@@ -20,6 +20,7 @@
 pub mod api;
 pub mod avbd;
 pub mod blast;
+pub mod blast_bond;
 pub mod bond;
 pub mod builders;
 pub mod capability;

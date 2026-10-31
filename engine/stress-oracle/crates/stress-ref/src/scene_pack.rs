@@ -203,6 +203,12 @@ pub struct ImportOptions {
     /// (`elasticModulus`, scaled), the one its Blast solver weights bonds by, instead of
     /// the calibrated material's. For the like-for-like comparison.
     pub pack_modulus: bool,
+    /// Also keep what Blast's own solver reads from the pack (`Scene::blast`): its node
+    /// centroids, masses and volumes, its bond centroids, normals and areas, and every
+    /// material's elastic and fatal limits. Every pack bond of positive area is kept, one to
+    /// one with the scene's bonds (a bond whose shared face has no width gets a square
+    /// patch of its area rather than being left out). For the Blast-model profiles.
+    pub blast_authoring: bool,
 }
 
 pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Scene, String> {
@@ -263,6 +269,27 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
     let mut notes = Vec::new();
     let crush = pack_crush(json, &mut notes)?;
     let classify = |asset: &str| if options.authored_strengths { map_material_authored(asset) } else { map_material(asset) };
+    let mut blast = options.blast_authoring.then(|| crate::blast_bond::BlastAuthoring {
+        materials: json["defaults"]["solver"]["materials"]
+            .as_array()
+            .map(|a| {
+                let f = |m: &Value, k: &str| m[k].as_f64().unwrap_or(0.0) * scale;
+                a.iter()
+                    .map(|m| crate::blast_bond::BlastMaterial {
+                        compression_elastic: f(m, "compressionElastic"),
+                        compression_fatal: f(m, "compressionFatal"),
+                        tension_elastic: f(m, "tensionElastic"),
+                        tension_fatal: f(m, "tensionFatal"),
+                        shear_elastic: f(m, "shearElastic"),
+                        shear_fatal: f(m, "shearFatal"),
+                        residual_area_fraction: m["residualAreaFraction"].as_f64().unwrap_or(0.0),
+                        modulus: f(m, "elasticModulus"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ..Default::default()
+    });
 
     let mut scene = new_scene(name, &format!("Imported from {source}"));
     let mut chunks: Vec<ChunkDesc> = Vec::with_capacity(nodes.len());
@@ -291,6 +318,9 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
         c.hull = Some(hull.vertices.iter().map(|v| v.to_array()).collect());
         let lowest = hull.vertices.iter().map(|v| v.z).fold(f64::INFINITY, f64::min) + c.center[2];
         let node_mass = node["mass"].as_f64().unwrap_or(0.0);
+        if let Some(blast) = &mut blast {
+            blast.nodes.push(crate::blast_bond::BlastNodeDesc { position: centroid.to_array(), mass: node_mass, volume: node["volume"].as_f64().unwrap_or(0.0) });
+        }
         if node_mass <= 0.0 || (!options.pack_masses && lowest <= GRADE + SEAM) {
             c.support = Support::Fixed;
         }
@@ -384,8 +414,13 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
         if normal.dot(cb - ca) < 0.0 {
             normal = -normal;
         }
+        // Under Blast authoring the pack decides which bonds exist: every one of positive area.
+        let pack_area = b["area"].as_f64().unwrap_or(0.0);
+        if blast.is_some() && !(pack_area > 0.0) {
+            continue;
+        }
         let patch = contact_patch(&hulls[a], ca, &hulls[bb], cb, normal, SEAM);
-        let (centroid, area, tangent, width) = match patch {
+        let (centroid, mut area, tangent, mut width) = match patch {
             Some(p) => (p.centroid, p.area, p.tangent, p.width),
             None => {
                 fallback += 1;
@@ -393,6 +428,13 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
                 (zup(&b["centroid"]), area, normal.any_perpendicular().normalized(), [area.sqrt(); 2])
             }
         };
+        if blast.is_some() && !(area > 0.0 && width[0] > 0.0 && width[1] > 0.0) {
+            degenerate += 1;
+            if !(area > 0.0) {
+                area = pack_area;
+            }
+            width = [area.sqrt(); 2];
+        }
         if area <= 0.0 {
             continue;
         }
@@ -401,6 +443,10 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
         if !(width[0] > 0.0 && width[1] > 0.0) {
             degenerate += 1;
             continue;
+        }
+        if let Some(blast) = &mut blast {
+            let material = b["m"].as_u64().map(|m| m as usize).unwrap_or(0);
+            blast.bonds.push(crate::blast_bond::BlastBondDesc { centroid: zup(&b["centroid"]).to_array(), normal: zup(&b["normal"]).to_array(), area: pack_area, material });
         }
         let rebar = is_reinforced_concrete(&asset_material).then(|| {
             scene.materials.entry("steel".into()).or_insert_with(Material::steel);
@@ -425,7 +471,9 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
     if fallback > 0 {
         notes.push(format!("{fallback} of {} bond patches from the asset's area, no shared face found", bonds.len()));
     }
-    if degenerate > 0 {
+    if degenerate > 0 && blast.is_some() {
+        notes.push(format!("{degenerate} asset bonds have no shared face of width: square patches of their area"));
+    } else if degenerate > 0 {
         notes.push(format!("{degenerate} asset bonds left out: their shared face has no width"));
     }
     if unnormal != [0, 0] {
@@ -435,6 +483,7 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
     scene.materials.entry("concrete".into()).or_insert_with(Material::concrete);
     scene.ground = Some(GroundDesc { height: GRADE, friction: 0.6, material: "concrete".into() });
     scene.bodies.push(body(body_name, chunks, bonds));
+    scene.blast = blast;
     scene.validate()?;
     Ok((scene, notes))
 }

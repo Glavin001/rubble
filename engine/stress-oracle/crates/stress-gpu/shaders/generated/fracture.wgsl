@@ -736,7 +736,7 @@ fn fr_loads(@builtin(global_invocation_id) id_0 : vec3<u32>)
     var _S54 : u32 = _S23 + u32(2) * to_0;
     work_0[_S54] = base_0;
     work_0[_S54 + u32(1)] = kept_0;
-    loads_0[k_0] = vec4<f32>(length(f_total_0), 0.0f, 0.0f, 0.0f);
+    loads_0[k_0] = vec4<f32>(length(f_total_0), f_total_0);
     return;
 }
 

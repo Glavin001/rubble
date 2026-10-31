@@ -629,6 +629,9 @@ impl World {
                 &crushed_now,
                 crate::BreakCause::Blast,
             )?;
+            // The frames as of the split, for the change log's later steps.
+            let t = self.fracture.slots[k].as_mut().expect("live slot");
+            t.frames = frames.chunks_exact(2).map(|p| [p[0], p[1]]).collect();
             let all_broken: Vec<u32> = events
                 .iter()
                 .filter_map(|e| match e {

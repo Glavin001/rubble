@@ -40,6 +40,10 @@ const BAKE = ['mpm_write_args', 'mpm_bake_edge_clear', 'mpm_bake_edge_count', 'm
 // The last area's bake also lands any parcels still in flight before the pool
 // empties (a forced close; settling waits for them).
 const LAST_BAKE = [...BAKE.slice(0, -2), 'mpm_parcels_land', ...BAKE.slice(-2)];
+// A bake that leaves areas open trims the pool after its last held slot and
+// packs the parcels still in flight (plan.rs `pool_trim`).
+const OPEN_BAKE = [...BAKE.slice(0, -2), 'mpm_write_args', 'mpm_pool_reserve', 'mpm_pool_top',
+  'mpm_parcels_pack', 'mpm_parcels_unpack', 'mpm_pool_trim', ...BAKE.slice(-2)];
 const counters = (o = {}) => {
   const c = new Uint32Array(T.COUNTER_WORDS);
   const f = new Float32Array(c.buffer);
@@ -63,7 +67,7 @@ test('an impact opens a region (activation, then source) and runs coupled frames
   const { blocks, end } = decodeBlocks(p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81));
   assert.equal(blocks.length, 2);
   // The default ground is absorbing: activation also lays out its boundary nodes.
-  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), ['mpm_activate_count', 'mpm_activate_scan', 'mpm_write_args', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
+  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), ['mpm_activate_count', 'mpm_activate_scan', 'mpm_write_args', 'mpm_pool_reserve', 'mpm_pool_holes_count', 'mpm_pool_holes_scan', 'mpm_pool_holes_list', 'mpm_pool_finish', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
   assert.equal(blocks[0].writes[0].binding, T.PARAMS);
   assert.deepEqual(blocks[1].cmds.map((c) => c.kernel), ['mpm_write_args', 'mpm_source']);
   assert.ok(end > 0);
@@ -140,7 +144,7 @@ test('several impacts: far apart they open areas that bake on their own; near on
   assert.equal(f[0], 3);
   const blocks = decodeBlocks(f, 2).blocks;
   assert.equal(blocks.length, 2);
-  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), BAKE);
+  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), OPEN_BAKE);
   assert.ok(blocks[1].cmds.some((c) => c.kernel === 'mpm_p2g'));
   assert.equal(JSON.parse(p.areas()).length, 1);
   // Bake the rest now.
@@ -170,7 +174,7 @@ test('the absorbing ground sets up its node records at activation and the geosta
   assert.equal(s.config.initial_stress, 'geostatic');
   const { blocks } = decodeBlocks(p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81));
   assert.deepEqual(blocks[0].cmds.map((c) => c.kernel),
-    ['mpm_activate_count', 'mpm_activate_scan', 'mpm_write_args', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
+    ['mpm_activate_count', 'mpm_activate_scan', 'mpm_write_args', 'mpm_pool_reserve', 'mpm_pool_holes_count', 'mpm_pool_holes_scan', 'mpm_pool_holes_list', 'mpm_pool_finish', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
   const f0 = p.frame(1 / 60, -9.81, 1);
   // The first frame's payload sets the geostatic F (counter word 11).
   const geostatic = (words) => decodeBlocks(words, 2).blocks[0].writes.some((w) => w.binding === T.COUNTERS && w.offset === 44 && w.words[0] === 1);

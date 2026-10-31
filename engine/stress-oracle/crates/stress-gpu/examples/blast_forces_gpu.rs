@@ -19,7 +19,7 @@ fn main() {
     let name = p.file_stem().unwrap().to_string_lossy().to_string();
     let has = |flag: &str| args.iter().any(|a| a == flag);
     let blast_model = has("--blast-model");
-    let options = stress_ref::scene_pack::ImportOptions { authored_strengths: blast_model, authored_fatal: blast_model, pack_masses: has("--blast-inputs"), pack_modulus: blast_model };
+    let options = stress_ref::scene_pack::ImportOptions { authored_strengths: blast_model, authored_fatal: blast_model, pack_masses: has("--blast-inputs"), pack_modulus: blast_model, blast_authoring: false };
     let mut scene = stress_ref::scene_pack::import_with(p, &name, "structure", options).expect("pack");
     scene.sim.methods.blast_model = blast_model;
     scene.sim.fracture = false;

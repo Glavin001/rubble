@@ -36,6 +36,8 @@ pub fn gpu_layout() -> bool {
 pub fn gpu_frame() -> bool {
     gpu_layout() && switch("STRESS_GPU_FRAME")
 }
+pub mod blast;
+pub mod fracture_log;
 pub mod gpu;
 pub mod gpu_plan;
 pub mod gpu_pass;
@@ -231,6 +233,30 @@ pub mod shaders {
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
     pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1)), ("threshold_predict", (256, 1, 1))]);
+    pub const BLAST_CGLS: ShaderSet = shader_set!("blast_cgls", [("blast_solve", (1024, 1, 1))]);
+    pub const BLAST_MATERIAL: ShaderSet = shader_set!("blast_material", [("blast_bond_stress", (64, 1, 1))]);
+    pub const FRACTURE_LOG: ShaderSet = shader_set!("fracture_log", [("log_bonds", (64, 1, 1)), ("log_chunks", (64, 1, 1)), ("log_frames", (64, 1, 1))]);
+    pub const BLAST_NATIVE_WIDE: ShaderSet = shader_set!("blast_native_wide", [("w_reset", (1, 1, 1)), ("w_classify", (64, 1, 1)), ("w_args", (1, 1, 1)), ("w_init_nodes", (1024, 1, 1)), ("w_init_bonds", (1024, 1, 1)), ("w_setup", (1024, 1, 1)), ("w_gram_nodes", (1024, 1, 1)), ("w_gram", (1024, 1, 1)), ("w_warm", (1024, 1, 1)), ("w_proj_part_r", (1024, 1, 1)), ("w_proj_solve", (1024, 1, 1)), ("w_proj_apply_r", (1024, 1, 1)), ("w_proj_part_rb", (1024, 1, 1)), ("w_proj_solve_rb", (1024, 1, 1)), ("w_proj_apply_rb", (1024, 1, 1)), ("w_proj_part_g", (1024, 1, 1)), ("w_proj_apply_g", (1024, 1, 1)), ("w_bond_r", (1024, 1, 1)), ("w_node_rn", (1024, 1, 1)), ("w_bond_rb", (1024, 1, 1)), ("w_node_rnb", (1024, 1, 1)), ("w_test", (1024, 1, 1)), ("w_rebuild", (1024, 1, 1)), ("w_decide", (1024, 1, 1)), ("w_pre1", (1024, 1, 1)), ("w_bond_loc", (1024, 1, 1)), ("w_pre2", (1024, 1, 1)), ("w_max", (1024, 1, 1)), ("w_mag", (1024, 1, 1)), ("w_scale", (1024, 1, 1)), ("w_gamma", (1024, 1, 1)), ("w_dir", (1024, 1, 1)), ("w_bond_p", (1024, 1, 1)), ("w_node_q", (1024, 1, 1)), ("w_den", (1024, 1, 1)), ("w_update", (1024, 1, 1)), ("w_final", (1024, 1, 1)), ("w_report", (1, 1, 1))]);
+    pub const BLAST_NATIVE: ShaderSet = shader_set!("blast_native", [("blast_native", (1024, 1, 1))]);
+    pub const BLAST_FRACTURE: ShaderSet = shader_set!("blast_fracture", [("blast_loads", (64, 1, 1)), ("blast_breaks", (64, 1, 1))]);
+    pub const BLAST_TOPOLOGY: ShaderSet = shader_set!(
+        "blast_topology",
+        [
+            ("bt_gate", (1, 1, 1)),
+            ("bt_reset", (64, 1, 1)),
+            ("bt_union", (64, 1, 1)),
+            ("bt_flatten", (64, 1, 1)),
+            ("bt_count_nodes", (64, 1, 1)),
+            ("bt_count_bonds", (64, 1, 1)),
+            ("bt_scan_blocks", (1024, 1, 1)),
+            ("bt_scan_top", (1024, 1, 1)),
+            ("bt_scan_add", (1024, 1, 1)),
+            ("bt_islands", (64, 1, 1)),
+            ("bt_scatter_nodes", (64, 1, 1)),
+            ("bt_scatter_bonds", (64, 1, 1)),
+            ("bt_sort", (1024, 1, 1)),
+        ]
+    );
     pub const FRACTURE: ShaderSet = shader_set!(
         "fracture",
         [
@@ -283,7 +309,7 @@ pub mod shaders {
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, CRUSH_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD, FRACTURE,
+        HUD_OVERLAY, THRESHOLD, FRACTURE, BLAST_CGLS, BLAST_MATERIAL, BLAST_TOPOLOGY, BLAST_FRACTURE, BLAST_NATIVE, FRACTURE_LOG, BLAST_NATIVE_WIDE,
     ];
 }
 

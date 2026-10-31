@@ -1765,13 +1765,15 @@ impl World {
         if ran {
             // Ray results are never dropped: a frame with queries waits for a slot.
             // Nor are contact events: a lost frame would break begin/end pairing.
-            // Nor are fracture states: a split must be adopted in the step it happened.
+            // Fracture changes may be: the GPU keeps them in its change log until the host
+            // has read them (stress-gpu `fracture_log`), so a later frame carries them. Not
+            // chunk crushes: their events are the frame's own.
             let block = self.backpressure == Backpressure::Block
                 || !batches.is_empty()
                 || !query_ids.is_empty()
                 || !casts.is_empty()
                 || contact_events
-                || fracture;
+                || (fracture && self.fracture.crushing());
             if !self.readback.has_free() && block {
                 self.wait_oldest()?;
             }

@@ -152,7 +152,7 @@ static const uint C_ERROR = 3;        // bits: 1 no free slot, 2 a mass sum out 
 static const uint C_SPLIT_FRAMES = 4;
 static const uint C_POOL_TOP = 5;     // + the half: pulses claimed in it this frame
 
-// `loads` layout: per chunk 1 float4 (its load), then the two halves of the pulse pool
+// `loads` layout: per chunk 1 float4 (|its load|, its load (world)), then the two halves of the pulse pool
 // (`pool_cap` pulses of 3 float4 each). A frame reads its chunks' carried pulses from one
 // half and writes the ones that last into the other: each chunk claims a run there with
 // one atomic add, where it lands does not matter (each chunk reads only its own, in
@@ -224,7 +224,8 @@ void fr_loads(uint3 id: SV_DispatchThreadID)
         atom[a_counters() + C_ERROR].or(8u);
     work[w_pulses() + 4 * k + 2 * to] = base;
     work[w_pulses() + 4 * k + 2 * to + 1] = kept;
-    loads[k] = float4(length(f_total), 0.0, 0.0, 0.0);
+    // The magnitude (fr_breaks), and the force itself (blast_fracture.slang `blast_loads`).
+    loads[k] = float4(length(f_total), f_total);
 }
 
 [shader("compute")]

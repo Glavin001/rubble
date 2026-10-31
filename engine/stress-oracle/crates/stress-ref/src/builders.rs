@@ -27,6 +27,7 @@ pub fn new_scene(name: &str, description: &str) -> Scene {
         probes: Vec::new(),
         metrics: Vec::new(),
         oracle: BTreeMap::new(),
+        blast: None,
     }
 }
 

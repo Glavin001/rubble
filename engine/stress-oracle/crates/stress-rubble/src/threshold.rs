@@ -125,7 +125,7 @@ impl ThresholdWorld {
     /// [`SHOTS`] parked spheres of `shot` (radius, mass; its material the scene's
     /// "projectile").
     pub fn new(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64) -> Result<ThresholdWorld, String> {
-        Self::new_with_crush(gpu, scene, shot_radius, shot_mass, false)
+        Self::with_options(gpu, scene, shot_radius, shot_mass, stress_ref::capability::Profile::Threshold, false)
     }
 
     /// [`Self::new`], with chunk crushing when `crush` (engine/docs/destruction-reactions.md
@@ -134,6 +134,21 @@ impl ThresholdWorld {
     /// out of the world; the lab keeps no fragments). Crushing with no crushable chunk is
     /// an error.
     pub fn new_with_crush(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, crush: bool) -> Result<ThresholdWorld, String> {
+        Self::with_options(gpu, scene, shot_radius, shot_mass, stress_ref::capability::Profile::Threshold, crush)
+    }
+
+    /// The world under `profile`: `Threshold` (bonds break on contact force), or `BlastGpu`
+    /// (Blast's stress solver decides them; the scene needs its Blast authoring, one structure).
+    pub fn with_profile(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, profile: stress_ref::capability::Profile) -> Result<ThresholdWorld, String> {
+        Self::with_options(gpu, scene, shot_radius, shot_mass, profile, false)
+    }
+
+    /// The world under `profile`, crushing chunks when `crush` ([`Self::new_with_crush`]).
+    pub fn with_options(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, profile: stress_ref::capability::Profile, crush: bool) -> Result<ThresholdWorld, String> {
+        use stress_ref::capability::Profile;
+        if !matches!(profile, Profile::Threshold | Profile::BlastGpu) {
+            return Err(format!("the GPU-only world runs the threshold or blast_gpu profile, not {}", profile.name()));
+        }
         let world = stress_ref::world::World::new(scene);
         let m = &world.solver;
         let chunk_count: usize = m.structures.iter().map(|s| s.chunks.len()).sum();
@@ -144,7 +159,6 @@ impl ThresholdWorld {
         capacity.max_contacts = contact_capacity(chunk_count, capacity.max_contacts, gpu.device.limits().max_storage_buffer_binding_size as u64);
         capacity.max_candidates = capacity.max_candidates.max(capacity.max_contacts);
         let mut engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), capacity.clone()).map_err(|e| format!("rubble: {e}"))?;
-        let profile = stress_ref::capability::Profile::Threshold;
         let (iterations, substeps) = profile.engine_policy();
         engine.set_policy(iterations, substeps);
         if let Some(g) = &scene.ground {
@@ -264,7 +278,8 @@ impl ThresholdWorld {
             t.chunk_body.push(collider_body[cols[0] as usize]);
         }
         // Each cluster's body frame (its structure's frame: a cluster's shapes are its
-        // chunks at their structure-frame poses) and its bonds.
+        // chunks at their structure-frame poses) and its bonds (and each one's structure bond).
+        let mut bond_source: Vec<(usize, usize)> = Vec::new();
         let mut crush_bonds: Vec<[f32; 4]> = Vec::new();
         for cl in &m.clusters {
             let e = &engine.bodies[&BodyKey::Cluster(cl.id)];
@@ -277,6 +292,7 @@ impl ThresholdWorld {
                 }
                 let capacity = b.strength.tensile * b.geometry.area * b.weibull;
                 t.bonds.push([global(cl.structure, b.geometry.a), global(cl.structure, b.geometry.b), (capacity as f32).to_bits(), (b.geometry.area as f32).to_bits()]);
+                bond_source.push((cl.structure, bi));
                 let g = b.geometry.centroid;
                 crush_bonds.push([g.x as f32, g.y as f32, g.z as f32, b.geometry.area as f32]);
             }
@@ -319,6 +335,10 @@ impl ThresholdWorld {
         }
         let ingest = EngineIngest::new(gpu, capacity.max_contacts, 1, capacity.max_bodies, chunk_count as u32, &table);
         let mut fracture = GpuFracture::new(gpu, &t, &engine.engine_buffers_now(), &ingest)?;
+        if profile == Profile::BlastGpu {
+            let (graph, materials) = blast_graph(scene, &t, &bond_source)?;
+            fracture.set_blast(gpu, stress_gpu::blast::BlastFrame::new(gpu, graph, materials, Vec3::from_array(scene.gravity)))?;
+        }
         // The punch list's sphere (world_coupling.rs `predict_punch`): bounding radius
         // 1.01 r + 1e-3, face r.
         let e_shot = projectile.youngs_modulus * scene.sim.stiffness_scale / (1.0 - projectile.poisson_ratio * projectile.poisson_ratio);
@@ -618,4 +638,48 @@ pub fn rotation_quat(m: &stress_ref::math::Mat3) -> Quat {
     let glam_m = glam::DMat3::from_cols(glam::DVec3::new(r(0, 0), r(1, 0), r(2, 0)), glam::DVec3::new(r(0, 1), r(1, 1), r(2, 1)), glam::DVec3::new(r(0, 2), r(1, 2), r(2, 2)));
     let q = glam::DQuat::from_mat3(&glam_m).normalize();
     Quat { w: q.w, x: q.x, y: q.y, z: q.z }
+}
+
+/// Blast's graph over the fracture's chunks and bonds, index for index, from the scene's Blast
+/// authoring (one structure: the fracture's chunk `c` is the scene's chunk `c`, and each
+/// fracture bond names the scene bond it came from).
+fn blast_graph(scene: &Scene, t: &FractureTables, bond_source: &[(usize, usize)]) -> Result<(stress_ref::blast_bond::BlastGraph, Vec<stress_ref::blast_bond::BlastMaterial>), String> {
+    use stress_ref::blast_bond::{BlastBond, BlastGraph, BlastNode};
+    let a = scene.blast.as_ref().ok_or("blast_gpu: the scene has no Blast authoring (import its pack with the profile's import options)")?;
+    let body = match scene.bodies.as_slice() {
+        [body] => body,
+        _ => return Err(format!("blast_gpu: Blast authoring covers one structure, the scene has {}", scene.bodies.len())),
+    };
+    if a.nodes.len() != t.chunks.len() || a.bonds.len() != body.bonds.len() {
+        return Err(format!("blast_gpu: {} Blast nodes and {} bonds for {} chunks and {} bonds", a.nodes.len(), a.bonds.len(), t.chunks.len(), body.bonds.len()));
+    }
+    let nodes = a.nodes.iter().map(|n| BlastNode { position: Vec3::from_array(n.position), mass: n.mass, inertia: 0.0, volume: n.volume }).collect();
+    let mut bonds = Vec::with_capacity(t.bonds.len());
+    for (f, (&(s, bi), tb)) in bond_source.iter().zip(&t.bonds).enumerate() {
+        let (d, sb) = (a.bonds[bi], &body.bonds[bi]);
+        if s != 0 || [sb.a as u32, sb.b as u32] != [tb[0], tb[1]] {
+            return Err(format!("blast_gpu: fracture bond {f} is structure {s} bond {bi}, chunks {:?}; the scene's is {:?}", [tb[0], tb[1]], [sb.a, sb.b]));
+        }
+        let material = a.materials.get(d.material).ok_or(format!("blast_gpu: bond {bi}: material {} of {}", d.material, a.materials.len()))?;
+        bonds.push(BlastBond { nodes: [sb.a, sb.b], centroid: Vec3::from_array(d.centroid), normal: Vec3::from_array(d.normal), area: d.area, modulus: material.modulus, material: d.material });
+    }
+    Ok((BlastGraph::new(nodes, bonds, blast_settings()?)?, a.materials.clone()))
+}
+
+/// The profile's Blast solve: PhysX's native (resident) stage as vibe-land runs it on the Mac,
+/// or `STRESS_BLAST_SOLVER=host` the CUDA host path (vibe-land's `blast` backend), for
+/// comparison.
+/// `STRESS_BLAST_FORCE_TOL=1e-3`: the native solve's force tolerance (vibe-land's
+/// `VIBE_NATIVE_STRESS_FORCE_TOLERANCE`, off by default there too).
+fn blast_settings() -> Result<stress_ref::blast_bond::BlastSettings, String> {
+    use stress_ref::blast_bond::BlastSettings;
+    let mut s = match std::env::var("STRESS_BLAST_SOLVER").as_deref() {
+        Err(_) | Ok("native") => BlastSettings::native(),
+        Ok("host") => BlastSettings::default(),
+        Ok(other) => return Err(format!("STRESS_BLAST_SOLVER={other}: expected native or host")),
+    };
+    if let Ok(t) = std::env::var("STRESS_BLAST_FORCE_TOL") {
+        s.force_tolerance = t.parse().map_err(|_| format!("STRESS_BLAST_FORCE_TOL={t}: expected a number"))?;
+    }
+    Ok(s)
 }

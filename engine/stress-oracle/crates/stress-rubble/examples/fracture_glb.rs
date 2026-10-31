@@ -84,9 +84,9 @@ fn main() {
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     let gpu = Gpu::new().expect("GPU");
     // `STRESS_THRESHOLD_GPU=1`: the threshold profile's GPU-resident world (stress-rubble
-    // `threshold`) instead of the resident GpuWorld, the same shots.
-    if std::env::var("STRESS_THRESHOLD_GPU").is_ok_and(|v| v == "1") {
-        threshold_gpu(&gpu, &scene, ball, frames);
+    // `threshold`) instead of the resident GpuWorld, the same shots. `blast_gpu` runs only there.
+    if std::env::var("STRESS_THRESHOLD_GPU").is_ok_and(|v| v == "1") || p == Profile::BlastGpu {
+        threshold_gpu(&gpu, &scene, ball, frames, if p == Profile::BlastGpu { p } else { Profile::Threshold });
         return;
     }
     let mut e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(&scene)).expect("rubble");
@@ -170,7 +170,7 @@ fn main() {
 /// radius, speed) as the GpuWorld run fires them. Each frame timed to the GPU's end (a
 /// wait the browser does not do), then the whole run again with frames queued as a
 /// browser queues them (no wait), and the counters.
-fn threshold_gpu(gpu: &Gpu, scene: &stress_ref::scene::Scene, ball: (f64, f64, f64), frames: usize) {
+fn threshold_gpu(gpu: &Gpu, scene: &stress_ref::scene::Scene, ball: (f64, f64, f64), frames: usize, profile: Profile) {
     let (mass, radius, speed) = ball;
     let all: Vec<_> = scene.bodies.iter().flat_map(|b| &b.chunks).collect();
     let lo = all.iter().fold([f64::INFINITY; 3], |a, c| [a[0].min(c.center[0]), a[1].min(c.center[1]), a[2].min(c.center[2])]);
@@ -183,7 +183,7 @@ fn threshold_gpu(gpu: &Gpu, scene: &stress_ref::scene::Scene, ball: (f64, f64, f
     let runs = std::env::var("STRESS_THRESHOLD_RUNS").unwrap_or_else(|_| "wait,queue".into());
     for (label, wait) in runs.split(',').map(|r| if r == "wait" { ("each frame waited for", true) } else { ("queued (no wait)", false) }) {
         let t = std::time::Instant::now();
-        let mut w = stress_rubble::threshold::ThresholdWorld::new(gpu, scene, radius, mass).expect("threshold world");
+        let mut w = stress_rubble::threshold::ThresholdWorld::with_profile(gpu, scene, radius, mass, profile).expect("threshold world");
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         println!("threshold GPU world: {} chunks, {} bonds, {} body slots, built in {:.2} s", w.tables.chunk_count(), w.tables.bond_count(), w.tables.body_count(), t.elapsed().as_secs_f64());
         let mut ms = Vec::with_capacity(frames);
