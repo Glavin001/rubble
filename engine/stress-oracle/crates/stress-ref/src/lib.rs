@@ -26,6 +26,7 @@ pub mod builders;
 pub mod capability;
 pub mod cli;
 pub mod contact;
+pub mod crush;
 pub mod engine;
 pub mod hull;
 pub mod implicit;

@@ -65,3 +65,29 @@ fn phase_table_names_real_entries() {
         }
     }
 }
+
+/// The fracture without crushing binds at most 8 storage buffers per entry (WebGPU's
+/// default limit): only the crush entries (`fracture::CRUSH_ENTRIES`, built only with
+/// crushing) may bind more, and the fracture lists every entry the shader has.
+#[test]
+fn fracture_core_fits_eight_storage_buffers() {
+    use stress_gpu::fracture::{entries, CRUSH_ENTRIES};
+    let mut wrong = Vec::new();
+    for &(module, entry, _, storage, _) in ENTRY_BINDINGS {
+        if module != "fracture" {
+            continue;
+        }
+        if !entries().contains(&entry) {
+            wrong.push(format!("{entry} is not in fracture.rs ENTRIES"));
+        }
+        if storage > 8 && !CRUSH_ENTRIES.contains(&entry) {
+            wrong.push(format!("{entry} uses {storage} storage buffers and is no crush entry"));
+        }
+    }
+    for e in CRUSH_ENTRIES {
+        if !entries().contains(&e) {
+            wrong.push(format!("crush entry {e} is not in ENTRIES"));
+        }
+    }
+    assert!(wrong.is_empty(), "fracture entries:\n  {}", wrong.join("\n  "));
+}

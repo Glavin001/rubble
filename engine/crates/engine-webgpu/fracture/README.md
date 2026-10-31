@@ -32,6 +32,13 @@ and wasm are ignored by git, so rerun the export after checkout or shader change
 and the `wasm-pack` build after changes to `engine-fracture`. `wasm-pack` comes
 from `web/`'s devDependencies (`npm --prefix web ci`) or `cargo install wasm-pack`.
 
+**Reference rigs.** `packs/` holds blast-stress-solver's crush-wall and reference
+building as scene packs with their authored shots; the Scene menu's *Reference rigs* group
+loads them, and `?pack=crush-wall&shot=1.4x` (or `reference-building-crush` with
+`ordinary`, `2x`, `8x`, `16x`; `bonds=stress` for blast_parity, default threshold) opens one
+in the stress-solver mode and fires the shot at its launch time. `record-reactions.mjs`
+records one to MP4/PNG; see [destruction-reactions.md](../../../docs/destruction-reactions.md).
+
 ## Shared architecture
 
 Each piece of logic has one source, used by both hosts:

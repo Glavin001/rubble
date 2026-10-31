@@ -136,6 +136,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "vehicle_loads_persistent",
     "vehicle_post",
     "raycast_batch",
+    "wheel_soil",
+    "wheel_soil_press",
     // Characters, in-step queries, projectiles (slang/kernels/character_step.slang).
     "char_move",
     "char_post",
@@ -162,6 +164,66 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_sleep",
     // Render poses for hosts (slang/kernels/pose_pack.slang).
     "pose_pack",
+    // Deformable terrain MPM (slang/kernels/terrain_mpm.slang).
+    "mpm_clear",
+    "mpm_touch",
+    "mpm_write_args",
+    "mpm_count",
+    "mpm_scan_cells",
+    "mpm_scatter",
+    "mpm_cell_sort",
+    "mpm_payload",
+    "mpm_p2g",
+    "mpm_grid",
+    "mpm_g2p",
+    "mpm_activate_count",
+    "mpm_activate_scan",
+    "mpm_activate_emit",
+    "mpm_activate_lower",
+    "mpm_bake_bin",
+    "mpm_bake_raise",
+    "mpm_bake_header",
+    "mpm_couple_clear",
+    "mpm_couple_bin",
+    "mpm_couple_gather",
+    "mpm_couple_apply",
+    "mpm_couple_emit",
+    "mpm_couple_finish",
+    "mpm_parcels",
+    "mpm_deposit_raise",
+    "mpm_deposit_header",
+    "mpm_source",
+    "mpm_absorb_init",
+    "mpm_geostatic",
+    "mpm_absorb_faces",
+    "mpm_bake_shift",
+    "mpm_bake_edge_clear",
+    "mpm_bake_edge_count",
+    "mpm_bake_edge_scan",
+    "mpm_bake_edge_scatter",
+    "mpm_bake_edge_sort",
+    "mpm_source_surface",
+    "mpm_grow_shift",
+    "mpm_wheel_loads",
+    "mpm_wheel_mass",
+    "mpm_parcels_land",
+    "mpm_pass",
+    "mpm_sleep_wheels",
+    "mpm_sleep_ring",
+    "mpm_sleep_dilate",
+    "mpm_sleep_touch",
+    // Terrain look-ahead (slang/kernels/terrain_watch.slang).
+    "terrain_watch_energy",
+    "terrain_watch_pick",
+    "terrain_watch_write",
+    // Render-only terrain surface (slang/kernels/terrain_surface.slang).
+    "terrain_surface_clear",
+    "terrain_surface_shift",
+    "terrain_surface_shift_mean",
+    "terrain_surface_bin",
+    "terrain_surface_resolve",
+    "terrain_surface_debris",
+    "terrain_surface_publish",
     // Contact events (P4), canonical and persistent storage.
     "contact_events",
     "contact_events_persistent",
@@ -184,6 +246,8 @@ const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_loads",
     "vehicle_post",
     "raycast_batch",
+    "wheel_soil",
+    "wheel_soil_press",
 ];
 
 /// Slang source that defines `entry`.
@@ -203,6 +267,15 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     }
     if entry == "pose_pack" {
         return kernels.join("pose_pack.slang");
+    }
+    if entry.starts_with("mpm_") {
+        return kernels.join("terrain_mpm.slang");
+    }
+    if entry.starts_with("terrain_surface_") {
+        return kernels.join("terrain_surface.slang");
+    }
+    if entry.starts_with("terrain_watch_") {
+        return kernels.join("terrain_watch.slang");
     }
     if entry.starts_with("convex_") {
         return kernels.join(if entry.ends_with("_persistent") {
@@ -382,6 +455,16 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         .arg(slang_root.join("kernels/soft_skin.slang"))
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
+    // MPM material probe (tests/mpm_material.rs): standalone, with its own bindings,
+    // so it stays out of the world's pipeline table.
+    compile_with_defines(
+        &slang_root.join("kernels/mpm_material_probe.slang"),
+        "mpm_material_probe",
+        SlangTarget::Wgsl,
+        &wgsl_dir.join("mpm_material_probe.wgsl"),
+        &[],
+        &[("ENGINE_WGSL", "1")],
+    )?;
     if !wgsl_failed.is_empty() {
         warnings.push(format!("direct WGSL failed: {}", wgsl_failed.join(", ")));
     }
