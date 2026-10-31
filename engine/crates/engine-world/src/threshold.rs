@@ -790,7 +790,12 @@ mod imp {
             }
             // Reserved slots for every other piece a split can make: static, parked, out
             // of every pair until a split re-parents a chunk's colliders onto one.
-            let spare_count = chunk_count.saturating_sub(m.clusters.len());
+            // With a world piece pool (`WorldDef::fracture_pieces`) the pool serves them.
+            let spare_count = if self.fracture_pieces.is_some() {
+                0
+            } else {
+                chunk_count.saturating_sub(m.clusters.len())
+            };
             let spare_defs = vec![
                 BodyDef {
                     user_data: def.user_data,
@@ -799,24 +804,8 @@ mod imp {
                 spare_count
             ];
             let spare_ids = self.create_bodies(&spare_defs)?;
-            let mut spare = Vec::with_capacity(spare_count);
-            let mut parked_records = Vec::with_capacity(spare_count);
-            for id in spare_ids {
-                let i = id.index();
-                let mut parked = BodyState::static_plane_support();
-                parked.position = crate::graveyard(i);
-                parked.initial_pos = parked.position;
-                parked_records.push((i, parked));
-                let slot = &mut self.bodies[i as usize];
-                slot.owner = Owner::Piece;
-                slot.alive = false;
-                spare.push(i);
-            }
-            // One upload per run of consecutive slots (a write each would stage thousands
-            // of buffers per destructible before anything is submitted).
-            for (first, records) in runs(parked_records) {
-                self.sim.write_bodies(first, &records);
-            }
+            let spare: Vec<u32> = spare_ids.iter().map(|id| id.index()).collect();
+            self.park_spares(&spare);
             let owned: Vec<u32> = cluster_bodies
                 .iter()
                 .map(|c| c.0)
@@ -1027,7 +1016,7 @@ mod imp {
                 });
             let sh = self.fracture.shared.as_mut().expect("shared fracture");
             sh.fracture
-                .append(&gpu, base, &g, &frames, &spare, all_scales)
+                .append(&gpu, base, &g, &frames, &spare, Some(all_scales))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let stride = std::mem::size_of::<ColliderInfo>() as u64;
             let sides: Vec<(u32, ColliderInfo)> = sides
@@ -1081,7 +1070,11 @@ mod imp {
                     self.fracture.slots.len() - 1
                 }
             };
-            let (base, n, e) = (slot.base, slot.chunk_body.len() as u32, slot.intact.len() as u32);
+            let (base, n, e) = (
+                slot.base,
+                slot.chunk_body.len() as u32,
+                slot.intact.len() as u32,
+            );
             self.fracture.slots[k] = Some(slot);
             for (ranges, start, len) in [
                 (&mut self.fracture.chunk_ranges, base.chunk, n),
@@ -1109,10 +1102,15 @@ mod imp {
             d.bond_joints = vec![None; bond_count];
             d.bond_intact = vec![true; bond_count];
             self.sync_projectiles()?;
-            // Hand this destructible's uploads to the GPU now: placing a map's worth before
-            // the first step would otherwise keep every staging buffer alive until then.
-            self.sim.queue().submit(std::iter::empty());
-            let _ = self.sim.device().poll(wgpu::PollType::Poll);
+            // Hand this destructible's uploads to the GPU and wait for them: staging memory
+            // is reclaimed only once its copies finish, so placing a map's worth without
+            // waiting piles up staging buffers until the driver blocks a buffer create
+            // (with the GPU busy elsewhere, it never recovers).
+            let index = self.sim.queue().submit(std::iter::empty());
+            let _ = self.sim.device().poll(wgpu::PollType::Wait {
+                submission_index: Some(index),
+                timeout: None,
+            });
             Ok(())
         }
 
@@ -1144,7 +1142,10 @@ mod imp {
             }
             // Resting contacts survive sleep (a woken cluster carries its weight from its
             // first step, as one that never slept): before the ingest binds the contacts.
-            self.sim.enable_sleep_archive()?;
+            let rows = self
+                .sleep_archive_rows
+                .unwrap_or(self.sim.capacity().max_bodies.saturating_mul(16));
+            self.sim.enable_sleep_archive(rows)?;
             let capacity = self.sim.capacity();
             // The ingest merges two records a contact row in 64-thread groups, one dispatch
             // dimension (WebGPU's 65,535 groups).
@@ -1154,11 +1155,12 @@ mod imp {
                 65_535 * 32,
                 capacity.max_contacts
             );
-            // A chunk per body slot (each piece a split can make has its own), bonds at
-            // four per chunk (a brick's six faces, shared), a part per collider.
+            // A chunk per collider at most, bonds at four per chunk (a brick's six faces,
+            // shared), a part per collider.
             let room = fracture::Capacity {
-                chunks: capacity.max_bodies,
-                bonds: capacity.max_bodies.saturating_mul(4),
+                // A chunk has at least one collider; the split's scans hold 2^20.
+                chunks: capacity.max_colliders.min(1 << 20),
+                bonds: capacity.max_colliders.min(1 << 20).saturating_mul(4),
                 parts: capacity.max_colliders,
                 events: EVENT_ROOM,
             };
@@ -1197,7 +1199,47 @@ mod imp {
                 dt,
                 projectile_colliders: Vec::new(),
             });
+            if let Some(n) = self.fracture_pieces {
+                // The world's piece pool: parked static slots any split may take.
+                self.add_to_pool(gpu, n)?;
+            }
             Ok(())
+        }
+
+        /// `n` more parked slots in the world's piece pool.
+        fn add_to_pool(&mut self, gpu: &Gpu, n: u32) -> anyhow::Result<()> {
+            if n == 0 {
+                return Ok(());
+            }
+            let ids = self.create_bodies(&vec![BodyDef::default(); n as usize])?;
+            let pool: Vec<u32> = ids.iter().map(|id| id.index()).collect();
+            self.park_spares(&pool);
+            let sh = self.fracture.shared.as_mut().expect("shared fracture");
+            let none = FractureTables::default();
+            sh.fracture
+                .append(gpu, fracture::Base::default(), &none, &[], &pool, None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            self.fracture.spare.extend(pool);
+            Ok(())
+        }
+
+        /// Park `slots` as spares: static, out of every pair, until a split takes one.
+        fn park_spares(&mut self, slots: &[u32]) {
+            let mut parked_records = Vec::with_capacity(slots.len());
+            for &i in slots {
+                let mut parked = BodyState::static_plane_support();
+                parked.position = crate::graveyard(i);
+                parked.initial_pos = parked.position;
+                parked_records.push((i, parked));
+                let slot = &mut self.bodies[i as usize];
+                slot.owner = Owner::Piece;
+                slot.alive = false;
+            }
+            // One upload per run of consecutive slots (a write each would stage thousands
+            // of buffers before anything is submitted).
+            for (first, records) in runs(parked_records) {
+                self.sim.write_bodies(first, &records);
+            }
         }
 
         /// The fracture's part of a step, between `ingest.begin_frame` (before the
@@ -1238,10 +1280,30 @@ mod imp {
             // The counters and this step's event lists: nothing that scales with the
             // destructibles placed.
             for (read, buffer, offset, size) in [
-                (FractureRead::Counters, &f.atom, 4 * l.a_counters() as u64, 4 * COUNTER_WORDS),
-                (FractureRead::Broken, &f.atom, 4 * l.a_events() as u64, 4 * l.events.broken as u64),
-                (FractureRead::Moved, &f.atom, 4 * l.a_moved() as u64, 8 * l.events.moved as u64),
-                (FractureRead::Frames, &f.frames, 16 * l.f_events() as u64, 48 * l.events.frames as u64),
+                (
+                    FractureRead::Counters,
+                    &f.atom,
+                    4 * l.a_counters() as u64,
+                    4 * COUNTER_WORDS,
+                ),
+                (
+                    FractureRead::Broken,
+                    &f.atom,
+                    4 * l.a_events() as u64,
+                    4 * l.events.broken as u64,
+                ),
+                (
+                    FractureRead::Moved,
+                    &f.atom,
+                    4 * l.a_moved() as u64,
+                    8 * l.events.moved as u64,
+                ),
+                (
+                    FractureRead::Frames,
+                    &f.frames,
+                    16 * l.f_events() as u64,
+                    48 * l.events.frames as u64,
+                ),
             ] {
                 if size > 0 {
                     out.push(crate::readback::Extra {
@@ -1562,7 +1624,9 @@ mod imp {
             sh.fracture.break_bonds_at(&gpu, &at);
             // The GPU reports only the bonds it breaks itself: these are reported with
             // the next frame read.
-            self.fracture.host_broken.extend(over.iter().map(|&b| (k, b)));
+            self.fracture
+                .host_broken
+                .extend(over.iter().map(|&b| (k, b)));
         }
 
         /// A changed body's mass, solver frame (from the GPU's frame record), type and
@@ -1711,6 +1775,12 @@ mod imp {
             let mut bodies: Vec<u32> = t.chunk_body.clone();
             bodies.sort_unstable();
             bodies.dedup();
+            // With a world piece pool, the slots its pieces took are replaced in the pool.
+            let pool_refill = if self.fracture_pieces.is_some() {
+                (bodies.len() as u32).saturating_sub(t.clusters)
+            } else {
+                0
+            };
             // Pieces beyond its clusters took spares; the rest of its spares go back.
             let taken = (bodies.len() as u32).saturating_sub(t.clusters);
             let give_back = t.spares_added.saturating_sub(taken) as usize;
@@ -1760,6 +1830,7 @@ mod imp {
                 slot.removed_at = Some(self.step);
                 self.free_bodies.push(b);
             }
+            self.add_to_pool(&gpu, pool_refill)?;
             if !self.fracture.active() {
                 self.fracture.fixed_plan = None;
             }

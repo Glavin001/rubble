@@ -3652,7 +3652,7 @@ bool contactPairAtRest(BodyState ba, BodyState bb)
 //   [free top, blocks, touched count (two, by step parity)]
 //   [row count, first block, age, cursor, touched step] x maxBodies [next] x blocks
 //   [free stack] x blocks [touched list] x maxBodies
-static const uint ARCHIVE_ROWS = 32u;
+static const uint ARCHIVE_ROWS = 8u;
 static const uint ARCHIVE_NONE = 0xFFFFFFFFu;
 static const uint ARCHIVE_JUST_SLEPT = 0xFFFFFFFEu;
 static const uint OVERFLOW_SLEEP_ARCHIVE = 131072u;

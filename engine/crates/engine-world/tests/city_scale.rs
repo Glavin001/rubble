@@ -51,18 +51,27 @@ fn capacity(asset: &DestructibleAssetDesc, k: usize) -> WorldCapacity {
     let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum::<usize>() * k;
     let one = stress_rubble::capacity_for(&scene);
     let mut c = one.clone();
-    c.max_bodies = ((chunks + 64 + 4) as u32).next_power_of_two();
-    c.max_colliders = c
-        .max_colliders
-        .max(((one.max_colliders as usize * k) as u32).next_power_of_two());
+    c.max_bodies = match pool() {
+        // Clusters (a few dozen a house) and the pool, not a slot per chunk.
+        Some(p) => ((64 * k) as u32 + p + 64).next_power_of_two(),
+        None => ((chunks + 64 + 4) as u32).next_power_of_two(),
+    };
+    // The houses' own shapes (a collider each), not k copies of one scene's headroom.
+    let shapes: usize = asset.chunks.iter().map(|c| c.shapes.len()).sum::<usize>() * k;
+    c.max_colliders = ((shapes + 4096) as u32).next_power_of_two();
     c.max_hull_vertices = c
         .max_hull_vertices
-        .max(((one.max_hull_vertices as usize * k) as u32).next_power_of_two());
+        .max(((shapes * 4 + 4096) as u32).next_power_of_two());
     c.max_contacts =
         stress_rubble::threshold::contact_capacity(chunks, one.max_contacts * k as u32, 1 << 30);
     c.max_candidates = c.max_candidates.max(c.max_contacts);
     c.max_joints = c.max_joints.max(1 << 16);
     c
+}
+
+/// CITY_POOL=n: a world piece pool of n slots (`WorldDef::fracture_pieces`).
+fn pool() -> Option<u32> {
+    std::env::var("CITY_POOL").ok().map(|v| v.parse().unwrap())
 }
 
 /// Lot centres: a ceil(sqrt(k))² grid over the map, centred on the origin.
@@ -96,6 +105,7 @@ fn city(asset: &DestructibleAssetDesc, k: usize, sleep: bool) -> (World, Vec<[f3
         solver,
         enable_sleep: sleep,
         contacts: ContactStorage::Canonical,
+        fracture_pieces: pool(),
         ..WorldDef::default()
     };
     let mut w = World::new(GpuContext::Default, &def).unwrap();

@@ -84,7 +84,10 @@ impl FractureTables {
         let mut first: std::collections::HashMap<u32, [f32; 3]> = std::collections::HashMap::new();
         let mut reach: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
         for k in 0..n {
-            let s = self.frames.get(self.chunk_body[k] as usize).map_or(0, |f| f[0][3].to_bits());
+            let s = self
+                .frames
+                .get(self.chunk_body[k] as usize)
+                .map_or(0, |f| f[0][3].to_bits());
             let c = self.chunks[k][0];
             let o = *first.entry(s).or_insert([c[0], c[1], c[2]]);
             let d = ((c[0] - o[0]).powi(2) + (c[1] - o[1]).powi(2) + (c[2] - o[2]).powi(2)).sqrt();
@@ -99,7 +102,13 @@ impl FractureTables {
             let m = c[0][3];
             bm = bm.max(m);
             bs = bs.max(m * extent);
-            let i = c[1][0].abs().max(c[1][1].abs()).max(c[1][2].abs()).max(c[1][3].abs()).max(c[2][0].abs()).max(c[2][1].abs());
+            let i = c[1][0]
+                .abs()
+                .max(c[1][1].abs())
+                .max(c[1][2].abs())
+                .max(c[1][3].abs())
+                .max(c[2][0].abs())
+                .max(c[2][1].abs());
             bj = bj.max(i + 2.0 * m * extent * extent);
         }
         let scale = |b: f32| 2f32.powi((30.0 - (b.max(1e-30) as f64).log2().ceil()) as i32 - 1);
@@ -425,7 +434,10 @@ fn storage_bytes(gpu: &Gpu, label: &str, bytes: u64, extra: wgpu::BufferUsages) 
     gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: bytes.max(16).next_multiple_of(16),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST | extra,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST
+            | extra,
         mapped_at_creation: false,
     })
 }
@@ -433,28 +445,58 @@ fn storage_bytes(gpu: &Gpu, label: &str, bytes: u64, extra: wgpu::BufferUsages) 
 impl GpuFracture {
     /// The fracture of `t`, bound to the engine's buffers and the ingest's (both must keep
     /// their buffers while it lives; [`Self::rebind`] after either replaces one).
-    pub fn new(gpu: &Gpu, t: &FractureTables, engine: &EngineBuffers, ingest: &EngineIngest) -> Result<GpuFracture, String> {
-        let room = Capacity { chunks: t.chunk_count(), bonds: t.bond_count(), parts: t.parts.len() as u32, events: Events::default() };
+    pub fn new(
+        gpu: &Gpu,
+        t: &FractureTables,
+        engine: &EngineBuffers,
+        ingest: &EngineIngest,
+    ) -> Result<GpuFracture, String> {
+        let room = Capacity {
+            chunks: t.chunk_count(),
+            bonds: t.bond_count(),
+            parts: t.parts.len() as u32,
+            events: Events::default(),
+        };
         Self::with_capacity(gpu, t, room, engine, ingest)
     }
 
     /// [`Self::new`] with room for `room` chunks, bonds and parts: `t`'s records first,
     /// the rest free (a free chunk's body is NONE, a free bond is broken) until
     /// [`Self::append`] places more. `t.frames` and `t.free` cover every body slot.
-    pub fn with_capacity(gpu: &Gpu, t: &FractureTables, room: Capacity, engine: &EngineBuffers, ingest: &EngineIngest) -> Result<GpuFracture, String> {
+    pub fn with_capacity(
+        gpu: &Gpu,
+        t: &FractureTables,
+        room: Capacity,
+        engine: &EngineBuffers,
+        ingest: &EngineIngest,
+    ) -> Result<GpuFracture, String> {
         let (used_n, used_e, b) = (t.chunk_count(), t.bond_count(), t.body_count());
         if used_n > room.chunks || used_e > room.bonds || t.parts.len() as u32 > room.parts {
-            return Err(format!("fracture: {used_n} chunks, {used_e} bonds and {} parts; room for {:?}", t.parts.len(), room));
+            return Err(format!(
+                "fracture: {used_n} chunks, {used_e} bonds and {} parts; room for {:?}",
+                t.parts.len(),
+                room
+            ));
         }
         let (n, e) = (room.chunks, room.bonds);
         // The scans' two levels hold 2^20 words (`fr_scan_top`: one group of 1024 blocks).
         if n > 1 << 20 || b > 1 << 20 {
-            return Err(format!("fracture: {n} chunks and {b} body slots; the scans hold at most 2^20 of each"));
+            return Err(format!(
+                "fracture: {n} chunks and {b} body slots; the scans hold at most 2^20 of each"
+            ));
         }
-        if t.info.len() != used_n as usize || t.chunk_body.len() != used_n as usize || t.free.len() != b as usize {
+        if t.info.len() != used_n as usize
+            || t.chunk_body.len() != used_n as usize
+            || t.free.len() != b as usize
+        {
             return Err("fracture: tables of mismatched lengths".into());
         }
-        let layout = Layout { n, e, b, events: room.events };
+        let layout = Layout {
+            n,
+            e,
+            b,
+            events: room.events,
+        };
         let [scale_m, scale_s, scale_j] = t.scales();
         let params = FractureParams {
             chunk_count: n,
@@ -486,9 +528,26 @@ impl GpuFracture {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        gpu.queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
-        let scan_new = gpu.uniform("fracture scan new", &ScanParams { n: used_n, in_base: layout.w_new(), out_base: layout.w_rank(), block_base: layout.scan_new_blocks() });
-        let scan_free = gpu.uniform("fracture scan free", &ScanParams { n: b, in_base: layout.w_free(), out_base: layout.w_free_rank(), block_base: layout.scan_free_blocks() });
+        gpu.queue
+            .write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
+        let scan_new = gpu.uniform(
+            "fracture scan new",
+            &ScanParams {
+                n: used_n,
+                in_base: layout.w_new(),
+                out_base: layout.w_rank(),
+                block_base: layout.scan_new_blocks(),
+            },
+        );
+        let scan_free = gpu.uniform(
+            "fracture scan free",
+            &ScanParams {
+                n: b,
+                in_base: layout.w_free(),
+                out_base: layout.w_free_rank(),
+                block_base: layout.scan_free_blocks(),
+            },
+        );
         let flat = |v: &[[[f32; 4]; 4]]| -> Vec<[f32; 4]> { v.iter().flatten().copied().collect() };
         let padded = |records: Vec<[f32; 4]>, len: usize| {
             let mut r = records;
@@ -512,13 +571,31 @@ impl GpuFracture {
         words[layout.w_alive() as usize..(layout.w_alive() + used_e) as usize].fill(1);
         words[layout.w_free() as usize..(layout.w_free() + b) as usize].copy_from_slice(&t.free);
         let work = gpu.storage("fracture work", &words);
-        let atom = storage_bytes(gpu, "fracture atom", 4 * layout.atom_words() as u64, wgpu::BufferUsages::empty());
+        let atom = storage_bytes(
+            gpu,
+            "fracture atom",
+            4 * layout.atom_words() as u64,
+            wgpu::BufferUsages::empty(),
+        );
         let mut frames: Vec<[f32; 4]> = t.frames.iter().flatten().copied().collect();
         // + staging (9 per chunk) + the strikes (3 per body slot) + the frame events.
-        frames.resize((2 * b + 9 * n + 3 * b + 3 * room.events.frames) as usize, [0.0; 4]);
+        frames.resize(
+            (2 * b + 9 * n + 3 * b + 3 * room.events.frames) as usize,
+            [0.0; 4],
+        );
         let frames = gpu.storage("fracture frames", &frames);
-        let loads = storage_bytes(gpu, "fracture loads", 16 * (n as u64 + 2 * 3 * t.pool_cap as u64), wgpu::BufferUsages::empty());
-        let sizes = storage_bytes(gpu, "fracture sizes", 12 * ARGS, wgpu::BufferUsages::empty());
+        let loads = storage_bytes(
+            gpu,
+            "fracture loads",
+            16 * (n as u64 + 2 * 3 * t.pool_cap as u64),
+            wgpu::BufferUsages::empty(),
+        );
+        let sizes = storage_bytes(
+            gpu,
+            "fracture sizes",
+            12 * ARGS,
+            wgpu::BufferUsages::empty(),
+        );
         let args = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fracture args"),
             size: 12 * ARGS,
@@ -526,13 +603,31 @@ impl GpuFracture {
             mapped_at_creation: false,
         });
         let g: Vec<[f32; 4]> = t.geometry.iter().flatten().copied().collect();
-        let geometry_records = if t.geometry.is_empty() && used_n > 0 { 0 } else { 3 * n as u64 };
-        let geometry = storage_bytes(gpu, "fracture strike geometry", 16 * geometry_records, wgpu::BufferUsages::empty());
+        let geometry_records = if t.geometry.is_empty() && used_n > 0 {
+            0
+        } else {
+            3 * n as u64
+        };
+        let geometry = storage_bytes(
+            gpu,
+            "fracture strike geometry",
+            16 * geometry_records,
+            wgpu::BufferUsages::empty(),
+        );
         if !g.is_empty() {
-            gpu.queue.write_buffer(&geometry, 0, bytemuck::cast_slice(&g));
+            gpu.queue
+                .write_buffer(&geometry, 0, bytemuck::cast_slice(&g));
         }
-        let shots = storage_bytes(gpu, "fracture strike shots", 32 * MAX_SHOTS as u64, wgpu::BufferUsages::empty());
-        let kernels = ENTRIES.iter().map(|entry| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS)).collect();
+        let shots = storage_bytes(
+            gpu,
+            "fracture strike shots",
+            32 * MAX_SHOTS as u64,
+            wgpu::BufferUsages::empty(),
+        );
+        let kernels = ENTRIES
+            .iter()
+            .map(|entry| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS))
+            .collect();
         let mut f = GpuFracture {
             layout,
             kernels,
@@ -554,7 +649,14 @@ impl GpuFracture {
             shots,
             binds: Vec::new(),
             scan_binds: Vec::new(),
-            placeholder: std::array::from_fn(|_| storage_bytes(gpu, "fracture view placeholder", 16, wgpu::BufferUsages::empty())),
+            placeholder: std::array::from_fn(|_| {
+                storage_bytes(
+                    gpu,
+                    "fracture view placeholder",
+                    16,
+                    wgpu::BufferUsages::empty(),
+                )
+            }),
             placeholder_uniform: gpu.uniform("fracture view placeholder", &ViewParams::default()),
             view: None,
             engine_bodies: None,
@@ -595,8 +697,15 @@ impl GpuFracture {
             ];
             gpu.bind(&k.group, &buffers)
         };
-        let binds = self.kernels.iter().map(|k| group(&self.scan_new, k)).collect();
-        let scan_binds = [10, 11, 12].iter().map(|&i| group(&self.scan_free, &self.kernels[i])).collect();
+        let binds = self
+            .kernels
+            .iter()
+            .map(|k| group(&self.scan_new, k))
+            .collect();
+        let scan_binds = [10, 11, 12]
+            .iter()
+            .map(|&i| group(&self.scan_free, &self.kernels[i]))
+            .collect();
         self.binds = binds;
         self.scan_binds = scan_binds;
         if let Some(v) = self.view.as_mut() {
@@ -604,7 +713,11 @@ impl GpuFracture {
         }
         self.engine_bodies = Some(engine.bodies.clone());
         self.engine_colliders = Some(engine.colliders.clone());
-        self.ingest_buffers = Some([ingest.collider_info.clone(), ingest.manifolds.clone(), ingest.sort.clone()]);
+        self.ingest_buffers = Some([
+            ingest.collider_info.clone(),
+            ingest.manifolds.clone(),
+            ingest.sort.clone(),
+        ]);
     }
 
     /// Chunks and bonds in use (the high-water marks [`Self::append`] raised).
@@ -617,8 +730,17 @@ impl GpuFracture {
     /// on), each chunk record's first part already a table part index, its parts' colliders
     /// engine colliders. `frames` sets body slots' frames (the bodies the new chunks are
     /// on), `free` the body slots a split may give new pieces. `scales` are the fixed-point
-    /// scales for every table now in use ([`FractureTables::scales`] over all of them).
-    pub fn append(&mut self, gpu: &Gpu, at: Base, t: &FractureTables, frames: &[(u32, FrameRecord)], free: &[u32], scales: [f32; 3]) -> Result<(), String> {
+    /// scales for every table now in use ([`FractureTables::scales`] over all of them;
+    /// `None`: kept).
+    pub fn append(
+        &mut self,
+        gpu: &Gpu,
+        at: Base,
+        t: &FractureTables,
+        frames: &[(u32, FrameRecord)],
+        free: &[u32],
+        scales: Option<[f32; 3]>,
+    ) -> Result<(), String> {
         let (n, e, p) = (t.chunk_count(), t.bond_count(), t.parts.len() as u32);
         let l = self.layout;
         let parts_room = self.parts.size() / 32;
@@ -628,35 +750,71 @@ impl GpuFracture {
                 at.chunk, at.bond, at.part, l.n, l.e, parts_room
             ));
         }
-        if t.info.len() != n as usize || t.chunk_body.len() != n as usize || (!t.geometry.is_empty() && t.geometry.len() != n as usize) {
+        if t.info.len() != n as usize
+            || t.chunk_body.len() != n as usize
+            || (!t.geometry.is_empty() && t.geometry.len() != n as usize)
+        {
             return Err("fracture: appended tables of mismatched lengths".into());
         }
         for &(slot, _) in frames {
             if slot >= l.b {
-                return Err(format!("fracture: body slot {slot}; the tables cover {}", l.b));
+                return Err(format!(
+                    "fracture: body slot {slot}; the tables cover {}",
+                    l.b
+                ));
             }
         }
         let q = &gpu.queue;
         if n > 0 {
             let flat: Vec<[f32; 4]> = t.chunks.iter().flatten().copied().collect();
-            q.write_buffer(&self.chunks, 64 * at.chunk as u64, bytemuck::cast_slice(&flat));
-            q.write_buffer(&self.info, 4 * at.chunk as u64, bytemuck::cast_slice(&t.info));
-            q.write_buffer(&self.work, 4 * (l.w_body() + at.chunk) as u64, bytemuck::cast_slice(&t.chunk_body));
+            q.write_buffer(
+                &self.chunks,
+                64 * at.chunk as u64,
+                bytemuck::cast_slice(&flat),
+            );
+            q.write_buffer(
+                &self.info,
+                4 * at.chunk as u64,
+                bytemuck::cast_slice(&t.info),
+            );
+            q.write_buffer(
+                &self.work,
+                4 * (l.w_body() + at.chunk) as u64,
+                bytemuck::cast_slice(&t.chunk_body),
+            );
             if !t.geometry.is_empty() {
                 if self.geometry.size() < 48 * l.n as u64 {
-                    return Err("fracture: strike geometry appended to tables made without it".into());
+                    return Err(
+                        "fracture: strike geometry appended to tables made without it".into(),
+                    );
                 }
                 let g: Vec<[f32; 4]> = t.geometry.iter().flatten().copied().collect();
-                q.write_buffer(&self.geometry, 48 * at.chunk as u64, bytemuck::cast_slice(&g));
+                q.write_buffer(
+                    &self.geometry,
+                    48 * at.chunk as u64,
+                    bytemuck::cast_slice(&g),
+                );
             }
         }
         if e > 0 {
-            q.write_buffer(&self.bonds, 16 * at.bond as u64, bytemuck::cast_slice(&t.bonds));
-            q.write_buffer(&self.work, 4 * (l.w_alive() + at.bond) as u64, bytemuck::cast_slice(&vec![1u32; e as usize]));
+            q.write_buffer(
+                &self.bonds,
+                16 * at.bond as u64,
+                bytemuck::cast_slice(&t.bonds),
+            );
+            q.write_buffer(
+                &self.work,
+                4 * (l.w_alive() + at.bond) as u64,
+                bytemuck::cast_slice(&vec![1u32; e as usize]),
+            );
         }
         if p > 0 {
             let parts: Vec<[f32; 4]> = t.parts.iter().flatten().copied().collect();
-            q.write_buffer(&self.parts, 32 * at.part as u64, bytemuck::cast_slice(&parts));
+            q.write_buffer(
+                &self.parts,
+                32 * at.part as u64,
+                bytemuck::cast_slice(&parts),
+            );
         }
         for (slot, frame) in frames {
             q.write_buffer(&self.frames, 32 * *slot as u64, bytemuck::cast_slice(frame));
@@ -667,21 +825,40 @@ impl GpuFracture {
         while k < sorted.len() {
             let first = sorted[k];
             if first >= l.b {
-                return Err(format!("fracture: free body slot {first}; the tables cover {}", l.b));
+                return Err(format!(
+                    "fracture: free body slot {first}; the tables cover {}",
+                    l.b
+                ));
             }
             let mut end = k + 1;
-            while end < sorted.len() && sorted[end] == first + (end - k) as u32 && sorted[end] < l.b {
+            while end < sorted.len() && sorted[end] == first + (end - k) as u32 && sorted[end] < l.b
+            {
                 end += 1;
             }
             // One write per run of consecutive slots.
-            q.write_buffer(&self.work, 4 * (l.w_free() + first) as u64, bytemuck::cast_slice(&vec![1u32; end - k]));
+            q.write_buffer(
+                &self.work,
+                4 * (l.w_free() + first) as u64,
+                bytemuck::cast_slice(&vec![1u32; end - k]),
+            );
             k = end;
         }
         self.params.chunk_used = self.params.chunk_used.max(at.chunk + n);
         self.params.bond_used = self.params.bond_used.max(at.bond + e);
-        [self.params.scale_m, self.params.scale_s, self.params.scale_j] = scales;
+        if let Some(scales) = scales {
+            [
+                self.params.scale_m,
+                self.params.scale_s,
+                self.params.scale_j,
+            ] = scales;
+        }
         q.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
-        let scan = ScanParams { n: self.params.chunk_used, in_base: l.w_new(), out_base: l.w_rank(), block_base: l.scan_new_blocks() };
+        let scan = ScanParams {
+            n: self.params.chunk_used,
+            in_base: l.w_new(),
+            out_base: l.w_rank(),
+            block_base: l.scan_new_blocks(),
+        };
         q.write_buffer(&self.scan_new, 0, bytemuck::bytes_of(&scan));
         Ok(())
     }
@@ -693,13 +870,25 @@ impl GpuFracture {
         let l = self.layout;
         let q = &gpu.queue;
         if chunks > 0 {
-            q.write_buffer(&self.work, 4 * (l.w_body() + at.chunk) as u64, bytemuck::cast_slice(&vec![NONE; chunks as usize]));
+            q.write_buffer(
+                &self.work,
+                4 * (l.w_body() + at.chunk) as u64,
+                bytemuck::cast_slice(&vec![NONE; chunks as usize]),
+            );
         }
         if bonds > 0 {
-            q.write_buffer(&self.work, 4 * (l.w_alive() + at.bond) as u64, bytemuck::cast_slice(&vec![0u32; bonds as usize]));
+            q.write_buffer(
+                &self.work,
+                4 * (l.w_alive() + at.bond) as u64,
+                bytemuck::cast_slice(&vec![0u32; bonds as usize]),
+            );
         }
         for &s in slots {
-            q.write_buffer(&self.work, 4 * (l.w_free() + s) as u64, bytemuck::bytes_of(&0u32));
+            q.write_buffer(
+                &self.work,
+                4 * (l.w_free() + s) as u64,
+                bytemuck::bytes_of(&0u32),
+            );
         }
     }
 
@@ -725,35 +914,79 @@ impl GpuFracture {
     /// The renderer's objects (`objects`: chunks and shots) and, with `bonds`, its bond
     /// lines (`lines`, 2 vertices per bond) from the engine's bodies as they are: recorded
     /// into `encoder` after the frame's work. `mode`: 0 materials, 1 body state, 2 bodies.
-    pub fn encode_view(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, objects: &wgpu::Buffer, lines: &wgpu::Buffer, mode: u32, bonds: bool) {
+    pub fn encode_view(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        objects: &wgpu::Buffer,
+        lines: &wgpu::Buffer,
+        mode: u32,
+        bonds: bool,
+    ) {
         let Some(v) = self.view.as_mut() else { return };
         if v.mode != mode {
             v.mode = mode;
-            let p = ViewParams { mode, shot_count: v.shot_count, impactor_base: v.impactor_base, rest_speed: 0.05, ..Default::default() };
+            let p = ViewParams {
+                mode,
+                shot_count: v.shot_count,
+                impactor_base: v.impactor_base,
+                rest_speed: 0.05,
+                ..Default::default()
+            };
             gpu.queue.write_buffer(&v.params, 0, bytemuck::bytes_of(&p));
         }
-        if v.bound.as_ref().is_none_or(|(o, l, _)| o != objects || l != lines) {
+        if v.bound
+            .as_ref()
+            .is_none_or(|(o, l, _)| o != objects || l != lines)
+        {
             let bodies = self.engine_bodies.as_ref().expect("engine bound");
             let colliders = self.engine_colliders.as_ref().expect("engine bound");
             let ing = self.ingest_buffers.as_ref().expect("ingest bound");
             let group = |i: usize| {
                 let buffers: [&wgpu::Buffer; 23] = [
-                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots, &self.geometry, &self.shots,
+                    &self.params_buf,
+                    &self.chunks,
+                    &self.bonds,
+                    &self.parts,
+                    &self.work,
+                    &self.atom,
+                    &self.frames,
+                    bodies,
+                    colliders,
+                    &ing[0],
+                    &ing[1],
+                    &ing[2],
+                    &self.loads,
+                    &self.sizes,
+                    &self.scan_new,
+                    &self.info,
+                    &v.params,
+                    &v.chunks,
+                    objects,
+                    lines,
+                    &v.shots,
+                    &self.geometry,
+                    &self.shots,
                 ];
                 gpu.bind(&self.kernels[i].group, &buffers)
             };
             let at = |name: &str| ENTRIES.iter().position(|e| *e == name).expect("view entry");
-            let groups = [group(at("fr_view_chunks")), group(at("fr_view_shots")), group(at("fr_view_bonds"))];
+            let groups = [
+                group(at("fr_view_chunks")),
+                group(at("fr_view_shots")),
+                group(at("fr_view_bonds")),
+            ];
             v.bound = Some((objects.clone(), lines.clone(), groups));
         }
         let (_, _, groups) = v.bound.as_ref().expect("bound");
         let mut pass = encoder.begin_compute_pass(&Default::default());
-        let run = |pass: &mut wgpu::ComputePass<'_>, name: &str, group: &wgpu::BindGroup, n: u32| {
-            let k = &self.kernels[ENTRIES.iter().position(|e| *e == name).expect("view entry")];
-            pass.set_pipeline(&k.pipeline);
-            pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(groups_of(n), 1, 1);
-        };
+        let run =
+            |pass: &mut wgpu::ComputePass<'_>, name: &str, group: &wgpu::BindGroup, n: u32| {
+                let k = &self.kernels[ENTRIES.iter().position(|e| *e == name).expect("view entry")];
+                pass.set_pipeline(&k.pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(groups_of(n), 1, 1);
+            };
         run(&mut pass, "fr_view_chunks", &groups[0], self.layout.n);
         run(&mut pass, "fr_view_shots", &groups[1], v.shot_count.max(1));
         if bonds {
@@ -762,7 +995,10 @@ impl GpuFracture {
     }
 
     fn kernel(&self, name: &str) -> (usize, &Kernel) {
-        let i = ENTRIES.iter().position(|e| *e == name).expect("fracture entry");
+        let i = ENTRIES
+            .iter()
+            .position(|e| *e == name)
+            .expect("fracture entry");
         (i, &self.kernels[i])
     }
 
@@ -772,7 +1008,8 @@ impl GpuFracture {
         // The pool's halves swap every frame.
         self.params.parity ^= 1;
         self.params.step = step;
-        gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+        gpu.queue
+            .write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             if self.layout.events != Events::default() {
@@ -782,12 +1019,28 @@ impl GpuFracture {
             self.direct(&mut pass, "fr_breaks", self.params.bond_used as usize);
             if self.params.shot_count > 0 {
                 self.direct(&mut pass, "fr_strike_reset", self.layout.b as usize);
-                self.direct(&mut pass, "fr_strike_bounds", self.params.chunk_used as usize);
+                self.direct(
+                    &mut pass,
+                    "fr_strike_bounds",
+                    self.params.chunk_used as usize,
+                );
                 self.direct(&mut pass, "fr_strike_find", self.layout.b as usize);
-                self.direct(&mut pass, "fr_strike_entry", self.params.chunk_used as usize);
-                self.direct(&mut pass, "fr_strike_nearest", self.params.chunk_used as usize);
+                self.direct(
+                    &mut pass,
+                    "fr_strike_entry",
+                    self.params.chunk_used as usize,
+                );
+                self.direct(
+                    &mut pass,
+                    "fr_strike_nearest",
+                    self.params.chunk_used as usize,
+                );
                 self.direct(&mut pass, "fr_strike_force", self.layout.b as usize);
-                self.direct(&mut pass, "fr_strike_breaks", self.params.bond_used as usize);
+                self.direct(
+                    &mut pass,
+                    "fr_strike_breaks",
+                    self.params.bond_used as usize,
+                );
             }
             self.direct(&mut pass, "fr_gate", 1);
         }
@@ -798,17 +1051,33 @@ impl GpuFracture {
     /// strike), at most [`MAX_SHOTS`]. None until set. Needs the tables' `geometry`.
     pub fn set_shots(&mut self, gpu: &Gpu, shots: &[Shot]) -> Result<(), String> {
         if shots.len() > MAX_SHOTS {
-            return Err(format!("fracture: {} shots; strike prediction holds at most {MAX_SHOTS}", shots.len()));
+            return Err(format!(
+                "fracture: {} shots; strike prediction holds at most {MAX_SHOTS}",
+                shots.len()
+            ));
         }
-        if !shots.is_empty() && self.layout.n > 0 && self.geometry.size() < 48 * self.layout.n as u64 {
+        if !shots.is_empty()
+            && self.layout.n > 0
+            && self.geometry.size() < 48 * self.layout.n as u64
+        {
             return Err("fracture: shots set without strike geometry".into());
         }
-        let words: Vec<[f32; 4]> = shots.iter().flat_map(|s| [[f32::from_bits(s.body), s.bound, s.face, s.mass], [s.modulus, 0.0, 0.0, 0.0]]).collect();
+        let words: Vec<[f32; 4]> = shots
+            .iter()
+            .flat_map(|s| {
+                [
+                    [f32::from_bits(s.body), s.bound, s.face, s.mass],
+                    [s.modulus, 0.0, 0.0, 0.0],
+                ]
+            })
+            .collect();
         if !words.is_empty() {
-            gpu.queue.write_buffer(&self.shots, 0, bytemuck::cast_slice(&words));
+            gpu.queue
+                .write_buffer(&self.shots, 0, bytemuck::cast_slice(&words));
         }
         self.params.shot_count = shots.len() as u32;
-        gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+        gpu.queue
+            .write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         Ok(())
     }
 
@@ -826,7 +1095,8 @@ impl GpuFracture {
     fn set_step(&mut self, gpu: &Gpu, step: u32) {
         if self.params.step != step {
             self.params.step = step;
-            gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+            gpu.queue
+                .write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         }
     }
 
@@ -835,7 +1105,13 @@ impl GpuFracture {
         k.dispatch(pass, &self.binds[i], n);
     }
 
-    fn indirect(&self, pass: &mut wgpu::ComputePass<'_>, name: &str, arg: u64, scan: Option<usize>) {
+    fn indirect(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        name: &str,
+        arg: u64,
+        scan: Option<usize>,
+    ) {
         let (i, k) = self.kernel(name);
         pass.set_pipeline(&k.pipeline);
         let bind = match scan {
@@ -880,7 +1156,12 @@ impl GpuFracture {
     /// Diagnostic read (waits for the GPU).
     pub fn counters(&self, gpu: &Gpu) -> Counters {
         let c: Vec<u32> = gpu.read_range(&self.atom, self.layout.a_counters() as usize, 16);
-        Counters { broken: c[1], pieces: c[2], error: c[3], split_frames: c[4] }
+        Counters {
+            broken: c[1],
+            pieces: c[2],
+            error: c[3],
+            split_frames: c[4],
+        }
     }
 
     /// Diagnostic read: each chunk's engine body.
@@ -890,7 +1171,11 @@ impl GpuFracture {
 
     /// Diagnostic read: whether each bond is intact.
     pub fn bonds_intact(&self, gpu: &Gpu) -> Vec<bool> {
-        let w: Vec<u32> = gpu.read_range(&self.work, self.layout.w_alive() as usize, self.layout.e as usize);
+        let w: Vec<u32> = gpu.read_range(
+            &self.work,
+            self.layout.w_alive() as usize,
+            self.layout.e as usize,
+        );
         w.into_iter().map(|x| x != 0).collect()
     }
 
@@ -904,7 +1189,14 @@ impl GpuFracture {
     /// Break `bonds` and mark their bodies dirty, as `fr_breaks` would (the tests' and the
     /// predictors' host entry): `intact` is every bond's state before, `chunk_body` every
     /// chunk's body. Two uploads, written before the next submission.
-    pub fn break_bonds(&self, gpu: &Gpu, bonds: &[u32], intact: &[bool], chunk_body: &[u32], bond_table: &[[u32; 4]]) {
+    pub fn break_bonds(
+        &self,
+        gpu: &Gpu,
+        bonds: &[u32],
+        intact: &[bool],
+        chunk_body: &[u32],
+        bond_table: &[[u32; 4]],
+    ) {
         let mut alive: Vec<u32> = intact.iter().map(|&b| b as u32).collect();
         let mut dirty = vec![0u32; self.layout.b as usize];
         let mut count = 0u32;
@@ -915,29 +1207,59 @@ impl GpuFracture {
                 count += 1;
             }
         }
-        gpu.queue.write_buffer(&self.work, 4 * self.layout.w_alive() as u64, bytemuck::cast_slice(&alive));
-        gpu.queue.write_buffer(&self.atom, 4 * self.layout.a_dirty() as u64, bytemuck::cast_slice(&dirty));
+        gpu.queue.write_buffer(
+            &self.work,
+            4 * self.layout.w_alive() as u64,
+            bytemuck::cast_slice(&alive),
+        );
+        gpu.queue.write_buffer(
+            &self.atom,
+            4 * self.layout.a_dirty() as u64,
+            bytemuck::cast_slice(&dirty),
+        );
         // The frame's broken count (`C_FRAME_BROKEN`): the gate runs the split.
-        gpu.queue.write_buffer(&self.atom, 4 * self.layout.a_counters() as u64, bytemuck::bytes_of(&count));
+        gpu.queue.write_buffer(
+            &self.atom,
+            4 * self.layout.a_counters() as u64,
+            bytemuck::bytes_of(&count),
+        );
     }
 
     /// Break `bonds` (and mark their chunks' bodies dirty) touching only their own words, so
     /// a step still in flight keeps every other bond's state: a host pass's breaks between
     /// frames, split by the next frame's gate. `chunk_body` is each chunk's body as last read.
-    pub fn break_bonds_sparse(&self, gpu: &Gpu, bonds: &[u32], chunk_body: &[u32], bond_table: &[[u32; 4]]) {
+    pub fn break_bonds_sparse(
+        &self,
+        gpu: &Gpu,
+        bonds: &[u32],
+        chunk_body: &[u32],
+        bond_table: &[[u32; 4]],
+    ) {
         if bonds.is_empty() {
             return;
         }
         let (zero, one) = (0u32, 1u32);
         for &i in bonds {
-            gpu.queue.write_buffer(&self.work, 4 * (self.layout.w_alive() + i) as u64, bytemuck::bytes_of(&zero));
+            gpu.queue.write_buffer(
+                &self.work,
+                4 * (self.layout.w_alive() + i) as u64,
+                bytemuck::bytes_of(&zero),
+            );
             for end in [bond_table[i as usize][0], bond_table[i as usize][1]] {
                 let body = chunk_body[end as usize];
-                gpu.queue.write_buffer(&self.atom, 4 * (self.layout.a_dirty() + body) as u64, bytemuck::bytes_of(&one));
+                gpu.queue.write_buffer(
+                    &self.atom,
+                    4 * (self.layout.a_dirty() + body) as u64,
+                    bytemuck::bytes_of(&one),
+                );
             }
         }
         // The frame's broken count (`C_FRAME_BROKEN`, cleared by every frame's gate).
-        gpu.queue.write_buffer(&self.atom, 4 * self.layout.a_counters() as u64, bytemuck::bytes_of(&(bonds.len() as u32)));
+        gpu.queue.write_buffer(
+            &self.atom,
+            4 * self.layout.a_counters() as u64,
+            bytemuck::bytes_of(&(bonds.len() as u32)),
+        );
     }
 
     /// [`Self::break_bonds_sparse`] with each bond's two bodies given: `(bond, body a,
@@ -948,13 +1270,25 @@ impl GpuFracture {
         }
         let (zero, one) = (0u32, 1u32);
         for &(i, a, b) in bonds {
-            gpu.queue.write_buffer(&self.work, 4 * (self.layout.w_alive() + i) as u64, bytemuck::bytes_of(&zero));
+            gpu.queue.write_buffer(
+                &self.work,
+                4 * (self.layout.w_alive() + i) as u64,
+                bytemuck::bytes_of(&zero),
+            );
             for body in [a, b] {
-                gpu.queue.write_buffer(&self.atom, 4 * (self.layout.a_dirty() + body) as u64, bytemuck::bytes_of(&one));
+                gpu.queue.write_buffer(
+                    &self.atom,
+                    4 * (self.layout.a_dirty() + body) as u64,
+                    bytemuck::bytes_of(&one),
+                );
             }
         }
         // The frame's broken count (`C_FRAME_BROKEN`, cleared by every frame's gate).
-        gpu.queue.write_buffer(&self.atom, 4 * self.layout.a_counters() as u64, bytemuck::bytes_of(&(bonds.len() as u32)));
+        gpu.queue.write_buffer(
+            &self.atom,
+            4 * self.layout.a_counters() as u64,
+            bytemuck::bytes_of(&(bonds.len() as u32)),
+        );
     }
 
     pub fn body_words() -> u32 {
@@ -976,7 +1310,13 @@ fn groups_of(n: u32) -> u32 {
     n.div_ceil(64).max(1)
 }
 
-pub fn reference_split(t: &FractureTables, intact: &mut [bool], broken: &[u32], chunk_body: &mut [u32], free: &mut [u32]) -> Vec<(u32, f64, [f64; 3], [[f64; 3]; 3])> {
+pub fn reference_split(
+    t: &FractureTables,
+    intact: &mut [bool],
+    broken: &[u32],
+    chunk_body: &mut [u32],
+    free: &mut [u32],
+) -> Vec<(u32, f64, [f64; 3], [[f64; 3]; 3])> {
     let n = t.chunks.len();
     let mut dirty = vec![false; t.frames.len()];
     for &i in broken {
@@ -998,7 +1338,10 @@ pub fn reference_split(t: &FractureTables, intact: &mut [bool], broken: &[u32], 
         if !intact[i] || !dirty[chunk_body[b[0] as usize] as usize] {
             continue;
         }
-        let (ra, rb) = (find(&mut parent, b[0] as usize), find(&mut parent, b[1] as usize));
+        let (ra, rb) = (
+            find(&mut parent, b[0] as usize),
+            find(&mut parent, b[1] as usize),
+        );
         if ra != rb {
             parent[ra.max(rb)] = ra.min(rb);
         }
@@ -1010,7 +1353,9 @@ pub fn reference_split(t: &FractureTables, intact: &mut [bool], broken: &[u32], 
             count[label[c]] += 1;
         }
     }
-    let roots: Vec<usize> = (0..n).filter(|&c| dirty[chunk_body[c] as usize] && label[c] == c).collect();
+    let roots: Vec<usize> = (0..n)
+        .filter(|&c| dirty[chunk_body[c] as usize] && label[c] == c)
+        .collect();
     let mut best: std::collections::HashMap<u32, (u32, usize)> = std::collections::HashMap::new();
     for &r in &roots {
         let e = best.entry(chunk_body[r]).or_insert((0, usize::MAX));
@@ -1018,7 +1363,9 @@ pub fn reference_split(t: &FractureTables, intact: &mut [bool], broken: &[u32], 
             *e = (count[r], r);
         }
     }
-    let free_list: Vec<u32> = (0..free.len() as u32).filter(|&s| free[s as usize] != 0).collect();
+    let free_list: Vec<u32> = (0..free.len() as u32)
+        .filter(|&s| free[s as usize] != 0)
+        .collect();
     let mut slot = vec![u32::MAX; n];
     let mut k = 0;
     for &r in &roots {
@@ -1055,12 +1402,21 @@ pub fn reference_split(t: &FractureTables, intact: &mut [bool], broken: &[u32], 
             for c in (0..n).filter(|&c| label[c] == r && chunk_body[c] == slot[r]) {
                 let k = &t.chunks[c];
                 let mc = k[0][3] as f64;
-                let d = [k[0][0] as f64 - com[0], k[0][1] as f64 - com[1], k[0][2] as f64 - com[2]];
+                let d = [
+                    k[0][0] as f64 - com[0],
+                    k[0][1] as f64 - com[1],
+                    k[0][2] as f64 - com[2],
+                ];
                 let dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-                let own = [[k[1][0], k[1][3], k[2][0]], [k[1][3], k[1][1], k[2][1]], [k[2][0], k[2][1], k[1][2]]];
+                let own = [
+                    [k[1][0], k[1][3], k[2][0]],
+                    [k[1][3], k[1][1], k[2][1]],
+                    [k[2][0], k[2][1], k[1][2]],
+                ];
                 for a in 0..3 {
                     for b in 0..3 {
-                        i[a][b] += own[a][b] as f64 + mc * (if a == b { dd } else { 0.0 } - d[a] * d[b]);
+                        i[a][b] +=
+                            own[a][b] as f64 + mc * (if a == b { dd } else { 0.0 } - d[a] * d[b]);
                     }
                 }
             }

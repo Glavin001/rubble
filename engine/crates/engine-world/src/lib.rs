@@ -43,12 +43,19 @@ pub use assembly::{
 pub use debug_draw::{
     DebugColor, DebugDraw, DebugDrawOptions, COLOR_ASLEEP, COLOR_AWAKE, COLOR_STATIC,
 };
-pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, MoveReports, ShapeDef, SurfaceMaterial};
+pub use defs::{
+    BodyDef, BodyType, Geometry, MassData, MotionLocks, MoveReports, ShapeDef, SurfaceMaterial,
+};
 pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, DestructibleAssetDesc,
     DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats, Preload,
     StrengthModel,
 };
+pub use engine_terrain::{
+    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
+    RegionPlan, SandMaterial, TerrainConfig, TerrainError, YieldSurface,
+};
+pub use engine_webgpu::TerrainStepReport;
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, ContactBeginEvent, ContactEndEvent,
@@ -71,11 +78,6 @@ pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
 pub use terrain::{StrikeDef, TerrainArea, TerrainDef};
 pub use threshold::{Projectile, StressSource};
-pub use engine_terrain::{
-    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
-    RegionPlan, SandMaterial, TerrainConfig, TerrainError, YieldSurface,
-};
-pub use engine_webgpu::TerrainStepReport;
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::heightfield::{HeightField, HeightFieldError};
@@ -141,6 +143,17 @@ pub struct WorldDef {
     /// `enable_hit_events` are also reported as hits (Box3D
     /// `hitEventThreshold`).
     pub hit_event_threshold: f32,
+    /// Threshold destructibles: the body slots their fracture pieces take, reserved
+    /// once for every destructible (a split takes the lowest free one). More pieces at
+    /// once than this is an error (no free body slot). `None`: each destructible
+    /// reserves a slot per chunk when placed, so no split can run out, at the cost of
+    /// a body slot per chunk of every destructible in the world.
+    pub fracture_pieces: Option<u32>,
+    /// Threshold worlds keep sleeping bodies' resting contacts (the sleep archive,
+    /// `WgpuSim::enable_sleep_archive`): room for this many contact rows (a sleeping
+    /// cluster keeps about a dozen). More fails the step (`OVERFLOW_SLEEP_ARCHIVE`).
+    /// `None`: 16 a body slot.
+    pub sleep_archive_rows: Option<u32>,
 }
 
 impl Default for WorldDef {
@@ -158,6 +171,8 @@ impl Default for WorldDef {
             env_overrides: false,
             readback_frames: 3,
             hit_event_threshold: 1.0,
+            fracture_pieces: None,
+            sleep_archive_rows: None,
             backpressure: Backpressure::Block,
         }
     }
@@ -423,6 +438,10 @@ pub struct World {
     contacts: contacts::ContactTracker,
     queries: queries::QueryQueue,
     hit_event_threshold: f32,
+    /// `WorldDef::fracture_pieces`.
+    pub(crate) fracture_pieces: Option<u32>,
+    /// `WorldDef::sleep_archive_rows`.
+    pub(crate) sleep_archive_rows: Option<u32>,
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
     fracture: threshold::Fracture,
@@ -496,6 +515,8 @@ impl World {
             contacts: Default::default(),
             queries: Default::default(),
             hit_event_threshold: def.hit_event_threshold,
+            fracture_pieces: def.fracture_pieces,
+            sleep_archive_rows: def.sleep_archive_rows,
             contact_storage: contacts,
             motion: Default::default(),
             resync: false,
@@ -535,7 +556,10 @@ impl World {
         bytes: u64,
     ) -> anyhow::Result<u64> {
         let have = self.sim.pose_buffer().size();
-        anyhow::ensure!(bytes > 0 && bytes <= have, "export of {bytes} bytes: the pose buffer holds {have}");
+        anyhow::ensure!(
+            bytes > 0 && bytes <= have,
+            "export of {bytes} bytes: the pose buffer holds {have}"
+        );
         anyhow::ensure!(
             bytes % 4 == 0 && current_offset % 4 == 0 && previous_offset % 4 == 0,
             "pose export offsets and size must be multiples of 4"
@@ -544,9 +568,12 @@ impl World {
             current_offset + bytes <= current.size() && previous_offset + bytes <= previous.size(),
             "pose export range past the end of a host buffer"
         );
-        let mut enc = self.sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("pose export"),
-        });
+        let mut enc = self
+            .sim
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pose export"),
+            });
         if self.pose_exports.is_none() {
             // From now on each step keeps the poses before it. Until the next step, previous =
             // current (nothing has moved since).
@@ -810,7 +837,11 @@ impl World {
     }
 
     /// Which of the body's moves frames report (default [`MoveReports::All`]).
-    pub fn set_body_move_reports(&mut self, id: BodyId, reports: MoveReports) -> anyhow::Result<()> {
+    pub fn set_body_move_reports(
+        &mut self,
+        id: BodyId,
+        reports: MoveReports,
+    ) -> anyhow::Result<()> {
         let i = self.live_body(id)?;
         self.bodies[i].moves = reports;
         Ok(())
@@ -1245,13 +1276,20 @@ impl World {
         // terrain's static body: its origin until a frame reports it).
         let body = self.shapes[s].body as usize;
         let to_world = |p: Vec3| {
-            let t = self.bodies[body].last_transform.unwrap_or(self.bodies[body].origin);
+            let t = self.bodies[body]
+                .last_transform
+                .unwrap_or(self.bodies[body].origin);
             t.p() + t.q() * (transform.p() + transform.q() * p)
         };
         let lo = field.vertex(i0, j0);
         let hi = field.vertex((i0 + w).saturating_sub(1), (j0 + d).saturating_sub(1));
         let (mut mn, mut mx) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-        for c in [Vec3::new(lo.x, -1e3, lo.z), Vec3::new(hi.x, 1e3, hi.z), Vec3::new(lo.x, 1e3, hi.z), Vec3::new(hi.x, -1e3, lo.z)] {
+        for c in [
+            Vec3::new(lo.x, -1e3, lo.z),
+            Vec3::new(hi.x, 1e3, hi.z),
+            Vec3::new(lo.x, 1e3, hi.z),
+            Vec3::new(hi.x, -1e3, lo.z),
+        ] {
             let p = to_world(c);
             mn = mn.min(p);
             mx = mx.max(p);
@@ -1274,7 +1312,8 @@ impl World {
                         })
                         .fold(0.0, f32::max),
                 );
-                (p.cmpge(mn - pad - reach).all() && p.cmple(mx + pad + reach).all()).then(|| GpuCommand::wake(i as u32))
+                (p.cmpge(mn - pad - reach).all() && p.cmple(mx + pad + reach).all())
+                    .then(|| GpuCommand::wake(i as u32))
             })
             .collect()
     }
@@ -1812,10 +1851,15 @@ impl World {
     /// `Backpressure::Block`; collect results with [`World::poll`].
     pub fn step(&mut self) -> anyhow::Result<()> {
         let step = self.step;
-        let host_t = std::env::var("RUBBLE_HOST_TIMING").is_ok().then(std::time::Instant::now);
+        let host_t = std::env::var("RUBBLE_HOST_TIMING")
+            .is_ok()
+            .then(std::time::Instant::now);
         let lap = |what: &str| {
             if let Some(t) = &host_t {
-                eprintln!("rubble host world step: {what} at {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
+                eprintln!(
+                    "rubble host world step: {what} at {:.3} ms",
+                    t.elapsed().as_secs_f64() * 1e3
+                );
             }
         };
         if std::mem::take(&mut self.dirty) {
@@ -1857,8 +1901,12 @@ impl World {
                 label: Some("world step"),
             });
         // `RUBBLE_GPU_TIMING=1` (diagnostic): each phase's GPU time, printed per step.
-        let marks = engine_webgpu::gpu_marks::GpuMarks::enabled(self.sim.device())
-            .then(|| std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new(self.sim.device(), 96)));
+        let marks = engine_webgpu::gpu_marks::GpuMarks::enabled(self.sim.device()).then(|| {
+            std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new(
+                self.sim.device(),
+                96,
+            ))
+        });
         if let Some(m) = &marks {
             m.mark(&mut enc, "begin");
             self.sim.set_marks(Some(m.clone()));
@@ -1995,7 +2043,11 @@ impl World {
             let parts = m.report(self.sim.device(), self.sim.queue(), &staging);
             let total: f64 = parts.iter().map(|p| p.1).sum();
             self.last_gpu_ms = Some(total);
-            let list: Vec<String> = parts.iter().filter(|p| p.1 >= 0.01).map(|(n, t)| format!("{n} {t:.2}")).collect();
+            let list: Vec<String> = parts
+                .iter()
+                .filter(|p| p.1 >= 0.01)
+                .map(|(n, t)| format!("{n} {t:.2}"))
+                .collect();
             if std::env::var("RUBBLE_GPU_TIMING_PRINT").is_ok() {
                 eprintln!("world step {step} GPU ms: {total:.2} = {}", list.join(", "));
             }
@@ -2076,19 +2128,27 @@ impl World {
                     });
                 }
                 Pending::Mapped { step, slot } => {
-                    let timing = std::env::var("RUBBLE_WORLD_TIMING").is_ok().then(std::time::Instant::now);
+                    let timing = std::env::var("RUBBLE_WORLD_TIMING")
+                        .is_ok()
+                        .then(std::time::Instant::now);
                     if !self.readback.ready(self.sim.device(), slot, wait)? {
                         break;
                     }
                     if let Some(t) = timing {
-                        eprintln!("world frame {step}: wait {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+                        eprintln!(
+                            "world frame {step}: wait {:.2} ms",
+                            t.elapsed().as_secs_f64() * 1e3
+                        );
                     }
                     self.readback.pending.pop_front();
                     let timing = timing.map(|_| std::time::Instant::now());
                     let raw = self.readback.take(slot);
                     frames.push(self.frame(step, raw)?);
                     if let Some(t) = timing {
-                        eprintln!("world frame {step}: build {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+                        eprintln!(
+                            "world frame {step}: build {:.2} ms",
+                            t.elapsed().as_secs_f64() * 1e3
+                        );
                     }
                 }
             }
@@ -2425,7 +2485,9 @@ impl World {
         // Hull blocks stay cached for reuse (inserts deduplicate them); a
         // heightfield's block is its own, so it is freed once out of quarantine.
         if matches!(s.geometry, Geometry::HeightField { .. }) {
-            let base = engine_schema::convex::convex_params_base(self.sim.collider_record(collider).params);
+            let base = engine_schema::convex::convex_params_base(
+                self.sim.collider_record(collider).params,
+            );
             self.retired_height_fields.push((base, self.step));
         }
         self.sim.set_collider(collider, retired_collider(body));
@@ -2591,7 +2653,9 @@ impl World {
         let frame = self.bodies[slot.body as usize].frame();
         let material = self.intern_material(&slot.def.material)?;
         let hull_params = match slot.geometry {
-            Geometry::Hull { .. } | Geometry::HeightField { .. } => Some(self.sim.collider_record(slot.collider).params),
+            Geometry::Hull { .. } | Geometry::HeightField { .. } => {
+                Some(self.sim.collider_record(slot.collider).params)
+            }
             _ => None,
         };
         let mut c = self.collider(
@@ -2931,7 +2995,10 @@ fn height_field_mesh(field: &HeightField, transform: Transform) -> ShapeMesh {
             triangles.push([v(0, 0), v(0, 1), v(1, 1)]);
         }
     }
-    ShapeMesh { vertices, triangles }
+    ShapeMesh {
+        vertices,
+        triangles,
+    }
 }
 
 #[cfg(test)]
@@ -2948,10 +3015,18 @@ mod height_field_arena_tests {
         let mut len = None;
         for _ in 0..4 {
             let s = w
-                .create_height_field_shape(ground, &ShapeDef::default(), &field, Transform::IDENTITY)
+                .create_height_field_shape(
+                    ground,
+                    &ShapeDef::default(),
+                    &field,
+                    Transform::IDENTITY,
+                )
                 .unwrap();
             let now = w.hulls.len();
-            assert!(len.is_none_or(|l| now <= l), "the arena grew to {now} records (was {len:?})");
+            assert!(
+                len.is_none_or(|l| now <= l),
+                "the arena grew to {now} records (was {len:?})"
+            );
             len = Some(now);
             w.destroy_shape(s, false).unwrap();
             for _ in 0..QUARANTINE_STEPS + 1 {

@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod character;
 pub mod commands;
-pub mod mass;
 pub mod convex;
 pub mod handles;
 pub mod heightfield;
 pub mod joint;
+pub mod mass;
 pub mod params;
 pub mod scene;
 pub mod snapshot;
@@ -61,9 +61,21 @@ impl AbiProbe {
 
     pub fn inertia(&self) -> Mat3 {
         Mat3::from_cols(
-            Vec3::new(self.inertia_col0[0], self.inertia_col0[1], self.inertia_col0[2]),
-            Vec3::new(self.inertia_col1[0], self.inertia_col1[1], self.inertia_col1[2]),
-            Vec3::new(self.inertia_col2[0], self.inertia_col2[1], self.inertia_col2[2]),
+            Vec3::new(
+                self.inertia_col0[0],
+                self.inertia_col0[1],
+                self.inertia_col0[2],
+            ),
+            Vec3::new(
+                self.inertia_col1[0],
+                self.inertia_col1[1],
+                self.inertia_col1[2],
+            ),
+            Vec3::new(
+                self.inertia_col2[0],
+                self.inertia_col2[1],
+                self.inertia_col2[2],
+            ),
         )
     }
 }
@@ -150,9 +162,21 @@ impl BodyState {
             inv_mass: inv_m,
             orientation: orientation.to_array(),
             inv_inertia: [
-                if inertia.x > 0.0 { 1.0 / inertia.x } else { 0.0 },
-                if inertia.y > 0.0 { 1.0 / inertia.y } else { 0.0 },
-                if inertia.z > 0.0 { 1.0 / inertia.z } else { 0.0 },
+                if inertia.x > 0.0 {
+                    1.0 / inertia.x
+                } else {
+                    0.0
+                },
+                if inertia.y > 0.0 {
+                    1.0 / inertia.y
+                } else {
+                    0.0
+                },
+                if inertia.z > 0.0 {
+                    1.0 / inertia.z
+                } else {
+                    0.0
+                },
             ],
             flags: BodyFlags::Dynamic as u32 | BodyFlags::Awake as u32,
             linear_vel: [0.0; 3],
@@ -173,7 +197,8 @@ impl BodyState {
     /// Moved by its set velocity, never by the solver (the kernels'
     /// `bodyIsKinematic`): `Kinematic` without `Dynamic`, zero inverse mass.
     pub fn is_kinematic(&self) -> bool {
-        self.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32) == BodyFlags::Kinematic as u32
+        self.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32)
+            == BodyFlags::Kinematic as u32
     }
 
     /// Moves at all (mass or kinematic flag): host-side broadphase sizing.
@@ -322,13 +347,28 @@ pub struct ImpulseRecord {
 
 impl ImpulseRecord {
     pub fn at_point(body: u32, j: [f32; 3], point: [f32; 3]) -> Self {
-        Self { body, mode: IMPULSE_AT_POINT, j, point }
+        Self {
+            body,
+            mode: IMPULSE_AT_POINT,
+            j,
+            point,
+        }
     }
     pub fn set_velocity(body: u32, linear: [f32; 3], angular: [f32; 3]) -> Self {
-        Self { body, mode: IMPULSE_SET_VELOCITY, j: linear, point: angular }
+        Self {
+            body,
+            mode: IMPULSE_SET_VELOCITY,
+            j: linear,
+            point: angular,
+        }
     }
     pub fn linear_angular(body: u32, linear: [f32; 3], angular: [f32; 3]) -> Self {
-        Self { body, mode: IMPULSE_LINEAR_ANGULAR, j: linear, point: angular }
+        Self {
+            body,
+            mode: IMPULSE_LINEAR_ANGULAR,
+            j: linear,
+            point: angular,
+        }
     }
 }
 /// Contact events (opt-in `contact_events` pass): after the large-static
@@ -382,7 +422,9 @@ pub struct JointBreak {
 /// advanced. Records overwritten before they were read are counted in the return.
 pub fn decode_joint_breaks(words: &[u32], seen: &mut u32, out: &mut Vec<JointBreak>) -> u32 {
     let cursor = words[0];
-    let lost = cursor.wrapping_sub(*seen).saturating_sub(EVENT_RING_CAPACITY);
+    let lost = cursor
+        .wrapping_sub(*seen)
+        .saturating_sub(EVENT_RING_CAPACITY);
     let mut n = seen.wrapping_add(lost);
     while n != cursor {
         let r = 4 + 4 * (n % EVENT_RING_CAPACITY) as usize;
@@ -419,7 +461,9 @@ pub struct MountBreak {
 /// (each event kind keeps its own read cursor over the shared ring).
 pub fn decode_mount_breaks(words: &[u32], seen: &mut u32, out: &mut Vec<MountBreak>) -> u32 {
     let cursor = words[0];
-    let lost = cursor.wrapping_sub(*seen).saturating_sub(EVENT_RING_CAPACITY);
+    let lost = cursor
+        .wrapping_sub(*seen)
+        .saturating_sub(EVENT_RING_CAPACITY);
     let mut n = seen.wrapping_add(lost);
     while n != cursor {
         let r = 4 + 4 * (n % EVENT_RING_CAPACITY) as usize;
@@ -518,6 +562,9 @@ pub const OVERFLOW_CHAR_CANDIDATES: u32 = 16384;
 /// A wheel on a soil heightfield would sink past the soil's `max_sinkage`
 /// (`soil::Soil`; the step clamps it there and fails).
 pub const OVERFLOW_SOIL_SINKAGE: u32 = 65536;
+/// The sleep archive (`WgpuSim::enable_sleep_archive`) is full: more sleeping bodies'
+/// resting contact rows than its room (in blocks of 8 rows a body).
+pub const OVERFLOW_SLEEP_ARCHIVE: u32 = 131072;
 /// Oversized-static list (statics wider than half a grid cell, uniform grid):
 /// this many collider ids in the scratch-atomics buffer at `LARGE_STATIC_BASE`.
 pub const LARGE_STATIC_CAP: u32 = 1024;
@@ -540,7 +587,21 @@ mod tests {
         put(&mut words, 2, EVENT_BREAK, 8);
         let (mut seen, mut out) = (0u32, Vec::new());
         assert_eq!(decode_joint_breaks(&words, &mut seen, &mut out), 0);
-        assert_eq!(out, vec![JointBreak { joint: 7, force: 2.5, torque: 0.5 }, JointBreak { joint: 8, force: 2.5, torque: 0.5 }]);
+        assert_eq!(
+            out,
+            vec![
+                JointBreak {
+                    joint: 7,
+                    force: 2.5,
+                    torque: 0.5
+                },
+                JointBreak {
+                    joint: 8,
+                    force: 2.5,
+                    torque: 0.5
+                }
+            ]
+        );
         assert_eq!(seen, 3);
         // Nothing new: nothing returned.
         out.clear();
