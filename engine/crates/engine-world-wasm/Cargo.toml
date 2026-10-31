@@ -3,7 +3,7 @@ name = "engine-world-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "wasm-bindgen bindings of rubble's world API for the browser showcase: scenarios (scene packs with driven vehicles, shots and charges) stepped in Rust, their poses handed to the page's renderer"
+description = "wasm-bindgen bindings of rubble's world API for the browser destruction page: scenarios (scene packs with driven vehicles, shots and charges) stepped in Rust, their poses handed to the page's renderer"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

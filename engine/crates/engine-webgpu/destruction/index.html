@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Rubble · Showcase</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Rubble · Destruction</title>
 <style>
 :root{color-scheme:dark;font:14px/1.5 system-ui,sans-serif;color:#e6eef2;background:#091019}*{box-sizing:border-box}body{margin:0}
 canvas{position:absolute;left:360px;width:calc(100% - 360px);height:100dvh;display:block;touch-action:none;cursor:crosshair}
@@ -18,7 +18,7 @@ body.collapsed aside,body.collapsed .badge{display:none}body.collapsed canvas{le
 @media(max-width:720px){canvas{left:0;width:100%}aside{left:8px;right:8px;top:8px;width:auto;max-height:55dvh;padding:16px}.badge{display:none}#status{left:12px;bottom:12px;max-width:calc(100% - 24px)}}
 </style></head><body>
 <canvas id="view" aria-label="The scenario's view. Click to fire the ball, drag to orbit and scroll to zoom."></canvas>
-<aside id="panel"><div class="brand"><span class="mark"></span><span class="eyebrow">Rubble / world API</span></div><h1>Showcase</h1>
+<aside id="panel"><div class="brand"><span class="mark"></span><span class="eyebrow">Rubble / world API</span></div><h1>Destruction</h1>
 <p>Raycast vehicles and bonded structures in one world: rubble's world API stepped in Rust on WebGPU. The vehicles are driven by their wheels; a wall breaks before the step that meets it.</p>
 <label class="eyebrow" for="scenario">Scenario</label><select id="scenario"></select>
 <div class="actions"><button class="primary" id="run" disabled>Pause</button><button id="restart" disabled>Restart</button></div>

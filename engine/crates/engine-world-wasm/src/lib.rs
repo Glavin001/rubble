@@ -1,4 +1,4 @@
-//! Rubble's world API in the browser for the showcase (`engine-webgpu/showcase.html`): a
+//! Rubble's world API in the browser for the destruction page (`engine-webgpu/destruction/`): a
 //! scenario (`rubble::scenario`: a scene pack with driven vehicles as one `World`, its
 //! structure a `Threshold` destructible) stepped here on this module's WebGPU device, and
 //! each step's poses handed to the page, which draws them with the fracture lab's renderer

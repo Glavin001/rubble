@@ -851,7 +851,7 @@ the middle shop's window, and the `six_wheel_truck` preset at the fourth shop's,
 behind. Each starts 30 m out and is driven at full throttle by its own engine, gearbox and
 wheels (the pack's `defaults.drives`, `stress_ref::drive`).
 - **How it runs.** stress-web runs the scene in rubble's world API (`World`), not in the
-  lab's threshold world, through `rubble::scenario` (the host the showcase page and the
+  lab's threshold world, through `rubble::scenario` (the host the destruction page and the
   native tests share). The structure is a `Threshold` destructible, the same GPU fracture
   as the threshold mode. Each vehicle's chassis is a projectile: its body boxes and its
   wheels' rims strike the shop front in the frame before they meet it. Each stands on its
@@ -882,7 +882,7 @@ four vehicles on them; the traffic behind drives on into the gap (take
 meets: a span still bonded at one seat hangs there, as no load reaches its links. The
 charge cuts what `blast_parity`'s stress solver breaks (`bo_viaduct_pier`).
 
-The same scenarios run on the **showcase** page (`../showcase/`): engine-world-wasm steps
+The same scenarios run on the **destruction** page (`../destruction/`): engine-world-wasm steps
 the world on its own device and hands each step's poses to this page's renderer
 (`render.mjs`), the chunks in their materials' colours. It needs JSPI (Chrome or Edge 137+).
 

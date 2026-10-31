@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Records demo takes to MP4 (showcase videos and play-testing), from any demo page that
+// Records demo takes to MP4 (demo videos and play-testing), from any demo page that
 // implements the take contract:
 //   window.__record(script, {name, upload, width}) plays `script` frame-locked (physics
 //   advances a fixed amount per video frame, independent of wall-clock speed) and PUTs
 //   each composited frame as JPEG to `${upload}/${name}/f00000.jpg`; it resolves to
 //   {frames, ...}. The page's segment fields are its own (see takes/*.mjs).
 //
-//   node --experimental-websocket record-takes.mjs [take ...] [--page vehicle|lab|showcase] [--out DIR] [--reel] [--list] [--check]
+//   node --experimental-websocket record-takes.mjs [take ...] [--page vehicle|lab|destruction] [--out DIR] [--reel] [--list] [--check]
 //
 // --check runs takes/check.mjs on each take (frame counts, black or uniform frames, page
 // and WebGPU errors, counters going backwards, frozen frames, overlay overflow), writes
@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { openHarness } from './takes/harness.mjs';
 import { VEHICLE_TAKES } from './takes/vehicle.mjs';
 import { LAB_TAKES } from './takes/lab.mjs';
-import { SHOWCASE_TAKES } from './takes/showcase.mjs';
+import { DESTRUCTION_TAKES } from './takes/destruction.mjs';
 import { checkTake, frameStats, frameHashes } from './takes/check.mjs';
 import { rmSync, writeFileSync } from 'node:fs';
 
@@ -33,10 +33,10 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const PAGES = {
   'vehicle.html': { ready: 'typeof window.__record === "function" && !!window.__vehicleState()', error: 'document.getElementById("err")?.textContent || ""' },
   'fracture/index.html': { ready: 'window.__FRACTURE_DEMO__?.ready && typeof window.__record === "function"', error: 'document.querySelector(".error")?.textContent || ""' },
-  'showcase/index.html': { ready: 'window.__SHOWCASE__?.ready && typeof window.__record === "function"', error: 'document.querySelector(".error")?.textContent || ""' },
+  'destruction/index.html': { ready: 'window.__DESTRUCTION__?.ready && typeof window.__record === "function"', error: 'document.querySelector(".error")?.textContent || ""' },
 };
-const GROUPS = { vehicle: VEHICLE_TAKES, lab: LAB_TAKES, showcase: SHOWCASE_TAKES };
-const ALL = { ...VEHICLE_TAKES, ...LAB_TAKES, ...SHOWCASE_TAKES };
+const GROUPS = { vehicle: VEHICLE_TAKES, lab: LAB_TAKES, destruction: DESTRUCTION_TAKES };
+const ALL = { ...VEHICLE_TAKES, ...LAB_TAKES, ...DESTRUCTION_TAKES };
 
 export async function recordTakes(names, { out = join(ROOT, 'recordings'), reel = false, check = false, repeat = false } = {}) {
   for (const t of names) if (!ALL[t]) throw new Error(`unknown take ${t}; have ${Object.keys(ALL).join(', ')}`);

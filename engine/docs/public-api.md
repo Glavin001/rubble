@@ -1044,7 +1044,7 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   wheels, its chassis a projectile; shots as projectile balls, the pack's
   charges cut between steps, a drive's cruising speed held by lifting the
   throttle. It gives the vehicles' and balls' poses and each chunk's motion
-  since rest. The lab (stress-web), the showcase page (engine-world-wasm) and
+  since rest. The lab (stress-web), the destruction page (engine-world-wasm) and
   the native tests run it.
 - **Settings.** `solver_for(StrengthModel::Threshold)` gives the lab's
   threshold engine settings: never asleep, zero-gap contact, world inertia,

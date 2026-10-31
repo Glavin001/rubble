@@ -1,4 +1,4 @@
-// The showcase: rubble's world API in the browser. A scenario (a scene pack with driven
+// The destruction page: rubble's world API in the browser. A scenario (a scene pack with driven
 // vehicles, engine-world `scenario`) is stepped in Rust on the wasm module's own WebGPU
 // device (engine-world-wasm); each step's poses come back as the fracture lab's draw buffer
 // and this page draws them with the lab's renderer (fracture/render.mjs), the structure's
@@ -95,7 +95,7 @@ const director=createDirector({
 });
 window.__record=(script,opts)=>director.record(script,opts);
 window.__replay=opts=>director.replay(opts);
-window.__SHOWCASE__={open:k=>open(k,false),get ready(){return !!scene&&!held},stats};
+window.__DESTRUCTION__={open:k=>open(k,false),get ready(){return !!scene&&!held},stats};
 
 function hud(){
  const s=stats();
@@ -136,7 +136,7 @@ addEventListener('keydown',e=>{if(e.code==='KeyR'&&!e.repeat&&!e.ctrlKey&&!e.met
 
 try{
  if(!navigator.gpu)throw new Error('WebGPU is unavailable. Open this page in a WebGPU-enabled browser.');
- if(!JSPI)throw new Error('The showcase waits for the GPU with JavaScript Promise Integration: open it in Chrome or Edge 137+.');
+ if(!JSPI)throw new Error('This page waits for the GPU with JavaScript Promise Integration: open it in Chrome or Edge 137+.');
  await showcase_init();
  const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error('No WebGPU adapter available');
  device=await adapter.requestDevice();

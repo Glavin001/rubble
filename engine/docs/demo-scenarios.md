@@ -43,8 +43,8 @@ runs in a browser.
 
 ## Our takes (2026-10-24), scored on those beats
 
-19 lab takes and 2 showcase takes, recorded in headless Chrome with `record-takes.mjs
---page lab --check --repeat` (and `--page showcase`). Every stress-mode take passes the
+19 lab takes and 2 destruction-page takes, recorded in headless Chrome with `record-takes.mjs
+--page lab --check --repeat` (and `--page destruction`). Every stress-mode take passes the
 checks and repeats frame for frame.
 
 | Take | Patterns | Works | Gaps |
@@ -61,7 +61,7 @@ checks and repeats frame for frame.
 | `rr_storefront_car` | V5 | Ball stand-in: a local break | Superseded by `rr_storefront_car_bus` |
 | `rr_drive_storefront` | V5 V4 | Driven, not launched: rubble's raycast sedan and six-wheel truck, in the world API (`World`, the `Threshold` model), accelerate on their own wheels from 30 m out. The sedan breaks the window at about 50 km/h and drives into the shop; the truck's front wheels meet the brick stallriser under the fourth shop's window and it breaks through slewed about 40° (136) | The vehicles are rigid: no crumple yet (soft bodies, plan Phase D). A raycast wheel cannot climb the stallriser |
 | `bo_drive_viaduct` | S2 V3 V5 | Driven traffic on the viaduct: four sedans, two six-wheel trucks and two on the road below, cruising. The hinge pier's charge cuts the drop-in spans loose; they swing down about their seats with four vehicles on them, the traffic behind drives into the gap, and a span lands on the lower road's truck (292) | Under the threshold model the ball alone cannot drop the spans (a span bonded at one end hangs there): the charge cuts what the stress solver would break |
-| `sc_ram_raid`, `sc_bridge_out` (showcase) | as above | The same two scenarios on the showcase page (`showcase/`: engine-world-wasm steps the world, the lab's renderer draws it, chunks in their materials' colours); the same breaks, frame for frame | Flat shading, no shadows or dust yet (the lab's stress renderer has them) |
+| `sc_ram_raid`, `sc_bridge_out` (destruction page) | as above | The same two scenarios on the destruction page (`destruction/`: engine-world-wasm steps the world, the lab's renderer draws it, chunks in their materials' colours); the same breaks, frame for frame | Flat shading, no shadows or dust yet (the lab's stress renderer has them) |
 | `ft_apartment_airliner` | S3 | A bonded 35 t jet at 70 m/s punches through five storeys of the middle bays; engines and nose fly off; it falls back out (1,148) | — |
 | `ft_glass_tower_airliner` | S3 | The nose breaks up in the curtain wall and floors (710) | It stops in the first bays and slides down the facade; no upper block fails (threshold has no stress solve) |
 | `vh_car_barrier_crash`, `vh_bus_barrier_crash` | V1 V2 | Into a rigid barrier: the front comes apart, wheels come off, the cabin holds (45, 39) | Wheels do not roll: the vehicles slide on them |
@@ -94,11 +94,11 @@ exactly; vehicles, glass and metal shed chips, not dust.
 3. **Driven vehicles: done for the storefront and the viaduct** (`rr_drive_storefront`,
    `bo_drive_viaduct`). Threshold fracture runs in `World` (D1b); a chassis's boxes strike
    exactly; wheels load what they stand on (W5); charges cut bonds between steps. One host,
-   `rubble::scenario`, runs them for the lab (stress-web), the showcase page
+   `rubble::scenario`, runs them for the lab (stress-web), the destruction page
    (engine-world-wasm) and the native tests. Next:
    - drives for the apartment block;
    - a vehicle you steer from the page;
-   - the showcase's look: the lab's shadows and dust, and Safari (an Asyncify build);
+   - the destruction page's look: the lab's shadows and dust, and Safari (an Asyncify build);
    - soft-body hero cars that crumple (plan Phase D).
 4. **A reel per pattern**, for sharing: the strongest takes cut together at the beats
    viewers replay.
