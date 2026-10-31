@@ -9,13 +9,16 @@
 #               the impact, each from five cameras: target/unreal/softcrash-<crash>-<camera>.mp4,
 #               and softcrash-<crash>-multicam.mp4
 #
-#   scripts/unreal/video.sh [--no-build] [town|glasstower|softcrash]
+#   scripts/unreal/video.sh [--no-build] [--draft] [town|glasstower|softcrash]
+#   --draft: without volumetric clouds and fog (faster)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ARGS=()
 FILM=town
+DRAFT=0
 for a in "$@"; do
   case "$a" in
+    --draft) DRAFT=1 ;;
     town|glasstower|softcrash) FILM="$a" ;;
     *) ARGS+=("$a") ;;
   esac
@@ -26,7 +29,9 @@ case "$FILM" in
   softcrash) TEST=Rubble.Video.SoftCrash; FRAMES="$ROOT/unreal/RubbleDemo/Saved/RubbleShots/video/softcrash" ;;
 esac
 # Five cameras of 22-30 s each at full quality take well over the default half hour.
-RUBBLE_TEST_TIMEOUT=${RUBBLE_TEST_TIMEOUT:-7200} RUBBLE_VOLUMETRICS=1 "$ROOT/scripts/unreal/test.sh" ${ARGS[@]+"${ARGS[@]}"} --only "$TEST"
+VOLUMETRICS=1
+[ "$DRAFT" = 1 ] && VOLUMETRICS=0
+RUBBLE_TEST_TIMEOUT=${RUBBLE_TEST_TIMEOUT:-7200} RUBBLE_VOLUMETRICS=$VOLUMETRICS "$ROOT/scripts/unreal/test.sh" ${ARGS[@]+"${ARGS[@]}"} --only "$TEST"
 mkdir -p "$ROOT/target/unreal"
 encode() { ffmpeg -loglevel error -y -framerate 30 -i "$1" -c:v libx264 -pix_fmt yuv420p -crf 20 -movflags +faststart "$2"; echo "video: $2"; }
 if [ "$FILM" = glasstower ]; then
@@ -41,17 +46,18 @@ if [ "$FILM" = glasstower ]; then
     -c:v libx264 -pix_fmt yuv420p -crf 20 -movflags +faststart "$ROOT/target/unreal/glasstower-multicam.mp4"
   echo "video: $ROOT/target/unreal/glasstower-multicam.mp4"
 elif [ "$FILM" = softcrash ]; then
-  # One film per crash and camera (<crash>-<camera>), and per crash its four cameras in a 2x2 grid.
-  for cam in "$FRAMES"/*/; do
-    cam=$(basename "$cam")
-    encode "$FRAMES/$cam/frame_%04d.png" "$ROOT/target/unreal/softcrash-$cam.mp4"
+  # The test writes one video per crash and camera (<crash>-<camera>.mp4, hardware-encoded as it
+  # films); then per crash its four close cameras in a 2x2 grid.
+  for f in "$FRAMES"/*.mp4; do
+    cp "$f" "$ROOT/target/unreal/softcrash-$(basename "$f")"
+    echo "video: $ROOT/target/unreal/softcrash-$(basename "$f")"
   done
   for crash in headon wall; do
-    [ -d "$FRAMES/$crash-side" ] && [ -d "$FRAMES/$crash-chase" ] || continue
-    V=() ; for cam in side closeup overhead chase; do V+=(-framerate 30 -i "$FRAMES/$crash-$cam/frame_%04d.png"); done
+    V=() ; for cam in side closeup overhead chase; do [ -f "$FRAMES/$crash-$cam.mp4" ] && V+=(-i "$FRAMES/$crash-$cam.mp4"); done
+    [ ${#V[@]} = 8 ] || continue
     ffmpeg -loglevel error -y "${V[@]}" -filter_complex \
       "[0]scale=iw/2:-2[a];[1]scale=iw/2:-2[b];[2]scale=iw/2:-2[c];[3]scale=iw/2:-2[d];[a][b][c][d]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0" \
-      -c:v libx264 -pix_fmt yuv420p -crf 20 -movflags +faststart "$ROOT/target/unreal/softcrash-$crash-multicam.mp4"
+      -c:v hevc_videotoolbox -b:v 16M -tag:v hvc1 -pix_fmt yuv420p -movflags +faststart "$ROOT/target/unreal/softcrash-$crash-multicam.mp4"
     echo "video: $ROOT/target/unreal/softcrash-$crash-multicam.mp4"
   done
 else

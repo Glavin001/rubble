@@ -377,7 +377,10 @@ void ARubbleVehicles::OnFrame(const FRubbleFrame& Frame)
 		}
 		if (FWheel* Wheel = Wheels.Find(Key))
 		{
-			Wheel->Previous = Wheel->bSeen ? Wheel->Current : W;
+			// A soft body's skin is drawn at the latest step (it is not interpolated), so its
+			// wheels are too: blending from the last displayed frame drew them up to a frame
+			// behind the body (half a metre at 15 m/s).
+			Wheel->Previous = Wheel->bSeen && !W.bSoft ? Wheel->Current : W;
 			Wheel->Current = W;
 			Wheel->bSeen = true;
 		}
