@@ -1016,6 +1016,15 @@ pub fn collider_radius(c: &crate::Collider) -> f32 {
 /// explicit 10-entry large list; when there are more, the levels cover them too.
 /// Mirrors `hierLevel` in world_step.slang (the fracture lab sizes its grid with engine-fracture `grid_config`).
 pub fn hierarchical_grid(cols: &[crate::Collider], bodies: &[crate::BodyState]) -> (f32, u32) {
+    hierarchical_grid_with(cols, bodies, 0.0)
+}
+
+/// [`hierarchical_grid`], the levels also covering a moving collider of radius
+/// `movable_radius`: one a GPU kernel can turn dynamic with no host write (a fracture's
+/// split re-parents chunk colliders onto new bodies), so the host's mirror cannot see it
+/// move. A moving collider above the top level would take the oversized-static list,
+/// which never queries: it would pass through every static.
+pub fn hierarchical_grid_with(cols: &[crate::Collider], bodies: &[crate::BodyState], movable_radius: f32) -> (f32, u32) {
     let mut diameters: Vec<f32> = cols
         .iter()
         .filter(|c| c.shape != crate::ShapeType::Plane as u32)
@@ -1035,6 +1044,7 @@ pub fn hierarchical_grid(cols: &[crate::Collider], bodies: &[crate::BodyState]) 
         .filter(|c| c.shape != crate::ShapeType::Plane as u32)
         .filter(|c| bodies.get(c.body as usize).is_some_and(|b| b.moves()))
         .map(|c| level(2.0 * collider_radius(c) + 0.0004))
+        .chain((movable_radius > 0.0).then(|| level(2.0 * movable_radius + 0.0004)))
         .max()
         .unwrap_or(0);
     let mut levels = (dynamic_max + 2).max(2);

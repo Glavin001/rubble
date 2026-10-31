@@ -74,6 +74,10 @@ BIND(53) RWStructuredBuffer<AUint> gTerrainSurface;
 static const uint TS_VIEWS = 0u;
 static const uint TS_DEBRIS_BASE = 4u;
 static const uint TS_EJECTA_SPEED = 5u;
+static const uint TS_GATHER_BASE = 6u;
+static const uint TS_GATHER_MAX = 7u;
+static const uint TS_GATHER_HEADER = 4u;   // SURFACE_GATHER_HEADER_WORDS
+static const uint TS_GATHER_RECORD = 8u;   // SURFACE_GATHER_RECORD_WORDS
 static const uint TS_NONE = 0xFFFFFFFFu;
 static const uint TS_FRAMES = 14u;
 static const uint TS_VALID = 15u;
@@ -427,6 +431,52 @@ void terrain_surface_debris(uint3 tid : SV_DispatchThreadID)
     uint k;
     AADD3(gTerrainSurface[TS_DEBRIS_COUNT], 1u, k);
     ASTORE(gTerrainSurface[tsWord(TS_DEBRIS_BASE) + k], i);
+}
+
+// The debris gather (SurfacePlan::with_debris): one compact record per piece
+// of debris, for hosts that read it back (the debris list holds particle
+// indices, and the parcels' count is the GPU's). Word 0 of the gather counts
+// the records the frame needed; past the limit nothing more is written and
+// the host fails the frame by name ("surface debris").
+void tsGatherWrite(float3 x, float vol, float3 v, uint kind)
+{
+    uint k;
+    AADD3(gTerrainSurface[tsWord(TS_GATHER_BASE)], 1u, k);
+    if (k >= tsWord(TS_GATHER_MAX)) return;
+    uint w = tsWord(TS_GATHER_BASE) + TS_GATHER_HEADER + TS_GATHER_RECORD * k;
+    ASTORE(gTerrainSurface[w], asuint(x.x));
+    ASTORE(gTerrainSurface[w + 1u], asuint(x.y));
+    ASTORE(gTerrainSurface[w + 2u], asuint(x.z));
+    ASTORE(gTerrainSurface[w + 3u], asuint(vol));
+    ASTORE(gTerrainSurface[w + 4u], asuint(v.x));
+    ASTORE(gTerrainSurface[w + 5u], asuint(v.y));
+    ASTORE(gTerrainSurface[w + 6u], asuint(v.z));
+    ASTORE(gTerrainSurface[w + 7u], kind);
+}
+
+// After terrain_surface_debris: each listed particle (world position, rest
+// volume, velocity).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void terrain_surface_gather(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (tsWord(TS_GATHER_MAX) == 0u || i >= tsWord(TS_DEBRIS_COUNT)) return;
+    MpmParticle q = gMpmParticles[tsWord(tsWord(TS_DEBRIS_BASE) + i)];
+    tsGatherWrite(q.xm.xyz, q.f0.w, q.vj.xyz, 0u);
+}
+
+// Each parcel in flight (its quanta's volume).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void terrain_surface_gather_parcels(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (tsWord(TS_GATHER_MAX) == 0u || k >= min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z))) return;
+    float4 xq = gMpmParcels[2u * k], vm = gMpmParcels[2u * k + 1u];
+    if (!(vm.w > 0.0)) return;
+    tsGatherWrite(xq.xyz, float(asuint(xq.w)) * p.column.y, vm.xyz, 1u);
 }
 
 // Records (four samples each) of patch collider pc.

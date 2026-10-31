@@ -187,6 +187,13 @@ impl Coords {
     pub fn density_in(&self, x: f32) -> f32 {
         x * self.scale(3)
     }
+    pub fn density_out(&self, x: f32) -> f32 {
+        x / self.scale(3)
+    }
+    /// Volume (m³ or cm³).
+    pub fn volume_out(&self, x: f32) -> f32 {
+        x * self.scale(3)
+    }
     /// Torque magnitudes (break torques, motor torques).
     pub fn torque_in(&self, x: f32) -> f32 {
         x / self.scale(2)
@@ -204,6 +211,14 @@ impl Coords {
     /// Energy (J: kg·m²/s²).
     pub fn energy_out(&self, x: f32) -> f32 {
         x * self.scale(2)
+    }
+    /// Volume (m^3).
+    pub fn volume_out(&self, x: f32) -> f32 {
+        x * self.scale(3)
+    }
+    /// Pressure and stress (Pa: kg/(m·s²)).
+    pub fn pressure_out(&self, x: f32) -> f32 {
+        x * self.scale(-1)
     }
     pub fn extents_out(&self, v: [f32; 3]) -> [f32; 3] {
         let p = self.polar_out(v, 1);

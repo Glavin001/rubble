@@ -31,3 +31,16 @@ stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-fea
 [features]
 default = ["stress"]
 stress = ["dep:stress-gpu", "dep:stress-ref", "dep:stress-rubble", "dep:serde_json"]
+# The destruction-reactions harness (tests/support/reactions.rs) counts every reaction
+# without them now; kept as no-ops for scripts that pass them.
+reactions-crush = ["stress"]
+reactions-blast = ["stress"]
+reactions-support = ["stress"]
+
+[[example]]
+name = "destruction_reactions"
+required-features = ["stress"]
+
+[[example]]
+name = "reaction_replay"
+required-features = ["stress"]

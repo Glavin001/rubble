@@ -38,6 +38,7 @@ pub struct SimSnapshot {
     has_filters: bool,
     grid_levels: u32,
     grid_cache: Option<(u32, f32, u32)>,
+    movable_radius: f32,
     manifolds_valid: bool,
     params: AvbdParams,
     last_contact_offset: u32,
@@ -303,6 +304,7 @@ impl WgpuSim {
             has_filters: self.has_filters,
             grid_levels: self.grid_levels,
             grid_cache: self.grid_cache,
+            movable_radius: self.movable_radius,
             manifolds_valid: self.manifolds_valid,
             params: self.params,
             last_contact_offset: self.last_contact_offset,
@@ -345,6 +347,8 @@ impl WgpuSim {
         self.has_filters = s.has_filters;
         self.grid_levels = s.grid_levels;
         self.grid_cache = s.grid_cache;
+        // The grid cache was sized with the snapshot's reservation.
+        self.movable_radius = s.movable_radius;
         self.manifolds_valid = s.manifolds_valid;
         self.params = s.params;
         self.last_contact_offset = s.last_contact_offset;
