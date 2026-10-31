@@ -130,3 +130,28 @@ A still map costs nothing. One car among sleeping houses is roughly flat in K; i
 time is mostly a fixed cost: a world past the sparse tail's body cap (`tail_ok`) dispatches
 all 32 colours every iteration. The bench's wall column is latency (it blocks on every
 frame's readback).
+
+## 1,024 houses (2026-10-31, 4911eb28)
+
+`CITY_POOL=32768 CITY_SLEEP=1 CITY_K=1024`: 732,160 chunks on the 2.2 km map, one
+shared piece pool. The GPU was not idle (another app reported 100% utilisation), so
+treat the wall column as an upper bound until a quiet rerun.
+
+| scenario | wall median ms | wall p95 ms | host median ms | awake | bonds broken |
+|---|---|---|---|---|---|
+| still | 0.02 | 0.13 | 0.02 | 0 | 0 |
+| drive | 14.21 | 14.48 | 0.62 | 0 | 0 |
+| war | 20.64 | 21.39 | 0.68 | 1001 | 2410 |
+
+- Still costs nothing and the host stays under 0.7 ms at every size.
+- Drive moves one kinematic car past sleeping houses, waking nothing. Its wall time
+  grows with the map (about 3 ms at 256 houses, 14 ms at 1,024), so some GPU pass
+  still runs over every collider or body once anything is awake. That is the next
+  L1 target: awake-indexed passes, a persistent broadphase for sleepers and
+  statics, and the fixed per-colour dispatches.
+
+Two "hangs" on the way were not engine cost:
+- The first step after a shader change took about 2 minutes. That was the one-time
+  Metal pipeline compile, which I kept killing before it was cached.
+- Placement deadlocked because each house's uploads were never waited on (fixed in
+  4911eb28).
