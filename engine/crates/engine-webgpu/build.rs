@@ -164,6 +164,12 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_sleep",
     // Render poses for hosts (slang/kernels/pose_pack.slang).
     "pose_pack",
+    // Directed debris (slang/kernels/guide_step.slang).
+    "guide_scan",
+    "guide_select",
+    "guide_rank",
+    "guide_plan",
+    "guide_commit",
     // Deformable terrain MPM (slang/kernels/terrain_mpm.slang).
     "mpm_clear",
     "mpm_touch",
@@ -212,6 +218,15 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_sleep_ring",
     "mpm_sleep_dilate",
     "mpm_sleep_touch",
+    "mpm_pool_reserve",
+    "mpm_pool_top",
+    "mpm_pool_trim",
+    "mpm_pool_holes_count",
+    "mpm_pool_holes_scan",
+    "mpm_pool_holes_list",
+    "mpm_pool_finish",
+    "mpm_parcels_pack",
+    "mpm_parcels_unpack",
     // Terrain look-ahead (slang/kernels/terrain_watch.slang).
     "terrain_watch_energy",
     "terrain_watch_pick",
@@ -223,6 +238,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "terrain_surface_bin",
     "terrain_surface_resolve",
     "terrain_surface_debris",
+    "terrain_surface_gather",
+    "terrain_surface_gather_parcels",
     "terrain_surface_publish",
     // Contact events (P4), canonical and persistent storage.
     "contact_events",
@@ -267,6 +284,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     }
     if entry == "pose_pack" {
         return kernels.join("pose_pack.slang");
+    }
+    if entry.starts_with("guide_") {
+        return kernels.join("guide_step.slang");
     }
     if entry.starts_with("mpm_") {
         return kernels.join("terrain_mpm.slang");

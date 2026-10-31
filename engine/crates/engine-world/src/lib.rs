@@ -26,6 +26,7 @@ mod defs;
 mod destruction;
 mod error;
 mod events;
+mod guidance;
 mod handles;
 mod joints;
 mod math;
@@ -59,6 +60,10 @@ pub use events::{
     ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,
     RayBatchResult, SensorEvent, SensorEvents, SkinId, SkinOutput, SoftOutput, VehicleOutput,
 };
+pub use guidance::{
+    BodyGuidance, GuidanceCapacity, GuidanceSettings, GuidanceZone, GuideEnd, GuideState,
+    ZoneAnchor, ZoneMotion, ZoneShape, GUIDE_PATH_KEYS,
+};
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
     DistanceJointDef, FilterJointDef, JointBase, JointDef, Plastic, PrismaticJointDef,
@@ -73,11 +78,15 @@ pub use motion::{
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
-pub use terrain::{StrikeDef, TerrainArea, TerrainDef};
+pub use terrain::{
+    StrikeDef, TerrainArea, TerrainBake, TerrainDebris, TerrainDef, TerrainSurfaceDef,
+    TerrainSurfaceView,
+};
 pub use threshold::{Projectile, StressSource};
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
-    RegionPlan, SandMaterial, TerrainConfig, TerrainError, YieldSurface,
+    RegionPlan, SandMaterial, SettleRule, TerrainConfig, TerrainError, TerrainProfile,
+    YieldSurface,
 };
 pub use engine_webgpu::TerrainStepReport;
 
@@ -143,6 +152,8 @@ pub struct WorldDef {
     /// Steps whose results can be in flight at once.
     pub readback_frames: u32,
     pub backpressure: Backpressure,
+    /// Directed debris buffers ([`World::set_guidance`]); `None`: off.
+    pub guidance: Option<GuidanceCapacity>,
     /// Contact begins at or above this approach speed (m/s) on shapes with
     /// `enable_hit_events` are also reported as hits (Box3D
     /// `hitEventThreshold`).
@@ -166,6 +177,7 @@ impl Default for WorldDef {
             readback_frames: 3,
             hit_event_threshold: 1.0,
             backpressure: Backpressure::Block,
+            guidance: None,
         }
     }
 }
@@ -219,6 +231,8 @@ enum Owner {
     Piece,
     /// A character's inner capsule: reported through `Frame::characters`.
     Character,
+    /// A terrain surface patch (`TerrainDef::surface`): the GPU places it.
+    TerrainPatch,
 }
 
 /// What an extra readback copy holds.
@@ -253,6 +267,10 @@ enum Extra {
     TerrainHeights(ShapeId),
     /// The terrain look-ahead's pick after this step.
     TerrainWatch,
+    /// The live surface's heights, for these views of the ground shape.
+    TerrainSurface(ShapeId, Vec<engine_terrain::surface::SurfaceViewRange>),
+    /// The surface pass's debris gather.
+    TerrainDebris,
 }
 
 #[derive(Clone, Debug)]
@@ -439,6 +457,7 @@ impl World {
             soft: def.soft,
             features,
             pose_output: true,
+            guidance: def.guidance,
         };
         let (info, device, queue) = match gpu {
             GpuContext::Default => engine_webgpu::default_device()?,
@@ -670,6 +689,7 @@ impl World {
         let index = id.index();
         self.fracture.body_destroyed(index);
         self.sim.cancel_body_commands(index);
+        self.sim.clear_guide_body(index);
         let p = graveyard(index);
         let mut parked = BodyState::static_plane_support();
         parked.position = p;
@@ -1920,6 +1940,9 @@ impl World {
                 }
             }
         }
+        for f in &mut frames {
+            f.terrain_bakes = self.terrain_take_bakes(f.step);
+        }
         if let Some(last) = frames.last_mut() {
             let (ends, sensor_ends) = self.take_pending_contact_ends();
             last.contact_events.end.extend(ends);
@@ -2125,6 +2148,8 @@ impl World {
         let mut record: Option<(VehicleHandle, Vec<[u32; 4]>)> = None;
         let mut ray_results = Vec::new();
         let mut terrain = None;
+        let mut terrain_surface = Vec::new();
+        let mut terrain_debris = Vec::new();
         let mut contact_events = ContactEvents::default();
         let mut sensor_events = SensorEvents::default();
         let mut overlap_results = Vec::new();
@@ -2188,6 +2213,10 @@ impl World {
                 Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
                 Extra::TerrainHeights(id) => self.terrain_heights(*id, bytes),
                 Extra::TerrainWatch => self.terrain_strike(step, bytes),
+                Extra::TerrainSurface(shape, views) => {
+                    terrain_surface = Self::terrain_surface_views(*shape, views, bytes)
+                }
+                Extra::TerrainDebris => terrain_debris = self.terrain_debris(step, bytes)?,
             }
         }
         Ok(Frame {
@@ -2213,6 +2242,9 @@ impl World {
             resynced: resync.is_some(),
             counters: Some(c),
             terrain,
+            terrain_surface,
+            terrain_debris,
+            terrain_bakes: Vec::new(),
         })
     }
 

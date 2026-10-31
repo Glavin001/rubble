@@ -27,7 +27,9 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const stream=data=>{const buffer=device.createBuffer({size:Math.max(16,data.byteLength),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});if(data.length)device.queue.writeBuffer(buffer,0,data);streams.push(buffer);
   return {count:data.length/10,group:device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:simulation.renderBodyBuffer??simulation.bodyBuffer}},{binding:1,resource:{buffer}},{binding:2,resource:{buffer:uniform}},{binding:3,resource:{buffer:joints}}]})}};
  const indexed=new IndexedMesh(scene.vertices),indices=indexed.index();
- const mesh=stream(indexed.vertices()),projectiles=stream(scene.projectileVertices),lines=stream(scene.lines),roads=stream(scene.roadVertices),floor=stream(floorVertices(scene.extent));
+ const mesh=stream(indexed.vertices()),projectiles=stream(scene.projectileVertices),props=stream(scene.propVertices??new Float32Array(0)),lines=stream(scene.lines),roads=stream(scene.roadVertices),floor=stream(floorVertices(scene.extent));
+ // Directed-debris zone outlines (engine-fracture guidance.rs), drawn over the scene.
+ let zones=stream(new Float32Array(0));
  indexed.free();
  const index=device.createBuffer({size:Math.max(4,indices.byteLength),usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(index,0,indices);
  const orbit=new Orbit(sceneHandle(scene));let depth,width=0,height=0;
@@ -56,6 +58,8 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
   resolve:device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),
   read:device.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),busy:false,last:0,ms:null}:null;
  return {aim,
+ // Line-list vertices outlining the guidance zones (empty: none).
+ setZones(vertices){zones=stream(vertices)},
  // Trail segments for the next frames (8 floats per vertex: xyz, pad, rgba).
  setTrails(data){
   trailVerts=data.length/8;if(!trailVerts)return;
@@ -102,9 +106,12 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
   pass.setPipeline(solid);pass.setBindGroup(0,mesh.group);pass.setIndexBuffer(index,'uint32');pass.drawIndexed(indices.length,scene.copies||1);
   if(dynVerts){pass.setBindGroup(0,dynGroup);pass.draw(dynVerts)}
   // The newest projectileCount balls (a shot past them reuses the oldest).
+  // Street props (parked cars, pedestrians): their own bodies, drawn once.
+  if(props.count){pass.setBindGroup(0,props.group);pass.draw(props.count)}
   if(simulation.shots){pass.setBindGroup(0,projectiles.group);pass.draw(Math.min(simulation.shots,scene.projectileCount)*projectiles.count/scene.projectileCount)}
   if(trailVerts){const vp=orbit.viewProj(w/h);device.queue.writeBuffer(trailView,0,vp);device.queue.writeBuffer(trailView,64,new Float32Array([1/w,1/h,0,0]));pass.setPipeline(trailPipe);pass.setBindGroup(0,trailGroup);pass.draw(trailVerts,4)}
-  if(showBonds&&lines.count){pass.setPipeline(wire);pass.setBindGroup(0,lines.group);pass.draw(lines.count,scene.copies||1)}pass.end();
+  if(showBonds&&lines.count){pass.setPipeline(wire);pass.setBindGroup(0,lines.group);pass.draw(lines.count,scene.copies||1)}
+  if(zones.count){pass.setPipeline(wire);pass.setBindGroup(0,zones.group);pass.draw(zones.count)}pass.end();
   if(timed){frameTimer.busy=true;frameTimer.last=performance.now();enc.resolveQuerySet(frameTimer.query,0,2,frameTimer.resolve,0);enc.copyBufferToBuffer(frameTimer.resolve,0,frameTimer.read,0,16)}
   device.queue.submit([enc.finish()]);
   if(timed)frameTimer.read.mapAsync(GPUMapMode.READ).then(()=>{const t=new BigUint64Array(frameTimer.read.getMappedRange());frameTimer.ms=Number(t[1]-t[0])/1e6;frameTimer.read.unmap()}).catch(()=>{}).finally(()=>{frameTimer.busy=false});

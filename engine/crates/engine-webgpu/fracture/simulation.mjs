@@ -5,7 +5,9 @@ import {loadShaderModules,pipelineBuilder} from '../shader-loader.mjs';
 // step state and the ordered dispatch schedule; this file creates the
 // buffers and pipelines and replays each tick's commands. The Metal viewer
 // (engine-viewer/src/fracture/sim.rs) replays the same commands.
-const PASS_ALIGN=256,COUNTER_BYTES=80,UPLOAD_BYTES=1120,BODY_BYTES=112,JOINT_BYTES=288;
+const PASS_ALIGN=256,COUNTER_BYTES=80,BODY_BYTES=112,JOINT_BYTES=288;
+// Directed debris buffers (engine-schema guidance: zones, per-body records, scratch).
+const [,GUIDE_ZONES,GUIDE_BODIES,GUIDE_SCRATCH]=Plan.guideBindings();
 const OP_DISPATCH=0,OP_INDIRECT=1,OP_COPY=2,HOST_UPLOAD=255;
 const KERNELS=Plan.kernels(),PHASES=Plan.phases();
 // One step encoded as several command buffers, split after these phases. Submitted
@@ -50,8 +52,16 @@ await new Promise(r=>setTimeout(r,0));
 
 const staging=device.createBuffer({size:COUNTER_BYTES,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
 const snapshot=device.createBuffer({size:Math.max(BODY_BYTES,bodyCount*BODY_BYTES),usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
-const hostUpload=device.createBuffer({size:UPLOAD_BYTES,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+const hostUpload=device.createBuffer({size:plan.hostUpload().length,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
 let last=plan.counters,timing={wallMs:0,encodeMs:0,waitMs:0},sliceEncodeMs=0,countedSteps=0;
+// Directed debris: {settings, zones} while on (applyGuide writes what the plan returns).
+let guide=null;
+const applyGuide=()=>{
+  plan.setGuidance(guide?guide.settings:{enabled:false});
+  const zones=plan.setGuidanceZones(guide?guide.zones:[]);
+  if(zones.length)device.queue.writeBuffer(bufs[GUIDE_ZONES],0,zones);
+  device.queue.writeBuffer(bufs[GUIDE_BODIES],0,plan.guideRecords(guide?0xFFFFFFFF:0));
+};
 
 // Replay plan commands: copies on the encoder, dispatches in compute passes.
 // begin(name) ends a profiled phase `name` and opens the next pass ('start'
@@ -395,6 +405,22 @@ return {
    device.queue.submit([enc.finish()]);
    upload();writeRender();slices=null;
    plan.reset();last=plan.counters;lastRead=null;inFlight=[];overlapError=null;
+   applyGuide();
+ },
+ // Directed debris: guidance settings (engine-schema GuidanceSettings, e.g.
+ // nearMissSettings) and zones (ZoneDesc), or null for off. Arms every piece
+ // of the scene; each one is steered at most once, on its first free flight.
+ setGuidance(settings,zones=[]){guide=settings?{settings,zones}:null;applyGuide()},
+ // Bodies per guidance state {off, armed, steering, done}, and why the done
+ // ones ended (engine-schema GuideEnd; a GPU readback).
+ async guideStates(){
+   const [off,armed,steering,done,,pushed,arrived,landed,short,slow,leftOut,noZone]=Plan.guideStateCounts(new Uint8Array(await readBuffer(bufs[GUIDE_BODIES],0,bodyCount*Plan.guideRecordBytes())));
+   return {off,armed,steering,done,ended:{pushed,arrived,landed,short,slow,leftOut,noZone}};
+ },
+ // Pieces each zone has taken so far (a GPU readback).
+ async guideClaims(){
+   const [offset,bytes]=plan.guideClaimsRange();if(!bytes)return [];
+   return Array.from(new Uint32Array(await readBuffer(bufs[GUIDE_SCRATCH],offset,bytes)));
  },
  dispose(){for(const b of [...bufs,staging,snapshot,hostUpload,renderBodies])b.destroy();if(tickTimer){tickTimer.query.destroy();tickTimer.resolve.destroy();tickTimer.read.destroy()}plan.free()},
 };

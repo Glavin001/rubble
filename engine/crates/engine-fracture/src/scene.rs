@@ -436,6 +436,15 @@ pub struct Scene {
     pub lines: Vec<f32>,
     #[serde(default)]
     pub projectile_vertices: Vec<f32>,
+    /// Street props (`props.rs`: parked cars, pedestrians), drawn once (not
+    /// instanced per copy).
+    #[serde(default)]
+    pub prop_vertices: Vec<f32>,
+    /// The props placed (`props.rs`) and their bodies.
+    #[serde(default)]
+    pub props: Vec<crate::props::Prop>,
+    #[serde(default)]
+    pub prop_bodies: Vec<u32>,
     /// Decorative road decals on the ground (body 0).
     #[serde(default)]
     pub road_vertices: Vec<f32>,
@@ -535,6 +544,9 @@ impl Scene {
             vertices: vec![],
             lines: vec![],
             projectile_vertices: vec![],
+            prop_vertices: vec![],
+            props: vec![],
+            prop_bodies: vec![],
             road_vertices: vec![],
             projectile_start: 0,
             projectile_count: 0,
