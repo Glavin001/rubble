@@ -860,6 +860,13 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   with one sphere or box shape to strike prediction and gives its contacts
   the lab's shot loads. Other non-chunk colliders load chunks as static
   geometry does (the lab's ground).
+- **Fast movers.** `DestructibleDef::is_bullet` (`RbDestructibleDef::is_bullet`)
+  makes the destructible's dynamic bodies bullets (`BODY_CCD`), under either
+  strength model, and every free piece they break into keeps it: the GPU
+  splitter copies the parent's flag into each piece's record, and the piece's
+  slot takes it at adoption. An anchored piece is static and has none
+  (`engine-world/tests/threshold.rs`
+  `every_dynamic_piece_of_a_bullet_destructible_is_a_bullet`).
 - **Settings.** `solver_for(StrengthModel::Threshold)` gives the lab's
   threshold engine settings: never asleep, zero-gap contact, world inertia,
   4 iterations, 60 Hz. `StressSource::ground_height` gives the lab's ground

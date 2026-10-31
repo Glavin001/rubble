@@ -127,6 +127,8 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("ccd_respond_apply", "ccd_respond_apply"),
     ("ccd_trust", "ccd_trust"),
     ("ccd_unhold", "ccd_unhold"),
+    ("ccd_late_mark", "ccd_late_mark"),
+    ("ccd_late_sweep", "ccd_late_sweep"),
     ("ccd_validate", "ccd_validate"),
     ("ccd_clamp", "ccd_clamp"),
     ("joint_hash_clear", "joint_hash_clear"),
@@ -1253,7 +1255,11 @@ impl Planner {
             }
         }
         if self.ccd_step() {
-            // Post-solve sweep check: no CCD body ends the step past a surface.
+            // Post-solve sweep check: no CCD body ends the step past a surface,
+            // after the late sweep adds the pairs of bodies the solve carried past
+            // their bounds.
+            self.disp("ccd_late_mark", engine_schema::CCD_BODY_CAP, 0);
+            self.disp("ccd_late_sweep", engine_schema::CCD_LATE_CAP * WORKGROUP, 0);
             self.disp("ccd_validate", engine_schema::CCD_PAIR_CAP, 0);
             self.disp("ccd_clamp", engine_schema::CCD_BODY_CAP, 0);
         }

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use engine_schema::BodyState;
-use stress_gpu::fracture::{self, FractureTables, GpuFracture, INFO_SUPPORT};
+use stress_gpu::fracture::{self, FractureTables, GpuFracture, INFO_CCD, INFO_SUPPORT};
 use stress_gpu::gpu::Gpu;
 use stress_gpu::ingest::{ColliderInfo, EngineIngest, KIND_BODY, KIND_STATIC, NONE};
 use stress_ref::engine::{BodyGeometry, BodyKey, EngineBody, RigidEngine};
@@ -236,7 +236,8 @@ impl ThresholdWorld {
             let e_plane = mat.youngs_modulus * scene.sim.stiffness_scale / (1.0 - mat.poisson_ratio * mat.poisson_ratio);
             let (bc, h, bq) = (ch.center, ch.half_extents, rotation_quat(&ch.rotation));
             t.geometry.push([[f(bc.x), f(bc.y), f(bc.z), f(h.norm())], [f(h.x), f(h.y), f(h.z), f(e_plane)], [f(bq.x), f(bq.y), f(bq.z), f(bq.w)]]);
-            t.info.push(if ch.support != Support::None { INFO_SUPPORT } else { 0 });
+            let ccd = if m.structures[s].ccd && engine.toi_ccd() { INFO_CCD } else { 0 };
+            t.info.push(if ch.support != Support::None { INFO_SUPPORT } else { 0 } | ccd);
             t.chunk_body.push(collider_body[cols[0] as usize]);
         }
         // Each cluster's body frame (its structure's frame: a cluster's shapes are its

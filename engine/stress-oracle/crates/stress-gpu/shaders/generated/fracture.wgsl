@@ -1742,7 +1742,15 @@ fn fr_piece(@builtin(global_invocation_id) id_13 : vec3<u32>)
     {
         spin_0 = w_parent_0;
     }
-    var ccd_0 : u32 = ((bitcast<u32>((bodies_0[pb_0 + u32(2)].w))) & (u32(256)));
+    var ccd_0 : u32;
+    if(((info_0[c_12] & (u32(2)))) != u32(0))
+    {
+        ccd_0 = u32(256);
+    }
+    else
+    {
+        ccd_0 = u32(0);
+    }
     var flags_0 : u32;
     if(anchored_0)
     {

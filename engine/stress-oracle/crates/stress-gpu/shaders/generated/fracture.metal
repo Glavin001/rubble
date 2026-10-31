@@ -2205,7 +2205,15 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     {
         spin_0 = w_parent_0;
     }
-    uint ccd_0 = (as_type<uint>(((float4(*((&kernelContext_45)->bodies_0+(pb_0 + 2U))) ).w))) & 256U;
+    uint ccd_0;
+    if(((&kernelContext_45)->info_0[c_11] & 2U) != 0U)
+    {
+        ccd_0 = 256U;
+    }
+    else
+    {
+        ccd_0 = 0U;
+    }
     uint flags_0;
     if(anchored_0)
     {

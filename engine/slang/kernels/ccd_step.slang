@@ -582,6 +582,20 @@ bool ccdTOIMatters(float t, float3 n, float3 r)
     return (1.0 - t) * dot(r, n) > PARAMS.contactOffset;
 }
 
+// A push, not an impact: touching at the step's start (within contact depth) an
+// awake dynamic body, which the look-ahead contact carries while it moves (a ram
+// through the rubble it broke). As a TOI pair it took a one-point contact and an
+// impact response every step, and the ties' contacts on every piece it pushed
+// stopped a ram punching a plug out of a wall (punch_gpu: 10.9 m/s and 16
+// fragments, the reference 35.1 and 6). Against a body held still (static,
+// kinematic, asleep, its wake deferred) it stays an impact: a look-ahead contact
+// alone let a 250 m/s ball embed 9 cm in a wall it touched.
+bool ccdIsPush(float t, float3 r, BodyState bo)
+{
+    if (t * length(r) > PARAMS.contactOffset) return false;
+    return bodyIsDynamic(bo) && !bodyIsSleeping(bo) && !wakePending(bo);
+}
+
 // gCandidates[i]._pad after ccd_toi: 0 none, else asuint(t) + 1 (bit 31 clear,
 // so the convex defer flag never reads it as set).
 [shader("compute")]
@@ -616,12 +630,21 @@ void ccd_toi(uint3 tid : SV_DispatchThreadID)
         return;
     }
     if (status != CAST_HIT || !ccdTOIMatters(t, n, r)) return;
+    if (ccdIsPush(t, r, bo)) return;
     gCandidates[i]._pad = asuint(t) + 1u;
     AMIN2(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 1u], asuint(t));
 }
 
+// A candidate whose contact ccd_emit builds at its time of impact (the
+// narrowphase skips it): each CCD body's winner (ccd_mark) and its ties (ccd_pick).
+static const uint CCD_WIN = 0x40000000u;
+
 // Second pass: among pairs at their body's minimum TOI, the lowest candidate
-// index wins (deterministic whatever the thread order).
+// index wins (deterministic whatever the thread order). Every pair whose TOI is
+// within contact depth of that minimum is a tie and gets a TOI contact too: a
+// flat face meets several colliders at once (a ram's face on four bricks of a
+// wall), and given to one of them the whole impact landed off centre and spun a
+// wall struck square at 2 rad/s from 5 m/s, 100 rad/s from 100 m/s.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void ccd_pick(uint3 tid : SV_DispatchThreadID)
@@ -654,6 +677,10 @@ void ccd_pick(uint3 tid : SV_DispatchThreadID)
     if (pair._pad != 0u)
     {
         if (pair._pad - 1u == minBits) AMIN2(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 2u], i);
+        BodyState bf = fastIsA ? ba : bb;
+        float travel = length(bf.linearVel) * PARAMS.dt;
+        if ((asfloat(pair._pad - 1u) - asfloat(minBits)) * travel <= PARAMS.contactOffset)
+            gCandidates[i]._pad = pair._pad | CCD_WIN;
         return;
     }
     // Found only through the deflection pad (clear of the whole straight
@@ -666,7 +693,6 @@ void ccd_pick(uint3 tid : SV_DispatchThreadID)
 // Third pass, one thread per CCD body: tag its winning candidate in place, so
 // the narrowphase and ccd_emit find it without the scratch buffer (the
 // narrowphase entries are at WebGPU's ten storage buffers).
-static const uint CCD_WIN = 0x40000000u;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -923,6 +949,153 @@ void ccd_clamp(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[r + 14u], asuint(v.z));
     ASTORE(gScratchAtomics[r + 11u], 1u);
     if (postStabilize()) gBodies[body].linearVel = v;
+}
+
+// ---------------------------------------------------------------------------
+// Late sweep (after the solve, before ccd_validate). A CCD body's bounds cover
+// its step-start sweep (v·h) padded by the solve's deflection bound
+// (build_aabbs), so its pairs hold every body it can reach along that path. A
+// body struck within the step gets its velocity in the solve and can be
+// carried past those bounds (the primal trust region: 0.7 m a step at four
+// iterations for a body at rest, more under ccd_trust), along a path no pair
+// covers: a CCD wall at rest, hit by a 100 m/s ram, crossed a 5 cm slab 0.4 m
+// behind it in the step it was hit. PhysX's CCD sweeps a body's actual motion
+// after the solve for the same reason.
+//
+// ccd_late_mark lists each collider of a CCD body whose solved pose left its
+// bounds; ccd_late_sweep tests that collider's box swept from its step-start
+// pose to its solved one against every collider's bounds (the step's grid is
+// gone by then: its words hold the solve's) and appends the pairs it overlaps
+// to the CCD pair list, so ccd_validate and ccd_clamp stop the body at the
+// first surface on the path it actually took, as on its own pairs. A ground
+// plane is checked in the sweep itself (ccd_validate skips planes). Nothing
+// runs for a body that stayed within its bounds.
+// ---------------------------------------------------------------------------
+// A collider's bounding radius about its own centre.
+float ccdLateRadius(Collider c)
+{
+    if (c.shape == SHAPE_SPHERE) return c.params.x;
+    if (c.shape == SHAPE_CAPSULE) return c.params.x + c.params.y;
+    if (c.shape == SHAPE_CONVEX) return c.params.w;
+    return length(c.params.xyz);
+}
+
+// A collider's world box at a pose, unpadded (buildColliderBounds' shapes).
+void ccdLateBox(Collider col, float3 pos, float4 rot, out float3 mn, out float3 mx)
+{
+    if (col.shape == SHAPE_SPHERE) worldAabbSphere(pos, col.params.x, mn, mx);
+    else if (col.shape == SHAPE_BOX) worldAabbBox(pos, rot, col.params.xyz, mn, mx);
+    else if (col.shape == SHAPE_CAPSULE) worldAabbCapsule(pos, rot, col.params.x, col.params.y, mn, mx);
+    else
+    {
+        HullRef h = hullOf(col);
+        mn = float3(1e30, 1e30, 1e30);
+        mx = float3(-1e30, -1e30, -1e30);
+        for (uint v = 0u; v < h.nv; v++)
+        {
+            float3 p = quatRotate(rot, hullVertex(h, v));
+            mn = min(mn, p);
+            mx = max(mx, p);
+        }
+        mn += pos;
+        mx += pos;
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_late_mark(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = dispatchIndex(tid);
+    if (k >= ccdBodyCount()) return;
+    uint body = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k]);
+    BodyState b = gBodies[body];
+    if (!bodyIsCcd(b)) return;
+    uint base = HOST_S(1);
+    uint nc = gCounters[0].colliderCount;
+    for (uint c = firstColliderOfBody(body); c < nc && gColliders[c].body == body; c++)
+    {
+        Collider col = gColliders[c];
+        if (col.shape == SHAPE_PLANE) continue;
+        // Its solved shape within the bounds its pairs were found in (convex,
+        // holding its step-start shape): every body on its path was a pair.
+        float3 p1; float4 r1; colliderPose(col, b, p1, r1);
+        float3 mn, mx;
+        ccdLateBox(col, p1, r1, mn, mx);
+        Aabb bounds = gAabbs[base + c];
+        if (all(mn >= bounds.mn) && all(mx <= bounds.mx)) continue;
+        uint at;
+        AADD3(gScratchAtomics[CCD_LATE_COUNT], 1u, at);
+        if (at < CCD_LATE_CAP) ASTORE(gScratchAtomics[CCD_LATE_BASE + at], c);
+        else if (at == CCD_LATE_CAP) AOR2(gCounters[0].overflowFlags, OVERFLOW_CCD_LATE);
+    }
+}
+
+// A ground plane crossed by the collider's late motion: its first contact
+// (the lowest point reaching the plane) as ccd_validate records a static one.
+void ccdLatePlane(uint slot, Collider cf, float3 p0, float4 r0, float3 p1, float4 r1, Collider plane)
+{
+    float3 n = plane.params.xyz;
+    float d0 = dot(n, shapeSupport(cf, p0, r0, -n)) - plane.params.w;
+    float d1 = dot(n, shapeSupport(cf, p1, r1, -n)) - plane.params.w;
+    float depth = max(2.0 * PARAMS.contactOffset, 0.25 * colliderThickness(cf));
+    // Ending no deeper than contact depth, or starting already past it (resting
+    // in it, the contacts' business): no crossing.
+    if (d1 >= -depth || d0 < -depth) return;
+    float mu = clamp(d0 / max(d0 - d1, 1e-12), 0.0, 1.0);
+    AMIN2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 8u], asuint(mu));
+    AMIN2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 10u], asuint(mu));
+}
+
+// One workgroup per listed collider (rows of 32768), those past the count
+// return at once: its swept box against every collider's bounds (the
+// candidate filters the broadphase applies), each overlap a CCD pair.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_late_sweep(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint k = gid.x + gid.y * 32768u;
+    if (k >= min(ALOAD(gScratchAtomics[CCD_LATE_COUNT]), CCD_LATE_CAP)) return;
+    uint c = ALOAD(gScratchAtomics[CCD_LATE_BASE + k]);
+    Collider cf = gColliders[c];
+    BodyState bf = gBodies[cf.body];
+    uint slot = ccdSlotOf(cf.body, bf);
+    if (slot == CCD_NO_PAIR) return;
+    float3 x0; float4 q0; stepStartPose(bf, x0, q0);
+    BodyState s = bf; s.position = x0; s.orientation = q0;
+    float3 p0; float4 r0; colliderPose(cf, s, p0, r0);
+    float3 p1; float4 r1; colliderPose(cf, bf, p1, r1);
+    float r = ccdLateRadius(cf) + PARAMS.contactOffset;
+    Aabb box;
+    box.mn = min(p0, p1) - r;
+    box.mx = max(p0, p1) + r;
+    box._pad0 = 0.0;
+    box._pad1 = 0.0;
+    uint base = HOST_S(1);
+    uint filterMode = HOST_S(30);
+    uint n = gCounters[0].colliderCount;
+    for (uint j = lid.x; j < n; j += 64u)
+    {
+        if (j == c) continue;
+        Collider co = gColliders[j];
+        if (co.body == cf.body || ((co.material | cf.material) & COLLIDER_SENSOR) != 0u) continue;
+        if ((filterMode & 1u) != 0u ? collidersFilteredOut(c, j) : (filterMode & 2u) != 0u && collidersIgnoreBody(c, j)) continue;
+        if (bodiesJointed(cf.body, co.body)) continue;
+        if (co.shape == SHAPE_PLANE)
+        {
+            ccdLatePlane(slot, cf, p0, r0, p1, r1, co);
+            continue;
+        }
+        if (!aabbOverlap(box, gAabbs[base + j])) continue;
+        uint at;
+        AADD3(gScratchAtomics[CCD_PAIR_COUNT], 1u, at);
+        if (at < CCD_PAIR_CAP)
+        {
+            ASTORE(gScratchAtomics[CCD_PAIR_BASE + 2u * at], c);
+            ASTORE(gScratchAtomics[CCD_PAIR_BASE + 2u * at + 1u], j);
+        }
+        else if (at == CCD_PAIR_CAP) AOR2(gCounters[0].overflowFlags, OVERFLOW_CCD_PAIRS);
+    }
 }
 
 // The velocity ccd_clamp left for a clamped CCD body (extract_velocity_sleep

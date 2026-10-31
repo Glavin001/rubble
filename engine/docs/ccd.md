@@ -37,6 +37,7 @@ ccd_emit                    the winner's manifold at the TOI pose
 predict_bodies              a CCD body starts from its TOI pose
 ccd_trust                   bodies a CCD body can strike: trust region for its reach
 solve
+ccd_late_mark / _sweep      CCD bodies the solve carried past their bounds: their path's pairs
 ccd_validate / ccd_clamp    post-solve sweep check: no CCD body ends past a surface
 extract_velocity_sleep
 ... sleep ...
@@ -76,7 +77,27 @@ shrinking: a hit if the gap is within 5 mm (`GJK_TOUCH`), a miss otherwise.
 Each body keeps the earliest TOI by an atomic minimum on its bits, then the
 lowest candidate index among equal TOIs, so the winner is deterministic.
 `ccd_mark` tags the winner, the narrowphase leaves it alone, and `ccd_emit`
-builds its manifold at the TOI pose. The rows hold the gap along the path, so
+builds its manifold at the TOI pose.
+
+**Pushing is not an impact.** A pair touching an awake dynamic body at the
+step's start (within contact depth: `ccd_toi`'s `ccdIsPush`,
+`t·|r| ≤ contactOffset`) is a push: its look-ahead contact carries it while the
+pushed body moves, and it is no TOI pair. A ram pushing the rubble it broke met
+every piece at t = 0; as TOI pairs (a one-point winner, an impact response each
+step, tie contacts on every piece) they stopped a ram punching a plug out of a
+wall: the GPU punch (`punch_gpu`) left it 10.9 m/s and 16 fragments against the
+reference's 35.1 m/s and 6. Against a body held still (static, kinematic,
+asleep, its wake deferred) it stays an impact: the look-ahead contact alone let
+a 250 m/s ball embed 9 cm in the wall it hit the step before.
+
+**Simultaneous impacts (ties).** Every pair whose TOI is within contact depth
+of its body's earliest (`ccd_pick`: `(t − t_min)·|v|·h ≤ contactOffset`) gets
+a TOI contact too: a flat face meets several colliders at once. With one
+winner, a 200 kg ram's face meeting four bricks of a free wall pushed one of
+them: a wall struck square spun at 2 rad/s from 5 m/s and 100 rad/s from
+100 m/s, and at 100 m/s turned 90° in the step it was hit (its corners swept
+through a slab behind it). With the ties it does not turn. The winner alone
+still sets the body's start pose and its impact response. The rows hold the gap along the path, so
 AVBD solves it as an ordinary contact: real two-way forces, visible to
 `last_contacts` and the stress solver. `predict_bodies` starts the body at its
 TOI fraction of the motion, so it arrives at the surface rather than inside it.
@@ -124,6 +145,24 @@ crown off at the inelastic speed. `ccd_respond` computes each slot's velocity
 changes (one thread per slot); `ccd_respond_apply` has one owner thread per
 body sum every change addressed to it in slot order: deterministic. (One
 thread over the slots cost 3 ms at 512 strikers.)
+
+**Late sweep (`ccd_late_mark`, `ccd_late_sweep`).** A CCD body's pairs are
+found in bounds built from its step-start velocity. A body struck within the
+step gets its velocity in the solve, which can carry it past those bounds (the
+trust region: 0.7 m a step at four iterations for a body at rest) along a path
+no pair covers: a CCD wall at rest, hit by a 100 m/s ram, crossed a 5 cm slab
+0.4 m behind it in the step it was hit (PhysX sweeps a CCD body's actual
+motion after the solve for the same reason). `ccd_late_mark` lists each
+collider of a CCD body whose solved box is not inside the bounds its pairs
+were found in; `ccd_late_sweep` (a workgroup per listed collider) tests the
+box swept from its step-start pose to its solved one against every collider's
+bounds (the step's grid words hold the solve's by then) and appends the
+overlaps to the CCD pair list, and a ground plane it crosses straight to the
+clamp. So the check below stops the body at the first surface on the path it
+took. Nothing is listed for a body that stays within its bounds. More than
+`CCD_LATE_CAP` (16,384) listed colliders in one step set `OVERFLOW_CCD_LATE`.
+Linear only, as PhysX's and Jolt's casts: a body that also turns far within one
+step can sweep a corner through thin geometry the cast does not see.
 
 **Post-solve sweep check (`ccd_validate`, `ccd_clamp`).** In dense rubble the
 solve can still push a CCD body into a piece (wedged among contacts, or carried
@@ -187,8 +226,10 @@ look-ahead on for the scene by itself).
   fast movers `BODY_CCD` rather than raising the step rate.
 - 120 Hz halves the distance per step but is no substitute for CCD at
   projectile speeds (the 250 m/s cases tunnel at 120 Hz without CCD).
-- `stress-rubble` keeps its whole-world CCD substeps by default; TOI CCD for its
-  impactors is opt-in (`set_toi_ccd`, see "In the demos").
+- The stress coupling: a scene marks its fast movers (`ImpactorDesc::ccd`, on for
+  impactors; `BodyDesc::ccd`), and every capability profile runs them as `BODY_CCD`
+  in its one engine step a frame (`Profile::engine_ccd`; see "Stress solver").
+  `World`: `BodyDef::is_bullet`, and `DestructibleDef::is_bullet` for a destructible.
 
 ## Limits
 
@@ -200,6 +241,7 @@ look-ahead on for the scene by itself).
 | GJK iterations | 32 | not an overflow: counted in `ccd_fallbacks()`, and the pair keeps its ordinary look-ahead contact |
 | Large dynamics on the uniform grid | 16 | `OVERFLOW_LARGE_DYNAMICS` (2048) |
 | Candidate pairs of CCD bodies (post-solve check) | 131,072 | `OVERFLOW_CCD_PAIRS` (32768) |
+| Late-sweep colliders a step (CCD bodies carried past their bounds) | 16,384 | `OVERFLOW_CCD_LATE` (65536) |
 
 Manifold reuse (`step_reuse_manifolds`, the lab's reuse mode) is off while CCD
 bodies exist: a reused step would keep last step's TOI contacts.
@@ -300,13 +342,44 @@ counter readback included) for a 6 ms GPU tick it ran one tick per frame, so a
 | `motion.html` | CCD gallery, character rockets, bullets | per lane, per body |
 | `demo.html` | the smash balls of the built scenes and the snapshot scenes' F projectile carry `BODY_CCD`; `demo.html`'s own schedule runs the CCD passes only in a scene that has one | `?ccd=0` off. The `?check=ring\|gables` regressions keep it off unless `?ccd=1` (their native baselines run without it); the ring check passes with it too |
 | `vehicle.html` | cannonballs (B) | `?ccd=0` off |
-| `fracture/` | Rubble bond modes: the "CCD balls" checkbox (on). Stress-solver modes: whole-world substeps for their balls (below) | checkbox |
+| `fracture/` | Rubble bond modes: the "CCD balls" checkbox (on). Stress-solver modes: every shot is `BODY_CCD` (below) | checkbox (bond modes) |
 
-stress-rubble keeps whole-world CCD substeps by default: `BODY_CCD` turns on
-look-ahead contact semantics for the whole scene, and the stress coupling's breakage
-was measured against substeps (with `BODY_CCD`, `punch_gpu`'s ram left the wall at
-6.5 m/s instead of 28, reference 35.1). `RubbleEngine::set_toi_ccd(true)` or
-`STRESS_RUBBLE_TOI_CCD=1` opts in.
+## Stress solver
+
+The coupling (stress-rubble, `GpuWorld`'s host-coupled and resident frames,
+`ThresholdWorld`, `World`'s threshold model) selects its fast movers per object:
+
+- **Selection.** `ImpactorDesc::ccd` (on by default: impactors are projectiles),
+  `BodyDesc::ccd` (off) for a structure. Every free piece a marked structure breaks
+  into is a CCD body too, on every split path: the host's (`RubbleEngine::create_body`),
+  the stress solver's GPU split (`spawn.slang`: the chunk table's `load_range.w`, with
+  the engine's flag in `SpawnParams::ccd_flag`), and the threshold splitter
+  (`fracture.slang` `fr_piece`: the parent record's `BODY_CCD`). An anchored part
+  is static and gets none until it comes loose. `World`: `DestructibleDef::is_bullet`.
+- **One step a frame.** Every profile (`Profile::engine_ccd`) runs marked bodies as
+  `BODY_CCD` in its one engine step: no whole-world substeps, and the resident frame
+  reads nothing back for them (the substeps read the fast bodies' speeds every frame).
+  `STRESS_RUBBLE_TOI_CCD=0` turns it off (a measurement); `set_toi_ccd(false)` with a
+  substep cap (`set_policy`) brings back the substeps.
+- **Accuracy.** Under `blast_parity_routed` the free-wall ram leaves at the same
+  35.0 m/s and 3 fragments with or without CCD (the impact island owns the strike).
+  On the house pack under `blast_parity`, a ball at 8, 15 and 30 m/s against a
+  32-substep reference (no CCD): the one-step plain run broke 0, 6 and 47 bonds, the
+  CCD run 0, 0 and 21, the reference 0, 3 and 0. The one engine step a frame is the
+  error; CCD does not add to it. A CCD body touching nothing changes nothing else in
+  the scene (the house's outcome bit for bit with and without a far-off CCD ball).
+- **Strike prediction.** With TOI contacts the engine meets a body in the frame its
+  sweep reaches it, so the threshold model's prediction (at the end of the frame
+  before) needs a resident frame before the strike: a strike in the frame after the
+  world's set-up frame is not predicted (`threshold_split` strikes in the third).
+
+| Test (stress-rubble) | Shows |
+|---|---|
+| `ccd_coupled` | A marked ball never passes a 5 cm steel slab at 60-1,200 m/s in any profile (the unmarked one does); a marked wall rammed into the slab leaves 0 of 72 chunks beyond it (unmarked: 72); every free piece of a marked structure is `BODY_CCD` on the GPU split paths, an anchored one is not; no read-back for CCD |
+| `engine_world::a_ccd_body_struck_within_the_step_stops_at_a_slab` | The engine alone: the late sweep and the ties (no spin, stopped at the slab) |
+| engine-world `threshold::every_dynamic_piece_of_a_bullet_destructible_is_a_bullet` | `World`: a bullet destructible's dynamic pieces are bullets |
+| `examples/ccd_modes` | The ram, slab and house strikes under each mode (none, substeps, toi, spec, refN) against the oracle |
+| `examples/ccd_scale_cost` | Frame cost at 10,000 bodies with CCD pieces and balls |
 
 ## Browser demo
 

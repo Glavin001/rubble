@@ -295,6 +295,9 @@ pub const CCD_CARRY_WORDS: u32 = 32;
 pub const CCD_PAIR_COUNT: u32 = CCD_BASE + 5;
 /// Largest |v|·h of this step's CCD bodies (f32 bits; `ccd_trust`).
 pub const CCD_MAX_REACH: u32 = CCD_BASE + 6;
+/// Colliders of CCD bodies the solve carried past their bounds this step
+/// (`ccd_late_mark`), listed at `CCD_LATE_BASE` for `ccd_late_sweep`.
+pub const CCD_LATE_COUNT: u32 = CCD_BASE + 7;
 pub const CCD_PAIR_CAP: u32 = 131072;
 pub const CCD_PAIR_BASE: u32 = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
 /// Impulse record modes (low 8 bits of `mode`; the rest is the record's sum
@@ -353,10 +356,16 @@ pub const QUERY_RESULT_CAP: u32 = 8192;
 /// of 8 words `[centre, radius]`, `[falloff, impulse per area, mask bits, 0]`.
 pub const EXPLODE_BASE: u32 = QUERY_RESULT_BASE + 2 * QUERY_RESULT_CAP;
 pub const EXPLODE_CAP: u32 = 16;
+/// The late sweep's colliders (`CCD_LATE_COUNT` of them, after the solve): each
+/// a collider of a CCD body carried past the bounds its pairs were found in,
+/// swept from its step-start pose to its solved one (`ccd_late_sweep`). More set
+/// `OVERFLOW_CCD_LATE`.
+pub const CCD_LATE_BASE: u32 = EXPLODE_BASE + 4 + 8 * EXPLODE_CAP;
+pub const CCD_LATE_CAP: u32 = 16384;
 /// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
 /// continuous-collision lists, impulse records and carried CCD velocities,
-/// contact events, queries, explosions).
-pub const SCRATCH_WORDS: u32 = EXPLODE_BASE + 4 + 8 * EXPLODE_CAP;
+/// contact events, queries, explosions, the late sweep's colliders).
+pub const SCRATCH_WORDS: u32 = CCD_LATE_BASE + CCD_LATE_CAP;
 /// Scratch word of the oversized-static count (uniform grid; see `LARGE_STATIC_CAP`).
 pub const LARGE_STATIC_COUNT: u32 = 80;
 /// First scratch word of the oversized-static collider ids, after the event ring.
@@ -511,6 +520,9 @@ pub const OVERFLOW_IMPULSES: u32 = 8192;
 pub const OVERFLOW_CCD_PAIRS: u32 = 32768;
 /// A character gathered more colliders than `character::CHAR_MAX_CANDIDATES`.
 pub const OVERFLOW_CHAR_CANDIDATES: u32 = 16384;
+/// More colliders of CCD bodies carried past their bounds in one step than
+/// `CCD_LATE_CAP` (the late sweep would miss some).
+pub const OVERFLOW_CCD_LATE: u32 = 65536;
 /// Oversized-static list (statics wider than half a grid cell, uniform grid):
 /// this many collider ids in the scratch-atomics buffer at `LARGE_STATIC_BASE`.
 pub const LARGE_STATIC_CAP: u32 = 1024;

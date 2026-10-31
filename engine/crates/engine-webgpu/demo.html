@@ -578,7 +578,7 @@
       ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
       ...(jointCount > 0 ? ['joint_hash_clear', 'joint_hash_insert', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints'] : []),
-      ...(ccdBalls ? ['ccd_register', 'broadphase_fast', 'ccd_toi', 'ccd_pick', 'ccd_wake', 'ccd_mark', ccdEmit, 'ccd_respond', 'ccd_respond_apply', 'ccd_trust', 'ccd_unhold', 'ccd_validate', 'ccd_clamp'] : []),
+      ...(ccdBalls ? ['ccd_register', 'broadphase_fast', 'ccd_toi', 'ccd_pick', 'ccd_wake', 'ccd_mark', ccdEmit, 'ccd_respond', 'ccd_respond_apply', 'ccd_trust', 'ccd_unhold', 'ccd_late_mark', 'ccd_late_sweep', 'ccd_validate', 'ccd_clamp'] : []),
     ];
 
     function bindingsOf(wgsl) {
@@ -1449,7 +1449,10 @@ struct VsOut {
         dispWork(pass, compactContacts ? 'solve_dual_compact' : 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
       }
       if (sceneCcd) {
-        // Post-solve sweep check: no CCD body ends the step past a surface.
+        // Post-solve sweep check: no CCD body ends the step past a surface, after
+        // the late sweep adds the pairs of bodies the solve carried past their bounds.
+        disp(pass, 'ccd_late_mark', M.CCD_BODY_CAP);
+        disp(pass, 'ccd_late_sweep', M.CCD_LATE_CAP * 64);
         disp(pass, 'ccd_validate', M.CCD_PAIR_CAP);
         disp(pass, 'ccd_clamp', M.CCD_BODY_CAP);
       }

@@ -2224,6 +2224,9 @@ pub struct RbDestructibleDef {
     /// Keep the asset's world bonds (anchors).
     pub anchored: bool,
     pub start_asleep: bool,
+    /// A fast mover: its dynamic bodies and every free piece they break into get
+    /// continuous collision (`rbBodyDef::is_bullet`).
+    pub is_bullet: bool,
     pub friction: f32,
     pub user_data: u64,
     pub model: RbStrengthModel,
@@ -2238,6 +2241,7 @@ pub extern "C" fn rbDefaultDestructibleDef() -> RbDestructibleDef {
         strength_scale: 1.0,
         anchored: true,
         start_asleep: true,
+        is_bullet: false,
         friction: SurfaceMaterial::default().friction,
         user_data: 0,
         model: RbStrengthModel::RB_STRENGTH_BONDS,
@@ -2268,6 +2272,7 @@ pub unsafe extern "C" fn rbCreateDestructible(
                 Anchors::None
             },
             asleep: d.start_asleep,
+            is_bullet: d.is_bullet,
             shape: ShapeDef {
                 material: SurfaceMaterial {
                     friction: d.friction,

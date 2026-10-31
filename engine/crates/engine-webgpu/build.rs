@@ -110,6 +110,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "ccd_respond_apply",
     "ccd_trust",
     "ccd_unhold",
+    "ccd_late_mark",
+    "ccd_late_sweep",
     "ccd_validate",
     "ccd_clamp",
     "ccd_emit",

@@ -84,6 +84,18 @@ struct Outcome {
 
 /// Place `asset` as a threshold destructible, fire the lab's shot, step `frames`.
 fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames: u32) -> Outcome {
+    run_world_with(asset, lab, frames, false, &mut |_, _| {})
+}
+
+/// `run_world` with the destructible a bullet (`DestructibleDef::is_bullet`) as given, and
+/// `inspect` shown the world and the destructible after the last frame.
+fn run_world_with(
+    asset: &DestructibleAssetDesc,
+    lab: &engine_fracture::Scene,
+    frames: u32,
+    is_bullet: bool,
+    inspect: &mut dyn FnMut(&mut World, DestructibleId),
+) -> Outcome {
     let placement = asset.stress.as_ref().unwrap().placement();
     // The lab's stress world is the asset frame less its placement.
     let offset = placement.map(|x| -x as f32);
@@ -94,6 +106,7 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
             model: StrengthModel::Threshold,
             transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
             asleep: false,
+            is_bullet,
             ..DestructibleDef::new(a)
         })
         .unwrap();
@@ -101,9 +114,11 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
     assert!(stats.chunks > 10 && stats.bonds > 10, "{stats:?}");
     let (origin, v, r, m) = lab_shot(lab, target(asset));
     let at = [0, 1, 2].map(|k| (origin[k] + offset[k] as f64) as f32);
+    // A bullet, as the lab's shot is a CCD impactor (`ImpactorDesc::ccd`).
     let ball = w
         .create_body(&BodyDef {
             linear_velocity: v.map(|x| x as f32),
+            is_bullet: true,
             ..BodyDef::dynamic(at)
         })
         .unwrap();
@@ -229,6 +244,7 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
             "piece {b:?} has a reported pose"
         );
     }
+    inspect(&mut w, id);
     w.destroy_destructible(id).unwrap();
     Outcome {
         broken,
@@ -413,5 +429,31 @@ fn limits_fail_loudly() {
             .unwrap();
         let r = w.body_set_projectile(b, Some(Projectile::default()));
         assert_eq!(r.is_ok(), k < 64, "projectile {k}: {r:?}");
+    }
+}
+
+/// A bullet destructible (`DestructibleDef::is_bullet`): after the shot splits it, every
+/// dynamic piece's body is a continuous-collision body (`BODY_CCD`, taken from its parent
+/// on the GPU); an anchored piece is static, and a destructible not marked has none.
+#[test]
+fn every_dynamic_piece_of_a_bullet_destructible_is_a_bullet() {
+    let (asset, lab) = arch();
+    for is_bullet in [true, false] {
+        let mut seen = 0;
+        let outcome = run_world_with(&asset, &lab, 60, is_bullet, &mut |w, id| {
+            let stats = w.destructible_stats(id).unwrap();
+            let mut bodies: Vec<BodyId> = (0..stats.chunks).map(|c| w.destructible_chunk_body(id, c).unwrap()).collect();
+            bodies.sort_by_key(|b| b.index());
+            bodies.dedup();
+            let records = w.sim().download_bodies();
+            for &b in &bodies {
+                let ccd = records[b.index() as usize].flags & engine_schema::BODY_CCD != 0;
+                let dynamic = w.body_type(b).unwrap() == BodyType::Dynamic;
+                assert_eq!(ccd, is_bullet && dynamic, "piece {b:?} (dynamic {dynamic}): BODY_CCD {ccd}, the destructible a bullet {is_bullet}");
+                seen += dynamic as usize;
+            }
+        });
+        eprintln!("bullet {is_bullet}: {} splits, {seen} dynamic pieces checked", outcome.splits);
+        assert!(outcome.splits > 0 && seen > 1, "the shot splits the arch into dynamic pieces");
     }
 }

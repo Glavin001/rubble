@@ -47,3 +47,7 @@ required-features = ["gpu"]
 [[example]]
 name = "ccd_modes"
 required-features = ["gpu"]
+
+[[example]]
+name = "ccd_scale_cost"
+required-features = ["gpu"]

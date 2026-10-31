@@ -28,6 +28,10 @@ pub type FrameRecord = [[f32; 4]; 2];
 
 /// Chunk flag (`info`): a support (its piece is anchored, static).
 pub const INFO_SUPPORT: u32 = 1;
+/// Chunk flag (`info`): continuous collision. A free piece whose root chunk has it is a
+/// `BODY_CCD` body, whatever its parent was (an anchored parent is static, so its record
+/// has no flag to inherit).
+pub const INFO_CCD: u32 = 2;
 
 /// What the fracture is made from, once, at load.
 #[derive(Clone, Debug, Default)]

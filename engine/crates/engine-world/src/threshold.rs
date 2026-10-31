@@ -111,7 +111,7 @@ mod imp {
     use engine_schema::{AvbdParams, BodyState, FLAG_CONTACT_GAP, FLAG_WORLD_INERTIA};
     use glam::{DMat3, DQuat, DVec3, Vec3};
     use std::sync::Arc;
-    use stress_gpu::fracture::{self, FractureTables, GpuFracture, INFO_SUPPORT};
+    use stress_gpu::fracture::{self, FractureTables, GpuFracture, INFO_CCD, INFO_SUPPORT};
     use stress_gpu::gpu::Gpu;
     use stress_gpu::ingest::{
         ColliderInfo, EngineBuffers, EngineIngest, KIND_BODY, KIND_STATIC, NONE,
@@ -314,6 +314,8 @@ mod imp {
         /// Colliders the ingest now sees as projectiles.
         projectile_colliders: Vec<u32>,
         pub nodes: Vec<Option<u32>>,
+        /// `DestructibleDef::is_bullet`: every free piece is a bullet.
+        bullet: bool,
     }
 
     /// The world's threshold destructibles.
@@ -600,6 +602,7 @@ mod imp {
                     position: instance.position,
                     rotation: instance.rotation,
                     is_awake: !def.asleep,
+                    is_bullet: def.is_bullet && dynamic,
                     user_data: def.user_data,
                     ..BodyDef::default()
                 })?;
@@ -777,11 +780,13 @@ mod imp {
                     [f(h.x), f(h.y), f(h.z), f(e_plane)],
                     [f(bq.x), f(bq.y), f(bq.z), f(bq.w)],
                 ]);
-                t.info.push(if ch.support != Support::None {
-                    INFO_SUPPORT
-                } else {
-                    0
-                });
+                t.info.push(
+                    if ch.support != Support::None {
+                        INFO_SUPPORT
+                    } else {
+                        0
+                    } | if def.is_bullet { INFO_CCD } else { 0 },
+                );
                 t.chunk_body.push(chunk_body[k]);
             }
             for &(b, id, structure, com, principal) in &cluster_bodies {
@@ -861,6 +866,7 @@ mod imp {
                 static_info,
                 projectile_colliders: Vec::new(),
                 nodes: source.nodes.clone(),
+                bullet: def.is_bullet,
             };
             let k = match self.fracture.slots.iter().position(|s| s.is_none()) {
                 Some(k) => k,
@@ -1082,6 +1088,19 @@ mod imp {
             }
             for &b in &changed {
                 self.reframe_piece(k, b, step + 1, frames)?;
+            }
+            // Every free piece of a bullet destructible is one (`is_bullet`): its GPU record
+            // took BODY_CCD from its chunks' INFO_CCD (stress-gpu fracture.slang
+            // `fr_piece`), and every later write of the body from its slot keeps it.
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            if t.bullet {
+                let pieces: Vec<u32> = moved.iter().map(|&c| t.chunk_body[c as usize]).collect();
+                for b in pieces {
+                    let slot = &mut self.bodies[b as usize];
+                    if slot.body_type == BodyType::Dynamic {
+                        slot.bullet = true;
+                    }
+                }
             }
             // Splits: each parent's chunks before, grouped by where they are now.
             let t = self.fracture.slots[k].as_ref().expect("live slot");

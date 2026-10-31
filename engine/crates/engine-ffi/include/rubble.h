@@ -616,6 +616,9 @@ typedef struct RbDestructibleDef {
   // Keep the asset's world bonds (anchors).
   bool anchored;
   bool start_asleep;
+  // A fast mover: its dynamic bodies and every free piece they break into get
+  // continuous collision (`rbBodyDef::is_bullet`).
+  bool is_bullet;
   float friction;
   uint64_t user_data;
   enum RbStrengthModel model;
