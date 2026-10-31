@@ -563,6 +563,14 @@ them progressively (1, 1, 2, 10, 13, 15 broken bonds over the first 0.1 s, one p
   ~6.4 m/s, is 37% above ours (4.0; 4.2 with `--feature crushing=off`), just outside
   the 30% gate. Closing this needs a crushing law in the oracle (pressure-capped
   chunks) and a contact-pulse comparison; it stays open.
+* **The coupled pipeline (rubble) is not deterministic** on a chaotic collapse: b8's
+  same input gave 12 broken bonds in one run and at least 18 in another (2026-10-24).
+  Judge such cases by the gate's ensemble (`stress-rubble`
+  `integrated::sudden_support_loss_is_promoted_at_its_event`), not single runs.
+* **A GPU split's fragments keep undeformed shapes for one frame** in the resident frame
+  (IMPROVEMENTS.md "Engine shapes follow the chunks' deformation"): the host follows
+  the last frame's GPU splits while the next frame's substeps run, so the shape pass
+  moves the new bodies' colliders from the frame after.
 * **Lateral release / Poisson coupling**: the chunk network has no Poisson effect, so
   spall breaks whole planes where the continuum keeps corner ligaments (b6), and peak
   panel displacement is 20-24% above OpenCourant (b9).

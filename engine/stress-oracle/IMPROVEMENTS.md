@@ -605,6 +605,99 @@ an intact joint carries no patch state.
 **Status:** evidence recorded. Adoption is a model change and needs a person's review
 (the b8 difference judged against its ensemble spread); then `scripts/fidelity.py`.
 
+### Engine shapes follow the chunks' deformation (coupling fix, switch, default on pending review, 2026-10-24)
+
+**Switch.** `World::engine_shapes_deformed` (`GpuWorld::set_engine_shapes_deformed`;
+`STRESS_ENGINE_SHAPES=undeformed` turns it off), in the host-coupled frame and the
+GPU-resident one. Coupled runs only: the standalone oracle and the GPU accuracy gate
+build no engine shapes.
+
+**What it replaces.** The coupling built a cluster's engine shapes at its chunks'
+undeformed centres, once per chunk set. Now each shape sits where the stress solve has
+its chunk (hidden displacement `u` and rotation `th`, as `World::chunk_box`), refreshed
+every frame (`World::shape_poses`, carried as `EngineBody::poses`). The shapes
+themselves stay undeformed, and every body is built from them (as the GPU's split
+builds its bodies from the undeformed part table). A body whose shapes moved keeps
+its identity: rubble places its colliders in place (`RubbleEngine::move_shapes`),
+keeping its contacts and their warm starts. Its mass properties stay the build's
+(small strains). A settled structure's poses do not change, so nothing is uploaded
+for it.
+
+**GPU-resident frame.** One kernel before the engine steps (`stress-gpu` `shapes.rs`,
+`shaders/shapes.slang`): for each engine collider of a chunk, its chunk from the
+coupling's collider table, that chunk's `u` and `th` from the state the last static
+solve left, and the collider's undeformed placement (`ResidentEngine::collider_rest`,
+uploaded only for colliders added since). It writes rubble's collider buffer in
+place; nothing is read back. A GPU split's fragments are moved from the frame after
+the host follows the split (README "Known gaps").
+
+**Why (b8_frame_sudden, coupled).** rubble's broadphase used to drop dynamic-static
+pairs whose static had the lower collider index. b8's anchored frame is created first,
+so its freed pieces fell through it. Keeping those pairs (PR #52) exposed this:
+- 11-40 broken bonds at 0.25 s over the gate's input perturbations (median 29),
+  against the oracle's 7-14.
+- Runs with and without those pairs break the same bonds until 84 ms.
+- Then a freed 2.7 m top-beam piece sits between the frame's anchored halves. In the
+  stress solve it has a gap at both ends, widening from 0.2 to 0.9 mm in 4 ms as the
+  frame springs apart after the column loss. In rubble, with undeformed shapes, it was
+  flush against both faces.
+- Turning (0.08 rad/s), it wedged: equal and opposite end impulses of 11, 84, then
+  121 N s per 1 ms frame, about its angular momentum over the lever arm. It broke in
+  three, and the cascade followed.
+
+**Evidence.**
+
+| b8, 7 runs over the gate's perturbations | broken bonds |
+|---|---|
+| oracle ensemble | 7-14 |
+| undeformed shapes (before) | 11-40, median 29 |
+| without the lower-index pairs (before PR #52) | 10-14 |
+| this switch | 13-17, median 14 |
+
+- *Ruled out.*
+  - Dropping the engine's contact loads from the stress solve (on pieces, on
+    anchored clusters, or both): median 24-28.
+  - rubble's friction at 0: median 34.
+  - Shapes deformed only when a body is built (at the split), not refreshed: median 28.
+  - Rebuilding the anchored bodies every frame, undeformed: median 13, but two runs
+    still cascade (37, 30). The rebuild resets the contacts' warm starts, which acts
+    like compliance.
+- *Isolated cases* match the oracle either way: a beam landing on an anchored block,
+  and a beam freed between two undeformed anchored walls (`stress-rubble` tests
+  `integrated::a_beam_*`).
+- *Resident against host-coupled.* `resident_gpu::resident_frame_moves_shapes_as_the_fast_frame`:
+  with the switch on, the rammed house's damage (which differs from its undeformed
+  run's) and the cantilever's split and fall match bit for bit; the ram's speed
+  agrees to rounding (f32 on the GPU, f64 on the host).
+- *Suite.* `stress-rubble` (every test binary) and `stress-gpu` pass with the switch
+  on.
+
+**Cost at scale.** `stress-rubble --example shape_deform_cost`, Apple M3 Max: 10,000
+bodies of 4 chunks (40,000 colliders), 40 frames, quasi-static. Two scenes: free beams
+dropped on the ground (every body active, the engine stepping; resting free beams
+barely deform, so no pose changes), and cantilevers fixed at one end (every body's
+chunks displaced, every pose new each frame while they settle).
+
+| per frame, median | free beams | cantilevers |
+|---|---|---|
+| resident: shape pass, submit to done (`STRESS_RESIDENT_PHASES`) | 0.30 ms | 0.27 ms |
+| resident: its host encode | 0.06 ms | 0.06 ms |
+| host-coupled: body sync, undeformed | 2.05 ms | 2.48 ms |
+| host-coupled: body sync, deformed | 5.47 ms | 5.68 ms |
+
+- The resident pass does the same work whatever moves (one thread per collider) and
+  reads nothing back. Its time includes the submission's round trip, so it bounds the
+  kernel from above. Resident frame totals (13-19 ms free, 4-7 ms cantilevers) vary
+  more between repeats than the pass costs, so they cannot resolve it.
+- The host-coupled frame pays about 3.3 ms on the host at this size: each cluster's
+  poses are computed and compared every frame (O(chunks)), uploads only for bodies
+  whose poses changed. Lossless options if that matters: skip clusters whose chunk
+  state did not change, or the GPU pass in that frame too.
+- A resident frame's split write-back keeps the poses last given
+  (`World::engine_poses_held`): the host does not recompute them there.
+
+**Status:** default on in both frames, pending review (a coupling model change).
+
 ## Runtime (bit-exact, no switch)
 
 Speedups that change no result take no switch. Each must reproduce the established

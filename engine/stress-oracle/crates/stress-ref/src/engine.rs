@@ -81,6 +81,10 @@ pub struct EngineBody {
     pub pose: Pose,
     pub velocity: Vec3,
     pub angular_velocity: Vec3,
+    /// Each shape's pose now, in `Boxes`' order, when it differs from its `local` (the
+    /// chunks' deformation, `World::shape_poses`): the shapes keep their undeformed poses,
+    /// which the body is built from. A new list only when a pose changed.
+    pub poses: Option<std::sync::Arc<Vec<Pose>>>,
 }
 
 /// Rigid state of an engine body: pose of the body frame, velocity of the centre of mass.

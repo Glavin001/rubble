@@ -30,6 +30,7 @@ use crate::statics::StaticOptions;
 #[path = "world_coupling.rs"]
 mod coupling;
 pub use coupling::{cluster_signature, tiered_impact_speed};
+use coupling::ShapeCache;
 /// The modal pre-window for impacts (prototype, `modal` feature): a child module so it
 /// drives the world's own contact and substep without widening their visibility.
 #[cfg(feature = "modal")]
@@ -265,6 +266,17 @@ pub struct World {
     /// faster than the tiered impact speed does (resting contacts stay the engine's).
     /// `STRESS_TIERED_JOIN=fast` turns it on (a measurement until you decide).
     pub tiered_fast_joins: bool,
+    /// Coupled mode: the engine's shapes sit where the stress solve has their chunks (each
+    /// chunk's hidden displacement and rotation, as the world's own contact sees it),
+    /// refreshed every frame (`World::shape_poses`). Off, they keep the chunks' undeformed
+    /// layout, as PhysX's native destruction does. Default on; the GPU-resident frame
+    /// moves them on the GPU (stress-gpu `shapes.rs`). `STRESS_ENGINE_SHAPES=undeformed`
+    /// turns it off.
+    pub engine_shapes_deformed: bool,
+    /// The engine's shapes are moved by another pass this frame (stress-gpu's resident
+    /// frame moves them on the GPU): the coupling keeps each body's last poses instead of
+    /// computing them on the host.
+    pub engine_poses_held: bool,
     /// `implicit_failure_windows`: chunks whose clusters take this frame in a window
     /// (a bond of theirs started to fail in an implicit step of an earlier attempt),
     /// and those found failing in this attempt.
@@ -385,7 +397,7 @@ struct Coupling {
     handed: Vec<(ContactKey, Stick)>,
     kept: HashMap<((usize, usize), (usize, usize)), f64>,
     /// Each cluster's engine shapes by cluster id, with the signature they were built for.
-    shapes: HashMap<u64, (u64, std::sync::Arc<Vec<BoxShape>>)>,
+    shapes: HashMap<u64, ShapeCache>,
     /// `select_islands`' per-cluster bounds and material data (lo, hi, reach, modulus,
     /// wave speed, contact radius, weakest bond capacity), reused for clusters in
     /// `ReferenceSolver::unchanged`.
@@ -505,6 +517,8 @@ impl World {
             impact_islands: true,
             qs_islands: false,
             tiered_fast_joins: std::env::var("STRESS_TIERED_JOIN").is_ok_and(|v| v == "fast"),
+            engine_shapes_deformed: !std::env::var("STRESS_ENGINE_SHAPES").is_ok_and(|v| v == "undeformed"),
+            engine_poses_held: false,
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,

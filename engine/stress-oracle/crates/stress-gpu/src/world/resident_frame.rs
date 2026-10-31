@@ -317,6 +317,30 @@ impl GpuWorld {
         }
     }
 
+    /// The engine's chunk colliders moved to the chunks' current deformation before the
+    /// engine steps (`shapes.rs`; `World::engine_shapes_deformed`), from the state the
+    /// last frame's static solve left. A split the GPU made in the last frame has its
+    /// bodies' colliders moved from the frame after the host follows it (`flush_pending`
+    /// runs while this frame's substeps do): one frame undeformed.
+    /// True when it recorded the pass.
+    fn deform_shapes(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder) -> bool {
+        if !self.shell.engine_shapes_deformed {
+            return false;
+        }
+        let engine = self.resident_engine.clone().expect("resident engine");
+        let e = engine.borrow();
+        let structures = &self.solver.mirror.structures;
+        let center = |s: usize, c: usize| structures[s].chunks[c].center;
+        let shapes = self.resident_shapes.get_or_insert_with(|| crate::shapes::ShapeDeform::new(gpu));
+        if !shapes.update(gpu, &*e, &center) {
+            return false;
+        }
+        let r = self.resident.as_ref().expect("resident tables");
+        let (_, _, state, _, _) = self.solver.resident_buffers();
+        shapes.encode(gpu, encoder, &r.ingest.collider_info, state, e.engine_buffers().colliders);
+        true
+    }
+
     /// After the engine adopted a split whose collider table the GPU refreshed: the table
     /// is current (`STRESS_GPU_COLLIDER_CHECK=1`: compared with the host's).
     /// `check`: compared now (the host's mirror and layout have followed every split the
@@ -507,6 +531,18 @@ impl GpuWorld {
         }
         let t_engine = web_time::Instant::now();
         {
+            // The shapes moved first, in their own submission (queue order puts it before
+            // the engine's substeps, which the default path submits as it records them).
+            let t_shapes = web_time::Instant::now();
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            if self.deform_shapes(gpu, &mut enc) {
+                gpu.queue.submit([enc.finish()]);
+                if phases {
+                    let encode = t_shapes.elapsed().as_secs_f64() * 1e3;
+                    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                    eprintln!("resident phases: shapes: encode {encode:.3} ms, done {:.3} ms", t_shapes.elapsed().as_secs_f64() * 1e3);
+                }
+            }
             let r = self.resident.as_ref().expect("resident tables");
             // `STRESS_FRAME_SUBMITS=one` (plan 5d, work in progress): the engine's substeps
             // and their ingest, then the cascade (`GpuSolver::frame_encoder`), in one command

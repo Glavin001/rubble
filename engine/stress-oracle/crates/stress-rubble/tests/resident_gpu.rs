@@ -56,11 +56,18 @@ fn run(gpu: &Gpu, scene: &Scene, resident: bool) -> (Vec<u64>, usize, usize, u64
 }
 
 fn run_with(gpu: &Gpu, scene: &Scene, resident: bool, budget: Option<(u32, u32)>) -> (Vec<u64>, usize, usize, u64, u64, Vec<u64>) {
+    run_shapes(gpu, scene, resident, budget, false)
+}
+
+/// `deformed`: the engine's shapes follow the chunks' deformation
+/// (`World::engine_shapes_deformed`; the resident frame moves them on the GPU).
+fn run_shapes(gpu: &Gpu, scene: &Scene, resident: bool, budget: Option<(u32, u32)>, deformed: bool) -> (Vec<u64>, usize, usize, u64, u64, Vec<u64>) {
     std::env::set_var("STRESS_GPU_FIXED_HORIZON", "1");
     std::env::set_var("STRESS_GPU_QUIET_EXCLUDE", "0");
     let engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble");
     let mut w = if resident { GpuWorld::with_resident_engine(gpu, scene, engine) } else { GpuWorld::with_engine(gpu, scene, Box::new(engine)) }.expect("coupled world");
     w.fast_qs = !resident;
+    w.set_engine_shapes_deformed(deformed);
     w.redo_fractured_frames = false;
     w.set_impact_islands(false);
     w.solver.mirror.config.static_budget = budget;
@@ -129,4 +136,33 @@ fn repeat_gate_is_lossless() {
     std::env::remove_var("STRESS_QS_REPEAT_GATE");
     assert!(gated.4 > 0, "no resident frame ran");
     assert_eq!((every.0, every.1, every.2, every.3, every.5), (gated.0, gated.1, gated.2, gated.3, gated.5));
+}
+
+/// With the engine's shapes following the chunks' deformation, which the resident frame
+/// does on the GPU (stress-gpu `shapes.rs`) and the fast frame on the host
+/// (`World::shape_poses`): the same damage bit for bit, through the rammed house's cracks
+/// and the cantilever's split (the host makes its fragment) and fall. The house cracks
+/// differently from its undeformed run, so the shapes moved.
+#[test]
+fn resident_frame_moves_shapes_as_the_fast_frame() {
+    let Ok(gpu) = Gpu::new() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let house = scene();
+    let fast = run_shapes(&gpu, &house, false, None, true);
+    let resident = run_shapes(&gpu, &house, true, None, true);
+    let undeformed = run(&gpu, &house, true);
+    assert!(resident.4 > 0, "no resident frame ran");
+    assert_ne!(resident.0, undeformed.0, "the deformed shapes changed nothing: the test needs them to");
+    assert_eq!((&fast.0, fast.1, fast.2), (&resident.0, resident.1, resident.2));
+    // The host places a moved collider in f64 and rounds; the GPU in f32 (its own sin and
+    // cos): the impactor's speed after its contacts agrees to rounding, not bit for bit.
+    let (a, b) = (f64::from_bits(fast.3), f64::from_bits(resident.3));
+    assert!((a - b).abs() <= 1e-9 * a.abs(), "impactor speed {a} against {b}");
+    let beam = weak_cantilever();
+    let fast = run_shapes(&gpu, &beam, false, None, true);
+    let resident = run_shapes(&gpu, &beam, true, None, true);
+    assert!(fast.2 > 1, "nothing split: the test needs a split");
+    assert_eq!((fast.0, fast.1, fast.2, fast.5), (resident.0, resident.1, resident.2, resident.5));
 }
