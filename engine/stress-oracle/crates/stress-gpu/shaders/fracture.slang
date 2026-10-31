@@ -58,7 +58,15 @@ struct FractureParams
     float scale_j;
     float strike_speed;  // a slower closing is no strike (world_coupling.rs `tiered_impact_speed`)
     uint shot_count;     // the shots (`shots`), parked ones included
-    float pad3;
+    // Chunks and bonds in use: the first `chunk_used` chunks and `bond_used` bonds (a
+    // world's shared fracture places destructibles into capacity-sized tables; the layout
+    // is sized by `chunk_count` and `bond_count`). A chunk in that range with body NONE
+    // is a free one.
+    uint chunk_used;
+    uint bond_used;
+    uint pad4;
+    uint pad5;
+    uint pad6;
 };
 
 struct ScanParams
@@ -164,6 +172,8 @@ static const uint ARG_ONE = 5;
 
 uint body_of(uint c) { return work[w_body() + c]; }
 bool dirty(uint body) { return atom[a_dirty() + body].load() != 0; }
+// A placed chunk (`chunk_used`, its body set).
+bool live(uint c) { return c < params.chunk_used && body_of(c) != NONE; }
 uint groups_of(uint n, uint size) { return (n + size - 1) / size; }
 
 // A body slot's structure-frame pose in the world (Z-up): the rotation and origin of its
@@ -181,7 +191,7 @@ void structure_pose(uint slot, uint b, out Quat q, out float3 origin)
 void fr_loads(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count)
+    if (!live(k))
         return;
     uint slot = body_of(k);
     uint b = BODY_WORDS * slot;
@@ -226,7 +236,7 @@ void fr_loads(uint3 id: SV_DispatchThreadID)
 void fr_breaks(uint3 id: SV_DispatchThreadID)
 {
     uint i = id.x;
-    if (i >= params.bond_count || work[w_alive() + i] == 0)
+    if (i >= params.bond_used || work[w_alive() + i] == 0)
         return;
     uint4 bond = bonds[i];
     float demand = max(loads[bond.x].x, loads[bond.y].x);
@@ -256,10 +266,10 @@ void fr_gate(uint3 id: SV_DispatchThreadID)
     atom[a_counters() + C_POOL_TOP + params.parity].store(0);
     if (run)
         atom[a_counters() + C_SPLIT_FRAMES].add(1);
-    set_args(ARG_CHUNKS, run ? groups_of(params.chunk_count, 64) : 0);
-    set_args(ARG_BONDS, run ? groups_of(params.bond_count, 64) : 0);
+    set_args(ARG_CHUNKS, run ? groups_of(params.chunk_used, 64) : 0);
+    set_args(ARG_BONDS, run ? groups_of(params.bond_used, 64) : 0);
     set_args(ARG_BODIES, run ? groups_of(params.body_count, 64) : 0);
-    set_args(ARG_SCAN_CHUNKS, run ? groups_of(params.chunk_count, 1024) : 0);
+    set_args(ARG_SCAN_CHUNKS, run ? groups_of(params.chunk_used, 1024) : 0);
     set_args(ARG_SCAN_BODIES, run ? groups_of(params.body_count, 1024) : 0);
     set_args(ARG_ONE, run ? 1 : 0);
 }
@@ -269,7 +279,7 @@ void fr_gate(uint3 id: SV_DispatchThreadID)
 void fr_uf_init(uint3 id: SV_DispatchThreadID)
 {
     uint c = id.x;
-    if (c >= params.chunk_count || !dirty(body_of(c)))
+    if (!live(c) || !dirty(body_of(c)))
         return;
     atom[a_parent() + c].store(c);
     atom[a_count() + c].store(0);
@@ -313,7 +323,7 @@ uint find(uint x)
 void fr_uf_union(uint3 id: SV_DispatchThreadID)
 {
     uint i = id.x;
-    if (i >= params.bond_count || work[w_alive() + i] == 0)
+    if (i >= params.bond_used || work[w_alive() + i] == 0)
         return;
     uint4 bond = bonds[i];
     if (!dirty(body_of(bond.x)))
@@ -372,7 +382,7 @@ float read64(uint at, float scale)
 void fr_uf_flatten(uint3 id: SV_DispatchThreadID)
 {
     uint c = id.x;
-    if (c >= params.chunk_count || !dirty(body_of(c)))
+    if (!live(c) || !dirty(body_of(c)))
         return;
     uint r = find(c);
     work[w_label() + c] = r;
@@ -402,7 +412,7 @@ void fr_uf_flatten(uint3 id: SV_DispatchThreadID)
 
 bool is_root(uint c)
 {
-    return c < params.chunk_count && dirty(body_of(c)) && work[w_label() + c] == c;
+    return live(c) && dirty(body_of(c)) && work[w_label() + c] == c;
 }
 
 [shader("compute")]
@@ -433,7 +443,7 @@ void fr_best_root(uint3 id: SV_DispatchThreadID)
 void fr_mark(uint3 id: SV_DispatchThreadID)
 {
     uint c = id.x;
-    if (c >= params.chunk_count)
+    if (c >= params.chunk_used)
         return;
     work[w_new() + c] = is_root(c) && atom[a_best_root() + body_of(c)].load() != c ? 1u : 0u;
 }
@@ -647,7 +657,7 @@ void fr_commit(uint3 id: SV_DispatchThreadID)
 void fr_reparent(uint3 id: SV_DispatchThreadID)
 {
     uint c = id.x;
-    if (c >= params.chunk_count || !dirty(body_of(c)))
+    if (!live(c) || !dirty(body_of(c)))
         return;
     uint r = work[w_label() + c];
     uint slot = work[w_slot() + r];
@@ -766,7 +776,7 @@ float3 chunk_world(uint k)
 void fr_view_chunks(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count)
+    if (!live(k))
         return;
     uint slot = body_of(k);
     uint b = BODY_WORDS * slot;
@@ -823,7 +833,7 @@ void write_line_vertex(uint v, float3 p)
 void fr_view_bonds(uint3 id: SV_DispatchThreadID)
 {
     uint i = id.x;
-    if (i >= params.bond_count)
+    if (i >= params.bond_used)
         return;
     uint4 bond = bonds[i];
     float3 a = chunk_world(bond.x);
@@ -895,7 +905,7 @@ void fr_strike_reset(uint3 id: SV_DispatchThreadID)
 void fr_strike_bounds(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count || params.shot_count == 0)
+    if (!live(k) || params.shot_count == 0)
         return;
     Quat q;
     float3 c = chunk_box_world(k, q);
@@ -973,7 +983,7 @@ bool struck(uint b, out uint shot)
 void fr_strike_entry(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count || params.shot_count == 0)
+    if (!live(k) || params.shot_count == 0)
         return;
     uint b = body_of(k);
     uint shot;
@@ -1027,7 +1037,7 @@ void fr_strike_entry(uint3 id: SV_DispatchThreadID)
 void fr_strike_nearest(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count || params.shot_count == 0)
+    if (!live(k) || params.shot_count == 0)
         return;
     uint b = body_of(k);
     uint shot;
@@ -1090,7 +1100,7 @@ void fr_strike_force(uint3 id: SV_DispatchThreadID)
 void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
 {
     uint i = id.x;
-    if (i >= params.bond_count || params.shot_count == 0 || work[w_alive() + i] == 0)
+    if (i >= params.bond_used || params.shot_count == 0 || work[w_alive() + i] == 0)
         return;
     uint4 bond = bonds[i];
     uint b = body_of(bond.x);

@@ -13,7 +13,7 @@
 //! the slots must match exactly, the mass properties to f32.
 
 use crate::gpu::{groups, Binding, Gpu, Kernel};
-use crate::ingest::{EngineBuffers, EngineIngest};
+use crate::ingest::{EngineBuffers, EngineIngest, NONE};
 use crate::shaders;
 
 /// Per chunk (`fracture.slang` `chunks`): (centre (structure frame), mass); inertia about
@@ -125,7 +125,30 @@ struct FractureParams {
     scale_j: f32,
     strike_speed: f32,
     shot_count: u32,
-    pad3: f32,
+    /// Chunks and bonds in use (`fracture.slang`): placed into capacity-sized tables.
+    chunk_used: u32,
+    bond_used: u32,
+    pad4: u32,
+    pad5: u32,
+    pad6: u32,
+}
+
+/// What a fracture's tables hold room for (`GpuFracture::with_capacity`): its layout is
+/// sized by these, and [`GpuFracture::append`] places more chunks, bonds and parts into
+/// them. More than the room is an error, never a silent drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capacity {
+    pub chunks: u32,
+    pub bonds: u32,
+    pub parts: u32,
+}
+
+/// Where [`GpuFracture::append`] places a table's records: its first chunk, bond and part.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Base {
+    pub chunk: u32,
+    pub bond: u32,
+    pub part: u32,
 }
 
 /// A shot, for strike prediction (`fracture.slang` `shots`).
@@ -377,7 +400,19 @@ impl GpuFracture {
     /// The fracture of `t`, bound to the engine's buffers and the ingest's (both must keep
     /// their buffers while it lives; [`Self::rebind`] after either replaces one).
     pub fn new(gpu: &Gpu, t: &FractureTables, engine: &EngineBuffers, ingest: &EngineIngest) -> Result<GpuFracture, String> {
-        let (n, e, b) = (t.chunk_count(), t.bond_count(), t.body_count());
+        let room = Capacity { chunks: t.chunk_count(), bonds: t.bond_count(), parts: t.parts.len() as u32 };
+        Self::with_capacity(gpu, t, room, engine, ingest)
+    }
+
+    /// [`Self::new`] with room for `room` chunks, bonds and parts: `t`'s records first,
+    /// the rest free (a free chunk's body is NONE, a free bond is broken) until
+    /// [`Self::append`] places more. `t.frames` and `t.free` cover every body slot.
+    pub fn with_capacity(gpu: &Gpu, t: &FractureTables, room: Capacity, engine: &EngineBuffers, ingest: &EngineIngest) -> Result<GpuFracture, String> {
+        let (used_n, used_e, b) = (t.chunk_count(), t.bond_count(), t.body_count());
+        if used_n > room.chunks || used_e > room.bonds || t.parts.len() as u32 > room.parts {
+            return Err(format!("fracture: {used_n} chunks, {used_e} bonds and {} parts; room for {:?}", t.parts.len(), room));
+        }
+        let (n, e) = (room.chunks, room.bonds);
         // The scans' two levels hold 2^20 words (`fr_scan_top`: one group of 1024 blocks).
         if n > 1 << 20 || b > 1 << 20 {
             return Err(format!("fracture: {n} chunks and {b} body slots; the scans hold at most 2^20 of each"));
@@ -390,6 +425,8 @@ impl GpuFracture {
         let params = FractureParams {
             chunk_count: n,
             bond_count: e,
+            chunk_used: used_n,
+            bond_used: used_e,
             body_count: b,
             max_bodies: t.max_bodies,
             step: 0,
@@ -403,7 +440,7 @@ impl GpuFracture {
             strike_speed: t.strike_speed,
             ..Default::default()
         };
-        if !t.geometry.is_empty() && t.geometry.len() != n as usize {
+        if !t.geometry.is_empty() && t.geometry.len() != used_n as usize {
             return Err("fracture: strike geometry of mismatched length".into());
         }
         let params_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -413,18 +450,29 @@ impl GpuFracture {
             mapped_at_creation: false,
         });
         gpu.queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
-        let scan_new = gpu.uniform("fracture scan new", &ScanParams { n, in_base: layout.w_new(), out_base: layout.w_rank(), block_base: layout.scan_new_blocks() });
+        let scan_new = gpu.uniform("fracture scan new", &ScanParams { n: used_n, in_base: layout.w_new(), out_base: layout.w_rank(), block_base: layout.scan_new_blocks() });
         let scan_free = gpu.uniform("fracture scan free", &ScanParams { n: b, in_base: layout.w_free(), out_base: layout.w_free_rank(), block_base: layout.scan_free_blocks() });
         let flat = |v: &[[[f32; 4]; 4]]| -> Vec<[f32; 4]> { v.iter().flatten().copied().collect() };
-        let chunks = gpu.storage("fracture chunks", &flat(&t.chunks));
-        let info = gpu.storage("fracture chunk info", &t.info);
-        let bonds = gpu.storage("fracture bonds", &t.bonds);
+        let padded = |records: Vec<[f32; 4]>, len: usize| {
+            let mut r = records;
+            r.resize(len.max(1), [0.0; 4]);
+            r
+        };
+        let chunks = gpu.storage("fracture chunks", &padded(flat(&t.chunks), 4 * n as usize));
+        let mut info = t.info.clone();
+        info.resize(n.max(1) as usize, 0);
+        let info = gpu.storage("fracture chunk info", &info);
+        let mut bond_records = t.bonds.clone();
+        bond_records.resize(e.max(1) as usize, [0; 4]);
+        let bonds = gpu.storage("fracture bonds", &bond_records);
         let parts: Vec<[f32; 4]> = t.parts.iter().flatten().copied().collect();
-        let parts = gpu.storage("fracture parts", &parts);
-        // work: each chunk's body, every bond intact, the free slots; the rest the kernels write.
+        let parts = gpu.storage("fracture parts", &padded(parts, 2 * room.parts as usize));
+        // work: each chunk's body (NONE: free), every bond in use intact, the free slots;
+        // the rest the kernels write.
         let mut words = vec![0u32; layout.work_words() as usize];
-        words[..n as usize].copy_from_slice(&t.chunk_body);
-        words[layout.w_alive() as usize..(layout.w_alive() + e) as usize].fill(1);
+        words[..n as usize].fill(NONE);
+        words[..used_n as usize].copy_from_slice(&t.chunk_body);
+        words[layout.w_alive() as usize..(layout.w_alive() + used_e) as usize].fill(1);
         words[layout.w_free() as usize..(layout.w_free() + b) as usize].copy_from_slice(&t.free);
         let work = gpu.storage("fracture work", &words);
         let atom = storage_bytes(gpu, "fracture atom", 4 * layout.atom_words() as u64, wgpu::BufferUsages::empty());
@@ -441,7 +489,8 @@ impl GpuFracture {
             mapped_at_creation: false,
         });
         let g: Vec<[f32; 4]> = t.geometry.iter().flatten().copied().collect();
-        let geometry = storage_bytes(gpu, "fracture strike geometry", 16 * g.len() as u64, wgpu::BufferUsages::empty());
+        let geometry_records = if t.geometry.is_empty() && used_n > 0 { 0 } else { 3 * n as u64 };
+        let geometry = storage_bytes(gpu, "fracture strike geometry", 16 * geometry_records, wgpu::BufferUsages::empty());
         if !g.is_empty() {
             gpu.queue.write_buffer(&geometry, 0, bytemuck::cast_slice(&g));
         }
@@ -521,6 +570,75 @@ impl GpuFracture {
         self.ingest_buffers = Some([ingest.collider_info.clone(), ingest.manifolds.clone(), ingest.sort.clone()]);
     }
 
+    /// Chunks and bonds in use (the high-water marks [`Self::append`] raised).
+    pub fn used(&self) -> (u32, u32) {
+        (self.params.chunk_used, self.params.bond_used)
+    }
+
+    /// Place `t`'s chunks, bonds and parts at `at` (written before the next submission;
+    /// nothing in use is touched). `t`'s bond ends are already table chunk indices (`at.chunk`
+    /// on), each chunk record's first part already a table part index, its parts' colliders
+    /// engine colliders. `frames` sets body slots' frames (the bodies the new chunks are
+    /// on), `free` the body slots a split may give new pieces. `scales` are the fixed-point
+    /// scales for every table now in use ([`FractureTables::scales`] over all of them).
+    pub fn append(&mut self, gpu: &Gpu, at: Base, t: &FractureTables, frames: &[(u32, FrameRecord)], free: &[u32], scales: [f32; 3]) -> Result<(), String> {
+        let (n, e, p) = (t.chunk_count(), t.bond_count(), t.parts.len() as u32);
+        let l = self.layout;
+        let parts_room = self.parts.size() / 32;
+        if at.chunk + n > l.n || at.bond + e > l.e || u64::from(at.part + p) > parts_room {
+            return Err(format!(
+                "fracture: placing {n} chunks at {}, {e} bonds at {}, {p} parts at {}; room for {} chunks, {} bonds, {} parts",
+                at.chunk, at.bond, at.part, l.n, l.e, parts_room
+            ));
+        }
+        if t.info.len() != n as usize || t.chunk_body.len() != n as usize || (!t.geometry.is_empty() && t.geometry.len() != n as usize) {
+            return Err("fracture: appended tables of mismatched lengths".into());
+        }
+        for &(slot, _) in frames {
+            if slot >= l.b {
+                return Err(format!("fracture: body slot {slot}; the tables cover {}", l.b));
+            }
+        }
+        let q = &gpu.queue;
+        if n > 0 {
+            let flat: Vec<[f32; 4]> = t.chunks.iter().flatten().copied().collect();
+            q.write_buffer(&self.chunks, 64 * at.chunk as u64, bytemuck::cast_slice(&flat));
+            q.write_buffer(&self.info, 4 * at.chunk as u64, bytemuck::cast_slice(&t.info));
+            q.write_buffer(&self.work, 4 * (l.w_body() + at.chunk) as u64, bytemuck::cast_slice(&t.chunk_body));
+            if !t.geometry.is_empty() {
+                if self.geometry.size() < 48 * l.n as u64 {
+                    return Err("fracture: strike geometry appended to tables made without it".into());
+                }
+                let g: Vec<[f32; 4]> = t.geometry.iter().flatten().copied().collect();
+                q.write_buffer(&self.geometry, 48 * at.chunk as u64, bytemuck::cast_slice(&g));
+            }
+        }
+        if e > 0 {
+            q.write_buffer(&self.bonds, 16 * at.bond as u64, bytemuck::cast_slice(&t.bonds));
+            q.write_buffer(&self.work, 4 * (l.w_alive() + at.bond) as u64, bytemuck::cast_slice(&vec![1u32; e as usize]));
+        }
+        if p > 0 {
+            let parts: Vec<[f32; 4]> = t.parts.iter().flatten().copied().collect();
+            q.write_buffer(&self.parts, 32 * at.part as u64, bytemuck::cast_slice(&parts));
+        }
+        for (slot, frame) in frames {
+            q.write_buffer(&self.frames, 32 * *slot as u64, bytemuck::cast_slice(frame));
+        }
+        for &slot in free {
+            if slot >= l.b {
+                return Err(format!("fracture: free body slot {slot}; the tables cover {}", l.b));
+            }
+            q.write_buffer(&self.work, 4 * (l.w_free() + slot) as u64, bytemuck::bytes_of(&1u32));
+        }
+        self.params.chunk_used = self.params.chunk_used.max(at.chunk + n);
+        self.params.bond_used = self.params.bond_used.max(at.bond + e);
+        [self.params.scale_m, self.params.scale_s, self.params.scale_j] = scales;
+        q.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+        let scan = ScanParams { n: self.params.chunk_used, in_base: l.w_new(), out_base: l.w_rank(), block_base: l.scan_new_blocks() };
+        q.write_buffer(&self.scan_new, 0, bytemuck::bytes_of(&scan));
+        Ok(())
+    }
+
     /// The view's tables (once per renderer layout).
     pub fn set_view(&mut self, gpu: &Gpu, t: &ViewTables) {
         let chunks: Vec<[f32; 4]> = t.chunks.iter().flatten().copied().collect();
@@ -593,16 +711,16 @@ impl GpuFracture {
         gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            self.direct(&mut pass, "fr_loads", self.layout.n as usize);
-            self.direct(&mut pass, "fr_breaks", self.layout.e as usize);
+            self.direct(&mut pass, "fr_loads", self.params.chunk_used as usize);
+            self.direct(&mut pass, "fr_breaks", self.params.bond_used as usize);
             if self.params.shot_count > 0 {
                 self.direct(&mut pass, "fr_strike_reset", self.layout.b as usize);
-                self.direct(&mut pass, "fr_strike_bounds", self.layout.n as usize);
+                self.direct(&mut pass, "fr_strike_bounds", self.params.chunk_used as usize);
                 self.direct(&mut pass, "fr_strike_find", self.layout.b as usize);
-                self.direct(&mut pass, "fr_strike_entry", self.layout.n as usize);
-                self.direct(&mut pass, "fr_strike_nearest", self.layout.n as usize);
+                self.direct(&mut pass, "fr_strike_entry", self.params.chunk_used as usize);
+                self.direct(&mut pass, "fr_strike_nearest", self.params.chunk_used as usize);
                 self.direct(&mut pass, "fr_strike_force", self.layout.b as usize);
-                self.direct(&mut pass, "fr_strike_breaks", self.layout.e as usize);
+                self.direct(&mut pass, "fr_strike_breaks", self.params.bond_used as usize);
             }
             self.direct(&mut pass, "fr_gate", 1);
         }
