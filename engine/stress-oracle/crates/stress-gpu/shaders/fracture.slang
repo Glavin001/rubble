@@ -64,9 +64,11 @@ struct FractureParams
     // is a free one.
     uint chunk_used;
     uint bond_used;
-    uint pad4;
-    uint pad5;
-    uint pad6;
+    // Room in this frame's event lists (`a_events`, `f_events`): bonds broken, chunks
+    // moved, body frames changed. Zero: no events kept. More is an error (C_ERROR 16).
+    uint ev_broken_cap;
+    uint ev_moved_cap;
+    uint ev_frames_cap;
 };
 
 struct ScanParams
@@ -145,6 +147,11 @@ uint a_counters() { return a_best_root() + params.body_count; }
 // entry time (float bits), the entry chunk's distance to the path (float bits), the entry
 // chunk.
 uint a_strike() { return a_counters() + 16; }
+// This frame's events: the bonds broken, then (chunk, its new body) per chunk moved.
+uint a_events() { return a_strike() + 9 * params.body_count; }
+uint a_moved() { return a_events() + params.ev_broken_cap; }
+// `frames` float4: per changed body this frame (slot as bits, -), its 2 frame float4.
+uint f_events() { return 2 * params.body_count + 9 * params.chunk_count + 3 * params.body_count; }
 
 // Counters (`a_counters` + i).
 static const uint C_FRAME_BROKEN = 0; // bonds broken this frame (fr_gate clears it)
@@ -153,6 +160,10 @@ static const uint C_PIECES = 2;       // new bodies in all
 static const uint C_ERROR = 3;        // bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 a pulse found no room
 static const uint C_SPLIT_FRAMES = 4;
 static const uint C_POOL_TOP = 5;     // + the half: pulses claimed in it this frame
+static const uint C_EV_BROKEN = 8;    // this frame's events (fr_events_reset clears them)
+static const uint C_EV_MOVED = 9;
+static const uint C_EV_FRAMES = 10;
+static const uint ERROR_EVENTS = 16;  // an event list was full (C_ERROR)
 
 // `loads` layout: per chunk 1 float4 (its load), then the two halves of the pulse pool
 // (`pool_cap` pulses of 3 float4 each). A frame reads its chunks' carried pulses from one
@@ -176,6 +187,19 @@ bool dirty(uint body) { return atom[a_dirty() + body].load() != 0; }
 bool live(uint c) { return c < params.chunk_used && body_of(c) != NONE; }
 uint groups_of(uint n, uint size) { return (n + size - 1) / size; }
 
+// This frame's event lists (a host reads them instead of every chunk and bond): kept only
+// when they have room (`ev_*_cap`); a full list is an error, never a silent drop.
+void event_broken(uint bond)
+{
+    if (params.ev_broken_cap == 0)
+        return;
+    uint i = atom[a_counters() + C_EV_BROKEN].add(1u);
+    if (i < params.ev_broken_cap)
+        atom[a_events() + i].store(bond);
+    else
+        atom[a_counters() + C_ERROR].or(ERROR_EVENTS);
+}
+
 // A body slot's structure-frame pose in the world (Z-up): the rotation and origin of its
 // structure's frame, from the engine's record (`bodies` at word `b`) and the slot's frame.
 void structure_pose(uint slot, uint b, out Quat q, out float3 origin)
@@ -184,6 +208,16 @@ void structure_pose(uint slot, uint b, out Quat q, out float3 origin)
     float3 com = frames[2 * slot].xyz;
     q = normalized(quat_mul(rot_from_rubble(quat_of(bodies[b + 1])), p_inv));
     origin = from_rubble(bodies[b].xyz) - rotate(q, com);
+}
+
+// A frame's first kernel: its event lists start empty.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void fr_events_reset(uint3 id: SV_DispatchThreadID)
+{
+    atom[a_counters() + C_EV_BROKEN].store(0);
+    atom[a_counters() + C_EV_MOVED].store(0);
+    atom[a_counters() + C_EV_FRAMES].store(0);
 }
 
 [shader("compute")]
@@ -246,6 +280,7 @@ void fr_breaks(uint3 id: SV_DispatchThreadID)
         atom[a_dirty() + body_of(bond.x)].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
     }
 }
 
@@ -648,6 +683,19 @@ void fr_commit(uint3 id: SV_DispatchThreadID)
             bodies[BODY_WORDS * (slot + region * params.max_bodies) + w] = frames[st + w];
     frames[2 * slot] = frames[st + 7];
     frames[2 * slot + 1] = frames[st + 8];
+    if (params.ev_frames_cap != 0)
+    {
+        uint i = atom[a_counters() + C_EV_FRAMES].add(1u);
+        if (i < params.ev_frames_cap)
+        {
+            uint at = f_events() + 3 * i;
+            frames[at] = float4(asfloat(slot), 0.0, 0.0, 0.0);
+            frames[at + 1] = frames[st + 7];
+            frames[at + 2] = frames[st + 8];
+        }
+        else
+            atom[a_counters() + C_ERROR].or(ERROR_EVENTS);
+    }
 }
 
 // The chunk's colliders on its piece's body (`member_colliders`), and the ingest's view
@@ -661,6 +709,17 @@ void fr_reparent(uint3 id: SV_DispatchThreadID)
         return;
     uint r = work[w_label() + c];
     uint slot = work[w_slot() + r];
+    if (slot != body_of(c) && params.ev_moved_cap != 0)
+    {
+        uint i = atom[a_counters() + C_EV_MOVED].add(1u);
+        if (i < params.ev_moved_cap)
+        {
+            atom[a_moved() + 2 * i].store(c);
+            atom[a_moved() + 2 * i + 1].store(slot);
+        }
+        else
+            atom[a_counters() + C_ERROR].or(ERROR_EVENTS);
+    }
     work[w_body() + c] = slot;
     float3 com = frames[2 * slot].xyz;
     Quat to_body = conj(quat_of(frames[2 * slot + 1]));
@@ -1120,5 +1179,6 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
         atom[a_dirty() + b].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
     }
 }

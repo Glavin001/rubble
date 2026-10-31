@@ -410,8 +410,6 @@ mod imp {
         dt: f32,
         /// Colliders the ingest now sees as projectiles.
         projectile_colliders: Vec<u32>,
-        /// One past the highest body slot a threshold destructible uses (the frames read).
-        body_high: u32,
     }
 
     /// The world's threshold destructibles.
@@ -423,6 +421,12 @@ mod imp {
         /// Reserved body slots no piece has taken yet: one pool for every destructible
         /// (a split takes the lowest free slot, whoever reserved it).
         spare: std::collections::BTreeSet<u32>,
+        /// Live slots by their first chunk and first bond (start, end, slot), sorted: an
+        /// event's destructible.
+        chunk_ranges: Vec<(u32, u32, usize)>,
+        bond_ranges: Vec<(u32, u32, usize)>,
+        /// Bonds the host broke (support loss) since the last frame read: (slot, bond).
+        host_broken: Vec<(usize, u32)>,
         /// Registered projectiles: body slot and generation, material.
         projectiles: Vec<(u32, u32, Projectile)>,
         projectiles_dirty: bool,
@@ -448,10 +452,22 @@ mod imp {
     #[derive(Clone, Copy, Debug)]
     pub(crate) enum FractureRead {
         Counters,
-        ChunkBodies,
-        Intact,
+        /// This step's events: bonds broken, chunks moved (chunk, body), body frames.
+        Broken,
+        Moved,
         Frames,
     }
+
+    /// Each step's event lists' room (`fracture::Events`): a step that breaks, moves or
+    /// re-frames more fails with an error naming the limit.
+    pub(crate) const EVENT_ROOM: fracture::Events = fracture::Events {
+        broken: 16_384,
+        moved: 16_384,
+        frames: 4_096,
+    };
+
+    /// A body's frame record, as the GPU wrote it.
+    type Frame = [[f32; 4]; 2];
 
     fn buffers(sim: &engine_webgpu::WgpuSim) -> EngineBuffers<'_> {
         EngineBuffers {
@@ -1028,7 +1044,6 @@ mod imp {
                     bytemuck::cast_slice(&infos),
                 );
             }
-            sh.body_high = sh.body_high.max(body_count);
             self.fracture.spare.extend(spare.iter().copied());
             let slot = ThresholdSlot {
                 destructible: index as u32,
@@ -1066,7 +1081,15 @@ mod imp {
                     self.fracture.slots.len() - 1
                 }
             };
+            let (base, n, e) = (slot.base, slot.chunk_body.len() as u32, slot.intact.len() as u32);
             self.fracture.slots[k] = Some(slot);
+            for (ranges, start, len) in [
+                (&mut self.fracture.chunk_ranges, base.chunk, n),
+                (&mut self.fracture.bond_ranges, base.bond, e),
+            ] {
+                let at = ranges.partition_point(|r| r.0 < start);
+                ranges.insert(at, (start, start + len, k));
+            }
             // A plan from counters read a frame or more late would differ run to run: the
             // lab fixes it (the hash at the contact capacity, every colour its own
             // dispatch).
@@ -1134,6 +1157,7 @@ mod imp {
                 chunks: capacity.max_bodies,
                 bonds: capacity.max_bodies.saturating_mul(4),
                 parts: capacity.max_colliders,
+                events: EVENT_ROOM,
             };
             let table = vec![static_info; capacity.max_colliders as usize];
             let ingest = EngineIngest::new(
@@ -1169,7 +1193,6 @@ mod imp {
                 band,
                 dt,
                 projectile_colliders: Vec::new(),
-                body_high: 0,
             });
             Ok(())
         }
@@ -1209,27 +1232,13 @@ mod imp {
             };
             let f = &sh.fracture;
             let l = f.layout;
-            let (chunks, bonds) = f.used();
+            // The counters and this step's event lists: nothing that scales with the
+            // destructibles placed.
             for (read, buffer, offset, size) in [
-                (
-                    FractureRead::Counters,
-                    &f.atom,
-                    4 * l.a_counters() as u64,
-                    4 * COUNTER_WORDS,
-                ),
-                (
-                    FractureRead::ChunkBodies,
-                    &f.work,
-                    4 * l.w_body() as u64,
-                    4 * chunks as u64,
-                ),
-                (
-                    FractureRead::Intact,
-                    &f.work,
-                    4 * l.w_alive() as u64,
-                    4 * bonds as u64,
-                ),
-                (FractureRead::Frames, &f.frames, 0, 32 * sh.body_high as u64),
+                (FractureRead::Counters, &f.atom, 4 * l.a_counters() as u64, 4 * COUNTER_WORDS),
+                (FractureRead::Broken, &f.atom, 4 * l.a_events() as u64, 4 * l.events.broken as u64),
+                (FractureRead::Moved, &f.atom, 4 * l.a_moved() as u64, 8 * l.events.moved as u64),
+                (FractureRead::Frames, &f.frames, 16 * l.f_events() as u64, 48 * l.events.frames as u64),
             ] {
                 if size > 0 {
                     out.push(crate::readback::Extra {
@@ -1261,37 +1270,71 @@ mod imp {
                     .find(|(r, _)| std::mem::discriminant(r) == std::mem::discriminant(&want))
                     .map(|(_, b)| *b)
             };
-            let (Some(counters), Some(chunks)) = (
-                find(FractureRead::Counters),
-                find(FractureRead::ChunkBodies),
-            ) else {
+            let Some(counters) = find(FractureRead::Counters) else {
                 return Ok(out);
             };
             let counters: &[u32] = bytemuck::cast_slice(counters);
+            let [nb, nm, nf] = fracture::Layout::EVENT_COUNTERS.map(|w| counters[w as usize]);
+            anyhow::ensure!(
+                counters[3] & fracture::ERROR_EVENTS == 0,
+                "step {step}: threshold fracture events beyond their room: {nb} bonds broken (room {}), {nm} chunks moved (room {}), {nf} bodies re-framed (room {})",
+                EVENT_ROOM.broken,
+                EVENT_ROOM.moved,
+                EVENT_ROOM.frames
+            );
             anyhow::ensure!(counters[3] == 0, "step {step}: threshold fracture error {:#x} (1: no free body slot, 2: mass sum out of range, 4: union did not settle, 8: impact pulse pool full)", counters[3]);
-            let chunks: &[u32] = bytemuck::cast_slice(chunks);
-            let intact: &[u32] = find(FractureRead::Intact)
-                .map(bytemuck::cast_slice)
+            let words = |r: FractureRead, n: usize| -> &[u32] {
+                find(r)
+                    .map(|b| &bytemuck::cast_slice::<u8, u32>(b)[..n])
+                    .unwrap_or_default()
+            };
+            let broken = words(FractureRead::Broken, nb as usize);
+            let moved = words(FractureRead::Moved, 2 * nm as usize);
+            let frame_words: &[[f32; 4]] = find(FractureRead::Frames)
+                .map(|b| &bytemuck::cast_slice::<u8, [f32; 4]>(b)[..3 * nf as usize])
                 .unwrap_or_default();
-            let frames: Vec<[f32; 4]> = find(FractureRead::Frames)
-                .map(|b| bytemuck::cast_slice(b).to_vec())
-                .unwrap_or_default();
-            for k in 0..self.fracture.slots.len() {
-                let Some(t) = self.fracture.slots[k].as_ref() else {
-                    continue;
-                };
-                // This destructible's chunks and bonds, in its own numbering.
-                let (c0, n) = (t.base.chunk as usize, t.chunk_body.len());
-                let (b0, e) = (t.base.bond as usize, t.intact.len());
-                let Some(own_chunks) = chunks.get(c0..c0 + n) else {
-                    // Placed after this step was read: nothing of it ran yet.
-                    continue;
-                };
-                let own_chunks = own_chunks.to_vec();
-                let own_intact: Vec<bool> = intact
-                    .get(b0..b0 + e)
-                    .map(|w| w.iter().map(|&x| x != 0).collect())
-                    .unwrap_or_default();
+            let host_broken = std::mem::take(&mut self.fracture.host_broken);
+            if broken.is_empty() && moved.is_empty() && host_broken.is_empty() {
+                return Ok(out);
+            }
+            let frames: std::collections::HashMap<u32, Frame> = frame_words
+                .chunks_exact(3)
+                .map(|r| (r[0][0].to_bits(), [r[1], r[2]]))
+                .collect();
+            // Each event to its destructible, in its own numbering.
+            let owner = |ranges: &[(u32, u32, usize)], at: u32| -> Option<(usize, u32)> {
+                let i = ranges.partition_point(|r| r.0 <= at).checked_sub(1)?;
+                let (start, end, k) = ranges[i];
+                (at < end).then_some((k, at - start))
+            };
+            type SlotEvents = (Vec<u32>, Vec<(u32, u32)>);
+            let mut per_slot: std::collections::BTreeMap<usize, SlotEvents> =
+                std::collections::BTreeMap::new();
+            for &b in broken {
+                if let Some((k, local)) = owner(&self.fracture.bond_ranges, b) {
+                    per_slot.entry(k).or_default().0.push(local);
+                }
+            }
+            for (k, local) in host_broken {
+                if self.fracture.slots.get(k).is_some_and(|s| s.is_some()) {
+                    per_slot.entry(k).or_default().0.push(local);
+                }
+            }
+            for pair in moved.chunks_exact(2) {
+                if let Some((k, local)) = owner(&self.fracture.chunk_ranges, pair[0]) {
+                    per_slot.entry(k).or_default().1.push((local, pair[1]));
+                }
+            }
+            for (k, (bonds, chunks)) in per_slot {
+                let t = self.fracture.slots[k].as_ref().expect("live slot");
+                let mut own_chunks = t.chunk_body.clone();
+                for (c, b) in chunks {
+                    own_chunks[c as usize] = b;
+                }
+                let mut own_intact = t.intact.clone();
+                for b in bonds {
+                    own_intact[b as usize] = false;
+                }
                 let events = self.apply_fracture(k, step, own_chunks, own_intact, &frames)?;
                 let broken: Vec<u32> = events
                     .iter()
@@ -1315,7 +1358,7 @@ mod imp {
             step: u64,
             chunks: Vec<u32>,
             intact: Vec<bool>,
-            frames: &[[f32; 4]],
+            frames: &std::collections::HashMap<u32, Frame>,
         ) -> anyhow::Result<Vec<DestructionEvent>> {
             let t = self.fracture.slots[k].as_mut().expect("live slot");
             let d = t.destructible as usize;
@@ -1514,6 +1557,9 @@ mod imp {
                 .collect();
             let sh = self.fracture.shared.as_ref().expect("shared fracture");
             sh.fracture.break_bonds_at(&gpu, &at);
+            // The GPU reports only the bonds it breaks itself: these are reported with
+            // the next frame read.
+            self.fracture.host_broken.extend(over.iter().map(|&b| (k, b)));
         }
 
         /// A changed body's mass, solver frame (from the GPU's frame record), type and
@@ -1523,7 +1569,7 @@ mod imp {
             k: usize,
             b: u32,
             from_step: u64,
-            frames: &[[f32; 4]],
+            frames: &std::collections::HashMap<u32, Frame>,
         ) -> anyhow::Result<()> {
             let t = self.fracture.slots[k].as_ref().expect("live slot");
             let chunks: Vec<usize> = (0..t.chunk_body.len())
@@ -1537,13 +1583,10 @@ mod imp {
                 // Every chunk left it (cannot happen: the largest piece keeps its body).
                 return Ok(());
             }
-            let rec = |i: usize| {
-                frames
-                    .get(i)
-                    .copied()
-                    .ok_or_else(|| anyhow::anyhow!("fracture frame {i} missing"))
-            };
-            let (c0, c1) = (rec(2 * b as usize)?, rec(2 * b as usize + 1)?);
+            let [c0, c1] = frames
+                .get(&b)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("fracture frame of body {b} missing"))?;
             let structure = c0[3].to_bits() as usize;
             let (sq, st) = t.structures[structure];
             let com = DVec3::new(c0[0] as f64, c0[1] as f64, c0[2] as f64);
@@ -1648,6 +1691,9 @@ mod imp {
         /// that no piece took (a split takes the lowest spare, whoever reserved it).
         pub(crate) fn destroy_threshold(&mut self, k: usize) -> anyhow::Result<()> {
             let t = self.fracture.slots[k].take().expect("live slot");
+            self.fracture.chunk_ranges.retain(|r| r.2 != k);
+            self.fracture.bond_ranges.retain(|r| r.2 != k);
+            self.fracture.host_broken.retain(|h| h.0 != k);
             let gpu = self
                 .fracture
                 .gpu

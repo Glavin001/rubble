@@ -128,9 +128,9 @@ struct FractureParams {
     /// Chunks and bonds in use (`fracture.slang`): placed into capacity-sized tables.
     chunk_used: u32,
     bond_used: u32,
-    pad4: u32,
-    pad5: u32,
-    pad6: u32,
+    ev_broken_cap: u32,
+    ev_moved_cap: u32,
+    ev_frames_cap: u32,
 }
 
 /// What a fracture's tables hold room for (`GpuFracture::with_capacity`): its layout is
@@ -141,7 +141,25 @@ pub struct Capacity {
     pub chunks: u32,
     pub bonds: u32,
     pub parts: u32,
+    /// Room in each frame's event lists (zero: none kept).
+    pub events: Events,
 }
+
+/// Each frame's event lists (`fracture.slang` `a_events`, `f_events`): what changed, for a
+/// host that reads them instead of every chunk owner, bond state and body frame. More
+/// events in a frame than their room is an error ([`ERROR_EVENTS`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Events {
+    /// Bonds broken.
+    pub broken: u32,
+    /// Chunks that moved to another body (chunk, body).
+    pub moved: u32,
+    /// Bodies whose frame changed (slot, frame).
+    pub frames: u32,
+}
+
+/// `Counters::error`'s bit for a full event list.
+pub const ERROR_EVENTS: u32 = 16;
 
 /// Where [`GpuFracture::append`] places a table's records: its first chunk, bond and part.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -179,6 +197,7 @@ pub struct Layout {
     pub n: u32,
     pub e: u32,
     pub b: u32,
+    pub events: Events,
 }
 
 impl Layout {
@@ -231,9 +250,23 @@ impl Layout {
     pub fn a_strike(&self) -> u32 {
         self.a_counters() + 16
     }
-    pub fn atom_words(&self) -> u32 {
+    /// This frame's broken bonds, then (chunk, body) per chunk moved.
+    pub fn a_events(&self) -> u32 {
         self.a_strike() + 9 * self.b
     }
+    pub fn a_moved(&self) -> u32 {
+        self.a_events() + self.events.broken
+    }
+    pub fn atom_words(&self) -> u32 {
+        self.a_moved() + 2 * self.events.moved
+    }
+    /// `frames` float4: per body whose frame changed this frame, (slot as bits, -) and
+    /// its two frame float4.
+    pub fn f_events(&self) -> u32 {
+        2 * self.b + 9 * self.n + 3 * self.b
+    }
+    /// The counters' words for this frame's event counts (broken, moved, frames).
+    pub const EVENT_COUNTERS: [u32; 3] = [8, 9, 10];
 }
 
 const SUMS: u32 = 20;
@@ -285,7 +318,7 @@ const BINDINGS: [Binding; 23] = [
     Binding::Storage,   // strike shots
 ];
 
-const ENTRIES: [&str; 29] = [
+const ENTRIES: [&str; 30] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -315,6 +348,7 @@ const ENTRIES: [&str; 29] = [
     "fr_strike_nearest",
     "fr_strike_force",
     "fr_strike_breaks",
+    "fr_events_reset",
 ];
 
 #[repr(C)]
@@ -400,7 +434,7 @@ impl GpuFracture {
     /// The fracture of `t`, bound to the engine's buffers and the ingest's (both must keep
     /// their buffers while it lives; [`Self::rebind`] after either replaces one).
     pub fn new(gpu: &Gpu, t: &FractureTables, engine: &EngineBuffers, ingest: &EngineIngest) -> Result<GpuFracture, String> {
-        let room = Capacity { chunks: t.chunk_count(), bonds: t.bond_count(), parts: t.parts.len() as u32 };
+        let room = Capacity { chunks: t.chunk_count(), bonds: t.bond_count(), parts: t.parts.len() as u32, events: Events::default() };
         Self::with_capacity(gpu, t, room, engine, ingest)
     }
 
@@ -420,13 +454,16 @@ impl GpuFracture {
         if t.info.len() != used_n as usize || t.chunk_body.len() != used_n as usize || t.free.len() != b as usize {
             return Err("fracture: tables of mismatched lengths".into());
         }
-        let layout = Layout { n, e, b };
+        let layout = Layout { n, e, b, events: room.events };
         let [scale_m, scale_s, scale_j] = t.scales();
         let params = FractureParams {
             chunk_count: n,
             bond_count: e,
             chunk_used: used_n,
             bond_used: used_e,
+            ev_broken_cap: room.events.broken,
+            ev_moved_cap: room.events.moved,
+            ev_frames_cap: room.events.frames,
             body_count: b,
             max_bodies: t.max_bodies,
             step: 0,
@@ -477,8 +514,8 @@ impl GpuFracture {
         let work = gpu.storage("fracture work", &words);
         let atom = storage_bytes(gpu, "fracture atom", 4 * layout.atom_words() as u64, wgpu::BufferUsages::empty());
         let mut frames: Vec<[f32; 4]> = t.frames.iter().flatten().copied().collect();
-        // + staging (9 per chunk) + the strikes (3 per body slot).
-        frames.resize((2 * b + 9 * n + 3 * b) as usize, [0.0; 4]);
+        // + staging (9 per chunk) + the strikes (3 per body slot) + the frame events.
+        frames.resize((2 * b + 9 * n + 3 * b + 3 * room.events.frames) as usize, [0.0; 4]);
         let frames = gpu.storage("fracture frames", &frames);
         let loads = storage_bytes(gpu, "fracture loads", 16 * (n as u64 + 2 * 3 * t.pool_cap as u64), wgpu::BufferUsages::empty());
         let sizes = storage_bytes(gpu, "fracture sizes", 12 * ARGS, wgpu::BufferUsages::empty());
@@ -738,6 +775,9 @@ impl GpuFracture {
         gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
+            if self.layout.events != Events::default() {
+                self.direct(&mut pass, "fr_events_reset", 1);
+            }
             self.direct(&mut pass, "fr_loads", self.params.chunk_used as usize);
             self.direct(&mut pass, "fr_breaks", self.params.bond_used as usize);
             if self.params.shot_count > 0 {

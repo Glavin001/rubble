@@ -262,6 +262,7 @@ pub mod shaders {
             ("fr_strike_nearest", (64, 1, 1)),
             ("fr_strike_force", (64, 1, 1)),
             ("fr_strike_breaks", (64, 1, 1)),
+            ("fr_events_reset", (1, 1, 1)),
         ]
     );
 
