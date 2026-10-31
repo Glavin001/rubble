@@ -2,13 +2,13 @@
 // wasm by engine-fracture-wasm): GLB parsing, scene building, hull cooking and
 // the per-tick dispatch plan. The native Metal viewer runs the same Rust.
 // Build: see fracture/README.md (wasm-pack ... --out-dir ../engine-webgpu/generated/fracture-wasm).
-import init,{initSync,Asset,Scene,Plan,HullArena as RustArena,hullView as rustHullView,hullBase,samples,packSamples,packSampleJson,colliderWorldVertices,colliderWorldBounds,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices} from '../generated/fracture-wasm/engine_fracture_wasm.js';
+import init,{initSync,Asset,Scene,Plan,nearMissSettings,HullArena as RustArena,hullView as rustHullView,hullBase,samples,packSamples,packSampleJson,colliderWorldVertices,colliderWorldBounds,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices} from '../generated/fracture-wasm/engine_fracture_wasm.js';
 
 const wasmUrl=new URL('../generated/fracture-wasm/engine_fracture_wasm_bg.wasm',import.meta.url);
 if(globalThis.process?.versions?.node){const {readFileSync}=await import('node:fs');initSync({module:readFileSync(wasmUrl)})}
 else await init({module_or_path:wasmUrl});
 
-export {Plan,hullBase,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices,packSampleJson};
+export {Plan,nearMissSettings,hullBase,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices,packSampleJson};
 export const SAMPLES=samples();
 // Scene packs built in Rust (the Wrecking Yard): {key, group, menu, label}; packSampleJson(key) is the pack.
 export const PACK_SAMPLES=packSamples();
@@ -25,7 +25,7 @@ export function parseFractureGlb(buffer){
 // decoded on first use (diagnostics and tests only).
 export function sceneObject(handle){
  const scene={handle,...handle.meta(),hullData:handle.hullData(),vertices:handle.vertices(),lines:handle.lines(),
-  projectileVertices:handle.projectileVertices(),roadVertices:handle.roadVertices()};
+  projectileVertices:handle.projectileVertices(),roadVertices:handle.roadVertices(),propVertices:handle.propVertices()};
  let bodies,colliders,joints;
  Object.defineProperties(scene,{
   bodies:{get:()=>bodies??=handle.bodies(),enumerable:true},
@@ -54,6 +54,11 @@ export const withoutJoints=scene=>sceneObject(sceneHandle(scene).withoutJoints()
 // [{step, origin, dir, label}] relative to the step it starts at.
 export const buildTowersScene=(one,{columns=2,rows=2,gap=6,radius,mass}={})=>sceneObject(sceneHandle(one).towers(columns,rows,gap,radius,mass));
 export const towersVolley=(scene,{raking=8,base=16,every=45}={})=>sceneHandle(scene).volley(raking,base,every);
+// Parked cars and pedestrians on the block's streets (engine-fracture props.rs),
+// a meteor onto a tower, and base shots that topple one over its street.
+export const withCity=scene=>sceneObject(sceneHandle(scene).withCity());
+export const meteorShot=scene=>sceneHandle(scene).meteorShot();
+export const toppleShots=(scene,{tower=0,shots=12,every=20}={})=>sceneHandle(scene).toppleShots(tower,shots,every);
 export const withBondStrength=(scene,scale)=>sceneObject(sceneHandle(scene).withBondStrength(scale));
 export const withProjectileRadius=(scene,scale)=>sceneObject(sceneHandle(scene).withProjectileRadius(scale));
 export const withCapacity=(scene,partial)=>sceneObject(sceneHandle(scene).withCapacity(partial));

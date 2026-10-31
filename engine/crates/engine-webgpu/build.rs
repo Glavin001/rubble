@@ -164,6 +164,12 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_sleep",
     // Render poses for hosts (slang/kernels/pose_pack.slang).
     "pose_pack",
+    // Directed debris (slang/kernels/guide_step.slang).
+    "guide_scan",
+    "guide_select",
+    "guide_rank",
+    "guide_plan",
+    "guide_commit",
     // Deformable terrain MPM (slang/kernels/terrain_mpm.slang).
     "mpm_clear",
     "mpm_touch",
@@ -278,6 +284,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     }
     if entry == "pose_pack" {
         return kernels.join("pose_pack.slang");
+    }
+    if entry.starts_with("guide_") {
+        return kernels.join("guide_step.slang");
     }
     if entry.starts_with("mpm_") {
         return kernels.join("terrain_mpm.slang");

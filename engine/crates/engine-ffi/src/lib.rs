@@ -19,6 +19,7 @@
 #![allow(non_camel_case_types, clippy::missing_safety_doc)]
 
 mod controls;
+mod guidance;
 pub use controls::*;
 mod terrain;
 pub use terrain::*;
@@ -176,6 +177,9 @@ pub struct RbWorldDef {
     pub contacts: RbContacts,
     /// Reserve a soft-body arena (needs `RB_CONTACTS_CANONICAL`).
     pub enable_soft_bodies: bool,
+    /// Reserve directed-debris buffers (`rbWorld_SetGuidance`; 256 zones,
+    /// 256 plans per step).
+    pub enable_guidance: bool,
     /// Steps whose results can be in flight; drop (and resync) instead of
     /// waiting when all are.
     pub readback_frames: u32,
@@ -1431,6 +1435,7 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
         max_hull_vertices: c.max_hull_vertices,
         contacts: RbContacts::RB_CONTACTS_PERSISTENT,
         enable_soft_bodies: false,
+        enable_guidance: false,
         readback_frames: 3,
         drop_frames: false,
         hit_event_threshold: 1.0,
@@ -1470,6 +1475,7 @@ pub unsafe extern "C" fn rbCreateWorld(def: *const RbWorldDef, out: *mut *mut Rb
                 RbContacts::RB_CONTACTS_CANONICAL => ContactStorage::Canonical,
             },
             soft: d.enable_soft_bodies.then(SoftCapacity::default),
+            guidance: d.enable_guidance.then(GuidanceCapacity::default),
             solver,
             readback_frames: d.readback_frames,
             hit_event_threshold: coords.length_in(d.hit_event_threshold),
