@@ -466,6 +466,7 @@ pub fn stress_fire_pack_shot(index: u32) -> bool {
             angular_velocity: zup(shot.angular_velocity),
             material: "projectile".into(),
             crush: None,
+            ccd: true,
         })
     });
     RUNNING.set(true);

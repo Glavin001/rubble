@@ -40,6 +40,7 @@ fn crushed(gpu: &Gpu, crush: bool) -> (u32, u32) {
             angular_velocity: [0.0; 3],
             material: "projectile".into(),
             crush: None,
+            ccd: true,
         },
     );
     for _ in 0..20 {

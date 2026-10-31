@@ -96,6 +96,7 @@ fn a_block_freed_on_the_gpu_lands_on_the_ground() {
             angular_velocity: [0.0; 3],
             material: "projectile".into(),
             crush: None,
+            ccd: true,
         };
         assert!(w.launch(&gpu, &desc), "shot launched");
     }
