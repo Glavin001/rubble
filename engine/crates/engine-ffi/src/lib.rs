@@ -695,6 +695,18 @@ pub struct RbFrame {
     pub projectile_count: u32,
     pub projectile_events: *const RbProjectileEvent,
     pub projectile_event_count: u32,
+    /// Deformable terrain (`rbWorld_EnableTerrain`): the latest step's
+    /// counters while an area is open (`has_terrain`).
+    pub has_terrain: bool,
+    pub terrain: RbTerrainReport,
+    /// With `enable_surface`: each open area's live ground, and the debris.
+    pub terrain_surfaces: *const RbTerrainSurface,
+    pub terrain_surface_count: u32,
+    pub terrain_debris: *const RbTerrainDebris,
+    pub terrain_debris_count: u32,
+    /// Areas that baked, in step order: re-read their shapes' heights.
+    pub terrain_bakes: *const RbTerrainBake,
+    pub terrain_bake_count: u32,
 }
 
 impl RbFrame {
@@ -742,6 +754,14 @@ impl RbFrame {
             projectile_count: 0,
             projectile_events: std::ptr::null(),
             projectile_event_count: 0,
+            has_terrain: false,
+            terrain: RbTerrainReport::default(),
+            terrain_surfaces: std::ptr::null(),
+            terrain_surface_count: 0,
+            terrain_debris: std::ptr::null(),
+            terrain_debris_count: 0,
+            terrain_bakes: std::ptr::null(),
+            terrain_bake_count: 0,
         }
     }
 }
@@ -768,6 +788,7 @@ struct FrameStore {
     overlaps: Vec<RbOverlapResult>,
     overlap_shapes: Vec<Vec<RbShapeId>>,
     motion: Option<motion::MotionStore>,
+    terrain: Option<terrain::TerrainStore>,
     /// Backing for bond lists, chunk lists, body lists and child arrays (the
     /// heap buffers do not move when these outer vectors grow).
     u32_lists: Vec<Vec<u32>>,
@@ -1308,6 +1329,14 @@ impl RbWorld {
             out.shapes = shapes.as_ptr();
         }
         let m = s.motion.insert(motion::MotionStore::new(coords, &c));
+        let t = s.terrain.insert(terrain::TerrainStore::new(
+            &self.world,
+            &coords,
+            c.terrain.as_ref(),
+            &c.terrain_surface,
+            &c.terrain_debris,
+            &c.terrain_bakes,
+        ));
         let counters = c.counters;
         RbFrame {
             has_frame: true,
@@ -1352,6 +1381,14 @@ impl RbWorld {
             projectile_count: m.projectiles.len() as u32,
             projectile_events: m.projectile_events.as_ptr(),
             projectile_event_count: m.projectile_events.len() as u32,
+            has_terrain: t.report.is_some(),
+            terrain: t.report.unwrap_or_default(),
+            terrain_surfaces: t.surfaces.as_ptr(),
+            terrain_surface_count: t.surfaces.len() as u32,
+            terrain_debris: t.debris.as_ptr(),
+            terrain_debris_count: t.debris.len() as u32,
+            terrain_bakes: t.bakes.as_ptr(),
+            terrain_bake_count: t.bakes.len() as u32,
         }
     }
 }
