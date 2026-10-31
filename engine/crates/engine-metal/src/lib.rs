@@ -3,10 +3,12 @@
 mod device;
 mod pipelines;
 mod sim;
+pub mod terrain;
 mod world;
 
 pub use device::MetalDevice;
 pub use sim::MetalSim;
+pub use terrain::{TerrainCaps, TerrainTiming};
 pub use engine_schema::scene::SceneBuilder;
 pub use world::MetalWorld;
 

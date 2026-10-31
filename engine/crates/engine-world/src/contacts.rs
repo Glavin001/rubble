@@ -204,7 +204,9 @@ impl World {
             if overlaps.contains_key(key) {
                 continue;
             }
-            if self.asleep(o.bodies) {
+            // A step that lost records cannot tell a missing pair from one it
+            // could not hold: it ends nothing, and the pair stays.
+            if lost > 0 || self.asleep(o.bodies) {
                 self.contacts.overlapping.insert(*key, *o);
             } else {
                 sensors.end.push(o.event);
@@ -223,8 +225,10 @@ impl World {
             if now.contains_key(key) {
                 continue;
             }
-            // Asleep pairs keep touching (their manifolds may not be rebuilt).
-            if self.asleep(touch.bodies) {
+            // Asleep pairs keep touching (their manifolds may not be rebuilt),
+            // and a step that lost records ends nothing (the pair may be one
+            // the region could not hold).
+            if lost > 0 || self.asleep(touch.bodies) {
                 self.contacts.touching.insert(*key, *touch);
             } else {
                 events.end.push(ContactEndEvent {

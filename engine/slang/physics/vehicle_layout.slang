@@ -117,6 +117,12 @@ static const uint W_FP = 37u;      // suspension force point (chassis space).xyz
 static const uint W_TJ = 38u;      // uint4(tyreJoint, shellCollider, twoBodyGround (NO_INDEX = static ground), pad)
 static const uint W_MOUNT = 39u;   // breakForce, breakTorque, lastForce, lastTorque (vehicle_loads)
 static const uint W_MOUNT2 = 40u;  // mount anchor (chassis space).xyz, peak load ratio
+// Soil (deformable terrain T5, vehicle_step.slang wheel_soil / wheel_soil_press);
+// zero while the wheel has never stood on a soil heightfield.
+static const uint W_SOIL0 = 41u;   // pressed segment: start.xz, end − start (.zw), in the soil field's local frame
+static const uint W_SOIL1 = 42u;   // rolling direction.xz (field-local, unit), imprint half width, depth to press (0 = none)
+static const uint W_SOIL2 = 43u;   // asfloat(soil collider + 1; 0 = none), compaction resistance R_c (N), load W (N), sinkage z (m)
+static const uint W_SOIL3 = 44u;   // compaction already ahead of the wheel z₀ (m), pad
 
 // Wheel config flags (W_CFG.y)
 static const uint WF_STEER = 1u;
@@ -173,5 +179,7 @@ static const uint POD_COUNT_SHIFT = 28u; // V_QUERY.zw: firstCollider | count <<
 // cos 35°: sphere-cast hits steeper than this belong to the wheel shell.
 static const float SWEEP_CONE_COS = 0.819;
 static const uint MAX_DRIVEN_WHEELS = 8u;
+// wheel_soil_press threads: each owns the heightfield records r ≡ lane (mod SOIL_LANES).
+static const uint SOIL_LANES = 256u;
 
 #endif

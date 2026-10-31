@@ -59,6 +59,7 @@ static const uint SHAPE_CAPSULE = 1u;
 static const uint SHAPE_BOX = 2u;
 static const uint SHAPE_CONVEX = 3u;
 static const uint SHAPE_PLANE = 4u;
+static const uint SHAPE_HEIGHTFIELD = 5u;
 
 struct Material
 {
@@ -234,7 +235,7 @@ static const uint OVERFLOW_LARGE_DYNAMICS = 2048u; // uniform grid: more than 16
 static const uint OVERFLOW_CCD_BODIES = 4096u; // more awake CCD bodies than CCD_BODY_CAP
 static const uint OVERFLOW_IMPULSES = 8192u; // more impulse records than IMPULSE_CAP
 static const uint OVERFLOW_CCD_PAIRS = 32768u; // more CCD candidate pairs than CCD_PAIR_CAP
-static const uint OVERFLOW_CCD_LATE = 65536u; // more late-sweep colliders than CCD_LATE_CAP
+static const uint OVERFLOW_CCD_LATE = 131072u; // more late-sweep colliders than CCD_LATE_CAP
 
 struct GpuCommand
 {

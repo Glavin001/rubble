@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the WebGPU demos into one static site: the demo scenes (demo.html), the vehicle
-# demo (vehicle.html), soft-body vehicles (softbody.html), the motion demo (motion.html:
+# demo (vehicle.html), soft-body vehicles (softbody.html), heightfield terrain (terrain.html), the meteor impact (impact.html), the meteor run (showcase.html), the motion demo (motion.html:
 # CCD, characters, bullets), the fracture lab (fracture/) and a landing page (index.html).
 # The one command Vercel, CI and local builds use. Runs on Linux and macOS; no GPU needed.
 #
@@ -209,7 +209,7 @@ step "Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
 step "Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$OUT"/
+cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$OUT"/
 cp "$WEB"/*.mjs "$OUT"/
 cp -R "$WEB"/generated "$OUT"/generated
 cp -R "$WEB"/fracture "$OUT"/fracture

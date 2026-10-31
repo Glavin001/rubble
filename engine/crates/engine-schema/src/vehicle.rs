@@ -105,6 +105,14 @@ pub const W_FP: u32 = 37;
 pub const W_TJ: u32 = 38; // suspension force point (chassis space).xyz, enabled (1/0)
 pub const W_MOUNT: u32 = 39; // breakForce, breakTorque, lastForce, lastTorque (vehicle_loads)
 pub const W_MOUNT2: u32 = 40; // mount anchor (chassis space).xyz, peak load ratio
+/// Soil (deformable terrain T5): pressed segment start.xz, end − start (field-local).
+pub const W_SOIL0: u32 = 41;
+/// Rolling direction.xz (field-local), imprint half width, depth to press.
+pub const W_SOIL1: u32 = 42;
+/// asfloat(soil collider + 1; 0 = none), compaction resistance (N), load (N), sinkage (m).
+pub const W_SOIL2: u32 = 43;
+/// Compaction already ahead of the wheel (m), pad.
+pub const W_SOIL3: u32 = 44;
 pub const WF_STEER: u32 = 1;
 pub const WF_DRIVEN: u32 = 2;
 pub const WF_HANDBRAKE: u32 = 4;
@@ -146,6 +154,8 @@ pub const SHELL_SPHERES: u32 = 5;
 /// V_QUERY.zw track pod: first collider | (collider count << POD_COUNT_SHIFT).
 pub const POD_COUNT_SHIFT: u32 = 28;
 pub const MAX_DRIVEN_WHEELS: u32 = 8;
+/// `wheel_soil_press` threads (each owns heightfield records r ≡ lane mod this).
+pub const SOIL_LANES: u32 = 256;
 
 /// `BodyState::flags` bit for a vehicle chassis (`initial_pad` = asfloat(block index)).
 pub const BODY_VEHICLE: u32 = 32;
@@ -254,6 +264,10 @@ pub const LAYOUT: &[(&str, u32)] = &[
     ("W_TJ", W_TJ),
     ("W_MOUNT", W_MOUNT),
     ("W_MOUNT2", W_MOUNT2),
+    ("W_SOIL0", W_SOIL0),
+    ("W_SOIL1", W_SOIL1),
+    ("W_SOIL2", W_SOIL2),
+    ("W_SOIL3", W_SOIL3),
     ("WF_STEER", WF_STEER),
     ("WF_DRIVEN", WF_DRIVEN),
     ("WF_HANDBRAKE", WF_HANDBRAKE),
@@ -294,6 +308,7 @@ pub const LAYOUT: &[(&str, u32)] = &[
     ("SHELL_SPHERES", SHELL_SPHERES),
     ("POD_COUNT_SHIFT", POD_COUNT_SHIFT),
     ("MAX_DRIVEN_WHEELS", MAX_DRIVEN_WHEELS),
+    ("SOIL_LANES", SOIL_LANES),
 ];
 
 #[cfg(test)]

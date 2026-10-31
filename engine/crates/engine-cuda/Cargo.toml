@@ -18,4 +18,5 @@ cudarc = { version = "0.19", default-features = false, features = ["std", "drive
 [build-dependencies]
 engine-slang-build.workspace = true
 engine-exec.workspace = true
+engine-terrain.workspace = true
 anyhow.workspace = true

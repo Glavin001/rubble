@@ -67,6 +67,12 @@ pub struct WheelState {
     pub disabled: bool,
     pub radius: f32,
     pub width: f32,
+    /// On a soil heightfield (deformable terrain T5): the sinkage (m) of the
+    /// last step's load, that load (N), and the compaction resistance (N) the
+    /// next step applies against the wheel's rolling. Zero off soil.
+    pub sinkage: f32,
+    pub soil_load: f32,
+    pub compaction_resistance: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -646,6 +652,9 @@ impl VehicleHost {
                 disabled: dynf & WD_DISABLED != 0,
                 radius: fw(w[W_HP as usize]),
                 width: fw(w[W_DIR as usize]),
+                sinkage: f32::from_bits(w[W_SOIL2 as usize][3]),
+                soil_load: f32::from_bits(w[W_SOIL2 as usize][2]),
+                compaction_resistance: f32::from_bits(w[W_SOIL2 as usize][1]),
             });
         }
         out

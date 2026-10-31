@@ -233,8 +233,16 @@ loop {
     `create_box_shape` (a native fast path);
   - `create_hull_shape` and `create_transformed_hull_shape(hull, transform,
     scale)`;
-  - later: `create_height_field_shape` (static only, as in Box3D) and baked
-    static compounds.
+  - `create_height_field_shape` (static only, as in Box3D; editable in place
+    with `set_height_field_region`, see `deformable-terrain.md`); a field may
+    carry a Bekker soil (`HeightField::with_soil`, `set_height_field_soil`, C
+    ABI `rbHeightField_SetSoil`) that vehicle wheels sink into and rut
+    (`deformable-terrain.md`, "T5 ruts"); and its ground can deform
+    (`enable_terrain`, `terrain_impact` / `terrain_explode` / `terrain_open`,
+    `terrain_watch_shape` for heavy-body strikes, `read_height_field`; C ABI
+    `rbWorld_EnableTerrain`, `rbTerrain_*`, `rbHeightField_GetHeights`;
+    `deformable-terrain.md`, "T4 status");
+  - later: baked static compounds.
   - **No triangle-mesh shapes** (decided 2026-10-24). Level geometry comes in
     convex-decomposed at the source (several hull shapes on a static body),
     the way Unreal's own collision is authored. Nothing is decomposed at
@@ -347,6 +355,10 @@ geometry, and a triangle mesh for box and hull shapes, in the body frame.
   `solve_planes` on the host, after Box3D's mover.
 - **`explode(ExplosionDef {position, radius, falloff, impulse_per_area,
   mask_bits})`** is a GPU command.
+- **`detonate(BlastDef {position, tnt_kg, radial})`** is a charge: the stress
+  oracle's face pressures on blast-loaded destructibles (see *Damage as
+  data*), and, with `radial`, `explode`'s impulse on bodies from the same
+  point.
 
 ### Destruction (first-class)
 
@@ -447,8 +459,27 @@ world.apply_damage(id, &DamageDesc::Radial { position, min_radius, max_radius, d
   reference.
 - Damage is a queued command applied before the next step, so fracture stays
   forward-only.
-- `explode(ExplosionDef)` damages destructibles in range and also applies
-  impulses to bodies.
+- `explode(ExplosionDef)` stays Box3D's radial impulse on bodies (its C struct
+  is fixed). Blasts that load destructibles are their own command,
+  `detonate(BlastDef { position, tnt_kg, radial })` (shipped 2026-10-25 for
+  `StrengthModel::Threshold`, opt-in per instance with
+  `DestructibleDef::blast_loading`):
+  - the oracle's blast physics (`stress_ref::blast::FaceBlast`: Kinney-Graham
+    peak, duration and impulse at `Z = R / W^(1/3)`, the fitted Friedlander
+    pulse, oblique reflection, shadowing, clearing) on each exposed chunk face,
+    exposure and clearing distances from the oracle's own functions on a
+    mirror of the bond states;
+  - each step the pulse reaches, before the engine steps: each chunk's load
+    over the step (its peak, as `impact_peak` takes an impact's; the mean
+    without it), the threshold rule (a bond breaks when either chunk's load
+    beats its tensile capacity), the split on the GPU, then each piece's share
+    of the blast impulse, so the step meets moving pieces (forward-only);
+  - the per-chunk loads (force, moment, `Σ sym(r ⊗ F)`, impulse, cause
+    `Blast`) from `destructible_blast_loads` and in a GPU buffer per instance
+    for kernels that compose with them (chunk crushing);
+  - a face nearer the charge than the fits reach (`Z < 0.05 m/kg^(1/3)`), a
+    non-positive charge or a non-finite position is an error, never clamped.
+    `DestructibleAssetDesc::from_stress_scene` places the oracle's own scenes.
 
 #### The three stages, all on the GPU
 
@@ -526,6 +557,117 @@ These are frame-latent by default; blocking variants exist for tools.
 
 - **The defaults are lossless:** `Fail` loudly, and no debris removal.
 - Removing debris is lossy, so it is opt-in, and every removal is reported.
+
+#### Directed debris (opt-in gameplay force, shipped)
+
+Authored zones that debris tends to land in: around an NPC, on a parked car,
+in a third-floor window. Players should see only physics. **This is not
+physics**: it adds momentum, so it is off unless the world asks for it.
+
+- **Opt in twice.** `WorldDef::guidance: Some(GuidanceCapacity { max_zones,
+  plan_budget })` reserves the buffers (`plan_budget` at most 256), and
+  `set_guidance(&GuidanceSettings)` enables it. Then guide bodies with `body_set_guided(id, true)`,
+  `body_set_guided_tags(id, mask)` or `destructible_set_guided(id, mask)`.
+  A world that does neither encodes no guidance passes, and its steps are
+  bitwise the same as before.
+- **Zones** (`set_guidance_zones`): `Point`, `Sphere`, `Box`, `Ring` (an
+  annulus: debris around a subject, not on it) or `Arc` (behind or beside it).
+  - A zone sits at a world point or on a body. A body anchor moves the zone
+    with that body and leads it by its velocity; `anchor_relative` turns the
+    zone with the body's heading (vehicle +Z forward, +X left).
+  - Each zone has a `weight`, an optional `quota`, an `active` time window and
+    `tags` matched against each body's tag mask.
+  - **Known motion** (`motion: ZoneMotion`). By default a zone keeps its
+    anchor's current velocity, which misses a target that turns before the
+    debris lands: re-plans are held to `max_jerk`, too slow to follow a
+    reversal. `Accelerating { accel }` adds a known constant acceleration
+    (a braking car). `Path { keys }` gives up to `GUIDE_PATH_KEYS` (8)
+    (position, world time) keys, joined by straight segments and extended past
+    both ends: a car's route, a patrol. The plan then aims at where the zone
+    will be at the hit time, turns included, with the same kick and held
+    acceleration limits. An anchored zone moves from its body as the path
+    moves from where it is now, so it stays on the body if the body drifts
+    off the path. Upload keys covering the next few seconds; refresh them as
+    the route goes on. Anchor-relative zones keep the body's current heading.
+    In `engine-world/tests/guidance.rs` a target that turns back 1.2 s into
+    a 2.85 s flight is missed by 3.6 m with velocity extrapolation and hit
+    within 0.04 m with its path.
+  - More zones than `max_zones` is an error, and so are path keys out of
+    time order or more than 8.
+- **How it stays invisible.** A guided body is planned once, when it becomes
+  free (no joints, nothing pushing it for `settle_steps`).
+  - **Aim points:** per zone, a seeded point inside it, then points two
+    thirds, a third and none of the way from the point of the zone nearest
+    the body's unguided landing toward it. The body takes the first it can
+    reach, so a burst spreads over the zone and a body that can only just
+    reach it lands at its near edge. Each is met at the time that needs the
+    least of the budget (for a zone on a fast car that is near the landing,
+    not the arc's closest approach in mid-air).
+  - **Zone choice:** each reachable zone scores `weight · (1 − s)²`, where `s`
+    is the fraction of the budget its easiest aim point needs. The body then
+    picks a zone by a seeded draw.
+  - **Launch kick:** spread over `kick_steps` steps, at most `launch_kick` of
+    the launch speed and `launch_cone` of direction change. It is applied only
+    within `launch_window` of the break, where the break's chaos hides it.
+  - **Held acceleration:** at most `accel_max_g · g`, constant for the whole
+    flight. Gravity plus a constant acceleration is still an exact parabola,
+    so the arc never bends or homes in. Only zones anchored to a moving body
+    are re-planned, every `replan_interval`, within `max_jerk`.
+  - **Defaults** (6 %, 3°, 0.1 s, 3 %·g) shift a 3 s flight's landing by
+    about 4–5 m and a 0.5 s hop by a few centimetres. Hops shorter than
+    `min_flight` are left alone.
+- **One arc only.** A push is a step whose velocity differs from the
+  ballistic update by more than `impact_dv`. Look-ahead contacts with
+  neighbours flying alongside do not count.
+  - The first push on a steered body ends its guidance for good.
+  - A body still waiting for a plan that is bumped inside a debris cloud just
+    waits for a clean flight. Pushed within 0.5 m of the ground, or left slower
+    than `min_speed`, it has landed and is never guided.
+  - Bounces, cascades and secondary breaks are pure physics.
+- **Cost is bounded.** Per step:
+  - one scan of the bodies (one word for an unguided body);
+  - at most `plan_budget` plans, one 64-lane workgroup each, with the lanes
+    splitting the zones (four aim points of 32 arc samples per zone);
+  - a single-workgroup select and commit.
+
+  A large burst is planned over several steps instead of spiking one. A body
+  planned after its launch window gets the held acceleration only. Selection
+  and quota claims resolve in body order, so results are deterministic.
+
+  Measured with `guide_bench` on an M-series GPU, 256 zones, every guided body
+  freed in the same step (`RUBBLE_GPU_TIMING=1`), the guide phase takes about
+  0.13 ms per step at 10k bodies and 0.32–0.36 ms at 100k while the queue drains
+  (256 plans a step, each weighing four aim points per zone). It was 0.03–0.05 ms
+  with one seeded aim point per zone, which missed zones on fast-moving anchors.
+  Zones without a path cost the same; paths cost only where used. With every
+  one of the 256 zones on an 8-key path (`GUIDE_BENCH_PATHS=1`), the guide
+  phase takes about 0.9 ms at 100k while the queue drains (0.07 ms at 10k).
+- **Reads (blocking, for tools and tests).** `body_guidance(id)` returns a
+  body's state, zone, held acceleration, hit time and why its guidance ended
+  (`GuideEnd`); `guidance_claims()` returns each zone's claimed bodies.
+- **Demos.** The fracture lab's Directed debris (Near Miss rings, city props);
+  `vehicle.html?scene=gauntlet`, a drivable truck down a shelled street, with
+  a ring around the truck, an arc behind it and the parked cars' roofs as
+  zones; and `vehicle.html?scene=meteors`, the same volleys into a steered and
+  an unsteered lane of target pads (`&targets=moving` puts the pads on carts
+  that turn back every 6 s; *Known routes* gives the steered zones the carts'
+  paths); and `vehicle.html?scene=run`, *Meteor gauntlet*, a game: drive a
+  310 m street (14k bodies) under a meteor shower. Meteors that hit a facade
+  blast its masonry into the street; the rest fall on the road. The blocks
+  are steered around the truck and the road meteors to arcs beside it, so
+  near misses score and hits cost health (`engine-vehicle-wasm/src/run.rs`
+  holds the director, judging and score; G toggles steering). In the
+  scripted take (`__runTake`, cruising one lane at 11 m/s) the truck reached
+  the finish in 3 of 4 runs with steering and was wrecked by 150–300 m in
+  4 of 4 without. All use the same passes through `RigidStep` / the lab planner.
+- **C ABI:** `RbWorldDef::enable_guidance`, `rbWorld_SetGuidance`,
+  `rbWorld_SetGuidanceZones` (with `RbGuidanceZone::accel` and `path`),
+  `rbWorld_ResetGuidanceClaims`,
+  `rbBody_SetGuided` and `rbDestructible_SetGuided`. Values are in the world's
+  coordinates; Unreal yaw and arc angles convert exactly.
+- **Code:** `slang/kernels/guide_step.slang`, `engine-world/src/guidance.rs`
+  and `engine-world/tests/guidance.rs`. It runs on the wgpu hosts (`World`
+  and `WgpuSim`); the Metal and CUDA benchmark hosts do not encode it.
 
 #### Rendering
 
@@ -706,6 +848,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
 | Fracture lab `threshold` mode (GPU splitter) | `StrengthModel::Threshold`, `RB_STRENGTH_THRESHOLD`; `body_set_projectile`, `rbBody_SetProjectile`; `solver_for`, `rbWorld_UseDestructibleAssetSolverFor`; `rbWorld_GetDestructibleAssetGround` (D1b) | ✅ |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
+| Deformable terrain (`impact.html`, `terrain.html`): meteor and charge craters, heavy-body strikes, vehicle ruts, baked heights for the host's mesh | `enable_terrain`, `terrain_impact` / `terrain_explode` / `terrain_open`, `terrain_watch_shape`, `set_height_field_soil`; `rbWorld_EnableTerrain`, `rbTerrain_*`, `rbHeightField_SetSoil`, `rbHeightField_GetHeights` | ✅ (an Unreal sample project 🔜) |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
 | Grab and drag | a kinematic mouse body (`rbBody_SetTargetTransform` each frame) jointed to the grabbed body (spherical, or a weld with `linear_stiffness`); tested through the ABI | ✅ (a dedicated mouse joint later) |
 | Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |
@@ -855,7 +998,11 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   inertia summed from its chunks. The step then reports `BondsBroken` and
   `Split` (the children partition the parent; one body per actor). Every
   piece's origin stays the instance frame, so `chunk_local` is the identity
-  and the render contract holds.
+  and the render contract holds. The frame that reports a `Split` also
+  reports each new piece's pose (`body_transform`, and a move with no
+  `previous`): it starts at its parent's origin, so it is drawable at once.
+  `read_body_state` poses a piece in the solver frame the GPU holds now, so a
+  read after a step whose split is not yet polled is still the piece's origin.
 - **Projectiles.** `body_set_projectile(body, Some(Projectile))` adds a body
   with one sphere or box shape to strike prediction and gives its contacts
   the lab's shot loads. Other non-chunk colliders load chunks as static

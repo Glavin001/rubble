@@ -1,5 +1,5 @@
 // Convex hull narrowphase entries (hull/hull, hull/box, hull/plane, hull/sphere,
-// hull/capsule). Gauss-map pruning and contact selection adapted from three-avbd
+// hull/capsule), and every heightfield pair (physics/heightfield.slang). Gauss-map pruning and contact selection adapted from three-avbd
 // (MIT), Copyright (c) 2026 Steven Bobyn; see ../THIRD_PARTY_LICENSES.txt.
 //
 // Schedule, after `narrowphase` has marked hull pairs with CONVEX_DEFER:
@@ -225,7 +225,9 @@ void convex_classify(uint3 tid : SV_DispatchThreadID)
     BoxManifold mf;
     mf.count = 0;
     mf.normal = float3(0, 1, 0);
-    if (ca.shape == SHAPE_CONVEX && cb.shape == SHAPE_PLANE)
+    if (ca.shape == SHAPE_HEIGHTFIELD || cb.shape == SHAPE_HEIGHTFIELD)
+        mf = heightFieldPairManifold(ca, ba, cb, bb, spec);
+    else if (ca.shape == SHAPE_CONVEX && cb.shape == SHAPE_PLANE)
         mf = convexPlaneManifold(hullOf(ca), fa, cb.params.xyz, cb.params.w, true, spec);
     else if (ca.shape == SHAPE_PLANE && cb.shape == SHAPE_CONVEX)
         mf = convexPlaneManifold(hullOf(cb), fb, ca.params.xyz, ca.params.w, false, spec);

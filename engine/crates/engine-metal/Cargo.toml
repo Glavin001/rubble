@@ -10,6 +10,7 @@ engine-schema.workspace = true
 engine-exec.workspace = true
 engine-vehicle.workspace = true
 engine-slang-build.workspace = true
+engine-terrain.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
 metal.workspace = true
@@ -26,10 +27,13 @@ serde_json.workspace = true
 [build-dependencies]
 engine-slang-build.workspace = true
 engine-exec.workspace = true
+engine-terrain.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
 engine-webgpu = { path = "../engine-webgpu" }
+# terrain_bench times wgpu-on-Metal with timestamp queries.
+wgpu.workspace = true
 env_logger.workspace = true
 
 [[bin]]

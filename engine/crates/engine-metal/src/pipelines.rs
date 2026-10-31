@@ -87,6 +87,11 @@ impl Pipelines {
             ("vehicle_loads", msl!("vehicle_loads")),
             ("vehicle_post", msl!("vehicle_post")),
             ("raycast_batch", msl!("raycast_batch")),
+            // Soil ruts: planned only with a soil heightfield, which Metal's
+            // step graph (no convex stages) rejects; compiled so the table
+            // covers every vehicle entry.
+            ("wheel_soil", msl!("wheel_soil")),
+            ("wheel_soil_press", msl!("wheel_soil_press")),
         ];
         let mut map = HashMap::new();
         let opts = CompileOptions::new();

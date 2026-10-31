@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Rubble terrain — heightfield collider (WebGPU AVBD)</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #10131a; color: #dfe4ee; font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel { position: fixed; background: rgba(16, 19, 26, 0.8); border: 1px solid #2c3346; border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
+    #hud { top: 12px; left: 12px; width: 25rem; max-width: calc(100vw - 48px); }
+    #hud h1 { font-size: 15px; margin: 0 0 6px; font-weight: 650; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+    .muted { color: #8d96aa; }
+    select, button { background: #1d2333; color: #dfe4ee; border: 1px solid #3a4360; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
+    button:hover { border-color: #6c7aa6; }
+    #err { color: #ff8e8e; white-space: pre-wrap; }
+    kbd { background: #252c3d; border: 1px solid #3a4360; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+    .bad { color: #ff8e8e; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud" class="panel">
+    <h1>Rubble terrain · heightfield collider</h1>
+    <div class="row">
+      <label class="muted" for="countSel">Bodies</label><select id="countSel"></select>
+      <button id="rainBtn">Rain <kbd>B</kbd></button>
+      <button id="craterBtn">Crater <kbd>C</kbd></button>
+      <button id="resetBtn">Reset <kbd>R</kbd></button>
+    </div>
+    <div class="row muted">Drag to orbit · scroll to zoom. The crater is an authored height edit plus a blast impulse (T1); computed cratering comes with the granular solver (T2).</div>
+    <div id="stats" class="muted"></div>
+    <div id="status" class="muted">starting…</div>
+    <div id="err"></div>
+  </div>
+  <script type="module">
+    import { createWorld, sceneCapacity } from './world-host.mjs';
+    import { M, heightFieldArena } from './vehicle.mjs';
+
+    const statusEl = document.getElementById('status');
+    const errEl = document.getElementById('err');
+    const fail = (e) => { errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
+    addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
+    addEventListener('error', (e) => fail(e.error || e.message));
+
+    const qs = new URLSearchParams(location.search);
+    const COUNTS = [500, 2000, 5000, 10000];
+    const N = COUNTS.includes(Number(qs.get('n'))) ? Number(qs.get('n')) : 2000;
+    const countSel = document.getElementById('countSel');
+    for (const n of COUNTS) countSel.add(new Option(n.toLocaleString(), n, false, n === N));
+    countSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('n', countSel.value); location.href = u.href; };
+
+    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error('no WebGPU adapter');
+    const device = await adapter.requestDevice({
+      requiredLimits: {
+        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxBufferSize: adapter.limits.maxBufferSize,
+      },
+    });
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+    const canvas = document.getElementById('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    const configure = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      context.configure({ device, format, alphaMode: 'opaque' });
+    };
+    configure();
+    addEventListener('resize', configure);
+
+    // ---------------------------------------------------------------- terrain
+    // 161 × 161 samples, 0.25 m cells: 40 m square. Rolling hills and a ridge.
+    const NX = 161, NZ = 161, DX = 0.25, DZ = 0.25;
+    const X0 = -0.5 * (NX - 1) * DX, Z0 = -0.5 * (NZ - 1) * DZ;
+    const hills = (x, z) => 1.4 * Math.sin(0.22 * x) * Math.cos(0.18 * z) + 0.5 * Math.sin(0.55 * x + 1.0) * Math.sin(0.43 * z)
+      + 0.9 * Math.exp(-((x - 6) ** 2) / 8) * Math.cos(0.15 * z);
+    const initialHeights = new Float32Array(NX * NZ);
+    for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) initialHeights[j * NX + i] = hills(X0 + i * DX, Z0 + j * DZ);
+    let heights = initialHeights.slice();
+
+    // ---------------------------------------------------------------- world
+    const cap = { ...sceneCapacity(N + 8, N + 8), maxHull: 8192 };
+    const world = await createWorld(device, { cap, status: (s) => { statusEl.textContent = s; } });
+    const DT = 1 / 60;
+    world.params.dt = DT;
+    world.params.iterations = 10;
+    world.params.gravityY = -9.81;
+    world.params.flags = M.FLAG_SPEC_VELOCITY;
+    world.setMaterial(0, 0.8);
+
+    // Collider 0: the terrain (records packed in Rust, engine_schema::heightfield).
+    const ground = world.addBody({ p: [0, 0, 0], flags: 0 });
+    let arena = heightFieldArena(NX, NZ, DX, DZ, heights);
+    world.setHullRecords(arena.records);
+    world.addCollider({ body: ground, shape: 5, material: 0, params: arena.params });
+    const hfBase = arena.base;
+
+    // Bodies: boxes, spheres and capsules on a jittered grid above the hills.
+    const rand = (() => { let s = 12345; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); })();
+    const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
+    const qRand = () => { const a = rand() * 6.283, b = rand() * 6.283; const s = Math.sin(a / 2); return [Math.cos(b) * s, Math.sin(b) * s * 0.5, 0.6 * s, Math.cos(a / 2)]; };
+    const norm4 = (q) => { const l = Math.hypot(...q); return q.map((x) => x / l); };
+    const side = Math.ceil(Math.sqrt(N / 6));
+    const spacing = 1.1;
+    for (let k = 0; k < N; k++) {
+      const layer = Math.floor(k / (side * side));
+      const cell = k % (side * side);
+      const x = (cell % side - side / 2 + 0.5) * spacing + (rand() - 0.5) * 0.3;
+      const z = (Math.floor(cell / side) - side / 2 + 0.5) * spacing + (rand() - 0.5) * 0.3;
+      const y = 4 + layer * 1.0 + hills(x, z);
+      const q = norm4(qRand());
+      const m = 1;
+      const kind = k % 3;
+      if (kind === 0) {
+        const h = [0.15 + 0.15 * rand(), 0.12 + 0.12 * rand(), 0.15 + 0.15 * rand()];
+        const body = world.addBody({ p: [x, y, z], q, invMass: 1 / m, invI: boxInv(m, ...h), flags: 1 | 8 });
+        world.addCollider({ body, shape: 2, params: [...h, Math.hypot(...h)] });
+      } else if (kind === 1) {
+        const r = 0.15 + 0.1 * rand(), i = 2.5 / (m * r * r);
+        const body = world.addBody({ p: [x, y, z], q, invMass: 1 / m, invI: [i, i, i], flags: 1 | 8 });
+        world.addCollider({ body, shape: 0, params: [r, 0, 0, r] });
+      } else {
+        const r = 0.12, hh = 0.18 + 0.1 * rand(), len = 2 * (hh + r);
+        const ia = 12 / (m * (3 * r * r + len * len)), iy = 2 / (m * r * r);
+        const body = world.addBody({ p: [x, y, z], q, invMass: 1 / m, invI: [ia, iy, ia], flags: 1 | 8 });
+        world.addCollider({ body, shape: 1, params: [r, hh, 0, r + hh] });
+      }
+    }
+    const initial = world.snapshot();
+
+    // ---------------------------------------------------------------- renderer
+    const SHADER = /* wgsl */`
+struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
+  linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
+struct Collider { body: u32, shape: u32, material: u32, generation: u32, localPos: vec3f, density: f32, localRot: vec4f, params: vec4f };
+struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
+@group(0) @binding(0) var<storage, read> bodies: array<Body>;
+@group(0) @binding(1) var<uniform> frame: Frame;
+@group(0) @binding(2) var<storage, read> cols: array<Collider>;
+@group(0) @binding(3) var<storage, read> hulls: array<vec4u>;
+
+fn qrot(q: vec4f, v: vec3f) -> vec3f {
+  let u = q.xyz;
+  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
+}
+fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
+fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f {
+  let l = normalize(frame.light.xyz);
+  let diff = max(dot(n, l), 0.0);
+  let v = normalize(frame.eye.xyz - w);
+  let spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.2;
+  let sky = 0.5 + 0.5 * n.y;
+  let fog = clamp(length(frame.eye.xyz - w) / 160.0, 0.0, 1.0);
+  return mix(c * (0.22 + 0.18 * sky + 0.75 * diff) + spec, vec3f(0.55, 0.62, 0.72), fog * fog);
+}
+
+struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1) c: vec3f, @location(2) w: vec3f,
+  @location(3) center: vec3f, @location(4) r: f32, @location(5) axis: vec3f, @location(6) hh: f32 };
+
+@vertex fn vsCol(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
+  let ci = inst + 1u;
+  let col = cols[ci];
+  let b = bodies[col.body];
+  var o: Out;
+  o.r = 0.0; o.hh = 0.0;
+  var half = col.params.xyz;
+  if (col.shape == 0u) { half = vec3f(col.params.x); o.r = col.params.x; }
+  if (col.shape == 1u) { half = vec3f(col.params.x, col.params.y + col.params.x, col.params.x); o.r = col.params.x; o.hh = col.params.y; }
+  let q = b.orientation;
+  let local = col.localPos + qrot(col.localRot, corner * half * 2.02);
+  let w = b.position + qrot(q, local);
+  o.w = w;
+  o.center = b.position + qrot(q, col.localPos);
+  o.axis = qrot(q, qrot(col.localRot, vec3f(0.0, 1.0, 0.0)));
+  o.n = qrot(q, qrot(col.localRot, normal));
+  o.clip = frame.viewProj * vec4f(w, 1.0);
+  let h = hash(col.body);
+  let asleep = (b.flags & 8u) == 0u;
+  if (col.shape == 0u) { o.c = mix(vec3f(0.25, 0.45, 0.8), vec3f(0.35, 0.6, 0.9), h); }
+  else if (col.shape == 1u) { o.c = mix(vec3f(0.75, 0.3, 0.3), vec3f(0.9, 0.45, 0.35), h); }
+  else { o.c = mix(vec3f(0.85, 0.6, 0.25), vec3f(0.95, 0.8, 0.45), h); }
+  if (asleep) { o.c = o.c * 0.65; }
+  return o;
+}
+
+fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
+  let ba = pb - pa; let oa = ro - pa;
+  let baba = dot(ba, ba); let bard = dot(ba, rd); let baoa = dot(ba, oa); let rdoa = dot(rd, oa); let oaoa = dot(oa, oa);
+  let a = baba - bard * bard; let b = baba * rdoa - baoa * bard; let c = baba * oaoa - baoa * baoa - r * r * baba;
+  var hh = b * b - a * c;
+  if (hh >= 0.0 && a > 1e-9) {
+    let t = (-b - sqrt(hh)) / a;
+    let y = baoa + t * bard;
+    if (y > 0.0 && y < baba) { return t; }
+    let oc = select(ro - pb, oa, y <= 0.0);
+    let b2 = dot(rd, oc); let c2 = dot(oc, oc) - r * r;
+    hh = b2 * b2 - c2;
+    if (hh > 0.0) { return -b2 - sqrt(hh); }
+  } else if (a <= 1e-9) {
+    let b2 = dot(rd, oa); let c2 = oaoa - r * r; let h2 = b2 * b2 - c2;
+    if (h2 > 0.0) { return -b2 - sqrt(h2); }
+  }
+  return -1.0;
+}
+
+@fragment fn fsCol(i: Out) -> @location(0) vec4f {
+  var n = normalize(i.n);
+  if (i.r > 0.0) {
+    let rd = normalize(i.w - frame.eye.xyz);
+    let pa = i.center - i.axis * i.hh;
+    let pb = i.center + i.axis * i.hh;
+    let t = capsuleHit(frame.eye.xyz, rd, pa, pb, i.r);
+    if (t < 0.0) { discard; }
+    let p = frame.eye.xyz + rd * t;
+    let s = clamp(dot(p - pa, i.axis), 0.0, 2.0 * i.hh);
+    n = normalize(p - (pa + i.axis * s));
+  }
+  return vec4f(shade(i.c, n, i.w), 1.0);
+}
+
+// The terrain straight from the physics records (engine_schema::heightfield):
+// header (magic, nx, nz, flags), (dx, dz, min, max), then heights, four per record.
+const HF_BASE = ${hfBase}u;
+fn hfH(i: u32, j: u32, nx: u32) -> f32 {
+  let k = j * nx + i;
+  let r = hulls[HF_BASE + 2u + (k >> 2u)];
+  return bitcast<f32>(r[k & 3u]);
+}
+@vertex fn vsTerrain(@builtin(vertex_index) vi: u32) -> Out {
+  let head = hulls[HF_BASE];
+  let nx = head.y; let nz = head.z;
+  let d = bitcast<vec4f>(hulls[HF_BASE + 1u]);
+  let cell = vi / 6u;
+  let ci = cell % (nx - 1u); let cj = cell / (nx - 1u);
+  // Triangles (00, 11, 10) and (00, 01, 11): the collider's diagonal split.
+  let corner = array<vec2u, 6>(vec2u(0u, 0u), vec2u(1u, 1u), vec2u(1u, 0u), vec2u(0u, 0u), vec2u(0u, 1u), vec2u(1u, 1u))[vi % 6u];
+  let i = ci + corner.x; let j = cj + corner.y;
+  let x0 = -0.5 * f32(nx - 1u) * d.x; let z0 = -0.5 * f32(nz - 1u) * d.y;
+  let h = hfH(i, j, nx);
+  let hx0 = hfH(max(i, 1u) - 1u, j, nx); let hx1 = hfH(min(i + 1u, nx - 1u), j, nx);
+  let hz0 = hfH(i, max(j, 1u) - 1u, nx); let hz1 = hfH(i, min(j + 1u, nz - 1u), nx);
+  var o: Out;
+  o.w = vec3f(x0 + f32(i) * d.x, h, z0 + f32(j) * d.y);
+  o.n = normalize(vec3f(-(hx1 - hx0) / (2.0 * d.x), 1.0, -(hz1 - hz0) / (2.0 * d.y)));
+  o.c = vec3f(0.0); o.center = o.w; o.r = 0.0; o.axis = vec3f(0.0); o.hh = 0.0;
+  o.clip = frame.viewProj * vec4f(o.w, 1.0);
+  return o;
+}
+@fragment fn fsTerrain(i: Out) -> @location(0) vec4f {
+  let n = normalize(i.n);
+  let g = abs(fract(i.w.xz) - 0.5);
+  let line = smoothstep(0.47, 0.5, max(g.x, g.y));
+  let slope = 1.0 - n.y;
+  let grass = mix(vec3f(0.33, 0.42, 0.25), vec3f(0.42, 0.37, 0.27), clamp(slope * 4.0, 0.0, 1.0));
+  let low = clamp(-i.w.y * 0.4, 0.0, 1.0);
+  let base = mix(grass, vec3f(0.38, 0.3, 0.22), low);
+  return vec4f(shade(mix(base, base * 1.25, line * 0.4), n, i.w), 1.0);
+}
+`;
+    const mod = device.createShaderModule({ label: 'terrain-render', code: SHADER });
+    const info = await mod.getCompilationInfo();
+    const err = info.messages.find((m) => m.type === 'error');
+    if (err) throw new Error(`render shader: ${err.message} @${err.lineNum}`);
+
+    const cube = [];
+    for (const [u, v, w] of [[0, 1, 2], [1, 2, 0], [2, 0, 1]]) for (const s of [-1, 1]) {
+      const n = [0, 0, 0]; n[w] = s;
+      const cs = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => { const p = [0, 0, 0]; p[u] = a * 0.5; p[v] = b * 0.5; p[w] = s * 0.5; return p; });
+      const tris = s > 0 ? [[0, 1, 2], [0, 2, 3]] : [[0, 2, 1], [0, 3, 2]];
+      for (const t of tris) for (const k of t) cube.push(...cs[k], ...n);
+    }
+    const cubeVbo = device.createBuffer({ size: cube.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(cubeVbo, 0, new Float32Array(cube));
+    const frameBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const vtx6 = [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }];
+    const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
+    const pipe = (vs, fs, buffers) => device.createRenderPipeline({
+      layout: 'auto', vertex: { module: mod, entryPoint: vs, buffers }, fragment: { module: mod, entryPoint: fs, targets: [{ format }] },
+      primitive: { cullMode: 'none' }, depthStencil,
+    });
+    const colPipe = pipe('vsCol', 'fsCol', vtx6);
+    const terrainPipe = pipe('vsTerrain', 'fsTerrain', []);
+    const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
+    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
+    // The hull arena buffer is replaced only when it grows; this page sizes it once (cap.maxHull).
+    const terrainBind = bind(terrainPipe, [[1, frameBuf], [3, world.bufs[18]]]);
+    let depth = null;
+
+    // ---------------------------------------------------------------- camera / input
+    const cam = { yaw: 0.7, pitch: 0.45, dist: 42, target: [0, 0, 0] };
+    let drag = null;
+    canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; });
+    addEventListener('pointerup', () => { drag = null; });
+    addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      cam.yaw -= (e.clientX - drag.x) * 0.005;
+      cam.pitch = Math.max(0.05, Math.min(1.4, cam.pitch + (e.clientY - drag.y) * 0.005));
+      drag = { x: e.clientX, y: e.clientY };
+    });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); cam.dist = Math.max(4, Math.min(120, cam.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+    const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const eyeOf = () => {
+      const cp = Math.cos(cam.pitch);
+      return [cam.target[0] + cam.dist * cp * Math.sin(cam.yaw), cam.target[1] + cam.dist * Math.sin(cam.pitch), cam.target[2] + cam.dist * cp * Math.cos(cam.yaw)];
+    };
+    function viewProj(eye, at, aspect) {
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const view = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+        -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
+      const f = 1 / Math.tan(Math.PI / 6), near = 0.05, far = 600;
+      const proj = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far / (near - far), -1, 0, 0, (near * far) / (near - far), 0];
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = proj[r] * view[c * 4] + proj[4 + r] * view[c * 4 + 1] + proj[8 + r] * view[c * 4 + 2] + proj[12 + r] * view[c * 4 + 3];
+      return o;
+    }
+    addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'SELECT' || e.repeat) return;
+      if (e.code === 'KeyR') reset();
+      else if (e.code === 'KeyC') crater();
+      else if (e.code === 'KeyB') rain();
+    });
+    document.getElementById('resetBtn').onclick = () => reset();
+    document.getElementById('craterBtn').onclick = () => crater();
+    document.getElementById('rainBtn').onclick = () => rain();
+
+    // ---------------------------------------------------------------- body readback
+    // Every body's pose, a few times a second, for the blast and the checks.
+    const allBytes = world.bodyCount * 112;
+    const poseRb = device.createBuffer({ size: allBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    let poseBusy = false;
+    let poses = null; // Float32Array of BodyState records
+    let poseFlags = null;
+    async function readPoses(enc) {
+      poseBusy = true;
+      enc.copyBufferToBuffer(world.bufs[0], 0, poseRb, 0, allBytes);
+      return () => poseRb.mapAsync(GPUMapMode.READ).then(() => {
+        const bytes = poseRb.getMappedRange().slice(0);
+        poseRb.unmap();
+        poses = new Float32Array(bytes);
+        poseFlags = new Uint32Array(bytes);
+        poseBusy = false;
+      });
+    }
+    const counterRb = [0, 1, 2].map(() => device.createBuffer({ size: 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    let lastCounters = null;
+
+    // ---------------------------------------------------------------- edits
+    // Surface height of the collider's triangle under (x, z) (the same split the
+    // GPU uses), for the checks and the blast.
+    function surfaceAt(x, z) {
+      const fx = (x - X0) / DX, fz = (z - Z0) / DZ;
+      if (fx < 0 || fz < 0 || fx > NX - 1 || fz > NZ - 1) return null;
+      const i = Math.min(Math.floor(fx), NX - 2), j = Math.min(Math.floor(fz), NZ - 2);
+      const u = fx - i, v = fz - j;
+      const h = (a, b) => heights[(j + b) * NX + i + a];
+      return u >= v ? h(0, 0) + u * (h(1, 0) - h(0, 0)) + v * (h(1, 1) - h(1, 0)) : h(0, 0) + v * (h(0, 1) - h(0, 0)) + u * (h(1, 1) - h(0, 1));
+    }
+    function uploadHeights() {
+      arena = heightFieldArena(NX, NZ, DX, DZ, heights);
+      world.setHullRecords(arena.records);
+      // The collider's bounds follow the new height range.
+      world.backend.writeCollider(0, world.colliderWords.slice(0, 16).map((w, k) => (k >= 12 ? new Uint32Array(Float32Array.of(arena.params[k - 12]).buffer)[0] : w)));
+    }
+    let craters = 0;
+    function crater(at) {
+      const c = at || [(rand() - 0.5) * 24, (rand() - 0.5) * 24];
+      const R = 3.0, D = 1.4;
+      // A bowl of depth D inside R; the dug volume heaped onto a rim out to 1.6R.
+      let dug = 0;
+      for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) {
+        const r = Math.hypot(X0 + i * DX - c[0], Z0 + j * DZ - c[1]);
+        if (r < R) { const d = D * (1 - (r / R) ** 2); heights[j * NX + i] -= d; dug += d; }
+      }
+      let rimW = 0;
+      const rimShape = (r) => (r >= R && r < 1.6 * R) ? Math.sin(Math.PI * (r - R) / (0.6 * R)) : 0;
+      for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) rimW += rimShape(Math.hypot(X0 + i * DX - c[0], Z0 + j * DZ - c[1]));
+      for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) {
+        const w = rimShape(Math.hypot(X0 + i * DX - c[0], Z0 + j * DZ - c[1]));
+        if (w > 0) heights[j * NX + i] += dug * w / rimW;
+      }
+      uploadHeights();
+      // Blast: an outward and upward impulse on bodies within 2R (wakes them).
+      if (poses) {
+        for (let b = 1; b < world.bodyCount; b++) {
+          const o = b * 28;
+          const p = [poses[o], poses[o + 1], poses[o + 2]];
+          const dx = p[0] - c[0], dz = p[2] - c[1];
+          const r = Math.hypot(dx, dz);
+          if (r > 2 * R) continue;
+          const k = 6 * (1 - r / (2 * R));
+          world.applyImpulse(b, [k * dx / (r + 0.3), k * 1.2, k * dz / (r + 0.3)], p);
+        }
+      }
+      craters++;
+    }
+    function rain() {
+      if (!poses) return;
+      // Lift a random tenth of the bodies 10 m up (teleport through the body record).
+      for (let b = 1; b < world.bodyCount; b++) {
+        if (rand() > 0.1) continue;
+        const words = world.bodyWords.slice(b * 28, b * 28 + 28);
+        const f = new Float32Array(words.buffer);
+        const o = b * 28;
+        f[0] = poses[o] + (rand() - 0.5) * 2; f[1] = Math.max(poses[o + 1], surfaceAt(poses[o], poses[o + 2]) ?? 0) + 10; f[2] = poses[o + 2] + (rand() - 0.5) * 2;
+        for (let k = 4; k < 8; k++) f[k] = poses[o + k];
+        f[12] = 0; f[13] = 0; f[14] = 0; f[16] = 0; f[17] = 0; f[18] = 0;
+        words[11] = (poseFlags[o + 11] | 8) >>> 0;
+        f[20] = f[0]; f[21] = f[1]; f[22] = f[2];
+        for (let k = 24; k < 28; k++) f[k] = f[k - 20];
+        world.backend.writeBody(b, words);
+      }
+    }
+    function reset() {
+      world.restore(initial);
+      heights = initialHeights.slice();
+      uploadHeights();
+      craters = 0;
+    }
+
+    // ---------------------------------------------------------------- loop
+    function updateCamera() {
+      if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
+        depth?.destroy();
+        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      }
+      const eye = eyeOf();
+      frameF.set(viewProj(eye, cam.target, canvas.width / canvas.height), 0);
+      frameF.set([...eye, 0], 16);
+      frameF.set([0.45, 0.8, 0.35, 0], 20);
+      device.queue.writeBuffer(frameBuf, 0, frameF);
+    }
+    function drawScene(enc) {
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
+        depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      rp.setPipeline(terrainPipe); rp.setBindGroup(0, terrainBind); rp.draw((NX - 1) * (NZ - 1) * 6);
+      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
+      rp.end();
+    }
+    const frameF = new Float32Array(24);
+    let manual = false;
+    let lastT = performance.now(), fpsAcc = 0, fpsN = 0, fpsShow = 0, physMs = 0;
+    const statsEl = document.getElementById('stats');
+    function stepOnce(enc) { world.encodeStep(enc); }
+    async function counters(enc) {
+      const rb = counterRb.pop();
+      if (!rb) return null;
+      enc.copyBufferToBuffer(world.bufs[7], 0, rb, 0, 80);
+      return () => rb.mapAsync(GPUMapMode.READ).then(() => {
+        const c = new Uint32Array(rb.getMappedRange().slice(0));
+        rb.unmap();
+        counterRb.push(rb);
+        world.setLastCounters(c);
+        lastCounters = { contact: c[2], awake: c[5], overflow: c[7] };
+      });
+    }
+    async function frame(now) {
+      const dt = Math.min(0.05, (now - lastT) / 1000);
+      lastT = now;
+      fpsAcc += dt; fpsN++;
+      if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
+      if (manual) { requestAnimationFrame(frame); return; }
+      updateCamera();
+      const enc = device.createCommandEncoder();
+      const t0 = performance.now();
+      stepOnce(enc);
+      drawScene(enc);
+      const done = await counters(enc);
+      const poseDone = !poseBusy && world.steps % 15 === 0 ? await readPoses(enc) : null;
+      device.queue.submit([enc.finish()]);
+      physMs = performance.now() - t0;
+      if (done) done().catch(fail);
+      if (poseDone) poseDone().catch(fail);
+      const c = lastCounters;
+      statsEl.innerHTML = `${world.bodyCount - 1} bodies · ${craters} craters` + (c ? ` · contacts ${c.contact} · awake ${c.awake}${c.overflow ? ` · <span class="bad">overflow 0x${c.overflow.toString(16)}</span>` : ''}` : '');
+      statusEl.textContent = `step ${world.steps} · ${fpsShow.toFixed(0)} fps · encode ${physMs.toFixed(1)} ms`;
+      requestAnimationFrame(frame);
+    }
+
+    // ---------------------------------------------------------------- automation
+    // __step(n): n physics steps, frame-locked; then counters and every pose.
+    window.__step = async (n = 1) => {
+      manual = true;
+      for (let i = 0; i < n; i++) {
+        const enc = device.createCommandEncoder();
+        stepOnce(enc);
+        const done = (i % 8 === 7 || i === n - 1) ? await counters(enc) : null;
+        device.queue.submit([enc.finish()]);
+        if (done) await done();
+      }
+      const enc = device.createCommandEncoder();
+      const poseDone = await readPoses(enc);
+      updateCamera();
+      drawScene(enc);
+      device.queue.submit([enc.finish()]);
+      await poseDone();
+      return { steps: world.steps, counters: lastCounters };
+    };
+    // __check(): settle, dig a crater under the pile, settle again; every body
+    // must stay on or above the terrain (centre above the surface under it).
+    window.__check = async () => {
+      // Off the field: rolled or tumbled past its edge (there is no ground beyond).
+      // Near the edge a body falling past it is not under the terrain either.
+      const margin = 1.0;
+      const below = () => {
+        let n = 0, off = 0, deepest = 0;
+        const cases = [];
+        for (let b = 1; b < world.bodyCount; b++) {
+          const o = b * 28;
+          const x = poses[o], z = poses[o + 2];
+          const h = Math.abs(x) < -X0 - margin && Math.abs(z) < -Z0 - margin ? surfaceAt(x, z) : null;
+          if (h === null) { off++; continue; }
+          const d = h - poses[o + 1];
+          if (d > 0) {
+            n++; deepest = Math.max(deepest, d);
+            if (cases.length < 6) cases.push({ b, shape: world.colliderWords[b * 16 + 1], p: [x, poses[o + 1], z].map((v) => +v.toFixed(2)), surface: +h.toFixed(2), v: [poses[o + 12], poses[o + 13], poses[o + 14]].map((v) => +v.toFixed(2)) });
+          }
+        }
+        return { below: n, off, deepest, cases };
+      };
+      await window.__step(300);
+      const settled = { ...below(), counters: lastCounters };
+      crater([0, 0]);
+      await window.__step(240);
+      const afterCrater = { ...below(), counters: lastCounters };
+      return { bodies: world.bodyCount - 1, settled, afterCrater };
+    };
+    window.__world = world;
+    window.__ready = true;
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
