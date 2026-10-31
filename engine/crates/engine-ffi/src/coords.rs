@@ -187,6 +187,13 @@ impl Coords {
     pub fn density_in(&self, x: f32) -> f32 {
         x * self.scale(3)
     }
+    pub fn density_out(&self, x: f32) -> f32 {
+        x / self.scale(3)
+    }
+    /// Volume (m³ or cm³).
+    pub fn volume_out(&self, x: f32) -> f32 {
+        x * self.scale(3)
+    }
     /// Torque magnitudes (break torques, motor torques).
     pub fn torque_in(&self, x: f32) -> f32 {
         x / self.scale(2)
