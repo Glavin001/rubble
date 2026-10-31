@@ -18,6 +18,7 @@ members = [
     "crates/engine-terrain",
     "crates/engine-gpu-wait",
     "crates/engine-world",
+    "crates/engine-world-wasm",
     "crates/engine-ffi",
 ]
 # The stress oracle is its own workspace (wgpu 30); engine-fracture depends on its crates by path.

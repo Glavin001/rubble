@@ -49,6 +49,8 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
  const trailPipe=device.createRenderPipeline({layout:'auto',vertex:{module:trailModule,entryPoint:'vs'},fragment:{module:trailModule,entryPoint:'fs',targets:[{format}]},primitive:{topology:'line-list'},depthStencil:{format:'depth24plus',depthWriteEnabled:false,depthCompare:'less'}});
  const trailView=device.createBuffer({size:80,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
  let trailBuf=null,trailGroup=null,trailVerts=0;
+ // A mesh the page replaces at will (setDynamic): render vertices, 10 floats each.
+ let dynBuf=null,dynGroup=null,dynVerts=0;
  let stamps=null,colorMode=0;
  // GPU time of a sampled frame's render pass, about four times a second (stats
  // panel). One sample in flight; nothing waits on its readback.
@@ -65,6 +67,16 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
    trailGroup=device.createBindGroup({layout:trailPipe.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:trailView}},{binding:1,resource:{buffer:trailBuf}}]})}
   device.queue.writeBuffer(trailBuf,0,data);
  },
+ // Render vertices (10 floats each, body-local) drawn with the scene's meshes until
+ // replaced: bodies the page adds while it runs (a character, balls, debris).
+ setDynamic(data){
+  dynVerts=data.length/10;if(!dynVerts)return;
+  if(!dynBuf||dynBuf.size<data.byteLength){dynBuf?.destroy();dynBuf=device.createBuffer({size:Math.max(65536,data.byteLength*2),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+   dynGroup=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:simulation.renderBodyBuffer??simulation.bodyBuffer}},{binding:1,resource:{buffer:dynBuf}},{binding:2,resource:{buffer:uniform}},{binding:3,resource:{buffer:joints}}]})}
+  device.queue.writeBuffer(dynBuf,0,data);
+ },
+ // A scripted camera (a take's shot): fly mode, the eye at `eye` looking at `target`.
+ lookAt(eye,target){orbit.lookAt(eye[0],eye[1],eye[2],target[0],target[1],target[2]);input.modeChanged()},
  // The camera's view mode (0 orbit, 1 first-person walk, 2 fly: engine-fracture ViewMode).
  get viewMode(){return orbit.mode},
  set viewMode(mode){orbit.setMode(mode|0,aspect());input.modeChanged()},
@@ -92,6 +104,7 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
   pass.setPipeline(ground);pass.setBindGroup(0,floor.group);pass.draw(floor.count);
   if(roads.count){pass.setPipeline(decal);pass.setBindGroup(0,roads.group);pass.draw(roads.count)}
   pass.setPipeline(solid);pass.setBindGroup(0,mesh.group);pass.setIndexBuffer(index,'uint32');pass.drawIndexed(indices.length,scene.copies||1);
+  if(dynVerts){pass.setBindGroup(0,dynGroup);pass.draw(dynVerts)}
   // The newest projectileCount balls (a shot past them reuses the oldest).
   // Street props (parked cars, pedestrians): their own bodies, drawn once.
   if(props.count){pass.setBindGroup(0,props.group);pass.draw(props.count)}
@@ -102,5 +115,5 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
   if(timed){frameTimer.busy=true;frameTimer.last=performance.now();enc.resolveQuerySet(frameTimer.query,0,2,frameTimer.resolve,0);enc.copyBufferToBuffer(frameTimer.resolve,0,frameTimer.read,0,16)}
   device.queue.submit([enc.finish()]);
   if(timed)frameTimer.read.mapAsync(GPUMapMode.READ).then(()=>{const t=new BigUint64Array(frameTimer.read.getMappedRange());frameTimer.ms=Number(t[1]-t[0])/1e6;frameTimer.read.unmap()}).catch(()=>{}).finally(()=>{frameTimer.busy=false});
- },dispose(){input.dispose();for(const b of [uniform,index,trailView,...streams])b.destroy();trailBuf?.destroy();if(joints!==simulation.jointBuffer)joints.destroy();orbit.free();if(frameTimer){frameTimer.query.destroy();frameTimer.resolve.destroy();frameTimer.read.destroy()}depth?.destroy()}};
+ },dispose(){input.dispose();for(const b of [uniform,index,trailView,...streams])b.destroy();trailBuf?.destroy();if(joints!==simulation.jointBuffer)joints.destroy();orbit.free();if(frameTimer){frameTimer.query.destroy();frameTimer.resolve.destroy();frameTimer.read.destroy()}depth?.destroy();dynBuf?.destroy()}};
 }

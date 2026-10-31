@@ -1,0 +1,18 @@
+# Galleon stern (broadside.html): building_lite with three levels. Without
+# fracture modes a fourth level only repeats the third, so three levels carry
+# the same leaf cells (L2: every member split into grain-stretched Voronoi
+# cells, 4 per analysis cell) at about two thirds of the payload.
+seed = 1337
+levels = 3
+
+[cells]
+target_analysis_cells_per_m3 = 20
+fine_per_analysis = 4
+
+[modes]
+enabled = false
+
+[render]
+lods = 1
+noise = false
+chipping = false

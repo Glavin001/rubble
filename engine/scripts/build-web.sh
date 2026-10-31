@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the WebGPU demos into one static site: the demo scenes (demo.html), the vehicle
-# demo (vehicle.html), soft-body vehicles (softbody.html), heightfield terrain (terrain.html), the meteor impact (impact.html), the meteor run (showcase.html), the motion demo (motion.html:
+# demo (vehicle.html), soft-body vehicles (softbody.html), heightfield terrain (terrain.html), the meteor impact (impact.html), the meteor run (showcase.html), Broadside (broadside.html), the motion demo (motion.html:
 # CCD, characters, bullets), the fracture lab (fracture/) and a landing page (index.html).
 # The one command Vercel, CI and local builds use. Runs on Linux and macOS; no GPU needed.
 #
@@ -155,10 +155,13 @@ cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
 step "Fracture lab wasm"
 wasm-pack build crates/engine-fracture-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
+step "World API wasm (Broadside: engine-world-wasm)"
+CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm --release --target web \
+  --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
 step "Stress-solver wasm (the Fracture lab's stress bond mode)"
 CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
   --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
-step "Stress-solver wasm, Asyncify build (browsers without JSPI: Safari)"
+step "Stress-solver and world wasm, Asyncify builds (browsers without JSPI: Safari)"
 # The solver waits on GPU maps through the import rubble-gpu-wait.yield_to_browser
 # (engine-gpu-wait). Chrome suspends the stack there with JSPI; elsewhere this build's
 # Asyncify unwinds it (fracture/gpu-wait.mjs). Only that import may unwind. Indirect calls
@@ -192,6 +195,16 @@ STRESS_ASYNCIFY="$(mktemp -d)/asyncify"
 cached asyncify "$( (cat "$STRESS_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
   "$STRESS_ASYNCIFY" asyncify
 cp "$STRESS_ASYNCIFY/stress_web_bg.asyncify.wasm" "${STRESS_WASM%.wasm}.asyncify.wasm"
+# Broadside's world wasm waits on the GPU the same way: its Asyncify build too.
+WORLD_WASM="$ENGINE/crates/engine-webgpu/generated/world-wasm/engine_world_wasm_bg.wasm"
+world_asyncify() {
+  mkdir -p "$WORLD_ASYNCIFY"
+  "$WASM_OPT" "$WORLD_WASM" "${ASYNCIFY_ARGS[@]}" -o "$WORLD_ASYNCIFY/engine_world_wasm_bg.asyncify.wasm"
+}
+WORLD_ASYNCIFY="$(mktemp -d)/asyncify"
+cached world-asyncify "$( (cat "$WORLD_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
+  "$WORLD_ASYNCIFY" world_asyncify
+cp "$WORLD_ASYNCIFY/engine_world_wasm_bg.asyncify.wasm" "${WORLD_WASM%.wasm}.asyncify.wasm"
 step "Scene snapshots (scene_export, host build)"
 cargo run --release -p engine-scenes --no-default-features --bin scene_export
 
@@ -209,7 +222,7 @@ step "Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
 step "Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$OUT"/
+cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$OUT"/
 cp "$WEB"/*.mjs "$OUT"/
 cp -R "$WEB"/generated "$OUT"/generated
 cp -R "$WEB"/fracture "$OUT"/fracture

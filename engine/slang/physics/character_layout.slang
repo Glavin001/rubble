@@ -71,7 +71,8 @@ static const uint EVENT_PROJECTILE_HIT = 8u;
 static const uint EVENT_PROJECTILE_STOPPED = 9u;
 
 // Candidates and contact planes a character gathers in one step.
-static const uint CHAR_MAX_CANDIDATES = 192u;
+static const uint CHAR_MAX_CANDIDATES = 4096u;
+static const uint CAND_STRIDE = 4u;
 static const uint PROJ_SEGMENTS = 4u;   // arc segments per step
 static const uint PROJ_MAX_HITS = 8u;   // hits per step at most (PJ_PEN.w lowers it)
 

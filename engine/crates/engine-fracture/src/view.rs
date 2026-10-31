@@ -142,6 +142,13 @@ impl Orbit {
         }
     }
 
+    /// A scripted camera (a take's shot): fly mode, the eye at `eye` looking at `target`.
+    pub fn frame_shot(&mut self, eye: [f64; 3], target: [f64; 3]) {
+        self.mode = ViewMode::Fly;
+        self.position = eye;
+        self.look_at(target);
+    }
+
     /// Eye position; in orbit, narrow viewports back off so the scene still fits.
     pub fn eye(&self, aspect: f64) -> [f64; 3] {
         match self.mode {

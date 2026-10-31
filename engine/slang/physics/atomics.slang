@@ -31,6 +31,8 @@ typealias AUint = Atomic<uint>;
     }
 // Groupshared-only exchange: All* lowers to textureBarrier(), which naga/wgpu reject.
 #define GROUP_SYNC() GroupMemoryBarrierWithGroupSync()
+// Lanes exchanging storage-buffer writes (and groupshared ones).
+#define STORAGE_SYNC() do { DeviceMemoryBarrierWithGroupSync(); GroupMemoryBarrierWithGroupSync(); } while (false)
 #define BIND(n) [[vk::binding(n, 0)]]
 #elif defined(ENGINE_CPU_TEST)
 // CPU conformance harness (slangc -target cpp): threads run sequentially, so
@@ -47,6 +49,7 @@ typealias AUint = uint;
 #define AXCHG3(x, v, o) do { (o) = (x); (x) = (v); } while (false)
 #define ACAS4(x, cmp, v, o) do { (o) = (x); if ((o) == (cmp)) (x) = (v); } while (false)
 #define GROUP_SYNC()
+#define STORAGE_SYNC()
 #define BIND(n)
 #else
 #define BIND(n)
@@ -61,6 +64,7 @@ typealias AUint = uint;
 #define AXCHG3(x, v, o) InterlockedExchange(x, v, o)
 #define ACAS4(x, cmp, v, o) InterlockedCompareExchange(x, cmp, v, o)
 #define GROUP_SYNC() AllMemoryBarrierWithGroupSync()
+#define STORAGE_SYNC() AllMemoryBarrierWithGroupSync()
 #endif
 
 // Same 64-byte layout as StepCounters; atomic fields typed AUint.

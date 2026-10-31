@@ -1,0 +1,307 @@
+//! The Broadside take natively: the captain walks the length of the choreography and
+//! reaches the main deck, every cue fires and breaks wood, nothing hits him, and the
+//! closing volley wrecks the ship around him.
+
+use engine_world_wasm::broadside::*;
+use rubble::GpuContext;
+use std::time::Instant;
+
+const GLB: &[u8] = include_bytes!("../../engine-webgpu/fracture/assets/galleon-stern.glb");
+
+#[test]
+fn the_take() {
+    let mut b = Broadside::new(GpuContext::Default, GLB).unwrap();
+    // The reference poses once the first step's readback has placed every body.
+    b.step().unwrap();
+    b.poll_blocking().unwrap();
+    let rest = b.chunk_poses();
+    let frames = (17.0 / b.dt).round() as u32;
+    let t0 = Instant::now();
+    for _ in 1..frames {
+        b.step().unwrap();
+        b.poll_blocking().unwrap();
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1e3 / frames as f64;
+    let loose = loose(&b, &rest);
+    eprintln!(
+        "take: {frames} frames, {ms:.1} ms/frame (blocking); {} shots, {} bonds broken, {} crushed; finale {:?}; {loose:?}",
+        b.total.shots, b.total.broken, b.total.crushed, b.finale
+    );
+    assert!(
+        b.captain_stopped(),
+        "the walker reaches the end of his walk"
+    );
+    assert!(b.finale.is_some(), "the closing volley fired");
+    assert!(
+        b.total.shots <= targets().len() + finale_targets().len(),
+        "every point shot at most once"
+    );
+    for (name, chunks, share) in loose {
+        if ["stairs (his)", "stairs (port)", "balustrade", "breast"].contains(&name) {
+            assert!(
+                chunks > 0 && share >= 0.9,
+                "{name}: {:.0}% of {chunks} chunks loose",
+                100.0 * share
+            );
+        }
+    }
+}
+
+/// The closing volley alone, early (profiling its frames).
+#[test]
+#[ignore]
+fn volley_only() {
+    let mut b = Broadside::new(GpuContext::Default, GLB).unwrap();
+    b.scripted = false;
+    for f in 0..240u32 {
+        if f == 30 {
+            b.final_volley().unwrap();
+        }
+        let t = Instant::now();
+        b.step().unwrap();
+        b.poll_blocking().unwrap();
+        if f >= 28 && (f < 40 || f % 20 == 0) {
+            eprintln!(
+                "frame {f}: {:.1} ms, broken {} splits {} crushed {}",
+                t.elapsed().as_secs_f64() * 1e3,
+                b.total.broken,
+                b.total.splits,
+                b.total.crushed
+            );
+        }
+    }
+}
+
+/// Frames of the take for Shardwright's `prefracture preview --sim` (every chunk at its
+/// fragment's pose, coloured as its mesh; the newest ball): `BROADSIDE_FRAMES=path`.
+#[test]
+#[ignore]
+fn dump_frames() {
+    let out = std::env::var("BROADSIDE_FRAMES").expect("BROADSIDE_FRAMES=path");
+    let at: Vec<u32> = std::env::var("BROADSIDE_AT")
+        .unwrap_or("0,150,240,280,330,420,560,590,640,900".into())
+        .split(',')
+        .map(|s| s.parse().unwrap())
+        .collect();
+    let mut b = Broadside::new(GpuContext::Default, GLB).unwrap();
+    let mut frames = Vec::new();
+    let mut colors = serde_json::Map::new();
+    for (c, f) in b.fragment.iter().enumerate() {
+        if let Some(f) = f {
+            colors.insert(f.to_string(), serde_json::json!(b.color[c]));
+        }
+    }
+    let last = *at.iter().max().unwrap();
+    for frame in 0..=last {
+        if frame > 0 {
+            b.step().unwrap();
+            b.poll_blocking().unwrap();
+        }
+        if std::env::var_os("BROADSIDE_TRACE").is_some()
+            && (330..440).contains(&frame)
+            && frame % 3 == 0
+        {
+            let shots: Vec<_> = b
+                .log
+                .iter()
+                .filter(|l| l.0 + 3 >= frame)
+                .map(|l| l.1.map(|x| x.round()))
+                .collect();
+            eprintln!(
+                "  {frame}: captain {:?} ground {} new shots {shots:?}",
+                b.captain_at.map(|x| (x * 100.0).round() / 100.0),
+                b.captain_ground
+            );
+        }
+        if !at.contains(&frame) {
+            continue;
+        }
+        let poses = b.chunk_poses();
+        let mut bodies = Vec::new();
+        for (c, t) in poses.iter().enumerate() {
+            let Some(f) = b.fragment[c] else { continue };
+            if b.crushed[c] {
+                continue;
+            }
+            // The fragment's mesh is about its centre of mass, unrotated: the chunk's
+            // pose less its principal rotation (its rest rotation).
+            let q = glam::Quat::from_array(t.rotation)
+                * glam::Quat::from_array(b.rest[c].rotation).inverse();
+            let p = t.position;
+            bodies.push(serde_json::json!([f, p[0], p[1], p[2], q.x, q.y, q.z, q.w]));
+        }
+        let mut fr = serde_json::json!({ "bodies": bodies });
+        if let Some(p) = b.ball_poses().last() {
+            fr["projectile"] =
+                serde_json::json!([p.position[0], p.position[1], p.position[2], 0.25]);
+        }
+        eprintln!(
+            "frame {frame} ({:.2} s): captain {:?}, broken {}",
+            b.seconds(),
+            b.captain_at,
+            b.total.broken
+        );
+        frames.push(fr);
+    }
+    std::fs::write(
+        out,
+        serde_json::json!({ "frames": frames, "colors": colors }).to_string(),
+    )
+    .unwrap();
+}
+
+/// The aft as regions: (name, min, max) in the ship frame, by a chunk's rest position.
+fn regions() -> Vec<(&'static str, [f32; 3], [f32; 3])> {
+    use ship::*;
+    vec![
+        (
+            "stairs (his)",
+            [BREAST - 2.3, MAIN_DECK, STAIR_INNER],
+            [BREAST, QUARTER_DECK + 1.0, STAIR_OUTER + 0.1],
+        ),
+        (
+            "stairs (port)",
+            [BREAST - 2.3, MAIN_DECK, -STAIR_OUTER - 0.1],
+            [BREAST, QUARTER_DECK + 1.0, -STAIR_INNER],
+        ),
+        (
+            "balustrade",
+            [BREAST, QUARTER_DECK, -HALF_BEAM],
+            [BREAST + 0.25, QUARTER_DECK + 1.1, HALF_BEAM],
+        ),
+        (
+            "breast",
+            [BREAST - 0.01, MAIN_DECK, -HALF_BEAM],
+            [BREAST + 0.09, QUARTER_DECK, HALF_BEAM],
+        ),
+        (
+            "quarterdeck front",
+            [BREAST, QUARTER_DECK - 0.3, -HALF_BEAM],
+            [BREAST + 3.0, QUARTER_DECK, HALF_BEAM],
+        ),
+        (
+            "quarterdeck",
+            [BREAST, QUARTER_DECK - 0.3, -HALF_BEAM],
+            [22.0, QUARTER_DECK, HALF_BEAM],
+        ),
+        (
+            "qd bulwarks",
+            [BREAST, QUARTER_DECK, -4.6],
+            [22.0, QUARTER_DECK + 1.0, 4.6],
+        ),
+    ]
+}
+
+/// Share of each region's chunks knocked loose (moved more than 15 cm, or crushed).
+fn loose(b: &Broadside, rest: &[rubble::Transform]) -> Vec<(&'static str, usize, f32)> {
+    let now = b.chunk_poses();
+    regions()
+        .into_iter()
+        .map(|(name, lo, hi)| {
+            let inside: Vec<usize> = (0..rest.len())
+                .filter(|&c| {
+                    (0..3).all(|k| rest[c].position[k] >= lo[k] && rest[c].position[k] <= hi[k])
+                })
+                .filter(|&c| name != "qd bulwarks" || rest[c].position[2].abs() > ship::HALF_BEAM)
+                .collect();
+            let gone = inside
+                .iter()
+                .filter(|&&c| {
+                    b.crushed[c]
+                        || (glam::Vec3::from(now[c].position) - glam::Vec3::from(rest[c].position))
+                            .length()
+                            > 0.15
+                })
+                .count();
+            (name, inside.len(), gone as f32 / inside.len().max(1) as f32)
+        })
+        .collect()
+}
+
+/// The barrage's destruction: when he reaches the main deck, and at the end.
+#[test]
+#[ignore]
+fn destruction() {
+    let level = std::env::var("BROADSIDE_LEVEL").map_or(LEVEL, |s| s.parse().unwrap());
+    let mut b = Broadside::at_level(GpuContext::Default, GLB, level).unwrap();
+    // The reference poses once the first step's readback has placed every body.
+    b.step().unwrap();
+    b.poll_blocking().unwrap();
+    let rest = b.chunk_poses();
+    let frames = (std::env::var("BROADSIDE_SECONDS").map_or(20.0, |s| s.parse().unwrap()) / b.dt)
+        .round() as u32;
+    let mut landed = None;
+    let mut closest = f32::MAX;
+    let (mut worst_lift, mut worst_after) = (0.0f32, 0.0f32);
+    let t0 = Instant::now();
+    for _ in 0..frames {
+        b.step().unwrap();
+        b.poll_blocking().unwrap();
+        let c = glam::Vec3::from(b.captain_at);
+        for (id, _) in &b.balls {
+            if let Ok(s) = b.world.read_body_state(*id) {
+                if glam::Vec3::from(s.linear_velocity).length() > 50.0 {
+                    let d = glam::Vec3::from(s.transform.position) - c;
+                    let axial = d.y.clamp(-CAPTAIN_HALF, CAPTAIN_HALF);
+                    closest = closest.min((d - glam::Vec3::new(0.0, axial, 0.0)).length());
+                }
+            }
+        }
+        // He should never be thrown: his height above the floor under his path.
+        let floor = if c.x > ship::BREAST + 0.1 {
+            ship::QUARTER_DECK
+        } else if c.x < ship::BREAST - 2.3 {
+            ship::MAIN_DECK
+        } else {
+            ship::MAIN_DECK + (ship::BREAST - c.x).clamp(0.0, 2.4) * -1.0 + 2.4
+        };
+        if (b.captain_vel[1].abs() > 3.0
+            || b.captain_vel[0].abs() > 2.0
+            || b.captain_vel[2].abs() > 2.0)
+            && std::env::var_os("BROADSIDE_WHY").is_some()
+        {
+            let on = b.captain_on;
+            let mass = b.world.body_mass_data(on).ok().flatten().map(|m| m.mass);
+            eprintln!("  lift at frame {}: pos {:?} vel {:?} on {on:?} (mass {mass:?}) ground vel {:?} grounded {}", b.frame, b.captain_at, b.captain_vel, b.captain_ground_vel, b.captain_ground);
+        }
+        let lift = c.y - CAPTAIN_HALF - CAPTAIN_RADIUS - floor;
+        if landed.is_none() {
+            worst_lift = worst_lift.max(lift);
+        } else {
+            worst_after = worst_after.max(lift);
+        }
+        if landed.is_none() && c.x < ship::BREAST - 2.4 && c.y < ship::MAIN_DECK + 1.2 {
+            landed = Some(b.frame);
+            eprintln!(
+                "he reaches the main deck at {:.2} s ({} shots):",
+                b.seconds(),
+                b.total.shots
+            );
+            for (n, k, f) in loose(&b, &rest) {
+                eprintln!("  {n:18} {k:5} chunks, {:5.1}% loose", 100.0 * f);
+            }
+        }
+        if b.frame % 120 == 0 {
+            eprintln!(
+                "t {:.1} s: captain {:?}, shots {}, broken {}, crushed {}, pieces {}",
+                b.seconds(),
+                b.captain_at.map(|x| (x * 100.0).round() / 100.0),
+                b.total.shots,
+                b.total.broken,
+                b.total.crushed,
+                b.world.destructible_stats(b.ship).unwrap().actors
+            );
+        }
+    }
+    eprintln!(
+        "end at {:.1} s ({} shots, {:.0} ms/step, finale {:?}):",
+        b.seconds(),
+        b.total.shots,
+        t0.elapsed().as_secs_f64() * 1e3 / frames as f64,
+        b.finale
+    );
+    for (n, k, f) in loose(&b, &rest) {
+        eprintln!("  {n:18} {k:5} chunks, {:5.1}% loose", 100.0 * f);
+    }
+    eprintln!("closest shot {closest:.2} m; highest he rose above his floor: {worst_lift:.2} m on the way down, {worst_after:.2} m after; final {:?}", b.captain_at);
+}
