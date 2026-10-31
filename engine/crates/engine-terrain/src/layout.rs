@@ -89,7 +89,24 @@ pub const MPM_C_SLEEP_AFTER: usize = MPM_C_SLEEP + 1;
 /// those and their neighbours; the rest are the second ring.
 pub const MPM_C_SLEEP_RING0: usize = MPM_C_SLEEP_AFTER + 1;
 pub const MPM_C_SLEEP_RING1: usize = MPM_C_SLEEP_RING0 + 1;
-pub const MPM_COUNTER_WORDS: usize = MPM_C_SLEEP_RING1 + 1;
+/// Per area slot k: the parcels in flight after the last substep whose
+/// ballistic path can still reach its box (`MPM_C_AREA_AIR + k`), and its
+/// fastest body touching its material this frame (`MPM_C_AREA_TOUCH + k`,
+/// f32 bits): the local settle rule's words ([`crate::SettleRule::Local`]).
+pub const MPM_C_AREA_AIR: usize = MPM_C_SLEEP_RING1 + 1;
+pub const MPM_C_AREA_TOUCH: usize = MPM_C_AREA_AIR + MPM_MAX_AREAS as usize;
+/// Pool reuse: one past the highest slot still held (`mpm_pool_top`).
+pub const MPM_C_POOL_TOP: usize = MPM_C_AREA_TOUCH + MPM_MAX_AREAS as usize;
+/// Pool reuse: the free slots found, then those an activation takes.
+pub const MPM_C_HOLES: usize = MPM_C_POOL_TOP + 1;
+/// Pool reuse: nonzero while a pass reuses slots (an activation past the
+/// pool's end: its particle count).
+pub const MPM_C_REUSE: usize = MPM_C_HOLES + 1;
+/// Live particles: the pool's held slots are these plus the parcels in
+/// flight (each comes back to the slot it left). With slots reused,
+/// [`MPM_C_PARTICLES`] is the pool's extent, not its use.
+pub const MPM_C_LIVE: usize = MPM_C_REUSE + 1;
+pub const MPM_COUNTER_WORDS: usize = MPM_C_LIVE + 1;
 
 /// Area slots (`TerrainConfig::max_regions` is at most this): records
 /// `1..=MPM_MAX_AREAS` of [`MPM_PARAMS_BINDING`] after the domain's.

@@ -16,7 +16,9 @@
 
 use crate::config::{TerrainConfig, TerrainError};
 use crate::layout::{MPM_BOUNDARY_ABSORBING, MPM_MAX_AREAS, MPM_NO_BED};
-use crate::plan::{TerrainCmd, TerrainOps, TerrainPlan, TerrainWrite, ARGS_PARTICLES};
+use crate::plan::{
+    TerrainCmd, TerrainOps, TerrainPlan, TerrainWrite, ARGS_PARCELS, ARGS_PARTICLES,
+};
 
 /// The surface buffer's binding (after the terrain look-ahead's 52).
 pub const SURFACE_BINDING: usize = 53;
@@ -32,10 +34,13 @@ pub const SURFACE_KERNELS: &[&str] = &[
     "terrain_surface_resolve",
     "terrain_surface_debris",
     "terrain_surface_publish",
+    "terrain_surface_gather",
+    "terrain_surface_gather_parcels",
 ];
 
 /// Header words: [0] views to scan (one past the highest open slot), [4] the
-/// debris list's first word, [5] the ejecta speed (f32 bits, m/s), [14]
+/// debris list's first word, [5] the ejecta speed (f32 bits, m/s), [6] the
+/// debris gather's first word, [7] its records (0: none), [14]
 /// frames resolved, [15] valid, [16..20) the debris draw's arguments. The view
 /// table follows ([`SURFACE_VIEW_WORD`]).
 pub const SURFACE_HEADER_WORDS: u32 = 24;
@@ -82,6 +87,55 @@ pub struct SurfacePatch {
 /// Default limit on window samples × layers, summed over the open areas.
 pub const DEFAULT_SURFACE_CELLS: u32 = 1 << 21;
 
+/// Words of the debris gather's header ([`SurfacePlan::gather_base`]): [0]
+/// the records the frame's debris needed (past the limit: the frame fails by
+/// name), [1..4) unused.
+pub const SURFACE_GATHER_HEADER_WORDS: u32 = 4;
+/// Words of one gathered debris record: position (world, m) and volume
+/// (m³), then velocity (m/s) and the kind ([`SURFACE_DEBRIS_PARTICLE`] or
+/// [`SURFACE_DEBRIS_PARCEL`], u32 bits).
+pub const SURFACE_GATHER_RECORD_WORDS: u32 = 8;
+/// Gathered debris kind: a particle in flight or above the surface.
+pub const SURFACE_DEBRIS_PARTICLE: u32 = 0;
+/// Gathered debris kind: a ballistic parcel in flight.
+pub const SURFACE_DEBRIS_PARCEL: u32 = 1;
+
+/// One piece of debris as the gather wrote it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceDebris {
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    /// Its material's volume (m³).
+    pub volume: f32,
+    /// A ballistic parcel in flight (else a particle listed as debris).
+    pub parcel: bool,
+}
+
+/// An open area's live heights in a surface readback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurfaceViewRange {
+    pub slot: u32,
+    /// Its window in the heightfield's samples: i0, j0, ni, nj (`ni × nj`
+    /// heights, row-major, the heightfield's local y).
+    pub window: [u32; 4],
+    /// Its first height, in words from [`SurfaceReadback::heights_word`].
+    pub offset: u32,
+}
+
+/// What a host copies out of the surface buffer after a frame's pass, and
+/// where each area's heights sit in the copy ([`SurfacePlan::readback`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SurfaceReadback {
+    /// The first word of the open windows' heights, back to back in slot order.
+    pub heights_word: u32,
+    pub heights_words: u32,
+    pub views: Vec<SurfaceViewRange>,
+    /// The debris gather's first word and its words (header and every
+    /// record slot), 0 without it.
+    pub debris_word: u32,
+    pub debris_words: u32,
+}
+
 /// The surface buffer's sections and limits.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfacePlan {
@@ -91,6 +145,8 @@ pub struct SurfacePlan {
     ejecta_fall: f32,
     /// Patch `k` serves area slot `k`.
     patches: Vec<SurfacePatch>,
+    /// Debris records the gather holds (0: no gather).
+    max_debris: u32,
 }
 
 impl SurfacePlan {
@@ -112,6 +168,7 @@ impl SurfacePlan {
             max_cells,
             ejecta_fall: 1.0,
             patches: Vec::new(),
+            max_debris: 0,
         })
     }
 
@@ -203,6 +260,85 @@ impl SurfacePlan {
         Ok(self)
     }
 
+    /// Gather the frame's debris (every particle the debris list holds, and
+    /// every parcel in flight) into at most `max` compact records a host can
+    /// copy back ([`Self::readback`], [`Self::decode_debris`]). A frame with
+    /// more fails by name ("surface debris"), never dropping any. 0 turns the
+    /// gather off.
+    pub fn with_debris(mut self, max: u32) -> Self {
+        self.max_debris = max;
+        self
+    }
+
+    pub fn max_debris(&self) -> u32 {
+        self.max_debris
+    }
+
+    /// First word of the debris gather (after the debris list).
+    pub fn gather_base(&self) -> u32 {
+        self.debris_base() + self.max_particles
+    }
+
+    fn gather_words(&self) -> u32 {
+        if self.max_debris == 0 {
+            0
+        } else {
+            SURFACE_GATHER_HEADER_WORDS + SURFACE_GATHER_RECORD_WORDS * self.max_debris
+        }
+    }
+
+    /// The copy a host makes after this frame's pass over `terrain`'s open
+    /// areas (the same layout [`Self::frame`] gives them): the heights of
+    /// every open window, then the debris gather.
+    pub fn readback(&self, terrain: &TerrainPlan) -> SurfaceReadback {
+        let mut views = Vec::new();
+        let mut heights = 0u32;
+        for a in terrain.areas() {
+            let Some(p) = terrain.area_params(a.slot) else {
+                continue;
+            };
+            let [i0, j0, ni, nj] = p.window;
+            views.push(SurfaceViewRange {
+                slot: a.slot,
+                window: [i0, j0, ni, nj],
+                offset: heights,
+            });
+            heights += ni * nj;
+        }
+        SurfaceReadback {
+            heights_word: self.heights_base(),
+            heights_words: heights,
+            views,
+            debris_word: self.gather_base(),
+            debris_words: self.gather_words(),
+        }
+    }
+
+    /// The debris records of a copy of the gather (`debris_words` words from
+    /// [`SurfaceReadback::debris_word`]), or the error naming the limit when
+    /// the frame had more debris than it holds.
+    pub fn decode_debris(&self, words: &[u32]) -> Result<Vec<SurfaceDebris>, TerrainError> {
+        let Some(&n) = words.first() else {
+            return Ok(Vec::new());
+        };
+        TerrainConfig::check("surface debris", u64::from(n), u64::from(self.max_debris))?;
+        let r = SURFACE_GATHER_RECORD_WORDS as usize;
+        let at = SURFACE_GATHER_HEADER_WORDS as usize;
+        Ok(words[at..]
+            .chunks_exact(r)
+            .take(n as usize)
+            .map(|w| {
+                let f = |k: usize| f32::from_bits(w[k]);
+                SurfaceDebris {
+                    position: [f(0), f(1), f(2)],
+                    volume: f(3),
+                    velocity: [f(4), f(5), f(6)],
+                    parcel: w[7] == SURFACE_DEBRIS_PARCEL,
+                }
+            })
+            .collect())
+    }
+
     /// First word of the heights (every open window's, one per sample).
     pub fn heights_base(&self) -> u32 {
         SURFACE_DATA_WORD
@@ -231,7 +367,7 @@ impl SurfacePlan {
 
     /// Bytes of the surface buffer.
     pub fn bytes(&self) -> u64 {
-        4 * (u64::from(self.debris_base()) + u64::from(self.max_particles))
+        4 * (u64::from(self.gather_base()) + u64::from(self.gather_words()))
     }
 
     pub fn max_cells(&self) -> u32 {
@@ -316,7 +452,16 @@ impl SurfacePlan {
                 TerrainWrite {
                     binding: SURFACE_BINDING,
                     offset: 0,
-                    words: vec![scan, 0, 0, 0, self.debris_base(), ejecta_speed.to_bits()],
+                    words: vec![
+                        scan,
+                        0,
+                        0,
+                        0,
+                        self.debris_base(),
+                        ejecta_speed.to_bits(),
+                        self.gather_base(),
+                        self.max_debris,
+                    ],
                 },
                 TerrainWrite {
                     binding: SURFACE_BINDING,
@@ -348,6 +493,23 @@ impl SurfacePlan {
             kernel: "terrain_surface_debris",
             offset: ARGS_PARTICLES,
         });
+        if self.max_debris > 0 {
+            ops.writes.push(TerrainWrite {
+                binding: SURFACE_BINDING,
+                offset: 4 * u64::from(self.gather_base()),
+                words: vec![0],
+            });
+            // The listed particles, then the parcels in flight (their counts
+            // are the GPU's: one thread per particle and per parcel).
+            ops.cmds.push(TerrainCmd::Indirect {
+                kernel: "terrain_surface_gather",
+                offset: ARGS_PARTICLES,
+            });
+            ops.cmds.push(TerrainCmd::Indirect {
+                kernel: "terrain_surface_gather_parcels",
+                offset: ARGS_PARCELS,
+            });
+        }
         self.publish(&mut ops);
         Ok(ops)
     }
@@ -452,7 +614,8 @@ mod tests {
             u64::from(ni * nj * layers)
         );
         assert_eq!(threads(&ops, "terrain_surface_resolve"), u64::from(ni * nj));
-        // The header names the views, the debris list and the ejecta speed.
+        // The header names the views, the debris list, the ejecta speed and
+        // the debris gather (off: no records).
         assert_eq!(ops.writes[0].binding, SURFACE_BINDING);
         assert_eq!(
             ops.writes[0].words,
@@ -462,7 +625,9 @@ mod tests {
                 0,
                 0,
                 s.debris_base(),
-                (2.0 * 9.81 * p.origin[3]).sqrt().to_bits()
+                (2.0 * 9.81 * p.origin[3]).sqrt().to_bits(),
+                s.gather_base(),
+                0
             ]
         );
         // The view: open on the absorbing ground, its sections and window.
