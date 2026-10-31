@@ -51,6 +51,66 @@ pub struct PackInfo {
     pub bonds: usize,
 }
 
+/// A shot a pack authors (`defaults.shots`, written by
+/// `engine-webgpu/fracture/packs/port-reference-packs.mjs`): the source demo's own
+/// projectile, as data. Positions and velocities are in the **pack's** frame (+Y up, as
+/// authored); add the scene's `placement` for the lab's / asset frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackShot {
+    pub label: String,
+    /// The multiples of the pack's `defaults.projectile` mass and speed this shot is.
+    pub mass_scale: f64,
+    pub speed_scale: f64,
+    pub radius: f64,
+    pub mass: f64,
+    pub origin: V3,
+    pub velocity: V3,
+    pub angular_velocity: V3,
+    /// Seconds after the scene starts (the source's settle).
+    pub launch_at: f64,
+    pub note: String,
+}
+
+impl PackShot {
+    /// The origin in the lab's / asset frame (`Scene::placement` added).
+    pub fn origin_at(&self, placement: V3) -> V3 {
+        add(self.origin, placement)
+    }
+}
+
+/// The shots a pack authors (`defaults.shots`), in order; empty when it authors none. A
+/// shot missing a field is an error, never a guessed value.
+pub fn pack_shots(bytes: &[u8]) -> Result<Vec<PackShot>> {
+    let json: Value = serde_json::from_slice(bytes).context("scene pack is not JSON")?;
+    let Some(shots) = json["defaults"]["shots"].as_array() else {
+        return Ok(Vec::new());
+    };
+    shots
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let num = |k: &str| f(s, k).ok_or_else(|| anyhow!("defaults.shots[{i}] has no {k}"));
+            let vec = |k: &str| v3(&s[k]).with_context(|| format!("defaults.shots[{i}].{k}"));
+            Ok(PackShot {
+                label: s["label"].as_str().map_or_else(|| format!("shot {i}"), str::to_string),
+                mass_scale: f(s, "massScale").unwrap_or(1.0),
+                speed_scale: f(s, "speedScale").unwrap_or(1.0),
+                radius: num("radius")?,
+                mass: num("mass")?,
+                origin: vec("origin")?,
+                velocity: vec("velocity")?,
+                angular_velocity: if s.get("angularVelocity").is_some() {
+                    vec("angularVelocity")?
+                } else {
+                    [0.0; 3]
+                },
+                launch_at: f(s, "launchAt").unwrap_or(0.0),
+                note: s["note"].as_str().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
+}
+
 fn v3(v: &Value) -> Result<V3> {
     let c = |k: &str| v[k].as_f64().ok_or_else(|| anyhow!("missing {k}"));
     Ok([c("x")?, c("y")?, c("z")?])

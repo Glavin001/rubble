@@ -168,6 +168,8 @@ impl engine_softbody::SoftBackend for Recorder<'_> {
 
 mod soft;
 pub use soft::*;
+mod terrain;
+pub use terrain::*;
 
 fn err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
@@ -249,6 +251,31 @@ pub fn character_record(desc_json: &str, inner_body: u32, x: f32, y: f32, z: f32
     }
     let d: engine_schema::character::CharacterDesc = serde_json::from_value(base).map_err(err)?;
     Ok(d.record(inner_body, [x, y, z]).iter().flatten().copied().collect())
+}
+
+/// A hull arena holding the unit cube (box pairs read it) and one heightfield,
+/// as `[base, params × 4 (f32 bits), records…]`: the host uploads the records to
+/// binding 18 and gives the heightfield collider those params
+/// (engine_schema::heightfield; samples row-major, `nx × nz`).
+#[wasm_bindgen]
+pub fn height_field_arena(
+    nx: u32,
+    nz: u32,
+    dx: f32,
+    dz: f32,
+    heights: &[f32],
+) -> Result<Vec<u32>, JsError> {
+    use engine_schema::heightfield::{height_field_collider_params, HeightField};
+    let field = HeightField::new(nx, nz, dx, dz, heights.to_vec())
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    let mut arena = engine_schema::convex::HullArena::new();
+    let base = arena
+        .insert_height_field(&field)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    let mut out = vec![base];
+    out.extend(height_field_collider_params(base, &field).map(f32::to_bits));
+    out.extend(arena.records().iter().flatten());
+    Ok(out)
 }
 
 /// Default character descriptor (JSON).
@@ -622,6 +649,9 @@ impl RigidStep {
             joint_count: joints,
             joint_hash_slots: engine_schema::joint_hash_size(joints),
             has_convex: false,
+            has_height_field: c(18) & 8 != 0,
+            // The browser hosts no event shapes yet (World runs natively).
+            soil: false,
             reuse_contacts: self.params.flags & engine_schema::FLAG_REUSE_CONTACTS != 0,
             max_colors: self.cap.max_colors,
             iterations: self.params.iterations,
@@ -637,8 +667,9 @@ impl RigidStep {
             command_count: 0,
             explosion_count: 0,
             // counts[18]: bit 0 CCD bodies, bit 1 kinematic bodies, bit 2 impulse
-            // records this step; counts[19] projectiles, counts[20] characters,
-            // counts[21] queries.
+            // records this step, bit 3 heightfield colliders (has_height_field,
+            // below); counts[19] projectiles, counts[20] characters, counts[21]
+            // queries.
             motion: {
                 let bits = c(18);
                 rp::MotionInputs {
@@ -731,6 +762,8 @@ impl RigidStep {
             (4096, false, 1, 1, 0, 0),
             (4096, false, 1, 0, 1, 7),
             (4096, false, 1, 0, 0, 7),
+            // Heightfield terrain: the convex stages take its pairs.
+            (4096, false, 1, 0, 0, 15),
         ] {
             let mut i = s.inputs(&[
                 n, n, 1, 1, 1, bodies, 1, 1, max_color, 1, 1, 1, 1, 1, 1, 1, 1, 1, motion, motion,

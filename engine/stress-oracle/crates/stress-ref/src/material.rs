@@ -154,6 +154,11 @@ pub struct Material {
     /// Fraction of critical damping of the bond dashpots (light; removes ringing).
     #[serde(default = "default_damping")]
     pub damping_ratio: f64,
+    /// Chunk crushing (`crush.rs`): a chunk of this material comminutes when its mean
+    /// stress leaves the crush surface. `None`: its chunks never crush. Read only by the
+    /// threshold mode's opt-in crush switch (rubble `DestructibleDef::crush`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crush: Option<crate::crush::CrushParams>,
 }
 
 fn default_damping() -> f64 {
@@ -196,6 +201,9 @@ impl Material {
                 return Err(format!("material '{name}': weibull_modulus must be positive"));
             }
         }
+        if let Some(c) = &self.crush {
+            c.validate(name)?;
+        }
         Ok(())
     }
 
@@ -228,6 +236,7 @@ impl Material {
             // n = 54.6, t_test = (3 MPa / 30 GPa) / 1e-6 /s = 100 s.
             static_fatigue: Some(StaticFatigue { exponent: 1.0 / 0.018 - 1.0, test_time: 100.0 }),
             damping_ratio: 0.01,
+            crush: None,
         }
     }
 
@@ -248,6 +257,7 @@ impl Material {
             dif: None,
             static_fatigue: None,
             damping_ratio: 0.01,
+            crush: None,
         }
     }
 
@@ -268,6 +278,7 @@ impl Material {
             dif: None,
             static_fatigue: None,
             damping_ratio: 0.01,
+            crush: None,
         }
     }
 
@@ -290,6 +301,7 @@ impl Material {
             // EN 1288 tests at 2 MPa/s, i.e. 20 s to the 40 MPa strength.
             static_fatigue: Some(StaticFatigue { exponent: 16.0, test_time: 20.0 }),
             damping_ratio: 0.005,
+            crush: None,
         }
     }
 
@@ -315,6 +327,7 @@ impl Material {
             dif: None,
             static_fatigue: Some(StaticFatigue { exponent: 24.0, test_time: 300.0 }),
             damping_ratio: 0.02,
+            crush: None,
         }
     }
 
@@ -335,6 +348,7 @@ impl Material {
             dif: None,
             static_fatigue: None,
             damping_ratio: 0.01,
+            crush: None,
         }
     }
 
@@ -355,6 +369,7 @@ impl Material {
             dif: None,
             static_fatigue: None,
             damping_ratio: 0.005,
+            crush: None,
         }
     }
 
@@ -410,6 +425,7 @@ impl Material {
             dif: None,
             static_fatigue: None,
             damping_ratio: 0.02,
+            crush: None,
         }
     }
 
@@ -471,6 +487,7 @@ impl Material {
             dif: None,
             static_fatigue: None,
             damping_ratio: 0.02,
+            crush: None,
         }
     }
 
@@ -491,6 +508,7 @@ impl Material {
             dif: None,
             static_fatigue: None,
             damping_ratio: 0.0,
+            crush: None,
         }
     }
 }

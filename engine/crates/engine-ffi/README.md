@@ -21,7 +21,7 @@ failure on the calling thread.
 | Area | Rules |
 |---|---|
 | Handles | `uint64_t`, where 0 is null. A stale handle returns `RB_STALE_HANDLE`. |
-| Definitions | Get one from `rbDefault*Def()` and change only the fields you need. A definition made any other way returns `RB_INVALID_ARGUMENT`. |
+| Definitions | Get one from `rbDefault*Def()` and change only the fields you need. A definition made any other way returns `RB_INVALID_ARGUMENT`. Defaults with lengths in them take the world's coordinates (`rbDefaultCharacterDef(RB_COORDINATES_UNREAL)` gives a 30 cm capsule). |
 | Stepping | `rbWorld_Step` never waits. `rbWorld_Poll` returns results: either one step at a time or folded together (`coalesce`). Pointers in an `RbFrame` stay valid until the next poll. |
 | Units and axes | Set `RbWorldDef::coordinates` to `RB_COORDINATES_UNREAL` for Unreal's Z-up, left-handed centimetres. The boundary converts vectors, rotations, pseudovectors (angular velocity and torque change sign), joint angles, units and triangle winding exactly. The rules are in `src/coords.rs`. |
 
@@ -59,3 +59,27 @@ for (;;) {
 }
 rbDestroyWorld(world);
 ```
+
+## Destruction reactions
+
+Every reaction of `engine/docs/destruction-reactions.md` is reachable from C
+(threshold destructibles, `RB_STRENGTH_THRESHOLD`; all off by default):
+
+- `RbDestructibleDef::support_loss` (and `support_loss_dynamic_factor`),
+  `blast_loading`, and `crush` (`RbCrushDef`: `enabled`, `mass`
+  `RB_CRUSH_CONSERVE` with `fragments` / `budget` or `RB_CRUSH_REMOVE`,
+  `max_per_step`, and optional `RbCrushMaterial`s by stress material name, in
+  SI units whatever the coordinates).
+- `rbWorld_Detonate(world, &blast)` with `rbDefaultBlastDef(coordinates)`:
+  a TNT-equivalent charge, optionally with `rbWorld_Explode`'s radial impulse.
+- Events: `RB_BONDS_BROKEN` carries `break_cause` (`RB_BREAK_STRESS`,
+  `RB_BREAK_BLAST`, `RB_BREAK_SUPPORT_LOSS`, `RB_BREAK_CRUSH`).
+  `RB_CHUNK_CRUSHED` carries `crush_cause` (`RB_CRUSH_IMPACT`,
+  `RB_CRUSH_BLAST`, `RB_CRUSH_CONTACT`, `RB_CRUSH_LOAD`), `mass`, `volume`,
+  `transform`, `linear_velocity`, `angular_velocity`, `peak_pressure`,
+  `peak_deviator` (in the world's units), and its fragment bodies as
+  `children`.
+
+`tests/reactions.rs` detonates 20 kg of TNT against the reference building
+through the ABI; `tests/layout.rs` checks the header's layouts against Rust's
+with a C compiler.

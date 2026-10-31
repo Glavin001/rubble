@@ -192,6 +192,27 @@ bool rayCapsule(float3 o0, float3 d, float3 c, float3 axis, float halfLen, float
     return hit;
 }
 
+// Path length a projectile of radius `rad` from hp along unit d spends inside
+// heightfield collider ci (solid below its surface): the centre line's run from
+// where it goes under the surface to where it comes back out, plus the radius
+// at either end. 0: the centre line passes over (a graze); 1e30: it does not
+// come back out over the field.
+float heightFieldThickness(uint ci, float3 hp, float3 d, float rad)
+{
+    Collider col = gColliders[ci];
+    Frame fh = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    float3 o = frameToLocal(fh, hp);
+    float3 ld = quatRotate(quatConjugate(fh.q), d);
+    float h, tIn = 0.0, tOut;
+    float3 nn;
+    if (!(hfSurface(hf, o.x, o.z, h, nn) && o.y < h) && !heightFieldRayLocal(hf, o, ld, 1.0e6, tIn, nn))
+        return 0.0;
+    float eps = 1.0e-4 * max(1.0, max(hf.dx, hf.dz));
+    if (!heightFieldRayLocal(hf, o + ld * (tIn + eps), ld, 1.0e6, tOut, nn)) return 1.0e30;
+    return tOut + eps + 2.0 * rad;
+}
+
 // Sweep a sphere of radius `rad` (0 = ray) from o along d against a collider.
 bool rayCollider(uint ci, float3 o, float3 d, float rad, out float t, out float3 n)
 {
@@ -222,6 +243,25 @@ bool rayCollider(uint ci, float3 o, float3 d, float rad, out float t, out float3
         t = -dist / denom; // origin behind the plane: t ≤ 0
         n = pn;
         return true;
+    }
+    if (col.shape == SHAPE_HEIGHTFIELD)
+    {
+        // Callers bound t themselves; the field's own extent bounds the march.
+        Frame fh = colliderFrame(col, b);
+        HeightFieldRef hf = heightFieldOf(col);
+        float3 lo = frameToLocal(fh, o);
+        float3 ld = quatRotate(quatConjugate(fh.q), d);
+        float3 nl;
+        bool hit;
+        if (rad > 0.0) hit = hfRoundCast(hf, lo, float3(0, 1, 0), 0.0, rad, ld, 1.0e6, t, nl);
+        else
+        {
+            float h;
+            if (hfSurface(hf, lo.x, lo.z, h, nl) && lo.y < h) { t = 0.0; hit = true; } // starts under it
+            else hit = heightFieldRayLocal(hf, lo, ld, 1.0e6, t, nl);
+        }
+        if (hit) n = quatRotate(fh.q, nl);
+        return hit;
     }
     // Convex hulls: exact against the face planes (ray), or a GJK sphere cast.
     float4 q = quatMul(b.orientation, col.localRot);
@@ -298,6 +338,8 @@ bool shapeCastCollider(Collider cs, float3 p, float4 q, float3 d, float maxT, ui
         t = -dist / denom;
         return true;
     }
+    if (col.shape == SHAPE_HEIGHTFIELD)
+        return heightFieldShapeCast(heightFieldOf(col), colliderFrame(col, b), cs, p, q, d, maxT, t, n);
     float3 pc; float4 qc; colliderPose(col, b, pc, qc);
     float mu;
     float3 nAB;

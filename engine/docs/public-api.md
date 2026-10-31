@@ -187,7 +187,7 @@ loop {
   | `gravity_scale` | P3 |
   | `sleep_threshold` | P3 (global today) |
   | `motion_locks` | P3 |
-  | `is_bullet` | P3 (port the Metal CCD sweep) |
+  | `is_bullet` | ✅ `BODY_CCD` (#52's continuous collision) |
   | `enable_sleep` | Available |
   | `is_awake` | Available |
   | `is_enabled` | P1.5 (park) |
@@ -233,8 +233,16 @@ loop {
     `create_box_shape` (a native fast path);
   - `create_hull_shape` and `create_transformed_hull_shape(hull, transform,
     scale)`;
-  - later: `create_height_field_shape` (static only, as in Box3D) and baked
-    static compounds.
+  - `create_height_field_shape` (static only, as in Box3D; editable in place
+    with `set_height_field_region`, see `deformable-terrain.md`); a field may
+    carry a Bekker soil (`HeightField::with_soil`, `set_height_field_soil`, C
+    ABI `rbHeightField_SetSoil`) that vehicle wheels sink into and rut
+    (`deformable-terrain.md`, "T5 ruts"); and its ground can deform
+    (`enable_terrain`, `terrain_impact` / `terrain_explode` / `terrain_open`,
+    `terrain_watch_shape` for heavy-body strikes, `read_height_field`; C ABI
+    `rbWorld_EnableTerrain`, `rbTerrain_*`, `rbHeightField_GetHeights`;
+    `deformable-terrain.md`, "T4 status");
+  - later: baked static compounds.
   - **No triangle-mesh shapes** (decided 2026-10-24). Level geometry comes in
     convex-decomposed at the source (several hull shapes on a static body),
     the way Unreal's own collision is authored. Nothing is decomposed at
@@ -347,6 +355,10 @@ geometry, and a triangle mesh for box and hull shapes, in the body frame.
   `solve_planes` on the host, after Box3D's mover.
 - **`explode(ExplosionDef {position, radius, falloff, impulse_per_area,
   mask_bits})`** is a GPU command.
+- **`detonate(BlastDef {position, tnt_kg, radial})`** is a charge: the stress
+  oracle's face pressures on blast-loaded destructibles (see *Damage as
+  data*), and, with `radial`, `explode`'s impulse on bodies from the same
+  point.
 
 ### Destruction (first-class)
 
@@ -433,9 +445,6 @@ Blast's terms, reachable as a `BodyId`.
 - A chunk's world transform is therefore always `body_transform *
   chunk_local`, where `chunk_local` is fixed in the asset. A split never
   requires a renderer to rebuild meshes.
-- A piece split off in a step has a `body_transform` from that step's frame on:
-  its parent's, since the split comes after the step's poses and the piece has
-  not moved off its parent yet.
 - Each child's centre of mass and axes come back in the split log.
 
 #### Damage as data
@@ -450,8 +459,27 @@ world.apply_damage(id, &DamageDesc::Radial { position, min_radius, max_radius, d
   reference.
 - Damage is a queued command applied before the next step, so fracture stays
   forward-only.
-- `explode(ExplosionDef)` damages destructibles in range and also applies
-  impulses to bodies.
+- `explode(ExplosionDef)` stays Box3D's radial impulse on bodies (its C struct
+  is fixed). Blasts that load destructibles are their own command,
+  `detonate(BlastDef { position, tnt_kg, radial })` (shipped 2026-10-25 for
+  `StrengthModel::Threshold`, opt-in per instance with
+  `DestructibleDef::blast_loading`):
+  - the oracle's blast physics (`stress_ref::blast::FaceBlast`: Kinney-Graham
+    peak, duration and impulse at `Z = R / W^(1/3)`, the fitted Friedlander
+    pulse, oblique reflection, shadowing, clearing) on each exposed chunk face,
+    exposure and clearing distances from the oracle's own functions on a
+    mirror of the bond states;
+  - each step the pulse reaches, before the engine steps: each chunk's load
+    over the step (its peak, as `impact_peak` takes an impact's; the mean
+    without it), the threshold rule (a bond breaks when either chunk's load
+    beats its tensile capacity), the split on the GPU, then each piece's share
+    of the blast impulse, so the step meets moving pieces (forward-only);
+  - the per-chunk loads (force, moment, `Σ sym(r ⊗ F)`, impulse, cause
+    `Blast`) from `destructible_blast_loads` and in a GPU buffer per instance
+    for kernels that compose with them (chunk crushing);
+  - a face nearer the charge than the fits reach (`Z < 0.05 m/kg^(1/3)`), a
+    non-positive charge or a non-finite position is an error, never clamped.
+    `DestructibleAssetDesc::from_stress_scene` places the oracle's own scenes.
 
 #### The three stages, all on the GPU
 
@@ -709,6 +737,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
 | Fracture lab `threshold` mode (GPU splitter) | `StrengthModel::Threshold`, `RB_STRENGTH_THRESHOLD`; `body_set_projectile`, `rbBody_SetProjectile`; `solver_for`, `rbWorld_UseDestructibleAssetSolverFor`; `rbWorld_GetDestructibleAssetGround` (D1b) | ✅ |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
+| Deformable terrain (`impact.html`, `terrain.html`): meteor and charge craters, heavy-body strikes, vehicle ruts, baked heights for the host's mesh | `enable_terrain`, `terrain_impact` / `terrain_explode` / `terrain_open`, `terrain_watch_shape`, `set_height_field_soil`; `rbWorld_EnableTerrain`, `rbTerrain_*`, `rbHeightField_SetSoil`, `rbHeightField_GetHeights` | ✅ (an Unreal sample project 🔜) |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
 | Grab and drag | a kinematic mouse body (`rbBody_SetTargetTransform` each frame) jointed to the grabbed body (spherical, or a weld with `linear_stiffness`); tested through the ABI | ✅ (a dedicated mouse joint later) |
 | Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |
@@ -722,7 +751,7 @@ design frame (metres, Y up), the format of `vehicle_presets.json` and the
 soft descriptors; spawn transforms and velocities use the world's
 coordinates. `tests/demo_parity.rs` covers each row through the ABI.
 
-Next: D5 (`stress`), then the rest of P3 (bullets).
+Next: D5 (`stress`).
 
 **P1.5: Box3D alignment (shipped).** `rubble::World` now has this shape:
 
@@ -858,9 +887,11 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   inertia summed from its chunks. The step then reports `BondsBroken` and
   `Split` (the children partition the parent; one body per actor). Every
   piece's origin stays the instance frame, so `chunk_local` is the identity
-  and the render contract holds. The blocking `read_body_state` converts a
-  piece's live GPU pose with the GPU's live frame record, since a step whose
-  readback is still pending may already have split it again.
+  and the render contract holds. The frame that reports a `Split` also
+  reports each new piece's pose (`body_transform`, and a move with no
+  `previous`): it starts at its parent's origin, so it is drawable at once.
+  `read_body_state` poses a piece in the solver frame the GPU holds now, so a
+  read after a step whose split is not yet polled is still the piece's origin.
 - **Projectiles.** `body_set_projectile(body, Some(Projectile))` adds every
   sphere and box collider of a body to strike prediction and gives their
   contacts the lab's shot loads. That covers a vehicle's chassis: its body
@@ -890,10 +921,12 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   the next step splits their bodies and reports them. It waits for the GPU.
   `engine-world/tests/bridge_out.rs` cuts the viaduct's hinge-pier charge
   under driven traffic: the drop-in spans come down with the four vehicles on
-  them. (The threshold model breaks a bond only under a contact's load, so a
-  span still bonded at a seat hangs there whatever it carries: the lab's ball
-  alone breaks what it meets. The charge cuts what `blast_parity`'s stress
-  solver breaks.)
+  them. (Without support loss the threshold model breaks a bond only under a
+  contact's load, so a span still bonded at a seat hangs there whatever it
+  carries: the lab's ball alone breaks what it meets. The charge cuts what
+  `blast_parity`'s stress solver breaks. `DestructibleDef::support_loss`
+  breaks such links by their load flow, section 4 of
+  `destruction-reactions.md`.)
 - **Scenarios.** `rubble::scenario::Scenario` (feature `stress`) is a scene
   pack with drives (`defaults.drives`) as one world: the structure placed as
   the lab places it, the lab's ground, each drive a preset vehicle on its
@@ -1047,12 +1080,28 @@ Unreal is the first client.
   which gives Box3D's inertial target exactly; only awake bodies that use
   them get one, and they neither wake bodies nor keep an asleep world
   stepping. Per-body `sleep_threshold` is still to do.
-- ✅ `motion_locks` (shipped 2026-10-24): six free body-flag bits; prediction
-  zeroes locked velocity and gravity and the primal solve replaces locked
-  rows and columns with identity, so other axes solve consistently. C:
-  `RB_LOCK_*` bits, permuted for Unreal axes.
-- `is_bullet`: port the Metal CCD classify and sweep passes to the shared
-  plan.
+- ✅ `motion_locks` (shipped 2026-10-24): body-flag bits 9..14 (above
+  `BODY_CCD`) read by two passes scheduled only while some body has locks:
+  `lock_predict` after prediction and `lock_project` after the solve each
+  remove the locked components (world axes) of the body's displacement and
+  rotation since the step start, so the inertial target respects the locks
+  and the locked axes are exact at the end of every step. The hot kernels
+  (`predictOne`, `primalApply`) are untouched: an earlier in-kernel version
+  shifted Metal and wgpu fast-math codegen for every body and failed the
+  Metal parity tests. C: `RB_LOCK_*` bits, permuted for Unreal axes.
+- ✅ `is_bullet` (2026-10-24): World sets `BODY_CCD`, #52's continuous
+  collision (uncapped reach, the fast list, a time-of-impact contact and
+  start pose); C `RbBodyDef::is_bullet`. Sensors take no time of impact and
+  no post-solve sweep check, so bullets pass through them.
+- ✅ Characters (2026-10-24): #52's capsule movers (`char_move`: walk,
+  step up, stick to the floor, slopes, jump, moving support, push weight)
+  through `World::create_character(CharacterDef)`, `character_set_input`
+  (velocity, jump once), `character_teleport`, `destroy_character` (slot
+  reused after quarantine); every frame reports `Frame::characters` and
+  `character_events` (landed, support lost, crushed) from one readback copy
+  of the records, no blocking read. The inner kinematic capsule is a World
+  body of its own, left out of body moves. C: `rbWorld_CreateCharacter`,
+  `rbCharacter_*`, `RbFrame::characters` / `character_events`.
 - `allow_fast_rotation`.
 
 **P4: contact, hit and sensor events.** Contact begin/end and hit events
@@ -1111,6 +1160,19 @@ queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule
   have one, impulse per area times each collider's cross-section, full
   inside the radius and fading over the falloff, waking what it reaches.
 
+- *Shipped (2026-10-24):* `World::cast(CastDef)` (C `rbWorld_Cast`): ray,
+  sphere and upright-capsule casts, closest hit, on #52's in-step
+  `query_batch` (grid walk, exact shapes, category mask, an ignored body).
+  It needs no vehicle pool. It runs before the step moves anything, so it
+  sees the poses the step starts from. Up to 256 per step; results in
+  `Frame::cast_results` / `RbFrame::casts`, and a frame with casts is never
+  dropped. Projectiles: `World::spawn_projectile(ProjectileDef)` (C
+  `rbWorld_SpawnProjectile`), #52's piercing ballistic casts. Energy pays
+  for each shape's thickness, and hits push dynamic bodies. Stopped
+  projectiles' slots are reused, and the pool is released once all have
+  stopped, so a quiet world can sleep again. Results arrive as
+  `Frame::projectiles` and `projectile_events` (passed with the thickness
+  crossed, or stopped).
 - *Shipped first cut:* `World::cast_rays` (C: `rbWorld_CastRays`) queues
   closest-hit rays for the next step. They trace on the GPU against that
   step's final poses (they share the vehicle ray pool, whose ray count only

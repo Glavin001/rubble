@@ -616,11 +616,11 @@ fn materials_are_interned_and_capped_loudly() {
 #[test]
 fn unsupported_fields_are_refused_not_ignored() {
     let mut w = world();
-    let bullet = BodyDef {
-        is_bullet: true,
+    let sleepless = BodyDef {
+        enable_sleep: false,
         ..BodyDef::dynamic([0.0; 3])
     };
-    assert!(unsupported(w.create_body(&bullet).unwrap_err()));
+    assert!(unsupported(w.create_body(&sleepless).unwrap_err()));
     let b = w.create_body(&BodyDef::dynamic([0.0; 3])).unwrap();
     let rolling = ShapeDef {
         material: SurfaceMaterial {

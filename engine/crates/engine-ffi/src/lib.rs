@@ -20,7 +20,11 @@
 
 mod controls;
 pub use controls::*;
+mod terrain;
+pub use terrain::*;
 pub mod coords;
+mod motion;
+pub use motion::*;
 
 use coords::{Coords, RbCoordinates};
 use rubble::*;
@@ -198,6 +202,8 @@ pub struct RbBodyDef {
     /// `RB_LOCK_*` bits: axes (world, host frame) it may not move along or
     /// turn about.
     pub motion_locks: u32,
+    /// Continuous collision: never tunnels (projectiles, debris).
+    pub is_bullet: bool,
     pub user_data: u64,
     pub internal_value: u32,
 }
@@ -368,6 +374,57 @@ pub enum RbDestructionType {
     /// A connection of an assembly or composed vehicle broke: `assembly`,
     /// `name`, `joint`, `force`, `torque`.
     RB_CONNECTION_BROKE = 6,
+    /// A chunk of a destructible was crushed: `destructible`, `index` (the
+    /// chunk), `mass`; `children` / `child_count` are the fragment bodies that
+    /// carry its mass, one each (none when removed).
+    RB_CHUNK_CRUSHED = 7,
+}
+
+/// What broke a destructible's bonds (`RB_BONDS_BROKEN`; one event per cause in a step).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbBreakCause {
+    /// The strength model's own rule: contact and impact loads, the strike prediction, or
+    /// the bonds model's joint forces.
+    RB_BREAK_STRESS = 0,
+    /// A blast's face pressures (`rbWorld_Detonate`, `RbDestructibleDef::blast_loading`).
+    RB_BREAK_BLAST = 1,
+    /// Support loss (`RbDestructibleDef::support_loss`).
+    RB_BREAK_SUPPORT_LOSS = 2,
+    /// A crushed chunk's bonds (`RB_CHUNK_CRUSHED`).
+    RB_BREAK_CRUSH = 3,
+}
+
+/// What crushed a chunk (`RB_CHUNK_CRUSHED`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbCrushCause {
+    /// A predicted strike (a projectile, `rbBody_SetProjectile`).
+    RB_CRUSH_IMPACT = 0,
+    /// A blast's face pressures (`RbDestructibleDef::blast_loading`).
+    RB_CRUSH_BLAST = 1,
+    /// Contact loads after a step (debris, sustained pressure).
+    RB_CRUSH_CONTACT = 2,
+    /// Loads through its bonds: the support-loss flow's weight above it.
+    RB_CRUSH_LOAD = 3,
+}
+
+fn break_cause(c: BreakCause) -> RbBreakCause {
+    match c {
+        BreakCause::Stress => RbBreakCause::RB_BREAK_STRESS,
+        BreakCause::Blast => RbBreakCause::RB_BREAK_BLAST,
+        BreakCause::SupportLoss => RbBreakCause::RB_BREAK_SUPPORT_LOSS,
+        BreakCause::Crush => RbBreakCause::RB_BREAK_CRUSH,
+    }
+}
+
+fn crush_cause(c: CrushCause) -> RbCrushCause {
+    match c {
+        CrushCause::Impact => RbCrushCause::RB_CRUSH_IMPACT,
+        CrushCause::Blast => RbCrushCause::RB_CRUSH_BLAST,
+        CrushCause::Contact => RbCrushCause::RB_CRUSH_CONTACT,
+        CrushCause::Load => RbCrushCause::RB_CRUSH_LOAD,
+    }
 }
 
 /// A connected group of chunks of a destructible (one rigid actor).
@@ -397,7 +454,10 @@ impl RbActor {
 /// Something broke (`RbFrame::destruction`). Fields by `type_`:
 /// joint: `joint`, `force`, `torque`, `user_data`; mount: `vehicle`, `index`,
 /// `is_wheel`, `force`, `torque`; beam: `soft`, `index`, `force`; piece:
-/// `soft`, `nodes` / `node_count`, `mass`.
+/// `soft`, `nodes` / `node_count`, `mass`; bonds broken: `destructible`,
+/// `bonds` / `bond_count`, `break_cause`; chunk crushed: `destructible`, `index`,
+/// `mass`, `volume`, `transform`, `linear_velocity`, `angular_velocity`,
+/// `peak_pressure`, `peak_deviator`, `crush_cause`, `children` / `child_count`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct RbDestructionEvent {
@@ -424,6 +484,22 @@ pub struct RbDestructionEvent {
     pub assembly: u64,
     /// The connection's name (UTF-8, NUL-terminated).
     pub name: *const c_char,
+    /// `RB_BONDS_BROKEN`: what broke them.
+    pub break_cause: RbBreakCause,
+    /// `RB_CHUNK_CRUSHED`: what crushed it.
+    pub crush_cause: RbCrushCause,
+    /// `RB_CHUNK_CRUSHED`: its volume.
+    pub volume: f32,
+    /// `RB_CHUNK_CRUSHED`: its pose when crushed (its centre of mass, and the rotation its
+    /// render mesh had).
+    pub transform: RbTransform,
+    /// `RB_CHUNK_CRUSHED`: its velocity at its centre of mass, and its angular velocity.
+    pub linear_velocity: RbVec3,
+    pub angular_velocity: RbVec3,
+    /// `RB_CHUNK_CRUSHED`: the highest mean pressure (compression positive) and deviatoric
+    /// stress it met.
+    pub peak_pressure: f32,
+    pub peak_deviator: f32,
 }
 
 #[repr(C)]
@@ -602,6 +678,31 @@ pub struct RbFrame {
     /// Overlap queries queued with `rbWorld_OverlapAABB` before these steps.
     pub overlaps: *const RbOverlapResult,
     pub overlap_count: u32,
+    /// Every character (the latest state of each).
+    pub characters: *const RbCharacterOutput,
+    pub character_count: u32,
+    pub character_events: *const RbCharacterEvent,
+    pub character_event_count: u32,
+    /// Casts queued with `rbWorld_Cast` before these steps.
+    pub casts: *const RbCastResult,
+    pub cast_count: u32,
+    /// Every projectile in flight, and each one that stopped.
+    pub projectiles: *const RbProjectileOutput,
+    pub projectile_count: u32,
+    pub projectile_events: *const RbProjectileEvent,
+    pub projectile_event_count: u32,
+    /// Deformable terrain (`rbWorld_EnableTerrain`): the latest step's
+    /// counters while an area is open (`has_terrain`).
+    pub has_terrain: bool,
+    pub terrain: RbTerrainReport,
+    /// With `enable_surface`: each open area's live ground, and the debris.
+    pub terrain_surfaces: *const RbTerrainSurface,
+    pub terrain_surface_count: u32,
+    pub terrain_debris: *const RbTerrainDebris,
+    pub terrain_debris_count: u32,
+    /// Areas that baked, in step order: re-read their shapes' heights.
+    pub terrain_bakes: *const RbTerrainBake,
+    pub terrain_bake_count: u32,
 }
 
 impl RbFrame {
@@ -639,6 +740,24 @@ impl RbFrame {
             sensor_end_count: 0,
             overlaps: std::ptr::null(),
             overlap_count: 0,
+            characters: std::ptr::null(),
+            character_count: 0,
+            character_events: std::ptr::null(),
+            character_event_count: 0,
+            casts: std::ptr::null(),
+            cast_count: 0,
+            projectiles: std::ptr::null(),
+            projectile_count: 0,
+            projectile_events: std::ptr::null(),
+            projectile_event_count: 0,
+            has_terrain: false,
+            terrain: RbTerrainReport::default(),
+            terrain_surfaces: std::ptr::null(),
+            terrain_surface_count: 0,
+            terrain_debris: std::ptr::null(),
+            terrain_debris_count: 0,
+            terrain_bakes: std::ptr::null(),
+            terrain_bake_count: 0,
         }
     }
 }
@@ -664,6 +783,8 @@ struct FrameStore {
     sensor_end: Vec<RbSensorEvent>,
     overlaps: Vec<RbOverlapResult>,
     overlap_shapes: Vec<Vec<RbShapeId>>,
+    motion: Option<motion::MotionStore>,
+    terrain: Option<terrain::TerrainStore>,
     /// Backing for bond lists, chunk lists, body lists and child arrays (the
     /// heap buffers do not move when these outer vectors grow).
     u32_lists: Vec<Vec<u32>>,
@@ -901,6 +1022,14 @@ impl RbWorld {
                 child_count: 0,
                 assembly: 0,
                 name: std::ptr::null(),
+                break_cause: RbBreakCause::RB_BREAK_STRESS,
+                crush_cause: RbCrushCause::RB_CRUSH_IMPACT,
+                volume: 0.0,
+                transform: RbTransform::default(),
+                linear_velocity: RbVec3::default(),
+                angular_velocity: RbVec3::default(),
+                peak_pressure: 0.0,
+                peak_deviator: 0.0,
             };
             match e {
                 DestructionEvent::JointBroke {
@@ -954,9 +1083,11 @@ impl RbWorld {
                 DestructionEvent::BondsBroken {
                     destructible,
                     bonds,
+                    cause,
                 } => {
                     ev.type_ = RbDestructionType::RB_BONDS_BROKEN;
                     ev.destructible = destructible.to_bits();
+                    ev.break_cause = break_cause(*cause);
                     let list = bonds.clone();
                     ev.bonds = list.as_ptr();
                     ev.bond_count = list.len() as u32;
@@ -985,6 +1116,54 @@ impl RbWorld {
                     };
                     ev.parent = actor(parent);
                     let kids: Vec<RbActor> = children.iter().map(&mut actor).collect();
+                    ev.children = kids.as_ptr();
+                    ev.child_count = kids.len() as u32;
+                    s.actor_lists.push(kids);
+                }
+                DestructionEvent::ChunkCrushed {
+                    destructible,
+                    chunk,
+                    mass,
+                    volume,
+                    pose,
+                    linear_velocity,
+                    angular_velocity,
+                    peak_pressure,
+                    peak_deviator,
+                    cause,
+                    fragments,
+                } => {
+                    ev.type_ = RbDestructionType::RB_CHUNK_CRUSHED;
+                    ev.destructible = destructible.to_bits();
+                    ev.index = *chunk;
+                    ev.mass = *mass;
+                    ev.crush_cause = crush_cause(*cause);
+                    ev.volume = coords.volume_out(*volume);
+                    ev.transform = t_out(*pose);
+                    ev.linear_velocity = RbVec3::of(coords.linear_out(*linear_velocity));
+                    ev.angular_velocity =
+                        RbVec3::of(coords.angular_velocity_out(*angular_velocity));
+                    ev.peak_pressure = coords.pressure_out(*peak_pressure);
+                    ev.peak_deviator = coords.pressure_out(*peak_deviator);
+                    // Each fragment a child: the chunk, its body, its share of the mass.
+                    let share = *mass / fragments.len().max(1) as f32;
+                    let kids: Vec<RbActor> = fragments
+                        .iter()
+                        .map(|f| {
+                            let chunks = vec![*chunk];
+                            let bodies = vec![f.to_bits()];
+                            let out = RbActor {
+                                chunks: chunks.as_ptr(),
+                                bodies: bodies.as_ptr(),
+                                chunk_count: 1,
+                                anchored: false,
+                                mass: share,
+                            };
+                            s.u32_lists.push(chunks);
+                            s.body_lists.push(bodies);
+                            out
+                        })
+                        .collect();
                     ev.children = kids.as_ptr();
                     ev.child_count = kids.len() as u32;
                     s.actor_lists.push(kids);
@@ -1145,6 +1324,15 @@ impl RbWorld {
         for (out, shapes) in s.overlaps.iter_mut().zip(&s.overlap_shapes) {
             out.shapes = shapes.as_ptr();
         }
+        let m = s.motion.insert(motion::MotionStore::new(coords, &c));
+        let t = s.terrain.insert(terrain::TerrainStore::new(
+            &self.world,
+            &coords,
+            c.terrain.as_ref(),
+            &c.terrain_surface,
+            &c.terrain_debris,
+            &c.terrain_bakes,
+        ));
         let counters = c.counters;
         RbFrame {
             has_frame: true,
@@ -1179,6 +1367,24 @@ impl RbWorld {
             sensor_end_count: s.sensor_end.len() as u32,
             overlaps: s.overlaps.as_ptr(),
             overlap_count: s.overlaps.len() as u32,
+            characters: m.characters.as_ptr(),
+            character_count: m.characters.len() as u32,
+            character_events: m.character_events.as_ptr(),
+            character_event_count: m.character_events.len() as u32,
+            casts: m.casts.as_ptr(),
+            cast_count: m.casts.len() as u32,
+            projectiles: m.projectiles.as_ptr(),
+            projectile_count: m.projectiles.len() as u32,
+            projectile_events: m.projectile_events.as_ptr(),
+            projectile_event_count: m.projectile_events.len() as u32,
+            has_terrain: t.report.is_some(),
+            terrain: t.report.unwrap_or_default(),
+            terrain_surfaces: t.surfaces.as_ptr(),
+            terrain_surface_count: t.surfaces.len() as u32,
+            terrain_debris: t.debris.as_ptr(),
+            terrain_debris_count: t.debris.len() as u32,
+            terrain_bakes: t.bakes.as_ptr(),
+            terrain_bake_count: t.bakes.len() as u32,
         }
     }
 }
@@ -1400,6 +1606,7 @@ pub extern "C" fn rbDefaultBodyDef() -> RbBodyDef {
         angular_damping: 0.0,
         gravity_scale: 1.0,
         motion_locks: 0,
+        is_bullet: false,
         user_data: 0,
         internal_value: COOKIE,
     }
@@ -1450,6 +1657,7 @@ pub unsafe extern "C" fn rbCreateBodies(
                 angular_damping: d.angular_damping,
                 gravity_scale: d.gravity_scale,
                 motion_locks: MotionLocks::from_bits(w.coords.locks_in(d.motion_locks)),
+                is_bullet: d.is_bullet,
                 user_data: d.user_data,
                 ..BodyDef::default()
             });
@@ -1756,6 +1964,176 @@ pub unsafe extern "C" fn rbCreateHullShape(
             hull,
             transform: w.transform_in(local),
         })
+    })
+}
+
+/// Host-ordered heightfield samples (`count_a` along the host's first ground
+/// axis, fastest; `count_b` along its second) as Rubble's grid. Rubble
+/// coordinates: A = +X, B = +Z, unchanged. Unreal: A = +X, B = +Y, which are
+/// Rubble -Z and +X, so the grid is transposed and its A order reversed (exact:
+/// no resampling).
+struct HostGrid {
+    count_a: u32,
+    count_b: u32,
+}
+
+impl HostGrid {
+    /// Rubble sample (i, j) of host sample (a, b).
+    fn to_rubble(&self, unreal: bool, a: u32, b: u32) -> (u32, u32) {
+        if unreal {
+            (b, self.count_a - 1 - a)
+        } else {
+            (a, b)
+        }
+    }
+    fn rubble_size(&self, unreal: bool) -> (u32, u32) {
+        if unreal {
+            (self.count_b, self.count_a)
+        } else {
+            (self.count_a, self.count_b)
+        }
+    }
+}
+
+/// Terrain on a static body: `heights` (`count_a × count_b`, A fastest) on
+/// cells `cell_a × cell_b`, centred on `local`. A and B are the host's ground
+/// axes (Rubble coordinates: +X, +Z; Unreal: +X, +Y) and heights run along
+/// its up axis.
+#[no_mangle]
+pub unsafe extern "C" fn rbCreateHeightFieldShape(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    def: *const RbShapeDef,
+    count_a: u32,
+    count_b: u32,
+    cell_a: f32,
+    cell_b: f32,
+    heights: *const f32,
+    local: RbTransform,
+    out: *mut RbShapeId,
+) -> RbResult {
+    create_shape(world, body, def, out, |w| {
+        if heights.is_null() {
+            return Err(invalid("null heightfield samples"));
+        }
+        let n = count_a as usize * count_b as usize;
+        let host = std::slice::from_raw_parts(heights, n);
+        let grid = HostGrid { count_a, count_b };
+        let unreal = w.coords.unreal();
+        let (nx, nz) = grid.rubble_size(unreal);
+        let (dx, dz) = if unreal {
+            (cell_b, cell_a)
+        } else {
+            (cell_a, cell_b)
+        };
+        let mut samples = vec![0.0; n];
+        for b in 0..count_b {
+            for a in 0..count_a {
+                let (i, j) = grid.to_rubble(unreal, a, b);
+                samples[(j * nx + i) as usize] =
+                    w.coords.length_in(host[(b * count_a + a) as usize]);
+            }
+        }
+        let field = HeightField::new(
+            nx,
+            nz,
+            w.coords.length_in(dx),
+            w.coords.length_in(dz),
+            samples,
+        )
+        .map_err(|e| anyhow::anyhow!("heightfield: {e}"))?;
+        Ok(Geometry::HeightField {
+            field,
+            transform: w.transform_in(local),
+        })
+    })
+}
+
+/// Overwrite heightfield samples `[a0, a0 + width_a) × [b0, b0 + width_b)`
+/// (host order, A fastest). Bodies asleep over the edit are woken.
+#[no_mangle]
+pub unsafe extern "C" fn rbHeightField_SetRegion(
+    world: *mut RbWorld,
+    shape: RbShapeId,
+    a0: u32,
+    b0: u32,
+    width_a: u32,
+    width_b: u32,
+    values: *const f32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let id = ShapeId::from_bits(shape);
+        let Geometry::HeightField { field, .. } = w.world.shape_geometry(id)? else {
+            return Err(invalid("not a heightfield shape"));
+        };
+        if values.is_null() {
+            return Err(invalid("null heightfield samples"));
+        }
+        let unreal = w.coords.unreal();
+        let (nx, nz) = field.samples();
+        let count_a = if unreal { nz } else { nx };
+        let count_b = if unreal { nx } else { nz };
+        if a0.saturating_add(width_a) > count_a || b0.saturating_add(width_b) > count_b {
+            return Err(invalid("heightfield region outside the field"));
+        }
+        let grid = HostGrid { count_a, count_b };
+        let host = std::slice::from_raw_parts(values, width_a as usize * width_b as usize);
+        // The region in Rubble's grid: its corner and size.
+        let (ia, ja) = grid.to_rubble(unreal, a0, b0);
+        let (ib, jb) = grid.to_rubble(unreal, a0 + width_a.max(1) - 1, b0 + width_b.max(1) - 1);
+        let (i0, j0) = (ia.min(ib), ja.min(jb));
+        let (rw, rd) = if unreal {
+            (width_b, width_a)
+        } else {
+            (width_a, width_b)
+        };
+        let mut region = vec![0.0; host.len()];
+        for b in 0..width_b {
+            for a in 0..width_a {
+                let (i, j) = grid.to_rubble(unreal, a0 + a, b0 + b);
+                region[((j - j0) * rw + (i - i0)) as usize] =
+                    w.coords.length_in(host[(b * width_a + a) as usize]);
+            }
+        }
+        w.world.set_height_field_region(id, i0, j0, rw, rd, &region)
+    })
+}
+
+/// Bekker soil for vehicle ruts (deformable terrain T5). `k_c` (N/m^(n+1))
+/// and `k_phi` (N/m^(n+2)) are SI whatever the host's units; `max_sinkage`
+/// is in the host's length unit (a wheel sinking deeper fails the step).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RbSoil {
+    pub k_c: f32,
+    pub k_phi: f32,
+    pub n: f32,
+    pub max_sinkage: f32,
+}
+
+/// Give a heightfield a soil (`soil` non-null) or take it away (null). Wheels
+/// on it sink to the rigid-wheel depth of their load, press ruts and pay
+/// compaction resistance. The field is placed again from the host's samples,
+/// so earlier ruts are not kept.
+#[no_mangle]
+pub unsafe extern "C" fn rbHeightField_SetSoil(
+    world: *mut RbWorld,
+    shape: RbShapeId,
+    soil: *const RbSoil,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let soil = match soil.as_ref() {
+            None => None,
+            Some(s) => Some(
+                Soil::new(s.k_c, s.k_phi, s.n, w.coords.length_in(s.max_sinkage)).map_err(|e| {
+                    anyhow::anyhow!("soil: {e}").context(InvalidArgumentMarker("soil"))
+                })?,
+            ),
+        };
+        w.world
+            .set_height_field_soil(ShapeId::from_bits(shape), soil)
     })
 }
 
@@ -2186,7 +2564,128 @@ pub struct RbDestructibleDef {
     pub friction: f32,
     pub user_data: u64,
     pub model: RbStrengthModel,
+    /// `RB_STRENGTH_THRESHOLD` only: support loss. Each anchored piece's weight flows down its
+    /// intact bonds, and a bond carrying more than its compressive capacity breaks, so a
+    /// structure whose supports are shot away collapses. Off by default.
+    pub support_loss: bool,
+    /// With `support_loss`: the dynamic factor k, 1 to 2, on the increase of load after a
+    /// sudden loss of support (a bond is held to before + k (after - before)). 1 (the
+    /// default): quasi-static.
+    pub support_loss_dynamic_factor: f32,
+    /// `RB_STRENGTH_THRESHOLD` only: blasts (`rbWorld_Detonate`) load its exposed chunk
+    /// faces with their face pressures. Off by default.
+    pub blast_loading: bool,
+    /// `RB_STRENGTH_THRESHOLD` only: chunk crushing. Off by default.
+    pub crush: RbCrushDef,
     pub internal_value: u32,
+}
+
+/// What becomes of a crushed chunk's mass.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbCrushMass {
+    /// Kept as `fragments` small rigid boxes carrying its mass and momentum, from
+    /// `budget` fragment bodies reserved at placement (a crush past them fails the step).
+    RB_CRUSH_CONSERVE = 0,
+    /// Removed (dust): the host draws it from `RB_CHUNK_CRUSHED`.
+    RB_CRUSH_REMOVE = 1,
+}
+
+/// A material's crush parameters, by the asset's stress material name (a pack's
+/// `materials[].crush` supplies them; these supply or replace them). SI units whatever
+/// the world's coordinates: they are material data, as asset packs carry it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbCrushMaterial {
+    /// UTF-8, NUL-terminated.
+    pub name: *const c_char,
+    /// Hydrostatic cap (Pa), > 0.
+    pub cap_pressure: f64,
+    /// Drucker-Prager intercept (Pa), >= 0.
+    pub cohesion: f64,
+    /// dq/dp of the cone, >= 0.
+    pub friction_slope: f64,
+    /// Comminution energy (J/m^3), > 0.
+    pub crush_energy: f64,
+    /// Perzyna viscosity (Pa s), > 0.
+    pub crush_viscosity: f64,
+}
+
+/// Chunk crushing (`RbDestructibleDef::crush`; engine/docs/destruction-reactions.md).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbCrushDef {
+    /// Off by default.
+    pub enabled: bool,
+    pub mass: RbCrushMass,
+    /// `RB_CRUSH_CONSERVE`: boxes per crushed chunk (a power of two up to 64; default 4),
+    /// and fragment bodies reserved (default 256).
+    pub fragments: u32,
+    pub budget: u32,
+    /// Crushes one step reports at most (0: 256); more fail the step.
+    pub max_per_step: u32,
+    /// Optional (null with count 0): crush parameters by material name.
+    pub materials: *const RbCrushMaterial,
+    pub material_count: u32,
+}
+
+impl Default for RbCrushDef {
+    fn default() -> Self {
+        let (fragments, budget) = match CrushMass::default() {
+            CrushMass::Conserve { fragments, budget } => (fragments, budget),
+            CrushMass::Remove => (0, 0),
+        };
+        Self {
+            enabled: false,
+            mass: RbCrushMass::RB_CRUSH_CONSERVE,
+            fragments,
+            budget,
+            max_per_step: 0,
+            materials: std::ptr::null(),
+            material_count: 0,
+        }
+    }
+}
+
+unsafe fn crush_in(c: &RbCrushDef) -> anyhow::Result<Option<Crush>> {
+    if !c.enabled {
+        return Ok(None);
+    }
+    if c.material_count > 0 && c.materials.is_null() {
+        return Err(invalid("crush materials: null with a nonzero count"));
+    }
+    let list: &[RbCrushMaterial] = if c.material_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(c.materials, c.material_count as usize)
+    };
+    let mut materials = Vec::with_capacity(list.len());
+    for m in list {
+        if m.name.is_null() {
+            return Err(invalid("crush material without a name"));
+        }
+        materials.push((
+            CStr::from_ptr(m.name).to_string_lossy().into_owned(),
+            CrushMaterial {
+                cap_pressure: m.cap_pressure,
+                cohesion: m.cohesion,
+                friction_slope: m.friction_slope,
+                crush_energy: m.crush_energy,
+                crush_viscosity: m.crush_viscosity,
+            },
+        ));
+    }
+    Ok(Some(Crush {
+        mass: match c.mass {
+            RbCrushMass::RB_CRUSH_CONSERVE => CrushMass::Conserve {
+                fragments: c.fragments,
+                budget: c.budget,
+            },
+            RbCrushMass::RB_CRUSH_REMOVE => CrushMass::Remove,
+        },
+        materials,
+        max_per_step: c.max_per_step,
+    }))
 }
 
 #[no_mangle]
@@ -2200,6 +2699,10 @@ pub extern "C" fn rbDefaultDestructibleDef() -> RbDestructibleDef {
         friction: SurfaceMaterial::default().friction,
         user_data: 0,
         model: RbStrengthModel::RB_STRENGTH_BONDS,
+        support_loss: false,
+        support_loss_dynamic_factor: 1.0,
+        blast_loading: false,
+        crush: RbCrushDef::default(),
         internal_value: COOKIE,
     }
 }
@@ -2236,6 +2739,10 @@ pub unsafe extern "C" fn rbCreateDestructible(
             },
             user_data: d.user_data,
             model: strength_model(d.model),
+            support_loss: d.support_loss,
+            support_loss_dynamic_factor: d.support_loss_dynamic_factor,
+            blast_loading: d.blast_loading,
+            crush: crush_in(&d.crush)?,
             ..base
         };
         let id = w.world.create_destructible(&def)?;

@@ -268,6 +268,44 @@ pub mod msl_layout {
         Ok(out)
     }
 
+    /// Metal allows `[[buffer(0..30)]]` per stage, but Slang numbers buffers
+    /// across every global the module declares, so a kernel in a file that
+    /// includes `world_step.slang` (the terrain's, bindings 37-52) gets indices
+    /// past 30. Renumbers the `[[kernel]]` signature's buffers 0, 1, … in
+    /// order (they are only referenced there); the indices then come from
+    /// [`msl_buffers`] on the result.
+    pub fn compact_buffers(msl: &str, entry: &str, stage: &str) -> Result<String> {
+        let mut out = String::with_capacity(msl.len());
+        let mut found = false;
+        for line in msl.split_inclusive('\n') {
+            if !found && line.starts_with(stage) && line.contains(&format!(" {entry}(")) {
+                found = true;
+                let mut rest = line;
+                let mut next = 0u32;
+                while let Some(at) = rest.find("[[buffer(") {
+                    let (head, tail) = rest.split_at(at + "[[buffer(".len());
+                    out.push_str(head);
+                    let close = tail
+                        .find(")]]")
+                        .ok_or_else(|| anyhow!("{entry}: unterminated buffer attribute"))?;
+                    out.push_str(&next.to_string());
+                    next += 1;
+                    rest = &tail[close..];
+                }
+                out.push_str(rest);
+                if next > 31 {
+                    bail!("{entry} binds {next} buffers; Metal allows 31 per stage");
+                }
+            } else {
+                out.push_str(line);
+            }
+        }
+        if !found {
+            bail!("no {stage} signature for {entry}");
+        }
+        Ok(out)
+    }
+
     /// Compile one compute entry to MSL (`-DENGINE_WGSL=1`) with reflection;
     /// returns (msl, thread-group size).
     pub fn compile_kernel(

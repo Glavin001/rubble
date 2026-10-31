@@ -26,6 +26,7 @@ pub mod buildings;
 pub mod capability;
 pub mod cli;
 pub mod contact;
+pub mod crush;
 pub mod drive;
 pub mod engine;
 pub mod hull;

@@ -148,3 +148,41 @@ fn damped_worlds_still_fall_asleep() {
         "the damped body slept and the world skips its steps"
     );
 }
+
+#[test]
+fn locked_axes_hold_against_contacts() {
+    let mut w = world(-10.0);
+    let g = w
+        .create_body(&BodyDef {
+            position: [0.0, -0.5, 0.0],
+            ..BodyDef::default()
+        })
+        .unwrap();
+    w.create_box_shape(g, &ShapeDef::default(), [20.0, 0.5, 20.0])
+        .unwrap();
+    let locked = cube(
+        &mut w,
+        BodyDef {
+            motion_locks: MotionLocks {
+                linear_x: true,
+                ..MotionLocks::default()
+            },
+            ..BodyDef::dynamic([0.0, 0.5, 0.0])
+        },
+    );
+    // A crate sliding into it along +x.
+    cube(
+        &mut w,
+        BodyDef {
+            linear_velocity: [6.0, 0.0, 0.0],
+            ..BodyDef::dynamic([-3.0, 0.5, 0.0])
+        },
+    );
+    run(&mut w, 120);
+    let s = w.read_body_state(locked).unwrap();
+    assert!(s.transform.position[0].abs() < 1e-4, "held along x: {s:?}");
+    assert!(
+        (s.transform.position[1] - 0.5).abs() < 0.06,
+        "still on the ground: {s:?}"
+    );
+}

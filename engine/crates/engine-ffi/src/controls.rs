@@ -905,14 +905,16 @@ pub struct RbExplosionDef {
     pub mask_bits: u16,
 }
 
+/// Defaults in `coordinates`' units.
 #[no_mangle]
-pub extern "C" fn rbDefaultExplosionDef() -> RbExplosionDef {
+pub extern "C" fn rbDefaultExplosionDef(coordinates: RbCoordinates) -> RbExplosionDef {
+    let c = Coords::new(coordinates);
     let d = ExplosionDef::default();
     RbExplosionDef {
         position: RbVec3::default(),
-        radius: d.radius,
-        falloff: d.falloff,
-        impulse_per_area: d.impulse_per_area,
+        radius: c.length_out(d.radius),
+        falloff: c.length_out(d.falloff),
+        impulse_per_area: c.impulse_per_area_out(d.impulse_per_area),
         mask_bits: d.mask,
     }
 }
@@ -934,6 +936,66 @@ pub unsafe extern "C" fn rbWorld_Explode(
             falloff: c.length_in(d.falloff),
             impulse_per_area: c.impulse_per_area_in(d.impulse_per_area),
             mask: d.mask_bits,
+        })
+    })
+}
+
+/// A charge (`rbWorld_Detonate`; engine/docs/destruction-reactions.md section 3).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbBlastDef {
+    pub position: RbVec3,
+    /// TNT-equivalent mass (kg), > 0.
+    pub tnt_kg: f32,
+    /// Also push bodies with `rbWorld_Explode`'s radial impulse from the same point
+    /// (`radius`, `falloff`, `impulse_per_area`, `mask_bits` as `RbExplosionDef`'s). It
+    /// reaches destructible pieces too unless their category is left out of the mask.
+    pub radial: bool,
+    pub radius: f32,
+    pub falloff: f32,
+    pub impulse_per_area: f32,
+    pub mask_bits: u16,
+    pub internal_value: u32,
+}
+
+/// Defaults in `coordinates`' units: 1 kg of TNT at the origin, no radial impulse.
+#[no_mangle]
+pub extern "C" fn rbDefaultBlastDef(coordinates: RbCoordinates) -> RbBlastDef {
+    let e = rbDefaultExplosionDef(coordinates);
+    let d = BlastDef::default();
+    RbBlastDef {
+        position: RbVec3::default(),
+        tnt_kg: d.tnt_kg,
+        radial: false,
+        radius: e.radius,
+        falloff: e.falloff,
+        impulse_per_area: e.impulse_per_area,
+        mask_bits: e.mask_bits,
+        internal_value: COOKIE,
+    }
+}
+
+/// Detonate a charge at the start of the next step: every destructible placed with
+/// `blast_loading` takes its face pressures over the steps its pulse lasts, breaking the
+/// bonds it overloads (`RB_BREAK_BLAST`) and, with crushing, crushing the chunks it
+/// overstresses (`RB_CRUSH_BLAST`). Forward only. Errors: a non-positive or non-finite
+/// charge, a loaded face nearer than the fits cover, more than 16 blasts at once.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_Detonate(world: *mut RbWorld, def: *const RbBlastDef) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let d = read(def, "null blast def")?;
+        check_cookie(d.internal_value, "blast def not from rbDefaultBlastDef")?;
+        let c = w.coords;
+        w.world.detonate(&BlastDef {
+            position: c.position_in(d.position.a()),
+            tnt_kg: d.tnt_kg,
+            radial: d.radial.then(|| RadialImpulse {
+                radius: c.length_in(d.radius),
+                falloff: c.length_in(d.falloff),
+                impulse_per_area: c.impulse_per_area_in(d.impulse_per_area),
+                mask: d.mask_bits,
+            }),
         })
     })
 }

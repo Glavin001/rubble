@@ -75,6 +75,9 @@ pub struct StepModes {
     /// Append `contact_events` after contact persistence: list touching pairs
     /// of event-flagged colliders (read-only on physics state).
     pub contact_events: bool,
+    /// Some body has motion locks: `lock_predict` after `predict_bodies` and
+    /// `lock_project` after the solve.
+    pub motion_locks: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -85,6 +88,9 @@ pub struct StepInputs {
     pub joint_count: u32,
     pub joint_hash_slots: u32,
     pub has_convex: bool,
+    /// Heightfield colliders exist: their pairs take the convex stages
+    /// (`convex_classify`) without the convex-only scheduling choices.
+    pub has_height_field: bool,
     pub reuse_contacts: bool,
     pub max_colors: u32,
     pub iterations: u32,
@@ -104,6 +110,10 @@ pub struct StepInputs {
     pub soft: SoftCounts,
     /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
     pub command_count: u32,
+    /// Some heightfield carries a soil (`engine_schema::soil`, vehicle ruts):
+    /// plan `wheel_soil` and `wheel_soil_press` after the vehicle passes.
+    /// Off, the step graph is unchanged.
+    pub soil: bool,
     /// Queued explosions (`explode` runs after the commands when non-zero).
     pub explosion_count: u32,
 }
@@ -421,8 +431,8 @@ pub fn encode_step(
                 64,
             );
         }
-        if i.has_convex {
-            // Hull pairs deferred by narrowphase: classify (cheap pairs emit
+        if i.has_convex || i.has_height_field {
+            // Hull and heightfield pairs deferred by narrowphase: classify (cheap pairs emit
             // here), bucket hull pairs, size-bucketed cooperative SAT, then clipping.
             e.w("convex_classify", 64);
             e.w("convex_bucket", 64);
@@ -532,6 +542,9 @@ pub fn encode_step(
         e.d("ccd_unhold", n_bodies);
     }
     e.d("predict_bodies", n_bodies);
+    if m.motion_locks {
+        e.d("lock_predict", n_bodies);
+    }
     if mo.ccd && !reuse_manifolds {
         // Struck bodies' trust regions for this step (ccd_step.slang).
         e.d("ccd_trust", u64::from(engine_schema::CCD_PAIR_CAP));
@@ -638,12 +651,25 @@ pub fn encode_step(
         e.d("ccd_clamp", u64::from(CCD_BODY_CAP));
         e.phase("ccdValidate");
     }
+    if m.motion_locks {
+        e.d("lock_project", n_bodies);
+    }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
         // Mount loads from the final λ and solved velocities; overloaded parts
         // and wheels are severed by the next step's vehicle_input.
         e.d("vehicle_loads", u64::from(i.vehicle_count));
         e.d("vehicle_post", u64::from(i.vehicle_count));
+        if i.soil {
+            // Wheels on soil sink to their load's depth: their patches are
+            // pressed into the heightfield for the next step's queries, and
+            // their compaction resistance waits for its vehicle_prepare.
+            e.d("wheel_soil", u64::from(i.wheel_count.max(1)));
+            e.d(
+                "wheel_soil_press",
+                u64::from(engine_schema::vehicle::SOIL_LANES),
+            );
+        }
     }
     if soft {
         // BDF2 velocities and history (a no-op under backward Euler).
@@ -713,6 +739,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "vehicle_iterate",
     "vehicle_loads_persistent",
     "vehicle_post",
+    "wheel_soil",
+    "wheel_soil_press",
     "build_aabbs",
     "joint_hash_clear",
     "joint_hash_insert",
@@ -809,6 +837,8 @@ pub const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_loads",
     "vehicle_post",
     "raycast_batch",
+    "wheel_soil",
+    "wheel_soil_press",
 ];
 
 pub fn kernel_source(entry: &str) -> &'static str {
@@ -856,10 +886,21 @@ pub fn grid_cell(
     bodies: &[engine_schema::BodyState],
     hierarchical: bool,
 ) -> (f32, u32) {
+    grid_cell_with(cols, bodies, hierarchical, 0.0)
+}
+
+/// [`grid_cell`], also sized for a moving collider of radius `movable_radius` the host's
+/// mirror cannot see move (engine-schema `hierarchical_grid_with`).
+pub fn grid_cell_with(
+    cols: &[engine_schema::Collider],
+    bodies: &[engine_schema::BodyState],
+    hierarchical: bool,
+    movable_radius: f32,
+) -> (f32, u32) {
     if hierarchical {
-        return engine_schema::convex::hierarchical_grid(cols, bodies);
+        return engine_schema::convex::hierarchical_grid_with(cols, bodies, movable_radius);
     }
-    let mut max_r = 0.25f32;
+    let mut max_r = if movable_radius <= 2.0 { movable_radius.max(0.25) } else { 0.25f32 };
     for c in cols {
         if c.shape == engine_schema::ShapeType::Plane as u32 {
             continue;
@@ -1130,6 +1171,7 @@ mod tests {
             joint_count: 0,
             joint_hash_slots: 65536,
             has_convex: false,
+            has_height_field: false,
             reuse_contacts: true,
             max_colors: 32,
             iterations: 4,
@@ -1148,6 +1190,7 @@ mod tests {
             motion: MotionInputs::default(),
             soft: SoftCounts::default(),
             command_count: 0,
+            soil: false,
             explosion_count: 0,
         }
     }
@@ -1269,6 +1312,7 @@ mod tests {
                 let mut i = inputs(10, 0);
                 i.joint_count = 3;
                 i.has_convex = true;
+                m.contact_events = true;
                 for whole in [false, true] {
                     for c in encode_step(&m, &i, whole, true) {
                         let k = match c {
@@ -1429,5 +1473,122 @@ mod tests {
         assert!(at("ccd_pick") < np);
         let emit = ccd.iter().position(|n| n.starts_with("ccd_emit")).unwrap();
         assert!(np < emit && emit < at("predict_bodies"));
+    }
+
+    #[test]
+    fn soil_passes_follow_the_vehicle_passes_only_with_soil() {
+        for m in [fast(), StepModes::default()] {
+            for whole in [false, true] {
+                let mut i = inputs(10, 0);
+                i.has_height_field = true;
+                i.vehicle_count = 2;
+                i.wheel_count = 8;
+                let plain = encode_step(&m, &i, whole, true);
+                i.soil = true;
+                let with = encode_step(&m, &i, whole, true);
+                let soil = |c: &Cmd| {
+                    matches!(
+                        c,
+                        Cmd::Dispatch {
+                            kernel: "wheel_soil" | "wheel_soil_press",
+                            ..
+                        }
+                    )
+                };
+                // Off: unchanged. On: the two passes inserted, nothing else moves.
+                assert!(!plain.iter().any(soil));
+                let stripped: Vec<Cmd> = with.iter().copied().filter(|c| !soil(c)).collect();
+                assert_eq!(stripped, plain);
+                let at = |k: &str| {
+                    with.iter()
+                        .position(|c| matches!(c, Cmd::Dispatch { kernel, .. } if *kernel == k))
+                        .unwrap_or_else(|| panic!("{k} missing"))
+                };
+                assert!(at("vehicle_post") < at("wheel_soil"));
+                assert_eq!(at("wheel_soil") + 1, at("wheel_soil_press"));
+                assert!(at("wheel_soil_press") < at("write_sleep_args"));
+                assert!(with.contains(&Cmd::Dispatch {
+                    kernel: "wheel_soil_press",
+                    threads: u64::from(engine_schema::vehicle::SOIL_LANES),
+                    pass: 0,
+                }));
+                for k in ["wheel_soil", "wheel_soil_press"] {
+                    assert!(PERSISTENT_ENTRIES.contains(&resolve_entry(k, true)));
+                    assert_eq!(kernel_source(k), "vehicle_step.slang");
+                }
+                // No vehicles: no wheels to sink.
+                i.vehicle_count = 0;
+                assert!(!encode_step(&m, &i, whole, true).iter().any(soil));
+            }
+        }
+    }
+
+    #[test]
+    fn contact_events_are_planned_only_for_flagged_worlds() {
+        let names = |m: &StepModes, i: &StepInputs, whole: bool| -> Vec<&'static str> {
+            encode_step(m, i, whole, true)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => Some(kernel),
+                    _ => None,
+                })
+                .collect()
+        };
+        for mut m in [fast(), StepModes::default()] {
+            for whole in [false, true] {
+                m.contact_events = false;
+                let mut i = inputs(10, 0);
+                i.has_height_field = true;
+                i.motion.ccd = true;
+                let plain = encode_step(&m, &i, whole, true);
+                assert!(
+                    !names(&m, &i, whole)
+                        .iter()
+                        .any(|k| k.starts_with("contact_events")),
+                    "a world without event shapes plans no contact_events pass"
+                );
+                m.contact_events = true;
+                let with = encode_step(&m, &i, whole, true);
+                // The same commands with the pass inserted: nothing else moves.
+                let stripped: Vec<Cmd> = with
+                    .iter()
+                    .copied()
+                    .filter(|c| {
+                        !matches!(
+                            c,
+                            Cmd::Indirect {
+                                kernel: "contact_events",
+                                ..
+                            }
+                        )
+                    })
+                    .collect();
+                assert_eq!(stripped, plain);
+                let n = names(&m, &i, whole);
+                let at = |k: &str| {
+                    n.iter()
+                        .position(|x| *x == k)
+                        .unwrap_or_else(|| panic!("{k} missing"))
+                };
+                let last_manifold_stage = n
+                    .iter()
+                    .rposition(|k| {
+                        k.starts_with("narrowphase")
+                            || k.starts_with("convex_")
+                            || k.starts_with("ccd_emit")
+                            || k.starts_with("reuse_all_manifolds")
+                            || k.starts_with("persist_")
+                    })
+                    .unwrap();
+                assert!(last_manifold_stage < at("contact_events"));
+                assert!(at("contact_events") < at("predict_bodies"));
+                if !whole {
+                    assert!(
+                        at("convex_manifold") < at("contact_events"),
+                        "heightfield pairs are included"
+                    );
+                }
+            }
+        }
     }
 }
