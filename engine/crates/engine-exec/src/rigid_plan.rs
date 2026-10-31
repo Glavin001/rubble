@@ -907,10 +907,21 @@ pub fn grid_cell(
     bodies: &[engine_schema::BodyState],
     hierarchical: bool,
 ) -> (f32, u32) {
+    grid_cell_with(cols, bodies, hierarchical, 0.0)
+}
+
+/// [`grid_cell`], also sized for a moving collider of radius `movable_radius` the host's
+/// mirror cannot see move (engine-schema `hierarchical_grid_with`).
+pub fn grid_cell_with(
+    cols: &[engine_schema::Collider],
+    bodies: &[engine_schema::BodyState],
+    hierarchical: bool,
+    movable_radius: f32,
+) -> (f32, u32) {
     if hierarchical {
-        return engine_schema::convex::hierarchical_grid(cols, bodies);
+        return engine_schema::convex::hierarchical_grid_with(cols, bodies, movable_radius);
     }
-    let mut max_r = 0.25f32;
+    let mut max_r = if movable_radius <= 2.0 { movable_radius.max(0.25) } else { 0.25f32 };
     for c in cols {
         if c.shape == engine_schema::ShapeType::Plane as u32 {
             continue;

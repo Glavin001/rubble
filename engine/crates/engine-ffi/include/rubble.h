@@ -66,7 +66,36 @@ typedef enum RbDestructionType {
   // A connection of an assembly or composed vehicle broke: `assembly`,
   // `name`, `joint`, `force`, `torque`.
   RB_CONNECTION_BROKE = 6,
+  // A chunk of a destructible was crushed: `destructible`, `index` (the
+  // chunk), `mass`; `children` / `child_count` are the fragment bodies that
+  // carry its mass, one each (none when removed).
+  RB_CHUNK_CRUSHED = 7,
 } RbDestructionType;
+
+// What broke a destructible's bonds (`RB_BONDS_BROKEN`; one event per cause in a step).
+typedef enum RbBreakCause {
+  // The strength model's own rule: contact and impact loads, the strike prediction, or
+  // the bonds model's joint forces.
+  RB_BREAK_STRESS = 0,
+  // A blast's face pressures (`rbWorld_Detonate`, `RbDestructibleDef::blast_loading`).
+  RB_BREAK_BLAST = 1,
+  // Support loss (`RbDestructibleDef::support_loss`).
+  RB_BREAK_SUPPORT_LOSS = 2,
+  // A crushed chunk's bonds (`RB_CHUNK_CRUSHED`).
+  RB_BREAK_CRUSH = 3,
+} RbBreakCause;
+
+// What crushed a chunk (`RB_CHUNK_CRUSHED`).
+typedef enum RbCrushCause {
+  // A predicted strike (a projectile, `rbBody_SetProjectile`).
+  RB_CRUSH_IMPACT = 0,
+  // A blast's face pressures (`RbDestructibleDef::blast_loading`).
+  RB_CRUSH_BLAST = 1,
+  // Contact loads after a step (debris, sustained pressure).
+  RB_CRUSH_CONTACT = 2,
+  // Loads through its bonds: the support-loss flow's weight above it.
+  RB_CRUSH_LOAD = 3,
+} RbCrushCause;
 
 typedef enum RbGroundState {
   RB_ON_GROUND = 0,
@@ -95,6 +124,15 @@ typedef enum RbStrengthModel {
   // split on the GPU (its `threshold` mode). Projectiles: `rbBody_SetProjectile`.
   RB_STRENGTH_THRESHOLD = 1,
 } RbStrengthModel;
+
+// What becomes of a crushed chunk's mass.
+typedef enum RbCrushMass {
+  // Kept as `fragments` small rigid boxes carrying its mass and momentum, from
+  // `budget` fragment bodies reserved at placement (a crush past them fails the step).
+  RB_CRUSH_CONSERVE = 0,
+  // Removed (dust): the host draws it from `RB_CHUNK_CRUSHED`.
+  RB_CRUSH_REMOVE = 1,
+} RbCrushMass;
 
 typedef enum RbVehicleDamageType {
   // The wheel falls off as a free body.
@@ -225,7 +263,10 @@ typedef struct RbActor {
 // Something broke (`RbFrame::destruction`). Fields by `type_`:
 // joint: `joint`, `force`, `torque`, `user_data`; mount: `vehicle`, `index`,
 // `is_wheel`, `force`, `torque`; beam: `soft`, `index`, `force`; piece:
-// `soft`, `nodes` / `node_count`, `mass`.
+// `soft`, `nodes` / `node_count`, `mass`; bonds broken: `destructible`,
+// `bonds` / `bond_count`, `break_cause`; chunk crushed: `destructible`, `index`,
+// `mass`, `volume`, `transform`, `linear_velocity`, `angular_velocity`,
+// `peak_pressure`, `peak_deviator`, `crush_cause`, `children` / `child_count`.
 typedef struct RbDestructionEvent {
   enum RbDestructionType type_;
   // The step it happened in.
@@ -250,6 +291,22 @@ typedef struct RbDestructionEvent {
   uint64_t assembly;
   // The connection's name (UTF-8, NUL-terminated).
   const char *name;
+  // `RB_BONDS_BROKEN`: what broke them.
+  enum RbBreakCause break_cause;
+  // `RB_CHUNK_CRUSHED`: what crushed it.
+  enum RbCrushCause crush_cause;
+  // `RB_CHUNK_CRUSHED`: its volume.
+  float volume;
+  // `RB_CHUNK_CRUSHED`: its pose when crushed (its centre of mass, and the rotation its
+  // render mesh had).
+  struct RbTransform transform;
+  // `RB_CHUNK_CRUSHED`: its velocity at its centre of mass, and its angular velocity.
+  struct RbVec3 linear_velocity;
+  struct RbVec3 angular_velocity;
+  // `RB_CHUNK_CRUSHED`: the highest mean pressure (compression positive) and deviatoric
+  // stress it met.
+  float peak_pressure;
+  float peak_deviator;
 } RbDestructionEvent;
 
 typedef struct RbWheelState {
@@ -633,6 +690,40 @@ typedef struct RbVehicleInput {
 // A destructible asset (index).
 typedef uint32_t RbDestructibleAssetId;
 
+// A material's crush parameters, by the asset's stress material name (a pack's
+// `materials[].crush` supplies them; these supply or replace them). SI units whatever
+// the world's coordinates: they are material data, as asset packs carry it.
+typedef struct RbCrushMaterial {
+  // UTF-8, NUL-terminated.
+  const char *name;
+  // Hydrostatic cap (Pa), > 0.
+  double cap_pressure;
+  // Drucker-Prager intercept (Pa), >= 0.
+  double cohesion;
+  // dq/dp of the cone, >= 0.
+  double friction_slope;
+  // Comminution energy (J/m^3), > 0.
+  double crush_energy;
+  // Perzyna viscosity (Pa s), > 0.
+  double crush_viscosity;
+} RbCrushMaterial;
+
+// Chunk crushing (`RbDestructibleDef::crush`; engine/docs/destruction-reactions.md).
+typedef struct RbCrushDef {
+  // Off by default.
+  bool enabled;
+  enum RbCrushMass mass;
+  // `RB_CRUSH_CONSERVE`: boxes per crushed chunk (a power of two up to 64; default 4),
+  // and fragment bodies reserved (default 256).
+  uint32_t fragments;
+  uint32_t budget;
+  // Crushes one step reports at most (0: 256); more fail the step.
+  uint32_t max_per_step;
+  // Optional (null with count 0): crush parameters by material name.
+  const struct RbCrushMaterial *materials;
+  uint32_t material_count;
+} RbCrushDef;
+
 // A placed destructible (`rbDefaultDestructibleDef`). Assets are authored in
 // Rubble's frame (Y up, metres); `transform` places them in the world's.
 typedef struct RbDestructibleDef {
@@ -645,6 +736,19 @@ typedef struct RbDestructibleDef {
   float friction;
   uint64_t user_data;
   enum RbStrengthModel model;
+  // `RB_STRENGTH_THRESHOLD` only: support loss. Each anchored piece's weight flows down its
+  // intact bonds, and a bond carrying more than its compressive capacity breaks, so a
+  // structure whose supports are shot away collapses. Off by default.
+  bool support_loss;
+  // With `support_loss`: the dynamic factor k, 1 to 2, on the increase of load after a
+  // sudden loss of support (a bond is held to before + k (after - before)). 1 (the
+  // default): quasi-static.
+  float support_loss_dynamic_factor;
+  // `RB_STRENGTH_THRESHOLD` only: blasts (`rbWorld_Detonate`) load its exposed chunk
+  // faces with their face pressures. Off by default.
+  bool blast_loading;
+  // `RB_STRENGTH_THRESHOLD` only: chunk crushing. Off by default.
+  struct RbCrushDef crush;
   uint32_t internal_value;
 } RbDestructibleDef;
 
@@ -727,6 +831,22 @@ typedef struct RbExplosionDef {
   float impulse_per_area;
   uint16_t mask_bits;
 } RbExplosionDef;
+
+// A charge (`rbWorld_Detonate`; engine/docs/destruction-reactions.md section 3).
+typedef struct RbBlastDef {
+  struct RbVec3 position;
+  // TNT-equivalent mass (kg), > 0.
+  float tnt_kg;
+  // Also push bodies with `rbWorld_Explode`'s radial impulse from the same point
+  // (`radius`, `falloff`, `impulse_per_area`, `mask_bits` as `RbExplosionDef`'s). It
+  // reaches destructible pieces too unless their category is left out of the mask.
+  bool radial;
+  float radius;
+  float falloff;
+  float impulse_per_area;
+  uint16_t mask_bits;
+  uint32_t internal_value;
+} RbBlastDef;
 
 typedef struct RbColor {
   float r;
@@ -1478,6 +1598,16 @@ struct RbExplosionDef rbDefaultExplosionDef(enum RbCoordinates coordinates);
 // A radial impulse at the start of the next step (Box3D `b3World_Explode`);
 // bodies it reaches wake. Up to 16 per step.
 enum RbResult rbWorld_Explode(struct RbWorld *world, const struct RbExplosionDef *def);
+
+// Defaults in `coordinates`' units: 1 kg of TNT at the origin, no radial impulse.
+struct RbBlastDef rbDefaultBlastDef(enum RbCoordinates coordinates);
+
+// Detonate a charge at the start of the next step: every destructible placed with
+// `blast_loading` takes its face pressures over the steps its pulse lasts, breaking the
+// bonds it overloads (`RB_BREAK_BLAST`) and, with crushing, crushing the chunks it
+// overstresses (`RB_CRUSH_BLAST`). Forward only. Errors: a non-positive or non-finite
+// charge, a loaded face nearer than the fits cover, more than 16 blasts at once.
+enum RbResult rbWorld_Detonate(struct RbWorld *world, const struct RbBlastDef *def);
 
 // Draw every shape at its body's last polled pose, coloured by state
 // (static, awake, asleep) unless a material colour is set.
