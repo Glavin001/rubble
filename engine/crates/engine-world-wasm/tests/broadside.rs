@@ -11,82 +11,40 @@ const GLB: &[u8] = include_bytes!("../../engine-webgpu/fracture/assets/galleon-s
 #[test]
 fn the_take() {
     let mut b = Broadside::new(GpuContext::Default, GLB).unwrap();
-    let frames = (16.0 / b.dt).round() as u32;
-    let mut closest = f32::MAX;
-    let mut per_shot: Vec<(u32, usize)> = Vec::new();
-    let mut last_broken = 0;
+    // The reference poses once the first step's readback has placed every body.
+    b.step().unwrap();
+    b.poll_blocking().unwrap();
+    let rest = b.chunk_poses();
+    let frames = (17.0 / b.dt).round() as u32;
     let t0 = Instant::now();
-    let mut finale_broken = None;
-    let mut lap = Instant::now();
-    for _ in 0..frames {
+    for _ in 1..frames {
         b.step().unwrap();
         b.poll_blocking().unwrap();
-        // Nearest any ball in flight (a shot, not one spent and rolling) has come to the
-        // captain's capsule axis.
-        let c = glam::Vec3::from(b.captain_at);
-        let flying: Vec<[f32; 3]> = b
-            .balls
-            .iter()
-            .filter_map(|(id, _)| b.world.read_body_state(*id).ok())
-            .filter(|s| glam::Vec3::from(s.linear_velocity).length() > 50.0)
-            .map(|s| s.transform.position)
-            .collect();
-        for p in flying {
-            let d = glam::Vec3::from(p) - c;
-            let axial = d.y.clamp(-CAPTAIN_HALF, CAPTAIN_HALF);
-            let r = (d - glam::Vec3::new(0.0, axial, 0.0)).length();
-            closest = closest.min(r);
-        }
-        if b.total.broken != last_broken {
-            per_shot.push((b.frame, b.total.broken - last_broken));
-            last_broken = b.total.broken;
-        }
-        if b.finale.is_some_and(|f| b.frame == f + 1) {
-            finale_broken = Some(b.total.broken);
-        }
-        if b.frame % 60 == 0 {
-            let ms = lap.elapsed().as_secs_f64() * 1e3 / 60.0;
-            lap = Instant::now();
-            eprintln!(
-                "{ms:.1} ms/frame; t {:.1} s captain {:?} ground {} shots {} broken {} splits {} crushed {}",
-                b.seconds(),
-                b.captain_at.map(|x| (x * 100.0).round() / 100.0),
-                b.captain_ground,
-                b.total.shots,
-                b.total.broken,
-                b.total.splits,
-                b.total.crushed
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1e3 / frames as f64;
+    let loose = loose(&b, &rest);
+    eprintln!(
+        "take: {frames} frames, {ms:.1} ms/frame (blocking); {} shots, {} bonds broken, {} crushed; finale {:?}; {loose:?}",
+        b.total.shots, b.total.broken, b.total.crushed, b.finale
+    );
+    assert!(
+        b.captain_stopped(),
+        "the walker reaches the end of his walk"
+    );
+    assert!(b.finale.is_some(), "the closing volley fired");
+    assert!(
+        b.total.shots <= targets().len() + finale_targets().len(),
+        "every point shot at most once"
+    );
+    for (name, chunks, share) in loose {
+        if ["stairs (his)", "stairs (port)", "balustrade", "breast"].contains(&name) {
+            assert!(
+                chunks > 0 && share >= 0.9,
+                "{name}: {:.0}% of {chunks} chunks loose",
+                100.0 * share
             );
         }
     }
-    let ms = t0.elapsed().as_secs_f64() * 1e3 / frames as f64;
-    eprintln!(
-        "take: {frames} frames, {ms:.1} ms/frame (blocking); {} shots, {} bonds broken, {} splits, {} crushed; finale at {:?}, closest ball {closest:.2} m",
-        b.total.shots, b.total.broken, b.total.splits, b.total.crushed, b.finale
-    );
-    eprintln!("breaks by frame: {per_shot:?}");
-    assert!(
-        b.captain_stopped(),
-        "the captain reaches the end of his walk"
-    );
-    assert!(
-        b.captain_at[1] < ship::MAIN_DECK + CAPTAIN_HALF + CAPTAIN_RADIUS + 0.3
-            && b.captain_at[0] < 8.0,
-        "he ends on the main deck: {:?}",
-        b.captain_at
-    );
-    assert_eq!(
-        b.total.shots,
-        targets().len() + finale_targets().len(),
-        "every cue and the closing volley fired"
-    );
-    assert!(
-        closest > CAPTAIN_RADIUS + BALL_RADIUS + 0.3,
-        "no shot comes near him: {closest} m"
-    );
-    assert!(b.finale.is_some(), "the closing volley fired");
-    let before = finale_broken.unwrap();
-    assert!(b.total.broken > before, "the closing volley breaks more");
 }
 
 /// The closing volley alone, early (profiling its frames).

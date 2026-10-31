@@ -246,10 +246,7 @@ pub struct Broadside {
     targets: Vec<Target>,
     /// Targets shot so far.
     hit: Vec<bool>,
-    /// The barrage's next pick is the chase (true) or the sweep.
-    chase_next: bool,
     path: Vec<[f32; 3]>,
-    leg: usize,
     /// The captain's last reported capsule centre.
     pub captain_at: [f32; 3],
     pub captain_vel: [f32; 3],
@@ -381,14 +378,12 @@ impl Broadside {
             color,
             targets,
             hit,
-            chase_next: true,
             captain_at: [start[0], start[1] + CAPTAIN_HALF + CAPTAIN_RADIUS, start[2]],
             captain_vel: [0.0; 3],
             captain_on: BodyId::NULL,
             captain_ground_vel: [0.0; 3],
             captain_ground: false,
             path,
-            leg: 1,
             stopped_at: None,
             finale: None,
             balls: Vec::new(),
@@ -596,11 +591,6 @@ impl Broadside {
         // where the chase is allowed, from the main deck to just under his feet. Until
         // he is down no ball's line may cross it (they go on through what they hit).
         let feet = c[1] - CAPTAIN_HALF - CAPTAIN_RADIUS;
-        let lag = if c[0] < BREAST + 0.3 {
-            BEHIND_ON_STAIRS
-        } else {
-            BEHIND
-        };
         let keep = (!down).then(|| {
             (
                 glam::Vec3::new(BREAST - 2.5, MAIN_DECK - 0.1, STAIR_INNER - 0.15),
