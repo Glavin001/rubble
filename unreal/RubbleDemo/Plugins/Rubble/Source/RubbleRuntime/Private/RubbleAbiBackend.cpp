@@ -513,23 +513,35 @@ bool FRubbleAbiBackend::CreateSoftCars(const FRubbleSceneAssets& Layout, FString
 		Cage += Turn.RotateVector(N);
 	}
 	const FTCHARToUTF8 DescUtf8(*Desc);
+	// The engine's render mesh of the car (the softbody page's): in its own frame and Unreal
+	// units, bound part by part so a torn-off panel carries its mesh away.
+	const RbSoftVisual* Visual = nullptr;
+	if (rbCreateSoftCarVisual("procedural_car", RB_COORDINATES_UNREAL, &Visual) != RB_OK)
+	{
+		Error = AbiError(TEXT("rbCreateSoftCarVisual"));
+		return false;
+	}
+	ON_SCOPE_EXIT { rbSoftVisual_Destroy(Visual); };
+	int32 CarMesh = INDEX_NONE;
+	{
+		// Drawn in the layout's frame (front +X): the descriptor turned as the spawn is.
+		FRubbleMeshData Mesh;
+		Mesh.Material = ERubbleMaterial::CarPaint;
+		for (uint32 v = 0; v < Visual->vertex_count; ++v)
+		{
+			Mesh.Positions.Add(FVector3f(Turn.RotateVector(Vec(Visual->vertices[v]))));
+			Mesh.Normals.Add(FVector3f::UpVector);
+		}
+		Mesh.Indices.Append(Visual->triangles, Visual->triangle_count * 3);
+		Mesh.CarSurfaces.Append(Visual->triangle_materials, Visual->triangle_count);
+		Mesh.Seams.Append(Visual->vertex_seams, Visual->vertex_count);
+		CarMesh = SceneAssets->Meshes.Add(MoveTemp(Mesh));
+	}
 	for (const FRubbleSoftVisual& V : Layout.SoftBodies)
 	{
 		if (!V.bCar)
 		{
 			continue;
-		}
-		// Fit the layout's car shell (front +X) to the cage, so the skin wraps the simulated car.
-		FRubbleMeshData& Mesh = SceneAssets->Meshes[V.Mesh];
-		FBox Shell(ForceInit);
-		for (const FVector3f& P : Mesh.Positions)
-		{
-			Shell += FVector(P);
-		}
-		const FVector Scale = Cage.GetSize() / Shell.GetSize().ComponentMax(FVector(1.0));
-		for (FVector3f& P : Mesh.Positions)
-		{
-			P = FVector3f(Cage.Min + (FVector(P) - Shell.Min) * Scale);
 		}
 		// Spawned a few centimetres up: the layout's origin is at its sag below the ground.
 		const FTransform Spawn(V.Spawn.GetRotation(), V.Spawn.GetLocation() + FVector(0, 0, 10));
@@ -541,19 +553,11 @@ bool FRubbleAbiBackend::CreateSoftCars(const FRubbleSceneAssets& Layout, FString
 			Error = AbiError(TEXT("rbCreateSoftVehicle"));
 			return false;
 		}
-		// In the car's own (descriptor) frame, not the world: rbSoft_BindSkin documents "world
-		// coordinates at spawn", but SoftHost::bind_mesh binds against the descriptor's node
-		// positions, so a world-space mesh binds to the wrong nodes (README, C ABI gaps).
-		TArray<RbVec3> World;
-		const FQuat Unturn = Turn.Inverse();
-		for (const FVector3f& P : Mesh.Positions)
-		{
-			World.Add(Vec(Unturn.RotateVector(FVector(P))));
-		}
 		RbSkinId Skin = 0;
-		if (rbSoft_BindSkin(WorldPtr, Soft, World.GetData(), uint32(World.Num()), Mesh.Indices.GetData(), uint32(Mesh.NumTriangles()), &Skin) != RB_OK)
+		if (rbSoft_BindSkinParts(WorldPtr, Soft, Visual->vertices, Visual->vertex_count, Visual->triangles, Visual->triangle_count,
+				Visual->vertex_parts, Visual->part_names, Visual->part_count, &Skin) != RB_OK)
 		{
-			Error = AbiError(TEXT("rbSoft_BindSkin"));
+			Error = AbiError(TEXT("rbSoft_BindSkinParts"));
 			return false;
 		}
 		FSoftCar Car;
@@ -565,27 +569,9 @@ bool FRubbleAbiBackend::CreateSoftCars(const FRubbleSceneAssets& Layout, FString
 		Car.WheelRadius = Radii;
 		Car.Spin.Init(0.0f, Axles.Num());
 		Car.LastHub.Init(FVector::ZeroVector, Axles.Num());
-		Car.Triangles = Mesh.Indices;
-		// Rest edge lengths around each vertex: strain and tears are measured against them.
-		Car.Neighbours.SetNum(Mesh.Positions.Num());
-		Car.RestLength.SetNum(Mesh.Positions.Num());
-		for (int32 t = 0; t + 2 < Mesh.Indices.Num(); t += 3)
-		{
-			for (int32 k = 0; k < 3; ++k)
-			{
-				const int32 a = Mesh.Indices[t + k], b = Mesh.Indices[t + (k + 1) % 3];
-				if (!Car.Neighbours[a].Contains(b))
-				{
-					const float L = FVector3f::Dist(Mesh.Positions[a], Mesh.Positions[b]);
-					Car.Neighbours[a].Add(b);
-					Car.RestLength[a].Add(L);
-					Car.Neighbours[b].Add(a);
-					Car.RestLength[b].Add(L);
-				}
-			}
-		}
 		FRubbleSoftVisual Out = V;
 		Out.Soft = Car.Visual;
+		Out.Mesh = CarMesh;
 		Out.Wheels.Reset();
 		for (const float R : Radii)
 		{
@@ -912,12 +898,21 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 				E.Type = ERubbleEventType::JointBroke;
 				break;
 			case RB_BEAM_BROKE:
-				E.Type = ERubbleEventType::BeamBroke;
-				E.Soft = int32(D.soft);
-				break;
 			case RB_PIECE_DETACHED:
-				E.Type = ERubbleEventType::PieceDetached;
-				E.Soft = int32(D.soft);
+				E.Type = D.type_ == RB_BEAM_BROKE ? ERubbleEventType::BeamBroke : ERubbleEventType::PieceDetached;
+				if (const int32* Car = SoftCarOfSoft.Find(D.soft))
+				{
+					E.Soft = SoftCars[*Car].Visual;
+				}
+				E.MaterialA = ERubbleMaterial::CarPaint;
+				if (D.has_point)
+				{
+					E.Position = Vec(D.point);
+				}
+				if (D.type_ == RB_PIECE_DETACHED && D.name)
+				{
+					E.Part = FName(UTF8_TO_TCHAR(D.name));
+				}
 				break;
 			case RB_BONDS_BROKEN:
 			case RB_SPLIT:
@@ -1054,9 +1049,8 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 			{
 				continue;
 			}
-			const FSoftCar& Car = SoftCars[*CarIndex];
 			FRubbleSoftSkin& Skin = R.Skins.AddDefaulted_GetRef();
-			Skin.Soft = Car.Visual;
+			Skin.Soft = SoftCars[*CarIndex].Visual;
 			Skin.Positions.SetNumUninitialized(SkinOut.vertex_count);
 			Skin.Normals.SetNumUninitialized(SkinOut.vertex_count);
 			for (uint32 v = 0; v < SkinOut.vertex_count; ++v)
@@ -1064,32 +1058,18 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 				Skin.Positions[v] = FVector3f(SkinOut.positions[v].x, SkinOut.positions[v].y, SkinOut.positions[v].z);
 				Skin.Normals[v] = FVector3f(SkinOut.normals[v].x, SkinOut.normals[v].y, SkinOut.normals[v].z);
 			}
-			// Strain: the largest stretch or squash of the edges around a vertex; an edge past
-			// 1.8 times its rest length tears its triangles (soft_skin's rule).
-			Skin.Strain.SetNumZeroed(SkinOut.vertex_count);
-			for (int32 v = 0; v < Car.Neighbours.Num() && v < int32(SkinOut.vertex_count); ++v)
+			// The skinning kernel's damage: strain per vertex and per triangle (−1: torn).
+			Skin.Strain.SetNumUninitialized(SkinOut.vertex_count);
+			for (uint32 v = 0; v < SkinOut.vertex_count; ++v)
 			{
-				float Worst = 0.0f;
-				for (int32 j = 0; j < Car.Neighbours[v].Num(); ++j)
-				{
-					const float L = FVector3f::Dist(Skin.Positions[v], Skin.Positions[Car.Neighbours[v][j]]);
-					Worst = FMath::Max(Worst, FMath::Abs(L / FMath::Max(Car.RestLength[v][j], 0.01f) - 1.0f));
-				}
-				// Below 5% is the skinning's own give, not damage.
-				Skin.Strain[v] = FMath::Clamp((Worst - 0.05f) * 1.5f, 0.0f, 1.0f);
+				Skin.Strain[v] = SkinOut.strain[v];
 			}
-			Skin.TornTriangles.Init(false, Car.Triangles.Num() / 3);
-			for (int32 t = 0; t + 2 < Car.Triangles.Num(); t += 3)
+			Skin.FaceStrain.SetNumUninitialized(SkinOut.triangle_count);
+			Skin.TornTriangles.Init(false, SkinOut.triangle_count);
+			for (uint32 t = 0; t < SkinOut.triangle_count; ++t)
 			{
-				for (int32 e = 0; e < 3; ++e)
-				{
-					const int32 a = Car.Triangles[t + e], b = Car.Triangles[t + (e + 1) % 3];
-					const int32 j = Car.Neighbours[a].IndexOfByKey(b);
-					if (j != INDEX_NONE && FVector3f::Dist(Skin.Positions[a], Skin.Positions[b]) > 1.8f * Car.RestLength[a][j] + 2.0f)
-					{
-						Skin.TornTriangles[t / 3] = true;
-					}
-				}
+				Skin.FaceStrain[t] = SkinOut.face_strain[t];
+				Skin.TornTriangles[t] = SkinOut.face_strain[t] < 0.0f;
 			}
 		}
 		for (uint32 k = 0; k < F.soft_count; ++k)

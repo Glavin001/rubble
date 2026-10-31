@@ -29,6 +29,7 @@
 #include "RubblePrimitives.h"
 #include "RubbleReplayBackend.h"
 #include "RubbleSoftBodies.h"
+#include "RubbleVehicles.h"
 #include "RubbleSubsystem.h"
 #include "Tests/AutomationCommon.h"
 #include "UnrealClient.h"
@@ -1043,3 +1044,237 @@ bool FRubbleVideoGlassTower::RunTest(const FString& Parameters)
 }
 #endif
 
+#if WITH_DEV_AUTOMATION_TESTS
+namespace SoftCrashFilm
+{
+	/** A crash test filmed: its scene and where the cars meet (cm). */
+	struct FCrash
+	{
+		const TCHAR* Name;
+		const TCHAR* Scene;
+		FVector Impact;
+	};
+	// softbody.html's head-on (two cars at 29 km/h from X ±800) and full-width wall (at 56 km/h
+	// from X -1200 into the wall's face at X 220); both meet about 0.8 s in.
+	static const FCrash Crashes[] = {
+		{ TEXT("headon"), TEXT("soft:headon"), FVector(0, 0, 70) },
+		{ TEXT("wall"), TEXT("soft:wall?speed=56"), FVector(200, 0, 70) },
+	};
+	enum class ERide : uint8
+	{
+		Fixed,  // standing still (offsets from the impact)
+		Orbit,  // circling the impact
+		Bonnet, // on the player car's bonnet, looking ahead
+	};
+	struct FView
+	{
+		const TCHAR* Name;
+		ERide Ride;
+		FVector Eye; // from the impact
+		FVector Target;
+		float Fov;
+	};
+	static const FView Views[] = {
+		// Low at the side, at bumper height: the fronts fold toward the lens.
+		{ TEXT("side"), ERide::Fixed, FVector(-60, -780, 55), FVector(0, 0, 0), 48.0f },
+		{ TEXT("closeup"), ERide::Fixed, FVector(-330, -300, 60), FVector(-60, 0, 0), 40.0f },
+		{ TEXT("overhead"), ERide::Fixed, FVector(-40, -120, 880), FVector(0, 0, -70), 62.0f },
+		{ TEXT("bonnet"), ERide::Bonnet, FVector(30, -40, 120), FVector(1000, 0, 60), 80.0f },
+		{ TEXT("orbit"), ERide::Orbit, FVector::ZeroVector, FVector::ZeroVector, 55.0f },
+	};
+	/** Seconds of world time: real speed, then a fifth of it from just before the impact until the
+	 *  wreck has settled, then real speed to the end. */
+	constexpr double SlowFrom = 0.55, SlowTo = 1.75, SlowScale = 0.2, End = 3.5;
+	double ScaleAt(double WorldT) { return WorldT >= SlowFrom && WorldT < SlowTo ? SlowScale : 1.0; }
+}
+
+/**
+ * Rubble.Video.SoftCrash: the soft-body crash tests in Unreal, on the engine's car mesh (the
+ * softbody page's: paint, glass, chrome, lamps) skinned part by part, with the damage it measures
+ * (crumpled and scraped paint, cracked and shattered glass, torn panels) and the debris it sheds.
+ * Each crash runs once (the orbit pass, recorded by FRubbleReplayBackend) and replays to every
+ * camera (SoftCrashFilm::Views), slowed to a fifth around the impact. Every frame (1/30 s) to
+ * RubbleShots/video/softcrash/<crash>-<camera>/ (scripts/unreal/video.sh softcrash encodes them).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleVideoSoftCrash, "Rubble.Video.SoftCrash",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubbleVideoSoftCrash::RunTest(const FString& Parameters)
+{
+	using namespace SoftCrashFilm;
+	FString Error;
+	if (!TestTrue(TEXT("the engine's ABI"), Rubble() && FRubbleAbiBackend::CheckVersion(Error)))
+	{
+		return false;
+	}
+	TUniquePtr<FRubbleReplayBackend> Owned = MakeUnique<FRubbleReplayBackend>(MakeUnique<FRubbleAbiBackend>());
+	FRubbleReplayBackend* Replay = Owned.Get();
+	Rubble()->SetBackend(MoveTemp(Owned));
+	constexpr double Fps = 30.0;
+	// -RubbleFilmCrash=wall films one crash; -RubbleFilmViews=N only the first N cameras.
+	FString Only;
+	FParse::Value(FCommandLine::Get(), TEXT("RubbleFilmCrash="), Only);
+	int32 NumViews = UE_ARRAY_COUNT(Views);
+	FParse::Value(FCommandLine::Get(), TEXT("RubbleFilmViews="), NumViews);
+	NumViews = FMath::Clamp(NumViews, 1, int32(UE_ARRAY_COUNT(Views)));
+	TArray<int32> Films;
+	for (int32 c = 0; c < UE_ARRAY_COUNT(Crashes); ++c)
+	{
+		if (Only.IsEmpty() || Only == Crashes[c].Name)
+		{
+			Films.Add(c);
+		}
+	}
+	const FString Root = ShotDir() / TEXT("video") / TEXT("softcrash");
+	IFileManager::Get().DeleteDirectory(*Root, false, true);
+	struct FState
+	{
+		int32 Film = 0;
+		int32 Pass = 0; // the camera; pass 0 records
+		int32 Frame = -100;
+		double WorldT = 0.0;
+		FTransform Ride;
+		bool bRiding = false;
+		TWeakObjectPtr<ARubbleFilmRig> Rig;
+	};
+	TSharedRef<FState> S = MakeShared<FState>();
+	// The recording pass is the orbit (the last camera): it sees the whole crash.
+	auto ViewOf = [](int32 Pass) { return Pass == 0 ? int32(UE_ARRAY_COUNT(Views)) - 1 : Pass - 1; };
+	ARubbleFilmRig* Rig = GameWorld()->SpawnActor<ARubbleFilmRig>();
+	S->Rig = Rig;
+	Rig->Late = [S, Films, ViewOf]() {
+		ARubblePawn* Pawn = Cast<ARubblePawn>(GameWorld()->GetFirstPlayerController()->GetPawn());
+		if (!Pawn || S->Frame == -100 || !Films.IsValidIndex(S->Film))
+		{
+			return;
+		}
+		const FCrash& C = Crashes[Films[S->Film]];
+		const FView& V = Views[ViewOf(S->Pass)];
+		switch (V.Ride)
+		{
+		case ERide::Fixed:
+			Pawn->ViewFrom(C.Impact + V.Eye, (V.Target - V.Eye).Rotation(), V.Fov);
+			break;
+		case ERide::Orbit:
+		{
+			// A quarter turn round the impact from the near side, closing in as it slows.
+			const float u = float(FMath::Clamp(S->WorldT / End, 0.0, 1.0));
+			const float Angle = FMath::DegreesToRadians(FMath::Lerp(-70.0f, 20.0f, u));
+			const float Radius = FMath::Lerp(1100.0f, 750.0f, u);
+			const FVector Eye = C.Impact + FVector(Radius * FMath::Sin(Angle), -Radius * FMath::Cos(Angle), 260.0f);
+			Pawn->ViewFrom(Eye, (C.Impact - Eye).Rotation(), V.Fov);
+			break;
+		}
+		case ERide::Bonnet:
+		{
+			FTransform Car;
+			for (TActorIterator<ARubbleVehicles> It(GameWorld()); It; ++It)
+			{
+				It->PlayerTransform(Car);
+			}
+			// Smoothed: the core's pose comes from the wheel hubs, which jolt in the crash.
+			if (!S->bRiding)
+			{
+				S->Ride = Car;
+				S->bRiding = true;
+			}
+			S->Ride.SetLocation(FMath::Lerp(S->Ride.GetLocation(), Car.GetLocation(), 0.5));
+			S->Ride.SetRotation(FQuat::Slerp(S->Ride.GetRotation(), Car.GetRotation(), 0.3f));
+			const FVector Eye = S->Ride.TransformPosition(V.Eye);
+			const FVector Look = S->Ride.TransformPosition(V.Target);
+			Pawn->ViewFrom(Eye, (Look - Eye).Rotation(), V.Fov);
+			break;
+		}
+		}
+	};
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(2.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, S, Replay, Root, Fps, Films, NumViews, ViewOf]() {
+		if (!Films.IsValidIndex(S->Film))
+		{
+			FApp::SetUseFixedTimeStep(false);
+			Rubble()->TimeScale = 1.0;
+			if (S->Rig.IsValid())
+			{
+				S->Rig->Destroy();
+			}
+			Rubble()->SetBackend(MakeUnique<FRubbleAbiBackend>());
+			return true;
+		}
+		const FCrash& C = Crashes[Films[S->Film]];
+		const FView& V = Views[ViewOf(S->Pass)];
+		const FString Dir = Root / FString::Printf(TEXT("%s-%s"), C.Name, V.Name);
+		if (S->Frame == -100)
+		{
+			FApp::SetUseFixedTimeStep(true);
+			FApp::SetFixedDeltaTime(1.0 / Fps);
+			IFileManager::Get().MakeDirectory(*Dir, true);
+			if (S->Pass == 0)
+			{
+				// A fresh crash: record it.
+				Replay->EndReplay();
+				FString LoadError;
+				FRubbleSceneRequest R;
+				FRubbleSceneRequest::Parse(C.Scene, R, LoadError);
+				if (!Rubble()->LoadScene(R, LoadError))
+				{
+					AddError(FString::Printf(TEXT("%s: %s"), C.Scene, *LoadError));
+					S->Film = Films.Num();
+					return false;
+				}
+			}
+			else
+			{
+				// Back to the start: the renderers rebuild from the recorded scene's assets.
+				Replay->BeginReplay();
+				Replay->SetHold(true);
+				FString LoadError;
+				FRubbleSceneRequest R;
+				FRubbleSceneRequest::Parse(C.Scene, R, LoadError);
+				Rubble()->LoadScene(R, LoadError);
+			}
+			Rubble()->bPaused = true;
+			Rubble()->TimeScale = 1.0;
+			S->bRiding = false;
+			S->WorldT = 0.0;
+			// Frames -40..-1 settle the camera and Lumen, unrecorded; the world runs from -10.
+			S->Frame = -40;
+		}
+		if (S->Frame == -10)
+		{
+			Rubble()->bPaused = false;
+			if (S->Pass == 0)
+			{
+				Replay->BeginRecording();
+			}
+			else
+			{
+				Replay->SetHold(false);
+			}
+		}
+		if (S->Frame < 0)
+		{
+			++S->Frame;
+			return false;
+		}
+		// The same speed schedule in every pass: a replay serves one recorded poll per frame.
+		Rubble()->TimeScale = ScaleAt(S->WorldT);
+		FScreenshotRequest::RequestScreenshot(Dir / FString::Printf(TEXT("frame_%04d.png"), S->Frame), /*bShowUI=*/false, false);
+		S->WorldT += Rubble()->TimeScale / Fps;
+		++S->Frame;
+		if (S->WorldT < End)
+		{
+			return false;
+		}
+		UE_LOG(LogRubble, Display, TEXT("Rubble.Video.SoftCrash: %s, %d frames in %s (%d polls recorded)"), *FString(C.Name), S->Frame, *Dir, Replay->RecordedPolls());
+		S->Frame = -100;
+		if (++S->Pass >= NumViews)
+		{
+			S->Pass = 0;
+			++S->Film;
+		}
+		return false;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	return true;
+}
+#endif

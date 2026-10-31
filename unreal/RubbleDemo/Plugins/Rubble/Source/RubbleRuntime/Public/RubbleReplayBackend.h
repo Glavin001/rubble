@@ -17,6 +17,8 @@ public:
 	/** Replay from the recording's start. Load then keeps the recorded scene's assets (the frames
 	 *  name its bodies) and only lets the renderers rebuild. */
 	void BeginReplay();
+	/** Back to the live backend (a new scene to record): the recording is kept until the next. */
+	void EndReplay() { bReplaying = false; bHold = false; }
 	/** While held, a replay serves nothing and stays where it is (a film's unrecorded lead-in). */
 	void SetHold(bool bInHold) { bHold = bInHold; }
 	bool IsReplaying() const { return bReplaying; }

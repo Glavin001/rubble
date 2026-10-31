@@ -150,8 +150,36 @@ fn the_car_visual_is_the_detailed_mesh() {
                 (e.x - b.x).abs() < 1e-3 && (e.y - b.y).abs() < 1e-3 && (e.z - b.z).abs() < 1e-3
             );
         }
-        assert_eq!(v.triangles[0], u.triangles[0]);
-        assert_eq!(v.triangles[1], u.triangles[2]);
+        // The paint faces out in each host's winding: Rubble's (b - a) x (c - a), Unreal's
+        // (c - a) x (b - a).
+        let out = |m: &Visual, unreal: bool| {
+            let c = m.vertices.iter().fold([0.0f32; 3], |s, p| [s[0] + p.x, s[1] + p.y, s[2] + p.z]);
+            let n = m.vertices.len() as f32;
+            let c = [c[0] / n, c[1] / n, c[2] / n];
+            let (mut outward, mut paint) = (0, 0);
+            for (t, &mat) in m.triangles.chunks_exact(3).zip(&m.materials) {
+                if mat != 0 {
+                    continue;
+                }
+                let [a, b, d] = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
+                let e1 = [b.x - a.x, b.y - a.y, b.z - a.z];
+                let e2 = [d.x - a.x, d.y - a.y, d.z - a.z];
+                let mut x = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                if unreal {
+                    x = x.map(|k| -k);
+                }
+                let r = [a.x - c[0], a.y - c[1], a.z - c[2]];
+                paint += 1;
+                outward += usize::from(x[0] * r[0] + x[1] * r[1] + x[2] * r[2] > 0.0);
+            }
+            outward as f32 / paint as f32
+        };
+        let (rubble, unreal) = (out(&v, false), out(&u, true));
+        assert!(rubble > 0.8 && unreal > 0.8, "paint facing out: Rubble {rubble}, Unreal {unreal}");
     }
 }
 

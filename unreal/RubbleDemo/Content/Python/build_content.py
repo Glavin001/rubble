@@ -169,6 +169,121 @@ def car_paint():
     return m
 
 
+# The soft car (the engine's procedural car mesh, skinned each frame): vertex colour R is the
+# crumple strain the skinning kernel measured, G the panel seam; UV0 and UV1.x hold the rest
+# position in metres (UV0 = x, y; UV1.x = z), so damage patterns stay on the panel as it bends.
+SOFT_PAINT = """
+float d = smoothstep(0.015, 0.25, Strain);
+float bare = saturate(smoothstep(0.86, 0.9, Streak) * smoothstep(0.25, 0.8, d) + smoothstep(0.55, 1.0, d) * step(0.55, Blotch));
+float3 base = lerp(Paint * (1.0 - 0.45 * d), float3(0.5, 0.51, 0.53), bare);
+Metal = bare;
+Rough = lerp(lerp(0.3, 0.55, d), 0.38, bare);
+Coat = (1.0 - d) * (1.0 - bare);
+if (Side < 0.0) { base = float3(0.18, 0.18, 0.17); Metal = 0.0; Rough = 0.8; Coat = 0.0; }
+base *= 1.0 - 0.85 * smoothstep(0.82, 0.97, Seam);
+return base;
+"""
+
+SOFT_GLASS = """
+float crack = smoothstep(0.012, 0.05, Strain) * (1.0 - smoothstep(0.0, 0.018, abs(Web - 0.5)));
+Opacity = saturate(0.32 + 0.6 * Fres + crack);
+Rough = lerp(0.02, 0.5, crack);
+return lerp(float3(0.015, 0.02, 0.025), float3(0.7, 0.72, 0.74), crack);
+"""
+
+
+def rest_position(m, x, y):
+    """The vertex's rest position in metres (UV0 = x, y; UV1.x = z)."""
+    uv0 = expr(m, unreal.MaterialExpressionTextureCoordinate, x - 300, y, coordinate_index=0)
+    uv1 = expr(m, unreal.MaterialExpressionTextureCoordinate, x - 300, y + 80, coordinate_index=1)
+    mask = expr(m, unreal.MaterialExpressionComponentMask, x - 150, y + 80, r=True, g=False, b=False, a=False)
+    link(uv1, "", mask, "")
+    return binary(m, unreal.MaterialExpressionAppendVector, uv0, mask, x, y)
+
+
+def rest_noise(m, rest, scale, x, y):
+    """Noise of the rest position scaled per axis (scale: x, y, z), 0..1."""
+    k = expr(m, unreal.MaterialExpressionConstant3Vector, x - 300, y, constant=unreal.LinearColor(scale[0], scale[1], scale[2], 0.0))
+    p = binary(m, unreal.MaterialExpressionMultiply, rest, k, x - 150, y)
+    n = expr(m, unreal.MaterialExpressionNoise, x, y, scale=1.0, levels=1, output_min=0.0, output_max=1.0, quality=1)
+    link(p, "", n, "Position")
+    return n
+
+
+def soft_car():
+    """The soft car's surfaces (RubbleRender::SoftCarSurface; car-render.mjs is the web's).
+
+    M_RubbleSoftCarPaint: clear-coat paint that dulls and darkens where the panel crumpled and is
+    scraped through to bare steel where it crumpled most; grey primer on a panel's inside (seen
+    through tears); dark panel gaps along seams. M_RubbleSoftCarGlass: dark tinted glass, Fresnel
+    opacity, a web of cracks as the pane strains. M_RubbleSoftCarLamp: lamps that go out when
+    crushed. The rest are M_RubbleSurface instances (chrome, trim, underbody, interior, engine,
+    grille)."""
+    s = eal.load_asset(f"{ROOT}/M_RubbleSurface")
+    m = material("M_RubbleSoftCarPaint")
+    m.set_editor_property("used_with_instanced_static_meshes", False)
+    m.set_editor_property("two_sided", True)
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_CLEAR_COAT)
+    vc = expr(m, unreal.MaterialExpressionVertexColor, -1500, -300)
+    rest = rest_position(m, -1500, 100)
+    c = custom(m, SOFT_PAINT, -800, 0, {
+        "Paint": (vector(m, "Paint", (0.05, 0.18, 0.55, 1.0), -1500, -450), ""),
+        "Strain": (vc, "R"),
+        "Seam": (vc, "G"),
+        "Side": (expr(m, unreal.MaterialExpressionTwoSidedSign, -1500, -150), ""),
+        "Streak": (rest_noise(m, rest, (6.0, 90.0, 90.0), -1100, 250), ""),
+        "Blotch": (rest_noise(m, rest, (18.0, 18.0, 18.0), -1100, 400), ""),
+    }, {"Metal": 1, "Rough": 1, "Coat": 1}, "SoftCarPaint")
+    # Clear coat goes in through material attributes (its custom-data pins are hidden from Python).
+    m.set_editor_property("use_material_attributes", True)
+    attrs = expr(m, unreal.MaterialExpressionMakeMaterialAttributes, -450, 0)
+    link(c, "", attrs, "BaseColor")
+    link(c, "Metal", attrs, "Metallic")
+    link(c, "Rough", attrs, "Roughness")
+    link(c, "Coat", attrs, "ClearCoat")
+    link(const(m, 0.06, -800, 300), "", attrs, "ClearCoatRoughness")
+    mel.connect_material_property(attrs, "", MP.MP_MATERIAL_ATTRIBUTES)
+    mel.recompile_material(m)
+
+    g = material("M_RubbleSoftCarGlass")
+    g.set_editor_property("used_with_instanced_static_meshes", False)
+    g.set_editor_property("two_sided", True)
+    g.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    g.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_SURFACE_PER_PIXEL_LIGHTING)
+    vc = expr(g, unreal.MaterialExpressionVertexColor, -1500, -300)
+    rest = rest_position(g, -1500, 100)
+    web = rest_noise(g, rest, (22.0, 22.0, 22.0), -1100, 250)
+    fres = expr(g, unreal.MaterialExpressionFresnel, -1100, -100, exponent=4.0, base_reflect_fraction=0.04)
+    c = custom(g, SOFT_GLASS, -800, 0, {"Strain": (vc, "R"), "Web": (web, ""), "Fres": (fres, "")}, {"Opacity": 1, "Rough": 1}, "SoftCarGlass")
+    mel.connect_material_property(c, "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(c, "Opacity", MP.MP_OPACITY)
+    mel.connect_material_property(c, "Rough", MP.MP_ROUGHNESS)
+    mel.connect_material_property(const(g, 1.0, -800, 300), "", MP.MP_SPECULAR)
+    mel.recompile_material(g)
+
+    lamp = material("M_RubbleSoftCarLamp")
+    lamp.set_editor_property("used_with_instanced_static_meshes", False)
+    color = vector(lamp, "Color", (1.0, 0.95, 0.85, 1.0), -900, -200)
+    vc = expr(lamp, unreal.MaterialExpressionVertexColor, -900, 100)
+    out = expr(lamp, unreal.MaterialExpressionSmoothStep, -700, 100)
+    link(const(lamp, 0.3, -900, 220), "", out, "Min")
+    link(const(lamp, 0.05, -900, 280), "", out, "Max")
+    link(vc, "R", out, "Value")
+    glow = binary(lamp, unreal.MaterialExpressionMultiply, color, scalar(lamp, "Intensity", 8.0, -900, 0), -550, -100)
+    mel.connect_material_property(binary(lamp, unreal.MaterialExpressionMultiply, glow, out, -350, 0), "", MP.MP_EMISSIVE_COLOR)
+    mel.connect_material_property(binary(lamp, unreal.MaterialExpressionMultiply, color, const(lamp, 0.3, -550, -250), -350, -250), "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(const(lamp, 0.08, -350, 150), "", MP.MP_ROUGHNESS)
+    mel.recompile_material(lamp)
+    instance("MI_SoftCarHeadlight", lamp, {"Intensity": 6.0}, {"Color": (1.0, 0.95, 0.85, 1)})
+    instance("MI_SoftCarTaillight", lamp, {"Intensity": 4.0}, {"Color": (0.9, 0.02, 0.015, 1)})
+    instance("MI_SoftCarChrome", s, {"Roughness": 0.06, "Metallic": 1.0, "Specular": 1.0, "Grit": 0.0}, {"BaseColor": (0.92, 0.92, 0.95, 1)})
+    instance("MI_SoftCarTrim", s, {"Roughness": 0.55, "Grit": 0.1}, {"BaseColor": (0.025, 0.025, 0.028, 1)})
+    instance("MI_SoftCarUnderbody", s, {"Roughness": 0.85, "Grit": 0.5}, {"BaseColor": (0.035, 0.035, 0.035, 1)})
+    instance("MI_SoftCarInterior", s, {"Roughness": 0.9, "Grit": 0.3}, {"BaseColor": (0.045, 0.045, 0.05, 1)})
+    instance("MI_SoftCarEngine", s, {"Roughness": 0.4, "Metallic": 0.7, "Grit": 0.4}, {"BaseColor": (0.22, 0.22, 0.23, 1)})
+    instance("MI_SoftCarGrille", s, {"Roughness": 0.5, "Grit": 0.6}, {"BaseColor": (0.02, 0.02, 0.02, 1)})
+
+
 def ground():
     m = material("M_RubbleGround")
     base = vector(m, "BaseColor", (0.07, 0.07, 0.075, 1.0), -900, -300)
@@ -938,6 +1053,7 @@ def main():
     instance("MI_Plastic", s, {"Roughness": 0.45, "Grit": 0.1}, {"BaseColor": (0.6, 0.6, 0.6, 1)})
     instance("MI_Interior", s, {"Roughness": 0.95, "Grit": 0.6}, {"BaseColor": (0.36, 0.34, 0.31, 1)})
     car_paint()
+    soft_car()
     g = ground()
     instance("MI_GroundYard", g, {"Roughness": 0.85}, {"BaseColor": (0.06, 0.06, 0.065, 1)})
     instance("MI_GroundHall", g, {"Roughness": 0.7}, {"BaseColor": (0.32, 0.32, 0.31, 1)})

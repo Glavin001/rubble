@@ -8,9 +8,13 @@
 
 namespace
 {
+	/** The mock's shells: paint, glass and trim sections. */
 	enum ESurface : int32 { SurfacePaint, SurfaceGlass, SurfaceTrim, SurfaceCount };
 
-	/** Which surface a car triangle is, by its rest position: glass in the greenhouse, trim low down. */
+	/** A pane that strains past this has shattered (car-render.mjs): it is no longer drawn. */
+	constexpr float GlassShatter = 0.06f;
+
+	/** Which surface a mock car triangle is, by its rest position: glass in the greenhouse, trim low down. */
 	ESurface SurfaceOf(const FVector3f& A, const FVector3f& B, const FVector3f& C, bool bCar)
 	{
 		if (!bCar)
@@ -78,7 +82,7 @@ void ARubbleSoftBodies::CreateSection(FBody& Body, int32 s, const TArray<uint32>
 	}
 	for (const int32 t : S.Triangles)
 	{
-		if (Body.Torn.IsValidIndex(t) && Body.Torn[t])
+		if ((Body.Torn.IsValidIndex(t) && Body.Torn[t]) || (Body.Shattered.IsValidIndex(t) && Body.Shattered[t]))
 		{
 			continue;
 		}
@@ -87,7 +91,7 @@ void ARubbleSoftBodies::CreateSection(FBody& Body, int32 s, const TArray<uint32>
 			S.Indices.Add(Local[Global[3 * t + k]]);
 		}
 	}
-	Body.Mesh->CreateMeshSection_LinearColor(s, S.Positions, S.Indices, S.Normals, S.UVs, S.Colors, S.Tangents, /*bCreateCollision=*/false);
+	Body.Mesh->CreateMeshSection_LinearColor(s, S.Positions, S.Indices, S.Normals, S.UVs, S.UV1s, {}, {}, S.Colors, S.Tangents, /*bCreateCollision=*/false);
 }
 
 void ARubbleSoftBodies::Rebuild(const FRubbleSceneAssets& Assets)
@@ -117,13 +121,19 @@ void ARubbleSoftBodies::Rebuild(const FRubbleSceneAssets& Assets)
 		Body.Mesh->RegisterComponent();
 		Body.Mesh->SetVisibility(false); // until its first skin
 		const bool bCar = M.Material == ERubbleMaterial::CarPaint;
-		Body.Sections.SetNum(SurfaceCount);
+		// The engine's car mesh carries its surfaces; the mock's shells are split by height.
+		Body.bEngineCar = M.CarSurfaces.Num() == M.NumTriangles() && M.NumTriangles() > 0;
+		const int32 NumSections = Body.bEngineCar ? int32(ERubbleCarSurface::Count) : int32(SurfaceCount);
+		Body.Sections.SetNum(NumSections);
+		Body.Shattered.Init(false, M.NumTriangles());
+		Body.bGlass.Init(false, M.NumTriangles());
 		TArray<TMap<int32, int32>> Seen;
-		Seen.SetNum(SurfaceCount);
+		Seen.SetNum(NumSections);
 		for (int32 t = 0; t < M.NumTriangles(); ++t)
 		{
 			const uint32 a = M.Indices[3 * t], b = M.Indices[3 * t + 1], c = M.Indices[3 * t + 2];
-			const ESurface Surf = SurfaceOf(M.Positions[a], M.Positions[b], M.Positions[c], bCar);
+			const int32 Surf = Body.bEngineCar ? int32(M.CarSurfaces[t]) : int32(SurfaceOf(M.Positions[a], M.Positions[b], M.Positions[c], bCar));
+			Body.bGlass[t] = Body.bEngineCar && Surf == int32(ERubbleCarSurface::Glass);
 			FSection& S = Body.Sections[Surf];
 			S.Triangles.Add(t);
 			for (const uint32 v : { a, b, c })
@@ -133,18 +143,41 @@ void ARubbleSoftBodies::Rebuild(const FRubbleSceneAssets& Assets)
 					Seen[Surf].Add(v, S.Vertices.Add(v));
 					S.Positions.Add(FVector(M.Positions[v]));
 					S.Normals.Add(FVector(M.Normals.IsValidIndex(v) ? M.Normals[v] : FVector3f::UpVector));
-					S.UVs.Add(FVector2D(M.UVs.IsValidIndex(v) ? M.UVs[v] : FVector2f::ZeroVector));
-					S.Colors.Add(FLinearColor::Black);
+					if (Body.bEngineCar)
+					{
+						// The rest position in metres (UV0 = x, y; UV1.x = z): the materials' damage
+						// patterns stay on the panel as it bends.
+						const FVector3f R = M.Positions[v] * 0.01f;
+						S.UVs.Add(FVector2D(R.X, R.Y));
+						S.UV1s.Add(FVector2D(R.Z, 0.0));
+					}
+					else
+					{
+						S.UVs.Add(FVector2D(M.UVs.IsValidIndex(v) ? M.UVs[v] : FVector2f::ZeroVector));
+					}
+					const float Seam = M.Seams.IsValidIndex(v) ? float(M.Seams[v]) : 0.0f;
+					S.Colors.Add(FLinearColor(0.0f, Body.bEngineCar ? Seam : 0.0f, 0.0f, 1.0f));
 				}
 			}
+			S.TriangleCorners.Append({ Seen[Surf][a], Seen[Surf][b], Seen[Surf][c] });
 		}
-		for (int32 s = 0; s < SurfaceCount; ++s)
+		for (int32 s = 0; s < NumSections; ++s)
 		{
 			CreateSection(Body, s, M.Indices);
 		}
-		Body.Mesh->SetMaterial(SurfacePaint, bCar ? static_cast<UMaterialInterface*>(RubbleRender::CarPaint(this, V.Paint)) : RubbleRender::Surface(M.Material));
-		Body.Mesh->SetMaterial(SurfaceGlass, RubbleRender::Surface(ERubbleMaterial::Glass));
-		Body.Mesh->SetMaterial(SurfaceTrim, RubbleRender::Surface(ERubbleMaterial::Rubber));
+		if (Body.bEngineCar)
+		{
+			for (int32 s = 0; s < NumSections; ++s)
+			{
+				Body.Mesh->SetMaterial(s, RubbleRender::SoftCarSurface(this, ERubbleCarSurface(s), V.Paint));
+			}
+		}
+		else
+		{
+			Body.Mesh->SetMaterial(SurfacePaint, bCar ? static_cast<UMaterialInterface*>(RubbleRender::CarPaint(this, V.Paint)) : RubbleRender::Surface(M.Material));
+			Body.Mesh->SetMaterial(SurfaceGlass, RubbleRender::Surface(ERubbleMaterial::Glass));
+			Body.Mesh->SetMaterial(SurfaceTrim, RubbleRender::Surface(ERubbleMaterial::Rubber));
+		}
 	}
 }
 
@@ -162,45 +195,62 @@ void ARubbleSoftBodies::OnFrame(const FRubbleFrame& Frame)
 			UE_LOG(LogRubble, Error, TEXT("soft body %d: skin has %d vertices, topology %d"), Skin.Soft, Skin.Positions.Num(), Body.NumVertices);
 			continue;
 		}
-		// A tear changes the index buffers: rebuild the sections it touched.
-		TBitArray<> TornSections(false, SurfaceCount);
-		if (Skin.TornTriangles.Num() == Body.Torn.Num())
+		// A tear, or a pane that shattered, changes the index buffers: rebuild the sections it touched.
+		const int32 NumSections = Body.Sections.Num();
+		TBitArray<> Rebuilt(false, NumSections);
+		const bool bFaces = Skin.FaceStrain.Num() == Body.Torn.Num();
+		for (int32 s = 0; s < NumSections; ++s)
 		{
-			for (int32 s = 0; s < SurfaceCount; ++s)
+			for (const int32 t : Body.Sections[s].Triangles)
 			{
-				for (const int32 t : Body.Sections[s].Triangles)
+				const bool bTorn = Skin.TornTriangles.IsValidIndex(t) && Skin.TornTriangles[t];
+				if (bTorn != Body.Torn[t])
 				{
-					if (Skin.TornTriangles[t] != Body.Torn[t])
-					{
-						TornSections[s] = true;
-						break;
-					}
+					Body.Torn[t] = bTorn;
+					Rebuilt[s] = true;
+				}
+				if (bFaces && Body.bGlass[t] && !Body.Shattered[t] && Skin.FaceStrain[t] > GlassShatter)
+				{
+					Body.Shattered[t] = true; // glass does not mend
+					Rebuilt[s] = true;
 				}
 			}
-			Body.Torn = Skin.TornTriangles;
 		}
-		for (int32 s = 0; s < SurfaceCount; ++s)
+		for (int32 s = 0; s < NumSections; ++s)
 		{
 			FSection& S = Body.Sections[s];
+			if (S.Vertices.Num() == 0)
+			{
+				continue;
+			}
+			// Colour R: the strain the materials shade by, the vertex's or, sharper, the largest of
+			// this surface's triangles around it (a glass crack, a crease in one panel).
 			for (int32 i = 0; i < S.Vertices.Num(); ++i)
 			{
 				const int32 v = S.Vertices[i];
 				S.Positions[i] = FVector(Skin.Positions[v]);
 				S.Normals[i] = FVector(Skin.Normals.IsValidIndex(v) ? Skin.Normals[v] : FVector3f::UpVector);
-				const float Strain = Skin.Strain.IsValidIndex(v) ? Skin.Strain[v] : 0.0f;
-				S.Colors[i] = FLinearColor(Strain, 0.0f, 0.0f, 1.0f);
+				S.Colors[i].R = Skin.Strain.IsValidIndex(v) ? FMath::Clamp(Skin.Strain[v], 0.0f, 1.0f) : 0.0f;
 			}
-			if (S.Vertices.Num() == 0)
+			if (bFaces)
 			{
-				continue;
+				for (int32 k = 0; k < S.Triangles.Num(); ++k)
+				{
+					const float F = FMath::Clamp(Skin.FaceStrain[S.Triangles[k]], 0.0f, 1.0f);
+					for (int32 c = 0; c < 3; ++c)
+					{
+						float& R = S.Colors[S.TriangleCorners[3 * k + c]].R;
+						R = FMath::Max(R, F);
+					}
+				}
 			}
-			if (TornSections[s])
+			if (Rebuilt[s])
 			{
 				CreateSection(Body, s, Topology[Skin.Soft]);
 			}
 			else
 			{
-				Body.Mesh->UpdateMeshSection_LinearColor(s, S.Positions, S.Normals, S.UVs, S.Colors, S.Tangents);
+				Body.Mesh->UpdateMeshSection_LinearColor(s, S.Positions, S.Normals, S.UVs, S.UV1s, {}, {}, S.Colors, S.Tangents, /*bSRGBConversion=*/false);
 			}
 		}
 		if (!Body.bShown)
@@ -233,4 +283,14 @@ int32 ARubbleSoftBodies::NumTopologyVertices(int32 Soft) const
 int32 ARubbleSoftBodies::NumTornTriangles(int32 Soft) const
 {
 	return Bodies.IsValidIndex(Soft) ? Bodies[Soft].Torn.CountSetBits() : 0;
+}
+
+int32 ARubbleSoftBodies::NumShatteredPanes(int32 Soft) const
+{
+	return Bodies.IsValidIndex(Soft) ? Bodies[Soft].Shattered.CountSetBits() : 0;
+}
+
+int32 ARubbleSoftBodies::NumSections(int32 Soft) const
+{
+	return Bodies.IsValidIndex(Soft) ? Bodies[Soft].Sections.Num() : 0;
 }

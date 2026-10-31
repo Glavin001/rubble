@@ -280,13 +280,12 @@ impl Coords {
         result
     }
 
-    /// Triangle winding for exported meshes.
+    /// Triangle winding for exported meshes: unchanged. Rubble's front faces wind
+    /// counter-clockwise ((b - a) x (c - a) points out); Unreal's axis map is a
+    /// mirror, which turns that into Unreal's own rule ((c - a) x (b - a) points
+    /// out) without reordering the corners.
     pub fn triangle_out(&self, t: [u32; 3]) -> [u32; 3] {
-        if self.unreal() {
-            [t[0], t[2], t[1]]
-        } else {
-            t
-        }
+        t
     }
 }
 
@@ -369,9 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn winding_flips_for_unreal() {
+    fn the_mirror_keeps_front_faces_front() {
+        // A Rubble triangle facing +Y (up): (b - a) x (c - a) = +Y.
+        let (a, b, d) = ([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
         let c = Coords::new(RbCoordinates::RB_COORDINATES_UNREAL);
-        assert_eq!(c.triangle_out([0, 1, 2]), [0, 2, 1]);
+        let t = c.triangle_out([0, 1, 2]);
+        let p = [a, b, d].map(|v| Vec3::from(c.position_out(v)));
+        let (a, b, d) = (p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]);
+        // Unreal's front: (c - a) x (b - a) points out, here up (+Z).
+        let n = (d - a).cross(b - a);
+        assert!(n.z > 0.0 && n.x.abs() < 1e-6 && n.y.abs() < 1e-6, "{n:?}");
     }
 
     #[test]

@@ -140,6 +140,42 @@ namespace RubbleRender
 		return MID;
 	}
 
+	UMaterialInterface* SoftCarSurface(UObject* Outer, ERubbleCarSurface Which, const FLinearColor& Paint)
+	{
+		if (Which == ERubbleCarSurface::Paint)
+		{
+			UMaterialInterface* Parent = HasGeneratedContent() ? LoadGenerated<UMaterialInterface>(TEXT("M_RubbleSoftCarPaint")) : nullptr;
+			if (!Parent)
+			{
+				return CarPaint(Outer, Paint);
+			}
+			UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(Parent, Outer);
+			MID->SetVectorParameterValue(TEXT("Paint"), Paint);
+			return MID;
+		}
+		static const TCHAR* Names[] = { nullptr, TEXT("M_RubbleSoftCarGlass"), TEXT("MI_SoftCarChrome"), TEXT("MI_SoftCarTrim"),
+			TEXT("MI_SoftCarHeadlight"), TEXT("MI_SoftCarTaillight"), TEXT("MI_SoftCarUnderbody"), TEXT("MI_SoftCarInterior"),
+			TEXT("MI_SoftCarEngine"), TEXT("MI_SoftCarGrille") };
+		static_assert(UE_ARRAY_COUNT(Names) == int32(ERubbleCarSurface::Count));
+		if (HasGeneratedContent())
+		{
+			if (UMaterialInterface* M = LoadGenerated<UMaterialInterface>(Names[int32(Which)]))
+			{
+				return M;
+			}
+		}
+		switch (Which)
+		{
+		case ERubbleCarSurface::Glass: return Surface(ERubbleMaterial::Glass);
+		case ERubbleCarSurface::Chrome:
+		case ERubbleCarSurface::Engine: return Surface(ERubbleMaterial::Steel);
+		case ERubbleCarSurface::Interior: return Surface(ERubbleMaterial::Interior);
+		case ERubbleCarSurface::Headlight:
+		case ERubbleCarSurface::Taillight: return Surface(ERubbleMaterial::Plastic);
+		default: return Surface(ERubbleMaterial::Rubber);
+		}
+	}
+
 	UMaterialInterface* Ground(ERubbleStage Stage)
 	{
 		if (HasGeneratedContent())

@@ -2,6 +2,7 @@
 
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/GameInstance.h"
+#include "Engine/World.h"
 #include "RubbleRender.h"
 #include "RubbleSubsystem.h"
 
@@ -75,6 +76,17 @@ void ARubbleEffects::EndPlay(const EEndPlayReason::Type Reason)
 
 void ARubbleEffects::OnScene(const FRubbleSceneAssets& Assets)
 {
+	Soft.Reset();
+	for (const FRubbleSoftVisual& V : Assets.SoftBodies)
+	{
+		FSoftState& S = Soft.AddDefaulted_GetRef();
+		if (Assets.Meshes.IsValidIndex(V.Mesh))
+		{
+			S.Indices = Assets.Meshes[V.Mesh].Indices;
+			S.Surfaces = Assets.Meshes[V.Mesh].CarSurfaces;
+		}
+		S.Paint = V.Paint;
+	}
 	// A new scene starts clean: every particle hidden now (Tick skips empty pools).
 	for (FPool& P : Pools)
 	{
@@ -169,11 +181,94 @@ void ARubbleEffects::Sparks(const FVector& At, const FVector& Normal, int32 Coun
 	}
 }
 
+void ARubbleEffects::SoftDamage(const FRubbleSoftSkin& Skin, float Dt)
+{
+	if (!Soft.IsValidIndex(Skin.Soft))
+	{
+		return;
+	}
+	FSoftState& S = Soft[Skin.Soft];
+	const int32 NumTris = S.Surfaces.Num();
+	if (NumTris == 0 || Skin.FaceStrain.Num() != NumTris || S.Indices.Num() != 3 * NumTris)
+	{
+		return; // not the engine's car mesh
+	}
+	const bool bFirst = S.PrevStrain.Num() != NumTris || S.PrevPositions.Num() != Skin.Positions.Num() || Dt <= 0.0f;
+	for (int32 t = 0; t < NumTris && !bFirst && SpawnedThisFrame < MaxSpawnPerFrame; ++t)
+	{
+		const float Cur = Skin.FaceStrain[t];
+		const float Prev = S.PrevStrain[t];
+		if (Prev < 0.0f || Cur == Prev)
+		{
+			continue; // torn already, or unchanged
+		}
+		const uint32 a = S.Indices[3 * t], b = S.Indices[3 * t + 1], c = S.Indices[3 * t + 2];
+		const FVector At = FVector(Skin.Positions[a] + Skin.Positions[b] + Skin.Positions[c]) / 3.0;
+		// The panel's own velocity: debris leaves with it.
+		const FVector Vel = FVector(Skin.Positions[a] - S.PrevPositions[a]) / Dt;
+		const ERubbleCarSurface Surf = ERubbleCarSurface(S.Surfaces[t]);
+		auto Throw = [&](EKind Kind, const FVector& V, float Life, const FVector& Scale, const FLinearColor& Color) {
+			FParticle& Q = Spawn(Kind);
+			Q.Pos = At;
+			Q.Vel = V;
+			Q.Life = Life;
+			Q.Scale = Scale;
+			Q.Color = Color;
+			Q.Rot = FQuat(Random.VRand(), Random.FRandRange(0.0f, UE_PI));
+			Q.AngVel = Random.VRand() * Random.FRandRange(4.0f, 18.0f);
+		};
+		if (Cur < 0.0f)
+		{
+			// Torn through: a chip of painted steel.
+			if (Surf == ERubbleCarSurface::Paint && Random.FRand() < 0.025f)
+			{
+				Throw(EKind::Chip, Vel * 0.85 + Random.VRand() * 120.0 + FVector(0, 0, 80), 6.0f,
+					FVector(Random.FRandRange(0.02f, 0.05f), Random.FRandRange(0.02f, 0.05f), 0.004f), S.Paint * Random.FRandRange(0.8f, 1.05f));
+			}
+			continue;
+		}
+		if (Surf == ERubbleCarSurface::Glass)
+		{
+			// The pane lets go: shards (it is no longer drawn).
+			if (Cur > 0.06f && Prev <= 0.06f)
+			{
+				for (int32 k = 0; k < 2; ++k)
+				{
+					Throw(EKind::Chip, Vel * 0.8 + Random.VRand() * 150.0 + FVector(0, 0, 60), Random.FRandRange(4.0f, 8.0f),
+						FVector(Random.FRandRange(0.01f, 0.035f), Random.FRandRange(0.01f, 0.035f), 0.003f), FLinearColor(0.55f, 0.68f, 0.72f));
+				}
+			}
+			continue;
+		}
+		const float Jump = Cur - Prev;
+		if ((Surf == ERubbleCarSurface::Paint || Surf == ERubbleCarSurface::Underbody) && Jump > 0.02f
+			&& Random.FRand() < FMath::Min(Jump * 1.2f, 0.08f))
+		{
+			// Metal scraping: a hot spark, thrown off the panel.
+			FParticle& Q = Spawn(EKind::Spark);
+			Q.Pos = At;
+			Q.Vel = Vel * 0.6 + Random.VRand() * Random.FRandRange(200.0f, 600.0f) + FVector(0, 0, 150);
+			Q.Life = Random.FRandRange(0.25f, 0.6f);
+			if (Random.FRand() < 0.04f)
+			{
+				DustPuffs(At, 1, 40.0f, 1.5f);
+			}
+		}
+	}
+	S.PrevStrain = Skin.FaceStrain;
+	S.PrevPositions = Skin.Positions;
+}
+
 void ARubbleEffects::OnFrame(const FRubbleFrame& Frame)
 {
 	if (!bEnabled)
 	{
 		return;
+	}
+	const float Dt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
+	for (const FRubbleSoftSkin& Skin : Frame.Skins)
+	{
+		SoftDamage(Skin, Dt);
 	}
 	for (const FRubbleEvent& E : Frame.Events)
 	{
@@ -197,13 +292,18 @@ void ARubbleEffects::OnFrame(const FRubbleFrame& Frame)
 			}
 			break;
 		case ERubbleEventType::BeamBroke:
+			// A beam of the car's frame snapped: a few sparks where it was.
 			Sparks(E.Position, E.Normal, 5);
-			Chips(E.Position, 2, ERubbleMaterial::CarPaint, 300.0f, 2.0f);
 			break;
 		case ERubbleEventType::PieceDetached:
-			Chips(E.Position + FVector(0, 0, 100), 40, ERubbleMaterial::Glass, 450.0f, 1.5f);
+		{
+			// A panel came away: flakes of its paint and a little road dust.
+			const FLinearColor Paint = Soft.IsValidIndex(E.Soft) ? Soft[E.Soft].Paint : FLinearColor::Transparent;
+			Chips(E.Position, 12, ERubbleMaterial::CarPaint, 250.0f, 1.5f, Paint);
+			Sparks(E.Position, FVector::UpVector, 10);
 			DustPuffs(E.Position, 3, 60.0f);
 			break;
+		}
 		case ERubbleEventType::JointBroke:
 			Sparks(E.Position, FVector::UpVector, 14);
 			Chips(E.Position, 6, ERubbleMaterial::Steel, 400.0f, 2.0f);

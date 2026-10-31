@@ -102,9 +102,6 @@ private:
 		TArray<float> WheelRadius;
 		TArray<float> Spin;
 		TArray<FVector> LastHub;
-		TArray<TArray<int32>> Neighbours; // per skin vertex
-		TArray<TArray<float>> RestLength;
-		TArray<uint32> Triangles;
 	};
 	TArray<FSoftCar> SoftCars;
 	TMap<uint32, int32> SoftCarOfSkin;
