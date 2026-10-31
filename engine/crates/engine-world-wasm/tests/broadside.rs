@@ -392,3 +392,16 @@ fn the_raze() {
     let whole = loose[0].2;
     assert!(whole >= 0.9, "the whole ship: {:.0}% loose", 100.0 * whole);
 }
+
+#[test]
+#[ignore]
+fn world_bounds() {
+    let mut b = Broadside::with_take(GpuContext::Default, GLB, 2, Take::Raze).unwrap();
+    b.step().unwrap();
+    b.poll_blocking().unwrap();
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for t in b.chunk_poses() {
+        for k in 0..3 { lo[k] = lo[k].min(t.position[k]); hi[k] = hi[k].max(t.position[k]); }
+    }
+    eprintln!("BOUNDS {lo:?} {hi:?}");
+}

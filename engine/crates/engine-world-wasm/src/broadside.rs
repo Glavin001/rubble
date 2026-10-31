@@ -340,7 +340,12 @@ fn capacity(asset: &DestructibleAssetDesc, crush_budget: u32) -> anyhow::Result<
     // Every chunk may become a body, plus the crush splinters, the balls and the captain.
     let bodies = chunks as u32 + crush_budget + MAX_BALLS as u32 + 64;
     c.max_bodies = c.max_bodies.max(bodies.next_power_of_two());
-    c.max_contacts = stress_rubble::threshold::contact_capacity(chunks, c.max_contacts, 1 << 30);
+    // Contacts for every body the take may have: the wreck piles up on the ground.
+    c.max_contacts = stress_rubble::threshold::contact_capacity(
+        chunks + crush_budget as usize + MAX_BALLS,
+        c.max_contacts,
+        1 << 30,
+    );
     c.max_candidates = c.max_candidates.max(c.max_contacts);
     Ok(c)
 }
@@ -392,6 +397,13 @@ impl Broadside {
             crush: Some(crush(take.crush_budget())),
             ..DestructibleDef::new(a)
         })?;
+        // The ground the wreck falls on: a static slab, its top at y 0 under the keel
+        // (the drawn ground; the ship stands only by its anchored keel).
+        let ground = world.create_body(&BodyDef {
+            position: [11.0, -5.0, 0.0],
+            ..BodyDef::default()
+        })?;
+        world.create_box_shape(ground, &ShapeDef::default(), [200.0, 5.0, 200.0])?;
         let chunks = asset.chunks.len() as u32;
         // Render bodies: the ground (0), then one per chunk in order (from_glb's order).
         let f = |v: [f64; 3]| v.map(|x| x as f32);
@@ -1003,7 +1015,7 @@ impl Director {
     /// pulling out wide for the closing volley.
     fn raze_shot(b: &Broadside) -> (glam::Vec3, glam::Vec3) {
         let t = b.seconds();
-        let centre = glam::Vec3::new(11.0, 3.5, 0.0);
+        let centre = glam::Vec3::new(11.0, 2.5, 0.0);
         let (radius, height) = match b.finale {
             Some(_) => (27.0, 11.0),
             None => (19.0 + 0.1 * t, 5.0 + 0.12 * t),
