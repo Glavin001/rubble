@@ -48,6 +48,11 @@ void ARubbleEffects::BeginPlay()
 		P.Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		P.Component->NumCustomDataFloats = 4; // rgb tint (chips), opacity or glow in 3
 		P.Component->SetCastShadow(k == int32(EKind::Chip));
+		// Thousands of instances move every frame: kept out of the global distance field (Lumen),
+		// whose update otherwise grows with every moved instance in every view (a film's five
+		// cameras stalled on it). Too small to matter to its lighting.
+		P.Component->bAffectDistanceFieldLighting = false;
+		P.Component->bAffectDynamicIndirectLighting = false;
 		P.Component->SetupAttachment(RootComponent);
 		P.Component->RegisterComponent();
 		P.Particles.SetNum(Capacity[k]);
