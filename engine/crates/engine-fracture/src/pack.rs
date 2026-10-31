@@ -44,6 +44,10 @@ pub struct PackInfo {
     pub nodes: usize,
     pub supports: usize,
     pub bonds: usize,
+    /// Each node's frame in the scene (the footprint shift applied; axes the scene's): where
+    /// its collider's points are. Its body's pose is the frame for a box, but a hull's body sits
+    /// at its centre of mass on its principal axes.
+    pub node_frames: Vec<V3>,
 }
 
 /// A shot a pack authors (`defaults.shots`, written by
@@ -132,6 +136,16 @@ fn shade(base: [f64; 3], i: usize) -> [f64; 3] {
     base.map(|c| (c * k).min(1.0))
 }
 
+/// A `#rrggbb` colour as linear-ish [0, 1] channels (as the key colours are given).
+fn hex_color(v: &Value) -> Option<[f64; 3]> {
+    let h = v.as_str()?.strip_prefix('#')?;
+    if h.len() != 6 {
+        return None;
+    }
+    let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok().map(|x| x as f64 / 255.0);
+    Some([c(0)?, c(2)?, c(4)?])
+}
+
 fn base_color(key: &str) -> [f64; 3] {
     let k = key.to_ascii_lowercase();
     if k.contains("brick") {
@@ -164,6 +178,7 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         .ok_or_else(|| anyhow!("pack has no scenario.bonds"))?;
     let sizes = sc["nodeSizes"].as_array();
     let colliders = sc["nodeColliders"].as_array();
+    let library = sc["shapeLibrary"].as_array();
     let meshes = json["nodeMeshes"].as_array();
     let key = json["key"].as_str().unwrap_or("pack").to_string();
     let limits = &json["defaults"]["solver"]["limits"];
@@ -173,6 +188,23 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         limit("compressionFatal"),
         limit("shearFatal"),
     );
+    // ScenePack v2 gives the limits per material (`defaults.solver.materials[m]`, a bond's
+    // `m`); a pack-wide `limits` block, when present, still applies to every bond.
+    let materials = json["defaults"]["solver"]["materials"].as_array();
+    let bond_limits = |b: &Value| -> (f64, f64, f64) {
+        if !limits.is_null() {
+            return (l_tension, l_compression, l_shear);
+        }
+        let m = b["m"].as_u64().and_then(|m| materials.and_then(|ms| ms.get(m as usize)));
+        match m {
+            Some(m) => (
+                f(m, "tensionFatal").unwrap_or(f64::INFINITY),
+                f(m, "compressionFatal").unwrap_or(f64::INFINITY),
+                f(m, "shearFatal").unwrap_or(f64::INFINITY),
+            ),
+            None => (l_tension, l_compression, l_shear),
+        }
+    };
     let color = base_color(&key);
 
     let centroid: Vec<V3> = nodes
@@ -222,11 +254,17 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         let support = mass.is_nan() || mass <= 0.0;
         let half = half_of(i);
         let at = add(centroid[i], shift);
+        info.node_frames.push(at);
         let id = bodies.len() as u32;
+        // A node's material colour where the pack gives one, else the pack's key colour.
+        let own = nodes[i]["m"]
+            .as_u64()
+            .and_then(|m| materials.and_then(|ms| ms.get(m as usize)))
+            .and_then(|m| hex_color(&m["color"]));
         let tint = if support {
             SUPPORT_COLOR
         } else {
-            shade(color, i)
+            shade(own.unwrap_or(color), i)
         };
         let collider = colliders.and_then(|c| c.get(i));
         let kind = collider.and_then(|c| c["kind"].as_str()).unwrap_or("");
@@ -266,12 +304,33 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
             });
             (point_list(&p["points"]), faces)
         };
+        // A `shape` collider names an entry of `scenario.shapeLibrary` (shared by many nodes,
+        // in each node's frame): that entry's hull or compound. An unknown kind is an error, never
+        // the node's box.
+        let parts_of = |c: &Value| -> Vec<(Vec<Vec3>, Option<(Vec<u32>, Vec<u32>)>)> {
+            match c["kind"].as_str().unwrap_or("") {
+                "compound" => c["parts"]
+                    .as_array()
+                    .map_or(vec![], |parts| parts.iter().map(part_of).collect()),
+                _ => vec![part_of(c)],
+            }
+        };
         let part_data: Vec<(Vec<Vec3>, Option<(Vec<u32>, Vec<u32>)>)> = match (kind, collider) {
-            ("convex_hull", Some(c)) => vec![part_of(c)],
-            ("compound", Some(c)) => c["parts"]
-                .as_array()
-                .map_or(vec![], |parts| parts.iter().map(part_of).collect()),
-            _ => vec![],
+            ("convex_hull" | "compound", Some(c)) => parts_of(c),
+            ("shape", Some(c)) => {
+                let k = c["shape"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("node {i}: shape collider without a shape index"))?;
+                let entry = library
+                    .and_then(|l| l.get(k as usize))
+                    .ok_or_else(|| anyhow!("node {i}: shape {k} is not in scenario.shapeLibrary"))?;
+                match entry["kind"].as_str().unwrap_or("convex_hull") {
+                    "convex_hull" | "compound" => parts_of(entry),
+                    other => bail!("node {i}: shapeLibrary[{k}] has kind '{other}'"),
+                }
+            }
+            ("cuboid", _) | ("", None) => vec![],
+            (other, _) => bail!("node {i}: collider kind '{other}' is not supported"),
         };
         let parts: Vec<ConvexHull> = part_data
             .iter()
@@ -503,6 +562,7 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         let mut n = norm(v3(&b["normal"])?);
         let c = add(v3(&b["centroid"])?, shift);
         let area = f(b, "area").unwrap_or(0.0).max(1e-8);
+        let (l_tension, l_compression, l_shear) = bond_limits(b);
         let (mut a, mut o) = (i0, i1);
         if map[a].support {
             if map[o].support {

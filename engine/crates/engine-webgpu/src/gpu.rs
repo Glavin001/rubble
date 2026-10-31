@@ -2528,6 +2528,7 @@ impl WgpuSim {
             guidance: self.guidance_active(),
             guide_slots: self.guide.as_ref().map_or(0, |g| g.cap.plan_budget),
             explosion_count: self.explosion_count,
+            post_stabilize: self.params.flags & engine_schema::FLAG_POST_STAB != 0,
         }
     }
 

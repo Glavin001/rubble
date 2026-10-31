@@ -121,6 +121,9 @@ pub struct StepInputs {
     pub soil: bool,
     /// Queued explosions (`explode` runs after the commands when non-zero).
     pub explosion_count: u32,
+    /// `FLAG_POST_STAB`: record the velocity after the iterations, then one
+    /// primal pass with α = 0 (pass `STAB_PASS + colour`).
+    pub post_stabilize: bool,
 }
 
 /// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
@@ -656,6 +659,16 @@ pub fn encode_step(
         }
         e.phase("dual");
     }
+    if i.post_stabilize {
+        e.d("record_stab_velocity", n_bodies);
+        for color in 0..max_c.min(sparse_start) {
+            e.wp(primal, color, STAB_PASS + color);
+        }
+        if sparse_start < max_c {
+            e.dp(sparse, 64, STAB_PASS + sparse_start);
+        }
+        e.phase("stabilize");
+    }
     if soft {
         // Plasticity and breaking at the converged state, then detacher groups.
         e.d("soft_plastic", u64::from(i.soft.beams.max(1)));
@@ -814,6 +827,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "solve_primal_color_persistent",
     "solve_primal_sparse_persistent",
     "solve_dual_persistent",
+    "record_stab_velocity",
     "extract_velocity_sleep",
     "write_sleep_args",
     "sleep_island_gate",
@@ -966,6 +980,10 @@ pub fn pair_warm_key(a: u32, b: u32) -> u32 {
 pub const BIND_COUNT: usize = 34;
 /// Pass-uniform slot stride (binding 22, dynamic offsets).
 pub const PASS_ALIGN: u64 = 256;
+/// Pass-uniform slots (binding 22): see [`pass_table`].
+pub const PASS_SLOTS: u64 = 160;
+/// First post-stabilization slot: `STAB_PASS + c` holds `256 | c` (colour c at α = 0).
+pub const STAB_PASS: u32 = 96;
 
 /// `gConstraintIds` words before the CSR index (grid heads, warm hash, ids).
 pub fn constraint_id_words(c: &WorldCapacity) -> u32 {
@@ -1040,7 +1058,7 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     // Scratch: host-reset words 0..63, uniform-grid large list 64..79, the
     // oversized-static count (80), then the event ring and the static list.
     s[21] = u64::from(engine_schema::SCRATCH_WORDS) * 4;
-    s[22] = 96 * PASS_ALIGN;
+    s[22] = PASS_SLOTS * PASS_ALIGN;
     // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
     // contacts 73), convex 74..76.
     s[23] = b(c.max_colors.max(77) * 3, 4);
@@ -1066,15 +1084,18 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
 }
 
 /// Pass uniform table (binding 22): slot i holds i below 48, block-scan
-/// constants at 48..67, zero above.
+/// constants at 48..67, zero to 95, and `256 | colour` from [`STAB_PASS`] (the
+/// post-stabilization primal pass).
 pub fn pass_table() -> Vec<u8> {
-    let mut pass = vec![0u8; (96 * PASS_ALIGN) as usize];
-    for i in 0..96u32 {
+    let mut pass = vec![0u8; (PASS_SLOTS * PASS_ALIGN) as usize];
+    for i in 0..PASS_SLOTS as u32 {
         let v = if i < 48 {
             i
         } else if i < 68 {
             let k = i - 48;
             (1u32 << k) | ((k & 1) << 31)
+        } else if i >= STAB_PASS {
+            256 | (i - STAB_PASS)
         } else {
             0
         };
@@ -1215,6 +1236,7 @@ mod tests {
             guide_slots: 0,
             soil: false,
             explosion_count: 0,
+            post_stabilize: false,
         }
     }
 

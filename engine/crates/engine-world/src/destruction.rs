@@ -44,6 +44,9 @@ pub struct ChunkDesc {
     pub fragment: Option<u32>,
     /// The glTF node that renders this chunk, if any.
     pub node: Option<u32>,
+    /// For a pack chunk: its node's frame in the asset frame (the frame its pack collider's
+    /// points and half extents are in; `pose` is its centre of mass and principal axes).
+    pub node_frame: Option<Transform>,
 }
 
 /// One bond between two chunks, or between a chunk and the world.
@@ -171,6 +174,21 @@ impl DestructibleAssetDesc {
     pub fn from_pack(bytes: &[u8]) -> anyhow::Result<Self> {
         let (scene, info) = engine_fracture::pack::build_pack_scene(bytes)?;
         let mut desc = Self::from_scene(&scene)?;
+        // One body per pack node, in order (build_pack_scene), so chunk k is node k: hosts
+        // read each chunk's collider and material from the pack (rbDestructible_GetChunkNode).
+        anyhow::ensure!(
+            desc.chunks.len() == info.nodes,
+            "pack {}: {} chunks for {} nodes",
+            info.key,
+            desc.chunks.len(),
+            info.nodes
+        );
+        anyhow::ensure!(info.node_frames.len() == info.nodes, "pack {}: node frames", info.key);
+        for (k, c) in desc.chunks.iter_mut().enumerate() {
+            c.node = Some(k as u32);
+            let f = info.node_frames[k];
+            c.node_frame = Some(Transform::new([f[0] as f32, f[1] as f32, f[2] as f32], [0.0, 0.0, 0.0, 1.0]));
+        }
         #[cfg(feature = "stress")]
         {
             desc.stress = Some(crate::StressSource::from_pack(
@@ -239,6 +257,7 @@ impl DestructibleAssetDesc {
                     shapes: Vec::new(),
                     fragment: None,
                     node: None,
+                    node_frame: None,
                 }
             })
             .collect();
@@ -823,8 +842,11 @@ impl World {
                 }
             };
             let s = def.strength_scale;
+            // The bond's penalties run normal, u, v, about u, about v, about normal; the D6
+            // bond rows normal, u, v, about normal, about u, about v (as the lab's planner).
+            let p = bond.stiffness;
             let spec = BondSpec {
-                k: bond.stiffness,
+                k: [p[0], p[1], p[2], p[5], p[3], p[4]],
                 strength: bond.strength.map(|x| x * s),
             };
             let desc = JointDesc::bond(
@@ -978,6 +1000,31 @@ impl World {
             .get(chunk as usize)
             .ok_or_else(|| anyhow::anyhow!("chunk {chunk} out of range"))?
             .node)
+    }
+
+    /// A chunk's pose in its body's frame: its centre of mass and principal axes in the asset
+    /// (every chunk body's origin is the destructible's frame). A host drawing a pack node's
+    /// collider draws it at body transform × [`Self::destructible_chunk_node_frame`] instead:
+    /// a hull's points are in its node's frame, not this one.
+    /// The frame a pack chunk's node is drawn in, in its body's frame: the frame its pack
+    /// collider's points (or a box's centre and axes) are given in. A chunk not from a pack
+    /// has none: its pose.
+    pub fn destructible_chunk_node_frame(&self, id: DestructibleId, chunk: u32) -> anyhow::Result<Transform> {
+        let d = &self.destructibles[self.live_destructible(id)?];
+        let c = self.assets[d.asset as usize]
+            .chunks
+            .get(chunk as usize)
+            .ok_or_else(|| anyhow::anyhow!("chunk {chunk} out of range"))?;
+        Ok(c.node_frame.unwrap_or(c.pose))
+    }
+
+    pub fn destructible_chunk_pose(&self, id: DestructibleId, chunk: u32) -> anyhow::Result<Transform> {
+        let d = &self.destructibles[self.live_destructible(id)?];
+        Ok(self.assets[d.asset as usize]
+            .chunks
+            .get(chunk as usize)
+            .ok_or_else(|| anyhow::anyhow!("chunk {chunk} out of range"))?
+            .pose)
     }
 
     /// The actor (connected chunks) a chunk is part of now.

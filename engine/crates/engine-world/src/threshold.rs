@@ -197,9 +197,11 @@ mod imp {
         /// A scene pack as the lab's stress modes import it (the stress profiles' import
         /// options).
         pub(crate) fn from_pack(bytes: &[u8], key: &str, placement: [f64; 3]) -> Self {
-            let scene = serde_json::from_slice(bytes)
+            let mut node_count = 0;
+            let scene = serde_json::from_slice::<serde_json::Value>(bytes)
                 .map_err(|e| format!("scene pack: {e}"))
                 .and_then(|json| {
+                    node_count = json["scenario"]["nodes"].as_array().map_or(0, |n| n.len());
                     stress_ref::scene_pack::import_value_with(
                         &json,
                         key,
@@ -209,10 +211,12 @@ mod imp {
                     )
                 })
                 .map(|(scene, _notes)| scene);
+            // The importer makes one chunk per pack node, in order; the ground anchors it
+            // adds follow them.
             Self {
                 scene: Arc::new(scene),
                 placement,
-                nodes: Vec::new(),
+                nodes: (0..node_count as u32).map(Some).collect(),
             }
         }
 
@@ -1146,6 +1150,14 @@ mod imp {
                     };
                 }
             }
+            // The ingest merges two records a contact row in 64-thread groups, one dispatch
+            // dimension (WebGPU's 65,535 groups).
+            anyhow::ensure!(
+                capacity.max_contacts as u64 * 2 <= 65_535 * 64,
+                "a threshold destructible needs max_contacts <= {} (the contact ingest's dispatch), not {}",
+                65_535 * 32,
+                capacity.max_contacts
+            );
             for c in crush_slot.iter().flat_map(|c| &c.pool) {
                 table[c.2 as usize] = ColliderInfo {
                     a: [NONE, c.0, KIND_BODY, 0],

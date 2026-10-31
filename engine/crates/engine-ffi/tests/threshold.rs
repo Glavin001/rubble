@@ -148,7 +148,9 @@ unsafe fn run(
                         "the children partition the parent"
                     );
                     for c in children {
+                        // A body for every chunk (RbActor's contract), the piece's for each.
                         let bodies = std::slice::from_raw_parts(c.bodies, c.chunk_count as usize);
+                        assert!(bodies.iter().all(|&b| b == bodies[0] && b != 0), "one live body per chunk: {bodies:?}");
                         let mut t = RbTransform::default();
                         ok(rbBody_GetTransform(w, bodies[0], &mut t));
                         assert!(t.p.x.is_finite() && t.p.z.is_finite());

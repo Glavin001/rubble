@@ -22,6 +22,25 @@ pub enum BodyType {
     Dynamic,
 }
 
+/// Which of a body's moves a frame reports ([`World::set_body_move_reports`]). A host that
+/// draws the body from the exported GPU poses ([`World::export_poses`]) needs only its sleep
+/// and wake changes, so the moves stay O(events) on the CPU. The simulation is the same either
+/// way: this filters what [`Frame`] carries, nothing else.
+///
+/// [`World::set_body_move_reports`]: crate::World::set_body_move_reports
+/// [`World::export_poses`]: crate::World::export_poses
+/// [`Frame`]: crate::Frame
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MoveReports {
+    /// Every step it moves (the default).
+    #[default]
+    All,
+    /// Only the steps it falls asleep, wakes, or is first reported.
+    SleepWake,
+    /// Never.
+    None,
+}
+
 /// Axes a body may not translate along or rotate about (not yet supported).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MotionLocks {
