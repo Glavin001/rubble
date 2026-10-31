@@ -43,6 +43,23 @@ pub mod part {
     pub const ROOF: u8 = 11;
 }
 
+/// The procedural car's part name ([`crate::procedural::car_desc`]) for each
+/// visual part id ([`part`]): the mesh a part binds to. The interior rides the body.
+pub const PART_NAMES: [&str; 12] = [
+    "body",
+    "bonnet",
+    "boot",
+    "door_fl",
+    "door_rl",
+    "door_fr",
+    "door_rr",
+    "bumper_front",
+    "bumper_rear",
+    "body",
+    "engine",
+    "roof",
+];
+
 #[derive(Clone, Debug, Default)]
 pub struct VisualMesh {
     /// Rest positions (desc space).
@@ -754,4 +771,17 @@ mod tests {
             assert!(n.dot((a + b + d) / 3.0 - c) > 0.0, "{a} {b} {d} n {n}");
         }
     }
+}
+
+/// The procedural car's render mesh for `p` (the softbody page's hatchback) and
+/// the desc's rest node positions it is bound to. Shared by the web and C ABI exports.
+pub fn procedural_car_visual(p: &CarParams) -> (VisualMesh, Vec<Vec3>) {
+    let (text, layout) = crate::procedural::car_truck_layout(p);
+    let d = crate::truck::load_truck(&text);
+    let nodes: Vec<Vec3> = d
+        .nodes
+        .iter()
+        .map(|n| Vec3::from_array(n.position))
+        .collect();
+    (car_visual(p, &layout, &nodes), nodes)
 }

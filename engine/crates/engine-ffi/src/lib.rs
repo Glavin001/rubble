@@ -20,6 +20,7 @@
 
 mod controls;
 pub use controls::*;
+use controls::text;
 mod terrain;
 pub use terrain::*;
 pub mod coords;
@@ -444,8 +445,13 @@ pub struct RbDestructionEvent {
     pub children: *const RbActor,
     pub child_count: u32,
     pub assembly: u64,
-    /// The connection's name (UTF-8, NUL-terminated).
+    /// The connection's name (UTF-8, NUL-terminated). A soft piece: the names
+    /// of the parts it carries away, comma-separated (`door_fl`, `bumper_front`).
     pub name: *const c_char,
+    /// Where it happened, when `has_point`: a soft beam's midpoint or a soft
+    /// piece's centre, from the frame's node output (`rbSoft_EnableOutput`).
+    pub point: RbVec3,
+    pub has_point: bool,
 }
 
 #[repr(C)]
@@ -511,6 +517,14 @@ pub struct RbSkinOutput {
     pub positions: *const RbVec3,
     pub normals: *const RbVec3,
     pub vertex_count: u32,
+    /// Per vertex: 1 when its frame tore (stretched past 1.8× rest).
+    pub torn: *const u8,
+    /// Per vertex: the largest crumple strain of the triangles around it.
+    pub strain: *const f32,
+    /// Per triangle, in the order bound: crumple strain against the rest
+    /// triangle, −1 when torn.
+    pub face_strain: *const f32,
+    pub triangle_count: u32,
 }
 
 /// Two shapes started touching (`RbFrame::contact_begin`, and `hits`).
@@ -688,6 +702,30 @@ impl RbFrame {
     }
 }
 
+/// The mean of a soft body's `nodes` (relative indices) in the frame's node
+/// output, when the body reports its nodes (`rbSoft_EnableOutput`).
+fn soft_point(soft: &[SoftOutput], body: u32, nodes: &[u32]) -> Option<[f32; 3]> {
+    let o = soft.iter().find(|o| o.soft.0 == body)?;
+    let mut sum = glam::Vec3::ZERO;
+    let mut n = 0;
+    for &i in nodes {
+        if let Some(p) = o.nodes.get(i as usize) {
+            sum += glam::Vec3::from(*p);
+            n += 1;
+        }
+    }
+    (n > 0).then(|| (sum / n as f32).to_array())
+}
+
+/// Backing for one skin's output arrays.
+struct SkinData {
+    positions: Vec<RbVec3>,
+    normals: Vec<RbVec3>,
+    torn: Vec<u8>,
+    strain: Vec<f32>,
+    face_strain: Vec<f32>,
+}
+
 /// Backing storage for the last polled frame.
 #[derive(Default)]
 struct FrameStore {
@@ -699,7 +737,7 @@ struct FrameStore {
     soft: Vec<RbSoftOutput>,
     soft_nodes: Vec<Vec<RbVec3>>,
     skins: Vec<RbSkinOutput>,
-    skin_data: Vec<(Vec<RbVec3>, Vec<RbVec3>)>,
+    skin_data: Vec<SkinData>,
     rays: Vec<RbRayBatchResult>,
     ray_hits: Vec<Vec<RbRayHit>>,
     contact_begin: Vec<RbContactBeginEvent>,
@@ -951,6 +989,8 @@ impl RbWorld {
                 child_count: 0,
                 assembly: 0,
                 name: std::ptr::null(),
+                point: RbVec3::default(),
+                has_point: false,
             };
             match e {
                 DestructionEvent::JointBroke {
@@ -977,6 +1017,18 @@ impl RbWorld {
                     ev.soft = b.soft_body;
                     ev.index = b.beam;
                     ev.force = coords.length_out(b.force);
+                    let sim = self.world.sim();
+                    let ends = sim
+                        .has_soft()
+                        .then(|| sim.soft_host().entries.get(b.soft_body as usize))
+                        .flatten()
+                        .and_then(|e| e.beam_ends.get(b.beam.wrapping_sub(e.first_beam) as usize));
+                    if let Some(&(a, z)) = ends {
+                        if let Some(p) = soft_point(&c.soft, b.soft_body, &[a, z]) {
+                            ev.point = RbVec3::of(coords.position_out(p));
+                            ev.has_point = true;
+                        }
+                    }
                 }
                 DestructionEvent::PieceDetached(p) => {
                     ev.type_ = RbDestructionType::RB_PIECE_DETACHED;
@@ -984,6 +1036,13 @@ impl RbWorld {
                     ev.mass = p.mass;
                     s.piece_nodes.push(p.nodes.clone());
                     ev.node_count = p.nodes.len() as u32;
+                    if let Some(at) = soft_point(&c.soft, p.soft_body.0, &p.nodes) {
+                        ev.point = RbVec3::of(coords.position_out(at));
+                        ev.has_point = true;
+                    }
+                    let name = CString::new(p.parts.join(",").replace('\0', " ")).unwrap_or_default();
+                    ev.name = name.as_ptr();
+                    s.names.push(name);
                 }
                 DestructionEvent::ConnectionBroke {
                     assembly,
@@ -1133,12 +1192,25 @@ impl RbWorld {
                 positions: std::ptr::null(),
                 normals: std::ptr::null(),
                 vertex_count: p.len() as u32,
+                torn: std::ptr::null(),
+                strain: std::ptr::null(),
+                face_strain: std::ptr::null(),
+                triangle_count: o.face_strain.len() as u32,
             });
-            s.skin_data.push((p, n));
+            s.skin_data.push(SkinData {
+                positions: p,
+                normals: n,
+                torn: o.torn.iter().map(|&t| u8::from(t)).collect(),
+                strain: o.strain.clone(),
+                face_strain: o.face_strain.clone(),
+            });
         }
-        for (out, (p, n)) in s.skins.iter_mut().zip(&s.skin_data) {
-            out.positions = p.as_ptr();
-            out.normals = n.as_ptr();
+        for (out, d) in s.skins.iter_mut().zip(&s.skin_data) {
+            out.positions = d.positions.as_ptr();
+            out.normals = d.normals.as_ptr();
+            out.torn = d.torn.as_ptr();
+            out.strain = d.strain.as_ptr();
+            out.face_strain = d.face_strain.as_ptr();
         }
         for r in &c.ray_results {
             let hits: Vec<RbRayHit> = r
@@ -2763,9 +2835,11 @@ pub unsafe extern "C" fn rbSoft_EnableOutput(
     })
 }
 
-/// Skin a render mesh (world coordinates at spawn) onto a soft body; every
-/// frame then carries its deformed vertices and normals. Triangles are index
-/// triples in the host's winding.
+/// Skin a render mesh onto a soft body; every frame then carries its deformed
+/// vertices and normals, and the damage the skinning measured. Vertices are in
+/// the vehicle's own frame (the descriptor's node coordinates, in the host's
+/// units and axes), not the world. Triangles are index triples in the host's
+/// winding.
 #[no_mangle]
 pub unsafe extern "C" fn rbSoft_BindSkin(
     world: *mut RbWorld,
@@ -2795,4 +2869,151 @@ pub unsafe extern "C" fn rbSoft_BindSkin(
             .soft_bind_skin(SoftHandle(soft), &verts, &tris, None)?;
         write(out, skin.0)
     })
+}
+
+/// [`rbSoft_BindSkin`] with a part per vertex: vertex `v` binds only to the
+/// nodes of the descriptor part named `part_names[vertex_parts[v]]`, so a door's
+/// mesh follows the door and leaves with it when it tears off.
+#[no_mangle]
+pub unsafe extern "C" fn rbSoft_BindSkinParts(
+    world: *mut RbWorld,
+    soft: RbSoftId,
+    vertices: *const RbVec3,
+    vertex_count: u32,
+    triangles: *const u32,
+    triangle_count: u32,
+    vertex_parts: *const u8,
+    part_names: *const *const c_char,
+    part_count: u32,
+    out: *mut RbSkinId,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        if vertices.is_null() || triangles.is_null() || vertex_parts.is_null() || part_names.is_null() {
+            return Err(invalid("null mesh or parts"));
+        }
+        let verts: Vec<[f32; 3]> = std::slice::from_raw_parts(vertices, vertex_count as usize)
+            .iter()
+            .map(|v| w.coords.position_in(v.a()))
+            .collect();
+        let tris: Vec<[u32; 3]> =
+            std::slice::from_raw_parts(triangles, triangle_count as usize * 3)
+                .chunks_exact(3)
+                .map(|t| w.coords.triangle_out([t[0], t[1], t[2]]))
+                .collect();
+        let parts = std::slice::from_raw_parts(vertex_parts, vertex_count as usize);
+        let names: Vec<String> = std::slice::from_raw_parts(part_names, part_count as usize)
+            .iter()
+            .map(|&n| text(n, "null part name").map(|t| t.into_owned()))
+            .collect::<anyhow::Result<_>>()?;
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let skin = w
+            .world
+            .soft_bind_skin_parts(SoftHandle(soft), &verts, &tris, parts, &names)?;
+        write(out, skin.0)
+    })
+}
+
+/// A built-in soft vehicle's render mesh (`rbCreateSoftCarVisual`): the
+/// softbody page's detailed car, in the vehicle's own frame and the host's
+/// units, axes and winding. Bind it with `rbSoft_BindSkinParts(vertices,
+/// triangles, vertex_parts, part_names)`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbSoftVisual {
+    pub vertices: *const RbVec3,
+    pub vertex_count: u32,
+    /// Index triples.
+    pub triangles: *const u32,
+    pub triangle_count: u32,
+    /// Per triangle: 0 paint, 1 glass, 2 chrome, 3 trim, 4 headlight,
+    /// 5 taillight, 6 underbody, 7 interior, 8 engine, 9 grille.
+    pub triangle_materials: *const u8,
+    /// Per vertex: an index into `part_names`.
+    pub vertex_parts: *const u8,
+    /// Per vertex: 1 on a seam between two parts (panel gaps).
+    pub vertex_seams: *const u8,
+    /// The descriptor part each part index binds to (UTF-8).
+    pub part_names: *const *const c_char,
+    pub part_count: u32,
+}
+
+/// `repr(C)`: `out` comes first, so a pointer to it is a pointer to the store.
+#[repr(C)]
+struct SoftVisualStore {
+    out: RbSoftVisual,
+    _vertices: Vec<RbVec3>,
+    _triangles: Vec<u32>,
+    _materials: Vec<u8>,
+    _parts: Vec<u8>,
+    _seams: Vec<u8>,
+    _names: Vec<CString>,
+    _name_ptrs: Vec<*const c_char>,
+}
+
+/// The render mesh of `"procedural_car"` (its node layout does not depend on
+/// the preset's `strength`). Free it with `rbSoftVisual_Destroy`.
+#[no_mangle]
+pub unsafe extern "C" fn rbCreateSoftCarVisual(
+    preset: *const c_char,
+    coordinates: RbCoordinates,
+    out: *mut *const RbSoftVisual,
+) -> RbResult {
+    guard_args(|| {
+        let name = text(preset, "null preset name")?;
+        anyhow::ensure!(
+            name.as_ref() == "procedural_car",
+            "no render mesh for soft vehicle preset {name:?} (only \"procedural_car\")"
+        );
+        let c = Coords::new(coordinates);
+        let p = engine_softbody::procedural::CarParams::default();
+        let (v, _) = engine_softbody::visual::procedural_car_visual(&p);
+        let vertices: Vec<RbVec3> = v
+            .vertices
+            .iter()
+            .map(|p| RbVec3::of(c.position_out(p.to_array())))
+            .collect();
+        let triangles: Vec<u32> = v.tris.iter().flat_map(|t| c.triangle_out(*t)).collect();
+        let names: Vec<CString> = engine_softbody::visual::PART_NAMES
+            .iter()
+            .map(|n| CString::new(*n).expect("part names have no NUL"))
+            .collect();
+        let name_ptrs: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
+        let seams: Vec<u8> = v.seam.iter().map(|&b| u8::from(b)).collect();
+        let mut store = Box::new(SoftVisualStore {
+            out: RbSoftVisual {
+                vertices: std::ptr::null(),
+                vertex_count: vertices.len() as u32,
+                triangles: std::ptr::null(),
+                triangle_count: v.tris.len() as u32,
+                triangle_materials: std::ptr::null(),
+                vertex_parts: std::ptr::null(),
+                vertex_seams: std::ptr::null(),
+                part_names: std::ptr::null(),
+                part_count: names.len() as u32,
+            },
+            _vertices: vertices,
+            _triangles: triangles,
+            _materials: v.tri_material,
+            _parts: v.part,
+            _seams: seams,
+            _names: names,
+            _name_ptrs: name_ptrs,
+        });
+        store.out.vertices = store._vertices.as_ptr();
+        store.out.triangles = store._triangles.as_ptr();
+        store.out.triangle_materials = store._materials.as_ptr();
+        store.out.vertex_parts = store._parts.as_ptr();
+        store.out.vertex_seams = store._seams.as_ptr();
+        store.out.part_names = store._name_ptrs.as_ptr();
+        // The store's first field is the RbSoftVisual handed out.
+        write(out, Box::into_raw(store) as *const RbSoftVisual)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbSoftVisual_Destroy(visual: *const RbSoftVisual) {
+    if !visual.is_null() {
+        drop(Box::from_raw(visual as *mut SoftVisualStore));
+    }
 }

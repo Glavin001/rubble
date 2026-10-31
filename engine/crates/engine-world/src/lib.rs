@@ -224,6 +224,7 @@ enum Extra {
     SoftNodes(SoftHandle),
     SkinPositions(SkinId),
     SkinNormals(SkinId),
+    SkinFaces(SkinId),
     /// The ray-query pool after this step's traces: batches by `(id, first,
     /// count)` into it.
     RayHits(Vec<(RayBatchId, u32, u32)>),
@@ -1720,6 +1721,50 @@ impl World {
         Ok(SkinId(self.skins.len() as u32 - 1))
     }
 
+    /// [`World::soft_bind_skin`] with a part per vertex: each vertex binds only to
+    /// its part's nodes (`parts[vertex_part[v]]`), so a door's mesh follows the
+    /// door and leaves with it when it tears off. One skin for the whole mesh.
+    pub fn soft_bind_skin_parts(
+        &mut self,
+        soft: SoftHandle,
+        vertices: &[[f32; 3]],
+        triangles: &[[u32; 3]],
+        vertex_part: &[u8],
+        parts: &[&str],
+    ) -> anyhow::Result<SkinId> {
+        anyhow::ensure!(
+            vertex_part.len() == vertices.len(),
+            "{} vertex parts for {} vertices",
+            vertex_part.len(),
+            vertices.len()
+        );
+        let verts: Vec<Vec3> = vertices.iter().map(|v| Vec3::from(*v)).collect();
+        let mut bindings = Vec::with_capacity(verts.len());
+        let mut by_part: std::collections::BTreeMap<u8, Vec<u32>> = Default::default();
+        for (v, &p) in vertex_part.iter().enumerate() {
+            by_part.entry(p).or_default().push(v as u32);
+        }
+        let mut slot = vec![None; verts.len()];
+        for (p, list) in &by_part {
+            let name = parts
+                .get(*p as usize)
+                .ok_or_else(|| anyhow::anyhow!("vertex part {p} has no name ({} names)", parts.len()))?;
+            let group: Vec<Vec3> = list.iter().map(|&v| verts[v as usize]).collect();
+            let got = self
+                .sim
+                .soft_host()
+                .bind_mesh(soft, &group, Some(name))
+                .map_err(|e| anyhow::anyhow!("bind_mesh `{name}`: {e}"))?;
+            for (&v, b) in list.iter().zip(got) {
+                slot[v as usize] = Some(b);
+            }
+        }
+        bindings.extend(slot.into_iter().map(|b| b.expect("every vertex is in a part")));
+        let skinner = engine_webgpu::SoftSkinner::new(&self.sim, &bindings, &verts, triangles);
+        self.skins.push((soft, skinner));
+        Ok(SkinId(self.skins.len() as u32 - 1))
+    }
+
     /// A soft body's damage so far (blocking readback): beams bent and broken,
     /// plastic work, per-node deformation.
     pub fn soft_damage(&self, soft: SoftHandle) -> engine_softbody::SoftDamage {
@@ -2234,11 +2279,18 @@ impl World {
                 Extra::SkinPositions(id) => skins.push(SkinOutput {
                     skin: *id,
                     positions: xyz(bytes),
-                    normals: Vec::new(),
+                    torn: xyzw(bytes).map(|v| v[3] > 0.5).collect(),
+                    ..SkinOutput::default()
                 }),
                 Extra::SkinNormals(id) => {
                     if let Some(s) = skins.iter_mut().find(|s| s.skin == *id) {
                         s.normals = xyz(bytes);
+                        s.strain = xyzw(bytes).map(|v| v[3]).collect();
+                    }
+                }
+                Extra::SkinFaces(id) => {
+                    if let Some(s) = skins.iter_mut().find(|s| s.skin == *id) {
+                        s.face_strain = xyzw(bytes).map(|v| v[3]).collect();
                     }
                 }
                 Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
@@ -2757,6 +2809,12 @@ fn slots(bytes: &[u8]) -> Vec<[u32; 4]> {
         .collect()
 }
 
+fn xyzw(bytes: &[u8]) -> impl Iterator<Item = [f32; 4]> + '_ {
+    bytes
+        .chunks_exact(16)
+        .map(|c| bytemuck::pod_read_unaligned::<[f32; 4]>(c))
+}
+
 fn xyz(bytes: &[u8]) -> Vec<[f32; 3]> {
     bytes
         .chunks_exact(16)
@@ -2825,6 +2883,12 @@ fn extras<'a>(
             buffer: &skin.normals,
             offset: 0,
             size,
+        });
+        out.push(readback::Extra {
+            kind: Extra::SkinFaces(id),
+            buffer: &skin.faces,
+            offset: 0,
+            size: u64::from(skin.triangle_count()) * 16,
         });
     }
     out

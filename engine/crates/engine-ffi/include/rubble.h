@@ -246,8 +246,13 @@ typedef struct RbDestructionEvent {
   const struct RbActor *children;
   uint32_t child_count;
   uint64_t assembly;
-  // The connection's name (UTF-8, NUL-terminated).
+  // The connection's name (UTF-8, NUL-terminated). A soft piece: the names
+  // of the parts it carries away, comma-separated (`door_fl`, `bumper_front`).
   const char *name;
+  // Where it happened, when `has_point`: a soft beam's midpoint or a soft
+  // piece's centre, from the frame's node output (`rbSoft_EnableOutput`).
+  struct RbVec3 point;
+  bool has_point;
 } RbDestructionEvent;
 
 typedef struct RbWheelState {
@@ -308,6 +313,14 @@ typedef struct RbSkinOutput {
   const struct RbVec3 *positions;
   const struct RbVec3 *normals;
   uint32_t vertex_count;
+  // Per vertex: 1 when its frame tore (stretched past 1.8× rest).
+  const uint8_t *torn;
+  // Per vertex: the largest crumple strain of the triangles around it.
+  const float *strain;
+  // Per triangle, in the order bound: crumple strain against the rest
+  // triangle, −1 when torn.
+  const float *face_strain;
+  uint32_t triangle_count;
 } RbSkinOutput;
 
 // A queued ray batch (`rbWorld_CastRays`). 0 is null.
@@ -649,6 +662,28 @@ typedef struct RbDestructibleDef {
   bool support_loss;
   uint32_t internal_value;
 } RbDestructibleDef;
+
+// A built-in soft vehicle's render mesh (`rbCreateSoftCarVisual`): the
+// softbody page's detailed car, in the vehicle's own frame and the host's
+// units, axes and winding. Bind it with `rbSoft_BindSkinParts(vertices,
+// triangles, vertex_parts, part_names)`.
+typedef struct RbSoftVisual {
+  const struct RbVec3 *vertices;
+  uint32_t vertex_count;
+  // Index triples.
+  const uint32_t *triangles;
+  uint32_t triangle_count;
+  // Per triangle: 0 paint, 1 glass, 2 chrome, 3 trim, 4 headlight,
+  // 5 taillight, 6 underbody, 7 interior, 8 engine, 9 grille.
+  const uint8_t *triangle_materials;
+  // Per vertex: an index into `part_names`.
+  const uint8_t *vertex_parts;
+  // Per vertex: 1 on a seam between two parts (panel gaps).
+  const uint8_t *vertex_seams;
+  // The descriptor part each part index binds to (UTF-8).
+  const char *const *part_names;
+  uint32_t part_count;
+} RbSoftVisual;
 
 // Mass, centre of mass (body frame) and rotational inertia about the centre
 // (body frame, rows), Box3D `b3MassData`.
@@ -1239,9 +1274,11 @@ enum RbResult rbSoft_SetInput(struct RbWorld *world, RbSoftId soft, struct RbVeh
 // Report this soft body's node positions in every frame.
 enum RbResult rbSoft_EnableOutput(struct RbWorld *world, RbSoftId soft, bool enabled);
 
-// Skin a render mesh (world coordinates at spawn) onto a soft body; every
-// frame then carries its deformed vertices and normals. Triangles are index
-// triples in the host's winding.
+// Skin a render mesh onto a soft body; every frame then carries its deformed
+// vertices and normals, and the damage the skinning measured. Vertices are in
+// the vehicle's own frame (the descriptor's node coordinates, in the host's
+// units and axes), not the world. Triangles are index triples in the host's
+// winding.
 enum RbResult rbSoft_BindSkin(struct RbWorld *world,
                               RbSoftId soft,
                               const struct RbVec3 *vertices,
@@ -1249,6 +1286,28 @@ enum RbResult rbSoft_BindSkin(struct RbWorld *world,
                               const uint32_t *triangles,
                               uint32_t triangle_count,
                               RbSkinId *out);
+
+// [`rbSoft_BindSkin`] with a part per vertex: vertex `v` binds only to the
+// nodes of the descriptor part named `part_names[vertex_parts[v]]`, so a door's
+// mesh follows the door and leaves with it when it tears off.
+enum RbResult rbSoft_BindSkinParts(struct RbWorld *world,
+                                   RbSoftId soft,
+                                   const struct RbVec3 *vertices,
+                                   uint32_t vertex_count,
+                                   const uint32_t *triangles,
+                                   uint32_t triangle_count,
+                                   const uint8_t *vertex_parts,
+                                   const char *const *part_names,
+                                   uint32_t part_count,
+                                   RbSkinId *out);
+
+// The render mesh of `"procedural_car"` (its node layout does not depend on
+// the preset's `strength`). Free it with `rbSoftVisual_Destroy`.
+enum RbResult rbCreateSoftCarVisual(const char *preset,
+                                    enum RbCoordinates coordinates,
+                                    const struct RbSoftVisual **out);
+
+void rbSoftVisual_Destroy(const struct RbSoftVisual *visual);
 
 // Change gravity (the world's coordinates and units).
 enum RbResult rbWorld_SetGravity(struct RbWorld *world, struct RbVec3 gravity);

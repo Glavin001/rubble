@@ -27,7 +27,7 @@ unsafe fn write_text(
     Ok(())
 }
 
-unsafe fn text<'a>(
+pub(crate) unsafe fn text<'a>(
     p: *const c_char,
     what: &'static str,
 ) -> anyhow::Result<std::borrow::Cow<'a, str>> {

@@ -143,15 +143,23 @@ pub struct RayBatchResult {
 }
 
 /// A skinned soft-body mesh ([`crate::World::soft_bind_skin`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct SkinId(pub u32);
 
-/// A skinned mesh's deformed vertices and normals after the step.
-#[derive(Clone, Debug, PartialEq)]
+/// A skinned mesh's deformed vertices and normals after the step, with the
+/// damage the skinning kernel measured (`soft_skin.slang`).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SkinOutput {
     pub skin: SkinId,
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// Per vertex: its frame stretched past 1.8× rest (torn away).
+    pub torn: Vec<bool>,
+    /// Per vertex: the largest crumple strain of the triangles around it.
+    pub strain: Vec<f32>,
+    /// Per triangle, in bind order: crumple strain against the rest triangle,
+    /// −1 when torn.
+    pub face_strain: Vec<f32>,
 }
 
 /// The results of one step, delivered by `World::poll` in step order. Valid

@@ -63,18 +63,7 @@ pub fn soft_dune_buggy(mount_scale: f32) -> String {
 /// bits), 4 per triangle (vertices, material).
 #[wasm_bindgen]
 pub fn soft_procedural_car_visual() -> Vec<u32> {
-    use engine_softbody::procedural::car_truck_layout;
-    use engine_softbody::visual::car_visual;
-    use glam::Vec3;
-    let p = CarParams::default();
-    let (text, layout) = car_truck_layout(&p);
-    let d = load_truck(&text);
-    let nodes: Vec<Vec3> = d
-        .nodes
-        .iter()
-        .map(|n| Vec3::from_array(n.position))
-        .collect();
-    let v = car_visual(&p, &layout, &nodes);
+    let (v, nodes) = engine_softbody::visual::procedural_car_visual(&CarParams::default());
     let mut out = vec![v.vertices.len() as u32, v.tris.len() as u32];
     for (i, b) in v.bindings.iter().enumerate() {
         let [c, x, y] = b.nodes;
