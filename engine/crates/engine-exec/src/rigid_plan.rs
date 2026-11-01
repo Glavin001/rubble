@@ -1696,7 +1696,6 @@ mod tests {
                             sparse_start: 10,
                             color_headroom: Some(4),
                             color_round_headroom: Some(2),
-                            tail_ok: true,
                             ..StepModes::default()
                         };
                         let i = StepInputs { reuse_contacts: reuse, sleep_time: 0.5, ..inputs(10, 3) };
