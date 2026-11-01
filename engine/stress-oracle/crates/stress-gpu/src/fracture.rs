@@ -1752,7 +1752,7 @@ impl GpuFracture {
             encoder.copy_buffer_to_buffer(&t.resolve, 256, &t.read, 8 * CS_STAMPS as u64, 8 * LP_STAMPS as u64);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("fracture loads"), timestamp_writes: None });
             if self.params.load_model == 1 && self.cs_timing.is_some() {
                 // Done above, timed.
             } else {
@@ -1834,7 +1834,7 @@ impl GpuFracture {
             self.direct(&mut pass, "fr_crush_gate", 1);
         }
         encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
-        let mut pass = encoder.begin_compute_pass(&Default::default());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("fracture crush"), timestamp_writes: None });
         let pass = &mut pass;
         self.indirect(pass, "fr_scan_blocks", ARG_CRUSH_SCAN, None);
         self.indirect(pass, "fr_scan_top", ARG_CRUSH_ONE, None);
@@ -2164,7 +2164,7 @@ impl GpuFracture {
             return;
         }
         encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
-        let mut pass = encoder.begin_compute_pass(&Default::default());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("fracture split"), timestamp_writes: None });
         let pass = &mut pass;
         self.indirect(pass, "fr_uf_init", ARG_CHUNKS, None);
         self.indirect(pass, "fr_body_init", ARG_BODIES, None);

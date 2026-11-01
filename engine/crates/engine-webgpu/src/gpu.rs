@@ -2266,7 +2266,8 @@ impl WgpuSim {
     /// Keep resting contacts through sleep (`world_step.slang` archiveMeta): a pair
     /// that falls asleep keeps its contact rows, and when it forms again its body
     /// restarts them warm, with the impulses and stiffness it fell asleep with, instead
-    /// of from rest. Room for `rows` archived rows (in blocks of 8 a body; an archive
+    /// of from rest. Turns the resting-pair carry off (the archive replaces it).
+    /// Room for `rows` archived rows (in blocks of 8 a body; an archive
     /// that would hold more fails the step, `OVERFLOW_SLEEP_ARCHIVE`). Canonical
     /// contacts only. The contact and scratch buffers grow (their contents kept): hosts
     /// holding them bind them again.
@@ -2325,6 +2326,11 @@ impl WgpuSim {
         self.rebind_buffer(4);
         self.rebind_buffer(21);
         self.sleep_archive_blocks = blocks;
+        // The archive keeps resting rows through sleep, so the resting-pair carry
+        // (8ep, which re-emits every resting pair each step to keep its warm start)
+        // is off: a sleeping pair then costs nothing per step. city_scale drive
+        // (1,024 houses, all asleep): 422k contacts solved per step -> 0.
+        self.carry_rest = false;
         Ok(())
     }
 

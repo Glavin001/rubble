@@ -169,6 +169,21 @@ fn finish(w: &mut World, broken: &mut u32) -> f64 {
             }
         }
     }
+    // CITY_COUNTERS=1: the engine's counters after each frame (bodies, awake, contacts solved).
+    if std::env::var("CITY_COUNTERS").is_ok() {
+        if let Some(c) = w.counters() {
+            eprintln!(
+                "counters bodies {} awake {} contacts {} manifolds {} colors {} rounds {} cand {}",
+                c.body_count,
+                c.awake_count,
+                c.contact_count,
+                c.manifold_count,
+                c.color_count,
+                c.color_rounds,
+                c.candidate_count
+            );
+        }
+    }
     t.elapsed().as_secs_f64() * 1e3
 }
 
