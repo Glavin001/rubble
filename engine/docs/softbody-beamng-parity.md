@@ -195,7 +195,51 @@ depth: 240 Hz × 10 → 1.36 (25.1 cm against 25.6); 120 Hz × 10 → 2.35 still
 threshold changes the material, a trade-off for the user to choose. BeamNG.tech
 recordings and the 15-vehicle set are not available here.
 
-### Against a Rigs of Rods-style solver (2026-11-01)
+### Against Rigs of Rods' own solver, on published RoR content (2026-11-01)
+
+Supersedes the "Rigs of Rods-style solver" section below as the reference: that one
+re-implemented RoR with our own beam rules. Now RoR's unmodified code is the oracle
+(local harness `inspiration/ror-harness`: its parser compiled as is, its spawner,
+mass, beam, node and collision functions copied verbatim at build time; graphics and
+sound stubbed; fixed 0.5 ms step). `soft_calibrate REF=ror ROR_BIN=... CAR=truck:<file>`
+runs both on the same unmodified `.truck` (RigsOfRods/content, GPLv3, local only).
+Rubble runs its production model (rigid core with 25% of the mass, raycast wheels);
+RoR its soft tyres. Coasting into a 1 m thick wall, M3 Max:
+
+| vehicle | solver | crush 30 / 56 / 100 km/h max (cm) | 56 km/h profile (cm) | peak (g) | rebound (m/s) |
+|---|---|---|---|---|---|
+| Agora S (98 nodes + RoR tyres) | Rigs of Rods | 5.5 / 13.2 / 141.8 | 11 0 0 11 | 44 | 7.6 |
+| | Rubble 240 Hz × 10 | 3.2 / 22.7 / 183.1 | 19 0 0 19 | 33 | 7.1 |
+| | Rubble 960 Hz × 30 | 4.0 / 27.4 / 218.1 | 23 0 0 23 | 35 | 7.5 |
+| Agora L (151 nodes) | Rigs of Rods | 12.9 / 32.5 / 186.7 | 31 12 0 6 15 | 21 | 7.1 |
+| | Rubble 240 Hz × 10 | 19.5 / 45.0 / 243.6 | 26 0 0 0 26 | 21 | 5.5 |
+| | Rubble 960 Hz × 30 | 20.7 / 52.9 / 239.7 | 28 0 0 0 28 | 21 | 6.0 |
+
+Cost per 60 fps frame (RoR: its step on the CPU, 33 steps per frame, without
+inter-vehicle collision, so a lower bound; "pool" = RoR's per-step thread pool on 16
+threads. Rubble: `soft_bench CAR=truck:`, pipelined, machine under other load):
+
+| | 1 bus | 10 buses | 40 buses |
+|---|---|---|---|
+| Agora S, RoR 1 thread / pool | 0.27 / 1.78 | 2.81 / 1.90 | 12.7 / 4.03 |
+| Agora S, Rubble 240 Hz × 10 | 7.8 | 9.0 | 11.1 |
+| Agora L, RoR 1 thread / pool | 0.39 / 1.80 | 4.09 / 2.10 | 18.7 / 5.21 |
+| Agora L, Rubble 240 Hz × 10 | 11.0 | 12.8 | — |
+
+Reading: Rubble is slower than RoR at every count measured, and differs from RoR's
+crash more than convergence explains (converged Rubble, 960 × 30, is further from RoR
+than 240 × 10). The gap is in the model, not only the solver: candidates are the rigid
+core holding 25% of the mass, the wall contact (RoR's `primitiveCollision` against
+penalty/AVBD contacts), node spheres, and yield inside the solve. Spawn data matches
+exactly (node masses, beam parameters; after the fixes below).
+
+Fixes found by the comparison: `minimass` is a block keyword in RoR (our cars wrote
+it inline, which RoR reads as a `globals` line); our wheel-spoke mass used the
+declared width instead of the axle length and left out cinecam beams (Agora S was
+12,170.8 kg against RoR's 12,058.1; now equal node by node). The procedural sedan
+is not valid RoR content: its 5 kg minimum node mass blows up at RoR's 2 kHz.
+
+### Against a Rigs of Rods-style solver (2026-11-01, superseded)
 
 `examples/ror_baseline.rs` solves our cars the way Rigs of Rods and BeamNG do:
 explicit symplectic Euler in f32 at a fixed rate, the same beam rules (`model`),
