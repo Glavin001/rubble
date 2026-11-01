@@ -56,16 +56,20 @@
   <div class="panel" id="status">loading…</div>
   <div id="caption" style="position:absolute;left:50%;bottom:64px;transform:translateX(-50%);font:600 24px system-ui,sans-serif;color:#fff;text-shadow:0 2px 6px #000;display:none"></div>
   <div id="err"></div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, sceneCapacity } from './world-host.mjs';
+    // Physics: rubble's Rust World (engine-world-wasm), the host native and Unreal run.
+    // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
+    // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
+    // that only describe vehicles, which the page spawns through World.
+    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
-    import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, calibratedSettings, duneBuggySoft, SOFT } from './soft.mjs';
+    import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
     import { createCarRenderer, LIGHTING_WGSL } from './car-render.mjs';
-
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
-    const fail = (e) => { if (!errEl.textContent) errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; };
+    const fail = (e) => { if (!errEl.textContent) errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; window.__failed = String((e && e.message) || e); };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
     addEventListener('error', (e) => fail(e.error || e.message));
 
@@ -166,18 +170,44 @@
     }
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('no WebGPU adapter');
-    // ?gputime: timestamp queries for window.__world.profileStep (per-kernel GPU ms).
-    const gpuTime = qs.has('gputime') && adapter.features.has('timestamp-query');
-    const device = await adapter.requestDevice({
-      requiredFeatures: gpuTime ? ['timestamp-query'] : [],
-      requiredLimits: {
-        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
-        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-        maxBufferSize: adapter.limits.maxBufferSize,
-      },
+
+    // ---------------------------------------------------------------- world
+    // Soft scenes step at 240 Hz (4 steps per 60 fps frame): stiff beams on light
+    // nodes need the smaller step (engine_softbody::soft_scene_params).
+    const HZ = Number(qs.get('hz')) || 240;
+    const STEPS_PER_FRAME = Math.max(1, Math.round(HZ / 60));
+    // Traffic scales the arenas with its car count (161 particles, 923 beams each).
+    const NCARS = scene === 'traffic' ? Math.max(1, Math.min(128, Number(qs.get('cars')) || 20)) : 0;
+    const big = Math.max(NCARS, 24);
+    const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+    // Sized as the JS host's sceneCapacity(200·big + 2000 bodies, 220·big + 4000 colliders).
+    const estBodies = 200 * big + 2000, maxBodies = nextPow2(Math.max(estBodies, 4096));
+    const capacity = {
+      maxBodies,
+      maxColliders: nextPow2(Math.max(220 * big + 4000, maxBodies * 2, 8192)),
+      maxContacts: Math.min(nextPow2(Math.max(estBodies * 16, 65536)), 1 << 21),
+      // The buggy holds 8 core joints and 30 bolted-part joints.
+      maxJoints: 512 + (buggy ? 48 : 16) * big,
+      maxCandidates: Math.min(nextPow2(Math.max(estBodies * 32, 131072)), 1 << 21),
+      maxColors: 32,
+      // The JS host's 64 held its kinematic velocities only; World also carries
+      // teleports and velocity sets as commands (capacity only).
+      maxCommands: 2048,
+      maxHullVertices: 64,
+    };
+    // The world opens the device; the page renders on it and reads the world's buffers in place.
+    const world = await createWorld({
+      gravity: [0, -9.81, 0],
+      contacts: 'canonical',
+      capacity,
+      // A frame takes up to 2 × STEPS_PER_FRAME steps, each holding a readback
+      // slot until it is polled: enough slots that real time never waits on one
+      // (World's default 3 would cap 240 Hz at 3 steps a frame, 75 % real time).
+      readbackFrames: 2 * STEPS_PER_FRAME + 2,
+      vehicles: { maxVehicles: big + 8, maxWheels: 4 * big + 32, maxCurvePoints: 4096, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 16 },
+      soft: { maxBodies: big + 16, maxBeams: 1000 * big + 8192, maxParticles: 170 * big + 2048, maxColors: 64, maxGroups: 1024, maxTriangles: 400 * big + 4096, maxObstacles: 64 },
     });
+    const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
     const canvas = document.getElementById('c');
@@ -192,32 +222,20 @@
     configure();
     addEventListener('resize', configure);
 
-    // ---------------------------------------------------------------- world
-    // Soft scenes step at 240 Hz (4 steps per 60 fps frame): stiff beams on light
-    // nodes need the smaller step (engine_softbody::soft_scene_params).
-    const HZ = Number(qs.get('hz')) || 240;
-    const STEPS_PER_FRAME = Math.max(1, Math.round(HZ / 60));
-    // Traffic scales the arenas with its car count (161 particles, 923 beams each).
-    const NCARS = scene === 'traffic' ? Math.max(1, Math.min(128, Number(qs.get('cars')) || 20)) : 0;
-    const big = Math.max(NCARS, 24);
-    const cap = sceneCapacity(200 * big + 2000, 220 * big + 4000);
-    // The buggy holds 8 core joints and 30 bolted-part joints.
-    cap.maxJoints = 512 + (buggy ? 48 : 16) * big;
-    const world = await createWorld(device, {
-      cap, vehicleCap: { maxVehicles: big + 8, maxWheels: 4 * big + 32, maxRays: 16 },
-      softCap: { maxBodies: big + 16, maxBeams: 1000 * big + 8192, maxParticles: 170 * big + 2048, maxTriangles: 400 * big + 4096 },
-      status: (s) => { statusEl.textContent = s; },
-    });
-    Object.assign(world.params, { dt: 1 / HZ, iterations: Number(qs.get('iters')) || 10, gravityY: -9.81, betaLin: 1e7 });
+    const ITERS = Number(qs.get('iters')) || 10;
+    world.setSolver({ dt: 1 / HZ, iterations: ITERS, gravityY: -9.81, betaLin: 1e7 });
+    // The simulation's clock: steps since the scene started or was reset.
+    const simSteps = () => world.simSteps();
     const MAT_GROUND = 0, MAT_PROP = 1, MAT_NODE = 9;
-    world.setMaterial(MAT_GROUND, 1.0);
-    world.setMaterial(MAT_PROP, 0.6);
-    world.setMaterial(MAT_NODE, 0.8);
-    world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
+    // The JS host's material table (64 slots, friction 0.6 unless set): soft nodes
+    // name slot 9 and wheel rims slot 7 directly, and shapes of a given friction
+    // share the first slot with it (ground slot 0, props slot 1).
+    const FRICTION = { [MAT_GROUND]: 1.0, [MAT_PROP]: 0.6, [MAT_NODE]: 0.8, [WHEEL_RIM_MATERIAL]: 0.9 };
+    for (let i = 0; i < 64; i++) world.setMaterialSlot(i, { friction: FRICTION[i] ?? 0.6 });
     // Deform/break thresholds scaled for the step rate (engine_softbody
     // SoftSettings::calibrated_for, fitted by soft_calibrate); ?threshold=1 keeps
     // the file's raw values. ?sweeps=N runs N particle sweeps per iteration.
-    const calibrated = calibratedSettings(HZ);
+    const calibrated = softCalibratedSettings(HZ);
     const threshold = Number(qs.get('threshold')) || calibrated.threshold_scale;
     const sweeps = Number(qs.get('sweeps')) || calibrated.sweeps;
     // Rigid mode (on unless ?rigid=0): quiet cars ride their cores rigidly and
@@ -225,26 +243,30 @@
     world.setSoftSettings({ ...calibrated, threshold_scale: threshold, sweeps, rigid_mode: qs.get('rigid') !== '0' });
 
     const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
-    const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
+    const boxI = (m, hx, hy, hz) => [(m * (hy * hy + hz * hz)) / 3, (m * (hx * hx + hz * hz)) / 3, (m * (hx * hx + hy * hy)) / 3];
+    const ballI = (m, r) => { const i = 0.4 * m * r * r; return [i, i, i]; };
+    const shapeOn = (body, geometry, material) => world.createShape(body, { material: { friction: FRICTION[material] ?? 0.6 } }, geometry);
     // Every static box but the ground is a soft obstacle: soft skin triangles
     // collide with it too, so a wall's edge cannot slip between a panel's nodes.
     const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => {
-      const body = world.addBody({ p, q, flags: 0 });
-      world.addCollider({ body, shape: 2, material, params: [...half, Math.hypot(...half)] });
-      if (material !== MAT_GROUND) world.addSoftObstacle(world.colliderCount - 1);
+      const body = world.createBody({ position: p, rotation: q });
+      const s = shapeOn(body, { box: { half } }, material);
+      if (material !== MAT_GROUND) world.softAddObstacle(s);
       return body;
     };
+    // A dynamic box (the JS host's inertia, set exactly): its handle, shape and slot.
     const dynBox = (p, half, mass, v = [0, 0, 0]) => {
-      const body = world.addBody({ p, invMass: 1 / mass, invI: boxInv(mass, ...half), flags: 1 | 8, v });
-      world.addCollider({ body, shape: 2, material: MAT_PROP, params: [...half, Math.hypot(...half)] });
-      return body;
+      const body = world.createBody({ type: 'dynamic', position: p, linearVelocity: v });
+      const shape = shapeOn(body, { box: { half } }, MAT_PROP);
+      world.bodySetMassData(body, mass, [0, 0, 0], boxI(mass, ...half));
+      return { body, shape, slot: world.bodySlot(body) };
     };
     // A static pole (capsule along Y) that soft triangles also collide with.
     const pole = (p, r, half) => {
-      const body = world.addBody({ p, flags: 0 });
-      const c = world.addCollider({ body, shape: 1, material: MAT_PROP, params: [r, half, 0, r + half] });
-      world.addSoftObstacle(c);
-      return c;
+      const body = world.createBody({ position: p });
+      const s = shapeOn(body, { capsule: { radius: r, halfLen: half } }, MAT_PROP);
+      world.softAddObstacle(s);
+      return s;
     };
     staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
 
@@ -252,14 +274,16 @@
     // ?deform= rebuilds it from .truck text with another threshold (no parts).
     const carDesc = buggy ? duneBuggySoft(Math.max(0.01, Number(qs.get('strength')) || 1))
       : qs.get('deform') ? loadTruck(proceduralCar(Number(qs.get('deform')), 0)) : proceduralCarDesc();
-    const softs = []; // {h, name, core}
-    const addSoft = (desc, p, yaw = 0, opts = {}) => {
-      const h = world.addSoftVehicle(desc, p, qAxis([0, 1, 0], yaw), opts);
-      const e = world.soft.entries[h];
+    const softs = []; // {h, name, core, car, buggy}
+    const entries = []; // World's softEntry of each soft body
+    const addSoftAt = (desc, p, q, opts = {}) => {
+      const h = world.addSoftVehicle(desc, p, q, opts);
+      const e = entries[h] = world.softEntry(h);
       // `car`: drawn by the procedural car's mesh; `buggy`: by the buggy's.
       softs.push({ h, name: e.name, core: e.core, car: desc === carDesc && !buggy, buggy: desc === carDesc && buggy });
       return h;
     };
+    const addSoft = (desc, p, yaw = 0, opts = {}) => addSoftAt(desc, p, qAxis([0, 1, 0], yaw), opts);
 
     let player = 0;
     let camMode = 'chase';
@@ -270,14 +294,15 @@
     // ?runup=metres: extra approach distance before a crash test (videos).
     const runup = Number(qs.get('runup')) || 0;
     // Camera subjects: every soft car (its core) plus named rigid bodies of the
-    // scene. `mount` = where a camera rides on it, in its own frame.
-    const subjects = []; // {name, body, mount: [x, y, z], car?: soft index}
-    const subject = (name, body, mount = [0, 1.6, 2.6]) => { subjects.push({ name, body, mount }); return body; };
+    // scene, by body slot. `mount` = where a camera rides on it, in its own frame.
+    const subjects = []; // {name, body, mount: [x, y, z]}
+    const subject = (name, slot, mount = [0, 1.6, 2.6]) => { subjects.push({ name, body: slot, mount }); return slot; };
     let ramSpeed = 11.1, ramAt = 0;
     const parkRam = (mass) => {
-      ram = subject('side ram', dynBox([-4000, -4000, -4000], [0.6, 0.6, 0.9], mass), [0, 1.0, 0]);
+      ram = dynBox([-4000, -4000, -4000], [0.6, 0.6, 0.9], mass);
+      subject('side ram', ram.slot, [0, 1.0, 0]);
       // Its edges would slip between the nodes: the skin collides with it too.
-      world.addSoftObstacle(world.colliderCount - 1);
+      world.softAddObstacle(ram.shape);
     };
     // Crash parameters (?speed= km/h, ?overlap=, ?angle=, ?offset=, ?at=, ?mass=,
     // ?carSpeed=, ?height=, ?pitch=); defaults are each scene's standard test.
@@ -345,10 +370,7 @@
       camMode = 'orbit'; orbit = { yaw: 2.0, pitch: 0.3, dist: 14, target: [0, 1, 10] };
     } else if (scene === 'drop') {
       // Dropped from `height` m, nose down by `pitch` degrees.
-      const q = qAxis([1, 0, 0], P('pitch', 35) * Math.PI / 180);
-      const h = world.addSoftVehicle(carDesc, [0, P('height', 8), 0], q, {});
-      const e = world.soft.entries[h];
-      softs.push({ h, name: e.name, core: e.core, car: !buggy, buggy });
+      addSoftAt(carDesc, [0, P('height', 8), 0], qAxis([1, 0, 0], P('pitch', 35) * Math.PI / 180));
       camMode = 'orbit'; orbit = { yaw: 1.6, pitch: 0.2, dist: 11, target: [0, 1.5, 1] };
     } else if (scene === 'limbo') {
       // A fixed bar across the road (underside at `bar` m): the bonnet passes
@@ -363,16 +385,20 @@
       // The car waits behind a parked 15 t truck; an 18 t truck at `speed` hits
       // it from behind and shunts it into the parked one.
       const half = [1.25, 1.6, 6.0];
-      subject('parked truck', dynBox([0, 1.75, CAR_FRONT + 0.4 + half[2]], half, P('parked', 15000)), [0, 1.2, -6.3]);
-      world.addSoftObstacle(world.colliderCount - 1);
+      const parked = dynBox([0, 1.75, CAR_FRONT + 0.4 + half[2]], half, P('parked', 15000));
+      subject('parked truck', parked.slot, [0, 1.2, -6.3]);
+      world.softAddObstacle(parked.shape);
       addSoft(carDesc, [0, 0.05, 0]);
-      subject('18 t truck', dynBox([0, 1.75, -CAR_FRONT - 3 - half[2] - runup], half, P('mass', 18000), [0, 0, P('speed', 60) / 3.6]), [0, 1.3, 6.4]);
-      world.addSoftObstacle(world.colliderCount - 1);
+      const truck = dynBox([0, 1.75, -CAR_FRONT - 3 - half[2] - runup], half, P('mass', 18000), [0, 0, P('speed', 60) / 3.6]);
+      subject('18 t truck', truck.slot, [0, 1.3, 6.4]);
+      world.softAddObstacle(truck.shape);
       camMode = 'orbit'; orbit = { yaw: 1.3, pitch: 0.3, dist: 16, target: [0, 1, 0] };
     } else if (scene === 'crusher') {
       // A `mass` kg block dropped from `height` m onto the roof.
-      crusher = { body: subject('crusher block', dynBox([0, P('height', 4) + 1.5, 0], [1.2, 0.5, 1.5], P('mass', 10000)), [0, -1.2, 2.5]), liftAt: P('liftAt', 2.5), liftTo: P('liftTo', 4.5), speed: 1.2, start: null, reading: false };
-      world.addSoftObstacle(world.colliderCount - 1);
+      const block = dynBox([0, P('height', 4) + 1.5, 0], [1.2, 0.5, 1.5], P('mass', 10000));
+      subject('crusher block', block.slot, [0, -1.2, 2.5]);
+      crusher = { body: block.body, slot: block.slot, liftAt: P('liftAt', 2.5), liftTo: P('liftTo', 4.5), speed: 1.2, start: null, reading: false, heavy: false };
+      world.softAddObstacle(block.shape);
       addSoft(carDesc, [0, 0.05, 0]);
       camMode = 'orbit'; orbit = { yaw: 1.0, pitch: 0.35, dist: 10, target: [0, 1, 0] };
     } else if (scene === 'traffic') {
@@ -404,16 +430,22 @@
       }
       camMode = 'orbit'; orbit = { yaw: 0.7, pitch: 0.4, dist: 9, target: [0, 1, 0] };
     }
-    // Cannonballs: parked statics launched by writing their body records.
+    // Cannonballs: parked static spheres (their 300 kg mass set first), launched by
+    // bodySetType. The JS host counted them as moving colliders while parked: the
+    // grid is sized for them the same way.
     const cannon = [];
     for (let i = 0; i < 6; i++) {
-      const body = world.addBody({ p: [-3000 - i * 5, -3000, -3000], flags: 0, invMass: 1 / 300, invI: [2.5 / (300 * 0.25), 2.5 / (300 * 0.25), 2.5 / (300 * 0.25)] });
-      world.addCollider({ body, shape: 0, material: MAT_PROP, params: [0.5, 0, 0, 0.5] });
-      world.addSoftObstacle(world.colliderCount - 1);
+      const p = [-3000 - i * 5, -3000, -3000];
+      const body = world.createBody({ type: 'dynamic', position: p });
+      const s = shapeOn(body, { sphere: { radius: 0.5 } }, MAT_PROP);
+      world.bodySetMassData(body, 300, [0, 0, 0], ballI(300, 0.5));
+      world.bodySetType(body, 'static', p, [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
+      world.softAddObstacle(s);
       cannon.push(body);
     }
+    world.reserveMovingRadius(0.5);
     const truckInfo = document.getElementById('truckInfo');
-    const initial = world.snapshot();
+    const initial = world.saveState();
 
     // ---------------------------------------------------------------- render data
     // Skin: every soft triangle (global particle indices) with its rest edge lengths.
@@ -422,15 +454,17 @@
     // Flexbody meshes (rounded, subdivided skins bound to particle frames).
     let flexBuf = null, flexIdx = null, flexCount = 0, flexBind = null;
     let skinMode = qs.get('skin') || 'flex';
-    let carR = null;
-    const flexCache = new Map();
+    let carR = null, carList = [];
+    const flexCache = new Map(), skinCache = new Map();
     const rebuildSkin = () => {
       const tris = [], rest = [];
-      world.soft.entries.forEach((e, s) => {
-        e.triangles.forEach((t, i) => { tris.push(t[0], t[1], t[2], s); rest.push(...e.triRest[i], 0); });
+      entries.forEach((e, s) => {
+        if (!skinCache.has(s)) skinCache.set(s, [world.softSkinTriangles(s), world.softSkinRest(s)]);
+        const [t, r] = skinCache.get(s);
+        for (let i = 0; i < t.length / 3; i++) { tris.push(t[i * 3], t[i * 3 + 1], t[i * 3 + 2], s); rest.push(r[i * 3], r[i * 3 + 1], r[i * 3 + 2], 0); }
       });
       triCount = tris.length / 4;
-      beamTotal = world.soft.entries.reduce((n, e) => n + e.beams, 0);
+      beamTotal = entries.reduce((n, e) => n + e.beams, 0);
       triBuf?.destroy(); restBuf?.destroy();
       triBuf = device.createBuffer({ size: Math.max(16, tris.length * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       restBuf = device.createBuffer({ size: Math.max(16, rest.length * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -440,10 +474,11 @@
       // Flexbody meshes: cars get rounded panels, crates and imports stay flat.
       const binds = [], idx = [];
       const isCar = (s) => softs.some((x) => x.h === s && x.car);
-      carR?.rebuild(world.soft.entries.map((e, s) => ({ h: s, index: s })).filter((c) => isCar(c.index))).catch(fail);
-      world.soft.entries.forEach((e, s) => {
+      carList = entries.map((e, s) => ({ h: s, index: s })).filter((c) => isCar(c.index));
+      carR?.rebuild(carList).catch(fail);
+      entries.forEach((e, s) => {
         if (!e.tris || (carR && isCar(s))) return;
-        if (!flexCache.has(s)) flexCache.set(s, world.soft.inner.flexbody(s, e.core ? 0.06 : 0.0));
+        if (!flexCache.has(s)) flexCache.set(s, world.softFlexbody(s, e.core ? 0.06 : 0.0));
         const w = flexCache.get(s);
         const nv = w[0], nt = w[1], base = binds.length / 8;
         for (let i = 0; i < nv * 8; i++) binds.push(w[2 + i]);
@@ -746,13 +781,15 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const SH = [[9, shadowView], [10, shadowSampler]];
     // Collider instances: only drawable ones (not soft-body node spheres, rigid
     // cores or wheel rims, hidden anyway), rebuilt when the colliders change.
-    let colBind = null, colShadowBind = null, colIdxBuf = null, colIdxN = 0, colIdxVersion = -1;
+    let colBind = null, colShadowBind = null, colIdxBuf = null, colIdxN = 0, colIdxCount = -1, colDirty = true;
     const refreshColliders = () => {
-      if (colBind && world.colliderVersion === colIdxVersion) return;
-      colIdxVersion = world.colliderVersion;
-      const w = world.colliderWords, list = [];
-      for (let i = 1; i < world.colliderCount; i++) {
-        const mat = w[i * 16 + 2];
+      const n = world.colliderCount();
+      if (colBind && !colDirty && n === colIdxCount) return;
+      colDirty = false;
+      colIdxCount = n;
+      const mats = world.colliderMaterials(), list = [];
+      for (let i = 1; i < n; i++) {
+        const mat = mats[i];
         if (mat === WHEEL_RIM_MATERIAL || ((mat | 0) >> 16) < 0) continue;
         list.push(i);
       }
@@ -760,15 +797,24 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       colIdxBuf?.destroy();
       colIdxBuf = device.createBuffer({ size: Math.max(16, list.length * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       if (list.length) device.queue.writeBuffer(colIdxBuf, 0, Uint32Array.from(list));
-      colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]], [11, colIdxBuf], ...SH]);
-      colShadowBind = bind(colShadow, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]], [11, colIdxBuf]]);
+      colBind = bind(colPipe, [[0, bound[0]], [1, frameBuf], [2, bound[1]], [11, colIdxBuf], ...SH]);
+      colShadowBind = bind(colShadow, [[0, bound[0]], [1, frameBuf], [2, bound[1]], [11, colIdxBuf]]);
     };
     // The dune buggy's baked mesh (buggy-render.mjs) draws its frame, parts and
-    // wheels; their wheel cylinders are hidden (bit per vehicle).
+    // wheels; their wheel cylinders are hidden (bit per vehicle). It reads the
+    // world through this view (bufs[0], bufs[31], vehicle and soft entries).
+    const vehicleEntries = [];
+    for (let v = 0; v < world.vehicleCount(); v++) vehicleEntries[v] = world.vehicleEntry(v);
+    const rworld = {
+      get bufs() { return { 0: world.bodyBuffer(), 31: world.vehiclePoolBuffer() }; },
+      vehicles: { entries: vehicleEntries },
+      vlayout: world.vehicleLayout(),
+      soft: { entries },
+    };
     const buggyR = softs.some((x) => x.buggy)
-      ? await createBuggyRenderer({ device, format, world, frameBuf, L, sampleCount: SAMPLES })
+      ? await createBuggyRenderer({ device, format, world: rworld, frameBuf, L, sampleCount: SAMPLES })
       : null;
-    const hideWords = new Uint32Array(Math.max(1, Math.ceil((world.vehicles.vehicleCount + 64) / 32)));
+    const hideWords = new Uint32Array(Math.max(1, Math.ceil((world.vehicleCount() + 64) / 32)));
     for (const x of softs) {
       if (!x.buggy) continue;
       buggyR.addHybrid(x.h, carDesc);
@@ -776,16 +822,30 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     const hideBuf = device.createBuffer({ size: hideWords.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(hideBuf, 0, hideWords);
-    const wheelBind = bind(wheelPipe, [[1, frameBuf], [3, world.bufs[31]], [12, hideBuf], ...SH]);
-    const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf], ...SH]);
     const skyBind = bind(skyPipe, [[1, frameBuf]]);
     const colShadow = shadowPipe('vsCol', vtx6), wheelShadow = shadowPipe('vsWheel', vtx6), flexShadow = shadowPipe('vsFlex', []);
-    const wheelShadowBind = bind(wheelShadow, [[1, frameBuf], [3, world.bufs[31]], [12, hideBuf]]);
-    let flexShadowBind = null;
-    // The procedural car's detailed mesh (car-render.mjs); imports keep the flexbody skin.
-    carR = createCarRenderer(device, { format, sampleCount: SAMPLES, bodies: world.bufs[0], frameBuf, shadowView, shadowSampler, visual: proceduralCarVisual(), soft: world.soft });
-    const beamBind = bind(beamPipe, [[0, world.bufs[0]], [1, frameBuf], [4, world.bufs[32]]]);
-    let skinBind = null;
+    let flexShadowBind = null, skinBind = null;
+    // The world's buffers can be replaced when they grow: rebind when one is a new object.
+    let bound = [], wheelBind = null, wheelShadowBind = null, groundBind = null, beamBind = null;
+    const rebind = () => {
+      const bufs = [world.bodyBuffer(), world.colliderBuffer(), world.vehiclePoolBuffer(), world.softBuffer()];
+      if (bufs.every((b, i) => b === bound[i])) return;
+      const bodiesMoved = bound.length > 0 && bufs[0] !== bound[0];
+      bound = bufs;
+      colBind = null; skinBind = null; flexBind = null; flexShadowBind = null;
+      wheelBind = bind(wheelPipe, [[1, frameBuf], [3, bufs[2]], [12, hideBuf], ...SH]);
+      wheelShadowBind = bind(wheelShadow, [[1, frameBuf], [3, bufs[2]], [12, hideBuf]]);
+      groundBind = bind(groundPipe, [[0, bufs[0]], [1, frameBuf], ...SH]);
+      beamBind = bind(beamPipe, [[0, bufs[0]], [1, frameBuf], [4, bufs[3]]]);
+      if (bodiesMoved) carR.rebuild(carList).catch(fail);
+    };
+    rebind();
+    // The procedural car's detailed mesh (car-render.mjs; the engine's binding and
+    // skinning kernel); imports keep the flexbody skin.
+    carR = createCarRenderer(device, {
+      format, sampleCount: SAMPLES, bodies: () => world.bodyBuffer(), frameBuf, shadowView, shadowSampler, visual: proceduralCarVisual(),
+      soft: { bindMesh: (h, xyz, part) => world.softBindMesh(h, xyz, part) },
+    });
     rebuildSkin();
     let depth = null, msaa = null;
     let beamView = qs.get('beams') === '1';
@@ -885,28 +945,22 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // a random point in the arena (wander) or the nearest other car (chase). Two in
     // three wander, one chases; a stuck car reverses out. Keys take over car 0.
     const aiCars = [];
-    let aiRb = null, aiBusy = false, aiPoses = null, userUntil = 0;
+    let aiPoses = null, aiRead = null, userUntil = 0;
     function setupAi() {
       if (scene !== 'traffic' || qs.get('ai') === '0') return;
       // ?ai=cruise: everyone wanders and brakes for cars ahead (traffic, not a derby).
       const cruise = qs.get('ai') === 'cruise';
       softs.forEach((s, i) => s.core && aiCars.push({ i, core: s.core, mode: !cruise && i % 3 === 2 ? 'chase' : 'wander', cruise, target: null, t: 0, slow: 0, reverse: 0, kmh: 35 + ((i * 17) % 45), seed: i * 7919 + 13 }));
-      aiRb = device.createBuffer({ size: Math.max(16, aiCars.length * 112), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     }
     const aiRand = (c) => { c.seed = (c.seed * 1103515245 + 12345) >>> 0; return (c.seed >>> 8) / 16777216; };
-    function encodeAiRead(enc) {
-      if (!aiRb || aiBusy) return false;
-      aiCars.forEach((c, k) => enc.copyBufferToBuffer(world.bufs[0], c.core.chassis * 112, aiRb, k * 112, 112));
-      return true;
-    }
-    function afterAiRead() {
-      aiBusy = true;
-      aiRb.mapAsync(GPUMapMode.READ).then(() => {
-        const f = new Float32Array(aiRb.getMappedRange().slice(0));
-        aiRb.unmap();
-        aiPoses = aiCars.map((_, k) => ({ p: [f[k * 28], f[k * 28 + 1], f[k * 28 + 2]], q: [f[k * 28 + 4], f[k * 28 + 5], f[k * 28 + 6], f[k * 28 + 7]], v: [f[k * 28 + 12], f[k * 28 + 13], f[k * 28 + 14]] }));
-        aiBusy = false;
-      }).catch(fail);
+    // The cores' poses and velocities (a non-blocking read; one in flight).
+    function readAi() {
+      if (!aiCars.length || aiRead) return aiRead;
+      aiRead = world.readBodies(aiCars.map((c) => c.core.chassis)).then((f) => {
+        aiPoses = aiCars.map((_, k) => { const o = k * 14; return { p: [f[o], f[o + 1], f[o + 2]], q: [f[o + 3], f[o + 4], f[o + 5], f[o + 6]], v: [f[o + 7], f[o + 8], f[o + 9]] }; });
+        aiRead = null;
+      }, (e) => { aiRead = null; throw e; });
+      return aiRead;
     }
     function aiDrive(dt) {
       if (!aiPoses) return;
@@ -918,7 +972,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         const speed = Math.hypot(me.v[0], me.v[2]);
         let input = { forward: 0, steer: 0, brake: 0, handbrake: 0 };
         c.t += dt;
-        if (up[1] < 0.3) { world.vehicles.setInput(world.backend, c.core.vehicle, input); return; } // on its side or roof
+        if (up[1] < 0.3) { world.setVehicleInput(c.core.vehicle, input); return; } // on its side or roof
         if (c.mode === 'chase') {
           let best = null, bd = 1e9;
           aiPoses.forEach((o, j) => { if (j !== k) { const d = Math.hypot(o.p[0] - me.p[0], o.p[2] - me.p[2]); if (d < bd) { bd = d; best = o; } } });
@@ -948,7 +1002,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         c.slow = speed < 0.8 ? c.slow + dt : 0;
         if (c.slow > 1.6 && c.reverse <= 0) { c.reverse = 1.4; c.slow = 0; }
         if (c.reverse > 0) { c.reverse -= dt; input = { forward: -0.8, steer: -input.steer, brake: 0, handbrake: 0 }; }
-        world.vehicles.setInput(world.backend, c.core.vehicle, input);
+        world.setVehicleInput(c.core.vehicle, input);
       });
     }
     setupAi();
@@ -958,11 +1012,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const body = cannon[cannonNext++ % cannon.length];
       const dir = norm3(sub3(camTarget, camEye));
       const p = [camEye[0] + dir[0] * 2, camEye[1] + dir[1] * 2, camEye[2] + dir[2] * 2];
-      const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
-      const f = new Float32Array(words.buffer);
-      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8; f.set(dir.map((d) => d * 30), 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
-      f.set(p, 20); f.set([0, 0, 0, 1], 24);
-      world.backend.writeBody(body, words);
+      world.bodySetType(body, 'dynamic', p, [0, 0, 0, 1], dir.map((d) => d * 30), [0, 0, 0]);
     }
     // A 1,500 kg car-height block at 40 km/h into the player's left side.
     function launchRam() {
@@ -975,48 +1025,40 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       // until the ram arrives.
       const along = ramAt + (scene === 'tbone' ? P('carSpeed', 0) / 3.6 : 0) * (2.4 + runup - CAR_HW - 0.6) / ramSpeed;
       const p = [c[0] + right[0] * (2.4 + runup) + fwd[0] * along, 0.7, c[2] + right[2] * (2.4 + runup) + fwd[2] * along];
-      const words = new Uint32Array(world.bodyWords.buffer, ram * 112, 28).slice();
-      const f = new Float32Array(words.buffer);
-      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8; f.set(right.map((d) => -d * ramSpeed), 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
-      f.set(p, 20); f.set([0, 0, 0, 1], 24);
-      world.backend.writeBody(ram, words);
+      world.bodySetType(ram.body, 'dynamic', p, [0, 0, 0, 1], right.map((d) => -d * ramSpeed), [0, 0, 0]);
     }
     // Scripted events. Crusher: once the block has rested `liftAt` s, a winch lifts
-    // it (kinematic: its record rewritten each frame, nearly infinite mass) to
-    // `liftTo` m above where it rested, and holds it there.
-    const readBodyPose = async (i) => {
-      const rb = device.createBuffer({ size: 112, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(world.bufs[0], i * 112, rb, 0, 112);
-      device.queue.submit([enc.finish()]);
-      await rb.mapAsync(GPUMapMode.READ);
-      const f = new Float32Array(rb.getMappedRange().slice(0));
-      rb.unmap(); rb.destroy();
-      return { p: [f[0], f[1], f[2]], q: [f[4], f[5], f[6], f[7]] };
-    };
+    // it (its pose and velocity rewritten each frame, a nearly infinite 1e7 kg mass,
+    // as the JS host's record rewrite) to `liftTo` m above where it rested, and
+    // holds it there.
+    let resetGen = 0;
     async function runScripts(awaitReads = false) {
       if (!crusher) return;
-      const t = world.steps / HZ;
+      const t = simSteps() / HZ;
       if (t < crusher.liftAt) return;
       if (!crusher.start) {
-        if (!crusher.reading) { crusher.reading = true; const pr = readBodyPose(crusher.body).then((pp) => { crusher.start = pp; }); if (awaitReads) await pr; }
+        if (!crusher.reading) {
+          crusher.reading = true;
+          const gen = resetGen;
+          const pr = world.readBodies([crusher.slot]).then((f) => { if (gen === resetGen) crusher.start = { p: [f[0], f[1], f[2]], q: [f[3], f[4], f[5], f[6]] }; });
+          if (awaitReads) await pr; else pr.catch(fail);
+        }
         if (!crusher.start) return;
       }
+      if (!crusher.heavy) { crusher.heavy = true; world.bodySetMassData(crusher.body, 1e7, [0, 0, 0], [1e7, 1e7, 1e7]); }
       const rise = Math.min(crusher.liftTo, crusher.speed * (t - crusher.liftAt));
       const moving = rise < crusher.liftTo;
       const p = [crusher.start.p[0], crusher.start.p[1] + rise, crusher.start.p[2]];
-      const words = new Uint32Array(world.bodyWords.buffer, crusher.body * 112, 28).slice();
-      const f = new Float32Array(words.buffer);
-      f.set(p, 0); f[3] = 1e-7; f.set(crusher.start.q, 4); f.set([1e-7, 1e-7, 1e-7], 8); words[11] = 1 | 8;
-      f.set([0, moving ? crusher.speed : 0, 0], 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
-      f.set(p, 20); f.set(crusher.start.q, 24);
-      world.backend.writeBody(crusher.body, words);
+      world.bodySetType(crusher.body, 'dynamic', p, crusher.start.q, [0, moving ? crusher.speed : 0, 0], [0, 0, 0]);
     }
     function resetScene() {
-      if (crusher) { crusher.start = null; crusher.reading = false; }
-      world.restore(initial);
+      resetGen++;
+      if (crusher) { crusher.start = null; crusher.reading = false; crusher.heavy = false; }
+      world.restoreState(initial);
       while (softs.length > initialSoftCount) softs.pop();
-      for (const k of [...flexCache.keys()]) if (k >= initialSoftCount) flexCache.delete(k);
+      entries.length = initialSoftCount;
+      for (const m of [flexCache, skinCache]) for (const k of [...m.keys()]) if (k >= initialSoftCount) m.delete(k);
+      colDirty = true;
       rebuildSkin();
       damage = null;
       breaks = 0;
@@ -1031,8 +1073,9 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const ahead = lastPlayer ? lastPlayer.p.map((x, i) => x + norm3(qrot(lastPlayer.q, [0, 0, 1]))[i] * 8) : [0, 0, 8];
       const [mn, mx] = desc.nodes.reduce(([a, b], n) => [a.map((v, i) => Math.min(v, n.position[i])), b.map((v, i) => Math.max(v, n.position[i]))], [[1e9, 1e9, 1e9], [-1e9, -1e9, -1e9]]);
       const h = addSoft(desc, [ahead[0] - (mn[0] + mx[0]) / 2, 0.3 - mn[1], ahead[2] - (mn[2] + mx[2]) / 2]);
+      colDirty = true;
       rebuildSkin();
-      const en = world.soft.entries[h];
+      const en = entries[h];
       truckInfo.textContent = `${label}: ${en.nodes} nodes, ${en.beams} beams, ${en.tris} triangles, ${en.mass.toFixed(0)} kg` +
         (en.warnings.length ? ` · ${en.warnings.length} warnings (first: ${en.warnings[0]})` : '');
       return h;
@@ -1060,8 +1103,9 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const mn = [0, 1, 2].map((i) => Math.min(...rot.map((r) => r[i]))), mx = [0, 1, 2].map((i) => Math.max(...rot.map((r) => r[i])));
       const h = addSoft(desc, [-(mn[0] + mx[0]) / 2, 0.15 - mn[1], 12 - gap - mx[2]], yaw, { velocity: [0, 0, speed] });
       player = softs.length - 1;
+      colDirty = true;
       rebuildSkin();
-      const en = world.soft.entries[h];
+      const en = entries[h];
       truckInfo.textContent = `${label}: ${en.nodes} nodes, ${en.beams} beams, ${en.mass.toFixed(0)} kg`;
       return { h, nodes: en.nodes, beams: en.beams, mass: en.mass, length: mx[2] - mn[2], height: mx[1] - mn[1] };
     };
@@ -1087,75 +1131,64 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       e.target.value = '';
     });
 
-    // ---------------------------------------------------------------- readback
-    const RB = 3;
-    // Player body, counters, then the camera's target and source subjects.
-    const rbFree = Array.from({ length: RB }, () => device.createBuffer({ size: 112 + 80 + 224, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    // ---------------------------------------------------------------- frames and reads
+    // Each poll: counters, beam breaks and the pieces they tore off (World's
+    // destruction events).
     let lastPlayer = null, lastCounters = null;
-    const followBody = () => playerCore() ? playerCore().chassis : world.soft.entries[player]?.firstBody ?? 1;
-    function encodeReadback(enc, rb) {
-      rb.step = world.steps;
-      enc.copyBufferToBuffer(world.bufs[0], followBody() * 112, rb, 0, 112);
-      enc.copyBufferToBuffer(world.bufs[7], 0, rb, 112, 80);
-      const tb = camSubjects[camTarget2]?.body ?? followBody(), fb = camSubjects[camFrom]?.body ?? tb;
-      enc.copyBufferToBuffer(world.bufs[0], tb * 112, rb, 192, 112);
-      enc.copyBufferToBuffer(world.bufs[0], fb * 112, rb, 304, 112);
-    }
-    function decode(buf) {
-      const all = new Uint32Array(buf.getMappedRange().slice(0));
-      buf.unmap();
-      const b = new Float32Array(all.buffer, 0, 28);
-      lastPlayer = { p: [b[0], b[1], b[2]], q: playerCore() ? [b[4], b[5], b[6], b[7]] : [0, 0, 0, 1], v: [b[12], b[13], b[14]] };
-      const c = all.subarray(28, 48);
-      lastCounters = { contact: c[2], awake: c[5] };
-      const pose = (o) => { const f = new Float32Array(all.buffer, o, 28); return { p: [f[0], f[1], f[2]], q: [f[4], f[5], f[6], f[7]], v: [f[12], f[13], f[14]] }; };
-      camTargetPose = pose(192); camFromPose = pose(304);
-      camTargetPose.step = camFromPose.step = buf.step ?? world.steps;
-      world.setLastCounters(c);
-    }
-    // Beam records of every soft body (a few times a second): yielded / broken counts.
-    let damage = null, breaks = 0, damageBusy = false, damageStep = -1;
+    const followBody = () => playerCore() ? playerCore().chassis : entries[player]?.firstBody ?? 1;
+    let damage = null, breaks = 0, damageRead = null, damageStep = -1, rigidCount = 0;
     const tornOff = []; // "car: part" per piece-detached event
     window.__tornOff = tornOff;
-    const beamRb = device.createBuffer({ size: Math.max(64, world.soft.cap.maxBeams * 64), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    async function readDamage() {
-      if (damageBusy || !beamTotal) return damage;
-      damageBusy = true;
-      // Spawning can change the beam count while this read is in flight.
-      const bytes = beamTotal * 64;
-      const entries = world.soft.entries.slice();
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(world.bufs[32], world.soft.layout.beamBase * 16, beamRb, 0, bytes);
-      device.queue.submit([enc.finish()]);
-      await beamRb.mapAsync(GPUMapMode.READ, 0, bytes);
-      const w = new Uint32Array(beamRb.getMappedRange(0, bytes).slice(0));
-      beamRb.unmap();
-      damageBusy = false;
-      damage = entries.map((e) => {
-        let yielded = 0, broken = 0;
-        for (let i = e.firstBeam; i < e.firstBeam + e.beams; i++) {
-          const meta = w[i * 16 + 11];
-          if (meta & SOFT.BEAM_YIELDED) yielded++;
-          if (meta & SOFT.BEAM_BROKEN) broken++;
+    function onFrame(f) {
+      if (f.empty) return;
+      const c = f.counters();
+      if (c) lastCounters = { contact: c.contacts, awake: c.awake };
+      for (const e of f.destructionEvents()) {
+        if (e.type === 'beam') breaks++;
+        else if (e.type === 'piece') {
+          const who = entries[e.softBody]?.name.split(' (')[0] ?? `body ${e.softBody}`;
+          tornOff.push(`${who}: ${e.parts.length ? e.parts.join(', ') : `${e.nodes.length} nodes`}`);
         }
-        return { name: e.name, beams: e.beams, yielded, broken };
-      });
-      world.readSoftModes().then((m) => { rigidCount = m.filter((x) => x === 1).length; }).catch(() => {});
-      // Destruction events (engine): beam breaks and the parts they tore off.
-      const ev = await world.pollSoftEvents();
-      breaks += ev.breaks.length;
-      for (const p of ev.pieces) {
-        const who = world.soft.entries[p.softBody]?.name.split(' (')[0] ?? `body ${p.softBody}`;
-        tornOff.push(`${who}: ${p.parts.length ? p.parts.join(', ') : `${p.nodes.length} nodes`}`);
       }
-      return damage;
+    }
+    const pollFrame = () => poll(world, onFrame);
+    // The player's body, then the camera's target and source subjects (a
+    // non-blocking read, one in flight): poses and velocities.
+    let poseRead = null;
+    function readPoses() {
+      if (poseRead) return poseRead;
+      const tb = camSubjects[camTarget2]?.body ?? followBody(), fb = camSubjects[camFrom]?.body ?? tb;
+      const step = simSteps(), core = !!playerCore();
+      poseRead = world.readBodies([followBody(), tb, fb]).then((f) => {
+        poseRead = null;
+        const pose = (k) => { const o = k * 14; return { p: [f[o], f[o + 1], f[o + 2]], q: [f[o + 3], f[o + 4], f[o + 5], f[o + 6]], v: [f[o + 7], f[o + 8], f[o + 9]] }; };
+        lastPlayer = pose(0);
+        if (!core) lastPlayer.q = [0, 0, 0, 1];
+        camTargetPose = pose(1); camFromPose = pose(2);
+        camTargetPose.step = camFromPose.step = step;
+      }, (e) => { poseRead = null; throw e; });
+      return poseRead;
+    }
+    // Beam damage of every soft body (a few times a second): bent / broken counts,
+    // and how many cars ride rigidly.
+    function readDamage() {
+      if (damageRead) return damageRead;
+      if (!entries.length) return Promise.resolve(damage);
+      const ents = entries.slice();
+      damageRead = Promise.all([world.readSoftDamage(), world.readSoftModes()]).then(([d, m]) => {
+        damageRead = null;
+        damage = d.map((x, i) => ({ name: ents[i]?.name ?? '', beams: x.beams, yielded: x.bent, broken: x.broken }));
+        rigidCount = m.filter((x) => x === 1).length;
+        return damage;
+      }, (e) => { damageRead = null; throw e; });
+      return damageRead;
     }
 
     // ---------------------------------------------------------------- frame
     const speedEl = document.getElementById('speed'), damageEl = document.getElementById('damage'), eventsEl = document.getElementById('events');
     function updateHud() {
       if (lastPlayer) speedEl.innerHTML = `${(Math.hypot(...lastPlayer.v) * 3.6).toFixed(0)} <small>km/h</small>`;
-      if (world.steps - damageStep >= 30) { damageStep = world.steps; readDamage().catch(fail); }
+      if (simSteps() - damageStep >= 30) { damageStep = simSteps(); readDamage().catch(fail); }
       if (damage) {
         damageEl.innerHTML = damage.map((d, i) => ({ ...d, i })).filter((d) => d.i === player || (d.beams > 200 && (damage.length < 6 || d.yielded > 0))).slice(0, 8)
           .map((d) => `${d.i === player ? '▶ ' : ''}${d.name.split(' (')[0].slice(0, 22)}: ${d.yielded} bent · ${d.broken} broken / ${d.beams}`).join('<br>');
@@ -1201,7 +1234,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       // Views on a subject (its pose read back each frame): level (yaw only)
       // except the driver's seat and the mount, which ride its full orientation.
       // Poses are a few steps old by the time they arrive: carry them forward.
-      const lead = (P) => P && { ...P, p: P.p.map((x, i) => x + P.v[i] * Math.max(0, world.steps - (P.step ?? world.steps)) / HZ) };
+      const lead = (P) => P && { ...P, p: P.p.map((x, i) => x + P.v[i] * Math.max(0, simSteps() - (P.step ?? simSteps())) / HZ) };
       const T = lead(camTargetPose), F = lead(camFromPose);
       let at = camMode === 'orbit' && orbit.target ? orbit.target : lastPlayer ? [lastPlayer.p[0], lastPlayer.p[1] + 0.6, lastPlayer.p[2]] : camTarget;
       let desiredE;
@@ -1256,8 +1289,9 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     let fxDt = 0, fxSteps = 0;
     const FX = qs.get('fx') === '1';
     function drawScene(enc) {
-      fxDt = Math.min(0.1, Math.max(0, world.steps - fxSteps) / HZ); fxSteps = world.steps;
-      if (!skinBind) skinBind = bind(skinPipe, [[0, world.bufs[0]], [1, frameBuf], [5, triBuf], [6, restBuf], ...SH]);
+      rebind();
+      fxDt = Math.min(0.1, Math.max(0, simSteps() - fxSteps) / HZ); fxSteps = simSteps();
+      if (!skinBind) skinBind = bind(skinPipe, [[0, bound[0]], [1, frameBuf], [5, triBuf], [6, restBuf], ...SH]);
       const flexMode = skinMode === 'flex';
       // Particle effects (sparks, shards, chips, dust) are off by default so the
       // deformation reads clearly; ?fx=1 turns them on.
@@ -1266,11 +1300,11 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
       refreshColliders();
       if (colIdxN) { sp.setPipeline(colShadow); sp.setBindGroup(0, colShadowBind); sp.setVertexBuffer(0, cubeVbo); sp.draw(36, colIdxN); }
-      if (world.vehicles.wheelCount) { sp.setPipeline(wheelShadow); sp.setBindGroup(0, wheelShadowBind); sp.setVertexBuffer(0, cylVbo); sp.draw(cyl.length / 6, world.vehicles.wheelCount); }
+      if (world.wheelCount()) { sp.setPipeline(wheelShadow); sp.setBindGroup(0, wheelShadowBind); sp.setVertexBuffer(0, cylVbo); sp.draw(cyl.length / 6, world.wheelCount()); }
       if (flexMode) {
         carR.drawShadow(sp);
         if (flexCount) {
-          if (!flexShadowBind) flexShadowBind = bind(flexShadow, [[0, world.bufs[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx]]);
+          if (!flexShadowBind) flexShadowBind = bind(flexShadow, [[0, bound[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx]]);
           sp.setPipeline(flexShadow); sp.setBindGroup(0, flexShadowBind); sp.draw(flexCount);
         }
       }
@@ -1285,37 +1319,36 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (flexMode) {
         carR.drawOpaque(rp);
         if (flexCount) {
-          if (!flexBind) flexBind = bind(flexPipe, [[0, world.bufs[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx], ...SH]);
+          if (!flexBind) flexBind = bind(flexPipe, [[0, bound[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx], ...SH]);
           rp.setPipeline(flexPipe); rp.setBindGroup(0, flexBind); rp.draw(flexCount);
         }
       } else if (triCount) { rp.setPipeline(skinPipe); rp.setBindGroup(0, skinBind); rp.draw(triCount * 3); }
       if (beamView && beamTotal) { rp.setPipeline(beamPipe); rp.setBindGroup(0, beamBind); rp.draw(2, beamTotal); }
-      if (world.vehicles.wheelCount) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.vehicles.wheelCount); }
+      if (world.wheelCount()) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.wheelCount()); }
       buggyR?.draw(rp);
       if (flexMode) { carR.drawGlass(rp); if (FX) carR.drawFx(rp); }
       rp.end();
     }
-    function stepPhysics(enc, n) {
-      for (let i = 0; i < n; i++) {
-        if (pendingRam >= 0 && world.steps >= pendingRam) { pendingRam = -1; launchRam(); }
-        world.encodeStep(enc);
-      }
-    }
+    // Steps run right before each one is taken: the tbone scene's ram launch.
+    const beforeStep = () => { if (pendingRam >= 0 && simSteps() >= pendingRam) { pendingRam = -1; launchRam(); } };
     let lastT = performance.now();
     let fpsAcc = 0, fpsN = 0, fpsShow = 0;
     const updateStatus = () => {
-      statusEl.textContent = `${world.bodyCount} bodies (${world.soft.entries.reduce((n, e) => n + e.particles, 0)} particles, ${beamTotal} beams) · ${HZ} Hz × ${world.params.iterations} it · step ${world.steps} (${(world.steps / HZ).toFixed(1)} s)`
+      statusEl.textContent = `${world.bodyCount()} bodies (${entries.reduce((n, e) => n + e.particles, 0)} particles, ${beamTotal} beams) · ${HZ} Hz × ${ITERS} it · step ${simSteps()} (${(simSteps() / HZ).toFixed(1)} s)`
         + ` · ${rigidCount}/${softs.filter((x) => x.core).length} rigid`
         + (manual ? '' : ` · ${fpsShow.toFixed(0)} fps · ${(realTime * 100).toFixed(0)}% real time`) + (lastCounters ? ` · contacts ${lastCounters.contact} · awake ${lastCounters.awake}` : '');
     };
     let manual = false;
-    let stepAcc = 0, simAcc = 0, wallAcc = 0, realTime = 1, rigidCount = 0;
+    // ?stopAt=N: the page's own loop takes no steps past step N (automation from a
+    // known state: ?stopAt=0 leaves every step to __step).
+    const stopAt = qs.has('stopAt') ? Number(qs.get('stopAt')) : Infinity;
+    let stepAcc = 0, simAcc = 0, wallAcc = 0, realTime = 1;
     function frame(now) {
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
       fpsAcc += dt; fpsN++;
       if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
-      if (manual || rbFree.length === 0) {
+      if (manual || simSteps() >= stopAt) {
         updateCamera(dt, false);
         const enc = device.createCommandEncoder();
         drawScene(enc);
@@ -1323,64 +1356,67 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         requestAnimationFrame(frame);
         return;
       }
+      pollFrame();
       const core = playerCore();
       if (core) {
         const input = readInput();
         const touched = input.forward || input.steer || input.handbrake;
         if (touched) userUntil = performance.now() + 3000;
-        if (scene !== 'traffic' || performance.now() < userUntil) world.vehicles.setInput(world.backend, core.vehicle, input);
+        if (scene !== 'traffic' || performance.now() < userUntil) world.setVehicleInput(core.vehicle, input);
       }
       aiDrive(dt);
       updateCamera(dt, false);
-      const enc = device.createCommandEncoder();
-      const aiRead = encodeAiRead(enc);
       // Real time: as many steps as the wall clock moved (a slow frame catches up
       // with up to twice the usual count; beyond that the simulation slows down).
+      // Steps only while a readback slot is free (never blocks): one that cannot be
+      // taken now is taken on a later frame.
       stepAcc += dt * HZ;
-      const steps = Math.min(Math.floor(stepAcc), 2 * STEPS_PER_FRAME);
-      stepAcc = Math.min(stepAcc - steps, STEPS_PER_FRAME);
-      simAcc += steps / HZ; wallAcc += dt;
+      const want = Math.min(Math.floor(stepAcc), 2 * STEPS_PER_FRAME);
+      let taken = 0;
+      if (want) {
+        runScripts().catch(fail);
+        while (taken < want && world.canStep()) { beforeStep(); world.step(); taken++; }
+      }
+      stepAcc = Math.min(stepAcc - taken, STEPS_PER_FRAME);
+      simAcc += taken / HZ; wallAcc += dt;
       if (wallAcc > 0.5) { realTime = simAcc / wallAcc; simAcc = 0; wallAcc = 0; }
-      if (steps) { runScripts(); stepPhysics(enc, steps); }
+      readAi()?.catch(fail);
+      readPoses().catch(fail);
+      const enc = device.createCommandEncoder();
       drawScene(enc);
-      const rb = rbFree.pop();
-      encodeReadback(enc, rb);
       const buggyRb = buggyR?.encodeReadback(enc);
       device.queue.submit([enc.finish()]);
       buggyR?.consume(buggyRb).catch(fail);
-      rb.mapAsync(GPUMapMode.READ).then(() => { decode(rb); rbFree.push(rb); updateHud(); }).catch(fail);
-      if (aiRead) afterAiRead();
+      updateHud();
       updateStatus();
       requestAnimationFrame(frame);
     }
 
     // ---------------------------------------------------------------- automation hooks
+    // `n` steps as fast as readbacks allow, polling as they go (drain afterwards).
+    async function stepN(n) {
+      for (let i = 0; i < n;) {
+        if (world.canStep()) { beforeStep(); world.step(); i++; } else await macrotask();
+        pollFrame();
+      }
+    }
     // __step(n, input): advance n physics steps (no rAF), return the player state and damage.
     window.__step = async (n = 1, input = null) => {
       manual = true;
       const core = playerCore();
-      if (input && core) world.vehicles.setInput(world.backend, core.vehicle, input);
+      if (input && core) world.setVehicleInput(core.vehicle, input);
       for (let i = 0; i < n; i += 8) {
         await runScripts(true);
         if (aiCars.length) {
           // Traffic drives itself in frame-stepped runs too: fresh poses, then AI.
-          const re = device.createCommandEncoder();
-          if (encodeAiRead(re)) { device.queue.submit([re.finish()]); afterAiRead(); while (aiBusy) await new Promise((r) => setTimeout(r, 1)); }
+          await readAi();
           aiDrive(Math.min(8, n - i) / HZ);
         }
-        const enc = device.createCommandEncoder();
-        stepPhysics(enc, Math.min(8, n - i));
-        device.queue.submit([enc.finish()]);
-        if (i % 64 === 56) await device.queue.onSubmittedWorkDone();
+        await stepN(Math.min(8, n - i));
       }
-      while (rbFree.length === 0) await new Promise((r) => setTimeout(r, 5));
-      const rb = rbFree.pop();
-      const enc = device.createCommandEncoder();
-      encodeReadback(enc, rb);
-      device.queue.submit([enc.finish()]);
-      await rb.mapAsync(GPUMapMode.READ);
-      decode(rb);
-      rbFree.push(rb);
+      await drain(world, onFrame);
+      await readPoses();
+      if (damageRead) await damageRead.catch(() => {});
       await readDamage();
       updateHud();
       updateStatus();
@@ -1389,20 +1425,14 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       drawScene(renc);
       device.queue.submit([renc.finish()]);
       await device.queue.onSubmittedWorkDone();
-      return { steps: world.steps, player: lastPlayer, damage, breaks, counters: lastCounters };
+      return { steps: simSteps(), player: lastPlayer, damage, breaks, counters: lastCounters };
     };
     // Particle positions of a soft body (one readback): [[x, y, z], …].
     window.__particles = async (h = 0) => {
-      const e = world.soft.entries[h];
-      const n = e.particles * 112;
-      const buf = device.createBuffer({ size: n, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(world.bufs[0], e.firstBody * 112, buf, 0, n);
-      device.queue.submit([enc.finish()]);
-      await buf.mapAsync(GPUMapMode.READ);
-      const f = new Float32Array(buf.getMappedRange().slice(0));
-      buf.destroy();
-      return Array.from({ length: e.particles }, (_, i) => [f[i * 28], f[i * 28 + 1], f[i * 28 + 2]]);
+      const e = entries[h];
+      const slots = Array.from({ length: e.particles }, (_, i) => e.firstBody + i);
+      const f = await world.readBodies(slots);
+      return slots.map((_, i) => [f[i * 14], f[i * 14 + 1], f[i * 14 + 2]]);
     };
     window.__setView = (o) => {
       if (o.cam) {
@@ -1420,12 +1450,14 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       for (const id of ['info', 'status']) document.getElementById(id).style.display = clean ? 'none' : '';
     };
     window.__world = world;
+    window.__entries = entries;
     window.__device = device;
     // Live loop for ms milliseconds (rAF, wall-clock stepping): fps and real-time ratio.
     window.__live = async (ms = 3000) => {
       manual = false;
       await new Promise((r) => setTimeout(r, ms));
       manual = true;
+      await drain(world, onFrame);
       return { fps: fpsShow, realTime };
     };
     // Skinning cost alone (the car mesh compute passes), ms per frame.
@@ -1454,7 +1486,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       return (performance.now() - t) / n;
     };
     window.__ready = true;
-    statusEl.textContent = `scene ready · ${world.bodyCount} bodies · ${softs.length} soft bodies`;
+    statusEl.textContent = `scene ready · ${world.bodyCount()} bodies · ${softs.length} soft bodies`;
     requestAnimationFrame(frame);
   </script>
 </body>

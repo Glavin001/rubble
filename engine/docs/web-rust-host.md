@@ -165,6 +165,84 @@ Each page moves in its own commit.
     the JS host's pages varied too, through their frame loops.
   - The status line's counters come from frames; the HUD no longer reads the
     vehicle pool itself.
+- **softbody.html.** Every scene (the yard, the crash tests and presets,
+  crates, import, the traffic derby, cruise and parked, limbo, sandwich,
+  crusher, and `?car=buggy`) runs on `World`. The page keeps rendering, input,
+  UI and its scene scripts: the traffic AI, the side ram, the crusher's winch,
+  the cannon and the imports. The `.truck` and JBeam importers and the
+  procedural car, crate and buggy stay in engine-vehicle-wasm (`soft.mjs`);
+  they only describe vehicles, and the page spawns them with `addSoftVehicle`.
+  `World` itself is unchanged. engine-world-wasm gained (`soft.rs`):
+  - `softAddObstacle`, `softCount`, and in `softEntry` the triangle range,
+    mass and importer warnings.
+  - `softSkinTriangles` / `softSkinRest` for the collision skin.
+  - `softBindMesh` (`SoftHost::bind_mesh`) and `softFlexbody`. The flexbody
+    word builder moved into `engine_softbody::flexbody::flexbody_words`, so
+    both wasm crates share it.
+  - `softBuffer` / `softLayout` for the beam view, bound in place.
+  - `colliderMaterials`, so the page draws only drawable colliders.
+  - `readSoftModes` and `readSoftDamage` (`damage_summary`), Promises like
+    `readBodies`.
+
+  Skinning stays on the page. The car mesh is skinned by the engine's
+  `soft_skin` kernel, dispatched by `soft-skin.mjs` and bound with
+  `softBindMesh`. That code only builds the vertex-to-triangle lists and
+  binds buffers; it is rendering, not physics. `World::soft_bind_skin` is not
+  used, because it is built for CPU consumers:
+  - one skinner per soft body,
+  - encoded on every step that has a readback slot,
+  - every vertex read back for `Frame::skins`.
+  In 100-car traffic it would mean 100 skinners × 3 dispatches × 4 steps per
+  frame, plus a full readback each step. The page skins every car in one
+  dispatch per drawn frame. A follow-up would be a render-only `World` skin:
+  several soft bodies, no readback, encoded on demand.
+
+  Masses and inertias are set with `bodySetMassData`. The solver is as
+  before: 240 Hz, 10 iterations, `betaLin` 1e7, gravity −9.81. Contacts are
+  canonical and soft settings `calibrated_for(240)`. The material table is
+  pinned slot for slot: 0 → 1.0, 7 → 0.9, 9 → 0.8, the rest 0.6.
+  The initial GPU state is bit-identical to the JS host's. This covers
+  bodies, colliders, the soft arena, the vehicle pool, materials and the
+  host words. The exceptions are the parked cannonballs, which are static
+  with no mass (the JS host kept an unused `invMass`), and collider density,
+  which only vehicle belts read.
+
+  With the same input from the same state (`?stopAt=0`, then 6 × `__step(60)`):
+  - The yard and buggy drives and the parked traffic match the old page
+    exactly.
+  - The crash scenes diverge after 60–120 steps. The cause is in the old
+    page, not in `World`. The JS host's plan read its counters only when a
+    `__step` call ended, so the second contact step built its contact rows
+    in another order (the same rows as a set) and the solve took them in
+    another order. Given counters after every step (a copy of the old page
+    that reads back each step), the JS host gives `World`'s results exactly
+    over 360 steps in the wall, tbone, sandwich, drop, crates, yard, buggy
+    and parked-traffic scenes.
+  - Pole, head-on, limbo and crusher match until 180–300 steps into the
+    crush. There `World` varies from run to run, because its plan hints come
+    from frames polled at wall-clock-dependent times (as for vehicle.html).
+
+  `softbody-check.mjs` passes all 19 default checks: drive, crash tests, tear,
+  limbo roof, traffic, beams, crates, close-ups and perf. `PAGE=` checks
+  another copy of the page. Its opt-in BUDGET check now times `World.step` on
+  the CPU. The JS host's per-kernel GPU split (`?gputime`, `profileStep`) and
+  its dispatch histogram are gone, because they were that host's internals.
+  Every automation hook is kept (`__step`, `__particles`, `__spawnImported`,
+  `__crashImported`, `__setView`, `__launchRam`, `__setCaption`, `__live`,
+  `__skinBench`, `__renderBench`, `__tornOff`, `__world`). Other
+  differences:
+  - Records the JS host rewrote are now `World` calls. The cannonballs and
+    the ram launch with `bodySetType`. The crusher's winch sets 1e7 kg mass
+    data once, then `bodySetType` each tick, with the same pose and velocity
+    as before. The cannonballs are parked static, so
+    `reserveMovingRadius(0.5)` sizes the grid as the JS host's count did.
+  - `readbackFrames` is 10. At `World`'s default of 3, a 240 Hz frame takes
+    only 3 of its 4 steps, which is 75 % real time.
+  - Breaks and torn-off parts come from each frame's destruction events. The
+    JS host polled them every 30 steps with the damage; the totals are the
+    same. Poses for the HUD, camera, AI and crusher come from `readBodies`,
+    as the JS host's `mapAsync` copies did.
+  - `?stopAt=N` stops the page's own loop at step N.
 - **Non-blocking reads.** `readBodies(slots)` returns a Promise (a copy, then
   `mapAsync`) for checks that need velocities.
 
@@ -198,6 +276,15 @@ steps. It covers the host's encode, submit and readback as well as the GPU work.
 | vehicle.html?scene=gauntlet, driving | 1.04 | 1.14 |
 | vehicle.html?scene=run, driving | 1.05 | 1.09 |
 | vehicle.html?scene=meteors, driving | 1.21 | 1.31 |
+| softbody.html (yard: 3 cars, 3 crates) | 0.98 / 1.01 | 1.10 |
+| softbody.html?scene=wall | 1.64 / 1.66 | 1.69 |
+| softbody.html?scene=crates | 1.31 / 1.33 | 1.32 |
+| softbody.html?scene=traffic&cars=20 (AI) | 3.58 / 3.52 | 2.39 |
+| softbody.html?scene=traffic&cars=100 (AI) | 3.95 / 3.96 | 3.32 |
+| softbody.html?car=buggy | 1.01 / 1.04 | 1.12 |
+| softbody.html, driving | 1.72 / 1.74 | 1.77 |
+| softbody.html?car=buggy, driving | 1.87 / 1.88 | 1.87 |
+| softbody.html?rigid=0, driving | 1.80 / 1.83 | 1.88 |
 
 `motion.html`'s CCD gallery is at rest until a volley: `World` skips a step when
 nothing is awake and nothing was written, and the JS host never did.
@@ -210,3 +297,11 @@ what it hits stay awake. Runs vary by about ±10 % from one invocation to the ne
 On the Rust host, driving costs 0-13 % more per step. `World` copies every
 vehicle's record and wheels with each step (`Frame::vehicles`), which is 98 copies
 in traffic; the JS page read only the player's.
+
+softbody.html steps at 240 Hz, and "driving" times `__step(300, { forward: 1,
+steer: ±0.3 })` there as well. Its "before" column gives two runs of the old
+page, taken at the start and the end of the port. On the Rust host, the
+single-car scenes cost 0-10 % more per step: `World` submits and reads back
+every step, where the JS host batched 8. Traffic is faster because of how
+each 8-step chunk waits for the AI's pose read. The old page polled with 1 ms
+timers; the new one awaits the `readBodies` Promise.

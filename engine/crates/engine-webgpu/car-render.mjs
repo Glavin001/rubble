@@ -334,8 +334,11 @@ fn paintColor(car: u32) -> vec3f {
 const PART_NAMES = ['body', 'bonnet', 'boot', 'door_fl', 'door_rl', 'door_fr', 'door_rr', 'bumper_front', 'bumper_rear', 'body', 'engine', 'roof'];
 
 /**
- * Car renderer. `visual` = proceduralCarVisual() words; `soft` = the world's
- * SoftHost (bindMesh); `bodies` = the body buffer (binding 0 of the step).
+ * Car renderer. `visual` = proceduralCarVisual() words; `soft` = anything with
+ * the engine's bindMesh(h, xyz, part) (a SoftHost, or a Rust-host World's
+ * softBindMesh); `bodies` = the body buffer (binding 0 of the step), or a
+ * function returning the current one (a Rust-host world can replace it when it
+ * grows: call rebuild again when it changes; `r.bodies` is the one bound).
  */
 export function createCarRenderer(device, { format, sampleCount, bodies, frameBuf, shadowView, shadowSampler, visual, soft }) {
   const nv0 = visual[0], nt0 = visual[1];
@@ -398,7 +401,8 @@ export function createCarRenderer(device, { format, sampleCount, bodies, frameBu
   r.rebuild = async (cars) => {
     const gen = ++generation;
     const nv = nv0 * cars.length, nt = nt0 * cars.length;
-    if (!nt) { r.groups = null; return; }
+    const B = typeof bodies === 'function' ? bodies() : bodies;
+    if (!nt) { r.groups = null; r.bodies = B; return; }
     // Engine bindings, part by part (a door's mesh follows only the door's nodes).
     const bindings = new Uint32Array(nv * 8);
     const vmeta = new Uint32Array(nv * 8);
@@ -430,11 +434,12 @@ export function createCarRenderer(device, { format, sampleCount, bodies, frameBu
         }
       });
     }
-    const skinner = await createSoftSkinner(device, bodies, { bindings, rest, triangles: tris, stride: 4 });
+    const skinner = await createSoftSkinner(device, B, { bindings, rest, triangles: tris, stride: 4 });
     if (gen !== generation) { skinner.destroy(); return; }
     r.skinner?.destroy();
     bufs.forEach((b) => b.destroy()); bufs = [];
     r.skinner = skinner;
+    r.bodies = B;
     r.verts = nv; r.tris = nt;
     r.opaqueTris = (opaquePerCar < 0 ? nt0 : opaquePerCar) * cars.length;
     const S = GPUBufferUsage.STORAGE;
@@ -442,7 +447,7 @@ export function createCarRenderer(device, { format, sampleCount, bodies, frameBu
     r.countsB = buf(Uint32Array.of(nv, nt, 0, 0), GPUBufferUsage.UNIFORM);
     const T = skinner.triangles, F = skinner.faces, P = skinner.positions, N = skinner.normals;
     r.groups = {
-      spawn: bg(pSpawn, [[0, bodies], [2, T], [3, F], [4, P], [5, prevB], [6, vmetaB], [7, r.countsB], [8, fxBuf]]),
+      spawn: bg(pSpawn, [[0, B], [2, T], [3, F], [4, P], [5, prevB], [6, vmetaB], [7, r.countsB], [8, fxBuf]]),
       fx: bg(pFx, [[7, r.countsB], [8, fxBuf]]),
       fxDraw: bg(fxPipe, [[1, frameBuf], [7, fxBuf]]),
       opaque: bg(opaque, [[1, frameBuf], [2, T], [3, F], [4, P], [5, N], [6, vmetaB], [9, shadowView], [10, shadowSampler]]),
