@@ -457,6 +457,7 @@ impl WgpuSim {
         let SimOptions {
             contacts,
             vehicles: vehicle_capacity,
+            characters: char_cap,
             soft,
             features,
             pose_output,
@@ -489,6 +490,7 @@ impl WgpuSim {
             compact_contacts,
             persistent_contacts,
             vehicle_capacity,
+            char_cap,
             features,
             pose_output,
             info,
@@ -526,6 +528,7 @@ impl WgpuSim {
         compact_contacts: bool,
         persistent_contacts: bool,
         vehicle_capacity: VehicleCapacity,
+        char_cap: engine_schema::character::CharacterCapacity,
         features: EngineFeatures,
         pose_output: bool,
         info: wgpu::AdapterInfo,
@@ -546,7 +549,6 @@ impl WgpuSim {
         sizes[9] +=
             u64::from(4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels)) * 32;
         sizes[31] = vehicle_capacity.bytes().max(16);
-        let char_cap = engine_schema::character::CharacterCapacity::default();
         sizes[33] = char_cap.bytes().max(16);
         let limits = device.limits();
         for (i, &bytes) in sizes.iter().enumerate() {
