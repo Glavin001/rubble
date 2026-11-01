@@ -1570,6 +1570,14 @@ mod imp {
                 self.fracture.spare.extend(spare.iter().copied());
                 (base, None)
             };
+            if own.is_none() {
+                // Its body frames and free marks went to the shared fracture with it (and
+                // nothing reads them here again): they cover every body slot below its own,
+                // so keeping them costs a map O(houses × body slots) host memory (about
+                // 2 GB at 1,024 houses, past wasm's 4 GiB heap with the rest).
+                t.frames = Vec::new();
+                t.free = Vec::new();
+            }
             let slot = ThresholdSlot {
                 destructible: index as u32,
                 base,
