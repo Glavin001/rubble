@@ -11,6 +11,8 @@ mod features;
 mod gpu;
 #[cfg(feature = "gpu")]
 mod poses;
+#[cfg(all(feature = "gpu", target_vendor = "apple"))]
+pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]

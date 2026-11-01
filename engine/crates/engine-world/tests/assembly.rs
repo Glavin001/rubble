@@ -207,6 +207,7 @@ fn a_rigid_vehicle_carries_mounted_and_destructible_parts() {
             }],
             fragment: None,
             node: None,
+            node_frame: None,
         };
         let desc = DestructibleAssetDesc {
             name: Some("crate".into()),

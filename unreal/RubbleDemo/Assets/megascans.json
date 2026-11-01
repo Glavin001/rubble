@@ -1,0 +1,21 @@
+{
+  "comment": "The Quixel Megascans RubbleDemo draws with: free Fab listings (Personal and Professional licences both $0). The assets are never committed here (the repo is public; Fab's licence forbids redistributing them): add each to your Fab library and project (scripts/unreal/fetch-assets.sh pulls the imported set from the private Glavin001/rubble-assets repo), and build_content.py reports any missing.",
+  "assets": [
+    {"key": "smooth_precast_concrete", "title": "Smooth Precast Concrete", "type": "material", "uid": "4ee8709a-252f-4eeb-be41-59afd0b7b726", "role": "floor slab tops"},
+    {"key": "shuttered_concrete_wall", "title": "Shuttered Concrete Wall", "type": "material", "uid": "cf4cf9fd-a62e-4988-86fb-db19dcce2780", "role": "slab edges, footings, structural concrete"},
+    {"key": "stained_concrete_ceiling", "title": "Stained Concrete Ceiling", "type": "material", "uid": "31059d5e-7209-45a6-b10a-7da35418cf9a", "role": "slab undersides"},
+    {"key": "concrete_damaged", "title": "Concrete Damaged", "type": "material", "uid": "3747b730-b482-4cfc-8aa4-810a5e298174", "role": "broken concrete faces"},
+    {"key": "damaged_concrete_slab", "title": "Damaged Concrete Slab", "type": "material", "uid": "afe6eb53-f9bb-462c-87a4-75f507fab2ed", "role": "broken concrete faces (large)"},
+    {"key": "damaged_concrete_with_rebar", "title": "Damaged Concrete With Rebar", "type": "decal", "uid": "27f9ecb1-3865-4217-b84a-fe8195f782a0", "role": "rebar on broken faces"},
+    {"key": "damaged_concrete_decal", "title": "Damaged Concrete", "type": "decal", "uid": "2628087c-19db-4254-93cb-3a9d42d34be8", "role": "impact damage"},
+    {"key": "scratched_painted_metal", "title": "Scratched Painted Metal", "type": "material", "uid": "ef4f6dd7-4d8d-4a59-b0cf-ac12edbdc2cf", "role": "steel columns and frames"},
+    {"key": "grassy_soil", "title": "Grassy Soil", "type": "material", "uid": "9b88de26-81a2-44ca-bd6b-c61dc41b9fb3", "role": "the ground"},
+    {"key": "asphalt", "title": "Asphalt", "type": "material", "uid": "8d46ca60-fe4f-459f-ba4c-0dca46fa3eb7", "role": "roads"},
+    {"key": "construction_rubble_surface", "title": "Construction Rubble", "type": "material", "uid": "11bbcf74-0773-40bf-bba4-e2b2d7554abd", "role": "rubble on the ground"},
+    {"key": "cement_rubble", "title": "Cement Rubble", "type": "3d-model", "uid": "00305c89-b94f-496b-85fd-978b43939c11", "role": "rubble"},
+    {"key": "construction_rubble", "title": "Construction Rubble", "type": "3d-model", "uid": "0ce81789-1f93-4c36-8de5-8b7f7980b46c", "role": "rubble"},
+    {"key": "concrete_rubble_pack", "title": "Concrete Rubble Pack", "type": "3d-model", "uid": "023f52ab-e085-45a2-bad5-56e60c216d5b", "role": "debris"},
+    {"key": "concrete_rubble_pile", "title": "Concrete Rubble Pile", "type": "3d-model", "uid": "aa404374-059d-4bab-9e0e-cc0ee6ff8c0f", "role": "rubble heaps"},
+    {"key": "concrete_debris", "title": "Concrete Debris", "type": "3d-model", "uid": "d8c67277-1b86-4bb3-8e93-41032880f3bc", "role": "loose debris"}
+  ]
+}
