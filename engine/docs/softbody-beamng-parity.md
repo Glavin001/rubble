@@ -173,3 +173,33 @@ not throughput, blocks the plan's high-res targets.
 
 Off by default: a core-jointed body couples wrongly in substeps (the core steps
 whole). Next: interpolate the core pose in the joint rows during substeps.
+
+### Phase 6 — BDF2 against the oracle (spike, s23 confirmed)
+
+Sedan without a core, 240 Hz × 10 with `BDF2=1`: tap 35 Hz (25 with backward Euler,
+oracle 46), crush 8.9 / 35.0 / 200 cm (oracle 10.2 / 25.6 / 73.4), stop 1.40 s. The
+100 km/h crash still blows up, as s23 found against the old reference. TR-BDF2 and
+JGS2 (phase 7) are not started.
+
+### Phase 9 — calibration against the oracle (fit recorded, not applied)
+
+`FIT=1`: one global threshold scale per rate to match the oracle's 56 km/h crush
+depth: 240 Hz × 10 → 1.36 (25.1 cm against 25.6); 120 Hz × 10 → 2.35 still crushes
+57 cm. `SoftSettings::calibrated_for` is unchanged (1.0 from 240 Hz): scaling every
+threshold changes the material, a trade-off for the user to choose. BeamNG.tech
+recordings and the 15-vehicle set are not available here.
+
+## Status summary
+
+| Phase | State |
+|---|---|
+| 0 harness and oracle | done |
+| 1 collision parity | mostly done (activation pre-pass, hull obstacles, staticCollision, skin tearing open) |
+| 2 OGC bounds | implemented, off by default (mixed results; zero penetrations not reached, the oracle has them too) |
+| 3 JBeam features | done for LBEAM, torsion bars, rails, slidenodes, anisotropic, deform limits; smaller beam options open |
+| 4 float precision | done |
+| 5 crash islands | implemented, off by default (core-joint coupling) |
+| 6 integrator spike | BDF2 re-measured; TR-BDF2 not started |
+| 7 JGS2 spike | not started; now the main blocker for the high-res car |
+| 8 resolution and scale | benchmarked; collide pass 4× faster; high-res car unconverged at real-time settings |
+| 9 calibration | oracle fit recorded, not applied |
