@@ -299,3 +299,68 @@ fn a_light_box_rests_on_sand_whatever_the_mass_ratio() {
         state.linear_vel
     );
 }
+
+/// The local settle rule's body word (`SettleRule::Local`): a body moving in
+/// the area's box counts only once it touches the material. A box falling
+/// through the box's air counts as coupled (the strict rule's word) but not
+/// as touching; on the sand it touches.
+#[test]
+fn a_falling_box_touches_the_sand_only_when_it_lands() {
+    let mut s = sim(-9.81);
+    let cfg = config();
+    s.terrain_enable(&cfg).unwrap();
+    let sand = SandMaterial::default();
+    s.terrain_set_material(Some(&sand)).unwrap();
+    let field = HeightField::new(33, 33, 0.0625, 0.0625, vec![0.0; 33 * 33]).unwrap();
+    let mut arena = HullArena::new();
+    let (_, bed) = s
+        .add_height_field(&mut arena, &field, Vec3::ZERO, Quat::IDENTITY, 0)
+        .unwrap();
+    let plan = RegionPlan::spanning(
+        &cfg,
+        Vec3::new(-0.9, -0.35, -0.9),
+        Vec3::new(0.9, 1.0, 0.9),
+        0.05,
+        0,
+        0,
+    )
+    .unwrap();
+    s.terrain_activate(
+        &plan,
+        bed,
+        &field,
+        Vec3::ZERO,
+        sand.density,
+        sand.friction_angle.tan(),
+    )
+    .unwrap();
+    // Dropped from 0.4 m above the surface: about 0.25 s of free fall.
+    let half = 0.1;
+    let b = crate_box(
+        &mut s,
+        Vec3::new(0.0, half + 0.4, 0.0),
+        Vec3::splat(half),
+        16.0,
+        Vec3::ZERO,
+    );
+    let (n, dt) = substeps_for(&cfg, FRAME, plan.dx, sand.p_wave_speed(), 8.0).unwrap();
+    let (mut aloft, mut touched) = (0, 0);
+    for f in 0..60 {
+        let (_, r) = s.step_with_terrain(n, dt).unwrap();
+        let y = s.read_body(b).position[1] - half;
+        if y > 0.15 && r.body_speed > 0.0 {
+            aloft += 1;
+            assert_eq!(
+                r.area_touch_speed[0], 0.0,
+                "frame {f}: {y:.3} m above the sand"
+            );
+        }
+        if r.area_touch_speed[0] > 0.0 {
+            touched += 1;
+            assert!(y < 0.1, "frame {f}: touching {y:.3} m up");
+        }
+    }
+    eprintln!("aloft and moving {aloft} frames, touching {touched}");
+    assert!(aloft > 5, "it fell through the box's air");
+    assert!(touched > 0, "it landed on the sand");
+}

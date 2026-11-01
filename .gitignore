@@ -29,6 +29,7 @@ autoresearch-results.tsv
 
 # The WebGPU demo site (engine/scripts/build-web.sh)
 engine/web-dist/
+engine/ffi-dist/
 .vercel/
 
 # CI: the LFS object list the cached LFS pull keys on (.github/actions/lfs-pull)

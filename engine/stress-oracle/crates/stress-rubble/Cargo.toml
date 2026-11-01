@@ -47,3 +47,7 @@ required-features = ["gpu"]
 [[example]]
 name = "shape_deform_cost"
 required-features = ["gpu"]
+
+[dev-dependencies]
+# The fracture lab's own scenes (the cuboid house) for tests/strike_through.rs.
+engine-fracture = { path = "../../../crates/engine-fracture" }

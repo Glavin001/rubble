@@ -48,6 +48,9 @@ pub struct Shot {
     pub origin: [f64; 3],
     pub dir: [f64; 3],
     pub label: String,
+    /// m/s; `None`: the scene's shot speed (and the speed scale).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
 }
 
 /// The towers' centres and the block's bounds (piece centres).
@@ -134,7 +137,87 @@ pub fn volley(scene: &Scene, raking: u32, base: u32, every: u32) -> Vec<Shot> {
             origin,
             dir,
             label: format!("{} {} tower {}", if raking_shot { "raking" } else { "base" }, i, i as usize % b.towers.len()),
+            speed: None,
         });
     }
     shots
+}
+
+/// The meteor scene's ball: radius (m) and mass (kg). The towers are
+/// 18,000 t each, so it has to be heavy to burst one open.
+pub const METEOR: (f64, f64) = (5.0, 3.0e7);
+/// Its speed (m/s) and descent (radians below the horizon).
+const METEOR_SPEED: f64 = 90.0;
+const METEOR_DESCENT: f64 = 0.55;
+
+/// A meteor coming down across the front of the block (the +z side, where
+/// the lab's camera starts) from the left, clipping the top front corner of
+/// the front-left tower, so its upper floors burst over the front street and
+/// their pieces fall 30-60 m onto it.
+pub fn meteor(scene: &Scene) -> Shot {
+    let b = block(scene);
+    // Front-most tower, then left-most.
+    let t = b
+        .towers
+        .iter()
+        .copied()
+        .fold(b.towers[0], |best, t| {
+            if t[2] > best[2] + 1e-3 || ((t[2] - best[2]).abs() <= 1e-3 && t[0] < best[0]) {
+                t
+            } else {
+                best
+            }
+        });
+    let (c, s) = (METEOR_DESCENT.cos(), METEOR_DESCENT.sin());
+    let dir = [c, -s, 0.0];
+    let aim = [
+        t[0] - 0.2 * b.half,
+        b.lo[1] + 0.85 * (b.hi[1] - b.lo[1]),
+        t[2] + 0.75 * b.half,
+    ];
+    let back = 120.0;
+    Shot {
+        step: 0,
+        origin: [aim[0] - dir[0] * back, aim[1] - dir[1] * back, aim[2] - dir[2] * back],
+        dir,
+        label: "meteor".into(),
+        speed: Some(METEOR_SPEED),
+    }
+}
+
+/// `shots` base shots `every` steps apart into one side of tower `tower`,
+/// all from outside the block, so it loses that side's footing and falls
+/// outward, over the street and what is parked there.
+pub fn topple(scene: &Scene, tower: usize, shots: u32, every: u32) -> Vec<Shot> {
+    let b = block(scene);
+    let t = b.towers[tower % b.towers.len()];
+    let centre = [0.5 * (b.lo[0] + b.hi[0]), 0.5 * (b.lo[2] + b.hi[2])];
+    // Out from the block's centre through the tower: the street side.
+    let mut out = [t[0] - centre[0], t[2] - centre[1]];
+    let len = (out[0] * out[0] + out[1] * out[1]).sqrt();
+    out = if len > 1e-6 { [out[0] / len, out[1] / len] } else { [1.0, 0.0] };
+    // Shots travel inward (toward the tower) along the dominant axis.
+    let axis = if out[0].abs() >= out[1].abs() {
+        [out[0].signum(), 0.0]
+    } else {
+        [0.0, out[1].signum()]
+    };
+    let dir = [-axis[0], 0.0, -axis[1]];
+    let across = [-dir[2], 0.0, dir[0]];
+    (0..shots)
+        .map(|i| {
+            let f = (i as f64 + 0.5) / shots as f64;
+            let lateral = (f - 0.5) * 1.6 * b.half;
+            let y = b.lo[1] + 0.03 * (b.hi[1] - b.lo[1]) + 1.2 * (i % 2) as f64;
+            let aim = [t[0] + across[0] * lateral, y, t[2] + across[2] * lateral];
+            let back = b.half + 30.0;
+            Shot {
+                step: 8 + i * every,
+                origin: [aim[0] - dir[0] * back, aim[1], aim[2] - dir[2] * back],
+                dir,
+                label: format!("topple {i} tower {tower}"),
+                speed: None,
+            }
+        })
+        .collect()
 }

@@ -598,6 +598,17 @@ pub struct RigidStep {
     parity: u32,
     sleep_rounds: u32,
     kernels: Vec<&'static str>,
+    /// Directed debris (bindings 37-41), allocated at construction.
+    guide: Option<GuideState>,
+}
+
+/// Host side of directed debris: the capacity, the settings' params and how
+/// many zones the last upload held.
+struct GuideState {
+    cap: engine_schema::guidance::GuidanceCapacity,
+    params: engine_schema::guidance::GuideParamsGpu,
+    enabled: bool,
+    zones: u32,
 }
 
 /// Command words: `[op, a, b, c, d, e]` per command. Copy (0): src, src offset,
@@ -665,6 +676,8 @@ impl RigidStep {
             wheel_count: wheels,
             soft,
             command_count: 0,
+            guidance: self.guide_active(),
+            guide_slots: self.guide.as_ref().map_or(0, |g| g.cap.plan_budget),
             explosion_count: 0,
             // counts[18]: bit 0 CCD bodies, bit 1 kinematic bodies, bit 2 impulse
             // records this step, bit 3 heightfield colliders (has_height_field,
@@ -686,6 +699,12 @@ impl RigidStep {
         }
     }
 
+    fn guide_active(&self) -> bool {
+        self.guide
+            .as_ref()
+            .is_some_and(|g| g.enabled && g.zones > 0)
+    }
+
     fn kernel_index(&mut self, name: &'static str) -> u32 {
         match self.kernels.iter().position(|k| *k == name) {
             Some(i) => i as u32,
@@ -704,8 +723,15 @@ impl RigidStep {
     /// wheel slot is added); `vehicles` as for [`WasmVehicleHost::new`].
     /// `soft` (optional) = [maxBodies, maxBeams, maxParticles, maxColors, maxGroups,
     /// maxTriangles, maxObstacles] of the soft-body arena (binding 32).
+    /// `guidance` (optional) = [maxZones, planBudget]: directed debris
+    /// (bindings 55-59, `set_guidance`).
     #[wasm_bindgen(constructor)]
-    pub fn new(world: &[u32], vehicles: &[u32], soft: Option<Vec<u32>>) -> RigidStep {
+    pub fn new(
+        world: &[u32],
+        vehicles: &[u32],
+        soft: Option<Vec<u32>>,
+        guidance: Option<Vec<u32>>,
+    ) -> Result<RigidStep, JsError> {
         let mut cap = engine_schema::WorldCapacity {
             max_bodies: world[0],
             max_colliders: world[1],
@@ -743,7 +769,32 @@ impl RigidStep {
             parity: 0,
             sleep_rounds: 8,
             kernels: Vec::new(),
+            guide: None,
         };
+        if let Some(g) = guidance {
+            let cap = engine_schema::guidance::GuidanceCapacity {
+                max_zones: g.first().copied().unwrap_or(256),
+                plan_budget: g.get(1).copied().unwrap_or(256),
+            };
+            if cap.max_zones == 0
+                || cap.plan_budget == 0
+                || cap.plan_budget > engine_schema::guidance::GUIDE_BLOCK
+            {
+                return Err(JsError::new(&format!(
+                    "guidance capacity needs zones > 0 and a plan budget in 1..={}",
+                    engine_schema::guidance::GUIDE_BLOCK
+                )));
+            }
+            s.guide = Some(GuideState {
+                cap,
+                params: Default::default(),
+                enabled: false,
+                zones: 0,
+            });
+            for k in engine_schema::guidance::GUIDE_ENTRIES {
+                s.kernel_index(k);
+            }
+        }
         // Every kernel a step can emit (small and large scenes, joints, vehicles).
         // Small and large scenes; soft passes with every option on, both with the
         // fused particle sweep (small colours) and one dispatch per colour.
@@ -782,7 +833,7 @@ impl RigidStep {
                 }
             }
         }
-        s
+        Ok(s)
     }
 
     /// Kernel entry names (JSON array); command words index into it.
@@ -799,7 +850,146 @@ impl RigidStep {
         if self.soft.max_bodies > 0 {
             s[32] = self.soft.bytes();
         }
-        s.iter().map(|&b| b as f64).collect()
+        let mut out: Vec<f64> = s.iter().map(|&b| b as f64).collect();
+        if let Some(g) = &self.guide {
+            use engine_schema::guidance as gd;
+            let n = u64::from(self.cap.max_bodies.max(1));
+            out.resize(gd::GUIDE_SLOTS_BINDING + 1, 256.0);
+            let size = |b: u64| b.max(256) as f64;
+            out[gd::GUIDE_PARAMS_BINDING] = size(std::mem::size_of::<gd::GuideParamsGpu>() as u64);
+            out[gd::GUIDE_ZONES_BINDING] =
+                size(u64::from(g.cap.max_zones) * std::mem::size_of::<engine_schema::guidance::GuideZoneGpu>() as u64);
+            out[gd::GUIDE_BODIES_BINDING] =
+                size(n * std::mem::size_of::<gd::GuideBodyGpu>() as u64);
+            out[gd::GUIDE_SCRATCH_BINDING] = size(g.cap.scratch_words(self.cap.max_bodies) * 4);
+            out[gd::GUIDE_SLOTS_BINDING] =
+                size(u64::from(g.cap.plan_budget) * std::mem::size_of::<gd::GuideSlotGpu>() as u64);
+        }
+        out
+    }
+
+    /// Enable, disable or retune directed debris (`GuidanceSettings` JSON,
+    /// camelCase; missing fields take the defaults). Needs the `guidance`
+    /// capacity of the constructor.
+    pub fn set_guidance(&mut self, settings_json: &str) -> Result<(), JsError> {
+        let s: engine_schema::guidance::GuidanceSettings =
+            serde_json::from_str(settings_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let (gravity, dt) = (self.params.gravity_y, self.params.dt);
+        let g = self
+            .guide
+            .as_mut()
+            .ok_or_else(|| JsError::new("RigidStep was built without a guidance capacity"))?;
+        g.params = s.to_params(gravity, dt).map_err(|e| JsError::new(&e))?;
+        g.enabled = s.enabled;
+        Ok(())
+    }
+
+    /// Zone records (`ZoneDesc` JSON array) for binding 56, written at offset 0.
+    /// `body_count` bounds the anchors.
+    pub fn set_guidance_zones(
+        &mut self,
+        zones_json: &str,
+        body_count: u32,
+    ) -> Result<Vec<u8>, JsError> {
+        let zones: Vec<engine_schema::guidance::ZoneDesc> =
+            serde_json::from_str(zones_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let g = self
+            .guide
+            .as_mut()
+            .ok_or_else(|| JsError::new("RigidStep was built without a guidance capacity"))?;
+        if zones.len() > g.cap.max_zones as usize {
+            return Err(JsError::new(&format!(
+                "{} guidance zones exceed the capacity of {}",
+                zones.len(),
+                g.cap.max_zones
+            )));
+        }
+        let mut out = Vec::with_capacity(zones.len() * std::mem::size_of::<engine_schema::guidance::GuideZoneGpu>());
+        for (k, z) in zones.iter().enumerate() {
+            if let Some(b) = z.anchor_body {
+                if b >= body_count {
+                    return Err(JsError::new(&format!(
+                        "zone {k} anchors to body {b}, past the scene"
+                    )));
+                }
+            }
+            let gpu = z
+                .to_gpu()
+                .map_err(|e| JsError::new(&format!("zone {k}: {e}")))?;
+            out.extend_from_slice(bytemuck::bytes_of(&gpu));
+        }
+        g.zones = zones.len() as u32;
+        Ok(out)
+    }
+
+    /// This step's guidance params (binding 55), empty while guidance is off
+    /// or has no zones. `counts` as for `encode`.
+    pub fn guide_params(&self, counts: &[u32]) -> Vec<u8> {
+        if !self.guide_active() {
+            return Vec::new();
+        }
+        let g = self.guide.as_ref().unwrap();
+        let p = g.params.for_step(
+            engine_schema::guidance::GuideStep {
+                time: self.steps as f32 * self.params.dt,
+                dt: self.params.dt,
+                gravity_y: self.params.gravity_y,
+                zones: g.zones,
+                bodies: counts[0],
+                joints: counts[2],
+            },
+            g.cap,
+        );
+        bytemuck::bytes_of(&p).to_vec()
+    }
+
+    /// `count` guidance records (binding 57) arming bodies for zones whose tags
+    /// meet `tag_mask` (0: off); write them at the first body's record.
+    pub fn guide_records(count: u32, tag_mask: u32) -> Vec<u8> {
+        use engine_schema::guidance::GuideBodyGpu;
+        let r = if tag_mask == 0 {
+            GuideBodyGpu::default()
+        } else {
+            GuideBodyGpu::armed(1, tag_mask)
+        };
+        bytemuck::bytes_of(&r).repeat(count as usize)
+    }
+
+    /// Bodies per state then per end reason (`[u32; 12]`, as the lab's
+    /// `guideStateCounts`) of a binding-39 readback.
+    pub fn guide_state_counts(records: &[u8]) -> Vec<u32> {
+        use engine_schema::guidance::{GuideBodyGpu, GuideEnd};
+        let mut out = vec![0u32; 12];
+        for c in records.chunks_exact(std::mem::size_of::<GuideBodyGpu>()) {
+            let r: GuideBodyGpu = bytemuck::pod_read_unaligned(c);
+            out[(r.state as usize).min(3)] += 1;
+            out[4 + GuideEnd::of(&r) as usize] += 1;
+        }
+        out
+    }
+
+    /// Guidance bindings: params, zones, bodies, scratch, slots.
+    pub fn guide_bindings() -> Vec<u32> {
+        use engine_schema::guidance as gd;
+        [
+            gd::GUIDE_PARAMS_BINDING,
+            gd::GUIDE_ZONES_BINDING,
+            gd::GUIDE_BODIES_BINDING,
+            gd::GUIDE_SCRATCH_BINDING,
+            gd::GUIDE_SLOTS_BINDING,
+        ]
+        .map(|b| b as u32)
+        .to_vec()
+    }
+
+    /// Bytes of one body's guidance record (the bodies binding).
+    pub fn guide_record_bytes() -> u32 {
+        std::mem::size_of::<engine_schema::guidance::GuideBodyGpu>() as u32
+    }
+
+    /// Byte offset of the zone claim counters in the scratch binding.
+    pub fn guide_claims_offset() -> u32 {
+        engine_schema::guidance::GUIDE_SCRATCH_CLAIMS * 4
     }
 
     /// First AABB entry past the colliders (the vehicle host's ground blocks).
@@ -909,5 +1099,8 @@ impl RigidStep {
     }
 }
 
+pub mod gauntlet;
+pub mod meteors;
+pub mod run;
 #[cfg(test)]
 mod tests;

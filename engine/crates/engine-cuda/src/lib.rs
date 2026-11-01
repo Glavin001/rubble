@@ -431,6 +431,8 @@ impl CudaSim {
             },
             soft: Default::default(),
             command_count: 0,
+            guidance: false,
+            guide_slots: 0,
             explosion_count: 0,
         }
     }

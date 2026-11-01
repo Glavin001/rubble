@@ -265,6 +265,15 @@ pub struct Frame {
     pub counters: Option<StepCounters>,
     /// The open terrain region after this step's MPM substeps.
     pub terrain: Option<engine_webgpu::TerrainStepReport>,
+    /// With `TerrainDef::surface`: each open area's live ground after this
+    /// step's substeps (empty with none open).
+    pub terrain_surface: Vec<crate::TerrainSurfaceView>,
+    /// With `TerrainDef::surface` and `max_debris`: the sand in flight or
+    /// above the surface, and the parcels in flight.
+    pub terrain_debris: Vec<crate::TerrainDebris>,
+    /// Areas that baked before this step: their heightfield's samples (and
+    /// `World`'s copy of them) changed.
+    pub terrain_bakes: Vec<crate::TerrainBake>,
 }
 
 /// Several steps' frames folded into one, for hosts that step more often than
@@ -302,6 +311,12 @@ pub struct CoalescedFrame {
     pub dropped: bool,
     /// The last step that ran.
     pub counters: Option<StepCounters>,
+    /// The latest delivered step's terrain report, live surface and debris.
+    pub terrain: Option<engine_webgpu::TerrainStepReport>,
+    pub terrain_surface: Vec<crate::TerrainSurfaceView>,
+    pub terrain_debris: Vec<crate::TerrainDebris>,
+    /// Every folded step's bakes, in step order.
+    pub terrain_bakes: Vec<crate::TerrainBake>,
 }
 
 /// Fold frames (in step order) into one.
@@ -365,8 +380,13 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
         out.projectile_events.extend(f.projectile_events);
         out.lost_events += f.lost_events;
         out.dropped |= f.dropped;
+        out.terrain_bakes.extend(f.terrain_bakes);
+        // A delivered step's terrain is the world's as of that step.
         if f.counters.is_some() {
             out.counters = f.counters;
+            out.terrain = f.terrain;
+            out.terrain_surface = f.terrain_surface;
+            out.terrain_debris = f.terrain_debris;
         }
     }
     out.moves = moves.into_values().collect();
