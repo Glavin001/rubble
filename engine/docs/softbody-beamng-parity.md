@@ -195,6 +195,33 @@ depth: 240 Hz × 10 → 1.36 (25.1 cm against 25.6); 120 Hz × 10 → 2.35 still
 threshold changes the material, a trade-off for the user to choose. BeamNG.tech
 recordings and the 15-vehicle set are not available here.
 
+### Explicit beams: Rubble's own solver against Rigs of Rods (2026-11-01, DECISIONS s36)
+
+Clean-room from `docs/explicit-beams.md`; RoR used only as a black box afterwards.
+Same `.truck` files, 56 km/h into a wall, `soft_calibrate REF=ror SETTINGS=explicit,240x10`:
+
+| vehicle | solver | sag (mm) | crush 30 / 56 / 100 km/h max (cm) | 56 km/h profile (cm) | peak (g) |
+|---|---|---|---|---|---|
+| Agora S (on its tyres) | Rigs of Rods | 17.64 | 5.6 / 13.1 / 141.4 | 11 0 4 11 | 44 |
+| | Rubble explicit beams (GPU) | 17.65 | 5.6 / 13.3 / 143.9 | 11 0 4 11 | 44 |
+| | Rubble implicit 240 Hz × 10 | 11.95 | 3.3 / 22.7 / 184.0 | 19 0 7 19 | 33 |
+| Agora L (on its tyres) | Rigs of Rods | 23.38 | 12.7 / 32.3 / 186.7 | 31 12 0 4 14 | 21 |
+| | Rubble explicit beams (GPU) | 23.51 | 12.3 / 33.5 / 237.6 | 33 13 0 4 14 | 21 |
+| Sedan (bare, minimass 10) | Rigs of Rods | 2.19 | 63.9 / 248.5 / 317.2 | 0 53 0 0 0 | 33 |
+| | Rubble explicit beams (GPU) | 2.19 | 66.2 / 261.8 / 333.5 | 0 53 0 0 0 | 33 |
+
+Cost per 60 fps frame, back to back (`ror_ref bench`, `explicit_beams_check bench`):
+
+| | 1 | 10 | 40 | 100 | 400 | 1000 |
+|---|---|---|---|---|---|---|
+| Agora S, RoR thread pool / 1 thread | 1.61 / 0.26 | 1.64 / 2.80 | 3.77 / 13.1 | 7.78 / 40.8 | | |
+| Agora S, Rubble explicit beams | 0.74 | 0.76 | 0.76 | 0.97 | 3.35 | 8.0 |
+| Agora L, RoR thread pool / 1 thread | 1.65 / 0.40 | 2.02 / 4.07 | 5.02 / 18.4 | 10.7 / 58.2 | | |
+| Agora L, Rubble explicit beams | 0.77 | 0.82 | 0.84 | 1.35 | 4.9 | 11.7 |
+
+Side-by-side videos: `explicit_beams_check trace= trace_steps=8` and
+`examples/compare_video.rs` (videos kept locally, not in the repo).
+
 ### Matching Rigs of Rods: RoR's step on the GPU (2026-11-01, DECISIONS s34; code removed, s35)
 
 The code measured here was translated from RoR's source and has been removed; the

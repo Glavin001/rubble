@@ -12,7 +12,8 @@
 //! `box=cx,cy,cz,hx,hy,hz` a static box (centre, half extents), `secs=` simulated
 //! time, `bare=1` drops the `wheels`, `engine` and `brakes` sections, `turb=1` turns
 //! turbulence on (off by default: CPU and GPU draw different noise),
-//! `trace=<file>` with `trace_every=<frames>` writes the GPU run: u32 nodes, u32
+//! `trace=<file>` with `trace_every=<frames>` (or `trace_steps=<steps>`, GPU only)
+//! writes the GPU run: u32 nodes, u32
 //! beams, then per sample every node's world position (f32 xyz) and every beam's
 //! broken flag (u8).
 //!
@@ -118,6 +119,22 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     };
     write_sample(&gpu)?;
+    // `trace_steps=N`: the GPU run alone, sampled every N steps (to line up with a
+    // reference trace sampled the same way).
+    if let Some(n) = kv.get("trace_steps").map(|s| s.parse::<u32>().unwrap()) {
+        let total = (secs / engine_softbody::explicit_beams::STEP).round() as u32;
+        let mut done = 0;
+        while done < total {
+            gpu.frame(n);
+            done += n;
+            write_sample(&gpu)?;
+        }
+        if let Some(mut w) = trace {
+            w.flush()?;
+        }
+        println!("trace: {} samples every {n} steps", total / n + 1);
+        return Ok(());
+    }
     println!("   t     rms(mm)   max(mm)   cpu broken/bent   gpu broken/bent");
     for f in 1..=frames {
         let steps = cpu.frame();
