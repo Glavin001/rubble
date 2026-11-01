@@ -51,42 +51,5 @@ export class Poses {
   rotation(slot) { return Array.from(this.pose.subarray(slot * 7 + 3, slot * 7 + 7)); }
 }
 
-// One macrotask: lets the browser run GPU map callbacks.
-const channel = new MessageChannel();
-let waiting = [];
-channel.port1.onmessage = () => { const w = waiting; waiting = []; for (const r of w) r(); };
-export const macrotask = () => new Promise((r) => { waiting.push(r); if (waiting.length === 1) channel.port2.postMessage(0); });
-
-/** Polls the world, hands the frame to `onFrame` and frees it; tracks the last step seen. */
-export function pollFrame(world, onFrame) {
-  const f = world.poll();
-  if (!f.empty) world.lastPolledStep = f.lastStep;
-  onFrame(f);
-  f.free();
-}
-
-/**
- * `n` steps as fast as readbacks allow (automation, checks), handing each poll's
- * frame to `onFrame`; resolves once every step's results have arrived.
- * `beforeStep()` runs right before each step is taken (per-step inputs).
- */
-export async function stepFrames(world, n, onFrame, beforeStep = null) {
-  for (let i = 0; i < n;) {
-    if (world.canStep()) {
-      beforeStep?.();
-      world.step();
-      i++;
-    } else await macrotask();
-    pollFrame(world, onFrame);
-  }
-  await drain(world, onFrame);
-}
-
-/** Resolves once the frames of every step taken so far have been polled. */
-export async function drain(world, onFrame) {
-  const last = world.stepCount() - 1;
-  while ((world.lastPolledStep ?? -1) < last) {
-    await macrotask();
-    pollFrame(world, onFrame);
-  }
-}
+// The frame helpers every page shares (no wasm: unit tests import them alone).
+export { macrotask, pollFrame, stepFrames, drain } from './world-loop.mjs';

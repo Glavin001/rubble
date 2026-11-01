@@ -1,14 +1,21 @@
-// Thin typed layer over the shared Rust host logic (engine-fracture, built to
-// wasm by engine-fracture-wasm): GLB parsing, scene building, hull cooking and
-// the per-tick dispatch plan. The native Metal viewer runs the same Rust.
-// Build: see fracture/README.md (wasm-pack ... --out-dir ../engine-webgpu/generated/fracture-wasm).
-import init,{initSync,Asset,Scene,Plan,nearMissSettings,HullArena as RustArena,hullView as rustHullView,hullBase,samples,colliderWorldVertices,colliderWorldBounds,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices} from '../generated/fracture-wasm/engine_fracture_wasm.js';
+// Thin typed layer over the shared Rust host logic (engine-fracture): GLB parsing, scene
+// building and hull cooking. In the browser these bindings are part of the World module
+// (engine-world-wasm links engine-fracture-wasm), so a scene goes to the World that steps
+// it (lab-world.mjs) without a copy; Node (the unit tests) loads engine-fracture-wasm
+// alone. The native Metal viewer runs the same Rust.
+// Build: see fracture/README.md (wasm-pack ... --out-dir ../engine-webgpu/generated/world-wasm).
+const node=!!globalThis.process?.versions?.node;
+const mod=node?await import('../generated/fracture-wasm/engine_fracture_wasm.js'):await import('../generated/world-wasm/engine_world_wasm.js');
+const {Asset,Scene,nearMissSettings,HullArena:RustArena,hullView:rustHullView,hullBase,samples,colliderWorldVertices,colliderWorldBounds,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices}=mod;
+if(node){const {readFileSync}=await import('node:fs');mod.initSync({module:readFileSync(new URL('../generated/fracture-wasm/engine_fracture_wasm_bg.wasm',import.meta.url))})}
+// The build Broadside also loads: its Asyncify one where the browser has no JSPI (Safari).
+else{const {JSPI}=await import('./gpu-wait.mjs');await mod.default({module_or_path:new URL(`../generated/world-wasm/engine_world_wasm_bg${JSPI?'':'.asyncify'}.wasm`,import.meta.url)})}
+// The lab's World assets (browser only: engine-world-wasm lab.rs).
+export const LabAsset=mod.LabAsset;
 
-const wasmUrl=new URL('../generated/fracture-wasm/engine_fracture_wasm_bg.wasm',import.meta.url);
-if(globalThis.process?.versions?.node){const {readFileSync}=await import('node:fs');initSync({module:readFileSync(wasmUrl)})}
-else await init({module_or_path:wasmUrl});
-
-export {Plan,nearMissSettings,hullBase,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices};
+// The JS host's plan (simulation.mjs, until it goes).
+export const Plan=mod.Plan;
+export {nearMissSettings,hullBase,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices};
 export const SAMPLES=samples();
 
 // A parsed fracture GLB: the Rust Asset plus the fields the lab shows.
