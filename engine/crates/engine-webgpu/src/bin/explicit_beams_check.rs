@@ -212,7 +212,7 @@ fn run_bench(
     }
     let cpu_ms = t.elapsed().as_secs_f64() * 1e3 / frames as f64;
     println!("CPU reference, 1 vehicle, single thread: {cpu_ms:.3} ms per frame (33 steps)");
-    println!("vehicles   ms/frame (median)   best   per vehicle (µs)");
+    println!("vehicles   ms/frame (median)   best   per vehicle (µs)   pipelined ms/frame   1-step frame ms");
     for &n in &counts {
         // Copies side by side, 10 m apart (every vehicle is independent anyway).
         let fleet: Vec<ExplicitBeams> = (0..n)
@@ -243,7 +243,28 @@ fn run_bench(
         times.sort_by(|a, b| a.total_cmp(b));
         let ms = times[times.len() / 2];
         let best = times[0];
-        println!("{n:8} {ms:14.3} {best:10.3} {:16.2}", ms * 1e3 / n as f64);
+        // Pipelined, as a game runs: 120 frames submitted back to back, one wait.
+        let t = Instant::now();
+        for _ in 0..120 {
+            gpu.frame(33);
+        }
+        gpu.wait();
+        let piped = t.elapsed().as_secs_f64() * 1e3 / 120.0;
+        // The fixed cost: a frame of a single step, submit to completion.
+        let mut one: Vec<f64> = (0..60)
+            .map(|_| {
+                let t = Instant::now();
+                gpu.frame(1);
+                gpu.wait();
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        one.sort_by(|a, b| a.total_cmp(b));
+        println!(
+            "{n:8} {ms:14.3} {best:10.3} {:16.2} {piped:18.3} {:16.3}",
+            ms * 1e3 / n as f64,
+            one[one.len() / 2]
+        );
     }
     Ok(())
 }
