@@ -79,7 +79,27 @@ impl WebFrame {
         set("candidates", f64::from(c.candidate_count));
         set("manifolds", f64::from(c.manifold_count));
         set("overflow", f64::from(c.overflow_flags));
+        set("colorRounds", f64::from(c.color_rounds));
         o.into()
+    }
+
+    /// Each folded step's GPU time (`WorldDef.gpuTiming`): `{ step, totalMs,
+    /// spanMs, segments: [[name, ms], ...], unmeasured: [name, ...] }`, in
+    /// step order.
+    #[wasm_bindgen(js_name = gpuTimes)]
+    pub fn gpu_times(&self) -> JsValue {
+        js(self
+            .frame
+            .gpu_times
+            .iter()
+            .map(|(step, t)| {
+                serde_json::json!({
+                    "step": step, "totalMs": t.total_ms, "spanMs": t.span_ms,
+                    "segments": t.segments.iter().map(|(n, ms)| serde_json::json!([n, ms])).collect::<Vec<_>>(),
+                    "unmeasured": t.unmeasured,
+                })
+            })
+            .collect())
     }
 }
 

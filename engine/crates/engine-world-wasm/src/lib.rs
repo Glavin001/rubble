@@ -21,6 +21,7 @@ mod broadside_page;
 pub use broadside_page::*;
 
 mod defs;
+mod demo;
 mod frame;
 mod guidance;
 mod motion;

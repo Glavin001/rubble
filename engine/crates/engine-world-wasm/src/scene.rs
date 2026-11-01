@@ -90,7 +90,9 @@ impl WebWorld {
 
     /// A ball joint (`JointDesc::ball`, Rubble's D6 preset) at `anchorA` on A
     /// and `anchorB` on B (each from its body's origin), breaking past
-    /// `breakForce` / `breakTorque` (≤ 0: never). Returns its handle.
+    /// `breakForce` / `breakTorque` (≤ 0: never). `linearStiffness` /
+    /// `angularStiffness` make its rows springs (a drag joint) and `torqueArm`
+    /// fixes its angular scale (0: from the bodies' sizes). Returns its handle.
     #[wasm_bindgen(js_name = createBallJoint)]
     pub fn create_ball_joint(&mut self, def: JsValue) -> Result<f64, JsValue> {
         let mut f = Fields::of("BallJoint", def)?;
@@ -104,10 +106,11 @@ impl WebWorld {
         f.f32("breakForce", &mut break_force)?;
         f.f32("breakTorque", &mut break_torque)?;
         f.u64("userData", &mut user_data)?;
-        f.finish()?;
         let big = |v: f32| if v > 0.0 { v } else { engine_schema::JOINT_BIG };
         let desc = engine_schema::JointDesc::ball(0, 0, glam::Vec3::from(anchor_a), glam::Vec3::from(anchor_b))
             .with_break(big(break_force), big(break_torque));
+        let desc = crate::demo::ball_extras(&mut f, desc)?;
+        f.finish()?;
         let def = JointDef::Custom { body_a: BodyId::from_bits(a), body_b: BodyId::from_bits(b), desc, user_data };
         Ok(handle(res(self.world.create_joint(&def))?.to_bits()))
     }

@@ -274,6 +274,60 @@ pub struct Frame {
     /// Areas that baked before this step: their heightfield's samples (and
     /// `World`'s copy of them) changed.
     pub terrain_bakes: Vec<crate::TerrainBake>,
+    /// With `WorldDef::gpu_timing` on: the rigid step's GPU time.
+    pub gpu_time: Option<StepGpuTime>,
+}
+
+/// One rigid step's GPU time from timestamp queries (`WorldDef::gpu_timing`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StepGpuTime {
+    /// Each timed pass segment, in order: the plan phase it ends with (or
+    /// `"step"`, the whole step's pass, with `GpuTiming::Step`), and its
+    /// GPU time in ms.
+    pub segments: Vec<(&'static str, f64)>,
+    /// Segments whose timestamps the device left unwritten (both zero; native
+    /// Metal leaves the device's first pair and the last pass of a per-phase
+    /// step so). They are not in `segments` or the totals.
+    pub unmeasured: Vec<&'static str>,
+    /// Sum of the segments: the step's GPU work.
+    pub total_ms: f64,
+    /// First measured segment's start to the last one's end (includes the
+    /// gaps between passes).
+    pub span_ms: f64,
+}
+
+impl StepGpuTime {
+    /// From resolved timestamps (a begin and an end tick per segment) and
+    /// the tick length. `None` when a written pair runs backwards (invalid
+    /// evidence, never a time) or nothing was measured.
+    pub fn from_ticks(names: &[&'static str], ticks: &[u64], period_ns: f64) -> Option<Self> {
+        if ticks.len() < 2 * names.len() || names.is_empty() {
+            return None;
+        }
+        let ms = |t: u64| t as f64 * period_ns * 1e-6;
+        let mut out = Self::default();
+        let (mut first, mut last) = (u64::MAX, 0u64);
+        for (k, name) in names.iter().enumerate() {
+            let (a, b) = (ticks[2 * k], ticks[2 * k + 1]);
+            if a == 0 && b == 0 {
+                out.unmeasured.push(name);
+                continue;
+            }
+            if b < a || a == 0 {
+                return None;
+            }
+            let t = ms(b - a);
+            out.total_ms += t;
+            out.segments.push((*name, t));
+            first = first.min(a);
+            last = last.max(b);
+        }
+        if out.segments.is_empty() {
+            return None;
+        }
+        out.span_ms = ms(last - first);
+        Some(out)
+    }
 }
 
 /// Several steps' frames folded into one, for hosts that step more often than
@@ -317,6 +371,8 @@ pub struct CoalescedFrame {
     pub terrain_debris: Vec<crate::TerrainDebris>,
     /// Every folded step's bakes, in step order.
     pub terrain_bakes: Vec<crate::TerrainBake>,
+    /// Every folded step's GPU time (`WorldDef::gpu_timing`), with its step.
+    pub gpu_times: Vec<(u64, StepGpuTime)>,
 }
 
 /// Fold frames (in step order) into one.
@@ -326,13 +382,23 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
         return out;
     };
     out.steps = Some((first.step, last.step));
+    // One frame (the common poll): its moves are already one per body.
+    let single = frames.len() == 1;
     let mut moves: BTreeMap<BodyId, BodyMoveEvent> = BTreeMap::new();
     let mut vehicles = BTreeMap::new();
     let mut soft = BTreeMap::new();
     let mut skins = BTreeMap::new();
     let mut characters = BTreeMap::new();
     let mut projectiles = BTreeMap::new();
-    for f in frames {
+    for mut f in frames {
+        if single {
+            // The map's order: by body.
+            let mut m = std::mem::take(&mut f.body_events.moves);
+            if !m.is_sorted_by_key(|e| e.body) {
+                m.sort_by_key(|e| e.body);
+            }
+            out.moves = m;
+        }
         for m in f.body_events.moves {
             moves
                 .entry(m.body)
@@ -381,6 +447,9 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
         out.lost_events += f.lost_events;
         out.dropped |= f.dropped;
         out.terrain_bakes.extend(f.terrain_bakes);
+        if let Some(t) = f.gpu_time {
+            out.gpu_times.push((f.step, t));
+        }
         // A delivered step's terrain is the world's as of that step.
         if f.counters.is_some() {
             out.counters = f.counters;
@@ -389,7 +458,9 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
             out.terrain_debris = f.terrain_debris;
         }
     }
-    out.moves = moves.into_values().collect();
+    if !single {
+        out.moves = moves.into_values().collect();
+    }
     out.vehicles = vehicles.into_values().collect();
     out.soft = soft.into_values().collect();
     out.skins = skins.into_values().collect();
@@ -421,6 +492,36 @@ mod tests {
             body_events: BodyEvents { moves },
             ..Frame::default()
         }
+    }
+
+    #[test]
+    fn gpu_time_sums_segments_and_spans_gaps() {
+        let names = ["broadphase", "narrowphase", "tail"];
+        // 1 ms, 2 ms and 0.5 ms passes with 1 ms gaps, at 1 ns ticks.
+        let ticks = [
+            1_000_000, 2_000_000, 3_000_000, 5_000_000, 6_000_000, 6_500_000,
+        ];
+        let t = StepGpuTime::from_ticks(&names, &ticks, 1.0).unwrap();
+        assert_eq!(
+            t.segments,
+            vec![("broadphase", 1.0), ("narrowphase", 2.0), ("tail", 0.5)]
+        );
+        assert!((t.total_ms - 3.5).abs() < 1e-12);
+        assert!((t.span_ms - 5.5).abs() < 1e-12);
+        assert!(t.unmeasured.is_empty());
+        // A reversed pair is not a time; nothing written is no time.
+        assert!(StepGpuTime::from_ticks(&names, &[1, 2, 5, 3, 6, 7], 1.0).is_none());
+        assert!(StepGpuTime::from_ticks(&names, &[0, 0, 0, 0, 0, 0], 1.0).is_none());
+        assert!(StepGpuTime::from_ticks(&names, &ticks[..4], 1.0).is_none());
+        // An unwritten pair is reported, not counted.
+        let t = StepGpuTime::from_ticks(
+            &names,
+            &[1_000_000, 2_000_000, 3_000_000, 5_000_000, 0, 0],
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(t.unmeasured, vec!["tail"]);
+        assert!((t.total_ms - 3.0).abs() < 1e-12 && (t.span_ms - 4.0).abs() < 1e-12);
     }
 
     #[test]

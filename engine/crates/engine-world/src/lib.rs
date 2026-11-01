@@ -35,6 +35,7 @@ mod motion;
 mod queries;
 mod readback;
 mod rig;
+mod snapshot_import;
 mod support_loss;
 mod terrain;
 mod threshold;
@@ -59,7 +60,8 @@ pub use error::{StaleHandle, Unsupported};
 pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
     ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,
-    RayBatchResult, SensorEvent, SensorEvents, SkinId, SkinOutput, SoftOutput, VehicleOutput,
+    RayBatchResult, SensorEvent, SensorEvents, SkinId, SkinOutput, SoftOutput, StepGpuTime,
+    VehicleOutput,
 };
 pub use guidance::{
     BodyGuidance, GuidanceCapacity, GuidanceSettings, GuidanceZone, GuideEnd, GuideState,
@@ -80,6 +82,7 @@ pub use motion::{
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
+pub use snapshot_import::SnapshotImport;
 pub use terrain::{
     StrikeDef, TerrainArea, TerrainBake, TerrainDebris, TerrainDef, TerrainPrediction,
     TerrainSurfaceDef, TerrainSurfaceView,
@@ -105,7 +108,7 @@ pub use engine_vehicle::{
     FunctionalState, GearRequest, MountLoad, VehicleCapacity, VehicleDesc, VehicleHandle,
     VehicleInput, VehicleState, WheelState,
 };
-pub use engine_webgpu::{ContactStorage, EngineFeatures, WgpuSim};
+pub use engine_webgpu::{ContactStorage, EngineFeatures, GpuTiming, WgpuSim};
 
 use engine_schema::convex::HullArena;
 use engine_schema::{BodyState, Collider, GpuCommand, ShapeType};
@@ -160,6 +163,8 @@ pub struct WorldDef {
     /// `enable_hit_events` are also reported as hits (Box3D
     /// `hitEventThreshold`).
     pub hit_event_threshold: f32,
+    /// Time the rigid step on the GPU (timestamp queries; `Frame::gpu_time`).
+    pub gpu_timing: GpuTiming,
 }
 
 impl Default for WorldDef {
@@ -180,6 +185,7 @@ impl Default for WorldDef {
             hit_event_threshold: 1.0,
             backpressure: Backpressure::Block,
             guidance: None,
+            gpu_timing: GpuTiming::Off,
         }
     }
 }
@@ -273,6 +279,8 @@ enum Extra {
     TerrainSurface(ShapeId, Vec<engine_terrain::surface::SurfaceViewRange>),
     /// The surface pass's debris gather.
     TerrainDebris,
+    /// The step's resolved timestamps, for these pass segments.
+    GpuTimes(Vec<&'static str>),
 }
 
 #[derive(Clone, Debug)]
@@ -495,6 +503,7 @@ impl World {
             params.sleep_time = f32::MAX;
         }
         sim.set_params(params);
+        sim.set_gpu_timing(def.gpu_timing)?;
         let readback = ReadbackRing::new(&sim, def.readback_frames);
         Ok(Self {
             sim,
@@ -666,6 +675,13 @@ impl World {
     /// GPU time of the last step the host waited for (ms).
     pub fn profile_ms(&self) -> f64 {
         self.sim.timings_ms()
+    }
+
+    /// Time the rigid step on the GPU from the next step on
+    /// ([`WorldDef::gpu_timing`]); each timed step's frame carries
+    /// `Frame::gpu_time`. Needs timestamp queries on the device.
+    pub fn set_gpu_timing(&mut self, mode: GpuTiming) -> anyhow::Result<()> {
+        self.sim.set_gpu_timing(mode)
     }
 
     /// Replace the solver settings (step size, iterations, contact and
@@ -989,6 +1005,32 @@ impl World {
             self.sim.set_motion_locks(true);
         }
         self.command(id, GpuCommand::set_locks(id.index(), locks.bits()))
+    }
+
+    /// Continuous collision on or off (Box3D `b3Body_SetBullet`). The flag is
+    /// inert on a static or kinematic body: set there, it takes effect when
+    /// [`World::body_set_type`] makes the body dynamic (a parked projectile
+    /// launched later). A dynamic body's flag is set at creation
+    /// (`BodyDef::is_bullet`); changing it in flight would need a GPU command
+    /// and is refused.
+    pub fn body_set_bullet(&mut self, id: BodyId, bullet: bool) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        if self.bodies[i].bullet == bullet {
+            return Ok(());
+        }
+        if self.bodies[i].body_type == BodyType::Dynamic {
+            return unsupported(
+                "changing a dynamic body's continuous collision (set BodyDef::is_bullet, or set \
+                 it while the body is static or kinematic)",
+            );
+        }
+        self.bodies[i].bullet = bullet;
+        Ok(())
+    }
+
+    /// Whether the body has continuous collision ([`World::body_set_bullet`]).
+    pub fn body_is_bullet(&self, id: BodyId) -> anyhow::Result<bool> {
+        Ok(self.bodies[self.live_body(id)?].bullet)
     }
 
     pub fn body_motion_locks(&self, id: BodyId) -> anyhow::Result<MotionLocks> {
@@ -1913,6 +1955,7 @@ impl World {
             self.encode_fracture(&mut enc);
         }
         let mut mapped = None;
+        let mut timed: Option<(Extra, u64)> = None;
         if ran {
             // Ray results are never dropped: a frame with queries waits for a slot.
             // Nor are contact events: a lost frame would break begin/end pairing.
@@ -1980,7 +2023,20 @@ impl World {
                     });
                 }
                 extras.extend(motion::extras(&self.sim, &self.motion, casts));
-                let slot = self.readback.encode(&self.sim, &mut enc, step, &extras);
+                // The step's timestamps are resolved in a submission of their
+                // own after the step's (Metal: a resolve in the same command
+                // buffer can read the last passes' samples before they land).
+                timed = self
+                    .sim
+                    .step_timestamps()
+                    .map(|(_, size, names)| (Extra::GpuTimes(names.to_vec()), size));
+                let slot = self.readback.encode(
+                    &self.sim,
+                    &mut enc,
+                    step,
+                    &extras,
+                    timed.as_slice(),
+                );
                 if terrain {
                     // Copied: the next frame's flags start clear.
                     self.sim.terrain_encode_flags_clear(&mut enc);
@@ -2005,6 +2061,19 @@ impl World {
         }
         self.sim.queue().submit([enc.finish()]);
         if let Some(slot) = mapped {
+            if let Some((_, size)) = &timed {
+                let mut late = self
+                    .sim
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("world step timestamps"),
+                    });
+                let (dst, at) = self.readback.late_target(slot, 0);
+                if let Some((src, _, _)) = self.sim.resolve_step_timestamps(&mut late) {
+                    late.copy_buffer_to_buffer(src, 0, dst, at, *size);
+                }
+                self.sim.queue().submit([late.finish()]);
+            }
             self.readback.map(slot);
         }
         let _ = self.sim.device().poll(wgpu::PollType::Poll);
@@ -2234,7 +2303,21 @@ impl World {
                 .collect(),
             None => raw.moved,
         };
-        records.sort_by_key(|r| r.body());
+        // In body order. Slots are unique in a step's list, so a dense list
+        // (most bodies moved) is placed by slot instead of sorted; records past
+        // the world's slots are skipped below either way.
+        let body_slots = self.bodies.len();
+        if records.len() >= 1024 && records.len() * 4 >= body_slots {
+            let mut placed: Vec<Option<engine_webgpu::PoseRecord>> = vec![None; body_slots];
+            for r in records.drain(..) {
+                if let Some(p) = placed.get_mut(r.body() as usize) {
+                    *p = Some(r);
+                }
+            }
+            records.extend(placed.into_iter().flatten());
+        } else {
+            records.sort_unstable_by_key(|r| r.body());
+        }
         let mut moves = Vec::with_capacity(records.len() + adopted.len());
         for r in &records {
             let i = r.body() as usize;
@@ -2312,6 +2395,7 @@ impl World {
         let mut terrain = None;
         let mut terrain_surface = Vec::new();
         let mut terrain_debris = Vec::new();
+        let mut gpu_time = None;
         let mut contact_events = ContactEvents::default();
         let mut sensor_events = SensorEvents::default();
         let mut overlap_results = Vec::new();
@@ -2379,6 +2463,11 @@ impl World {
                     terrain_surface = Self::terrain_surface_views(*shape, views, bytes)
                 }
                 Extra::TerrainDebris => terrain_debris = self.terrain_debris(step, bytes)?,
+                Extra::GpuTimes(names) => {
+                    let ticks: Vec<u64> = bytemuck::pod_collect_to_vec(bytes);
+                    let period = f64::from(self.sim.timestamp_period_ns());
+                    gpu_time = StepGpuTime::from_ticks(names, &ticks, period);
+                }
             }
         }
         Ok(Frame {
@@ -2407,6 +2496,7 @@ impl World {
             terrain_surface,
             terrain_debris,
             terrain_bakes: Vec::new(),
+            gpu_time,
         })
     }
 

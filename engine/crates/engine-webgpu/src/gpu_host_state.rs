@@ -99,6 +99,13 @@ impl WgpuSim {
         &self.bufs[7]
     }
 
+    /// The step's colour bucket sizes (binding 17: bodies per primal colour in
+    /// words `[0, max_colors)`, then per-colour max degrees), for checks that
+    /// the colouring covered every awake body.
+    pub fn color_count_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[17]
+    }
+
     /// The soft-body arena (binding 32, `vec4<u32>` slots laid out by
     /// `SoftCapacity::layout`: body records, beams, groups, triangles, ...),
     /// for renderers (beam views) and reads of soft state.

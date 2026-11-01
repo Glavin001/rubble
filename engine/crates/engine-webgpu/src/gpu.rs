@@ -79,6 +79,50 @@ struct GuideHost {
     zones: u32,
 }
 
+/// The step's timestamp queries and their resolve buffer ([`WgpuSim::set_gpu_timing`]).
+struct StepQueries {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    /// Pass segments one step can time.
+    segments: u32,
+}
+
+/// A compute pass of the step, timestamped as segment `segment` when the
+/// queries have room for it.
+fn begin_timed<'e>(enc: &'e mut wgpu::CommandEncoder, queries: Option<&StepQueries>, segment: usize) -> wgpu::ComputePass<'e> {
+    let timestamp_writes = queries
+        .filter(|q| segment < q.segments as usize)
+        .map(|q| wgpu::ComputePassTimestampWrites {
+            query_set: &q.set,
+            beginning_of_pass_write_index: Some(2 * segment as u32),
+            end_of_pass_write_index: Some(2 * segment as u32 + 1),
+        });
+    enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("step"),
+        timestamp_writes,
+    })
+}
+
+impl StepQueries {
+    fn new(device: &wgpu::Device) -> Self {
+        let segments = 128;
+        Self {
+            set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("step timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2 * segments,
+            }),
+            resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("step timestamps"),
+                size: 16 * u64::from(segments),
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            segments,
+        }
+    }
+}
+
 pub struct WgpuSim {
     /// Directed debris (`allocate_guidance`); `None`: not allocated.
     guide: Option<GuideHost>,
@@ -153,6 +197,11 @@ pub struct WgpuSim {
     motion_locks: bool,
     /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
     last_step_ran: bool,
+    /// Timestamp queries around the step's passes ([`WgpuSim::set_gpu_timing`]).
+    gpu_timing: crate::GpuTiming,
+    step_queries: Option<StepQueries>,
+    /// Segments the last encoded step timed (empty: not timed), in pass order.
+    timed_segments: Vec<&'static str>,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
     last_timings: PhaseTimingsMs,
@@ -787,6 +836,9 @@ impl WgpuSim {
             explosion_count: 0,
             motion_locks: false,
             last_step_ran: false,
+            gpu_timing: crate::GpuTiming::Off,
+            step_queries: None,
+            timed_segments: Vec::new(),
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
             last_timings: PhaseTimingsMs::default(),
@@ -2074,6 +2126,7 @@ impl WgpuSim {
             self.counted_steps = self.steps_done;
             self.last_timings.total_gpu = 0.0;
             self.last_step_ran = false;
+            self.timed_segments.clear();
             return Ok(self.last_counters);
         }
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
@@ -2258,22 +2311,39 @@ impl WgpuSim {
     }
 
     /// The plan's dispatches in one compute pass of `enc` (its copies are encoded before).
-    fn encode_dispatches(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
+    fn encode_dispatches(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
         self.encode_dispatches_hooked(enc, cmds, None);
     }
 
     /// [`Self::encode_dispatches`], with `hook` encoded into `enc` where the plan marks
     /// the end of phase `hook.0` (the step's pass ends before it and resumes after).
-    fn encode_dispatches_hooked(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], mut hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) {
-        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("step"),
-            timestamp_writes: None,
-        });
+    fn encode_dispatches_hooked(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) {
+        let segments = self.encode_passes(enc, cmds, hook);
+        self.timed_segments = segments;
+    }
+
+    /// The plan's dispatches in compute passes of `enc`; returns the segments
+    /// it timed (see [`WgpuSim::set_gpu_timing`]).
+    fn encode_passes(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], mut hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) -> Vec<&'static str> {
         let split = std::env::var("RUBBLE_PASS_PER_PHASE").is_ok_and(|v| v == "1");
+        let queries = self
+            .step_queries
+            .as_ref()
+            .filter(|_| self.gpu_timing != crate::GpuTiming::Off);
+        // A pass per phase when phases are timed, or when the pass is split
+        // anyway (then the step's time is the sum of its segments).
+        let per_phase = queries.is_some()
+            && (self.gpu_timing == crate::GpuTiming::Phases || split || hook.is_some());
+        let mut segments: Vec<&'static str> = Vec::new();
         // `RUBBLE_SKIP_KERNELS=a,b` (diagnostic, A/B timing): leave those out.
         let skip = std::env::var("RUBBLE_SKIP_KERNELS").unwrap_or_default();
         let skipped = |k: &str| !skip.is_empty() && skip.split(',').any(|s| s == k);
-        for c in cmds {
+        // Timed per phase, a pass ends only at a marker after some dispatch: an
+        // empty pass need not write its timestamps (Dawn and Metal leave them
+        // zero), and a phase with no work has no time to report.
+        let mut dispatched = false;
+        let mut pass = Some(begin_timed(enc, queries, 0));
+        for (k, c) in cmds.iter().enumerate() {
             match *c {
                 rigid_plan::Cmd::Dispatch { kernel, .. }
                 | rigid_plan::Cmd::Indirect { kernel, .. }
@@ -2285,20 +2355,28 @@ impl WgpuSim {
             }
             if let (rigid_plan::Cmd::Phase { name, .. }, Some((at, f))) = (c, hook.as_mut()) {
                 if name == at {
-                    drop(pass);
+                    // Ends the step's pass (its borrow of `enc`) before the hook.
+                    #[allow(unused_assignments)]
+                    {
+                        pass = None;
+                    }
+                    segments.push(*name);
+                    dispatched = false;
                     f(enc);
                     hook = None;
-                    pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step"), timestamp_writes: None });
+                    pass = Some(begin_timed(enc, queries, segments.len()));
                     continue;
                 }
             }
             match *c {
-                rigid_plan::Cmd::Phase { .. } if split => {
-                    drop(pass);
-                    pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("step"),
-                        timestamp_writes: None,
-                    });
+                rigid_plan::Cmd::Phase { .. } if per_phase && !dispatched => {}
+                rigid_plan::Cmd::Phase { name } if split || per_phase => {
+                    pass = None;
+                    segments.push(name);
+                    dispatched = false;
+                    if !(per_phase && k + 1 == cmds.len()) {
+                        pass = Some(begin_timed(enc, queries, segments.len()));
+                    }
                 }
                 rigid_plan::Cmd::Copy { .. } | rigid_plan::Cmd::Phase { .. } => {}
                 rigid_plan::Cmd::Dispatch {
@@ -2306,21 +2384,35 @@ impl WgpuSim {
                     threads,
                     pass: p,
                 } => {
-                    self.disp(&mut pass, kernel, threads, Some(p));
+                    dispatched = true;
+                    self.disp(pass.as_mut().expect("a pass"), kernel, threads, Some(p));
                 }
                 rigid_plan::Cmd::Indirect {
                     kernel,
                     slot,
                     pass: p,
                 } => {
+                    dispatched = true;
+                    let pass = pass.as_mut().expect("a pass");
                     if kernel.starts_with("solve_primal_color") {
-                        self.disp_indirect(&mut pass, slot);
+                        self.disp_indirect(pass, slot);
                     } else {
-                        self.disp_work(&mut pass, kernel, slot, Some(p));
+                        self.disp_work(pass, kernel, slot, Some(p));
                     }
                 }
             }
         }
+        let pass_open = pass.is_some();
+        drop(pass);
+        let Some(q) = queries else {
+            return Vec::new();
+        };
+        if !per_phase || (dispatched && pass_open) {
+            segments.push(if per_phase { "tail" } else { "step" });
+        }
+        // Passes past the query set's capacity ran untimed (never in the shipped plans).
+        segments.truncate(q.segments as usize);
+        segments
     }
 
     /// `step_submit` encoded into the caller's `enc` instead of a submission of its own:
@@ -2360,6 +2452,7 @@ impl WgpuSim {
             self.counted_steps = self.steps_done;
             self.last_timings.total_gpu = 0.0;
             self.last_step_ran = false;
+            self.timed_segments.clear();
             return Ok(false);
         }
         self.refresh_cell();
@@ -2807,6 +2900,61 @@ impl WgpuSim {
 
     pub fn timings_ms(&self) -> f64 {
         self.last_timings.total_gpu
+    }
+
+    /// Time the rigid step on the GPU with timestamp queries: `Step` brackets
+    /// the step's compute pass, `Phases` gives each phase of the plan its own
+    /// pass and pair of timestamps (the extra pass boundaries perturb the
+    /// step a little). The host resolves each timed step's timestamps
+    /// ([`WgpuSim::resolve_step_timestamps`]) and copies them with its
+    /// readback; nothing waits. Needs `Features::TIMESTAMP_QUERY` on the device.
+    pub fn set_gpu_timing(&mut self, mode: crate::GpuTiming) -> anyhow::Result<()> {
+        if mode != crate::GpuTiming::Off {
+            anyhow::ensure!(
+                self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY),
+                "GPU step timing needs timestamp queries (Features::TIMESTAMP_QUERY) on the device"
+            );
+            if self.step_queries.is_none() {
+                self.step_queries = Some(StepQueries::new(&self.device));
+            }
+        }
+        self.gpu_timing = mode;
+        Ok(())
+    }
+
+    pub fn gpu_timing(&self) -> crate::GpuTiming {
+        self.gpu_timing
+    }
+
+    /// Resolve the last encoded step's timestamps into
+    /// [`WgpuSim::step_timestamps`]' buffer. Encode it in a submission after
+    /// the step's: on Metal a resolve in the step's own command buffer can
+    /// read its last passes' samples before they are written.
+    pub fn resolve_step_timestamps(&self, enc: &mut wgpu::CommandEncoder) -> Option<(&wgpu::Buffer, u64, &[&'static str])> {
+        let (q, n) = (self.step_queries.as_ref()?, self.timed_segments.len() as u32);
+        if !self.last_step_ran || n == 0 {
+            return None;
+        }
+        enc.resolve_query_set(&q.set, 0..2 * n, &q.resolve, 0);
+        self.step_timestamps()
+    }
+
+    /// The last encoded step's timestamps once resolved
+    /// ([`WgpuSim::resolve_step_timestamps`]): the buffer (a begin and an end
+    /// tick, `u64` each, per segment, from offset 0), its byte size, and the
+    /// segments in pass order (each phase's name, or `"step"` for the whole
+    /// step). `None` when the step was skipped or timing is off.
+    pub fn step_timestamps(&self) -> Option<(&wgpu::Buffer, u64, &[&'static str])> {
+        let q = self.step_queries.as_ref()?;
+        if !self.last_step_ran || self.timed_segments.is_empty() {
+            return None;
+        }
+        Some((&q.resolve, 16 * self.timed_segments.len() as u64, &self.timed_segments))
+    }
+
+    /// Nanoseconds per timestamp tick.
+    pub fn timestamp_period_ns(&self) -> f32 {
+        self.queue.get_timestamp_period()
     }
 
     /// Rebuild the bind groups that use `binding` after its buffer was replaced.

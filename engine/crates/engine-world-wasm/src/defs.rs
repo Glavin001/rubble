@@ -39,6 +39,11 @@ impl Fields {
         self.map.remove(key).filter(|v| !v.is_null())
     }
 
+    /// The field as given, `null` included.
+    pub fn map_take_raw(&mut self, key: &str) -> Option<Value> {
+        self.map.remove(key)
+    }
+
     fn bad(&self, key: &str, want: &str) -> JsValue {
         crate::err(format!("{}.{key}: expected {want}", self.what))
     }
@@ -182,6 +187,13 @@ pub fn world_def(v: JsValue) -> Result<WorldDef, JsValue> {
         let v = serde_wasm_bindgen::to_value(&v).map_err(crate::err)?;
         d.solver = solver(v, d.solver)?;
     }
+    if let Some(mut v) = f.object("features")? {
+        features(&mut v, &mut d.features)?;
+        v.finish()?;
+    }
+    if let Some(s) = f.string("gpuTiming")? {
+        d.gpu_timing = gpu_timing(&s)?;
+    }
     f.u32("readbackFrames", &mut d.readback_frames)?;
     f.f32("hitEventThreshold", &mut d.hit_event_threshold)?;
     if let Some(s) = f.string("backpressure")? {
@@ -193,6 +205,68 @@ pub fn world_def(v: JsValue) -> Result<WorldDef, JsValue> {
     }
     f.finish()?;
     Ok(d)
+}
+
+/// `'off' | 'step' | 'phases'` (`GpuTiming`).
+pub fn gpu_timing(s: &str) -> Result<GpuTiming, JsValue> {
+    Ok(match s {
+        "off" => GpuTiming::Off,
+        "step" => GpuTiming::Step,
+        "phases" => GpuTiming::Phases,
+        _ => return Err(crate::err(format!("gpuTiming: unknown {s}"))),
+    })
+}
+
+/// `EngineFeatures` (the native `ENGINE_*` benchmark switches), camelCase:
+/// the fields given replace the shipped defaults. A headroom of `null`
+/// dispatches the whole palette (`ENGINE_COLOR_HEADROOM=full`).
+pub fn features(f: &mut Fields, d: &mut EngineFeatures) -> Result<(), JsValue> {
+    f.u32("sparseColors", &mut d.sparse_colors)?;
+    if d.sparse_colors > 32 {
+        return Err(crate::err("features.sparseColors: at most 32"));
+    }
+    if let Some(s) = f.string("manifoldPersistence")? {
+        d.manifold_persistence = match s.as_str() {
+            "contacts" => engine_webgpu::ManifoldPersistence::Contacts,
+            "manifolds" => engine_webgpu::ManifoldPersistence::Manifolds,
+            "fused" => engine_webgpu::ManifoldPersistence::Fused,
+            _ => return Err(crate::err(format!("features.manifoldPersistence: unknown {s}"))),
+        };
+    }
+    if let Some(s) = f.string("warmHash")? {
+        d.warm_hash = match s.as_str() {
+            "record" => engine_webgpu::WarmHash::Record,
+            "manifold" => engine_webgpu::WarmHash::Manifold,
+            "contact" => engine_webgpu::WarmHash::Contact,
+            _ => return Err(crate::err(format!("features.warmHash: unknown {s}"))),
+        };
+    }
+    f.bool("reuseCopy", &mut d.reuse_copy)?;
+    f.bool("npSplit", &mut d.np_split)?;
+    f.bool("persistList", &mut d.persist_list)?;
+    f.bool("localRepair", &mut d.local_repair)?;
+    f.bool("carryRest", &mut d.carry_rest)?;
+    if let Some(s) = f.string("grid")? {
+        d.grid = match s.as_str() {
+            "split" => engine_webgpu::GridLayout::Split,
+            "scaled" => engine_webgpu::GridLayout::Scaled,
+            "fixed" => engine_webgpu::GridLayout::Fixed,
+            _ => return Err(crate::err(format!("features.grid: unknown {s}"))),
+        };
+    }
+    if let Some(v) = f.take("gridLevels") {
+        d.grid_levels = Some(v.as_bool().ok_or_else(|| crate::err("features.gridLevels: expected a boolean"))?);
+    }
+    for (key, out) in [("colorHeadroom", &mut d.color_headroom), ("colorRoundHeadroom", &mut d.color_round_headroom)] {
+        // Present and null: the whole palette; absent: the default.
+        if let Some(v) = f.map_take_raw(key) {
+            *out = match v {
+                serde_json::Value::Null => None,
+                v => Some(v.as_u64().ok_or_else(|| crate::err(format!("features.{key}: expected an unsigned integer or null")))? as u32),
+            };
+        }
+    }
+    Ok(())
 }
 
 pub fn body_def(v: JsValue) -> Result<BodyDef, JsValue> {
