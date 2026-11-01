@@ -214,7 +214,6 @@ impl MetalSim {
             sparse_start: 32,
             color_headroom: Some(4),
             color_round_headroom: Some(2),
-            tail_ok: capacity.max_bodies <= (1 << 16) * 8,
             ..StepModes::default()
         };
         let hull_records_capacity = (sizes[18] / 16) as u32;

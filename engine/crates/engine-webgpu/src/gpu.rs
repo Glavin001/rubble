@@ -226,6 +226,10 @@ pub struct WgpuSim {
     grid_cache: Option<(u32, f32, u32)>,
     /// Colliders were added after step 0; see `build_all_bounds`.
     bounds_dirty: bool,
+    /// Diagnostic GPU timing marks at the plan's phases (`set_marks`, `RUBBLE_GPU_TIMING`).
+    marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>,
+    /// The sleep archive's blocks (`enable_sleep_archive`; 0: off).
+    sleep_archive_blocks: u32,
     /// Any collider carries a collision filter (HOST_S(21)).
     has_filters: bool,
     /// Some heightfield in the hull arena carries a soil (vehicle ruts, T5):
@@ -367,22 +371,29 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
     }))
     .map_err(|e| anyhow::anyhow!("no wgpu adapter: {e}"))?;
     let info = adapter.get_info();
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("engine-webgpu-sim"),
-        // Per-phase GPU timing (`RUBBLE_GPU_TIMING=1`, and the terrain's
-        // `RUBBLE_TERRAIN_TIMING` / `RUBBLE_TERRAIN_GPU_MS`) needs timestamp queries.
-        required_features: if ["RUBBLE_GPU_TIMING", "RUBBLE_TERRAIN_TIMING", "RUBBLE_TERRAIN_GPU_MS"]
+    let (device, queue) = pollster::block_on(
+        adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("engine-webgpu-sim"),
+            // Per-phase GPU timing (`RUBBLE_GPU_TIMING=1`, and the terrain's
+            // `RUBBLE_TERRAIN_TIMING` / `RUBBLE_TERRAIN_GPU_MS`) needs timestamp queries.
+            required_features: if [
+                "RUBBLE_GPU_TIMING",
+                "RUBBLE_TERRAIN_TIMING",
+                "RUBBLE_TERRAIN_GPU_MS",
+            ]
             .iter()
             .any(|k| std::env::var(k).is_ok_and(|v| v == "1"))
-        {
-            adapter.features()
-                & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
-        } else {
-            wgpu::Features::empty()
-        },
-        required_limits: adapter.limits(),
-        ..Default::default()
-    }))?;
+            {
+                adapter.features()
+                    & (wgpu::Features::TIMESTAMP_QUERY
+                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
+            } else {
+                wgpu::Features::empty()
+            },
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }),
+    )?;
     Ok((info, device, queue))
 }
 
@@ -640,7 +651,9 @@ impl WgpuSim {
         }
         // Deformable-terrain MPM buffers (terrain_mpm.slang): placeholders until
         // `terrain_enable` sizes them from a TerrainConfig.
-        for binding in engine_terrain::layout::MPM_PARAMS_BINDING..engine_terrain::layout::MPM_BINDING_END {
+        for binding in
+            engine_terrain::layout::MPM_PARAMS_BINDING..engine_terrain::layout::MPM_BINDING_END
+        {
             debug_assert_eq!(bufs.len(), binding);
             bufs.push(terrain_buffer(&device, binding, 256));
         }
@@ -791,11 +804,7 @@ impl WgpuSim {
             compact_contacts,
             persistent_contacts,
             spec_reach_max: 0.0,
-            sparse_start: if capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8 {
-                features.sparse_colors.min(32)
-            } else {
-                32
-            },
+            sparse_start: features.sparse_colors.min(32),
             fused_persistence: compact_contacts
                 && features.manifold_persistence == ManifoldPersistence::Fused,
             manifold_persistence: features.manifold_persistence == ManifoldPersistence::Manifolds,
@@ -857,6 +866,8 @@ impl WgpuSim {
             grid_levels: 0,
             grid_cache: None,
             bounds_dirty: false,
+            marks: None,
+            sleep_archive_blocks: 0,
             has_filters: false,
             has_soil: false,
             manifolds_valid: false,
@@ -1299,7 +1310,9 @@ impl WgpuSim {
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
-        self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
+        self.has_height_field |= cols
+            .iter()
+            .any(|c| c.shape == ShapeType::HeightField as u32);
         if cols.iter().any(CollisionFilter::is_set) {
             self.has_filters = true;
         } else if cleared {
@@ -1432,7 +1445,9 @@ impl WgpuSim {
             }
         }
         self.has_convex = cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
-        self.has_height_field = cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
+        self.has_height_field = cols
+            .iter()
+            .any(|c| c.shape == ShapeType::HeightField as u32);
         self.has_filters = cols
             .iter()
             .any(engine_schema::convex::CollisionFilter::is_set);
@@ -1467,7 +1482,9 @@ impl WgpuSim {
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
-        self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
+        self.has_height_field |= cols
+            .iter()
+            .any(|c| c.shape == ShapeType::HeightField as u32);
         if cols.iter().any(CollisionFilter::is_set) {
             self.has_filters = true;
         } else if cleared {
@@ -1555,7 +1572,11 @@ impl WgpuSim {
         rows: std::ops::Range<u32>,
     ) -> Result<(), engine_schema::heightfield::HeightFieldError> {
         let mut col = self.collider(collider);
-        assert_eq!(col.shape, ShapeType::HeightField as u32, "collider {collider} is not a heightfield");
+        assert_eq!(
+            col.shape,
+            ShapeType::HeightField as u32,
+            "collider {collider} is not a heightfield"
+        );
         let base = engine_schema::convex::convex_params_base(col.params);
         arena.update_height_field(base, field, rows)?;
         col.params = engine_schema::heightfield::height_field_collider_params(base, field);
@@ -2312,6 +2333,90 @@ impl WgpuSim {
         self.finish_step(read, wall)
     }
 
+    /// Keep resting contacts through sleep (`world_step.slang` archiveMeta): a pair
+    /// that falls asleep keeps its contact rows, and when it forms again its body
+    /// restarts them warm, with the impulses and stiffness it fell asleep with, instead
+    /// of from rest. Room for `rows` archived rows (in blocks of 8 a body; an archive
+    /// that would hold more fails the step, `OVERFLOW_SLEEP_ARCHIVE`). Canonical
+    /// contacts only. The contact and scratch buffers grow (their contents kept): hosts
+    /// holding them bind them again.
+    pub fn enable_sleep_archive(&mut self, rows: u32) -> anyhow::Result<()> {
+        if self.sleep_archive_blocks > 0 {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !self.compact_contacts && !self.persistent_contacts,
+            "the sleep archive keeps canonical contact rows (ContactStorage::Canonical)"
+        );
+        // world_step.slang ARCHIVE_ROWS: a sleeping body's rows, in blocks of 8.
+        const ROWS: u32 = 8;
+        let max_c = self.capacity.max_contacts;
+        let blocks = (rows / ROWS).max(1);
+        let mb = self.capacity.max_bodies;
+        let row_bytes = std::mem::size_of::<engine_schema::Contact>() as u64;
+        let contact_bytes = (2 * u64::from(max_c) + u64::from(blocks * ROWS)) * row_bytes;
+        let meta = engine_schema::SCRATCH_WORDS;
+        let scratch_words = u64::from(meta) + 4 + 6 * u64::from(mb) + 2 * u64::from(blocks);
+        let limits = self.device.limits();
+        for (binding, bytes) in [(4usize, contact_bytes), (21, 4 * scratch_words)] {
+            check_limits(&limits, binding, bytes)?;
+        }
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("sleep archive"),
+            });
+        for (binding, bytes) in [(4usize, contact_bytes), (21, 4 * scratch_words)] {
+            let old = &self.bufs[binding];
+            let new = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("b{binding}")),
+                size: bytes,
+                usage: old.usage(),
+                mapped_at_creation: false,
+            });
+            enc.copy_buffer_to_buffer(old, 0, &new, 0, old.size().min(bytes));
+            self.bufs[binding] = new;
+        }
+        self.queue.submit([enc.finish()]);
+        // The records: no rows, no blocks, not just asleep; every block free.
+        let mut words = vec![0u32; (4 + 6 * mb + 2 * blocks) as usize];
+        words[0] = blocks;
+        words[1] = blocks;
+        let (head, stack) = ((4 + mb) as usize, (4 + 5 * mb + blocks) as usize);
+        words[head..head + mb as usize].fill(u32::MAX);
+        for k in 0..blocks {
+            words[stack + k as usize] = k;
+        }
+        self.queue.write_buffer(
+            &self.bufs[21],
+            u64::from(meta) * 4,
+            bytemuck::cast_slice(&words),
+        );
+        self.rebind_buffer(4);
+        self.rebind_buffer(21);
+        self.sleep_archive_blocks = blocks;
+        Ok(())
+    }
+
+    /// The sleep archive's blocks in use and in all (diagnostic read; waits for the GPU).
+    pub fn sleep_archive_use(&self) -> (u32, u32) {
+        if self.sleep_archive_blocks == 0 {
+            return (0, 0);
+        }
+        let free =
+            self.read_buffer_range::<u32>(21, u64::from(engine_schema::SCRATCH_WORDS) * 4, 1)[0];
+        (
+            self.sleep_archive_blocks.saturating_sub(free),
+            self.sleep_archive_blocks,
+        )
+    }
+
+    /// Mark every phase of the steps encoded from now on (`None`: stop): diagnostic GPU
+    /// timing a host reads with its own marks around the step.
+    pub fn set_marks(&mut self, marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>) {
+        self.marks = marks;
+    }
+
     /// The plan's dispatches in one compute pass of `enc` (its copies are encoded before).
     fn encode_dispatches(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
         self.encode_dispatches_hooked(enc, cmds, None);
@@ -2362,6 +2467,9 @@ impl WgpuSim {
                     {
                         pass = None;
                     }
+                    if let Some(m) = self.marks.as_ref() {
+                        m.mark(enc, name);
+                    }
                     segments.push(*name);
                     dispatched = false;
                     f(enc);
@@ -2371,6 +2479,14 @@ impl WgpuSim {
                 }
             }
             match *c {
+                // Native per-phase marks (`RUBBLE_GPU_TIMING`): a mark between passes.
+                rigid_plan::Cmd::Phase { name } if self.marks.is_some() => {
+                    pass = None;
+                    self.marks.as_ref().expect("marks").mark(enc, name);
+                    segments.push(name);
+                    dispatched = false;
+                    pass = Some(begin_timed(enc, queries, segments.len()));
+                }
                 rigid_plan::Cmd::Phase { .. } if per_phase && !dispatched => {}
                 rigid_plan::Cmd::Phase { name } if split || per_phase => {
                     pass = None;
@@ -2457,11 +2573,24 @@ impl WgpuSim {
             self.timed_segments.clear();
             return Ok(false);
         }
+        let host_t = std::env::var("RUBBLE_HOST_TIMING")
+            .is_ok()
+            .then(web_time::Instant::now);
+        let lap = |t: &Option<web_time::Instant>, what: &str| {
+            if let Some(t) = t {
+                eprintln!(
+                    "rubble host step_encode: {what} at {:.3} ms",
+                    t.elapsed().as_secs_f64() * 1e3
+                );
+            }
+        };
         self.refresh_cell();
+        lap(&host_t, "refresh_cell");
         self.last_step_ran = true;
         self.flush_commands();
         self.upload_impulses();
         self.write_host_uniforms_ex(true);
+        lap(&host_t, "uniforms");
         self.write_guide_params();
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
@@ -2495,9 +2624,11 @@ impl WgpuSim {
                 );
             }
         }
+        lap(&host_t, "plan + copies");
         let phases: Vec<&str> = cmds.iter().filter_map(|c| if let rigid_plan::Cmd::Phase { name, .. } = c { Some(*name) } else { None }).collect();
         let hooked = hook.as_ref().is_some_and(|(at, _)| phases.contains(at));
         self.encode_dispatches_hooked(enc, &cmds, hook);
+        lap(&host_t, "dispatches");
         self.finish_step(false, wall).map(|_| hooked)
     }
 
@@ -2603,6 +2734,7 @@ impl WgpuSim {
     /// This step's resolved modes for the shared step graph.
     fn step_modes(&self) -> rigid_plan::StepModes {
         rigid_plan::StepModes {
+            sleep_archive_blocks: self.sleep_archive_blocks,
             compact_contacts: self.compact_contacts,
             persistent_contacts: self.persistent_contacts,
             manifold_persistence: self.manifold_persistence,
@@ -2617,7 +2749,6 @@ impl WgpuSim {
             sparse_start: self.sparse_start,
             color_headroom: self.color_headroom,
             color_round_headroom: self.color_round_headroom,
-            tail_ok: self.capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8,
             pose_output: self.pose_output,
             contact_events: self.contact_events,
             motion_locks: self.motion_locks,
@@ -2778,10 +2909,14 @@ impl WgpuSim {
         self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&host));
         // build_aabbs reads the collider count from the counter block, which
         // only a step would otherwise refresh (raycast_batch writes it too).
+        // Only the body and collider counts: a pipelined step forwards the
+        // contact and manifold counts the block still holds from the step
+        // before, and zeroing them would restart every resting contact cold.
+        let counts = rigid_plan::step_counters(&inputs);
         self.queue.write_buffer(
             &self.bufs[7],
             0,
-            bytes_of(&rigid_plan::step_counters(&inputs)),
+            bytemuck::cast_slice(&[counts.body_count, counts.collider_count]),
         );
         let mut enc = self
             .device
@@ -3731,8 +3866,8 @@ mod terrain;
 pub use terrain::TerrainStepReport;
 #[path = "gpu_terrain_watch.rs"]
 mod terrain_watch;
-pub use terrain_watch::{TerrainStrike, TerrainWatch};
 pub(crate) use terrain::terrain_buffer;
+pub use terrain_watch::{TerrainStrike, TerrainWatch};
 #[path = "gpu_characters.rs"]
 mod characters;
 pub use characters::{CharacterHandle, MotionEvent};

@@ -50,13 +50,21 @@ pub use blast::{
 pub use debug_draw::{
     DebugColor, DebugDraw, DebugDrawOptions, COLOR_ASLEEP, COLOR_AWAKE, COLOR_STATIC,
 };
-pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, MoveReports, ShapeDef, SurfaceMaterial};
+pub use defs::{
+    BodyDef, BodyType, Geometry, MassData, MotionLocks, MoveReports, ShapeDef, SurfaceMaterial,
+};
 pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
     CRUSH_PARTICLE_GROUP,
     DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats,
     Preload, StrengthModel,
 };
+pub use engine_terrain::{
+    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
+    RegionPlan, SandMaterial, SettleRule, TerrainConfig, TerrainError, TerrainProfile,
+    YieldSurface,
+};
+pub use engine_webgpu::TerrainStepReport;
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
@@ -89,12 +97,6 @@ pub use terrain::{
     TerrainSurfaceDef, TerrainSurfaceView,
 };
 pub use threshold::{Projectile, StressSource};
-pub use engine_terrain::{
-    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
-    RegionPlan, SandMaterial, SettleRule, TerrainConfig, TerrainError, TerrainProfile,
-    YieldSurface,
-};
-pub use engine_webgpu::TerrainStepReport;
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::heightfield::{HeightField, HeightFieldError};
@@ -166,6 +168,17 @@ pub struct WorldDef {
     pub hit_event_threshold: f32,
     /// Time the rigid step on the GPU (timestamp queries; `Frame::gpu_time`).
     pub gpu_timing: GpuTiming,
+    /// Threshold destructibles: the body slots their fracture pieces take, reserved
+    /// once for every destructible (a split takes the lowest free one). More pieces at
+    /// once than this is an error (no free body slot). `None`: each destructible
+    /// reserves a slot per chunk when placed, so no split can run out, at the cost of
+    /// a body slot per chunk of every destructible in the world.
+    pub fracture_pieces: Option<u32>,
+    /// Threshold worlds keep sleeping bodies' resting contacts (the sleep archive,
+    /// `WgpuSim::enable_sleep_archive`): room for this many contact rows (a sleeping
+    /// cluster keeps about a dozen). More fails the step (`OVERFLOW_SLEEP_ARCHIVE`).
+    /// `None`: 16 a body slot.
+    pub sleep_archive_rows: Option<u32>,
 }
 
 impl Default for WorldDef {
@@ -184,6 +197,8 @@ impl Default for WorldDef {
             env_overrides: false,
             readback_frames: 3,
             hit_event_threshold: 1.0,
+            fracture_pieces: None,
+            sleep_archive_rows: None,
             backpressure: Backpressure::Block,
             guidance: None,
             gpu_timing: GpuTiming::Off,
@@ -414,6 +429,11 @@ pub struct World {
     hulls: HullArena,
     bodies: Vec<BodySlot>,
     free_bodies: Vec<u32>,
+    /// Bodies that may carry damping or a gravity scale (`push_damping` walks these,
+    /// not every slot; stale entries drop out there).
+    tuned: std::collections::BTreeSet<u32>,
+    /// The last step's GPU time from its marks (`RUBBLE_GPU_TIMING=1`).
+    last_gpu_ms: Option<f64>,
     shapes: Vec<ShapeSlot>,
     free_shapes: Vec<u32>,
     /// Retired colliders: `(collider, released at step)`.
@@ -457,6 +477,10 @@ pub struct World {
     contacts: contacts::ContactTracker,
     queries: queries::QueryQueue,
     hit_event_threshold: f32,
+    /// `WorldDef::fracture_pieces`.
+    pub(crate) fracture_pieces: Option<u32>,
+    /// `WorldDef::sleep_archive_rows`.
+    pub(crate) sleep_archive_rows: Option<u32>,
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
     fracture: threshold::Fracture,
@@ -515,6 +539,8 @@ impl World {
             hulls: HullArena::new(),
             bodies: Vec::new(),
             free_bodies: Vec::new(),
+            tuned: std::collections::BTreeSet::new(),
+            last_gpu_ms: None,
             shapes: Vec::new(),
             free_shapes: Vec::new(),
             free_colliders: Vec::new(),
@@ -536,6 +562,8 @@ impl World {
             contacts: Default::default(),
             queries: Default::default(),
             hit_event_threshold: def.hit_event_threshold,
+            fracture_pieces: def.fracture_pieces,
+            sleep_archive_rows: def.sleep_archive_rows,
             contact_storage: contacts,
             motion: Default::default(),
             resync: false,
@@ -577,7 +605,10 @@ impl World {
         bytes: u64,
     ) -> anyhow::Result<u64> {
         let have = self.sim.pose_buffer().size();
-        anyhow::ensure!(bytes > 0 && bytes <= have, "export of {bytes} bytes: the pose buffer holds {have}");
+        anyhow::ensure!(
+            bytes > 0 && bytes <= have,
+            "export of {bytes} bytes: the pose buffer holds {have}"
+        );
         anyhow::ensure!(
             bytes % 4 == 0 && current_offset % 4 == 0 && previous_offset % 4 == 0,
             "pose export offsets and size must be multiples of 4"
@@ -586,9 +617,12 @@ impl World {
             current_offset + bytes <= current.size() && previous_offset + bytes <= previous.size(),
             "pose export range past the end of a host buffer"
         );
-        let mut enc = self.sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("pose export"),
-        });
+        let mut enc = self
+            .sim
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pose export"),
+            });
         if self.pose_exports.is_none() {
             // From now on each step keeps the poses before it. Until the next step, previous =
             // current (nothing has moved since).
@@ -686,6 +720,11 @@ impl World {
     /// `Frame::gpu_time`. Needs timestamp queries on the device.
     pub fn set_gpu_timing(&mut self, mode: GpuTiming) -> anyhow::Result<()> {
         self.sim.set_gpu_timing(mode)
+    }
+
+    /// GPU time of the last step, every pass of it (`RUBBLE_GPU_TIMING=1`; else None).
+    pub fn last_step_gpu_ms(&self) -> Option<f64> {
+        self.last_gpu_ms
     }
 
     /// Replace the solver settings (step size, iterations, contact and
@@ -794,6 +833,11 @@ impl World {
         {
             self.sim.set_motion_locks(true);
         }
+        for id in &ids {
+            if self.bodies[id.index() as usize].tuned() {
+                self.tuned.insert(id.index());
+            }
+        }
         Ok(ids)
     }
 
@@ -851,7 +895,11 @@ impl World {
     }
 
     /// Which of the body's moves frames report (default [`MoveReports::All`]).
-    pub fn set_body_move_reports(&mut self, id: BodyId, reports: MoveReports) -> anyhow::Result<()> {
+    pub fn set_body_move_reports(
+        &mut self,
+        id: BodyId,
+        reports: MoveReports,
+    ) -> anyhow::Result<()> {
         let i = self.live_body(id)?;
         self.bodies[i].moves = reports;
         Ok(())
@@ -976,6 +1024,7 @@ impl World {
         let i = self.live_body(id)?;
         anyhow::ensure!(linear >= 0.0 && angular >= 0.0, "negative damping");
         self.bodies[i].damping = (linear, angular);
+        self.tuned.insert(i as u32);
         Ok(())
     }
 
@@ -991,6 +1040,7 @@ impl World {
             return Ok(());
         }
         self.bodies[i].gravity_scale = scale;
+        self.tuned.insert(i as u32);
         // A body resting under the old scale may have slept: it moves again.
         self.command(id, GpuCommand::wake(id.index()))
     }
@@ -1051,8 +1101,12 @@ impl World {
         let p = self.sim.params();
         let h = p.dt;
         let mut cmds = Vec::new();
-        for (i, b) in self.bodies.iter().enumerate() {
-            if !b.alive || b.body_type != BodyType::Dynamic || b.last_asleep || !b.tuned() {
+        let bodies = &self.bodies;
+        self.tuned
+            .retain(|&i| bodies.get(i as usize).is_some_and(|b| b.alive && b.tuned()));
+        for &i in &self.tuned {
+            let b = &self.bodies[i as usize];
+            if b.body_type != BodyType::Dynamic || b.last_asleep {
                 continue;
             }
             let add = [0.0, h * (b.gravity_scale - 1.0) * p.gravity_y, 0.0];
@@ -1314,13 +1368,20 @@ impl World {
         // terrain's static body: its origin until a frame reports it).
         let body = self.shapes[s].body as usize;
         let to_world = |p: Vec3| {
-            let t = self.bodies[body].last_transform.unwrap_or(self.bodies[body].origin);
+            let t = self.bodies[body]
+                .last_transform
+                .unwrap_or(self.bodies[body].origin);
             t.p() + t.q() * (transform.p() + transform.q() * p)
         };
         let lo = field.vertex(i0, j0);
         let hi = field.vertex((i0 + w).saturating_sub(1), (j0 + d).saturating_sub(1));
         let (mut mn, mut mx) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-        for c in [Vec3::new(lo.x, -1e3, lo.z), Vec3::new(hi.x, 1e3, hi.z), Vec3::new(lo.x, 1e3, hi.z), Vec3::new(hi.x, -1e3, lo.z)] {
+        for c in [
+            Vec3::new(lo.x, -1e3, lo.z),
+            Vec3::new(hi.x, 1e3, hi.z),
+            Vec3::new(lo.x, 1e3, hi.z),
+            Vec3::new(hi.x, -1e3, lo.z),
+        ] {
             let p = to_world(c);
             mn = mn.min(p);
             mx = mx.max(p);
@@ -1343,7 +1404,8 @@ impl World {
                         })
                         .fold(0.0, f32::max),
                 );
-                (p.cmpge(mn - pad - reach).all() && p.cmple(mx + pad + reach).all()).then(|| GpuCommand::wake(i as u32))
+                (p.cmpge(mn - pad - reach).all() && p.cmple(mx + pad + reach).all())
+                    .then(|| GpuCommand::wake(i as u32))
             })
             .collect()
     }
@@ -1896,6 +1958,17 @@ impl World {
     /// `Backpressure::Block`; collect results with [`World::poll`].
     pub fn step(&mut self) -> anyhow::Result<()> {
         let step = self.step;
+        let host_t = std::env::var("RUBBLE_HOST_TIMING")
+            .is_ok()
+            .then(std::time::Instant::now);
+        let lap = |what: &str| {
+            if let Some(t) = &host_t {
+                eprintln!(
+                    "rubble host world step: {what} at {:.3} ms",
+                    t.elapsed().as_secs_f64() * 1e3
+                );
+            }
+        };
         // Blasts' loads, breaks and splits before the engine steps (forward-only).
         #[cfg(feature = "stress")]
         self.blast_before_step()?;
@@ -1905,6 +1978,7 @@ impl World {
         let rays = std::mem::take(&mut self.pending_rays);
         let batches = std::mem::take(&mut self.pending_batches);
         self.push_damping()?;
+        lap("damping");
         let explosions = std::mem::take(&mut self.queries.explosions);
         if !explosions.is_empty() {
             self.sim.write_explosions(&explosions)?;
@@ -1918,7 +1992,9 @@ impl World {
         if contact_events {
             self.sim.clear_contact_events();
         }
+        lap("queries");
         let casts = self.motion_before_step();
+        lap("motion");
         if !rays.is_empty() {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
@@ -1934,12 +2010,24 @@ impl World {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("world step"),
             });
+        // `RUBBLE_GPU_TIMING=1` (diagnostic): each phase's GPU time, printed per step.
+        let marks = engine_webgpu::gpu_marks::GpuMarks::enabled(self.sim.device()).then(|| {
+            std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new(
+                self.sim.device(),
+                96,
+            ))
+        });
+        if let Some(m) = &marks {
+            m.mark(&mut enc, "begin");
+            self.sim.set_marks(Some(m.clone()));
+        }
         if let Some(e) = &self.pose_exports {
             // The poses before this step, for exports (a GPU copy in the step's own submission).
             // If the step does not run, nothing moves and previous = current is right.
             enc.copy_buffer_to_buffer(self.sim.pose_buffer(), 0, &e.previous, 0, e.previous.size());
         }
         // The terrain's substeps go first: the rigid step applies their reactions.
+        lap("before terrain");
         self.terrain_open_strike()?;
         let terrain = self.terrain_encode(&mut enc)?;
         #[cfg(feature = "stress")]
@@ -1954,10 +2042,17 @@ impl World {
             .step_encode(&mut enc)
             .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
         let ran = self.sim.last_step_ran();
+        lap("rigid encoded");
+        if let Some(m) = &marks {
+            m.mark(&mut enc, "rigid tail");
+        }
         #[cfg(feature = "stress")]
         if fracture && ran {
             // Loads, breaks and splits from this step's contacts, before the next step.
             self.encode_fracture(&mut enc);
+            if let Some(m) = &marks {
+                m.mark(&mut enc, "fracture");
+            }
         }
         let mut mapped = None;
         let mut timed: Option<(Extra, u64)> = None;
@@ -2064,7 +2159,28 @@ impl World {
             };
             self.readback.pending.push_back(skipped);
         }
+        lap("fracture + readback encoded");
+        let timing = marks.map(|m| {
+            m.mark(&mut enc, "readback copies");
+            self.sim.set_marks(None);
+            let staging = m.resolve(self.sim.device(), &mut enc);
+            (m, staging)
+        });
         self.sim.queue().submit([enc.finish()]);
+        if let Some((m, staging)) = timing {
+            let parts = m.report(self.sim.device(), self.sim.queue(), &staging);
+            let total: f64 = parts.iter().map(|p| p.1).sum();
+            self.last_gpu_ms = Some(total);
+            let list: Vec<String> = parts
+                .iter()
+                .filter(|p| p.1 >= 0.01)
+                .map(|(n, t)| format!("{n} {t:.2}"))
+                .collect();
+            if std::env::var("RUBBLE_GPU_TIMING_PRINT").is_ok() {
+                eprintln!("world step {step} GPU ms: {total:.2} = {}", list.join(", "));
+            }
+        }
+        lap("submitted");
         if let Some(slot) = mapped {
             if let Some((_, size)) = &timed {
                 let mut late = self
@@ -2082,6 +2198,7 @@ impl World {
             self.readback.map(slot);
         }
         let _ = self.sim.device().poll(wgpu::PollType::Poll);
+        lap("mapped + polled");
         self.step += 1;
         Ok(())
     }
@@ -2152,12 +2269,28 @@ impl World {
                     });
                 }
                 Pending::Mapped { step, slot } => {
+                    let timing = std::env::var("RUBBLE_WORLD_TIMING")
+                        .is_ok()
+                        .then(std::time::Instant::now);
                     if !self.readback.ready(self.sim.device(), slot, wait)? {
                         break;
                     }
+                    if let Some(t) = timing {
+                        eprintln!(
+                            "world frame {step}: wait {:.2} ms",
+                            t.elapsed().as_secs_f64() * 1e3
+                        );
+                    }
                     self.readback.pending.pop_front();
+                    let timing = timing.map(|_| std::time::Instant::now());
                     let raw = self.readback.take(slot);
                     frames.push(self.frame(step, raw)?);
+                    if let Some(t) = timing {
+                        eprintln!(
+                            "world frame {step}: build {:.2} ms",
+                            t.elapsed().as_secs_f64() * 1e3
+                        );
+                    }
                 }
             }
         }
@@ -2585,7 +2718,9 @@ impl World {
         // Hull blocks stay cached for reuse (inserts deduplicate them); a
         // heightfield's block is its own, so it is freed once out of quarantine.
         if matches!(s.geometry, Geometry::HeightField { .. }) {
-            let base = engine_schema::convex::convex_params_base(self.sim.collider_record(collider).params);
+            let base = engine_schema::convex::convex_params_base(
+                self.sim.collider_record(collider).params,
+            );
             self.retired_height_fields.push((base, self.step));
         }
         self.sim.set_collider(collider, retired_collider(body));
@@ -2751,7 +2886,9 @@ impl World {
         let frame = self.bodies[slot.body as usize].frame();
         let material = self.intern_material(&slot.def.material)?;
         let hull_params = match slot.geometry {
-            Geometry::Hull { .. } | Geometry::HeightField { .. } => Some(self.sim.collider_record(slot.collider).params),
+            Geometry::Hull { .. } | Geometry::HeightField { .. } => {
+                Some(self.sim.collider_record(slot.collider).params)
+            }
             _ => None,
         };
         let mut c = self.collider(
@@ -3096,7 +3233,10 @@ fn height_field_mesh(field: &HeightField, transform: Transform) -> ShapeMesh {
             triangles.push([v(0, 0), v(0, 1), v(1, 1)]);
         }
     }
-    ShapeMesh { vertices, triangles }
+    ShapeMesh {
+        vertices,
+        triangles,
+    }
 }
 
 #[cfg(test)]
@@ -3113,10 +3253,18 @@ mod height_field_arena_tests {
         let mut len = None;
         for _ in 0..4 {
             let s = w
-                .create_height_field_shape(ground, &ShapeDef::default(), &field, Transform::IDENTITY)
+                .create_height_field_shape(
+                    ground,
+                    &ShapeDef::default(),
+                    &field,
+                    Transform::IDENTITY,
+                )
                 .unwrap();
             let now = w.hulls.len();
-            assert!(len.is_none_or(|l| now <= l), "the arena grew to {now} records (was {len:?})");
+            assert!(
+                len.is_none_or(|l| now <= l),
+                "the arena grew to {now} records (was {len:?})"
+            );
             len = Some(now);
             w.destroy_shape(s, false).unwrap();
             for _ in 0..QUARANTINE_STEPS + 1 {

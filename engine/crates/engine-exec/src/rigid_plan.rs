@@ -57,6 +57,9 @@ pub enum Cmd {
 /// Modes a host resolved for this step (already gated on each other).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StepModes {
+    /// Sleep archive blocks (`world_step.slang` archiveMeta, host word 30 bit 5; 0: off). Canonical
+    /// contacts only: a pair that falls asleep keeps its rows for its wake.
+    pub sleep_archive_blocks: u32,
     pub compact_contacts: bool,
     pub persistent_contacts: bool,
     pub manifold_persistence: bool,
@@ -72,8 +75,6 @@ pub struct StepModes {
     pub sparse_start: u32,
     pub color_headroom: Option<u32>,
     pub color_round_headroom: Option<u32>,
-    /// The sparse tail's single-workgroup loop can cover the body capacity.
-    pub tail_ok: bool,
     /// Append `pose_pack` after the sleep commit: compact render poses and the
     /// list of bodies that moved (bindings 34-36, after BIND_COUNT; read-only on physics state).
     pub pose_output: bool,
@@ -213,7 +214,7 @@ pub fn color_rounds_dispatched(m: &StepModes, last: &StepCounters) -> u32 {
 /// Primal colours dispatched one by one; later colours run in the sparse tail.
 pub fn primal_colors_dispatched(m: &StepModes, i: &StepInputs, max_c: u32) -> u32 {
     let estimate = match m.color_headroom {
-        Some(h) if m.tail_ok && i.steps_done > 0 => (i.last.color_count + h).max(1),
+        Some(h) if i.steps_done > 0 => (i.last.color_count + h).max(1),
         _ => max_c,
     };
     estimate.min(m.sparse_start).min(max_c)
@@ -390,6 +391,10 @@ pub fn encode_step(
         if mo.characters > 0 {
             e.d("char_move", u64::from(mo.characters) * 64);
         }
+    }
+    if m.sleep_archive_blocks > 0 && !reuse_manifolds {
+        // Touched sleepers' archived resting pairs (world_step.slang archive_emit).
+        e.d("archive_emit", 4096);
     }
     e.d(work_args, 64);
     e.phase("broadphase");
@@ -733,6 +738,14 @@ pub fn encode_step(
         }
     }
     e.w("sleep_island_commit", 67);
+    if m.sleep_archive_blocks > 0 {
+        // Archive what just fell asleep (awake list, then this step's rows).
+        e.w("archive_free", 67);
+        e.w("archive_count", 65);
+        e.w("archive_alloc", 67);
+        e.w("archive_scatter", 65);
+        e.w("archive_seal", 67);
+    }
     if mo.ccd && !reuse_manifolds {
         // CCD impacts on dynamic bodies: the momentum exchange (ccd_step.slang).
         e.phase("sleepMain");
@@ -1185,6 +1198,8 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     let mo = i.motion;
     s[30] |= (u32::from(mo.ccd) << 2) | (u32::from(mo.kinematic) << 3)
         | (u32::from(fast_list_scheduled(&mo)) << 4);
+    // Bit 5: the sleep archive (world_step.slang sleepArchive).
+    s[30] |= u32::from(m.sleep_archive_blocks > 0) << 5;
     s
 }
 
@@ -1264,7 +1279,6 @@ mod tests {
             sparse_start: 32,
             color_headroom: Some(4),
             color_round_headroom: Some(2),
-            tail_ok: true,
             pose_output: false,
             ..StepModes::default()
         }
