@@ -121,6 +121,13 @@ uint softBeamExtraBase() { return SU(11u).y; }
 uint softElementCount() { return SU(11u).z; }
 uint softElementBase() { return SU(11u).w; }
 uint softRailNodeBase() { return SU(12u).x; }
+uint softIslandBase() { return SU(12u).y; }
+uint softCrashSubsteps() { return SU(12u).z; }
+uint softSweeps() { return max(SU(12u).w, 1u); }
+// Substeps soft body s takes this step (crash islands; 1 otherwise) and its
+// substep length.
+uint softSubsteps(uint s) { return max(SU(softIslandBase() + s).x, 1u); }
+float softH(uint s) { return max(PARAMS.dt, 1e-6) / float(softSubsteps(s)); }
 // Least speed (m/s) at which a soft contact pushes out an overlap it started the
 // step with (SoftSettings::contact_push_out).
 float softPushOut() { return SD(10u).w; }
@@ -544,7 +551,8 @@ void soft_velocity(uint3 tid : SV_DispatchThreadID)
     uint slot = softBdfBase() + ord;
     BodyState b = gBodies[body];
     bool moving = bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b);
-    float h = max(PARAMS.dt, 1e-6);
+    // The last substep's length for a crash island.
+    float h = softH(ent.w & 0xFFFFu);
     float3 xl = softLocal(ord), xl0 = softLocal0(ord);
     // The velocity from the local positions: extraction's (x − x⁻)/h from the
     // world copies loses precision far from the origin. Not for a particle that
@@ -1624,7 +1632,8 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
     if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b)) return SOFT_SKIP;
     if (softIsRigid(ent.w & 0xFFFFu)) return SOFT_FOLLOW;
     AvbdParams p = PARAMS;
-    float h = max(p.dt, 1e-6);
+    // A crash island's substep (the whole step otherwise).
+    float h = softH(ent.w & 0xFFFFu);
 
     // Inertia, contacts and joints: the rigid accumulation, rotation frozen.
     bool edges = SOLVE_INDEX(body) != SOLVE_INDEX(body + 1u) || (b.flags & BODY_VEHICLE) != 0u;
@@ -1633,7 +1642,7 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
     {
         // No contact or joint edge: primalAccumulate's linear block is the inertia
         // term alone (same arithmetic), without its 6×6 accumulation.
-        float k = (b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0) / (p.dt * p.dt);
+        float k = (b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0) / (h * h);
         uint o = particleOrdinal(ent.w & 0xFFFFu, body);
         if (softBdf2For(o)) k *= 2.25;
         float3 dp = softLocal(o) - softTargetLocal(o);
@@ -1657,9 +1666,12 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
         {
             // primalAccumulate's inertia gradient came from the world copies:
             // swap it for the local one (the same term, without their rounding).
-            float k = (b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0) / (p.dt * p.dt);
+            // A substep weighs the inertia m/hₛ² (primalAccumulate added m/h²).
+            float m = b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0;
+            float kw = m / (p.dt * p.dt), k = m / (h * h);
             float3 dl = softLocal(o) - softTargetLocal(o);
-            g += k * (dl - (b.position - gAabbs[body].mn));
+            g += k * dl - kw * (b.position - gAabbs[body].mn);
+            H += float3x3(k - kw, 0.0, 0.0, 0.0, k - kw, 0.0, 0.0, 0.0, k - kw);
             if (softBdf2For(o))
             {
                 // BDF2 inertia weight 9/4: add the other 5/4 of the term.
@@ -2043,6 +2055,36 @@ void soft_primal_bodies(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
             : (gsSoftAwake == 0u ? 0u : (softIsRigid(gid.x) ? SOFT_ROLE_FOLLOW : allColors));
     GROUP_SYNC();
     uint role = gsUniformLanes;
+    // Crash island: the step's passes split into its substeps. At the first pass
+    // the first substep is set from the step's start; at each later boundary the
+    // body's beams yield at the substep's end, then its particles move on to the
+    // next substep. Chebyshev restarts with each substep.
+    uint chebPass = PASS_U;
+    if (isSoft && role != 0u && role < SOFT_ROLE_FOLLOW && softSubsteps(gid.x) > 1u)
+    {
+        uint S = softSubsteps(gid.x);
+        uint per = max(PARAMS.iterations * softSweeps() / S, 1u);
+        uint j = min(PASS_U / per, S - 1u);
+        chebPass = PASS_U - j * per;
+        if (chebPass == 0u)
+        {
+            float hs = softH(gid.x);
+            if (j > 0u && SUBSTEP_YIELD)
+            {
+                uint4 rb = softBodyRec(gid.x);
+                for (uint e = rb.z + local; e < rb.z + rb.w; e += 256u) softSubstepYield(e, hs);
+                DeviceMemoryBarrierWithGroupSync();
+            }
+            for (uint c = 0u; c < allColors; c++)
+            {
+                uint4 slot = SU(base + c / 2u);
+                uint2 cr = (c & 1u) == 0u ? slot.xy : slot.zw;
+                for (uint t = local; t < cr.y; t += 256u)
+                    softSubstepParticle(cr.x + t, hs, j == 0u);
+            }
+            DeviceMemoryBarrierWithGroupSync();
+        }
+    }
     if (role == SOFT_ROLE_FOLLOW)
     {
         for (uint c = 0u; c < allColors; c++)
@@ -2103,7 +2145,7 @@ void soft_primal_bodies(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         {
             uint4 slot = SU(base + c / 2u);
             uint2 cr = (c & 1u) == 0u ? slot.xy : slot.zw;
-            for (uint t = local; t < cr.y; t += 256u) softChebyshevEntry(cr.x + t, PASS_U);
+            for (uint t = local; t < cr.y; t += 256u) softChebyshevEntry(cr.x + t, chebPass);
         }
     }
     // Workgroups past the soft bodies (SOFT_ROLE_VEHICLE): vehicle_iterate, 64 vehicles each. It
@@ -2256,28 +2298,12 @@ bool softContactEdgeLive(uint id)
 // contact of a particle (a contact edge in its constraint list) or bounds that
 // near another soft body or an obstacle; demote (turn rigid) after `quiet ms`
 // with neither and no yield. Both take effect this step.
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void soft_mode(uint3 tid : SV_DispatchThreadID)
+// Bounds near another soft body or a registered obstacle (within both skins
+// + 0.1 m, an obstacle's own travel this step besides).
+bool softNear(uint s)
 {
-    uint s = dispatchIndex(tid);
-    if (s >= softBodyCount()) return;
-    uint4 st = SU(softModeSlot(s));
-    if ((st.z & 1u) == 0u) return; // no rigid core
-    uint core = asuint(softBodyRec1(s).z);
-    if (core == SOFT_NO_BODY) return;
-    bool enabled = (softFlags() & SOFT_RIGID_MODE) != 0u;
-    uint4 r = softBodyRec(s);
-    bool trigger = !enabled;
-    uint nJ = gCounters[0].jointCount;
-    for (uint k = 0u; k < r.y && !trigger; k++) trigger = softBodyContactLive(r.x + k, nJ);
-    // A blow to an attached bolted part.
-    for (uint k = 0u; k < softPartCount(s) && !trigger; k++)
-    {
-        uint4 rec = SU(softPartSlot(s, k));
-        if (softPartAttached(rec)) trigger = softBodyContactLive(rec.x, nJ);
-    }
-    if (!trigger && softContactsOn())
+    bool trigger = false;
+    if (softContactsOn())
     {
         // Contacts this step form only inside the bounds soft_bounds padded by
         // twice this step's travel (+ 0.1 m), so bounds within both skins
@@ -2309,6 +2335,49 @@ void soft_mode(uint3 tid : SV_DispatchThreadID)
             if (all(ohi + mo >= lo) && all(olo - mo <= hi)) trigger = true;
         }
     }
+    return trigger;
+}
+
+// Crash islands: a body that is not riding its core, with a live contact on a
+// particle or a soft contact in the last 50 ms, takes crash_substeps substeps
+// this step. Yields and nearness do not count: a quiet body hung on a rigid
+// core, stepped in substeps, kept yielding a little, so it never went rigid.
+void softIsland(uint s)
+{
+    uint S = softCrashSubsteps();
+    uint4 isl = SU(softIslandBase() + s);
+    bool hit = false;
+    if (S > 1u && !softIsRigid(s))
+    {
+        uint4 r = softBodyRec(s);
+        uint nJ = gCounters[0].jointCount;
+        uint ob = asuint(softBodyRec1(s).w);
+        for (uint k = 0u; k < r.y && !hit; k++)
+            hit = softBodyContactLive(r.x + k, nJ) || (softContactsOn() && SD(softFlagBase() + ob + k).x != 0.0);
+    }
+    uint quiet = hit ? 0u : min(isl.y + 1u, 1u << 24);
+    bool island = S > 1u && !softIsRigid(s) && float(quiet) * max(PARAMS.dt, 1e-6) <= 0.05;
+    gSoftData[softIslandBase() + s] = asfloat(uint4(island ? S : 1u, quiet, 0u, 0u));
+}
+
+void softModeBody(uint s)
+{
+    uint4 st = SU(softModeSlot(s));
+    if ((st.z & 1u) == 0u) return; // no rigid core
+    uint core = asuint(softBodyRec1(s).z);
+    if (core == SOFT_NO_BODY) return;
+    bool enabled = (softFlags() & SOFT_RIGID_MODE) != 0u;
+    uint4 r = softBodyRec(s);
+    bool trigger = !enabled;
+    uint nJ = gCounters[0].jointCount;
+    for (uint k = 0u; k < r.y && !trigger; k++) trigger = softBodyContactLive(r.x + k, nJ);
+    // A blow to an attached bolted part.
+    for (uint k = 0u; k < softPartCount(s) && !trigger; k++)
+    {
+        uint4 rec = SU(softPartSlot(s, k));
+        if (softPartAttached(rec)) trigger = softBodyContactLive(rec.x, nJ);
+    }
+    if (!trigger) trigger = softNear(s);
     float h = max(PARAMS.dt, 1e-6);
     uint quiet = trigger ? 0u : min(st.y + 1u, 1u << 24);
     uint mode = st.x;
@@ -2324,6 +2393,16 @@ void soft_mode(uint3 tid : SV_DispatchThreadID)
     }
     gSoftData[softModeSlot(s)] = asfloat(uint4(mode, quiet, st.z, st.w));
     softPartsFollow(s, core, mode == 1u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_mode(uint3 tid : SV_DispatchThreadID)
+{
+    uint s = dispatchIndex(tid);
+    if (s >= softBodyCount()) return;
+    softModeBody(s);
+    softIsland(s);
 }
 
 // Dual update per beam: the finite-stiffness ramp k ← min(k*, k + β|C|), and the
@@ -2353,33 +2432,12 @@ void soft_dual(uint3 tid : SV_DispatchThreadID)
 }
 
 // Post-step plasticity and breaking at the converged state (Rigs of Rods rules).
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void soft_plastic(uint3 tid : SV_DispatchThreadID)
+// Rigs of Rods yield at the converged length: past a threshold the rest length
+// moves so the beam sits on it (hardening in compression, weakening in
+// tension). Returns the force the beam carried.
+float softBeamYield(uint i, inout SoftBeam e, float force, float delta)
 {
-    uint i = dispatchIndex(tid);
-    // Elements ride the beams' threads (dispatched one per beam).
-    for (uint k = i; k < softElementCount(); k += max(softBeamCount(), 1u)) softElementPlastic(k);
-    if (i >= softBeamCount()) return;
-    SoftBeam e = loadBeam(i);
-    if (beamBroken(e)) return;
-    if (softIsRigid(beamSoftBody(e))) return; // rigid mode: the shape does not change
-    BodyState ba = gBodies[e.a];
-    BodyState bb = gBodies[e.b];
-    // Both ends asleep (or static): nothing moved this step.
-    bool movingA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
-    bool movingB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
-    if (!movingA && !movingB) return;
-    float h = max(PARAMS.dt, 1e-6);
-    uint ob = asuint(softBodyRec1(beamSoftBody(e)).w) - softBodyRec(beamSoftBody(e)).x;
-    float3 la = softLocal(ob + e.a), lb = softLocal(ob + e.b);
-    float len = length(la - lb);
-    // A sleeping end did not move: its step-start position is where it is.
-    float3 la0 = movingA ? softLocal0(ob + e.a) : la, lb0 = movingB ? softLocal0(ob + e.b) : lb;
-    float len0 = length(la0 - lb0);
-    float force = beamReadout(e, i, len, len0, h);
     uint flags = softFlags();
-    float delta = len - e.rest;
     float ts = softThresholdScale();
     if ((flags & SOFT_PLASTICITY) != 0u && beamPlastic(beamKind(e)) && e.spring > 0.0)
     {
@@ -2417,6 +2475,87 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
             softBdf2Interrupt(beamSoftBody(e), e.a, e.b);
         }
     }
+    return force;
+}
+
+// Rest lengths move only at the step's end: mid-step the structure (and the rigid
+// core it hangs on) has had only part of the iterations, and yield checks there
+// fired on unconverged forces (a buggy on its run-up never went rigid). The
+// in-solve cap still holds each beam at its threshold through the substeps.
+static const bool SUBSTEP_YIELD = false;
+// A crash island's substep boundary, beam i: yield at the substep's end lengths
+// (breaking waits for the step's end, in soft_plastic).
+void softSubstepYield(uint i, float h)
+{
+    SoftBeam e = loadBeam(i);
+    if (beamBroken(e)) return;
+    uint s = beamSoftBody(e);
+    uint ob = asuint(softBodyRec1(s).w) - softBodyRec(s).x;
+    float3 la = softLocal(ob + e.a), lb = softLocal(ob + e.b);
+    float len = length(la - lb);
+    float len0 = length(softLocal0(ob + e.a) - softLocal0(ob + e.b));
+    float force = beamReadout(e, i, len, len0, h);
+    e.force = softBeamYield(i, e, force, len - e.rest);
+    storeBeamState(i, e);
+}
+
+// A crash island's particle at a substep boundary: `restart` (pass 0) sets the
+// first substep from the step's start with hₛ; otherwise the substep that ended
+// becomes the next one's start, at the velocity it reached.
+void softSubstepParticle(uint li, float h, bool restart)
+{
+    uint4 ent = SU(softListBase() + li);
+    uint body = ent.x;
+    BodyState b = gBodies[body];
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b)) return;
+    uint sb = ent.w & 0xFFFFu;
+    uint ord = particleOrdinal(sb, body);
+    uint lq = softLocalBase() + LOCAL_STRIDE * ord;
+    float3 x0 = softLocal0(ord), x = softLocal(ord);
+    float3 v = restart ? b.linearVel : (x - x0) / h;
+    float3 start = restart ? x0 : x;
+    float3 gv = float3(0.0, PARAMS.gravityY, 0.0);
+    float3 y = start + v * h + gv * (h * h);
+    gSoftData[lq + 1u] = float4(start, 0.0);
+    gSoftData[lq + 2u] = float4(y, 0.0);
+    float3 o = softOrigin(sb);
+    gAabbs[body].mn = o + y;
+    softSetLocal(body, ord, sb, y);
+    // Chebyshev history restarts at the substep's guess.
+    uint q = softChebBase() + 3u * li;
+    gSoftData[q] = float4(y, 0.0);
+    gSoftData[q + 1u] = float4(y, 0.0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_plastic(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    // Elements ride the beams' threads (dispatched one per beam).
+    for (uint k = i; k < softElementCount(); k += max(softBeamCount(), 1u)) softElementPlastic(k);
+    if (i >= softBeamCount()) return;
+    SoftBeam e = loadBeam(i);
+    if (beamBroken(e)) return;
+    if (softIsRigid(beamSoftBody(e))) return; // rigid mode: the shape does not change
+    BodyState ba = gBodies[e.a];
+    BodyState bb = gBodies[e.b];
+    // Both ends asleep (or static): nothing moved this step.
+    bool movingA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
+    bool movingB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    if (!movingA && !movingB) return;
+    float h = softH(beamSoftBody(e));
+    uint ob = asuint(softBodyRec1(beamSoftBody(e)).w) - softBodyRec(beamSoftBody(e)).x;
+    float3 la = softLocal(ob + e.a), lb = softLocal(ob + e.b);
+    float len = length(la - lb);
+    // A sleeping end did not move: its step-start position is where it is.
+    float3 la0 = movingA ? softLocal0(ob + e.a) : la, lb0 = movingB ? softLocal0(ob + e.b) : lb;
+    float len0 = length(la0 - lb0);
+    float force = beamReadout(e, i, len, len0, h);
+    uint flags = softFlags();
+    float delta = len - e.rest;
+    float ts = softThresholdScale();
+    force = softBeamYield(i, e, force, delta);
     e.force = force;
     if ((flags & SOFT_BREAKING) != 0u)
     {

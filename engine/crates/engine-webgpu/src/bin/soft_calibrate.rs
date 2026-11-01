@@ -14,6 +14,8 @@
 //! SETTINGS=240x10 BDF2=1 CAR=default cargo run -p engine-webgpu --release --bin soft_calibrate
 //! # fit the global threshold scale per step rate to the oracle's 56 km/h crush
 //! FIT=1 cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # crash islands: 2 substeps per step for bodies in contact
+//! SUBSTEPS=2 SETTINGS=240x10 cargo run -p engine-webgpu --release --bin soft_calibrate
 //! # the GPU scenes 10 km from the origin (f32 precision)
 //! OFFSET=10000 SETTINGS=240x10 cargo run -p engine-webgpu --release --bin soft_calibrate
 //! ```
@@ -106,6 +108,7 @@ impl Gpu {
             sweeps: env_f32("SWEEPS").map_or(d.sweeps, |v| v as u32),
             plasticity: std::env::var("PLASTIC").as_deref() != Ok("0"),
             bdf2: std::env::var("BDF2").as_deref() == Ok("1"),
+            crash_substeps: env_f32("SUBSTEPS").map_or(d.crash_substeps, |v| v as u32),
             ..d
         });
         for (i, mu) in [(0, 1.0), (9, 0.8)] {

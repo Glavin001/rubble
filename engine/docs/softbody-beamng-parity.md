@@ -144,3 +144,32 @@ Open: `deformLimitStress`, `precompressionRange` and `beamPrecompressionTime`,
 `breakGroupType`, the 2 cm minimum deformed length (RoR's 0.1 m floor stays), the
 anisotropic `transitionZone`, and checking the legocar's skipped sections (needs
 `RUBBLE_JBEAM_DIR`, not available here).
+
+### Phase 8 — BeamNG resolution and scale (measured; DECISIONS s31)
+
+`soft_bench` (M3 Max, native, 240 Hz × 10, all cars soft and driving):
+
+| car | 1 car | 10 cars | 40 cars |
+|---|---|---|---|
+| sedan (161 nodes) | 2.11 ms/step | 2.11 | 2.79 |
+| high-res (1,014 nodes) | 4.83 | 6.19 | 10.03 |
+
+Self-collision on the high-res car: detection 0.96 → 0.50 ms per step after the
+lane-parallel `soft_collide_tris`; with the solve's contact terms it is about +1.4 ms
+on a 3.65 ms soft step without soft contacts (the plan's target is ≤ 25%).
+At these settings the high-res car does not converge (see the phase 0 table); that,
+not throughput, blocks the plan's high-res targets.
+
+### Phase 5 — crash islands (implemented, off by default; DECISIONS s31)
+
+`SoftSettings::crash_substeps`. Sedan without a core, 240 Hz × 10:
+
+| setting | tap (Hz) | crush 30 / 56 / 100 km/h max (cm) | 56 km/h profile (cm) | peak (g) | rebound (m/s) |
+|---|---|---|---|---|---|
+| oracle | 46 | 10.2 / 25.6 / 73.4 | 20 15 19 | 49 | 5.3 |
+| 1 substep | 25 | 9.6 / 36.6 / 113.9 | 20 23 22 | 40 | 4.6 |
+| 2 substeps | 35 | 6.9 / 39.9 / 68.4 | 19 19 15 | 48 | 5.1 |
+| 2 substeps, 12 iterations | 37 | 6.0 / 34.4 / 80.5 | 20 19 5 | 49 | 5.3 |
+
+Off by default: a core-jointed body couples wrongly in substeps (the core steps
+whole). Next: interpolate the core pose in the joint rows during substeps.

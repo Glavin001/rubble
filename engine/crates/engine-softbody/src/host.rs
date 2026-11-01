@@ -849,7 +849,17 @@ impl SoftHost {
                 self.elements_used,
                 l.element_base,
             ],
-            [l.rail_node_base, 0, 0, 0],
+            [
+                l.rail_node_base,
+                l.island_base,
+                // BDF2 keeps one step (its history is a step back).
+                if st.bdf2 {
+                    1
+                } else {
+                    st.crash_substeps.clamp(1, 16)
+                },
+                st.sweeps.max(1),
+            ],
         ];
         backend.write_soft_slots(0, &header);
     }

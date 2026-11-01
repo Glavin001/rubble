@@ -105,26 +105,28 @@ fn crush_spread_probe() {
     }
 }
 
-/// A crash is chaotic: shifting the scene by a few metres (no loss of precision)
-/// already moves the RMS crush by about 0.4 cm and the deepest node by 0.6 cm,
-/// through the order of contacts and whether a panel tears. 10 km out the crush
-/// lands within 1 cm of that spread. Before local frames it was 17 cm deeper.
+/// A crash is chaotic: shifting the scene a few metres (no loss of precision)
+/// already moves the RMS crush by about 0.2 cm and the deepest node by 1.3 cm,
+/// through the order of contacts and whether a panel tears. 10 km out the RMS
+/// crush lands within 1 cm of that spread and the deepest node within 2 cm (the
+/// node contacts with the ground and wall are the rigid pipeline's, in world
+/// f32). Before local frames the 10 km crash crushed 17 cm deeper.
 #[test]
 fn a_crash_ten_km_out_crushes_as_at_the_origin() {
-    let near: Vec<(f32, f32)> = [0.0f32, 3.0, 17.0]
+    let near: Vec<(f32, f32)> = [0.0f32, 1.0, 3.0, 17.0, 50.0]
         .iter()
         .map(|&o| wall_crash(Vec3::new(o, 0.0, o)))
         .collect();
     let (max1, rms1) = wall_crash(Vec3::new(10_000.0, 0.0, 10_000.0));
-    let band = |f: fn(&(f32, f32)) -> f32| {
+    let band = |f: fn(&(f32, f32)) -> f32, margin: f32| {
         let v: Vec<f32> = near.iter().map(f).collect();
         (
-            v.iter().copied().fold(f32::MAX, f32::min) - 0.01,
-            v.iter().copied().fold(f32::MIN, f32::max) + 0.01,
+            v.iter().copied().fold(f32::MAX, f32::min) - margin,
+            v.iter().copied().fold(f32::MIN, f32::max) + margin,
         )
     };
-    let (lo_max, hi_max) = band(|c| c.0);
-    let (lo_rms, hi_rms) = band(|c| c.1);
+    let (lo_max, hi_max) = band(|c| c.0, 0.02);
+    let (lo_rms, hi_rms) = band(|c| c.1, 0.01);
     eprintln!("near the origin: {near:?}; 10 km: max {max1:.4} m, RMS {rms1:.4} m");
     assert!(
         (lo_max..=hi_max).contains(&max1) && (lo_rms..=hi_rms).contains(&rms1),

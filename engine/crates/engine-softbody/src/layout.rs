@@ -33,6 +33,8 @@
 //!                        slidenode and its rail list; kind, spring, damping, rest
 //!                        angle; deform, strength, tolerance, cap strength
 //! railNodeBase + i/4     rail node lists (body indices)
+//! islandBase + s         soft body s: [substeps this step, steps since its last
+//!                        contact or yield, 0, 0] (crash islands)
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -239,6 +241,9 @@ pub struct SoftLayout {
     pub element_base: u32,
     /// Rail node lists (body indices, 4 per slot).
     pub rail_node_base: u32,
+    /// Per soft body: [substeps this step (crash island), steps since its last
+    /// contact or yield, 0, 0].
+    pub island_base: u32,
     pub total_slots: u32,
 }
 
@@ -311,8 +316,13 @@ impl SoftCapacity {
                 + self.max_bodies
                 + self.max_beams
                 + ELEMENT_STRIDE * self.max_elements,
-            total_slots: origin_base
+            island_base: origin_base
                 + self.max_bodies
+                + self.max_beams
+                + ELEMENT_STRIDE * self.max_elements
+                + self.max_rail_nodes.div_ceil(4),
+            total_slots: origin_base
+                + 2 * self.max_bodies
                 + self.max_beams
                 + ELEMENT_STRIDE * self.max_elements
                 + self.max_rail_nodes.div_ceil(4),
@@ -374,6 +384,15 @@ pub struct SoftSettings {
     /// wall's penetrations from 33 to 25 but raised a 2 × 80 km/h head-on's
     /// car-to-car ones from 1 to 12; DECISIONS s29).
     pub displacement_bound: f32,
+    /// Crash islands (BeamNG-parity phase 5): a soft body with a contact on one
+    /// of its particles within the last 50 ms splits its step into this many
+    /// substeps (its iterations shared among them), at
+    /// no extra particle sweeps. Rigid bodies and contacts still take one step:
+    /// within it they are fixed obstacles to the substeps. 1 = off (the default):
+    /// a body jointed to a rigid core couples wrongly, since the core takes the
+    /// whole step while the substeps pull its axle nodes half way (a buggy
+    /// yielded 70 beams settling on spawn); DECISIONS s31.
+    pub crash_substeps: u32,
     /// Second-order BDF2 for the particles instead of backward Euler (BDF1):
     /// far less numerical damping of the structure's vibration at a given step
     /// (experimental; validate with `soft_calibrate`). Backward Euler wherever a
@@ -402,6 +421,7 @@ impl Default for SoftSettings {
             bdf2: false,
             contact_push_out: 1.0,
             displacement_bound: 0.0,
+            crash_substeps: 1,
         }
     }
 }
@@ -453,8 +473,9 @@ mod tests {
         );
         assert_eq!(
             l.rail_node_base + c.max_rail_nodes.div_ceil(4),
-            l.total_slots
+            l.island_base
         );
+        assert_eq!(l.island_base + c.max_bodies, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }
