@@ -41,8 +41,8 @@ Paths are under `engine/crates/engine-webgpu/`.
 | `terrain.html` | WorldHost plus heightfield | `RigidStep` | vehicle-wasm | b0, b2, b18 |
 | `impact.html` | WorldHost, VehicleHost, `terrain-host.mjs` | `RigidStep` plus `TerrainStep` | vehicle-wasm | b0, b2, b18, b31, terrain buffers, `drawIndirect` |
 | `showcase.html` | as impact, plus buggy renderer | same | vehicle-wasm | same |
-| `fracture/` (`main.mjs` → `simulation.mjs`) | fracture `Simulation` | replays engine-fracture `Plan` | fracture-wasm | a b0 copy, b5 |
-| `fracture/` stress mode | none (stress-web: Rust host and renderer) | Rust | stress-web | Rust |
+| `fracture/` (`main.mjs` → `simulation.mjs`) | fracture `Simulation`; now `World` | replays engine-fracture `Plan` | fracture-wasm | a b0 copy, b5 |
+| `fracture/` stress mode | none (stress-web: Rust host and renderer); the simple threshold now `World` | Rust | stress-web | Rust |
 
 The JavaScript host's readbacks are all asynchronous `mapAsync`:
 - counters (b7)
@@ -95,7 +95,11 @@ The tests are:
 - `demo.html`'s benchmark harness: kernel variants, per-kernel timestamps, RUBSNAP1
   scenes. Added: `WorldDef.features` (the `ENGINE_*` switches), `GpuTiming`
   (`Frame::gpu_time`) and `World::import_snapshot`.
-- The fracture lab's sliced and overlapped stepping and its contact inspection.
+- The fracture lab's sliced and overlapped stepping and its contact inspection. Not
+  added: World steps whole ticks without waiting, so neither is needed (see the
+  fracture lab entry); contact inspection went with the JS host.
+- A placement that never blocks the page: the lab's bond preload is a job the page
+  advances (`World::begin_destructible_preload` / `advance_destructible_preload`).
 
 ## Progress
 
@@ -434,10 +438,111 @@ Each page moves in its own commit.
     - Built scenes match the JS host for the first steps and then diverge as
       chaotic piles do (wall: 1.8 cm after 30 steps).
 
-- **world-host.mjs, terrain-host.mjs.** No page imports them any more. They
-  stay, as do `RigidStep` and `TerrainStep` in engine-vehicle-wasm, which
-  `tests/terrain_plan.test.mjs` still checks against engine-terrain's plan;
-  removing them is a follow-up.
+- **fracture/ (the fracture lab).** The bond modes (None, breakable D6, and learned
+  impact, which runs rubble unbonded) and the stress mode's simple threshold run on
+  `World`. Every scene (the GLBs and their levels and layouts, the cuboid houses, the
+  scene packs including vibe-city's, the towers block, the meteor and topple scripts,
+  the glass tower, the reference rigs) is built by engine-fracture as before; the
+  page turns it into a destructible and places it (`engine-world-wasm` `lab.rs`,
+  `fracture/lab-world.mjs`, `lab-sim.mjs`). The page keeps rendering (its own
+  renderer), input, UI, the trails and the scripted volleys.
+  - **Bond modes.** The scene is one `StrengthModel::Bonds` destructible
+    (`DestructibleAssetDesc::from_scene`, the lab's solver `lab_solver`, the lab
+    plan's capacities, friction and 1 cm contact offset). Scene body *i* is world
+    slot *i* (ground first, then the chunks; bond *k* is joint *k*), checked at
+    placement, so `render.mjs` binds the world's body and joint buffers in place; the
+    parked shots and street props are drawn once and remapped. A shot launches the next
+    parked ball (`body_set_bullet` while static, `body_set_type`, mass data) by the
+    lab's rule (`plan::shot_velocity`, Ball mass/speed/CCD). Guidance arms every chunk
+    (`destructible_set_guided`). Reset is `World::restore_state`, which now covers
+    Bonds-model destructibles. D6 bonds settle one house on `World` and lay out copies
+    of it as before (`settleBonds`).
+  - **Threshold.** A `StrengthModel::Threshold` destructible on the world's shared
+    GPU fracture: a GLB's level (one copy, as the stress mode imported it), the cuboid
+    houses (one destructible per copy of the layout: #92's shared fracture with many
+    destructibles) or a scene pack, with the panel's rate, bond strength, ball
+    settings, crush (`CrushMass::Remove`, presets with "with presets") and the packs'
+    authored shots. Each shot is a new World projectile. The stress import's chunks
+    are the lab scene's bodies in order (`check_lab_chunk_order`, tested), so the
+    page draws each chunk from `labPoses`: its body's polled transform times its lab
+    pose, a pose buffer written when a frame arrives. `record-reactions.mjs` drives it
+    through the same frame-locked hooks.
+  - **Placement never blocks the page.** #92's threshold placement polled with
+    `Wait` after each destructible's uploads; on wasm32 it no longer does (WebGPU
+    cannot block, and `writeBuffer` stages in the browser, which frees it). The D6
+    preload, which waited for its helper world (`poll_blocking`, `read_body_state`),
+    is now a job the page advances once per frame
+    (`World::begin_destructible_preload` / `advance_destructible_preload`): it steps
+    while a readback slot is free and reads the awake count and the settled poses from
+    frames. `preload_destructible_asset` runs the same job blocking. Natively the two
+    take the same steps and settle within 0.3 mm (two blocking runs agree bit for bit:
+    the job polls at other times, and World's plan hints follow the polled counters).
+    JSPI was not used: nothing in the lab needs to suspend.
+  - **Stepping.** Each frame takes the ticks that fell due (at most 4) while a readback
+    slot is free; the rest stay due. The lab's worlds keep 8 readbacks in flight
+    (`readbackFrames`): with World's default 3 the towers volley (~6 ms of GPU a tick)
+    got only 81 ticks a second.
+  - **Checks.** `motion-check.mjs tower towers live lab` passes: no CCD ball crosses a
+    still piece in either tower pack (36 shots each) or the towers volley, the controls
+    find phase-throughs, the live click path passes on both towers, and the CCD ball
+    knocks the arch's crown out. The towers volley as a person watches it: 120 ticks/s,
+    1.00× real time (min 0.99×), against the JS host's 113 (0.94×, min 0.37×). With
+    every step's bodies captured for the check: 96-98 against 113-115. A recorded
+    crush-wall take (threshold, crush on) breaks 245 bonds and crushes 5 chunks.
+  - **Same shot, old and new** (the shot from 3 extents in front of the scene's
+    centre; stress modes: a click at the view's centre; 600 steps or frames):
+
+    | Scene | First break (step) | Bonds broken | Bodies | Awake at 600 |
+    |---|---|---|---|---|
+    | house, None | — / — | — | — | 129 / 124 (peak 132 / 132) |
+    | house, D6 | 84 / 84 | 89 / 97 | 10 / 10 actors | 132 / 131 |
+    | vc-towers (D6 at 0.2×) | 62 / 65 | 120 / 116 | 4 / 208 (World also counts the parked cars and pedestrians, each its own actor; the JS count took the towers' dynamic pieces only) | 14,701 / 14,701 |
+    | house, threshold | 31 / 29 | 33 / 30 | 5 / 4 | |
+    | cuboid grid, threshold (frame ~360) | 4 / 3 | 3,037 / 3,328 | 5,384 / 5,446 | |
+    | vc fracturedTower, threshold | 150 / 148 | 145 / 129 | 15 / 14 | |
+
+    The D6 house breaks at the same step; after that the counts drift as chaotic
+    collapses do (World runs its own plan, the shared `rigid_plan`, not the lab plan:
+    other contact rows and solve order). The JS host's frame-locked stress capture
+    advanced only 430 frames in 600 display frames (its catch-up dropped time), so its
+    first-break frames read a frame or two late.
+  - **Differences.**
+    - World's plan is not the lab plan. The 49-house grid with the ball in flight (one
+      awake body) costs 1.7 ms of GPU a step against the lab plan's 1.0 ms: World runs
+      its broadphase grid (0.45 ms), narrowphase (0.22), the CCD passes for the
+      bullet (0.23) and sleep (0.11) over the whole world, where the lab plan's awake
+      lists, moved-only bounds and awake queries skipped the sleepers. With few awake
+      the lab paid less; with many awake (the towers, the houses after a shot) World
+      is as fast or faster (table below).
+    - The threshold mode's World has no switch for strike prediction (always on, the
+      projectile's) or for the in-step contact fracture (off); the checkboxes show it
+      and are disabled. Its balls have no continuous collision, as ThresholdWorld's.
+    - The threshold mode's Bodies view colours per chunk, not per body (the draw shader
+      colours by the drawn index).
+    - Dropped with the JS host: sliced ticks and Overlap physics ticks (World never
+      waits), per-dispatch kernel profiles (`?gputime=phases` gives World's phases),
+      the collision-only pass `inspectCollisions` and `readContacts` and what read
+      them (`sleep-diag.mjs`, the GPU half of `convex-regression.mjs`, parity's pair
+      count, headless `lockstep`/`timeline`/sleep diagnostics), the plan budget's
+      `deterministic` flag. `headless-page`, `bond-regression`, `parity` and
+      `perf-bench` run on World.
+    - Kept on stress-web: the blast_parity stress solver, load path and local impact,
+      which World has no equivalent of (build-web.sh still builds stress-web).
+  - **Tests.** `fracture/simulation.test.mjs` (a mock GPUDevice under the JS host)
+    is replaced by `lab-sim.test.mjs` (the page's World bookkeeping under a mock
+    World), engine-world-wasm `tests/lab.rs` (chunk order) and engine-world's
+    `the_frame_by_frame_preload_settles_as_the_blocking_one`.
+- **JavaScript host deleted.** `fracture/simulation.mjs` and `simulation.test.mjs`,
+  `fracture/bonds.mjs`, `fracture/sleep-diag.mjs`, `world-host.mjs`, `terrain-host.mjs`,
+  and the `VehicleHost` / `SoftHost` wrappers (with `applyOps`, the character, height
+  field and `fbits` helpers) in `vehicle.mjs` / `soft.mjs`, with the node tests that
+  exercised only them. Kept, because pages or tests still use them: `vehicle.mjs`'s
+  constants, `vehicleLayout`, `M` and scene builders, `soft.mjs`'s importers,
+  `RigidStep` and `TerrainStep` (`tests/*_layout`, `terrain_plan.test.mjs`),
+  `shader-loader.mjs` (`fracture/learned-impact.mjs`), and engine-fracture-wasm (the
+  lab's node tests; the page loads its bindings inside the world wasm). Its `Plan`
+  binding and engine-vehicle-wasm's `WasmVehicleHost` / `WasmSoftHost` spawning are
+  now unused by pages; removing them from the Rust crates is a follow-up.
 - **Non-blocking reads.** `readBodies(slots)` returns a Promise (a copy, then
   `mapAsync`) for checks that need velocities.
 
@@ -505,6 +610,12 @@ steps. It covers the host's encode, submit and readback as well as the GPU work.
 | demo.html?scene=legacyGrid100k (settled) | 4.83 | 0.32 |
 | demo.html?scene=ring110k&bench=only (three-avbd protocol; GPU span) | 12.75 (12.28) | 13.66 (12.14) |
 | demo.html?scene=gables506k&bench=only (three-avbd protocol; GPU span) | 34.84 (34.39) | 37.02 (32.69) |
+| fracture/?scene=house (None, idle) | 0.001 | 0.006 |
+| fracture/?scene=house (None, after the shot) | 2.76 | 2.61 |
+| fracture/?scene=house&bonds=d6 (after the shot) | 4.26 | 3.34 |
+| fracture/?scene=grid (None, ball in flight) | 1.38 | 2.57 |
+| fracture/?scene=vc-towers (D6, after the shot) | 5.88 | 4.66 |
+| fracture/?scene=vc:fracturedTower (None, after the shot) | 0.62 | 0.93 |
 
 demo.html's "before" is the old page with a frame-locked `__step(n)` added (each
 step with its counter readback, 3 in flight, as World's default ring). Settled
@@ -514,6 +625,13 @@ awake islands' bookkeeping, the JS host ran every pass. The awake scenes cost
 spans agree within 5 %), and World reads back every moved body's pose each step
 (3.5 MB at 110k awake, 16 MB at 506k). The joint scenes are cheaper on World
 partly because their first steps differ (see the demo.html entry).
+
+The fracture lab's rows time pipelined steps after the page's own setup (old: the JS
+host's overlapped `step(1, {wait: false})` with its 3 ticks in flight; new: `World`
+with 8 readbacks in flight), `(reset, the shot, 300 steps)` best of 3. Idle, both skip
+the step (nothing awake). The stress mode's threshold ran at the display's 60 Hz in both
+(60 frames a second, 1.00× real time, on the house, the cuboid grid and the tower); the
+CPU per tick is 0.04-0.46 ms (`World.step`) against stress-web's 0.2-0.3 ms.
 
 `motion.html`'s CCD gallery is at rest until a volley: `World` skips a step when
 nothing is awake and nothing was written, and the JS host never did.
