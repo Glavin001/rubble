@@ -303,3 +303,82 @@ fn preloaded_assets_start_asleep_and_hold_their_own_weight() {
         "the structure stays asleep: {awake} of {chunks} awake"
     );
 }
+
+/// A ScenePack's chunks name their pack nodes (chunk k is node k), so a host can draw each from
+/// the pack's own collider and material.
+#[test]
+fn pack_chunks_name_their_nodes() {
+    let pack = br#"{"version": 2, "key": "nodes",
+        "scenario": {
+            "nodes": [
+                {"centroid": {"x": 0, "y": 0.5, "z": 0}, "mass": 10, "volume": 1},
+                {"centroid": {"x": 1, "y": 0.5, "z": 0}, "mass": 10, "volume": 1},
+                {"centroid": {"x": 2, "y": 0.5, "z": 0}, "mass": 10, "volume": 1}
+            ],
+            "nodeSizes": [{"x": 1, "y": 1, "z": 1}, {"x": 1, "y": 1, "z": 1}, {"x": 1, "y": 1, "z": 1}],
+            "bonds": [{"node0": 0, "node1": 1, "centroid": {"x": 0.5, "y": 0.5, "z": 0},
+                       "normal": {"x": 1, "y": 0, "z": 0}, "area": 1}]
+        }}"#;
+    let desc = rubble::DestructibleAssetDesc::from_pack(pack).unwrap();
+    assert_eq!(desc.chunks.len(), 3);
+    for (k, c) in desc.chunks.iter().enumerate() {
+        assert_eq!(c.node, Some(k as u32), "chunk {k}");
+        // The chunk's pose (rbDestructible_GetChunkPose) is its node's centroid, with the
+        // footprint centred on x = z = 0 (x from -0.5..2.5: shifted by -1).
+        let p = c.pose.position;
+        assert!((p[0] - (k as f32 - 1.0)).abs() < 1e-6 && (p[1] - 0.5).abs() < 1e-6 && p[2].abs() < 1e-6, "chunk {k} at {p:?}");
+    }
+}
+
+/// A pack collider of kind `shape` is its `scenario.shapeLibrary` entry's hull (not the node's
+/// `nodeSizes` box), and the node frame says where the library's points are: the hull's corners
+/// drawn at the chunk's pose are its points drawn at its node frame.
+#[test]
+fn pack_shape_colliders_are_their_library_hulls() {
+    use glam::Vec3;
+    // A wedge off its node's centroid: its centre of mass and principal axes are not the node's.
+    let pack = |kind: &str, shape: u32| {
+        format!(
+            r#"{{"version": 2, "key": "shapes",
+            "scenario": {{
+                "nodes": [
+                    {{"centroid": {{"x": 0, "y": 0.5, "z": 0}}, "mass": 10, "volume": 1}},
+                    {{"centroid": {{"x": 1, "y": 0.5, "z": 0}}, "mass": 10, "volume": 0.5}}
+                ],
+                "nodeSizes": [{{"x": 1, "y": 1, "z": 1}}, {{"x": 1, "y": 1, "z": 1}}],
+                "nodeColliders": [
+                    {{"kind": "cuboid", "halfExtents": {{"x": 0.5, "y": 0.5, "z": 0.5}}}},
+                    {{"kind": "{kind}", "shape": {shape}}}
+                ],
+                "shapeLibrary": [{{"kind": "convex_hull", "points": [
+                    -0.5, -0.5, -0.5,  0.5, -0.5, -0.5,  -0.5, 0.5, -0.5,  -0.5, -0.5, 0.5,
+                     0.5, -0.5,  0.5,  -0.5, 0.5,  0.5]}}],
+                "bonds": [{{"node0": 0, "node1": 1, "centroid": {{"x": 0.5, "y": 0.5, "z": 0}},
+                           "normal": {{"x": 1, "y": 0, "z": 0}}, "area": 0.5}}]
+            }}}}"#
+        )
+    };
+    let desc = rubble::DestructibleAssetDesc::from_pack(pack("shape", 0).as_bytes()).unwrap();
+    let c = &desc.chunks[1];
+    let (hull, local) = match &c.shapes[..] {
+        [Geometry::Hull { hull, transform }] => (hull, *transform),
+        other => panic!("node 1 collides as {other:?}, not its library hull"),
+    };
+    let frame = c.node_frame.expect("a pack chunk has its node frame");
+    // The footprint x -0.5..1.5 is centred: node 1's frame is at x = 0.5.
+    assert!((frame.position[0] - 0.5).abs() < 1e-6 && (frame.position[1] - 0.5).abs() < 1e-6, "{frame:?}");
+    assert!((Vec3::from(c.pose.position) - Vec3::from(frame.position)).length() > 0.05, "a wedge's centre of mass is off its node's frame");
+    let place = |t: Transform, v: Vec3| glam::Quat::from_array(t.rotation) * v + Vec3::from(t.position);
+    let corners: Vec<Vec3> = hull.vertices.iter().map(|v| place(c.pose, place(local, *v))).collect();
+    let points = [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [-0.5, 0.5, 0.5]];
+    assert_eq!(corners.len(), points.len());
+    for p in points {
+        let at = place(frame, Vec3::from(p));
+        assert!(corners.iter().any(|q| (*q - at).length() < 1e-4), "point {p:?} (at {at}) is not a hull corner: {corners:?}");
+    }
+    // A box's node frame is its pose.
+    assert_eq!(desc.chunks[0].node_frame.unwrap().position, desc.chunks[0].pose.position);
+    // Not silently a box: an unknown kind, or a shape the library lacks, is an error.
+    assert!(rubble::DestructibleAssetDesc::from_pack(pack("blob", 0).as_bytes()).is_err());
+    assert!(rubble::DestructibleAssetDesc::from_pack(pack("shape", 3).as_bytes()).is_err());
+}

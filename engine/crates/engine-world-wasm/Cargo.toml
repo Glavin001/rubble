@@ -3,7 +3,7 @@ name = "engine-world-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "wasm-bindgen bindings of rubble's World for the web pages: the same host as native and Unreal, on the browser's WebGPU"
+description = "Rubble's World in the browser (wasm-bindgen): the web pages' physics host on the browser's WebGPU, the same host native and Unreal run; also Broadside's scene (broadside.html), stepped in Rust"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -17,7 +17,12 @@ engine-schema.workspace = true
 engine-softbody.workspace = true
 engine-terrain.workspace = true
 engine-webgpu = { workspace = true, features = ["gpu"] }
+engine-fracture.workspace = true
 engine-gpu-wait.workspace = true
+# Broadside's threshold destructible and its device (stress-gpu's `Gpu`).
+stress-gpu = { path = "../../stress-oracle/crates/stress-gpu" }
+stress-ref = { path = "../../stress-oracle/crates/stress-ref" }
+stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-features = false, features = ["gpu"] }
 wgpu.workspace = true
 glam.workspace = true
 bytemuck.workspace = true

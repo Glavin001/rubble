@@ -15,6 +15,11 @@
 use rubble::*;
 use wasm_bindgen::prelude::*;
 
+pub mod broadside;
+/// Broadside (`broadside.html`): its scene stepped in Rust, the page draws its poses.
+mod broadside_page;
+pub use broadside_page::*;
+
 mod defs;
 mod frame;
 mod guidance;
@@ -102,23 +107,14 @@ impl WebWorld {
     /// The world's `GPUDevice`: the page renders on it, so its passes read the
     /// world's buffers in place.
     pub fn device(&self) -> JsValue {
-        self.world
-            .device()
-            .as_webgpu()
-            .map(|d| JsValue::from(d.clone()))
-            .unwrap_or(JsValue::NULL)
+        gpu_device(self.world.device())
     }
 
     /// The `GPUBuffer` of body poses (`engine_webgpu::POSE_RECORD_BYTES` per
     /// body slot, in slot order), as the step left it.
     #[wasm_bindgen(js_name = poseBuffer)]
     pub fn pose_buffer(&self) -> JsValue {
-        self.world
-            .sim()
-            .pose_buffer()
-            .as_webgpu()
-            .map(|b| JsValue::from(b.clone()))
-            .unwrap_or(JsValue::NULL)
+        gpu_buffer(self.world.sim().pose_buffer())
     }
 
     #[wasm_bindgen(js_name = stepCount)]
@@ -331,8 +327,25 @@ pub fn solver_flags() -> JsValue {
     o.into()
 }
 
+/// The browser's `GPUBuffer` under `b` (`null` off the WebGPU backend, e.g. a
+/// native build of this crate for its tests).
 fn gpu_buffer(b: &wgpu::Buffer) -> JsValue {
-    b.as_webgpu().map(|b| JsValue::from(b.clone())).unwrap_or(JsValue::NULL)
+    #[cfg(target_arch = "wasm32")]
+    if let Some(b) = b.as_webgpu() {
+        return JsValue::from(b.clone());
+    }
+    let _ = b;
+    JsValue::NULL
+}
+
+/// The browser's `GPUDevice` under `d` (`null` off the WebGPU backend).
+fn gpu_device(d: &wgpu::Device) -> JsValue {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(d) = d.as_webgpu() {
+        return JsValue::from(d.clone());
+    }
+    let _ = d;
+    JsValue::NULL
 }
 
 fn id(body: f64) -> BodyId {

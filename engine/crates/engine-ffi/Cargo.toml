@@ -11,6 +11,9 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 engine-world = { path = "../engine-world" }
+# The host renderer's device and buffers (metal_interop) for rbCreateWorldOnMetal.
+engine-webgpu.workspace = true
+wgpu.workspace = true
 engine-schema.workspace = true
 engine-vehicle.workspace = true
 engine-softbody.workspace = true
@@ -24,3 +27,7 @@ engine-fracture.workspace = true
 
 [build-dependencies]
 cbindgen = { version = "0.29", default-features = false }
+
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+objc2 = "0.6"
+objc2-metal = "0.3"

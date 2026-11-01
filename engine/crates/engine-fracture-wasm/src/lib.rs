@@ -185,6 +185,12 @@ impl Scene {
             .map(|(s, _)| Scene(s))
             .map_err(err)
     }
+    /// The glass tower and the pavilion it can be felled onto, as a scene pack's bytes
+    /// (engine-fracture `glass_tower.rs`; load it with `fromPack`).
+    #[wasm_bindgen(js_name = glassTowerPack)]
+    pub fn glass_tower_pack() -> Result<Vec<u8>, JsError> {
+        serde_json::to_vec(&engine_fracture::glass_tower::felling_scene_pack()).map_err(err)
+    }
     /// Collision-cost benchmark scene (`count` stacks of shape `a` under `b`).
     #[wasm_bindgen(js_name = pairs)]
     pub fn pairs(a: &str, b: &str, count: u32) -> Result<Scene, JsError> {
@@ -443,6 +449,11 @@ impl Orbit {
     /// First-person travel for `dt` seconds (axes in -1..1: forward, right, up).
     pub fn travel(&mut self, forward: f64, right: f64, up: f64, sprint: bool, dt: f64) {
         self.0.travel(forward, right, up, sprint, dt)
+    }
+    /// A scripted camera: fly mode, the eye at (ex, ey, ez) looking at (tx, ty, tz).
+    #[wasm_bindgen(js_name = lookAt)]
+    pub fn look_at(&mut self, ex: f64, ey: f64, ez: f64, tx: f64, ty: f64, tz: f64) {
+        self.0.frame_shot([ex, ey, ez], [tx, ty, tz])
     }
     /// Column-major view-projection for the draw shader.
     #[wasm_bindgen(js_name = viewProj)]
