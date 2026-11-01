@@ -752,3 +752,110 @@ fall forever and keep the world awake. It is now removed:
 
 Every body sleeps by 22 s. From then on `World` dispatches no step, and the page
 is bound by drawing the 110k boxes (about 700 FPS).
+
+## Large maps in the browser
+
+`city.html` runs the large-maps benchmark city (`engine-world/tests/city_scale.rs`,
+[large-maps-progress.md](large-maps-progress.md)) on `World` in the browser. Both build
+it through one builder, `rubble::city` (engine-world, `stress` feature): K threshold
+cuboid houses (715 chunks, 1,549 bonds each) on a ceil(√K)² grid over the 2.2 km map,
+the same `WorldDef` (capacity, threshold solver, canonical contacts, the large-map
+sleep policy, the 32,768-slot piece pool), the same scenarios and the same shots. The
+page sets only what a page owns: GPU timing, the kill floor (`killBelow: -50`, as
+demo.html) and readback depth (`WebWorld.createCity` rejects anything else).
+
+- **Placement never blocks the page.** `world.cityPlace(city, n)` places n houses and
+  returns; the page places houses until 8 ms of its frame are spent (`?budget=`), draws,
+  and continues next frame, with a progress bar. On wasm32 a placement does not wait on
+  its uploads (the browser stages `writeBuffer` itself). After placement the city
+  settles 120 steps, each taken once the previous step's frame arrived (as native: a
+  split is adopted from its frame), then the scenario starts.
+- **Drawing in place.** One instanced 8-corner cube per collider, read from the world's
+  body, collider and hull-arena buffers (a hull is drawn as its local bounds box, exact
+  for these boxes): no per-chunk host work, and a chunk's collider follows its body on
+  the GPU as clusters split. 732,160 boxes draw at 60 FPS (the headless frame cap).
+- **Modes.** `still`; `drive`, by default a sedan through the vehicle API held to
+  15 m/s down the native car's street (`?car=box`: the native kinematic box); `war`,
+  the native 20 shots. Rebuilding for another scenario replaces the world in place on
+  the same device (`world.cityRebuild`). Automation: `__ready`, `__step(n)` (each step
+  waited for, with wall, host and GPU ms), `__scenario(name)`, `__measure(name)` (a
+  fresh city, 120 waited steps, then 120 pipelined), `__segments()`.
+
+### Native vs web (M3 Max, 2026-11-01)
+
+Native: `CITY_K=… CITY_SLEEP=1 CITY_POOL=32768 CITY_SCENARIOS=still,drive,war`, run
+right before the web runs; GPU from a second run with `RUBBLE_GPU_TIMING=1` (the sum of
+the step's pass marks). Web: headless Chrome 156 (`tools/page-bench.mjs`,
+`__measure`), wall and host with `?timing=off`, GPU with `?timing=step` (one timestamp
+pair around the step). Wall is per step, each step waited for (latency, as the native
+bench); "pipelined" is 120 further steps as fast as readbacks allow. Medians of 120
+steps, ms. Awake and bonds broken are at the end of the 120 measured steps (web from the
+`timing=off` run). One GPU job at a time; other sessions ran GPU jobs between runs.
+
+| K (chunks) | scenario | native wall | native host | native GPU | web wall | web host | web pipelined | web GPU | awake native / web | bonds broken native / web |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 64 (45,760) | still | 0.01 | 0.01 | 0.07 | 0.0 | 0.0 | 0.01 | — | 0 / 0 | 0 / 0 |
+| | drive | 2.68 | 0.35 | 1.41 | 7.8 | 0.2 | 2.15 | 3.38 | 0 / 0 | 0 / 0 |
+| | war | 5.34 | 0.45 | 3.49 | 8.5 | 0.6 | 4.01 | 3.79 | 1,034 / 1,106 | 2,630 / 2,605 |
+| 256 (183,040) | still | 0.01 | 0.01 | 0.07 | 0.0 | 0.0 | 0.01 | — | 0 / 0 | 0 / 0 |
+| | drive | 4.85 | 0.36 | 2.61 | 8.4 | 0.2 | 4.08 | 3.27 | 0 / 0 | 0 / 0 |
+| | war | 8.59 | 0.70 | 5.00 | 11.4 | 0.5 | 8.54 | 4.19 | 994 / 1,081 | 2,429 / 2,571 |
+| 1,024 (732,160) | still | 0.02 | 0.02 | 0.08 | 16.8* | 0.2 | 16.2* | 8.8* | 0 / 7* | 0 / 5* |
+| | drive | 13.88 | 0.41 | 7.32 | 17.7 | 0.2 | 16.5 | 9.7 | 0 / 7* | 0 / 5* |
+| | war | 20.67 | 0.53 | 12.83 | 23.2 | 0.4 | 23.4 | 12.0 | 1,080 / 1,068 | 2,389 / 2,451 |
+
+\* On the web the 1,024-house city has not quite settled at step 120: one house still
+sheds 5 bonds and 7 bodies stay awake until about step 365 (9 bonds in all), after which
+`still` costs nothing (0 ms, step skipped) as natively. Native settles within 120 steps.
+The houses' own settle (about 600 bonds break in steps 2-4 natively) and the shots are
+chaotic, and the browser's WGSL (Tint on Metal) and native Metal round differently, so
+counts differ run-to-backend; each backend is repeatable (web war at K=16: 975 awake,
+2,239 bonds twice; native 853, 1,978 twice), and the war counts agree within a few
+percent.
+
+Drive with the vehicle-API sedan (`?car=vehicle`, timing on): K=64 wall 8.3, GPU 3.5,
+pipelined 2.7; K=256 8.8, 3.3, 4.7; K=1,024 17.8, 9.1, 15.0 (one awake body: the
+chassis; raycast wheels touch only the ground).
+
+Placement takes the same time in both: 5.0 s for 64 houses, 20.6 s for 256, 84 s for
+1,024 (82 ms a house, web and native alike): `World::create_destructible`'s host work
+per house, not wasm.
+
+### Where the time goes
+
+- **Small maps: readback latency, not wasm.** The web host's `World::step` is 0.2-0.6 ms
+  (native 0.35-0.7). At K=64 a waited web step is 7.8 ms against 2.68 natively, but 120
+  pipelined steps take 2.15 ms each: the ~5 ms is the browser's map round trip (a
+  `mapAsync` result reaches the page on a later task), which a waiting loop pays every
+  step and a live page, keeping up to three steps in flight, does not.
+- **Large maps: the GPU, about 10-20% above native.** At K=1,024 every step with
+  anything awake costs 15-16 ms pipelined on the web against 13.9 ms waited natively,
+  with the host at 0.2 ms. The phase split (`?timing=phases`, drive) is broadphase grid
+  1.3, narrowphase 4.9, warm 0.5, graph 0.2, the four iterations 0.8, sleep 0.5 ms:
+  passes that run over every collider or body once anything is awake, the L1 target in
+  large-maps-progress.md (native's pass marks put the same ~4.4 ms block in an
+  iteration; Apple's timestamps attribute work across pass boundaries loosely). The
+  step-pair GPU time misses part of the step on both sides (web 9.7, native 7.3 ms of a
+  14-16 ms step), so the wall and pipelined columns are the comparison.
+- **Host memory sets the browser's limit.** Each threshold destructible kept its
+  placement-time body frames and free marks, sized to every body slot below its own:
+  host memory grew as houses × body slots (native RSS 3.2 MB a house; the wasm heap
+  reached 3.8 GB at 1,024 houses, so a second city could not be built in wasm32's
+  4 GiB). They are not read after placement and are now dropped (lossless): 1.4 MB a
+  house natively, a 1.35-1.7 GiB wasm heap at 1,024 houses.
+
+### The largest city in the browser
+
+1,024 houses (732,160 chunks) run in Chrome with room to spare: the device's
+`maxBufferSize` and `maxStorageBufferBindingSize` are 4 GiB on this Mac, and the city's
+buffers are far below that (1,048,576 colliders × 64 B = 64 MiB; 524,288 contact rows ×
+128 B = 64 MiB); `World::new` checks every rigid buffer against the device and fails
+with the limit named, which the page reports with the device's limits. Neither larger city
+fails on a browser limit; both fail identically natively, with clear errors:
+
+- 2,048 houses: "826 more chunks do not fit (room for 1048576 …)": the shared GPU
+  fracture's split scans hold 2^20 chunks a world (1,466 houses of 715 chunks).
+- 1,466 houses: "WorldCapacity::max_bodies (131072) reached": the city's capacity rule
+  (64 body slots a house plus the pool, to a power of two) is too tight there.
+
+The wasm heap (1.4 GiB at 1,024 houses after the fix above) would allow about 2,500.
