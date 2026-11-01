@@ -206,74 +206,82 @@ impl World {
 
     /// Every body as the engine should have it: one per cluster (boxes per chunk) and
     /// one per impactor. A cluster's shapes are built when its signature is new and
-    /// shared from `cache` after that (they depend only on its chunks).
-    fn engine_bodies(&self, cache: &mut HashMap<u64, (u64, std::sync::Arc<Vec<BoxShape>>)>) -> Vec<EngineBody> {
+    /// shared from `cache` after that (they depend only on its chunks), undeformed; with
+    /// `engine_shapes_deformed` their current poses (`shape_poses`) go with them, a new
+    /// list only when one changed (a settled body's engine geometry is untouched).
+    fn engine_bodies(&self, cache: &mut HashMap<u64, ShapeCache>) -> Vec<EngineBody> {
         let mut out = Vec::with_capacity(self.solver.clusters.len() + self.impactors.len());
         let mut live = std::collections::HashSet::with_capacity(self.solver.clusters.len());
         for cl in &self.solver.clusters {
             let st = &self.solver.structures[cl.structure];
             let signature = cluster_signature(cl);
             live.insert(cl.id);
-            if let Some((sig, shapes)) = cache.get(&cl.id) {
-                if *sig == signature {
-                    out.push(EngineBody {
-                        key: BodyKey::Cluster(cl.id),
-                        signature,
-                        geometry: BodyGeometry::Boxes(shapes.clone()),
-                        fixed: cl.anchored,
-                        ccd: false,
-                        pose: cl.pose,
-                        velocity: cl.velocity,
-                        angular_velocity: cl.angular_velocity,
-                    });
-                    continue;
-                }
-            }
-            let shapes: Vec<BoxShape> = cl
-                .chunks
-                .iter()
-                .flat_map(|&c| {
-                    let ch = &st.chunks[c];
-                    let rotation = rotation_of(&ch.rotation);
-                    match &ch.parts {
-                        // A compound chunk: one hull shape per part, reported on the chunk,
-                        // with the chunk's mass shared by the parts' volumes.
-                        Some(parts) => {
-                            let volumes: Vec<f64> = parts.iter().map(|p| p.hull.unit_mass().volume).collect();
-                            let total: f64 = volumes.iter().sum();
-                            parts
-                                .iter()
-                                .zip(volumes)
-                                .map(|(p, v)| BoxShape {
-                                    local: Pose::new(ch.center + ch.rotation * p.offset, rotation),
-                                    half_extents: p.hull.half_extents(),
-                                    mass: ch.mass * v / total,
+            let cached = match cache.get_mut(&cl.id) {
+                Some(c) if c.signature == signature => c,
+                _ => {
+                    let shapes: Vec<BoxShape> = cl
+                        .chunks
+                        .iter()
+                        .flat_map(|&c| {
+                            let ch = &st.chunks[c];
+                            match &ch.parts {
+                                // A compound chunk: one hull shape per part, reported on the
+                                // chunk, with the chunk's mass shared by the parts' volumes.
+                                Some(parts) => {
+                                    let volumes: Vec<f64> = parts.iter().map(|p| p.hull.unit_mass().volume).collect();
+                                    let total: f64 = volumes.iter().sum();
+                                    parts
+                                        .iter()
+                                        .zip(volumes)
+                                        .map(|(p, v)| BoxShape {
+                                            local: Pose::new(ch.center + ch.rotation * p.offset, rotation_of(&ch.rotation)),
+                                            half_extents: p.hull.half_extents(),
+                                            mass: ch.mass * v / total,
+                                            chunk: Some((cl.structure, c)),
+                                            hull: Some(p.hull.vertices.clone()),
+                                        })
+                                        .collect::<Vec<_>>()
+                                }
+                                None => vec![BoxShape {
+                                    local: Pose::new(ch.center, rotation_of(&ch.rotation)),
+                                    half_extents: ch.half_extents,
+                                    mass: ch.mass,
                                     chunk: Some((cl.structure, c)),
-                                    hull: Some(p.hull.vertices.clone()),
-                                })
-                                .collect::<Vec<_>>()
-                        }
-                        None => vec![BoxShape {
-                            local: Pose::new(ch.center, rotation),
-                            half_extents: ch.half_extents,
-                            mass: ch.mass,
-                            chunk: Some((cl.structure, c)),
-                            hull: ch.hull.as_ref().map(|h| h.vertices.clone()),
-                        }],
-                    }
-                })
-                .collect();
-            let shapes = std::sync::Arc::new(shapes);
-            cache.insert(cl.id, (signature, shapes.clone()));
+                                    hull: ch.hull.as_ref().map(|h| h.vertices.clone()),
+                                }],
+                            }
+                        })
+                        .collect();
+                    cache.insert(cl.id, ShapeCache { signature, shapes: std::sync::Arc::new(shapes), poses: None });
+                    cache.get_mut(&cl.id).expect("inserted")
+                }
+            };
+            if self.engine_poses_held {
+                // Another pass moves the engine's shapes this frame (the GPU-resident
+                // frame's): the poses last given stand, and a new body is built undeformed.
+            } else if self.engine_shapes_deformed {
+                let poses = self.shape_poses(cl);
+                let current: &[Pose] = match &cached.poses {
+                    Some(p) => p,
+                    None => &[],
+                };
+                let same = if current.is_empty() { cached.shapes.iter().zip(&poses).all(|(s, p)| s.local == *p) } else { current == &poses[..] };
+                if !same {
+                    cached.poses = Some(std::sync::Arc::new(poses));
+                }
+            } else {
+                cached.poses = None;
+            }
             out.push(EngineBody {
                 key: BodyKey::Cluster(cl.id),
                 signature,
-                geometry: BodyGeometry::Boxes(shapes),
+                geometry: BodyGeometry::Boxes(cached.shapes.clone()),
                 fixed: cl.anchored,
                 ccd: false,
                 pose: cl.pose,
                 velocity: cl.velocity,
                 angular_velocity: cl.angular_velocity,
+                poses: cached.poses.clone(),
             });
         }
         for (i, imp) in self.impactors.iter().enumerate() {
@@ -296,9 +304,37 @@ impl World {
                 pose: imp.pose,
                 velocity: imp.velocity,
                 angular_velocity: imp.angular_velocity,
+                poses: None,
             });
         }
         cache.retain(|id, _| live.contains(id));
+        out
+    }
+
+    /// The pose of each of a cluster's engine shapes in the cluster frame, in
+    /// `engine_bodies`' order (a compound chunk's parts in turn): where the stress solve
+    /// has the chunk, its hidden displacement and rotation included, as the world's own
+    /// contact sees it (`World::chunk_box`); undeformed with `engine_shapes_deformed`
+    /// off. Undeformed shapes kept a piece freed from a
+    /// deforming structure flush against the remainder's faces where the solve had a
+    /// widening gap: it wedged there and broke (b8_frame_sudden, README "Known gaps").
+    fn shape_poses(&self, cl: &crate::solver::Cluster) -> Vec<Pose> {
+        let st = &self.solver.structures[cl.structure];
+        let mut out = Vec::with_capacity(cl.chunks.len());
+        for &c in &cl.chunks {
+            let ch = &st.chunks[c];
+            let (center, turn) = if self.engine_shapes_deformed {
+                let hidden = &self.solver.chunks[cl.structure][c];
+                (ch.center + hidden.u, Quat::from_axis_angle(hidden.th, hidden.th.norm()).to_mat3() * ch.rotation)
+            } else {
+                (ch.center, ch.rotation)
+            };
+            let rotation = rotation_of(&turn);
+            match &ch.parts {
+                Some(parts) => out.extend(parts.iter().map(|p| Pose::new(center + turn * p.offset, rotation))),
+                None => out.push(Pose::new(center, rotation)),
+            }
+        }
         out
     }
 
@@ -1353,4 +1389,13 @@ mod network_tests {
         assert!(bound <= exact * 1.002, "{bound} not sharp against {exact} (rows {rows})");
         assert!(rows > 5.0 * exact);
     }
+}
+
+/// A cluster's engine shapes as `World::engine_bodies` shares them: built for its chunks
+/// (`signature`), undeformed, and their current poses when they differ.
+#[derive(Clone)]
+pub(crate) struct ShapeCache {
+    signature: u64,
+    shapes: std::sync::Arc<Vec<BoxShape>>,
+    poses: Option<std::sync::Arc<Vec<Pose>>>,
 }
