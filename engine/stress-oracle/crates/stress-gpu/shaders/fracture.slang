@@ -111,6 +111,10 @@ static const uint NONE = 0xffffffffu;
 static const uint BODY_WORDS = 7;
 static const uint FLAG_DYNAMIC = 1;
 static const uint FLAG_AWAKE = 8;
+// rubble's BODY_CCD and BODY_CCD_FAST: a crush particle's continuous collision, on while
+// it moves fast (world_step.slang ccdFastLatch clears it once it slows).
+static const uint FLAG_CCD = 256u;
+static const uint FLAG_CCD_FAST = 32768u;
 static const uint INFO_SUPPORT = 1;
 static const uint SUMS = 20;      // per root: mass, first moment (3), second moment (6), 64-bit each
 
@@ -1148,7 +1152,9 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
 // it; at D >= 1 it is crushed: every bond of it breaks (the split above re-splits its
 // body), and after the split its body is parked out of the world (removed) and, with
 // `crush.mode` 1 (conserve), `crush.fragments` small boxes from a reserved pool take its
-// mass and momentum. Forward only: decided from this frame's loads and the predicted
+// mass and momentum, or with mode 2 (particles) the chunk's own count of small spheres
+// (its crush row's .w: from its volume, set by the host) that never rotate and never
+// collide with one another (their colliders share a negative filter group). Forward only: decided from this frame's loads and the predicted
 // strike, applied before the engine's next step.
 //
 // The stress estimate (threshold mode solves no bond forces): the chunk's external forces
@@ -1176,14 +1182,15 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
 //   fr_crush_mark, fr_crush_gate
 //                    the chunks crushed this frame (scan input), and the indirect sizes
 //                    of what follows (zero on a frame with none);
-//   (the scan: each crushed chunk's rank, its event and fragments in chunk order)
+//   (the scan: each crushed chunk's rank, its event and fragments in chunk order; the
+//    scanned value packs one event (CRUSH_EVENT_ONE) and its pool entries below it)
 //   fr_crush_apply   one thread per crushed chunk: its event, its fragments, its body parked;
 //   fr_crush_end     one thread: the frame's counts.
 
 struct CrushParams
 {
     uint enabled;
-    uint mode;        // 0 remove, 1 conserve
+    uint mode;        // 0 remove, 1 conserve (boxes), 2 particles
     uint fragments;   // per crushed chunk (conserve), a power of two
     uint pool_size;   // fragment bodies reserved
     uint max_events;  // crushes a frame at most
@@ -1205,7 +1212,7 @@ struct CrushParams
 };
 
 // Per chunk 2 float4: (capPressure, cohesion, frictionSlope, crushEnergy), (crushViscosity,
-// volume, flags as bits (1 crushable), -); then the tables at `crush.t_*`.
+// volume, flags as bits (1 crushable), particles (mode 2)); then the tables at `crush.t_*`.
 [[vk::binding(23, 0)]] StructuredBuffer<float4> crush_tab;
 // Per chunk (damage, peak p, peak q, flags as bits: 1 crushed, 2 crushed this frame, cause
 // << 4 (1 contact, 2 impact)); then the per-body bill, per-shot impulses and the events.
@@ -1227,6 +1234,30 @@ static const uint ARG_CRUSH_CHUNKS = 6;
 static const uint ARG_CRUSH_SCAN = 7;
 static const uint ARG_CRUSH_ONE = 8;
 static const uint MAX_SHOTS = 64;
+// The crush scan's value: one event in the high bits, the chunk's pool entries below
+// (the host keeps the pool under CRUSH_POOL_SPAN and the events a frame under 4096).
+static const uint CRUSH_EVENT_ONE = 1u << 20;
+static const uint CRUSH_POOL_SPAN = CRUSH_EVENT_ONE - 1u;
+
+// Pool entries a crushed chunk takes: the fixed box count, its own particle count, none.
+uint crush_pieces(uint k)
+{
+    if (crush.mode == 1)
+        return crush.fragments;
+    if (crush.mode == 2)
+        return uint(crush_tab[2 * k + 1].w + 0.5);
+    return 0u;
+}
+
+// A particle's spot in its chunk's box, each coordinate in [-1, 1]: a hash of the chunk and
+// the particle (the host's mirror computes the same).
+float3 crush_particle_spot(uint k, uint i)
+{
+    uint h = (k * 0x9E3779B1u) ^ (i * 0x85EBCA77u);
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;
+    uint h2 = h * 0x9E3779B1u + 0x7F4A7C15u;
+    return float3(float(h & 0x3FFu), float((h >> 10) & 0x3FFu), float(h2 & 0x3FFu)) / 511.5 - 1.0;
+}
 
 bool crushable(uint k)
 {
@@ -1966,7 +1997,7 @@ void fr_crush_mark(uint3 id: SV_DispatchThreadID)
     if (c >= params.chunk_count || crush.enabled == 0)
         return;
     uint now = (crush_flags(c) & CR_NOW) != 0 ? 1u : 0u;
-    work[w_new() + c] = now;
+    work[w_new() + c] = now != 0 ? CRUSH_EVENT_ONE | crush_pieces(c) : 0u;
     if (now != 0)
         atom[a_counters() + C_FRAME_CRUSHED].add(1u);
 }
@@ -2020,14 +2051,16 @@ void fr_crush_apply(uint3 id: SV_DispatchThreadID)
     float3 w = bodies[bw + 4].xyz;
     float mass = chunks[4 * k].w;
     float volume = crush_tab[2 * k + 1].y;
-    uint rank = work[w_rank() + k];
+    uint scanned = work[w_rank() + k];
+    uint rank = scanned / CRUSH_EVENT_ONE;
+    uint pieces = crush_pieces(k);
     if (rank >= crush.max_events)
         atom[a_counters() + C_ERROR].or(32u);
     uint first = NONE;
     float3 half = float3(0.0);
     if (crush.mode == 1 && crush.fragments > 0)
     {
-        uint base = atom[a_counters() + C_FRAGMENTS].load() + rank * crush.fragments;
+        uint base = atom[a_counters() + C_FRAGMENTS].load() + (scanned & CRUSH_POOL_SPAN);
         // The pool is the engine-wide budget: more is an error, never a silent drop.
         if (base + crush.fragments > crush.pool_size)
             atom[a_counters() + C_ERROR].or(16u);
@@ -2076,6 +2109,48 @@ void fr_crush_apply(uint3 id: SV_DispatchThreadID)
             collider_info[2 * fc + 1] = uint4(asuint(mf), asuint(e), asuint(face), 0u);
         }
     }
+    if (crush.mode == 2 && pieces > 0)
+    {
+        uint base = atom[a_counters() + C_FRAGMENTS].load() + (scanned & CRUSH_POOL_SPAN);
+        if (base + pieces > crush.pool_size)
+            atom[a_counters() + C_ERROR].or(16u);
+        else
+            first = base;
+        // Particles: spheres of the chunk's volume shared out (no rotation, so no inertia),
+        // spread through its box about its centre of mass (a hash per particle), each with
+        // the chunk's velocity at its spot.
+        Quat q;
+        float3 origin;
+        structure_pose(slot, bw, q, origin);
+        float3 com = origin + rotate(q, chunks[4 * k].xyz);
+        Quat box = normalized(quat_mul(q, quat_of(geometry[3 * k + 2])));
+        float3 h = geometry[3 * k + 1].xyz;
+        float r = max(pow(0.75 * volume / (3.14159265 * float(pieces)), 1.0 / 3.0), 0.002);
+        half = float3(r, r, r);
+        float mf = mass / float(pieces);
+        float e = chunks[4 * k + 3].x;
+        // Inside the box by a radius where it is wide enough, the spots' mean on the
+        // centre of mass (so the particles' momentum is the chunk's: Σ w×(x - b0) = 0).
+        float3 room = max(h - r, 0.25 * h);
+        float3 mean = float3(0.0);
+        for (uint i = 0; i < pieces; i++)
+            mean += crush_particle_spot(k, i);
+        mean /= float(pieces);
+        for (uint i = 0; i < pieces && first != NONE; i++)
+        {
+            float3 x = to_rubble(com + rotate(box, room * (crush_particle_spot(k, i) - mean)));
+            float4 entry = crush_tab[crush.t_pool + first + i];
+            uint fs = asuint(entry.x);
+            uint fc = asuint(entry.y);
+            write_body(fs, x, 1.0 / mf, quat_of(float4(0.0, 0.0, 0.0, 1.0)), float3(0.0), FLAG_DYNAMIC | FLAG_AWAKE | FLAG_CCD | FLAG_CCD_FAST, v + cross(w, x - b0.xyz), float3(0.0));
+            colliders[4 * fc + 1] = float4(0.0, 0.0, 0.0, colliders[4 * fc + 1].w);
+            colliders[4 * fc + 2] = float4(0.0, 0.0, 0.0, 1.0);
+            colliders[4 * fc + 3] = float4(r, 0.0, 0.0, r);
+            uint4 a = collider_info[2 * fc];
+            collider_info[2 * fc] = uint4(NONE, fs, KIND_BODY, a.w);
+            collider_info[2 * fc + 1] = uint4(asuint(mf), asuint(e), asuint(r), 0u);
+        }
+    }
     if (rank < crush.max_events)
     {
         uint ev = crush.r_events + 6 * rank;
@@ -2097,8 +2172,8 @@ void fr_crush_end(uint3 id: SV_DispatchThreadID)
 {
     uint blocks = (params.chunk_count + 1023) / 1024;
     uint total = work[scan_new_blocks() + blocks];
-    atom[a_counters() + C_CRUSH_EVENTS].store(total);
-    atom[a_counters() + C_CRUSHED].add(total);
-    if (crush.mode == 1)
-        atom[a_counters() + C_FRAGMENTS].add(total * crush.fragments);
+    uint events = total / CRUSH_EVENT_ONE;
+    atom[a_counters() + C_CRUSH_EVENTS].store(events);
+    atom[a_counters() + C_CRUSHED].add(events);
+    atom[a_counters() + C_FRAGMENTS].add(total & CRUSH_POOL_SPAN);
 }

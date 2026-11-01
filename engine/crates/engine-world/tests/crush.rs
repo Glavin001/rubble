@@ -610,6 +610,223 @@ fn conserve_keeps_mass_and_momentum_of_a_free_wall() {
 }
 
 #[test]
+fn particles_keep_mass_and_momentum_of_a_free_wall() {
+    // As `conserve_keeps_mass_and_momentum_of_a_free_wall`, the crushed block kept as
+    // particles: about volume / size^3 of them (a 0.4 m block at 0.1 m: 64), spheres that
+    // never rotate and share the crush particle group, inside its box, at its velocity,
+    // carrying its mass and momentum.
+    let asset = asset_of(&free_wall_json());
+    let size = 0.1f32;
+    let mut w = world_for(&asset, 4096, false, false);
+    let id = place(
+        &mut w,
+        &asset,
+        Some(Crush {
+            mass: CrushMass::Particles {
+                size,
+                max_per_chunk: 256,
+                budget: 4096,
+            },
+            ..Crush::default()
+        }),
+    )
+    .unwrap();
+    let ball = shoot(&mut w, 35.0, 4800.0);
+    w.step_sync().unwrap();
+    let data = chunk_data(&asset);
+    let wall_mass: f32 = data.iter().map(|d| (d.0 * d.1) as f32).sum();
+    let mut particles: Vec<BodyId> = Vec::new();
+    let mut prev = momentum(&w, &live_bodies(&w, id, &[ball])).0;
+    let mut crushed = 0;
+    for _ in 0..12 {
+        let f = w.step_sync().unwrap();
+        let events = crushes(&f);
+        for e in &events {
+            let DestructionEvent::ChunkCrushed {
+                chunk,
+                mass,
+                volume,
+                pose,
+                linear_velocity,
+                fragments: frs,
+                ..
+            } = e
+            else {
+                unreachable!()
+            };
+            let expected_n = ((*volume / size.powi(3)).round() as usize).clamp(1, 256);
+            assert_eq!(frs.len(), expected_n, "chunk {chunk}: {volume} m^3");
+            let mut p = Vec3::ZERO;
+            let mut m_total = 0.0f32;
+            for b in frs {
+                let s = w.read_body_state(*b).unwrap();
+                let m = w.body_mass_data(*b).unwrap().unwrap().mass;
+                p += Vec3::from(s.linear_velocity) * m;
+                m_total += m;
+                assert_eq!(Vec3::from(s.angular_velocity), Vec3::ZERO, "a particle never spins");
+                let d = Vec3::from(s.transform.position) - Vec3::from(pose.position);
+                assert!(d.length() < 0.35, "a particle {d:?} from its chunk's centre");
+                let shape = w.body_shapes(*b).unwrap()[0];
+                assert!(matches!(w.shape_geometry(shape).unwrap(), Geometry::Sphere { .. }));
+                assert_eq!(w.shape_filter(shape).unwrap().group, CRUSH_PARTICLE_GROUP);
+            }
+            assert!((m_total - mass).abs() < 1e-3 * mass, "{m_total} kg of {mass} kg");
+            let expected = Vec3::from(*linear_velocity) * *mass;
+            assert!(
+                (p - expected).length() <= 1e-3 * expected.length() + 1e-3,
+                "particles {p:?}, chunk {expected:?}"
+            );
+            particles.extend_from_slice(frs);
+            crushed += 1;
+        }
+        let bodies = live_bodies(&w, id, &[&particles[..], &[ball]].concat());
+        let now = momentum(&w, &bodies).0;
+        if !events.is_empty() {
+            assert!(
+                (now - prev).length() <= 1e-3 * prev.length(),
+                "momentum {prev:?} -> {now:?} over the crush"
+            );
+            let total: f32 = bodies
+                .iter()
+                .filter(|b| **b != ball)
+                .filter_map(|b| w.body_mass_data(*b).unwrap())
+                .map(|m| m.mass)
+                .sum();
+            assert!((total - wall_mass).abs() < 1e-3 * wall_mass, "{total} kg of {wall_mass} kg");
+            break;
+        }
+        prev = now;
+    }
+    assert!(crushed > 0, "the strike crushes the struck block");
+}
+
+#[test]
+fn particles_land_on_the_ground_and_pass_through_one_another() {
+    // The anchored wall under gravity, struck: its crushed blocks fall as particles onto
+    // the ground and rest on it (none under it), and they never push one another apart
+    // (resting particles overlap where they land on the same spot).
+    let asset = asset_of(&crush_wall_json());
+    let size = 0.1f32;
+    let mut w = world_for(&asset, 4096, true, true);
+    let id = place(
+        &mut w,
+        &asset,
+        Some(Crush {
+            mass: CrushMass::Particles {
+                size,
+                max_per_chunk: 256,
+                budget: 4096,
+            },
+            ..Crush::default()
+        }),
+    )
+    .unwrap();
+    let _ = id;
+    shoot(&mut w, 35.0, 4800.0);
+    let ground = {
+        let stress = asset.stress.as_ref().unwrap();
+        stress.ground_height().unwrap() - stress.placement()[1] as f32
+    };
+    let mut particles: Vec<(BodyId, f32)> = Vec::new();
+    for _ in 0..240 {
+        let f = w.step_sync().unwrap();
+        for e in crushes(&f) {
+            let DestructionEvent::ChunkCrushed { fragments, .. } = e else {
+                unreachable!()
+            };
+            for b in fragments {
+                let shape = w.body_shapes(b).unwrap()[0];
+                let Geometry::Sphere { radius, .. } = *w.shape_geometry(shape).unwrap() else {
+                    panic!("a particle is a sphere")
+                };
+                particles.push((b, radius));
+            }
+        }
+    }
+    assert!(!particles.is_empty(), "the strike crushes blocks into particles");
+    let at: Vec<(Vec3, f32)> = particles
+        .iter()
+        .map(|(b, r)| (Vec3::from(w.read_body_state(*b).unwrap().transform.position), *r))
+        .collect();
+    let lowest = at.iter().map(|(p, r)| p.y - r).fold(f32::INFINITY, f32::min);
+    eprintln!("{} particles; lowest bottom {lowest:.3} m over the ground at {ground:.3} m", at.len());
+    // Resting contact sits a little inside (the solver's penetration under load).
+    assert!(lowest > ground - 0.03, "a particle sank through the ground: {lowest} < {ground}");
+    let overlapping = (0..at.len())
+        .filter(|&i| {
+            (0..at.len()).any(|j| j != i && (at[i].0 - at[j].0).length() < 0.5 * (at[i].1 + at[j].1))
+        })
+        .count();
+    eprintln!("{overlapping} particles overlap another");
+    assert!(overlapping > 0, "particles pass through one another");
+}
+
+/// A small fast sphere with continuous collision while fast (a crush particle: 2 cm, up
+/// to 50 m/s) never passes through a 5 cm plank.
+#[test]
+fn a_fast_particle_does_not_pass_through_a_plank() {
+    let def = WorldDef {
+        gravity: [0.0, 0.0, 0.0],
+        capacity: WorldCapacity {
+            max_bodies: 1024,
+            max_colliders: 1024,
+            max_contacts: 16_384,
+            max_joints: 64,
+            max_candidates: 32_768,
+            max_colors: 32,
+            max_commands: 1024,
+            max_hull_vertices: 1024,
+        },
+        enable_sleep: false,
+        ..WorldDef::default()
+    };
+    let mut w = World::new(GpuContext::Default, &def).unwrap();
+    let plank = w.create_body(&BodyDef::default()).unwrap();
+    w.create_box_shape(plank, &ShapeDef::default(), [1.0, 1.0, 0.025]).unwrap();
+    let mut particles = Vec::new();
+    for (k, speed) in [5.0f32, 10.0, 25.0, 50.0].into_iter().enumerate() {
+        let b = w
+            .create_body(&BodyDef {
+                linear_velocity: [0.0, 0.0, -speed],
+                ccd_when_fast: true,
+                ..BodyDef::dynamic([-0.6 + 0.4 * k as f32, 0.0, 0.5])
+            })
+            .unwrap();
+        w.create_sphere_shape(
+            b,
+            &ShapeDef {
+                filter: Filter {
+                    group: CRUSH_PARTICLE_GROUP,
+                    ..Filter::default()
+                },
+                ..ShapeDef::default()
+            },
+            [0.0; 3],
+            0.02,
+        )
+        .unwrap();
+        w.body_set_mass_data(
+            b,
+            MassData {
+                mass: 0.01,
+                center: [0.0; 3],
+                rotational_inertia: [[0.0; 3]; 3],
+            },
+        )
+        .unwrap();
+        particles.push((b, speed));
+    }
+    for _ in 0..60 {
+        w.step_sync().unwrap();
+    }
+    for (b, speed) in particles {
+        let z = w.read_body_state(b).unwrap().transform.position[2];
+        eprintln!("{speed} m/s: ends at z {z:.3}");
+        assert!(z > 0.0, "the {speed} m/s particle passed through the plank (z {z})");
+    }
+}
+
+#[test]
 fn remove_takes_the_chunk_out() {
     let asset = asset_of(&crush_wall_json());
     let mut w = world_for(&asset, 0, true, true);

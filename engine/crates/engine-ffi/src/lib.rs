@@ -2639,6 +2639,8 @@ impl Default for RbCrushDef {
     fn default() -> Self {
         let (fragments, budget) = match CrushMass::default() {
             CrushMass::Conserve { fragments, budget } => (fragments, budget),
+            // Not offered through the C API yet.
+            CrushMass::Particles { budget, .. } => (0, budget),
             CrushMass::Remove => (0, 0),
         };
         Self {
