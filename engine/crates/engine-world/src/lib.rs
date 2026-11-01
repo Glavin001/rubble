@@ -81,8 +81,8 @@ pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
 pub use terrain::{
-    StrikeDef, TerrainArea, TerrainBake, TerrainDebris, TerrainDef, TerrainSurfaceDef,
-    TerrainSurfaceView,
+    StrikeDef, TerrainArea, TerrainBake, TerrainDebris, TerrainDef, TerrainPrediction,
+    TerrainSurfaceDef, TerrainSurfaceView,
 };
 pub use threshold::{Projectile, StressSource};
 pub use engine_terrain::{

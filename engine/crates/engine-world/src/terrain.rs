@@ -16,8 +16,8 @@ use engine_terrain::surface::{
 };
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
-    CraterPrediction, ExplosionSource, ImpactSource, RegionClock, RegionPlan, SandMaterial,
-    SettleRule, TerrainConfig, ZModel,
+    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, RegionClock, RegionPlan,
+    SandMaterial, SettleRule, TerrainConfig, ZModel,
 };
 use engine_webgpu::{TerrainStepReport, TerrainStrike, TerrainWatch};
 use glam::{Quat, Vec3};
@@ -160,6 +160,85 @@ impl Default for TerrainDef {
     }
 }
 
+/// What an event will open, from the settings alone (no world): sizing a
+/// heightfield before the world exists.
+#[derive(Clone, Copy, Debug)]
+pub struct TerrainPrediction {
+    /// π-scaling's crater.
+    pub crater: CraterPrediction,
+    /// The region's cell on an empty grid (m), and its box in 4-cell blocks.
+    pub dx: f32,
+    pub blocks: [i32; 3],
+    /// The source's peak speed (m/s): the first frame's speed bound starts there.
+    pub source_speed: f32,
+}
+
+impl TerrainDef {
+    /// A vertical impact (the Z-model source is axisymmetric) of a sphere of
+    /// `radius` m and `density` kg/m³ at `speed` m/s into this sand.
+    pub fn vertical_impact(
+        &self,
+        radius: f64,
+        density: f64,
+        speed: f64,
+    ) -> anyhow::Result<ImpactSource> {
+        Ok(ImpactSource {
+            impactor_radius: radius,
+            impactor_density: density,
+            velocity: glam::DVec3::new(0.0, -speed, 0.0),
+            target: CraterTarget::sand(&self.material)?,
+        })
+    }
+
+    /// A buried charge of `kg` TNT `depth` m down in this sand.
+    pub fn tnt_charge(&self, kg: f64, depth: f64) -> anyhow::Result<ExplosionSource> {
+        Ok(ExplosionSource::tnt(
+            kg,
+            depth,
+            CraterTarget::sand(&self.material)?,
+        ))
+    }
+
+    /// [`World::terrain_impact`]'s crater and region under gravity `g` (m/s²,
+    /// its magnitude), without a world.
+    pub fn predict_impact(
+        &self,
+        impact: &ImpactSource,
+        g: f64,
+    ) -> anyhow::Result<TerrainPrediction> {
+        let z = self
+            .z
+            .unwrap_or_else(|| point_source_z(impact.target.ejecta.mu));
+        self.prediction(impact.crater(g)?, &impact.field(g, z)?)
+    }
+
+    /// [`Self::predict_impact`] for a buried charge.
+    pub fn predict_explosion(
+        &self,
+        charge: &ExplosionSource,
+        g: f64,
+    ) -> anyhow::Result<TerrainPrediction> {
+        let z = self
+            .z
+            .unwrap_or_else(|| point_source_z(charge.target.ejecta.mu));
+        self.prediction(charge.crater(g)?, &charge.field(g, z)?)
+    }
+
+    fn prediction(
+        &self,
+        crater: CraterPrediction,
+        field: &ZModel,
+    ) -> anyhow::Result<TerrainPrediction> {
+        let plan = crater.region(&self.config, Vec3::ZERO, self.region_margin, 0, 0)?;
+        Ok(TerrainPrediction {
+            crater,
+            dx: plan.dx,
+            blocks: plan.blocks.to_array(),
+            source_speed: source_peak_speed(field),
+        })
+    }
+}
+
 /// An open area: on which heightfield shape, its box, and how it is settling.
 #[derive(Clone, Debug)]
 struct ActiveArea {
@@ -209,9 +288,20 @@ pub(crate) struct TerrainHost {
     bakes: Vec<(u64, TerrainBake)>,
     /// This step's surface copy (its layout), when the pass ran.
     surface_copy: Option<SurfaceReadback>,
+    /// The MPM substeps the last step ran (0: none coupled).
+    last_substeps: u32,
+}
+
+/// A terrain host with no area open, as [`World::save_state`] keeps it.
+#[derive(Clone)]
+pub(crate) struct TerrainSaved {
+    def: TerrainDef,
+    watched: Vec<ShapeId>,
+    surface: Option<HostSurface>,
 }
 
 /// The surface pass's plan and the patches `World` made for it.
+#[derive(Clone)]
 struct HostSurface {
     plan: SurfacePlan,
     def: TerrainSurfaceDef,
@@ -273,8 +363,108 @@ impl World {
             surface,
             bakes: Vec::new(),
             surface_copy: None,
+            last_substeps: 0,
         });
         Ok(())
+    }
+
+    /// The terrain host for a snapshot ([`World::save_state`]): refused while
+    /// an area is open or a bake's heights are on their way back (the
+    /// heightfields' mirror is then behind the GPU).
+    pub(crate) fn terrain_save(&self) -> anyhow::Result<Option<TerrainSaved>> {
+        let Some(host) = self.terrain.as_ref() else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            host.areas.is_empty(),
+            "save_state with a terrain area open (close it first)"
+        );
+        anyhow::ensure!(
+            host.mirror_due.is_empty() && host.mirror_in_flight.is_empty(),
+            "save_state before a bake's heights arrived (poll first)"
+        );
+        Ok(Some(TerrainSaved {
+            def: host.def.clone(),
+            watched: host.watched.clone(),
+            surface: host.surface.clone(),
+        }))
+    }
+
+    /// After the bodies and shapes went back to a snapshot: the terrain as it
+    /// was saved, with the pool started over. Open areas are dropped, not
+    /// baked (a reset discards them), and every heightfield's samples go back
+    /// up from the restored mirror (the GPU arena kept what the bakes wrote).
+    /// Patches made after the save are gone with their bodies; their arena
+    /// blocks are freed once no step in flight reads them.
+    pub(crate) fn terrain_restore(
+        &mut self,
+        saved: Option<&TerrainSaved>,
+        later_patches: Vec<u32>,
+    ) -> anyhow::Result<()> {
+        let step = self.step;
+        for base in later_patches {
+            self.retired_height_fields.push((base, step));
+        }
+        let Some(saved) = saved else {
+            anyhow::ensure!(self.terrain.is_none(), "terrain was enabled after the save");
+            return Ok(());
+        };
+        let missed = self.terrain.as_ref().map_or(0, |t| t.missed_strikes);
+        self.sim.terrain_reset()?;
+        self.sim.terrain_set_material(Some(&saved.def.material))?;
+        self.terrain = Some(TerrainHost {
+            def: saved.def.clone(),
+            areas: Vec::new(),
+            mirror_due: Vec::new(),
+            mirror_in_flight: Vec::new(),
+            watched: saved.watched.clone(),
+            pending_strike: None,
+            missed_strikes: missed,
+            surface: saved.surface.clone(),
+            bakes: Vec::new(),
+            surface_copy: None,
+            last_substeps: 0,
+        });
+        // The live surface is no longer valid (and the patches sink).
+        if let Some(sf) = saved.surface.as_ref() {
+            self.sim.terrain_surface(&sf.plan)?;
+        }
+        let fields: Vec<(u32, HeightField)> = self
+            .shapes
+            .iter()
+            .filter(|s| s.alive)
+            .filter_map(|s| match &s.geometry {
+                Geometry::HeightField { field, .. } => Some((s.collider, field.clone())),
+                _ => None,
+            })
+            .collect();
+        for (collider, field) in fields {
+            let (_, nz) = field.samples();
+            self.sim
+                .update_height_field(&mut self.hulls, collider, &field, 0..nz)
+                .map_err(|e| anyhow::anyhow!("heightfield restore: {e}"))?;
+        }
+        if saved.watched.is_empty() && !self.sim.terrain_watch_enabled() {
+            return Ok(());
+        }
+        self.terrain_update_watch()
+    }
+
+    /// The arena bases of the surface patches the snapshot `saved` does not
+    /// have (made after it).
+    pub(crate) fn terrain_patches_since(&self, saved: Option<&TerrainSaved>) -> Vec<u32> {
+        let Some(sf) = self.terrain.as_ref().and_then(|t| t.surface.as_ref()) else {
+            return Vec::new();
+        };
+        let kept = saved
+            .and_then(|s| s.surface.as_ref())
+            .map_or(0, |s| s.patches.len());
+        sf.patches[kept.min(sf.patches.len())..]
+            .iter()
+            .map(|&(_, _, collider)| {
+                engine_schema::convex::convex_params_base(self.sim.collider_record(collider).params)
+            })
+            .collect()
     }
 
     /// Before an area opens on `ground` (live shape slot `s`): the surface
@@ -549,6 +739,12 @@ impl World {
             .ok_or_else(|| anyhow::anyhow!("terrain is not enabled (call enable_terrain)"))
     }
 
+    /// The MPM substeps the last step ran over the open areas (0: no area
+    /// was coupled): every area's frame at the busiest one's CFL bound.
+    pub fn terrain_last_substeps(&self) -> u32 {
+        self.terrain.as_ref().map_or(0, |t| t.last_substeps)
+    }
+
     /// The settings `enable_terrain` was given, if terrain is on.
     pub fn terrain_settings(&self) -> Option<&TerrainDef> {
         self.terrain.as_ref().map(|t| &t.def)
@@ -672,9 +868,10 @@ impl World {
         &mut self,
         enc: &mut wgpu::CommandEncoder,
     ) -> anyhow::Result<bool> {
-        let Some(host) = self.terrain.as_ref() else {
+        let Some(host) = self.terrain.as_mut() else {
             return Ok(false);
         };
+        host.last_substeps = 0;
         // Settled areas bake (each its own submission); the rest step on.
         let settled: Vec<u32> = host
             .areas
@@ -707,6 +904,10 @@ impl World {
             }
         }
         self.sim.terrain_encode_coupled(enc, frame.0, frame.1)?;
+        self.terrain
+            .as_mut()
+            .expect("terrain enabled")
+            .last_substeps = frame.0;
         // The live surface from the substeps' sand, before the rigid step
         // (the patches carry it into this step).
         let host = self.terrain.as_mut().expect("terrain enabled");

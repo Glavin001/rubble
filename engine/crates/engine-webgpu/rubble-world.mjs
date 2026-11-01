@@ -4,10 +4,19 @@
 //
 // Pages need an import map for the wasm's GPU-wait import:
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
-import init, { WebWorld, solverFlags, softCalibratedSettings } from './generated/world-wasm/engine_world_wasm.js';
+import init, {
+  WebWorld, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
+} from './generated/world-wasm/engine_world_wasm.js';
 
 export { WebWorld, softCalibratedSettings };
 let ready = null;
+
+/** The wasm's world-less functions (terrain settings, predictions, buffer layout), once loaded. */
+export async function worldWasm() {
+  ready ??= init();
+  await ready;
+  return { terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout };
+}
 
 /** A World on its own WebGPU device (`WorldDef` fields, camelCase). Render on `world.device()`. */
 export async function createWorld(def = {}) {

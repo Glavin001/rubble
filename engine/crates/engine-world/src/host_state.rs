@@ -23,15 +23,18 @@ pub struct WorldSnapshot {
     vehicles: Vec<engine_vehicle::VehicleHandle>,
     soft_outputs: Vec<engine_softbody::SoftHandle>,
     skins: usize,
+    terrain: Option<crate::terrain::TerrainSaved>,
 }
 
 impl World {
     /// Copy the world (every GPU buffer, on the GPU, and the host's records)
     /// for [`World::restore_state`]: a scene reset. Not supported with
-    /// destructibles, assemblies, terrain, characters or projectiles, whose
-    /// host state it does not cover.
+    /// destructibles, assemblies, characters or projectiles, whose host state
+    /// it does not cover. Terrain is saved with no area open (its settings,
+    /// patches and watched shapes; the pool's buffers are not copied).
     pub fn save_state(&self) -> anyhow::Result<WorldSnapshot> {
         self.check_restorable()?;
+        let terrain = self.terrain_save()?;
         Ok(WorldSnapshot {
             sim: self.sim.save_state(),
             bodies: self.bodies.clone(),
@@ -45,6 +48,7 @@ impl World {
             vehicles: self.vehicles.clone(),
             soft_outputs: self.soft_outputs.clone(),
             skins: self.skins.len(),
+            terrain,
         })
     }
 
@@ -52,13 +56,20 @@ impl World {
     /// joints, vehicles and soft bodies as they were, joints unbroken, parts
     /// back on. The step count keeps counting (frames stay ordered); the next
     /// frame reports every body whose pose differs from the last one delivered.
-    /// Handles of objects created after the save are invalid afterwards.
+    /// Handles of objects created after the save are invalid afterwards. Open
+    /// terrain areas are dropped, not baked, and the heightfields go back to
+    /// their saved samples.
     pub fn restore_state(&mut self, s: &WorldSnapshot) -> anyhow::Result<()> {
         self.check_restorable()?;
         anyhow::ensure!(
             s.skins == self.skins.len(),
             "soft skins were bound after the save"
         );
+        anyhow::ensure!(
+            s.terrain.is_some() || self.terrain.is_none(),
+            "terrain was enabled after the save"
+        );
+        let later_patches = self.terrain_patches_since(s.terrain.as_ref());
         self.sim.restore_state(&s.sim);
         // What was delivered stays what the next frame diffs against.
         let delivered: Vec<_> = self
@@ -79,6 +90,7 @@ impl World {
         self.materials.clone_from(&s.materials);
         self.vehicles.clone_from(&s.vehicles);
         self.soft_outputs.clone_from(&s.soft_outputs);
+        self.terrain_restore(s.terrain.as_ref(), later_patches)?;
         self.resync = true;
         self.dirty = true;
         self.restored_at = self.step;
@@ -87,12 +99,9 @@ impl World {
 
     fn check_restorable(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.destructibles.is_empty()
-                && self.assemblies.is_empty()
-                && self.terrain.is_none()
-                && self.motion.is_empty(),
-            "save/restore covers bodies, shapes, joints, vehicles and soft bodies only \
-             (not destructibles, assemblies, terrain, characters or projectiles)"
+            self.destructibles.is_empty() && self.assemblies.is_empty() && self.motion.is_empty(),
+            "save/restore covers bodies, shapes, joints, vehicles, soft bodies and terrain \
+             only (not destructibles, assemblies, characters or projectiles)"
         );
         Ok(())
     }

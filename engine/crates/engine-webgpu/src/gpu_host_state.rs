@@ -53,6 +53,12 @@ pub struct SimSnapshot {
     free_joints: Vec<u32>,
 }
 
+/// The terrain pool's bindings (MPM and the live surface), which snapshots skip.
+fn is_terrain_binding(i: usize) -> bool {
+    (engine_terrain::layout::MPM_PARAMS_BINDING..=engine_terrain::surface::SURFACE_BINDING)
+        .contains(&i)
+}
+
 impl WgpuSim {
     pub fn body_count(&self) -> u32 {
         self.body_count
@@ -304,17 +310,25 @@ impl WgpuSim {
             .iter()
             .enumerate()
             .map(|(i, b)| {
-                let size = b.size();
+                // The terrain pool is not saved (its buffers are the
+                // largest): a restore starts it over (`terrain_reset`).
+                let size = if self.terrain.is_some() && is_terrain_binding(i) {
+                    0
+                } else {
+                    b.size()
+                };
                 let copy = match old.next() {
                     Some((buf, s)) if s == size => buf,
                     _ => self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("snapshot-b{i}")),
-                        size,
+                        size: size.max(4),
                         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
                         mapped_at_creation: false,
                     }),
                 };
-                enc.copy_buffer_to_buffer(b, 0, &copy, 0, size);
+                if size > 0 {
+                    enc.copy_buffer_to_buffer(b, 0, &copy, 0, size);
+                }
                 (copy, size)
             })
             .collect();
@@ -362,8 +376,8 @@ impl WgpuSim {
                 label: Some("restore-state"),
             });
         for (i, (copy, size)) in s.bufs.iter().enumerate() {
-            if i == 18 {
-                continue; // the hull arena stays the host's
+            if i == 18 || *size == 0 {
+                continue; // the hull arena stays the host's; the terrain pool was not saved
             }
             enc.copy_buffer_to_buffer(copy, 0, &self.bufs[i], 0, (*size).min(self.bufs[i].size()));
         }

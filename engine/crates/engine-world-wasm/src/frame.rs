@@ -240,3 +240,56 @@ impl WebFrame {
             .collect())
     }
 }
+
+#[wasm_bindgen]
+impl WebFrame {
+    /// The last step's terrain counters (`TerrainStepReport`), or `null` when
+    /// no area was open: `{ blocks, maxSpeed, particles, live, parcels,
+    /// deposited, escaped, airborne, bodySpeed, wheels, areaSpeed: [..] }`
+    /// (`areaSpeed[slot]`, `areaAirborne`, `areaBodySpeed` by area slot).
+    pub fn terrain(&self) -> JsValue {
+        let Some(r) = self.frame.terrain else {
+            return JsValue::NULL;
+        };
+        js(serde_json::json!({
+            "blocks": r.blocks, "maxSpeed": r.max_speed, "particles": r.particles, "live": r.live,
+            "parcels": r.parcels, "deposited": r.deposited, "escaped": r.escaped,
+            "airborne": r.airborne, "bodySpeed": r.body_speed, "wheels": r.wheels,
+            "areaSpeed": r.area_speed, "areaBodySpeed": r.area_body_speed, "areaAirborne": r.area_airborne,
+        }))
+    }
+
+    /// Areas that baked in the folded steps: `[{ slot, shape }]` (the shape's
+    /// samples in `heightFieldHeights` follow by this frame).
+    #[wasm_bindgen(js_name = terrainBakes)]
+    pub fn terrain_bakes(&self) -> JsValue {
+        js(self
+            .frame
+            .terrain_bakes
+            .iter()
+            .map(|b| serde_json::json!({ "slot": b.slot, "shape": id(b.shape.to_bits()) }))
+            .collect())
+    }
+
+    /// The open areas' live ground after the last step: `[{ slot, shape,
+    /// window: [i0, j0, ni, nj], heights }]`, `heights` a `Float32Array` of
+    /// `ni × nj` (j then i) in the heightfield's local y.
+    #[wasm_bindgen(js_name = terrainSurface)]
+    pub fn terrain_surface(&self) -> js_sys::Array {
+        self.frame
+            .terrain_surface
+            .iter()
+            .map(|v| {
+                let o = js_sys::Object::new();
+                let set = |k: &str, x: JsValue| {
+                    let _ = js_sys::Reflect::set(&o, &k.into(), &x);
+                };
+                set("slot", v.slot.into());
+                set("shape", id(v.shape.to_bits()).into());
+                set("window", js_sys::Uint32Array::from(&v.window[..]).into());
+                set("heights", js_sys::Float32Array::from(v.heights.as_slice()).into());
+                JsValue::from(o)
+            })
+            .collect()
+    }
+}

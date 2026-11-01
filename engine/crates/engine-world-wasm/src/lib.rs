@@ -22,6 +22,7 @@ mod motion;
 mod read;
 mod scene;
 mod soft;
+mod terrain;
 mod vehicle;
 
 pub use frame::WebFrame;
