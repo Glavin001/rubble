@@ -14,6 +14,7 @@ wasm-opt = false
 [dependencies]
 engine-world = { path = "../engine-world" }
 engine-schema.workspace = true
+engine-softbody.workspace = true
 engine-webgpu = { workspace = true, features = ["gpu"] }
 engine-gpu-wait.workspace = true
 wgpu.workspace = true

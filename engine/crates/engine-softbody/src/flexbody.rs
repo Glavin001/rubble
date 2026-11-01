@@ -206,6 +206,54 @@ pub fn rounded_skin(
     (verts, tris, sources)
 }
 
+/// A soft body's flexbody render mesh as GPU words: its skin triangles rounded
+/// ([`rounded_skin`], `bulge` × edge length) and each vertex bound to the frame
+/// of the skin triangle it came from ([`bind_to_triangles`]). Returns
+/// `[vertexCount, triCount, bindings…, indices…]`, bindings 8 words per vertex:
+/// centre, x, y particle (`first_body` + node), `soft`, then the frame
+/// coordinates and the frame's longest rest edge (f32 bits). A vertex with no
+/// valid frame collapses onto its nearest node. The web pages' flexbody shader
+/// reads this layout.
+pub fn flexbody_words(
+    nodes: &[Vec3],
+    triangles: &[[u32; 3]],
+    first_body: u32,
+    soft: u32,
+    bulge: f32,
+) -> Vec<u32> {
+    let (verts, faces, sources) = rounded_skin(nodes, triangles, bulge);
+    let binds = bind_to_triangles(&verts, nodes, &sources);
+    let mut out = vec![verts.len() as u32, faces.len() as u32];
+    for (v, b) in verts.iter().zip(&binds) {
+        match b {
+            Some(b) => {
+                let [c, x, y] = b.nodes;
+                let rest = (nodes[x as usize] - nodes[c as usize])
+                    .length()
+                    .max((nodes[y as usize] - nodes[c as usize]).length());
+                out.extend_from_slice(&[first_body + c, first_body + x, first_body + y, soft]);
+                out.extend(b.coords.iter().map(|f| f.to_bits()));
+                out.push(rest.to_bits());
+            }
+            None => {
+                let c = nodes
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| {
+                        (*a.1 - *v)
+                            .length_squared()
+                            .total_cmp(&(*b.1 - *v).length_squared())
+                    })
+                    .map_or(0, |(i, _)| i as u32);
+                let n = first_body + c;
+                out.extend_from_slice(&[n, n, n, soft, 0, 0, 0, 1f32.to_bits()]);
+            }
+        }
+    }
+    out.extend(faces.iter().flatten());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

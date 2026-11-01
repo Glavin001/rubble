@@ -183,8 +183,9 @@ impl WebWorld {
         self.world.soft_vehicle(SoftHandle(soft)).map(|v| v.0)
     }
 
-    /// `{ name, firstBody, particles, nodes, firstBeam, beams, core: { vehicle,
-    /// chassis } | null, rigidParts: [{ name, body, joints: [start, end) }] }`.
+    /// `{ name, firstBody, particles, nodes, firstBeam, beams, firstTri, tris,
+    /// mass, warnings, core: { vehicle, chassis } | null, rigidParts: [{ name,
+    /// body, joints: [start, end) }] }`.
     #[wasm_bindgen(js_name = softEntry)]
     pub fn soft_entry(&self, soft: u32) -> Result<JsValue, JsValue> {
         let host = self.world.sim().soft_host();
@@ -194,6 +195,8 @@ impl WebWorld {
             "name": d.name,
             "firstBody": e.first_body, "particles": e.particles, "nodes": d.nodes.len(),
             "firstBeam": e.first_beam, "beams": e.beams,
+            "firstTri": e.first_tri, "tris": e.tris,
+            "mass": d.total_mass(), "warnings": d.warnings,
             "core": e.core.map(|(v, chassis)| serde_json::json!({"vehicle": v.0, "chassis": chassis})),
             "rigidParts": e.rigid_parts.iter().zip(&d.rigid_parts)
                 .map(|((body, j), p)| serde_json::json!({"name": p.name, "body": body, "joints": [j.start, j.end]}))

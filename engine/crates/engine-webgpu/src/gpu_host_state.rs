@@ -93,6 +93,13 @@ impl WgpuSim {
         &self.bufs[7]
     }
 
+    /// The soft-body arena (binding 32, `vec4<u32>` slots laid out by
+    /// `SoftCapacity::layout`: body records, beams, groups, triangles, ...),
+    /// for renderers (beam views) and reads of soft state.
+    pub fn soft_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[32]
+    }
+
     /// The step's broadphase candidate pairs (binding 10, `CandidatePair`: two colliders),
     /// `StepCounters::candidate_count` of them once the broadphase has run (a hook of
     /// `step_encode_with` at `"broadphase"` sees this step's).

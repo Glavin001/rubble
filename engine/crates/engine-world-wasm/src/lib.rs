@@ -21,6 +21,7 @@ mod guidance;
 mod motion;
 mod read;
 mod scene;
+mod soft;
 mod vehicle;
 
 pub use frame::WebFrame;

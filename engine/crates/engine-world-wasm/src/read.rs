@@ -62,6 +62,16 @@ impl WebWorld {
 /// Copies of `(buffer, byte offset, byte size)` ranges, back to back, resolved
 /// once mapped as one `Uint32Array` (sizes are multiples of 4).
 pub(crate) fn read_ranges(world: &rubble::World, ranges: Vec<(wgpu::Buffer, u64, u64)>) -> js_sys::Promise {
+    read_ranges_with(world, ranges, |words| Ok(js_sys::Uint32Array::from(words.as_slice()).into()))
+}
+
+/// [`read_ranges`], the words handed to `decode` once mapped; resolves to what
+/// it returns.
+pub(crate) fn read_ranges_with(
+    world: &rubble::World,
+    ranges: Vec<(wgpu::Buffer, u64, u64)>,
+    decode: impl FnOnce(Vec<u32>) -> Result<JsValue, JsValue> + 'static,
+) -> js_sys::Promise {
     let device = world.device().clone();
     let queue = world.queue().clone();
     wasm_bindgen_futures::future_to_promise(async move {
@@ -88,12 +98,11 @@ pub(crate) fn read_ranges(world: &rubble::World, ranges: Vec<(wgpu::Buffer, u64,
         rx.await
             .map_err(|_| crate::err("read: map dropped"))?
             .map_err(|e| crate::err(format!("read: {e}")))?;
-        let out = {
+        let words: Vec<u32> = {
             let data = staging.slice(..).get_mapped_range().expect("mapped");
-            let words: Vec<u32> = bytemuck::pod_collect_to_vec(&data[..total as usize]);
-            js_sys::Uint32Array::from(words.as_slice())
+            bytemuck::pod_collect_to_vec(&data[..total as usize])
         };
         staging.unmap();
-        Ok(out.into())
+        decode(words)
     })
 }
