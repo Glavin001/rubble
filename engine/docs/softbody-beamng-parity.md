@@ -53,3 +53,42 @@ kernel where possible (dispatch latency dominates).
 ## Progress log
 
 Entries are appended as each step lands, with measured numbers.
+
+### Phase 0 — measurement harness and reference (done)
+
+* `explicit_ref` (oracle), `metrics` (penetration and self-intersection counts with a
+  side cache that also catches crossings between samples, intrusion, crush profile,
+  engine-block travel, time to stop, peak deceleration), `hires` (an original 1,014-node,
+  5,774-beam, 1,600-triangle JBeam car with groups), and `soft_calibrate` on all of them
+  (`CAR=sedan|default|hires`, `OFFSET=` for distance from the origin). CI runs the oracle
+  and metrics tests (`cargo test -p engine-softbody`).
+* Sedan, no rigid core (DECISIONS s26):
+
+| setting | tap (Hz) | crush 30 / 56 / 100 km/h max (cm) | 56 km/h profile (cm) | peak (g) | self-penetrations |
+|---|---|---|---|---|---|
+| oracle (explicit) | 46 | 10.2 / 25.6 / 73.4 | 20 15 19 | 49 | 2 |
+| 240 Hz × 10 (before) | 25 | 8.8 / 40.6 / 115.7 | 32 34 32 | 36 | 44 |
+| 960 Hz × 30 (before) | 43 | 10.1 / 24.0 / 73.8 | 19 16 20 | 47 | 24 |
+
+### Phase 4 — float precision (done, DECISIONS s28)
+
+* 240 Hz × 10 at (10 km, 0, 10 km), before: crush 18.2 / 58.2 / 146.7 cm against
+  8.8 / 40.6 / 115.7 at the origin. After: 9.5 / 37.8 / 105.9 against 8.6 / 36.5 / 107.4.
+* `tests/soft_precision.rs`: RMS crush within 0.1 mm, deepest node within 1.3 cm (world
+  f32 contacts with the ground and wall).
+
+### Phase 1 — collision parity (in progress, DECISIONS s27)
+
+Done: lone-vehicle self-collision, persistent anti-clip side cache with two-sided
+triangles, BeamNG node groups and `selfCollision`, triangle bias, `NONCOLLIDABLE`,
+triangle break on edge beam or `breakGroup`. Sedan after phases 1 and 4:
+
+| setting | crush 30 / 56 / 100 km/h max (cm) | 56 km/h profile (cm) | peak (g) | self-penetrations |
+|---|---|---|---|---|
+| 240 Hz × 10 | 8.6 / 36.5 / 107.4 | 31 29 31 | 38 | 19 |
+| 960 Hz × 30 | 10.3 / 22.8 / 68.8 | 20 15 20 | 48 | 5 |
+
+Open: triangle activation pre-pass, rigid hulls against soft triangles, the remaining
+penetrations (phase 2's displacement bounds), `staticCollision`, visual tearing in the
+skinning kernel matching collision tearing, self-collision cost on the high-res car.
+

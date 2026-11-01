@@ -27,8 +27,8 @@ pub struct TrackedBody {
     /// Per triangle, the vehicle's beams along its edges (beam index in the
     /// desc's packed order), when any: a triangle loses collision once one breaks.
     pub edge_beams: Vec<Vec<u32>>,
-    /// Self pairs (node, triangle) excluded by the rest-pose rule
-    /// ([`crate::explicit_ref::self_excluded`]) or because the node is a corner.
+    /// Self pairs (node, triangle) the engine does not collide
+    /// ([`crate::explicit_ref::self_skip`]).
     pub excluded: std::collections::HashSet<(u32, u32)>,
 }
 
@@ -79,12 +79,9 @@ impl TrackedBody {
             .collect();
         let mut excluded = std::collections::HashSet::new();
         for (ti, t) in tris.iter().enumerate() {
-            let [a, b, c] = t.map(|k| rest[k as usize].as_dvec3());
-            for (n, p) in rest.iter().enumerate() {
-                if t.contains(&(n as u32))
-                    || crate::explicit_ref::self_excluded(p.as_dvec3(), a, b, c)
-                {
-                    excluded.insert((n as u32, ti as u32));
+            for n in 0..desc.nodes.len() as u32 {
+                if crate::explicit_ref::self_skip(desc, n, *t) {
+                    excluded.insert((n, ti as u32));
                 }
             }
         }

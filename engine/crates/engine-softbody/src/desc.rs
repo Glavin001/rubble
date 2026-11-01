@@ -60,8 +60,16 @@ pub struct SoftNode {
     pub collision: bool,
     /// Immovable (RoR `fixes`, JBeam `fixed`).
     pub fixed: bool,
-    /// Contacter: collides with other vehicles' triangles.
+    /// Contacter: collides with other vehicles' triangles (BeamNG `collision`).
     pub contacter: bool,
+    /// Collides with its own vehicle's triangles (BeamNG `selfCollision`; Rigs of
+    /// Rods contacters and the procedural cars self-collide).
+    pub self_collision: bool,
+    /// BeamNG self-collision group: the node's first JBeam `group` (index + 1
+    /// into [`SoftVehicleDesc::node_groups`], 0 = none). When the vehicle has
+    /// groups, a node skips its own triangles whose three nodes share its group;
+    /// without, the rest-distance rule (decision s18) applies.
+    pub self_group: u32,
     pub friction: f32,
     /// Part of the rigid core attachment set (filled by the lowering).
     pub frame: bool,
@@ -76,6 +84,8 @@ impl Default for SoftNode {
             collision: true,
             fixed: false,
             contacter: false,
+            self_collision: true,
+            self_group: 0,
             friction: 0.8,
             frame: false,
         }
@@ -133,11 +143,34 @@ impl Default for SoftBeam {
     }
 }
 
-/// Collision (and render) triangle, counter-clockwise front face.
+/// Collision (and render) triangle, counter-clockwise front face (BeamNG:
+/// two-sided, but the front face should point outward).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SoftTriangle {
     pub nodes: [u32; 3],
+    /// Collision force and anti-clip (BeamNG `NORMALTYPE`). False: anti-clip only
+    /// (`NONCOLLIDABLE`): a node that comes from one side is kept on it, with no
+    /// force in front of the face.
     pub collision: bool,
+    /// Extra contact thickness over the vehicle's (BeamNG `externalCollisionBias`,
+    /// m): thicker triangles clip less at speed.
+    pub bias: f32,
+    /// Break group (index into the beams' groups, 0 = none): the triangle stops
+    /// colliding once that group breaks, as it does once a beam along an edge
+    /// breaks.
+    pub break_group: u32,
+}
+
+impl Default for SoftTriangle {
+    fn default() -> Self {
+        Self {
+            nodes: [0; 3],
+            collision: true,
+            bias: 0.0,
+            break_group: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -308,6 +341,9 @@ pub struct SoftVehicleDesc {
     pub rigid_parts: Vec<SoftRigidPart>,
     /// Sections or options the importer skipped.
     pub warnings: Vec<String>,
+    /// BeamNG node group names, for [`SoftNode::self_group`] (group g is
+    /// `node_groups[g - 1]`). Empty: no groups (the rest-distance rule applies).
+    pub node_groups: Vec<String>,
     /// Named node sets (a bonnet, a door, an engine): what an integration binds
     /// its render meshes to, and what [`crate::host::PieceDetached`] reports.
     /// A node may be in several parts.

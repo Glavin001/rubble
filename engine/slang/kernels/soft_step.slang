@@ -50,6 +50,11 @@ static const uint SOFT_BDF2 = 32u;
 // Self-collision skips triangles nearer than this to the node in the rest body.
 static const float SELF_REST_GAP = 0.12;
 static const uint ENTRY_CONTACTER = 65536u;
+// The node collides with its own body's triangles (engine_softbody::ENTRY_SELF).
+static const uint ENTRY_SELF = 131072u;
+// Rest slot .w: the node's self-collision group, with this bit when its body has
+// groups (engine_softbody::NODE_GROUPED).
+static const uint NODE_GROUPED = 0x80000000u;
 // Node contacts a triangle records (the triangle side of node–triangle contacts).
 static const uint TRI_NODE_CONTACTS = 4u;
 static const uint TRI_CONTACT_STRIDE = 3u + 3u * TRI_NODE_CONTACTS;
@@ -100,6 +105,10 @@ uint softTriPlaneBase() { return SU(8u).z; }
 uint softPairBase() { return SU(8u).w; }
 uint softBdfBase() { return SU(9u).x; }
 bool softBdf2On() { return (softFlags() & SOFT_BDF2) != 0u; }
+uint softTriExtraBase() { return SU(9u).w; }
+uint softPairCacheBase() { return SU(10u).x; }
+uint softLocalBase() { return SU(10u).y; }
+uint softOriginBase() { return SU(10u).z; }
 // BDF2 for this particle this step: on, and it has a position one step back.
 bool softBdf2For(uint ord) { return softBdf2On() && SD(softBdfBase() + ord).w == 1.0; }
 static const uint SOFT_PAIR_STRIDE = 8u; // engine_softbody::SOFT_PAIR_STRIDE
@@ -127,12 +136,49 @@ bool triTorn(uint t, float3 a, float3 b, float3 c)
     float3 r = SD(softTriRestBase() + t).xyz;
     return length(a - b) > TRI_TEAR * r.x || length(b - c) > TRI_TEAR * r.y || length(c - a) > TRI_TEAR * r.z;
 }
+bool beamIdBroken(uint e)
+{
+    return e != SOFT_NONE && (SU(softBeamBase() + 4u * e + 2u).w & BEAM_BROKEN) != 0u;
+}
+// A triangle stops colliding once torn, once a beam along one of its edges has
+// broken, or once its break group has (BeamNG's rule).
+bool triDead(uint t, float3 a, float3 b, float3 c)
+{
+    uint4 e = SU(softTriExtraBase() + t);
+    return beamIdBroken(e.x) || beamIdBroken(e.y) || beamIdBroken(e.z) || beamIdBroken(e.w)
+        || triTorn(t, a, b, c);
+}
+// Contact thickness of triangle t: its body's δ plus the triangle's bias
+// (BeamNG externalCollisionBias); 0 for an anti-clip-only triangle.
+float triThickness(uint t, uint4 tri)
+{
+    if (((tri.w >> 8) & 1u) == 0u) return 0.0;
+    return asfloat(softBodyRec2(tri.w & 255u).z) + SD(softTriRestBase() + t).w;
+}
 bool softContactsOn() { return (softFlags() & SOFT_CONTACTS) != 0u; }
 
 // Particle position reads and writes of the particle solve.
 float3 softPos(uint b) { return gBodies[b].position; }
 float3 softPos0(uint b) { return gBodies[b].initialPos; }
 void softSetPos(uint b, float3 x) { gBodies[b].position = x; }
+
+// Vehicle-local frames (f32 precision far from the origin). Each soft body has an
+// origin on a 1 m grid; its particles' positions relative to it are the solver's
+// state: beams, inertia, Chebyshev and BDF2 history, plasticity and velocity are
+// all computed from them, so sub-millimetre corrections survive at any distance.
+// gBodies keeps the world position (origin + local) for the rigid pipeline and
+// the contacts between bodies, which are geometric and tolerate its rounding.
+// Per particle ordinal: [local], [local at the step start], [inertial target].
+float3 softOrigin(uint s) { return SD(softOriginBase() + s).xyz; }
+float3 softLocal(uint o) { return SD(softLocalBase() + 3u * o).xyz; }
+float3 softLocal0(uint o) { return SD(softLocalBase() + 3u * o + 1u).xyz; }
+float3 softTargetLocal(uint o) { return SD(softLocalBase() + 3u * o + 2u).xyz; }
+// Writes a particle's local position and its world copy.
+void softSetLocal(uint body, uint o, uint s, float3 xl)
+{
+    gSoftData[softLocalBase() + 3u * o] = float4(xl, 0.0);
+    gBodies[body].position = softOrigin(s) + xl;
+}
 struct SoftBeam
 {
     uint a;
@@ -251,11 +297,53 @@ groupshared float4 gsBodyHi[64];
 // One 64-lane workgroup per soft body (hosts size it as bodies × 64 threads).
 uint softGroupBody(uint3 gid) { return gid.y * 32768u + gid.x; }
 
+groupshared float4 gsShift;
+
+// Start of the step, per soft body: resynchronise a particle whose world
+// position was written from outside (a spawn, a teleport) with its local one,
+// then move the origin (by whole metres) when the body has wandered more than
+// 32 m from it, shifting every local position and the BDF2 history to match.
+void softRecentre(uint s, uint local)
+{
+    uint4 r = softBodyRec(s);
+    uint ob = asuint(softBodyRec1(s).w);
+    float3 o = softOrigin(s);
+    for (uint k = local; k < r.y; k += 64u)
+    {
+        float3 xw = gBodies[r.x + k].position;
+        float3 xl = softLocal(ob + k);
+        if (any(abs(o + xl - xw) > 0.01))
+        {
+            gSoftData[softLocalBase() + 3u * (ob + k)] = float4(xw - o, 0.0);
+            gSoftData[softBdfBase() + ob + k] = float4(0.0, 0.0, 0.0, 0.0);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (local == 0u)
+    {
+        float3 x0 = r.y > 0u ? softLocal(ob) : float3(0.0, 0.0, 0.0);
+        float3 shift = any(abs(x0) > 32.0) ? round(x0) : float3(0.0, 0.0, 0.0);
+        gsShift = float4(shift, 0.0);
+        if (any(shift != 0.0)) gSoftData[softOriginBase() + s] = float4(o + shift, 0.0);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    float3 shift = gsShift.xyz;
+    if (!any(shift != 0.0)) return;
+    for (uint k = local; k < r.y; k += 64u)
+    {
+        uint q = softLocalBase() + 3u * (ob + k);
+        gSoftData[q] = float4(SD(q).xyz - shift, 0.0);
+        float4 hist = SD(softBdfBase() + ob + k);
+        if (hist.w != 0.0) gSoftData[softBdfBase() + ob + k] = float4(hist.xyz - shift, hist.w);
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void soft_wake(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
     uint s = softGroupBody(gid), local = lid.x;
+    if (s < softBodyCount()) softRecentre(s, local);
     bool live = s < softBodyCount() && (softFlags() & SOFT_SLEEP_SYNC) != 0u;
     uint4 r = live ? softBodyRec(s) : uint4(0, 0, 0, 0);
     uint core = live ? asuint(softBodyRec1(s).z) : SOFT_NO_BODY;
@@ -347,9 +435,18 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
             // Rigid mode: the particle rides its core (predicted pose).
             BodyState c = gBodies[core];
             float3 x = c.position + quatRotate(c.orientation, SD(softRigidBase() + 2u * ord).xyz);
-            gBodies[body].position = x;
-            gSoftData[q] = float4(x, 0.0);
-            gSoftData[q + 1u] = float4(x, 0.0);
+            float3 o = softOrigin(sb);
+            float3 xl = x - o;
+            // Start and inertial target too: the body may turn soft within this step
+            // (soft_mode), and then solves from them.
+            float3 x0l = softLocal(ord);
+            float h = PARAMS.dt;
+            gSoftData[softLocalBase() + 3u * ord + 1u] = float4(x0l, 0.0);
+            gSoftData[softLocalBase() + 3u * ord + 2u] = float4(
+                x0l + b.linearVel * h + float3(0.0, PARAMS.gravityY, 0.0) * (h * h), 0.0);
+            softSetLocal(body, ord, sb, xl);
+            gSoftData[q] = float4(xl, 0.0);
+            gSoftData[q + 1u] = float4(xl, 0.0);
             gSoftData[q + 2u] = float4(b.linearVel, 0.0);
         }
         else if (bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b))
@@ -367,18 +464,28 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
             float3 vPrev = SD(q + 2u).xyz;
             float3 a = (b.linearVel - vPrev) / max(h, 1e-6);
             float weight = clamp(dot(a, gv) / max(dot(gv, gv), 1e-6), 0.0, 1.0);
-            float3 x = b.initialPos + b.linearVel * h + gv * (h * h * weight);
+            // In the body's local frame: x⁻ is where the last step left the particle.
+            float3 o = softOrigin(sb);
+            float3 x0 = softLocal(ord);
+            float3 x = x0 + b.linearVel * h + gv * (h * h * weight);
+            // Backward Euler's inertial target (predict_bodies's, locally).
+            float3 y = x0 + b.linearVel * h + gv * (h * h);
             if (softBdf2For(ord))
             {
                 // BDF2 inertial target: (4/3)xₙ − (1/3)xₙ₋₁ + (2h/3)((4/3)vₙ − (1/3)vₙ₋₁)
                 // + (4/9)h²g, weighted (9/4)·m/h² in the solve.
                 float3 xp = SD(softBdfBase() + ord).xyz;
-                float3 y = (4.0 / 3.0) * b.initialPos - (1.0 / 3.0) * xp
+                y = (4.0 / 3.0) * x0 - (1.0 / 3.0) * xp
                     + (2.0 * h / 3.0) * ((4.0 / 3.0) * b.linearVel - (1.0 / 3.0) * vPrev)
                     + gv * (4.0 / 9.0 * h * h);
-                gAabbs[body].mn = y;
             }
-            gBodies[body].position = x;
+            // The world copies the rigid pipeline reads (primalAccumulate's target).
+            gAabbs[body].mn = o + y;
+            gBodies[body].initialPos = o + x0;
+            uint lq = softLocalBase() + 3u * ord;
+            gSoftData[lq + 1u] = float4(x0, 0.0);
+            gSoftData[lq + 2u] = float4(y, 0.0);
+            softSetLocal(body, ord, sb, x);
             gSoftData[q] = float4(x, 0.0);
             gSoftData[q + 1u] = float4(x, 0.0);
             gSoftData[q + 2u] = float4(b.linearVel, 0.0);
@@ -400,7 +507,14 @@ void soft_velocity(uint3 tid : SV_DispatchThreadID)
     uint ord = particleOrdinal(ent.w & 0xFFFFu, body);
     uint slot = softBdfBase() + ord;
     BodyState b = gBodies[body];
-    if (!softBdf2On() || !bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b))
+    bool moving = bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b);
+    float h = max(PARAMS.dt, 1e-6);
+    float3 xl = softLocal(ord), xl0 = softLocal0(ord);
+    // The velocity from the local positions: extraction's (x − x⁻)/h from the
+    // world copies loses precision far from the origin. Not for a particle that
+    // started this step asleep (its local x⁻ was not refreshed).
+    if (moving && !softIsRigid(ent.w & 0xFFFFu)) gBodies[body].linearVel = (xl - xl0) / h;
+    if (!softBdf2On() || !moving)
     {
         gSoftData[slot] = float4(0.0, 0.0, 0.0, 0.0);
         return;
@@ -408,13 +522,13 @@ void soft_velocity(uint3 tid : SV_DispatchThreadID)
     float4 xp = SD(slot);
     // This step was BDF2 (w = 1, or 2: a beam of it yielded or broke since).
     if (xp.w >= 1.0)
-        gBodies[body].linearVel = (3.0 * b.position - 4.0 * b.initialPos + xp.xyz) / (2.0 * max(PARAMS.dt, 1e-6));
+        gBodies[body].linearVel = (3.0 * xl - 4.0 * xl0 + xp.xyz) / (2.0 * h);
     // Next step BDF2 only if nothing interrupted it: no yield or break of its
     // beams, no contact (an impact's velocity jump would be extrapolated).
     bool contact = SOLVE_INDEX(body + 1u) != SOLVE_INDEX(body)
         || (softContactsOn() && SD(softFlagBase() + ord).x != 0.0);
     bool smooth = xp.w != 2.0 && !contact;
-    gSoftData[slot] = float4(b.initialPos, smooth ? 1.0 : 0.0);
+    gSoftData[slot] = float4(xl0, smooth ? 1.0 : 0.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -620,8 +734,42 @@ bool softAabbOverlaps(uint s, float3 lo, float3 hi)
     return all(lo <= mx) && all(hi >= mn);
 }
 
-// Per solved particle: the closest other-vehicle collision triangle it is in
-// front of (or slightly behind) within the collision range.
+// Anti-clip side cache (BeamNG's anti-clip): per particle, the last four
+// triangles it took a contact with and the side it was on when it first did,
+// as (triangle + 1) << 1 | back. A node pushed through a triangle it was in
+// front of is pushed back to the side it came from, however deep, instead of
+// being given the other side at the next step start.
+static const uint PAIR_CACHE = 4u;
+uint pairEntry(uint t, float side) { return ((t + 1u) << 1) | (side < 0.0 ? 1u : 0u); }
+uint pairTri(uint e) { return (e >> 1) - 1u; }
+float pairSide(uint e) { return (e & 1u) != 0u ? -1.0 : 1.0; }
+// The side cached for triangle t, 0 when none.
+float pairCachedSide(uint4 cache, uint t)
+{
+    for (uint k = 0u; k < PAIR_CACHE; k++)
+        if (cache[k] != 0u && pairTri(cache[k]) == t) return pairSide(cache[k]);
+    return 0.0;
+}
+// Whether a cached pair still matters: the triangle is alive, the node is over
+// it (within 5 cm of its prism), not far in front on its side, and not beyond
+// the walk's reach behind it.
+bool pairKeep(uint e, float3 x)
+{
+    uint t = pairTri(e);
+    float4 p0 = SD(softTriPlaneBase() + 2u * t);
+    if (p0.w < 1e-8) return false;
+    uint4 tri = SU(softTriBase() + t);
+    float3 a = gBodies[tri.x].position, b = gBodies[tri.y].position, c = gBodies[tri.z].position;
+    float sd = pairSide(e) * dot(x - a, p0.xyz);
+    if (sd > triThickness(t, tri) + 0.1 || sd < -0.3) return false;
+    float3 w;
+    float3 foot = x - p0.xyz * dot(x - a, p0.xyz);
+    float3 q = closestOnTriangle(foot, a, b, c, w);
+    return dot(q - foot, q - foot) < 0.0025;
+}
+
+// Per solved particle: the triangle (of another vehicle, or its own outside the
+// self-collision exclusion) it presses on most, on the side it came from.
 // SOFT_NODE_LANES lanes per node: each walks every LANES-th candidate triangle and
 // keeps its first best; the node's best is the lowest (score, triangle) over its
 // lanes, the triangle the one-lane walk (bodies, then triangles, ascending) keeps.
@@ -639,38 +787,51 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
     uint4 ent = live ? SU(softListBase() + i) : uint4(0, 0, 0, 0);
     uint body = ent.x;
     uint sb = ent.w & 0xFFFFu;
-    uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * particleOrdinal(sb, body);
+    uint ordSelf = particleOrdinal(sb, body);
+    uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * ordSelf;
     if (live && lane == 0u) gSoftData[ns] = float4(0, 0, 0, asfloat(SOFT_NONE));
-    live = live && softContactsOn() && (ent.w & ENTRY_CONTACTER) != 0u;
+    bool ext = (ent.w & ENTRY_CONTACTER) != 0u;
+    // Self-collision: a node against its own body's triangles too (a torn door, a
+    // folding bonnet), except triangles it is a corner of and, with node groups
+    // (BeamNG), triangles whose nodes share its group, or without, any it sat
+    // over within SELF_REST_GAP in the undeformed body (its own panel).
+    bool selfOn = !softIsRigid(sb) && (ent.w & ENTRY_SELF) != 0u;
+    live = live && softContactsOn() && (ext || selfOn);
     BodyState b = gBodies[body];
     live = live && bodyIsDynamic(b) && !bodyIsSleeping(b);
     float3 x = b.position, x0 = b.initialPos;
+    uint cacheAt = softPairCacheBase() + ordSelf;
+    uint4 cache = live ? SU(cacheAt) : uint4(0, 0, 0, 0);
     float bestScore = 1e30;
     uint bestTri = SOFT_NONE;
     float3 bestN = float3(0, 0, 0), bestW = float3(0, 0, 0);
     float bestDelta = 0.0;
     float bestGap = 0.0;
-    uint nb = softBodyCount();
-    // Self-collision: a node against its own body's triangles too (a torn door,
-    // a folding bonnet), but not triangles it is a corner of, nor any within
-    // SELF_REST_GAP of it in the undeformed body (its own panel).
-    uint ordSelf = particleOrdinal(sb, body);
-    float3 restSelf = SD(softRigidBase() + 2u * ordSelf + 1u).xyz;
+    float bestSide = 1.0;
+    float4 restS = SD(softRigidBase() + 2u * ordSelf + 1u);
+    float3 restSelf = restS.xyz;
+    uint groupWord = asuint(restS.w);
+    bool grouped = (groupWord & NODE_GROUPED) != 0u;
+    uint myGroup = groupWord & 0xFFFFu;
     uint selfOrdBase = asuint(softBodyRec1(sb).w) - softBodyRec(sb).x;
-    bool selfOn = !softIsRigid(sb);
     uint np = live ? softPairCount(sb) : 0u;
     for (uint pk = 0u; pk < np; pk++)
     {
         uint s2 = softPairAt(sb, pk);
         bool self = s2 == sb;
-        if (self ? !selfOn : !softAabbHas(s2, x)) continue;
+        if (self ? !selfOn : (!ext || !softAabbHas(s2, x))) continue;
         uint4 r2 = softBodyRec2(s2);
-        float delta = asfloat(r2.z);
         for (uint t = r2.x + lane; t < r2.x + r2.y; t += SOFT_NODE_LANES)
         {
             uint4 tri = SU(softTriBase() + t);
-            if (((tri.w >> 8) & 1u) == 0u) continue;
-            if (self && (tri.x == body || tri.y == body || tri.z == body)) continue;
+            if (self)
+            {
+                if (tri.x == body || tri.y == body || tri.z == body) continue;
+                // BeamNG: a triangle whose nodes share the node's group.
+                if (grouped && myGroup != 0u && (tri.w >> 16) == myGroup) continue;
+            }
+            float delta = triThickness(t, tri);
+            float side = pairCachedSide(cache, t);
             // soft_tri_planes: first vertex and cull radius, then normal and area
             // (the same values as from the vertices, which load only past the cull).
             float reach = delta + length(x - x0) + 0.05;
@@ -684,19 +845,27 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
             if (p0.w < 1e-8) continue; // torn or degenerate
             float3 n = p0.xyz;
             float d = dot(x - a, n);
-            if (d > reach || d < -0.3) continue;
+            if (abs(d) > max(reach, 0.3)) continue;
             float3 bpos = gBodies[tri.y].position, c = gBodies[tri.z].position;
-            // Step-start side: the node must come from the front face.
             float3 a0 = gBodies[tri.x].initialPos, b0 = gBodies[tri.y].initialPos, c0 = gBodies[tri.z].initialPos;
-            float3 n0 = cross(b0 - a0, c0 - a0);
-            float l0 = length(n0);
-            float d0 = l0 > 1e-8 ? dot(x0 - a0, n0 / l0) : d;
-            if (d0 < -0.05) continue;
+            if (side == 0.0)
+            {
+                // A new pair takes the side the node came from at the step start.
+                // Triangles face outward, so a node up to 5 cm behind the front face
+                // (pressed in by an earlier contact) still counts as in front; only
+                // one clearly behind starts on the back side (two-sided triangles).
+                float3 n0 = cross(b0 - a0, c0 - a0);
+                float l0 = length(n0);
+                float d0 = l0 > 1e-8 ? dot(x0 - a0, n0 / l0) : d;
+                side = d0 >= -0.05 ? 1.0 : -1.0;
+            }
+            float sd = side * d;
+            if (sd > reach || sd < -0.3) continue;
             float3 w;
             float3 q = closestOnTriangle(x - n * d, a, bpos, c, w);
             // Prism test: the node projects inside the triangle.
             if (dot(q - (x - n * d), q - (x - n * d)) > 1e-6) continue;
-            if (self)
+            if (self && !grouped)
             {
                 // Checked last (it costs a closest-point query): excluded only if the
                 // node sat over this triangle's face, within SELF_REST_GAP, in the
@@ -713,31 +882,51 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
                 float dRest = length(closestOnTriangle(restSelf, ra, rb, rc, wr) - restSelf);
                 if (dRest < SELF_REST_GAP && dRest - dPlane < 0.02) continue;
             }
-            float score = abs(d);
+            // The deepest on its own side first.
+            float score = sd;
             if (score < bestScore || (score == bestScore && t < bestTri))
             {
-                bestScore = score; bestTri = t; bestN = n; bestW = w; bestDelta = delta;
+                bestScore = score; bestTri = t; bestN = n * side; bestW = w; bestDelta = delta; bestSide = side;
                 // Gap at the step start (frozen normal): the stabilised constraint
                 // corrects only (1 − α) of an existing overlap per step.
-                bestGap = dot(x0 - (w.x * a0 + w.y * b0 + w.z * c0), n) - delta;
+                bestGap = dot(x0 - (w.x * a0 + w.y * b0 + w.z * c0), n * side) - delta;
             }
         }
     }
     gsNodeScore[lid.x] = bestScore;
     gsNodeTri[lid.x] = bestTri;
     GroupMemoryBarrierWithGroupSync();
-    if (!live || bestTri == SOFT_NONE) return;
+    if (!live) return;
     uint first = lid.x - lane;
-    for (uint k = 0u; k < SOFT_NODE_LANES; k++)
+    bool winner = bestTri != SOFT_NONE;
+    for (uint k = 0u; k < SOFT_NODE_LANES && winner; k++)
     {
         float sk = gsNodeScore[first + k];
         uint tk = gsNodeTri[first + k];
-        if (k != lane && tk != SOFT_NONE && (sk < bestScore || (sk == bestScore && tk < bestTri))) return;
+        if (k != lane && tk != SOFT_NONE && (sk < bestScore || (sk == bestScore && tk < bestTri))) winner = false;
     }
+    // The cache: the winning lane (or lane 0 when no lane found a triangle)
+    // records this step's pair first, then keeps the old pairs that still matter.
+    bool none = true;
+    for (uint k = 0u; k < SOFT_NODE_LANES; k++) none = none && gsNodeTri[first + k] == SOFT_NONE;
+    if (winner || (none && lane == 0u))
+    {
+        uint4 next = uint4(0, 0, 0, 0);
+        uint m = 0u;
+        if (winner) { next[0] = pairEntry(bestTri, bestSide); m = 1u; }
+        for (uint k = 0u; k < PAIR_CACHE; k++)
+        {
+            uint e = cache[k];
+            if (e == 0u || m >= PAIR_CACHE || (winner && pairTri(e) == bestTri)) continue;
+            if (pairKeep(e, x)) { next[m] = e; m++; }
+        }
+        gSoftData[cacheAt] = asfloat(next);
+    }
+    if (!winner) return;
     gSoftData[ns] = float4(bestN, asfloat(bestTri));
     gSoftData[ns + 1u] = float4(bestW, bestDelta);
     gSoftData[ns + 2u] = float4(bestGap, 0.0, 0.0, 0.0);
-    gSoftData[softFlagBase() + particleOrdinal(sb, body)] = float4(1, 0, 0, 0);
+    gSoftData[softFlagBase() + ordSelf] = float4(1, 0, 0, 0);
 }
 
 // Per collision triangle, before node contacts: its unit normal and area (area 0
@@ -753,7 +942,7 @@ void soft_tri_planes(uint3 tid : SV_DispatchThreadID)
     float3 a = gBodies[tri.x].position, b = gBodies[tri.y].position, c = gBodies[tri.z].position;
     float3 nr = cross(b - a, c - a);
     float area = length(nr);
-    bool dead = triTorn(t, a, b, c) || area < 1e-8;
+    bool dead = triDead(t, a, b, c) || area < 1e-8;
     gSoftData[softTriPlaneBase() + 2u * t] = dead ? float4(0.0, 0.0, 0.0, 0.0) : float4(nr / area, area);
     gSoftData[softTriPlaneBase() + 2u * t + 1u] = float4(a, max(length(b - a), length(c - a)));
 }
@@ -835,20 +1024,22 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
     for (uint m = 0u; m < TRI_NODE_CONTACTS; m++) gSoftData[tc + 3u + 3u * m] = float4(0, 0, 0, asfloat(SOFT_NONE));
     if (!softContactsOn()) return;
     uint4 tri = SU(softTriBase() + t);
-    if (((tri.w >> 8) & 1u) == 0u) return;
+    // Anti-clip-only triangles (non-collidable) still keep their nodes' sides,
+    // but meet no obstacles.
+    bool collide = ((tri.w >> 8) & 1u) != 0u;
     uint sb = tri.w & 255u;
     BodyState ba = gBodies[tri.x], bb = gBodies[tri.y], bc = gBodies[tri.z];
     if (bodyIsSleeping(ba) && bodyIsSleeping(bb) && bodyIsSleeping(bc)) return;
     float3 a = ba.position, b = bb.position, c = bc.position;
-    if (triTorn(t, a, b, c)) return;
-    float delta = asfloat(softBodyRec2(sb).z);
+    if (triDead(t, a, b, c)) return;
+    float delta = triThickness(t, tri);
     float travel = max(max(length(a - ba.initialPos), length(b - bb.initialPos)), length(c - bc.initialPos));
     float3 lo = min(min(a, b), c), hi = max(max(a, b), c);
     bool marked = false;
 
     // Thin obstacles.
     float bestGap = 1e30;
-    uint nObs = softObstacleCount();
+    uint nObs = collide ? softObstacleCount() : 0u;
     for (uint k = 0u; k < nObs; k++)
     {
         uint ci = SU(softObstacleBase() + k).x;
@@ -1110,8 +1301,9 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
         // No contact or joint edge: primalAccumulate's linear block is the inertia
         // term alone (same arithmetic), without its 6×6 accumulation.
         float k = (b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0) / (p.dt * p.dt);
-        if (softBdf2For(particleOrdinal(ent.w & 0xFFFFu, body))) k *= 2.25;
-        float3 dp = b.position - gAabbs[body].mn;
+        uint o = particleOrdinal(ent.w & 0xFFFFu, body);
+        if (softBdf2For(o)) k *= 2.25;
+        float3 dp = softLocal(o) - softTargetLocal(o);
         H = float3x3(k, 0.0, 0.0, 0.0, k, 0.0, 0.0, 0.0, k);
         g = float3(k * dp.x, k * dp.y, k * dp.z);
     }
@@ -1127,17 +1319,27 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
             A.m[6], A.m[7], A.m[13],
             A.m[12], A.m[13], A.m[14]);
         g = float3(rhs.v[0], rhs.v[1], rhs.v[2]);
-        if (lane == 0u && softBdf2For(particleOrdinal(ent.w & 0xFFFFu, body)))
+        uint o = particleOrdinal(ent.w & 0xFFFFu, body);
+        if (lane == 0u)
         {
-            // BDF2 inertia weight 9/4: add the other 5/4 of primalAccumulate's term.
-            float k = 1.25 * (b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0) / (p.dt * p.dt);
-            H += float3x3(k, 0.0, 0.0, 0.0, k, 0.0, 0.0, 0.0, k);
-            g += k * (b.position - gAabbs[body].mn);
+            // primalAccumulate's inertia gradient came from the world copies:
+            // swap it for the local one (the same term, without their rounding).
+            float k = (b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0) / (p.dt * p.dt);
+            float3 dl = softLocal(o) - softTargetLocal(o);
+            g += k * (dl - (b.position - gAabbs[body].mn));
+            if (softBdf2For(o))
+            {
+                // BDF2 inertia weight 9/4: add the other 5/4 of the term.
+                H += float3x3(1.25 * k, 0.0, 0.0, 0.0, 1.25 * k, 0.0, 0.0, 0.0, 1.25 * k);
+                g += 1.25 * k * dl;
+            }
         }
     }
 
-    float3 xa = b.position;
-    float3 xa0 = b.initialPos;
+    uint sbe = ent.w & 0xFFFFu;
+    uint ordBase = asuint(softBodyRec1(sbe).w) - softBodyRec(sbe).x;
+    float3 xa = softLocal(ordBase + body);
+    float3 xa0 = softLocal0(ordBase + body);
     uint adj = softAdjBase();
     uint nBeams = ent.z & 0xFFFFu;
     bool plastic = (softFlags() & SOFT_PLASTICITY) != 0u;
@@ -1149,8 +1351,8 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
         uint e = SU(adj + (w >> 2))[w & 3u];
         uint other = SU(adj + (w1 >> 2))[w1 & 3u];
         // Fields, not the 112-byte record: WGSL copies a loaded struct whole.
-        float3 oPos = softPos(other);
-        float3 oPos0 = softPos0(other);
+        float3 oPos = softLocal(ordBase + other);
+        float3 oPos0 = softLocal0(ordBase + other);
         SoftBeam sb = loadBeam(e);
         if (beamBroken(sb)) continue;
         float3 d = xa - oPos;
@@ -1177,7 +1379,8 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
         H += nn * (d2 - lat);
         H[0][0] += lat; H[1][1] += lat; H[2][2] += lat;
     }
-    softContactsFor(body, particleOrdinal(ent.w & 0xFFFFu, body), xa, xa0, ent.y + 2u * nBeams, ent.z >> 16, lane, lanes, g, H);
+    // Contacts between bodies: in the world (both sides' world copies).
+    softContactsFor(body, ordBase + body, b.position, b.initialPos, ent.y + 2u * nBeams, ent.z >> 16, lane, lanes, g, H);
     return SOFT_SOLVE;
 }
 
@@ -1192,11 +1395,14 @@ void softFinish(uint4 ent, uint mode, float3x3 H, float3 g)
     {
         // Rigid mode: follow the core's current iterate, no particle solve.
         BodyState c = gBodies[asuint(softBodyRec1(sb0).z)];
-        softSetPos(body, c.position + quatRotate(c.orientation, SD(softRigidBase() + 2u * particleOrdinal(sb0, body)).xyz));
+        uint of = particleOrdinal(sb0, body);
+        float3 xw = c.position + quatRotate(c.orientation, SD(softRigidBase() + 2u * of).xyz);
+        softSetLocal(body, of, sb0, xw - softOrigin(sb0));
         return;
     }
     AvbdParams p = PARAMS;
-    float3 xa = gBodies[body].position;
+    uint ord = particleOrdinal(sb0, body);
+    float3 xa = softLocal(ord);
     // Closed-form 3×3 solve (adjugate); skip near-singular blocks (VBD).
     float3 c0 = float3(H[0][0], H[1][0], H[2][0]);
     float3 c1 = float3(H[0][1], H[1][1], H[2][1]);
@@ -1212,7 +1418,7 @@ void softFinish(uint4 ent, uint mode, float3x3 H, float3 g)
     float l = length(dx);
     if (l > maxLin && l > 1e-12) dx *= maxLin / l;
     if (dx.x != dx.x || dx.y != dx.y || dx.z != dx.z) return;
-    softSetPos(body, xa + dx);
+    softSetLocal(body, ord, sb0, xa + dx);
 }
 
 // VBD block solve of one particle on one lane.
@@ -1249,8 +1455,9 @@ void softChebyshevEntry(uint i, uint it)
     float3 prev2 = SD(q).xyz;
     float3 prev1 = SD(q + 1u).xyz;
     BodyState b = gBodies[body];
-    float3 x = b.position;
     uint4 ent = SU(softListBase() + i);
+    uint ord = particleOrdinal(ent.w & 0xFFFFu, body);
+    float3 x = softLocal(ord);
     bool soft = softContactsOn() && SD(softFlagBase() + particleOrdinal(ent.w & 0xFFFFu, body)).x != 0.0;
     if (softIsRigid(ent.w & 0xFFFFu)) soft = true; // rigid mode: no acceleration
     if (it > 0u && bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b) && !soft
@@ -1260,7 +1467,7 @@ void softChebyshevEntry(uint i, uint it)
         float omega = 2.0 / (2.0 - rho2);
         for (uint k = 2u; k <= it; k++) omega = 4.0 / (4.0 - rho2 * omega);
         x = prev2 + (x - prev2) * omega;
-        gBodies[body].position = x;
+        softSetLocal(body, ord, ent.w & 0xFFFFu, x);
     }
     gSoftData[q] = float4(prev1, 0.0);
     gSoftData[q + 1u] = float4(x, 0.0);
@@ -1748,7 +1955,8 @@ void soft_dual(uint3 tid : SV_DispatchThreadID)
     if (i >= softBeamCount()) return;
     SoftBeam e = loadBeam(i);
     if (beamBroken(e)) return;
-    float len = length(gBodies[e.a].position - gBodies[e.b].position);
+    uint ob = asuint(softBodyRec1(beamSoftBody(e)).w) - softBodyRec(beamSoftBody(e)).x;
+    float len = length(softLocal(ob + e.a) - softLocal(ob + e.b));
     float cv = len - e.rest;
     if (beamHard(e))
     {
@@ -1780,8 +1988,12 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
     bool movingB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
     if (!movingA && !movingB) return;
     float h = max(PARAMS.dt, 1e-6);
-    float len = length(ba.position - bb.position);
-    float len0 = length(ba.initialPos - bb.initialPos);
+    uint ob = asuint(softBodyRec1(beamSoftBody(e)).w) - softBodyRec(beamSoftBody(e)).x;
+    float3 la = softLocal(ob + e.a), lb = softLocal(ob + e.b);
+    float len = length(la - lb);
+    // A sleeping end did not move: its step-start position is where it is.
+    float3 la0 = movingA ? softLocal0(ob + e.a) : la, lb0 = movingB ? softLocal0(ob + e.b) : lb;
+    float len0 = length(la0 - lb0);
     float force = beamReadout(e, len, len0, h);
     uint flags = softFlags();
     float delta = len - e.rest;

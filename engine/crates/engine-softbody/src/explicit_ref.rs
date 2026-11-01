@@ -97,9 +97,16 @@ impl Shape {
 pub struct OracleTri {
     pub nodes: [u32; 3],
     pub body: u32,
+    /// Collision force and anti-clip; false: anti-clip only (BeamNG `NONCOLLIDABLE`).
     pub collide: bool,
+    /// Extra thickness (BeamNG `externalCollisionBias`).
+    pub bias: f64,
     /// Beams along its edges (ab, bc, ca), when any.
     pub edge_beams: [Option<u32>; 3],
+    /// A beam of the triangle's break group: once it breaks, so does the triangle.
+    pub group_beam: Option<u32>,
+    /// Its nodes' shared self-collision group (0 = none or mixed).
+    pub group: u32,
 }
 
 /// One vehicle's ranges in the oracle's arrays.
@@ -180,6 +187,24 @@ pub fn self_excluded(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> bool {
     d_rest < SELF_REST_GAP && d_rest - d_plane < 0.02
 }
 
+/// Whether `node` of `desc` skips its own vehicle's triangle `tri` (shared by the
+/// oracle, the metrics and, mirrored, `soft_collide_nodes`):
+/// * the node does not self-collide (BeamNG `selfCollision`), or is a corner;
+/// * with node groups (BeamNG): the triangle's three nodes share its group;
+/// * without (Rigs of Rods, procedural): the rest-distance rule [`self_excluded`].
+pub fn self_skip(desc: &SoftVehicleDesc, node: u32, tri: [u32; 3]) -> bool {
+    let n = &desc.nodes[node as usize];
+    if !n.self_collision || tri.contains(&node) {
+        return true;
+    }
+    if !desc.node_groups.is_empty() {
+        let g = n.self_group;
+        return g != 0 && tri.iter().all(|&k| desc.nodes[k as usize].self_group == g);
+    }
+    let p = |k: u32| Vec3::from_array(desc.nodes[k as usize].position).as_dvec3();
+    self_excluded(p(node), p(tri[0]), p(tri[1]), p(tri[2]))
+}
+
 /// Closest point on triangle abc to p (Ericson 5.1.5) and its barycentrics.
 pub fn closest_on_triangle(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> (DVec3, DVec3) {
     let ab = b - a;
@@ -228,7 +253,12 @@ pub fn closest_on_triangle(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> (DVec3, DV
 struct TriGrid {
     cell: f64,
     cells: HashMap<(i32, i32, i32), Vec<u32>>,
+    /// Substeps left before the next rebuild (the padding covers the travel).
+    fresh: u32,
 }
+
+/// Substeps between grid rebuilds; the padding grows by the travel over them.
+const GRID_REUSE: u32 = 8;
 
 impl TriGrid {
     fn key(&self, p: DVec3) -> (i32, i32, i32) {
@@ -262,8 +292,13 @@ pub struct ExplicitSim {
     pub settings: ExplicitSettings,
     /// (node, triangle) → the side (±1) the node came from.
     pub pairs: HashMap<(u32, u32), f64>,
-    /// Self-collision exclusions (node, triangle), from the rest pose.
+    /// Self-collision exclusions (node, triangle) by the rest-distance rule, for
+    /// vehicles without node groups.
     excluded: std::collections::HashSet<(u32, u32)>,
+    /// Per node: self-collides, and its group when its vehicle has groups
+    /// (`Some(0)` = grouped vehicle, no group; `None` = rest-distance rule).
+    pub self_collision: Vec<bool>,
+    pub node_group: Vec<Option<u32>>,
     pub time: f64,
     pub substeps: u64,
     /// Totals over the run.
@@ -297,6 +332,8 @@ impl ExplicitSim {
             settings,
             pairs: HashMap::new(),
             excluded: Default::default(),
+            self_collision: Vec::new(),
+            node_group: Vec::new(),
             time: 0.0,
             substeps: 0,
             yielded_events: 0,
@@ -304,6 +341,7 @@ impl ExplicitSim {
             grid: TriGrid {
                 cell: 0.3,
                 cells: HashMap::new(),
+                fresh: 0,
             },
             hz: settings.hz,
         }
@@ -345,6 +383,9 @@ impl ExplicitSim {
             self.fixed.push(nd.fixed);
             self.collide.push(nd.collision);
             self.contacter.push(nd.contacter);
+            self.self_collision.push(nd.self_collision);
+            self.node_group
+                .push((!desc.node_groups.is_empty()).then_some(nd.self_group));
             self.node_body.push(body);
             self.rest.push(Vec3::from_array(nd.position).as_dvec3());
         }
@@ -365,10 +406,26 @@ impl ExplicitSim {
         for t in &desc.triangles {
             let nodes = t.nodes.map(|k| k + first);
             let edge = |p: u32, q: u32| by_edge.get(&(p.min(q), p.max(q))).copied();
+            let group_beam = (t.break_group != 0)
+                .then(|| {
+                    self.beams[rec.first_beam as usize..]
+                        .iter()
+                        .position(|b| b.group == t.break_group)
+                        .map(|k| rec.first_beam + k as u32)
+                })
+                .flatten();
+            let g = desc.nodes[t.nodes[0] as usize].self_group;
+            let shared = t
+                .nodes
+                .iter()
+                .all(|&k| desc.nodes[k as usize].self_group == g);
             self.tris.push(OracleTri {
                 nodes,
                 body,
+                group: if shared { g } else { 0 },
                 collide: t.collision,
+                bias: f64::from(t.bias),
+                group_beam,
                 edge_beams: [
                     edge(nodes[0], nodes[1]),
                     edge(nodes[1], nodes[2]),
@@ -376,17 +433,19 @@ impl ExplicitSim {
                 ],
             });
         }
-        // Self-collision exclusions from the rest pose.
-        for ti in rec.first_tri..rec.first_tri + rec.tris {
-            let t = self.tris[ti as usize];
-            let [a, b, c] = t.nodes.map(|k| self.rest[k as usize]);
-            for n in first..first + rec.nodes {
-                if t.nodes.contains(&n) || self_excluded(self.rest[n as usize], a, b, c) {
-                    self.excluded.insert((n, ti));
+        // Rest-distance exclusions (vehicles without node groups; grouped ones
+        // apply the group rule as they go, the same as `self_skip`).
+        if desc.node_groups.is_empty() {
+            for (k, t) in desc.triangles.iter().enumerate() {
+                for n in 0..rec.nodes {
+                    if !t.nodes.contains(&n) && self_skip(desc, n, t.nodes) {
+                        self.excluded.insert((first + n, rec.first_tri + k as u32));
+                    }
                 }
             }
         }
         self.bodies.push(rec);
+        self.grid.fresh = 0;
         self.hz = self.settings.hz.max(self.stable_hz());
         body
     }
@@ -534,11 +593,23 @@ impl ExplicitSim {
         }
     }
 
+    /// Rebuilds the triangle grid every `GRID_REUSE` substeps. Triangles are
+    /// padded by the pair range plus twice the fastest node's travel until the
+    /// next rebuild (a node and a triangle each move at most that far), so every
+    /// substep in between finds the same candidates as a fresh grid.
     fn rebuild_grid(&mut self) {
-        let pad = self.settings.pair_range + self.settings.tri_thickness;
+        if self.grid.fresh > 0 {
+            self.grid.fresh -= 1;
+            return;
+        }
+        self.grid.fresh = GRID_REUSE - 1;
+        let vmax = self.v.iter().map(|v| v.length()).fold(0.0f64, f64::max);
+        // Acceleration over the window is bounded loosely by doubling the travel.
+        let travel = 2.0 * vmax * f64::from(GRID_REUSE) / self.hz + 0.01;
+        let pad = self.settings.pair_range + self.settings.tri_thickness + 2.0 * travel;
         self.grid.cells.clear();
         for (ti, t) in self.tris.iter().enumerate() {
-            if !t.collide || self.tri_broken(ti) {
+            if self.tri_broken(ti) {
                 continue;
             }
             let [a, b, c] = t.nodes.map(|k| self.x[k as usize]);
@@ -566,6 +637,7 @@ impl ExplicitSim {
         let t = self.tris[ti];
         if t.edge_beams
             .iter()
+            .chain(std::iter::once(&t.group_beam))
             .flatten()
             .any(|&e| self.beams[e as usize].broken())
         {
@@ -591,9 +663,22 @@ impl ExplicitSim {
         self.rebuild_grid();
         let h = 1.0 / self.hz;
         let st = self.settings;
+        // This substep's planes (unit normal; none when torn or degenerate).
+        let planes: Vec<Option<DVec3>> = (0..self.tris.len())
+            .map(|ti| {
+                if self.tri_broken(ti) {
+                    return None;
+                }
+                let [a, b, c] = self.tris[ti].nodes.map(|k| self.x[k as usize]);
+                let nr = (b - a).cross(c - a);
+                let l = nr.length();
+                (l > 1e-12).then(|| nr / l)
+            })
+            .collect();
+        let band = st.pair_range + st.tri_thickness + 0.05;
         let mut live: HashMap<(u32, u32), f64> = HashMap::with_capacity(self.pairs.len());
         for i in 0..self.x.len() {
-            if !self.contacter[i] || self.fixed[i] {
+            if !(self.contacter[i] || self.self_collision[i]) || self.fixed[i] {
                 continue;
             }
             let p = self.x[i];
@@ -603,17 +688,32 @@ impl ExplicitSim {
             let me = self.node_body[i];
             for &ti in cands {
                 let t = self.tris[ti as usize];
-                if t.body == me && (!st.self_collision || self.excluded.contains(&(i as u32, ti))) {
+                if t.body == me {
+                    if !st.self_collision
+                        || !self.self_collision[i]
+                        || t.nodes.contains(&(i as u32))
+                    {
+                        continue;
+                    }
+                    let skip = match self.node_group[i] {
+                        Some(g) => g != 0 && t.group == g,
+                        None => self.excluded.contains(&(i as u32, ti)),
+                    };
+                    if skip {
+                        continue;
+                    }
+                } else if !self.contacter[i] {
                     continue;
                 }
-                let [a, b, c] = t.nodes.map(|k| self.x[k as usize]);
-                let nr = (b - a).cross(c - a);
-                let area2 = nr.length();
-                if area2 < 1e-12 {
+                let Some(nrm) = planes[ti as usize] else {
                     continue;
-                }
-                let nrm = nr / area2;
+                };
+                let a = self.x[t.nodes[0] as usize];
                 let d = (p - a).dot(nrm);
+                if d.abs() > band {
+                    continue;
+                }
+                let [b, c] = [t.nodes[1], t.nodes[2]].map(|k| self.x[k as usize]);
                 let key = (i as u32, ti);
                 let (q, w) = closest_on_triangle(p - nrm * d, a, b, c);
                 let inside = (q - (p - nrm * d)).length_squared() < 1e-10;
@@ -629,16 +729,20 @@ impl ExplicitSim {
                     None => continue,
                 };
                 // Keep the pair while the node is near the face's prism.
-                if d.abs() > st.pair_range + st.tri_thickness + 0.05
-                    || (q - (p - nrm * d)).length() > 0.05
-                {
+                if (q - (p - nrm * d)).length() > 0.05 {
                     continue;
                 }
                 live.insert(key, side);
                 if !inside {
                     continue;
                 }
-                let pen = st.tri_thickness - side * d;
+                // Anti-clip only (non-collidable): no force in front of the face.
+                let thickness = if t.collide {
+                    st.tri_thickness + t.bias
+                } else {
+                    0.0
+                };
+                let pen = thickness - side * d;
                 if pen <= 0.0 {
                     continue;
                 }

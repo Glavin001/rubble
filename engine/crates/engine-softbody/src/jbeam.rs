@@ -831,6 +831,26 @@ pub fn to_rubble(p: [f32; 3]) -> [f32; 3] {
 
 /// Load a vehicle from its `.jbeam` files (`(file name, source)`) and an
 /// optional `.pc` configuration.
+/// A triangle's `externalCollisionBias` (m, ≥ 0).
+fn tri_bias(f: &Map<String, Value>) -> f32 {
+    f.get("externalCollisionBias")
+        .and_then(as_f32)
+        .filter(|b| b.is_finite())
+        .unwrap_or(0.0)
+        .max(0.0)
+}
+
+/// A triangle's `breakGroup` (a string, or a table of them: the first) as the
+/// beams' group index; 0 when no beam has that group.
+fn tri_group(f: &Map<String, Value>, groups: &HashMap<String, u32>) -> u32 {
+    let name = match f.get("breakGroup") {
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(Value::Array(a)) => a.first().and_then(Value::as_str),
+        _ => None,
+    };
+    name.and_then(|n| groups.get(n).copied()).unwrap_or(0)
+}
+
 pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVehicleDesc, String> {
     let mut db = JbeamDb::default();
     for (name, src) in files {
@@ -886,11 +906,32 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             mass: f.get("nodeWeight").and_then(as_f32).unwrap_or(25.0),
             collision: f.get("collision").and_then(Value::as_bool).unwrap_or(true),
             fixed: f.get("fixed").and_then(Value::as_bool).unwrap_or(false),
-            contacter: f
+            contacter: f.get("collision").and_then(Value::as_bool).unwrap_or(true),
+            // BeamNG's default: no self-collision unless the node asks for it.
+            self_collision: f
                 .get("selfCollision")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-                || f.get("collision").and_then(Value::as_bool).unwrap_or(true),
+                .unwrap_or(false),
+            self_group: {
+                let first = match f.get("group") {
+                    Some(Value::String(g)) if !g.is_empty() => Some(g.clone()),
+                    Some(Value::Array(gs)) => gs
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .find(|g| !g.is_empty())
+                        .map(str::to_string),
+                    _ => None,
+                };
+                first.map_or(0, |g| {
+                    match desc.node_groups.iter().position(|x| *x == g) {
+                        Some(i) => i as u32 + 1,
+                        None => {
+                            desc.node_groups.push(g);
+                            desc.node_groups.len() as u32
+                        }
+                    }
+                })
+            },
             friction: f.get("frictionCoef").and_then(as_f32).unwrap_or(1.0),
             frame: false,
         };
@@ -1073,6 +1114,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         desc.triangles.push(SoftTriangle {
             nodes: [a, b, c],
             collision,
+            bias: tri_bias(&f),
+            break_group: tri_group(&f, &groups),
         });
     }
     for (_, f) in expand(&db, &parts, "quads", &vars) {
@@ -1088,14 +1131,15 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             .get("triangleType")
             .and_then(Value::as_str)
             .is_none_or(|t| !t.contains("NONCOLLIDABLE"));
-        desc.triangles.push(SoftTriangle {
-            nodes: [a, b, c],
-            collision,
-        });
-        desc.triangles.push(SoftTriangle {
-            nodes: [a, c, d],
-            collision,
-        });
+        let (bias, break_group) = (tri_bias(&f), tri_group(&f, &groups));
+        for nodes in [[a, b, c], [a, c, d]] {
+            desc.triangles.push(SoftTriangle {
+                nodes,
+                collision,
+                bias,
+                break_group,
+            });
+        }
     }
 
     // Powertrain: wheels connected (through any chain) to an engine or motor are driven.

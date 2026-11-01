@@ -14,6 +14,8 @@
 //! SETTINGS=240x10 BDF2=1 CAR=default cargo run -p engine-webgpu --release --bin soft_calibrate
 //! # fit the global threshold scale per step rate to the oracle's 56 km/h crush
 //! FIT=1 cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # the GPU scenes 10 km from the origin (f32 precision)
+//! OFFSET=10000 SETTINGS=240x10 cargo run -p engine-webgpu --release --bin soft_calibrate
 //! ```
 use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity};
 use engine_softbody::calibrate::*;
@@ -65,6 +67,9 @@ trait Runner {
 struct Gpu {
     sim: WgpuSim,
     h: SoftHandle,
+    /// The whole scene sits here (`OFFSET=d` puts it at (d, 0, d)); positions are
+    /// reported relative to it.
+    offset: Vec3,
     steps: u32,
     dt: f64,
     t: f64,
@@ -76,6 +81,8 @@ fn env_f32(name: &str) -> Option<f32> {
 
 impl Gpu {
     fn new(s: Setting, desc: &SoftVehicleDesc, at: Vec3, vel: Vec3, walls: &[Wall]) -> Self {
+        let d = env_f32("OFFSET").unwrap_or(0.0);
+        let offset = Vec3::new(d, 0.0, d);
         let cap = WorldCapacity {
             max_bodies: 4096,
             max_colliders: 8192,
@@ -123,7 +130,7 @@ impl Gpu {
                 shape: ShapeType::Box as u32,
                 material: 0,
                 generation: 0,
-                local_pos: w.center.to_array(),
+                local_pos: (w.center + offset).to_array(),
                 density: 0.0,
                 local_rot: [0.0, 0.0, 0.0, 1.0],
                 params: [w.half.x, w.half.y, w.half.z, w.half.length()],
@@ -132,7 +139,7 @@ impl Gpu {
         let h = sim
             .add_soft_vehicle(
                 desc,
-                at.to_array(),
+                (at + offset).to_array(),
                 [0.0, 0.0, 0.0, 1.0],
                 &SpawnOptions {
                     rigid_core: false,
@@ -145,6 +152,7 @@ impl Gpu {
         Self {
             sim,
             h,
+            offset,
             steps,
             dt: 1.0 / f64::from(s.hz),
             t: 0.0,
@@ -166,7 +174,7 @@ impl Runner for Gpu {
         self.sim
             .read_soft_particles(self.h)
             .iter()
-            .map(|b| Vec3::from_array(b.position))
+            .map(|b| Vec3::from_array(b.position) - self.offset)
             .collect()
     }
     fn velocities(&self) -> Vec<Vec3> {

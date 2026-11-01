@@ -19,11 +19,19 @@
 //! aabbBase + 2·s         soft body s bounds this step: min, max
 //! partBase + 3·(32·s+k)  soft body s's bolted part k: [body, firstJoint, joints, 0],
 //!                        its position and orientation in the core frame
+//! triExtraBase + t       triangle t: the beams along its edges ab, bc, ca and a beam
+//!                        of its break group (SOFT_NONE = none): once one breaks,
+//!                        the triangle stops colliding
+//! pairCacheBase + o      particle ordinal o: its anti-clip side cache, four
+//!                        (triangle + 1) << 1 | back entries (0 = empty)
+//! localBase + 3·o        particle ordinal o in its body's local frame: position,
+//!                        position at the step start, inertial target
+//! originBase + s         soft body s's local-frame origin (whole metres)
 //! ```
 
 use serde::{Deserialize, Serialize};
 
-pub const HEADER_SLOTS: u32 = 10;
+pub const HEADER_SLOTS: u32 = 11;
 /// Slots per soft body in the pair list (a count and up to 31 bodies).
 pub const SOFT_PAIR_STRIDE: u32 = 8;
 /// Slots per particle in the contact list (a count and up to 15 contacts).
@@ -84,6 +92,12 @@ pub const SOFT_CONTACTS: u32 = 8;
 
 /// List entry flags (word w, above the soft body index).
 pub const ENTRY_CONTACTER: u32 = 1 << 16;
+/// The node collides with its own body's triangles (`SoftNode::self_collision`).
+pub const ENTRY_SELF: u32 = 1 << 17;
+/// Rest slot .w of a particle: its self-collision group (low 16 bits), with this
+/// bit set when its body has groups (BeamNG content: the group rule applies
+/// instead of the rest-distance rule).
+pub const NODE_GROUPED: u32 = 1 << 31;
 
 /// Body flag marking a particle (3-DOF node) in `gBodies`.
 pub const BODY_PARTICLE: u32 = 64;
@@ -173,6 +187,16 @@ pub struct SoftLayout {
     pub contact_list_base: u32,
     /// Bolted parts: `MAX_RIGID_PARTS` records of `PART_STRIDE` slots per soft body.
     pub part_base: u32,
+    /// Per triangle: its edge beams and a break-group beam (global beam ids).
+    pub tri_extra_base: u32,
+    /// Per particle (ordinal): the anti-clip side cache.
+    pub pair_cache_base: u32,
+    /// Per particle (ordinal), 3 slots: its local position, local position at the
+    /// step start and inertial target (the solver's state, precise at any
+    /// distance from the world origin).
+    pub local_base: u32,
+    /// Per soft body: the origin of its local frame.
+    pub origin_base: u32,
     pub total_slots: u32,
 }
 
@@ -203,6 +227,10 @@ impl SoftCapacity {
         let bdf_base = body_pair_base + SOFT_PAIR_STRIDE * self.max_bodies;
         let contact_list_base = bdf_base + self.max_particles;
         let part_base = contact_list_base + CONTACT_LIST_STRIDE * self.max_particles;
+        let tri_extra_base = part_base + PART_STRIDE * MAX_RIGID_PARTS * self.max_bodies;
+        let pair_cache_base = tri_extra_base + self.max_triangles;
+        let local_base = pair_cache_base + self.max_particles;
+        let origin_base = local_base + 3 * self.max_particles;
         SoftLayout {
             body_base,
             beam_base,
@@ -226,7 +254,11 @@ impl SoftCapacity {
             bdf_base,
             contact_list_base,
             part_base,
-            total_slots: part_base + PART_STRIDE * MAX_RIGID_PARTS * self.max_bodies,
+            tri_extra_base,
+            pair_cache_base,
+            local_base,
+            origin_base,
+            total_slots: origin_base + self.max_bodies,
         }
     }
 
@@ -335,8 +367,12 @@ mod tests {
         );
         assert_eq!(
             l.part_base + PART_STRIDE * MAX_RIGID_PARTS * c.max_bodies,
-            l.total_slots
+            l.tri_extra_base
         );
+        assert_eq!(l.tri_extra_base + c.max_triangles, l.pair_cache_base);
+        assert_eq!(l.pair_cache_base + c.max_particles, l.local_base);
+        assert_eq!(l.local_base + 3 * c.max_particles, l.origin_base);
+        assert_eq!(l.origin_base + c.max_bodies, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }

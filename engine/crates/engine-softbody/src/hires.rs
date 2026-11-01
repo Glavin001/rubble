@@ -884,3 +884,22 @@ mod tests {
         assert!(outward as f32 > 0.97 * shell as f32, "{outward} of {shell}");
     }
 }
+
+#[cfg(test)]
+mod oracle_rate {
+    #[test]
+    fn oracle_rate_for_the_hires_car() {
+        let (d, _) = super::hires_car_desc(&super::HiresParams::default());
+        let mut sim = crate::explicit_ref::ExplicitSim::default();
+        sim.add_vehicle(&d, glam::Vec3::ZERO, glam::Quat::IDENTITY, glam::Vec3::ZERO);
+        let t = std::time::Instant::now();
+        for _ in 0..200 {
+            sim.substep();
+        }
+        println!(
+            "oracle rate {:.0} Hz, {:.2} ms per substep",
+            sim.hz(),
+            t.elapsed().as_secs_f64() * 5.0
+        );
+    }
+}

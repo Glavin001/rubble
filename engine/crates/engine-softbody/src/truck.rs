@@ -493,6 +493,7 @@ impl Parser {
                 self.out.triangles.push(SoftTriangle {
                     nodes: [a, b, c],
                     collision,
+                    ..Default::default()
                 });
             }
             Section::Contacters => {

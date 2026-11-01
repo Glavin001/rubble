@@ -295,12 +295,27 @@ stiff (decision s12). A broken beam with a detacher group breaks its whole group
 * **Node spheres** (radius 0.06 m) go through the existing broadphase, narrowphase and
   contact persistence against rigid bodies, terrain and other vehicles' nodes. The
   node's block takes the linear part of the contact rows.
-* **Node–triangle** contacts between soft bodies. Each contacter node finds the closest
-  collision triangle of another vehicle that it is in front of (prism test, step-start
-  side). Each triangle collects up to four nodes that chose it. With two, a crushed
-  front pressing many nodes into one panel lost most of the triangle side, and the cars
-  overlapped visibly. Normals and
-  barycentrics are frozen for the step; the gap is re-evaluated every iteration.
+* **Node–triangle** contacts, BeamNG style: only nodes collide, against other
+  vehicles' collision triangles (contacter nodes, BeamNG `collision`) and their own
+  (`SoftNode::self_collision`, BeamNG `selfCollision`; on for Rigs of Rods and the
+  procedural cars, off unless asked in JBeam). Each node takes the triangle it presses
+  on most (prism test); each triangle collects up to four nodes that chose it. Normals
+  and barycentrics are frozen for the step; the gap is re-evaluated every iteration.
+  * **Anti-clip.** Triangles are two-sided. A per-node cache keeps the side a node was
+    on when it first took a contact with a triangle (four triangles per node,
+    `pairCacheBase`), so a node pushed through is pushed back to its own side however
+    deep, instead of being handed the other side at the next step start. A new pair
+    takes the step-start side, counting a node up to 5 cm behind the front face as in
+    front. Entries leave once the node is 10 cm in front, 30 cm behind or off the
+    triangle.
+  * **Self-collision exclusion.** A node skips its own triangles it is a corner of.
+    With JBeam node groups (BeamNG), it skips triangles whose three nodes share its
+    first group; without groups, any triangle it sat over within 12 cm in the rest
+    body (decision s18).
+  * **Thickness:** the vehicle's δ plus the triangle's `externalCollisionBias`.
+    `NONCOLLIDABLE` triangles keep sides (anti-clip) with no force in front.
+  * **Breaking:** a triangle stops colliding once a beam along an edge, or its
+    `breakGroup`, breaks (or it stretches past 2.5× rest).
 * **Triangle–obstacle** contacts against thin static spheres and capsules registered
   with `add_soft_obstacle`. These are the poles and bollards narrower than the node
   spacing that would otherwise pass between nodes.
@@ -309,9 +324,9 @@ stiff (decision s12). A broken beam with a detacher group breaks its whole group
   corrected per step. Without that, a node freed inside a crushed panel was fired out
   at about 35 m/s. A per-particle flag skips the slot reads for particles with no soft
   contact this step.
-* Not done: rigid boxes and hulls against soft triangles (walls are wide enough for
-  node spheres), self-collision, edge–edge contacts, and conservative displacement
-  bounds or substeps for highway-speed tunnelling.
+* Not done: rigid hulls against soft triangles (boxes, spheres and capsules registered
+  as obstacles are), edge–edge contacts, and conservative displacement bounds for
+  highway-speed tunnelling (`softbody-beamng-parity.md`, phase 2).
 
 **Soft-scene parameters.** `soft_scene_params(hz, iterations)` raises the contact
 penalty ramp `beta_lin` from 10⁴ to 10⁷. A light node's contact must reach its own
@@ -787,6 +802,9 @@ comes on top of the rigid step's fixed 7.5 ms per frame at 240 Hz.
 * The RoR cab-node exception (keep the last beams on a collision node) is not
   implemented. LBEAM, torsion bars, pressured beams and node–beam tyres are not
   simulated (JBeam PRESSURED and ANISOTROPIC run as NORMAL).
+* Particles are solved in their body's local frame (an origin on a 1 m grid, moved
+  when the body wanders 32 m), with world copies in the body buffer for the rigid
+  pipeline (decision s28). Contacts with rigid geometry stay in world f32.
 * Only the native wgpu host and the browser run soft bodies. The Metal (`MetalSim`)
   and CUDA hosts compile and plan no soft passes (`SoftCounts::default`).
 * Rigid parts hang one level deep on nodes (no rigid part carries another).
