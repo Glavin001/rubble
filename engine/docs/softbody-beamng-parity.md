@@ -195,6 +195,42 @@ depth: 240 Hz × 10 → 1.36 (25.1 cm against 25.6); 120 Hz × 10 → 2.35 still
 threshold changes the material, a trade-off for the user to choose. BeamNG.tech
 recordings and the 15-vehicle set are not available here.
 
+### Matching Rigs of Rods: RoR's step on the GPU (2026-11-01, DECISIONS s34)
+
+The implicit solver's gap to RoR is in its model (converging it further moves it
+away), so Rubble now runs RoR's own step: `engine_softbody::ror` on the CPU (exact
+twin of RoR's code, the CI reference) and `RorGpu` (`slang/kernels/ror_step.slang`)
+on the GPU. `RorSim::from_truck` spawns a published `.truck` as RoR does, soft tyres
+included. Published Agora buses on their tyres, 56 km/h into a wall
+(`soft_calibrate REF=ror SETTINGS=ror,240x10 CAR=truck:<file>`):
+
+| bus | solver | sag (mm) | crush 30 / 56 / 100 km/h max (cm) | 56 km/h profile (cm) | peak (g) |
+|---|---|---|---|---|---|
+| Agora S | Rigs of Rods | 17.64 | 5.6 / 13.1 / 141.4 | 11 0 4 11 | 44 |
+| | Rubble GPU (RoR step) | 17.65 | 5.6 / 13.1 / 144.5 | 11 0 4 11 | 44 |
+| | Rubble implicit 240 Hz × 10 | 11.95 | 3.3 / 22.7 / 184.0 | 19 0 7 19 | 33 |
+| Agora L | Rigs of Rods | 23.38 | 12.7 / 32.3 / 186.7 | 31 12 0 4 14 | 21 |
+| | Rubble GPU (RoR step) | 23.93 | 12.4 / 30.6 / 236.8 | 28 11 0 4 16 | 21 |
+| | Rubble implicit 240 Hz × 10 | 13.88 | 21.0 / 44.9 / 250.8 | 26 0 0 12 26 | 21 |
+
+(The 100 km/h maximum is one node in a chaotic rebound; the profiles agree.)
+
+Cost per 60 fps frame (33 steps), M3 Max (`ror_gpu_check bench`):
+
+| | 1 | 10 | 40 | 100 | 400 | 1000 |
+|---|---|---|---|---|---|---|
+| Agora S, RoR's thread pool / 1 thread | 1.78 / 0.27 | 1.90 / 2.81 | 4.03 / 12.7 | | | |
+| Agora S, Rubble GPU | 0.57 | 0.56 | 0.56 | 0.88 | 3.4 | 8.3 |
+| Agora L, RoR's thread pool / 1 thread | 1.80 / 0.39 | 2.10 / 4.09 | 5.21 / 18.7 | | | |
+| Agora L, Rubble GPU | 0.64 | 0.64 | 0.65 | 1.29 | 5.2 | 13.0 |
+
+Videos (side by side, RoR's code and Rubble's GPU run): `examples/ror_video.rs` from
+`ror_gpu_check trace=` and the harness's `trace=`.
+
+Open: wheel torque and engine (`CalcWheels`), vehicle–vehicle collisions, coupling
+`RorGpu` vehicles with Rubble's rigid world (the implicit path keeps that role), and
+the single-vehicle latency floor (0.57 ms against RoR's single-threaded 0.27 ms).
+
 ### Against Rigs of Rods' own solver, on published RoR content (2026-11-01)
 
 Supersedes the "Rigs of Rods-style solver" section below as the reference: that one
