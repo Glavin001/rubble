@@ -20,6 +20,9 @@
 
 mod assembly;
 mod blast;
+/// The large-maps benchmark city: one builder for the native benchmark and `city.html`.
+#[cfg(feature = "stress")]
+pub mod city;
 mod contacts;
 mod debug_draw;
 mod defs;

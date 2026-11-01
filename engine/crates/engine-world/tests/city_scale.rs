@@ -1,7 +1,7 @@
 //! Benchmark (ignored): what a step costs as a map fills with buildings
 //! (engine/docs/large-maps.md, "Gates and benchmark").
 //!
-//! K threshold cuboid houses are laid on a grid over the same 2.2 km square, and the
+//! K threshold cuboid houses (`rubble::city`, the builder `city.html` shares) are laid on a grid over the same 2.2 km square, and the
 //! per-step cost of four scenarios is measured for each K:
 //! - `still`: nothing moves after settling;
 //! - `drive`: one kinematic car drives a street, touching nothing;
@@ -16,16 +16,9 @@
 //! pass of the step (its timestamp marks; the waits they add inflate the wall column).
 #![cfg(feature = "stress")]
 
+use rubble::city::*;
 use rubble::*;
 use std::time::Instant;
-
-fn map() -> f32 {
-    std::env::var("CITY_MAP")
-        .map(|s| s.parse().unwrap())
-        .unwrap_or(2200.0)
-}
-const SETTLE: u32 = 120;
-const MEASURE: u32 = 120;
 
 struct Run {
     k: usize,
@@ -44,105 +37,32 @@ fn percentile(v: &[f64], p: f64) -> f64 {
     s[((s.len() - 1) as f64 * p).round() as usize]
 }
 
-fn capacity(asset: &DestructibleAssetDesc, k: usize) -> WorldCapacity {
-    let stress = asset.stress.as_ref().unwrap();
-    let solver = asset.solver_for(StrengthModel::Threshold).unwrap();
-    let scene = stress.threshold_scene(1.0, solver.dt).unwrap();
-    let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum::<usize>() * k;
-    let one = stress_rubble::capacity_for(&scene);
-    let mut c = one.clone();
-    c.max_bodies = match pool() {
-        // Clusters (a few dozen a house) and the pool, not a slot per chunk.
-        Some(p) => ((64 * k) as u32 + p + 64).next_power_of_two(),
-        None => ((chunks + 64 + 4) as u32).next_power_of_two(),
-    };
-    // The houses' own shapes (a collider each), not k copies of one scene's headroom.
-    let shapes: usize = asset.chunks.iter().map(|c| c.shapes.len()).sum::<usize>() * k;
-    c.max_colliders = ((shapes + 4096) as u32).next_power_of_two();
-    c.max_hull_vertices = c
-        .max_hull_vertices
-        .max(((shapes * 4 + 4096) as u32).next_power_of_two());
-    c.max_contacts =
-        stress_rubble::threshold::contact_capacity(chunks, one.max_contacts * k as u32, 1 << 30);
-    c.max_candidates = c.max_candidates.max(c.max_contacts);
-    c.max_joints = c.max_joints.max(1 << 16);
-    c
-}
-
-/// CITY_POOL=n: a world piece pool of n slots (`WorldDef::fracture_pieces`).
-fn pool() -> Option<u32> {
-    std::env::var("CITY_POOL").ok().map(|v| v.parse().unwrap())
-}
-
-/// Lot centres: a ceil(sqrt(k))² grid over the map, centred on the origin.
-fn lots(k: usize) -> (Vec<[f32; 2]>, f32) {
-    let side = (k as f64).sqrt().ceil() as usize;
-    let pitch = map() / side as f32;
-    let origin = -map() / 2.0 + pitch / 2.0;
-    let lots = (0..k)
-        .map(|i| {
-            [
-                origin + (i % side) as f32 * pitch,
-                origin + (i / side) as f32 * pitch,
-            ]
-        })
-        .collect();
-    (lots, pitch)
-}
-
-fn city(asset: &DestructibleAssetDesc, k: usize, sleep: bool) -> (World, Vec<[f32; 2]>, f32, f32) {
-    // Sleep: the large-map policy (sleeping_solver_for); houses are placed awake, settle,
-    // and fall asleep with their resting contacts archived.
-    let solver = if sleep {
-        asset.sleeping_solver_for(StrengthModel::Threshold)
-    } else {
-        asset.solver_for(StrengthModel::Threshold)
+/// The city of the env's settings (`rubble::city`, shared with `city.html`).
+fn def(k: usize, sleep: bool) -> CityDef {
+    CityDef {
+        houses: k,
+        map: std::env::var("CITY_MAP")
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(CITY_MAP),
+        sleep,
+        // CITY_POOL=n: a world piece pool of n slots (`WorldDef::fracture_pieces`).
+        pool: std::env::var("CITY_POOL").ok().map(|v| v.parse().unwrap()),
     }
-    .expect("threshold solver");
-    let def = WorldDef {
-        capacity: capacity(asset, k),
-        gravity: [0.0, solver.gravity_y, 0.0],
-        solver,
-        enable_sleep: sleep,
-        contacts: ContactStorage::Canonical,
-        fracture_pieces: pool(),
-        ..WorldDef::default()
-    };
-    let mut w = World::new(GpuContext::Default, &def).unwrap();
-    let stress = asset.stress.as_ref().unwrap();
-    let placement = stress.placement();
-    let ground = stress.ground_height().unwrap_or(0.0) - placement[1] as f32;
-    let g = w.create_body(&BodyDef::default()).unwrap();
-    w.create_shape(
-        g,
-        &ShapeDef::default(),
-        Geometry::Plane {
-            normal: [0.0, 1.0, 0.0],
-            offset: ground,
-        },
-    )
-    .unwrap();
-    let a = w.create_destructible_asset(asset).unwrap();
-    let (lots, pitch) = lots(k);
-    for l in &lots {
-        // The asset frame less its placement, moved to the lot.
-        let p = [
-            l[0] - placement[0] as f32,
-            -placement[1] as f32,
-            l[1] - placement[2] as f32,
-        ];
-        w.create_destructible(&DestructibleDef {
-            model: StrengthModel::Threshold,
-            transform: Transform {
-                position: p,
-                ..Transform::default()
-            },
-            asleep: false,
-            ..DestructibleDef::new(a)
-        })
-        .unwrap();
+}
+
+fn city(asset: &DestructibleAssetDesc, k: usize, sleep: bool) -> (World, City) {
+    let def = def(k, sleep);
+    let mut w = World::new(GpuContext::Default, &def.world_def(asset).unwrap()).unwrap();
+    let t = Instant::now();
+    let mut c = City::begin(&mut w, asset, def).unwrap();
+    c.place(&mut w, k).unwrap();
+    if std::env::var("CITY_DEBUG").is_ok() {
+        eprintln!(
+            "placed {k} houses in {:.0} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
     }
-    (w, lots, pitch, ground)
+    (w, c)
 }
 
 fn frame(w: &mut World, broken: &mut u32) -> f64 {
@@ -155,87 +75,26 @@ fn frame(w: &mut World, broken: &mut u32) -> f64 {
 fn finish(w: &mut World, broken: &mut u32) -> f64 {
     let t = Instant::now();
     for f in w.poll_blocking().unwrap() {
-        for e in &f.destruction_events {
-            if let DestructionEvent::BondsBroken {
-                bonds,
-                destructible,
-                ..
-            } = e
-            {
-                if std::env::var("CITY_DEBUG").is_ok() {
-                    eprintln!("step {}: {destructible:?} broke {}", f.step, bonds.len());
-                }
-                *broken += bonds.len() as u32;
-            }
+        let n = bonds_broken(&f.destruction_events);
+        if n > 0 && std::env::var("CITY_DEBUG").is_ok() {
+            eprintln!("step {}: broke {n}", f.step);
         }
+        *broken += n;
     }
     t.elapsed().as_secs_f64() * 1e3
 }
 
-fn shot(w: &mut World, at: [f32; 2], ground: f32) {
-    let b = w
-        .create_body(&BodyDef {
-            linear_velocity: [0.0, -40.0, 0.0],
-            is_bullet: true,
-            ..BodyDef::dynamic([at[0], ground + 30.0, at[1]])
-        })
-        .unwrap();
-    w.create_sphere_shape(
-        b,
-        &ShapeDef {
-            density: 7800.0,
-            ..ShapeDef::default()
-        },
-        [0.0; 3],
-        0.6,
-    )
-    .unwrap();
-    w.body_set_projectile(b, Some(Projectile::default()))
-        .unwrap();
-}
-
 fn run(asset: &DestructibleAssetDesc, k: usize, scenario: &'static str, sleep: bool) -> Run {
-    let (mut w, lots, pitch, ground) = city(asset, k, sleep);
+    let (mut w, c) = city(asset, k, sleep);
     let mut broken = 0;
-    for _ in 0..SETTLE {
+    for _ in 0..CITY_SETTLE {
         frame(&mut w, &mut broken);
     }
-    match scenario {
-        "drive" => {
-            // A street halfway between the first two rows of lots.
-            let z = lots[0][1] + pitch / 2.0;
-            let car = w
-                .create_body(&BodyDef {
-                    body_type: BodyType::Kinematic,
-                    linear_velocity: [15.0, 0.0, 0.0],
-                    ..BodyDef::dynamic([-map() / 2.0, ground + 1.0, z])
-                })
-                .unwrap();
-            w.create_box_shape(car, &ShapeDef::default(), [2.0, 0.75, 1.0])
-                .unwrap();
-        }
-        "spawn" => {
-            // A static box far above the map: touches nothing.
-            let b = w
-                .create_body(&BodyDef {
-                    body_type: BodyType::Static,
-                    ..BodyDef::dynamic([0.0, 500.0, 0.0])
-                })
-                .unwrap();
-            w.create_box_shape(b, &ShapeDef::default(), [1.0, 1.0, 1.0])
-                .unwrap();
-        }
-        "demolish" => shot(&mut w, lots[k / 2], ground),
-        "war" => {
-            for i in 0..20.min(k) {
-                shot(&mut w, lots[i * k / 20.min(k)], ground);
-            }
-        }
-        _ => {}
-    }
+    c.start(&mut w, CityScenario::from_name(scenario).unwrap())
+        .unwrap();
     let broken_before = broken;
     let (mut wall_ms, mut gpu_ms, mut host_ms) = (Vec::new(), Vec::new(), Vec::new());
-    for _ in 0..MEASURE {
+    for _ in 0..CITY_MEASURE {
         let t = Instant::now();
         w.step().unwrap();
         host_ms.push(t.elapsed().as_secs_f64() * 1e3);
@@ -269,7 +128,7 @@ fn city_scale() {
         .map(String::from)
         .collect();
     let sleep = std::env::var("CITY_SLEEP").is_ok();
-    let asset = DestructibleAssetDesc::cuboid_house(&Default::default()).unwrap();
+    let asset = city_house().unwrap();
     let chunks = asset.chunks.len();
     println!(
         "cuboid house: {chunks} chunks, {} bonds; sleep {sleep}",
