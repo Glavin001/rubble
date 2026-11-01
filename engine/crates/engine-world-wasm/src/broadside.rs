@@ -274,6 +274,16 @@ pub fn crush(budget: u32) -> Crush {
     }
 }
 
+/// Crushed wood's debris: a crush particle (`half` its radius, thrice; drawn as a few
+/// splinters) or a box fragment (`half` its extents); where it was made.
+#[derive(Clone, Copy, Debug)]
+pub struct Splinter {
+    pub body: BodyId,
+    pub half: [f32; 3],
+    pub at: [f32; 3],
+    pub particle: bool,
+}
+
 /// What a frame did (since the last `take_report`).
 #[derive(Clone, Debug, Default)]
 pub struct Report {
@@ -326,9 +336,9 @@ pub struct Broadside {
     pub scripted: bool,
     /// Chunks crushed so far (hidden: their mass is in `splinters`).
     pub crushed: Vec<bool>,
-    /// Crush particles: body, the splinter's half extents (drawn: a sliver of the
-    /// particle's volume) and where it was made; `splinters_version` counts changes.
-    pub splinters: Vec<(BodyId, [f32; 3], [f32; 3])>,
+    /// What crushed wood left (particles or box fragments); `splinters_version` counts
+    /// changes.
+    pub splinters: Vec<Splinter>,
     pub splinters_version: u32,
     /// Raze: the frame each chunk was last aimed at, the chunks still in large pieces
     /// (refreshed every few steps) and their share of the ship.
@@ -907,12 +917,10 @@ impl Broadside {
                             .and_then(|s| s.first().copied())
                             .and_then(|s| match self.world.shape_geometry(s) {
                                 Ok(Geometry::Box { half, .. }) => Some(*half),
-                                // A splinter of about the particle's volume.
-                                Ok(Geometry::Sphere { radius: r, .. }) => {
-                                    Some([2.2 * r, 0.35 * r, 0.55 * r])
-                                }
+                                Ok(Geometry::Sphere { radius: r, .. }) => Some([*r; 3]),
                                 _ => None,
                             });
+                        let particle = half.is_some_and(|h| h[0] == h[1] && h[1] == h[2]);
                         let at = self
                             .world
                             .body_transform(f)
@@ -920,7 +928,12 @@ impl Broadside {
                             .flatten()
                             .map_or([0.0; 3], |t| t.position);
                         if let Some(half) = half {
-                            self.splinters.push((f, half, at));
+                            self.splinters.push(Splinter {
+                                body: f,
+                                half,
+                                at,
+                                particle,
+                            });
                         }
                     }
                     self.splinters_version += 1;

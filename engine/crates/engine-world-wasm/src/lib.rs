@@ -191,14 +191,109 @@ pub fn broadside_extra_vertices() -> Vec<f32> {
             sphere_vertices(broadside::BALL_RADIUS, 8, BALL, id, &mut out);
             id += 1.0;
         }
-        for (k, (_, half, _)) in l.b.splinters.iter().enumerate() {
-            let h = (k as u32).wrapping_mul(2654435761) >> 24;
-            let shade = 0.82 + 0.3 * (h as f32 / 255.0);
-            box_vertices(*half, SPLINTER.map(|c| (c * shade).min(1.0)), id, &mut out);
-            id += 1.0;
+        let first = id;
+        for (k, s) in l.b.splinters.iter().enumerate() {
+            splinter_vertices(k as u32, s, first + k as f32, &mut out);
         }
         out
     })
+}
+
+/// Vertices each piece of debris takes ([`splinter_vertices`]).
+const SPLINTER_VERTS: u32 = (SHARDS * 12) as u32;
+
+/// The vertex where debris `k`'s vertices start in [`broadside_extra_vertices`] (the
+/// captain's and the balls' come first): the page appends new debris there.
+#[wasm_bindgen]
+pub fn broadside_splinter_vertex_offset(k: u32) -> u32 {
+    let (mut captain, mut ball) = (Vec::new(), Vec::new());
+    captain_vertices(0.0, &mut captain);
+    sphere_vertices(broadside::BALL_RADIUS, 8, BALL, 0.0, &mut ball);
+    let verts = |v: &Vec<f32>| (v.len() / VERTEX_FLOATS) as u32;
+    verts(&captain) + verts(&ball) * MAX_BALLS as u32 + k * SPLINTER_VERTS
+}
+
+/// Debris so far (crush particles and fragments).
+#[wasm_bindgen]
+pub fn broadside_splinter_count() -> u32 {
+    LOADED.with_borrow(|l| l.as_ref().map_or(0, |l| l.b.splinters.len() as u32))
+}
+
+/// The render vertices of debris `from` onward (append them at
+/// [`broadside_splinter_vertex_offset`]`(from)`).
+#[wasm_bindgen]
+pub fn broadside_splinter_vertices(from: u32) -> Vec<f32> {
+    LOADED.with_borrow(|l| {
+        let Some(l) = l.as_ref() else {
+            return Vec::new();
+        };
+        let first = (l.render_bodies + 1 + MAX_BALLS) as f32;
+        let mut out = Vec::new();
+        for (k, s) in l.b.splinters.iter().enumerate().skip(from as usize) {
+            splinter_vertices(k as u32, s, first + k as f32, &mut out);
+        }
+        out
+    })
+}
+
+/// Shards a crush particle is drawn as.
+const SHARDS: usize = 3;
+
+/// Debris `k`'s vertices, all [`SPLINTER_VERTS`] of them: a crush particle as `SHARDS`
+/// thin pointed slivers of fresh-split wood about it (lengths, tilts and shades of their
+/// own), a box fragment as its box (padded to the same count with degenerate triangles).
+fn splinter_vertices(k: u32, s: &broadside::Splinter, id: f32, out: &mut Vec<f32>) {
+    let h = |i: u32| {
+        let x = k.wrapping_mul(0x9E37_79B1) ^ i.wrapping_mul(0x85EB_CA77);
+        let x = (x ^ (x >> 15)).wrapping_mul(0x2C1B_3C6D);
+        ((x ^ (x >> 13)) >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let start = out.len();
+    if s.particle {
+        let r = s.half[0];
+        for j in 0..SHARDS as u32 {
+            let g = |i: u32| h(16 * j + i);
+            let shade = 0.78 + 0.34 * g(0);
+            let color = SPLINTER.map(|c| (c * shade).min(1.0));
+            let (len, t) = (r * (1.6 + 1.6 * g(1)), r * (0.16 + 0.14 * g(2)));
+            let q = glam::Quat::from_euler(
+                glam::EulerRot::XYZ,
+                6.28 * g(3),
+                6.28 * g(4),
+                6.28 * g(5),
+            );
+            let at = glam::Vec3::new(g(6) - 0.5, g(7) - 0.5, g(8) - 0.5) * (1.6 * r);
+            // A wedge: a point at one end, a small triangle at the other.
+            let p = [
+                glam::Vec3::new(0.5 * len, 0.0, 0.0),
+                glam::Vec3::new(-0.5 * len, t, 0.0),
+                glam::Vec3::new(-0.5 * len, -0.5 * t, 0.87 * t),
+                glam::Vec3::new(-0.5 * len, -0.5 * t, -0.87 * t),
+            ]
+            .map(|v| at + q * v);
+            let centre = (p[0] + p[1] + p[2] + p[3]) * 0.25;
+            for [a, b, c] in [[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]] {
+                let mut n = (p[b] - p[a]).cross(p[c] - p[a]).normalize_or_zero();
+                let (mut b, mut c) = (b, c);
+                if n.dot(p[a] - centre) < 0.0 {
+                    n = -n;
+                    std::mem::swap(&mut b, &mut c);
+                }
+                for v in [a, b, c] {
+                    vertex(p[v].to_array(), n.to_array(), color, id, out);
+                }
+            }
+        }
+    } else {
+        let shade = 0.82 + 0.3 * h(0);
+        box_vertices(s.half, SPLINTER.map(|c| (c * shade).min(1.0)), id, out);
+    }
+    // The same count for every piece (the page appends by index).
+    let want = start + SPLINTER_VERTS as usize * VERTEX_FLOATS;
+    while out.len() < want {
+        vertex([0.0; 3], [0.0, 1.0, 0.0], SPLINTER, id, out);
+    }
+    out.truncate(want);
 }
 
 /// Changes whenever [`broadside_extra_vertices`] would.
@@ -287,12 +382,12 @@ fn render_poses(l: &Loaded) -> Vec<Transform> {
     for k in 0..MAX_BALLS {
         poses.push(balls.get(k).copied().unwrap_or_else(parked));
     }
-    for (k, (f, half, at)) in b.splinters.iter().enumerate() {
-        let Some(t) = b.world.body_transform(*f).ok().flatten() else {
+    for (k, s) in b.splinters.iter().enumerate() {
+        let Some(t) = b.world.body_transform(s.body).ok().flatten() else {
             poses.push(parked());
             continue;
         };
-        poses.push(Transform::new(t.position, tumble(k as u32, *half, *at, t).to_array()));
+        poses.push(Transform::new(t.position, tumble(k as u32, s, t).to_array()));
     }
     poses
 }
@@ -300,11 +395,12 @@ fn render_poses(l: &Loaded) -> Vec<Transform> {
 /// A splinter's drawn turn: a crush particle never rotates, so the page tumbles its
 /// splinter about an axis of its own by how far it has travelled (render only; it
 /// settles when the particle does). A box fragment keeps its body's rotation.
-fn tumble(k: u32, half: [f32; 3], at: [f32; 3], t: Transform) -> glam::Quat {
+fn tumble(k: u32, s: &broadside::Splinter, t: Transform) -> glam::Quat {
     let body = glam::Quat::from_array(t.rotation);
-    if body != glam::Quat::IDENTITY {
+    if !s.particle {
         return body;
     }
+    let (half, at) = (s.half, s.at);
     let h = |s: u32| {
         let x = k.wrapping_mul(0x9E37_79B1) ^ s.wrapping_mul(0x85EB_CA77);
         ((x ^ (x >> 15)).wrapping_mul(0x2C1B_3C6D) >> 8) as f32 / (1u32 << 24) as f32
@@ -312,7 +408,7 @@ fn tumble(k: u32, half: [f32; 3], at: [f32; 3], t: Transform) -> glam::Quat {
     let axis = glam::Vec3::new(h(1) - 0.5, h(2) - 0.5, h(3) - 0.5).normalize_or(glam::Vec3::Y);
     let start = glam::Quat::from_euler(glam::EulerRot::XYZ, 6.28 * h(4), 6.28 * h(5), 6.28 * h(6));
     let travelled = (glam::Vec3::from(t.position) - glam::Vec3::from(at)).length();
-    glam::Quat::from_axis_angle(axis, travelled / half[0].max(0.005) * 0.6) * start
+    glam::Quat::from_axis_angle(axis, travelled / half[0].max(0.005) * 0.3) * start
 }
 
 /// The take's camera for a frame `wall` seconds after the last: `[eye, target]`.
