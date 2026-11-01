@@ -128,7 +128,7 @@ mod imp {
     use stress_ref::scene::{Scene, Support};
 
     /// The words of a fracture counters block (`fracture.slang` `C_*`).
-    const COUNTER_WORDS: u64 = 16;
+    const COUNTER_WORDS: u64 = fracture::COUNTER_WORDS as u64;
 
     /// The rotation from the stress frame (Z up) to rubble's (Y up): -90 degrees about x.
     fn to_y_up() -> DQuat {
@@ -755,6 +755,8 @@ mod imp {
                 face,
                 mass,
                 modulus: e_plane as f32,
+                // No launch marks: the analytic strike's (`impact_local`) only.
+                launch: 0,
             };
             let info = ColliderInfo {
                 a: [NONE, b, KIND_BODY, 0],

@@ -40,14 +40,15 @@ const BAKE = ['mpm_write_args', 'mpm_bake_edge_clear', 'mpm_bake_edge_count', 'm
 // The last area's bake also lands any parcels still in flight before the pool
 // empties (a forced close; settling waits for them).
 const LAST_BAKE = [...BAKE.slice(0, -2), 'mpm_parcels_land', ...BAKE.slice(-2)];
-// A bake that leaves other areas open frees the pool's dead tail and packs the parcels in
-// flight, before the deposits (plan.rs pool_trim).
-const POOL_TRIM = ['mpm_write_args', 'mpm_pool_reserve', 'mpm_pool_top', 'mpm_parcels_pack', 'mpm_parcels_unpack', 'mpm_pool_trim'];
-const OPEN_BAKE = [...BAKE.slice(0, -2), ...POOL_TRIM, ...BAKE.slice(-2)];
-// An activation: count and scan its samples, then (past the pool's end) the free slots
-// first (plan.rs pool_holes; the GPU returns at once when none are needed), then emit.
-const ACTIVATE = ['mpm_activate_count', 'mpm_activate_scan', 'mpm_write_args', 'mpm_pool_reserve', 'mpm_pool_holes_count',
-  'mpm_pool_holes_scan', 'mpm_pool_holes_list', 'mpm_pool_finish', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init'];
+// A bake that leaves areas open then trims the pool (plan.rs `pool_trim`): it ends
+// after its last slot still held and packs the parcels in flight to the front.
+const OPEN_BAKE = [...BAKE.slice(0, -2), 'mpm_write_args', 'mpm_pool_reserve', 'mpm_pool_top',
+  'mpm_parcels_pack', 'mpm_parcels_unpack', 'mpm_pool_trim', ...BAKE.slice(-2)];
+// An activation: its particles past the pool's end take the free slots first
+// (plan.rs `pool_holes`), then the absorbing ground's boundary nodes.
+const ACTIVATE = ['mpm_activate_count', 'mpm_activate_scan', 'mpm_write_args', 'mpm_pool_reserve',
+  'mpm_pool_holes_count', 'mpm_pool_holes_scan', 'mpm_pool_holes_list', 'mpm_pool_finish',
+  'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init'];
 const counters = (o = {}) => {
   const c = new Uint32Array(T.COUNTER_WORDS);
   const f = new Float32Array(c.buffer);
@@ -177,8 +178,7 @@ test('the absorbing ground sets up its node records at activation and the geosta
   assert.equal(s.config.boundary, 'absorbing');
   assert.equal(s.config.initial_stress, 'geostatic');
   const { blocks } = decodeBlocks(p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81));
-  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel),
-    ACTIVATE);
+  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), ACTIVATE);
   const f0 = p.frame(1 / 60, -9.81, 1);
   // The first frame's payload sets the geostatic F (counter word 11).
   const geostatic = (words) => decodeBlocks(words, 2).blocks[0].writes.some((w) => w.binding === T.COUNTERS && w.offset === 44 && w.words[0] === 1);

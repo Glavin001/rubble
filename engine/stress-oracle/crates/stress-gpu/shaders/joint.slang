@@ -207,7 +207,7 @@ float life_rate(JointMaterial mat, float s)
     return fdiv((mat.misc.y + 1.0) * fpow(s, mat.misc.y), mat.misc.z);
 }
 
-float dif_factor(JointMaterial mat, float strain_rate)
+public float dif_factor(JointMaterial mat, float strain_rate)
 {
     float r = abs(strain_rate);
     float ref = mat.dif.x;

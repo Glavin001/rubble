@@ -2351,6 +2351,12 @@ impl WgpuSim {
 
     /// The plan's dispatches in one compute pass of `enc` (its copies are encoded before).
     fn encode_dispatches(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
+        self.encode_dispatches_hooked(enc, cmds, None);
+    }
+
+    /// [`Self::encode_dispatches`], with `hook` encoded into `enc` where the plan marks
+    /// the end of phase `hook.0` (the step's pass ends before it and resumes after).
+    fn encode_dispatches_hooked(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], mut hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) {
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("step"),
             timestamp_writes: None,
@@ -2368,6 +2374,18 @@ impl WgpuSim {
                     continue
                 }
                 _ => {}
+            }
+            if let (rigid_plan::Cmd::Phase { name, .. }, Some((at, f))) = (c, hook.as_mut()) {
+                if name == at {
+                    drop(pass);
+                    if let Some(m) = self.marks.as_ref() {
+                        m.mark(enc, name);
+                    }
+                    f(enc);
+                    hook = None;
+                    pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step"), timestamp_writes: None });
+                    continue;
+                }
             }
             match *c {
                 rigid_plan::Cmd::Phase { name } if self.marks.is_some() => {
@@ -2413,6 +2431,20 @@ impl WgpuSim {
     /// once. The step's host writes (its uniforms) take effect at that submission, before
     /// its commands, as they would at its own.
     pub fn step_encode(&mut self, enc: &mut wgpu::CommandEncoder) -> Result<(), ExecError> {
+        self.step_encode_hooked(enc, None).map(|_| ())
+    }
+
+    /// [`Self::step_encode`] with `hook` encoded into `enc` within the step, where the
+    /// plan's phase `hook.0` ends (for example `"warm"`: the step's contacts are made and
+    /// warm-started, nothing is solved yet; a host may change bodies and colliders there
+    /// and the rest of the step sees them). Returns whether the hook was
+    /// encoded: not when the step was skipped (every body asleep) or the plan has no
+    /// such phase. A hook must leave the step's own buffers' layouts as they are.
+    pub fn step_encode_with(&mut self, enc: &mut wgpu::CommandEncoder, phase: &str, hook: &mut dyn FnMut(&mut wgpu::CommandEncoder)) -> Result<bool, ExecError> {
+        self.step_encode_hooked(enc, Some((phase, hook)))
+    }
+
+    fn step_encode_hooked(&mut self, enc: &mut wgpu::CommandEncoder, hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) -> Result<bool, ExecError> {
         // Its own submission, ahead of the caller's encoder.
         self.build_all_bounds_if_dirty();
         let wall = web_time::Instant::now();
@@ -2431,7 +2463,7 @@ impl WgpuSim {
             self.counted_steps = self.steps_done;
             self.last_timings.total_gpu = 0.0;
             self.last_step_ran = false;
-            return Ok(());
+            return Ok(false);
         }
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
             .is_ok()
@@ -2485,9 +2517,11 @@ impl WgpuSim {
             }
         }
         lap(&host_t, "plan + copies");
-        self.encode_dispatches(enc, &cmds);
+        let phases: Vec<&str> = cmds.iter().filter_map(|c| if let rigid_plan::Cmd::Phase { name, .. } = c { Some(*name) } else { None }).collect();
+        let hooked = hook.as_ref().is_some_and(|(at, _)| phases.contains(at));
+        self.encode_dispatches_hooked(enc, &cmds, hook);
         lap(&host_t, "dispatches");
-        self.finish_step(false, wall).map(|_| ())
+        self.finish_step(false, wall).map(|_| hooked)
     }
 
     /// The step's host bookkeeping after its submission (and its counters, `read`).
