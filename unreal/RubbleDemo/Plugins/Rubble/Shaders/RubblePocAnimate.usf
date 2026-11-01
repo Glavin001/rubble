@@ -1,0 +1,29 @@
+// The GPU Scene proof of concept's stand-in for a Rubble step: writes a field of spinning,
+// bobbing boxes as Rubble's pose records (Rubble's frame: Y up, metres), so the PoC measures the
+// write path at scale without any per-body CPU work, as with Rubble's own pose buffer.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ComputeShaderUtils.ush"
+
+uint NumBodies;
+uint Side;
+float Time;
+RWStructuredBuffer<float4> OutPoses;
+
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void AnimatePosesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint I = GetUnWrappedDispatchThreadId(GroupId, GroupIndex, THREAD_GROUP_SIZE).x;
+	if (I >= NumBodies)
+	{
+		return;
+	}
+	const float X = (float(I % Side) - Side * 0.5) * 1.5;
+	const float Z = (float(I / Side) - Side * 0.5) * 1.5;
+	const float Phase = 0.37 * float(I % 13) + 0.11 * float(I % 7);
+	const float Y = 1.0 + 0.8 * abs(sin(1.5 * Time + Phase));
+	const float3 Axis = normalize(float3(0.3, 1.0, 0.2));
+	const float Half = 0.5 * (1.2 * Time + Phase);
+	OutPoses[I * 2 + 0] = float4(X, Y, Z, 0);
+	OutPoses[I * 2 + 1] = float4(Axis * sin(Half), cos(Half));
+}
