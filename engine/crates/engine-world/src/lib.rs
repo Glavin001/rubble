@@ -1698,6 +1698,13 @@ impl World {
 
     // ----- stepping --------------------------------------------------------
 
+    /// Whether [`World::step`] can run now without waiting on an earlier step's
+    /// readback: a readback slot is free. Hosts that must never block (the
+    /// browser's main thread) step only when this holds, and poll otherwise.
+    pub fn can_step_without_waiting(&self) -> bool {
+        self.readback.has_free()
+    }
+
     /// Advance one fixed step (queued commands first). Never waits on a
     /// readback unless every readback slot is in flight and
     /// `Backpressure::Block`; collect results with [`World::poll`].
