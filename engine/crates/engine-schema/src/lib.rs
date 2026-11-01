@@ -85,6 +85,11 @@ pub enum BodyFlags {
 /// and the nearest time of impact along its path places a speculative contact
 /// in the solve and starts the body's iterate at that pose.
 pub const BODY_CCD: u32 = 256; // 64 BODY_PARTICLE, 128 BODY_FOLLOW (engine-softbody)
+/// `BodyState::flags` bit: continuous collision only on steps the body moves fast
+/// (`world_step.slang` BODY_CCD_FAST): the step's velocity extraction sets or clears
+/// `BODY_CCD` from the velocity it leaves, past `CCD_FAST_REACH` contact offsets a step.
+/// Crush particles carry it.
+pub const BODY_CCD_FAST: u32 = 32768;
 /// Motion locks in `BodyState::flags` (world axes): bits 9..11 linear x, y,
 /// z; 12..14 angular x, y, z (the `lock_predict` / `lock_project` passes).
 pub const BODY_LOCK_SHIFT: u32 = 9;

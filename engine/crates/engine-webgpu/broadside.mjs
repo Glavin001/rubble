@@ -4,7 +4,7 @@
 // this page builds the ship's render scene from the same GLB (fracture/wasm.mjs), uploads
 // each frame's poses and draws them with the fracture lab's renderer. `window.__film`
 // renders the take frame by frame at a fixed clock rate for recording (record-broadside.mjs).
-import init,{broadside_init,broadside_set_asset,broadside_set_level,broadside_set_take,broadside_error,broadside_panic,broadside_lost,broadside_body_base,broadside_extra_vertices,broadside_extras_version,broadside_poses,broadside_camera,broadside_time_scale,broadside_set_scripted,broadside_shoot_ray,broadside_stats} from './generated/world-wasm/engine_world_wasm.js';
+import init,{broadside_init,broadside_set_asset,broadside_set_level,broadside_set_take,broadside_error,broadside_panic,broadside_lost,broadside_body_base,broadside_extra_vertices,broadside_extras_version,broadside_splinter_count,broadside_splinter_vertices,broadside_splinter_vertex_offset,broadside_poses,broadside_camera,broadside_time_scale,broadside_set_scripted,broadside_shoot_ray,broadside_stats} from './generated/world-wasm/engine_world_wasm.js';
 // Chrome and Edge 137+ suspend the wasm stack natively (JSPI); elsewhere the Asyncify build
 // of the same Rust does, driven by gpu-wait.mjs (as the lab's stress mode).
 import {JSPI,bindAsyncify,asyncifyPromising} from './fracture/gpu-wait.mjs';
@@ -27,7 +27,7 @@ function fail(e){
 
 // The most bodies the pose buffer holds beyond the render scene's: the captain, MAX_BALLS
 // balls and the crush splinter budget.
-const POSE_FLOATS=28,EXTRA_BODIES=1+256+16384;
+const POSE_FLOATS=28,EXTRA_BODIES=1+256+49152;
 // The ship's fracture level (broadside::LEVEL's list): 0 whole members, 1 pieces, 2 cells.
 const levelPick=$('level');
 // Phones (a coarse pointer) start on the lighter ship.
@@ -40,7 +40,7 @@ const take=()=>Number(takePick.value);
 const scenes=new Map();
 
 let device,renderer=null,poseBuffer=null,scene=null,glb=null,asset=null;
-let running=true,last=0,credit=0,extrasVersion=-1,frame=Promise.resolve();
+let running=true,last=0,credit=0,extrasVersion=-1,uploaded=0,frame=Promise.resolve();
 
 const wasm=await init({module_or_path:new URL(`./generated/world-wasm/engine_world_wasm_bg${JSPI?'':'.asyncify'}.wasm`,import.meta.url)});
 if(!JSPI)bindAsyncify(wasm,wasm.broadside_asyncify_buffer());
@@ -55,7 +55,13 @@ const stats=()=>JSON.parse(broadside_stats());
 function draw(alpha,wall){
  const poses=broadside_poses(alpha);device.queue.writeBuffer(poseBuffer,0,poses);
  const v=broadside_extras_version();
- if(v!==extrasVersion){extrasVersion=v;renderer.setDynamic(broadside_extra_vertices())}
+ if(v!==extrasVersion){
+  // New debris only (each piece's vertices depend on its index alone); the whole mesh
+  // when it is the first upload or outgrows the buffer.
+  const n=broadside_splinter_count();
+  if(extrasVersion<0||n<uploaded||!renderer.appendDynamic(broadside_splinter_vertices(uploaded),broadside_splinter_vertex_offset(uploaded)))renderer.setDynamic(broadside_extra_vertices());
+  extrasVersion=v;uploaded=n;
+ }
  if($('director').checked){const c=broadside_camera(wall);renderer.lookAt([c[0],c[1],c[2]],[c[3],c[4],c[5]])}
  renderer.draw(false);
 }
@@ -75,7 +81,7 @@ async function open(){
  const bodies=broadside_body_base()+EXTRA_BODIES;
  poseBuffer?.destroy();poseBuffer=device.createBuffer({size:bodies*POSE_FLOATS*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
  renderer?.dispose();renderer=await createRenderer(device,canvas,{bodyBuffer:poseBuffer,shots:0},scene,shoot);
- extrasVersion=-1;last=0;credit=0;
+ extrasVersion=-1;uploaded=0;last=0;credit=0;
  broadside_set_scripted(true);
  const s=stats();
  setStatus(`${s.chunks} chunks · ${s.bonds} bonds`);

@@ -24,6 +24,7 @@ public static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
 public static const uint BODY_PARTICLE = 64u;
 public static const uint BODY_FOLLOW = 128u;
 public static const uint BODY_CCD = 256u;
+public static const uint BODY_CCD_FAST = 32768u;
 public static const uint BODY_LOCK_SHIFT = 9u;
 public static const uint BODY_LOCK_MASK = 0x7E00u;
 

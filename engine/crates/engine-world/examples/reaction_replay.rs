@@ -558,6 +558,7 @@ fn run(s: &Scenario) -> anyhow::Result<Value> {
                         None => "off".to_string(),
                         Some(CrushMass::Remove) => "remove".into(),
                         Some(CrushMass::Conserve { fragments, .. }) => format!("conserve ({fragments} fragments)"),
+                        Some(CrushMass::Particles { size, .. }) => format!("particles ({size} m)"),
                      }},
         "notes": s.notes,
         "chunks": chunks, "extras": extras_json, "events": events, "frames": out_frames,

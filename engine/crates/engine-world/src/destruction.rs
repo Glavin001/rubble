@@ -419,8 +419,13 @@ pub struct CrushMaterial {
     pub crush_viscosity: f64,
 }
 
+/// The collision group of every crush particle ([`CrushMass::Particles`]): negative, so
+/// two particles never collide. Reserved: a crushing destructible's particles take it in
+/// place of its shapes' own group.
+pub const CRUSH_PARTICLE_GROUP: i16 = i16::MIN;
+
 /// What becomes of a crushed chunk's mass.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CrushMass {
     /// Kept: the chunk leaves its structure as `fragments` small rigid boxes (a power of
     /// two, at most 64) inside its volume, carrying its mass and momentum, so its weight
@@ -428,6 +433,25 @@ pub enum CrushMass {
     /// destructible is placed (the engine never allocates during a step); a crush past
     /// them fails the step with an error naming this budget, never a silent drop.
     Conserve { fragments: u32, budget: u32 },
+    /// Kept as particles: the chunk becomes about `volume / size³` small spheres (at least
+    /// 1, at most `max_per_chunk`, at most 4096) spread through its volume, carrying its
+    /// mass and momentum. A particle never rotates and never collides with another
+    /// particle (their shapes share the group [`CRUSH_PARTICLE_GROUP`]); it collides with
+    /// every other shape the destructible's filter allows, so the crushed wood lands, slides
+    /// and rests on what is there and still loads it. `budget` particle bodies are reserved
+    /// when the destructible is placed; a crush past them fails the step with an error
+    /// naming this budget, never a silent drop.
+    ///
+    /// `continuous`: a particle has continuous collision while it moves fast
+    /// (`BodyDef::ccd_when_fast`), so it never passes through a plank. Those bodies share
+    /// the engine's `CCD_BODY_CAP` slots a step (more fails the step); off, a fast
+    /// particle may pass through thin shapes.
+    Particles {
+        size: f32,
+        max_per_chunk: u32,
+        budget: u32,
+        continuous: bool,
+    },
     /// Removed (dust): the chunk's mass leaves the simulation. The host draws the dust
     /// from `ChunkCrushed`.
     Remove,

@@ -75,6 +75,13 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
    dynGroup=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:simulation.renderBodyBuffer??simulation.bodyBuffer}},{binding:1,resource:{buffer:dynBuf}},{binding:2,resource:{buffer:uniform}},{binding:3,resource:{buffer:joints}}]})}
   device.queue.writeBuffer(dynBuf,0,data);
  },
+ // Vertices written from vertex `at` on, the rest kept (debris the page adds as it
+ // goes). False when the buffer cannot hold them: replace the whole mesh then.
+ appendDynamic(data,at){
+  if(!dynBuf||(at*10+data.length)*4>dynBuf.size)return false;
+  if(data.length)device.queue.writeBuffer(dynBuf,at*40,data);
+  dynVerts=at+data.length/10;return true;
+ },
  // A scripted camera (a take's shot): fly mode, the eye at `eye` looking at `target`.
  lookAt(eye,target){orbit.lookAt(eye[0],eye[1],eye[2],target[0],target[1],target[2]);input.modeChanged()},
  // The camera's view mode (0 orbit, 1 first-person walk, 2 fly: engine-fracture ViewMode).

@@ -279,7 +279,9 @@ pub struct WgpuSim {
 
 /// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
 pub(crate) fn body_motion_flags(bodies: &[BodyState]) -> (bool, bool) {
-    let ccd = bodies.iter().any(|b| b.flags & BODY_CCD != 0);
+    let ccd = bodies
+        .iter()
+        .any(|b| b.flags & (BODY_CCD | engine_schema::BODY_CCD_FAST) != 0);
     let kin = bodies.iter().any(|b| {
         b.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32)
             == BodyFlags::Kinematic as u32

@@ -402,7 +402,7 @@ impl ThresholdWorld {
             if !rows.iter().any(|r| r[1][2].to_bits() == 1) {
                 return Err("crushing: no chunk's material has crush parameters (a ScenePack v3's materials[].crush, or the presets)".into());
             }
-            t.crush = Some(fracture::CrushTables { chunks: rows, bonds: std::mem::take(&mut crush_bonds), normals: Vec::new(), flow: false, conserve: false, fragments: 0, pool: Vec::new(), max_events: 1024, park_y: -10_000.0, park_step: 8.0 });
+            t.crush = Some(fracture::CrushTables { chunks: rows, bonds: std::mem::take(&mut crush_bonds), normals: Vec::new(), flow: false, conserve: false, fragments: 0, particles: false, particle_ccd: false, pool: Vec::new(), max_events: 1024, park_y: -10_000.0, park_step: 8.0 });
         }
         if let LoadModel::LoadPath { .. } = load_model {
             let net = load_path_network(&t, &bond_data);

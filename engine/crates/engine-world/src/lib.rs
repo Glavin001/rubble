@@ -53,6 +53,7 @@ pub use debug_draw::{
 pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, MoveReports, ShapeDef, SurfaceMaterial};
 pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
+    CRUSH_PARTICLE_GROUP,
     DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats,
     Preload, StrengthModel,
 };
@@ -320,6 +321,9 @@ struct BodySlot {
     gravity_scale: f32,
     locks: u32,
     bullet: bool,
+    /// Continuous collision only on steps it moves fast (a crush particle:
+    /// `BODY_CCD_FAST`).
+    pub(crate) ccd_when_fast: bool,
 }
 
 impl BodySlot {
@@ -753,6 +757,7 @@ impl World {
                 gravity_scale: d.gravity_scale,
                 locks: d.motion_locks.bits(),
                 bullet: d.is_bullet && d.body_type == BodyType::Dynamic,
+                ccd_when_fast: d.ccd_when_fast && d.body_type == BodyType::Dynamic,
             };
             let state = body_state(&slot);
             match self.reusable_body_slot() {
@@ -2888,6 +2893,7 @@ impl World {
                 gravity_scale: 1.0,
                 locks: 0,
                 bullet: false,
+                ccd_when_fast: false,
             });
         }
     }
@@ -2945,6 +2951,10 @@ fn body_state(slot: &BodySlot) -> BodyState {
     };
     if slot.bullet {
         b.flags |= engine_schema::BODY_CCD;
+    }
+    if slot.ccd_when_fast {
+        // Latched on (the GPU clears it at the end of a slow step).
+        b.flags |= engine_schema::BODY_CCD | engine_schema::BODY_CCD_FAST;
     }
     if slot.body_type == BodyType::Dynamic {
         b.flags |= slot.locks << engine_schema::BODY_LOCK_SHIFT;
