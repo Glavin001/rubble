@@ -85,7 +85,9 @@ The tests are:
 
 - Scene save/restore (every page's R key). Added for vehicle.html:
   `World::save_state` / `restore_state` (bodies, shapes, joints, vehicles and soft
-  bodies; not destructibles, terrain or characters).
+  bodies; not destructibles or characters). Terrain was added for impact.html
+  and showcase.html: saved with no area open, restored with the pool started
+  over.
 - Vehicle part control (detach or disable wheels and parts, functional state,
   mount loads) and soft settings and obstacles were already in `World`
   (`vehicle_damage`, `rig.rs`); the wasm layer now exposes them.
@@ -243,6 +245,111 @@ Each page moves in its own commit.
     same. Poses for the HUD, camera, AI and crusher come from `readBodies`,
     as the JS host's `mapAsync` copies did.
   - `?stopAt=N` stops the page's own loop at step N.
+- **impact.html.** The meteor impact (impact and buried charge, every view,
+  the cut, the tracked parcel, Bake now, the timed bake, the drive-in truck and
+  Replay) runs on `World`. The page keeps rendering, input, UI and its
+  scripting. The terrain is `enableTerrain` with the `TerrainDef` the JS
+  host's `TerrainStep` had: the game profile (or `?profile=physical`), the
+  browser limits, the margin, the settle speed and 30 frames, and the live
+  surface without patches or debris copies. The strike is `terrainImpact` /
+  `terrainExplode`; a settled area bakes inside `World::step`, Bake now and
+  the timed bake are `terrainClose`. The page binds the particle, parcel,
+  counter, surface, body, collider, hull and vehicle buffers in place and
+  draws the engine's debris list with `drawIndirect`. Counters, the live
+  surface and bakes come from frames. The crater is measured from World's
+  heightfield mirror (`heightFieldHeights`) once the bake's frame arrives.
+  The prediction comes from `terrainPredictImpact` before the world exists,
+  because it sizes the heightfield. The solver is as before: 120 Hz, 8
+  iterations, g = 9.81, `SPEC_VELOCITY`, canonical contacts, friction 0.9 on
+  slot 0 and the rims and 0.6 elsewhere.
+
+  With the same input from the same state (launch, then frames polled one by
+  one), World gives the JS host's results exactly. Over 600 coupled frames the
+  max speeds, parcel counts and substeps are equal. Each frame's substeps
+  follow the speed in the last report that arrived (`RegionClock`), so they
+  depend on when reports arrive. With pipelined `__step(60)` both hosts
+  diverge from that reference, by different amounts:
+  - the crater depth is 93.28 m (JS) and 93.62 m (World), the rim radius
+    236.1 m in both, the rim height 24.10 m and 24.21 m;
+  - the drive-in truck follows the same path to within 0.4 m;
+  - the particle counts and window are identical.
+
+  `World` gained (each change is in World and engine-webgpu, shared with
+  native and Unreal):
+  - Save/restore with terrain (`save_state` refuses an open area). A restore
+    drops open areas without baking them, as the JS host's `terrain.reset()`
+    did, and starts the pool over (`WgpuSim::terrain_reset`). It also puts
+    every heightfield's samples back: the hull arena is not part of a
+    snapshot, so it kept what the bakes wrote. Snapshots skip the terrain
+    pool's buffers, about 200 MB for impact.html.
+  - `TerrainDef::predict_impact` / `predict_explosion` (and
+    `vertical_impact`, `tnt_charge`): the crater, the region's cell and the
+    source's peak speed, without a world.
+  - `terrain_last_substeps` for the HUD and the frame log.
+  - Two `WgpuSim` fixes:
+    - With a live surface and no patches, the last bake now clears the
+      surface's valid word, so renderers stop drawing a stale surface. The
+      JS host did this itself.
+    - The surface buffer can be used for indirect draws.
+  - Read-only particle and parcel buffers for renderers.
+
+  engine-world-wasm gained `terrain.rs`: `enableTerrain` (a camelCase
+  `TerrainDef`), the events, `terrainAreas`, the buffers, Promise reads of
+  particles, parcels and the surface, and world-less `terrainSettings`,
+  `terrainPredictImpact`, `terrainPredictExplosion` and `terrainLayout`.
+  Frames carry `terrain()`, `terrainBakes()` and `terrainSurface()`.
+
+  Differences:
+  - The HUD and `__impact.timings()` no longer have the terrain pass's GPU
+    time. The JS host timed its own pass with timestamp queries, and World
+    encodes that pass itself.
+  - The bake shows (phase "baked") when its frame arrives, a readback lag
+    after the step that baked. The JS host knew when it encoded the bake.
+  - The switch error compares the last frame's live surface with the baked
+    mirror (`switchError` in terrain-render.mjs). The JS host read both back
+    from the GPU.
+  - `__step(n)` is new; `__impact.frames(n)` is kept.
+- **showcase.html.** Every scene (drive, drive1, pass, bts and play) runs on
+  `World`. The terrain settings are those of the JS host, as a `TerrainDef`:
+  the game profile, 6 cells per radius, the margin, 60 settle frames,
+  `maxRegions` per scene, the local settle rule in play, and a surface of
+  2²¹ cells with one patch of `PN` samples per area slot (`patchSamples`).
+  The dune buggy is `addVehicle`, drawn by buggy-render.mjs through a view of
+  the world's buffers, as in vehicle.html. The page keeps the schedule, the
+  director, the autopilot, the camera, the recording and the HUD.
+  `liveHeightAt` reads the surface with `readTerrainSurface`. Reset is
+  `World::restore_state`, and a run after it repeats the first run bit for
+  bit.
+
+  With the same input from the same state (`?manual=1`, `__showcase.frames(n)`,
+  each frame waited for, as the JS host's), the terrain gives the JS host's
+  results exactly: substeps, particles and parcels in flight agree over 2,400
+  frames, and the strike times and points are identical. The buggy's path is
+  bit-identical until it couples to open sand (6.7 s into the drive scene).
+  From there it diverges and ends 20 m apart after 20 s.
+
+  The cause is the order of the colliders. The JS page made the 8 surface
+  patches before the car; World makes them at the first strike, after it. A
+  copy of the old page that creates the car first gives World's result
+  exactly. The coupling bins colliders by index, so float sums run in
+  another order, and a buggy on fresh sand amplifies that. Settled bakes
+  happen at the same times (4.783 s and 7.683 s, `scene=pass&settle=3`).
+
+  Other differences:
+  - The JS page's switch error was 0 with patches. Its read came after the
+    surface retire had cleared the view table. The new measurement gives
+    0.09 m rms.
+  - The terrain and surface GPU times are gone from the HUD and
+    `timings()`, as in impact.html.
+  - The page's own loop never waits. A frame with no readback slot free
+    only renders. The JS loop waited for the GPU every frame.
+  - Frames carry the open areas' live heights every coupled step
+    (`TerrainDef::surface`). The page draws from the buffer and uses the
+    copy only for the switch error.
+- **world-host.mjs, terrain-host.mjs.** No page imports them any more. They
+  stay, as do `RigidStep` and `TerrainStep` in engine-vehicle-wasm, which
+  `tests/terrain_plan.test.mjs` still checks against engine-terrain's plan;
+  removing them is a follow-up.
 - **Non-blocking reads.** `readBodies(slots)` returns a Promise (a copy, then
   `mapAsync`) for checks that need velocities.
 
@@ -285,6 +392,13 @@ steps. It covers the host's encode, submit and readback as well as the GPU work.
 | softbody.html, driving | 1.72 / 1.74 | 1.77 |
 | softbody.html?car=buggy, driving | 1.87 / 1.88 | 1.87 |
 | softbody.html?rigid=0, driving | 1.80 / 1.83 | 1.88 |
+| impact.html (ready, idle) | 0.48 | 0.006 |
+| impact.html?autostart=1 (impact open, game profile) | 1.95 | 1.60 |
+| impact.html?autostart=1&profile=physical | 5.59 | 5.01 |
+| showcase.html?lead=100 (driving, no strike) | 1.63 | 1.66 |
+| showcase.html (drive: the barrage) | 2.29 / 2.06 / 2.08 | 2.82 / 2.33 / 2.29 |
+| showcase.html?scene=drive1 | 2.30 | 2.81 |
+| showcase.html?scene=bts (300 Hz) | 1.55 | 1.61 |
 
 `motion.html`'s CCD gallery is at rest until a volley: `World` skips a step when
 nothing is awake and nothing was written, and the JS host never did.
@@ -305,3 +419,15 @@ single-car scenes cost 0-10 % more per step: `World` submits and reads back
 every step, where the JS host batched 8. Traffic is faster because of how
 each 8-step chunk waits for the AI's pose read. The old page polled with 1 ms
 timers; the new one awaits the `readBodies` Promise.
+
+impact.html and showcase.html are timed with a `__step(n)` added to both
+pages: n frames, pipelined, with no render. The old copy waited only when all
+8 counter readbacks were in flight. Once a strike lands, each run of 300
+frames covers another phase of it (other strikes in showcase.html, the
+crater forming in impact.html), so best of 3 is the cheapest phase.
+
+showcase.html's drive row gives three invocations. Their means over the 3
+runs are 3.05 (JS) and 2.95 (World), and the best runs differ by 10-20 %. The
+terrain work is identical. On top of it, World copies the open areas' live
+heights back every step, and the page reads the buggy's chassis with
+`readBodies` every step.

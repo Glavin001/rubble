@@ -51,36 +51,6 @@ export function switchError(views, heights, nx, slots = null) {
   return { rms: n ? Math.sqrt(sq / n) : 0, mean: n ? sum / n : 0, worst, samples: n };
 }
 
-// The JS host's GPU-read version of switchError (showcase.html until it moves to World).
-export async function surfaceSwitchError(device, surfaceBuffer, hullBuffer, hfBase, nx, slots = null, T) {
-  const W = surfaceWords(T);
-  const read = async (buf, offset, words) => {
-    const rb = device.createBuffer({ size: words * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(buf, offset, rb, 0, words * 4);
-    device.queue.submit([enc.finish()]);
-    await rb.mapAsync(GPUMapMode.READ);
-    const out = rb.getMappedRange().slice(0);
-    rb.unmap(); rb.destroy();
-    return out;
-  };
-  const table = new Uint32Array(await read(surfaceBuffer, 4 * W.view, W.viewWords * W.maxViews));
-  let sum = 0, sq = 0, worst = 0, n = 0;
-  for (let s = 0; s < W.maxViews; s++) {
-    const v = table.subarray(s * W.viewWords, (s + 1) * W.viewWords);
-    if (!(v[W.vFlags] & T.SURFACE_VIEW_OPEN) || (slots && !slots.includes(s))) continue;
-    const [i0, j0, ni, nj] = v.subarray(W.vWindow, W.vWindow + 4);
-    const live = new Float32Array(await read(surfaceBuffer, 4 * v[W.vHeights], ni * nj));
-    const rows = new Float32Array(await read(hullBuffer, (hfBase + 2) * 16 + j0 * nx * 4, Math.ceil((nj * nx) / 4) * 4));
-    for (let j = 0; j < nj; j++) for (let i = 0; i < ni; i++) {
-      const d = live[j * ni + i] - rows[j * nx + i0 + i];
-      sum += d; sq += d * d; n++;
-      if (Math.abs(d) > Math.abs(worst)) worst = d;
-    }
-  }
-  return { rms: n ? Math.sqrt(sq / n) : 0, mean: n ? sum / n : 0, worst, samples: n };
-}
-
 export const GROUND_WGSL = ({ hfBase, surfaceBinding, T }) => {
   const W = surfaceWords(T);
   return /* wgsl */`

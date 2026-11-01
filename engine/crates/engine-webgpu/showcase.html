@@ -50,11 +50,11 @@
     <button id="tBrake" style="right: 90px">▼</button>
     <button id="tGas" style="right: 14px">▲</button>
   </div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, sceneCapacity } from './world-host.mjs';
-    import { M, WHEEL_RIM_MATERIAL, L, heightFieldArena, fbits, bitsf } from './vehicle.mjs';
-    import { createTerrain, TerrainStep, T } from './terrain-host.mjs';
-    import { GROUND_WGSL, surfaceSwitchError } from './terrain-render.mjs';
+    import { createWorld, pollFrame, stepFrames, drain, macrotask, worldWasm } from './rubble-world.mjs';
+    import { WHEEL_RIM_MATERIAL, L } from './vehicle.mjs';
+    import { GROUND_WGSL, switchError } from './terrain-render.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
 
     const $ = (id) => document.getElementById(id);
@@ -68,20 +68,19 @@
     if (qs.get('hud') === '0') $('hud').hidden = true;
 
     // ================================================================ terrain settings
-    // The one place the terrain is configured. The engine's game profile (a
-    // TerrainConfig preset for real time) replaces `settings` when it lands.
+    // The one place the terrain is configured (engine-world's TerrainDef).
     const G = 9.81;
     const TERRAIN = {
       // A stony meteor: π-scaling gives a 27 m transient crater, a 35 m final rim.
       meteor: { radius: num('radius', 1.0), density: 3000, speed: num('speed', 20) * 1000 },
       settings: {
         config: {
-          max_particles: 1 << 20, max_blocks: 8192, max_parcels: 1 << 17, max_substeps: 1024,
-          max_columns: 1 << 16, max_field_samples: 1 << 19,
+          maxParticles: 1 << 20, maxBlocks: 8192, maxParcels: 1 << 17, maxSubsteps: 1024,
+          maxColumns: 1 << 16, maxFieldSamples: 1 << 19,
           // The dune buggy drives into open regions: its 17 parts' colliders couple.
-          max_coupled: 256,
+          maxCoupled: 256,
           // Cells across the transient radius: 6 gives 4.5 m cells.
-          cells_per_radius: num('cpr', 6),
+          cellsPerRadius: num('cpr', 6),
           // The engine's game profile (TerrainProfile::Game: Courant 0.45,
           // speed growth 1.0, bed 1.25 R) under these limits, the default for
           // demos; ?profile=physical keeps the validation profile.
@@ -89,10 +88,12 @@
         },
         // 1 R past the transient radius (the final rim is at 1.3 R): a box of
         // ~100k particles, which the car's track can pass close to.
-        region_margin: num('margin', 1.0),
-        settle_speed: null, // 1% of the crater's √(gR), set below
-        settle_frames: 60, // 0.5 s at 120 Hz
-        surface_cells: 1 << 21,
+        regionMargin: num('margin', 1.0),
+        settleSpeed: null, // 1% of the crater's √(gR), set below
+        settleFrames: 60, // 0.5 s at 120 Hz
+        // The live surface, with its patches (samples set below); the page
+        // draws the engine's debris list in place, so no debris copies.
+        surface: { cells: 1 << 21, maxDebris: 0 },
       },
     };
 
@@ -110,56 +111,23 @@
     const PLAY = SCENE === 'play';
     // The barrage keeps several areas open at once (overlapping strikes grow
     // one area): explicit, so a schedule that needs more fails by name.
-    if (SCENE === 'drive') TERRAIN.settings.config.max_regions = num('regions', 8);
-    if (PLAY) TERRAIN.settings.config.max_regions = num('regions', 12);
+    if (SCENE === 'drive') TERRAIN.settings.config.maxRegions = num('regions', 8);
+    if (PLAY) TERRAIN.settings.config.maxRegions = num('regions', 12);
     // Endless play: an area settles on its own sand and the parcels that can
     // still reach it (engine_terrain::SettleRule::Local), not on the car
     // driving over it or a barrage's ejecta flying elsewhere.
-    if (PLAY) TERRAIN.settings.settle_rule = qs.get('rule') === 'strict' ? 'strict' : 'local';
-
-    // ================================================================ device
-    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('no WebGPU adapter');
-    const timestamps = adapter.features.has('timestamp-query');
-    const device = await adapter.requestDevice({
-      requiredFeatures: timestamps ? ['timestamp-query'] : [],
-      requiredLimits: {
-        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
-        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-        maxBufferSize: adapter.limits.maxBufferSize,
-      },
-    });
-    device.lost.then((i) => fail('device lost: ' + i.message));
-    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
-    const canvas = $('c');
-    const context = canvas.getContext('webgpu');
-    const format = navigator.gpu.getPreferredCanvasFormat();
-    // ?w=&h= fix the drawing size (recording); otherwise the window's.
-    const fixedSize = qs.has('w') && qs.has('h');
-    const configure = () => {
-      if (fixedSize) { canvas.width = num('w', 1280); canvas.height = num('h', 720); }
-      else {
-        const dpr = Math.min(devicePixelRatio || 1, 2);
-        canvas.width = Math.max(320, Math.floor((canvas.clientWidth || 1280) * dpr));
-        canvas.height = Math.max(180, Math.floor((canvas.clientHeight || 720) * dpr));
-      }
-      context.configure({ device, format, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
-    };
-    configure();
-    addEventListener('resize', () => { if (!fixedSize) configure(); });
+    if (PLAY) TERRAIN.settings.settleRule = qs.get('rule') === 'strict' ? 'strict' : 'local';
 
     // ================================================================ the crater (Rust: π-scaling)
-    const probe = new TerrainStep(JSON.stringify({ ...TERRAIN.settings, settle_speed: 0.05 }));
-    const pred = JSON.parse(probe.predict_impact(TERRAIN.meteor.radius, TERRAIN.meteor.density, TERRAIN.meteor.speed, G));
-    const sandInfo = JSON.parse(probe.settings());
-    probe.free();
-    const R = pred.crater.radius, RIM = pred.crater.final_rim_radius;
-    TERRAIN.settings.settle_speed = num('settle', 0.01 * Math.sqrt(G * R));
+    const W = await worldWasm();
+    const pred = W.terrainPredictImpact({ ...TERRAIN.settings, settleSpeed: 0.05 }, TERRAIN.meteor.radius, TERRAIN.meteor.density, TERRAIN.meteor.speed, G);
+    const sandInfo = W.terrainSettings({ ...TERRAIN.settings, settleSpeed: 0.05 });
+    const R = pred.crater.radius, RIM = pred.crater.finalRimRadius;
+    TERRAIN.settings.settleSpeed = num('settle', 0.01 * Math.sqrt(G * R));
     const DX = pred.dx;
     // How far an open region's box reaches from its strike: R(1 + margin),
     // rounded out to whole 4-cell blocks.
-    const REACH = R * (1 + TERRAIN.settings.region_margin) + 4 * DX;
+    const REACH = R * (1 + TERRAIN.settings.regionMargin) + 4 * DX;
 
     // ================================================================ the ground
     // Heightfield samples are the region's cells. Dunes, flattened over the
@@ -214,29 +182,17 @@
     const initialHeights = new Float32Array(NX * NZ);
     for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) initialHeights[j * NX + i] = dune(X0 + i * SP, Z0 + j * SP);
     let heights = initialHeights.slice();
-    const field = { nx: NX, nz: NZ, dx: SP, dz: SP, origin: [0, 0, 0] };
-    const arena0 = heightFieldArena(NX, NZ, SP, SP, initialHeights);
-    // The surface patches (engine_terrain::surface::SurfacePatch): one more
-    // heightfield per area slot (max_regions of them), which the surface pass
-    // keeps on that area's live sand over its open window, so the wheels'
-    // rays meet the sand, not the lowered bed under it. Out of reach (10 km
-    // down) while its area is not open. Overlapping strikes grow one area to
-    // cover them both (49 × 25 samples for the drive scene's first two), so a
-    // patch takes the grown window plus its ring.
-    const REGIONS = (() => {
-      const p = new TerrainStep(JSON.stringify(TERRAIN.settings));
-      try { return JSON.parse(p.settings()).config.max_regions; } finally { p.free(); }
-    })();
+    // The surface patches (engine_terrain::surface::SurfacePatch): World makes
+    // one more heightfield per area slot (max_regions of them) at the first
+    // strike, which the surface pass keeps on that area's live sand over its
+    // open window, so the wheels' rays meet the sand, not the lowered bed under
+    // it. Out of reach while its area is not open. Overlapping strikes grow one
+    // area to cover them both (49 × 25 samples for the drive scene's first
+    // two), so a patch takes the grown window plus its ring.
+    const REGIONS = sandInfo.config.maxRegions;
     // The barrage's strikes chain along the road into longer grown windows.
     const PN = num('patch', SCENE === 'drive' || PLAY ? 128 : 72);
-    const patchArena = heightFieldArena(PN, PN, SP, SP, new Float32Array(PN * PN).fill(-1e4));
-    const ALL_RECORDS = new Uint32Array(arena0.records.length + REGIONS * patchArena.records.length);
-    ALL_RECORDS.set(arena0.records, 0);
-    const patchParams = Array.from({ length: REGIONS }, (_, k) => {
-      const at = arena0.records.length + k * patchArena.records.length;
-      ALL_RECORDS.set(patchArena.records, at);
-      return [bitsf((fbits(patchArena.params[0]) & ~0x1FFFFFFF) | (at / 4 + patchArena.base)), ...patchArena.params.slice(1)];
-    });
+    TERRAIN.settings.surface.patchSamples = PN;
     const groundAt = (x, z) => {
       const fx = Math.min(Math.max((x - X0) / SP, 0), NX - 1.001), fz = Math.min(Math.max((z - Z0) / SP, 0), NZ - 1.001);
       const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j;
@@ -245,28 +201,59 @@
     };
 
     // ================================================================ world
-    const cap = { ...sceneCapacity(256, 512), maxHull: ALL_RECORDS.length / 4 + 4096 };
-    const world = await createWorld(device, { cap, vehicleCap: { maxVehicles: 4, maxWheels: 16, maxCurvePoints: 512, maxDiffs: 8, maxAntiRolls: 8, maxParts: 64, maxRays: 16 },
-      status: (s) => { statusEl.textContent = s; } });
+    // Rubble's World (engine-world-wasm) opens the device; the page renders on
+    // it and binds the world's buffers in place. The JS host's sizes: 4096
+    // bodies, 8192 colliders, canonical contacts.
+    const world = await createWorld({
+      gravity: [0, -G, 0],
+      contacts: 'canonical',
+      capacity: { maxBodies: 4096, maxColliders: 8192, maxContacts: 65536, maxJoints: 64, maxCandidates: 131072, maxColors: 32,
+        // The JS host's 64 held its kinematic velocities only; World also carries
+        // teleports and velocity sets as commands (capacity only).
+        maxCommands: 2048 },
+      vehicles: { maxVehicles: 4, maxWheels: 16, maxCurvePoints: 512, maxDiffs: 8, maxAntiRolls: 8, maxParts: 64, maxRays: 16 },
+      readbackFrames: 4,
+    });
+    const device = world.device();
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+    const canvas = $('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    // ?w=&h= fix the drawing size (recording); otherwise the window's.
+    const fixedSize = qs.has('w') && qs.has('h');
+    const configure = () => {
+      if (fixedSize) { canvas.width = num('w', 1280); canvas.height = num('h', 720); }
+      else {
+        const dpr = Math.min(devicePixelRatio || 1, 2);
+        canvas.width = Math.max(320, Math.floor((canvas.clientWidth || 1280) * dpr));
+        canvas.height = Math.max(180, Math.floor((canvas.clientHeight || 720) * dpr));
+      }
+      context.configure({ device, format, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    };
+    configure();
+    addEventListener('resize', () => { if (!fixedSize) configure(); });
     // 120 Hz: physics and render every frame (behind the scenes: 300 Hz, so
     // each recorded frame can be a finer slice of the strike).
     const DT = SCENE === 'bts' ? 1 / 300 : 1 / 120;
-    Object.assign(world.params, { dt: DT, iterations: 8, gravityY: -G, flags: M.FLAG_SPEC_VELOCITY });
-    world.setMaterial(0, 0.9);
-    world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
-    const groundBody = world.addBody({ p: [0, 0, 0], flags: 0 });
-    world.setHullRecords(ALL_RECORDS);
-    const GROUND = world.addCollider({ body: groundBody, shape: 5, material: 0, params: arena0.params });
-    const HF_BASE = arena0.base;
-    const PATCHES = patchParams.map((params) => world.addCollider({ body: world.addBody({ p: [0, 0, 0], flags: 0 }), shape: 5, material: 0, params }));
+    world.setSolver({ dt: DT, iterations: 8, gravityY: -G, flags: world.flags.SPEC_VELOCITY });
+    // The JS host's material table: slot 0 (the ground, the patches and the
+    // buggy's part colliders) and the wheel rims at 0.9, the rest 0.6.
+    for (let i = 0; i < 64; i++) world.setMaterialSlot(i, { friction: i === 0 || i === WHEEL_RIM_MATERIAL ? 0.9 : 0.6 });
+    const GROUND = world.createHeightField(world.createBody({}), { material: { friction: 0.9 } }, NX, NZ, SP, SP, initialHeights);
+    const HF_BASE = world.shapeArenaBase(GROUND);
 
-    statusEl.textContent = 'building terrain kernels…';
-    const terrain = await createTerrain(world, TERRAIN.settings, { status: (s) => { statusEl.textContent = s; }, surface: true,
-      patches: PATCHES.map((collider) => ({ collider, nx: PN, nz: PN })) });
-    const maxParticles = terrain.settings.config.max_particles, maxParcels = terrain.settings.config.max_parcels;
-    // A second strike while a region is open: the engine's multi-region API
-    // when it is there (max_regions > 1); until then each region bakes first.
-    const canOverlap = () => (terrain.settings.config.max_regions ?? 1) > 1;
+    statusEl.textContent = 'enabling terrain…';
+    world.enableTerrain(TERRAIN.settings);
+    const T = W.terrainLayout();
+    const terrainSettings = world.terrainSettings();
+    const maxParticles = terrainSettings.config.maxParticles, maxParcels = terrainSettings.config.maxParcels;
+    // Several strikes at once (max_regions > 1); otherwise each region bakes first.
+    const canOverlap = () => (terrainSettings.config.maxRegions ?? 1) > 1;
+    // The terrain as the frames report it: the last counters, the open areas
+    // (World's, current after every step) and the last live surface.
+    const terrain = { report: null, areas: [], region: null, views: [] };
+    const refreshAreas = () => { terrain.areas = world.terrainAreas(); terrain.region = terrain.areas[0] ?? null; };
 
     // ---- the car: the dune buggy on an autopilot loop around the strike field
     const presets = Object.fromEntries((await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json()).map((p) => [p.name, p]));
@@ -276,7 +263,7 @@
     const startCar = () => {
       const [x, z] = PLAY ? [0, 0] : TRACK[0];
       // Facing +x along the first straight.
-      return world.vehicles.addVehicle(world.backend, presets[CAR], [x, groundAt(x, z) + 1.4, z], qYaw(Math.PI / 2));
+      return world.addVehicle(presets[CAR], [x, groundAt(x, z) + 1.4, z], qYaw(Math.PI / 2));
     };
 
     // ================================================================ the strikes
@@ -975,7 +962,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     const rockVbo = vbo(rockMesh);
     const ROCK_VERTS = rockMesh.length / 6;
     // The engine's debris list is drawn as rocks: the indirect draw's vertex count.
-    device.queue.writeBuffer(terrain.surfaceBuffer, 4 * T.SURFACE_DEBRIS_ARGS_WORD, Uint32Array.of(ROCK_VERTS));
+    device.queue.writeBuffer(world.terrainSurfaceBuffer(), 4 * T.SURFACE_DEBRIS_ARGS_WORD, Uint32Array.of(ROCK_VERTS));
     const FRAME_BYTES = 512;
     const frameBuf = device.createBuffer({ size: FRAME_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const eventBuf = device.createBuffer({ size: 2 * MAX_FX * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -1009,26 +996,42 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         box: pipe('vsBox', 'fsLine', { topology: 'line-list' }),
       } : {}),
     };
-    const RES = { 1: frameBuf, 3: world.bufs[18], 4: world.bufs[T.PARTICLES], 6: world.bufs[T.PARCELS], 7: world.bufs[T.COUNTERS], 9: h0Buf, 10: terrain.surfaceBuffer, 11: eventBuf };
+    // The world's buffers, bound in place; a buffer can be replaced when it
+    // grows: rebind when one is a new object.
     // Which bindings each entry point reads (auto layouts reject extra entries).
     const USES = {
       sky: [1], ground: [1, 3, 9, 10, 11], rockPart: [1, 4, 10, 11], rockParcel: [1, 6, 7, 11],
       trailPart: [1, 3, 4, 10, 11], trailParcel: [1, 3, 6, 7, 10, 11],
       ...(SCENE === 'bts' ? { groundEngine: [1, 3, 9, 10], partEngine: [1, 4, 7], parcelEngine: [1, 6, 7], box: [1, 3, 10] } : {}), plume: [1, 11], smoke: [1, 11], glow: [1, 11], ring: [1, 3, 10, 11],
     };
-    const B = Object.fromEntries(Object.entries(USES).map(([k, ids]) => [k, device.createBindGroup({ layout: P[k].getBindGroupLayout(0), entries: ids.map((b) => ({ binding: b, resource: { buffer: RES[b] } })) })]));
-    const buggy = CAR === 'dune_buggy' ? await createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl: BUGGY_WGSL, sampleCount: SAMPLES }).catch((e) => { console.warn('buggy mesh', e); return null; }) : null;
+    let B = null, bound = [];
+    const rebind = () => {
+      const bufs = [world.hullArenaBuffer(), world.terrainParticleBuffer(), world.terrainParcelBuffer(), world.terrainCounterBuffer(), world.terrainSurfaceBuffer()];
+      if (bufs.every((b, i) => b === bound[i])) return;
+      bound = bufs;
+      const RES = { 1: frameBuf, 3: bufs[0], 4: bufs[1], 6: bufs[2], 7: bufs[3], 9: h0Buf, 10: bufs[4], 11: eventBuf };
+      B = Object.fromEntries(Object.entries(USES).map(([k, ids]) => [k, device.createBindGroup({ layout: P[k].getBindGroupLayout(0), entries: ids.map((b) => ({ binding: b, resource: { buffer: RES[b] } })) })]));
+    };
+    rebind();
+    // buggy-render.mjs reads the world through this view (bufs[0], bufs[31], records).
+    const entries = [];
+    const rworld = {
+      get bufs() { return { 0: world.bodyBuffer(), 31: world.vehiclePoolBuffer() }; },
+      vehicles: { entries }, vlayout: world.vehicleLayout(), soft: { entries: [] },
+    };
+    const buggy = CAR === 'dune_buggy' ? await createBuggyRenderer({ device, format, world: rworld, frameBuf, L, shadeWgsl: BUGGY_WGSL, sampleCount: SAMPLES }).catch((e) => { console.warn('buggy mesh', e); return null; }) : null;
     let msaa = null, depthTex = null;
 
     // ================================================================ state
     const st = { t: 0, frame: 0, car: null, carPose: null, carSpeed: 0, fx: [], strikes: [], lastStrike: -1e9, shake: [0, 0, 0], err: null, switches: [] };
     const cam = { eye: null, target: null, focus: null, focusW: 0 };
-    const carRbs = Array.from({ length: 3 }, () => device.createBuffer({ size: 112, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
     function reset() {
-      world.restore(initial);
+      // World::restore_state: the scene as saved, open areas dropped (not
+      // baked), the heightfield's samples back, the terrain pool started over.
+      world.restoreState(initial);
       heights = initialHeights.slice();
-      world.setHullRecords(ALL_RECORDS);
-      terrain.reset();
+      terrain.report = null; terrain.views = [];
+      refreshAreas();
       st.t = 0; st.frame = 0; st.fx = []; st.strikes = []; st.lastStrike = -1e9; st.carPose = null; st.carSpeed = 0; st.switches = [];
       cam.eye = null;
       SCHEDULE.forEach((s) => { s.state = 'wait'; s.fx = null; s.liveRead = false; });
@@ -1040,15 +1043,17 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       }
     }
     st.car = startCar();
+    entries[st.car] = world.vehicleEntry(st.car);
+    const CHASSIS = entries[st.car].chassis;
     if (buggy) buggy.add(st.car);
-    const initial = world.snapshot();
+    const initial = world.saveState();
     SCHEDULE.forEach((s) => { s.state = 'wait'; });
 
     // ---- the schedule
     // The box a strike at (x, z) opens (RegionPlan::around: the padded
     // radius rounded out to whole blocks), and how far the road passes from it.
     const boxOf = (x, z) => {
-      const reach = R * (1 + TERRAIN.settings.region_margin);
+      const reach = R * (1 + TERRAIN.settings.regionMargin);
       return [Math.floor((x - reach) / BLOCK) * BLOCK, Math.floor((z - reach) / BLOCK) * BLOCK, Math.ceil((x + reach) / BLOCK) * BLOCK, Math.ceil((z + reach) / BLOCK) * BLOCK];
     };
     // How close the track comes to a box (every track point outside it).
@@ -1093,13 +1098,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     // The live surface's height at (x, z) (nearest sample), or null outside
     // every open area's window.
     async function liveHeightAt(x, z) {
-      const read = async (offset, bytes) => {
-        const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-        const e = device.createCommandEncoder(); e.copyBufferToBuffer(terrain.surfaceBuffer, offset, rb, 0, bytes); device.queue.submit([e.finish()]);
-        await rb.mapAsync(GPUMapMode.READ);
-        const out = rb.getMappedRange().slice(0); rb.unmap(); rb.destroy();
-        return out;
-      };
+      const read = async (offset, bytes) => (await world.readTerrainSurface(offset / 4, bytes / 4)).buffer;
       const head = new Uint32Array(await read(0, 4 * (T.SURFACE_VIEW_WORD + T.SURFACE_VIEW_WORDS * T.MAX_SURFACE_VIEWS)));
       if (head[T.SURFACE_VALID_WORD] !== 1) return null;
       for (let s = 0; s < T.MAX_SURFACE_VIEWS; s++) {
@@ -1125,7 +1124,8 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
             // bake, World::terrain_close), and the next fireball starts then.
             if ((terrain.report?.airborne ?? 1) > 0) continue;
             st.closing = 'timed';
-            terrain.close();
+            world.terrainClose();
+            refreshAreas();
             continue; // the fireball starts next frame, on the baked heights
 
           }
@@ -1159,7 +1159,9 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
             game.say('it burned up');
             continue;
           }
-          terrain.impact(GROUND, field, s.point, TERRAIN.meteor.radius, TERRAIN.meteor.density, TERRAIN.meteor.speed);
+          if (!terrain.areas.length) terrain.report = null;
+          world.terrainImpact(GROUND, s.point, TERRAIN.meteor.radius, TERRAIN.meteor.density, TERRAIN.meteor.speed);
+          refreshAreas();
           s.state = 'done';
           s.struckAt = st.t;
           st.lastStrike = st.t;
@@ -1169,30 +1171,21 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       }
     }
     // Each bake: by settling, or timed (a strike due with one region at a
-    // time); and the jump from the live surface to the baked ground.
-    terrain.onBake = () => {
+    // time), as the frame that carries it reports it; and the jump from the
+    // last live surface to the baked ground (World's heights follow by then).
+    function onBake(slots) {
       const rec = { t: +st.t.toFixed(3), kind: st.closing || 'settled' };
       st.closing = null;
       if (PLAY) game.baked++;
       st.switches.push(rec);
-      st.pendingBake = Promise.all([readHeights(), surfaceSwitchError(device, terrain.surfaceBuffer, world.bufs[18], HF_BASE, NX, terrain.bakedSlots, T).then((e) => {
-        rec.error = { rms: +e.rms.toFixed(3), mean: +e.mean.toFixed(3), worst: +e.worst.toFixed(3) };
-      })]).catch(fail);
-    };
-    async function readHeights() {
-      const bytes = NX * NZ * 4;
-      const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(world.bufs[18], (HF_BASE + 2) * 16, rb, 0, bytes);
-      device.queue.submit([enc.finish()]);
-      await rb.mapAsync(GPUMapMode.READ);
-      heights = new Float32Array(rb.getMappedRange().slice(0));
-      rb.unmap(); rb.destroy();
+      heights = Float32Array.from(world.heightFieldHeights(GROUND));
+      const e = switchError(terrain.views, heights, NX, slots);
+      rec.error = { rms: +e.rms.toFixed(3), mean: +e.mean.toFixed(3), worst: +e.worst.toFixed(3) };
     }
 
     // ---- the autopilot: the road around the field, held to SPEED
     function driveInput() {
-      if (PLAY) { world.vehicles.setInput(world.backend, st.car, playInput()); return; }
+      if (PLAY) { world.setVehicleInput(st.car, playInput()); return; }
       const p = st.carPose;
       let inp = { forward: 1, brake: 0, steer: 0 };
       if (p) {
@@ -1208,7 +1201,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         inp.forward = Math.max(0, Math.min(1, 0.35 * e + 0.25));
         inp.brake = e < -3 ? Math.min(1, -0.2 * e) : 0;
       }
-      world.vehicles.setInput(world.backend, st.car, inp);
+      world.setVehicleInput(st.car, inp);
     }
 
     // ================================================================ play
@@ -1551,10 +1544,10 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       device.queue.writeBuffer(eventBuf, 0, eventF);
     }
     let lastTex = null;
-    function draw(enc, timestampWrites) {
+    function draw(enc) {
+      rebind();
       lastTex = context.getCurrentTexture();
       const rp = enc.beginRenderPass({
-        timestampWrites,
         colorAttachments: [{ view: msaa.createView(), resolveTarget: lastTex.createView(), clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'discard' }],
         depthStencilAttachment: { view: depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' },
       });
@@ -1579,10 +1572,10 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       const open = !!terrain.region;
       const nParcel = Math.min(maxParcels, (terrain.report?.parcels ?? 0) + (open ? 4096 : 0));
       const debrisArgs = 4 * T.SURFACE_DEBRIS_ARGS_WORD;
-      if (open) { rp.setPipeline(P.rockPart); rp.setBindGroup(0, B.rockPart); rp.setVertexBuffer(0, rockVbo); rp.drawIndirect(terrain.surfaceBuffer, debrisArgs); }
+      if (open) { rp.setPipeline(P.rockPart); rp.setBindGroup(0, B.rockPart); rp.setVertexBuffer(0, rockVbo); rp.drawIndirect(bound[4], debrisArgs); }
       if (nParcel && open) { rp.setPipeline(P.rockParcel); rp.setBindGroup(0, B.rockParcel); rp.setVertexBuffer(0, rockVbo); rp.draw(ROCK_VERTS, nParcel); }
       buggy?.draw(rp);
-      if (open) { rp.setPipeline(P.trailPart); rp.setBindGroup(0, B.trailPart); rp.drawIndirect(terrain.surfaceBuffer, debrisArgs); }
+      if (open) { rp.setPipeline(P.trailPart); rp.setBindGroup(0, B.trailPart); rp.drawIndirect(bound[4], debrisArgs); }
       if (nParcel && open) { rp.setPipeline(P.trailParcel); rp.setBindGroup(0, B.trailParcel); rp.draw(6, nParcel); }
       const nfx = Math.min(st.fx.length, MAX_FX);
       if (nfx) {
@@ -1594,80 +1587,81 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       rp.end();
     }
 
-    // ---- timing: GPU time of the terrain and surface passes, and the frame
-    const TS_SLOTS = 8;
-    const ts = timestamps ? { qs: device.createQuerySet({ type: 'timestamp', count: 6 * TS_SLOTS }),
-      res: device.createBuffer({ size: 512 * TS_SLOTS, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }),
-      rbs: Array.from({ length: 4 }, () => device.createBuffer({ size: 48, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })), slot: 0 } : null;
+    // ---- the frame log (the JS host also timed its terrain and surface
+    // passes with GPU timestamps; World encodes those passes itself)
     const log = [];
-    let last = null;
+    let last = null, lastWall = null;
 
-    // One 1/120 s frame: strikes due, the car's input, the terrain's substeps
-    // and its live surface, the rigid step, the render; one submission.
-    async function stepFrame({ render = true, wait = true, capture = null } = {}) {
+    // Each poll: the terrain's counters, the last live surface and the bakes.
+    function onFrame(f) {
+      if (f.empty) return;
+      const r = f.terrain();
+      if (r) terrain.report = r;
+      const views = f.terrainSurface();
+      if (views.length) terrain.views = views;
+      const bakes = f.terrainBakes();
+      if (bakes.length) onBake(bakes.map((b) => b.slot));
+    }
+    // The chassis' state (readBodies: position, rotation, velocity), one read in flight.
+    let carRead = null;
+    function readCar() {
+      carRead ??= world.readBodies([CHASSIS]).then((f) => {
+        carRead = null;
+        const q = [f[3], f[4], f[5], f[6]];
+        const rot = (v) => { const [x, y, z, w] = q, d = 2 * (x * v[0] + y * v[1] + z * v[2]), s = w * w - (x * x + y * y + z * z); const c = cross3([x, y, z], v); return [x * d + v[0] * s + c[0] * 2 * w, y * d + v[1] * s + c[1] * 2 * w, z * d + v[2] * s + c[2] * 2 * w]; };
+        st.carPose = { p: [f[0], f[1], f[2]], fwd: rot([0, 0, 1]), up: rot([0, 1, 0]), v: [f[7], f[8], f[9]] };
+        st.carSpeed = Math.hypot(f[7], f[8], f[9]);
+      });
+      return carRead;
+    }
+    // One 1/120 s frame's scripting (strikes due, the car's input) and World's
+    // step: the terrain's substeps (or bakes) and its live surface ahead of the
+    // rigid step. Returns the frame's kind as the JS host's (0 none, 1 coupled,
+    // 2 baked, 3 some baked and the rest coupled).
+    function physicsFrame() {
       if (PLAY) playTick();
       schedule();
       driveInput();
+      const before = terrain.areas.map((a) => a.slot);
+      world.step();
+      refreshAreas();
+      const substeps = world.terrainLastSubsteps();
+      const baked = before.some((s) => !terrain.areas.some((a) => a.slot === s));
+      return { kind: substeps ? (baked ? 3 : 1) : baked ? 2 : 0, substeps };
+    }
+    // One frame: its physics, then the render (and the buggy rigs' wheel copies)
+    // in one submission. `wait`: wait for World's step and its frame first (a
+    // free readback slot), then for the GPU and the frame's results, as the JS
+    // host's frame-locked run did; otherwise skip the step when no slot is free.
+    async function stepFrame({ render = true, wait = true, capture = null } = {}) {
+      if (wait) while (!world.canStep()) { await macrotask(); pollFrame(world, onFrame); }
+      const stepped = world.canStep();
+      const { kind, substeps } = stepped ? physicsFrame() : { kind: 0, substeps: 0 };
       updateCamera(DT);
       const enc = device.createCommandEncoder();
-      let slot = -1;
-      const tsOn = ts && ts.rbs.length;
-      if (tsOn) slot = ts.slot++ % TS_SLOTS;
-      // Zeroed: a pass that does not run leaves its pair at 0.
-      if (tsOn) enc.clearBuffer(ts.res, 512 * slot, 512);
-      const terrainOpen = !!terrain.region;
-      const kind = terrain.encodeFrame(enc, tsOn && terrainOpen ? {
-        timestampWrites: { querySet: ts.qs, beginningOfPassWriteIndex: 6 * slot, endOfPassWriteIndex: 6 * slot + 1 },
-        surfaceTimestampWrites: { querySet: ts.qs, beginningOfPassWriteIndex: 6 * slot + 2, endOfPassWriteIndex: 6 * slot + 3 },
-      } : {});
-      // Kind 3: some areas baked, the others stepped (a coupled frame too).
-      const coupled = kind === 1 || kind === 3;
-      world.encodeStep(enc);
-      const carRb = carRbs.pop();
-      const chassis = world.vehicles.chassisBody(st.car);
-      if (carRb) enc.copyBufferToBuffer(world.bufs[0], chassis * 112, carRb, 0, 112);
       const buggyRb = buggy?.encodeReadback(enc);
-      if (render) { writeFrame(); draw(enc, tsOn ? { querySet: ts.qs, beginningOfPassWriteIndex: 6 * slot + 4, endOfPassWriteIndex: 6 * slot + 5 } : undefined); }
+      if (render) { writeFrame(); draw(enc); }
       // Recording: the frame's pixels, copied in the same submission.
       if (render && capture) enc.copyTextureToBuffer({ texture: lastTex }, { buffer: capture.buffer, bytesPerRow: capture.bytesPerRow }, [canvas.width, canvas.height]);
-      let tsRb = null;
-      if (tsOn && (coupled || render)) {
-        tsRb = ts.rbs.pop();
-        // Resolve offsets are 256-byte aligned: terrain and surface, then the render.
-        if (coupled) enc.resolveQuerySet(ts.qs, 6 * slot, 4, ts.res, 512 * slot);
-        if (render) enc.resolveQuerySet(ts.qs, 6 * slot + 4, 2, ts.res, 512 * slot + 256);
-        enc.copyBufferToBuffer(ts.res, 512 * slot, tsRb, 0, 32);
-        enc.copyBufferToBuffer(ts.res, 512 * slot + 256, tsRb, 32, 16);
-      }
       const t0 = performance.now();
       device.queue.submit([enc.finish()]);
-      terrain.afterSubmit();
-      const entry = { t: +st.t.toFixed(4), car: st.carPose && st.frame % 30 === 0 ? st.carPose.p.map((v) => +v.toFixed(1)) : undefined, kind, substeps: coupled ? terrain.lastSubsteps : 0, particles: terrain.report?.particles ?? 0, airborne: terrain.report?.airborne ?? 0 };
-      const done = [];
-      if (carRb) done.push(carRb.mapAsync(GPUMapMode.READ).then(() => {
-        const f = new Float32Array(carRb.getMappedRange(0, 112).slice(0));
-        carRb.unmap(); carRbs.push(carRb);
-        const q = [f[4], f[5], f[6], f[7]];
-        const rot = (v) => { const [x, y, z, w] = q, d = 2 * (x * v[0] + y * v[1] + z * v[2]), s = w * w - (x * x + y * y + z * z); const c = cross3([x, y, z], v); return [x * d + v[0] * s + c[0] * 2 * w, y * d + v[1] * s + c[1] * 2 * w, z * d + v[2] * s + c[2] * 2 * w]; };
-        st.carPose = { p: [f[0], f[1], f[2]], fwd: rot([0, 0, 1]), up: rot([0, 1, 0]), v: [f[12], f[13], f[14]] };
-        st.carSpeed = Math.hypot(f[12], f[13], f[14]);
-      }));
+      const car = readCar();
+      const entry = { t: +st.t.toFixed(4), car: st.carPose && st.frame % 30 === 0 ? st.carPose.p.map((v) => +v.toFixed(1)) : undefined, kind, substeps, particles: terrain.report?.particles ?? 0, airborne: terrain.report?.airborne ?? 0 };
+      const done = [car];
       if (buggyRb) done.push(buggy.consume(buggyRb));
-      if (tsRb) done.push(tsRb.mapAsync(GPUMapMode.READ).then(() => {
-        const t = new BigUint64Array(tsRb.getMappedRange().slice(0)); tsRb.unmap(); ts.rbs.push(tsRb);
-        const a = Number(t[1] - t[0]) / 1e6, b = Number(t[3] - t[2]) / 1e6, c = Number(t[5] - t[4]) / 1e6;
-        if (a > 0 && a < 1e4) entry.terrainMs = +a.toFixed(3);
-        if (b > 0 && b < 1e4) entry.surfaceMs = +b.toFixed(3);
-        if (c > 0 && c < 1e4) entry.renderMs = +c.toFixed(3);
-      }));
       if (wait) {
         await device.queue.onSubmittedWorkDone();
         entry.ms = +(performance.now() - t0).toFixed(3);
         await Promise.all(done);
-        await terrain.settle();
-        if (st.pendingBake) { await st.pendingBake; st.pendingBake = null; }
-        if (terrain.error) throw terrain.error;
-      } else done.forEach((p) => p.catch(fail));
+        await drain(world, onFrame);
+      } else {
+        // Not waited for: the wall time between the page's frames instead.
+        if (lastWall != null) entry.ms = +(t0 - lastWall).toFixed(3);
+        lastWall = t0;
+        done.forEach((p) => p.catch(fail));
+        pollFrame(world, onFrame);
+      }
+      if (!stepped) return entry;
       log.push(entry);
       if (log.length > 20000) log.shift();
       last = entry;
@@ -1682,9 +1676,9 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       const mean = (k) => { const v = recent.map((e) => e[k]).filter((x) => x !== undefined); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0; };
       $('stats').textContent = [
         `t ${st.t.toFixed(2)} s · ${st.carPose ? (st.carSpeed * 3.6).toFixed(0) : '–'} km/h · region ${terrain.region ? 'open' : '—'}`,
-        `frame ${mean('ms').toFixed(2)} ms (budget 8.33) · terrain ${mean('terrainMs').toFixed(2)} ms · surface ${mean('surfaceMs').toFixed(2)} ms`,
+        `frame ${mean('ms').toFixed(2)} ms (budget 8.33)`,
         `particles ${(terrain.report?.particles ?? 0).toLocaleString()} · substeps ${last?.substeps ?? 0} · in flight ${(terrain.report?.airborne ?? 0).toLocaleString()} · wheels on sand ${terrain.report?.wheels ?? 0}`,
-        `crater R ${R.toFixed(1)} m · rim ${RIM.toFixed(1)} m · cells ${DX.toFixed(2)} m (${TERRAIN.settings.config.cells_per_radius}/R, margin ${TERRAIN.settings.region_margin})`,
+        `crater R ${R.toFixed(1)} m · rim ${RIM.toFixed(1)} m · cells ${DX.toFixed(2)} m (${TERRAIN.settings.config.cellsPerRadius}/R, margin ${TERRAIN.settings.regionMargin})`,
       ].join('\n');
       if (PLAY) {
         const t = game.over ? game.survived : st.t;
@@ -1701,7 +1695,8 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     async function loop() {
       if (failed) return;
       try {
-        if (!manual) { await stepFrame({ render: true, wait: true }); hud(); }
+        // Never waits: a frame whose step has no free readback slot only renders.
+        if (!manual) { await stepFrame({ render: true, wait: false }); hud(); }
       } catch (e) { fail(e); return; }
       requestAnimationFrame(loop);
     }
@@ -1710,7 +1705,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     // ================================================================ automation and recording
     // frames(n): n frames, each waited for on the GPU (no rAF: it runs in a
     // hidden page too). Each entry's `ms` is encode-to-GPU-done wall time,
-    // rendering included; terrainMs / surfaceMs are GPU timestamps.
+    // rendering included.
     async function frames(n, { render = true } = {}) {
       manual = true;
       if (failed) throw new Error(window.__failed);
@@ -1816,14 +1811,29 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         const q = (p) => a[Math.min(a.length - 1, Math.floor(p * a.length))];
         return { n: a.length, mean: +(a.reduce((s, x) => s + x, 0) / a.length).toFixed(3), p50: q(0.5), p95: q(0.95), max: a[a.length - 1] };
       };
-      return { frameMs: stat('ms'), frameMsOpen: stat('ms', (e) => e.kind === 1 || e.kind === 3), frameMsIdle: stat('ms', (e) => e.kind === 0), terrainMs: stat('terrainMs'), surfaceMs: stat('surfaceMs'), renderMs: stat('renderMs'), renderMsOpen: stat('renderMs', (e) => e.kind === 1 || e.kind === 3), substeps: stat('substeps', (e) => e.kind === 1 || e.kind === 3), over8_3: v.filter((e) => e.ms > 8.333).length, frames: v.length };
+      return { frameMs: stat('ms'), frameMsOpen: stat('ms', (e) => e.kind === 1 || e.kind === 3), frameMsIdle: stat('ms', (e) => e.kind === 0), substeps: stat('substeps', (e) => e.kind === 1 || e.kind === 3), over8_3: v.filter((e) => e.ms > 8.333).length, frames: v.length };
     }
     window.__showcase = {
       frames, record, still, reset, timings, log,
-      state: () => ({ t: st.t, frame: st.frame, car: st.carPose, carKmh: st.carSpeed * 3.6, region: terrain.region, report: terrain.report, strikes: st.strikes, switches: st.switches, canOverlap: canOverlap(), schedule: SCHEDULE.map((s) => ({ state: s.state, t0: s.t0, point: s.point })), error: terrain.error && String(terrain.error) }),
-      settings: { TERRAIN, R, RIM, DX, REACH, NX, STRAIGHT, TURN, SPEED, LEAD, sand: sandInfo.sand, prediction: pred },
+      state: () => ({ t: st.t, frame: st.frame, car: st.carPose, carKmh: st.carSpeed * 3.6, region: terrain.region, report: terrain.report, strikes: st.strikes, switches: st.switches, canOverlap: canOverlap(), schedule: SCHEDULE.map((s) => ({ state: s.state, t0: s.t0, point: s.point })) }),
+      settings: { TERRAIN, R, RIM, DX, REACH, NX, STRAIGHT, TURN, SPEED, LEAD, sand: sandInfo.material, prediction: pred },
       resume: () => { manual = false; },
       camera: (o) => { cam.override = o; },
+    };
+    // __step(n): n frames frame-locked as fast as World's readbacks allow (no
+    // render), then every frame polled; returns the state.
+    window.__step = async (n = 1) => {
+      manual = true;
+      await stepFrames(world, n, onFrame, () => {
+        if (PLAY) playTick();
+        schedule();
+        driveInput();
+        readCar().catch(fail);
+        st.t += DT; st.frame++;
+      });
+      refreshAreas();
+      await readCar();
+      return window.__showcase.state();
     };
     window.__world = world; window.__terrain = terrain;
     window.__ready = true;
