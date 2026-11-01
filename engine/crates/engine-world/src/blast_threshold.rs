@@ -93,6 +93,127 @@ fn gv(v: stress_ref::math::Vec3) -> DVec3 {
     DVec3::new(v.x, v.y, v.z)
 }
 
+/// The occluder boxes in a uniform grid (each in every cell its bounding sphere's box
+/// overlaps), so a face's line of sight to the charge tests only the boxes in the cells it
+/// crosses. A box the segment hits lies in one of those cells, so the result is the scan
+/// over every box's.
+struct OccluderGrid {
+    lo: DVec3,
+    cell: f64,
+    dims: [usize; 3],
+    cells: Vec<Vec<u32>>,
+}
+
+impl OccluderGrid {
+    fn new(boxes: &[(usize, u32, OBox)]) -> Self {
+        let bound = |b: &OBox| (gv(b.center), b.bounding_radius());
+        let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+        let mut mean_r = 0.0;
+        for (_, _, b) in boxes {
+            let (c, r) = bound(b);
+            lo = lo.min(c - r);
+            hi = hi.max(c + r);
+            mean_r += r;
+        }
+        if boxes.is_empty() || !lo.is_finite() || !hi.is_finite() {
+            return Self { lo: DVec3::ZERO, cell: 1.0, dims: [0; 3], cells: Vec::new() };
+        }
+        mean_r /= boxes.len() as f64;
+        // Cells about one typical box across, at most 2^21 of them.
+        let span = (hi - lo).max(DVec3::splat(1e-6));
+        let mut cell = (2.0 * mean_r).max(1e-3);
+        while (span / cell).ceil().element_product() > (1u64 << 21) as f64 {
+            cell *= 1.5;
+        }
+        let dims = [0, 1, 2].map(|k| ((span[k] / cell).ceil() as usize).max(1));
+        let mut cells = vec![Vec::new(); dims[0] * dims[1] * dims[2]];
+        let at = |p: DVec3, k: usize| (((p[k] - lo[k]) / cell).floor().max(0.0) as usize).min(dims[k] - 1);
+        for (i, (_, _, b)) in boxes.iter().enumerate() {
+            let (c, r) = bound(b);
+            let (a, z) = (c - r, c + r);
+            for x in at(a, 0)..=at(z, 0) {
+                for y in at(a, 1)..=at(z, 1) {
+                    for zz in at(a, 2)..=at(z, 2) {
+                        cells[(zz * dims[1] + y) * dims[0] + x].push(i as u32);
+                    }
+                }
+            }
+        }
+        Self { lo, cell, dims, cells }
+    }
+
+    /// Whether `hit` holds for some box in a cell the segment `a`-`b` crosses, each box
+    /// tested at most once (`marks`/`stamp`: the boxes this query has tested).
+    fn any(&self, a: DVec3, b: DVec3, marks: &mut [u32], stamp: u32, mut hit: impl FnMut(usize) -> bool) -> bool {
+        if self.cells.is_empty() {
+            return false;
+        }
+        let hi = self.lo + DVec3::new(self.dims[0] as f64, self.dims[1] as f64, self.dims[2] as f64) * self.cell;
+        // Clip the segment to the grid (slabs).
+        let d = b - a;
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        for k in 0..3 {
+            if d[k].abs() < 1e-300 {
+                if a[k] < self.lo[k] || a[k] > hi[k] {
+                    return false;
+                }
+            } else {
+                let (u, v) = ((self.lo[k] - a[k]) / d[k], (hi[k] - a[k]) / d[k]);
+                t0 = t0.max(u.min(v));
+                t1 = t1.min(u.max(v));
+            }
+        }
+        if t0 > t1 {
+            return false;
+        }
+        // 3D DDA (Amanatides & Woo) from the clipped start.
+        let p = a + d * t0;
+        let cell_of = |k: usize| (((p[k] - self.lo[k]) / self.cell).floor().max(0.0) as i64).min(self.dims[k] as i64 - 1);
+        let mut c = [cell_of(0), cell_of(1), cell_of(2)];
+        let mut step = [0i64; 3];
+        let mut t_max = [f64::INFINITY; 3];
+        let mut t_delta = [f64::INFINITY; 3];
+        for k in 0..3 {
+            if d[k] > 0.0 {
+                step[k] = 1;
+                t_max[k] = (self.lo[k] + (c[k] + 1) as f64 * self.cell - a[k]) / d[k];
+                t_delta[k] = self.cell / d[k];
+            } else if d[k] < 0.0 {
+                step[k] = -1;
+                t_max[k] = (self.lo[k] + c[k] as f64 * self.cell - a[k]) / d[k];
+                t_delta[k] = -self.cell / d[k];
+            }
+        }
+        loop {
+            let idx = (c[2] as usize * self.dims[1] + c[1] as usize) * self.dims[0] + c[0] as usize;
+            for &i in &self.cells[idx] {
+                let i = i as usize;
+                if marks[i] != stamp {
+                    marks[i] = stamp;
+                    if hit(i) {
+                        return true;
+                    }
+                }
+            }
+            let k = if t_max[0] <= t_max[1] && t_max[0] <= t_max[2] {
+                0
+            } else if t_max[1] <= t_max[2] {
+                1
+            } else {
+                2
+            };
+            if t_max[k] > t1 {
+                return false;
+            }
+            c[k] += step[k];
+            if c[k] < 0 || c[k] >= self.dims[k] as i64 {
+                return false;
+            }
+            t_max[k] += t_delta[k];
+        }
+    }
+}
+
 fn mat(q: DQuat) -> stress_ref::math::Mat3 {
     let m = glam::DMat3::from_quat(q);
     stress_ref::math::Mat3::from_cols(sv(m.x_axis), sv(m.y_axis), sv(m.z_axis))
@@ -298,17 +419,11 @@ impl World {
             }
             let position = DVec3::from(blast.position);
             let near = |b: &OBox| (gv(b.center) - position).length() - b.bounding_radius();
-            let mut by_reach: Vec<(f64, usize)> = boxes
-                .iter()
-                .enumerate()
-                .map(|(i, b)| (near(&b.2), i))
-                .collect();
-            let finite_reach = by_reach.iter().all(|r| r.0.is_finite());
-            by_reach.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let finite_reach = boxes.iter().all(|b| near(&b.2).is_finite());
             let mut end: f64 = 0.0;
             for &k in slots {
                 let faces =
-                    self.blast_faces(k, blast, &poses[k], &boxes, &by_reach, finite_reach)?;
+                    self.blast_faces(k, blast, &poses[k], &boxes, finite_reach)?;
                 end = faces
                     .iter()
                     .map(|f| f.blast.arrival + f.blast.duration)
@@ -339,7 +454,6 @@ impl World {
         blast: &ActiveBlast,
         poses: &[(DQuat, DVec3)],
         boxes: &[(usize, u32, OBox)],
-        by_reach: &[(f64, usize)],
         finite_reach: bool,
     ) -> anyhow::Result<Vec<CachedFace>> {
         let t = self.fracture.slots[k].as_ref().expect("live slot");
@@ -354,6 +468,9 @@ impl World {
             .collect();
         let position = DVec3::from(blast.position);
         let w_third = blast.tnt.cbrt();
+        let grid = OccluderGrid::new(boxes);
+        let mut marks = vec![0u32; boxes.len()];
+        let mut stamp = 0u32;
         let mut out = Vec::new();
         for (c, &(s, sc)) in b.chunk_of.iter().enumerate() {
             let ch = &m.structures[s].chunks[sc];
@@ -378,9 +495,21 @@ impl World {
                     continue;
                 }
                 let start = x + n * 1e-6;
+                let seg = position - start;
+                let seg_len2 = seg.length_squared().max(1e-300);
                 let blocks = |i: usize| {
                     let (bk, bc, ob) = &boxes[i];
-                    (*bk, *bc) != (k, c as u32) && ob.segment_hit(sv(start), sv(position)).is_some()
+                    if (*bk, *bc) == (k, c as u32) {
+                        return false;
+                    }
+                    // A box whose bounding sphere misses the segment cannot block it.
+                    let centre = gv(ob.center);
+                    let t = ((centre - start).dot(seg) / seg_len2).clamp(0.0, 1.0);
+                    let r = ob.bounding_radius();
+                    if (start + seg * t - centre).length_squared() > r * r * (1.0 + 1e-9) + 1e-12 {
+                        return false;
+                    }
+                    ob.segment_hit(sv(start), sv(position)).is_some()
                 };
                 let shadowed = b.shadowing && {
                     let reach = (start - position).length();
@@ -392,8 +521,13 @@ impl World {
                         .fold(reach, f64::max);
                     let limit = reach * (1.0 + 1e-9) + 1e-9 * scale;
                     if finite_reach && limit.is_finite() {
-                        let end = by_reach.partition_point(|r| r.0 <= limit);
-                        by_reach[..end].iter().any(|&(_, i)| blocks(i))
+                        // Only boxes along the line of sight can block it (any box the
+                        // segment hits is within its reach of the charge).
+                        stamp = stamp.wrapping_add(1).max(1);
+                        if stamp == 1 {
+                            marks.fill(0);
+                        }
+                        grid.any(start, position, &mut marks, stamp, blocks)
                     } else {
                         (0..boxes.len()).any(blocks)
                     }
