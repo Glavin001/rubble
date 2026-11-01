@@ -7,9 +7,12 @@ fn committed_header_is_current() {
     if std::env::var("RUBBLE_FFI_BLESS").is_ok() {
         std::fs::write(path, &generated).unwrap();
     }
-    let committed = std::fs::read_to_string(path).unwrap_or_default();
+    // A Windows checkout may have CRLF line endings; compare the text.
+    let committed = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     assert!(
-        committed == generated,
+        committed == generated.replace("\r\n", "\n"),
         "include/rubble.h is stale: run `RUBBLE_FFI_BLESS=1 cargo test -p engine-ffi --test header`"
     );
 }

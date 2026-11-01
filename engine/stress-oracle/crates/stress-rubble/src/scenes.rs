@@ -93,3 +93,71 @@ pub fn later(mut s: Scene, frames: usize) -> Scene {
 pub fn house() -> Scene {
     stress_ref::scene_pack::import(&packs_dir().join("house-1story.json"), "house-1story", "structure").expect("house-1story pack")
 }
+
+/// A concrete wall for shots (the fracture world's models: `stress_bench` `wall_shot`,
+/// tests/fracture_models.rs): 1 m wide (10 chunks of 0.1 m along x), `layers` chunks thick
+/// along +y from y = 0, 1.1 m tall (11), under gravity; its bottom row fixed when
+/// `anchored`. No impactor: shots are launched ([`shot_at`]).
+pub fn shot_wall(layers: usize, anchored: bool) -> Scene {
+    shot_row(1, layers, anchored)
+}
+
+/// `n` walls of [`shot_wall`]'s, 0.3 m apart along +y.
+pub fn shot_row(n: usize, layers: usize, anchored: bool) -> Scene {
+    use stress_ref::builders::*;
+    use stress_ref::math::Vec3;
+    use stress_ref::scene::Support;
+    let mut s = new_scene(&format!("shot_row{n}x{layers}"), "concrete walls for launched shots");
+    s.materials.insert("concrete".into(), oracle_concrete(None));
+    s.materials.insert("projectile".into(), elastic_steel());
+    let counts = [10, layers, 11];
+    for k in 0..n {
+        let y = k as f64 * (0.1 * layers as f64 + 0.3);
+        let mut chunks = grid(Vec3::new(-0.5, y, 0.0), counts, Vec3::splat(0.1), "concrete");
+        if anchored {
+            for i in 0..counts[0] {
+                for j in 0..counts[1] {
+                    chunks[grid_index(counts, i, j, 0)].support = Support::Fixed;
+                }
+            }
+        }
+        let bonds = auto_bonds(&chunks, |_, _| "concrete".into());
+        s.bodies.push(body(&format!("wall{k}"), chunks, bonds));
+    }
+    s
+}
+
+/// A concrete cantilever plate under gravity: `len` chunks of 0.1 m along +x (the first
+/// column fixed), 3 wide along y, one thick.
+pub fn cantilever_plate(len: usize) -> Scene {
+    use stress_ref::builders::*;
+    use stress_ref::math::Vec3;
+    use stress_ref::scene::Support;
+    let mut s = new_scene(&format!("cantilever_plate{len}"), "concrete cantilever plate under gravity");
+    s.materials.insert("concrete".into(), oracle_concrete(None));
+    s.materials.insert("projectile".into(), elastic_steel());
+    let counts = [len, 3, 1];
+    let mut chunks = grid(Vec3::new(0.0, -0.15, 1.0), counts, Vec3::splat(0.1), "concrete");
+    for j in 0..3 {
+        chunks[grid_index(counts, 0, j, 0)].support = Support::Fixed;
+    }
+    let bonds = auto_bonds(&chunks, |_, _| "concrete".into());
+    s.bodies.push(body("plate", chunks, bonds));
+    s
+}
+
+/// A steel shot of `radius` and `mass` at `position`, moving at `velocity` (the scene's
+/// "projectile" material).
+pub fn shot_at(radius: f64, mass: f64, position: [f64; 3], velocity: [f64; 3]) -> stress_ref::scene::ImpactorDesc {
+    stress_ref::scene::ImpactorDesc {
+        name: "shot".into(),
+        shape: stress_ref::scene::ImpactorShape::Sphere { radius },
+        mass,
+        position,
+        orientation: [1.0, 0.0, 0.0, 0.0],
+        velocity,
+        angular_velocity: [0.0; 3],
+        material: "projectile".into(),
+        crush: None,
+    }
+}

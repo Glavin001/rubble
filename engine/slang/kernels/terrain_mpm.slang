@@ -2292,8 +2292,8 @@ void mpm_pool_holes_scan(uint3 lid : SV_GroupThreadID)
     uint start = gsMpmScan[l] - sum;
     for (uint c = first; c < last; c++)
     {
-        // The count is used before its place is overwritten (Slang's CUDA output
-        // would otherwise load it after the store).
+        // The count used before the store: Slang's CUDA output would otherwise
+        // load it after (engine-cuda's build rejects that).
         uint next = start + gMpmSorted[p.counts.x + c];
         gMpmSorted[p.counts.x + c] = start;
         start = next;
