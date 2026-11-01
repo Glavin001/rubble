@@ -21,9 +21,6 @@ impl WebFrame {
         Self { frame }
     }
 
-    pub(crate) fn inner(&self) -> &CoalescedFrame {
-        &self.frame
-    }
 }
 
 #[wasm_bindgen]
@@ -78,6 +75,10 @@ impl WebFrame {
         set("awake", f64::from(c.awake_count));
         set("contacts", f64::from(c.contact_count));
         set("colors", f64::from(c.color_count));
+        set("bodies", f64::from(c.body_count));
+        set("candidates", f64::from(c.candidate_count));
+        set("manifolds", f64::from(c.manifold_count));
+        set("overflow", f64::from(c.overflow_flags));
         o.into()
     }
 }

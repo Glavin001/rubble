@@ -1353,6 +1353,12 @@ impl World {
         Ok(BodyId::new(b, self.bodies[b as usize].generation))
     }
 
+    /// The shape's record in the sim's collider buffer
+    /// (`WgpuSim::collider_buffer`), for renderers that read colliders in place.
+    pub fn shape_collider(&self, id: ShapeId) -> anyhow::Result<u32> {
+        Ok(self.shapes[self.live_shape(id)?].collider)
+    }
+
     pub fn shape_user_data(&self, id: ShapeId) -> anyhow::Result<u64> {
         Ok(self.shapes[self.live_shape(id)?].def.user_data)
     }

@@ -279,3 +279,43 @@ pub fn geometry(v: JsValue) -> Result<Geometry, JsValue> {
     f.finish()?;
     Ok(g)
 }
+
+/// `AvbdParams` fields, camelCase.
+macro_rules! solver_fields {
+    ($m:ident) => {
+        $m!(f32: "dt" dt, "gravityY" gravity_y, "alpha" alpha, "gamma" gamma, "betaLin" beta_lin,
+            "betaAng" beta_ang, "kStart" k_start, "kMaxN" k_max_n, "kMaxT" k_max_t,
+            "contactOffset" contact_offset, "sleepLin" sleep_lin, "sleepAng" sleep_ang,
+            "sleepTime" sleep_time, "residualExit" residual_exit, "trustLin" trust_lin,
+            "trustAng" trust_ang, "pivotFloor" pivot_floor, "gridCellSize" grid_cell_size;
+            u32: "iterations" iterations, "flags" flags)
+    };
+}
+
+pub fn solver(v: JsValue, mut p: AvbdParams) -> Result<AvbdParams, JsValue> {
+    let mut f = Fields::of("AvbdParams", v)?;
+    macro_rules! read {
+        (f32: $($k:literal $n:ident),*; u32: $($ku:literal $nu:ident),*) => {
+            $(f.f32($k, &mut p.$n)?;)*
+            $(f.u32($ku, &mut p.$nu)?;)*
+        };
+    }
+    solver_fields!(read);
+    f.finish()?;
+    Ok(p)
+}
+
+pub fn solver_to_js(p: &AvbdParams) -> JsValue {
+    let o = js_sys::Object::new();
+    let set = |k: &str, v: f64| {
+        let _ = js_sys::Reflect::set(&o, &k.into(), &v.into());
+    };
+    macro_rules! write {
+        (f32: $($k:literal $n:ident),*; u32: $($ku:literal $nu:ident),*) => {
+            $(set($k, f64::from(p.$n));)*
+            $(set($ku, f64::from(p.$nu));)*
+        };
+    }
+    solver_fields!(write);
+    o.into()
+}

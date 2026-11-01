@@ -170,6 +170,173 @@ impl WebWorld {
     pub fn body_slot(&self, body: f64) -> u32 {
         BodyId::from_bits(bits(body)).index()
     }
+
+    #[wasm_bindgen(js_name = bodyCount)]
+    pub fn body_count(&self) -> u32 {
+        self.world.body_count() as u32
+    }
+
+    /// Mass, centre (body frame) and principal inertia about it, axes aligned.
+    #[wasm_bindgen(js_name = bodySetMassData)]
+    pub fn body_set_mass_data(&mut self, body: f64, mass: f32, center: &[f32], inertia: &[f32]) -> Result<(), JsValue> {
+        let mass = MassData::principal(mass, vec3(center)?, vec3(inertia)?);
+        res(self.world.body_set_mass_data(id(body), mass))
+    }
+
+    #[wasm_bindgen(js_name = bodySetTransform)]
+    pub fn body_set_transform(&mut self, body: f64, position: &[f32], rotation: &[f32]) -> Result<(), JsValue> {
+        let t = Transform::new(vec3(position)?, vec4(rotation)?);
+        res(self.world.body_set_transform(id(body), t))
+    }
+
+    #[wasm_bindgen(js_name = bodySetVelocity)]
+    pub fn body_set_velocity(&mut self, body: f64, linear: &[f32], angular: &[f32]) -> Result<(), JsValue> {
+        res(self.world.body_set_velocity(id(body), vec3(linear)?, vec3(angular)?))
+    }
+
+    #[wasm_bindgen(js_name = bodyApplyLinearImpulse)]
+    pub fn body_apply_linear_impulse(&mut self, body: f64, impulse: &[f32], point: &[f32], wake: bool) -> Result<(), JsValue> {
+        res(self.world.body_apply_linear_impulse(id(body), vec3(impulse)?, vec3(point)?, wake))
+    }
+
+    #[wasm_bindgen(js_name = bodySetAwake)]
+    pub fn body_set_awake(&mut self, body: f64, awake: bool) -> Result<(), JsValue> {
+        res(self.world.body_set_awake(id(body), awake))
+    }
+
+    // ---- shapes ----
+
+    /// A heightfield of `nx × nz` samples (row-major `heights`, centred on
+    /// `transform`) on a static body.
+    #[wasm_bindgen(js_name = createHeightField)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_height_field(
+        &mut self,
+        body: f64,
+        def: JsValue,
+        nx: u32,
+        nz: u32,
+        dx: f32,
+        dz: f32,
+        heights: Vec<f32>,
+        transform: JsValue,
+    ) -> Result<f64, JsValue> {
+        let def = defs::shape_def(def)?;
+        let field = HeightField::new(nx, nz, dx, dz, heights).map_err(err)?;
+        let mut f = defs::Fields::new("createHeightField", serde_json::Map::new());
+        if !transform.is_undefined() && !transform.is_null() {
+            let mut m = serde_json::Map::new();
+            m.insert("t".into(), serde_wasm_bindgen::from_value(transform).map_err(err)?);
+            f = defs::Fields::new("createHeightField", m);
+        }
+        let t = defs::transform(&mut f, "t")?;
+        let s = res(self.world.create_height_field_shape(id(body), &def, &field, t))?;
+        Ok(handle(s.to_bits()))
+    }
+
+    /// Overwrite samples `[i0, i0 + w) × [j0, j0 + d)` (row-major `values`).
+    #[wasm_bindgen(js_name = setHeightFieldRegion)]
+    pub fn set_height_field_region(&mut self, shape: f64, i0: u32, j0: u32, w: u32, d: u32, values: &[f32]) -> Result<(), JsValue> {
+        res(self.world.set_height_field_region(ShapeId::from_bits(bits(shape)), i0, j0, w, d, values))
+    }
+
+    /// The heightfield's surface height under shape-local `(x, z)`, as the GPU
+    /// evaluates it (the triangle containing the point); `NaN` off the field.
+    #[wasm_bindgen(js_name = heightFieldSurface)]
+    pub fn height_field_surface(&self, shape: f64, x: f32, z: f32) -> Result<f32, JsValue> {
+        match res(self.world.shape_geometry(ShapeId::from_bits(bits(shape))))? {
+            Geometry::HeightField { field, .. } => Ok(field.surface(x, z).map_or(f32::NAN, |(h, _)| h)),
+            _ => Err(err("not a heightfield")),
+        }
+    }
+
+    /// The shape's index in [`Self::collider_buffer`].
+    #[wasm_bindgen(js_name = shapeCollider)]
+    pub fn shape_collider(&self, shape: f64) -> Result<u32, JsValue> {
+        res(self.world.shape_collider(ShapeId::from_bits(bits(shape))))
+    }
+
+    /// The arena base of a hull or heightfield shape's records in
+    /// [`Self::hull_arena_buffer`].
+    #[wasm_bindgen(js_name = shapeArenaBase)]
+    pub fn shape_arena_base(&self, shape: f64) -> Result<u32, JsValue> {
+        let c = self.shape_collider(shape)?;
+        Ok(engine_schema::convex::convex_params_base(self.world.sim().collider_record(c).params))
+    }
+
+    /// Collider records in use (the instance count for drawing every collider).
+    #[wasm_bindgen(js_name = colliderCount)]
+    pub fn collider_count(&self) -> u32 {
+        self.world.sim().collider_count()
+    }
+
+    // ---- solver ----
+
+    /// The solver constants (`AvbdParams`) as an object.
+    pub fn solver(&self) -> JsValue {
+        defs::solver_to_js(&self.world.solver())
+    }
+
+    /// Change solver constants: the fields given replace the current ones.
+    #[wasm_bindgen(js_name = setSolver)]
+    pub fn set_solver(&mut self, params: JsValue) -> Result<(), JsValue> {
+        let p = defs::solver(params, self.world.solver())?;
+        self.world.set_solver(p);
+        Ok(())
+    }
+
+    // ---- GPU buffers, for renderers on [`Self::device`] ----
+    // A buffer can be replaced when it grows: fetch it each frame and rebind
+    // when it is a different object.
+
+    /// `BodyState` records (112 B) by body slot: solver-frame (centre of mass) poses.
+    #[wasm_bindgen(js_name = bodyBuffer)]
+    pub fn body_buffer(&self) -> JsValue {
+        gpu_buffer(self.world.sim().body_buffer())
+    }
+
+    /// `Collider` records (64 B).
+    #[wasm_bindgen(js_name = colliderBuffer)]
+    pub fn collider_buffer(&self) -> JsValue {
+        gpu_buffer(self.world.sim().collider_buffer())
+    }
+
+    /// The hull and heightfield arena (`vec4<u32>` records).
+    #[wasm_bindgen(js_name = hullArenaBuffer)]
+    pub fn hull_arena_buffer(&self) -> JsValue {
+        gpu_buffer(self.world.sim().hull_arena_buffer())
+    }
+}
+
+/// Solver flag bits (`AvbdParams::flags`).
+#[wasm_bindgen(js_name = solverFlags)]
+pub fn solver_flags() -> JsValue {
+    let o = js_sys::Object::new();
+    for (k, v) in [
+        ("REUSE_CONTACTS", engine_schema::FLAG_REUSE_CONTACTS),
+        ("CONTACT_GAP", engine_schema::FLAG_CONTACT_GAP),
+        ("SPEC_VELOCITY", engine_schema::FLAG_SPEC_VELOCITY),
+        ("WORLD_INERTIA", engine_schema::FLAG_WORLD_INERTIA),
+    ] {
+        let _ = js_sys::Reflect::set(&o, &k.into(), &v.into());
+    }
+    o.into()
+}
+
+fn gpu_buffer(b: &wgpu::Buffer) -> JsValue {
+    b.as_webgpu().map(|b| JsValue::from(b.clone())).unwrap_or(JsValue::NULL)
+}
+
+fn id(body: f64) -> BodyId {
+    BodyId::from_bits(bits(body))
+}
+
+fn vec3(v: &[f32]) -> Result<[f32; 3], JsValue> {
+    v.try_into().map_err(|_| err("expected 3 numbers"))
+}
+
+fn vec4(v: &[f32]) -> Result<[f32; 4], JsValue> {
+    v.try_into().map_err(|_| err("expected 4 numbers"))
 }
 
 fn handle(bits: u64) -> f64 {
