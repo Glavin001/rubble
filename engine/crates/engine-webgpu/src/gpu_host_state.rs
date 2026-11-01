@@ -95,6 +95,12 @@ impl WgpuSim {
         &self.bufs[4]
     }
 
+    /// The joint records (binding 5, `Joint`, by joint slot): renderers read a bond's
+    /// broken flag (word 2, bit 0) in place.
+    pub fn joint_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[5]
+    }
+
     pub fn counters_buffer(&self) -> &wgpu::Buffer {
         &self.bufs[7]
     }

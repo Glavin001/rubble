@@ -21,6 +21,9 @@ impl WebFrame {
         Self { frame }
     }
 
+    pub(crate) fn frame(&self) -> &CoalescedFrame {
+        &self.frame
+    }
 }
 
 #[wasm_bindgen]

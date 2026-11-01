@@ -24,13 +24,18 @@ pub struct WorldSnapshot {
     soft_outputs: Vec<engine_softbody::SoftHandle>,
     skins: usize,
     terrain: Option<crate::terrain::TerrainSaved>,
+    /// Bonds-model destructibles: their chunk bodies, bond joints and which bonds
+    /// are intact (the joints' GPU records are in `sim`).
+    destructibles: Vec<crate::destruction::DestructibleSlot>,
+    bond_owner: std::collections::HashMap<u32, (u32, u32)>,
 }
 
 impl World {
     /// Copy the world (every GPU buffer, on the GPU, and the host's records)
-    /// for [`World::restore_state`]: a scene reset. Not supported with
-    /// destructibles, assemblies, characters or projectiles, whose host state
-    /// it does not cover. Terrain is saved with no area open (its settings,
+    /// for [`World::restore_state`]: a scene reset. Bonds-model destructibles are
+    /// covered (their joints and bookkeeping); not supported with threshold
+    /// destructibles, assemblies, characters or projectiles, whose host state it
+    /// does not cover. Terrain is saved with no area open (its settings,
     /// patches and watched shapes; the pool's buffers are not copied).
     pub fn save_state(&self) -> anyhow::Result<WorldSnapshot> {
         self.check_restorable()?;
@@ -49,6 +54,8 @@ impl World {
             soft_outputs: self.soft_outputs.clone(),
             skins: self.skins.len(),
             terrain,
+            destructibles: self.destructibles.clone(),
+            bond_owner: self.bond_owner.clone(),
         })
     }
 
@@ -90,6 +97,8 @@ impl World {
         self.materials.clone_from(&s.materials);
         self.vehicles.clone_from(&s.vehicles);
         self.soft_outputs.clone_from(&s.soft_outputs);
+        self.destructibles.clone_from(&s.destructibles);
+        self.bond_owner.clone_from(&s.bond_owner);
         self.terrain_restore(s.terrain.as_ref(), later_patches)?;
         self.resync = true;
         self.dirty = true;
@@ -98,10 +107,17 @@ impl World {
     }
 
     fn check_restorable(&self) -> anyhow::Result<()> {
+        // Bonds-model destructibles are bodies, shapes and joints plus host bookkeeping,
+        // all saved; a threshold destructible's fracture state lives outside the sim.
+        let bonds_only = self
+            .destructibles
+            .iter()
+            .all(|d| !d.alive || d.model == crate::StrengthModel::Bonds);
         anyhow::ensure!(
-            self.destructibles.is_empty() && self.assemblies.is_empty() && self.motion.is_empty(),
-            "save/restore covers bodies, shapes, joints, vehicles, soft bodies and terrain \
-             only (not destructibles, assemblies, characters or projectiles)"
+            bonds_only && self.assemblies.is_empty() && self.motion.is_empty(),
+            "save/restore covers bodies, shapes, joints, vehicles, soft bodies, terrain \
+             and Bonds-model destructibles only (not threshold destructibles, assemblies, \
+             characters or projectiles)"
         );
         Ok(())
     }

@@ -393,6 +393,24 @@ impl DestructibleAssetDesc {
     }
 }
 
+/// A bond preload in progress (`World::begin_destructible_preload`): the helper
+/// world settling one copy of the asset.
+pub struct DestructiblePreload {
+    asset: DestructibleAssetId,
+    desc: DestructibleAssetDesc,
+    helper: Box<World>,
+    placed: DestructibleId,
+    /// Steps of the settle whose awake count was checked.
+    steps: u32,
+}
+
+impl DestructiblePreload {
+    /// Settle steps taken and checked so far.
+    pub fn steps(&self) -> u32 {
+        self.steps
+    }
+}
+
 /// An asset in a world (`World::create_destructible_asset`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DestructibleAssetId(pub u32);
@@ -590,6 +608,7 @@ pub struct DestructibleStats {
     pub crushed: u32,
 }
 
+#[derive(Clone)]
 pub(crate) struct DestructibleSlot {
     pub generation: u32,
     pub alive: bool,
@@ -634,11 +653,29 @@ impl World {
     /// this world's solver settings and breaking off, until it sleeps (checked
     /// every 60 steps, at most 600). Instances placed afterwards start asleep at
     /// the settled poses. Runs in a helper world on this world's device and
-    /// blocks until done. Returns whether it settled.
+    /// blocks until done. Returns whether it settled. Hosts that must not block
+    /// (the browser) run the same settle with [`Self::begin_destructible_preload`].
     pub fn preload_destructible_asset(&mut self, id: DestructibleAssetId) -> anyhow::Result<bool> {
+        let Some(mut job) = self.begin_destructible_preload(id)? else {
+            return Ok(true);
+        };
+        loop {
+            if let Some(settled) = self.advance_destructible_preload(&mut job, true)? {
+                return Ok(settled);
+            }
+        }
+    }
+
+    /// [`Self::preload_destructible_asset`] as a job that never waits: advance it
+    /// with [`Self::advance_destructible_preload`] (e.g. once per browser frame)
+    /// until it reports done. `None`: the asset has no bonds, nothing to settle.
+    pub fn begin_destructible_preload(
+        &mut self,
+        id: DestructibleAssetId,
+    ) -> anyhow::Result<Option<DestructiblePreload>> {
         let mut desc = self.destructible_asset(id)?.clone();
         if desc.bonds.is_empty() {
-            return Ok(true);
+            return Ok(None);
         }
         desc.preload = None;
         let shapes: usize = desc.chunks.iter().map(|c| c.shapes.len()).sum();
@@ -690,34 +727,83 @@ impl World {
             asleep: false,
             ..DestructibleDef::new(asset)
         })?;
-        let mut steps = 0u32;
-        let awake = loop {
-            for _ in 0..4 {
+        Ok(Some(DestructiblePreload {
+            asset: id,
+            desc,
+            helper: Box::new(helper),
+            placed,
+            steps: 0,
+        }))
+    }
+
+    /// Advance a preload job: steps of 4, the awake count of each 4th step checked
+    /// as [`Self::preload_destructible_asset`] does. Without `block` it never waits:
+    /// it takes the steps a free readback slot allows and returns `None` until the
+    /// settle is decided; then the asset's preload is set (instances placed from
+    /// now on start at the settled poses) and it returns whether it settled.
+    pub fn advance_destructible_preload(
+        &mut self,
+        job: &mut DestructiblePreload,
+        block: bool,
+    ) -> anyhow::Result<Option<bool>> {
+        anyhow::ensure!(
+            self.destructible_asset(job.asset).is_ok(),
+            "preload of an unknown asset"
+        );
+        let helper = &mut job.helper;
+        // Steps of 4, each round's awake count read from its last step's frame.
+        loop {
+            let taken = helper.step_count() as u32;
+            if taken < job.steps + 4 {
+                if !block && !helper.can_step_without_waiting() {
+                    helper.poll()?;
+                    return Ok(None);
+                }
                 helper.step()?;
+                continue;
             }
-            steps += 4;
-            let awake = helper
-                .poll_blocking()?
-                .last()
-                .and_then(|f| f.counters)
-                .map_or(0, |c| c.awake_count);
-            if Scene::preload_done(steps, awake) {
-                break awake;
+            let frames = if block {
+                helper.poll_blocking()?
+            } else {
+                helper.poll()?
+            };
+            // The round's last step (0-based index steps + 3).
+            let last = u64::from(job.steps) + 3;
+            let Some(awake) = frames
+                .iter()
+                .find(|f| f.step == last)
+                .map(|f| f.counters.map_or(0, |c| c.awake_count))
+            else {
+                anyhow::ensure!(!block, "preload: the frame of step {last} did not arrive");
+                return Ok(None);
+            };
+            job.steps += 4;
+            if Scene::preload_done(job.steps, awake) {
+                let n = job.desc.chunks.len() as u32;
+                let body_poses = (0..n)
+                    .map(|k| {
+                        let body = helper.destructible_chunk_body(job.placed, k)?;
+                        // Blocking: the GPU's state. Otherwise the last frame's pose
+                        // (every awake body reports each step: the same values).
+                        if block {
+                            return Ok(helper.read_body_state(body)?.transform);
+                        }
+                        Ok(match helper.body_transform(body)? {
+                            Some(t) => t,
+                            None => helper.body_initial_transform(body)?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let mut desc = job.desc.clone();
+                desc.preload = Some(Preload {
+                    body_poses,
+                    steps: job.steps,
+                    settled: awake == 0,
+                });
+                self.assets[job.asset.0 as usize] = Arc::new(desc);
+                return Ok(Some(awake == 0));
             }
-        };
-        let body_poses = (0..n)
-            .map(|k| {
-                let body = helper.destructible_chunk_body(placed, k)?;
-                Ok(helper.read_body_state(body)?.transform)
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        desc.preload = Some(Preload {
-            body_poses,
-            steps,
-            settled: awake == 0,
-        });
-        self.assets[id.0 as usize] = Arc::new(desc);
-        Ok(awake == 0)
+        }
     }
 
     /// Register an asset (validated; shared by every instance of it).
@@ -1011,6 +1097,33 @@ impl World {
             .get(chunk as usize)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("chunk {chunk} out of range"))
+    }
+
+    /// Whether a bond is intact as of the last polled frame (both models).
+    pub fn destructible_bond_intact(&self, id: DestructibleId, bond: u32) -> anyhow::Result<bool> {
+        let d = &self.destructibles[self.live_destructible(id)?];
+        d.bond_intact
+            .get(bond as usize)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("bond {bond} out of range"))
+    }
+
+    /// The joint a `Bonds`-model bond is (`None`: a world bond placed without anchors,
+    /// or the threshold model, whose bonds are no joints). Its index is the joint's slot
+    /// in the sim's joint records, where a renderer reads its broken flag.
+    pub fn destructible_bond_joint(
+        &self,
+        id: DestructibleId,
+        bond: u32,
+    ) -> anyhow::Result<Option<JointId>> {
+        let d = &self.destructibles[self.live_destructible(id)?];
+        if d.model != StrengthModel::Bonds {
+            return Ok(None);
+        }
+        d.bond_joints
+            .get(bond as usize)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("bond {bond} out of range"))
     }
 
     /// The chunk's fixed transform relative to its body (render contract:

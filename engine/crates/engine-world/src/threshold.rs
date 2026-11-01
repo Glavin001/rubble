@@ -1671,12 +1671,17 @@ mod imp {
             // Hand this destructible's uploads to the GPU and wait for them: staging memory
             // is reclaimed only once its copies finish, so placing a map's worth without
             // waiting piles up staging buffers until the driver blocks a buffer create
-            // (with the GPU busy elsewhere, it never recovers).
+            // (with the GPU busy elsewhere, it never recovers). Native only: in the browser
+            // `writeBuffer` stages in the browser, which frees it, and a poll cannot wait
+            // there (WebGPU polls itself), so placement never blocks a page's frame.
             let index = self.sim.queue().submit(std::iter::empty());
+            #[cfg(not(target_arch = "wasm32"))]
             let _ = self.sim.device().poll(wgpu::PollType::Wait {
                 submission_index: Some(index),
                 timeout: None,
             });
+            #[cfg(target_arch = "wasm32")]
+            let _ = index;
             Ok(())
         }
 

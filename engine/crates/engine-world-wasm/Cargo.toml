@@ -18,6 +18,9 @@ engine-softbody.workspace = true
 engine-terrain.workspace = true
 engine-webgpu = { workspace = true, features = ["gpu"] }
 engine-fracture.workspace = true
+# The fracture lab's scene bindings (Scene, Asset, Orbit, ...), linked into this module so
+# its scenes go to the World without a copy (lab.rs).
+engine-fracture-wasm = { path = "../engine-fracture-wasm" }
 engine-gpu-wait.workspace = true
 # Broadside's threshold destructible and its device (stress-gpu's `Gpu`).
 stress-gpu = { path = "../../stress-oracle/crates/stress-gpu" }

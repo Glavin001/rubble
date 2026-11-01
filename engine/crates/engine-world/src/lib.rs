@@ -56,8 +56,8 @@ pub use defs::{
 pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
     CRUSH_PARTICLE_GROUP,
-    DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats,
-    Preload, StrengthModel,
+    DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructiblePreload,
+    DestructibleStats, Preload, StrengthModel,
 };
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
@@ -728,6 +728,17 @@ impl World {
 
     pub fn device(&self) -> &wgpu::Device {
         self.sim.device()
+    }
+
+    /// This world's adapter, device and queue, to build another world on the same
+    /// device (`GpuContext::Shared`): hosts that rebuild a scene keep their device,
+    /// and their renderers, across worlds.
+    pub fn gpu_context(&self) -> GpuContext {
+        GpuContext::Shared {
+            info: self.adapter.clone(),
+            device: self.sim.device().clone(),
+            queue: self.sim.queue().clone(),
+        }
     }
 
     pub fn queue(&self) -> &wgpu::Queue {

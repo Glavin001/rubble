@@ -304,6 +304,60 @@ fn preloaded_assets_start_asleep_and_hold_their_own_weight() {
     );
 }
 
+/// The browser's preload (`begin_destructible_preload` / `advance_destructible_preload`,
+/// never waiting) settles as the blocking one: the same rounds of 4 steps, the same awake
+/// check and step count, and the settled poses from frames rather than a GPU read.
+#[test]
+fn the_frame_by_frame_preload_settles_as_the_blocking_one() {
+    let glb = include_bytes!("../../engine-webgpu/fracture/assets/veneer-house.glb");
+    let desc = DestructibleAssetDesc::from_glb(glb, 0).unwrap();
+    let solver = desc.solver.unwrap();
+    let preload = |blocking: bool| {
+        let def = WorldDef {
+            capacity: capacity(),
+            solver,
+            gravity: [0.0, solver.gravity_y, 0.0],
+            ..WorldDef::default()
+        };
+        let mut w = World::new(GpuContext::Default, &def).unwrap();
+        let asset = w.create_destructible_asset(&desc).unwrap();
+        if blocking {
+            w.preload_destructible_asset(asset).unwrap();
+        } else {
+            let mut job = w.begin_destructible_preload(asset).unwrap().unwrap();
+            let mut calls = 0;
+            while w
+                .advance_destructible_preload(&mut job, false)
+                .unwrap()
+                .is_none()
+            {
+                calls += 1;
+            }
+            assert!(calls > 0, "the job returns before its frames arrive");
+        }
+        w.destructible_asset(asset)
+            .unwrap()
+            .preload
+            .clone()
+            .unwrap()
+    };
+    let (a, b, c) = (preload(true), preload(true), preload(false));
+    assert_eq!((a.steps, a.settled), (c.steps, c.settled));
+    let worst = |p: &Preload, q: &Preload| {
+        p.body_poses
+            .iter()
+            .zip(&q.body_poses)
+            .map(|(p, q)| (glam::Vec3::from(p.position) - glam::Vec3::from(q.position)).length())
+            .fold(0.0f32, f32::max)
+    };
+    // Two blocking settles agree bit for bit. The frame-by-frame one polls at other times,
+    // and World's plan hints follow the latest polled counters (`set_plan_hints`), so its
+    // steps run in another order: its poses agree to a millimetre (0.3 mm on this house).
+    let (spread, diff) = (worst(&a, &b), worst(&a, &c));
+    eprintln!("blocking runs differ by {spread} m; the frame-by-frame one by {diff} m");
+    assert!(diff < 1e-3, "settled poses differ by {diff} m");
+}
+
 /// A ScenePack's chunks name their pack nodes (chunk k is node k), so a host can draw each from
 /// the pack's own collider and material.
 #[test]
