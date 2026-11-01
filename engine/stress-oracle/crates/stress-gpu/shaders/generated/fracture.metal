@@ -91,7 +91,7 @@ struct CrushParams_0
     uint t_normal_0;
     uint r_flow_0;
     uint r_blast_0;
-    float pad0_1;
+    uint particle_ccd_0;
     float pad1_1;
 };
 
@@ -11925,42 +11925,55 @@ float3 inverse_rotate_0(const Quat_0 thread* q_34, float3 v_19)
     return;
 }
 
+uint crush_pieces_0(uint k_68, KernelContext_0 thread* kernelContext_213)
+{
+    if((kernelContext_213->crush_0->mode_1) == 1U)
+    {
+        return kernelContext_213->crush_0->fragments_0;
+    }
+    if((kernelContext_213->crush_0->mode_1) == 2U)
+    {
+        return uint((float4(*(kernelContext_213->crush_tab_0+(2U * k_68 + 1U))) ).w + 0.5f);
+    }
+    return 0U;
+}
+
 [[kernel]] void fr_crush_mark(uint3 id_78 [[thread_position_in_grid]], FractureParams_0 constant* params_84 [[buffer(0)]], uint device* work_84 [[buffer(4)]], packed_float4 device* frames_84 [[buffer(6)]], packed_float4 device* bodies_84 [[buffer(7)]], packed_float4 device* chunks_84 [[buffer(1)]], uint device* sort_84 [[buffer(11)]], atomic<uint> device* atom_84 [[buffer(5)]], Record_natural_0 device* manifolds_84 [[buffer(10)]], packed_float4 device* loads_84 [[buffer(12)]], packed_uint4 device* bonds_85 [[buffer(2)]], uint device* args_84 [[buffer(13)]], uint device* info_84 [[buffer(15)]], ScanParams_0 constant* scan_84 [[buffer(14)]], packed_float4 device* parts_84 [[buffer(3)]], packed_float4 device* colliders_84 [[buffer(8)]], packed_uint4 device* collider_info_84 [[buffer(9)]], packed_float4 device* view_chunks_84 [[buffer(17)]], ViewParams_0 constant* view_84 [[buffer(16)]], packed_float4 device* objects_84 [[buffer(18)]], uint device* shot_bodies_84 [[buffer(20)]], float device* lines_84 [[buffer(19)]], packed_float4 device* geometry_84 [[buffer(21)]], packed_float4 device* shots_84 [[buffer(22)]], packed_float4 device* lp_84 [[buffer(24)]], packed_float4 device* ext_86 [[buffer(23)]], packed_float4 device* engine_contacts_84 [[buffer(25)]], CrushParams_0 constant* crush_84 [[buffer(28)]], packed_float4 device* crush_rw_84 [[buffer(27)]], packed_float4 device* crush_tab_84 [[buffer(26)]])
 {
-    thread KernelContext_0 kernelContext_213;
-    (&kernelContext_213)->params_0 = params_84;
-    (&kernelContext_213)->work_0 = work_84;
-    (&kernelContext_213)->frames_0 = frames_84;
-    (&kernelContext_213)->bodies_0 = bodies_84;
-    (&kernelContext_213)->chunks_0 = chunks_84;
-    (&kernelContext_213)->sort_0 = sort_84;
-    (&kernelContext_213)->atom_0 = atom_84;
-    (&kernelContext_213)->manifolds_0 = manifolds_84;
-    (&kernelContext_213)->loads_0 = loads_84;
-    (&kernelContext_213)->bonds_0 = bonds_85;
-    (&kernelContext_213)->args_0 = args_84;
-    (&kernelContext_213)->info_0 = info_84;
-    (&kernelContext_213)->scan_0 = scan_84;
-    (&kernelContext_213)->parts_0 = parts_84;
-    (&kernelContext_213)->colliders_0 = colliders_84;
-    (&kernelContext_213)->collider_info_0 = collider_info_84;
-    (&kernelContext_213)->view_chunks_0 = view_chunks_84;
-    (&kernelContext_213)->view_0 = view_84;
-    (&kernelContext_213)->objects_0 = objects_84;
-    (&kernelContext_213)->shot_bodies_0 = shot_bodies_84;
-    (&kernelContext_213)->lines_0 = lines_84;
-    (&kernelContext_213)->geometry_0 = geometry_84;
-    (&kernelContext_213)->shots_0 = shots_84;
-    (&kernelContext_213)->lp_0 = lp_84;
-    (&kernelContext_213)->ext_0 = ext_86;
-    (&kernelContext_213)->engine_contacts_0 = engine_contacts_84;
-    (&kernelContext_213)->crush_0 = crush_84;
-    (&kernelContext_213)->crush_rw_0 = crush_rw_84;
-    (&kernelContext_213)->crush_tab_0 = crush_tab_84;
+    thread KernelContext_0 kernelContext_214;
+    (&kernelContext_214)->params_0 = params_84;
+    (&kernelContext_214)->work_0 = work_84;
+    (&kernelContext_214)->frames_0 = frames_84;
+    (&kernelContext_214)->bodies_0 = bodies_84;
+    (&kernelContext_214)->chunks_0 = chunks_84;
+    (&kernelContext_214)->sort_0 = sort_84;
+    (&kernelContext_214)->atom_0 = atom_84;
+    (&kernelContext_214)->manifolds_0 = manifolds_84;
+    (&kernelContext_214)->loads_0 = loads_84;
+    (&kernelContext_214)->bonds_0 = bonds_85;
+    (&kernelContext_214)->args_0 = args_84;
+    (&kernelContext_214)->info_0 = info_84;
+    (&kernelContext_214)->scan_0 = scan_84;
+    (&kernelContext_214)->parts_0 = parts_84;
+    (&kernelContext_214)->colliders_0 = colliders_84;
+    (&kernelContext_214)->collider_info_0 = collider_info_84;
+    (&kernelContext_214)->view_chunks_0 = view_chunks_84;
+    (&kernelContext_214)->view_0 = view_84;
+    (&kernelContext_214)->objects_0 = objects_84;
+    (&kernelContext_214)->shot_bodies_0 = shot_bodies_84;
+    (&kernelContext_214)->lines_0 = lines_84;
+    (&kernelContext_214)->geometry_0 = geometry_84;
+    (&kernelContext_214)->shots_0 = shots_84;
+    (&kernelContext_214)->lp_0 = lp_84;
+    (&kernelContext_214)->ext_0 = ext_86;
+    (&kernelContext_214)->engine_contacts_0 = engine_contacts_84;
+    (&kernelContext_214)->crush_0 = crush_84;
+    (&kernelContext_214)->crush_rw_0 = crush_rw_84;
+    (&kernelContext_214)->crush_tab_0 = crush_tab_84;
     threadgroup array<uint, int(1024)> g_scan_84;
-    (&kernelContext_213)->g_scan_0 = &g_scan_84;
+    (&kernelContext_214)->g_scan_0 = &g_scan_84;
     threadgroup array<float, int(64)> g_il_best_84;
-    (&kernelContext_213)->g_il_best_0 = &g_il_best_84;
+    (&kernelContext_214)->g_il_best_0 = &g_il_best_84;
     uint c_27 = id_78.x;
     bool _S1645;
     if(c_27 >= (params_84->chunk_count_0))
@@ -11969,13 +11982,13 @@ float3 inverse_rotate_0(const Quat_0 thread* q_34, float3 v_19)
     }
     else
     {
-        _S1645 = ((&kernelContext_213)->crush_0->enabled_0) == 0U;
+        _S1645 = ((&kernelContext_214)->crush_0->enabled_0) == 0U;
     }
     if(_S1645)
     {
         return;
     }
-    uint _S1646 = crush_flags_0(c_27, &kernelContext_213);
+    uint _S1646 = crush_flags_0(c_27, &kernelContext_214);
     uint now_0;
     if((_S1646 & 2U) != 0U)
     {
@@ -11985,101 +11998,112 @@ float3 inverse_rotate_0(const Quat_0 thread* q_34, float3 v_19)
     {
         now_0 = 0U;
     }
-    uint _S1647 = w_new_0(&kernelContext_213);
-    *((&kernelContext_213)->work_0+(_S1647 + c_27)) = now_0;
-    if(now_0 != 0U)
+    uint _S1647 = w_new_0(&kernelContext_214);
+    uint device* _S1648 = (&kernelContext_214)->work_0+(_S1647 + c_27);
+    bool _S1649 = now_0 != 0U;
+    if(_S1649)
     {
-        uint _S1648 = a_counters_1(&kernelContext_213);
-        uint _S1649 = atomic_fetch_add_explicit((&kernelContext_213)->atom_0+(_S1648 + 10U), 1U, memory_order_relaxed);
+        uint _S1650 = crush_pieces_0(c_27, &kernelContext_214);
+        now_0 = 1048576U | _S1650;
+    }
+    else
+    {
+        now_0 = 0U;
+    }
+    *_S1648 = now_0;
+    if(_S1649)
+    {
+        uint _S1651 = a_counters_1(&kernelContext_214);
+        uint _S1652 = atomic_fetch_add_explicit((&kernelContext_214)->atom_0+(_S1651 + 10U), 1U, memory_order_relaxed);
     }
     return;
 }
 
 [[kernel]] void fr_crush_gate(uint3 id_79 [[thread_position_in_grid]], FractureParams_0 constant* params_85 [[buffer(0)]], uint device* work_85 [[buffer(4)]], packed_float4 device* frames_85 [[buffer(6)]], packed_float4 device* bodies_85 [[buffer(7)]], packed_float4 device* chunks_85 [[buffer(1)]], uint device* sort_85 [[buffer(11)]], atomic<uint> device* atom_85 [[buffer(5)]], Record_natural_0 device* manifolds_85 [[buffer(10)]], packed_float4 device* loads_85 [[buffer(12)]], packed_uint4 device* bonds_86 [[buffer(2)]], uint device* args_85 [[buffer(13)]], uint device* info_85 [[buffer(15)]], ScanParams_0 constant* scan_85 [[buffer(14)]], packed_float4 device* parts_85 [[buffer(3)]], packed_float4 device* colliders_85 [[buffer(8)]], packed_uint4 device* collider_info_85 [[buffer(9)]], packed_float4 device* view_chunks_85 [[buffer(17)]], ViewParams_0 constant* view_85 [[buffer(16)]], packed_float4 device* objects_85 [[buffer(18)]], uint device* shot_bodies_85 [[buffer(20)]], float device* lines_85 [[buffer(19)]], packed_float4 device* geometry_85 [[buffer(21)]], packed_float4 device* shots_85 [[buffer(22)]], packed_float4 device* lp_85 [[buffer(24)]], packed_float4 device* ext_87 [[buffer(23)]], packed_float4 device* engine_contacts_85 [[buffer(25)]], CrushParams_0 constant* crush_85 [[buffer(28)]], packed_float4 device* crush_rw_85 [[buffer(27)]], packed_float4 device* crush_tab_85 [[buffer(26)]])
 {
-    thread KernelContext_0 kernelContext_214;
-    (&kernelContext_214)->params_0 = params_85;
-    (&kernelContext_214)->work_0 = work_85;
-    (&kernelContext_214)->frames_0 = frames_85;
-    (&kernelContext_214)->bodies_0 = bodies_85;
-    (&kernelContext_214)->chunks_0 = chunks_85;
-    (&kernelContext_214)->sort_0 = sort_85;
-    (&kernelContext_214)->atom_0 = atom_85;
-    (&kernelContext_214)->manifolds_0 = manifolds_85;
-    (&kernelContext_214)->loads_0 = loads_85;
-    (&kernelContext_214)->bonds_0 = bonds_86;
-    (&kernelContext_214)->args_0 = args_85;
-    (&kernelContext_214)->info_0 = info_85;
-    (&kernelContext_214)->scan_0 = scan_85;
-    (&kernelContext_214)->parts_0 = parts_85;
-    (&kernelContext_214)->colliders_0 = colliders_85;
-    (&kernelContext_214)->collider_info_0 = collider_info_85;
-    (&kernelContext_214)->view_chunks_0 = view_chunks_85;
-    (&kernelContext_214)->view_0 = view_85;
-    (&kernelContext_214)->objects_0 = objects_85;
-    (&kernelContext_214)->shot_bodies_0 = shot_bodies_85;
-    (&kernelContext_214)->lines_0 = lines_85;
-    (&kernelContext_214)->geometry_0 = geometry_85;
-    (&kernelContext_214)->shots_0 = shots_85;
-    (&kernelContext_214)->lp_0 = lp_85;
-    (&kernelContext_214)->ext_0 = ext_87;
-    (&kernelContext_214)->engine_contacts_0 = engine_contacts_85;
-    (&kernelContext_214)->crush_0 = crush_85;
-    (&kernelContext_214)->crush_rw_0 = crush_rw_85;
-    (&kernelContext_214)->crush_tab_0 = crush_tab_85;
+    thread KernelContext_0 kernelContext_215;
+    (&kernelContext_215)->params_0 = params_85;
+    (&kernelContext_215)->work_0 = work_85;
+    (&kernelContext_215)->frames_0 = frames_85;
+    (&kernelContext_215)->bodies_0 = bodies_85;
+    (&kernelContext_215)->chunks_0 = chunks_85;
+    (&kernelContext_215)->sort_0 = sort_85;
+    (&kernelContext_215)->atom_0 = atom_85;
+    (&kernelContext_215)->manifolds_0 = manifolds_85;
+    (&kernelContext_215)->loads_0 = loads_85;
+    (&kernelContext_215)->bonds_0 = bonds_86;
+    (&kernelContext_215)->args_0 = args_85;
+    (&kernelContext_215)->info_0 = info_85;
+    (&kernelContext_215)->scan_0 = scan_85;
+    (&kernelContext_215)->parts_0 = parts_85;
+    (&kernelContext_215)->colliders_0 = colliders_85;
+    (&kernelContext_215)->collider_info_0 = collider_info_85;
+    (&kernelContext_215)->view_chunks_0 = view_chunks_85;
+    (&kernelContext_215)->view_0 = view_85;
+    (&kernelContext_215)->objects_0 = objects_85;
+    (&kernelContext_215)->shot_bodies_0 = shot_bodies_85;
+    (&kernelContext_215)->lines_0 = lines_85;
+    (&kernelContext_215)->geometry_0 = geometry_85;
+    (&kernelContext_215)->shots_0 = shots_85;
+    (&kernelContext_215)->lp_0 = lp_85;
+    (&kernelContext_215)->ext_0 = ext_87;
+    (&kernelContext_215)->engine_contacts_0 = engine_contacts_85;
+    (&kernelContext_215)->crush_0 = crush_85;
+    (&kernelContext_215)->crush_rw_0 = crush_rw_85;
+    (&kernelContext_215)->crush_tab_0 = crush_tab_85;
     threadgroup array<uint, int(1024)> g_scan_85;
-    (&kernelContext_214)->g_scan_0 = &g_scan_85;
+    (&kernelContext_215)->g_scan_0 = &g_scan_85;
     threadgroup array<float, int(64)> g_il_best_85;
-    (&kernelContext_214)->g_il_best_0 = &g_il_best_85;
+    (&kernelContext_215)->g_il_best_0 = &g_il_best_85;
     bool run_2;
     if((crush_85->enabled_0) != 0U)
     {
-        uint _S1650 = a_counters_1(&kernelContext_214);
-        uint _S1651 = atomic_load_explicit((&kernelContext_214)->atom_0+(_S1650 + 10U), memory_order_relaxed);
-        run_2 = _S1651 != 0U;
+        uint _S1653 = a_counters_1(&kernelContext_215);
+        uint _S1654 = atomic_load_explicit((&kernelContext_215)->atom_0+(_S1653 + 10U), memory_order_relaxed);
+        run_2 = _S1654 != 0U;
     }
     else
     {
         run_2 = false;
     }
-    uint _S1652 = a_counters_1(&kernelContext_214);
-    atomic_store_explicit((&kernelContext_214)->atom_0+(_S1652 + 10U), 0U, memory_order_relaxed);
-    atomic_store_explicit((&kernelContext_214)->atom_0+(_S1652 + 7U), 0U, memory_order_relaxed);
-    uint _S1653;
+    uint _S1655 = a_counters_1(&kernelContext_215);
+    atomic_store_explicit((&kernelContext_215)->atom_0+(_S1655 + 10U), 0U, memory_order_relaxed);
+    atomic_store_explicit((&kernelContext_215)->atom_0+(_S1655 + 7U), 0U, memory_order_relaxed);
+    uint _S1656;
     if(run_2)
     {
-        uint _S1654 = groups_of_0((&kernelContext_214)->params_0->chunk_count_0, 64U);
-        _S1653 = _S1654;
+        uint _S1657 = groups_of_0((&kernelContext_215)->params_0->chunk_count_0, 64U);
+        _S1656 = _S1657;
     }
     else
     {
-        _S1653 = 0U;
+        _S1656 = 0U;
     }
-    set_args_0(14U, _S1653, &kernelContext_214);
+    set_args_0(14U, _S1656, &kernelContext_215);
     if(run_2)
     {
-        uint _S1655 = groups_of_0((&kernelContext_214)->params_0->chunk_count_0, 1024U);
-        _S1653 = _S1655;
+        uint _S1658 = groups_of_0((&kernelContext_215)->params_0->chunk_count_0, 1024U);
+        _S1656 = _S1658;
     }
     else
     {
-        _S1653 = 0U;
+        _S1656 = 0U;
     }
-    set_args_0(15U, _S1653, &kernelContext_214);
-    int _S1656;
+    set_args_0(15U, _S1656, &kernelContext_215);
+    int _S1659;
     if(run_2)
     {
-        _S1656 = int(1);
+        _S1659 = int(1);
     }
     else
     {
-        _S1656 = int(0);
+        _S1659 = int(0);
     }
-    set_args_0(16U, uint(_S1656), &kernelContext_214);
+    set_args_0(16U, uint(_S1659), &kernelContext_215);
     return;
 }
 
-void write_body_0(uint slot_7, float3 pos_1, float inv_mass_14, const Quat_0 thread* orientation_0, float3 inv_inertia_1, uint flags_3, float3 v_20, float3 w_13, KernelContext_0 thread* kernelContext_215)
+void write_body_0(uint slot_7, float3 pos_1, float inv_mass_14, const Quat_0 thread* orientation_0, float3 inv_inertia_1, uint flags_3, float3 v_20, float3 w_13, KernelContext_0 thread* kernelContext_216)
 {
     uint region_8 = 0U;
     for(;;)
@@ -12091,115 +12115,127 @@ void write_body_0(uint slot_7, float3 pos_1, float inv_mass_14, const Quat_0 thr
         {
             break;
         }
-        uint b_65 = 7U * (slot_7 + region_8 * kernelContext_215->params_0->max_bodies_0);
-        *(kernelContext_215->bodies_0+b_65) = packed_float4(float4(pos_1, inv_mass_14)) ;
-        packed_float4 device* _S1657 = kernelContext_215->bodies_0+(b_65 + 1U);
-        float4 _S1658 = quat_vec_0(orientation_0);
-        *_S1657 = packed_float4(_S1658) ;
-        *(kernelContext_215->bodies_0+(b_65 + 2U)) = packed_float4(float4(inv_inertia_1, (as_type<float>((flags_3))))) ;
-        *(kernelContext_215->bodies_0+(b_65 + 3U)) = packed_float4(float4(v_20, 0.0f)) ;
-        *(kernelContext_215->bodies_0+(b_65 + 4U)) = packed_float4(float4(w_13, (as_type<float>((kernelContext_215->params_0->step_0))))) ;
-        *(kernelContext_215->bodies_0+(b_65 + 5U)) = packed_float4(float4(0.0f) ) ;
-        *(kernelContext_215->bodies_0+(b_65 + 6U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, 1.0f)) ;
+        uint b_65 = 7U * (slot_7 + region_8 * kernelContext_216->params_0->max_bodies_0);
+        *(kernelContext_216->bodies_0+b_65) = packed_float4(float4(pos_1, inv_mass_14)) ;
+        packed_float4 device* _S1660 = kernelContext_216->bodies_0+(b_65 + 1U);
+        float4 _S1661 = quat_vec_0(orientation_0);
+        *_S1660 = packed_float4(_S1661) ;
+        *(kernelContext_216->bodies_0+(b_65 + 2U)) = packed_float4(float4(inv_inertia_1, (as_type<float>((flags_3))))) ;
+        *(kernelContext_216->bodies_0+(b_65 + 3U)) = packed_float4(float4(v_20, 0.0f)) ;
+        *(kernelContext_216->bodies_0+(b_65 + 4U)) = packed_float4(float4(w_13, (as_type<float>((kernelContext_216->params_0->step_0))))) ;
+        *(kernelContext_216->bodies_0+(b_65 + 5U)) = packed_float4(float4(0.0f) ) ;
+        *(kernelContext_216->bodies_0+(b_65 + 6U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, 1.0f)) ;
         region_8 = region_8 + 1U;
     }
     return;
 }
 
+float3 crush_particle_spot_0(uint k_69, uint i_22)
+{
+    uint h_7 = (k_69 * 2654435761U) ^ (i_22 * 2246822519U);
+    uint h_8 = (h_7 ^ (h_7 >> 15U)) * 739982445U;
+    uint h_9 = (h_8 ^ (h_8 >> 12U)) * 695872825U;
+    uint h_10 = h_9 ^ (h_9 >> 15U);
+    return float3(float(h_10 & 1023U), float((h_10 >> 10U) & 1023U), float((h_10 * 2654435761U + 2135587861U) & 1023U)) / float3(511.5f)  - float3(1.0f) ;
+}
+
 [[kernel]] void fr_crush_apply(uint3 id_80 [[thread_position_in_grid]], FractureParams_0 constant* params_86 [[buffer(0)]], uint device* work_86 [[buffer(4)]], packed_float4 device* frames_86 [[buffer(6)]], packed_float4 device* bodies_86 [[buffer(7)]], packed_float4 device* chunks_86 [[buffer(1)]], uint device* sort_86 [[buffer(11)]], atomic<uint> device* atom_86 [[buffer(5)]], Record_natural_0 device* manifolds_86 [[buffer(10)]], packed_float4 device* loads_86 [[buffer(12)]], packed_uint4 device* bonds_87 [[buffer(2)]], uint device* args_86 [[buffer(13)]], uint device* info_86 [[buffer(15)]], ScanParams_0 constant* scan_86 [[buffer(14)]], packed_float4 device* parts_86 [[buffer(3)]], packed_float4 device* colliders_86 [[buffer(8)]], packed_uint4 device* collider_info_86 [[buffer(9)]], packed_float4 device* view_chunks_86 [[buffer(17)]], ViewParams_0 constant* view_86 [[buffer(16)]], packed_float4 device* objects_86 [[buffer(18)]], uint device* shot_bodies_86 [[buffer(20)]], float device* lines_86 [[buffer(19)]], packed_float4 device* geometry_86 [[buffer(21)]], packed_float4 device* shots_86 [[buffer(22)]], packed_float4 device* lp_86 [[buffer(24)]], packed_float4 device* ext_88 [[buffer(23)]], packed_float4 device* engine_contacts_86 [[buffer(25)]], CrushParams_0 constant* crush_86 [[buffer(28)]], packed_float4 device* crush_rw_86 [[buffer(27)]], packed_float4 device* crush_tab_86 [[buffer(26)]])
 {
-    uint ax_5;
-    thread KernelContext_0 kernelContext_216;
-    (&kernelContext_216)->params_0 = params_86;
-    (&kernelContext_216)->work_0 = work_86;
-    (&kernelContext_216)->frames_0 = frames_86;
-    (&kernelContext_216)->bodies_0 = bodies_86;
-    (&kernelContext_216)->chunks_0 = chunks_86;
-    (&kernelContext_216)->sort_0 = sort_86;
-    (&kernelContext_216)->atom_0 = atom_86;
-    (&kernelContext_216)->manifolds_0 = manifolds_86;
-    (&kernelContext_216)->loads_0 = loads_86;
-    (&kernelContext_216)->bonds_0 = bonds_87;
-    (&kernelContext_216)->args_0 = args_86;
-    (&kernelContext_216)->info_0 = info_86;
-    (&kernelContext_216)->scan_0 = scan_86;
-    (&kernelContext_216)->parts_0 = parts_86;
-    (&kernelContext_216)->colliders_0 = colliders_86;
-    (&kernelContext_216)->collider_info_0 = collider_info_86;
-    (&kernelContext_216)->view_chunks_0 = view_chunks_86;
-    (&kernelContext_216)->view_0 = view_86;
-    (&kernelContext_216)->objects_0 = objects_86;
-    (&kernelContext_216)->shot_bodies_0 = shot_bodies_86;
-    (&kernelContext_216)->lines_0 = lines_86;
-    (&kernelContext_216)->geometry_0 = geometry_86;
-    (&kernelContext_216)->shots_0 = shots_86;
-    (&kernelContext_216)->lp_0 = lp_86;
-    (&kernelContext_216)->ext_0 = ext_88;
-    (&kernelContext_216)->engine_contacts_0 = engine_contacts_86;
-    (&kernelContext_216)->crush_0 = crush_86;
-    (&kernelContext_216)->crush_rw_0 = crush_rw_86;
-    (&kernelContext_216)->crush_tab_0 = crush_tab_86;
+    thread KernelContext_0 kernelContext_217;
+    (&kernelContext_217)->params_0 = params_86;
+    (&kernelContext_217)->work_0 = work_86;
+    (&kernelContext_217)->frames_0 = frames_86;
+    (&kernelContext_217)->bodies_0 = bodies_86;
+    (&kernelContext_217)->chunks_0 = chunks_86;
+    (&kernelContext_217)->sort_0 = sort_86;
+    (&kernelContext_217)->atom_0 = atom_86;
+    (&kernelContext_217)->manifolds_0 = manifolds_86;
+    (&kernelContext_217)->loads_0 = loads_86;
+    (&kernelContext_217)->bonds_0 = bonds_87;
+    (&kernelContext_217)->args_0 = args_86;
+    (&kernelContext_217)->info_0 = info_86;
+    (&kernelContext_217)->scan_0 = scan_86;
+    (&kernelContext_217)->parts_0 = parts_86;
+    (&kernelContext_217)->colliders_0 = colliders_86;
+    (&kernelContext_217)->collider_info_0 = collider_info_86;
+    (&kernelContext_217)->view_chunks_0 = view_chunks_86;
+    (&kernelContext_217)->view_0 = view_86;
+    (&kernelContext_217)->objects_0 = objects_86;
+    (&kernelContext_217)->shot_bodies_0 = shot_bodies_86;
+    (&kernelContext_217)->lines_0 = lines_86;
+    (&kernelContext_217)->geometry_0 = geometry_86;
+    (&kernelContext_217)->shots_0 = shots_86;
+    (&kernelContext_217)->lp_0 = lp_86;
+    (&kernelContext_217)->ext_0 = ext_88;
+    (&kernelContext_217)->engine_contacts_0 = engine_contacts_86;
+    (&kernelContext_217)->crush_0 = crush_86;
+    (&kernelContext_217)->crush_rw_0 = crush_rw_86;
+    (&kernelContext_217)->crush_tab_0 = crush_tab_86;
     threadgroup array<uint, int(1024)> g_scan_86;
-    (&kernelContext_216)->g_scan_0 = &g_scan_86;
+    (&kernelContext_217)->g_scan_0 = &g_scan_86;
     threadgroup array<float, int(64)> g_il_best_86;
-    (&kernelContext_216)->g_il_best_0 = &g_il_best_86;
-    uint k_68 = id_80.x;
-    bool _S1659;
-    if(k_68 >= (params_86->chunk_count_0))
+    (&kernelContext_217)->g_il_best_0 = &g_il_best_86;
+    uint k_70 = id_80.x;
+    bool _S1662;
+    if(k_70 >= (params_86->chunk_count_0))
     {
-        _S1659 = true;
+        _S1662 = true;
     }
     else
     {
-        _S1659 = ((&kernelContext_216)->crush_0->enabled_0) == 0U;
+        _S1662 = ((&kernelContext_217)->crush_0->enabled_0) == 0U;
     }
-    if(_S1659)
+    if(_S1662)
     {
         return;
     }
-    float4 _S1660 = float4(*((&kernelContext_216)->crush_rw_0+k_68)) ;
-    uint flags_4 = (as_type<uint>((_S1660.w)));
+    float4 _S1663 = float4(*((&kernelContext_217)->crush_rw_0+k_70)) ;
+    uint flags_4 = (as_type<uint>((_S1663.w)));
     if((flags_4 & 2U) == 0U)
     {
         return;
     }
-    *((&kernelContext_216)->crush_rw_0+k_68) = packed_float4(float4(_S1660.xyz, (as_type<float>((flags_4 & 4294967293U))))) ;
-    uint _S1661 = body_of_0(k_68, &kernelContext_216);
-    uint bw_1 = 7U * _S1661;
-    float4 _S1662 = float4(*((&kernelContext_216)->bodies_0+bw_1)) ;
-    Quat_0 orientation_1 = quat_of_0(float4(*((&kernelContext_216)->bodies_0+(bw_1 + 1U))) );
-    float3 v_21 = (float4(*((&kernelContext_216)->bodies_0+(bw_1 + 3U))) ).xyz;
-    float3 w_14 = (float4(*((&kernelContext_216)->bodies_0+(bw_1 + 4U))) ).xyz;
-    uint _S1663 = 4U * k_68;
-    float mass_1 = (float4(*((&kernelContext_216)->chunks_0+_S1663)) ).w;
-    float volume_1 = (float4(*((&kernelContext_216)->crush_tab_0+(2U * k_68 + 1U))) ).y;
-    uint _S1664 = w_rank_0(&kernelContext_216);
-    uint device* _S1665 = (&kernelContext_216)->work_0+(_S1664 + k_68);
-    uint rank_0 = *_S1665;
-    if((*_S1665) >= ((&kernelContext_216)->crush_0->max_events_0))
+    *((&kernelContext_217)->crush_rw_0+k_70) = packed_float4(float4(_S1663.xyz, (as_type<float>((flags_4 & 4294967293U))))) ;
+    uint _S1664 = body_of_0(k_70, &kernelContext_217);
+    uint bw_1 = 7U * _S1664;
+    float4 _S1665 = float4(*((&kernelContext_217)->bodies_0+bw_1)) ;
+    Quat_0 orientation_1 = quat_of_0(float4(*((&kernelContext_217)->bodies_0+(bw_1 + 1U))) );
+    float3 v_21 = (float4(*((&kernelContext_217)->bodies_0+(bw_1 + 3U))) ).xyz;
+    float3 w_14 = (float4(*((&kernelContext_217)->bodies_0+(bw_1 + 4U))) ).xyz;
+    uint _S1666 = 4U * k_70;
+    float mass_1 = (float4(*((&kernelContext_217)->chunks_0+_S1666)) ).w;
+    float volume_1 = (float4(*((&kernelContext_217)->crush_tab_0+(2U * k_70 + 1U))) ).y;
+    uint _S1667 = w_rank_0(&kernelContext_217);
+    uint device* _S1668 = (&kernelContext_217)->work_0+(_S1667 + k_70);
+    uint scanned_0 = *_S1668;
+    uint rank_0 = *_S1668 / 1048576U;
+    uint _S1669 = crush_pieces_0(k_70, &kernelContext_217);
+    if(rank_0 >= ((&kernelContext_217)->crush_0->max_events_0))
     {
-        uint _S1666 = a_counters_1(&kernelContext_216);
-        uint _S1667 = atomic_fetch_or_explicit((&kernelContext_216)->atom_0+(_S1666 + 3U), 32U, memory_order_relaxed);
+        uint _S1670 = a_counters_1(&kernelContext_217);
+        uint _S1671 = atomic_fetch_or_explicit((&kernelContext_217)->atom_0+(_S1670 + 3U), 32U, memory_order_relaxed);
     }
-    float3 _S1668 = float3(0.0f) ;
-    if(((&kernelContext_216)->crush_0->mode_1) == 1U)
+    float3 _S1672 = float3(0.0f) ;
+    if(((&kernelContext_217)->crush_0->mode_1) == 1U)
     {
-        _S1659 = ((&kernelContext_216)->crush_0->fragments_0) > 0U;
+        _S1662 = ((&kernelContext_217)->crush_0->fragments_0) > 0U;
     }
     else
     {
-        _S1659 = false;
+        _S1662 = false;
     }
     uint first_6;
+    uint n_7;
+    uint i_23;
     float3 half_2;
-    if(_S1659)
+    if(_S1662)
     {
-        uint _S1669 = a_counters_1(&kernelContext_216);
-        uint _S1670 = atomic_load_explicit((&kernelContext_216)->atom_0+(_S1669 + 8U), memory_order_relaxed);
-        uint base_4 = _S1670 + rank_0 * (&kernelContext_216)->crush_0->fragments_0;
-        if((base_4 + (&kernelContext_216)->crush_0->fragments_0) > ((&kernelContext_216)->crush_0->pool_size_0))
+        uint _S1673 = a_counters_1(&kernelContext_217);
+        uint _S1674 = atomic_load_explicit((&kernelContext_217)->atom_0+(_S1673 + 8U), memory_order_relaxed);
+        uint base_4 = _S1674 + (scanned_0 & 1048575U);
+        if((base_4 + (&kernelContext_217)->crush_0->fragments_0) > ((&kernelContext_217)->crush_0->pool_size_0))
         {
-            uint _S1671 = atomic_fetch_or_explicit((&kernelContext_216)->atom_0+(_S1669 + 3U), 16U, memory_order_relaxed);
+            uint _S1675 = atomic_fetch_or_explicit((&kernelContext_217)->atom_0+(_S1673 + 3U), 16U, memory_order_relaxed);
             first_6 = 4294967295U;
         }
         else
@@ -12208,22 +12244,22 @@ void write_body_0(uint slot_7, float3 pos_1, float inv_mass_14, const Quat_0 thr
         }
         thread Quat_0 q_35;
         thread float3 origin_14;
-        structure_pose_0(_S1661, bw_1, &q_35, &origin_14, &kernelContext_216);
-        float3 _S1672 = (float4(*((&kernelContext_216)->chunks_0+_S1663)) ).xyz;
-        thread Quat_0 _S1673 = q_35;
-        float3 _S1674 = rotate_0(&_S1673, _S1672);
-        float3 _S1675 = origin_14 + _S1674;
-        uint _S1676 = 3U * k_68;
-        Quat_0 _S1677 = quat_of_0(float4(*((&kernelContext_216)->geometry_0+(_S1676 + 2U))) );
-        thread Quat_0 _S1678 = q_35;
-        thread Quat_0 _S1679 = _S1677;
-        Quat_0 _S1680 = quat_mul_0(&_S1678, &_S1679);
-        thread Quat_0 _S1681 = _S1680;
-        Quat_0 _S1682 = normalized_0(&_S1681);
-        float3 h_7 = (float4(*((&kernelContext_216)->geometry_0+(_S1676 + 1U))) ).xyz;
+        structure_pose_0(_S1664, bw_1, &q_35, &origin_14, &kernelContext_217);
+        float3 _S1676 = (float4(*((&kernelContext_217)->chunks_0+_S1666)) ).xyz;
+        thread Quat_0 _S1677 = q_35;
+        float3 _S1678 = rotate_0(&_S1677, _S1676);
+        float3 _S1679 = origin_14 + _S1678;
+        uint _S1680 = 3U * k_70;
+        Quat_0 _S1681 = quat_of_0(float4(*((&kernelContext_217)->geometry_0+(_S1680 + 2U))) );
+        thread Quat_0 _S1682 = q_35;
+        thread Quat_0 _S1683 = _S1681;
+        Quat_0 _S1684 = quat_mul_0(&_S1682, &_S1683);
+        thread Quat_0 _S1685 = _S1684;
+        Quat_0 _S1686 = normalized_0(&_S1685);
+        float3 h_11 = (float4(*((&kernelContext_217)->geometry_0+(_S1680 + 1U))) ).xyz;
         thread uint3 g_0 = uint3(int3(int(1)) );
-        thread float3 cell_0 = h_7;
-        uint n_7 = (&kernelContext_216)->crush_0->fragments_0;
+        thread float3 cell_0 = h_11;
+        n_7 = (&kernelContext_217)->crush_0->fragments_0;
         for(;;)
         {
             if(n_7 > 1U)
@@ -12235,32 +12271,32 @@ void write_body_0(uint slot_7, float3 pos_1, float inv_mass_14, const Quat_0 thr
             }
             if((cell_0.x) >= (cell_0.y))
             {
-                _S1659 = (cell_0.x) >= (cell_0.z);
+                _S1662 = (cell_0.x) >= (cell_0.z);
             }
             else
             {
-                _S1659 = false;
+                _S1662 = false;
             }
-            if(_S1659)
+            if(_S1662)
             {
-                ax_5 = 0U;
+                i_23 = 0U;
             }
             else
             {
                 if((cell_0.y) >= (cell_0.z))
                 {
-                    ax_5 = 1U;
+                    i_23 = 1U;
                 }
                 else
                 {
-                    ax_5 = 2U;
+                    i_23 = 2U;
                 }
             }
-            g_0[ax_5] = g_0[ax_5] * 2U;
-            cell_0[ax_5] = cell_0[ax_5] * 0.5f;
+            g_0[i_23] = g_0[i_23] * 2U;
+            cell_0[i_23] = cell_0[i_23] * 0.5f;
             n_7 = n_7 >> 1U;
         }
-        float box_volume_0 = 8.0f * h_7.x * h_7.y * h_7.z;
+        float box_volume_0 = 8.0f * h_11.x * h_11.y * h_11.z;
         float shrink_0;
         if(box_volume_0 > 0.0f)
         {
@@ -12271,135 +12307,243 @@ void write_body_0(uint slot_7, float3 pos_1, float inv_mass_14, const Quat_0 thr
             shrink_0 = 0.94999998807907104f;
         }
         float3 half_3 = cell_0 * float3(shrink_0) ;
-        float mf_0 = mass_1 / float((&kernelContext_216)->crush_0->fragments_0);
-        float _S1683 = half_3.y;
-        float _S1684 = _S1683 * _S1683;
-        float _S1685 = half_3.z;
-        float _S1686 = _S1685 * _S1685;
-        float _S1687 = half_3.x;
+        float mf_0 = mass_1 / float((&kernelContext_217)->crush_0->fragments_0);
+        float _S1687 = half_3.y;
         float _S1688 = _S1687 * _S1687;
-        float3 inertia_0 = float3((mf_0 / 3.0f))  * float3(_S1684 + _S1686, _S1688 + _S1686, _S1688 + _S1684);
-        float3 _S1689 = float3(1.0f / inertia_0.x, 1.0f / inertia_0.y, 1.0f / inertia_0.z);
-        thread Quat_0 _S1690 = _S1682;
-        Quat_0 _S1691 = rot_to_rubble_0(&_S1690);
-        float _S1692 = (float4(*((&kernelContext_216)->chunks_0+(_S1663 + 3U))) ).x;
-        float _S1693 = min(_S1687, min(_S1683, _S1685));
-        ax_5 = 0U;
+        float _S1689 = half_3.z;
+        float _S1690 = _S1689 * _S1689;
+        float _S1691 = half_3.x;
+        float _S1692 = _S1691 * _S1691;
+        float3 inertia_0 = float3((mf_0 / 3.0f))  * float3(_S1688 + _S1690, _S1692 + _S1690, _S1692 + _S1688);
+        float3 _S1693 = float3(1.0f / inertia_0.x, 1.0f / inertia_0.y, 1.0f / inertia_0.z);
+        thread Quat_0 _S1694 = _S1686;
+        Quat_0 _S1695 = rot_to_rubble_0(&_S1694);
+        float _S1696 = (float4(*((&kernelContext_217)->chunks_0+(_S1666 + 3U))) ).x;
+        float _S1697 = min(_S1691, min(_S1687, _S1689));
+        i_23 = 0U;
         for(;;)
         {
-            if(ax_5 < ((&kernelContext_216)->crush_0->fragments_0))
+            if(i_23 < ((&kernelContext_217)->crush_0->fragments_0))
             {
-                _S1659 = first_6 != 4294967295U;
+                _S1662 = first_6 != 4294967295U;
             }
             else
             {
-                _S1659 = false;
+                _S1662 = false;
             }
-            if(_S1659)
+            if(_S1662)
             {
             }
             else
             {
                 break;
             }
-            uint _S1694 = ax_5 % g_0.x;
-            uint _S1695 = ax_5 / g_0.x;
-            uint _S1696 = _S1695 % g_0.y;
-            uint _S1697 = ax_5 / (g_0.x * g_0.y);
-            float3 offset_0 = - h_7 + cell_0 * (float3(2.0f)  * float3(uint3(_S1694, _S1696, _S1697)) + float3(1.0f) );
-            thread Quat_0 _S1698 = _S1682;
-            float3 _S1699 = rotate_0(&_S1698, offset_0);
-            float3 x_8 = to_rubble_0(_S1675 + _S1699);
-            float4 _S1700 = float4(*((&kernelContext_216)->crush_tab_0+((&kernelContext_216)->crush_0->t_pool_0 + first_6 + ax_5))) ;
-            uint fs_0 = (as_type<uint>((_S1700.x)));
-            uint fc_3 = (as_type<uint>((_S1700.y)));
-            float _S1701 = 1.0f / mf_0;
-            float3 _S1702 = v_21 + cross(w_14, x_8 - _S1662.xyz);
-            thread Quat_0 _S1703 = _S1691;
-            write_body_0(fs_0, x_8, _S1701, &_S1703, _S1689, 9U, _S1702, w_14, &kernelContext_216);
-            uint _S1704 = 4U * fc_3;
-            uint _S1705 = _S1704 + 1U;
-            *((&kernelContext_216)->colliders_0+_S1705) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_216)->colliders_0+_S1705)) ).w)) ;
-            *((&kernelContext_216)->colliders_0+(_S1704 + 2U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, 1.0f)) ;
-            *((&kernelContext_216)->colliders_0+(_S1704 + 3U)) = packed_float4(float4(half_3, length(half_3))) ;
-            uint _S1706 = 2U * fc_3;
-            *((&kernelContext_216)->collider_info_0+_S1706) = packed_uint4(uint4(4294967295U, fs_0, 2U, (uint4(*((&kernelContext_216)->collider_info_0+_S1706)) ).w)) ;
-            *((&kernelContext_216)->collider_info_0+(_S1706 + 1U)) = packed_uint4(uint4((as_type<uint>((mf_0))), (as_type<uint>((_S1692))), (as_type<uint>((_S1693))), 0U)) ;
-            ax_5 = ax_5 + 1U;
+            uint _S1698 = i_23 % g_0.x;
+            uint _S1699 = i_23 / g_0.x;
+            uint _S1700 = _S1699 % g_0.y;
+            uint _S1701 = i_23 / (g_0.x * g_0.y);
+            float3 offset_0 = - h_11 + cell_0 * (float3(2.0f)  * float3(uint3(_S1698, _S1700, _S1701)) + float3(1.0f) );
+            thread Quat_0 _S1702 = _S1686;
+            float3 _S1703 = rotate_0(&_S1702, offset_0);
+            float3 x_8 = to_rubble_0(_S1679 + _S1703);
+            float4 _S1704 = float4(*((&kernelContext_217)->crush_tab_0+((&kernelContext_217)->crush_0->t_pool_0 + first_6 + i_23))) ;
+            uint fs_0 = (as_type<uint>((_S1704.x)));
+            uint fc_3 = (as_type<uint>((_S1704.y)));
+            float _S1705 = 1.0f / mf_0;
+            float3 _S1706 = v_21 + cross(w_14, x_8 - _S1665.xyz);
+            thread Quat_0 _S1707 = _S1695;
+            write_body_0(fs_0, x_8, _S1705, &_S1707, _S1693, 9U, _S1706, w_14, &kernelContext_217);
+            uint _S1708 = 4U * fc_3;
+            uint _S1709 = _S1708 + 1U;
+            *((&kernelContext_217)->colliders_0+_S1709) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_217)->colliders_0+_S1709)) ).w)) ;
+            *((&kernelContext_217)->colliders_0+(_S1708 + 2U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, 1.0f)) ;
+            *((&kernelContext_217)->colliders_0+(_S1708 + 3U)) = packed_float4(float4(half_3, length(half_3))) ;
+            uint _S1710 = 2U * fc_3;
+            *((&kernelContext_217)->collider_info_0+_S1710) = packed_uint4(uint4(4294967295U, fs_0, 2U, (uint4(*((&kernelContext_217)->collider_info_0+_S1710)) ).w)) ;
+            *((&kernelContext_217)->collider_info_0+(_S1710 + 1U)) = packed_uint4(uint4((as_type<uint>((mf_0))), (as_type<uint>((_S1696))), (as_type<uint>((_S1697))), 0U)) ;
+            i_23 = i_23 + 1U;
         }
         half_2 = half_3;
     }
     else
     {
         first_6 = 4294967295U;
-        half_2 = _S1668;
+        half_2 = _S1672;
     }
-    if(rank_0 < ((&kernelContext_216)->crush_0->max_events_0))
+    if(((&kernelContext_217)->crush_0->mode_1) == 2U)
     {
-        uint ev_0 = (&kernelContext_216)->crush_0->r_events_0 + 6U * rank_0;
-        *((&kernelContext_216)->crush_rw_0+ev_0) = packed_float4(float4((as_type<float>((k_68))), (as_type<float>((first_6))), (as_type<float>((flags_4 >> 4U))), _S1660.x)) ;
-        *((&kernelContext_216)->crush_rw_0+(ev_0 + 1U)) = packed_float4(float4(_S1662.xyz, mass_1)) ;
-        packed_float4 device* _S1707 = (&kernelContext_216)->crush_rw_0+(ev_0 + 2U);
-        thread Quat_0 _S1708 = orientation_1;
-        float4 _S1709 = quat_vec_0(&_S1708);
-        *_S1707 = packed_float4(_S1709) ;
-        *((&kernelContext_216)->crush_rw_0+(ev_0 + 3U)) = packed_float4(float4(v_21, _S1660.y)) ;
-        *((&kernelContext_216)->crush_rw_0+(ev_0 + 4U)) = packed_float4(float4(w_14, _S1660.z)) ;
-        *((&kernelContext_216)->crush_rw_0+(ev_0 + 5U)) = packed_float4(float4(half_2, volume_1)) ;
+        _S1662 = _S1669 > 0U;
     }
-    float3 park_0 = float3(float(_S1661 % 1024U) * (&kernelContext_216)->crush_0->park_step_0, (&kernelContext_216)->crush_0->park_y_0, float(_S1661 / 1024U) * (&kernelContext_216)->crush_0->park_step_0);
-    thread Quat_0 _S1710 = orientation_1;
-    write_body_0(_S1661, park_0, 0.0f, &_S1710, _S1668, 0U, _S1668, _S1668, &kernelContext_216);
+    else
+    {
+        _S1662 = false;
+    }
+    if(_S1662)
+    {
+        uint _S1711 = a_counters_1(&kernelContext_217);
+        uint _S1712 = atomic_load_explicit((&kernelContext_217)->atom_0+(_S1711 + 8U), memory_order_relaxed);
+        uint base_5 = _S1712 + (scanned_0 & 1048575U);
+        if((base_5 + _S1669) > ((&kernelContext_217)->crush_0->pool_size_0))
+        {
+            uint _S1713 = atomic_fetch_or_explicit((&kernelContext_217)->atom_0+(_S1711 + 3U), 16U, memory_order_relaxed);
+        }
+        else
+        {
+            first_6 = base_5;
+        }
+        thread Quat_0 q_36;
+        thread float3 origin_15;
+        structure_pose_0(_S1664, bw_1, &q_36, &origin_15, &kernelContext_217);
+        float3 _S1714 = (float4(*((&kernelContext_217)->chunks_0+_S1666)) ).xyz;
+        thread Quat_0 _S1715 = q_36;
+        float3 _S1716 = rotate_0(&_S1715, _S1714);
+        float3 _S1717 = origin_15 + _S1716;
+        uint _S1718 = 3U * k_70;
+        Quat_0 _S1719 = quat_of_0(float4(*((&kernelContext_217)->geometry_0+(_S1718 + 2U))) );
+        thread Quat_0 _S1720 = q_36;
+        thread Quat_0 _S1721 = _S1719;
+        Quat_0 _S1722 = quat_mul_0(&_S1720, &_S1721);
+        thread Quat_0 _S1723 = _S1722;
+        Quat_0 _S1724 = normalized_0(&_S1723);
+        float3 h_12 = (float4(*((&kernelContext_217)->geometry_0+(_S1718 + 1U))) ).xyz;
+        float _S1725 = float(_S1669);
+        float _S1726 = max(pow(0.75f * volume_1 / (3.14159274101257324f * _S1725), 0.3333333432674408f), 0.0020000000949949f);
+        float3 _S1727 = float3(_S1726, _S1726, _S1726);
+        float _S1728 = mass_1 / _S1725;
+        float _S1729 = (float4(*((&kernelContext_217)->chunks_0+(_S1666 + 3U))) ).x;
+        float3 _S1730 = max(h_12 - float3(_S1726) , float3(0.25f)  * h_12);
+        i_23 = 0U;
+        float3 mean_4 = _S1672;
+        for(;;)
+        {
+            if(i_23 < _S1669)
+            {
+            }
+            else
+            {
+                break;
+            }
+            float3 mean_5 = mean_4 + crush_particle_spot_0(k_70, i_23);
+            i_23 = i_23 + 1U;
+            mean_4 = mean_5;
+        }
+        float3 mean_6 = mean_4 / float3(_S1725) ;
+        i_23 = 0U;
+        for(;;)
+        {
+            if(i_23 < _S1669)
+            {
+                _S1662 = first_6 != 4294967295U;
+            }
+            else
+            {
+                _S1662 = false;
+            }
+            if(_S1662)
+            {
+            }
+            else
+            {
+                break;
+            }
+            float3 _S1731 = _S1730 * (crush_particle_spot_0(k_70, i_23) - mean_6);
+            thread Quat_0 _S1732 = _S1724;
+            float3 _S1733 = rotate_0(&_S1732, _S1731);
+            float3 x_9 = to_rubble_0(_S1717 + _S1733);
+            float4 _S1734 = float4(*((&kernelContext_217)->crush_tab_0+((&kernelContext_217)->crush_0->t_pool_0 + first_6 + i_23))) ;
+            uint fs_1 = (as_type<uint>((_S1734.x)));
+            uint fc_4 = (as_type<uint>((_S1734.y)));
+            float _S1735 = 1.0f / _S1728;
+            float4 _S1736 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+            Quat_0 _S1737 = quat_of_0(_S1736);
+            if(((&kernelContext_217)->crush_0->particle_ccd_0) != 0U)
+            {
+                n_7 = 33024U;
+            }
+            else
+            {
+                n_7 = 0U;
+            }
+            uint _S1738 = 9U | n_7;
+            float3 _S1739 = v_21 + cross(w_14, x_9 - _S1665.xyz);
+            thread Quat_0 _S1740 = _S1737;
+            write_body_0(fs_1, x_9, _S1735, &_S1740, _S1672, _S1738, _S1739, _S1672, &kernelContext_217);
+            uint _S1741 = 4U * fc_4;
+            uint _S1742 = _S1741 + 1U;
+            *((&kernelContext_217)->colliders_0+_S1742) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_217)->colliders_0+_S1742)) ).w)) ;
+            *((&kernelContext_217)->colliders_0+(_S1741 + 2U)) = packed_float4(_S1736) ;
+            *((&kernelContext_217)->colliders_0+(_S1741 + 3U)) = packed_float4(float4(_S1726, 0.0f, 0.0f, _S1726)) ;
+            uint _S1743 = 2U * fc_4;
+            *((&kernelContext_217)->collider_info_0+_S1743) = packed_uint4(uint4(4294967295U, fs_1, 2U, (uint4(*((&kernelContext_217)->collider_info_0+_S1743)) ).w)) ;
+            *((&kernelContext_217)->collider_info_0+(_S1743 + 1U)) = packed_uint4(uint4((as_type<uint>((_S1728))), (as_type<uint>((_S1729))), (as_type<uint>((_S1726))), 0U)) ;
+            i_23 = i_23 + 1U;
+        }
+        half_2 = _S1727;
+    }
+    if(rank_0 < ((&kernelContext_217)->crush_0->max_events_0))
+    {
+        uint ev_0 = (&kernelContext_217)->crush_0->r_events_0 + 6U * rank_0;
+        *((&kernelContext_217)->crush_rw_0+ev_0) = packed_float4(float4((as_type<float>((k_70))), (as_type<float>((first_6))), (as_type<float>((flags_4 >> 4U))), _S1663.x)) ;
+        *((&kernelContext_217)->crush_rw_0+(ev_0 + 1U)) = packed_float4(float4(_S1665.xyz, mass_1)) ;
+        packed_float4 device* _S1744 = (&kernelContext_217)->crush_rw_0+(ev_0 + 2U);
+        thread Quat_0 _S1745 = orientation_1;
+        float4 _S1746 = quat_vec_0(&_S1745);
+        *_S1744 = packed_float4(_S1746) ;
+        *((&kernelContext_217)->crush_rw_0+(ev_0 + 3U)) = packed_float4(float4(v_21, _S1663.y)) ;
+        *((&kernelContext_217)->crush_rw_0+(ev_0 + 4U)) = packed_float4(float4(w_14, _S1663.z)) ;
+        *((&kernelContext_217)->crush_rw_0+(ev_0 + 5U)) = packed_float4(float4(half_2, volume_1)) ;
+    }
+    float3 park_0 = float3(float(_S1664 % 1024U) * (&kernelContext_217)->crush_0->park_step_0, (&kernelContext_217)->crush_0->park_y_0, float(_S1664 / 1024U) * (&kernelContext_217)->crush_0->park_step_0);
+    thread Quat_0 _S1747 = orientation_1;
+    write_body_0(_S1664, park_0, 0.0f, &_S1747, _S1672, 0U, _S1672, _S1672, &kernelContext_217);
     return;
 }
 
 [[kernel]] void fr_crush_end(uint3 id_81 [[thread_position_in_grid]], FractureParams_0 constant* params_87 [[buffer(0)]], uint device* work_87 [[buffer(4)]], packed_float4 device* frames_87 [[buffer(6)]], packed_float4 device* bodies_87 [[buffer(7)]], packed_float4 device* chunks_87 [[buffer(1)]], uint device* sort_87 [[buffer(11)]], atomic<uint> device* atom_87 [[buffer(5)]], Record_natural_0 device* manifolds_87 [[buffer(10)]], packed_float4 device* loads_87 [[buffer(12)]], packed_uint4 device* bonds_88 [[buffer(2)]], uint device* args_87 [[buffer(13)]], uint device* info_87 [[buffer(15)]], ScanParams_0 constant* scan_87 [[buffer(14)]], packed_float4 device* parts_87 [[buffer(3)]], packed_float4 device* colliders_87 [[buffer(8)]], packed_uint4 device* collider_info_87 [[buffer(9)]], packed_float4 device* view_chunks_87 [[buffer(17)]], ViewParams_0 constant* view_87 [[buffer(16)]], packed_float4 device* objects_87 [[buffer(18)]], uint device* shot_bodies_87 [[buffer(20)]], float device* lines_87 [[buffer(19)]], packed_float4 device* geometry_87 [[buffer(21)]], packed_float4 device* shots_87 [[buffer(22)]], packed_float4 device* lp_87 [[buffer(24)]], packed_float4 device* ext_89 [[buffer(23)]], packed_float4 device* engine_contacts_87 [[buffer(25)]], CrushParams_0 constant* crush_87 [[buffer(28)]], packed_float4 device* crush_rw_87 [[buffer(27)]], packed_float4 device* crush_tab_87 [[buffer(26)]])
 {
-    thread KernelContext_0 kernelContext_217;
-    (&kernelContext_217)->params_0 = params_87;
-    (&kernelContext_217)->work_0 = work_87;
-    (&kernelContext_217)->frames_0 = frames_87;
-    (&kernelContext_217)->bodies_0 = bodies_87;
-    (&kernelContext_217)->chunks_0 = chunks_87;
-    (&kernelContext_217)->sort_0 = sort_87;
-    (&kernelContext_217)->atom_0 = atom_87;
-    (&kernelContext_217)->manifolds_0 = manifolds_87;
-    (&kernelContext_217)->loads_0 = loads_87;
-    (&kernelContext_217)->bonds_0 = bonds_88;
-    (&kernelContext_217)->args_0 = args_87;
-    (&kernelContext_217)->info_0 = info_87;
-    (&kernelContext_217)->scan_0 = scan_87;
-    (&kernelContext_217)->parts_0 = parts_87;
-    (&kernelContext_217)->colliders_0 = colliders_87;
-    (&kernelContext_217)->collider_info_0 = collider_info_87;
-    (&kernelContext_217)->view_chunks_0 = view_chunks_87;
-    (&kernelContext_217)->view_0 = view_87;
-    (&kernelContext_217)->objects_0 = objects_87;
-    (&kernelContext_217)->shot_bodies_0 = shot_bodies_87;
-    (&kernelContext_217)->lines_0 = lines_87;
-    (&kernelContext_217)->geometry_0 = geometry_87;
-    (&kernelContext_217)->shots_0 = shots_87;
-    (&kernelContext_217)->lp_0 = lp_87;
-    (&kernelContext_217)->ext_0 = ext_89;
-    (&kernelContext_217)->engine_contacts_0 = engine_contacts_87;
-    (&kernelContext_217)->crush_0 = crush_87;
-    (&kernelContext_217)->crush_rw_0 = crush_rw_87;
-    (&kernelContext_217)->crush_tab_0 = crush_tab_87;
+    thread KernelContext_0 kernelContext_218;
+    (&kernelContext_218)->params_0 = params_87;
+    (&kernelContext_218)->work_0 = work_87;
+    (&kernelContext_218)->frames_0 = frames_87;
+    (&kernelContext_218)->bodies_0 = bodies_87;
+    (&kernelContext_218)->chunks_0 = chunks_87;
+    (&kernelContext_218)->sort_0 = sort_87;
+    (&kernelContext_218)->atom_0 = atom_87;
+    (&kernelContext_218)->manifolds_0 = manifolds_87;
+    (&kernelContext_218)->loads_0 = loads_87;
+    (&kernelContext_218)->bonds_0 = bonds_88;
+    (&kernelContext_218)->args_0 = args_87;
+    (&kernelContext_218)->info_0 = info_87;
+    (&kernelContext_218)->scan_0 = scan_87;
+    (&kernelContext_218)->parts_0 = parts_87;
+    (&kernelContext_218)->colliders_0 = colliders_87;
+    (&kernelContext_218)->collider_info_0 = collider_info_87;
+    (&kernelContext_218)->view_chunks_0 = view_chunks_87;
+    (&kernelContext_218)->view_0 = view_87;
+    (&kernelContext_218)->objects_0 = objects_87;
+    (&kernelContext_218)->shot_bodies_0 = shot_bodies_87;
+    (&kernelContext_218)->lines_0 = lines_87;
+    (&kernelContext_218)->geometry_0 = geometry_87;
+    (&kernelContext_218)->shots_0 = shots_87;
+    (&kernelContext_218)->lp_0 = lp_87;
+    (&kernelContext_218)->ext_0 = ext_89;
+    (&kernelContext_218)->engine_contacts_0 = engine_contacts_87;
+    (&kernelContext_218)->crush_0 = crush_87;
+    (&kernelContext_218)->crush_rw_0 = crush_rw_87;
+    (&kernelContext_218)->crush_tab_0 = crush_tab_87;
     threadgroup array<uint, int(1024)> g_scan_87;
-    (&kernelContext_217)->g_scan_0 = &g_scan_87;
+    (&kernelContext_218)->g_scan_0 = &g_scan_87;
     threadgroup array<float, int(64)> g_il_best_87;
-    (&kernelContext_217)->g_il_best_0 = &g_il_best_87;
+    (&kernelContext_218)->g_il_best_0 = &g_il_best_87;
     uint blocks_2 = (params_87->chunk_count_0 + 1023U) / 1024U;
-    uint _S1711 = scan_new_blocks_0(&kernelContext_217);
-    uint device* _S1712 = (&kernelContext_217)->work_0+(_S1711 + blocks_2);
-    uint total_3 = *_S1712;
-    uint _S1713 = a_counters_1(&kernelContext_217);
-    atomic_store_explicit((&kernelContext_217)->atom_0+(_S1713 + 7U), *_S1712, memory_order_relaxed);
-    uint _S1714 = atomic_fetch_add_explicit((&kernelContext_217)->atom_0+(_S1713 + 9U), total_3, memory_order_relaxed);
-    if(((&kernelContext_217)->crush_0->mode_1) == 1U)
-    {
-        uint _S1715 = atomic_fetch_add_explicit((&kernelContext_217)->atom_0+(_S1713 + 8U), total_3 * (&kernelContext_217)->crush_0->fragments_0, memory_order_relaxed);
-    }
+    uint _S1748 = scan_new_blocks_0(&kernelContext_218);
+    uint device* _S1749 = (&kernelContext_218)->work_0+(_S1748 + blocks_2);
+    uint total_3 = *_S1749;
+    uint events_0 = *_S1749 / 1048576U;
+    uint _S1750 = a_counters_1(&kernelContext_218);
+    atomic_store_explicit((&kernelContext_218)->atom_0+(_S1750 + 7U), events_0, memory_order_relaxed);
+    uint _S1751 = atomic_fetch_add_explicit((&kernelContext_218)->atom_0+(_S1750 + 9U), events_0, memory_order_relaxed);
+    uint _S1752 = atomic_fetch_add_explicit((&kernelContext_218)->atom_0+(_S1750 + 8U), total_3 & 1048575U, memory_order_relaxed);
     return;
 }
 
