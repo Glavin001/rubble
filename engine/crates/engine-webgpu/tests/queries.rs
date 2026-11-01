@@ -159,8 +159,12 @@ fn grid_walk_matches_full_scan(mut sim: WgpuSim, label: &str) -> (Vec<SceneQuery
             (None, None) => {}
             (Some(g), Some(f)) => {
                 hits += 1;
-                assert_eq!(g.collider, f.collider, "{label} query {k}: grid hit collider {} vs full scan {}", g.collider, f.collider);
                 assert!((g.distance - f.distance).abs() < 1e-5, "{label} query {k}: {} vs {}", g.distance, f.distance);
+                // A sweep that starts inside two colliders hits both at 0: either is
+                // the nearest, and the walk order (not the answer) picks one.
+                if g.distance > 0.0 {
+                    assert_eq!(g.collider, f.collider, "{label} query {k}: grid hit collider {} vs full scan {}", g.collider, f.collider);
+                }
             }
             _ => panic!("{label} query {k}: grid {g:?} vs full scan {f:?}"),
         }
