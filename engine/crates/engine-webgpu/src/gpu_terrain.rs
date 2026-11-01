@@ -572,7 +572,7 @@ impl WgpuSim {
             return;
         }
         let p = &self.pipes[name];
-        pass.set_pipeline(&p.pipeline);
+        pass.set_pipeline(p.pipeline(&self.device, name));
         pass.set_bind_group(0, &p.bind, &[]);
         pass.dispatch_workgroups_indirect(&self.bufs[MPM_ARGS_BINDING], offset);
     }

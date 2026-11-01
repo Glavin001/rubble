@@ -33,12 +33,40 @@ pub const MOVED_BINDING: usize = BIND_COUNT + 2;
 pub const POSE_RECORD_BYTES: u64 = 32;
 
 struct Pipe {
-    pipeline: wgpu::ComputePipeline,
+    /// Built on the first dispatch ([`Pipe::pipeline`]): a world compiles only the
+    /// kernels it runs, not every character, vehicle, soft-body and terrain kernel.
+    pipeline: std::sync::OnceLock<wgpu::ComputePipeline>,
+    wgsl: String,
     bind: wgpu::BindGroup,
     dynamic_pass: bool,
     /// Kept so bind groups can be rebuilt when a buffer is replaced (hull growth).
     layout: wgpu::BindGroupLayout,
     bindings: Vec<u32>,
+}
+
+impl Pipe {
+    fn pipeline(&self, device: &wgpu::Device, name: &str) -> &wgpu::ComputePipeline {
+        self.pipeline.get_or_init(|| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl(self.wgsl.as_str().into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(name),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some(name),
+                        bind_group_layouts: &[Some(&self.layout)],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &module,
+                entry_point: None,
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        })
+    }
 }
 
 fn make_bind_group(
@@ -688,30 +716,13 @@ impl WgpuSim {
                 label: Some(&name),
                 entries: &entries,
             });
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(&name),
-                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-            });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(&name),
-                layout: Some(
-                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some(&name),
-                        bind_group_layouts: &[Some(&layout)],
-                        immediate_size: 0,
-                    }),
-                ),
-                module: &module,
-                entry_point: None,
-                compilation_options: Default::default(),
-                cache: None,
-            });
             let bindings: Vec<u32> = binds.iter().map(|b| b.index).collect();
             let bind = make_bind_group(&device, name, &layout, &bindings, &bufs);
             pipes.insert(
                 name.clone(),
                 Pipe {
-                    pipeline,
+                    pipeline: std::sync::OnceLock::new(),
+                    wgsl,
                     bind,
                     dynamic_pass: binds.iter().any(|b| b.index == 22),
                     layout,
@@ -2446,7 +2457,7 @@ impl WgpuSim {
             .pipes
             .get(name)
             .unwrap_or_else(|| panic!("missing {name}"));
-        pass.set_pipeline(&p.pipeline);
+        pass.set_pipeline(p.pipeline(&self.device, name));
         if p.dynamic_pass {
             let idx = pass_idx.unwrap_or(0);
             pass.set_bind_group(0, &p.bind, &[idx * PASS_ALIGN as u32]);
@@ -2465,7 +2476,7 @@ impl WgpuSim {
         pass_idx: Option<u32>,
     ) {
         let p = &self.pipes[name];
-        pass.set_pipeline(&p.pipeline);
+        pass.set_pipeline(p.pipeline(&self.device, name));
         if p.dynamic_pass {
             pass.set_bind_group(0, &p.bind, &[pass_idx.unwrap_or(0) * PASS_ALIGN as u32]);
         } else {
@@ -2478,12 +2489,13 @@ impl WgpuSim {
         if !self.wg_allows("solve_primal_color") {
             return;
         }
-        let p = &self.pipes[if self.compact_contacts {
+        let name = if self.compact_contacts {
             "solve_primal_color_compact"
         } else {
             "solve_primal_color"
-        }];
-        pass.set_pipeline(&p.pipeline);
+        };
+        let p = &self.pipes[name];
+        pass.set_pipeline(p.pipeline(&self.device, name));
         pass.set_bind_group(0, &p.bind, &[color * PASS_ALIGN as u32]);
         pass.dispatch_workgroups_indirect(&self.bufs[23], (color as u64) * 12);
     }
