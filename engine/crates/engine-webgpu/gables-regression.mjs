@@ -11,7 +11,7 @@ export async function runGablesRegression({ initial, submit, read, progress, bat
   for (const [checkpoint, target] of checkpoints.entries()) {
     while (steps < target) {
       const end = Math.min(target, steps + batchSize);
-      while (steps < end) { submit(); steps++; }
+      while (steps < end) { await submit(); steps++; }
       await progress(steps);
     }
     const { bytes, counters } = await read();

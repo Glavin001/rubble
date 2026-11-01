@@ -34,7 +34,7 @@ Paths are under `engine/crates/engine-webgpu/`.
 
 | Page | JS host | Step | Wasm | Renders from |
 |---|---|---|---|---|
-| `demo.html` | its own (dispatch list `K`, per-URL kernel routing, RUBSNAP1 scenes) | hand-written | vehicle-wasm (constants) | b0, b2 |
+| `demo.html` | its own (dispatch list `K`, per-URL kernel routing, RUBSNAP1 scenes); now `World` | hand-written | vehicle-wasm (constants) | b0, b2 |
 | `vehicle.html` | `world-host.mjs`, `vehicle.mjs`, `soft.mjs`, guidance | replays `RigidStep` | vehicle-wasm | b0, b2, b31; buggy renderer |
 | `softbody.html` | WorldHost, SoftHost, VehicleHost | `RigidStep` | vehicle-wasm | b0, b2, b31, b32; GPU skinning |
 | `motion.html` | WorldHost (characters, projectiles, kinematics) | `RigidStep` | vehicle-wasm | b0, b2 |
@@ -93,7 +93,8 @@ The tests are:
   (`vehicle_damage`, `rig.rs`); the wasm layer now exposes them.
 - GPU buffer handles for renderers. These are reachable only through `World::sim()`.
 - `demo.html`'s benchmark harness: kernel variants, per-kernel timestamps, RUBSNAP1
-  scenes.
+  scenes. Added: `WorldDef.features` (the `ENGINE_*` switches), `GpuTiming`
+  (`Frame::gpu_time`) and `World::import_snapshot`.
 - The fracture lab's sliced and overlapped stepping and its contact inspection.
 
 ## Progress
@@ -346,6 +347,93 @@ Each page moves in its own commit.
   - Frames carry the open areas' live heights every coupled step
     (`TerrainDef::surface`). The page draws from the buffer and uses the
     copy only for the switch error.
+- **demo.html.** Every scene runs on `World`: the built scenes (wall, ring,
+  gables, pyramid, pile, columns, ring110k, gables506k), the RUBSNAP1 scenes (the
+  joint scenes and the legacy scenes), the joint controls, `bench=1` / `bench=only`,
+  `check=ring|gables`, `stopAt`, the sleep toggle and the colour modes. The page's
+  dispatch list `K`, its kernel routing, buffer table and pass table are gone: the
+  step is `World::step` (engine-exec's `rigid_plan`). The page keeps rendering
+  (instanced boxes from the world's body and collider buffers, bound in place),
+  camera, input, HUD, the three-avbd timing protocol and the checks.
+  - **Scenes.** The built scenes are described in `demo-scene.mjs` (the
+    scene-builders.mjs geometry) and made with one `createBodies` call (a batch of
+    `create_bodies`, `create_shape` and `body_set_mass_data`; ground in slot 0).
+    Masses and inertias come out bit-identical to the JS host's records; positions
+    agree to 1e-6 m after the first step. The RUBSNAP1 files go to Rust whole:
+    `World::import_snapshot` rebuilds their bodies, shapes (spheres, capsules,
+    boxes, world-space planes) and joints through World's own calls.
+    `JointDesc::from_gpu` inverts `to_gpu` exactly (it refuses records with
+    solver state), so the joint records come back bit for bit (tested on a
+    hinge with a motor, a broken drag slot and a plane). Broken records (the
+    exporter's released drag joint) are skipped.
+  - **Joint controls** (`joint-interaction.mjs`) call World: the drag is a
+    `createBallJoint` from the mouse body (5000 N/m, no angular rows, arm 1),
+    moved with `bodySetTransform` and removed with `destroyJoint`; F is
+    `bodySetType` + `bodySetMassData` on the parked projectile, which
+    `World::body_set_bullet` (new) marks for continuous collision while it is
+    static; motors and servos are `jointSetDrive`.
+  - **Kernel variants** map onto `WorldDef` (`demo-config.mjs`): `contacts` →
+    `ContactStorage`; `sparse`, `colors=full`, `rounds=full`, `persistence`,
+    `hashInsert`, `reuse`, `np`, `persist`, `repair`, `rest`, `grid` →
+    `EngineFeatures` (`WorldDef.features`, the native `ENGINE_*` controls). The
+    page's defaults are the shipped `EngineFeatures` with the ring's sparse start
+    10, as before, and persistent contacts (World's default too). `endpoints`
+    follows the storage in Rust (pairs when persistent) and its other value is
+    refused. Dropped, with the reason in the error: `coloring=rebuild` (colouring
+    from scratch each step), `prefix=serial` (one-workgroup colour-tile prefix),
+    `packing=atomic` (`pack_color_lists`), `adjacency=append` (`csr_sort_append`)
+    and `profile=detail|graph|colors` (the JS host's own pass splits). Their
+    default values are still accepted. `order=morton` (an upload order) and `ccd`
+    are page settings, as before.
+  - **Timing.** `bench=1` keeps the three-avbd protocol (2 × 5 batches of 10
+    steps, coverage checked before and after, outside the window); each step is
+    `World::step` with its readback, as on every page. The per-phase GPU split
+    comes from `GpuTiming::Phases`: WgpuSim gives each phase of the plan its own
+    pass with timestamps, World resolves them in a submission after the step's
+    and copies them with the readback, and each frame carries `gpu_time`. Live
+    play uses `GpuTiming::Step` (one pair around the step) for the HUD's GPU
+    ms/step, as the JS host timed its pass. Empty passes are not timed (Dawn and
+    Metal leave their timestamps zero); native Metal also leaves the device's
+    first pair and a per-phase step's last pass unwritten, which frames report
+    as `unmeasured`.
+  - **World host cost.** The ring's 110k awake bodies made `World::poll` cost
+    12 ms a step in wasm: sorting the moved list and the coalescing map. A dense
+    moved list is now placed by slot, and a single polled frame skips the map
+    (same output): 12 → ~3 ms. The rest is World's moved-pose readback (3.5 MB
+    a step at 110k awake), which the JS page never read.
+  - **Tests.** `persistence_schedule.test.mjs` sliced the JS encoder. Its
+    schedule properties (persistence after narrowphase, one pack before CSR and
+    the solve, the persist list's slots 70/71, carried rest pairs, local repair,
+    the sleep gate) are now a Rust test of the plan every host runs
+    (`rigid_plan::tests::every_mode_keeps_its_contact_dependencies`); the node
+    file tests the URL → `WorldDef` mapping. `demo_profiling.test.mjs` keeps the
+    coverage, benchmark-window, phase-summary and HUD tests against the page's
+    new code; its JS timestamp-pairing tests became Rust tests of
+    `StepGpuTime::from_ticks` and `tests/gpu_timing.rs`. `spatial_order.test.mjs`
+    checks `packDemoBodies` instead of the sliced upload.
+  - **Checks.** `motion-check.mjs demo ring` passes (wall smash to step 180 with
+    and without CCD, ring480 and reset with CCD off and on). `check=gables` passes
+    (240 steps, unhit drift 0.117 / 0.329 m against the reference 0.118 / 0.328).
+  - **Differences.**
+    - The JS host uploaded the snapshot's static records as exported, with their
+      initial pose (x⁻) at the origin; World writes initial = pose for every
+      body, as the JS host did for its built scenes. The kernels read x⁻ as the
+      body's step-start pose, so the old page's first steps of the joint scenes
+      saw static bodies "moving" from the origin: 48 contacts against 4 in step 1
+      of `joints`, 3,491 against 1,296 at step 30 of `ragdolls10k`. The legacy
+      scenes (statics on planes) agree: equal contact counts after step 1.
+    - World computes the grid cell from moving colliders up to 2 m (as natively);
+      the JS page used every collider but the ground. The wall's 2 m ball makes
+      the cell 4.0 m instead of 1.12 m. The broadphase is conservative, so the
+      pairs are the same, in another order.
+    - The snapshot scenes run the CCD passes once the projectile is launched
+      (World schedules them when a body carries CCD); the JS host ran them from
+      the start. With no CCD body they do nothing.
+    - A capacity overflow fails the frame (`World::poll`); the JS page warned and
+      went on.
+    - Built scenes match the JS host for the first steps and then diverge as
+      chaotic piles do (wall: 1.8 cm after 30 steps).
+
 - **world-host.mjs, terrain-host.mjs.** No page imports them any more. They
   stay, as do `RigidStep` and `TerrainStep` in engine-vehicle-wasm, which
   `tests/terrain_plan.test.mjs` still checks against engine-terrain's plan;
@@ -399,6 +487,33 @@ steps. It covers the host's encode, submit and readback as well as the GPU work.
 | showcase.html (drive: the barrage) | 2.29 / 2.06 / 2.08 | 2.82 / 2.33 / 2.29 |
 | showcase.html?scene=drive1 | 2.30 | 2.81 |
 | showcase.html?scene=bts (300 Hz) | 1.55 | 1.61 |
+| demo.html (wall smash) | 0.90 | 1.14 |
+| demo.html?scene=ring (9k) | 1.86 | 2.28 |
+| demo.html?scene=gables (6.7k, sleep on) | 0.59 | 0.85 |
+| demo.html?scene=pyramid (settled) | 3.38 | 0.020 |
+| demo.html?scene=pile (settled) | 1.40 | 0.048 |
+| demo.html?scene=columns (settled) | 2.03 | 0.38 |
+| demo.html?scene=ring110k | 9.98 | 10.28 |
+| demo.html?scene=ring110k&sleep=on | 6.62 | 7.53 |
+| demo.html?scene=gables506k | 29.29 | 33.49 |
+| demo.html?scene=joints | 1.73 | 1.99 |
+| demo.html?scene=ragdolls10k | 4.43 | 3.72 |
+| demo.html?scene=hingechains10k | 1.91 | 1.32 |
+| demo.html?scene=motorfield10k | 1.51 | 1.31 |
+| demo.html?scene=legacyScatter | 3.26 | 3.08 |
+| demo.html?scene=legacyGrid10k (settled) | 3.73 | 0.022 |
+| demo.html?scene=legacyGrid100k (settled) | 4.83 | 0.32 |
+| demo.html?scene=ring110k&bench=only (three-avbd protocol; GPU span) | 12.75 (12.28) | 13.66 (12.14) |
+| demo.html?scene=gables506k&bench=only (three-avbd protocol; GPU span) | 34.84 (34.39) | 37.02 (32.69) |
+
+demo.html's "before" is the old page with a frame-locked `__step(n)` added (each
+step with its counter readback, 3 in flight, as World's default ring). Settled
+scenes are mostly or wholly asleep: World skips their steps or steps only the
+awake islands' bookkeeping, the JS host ran every pass. The awake scenes cost
+3-14 % more per step on World: the GPU work is the same (the `bench=only` GPU
+spans agree within 5 %), and World reads back every moved body's pose each step
+(3.5 MB at 110k awake, 16 MB at 506k). The joint scenes are cheaper on World
+partly because their first steps differ (see the demo.html entry).
 
 `motion.html`'s CCD gallery is at rest until a volley: `World` skips a step when
 nothing is awake and nothing was written, and the JS host never did.
@@ -451,5 +566,49 @@ heights back every step, and the page reads the buggy's chassis with
 - **Drawing is cheap.** Drawing the 110k boxes takes about 1.4 ms a frame, so a
   step that costs nothing at rest would allow 600+ FPS.
 
-On `World`, a fully asleep world skips the GPU step entirely, and a mostly asleep
-one should cost in proportion to its awake bodies.
+On `World` (same URL, same tool, `tools/ring-sleep.js`; the JS host run again
+beside it, same session):
+
+| Time | World: step | awake | GPU ms/step | render ms/frame | max FPS | JS host (rerun): step | awake | GPU ms/step |
+|---|---|---|---|---|---|---|---|---|
+| 2 s | 117 | 51,465 | 10.8 | 3.8 | 266 | 117 | 50,069 | 11.0 |
+| 8 s | 477 | 57,754 | 9.0 | 3.8 | 266 | 474 | 58,102 | 9.3 |
+| 20 s | 1,197 | 1,254 | 6.0 | 2.8 | 357 | 1,195 | 2,997 | 6.1 |
+| 60 s | 3,719 | 546 | 6.0 | 3.1 | 322 | 3,337 | 521 | 5.1 |
+| 300 s | 17,982 | 546 | 5.6 | 3.3 | 302 | 16,214 | 521 | 9.4 |
+
+"Render ms/frame" is the CPU time of one rAF callback (the page's `frameMs`): on
+World it includes `world.step()` and `world.poll()`, on the JS host only its
+encode. The JS rerun lost ~25 s to another GPU client at 62-80 s (2 steps/s).
+
+Findings:
+
+- **The bodies that never sleep are falling into the void.** On both hosts the
+  last 500-550 awake bodies are bricks the ball threw past the edge of the ground
+  slab (180 m half extent): at 20 s they are 70-460 m from the centre and already
+  below the ground (median y −190 m, 60-100 m/s); at 60 s at y ≈ −11,700 m and
+  490 m/s; at 120 s at y ≈ −58,000 m and 1,130 m/s, the same bodies, falling
+  freely. A body in free fall never meets the sleep thresholds, so neither host
+  ever reaches an all-asleep world, and World never gets to skip a step. Making
+  them stop is a scene or physics decision, not done here: a larger ground, a kill
+  depth that removes bodies (a World feature), or no change.
+- **The cost does not grow with time.** On both hosts the GPU ms/step jumps
+  between plateaus of about 5 ms and about 9.4 ms lasting tens of seconds (World:
+  5.1-6.4 → 7.6-9.5 at 134-170 s and 206-254 s; JS host: 4.7-5.6 → 7.2-9.4 at
+  140-182 s and from 230 s), while the awake count, the contact count (1,025,884)
+  and the manifold count stay exactly the same. A per-phase split taken at 20, 60
+  and 120 s (`__profileNow`) is 5.8-6.3 ms each time, with no phase growing. The
+  JS host's "5 → 9.4 ms" in the table above is one of these plateaus; it is not
+  engine work and most likely the GPU's clock state or another GPU client.
+- **Why a mostly asleep step still costs ~5 ms.** With 507 awake bodies the
+  phases are: broadphase 0.4, CCD passes 1.0 (the ball), narrowphase 1.1, warm
+  start 1.1, graph 0.3, primal 0.2, dual 0.95, sleep 0.6-0.8 ms. The resting
+  contacts of the 110k sleeping bricks (1.03M contacts in 267k manifolds) are
+  carried and warm-started every step (`rest=carry`), and the dual pass and the
+  narrowphase scan run over them: the step's cost follows the resting contacts,
+  not the awake bodies. Making it follow the awake bodies would change those
+  passes (a design decision).
+- **World's frame cost.** World's render frames take 2.6-3.8 ms against the JS
+  host's 1.4-1.9 ms: the extra is World's host step and poll (moved-pose readback
+  of the awake bodies, frame decode). Max FPS is ~300 instead of ~600; the GPU,
+  not the frame, bounds the step rate here.

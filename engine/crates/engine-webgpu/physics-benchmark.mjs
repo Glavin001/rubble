@@ -1,5 +1,6 @@
 // Match pinned three-avbd compare(... rounds:2, batches:5, perBatch:10,
-// warmup:0). The caller builds the scene and completes its 60-step lead-in.
+// warmup:0). `step` may return a Promise (World steps only while a readback
+// slot is free, so a batch can wait on readbacks: part of its cost). The caller builds the scene and completes its 60-step lead-in.
 // Keep every sample: the best round alone hides throttling and competing work.
 // Validate outside timed batches: a fast result with missing work is not a result.
 // allowSleep: the run measures the production configuration with sleeping on, so
@@ -27,12 +28,12 @@ export async function measurePhysicsBatches({ step, drain, now = () => performan
   await drain();
   const rounds = [];
   for (let round = 0; round < 2; round++) {
-    for (let i = 0; i < 3; i++) step();
+    for (let i = 0; i < 3; i++) await step();
     await drain();
     const samplesMs = [];
     for (let batch = 0; batch < 5; batch++) {
       const start = now();
-      for (let i = 0; i < 10; i++) step();
+      for (let i = 0; i < 10; i++) await step();
       await drain();
       const ms = (now() - start) / 10;
       if (!Number.isFinite(ms) || ms <= 0) {

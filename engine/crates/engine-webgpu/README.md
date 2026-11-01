@@ -110,6 +110,13 @@ python3 -m http.server 8765 --bind 127.0.0.1 --directory crates/engine-webgpu
 ```
 
 Open `http://127.0.0.1:8765/demo.html?scene=ring110k`. Reload after each export.
+`demo.html` runs on `World` (engine-world-wasm, rebuilt with `wasm-pack`, see
+`../../docs/web-rust-host.md`): its step is `World::step`, and its URL switches are
+`WorldDef` settings (`contacts`, `features` = the native `ENGINE_*` controls,
+`gpuTiming`); `demo-config.mjs` maps them. The JS host's experiments with no Rust
+path (`coloring=rebuild`, `prefix=serial`, `packing=atomic`, `adjacency=append`,
+`endpoints=` against the contact storage, `profile=detail|graph|colors`) are refused
+with the reason. The paragraphs below record measurements made on the JS host.
 Normal playback runs continuously without benchmark pauses or resets. To measure,
 add `&bench=1`; playback pauses after the impact, then restarts after measurement.
 In that mode the console emits `BENCH` with wall time, active bodies, contact count and overflow.
@@ -193,9 +200,9 @@ Use `?scene=gables506k&check=gables` for the 240-step full-size gables check.
 Add `&bench=1` to either check to measure wall time after validation. Rendering
 intentionally pauses during a check and stops at its result.
 Use the page's live-demo link to resume ordinary playback. The page must finish with `PASS`; the console emits `RING_CHECK` or `GABLES_CHECK` samples
-and a final `REGRESSION` report. Add `&batch=1` to drain the queue after each step.
-Both modes intentionally avoid CPU counter readbacks between checkpoints, so they
-exercise GPU warm-start metadata rather than relying on cached host counts.
+and a final `REGRESSION` report (also `window.__CHECK__`). `&batch=1` reads bodies
+after every step instead of every ten. On `World` every step reads its counters back
+and plans the next from the latest polled ones.
 
 Coloring reuses valid colors by default and compacts local priority maxima before
 repairing conflicts. To run the diagnostic control, append `&coloring=rebuild` to
@@ -342,8 +349,9 @@ The probe uses its own device/buffers and does not modify the physics backend.
 ## Joint scenes in the browser
 
 `demo.html?scene=joints` (also `ragdolls`, `ragdolls10k`, `hingechains10k`, `motorfield10k`)
-loads scenes built by `engine-scenes` and exported as raw GPU records
-(`cargo run -p engine-scenes --release --bin scene_export`), so the browser steps exactly
-the records the native tests use. Alt-drag grabs a body, `F` fires a ball, `M` toggles
+loads scenes built by `engine-scenes` and exported as RUBSNAP1 records
+(`cargo run -p engine-scenes --release --bin scene_export`); `World::import_snapshot`
+rebuilds them as bodies, shapes and joints, so the browser steps the records the native
+tests use. Alt-drag grabs a body, `F` fires a ball, `M` toggles
 motors. `node tools/record-joints.mjs` records each scene in headless Chrome WebGPU to
 `test-results/joints/`. See `engine/docs/JOINTS.md`.
