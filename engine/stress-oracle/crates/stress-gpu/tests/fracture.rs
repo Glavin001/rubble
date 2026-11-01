@@ -270,7 +270,7 @@ fn one_chip_off_a_large_body() {
     let bodies = f.chunk_bodies(&gpu);
     assert_eq!(bodies[0], 1, "the chip takes the first free slot");
     assert!(bodies[1..].iter().all(|&b| b == 0), "the rest keeps the body");
-    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 0, pieces: 1, error: 0, split_frames: 1 });
+    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 0, pieces: 1, error: 0, split_frames: 1, ..Default::default() });
 }
 
 /// A host break (`break_bonds_sparse`, support loss) issued while an earlier frame's split
@@ -299,12 +299,12 @@ fn host_breaks_split_the_piece_an_unread_split_made() {
     gpu.queue.submit([enc.finish()]);
     assert_eq!(f.chunk_bodies(&gpu), vec![0, 0, 1, 2], "chunk 3 splits off the piece frame 1 made");
     assert_eq!(f.bonds_intact(&gpu), vec![true, false, false]);
-    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 2, pieces: 2, error: 0, split_frames: 2 });
+    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 2, pieces: 2, error: 0, split_frames: 2, ..Default::default() });
     // A frame with no host breaks dispatches none and splits nothing.
     let mut enc = gpu.device.create_command_encoder(&Default::default());
     f.encode_split(&gpu, &mut enc, 3);
     gpu.queue.submit([enc.finish()]);
-    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 2, pieces: 2, error: 0, split_frames: 2 });
+    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 2, pieces: 2, error: 0, split_frames: 2, ..Default::default() });
 }
 
 /// A device allowing 8 storage buffers per shader stage (WebGPU's default), on the
