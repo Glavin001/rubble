@@ -1076,16 +1076,29 @@ void boxTriangle(Collider col, BodyState ob, float3 a, float3 b, float3 c, out f
 
 // Per collision triangle: its deepest thin obstacle, and the (up to four) nodes
 // that chose it in soft_collide_nodes (the triangle side of their contacts).
+// One 64-lane workgroup per triangle: lane 0 meets the obstacles; every lane
+// scans a contiguous share of each nearby body's nodes for contacts naming the
+// triangle, and lane 0 takes the first TRI_NODE_CONTACTS in node order (what a
+// single thread walking the nodes in order would take).
+static const uint SOFT_TRI_LANES = 64u;
+groupshared uint gsTriHits[SOFT_TRI_LANES * 4u];
+groupshared uint gsTriHitCount[SOFT_TRI_LANES];
+groupshared uint gsTriFound;
+groupshared uint gsTriMarked;
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
+void soft_collide_tris(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
-    uint t = dispatchIndex(tid);
+    uint t = softGroupBody(gid), lane = lid.x;
     if (t >= softTriCount()) return;
     uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * t;
-    gSoftData[tc] = float4(0, 0, 0, asfloat(SOFT_NONE));
-    for (uint m = 0u; m < TRI_NODE_CONTACTS; m++) gSoftData[tc + 3u + 3u * m] = float4(0, 0, 0, asfloat(SOFT_NONE));
-    gSoftData[tc + TRI_BOUND_SLOT] = float4(1e30, 1e30, 0, 0);
+    if (lane == 0u)
+    {
+        gSoftData[tc] = float4(0, 0, 0, asfloat(SOFT_NONE));
+        for (uint m = 0u; m < TRI_NODE_CONTACTS; m++) gSoftData[tc + 3u + 3u * m] = float4(0, 0, 0, asfloat(SOFT_NONE));
+        gSoftData[tc + TRI_BOUND_SLOT] = float4(1e30, 1e30, 0, 0);
+    }
     if (!softContactsOn()) return;
     uint4 tri = SU(softTriBase() + t);
     // Anti-clip-only triangles (non-collidable) still keep their nodes' sides,
@@ -1099,96 +1112,120 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
     float delta = triThickness(t, tri);
     float travel = max(max(length(a - ba.initialPos), length(b - bb.initialPos)), length(c - bc.initialPos));
     float3 lo = min(min(a, b), c), hi = max(max(a, b), c);
-    bool marked = false;
-
-    // Thin obstacles.
-    float bestGap = 1e30;
-    uint nObs = collide ? softObstacleCount() : 0u;
-    for (uint k = 0u; k < nObs; k++)
+    if (lane == 0u)
     {
-        uint ci = SU(softObstacleBase() + k).x;
-        Collider col = gColliders[ci];
-        BodyState ob = gBodies[col.body];
-        // Boxes apart by more than the contact reach on an axis cannot touch.
-        float reach = delta + travel + 0.05;
-        float3 olo, ohi;
-        obstacleBounds(col, ob, olo, ohi);
-        if (any(olo > hi + reach) || any(ohi < lo - reach)) continue;
-        float r = col.params.x;
-        float3 q, cs, w;
-        bool inside = false;
-        float3 insideN = float3(0, 1, 0);
-        if (col.shape == SHAPE_SPHERE)
+        gsTriFound = 0u;
+        gsTriMarked = 0u;
+        // Thin obstacles.
+        float bestGap = 1e30;
+        uint nObs = collide ? softObstacleCount() : 0u;
+        for (uint k = 0u; k < nObs; k++)
         {
-            cs = transformPoint(ob.position, ob.orientation, col.localPos);
-            q = closestOnTriangle(cs, a, b, c, w);
+            uint ci = SU(softObstacleBase() + k).x;
+            Collider col = gColliders[ci];
+            BodyState ob = gBodies[col.body];
+            // Boxes apart by more than the contact reach on an axis cannot touch.
+            float reach = delta + travel + 0.05;
+            float3 olo, ohi;
+            obstacleBounds(col, ob, olo, ohi);
+            if (any(olo > hi + reach) || any(ohi < lo - reach)) continue;
+            float r = col.params.x;
+            float3 q, cs, w;
+            bool inside = false;
+            float3 insideN = float3(0, 1, 0);
+            if (col.shape == SHAPE_SPHERE)
+            {
+                cs = transformPoint(ob.position, ob.orientation, col.localPos);
+                q = closestOnTriangle(cs, a, b, c, w);
+            }
+            else if (col.shape == SHAPE_CAPSULE)
+            {
+                float3 ax = quatRotate(quatMul(ob.orientation, col.localRot), float3(0.0, col.params.y, 0.0));
+                float3 mid = transformPoint(ob.position, ob.orientation, col.localPos);
+                closestSegTriangle(mid - ax, mid + ax, a, b, c, q, cs, w);
+            }
+            else if (col.shape == SHAPE_BOX)
+            {
+                r = 0.0;
+                boxTriangle(col, ob, a, b, c, q, cs, w, inside, insideN);
+            }
+            else continue;
+            float3 dv = q - cs;
+            float dist = length(dv);
+            float gap = inside ? -dist : dist - r;
+            if (gap > delta + travel + 0.05 || gap >= bestGap) continue;
+            float3 n = inside ? insideN : (dist > 1e-5 ? dv / dist : normalize(cross(b - a, c - a)));
+            // Touching or crossing (no direction from the gap): point away from the obstacle.
+            if (!inside && dist <= 1e-5 && dot(n, (a + b + c) / 3.0 - cs) < 0.0) n = -n;
+            bestGap = gap;
+            // Gap at the step start (triangle at x⁻) for the stabilised constraint.
+            float3 q0 = w.x * ba.initialPos + w.y * bb.initialPos + w.z * bc.initialPos;
+            gSoftData[tc] = float4(n, asfloat(ci));
+            gSoftData[tc + 1u] = float4(cs + n * r, dot(q0 - (cs + n * r), n) - delta);
+            gSoftData[tc + 2u] = float4(w, delta);
+            gsTriMarked = 1u;
         }
-        else if (col.shape == SHAPE_CAPSULE)
-        {
-            float3 ax = quatRotate(quatMul(ob.orientation, col.localRot), float3(0.0, col.params.y, 0.0));
-            float3 mid = transformPoint(ob.position, ob.orientation, col.localPos);
-            closestSegTriangle(mid - ax, mid + ax, a, b, c, q, cs, w);
-        }
-        else if (col.shape == SHAPE_BOX)
-        {
-            r = 0.0;
-            boxTriangle(col, ob, a, b, c, q, cs, w, inside, insideN);
-        }
-        else continue;
-        float3 dv = q - cs;
-        float dist = length(dv);
-        float gap = inside ? -dist : dist - r;
-        if (gap > delta + travel + 0.05 || gap >= bestGap) continue;
-        float3 n = inside ? insideN : (dist > 1e-5 ? dv / dist : normalize(cross(b - a, c - a)));
-        // Touching or crossing (no direction from the gap): point away from the obstacle.
-        if (!inside && dist <= 1e-5 && dot(n, (a + b + c) / 3.0 - cs) < 0.0) n = -n;
-        bestGap = gap;
-        // Gap at the step start (triangle at x⁻) for the stabilised constraint.
-        float3 q0 = w.x * ba.initialPos + w.y * bb.initialPos + w.z * bc.initialPos;
-        gSoftData[tc] = float4(n, asfloat(ci));
-        gSoftData[tc + 1u] = float4(cs + n * r, dot(q0 - (cs + n * r), n) - delta);
-        gSoftData[tc + 2u] = float4(w, delta);
-        marked = true;
     }
+    GroupMemoryBarrierWithGroupSync();
 
-    // Nodes of other soft bodies that chose this triangle.
-    uint found = 0u;
+    // Nodes (other bodies', and its own: self-collision, filtered on the node
+    // side) whose contacts name this triangle.
     // The nearest node in front of the face, on its front and on its back.
     float2 nearest = float2(1e30, 1e30);
     float3 faceN = SD(softTriPlaneBase() + 2u * t).xyz;
-    uint nb = softBodyCount();
     uint np = softPairCount(sb);
-    for (uint pk = 0u; pk < np && found < TRI_NODE_CONTACTS; pk++)
+    for (uint pk = 0u; pk < np; pk++)
     {
         uint s2 = softPairAt(sb, pk);
-        // Own nodes too (self-collision, filtered on the node side).
         if (s2 == sb ? softIsRigid(sb) : !softAabbOverlaps(s2, lo - 0.3, hi + 0.3)) continue;
         uint4 r2 = softBodyRec(s2);
         uint ordBase = asuint(softBodyRec1(s2).w);
-        for (uint k = 0u; k < r2.y && found < TRI_NODE_CONTACTS; k++)
+        uint chunk = (r2.y + SOFT_TRI_LANES - 1u) / SOFT_TRI_LANES;
+        uint k0 = lane * chunk, k1 = min(k0 + chunk, r2.y);
+        uint hits = 0u;
+        for (uint k = k0; k < k1 && hits < 4u; k++)
         {
             uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * (ordBase + k);
-            for (uint j = 0u; j < NODE_CONTACTS && found < TRI_NODE_CONTACTS; j++)
+            for (uint j = 0u; j < NODE_CONTACTS && hits < 4u; j++)
             {
-                float4 s0 = SD(ns + 3u * j);
-                if (asuint(s0.w) == SOFT_NONE) break;
-                if (asuint(s0.w) != t) continue;
-                float4 s2 = SD(ns + 3u * j + 2u);
-                if (s2.y > 0.0)
-                {
-                    if (dot(s0.xyz, faceN) >= 0.0) nearest.x = min(nearest.x, s2.y);
-                    else nearest.y = min(nearest.y, s2.y);
-                }
-                gSoftData[tc + 3u + 3u * found] = float4(s0.xyz, asfloat(r2.x + k));
-                gSoftData[tc + 4u + 3u * found] = SD(ns + 3u * j + 1u);
-                gSoftData[tc + 5u + 3u * found] = s2;
-                found++;
-                marked = true;
+                uint tj = asuint(SD(ns + 3u * j).w);
+                if (tj == SOFT_NONE) break;
+                if (tj == t) { gsTriHits[4u * lane + hits] = (k << 2) | j; hits++; }
             }
         }
+        gsTriHitCount[lane] = hits;
+        GroupMemoryBarrierWithGroupSync();
+        if (lane == 0u)
+        {
+            uint found = gsTriFound;
+            for (uint l = 0u; l < SOFT_TRI_LANES && found < TRI_NODE_CONTACTS; l++)
+            {
+                for (uint m = 0u; m < gsTriHitCount[l] && found < TRI_NODE_CONTACTS; m++)
+                {
+                    uint code = gsTriHits[4u * l + m];
+                    uint k = code >> 2, j = code & 3u;
+                    uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * (ordBase + k);
+                    float4 s0 = SD(ns + 3u * j);
+                    float4 sg = SD(ns + 3u * j + 2u);
+                    if (sg.y > 0.0)
+                    {
+                        if (dot(s0.xyz, faceN) >= 0.0) nearest.x = min(nearest.x, sg.y);
+                        else nearest.y = min(nearest.y, sg.y);
+                    }
+                    gSoftData[tc + 3u + 3u * found] = float4(s0.xyz, asfloat(r2.x + k));
+                    gSoftData[tc + 4u + 3u * found] = SD(ns + 3u * j + 1u);
+                    gSoftData[tc + 5u + 3u * found] = sg;
+                    found++;
+                }
+            }
+            gsTriFound = found;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (gsTriFound >= TRI_NODE_CONTACTS) break;
     }
+    if (lane != 0u) return;
     gSoftData[tc + TRI_BOUND_SLOT] = float4(nearest, 0, 0);
-    if (marked)
+    if (gsTriFound > 0u || gsTriMarked != 0u)
     {
         uint ob = asuint(softBodyRec1(sb).w) - softBodyRec(sb).x;
         gSoftData[softFlagBase() + ob + tri.x] = float4(1, 0, 0, 0);
