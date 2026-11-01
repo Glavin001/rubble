@@ -87,7 +87,8 @@ pub struct FractureTables {
 #[derive(Clone, Debug, Default)]
 pub struct CrushTables {
     /// Per chunk: (capPressure, cohesion, frictionSlope, crushEnergy), (crushViscosity,
-    /// volume, crushable 0/1, -). An uncrushable chunk's material row is ignored.
+    /// volume, crushable 0/1, particles (`particles`: how many it crushes into, at least
+    /// 1)). An uncrushable chunk's material row is ignored.
     pub chunks: Vec<[[f32; 4]; 2]>,
     /// Per bond: (centroid (structure frame), area).
     pub bonds: Vec<[f32; 4]>,
@@ -101,7 +102,13 @@ pub struct CrushTables {
     pub conserve: bool,
     /// Fragments per crushed chunk (conserve): a power of two, at most 64.
     pub fragments: u32,
-    /// The reserved fragment bodies (engine body, its one box collider): the budget; a
+    /// With `conserve`: a crushed chunk's mass kept as its own count of particles (`pool`
+    /// spheres that never rotate; the host gives them a shared negative filter group so
+    /// they never collide with one another) instead of `fragments` boxes.
+    pub particles: bool,
+    /// The particles' continuous collision while fast (rubble's BODY_CCD_FAST).
+    pub particle_ccd: bool,
+    /// The reserved fragment bodies (engine body, its one box or sphere collider): the budget; a
     /// crush past it is an error (`CRUSH_ERROR_FRAGMENTS`), never a silent drop.
     pub pool: Vec<[u32; 2]>,
     /// Crushes one frame reports at most (the events' room); more is an error.
@@ -112,6 +119,9 @@ pub struct CrushTables {
     pub park_step: f32,
 }
 
+/// The crush scan packs one event over a chunk's pool entries (`fracture.slang`
+/// `CRUSH_EVENT_ONE`): a pool and a frame's entries stay under this.
+pub const CRUSH_POOL_SPAN: u32 = (1 << 20) - 1;
 /// `Counters::error` bit: a crush found the fragment pool spent.
 pub const CRUSH_ERROR_FRAGMENTS: u32 = 16;
 /// `Counters::error` bit: more crushes in a frame than `CrushTables::max_events`.
@@ -192,7 +202,7 @@ struct CrushParams {
     t_normal: u32,
     r_flow: u32,
     r_blast: u32,
-    pad0: f32,
+    particle_ccd: u32,
     pad1: f32,
 }
 
@@ -209,11 +219,20 @@ fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::B
     if t.geometry.len() != n {
         return Err("fracture crush: needs the chunks' box geometry (FractureTables::geometry)".into());
     }
-    if c.conserve && !(c.fragments.is_power_of_two() && c.fragments <= 64) {
+    if c.conserve && !c.particles && !(c.fragments.is_power_of_two() && c.fragments <= 64) {
         return Err(format!("fracture crush: {} fragments per chunk; a power of two up to 64", c.fragments));
     }
     if c.max_events == 0 {
         return Err("fracture crush: max_events must be at least 1".into());
+    }
+    // The crush scan packs a frame's events over its pool entries (`CRUSH_EVENT_ONE`).
+    if c.max_events >= 4096 || c.pool.len() >= CRUSH_POOL_SPAN as usize {
+        return Err(format!("fracture crush: {} events a frame (under 4096) and a pool of {} (under {CRUSH_POOL_SPAN})", c.max_events, c.pool.len()));
+    }
+    if c.conserve && c.particles {
+        if let Some(k) = c.chunks.iter().position(|r| r[1][2].to_bits() == 1 && !(r[1][3] >= 1.0 && r[1][3] <= 4096.0 && r[1][3].fract() == 0.0)) {
+            return Err(format!("fracture crush: chunk {k} crushes into {} particles (a whole number from 1 to 4096)", c.chunks[k][1][3]));
+        }
     }
     if c.flow && c.normals.len() != e {
         return Err(format!("fracture crush: the flow needs {e} bond normals, got {}", c.normals.len()));
@@ -263,8 +282,12 @@ fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::B
     let rw_words = (r_flow + flow_words) as u64;
     let params = CrushParams {
         enabled: 1,
-        mode: c.conserve as u32,
-        fragments: if c.conserve { c.fragments } else { 0 },
+        mode: match (c.conserve, c.particles) {
+            (false, _) => 0,
+            (true, false) => 1,
+            (true, true) => 2,
+        },
+        fragments: if c.conserve && !c.particles { c.fragments } else { 0 },
         pool_size: pool.len() as u32,
         max_events: c.max_events,
         t_bonds,
@@ -280,6 +303,7 @@ fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::B
         t_normal,
         r_flow,
         r_blast,
+        particle_ccd: (c.particles && c.particle_ccd) as u32,
         ..Default::default()
     };
     Ok((gpu.storage("fracture crush tables", &tab), storage_bytes(gpu, "fracture crush state", 16 * rw_words, wgpu::BufferUsages::empty()), gpu.uniform("fracture crush params", &params), params))
