@@ -1,5 +1,5 @@
 // Renders vibe-land's dune buggy (generated/dune-buggy/buggy-mesh.*, baked by
-// engine/scenes/dune-buggy) on every `dune_buggy` vehicle of a world-host world.
+// engine/scenes/dune-buggy) on every `dune_buggy` vehicle of a page's World.
 //
 // Each of the mesh's ~50 primitives is one instanced draw over every part that
 // uses it, on every buggy. A part is drawn
@@ -41,7 +41,7 @@ const hex = (c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
  * @param {object} o
  * @param {GPUDevice} o.device
  * @param {GPUTextureFormat} o.format
- * @param {object} o.world      world-host world, or a view of a Rust-host one: bufs[0] and
+ * @param {object} o.world      a view of the page's World: bufs[0] and
  *                               bufs[31], vehicles.entries, vlayout, soft.entries
  * @param {GPUBuffer} o.frameBuf  vehicle.html's Frame uniform (viewProj, eye, light)
  * @param {object} o.L           vehicle layout constants

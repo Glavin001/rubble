@@ -13,8 +13,6 @@ else{const {JSPI}=await import('./gpu-wait.mjs');await mod.default({module_or_pa
 // The lab's World assets (browser only: engine-world-wasm lab.rs).
 export const LabAsset=mod.LabAsset;
 
-// The JS host's plan (simulation.mjs, until it goes).
-export const Plan=mod.Plan;
 export {nearMissSettings,hullBase,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices};
 export const SAMPLES=samples();
 

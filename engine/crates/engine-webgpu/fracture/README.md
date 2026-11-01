@@ -636,8 +636,9 @@ node --test engine/crates/engine-webgpu/fracture/*.test.mjs
 cargo test --manifest-path engine/Cargo.toml -p engine-oracles --test convex_slang_cpu
 ```
 
-`simulation.test.mjs` drives the browser host with a mock WebGPU device against
-the exported WGSL (no GPU). The node tests run the lab's wasm path (build it
+`lab-sim.test.mjs` drives the page's World bookkeeping with a mock World (no GPU);
+the World side is tested in Rust (`cargo test -p engine-world`, and
+`-p engine-world-wasm --test lab`). The node tests run the lab's wasm path (build it
 first, see *Run*); the scene, bond, hull and cuboid-house logic is tested in Rust:
 
 ```sh

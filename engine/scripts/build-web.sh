@@ -133,13 +133,13 @@ done
 step "WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
 # Without the `gpu` feature: the exporter only needs the WGSL tables, not native wgpu.
 cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
-step "Fracture lab wasm"
+step "Fracture scene wasm (the unit tests; the page loads it inside the world wasm)"
 wasm-pack build crates/engine-fracture-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
-step "World wasm (engine-world-wasm: the pages' physics host, and Broadside)"
+step "World wasm (engine-world-wasm: the pages' physics host, the fracture lab's scenes, Broadside)"
 CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
-step "Stress-solver wasm (the Fracture lab's stress bond mode)"
+step "Stress-solver wasm (the Fracture lab's blast_parity, load path and local impact modes)"
 CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
   --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
 step "Stress-solver and world wasm, Asyncify builds (browsers without JSPI: Safari)"

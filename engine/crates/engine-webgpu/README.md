@@ -56,9 +56,9 @@ a million tiny uploads before the first GPU submission.
 
 ## Vehicle demo
 
-`vehicle.html` drives the same WGSL kernels through `world-host.mjs` (a port of
-`WgpuSim::step`) and `vehicle.mjs` (a thin wrapper over `engine-vehicle`'s packer and
-`VehicleHost`, compiled to wasm from `../engine-vehicle-wasm`). Run
+`vehicle.html` runs on rubble's `World` (`engine-world-wasm`, the host native and Unreal
+run; see `engine/docs/web-rust-host.md`); `vehicle.mjs` gives it `engine-vehicle`'s layout
+constants and scene builders, compiled to wasm from `../engine-vehicle-wasm`. Run
 `cargo run -p engine-webgpu --release --bin wgsl_export` first: it also writes
 `generated/vehicle_presets.json` and builds `generated/vehicle_wasm/` with `wasm-pack`
 (needs the `wasm32-unknown-unknown` target). `node --test tests/vehicle_layout.test.mjs`
@@ -82,8 +82,8 @@ See [../../docs/vehicles.md](../../docs/vehicles.md).
 
 ## Motion demo (CCD, characters, bullets)
 
-`motion.html` runs the continuous-collision, character and projectile kernels
-through `world-host.mjs` (same `wgsl_export` step as the vehicle demo):
+`motion.html` runs the continuous-collision, character and projectile kernels on
+`World` (same `wgsl_export` step as the vehicle demo):
 
 - `?scene=ccd&speed=60|140|250`: balls at a 0.05/0.2/1 m slab and a brick wall,
   CCD off and on side by side, plus a debris shower through a slab.

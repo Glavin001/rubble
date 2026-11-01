@@ -495,7 +495,7 @@ window.__lab={
 };
 // The threshold mode's numbers, as the stress modes' stats.
 let lockedBehind=0;
-const thresholdStats=()=>{const st=sim.stats();return {frames:sim.steps,shots:sim.shots,bodies:st.actors,brokenBonds:st.bonds-st.bondsIntact,crushed:st.crushed,chunks:st.chunks,bonds:st.bonds,simSeconds:sim.steps*sim.dt,frameHz:stepHz()}};
+const thresholdStats=()=>{const st=sim.stats();return {frames:sim.steps,shots:sim.shots,bodies:st.actors,brokenBonds:st.bonds-st.bondsIntact,crush:crushMode(),crushed:st.crushed,chunks:st.chunks,bonds:st.bonds,simSeconds:sim.steps*sim.dt,frameHz:stepHz()}};
 // One stress-mode frame: the Rust steps what fell due and draws; the HUD counts physics
 // frames and rendered frames per second from its stats.
 // What the stress import could not take from the scene as given (stress-web `warnings`).

@@ -3,8 +3,8 @@
 //! `engine_fracture::Planner` owns the buffer sizes, host words, step state and
 //! the ordered dispatch schedule; this host creates the buffers and pipelines
 //! (Slang -> MSL with the browser's `ENGINE_WGSL` layout, see build.rs) and
-//! replays each tick's commands, exactly as `fracture/simulation.mjs` does on
-//! WebGPU. All storage is shared (unified memory on Apple silicon), so
+//! replays each tick's commands, as the browser lab's former JS host
+//! (`fracture/simulation.mjs`) did on WebGPU. All storage is shared (unified memory on Apple silicon), so
 //! counters and bodies are read in place.
 
 use super::kernels::{Kernel, KERNELS};
