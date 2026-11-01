@@ -344,11 +344,13 @@ groupshared float4 gsShift;
 // position was written from outside (a spawn, a teleport) with its local one,
 // then move the origin (by whole metres) when the body has wandered more than
 // 32 m from it, shifting every local position and the BDF2 history to match.
-void softRecentre(uint s, uint local)
+// Every lane of the workgroup calls it (its barriers need uniform control flow);
+// `live` = s is a soft body.
+void softRecentre(uint s, uint local, bool live)
 {
-    uint4 r = softBodyRec(s);
-    uint ob = asuint(softBodyRec1(s).w);
-    float3 o = softOrigin(s);
+    uint4 r = live ? softBodyRec(s) : uint4(0, 0, 0, 0);
+    uint ob = live ? asuint(softBodyRec1(s).w) : 0u;
+    float3 o = live ? softOrigin(s) : float3(0.0, 0.0, 0.0);
     for (uint k = local; k < r.y; k += 64u)
     {
         float3 xw = gBodies[r.x + k].position;
@@ -365,12 +367,12 @@ void softRecentre(uint s, uint local)
         float3 x0 = r.y > 0u ? softLocal(ob) : float3(0.0, 0.0, 0.0);
         float3 shift = any(abs(x0) > 32.0) ? round(x0) : float3(0.0, 0.0, 0.0);
         gsShift = float4(shift, 0.0);
-        if (any(shift != 0.0)) gSoftData[softOriginBase() + s] = float4(o + shift, 0.0);
+        if (live && any(shift != 0.0)) gSoftData[softOriginBase() + s] = float4(o + shift, 0.0);
     }
     GroupMemoryBarrierWithGroupSync();
     float3 shift = gsShift.xyz;
-    if (!any(shift != 0.0)) return;
-    for (uint k = local; k < r.y; k += 64u)
+    uint n = any(shift != 0.0) ? r.y : 0u;
+    for (uint k = local; k < n; k += 64u)
     {
         uint q = softLocalBase() + LOCAL_STRIDE * (ob + k);
         gSoftData[q] = float4(SD(q).xyz - shift, 0.0);
@@ -384,7 +386,7 @@ void softRecentre(uint s, uint local)
 void soft_wake(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
     uint s = softGroupBody(gid), local = lid.x;
-    if (s < softBodyCount()) softRecentre(s, local);
+    softRecentre(s, local, s < softBodyCount());
     bool live = s < softBodyCount() && (softFlags() & SOFT_SLEEP_SYNC) != 0u;
     uint4 r = live ? softBodyRec(s) : uint4(0, 0, 0, 0);
     uint core = live ? asuint(softBodyRec1(s).z) : SOFT_NO_BODY;
@@ -1098,25 +1100,28 @@ groupshared uint gsTriMarked;
 [numthreads(64, 1, 1)]
 void soft_collide_tris(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
+    // Every lane reaches every barrier (Chrome requires uniform control flow), so
+    // the exits are a flag, and lane 0 publishes the walk's length through
+    // gsUniformLanes (a uniform load).
     uint t = softGroupBody(gid), lane = lid.x;
-    if (t >= softTriCount()) return;
+    bool go = t < softTriCount();
     uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * t;
-    if (lane == 0u)
+    if (go && lane == 0u)
     {
         gSoftData[tc] = float4(0, 0, 0, asfloat(SOFT_NONE));
         for (uint m = 0u; m < TRI_NODE_CONTACTS; m++) gSoftData[tc + 3u + 3u * m] = float4(0, 0, 0, asfloat(SOFT_NONE));
         gSoftData[tc + TRI_BOUND_SLOT] = float4(1e30, 1e30, 0, 0);
     }
-    if (!softContactsOn()) return;
-    uint4 tri = SU(softTriBase() + t);
+    go = go && softContactsOn();
+    uint4 tri = go ? SU(softTriBase() + t) : uint4(0, 0, 0, 0);
     // Anti-clip-only triangles (non-collidable) still keep their nodes' sides,
     // but meet no obstacles.
     bool collide = ((tri.w >> 8) & 1u) != 0u;
     uint sb = tri.w & 255u;
     BodyState ba = gBodies[tri.x], bb = gBodies[tri.y], bc = gBodies[tri.z];
-    if (bodyIsSleeping(ba) && bodyIsSleeping(bb) && bodyIsSleeping(bc)) return;
+    go = go && !(bodyIsSleeping(ba) && bodyIsSleeping(bb) && bodyIsSleeping(bc));
     float3 a = ba.position, b = bb.position, c = bc.position;
-    if (triDead(t, a, b, c)) return;
+    go = go && !triDead(t, a, b, c);
     float delta = triThickness(t, tri);
     float travel = max(max(length(a - ba.initialPos), length(b - bb.initialPos)), length(c - bc.initialPos));
     float3 lo = min(min(a, b), c), hi = max(max(a, b), c);
@@ -1124,9 +1129,10 @@ void soft_collide_tris(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     {
         gsTriFound = 0u;
         gsTriMarked = 0u;
+        gsUniformLanes = go ? softPairCount(sb) + 1u : 0u;
         // Thin obstacles.
         float bestGap = 1e30;
-        uint nObs = collide ? softObstacleCount() : 0u;
+        uint nObs = go && collide ? softObstacleCount() : 0u;
         for (uint k = 0u; k < nObs; k++)
         {
             uint ci = SU(softObstacleBase() + k).x;
@@ -1181,13 +1187,14 @@ void soft_collide_tris(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     // The nearest node in front of the face, on its front and on its back.
     float2 nearest = float2(1e30, 1e30);
     float3 faceN = SD(softTriPlaneBase() + 2u * t).xyz;
-    uint np = softPairCount(sb);
-    for (uint pk = 0u; pk < np; pk++)
+    uint walk = gsUniformLanes;
+    for (uint pk = 0u; pk + 1u < walk; pk++)
     {
         uint s2 = softPairAt(sb, pk);
-        if (s2 == sb ? softIsRigid(sb) : !softAabbOverlaps(s2, lo - 0.3, hi + 0.3)) continue;
-        uint4 r2 = softBodyRec(s2);
-        uint ordBase = asuint(softBodyRec1(s2).w);
+        bool skip = gsTriFound >= TRI_NODE_CONTACTS
+            || (s2 == sb ? softIsRigid(sb) : !softAabbOverlaps(s2, lo - 0.3, hi + 0.3));
+        uint4 r2 = skip ? uint4(0, 0, 0, 0) : softBodyRec(s2);
+        uint ordBase = skip ? 0u : asuint(softBodyRec1(s2).w);
         uint chunk = (r2.y + SOFT_TRI_LANES - 1u) / SOFT_TRI_LANES;
         uint k0 = lane * chunk, k1 = min(k0 + chunk, r2.y);
         uint hits = 0u;
@@ -1203,7 +1210,7 @@ void soft_collide_tris(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         }
         gsTriHitCount[lane] = hits;
         GroupMemoryBarrierWithGroupSync();
-        if (lane == 0u)
+        if (lane == 0u && !skip)
         {
             uint found = gsTriFound;
             for (uint l = 0u; l < SOFT_TRI_LANES && found < TRI_NODE_CONTACTS; l++)
@@ -1229,9 +1236,8 @@ void soft_collide_tris(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
             gsTriFound = found;
         }
         GroupMemoryBarrierWithGroupSync();
-        if (gsTriFound >= TRI_NODE_CONTACTS) break;
     }
-    if (lane != 0u) return;
+    if (lane != 0u || walk == 0u) return;
     gSoftData[tc + TRI_BOUND_SLOT] = float4(nearest, 0, 0);
     if (gsTriFound > 0u || gsTriMarked != 0u)
     {
@@ -2056,34 +2062,37 @@ void soft_primal_bodies(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     GROUP_SYNC();
     uint role = gsUniformLanes;
     // Crash island: the step's passes split into its substeps. At the first pass
-    // the first substep is set from the step's start; at each later boundary the
-    // body's beams yield at the substep's end, then its particles move on to the
-    // next substep. Chebyshev restarts with each substep.
-    uint chebPass = PASS_U;
-    if (isSoft && role != 0u && role < SOFT_ROLE_FOLLOW && softSubsteps(gid.x) > 1u)
+    // the first substep is set from the step's start; at each later boundary its
+    // particles move on to the next substep (rest lengths move only at the step's
+    // end). Chebyshev restarts with each substep. Lane 0 decides and publishes it
+    // through gsUniformLanes: the boundary's barrier needs uniform control flow.
+    GROUP_SYNC();
+    if (local == 0u)
     {
-        uint S = softSubsteps(gid.x);
-        uint per = max(PARAMS.iterations * softSweeps() / S, 1u);
-        uint j = min(PASS_U / per, S - 1u);
-        chebPass = PASS_U - j * per;
-        if (chebPass == 0u)
+        uint code = 0u;
+        if (isSoft && role != 0u && role < SOFT_ROLE_FOLLOW && softSubsteps(gid.x) > 1u)
         {
-            float hs = softH(gid.x);
-            if (j > 0u && SUBSTEP_YIELD)
-            {
-                uint4 rb = softBodyRec(gid.x);
-                for (uint e = rb.z + local; e < rb.z + rb.w; e += 256u) softSubstepYield(e, hs);
-                DeviceMemoryBarrierWithGroupSync();
-            }
-            for (uint c = 0u; c < allColors; c++)
-            {
-                uint4 slot = SU(base + c / 2u);
-                uint2 cr = (c & 1u) == 0u ? slot.xy : slot.zw;
-                for (uint t = local; t < cr.y; t += 256u)
-                    softSubstepParticle(cr.x + t, hs, j == 0u);
-            }
-            DeviceMemoryBarrierWithGroupSync();
+            uint S = softSubsteps(gid.x);
+            uint per = max(PARAMS.iterations * softSweeps() / S, 1u);
+            uint j = min(PASS_U / per, S - 1u);
+            code = 1u | (j == 0u ? 2u : 0u) | ((PASS_U - j * per) << 8);
         }
+        gsUniformLanes = code;
+    }
+    GROUP_SYNC();
+    uint island = gsUniformLanes;
+    uint chebPass = (island & 1u) != 0u ? island >> 8 : PASS_U;
+    if ((island & 1u) != 0u && chebPass == 0u)
+    {
+        float hs = softH(gid.x);
+        for (uint c = 0u; c < allColors; c++)
+        {
+            uint4 slot = SU(base + c / 2u);
+            uint2 cr = (c & 1u) == 0u ? slot.xy : slot.zw;
+            for (uint t = local; t < cr.y; t += 256u)
+                softSubstepParticle(cr.x + t, hs, (island & 2u) != 0u);
+        }
+        DeviceMemoryBarrierWithGroupSync();
     }
     if (role == SOFT_ROLE_FOLLOW)
     {
@@ -2478,27 +2487,10 @@ float softBeamYield(uint i, inout SoftBeam e, float force, float delta)
     return force;
 }
 
-// Rest lengths move only at the step's end: mid-step the structure (and the rigid
-// core it hangs on) has had only part of the iterations, and yield checks there
-// fired on unconverged forces (a buggy on its run-up never went rigid). The
-// in-solve cap still holds each beam at its threshold through the substeps.
-static const bool SUBSTEP_YIELD = false;
-// A crash island's substep boundary, beam i: yield at the substep's end lengths
-// (breaking waits for the step's end, in soft_plastic).
-void softSubstepYield(uint i, float h)
-{
-    SoftBeam e = loadBeam(i);
-    if (beamBroken(e)) return;
-    uint s = beamSoftBody(e);
-    uint ob = asuint(softBodyRec1(s).w) - softBodyRec(s).x;
-    float3 la = softLocal(ob + e.a), lb = softLocal(ob + e.b);
-    float len = length(la - lb);
-    float len0 = length(softLocal0(ob + e.a) - softLocal0(ob + e.b));
-    float force = beamReadout(e, i, len, len0, h);
-    e.force = softBeamYield(i, e, force, len - e.rest);
-    storeBeamState(i, e);
-}
-
+// Rest lengths move only at the step's end: yield checks mid-step fired on
+// unconverged forces (the structure, and the rigid core it hangs on, had only
+// part of the iterations). The in-solve cap holds each beam at its threshold
+// through the substeps.
 // A crash island's particle at a substep boundary: `restart` (pass 0) sets the
 // first substep from the step's start with hₛ; otherwise the substep that ended
 // becomes the next one's start, at the velocity it reached.
