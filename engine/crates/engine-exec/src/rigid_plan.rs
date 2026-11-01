@@ -1646,4 +1646,101 @@ mod tests {
             }
         }
     }
+
+    /// The schedule properties demo.html's node tests checked on its own JS
+    /// encoder (tests/persistence_schedule.test.mjs), now on the plan every host
+    /// runs: each mode's contact writers, persistence, packing, CSR and solve
+    /// stay in dependency order.
+    #[test]
+    fn every_mode_keeps_its_contact_dependencies() {
+        let kernel = |c: &Cmd| match *c {
+            Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => Some(kernel),
+            _ => None,
+        };
+        for storage in ["canonical", "compact", "persistent"] {
+            for persistence in ["contacts", "manifolds", "fused"] {
+                if persistence == "fused" && storage == "canonical" {
+                    continue;
+                }
+                for reuse in [false, true] {
+                    for fast_paths in [false, true] {
+                        let persistent = storage == "persistent";
+                        let compact = storage != "canonical";
+                        let copy = persistent && persistence == "contacts" && fast_paths;
+                        let m = StepModes {
+                            compact_contacts: compact,
+                            persistent_contacts: persistent,
+                            manifold_persistence: persistence == "manifolds",
+                            fused_persistence: compact && persistence == "fused",
+                            manifold_insert: fast_paths && reuse,
+                            copy_reuse: copy,
+                            split_np: copy,
+                            listed_persist: copy,
+                            carry_rest: fast_paths,
+                            local_repair: fast_paths,
+                            grid_split: fast_paths,
+                            sparse_start: 10,
+                            color_headroom: Some(4),
+                            color_round_headroom: Some(2),
+                            tail_ok: true,
+                            ..StepModes::default()
+                        };
+                        let i = StepInputs { reuse_contacts: reuse, sleep_time: 0.5, ..inputs(10, 3) };
+                        let cmds = encode_step(&m, &i, false, true);
+                        let label = format!("{storage} {persistence} reuse={reuse} fast={fast_paths}");
+                        let names: Vec<&str> = cmds.iter().filter_map(kernel).collect();
+                        let first = |pred: &dyn Fn(&str) -> bool| names.iter().position(|n| pred(n));
+                        let last = |pred: &dyn Fn(&str) -> bool| names.iter().rposition(|n| pred(n));
+                        let np_last = last(&|n| n.starts_with("narrowphase")).expect("narrowphase");
+                        let persist_first = first(&|n| n.starts_with("persist_")).expect("a persistence pass");
+                        let primal = first(&|n| n.starts_with("solve_primal")).expect("a solve");
+                        assert!(np_last < persist_first, "{label}: persistence after every narrowphase pass");
+                        assert!(persist_first < primal, "{label}: persistence before the solve");
+                        if compact && persistence != "fused" {
+                            let pack = first(&|n| n == "pack_solver_contacts").expect("pack");
+                            assert_eq!(names.iter().filter(|n| **n == "pack_solver_contacts").count(), 1, "{label}: packed once");
+                            assert!(persist_first < pack && pack < primal, "{label}: packed between persistence and the solve");
+                            if persistent && persistence == "contacts" {
+                                let csr = first(&|n| n == "csr_degree_contacts").unwrap();
+                                assert!(pack < csr, "{label}: CSR reads the packed pairs");
+                            }
+                            if !persistent {
+                                let clear = first(&|n| n == "clear_solver_contacts").expect("clear");
+                                assert!(clear < pack, "{label}: cleared before packing");
+                            }
+                        }
+                        if m.manifold_insert {
+                            let insert = first(&|n| n == "contact_hash_insert_manifolds").unwrap();
+                            assert!(insert < first(&|n| n.starts_with("narrowphase")).unwrap(), "{label}: manifold insert before narrowphase overwrites them");
+                        }
+                        if m.split_np {
+                            let defer = first(&|n| n == "narrowphase_defer_copy_persistent").unwrap();
+                            let fresh = first(&|n| n == "narrowphase_fresh_copy_persistent").unwrap();
+                            assert!(defer < fresh && fresh < persist_first, "{label}: defer, then fresh pairs");
+                        }
+                        if m.listed_persist {
+                            let at = |slot| cmds.iter().position(|c| matches!(c, Cmd::Indirect { kernel, slot: s, .. } if kernel.starts_with("persist_") && *s == slot));
+                            let (list, scan) = (at(70).expect("list on slot 70"), at(71).expect("overflow scan on slot 71"));
+                            let np = cmds.iter().rposition(|c| kernel(c).is_some_and(|k| k.starts_with("narrowphase"))).unwrap();
+                            let args = cmds.iter().skip(np).position(|c| kernel(c).is_some_and(|k| k.starts_with("write_work_args"))).unwrap() + np;
+                            assert!(args < list && list < scan, "{label}: list then scan, after the narrowphase work args");
+                        }
+                        if m.carry_rest {
+                            let carry = first(&|n| n == "carry_rest_pairs").unwrap();
+                            assert!(first(&|n| n == "broadphase_query").unwrap() < carry && carry < first(&|n| n.starts_with("narrowphase")).unwrap(), "{label}: carried pairs join the broadphase's before narrowphase");
+                        }
+                        if m.local_repair {
+                            let local = first(&|n| n == "color_bodies_local").unwrap();
+                            assert!(first(&|n| n == "init_colors").unwrap() < local && local < first(&|n| n == "color_bodies").unwrap(), "{label}: local repair before the global rounds");
+                        }
+                        assert_eq!(names.iter().filter(|n| **n == "sleep_island_gate").count(), 8, "{label}: the island gate runs with sleep on");
+                    }
+                }
+            }
+        }
+        // A sleep time past any run (1e6 s, the ring and gables benchmarks) has
+        // nothing for the gate to revoke.
+        let cmds = encode_step(&fast(), &inputs(10, 0), false, true);
+        assert!(!cmds.iter().any(|c| kernel(c) == Some("sleep_island_gate")));
+    }
 }

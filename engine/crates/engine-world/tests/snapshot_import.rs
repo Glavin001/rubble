@@ -76,6 +76,11 @@ fn scene() -> engine_schema::WorldSnapshot {
             0,
             [0.0, 0.1, 0.0],
         ),
+        // A world-space plane (the legacy scenes' floors): y = -1.
+        Collider {
+            density: 0.0,
+            ..collider(0, ShapeType::Plane, [0.0, 1.0, 0.0, -1.0], 0, [0.0; 3])
+        },
     ];
     let mut materials = vec![
         Material {
@@ -135,7 +140,7 @@ fn import_gives_back_the_snapshot_records() {
     .unwrap();
     let import = w.import_snapshot(&snap).unwrap();
     assert_eq!(import.bodies.len(), 5);
-    assert_eq!(import.shapes.len(), 4);
+    assert_eq!(import.shapes.len(), 5);
     assert!(
         import.joints[0].is_some() && import.joints[1].is_none(),
         "the broken drag slot is skipped"

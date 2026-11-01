@@ -140,6 +140,17 @@ impl World {
                     half: [c.params[0], c.params[1], c.params[2]],
                     transform: Transform::new(c.local_pos, c.local_rot),
                 },
+                s if s == ShapeType::Plane as u32 => {
+                    // World-space plane on a static body: back into the body's frame.
+                    let b = &snap.bodies[c.body as usize];
+                    let q = glam::Quat::from_array(b.orientation);
+                    let n = glam::Vec3::new(c.params[0], c.params[1], c.params[2]);
+                    let p = glam::Vec3::from(b.position);
+                    Geometry::Plane {
+                        normal: (q.conjugate() * n).to_array(),
+                        offset: c.params[3] - n.dot(p),
+                    }
+                }
                 s => anyhow::bail!(
                     "collider record {i}: shape type {s} (hulls, planes and heightfields need \
                      their arena data, which a snapshot does not carry)"
