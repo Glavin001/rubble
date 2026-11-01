@@ -29,7 +29,8 @@ broadphase_fast             each fast collider walks the cells along its sweep
 projectile_step             segment casts; apply_impulses (late pass) for hits
 write_work_args / carry_rest_pairs
 ccd_toi                     GJK ray cast of each CCD pair along its relative motion
-ccd_pick                    per body: the earliest TOI, then the lowest candidate
+ccd_pick_key                per body: among pairs at the earliest TOI, the least other collider
+ccd_pick                    the pair with it (lowest candidate only within a compound body)
 ccd_mark                    tags the winning pair; the narrowphase skips it
 narrowphase / convex
 ccd_emit                    the winner's manifold at the TOI pose
@@ -73,8 +74,12 @@ Bergen) in the pair's local frame. A cast starts one step back, so a pair
 already touching and closing gets TOI 0. It ends when the distance stops
 shrinking: a hit if the gap is within 5 mm (`GJK_TOUCH`), a miss otherwise.
 
-Each body keeps the earliest TOI by an atomic minimum on its bits, then the
-lowest candidate index among equal TOIs, so the winner is deterministic.
+Each body keeps the earliest TOI by an atomic minimum on its bits, then among
+equal TOIs the least other collider (`ccd_pick_key`), then the lowest
+candidate index only between a compound body's colliders meeting that one.
+The candidates are appended with atomics, in no fixed order, so their index
+alone was no deterministic tie-break: coplanar pieces met at one TOI gave a
+different winner run to run.
 `ccd_mark` tags the winner, the narrowphase leaves it alone, and `ccd_emit`
 builds its manifold at the TOI pose. The rows hold the gap along the path, so
 AVBD solves it as an ordinary contact: real two-way forces, visible to
