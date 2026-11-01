@@ -1146,8 +1146,12 @@ mod imp {
                     };
                     budget as usize
                 ])?;
-                let mut pool = Vec::with_capacity(ids.len());
-                for id in ids {
+                // Parked and given their shapes in batches: the pool can be tens of
+                // thousands of bodies, and an upload apiece holds a staging buffer each
+                // until the next submission (gigabytes on Metal, a lost device on iOS).
+                let mut parked_runs: Vec<(u32, Vec<BodyState>)> = Vec::new();
+                let mut shapes = Vec::with_capacity(ids.len());
+                for id in &ids {
                     let i = id.index();
                     let mut parked = BodyState::static_plane_support();
                     parked.position = crate::graveyard(i);
@@ -1157,7 +1161,10 @@ mod imp {
                         // from placement (a parked static body is never a CCD body).
                         parked.flags |= engine_schema::BODY_CCD_FAST;
                     }
-                    self.sim.write_bodies(i, &[parked]);
+                    match parked_runs.last_mut() {
+                        Some((first, run)) if *first + run.len() as u32 == i => run.push(parked),
+                        _ => parked_runs.push((i, vec![parked])),
+                    }
                     let geometry = if particles {
                         Geometry::Sphere {
                             center: [0.0; 3],
@@ -1173,8 +1180,15 @@ mod imp {
                         self.collider(i, SolverFrame::IDENTITY, &geometry, 0.0, material, None)?;
                     pool_def.filter.apply(&mut col);
                     col.material |= crate::contacts::event_bits(&pool_def);
-                    let (shape, collider) =
-                        self.add_shape_record(i as usize, &pool_def, geometry, col)?;
+                    shapes.push((i as usize, geometry, col));
+                }
+                for (first, run) in &parked_runs {
+                    self.sim.write_bodies(*first, run);
+                }
+                let records = self.add_shape_records(&pool_def, shapes)?;
+                let mut pool = Vec::with_capacity(ids.len());
+                for (id, (shape, collider)) in ids.iter().zip(records) {
+                    let i = id.index();
                     let slot = &mut self.bodies[i as usize];
                     slot.owner = Owner::Piece;
                     slot.alive = false;

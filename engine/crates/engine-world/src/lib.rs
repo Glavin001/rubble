@@ -1431,6 +1431,31 @@ impl World {
         self.dirty = true;
         self.contacts_shape_added(def);
         let collider_index = self.place_collider(collider)?;
+        Ok((self.record_shape(b, def, geometry, collider_index), collider_index))
+    }
+
+    /// [`Self::add_shape_record`] for many shapes of one `def`, their new colliders
+    /// appended in one upload (a crush pool's tens of thousands: one upload each would
+    /// hold a staging buffer apiece until the next submission).
+    #[cfg_attr(not(feature = "stress"), allow(dead_code))]
+    pub(crate) fn add_shape_records(
+        &mut self,
+        def: &ShapeDef,
+        shapes: Vec<(usize, Geometry, Collider)>,
+    ) -> anyhow::Result<Vec<(u32, u32)>> {
+        self.dirty = true;
+        let colliders: Vec<Collider> = shapes.iter().map(|s| s.2).collect();
+        let placed = self.place_colliders(&colliders)?;
+        let mut out = Vec::with_capacity(shapes.len());
+        for ((b, geometry, _), collider_index) in shapes.into_iter().zip(placed) {
+            self.contacts_shape_added(def);
+            out.push((self.record_shape(b, def, geometry, collider_index), collider_index));
+        }
+        Ok(out)
+    }
+
+    /// The shape slot for collider `collider_index` (already placed) on body `b`.
+    fn record_shape(&mut self, b: usize, def: &ShapeDef, geometry: Geometry, collider_index: u32) -> u32 {
         let slot = ShapeSlot {
             generation: 1,
             alive: true,
@@ -1456,7 +1481,7 @@ impl World {
         }
         self.collider_shape[collider_index as usize] = index;
         self.bodies[b].shapes.push(index);
-        Ok((index, collider_index))
+        index
     }
 
     /// Destroy a shape (Box3D `b3DestroyShape`).
@@ -2503,6 +2528,35 @@ impl World {
             "WorldCapacity::max_colliders ({cap}) reached"
         );
         Ok(self.sim.add_collider(c))
+    }
+
+    /// [`Self::place_collider`] for many: quarantine-free slots first, the rest appended
+    /// in one upload.
+    fn place_colliders(&mut self, cs: &[Collider]) -> anyhow::Result<Vec<u32>> {
+        let now = self.step;
+        let mut placed = Vec::with_capacity(cs.len());
+        let mut reused = 0;
+        for &c in cs {
+            let Some(pos) = self
+                .free_colliders
+                .iter()
+                .position(|&(_, t)| now >= t + QUARANTINE_STEPS)
+            else {
+                break;
+            };
+            let (index, _) = self.free_colliders.swap_remove(pos);
+            self.sim.set_collider(index, c);
+            placed.push(index);
+            reused += 1;
+        }
+        let fresh = &cs[reused..];
+        let cap = self.sim.capacity().max_colliders;
+        anyhow::ensure!(
+            self.sim.collider_count() as usize + fresh.len() <= cap as usize,
+            "WorldCapacity::max_colliders ({cap}) reached"
+        );
+        placed.extend(self.sim.add_colliders(fresh));
+        Ok(placed)
     }
 
     fn intern_material(&mut self, m: &SurfaceMaterial) -> anyhow::Result<u32> {
