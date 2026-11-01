@@ -98,6 +98,18 @@ enum Section {
     Skipped,
 }
 
+/// A `cinecam`: a node (no ground contact) at `position` on 8 normal beams with the
+/// beam defaults in force at its line, its own spring and damping, and its own mass
+/// (raised to the minimum node mass), as RoR's `ProcessCinecam`.
+#[derive(Clone, Debug)]
+pub struct TruckCinecam {
+    pub position: [f32; 3],
+    pub nodes: [u32; 8],
+    /// Template for its beams (spring, damping, thresholds; `a`, `b` unset).
+    pub beam: SoftBeam,
+    pub node_mass: f32,
+}
+
 /// A wheel as written in the file (before lowering to a raycast wheel).
 #[derive(Clone, Debug)]
 pub struct TruckWheel {
@@ -135,9 +147,9 @@ pub struct TruckFile {
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
     pub cameras: Option<RefNodes>,
-    /// `cinecam` points and their 8 body nodes: Rigs of Rods spawns a node there with
-    /// 8 beams, which take part in the dry-mass split (see [`distribute_masses`]).
-    pub cinecams: Vec<([f32; 3], [u32; 8])>,
+    /// `cinecam` lines: Rigs of Rods spawns a camera node there on 8 beams, which
+    /// take part in the dry-mass split ([`distribute_masses`]) and are simulated.
+    pub cinecams: Vec<TruckCinecam>,
     pub warnings: Vec<String>,
 }
 
@@ -569,10 +581,19 @@ impl Parser {
                 if t.len() >= 11 {
                     let nodes: Option<Vec<u32>> = t[3..11].iter().map(|k| self.node(k)).collect();
                     if let Some(nodes) = nodes {
-                        self.out.cinecams.push((
-                            [f(t, 0, 0.0), f(t, 1, 0.0), f(t, 2, 0.0)],
-                            nodes.try_into().unwrap(),
-                        ));
+                        // ProcessCinecam: AddBeam with the beam defaults (unscaled break
+                        // threshold), then the cinecam's spring and damping.
+                        let mut beam = self.beam(0, 0);
+                        beam.strength = self.defaults.brk;
+                        beam.spring = f(t, 11, 8000.0);
+                        beam.damp = f(t, 12, 800.0);
+                        let m = f(t, 13, 20.0);
+                        self.out.cinecams.push(TruckCinecam {
+                            position: [f(t, 0, 0.0), f(t, 1, 0.0), f(t, 2, 0.0)],
+                            nodes: nodes.try_into().unwrap(),
+                            beam,
+                            node_mass: if m > 0.0 { m } else { 20.0 },
+                        });
                     }
                 } else {
                     self.warn("cinecam line needs x, y, z and 8 nodes".into());
@@ -675,7 +696,10 @@ impl Parser {
         beam.kind = BeamKind::Bounded;
         beam.spring = spring;
         beam.damp = damp;
-        beam.deform = f32::INFINITY;
+        // Past its bounds a RoR shock moves toward the beam defaults' spring and
+        // damping (`shock_t::sbd_spring`, `sbd_damp`; unscaled).
+        beam.deform = self.defaults.spring;
+        beam.limit_damp = self.defaults.damp;
         // Shock strength: 4 × the unscaled break threshold.
         beam.strength = 4.0 * self.defaults.brk;
         beam.precompression = if pre > 0.0 { pre } else { 1.0 };
@@ -916,9 +940,9 @@ pub fn distribute_masses(file: &mut TruckFile) {
     // count in the split; the cinecam's own share is lost (RoR then sets that node's
     // mass from the cinecam definition), the body ends keep theirs.
     let mut lost = 0.0;
-    for (p, nodes) in &file.cinecams {
-        for &k in nodes {
-            let l = (Vec3::from_array(*p) - pos(k)).length();
+    for c in &file.cinecams {
+        for &k in &c.nodes {
+            let l = (Vec3::from_array(c.position) - pos(k)).length();
             halves.push((k, 0.5 * l));
             lost += 0.5 * l;
         }
@@ -948,7 +972,35 @@ pub fn load_truck(src: &str) -> SoftVehicleDesc {
     lower(file)
 }
 
-fn lower(file: TruckFile) -> SoftVehicleDesc {
+fn lower(mut file: TruckFile) -> SoftVehicleDesc {
+    // Cinecams: their node after the truck's nodes, their beams before the truck's
+    // (RoR spawns cinecams before beams), mass the cinecam's raised to the minimum.
+    let mut cine_beams = Vec::new();
+    for c in &file.cinecams {
+        let node = file.nodes.len() as u32;
+        file.nodes.push(SoftNode {
+            name: format!("cinecam{}", cine_beams.len() / 8),
+            position: c.position,
+            mass: c.node_mass.max(file.minimass),
+            collision: false,
+            contacter: false,
+            self_collision: false,
+            ..Default::default()
+        });
+        file.loaded.push((false, None));
+        for &k in &c.nodes {
+            cine_beams.push(SoftBeam {
+                a: node,
+                b: k,
+                visible: false,
+                ..c.beam.clone()
+            });
+        }
+    }
+    if !cine_beams.is_empty() {
+        cine_beams.append(&mut file.beams);
+        file.beams = cine_beams;
+    }
     let mut desc = SoftVehicleDesc {
         name: file.title.clone(),
         nodes: file.nodes,

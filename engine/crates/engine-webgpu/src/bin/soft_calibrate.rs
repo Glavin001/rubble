@@ -153,6 +153,8 @@ impl Gpu {
                 [0.0, 0.0, 0.0, 1.0],
                 &SpawnOptions {
                     rigid_core: car.core,
+                    core_mass_fraction: env_f32("CORE_FRAC")
+                        .unwrap_or(SpawnOptions::default().core_mass_fraction),
                     velocity: vel.to_array(),
                     ..Default::default()
                 },
@@ -480,7 +482,12 @@ impl Car {
     fn from_env() -> Self {
         match std::env::var("CAR").as_deref() {
             Ok("hires") => Self::hires(&HiresParams::default()),
-            Ok(v) if v.starts_with("truck:") => Self::truck_file(&v["truck:".len()..]),
+            Ok(v) if v.starts_with("truck:") => Self::truck_file(&v["truck:".len()..], false),
+            // The same file without wheels, engine and brakes: the node–beam body on
+            // its node spheres, comparable with the oracle and a bare GPU body.
+            Ok(v) if v.starts_with("truck_bare:") => {
+                Self::truck_file(&v["truck_bare:".len()..], true)
+            }
             Ok("default") => Self::procedural(&CarParams::default(), false),
             // The sedan as Rigs of Rods can run it at its fixed 2 kHz (10 kg minimum
             // node mass instead of 5), body only: the RoR comparison car.
@@ -537,8 +544,16 @@ impl Car {
     /// in the repo). Forward from its `cameras` line (centre minus back node; RoR
     /// vehicles face −X), the rear 40% along it as the reference frame, rigid core
     /// and raycast wheels when it has wheels.
-    fn truck_file(path: &str) -> Self {
+    fn truck_file(path: &str, bare: bool) -> Self {
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let text = if bare {
+            engine_softbody::procedural::strip_truck_sections(
+                &text,
+                &["wheels", "engine", "brakes"],
+            )
+        } else {
+            text
+        };
         let file = engine_softbody::truck::parse_truck(&text);
         let desc = engine_softbody::truck::load_truck(&text);
         let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
@@ -578,7 +593,7 @@ impl Car {
             lateral,
             core: !file.wheels.is_empty(),
             tap: (top, floor),
-            lift: 0.25 - desc.bounds().0[1],
+            lift: if file.wheels.is_empty() { 0.06 } else { 0.25 } - desc.bounds().0[1],
             body: (0..n).collect(),
             cabin,
             rear,
@@ -601,7 +616,10 @@ impl Car {
             .iter()
             .map(|n| Vec3::from_array(n.position).dot(self.forward))
             .fold(f32::MIN, f32::max);
-        let face = front + 1.0 + 0.5 * v;
+        // A car on wheels gets half a second to settle on its suspension; a bare
+        // body slides on its nodes, so the wall is right in front of it (impact
+        // speed then does not depend on the ground friction model).
+        let face = front + if self.core { 1.0 + 0.5 * v } else { 0.3 };
         let half = Vec3::new(6.0, 3.0, 0.5);
         let center = self.forward * (face + half.z) + Vec3::Y * half.y;
         let half = if self.forward.x.abs() > 0.5 {
@@ -774,15 +792,31 @@ fn runner(s: Option<Setting>, car: &Car, at: Vec3, vel: Vec3, walls: &[Wall]) ->
         None if std::env::var("REF").as_deref() == Ok("ror") => {
             Box::new(Ror::new(car, at, vel, walls))
         }
-        None => Box::new(Oracle::new(&car.desc, at, vel, walls)),
+        None => {
+            assert!(
+                !car.core,
+                "the oracle has no rigid core: use CAR=truck_bare:"
+            );
+            Box::new(Oracle::new(&car.desc, at, vel, walls))
+        }
     }
 }
 
 fn metrics(car: &Car, s: Option<Setting>) -> Metrics {
+    // QUICK=1: the 56 and 100 km/h crashes only.
+    let quick = std::env::var("QUICK").as_deref() == Ok("1");
     let still = Vec3::new(0.0, car.lift, 0.0);
-    let (sag_rms, tap_hz) = rest_and_tap(car, &mut *runner(s, car, still, Vec3::ZERO, &[]), still);
+    let (sag_rms, tap_hz) = if quick {
+        (f32::NAN, f32::NAN)
+    } else {
+        rest_and_tap(car, &mut *runner(s, car, still, Vec3::ZERO, &[]), still)
+    };
     let high = Vec3::new(0.0, car.lift + 1.0, 0.0);
-    let drop_yield = drop_test(&mut *runner(s, car, high, Vec3::ZERO, &[]));
+    let drop_yield = if quick {
+        0
+    } else {
+        drop_test(&mut *runner(s, car, high, Vec3::ZERO, &[]))
+    };
     let crash = |kmh: f32| {
         let v = kmh / 3.6;
         let (start, wall) = car.wall_scene(v);
@@ -797,7 +831,11 @@ fn metrics(car: &Car, s: Option<Setting>) -> Metrics {
         sag_rms,
         tap_hz,
         drop_yield,
-        crush30: crash(30.0).crush,
+        crush30: if quick {
+            (f32::NAN, f32::NAN)
+        } else {
+            crash(30.0).crush
+        },
         crash56: crash(56.0),
         crush100: crash(100.0).crush,
     }

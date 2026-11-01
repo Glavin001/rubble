@@ -135,6 +135,10 @@ pub struct SoftBeam {
     /// Breaking does not set off its break group, though the group still breaks it
     /// (JBeam `breakGroupType` 1).
     pub break_group_passive: bool,
+    /// Bounded (shock) beams: damping toward which a beam past its bounds moves
+    /// (Rigs of Rods `sbd_damp`, the beam defaults' damping; 0 = the default damping).
+    /// The matching spring is `deform` (RoR `sbd_spring`, JBeam `beamLimitSpring`).
+    pub limit_damp: f32,
 }
 
 impl Default for SoftBeam {
@@ -158,6 +162,7 @@ impl Default for SoftBeam {
             damp_expansion: 0.0,
             deform_limit_stress: f32::INFINITY,
             break_group_passive: false,
+            limit_damp: 0.0,
         }
     }
 }

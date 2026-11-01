@@ -1081,6 +1081,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             },
             deform_limit_stress: g("deformLimitStress", f32::INFINITY).max(0.0),
             break_group_passive: g("breakGroupType", 0.0) as i32 == 1,
+            limit_damp: 0.0,
         };
         // precompressionRange (m) overrides beamPrecompression: the spawn length
         // changes by that much.
