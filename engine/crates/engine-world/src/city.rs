@@ -328,9 +328,9 @@ pub fn city_shot(world: &mut World, at: [f32; 2], ground: f32) -> anyhow::Result
 }
 
 /// Bonds broken in a polled frame's destruction events.
-pub fn bonds_broken(events: &[DestructionEvent]) -> u32 {
+pub fn bonds_broken<'a>(events: impl IntoIterator<Item = &'a DestructionEvent>) -> u32 {
     events
-        .iter()
+        .into_iter()
         .map(|e| match e {
             DestructionEvent::BondsBroken { bonds, .. } => bonds.len() as u32,
             _ => 0,

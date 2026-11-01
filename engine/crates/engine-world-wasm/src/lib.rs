@@ -20,6 +20,8 @@ pub mod broadside;
 mod broadside_page;
 pub use broadside_page::*;
 
+/// The large-maps city (`city.html`): `rubble::city` placed over frames.
+mod city;
 mod defs;
 mod demo;
 mod frame;
@@ -33,6 +35,7 @@ mod soft;
 mod terrain;
 mod vehicle;
 
+pub use city::WebCity;
 pub use frame::WebFrame;
 pub use lab::{check_lab_chunk_order, LabAsset, LabPreload, LabScene};
 /// The lab's scene bindings (`engine-fracture-wasm`), exported from this module too.

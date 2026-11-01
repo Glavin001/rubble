@@ -5,10 +5,10 @@
 // Pages need an import map for the wasm's GPU-wait import:
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
-  WebWorld, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
+  WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
 } from './generated/world-wasm/engine_world_wasm.js';
 
-export { WebWorld, softCalibratedSettings };
+export { WebWorld, WebCity, softCalibratedSettings };
 let ready = null;
 
 /** The wasm's world-less functions (terrain settings, predictions, buffer layout), once loaded. */
@@ -25,6 +25,21 @@ export async function createWorld(def = {}) {
   const world = await WebWorld.create(def);
   world.flags = solverFlags();
   return world;
+}
+
+/**
+ * The large-maps city (`rubble::city`, as the native benchmark builds it): `opts`
+ * `{ houses, map, sleep, pool }`, `page` the WorldDef fields a page may set (`gpuTiming`,
+ * `killBelow`, `readbackFrames`, ...). `on`: a world whose device to reuse. Place the
+ * houses with `world.cityBegin(city)` then `world.cityPlace(city, n)` over frames.
+ */
+export async function createCity(opts, page = {}, on = null) {
+  ready ??= init();
+  await ready;
+  const city = new WebCity(opts);
+  const world = on ? WebWorld.createCityOnDeviceOf(city, page, on) : await WebWorld.createCity(city, page);
+  world.flags = solverFlags();
+  return { city, world };
 }
 
 /** Floats per body move in `WebFrame.moves()` (engine-world-wasm frame.rs). */
