@@ -168,17 +168,21 @@ impl WebWorld {
         Ok(WebWorld { world })
     }
 
-    /// [`Self::create_city`] on `other`'s device (a page rebuilding its city keeps its
-    /// renderer's device).
-    #[wasm_bindgen(js_name = createCityOnDeviceOf)]
-    pub fn create_city_on_device_of(
-        city: &WebCity,
-        page: JsValue,
-        other: &WebWorld,
-    ) -> Result<WebWorld, JsValue> {
+    /// Replace this world with a fresh one for `city` on the same device (a page
+    /// rebuilding its city keeps its renderer's device and this object). The old world
+    /// is dropped first: two map-sized worlds do not fit the wasm heap at once.
+    #[wasm_bindgen(js_name = cityRebuild)]
+    pub fn city_rebuild(&mut self, city: &mut WebCity, page: JsValue) -> Result<(), JsValue> {
         let def = world_def(city, page)?;
-        let world = res(World::new(other.world.gpu_context(), &def))?;
-        Ok(WebWorld { world })
+        // A minimal world in its place, so the old one (and its buffers) goes now.
+        let empty = WorldDef {
+            capacity: WorldCapacity::small(),
+            ..WorldDef::default()
+        };
+        self.world = res(World::new(self.world.gpu_context(), &empty))?;
+        self.world = res(World::new(self.world.gpu_context(), &def))?;
+        city.city = None;
+        Ok(())
     }
 
     /// Start `city` in this world: its ground and house asset, no houses yet.

@@ -30,16 +30,21 @@ export async function createWorld(def = {}) {
 /**
  * The large-maps city (`rubble::city`, as the native benchmark builds it): `opts`
  * `{ houses, map, sleep, pool }`, `page` the WorldDef fields a page may set (`gpuTiming`,
- * `killBelow`, `readbackFrames`, ...). `on`: a world whose device to reuse. Place the
- * houses with `world.cityBegin(city)` then `world.cityPlace(city, n)` over frames.
+ * `killBelow`, `readbackFrames`, ...). Place the houses with `world.cityBegin(city)` then
+ * `world.cityPlace(city, n)` over frames; `world.cityRebuild(city, page)` starts over.
  */
-export async function createCity(opts, page = {}, on = null) {
+export async function createCity(opts, page = {}) {
   ready ??= init();
   await ready;
   const city = new WebCity(opts);
-  const world = on ? WebWorld.createCityOnDeviceOf(city, page, on) : await WebWorld.createCity(city, page);
+  const world = await WebWorld.createCity(city, page);
   world.flags = solverFlags();
   return { city, world };
+}
+
+/** Bytes of the wasm heap (its linear memory), once loaded. */
+export async function wasmHeapBytes() {
+  return (await ready)?.memory?.buffer.byteLength ?? 0;
 }
 
 /** Floats per body move in `WebFrame.moves()` (engine-world-wasm frame.rs). */

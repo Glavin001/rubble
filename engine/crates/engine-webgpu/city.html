@@ -49,7 +49,7 @@
     // rubble::city): same houses, layout, capacity, sleep policy, piece pool, scenarios
     // and shots. The page places the houses a few per frame, settles the city, starts a
     // scenario, and draws every collider from the world's buffers in place.
-    import { createCity, Poses, pollFrame, stepFrames } from './rubble-world.mjs';
+    import { createCity, wasmHeapBytes, Poses, pollFrame, stepFrames, drain, macrotask } from './rubble-world.mjs';
     import { lastPanic } from './generated/world-wasm/engine_world_wasm.js';
 
     const statusEl = document.getElementById('status');
@@ -120,7 +120,7 @@
       if (c) counters = c;
       if (run) {
         run.broken += f.bondsBroken();
-        for (const t of f.gpuTimes()) run.gpu.push(t.totalMs);
+        for (const t of f.gpuTimes()) { run.gpu.push(t.totalMs); run.segments = t.segments; }
         if (run.vehicle !== null) vehicleState = f.vehicleState(run.vehicle) ?? vehicleState;
       }
     };
@@ -131,10 +131,7 @@
     async function build(next) {
       if (world && run) {
         // A fresh world on the same device, as the native benchmark builds one per scenario.
-        const old = world;
-        city.free();
-        ({ city, world } = await createCity(cityOpts, page, old));
-        old.free();
+        world.cityRebuild(city, page);
       }
       scenario = next;
       run = newRun();
@@ -386,7 +383,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     function highlight() { for (const b of buttons) b.classList.toggle('on', b.dataset.s === scenario); }
     for (const b of buttons) b.onclick = () => { if (phase === 'running' || phase === 'settling') build(b.dataset.s).catch(fail); };
     const median = (a) => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
-    let fps = 0, frames = 0, fpsAt = performance.now();
+    let fps = 0, frames = 0, fpsAt = performance.now(), heapBytes = 0;
     function hud() {
       const placed = city.placed();
       barEl.style.width = `${(100 * placed / K).toFixed(1)}%`;
@@ -401,6 +398,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
         ['FPS', fps.toFixed(0)],
         ['placement', run.placeMs ? `${(run.placeMs / 1000).toFixed(1)} s` : `${((performance.now() - placeStart) / 1000).toFixed(1)} s…`],
         ['limits', `buffer ${mb(limits.maxBufferSize)}, storage binding ${mb(limits.maxStorageBufferBindingSize)}`],
+        ['wasm heap', mb(heapBytes)],
         ['capacity', `${capacity.maxBodies.toLocaleString()} bodies, ${capacity.maxColliders.toLocaleString()} colliders, ${capacity.maxContacts.toLocaleString()} contacts`],
       ];
       if (leftWorld) rows.push(['left the world', leftWorld]);
@@ -415,14 +413,18 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     }
     async function frame(now) {
       frames++;
-      if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
+      if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; wasmHeapBytes().then((b) => { heapBytes = b; }); }
       try {
         if (!manual && !busy) {
           if (phase === 'placing') {
             placeSome();
             statusEl.textContent = `placing houses: ${city.placed()} / ${K}`;
           } else {
-            if (world.canStep()) stepOnce();
+            // Settling steps one at a time, each after the last one's frame arrived, as the
+            // native benchmark does (a split is adopted from its frame, so readback lag would
+            // change the settled city); afterwards as fast as readbacks allow.
+            const waited = phase !== 'settling' || (world.lastPolledStep ?? -1) >= world.stepCount() - 1;
+            if (waited && world.canStep()) stepOnce();
             pollFrame(world, onFrame);
             if (phase === 'settling' && world.stepCount() - run.placedAt >= SETTLE) {
               busy = true;
@@ -454,30 +456,54 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     };
     window.__step = async (n = 1) => {
       manual = true;
-      const wall = [];
+      const wall = [], host = [];
       const g0 = run.gpu.length;
       for (let i = 0; i < n; i++) {
         const t = performance.now();
-        await stepFrames(world, 1, onFrame, phase === 'running' ? drive : null);
+        while (!world.canStep()) { await macrotask(); pollFrame(world, onFrame); }
+        if (phase === 'running') drive();
+        const h = performance.now();
+        world.step();
+        host.push(performance.now() - h);
+        await drain(world, onFrame);
         wall.push(performance.now() - t);
       }
       draw();
       return {
-        steps: world.stepCount(), scenario, wallMs: wall, gpuMs: run.gpu.slice(g0),
+        steps: world.stepCount(), scenario, wallMs: wall, hostMs: host, gpuMs: run.gpu.slice(g0),
         awake: counters?.awake ?? 0, bodies: world.bodyCount(), broken: run.broken, placeMs: run.placeMs,
       };
     };
-    // A native-style measurement of the current scenario: CITY_MEASURE (120) steps.
+    // n steps as fast as readbacks allow (pipelined, as the live page steps): ms per step.
+    window.__throughput = async (n = 120) => {
+      manual = true;
+      const t = performance.now();
+      await stepFrames(world, n, onFrame, phase === 'running' ? drive : null);
+      return (performance.now() - t) / n;
+    };
+    // A native-style measurement of a scenario on a fresh city: CITY_MEASURE (120) steps,
+    // each waited for; then 120 more pipelined.
     window.__measure = async (name) => {
       const s = await window.__scenario(name);
       const r = await window.__step(120);
-      return { ...s, wallMedian: median(r.wallMs), wallP95: [...r.wallMs].sort((a, b) => a - b)[Math.round(0.95 * (r.wallMs.length - 1))], gpuMedian: median(r.gpuMs), awake: r.awake, broken: r.broken, bodies: r.bodies, limits };
+      const p95 = (a) => [...a].sort((x, y) => x - y)[Math.round(0.95 * (a.length - 1))];
+      const out = {
+        ...s, wallMedian: median(r.wallMs), wallP95: p95(r.wallMs), hostMedian: median(r.hostMs), gpuMedian: median(r.gpuMs),
+        awake: r.awake, broken: r.broken, bodies: r.bodies,
+      };
+      // The last measured step's GPU passes ([name, ms]), with GPU timing on.
+      out.segments = run.segments ?? null;
+      out.pipelinedMs = await window.__throughput(120);
+      out.heapMiB = (await wasmHeapBytes()) / 2 ** 20;
+      return out;
     };
     // The car's position and speed (drive), for checks.
     window.__car = () => {
       const slot = run.chassis >= 0 ? run.chassis : run.car;
       return slot === null ? null : { position: poses.position(slot), speed: vehicleState?.forwardSpeed ?? null, street: layout.street };
     };
+    // The last timed step's GPU passes ([name, ms]; ?timing=phases splits the step).
+    window.__segments = () => run.segments ?? null;
     window.__live = () => { manual = false; };
     window.__world = world;
 
