@@ -9,6 +9,7 @@
 mod features;
 #[cfg(feature = "gpu")]
 mod gpu;
+#[cfg(feature = "gpu")]
 pub mod gpu_marks;
 #[cfg(feature = "gpu")]
 mod poses;
