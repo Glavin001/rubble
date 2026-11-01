@@ -452,6 +452,90 @@ impl Runner for Ror {
     }
 }
 
+/// Rubble's explicit-beams solver on the GPU (`ExplicitBeamsGpu`, `SETTINGS=explicit`):
+/// fixed 0.5 ms explicit steps, every step of a frame in one dispatch. A car with
+/// wheels runs on its soft tyres, standing on them (lowest node 2 cm up), as the RoR
+/// reference does.
+struct ExplicitGpuRun {
+    gpu: engine_webgpu::ExplicitBeamsGpu,
+    masses: Vec<f32>,
+    t: f64,
+    steps: u64,
+}
+
+impl ExplicitGpuRun {
+    fn new(car: &Car, at: Vec3, vel: Vec3, walls: &[Wall]) -> Self {
+        use engine_softbody::explicit_beams::{ExplicitBeams, StaticBox};
+        let (_, device, queue) = engine_webgpu::default_device().expect("wgpu");
+        let text = car
+            .truck
+            .as_deref()
+            .expect("SETTINGS=explicit needs a .truck car");
+        let mut sim = if car.core {
+            let mut sim = ExplicitBeams::from_truck(
+                text,
+                Vec3::new(at.x, 0.0, at.z),
+                vel,
+                Default::default(),
+            )
+            .expect("explicit beams spawn");
+            let lowest = sim.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+            for n in &mut sim.nodes {
+                n.pos.y += 0.02 - lowest;
+            }
+            sim
+        } else {
+            ExplicitBeams::from_truck(text, at, vel, Default::default())
+                .expect("explicit beams spawn")
+        };
+        for w in walls {
+            sim.boxes.push(StaticBox::centered(w.center, w.half));
+        }
+        Self {
+            gpu: engine_webgpu::ExplicitBeamsGpu::new(&device, &queue, &[sim]),
+            masses: car.desc.nodes.iter().map(|n| n.mass).collect(),
+            t: 0.0,
+            steps: 0,
+        }
+    }
+}
+
+impl Runner for ExplicitGpuRun {
+    fn frame(&mut self) {
+        // Whole 0.5 ms steps up to the sample time, the remainder carried.
+        self.t += 1.0 / f64::from(SAMPLE_HZ);
+        let due = (self.t / f64::from(engine_softbody::explicit_beams::STEP)) as u64;
+        let n = due - self.steps;
+        self.steps = due;
+        self.gpu.frame(n as u32);
+    }
+    fn time(&self) -> f64 {
+        self.t
+    }
+    fn positions(&self) -> Vec<Vec3> {
+        let mut p = self.gpu.positions().swap_remove(0);
+        p.truncate(self.masses.len());
+        p
+    }
+    fn velocities(&self) -> Vec<Vec3> {
+        let mut v = self.gpu.velocities().swap_remove(0);
+        v.truncate(self.masses.len());
+        v
+    }
+    fn masses(&self) -> Vec<f32> {
+        self.masses.clone()
+    }
+    fn broken(&self) -> Vec<bool> {
+        self.gpu.beams()[0].iter().map(|b| b.broken).collect()
+    }
+    fn yielded(&self) -> usize {
+        self.gpu.beams()[0].iter().filter(|b| b.bent()).count()
+    }
+    fn kick(&mut self, node: u32, velocity: Vec3) {
+        self.gpu.set_velocity(0, node, velocity);
+    }
+}
+
 /// The car under test and the node sets the metrics read.
 struct Car {
     name: String,
@@ -788,6 +872,7 @@ fn wall_crash(car: &Car, r: &mut dyn Runner, at: Vec3, v: f32) -> Crash {
 /// Builds a runner: the oracle (`None`) or the GPU at a setting.
 fn runner(s: Option<Setting>, car: &Car, at: Vec3, vel: Vec3, walls: &[Wall]) -> Box<dyn Runner> {
     match s {
+        Some(s) if s.iterations == 0 => Box::new(ExplicitGpuRun::new(car, at, vel, walls)),
         Some(s) => Box::new(Gpu::new(s, car, at, vel, walls)),
         None if std::env::var("REF").as_deref() == Ok("ror") => {
             Box::new(Ror::new(car, at, vel, walls))
@@ -894,7 +979,13 @@ fn main() {
         Ok(v) => v
             .split(',')
             .map(|p| {
-                let (hz, it) = p.split_once('x').expect("SETTINGS=HZxITERS,...");
+                // `explicit`: the explicit-beams solver on the GPU (marked by 0 iterations).
+                if p == "explicit" {
+                    return (2000.0, 0);
+                }
+                let (hz, it) = p
+                    .split_once('x')
+                    .expect("SETTINGS=HZxITERS,... or explicit");
                 (hz.parse().unwrap(), it.parse().unwrap())
             })
             .collect(),
@@ -917,7 +1008,7 @@ fn main() {
         eprintln!("{hz} Hz × {it} done in {:.1} s", t.elapsed().as_secs_f32());
         row(
             &if it == 0 {
-                "RoR step on the GPU".to_string()
+                "Rubble explicit beams (GPU)".to_string()
             } else {
                 format!("{hz} Hz × {it}")
             },

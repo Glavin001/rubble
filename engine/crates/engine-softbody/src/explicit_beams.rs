@@ -1,0 +1,1105 @@
+//! Explicit beams: Rubble's fixed-step node–beam solver (CPU reference).
+//!
+//! A soft-body vehicle is nodes (point masses) joined by beams (spring–dampers that
+//! yield, harden, weaken and break), advanced with small fixed explicit steps of
+//! [`STEP`] seconds. Every step runs three passes in order: nodes (ground and box
+//! contact, integration, force restart with gravity and drag), beams (forces,
+//! plasticity, breaking, detacher groups) and self-collision (contacters against the
+//! vehicle's own collision triangles). Forces accumulate across the passes and across
+//! the step boundary: the node pass consumes what the previous step's beam and
+//! self-collision passes produced.
+//!
+//! This is the CPU reference, in single precision, written from
+//! `engine/docs/explicit-beams.md`; `engine_webgpu::ExplicitBeamsGpu`
+//! (`slang/kernels/explicit_beams.slang`) runs the same rules with every vehicle on
+//! the GPU. The behaviours that reproduce the established simulator's results (its
+//! fast approximations, its yield force, its break exception) form the compatible
+//! profile; [`ExplicitBeamsSettings`] switches the optional ones.
+
+use crate::desc::{BeamKind, SoftVehicleDesc};
+use crate::truck::{load_truck, parse_truck};
+use glam::Vec3;
+
+/// The fixed step (s).
+pub const STEP: f32 = 0.0005;
+/// Gravity along y (m/s²).
+pub const GRAVITY: f32 = -9.807;
+/// Air drag: F = −coefficient·|v|·v.
+pub const DRAG: f32 = 0.05;
+/// A beam yielding in compression keeps at least this rest length (m).
+pub const MIN_REST: f32 = 0.1;
+/// Supports break past this many rest lengths of extension unless the file says.
+pub const SUPPORT_BREAK_FACTOR: f32 = 4.0;
+/// Node 0 farther than this from the origin moves the origin to it (m).
+pub const REBASE_RADIUS: f32 = 100.0;
+/// Turbulence scale on the drag force.
+pub const TURBULENCE: f32 = 0.005;
+/// Collision range when the file gives none (m).
+pub const DEFAULT_COLLISION_RANGE: f32 = 0.02;
+
+/// Node flags ([`Node::flags`]).
+pub const NODE_NO_GROUND: u32 = 1;
+pub const NODE_IMMOVABLE: u32 = 2;
+pub const NODE_ON_TRIANGLE: u32 = 4;
+pub const NODE_CONTACTER: u32 = 8;
+pub const NODE_TYRE: u32 = 16;
+
+/// Optional parts of the compatible profile. All on by default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExplicitBeamsSettings {
+    /// Beam lengths through the fast inverse square root (off: exact).
+    pub fast_inv_sqrt: bool,
+    /// Air drag on every node.
+    pub drag: bool,
+    /// Pseudo-random turbulence on top of the drag (needs `drag`).
+    pub turbulence: bool,
+}
+
+impl Default for ExplicitBeamsSettings {
+    fn default() -> Self {
+        Self {
+            fast_inv_sqrt: true,
+            drag: true,
+            turbulence: true,
+        }
+    }
+}
+
+/// A contact surface's friction model: adhesion below `va`, static μ `ms`,
+/// sliding μ `mc`, hydrodynamic friction `t2`, Stribeck speed `vs` and exponent
+/// `alpha`, and a strength multiplier on the reaction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactSurface {
+    pub va: f32,
+    pub ms: f32,
+    pub mc: f32,
+    pub t2: f32,
+    pub vs: f32,
+    pub alpha: f32,
+    pub strength: f32,
+}
+
+impl ContactSurface {
+    /// The ground ("gravel").
+    pub const GROUND: Self = Self {
+        va: 3.0,
+        ms: 0.85,
+        mc: 0.6,
+        t2: 0.006,
+        vs: 3.0,
+        alpha: 2.0,
+        strength: 1.0,
+    };
+    /// Static boxes and self-collision ("concrete").
+    pub const BOX: Self = Self {
+        va: 3.0,
+        ms: 1.2,
+        mc: 0.75,
+        t2: 0.01,
+        vs: 6.0,
+        alpha: 2.0,
+        strength: 1.0,
+    };
+}
+
+/// How a beam's stiffness depends on its extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplicitKind {
+    Plain,
+    /// Spring–damper that moves toward a stiff limit spring past its bounds (shocks,
+    /// tyre spokes).
+    LimitedSpring,
+    /// No stiffness when stretched; breaks past a long extension.
+    Support,
+    /// No stiffness when compressed.
+    Rope,
+}
+
+impl ExplicitKind {
+    pub fn code(self) -> u32 {
+        match self {
+            ExplicitKind::Plain => 0,
+            ExplicitKind::LimitedSpring => 1,
+            ExplicitKind::Support => 2,
+            ExplicitKind::Rope => 3,
+        }
+    }
+}
+
+/// Whether a beam may yield.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplicitType {
+    /// May yield (unless it is a limited spring).
+    Deformable,
+    /// Shocks and hydros: never yield.
+    Actuator,
+    /// Tyre rigidity beams: never yield.
+    Virtual,
+}
+
+impl ExplicitType {
+    pub fn code(self) -> u32 {
+        match self {
+            ExplicitType::Deformable => 0,
+            ExplicitType::Actuator => 1,
+            ExplicitType::Virtual => 2,
+        }
+    }
+}
+
+/// A point mass. `pos` is relative to the vehicle's origin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Node {
+    pub pos: Vec3,
+    pub vel: Vec3,
+    /// Accumulated force, consumed by the next node pass.
+    pub force: Vec3,
+    pub mass: f32,
+    pub friction: f32,
+    /// `NODE_*` bits.
+    pub flags: u32,
+}
+
+impl Node {
+    pub fn has(&self, flag: u32) -> bool {
+        self.flags & flag != 0
+    }
+}
+
+/// A beam between nodes `a` and `b`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Beam {
+    pub a: u32,
+    pub b: u32,
+    /// Stiffness (N/m) and damping (N·s/m).
+    pub k: f32,
+    pub c: f32,
+    /// Rest length (changes as the beam yields) and spawn rest length (m).
+    pub rest: f32,
+    pub rest0: f32,
+    /// Compression and tension yield thresholds (N, both positive).
+    pub tc: f32,
+    pub tt: f32,
+    /// Force above which the yield and break rules run.
+    pub gate: f32,
+    /// Break strength (N).
+    pub strength: f32,
+    /// Plastic coefficient 0..1.
+    pub plastic: f32,
+    pub kind: ExplicitKind,
+    pub ty: ExplicitType,
+    /// Limited springs: limit stiffness and damping, short and long bounds
+    /// (fractions of the rest length). Supports: `long_bound` is the break factor.
+    pub limit_k: f32,
+    pub limit_c: f32,
+    pub short_bound: f32,
+    pub long_bound: f32,
+    /// Detacher group: 0 none, > 0 a group master, < 0 a follower of group −g.
+    pub group: i32,
+    pub broken: bool,
+    /// Last force (N, positive = compression).
+    pub force: f32,
+}
+
+impl Beam {
+    /// A beam of `kind` and `ty` with its thresholds set from `deform` and
+    /// `strength` as spawning does (deformable: Tc = Tt = G = deform; otherwise
+    /// no yield and G = S).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        a: u32,
+        b: u32,
+        kind: ExplicitKind,
+        ty: ExplicitType,
+        k: f32,
+        c: f32,
+        rest: f32,
+        deform: f32,
+        strength: f32,
+        plastic: f32,
+    ) -> Self {
+        let deformable = ty == ExplicitType::Deformable;
+        let (tc, gate) = if deformable {
+            (deform, deform)
+        } else {
+            (f32::INFINITY, strength)
+        };
+        Self {
+            a,
+            b,
+            k,
+            c,
+            rest,
+            rest0: rest,
+            tc,
+            tt: tc,
+            gate,
+            strength,
+            plastic,
+            kind,
+            ty,
+            limit_k: 0.0,
+            limit_c: 0.0,
+            short_bound: 0.0,
+            long_bound: 0.0,
+            group: 0,
+            broken: false,
+            force: 0.0,
+        }
+    }
+
+    /// Yielded: alive with a rest length off its spawn length by more than 0.1 %.
+    pub fn bent(&self) -> bool {
+        !self.broken && (self.rest - self.rest0).abs() > 1e-3 * self.rest0
+    }
+}
+
+/// A collision triangle (nodes in file order) and its test throttle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Triangle {
+    pub nodes: [u32; 3],
+    pub wait: i32,
+    pub idle: i32,
+}
+
+/// An axis-aligned static box (world coordinates).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StaticBox {
+    pub lo: Vec3,
+    pub hi: Vec3,
+}
+
+impl StaticBox {
+    /// The box with centre `c` and half extents `half`.
+    pub fn centered(c: Vec3, half: Vec3) -> Self {
+        Self {
+            lo: c - half,
+            hi: c + half,
+        }
+    }
+}
+
+/// Steps per 60 fps frame with the remainder carried: 1/60 s is 100 units of
+/// 1/6000 s and a step is 3, so frames run 33, 33, 34, … steps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameClock {
+    carry: u32,
+}
+
+impl FrameClock {
+    /// Steps of the next frame.
+    pub fn next(&mut self) -> u32 {
+        let total = self.carry + 100;
+        self.carry = total % 3;
+        total / 3
+    }
+}
+
+/// One vehicle.
+#[derive(Clone, Debug)]
+pub struct ExplicitBeams {
+    pub nodes: Vec<Node>,
+    pub beams: Vec<Beam>,
+    pub triangles: Vec<Triangle>,
+    pub boxes: Vec<StaticBox>,
+    /// World position the node positions are relative to.
+    pub origin: Vec3,
+    /// Flat ground height (m).
+    pub ground: f32,
+    /// Self-collision range r (m).
+    pub collision_range: f32,
+    pub settings: ExplicitBeamsSettings,
+    /// Turbulence noise state (starts at 1).
+    pub noise: i32,
+    /// Per node, the beams it belongs to.
+    pub incidence: Vec<Vec<u32>>,
+    /// Contacters that are not tyre nodes, in node order.
+    pub candidates: Vec<u32>,
+    /// Steps run so far.
+    pub steps: u64,
+    pub clock: FrameClock,
+}
+
+// --- numerical primitives (compatible profile) ---
+
+/// The fast inverse square root: magic-constant estimate, one Newton iteration.
+pub fn fast_inv_sqrt(x: f32) -> f32 {
+    let i = 0x5f37_59df_i32.wrapping_sub((x.to_bits() as i32) >> 1);
+    let y = f32::from_bits(i as u32);
+    y * (1.5 - 0.5 * x * y * y)
+}
+
+/// Bit-trick square root: halves the exponent.
+pub fn approx_sqrt(x: f32) -> f32 {
+    let i = ((x.to_bits() as i32).wrapping_sub(0x3F80_0000) >> 1).wrapping_add(0x3F80_0000);
+    f32::from_bits(i as u32)
+}
+
+/// Schraudolph's exponential: 0 below −15, 1e38 above 88.
+pub fn approx_exp(x: f32) -> f32 {
+    if x < -15.0 {
+        return 0.0;
+    }
+    if x > 88.0 {
+        return 1e38;
+    }
+    let i = (12_102_203.0f32 * x + 1_064_652_319.0f32) as i32;
+    f32::from_bits(i as u32)
+}
+
+/// Bit-trick power xʸ.
+pub fn approx_pow(x: f32, y: f32) -> f32 {
+    let e = (x.to_bits() as i32).wrapping_sub(1_065_353_216) as f32;
+    let i = (y * e + 1_065_353_216.0f32) as i32;
+    f32::from_bits(i as u32)
+}
+
+/// One turbulence draw: advance the state, return a value in [−1, 1).
+pub fn noise_draw(state: &mut i32) -> f32 {
+    *state = state.wrapping_mul(16807);
+    f32::from_bits(0x4000_0000 | (*state as u32 & 0x007F_FFFF)) - 3.0
+}
+
+/// The contact force on a node with force `f` and velocity `v` (relative to the
+/// surface), mass `m`, against unit normal `n` with penetration `p`: cancels the
+/// normal force, removes 80 % of an approaching velocity (plus a penetration push),
+/// and applies static or sliding friction with the node's coefficient `friction`.
+#[allow(clippy::too_many_arguments)]
+pub fn contact_force(
+    f: Vec3,
+    v: Vec3,
+    m: f32,
+    n: Vec3,
+    h: f32,
+    surface: &ContactSurface,
+    p: f32,
+    friction: f32,
+) -> Vec3 {
+    if p < 0.0 {
+        return Vec3::ZERO;
+    }
+    let vn = v.dot(n);
+    let fn_ = f.dot(n);
+    let mut r = -fn_;
+    if vn < 0.0 {
+        r -= (0.8 * vn - 0.2 * p / h) * m / h;
+    }
+    if r <= 0.0 {
+        return Vec3::ZERO;
+    }
+    let sf = f - fn_ * n;
+    let mut s = v - vn * n;
+    let sigma = s.length();
+    if sigma > 0.0 {
+        s /= sigma;
+    }
+    let gr = r * surface.strength * friction;
+    let ms = surface.ms * gr;
+    if sigma < surface.va && gr > 0.0 && sf.length_squared() <= ms * ms {
+        r * n - ms * (1.0 - approx_exp(-sigma / surface.va)) * s - sf
+    } else {
+        let g = surface.mc
+            + (surface.ms - surface.mc)
+                * approx_exp(-approx_pow(sigma / surface.vs, surface.alpha));
+        r * n - (g + (surface.t2 * sigma).min(5.0)) * gr * s
+    }
+}
+
+/// Beam type and kind for a desc beam.
+fn classify(kind: BeamKind) -> (ExplicitKind, ExplicitType) {
+    match kind {
+        BeamKind::Normal | BeamKind::Anisotropic => (ExplicitKind::Plain, ExplicitType::Deformable),
+        BeamKind::Support => (ExplicitKind::Support, ExplicitType::Deformable),
+        BeamKind::Rope => (ExplicitKind::Rope, ExplicitType::Deformable),
+        BeamKind::Bounded => (ExplicitKind::LimitedSpring, ExplicitType::Actuator),
+        BeamKind::Hydro => (ExplicitKind::Plain, ExplicitType::Actuator),
+    }
+}
+
+/// Spawn order class: plain/support/rope, then shocks, then hydros.
+fn order_class(kind: BeamKind) -> u32 {
+    match kind {
+        BeamKind::Bounded => 1,
+        BeamKind::Hydro => 2,
+        _ => 0,
+    }
+}
+
+impl ExplicitBeams {
+    /// An empty vehicle (add nodes and beams, then [`Self::finish`]).
+    pub fn empty(settings: ExplicitBeamsSettings) -> Self {
+        Self {
+            nodes: Vec::new(),
+            beams: Vec::new(),
+            triangles: Vec::new(),
+            boxes: Vec::new(),
+            origin: Vec3::ZERO,
+            ground: 0.0,
+            collision_range: DEFAULT_COLLISION_RANGE,
+            settings,
+            noise: 1,
+            incidence: Vec::new(),
+            candidates: Vec::new(),
+            steps: 0,
+            clock: FrameClock::default(),
+        }
+    }
+
+    /// Spawn a `.truck` file with its node offsets at `position`, every node moving
+    /// at `velocity`, its tyres built from the `wheels` section (other wheel
+    /// sections are an error).
+    pub fn from_truck(
+        text: &str,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+    ) -> Result<Self, String> {
+        let file = parse_truck(text);
+        if let Some(w) = file.wheels.iter().find(|w| w.kind != "wheels") {
+            return Err(format!(
+                "`{}` wheels are not supported (only `wheels`)",
+                w.kind
+            ));
+        }
+        let desc = load_truck(text);
+        let cine_beams = file.cinecams.len() * 8;
+        let mut s = Self::spawn_nodes(&desc, position, velocity, settings);
+        // Contacters exactly as listed in the file.
+        for n in &mut s.nodes {
+            n.flags &= !NODE_CONTACTER;
+        }
+        for &c in &file.contacters {
+            s.nodes[c as usize].flags |= NODE_CONTACTER;
+        }
+        // Beam order: cinecam beams, tyre beams, then the file's beams, shocks, hydros.
+        for b in &desc.beams[..cine_beams.min(desc.beams.len())] {
+            s.push_desc_beam(b);
+        }
+        for w in &file.wheels {
+            let a1 = w.node1;
+            let a2 = w.node2;
+            let pa1 = s.nodes[a1 as usize].pos;
+            let pa2 = s.nodes[a2 as usize].pos;
+            let n = w.rays.max(1);
+            let axis = (pa2 - pa1).normalize();
+            let mut spoke = axis.cross(Vec3::X);
+            if spoke.length_squared() < 1e-12 {
+                spoke = axis.cross(Vec3::Y);
+            }
+            let mut spoke = spoke.normalize() * w.radius;
+            let theta = -360.0f32 / (2 * n) as f32;
+            let half = (theta * 0.5).to_radians();
+            let qw = half.cos();
+            let qv = half.sin() * axis;
+            let rotate = |u: Vec3| u + 2.0 * qw * qv.cross(u) + 2.0 * qv.cross(qv.cross(u));
+            let first = s.nodes.len() as u32;
+            let tyre = |pos: Vec3| Node {
+                pos,
+                vel: velocity,
+                force: Vec3::ZERO,
+                mass: w.mass / (2 * n) as f32,
+                friction: w.node_friction,
+                flags: NODE_CONTACTER | NODE_TYRE,
+            };
+            for _ in 0..n {
+                s.nodes.push(tyre(pa1 + spoke));
+                spoke = rotate(spoke);
+                s.nodes.push(tyre(pa2 + spoke));
+                spoke = rotate(spoke);
+            }
+            let outer = |i: u32| first + 2 * (i % n);
+            let inner = |i: u32| first + 2 * (i % n) + 1;
+            let group = signed_group(&w.beam);
+            let deform = w.beam.deform;
+            let strength = w.beam.strength;
+            let plastic = w.beam.plastic_coef;
+            let rigidity = w.rigidity.map(|p| {
+                let pp = s.nodes[p as usize].pos;
+                (p, pp.distance_squared(pa1) < pp.distance_squared(pa2))
+            });
+            for i in 0..n {
+                let add = |s: &mut Self, a: u32, b: u32, kind: ExplicitKind, ty: ExplicitType| {
+                    let rest = s.nodes[a as usize].pos.distance(s.nodes[b as usize].pos);
+                    let mut beam = Beam::new(
+                        a, b, kind, ty, w.spring, w.damp, rest, deform, strength, plastic,
+                    );
+                    beam.group = group;
+                    if kind == ExplicitKind::LimitedSpring {
+                        beam.short_bound = 0.66;
+                        beam.long_bound = 0.0;
+                        beam.limit_k = 9_000_000.0;
+                        beam.limit_c = 12_000.0;
+                    }
+                    s.beams.push(beam);
+                };
+                let (o, ii) = (outer(i), inner(i));
+                let lim = ExplicitKind::LimitedSpring;
+                let plain = ExplicitKind::Plain;
+                let def = ExplicitType::Deformable;
+                add(&mut s, a1, o, lim, def);
+                add(&mut s, a2, ii, lim, def);
+                add(&mut s, a2, o, plain, def);
+                add(&mut s, a1, ii, plain, def);
+                add(&mut s, o, ii, plain, def);
+                add(&mut s, o, outer(i + 1), plain, def);
+                add(&mut s, ii, inner(i + 1), plain, def);
+                add(&mut s, ii, outer(i + 1), plain, def);
+                if let Some((p, near_a1)) = rigidity {
+                    let end = if near_a1 { o } else { ii };
+                    add(&mut s, p, end, plain, ExplicitType::Virtual);
+                }
+            }
+        }
+        let rest: Vec<_> = desc.beams[cine_beams.min(desc.beams.len())..].to_vec();
+        for class in 0..3 {
+            for b in rest.iter().filter(|b| order_class(b.kind) == class) {
+                s.push_desc_beam(b);
+            }
+        }
+        s.collision_range = desc.collision_range;
+        s.add_triangles(&desc);
+        s.finish();
+        Ok(s)
+    }
+
+    /// Spawn a desc (no tyres): its nodes at `position` moving at `velocity`, its
+    /// beams in the desc's order, contacters as the desc marks them.
+    pub fn new(
+        desc: &SoftVehicleDesc,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+    ) -> Self {
+        let mut s = Self::spawn_nodes(desc, position, velocity, settings);
+        for b in &desc.beams {
+            s.push_desc_beam(b);
+        }
+        s.collision_range = if desc.collision_range > 0.0 {
+            desc.collision_range
+        } else {
+            DEFAULT_COLLISION_RANGE
+        };
+        s.add_triangles(desc);
+        s.finish();
+        s
+    }
+
+    fn spawn_nodes(
+        desc: &SoftVehicleDesc,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+    ) -> Self {
+        let mut s = Self::empty(settings);
+        for n in &desc.nodes {
+            let mut flags = 0;
+            if !n.collision {
+                flags |= NODE_NO_GROUND;
+            }
+            if n.fixed {
+                flags |= NODE_IMMOVABLE;
+            }
+            if n.contacter {
+                flags |= NODE_CONTACTER;
+            }
+            s.nodes.push(Node {
+                pos: position + Vec3::from_array(n.position),
+                vel: if n.fixed { Vec3::ZERO } else { velocity },
+                force: Vec3::ZERO,
+                mass: n.mass,
+                friction: n.friction,
+                flags,
+            });
+        }
+        s
+    }
+
+    fn push_desc_beam(&mut self, b: &crate::desc::SoftBeam) {
+        let (kind, ty) = classify(b.kind);
+        let mut rest = self.nodes[b.a as usize]
+            .pos
+            .distance(self.nodes[b.b as usize].pos);
+        if b.kind == BeamKind::Bounded {
+            rest *= b.precompression;
+        }
+        let mut beam = Beam::new(
+            b.a,
+            b.b,
+            kind,
+            ty,
+            b.spring,
+            b.damp,
+            rest,
+            b.deform,
+            b.strength,
+            b.plastic_coef,
+        );
+        beam.group = signed_group(b);
+        match kind {
+            ExplicitKind::LimitedSpring => {
+                beam.limit_k = b.deform;
+                beam.limit_c = if b.limit_damp == 0.0 {
+                    12_000.0
+                } else {
+                    b.limit_damp
+                };
+                beam.short_bound = b.short_bound;
+                beam.long_bound = b.long_bound;
+            }
+            ExplicitKind::Support => beam.long_bound = b.long_bound,
+            _ => {}
+        }
+        self.beams.push(beam);
+    }
+
+    fn add_triangles(&mut self, desc: &SoftVehicleDesc) {
+        for t in desc.triangles.iter().filter(|t| t.collision) {
+            for &n in &t.nodes {
+                self.nodes[n as usize].flags |= NODE_ON_TRIANGLE;
+            }
+            self.triangles.push(Triangle {
+                nodes: t.nodes,
+                wait: 0,
+                idle: 0,
+            });
+        }
+    }
+
+    /// Build the per-node beam lists and the self-collision candidates (after
+    /// adding nodes, beams or contacter flags by hand).
+    pub fn finish(&mut self) {
+        self.incidence = vec![Vec::new(); self.nodes.len()];
+        for (i, b) in self.beams.iter().enumerate() {
+            self.incidence[b.a as usize].push(i as u32);
+            self.incidence[b.b as usize].push(i as u32);
+        }
+        self.candidates = (0..self.nodes.len() as u32)
+            .filter(|&i| {
+                let n = &self.nodes[i as usize];
+                n.has(NODE_CONTACTER) && !n.has(NODE_TYRE)
+            })
+            .collect();
+    }
+
+    /// World positions of the nodes.
+    pub fn positions(&self) -> Vec<Vec3> {
+        self.nodes.iter().map(|n| self.origin + n.pos).collect()
+    }
+
+    /// Live plain beams at `node`.
+    pub fn live_plain(&self, node: u32) -> u32 {
+        self.incidence[node as usize]
+            .iter()
+            .filter(|&&j| {
+                let b = &self.beams[j as usize];
+                !b.broken && b.kind == ExplicitKind::Plain
+            })
+            .count() as u32
+    }
+
+    /// Broken and bent ([`Beam::bent`]) beam counts.
+    pub fn damage(&self) -> (usize, usize) {
+        (
+            self.beams.iter().filter(|b| b.broken).count(),
+            self.beams.iter().filter(|b| b.bent()).count(),
+        )
+    }
+
+    /// If node 0 is farther than [`REBASE_RADIUS`] from the origin, move the origin
+    /// to it (node positions keep their world positions).
+    pub fn rebase_origin(&mut self) {
+        let Some(first) = self.nodes.first() else {
+            return;
+        };
+        let offset = first.pos;
+        if offset.length() > REBASE_RADIUS {
+            self.origin += offset;
+            for n in &mut self.nodes {
+                n.pos -= offset;
+            }
+        }
+    }
+
+    /// One 60 fps frame: rebase, then its steps ([`FrameClock`]). Returns the steps.
+    pub fn frame(&mut self) -> u32 {
+        self.rebase_origin();
+        let steps = self.clock.next();
+        for _ in 0..steps {
+            self.step();
+        }
+        steps
+    }
+
+    /// Simulate `seconds` as 60 fps frames.
+    pub fn run(&mut self, seconds: f32) {
+        let frames = (seconds * 60.0).round() as u32;
+        for _ in 0..frames {
+            self.frame();
+        }
+    }
+
+    /// One fixed step: nodes, beams, self-collision.
+    pub fn step(&mut self) {
+        self.node_pass();
+        self.beam_pass();
+        if !self.triangles.is_empty() && !self.candidates.is_empty() {
+            self.collision_pass();
+        }
+        self.steps += 1;
+    }
+
+    fn node_pass(&mut self) {
+        let h = STEP;
+        let origin = self.origin;
+        let ground = self.ground;
+        let settings = self.settings;
+        for i in 0..self.nodes.len() {
+            let mut n = self.nodes[i];
+            if !n.has(NODE_NO_GROUND) {
+                let x = origin + n.pos;
+                if ground > x.y {
+                    n.force += contact_force(
+                        n.force,
+                        n.vel,
+                        n.mass,
+                        Vec3::Y,
+                        h,
+                        &ContactSurface::GROUND,
+                        ground - x.y,
+                        n.friction,
+                    );
+                }
+                for bx in &self.boxes {
+                    if let Some(normal) = box_face(bx, x) {
+                        n.force += contact_force(
+                            n.force,
+                            n.vel,
+                            n.mass,
+                            normal,
+                            h,
+                            &ContactSurface::BOX,
+                            0.0,
+                            n.friction,
+                        );
+                    }
+                }
+            }
+            if !n.has(NODE_IMMOVABLE) {
+                n.vel += n.force / n.mass * h;
+                n.pos += n.vel * h;
+            }
+            n.force = Vec3::new(0.0, n.mass * GRAVITY, 0.0);
+            if settings.drag {
+                let s = approx_sqrt(n.vel.dot(n.vel));
+                n.force += -DRAG * s * n.vel;
+                if settings.turbulence {
+                    let t = DRAG * s * s * TURBULENCE;
+                    let x = noise_draw(&mut self.noise);
+                    let y = noise_draw(&mut self.noise);
+                    let z = noise_draw(&mut self.noise);
+                    n.force += t * Vec3::new(x, y, z);
+                }
+            }
+            self.nodes[i] = n;
+        }
+    }
+
+    fn beam_pass(&mut self) {
+        for j in 0..self.beams.len() {
+            if self.beams[j].broken {
+                continue;
+            }
+            let mut beam = self.beams[j];
+            let na = self.nodes[beam.a as usize];
+            let nb = self.nodes[beam.b as usize];
+            let out = beam_force(&mut beam, &na, &nb, self.settings.fast_inv_sqrt);
+            let mut f = out.force;
+            let mut cascade = false;
+            if out.check_break {
+                let saved = [beam.a, beam.b].iter().any(|&e| {
+                    self.nodes[e as usize].has(NODE_ON_TRIANGLE) && self.live_plain(e) < 3
+                });
+                if saved {
+                    beam.strength = 2.0 * beam.gate;
+                } else {
+                    beam.broken = true;
+                    f = 0.0;
+                    cascade = beam.group > 0;
+                }
+            }
+            self.beams[j] = beam;
+            if cascade {
+                let g = beam.group;
+                for other in &mut self.beams {
+                    if other.group.abs() == g {
+                        other.broken = true;
+                    }
+                }
+            }
+            let push = out.d * (f * out.inv);
+            self.nodes[beam.a as usize].force += push;
+            self.nodes[beam.b as usize].force -= push;
+        }
+    }
+
+    fn collision_pass(&mut self) {
+        let r = self.collision_range;
+        let h = STEP;
+        for t in 0..self.triangles.len() {
+            let tri = &mut self.triangles[t];
+            if tri.wait > 0 {
+                tri.idle += 1;
+                tri.wait -= 1;
+                continue;
+            } else if tri.idle > 0 {
+                tri.wait = tri.idle.min(12);
+                tri.idle = 0;
+            }
+            let [i0, i1, i2] = tri.nodes;
+            let world = |i: u32| self.origin + self.nodes[i as usize].pos;
+            let (p0, p1, p2) = (world(i0), world(i1), world(i2));
+            let frame = TriFrame::new(p0, p1, p2);
+            let lo = p0.min(p1).min(p2) - Vec3::splat(r);
+            let hi = p0.max(p1).max(p2) + Vec3::splat(r);
+            let mut hit = false;
+            for k in 0..self.candidates.len() {
+                let hn = self.candidates[k];
+                if hn == i0 || hn == i1 || hn == i2 {
+                    continue;
+                }
+                let p = self.origin + self.nodes[hn as usize].pos;
+                if p.cmplt(lo).any() || p.cmpgt(hi).any() {
+                    continue;
+                }
+                let Some((alpha, beta, gamma, delta, n)) = frame.hit(p, r) else {
+                    continue;
+                };
+                hit = true;
+                let node = self.nodes[hn as usize];
+                let (n0, n1, n2) = (
+                    self.nodes[i0 as usize],
+                    self.nodes[i1 as usize],
+                    self.nodes[i2 as usize],
+                );
+                let v = node.vel - (alpha * n1.vel + beta * n2.vel + gamma * n0.vel);
+                let mt = alpha * n1.mass + beta * n2.mass + gamma * n0.mass;
+                let m = node.mass * mt / (node.mass + mt);
+                let f = contact_force(
+                    node.force,
+                    v,
+                    m,
+                    n,
+                    h,
+                    &ContactSurface::BOX,
+                    r - delta,
+                    node.friction,
+                );
+                self.nodes[hn as usize].force += f;
+                self.nodes[i1 as usize].force -= alpha * f;
+                self.nodes[i2 as usize].force -= beta * f;
+                self.nodes[i0 as usize].force -= gamma * f;
+            }
+            let tri = &mut self.triangles[t];
+            if hit {
+                tri.wait = -20000;
+            } else {
+                tri.wait += 1;
+            }
+        }
+    }
+}
+
+fn signed_group(b: &crate::desc::SoftBeam) -> i32 {
+    let g = b.break_group as i32;
+    if b.break_group_passive {
+        -g
+    } else {
+        g
+    }
+}
+
+/// The face of `b` a point strictly inside it is pushed out through (its outward
+/// normal), or `None` when the point is not strictly inside.
+pub fn box_face(b: &StaticBox, x: Vec3) -> Option<Vec3> {
+    let inside = x.x > b.lo.x
+        && x.x < b.hi.x
+        && x.y > b.lo.y
+        && x.y < b.hi.y
+        && x.z > b.lo.z
+        && x.z < b.hi.z;
+    if !inside {
+        return None;
+    }
+    let mut normal = Vec3::NEG_Z;
+    let mut dist = x.z - b.lo.z;
+    for (d, n) in [
+        (b.hi.z - x.z, Vec3::Z),
+        (x.x - b.lo.x, Vec3::NEG_X),
+        (b.hi.x - x.x, Vec3::X),
+        (x.y - b.lo.y, Vec3::NEG_Y),
+        (b.hi.y - x.y, Vec3::Y),
+    ] {
+        if d < dist {
+            dist = d;
+            normal = n;
+        }
+    }
+    Some(normal)
+}
+
+/// What [`beam_force`] decided.
+#[derive(Clone, Copy, Debug)]
+pub struct BeamOut {
+    /// a − b and 1/|a − b|.
+    pub d: Vec3,
+    pub inv: f32,
+    /// Force to apply (positive = compression), before the break test.
+    pub force: f32,
+    /// τ exceeded the strength: the beam breaks unless an end saves it.
+    pub check_break: bool,
+}
+
+/// One beam's force with the kind rules and the yield rules applied to `beam`
+/// (rest length, thresholds, strength, last force; a support stretched too far is
+/// marked broken). The break test that needs the node graph is left to the caller
+/// (`check_break`).
+pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut {
+    let d = na.pos - nb.pos;
+    let q = d.dot(d);
+    let inv = if fast {
+        fast_inv_sqrt(q)
+    } else {
+        1.0 / q.sqrt()
+    };
+    let len = q * inv;
+    let e = len - beam.rest;
+    let u = (na.vel - nb.vel).dot(d) * inv;
+    let mut k = beam.k;
+    let mut c = beam.c;
+    let mut support_broke = false;
+    match beam.kind {
+        ExplicitKind::LimitedSpring => {
+            let long = beam.long_bound * beam.rest;
+            let short = beam.short_bound * beam.rest;
+            let o = if e > long {
+                e - long
+            } else if e < -short {
+                -e - short
+            } else {
+                0.0
+            };
+            if o != 0.0 {
+                k += (beam.limit_k - k) * o;
+                c += (beam.limit_c - c) * o;
+            }
+        }
+        ExplicitKind::Support => {
+            if e > 0.0 {
+                k = 0.0;
+                c *= 0.1;
+                let factor = if beam.long_bound > 0.0 {
+                    beam.long_bound
+                } else {
+                    SUPPORT_BREAK_FACTOR
+                };
+                if e > beam.rest * factor {
+                    beam.broken = true;
+                    support_broke = true;
+                }
+            }
+        }
+        ExplicitKind::Rope => {
+            if e < 0.0 {
+                k = 0.0;
+                c *= 0.1;
+            }
+        }
+        ExplicitKind::Plain => {}
+    }
+    let mut f = -k * e - c * u;
+    beam.force = f;
+    let mut tau = f.abs();
+    let mut check_break = false;
+    if !support_broke && tau > beam.gate {
+        if beam.ty == ExplicitType::Deformable
+            && beam.kind != ExplicitKind::LimitedSpring
+            && k != 0.0
+        {
+            if f > beam.tc && e < 0.0 {
+                let delta = e + (beam.tc / k) * (1.0 - beam.plastic);
+                let old = beam.rest;
+                beam.rest = (beam.rest + delta).max(MIN_REST);
+                f -= (f - beam.tc) / 2.0;
+                tau = f;
+                if beam.rest < old {
+                    beam.tc = beam.tc * old / beam.rest;
+                    beam.gate = beam.tc.min(beam.tt).min(beam.strength);
+                }
+            } else if f < -beam.tt && e > 0.0 {
+                let delta = e - (beam.tt / k) * (1.0 - beam.plastic);
+                let old = beam.rest;
+                beam.rest += delta;
+                f -= (f + beam.tt) / 2.0;
+                tau = -f;
+                if beam.rest > old {
+                    beam.tt = beam.tt * beam.rest / old;
+                    beam.gate = beam.tc.min(beam.tt).min(beam.strength);
+                }
+                beam.strength -= delta * k;
+            }
+        }
+        check_break = tau > beam.strength;
+    }
+    BeamOut {
+        d,
+        inv,
+        force: f,
+        check_break,
+    }
+}
+
+/// A triangle's barycentric frame for the self-collision test.
+#[derive(Clone, Copy, Debug)]
+pub struct TriFrame {
+    pub p0: Vec3,
+    pub n: Vec3,
+    /// Rows of the inverse of the matrix with columns (u, w, n), or `None` when its
+    /// determinant is too small.
+    pub inv: Option<[Vec3; 3]>,
+}
+
+impl TriFrame {
+    pub fn new(p0: Vec3, p1: Vec3, p2: Vec3) -> Self {
+        let u = p1 - p0;
+        let w = p2 - p0;
+        let c = u.cross(w);
+        let len = c.length();
+        let n = if len > 0.0 { c / len } else { c };
+        let det = u.dot(w.cross(n));
+        let inv = (det.abs() > 1e-6).then(|| {
+            let r = 1.0 / det;
+            [w.cross(n) * r, n.cross(u) * r, u.cross(w) * r]
+        });
+        Self { p0, n, inv }
+    }
+
+    /// (α, β, γ, δ, normal) when `p` is over the triangle within `r` of its plane;
+    /// the normal points to the side `p` is on (δ ≥ 0).
+    pub fn hit(&self, p: Vec3, r: f32) -> Option<(f32, f32, f32, f32, Vec3)> {
+        let q = p - self.p0;
+        let (alpha, beta, delta) = match self.inv {
+            Some([ra, rb, rd]) => (ra.dot(q), rb.dot(q), rd.dot(q)),
+            None => (0.0, 0.0, 0.0),
+        };
+        let gamma = 1.0 - alpha - beta;
+        if alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && delta.abs() <= r {
+            if delta < 0.0 {
+                Some((alpha, beta, gamma, -delta, -self.n))
+            } else {
+                Some((alpha, beta, gamma, delta, self.n))
+            }
+        } else {
+            None
+        }
+    }
+}

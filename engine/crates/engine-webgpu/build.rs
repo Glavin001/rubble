@@ -476,6 +476,30 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         .arg(slang_root.join("kernels/soft_skin.slang"))
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
+    // Explicit beams (`ExplicitBeamsGpu`): one standalone module, entry
+    // `explicit_beams_frame`. Its barriers order storage only: Slang lowers
+    // DeviceMemoryBarrierWithGroupSync with a texture barrier naga rejects (and an
+    // empty statement Safari's parser rejects), so keep the storage and workgroup
+    // barriers alone.
+    let beams = wgsl_dir.join("explicit_beams.wgsl");
+    compile_with_defines(
+        &slang_root.join("kernels/explicit_beams.slang"),
+        "explicit_beams_frame",
+        SlangTarget::Wgsl,
+        &beams,
+        &[],
+        &[("ENGINE_WGSL", "1")],
+    )?;
+    let text = std::fs::read_to_string(&beams)?
+        .replace(
+            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+            "storageBarrier(); workgroupBarrier();",
+        )
+        .replace(
+            "storageBarrier(); textureBarrier(); workgroupBarrier();",
+            "storageBarrier(); workgroupBarrier();",
+        );
+    std::fs::write(&beams, text)?;
     // MPM material probe (tests/mpm_material.rs): standalone, with its own bindings,
     // so it stays out of the world's pipeline table.
     compile_with_defines(

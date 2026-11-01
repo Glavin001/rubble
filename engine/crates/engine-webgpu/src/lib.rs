@@ -6,6 +6,8 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 #[cfg(feature = "gpu")]
+mod explicit_beams_gpu;
+#[cfg(feature = "gpu")]
 mod features;
 #[cfg(feature = "gpu")]
 mod gpu;
@@ -15,6 +17,8 @@ mod poses;
 pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
+#[cfg(feature = "gpu")]
+pub use explicit_beams_gpu::{ExplicitBeamsGpu, GpuBeam};
 #[cfg(feature = "gpu")]
 pub use features::{
     ContactStorage, EngineFeatures, GridLayout, ManifoldPersistence, SimOptions, WarmHash,
@@ -32,6 +36,12 @@ pub use soft_skin::SoftSkinner;
 /// The skinning kernels as one WGSL module (entries `soft_skin_vertices`,
 /// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
 pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
+
+/// The explicit-beams solver (`slang/kernels/explicit_beams.slang`, entry
+/// `explicit_beams_frame`): one workgroup per vehicle runs a whole frame of steps
+/// ([`ExplicitBeamsGpu`]), as `generated/wgsl/explicit_beams.wgsl`.
+pub const EXPLICIT_BEAMS_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams.wgsl"));
 
 /// The MPM material probe (`slang/kernels/mpm_material_probe.slang`, entry
 /// `mpm_material_probe`): runs `physics/mpm_material.slang` on test cases so

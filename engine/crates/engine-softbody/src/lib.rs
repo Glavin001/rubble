@@ -15,6 +15,7 @@ pub mod cpu;
 pub mod damage;
 pub mod desc;
 pub mod elements;
+pub mod explicit_beams;
 pub mod explicit_ref;
 pub mod flexbody;
 pub mod hires;
