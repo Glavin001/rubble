@@ -422,10 +422,16 @@ pub enum CrushMass {
     /// and rests on what is there and still loads it. `budget` particle bodies are reserved
     /// when the destructible is placed; a crush past them fails the step with an error
     /// naming this budget, never a silent drop.
+    ///
+    /// `continuous`: a particle has continuous collision while it moves fast
+    /// (`BodyDef::ccd_when_fast`), so it never passes through a plank. Those bodies share
+    /// the engine's `CCD_BODY_CAP` slots a step (more fails the step); off, a fast
+    /// particle may pass through thin shapes.
     Particles {
         size: f32,
         max_per_chunk: u32,
         budget: u32,
+        continuous: bool,
     },
     /// Removed (dust): the chunk's mass leaves the simulation. The host draws the dust
     /// from `ChunkCrushed`.

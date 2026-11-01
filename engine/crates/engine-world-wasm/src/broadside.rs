@@ -199,6 +199,10 @@ pub fn finale_targets() -> Vec<([f32; 3], f32)> {
 /// another particle; the page draws each as a splinter.
 pub const PARTICLE_SIZE: f32 = 0.08;
 pub const PARTICLES_PER_CHUNK: u32 = 24;
+/// Continuous collision for fast particles. Off for now: the takes have more fast
+/// particles at once than the engine's CCD slots (`CCD_BODY_CAP`), so a fast particle
+/// may pass through a thin plank.
+pub const PARTICLE_CCD: bool = false;
 /// Particle bodies reserved when the ship is placed; a take that crushes more fails with
 /// an error.
 pub const CRUSH_BUDGET: u32 = 16384;
@@ -264,6 +268,7 @@ pub fn crush(budget: u32) -> Crush {
             size: PARTICLE_SIZE,
             max_per_chunk: PARTICLES_PER_CHUNK,
             budget,
+            continuous: PARTICLE_CCD,
         },
         ..Crush::default()
     }

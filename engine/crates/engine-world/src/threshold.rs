@@ -490,6 +490,8 @@ mod imp {
         fragments: u32,
         /// `CrushMass::Particles`: each chunk's particle count (0 where it cannot crush).
         particles: Option<Vec<u32>>,
+        /// Its particles' continuous collision while fast.
+        particle_ccd: bool,
         material: u32,
         shape_def: crate::ShapeDef,
     }
@@ -1107,6 +1109,13 @@ mod imp {
                     CrushMass::Particles { budget, .. } => (true, 0, budget, true),
                     CrushMass::Remove => (false, 0, 0, false),
                 };
+                let particle_ccd = matches!(
+                    c.mass,
+                    CrushMass::Particles {
+                        continuous: true,
+                        ..
+                    }
+                );
                 anyhow::ensure!(
                     budget < stress_gpu::fracture::CRUSH_POOL_SPAN,
                     "DestructibleDef::crush: a budget of {budget} crush bodies; under {}",
@@ -1137,7 +1146,7 @@ mod imp {
                     let mut parked = BodyState::static_plane_support();
                     parked.position = crate::graveyard(i);
                     parked.initial_pos = parked.position;
-                    if particles {
+                    if particle_ccd {
                         // The particles' continuous collision: the passes are scheduled
                         // from placement (a parked static body is never a CCD body).
                         parked.flags |= engine_schema::BODY_CCD_FAST;
@@ -1181,6 +1190,7 @@ mod imp {
                     conserve,
                     fragments,
                     particles,
+                    particle_ccd,
                     pool: pool.iter().map(|p| [p.0, p.2]).collect(),
                     max_events,
                     park_y: crate::graveyard(0)[1],
@@ -1190,6 +1200,7 @@ mod imp {
                     pool,
                     fragments,
                     particles: particles.then_some(counts),
+                    particle_ccd,
                     material,
                     shape_def: pool_def,
                 });
@@ -1776,12 +1787,13 @@ mod imp {
                 let t = self.fracture.slots[k].as_ref().expect("live slot");
                 let c = e.chunk as usize;
                 let b = t.chunk_body[c] as usize;
-                let (pool, fragments, particles, material, shape_def) = {
+                let (pool, fragments, particles, particle_ccd, material, shape_def) = {
                     let cs = t.crush.as_ref().expect("a crushing destructible");
                     (
                         cs.pool.clone(),
                         cs.pieces(c),
                         cs.particles.is_some(),
+                        cs.particle_ccd,
                         cs.material,
                         cs.shape_def.clone(),
                     )
@@ -1915,7 +1927,7 @@ mod imp {
                                 .to_cols_array_2d(),
                         });
                         slot.principal = moments;
-                        slot.ccd_when_fast = particles;
+                        slot.ccd_when_fast = particle_ccd;
                         slot.frames = vec![(0, SolverFrame::IDENTITY)];
                         slot.last_transform = None;
                         slot.last_solver = None;

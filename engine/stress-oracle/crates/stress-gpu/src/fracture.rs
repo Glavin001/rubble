@@ -88,6 +88,8 @@ pub struct CrushTables {
     /// spheres that never rotate; the host gives them a shared negative filter group so
     /// they never collide with one another) instead of `fragments` boxes.
     pub particles: bool,
+    /// The particles' continuous collision while fast (rubble's BODY_CCD_FAST).
+    pub particle_ccd: bool,
     /// The reserved fragment bodies (engine body, its one box or sphere collider): the budget; a
     /// crush past it is an error (`CRUSH_ERROR_FRAGMENTS`), never a silent drop.
     pub pool: Vec<[u32; 2]>,
@@ -182,7 +184,7 @@ struct CrushParams {
     t_normal: u32,
     r_flow: u32,
     r_blast: u32,
-    pad0: f32,
+    particle_ccd: u32,
     pad1: f32,
 }
 
@@ -283,6 +285,7 @@ fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::B
         t_normal,
         r_flow,
         r_blast,
+        particle_ccd: (c.particles && c.particle_ccd) as u32,
         ..Default::default()
     };
     Ok((gpu.storage("fracture crush tables", &tab), storage_bytes(gpu, "fracture crush state", 16 * rw_words, wgpu::BufferUsages::empty()), gpu.uniform("fracture crush params", &params), params))

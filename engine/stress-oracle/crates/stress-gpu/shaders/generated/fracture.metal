@@ -76,7 +76,7 @@ struct CrushParams_0
     uint t_normal_0;
     uint r_flow_0;
     uint r_blast_0;
-    float pad0_1;
+    uint particle_ccd_0;
     float pad1_1;
 };
 
@@ -5876,6 +5876,7 @@ float3 crush_particle_spot_0(uint k_29, uint i_10)
         _S774 = false;
     }
     uint first_6;
+    uint n_4;
     uint i_11;
     float3 half_1;
     if(_S774)
@@ -5909,7 +5910,7 @@ float3 crush_particle_spot_0(uint k_29, uint i_10)
         float3 h_5 = (float4(*((&kernelContext_95)->geometry_0+(_S792 + 1U))) ).xyz;
         thread uint3 g_0 = uint3(int3(int(1)) );
         thread float3 cell_0 = h_5;
-        uint n_4 = (&kernelContext_95)->crush_0->fragments_0;
+        n_4 = (&kernelContext_95)->crush_0->fragments_0;
         for(;;)
         {
             if(n_4 > 1U)
@@ -6105,17 +6106,27 @@ float3 crush_particle_spot_0(uint k_29, uint i_10)
             uint fc_1 = (as_type<uint>((_S846.y)));
             float _S847 = 1.0f / _S840;
             float4 _S848 = float4(0.0f, 0.0f, 0.0f, 1.0f);
-            float3 _S849 = v_14 + cross(w_11, x_7 - _S777.xyz);
-            thread Quat_0 _S850 = quat_of_0(_S848);
-            write_body_0(fs_1, x_7, _S847, &_S850, _S784, 33033U, _S849, _S784, &kernelContext_95);
-            uint _S851 = 4U * fc_1;
-            uint _S852 = _S851 + 1U;
-            *((&kernelContext_95)->colliders_0+_S852) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_95)->colliders_0+_S852)) ).w)) ;
-            *((&kernelContext_95)->colliders_0+(_S851 + 2U)) = packed_float4(_S848) ;
-            *((&kernelContext_95)->colliders_0+(_S851 + 3U)) = packed_float4(float4(_S838, 0.0f, 0.0f, _S838)) ;
-            uint _S853 = 2U * fc_1;
-            *((&kernelContext_95)->collider_info_0+_S853) = packed_uint4(uint4(4294967295U, fs_1, 2U, (uint4(*((&kernelContext_95)->collider_info_0+_S853)) ).w)) ;
-            *((&kernelContext_95)->collider_info_0+(_S853 + 1U)) = packed_uint4(uint4((as_type<uint>((_S840))), (as_type<uint>((_S841))), (as_type<uint>((_S838))), 0U)) ;
+            Quat_0 _S849 = quat_of_0(_S848);
+            if(((&kernelContext_95)->crush_0->particle_ccd_0) != 0U)
+            {
+                n_4 = 33024U;
+            }
+            else
+            {
+                n_4 = 0U;
+            }
+            uint _S850 = 9U | n_4;
+            float3 _S851 = v_14 + cross(w_11, x_7 - _S777.xyz);
+            thread Quat_0 _S852 = _S849;
+            write_body_0(fs_1, x_7, _S847, &_S852, _S784, _S850, _S851, _S784, &kernelContext_95);
+            uint _S853 = 4U * fc_1;
+            uint _S854 = _S853 + 1U;
+            *((&kernelContext_95)->colliders_0+_S854) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_95)->colliders_0+_S854)) ).w)) ;
+            *((&kernelContext_95)->colliders_0+(_S853 + 2U)) = packed_float4(_S848) ;
+            *((&kernelContext_95)->colliders_0+(_S853 + 3U)) = packed_float4(float4(_S838, 0.0f, 0.0f, _S838)) ;
+            uint _S855 = 2U * fc_1;
+            *((&kernelContext_95)->collider_info_0+_S855) = packed_uint4(uint4(4294967295U, fs_1, 2U, (uint4(*((&kernelContext_95)->collider_info_0+_S855)) ).w)) ;
+            *((&kernelContext_95)->collider_info_0+(_S855 + 1U)) = packed_uint4(uint4((as_type<uint>((_S840))), (as_type<uint>((_S841))), (as_type<uint>((_S838))), 0U)) ;
             i_11 = i_11 + 1U;
         }
         half_1 = _S839;
@@ -6125,17 +6136,17 @@ float3 crush_particle_spot_0(uint k_29, uint i_10)
         uint ev_0 = (&kernelContext_95)->crush_0->r_events_0 + 6U * rank_0;
         *((&kernelContext_95)->crush_rw_0+ev_0) = packed_float4(float4((as_type<float>((k_30))), (as_type<float>((first_6))), (as_type<float>((flags_4 >> 4U))), _S775.x)) ;
         *((&kernelContext_95)->crush_rw_0+(ev_0 + 1U)) = packed_float4(float4(_S777.xyz, mass_0)) ;
-        packed_float4 device* _S854 = (&kernelContext_95)->crush_rw_0+(ev_0 + 2U);
-        thread Quat_0 _S855 = orientation_1;
-        float4 _S856 = quat_vec_0(&_S855);
-        *_S854 = packed_float4(_S856) ;
+        packed_float4 device* _S856 = (&kernelContext_95)->crush_rw_0+(ev_0 + 2U);
+        thread Quat_0 _S857 = orientation_1;
+        float4 _S858 = quat_vec_0(&_S857);
+        *_S856 = packed_float4(_S858) ;
         *((&kernelContext_95)->crush_rw_0+(ev_0 + 3U)) = packed_float4(float4(v_14, _S775.y)) ;
         *((&kernelContext_95)->crush_rw_0+(ev_0 + 4U)) = packed_float4(float4(w_11, _S775.z)) ;
         *((&kernelContext_95)->crush_rw_0+(ev_0 + 5U)) = packed_float4(float4(half_1, volume_1)) ;
     }
     float3 park_0 = float3(float(_S776 % 1024U) * (&kernelContext_95)->crush_0->park_step_0, (&kernelContext_95)->crush_0->park_y_0, float(_S776 / 1024U) * (&kernelContext_95)->crush_0->park_step_0);
-    thread Quat_0 _S857 = orientation_1;
-    write_body_0(_S776, park_0, 0.0f, &_S857, _S784, 0U, _S784, _S784, &kernelContext_95);
+    thread Quat_0 _S859 = orientation_1;
+    write_body_0(_S776, park_0, 0.0f, &_S859, _S784, 0U, _S784, _S784, &kernelContext_95);
     return;
 }
 
@@ -6171,14 +6182,14 @@ float3 crush_particle_spot_0(uint k_29, uint i_10)
     threadgroup array<uint, int(1024)> g_scan_43;
     (&kernelContext_96)->g_scan_0 = &g_scan_43;
     uint blocks_2 = (params_43->chunk_count_0 + 1023U) / 1024U;
-    uint _S858 = scan_new_blocks_0(&kernelContext_96);
-    uint device* _S859 = (&kernelContext_96)->work_0+(_S858 + blocks_2);
-    uint total_3 = *_S859;
-    uint events_0 = *_S859 / 1048576U;
-    uint _S860 = a_counters_0(&kernelContext_96);
-    atomic_store_explicit((&kernelContext_96)->atom_0+(_S860 + 7U), events_0, memory_order_relaxed);
-    uint _S861 = atomic_fetch_add_explicit((&kernelContext_96)->atom_0+(_S860 + 9U), events_0, memory_order_relaxed);
-    uint _S862 = atomic_fetch_add_explicit((&kernelContext_96)->atom_0+(_S860 + 8U), total_3 & 1048575U, memory_order_relaxed);
+    uint _S860 = scan_new_blocks_0(&kernelContext_96);
+    uint device* _S861 = (&kernelContext_96)->work_0+(_S860 + blocks_2);
+    uint total_3 = *_S861;
+    uint events_0 = *_S861 / 1048576U;
+    uint _S862 = a_counters_0(&kernelContext_96);
+    atomic_store_explicit((&kernelContext_96)->atom_0+(_S862 + 7U), events_0, memory_order_relaxed);
+    uint _S863 = atomic_fetch_add_explicit((&kernelContext_96)->atom_0+(_S862 + 9U), events_0, memory_order_relaxed);
+    uint _S864 = atomic_fetch_add_explicit((&kernelContext_96)->atom_0+(_S862 + 8U), total_3 & 1048575U, memory_order_relaxed);
     return;
 }
 

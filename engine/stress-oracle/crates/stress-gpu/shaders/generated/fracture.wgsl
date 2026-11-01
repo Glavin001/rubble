@@ -110,7 +110,7 @@ struct CrushParams_std140_0
     @align(4) t_normal_0 : u32,
     @align(16) r_flow_0 : u32,
     @align(4) r_blast_0 : u32,
-    @align(8) pad0_1 : f32,
+    @align(8) particle_ccd_0 : u32,
     @align(4) pad1_1 : f32,
 };
 
@@ -4517,6 +4517,7 @@ fn fr_crush_apply(@builtin(global_invocation_id) id_39 : vec3<u32>)
         _S389 = false;
     }
     var first_6 : u32;
+    var n_5 : u32;
     var i_11 : u32;
     var half_1 : vec3<f32>;
     if(_S389)
@@ -4542,7 +4543,7 @@ fn fr_crush_apply(@builtin(global_invocation_id) id_39 : vec3<u32>)
         var h_5 : vec3<f32> = geometry_0[_S397 + u32(1)].xyz;
         var g_0 : vec3<u32> = vec3<u32>(vec3<i32>(i32(1)));
         var cell_0 : vec3<f32> = h_5;
-        var n_5 : u32 = crush_0.fragments_0;
+        n_5 = crush_0.fragments_0;
         loop
         {
             if(n_5 > u32(1))
@@ -4718,16 +4719,26 @@ fn fr_crush_apply(@builtin(global_invocation_id) id_39 : vec3<u32>)
             var entry_2 : vec4<f32> = crush_tab_0[crush_0.t_pool_0 + first_6 + i_11];
             var fs_1 : u32 = (bitcast<u32>((entry_2.x)));
             var fc_1 : u32 = (bitcast<u32>((entry_2.y)));
-            const _S427 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
-            write_body_0(fs_1, x_9, 1.0f / _S424, quat_of_0(_S427), _S392, u32(33033), v_14 + cross(w_14, x_9 - b0_0.xyz), _S392);
-            var _S428 : u32 = u32(4) * fc_1;
-            var _S429 : u32 = _S428 + u32(1);
-            colliders_0[_S429] = vec4<f32>(0.0f, 0.0f, 0.0f, colliders_0[_S429].w);
-            colliders_0[_S428 + u32(2)] = _S427;
-            colliders_0[_S428 + u32(3)] = vec4<f32>(_S422, 0.0f, 0.0f, _S422);
-            var _S430 : u32 = u32(2) * fc_1;
-            collider_info_0[_S430] = vec4<u32>(u32(4294967295), fs_1, u32(2), collider_info_0[_S430].w);
-            collider_info_0[_S430 + u32(1)] = vec4<u32>((bitcast<u32>((_S424))), (bitcast<u32>((_S425))), (bitcast<u32>((_S422))), u32(0));
+            var _S427 : f32 = 1.0f / _S424;
+            const _S428 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
+            var _S429 : Quat_0 = quat_of_0(_S428);
+            if((crush_0.particle_ccd_0) != u32(0))
+            {
+                n_5 = u32(33024);
+            }
+            else
+            {
+                n_5 = u32(0);
+            }
+            write_body_0(fs_1, x_9, _S427, _S429, _S392, (u32(9) | (n_5)), v_14 + cross(w_14, x_9 - b0_0.xyz), _S392);
+            var _S430 : u32 = u32(4) * fc_1;
+            var _S431 : u32 = _S430 + u32(1);
+            colliders_0[_S431] = vec4<f32>(0.0f, 0.0f, 0.0f, colliders_0[_S431].w);
+            colliders_0[_S430 + u32(2)] = _S428;
+            colliders_0[_S430 + u32(3)] = vec4<f32>(_S422, 0.0f, 0.0f, _S422);
+            var _S432 : u32 = u32(2) * fc_1;
+            collider_info_0[_S432] = vec4<u32>(u32(4294967295), fs_1, u32(2), collider_info_0[_S432].w);
+            collider_info_0[_S432 + u32(1)] = vec4<u32>((bitcast<u32>((_S424))), (bitcast<u32>((_S425))), (bitcast<u32>((_S422))), u32(0));
             i_11 = i_11 + u32(1);
         }
         half_1 = _S423;
@@ -4752,10 +4763,10 @@ fn fr_crush_end(@builtin(global_invocation_id) id_40 : vec3<u32>)
 {
     var total_3 : u32 = work_0[scan_new_blocks_0() + (params_0.chunk_count_0 + u32(1023)) / u32(1024)];
     var events_0 : u32 = work_0[scan_new_blocks_0() + (params_0.chunk_count_0 + u32(1023)) / u32(1024)] / u32(1048576);
-    var _S431 : u32 = a_counters_0();
-    atomicStore(&(atom_0[_S431 + u32(7)]), events_0);
-    var _S432 : u32 = atomicAdd(&(atom_0[_S431 + u32(9)]), events_0);
-    var _S433 : u32 = atomicAdd(&(atom_0[_S431 + u32(8)]), (total_3 & (u32(1048575))));
+    var _S433 : u32 = a_counters_0();
+    atomicStore(&(atom_0[_S433 + u32(7)]), events_0);
+    var _S434 : u32 = atomicAdd(&(atom_0[_S433 + u32(9)]), events_0);
+    var _S435 : u32 = atomicAdd(&(atom_0[_S433 + u32(8)]), (total_3 & (u32(1048575))));
     return;
 }
 

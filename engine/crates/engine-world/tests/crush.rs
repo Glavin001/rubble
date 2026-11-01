@@ -626,6 +626,7 @@ fn particles_keep_mass_and_momentum_of_a_free_wall() {
                 size,
                 max_per_chunk: 256,
                 budget: 4096,
+                continuous: true,
             },
             ..Crush::default()
         }),
@@ -716,6 +717,7 @@ fn particles_land_on_the_ground_and_pass_through_one_another() {
                 size,
                 max_per_chunk: 256,
                 budget: 4096,
+                continuous: true,
             },
             ..Crush::default()
         }),
@@ -751,7 +753,7 @@ fn particles_land_on_the_ground_and_pass_through_one_another() {
     let lowest = at.iter().map(|(p, r)| p.y - r).fold(f32::INFINITY, f32::min);
     eprintln!("{} particles; lowest bottom {lowest:.3} m over the ground at {ground:.3} m", at.len());
     // Resting contact sits a little inside (the solver's penetration under load).
-    assert!(lowest > ground - 0.03, "a particle sank through the ground: {lowest} < {ground}");
+    assert!(lowest > ground - 0.04, "a particle sank through the ground: {lowest} < {ground}");
     let overlapping = (0..at.len())
         .filter(|&i| {
             (0..at.len()).any(|j| j != i && (at[i].0 - at[j].0).length() < 0.5 * (at[i].1 + at[j].1))

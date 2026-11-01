@@ -1207,7 +1207,7 @@ struct CrushParams
     uint t_normal;    // crush_tab: per bond its normal (structure frame)
     uint r_flow;      // crush_rw: per bond its compressive flow load (N), 4 per float4
     uint r_blast;     // crush_rw: per chunk a blast window's (damage, peak p, peak q, -)
-    float pad0;
+    uint particle_ccd; // mode 2: the particles' continuous collision while fast
     float pad1;
 };
 
@@ -2142,7 +2142,7 @@ void fr_crush_apply(uint3 id: SV_DispatchThreadID)
             float4 entry = crush_tab[crush.t_pool + first + i];
             uint fs = asuint(entry.x);
             uint fc = asuint(entry.y);
-            write_body(fs, x, 1.0 / mf, quat_of(float4(0.0, 0.0, 0.0, 1.0)), float3(0.0), FLAG_DYNAMIC | FLAG_AWAKE | FLAG_CCD | FLAG_CCD_FAST, v + cross(w, x - b0.xyz), float3(0.0));
+            write_body(fs, x, 1.0 / mf, quat_of(float4(0.0, 0.0, 0.0, 1.0)), float3(0.0), FLAG_DYNAMIC | FLAG_AWAKE | (crush.particle_ccd != 0 ? FLAG_CCD | FLAG_CCD_FAST : 0u), v + cross(w, x - b0.xyz), float3(0.0));
             colliders[4 * fc + 1] = float4(0.0, 0.0, 0.0, colliders[4 * fc + 1].w);
             colliders[4 * fc + 2] = float4(0.0, 0.0, 0.0, 1.0);
             colliders[4 * fc + 3] = float4(r, 0.0, 0.0, r);
