@@ -450,7 +450,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
 @group(0) @binding(9) var<storage, read> h0: array<f32>;
 // Strikes: (point, contact time), (crater radius, approach yaw, active, approach pitch).
 @group(0) @binding(11) var<uniform> events: array<vec4f, ${2 * MAX_FX}>;
-${GROUND_WGSL({ hfBase: HF_BASE, surfaceBinding: 10 })}
+${GROUND_WGSL({ hfBase: HF_BASE, surfaceBinding: 10, T })}
 ${LIGHT_WGSL}
 fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
 fn h21(p: vec2f) -> f32 { let q = fract(p * vec2f(0.1031, 0.1030)); let r = q + dot(q, q.yx + 33.33); return fract((r.x + r.y) * r.x); }
@@ -1175,7 +1175,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       st.closing = null;
       if (PLAY) game.baked++;
       st.switches.push(rec);
-      st.pendingBake = Promise.all([readHeights(), surfaceSwitchError(device, terrain.surfaceBuffer, world.bufs[18], HF_BASE, NX, terrain.bakedSlots).then((e) => {
+      st.pendingBake = Promise.all([readHeights(), surfaceSwitchError(device, terrain.surfaceBuffer, world.bufs[18], HF_BASE, NX, terrain.bakedSlots, T).then((e) => {
         rec.error = { rms: +e.rms.toFixed(3), mean: +e.mean.toFixed(3), worst: +e.worst.toFixed(3) };
       })]).catch(fail);
     };

@@ -92,11 +92,11 @@
     </div>
     <div id="bar"></div>
   </div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, sceneCapacity } from './world-host.mjs';
-    import { M, L, WHEEL_RIM_MATERIAL, heightFieldArena } from './vehicle.mjs';
-    import { createTerrain, TerrainStep, T } from './terrain-host.mjs';
-    import { GROUND_WGSL, surfaceSwitchError } from './terrain-render.mjs';
+    import { createWorld, pollFrame, stepFrames, drain, macrotask, worldWasm } from './rubble-world.mjs';
+    import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
+    import { GROUND_WGSL, switchError } from './terrain-render.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -154,63 +154,37 @@
       location.href = u.href;
     };
 
-    // ---------------------------------------------------------------- device
-    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('no WebGPU adapter');
-    const timestamps = adapter.features.has('timestamp-query');
-    const device = await adapter.requestDevice({
-      requiredFeatures: timestamps ? ['timestamp-query'] : [],
-      requiredLimits: {
-        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
-        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-        maxBufferSize: adapter.limits.maxBufferSize,
-      },
-    });
-    device.lost.then((i) => fail('device lost: ' + i.message));
-    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
-    const canvas = $('c');
-    const context = canvas.getContext('webgpu');
-    const format = navigator.gpu.getPreferredCanvasFormat();
-    const configure = () => {
-      const dpr = Math.min(devicePixelRatio || 1, 2);
-      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
-      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-      context.configure({ device, format, alphaMode: 'opaque' });
-    };
-    configure();
-    addEventListener('resize', configure);
-
     // ---------------------------------------------------------------- the event (Rust: π-scaling)
-    // The terrain's settings: dry sand at physical stiffness (E = 50 MPa), engine
-    // limits sized for the browser. Every limit fails by name when exceeded.
+    // The terrain's settings (engine-world's TerrainDef): dry sand at physical
+    // stiffness (E = 50 MPa), engine limits sized for the browser. Every limit
+    // fails by name when exceeded.
     const G = 9.81;
-    const SETTINGS = {
-      config: { max_particles: 3 << 19, max_blocks: 8192, max_parcels: 1 << 18, max_substeps: 1024,
-        max_columns: 1 << 17, max_field_samples: 1 << 19, max_coupled: 64, profile: S.profile,
-        ...(S.cpr != null ? { cells_per_radius: S.cpr } : {}) },
-      region_margin: S.margin,
+    const W = await worldWasm();
+    const TERRAIN = {
+      config: { maxParticles: 3 << 19, maxBlocks: 8192, maxParcels: 1 << 18, maxSubsteps: 1024,
+        maxColumns: 1 << 17, maxFieldSamples: 1 << 19, maxCoupled: 64, profile: S.profile,
+        ...(S.cpr != null ? { cellsPerRadius: S.cpr } : {}) },
+      regionMargin: S.margin,
       // The region's rest tolerance (set from the crater below): it bakes once
       // its fastest particle stays under it for half a second with nothing in
       // flight.
-      settle_speed: 0.05, settle_frames: 30,
+      settleSpeed: 0.05, settleFrames: 30,
+      // The live surface the page draws over the open area (no patches, no
+      // debris copied back: it renders the engine's debris list in place).
+      surface: { patchSamples: 0, maxDebris: 0 },
     };
-    const probe = new TerrainStep(JSON.stringify(SETTINGS));
-    const settingsInfo = JSON.parse(probe.settings());
-    let pred;
-    try {
-      pred = S.mode === 'impact'
-        ? JSON.parse(probe.predict_impact(S.radius, S.density, S.speed * 1000, G))
-        : JSON.parse(probe.predict_explosion(10 ** S.charge, S.depth, G));
-    } finally { probe.free(); }
+    const settingsInfo = W.terrainSettings(TERRAIN);
+    const pred = S.mode === 'impact'
+      ? W.terrainPredictImpact(TERRAIN, S.radius, S.density, S.speed * 1000, G)
+      : W.terrainPredictExplosion(TERRAIN, 10 ** S.charge, S.depth, G);
     const R = pred.crater.radius;
     // Rest, at the crater's scale: 1% of its gravity speed √(gR) (38 m/s for the
     // default 151 m crater, so 0.38 m/s). A crater's walls keep creeping for
     // minutes at a few tenths of a m/s; the bake freezes motion below that.
-    SETTINGS.settle_speed = num('settle', 0.01 * Math.sqrt(G * R));
-    $('bakeMode').options[0].textContent = `when settled (< ${SETTINGS.settle_speed.toFixed(2)} m/s for 0.5 s)`;
+    TERRAIN.settleSpeed = num('settle', 0.01 * Math.sqrt(G * R));
+    $('bakeMode').options[0].textContent = `when settled (< ${TERRAIN.settleSpeed.toFixed(2)} m/s for 0.5 s)`;
     const DXR = pred.dx; // region cell (m)
-    const PPC = settingsInfo.config.particles_per_cell_axis;
+    const PPC = settingsInfo.config.particlesPerCellAxis;
     // The heightfield's samples are the region's cells (the native crater tests'
     // spacing: each baked column holds PPC² particle columns), out to 6
     // transient radii: room for the ejecta blanket and a drive in.
@@ -228,29 +202,58 @@
     const initialHeights = new Float32Array(NX * NZ);
     for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) initialHeights[j * NX + i] = plain(X0 + i * SP, Z0 + j * SP);
     let heights = initialHeights.slice();
-    const field = { nx: NX, nz: NZ, dx: SP, dz: SP, origin: [0, 0, 0] };
-    const arena0 = heightFieldArena(NX, NZ, SP, SP, initialHeights);
 
     // ---------------------------------------------------------------- world
-    const cap = { ...sceneCapacity(256, 512), maxHull: arena0.records.length / 4 + 64 };
-    const world = await createWorld(device, { cap, vehicleCap: { maxVehicles: 4, maxWheels: 16, maxCurvePoints: 512, maxDiffs: 8, maxAntiRolls: 8, maxParts: 16, maxRays: 16 },
-      status: (s) => { statusEl.textContent = s; } });
+    // Rubble's World (engine-world-wasm) opens the device; the page renders on it
+    // and binds the world's buffers in place. The JS host's sizes: 4096 bodies,
+    // 8192 colliders, canonical contacts.
+    const world = await createWorld({
+      gravity: [0, -G, 0],
+      contacts: 'canonical',
+      capacity: { maxBodies: 4096, maxColliders: 8192, maxContacts: 65536, maxJoints: 64, maxCandidates: 131072, maxColors: 32,
+        // The JS host's 64 held its kinematic velocities only; World also carries
+        // teleports and velocity sets as commands (capacity only).
+        maxCommands: 2048 },
+      vehicles: { maxVehicles: 4, maxWheels: 16, maxCurvePoints: 512, maxDiffs: 8, maxAntiRolls: 8, maxParts: 16, maxRays: 16 },
+      // Two physics frames per drawn frame at 120 Hz: a readback slot each and one to spare.
+      readbackFrames: 4,
+    });
+    const device = world.device();
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+    const canvas = $('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    const configure = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      context.configure({ device, format, alphaMode: 'opaque' });
+    };
+    configure();
+    addEventListener('resize', configure);
     const DT = 1 / S.hz;
-    Object.assign(world.params, { dt: DT, iterations: 8, gravityY: -G, flags: M.FLAG_SPEC_VELOCITY });
-    world.setMaterial(0, 0.9);
-    world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
-    const groundBody = world.addBody({ p: [0, 0, 0], flags: 0 });
-    world.setHullRecords(arena0.records);
-    const GROUND = world.addCollider({ body: groundBody, shape: 5, material: 0, params: arena0.params });
-    const HF_BASE = arena0.base;
-    const initial = world.snapshot();
+    world.setSolver({ dt: DT, iterations: 8, gravityY: -G, flags: world.flags.SPEC_VELOCITY });
+    // The JS host's material table: slot 0 (the ground and the vehicle's part
+    // colliders) and the wheel rims at 0.9, the rest 0.6.
+    for (let i = 0; i < 64; i++) world.setMaterialSlot(i, { friction: i === 0 || i === WHEEL_RIM_MATERIAL ? 0.9 : 0.6 });
+    const groundBody = world.createBody({});
+    const GROUND = world.createHeightField(groundBody, { material: { friction: 0.9 } }, NX, NZ, SP, SP, initialHeights);
+    const HF_BASE = world.shapeArenaBase(GROUND);
 
-    statusEl.textContent = 'building terrain kernels…';
-    const terrain = await createTerrain(world, SETTINGS, { status: (s) => { statusEl.textContent = s; }, surface: true });
+    statusEl.textContent = 'enabling terrain…';
+    world.enableTerrain(TERRAIN);
+    const T = W.terrainLayout();
+    const terrainSettings = world.terrainSettings();
     // The debris draw: a particle billboard (6 vertices) per listed particle.
-    device.queue.writeBuffer(terrain.surfaceBuffer, 4 * T.SURFACE_DEBRIS_ARGS_WORD, Uint32Array.of(6));
-    const maxParticles = terrain.settings.config.max_particles, maxParcels = terrain.settings.config.max_parcels;
-
+    device.queue.writeBuffer(world.terrainSurfaceBuffer(), 4 * T.SURFACE_DEBRIS_ARGS_WORD, Uint32Array.of(6));
+    const maxParticles = terrainSettings.config.maxParticles, maxParcels = terrainSettings.config.maxParcels;
+    // The scene before any event (Replay goes back here; the terrain pool starts over).
+    const initial = world.saveState();
+    // The terrain as the frames report it: the last counters, the open areas
+    // (World's, current after every step) and the last live surface.
+    const terrain = { report: null, areas: [], region: null, views: [], substeps: 0 };
+    const refreshAreas = () => { terrain.areas = world.terrainAreas(); terrain.region = terrain.areas[0] ?? null; };
     const surfaceAt = (x, z) => {
       const fx = (x - X0) / SP, fz = (z - Z0) / SP;
       if (fx < 0 || fz < 0 || fx > NX - 1 || fz > NZ - 1) return 0;
@@ -267,10 +270,10 @@
       const kt = (pred.energy / 4.184e12);
       $('pred').innerHTML = `<table class="st">
         <tr><td class="k">π-scaling transient R</td><td>${c.radius.toFixed(1)} m</td><td class="k">depth</td><td>${c.depth.toFixed(1)} m</td></tr>
-        <tr><td class="k">final rim radius</td><td>${c.final_rim_radius.toFixed(1)} m</td><td class="k">formation</td><td>${c.formation_time.toFixed(2)} s</td></tr>
+        <tr><td class="k">final rim radius</td><td>${c.finalRimRadius.toFixed(1)} m</td><td class="k">formation</td><td>${c.formationTime.toFixed(2)} s</td></tr>
         <tr><td class="k">energy</td><td>${kt >= 1 ? kt.toFixed(1) + ' kt' : (kt * 1000).toFixed(1) + ' t'} TNT</td><td class="k">${S.mode === 'impact' ? 'impactor mass' : 'charge'}</td><td>${S.mode === 'impact' ? fmtMass(pred.mass) : fmtMass(10 ** S.charge)}</td></tr>
-        <tr><td class="k">region cell dx</td><td>${DXR.toFixed(2)} m</td><td class="k">source peak</td><td>${pred.source_speed.toFixed(0)} m/s</td></tr>
-        <tr><td class="k">sand P-wave</td><td>${settingsInfo.sand.p_wave_speed.toFixed(0)} m/s</td><td class="k">E</td><td>${(settingsInfo.sand.youngs_modulus / 1e6).toFixed(0)} MPa</td></tr></table>`;
+        <tr><td class="k">region cell dx</td><td>${DXR.toFixed(2)} m</td><td class="k">source peak</td><td>${pred.sourceSpeed.toFixed(0)} m/s</td></tr>
+        <tr><td class="k">sand P-wave</td><td>${settingsInfo.material.pWaveSpeed.toFixed(0)} m/s</td><td class="k">E</td><td>${(settingsInfo.material.youngsModulus / 1e6).toFixed(0)} MPa</td></tr></table>`;
     }
 
     // ---------------------------------------------------------------- renderer
@@ -340,7 +343,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
   @location(3) q: vec2f, @location(4) d: f32 };
 
 // ---- heightfield straight from the physics records (engine_schema::heightfield)
-${GROUND_WGSL({ hfBase: HF_BASE, surfaceBinding: 10 })}
+${GROUND_WGSL({ hfBase: HF_BASE, surfaceBinding: 10, T })}
 fn live() -> bool { return frame.surf.x > 0.5; }
 fn inWindow(x: f32, z: f32) -> bool {
   return frame.datum.z > 0.5 && x >= frame.window.x && x <= frame.window.z && z >= frame.window.y && z <= frame.window.w;
@@ -504,7 +507,8 @@ fn partOut(vi: u32, inst: u32) -> Out {
   let b = bodies[col.body];
   var o: Out;
   o.q = vec2f(0.0); o.d = 0.0;
-  let hidden = col.material == ${WHEEL_RIM_MATERIAL}u || col.shape == 5u;
+  // World's material word: the slot in the low 16 bits, the collision group above.
+  let hidden = (col.material & 0xFFFFu) == ${WHEEL_RIM_MATERIAL}u || col.shape == 5u;
   var half = col.params.xyz;
   if (col.shape == 0u) { half = vec3f(col.params.x); }
   let local = col.localPos + qrot(col.localRot, corner * half * 2.0);
@@ -561,8 +565,6 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     const h0Buf = device.createBuffer({ size: NX * NZ * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(h0Buf, 0, initialHeights);
     const capturePipe = device.createComputePipeline({ layout: 'auto', compute: { module: capMod, entryPoint: 'capture' } });
-    const captureBind = device.createBindGroup({ layout: capturePipe.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: world.bufs[T.PARTICLES] } }, { binding: 1, resource: { buffer: restBuf } }, { binding: 2, resource: { buffer: world.bufs[T.COUNTERS] } }] });
 
     const cube = [];
     for (const [u, v, w] of [[0, 1, 2], [1, 2, 0], [2, 0, 1]]) for (const s of [-1, 1]) {
@@ -596,12 +598,24 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       trailDot: pipe('vsTrailDot', 'fsGlow', [{ arrayStride: 12, stepMode: 'instance', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }]),
       col: pipe('vsCol', 'fsCol', vtx6), wheel: pipe('vsWheel', 'fsCol', vtx6),
     };
-    const RES = { 0: world.bufs[0], 1: frameBuf, 2: world.bufs[2], 3: world.bufs[18], 4: world.bufs[T.PARTICLES], 5: restBuf, 6: world.bufs[T.PARCELS], 7: world.bufs[T.COUNTERS], 8: world.bufs[31], 9: h0Buf, 10: terrain.surfaceBuffer };
-    const bind = (p, ids) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: ids.map((b) => ({ binding: b, resource: { buffer: RES[b] } })) });
-    const B = {
-      terrain: bind(P.terrain, [1, 3, 9, 10]), cut: bind(P.cut, [1, 3, 9]), part: bind(P.part, [1, 4, 5, 7]), debris: bind(P.debris, [1, 4, 5, 7, 10]), parcel: bind(P.parcel, [1, 6, 7]),
-      glow: bind(P.glow, [1]), trail: bind(P.trail, [1]), trailDot: bind(P.trailDot, [1]), col: bind(P.col, [0, 1, 2]), wheel: bind(P.wheel, [1, 8]),
+    // The world's buffers, bound in place; a buffer can be replaced when it
+    // grows: rebind when one is a new object.
+    let B = null, captureBind = null, bound = [];
+    const rebind = () => {
+      const bufs = [world.bodyBuffer(), world.colliderBuffer(), world.hullArenaBuffer(), world.terrainParticleBuffer(),
+        world.terrainParcelBuffer(), world.terrainCounterBuffer(), world.vehiclePoolBuffer(), world.terrainSurfaceBuffer()];
+      if (bufs.every((b, i) => b === bound[i])) return;
+      bound = bufs;
+      const RES = { 0: bufs[0], 1: frameBuf, 2: bufs[1], 3: bufs[2], 4: bufs[3], 5: restBuf, 6: bufs[4], 7: bufs[5], 8: bufs[6], 9: h0Buf, 10: bufs[7] };
+      const bind = (p, ids) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: ids.map((b) => ({ binding: b, resource: { buffer: RES[b] } })) });
+      B = {
+        terrain: bind(P.terrain, [1, 3, 9, 10]), cut: bind(P.cut, [1, 3, 9]), part: bind(P.part, [1, 4, 5, 7]), debris: bind(P.debris, [1, 4, 5, 7, 10]), parcel: bind(P.parcel, [1, 6, 7]),
+        glow: bind(P.glow, [1]), trail: bind(P.trail, [1]), trailDot: bind(P.trailDot, [1]), col: bind(P.col, [0, 1, 2]), wheel: bind(P.wheel, [1, 8]),
+      };
+      captureBind = device.createBindGroup({ layout: capturePipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: bufs[3] } }, { binding: 1, resource: { buffer: restBuf } }, { binding: 2, resource: { buffer: bufs[5] } }] });
     };
+    rebind();
     let depthTex = null;
 
     // ---------------------------------------------------------------- camera
@@ -648,7 +662,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       frames: 0, simTime: 0,
     };
     const APPROACH = 0.12; // s of flight shown before contact
-    const TF = pred.crater.formation_time;
+    const TF = pred.crater.formationTime;
     const viewBtns = [...document.querySelectorAll('#views button')];
     const setView = (v) => {
       st.view = v; userCam = false;
@@ -723,11 +737,14 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       st.phase = 'approach'; st.t = -APPROACH; st.launchT = st.simTime;
     }
     function strike() {
-      const region = S.mode === 'impact'
-        ? terrain.impact(GROUND, field, IMPACT, S.radius, S.density, S.speed * 1000)
-        : terrain.explode(GROUND, field, IMPACT, 10 ** S.charge, S.depth);
-      st.region = region;
-      // Where each particle starts (render-only strata colours).
+      if (!terrain.areas.length) terrain.report = null;
+      if (S.mode === 'impact') world.terrainImpact(GROUND, IMPACT, S.radius, S.density, S.speed * 1000);
+      else world.terrainExplode(GROUND, IMPACT, 10 ** S.charge, S.depth);
+      refreshAreas();
+      st.region = terrain.region;
+      // Where each particle starts (render-only strata colours), right after
+      // the activation World submitted.
+      rebind();
       const enc = device.createCommandEncoder();
       enc.clearBuffer(restBuf);
       const p = enc.beginComputePass();
@@ -738,13 +755,17 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       st.phase = 'open'; st.t = 0; st.impactStep = st.frames; st.flash = 1;
       pickTracked().catch(fail);
     }
-    terrain.onBake = () => {
+    // A bake, as the frame that carries it reports it: World's copy of the
+    // heights follows by then.
+    function onBake(slots) {
+      if (st.phase !== 'open') return;
       st.phase = 'baked'; st.bakeT = st.t;
-      readHeights().then(measureCrater).catch(fail);
-      // The jump at the switch from the live surface to the baked heightfield.
-      surfaceSwitchError(device, terrain.surfaceBuffer, world.bufs[18], HF_BASE, NX).then((e) => { st.switchError = e; }).catch(fail);
-    };
-    function bakeNow() { if (st.phase === 'open') terrain.close(); }
+      heights = Float32Array.from(world.heightFieldHeights(GROUND));
+      // The jump at the switch from the last live surface to the baked heightfield.
+      st.switchError = switchError(terrain.views, heights, NX, slots);
+      measureCrater();
+    }
+    function bakeNow() { if (st.phase === 'open' && terrain.region) { world.terrainClose(); refreshAreas(); } }
     $('launch').onclick = launch;
     $('bake').onclick = bakeNow;
     $('replay').onclick = () => replay();
@@ -768,10 +789,12 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     addEventListener('keyup', (e) => keys.delete(e.code));
 
     function replay() {
-      world.restore(initial);
+      // World::restore_state: the scene as saved, open areas dropped (not
+      // baked), the heightfield's samples back, the terrain pool started over.
+      world.restoreState(initial);
       heights = initialHeights.slice();
-      world.setHullRecords(arena0.records);
-      terrain.reset();
+      terrain.report = null; terrain.views = []; terrain.substeps = 0;
+      refreshAreas();
       st.phase = 'ready'; st.t = 0; st.tracked = null; st.vehicle = null; st.chassis = null; st.carPose = null;
       st.crater = null; st.bakeT = null; st.manual = false; st.flash = 0; st.region = null;
       trailN = 0;
@@ -782,10 +805,9 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     // cut plane: followed as a particle, then (thrown out of the region) as the
     // ballistic parcel that carries it, until it lands.
     let trailN = 0;
-    const smallRb = Array.from({ length: 4 }, () => device.createBuffer({ size: 128, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
     let trackBusy = false;
     async function pickTracked() {
-      const n = terrain.settings.config.max_particles;
+      const n = terrainSettings.config.maxParticles;
       const rb = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
       const enc = device.createCommandEncoder();
       enc.copyBufferToBuffer(restBuf, 0, rb, 0, n * 16);
@@ -808,13 +830,13 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       trackBusy = true;
       try {
         if (tr.mode === 'particle') {
-          const w = await terrain.readParticle(tr.index);
+          const w = await world.readTerrainParticles(tr.index, 1);
           const f = new Float32Array(w.buffer);
           if ((w[31] & T.PARTICLE_DEAD) !== 0) {
             // Thrown: the parcel in flight nearest to where the particle left.
             const n = Math.min(terrain.report?.parcels ?? 0, maxParcels);
             if (n > 0) {
-              const pw = new Float32Array((await terrain.readParcels(n)).buffer);
+              const pw = new Float32Array((await world.readTerrainParcels(0, n)).buffer);
               let best = -1, bd = Infinity;
               for (let k = 0; k < n; k++) {
                 if (pw[k * 8 + 7] <= 0) continue;
@@ -827,7 +849,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
             tr.pos = [f[0], f[1], f[2]]; tr.vel = [f[4], f[5], f[6]];
           }
         } else if (tr.mode === 'parcel') {
-          const pw = new Float32Array((await terrain.readParcel(tr.slot)).buffer);
+          const pw = new Float32Array((await world.readTerrainParcels(tr.slot, 1)).buffer);
           tr.pos = [pw[0], pw[1], pw[2]]; tr.vel = [pw[4], pw[5], pw[6]];
           if (pw[7] <= 0) {
             tr.mode = 'landed'; tr.landedAt = st.t;
@@ -847,16 +869,6 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     }
 
     // ---------------------------------------------------------------- after the bake
-    async function readHeights() {
-      const bytes = NX * NZ * 4;
-      const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(world.bufs[18], (HF_BASE + 2) * 16, rb, 0, bytes);
-      device.queue.submit([enc.finish()]);
-      await rb.mapAsync(GPUMapMode.READ);
-      heights = new Float32Array(rb.getMappedRange().slice(0));
-      rb.unmap(); rb.destroy();
-    }
     // The baked crater's profile (azimuthal mean of the height change): its
     // deepest point, the rim's crest and where the floor crosses the plain.
     function measureCrater() {
@@ -882,8 +894,8 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       // neighbouring samples; see the doc's open points.)
       const x = IMPACT[0] - 0.08 * R;
       const desc = presets.monster_truck;
-      st.vehicle = world.vehicles.addVehicle(world.backend, desc, [x, surfaceAt(x, 0) + 2.2, 0], [0, -Math.SQRT1_2, 0, Math.SQRT1_2]);
-      st.chassis = world.vehicles.chassisBody(st.vehicle);
+      st.vehicle = world.addVehicle(desc, [x, surfaceAt(x, 0) + 2.2, 0], [0, -Math.SQRT1_2, 0, Math.SQRT1_2]);
+      st.chassis = world.vehicleEntry(st.vehicle).chassis;
       st.phase = 'drive';
     }
     const presets = Object.fromEntries((await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json()).map((p) => [p.name, p]));
@@ -891,18 +903,12 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       if (st.chassis == null || st.carBusy) return;
       st.carBusy = true;
       try {
-        const rb = smallRb.pop();
-        if (!rb) return;
-        const enc = device.createCommandEncoder();
-        enc.copyBufferToBuffer(world.bufs[0], st.chassis * 112, rb, 0, 112);
-        device.queue.submit([enc.finish()]);
-        await rb.mapAsync(GPUMapMode.READ);
-        const f = new Float32Array(rb.getMappedRange(0, 112).slice(0));
-        rb.unmap(); smallRb.push(rb);
-        const q = [f[4], f[5], f[6], f[7]];
+        // The chassis' solver state (readBodies: position, rotation, velocity).
+        const f = await world.readBodies([st.chassis]);
+        const q = [f[3], f[4], f[5], f[6]];
         const rot = (v) => { const [x, y, z, w] = q, d = 2 * (x * v[0] + y * v[1] + z * v[2]), s = w * w - (x * x + y * y + z * z); const c = cross3([x, y, z], v); return [x * d + v[0] * s + c[0] * 2 * w, y * d + v[1] * s + c[1] * 2 * w, z * d + v[2] * s + c[2] * 2 * w]; };
         st.carPose = { p: [f[0], f[1], f[2]], fwd: rot([0, 0, 1]), up: rot([0, 1, 0]) };
-        st.carSpeed = Math.hypot(f[12], f[13], f[14]);
+        st.carSpeed = Math.hypot(f[7], f[8], f[9]);
       } finally { st.carBusy = false; }
     }
     function driveInput() {
@@ -922,23 +928,19 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
         }
       }
       const k = `${inp.forward}/${inp.brake}/${inp.steer.toFixed(2)}`;
-      if (k !== st.lastInput) { world.vehicles.setInput(world.backend, st.vehicle, inp); st.lastInput = k; }
+      if (k !== st.lastInput) { world.setVehicleInput(st.vehicle, inp); st.lastInput = k; }
     }
 
     // ---------------------------------------------------------------- timing
-    // GPU time of the terrain pass (timestamp queries when the device has them)
-    // and the wall clock: sim seconds per wall second is the speed of the run.
-    const TS_SLOTS = 8;
-    const ts = timestamps ? { qs: device.createQuerySet({ type: 'timestamp', count: 2 * TS_SLOTS }),
-      res: device.createBuffer({ size: 256 * TS_SLOTS, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
-      rbs: Array.from({ length: 3 }, () => device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })), slot: 0 } : null;
-    const timing = { terrainMs: [], frameMs: [], ratio: [], substeps: [], worst: 0, log: [] };
+    // The wall clock: sim seconds per wall second is the speed of the run.
+    // (The JS host also timed its terrain pass with GPU timestamps; World
+    // encodes that pass itself, so the page has no terrain GPU time.)
+    const timing = { frameMs: [], ratio: [], substeps: [], log: [] };
     const pushCap = (a, v, n = 120) => { a.push(v); if (a.length > n) a.shift(); };
     const mean = (a) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0);
 
     // ---------------------------------------------------------------- frame
     const frameF = new Float32Array(FRAME_BYTES / 4);
-    const counterRb = Array.from({ length: 4 }, () => device.createBuffer({ size: 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
     function writeFrame() {
       if (!depthTex || depthTex.width !== canvas.width || depthTex.height !== canvas.height) {
         depthTex?.destroy();
@@ -973,6 +975,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       device.queue.writeBuffer(frameBuf, 0, frameF);
     }
     function draw(enc) {
+      rebind();
       const rp = enc.beginRenderPass({
         colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55 + 0.45 * st.flash, 0.62 + 0.38 * st.flash, 0.72 + 0.28 * st.flash, 1], loadOp: 'clear', storeOp: 'store' }],
         depthStencilAttachment: { view: depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
@@ -981,7 +984,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       if (st.cut || st.cutView) { rp.setPipeline(P.cut); rp.setBindGroup(0, B.cut); rp.draw((NX - 1) * 6); }
       if (terrain.region) {
         const n = Math.min(maxParticles, (terrain.report?.particles ?? terrain.region.window[2] * terrain.region.window[3] * 64) + 4096);
-        if (frameF[60] > 0.5) { rp.setPipeline(P.debris); rp.setBindGroup(0, B.debris); rp.drawIndirect(terrain.surfaceBuffer, 4 * T.SURFACE_DEBRIS_ARGS_WORD); }
+        if (frameF[60] > 0.5) { rp.setPipeline(P.debris); rp.setBindGroup(0, B.debris); rp.drawIndirect(bound[7], 4 * T.SURFACE_DEBRIS_ARGS_WORD); }
         else { rp.setPipeline(P.part); rp.setBindGroup(0, B.part); rp.draw(6, n); }
         const m = Math.min(maxParcels, (terrain.report?.parcels ?? 0) + 4096);
         rp.setPipeline(P.parcel); rp.setBindGroup(0, B.parcel); rp.draw(6, m);
@@ -989,79 +992,68 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       rp.setPipeline(P.glow); rp.setBindGroup(0, B.glow); rp.draw(18);
       if (trailN > 1 && st.phase === 'open') { rp.setPipeline(P.trail); rp.setBindGroup(0, B.trail); rp.setVertexBuffer(0, trailVbo); rp.draw(trailN);
         rp.setPipeline(P.trailDot); rp.setBindGroup(0, B.trailDot); rp.setVertexBuffer(0, trailVbo); rp.draw(6, trailN); }
-      if (world.colliderCount > 1) { rp.setPipeline(P.col); rp.setBindGroup(0, B.col); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1); }
-      if (world.vehicles.wheelCount) { rp.setPipeline(P.wheel); rp.setBindGroup(0, B.wheel); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.vehicles.wheelCount); }
+      const colliders = world.colliderCount(), wheels = world.wheelCount();
+      if (colliders > 1) { rp.setPipeline(P.col); rp.setBindGroup(0, B.col); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, colliders - 1); }
+      if (wheels) { rp.setPipeline(P.wheel); rp.setBindGroup(0, B.wheel); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, wheels); }
       rp.end();
     }
 
-    // One physics frame (DT, 1/120 s by default): the terrain's coupled substeps (or its bake)
-    // ahead of the rigid step, in one submission with the render.
-    async function physicsFrame(enc, render) {
+    // Each poll: the terrain's counters, the last live surface and the bakes.
+    function onFrame(f) {
+      if (f.empty) return;
+      const r = f.terrain();
+      if (r) terrain.report = r;
+      const views = f.terrainSurface();
+      if (views.length) terrain.views = views;
+      const bakes = f.terrainBakes();
+      if (bakes.length) onBake(bakes.map((b) => b.slot));
+    }
+    // One physics frame (DT, 1/120 s by default): the strike or a timed bake
+    // when due, the drive input, then World's step (the terrain's coupled
+    // substeps, or its bake, ahead of the rigid step).
+    function beforeStep() {
       if (st.phase === 'approach' && st.t >= 0) strike();
       // Timed bake: once nothing is in flight (a parcel still flying would be
       // left out of the ledger), as the settle rule also requires.
-      if (st.phase === 'open' && S.bake === 'time' && st.t >= S.bakeAt && terrain.report && terrain.report.airborne === 0) terrain.close();
-      driveInput();
-      let tsIdx = -1;
-      const tsw = ts && st.phase === 'open' ? (tsIdx = ts.slot++ % TS_SLOTS, { querySet: ts.qs, beginningOfPassWriteIndex: 2 * tsIdx, endOfPassWriteIndex: 2 * tsIdx + 1 }) : undefined;
-      const kind = terrain.encodeFrame(enc, { timestampWrites: tsw });
-      world.encodeStep(enc);
-      const rb = counterRb.pop();
-      if (rb) enc.copyBufferToBuffer(world.bufs[7], 0, rb, 0, 80);
-      let tsRb = null;
-      if ((kind === 1 || kind === 3) && tsw) {
-        tsRb = ts.rbs.pop();
-        if (tsRb) { enc.resolveQuerySet(ts.qs, 2 * tsIdx, 2, ts.res, 256 * tsIdx); enc.copyBufferToBuffer(ts.res, 256 * tsIdx, tsRb, 0, 16); }
+      if (st.phase === 'open' && S.bake === 'time' && st.t >= S.bakeAt && terrain.region && terrain.report && terrain.report.airborne === 0) {
+        world.terrainClose();
+        refreshAreas();
       }
-      if (render) draw(enc);
-      device.queue.submit([enc.finish()]);
-      terrain.afterSubmit();
-      if (kind === 1 || kind === 3) pushCap(timing.substeps, terrain.lastSubsteps);
-      if (rb) rb.mapAsync(GPUMapMode.READ).then(() => { world.setLastCounters(new Uint32Array(rb.getMappedRange().slice(0))); rb.unmap(); counterRb.push(rb); }).catch(fail);
-      if (tsRb) tsRb.mapAsync(GPUMapMode.READ).then(() => {
-        const t = new BigUint64Array(tsRb.getMappedRange().slice(0)); tsRb.unmap(); ts.rbs.push(tsRb);
-        const ms = Number(t[1] - t[0]) / 1e6;
-        if (ms > 0 && ms < 1e4) {
-          pushCap(timing.terrainMs, ms);
-          timing.worst = Math.max(timing.worst, ms);
-          timing.log.push({ t: +st.t.toFixed(3), ms: +ms.toFixed(2), substeps: terrain.lastSubsteps, particles: terrain.report?.particles ?? 0 });
-          if (timing.log.length > 4000) timing.log.shift();
-        }
-      }).catch(fail);
+      driveInput();
+    }
+    function afterStep() {
+      refreshAreas();
+      terrain.substeps = world.terrainLastSubsteps();
+      if (terrain.substeps) pushCap(timing.substeps, terrain.substeps);
       st.frames++; st.simTime += DT;
       if (st.phase === 'approach' || st.phase === 'open' || st.phase === 'baked' || st.phase === 'drive') st.t += DT;
       st.flash = Math.max(0, st.flash - DT * 4);
     }
+    function physicsFrame() { beforeStep(); world.step(); afterStep(); }
 
-    // Fixed DT steps against the wall clock: at most one terrain frame in
-    // flight, so a frame slower than real time slows the run (shown as sim speed)
-    // instead of queueing.
-    let lastT = performance.now(), acc = 0, inFlight = null;
+    // Fixed DT steps against the wall clock, never waiting: a step is taken
+    // only while World has a readback slot free (otherwise on a later frame),
+    // so a frame slower than real time slows the run (shown as sim speed).
+    let lastT = performance.now(), acc = 0;
     const statsEl = $('stats');
-    async function loop(now) {
+    function loop(now) {
       if (failed) return;
       const dtWall = Math.min(0.1, (now - lastT) / 1000);
       lastT = now;
       try {
         if (window.__manual) { requestAnimationFrame(loop); return; }
-        if (inFlight) await inFlight;
-        if (terrain.busy()) await terrain.settle();
+        pollFrame(world, onFrame);
         acc += dtWall;
         // At most one display frame's worth of physics frames while the region
         // is open (two otherwise), so 120 Hz steps keep up on a 60 Hz display.
         const perDisplay = Math.max(1, Math.round(1 / (60 * DT)));
         let steps = Math.min((st.phase === 'open' ? 1 : 2) * perDisplay, Math.floor(acc / DT));
         if (st.phase === 'ready') { acc = 0; steps = 1; }
-        if (steps === 0 && acc < DT) steps = 0;
-        acc = Math.max(0, acc - steps * DT);
+        const simBefore = st.simTime;
+        for (let s = 0; s < steps && world.canStep(); s++) { physicsFrame(); acc = Math.max(0, acc - DT); }
         if (acc > 2 * perDisplay * DT) acc = 0; // behind: run slower than real time, don't catch up
         aimCamera(); smoothCamera(dtWall); writeFrame();
-        const simBefore = st.simTime;
-        if (steps === 0) {
-          const enc = device.createCommandEncoder(); draw(enc); device.queue.submit([enc.finish()]);
-        }
-        for (let s = 0; s < steps; s++) await physicsFrame(device.createCommandEncoder(), s === steps - 1);
-        inFlight = st.phase === 'open' ? device.queue.onSubmittedWorkDone() : null;
+        const enc = device.createCommandEncoder(); draw(enc); device.queue.submit([enc.finish()]);
         pushCap(timing.frameMs, dtWall * 1000);
         pushCap(timing.ratio, dtWall > 0 ? (st.simTime - simBefore) / dtWall : 1);
         followTracked().catch(fail);
@@ -1077,18 +1069,17 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       rows.push(`<tr><td class="k">phase</td><td>${st.phase}</td><td class="k">t</td><td>${st.t.toFixed(2)} s</td></tr>`);
       if (reg) {
         rows.push(`<tr><td class="k">particles</td><td>${(r?.particles ?? 0).toLocaleString()}</td><td class="k">blocks</td><td>${r?.blocks ?? 0}</td></tr>`);
-        rows.push(`<tr><td class="k">substeps / frame</td><td>${terrain.lastSubsteps}</td><td class="k">max speed</td><td>${(r?.max_speed ?? 0).toFixed(2)} m/s</td></tr>`);
+        rows.push(`<tr><td class="k">substeps / frame</td><td>${terrain.substeps}</td><td class="k">max speed</td><td>${(r?.maxSpeed ?? 0).toFixed(2)} m/s</td></tr>`);
         rows.push(`<tr><td class="k">parcels thrown</td><td>${(r?.parcels ?? 0).toLocaleString()}</td><td class="k">in flight</td><td>${(r?.airborne ?? 0).toLocaleString()}</td></tr>`);
         const q = ((DXR / PPC) ** 3) / 64;
         rows.push(`<tr><td class="k">deposited</td><td>${((r?.deposited ?? 0) * q).toFixed(0)} m³</td><td class="k">escaped</td><td>${((r?.escaped ?? 0) * q).toFixed(0)} m³</td></tr>`);
       }
-      rows.push(`<tr><td class="k">terrain GPU</td><td>${timing.terrainMs.length ? mean(timing.terrainMs.slice(-30)).toFixed(1) + ' ms' : '–'}</td><td class="k">frame</td><td>${mean(timing.frameMs.slice(-30)).toFixed(1)} ms</td></tr>`);
       // Driven frame by frame (frames()): the speed each frame's cost allows.
       const shown = window.__manual && frameLog.length ? Math.min(1, (1000 / 60) / mean(frameLog.slice(-30).map((e) => e.ms))) : ratio;
-      rows.push(`<tr><td class="k">sim speed</td><td>${shown.toFixed(2)}×</td><td class="k">worst terrain</td><td>${timing.worst ? timing.worst.toFixed(1) + ' ms' : '–'}</td></tr>`);
+      rows.push(`<tr><td class="k">frame</td><td>${mean(timing.frameMs.slice(-30)).toFixed(1)} ms</td><td class="k">sim speed</td><td>${shown.toFixed(2)}×</td></tr>`);
       if (st.crater) {
         const c = st.crater;
-        rows.push(`<tr><td class="k">baked rim radius</td><td>${c.rimR.toFixed(1)} m</td><td class="k">predicted</td><td>${pred.crater.final_rim_radius.toFixed(1)} m</td></tr>`);
+        rows.push(`<tr><td class="k">baked rim radius</td><td>${c.rimR.toFixed(1)} m</td><td class="k">predicted</td><td>${pred.crater.finalRimRadius.toFixed(1)} m</td></tr>`);
         rows.push(`<tr><td class="k">deepest</td><td>${c.depth.toFixed(1)} m</td><td class="k">rim height</td><td>${c.rimH.toFixed(1)} m</td></tr>`);
       }
       if (st.carPose) rows.push(`<tr><td class="k">truck speed</td><td>${(st.carSpeed * 3.6).toFixed(0)} km/h</td><td class="k">height</td><td>${(st.carPose.p[1] - IMPACT[1]).toFixed(1)} m</td></tr>`);
@@ -1097,7 +1088,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
         rows.push(`<tr><td class="k">tracked</td><td>${tr.mode}${tr.mode === 'landed' ? (tr.escaped ? ' (off the field: escaped)' : tr.inside ? ' (back in the region)' : ' (on the field)') : ''}</td><td class="k">speed</td><td>${Math.hypot(...tr.vel).toFixed(1)} m/s</td></tr>`);
       }
       statsEl.innerHTML = `<table class="st">${rows.join('')}</table>`;
-      statusEl.textContent = st.phase === 'ready' ? `ready · press Launch (Space) · ${timestamps ? 'GPU timestamps on' : 'no timestamp queries'}`
+      statusEl.textContent = st.phase === 'ready' ? 'ready · press Launch (Space)'
         : st.phase === 'drive' ? (st.manual ? 'driving (W/A/S/D)' : 'autopilot: from the floor out up the wall · W/A/S/D to drive') : `view: ${st.shown}`;
       drawBar();
       legend();
@@ -1114,34 +1105,44 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     // ---------------------------------------------------------------- automation
     // frames(n): n frames back to back, each waited for on the GPU (no rAF: it
     // also runs in a background page). Each entry is that frame's wall time from
-    // encode to GPU completion, which is what 1× needs under 16.7 ms.
+    // the step to GPU completion, which is what 1× needs under 16.7 ms.
     const frameLog = [];
     async function frames(n, { render = true } = {}) {
       window.__manual = true;
       const out = [];
       for (let i = 0; i < n && !failed; i++) {
-        if (terrain.busy()) await terrain.settle();
+        while (!world.canStep()) { await macrotask(); pollFrame(world, onFrame); }
         aimCamera(); smoothCamera(DT); writeFrame();
         const t0 = performance.now();
         const phase = st.phase, t = st.t;
-        await physicsFrame(device.createCommandEncoder(), render);
+        physicsFrame();
+        if (render) { const enc = device.createCommandEncoder(); draw(enc); device.queue.submit([enc.finish()]); }
         await device.queue.onSubmittedWorkDone();
         const ms = performance.now() - t0;
-        const e = { t: +t.toFixed(3), phase, ms: +ms.toFixed(2), substeps: terrain.lastKind === 1 ? terrain.lastSubsteps : 0, particles: terrain.report?.particles ?? 0 };
-        out.push(e); frameLog.push(e);
+        pollFrame(world, onFrame);
+        const e = { t: +t.toFixed(3), phase, ms: +ms.toFixed(2), substeps: terrain.substeps, particles: terrain.report?.particles ?? 0 };
+        out.push(e); frameLog.push(e); timing.log.push(e);
+        if (timing.log.length > 4000) timing.log.shift();
         await followTracked(); await followCar();
         hud();
       }
-      await terrain.settle();
-      if (terrain.error) throw terrain.error;
+      await drain(world, onFrame);
       return out;
     }
+    // __step(n): n physics frames frame-locked as fast as World's readbacks
+    // allow (no render), then every frame polled; returns the state.
+    window.__step = async (n = 1) => {
+      window.__manual = true;
+      await stepFrames(world, n, onFrame, () => { beforeStep(); afterStep(); });
+      await followCar();
+      return window.__impact.state();
+    };
     window.__impact = {
       frames, frameLog, resume: () => { window.__manual = false; },
-      launch, replay, setView, bake: bakeNow, state: () => ({ phase: st.phase, t: st.t, view: st.shown, report: terrain.report, region: terrain.region, crater: st.crater, switchError: st.switchError, tracked: st.tracked && { mode: st.tracked.mode, pos: st.tracked.pos, inside: st.tracked.inside }, car: st.carPose, carSpeed: st.carSpeed, error: terrain.error && String(terrain.error) }),
-      timings: () => ({ terrainMsMean: mean(timing.terrainMs), terrainMsWorst: timing.worst, frameMsMean: mean(timing.frameMs), simSpeed: mean(timing.ratio), substeps: timing.substeps.slice(-20), log: timing.log }),
-      prediction: pred, settings: terrain.settings,
-      debug: { surfaceAt: (x, z) => surfaceAt(x, z), heights: () => heights, field, HF_BASE },
+      launch, replay, setView, bake: bakeNow, state: () => ({ phase: st.phase, t: st.t, view: st.shown, report: terrain.report, region: terrain.region, crater: st.crater, switchError: st.switchError, tracked: st.tracked && { mode: st.tracked.mode, pos: st.tracked.pos, inside: st.tracked.inside }, car: st.carPose, carSpeed: st.carSpeed, substeps: terrain.substeps }),
+      timings: () => ({ frameMsMean: mean(timing.frameMs), simSpeed: mean(timing.ratio), substeps: timing.substeps.slice(-20), log: timing.log }),
+      prediction: pred, settings: terrainSettings,
+      debug: { surfaceAt: (x, z) => surfaceAt(x, z), heights: () => heights, HF_BASE },
     };
     window.__world = world; window.__terrain = terrain;
     window.__ready = true;
