@@ -159,6 +159,7 @@ fn finish(w: &mut World, broken: &mut u32) -> f64 {
             if let DestructionEvent::BondsBroken {
                 bonds,
                 destructible,
+                ..
             } = e
             {
                 if std::env::var("CITY_DEBUG").is_ok() {

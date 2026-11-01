@@ -689,6 +689,32 @@ impl WgpuSim {
         Ok(())
     }
 
+    /// [`Self::terrain_surface`] encoded into `enc` after the frame's coupled
+    /// substeps ([`Self::terrain_encode_coupled`]) and before the rigid step,
+    /// for pipelined hosts: the patches carry this frame's sand into the step
+    /// that follows. Needs an open area.
+    pub fn terrain_encode_surface(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        surface: &SurfacePlan,
+    ) -> anyhow::Result<()> {
+        let gravity = self.params.gravity_y;
+        let ops = surface.frame(self.terrain_plan()?, gravity)?;
+        self.terrain_writes(&ops);
+        self.terrain_pass(enc, &ops, "terrain surface");
+        for p in surface.patches().to_vec() {
+            let body = self.collider(p.collider).body;
+            self.mark_surface_moved(body);
+        }
+        Ok(())
+    }
+
+    /// The surface buffer (binding [`engine_terrain::surface::SURFACE_BINDING`]),
+    /// for hosts that copy its heights and debris into their readback.
+    pub fn terrain_surface_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[engine_terrain::surface::SURFACE_BINDING]
+    }
+
     /// Rebuild the live surface of every open area from its particles as
     /// they are now, under the world's gravity, and publish it into
     /// `surface`'s patches ([`SurfacePlan::frame`]); with no area open, sink

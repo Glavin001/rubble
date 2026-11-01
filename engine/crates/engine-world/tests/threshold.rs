@@ -268,6 +268,7 @@ fn run_world_among(
                     DestructionEvent::BondsBroken {
                         destructible,
                         bonds,
+                        ..
                     } => {
                         if *destructible != id && n < 10 {
                             // A house settling under its own weight can break a bond or two
@@ -379,6 +380,60 @@ fn run_world_among(
         splits,
         timeline,
     })
+}
+
+/// `asset` placed as a threshold destructible (at the lab's stress world) with the lab's
+/// shot fired at it: the world, the destructible and its instance transform.
+fn shoot(
+    asset: &DestructibleAssetDesc,
+    lab: &engine_fracture::Scene,
+) -> (World, DestructibleId, Transform) {
+    let placement = asset.stress.as_ref().unwrap().placement();
+    // The lab's stress world is the asset frame less its placement.
+    let offset = placement.map(|x| -x as f32);
+    let mut w = world_for(asset, offset);
+    let a = w.create_destructible_asset(asset).unwrap();
+    let id = w
+        .create_destructible(&DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
+            asleep: false,
+            ..DestructibleDef::new(a)
+        })
+        .unwrap();
+    let stats = w.destructible_stats(id).unwrap();
+    assert!(stats.chunks > 10 && stats.bonds > 10, "{stats:?}");
+    let (origin, v, r, m) = lab_shot(lab, target(asset));
+    let at = [0, 1, 2].map(|k| (origin[k] + offset[k] as f64) as f32);
+    let ball = w
+        .create_body(&BodyDef {
+            linear_velocity: v.map(|x| x as f32),
+            ..BodyDef::dynamic(at)
+        })
+        .unwrap();
+    w.create_sphere_shape(
+        ball,
+        &ShapeDef {
+            update_body_mass: false,
+            ..ShapeDef::default()
+        },
+        [0.0; 3],
+        r as f32,
+    )
+    .unwrap();
+    let i = (0.4 * m * r * r) as f32;
+    w.body_set_mass_data(
+        ball,
+        MassData {
+            mass: m as f32,
+            center: [0.0; 3],
+            rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]],
+        },
+    )
+    .unwrap();
+    w.body_set_projectile(ball, Some(Projectile::default()))
+        .unwrap();
+    (w, id, Transform::new(offset, [0.0, 0.0, 0.0, 1.0]))
 }
 
 /// The lab's `ThresholdWorld` on the same scene and shot (stress frame: the asset frame
@@ -564,6 +619,118 @@ fn masonry_arch_breaks_and_splits_as_in_the_lab() {
 #[test]
 fn cuboid_house_breaks_and_splits_as_in_the_lab() {
     check("house", house());
+}
+
+/// The arch's keystone shot splits its anchored body in consecutive frames (the piece
+/// one split leaves splits again the next step). Every static piece stays exactly at the
+/// instance frame, whether read from the GPU straight after a step (its split not yet
+/// polled) or from the frames; a split's pieces are reported in the frame that reports
+/// the split, at their parent's origin; and every chunk's world pose is continuous.
+#[test]
+fn consecutive_splits_keep_pieces_in_place() {
+    let (asset, lab) = arch();
+    let (mut w, id, instance) = shoot(&asset, &lab);
+    let dt = asset.solver_for(StrengthModel::Threshold).unwrap().dt;
+    let chunks = w.destructible_stats(id).unwrap().chunks;
+    let same = |a: &Transform, b: &Transform, tol: f32| {
+        let d = (glam::Vec3::from(a.position) - glam::Vec3::from(b.position)).length();
+        // Half the angle between them, near enough (acos loses it in f32).
+        let (qa, qb) = (glam::Vec4::from(a.rotation), glam::Vec4::from(b.rotation));
+        let r = (qa - qb).length().min((qa + qb).length());
+        d <= tol && r <= tol
+    };
+    // Per chunk: its body's origin when last polled, and the body's centre of mass then
+    // (a point fixed to the chunk: chunk-local is the identity).
+    let mut last: Vec<Option<(Transform, glam::Vec3)>> = vec![None; chunks as usize];
+    // Frames in which an anchored parent split.
+    let mut anchored_splits = Vec::new();
+    for n in 0..120u32 {
+        w.step().unwrap();
+        // Straight from the GPU, before this step is polled (it may have split them).
+        for c in 0..chunks {
+            let b = w.destructible_chunk_body(id, c).unwrap();
+            if w.body_type(b).unwrap() == BodyType::Static {
+                let pose = w.read_body_state(b).unwrap().transform;
+                assert!(
+                    same(&pose, &instance, 1e-4),
+                    "frame {n}: static {b:?} (chunk {c}) read at {pose:?}, not the instance frame"
+                );
+            }
+        }
+        for f in w.poll_blocking().unwrap() {
+            for e in &f.destruction_events {
+                let DestructionEvent::Split {
+                    parent, children, ..
+                } = e
+                else {
+                    continue;
+                };
+                if parent.anchored {
+                    anchored_splits.push(n);
+                }
+                let at = w
+                    .body_transform(parent.bodies[0])
+                    .unwrap()
+                    .expect("the parent has a pose");
+                for c in children {
+                    let b = c.bodies[0];
+                    let pose = w
+                        .body_transform(b)
+                        .unwrap()
+                        .expect("a split's piece is reported with the split");
+                    assert!(
+                        same(&pose, &at, 1e-4),
+                        "frame {n}: piece {b:?} reported at {pose:?}, its parent at {at:?}"
+                    );
+                    assert!(
+                        b == parent.bodies[0]
+                            || f.body_events
+                                .moves
+                                .iter()
+                                .any(|m| m.body == b && m.transform == pose),
+                        "frame {n}: piece {b:?} has no move with the split"
+                    );
+                }
+            }
+        }
+        for c in 0..chunks {
+            let b = w.destructible_chunk_body(id, c).unwrap();
+            let pose = w
+                .body_transform(b)
+                .unwrap()
+                .expect("every piece has a pose");
+            let st = w.read_body_state(b).unwrap();
+            assert!(
+                same(&st.transform, &pose, 1e-4),
+                "frame {n}: {b:?} polled at {pose:?}, read at {:?}",
+                st.transform
+            );
+            if w.body_type(b).unwrap() == BodyType::Static {
+                assert!(
+                    same(&pose, &instance, 1e-4),
+                    "frame {n}: static {b:?} (chunk {c}) at {pose:?}"
+                );
+            }
+            if let Some((before, centre)) = last[c as usize] {
+                let at = |t: &Transform| {
+                    glam::Quat::from_array(t.rotation) * centre + glam::Vec3::from(t.position)
+                };
+                let v = glam::Vec3::from(st.linear_velocity).length()
+                    + glam::Vec3::from(st.angular_velocity).length()
+                        * (at(&pose) - glam::Vec3::from(pose.position)).length();
+                let d = (at(&pose) - at(&before)).length();
+                assert!(
+                    d <= 2.0 * v * dt + 0.02,
+                    "frame {n}: chunk {c} jumped {d} m (v {v} m/s)"
+                );
+            }
+            last[c as usize] = Some((pose, glam::Vec3::from(w.body_local_center(b).unwrap())));
+        }
+    }
+    assert!(
+        anchored_splits.windows(2).any(|p| p[1] == p[0] + 1),
+        "the shot splits an anchored body in consecutive frames: {anchored_splits:?}"
+    );
 }
 
 #[test]

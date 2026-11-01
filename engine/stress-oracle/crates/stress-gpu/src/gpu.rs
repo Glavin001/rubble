@@ -119,10 +119,21 @@ impl Gpu {
     /// world's own device). Its shaders are WGSL unless the device was opened with
     /// `PASSTHROUGH_SHADERS` on Metal, where they are the Metal library, as
     /// [`Gpu::with_instance`] picks; parity math (no fast math), the device's storage limit.
+    /// As there, `STRESS_GPU_SHADERS=wgsl` runs WGSL on Metal and a lower
+    /// `STRESS_GPU_STORAGE_LIMIT` the browser's per-entry layouts (diagnostics: a host's
+    /// WebGPU limits reproduced natively).
     pub fn from_device(adapter_info: wgpu::AdapterInfo, device: wgpu::Device, queue: wgpu::Queue) -> Gpu {
         let passthrough = adapter_info.backend == wgpu::Backend::Metal && device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS);
-        let shader_path = if passthrough { ShaderPath::MetalLib } else { ShaderPath::Wgsl };
-        let storage_limit = device.limits().max_storage_buffers_per_shader_stage;
+        let wgsl = std::env::var("STRESS_GPU_SHADERS").is_ok_and(|v| v == "wgsl");
+        let shader_path = if passthrough && !wgsl { ShaderPath::MetalLib } else { ShaderPath::Wgsl };
+        let device_limit = device.limits().max_storage_buffers_per_shader_stage;
+        let storage_limit = match std::env::var("STRESS_GPU_STORAGE_LIMIT") {
+            Err(_) => device_limit,
+            Ok(v) => match v.parse::<u32>() {
+                Ok(n) if n <= device_limit => n,
+                _ => panic!("STRESS_GPU_STORAGE_LIMIT={v}: expected a count up to the device's {device_limit}"),
+            },
+        };
         Gpu { adapter: None, device, queue, adapter_info, shader_path, passthrough, fast_math: false, storage_limit }
     }
 

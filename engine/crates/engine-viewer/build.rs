@@ -127,6 +127,7 @@ fn main() -> Result<()> {
     let slots = bind_slots(&[
         kernels.join("world_step.slang"),
         kernels.join("convex_step.slang"),
+        kernels.join("guide_step.slang"),
         root.join("physics/contact_storage.slang"),
     ])?;
 

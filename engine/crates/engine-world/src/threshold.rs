@@ -101,17 +101,24 @@ impl Fracture {
 
 #[cfg(feature = "stress")]
 mod imp {
+    /// Blast loading's threshold side (`crate::blast`): a child, so it reads the slots.
+    mod blast {
+        include!("blast_threshold.rs");
+    }
+
     use super::{Projectile, StressSource};
     use crate::defs::{BodyDef, BodyType, Geometry, MassData};
-    use crate::destruction::{ActorInfo, DestructibleDef, StrengthModel};
-    use crate::events::DestructionEvent;
+    use crate::destruction::{ActorInfo, CrushMass, DestructibleDef, StrengthModel};
+    use crate::events::{BreakCause, DestructionEvent};
     use crate::math::SolverFrame;
     use crate::{BodyId, DestructibleAssetDesc, DestructibleId, Owner, Transform, World};
     use engine_schema::convex::ConvexHull;
     use engine_schema::{AvbdParams, BodyState, FLAG_CONTACT_GAP, FLAG_WORLD_INERTIA};
     use glam::{DMat3, DQuat, DVec3, Vec3};
     use std::sync::Arc;
-    use stress_gpu::fracture::{self, FractureTables, GpuFracture, INFO_SUPPORT};
+    use stress_gpu::fracture::{
+        self, CrushEvent, CrushTables, FractureTables, GpuFracture, INFO_SUPPORT,
+    };
     use stress_gpu::gpu::Gpu;
     use stress_gpu::ingest::{
         ColliderInfo, EngineBuffers, EngineIngest, KIND_BODY, KIND_STATIC, NONE,
@@ -317,8 +324,66 @@ mod imp {
         chunk_body: Vec<u32>,
         intact: Vec<bool>,
         pub nodes: Vec<Option<u32>>,
+        /// Blast loading's state (`DestructibleDef::blast_loading`).
+        blast: Option<blast::BlastSlot>,
         /// `DestructibleDef::support_loss`: what the pass reads.
         support: Option<SupportLoss>,
+        /// Chunk crushing (`DestructibleDef::crush`).
+        crush: Option<CrushSlot>,
+        /// Its own ingest and fracture (crushing, blast loading), else `None`: it is in the
+        /// world's shared fracture at `base`.
+        own: Option<Own>,
+    }
+
+    impl ThresholdSlot {
+        /// Its own fracture (a crushing or blast-loaded destructible's).
+        fn own(&self) -> &Own {
+            self.own
+                .as_ref()
+                .expect("a destructible with its own fracture")
+        }
+
+        fn own_mut(&mut self) -> &mut Own {
+            self.own
+                .as_mut()
+                .expect("a destructible with its own fracture")
+        }
+    }
+
+    /// A threshold destructible with its own contact ingest and GPU fracture. Crushing's
+    /// GPU state (its material laws, fragment pool, crush events) and blast loading's are
+    /// per fracture (`fracture::CrushTables`), so those destructibles do not join the
+    /// world's shared fracture; each costs its own ingest and fracture kernels per step.
+    struct Own {
+        ingest: EngineIngest,
+        fracture: GpuFracture,
+        /// Reserved body slots no piece has taken yet.
+        spare: Vec<u32>,
+        /// Every body slot it owns (pieces, spares, crush fragments).
+        owned: Vec<u32>,
+        /// The scene's stiffness scale (strike prediction's plane-strain modulus).
+        stiffness_scale: f64,
+        /// The ingest's default contact side for a collider (static geometry).
+        static_info: ColliderInfo,
+        /// Colliders the ingest now sees as projectiles.
+        projectile_colliders: Vec<u32>,
+    }
+
+    /// A frame's body frame records: an own fracture's every slot, or the shared
+    /// fracture's changed bodies.
+    #[derive(Clone, Copy)]
+    enum Frames<'a> {
+        Dense(&'a [[f32; 4]]),
+        Sparse(&'a std::collections::HashMap<u32, Frame>),
+    }
+
+    impl Frames<'_> {
+        fn get(&self, b: u32) -> Option<Frame> {
+            match self {
+                Frames::Dense(f) => Some([*f.get(2 * b as usize)?, *f.get(2 * b as usize + 1)?]),
+                Frames::Sparse(m) => m.get(&b).copied(),
+            }
+        }
     }
 
     /// Support loss's inputs for one threshold destructible (`support_loss.rs`).
@@ -331,6 +396,139 @@ mod imp {
         gravity: [f32; 3],
         /// Bonds the pass has broken that no readback has shown broken yet.
         sent: Vec<bool>,
+        /// `DestructibleDef::support_loss_dynamic_factor`: on the increase of load in a
+        /// piece whose supports changed this frame.
+        dynamic_factor: f32,
+        /// Per bond: its flow load (N) when the pass last ran on its piece (from the intact
+        /// structure at placement), the `before` of a sudden loss's amplification.
+        load: Vec<f32>,
+        /// With crushing: some chunk's flow stress alone is at its crush surface, so its
+        /// damage grows every step: the world steps even when nothing is awake.
+        overstressed: bool,
+        /// Every bond the pass has broken, in order (a diagnostic record:
+        /// `World::destructible_support_loss_breaks`).
+        broke: Vec<u32>,
+    }
+
+    /// Whether the flow's loads alone (`SupportLoss::load`) put a crushable, uncrushed
+    /// chunk at (or within 0.1% of) its crush surface: the virial `fracture.slang`
+    /// `flow_virial` builds, in the structure frame (the invariants do not depend on it).
+    /// Conservative (the GPU decides the damage): it only keeps the world stepping.
+    fn flow_overstressed(t: &ThresholdSlot, sl: &SupportLoss, crushed: &[bool]) -> bool {
+        let Some(ct) = t.tables.crush.as_ref().filter(|c| c.flow) else {
+            return false;
+        };
+        (0..t.tables.chunks.len()).any(|c| {
+            let [m0, m1] = ct.chunks[c];
+            if crushed.get(c).copied().unwrap_or(false) || m1[2].to_bits() & 1 == 0 {
+                return false;
+            }
+            let r0 = t.tables.chunks[c][0];
+            let centre = DVec3::new(r0[0] as f64, r0[1] as f64, r0[2] as f64);
+            let mut virial = [0.0f64; 6];
+            for &b in &sl.bonds_of[c] {
+                let l = sl.load[b as usize] as f64;
+                if !t.intact[b as usize] || sl.sent[b as usize] || !(l > 0.0) {
+                    continue;
+                }
+                let g = ct.bonds[b as usize];
+                let n = ct.normals[b as usize];
+                let r = DVec3::new(g[0] as f64, g[1] as f64, g[2] as f64) - centre;
+                let mut n = DVec3::new(n[0] as f64, n[1] as f64, n[2] as f64);
+                if n.dot(r) < 0.0 {
+                    n = -n;
+                }
+                let s = stress_ref::crush::sym_outer(r.to_array(), (-l * n).to_array());
+                for (v, x) in virial.iter_mut().zip(s) {
+                    *v += x;
+                }
+            }
+            let (p, q) = stress_ref::crush::invariants(virial, m1[1] as f64);
+            let m = stress_ref::crush::CrushParams {
+                cap_pressure: m0[0] as f64,
+                cohesion: m0[1] as f64,
+                friction_slope: m0[2] as f64,
+                crush_energy: m0[3] as f64,
+                crush_viscosity: m1[0] as f64,
+            };
+            m.excess(1.001 * p, 1.001 * q).is_some()
+        })
+    }
+
+    /// The pass on one piece (`chunks`): the bonds (the tables' indices) it breaks, and its
+    /// intact bonds' static flow loads now. `sudden`: the dynamic factor of a sudden loss of
+    /// support (the bonds' `SupportLoss::load` as their loads before).
+    fn evaluate_piece(
+        tables: &FractureTables,
+        intact: &[bool],
+        sl: &SupportLoss,
+        chunks: &[u32],
+        sudden: Option<f32>,
+    ) -> (Vec<u32>, Vec<(u32, f32)>) {
+        let bonds = &tables.bonds;
+        let mut local = std::collections::HashMap::with_capacity(chunks.len());
+        for (j, &c) in chunks.iter().enumerate() {
+            local.insert(c, j as u32);
+        }
+        let mut piece_bonds = Vec::new();
+        let mut table_index = Vec::new();
+        for &c in chunks.iter() {
+            for &b in &sl.bonds_of[c as usize] {
+                let [a, o, _, _] = bonds[b as usize];
+                // Each bond once (from its first chunk), intact and inside the piece.
+                if a != c || !intact[b as usize] || sl.sent[b as usize] {
+                    continue;
+                }
+                if let (Some(&la), Some(&lo)) = (local.get(&a), local.get(&o)) {
+                    piece_bonds.push((la, lo, sl.compressive[b as usize]));
+                    table_index.push(b);
+                }
+            }
+        }
+        let mass: Vec<f32> = chunks
+            .iter()
+            .map(|&c| tables.chunks[c as usize][0][3])
+            .collect();
+        let support: Vec<bool> = chunks
+            .iter()
+            .map(|&c| tables.info[c as usize] & INFO_SUPPORT != 0)
+            .collect();
+        // Chunk centres in their structure's stress frame (a piece is in one structure).
+        let centre: Vec<[f32; 3]> = chunks
+            .iter()
+            .map(|&c| {
+                let r = tables.chunks[c as usize][0];
+                [r[0], r[1], r[2]]
+            })
+            .collect();
+        let piece = crate::support_loss::Piece {
+            mass: &mass,
+            support: &support,
+            centre: &centre,
+            bonds: &piece_bonds,
+        };
+        let before: Vec<f32> = table_index.iter().map(|&b| sl.load[b as usize]).collect();
+        let sudden = sudden.map(|factor| crate::support_loss::Sudden {
+            factor,
+            before: &before,
+        });
+        let r = crate::support_loss::failing(&piece, sl.gravity, sudden.as_ref());
+        let broken = r.bonds.iter().map(|&i| table_index[i as usize]).collect();
+        let loads = table_index
+            .iter()
+            .zip(&r.load)
+            .map(|(&b, &l)| (b, l as f32))
+            .collect();
+        (broken, loads)
+    }
+
+    /// A threshold destructible's crushing: the reserved fragment bodies (body, shape,
+    /// collider; the GPU's `CrushTables::pool` in order) and how many a crush takes.
+    struct CrushSlot {
+        pool: Vec<(u32, u32, u32)>,
+        fragments: u32,
+        material: u32,
+        shape_def: crate::ShapeDef,
     }
 
     /// First-fit ranges of a shared table (chunks, bonds or parts): `free` sorted and
@@ -425,14 +623,16 @@ mod imp {
         /// event's destructible.
         chunk_ranges: Vec<(u32, u32, usize)>,
         bond_ranges: Vec<(u32, u32, usize)>,
-        /// Bonds the host broke (support loss) since the last frame read: (slot, bond).
-        host_broken: Vec<(usize, u32)>,
         /// Registered projectiles: body slot and generation, material.
         projectiles: Vec<(u32, u32, Projectile)>,
         projectiles_dirty: bool,
         /// The plan hints the lab fixes (`set_plan_hints`): the contact capacity, every
         /// colour its own dispatch.
         pub fixed_plan: Option<(u32, u32)>,
+        /// This frame's crushed bodies and their origins as the split left them (before
+        /// parking): a crushed chunk that kept its parent's body leaves no record of where
+        /// the parent was, and the split's other pieces start there (`World::frame`).
+        pub crushed_origins: Vec<(u32, Transform)>,
     }
 
     impl Fracture {
@@ -451,11 +651,20 @@ mod imp {
     /// One step's fracture readback (the shared fracture's).
     #[derive(Clone, Copy, Debug)]
     pub(crate) enum FractureRead {
+        /// The shared fracture's counters and this step's events: bonds broken, chunks
+        /// moved (chunk, body), body frames.
         Counters,
-        /// This step's events: bonds broken, chunks moved (chunk, body), body frames.
         Broken,
         Moved,
         Frames,
+        /// A destructible with its own fracture (crushing, blast loading): its counters,
+        /// chunk owners, bond states, body frames and this frame's crush events
+        /// (`GpuFracture::crush_events_range`).
+        SlotCounters(u32),
+        ChunkBodies(u32),
+        Intact(u32),
+        SlotFrames(u32),
+        Crush(u32),
     }
 
     /// Each step's event lists' room (`fracture::Events`): a step that breaks, moves or
@@ -554,7 +763,8 @@ mod imp {
             Ok((shot, shape.collider, info))
         }
 
-        /// Every threshold destructible's shot table and the projectiles' contact sides.
+        /// Every threshold destructible's shot table and the projectiles' contact sides:
+        /// the shared fracture's and each own fracture's.
         pub(crate) fn sync_projectiles(&mut self) -> anyhow::Result<()> {
             self.fracture.projectiles_dirty = false;
             let live: Vec<(u32, Projectile)> = self
@@ -573,40 +783,71 @@ mod imp {
                 .gpu
                 .clone()
                 .expect("a threshold destructible's GPU");
-            let Some(scale) = self.fracture.shared.as_ref().map(|sh| sh.stiffness_scale) else {
-                return Ok(());
-            };
-            let mut shots = Vec::with_capacity(live.len());
-            let mut sides = Vec::with_capacity(live.len());
-            for (b, p) in &live {
-                let (shot, collider, info) = self.projectile_shot(*b, p, scale)?;
-                shots.push(shot);
-                sides.push((collider, info));
+            // The fractures' stiffness scales: the shared one's (`None` slot), each own's.
+            let mut targets: Vec<(Option<usize>, f64)> = Vec::new();
+            if let Some(sh) = &self.fracture.shared {
+                targets.push((None, sh.stiffness_scale));
             }
-            let sh = self.fracture.shared.as_mut().expect("shared fracture");
-            let stride = std::mem::size_of::<ColliderInfo>() as u64;
-            // A collider that stopped being a projectile (cleared, or its body destroyed
-            // and the slot reused) is static geometry again.
-            for &c in &sh.projectile_colliders {
-                if !sides.iter().any(|s| s.0 == c) {
-                    gpu.queue.write_buffer(
-                        &sh.ingest.collider_info,
-                        stride * c as u64,
-                        bytemuck::bytes_of(&sh.static_info),
-                    );
+            for (k, t) in self.fracture.slots.iter().enumerate() {
+                if let Some(o) = t.as_ref().and_then(|t| t.own.as_ref()) {
+                    targets.push((Some(k), o.stiffness_scale));
                 }
             }
-            for (c, info) in &sides {
-                gpu.queue.write_buffer(
-                    &sh.ingest.collider_info,
-                    stride * *c as u64,
-                    bytemuck::bytes_of(info),
-                );
+            let stride = std::mem::size_of::<ColliderInfo>() as u64;
+            for (k, scale) in targets {
+                let mut shots = Vec::with_capacity(live.len());
+                let mut sides = Vec::with_capacity(live.len());
+                for (b, p) in &live {
+                    let (shot, collider, info) = self.projectile_shot(*b, p, scale)?;
+                    shots.push(shot);
+                    sides.push((collider, info));
+                }
+                let (ingest, fracture, static_info, colliders) = match k {
+                    None => {
+                        let sh = self.fracture.shared.as_mut().expect("shared fracture");
+                        (
+                            &sh.ingest,
+                            &mut sh.fracture,
+                            sh.static_info,
+                            &mut sh.projectile_colliders,
+                        )
+                    }
+                    Some(k) => {
+                        let o = self.fracture.slots[k]
+                            .as_mut()
+                            .expect("live slot")
+                            .own_mut();
+                        (
+                            &o.ingest,
+                            &mut o.fracture,
+                            o.static_info,
+                            &mut o.projectile_colliders,
+                        )
+                    }
+                };
+                // A collider that stopped being a projectile (cleared, or its body
+                // destroyed and the slot reused) is static geometry again.
+                for &c in colliders.iter() {
+                    if !sides.iter().any(|s| s.0 == c) {
+                        gpu.queue.write_buffer(
+                            &ingest.collider_info,
+                            stride * c as u64,
+                            bytemuck::bytes_of(&static_info),
+                        );
+                    }
+                }
+                for (c, info) in &sides {
+                    gpu.queue.write_buffer(
+                        &ingest.collider_info,
+                        stride * *c as u64,
+                        bytemuck::bytes_of(info),
+                    );
+                }
+                *colliders = sides.iter().map(|s| s.0).collect();
+                fracture
+                    .set_shots(&gpu, &shots)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
-            sh.projectile_colliders = sides.iter().map(|s| s.0).collect();
-            sh.fracture
-                .set_shots(&gpu, &shots)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
         }
 
@@ -627,7 +868,10 @@ mod imp {
                 self.contact_storage
             );
             let params = self.sim.params();
-            let scene = source.threshold_scene(def.strength_scale, params.dt)?;
+            let mut scene = source.threshold_scene(def.strength_scale, params.dt)?;
+            if let Some(c) = &def.crush {
+                apply_crush_materials(&mut scene, c)?;
+            }
             let world = stress_ref::world::World::new(&scene);
             let m = &world.solver;
             let chunk_count: usize = m.structures.iter().map(|s| s.chunks.len()).sum();
@@ -788,10 +1032,21 @@ mod imp {
             if cooked_hulls(&chunk_parts) {
                 self.sim.sync_hulls(&mut self.hulls);
             }
+            // Any chunk can split off onto a dynamic body on the GPU, before (or without)
+            // this host adopting the split: the broadphase grid is sized for the largest
+            // chunk collider moving from the start.
+            let reach = chunk_cols
+                .iter()
+                .flatten()
+                .map(|&c| engine_schema::convex::collider_radius(&self.sim.collider(c)))
+                .fold(0.0f32, f32::max);
+            self.sim.reserve_movable_radius(reach);
             // Reserved slots for every other piece a split can make: static, parked, out
             // of every pair until a split re-parents a chunk's colliders onto one.
             // With a world piece pool (`WorldDef::fracture_pieces`) the pool serves them.
-            let spare_count = if self.fracture_pieces.is_some() {
+            // Crushing and blast loading keep their own fracture (`Own`) and its spares.
+            let own_fracture = def.crush.is_some() || def.blast_loading;
+            let spare_count = if self.fracture_pieces.is_some() && !own_fracture {
                 0
             } else {
                 chunk_count.saturating_sub(m.clusters.len())
@@ -895,6 +1150,10 @@ mod imp {
                 });
                 t.chunk_body.push(chunk_body[k]);
             }
+            // Per GPU bond: its structure and bond (blast loading's mirror).
+            let mut bond_source = Vec::new();
+            let mut crush_bonds: Vec<[f32; 4]> = Vec::new();
+            let mut crush_normals: Vec<[f32; 4]> = Vec::new();
             for &(b, id, structure, com, principal) in &cluster_bodies {
                 let cl = m.clusters.iter().find(|c| c.id == id).expect("a cluster");
                 let (c, p) = (com.as_vec3(), principal.as_quat());
@@ -908,11 +1167,21 @@ mod imp {
                         continue;
                     }
                     let capacity = bond.strength.tensile * bond.geometry.area * bond.weibull;
+                    bond_source.push((cl.structure, bi));
                     let source = &scene.bodies[cl.structure].bonds[bond.source];
                     compressive.push(
                         (scene.material(&source.material).compressive_strength * bond.geometry.area)
                             as f32,
                     );
+                    let g = bond.geometry.centroid;
+                    crush_bonds.push([
+                        g.x as f32,
+                        g.y as f32,
+                        g.z as f32,
+                        bond.geometry.area as f32,
+                    ]);
+                    let nn = bond.geometry.normal;
+                    crush_normals.push([nn.x as f32, nn.y as f32, nn.z as f32, 0.0]);
                     t.bonds.push([
                         global(cl.structure, bond.geometry.a),
                         global(cl.structure, bond.geometry.b),
@@ -921,7 +1190,122 @@ mod imp {
                     ]);
                 }
             }
-            // The ingest's contact sides: every collider the static side by default (the
+            // Chunk crushing: each chunk's material law, the bonds' centroids, the fragment
+            // pool (reserved bodies, one box collider each, parked as the spares are).
+            let mut crush_slot = None;
+            if let Some(c) = &def.crush {
+                let mut rows = Vec::with_capacity(chunk_count);
+                let mut lacking = std::collections::BTreeSet::new();
+                let mut crushable = 0usize;
+                for (k, &(s, cc)) in chunk_of.iter().enumerate() {
+                    let ch = &m.structures[s].chunks[cc];
+                    let mat = scene.material(&ch.material);
+                    let can = ch.support == Support::None && t.chunks[k][0][3] > 0.0;
+                    match (&mat.crush, can) {
+                        (Some(p), true) => {
+                            crushable += 1;
+                            rows.push([
+                                [
+                                    p.cap_pressure as f32,
+                                    p.cohesion as f32,
+                                    p.friction_slope as f32,
+                                    p.crush_energy as f32,
+                                ],
+                                [
+                                    p.crush_viscosity as f32,
+                                    ch.volume() as f32,
+                                    f32::from_bits(1),
+                                    0.0,
+                                ],
+                            ]);
+                        }
+                        (None, true) => {
+                            lacking.insert(ch.material.clone());
+                            rows.push([[0.0; 4]; 2]);
+                        }
+                        _ => rows.push([[0.0; 4]; 2]),
+                    }
+                }
+                anyhow::ensure!(
+                    crushable > 0,
+                    "DestructibleDef::crush: no chunk can crush: its materials {lacking:?} have no crush parameters (give them in Crush::materials, e.g. from stress_ref::crush::presets, or import a ScenePack v3 with materials[].crush)"
+                );
+                let (conserve, fragments, budget) = match c.mass {
+                    CrushMass::Conserve { fragments, budget } => {
+                        anyhow::ensure!(
+                            fragments.is_power_of_two() && fragments <= 64,
+                            "CrushMass::Conserve: {fragments} fragments per chunk; a power of two up to 64"
+                        );
+                        (true, fragments, budget)
+                    }
+                    CrushMass::Remove => (false, 0, 0),
+                };
+                let ids = self.create_bodies(&vec![
+                    BodyDef {
+                        user_data: def.user_data,
+                        ..BodyDef::default()
+                    };
+                    budget as usize
+                ])?;
+                let mut pool = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let i = id.index();
+                    let mut parked = BodyState::static_plane_support();
+                    parked.position = crate::graveyard(i);
+                    parked.initial_pos = parked.position;
+                    self.sim.write_bodies(i, &[parked]);
+                    let geometry = Geometry::Box {
+                        half: [0.05; 3],
+                        transform: Transform::IDENTITY,
+                    };
+                    let mut col =
+                        self.collider(i, SolverFrame::IDENTITY, &geometry, 0.0, material, None)?;
+                    shape_def.filter.apply(&mut col);
+                    col.material |= crate::contacts::event_bits(&shape_def);
+                    let (shape, collider) =
+                        self.add_shape_record(i as usize, &shape_def, geometry, col)?;
+                    let slot = &mut self.bodies[i as usize];
+                    slot.owner = Owner::Piece;
+                    slot.alive = false;
+                    pool.push((i, shape, collider));
+                }
+                let max_events = if c.max_per_step == 0 {
+                    256
+                } else {
+                    c.max_per_step
+                };
+                // With support loss, its flow's bond loads enter the stress estimate
+                // (`fracture.slang` `crush_loads_flow`: crushes with cause Load).
+                let flow = def.support_loss;
+                t.crush = Some(CrushTables {
+                    chunks: rows,
+                    bonds: crush_bonds,
+                    normals: if flow { crush_normals } else { Vec::new() },
+                    flow,
+                    conserve,
+                    fragments,
+                    pool: pool.iter().map(|p| [p.0, p.2]).collect(),
+                    max_events,
+                    park_y: crate::graveyard(0)[1],
+                    park_step: crate::graveyard(1)[0],
+                });
+                crush_slot = Some(CrushSlot {
+                    pool,
+                    fragments,
+                    material,
+                    shape_def: shape_def.clone(),
+                });
+            }
+            let owned: Vec<u32> = owned
+                .into_iter()
+                .chain(crush_slot.iter().flat_map(|c| c.pool.iter().map(|p| p.0)))
+                .collect();
+            // The frames and free marks cover every slot the fracture may see.
+            let body_count = owned.iter().copied().max().map_or(0, |b| b + 1) as usize;
+            t.frames
+                .resize(body_count, [[0.0; 4], [0.0, 0.0, 0.0, 1.0]]);
+            t.free.resize(body_count, 0);
+            // The ingest's collider table: every collider the static side by default (the
             // lab's ground), the chunks' on their bodies, the projectiles' (synced below).
             let ground_modulus = scene
                 .ground
@@ -955,85 +1339,137 @@ mod imp {
                     ));
                 }
             }
-            let band = t.band;
-            let dt = t.dt;
-            let stiffness_scale = scene.sim.stiffness_scale;
-            self.threshold_shared(&gpu, static_info, stiffness_scale, band, dt)?;
-            let scales = t.scales();
             let bond_count = t.bonds.len();
-            let sh = self.fracture.shared.as_mut().expect("shared fracture");
-            let (n, e, p) = (chunk_count as u32, bond_count as u32, t.parts.len() as u32);
-            let chunk_at = sh.chunks.take(n)?;
-            let bond_at = match sh.bonds.take(e) {
-                Ok(at) => at,
-                Err(err) => {
-                    sh.chunks.give(chunk_at, n);
-                    return Err(err);
-                }
-            };
-            let part_at = match sh.parts.take(p) {
-                Ok(at) => at,
-                Err(err) => {
-                    sh.chunks.give(chunk_at, n);
-                    sh.bonds.give(bond_at, e);
-                    return Err(err);
-                }
-            };
-            let base = fracture::Base {
-                chunk: chunk_at,
-                bond: bond_at,
-                part: part_at,
-            };
-            // The records as the shared tables number them.
-            let mut g = FractureTables {
-                chunks: t.chunks.clone(),
-                info: t.info.clone(),
-                bonds: t.bonds.clone(),
-                parts: t.parts.clone(),
-                chunk_body: t.chunk_body.clone(),
-                geometry: t.geometry.clone(),
-                ..Default::default()
-            };
-            for c in &mut g.chunks {
-                c[2][2] = f32::from_bits(c[2][2].to_bits() + base.part);
-            }
-            for b in &mut g.bonds {
-                b[0] += base.chunk;
-                b[1] += base.chunk;
-            }
-            let frames: Vec<(u32, fracture::FrameRecord)> = cluster_bodies
-                .iter()
-                .map(|c| (c.0, t.frames[c.0 as usize]))
-                .collect();
-            let all_scales = self
-                .fracture
-                .slots
-                .iter()
-                .flatten()
-                .map(|s| s.scales)
-                .fold(scales, |a, b| {
-                    [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])]
-                });
-            let sh = self.fracture.shared.as_mut().expect("shared fracture");
-            sh.fracture
-                .append(&gpu, base, &g, &frames, &spare, Some(all_scales))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let stride = std::mem::size_of::<ColliderInfo>() as u64;
-            let sides: Vec<(u32, ColliderInfo)> = sides
-                .into_iter()
-                .map(|(col, mut info)| {
-                    info.a[0] += base.chunk;
-                    (col, info)
-                })
-                .collect();
-            for (first, infos) in runs(sides) {
-                gpu.queue.write_buffer(
-                    &sh.ingest.collider_info,
-                    stride * first as u64,
-                    bytemuck::cast_slice(&infos),
+            let blast = def.blast_loading.then(|| {
+                blast::BlastSlot::new(
+                    &gpu.device,
+                    m.clone(),
+                    &scene,
+                    bond_source,
+                    chunk_of.clone(),
+                )
+            });
+            let scales = t.scales();
+            let (base, own) = if own_fracture {
+                // The ingest merges two records a contact row in 64-thread groups, one
+                // dispatch dimension (WebGPU's 65,535 groups).
+                anyhow::ensure!(
+                    capacity.max_contacts as u64 * 2 <= 65_535 * 64,
+                    "a threshold destructible needs max_contacts <= {} (the contact ingest's dispatch), not {}",
+                    65_535 * 32,
+                    capacity.max_contacts
                 );
-            }
-            self.fracture.spare.extend(spare.iter().copied());
+                let mut table = vec![static_info; capacity.max_colliders as usize];
+                for (col, info) in &sides {
+                    table[*col as usize] = *info;
+                }
+                for c in crush_slot.iter().flat_map(|c| &c.pool) {
+                    table[c.2 as usize] = ColliderInfo {
+                        a: [NONE, c.0, KIND_BODY, 0],
+                        b: [f32::INFINITY, ground_modulus as f32, 1.0, 0.0],
+                    };
+                }
+                let ingest = EngineIngest::new(
+                    &gpu,
+                    capacity.max_contacts,
+                    1,
+                    capacity.max_bodies,
+                    chunk_count as u32,
+                    &table,
+                );
+                let fracture = GpuFracture::new(&gpu, &t, &buffers(&self.sim), &ingest)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let own = Own {
+                    ingest,
+                    fracture,
+                    spare: spare.clone(),
+                    owned: owned.clone(),
+                    stiffness_scale: scene.sim.stiffness_scale,
+                    static_info,
+                    projectile_colliders: Vec::new(),
+                };
+                (fracture::Base::default(), Some(own))
+            } else {
+                let band = t.band;
+                let dt = t.dt;
+                let stiffness_scale = scene.sim.stiffness_scale;
+                self.threshold_shared(&gpu, static_info, stiffness_scale, band, dt)?;
+                let sh = self.fracture.shared.as_mut().expect("shared fracture");
+                let (n, e, p) = (chunk_count as u32, bond_count as u32, t.parts.len() as u32);
+                let chunk_at = sh.chunks.take(n)?;
+                let bond_at = match sh.bonds.take(e) {
+                    Ok(at) => at,
+                    Err(err) => {
+                        sh.chunks.give(chunk_at, n);
+                        return Err(err);
+                    }
+                };
+                let part_at = match sh.parts.take(p) {
+                    Ok(at) => at,
+                    Err(err) => {
+                        sh.chunks.give(chunk_at, n);
+                        sh.bonds.give(bond_at, e);
+                        return Err(err);
+                    }
+                };
+                let base = fracture::Base {
+                    chunk: chunk_at,
+                    bond: bond_at,
+                    part: part_at,
+                };
+                // The records as the shared tables number them.
+                let mut g = FractureTables {
+                    chunks: t.chunks.clone(),
+                    info: t.info.clone(),
+                    bonds: t.bonds.clone(),
+                    parts: t.parts.clone(),
+                    chunk_body: t.chunk_body.clone(),
+                    geometry: t.geometry.clone(),
+                    ..Default::default()
+                };
+                for c in &mut g.chunks {
+                    c[2][2] = f32::from_bits(c[2][2].to_bits() + base.part);
+                }
+                for b in &mut g.bonds {
+                    b[0] += base.chunk;
+                    b[1] += base.chunk;
+                }
+                let frames: Vec<(u32, fracture::FrameRecord)> = cluster_bodies
+                    .iter()
+                    .map(|c| (c.0, t.frames[c.0 as usize]))
+                    .collect();
+                let all_scales = self
+                    .fracture
+                    .slots
+                    .iter()
+                    .flatten()
+                    .filter(|s| s.own.is_none())
+                    .map(|s| s.scales)
+                    .fold(scales, |a, b| {
+                        [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])]
+                    });
+                let sh = self.fracture.shared.as_mut().expect("shared fracture");
+                sh.fracture
+                    .append(&gpu, base, &g, &frames, &spare, Some(all_scales))
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let stride = std::mem::size_of::<ColliderInfo>() as u64;
+                let sides: Vec<(u32, ColliderInfo)> = sides
+                    .into_iter()
+                    .map(|(col, mut info)| {
+                        info.a[0] += base.chunk;
+                        (col, info)
+                    })
+                    .collect();
+                for (first, infos) in runs(sides) {
+                    gpu.queue.write_buffer(
+                        &sh.ingest.collider_info,
+                        stride * first as u64,
+                        bytemuck::cast_slice(&infos),
+                    );
+                }
+                self.fracture.spare.extend(spare.iter().copied());
+                (base, None)
+            };
             let slot = ThresholdSlot {
                 destructible: index as u32,
                 base,
@@ -1046,7 +1482,10 @@ mod imp {
                 chunk_shapes,
                 intact: vec![true; bond_count],
                 nodes: source.nodes.clone(),
+                blast,
                 support: None,
+                crush: crush_slot,
+                own,
             };
             let mut slot = slot;
             if def.support_loss {
@@ -1056,12 +1495,34 @@ mod imp {
                     bonds_of[b[1] as usize].push(i as u32);
                 }
                 let g = scene.gravity;
-                slot.support = Some(SupportLoss {
+                let mut sl = SupportLoss {
                     sent: vec![false; compressive.len()],
+                    load: vec![0.0; compressive.len()],
+                    broke: Vec::new(),
                     compressive,
                     bonds_of,
                     gravity: g.map(|x| x as f32),
-                });
+                    dynamic_factor: def.support_loss_dynamic_factor,
+                    overstressed: false,
+                };
+                // The intact structure's flow: every bond's load before any loss.
+                for &(b, ..) in &cluster_bodies {
+                    let chunks: Vec<u32> = (0..slot.chunk_body.len() as u32)
+                        .filter(|&c| slot.chunk_body[c as usize] == b)
+                        .collect();
+                    let (_, loads) = evaluate_piece(&slot.tables, &slot.intact, &sl, &chunks, None);
+                    for (bond, load) in loads {
+                        sl.load[bond as usize] = load;
+                    }
+                }
+                if slot.own.as_ref().is_some_and(|o| o.fracture.crush_flow()) {
+                    slot.own()
+                        .fracture
+                        .set_crush_flow(&gpu, &sl.load)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    sl.overstressed = flow_overstressed(&slot, &sl, &[]);
+                }
+                slot.support = Some(sl);
             }
             let k = match self.fracture.slots.iter().position(|s| s.is_none()) {
                 Some(k) => k,
@@ -1070,18 +1531,22 @@ mod imp {
                     self.fracture.slots.len() - 1
                 }
             };
-            let (base, n, e) = (
+            let (base, n, e, shared) = (
                 slot.base,
                 slot.chunk_body.len() as u32,
                 slot.intact.len() as u32,
+                slot.own.is_none(),
             );
             self.fracture.slots[k] = Some(slot);
+            // The shared fracture's events find their destructible by these.
             for (ranges, start, len) in [
                 (&mut self.fracture.chunk_ranges, base.chunk, n),
                 (&mut self.fracture.bond_ranges, base.bond, e),
             ] {
-                let at = ranges.partition_point(|r| r.0 < start);
-                ranges.insert(at, (start, start + len, k));
+                if shared {
+                    let at = ranges.partition_point(|r| r.0 < start);
+                    ranges.insert(at, (start, start + len, k));
+                }
             }
             // A plan from counters read a frame or more late would differ run to run: the
             // lab fixes it (the hash at the contact capacity, every colour its own
@@ -1101,6 +1566,7 @@ mod imp {
                 .collect();
             d.bond_joints = vec![None; bond_count];
             d.bond_intact = vec![true; bond_count];
+            d.crushed = vec![false; chunk_count];
             self.sync_projectiles()?;
             // Hand this destructible's uploads to the GPU and wait for them: staging memory
             // is reclaimed only once its copies finish, so placing a map's worth without
@@ -1246,8 +1712,18 @@ mod imp {
         /// engine's step) and the readback: the ingest of the step's contacts, the loads,
         /// the breaks and the splits.
         pub(crate) fn encode_fracture_begin(&self, enc: &mut wgpu::CommandEncoder) {
+            let e = buffers(&self.sim);
             if let Some(sh) = &self.fracture.shared {
-                sh.ingest.begin_frame(enc, &buffers(&self.sim));
+                sh.ingest.begin_frame(enc, &e);
+            }
+            for o in self
+                .fracture
+                .slots
+                .iter()
+                .flatten()
+                .filter_map(|t| t.own.as_ref())
+            {
+                o.ingest.begin_frame(enc, &e);
             }
         }
 
@@ -1264,47 +1740,28 @@ mod imp {
                 sh.ingest.merge(&gpu, enc, &e, 1);
                 sh.fracture.encode_frame(&gpu, enc, step);
             }
+            for o in self
+                .fracture
+                .slots
+                .iter_mut()
+                .flatten()
+                .filter_map(|t| t.own.as_mut())
+            {
+                o.ingest.substep(&gpu, enc, &e, offset, 0, dt);
+                o.ingest.merge(&gpu, enc, &e, 1);
+                o.fracture.encode_frame(&gpu, enc, step);
+            }
         }
     }
 
     impl Fracture {
-        /// The readback copies of every threshold destructible's state after a step:
-        /// its counters, chunk owners, bond states and body frames.
+        /// The readback copies of every threshold destructible's state after a step: the
+        /// shared fracture's counters and event lists (nothing that scales with the
+        /// destructibles placed), and each own fracture's counters, chunk owners, bond
+        /// states, body frames and crush events.
         pub(crate) fn extras(&self) -> Vec<crate::readback::Extra<'_, crate::Extra>> {
             let mut out = Vec::new();
-            let Some(sh) = &self.shared else {
-                return out;
-            };
-            let f = &sh.fracture;
-            let l = f.layout;
-            // The counters and this step's event lists: nothing that scales with the
-            // destructibles placed.
-            for (read, buffer, offset, size) in [
-                (
-                    FractureRead::Counters,
-                    &f.atom,
-                    4 * l.a_counters() as u64,
-                    4 * COUNTER_WORDS,
-                ),
-                (
-                    FractureRead::Broken,
-                    &f.atom,
-                    4 * l.a_events() as u64,
-                    4 * l.events.broken as u64,
-                ),
-                (
-                    FractureRead::Moved,
-                    &f.atom,
-                    4 * l.a_moved() as u64,
-                    8 * l.events.moved as u64,
-                ),
-                (
-                    FractureRead::Frames,
-                    &f.frames,
-                    16 * l.f_events() as u64,
-                    48 * l.events.frames as u64,
-                ),
-            ] {
+            let mut push = |read, buffer, offset, size| {
                 if size > 0 {
                     out.push(crate::readback::Extra {
                         kind: crate::Extra::Fracture(read),
@@ -1313,6 +1770,71 @@ mod imp {
                         size,
                     });
                 }
+            };
+            if let Some(sh) = &self.shared {
+                let f = &sh.fracture;
+                let l = f.layout;
+                push(
+                    FractureRead::Counters,
+                    &f.atom,
+                    4 * l.a_counters() as u64,
+                    4 * COUNTER_WORDS,
+                );
+                push(
+                    FractureRead::Broken,
+                    &f.atom,
+                    4 * l.a_events() as u64,
+                    4 * l.events.broken as u64,
+                );
+                push(
+                    FractureRead::Moved,
+                    &f.atom,
+                    4 * l.a_moved() as u64,
+                    8 * l.events.moved as u64,
+                );
+                push(
+                    FractureRead::Frames,
+                    &f.frames,
+                    16 * l.f_events() as u64,
+                    48 * l.events.frames as u64,
+                );
+            }
+            for (k, t) in self.slots.iter().enumerate() {
+                let Some(o) = t.as_ref().and_then(|t| t.own.as_ref()) else {
+                    continue;
+                };
+                let k = k as u32;
+                let f = &o.fracture;
+                let l = f.layout;
+                push(
+                    FractureRead::SlotCounters(k),
+                    &f.atom,
+                    4 * l.a_counters() as u64,
+                    4 * COUNTER_WORDS,
+                );
+                push(
+                    FractureRead::ChunkBodies(k),
+                    &f.work,
+                    4 * l.w_body() as u64,
+                    4 * l.n as u64,
+                );
+                push(
+                    FractureRead::Intact(k),
+                    &f.work,
+                    4 * l.w_alive() as u64,
+                    4 * l.e as u64,
+                );
+                push(FractureRead::SlotFrames(k), &f.frames, 0, 32 * l.b as u64);
+                push(
+                    FractureRead::Crush(k),
+                    &f.crush_rw,
+                    f.crush_events_range().0,
+                    if f.crushes() {
+                        f.crush_events_range().1
+                    } else {
+                        0
+                    },
+                );
             }
             out
         }
@@ -1324,6 +1846,19 @@ mod imp {
         /// on. A fracture error (no free slot, a mass sum out of range, an unsettled union,
         /// a full impact pulse pool) fails the frame.
         pub(crate) fn fracture_frame(
+            &mut self,
+            step: u64,
+            reads: &[(FractureRead, &[u8])],
+        ) -> anyhow::Result<Vec<DestructionEvent>> {
+            // This frame's (a blast's crushes before the step report no adoption).
+            self.fracture.crushed_origins.clear();
+            let mut out = self.shared_frame(step, reads)?;
+            out.extend(self.own_frames(step, reads)?);
+            Ok(out)
+        }
+
+        /// The shared fracture's frame: its event lists, each to its destructible.
+        fn shared_frame(
             &mut self,
             step: u64,
             reads: &[(FractureRead, &[u8])],
@@ -1358,8 +1893,7 @@ mod imp {
             let frame_words: &[[f32; 4]] = find(FractureRead::Frames)
                 .map(|b| &bytemuck::cast_slice::<u8, [f32; 4]>(b)[..3 * nf as usize])
                 .unwrap_or_default();
-            let host_broken = std::mem::take(&mut self.fracture.host_broken);
-            if broken.is_empty() && moved.is_empty() && host_broken.is_empty() {
+            if broken.is_empty() && moved.is_empty() {
                 return Ok(out);
             }
             let frames: std::collections::HashMap<u32, Frame> = frame_words
@@ -1380,11 +1914,6 @@ mod imp {
                     per_slot.entry(k).or_default().0.push(local);
                 }
             }
-            for (k, local) in host_broken {
-                if self.fracture.slots.get(k).is_some_and(|s| s.is_some()) {
-                    per_slot.entry(k).or_default().0.push(local);
-                }
-            }
             for pair in moved.chunks_exact(2) {
                 if let Some((k, local)) = owner(&self.fracture.chunk_ranges, pair[0]) {
                     per_slot.entry(k).or_default().1.push((local, pair[1]));
@@ -1400,7 +1929,14 @@ mod imp {
                 for b in bonds {
                     own_intact[b as usize] = false;
                 }
-                let events = self.apply_fracture(k, step, own_chunks, own_intact, &frames)?;
+                let events = self.apply_fracture(
+                    k,
+                    step,
+                    own_chunks,
+                    own_intact,
+                    Frames::Sparse(&frames),
+                    &[],
+                )?;
                 let broken: Vec<u32> = events
                     .iter()
                     .filter_map(|e| match e {
@@ -1417,13 +1953,117 @@ mod imp {
             Ok(out)
         }
 
+        /// Each own fracture's frame (crushing, blast loading): its whole chunk owners,
+        /// bond states and frames, and its crushes.
+        fn own_frames(
+            &mut self,
+            step: u64,
+            reads: &[(FractureRead, &[u8])],
+        ) -> anyhow::Result<Vec<DestructionEvent>> {
+            let mut out = Vec::new();
+            for k in 0..self.fracture.slots.len() {
+                let find = |want: fn(u32) -> FractureRead| {
+                    reads
+                        .iter()
+                        .find(|(r, _)| {
+                            std::mem::discriminant(r) == std::mem::discriminant(&want(k as u32))
+                                && read_slot(*r) == k as u32
+                        })
+                        .map(|(_, b)| *b)
+                };
+                let (Some(counters), Some(chunks)) = (
+                    find(FractureRead::SlotCounters),
+                    find(FractureRead::ChunkBodies),
+                ) else {
+                    continue;
+                };
+                let counters: &[u32] = bytemuck::cast_slice(counters);
+                anyhow::ensure!(counters[3] & fracture::CRUSH_ERROR_FRAGMENTS == 0, "step {step}: a chunk crush found the fragment bodies spent: raise CrushMass::Conserve's budget");
+                anyhow::ensure!(
+                    counters[3] & fracture::CRUSH_ERROR_EVENTS == 0,
+                    "step {step}: more chunks crushed in one step than Crush::max_per_step"
+                );
+                anyhow::ensure!(counters[3] == 0, "step {step}: threshold fracture error {:#x} (1: no free body slot, 2: mass sum out of range, 4: union did not settle, 8: impact pulse pool full)", counters[3]);
+                let crushes: Vec<CrushEvent> = find(FractureRead::Crush)
+                    .map(|b| {
+                        CrushEvent::decode(
+                            bytemuck::cast_slice(b),
+                            counters[fracture::C_CRUSH_EVENTS],
+                        )
+                    })
+                    .unwrap_or_default();
+                let crushed_now: Vec<u32> = crushes.iter().map(|e| e.chunk).collect();
+                let chunks: Vec<u32> = bytemuck::cast_slice(chunks).to_vec();
+                let intact: Vec<bool> = find(FractureRead::Intact)
+                    .map(|b| {
+                        bytemuck::cast_slice::<u8, u32>(b)
+                            .iter()
+                            .map(|&x| x != 0)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let frames: Vec<[f32; 4]> = find(FractureRead::SlotFrames)
+                    .map(|b| bytemuck::cast_slice(b).to_vec())
+                    .unwrap_or_default();
+                let events = self.apply_fracture(
+                    k,
+                    step,
+                    chunks,
+                    intact,
+                    Frames::Dense(&frames),
+                    &crushed_now,
+                )?;
+                let broken: Vec<u32> = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        DestructionEvent::BondsBroken { bonds, .. } => Some(bonds.clone()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                if !broken.is_empty() {
+                    self.support_loss(k, &broken);
+                }
+                out.extend(events);
+                out.extend(self.apply_crush(k, step, &crushes, &frames)?);
+            }
+            Ok(out)
+        }
+
         fn apply_fracture(
             &mut self,
             k: usize,
             step: u64,
             chunks: Vec<u32>,
             intact: Vec<bool>,
-            frames: &std::collections::HashMap<u32, Frame>,
+            frames: Frames<'_>,
+            crushed_now: &[u32],
+        ) -> anyhow::Result<Vec<DestructionEvent>> {
+            // This step's poses are from before the split: re-frame from the next.
+            self.apply_fracture_from(
+                k,
+                step + 1,
+                chunks,
+                intact,
+                frames,
+                crushed_now,
+                BreakCause::Stress,
+            )
+        }
+
+        /// A split's adoption, the changed bodies re-framed from `from_step` on. The
+        /// broken bonds are reported by cause: a crushed chunk's (`crushed_now`) Crush, a
+        /// bond support loss broke SupportLoss, the rest `cause`.
+        #[allow(clippy::too_many_arguments)]
+        fn apply_fracture_from(
+            &mut self,
+            k: usize,
+            from_step: u64,
+            chunks: Vec<u32>,
+            intact: Vec<bool>,
+            frames: Frames<'_>,
+            crushed_now: &[u32],
+            cause: BreakCause,
         ) -> anyhow::Result<Vec<DestructionEvent>> {
             let t = self.fracture.slots[k].as_mut().expect("live slot");
             let d = t.destructible as usize;
@@ -1444,10 +2084,37 @@ mod imp {
             let id = DestructibleId::new(d as u32, self.destructibles[d].generation);
             let mut out = Vec::new();
             if !broken.is_empty() {
-                out.push(DestructionEvent::BondsBroken {
-                    destructible: id,
-                    bonds: broken.clone(),
-                });
+                let bonds = &t.tables.bonds;
+                let sent = t.support.as_ref().map(|sl| &sl.sent);
+                let cause_of = |b: u32| {
+                    let [a, o, _, _] = bonds[b as usize];
+                    if crushed_now.contains(&a) || crushed_now.contains(&o) {
+                        BreakCause::Crush
+                    } else if sent.is_some_and(|s| s[b as usize]) {
+                        BreakCause::SupportLoss
+                    } else {
+                        cause
+                    }
+                };
+                for c in [
+                    BreakCause::Stress,
+                    BreakCause::Blast,
+                    BreakCause::SupportLoss,
+                    BreakCause::Crush,
+                ] {
+                    let these: Vec<u32> = broken
+                        .iter()
+                        .copied()
+                        .filter(|&b| cause_of(b) == c)
+                        .collect();
+                    if !these.is_empty() {
+                        out.push(DestructionEvent::BondsBroken {
+                            destructible: id,
+                            bonds: these,
+                            cause: c,
+                        });
+                    }
+                }
                 for &b in &broken {
                     self.destructibles[d].bond_intact[b as usize] = false;
                 }
@@ -1471,12 +2138,22 @@ mod imp {
             changed.dedup();
             let mut spare_taken = Vec::new();
             for &b in &changed {
-                if self.fracture.spare.remove(&b) {
+                // An own fracture's spares are its own; the shared one's, the world's.
+                let taken = match t.own.as_mut() {
+                    Some(o) => match o.spare.iter().position(|&s| s == b) {
+                        Some(i) => {
+                            o.spare.swap_remove(i);
+                            true
+                        }
+                        None => false,
+                    },
+                    None => self.fracture.spare.remove(&b),
+                };
+                if taken {
                     spare_taken.push(b);
                 }
             }
-            // Adopt the pieces' new bodies; re-frame every changed body from the step
-            // after this one (this step's poses are from before the split).
+            // Adopt the pieces' new bodies; re-frame every changed body from `from_step`.
             for &b in &spare_taken {
                 let slot = &mut self.bodies[b as usize];
                 slot.alive = true;
@@ -1488,7 +2165,7 @@ mod imp {
                 slot.asleep = false;
             }
             for &b in &changed {
-                self.reframe_piece(k, b, step + 1, frames)?;
+                self.reframe_piece(k, b, from_step, frames)?;
             }
             // Splits: each parent's chunks before, grouped by where they are now.
             let t = self.fracture.slots[k].as_ref().expect("live slot");
@@ -1505,14 +2182,19 @@ mod imp {
                     continue;
                 }
                 let parent = self.piece_info(k, &members, p);
+                // A crushed chunk is no piece (`ChunkCrushed` reports it).
                 let children = groups
                     .iter()
                     .map(|&g| {
-                        let chunks: Vec<u32> = members
+                        members
                             .iter()
                             .copied()
                             .filter(|&c| chunk_body[c as usize] == g)
-                            .collect();
+                            .collect::<Vec<u32>>()
+                    })
+                    .filter(|chunks| !chunks.iter().all(|c| crushed_now.contains(c)))
+                    .map(|chunks| {
+                        let g = chunk_body[chunks[0] as usize];
                         self.piece_info(k, &chunks, g)
                     })
                     .collect();
@@ -1553,80 +2235,336 @@ mod imp {
                 .collect();
             bodies.sort_unstable();
             bodies.dedup();
+            // The touched pieces' chunks, in one sweep.
+            let mut chunks_of: Vec<Vec<u32>> = vec![Vec::new(); bodies.len()];
+            for (c, b) in t.chunk_body.iter().enumerate() {
+                if let Ok(i) = bodies.binary_search(b) {
+                    chunks_of[i].push(c as u32);
+                }
+            }
+            let lost = crate::support_loss::lost_support(
+                &bodies,
+                &chunks_of,
+                broken,
+                |b| {
+                    let [a, o, _, _] = bonds[b as usize];
+                    (t.chunk_body[a as usize], t.chunk_body[o as usize])
+                },
+                |c| t.tables.info[c as usize] & INFO_SUPPORT != 0,
+            );
             let mut over = Vec::new();
-            for body in bodies {
-                let chunks: Vec<u32> = (0..t.chunk_body.len() as u32)
-                    .filter(|&c| t.chunk_body[c as usize] == body)
-                    .collect();
-                let mut local = std::collections::HashMap::with_capacity(chunks.len());
-                for (i, &c) in chunks.iter().enumerate() {
-                    local.insert(c, i as u32);
+            for (i, chunks) in chunks_of.iter().enumerate() {
+                // A sudden loss of support: the dynamic factor on the load's increase; else
+                // the quasi-static flow.
+                let sudden = (lost[i] && sl.dynamic_factor != 1.0).then_some(sl.dynamic_factor);
+                let (broken, loads) = evaluate_piece(&t.tables, &t.intact, sl, chunks, sudden);
+                over.extend(broken);
+                for (bond, load) in loads {
+                    sl.load[bond as usize] = load;
                 }
-                let mut piece_bonds = Vec::new();
-                let mut table_index = Vec::new();
-                for &c in &chunks {
-                    for &b in &sl.bonds_of[c as usize] {
-                        let [a, o, _, _] = bonds[b as usize];
-                        // Each bond once (from its first chunk), intact and inside the piece.
-                        if a != c || !t.intact[b as usize] || sl.sent[b as usize] {
-                            continue;
-                        }
-                        if let (Some(&la), Some(&lo)) = (local.get(&a), local.get(&o)) {
-                            piece_bonds.push((la, lo, sl.compressive[b as usize]));
-                            table_index.push(b);
-                        }
-                    }
-                }
-                let mass: Vec<f32> = chunks
-                    .iter()
-                    .map(|&c| t.tables.chunks[c as usize][0][3])
-                    .collect();
-                let support: Vec<bool> = chunks
-                    .iter()
-                    .map(|&c| t.tables.info[c as usize] & INFO_SUPPORT != 0)
-                    .collect();
-                // Chunk centres in their structure's stress frame (a piece is in one structure).
-                let centre: Vec<[f32; 3]> = chunks
-                    .iter()
-                    .map(|&c| {
-                        let r = t.tables.chunks[c as usize][0];
-                        [r[0], r[1], r[2]]
-                    })
-                    .collect();
-                let piece = crate::support_loss::Piece {
-                    mass: &mass,
-                    support: &support,
-                    centre: &centre,
-                    bonds: &piece_bonds,
-                };
-                over.extend(
-                    crate::support_loss::failing(&piece, sl.gravity)
-                        .into_iter()
-                        .map(|i| table_index[i as usize]),
-                );
             }
             for &b in &over {
                 sl.sent[b as usize] = true;
             }
-            // In the shared tables' numbering.
-            let at: Vec<(u32, u32, u32)> = over
-                .iter()
-                .map(|&b| {
-                    let [a, o, _, _] = bonds[b as usize];
-                    (
-                        b + t.base.bond,
-                        t.chunk_body[a as usize],
-                        t.chunk_body[o as usize],
-                    )
-                })
-                .collect();
-            let sh = self.fracture.shared.as_ref().expect("shared fracture");
-            sh.fracture.break_bonds_at(&gpu, &at);
-            // The GPU reports only the bonds it breaks itself: these are reported with
-            // the next frame read.
+            sl.broke.extend_from_slice(&over);
+            match t.own.as_mut() {
+                Some(o) => {
+                    // The GPU marks each bond's body from its own chunk to body map: a step
+                    // still in flight may have split the piece since `chunk_body` was read.
+                    o.fracture.break_bonds_sparse(&over);
+                    // The flow's loads for the crush estimate from the next frame on.
+                    if o.fracture.crush_flow() {
+                        o.fracture
+                            .set_crush_flow(&gpu, &sl.load)
+                            .expect("a flow-crushing destructible's loads");
+                        let t = self.fracture.slots[k].as_ref().expect("live slot");
+                        let sl = t.support.as_ref().expect("support loss");
+                        let crushed = &self.destructibles[t.destructible as usize].crushed;
+                        let over = flow_overstressed(t, sl, crushed);
+                        let t = self.fracture.slots[k].as_mut().expect("live slot");
+                        t.support.as_mut().expect("support loss").overstressed = over;
+                    }
+                }
+                None => {
+                    // In the shared tables' numbering; the next frame's events report them.
+                    let at: Vec<u32> = over.iter().map(|&b| b + t.base.bond).collect();
+                    let sh = self.fracture.shared.as_mut().expect("shared fracture");
+                    sh.fracture.break_bonds_sparse(&at);
+                }
+            }
+        }
+
+        /// Whether a destructible's flow keeps a chunk's crush damage growing
+        /// (`SupportLoss::overstressed`): its steps must run with nothing awake.
+        pub(crate) fn fracture_flow_needs_step(&self) -> bool {
             self.fracture
-                .host_broken
-                .extend(over.iter().map(|&b| (k, b)));
+                .slots
+                .iter()
+                .flatten()
+                .any(|t| t.support.as_ref().is_some_and(|s| s.overstressed))
+        }
+
+        /// A step's crushes: each chunk's body (parked on the GPU) retired, its fragments
+        /// (made on the GPU) adopted as bodies, and the events. `frames` is the fracture's
+        /// frame record after the step (the crushed bodies' principal frames).
+        fn apply_crush(
+            &mut self,
+            k: usize,
+            _step: u64,
+            crushes: &[CrushEvent],
+            frames: &[[f32; 4]],
+        ) -> anyhow::Result<Vec<DestructionEvent>> {
+            if crushes.is_empty() {
+                return Ok(Vec::new());
+            }
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            let d = t.destructible as usize;
+            let id = DestructibleId::new(d as u32, self.destructibles[d].generation);
+            let mut out = Vec::with_capacity(crushes.len());
+            for e in crushes {
+                let t = self.fracture.slots[k].as_ref().expect("live slot");
+                let c = e.chunk as usize;
+                let b = t.chunk_body[c] as usize;
+                let (pool, fragments, material, shape_def) = {
+                    let cs = t.crush.as_ref().expect("a crushing destructible");
+                    (
+                        cs.pool.clone(),
+                        cs.fragments,
+                        cs.material,
+                        cs.shape_def.clone(),
+                    )
+                };
+                // Its body (alone after the split, parked out of the world on the GPU).
+                let solver = Transform::new(e.position, e.orientation);
+                let origin = self.bodies[b].frame().to_origin(solver);
+                let pose = Transform::new(e.position, origin.rotation);
+                self.fracture.crushed_origins.push((b as u32, origin));
+                let slot = &mut self.bodies[b];
+                slot.alive = false;
+                slot.generation = slot.generation.wrapping_add(1).max(1);
+                slot.body_type = BodyType::Static;
+                slot.mass = None;
+                slot.last_transform = None;
+                slot.last_solver = None;
+                // Its fragments: boxes about its centre of mass, origin = solver frame.
+                let mut ids = Vec::new();
+                // Each fragment's pose and velocity as `fr_crush_apply` wrote them (rubble's
+                // frame): the chunk's box (its rotation `g` and half extents in the
+                // structure frame) about its centre of mass, the body's `orientation` less
+                // its principal rotation `p` turning the structure frame into the world's.
+                let t = self.fracture.slots[k].as_ref().expect("live slot");
+                let fragment_poses = {
+                    let rec = frames
+                        .get(2 * b + 1)
+                        .ok_or_else(|| anyhow::anyhow!("fracture frame {} missing", 2 * b + 1))?;
+                    let p = glam::Quat::from_array(*rec).normalize();
+                    let geo =
+                        t.tables.geometry.get(c).ok_or_else(|| {
+                            anyhow::anyhow!("crush: chunk {c} has no box geometry")
+                        })?;
+                    let g = glam::Quat::from_array(geo[2]).normalize();
+                    let o = (glam::Quat::from_array(e.orientation) * p.conjugate() * g).normalize();
+                    let h = Vec3::new(geo[1][0], geo[1][1], geo[1][2]);
+                    let (mut dims, mut cell) = ([1u32; 3], h);
+                    let mut n = fragments;
+                    while n > 1 {
+                        let ax = if cell.x >= cell.y && cell.x >= cell.z {
+                            0
+                        } else if cell.y >= cell.z {
+                            1
+                        } else {
+                            2
+                        };
+                        dims[ax] *= 2;
+                        cell[ax] *= 0.5;
+                        n >>= 1;
+                    }
+                    let (b0, v, w) = (
+                        Vec3::from(e.position),
+                        Vec3::from(e.linear_velocity),
+                        Vec3::from(e.angular_velocity),
+                    );
+                    (0..fragments)
+                        .map(|i| {
+                            let idx = Vec3::new(
+                                (i % dims[0]) as f32,
+                                ((i / dims[0]) % dims[1]) as f32,
+                                (i / (dims[0] * dims[1])) as f32,
+                            );
+                            let x = b0 + o * (-h + cell * (2.0 * idx + Vec3::ONE));
+                            (
+                                Transform::new(x.to_array(), o.to_array()),
+                                (v + w.cross(x - b0)).to_array(),
+                                w.to_array(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                if let Some(first) = e.first_fragment {
+                    let mf = e.mass / fragments as f32;
+                    let h = Vec3::from(e.fragment_half);
+                    let moments = Vec3::new(
+                        h.y * h.y + h.z * h.z,
+                        h.x * h.x + h.z * h.z,
+                        h.x * h.x + h.y * h.y,
+                    ) * (mf / 3.0);
+                    let geometry = Geometry::Box {
+                        half: e.fragment_half,
+                        transform: Transform::IDENTITY,
+                    };
+                    for i in 0..fragments {
+                        let (fb, shape, collider) =
+                            *pool.get((first + i) as usize).ok_or_else(|| {
+                                anyhow::anyhow!("crush fragment {} outside the pool", first + i)
+                            })?;
+                        let slot = &mut self.bodies[fb as usize];
+                        slot.alive = true;
+                        slot.generation = slot.generation.wrapping_add(1).max(1);
+                        slot.body_type = BodyType::Dynamic;
+                        slot.mass = Some(MassData {
+                            mass: mf,
+                            center: [0.0; 3],
+                            rotational_inertia: glam::Mat3::from_diagonal(moments)
+                                .to_cols_array_2d(),
+                        });
+                        slot.principal = moments;
+                        slot.frames = vec![(0, SolverFrame::IDENTITY)];
+                        slot.last_transform = None;
+                        slot.last_solver = None;
+                        slot.last_asleep = false;
+                        slot.asleep = false;
+                        let (pose, v, w) = fragment_poses[i as usize];
+                        slot.origin = pose;
+                        slot.velocity = (v, w);
+                        // The GPU wrote the body (dynamic, awake): the host's mirror follows,
+                        // with no upload (the step plan reads which bodies move).
+                        let state = crate::body_state(slot);
+                        self.sim.mirror_bodies(fb, &[state]);
+                        self.shapes[shape as usize].geometry = geometry.clone();
+                        // The GPU rewrote the collider: the host's mirror follows.
+                        let mut col = self.collider(
+                            fb,
+                            SolverFrame::IDENTITY,
+                            &geometry,
+                            0.0,
+                            material,
+                            None,
+                        )?;
+                        shape_def.filter.apply(&mut col);
+                        col.material |= crate::contacts::event_bits(&shape_def);
+                        col.generation = self.sim.collider_record(collider).generation;
+                        self.sim.mirror_colliders(collider, &[col]);
+                        ids.push(BodyId::new(fb, self.bodies[fb as usize].generation));
+                    }
+                }
+                self.destructibles[d].crushed[c] = true;
+                self.destructibles[d].chunk_bodies[c] =
+                    BodyId::new(b as u32, self.bodies[b].generation);
+                out.push(DestructionEvent::ChunkCrushed {
+                    destructible: id,
+                    chunk: e.chunk,
+                    mass: e.mass,
+                    volume: e.volume,
+                    pose,
+                    linear_velocity: e.linear_velocity,
+                    angular_velocity: e.angular_velocity,
+                    peak_pressure: e.peak_pressure,
+                    peak_deviator: e.peak_deviator,
+                    cause: match e.cause {
+                        2 => crate::CrushCause::Impact,
+                        3 => crate::CrushCause::Blast,
+                        4 => crate::CrushCause::Load,
+                        _ => crate::CrushCause::Contact,
+                    },
+                    fragments: ids,
+                });
+            }
+            Ok(out)
+        }
+
+        /// The bonds support loss (`DestructibleDef::support_loss`) has broken so far, in the
+        /// order it broke them (bond indices into the asset's threshold tables, as
+        /// `BondsBroken` reports them). `BondsBroken` does not carry a cause; this tells a
+        /// host which of its breaks were the weight's. Empty without support loss.
+        pub fn destructible_support_loss_breaks(
+            &self,
+            id: DestructibleId,
+        ) -> anyhow::Result<&[u32]> {
+            let i = self.live_destructible(id)?;
+            let k = self.destructibles[i].threshold.ok_or_else(|| {
+                anyhow::anyhow!("destructible {} is not a threshold one", id.index())
+            })? as usize;
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            Ok(t.support.as_ref().map_or(&[][..], |s| &s.broke[..]))
+        }
+
+        /// A threshold destructible's chunks' crush state (blocking: for tools and
+        /// tests): per chunk (damage, peak pressure, peak deviator (Pa), crushed). Empty
+        /// without `DestructibleDef::crush`.
+        pub fn destructible_crush_state(
+            &self,
+            id: DestructibleId,
+        ) -> anyhow::Result<Vec<(f32, f32, f32, bool)>> {
+            let i = self.live_destructible(id)?;
+            let k = self.destructibles[i].threshold.ok_or_else(|| {
+                anyhow::anyhow!("destructible {} is not a threshold one", id.index())
+            })? as usize;
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            let gpu = self
+                .fracture
+                .gpu
+                .as_ref()
+                .expect("a threshold destructible's GPU");
+            let Some(o) = &t.own else {
+                // Crushing has its own fracture: a shared one's destructible has none.
+                return Ok(Vec::new());
+            };
+            Ok(o.fracture
+                .crush_state(gpu)
+                .iter()
+                .map(|s| (s[0], s[1], s[2], s[3].to_bits() & 1 != 0))
+                .collect())
+        }
+
+        /// A threshold destructible's fracture counters on the GPU (blocking: for tools and
+        /// tests): bonds broken and new piece bodies made, in all, after every step
+        /// submitted. Every broken bond is counted once, whatever broke it (contact loads,
+        /// a strike, a blast, support loss, a crush), as `BondsBroken` reports it once.
+        pub fn destructible_fracture_counts(
+            &self,
+            id: DestructibleId,
+        ) -> anyhow::Result<(u32, u32)> {
+            let i = self.live_destructible(id)?;
+            let k = self.destructibles[i].threshold.ok_or_else(|| {
+                anyhow::anyhow!("destructible {} is not a threshold one", id.index())
+            })? as usize;
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            let gpu = self
+                .fracture
+                .gpu
+                .as_ref()
+                .expect("a threshold destructible's GPU");
+            match &t.own {
+                Some(o) => {
+                    let c = o.fracture.counters(gpu);
+                    Ok((c.broken, c.pieces))
+                }
+                None => {
+                    // Its own ranges of the shared tables: bonds no longer intact, and
+                    // bodies its chunks are on beyond the clusters it was placed with.
+                    let sh = self.fracture.shared.as_ref().expect("shared fracture");
+                    let l = sh.fracture.layout;
+                    let (n, e) = (t.chunk_body.len(), t.intact.len());
+                    let alive: Vec<u32> =
+                        gpu.read_range(&sh.fracture.work, (l.w_alive() + t.base.bond) as usize, e);
+                    let mut bodies: Vec<u32> =
+                        gpu.read_range(&sh.fracture.work, (l.w_body() + t.base.chunk) as usize, n);
+                    bodies.sort_unstable();
+                    bodies.dedup();
+                    let broken = alive.iter().filter(|&&a| a == 0).count() as u32;
+                    Ok((broken, (bodies.len() as u32).saturating_sub(t.clusters)))
+                }
+            }
         }
 
         /// A changed body's mass, solver frame (from the GPU's frame record), type and
@@ -1636,7 +2574,7 @@ mod imp {
             k: usize,
             b: u32,
             from_step: u64,
-            frames: &std::collections::HashMap<u32, Frame>,
+            frames: Frames<'_>,
         ) -> anyhow::Result<()> {
             let t = self.fracture.slots[k].as_ref().expect("live slot");
             let chunks: Vec<usize> = (0..t.chunk_body.len())
@@ -1651,12 +2589,8 @@ mod imp {
                 return Ok(());
             }
             let [c0, c1] = frames
-                .get(&b)
-                .copied()
+                .get(b)
                 .ok_or_else(|| anyhow::anyhow!("fracture frame of body {b} missing"))?;
-            let structure = c0[3].to_bits() as usize;
-            let (sq, st) = t.structures[structure];
-            let com = DVec3::new(c0[0] as f64, c0[1] as f64, c0[2] as f64);
             let principal =
                 DQuat::from_xyzw(c1[0] as f64, c1[1] as f64, c1[2] as f64, c1[3] as f64)
                     .normalize();
@@ -1688,10 +2622,7 @@ mod imp {
             let pm = DMat3::from_quat(principal);
             let local = pm.transpose() * inertia * pm;
             let moments = DVec3::new(local.x_axis.x, local.y_axis.y, local.z_axis.z);
-            let frame = SolverFrame {
-                center: (st + sq * com).as_vec3(),
-                axes: (sq * principal).normalize().as_quat(),
-            };
+            let frame = piece_frame(t, c0, c1);
             let body_type = if anchored || mass <= 0.0 {
                 BodyType::Static
             } else {
@@ -1704,10 +2635,76 @@ mod imp {
             slot.frames.retain(|f| f.0 < from_step);
             slot.frames.push((from_step, frame));
             slot.shapes = shapes.clone();
+            let state = crate::body_state(slot);
             for s in shapes {
                 self.shapes[s as usize].body = b;
             }
+            // The split was the GPU's (`fr_commit`, `fr_reparent`): the host's mirror of the
+            // body and of its chunks' colliders follows it, with no upload. The step plan
+            // reads that mirror: the hierarchical grid sizes its levels from the colliders of
+            // moving bodies (`hierarchical_grid`), and a moving collider larger than the
+            // levels a stale mirror gives goes to the oversized-static list, which never
+            // queries, so it passed through the ground and every static piece.
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            let com = Vec3::new(c0[0], c0[1], c0[2]);
+            let to_body = glam::Quat::from_xyzw(c1[0], c1[1], c1[2], c1[3])
+                .normalize()
+                .conjugate();
+            let mut cols = Vec::new();
+            for &c in &chunks {
+                let r = t.tables.chunks[c][2];
+                let (first, count) = (r[2].to_bits() as usize, r[3].to_bits() as usize);
+                for p in &t.tables.parts[first..first + count] {
+                    let id = p[0][3].to_bits();
+                    let mut col = self.sim.collider(id);
+                    col.body = b;
+                    col.local_pos =
+                        (to_body * (Vec3::new(p[0][0], p[0][1], p[0][2]) - com)).to_array();
+                    col.local_rot = (to_body * glam::Quat::from_array(p[1]))
+                        .normalize()
+                        .to_array();
+                    cols.push((id, col));
+                }
+            }
+            self.sim.mirror_bodies(b, &[state]);
+            for (id, col) in cols {
+                self.sim.mirror_colliders(id, &[col]);
+            }
             Ok(())
+        }
+
+        /// A piece body's solver frame as the GPU holds it now, after every step submitted
+        /// (polled or not), for `read_body_state`: a step still in flight may have split the
+        /// body and re-framed it, and the host's frame changes only when its readback is
+        /// polled. `None` for a body that is no threshold piece. Found by slot (every slot
+        /// a destructible's pieces may take), not by the host's last read of the chunks'
+        /// bodies, which a split in flight may have changed; the crush fragments' pool,
+        /// whose frames the fracture does not keep, excluded.
+        pub(crate) fn threshold_frame_now(&self, body: u32) -> Option<SolverFrame> {
+            let gpu = self.fracture.gpu.as_ref()?;
+            let t = self
+                .fracture
+                .slots
+                .iter()
+                .flatten()
+                .find(|t| match &t.own {
+                    Some(o) => {
+                        o.owned.contains(&body)
+                            && !t
+                                .crush
+                                .as_ref()
+                                .is_some_and(|c| c.pool.iter().any(|p| p.0 == body))
+                    }
+                    // In the shared fracture a spare serves whichever destructible splits
+                    // first: a piece the host has adopted (its chunks are on it).
+                    None => t.chunk_body.contains(&body),
+                })?;
+            let frames = match &t.own {
+                Some(o) => &o.fracture.frames,
+                None => &self.fracture.shared.as_ref()?.fracture.frames,
+            };
+            let r: Vec<[f32; 4]> = gpu.read_range(frames, 2 * body as usize, 2);
+            Some(piece_frame(t, r[0], r[1]))
         }
 
         fn piece_info(&self, k: usize, chunks: &[u32], body: u32) -> ActorInfo {
@@ -1758,9 +2755,35 @@ mod imp {
         /// that no piece took (a split takes the lowest spare, whoever reserved it).
         pub(crate) fn destroy_threshold(&mut self, k: usize) -> anyhow::Result<()> {
             let t = self.fracture.slots[k].take().expect("live slot");
+            if let Some(o) = t.own {
+                // Its own fracture goes with it: every slot it owns is freed.
+                for b in o.owned {
+                    let slot = &self.bodies[b as usize];
+                    if slot.alive {
+                        self.bodies[b as usize].owner = Owner::User;
+                        let id = BodyId::new(b, self.bodies[b as usize].generation);
+                        self.destroy_body(id)?;
+                    } else {
+                        // A reserved slot no piece took, a crushed chunk's parked body or
+                        // an unused fragment: its shapes retired (a crushed chunk's, a
+                        // fragment's box), then the slot freed.
+                        for s in std::mem::take(&mut self.bodies[b as usize].shapes) {
+                            self.release_shape(s);
+                        }
+                        let slot = &mut self.bodies[b as usize];
+                        slot.owner = Owner::User;
+                        slot.generation = slot.generation.wrapping_add(1).max(1);
+                        slot.removed_at = Some(self.step);
+                        self.free_bodies.push(b);
+                    }
+                }
+                if !self.fracture.active() {
+                    self.fracture.fixed_plan = None;
+                }
+                return Ok(());
+            }
             self.fracture.chunk_ranges.retain(|r| r.2 != k);
             self.fracture.bond_ranges.retain(|r| r.2 != k);
-            self.fracture.host_broken.retain(|h| h.0 != k);
             let gpu = self
                 .fracture
                 .gpu
@@ -1820,6 +2843,18 @@ mod imp {
                     self.bodies[b as usize].owner = Owner::User;
                     let id = BodyId::new(b, self.bodies[b as usize].generation);
                     self.destroy_body(id)?;
+                } else {
+                    // A reserved slot no piece took, a crushed chunk's parked body or an
+                    // unused fragment: its shapes retired (a crushed chunk's, a fragment's
+                    // box), then the slot freed.
+                    for s in std::mem::take(&mut self.bodies[b as usize].shapes) {
+                        self.release_shape(s);
+                    }
+                    let slot = &mut self.bodies[b as usize];
+                    slot.owner = Owner::User;
+                    slot.generation = slot.generation.wrapping_add(1).max(1);
+                    slot.removed_at = Some(self.step);
+                    self.free_bodies.push(b);
                 }
             }
             for b in returned {
@@ -1855,6 +2890,64 @@ mod imp {
         out
     }
 
+    /// `Crush::materials` onto the stress scene's chunk materials: a name matches its
+    /// material, and a pack import's per-node copies of it (`brick#mass12`, `brick@crush#0`).
+    fn apply_crush_materials(scene: &mut Scene, c: &crate::Crush) -> anyhow::Result<()> {
+        for (name, m) in &c.materials {
+            let params = stress_ref::crush::CrushParams {
+                cap_pressure: m.cap_pressure,
+                cohesion: m.cohesion,
+                friction_slope: m.friction_slope,
+                crush_energy: m.crush_energy,
+                crush_viscosity: m.crush_viscosity,
+            };
+            params
+                .validate(name)
+                .map_err(|e| anyhow::anyhow!("Crush::materials: {e}"))?;
+            let mut found = false;
+            for (key, mat) in scene.materials.iter_mut() {
+                let base = key.split(['#', '@']).next().unwrap_or(key);
+                if key == name || base == name {
+                    mat.crush = Some(params);
+                    found = true;
+                }
+            }
+            anyhow::ensure!(
+                found,
+                "Crush::materials: the stress scene has no material '{name}' (its materials: {:?})",
+                scene.materials.keys().collect::<Vec<_>>()
+            );
+        }
+        Ok(())
+    }
+
+    /// A body's solver frame from the GPU's frame record (`frames`: its centre of mass
+    /// and principal rotation in its structure's stress frame, the structure as bits).
+    fn piece_frame(t: &ThresholdSlot, c0: [f32; 4], c1: [f32; 4]) -> SolverFrame {
+        let (sq, st) = t.structures[c0[3].to_bits() as usize];
+        let com = DVec3::new(c0[0] as f64, c0[1] as f64, c0[2] as f64);
+        let principal =
+            DQuat::from_xyzw(c1[0] as f64, c1[1] as f64, c1[2] as f64, c1[3] as f64).normalize();
+        SolverFrame {
+            center: (st + sq * com).as_vec3(),
+            axes: (sq * principal).normalize().as_quat(),
+        }
+    }
+
+    fn read_slot(r: FractureRead) -> u32 {
+        match r {
+            FractureRead::SlotCounters(k)
+            | FractureRead::ChunkBodies(k)
+            | FractureRead::Intact(k)
+            | FractureRead::SlotFrames(k)
+            | FractureRead::Crush(k) => k,
+            FractureRead::Counters
+            | FractureRead::Broken
+            | FractureRead::Moved
+            | FractureRead::Frames => u32::MAX,
+        }
+    }
+
     fn cooked_hulls(parts: &[Vec<stress_rubble::Part>]) -> bool {
         parts
             .iter()
@@ -1885,5 +2978,170 @@ mod imp {
             .enumerate()
             .map(|(c, b)| *first.entry(*b).or_insert(c as u32))
             .collect()
+    }
+}
+
+/// The host's mirror of a crush's fragment bodies (`apply_crush`): dynamic, where the GPU
+/// put them. Reads the mirror, which no public call shows.
+#[cfg(all(test, feature = "stress"))]
+mod crush_mirror_tests {
+    use crate::*;
+
+    /// Two crush-wall blocks bonded front to back (`tests/crush.rs` `two_blocks_json`).
+    fn two_blocks() -> DestructibleAssetDesc {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../engine-webgpu/fracture/packs/crush-wall.json"
+        );
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let sc = &mut json["scenario"];
+        let nodes = sc["nodes"].as_array().unwrap().clone();
+        let at = |x: f64| {
+            nodes
+                .iter()
+                .position(|n| {
+                    let c = &n["centroid"];
+                    let near = |k: &str, v: f64| (c[k].as_f64().unwrap() - v).abs() < 1e-6;
+                    near("x", x) && near("y", 1.8) && near("z", 0.2)
+                })
+                .unwrap()
+        };
+        let keep = [at(0.2), at(-0.2)];
+        for key in ["nodes", "nodeTypes", "nodeSizes", "nodeColliders"] {
+            if let Some(a) = sc[key].as_array() {
+                let a: Vec<serde_json::Value> = keep.iter().map(|&i| a[i].clone()).collect();
+                sc[key] = a.into();
+            }
+        }
+        let bonds: Vec<serde_json::Value> = sc["bonds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| {
+                let a = keep
+                    .iter()
+                    .position(|&k| k as u64 == b["node0"].as_u64().unwrap())?;
+                let c = keep
+                    .iter()
+                    .position(|&k| k as u64 == b["node1"].as_u64().unwrap())?;
+                let mut b = b.clone();
+                b["node0"] = a.into();
+                b["node1"] = c.into();
+                Some(b)
+            })
+            .collect();
+        sc["bonds"] = bonds.into();
+        DestructibleAssetDesc::from_pack(&serde_json::to_vec(&json).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn fragments_are_mirrored_dynamic_where_the_gpu_put_them() {
+        let asset = two_blocks();
+        let stress = asset.stress.as_ref().unwrap();
+        let solver = asset.solver_for(StrengthModel::Threshold).unwrap();
+        let scene = stress.threshold_scene(1.0, solver.dt).unwrap();
+        let mut capacity = stress_rubble::capacity_for(&scene);
+        capacity.max_bodies = capacity.max_bodies.max(64);
+        capacity.max_colliders = capacity.max_colliders.max(capacity.max_bodies + 64);
+        capacity.max_contacts =
+            stress_rubble::threshold::contact_capacity(2, capacity.max_contacts, 1 << 30);
+        capacity.max_candidates = capacity.max_candidates.max(capacity.max_contacts);
+        let def = WorldDef {
+            capacity,
+            gravity: [0.0; 3],
+            solver: engine_schema::AvbdParams {
+                gravity_y: 0.0,
+                ..solver
+            },
+            enable_sleep: false,
+            contacts: ContactStorage::Canonical,
+            ..WorldDef::default()
+        };
+        let mut w = World::new(GpuContext::Default, &def).unwrap();
+        let offset = stress.placement().map(|x| -x as f32);
+        let a = w.create_destructible_asset(&asset).unwrap();
+        w.create_destructible(&DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
+            asleep: false,
+            strength_scale: 1e6,
+            crush: Some(Crush {
+                mass: CrushMass::Conserve {
+                    fragments: 8,
+                    budget: 8,
+                },
+                ..Crush::default()
+            }),
+            ..DestructibleDef::new(a)
+        })
+        .unwrap();
+        // A heavy fast ball at the front block (chunk 0), from +x.
+        let p0 = glam::Vec3::from(asset.chunks[0].pose.position) + glam::Vec3::from(offset);
+        let (r, m) = (0.45f32, 4800.0f32);
+        let ball = w
+            .create_body(&BodyDef {
+                linear_velocity: [-100.0, 0.0, 0.0],
+                ..BodyDef::dynamic((p0 + glam::Vec3::new(3.8, 0.0, 0.0)).to_array())
+            })
+            .unwrap();
+        let shape = ShapeDef {
+            update_body_mass: false,
+            ..ShapeDef::default()
+        };
+        w.create_sphere_shape(ball, &shape, [0.0; 3], r).unwrap();
+        let i = 0.4 * m * r * r;
+        w.body_set_mass_data(
+            ball,
+            MassData {
+                mass: m,
+                center: [0.0; 3],
+                rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]],
+            },
+        )
+        .unwrap();
+        w.body_set_projectile(ball, Some(Projectile::default()))
+            .unwrap();
+        let mut checked = 0;
+        for _ in 0..20 {
+            let f = w.step_sync().unwrap();
+            for e in &f.destruction_events {
+                let DestructionEvent::ChunkCrushed { fragments, .. } = e else {
+                    continue;
+                };
+                assert_eq!(fragments.len(), 8);
+                for b in fragments {
+                    let mirror = engine_softbody::SoftBackend::host_body(&w.sim, b.index());
+                    let gpu = w.sim.read_body(b.index());
+                    assert!(mirror.inv_mass > 0.0, "fragment {b:?} mirrored static");
+                    assert!((mirror.inv_mass - gpu.inv_mass).abs() <= 1e-4 * gpu.inv_mass);
+                    let d = glam::Vec3::from(mirror.position) - glam::Vec3::from(gpu.position);
+                    // No step since the crush: the GPU's record is `fr_crush_apply`'s.
+                    assert!(
+                        d.length() < 1e-4,
+                        "fragment {b:?}: mirror {:?}, GPU {:?}",
+                        mirror.position,
+                        gpu.position
+                    );
+                    let dv = glam::Vec3::from(mirror.linear_vel) - glam::Vec3::from(gpu.linear_vel);
+                    assert!(dv.length() < 1e-3, "fragment {b:?}: velocity");
+                    // A fragment's solver frame is the identity (`threshold_frame_now`
+                    // keeps the pool out of the fracture's frame records).
+                    let read = w.read_body_state(*b).unwrap().transform;
+                    assert_eq!(read.position, gpu.position, "fragment {b:?}: read pose");
+                    let q = glam::Quat::from_array(mirror.orientation);
+                    let qg = glam::Quat::from_array(gpu.orientation);
+                    assert!(q.dot(qg).abs() > 0.999, "fragment {b:?}: {q:?} vs {qg:?}");
+                    checked += 1;
+                }
+            }
+            if checked > 0 {
+                break;
+            }
+        }
+        assert!(
+            checked > 0,
+            "the strike crushes the front block into fragments"
+        );
     }
 }

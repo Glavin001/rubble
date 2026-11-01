@@ -1325,35 +1325,250 @@ Each strike shows a red ring on the ground while it comes in. Runs are seeded
 A contact within RIM + 12 m that you survive is a near miss. The best time is
 kept in the browser.
 
-**Endless.** The engine's own settling needs nothing in flight, and with
-strikes every second or two the ejecta always are. So the page bakes the areas
-it leaves behind itself: a timed close (`World::terrain_close_area`, the same
-forced close that lands parcels still in flight) that freezes any motion left.
-Each part is an explicit `?` setting, shown in the status line:
-- **When an area closes:**
-  - once it is `closeafter` s old (6) and its fastest sand is under
-    `closespeed` m/s (1.5);
-  - or at `maxage` s (12) whatever it does.
-  - An area grown over others keeps the oldest one's age, since growth can
-    move it to another slot. That bug once let the car's area grow strike by
-    strike to 490k particles and never close.
-- **The director stays out of old areas:** it drops nothing into an area
-  already older than `closeafter`.
-- **Lulls:** baked slots return to the pool only once every area has baked
-  ("Slot reuse"). Past `pool` (0.7) of the particle or parcel pool the
-  director pauses, and areas close sooner, until the last one bakes and the
-  pool starts empty.
-- **Limits checked before a strike is placed**, refused with a message rather
-  than an engine error:
-  - the area slots (`max_regions` 12, two kept for yours);
-  - the pool;
-  - the wheel patch: a strike whose growth would make a window wider than
-    `PN` − 8 samples is not placed, since a larger one fails by name ("surface
-    patch samples").
+**Endless.** The engine keeps it going ("Endless areas", below): the page
+runs with `settle_rule: "local"`, so an area settles on its own sand while the
+car drives over it and the barrage's ejecta fly elsewhere, and the pool takes
+back a baked area's slots while others are open. The page closes nothing and
+never pauses the director. (Until 2026-10-30 it did: timed closes at
+`closeafter`/`maxage` and lulls until every area had baked. `?rule=strict`
+keeps the strict rule, without them, to compare.)
 
-  A strike that can no longer open by contact burns up.
+A crater's sand creeps for some 10–15 s before it is under the settle speed
+(measured on the preview: an area 0.46 m/s 3 s after its strike, under
+0.16 m/s and baked 13 s after). A strike into an open area grows it and starts
+it over, and an area's box is about 144 m across, so a director that keeps
+striking near the car feeds one area that never settles (one grew to 508k
+particles in 25 s). So the director keeps its own strikes out of an area older
+than `settleafter` s (8); an area grown over others keeps the oldest one's
+age. Yours go anywhere.
+
+**Limits checked before a strike is placed**, refused with a message rather
+than an engine error:
+- the area slots (`max_regions` 12, two kept for yours);
+- the pool: its held slots (`live` + `airborne`, below) and its parcels;
+- the wheel patch: a strike whose growth would make a window wider than
+  `PN` − 8 samples is not placed, since a larger one fails by name ("surface
+  patch samples").
+
+A strike that can no longer open by contact burns up.
 
 The ground is a 1.2 km basin (`?half=600`) of low dunes, rimmed by hills.
+
+### Endless areas (2026-10-30)
+
+Two things kept a run of steady strikes from going on by itself. Both are
+engine changes now. Neither moves a live particle or changes a result where
+it does not apply.
+
+**1. Settling while you drive over it: `TerrainDef::settle_rule`.** An area
+bakes once its own sand has stayed under `settle_speed` for `settle_frames`
+frames, with no hold on. What else keeps it open is the rule:
+
+| | `Strict` (the default) | `Local` |
+|---|---|---|
+| Parcels in flight | any, anywhere in the domain | those whose ballistic path can still reach the area's box |
+| Bodies | any dynamic body in the box that moves | those whose contacts hold the area's material |
+
+- **Parcels (`MPM_C_AREA_AIR + slot`).** For each parcel in flight after a
+  substep (`mpmParcelReach`, in `mpm_parcels` and where G2P throws one), every
+  open area whose box, padded by a block, its path crosses before it falls
+  below the box's floor counts it. The path is the exact ballistic one, with no
+  drag, as the parcel flies. A parcel that lands sooner on the heightfield is
+  still counted, which only keeps the area open longer. So under `Local` a
+  parcel that cannot reach an area cannot change it, and the area bakes on
+  what it holds.
+- **Bodies (`MPM_C_AREA_TOUCH + slot`).** `mpm_couple_gather` already sums
+  each body's contact nodes. A node with mass now marks its area, and the
+  body's surface speed (linear plus spin over its reach, as the strict word)
+  goes to each area it touched. The buggy's chassis rides above the sand on
+  its wheels: under `Strict` it holds every area it is over; under `Local`
+  only the sand under it moving does (the wheel loads move it, and that shows
+  in the area's own speed).
+- **A body falling onto quiet sand** touches nothing until it lands, so
+  `Local` could bake the area just before. That is the strike look-ahead's job
+  (`World::terrain_watch_shape`): a predicted strike past its thresholds holds
+  the area until it lands, and one under them meets rigid ground, as it would
+  anywhere else.
+- **Hosts:** `TerrainDef::settle_rule`; in the browser `settle_rule: "local"`;
+  the C ABI `RbTerrainDef::settle_local`. The report keeps both views:
+  `area_body_speed` and `area_touch_speed`, `airborne` and `area_airborne`
+  (`TerrainStepReport::settle_view`).
+
+**2. Slots back while other areas are open (pool reuse).** A baked area's
+particles, and a landed parcel's source slot, stay in the pool as dead slots:
+P2G sums particles in slot order, so the pool never moves a live one. Before,
+those slots came back only when the last area baked. Two GPU passes now take
+them back sooner (`slang/kernels/terrain_mpm.slang`, "pool reuse"):
+
+- **Trim, at every bake that leaves areas open** (`TerrainPlan::pool_trim`):
+  - `mpm_pool_reserve` marks the slot each parcel in flight will come back to;
+  - `mpm_pool_top` finds the last slot still held (live or marked);
+  - `mpm_pool_trim` ends the pool there.
+
+  Live particles keep their slots and their order, so the open areas step
+  exactly as before. The bake's dithers count slots from the area's first, so
+  they are unchanged too.
+- **Packing the parcels, at the same bakes:** `mpm_parcels_pack` (one
+  workgroup, a scan in slot order) copies the parcels still in flight to a
+  staging half of the parcel buffer, and `mpm_parcels_unpack` copies them back
+  to the front. Nothing reads a parcel's slot: landing, deposits (seeded by the
+  particle it left) and the slot it returns to go by its own record. So packing
+  changes no result. `max_parcels` now bounds the parcels at once between such
+  bakes, not over the domain's life. The parcel binding doubled for the
+  staging copy (96 B per parcel).
+- **Free slots, at an activation past the pool's end** (`TerrainPlan::pool_holes`,
+  only when the append would pass `max_particles`):
+  - `mpm_activate_scan` sees it will not fit and hands its count to the pool
+    passes instead of failing;
+  - `mpm_pool_holes_count`, `_scan` and `_list` list the free slots in slot
+    order, in the sort's scratch (between frames);
+  - `mpm_pool_finish` takes them first and appends the rest. It fails by name
+    (`max_particles`) only if the free slots plus the room left are too few.
+
+  An activation that fits runs as before. One that reuses slots puts its
+  particles among others: its P2G order is its own particles' order (slot
+  order of the list, then the tail), but the bake's dithers count from other
+  slots. Its crater differs from the same impact alone only in that rounding.
+- **`live` (`MPM_C_LIVE`):** the live particles. Activations add their count;
+  the bake, G2P's throws and returning parcels keep it. The pool's held slots
+  are `live` + `airborne`, so a host can tell whether a strike fits.
+  `particles` is now the pool's extent.
+
+**Found on the way:** a parcel coming back over an open area landed only at the
+heightfield. An open area lowers that to its bed, so the parcel fell through the
+material still there and came back as a particle at the bed, under the sand.
+Ejecta falling back into a crater were buried at its floor. Now a parcel comes
+back as a particle as soon as it enters an open area's box (one cell in), and
+the MPM lands it on the material.
+
+**Validation** (`engine-webgpu` tests, on Metal):
+
+| Test | Result |
+|---|---|
+| `terrain_multi` `parcels_count_only_for_the_areas_they_can_reach` | Ejecta thrown from one area: every one of them in that area's word, 0 in the far one's, frame by frame, while they fly and land; ledger exact. |
+| `a_bake_with_areas_open_trims_the_pools_dead_tail` | The second of two areas bakes: the pool ends at the first's last live slot (60,900 of 121,800 slots back), bit-identical particles; ledger exact. |
+| `a_bake_mid_flight_keeps_the_parcels_slots_and_packs_them` | One area bakes with 27,138 parcels aloft: the same parcels (bits) fly on, packed to the front, each with the slot it left inside the trimmed pool; ledger exact. |
+| `an_activation_past_the_pools_end_takes_the_free_slots` | A third area (70,644 particles) in a pool of 152,250 holding 121,800 slots, half of them freed by a bake: it fits, the pool grows to 131,544; ledger exact. Its crater against the same impact alone: cavity 6.7215 → 6.7267 × 10⁻⁴ m³ (+0.08%), deepest point 0.3 mm deeper, samples within 1.9 mm (the dithers' rounding). |
+| `ejecta_falling_back_into_an_open_area_land_on_its_sand_not_its_bed` | The crater's middle thrown straight up: the 3,572 that flew come back no lower than 0.016 m, on sand topping out at 0.16 m (bed −0.19 m). With the old landing they came back at −0.193 m, the bed. |
+| `terrain_couple` `a_falling_box_touches_the_sand_only_when_it_lands` | A box falling 0.4 m through an area's air counts as moving (strict word) but not as touching (local word) until it reaches the sand. |
+
+**On the preview** (`showcase.html?scene=play`, seed 11, a scripted driver on
+the throttle weaving every 3 s; WebGPU, Chrome on an M-series Mac):
+- the car's chassis never touched the sand (`touch_speed` 0 throughout), so it
+  held no area open;
+- areas settled and baked by themselves, 6–13 s after their last strike; the
+  pool's live particles fell with each bake (160,967 → 96,031 → 0);
+- terrain GPU time per frame 0.4–1.35 ms mean over 3 s spans, 15 ms at worst
+  (strike frames).
+
+**Not fixed, found on the way:**
+- **The live-to-baked jump** (`surfaceSwitchError`, logged per bake) was
+  rms 4.5 m, worst 14.9 m, on one of three bakes on the preview, and rms
+  5.4 m, worst 18.75 m, on one of four of main's timed closes with the same
+  seed and driver. So it is not from this change. Most bakes read exactly 0
+  (no samples measured), so the measurement itself may be reading the
+  surface after its view has closed; it needs its own look before it says
+  whether bodies see a step.
+- In `terrain_multi`'s scene, material thrown out of an area by hand (most of
+  its sand at 4 m/s) leaves a torn remnant. Stepped on with that area open, a
+  few of the remnant's particles outrun the CFL bound about 13 frames later,
+  on main as well. The existing tests close the area mid-flight, and the new
+  one does too.
+- `terrain_crater`'s π-scaling validation (ignored, long) fails its cavity
+  check, 2.85× the transient volume against a 0.5–2× band, with identical
+  numbers on main.
+
+### Live surface in `World` and the C ABI (2026-10-30)
+
+A native host (the C ABI, Unreal) used to see the ground jump from flat to the
+baked crater, with nothing in between and no ejecta. A car entering an open
+area fell to the lowered bed. The live surface, the debris and the wheel
+patches were run only by the web page's JavaScript (`terrain-host.mjs`). `World`
+now runs them from the same Rust plan (`engine_terrain::surface::SurfacePlan`)
+that the browser's `TerrainStep` uses.
+
+**`TerrainDef::surface`** (off by default; `TerrainSurfaceDef`: `cells`,
+`ejecta_fall`, `patch_samples` 128, `max_debris` 16384). With it, `World`:
+- runs the surface pass in its step's encoder, after the terrain substeps and
+  before the rigid step (`WgpuSim::terrain_encode_surface`). The patches carry
+  this frame's sand into the step that follows: unlike the bare-sim tests,
+  there's no frame of lag;
+- makes one patch per `max_regions` slot when the first area opens, at the
+  ground's sample spacing (a static body and heightfield shape, marked
+  `Owner::TerrainPatch`):
+  - the GPU writes their samples and poses, and `World` never rewrites them
+    (arena syncs upload only dirty records, and an arena grows by copying);
+  - a host edit of a patch fails by name, and destroying a patch body is refused;
+  - each surface pass bumps their generation, as the JS host does;
+- reports a contact or ray hit on a patch as the ground shape it stands in for
+  (the patch collider maps to the ground's `ShapeId`), so a host sees one
+  ground;
+- sinks the patches when the last area bakes (`SurfacePlan::retire`).
+
+**Debris gather** (`SurfacePlan::with_debris`; shared, so the browser can use
+it too). The debris list holds particle indices, and only the GPU knows the
+parcels' count. So two kernels write compact records, each a world position,
+volume, velocity and kind:
+- `terrain_surface_gather`, per listed particle;
+- `terrain_surface_gather_parcels`, per parcel in flight.
+
+A frame with more than `max_debris` fails naming "surface debris"; nothing is
+dropped.
+
+**Frames.**
+- `Frame` and `CoalescedFrame` carry:
+  - `terrain_surface`: each open area's slot, ground shape, window and
+    `ni × nj` heights in the field's local y;
+  - `terrain_debris`;
+  - `terrain_bakes`: an event per area that baked;
+  - `CoalescedFrame::terrain`: the counters, which `coalesce` used to drop.
+- One readback per step covers the open windows' heights (only the samples in
+  use; `SurfacePlan::readback` gives the layout) and the gather.
+- A bake's event comes with the frame whose readback refreshed the host's copy
+  of the field, so `shape_geometry` / `rbHeightField_GetHeights` already hold
+  the bake.
+
+**C ABI.**
+- `RbFrame` gains:
+  - `has_terrain` with `RbTerrainReport`;
+  - `terrain_surfaces` (`RbTerrainSurface`: shape, slot, the window as host
+    samples `a0, b0, count_a, count_b`, heights A fastest);
+  - `terrain_debris` (`RbTerrainDebris`);
+  - `terrain_bakes` (`RbTerrainBake`).
+- In Unreal mode, windows and heights convert like heightfields: window
+  [i0, j0, ni, nj] is host A [nz − j0 − nj, nz − j0) and B [i0, i0 + ni);
+  heights, positions, velocities and volumes are in cm.
+- New controls:
+  - `rbTerrain_CloseArea(slot)`;
+  - `rbTerrain_GetAreas` (box, cell, window, age);
+  - `rbTerrain_PredictImpact` and `rbTerrain_PredictExplosion`, which predict
+    without striking (`World::terrain_predict_*`).
+- `rbDefaultTerrainDef(coordinates)` gives the defaults in host units, like
+  `rbDefaultCharacterDef`.
+- `RbTerrainDef` gains `max_wheel_loads`, `max_columns`, `profile` (0 as
+  given, 1 the game preset) and the surface settings.
+- The live ground height at a point is the surface's sample there; there is no
+  separate call.
+
+**Validation:**
+
+| Test | Result |
+|---|---|
+| `engine-world` `terrain_surface` `frames_carry_the_live_surface_until_it_bakes_and_the_patch_follows_it` | The patch matches the newest frame's surface exactly (0 m). The last live surface is within 1.4 mm of the bake (the cell is 18.4 mm); up to 268 pieces of debris while it digs, none in the last frame. After the bake: patches at −10⁴ m, frames carry no surface, and a patch edit is refused. |
+| `a_frame_with_more_debris_than_the_limit_fails_by_name` | 183 pieces against 8 allowed: the poll fails naming "surface debris". |
+| `a_car_crosses_an_open_area_on_its_patch_and_leaves_a_rut` | A sedan at 0.3 throttle crosses a 4 × 6 m area: four wheels on the sand at once; lowest contact −7 mm (the bed is −1.2 m). Rut −2.7 mm against +0.7 mm clear of the tracks; volume unchanged to 4 × 10⁻⁷ m³. |
+| `engine-ffi` `terrain_abi` `unreal_frames_carry_the_live_surface_debris_and_the_bake` | Unreal (cm, Z up), a strike off centre on a 97 × 65 field. Every frame's surface is the area's window (a 42+25, b 14+29), equal to `rbTerrain_GetAreas`. The prediction equals the strike's. Debris lies round the strike in host axes. After the bake event, the host's copy holds the last live ground to 0.14 cm (the cell is 1.84 cm), with the deepest sample under the strike. |
+| `close_area_bakes_one_area_while_the_other_stays_open` | Two areas listed; closing one leaves the other open (with its age), a second close fails, and the next frame's bake event names the closed slot. |
+
+**Not done:**
+- The web page still sequences its own patches in JS (`terrain-host.mjs`):
+  creating them, bumping generations and retiring at the last bake. It doesn't
+  yet use `World`'s policy, but the plan, kernels and limits are the shared
+  Rust ones.
+- The outline's optional zero-copy export of the surface and debris onto the
+  host's Metal device (like `rbWorld_ExportPoses`) is not built.
+- `MetalSim` still lacks the surface pass. The C ABI's `World` runs on wgpu,
+  including on the host's Metal device, so this is not a blocker.
 
 ## The splat bake (2026-10-25)
 
@@ -2511,10 +2726,11 @@ the longest hold of its strikes (up to 3 substeps between them here).
   area grows by. A baked area costs nothing.
 - At most 16 separate areas open at once (`max_regions`, `MPM_MAX_AREAS`);
   a closer strike grows an area instead.
-- Slots of baked particles and landed parcels are reused only once every area
-  has baked, so a barrage that always leaves one area open fills
-  `max_particles` / `max_parcels` and then fails by name ("Slot reuse" under
-  "Multiple impacts"). Compacting the pool is the fix for an endless barrage.
+- Slots of baked particles and landed parcels come back while other areas are
+  open ("Endless areas", 2026-10-30): a bake trims the pool's dead tail and
+  packs the parcels, and an activation past the pool's end takes the free
+  slots. `max_particles` bounds the particles live at once (plus one slot per
+  parcel in flight), not a barrage's total.
 
 ## Native backends (2026-10-25)
 
@@ -3142,11 +3358,9 @@ step of the frame the field starts in. That bears on the open volume excess
 (3.1× π-scaling). It is reported, not investigated or adopted.
 
 **Open points.**
-- **Slot reuse.** Slots of baked particles, and of landed parcels, are reused
-  only when the pool empties. A chain of events that always leaves one area
-  open fills `max_particles` or `max_parcels`, which then fails by name.
-  Compacting the pool is the follow-up; the bake no longer needs slot ranges,
-  so it can be done.
+- **Slot reuse.** Done without moving a live particle ("Endless areas",
+  2026-10-30): trimming at bakes, parcels packed, free slots for an
+  activation past the pool's end.
 - **Parcels are one pool.** An area's landing ejecta take slots, deposit
   dithers and re-entry order shared with the others, in the atomics' order.
   So an area matches a single run only to a few quanta where its ejecta
@@ -3205,7 +3419,7 @@ exact through every such close.
 
 | Close | What happens to parcels in flight |
 |---|---|
-| One area of several (`bake_area` while others stay open) | They keep flying with the open areas' substeps. Each lands on the heightfield, or back in an open area as a particle in the dead slot of the particle it left. The pool keeps every slot while an area is open, so no one else takes that slot. Unchanged. |
+| One area of several (`bake_area` while others stay open) | They keep flying with the open areas' substeps. Each lands on the heightfield, or back in an open area as a particle in the dead slot of the particle it left. That slot stays held while it flies ("Endless areas"), so no one else takes it. Unchanged. |
 | The last area (`bake`, or `bake_area` on the only one) | Before: no frame runs once no area is open, so they hung in the air. The next fresh domain reset the parcel counters and dropped their quanta. Their source slots also pointed into an emptied pool that the next activation refills. Now: in the bake's pass, after the window is raised, `mpm_parcels_land` flies each one on to where it lands, all in that pass. |
 
 **How `mpm_parcels_land` flies them:**
@@ -3225,7 +3439,7 @@ exact through every such close.
   - with `max_parcels` 0, a particle outside every area raises `MPM_OUTSIDE`, and the last bake still takes it;
   - a deposit with no slot raises `max_field_samples` and stays in flight.
 - `TerrainPlan::load` replaces the domain on purpose: it is for host-loaded test material and drops what was there. It is not a close.
-- Parcel slots are not reused within a domain. A domain that throws more than `max_parcels` over its life fails by name even if most of them have landed.
+- Parcel slots come back at every bake that leaves areas open ("Endless areas": the parcels still in flight are packed to the front). Between such bakes, a domain that throws more than `max_parcels` fails by name even if most of them have landed.
 
 **Validation** (`engine-webgpu` `tests/terrain_multi.rs`, the scene above). The area's material is thrown up at 4 m/s and out at 1 m/s, as a blast would; this impact's own ejecta stay inside its box.
 
