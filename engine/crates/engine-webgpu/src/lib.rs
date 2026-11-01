@@ -14,6 +14,8 @@ mod poses;
 #[cfg(all(feature = "gpu", target_vendor = "apple"))]
 pub mod metal_interop;
 #[cfg(feature = "gpu")]
+mod ror_gpu;
+#[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]
 pub use features::{
@@ -27,11 +29,16 @@ pub use gpu::{
 #[cfg(feature = "gpu")]
 pub use poses::PoseRecord;
 #[cfg(feature = "gpu")]
+pub use ror_gpu::RorGpu;
+#[cfg(feature = "gpu")]
 pub use soft_skin::SoftSkinner;
 
 /// The skinning kernels as one WGSL module (entries `soft_skin_vertices`,
 /// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
 pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
+/// Rigs of Rods' explicit soft-body step (`slang/kernels/ror_step.slang`, entry
+/// `ror_frame`), as `generated/wgsl/ror_step.wgsl`.
+pub const ROR_STEP_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/ror_step.wgsl"));
 
 /// The MPM material probe (`slang/kernels/mpm_material_probe.slang`, entry
 /// `mpm_material_probe`): runs `physics/mpm_material.slang` on test cases so

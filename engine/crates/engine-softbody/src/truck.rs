@@ -124,6 +124,13 @@ pub struct TruckWheel {
     pub mass: f32,
     /// Section the wheel came from.
     pub kind: &'static str,
+    /// `wheels` only: tyre spring and damping, the rigidity node, and the beam and
+    /// node defaults in force at the line (Rigs of Rods' soft tyre, [`crate::ror`]).
+    pub spring: f32,
+    pub damp: f32,
+    pub rigidity: Option<u32>,
+    pub beam: SoftBeam,
+    pub node_friction: f32,
 }
 
 /// Parsed file before mass distribution, in file node indices.
@@ -202,7 +209,14 @@ impl Parser {
     }
 
     fn node(&mut self, tok: &str) -> Option<u32> {
-        let r = self.ids.get(tok).copied();
+        let mut r = self.ids.get(tok).copied();
+        // Legacy numbering (fileformatversion < 450): RoR reads a node reference as an
+        // integer and takes its absolute value (`_ParseNodeRef`), so `-65` is node 65.
+        if r.is_none() && self.sequential() {
+            if let Ok(n) = tok.parse::<i64>() {
+                r = self.ids.get(&n.abs().to_string()).copied();
+            }
+        }
         if r.is_none() {
             self.warn(format!("unknown node `{tok}`"));
         }
@@ -759,6 +773,12 @@ impl Parser {
             Section::Wheels => f(t, 1, 0.2),
             _ => f(t, 2, 0.2),
         };
+        // GetArgRigidityNode: 9999 is "none", anything else a node reference.
+        let rigidity = if t[n1_col + 2] == "9999" {
+            None
+        } else {
+            self.node(t[n1_col + 2])
+        };
         self.out.wheels.push(TruckWheel {
             radius,
             width,
@@ -770,6 +790,16 @@ impl Parser {
             propulsed: f(t, n1_col + 4, 0.0) as u32,
             mass: f(t, n1_col + 6, 20.0),
             kind,
+            spring: f(t, n1_col + 7, 0.0),
+            damp: f(t, n1_col + 8, 0.0),
+            rigidity,
+            beam: {
+                // AddBeam: unscaled break threshold, scaled deform threshold.
+                let mut b = self.beam(0, 0);
+                b.strength = self.defaults.brk;
+                b
+            },
+            node_friction: self.node_defaults.friction.unwrap_or(1.0),
         });
         if self.sequential() {
             self.next_number += nodes_per_ray * rays;

@@ -54,6 +54,22 @@ fn spawn(truck: &str, nodes_csv: &str, beams_csv: Option<&str>) {
     let desc = load_truck(&src);
     let ror = csv(nodes_csv);
     println!("nodes: rubble {} ror {}", desc.nodes.len(), ror.len());
+    let full = RorSim::from_truck(&src, Vec3::ZERO, Vec3::ZERO, RorSettings::default());
+    if full.nodes.len() != desc.nodes.len() {
+        let rm: f64 = full.nodes.iter().map(|n| f64::from(n.mass)).sum();
+        let worst = full
+            .nodes
+            .iter()
+            .zip(&ror)
+            .map(|(n, r)| (f64::from(n.mass) - r[1]).abs() / r[1].max(1e-9))
+            .fold(0.0, f64::max);
+        println!(
+            "with RoR tyres: nodes {} (ror {}), mass {rm:.2} kg, worst node mass {:.3}%",
+            full.nodes.len(),
+            ror.len(),
+            worst * 100.0
+        );
+    }
     let (mut rm, mut om, mut worst) = (0.0f64, 0.0f64, (0.0f64, 0usize));
     for (i, n) in desc.nodes.iter().enumerate() {
         let r = &ror[i];
@@ -78,7 +94,11 @@ fn spawn(truck: &str, nodes_csv: &str, beams_csv: Option<&str>) {
     // columns: i,p1,p2,k,d,L,refL,maxpos,maxneg,strength,plastic,bounded,type,detacher
     // Matched by node pair: RoR spawns cinecam, wheels, beams, shocks, hydros in that
     // order, the file may interleave them.
-    let sim = RorSim::new(&desc, Vec3::ZERO, Vec3::ZERO, RorSettings::default());
+    let sim = if full.nodes.len() == ror.len() && full.nodes.len() != desc.nodes.len() {
+        full.clone()
+    } else {
+        RorSim::new(&desc, Vec3::ZERO, Vec3::ZERO, RorSettings::default())
+    };
     let mut by_pair: std::collections::HashMap<(u32, u32), Vec<usize>> = Default::default();
     for (i, r) in rb.iter().enumerate() {
         let (a, b) = (r[1] as u32, r[2] as u32);
@@ -104,6 +124,11 @@ fn spawn(truck: &str, nodes_csv: &str, beams_csv: Option<&str>) {
             ("strength", f64::from(b.strength), r[9]),
             ("plastic", f64::from(b.plastic_coef), r[10]),
             ("bounded", f64::from(b.bounded as u8), r[11]),
+            (
+                "normal",
+                f64::from(u8::from(b.normal)),
+                f64::from(u8::from(r[12] == 0.0)),
+            ),
             ("detacher", f64::from(b.detacher), r[13]),
         ];
         for (name, ours, theirs) in checks {
@@ -154,16 +179,14 @@ fn free(truck: &str, nodes_csv: &str, args: &[String]) {
     let v3 = |k: &str| kv(args, k).map_or(Vec3::ZERO, |s| Vec3::from_slice(&floats(s)));
     let drag = kv(args, "drag") != Some("0");
     let secs: f32 = kv(args, "secs").map_or(1.0, |s| s.parse().unwrap());
-    let mut sim = RorSim::new(
-        &desc,
-        v3("pos"),
-        v3("vel"),
-        RorSettings {
-            drag,
-            turbulence: drag,
-            fast_inv_sqrt: kv(args, "fastinv") != Some("0"),
-        },
-    );
+    let settings = RorSettings {
+        drag,
+        turbulence: drag,
+        fast_inv_sqrt: kv(args, "fastinv") != Some("0"),
+    };
+    // With `wheels`, RoR's soft tyres (as the harness spawns them).
+    let text = std::fs::read_to_string(truck).unwrap();
+    let mut sim = RorSim::from_truck(&text, v3("pos"), v3("vel"), settings);
     if let Some(b) = kv(args, "box") {
         let c = floats(b);
         let (centre, half) = (Vec3::new(c[0], c[1], c[2]), Vec3::new(c[3], c[4], c[5]));
@@ -202,6 +225,30 @@ fn free(truck: &str, nodes_csv: &str, args: &[String]) {
         .zip(&ror)
         .map(|(p, r)| (*p - Vec3::new(r[2] as f32, r[3] as f32, r[4] as f32)).length())
         .fold(0.0, f32::max);
+    // beams_csv=<harness beams_out>: per-beam stress (last step) by node pair.
+    if let Some(bc) = kv(args, "beams_csv") {
+        let rb = csv(bc);
+        let mut by_pair: std::collections::HashMap<(u32, u32), Vec<usize>> = Default::default();
+        for (i, r) in rb.iter().enumerate() {
+            let (a, b) = (r[1] as u32, r[2] as u32);
+            by_pair.entry((a.min(b), a.max(b))).or_default().push(i);
+        }
+        let mut shown = 0;
+        for (k, b) in sim.beams.iter().enumerate() {
+            let r = &rb[by_pair
+                .get_mut(&(b.a.min(b.b), b.a.max(b.b)))
+                .unwrap()
+                .remove(0)];
+            let d = (f64::from(b.stress) - r[3]).abs();
+            if d > 1e-3 * r[3].abs().max(1.0) && shown < 12 {
+                shown += 1;
+                println!(
+                    "  beam {k} ({}-{}) stress rubble {} ror {} (L {} / {})",
+                    b.a, b.b, b.stress, r[3], b.l, r[4]
+                );
+            }
+        }
+    }
     let broken = sim.beams.iter().filter(|b| b.broken).count();
     let deformed = sim
         .beams
