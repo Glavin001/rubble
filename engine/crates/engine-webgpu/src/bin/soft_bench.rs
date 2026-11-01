@@ -8,6 +8,7 @@
 //! Reports wall time per step and per 60 fps frame (4 steps), after warm-up.
 //! `CAR=buggy`: the hybrid dune buggy (152 nodes, 861 beams, 10 bolted parts)
 //! instead, and with `--rigid` the rigid `dune_buggy` preset it is built from.
+//! `CAR=sedan`: the procedural sedan (367 nodes, 2,170 beams).
 //! `CAR=hires`: the BeamNG-resolution JBeam car (1,014 nodes, 5,774 beams).
 use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity};
 use engine_softbody::procedural::{car_truck, CarParams};
@@ -30,6 +31,8 @@ fn main() -> anyhow::Result<()> {
     let buggy = std::env::var("CAR").as_deref() == Ok("buggy");
     let desc = if buggy {
         engine_softbody::buggy::dune_buggy_soft()
+    } else if std::env::var("CAR").as_deref() == Ok("sedan") {
+        engine_softbody::procedural::car_desc(&CarParams::sedan()).0
     } else if std::env::var("CAR").as_deref() == Ok("hires") {
         engine_softbody::hires::hires_car_desc(&Default::default()).0
     } else {

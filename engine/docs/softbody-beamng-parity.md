@@ -195,6 +195,41 @@ depth: 240 Hz × 10 → 1.36 (25.1 cm against 25.6); 120 Hz × 10 → 2.35 still
 threshold changes the material, a trade-off for the user to choose. BeamNG.tech
 recordings and the 15-vehicle set are not available here.
 
+### Against a Rigs of Rods-style solver (2026-11-01)
+
+`examples/ror_baseline.rs` solves our cars the way Rigs of Rods and BeamNG do:
+explicit symplectic Euler in f32 at a fixed rate, the same beam rules (`model`),
+nodes against ground and wall by projection, no node–triangle contacts (so a lower
+bound on RoR's cost), one car per thread as RoR runs actors. M3 Max, CPU:
+
+| car | beam-only stable rate | 56 km/h crush profile, 2 kHz | at 4 kHz | at 8 kHz |
+|---|---|---|---|---|
+| sedan (367 nodes, 2,170 beams) | 4.6 kHz | 23 19 17 cm, 92 broken | 18 17 16, 43 | 17 17 17, 39 |
+| high-res (1,014 nodes, 5,774 beams) | 6.3 kHz | blows up (2,230 broken) | 19 17 22 21 22, 135 | 19 17 21 18 19, 110 |
+
+Cost per 60 fps frame (ms), CPU explicit at a converged rate against Rubble's GPU at
+240 Hz × 10 (`soft_bench`, with rigid core, wheels and self-collision; the machine was
+under heavy load from other builds, so Rubble's figures are upper bounds; the clean
+phase-8 figures are 4.83 / 6.19 / 10.03 ms per step for the high-res car):
+
+| | 1 car | 10 cars | 40 cars |
+|---|---|---|---|
+| sedan, RoR-style 8 kHz, 1 thread / 16 threads | 2.8 / 2.8 | 27.7 / 3.1 | 112 / 11.7 |
+| sedan, Rubble 240 Hz × 10 | 10.8–13.2 | 17–24 | 21–32 |
+| high-res, RoR-style 4 kHz, 1 / 16 threads | 3.7 / 3.8 | 37 / 5.8 | 151 / 20 |
+| high-res, Rubble 240 Hz × 10 | 19.3 (clean) – 23.5 | 24.8 (clean) – 39 | 40 (clean) – 62 |
+| high-res, Rubble 240 Hz × 10, no soft contacts | 19.4 | | 22.6 |
+| high-res, Rubble 960 Hz × 30 (converged) | 234 | 281 | |
+
+Reading: today Rubble is neither faster nor more accurate than the RoR method on a
+16-core CPU. The explicit solver at its stable rate is converged (it is the oracle's
+method), while Rubble at 240 Hz × 10 over-crushes the sedan by ~40% and collapses the
+high-res car; at 960 Hz × 30 Rubble converges but costs ~60× the CPU. Rubble's cost
+is dispatch latency (about 4–5 ms per step for one car, flat in car count), so the GPU
+only gains with car count: at 40 high-res cars without soft contacts it is level with
+16 CPU threads. Rubble's content also needs 4–6 kHz explicitly; RoR's fixed 2 kHz
+cannot run the high-res car.
+
 ## Status summary
 
 | Phase | State |
