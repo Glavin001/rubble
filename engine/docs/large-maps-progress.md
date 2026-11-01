@@ -265,6 +265,30 @@ So removing the carry's cost cannot be made bit-for-bit lossless cheaply. Two op
 
 Not adopted: either changes code paths whose results the user signs off.
 
+**Option A's gate (2026-11-01): failed, not adopted.** The user chose A subject to the
+`sleep_policy_ensemble` gate (21 shots nudged -10..10 mm, 120 frames; bonds broken and
+bodies, mean ± standard deviation [min, max]; `THRESHOLD_CARRY=on|off` forces the carry):
+
+| Policy | Bonds broken | Bodies |
+|---|---|---|
+| never asleep (the reference) | 57.3 ± 2.5 [53, 62] | 107.5 ± 0.6 [107, 109] |
+| sleep + archive + wake on touch, carry on (today) | 56.3 ± 1.2 [55, 60] | 108.0 ± 0.2 [108, 109] |
+| sleep + archive + wake on touch, carry off (A) | 60.9 ± 2.3 [57, 66] | 107.7 ± 0.7 [106, 109] |
+
+Bodies match. Bonds do not: carry off breaks 3.6 more on average than the reference,
+about 4.9 standard errors at n = 21 (today's carry-on is 1.0 below, about 1.6), and its
+range reaches 66 against the reference's 62. By the gate's rule (the breakage
+distribution within the reference's spread, mean and range) it fails, so the carry
+stays on by default. The numbers are identical with `ENGINE_BROADPHASE=full
+WGPU_VALIDATION_INDIRECT_CALL=1`, so this branch's other changes do not move them. (They
+differ from the October ensemble above because the house and shot have changed since;
+the reference was rerun alongside.)
+
+Why carry-off breaks more is not established. Candidates: woken pairs now start from
+the archive's λ (the rows the pair fell asleep with, not the converged rows of the
+moment it is struck), and wakes no longer chain through resting pairs within a step,
+so for a step a struck cluster may rest on sleepers acting as walls.
+
 ### Left for the next step
 
 - The decision above.
