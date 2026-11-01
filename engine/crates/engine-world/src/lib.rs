@@ -28,6 +28,7 @@ mod error;
 mod events;
 mod guidance;
 mod handles;
+mod host_state;
 mod joints;
 mod math;
 mod motion;
@@ -65,6 +66,7 @@ pub use guidance::{
     ZoneAnchor, ZoneMotion, ZoneShape, GUIDE_PATH_KEYS,
 };
 pub use handles::{BodyId, JointId, ShapeId};
+pub use host_state::WorldSnapshot;
 pub use joints::{
     DistanceJointDef, FilterJointDef, JointBase, JointDef, Plastic, PrismaticJointDef,
     RevoluteJointDef, SphericalJointDef, Spring, WeldJointDef,
@@ -434,6 +436,10 @@ pub struct World {
     motion: motion::MotionState,
     /// Deformable terrain, once enabled.
     terrain: Option<terrain::TerrainHost>,
+    /// Steps before this were taken before a `restore_state`: their frames
+    /// still deliver poses, but their counters and events describe a state
+    /// the simulation no longer has.
+    restored_at: u64,
 }
 
 impl World {
@@ -516,6 +522,7 @@ impl World {
             fracture: Default::default(),
             blasts: Default::default(),
             terrain: None,
+            restored_at: 0,
         })
     }
 
@@ -1556,11 +1563,13 @@ impl World {
     ) -> anyhow::Result<SoftHandle> {
         self.dirty = true;
         let before = self.sim.body_count();
+        let joints_before = self.sim.joint_count();
         let h = self
             .sim
             .add_soft_vehicle(desc, position, rotation, options)
             .map_err(|e| anyhow::anyhow!("add_soft_vehicle: {e}"))?;
         self.adopt_owned(before);
+        self.adopt_joints(joints_before);
         let e = &self.sim.soft_host().entries[h.0 as usize];
         let (first, n) = (e.first_body, e.particles);
         let core = e.core.map(|c| c.0);
@@ -1984,11 +1993,14 @@ impl World {
 
     fn frame(&mut self, step: u64, raw: readback::Readback<Extra>) -> anyhow::Result<Frame> {
         let c = raw.counters;
+        let stale = step < self.restored_at;
         // Counters describe the world as it is now when they are the newest
         // step's, or when nothing was awake and nothing was written since:
         // every later step left it unchanged, so the sim may skip asleep steps.
         let quiet_since = self.last_input_step.is_none_or(|s| s <= step);
-        if self.newest_ran == Some(step) || (c.awake_count == 0 && quiet_since) {
+        if stale {
+            // From before a restore: neither the plan nor the event cursors use it.
+        } else if self.newest_ran == Some(step) || (c.awake_count == 0 && quiet_since) {
             self.sim
                 .drained(c)
                 .map_err(|e| anyhow::anyhow!("step {step}: {e:?}"))?;
@@ -2004,7 +2016,11 @@ impl World {
             self.sim.set_plan_hints(contacts, colors);
         }
         self.last_counters = Some(c);
-        let ring = self.sim.ring_events(&raw.ring);
+        let ring = if stale {
+            Default::default()
+        } else {
+            self.sim.ring_events(&raw.ring)
+        };
         let (character_events, projectile_events, lost_motion) =
             self.motion_events(step, &raw.ring);
         let mut destruction = Vec::new();

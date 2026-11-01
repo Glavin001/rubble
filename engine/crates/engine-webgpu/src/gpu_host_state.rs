@@ -44,6 +44,12 @@ pub struct SimSnapshot {
     last_contact_offset: u32,
     vehicles: Option<engine_vehicle::VehicleHost>,
     events_seen: u32,
+    /// The event ring's other readers' cursors: the ring's words are restored
+    /// with the buffers, so each reader must go back to where it was.
+    mount_events_seen: u32,
+    beam_events_seen: u32,
+    motion_events_seen: u32,
+    soft: Option<engine_softbody::SoftHost>,
     free_joints: Vec<u32>,
 }
 
@@ -328,6 +334,10 @@ impl WgpuSim {
             last_contact_offset: self.last_contact_offset,
             vehicles: self.vehicles.clone(),
             events_seen: self.events_seen,
+            mount_events_seen: self.mount_events_seen,
+            beam_events_seen: self.beam_events_seen,
+            motion_events_seen: self.motion_events_seen,
+            soft: self.soft.clone(),
             free_joints: self.free_joints.clone(),
         }
     }
@@ -375,6 +385,12 @@ impl WgpuSim {
             v.dirty = true;
         }
         self.events_seen = s.events_seen;
+        self.mount_events_seen = s.mount_events_seen;
+        self.beam_events_seen = s.beam_events_seen;
+        self.motion_events_seen = s.motion_events_seen;
+        if s.soft.is_some() {
+            self.soft.clone_from(&s.soft);
+        }
         self.free_joints.clone_from(&s.free_joints);
         // The restored state may have bodies awake that the last step did not.
         self.wake_pending = true;

@@ -916,6 +916,12 @@ impl WgpuSim {
         start..self.body_count
     }
 
+    /// Some body has carried `BODY_CCD`: the step schedules the continuous
+    /// collision passes.
+    pub fn has_ccd(&self) -> bool {
+        self.has_ccd
+    }
+
     pub(crate) fn note_motion_flags(&mut self, bodies: &[BodyState]) {
         let (ccd, kin) = body_motion_flags(bodies);
         self.has_ccd |= ccd;
@@ -1672,6 +1678,15 @@ impl WgpuSim {
             off,
             bytemuck::cast_slice(&[target, velocity]),
         );
+    }
+
+    /// Start a joint's linear rows (penalty slots 0..3) at stiffness `k`
+    /// instead of the solver's `k_start`: the AVBD ramp continues from there.
+    /// For a joint written this step, before it has been solved.
+    pub fn set_joint_linear_penalty(&mut self, id: u32, k: f32) {
+        let off = Self::joint_offset(id) + std::mem::offset_of!(Joint, penalty) as u64;
+        self.queue
+            .write_buffer(&self.bufs[5], off, bytemuck::cast_slice(&[k; 3]));
     }
 
     pub fn body_y(&self, id: u32) -> f32 {
@@ -2937,6 +2952,18 @@ impl WgpuSim {
             u64::from(first) * stride,
             count as usize,
         )
+    }
+
+    /// The guidance body records and scratch (claims from
+    /// `GUIDE_SCRATCH_CLAIMS`), with the zone count: for hosts that copy them
+    /// without a blocking read. `None` without guidance.
+    pub fn guidance_buffers(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)> {
+        let g = self.guide.as_ref()?;
+        Some((
+            &self.bufs[guidance::GUIDE_BODIES_BINDING],
+            &self.bufs[guidance::GUIDE_SCRATCH_BINDING],
+            g.zones,
+        ))
     }
 
     /// Each zone's claimed bodies (blocking; for tools and tests).

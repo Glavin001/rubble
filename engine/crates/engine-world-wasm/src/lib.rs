@@ -17,10 +17,14 @@ use wasm_bindgen::prelude::*;
 
 mod defs;
 mod frame;
+mod guidance;
 mod motion;
 mod read;
+mod scene;
+mod vehicle;
 
 pub use frame::WebFrame;
+pub use scene::WebSnapshot;
 
 fn err(e: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&e.to_string()).into()

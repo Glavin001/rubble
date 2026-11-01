@@ -180,3 +180,63 @@ impl WebFrame {
             .collect())
     }
 }
+
+#[wasm_bindgen]
+impl WebFrame {
+    /// Every vehicle's state after the last step: `[{ vehicle, state }]`,
+    /// `state` the `VehicleState` (camelCase: forwardSpeed, engineRpm, gear,
+    /// wheels, partsLost, partsBroken, ...).
+    pub fn vehicles(&self) -> JsValue {
+        js(self
+            .frame
+            .vehicles
+            .iter()
+            .map(|v| serde_json::json!({ "vehicle": v.vehicle.0, "state": v.state }))
+            .collect())
+    }
+
+    /// One vehicle's `VehicleState` after the last step (`null`: not in this
+    /// frame).
+    #[wasm_bindgen(js_name = vehicleState)]
+    pub fn vehicle_state(&self, vehicle: u32) -> JsValue {
+        match self.frame.vehicles.iter().rev().find(|v| v.vehicle.0 == vehicle) {
+            Some(v) => js(serde_json::to_value(&v.state).unwrap_or_default()),
+            None => JsValue::NULL,
+        }
+    }
+
+    /// What broke, in step order: `{ step, type: 'joint', joint, index, force,
+    /// torque, userData }`, `{ step, type: 'mount', vehicle, index, wheel,
+    /// force, torque }`, `{ step, type: 'beam', softBody, beam, force }`,
+    /// `{ step, type: 'piece', softBody, nodes, parts, mass }`. Other kinds
+    /// (destructibles, assemblies) come as `{ step, type: 'other' }`.
+    #[wasm_bindgen(js_name = destructionEvents)]
+    pub fn destruction_events(&self) -> JsValue {
+        js(self
+            .frame
+            .destruction_events
+            .iter()
+            .map(|(step, e)| {
+                let step = *step as f64;
+                match e {
+                    DestructionEvent::JointBroke { joint, force, torque, user_data } => serde_json::json!({
+                        "step": step, "type": "joint", "joint": id(joint.to_bits()), "index": joint.index(),
+                        "force": force, "torque": torque, "userData": user_data,
+                    }),
+                    DestructionEvent::MountBroke(m) => serde_json::json!({
+                        "step": step, "type": "mount", "vehicle": m.vehicle, "index": m.index, "wheel": m.wheel,
+                        "force": m.force, "torque": m.torque,
+                    }),
+                    DestructionEvent::BeamBroke(b) => serde_json::json!({
+                        "step": step, "type": "beam", "softBody": b.soft_body, "beam": b.beam, "force": b.force,
+                    }),
+                    DestructionEvent::PieceDetached(p) => serde_json::json!({
+                        "step": step, "type": "piece", "softBody": p.soft_body.0, "nodes": p.nodes,
+                        "parts": p.parts, "mass": p.mass,
+                    }),
+                    _ => serde_json::json!({ "step": step, "type": "other" }),
+                }
+            })
+            .collect())
+    }
+}

@@ -148,6 +148,40 @@ pub fn world_def(v: JsValue) -> Result<WorldDef, JsValue> {
             _ => return Err(crate::err(format!("WorldDef.contacts: unknown {s}"))),
         };
     }
+    if let Some(mut v) = f.object("vehicles")? {
+        let c = &mut d.vehicles;
+        v.u32("maxVehicles", &mut c.max_vehicles)?;
+        v.u32("maxWheels", &mut c.max_wheels)?;
+        v.u32("maxCurvePoints", &mut c.max_curve_points)?;
+        v.u32("maxDiffs", &mut c.max_diffs)?;
+        v.u32("maxAntiRolls", &mut c.max_anti_rolls)?;
+        v.u32("maxParts", &mut c.max_parts)?;
+        v.u32("maxRays", &mut c.max_rays)?;
+        v.finish()?;
+    }
+    if let Some(mut v) = f.object("soft")? {
+        let mut c = SoftCapacity::default();
+        v.u32("maxBodies", &mut c.max_bodies)?;
+        v.u32("maxBeams", &mut c.max_beams)?;
+        v.u32("maxParticles", &mut c.max_particles)?;
+        v.u32("maxColors", &mut c.max_colors)?;
+        v.u32("maxGroups", &mut c.max_groups)?;
+        v.u32("maxTriangles", &mut c.max_triangles)?;
+        v.u32("maxObstacles", &mut c.max_obstacles)?;
+        v.finish()?;
+        d.soft = Some(c);
+    }
+    if let Some(mut v) = f.object("guidance")? {
+        let mut c = GuidanceCapacity::default();
+        v.u32("maxZones", &mut c.max_zones)?;
+        v.u32("planBudget", &mut c.plan_budget)?;
+        v.finish()?;
+        d.guidance = Some(c);
+    }
+    if let Some(v) = f.take("solver") {
+        let v = serde_wasm_bindgen::to_value(&v).map_err(crate::err)?;
+        d.solver = solver(v, d.solver)?;
+    }
     f.u32("readbackFrames", &mut d.readback_frames)?;
     f.f32("hitEventThreshold", &mut d.hit_event_threshold)?;
     if let Some(s) = f.string("backpressure")? {
