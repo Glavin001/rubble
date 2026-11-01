@@ -83,9 +83,9 @@ function updateNear(now){
 }
 for(const id of ['guide','guide-strength'])$(id).onchange=()=>{applyGuide();$(id).blur()};
 // The stress solver's modes on stress-web, and the capability profile each runs. The simple
-// threshold moves to World next (thresholdMode, loadThreshold).
-const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold',load_path:'load_path',impact_local:'impact_local'};
-const thresholdMode=()=>false;
+// threshold runs on World (thresholdMode).
+const STRESS_PROFILES={stress:'blast_parity',load_path:'load_path',impact_local:'impact_local'};
+const thresholdMode=()=>bondMode()==='threshold';
 const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps'};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
 // The stress-solver modes wait on the GPU from Rust: through WebAssembly JavaScript Promise

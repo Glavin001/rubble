@@ -1,5 +1,7 @@
-// "Stress solver" bond mode: the GPU stress solver coupled to rubble, run in Rust on its own
-// WebGPU device and canvas (engine/stress-oracle/crates/stress-web). This file loads the
+// The stress-solver bond modes World has no equivalent of (the blast_parity stress solver,
+// load path, local impact): the GPU stress solver coupled to rubble, run in Rust on its own
+// WebGPU device and canvas (engine/stress-oracle/crates/stress-web). The simple threshold
+// runs on World (lab-world.mjs). This file loads the
 // module, forwards input (camera-input.mjs, as the page's renderer) and drives one frame per
 // animation frame; the physics, camera, shot rule and drawing are the Rust's.
 import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic,stress_set_strike_prediction,stress_strike_prediction,stress_set_contact_fracture,stress_contact_fracture,stress_contact_fracture_available,stress_set_crush,stress_pack_shots,stress_fire_pack_shot,stress_dust} from '../generated/stress-web/stress_web.js';
@@ -56,8 +58,8 @@ export async function createStressMode(canvas){
   setShotSpeedScale(scale){stress_set_shot_speed_scale(scale)},
   setShotRadiusScale(scale){stress_set_shot_radius_scale(scale)},
   setBondStrengthScale(scale){stress_set_bond_strength_scale(scale)},
-  // The capability profile of the next load: blast_parity, threshold (the v0 mode),
-  // load_path or impact_local.
+  // The capability profile of the next load: blast_parity, load_path or impact_local (the
+  // page runs threshold on World).
   setProfile(name){stress_set_profile(name)},
   // Strike prediction (forward only): a shot's breaks made before the engine steps, so it
   // meets the pieces instead of rebounding off the whole structure. Now and for the next
