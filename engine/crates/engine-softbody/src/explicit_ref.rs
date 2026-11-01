@@ -645,7 +645,7 @@ impl ExplicitSim {
             rep.yielded += u32::from(o.yielded);
             if o.broke {
                 rep.broke += 1;
-                if b.group != 0 {
+                if b.group != 0 && !b.group_passive {
                     groups.push(b.group);
                 }
                 continue;
@@ -1102,6 +1102,8 @@ mod tests {
             force: 0.0,
             spring_exp: 1.0e4,
             damp_exp: 0.0,
+            deform_limit: f64::INFINITY,
+            group_passive: false,
         });
         sim.bodies.push(OracleBody {
             nodes: 2,

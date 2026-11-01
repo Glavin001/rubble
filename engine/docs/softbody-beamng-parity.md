@@ -140,9 +140,13 @@ fix that lets `deformLimit` / `deformLimitExpansion` reach the solver. Each elem
 finite-difference gradient and PSD tests (`elements.rs`), oracle behaviour tests
 (`elements_oracle.rs`) and GPU-vs-oracle static tests (`soft_elements.rs`, < 0.1 mm).
 
-Open: `deformLimitStress`, `precompressionRange` and `beamPrecompressionTime`,
-`breakGroupType`, the 2 cm minimum deformed length (RoR's 0.1 m floor stays), the
-anisotropic `transitionZone`, and checking the legocar's skipped sections (needs
+Then: `deformLimitStress` (ceiling on hardening), `breakGroupType` 1 (breaks with
+its group without setting it off) and `precompressionRange` (spawn length change in
+metres), on the CPU, oracle and GPU; anisotropic beams' expansion rates now read back.
+
+Open: `beamPrecompressionTime` (a gradual spawn change; needs a per-step rest ramp),
+the 2 cm minimum deformed length (RoR's 0.1 m floor stays), the anisotropic
+`transitionZone`, and checking the legocar's skipped sections (needs
 `RUBBLE_JBEAM_DIR`, not available here).
 
 ### Phase 8 — BeamNG resolution and scale (measured; DECISIONS s31)

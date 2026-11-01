@@ -234,7 +234,8 @@ pub struct SoftLayout {
     pub local_base: u32,
     /// Per soft body: the origin of its local frame.
     pub origin_base: u32,
-    /// Per beam: [expansion spring, expansion damping] (anisotropic beams).
+    /// Per beam: [expansion spring, expansion damping (anisotropic beams), deform
+    /// threshold ceiling, 1 = breaking does not trigger its group].
     pub beam_extra_base: u32,
     /// Per element: `ELEMENT_STRIDE` slots (nodes; kind and flags, spring, damping,
     /// rest angle; deform, strength, tolerance, cap strength).

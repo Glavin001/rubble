@@ -94,6 +94,10 @@ pub struct BeamT<T> {
     /// keep `spring` and `damp` here). Stored beside the 16 words.
     pub spring_exp: T,
     pub damp_exp: T,
+    /// Ceiling on `deform_c` as it hardens (∞ = none).
+    pub deform_limit: T,
+    /// Breaking does not trigger its group (the group still breaks it).
+    pub group_passive: bool,
 }
 
 /// The GPU's beam: f32 throughout.
@@ -124,6 +128,8 @@ impl Beam {
             force: U::of(self.force),
             spring_exp: U::of(self.spring_exp),
             damp_exp: U::of(self.damp_exp),
+            deform_limit: U::of(self.deform_limit),
+            group_passive: self.group_passive,
         }
     }
 }
@@ -190,6 +196,8 @@ impl Beam {
             force: f(BW_FORCE),
             spring_exp: f(BW_SPRING),
             damp_exp: f(BW_DAMP),
+            deform_limit: f32::INFINITY,
+            group_passive: false,
         }
     }
 }
@@ -376,7 +384,7 @@ pub fn plastic_update<T: Real>(
             if beam.short_bound > T::ZERO {
                 beam.rest = beam.rest.max(beam.rest0 * beam.short_bound);
             }
-            beam.deform_c *= old / beam.rest;
+            beam.deform_c = (beam.deform_c * (old / beam.rest)).min(beam.deform_limit);
             beam.flags |= BEAM_YIELDED;
             out.yielded = true;
         } else if -force > beam.deform_t && delta > T::ZERO {
@@ -437,6 +445,8 @@ mod tests {
             force: 0.0,
             spring_exp: 1.0e6,
             damp_exp: 0.0,
+            deform_limit: f32::INFINITY,
+            group_passive: false,
         }
     }
 
@@ -508,6 +518,18 @@ mod tests {
             b.rest
         );
         assert!(b.deform_c > 1.0e4, "hardens as it shortens");
+    }
+
+    #[test]
+    fn hardening_stops_at_the_deform_limit_stress() {
+        let mut b = beam(1.0);
+        b.strength = 1.0e9;
+        b.deform_limit = 1.2e4;
+        for len in [0.9f32, 0.8, 0.7] {
+            let f = readout_force(&b, len, len, 0.01, 1.0);
+            plastic_update(&mut b, len, f, 0.1, true, true);
+        }
+        assert!((b.deform_c - 1.2e4).abs() < 1e-3, "{}", b.deform_c);
     }
 
     #[test]

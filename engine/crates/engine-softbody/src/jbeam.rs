@@ -1079,7 +1079,17 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             } else {
                 0.0
             },
+            deform_limit_stress: g("deformLimitStress", f32::INFINITY).max(0.0),
+            break_group_passive: g("breakGroupType", 0.0) as i32 == 1,
         };
+        // precompressionRange (m) overrides beamPrecompression: the spawn length
+        // changes by that much.
+        if let Some(range) = f.get("precompressionRange").and_then(as_f32) {
+            let l0 = desc.rest_length(&beam);
+            if l0 > 1e-6 {
+                beam.precompression = ((l0 + range) / l0).max(0.01);
+            }
+        }
         match kind {
             BeamKind::Support => {
                 // Breaks past (1 + longBound)·L₀; default bound 1.

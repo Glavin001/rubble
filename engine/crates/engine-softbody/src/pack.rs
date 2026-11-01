@@ -298,6 +298,8 @@ pub fn pack_soft(
             } else {
                 sb.damp
             },
+            deform_limit: sb.deform_limit_stress,
+            group_passive: sb.break_group_passive,
         };
         let id = beams.len() as u32;
         adjacency[sb.a as usize].push(id);

@@ -128,6 +128,13 @@ pub struct SoftBeam {
     /// than rest (0 = the same as in compression).
     pub spring_expansion: f32,
     pub damp_expansion: f32,
+    /// Ceiling on the compression yield threshold as it hardens (JBeam
+    /// `deformLimitStress`, N). `f32::INFINITY` = none.
+    #[serde(with = "inf_f32")]
+    pub deform_limit_stress: f32,
+    /// Breaking does not set off its break group, though the group still breaks it
+    /// (JBeam `breakGroupType` 1).
+    pub break_group_passive: bool,
 }
 
 impl Default for SoftBeam {
@@ -149,6 +156,8 @@ impl Default for SoftBeam {
             visible: true,
             spring_expansion: 0.0,
             damp_expansion: 0.0,
+            deform_limit_stress: f32::INFINITY,
+            break_group_passive: false,
         }
     }
 }

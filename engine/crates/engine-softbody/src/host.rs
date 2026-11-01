@@ -279,7 +279,14 @@ impl SoftHost {
         let extra: Vec<Slot> = packed
             .beams
             .iter()
-            .map(|b| [b.spring_exp.to_bits(), b.damp_exp.to_bits(), 0, 0])
+            .map(|b| {
+                [
+                    b.spring_exp.to_bits(),
+                    b.damp_exp.to_bits(),
+                    b.deform_limit.to_bits(),
+                    u32::from(b.group_passive),
+                ]
+            })
             .collect();
         backend.write_soft_slots(l.beam_extra_base + first_beam, &extra);
         self.beams_used += packed.beams.len() as u32;
@@ -991,14 +998,22 @@ impl SoftHost {
             l.beam_base + BEAM_STRIDE * e.first_beam,
             BEAM_STRIDE * e.beams,
         );
+        // Anisotropic beams' expansion rates live beside the 16 words.
+        let extra = backend.read_soft_slots(l.beam_extra_base + e.first_beam, e.beams);
         slots
             .chunks(4)
-            .map(|c| {
+            .zip(&extra)
+            .map(|(c, x)| {
                 let mut w = [0u32; 16];
                 for (k, s) in c.iter().enumerate() {
                     w[k * 4..k * 4 + 4].copy_from_slice(s);
                 }
-                Beam::from_words(&w)
+                let mut b = Beam::from_words(&w);
+                b.spring_exp = f32::from_bits(x[0]);
+                b.damp_exp = f32::from_bits(x[1]);
+                b.deform_limit = f32::from_bits(x[2]);
+                b.group_passive = x[3] != 0;
+                b
             })
             .collect()
     }

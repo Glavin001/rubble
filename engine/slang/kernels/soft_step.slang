@@ -2466,7 +2466,8 @@ float softBeamYield(uint i, inout SoftBeam e, float force, float delta)
             float deform = delta + dc * (1.0 - e.coef) / k;
             e.rest = max(e.rest + deform, softMinLength());
             if (e.shortB > 0.0) e.rest = max(e.rest, e.rest0 * e.shortB);
-            e.deformC *= old / e.rest;
+            // Hardening stops at the beam's ceiling (JBeam deformLimitStress).
+            e.deformC = min(e.deformC * (old / e.rest), SD(softBeamExtraBase() + i).z);
             e.meta |= BEAM_YIELDED;
             softQuietReset(beamSoftBody(e));
             softBdf2Interrupt(beamSoftBody(e), e.a, e.b);
@@ -2562,7 +2563,10 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
         {
             e.meta |= BEAM_BROKEN;
             uint g = beamGroup(e);
-            if (g != 0u && g < softGroupCount()) gSoftData[softGroupBase() + g] = float4(1, 0, 0, 0);
+            // A passive member (breakGroupType 1) breaks with its group but does
+            // not set it off.
+            bool passive = SU(softBeamExtraBase() + i).w != 0u;
+            if (g != 0u && g < softGroupCount() && !passive) gSoftData[softGroupBase() + g] = float4(1, 0, 0, 0);
             emitEvent(EVENT_BEAM_BREAK, i, asuint(abs(force)), beamSoftBody(e));
         }
     }

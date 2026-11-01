@@ -118,3 +118,39 @@ fn anisotropic_beam_is_stiffer_in_tension() {
         "{long} {short}"
     );
 }
+
+/// JBeam beam options: precompressionRange sets the spawn length in metres,
+/// deformLimitStress caps hardening, and a breakGroupType 1 beam breaks with its
+/// group without setting it off.
+#[test]
+fn beam_options_import_and_run() {
+    let jb = r#"{"opt": {"slotType": "main",
+        "nodes": [["id", "posX", "posY", "posZ"], {"nodeWeight": 1},
+            ["a", 0, 0, 0, {"fixed": true}], ["b", 1, 0, 0], ["c", 2, 0, 0]],
+        "beams": [["id1:", "id2:"],
+            {"beamSpring": 100000, "beamDamp": 0, "beamDeform": 5000, "beamStrength": 2000,
+             "breakGroup": "g", "breakGroupType": 1, "precompressionRange": -0.1, "deformLimitStress": 6000},
+            ["a", "b"],
+            {"breakGroupType": 0, "precompressionRange": "", "beamStrength": "FLT_MAX", "deformLimitStress": ""},
+            ["b", "c"]]
+    }}"#;
+    let d = load_jbeam(&[("opt.jbeam", jb)], None).unwrap();
+    let (ab, bc) = (&d.beams[0], &d.beams[1]);
+    assert!(
+        (ab.precompression - 0.9).abs() < 1e-6,
+        "{}",
+        ab.precompression
+    );
+    assert_eq!(ab.deform_limit_stress, 6000.0);
+    assert!(ab.break_group_passive && !bc.break_group_passive);
+    assert_eq!(ab.break_group, bc.break_group);
+    // The passive beam a-b, pulled 10 cm short at spawn with 2 kN strength, breaks
+    // at once (10 kN). It must not set off its group: b-c (unbreakable) survives.
+    let mut s = sim(&d);
+    s.run(0.05);
+    assert!(s.beams[0].broken(), "the precompressed beam breaks");
+    assert!(
+        !s.beams[1].broken(),
+        "a passive member does not break its group"
+    );
+}

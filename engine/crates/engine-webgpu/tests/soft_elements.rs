@@ -93,3 +93,50 @@ fn slidenode_rests_at_the_cap_like_the_oracle() {
         "at the low cap"
     );
 }
+
+/// breakGroupType 1 on the GPU: the passive beam breaks without breaking its group.
+#[test]
+fn a_passive_group_member_breaks_alone() {
+    let jb = r#"{"opt": {"slotType": "main",
+        "nodes": [["id", "posX", "posY", "posZ"], {"nodeWeight": 1},
+            ["a", 0, 0, 0, {"fixed": true}], ["b", 1, 0, 0], ["c", 2, 0, 0]],
+        "beams": [["id1:", "id2:"],
+            {"beamSpring": 100000, "beamDamp": 0, "beamDeform": 5000, "beamStrength": 2000,
+             "breakGroup": "g", "breakGroupType": 1, "precompressionRange": -0.1},
+            ["a", "b"],
+            {"breakGroupType": 0, "precompressionRange": "", "beamStrength": "FLT_MAX"},
+            ["b", "c"]]
+    }}"#;
+    let d = load_jbeam(&[("opt.jbeam", jb)], None).unwrap();
+    let cap = WorldCapacity {
+        max_bodies: 256,
+        max_colliders: 512,
+        max_contacts: 4096,
+        max_joints: 64,
+        max_candidates: 8192,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    };
+    let mut sim = WgpuSim::new_with_soft(cap, VehicleCapacity::default(), SoftCapacity::default())
+        .expect("wgpu");
+    sim.set_params(soft_scene_params(240.0, 10));
+    let h = sim
+        .add_soft_vehicle(
+            &d,
+            [0.0; 3],
+            [0.0, 0.0, 0.0, 1.0],
+            &SpawnOptions {
+                rigid_core: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for _ in 0..24 {
+        sim.step().unwrap();
+    }
+    let beams = sim.read_soft_beams(h);
+    assert!(beams[0].broken(), "the precompressed beam breaks");
+    assert!(!beams[1].broken(), "it does not set off its group");
+    assert!(beams[0].group_passive);
+}
