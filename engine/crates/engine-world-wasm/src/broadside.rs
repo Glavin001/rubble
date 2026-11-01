@@ -193,11 +193,17 @@ pub fn finale_targets() -> Vec<([f32; 3], f32)> {
     t
 }
 
-/// Splinter bodies crushed wood leaves (four per crushed chunk, its mass conserved),
-/// reserved when the ship is placed; a take that crushes more fails with an error.
-pub const CRUSH_BUDGET: u32 = 4096;
+/// Crushed wood becomes particles (`CrushMass::Particles`): about one per `PARTICLE_SIZE`
+/// cube of the chunk's volume, at most `PARTICLES_PER_CHUNK`, its mass conserved. Each
+/// collides with the ship and the ground (continuous collision while fast) but not with
+/// another particle; the page draws each as a splinter.
+pub const PARTICLE_SIZE: f32 = 0.08;
+pub const PARTICLES_PER_CHUNK: u32 = 24;
+/// Particle bodies reserved when the ship is placed; a take that crushes more fails with
+/// an error.
+pub const CRUSH_BUDGET: u32 = 16384;
 /// Raze shoots every part of the ship and crushes far more wood.
-pub const RAZE_CRUSH_BUDGET: u32 = 16384;
+pub const RAZE_CRUSH_BUDGET: u32 = 49152;
 
 /// The take's script.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -254,8 +260,9 @@ pub fn crush(budget: u32) -> Crush {
                 crush_viscosity: p.crush_viscosity,
             },
         )],
-        mass: CrushMass::Conserve {
-            fragments: 4,
+        mass: CrushMass::Particles {
+            size: PARTICLE_SIZE,
+            max_per_chunk: PARTICLES_PER_CHUNK,
             budget,
         },
         ..Crush::default()
@@ -314,8 +321,9 @@ pub struct Broadside {
     pub scripted: bool,
     /// Chunks crushed so far (hidden: their mass is in `splinters`).
     pub crushed: Vec<bool>,
-    /// Crush fragments: body and box half extents; `splinters_version` counts changes.
-    pub splinters: Vec<(BodyId, [f32; 3])>,
+    /// Crush particles: body, the splinter's half extents (drawn: a sliver of the
+    /// particle's volume) and where it was made; `splinters_version` counts changes.
+    pub splinters: Vec<(BodyId, [f32; 3], [f32; 3])>,
     pub splinters_version: u32,
     /// Raze: the frame each chunk was last aimed at, the chunks still in large pieces
     /// (refreshed every few steps) and their share of the ship.
@@ -894,10 +902,20 @@ impl Broadside {
                             .and_then(|s| s.first().copied())
                             .and_then(|s| match self.world.shape_geometry(s) {
                                 Ok(Geometry::Box { half, .. }) => Some(*half),
+                                // A splinter of about the particle's volume.
+                                Ok(Geometry::Sphere { radius: r, .. }) => {
+                                    Some([2.2 * r, 0.35 * r, 0.55 * r])
+                                }
                                 _ => None,
                             });
+                        let at = self
+                            .world
+                            .body_transform(f)
+                            .ok()
+                            .flatten()
+                            .map_or([0.0; 3], |t| t.position);
                         if let Some(half) = half {
-                            self.splinters.push((f, half));
+                            self.splinters.push((f, half, at));
                         }
                     }
                     self.splinters_version += 1;

@@ -27,7 +27,7 @@ function fail(e){
 
 // The most bodies the pose buffer holds beyond the render scene's: the captain, MAX_BALLS
 // balls and the crush splinter budget.
-const POSE_FLOATS=28,EXTRA_BODIES=1+256+16384;
+const POSE_FLOATS=28,EXTRA_BODIES=1+256+49152;
 // The ship's fracture level (broadside::LEVEL's list): 0 whole members, 1 pieces, 2 cells.
 const levelPick=$('level');
 // Phones (a coarse pointer) start on the lighter ship.

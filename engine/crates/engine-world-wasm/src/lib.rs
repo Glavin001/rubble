@@ -191,7 +191,7 @@ pub fn broadside_extra_vertices() -> Vec<f32> {
             sphere_vertices(broadside::BALL_RADIUS, 8, BALL, id, &mut out);
             id += 1.0;
         }
-        for (k, (_, half)) in l.b.splinters.iter().enumerate() {
+        for (k, (_, half, _)) in l.b.splinters.iter().enumerate() {
             let h = (k as u32).wrapping_mul(2654435761) >> 24;
             let shade = 0.82 + 0.3 * (h as f32 / 255.0);
             box_vertices(*half, SPLINTER.map(|c| (c * shade).min(1.0)), id, &mut out);
@@ -287,16 +287,32 @@ fn render_poses(l: &Loaded) -> Vec<Transform> {
     for k in 0..MAX_BALLS {
         poses.push(balls.get(k).copied().unwrap_or_else(parked));
     }
-    for (f, _) in &b.splinters {
-        poses.push(
-            b.world
-                .body_transform(*f)
-                .ok()
-                .flatten()
-                .unwrap_or_else(parked),
-        );
+    for (k, (f, half, at)) in b.splinters.iter().enumerate() {
+        let Some(t) = b.world.body_transform(*f).ok().flatten() else {
+            poses.push(parked());
+            continue;
+        };
+        poses.push(Transform::new(t.position, tumble(k as u32, *half, *at, t).to_array()));
     }
     poses
+}
+
+/// A splinter's drawn turn: a crush particle never rotates, so the page tumbles its
+/// splinter about an axis of its own by how far it has travelled (render only; it
+/// settles when the particle does). A box fragment keeps its body's rotation.
+fn tumble(k: u32, half: [f32; 3], at: [f32; 3], t: Transform) -> glam::Quat {
+    let body = glam::Quat::from_array(t.rotation);
+    if body != glam::Quat::IDENTITY {
+        return body;
+    }
+    let h = |s: u32| {
+        let x = k.wrapping_mul(0x9E37_79B1) ^ s.wrapping_mul(0x85EB_CA77);
+        ((x ^ (x >> 15)).wrapping_mul(0x2C1B_3C6D) >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let axis = glam::Vec3::new(h(1) - 0.5, h(2) - 0.5, h(3) - 0.5).normalize_or(glam::Vec3::Y);
+    let start = glam::Quat::from_euler(glam::EulerRot::XYZ, 6.28 * h(4), 6.28 * h(5), 6.28 * h(6));
+    let travelled = (glam::Vec3::from(t.position) - glam::Vec3::from(at)).length();
+    glam::Quat::from_axis_angle(axis, travelled / half[0].max(0.005) * 0.6) * start
 }
 
 /// The take's camera for a frame `wall` seconds after the last: `[eye, target]`.
