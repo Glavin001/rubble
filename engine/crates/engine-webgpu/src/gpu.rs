@@ -751,11 +751,7 @@ impl WgpuSim {
             compact_contacts,
             persistent_contacts,
             spec_reach_max: 0.0,
-            sparse_start: if capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8 {
-                features.sparse_colors.min(32)
-            } else {
-                32
-            },
+            sparse_start: features.sparse_colors.min(32),
             fused_persistence: compact_contacts
                 && features.manifold_persistence == ManifoldPersistence::Fused,
             manifold_persistence: features.manifold_persistence == ManifoldPersistence::Manifolds,
@@ -2641,7 +2637,6 @@ impl WgpuSim {
             sparse_start: self.sparse_start,
             color_headroom: self.color_headroom,
             color_round_headroom: self.color_round_headroom,
-            tail_ok: self.capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8,
             pose_output: self.pose_output,
             contact_events: self.contact_events,
             motion_locks: self.motion_locks,

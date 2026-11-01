@@ -626,7 +626,6 @@ impl RigidStep {
             sparse_start: 32,
             color_headroom: Some(2),
             color_round_headroom: Some(2),
-            tail_ok: self.cap.max_bodies <= (1 << 16) * 8,
             ..Default::default()
         }
     }

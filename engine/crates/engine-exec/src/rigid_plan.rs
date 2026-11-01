@@ -70,8 +70,6 @@ pub struct StepModes {
     pub sparse_start: u32,
     pub color_headroom: Option<u32>,
     pub color_round_headroom: Option<u32>,
-    /// The sparse tail's single-workgroup loop can cover the body capacity.
-    pub tail_ok: bool,
     /// Append `pose_pack` after the sleep commit: compact render poses and the
     /// list of bodies that moved (bindings 34-36, after BIND_COUNT; read-only on physics state).
     pub pose_output: bool,
@@ -211,7 +209,7 @@ pub fn color_rounds_dispatched(m: &StepModes, last: &StepCounters) -> u32 {
 /// Primal colours dispatched one by one; later colours run in the sparse tail.
 pub fn primal_colors_dispatched(m: &StepModes, i: &StepInputs, max_c: u32) -> u32 {
     let estimate = match m.color_headroom {
-        Some(h) if m.tail_ok && i.steps_done > 0 => (i.last.color_count + h).max(1),
+        Some(h) if i.steps_done > 0 => (i.last.color_count + h).max(1),
         _ => max_c,
     };
     estimate.min(m.sparse_start).min(max_c)
@@ -1273,7 +1271,6 @@ mod tests {
             sparse_start: 32,
             color_headroom: Some(4),
             color_round_headroom: Some(2),
-            tail_ok: true,
             pose_output: false,
             ..StepModes::default()
         }

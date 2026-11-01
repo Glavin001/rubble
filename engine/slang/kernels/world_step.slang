@@ -5598,6 +5598,9 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
     }
 }
 
+// Bodies per span of the sparse tail: 2^15 chunks of 8.
+static const uint SPARSE_SPAN_BODIES = 8u << 15;
+
 // Experimental single-workgroup tail. Every color is completed before the next,
 // and every bucket is chunked, so no stale CPU count can truncate the solve.
 [shader("compute")]
@@ -5618,7 +5621,10 @@ void solve_primal_sparse(uint3 lid : SV_GroupThreadID)
         if (local == 0u) gsUniformLanes = SOLVE_COUNT(color);
         GROUP_SYNC();
         uint count = gsUniformLanes;
-        for (uint base = 0u; base < count; base += 8u)
+        // Spans keep each loop under the WGSL loop guard (WGSL_LOOP_CAP
+        // iterations), so a colour of any size finishes here.
+        for (uint span = 0u; span < count; span += SPARSE_SPAN_BODIES)
+        for (uint base = span; base < min(count, span + SPARSE_SPAN_BODIES); base += 8u)
         {
             uint bodySlot = base + slot;
             bool live = bodySlot < count;
