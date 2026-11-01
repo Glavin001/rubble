@@ -22,8 +22,10 @@ pub struct TrackedBody {
     pub tris: Vec<[u32; 3]>,
     /// Rest triangle edge lengths, for the tear test.
     pub tri_rest: Vec<[f32; 3]>,
-    /// Nodes that collide with triangles (contacters).
+    /// Nodes that collide with other vehicles' triangles (contacters).
     pub contacter: Vec<bool>,
+    /// Nodes that collide with their own vehicle's triangles.
+    pub self_collision: Vec<bool>,
     /// Per triangle, the vehicle's beams along its edges (beam index in the
     /// desc's packed order), when any: a triangle loses collision once one breaks.
     pub edge_beams: Vec<Vec<u32>>,
@@ -90,7 +92,16 @@ impl TrackedBody {
             nodes: desc.nodes.len() as u32,
             tris,
             tri_rest,
-            contacter: desc.nodes.iter().map(|n| n.contacter).collect(),
+            contacter: desc
+                .nodes
+                .iter()
+                .map(|n| n.contacter && n.collision)
+                .collect(),
+            self_collision: desc
+                .nodes
+                .iter()
+                .map(|n| n.self_collision && n.collision)
+                .collect(),
             edge_beams,
             excluded,
         }
@@ -125,6 +136,9 @@ pub struct PenetrationTracker {
     prev: Vec<Vec3>,
     /// Largest count seen so far.
     pub max: PenetrationCount,
+    /// This sample's penetrating pairs: (triangle's body, triangle, node index in
+    /// the sampled array, depth behind the face).
+    pub last: Vec<(u32, u32, u32, f32)>,
 }
 
 impl PenetrationTracker {
@@ -136,6 +150,7 @@ impl PenetrationTracker {
             pairs: HashMap::new(),
             prev: Vec::new(),
             max: PenetrationCount::default(),
+            last: Vec::new(),
         }
     }
 
@@ -148,6 +163,7 @@ impl PenetrationTracker {
             self.prev = x.to_vec();
         }
         let mut live = HashMap::with_capacity(self.pairs.len());
+        self.last.clear();
         let range = self.range;
         // Triangles by body: (body, tri) → plane, bounds.
         for (tb, body) in self.bodies.iter().enumerate() {
@@ -181,9 +197,13 @@ impl PenetrationTracker {
                 for (nb, other) in self.bodies.iter().enumerate() {
                     let same = nb == tb;
                     for k in 0..other.nodes {
-                        if !other.contacter[k as usize]
-                            || (same && body.excluded.contains(&(k, ti as u32)))
-                        {
+                        let collides = if same {
+                            other.self_collision[k as usize]
+                                && !body.excluded.contains(&(k, ti as u32))
+                        } else {
+                            other.contacter[k as usize]
+                        };
+                        if !collides {
                             continue;
                         }
                         let gi = (other.first + k) as usize;
@@ -215,6 +235,7 @@ impl PenetrationTracker {
                         }
                         live.insert(key, side);
                         if inside && side * d < -self.tolerance {
+                            self.last.push((tb as u32, ti as u32, gi as u32, -side * d));
                             if same {
                                 count.self_ += 1;
                             } else {
@@ -382,6 +403,7 @@ mod tests {
             tris: vec![[0, 1, 2]],
             tri_rest: vec![[1.0, 1.5, 1.0]],
             contacter: vec![false; 3],
+            self_collision: vec![false; 3],
             edge_beams: vec![vec![]],
             excluded: Default::default(),
         }
@@ -394,6 +416,7 @@ mod tests {
             tris: vec![],
             tri_rest: vec![],
             contacter: vec![true],
+            self_collision: vec![true],
             edge_beams: vec![],
             excluded: Default::default(),
         }

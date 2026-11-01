@@ -57,8 +57,13 @@ static const uint ENTRY_SELF = 131072u;
 static const uint NODE_GROUPED = 0x80000000u;
 // Node contacts a triangle records (the triangle side of node–triangle contacts).
 static const uint TRI_NODE_CONTACTS = 4u;
-static const uint TRI_CONTACT_STRIDE = 3u + 3u * TRI_NODE_CONTACTS;
-static const uint NODE_SLOT_STRIDE = 3u;
+// Obstacle (3 slots), node contacts (3 each), then the nearest node's distance in
+// front of the face this step (the displacement bound of its vertices).
+static const uint TRI_CONTACT_STRIDE = 4u + 3u * TRI_NODE_CONTACTS;
+static const uint TRI_BOUND_SLOT = 3u + 3u * TRI_NODE_CONTACTS;
+// Node contacts per node (its side-cached triangles), 3 slots each.
+static const uint NODE_CONTACTS = 4u;
+static const uint NODE_SLOT_STRIDE = 3u * NODE_CONTACTS;
 // "No index" marker stored in float4 slots: FLT_MAX bits (an all-ones NaN pattern
 // cannot appear as a WGSL constant).
 static const uint SOFT_NONE = 0x7F7FFFFFu;
@@ -109,6 +114,11 @@ uint softTriExtraBase() { return SU(9u).w; }
 uint softPairCacheBase() { return SU(10u).x; }
 uint softLocalBase() { return SU(10u).y; }
 uint softOriginBase() { return SU(10u).z; }
+// Least speed (m/s) at which a soft contact pushes out an overlap it started the
+// step with (SoftSettings::contact_push_out).
+float softPushOut() { return SD(10u).w; }
+// Displacement bound relaxation γ (SoftSettings::displacement_bound; 0 = off).
+float softBoundGamma() { return SD(11u).x; }
 // BDF2 for this particle this step: on, and it has a position one step back.
 bool softBdf2For(uint ord) { return softBdf2On() && SD(softBdfBase() + ord).w == 1.0; }
 static const uint SOFT_PAIR_STRIDE = 8u; // engine_softbody::SOFT_PAIR_STRIDE
@@ -170,13 +180,16 @@ void softSetPos(uint b, float3 x) { gBodies[b].position = x; }
 // the contacts between bodies, which are geometric and tolerate its rounding.
 // Per particle ordinal: [local], [local at the step start], [inertial target].
 float3 softOrigin(uint s) { return SD(softOriginBase() + s).xyz; }
-float3 softLocal(uint o) { return SD(softLocalBase() + 3u * o).xyz; }
-float3 softLocal0(uint o) { return SD(softLocalBase() + 3u * o + 1u).xyz; }
-float3 softTargetLocal(uint o) { return SD(softLocalBase() + 3u * o + 2u).xyz; }
+static const uint LOCAL_STRIDE = 4u;
+float3 softLocal(uint o) { return SD(softLocalBase() + LOCAL_STRIDE * o).xyz; }
+float3 softLocal0(uint o) { return SD(softLocalBase() + LOCAL_STRIDE * o + 1u).xyz; }
+float3 softTargetLocal(uint o) { return SD(softLocalBase() + LOCAL_STRIDE * o + 2u).xyz; }
+// Where contacts were detected this step (the initial guess, local).
+float3 softDetectLocal(uint o) { return SD(softLocalBase() + LOCAL_STRIDE * o + 3u).xyz; }
 // Writes a particle's local position and its world copy.
 void softSetLocal(uint body, uint o, uint s, float3 xl)
 {
-    gSoftData[softLocalBase() + 3u * o] = float4(xl, 0.0);
+    gSoftData[softLocalBase() + LOCAL_STRIDE * o] = float4(xl, 0.0);
     gBodies[body].position = softOrigin(s) + xl;
 }
 struct SoftBeam
@@ -314,7 +327,7 @@ void softRecentre(uint s, uint local)
         float3 xl = softLocal(ob + k);
         if (any(abs(o + xl - xw) > 0.01))
         {
-            gSoftData[softLocalBase() + 3u * (ob + k)] = float4(xw - o, 0.0);
+            gSoftData[softLocalBase() + LOCAL_STRIDE * (ob + k)] = float4(xw - o, 0.0);
             gSoftData[softBdfBase() + ob + k] = float4(0.0, 0.0, 0.0, 0.0);
         }
     }
@@ -331,7 +344,7 @@ void softRecentre(uint s, uint local)
     if (!any(shift != 0.0)) return;
     for (uint k = local; k < r.y; k += 64u)
     {
-        uint q = softLocalBase() + 3u * (ob + k);
+        uint q = softLocalBase() + LOCAL_STRIDE * (ob + k);
         gSoftData[q] = float4(SD(q).xyz - shift, 0.0);
         float4 hist = SD(softBdfBase() + ob + k);
         if (hist.w != 0.0) gSoftData[softBdfBase() + ob + k] = float4(hist.xyz - shift, hist.w);
@@ -441,9 +454,10 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
             // (soft_mode), and then solves from them.
             float3 x0l = softLocal(ord);
             float h = PARAMS.dt;
-            gSoftData[softLocalBase() + 3u * ord + 1u] = float4(x0l, 0.0);
-            gSoftData[softLocalBase() + 3u * ord + 2u] = float4(
+            gSoftData[softLocalBase() + LOCAL_STRIDE * ord + 1u] = float4(x0l, 0.0);
+            gSoftData[softLocalBase() + LOCAL_STRIDE * ord + 2u] = float4(
                 x0l + b.linearVel * h + float3(0.0, PARAMS.gravityY, 0.0) * (h * h), 0.0);
+            gSoftData[softLocalBase() + LOCAL_STRIDE * ord + 3u] = float4(xl, 0.0);
             softSetLocal(body, ord, sb, xl);
             gSoftData[q] = float4(xl, 0.0);
             gSoftData[q + 1u] = float4(xl, 0.0);
@@ -482,9 +496,10 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
             // The world copies the rigid pipeline reads (primalAccumulate's target).
             gAabbs[body].mn = o + y;
             gBodies[body].initialPos = o + x0;
-            uint lq = softLocalBase() + 3u * ord;
+            uint lq = softLocalBase() + LOCAL_STRIDE * ord;
             gSoftData[lq + 1u] = float4(x0, 0.0);
             gSoftData[lq + 2u] = float4(y, 0.0);
+            gSoftData[lq + 3u] = float4(x, 0.0);
             softSetLocal(body, ord, sb, x);
             gSoftData[q] = float4(x, 0.0);
             gSoftData[q + 1u] = float4(x, 0.0);
@@ -776,6 +791,7 @@ bool pairKeep(uint e, float3 x)
 static const uint SOFT_NODE_LANES = 8u;
 groupshared float gsNodeScore[64];
 groupshared uint gsNodeTri[64];
+groupshared float gsNodeSide[64];
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -789,7 +805,7 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
     uint sb = ent.w & 0xFFFFu;
     uint ordSelf = particleOrdinal(sb, body);
     uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * ordSelf;
-    if (live && lane == 0u) gSoftData[ns] = float4(0, 0, 0, asfloat(SOFT_NONE));
+    if (live && lane < NODE_CONTACTS) gSoftData[ns + 3u * lane] = float4(0, 0, 0, asfloat(SOFT_NONE));
     bool ext = (ent.w & ENTRY_CONTACTER) != 0u;
     // Self-collision: a node against its own body's triangles too (a torn door, a
     // folding bonnet), except triangles it is a corner of and, with node groups
@@ -895,37 +911,63 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
     }
     gsNodeScore[lid.x] = bestScore;
     gsNodeTri[lid.x] = bestTri;
+    gsNodeSide[lid.x] = bestSide;
     GroupMemoryBarrierWithGroupSync();
-    if (!live) return;
-    uint first = lid.x - lane;
-    bool winner = bestTri != SOFT_NONE;
-    for (uint k = 0u; k < SOFT_NODE_LANES && winner; k++)
+    if (!live || lane != 0u) return;
+    // Lane 0 assembles the node's contacts: the deepest pair over the lanes, the
+    // cached pairs that still matter, then the other lanes' nearest pairs (so a
+    // pair is cached, with its side, as soon as the node comes within reach, not
+    // only once it is the deepest). All of them are enforced.
+    uint first = lid.x;
+    uint top = SOFT_NONE;
+    float topScore = 1e30;
+    for (uint k = 0u; k < SOFT_NODE_LANES; k++)
     {
         float sk = gsNodeScore[first + k];
         uint tk = gsNodeTri[first + k];
-        if (k != lane && tk != SOFT_NONE && (sk < bestScore || (sk == bestScore && tk < bestTri))) winner = false;
+        if (tk != SOFT_NONE && (sk < topScore || (sk == topScore && tk < top))) { topScore = sk; top = k; }
     }
-    // The cache: the winning lane (or lane 0 when no lane found a triangle)
-    // records this step's pair first, then keeps the old pairs that still matter.
-    bool none = true;
-    for (uint k = 0u; k < SOFT_NODE_LANES; k++) none = none && gsNodeTri[first + k] == SOFT_NONE;
-    if (winner || (none && lane == 0u))
+    uint4 next = uint4(0, 0, 0, 0);
+    uint m = 0u;
+    if (top != SOFT_NONE) { next[0] = pairEntry(gsNodeTri[first + top], gsNodeSide[first + top]); m = 1u; }
+    for (uint k = 0u; k < PAIR_CACHE && m < NODE_CONTACTS; k++)
     {
-        uint4 next = uint4(0, 0, 0, 0);
-        uint m = 0u;
-        if (winner) { next[0] = pairEntry(bestTri, bestSide); m = 1u; }
-        for (uint k = 0u; k < PAIR_CACHE; k++)
-        {
-            uint e = cache[k];
-            if (e == 0u || m >= PAIR_CACHE || (winner && pairTri(e) == bestTri)) continue;
-            if (pairKeep(e, x)) { next[m] = e; m++; }
-        }
-        gSoftData[cacheAt] = asfloat(next);
+        uint e = cache[k];
+        bool dup = false;
+        for (uint j = 0u; j < m; j++) dup = dup || pairTri(next[j]) == pairTri(e);
+        if (e != 0u && !dup && pairKeep(e, x)) { next[m] = e; m++; }
     }
-    if (!winner) return;
-    gSoftData[ns] = float4(bestN, asfloat(bestTri));
-    gSoftData[ns + 1u] = float4(bestW, bestDelta);
-    gSoftData[ns + 2u] = float4(bestGap, 0.0, 0.0, 0.0);
+    for (uint k = 0u; k < SOFT_NODE_LANES && m < NODE_CONTACTS; k++)
+    {
+        uint tk = gsNodeTri[first + k];
+        bool dup = tk == SOFT_NONE;
+        for (uint j = 0u; j < m; j++) dup = dup || pairTri(next[j]) == tk;
+        if (!dup) { next[m] = pairEntry(tk, gsNodeSide[first + k]); m++; }
+    }
+    gSoftData[cacheAt] = asfloat(next);
+    if (m == 0u) return;
+    // Each pair's contact for this step: normal toward the node's side,
+    // barycentrics of its foot (clamped onto the triangle), thickness and the
+    // step-start gap.
+    for (uint k = 0u; k < m; k++)
+    {
+        uint t = pairTri(next[k]);
+        float side = pairSide(next[k]);
+        uint4 tri = SU(softTriBase() + t);
+        float4 p0 = SD(softTriPlaneBase() + 2u * t);
+        float3 n = p0.xyz * side;
+        float3 a = gBodies[tri.x].position, bp = gBodies[tri.y].position, c = gBodies[tri.z].position;
+        float3 w;
+        closestOnTriangle(x - p0.xyz * dot(x - a, p0.xyz), a, bp, c, w);
+        float delta = triThickness(t, tri);
+        float3 q0 = w.x * gBodies[tri.x].initialPos + w.y * gBodies[tri.y].initialPos + w.z * gBodies[tri.z].initialPos;
+        // .y: the node's distance in front of the face on its side (0 when behind):
+        // the displacement bound's room toward it.
+        float sd = max(dot(x - a, n), 0.0);
+        gSoftData[ns + 3u * k] = float4(n, asfloat(t));
+        gSoftData[ns + 3u * k + 1u] = float4(w, delta);
+        gSoftData[ns + 3u * k + 2u] = float4(dot(x0 - q0, n) - delta, sd, 0.0, 0.0);
+    }
     gSoftData[softFlagBase() + ordSelf] = float4(1, 0, 0, 0);
 }
 
@@ -1022,6 +1064,7 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
     uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * t;
     gSoftData[tc] = float4(0, 0, 0, asfloat(SOFT_NONE));
     for (uint m = 0u; m < TRI_NODE_CONTACTS; m++) gSoftData[tc + 3u + 3u * m] = float4(0, 0, 0, asfloat(SOFT_NONE));
+    gSoftData[tc + TRI_BOUND_SLOT] = float4(1e30, 1e30, 0, 0);
     if (!softContactsOn()) return;
     uint4 tri = SU(softTriBase() + t);
     // Anti-clip-only triangles (non-collidable) still keep their nodes' sides,
@@ -1089,6 +1132,9 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
 
     // Nodes of other soft bodies that chose this triangle.
     uint found = 0u;
+    // The nearest node in front of the face, on its front and on its back.
+    float2 nearest = float2(1e30, 1e30);
+    float3 faceN = SD(softTriPlaneBase() + 2u * t).xyz;
     uint nb = softBodyCount();
     uint np = softPairCount(sb);
     for (uint pk = 0u; pk < np && found < TRI_NODE_CONTACTS; pk++)
@@ -1101,15 +1147,26 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
         for (uint k = 0u; k < r2.y && found < TRI_NODE_CONTACTS; k++)
         {
             uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * (ordBase + k);
-            float4 s0 = SD(ns);
-            if (asuint(s0.w) != t) continue;
-            gSoftData[tc + 3u + 3u * found] = float4(s0.xyz, asfloat(r2.x + k));
-            gSoftData[tc + 4u + 3u * found] = SD(ns + 1u);
-            gSoftData[tc + 5u + 3u * found] = SD(ns + 2u);
-            found++;
-            marked = true;
+            for (uint j = 0u; j < NODE_CONTACTS && found < TRI_NODE_CONTACTS; j++)
+            {
+                float4 s0 = SD(ns + 3u * j);
+                if (asuint(s0.w) == SOFT_NONE) break;
+                if (asuint(s0.w) != t) continue;
+                float4 s2 = SD(ns + 3u * j + 2u);
+                if (s2.y > 0.0)
+                {
+                    if (dot(s0.xyz, faceN) >= 0.0) nearest.x = min(nearest.x, s2.y);
+                    else nearest.y = min(nearest.y, s2.y);
+                }
+                gSoftData[tc + 3u + 3u * found] = float4(s0.xyz, asfloat(r2.x + k));
+                gSoftData[tc + 4u + 3u * found] = SD(ns + 3u * j + 1u);
+                gSoftData[tc + 5u + 3u * found] = s2;
+                found++;
+                marked = true;
+            }
         }
     }
+    gSoftData[tc + TRI_BOUND_SLOT] = float4(nearest, 0, 0);
     if (marked)
     {
         uint ob = asuint(softBodyRec1(sb).w) - softBodyRec(sb).x;
@@ -1124,9 +1181,17 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
 // travel u this step. As rigid contacts (AVBD α), only (1 − α) of an overlap
 // present at the step start is corrected per step, so a deep overlap (a node
 // freed inside a crushed panel) is not fired out.
-void softContactTerm(inout float3 g, inout float3x3 H, float s, float C, float C0, float3 n, float3 u)
+void softContactTerm(inout float3 g, inout float3x3 H, float s, float C, float C0, float3 n, float3 u, float delta)
 {
-    C -= PARAMS.alpha * min(C0, 0.0);
+    // The overlap left this step: α of the step-start one. Past the face itself
+    // (deeper than the thickness δ), at least contact_push_out·h less, until the
+    // node is back on the face (α = 0.99 alone held a node 2 cm behind a panel for
+    // a third of a second). Within the thickness, α alone: parts that rest that
+    // close are left be.
+    float c0 = min(C0, 0.0);
+    float keep = PARAMS.alpha * c0;
+    if (c0 < -delta) keep = max(keep, min(c0 + softPushOut() * PARAMS.dt, -delta));
+    C -= keep;
     if (C >= 0.0) return;
     float k = softContactStiffness();
     float3x3 nn = float3x3(n * n.x, n * n.y, n * n.z);
@@ -1163,7 +1228,7 @@ void softTriObstacleTerm(uint4 tri, uint tc, uint j, inout float3 g, inout float
     float4 o1 = SD(tc + 1u);
     float4 o2 = SD(tc + 2u);
     float C = dot(o0.xyz, triPoint(tri, o2.xyz) - o1.xyz) - o2.w;
-    softContactTerm(g, H, o2[j], C, o1.w, o0.xyz, triTravel(tri, o2.xyz));
+    softContactTerm(g, H, o2[j], C, o1.w, o0.xyz, triTravel(tri, o2.xyz), o2.w);
 }
 void softTriNodeTerm(uint4 tri, uint tc, uint j, uint m, inout float3 g, inout float3x3 H)
 {
@@ -1173,7 +1238,7 @@ void softTriNodeTerm(uint4 tri, uint tc, uint j, uint m, inout float3 g, inout f
     float3 np = softPos(node);
     float C = dot(c0.xyz, np - triPoint(tri, c1.xyz)) - c1.w;
     float3 u = (np - softPos0(node)) - triTravel(tri, c1.xyz);
-    softContactTerm(g, H, -c1[j], C, SD(tc + 5u + 3u * m).x, c0.xyz, u);
+    softContactTerm(g, H, -c1[j], C, SD(tc + 5u + 3u * m).x, c0.xyz, u, c1.w);
 }
 
 uint softContactListBase() { return SU(9u).y; }
@@ -1233,14 +1298,15 @@ void softContactsFor(uint body, uint ord, float3 x, float3 x0, uint triStart, ui
     // triangle vertex); the rest have nothing to read.
     if (SD(softFlagBase() + ord).x == 0.0) return;
     uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * ord;
-    float4 s0 = SD(ns);
-    uint t = asuint(s0.w);
-    if (t != SOFT_NONE && lane == 0u)
+    for (uint j = lane; j < NODE_CONTACTS; j += lanes)
     {
-        float4 s1 = SD(ns + 1u);
+        float4 s0 = SD(ns + 3u * j);
+        uint t = asuint(s0.w);
+        if (t == SOFT_NONE) continue;
+        float4 s1 = SD(ns + 3u * j + 1u);
         uint4 tri = SU(softTriBase() + t);
         float C = dot(s0.xyz, x - triPoint(tri, s1.xyz)) - s1.w;
-        softContactTerm(g, H, 1.0, C, SD(ns + 2u).x, s0.xyz, (x - x0) - triTravel(tri, s1.xyz));
+        softContactTerm(g, H, 1.0, C, SD(ns + 3u * j + 2u).x, s0.xyz, (x - x0) - triTravel(tri, s1.xyz), s1.w);
     }
     uint cl = softContactListBase() + CONTACT_LIST_STRIDE * ord;
     uint n = SU(cl).x;
@@ -1384,6 +1450,46 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
     return SOFT_SOLVE;
 }
 
+// Displacement bounds (BeamNG-parity plan, phase 2; after Offset Geometric
+// Contact, Chen et al. 2025): a particle in a soft contact may move toward each
+// face it is in front of by at most γ times its distance from it at detection,
+// measured from where it was detected (the initial guess); a triangle vertex
+// may move toward the nodes on either side of its face by at most γ times the
+// nearest one's distance. With γ < 1/2 neither side can close the gap alone, so no
+// node crosses a face within the step, however hard it is pushed. Motion along
+// the faces is free.
+float3 softBounded(uint4 ent, uint ord, float3 xn)
+{
+    float gamma = softBoundGamma();
+    if (gamma <= 0.0 || !softContactsOn() || SD(softFlagBase() + ord).x == 0.0) return xn;
+    float3 xd = softDetectLocal(ord);
+    uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * ord;
+    for (uint j = 0u; j < NODE_CONTACTS; j++)
+    {
+        float4 s0 = SD(ns + 3u * j);
+        if (asuint(s0.w) == SOFT_NONE) break;
+        float sd = SD(ns + 3u * j + 2u).y;
+        if (sd <= 0.0) continue;
+        float c = dot(s0.xyz, xn - xd);
+        float lim = -gamma * sd;
+        if (c < lim) xn += s0.xyz * (lim - c);
+    }
+    uint adj = softAdjBase();
+    uint triStart = ent.y + 2u * (ent.z & 0xFFFFu), triCount = ent.z >> 16;
+    for (uint k = 0u; k < triCount; k++)
+    {
+        uint wi = triStart + k;
+        uint tt = SU(adj + (wi >> 2))[wi & 3u];
+        float2 near = SD(softTriContactBase() + TRI_CONTACT_STRIDE * tt + TRI_BOUND_SLOT).xy;
+        if (near.x >= 1e29 && near.y >= 1e29) continue;
+        // Toward the nodes in front of it (front face: +n), each side on its own.
+        float3 n = SD(softTriPlaneBase() + 2u * tt).xyz;
+        float c = dot(n, xn - xd);
+        xn += n * (clamp(c, -gamma * near.y, gamma * near.x) - c);
+    }
+    return xn;
+}
+
 // Apply a particle's summed block: follow the core (rigid mode) or take the
 // block step.
 void softFinish(uint4 ent, uint mode, float3x3 H, float3 g)
@@ -1418,7 +1524,7 @@ void softFinish(uint4 ent, uint mode, float3x3 H, float3 g)
     float l = length(dx);
     if (l > maxLin && l > 1e-12) dx *= maxLin / l;
     if (dx.x != dx.x || dx.y != dx.y || dx.z != dx.z) return;
-    softSetLocal(body, ord, sb0, xa + dx);
+    softSetLocal(body, ord, sb0, softBounded(ent, ord, xa + dx));
 }
 
 // VBD block solve of one particle on one lane.

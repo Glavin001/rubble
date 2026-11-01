@@ -88,7 +88,46 @@ triangle break on edge beam or `breakGroup`. Sedan after phases 1 and 4:
 | 240 Hz × 10 | 8.6 / 36.5 / 107.4 | 31 29 31 | 38 | 19 |
 | 960 Hz × 30 | 10.3 / 22.8 / 68.8 | 20 15 20 | 48 | 5 |
 
-Open: triangle activation pre-pass, rigid hulls against soft triangles, the remaining
-penetrations (phase 2's displacement bounds), `staticCollision`, visual tearing in the
-skinning kernel matching collision tearing, self-collision cost on the high-res car.
+Then (DECISIONS s29): four contacts per node from the side cache, pairs cached on
+approach, overlap past the face pushed out at ≥ 1 m/s:
 
+| setting | crush 30 / 56 / 100 km/h max (cm) | 56 km/h profile (cm) | rebound (m/s) | intrusion (cm) | self-penetrations |
+|---|---|---|---|---|---|
+| oracle | 10.2 / 25.6 / 73.4 | 20 15 19 | 5.3 | 6.1 | 2 |
+| 240 Hz × 10 | 9.6 / 36.6 / 113.9 | 20 23 22 | 4.6 | 4.2 | 5 |
+| 960 Hz × 30 | 10.3 / 22.5 / 74.8 | 20 20 22 | 5.8 | 5.1 | 7 |
+
+Open: triangle activation pre-pass, rigid hulls against soft triangles, `staticCollision`,
+visual tearing in the skinning kernel matching collision tearing, self-collision cost on
+the high-res car.
+
+### Phase 2 — penetration-free contact (implemented, off by default; s29)
+
+`SoftSettings::displacement_bound` (γ): OGC-style bounds along each contact's normal,
+from the detection position. Penetrations, max over the run (`soft_anticlip.rs`
+probes):
+
+| scene | oracle (6.3 kHz) | 240 Hz × 10, γ = 0 | 240 Hz × 10, γ = 0.45 | 960 Hz × 30, γ = 0 |
+|---|---|---|---|---|
+| wall 56 km/h | 2 self | 5 self | 13 self | 7 self |
+| wall 100 km/h | 7 self | 33 self | 25 self | 23 self |
+| head-on 2 × 80 km/h | 14 ext + 8 self | 1 ext + 35 self | 12 ext + 40 self | 0 ext + 33 self |
+| side pole 60 km/h | — | 5 self | 5 self | 4 self |
+
+The plan's "penetration count = 0" is not met by the penalty contact model, the
+explicit reference included. The remaining cases are nodes already behind a face at
+the step start under crash loads.
+
+### High-resolution car (phase 8 input)
+
+`CAR=hires` (1,014 nodes, no rigid core):
+
+| setting | crush 30 / 56 / 100 km/h max (cm) | 56 km/h profile (cm) | self-penetrations | 1 m drop: bent |
+|---|---|---|---|---|
+| oracle (10.4 kHz) | 8.3 / 53.0* / 78.7 | 15 15 20 14 18 | 3 | 115 |
+| 240 Hz × 10 | 71.6 / 150 / 215 | ~190 | 251 | 517 |
+| 960 Hz × 30 | 7.4 / 20.5 / 77.2 | 15 13 21 15 18 | 96 | 63 |
+
+\* one torn shell node; the profile agrees with 960 Hz × 30. At production settings a
+BeamNG-resolution car is badly under-converged (it collapses), so phases 5, 7 and 8
+carry the high-res target.

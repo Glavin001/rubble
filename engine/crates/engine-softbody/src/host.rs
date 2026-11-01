@@ -337,7 +337,9 @@ impl SoftHost {
         self.particles_used += desc.nodes.len() as u32;
         // Node contact slots start empty (fixed particles are never rewritten).
         let none = [[0u32, 0, 0, SOFT_NONE], [0, 0, 0, 0], [0, 0, 0, 0]];
-        let slots: Vec<Slot> = (0..desc.nodes.len()).flat_map(|_| none).collect();
+        let slots: Vec<Slot> = (0..desc.nodes.len() * NODE_CONTACTS as usize)
+            .flat_map(|_| none)
+            .collect();
         backend.write_soft_slots(l.node_slot_base + NODE_SLOT_STRIDE * ordinal_base, &slots);
         // Vehicle-local frame: an origin on the 1 m grid near the spawn, and every
         // particle's position relative to it (the solver's state; the world
@@ -354,10 +356,10 @@ impl SoftHost {
             .flat_map(|n| {
                 let p = rel + place.rotation * Vec3::from_array(n.position);
                 let w = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), 0];
-                [w, w, w]
+                [w; LOCAL_STRIDE as usize]
             })
             .collect();
-        backend.write_soft_slots(l.local_base + 3 * ordinal_base, &locals);
+        backend.write_soft_slots(l.local_base + LOCAL_STRIDE * ordinal_base, &locals);
         // Anti-clip side caches start empty.
         let empty: Vec<Slot> = vec![[0; 4]; desc.nodes.len()];
         backend.write_soft_slots(l.pair_cache_base + ordinal_base, &empty);
@@ -705,7 +707,13 @@ impl SoftHost {
                 l.body_pair_base,
             ],
             [l.bdf_base, l.contact_list_base, l.part_base, l.tri_extra_base],
-            [l.pair_cache_base, l.local_base, l.origin_base, 0],
+            [
+                l.pair_cache_base,
+                l.local_base,
+                l.origin_base,
+                st.contact_push_out.max(0.0).to_bits(),
+            ],
+            [st.displacement_bound.clamp(0.0, 0.49).to_bits(), 0, 0, 0],
         ];
         backend.write_soft_slots(0, &header);
     }

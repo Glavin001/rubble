@@ -24,14 +24,15 @@
 //!                        the triangle stops colliding
 //! pairCacheBase + o      particle ordinal o: its anti-clip side cache, four
 //!                        (triangle + 1) << 1 | back entries (0 = empty)
-//! localBase + 3·o        particle ordinal o in its body's local frame: position,
-//!                        position at the step start, inertial target
+//! localBase + 4·o        particle ordinal o in its body's local frame: position,
+//!                        position at the step start, inertial target, where its
+//!                        contacts were detected
 //! originBase + s         soft body s's local-frame origin (whole metres)
 //! ```
 
 use serde::{Deserialize, Serialize};
 
-pub const HEADER_SLOTS: u32 = 11;
+pub const HEADER_SLOTS: u32 = 12;
 /// Slots per soft body in the pair list (a count and up to 31 bodies).
 pub const SOFT_PAIR_STRIDE: u32 = 8;
 /// Slots per particle in the contact list (a count and up to 15 contacts).
@@ -44,9 +45,17 @@ pub const BODY_STRIDE: u32 = 6;
 pub const BEAM_STRIDE: u32 = 4;
 /// Node contacts a triangle records (its side of node–triangle contacts).
 pub const TRI_NODE_CONTACTS: u32 = 4;
-pub const TRI_CONTACT_STRIDE: u32 = 3 + 3 * TRI_NODE_CONTACTS;
-/// Node contact slot stride (normal + triangle, barycentrics + δ, initial gap).
-pub const NODE_SLOT_STRIDE: u32 = 3;
+/// Per triangle: its obstacle (3 slots), its node contacts (3 each), and the
+/// nearest node's distance in front of it (the displacement bound).
+pub const TRI_CONTACT_STRIDE: u32 = 4 + 3 * TRI_NODE_CONTACTS;
+/// Slots per particle in the local-frame region: position, step-start position,
+/// inertial target, detection position.
+pub const LOCAL_STRIDE: u32 = 4;
+/// Node contacts per node (its side-cached triangles, all enforced).
+pub const NODE_CONTACTS: u32 = 4;
+/// Node contact slot stride: per contact (normal + triangle, barycentrics + δ,
+/// initial gap).
+pub const NODE_SLOT_STRIDE: u32 = 3 * NODE_CONTACTS;
 
 /// Beam record words (u32/f32 view of its 4 slots).
 pub const BW_A: usize = 0;
@@ -230,7 +239,7 @@ impl SoftCapacity {
         let tri_extra_base = part_base + PART_STRIDE * MAX_RIGID_PARTS * self.max_bodies;
         let pair_cache_base = tri_extra_base + self.max_triangles;
         let local_base = pair_cache_base + self.max_particles;
-        let origin_base = local_base + 3 * self.max_particles;
+        let origin_base = local_base + LOCAL_STRIDE * self.max_particles;
         SoftLayout {
             body_base,
             beam_base,
@@ -305,6 +314,18 @@ pub struct SoftSettings {
     /// bodies couple to the rigid passes only through their core joints, so
     /// extra sweeps converge them at about half the cost of extra iterations.
     pub sweeps: u32,
+    /// Least speed (m/s) at which a soft contact pushes out an overlap present at
+    /// the step start. AVBD's α alone corrects 1% of it per step (α = 0.99), which
+    /// held a crushed node 2 cm behind a panel for a third of a second; 0 = α only.
+    pub contact_push_out: f32,
+    /// Displacement bound relaxation γ (BeamNG-parity phase 2, after Offset
+    /// Geometric Contact): a particle in a soft contact moves toward a face it is
+    /// in front of by at most γ × its distance at detection, and a triangle vertex
+    /// along its normal by γ × the nearest node's, so no node crosses a face within
+    /// a step. Below 1/2; 0 = off (the default: at 240 Hz × 10 it cut a 100 km/h
+    /// wall's penetrations from 33 to 25 but raised a 2 × 80 km/h head-on's
+    /// car-to-car ones from 1 to 12; DECISIONS s29).
+    pub displacement_bound: f32,
     /// Second-order BDF2 for the particles instead of backward Euler (BDF1):
     /// far less numerical damping of the structure's vibration at a given step
     /// (experimental; validate with `soft_calibrate`). Backward Euler wherever a
@@ -331,6 +352,8 @@ impl Default for SoftSettings {
             rigid_mode: false,
             rigid_quiet: 0.5,
             bdf2: false,
+            contact_push_out: 1.0,
+            displacement_bound: 0.0,
         }
     }
 }
@@ -371,7 +394,7 @@ mod tests {
         );
         assert_eq!(l.tri_extra_base + c.max_triangles, l.pair_cache_base);
         assert_eq!(l.pair_cache_base + c.max_particles, l.local_base);
-        assert_eq!(l.local_base + 3 * c.max_particles, l.origin_base);
+        assert_eq!(l.local_base + LOCAL_STRIDE * c.max_particles, l.origin_base);
         assert_eq!(l.origin_base + c.max_bodies, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);

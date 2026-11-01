@@ -149,3 +149,62 @@ fn wall_56_crushes_the_front_without_clipping() {
     assert!(intr < 0.15, "the cell holds ({intr})");
     assert!(tr.max.total() <= 4, "clipping {:?}", tr.max);
 }
+
+/// Penetrations in the phase 2 scenes on the oracle (the reference for the GPU's
+/// `soft_anticlip.rs` probe): a 100 km/h wall and a 2 × 80 km/h head-on.
+#[test]
+#[ignore]
+fn oracle_phase2_scenes_probe() {
+    let (d, _) = car_desc(&CarParams::sedan());
+    let lift = standing(&d);
+    for scene in ["wall100", "headon"] {
+        let mut sim = ExplicitSim::new(ExplicitSettings::default());
+        match scene {
+            "wall100" => {
+                sim.add_vehicle(
+                    &d,
+                    Vec3::new(0.0, lift, -1.0),
+                    Quat::IDENTITY,
+                    Vec3::new(0.0, 0.0, 100.0 / 3.6),
+                );
+                sim.add_obstacle(
+                    Shape::Box {
+                        center: DVec3::new(0.0, 1.5, 3.0),
+                        half: DVec3::new(3.0, 1.5, 0.2),
+                        rotation: DQuat::IDENTITY,
+                    },
+                    0.894,
+                );
+            }
+            _ => {
+                let v = 80.0 / 3.6;
+                sim.add_vehicle(
+                    &d,
+                    Vec3::new(0.0, lift, -2.6),
+                    Quat::IDENTITY,
+                    Vec3::new(0.0, 0.0, v),
+                );
+                sim.add_vehicle(
+                    &d,
+                    Vec3::new(0.0, lift, 2.6),
+                    Quat::from_rotation_y(std::f32::consts::PI),
+                    Vec3::new(0.0, 0.0, -v),
+                );
+            }
+        }
+        ground(&mut sim);
+        let n = d.nodes.len() as u32;
+        let bodies = (0..sim.bodies.len() as u32)
+            .map(|b| TrackedBody::from_desc(&d, b * n))
+            .collect();
+        let mut tr = PenetrationTracker::new(bodies);
+        let per = (sim.hz() / 240.0).round() as u32;
+        for _ in 0..300 {
+            for _ in 0..per {
+                sim.substep();
+            }
+            tr.update(&sim.positions(), Some(&broken_flags(&sim)));
+        }
+        println!("{scene}: oracle at {:.0} Hz: {:?}", sim.hz(), tr.max);
+    }
+}

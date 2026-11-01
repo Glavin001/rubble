@@ -317,7 +317,10 @@ fn the_sedan_crumples_its_front_and_keeps_its_cabin() {
         "front crush {}",
         c.crush_peak
     );
-    assert!(c.cabin.abs() < 0.03, "cabin shortened {}", c.cabin);
+    // The bay's parts stack against the firewall rather than passing through one
+    // another (self-collision with every cached pair enforced), so the cell gives a
+    // few cm: the explicit oracle's firewall intrusion in this crash is 6 cm.
+    assert!(c.cabin.abs() < 0.1, "cabin shortened {}", c.cabin);
     assert!(
         (0.05..0.3).contains(&c.bonnet_rise),
         "bonnet tent {}",
