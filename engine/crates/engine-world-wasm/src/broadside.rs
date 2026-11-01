@@ -194,10 +194,9 @@ pub fn finale_targets() -> Vec<([f32; 3], f32)> {
 }
 
 /// Splinter bodies crushed wood leaves (four per crushed chunk, its mass conserved),
-/// reserved when the ship is placed; a take that crushes more fails with an error.
-pub const CRUSH_BUDGET: u32 = 4096;
-/// Raze shoots every part of the ship and crushes far more wood.
-pub const RAZE_CRUSH_BUDGET: u32 = 16384;
+/// reserved when the ship is placed: room for 4,096 crushed chunks, enough for the raze
+/// and for free play after either take. A run that crushes more fails with an error.
+pub const CRUSH_BUDGET: u32 = 16384;
 
 /// The take's script.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -210,15 +209,6 @@ pub enum Take {
     /// each ball at a chunk still part of a large piece, until almost none is, then both
     /// batteries rake what is left.
     Raze,
-}
-
-impl Take {
-    pub fn crush_budget(self) -> u32 {
-        match self {
-            Take::Walk => CRUSH_BUDGET,
-            Take::Raze => RAZE_CRUSH_BUDGET,
-        }
-    }
 }
 
 /// Raze: a chunk in a piece of fewer than this many chunks is destroyed (loose wreckage).
@@ -326,7 +316,7 @@ pub struct Broadside {
     progress: (f32, u32),
 }
 
-fn capacity(asset: &DestructibleAssetDesc, crush_budget: u32) -> anyhow::Result<WorldCapacity> {
+fn capacity(asset: &DestructibleAssetDesc) -> anyhow::Result<WorldCapacity> {
     let stress = asset
         .stress
         .as_ref()
@@ -338,11 +328,11 @@ fn capacity(asset: &DestructibleAssetDesc, crush_budget: u32) -> anyhow::Result<
     let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
     let mut c = stress_rubble::capacity_for(&scene);
     // Every chunk may become a body, plus the crush splinters, the balls and the captain.
-    let bodies = chunks as u32 + crush_budget + MAX_BALLS as u32 + 64;
+    let bodies = chunks as u32 + CRUSH_BUDGET + MAX_BALLS as u32 + 64;
     c.max_bodies = c.max_bodies.max(bodies.next_power_of_two());
     // Contacts for every body the take may have: the wreck piles up on the ground.
     c.max_contacts = stress_rubble::threshold::contact_capacity(
-        chunks + crush_budget as usize + MAX_BALLS,
+        chunks + CRUSH_BUDGET as usize + MAX_BALLS,
         c.max_contacts,
         1 << 30,
     );
@@ -373,7 +363,7 @@ impl Broadside {
             .solver_for(StrengthModel::Threshold)
             .ok_or_else(|| anyhow::anyhow!("asset has no threshold solver"))?;
         let def = WorldDef {
-            capacity: capacity(&asset, take.crush_budget())?,
+            capacity: capacity(&asset)?,
             gravity: [0.0, solver.gravity_y, 0.0],
             solver,
             enable_sleep: false,
@@ -397,7 +387,7 @@ impl Broadside {
             transform: Transform::new(placement.map(|x| -x as f32), [0.0, 0.0, 0.0, 1.0]),
             asleep: false,
             support_loss: true,
-            crush: Some(crush(take.crush_budget())),
+            crush: Some(crush(CRUSH_BUDGET)),
             ..DestructibleDef::new(a)
         })?;
         // The ground the wreck falls on: a static slab, its top at y 0 under the keel
