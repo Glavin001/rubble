@@ -801,8 +801,10 @@ impl World {
                 let (Some(first), Some(cs)) = (e.first_fragment, t.crush.as_ref()) else {
                     continue;
                 };
-                let n = cs.fragments as f64;
-                for i in 0..cs.fragments {
+                // A particle never rotates: it takes the impulse alone.
+                let pieces = cs.pieces(c);
+                let n = pieces as f64;
+                for i in 0..pieces {
                     let body = cs.pool[(first + i) as usize].0;
                     let entry = per_body.entry(body).or_default();
                     entry.0 += w.impulse / n;

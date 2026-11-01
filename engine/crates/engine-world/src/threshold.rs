@@ -522,11 +522,33 @@ mod imp {
         (broken, loads)
     }
 
+    /// A crush particle's spot in its chunk's box, each coordinate in [-1, 1]
+    /// (`fracture.slang` `crush_particle_spot`, the same hash).
+    fn crush_particle_spot(k: u32, i: u32) -> Vec3 {
+        let mut h = k.wrapping_mul(0x9E37_79B1) ^ i.wrapping_mul(0x85EB_CA77);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2C1B_3C6D);
+        h ^= h >> 12;
+        h = h.wrapping_mul(0x297A_2D39);
+        h ^= h >> 15;
+        let h2 = h.wrapping_mul(0x9E37_79B1).wrapping_add(0x7F4A_7C15);
+        Vec3::new(
+            (h & 0x3FF) as f32,
+            ((h >> 10) & 0x3FF) as f32,
+            (h2 & 0x3FF) as f32,
+        ) / 511.5
+            - Vec3::ONE
+    }
+
     /// A threshold destructible's crushing: the reserved fragment bodies (body, shape,
     /// collider; the GPU's `CrushTables::pool` in order) and how many a crush takes.
     struct CrushSlot {
         pool: Vec<(u32, u32, u32)>,
         fragments: u32,
+        /// `CrushMass::Particles`: each chunk's particle count (0 where it cannot crush).
+        particles: Option<Vec<u32>>,
+        /// Its particles' continuous collision while fast.
+        particle_ccd: bool,
         material: u32,
         shape_def: crate::ShapeDef,
     }
@@ -584,6 +606,16 @@ mod imp {
             if i > 0 && self.free[i - 1].0 + self.free[i - 1].1 == self.free[i].0 {
                 self.free[i - 1].1 += self.free[i].1;
                 self.free.remove(i);
+            }
+        }
+    }
+
+    impl CrushSlot {
+        /// Pool entries chunk `c`'s crush takes.
+        fn pieces(&self, c: usize) -> u32 {
+            match &self.particles {
+                Some(counts) => counts[c],
+                None => self.fragments,
             }
         }
     }
@@ -1197,7 +1229,26 @@ mod imp {
             let mut crush_slot = None;
             if let Some(c) = &def.crush {
                 let mut rows = Vec::with_capacity(chunk_count);
+                let mut counts = Vec::with_capacity(chunk_count);
                 let mut lacking = std::collections::BTreeSet::new();
+                // Particles: about volume / size³ a chunk, within its bounds.
+                let particle_count = |volume: f64| -> anyhow::Result<u32> {
+                    match c.mass {
+                        CrushMass::Particles {
+                            size,
+                            max_per_chunk,
+                            ..
+                        } => {
+                            anyhow::ensure!(
+                                size > 0.0 && (1..=4096).contains(&max_per_chunk),
+                                "CrushMass::Particles: size {size} m must be positive and max_per_chunk {max_per_chunk} from 1 to 4096"
+                            );
+                            let n = (volume / (size as f64).powi(3)).round();
+                            Ok((n as u32).clamp(1, max_per_chunk))
+                        }
+                        _ => Ok(0),
+                    }
+                };
                 let mut crushable = 0usize;
                 for (k, &(s, cc)) in chunk_of.iter().enumerate() {
                     let ch = &m.structures[s].chunks[cc];
@@ -1206,6 +1257,8 @@ mod imp {
                     match (&mat.crush, can) {
                         (Some(p), true) => {
                             crushable += 1;
+                            let n = particle_count(ch.volume())?;
+                            counts.push(n);
                             rows.push([
                                 [
                                     p.cap_pressure as f32,
@@ -1217,30 +1270,59 @@ mod imp {
                                     p.crush_viscosity as f32,
                                     ch.volume() as f32,
                                     f32::from_bits(1),
-                                    0.0,
+                                    n as f32,
                                 ],
                             ]);
                         }
                         (None, true) => {
                             lacking.insert(ch.material.clone());
+                            counts.push(0);
                             rows.push([[0.0; 4]; 2]);
                         }
-                        _ => rows.push([[0.0; 4]; 2]),
+                        _ => {
+                            counts.push(0);
+                            rows.push([[0.0; 4]; 2]);
+                        }
                     }
                 }
                 anyhow::ensure!(
                     crushable > 0,
                     "DestructibleDef::crush: no chunk can crush: its materials {lacking:?} have no crush parameters (give them in Crush::materials, e.g. from stress_ref::crush::presets, or import a ScenePack v3 with materials[].crush)"
                 );
-                let (conserve, fragments, budget) = match c.mass {
+                let (conserve, fragments, budget, particles) = match c.mass {
                     CrushMass::Conserve { fragments, budget } => {
                         anyhow::ensure!(
                             fragments.is_power_of_two() && fragments <= 64,
                             "CrushMass::Conserve: {fragments} fragments per chunk; a power of two up to 64"
                         );
-                        (true, fragments, budget)
+                        (true, fragments, budget, false)
                     }
-                    CrushMass::Remove => (false, 0, 0),
+                    CrushMass::Particles { budget, .. } => (true, 0, budget, true),
+                    CrushMass::Remove => (false, 0, 0, false),
+                };
+                let particle_ccd = matches!(
+                    c.mass,
+                    CrushMass::Particles {
+                        continuous: true,
+                        ..
+                    }
+                );
+                anyhow::ensure!(
+                    budget < stress_gpu::fracture::CRUSH_POOL_SPAN,
+                    "DestructibleDef::crush: a budget of {budget} crush bodies; under {}",
+                    stress_gpu::fracture::CRUSH_POOL_SPAN
+                );
+                // Particles share a negative group: they never collide with one another.
+                let pool_def = if particles {
+                    crate::ShapeDef {
+                        filter: crate::Filter {
+                            group: crate::CRUSH_PARTICLE_GROUP,
+                            ..shape_def.filter
+                        },
+                        ..shape_def.clone()
+                    }
+                } else {
+                    shape_def.clone()
                 };
                 let ids = self.create_bodies(&vec![
                     BodyDef {
@@ -1255,17 +1337,29 @@ mod imp {
                     let mut parked = BodyState::static_plane_support();
                     parked.position = crate::graveyard(i);
                     parked.initial_pos = parked.position;
+                    if particle_ccd {
+                        // The particles' continuous collision: the passes are scheduled
+                        // from placement (a parked static body is never a CCD body).
+                        parked.flags |= engine_schema::BODY_CCD_FAST;
+                    }
                     self.sim.write_bodies(i, &[parked]);
-                    let geometry = Geometry::Box {
-                        half: [0.05; 3],
-                        transform: Transform::IDENTITY,
+                    let geometry = if particles {
+                        Geometry::Sphere {
+                            center: [0.0; 3],
+                            radius: 0.05,
+                        }
+                    } else {
+                        Geometry::Box {
+                            half: [0.05; 3],
+                            transform: Transform::IDENTITY,
+                        }
                     };
                     let mut col =
                         self.collider(i, SolverFrame::IDENTITY, &geometry, 0.0, material, None)?;
-                    shape_def.filter.apply(&mut col);
-                    col.material |= crate::contacts::event_bits(&shape_def);
+                    pool_def.filter.apply(&mut col);
+                    col.material |= crate::contacts::event_bits(&pool_def);
                     let (shape, collider) =
-                        self.add_shape_record(i as usize, &shape_def, geometry, col)?;
+                        self.add_shape_record(i as usize, &pool_def, geometry, col)?;
                     let slot = &mut self.bodies[i as usize];
                     slot.owner = Owner::Piece;
                     slot.alive = false;
@@ -1286,6 +1380,8 @@ mod imp {
                     flow,
                     conserve,
                     fragments,
+                    particles,
+                    particle_ccd,
                     pool: pool.iter().map(|p| [p.0, p.2]).collect(),
                     max_events,
                     park_y: crate::graveyard(0)[1],
@@ -1294,8 +1390,10 @@ mod imp {
                 crush_slot = Some(CrushSlot {
                     pool,
                     fragments,
+                    particles: particles.then_some(counts),
+                    particle_ccd,
                     material,
-                    shape_def: shape_def.clone(),
+                    shape_def: pool_def,
                 });
             }
             let owned: Vec<u32> = owned
@@ -2327,11 +2425,13 @@ mod imp {
                 let t = self.fracture.slots[k].as_ref().expect("live slot");
                 let c = e.chunk as usize;
                 let b = t.chunk_body[c] as usize;
-                let (pool, fragments, material, shape_def) = {
+                let (pool, fragments, particles, particle_ccd, material, shape_def) = {
                     let cs = t.crush.as_ref().expect("a crushing destructible");
                     (
                         cs.pool.clone(),
-                        cs.fragments,
+                        cs.pieces(c),
+                        cs.particles.is_some(),
+                        cs.particle_ccd,
                         cs.material,
                         cs.shape_def.clone(),
                     )
@@ -2386,6 +2486,28 @@ mod imp {
                         Vec3::from(e.linear_velocity),
                         Vec3::from(e.angular_velocity),
                     );
+                    if particles {
+                        // As `fr_crush_apply` spreads them: through the box, a radius in,
+                        // about the centre of mass.
+                        let r = e.fragment_half[0];
+                        let room = (h - Vec3::splat(r)).max(h * 0.25);
+                        let mut mean = Vec3::ZERO;
+                        for i in 0..fragments {
+                            mean += crush_particle_spot(e.chunk, i);
+                        }
+                        mean /= fragments as f32;
+                        (0..fragments)
+                            .map(|i| {
+                                let x =
+                                    b0 + o * (room * (crush_particle_spot(e.chunk, i) - mean));
+                                (
+                                    Transform::new(x.to_array(), [0.0, 0.0, 0.0, 1.0]),
+                                    (v + w.cross(x - b0)).to_array(),
+                                    [0.0; 3],
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
                     (0..fragments)
                         .map(|i| {
                             let idx = Vec3::new(
@@ -2401,18 +2523,31 @@ mod imp {
                             )
                         })
                         .collect::<Vec<_>>()
+                    }
                 };
                 if let Some(first) = e.first_fragment {
                     let mf = e.mass / fragments as f32;
                     let h = Vec3::from(e.fragment_half);
-                    let moments = Vec3::new(
-                        h.y * h.y + h.z * h.z,
-                        h.x * h.x + h.z * h.z,
-                        h.x * h.x + h.y * h.y,
-                    ) * (mf / 3.0);
-                    let geometry = Geometry::Box {
-                        half: e.fragment_half,
-                        transform: Transform::IDENTITY,
+                    // A particle never rotates: no inertia (its inverse is zero).
+                    let moments = if particles {
+                        Vec3::ZERO
+                    } else {
+                        Vec3::new(
+                            h.y * h.y + h.z * h.z,
+                            h.x * h.x + h.z * h.z,
+                            h.x * h.x + h.y * h.y,
+                        ) * (mf / 3.0)
+                    };
+                    let geometry = if particles {
+                        Geometry::Sphere {
+                            center: [0.0; 3],
+                            radius: h.x,
+                        }
+                    } else {
+                        Geometry::Box {
+                            half: e.fragment_half,
+                            transform: Transform::IDENTITY,
+                        }
                     };
                     for i in 0..fragments {
                         let (fb, shape, collider) =
@@ -2430,6 +2565,7 @@ mod imp {
                                 .to_cols_array_2d(),
                         });
                         slot.principal = moments;
+                        slot.ccd_when_fast = particle_ccd;
                         slot.frames = vec![(0, SolverFrame::IDENTITY)];
                         slot.last_transform = None;
                         slot.last_solver = None;
