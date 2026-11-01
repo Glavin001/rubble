@@ -7,6 +7,7 @@
 //! Everything on the GPU is f32; accuracy against the reference is measured, not assumed.
 
 pub mod colliders;
+pub mod shapes;
 
 /// The GPU's split path: splits laid out on the GPU (`STRESS_GPU_LAYOUT`), and a frame's
 /// cascade and splits in one submission (`STRESS_GPU_FRAME`). On when a capability profile
@@ -137,6 +138,7 @@ pub mod shaders {
     pub const SMOKE: ShaderSet = shader_set!("smoke", [("smoke", (64, 1, 1))]);
     pub const STRESS_STEP: ShaderSet = shader_set!("stress_step", [("bond_forces", (64, 1, 1)), ("chunk_integrate", (64, 1, 1)), ("island_substeps", (256, 1, 1)), ("island_shared_substeps", (256, 1, 1))]);
     pub const JOINT_TEST: ShaderSet = shader_set!("joint_test", [("joint_eval_test", (64, 1, 1))]);
+    pub const CRUSH_TEST: ShaderSet = shader_set!("crush_test", [("crush_step_test", (64, 1, 1))]);
     pub const WORLD: ShaderSet =
         shader_set!("world", [
             ("contact_forces", (64, 1, 1)),
@@ -211,6 +213,7 @@ pub mod shaders {
             ("spawn_colliders_phased", (64, 1, 1)),
         ]
     );
+    pub const SHAPES: ShaderSet = shader_set!("shapes", [("shapes_deform", (64, 1, 1))]);
     pub const COLLIDERS: ShaderSet = shader_set!("colliders", [("collider_keys", (64, 1, 1)), ("collider_slots", (64, 1, 1)), ("collider_refresh", (64, 1, 1))]);
     pub const PASS: ShaderSet = shader_set!(
         "pass",
@@ -262,12 +265,70 @@ pub mod shaders {
             ("fr_strike_nearest", (64, 1, 1)),
             ("fr_strike_force", (64, 1, 1)),
             ("fr_strike_breaks", (64, 1, 1)),
+            ("fr_lp_clear", (64, 1, 1)),
+            ("fr_lp_sum", (64, 1, 1)),
+            ("fr_lp_relief", (64, 1, 1)),
+            ("fr_lp_block", (64, 1, 1)),
+            ("fr_lp_sweep_even", (64, 1, 1)),
+            ("fr_lp_sweep_odd", (64, 1, 1)),
+            ("fr_lp_breaks", (64, 1, 1)),
+            ("fr_il_first_reset", (64, 1, 1)),
+            ("fr_il_first", (64, 1, 1)),
+            ("fr_il_begin", (64, 1, 1)),
+            ("fr_il_tube_count", (64, 1, 1)),
+            ("fr_il_tube_base", (64, 1, 1)),
+            ("fr_il_tube_collect", (64, 1, 1)),
+            ("fr_il_run", (64, 1, 1)),
+            ("fr_il_strike", (64, 1, 1)),
+            ("fr_il_mark", (64, 1, 1)),
+            ("fr_il_breaks", (64, 1, 1)),
+            ("fr_il_carry", (64, 1, 1)),
+            ("fr_cs_begin", (1, 1, 1)),
+            ("fr_cs_contacts", (64, 1, 1)),
+            ("fr_cs_pick_a", (64, 1, 1)),
+            ("fr_cs_pick_b", (64, 1, 1)),
+            ("fr_cs_pick_c", (64, 1, 1)),
+            ("fr_cs_pick_d", (64, 1, 1)),
+            ("fr_cs_record", (64, 1, 1)),
+            ("fr_cs_hertz", (64, 1, 1)),
+            ("fr_cs_count", (64, 1, 1)),
+            ("fr_cs_base", (64, 1, 1)),
+            ("fr_cs_collect", (64, 1, 1)),
+            ("fr_cs_gate", (1, 1, 1)),
+            ("fr_cs_solve", (256, 1, 1)),
+            ("fr_cs_gate2", (1, 1, 1)),
+            ("fr_cs_save", (64, 1, 1)),
+            ("fr_cs_fix", (64, 1, 1)),
+            ("fr_cs_clean", (64, 1, 1)),
+            ("fr_csl_begin", (64, 1, 1)),
+            ("fr_csl_tube_count", (64, 1, 1)),
+            ("fr_csl_tube_base", (64, 1, 1)),
+            ("fr_csl_tube_collect", (64, 1, 1)),
+            ("fr_csl_run", (64, 1, 1)),
+            ("fr_csl_strike", (64, 1, 1)),
+            ("fr_csl_mark", (64, 1, 1)),
+            ("fr_csl_breaks", (64, 1, 1)),
+            ("fr_csl_carry", (64, 1, 1)),
+            ("fr_crush_loads", (64, 1, 1)),
+            ("fr_strike_crush", (64, 1, 1)),
+            ("fr_crush_bill", (64, 1, 1)),
+            ("fr_crush_push", (64, 1, 1)),
+            ("fr_crush_bonds", (64, 1, 1)),
+            ("fr_crush_mark", (64, 1, 1)),
+            ("fr_crush_gate", (1, 1, 1)),
+            ("fr_crush_apply", (64, 1, 1)),
+            ("fr_crush_end", (1, 1, 1)),
+            ("fr_crush_blast", (64, 1, 1)),
+            ("fr_strike_patch", (64, 1, 1)),
+            ("fr_strike_cover", (64, 1, 1)),
+            ("fr_strike_claim", (64, 1, 1)),
+            ("fr_host_breaks", (64, 1, 1)),
         ]
     );
 
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
-        WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
+        WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, CRUSH_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, SHAPES, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
         HUD_OVERLAY, THRESHOLD, FRACTURE,
     ];
 }

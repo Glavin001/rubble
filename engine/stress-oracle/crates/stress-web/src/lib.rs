@@ -88,6 +88,9 @@ thread_local! {
     /// The camera's view mode, kept across loads (`stress_set_view_mode`).
     static VIEW_MODE: Cell<ViewMode> = const { Cell::new(ViewMode::Orbit) };
     static SHOOTING: Cell<Option<Shooting>> = const { Cell::new(None) };
+    /// The loaded pack's authored shots (`defaults.shots`, pack frame), for
+    /// [`stress_fire_pack_shot`].
+    static PACK_SHOTS: RefCell<Vec<engine_fracture::pack::PackShot>> = const { RefCell::new(Vec::new()) };
     static PENDING: RefCell<Vec<ImpactorDesc>> = const { RefCell::new(Vec::new()) };
     static FIRED: Cell<usize> = const { Cell::new(0) };
     /// The shots' mass as a multiple of the lab's default ball (`stress_set_shot_mass_scale`).
@@ -102,15 +105,32 @@ thread_local! {
     static VIEW: Cell<(bool, ColorMode)> = const { Cell::new((false, ColorMode::Material)) };
     /// The capability profile of the next `stress_load` (`stress_set_profile`).
     static PROFILE: Cell<Profile> = const { Cell::new(Profile::BlastParity) };
+    // Strike prediction as the lab set it (`stress_set_strike_prediction`), None: the
+    // profile's own (`Profile::predicts_strikes`). Kept across loads of one profile.
+    static STRIKE: Cell<Option<bool>> = const { Cell::new(None) };
+    // A change of it the loaded world has not taken yet: the next frame applies it (a
+    // frame holds the device and the world across its GPU waits).
+    static STRIKE_PENDING: Cell<bool> = const { Cell::new(false) };
+    // The in-step contact fracture as the lab set it (`stress_set_contact_fracture`), None:
+    // the profile's own (`Profile::contact_fracture`). Taken when a world is made; kept
+    // across loads of one profile.
+    static CONTACT: Cell<Option<bool>> = const { Cell::new(None) };
     /// The physics frame rate of the next `stress_load` (`stress_set_physics_hz`); 0 keeps
     /// the scene's own.
     static PHYSICS_HZ: Cell<f64> = const { Cell::new(0.0) };
+    /// Chunk crushing of the next threshold load (`stress_set_crush`): 0 off, 1 the scene's
+    /// own crush parameters, 2 those and the cited presets for the rest.
+    static CRUSH: Cell<u32> = const { Cell::new(0) };
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     static STATS: RefCell<String> = RefCell::new("{}".into());
     /// The last frame's step, state copy and draw (ms).
     static PHASES: Cell<[f64; 3]> = const { Cell::new([0.0; 3]) };
     static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Dust at each crushed chunk (render only; `stress_dust`): the puffs alive, and their
+    /// particles as last drawn, on the canvas.
+    static DUST: RefCell<Vec<Puff>> = const { RefCell::new(Vec::new()) };
+    static DUST_VIEW: RefCell<String> = RefCell::new("[]".into());
 }
 
 /// The input of the next [`stress_load`].
@@ -288,13 +308,78 @@ pub fn stress_set_bond_strength_scale(scale: f64) {
     }
 }
 
-/// The capability profile of the next `stress_load`: `blast_parity` (the default) or
-/// `threshold` (the v0 stress mode: bonds break on contact force alone, no solve).
+/// The capability profile of the next `stress_load`: `blast_parity` (the default),
+/// `threshold` (the v0 stress mode: bonds break on contact force alone, no solve),
+/// `load_path` (the fracture world with a load path: gravity and contacts carried through
+/// the bonds) or `impact_local` (the fracture world with the analytic local impact model).
 #[wasm_bindgen]
 pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
     let p = Profile::parse(&name).ok_or_else(|| JsValue::from_str(&format!("no profile {name}")))?;
+    if p != PROFILE.get() {
+        STRIKE.set(None);
+        CONTACT.set(None);
+    }
     PROFILE.set(p);
     Ok(())
+}
+
+/// Strike prediction on or off, now (the loaded world) and for the next loads of this
+/// profile: a shot's breaks predicted at the end of the frame before it reaches a
+/// structure and made before the engine steps, so the shot meets the pieces (forward
+/// only, no re-simulation). Off, the engine's contact meets the whole structure first and
+/// the shot rebounds; bonds break only on the contact loads after the step.
+#[wasm_bindgen]
+pub fn stress_set_strike_prediction(on: bool) {
+    STRIKE.set(Some(on));
+    // Taken by the loaded world at its next frame (`frame` holds the world across its GPU
+    // waits, so it is not touched here).
+    STRIKE_PENDING.set(true);
+}
+
+/// The in-step contact fracture on or off for the next load (the fracture world's
+/// profiles: threshold, load_path, impact_local): within rubble's step, after its contacts
+/// are made and before it solves them, a contact closing on a structure is judged by the
+/// profile's own stress solver, so its bonds break by that verdict and the structure splits
+/// before the contact is solved, or nothing breaks and the striker is stopped. Made with
+/// the world (its shots become CCD bodies): the lab reloads.
+#[wasm_bindgen]
+pub fn stress_set_contact_fracture(on: bool) {
+    CONTACT.set(Some(on));
+}
+
+/// Whether the loaded world runs the in-step contact fracture (false for a world without
+/// one: the GPU stress solver's).
+#[wasm_bindgen]
+pub fn stress_contact_fracture() -> bool {
+    TWORLD.with(|w| w.try_borrow().ok().and_then(|w| w.as_ref().map(|l| l.world.contact_fracture() > 0))).unwrap_or(false)
+}
+
+/// Whether the loaded world can run the in-step contact fracture (the fracture world).
+#[wasm_bindgen]
+pub fn stress_contact_fracture_available() -> bool {
+    TWORLD.with(|w| w.try_borrow().ok().is_some_and(|w| w.is_some()))
+}
+
+/// Whether strike prediction is on: as the lab set it, else the loaded world's (its
+/// profile's own).
+#[wasm_bindgen]
+pub fn stress_strike_prediction() -> bool {
+    if let Some(on) = STRIKE.get() {
+        return on;
+    }
+    let loaded = WORLD.with(|w| w.try_borrow().ok().and_then(|w| w.as_ref().map(|l| l.world.predict_strikes)));
+    let loaded = loaded.or_else(|| TWORLD.with(|w| w.try_borrow().ok().and_then(|w| w.as_ref().map(|l| l.world.strike_prediction()))));
+    loaded.unwrap_or_else(|| PROFILE.get().predicts_strikes())
+}
+
+/// Chunk crushing for the next `stress_load` (threshold profile on the GPU-resident world;
+/// engine/docs/destruction-reactions.md section 1): 0 off (the default), 1 with the scene's
+/// own crush parameters (a ScenePack v3's `materials[].crush`), 2 those and, for chunk
+/// materials without any, the cited presets (stress-ref `crush::presets::for_material`). A
+/// crushed chunk is removed (dust); the stats count them (`crushed`).
+#[wasm_bindgen]
+pub fn stress_set_crush(mode: u32) {
+    CRUSH.set(mode.min(2));
 }
 
 /// The physics frame rate (Hz) of the next `stress_load`: one resident frame per
@@ -403,6 +488,54 @@ pub fn stress_shoot(u: f64, v: f64) -> bool {
     true
 }
 
+/// The loaded pack's authored shots (`defaults.shots`), as JSON: label, mass (kg), speed
+/// (m/s), the source's launch time (s) and note. Empty for a GLB or the cuboid houses.
+#[wasm_bindgen]
+pub fn stress_pack_shots() -> String {
+    PACK_SHOTS.with_borrow(|shots| {
+        serde_json::Value::Array(
+            shots
+                .iter()
+                .map(|s| {
+                    let speed = s.velocity.iter().map(|x| x * x).sum::<f64>().sqrt();
+                    serde_json::json!({"label": s.label, "mass": s.mass, "radius": s.radius, "speed": speed, "launchAt": s.launch_at, "note": s.note})
+                })
+                .collect(),
+        )
+        .to_string()
+    })
+}
+
+/// Fire the loaded pack's authored shot `index` exactly as authored (origin, velocity,
+/// spin, mass and radius; the panel's ball scales do not apply): launched into the world
+/// at the next frame. False when there is no such shot or all shots are fired.
+#[wasm_bindgen]
+pub fn stress_fire_pack_shot(index: u32) -> bool {
+    let Some(shot) = PACK_SHOTS.with_borrow(|s| s.get(index as usize).cloned()) else { return false };
+    if FIRED.get() >= SHOTS && TWORLD.with_borrow(|w| w.is_none()) {
+        return false;
+    }
+    let k = FIRED.get();
+    FIRED.set(k + 1);
+    PENDING.with_borrow_mut(|p| {
+        p.push(ImpactorDesc {
+            name: format!("shot{k}"),
+            shape: ImpactorShape::Sphere { radius: shot.radius },
+            mass: shot.mass,
+            // The pack's frame is the stress scene's turned Y up (the asset frame less
+            // its placement).
+            position: zup(shot.origin),
+            orientation: [1.0, 0.0, 0.0, 0.0],
+            velocity: zup(shot.velocity),
+            angular_velocity: zup(shot.angular_velocity),
+            material: "projectile".into(),
+            crush: None,
+        })
+    });
+    RUNNING.set(true);
+    true
+}
+
 fn fail(e: String) -> u32 {
     web_sys::console::error_1(&e.clone().into());
     ERROR.set(e);
@@ -422,10 +555,13 @@ pub extern "C" fn stress_load(level: u32) -> u32 {
 fn load(level: u8) -> Result<(), String> {
     WORLD.with_borrow_mut(|w| *w = None);
     TWORLD.with_borrow_mut(|w| *w = None);
+    DUST.with_borrow_mut(|d| d.clear());
+    DUST_VIEW.set("[]".into());
     // The lab's own scene (its camera, centre, extent and projectile) and the stress
     // oracle's input: the GLB's level, the cuboid houses in their layout, or the pack.
     let profile = PROFILE.get();
     let mut warnings = Vec::new();
+    let mut shots = Vec::new();
     let (lab, mut scene) = SOURCE.with_borrow(|source| -> Result<_, String> {
         Ok(match source {
             Source::Cuboid(layout) => {
@@ -441,6 +577,7 @@ fn load(level: u8) -> Result<(), String> {
             }
             Source::Pack(bytes) => {
                 let (lab, info) = engine_fracture::pack::build_pack_scene(bytes).map_err(|e| format!("scene pack: {e}"))?;
+                shots = engine_fracture::pack::pack_shots(bytes).map_err(|e| format!("scene pack: {e}"))?;
                 let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("scene pack: {e}"))?;
                 let (scene, notes) = stress_ref::scene_pack::import_value_with(&json, &info.key, "structure", &info.key, profile.import_options())?;
                 warnings = notes;
@@ -449,6 +586,7 @@ fn load(level: u8) -> Result<(), String> {
         })
     })?;
     WARNINGS.set(warnings);
+    PACK_SHOTS.set(shots);
     let mut camera = Orbit::new(&lab);
     let (w, h) = SIZE.get();
     camera.set_mode(VIEW_MODE.get(), w.max(1) as f64 / h.max(1) as f64);
@@ -480,12 +618,31 @@ fn load(level: u8) -> Result<(), String> {
     scene.sim.methods = stress_ref::scene::Methods::established();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
-    if profile == Profile::Threshold && THRESHOLD_GPU.get() {
+    let crush = CRUSH.get();
+    if crush == 2 {
+        // The presets, chosen explicitly, for chunk materials without their own (a pack
+        // import's per-node copies by their calibrated base name).
+        for (name, m) in scene.materials.iter_mut() {
+            if m.crush.is_none() {
+                m.crush = stress_ref::crush::presets::for_material(name.split(['#', '@']).next().unwrap_or(name));
+            }
+        }
+    }
+    if crush != 0 && !(profile == Profile::Threshold && THRESHOLD_GPU.get()) {
+        return Err("chunk crushing runs in the threshold profile on the GPU-resident world".into());
+    }
+    // The load path and the analytic strike exist only on the GPU-resident fracture world.
+    if (profile == Profile::Threshold && THRESHOLD_GPU.get()) || profile.fracture_world_only() {
         return DEVICE.with_borrow(|d| {
             let d = d.as_ref().ok_or("stress_init first")?;
             let gpu = &d.gpu;
             let s = SHOOTING.get().expect("shooting set");
-            let mut world = stress_rubble::threshold::ThresholdWorld::new(gpu, &scene, s.radius, s.mass)?;
+            let options = stress_rubble::threshold::FractureOptions { contact: CONTACT.get(), toi_ccd: None, crush: crush != 0 };
+            let mut world = stress_rubble::threshold::ThresholdWorld::with_options(gpu, &scene, s.radius, s.mass, profile, options)?;
+            STRIKE_PENDING.set(false);
+            if let Some(on) = STRIKE.get() {
+                world.set_strike_prediction(gpu, on)?;
+            }
             let shots = world.shot_impactors();
             let renderer = Renderer::for_target(gpu, &world.mirror, &shots, d.config.width, d.config.height, d.view_format);
             world.attach_view(gpu, &renderer);
@@ -509,6 +666,10 @@ fn load(level: u8) -> Result<(), String> {
         world.redo_fractured_frames = false;
         world.set_impact_islands(true);
         world.apply_profile(profile);
+        STRIKE_PENDING.set(false);
+        if let Some(on) = STRIKE.get() {
+            world.set_strike_prediction(on)?;
+        }
         let shots = shot_meshes(&world);
         // Meshes for every chunk and for the shots to come.
         let (mut renderer, totals) = world.view_with(gpu, |mirror, _| {
@@ -546,6 +707,69 @@ pub extern "C" fn stress_frame(elapsed_ms: f64) -> u32 {
     }
 }
 
+/// A crushed chunk's dust puff (render only): where and when (simulated s) its chunk was
+/// crushed, its size (m, from the chunk's volume), its velocity (stress frame), and the
+/// cause (`CrushEvent::cause`: 1 contact loads, 2 a predicted strike).
+#[derive(Clone, Copy)]
+struct Puff {
+    at: Vec3,
+    born: f64,
+    size: f64,
+    velocity: Vec3,
+    cause: u32,
+}
+
+/// How long a puff lasts (simulated s), and its particles.
+const PUFF_LIFE: f64 = 1.4;
+const PUFF_PARTICLES: usize = 7;
+
+/// The dust as drawn this frame: per particle `[x, y, radius, alpha, cause]` in canvas
+/// pixels (the page draws them over the canvas, `fracture/stress-mode.mjs`).
+#[wasm_bindgen]
+pub fn stress_dust() -> String {
+    DUST_VIEW.with_borrow(|d| d.clone())
+}
+
+/// This frame's crush events become puffs, old puffs end, and the live ones' particles
+/// are projected with the frame's camera.
+fn update_dust(events: Vec<(u64, stress_gpu::fracture::CrushEvent)>, dt: f64, now: f64, view_proj: [[f32; 4]; 4], width: u32, height: u32) {
+    DUST.with_borrow_mut(|dust| {
+        for (frame, e) in events {
+            dust.push(Puff {
+                at: stress_rubble::from_rubble(e.position),
+                born: frame as f64 * dt,
+                size: (e.volume.max(1e-4) as f64).cbrt(),
+                velocity: stress_rubble::from_rubble(e.linear_velocity),
+                cause: e.cause,
+            });
+        }
+        dust.retain(|p| now - p.born < PUFF_LIFE);
+        let project = |p: Vec3| -> Option<[f64; 3]> {
+            let c: [f64; 4] = std::array::from_fn(|r| view_proj[0][r] as f64 * p.x + view_proj[1][r] as f64 * p.y + view_proj[2][r] as f64 * p.z + view_proj[3][r] as f64);
+            (c[3] > 1e-3).then(|| [(c[0] / c[3] * 0.5 + 0.5) * width as f64, (0.5 - c[1] / c[3] * 0.5) * height as f64, c[3]])
+        };
+        let mut out = Vec::new();
+        for p in dust.iter() {
+            let age = (now - p.born).max(0.0);
+            let grow = p.size * (0.45 + 1.1 * age.sqrt());
+            for k in 0..PUFF_PARTICLES {
+                // Fixed directions (a golden-angle spiral, upward-biased): the same puff
+                // every run.
+                let a = k as f64 * 2.399963;
+                let up = 0.25 + 0.75 * (k as f64 + 0.5) / PUFF_PARTICLES as f64;
+                let side = (1.0 - up * up).sqrt();
+                let dir = Vec3::new(side * a.cos(), side * a.sin(), up);
+                let centre = p.at + p.velocity * (0.12 * age) + dir * (0.8 * grow);
+                let (Some(c), Some(top)) = (project(centre), project(centre + Vec3::new(0.0, 0.0, grow))) else { continue };
+                let r = ((top[0] - c[0]).powi(2) + (top[1] - c[1]).powi(2)).sqrt();
+                let alpha = 0.5 * (1.0 - age / PUFF_LIFE).powf(0.8);
+                out.push([c[0].round(), c[1].round(), r.round().max(2.0), (alpha * 100.0).round() / 100.0, p.cause as f64]);
+            }
+        }
+        DUST_VIEW.set(serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()));
+    });
+}
+
 /// The lab's camera for the renderer: its view-projection and eye in the stress scene's
 /// frame. The lab's camera looks at its own frame (the asset, +Y up, moved by
 /// `placement`); the renderer draws the stress scene's (+Z up): view_proj times the map
@@ -570,6 +794,11 @@ fn camera_view(width: u32, height: u32) -> ([[f32; 4]; 4], Vec3) {
 /// finished them (never waited for). Nothing here reads the GPU.
 fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(), String> {
     let gpu = &d.gpu;
+    if STRIKE_PENDING.replace(false) {
+        if let Some(on) = STRIKE.get() {
+            l.world.set_strike_prediction(gpu, on)?;
+        }
+    }
     let (width, height) = SIZE.get();
     if (width, height) != (d.config.width, d.config.height) {
         d.config.width = width;
@@ -623,6 +852,7 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
     let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
     PHASES.set([step_ms, 0.0, draw_ms]);
     let st = l.world.poll(gpu);
+    update_dust(l.world.take_crush_events(), dt, l.world.frame as f64 * dt, view_proj, width, height);
     let s = SHOOTING.get();
     let stats = serde_json::json!({
         "gpuResident": true,
@@ -638,6 +868,10 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         "ballSpeed": s.map_or(0.0, |s| engine_fracture::plan::default_shot_speed(s.extent, s.speed)),
         "frameHz": 1.0 / dt,
         "profile": PROFILE.get().name(),
+        "strikePrediction": l.world.strike_prediction(),
+        "contactFracture": l.world.contact_fracture() > 0,
+        "contactStrikes": st.contact_strikes,
+        "contactBreaks": st.contact_breaks,
         // As the GPU last finished them (a frame or two behind).
         "frames": l.world.frame,
         "statsFrame": st.frame,
@@ -645,17 +879,23 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         "fragments": st.bodies,
         "brokenBonds": st.broken,
         "splitFrames": st.split_frames,
+        "crush": CRUSH.get(),
+        "crushed": st.crushed,
         "awake": st.awake,
         "contacts": st.contacts,
         "errors": st.error,
         "engineOverflow": st.engine_overflow,
         "compactions": 0,
+        // `impact_local`: the analytic strikes by outcome; `load_path`: its largest failure
+        // index (1: a bond's strength).
+        "strikes": { "bounce": st.bounces, "crater": st.craters, "spall": st.spalls, "perforate": st.perforations },
+        "peakUtilization": st.peak_utilization,
     });
     STATS.set(stats.to_string());
     if st.error != 0 || st.engine_overflow != 0 {
         // Paused: one report, not one a frame.
         RUNNING.set(false);
-        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (fracture: 1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full; engine: 1 contacts, 2 candidate pairs, 64 manifolds)", st.error, st.engine_overflow));
+        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (fracture: 1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full, 16 a crush found the fragment pool spent, 32 more crushes than the events' room, 64 a load-path block was not positive definite; engine: 1 contacts, 2 candidate pairs, 64 manifolds)", st.error, st.engine_overflow));
     }
     Ok(())
 }
@@ -675,6 +915,11 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
         WORLD.with_borrow_mut(|w| {
             let Some(l) = w.as_mut() else { return Ok(()) };
             let gpu = &d.gpu;
+            if STRIKE_PENDING.replace(false) {
+                if let Some(on) = STRIKE.get() {
+                    l.world.set_strike_prediction(on)?;
+                }
+            }
             let (width, height) = SIZE.get();
             if (width, height) != (d.config.width, d.config.height) {
                 d.config.width = width;
@@ -717,6 +962,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             let want_stats = stepped > 0 || STATS.with_borrow(|s| s == "{}");
             let renderer = &l.renderer;
             let totals = l.totals;
+            let strike_prediction = l.world.predict_strikes;
             let (view_ms, draw_ms, stats) = l.world.view_with(gpu, |mirror, imps| {
                 let view_ms = t_view.elapsed().as_secs_f64() * 1e3;
                 let t_draw = web_time::Instant::now();
@@ -741,6 +987,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "lastShot": imps.last().map(|i| serde_json::json!({"position": i.pose.position.to_array(), "velocity": i.velocity.to_array()})),
                         "frameHz": 1.0 / dt,
                         "profile": PROFILE.get().name(),
+                        "strikePrediction": strike_prediction,
                         // Rigid bodies the structures are now (each split's children).
                         "bodies": mirror.clusters.len(),
                     })

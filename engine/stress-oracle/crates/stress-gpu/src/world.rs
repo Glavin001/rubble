@@ -174,6 +174,8 @@ pub struct GpuWorld {
     /// The scene has compound chunks (`has_compound`): frames with impact islands fail.
     compound: bool,
     resident: Option<resident_frame::ResidentState>,
+    /// The resident frame's shape pass (`shapes.rs`), made at its first frame.
+    resident_shapes: Option<crate::shapes::ShapeDeform>,
     /// The collider table's lookups of the current layout (resident_frame.rs).
     table_lookup: Option<resident_frame::TableLookup>,
     /// A frame's GPU splits the engine has adopted but the host's mirror and layout not yet
@@ -318,6 +320,7 @@ impl GpuWorld {
             impactors_stale: false,
             compound: false,
             resident: None,
+            resident_shapes: None,
             table_lookup: None,
             pending_splits: Vec::new(),
             pending_write_back: false,
@@ -404,11 +407,7 @@ impl GpuWorld {
         // The threshold profile predicts strikes before the engine steps: the routing check
         // (the tiered coupling's) at the end of every resident frame, no impact islands.
         if profile.predicts_strikes() {
-            self.predict_strikes = true;
-            self.set_tiered(true).expect("the threshold profile is quasi-static");
-            // No check has run before the first resident frame: it predicts (a strike may
-            // come in the frame after it).
-            self.route_next = true;
+            self.set_strike_prediction(true).expect("the threshold profile is quasi-static");
         }
         // The profile's resident frame runs the GPU's split path.
         if profile.resident() {
@@ -416,8 +415,32 @@ impl GpuWorld {
         }
     }
 
+    /// Coupled mode: the engine's shapes follow the chunks' deformation
+    /// (`World::engine_shapes_deformed`), in the resident frame on the GPU (`shapes.rs`).
+    pub fn set_engine_shapes_deformed(&mut self, on: bool) {
+        self.shell.engine_shapes_deformed = on;
+    }
+
     pub fn set_impact_islands(&mut self, on: bool) {
         self.shell.impact_islands = on;
+    }
+
+    /// Strike prediction (forward only, no re-simulation): at the end of every resident
+    /// frame the routing check finds a shot that will reach a structure within the next
+    /// frame, `threshold_predict` breaks the bonds its strike breaks, and the structure
+    /// splits before the engine steps, so the shot meets the pieces instead of the whole
+    /// body (off, the engine's contact with the whole body comes first and the shot
+    /// rebounds off it). Needs the tiered (quasi-static) coupling; errors where it cannot
+    /// run.
+    pub fn set_strike_prediction(&mut self, on: bool) -> Result<(), String> {
+        if on {
+            self.set_tiered(true)?;
+            // No check has run before the next resident frame: it predicts (a strike may
+            // come in the frame after it).
+            self.route_next = true;
+        }
+        self.predict_strikes = on;
+        Ok(())
     }
 
     /// Strict mode: fail when a structure's certified explicit stress step is below
@@ -512,7 +535,12 @@ impl GpuWorld {
     fn step_frame_coupled(&mut self, gpu: &Gpu) -> Result<(), String> {
         if self.resident_now() {
             self.last_resident = true;
-            return self.resident_frame(gpu);
+            // The frame's shape pass moves the engine's shapes (`deform_shapes`): a
+            // write-back in it (a split's) leaves them as they are.
+            self.shell.engine_poses_held = self.shell.engine_shapes_deformed;
+            let r = self.resident_frame(gpu);
+            self.shell.engine_poses_held = false;
+            return r;
         }
         let fdt = self.scene.sim.frame_dt;
         // `STRESS_IMPACT_PUNCH=1` (a model under measurement): a routed frame breaks the

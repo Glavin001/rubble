@@ -184,7 +184,7 @@ impl Ord for OrdF64 {
 }
 
 /// Distance from each exposed face to the nearest free edge (world.rs `clearing_distances`).
-fn clearing_distances(m: &ReferenceSolver, exposure: &[Vec<Vec<f64>>], s: usize) -> HashMap<(usize, usize), f64> {
+pub fn clearing_distances(m: &ReferenceSolver, exposure: &[Vec<Vec<f64>>], s: usize) -> HashMap<(usize, usize), f64> {
     let st = &m.structures[s];
     let exposed = |c: usize, f: usize| exposure[s][c][f] > 0.5 * st.chunks[c].faces[f].area;
     type F = (usize, usize);

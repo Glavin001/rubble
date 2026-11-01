@@ -8,6 +8,47 @@ dynamic library.
 The ABI is version **0.x**: it stays unstable until destructibles ship (D1 in
 `engine/docs/public-api.md`).
 
+## Getting the library
+
+- **Prebuilt.** Every CI run uploads a package per platform: `rubble-macos`,
+  `rubble-linux` and `rubble-windows`, under the run's artifacts. Each
+  package holds `include/rubble.h`, `lib/` (static and dynamic libraries),
+  `examples/hello.c` and this README.
+- **From source.** `engine/scripts/build-ffi.sh` builds the same package into
+  `engine/ffi-dist/rubble-<os>-<arch>/`. It then compiles `examples/hello.c`
+  against it and runs it. It needs Rust stable, and downloads the pinned
+  slangc when none is installed. On Windows, run it from Git Bash inside an
+  MSVC developer shell.
+
+**Linking.**
+
+| Platform | Dynamic | Static |
+|---|---|---|
+| macOS | `librubble_ffi.dylib`, install name `@rpath/librubble_ffi.dylib` | `librubble_ffi.a` |
+| Linux | `librubble_ffi.so` | `librubble_ffi.a` |
+| Windows | `rubble_ffi.dll`, with import library `rubble_ffi.dll.lib` | `rubble_ffi.lib` |
+
+- The dynamic library is the simpler choice.
+- The static one also needs the system libraries listed in
+  `lib/static-link-libs.txt`: Metal, QuartzCore and Foundation on macOS, for
+  example.
+- In Unreal, add the import or static library to the module's
+  `PublicAdditionalLibraries`, and add the DLL or dylib to
+  `RuntimeDependencies` so it ships next to the binary.
+
+**GPU.**
+- Rubble runs on the GPU through wgpu: Metal on macOS, and Vulkan (or GL) on
+  Windows and Linux. The C ABI creates its own device; DX12 isn't used yet.
+- Mesa's lavapipe (CPU Vulkan) also works, which is how CI runs the example
+  on Linux.
+- `rbCreateWorld` fails with a message from `rbGetLastError()` when no
+  adapter is found.
+
+**Threads.**
+- Calls on one world must not overlap; call it from one thread at a time.
+- Separate worlds are independent.
+- `rbGetLastError()` is per thread.
+
 ## Shape
 
 The calls follow Box3D, with an `rb` prefix:
@@ -27,6 +68,9 @@ failure on the calling thread.
 
 ## Example
 
+A complete program that is compiled, linked and run in CI is
+[`examples/hello.c`](examples/hello.c). In outline:
+
 ```c
 #include "rubble.h"
 
@@ -44,7 +88,7 @@ rbCreateBody(world, &bd, &crate_);
 
 RbShapeDef sd = rbDefaultShapeDef();
 sd.density = 0.0005f;                        /* kg/cm^3 */
-RbShapeId shape;
+RbShapeId shape;                             /* {0}: no offset, identity rotation */
 rbCreateBoxShape(world, crate_, &sd, (RbVec3){50, 50, 50}, (RbTransform){0}, &shape);
 
 for (;;) {
@@ -59,3 +103,27 @@ for (;;) {
 }
 rbDestroyWorld(world);
 ```
+
+## Destruction reactions
+
+Every reaction of `engine/docs/destruction-reactions.md` is reachable from C
+(threshold destructibles, `RB_STRENGTH_THRESHOLD`; all off by default):
+
+- `RbDestructibleDef::support_loss` (and `support_loss_dynamic_factor`),
+  `blast_loading`, and `crush` (`RbCrushDef`: `enabled`, `mass`
+  `RB_CRUSH_CONSERVE` with `fragments` / `budget` or `RB_CRUSH_REMOVE`,
+  `max_per_step`, and optional `RbCrushMaterial`s by stress material name, in
+  SI units whatever the coordinates).
+- `rbWorld_Detonate(world, &blast)` with `rbDefaultBlastDef(coordinates)`:
+  a TNT-equivalent charge, optionally with `rbWorld_Explode`'s radial impulse.
+- Events: `RB_BONDS_BROKEN` carries `break_cause` (`RB_BREAK_STRESS`,
+  `RB_BREAK_BLAST`, `RB_BREAK_SUPPORT_LOSS`, `RB_BREAK_CRUSH`).
+  `RB_CHUNK_CRUSHED` carries `crush_cause` (`RB_CRUSH_IMPACT`,
+  `RB_CRUSH_BLAST`, `RB_CRUSH_CONTACT`, `RB_CRUSH_LOAD`), `mass`, `volume`,
+  `transform`, `linear_velocity`, `angular_velocity`, `peak_pressure`,
+  `peak_deviator` (in the world's units), and its fragment bodies as
+  `children`.
+
+`tests/reactions.rs` detonates 20 kg of TNT against the reference building
+through the ABI; `tests/layout.rs` checks the header's layouts against Rust's
+with a C compiler.

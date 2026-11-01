@@ -8,8 +8,13 @@
 
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
 
-/// Jones-Plassmann rounds a step may use (dispatched plus tail).
+/// Jones-Plassmann rounds a step may dispatch (more run in the tail).
 pub const COLOR_ROUND_LIMIT: u32 = 32;
+/// Rounds `color_bodies_tail` may run in all (the dispatched ones included). It stops as
+/// soon as every body is coloured, so the limit costs nothing until a dense pile (a
+/// razed ship's wreck) has longer chains of blocking neighbours than the dispatched
+/// rounds; past it the step reports `OVERFLOW_COLORS`.
+pub const COLOR_TAIL_ROUND_LIMIT: u32 = 1024;
 /// Sleep times at or above this never elapse in a run (benchmarks use 1e6 s).
 pub const SLEEP_NEVER_S: f32 = 1.0e5;
 /// Buffer id of the host-written counter block a pipelined step copies into
@@ -110,6 +115,11 @@ pub struct StepInputs {
     pub soft: SoftCounts,
     /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
     pub command_count: u32,
+    /// Directed debris (`guide_step.slang`, bindings 55-59) runs before
+    /// prediction. Off: the passes are not encoded.
+    pub guidance: bool,
+    /// Plan slots per step (`GuidanceCapacity::plan_budget`).
+    pub guide_slots: u32,
     /// Some heightfield carries a soil (`engine_schema::soil`, vehicle ruts):
     /// plan `wheel_soil` and `wheel_soil_press` after the vehicle passes.
     /// Off, the step graph is unchanged.
@@ -393,6 +403,7 @@ pub fn encode_step(
         // Each CCD body's nearest time of impact, then its winning pair
         // (rows 2-3); the narrowphase leaves that pair to ccd_emit.
         e.w("ccd_toi", 64);
+        e.w("ccd_pick_key", 64);
         e.w("ccd_pick", 64);
         // Sleepers in a fast CCD body's path wake before the narrowphase.
         e.d("ccd_wake", n_bodies);
@@ -523,13 +534,16 @@ pub fn encode_step(
         e.d("color_bodies_local", 64);
     }
     // Rounds dispatched: last step's need plus headroom; color_bodies_tail runs
-    // any further rounds in one workgroup up to the same limit, so colouring
-    // always finishes (8cl). Pass value = round index (slots 0..47 hold i).
+    // any further rounds in one workgroup up to COLOR_TAIL_ROUND_LIMIT, so
+    // colouring finishes (8cl). It returns at once when the dispatched rounds
+    // did, so the adaptive plan always has it (a pile may need more than
+    // COLOR_ROUND_LIMIT rounds); full controls dispatch exactly the 32 rounds.
+    // Pass value = round index (slots 0..47 hold i).
     let rounds = color_rounds_dispatched(m, &i.last);
     for round in 0..rounds {
         e.wp("color_bodies", 69, round);
     }
-    if rounds < COLOR_ROUND_LIMIT {
+    if rounds < COLOR_ROUND_LIMIT || m.color_round_headroom.is_some() {
         e.dp("color_bodies_tail", 64, rounds);
     }
     e.phase("coloring");
@@ -543,6 +557,19 @@ pub fn encode_step(
     if mo.ccd && !reuse_manifolds {
         // Bodies a fast CCD body woke this step are solved this step (ccd_step.slang).
         e.d("ccd_unhold", n_bodies);
+    }
+    if i.guidance {
+        // After the graph (free flight = no contacts or joints this step) and
+        // before prediction, which carries the steered velocities.
+        // guide_scan and the single-group passes use 256-lane groups, the plan
+        // one 64-lane group per slot (hosts size groups as threads / 64).
+        let blocks = n_bodies.div_ceil(256);
+        e.d("guide_scan", blocks * 64);
+        e.d("guide_select", 64);
+        e.d("guide_rank", n_bodies);
+        e.d("guide_plan", u64::from(i.guide_slots) * 64);
+        e.d("guide_commit", 64);
+        e.phase("guide");
     }
     e.d("predict_bodies", n_bodies);
     if m.motion_locks {
@@ -730,6 +757,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_register",
     "broadphase_fast",
     "ccd_toi",
+    "ccd_pick_key",
     "ccd_pick",
     "ccd_wake",
     "ccd_mark",
@@ -871,6 +899,9 @@ pub fn kernel_source(entry: &str) -> &'static str {
     if entry == "pose_pack" {
         return "pose_pack.slang";
     }
+    if engine_schema::guidance::GUIDE_ENTRIES.contains(&entry) {
+        return "guide_step.slang";
+    }
     if entry.starts_with("convex_") {
         return if entry.ends_with("_persistent") {
             "convex_persistent.slang"
@@ -900,10 +931,21 @@ pub fn grid_cell(
     bodies: &[engine_schema::BodyState],
     hierarchical: bool,
 ) -> (f32, u32) {
+    grid_cell_with(cols, bodies, hierarchical, 0.0)
+}
+
+/// [`grid_cell`], also sized for a moving collider of radius `movable_radius` the host's
+/// mirror cannot see move (engine-schema `hierarchical_grid_with`).
+pub fn grid_cell_with(
+    cols: &[engine_schema::Collider],
+    bodies: &[engine_schema::BodyState],
+    hierarchical: bool,
+    movable_radius: f32,
+) -> (f32, u32) {
     if hierarchical {
-        return engine_schema::convex::hierarchical_grid(cols, bodies);
+        return engine_schema::convex::hierarchical_grid_with(cols, bodies, movable_radius);
     }
-    let mut max_r = 0.25f32;
+    let mut max_r = if movable_radius <= 2.0 { movable_radius.max(0.25) } else { 0.25f32 };
     for c in cols {
         if c.shape == engine_schema::ShapeType::Plane as u32 {
             continue;
@@ -1165,7 +1207,7 @@ pub fn step_counters(i: &StepInputs) -> StepCounters {
         collider_count: i.collider_count,
         joint_count: i.joint_count,
         // Read by color_bodies_tail: rounds allowed this step.
-        color_round_limit: COLOR_ROUND_LIMIT,
+        color_round_limit: COLOR_TAIL_ROUND_LIMIT,
         ..StepCounters::default()
     }
 }
@@ -1200,6 +1242,8 @@ mod tests {
             motion: MotionInputs::default(),
             soft: SoftCounts::default(),
             command_count: 0,
+            guidance: false,
+            guide_slots: 0,
             soil: false,
             explosion_count: 0,
             post_stabilize: false,
@@ -1479,7 +1523,7 @@ mod tests {
         assert!(at("apply_impulses") < at("build_aabbs"));
         assert!(at("broadphase_clear") < at("ccd_register") && at("ccd_register") < at("broadphase_insert"));
         assert!(at("broadphase_query") < at("broadphase_fast"));
-        assert!(at("broadphase_fast") < at("ccd_toi") && at("ccd_toi") < at("ccd_pick"));
+        assert!(at("broadphase_fast") < at("ccd_toi") && at("ccd_toi") < at("ccd_pick_key") && at("ccd_pick_key") < at("ccd_pick"));
         let np = ccd.iter().position(|n| n.starts_with("narrowphase")).unwrap();
         assert!(at("ccd_pick") < np);
         let emit = ccd.iter().position(|n| n.starts_with("ccd_emit")).unwrap();

@@ -187,6 +187,8 @@ impl EngineFeatures {
 pub struct SimOptions {
     pub contacts: ContactStorage,
     pub vehicles: VehicleCapacity,
+    /// The character, query and projectile pool (binding 33).
+    pub characters: engine_schema::character::CharacterCapacity,
     /// A soft-body arena; needs [`ContactStorage::Canonical`].
     pub soft: Option<SoftCapacity>,
     pub features: EngineFeatures,
@@ -194,6 +196,9 @@ pub struct SimOptions {
     /// moved ([`crate::WgpuSim::pose_buffer`], `moved_buffer`). Read-only on the
     /// physics state, so the simulation is the same with it on or off.
     pub pose_output: bool,
+    /// Directed debris buffers (`guide_step.slang`); `None`: guidance cannot be
+    /// enabled in this world.
+    pub guidance: Option<engine_schema::guidance::GuidanceCapacity>,
 }
 
 impl SimOptions {

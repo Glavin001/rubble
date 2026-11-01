@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,buildTowersScene,towersVolley,glassTowerPack,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,buildTowersScene,towersVolley,withCity,meteorShot,toppleShots,nearMissSettings,sceneHandle,glassTowerPack,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -26,6 +26,8 @@ let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=nul
 // its own ball, bonds at 0.2× the pack's strength unless Bonds is None.
 const TOWERS={columns:2,rows:2,gap:6,radius:1,mass:30000,strength:0.2};
 let towersBlock=false;
+// The meteor variant of the block: a 5 m, 30,000 t ball (engine-fracture towers.rs METEOR).
+let towersMeteor=false;const METEOR={radius:5,mass:3e7};
 // The scripted volley in flight: shots with absolute steps, the next to fire.
 let volley=null;
 // Ball trails: per projectile slot, its path and whether it was a CCD shot;
@@ -52,8 +54,10 @@ function updateTrails(){
 }
 // Bond mode (the Bonds menu): 'none' (pieces sleep until hit), 'd6' (breakable D6
 // joints, AVBD welds), 'stress' (GPU stress solver on its own canvas), 'threshold' (the
-// same, with the v0 rule: a bond breaks on contact force alone, no solve), or 'learned'
-// (lean MGN-T forward on this page's WebGPU — compute/timing only; rubble stays unbonded).
+// same, with the v0 rule: a bond breaks on contact force alone, no solve), 'load_path' and
+// 'impact_local' (the same GPU world with a load path, or with the analytic local impact
+// model for strikes), or 'learned' (lean MGN-T forward on this page's WebGPU — compute/timing
+// only; rubble stays unbonded).
 const bondMode=()=>$('bond-mode').value;
 // The controls panel collapses for a full view (remembered per viewer; phones start
 // collapsed). Collapsed, a quick button mirrors Start / Pause.
@@ -69,8 +73,31 @@ $('panel-toggle').onclick=()=>setPanel(document.body.classList.contains('collaps
 {const quick=$('quick-release'),release=$('release'),sync=()=>{quick.textContent=release.textContent;quick.disabled=release.disabled};
  new MutationObserver(sync).observe(release,{childList:true,characterData:true,subtree:true,attributes:true,attributeFilter:['disabled']});sync();quick.onclick=()=>release.click()}
 
+// Directed debris, "Near Miss" (engine-fracture guidance.rs): each shot finds a
+// crowd of bystanders downrange (orange rings). On, debris that can reach one
+// lands around them rather than on open ground; off, it flies as it would. The
+// rings and the count of pieces resting near a bystander show either way, so
+// the two can be compared shot for shot. Each shot re-arms the pieces.
+let bystanders=[],nearAt=0,nearBusy=false;
+function applyGuide(){
+ if(!sim||!scene||stressOn)return;
+ sim.setGuidance($('guide').checked?nearMissSettings($('guide-strength').value):null,bystanders);
+ renderer?.setZones(sceneHandle(scene).zoneOutline(bystanders));
+}
+function placeCrowd(ray){
+ // The city block's zones sit on its cars and pedestrians.
+ if(!scene||stressOn||towersBlock)return;
+ bystanders=sceneHandle(scene).nearMissZonesFor(Float64Array.from(ray.origin),Float64Array.from(ray.direction));
+ applyGuide();$('near').textContent='0';
+}
+function updateNear(now){
+ if(nearBusy||!sim||!bystanders.length||now-nearAt<500)return;nearAt=now;nearBusy=true;
+ sim.snapshot().then(s=>{if(sim&&scene)$('near').textContent=sceneHandle(scene).nearCounts(s,bystanders).reduce((a,b)=>a+b,0)}).catch(()=>{}).finally(()=>{nearBusy=false});
+}
+for(const id of ['guide','guide-strength'])$(id).onchange=()=>{applyGuide();$(id).blur()};
 // The stress solver's modes, and the capability profile each runs (stress-web).
-const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold'};
+const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold',load_path:'load_path',impact_local:'impact_local'};
+const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps'};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
 // The stress-solver modes wait on the GPU from Rust: through WebAssembly JavaScript Promise
 // Integration where the browser has it, else (Safari) through the Asyncify build
@@ -114,6 +141,9 @@ const strengthScale=()=>2**Number($('bond-strength').value);
 // Physics rate: 0 (Auto) keeps the scene's dt, else 60 or 120 ticks per second of
 // simulated time, applied when the level loads.
 const physicsHz=()=>Number($('physics-hz').value);
+// Chunk crushing in the threshold mode (engine/docs/destruction-reactions.md): 0 off, 1 the
+// scene's own crush parameters (a ScenePack v3's materials[].crush), 2 those and the cited presets.
+const crushMode=()=>Number($('crush').value);
 const scaleLabel=k=>`×${k>=1?k:`1/${1/k}`}`;
 function applyBallSpeed(){
  const k=speedScale(),ms=(stressOn?stress?.stats.ballSpeed:sim?.shotSpeed)*k;
@@ -157,12 +187,12 @@ const rates=createRates(value=>{
 document.addEventListener('visibilitychange',()=>{last=0;accumulator=0;rates.reset()});
 const setStatus=text=>{status.textContent=text;status.classList.remove('error')};
 const fail=e=>{console.error(e?.message??e);running=false;status.textContent=e.message;status.classList.add('error');$('release').textContent=released?'Resume':'Start simulation'};
-const controls=enabled=>{enabled||=stressOn&&!loading;for(const id of ['release','reset','level','metadata','fire','volley'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
+const controls=enabled=>{enabled||=stressOn&&!loading;for(const id of ['release','reset','level','metadata','fire','volley','meteor','topple'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
 function serializeLoad(task){const result=loadTail.catch(()=>{}).then(async()=>{loading=true;running=false;controls(false);await frame;rates.reset();try{await task()}catch(e){fail(e)}finally{loading=false;last=0;rates.reset();controls(!!sim)}});loadTail=result;return result}
 let shotQueue=Promise.resolve();
 function shoot(ray){
  if(loading||!sim)return;
- shotQueue=shotQueue.then(async()=>{await frame;if(loading||!sim)return;try{trailLaunched(sim.launch(ray.origin,ray.direction));if(!running)rates.reset();released=true;running=true;accumulator=0;$('release').textContent='Pause'}catch(e){fail(e)}});
+ shotQueue=shotQueue.then(async()=>{await frame;if(loading||!sim)return;try{placeCrowd(ray);trailLaunched(sim.launch(ray.origin,ray.direction));if(!running)rates.reset();released=true;running=true;accumulator=0;$('release').textContent='Pause'}catch(e){fail(e)}});
  return shotQueue;
 }
 async function loadLevel(level){
@@ -171,7 +201,7 @@ async function loadLevel(level){
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   if(stressMode())return loadStress(level);
-  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;
+  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;$('strike-prediction').disabled=true;$('contact-fracture').disabled=true;$('pack-shot-row').hidden=true;pendingShot=null;
   learned?.dispose();learned=null;learnedMs=0;
   const raw=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   const built=physicsHz()?withParams(raw,{dt:1/physicsHz()}):raw;
@@ -179,7 +209,8 @@ async function loadLevel(level){
    // The pack's welds as authored (no settling pass: the towers start at rest),
    // weakened so the volley can bring them down; loose pieces with Bonds: None.
    const one=bondMode()==='none'?withoutJoints(built):withBondStrength(built,TOWERS.strength*strengthScale());
-   const laid=buildTowersScene(one,TOWERS);
+   // Parked cars and pedestrians on the streets: what the debris is steered at.
+   const laid=withCity(buildTowersScene(one,towersMeteor?{...TOWERS,...METEOR}:TOWERS));
    next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale());
   }else{
   if(bondMode()==='d6'&&!towersBlock)setStatus('Settling bonds under self-weight…');
@@ -190,7 +221,7 @@ async function loadLevel(level){
   next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale())}}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;volley=null;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);resetTrails();
- renderer.colorMode=viewMode();applyCamera();applyBallMass();applyBallSpeed();applyBallCcd();showBallRadius();
+ renderer.colorMode=viewMode();applyCamera();applyBallMass();applyBallSpeed();applyBallCcd();showBallRadius();bystanders=towersBlock?sceneHandle(scene).cityZones():[];applyGuide();$('near').textContent='—';$('meteor').hidden=!towersMeteor;$('topple').hidden=!towersBlock;
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
   const {createLearnedImpact}=await import('./learned-impact.mjs');
@@ -223,13 +254,16 @@ async function loadStress(level){
  catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e?.message??e}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  const profile=STRESS_PROFILES[bondMode()];
- stress.viewMode=cameraMode();stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
+ stress.viewMode=cameraMode();stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setCrush(profile==='threshold'?crushMode():0);stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else if(pack)await stress.loadPack(packBytes);else await stress.load(assetBytes,level);
  await stress.frame(0);applyBallMass();applyBallSpeed();showBallRadius();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
- setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${profile==='threshold'?'simple threshold (v0): a bond breaks when a contact force beats its strength':profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
+ $('strike-prediction').checked=stress.strikePrediction;$('strike-prediction').disabled=false;
+ $('contact-fracture').checked=stress.contactFracture;$('contact-fracture').disabled=!stress.contactFractureAvailable;
+ setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${PROFILE_NOTES[profile]??profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
+ pendingShot=null;showPackShots();
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
  assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;towersBlock=false;
@@ -247,6 +281,10 @@ const sceneGroups=[...new Set(SAMPLES.map(s=>s.group))].map(label=>optgroup(labe
 // Generated in Rust (engine-fracture glass_tower.rs): a pack built on the spot, no file.
 samples['glass-tower']={key:'glass-tower',label:'glass tower and pavilion',generated:glassTowerPack};
 $('scene').replaceChildren(...sceneGroups,optgroup('Generated',[new Option('Glass tower · 10 storeys of shattering glass, a pavilion beside it','glass-tower')]),optgroup('Your file',[Object.assign(new Option('Custom GLB (choose or drop one below)',''),{disabled:true})]));
+// The punch-through wall (ScenePack v3 with crush blocks, blast-stress-solver crush-wall.json):
+// chunk crushing's showcase (Bonds: simple threshold, Crush: on).
+samples['crush-wall']={key:'crush-wall',label:'punch-through wall',pack:'./packs/crush-wall.json',nodes:216,bonds:464};
+$('scene').insertBefore(optgroup('Chunk crushing (ScenePack v3)',[new Option('Punch-through wall · 12×8×2 blocks','crush-wall')]),$('scene').lastElementChild);
 // vibe-city /destructible-stress presets, generated into ../generated/vibe-city (optional).
 const VIBE_CITY='../generated/vibe-city/';
 try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
@@ -256,6 +294,9 @@ try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
   // The CCD showcase: the fractured tower as a 2×2 city block, fast off-angle balls.
   samples['vc-towers']={key:'vc-towers',label:'fractured towers block',pack:`${VIBE_CITY}fracturedTower.json`,nodes:tower.nodes*4,bonds:tower.bonds*4,towers:true};
   group.append(new Option(`Fractured towers · 2×2 city block · ${tower.nodes*4} nodes (CCD volley)`,'vc-towers'));
+  // The same block, cars and pedestrians in its streets, and a meteor (Directed debris demo).
+  samples['vc-meteor']={...samples['vc-towers'],key:'vc-meteor',label:'meteor strike',meteor:true};
+  group.append(new Option(`Meteor strike · fractured towers, cars, pedestrians`,'vc-meteor'));
  }
  for(const p of index.presets.filter(p=>!p.failed&&!p.pending)){
   const key=`vc:${p.id}`;samples[key]={key,label:p.id,pack:`${VIBE_CITY}${p.id}.json`,nodes:p.nodes,bonds:p.bonds};
@@ -263,6 +304,38 @@ try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
  }
  if(group.children.length)$('scene').insertBefore(group,$('scene').lastElementChild);
 }catch{}
+// The reference destruction rigs (packs/index.json, port-reference-packs.mjs): scene packs
+// with authored shots, run in the stress-solver modes (destruction-reactions.md).
+try{const index=await (await fetch('./packs/index.json')).json();
+ const group=document.createElement('optgroup');group.label='Reference rigs (scene packs, authored shots)';
+ for(const p of index.packs){const key=`ref:${p.key}`;samples[key]={key,label:p.title,pack:`./packs/${p.file}`,nodes:p.nodes,bonds:p.bonds,reference:true,shots:p.shots};
+  group.append(new Option(`${p.key} · ${p.nodes} chunks · ${p.bonds} bonds`,key))}
+ if(group.children.length)$('scene').insertBefore(group,$('scene').lastElementChild);
+}catch{}
+// URL: ?pack=crush-wall&shot=1.4x[&bonds=threshold|stress][&camera=x,y,z,tx,ty,tz] picks a
+// reference rig, the stress-solver mode (threshold unless bonds= says otherwise) and fires
+// the authored shot at its launch time (the source's 2 s settle); shot=1.4 matches 1.4x.
+const query=new URLSearchParams(location.search);
+let urlShot=null;
+{const pack=query.get('pack'),bonds=query.get('bonds');
+ if(bonds&&$('bond-mode').querySelector(`option[value="${bonds}"]`))$('bond-mode').value=bonds;
+ if(pack&&samples[`ref:${pack}`]){$('scene').value=`ref:${pack}`;if(!bonds)$('bond-mode').value='threshold';urlShot=query.get('shot')}}
+// The pack's authored shots in the panel (stress modes), and firing one.
+function showPackShots(){
+ const shots=stressOn&&procedural==='pack'?stress.packShots:[];
+ $('pack-shot').replaceChildren(...shots.map((s,i)=>new Option(`${s.label} · ${(s.mass/1000).toFixed(1)} t at ${s.speed.toFixed(1)} m/s`,i)));
+ $('pack-shot-row').hidden=!shots.length;$('pack-shot').title=shots.map(s=>`${s.label}: ${s.note}`).join('\n');
+ if(urlShot!==null){const i=shots.findIndex(s=>s.label===urlShot||s.label===`${urlShot}x`);
+  if(i<0)throw new Error(`No authored shot ${urlShot}: ${shots.map(s=>s.label).join(', ')}`);
+  $('pack-shot').value=String(i);pendingShot={index:i,at:shots[i].launchAt};urlShot=null;stress.running=true}
+}
+// An authored shot waiting for its launch time (s of simulated time).
+let pendingShot=null;
+function firePendingShot(st){
+ if(!pendingShot||(st.frames??0)/st.frameHz<pendingShot.at)return;
+ stress.firePackShot(pendingShot.index);pendingShot=null;
+}
+$('fire-pack-shot').onclick=()=>{if(stressOn&&stress){stress.firePackShot(Number($('pack-shot').value));stress.running=true}};
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
  if(entry.pack||entry.generated){
@@ -272,13 +345,13 @@ const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
   else{
    setStatus(`Fetching ${entry.label}…`);
    const response=await fetch(entry.pack);
-   if(!response.ok)throw new Error('Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
+   if(!response.ok)throw new Error(entry.reference?`Scene pack missing: ${entry.pack}`:'Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
    packBytes=await response.arrayBuffer();
   }
   assetBytes=null;layout=null;procedural='pack';
   // The towers block: breakable welds, CCD balls at 16× unless the panel says otherwise.
-  if(entry.towers&&!towersBlock){$('bond-mode').value='d6';$('ball-speed').value='4';$('ball-ccd').checked=true}
-  towersBlock=!!entry.towers;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack?entry.pack.split('/').pop():'generated in Rust (glass_tower.rs)';
+  if(entry.towers&&(!towersBlock||towersMeteor!==!!entry.meteor)){$('bond-mode').value='d6';$('ball-speed').value=entry.meteor?'0':'4';$('ball-ccd').checked=true}
+  towersBlock=!!entry.towers;towersMeteor=!!entry.meteor;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack?entry.pack.split('/').pop():'generated in Rust (glass_tower.rs)';
   $('level').replaceChildren(new Option(entry.nodes!=null?`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`:'Scene pack · generated',0));$('level').value='0';
   await loadLevel(0);return;
  }
@@ -299,11 +372,15 @@ $('sample').onclick=()=>sample();
 $('fire').onclick=()=>scene?.rowShot&&shoot(scene.rowShot);
 // The volley's shots fire from the frame loop at their steps (never inside a
 // step split across frames), counted from the step the button was pressed at.
-$('volley').onclick=()=>{if(!sim||!towersBlock)return;applyBallCcd();applyBallSpeed();
- const base=sim.steps;volley={shots:towersVolley(scene).map(s=>({...s,step:s.step+base})),next:0};released=true;running=true;accumulator=0;$('release').textContent='Pause'};
+function startShots(shots){applyBallCcd();applyBallSpeed();
+ const base=sim.steps;volley={shots:shots.map(s=>({...s,step:s.step+base})),next:0};released=true;running=true;accumulator=0;$('release').textContent='Pause'}
+$('volley').onclick=()=>{if(sim&&towersBlock)startShots(towersVolley(scene))};
+// The meteor scene's strike, and base shots that topple the first tower over its street.
+$('meteor').onclick=()=>{if(sim&&towersMeteor)startShots([meteorShot(scene)])};
+$('topple').onclick=()=>{if(sim&&towersBlock)startShots(toppleShots(scene))};
 function fireVolley(){
  if(!volley||sim.slicing)return;
- while(volley.next<volley.shots.length&&volley.shots[volley.next].step<=sim.steps){const s=volley.shots[volley.next++];trailLaunched(sim.launch(s.origin,s.dir))}
+ while(volley.next<volley.shots.length&&volley.shots[volley.next].step<=sim.steps){const s=volley.shots[volley.next++];trailLaunched(sim.launch(s.origin,s.dir,s.speed?{speed:s.speed,arc:false}:undefined))}
  if(volley.next>=volley.shots.length)volley=null;
 }
 $('scene').onchange=()=>sample($('scene').value);
@@ -311,6 +388,8 @@ $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>i
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('view-mode').onchange=()=>{if(renderer)renderer.colorMode=viewMode();applyView()};
 $('show-bonds').onchange=applyView;
+$('strike-prediction').onchange=()=>{if(stressOn&&stress)stress.setStrikePrediction($('strike-prediction').checked)};
+$('contact-fracture').onchange=()=>{if(stressOn&&stress){stress.setContactFracture($('contact-fracture').checked);serializeLoad(()=>loadLevel(Number($('level').value)))}};
 $('ball-mass').oninput=applyBallMass;
 $('ball-speed').oninput=applyBallSpeed;
 $('ball-ccd').onchange=applyBallCcd;
@@ -319,6 +398,7 @@ $('ball-radius').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').valu
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
 $('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLevel(Number($('level').value)))};
 $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
+$('crush').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('physics-hz').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{if(stressOn&&stress){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 $('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();volley=null;resetTrails();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
@@ -327,6 +407,13 @@ for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.pr
 window.addEventListener('dragleave',()=>document.body.classList.remove('drop'));
 window.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drop');const f=e.dataTransfer.files[0];if(f&&device)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))});
 window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
+ // The stress modes, frame-locked for recording: ready once loaded; each advance runs one
+ // display frame of `ms` (the Rust steps the physics frames that fell due, fires a URL
+ // shot at its launch time and draws). orbit/zoom move the stress camera as a drag would.
+ get stressReady(){return !loading&&stressOn&&!!stress},
+ async stressAdvance(ms=1000/60){stressCapture=true;await frame;await stress.frame(ms);const st=stress.stats;firePendingShot(st);setStatus(stressStatus(st));return st},
+ stressOrbit(dx,dy){stress.orbit(dx,dy)},stressZoom(delta){stress.zoom(delta)},
+ get status(){return $('status').textContent},
  // The page's own shot (a click's path: queued behind the frame, the loop keeps running).
  shoot:ray=>shoot(ray),
  // Run or pause the frame loop's physics, as the Start / Pause button does.
@@ -334,7 +421,9 @@ window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
  get running(){return running},
  // The towers volley still firing (the Fire the volley button).
  get volleyActive(){return !!volley},get ready(){return !loading&&!!sim},get device(){return device},get asset(){return asset},get scene(){return scene},get simulation(){return sim},get renderer(){return renderer},get rates(){return currentRates},
- async shootRay(origin,direction){running=false;await frame;return sim.launch(origin,direction)},
+ async shootRay(origin,direction){running=false;await frame;placeCrowd({origin,direction});return sim.launch(origin,direction)},
+ // The current Near Miss crowd (one ring zone per bystander).
+ get bystanders(){return bystanders},
  async fireRow(){running=false;await frame;return sim.launch(scene.rowShot.origin,scene.rowShot.direction)},
  // Repeatable row benchmark: fire, then every `every` steps record wall ms per
  // step, the ball, counters and (optionally) a per-phase GPU profile.
@@ -356,9 +445,11 @@ window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
 // frames and rendered frames per second from its stats.
 // What the stress import could not take from the scene as given (stress-web `warnings`).
 const stressWarning=st=>st.warnings?.length?` · ⚠ ${st.warnings.join('; ')}`:'';
+// The running stress mode's status line (the frame loop's and the frame-locked capture's).
+const stressStatus=st=>`${st.shots} shots · ${st.frames} frames · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken${st.crush?` · ${st.crushed} crushed`:' · crush off'} · ${st.simSeconds.toFixed(2)} s${stressWarning(st)}`;
 function stressTick(now,elapsedMs){
  frame=(async()=>{try{
-  const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;
+  const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;firePendingShot(st);
   stressHud.frames+=(st.frames??0)-before;stressHud.renders++;
   if(now-stressHud.t>=1000){const s=(now-stressHud.t)/1000;$('tps').textContent=(stressHud.frames/s).toFixed(0);$('fps').textContent=(stressHud.renders/s).toFixed(0);$('sim-speed').textContent=`${(stressHud.frames/s/st.frameHz).toFixed(2)}×`;stressHud={t:now,frames:0,renders:0,stepMs:stressHud.stepMs}}
   // A display frame that stepped no physics frame (a 120 Hz display, a 60 Hz simulation)
@@ -367,11 +458,14 @@ function stressTick(now,elapsedMs){
   $('step-ms').textContent=stressHud.stepMs?`${stressHud.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
   $('frame-ms').textContent='frames / second';
   $('awake').textContent=st.moving??st.awake??'—';
-  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots} shots · ${st.frames} frames · ${st.fragments} fragments · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken · ${st.simSeconds.toFixed(1)} s${stressWarning(st)}`)}
+  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(stressStatus(st))}
  }catch(e){fail(e)}})();
  frame.finally(()=>requestAnimationFrame(tick));
 }
+// Frame-locked capture (record-reactions.mjs): the stress mode steps only when asked.
+let stressCapture=false;
 function tick(now){
+ if(stressOn&&stressCapture){requestAnimationFrame(tick);return}
  if(stressOn&&!loading&&stress){const ms=last?Math.min(250,now-last):0;last=now;return stressTick(now,ms)}
  const frameMs=last?now-last:FRAME_BUDGET_MS;
  const elapsed=last?Math.min(.04,(now-last)/1000):0;last=now;
@@ -421,7 +515,7 @@ function tick(now){
   // Queue the draw immediately behind physics; do not wait for CPU stats first.
   updateTrails();renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}
-  if(running){const c=sim.counters;$("awake").textContent=c.awake;$("contacts").textContent=c.contact}
+  if(running){const c=sim.counters;$("awake").textContent=c.awake;$("contacts").textContent=c.contact;updateNear(now)}
   if(running){const c=sim.counters;setStatus(`${sim.shots} shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}
   if(!document.hidden)rates.frame();
  }catch(e){fail(e)}})();frame.finally(()=>requestAnimationFrame(tick))}else requestAnimationFrame(tick);
@@ -431,5 +525,10 @@ try{
  const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error('No WebGPU adapter available');
  device=await adapter.requestDevice({requiredFeatures:adapter.features.has('timestamp-query')?['timestamp-query']:[],requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(16,adapter.limits.maxStorageBuffersPerShaderStage),maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
  device.addEventListener('uncapturederror',e=>fail(e.error));device.lost.then(info=>fail(new Error(`GPU device lost: ${info.message}. Reload this page.`)));
+ // ?scene=<key>&bonds=<mode>&crush=<0|1|2> preselect the panel (e.g. scene=crush-wall&bonds=threshold&crush=1).
+ const q=new URLSearchParams(location.search);
+ if(q.has('scene')&&samples[q.get('scene')])$('scene').value=q.get('scene');
+ if(q.has('bonds'))$('bond-mode').value=q.get('bonds');
+ if(q.has('crush'))$('crush').value=q.get('crush');
  await sample();requestAnimationFrame(tick);
 }catch(e){fail(e);controls(false)}

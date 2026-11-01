@@ -8,6 +8,7 @@ use engine_exec::rigid_plan;
 use engine_exec::rigid_plan::{constraint_id_words, HostUniforms};
 use engine_exec::{ExecError, PhaseTimingsMs};
 use engine_schema::convex::HullArena;
+use engine_schema::guidance::{self, GuideBodyGpu, GuideParamsGpu, GuideZoneGpu, GuidanceCapacity};
 use engine_schema::*;
 use engine_vehicle::{
     FunctionalState, Ray, RayHit, VehicleBackend, VehicleCapacity, VehicleDesc, VehicleEvent,
@@ -69,7 +70,18 @@ fn make_bind_group(
     })
 }
 
+/// Host side of directed debris (`WgpuSim::allocate_guidance`).
+struct GuideHost {
+    cap: GuidanceCapacity,
+    /// Tuning; the per-step fields are filled by `write_guide_params`.
+    params: GuideParamsGpu,
+    enabled: bool,
+    zones: u32,
+}
+
 pub struct WgpuSim {
+    /// Directed debris (`allocate_guidance`); `None`: not allocated.
+    guide: Option<GuideHost>,
     compact_contacts: bool,
     persistent_contacts: bool,
     sparse_start: u32,
@@ -101,6 +113,9 @@ pub struct WgpuSim {
     grid_fixed: bool,
     /// `ENGINE_GRID_LEVELS` override of the hierarchical grid (None: convex scenes).
     grid_levels_mode: Option<bool>,
+    /// The largest collider radius a GPU kernel may turn dynamic behind the host's
+    /// mirror (`reserve_movable_radius`); the grid is sized as if one moved.
+    movable_radius: f32,
     /// Diagnostic dispatch filters (`WG_ONLY` / `WG_SKIP`), parsed once.
     wg_only: Option<Vec<String>>,
     wg_skip: Option<Vec<String>>,
@@ -215,8 +230,13 @@ pub struct WgpuSim {
 
 /// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
 pub(crate) fn body_motion_flags(bodies: &[BodyState]) -> (bool, bool) {
-    let ccd = bodies.iter().any(|b| b.flags & BODY_CCD != 0);
-    let kin = bodies.iter().any(|b| b.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32) == BodyFlags::Kinematic as u32);
+    let ccd = bodies
+        .iter()
+        .any(|b| b.flags & (BODY_CCD | engine_schema::BODY_CCD_FAST) != 0);
+    let kin = bodies.iter().any(|b| {
+        b.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32)
+            == BodyFlags::Kinematic as u32
+    });
     (ccd, kin)
 }
 
@@ -428,9 +448,11 @@ impl WgpuSim {
         let SimOptions {
             contacts,
             vehicles: vehicle_capacity,
+            characters: char_cap,
             soft,
             features,
             pose_output,
+            guidance,
         } = options;
         anyhow::ensure!(
             soft.is_none() || contacts == ContactStorage::Canonical,
@@ -459,6 +481,7 @@ impl WgpuSim {
             compact_contacts,
             persistent_contacts,
             vehicle_capacity,
+            char_cap,
             features,
             pose_output,
             info,
@@ -479,6 +502,9 @@ impl WgpuSim {
             sim.rebind_buffer(32);
             sim.soft = Some(SoftHost::new(soft));
         }
+        if let Some(cap) = guidance {
+            sim.allocate_guidance(cap)?;
+        }
         Ok(sim)
     }
 
@@ -493,6 +519,7 @@ impl WgpuSim {
         compact_contacts: bool,
         persistent_contacts: bool,
         vehicle_capacity: VehicleCapacity,
+        char_cap: engine_schema::character::CharacterCapacity,
         features: EngineFeatures,
         pose_output: bool,
         info: wgpu::AdapterInfo,
@@ -513,7 +540,6 @@ impl WgpuSim {
         sizes[9] +=
             u64::from(4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels)) * 32;
         sizes[31] = vehicle_capacity.bytes().max(16);
-        let char_cap = engine_schema::character::CharacterCapacity::default();
         sizes[33] = char_cap.bytes().max(16);
         let limits = device.limits();
         for (i, &bytes) in sizes.iter().enumerate() {
@@ -577,6 +603,24 @@ impl WgpuSim {
             engine_terrain::surface::SURFACE_BINDING,
             256,
         ));
+        // 54 is Metal's terrain partials (terrain_mpm_fast.slang): unused here.
+        const _: () = assert!(
+            guidance::GUIDE_PARAMS_BINDING == engine_terrain::surface::SURFACE_BINDING + 2
+        );
+        bufs.push(terrain_buffer(&device, engine_terrain::surface::SURFACE_BINDING + 1, 256));
+        // Directed-debris buffers (guide_step.slang): placeholders until a world
+        // asks for guidance (`allocate_guidance`).
+        for binding in guidance::GUIDE_PARAMS_BINDING..=guidance::GUIDE_SLOTS_BINDING {
+            debug_assert_eq!(bufs.len(), binding);
+            bufs.push(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("b{binding} guide")),
+                size: 256,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+        }
         // Pass table slots (256-byte aligned so dynamic offsets are legal).
         queue.write_buffer(&bufs[22], 0, &rigid_plan::pass_table());
 
@@ -721,6 +765,7 @@ impl WgpuSim {
             grid_split: features.grid == GridLayout::Split,
             grid_fixed: features.grid == GridLayout::Fixed,
             grid_levels_mode: features.grid_levels,
+            movable_radius: 0.0,
             color_headroom: features.color_headroom,
             color_round_headroom: features.color_round_headroom,
             soft_unfused: features.soft_unfused,
@@ -781,6 +826,7 @@ impl WgpuSim {
             fast_list_off: false,
             beam_events_seen: 0,
             mount_events_seen: 0,
+            guide: None,
         };
         sim.write_character_header();
         // Kernel fixtures in the unit tests set the modes they exercise on top
@@ -909,7 +955,12 @@ impl WgpuSim {
             "more than {IMPULSE_CAP} impulse records in one step"
         );
         for r in records {
-            assert!(r.body < self.body_count, "impulse on body {} of {}", r.body, self.body_count);
+            assert!(
+                r.body < self.body_count,
+                "impulse on body {} of {}",
+                r.body,
+                self.body_count
+            );
         }
         self.impulse_queue.extend_from_slice(records);
         self.wake_pending = true;
@@ -927,12 +978,27 @@ impl WgpuSim {
                 .impulse_queue
                 .iter()
                 .enumerate()
-                .map(|(k, r)| ImpulseRecord { mode: (r.mode & 255) | ((k as u32) << 8), ..*r })
+                .map(|(k, r)| ImpulseRecord {
+                    mode: (r.mode & 255) | ((k as u32) << 8),
+                    ..*r
+                })
                 .collect();
-            self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_BASE) * 4, bytemuck::cast_slice(&keyed));
+            self.queue.write_buffer(
+                &self.bufs[21],
+                u64::from(IMPULSE_BASE) * 4,
+                bytemuck::cast_slice(&keyed),
+            );
             // IMPULSE_COUNT and IMPULSE_FIRST are adjacent words.
-            self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_COUNT) * 4, bytemuck::bytes_of(&n));
-            self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_FIRST) * 4, bytemuck::bytes_of(&n));
+            self.queue.write_buffer(
+                &self.bufs[21],
+                u64::from(IMPULSE_COUNT) * 4,
+                bytemuck::bytes_of(&n),
+            );
+            self.queue.write_buffer(
+                &self.bufs[21],
+                u64::from(IMPULSE_FIRST) * 4,
+                bytemuck::bytes_of(&n),
+            );
         }
         self.impulse_queue.clear();
     }
@@ -1578,15 +1644,27 @@ impl WgpuSim {
     pub fn set_joint_frame(&mut self, id: u32, side_b: bool, anchor: [f32; 3], rot: [f32; 4]) {
         let base = Self::joint_offset(id);
         let (a, r) = if side_b {
-            (std::mem::offset_of!(Joint, anchor_b), std::mem::offset_of!(Joint, frame_b))
+            (
+                std::mem::offset_of!(Joint, anchor_b),
+                std::mem::offset_of!(Joint, frame_b),
+            )
         } else {
-            (std::mem::offset_of!(Joint, anchor_a), std::mem::offset_of!(Joint, frame_a))
+            (
+                std::mem::offset_of!(Joint, anchor_a),
+                std::mem::offset_of!(Joint, frame_a),
+            )
         };
-        self.queue.write_buffer(&self.bufs[5], base + a as u64, bytemuck::cast_slice(&anchor));
-        self.queue.write_buffer(&self.bufs[5], base + r as u64, bytemuck::cast_slice(&rot));
+        self.queue.write_buffer(
+            &self.bufs[5],
+            base + a as u64,
+            bytemuck::cast_slice(&anchor),
+        );
+        self.queue
+            .write_buffer(&self.bufs[5], base + r as u64, bytemuck::cast_slice(&rot));
         if side_b {
             let rest = std::mem::offset_of!(Joint, rest_start) as u64;
-            self.queue.write_buffer(&self.bufs[5], base + rest, bytemuck::cast_slice(&rot));
+            self.queue
+                .write_buffer(&self.bufs[5], base + rest, bytemuck::cast_slice(&rot));
         }
     }
 
@@ -1664,7 +1742,10 @@ impl WgpuSim {
     /// Queue explosions for the next step (`explode` runs after the
     /// commands): `(centre, radius, falloff, impulse per area, mask bits)`.
     /// The step runs even if everything sleeps.
-    pub fn write_explosions(&mut self, explosions: &[([f32; 3], f32, f32, f32, u32)]) -> anyhow::Result<()> {
+    pub fn write_explosions(
+        &mut self,
+        explosions: &[([f32; 3], f32, f32, f32, u32)],
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             explosions.len() as u32 <= engine_schema::EXPLODE_CAP,
             "{} explosions in one step exceed {}",
@@ -1673,11 +1754,17 @@ impl WgpuSim {
         );
         let mut words = vec![explosions.len() as u32, 0, 0, 0];
         for (c, radius, falloff, per_area, mask) in explosions {
-            words.extend([c[0].to_bits(), c[1].to_bits(), c[2].to_bits(), radius.to_bits()]);
+            words.extend([
+                c[0].to_bits(),
+                c[1].to_bits(),
+                c[2].to_bits(),
+                radius.to_bits(),
+            ]);
             words.extend([falloff.to_bits(), per_area.to_bits(), *mask, 0]);
         }
         let offset = u64::from(engine_schema::EXPLODE_BASE) * 4;
-        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
+        self.queue
+            .write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
         self.explosion_count = explosions.len() as u32;
         self.wake_pending = true;
         Ok(())
@@ -1685,7 +1772,10 @@ impl WgpuSim {
 
     /// Queue overlap queries (boxes, with their filter) for
     /// [`Self::encode_overlap_queries`]: `(min, max, category bits, mask bits)`.
-    pub fn write_overlap_queries(&mut self, queries: &[([f32; 3], [f32; 3], u32, u32)]) -> anyhow::Result<()> {
+    pub fn write_overlap_queries(
+        &mut self,
+        queries: &[([f32; 3], [f32; 3], u32, u32)],
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             queries.len() as u32 <= engine_schema::QUERY_CAP,
             "{} overlap queries in one step exceed {}",
@@ -1694,11 +1784,17 @@ impl WgpuSim {
         );
         let mut words = vec![queries.len() as u32, 0, 0, 0];
         for (mn, mx, categories, mask) in queries {
-            words.extend([mn[0].to_bits(), mn[1].to_bits(), mn[2].to_bits(), *categories]);
+            words.extend([
+                mn[0].to_bits(),
+                mn[1].to_bits(),
+                mn[2].to_bits(),
+                *categories,
+            ]);
             words.extend([mx[0].to_bits(), mx[1].to_bits(), mx[2].to_bits(), *mask]);
         }
         let offset = u64::from(engine_schema::QUERY_BASE) * 4;
-        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
+        self.queue
+            .write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
         self.wake_pending = true;
         Ok(())
     }
@@ -1729,7 +1825,8 @@ impl WgpuSim {
     /// Zero the contact-event count before a step (records are appended).
     pub fn clear_contact_events(&self) {
         let offset = u64::from(engine_schema::CONTACT_EVENT_BASE) * 4;
-        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&[0u32; 4]));
+        self.queue
+            .write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&[0u32; 4]));
     }
 
     /// The contact-event region (header and records): buffer, byte offset, size.
@@ -1754,13 +1851,24 @@ impl WgpuSim {
             .iter()
             .position(|c| matches!(c, rigid_plan::Cmd::Phase { name: "broadphase" }))
             .expect("broadphase phase marker");
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("broadphase-only") });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("broadphase-only"),
+            });
         self.encode_dispatches(&mut enc, &cmds[..cut]);
         self.queue.submit([enc.finish()]);
         let c = self.read_counters();
         let n = c.candidate_count.min(self.capacity.max_candidates) as usize;
         let words: Vec<u32> = self.read_buffer_range(10, 0, n * 4);
-        (0..n).map(|k| (words[4 * k].min(words[4 * k + 1]), words[4 * k].max(words[4 * k + 1]))).collect()
+        (0..n)
+            .map(|k| {
+                (
+                    words[4 * k].min(words[4 * k + 1]),
+                    words[4 * k].max(words[4 * k + 1]),
+                )
+            })
+            .collect()
     }
 
     /// Diagnostic read of `count` words of a binding from word `first` (waits
@@ -1771,6 +1879,12 @@ impl WgpuSim {
 
     pub(crate) fn pose_output_enabled(&self) -> bool {
         self.pose_output
+    }
+
+    /// Run the next step even if nothing is awake and nothing was written (a host
+    /// pass that has to see every step, such as a sustained load integrating damage).
+    pub fn request_step(&mut self) {
+        self.wake_pending = true;
     }
 
     /// Whether the last `step*` call ran the GPU step (false: it was skipped
@@ -1853,6 +1967,19 @@ impl WgpuSim {
         self.grid_cache = None;
     }
 
+    /// Size the broadphase grid for a moving collider of radius `radius` (m) even while
+    /// none moves on the host's mirror: colliders a GPU kernel can put on a dynamic body
+    /// with no host write (a fracture's split, stress-gpu `fr_reparent`). Without it the
+    /// grid's levels follow the mirror's moving colliders only, and a larger piece freed
+    /// on the GPU lands in the oversized-static list, which never queries the statics.
+    /// Only grows (several fracture hosts reserve their own).
+    pub fn reserve_movable_radius(&mut self, radius: f32) {
+        if radius > self.movable_radius {
+            self.movable_radius = radius;
+            self.grid_cache = None;
+        }
+    }
+
     pub fn step(&mut self) -> Result<StepCounters, ExecError> {
         self.step_inner(false)
     }
@@ -1892,7 +2019,8 @@ impl WgpuSim {
         self.counted_steps = self.steps_done;
         // Wheel queries walk this step's broadphase grid, so vehicle worlds
         // never reuse a whole step's manifolds.
-        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0 && self.characters.is_empty();
+        self.manifolds_valid =
+            counters.overflow_flags == 0 && self.vehicle_count() == 0 && self.characters.is_empty();
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
@@ -1944,6 +2072,7 @@ impl WgpuSim {
         self.flush_commands();
         self.upload_impulses();
         self.write_host_uniforms_ex(!read);
+        self.write_guide_params();
         if let (Some(t), Some(c)) = (host_t, t_cell) {
             eprintln!(
                 "rubble host: grid cell {c:.2} ms, uniforms {:.2} ms",
@@ -1956,12 +2085,18 @@ impl WgpuSim {
         } else {
             self.capacity.max_contacts
         };
-        let prof = std::env::var("RUBBLE_STEP_PROFILE").is_ok().then(web_time::Instant::now);
+        let prof = std::env::var("RUBBLE_STEP_PROFILE")
+            .is_ok()
+            .then(web_time::Instant::now);
         let modes = self.step_modes();
         let inputs = self.step_inputs();
         let cmds = rigid_plan::encode_step(&modes, &inputs, reuse_manifolds, !read);
         if let Some(t) = prof {
-            eprintln!("rubble step profile: inputs+plan {:.3} ms since start {:.3}", t.elapsed().as_secs_f64() * 1e3, wall.elapsed().as_secs_f64() * 1e3);
+            eprintln!(
+                "rubble step profile: inputs+plan {:.3} ms since start {:.3}",
+                t.elapsed().as_secs_f64() * 1e3,
+                wall.elapsed().as_secs_f64() * 1e3
+            );
         }
         let mut enc = self
             .device
@@ -2076,8 +2211,23 @@ impl WgpuSim {
             let t: Vec<u64> =
                 bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
             let period = self.queue.get_timestamp_period() as f64 * 1e-6;
-            let parts: Vec<String> = names.iter().enumerate().map(|(i, n)| format!("{n} {:.2}", t[2 * i + 1].saturating_sub(t[2 * i]) as f64 * period)).collect();
-            let begin = t.iter().step_by(2).copied().filter(|&x| x > 0).min().unwrap_or(0);
+            let parts: Vec<String> = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| {
+                    format!(
+                        "{n} {:.2}",
+                        t[2 * i + 1].saturating_sub(t[2 * i]) as f64 * period
+                    )
+                })
+                .collect();
+            let begin = t
+                .iter()
+                .step_by(2)
+                .copied()
+                .filter(|&x| x > 0)
+                .min()
+                .unwrap_or(0);
             let end = t.iter().skip(1).step_by(2).copied().max().unwrap_or(0);
             let span = end.saturating_sub(begin) as f64 * period;
             eprintln!("rubble step GPU ms: span {span:.2}, {}", parts.join(", "));
@@ -2096,6 +2246,12 @@ impl WgpuSim {
 
     /// The plan's dispatches in one compute pass of `enc` (its copies are encoded before).
     fn encode_dispatches(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
+        self.encode_dispatches_hooked(enc, cmds, None);
+    }
+
+    /// [`Self::encode_dispatches`], with `hook` encoded into `enc` where the plan marks
+    /// the end of phase `hook.0` (the step's pass ends before it and resumes after).
+    fn encode_dispatches_hooked(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], mut hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) {
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("step"),
             timestamp_writes: None,
@@ -2106,13 +2262,30 @@ impl WgpuSim {
         let skipped = |k: &str| !skip.is_empty() && skip.split(',').any(|s| s == k);
         for c in cmds {
             match *c {
-                rigid_plan::Cmd::Dispatch { kernel, .. } | rigid_plan::Cmd::Indirect { kernel, .. } if skipped(kernel) => continue,
+                rigid_plan::Cmd::Dispatch { kernel, .. }
+                | rigid_plan::Cmd::Indirect { kernel, .. }
+                    if skipped(kernel) =>
+                {
+                    continue
+                }
                 _ => {}
+            }
+            if let (rigid_plan::Cmd::Phase { name, .. }, Some((at, f))) = (c, hook.as_mut()) {
+                if name == at {
+                    drop(pass);
+                    f(enc);
+                    hook = None;
+                    pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step"), timestamp_writes: None });
+                    continue;
+                }
             }
             match *c {
                 rigid_plan::Cmd::Phase { .. } if split => {
                     drop(pass);
-                    pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step"), timestamp_writes: None });
+                    pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("step"),
+                        timestamp_writes: None,
+                    });
                 }
                 rigid_plan::Cmd::Copy { .. } | rigid_plan::Cmd::Phase { .. } => {}
                 rigid_plan::Cmd::Dispatch {
@@ -2142,6 +2315,20 @@ impl WgpuSim {
     /// once. The step's host writes (its uniforms) take effect at that submission, before
     /// its commands, as they would at its own.
     pub fn step_encode(&mut self, enc: &mut wgpu::CommandEncoder) -> Result<(), ExecError> {
+        self.step_encode_hooked(enc, None).map(|_| ())
+    }
+
+    /// [`Self::step_encode`] with `hook` encoded into `enc` within the step, where the
+    /// plan's phase `hook.0` ends (for example `"warm"`: the step's contacts are made and
+    /// warm-started, nothing is solved yet; a host may change bodies and colliders there
+    /// and the rest of the step sees them). Returns whether the hook was
+    /// encoded: not when the step was skipped (every body asleep) or the plan has no
+    /// such phase. A hook must leave the step's own buffers' layouts as they are.
+    pub fn step_encode_with(&mut self, enc: &mut wgpu::CommandEncoder, phase: &str, hook: &mut dyn FnMut(&mut wgpu::CommandEncoder)) -> Result<bool, ExecError> {
+        self.step_encode_hooked(enc, Some((phase, hook)))
+    }
+
+    fn step_encode_hooked(&mut self, enc: &mut wgpu::CommandEncoder, hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) -> Result<bool, ExecError> {
         // Its own submission, ahead of the caller's encoder.
         self.build_all_bounds_if_dirty();
         let wall = web_time::Instant::now();
@@ -2160,13 +2347,14 @@ impl WgpuSim {
             self.counted_steps = self.steps_done;
             self.last_timings.total_gpu = 0.0;
             self.last_step_ran = false;
-            return Ok(());
+            return Ok(false);
         }
         self.refresh_cell();
         self.last_step_ran = true;
         self.flush_commands();
         self.upload_impulses();
         self.write_host_uniforms_ex(true);
+        self.write_guide_params();
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
             0
@@ -2199,8 +2387,10 @@ impl WgpuSim {
                 );
             }
         }
-        self.encode_dispatches(enc, &cmds);
-        self.finish_step(false, wall).map(|_| ())
+        let phases: Vec<&str> = cmds.iter().filter_map(|c| if let rigid_plan::Cmd::Phase { name, .. } = c { Some(*name) } else { None }).collect();
+        let hooked = hook.as_ref().is_some_and(|(at, _)| phases.contains(at));
+        self.encode_dispatches_hooked(enc, &cmds, hook);
+        self.finish_step(false, wall).map(|_| hooked)
     }
 
     /// The step's host bookkeeping after its submission (and its counters, `read`).
@@ -2225,7 +2415,11 @@ impl WgpuSim {
         let t_read = web_time::Instant::now();
         let counters = self.read_counters();
         if std::env::var("RUBBLE_STEP_PROFILE").is_ok() {
-            eprintln!("rubble step profile: read {:.3} ms, total {:.3} ms", t_read.elapsed().as_secs_f64() * 1e3, wall.elapsed().as_secs_f64() * 1e3);
+            eprintln!(
+                "rubble step profile: read {:.3} ms, total {:.3} ms",
+                t_read.elapsed().as_secs_f64() * 1e3,
+                wall.elapsed().as_secs_f64() * 1e3
+            );
         }
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
@@ -2234,7 +2428,8 @@ impl WgpuSim {
         self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
         self.last_counters = counters;
         self.counted_steps = self.steps_done;
-        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0 && self.characters.is_empty();
+        self.manifolds_valid =
+            counters.overflow_flags == 0 && self.vehicle_count() == 0 && self.characters.is_empty();
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
@@ -2365,6 +2560,8 @@ impl WgpuSim {
             },
             soft: self.soft_counts(),
             command_count: self.command_count,
+            guidance: self.guidance_active(),
+            guide_slots: self.guide.as_ref().map_or(0, |g| g.cap.plan_budget),
             explosion_count: self.explosion_count,
             post_stabilize: self.params.flags & engine_schema::FLAG_POST_STAB != 0,
         }
@@ -2467,16 +2664,33 @@ impl WgpuSim {
         // The step-0 full pass: every collider, asleep or not.
         s[17] = 0;
         s[19] = 0;
-        self.queue.write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
+        self.queue
+            .write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
         let host = rigid_plan::host_uniforms(&self.params, &s);
         self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&host));
         // build_aabbs reads the collider count from the counter block, which
         // only a step would otherwise refresh (raycast_batch writes it too).
-        self.queue.write_buffer(&self.bufs[7], 0, bytes_of(&rigid_plan::step_counters(&inputs)));
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bounds") });
+        self.queue.write_buffer(
+            &self.bufs[7],
+            0,
+            bytes_of(&rigid_plan::step_counters(&inputs)),
+        );
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bounds"),
+            });
         {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("bounds"), timestamp_writes: None });
-            self.disp(&mut pass, "build_aabbs", u64::from(self.collider_count.max(1)), None);
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bounds"),
+                timestamp_writes: None,
+            });
+            self.disp(
+                &mut pass,
+                "build_aabbs",
+                u64::from(self.collider_count.max(1)),
+                None,
+            );
         }
         self.queue.submit([enc.finish()]);
     }
@@ -2535,7 +2749,12 @@ impl WgpuSim {
         let (cell, levels) = match self.grid_cache {
             Some((n, cell, levels)) if hier && n == self.collider_count => (cell, levels),
             _ => {
-                let r = rigid_plan::grid_cell(&self.host_cols, &self.host_bodies, hier);
+                let r = rigid_plan::grid_cell_with(
+                    &self.host_cols,
+                    &self.host_bodies,
+                    hier,
+                    self.movable_radius,
+                );
                 if hier {
                     self.grid_cache = Some((self.collider_count, r.0, r.1));
                 }
@@ -2585,6 +2804,182 @@ impl WgpuSim {
                     make_bind_group(&self.device, name, &pipe.layout, &pipe.bindings, &self.bufs);
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Directed debris (slang/kernels/guide_step.slang)
+    // ---------------------------------------------------------------------
+
+    /// Size the guidance buffers (bindings 55-59). Every body's record starts
+    /// off (zeroed); `write_guide_bodies` arms the guided ones.
+    fn allocate_guidance(&mut self, cap: GuidanceCapacity) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            cap.max_zones > 0 && cap.plan_budget > 0,
+            "guidance capacity needs max_zones and plan_budget above zero"
+        );
+        anyhow::ensure!(
+            cap.plan_budget <= guidance::GUIDE_BLOCK,
+            "GuidanceCapacity::plan_budget {} exceeds {} plans per step",
+            cap.plan_budget,
+            guidance::GUIDE_BLOCK
+        );
+        let max_bodies = self.capacity.max_bodies;
+        let sizes = [
+            (guidance::GUIDE_PARAMS_BINDING, std::mem::size_of::<GuideParamsGpu>() as u64),
+            (
+                guidance::GUIDE_ZONES_BINDING,
+                u64::from(cap.max_zones) * std::mem::size_of::<GuideZoneGpu>() as u64,
+            ),
+            (
+                guidance::GUIDE_BODIES_BINDING,
+                u64::from(max_bodies.max(1)) * std::mem::size_of::<GuideBodyGpu>() as u64,
+            ),
+            (guidance::GUIDE_SCRATCH_BINDING, cap.scratch_words(max_bodies) * 4),
+            (
+                guidance::GUIDE_SLOTS_BINDING,
+                u64::from(cap.plan_budget) * std::mem::size_of::<guidance::GuideSlotGpu>() as u64,
+            ),
+        ];
+        for (binding, bytes) in sizes {
+            self.check_buffer_fits(binding, bytes)?;
+            self.bufs[binding] = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("b{binding} guide")),
+                size: bytes.max(256),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            self.rebind_buffer(binding as u32);
+        }
+        self.guide = Some(GuideHost {
+            cap,
+            params: GuideParamsGpu::default(),
+            enabled: false,
+            zones: 0,
+        });
+        Ok(())
+    }
+
+    /// The guidance capacity this world was created with.
+    pub fn guidance_capacity(&self) -> Option<GuidanceCapacity> {
+        self.guide.as_ref().map(|g| g.cap)
+    }
+
+    fn guide_host(&mut self) -> anyhow::Result<&mut GuideHost> {
+        self.guide.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("guidance was not allocated: create the world with a guidance capacity")
+        })
+    }
+
+    /// Turn guidance on or off with its tuning. The host fills the per-step
+    /// fields (time, dt, gravity, counts); the rest of `params` is kept.
+    pub fn set_guidance(&mut self, enabled: bool, params: GuideParamsGpu) -> anyhow::Result<()> {
+        let g = self.guide_host()?;
+        g.enabled = enabled;
+        g.params = params;
+        Ok(())
+    }
+
+    /// Replace the zone list. Claims follow zone indices and are kept (see
+    /// `reset_guide_claims`), so a zone list can be re-sent without
+    /// refilling every quota.
+    pub fn set_guide_zones(&mut self, zones: &[GuideZoneGpu]) -> anyhow::Result<()> {
+        let max = self.guide_host()?.cap.max_zones;
+        anyhow::ensure!(
+            zones.len() <= max as usize,
+            "{} guidance zones exceed GuidanceCapacity::max_zones ({max})",
+            zones.len()
+        );
+        self.guide_host()?.zones = zones.len() as u32;
+        if !zones.is_empty() {
+            self.write_binding(guidance::GUIDE_ZONES_BINDING, 0, zones);
+        }
+        Ok(())
+    }
+
+    /// Zero every zone's claim counter.
+    pub fn reset_guide_claims(&mut self) -> anyhow::Result<()> {
+        let max = self.guide_host()?.cap.max_zones;
+        let zeros = vec![0u32; max as usize];
+        self.write_binding(
+            guidance::GUIDE_SCRATCH_BINDING,
+            u64::from(guidance::GUIDE_SCRATCH_CLAIMS) * 4,
+            &zeros,
+        );
+        Ok(())
+    }
+
+    /// Write the guidance records of bodies `first..first + records.len()`.
+    pub fn write_guide_bodies(&mut self, first: u32, records: &[GuideBodyGpu]) -> anyhow::Result<()> {
+        self.guide_host()?;
+        anyhow::ensure!(
+            u64::from(first) + records.len() as u64 <= u64::from(self.capacity.max_bodies),
+            "guidance records past the body capacity"
+        );
+        if !records.is_empty() {
+            let stride = std::mem::size_of::<GuideBodyGpu>() as u64;
+            self.write_binding(guidance::GUIDE_BODIES_BINDING, u64::from(first) * stride, records);
+        }
+        Ok(())
+    }
+
+    /// Clear a freed body slot's record so a body reusing it starts unguided.
+    pub fn clear_guide_body(&mut self, index: u32) {
+        if self.guide.is_some() {
+            let _ = self.write_guide_bodies(index, &[GuideBodyGpu::default()]);
+        }
+    }
+
+    /// Read guidance records (blocking; for tools and tests).
+    pub fn read_guide_bodies(&self, first: u32, count: u32) -> Vec<GuideBodyGpu> {
+        if self.guide.is_none() {
+            return Vec::new();
+        }
+        let stride = std::mem::size_of::<GuideBodyGpu>() as u64;
+        self.read_buffer_range(
+            guidance::GUIDE_BODIES_BINDING,
+            u64::from(first) * stride,
+            count as usize,
+        )
+    }
+
+    /// Each zone's claimed bodies (blocking; for tools and tests).
+    pub fn read_guide_claims(&self) -> Vec<u32> {
+        let Some(g) = self.guide.as_ref() else {
+            return Vec::new();
+        };
+        self.read_buffer_range(
+            guidance::GUIDE_SCRATCH_BINDING,
+            u64::from(guidance::GUIDE_SCRATCH_CLAIMS) * 4,
+            g.zones as usize,
+        )
+    }
+
+    /// The guidance passes run this step: enabled, with zones and bodies.
+    fn guidance_active(&self) -> bool {
+        self.guide
+            .as_ref()
+            .is_some_and(|g| g.enabled && g.zones > 0 && self.body_count > 0)
+    }
+
+    fn write_guide_params(&self) {
+        if !self.guidance_active() {
+            return;
+        }
+        let g = self.guide.as_ref().expect("active guidance");
+        let p = g.params.for_step(
+            guidance::GuideStep {
+                time: self.steps_done as f32 * self.params.dt,
+                dt: self.params.dt,
+                gravity_y: self.params.gravity_y,
+                zones: g.zones,
+                bodies: self.body_count,
+                joints: self.joint_count,
+            },
+            g.cap,
+        );
+        self.write_binding(guidance::GUIDE_PARAMS_BINDING, 0, std::slice::from_ref(&p));
     }
 
     // ---------------------------------------------------------------------
@@ -2871,7 +3266,8 @@ impl WgpuSim {
         let mut joint_breaks = Vec::new();
         let lost_joints = decode_joint_breaks(words, &mut self.events_seen, &mut joint_breaks);
         let mut mount_breaks = Vec::new();
-        let lost_mounts = decode_mount_breaks(words, &mut self.mount_events_seen, &mut mount_breaks);
+        let lost_mounts =
+            decode_mount_breaks(words, &mut self.mount_events_seen, &mut mount_breaks);
         let soft = self.soft_events_from(words);
         RingEvents {
             joint_breaks,

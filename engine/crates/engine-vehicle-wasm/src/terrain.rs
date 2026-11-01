@@ -15,8 +15,8 @@
 use super::err;
 use engine_terrain::layout::*;
 use engine_terrain::plan::{
-    alloc_bytes, source_peak_speed, FieldGrid, RegionClock, TerrainCmd, TerrainOps, TerrainPlan,
-    TerrainStepReport, KERNELS,
+    alloc_bytes, source_peak_speed, FieldGrid, RegionClock, SettleRule, TerrainCmd, TerrainOps,
+    TerrainPlan, TerrainStepReport, KERNELS,
 };
 use engine_terrain::surface::{
     SurfacePatch, SurfacePlan, DEFAULT_SURFACE_CELLS, SURFACE_BINDING, SURFACE_DEBRIS_ARGS_WORD,
@@ -90,6 +90,8 @@ struct SettingsJson {
     speed_headroom: Option<f32>,
     settle_speed: Option<f32>,
     settle_frames: Option<u32>,
+    /// `"strict"` (the default) or `"local"` (`engine_terrain::SettleRule`).
+    settle_rule: Option<String>,
     /// The render-only surface's limit on window samples × layers
     /// (`engine_terrain::surface`).
     surface_cells: Option<u32>,
@@ -119,6 +121,7 @@ pub struct TerrainStep {
     headroom: f32,
     settle_speed: f32,
     settle_frames: u32,
+    settle_rule: SettleRule,
     /// The open areas, by slot.
     areas: Vec<Open>,
     surface: SurfacePlan,
@@ -298,6 +301,15 @@ impl TerrainStep {
                 "speed_headroom must be finite and non-negative",
             ));
         }
+        let settle_rule = match s.settle_rule.as_deref() {
+            None | Some("strict") => SettleRule::Strict,
+            Some("local") => SettleRule::Local,
+            Some(r) => {
+                return Err(JsError::new(&format!(
+                    "settle_rule {r:?} is not \"strict\" or \"local\""
+                )))
+            }
+        };
         if !(settle_speed.is_finite() && settle_speed > 0.0 && settle_frames > 0) {
             return Err(JsError::new(
                 "settle_speed must be positive and settle_frames at least 1",
@@ -311,6 +323,7 @@ impl TerrainStep {
             headroom,
             settle_speed,
             settle_frames,
+            settle_rule,
             areas: Vec::new(),
             surface,
             frame: 0,
@@ -383,6 +396,7 @@ impl TerrainStep {
                 "bed_depth": c.bed_depth, "speed_growth": c.speed_growth},
             "region_margin": self.margin, "speed_headroom": self.headroom,
             "settle_speed": self.settle_speed, "settle_frames": self.settle_frames,
+            "settle_rule": if self.settle_rule == SettleRule::Local { "local" } else { "strict" },
         })
         .to_string()
     }
@@ -711,22 +725,25 @@ impl TerrainStep {
             .plan
             .check(counters)
             .map_err(|e| JsError::new(&format!("step {step}: terrain: {e}")))?;
-        let settle = self.settle_speed;
+        let (settle, rule) = (self.settle_speed, self.settle_rule);
         for open in &mut self.areas {
             open.clock
-                .report(u64::from(step), &r.area(open.slot), settle);
+                .report(u64::from(step), &r.settle_view(open.slot, rule), settle);
         }
         self.last = Some(r);
         let areas: Vec<serde_json::Value> = self
             .areas
             .iter()
             .map(|a| {
-                json!({"slot": a.slot, "max_speed": r.area_speed[a.slot as usize],
-                    "body_speed": r.area_body_speed[a.slot as usize]})
+                let k = a.slot as usize;
+                json!({"slot": a.slot, "max_speed": r.area_speed[k],
+                    "body_speed": r.area_body_speed[k], "airborne": r.area_airborne[k],
+                    "touch_speed": r.area_touch_speed[k]})
             })
             .collect();
         Ok(json!({
             "blocks": r.blocks, "max_speed": r.max_speed, "particles": r.particles,
+            "live": r.live,
             "parcels": r.parcels, "deposited": r.deposited, "escaped": r.escaped,
             "airborne": r.airborne, "body_speed": r.body_speed, "wheels": r.wheels,
             "areas": areas,

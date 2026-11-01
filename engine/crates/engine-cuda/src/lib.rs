@@ -431,6 +431,8 @@ impl CudaSim {
             },
             soft: Default::default(),
             command_count: 0,
+            guidance: false,
+            guide_slots: 0,
             explosion_count: 0,
             post_stabilize: self.params.flags & engine_schema::FLAG_POST_STAB != 0,
         }

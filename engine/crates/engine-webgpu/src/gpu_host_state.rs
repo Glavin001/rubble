@@ -38,6 +38,7 @@ pub struct SimSnapshot {
     has_filters: bool,
     grid_levels: u32,
     grid_cache: Option<(u32, f32, u32)>,
+    movable_radius: f32,
     manifolds_valid: bool,
     params: AvbdParams,
     last_contact_offset: u32,
@@ -86,9 +87,27 @@ impl WgpuSim {
         &self.bufs[7]
     }
 
+    /// The step's broadphase candidate pairs (binding 10, `CandidatePair`: two colliders),
+    /// `StepCounters::candidate_count` of them once the broadphase has run (a hook of
+    /// `step_encode_with` at `"broadphase"` sees this step's).
+    pub fn candidate_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[10]
+    }
+
     /// First row of the last step's contacts in `contact_buffer` (the ping-pong half).
     pub fn last_contact_offset(&self) -> u32 {
         self.last_contact_offset
+    }
+
+    /// First row of the next step's contacts in `contact_buffer`: what
+    /// [`Self::last_contact_offset`] is once that step is encoded (a hook within it reads
+    /// its rows there).
+    pub fn next_contact_offset(&self) -> u32 {
+        if self.contacts_parity == 0 {
+            0
+        } else {
+            self.capacity.max_contacts
+        }
     }
 
     pub fn capacity(&self) -> WorldCapacity {
@@ -303,6 +322,7 @@ impl WgpuSim {
             has_filters: self.has_filters,
             grid_levels: self.grid_levels,
             grid_cache: self.grid_cache,
+            movable_radius: self.movable_radius,
             manifolds_valid: self.manifolds_valid,
             params: self.params,
             last_contact_offset: self.last_contact_offset,
@@ -345,6 +365,8 @@ impl WgpuSim {
         self.has_filters = s.has_filters;
         self.grid_levels = s.grid_levels;
         self.grid_cache = s.grid_cache;
+        // The grid cache was sized with the snapshot's reservation.
+        self.movable_radius = s.movable_radius;
         self.manifolds_valid = s.manifolds_valid;
         self.params = s.params;
         self.last_contact_offset = s.last_contact_offset;
