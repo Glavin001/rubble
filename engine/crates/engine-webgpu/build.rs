@@ -103,6 +103,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "ccd_register",
     "broadphase_fast",
     "ccd_toi",
+    "ccd_pick_key",
     "ccd_pick",
     "ccd_wake",
     "ccd_mark",
