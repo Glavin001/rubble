@@ -220,6 +220,17 @@ void fastQuery(uint i, uint lane)
 // One workgroup per fast collider: FAST_CAP groups (in rows of 32768), those
 // past the list's count return at once, so a flood of fast debris after big
 // impacts is walked in parallel, not a few groups striding the list.
+// write_fast_args sizes it from the list's count instead (work slot 82, one
+// workgroup per listed collider, the same group numbering), so a step with few
+// fast colliders launches few groups, not FAST_CAP.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void write_fast_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    writeDispatchArgs(82u, fastCount() * 64u);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void broadphase_fast(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)

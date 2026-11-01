@@ -144,9 +144,13 @@ fn awake_broadphase_finds_the_full_broadphase_pairs() {
             s.sim.set_awake_broadphase(true);
             let awake = sorted(s.sim.debug_broadphase_pairs());
             let awake_bounds = bounds(&s.sim);
+            // The reference: the full broadphase, and broadphase_fast over all FAST_CAP
+            // workgroups as before it was sized from the fast list.
             s.sim.set_awake_broadphase(false);
+            s.sim.set_fast_indirect(false);
             let full = sorted(s.sim.debug_broadphase_pairs());
             let full_bounds = bounds(&s.sim);
+            s.sim.set_fast_indirect(true);
             s.sim.set_awake_broadphase(true);
             assert!(awake_bounds == full_bounds, "step {step}: collider bounds differ");
             if awake != full {

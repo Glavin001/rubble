@@ -96,6 +96,10 @@ pub struct StepModes {
     /// With `awake_broadphase`: bound every collider this step (`build_aabbs`), not
     /// only the moving ones (a host write may have moved a static).
     pub full_bounds: bool,
+    /// Size `broadphase_fast` from the fast list's count (`write_fast_args`, work
+    /// slot 82) instead of dispatching all FAST_CAP workgroups (the same groups do
+    /// the work; the rest returned at once).
+    pub fast_indirect: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -421,7 +425,13 @@ pub fn encode_step(
         if fast_list_scheduled(&mo) {
             // Sweeps longer than a cell query along their path (row 1).
             e.phase("broadphaseGrid");
-            e.d("broadphase_fast", FAST_GROUPS * 64);
+            if m.fast_indirect {
+                // One workgroup per listed fast collider (slot 82), not FAST_CAP.
+                e.d("write_fast_args", 64);
+                e.w("broadphase_fast", 82);
+            } else {
+                e.d("broadphase_fast", FAST_GROUPS * 64);
+            }
             e.phase("ccdFast");
         }
         if vehicles {
@@ -834,6 +844,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "apply_impulses",
     "ccd_register",
     "broadphase_fast",
+    "write_fast_args",
     "ccd_toi",
     "ccd_pick_key",
     "ccd_pick",
@@ -1161,8 +1172,8 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[22] = PASS_SLOTS * PASS_ALIGN;
     // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
     // contacts 73), convex 74..76, the awake-indexed broadphase's 77..81 (finer
-    // scan, moved list, resting-table rebuild, moving colliders).
-    s[23] = b(c.max_colors.max(82) * 3, 4);
+    // scan, moved list, resting-table rebuild, moving colliders), the fast list's 82.
+    s[23] = b(c.max_colors.max(83) * 3, 4);
     s[24] = b(c.max_colliders, 80);
     s[25] = b(c.max_candidates, 32);
     s[26] = b(c.max_bodies, 32);

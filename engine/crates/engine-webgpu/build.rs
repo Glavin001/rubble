@@ -110,6 +110,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "apply_impulses",
     "ccd_register",
     "broadphase_fast",
+    "write_fast_args",
     "ccd_toi",
     "ccd_pick_key",
     "ccd_pick",

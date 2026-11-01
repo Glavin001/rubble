@@ -208,6 +208,8 @@ pub struct WgpuSim {
     /// them, or the last step did not keep the table. The next awake-indexed step
     /// rebuilds it and bounds every collider.
     pub(crate) rest_stale: bool,
+    /// Test control: dispatch all FAST_CAP `broadphase_fast` workgroups (the old way).
+    fast_direct: bool,
     /// Local incremental color repair (8en, HOST_S(27)).
     pub(crate) local_repair: bool,
     /// Test hook: caps the persist list (HOST_S(23)); 0 uses the whole region.
@@ -869,6 +871,7 @@ impl WgpuSim {
             carry_rest: features.carry_rest,
             awake_broadphase: features.awake_broadphase,
             rest_stale: true,
+            fast_direct: false,
             persist_list: persistent_contacts && features.reuse_copy && features.persist_list,
             // Split broadphase grids: awake dynamics in one table, sleepers and small
             // statics in a second (HOST_S(20)); awake queriers walk 14 cells.
@@ -982,21 +985,21 @@ impl WgpuSim {
 
     /// Overwrite one of the 64 material slots (friction is combined per contact).
     pub fn set_material(&mut self, index: u32, material: Material) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         assert!(index < 64, "material slot out of range");
         self.queue
             .write_buffer(&self.bufs[3], u64::from(index) * 16, bytes_of(&material));
     }
 
     pub fn set_params(&mut self, params: AvbdParams) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         self.params = params;
     }
 
     /// Replace the material table that `Collider::material` indexes (64 entries, all
     /// friction 0.5 until set).
     pub fn set_materials(&mut self, mats: &[Material]) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         assert!(mats.len() <= 64, "the material table holds 64 entries");
         self.queue
             .write_buffer(&self.bufs[3], 0, bytemuck::cast_slice(mats));
@@ -1010,7 +1013,7 @@ impl WgpuSim {
     /// previous poses. A write per body can exhaust Metal staging allocations
     /// before the first submission on half-million-body scenes.
     pub fn add_bodies(&mut self, bodies: &[BodyState]) -> std::ops::Range<u32> {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         let start = self.body_count;
         let count = u32::try_from(bodies.len()).expect("body batch exceeds u32 index space");
         assert!(
@@ -1141,7 +1144,7 @@ impl WgpuSim {
 
     /// Append collider records in one contiguous upload, preserving body indices.
     pub fn add_colliders(&mut self, colliders: &[Collider]) -> std::ops::Range<u32> {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         self.bounds_dirty |= self.steps_done > 0 && !colliders.is_empty();
         let start = self.collider_count;
         let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
@@ -1191,7 +1194,7 @@ impl WgpuSim {
     /// first-fit reuse of released blocks). Grows the GPU buffer to the next
     /// power of two and rebuilds the bind groups that reference it.
     pub fn sync_hulls(&mut self, arena: &mut HullArena) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         let needed = arena.len() as u32;
         if needed > self.hull_records_capacity {
             let records = needed.next_power_of_two();
@@ -1394,7 +1397,7 @@ impl WgpuSim {
     /// character's inner capsule must be kept; a dropped ground or hit reads
     /// as none, a queued impulse on a dropped body is discarded).
     pub fn compact(&mut self, keep_bodies: &[u32], keep_colliders: &[u32]) -> (Vec<u32>, Vec<u32>) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         assert!(
             self.joint_count == 0 && self.vehicle_count() == 0,
             "compact: joints and vehicles name bodies and are not renumbered"
@@ -1521,7 +1524,7 @@ impl WgpuSim {
 
     /// Replace the contiguous colliders `first..first + cols.len()` in one upload.
     pub fn set_colliders(&mut self, first: u32, cols: &[Collider]) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         let end = first as usize + cols.len();
         assert!(
             end <= self.collider_count as usize,
@@ -2107,6 +2110,22 @@ impl WgpuSim {
     /// the CCD audit (they then miss pairs; see tests/broadphase_oracle.rs).
     pub fn set_fast_list(&mut self, on: bool) {
         self.fast_list_off = !on;
+    }
+
+    /// Test control: `false` dispatches every FAST_CAP `broadphase_fast` workgroup
+    /// instead of sizing the dispatch from the fast list (the same pairs).
+    pub fn set_fast_indirect(&mut self, on: bool) {
+        self.fast_direct = !on;
+    }
+
+    /// A host write: the next awake-indexed step rebuilds the resting table and bounds
+    /// every collider. `RUBBLE_REST_DEBUG=1` names the caller.
+    #[track_caller]
+    pub(crate) fn mark_rest_stale(&mut self) {
+        if !self.rest_stale && std::env::var("RUBBLE_REST_DEBUG").is_ok() {
+            eprintln!("rest table stale: {}", std::panic::Location::caller());
+        }
+        self.rest_stale = true;
     }
 
     /// The awake-indexed broadphase on or off (`EngineFeatures::awake_broadphase`):
@@ -2861,6 +2880,7 @@ impl WgpuSim {
             rest_rebuild: self.rest_stale,
             // Host commands may move statics or kinematics (apply_commands, this step).
             full_bounds: self.rest_stale || self.command_count > 0,
+            fast_indirect: !self.fast_direct,
         }
     }
 
@@ -3928,7 +3948,7 @@ impl VehicleBackend for WgpuSim {
     }
 
     fn write_body(&mut self, index: u32, body: &BodyState) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         let stride = std::mem::size_of::<BodyState>() as u64;
         self.queue
             .write_buffer(&self.bufs[0], u64::from(index) * stride, bytes_of(body));
@@ -3941,7 +3961,7 @@ impl VehicleBackend for WgpuSim {
     }
 
     fn write_collider(&mut self, index: u32, collider: &Collider) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         self.queue.write_buffer(
             &self.bufs[2],
             u64::from(index) * std::mem::size_of::<Collider>() as u64,

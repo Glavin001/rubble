@@ -153,7 +153,7 @@ impl WgpuSim {
     /// is written back: the solver treats it as static (contacts against it are
     /// resolved for the others; it is neither predicted nor integrated).
     pub fn write_bodies(&mut self, first: u32, bodies: &[BodyState]) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         let count = u32::try_from(bodies.len()).expect("body batch exceeds u32 index space");
         assert!(
             first <= self.body_count && count <= self.body_count - first,
@@ -379,7 +379,7 @@ impl WgpuSim {
 
     /// Return to a snapshot of this simulation (`save_state`).
     pub fn restore_state(&mut self, s: &SimSnapshot) {
-        self.rest_stale = true;
+        self.mark_rest_stale();
         assert_eq!(
             s.bufs.len(),
             self.bufs.len(),
