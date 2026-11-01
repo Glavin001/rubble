@@ -38,7 +38,9 @@ pub(crate) fn terrain_buffer(device: &wgpu::Device, binding: usize, bytes: u64) 
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_DST
             | wgpu::BufferUsages::COPY_SRC
-            | if binding == MPM_ARGS_BINDING {
+            // The surface's debris list doubles as a renderer's indirect
+            // draw arguments (`SURFACE_DEBRIS_ARGS_WORD`).
+            | if binding == MPM_ARGS_BINDING || binding == engine_terrain::surface::SURFACE_BINDING {
                 wgpu::BufferUsages::INDIRECT
             } else {
                 wgpu::BufferUsages::empty()
