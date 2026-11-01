@@ -108,3 +108,46 @@ under large and novel deformation, and over 50% better than JGS2 when deformatio
 is novel. That is our crash case, so it is likely the variant to build. How the
 quadrature is defined over a vertex's complementary domain, and whether Ū still
 comes from the rest Hessian, are unknown until the paper is read.
+
+## Gate 1 results (`examples/jgs2_probe.rs`, 2026-11-01)
+
+One backward-Euler step at 240 Hz, elastic beam energy only (no damping, yield or
+contacts; the lowest nodes fixed as ground), solved exactly by projected Newton with
+dense f64 solves. Error ‖x − x*‖ / ‖x₀ − x*‖ from the inertial guess. `jgs2-rest` is
+Jacobi with the co-rotated rest-shape basis and the complementary terms summed
+exactly (no cubature); `-ls` adds a global Armijo line search; `jgs2-exact` uses the
+current Hessian's basis (a check: one iteration is one Newton step).
+
+| case | method | it 1 | it 3 | it 10 | it 40 |
+|---|---|---|---|---|---|
+| sedan (367 nodes), gravity | VBD | 7.3e-1 | 3.7e-1 | 8.3e-2 | — (5.5e-3 at 30) |
+| | JGS2 rest | 2.2e-4 | converged | | |
+| sedan, impact (rear 2/3 at 15 m/s, nose stopped) | VBD | 6.6e-1 | 4.2e-1 | 1.4e-1 | 4.1e-3 |
+| | JGS2 rest | 1.3e-1 | 7.1e-3 | 4.1e-7 | converged |
+| sedan impact, 10% of front beams broken after the basis | JGS2 rest | 1.3e-1 | 9.0e-3 | 5.4e-5 | 1.4e-9 |
+| sedan impact, 30% broken after the basis | JGS2 rest | 2.1e-1 | 5.3e-2 | 6.1e-3 | 9.6e-5 |
+| high-res (1,014 nodes), gravity | VBD | 1.2 | 9.2e-1 | 5.5e-1 | 1.9e-1 |
+| | JGS2 rest | 1.9e-2 | 7.7e-7 | converged | |
+| high-res, impact | VBD | 9.6e-1 | 8.5e-1 | 6.5e-1 | 3.5e-1 |
+| | JGS2 rest | 1.27 | 1.92 | 1.38 | 6.0e-1 |
+| | JGS2 rest + line search | 7.9e-1 | 8.0e-1 | 4.6e-1 | 2.8e-1 |
+
+Reading:
+
+* Where the step is near the rest Hessian's regime (gravity, driving, a moderate
+  impact on the sedan), JGS2 turns VBD's slow linear convergence into near-Newton
+  convergence. On the high-res car's gravity step VBD is at 0.19 after 40
+  iterations; JGS2 is at 7.7e-7 after 3. That is the high-res car's sag problem.
+* The basis degrades gracefully when beams break after it was built: 10% of the
+  front's beams cost a little; 30% loses most of the advantage but stays ahead of VBD.
+  A basis rebuild after heavy tearing would recover it.
+* The high-res impact step (front beams 12 cm long compressed about 50% in one step)
+  is violently nonlinear: Newton itself needed 49 line-searched iterations. Plain
+  Jacobi JGS2 diverges at first there; with a global line search it is slightly
+  ahead of VBD but stalls. The paper says the same (line search needed when Newton's
+  quadratic model fails). Real beams cap their force at yield, which this elastic
+  probe does not, so the real crash step is less stiff than this one.
+
+Not covered yet: cubature or quadrature (the exact complementary sums are O(N) per
+node, too slow for the GPU), yield inside the energy, contacts, the per-iteration
+cost on the GPU.
