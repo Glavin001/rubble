@@ -98,15 +98,19 @@
     <div class="muted" id="rpmText">— rpm</div>
     <div id="wheels"></div>
   </div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, sceneCapacity, colliderWords } from './world-host.mjs';
-    import { L, M, WHEEL_RIM_MATERIAL, bitsf, centerOfMass, Gauntlet, MeteorRange, MeteorRun } from './vehicle.mjs';
+    // Physics: rubble's Rust World (engine-world-wasm), the host native and Unreal run.
+    // This page keeps rendering, input, UI and its scene scripts; the street, meteor
+    // and run builders (engine-vehicle-wasm) are Rust that only describe launches.
+    import { createWorld, pollFrame as poll, stepFrames, softCalibratedSettings } from './rubble-world.mjs';
+    import { L, WHEEL_RIM_MATERIAL, centerOfMass, Gauntlet, MeteorRange, MeteorRun } from './vehicle.mjs';
     import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
-    import { duneBuggySoft, calibratedSettings } from './soft.mjs';
+    import { duneBuggySoft } from './soft.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
-    const fail = (e) => { errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; };
+    const fail = (e) => { errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; window.__failed = String(e && e.message || e); };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
     addEventListener('error', (e) => fail(e.error || e.message));
 
@@ -172,15 +176,40 @@
     }
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('no WebGPU adapter');
-    const device = await adapter.requestDevice({
-      requiredLimits: {
-        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
-        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-        maxBufferSize: adapter.limits.maxBufferSize,
-      },
+
+    // ---------------------------------------------------------------- world
+    const nTraffic = scene === 'traffic' ? Math.max(1, Math.min(60, Number(qs.get('vehicles')) || 48)) : 0;
+    const est = scene === 'traffic' ? 4000 + nTraffic * 40 : scene === 'gauntlet' ? 9000 : scene === 'run' ? 15000 : 6000;
+    const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+    const maxBodies = nextPow2(Math.max(est, 4096));
+    // ?build=hybrid (buggies scene): node-beam frames with bolted parts on joints
+    // (engine_softbody::buggy), stepped as the soft-body demo: 240 Hz, 4 steps a frame.
+    const hybrid = (scene === 'buggies' || scene === 'vibeland') && qs.get('build') === 'hybrid';
+    const SOFT_HZ = 240;
+    const STEPS_PER_FRAME = hybrid ? Math.round(SOFT_HZ / 60) : 1;
+    const capacity = {
+      maxBodies,
+      maxColliders: nextPow2(Math.max(est * 2, maxBodies * 2, 8192)),
+      maxContacts: Math.min(nextPow2(Math.max(est * 16, 65536)), 1 << 21),
+      maxJoints: hybrid ? 1024 : 64,
+      maxCandidates: Math.min(nextPow2(Math.max(est * 32, 131072)), 1 << 21),
+      maxColors: 32,
+      // The JS host's 64 held its kinematic velocities only; World also carries
+      // teleports and velocity sets as commands (capacity only).
+      maxCommands: 2048,
+      maxHullVertices: 64,
+    };
+    const guided = scene === 'gauntlet' || scene === 'meteors' || scene === 'run';
+    // The world opens the device; the page renders on it and reads the world's buffers in place.
+    const world = await createWorld({
+      gravity: [0, hybrid ? -9.81 : -10, 0],
+      contacts: 'canonical',
+      capacity,
+      vehicles: { maxVehicles: 64, maxWheels: 1024, maxCurvePoints: 8192, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 64 },
+      ...(hybrid ? { soft: { maxBodies: 32, maxBeams: 24576, maxParticles: 4096, maxColors: 64, maxGroups: 1024, maxTriangles: 12288, maxObstacles: 64 } } : {}),
+      ...(guided ? { guidance: { maxZones: 256, planBudget: 256 } } : {}),
     });
+    const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
     const canvas = document.getElementById('c');
@@ -195,58 +224,78 @@
     configure();
     addEventListener('resize', configure);
 
-    // ---------------------------------------------------------------- scene
-    const nTraffic = scene === 'traffic' ? Math.max(1, Math.min(60, Number(qs.get('vehicles')) || 48)) : 0;
-    const est = scene === 'traffic' ? 4000 + nTraffic * 40 : scene === 'gauntlet' ? 9000 : scene === 'run' ? 15000 : 6000;
-    const cap = sceneCapacity(est, est * 2);
-    const vehicleCap = { maxVehicles: 64, maxWheels: 1024, maxCurvePoints: 8192, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 64 };
-    // ?build=hybrid (buggies scene): node-beam frames with bolted parts on joints
-    // (engine_softbody::buggy), stepped as the soft-body demo: 240 Hz, 4 steps a frame.
-    const hybrid = (scene === 'buggies' || scene === 'vibeland') && qs.get('build') === 'hybrid';
-    const SOFT_HZ = 240;
-    const STEPS_PER_FRAME = hybrid ? Math.round(SOFT_HZ / 60) : 1;
-    if (hybrid) cap.maxJoints = 1024;
-    const world = await createWorld(device, { cap, vehicleCap, ...(hybrid ? { softCap: {} } : {}), ...(scene === 'gauntlet' || scene === 'meteors' || scene === 'run' ? { guidance: {} } : {}), status: (s) => { statusEl.textContent = s; } });
     // The bridge needs 20 iterations to converge its bending within a fast crossing
     // (tests/vehicle.rs BRIDGE_ITERATIONS).
-    world.params.iterations = scene === 'bridge' ? 20 : 8;
+    world.setSolver({ iterations: scene === 'bridge' ? 20 : 8 });
     if (hybrid) {
-      Object.assign(world.params, { dt: 1 / SOFT_HZ, iterations: 10, gravityY: -9.81, betaLin: 1e7 });
+      world.setSolver({ dt: 1 / SOFT_HZ, iterations: 10, gravityY: -9.81, betaLin: 1e7 });
       // Rigid mode (on unless ?rigid=0): a buggy that only drives rides its core
       // (drives exactly as the rigid buggy); any contact turns it soft that step.
-      world.setSoftSettings({ ...calibratedSettings(SOFT_HZ), rigid_mode: qs.get('rigid') !== '0' });
-      world.setMaterial(9, 0.8); // node spheres
+      world.setSoftSettings({ ...softCalibratedSettings(SOFT_HZ), rigid_mode: qs.get('rigid') !== '0' });
     }
     const sleepQ = qs.get('sleep');
-    if (sleepQ === 'off') world.params.sleepTime = 1e6;
-    const MAT_GROUND = 0, MAT_PROP = 1, MAT_ICE = 2;
+    if (sleepQ === 'off') world.setSolver({ sleepTime: 1e6 });
+    const DT = world.solver().dt, GRAVITY_Y = world.solver().gravityY;
+    // The simulation's clock: steps since the scene started or was reset.
+    const steps = () => world.simSteps();
+    const MAT_GROUND = 0, MAT_PROP = 1, MAT_ICE = 2, MAT_SKID = 3;
     // Meteor range colours (the renderer keys static bodies on these).
     const MAT_PAD = 4, MAT_HIT = 5, MAT_MISS = 6;
     // Meteor gauntlet: meteors, their trails (drawn along the velocity) and the finish gate.
     const MAT_METEOR = 10, MAT_TRAIL = 11, MAT_FINISH = 12;
-    world.setMaterial(MAT_GROUND, 1.0);
-    world.setMaterial(MAT_PROP, 0.6);
-    world.setMaterial(MAT_ICE, 0.08);
-    world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
+    // The material table the JS host had (64 slots, friction 0.6 unless set): vehicle
+    // part colliders name slot 0, wheel rims slot 7 and soft nodes slot 9 directly, and
+    // shapes of a given friction share the first slot with it.
+    const labs = !['playground', 'destruction', 'traffic', 'buggies', 'vibeland', 'gauntlet', 'meteors', 'run'].includes(scene);
+    const FRICTION = { [MAT_GROUND]: 1.0, [MAT_PROP]: 0.6, [MAT_ICE]: 0.08, [WHEEL_RIM_MATERIAL]: 0.9 };
+    if (labs) FRICTION[MAT_SKID] = 0.0;
+    if (hybrid) FRICTION[9] = 0.8; // node spheres
+    for (let i = 0; i < 64; i++) world.setMaterialSlot(i, { friction: FRICTION[i] ?? 0.6 });
+    // Page material per collider, for colours only (the GPU slot is the friction's).
+    const kinds = new Uint32Array(capacity.maxColliders);
 
     const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
-    const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
+    const boxI = (m, hx, hy, hz) => [(m * (hy * hy + hz * hz)) / 3, (m * (hx * hx + hz * hz)) / 3, (m * (hx * hx + hy * hy)) / 3];
+    const ballI = (m, r) => { const i = 0.4 * m * r * r; return [i, i, i]; };
+    const shape = (body, geometry, kind, filter) => {
+      const s = world.createShape(body, { material: { friction: FRICTION[kind] ?? 0.6 }, ...(filter ? { filter } : {}) }, geometry);
+      const c = world.shapeCollider(s);
+      kinds[c] = kind;
+      return c;
+    };
+    const boxOf = (half, position) => ({ box: { half, ...(position ? { transform: { position, rotation: [0, 0, 0, 1] } } : {}) } });
     const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => {
-      const body = world.addBody({ p, q, flags: 0 });
-      world.addCollider({ body, shape: 2, material, params: [...half, Math.hypot(...half)] });
+      const body = world.createBody({ position: p, rotation: q });
+      shape(body, boxOf(half), material);
       return body;
     };
+    const dynBody = (p, mass, inertia, q = [0, 0, 0, 1], v = [0, 0, 0], isBullet = false) => {
+      const body = world.createBody({ type: 'dynamic', position: p, rotation: q, linearVelocity: v, isBullet });
+      return { body, mass: () => world.bodySetMassData(body, mass, [0, 0, 0], inertia) };
+    };
     const dynBox = (p, half, mass, q = [0, 0, 0, 1]) => {
-      const body = world.addBody({ p, q, invMass: 1 / mass, invI: boxInv(mass, ...half), flags: 1 | 8 });
-      world.addCollider({ body, shape: 2, material: MAT_PROP, params: [...half, Math.hypot(...half)] });
+      const { body, mass: setMass } = dynBody(p, mass, boxI(mass, ...half), q);
+      shape(body, boxOf(half), MAT_PROP);
+      setMass();
       return body;
     };
     const dynBall = (p, r, mass, v = [0, 0, 0]) => {
-      const i = 2.5 / (mass * r * r);
-      const body = world.addBody({ p, invMass: 1 / mass, invI: [i, i, i], flags: 1 | 8, v });
-      world.addCollider({ body, shape: 0, material: MAT_PROP, params: [r, 0, 0, r] });
+      const { body, mass: setMass } = dynBody(p, mass, ballI(mass, r), [0, 0, 0, 1], v);
+      shape(body, { sphere: { radius: r } }, MAT_PROP);
+      setMass();
       return body;
     };
+    // A body parked static until launched (bodySetType): made dynamic with its mass
+    // first, so a launch only changes its type, pose and velocity.
+    const parked = (p, geometry, kind, mass, inertia, isBullet = false) => {
+      const { body, mass: setMass } = dynBody(p, mass, inertia, [0, 0, 0, 1], [0, 0, 0], isBullet);
+      shape(body, geometry, kind);
+      setMass();
+      world.bodySetType(body, 'static', p, [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
+      return { id: body, slot: world.bodySlot(body), home: p };
+    };
+    const park = (b) => world.bodySetType(b.id, 'static', b.home, [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
+    const launch = (b, p, v, w = [0, 0, 0]) => world.bodySetType(b.id, 'dynamic', p, [0, 0, 0, 1], v, w);
     // Ground slab (collider 0; the renderer draws it as a plane).
     staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
 
@@ -260,29 +309,36 @@
       d.wheels.forEach((w) => scaleMount(w.mount));
       return d;
     };
-    const vehicles = []; // {h, preset, ai, soft?}
+    // Each vehicle's records and bodies (World's vehicleEntry), and soft bodies'.
+    const entries = [];
+    const softEntries = [];
+    const entryOf = (h) => (entries[h] ??= world.vehicleEntry(h));
+    const chassisSlot = (h) => entryOf(h).chassis;
+    const vehicles = []; // {h, name, ai, soft?}
     const addVehicle = (name, p, yaw = 0, ai = null) => {
       if (hybrid && name === 'dune_buggy') {
         // The soft frame stands on its core's wheels from the ground up.
         const desc = duneBuggySoft(strength);
-        const s = world.addSoftVehicle(desc, [p[0], 0.1, p[2]], qAxis([0, 1, 0], yaw));
-        const h = world.soft.entries[s].core.vehicle;
+        const s = world.addSoftVehicle(desc, [p[0], 0.1, p[2]], qAxis([0, 1, 0], yaw), null);
+        softEntries[s] = world.softEntry(s);
+        const h = world.softVehicle(s);
+        entryOf(h);
         vehicles.push({ h, name, ai, soft: s, softDesc: desc });
         return h;
       }
       const q = qAxis([0, 1, 0], yaw);
-      const h = world.vehicles.addVehicle(world.backend, withStrength(byName[name]), p, q);
+      const h = world.addVehicle(withStrength(byName[name]), p, q);
       const v = { h, name, ai };
       vehicles.push(v);
       if (name === 'vibe_semi') {
         // Its flatbed: a vehicle of its own, placed so the two hitch points meet
         // (both design spaces share the origin), joined there by a ball joint.
         const trailer = byName.vibe_semi_trailer;
-        const oc = world.vehicles.entries[h].origin, ot = centerOfMass(trailer);
+        const oc = entryOf(h).origin, ot = centerOfMass(trailer);
         const d = qrotJs(q, ot.map((x, k) => x - oc[k]));
-        const t = world.vehicles.addVehicle(world.backend, trailer, p.map((x, k) => x + d[k]), q);
+        const t = world.addVehicle(trailer, p.map((x, k) => x + d[k]), q);
         const hitch = [0, 1.12, -2.3]; // presets::VIBE_SEMI_HITCH
-        world.addBallJoint({ bodyA: world.vehicles.chassisBody(h), bodyB: world.vehicles.chassisBody(t),
+        world.createBallJoint({ bodyA: world.bodyAt(chassisSlot(h)), bodyB: world.bodyAt(chassisSlot(t)),
           anchorA: hitch.map((x, k) => x - oc[k]), anchorB: hitch.map((x, k) => x - ot[k]) });
         v.trailer = t;
       }
@@ -294,22 +350,35 @@
       return [x * d + v[0] * s + c[0] * 2 * w, y * d + v[1] * s + c[1] * 2 * w, z * d + v[2] * s + c[2] * 2 * w];
     }
 
-    // Gauntlet: the street's shelling state and its facade blocks (bodies first..first+count).
+    // Gauntlet: the street's shelling state and its facade blocks.
     const street = scene === 'gauntlet' ? new Gauntlet() : null;
     const range = scene === 'meteors';
     // Meteor gauntlet: the run (engine-vehicle-wasm run.rs: the street, the
-    // meteor director, judging and score) and its meteors (bodies first..first+count).
+    // meteor director, judging and score) and its meteors.
     const run = scene === 'run' ? new MeteorRun() : null;
-    const rocks = { first: 0, count: 0, radius: 1, mass: 1 };
+    const rocks = { list: [], count: 0, radius: 1, mass: 1 };
     if (run) document.body.classList.add('run');
-    const blocks = { first: 0, count: 0, parked: [] };
+    const blocks = { list: [], count: 0, parked: [], launched: new Set() };
     // Meteor range: launched meteors and their touchdown markers.
-    const meteors = { pads: [], moving: qs.get('targets') === 'moving', routes: qs.get('routes') !== '0', first: 0, count: 36, markerFirst: 0, markers: 60, next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] };
+    const meteors = { pads: [], moving: qs.get('targets') === 'moving', routes: qs.get('routes') !== '0', list: [], count: 36, markerList: [], markers: 60, next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] };
     let rng = 7;
     let bridgeBolts = 0; // breakable joints in the scene (bridge)
     // ?spawn=x,z,yaw places the player vehicle (yaw in radians about +Y).
     const spawnAt = (qs.get('spawn') || '').split(',').filter(Boolean).map(Number);
     const rand = () => { rng = (Math.imul(rng, 1103515245) + 12345) >>> 0; return rng / 2 ** 32; };
+    // Facade blocks, static until a blast launches them; the grid is sized for them
+    // as if they moved (the JS host counted them as moving colliders).
+    const addBlocks = (g) => {
+      let r = 0;
+      for (const b of g.blocks) {
+        blocks.list.push(parked(b.p, boxOf(b.half), MAT_PROP, b.mass, boxI(b.mass, ...b.half)));
+        const br = Math.hypot(...b.half);
+        if (br <= 2) r = Math.max(r, br);
+      }
+      world.reserveMovingRadius(r);
+      blocks.count = g.blocks.length;
+      blocks.layout = g.blocks;
+    };
     if (scene === 'playground' || scene === 'destruction') {
       addVehicle(presetName, [spawnAt[0] ?? 0, 2.5, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
       // Ramps (static, rotated about X), a long hill and a kicker.
@@ -377,21 +446,17 @@
       addVehicle(presetName, [0, 2.2, 18], 0);
       // Pads are kinematic, so they can slide as carts (moving targets).
       for (const p of g.pads) {
-        const body = world.addBody({ p: [p.p[0], p.half[1], p.p[2]], flags: M.BODY_KINEMATIC | 8 });
-        world.addCollider({ body, shape: 2, material: MAT_PAD, params: [...p.half, Math.hypot(...p.half)] });
-        meteors.pads.push({ body, lane: p.lane, pad: meteors.pads.filter((x) => x.lane === p.lane).length, y: p.half[1], z: p.p[2] });
+        const body = world.createBody({ type: 'kinematic', position: [p.p[0], p.half[1], p.p[2]] });
+        shape(body, boxOf(p.half), MAT_PAD);
+        meteors.pads.push({ body, slot: world.bodySlot(body), lane: p.lane, pad: meteors.pads.filter((x) => x.lane === p.lane).length, y: p.half[1], z: p.p[2] });
       }
       // Parked meteors (static until launched) and touchdown markers (collide with nothing).
-      meteors.first = world.bodyCount;
-      for (let i = 0; i < meteors.count; i++) {
-        const body = world.addBody({ p: [-3000 - i * 3, -3000, -3000], flags: 0 });
-        world.addCollider({ body, shape: 0, material: MAT_PROP, params: [g.radius, 0, 0, g.radius] });
-      }
-      meteors.markerFirst = world.bodyCount;
+      for (let i = 0; i < meteors.count; i++) meteors.list.push(parked([-3000 - i * 3, -3000, -3000], { sphere: { radius: g.radius } }, MAT_PROP, g.mass, ballI(g.mass, g.radius)));
       for (let i = 0; i < meteors.markers; i++) {
-        const body = world.addBody({ p: [-3000 - i * 3, -3000, -2000], flags: 0 });
-        const c = world.addColliderWords(colliderWords({ body, shape: 2, material: MAT_MISS, generation: 0x8000, localPos: [0, 0, 0], density: 0, localRot: [0, 0, 0, 1], params: [0.25, 0.06, 0.25, 0.36] }));
-        if (i === 0) meteors.markerCollider = c;
+        const p = [-3000 - i * 3, -3000, -2000];
+        const body = world.createBody({ position: p });
+        const c = shape(body, boxOf([0.25, 0.06, 0.25]), MAT_MISS, { categories: 0x8000, mask: 0 });
+        meteors.markerList.push({ id: body, collider: c });
       }
       meteors.radius = g.radius; meteors.mass = g.mass;
     } else if (scene === 'gauntlet') {
@@ -401,14 +466,7 @@
       const g = JSON.parse(street.layout());
       addVehicle(presetName, g.spawn, 0);
       for (const c of g.cores) staticBox(c.p, c.half);
-      blocks.first = world.bodyCount;
-      for (const b of g.blocks) {
-        const body = world.addBody({ p: b.p, flags: 0 });
-        const c = world.addCollider({ body, shape: 2, material: MAT_PROP, params: [...b.half, Math.hypot(...b.half)] });
-        world.colliderInfo[c].dynamic = true; // a launched block sizes the grid cell
-      }
-      blocks.count = g.blocks.length;
-      blocks.layout = g.blocks;
+      addBlocks(g);
       for (const c of g.parked) blocks.parked.push(addVehicle('sedan', c.p, c.yaw, { forward: 0, steer: 0, handbrake: 1 }));
     } else if (scene === 'run') {
       // engine-vehicle-wasm run.rs: the Gauntlet's street, twice as long, its
@@ -416,42 +474,31 @@
       const g = JSON.parse(run.layout());
       addVehicle(presetName, g.spawn, 0);
       for (const c of g.cores) staticBox(c.p, c.half);
-      blocks.first = world.bodyCount;
-      for (const b of g.blocks) {
-        const body = world.addBody({ p: b.p, flags: 0 });
-        const c = world.addCollider({ body, shape: 2, material: MAT_PROP, params: [...b.half, Math.hypot(...b.half)] });
-        world.colliderInfo[c].dynamic = true; // a launched block sizes the grid cell
-      }
-      blocks.count = g.blocks.length;
-      blocks.layout = g.blocks;
+      addBlocks(g);
       for (const c of g.parked) blocks.parked.push(addVehicle('sedan', c.p, c.yaw, { forward: 0, steer: 0, handbrake: 1 }));
       // The finish gate: posts at the kerbs and a banner across, high over the road.
       for (const x of [-7.4, 7.4]) staticBox([x, 4, g.finish], [0.3, 4, 0.3], [0, 0, 0, 1], MAT_FINISH);
       staticBox([0, 8.4, g.finish], [7.7, 0.5, 0.15], [0, 0, 0, 1], MAT_FINISH);
-      // Parked meteors (static until launched), each with its trail (collides with nothing).
-      Object.assign(rocks, { first: world.bodyCount, count: g.meteor.count, radius: g.meteor.radius, mass: g.meteor.mass });
+      // Parked meteors (static until launched, continuous collision once they fly),
+      // each with its trail (collides with nothing).
+      Object.assign(rocks, { count: g.meteor.count, radius: g.meteor.radius, mass: g.meteor.mass });
+      const r = rocks.radius;
       for (let i = 0; i < rocks.count; i++) {
-        const body = world.addBody({ p: [-3000 - i * 4, -3000, -1000], flags: 0 });
-        const c = world.addCollider({ body, shape: 0, material: MAT_METEOR, params: [rocks.radius, 0, 0, rocks.radius] });
-        world.colliderInfo[c].dynamic = true;
-        world.addColliderWords(colliderWords({ body, shape: 2, material: MAT_TRAIL, generation: 0x8000, localPos: [0, 0, 0], density: 0, localRot: [0, 0, 0, 1], params: [0.8 * rocks.radius, 0.8 * rocks.radius, 0.5, rocks.radius] }));
+        const rock = parked([-3000 - i * 4, -3000, -1000], { sphere: { radius: r } }, MAT_METEOR, rocks.mass, ballI(rocks.mass, r), true);
+        shape(rock.id, boxOf([0.8 * r, 0.8 * r, 0.5]), MAT_TRAIL, { categories: 0x8000, mask: 0 });
+        rocks.list.push(rock);
       }
+      if (r <= 2) world.reserveMovingRadius(r);
     } else if (scene !== 'traffic') {
       // Two-way coupling labs: each mirrors a test in tests/vehicle.rs.
-      const MAT_SKID = 3;
-      world.setMaterial(MAT_SKID, 0.0);
-      const boxBody = (p, half, mass, extra = {}) => {
-        const body = world.addBody({ p, q: extra.q, invMass: 1 / mass, invI: boxInv(mass, ...half), flags: 1 | 8 });
-        return body;
-      };
-      const boxCol = (body, half, material, localPos = [0, 0, 0]) =>
-        world.addCollider({ body, shape: 2, material, localPos, params: [...half, Math.hypot(...half)] });
+      const boxBody = (p, half, mass, extra = {}) => dynBody(p, mass, boxI(mass, ...half), extra.q);
       if (scene === 'slab') {
         // Heavy slab: grippy deck on frictionless skids. The car's tyres push it back.
         const m = 2500, half = [6, 0.15, 30];
-        const body = boxBody([0, 0.25, 0], [6, 0.25, 30], m);
-        boxCol(body, half, MAT_GROUND, [0, 0.1, 0]);
-        boxCol(body, half, MAT_SKID, [0, -0.1, 0]);
+        const b = boxBody([0, 0.25, 0], [6, 0.25, 30], m);
+        shape(b.body, boxOf(half, [0, 0.1, 0]), MAT_GROUND);
+        shape(b.body, boxOf(half, [0, -0.1, 0]), MAT_SKID);
+        b.mass();
         // Cones along the world so the slab's motion reads on camera.
         for (let z = -40; z <= 40; z += 8) staticBox([8.5, 0.5, z], [0.25, 0.5, 0.25]);
         addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? -20], spawnAt[2] ?? 0);
@@ -461,8 +508,9 @@
         // Centre 1 m on the near side so the plank rests on its near end until the car's
         // weight crosses the pivot.
         const tilt = -Math.atan(0.5 / 8);
-        const body = boxBody([0, 0.58 - Math.tan(-tilt), -1], [2.2, 0.08, 7], 250, { q: qAxis([1, 0, 0], tilt) });
-        boxCol(body, [2.2, 0.08, 7], MAT_GROUND);
+        const b = boxBody([0, 0.58 - Math.tan(-tilt), -1], [2.2, 0.08, 7], 250, { q: qAxis([1, 0, 0], tilt) });
+        shape(b.body, boxOf([2.2, 0.08, 7]), MAT_GROUND);
+        b.mass();
         addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? -16], spawnAt[2] ?? 0);
       } else if (scene === 'carry') {
         addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
@@ -485,18 +533,20 @@
         staticBox([0, seatTop / 2, endZ - (seat - GAP) / 2], [roadX, seatTop / 2, (seat + GAP) / 2]);
         const planks = [];
         for (let i = 0; i < N; i++) {
-          const body = boxBody([0, Y - HY, i * pitch + HZ], [HX, HY, HZ], MASS);
-          boxCol(body, [HX, HY, HZ], MAT_GROUND);
-          planks.push(body);
+          const b = boxBody([0, Y - HY, i * pitch + HZ], [HX, HY, HZ], MASS);
+          shape(b.body, boxOf([HX, HY, HZ]), MAT_GROUND);
+          b.mass();
+          planks.push(b.body);
         }
         for (let i = 0; i + 1 < N; i++) {
           for (const [bx, by] of [[-0.8 * HX, -0.8 * HY], [0.8 * HX, -0.8 * HY], [-0.8 * HX, 0.8 * HY], [0.8 * HX, 0.8 * HY]]) {
             // D6 ball bolt; its rows start at BOLT_K (the default kStart lets the span sag).
-            world.addBallJoint({
+            const j = world.createBallJoint({
               bodyA: planks[i], bodyB: planks[i + 1],
               anchorA: [bx, by, HZ + GAP / 2], anchorB: [bx, by, -HZ - GAP / 2],
-              penalty: BOLT_K, breakForce: BOLT_BREAK,
+              breakForce: BOLT_BREAK,
             });
+            world.jointSetLinearPenalty(j, BOLT_K);
           }
         }
         bridgeBolts = (N - 1) * 4;
@@ -513,13 +563,15 @@
         // across the lane, then a 0.6 m ledge (twice the road wheels' reach).
         for (let row = 0; row < 7; row++) for (const x of [-1.7, 0, 1.7]) {
           const h = row % 2 ? 0.175 : 0.12, z = 10 + row * 1.5, j = (row % 3 - 1) * 0.15;
-          const body = boxBody([x + j, h, z], [h, h, h], 1500 * 8 * h * h * h);
-          boxCol(body, [h, h, h], MAT_PROP);
+          const b = boxBody([x + j, h, z], [h, h, h], 1500 * 8 * h * h * h);
+          shape(b.body, boxOf([h, h, h]), MAT_PROP);
+          b.mass();
         }
         for (const z of [24, 28]) {
           const half = [2.6, 0.2, 0.2];
-          const body = boxBody([0, 0.2, z], half, 250);
-          boxCol(body, half, MAT_PROP);
+          const b = boxBody([0, 0.2, z], half, 250);
+          shape(b.body, boxOf(half), MAT_PROP);
+          b.mass();
         }
         staticBox([0, 0.3, 36 + 25], [6, 0.3, 25], [0, 0, 0, 1], MAT_GROUND);
         for (let z = 0; z <= 80; z += 8) staticBox([7.5, 0.5, z], [0.25, 0.5, 0.25]);
@@ -528,36 +580,33 @@
         // Light crates in two rows that only the tyre outlines reach (outside the body,
         // off the ray lines): the wheel shells shove them.
         for (let i = 0; i < 8; i++) for (const x of [-1.15, 1.15]) {
-          const body = boxBody([x, 0.2, 6 + i * 2.5], [0.3, 0.2, 0.3], 15);
-          boxCol(body, [0.3, 0.2, 0.3], MAT_PROP);
+          const b = boxBody([x, 0.2, 6 + i * 2.5], [0.3, 0.2, 0.3], 15);
+          shape(b.body, boxOf([0.3, 0.2, 0.3]), MAT_PROP);
+          b.mass();
         }
         addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
       }
     } else {
       addVehicle(presetName, [spawnAt[0] ?? 0, 2.5, spawnAt[1] ?? -60], spawnAt[2] ?? 0);
-      const kinds = ['sedan', 'sports', 'kart', 'jolt_default', 'destructible_sedan', 'monster_truck'];
+      const kindsOfCar = ['sedan', 'sports', 'kart', 'jolt_default', 'destructible_sedan', 'monster_truck'];
       const cols = Math.ceil(Math.sqrt(nTraffic));
       for (let i = 0; i < nTraffic; i++) {
         const x = ((i % cols) - cols / 2) * 14, z = (Math.floor(i / cols) - cols / 2) * 14;
-        const kind = kinds[i % kinds.length];
+        const kind = kindsOfCar[i % kindsOfCar.length];
         addVehicle(kind, [x, kind === 'monster_truck' ? 3.5 : 2.2, z], rand() * 6.28,
           { forward: 0.2 + 0.25 * rand(), steer: (rand() < 0.5 ? -1 : 1) * (0.15 + 0.35 * rand()) });
       }
       for (let i = 0; i < 400; i++) dynBox([(rand() - 0.5) * 120, 0.5 + rand() * 6, (rand() - 0.5) * 120], [0.5, 0.5, 0.5], 30);
     }
-    // Cannonballs: parked static spheres, launched by writing their body records.
+    // Cannonballs: parked static spheres, launched by bodySetType.
     // Continuous collision (BODY_CCD, engine/docs/ccd.md): a 45 m/s ball gets a
     // time-of-impact contact instead of passing thin parts between steps; ?ccd=0
     // turns it off. The flag is inert on a parked (static) ball.
-    const cannonCcd = new URLSearchParams(location.search).get('ccd') === '0' ? 0 : M.BODY_CCD;
+    const cannonCcd = qs.get('ccd') !== '0';
     const cannon = [];
-    for (let i = 0; i < 12; i++) {
-      const body = world.addBody({ p: [-4000 - i * 5, -4000, -4000], flags: cannonCcd, invMass: 1 / 400, invI: [2.5 / (400 * 0.36), 2.5 / (400 * 0.36), 2.5 / (400 * 0.36)] });
-      world.addCollider({ body, shape: 0, material: MAT_PROP, params: [0.6, 0, 0, 0.6] });
-      cannon.push(body);
-    }
-    for (const v of vehicles) if (v.ai) world.vehicles.setInput(world.backend, v.h, v.ai);
-    const initial = world.snapshot();
+    for (let i = 0; i < 12; i++) cannon.push(parked([-4000 - i * 5, -4000, -4000], { sphere: { radius: 0.6 } }, MAT_PROP, 400, ballI(400, 0.6), cannonCcd));
+    for (const v of vehicles) if (v.ai) world.setVehicleInput(v.h, v.ai);
+    const initial = world.saveState();
     // ---------------------------------------------------------------- directed debris (gauntlet)
     const guideOn = document.getElementById('guideOn'), guideStrength = document.getElementById('guideStrength');
     const shellOn = document.getElementById('shellOn'), guideStatsEl = document.getElementById('guideStats');
@@ -585,118 +634,99 @@
     // The player chassis' height over the ground once it has settled (the zones
     // around it lie on the ground); a guess until then.
     let chassisRest = 0;
+    const guidanceSettings = () => JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked));
     function applyGuidance(rearm = true) {
       if (range) {
         // Carts start where their motion has them at time 0.
         for (const p of rearm ? meteors.pads : []) {
-          const words = new Uint32Array(world.bodyWords.buffer, p.body * 112, 28).slice();
-          new Float32Array(words.buffer).set([MeteorRange.pad_x(p.lane, p.pad, 0, meteors.moving), p.y, p.z], 0);
-          world.backend.writeBody(p.body, words);
+          world.bodySetType(p.body, 'kinematic', [MeteorRange.pad_x(p.lane, p.pad, 0, meteors.moving), p.y, p.z], [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
         }
-        const steeredPads = Uint32Array.from(meteors.pads.filter((p) => p.lane === 0).map((p) => p.body));
-        const zones = JSON.parse(MeteorRange.zones(steeredPads, meteors.moving, meteors.routes, world.steps * world.params.dt));
+        const steeredPads = Uint32Array.from(meteors.pads.filter((p) => p.lane === 0).map((p) => p.slot));
+        const zones = JSON.parse(MeteorRange.zones(steeredPads, meteors.moving, meteors.routes, steps() * DT));
         guideZoneCount = zones.length;
-        world.setGuidance(JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked)), zones);
+        world.setGuidance(guidanceSettings());
+        world.setGuidanceZones(zones);
         return;
       }
       if (!street && !run) return;
-      const chassis = world.vehicles.chassisBody(vehicles[0].h);
-      const zones = JSON.parse((run || street).zones(chassis, chassisRest || 0.8, Uint32Array.from(blocks.parked.map((h) => world.vehicles.chassisBody(h)))));
+      const zones = JSON.parse((run || street).zones(chassisSlot(vehicles[0].h), chassisRest || 0.8, Uint32Array.from(blocks.parked.map(chassisSlot))));
       guideZoneCount = zones.length;
-      world.setGuidance(JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked)), zones);
-      if (rearm) world.setGuided(blocks.first, blocks.count, 1);
+      world.setGuidance(guidanceSettings());
+      world.setGuidanceZones(zones);
+      if (rearm) for (const b of blocks.list) world.bodySetGuidedTags(b.id, 1);
     }
     applyGuidance();
     let lastShell = 0;
-    // Blast the facade ahead of the player car (gauntlet.rs Gauntlet::blast).
     // Meteor range: launch the next volley into both lanes (meteors.rs volley).
     function fireVolley() {
-      lastShell = world.steps;
-      const r = meteors.radius, m = meteors.mass, inv = 2.5 / (m * r * r);
-      const t = world.steps * world.params.dt;
+      lastShell = steps();
+      const t = steps() * DT;
       // Known routes cover the next few seconds: refresh them for this volley.
       if (meteors.moving && meteors.routes) applyGuidance(false);
-      for (const l of JSON.parse(MeteorRange.volley(meteors.volley++, world.params.gravityY, t, meteors.moving))) {
-        const body = meteors.first + (meteors.next++ % meteors.count);
-        const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
-        const f = new Float32Array(words.buffer);
-        f.set(l.p, 0); f[3] = 1 / m; f.set([0, 0, 0, 1], 4); f.set([inv, inv, inv], 8); words[11] = 1 | 8;
-        f.set(l.v, 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps; f.set(l.p, 20); f.set([0, 0, 0, 1], 24);
-        world.backend.writeBody(body, words);
-        world.setGuided(body, 1, l.tags);
-        meteors.flying = meteors.flying.filter((x) => x.body !== body);
-        meteors.landed = meteors.landed.filter((x) => x.body !== body);
-        meteors.flying.push({ body, lane: l.lane, pad: l.pad, prev: null, prevStep: 0, t0: t });
+      for (const l of JSON.parse(MeteorRange.volley(meteors.volley++, GRAVITY_Y, t, meteors.moving))) {
+        const m = meteors.list[meteors.next++ % meteors.count];
+        launch(m, l.p, l.v);
+        world.bodySetGuidedTags(m.id, l.tags);
+        meteors.flying = meteors.flying.filter((x) => x.m !== m);
+        meteors.landed = meteors.landed.filter((x) => x.m !== m);
+        meteors.flying.push({ m, lane: l.lane, pad: l.pad, prev: null, prevStep: 0, t0: t });
       }
     }
     // Touchdowns since the last call (meteors' first crossing of their resting
     // height, interpolated between reads): marked on the ground and scored.
     async function trackMeteors() {
       if (!meteors.flying.length) return;
-      const f = new Float32Array((await world.readBodies(meteors.first, meteors.count)).buffer);
+      const f = await world.readBodies(meteors.list.map((m) => m.slot));
+      const now = steps();
       const rest = meteors.radius + 0.05;
       for (const x of [...meteors.flying]) {
-        const o = (x.body - meteors.first) * 28;
+        const o = meteors.list.indexOf(x.m) * 14;
         const p = [f[o], f[o + 1], f[o + 2]];
         if (x.prev && x.prev[1] > rest && p[1] <= rest) {
           const s = (x.prev[1] - rest) / (x.prev[1] - p[1]);
           const at = [0, 1, 2].map((k) => x.prev[k] + s * (p[k] - x.prev[k]));
-          const t = (x.prevStep + s * (world.steps - x.prevStep)) * world.params.dt;
+          const t = (x.prevStep + s * (now - x.prevStep)) * DT;
           const hit = MeteorRange.on_pad(x.lane, x.pad, at[0], at[1], at[2], t, meteors.moving);
           meteors.score[x.lane][0] += hit ? 1 : 0;
           // Did the cart turn around while this meteor was in the air?
           const dir = (u) => Math.sign(MeteorRange.pad_x(x.lane, x.pad, u + 0.01, true) - MeteorRange.pad_x(x.lane, x.pad, u, true));
           const turned = meteors.moving && dir(x.t0) !== dir(t);
-          meteors.log?.push({ lane: x.lane, pad: x.pad, at, hit, turned, body: x.body });
+          meteors.log?.push({ lane: x.lane, pad: x.pad, at, hit, turned, body: x.m.slot });
           meteors.score[x.lane][1] += 1;
-          const k = meteors.nextMarker++ % meteors.markers;
-          const mk = meteors.markerFirst + k, ci = meteors.markerCollider + k;
-          const words = new Uint32Array(world.bodyWords.buffer, mk * 112, 28).slice();
-          new Float32Array(words.buffer).set([at[0], 0.07, at[2]], 0);
-          world.backend.writeBody(mk, words);
-          const cw = world.colliderWords.slice(ci * 16, ci * 16 + 16);
-          cw[2] = hit ? MAT_HIT : MAT_MISS;
-          world.backend.writeCollider(ci, cw);
+          const mk = meteors.markerList[meteors.nextMarker++ % meteors.markers];
+          world.bodySetType(mk.id, 'static', [at[0], 0.07, at[2]], [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
+          setKind(mk.collider, hit ? MAT_HIT : MAT_MISS);
           meteors.flying.splice(meteors.flying.indexOf(x), 1);
-          meteors.landed.push({ body: x.body, step: world.steps });
-        } else { x.prev = p; x.prevStep = world.steps; }
+          meteors.landed.push({ m: x.m, step: now });
+        } else { x.prev = p; x.prevStep = now; }
       }
       // Park meteors 1.5 s after they come down, so the range stays clear.
-      while (meteors.landed.length && world.steps - meteors.landed[0].step > 90) {
-        const { body } = meteors.landed.shift();
-        if (meteors.flying.some((x) => x.body === body)) continue; // relaunched
-        world.backend.writeBody(body, initialWords(body));
+      while (meteors.landed.length && now - meteors.landed[0].step > 90) {
+        const { m } = meteors.landed.shift();
+        if (meteors.flying.some((x) => x.m === m)) continue; // relaunched
+        park(m);
       }
     }
-    const initialWords = (body) => initial.bodies.slice(body * 28, body * 28 + 28);
-    // Moving targets: each step, every cart's velocity carries it to where
+    // Before every step: moving targets' velocities carry each cart to where
     // pad_x has it a step later (exact, so the carts never drift).
-    if (range) {
-      const encode = world.encodeStep;
-      world.encodeStep = (enc) => {
-        if (meteors.moving) {
-          const dt = world.params.dt, t = world.steps * dt;
-          for (const p of meteors.pads) {
-            const v = (MeteorRange.pad_x(p.lane, p.pad, t + dt, true) - MeteorRange.pad_x(p.lane, p.pad, t, true)) / dt;
-            world.setKinematicVelocity(p.body, [v, 0, 0]);
-          }
-        }
-        encode(enc);
-      };
+    function padVelocities() {
+      if (!range || !meteors.moving) return;
+      const t = steps() * DT;
+      for (const p of meteors.pads) {
+        const v = (MeteorRange.pad_x(p.lane, p.pad, t + DT, true) - MeteorRange.pad_x(p.lane, p.pad, t, true)) / DT;
+        world.bodySetVelocity(p.body, [v, 0, 0], [0, 0, 0]);
+      }
     }
     // A static facade block becomes dynamic at its launch velocity and spin.
     function launchBlock(i, v, w) {
-      const b = blocks.layout[i], body = blocks.first + i;
-      const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
-      const f = new Float32Array(words.buffer);
-      f[3] = 1 / b.mass; f.set(boxInv(b.mass, ...b.half), 8); words[11] = 1 | 8;
-      f.set(v, 12); f[15] = 0; f.set(w, 16); words[19] = world.steps;
-      world.backend.writeBody(body, words);
+      blocks.launched.add(i);
+      launch(blocks.list[i], blocks.layout[i].p, Array.from(v), Array.from(w));
     }
+    // Blast the facade ahead of the player car (gauntlet.rs Gauntlet::blast).
     function fireShell() {
       if (range) return fireVolley();
       if (!street || !lastChassis) return;
-      lastShell = world.steps;
+      lastShell = steps();
       const out = street.blast(lastChassis.p[0], lastChassis.p[2], lastChassis.v[2]);
       for (let k = 0, o = 4; k < out[3]; k++, o += 7) launchBlock(out[o], out.subarray(o + 1, o + 4), out.subarray(o + 4, o + 7));
       return { centre: [out[0], out[1], out[2]], blocks: out[3] };
@@ -707,62 +737,42 @@
     function runTick() {
       if (!run || !lastChassis || !shellOn.checked) return;
       const c = lastChassis;
-      const out = run.tick(world.steps * world.params.dt, world.params.dt, Float32Array.from([...c.p, ...c.v]), world.params.gravityY);
+      const out = run.tick(steps() * DT, DT, Float32Array.from([...c.p, ...c.v]), GRAVITY_Y);
       let o = 0;
       for (let k = 0, n = out[o++]; k < n; k++, o += 8) {
-        const body = rocks.first + out[o], m = rocks.mass, inv = 2.5 / (m * rocks.radius * rocks.radius);
-        const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
-        const f = new Float32Array(words.buffer);
-        f.set(out.subarray(o + 1, o + 4), 0); f[3] = 1 / m; f.set([0, 0, 0, 1], 4); f.set([inv, inv, inv], 8); words[11] = 1 | 8 | M.BODY_CCD;
-        f.set(out.subarray(o + 4, o + 7), 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
-        world.backend.writeBody(body, words);
-        world.setGuided(body, 1, out[o + 7]);
+        const rock = rocks.list[out[o]];
+        launch(rock, Array.from(out.subarray(o + 1, o + 4)), Array.from(out.subarray(o + 4, o + 7)));
+        world.bodySetGuidedTags(rock.id, out[o + 7]);
       }
       for (let k = 0, n = out[o++]; k < n; k++) {
         const blocksHit = out[o + 3];
         o += 4;
         for (let j = 0; j < blocksHit; j++, o += 7) launchBlock(out[o], out.subarray(o + 1, o + 4), out.subarray(o + 4, o + 7));
       }
-      for (let k = 0, n = out[o++]; k < n; k++) {
-        const body = rocks.first + out[o++];
-        world.backend.writeBody(body, initialWords(body));
-      }
+      for (let k = 0, n = out[o++]; k < n; k++) park(rocks.list[out[o++]]);
     }
+    // The page's per-step inputs, right before each step (the JS host's encodeStep).
+    function beforeStep() { padVelocities(); }
     // Read back what the run watches (and the car, from the same state) and judge it.
     async function judgeRun() {
       const w = run.watched();
-      const chassis = world.vehicles.chassisBody(player);
-      const ids = [];
-      for (let k = 0; k < w.length; k += 2) ids.push(w[k] ? rocks.first + w[k + 1] : blocks.first + w[k + 1]);
-      // Nearby bodies in one read each.
-      const order = ids.map((b, i) => [b, i]).sort((a, b) => a[0] - b[0]);
-      const groups = [];
-      for (let s = 0; s < order.length;) {
-        let e = s;
-        while (e + 1 < order.length && order[e + 1][0] - order[e][0] < 128) e++;
-        groups.push(order.slice(s, e + 1));
-        s = e + 1;
+      const slots = [chassisSlot(player)];
+      for (let k = 0; k < w.length; k += 2) slots.push(w[k] ? rocks.list[w[k + 1]].slot : blocks.list[w[k + 1]].slot);
+      const t = steps() * DT;
+      const f = await world.readBodies(slots);
+      const n = slots.length - 1;
+      const recs = new Float32Array(n * 8);
+      for (let i = 0; i < n; i++) {
+        const o = (i + 1) * 14;
+        recs.set([w[2 * i], w[2 * i + 1], f[o], f[o + 1], f[o + 2], f[o + 7], f[o + 8], f[o + 9]], i * 8);
       }
-      const t = world.steps * world.params.dt;
-      const recs = new Float32Array(ids.length * 8);
-      const [carRec] = await Promise.all([
-        world.readBodies(chassis, 1),
-        ...groups.map(async (g) => {
-          const first = g[0][0];
-          const f = new Float32Array((await world.readBodies(first, g[g.length - 1][0] - first + 1)).buffer);
-          for (const [b, i] of g) {
-            const o = (b - first) * 28;
-            recs.set([w[2 * i], w[2 * i + 1], f[o], f[o + 1], f[o + 2], f[o + 12], f[o + 13], f[o + 14]], i * 8);
-          }
-        }),
-      ]);
-      const cf = new Float32Array(carRec.buffer);
-      const events = run.judge(t, Float32Array.from([cf[0], cf[1], cf[2], cf[4], cf[5], cf[6], cf[7], cf[12], cf[13], cf[14]]), recs);
+      const car = [f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9]];
+      const events = run.judge(t, Float32Array.from(car), recs);
       for (let k = 0; k < events.length; k += 6) {
         callOut(events[k]);
-        runLog?.push({ t: Math.round(t * 100) / 100, event: events[k], meteor: events[k + 1] === 1, index: events[k + 2], at: [...events.subarray(k + 3, k + 6)].map((x) => Math.round(x * 10) / 10), car: [cf[0], cf[1], cf[2]].map((x) => Math.round(x * 10) / 10) });
+        runLog?.push({ t: Math.round(t * 100) / 100, event: events[k], meteor: events[k + 1] === 1, index: events[k + 2], at: [...events.subarray(k + 3, k + 6)].map((x) => Math.round(x * 10) / 10), car: [f[0], f[1], f[2]].map((x) => Math.round(x * 10) / 10) });
       }
-      runHud(t, cf[2]);
+      runHud(t, f[2]);
     }
     const gScore = document.getElementById('gScore'), hpEl = document.getElementById('hp'), progEl = document.getElementById('prog');
     const gInfo = document.getElementById('gInfo'), toastsEl = document.getElementById('toasts');
@@ -823,8 +833,8 @@
     }
     let guideBusy = false, guideStatsStep = -1;
     function pollGuide() {
-      if (range && !guideBusy && world.steps - guideStatsStep >= 6) {
-        guideStatsStep = world.steps;
+      if (range && !guideBusy && steps() - guideStatsStep >= 6) {
+        guideStatsStep = steps();
         guideBusy = true;
         trackMeteors().then(() => {
           guideBusy = false;
@@ -834,20 +844,21 @@
         }).catch(fail);
         return;
       }
-      if (run && !guideBusy && lastChassis && world.steps - guideStatsStep >= 4) {
-        guideStatsStep = world.steps;
+      if (run && !guideBusy && lastChassis && steps() - guideStatsStep >= 4) {
+        guideStatsStep = steps();
         guideBusy = true;
         judgeRun().then(() => { guideBusy = false; }).catch(fail);
       }
-      if ((street || run) && !chassisRest && world.steps > 90 && lastChassis) {
+      if ((street || run) && !chassisRest && steps() > 90 && lastChassis) {
         chassisRest = lastChassis.p[1];
         applyGuidance(false);
       }
-      if (!street || guideBusy || world.steps - guideStatsStep < 30) return;
-      guideStatsStep = world.steps;
+      if (!street || guideBusy || steps() - guideStatsStep < 30) return;
+      guideStatsStep = steps();
       guideBusy = true;
-      Promise.all([world.guideStates(), world.guideClaims(guideZoneCount)]).then(([s, claims]) => {
+      world.readGuidance().then((s) => {
         guideBusy = false;
+        const claims = s.claims;
         const cars = claims.slice(2).reduce((a, b) => a + b, 0);
         guideStatsEl.textContent = guideOn.checked
           ? `steering ${s.steering} · steered so far ${s.done} (arrived ${s.ended.arrived}, knocked off course ${s.ended.pushed}) · aimed: around car ${claims[0]}, behind ${claims[1]}, parked cars ${cars}`
@@ -856,13 +867,12 @@
     }
     // The controlled vehicle (Tab cycles; __record act 'player:<i>').
     let player = 0;
-    statusEl.textContent = `scene ready · ${world.bodyCount} bodies · ${world.vehicles.vehicleCount} vehicles`;
-
+    statusEl.textContent = `scene ready · ${world.bodyCount()} bodies · ${world.vehicleCount()} vehicles`;
     // ---------------------------------------------------------------- renderer
     // Lighting shared with the dune buggy mesh (buggy-render.mjs); needs `frame`.
     const LIGHT_WGSL = BUGGY_SHADE_WGSL;
     // Hide bitset: bodies first, then vehicles from bit HIDE_VEHICLES.
-    const HIDE_VEHICLES = Math.ceil(world.cap.maxBodies / 32) * 32;
+    const HIDE_VEHICLES = Math.ceil(capacity.maxBodies / 32) * 32;
     const SHADER = /* wgsl */`
 struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
   linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
@@ -877,6 +887,8 @@ ${LIGHT_WGSL}
 fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
 // Bodies / vehicles drawn by a detailed mesh instead (buggy-render.mjs): bitsets.
 @group(0) @binding(4) var<storage, read> hide: array<u32>;
+// Page material per collider (colours only; the GPU slot is the friction's).
+@group(0) @binding(5) var<storage, read> kinds: array<u32>;
 fn bodyHidden(b: u32) -> bool { return (hide[b >> 5u] & (1u << (b & 31u))) != 0u; }
 fn vehicleHidden(v: u32) -> bool { let i = ${HIDE_VEHICLES}u + v; return (hide[i >> 5u] & (1u << (i & 31u))) != 0u; }
 
@@ -885,12 +897,13 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
 @vertex fn vsCol(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
   let ci = inst + 1u;
   let col = cols[ci];
+  let kind = kinds[ci];
   let b = bodies[col.body];
   var o: Out;
   o.r = 0.0; o.m = corner;
   // Meteor gauntlet: a meteor's trail streams back along its velocity (a
   // tenth of a second of flight), hidden once it has slowed.
-  if (col.material == 11u) {
+  if (kind == 11u) {
     let sp = length(b.linearVel);
     let dir = b.linearVel / max(sp, 1e-3);
     let side = normalize(cross(dir, select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(dir.y) > 0.9)));
@@ -921,14 +934,14 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
     o.c = mix(vec3f(0.85, 0.12, 0.10), vec3f(0.10, 0.35, 0.85), step(0.5, hue));
     if (col.localPos.y > 0.15) { o.c = o.c * 1.15; }
   } else if (!dyn) {
-    o.c = select(vec3f(0.55, 0.56, 0.6), vec3f(0.62, 0.8, 0.95), col.material == 2u);
+    o.c = select(vec3f(0.55, 0.56, 0.6), vec3f(0.62, 0.8, 0.95), kind == 2u);
     // Meteor range: target pads, and touchdown markers on target / off it.
-    if (col.material == 4u) { o.c = vec3f(1.0, 0.55, 0.12); }
-    if (col.material == 5u) { o.c = vec3f(0.2, 0.9, 0.3); }
-    if (col.material == 6u) { o.c = vec3f(0.95, 0.15, 0.15); }
+    if (kind == 4u) { o.c = vec3f(1.0, 0.55, 0.12); }
+    if (kind == 5u) { o.c = vec3f(0.2, 0.9, 0.3); }
+    if (kind == 6u) { o.c = vec3f(0.95, 0.15, 0.15); }
     // The finish gate: glowing chequers.
-    if (col.material == 12u) { o.c = select(vec3f(0.95), vec3f(0.08), (i32(floor(w.x * 0.7)) + i32(floor(w.y * 0.7))) % 2 == 0); o.m = vec3f(9.0, 0.0, 0.0); }
-  } else if (col.material == 10u) {
+    if (kind == 12u) { o.c = select(vec3f(0.95), vec3f(0.08), (i32(floor(w.x * 0.7)) + i32(floor(w.y * 0.7))) % 2 == 0); o.m = vec3f(9.0, 0.0, 0.0); }
+  } else if (kind == 10u) {
     // A meteor: hot rock.
     o.c = vec3f(1.0, 0.42, 0.1); o.m = vec3f(9.0, 0.0, 0.0);
   } else if (col.shape == 0u) {
@@ -1051,12 +1064,20 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // Dune buggies: the baked mesh replaces their collider boxes and wheel cylinders
     // (?colliders=1 draws those too, to check the fit).
     // vibe-land's vehicles: one mesh renderer per model in the scene, used as one.
+    // buggy-render.mjs reads the world through this view (bufs[0], bufs[31], records).
+    const rworld = {
+      get bufs() { return { 0: world.bodyBuffer(), 31: world.vehiclePoolBuffer() }; },
+      vehicles: { entries },
+      vlayout: world.vehicleLayout(),
+      soft: { entries: softEntries },
+    };
     const modelOf = (name) => (name === 'dune_buggy' ? 'buggy' : name.startsWith('vibe_') && !name.endsWith('_trailer') ? name.slice(5) : null);
+    for (let h = 0; h < world.vehicleCount(); h++) entryOf(h);
     const meshes = {};
     for (const v of vehicles) {
       const m = modelOf(v.name);
       if (!m) continue;
-      meshes[m] ??= await createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl: LIGHT_WGSL, model: m });
+      meshes[m] ??= await createBuggyRenderer({ device, format, world: rworld, frameBuf, L, shadeWgsl: LIGHT_WGSL, model: m });
       if (v.soft !== undefined) meshes[m].addHybrid(v.soft, v.softDesc); else meshes[m].add(v.h, { trailer: v.trailer });
     }
     const meshList = Object.values(meshes);
@@ -1077,11 +1098,23 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     const hideBuf = device.createBuffer({ size: hideWords.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(hideBuf, 0, hideWords);
-    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]], [4, hideBuf]]);
-    const wheelBind = bind(wheelPipe, [[0, world.bufs[0]], [1, frameBuf], [3, world.bufs[31]], [4, hideBuf]]);
-    const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf]]);
+    const kindBuf = device.createBuffer({ size: kinds.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(kindBuf, 0, kinds);
+    function setKind(collider, kind) {
+      kinds[collider] = kind;
+      device.queue.writeBuffer(kindBuf, collider * 4, kinds, collider, 1);
+    }
+    // The world's buffers can be replaced when they grow: rebind when one is a new object.
+    let colBind = null, wheelBind = null, groundBind = null, bound = [];
+    const rebind = () => {
+      const bufs = [world.bodyBuffer(), world.colliderBuffer(), world.vehiclePoolBuffer()];
+      if (bufs.every((b, i) => b === bound[i])) return;
+      bound = bufs;
+      colBind = bind(colPipe, [[0, bufs[0]], [1, frameBuf], [2, bufs[1]], [4, hideBuf], [5, kindBuf]]);
+      wheelBind = bind(wheelPipe, [[0, bufs[0]], [1, frameBuf], [3, bufs[2]], [4, hideBuf]]);
+      groundBind = bind(groundPipe, [[0, bufs[0]], [1, frameBuf]]);
+    };
     let depth = null;
-
     // ---------------------------------------------------------------- camera
     // The meteor range opens on both lanes from behind the launch side.
     let camMode = scene === 'meteors' ? 'orbit' : 'chase';
@@ -1126,13 +1159,13 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (e.repeat) return;
       if (e.code === 'KeyR') resetScene();
       else if (e.code === 'KeyC') camMode = camMode === 'chase' ? 'orbit' : 'chase';
-      else if (e.code === 'Tab') { e.preventDefault(); world.vehicles.setInput(world.backend, player, { forward: 0, steer: 0, brake: 1 }); selectPlayer((player + 1) % vehicles.length); }
+      else if (e.code === 'Tab') { e.preventDefault(); world.setVehicleInput(player, { forward: 0, steer: 0, brake: 1 }); selectPlayer((player + 1) % vehicles.length); }
       else if (e.code === 'KeyX') severWheel(true);
       else if (e.code === 'KeyZ') severWheel(false);
       else if (e.code === 'KeyP') severPart();
       else if (e.code === 'KeyB') fireCannon();
       else if (e.code === 'KeyF') fireShell();
-      else if (e.code === 'KeyG' && run) { guideOn.checked = !guideOn.checked; applyGuidance(false); runHud(world.steps * world.params.dt, lastChassis?.p[2] ?? -25); }
+      else if (e.code === 'KeyG' && run) { guideOn.checked = !guideOn.checked; applyGuidance(false); runHud(steps() * DT, lastChassis?.p[2] ?? -25); }
     });
     addEventListener('keyup', (e) => keys.delete(e.code));
     addEventListener('blur', () => keys.clear());
@@ -1165,15 +1198,15 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const alive = st.wheels.map((w, i) => (!w.detached && !w.disabled ? i : -1)).filter((i) => i >= 0);
       if (!alive.length) return;
       const w = alive[Math.floor(Math.random() * alive.length)];
-      if (spawn) world.vehicles.detachWheel(world.backend, player, w); else world.vehicles.disableWheel(world.backend, player, w);
+      world.vehicleDamage(player, spawn ? 'detachWheel' : 'disableWheel', w);
     }
     function severPart() {
-      const desc = world.vehicles.entries[player].desc;
+      const desc = entryOf(player).desc;
       for (let i = 0; i < desc.parts.length; i++) {
         if (desc.parts.length > 1 && i === 0) continue; // keep the main body
         if (severed.has(i)) continue;
         severed.add(i);
-        world.vehicles.detachPart(world.backend, player, i);
+        world.vehicleDamage(player, 'detachPart', i);
         renderParts();
         return;
       }
@@ -1186,24 +1219,23 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // Launch the next 400 kg cannonball from `p` at velocity `v` (also __cannon).
     function fireCannonAt(p, v) {
       if (!cannon.length) return;
-      const body = cannon[cannonNext++ % cannon.length];
-      const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
-      const f = new Float32Array(words.buffer);
-      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8 | cannonCcd; f.set(v, 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
-      f.set(p, 20); f.set([0, 0, 0, 1], 24);
-      world.backend.writeBody(body, words);
+      launch(cannon[cannonNext++ % cannon.length], p, v);
     }
     function resetScene() {
-      world.restore(initial);
+      world.restoreState(initial);
       street?.reset();
-      if (run) { run.reset(); world.clearGuidance(); toastsEl.replaceChildren(); runCardKey = ''; }
+      if (run) { run.reset(); toastsEl.replaceChildren(); runCardKey = ''; }
       if (range) Object.assign(meteors, { next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] });
+      blocks.launched.clear();
+      // Marker colours back to their spawn (the rest is the world's).
+      for (const mk of meteors.markerList) setKind(mk.collider, MAT_MISS);
       applyGuidance();
       if (run) runHud(0, -25);
       lastShell = 0;
       bolts = { broken: 0, lastForce: 0 };
-      boltPollStep = -1;
       mounts.last = null;
+      for (const r of hybridParts) r.broken = 0;
+      brokenGroups.clear();
       severed.clear();
       renderParts();
     }
@@ -1212,7 +1244,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const partsPanel = document.getElementById('parts');
     const partList = document.getElementById('partList');
     function renderParts() {
-      const e = world.vehicles.entries[player];
+      const e = entryOf(player);
       partsPanel.hidden = false;
       partList.textContent = '';
       const lost = lastState ? lastState.partsLost : 0;
@@ -1222,8 +1254,8 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         const role = p.role.type.replace('_', ' ');
         row.innerHTML = `<span>${p.name} <span class="muted">(${role})</span> <span class="muted load" data-part="${i}"></span></span>`;
         const btns = document.createElement('span');
-        for (const [label, fn] of [['sever', () => world.vehicles.detachPart(world.backend, player, i)], ['disable', () => world.vehicles.disablePart(world.backend, player, i)]]) {
-          const b = document.createElement('button'); b.textContent = label; b.onclick = () => { fn(); b.blur(); };
+        for (const [label, kind] of [['sever', 'detachPart'], ['disable', 'disablePart']]) {
+          const b = document.createElement('button'); b.textContent = label; b.onclick = () => { world.vehicleDamage(player, kind, i); b.blur(); };
           b.disabled = !!((lost >> i) & 1);
           btns.append(b, ' ');
         }
@@ -1237,8 +1269,8 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         row.className = 'part' + (gone ? ' lost' : '');
         row.innerHTML = `<span>wheel ${n} <span class="muted load" data-wheel="${i}"></span></span>`;
         const btns = document.createElement('span');
-        for (const [label, fn] of [['sever', () => world.vehicles.detachWheel(world.backend, player, i)], ['remove', () => world.vehicles.disableWheel(world.backend, player, i)]]) {
-          const b = document.createElement('button'); b.textContent = label; b.onclick = () => { fn(); b.blur(); }; b.disabled = !!gone;
+        for (const [label, kind] of [['sever', 'detachWheel'], ['remove', 'disableWheel']]) {
+          const b = document.createElement('button'); b.textContent = label; b.onclick = () => { world.vehicleDamage(player, kind, i); b.blur(); }; b.disabled = !!gone;
           btns.append(b, ' ');
         }
         row.append(btns);
@@ -1249,45 +1281,35 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       eng.innerHTML = '<span>engine override</span>';
       const t = document.createElement('button');
       t.textContent = engineOn ? 'cut' : 'restore';
-      t.onclick = () => { engineOn = !engineOn; world.vehicles.setFunctionalState(world.backend, player, { engineConnected: engineOn }); renderParts(); };
+      t.onclick = () => { engineOn = !engineOn; world.vehicleSetFunctionalState(player, { engineConnected: engineOn }); renderParts(); };
       eng.append(t);
       partList.append(eng);
     }
     let engineOn = true;
 
-    // ---------------------------------------------------------------- readback (pipelined)
-    const l = world.vlayout;
-    let vehOff = 0, wheelOff = 0, wheelBytes = 0;
-    const maxWheelBytes = Math.max(...world.vehicles.entries.map((e) => e.wheelSlots)) * L.WHEEL_STRIDE * 16;
-    const RB = 3;
-    const maxPartBytes = Math.max(...world.vehicles.entries.map((e) => e.desc.parts.length)) * L.PART_STRIDE * 16;
-    const rbFree = Array.from({ length: RB }, () => device.createBuffer({ size: 112 + L.VEH_STRIDE * 16 + maxWheelBytes + 80 + maxPartBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
-    let partOff = 0, partBytes = 0, lastLoads = null;
-    let lastState = null, lastChassis = null, lastCounters = null;
-    const shadow = new Uint32Array(l.totalSlots * 4);
-    // Chassis body, vehicle record, wheel records and counters of the player.
-    function encodeReadback(enc, rb) {
-      rb.player = player;
-      enc.copyBufferToBuffer(world.bufs[0], world.vehicles.chassisBody(player) * 112, rb, 0, 112);
-      enc.copyBufferToBuffer(world.bufs[31], vehOff, rb, 112, L.VEH_STRIDE * 16);
-      enc.copyBufferToBuffer(world.bufs[31], wheelOff, rb, 112 + L.VEH_STRIDE * 16, wheelBytes);
-      enc.copyBufferToBuffer(world.bufs[7], 0, rb, 112 + L.VEH_STRIDE * 16 + wheelBytes, 80);
-      enc.copyBufferToBuffer(world.bufs[31], partOff, rb, 112 + L.VEH_STRIDE * 16 + wheelBytes + 80, partBytes);
+    // ---------------------------------------------------------------- frames
+    // Each poll: the player's vehicle state, the counters and what broke. The
+    // chassis pose and velocity come from a non-blocking read of its body.
+    let lastState = null, lastChassis = null, lastCounters = null, lastLoads = null;
+    function onFrame(f) {
+      if (f.empty) return;
+      const st = f.vehicleState(player);
+      if (st) lastState = st;
+      const c = f.counters();
+      if (c) lastCounters = { contact: c.contacts, awake: c.awake, overflow: c.overflow };
+      for (const e of f.destructionEvents()) onBreak(e);
     }
-    function decode(buf) {
-      const all = new Uint32Array(buf.getMappedRange().slice(0));
-      buf.unmap();
-      if (buf.player !== player) return; // read before a player switch
-      const body = new Float32Array(all.buffer, 0, 28);
-      lastChassis = { p: [body[0], body[1], body[2]], q: [body[4], body[5], body[6], body[7]], v: [body[12], body[13], body[14]], flags: all[11] };
-      shadow.set(all.subarray(28, 28 + L.VEH_STRIDE * 4), vehOff / 4);
-      shadow.set(all.subarray(28 + L.VEH_STRIDE * 4, 28 + L.VEH_STRIDE * 4 + wheelBytes / 4), wheelOff / 4);
-      lastState = world.vehicles.readState(shadow, player);
-      const c = all.subarray(28 + L.VEH_STRIDE * 4 + wheelBytes / 4);
-      lastCounters = { contact: c[2], awake: c[5], overflow: c[7] };
-      world.setLastCounters(c.subarray(0, 20));
-      shadow.set(all.subarray(28 + L.VEH_STRIDE * 4 + wheelBytes / 4 + 20, 28 + L.VEH_STRIDE * 4 + (wheelBytes + partBytes) / 4 + 20), partOff / 4);
-      lastLoads = breakable ? world.vehicles.readMountLoads(shadow, player) : null;
+    const pollFrame = () => poll(world, onFrame);
+    let chassisRead = null;
+    function readChassis() {
+      if (chassisRead) return chassisRead;
+      const who = player;
+      chassisRead = world.readBodies([chassisSlot(who)]).then((f) => {
+        chassisRead = null;
+        if (who !== player) return; // read before a player switch
+        lastChassis = { p: [f[0], f[1], f[2]], q: [f[3], f[4], f[5], f[6]], v: [f[7], f[8], f[9]] };
+      });
+      return chassisRead;
     }
 
     // ---------------------------------------------------------------- HUD
@@ -1297,13 +1319,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     let playerDesc = null, maxRpm = 0, chaseDist = 0;
     function selectPlayer(i) {
       player = i;
-      const pe = world.vehicles.entries[player];
-      vehOff = (l.vehicleBase + player * L.VEH_STRIDE) * 16;
-      wheelOff = (l.wheelBase + pe.slots.wheelBase * L.WHEEL_STRIDE) * 16;
-      wheelBytes = pe.wheelSlots * L.WHEEL_STRIDE * 16;
-      partOff = (l.partBase + pe.slots.partBase * L.PART_STRIDE) * 16;
-      partBytes = pe.desc.parts.length * L.PART_STRIDE * 16;
-      playerDesc = pe.desc;
+      playerDesc = entryOf(player).desc;
       maxRpm = playerDesc.drive.type === 'drivetrain' ? playerDesc.drive.engine.max_rpm : 0;
       // Chase distance scales with the vehicle's size (a motorcycle vs a tank).
       const vehicleExtent = Math.max(
@@ -1313,62 +1329,48 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       );
       chaseDist = Math.max(4.5, Math.min(16, 2.5 + 2.6 * vehicleExtent));
       lastState = null;
+      lastLoads = null;
       lastPartsKey = '';
       severed.clear();
       renderParts();
     }
     let lastPartsKey = '';
-    selectPlayer(0);
-    // Broken bolts (EVENT_BREAK ring), polled a few times a second.
+    // Broken bolts (joint breaks), from the frames.
     let bolts = { broken: 0, lastForce: 0 };
-    let boltPollStep = -1;
-    function pollBolts() {
-      if (!bridgeBolts || world.steps - boltPollStep < 15) return;
-      boltPollStep = world.steps;
-      world.pollJointBreaks().then((list) => {
-        for (const b of list) { bolts.broken++; bolts.lastForce = b.force; }
-      }).catch(fail);
-    }
-    // Mount breaks (EVENT_MOUNT_BREAK ring): parts and wheels torn off under load.
-    const breakable = vehicles.some((v) => world.vehicles.entries[v.h].desc.parts.some((p, i) => i > 0 && (p.mount?.break_force > 0 || p.mount?.break_torque > 0)));
+    // Mount breaks: parts and wheels torn off under load.
+    const breakable = vehicles.some((v) => entryOf(v.h).desc.parts.some((p, i) => i > 0 && (p.mount?.break_force > 0 || p.mount?.break_torque > 0)));
     let mounts = { last: null };
     // Hybrid buggies: bolted parts whose joints all broke, and detached frame pieces
     // (break groups), from the joint and beam break events.
-    const hybridParts = vehicles.filter((v) => v.soft !== undefined).flatMap((v) => world.soft.entries[v.soft].rigidParts.map((r) => ({ ...r, broken: 0 })));
+    const hybridParts = vehicles.filter((v) => v.soft !== undefined).flatMap((v) => softEntries[v.soft].rigidParts.map((r) => ({ ...r, broken: 0 })));
     const jointOwner = new Map(hybridParts.flatMap((r) => Array.from({ length: r.joints[1] - r.joints[0] }, (_, k) => [r.joints[0] + k, r])));
     const brokenGroups = new Set();
     const softGroupNames = ['', 'front_bumper', 'rear_bumper', 'nose'];
-    let mountPollStep = -1, mountPolling = false;
-    function pollMounts() {
-      if (!breakable || mountPolling || world.steps - mountPollStep < 15) return;
-      mountPollStep = world.steps;
-      mountPolling = true;
-      if (hybrid) {
-        world.pollJointBreaks().then((list) => {
-          for (const j of list) {
-            const r = jointOwner.get(j.joint);
-            if (r && ++r.broken === r.joints[1] - r.joints[0]) mounts.last = `${r.name} at ${(j.force / 1000).toFixed(0)} kN`;
-          }
-          return world.pollBeamBreaks();
-        }).then((list) => {
-          for (const b of list || []) {
-            const e = world.soft.entries[b.softBody];
-            const v = vehicles.find((x) => x.soft === b.softBody);
-            const g = v?.softDesc.beams[b.beam - e.firstBeam]?.break_group;
-            if (g && !brokenGroups.has(`${b.softBody}:${g}`)) { brokenGroups.add(`${b.softBody}:${g}`); mounts.last = `${softGroupNames[g]} torn off`; }
-          }
-        }).catch(fail);
+    function onBreak(e) {
+      if (e.type === 'joint') {
+        const r = jointOwner.get(e.index);
+        if (r) { if (++r.broken === r.joints[1] - r.joints[0]) mounts.last = `${r.name} at ${(e.force / 1000).toFixed(0)} kN`; }
+        else { bolts.broken++; bolts.lastForce = e.force; }
+      } else if (e.type === 'beam') {
+        const s = softEntries[e.softBody];
+        const v = vehicles.find((x) => x.soft === e.softBody);
+        const g = s && v?.softDesc.beams[e.beam - s.firstBeam]?.break_group;
+        if (g && !brokenGroups.has(`${e.softBody}:${g}`)) { brokenGroups.add(`${e.softBody}:${g}`); mounts.last = `${softGroupNames[g]} torn off`; }
+      } else if (e.type === 'mount') {
+        const desc = entries[e.vehicle]?.desc;
+        mounts.last = `${e.wheel ? `wheel ${e.index}` : desc?.parts[e.index]?.name ?? `part ${e.index}`} at ${(e.force / 1000).toFixed(0)} kN`;
       }
-      world.pollMountBreaks().then((list) => {
-        mountPolling = false;
-        for (const m of list) {
-          const desc = world.vehicles.entries[m.vehicle]?.desc;
-          mounts.last = `${m.wheel ? `wheel ${m.index}` : desc?.parts[m.index]?.name ?? `part ${m.index}`} at ${(m.force / 1000).toFixed(0)} kN`;
-        }
-      }).catch(fail);
     }
-    // Counts from the buggies' latched masks (the event ring is shared with sleep and
-    // wake events and may wrap between polls); the events name the latest break.
+    // Each mount's load against its limit, a few times a second (non-blocking read).
+    let loadStep = -1, loadBusy = false;
+    function pollLoads() {
+      if (!breakable || loadBusy || steps() - loadStep < 15) return;
+      loadStep = steps();
+      loadBusy = true;
+      const who = player;
+      world.readMountLoads(who).then((w) => { loadBusy = false; if (who === player) lastLoads = world.vehicleMountLoads(who, w); }).catch(fail);
+    }
+    // Counts from the buggies' latched masks; the events name the latest break.
     const mountText = () => {
       if (!breakable) return '';
       const n = buggyMesh ? buggyMesh.broken() : { parts: 0, wheels: 0 };
@@ -1378,8 +1380,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const boltText = () => bridgeBolts ? ` · bolts broken ${bolts.broken}/${bridgeBolts}${bolts.broken ? ` (last at ${(bolts.lastForce / 1000).toFixed(0)} kN)` : ''}` : '';
     function updateHud() {
       pollGuide();
-      pollBolts();
-      pollMounts();
+      pollLoads();
       const st = lastState;
       if (!st) return;
       speedEl.innerHTML = `${Math.abs(st.forwardSpeed * 3.6).toFixed(0)} <small>km/h</small>`;
@@ -1400,6 +1401,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         }
       }
     }
+    selectPlayer(0);
 
     function updateCamera(dt, snap) {
       if (lastChassis) {
@@ -1434,56 +1436,57 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       device.queue.writeBuffer(frameBuf, 0, frameF);
     }
     function drawScene(enc) {
+      rebind();
       const rp = enc.beginRenderPass({
         colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: run ? [0.46, 0.33, 0.29, 1] : [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
       rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
-      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
-      rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.vehicles.wheelCount);
+      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount() - 1);
+      rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.wheelCount());
       buggyMesh?.draw(rp);
       rp.end();
     }
 
     // ---------------------------------------------------------------- loop
     const stopAt = Number(qs.get('stopAt')) || 0;
-    let inFlight = 0;
     let lastT = performance.now();
     let fpsAcc = 0, fpsN = 0, fpsShow = 0;
     const frameF = new Float32Array(24);
+    // The frame's draw (and the buggy rigs' wheel-record copies) after the steps.
+    function present(dt, snap) {
+      updateCamera(dt, snap);
+      const enc = device.createCommandEncoder();
+      drawScene(enc);
+      const buggyRb = buggyMesh?.encodeReadback(enc);
+      device.queue.submit([enc.finish()]);
+      return buggyMesh?.consume(buggyRb);
+    }
     function frame(now) {
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
       fpsAcc += dt; fpsN++;
       if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
-      if (rbFree.length === 0) { requestAnimationFrame(frame); return; }
       if (manual) {
         // Scripted via __step(): render only, never overwrite the scripted input.
-        updateCamera(dt, false);
-        const enc = device.createCommandEncoder();
-        drawScene(enc);
-        device.queue.submit([enc.finish()]);
+        present(dt, false)?.catch(fail);
         requestAnimationFrame(frame);
         return;
       }
-      const input = readInput(dt);
-      world.vehicles.setInput(world.backend, player, input);
-
-      updateCamera(dt, false);
-      const enc = device.createCommandEncoder();
-      const frozen = stopAt > 0 && world.steps >= stopAt;
-      if (range && shellOn.checked && !frozen && world.steps - lastShell >= 120) fireVolley();
-      if (street && shellOn.checked && !frozen && lastChassis && lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && world.steps - lastShell >= 70) fireShell();
-      if (!frozen) for (let k = 0; k < STEPS_PER_FRAME; k++) { runTick(); world.encodeStep(enc); }
-      drawScene(enc);
-      const rb = rbFree.pop();
-      encodeReadback(enc, rb);
-      const buggyRb = buggyMesh?.encodeReadback(enc);
-      device.queue.submit([enc.finish()]);
-      buggyMesh?.consume(buggyRb).catch(fail);
-      inFlight++;
-      rb.mapAsync(GPUMapMode.READ).then(() => { decode(rb); rbFree.push(rb); inFlight--; updateHud(); }).catch(fail);
-      statusEl.textContent = `${world.bodyCount} bodies · ${world.vehicles.vehicleCount} vehicles · step ${world.steps}${frozen ? ' (stopAt)' : ''} · ${fpsShow.toFixed(0)} fps`
+      pollFrame();
+      world.setVehicleInput(player, readInput(dt));
+      const frozen = stopAt > 0 && steps() >= stopAt;
+      // Steps only while a readback slot is free (never blocks): a step that cannot
+      // be taken now is taken on a later frame.
+      if (!frozen && world.canStep()) {
+        if (range && shellOn.checked && steps() - lastShell >= 120) fireVolley();
+        if (street && shellOn.checked && lastChassis && lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && steps() - lastShell >= 70) fireShell();
+        for (let k = 0; k < STEPS_PER_FRAME && world.canStep(); k++) { runTick(); beforeStep(); world.step(); }
+      }
+      readChassis().catch(fail);
+      updateHud();
+      present(dt, false)?.catch(fail);
+      statusEl.textContent = `${world.bodyCount()} bodies · ${world.vehicleCount()} vehicles · step ${steps()}${frozen ? ' (stopAt)' : ''} · ${fpsShow.toFixed(0)} fps`
         + (lastCounters ? ` · contacts ${lastCounters.contact} · awake ${lastCounters.awake}` : '') + ` · ${camMode} cam` + boltText() + mountText();
       requestAnimationFrame(frame);
     }
@@ -1491,31 +1494,18 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // Debug / automation hooks. __step(n, input) advances n physics steps without
     // rendering (rAF is throttled in background tabs) and returns the player state.
     let manual = false;
+    // n steps frame-locked, then the chassis read: what every hook below runs on.
+    const advance = async (n, each = beforeStep) => {
+      await stepFrames(world, n, onFrame, each);
+      await readChassis();
+    };
     window.__step = async (n = 1, input = null) => {
       manual = true;
-      if (input) world.vehicles.setInput(world.backend, player, input);
-      for (let i = 0; i < n; i++) {
-        const enc = device.createCommandEncoder();
-        world.encodeStep(enc);
-        device.queue.submit([enc.finish()]);
-        if (i % 30 === 29) await device.queue.onSubmittedWorkDone();
-      }
-      while (rbFree.length === 0) await new Promise((r) => setTimeout(r, 5));
-      const rb = rbFree.pop();
-      const enc = device.createCommandEncoder();
-      encodeReadback(enc, rb);
-      const buggyRb = buggyMesh?.encodeReadback(enc);
-      device.queue.submit([enc.finish()]);
-      await buggyMesh?.consume(buggyRb);
-      await rb.mapAsync(GPUMapMode.READ);
-      decode(rb);
-      rbFree.push(rb);
+      if (input) world.setVehicleInput(player, input);
+      await advance(n);
       updateHud();
-      updateCamera(0, true);
-      const renc = device.createCommandEncoder();
-      drawScene(renc);
-      device.queue.submit([renc.finish()]);
-      return { steps: world.steps, chassis: lastChassis, state: lastState, counters: lastCounters };
+      await present(0, true);
+      return { steps: steps(), chassis: lastChassis, state: lastState, counters: lastCounters };
     };
     // __record(script, {name, every, width, upload}) plays a scripted drive frame-locked
     // (one physics step per video frame at 60 Hz, independent of rAF timing) and PUTs
@@ -1535,44 +1525,30 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const pending = new Set();
       const t0 = performance.now();
       for (const seg of script) {
-        if (seg.input) world.vehicles.setInput(world.backend, player, seg.input);
+        if (seg.input) world.setVehicleInput(player, seg.input);
         if (seg.caption !== undefined) caption = seg.caption;
         if (seg.cam === 'chase') { camMode = 'chase'; spin = 0; }
         else if (seg.cam && seg.cam.orbit) { camMode = 'orbit'; [orbit.yaw, orbit.pitch, orbit.dist] = seg.cam.orbit; spin = seg.cam.spin || 0; }
         if (seg.act) {
           const [a, arg] = seg.act.split(':');
-          if (a === 'wheel') world.vehicles.detachWheel(world.backend, player, Number(arg));
-          else if (a === 'remove') world.vehicles.disableWheel(world.backend, player, Number(arg));
+          if (a === 'wheel') world.vehicleDamage(player, 'detachWheel', Number(arg));
+          else if (a === 'remove') world.vehicleDamage(player, 'disableWheel', Number(arg));
           else if (a === 'part') severPart();
           else if (a === 'cannon') fireCannon();
           else if (a === 'reset') resetScene();
-          else if (a === 'player') { world.vehicles.setInput(world.backend, player, { forward: 0, steer: 0, brake: 1 }); selectPlayer(Number(arg)); }
+          else if (a === 'player') { world.setVehicleInput(player, { forward: 0, steer: 0, brake: 1 }); selectPlayer(Number(arg)); }
         }
         for (let i = 0; i < (seg.n || 0); i++) {
           orbit.yaw += spin;
           if (seg.cruise !== undefined && lastState) {
             // Hold a target forward speed (m/s) with throttle / brake.
             const e = seg.cruise - lastState.forwardSpeed;
-            world.vehicles.setInput(world.backend, player, { ...(seg.input || {}), forward: Math.max(0, Math.min(1, e * 0.4)), brake: e < -1 ? Math.min(1, -e * 0.2) : 0 });
+            world.setVehicleInput(player, { ...(seg.input || {}), forward: Math.max(0, Math.min(1, e * 0.4)), brake: e < -1 ? Math.min(1, -e * 0.2) : 0 });
           }
-          // Frames the render loop queued before the take may still hold the readbacks.
-          while (rbFree.length === 0) await new Promise((r) => setTimeout(r, 5));
-          const enc = device.createCommandEncoder();
-          for (let k = 0; k < STEPS_PER_FRAME; k++) world.encodeStep(enc);
-          const rb = rbFree.pop();
-          encodeReadback(enc, rb);
-          const buggyRb = buggyMesh?.encodeReadback(enc);
-          device.queue.submit([enc.finish()]);
-          await buggyMesh?.consume(buggyRb);
-          await rb.mapAsync(GPUMapMode.READ);
-          decode(rb);
-          rbFree.push(rb);
-          if (world.steps % every !== 0) continue;
+          await advance(STEPS_PER_FRAME);
+          if (steps() % every !== 0) continue;
           updateHud();
-          updateCamera(1 / 60, frameNo === 0);
-          const renc = device.createCommandEncoder();
-          drawScene(renc);
-          device.queue.submit([renc.finish()]);
+          await present(1 / 60, frameNo === 0);
           g.drawImage(canvas, 0, 0, W, H);
           const st = lastState;
           g.fillStyle = 'rgba(10,14,22,0.62)';
@@ -1584,8 +1560,8 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
           if (st) {
             const gear = maxRpm ? (st.gear < 0 ? 'R' : st.gear === 0 ? 'N' : String(st.gear)) : 'D';
             g.fillText(bridgeBolts
-              ? `${playerDesc.name.replaceAll('_', ' ')}  ${Math.abs(st.forwardSpeed * 3.6).toFixed(0).padStart(3)} km/h  bolts broken ${bolts.broken}/${bridgeBolts}  step ${world.steps}`
-              : `${Math.abs(st.forwardSpeed * 3.6).toFixed(0).padStart(3)} km/h  gear ${gear}  ${maxRpm ? st.engineRpm.toFixed(0) + ' rpm' : ''}  yaw ${st.yawRate.toFixed(2)}  contacts ${st.contacts}  step ${world.steps}`, 24, H - 22);
+              ? `${playerDesc.name.replaceAll('_', ' ')}  ${Math.abs(st.forwardSpeed * 3.6).toFixed(0).padStart(3)} km/h  bolts broken ${bolts.broken}/${bridgeBolts}  step ${steps()}`
+              : `${Math.abs(st.forwardSpeed * 3.6).toFixed(0).padStart(3)} km/h  gear ${gear}  ${maxRpm ? st.engineRpm.toFixed(0) + ' rpm' : ''}  yaw ${st.yawRate.toFixed(2)}  contacts ${st.contacts}  step ${steps()}`, 24, H - 22);
           }
           const blob = await out.convertToBlob({ type: 'image/jpeg', quality: 0.88 });
           const p = fetch(`${upload}/${name}/f${String(frameNo++).padStart(5, '0')}.jpg`, { method: 'PUT', body: blob }).then(() => pending.delete(p));
@@ -1596,20 +1572,13 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       await Promise.all(pending);
       return { name, frames: frameNo, width: W, height: H, seconds: (performance.now() - t0) / 1000, state: lastState, chassis: lastChassis };
     };
-    // Chassis poses of every vehicle: [{name, p, up, speed}] (one GPU readback).
+    // Chassis poses of every vehicle: [{name, p, up, speed}] (one GPU read).
     window.__chassisPoses = async () => {
-      const n = world.bodyCount * 112;
-      const buf = device.createBuffer({ size: n, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(world.bufs[0], 0, buf, 0, n);
-      device.queue.submit([enc.finish()]);
-      await buf.mapAsync(GPUMapMode.READ);
-      const f = new Float32Array(buf.getMappedRange().slice(0));
-      buf.destroy();
-      return vehicles.map((v) => {
-        const o = world.vehicles.chassisBody(v.h) * 28;
-        const q = [f[o + 4], f[o + 5], f[o + 6], f[o + 7]];
-        return { name: v.name, p: [f[o], f[o + 1], f[o + 2]], up: qrot(q, [0, 1, 0]), speed: Math.hypot(f[o + 12], f[o + 13], f[o + 14]) };
+      const f = await world.readBodies(vehicles.map((v) => chassisSlot(v.h)));
+      return vehicles.map((v, i) => {
+        const o = i * 14;
+        const q = [f[o + 3], f[o + 4], f[o + 5], f[o + 6]];
+        return { name: v.name, p: [f[o], f[o + 1], f[o + 2]], up: qrot(q, [0, 1, 0]), speed: Math.hypot(f[o + 7], f[o + 8], f[o + 9]) };
       });
     };
     window.__vehicleState = () => lastState;
@@ -1619,58 +1588,45 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // launched block's first touchdown (sampled every 6 steps) is measured from
     // the car at that moment: `landings` histograms the plan-view distances (m),
     // `near` counts those within `near` m and `close` those within 2 m.
-    window.__gauntletTake = async ({ steps = 720, guided = true, strength = 1, cruise = 11, every = 70, near = 6 } = {}) => {
+    window.__gauntletTake = async ({ steps: total = 720, guided = true, strength = 1, cruise = 11, every = 70, near = 6 } = {}) => {
       if (!street) throw new Error('not the gauntlet scene');
       guideOn.checked = guided; guideStrength.value = String(strength);
-      resetScene();
       manual = true;
-      const chassis = world.vehicles.chassisBody(vehicles[0].h);
-      const n = world.bodyCount * 112;
-      const buf = device.createBuffer({ size: n, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      resetScene();
+      const slots = [chassisSlot(vehicles[0].h), ...blocks.list.map((b) => b.slot)];
       const landed = new Map(); // block -> distance from the car at touchdown
       let shells = 0;
       const trace = [];
-      for (let s = 0; s < steps; s += 6) {
-        const enc = device.createCommandEncoder();
-        enc.copyBufferToBuffer(world.bufs[0], 0, buf, 0, n);
-        device.queue.submit([enc.finish()]);
-        await buf.mapAsync(GPUMapMode.READ);
-        const f = new Float32Array(buf.getMappedRange().slice(0));
-        buf.unmap();
-        const c = chassis * 28;
-        lastChassis = { p: [f[c], f[c + 1], f[c + 2]], q: [f[c + 4], f[c + 5], f[c + 6], f[c + 7]], v: [f[c + 12], f[c + 13], f[c + 14]] };
+      for (let s = 0; s < total; s += 6) {
+        const f = await world.readBodies(slots);
+        lastChassis = { p: [f[0], f[1], f[2]], q: [f[3], f[4], f[5], f[6]], v: [f[7], f[8], f[9]] };
         for (let i = 0; i < blocks.count; i++) {
-          const o = (blocks.first + i) * 28;
-          if (landed.has(i) || f[o + 3] === 0 || f[o + 1] > 0.6) continue;
-          landed.set(i, Math.hypot(f[o] - f[c], f[o + 2] - f[c + 2]));
+          const o = (i + 1) * 14;
+          if (landed.has(i) || !blocks.launched.has(i) || f[o + 1] > 0.6) continue;
+          landed.set(i, Math.hypot(f[o] - f[0], f[o + 2] - f[2]));
         }
         const fw = qrot(lastChassis.q, [0, 0, 1]);
         const speed = fw[0] * lastChassis.v[0] + fw[2] * lastChassis.v[2];
         if (s % 60 === 0) trace.push([Math.round(lastChassis.p[0] * 10) / 10, Math.round(lastChassis.p[2]), Math.round(speed * 10) / 10]);
         const steerIn = Math.max(-1, Math.min(1, 0.25 * (lastChassis.p[0] + 2.5) + 2.5 * fw[0]));
         const e = cruise - speed;
-        world.vehicles.setInput(world.backend, player, { forward: Math.max(0, Math.min(1, e * 0.4)), steer: steerIn, brake: e < -1 ? Math.min(1, -e * 0.2) : 0, handbrake: 0 });
-        if (lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && world.steps - lastShell >= every) { fireShell(); shells++; }
-        // One submit per step: each step stages its own host uploads.
-        for (let k = 0; k < 6; k++) {
-          const step = device.createCommandEncoder();
-          world.encodeStep(step);
-          device.queue.submit([step.finish()]);
-        }
+        world.setVehicleInput(player, { forward: Math.max(0, Math.min(1, e * 0.4)), steer: steerIn, brake: e < -1 ? Math.min(1, -e * 0.2) : 0, handbrake: 0 });
+        if (lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && steps() - lastShell >= every) { fireShell(); shells++; }
+        await stepFrames(world, 6, onFrame, beforeStep);
       }
-      buf.destroy();
       manual = false;
-      const states = await world.guideStates();
+      const g = await world.readGuidance();
+      const { claims, ...states } = g;
       const d = [...landed.values()];
       const landings = [2, 4, 6, 8, 12, 20, Infinity].map((r, k, a) => d.filter((x) => x < r && x >= (a[k - 1] ?? 0)).length);
-      return { guided, strength, shells, landed: d.length, near: d.filter((x) => x < near).length, close: d.filter((x) => x < 2).length, landings, z: lastChassis.p[2], trace, states, claims: await world.guideClaims(guideZoneCount) };
+      return { guided, strength, shells, landed: d.length, near: d.filter((x) => x < near).length, close: d.filter((x) => x < 2).length, landings, z: lastChassis.p[2], trace, states, claims: claims.slice(0, guideZoneCount) };
     };
     // Parts / wheels broken off under load over every buggy, and the latest break.
     window.__mounts = () => {
       const n = buggyMesh ? buggyMesh.broken() : { parts: 0, wheels: 0 };
       return { ...n, loose: hybridParts.filter((r) => r.broken === r.joints[1] - r.joints[0]).map((r) => r.name), groups: [...brokenGroups], last: mounts.last };
     };
-    window.__setVehicleInput = (h, input) => world.vehicles.setInput(world.backend, h, input);
+    window.__setVehicleInput = (h, input) => world.setVehicleInput(h, input);
     window.__world = world;
     // Meteor range take: from a reset, `volleys` volleys two seconds apart with
     // steering on or off; returns each lane's [on target, landed].
@@ -1679,15 +1635,14 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       guideOn.checked = guided; guideStrength.value = String(strength);
       meteors.moving = moving; document.getElementById('movingOn').checked = moving;
       meteors.routes = routes; document.getElementById('routesOn').checked = routes;
-      resetScene();
       manual = true;
+      resetScene();
       meteors.log = [];
-      for (let s = 0; s < volleys * 120 + 240; s++) {
-        if (s % 120 === 0 && s < volleys * 120) fireVolley();
-        const enc = device.createCommandEncoder();
-        world.encodeStep(enc);
-        device.queue.submit([enc.finish()]);
-        if (s % 6 === 5) await trackMeteors();
+      let s = 0;
+      const each = () => { if (s % 120 === 0 && s < volleys * 120) fireVolley(); beforeStep(); s++; };
+      while (s < volleys * 120 + 240) {
+        await stepFrames(world, 6, onFrame, each);
+        await trackMeteors();
       }
       manual = false;
       return { guided, strength, moving, routes, steered: meteors.score[0], unsteered: meteors.score[1], log: meteors.log };
@@ -1695,37 +1650,30 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // Meteor gauntlet take: from a reset, drive the street at `cruise` m/s holding
     // the lane at x = `lane`, with directed debris on or off, until the run ends
     // or `steps` steps; returns the run's status.
-    window.__runTake = async ({ steps = 2400, guided = true, strength = 1, cruise = 11, lane = -2.5 } = {}) => {
+    window.__runTake = async ({ steps: total = 2400, guided = true, strength = 1, cruise = 11, lane = -2.5 } = {}) => {
       if (!run) throw new Error('not the meteor gauntlet');
       guideOn.checked = guided; guideStrength.value = String(strength);
-      resetScene();
       manual = true;
+      resetScene();
       runLog = [];
-      const chassis = world.vehicles.chassisBody(vehicles[0].h);
       let st = null;
-      for (let s = 0; s < steps; s++) {
-        if (s % 6 === 0) {
-          await device.queue.onSubmittedWorkDone();
-          const f = new Float32Array((await world.readBodies(chassis, 1)).buffer);
-          lastChassis = { p: [f[0], f[1], f[2]], q: [f[4], f[5], f[6], f[7]], v: [f[12], f[13], f[14]] };
-          if (!chassisRest && s > 90) { chassisRest = lastChassis.p[1]; applyGuidance(false); }
-          const fw = qrot(lastChassis.q, [0, 0, 1]);
-          const speed = fw[0] * lastChassis.v[0] + fw[2] * lastChassis.v[2];
-          const e = cruise - speed;
-          world.vehicles.setInput(world.backend, player, { forward: Math.max(0, Math.min(1, e * 0.4)), steer: Math.max(-1, Math.min(1, 0.25 * (lastChassis.p[0] - lane) + 2.5 * fw[0])), brake: e < -1 ? Math.min(1, -e * 0.2) : 0, handbrake: 0 });
-          await judgeRun();
-          st = JSON.parse(run.status(world.steps * world.params.dt, lastChassis.p[2]));
-          if (st.state === 'wrecked' || st.state === 'finished') break;
-        }
-        runTick();
-        const enc = device.createCommandEncoder();
-        world.encodeStep(enc);
-        device.queue.submit([enc.finish()]);
+      for (let s = 0; s < total; s += 6) {
+        await readChassis();
+        if (!chassisRest && s > 90) { chassisRest = lastChassis.p[1]; applyGuidance(false); }
+        const fw = qrot(lastChassis.q, [0, 0, 1]);
+        const speed = fw[0] * lastChassis.v[0] + fw[2] * lastChassis.v[2];
+        const e = cruise - speed;
+        world.setVehicleInput(player, { forward: Math.max(0, Math.min(1, e * 0.4)), steer: Math.max(-1, Math.min(1, 0.25 * (lastChassis.p[0] - lane) + 2.5 * fw[0])), brake: e < -1 ? Math.min(1, -e * 0.2) : 0, handbrake: 0 });
+        await judgeRun();
+        st = JSON.parse(run.status(steps() * DT, lastChassis.p[2]));
+        if (st.state === 'wrecked' || st.state === 'finished') break;
+        await stepFrames(world, Math.min(6, total - s), onFrame, () => { runTick(); beforeStep(); });
       }
       manual = false;
       const log = runLog;
       runLog = null;
-      return { guided, strength, ...st, z: lastChassis.p[2], states: await world.guideStates(), hits: log.filter((e) => e.event === 2 || e.event === 4) };
+      const { claims, ...states } = await world.readGuidance();
+      return { guided, strength, ...st, z: lastChassis.p[2], states, hits: log.filter((e) => e.event === 2 || e.event === 4) };
     };
     renderParts();
     requestAnimationFrame(frame);

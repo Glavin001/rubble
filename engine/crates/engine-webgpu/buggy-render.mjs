@@ -41,7 +41,8 @@ const hex = (c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
  * @param {object} o
  * @param {GPUDevice} o.device
  * @param {GPUTextureFormat} o.format
- * @param {object} o.world      world-host world (bufs, vehicles, vlayout)
+ * @param {object} o.world      world-host world, or a view of a Rust-host one: bufs[0] and
+ *                               bufs[31], vehicles.entries, vlayout, soft.entries
  * @param {GPUBuffer} o.frameBuf  vehicle.html's Frame uniform (viewProj, eye, light)
  * @param {object} o.L           vehicle layout constants
  * @param {string} o.shadeWgsl   WGSL defining qrot() and shade(c, n, w) against `frame`
@@ -297,14 +298,22 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
     device.queue.writeBuffer(buggyBuf, 0, bw);
     dynBuf = device.createBuffer({ size: nB * slotsPerBuggy * MAT_FLOATS * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     for (const g of buggies) writeDyn(g);
-    bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[31]], [3, instBuf], [4, buggyBuf], [5, dynBuf]]
-        .map(([binding, buffer]) => ({ binding, resource: { buffer } })),
-    });
+    bind();
     rbFree.forEach((b) => b.destroy());
     rbSize = nB * recBytes;
     rbFree = Array.from({ length: RB }, () => device.createBuffer({ size: rbSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+  }
+
+  // The world's body and vehicle buffers can be replaced when they grow (a
+  // Rust-host world): bind them again when either is a new object.
+  let bound = [];
+  function bind() {
+    bound = [world.bufs[0], world.bufs[31]];
+    bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [[0, bound[0]], [1, frameBuf], [2, bound[1]], [3, instBuf], [4, buggyBuf], [5, dynBuf]]
+        .map(([binding, buffer]) => ({ binding, resource: { buffer } })),
+    });
   }
 
   /** Pose the rig of buggy `g` and upload its matrix slots. */
@@ -483,6 +492,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
     },
     draw(rp) {
       if (!draws.length) return;
+      if (world.bufs[0] !== bound[0] || world.bufs[31] !== bound[1]) bind();
       rp.setPipeline(pipeline);
       rp.setBindGroup(0, bindGroup);
       rp.setIndexBuffer(geo, 'uint32');
