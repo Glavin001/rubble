@@ -38,9 +38,9 @@
     <div id="err"></div>
   </div>
   <div id="stats" class="panel"><div id="statsBody"></div><div id="log"></div></div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, sceneCapacity } from './world-host.mjs';
-    import { M } from './vehicle.mjs';
+    import { createWorld, Poses, pollFrame as poll, stepFrames } from './rubble-world.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -74,15 +74,13 @@
     }[scene];
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('no WebGPU adapter');
-    const device = await adapter.requestDevice({
-      requiredLimits: {
-        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
-        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-        maxBufferSize: adapter.limits.maxBufferSize,
-      },
+    // The world opens the device; the page renders on it and reads the world's buffers in place.
+    const world = await createWorld({
+      gravity: [0, -10, 0],
+      contacts: 'canonical',
+      capacity: { maxBodies: 4096, maxColliders: 8192, maxContacts: 65536, maxCandidates: 131072, maxJoints: 64, maxCommands: 2048 },
     });
+    const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
     const canvas = document.getElementById('c');
@@ -98,46 +96,42 @@
     addEventListener('resize', configure);
 
     // ---------------------------------------------------------------- world
-    const cap = sceneCapacity(4000, 8000);
-    const world = await createWorld(device, { cap, status: (s) => { statusEl.textContent = s; } });
     const DT = 1 / 60;
-    world.params.dt = DT;
-    world.params.iterations = 10;
-    world.params.gravityY = -10;
-    world.params.flags = lookAhead ? M.FLAG_SPEC_VELOCITY : 0;
-    const MAT_GROUND = 0, MAT_PROP = 1;
-    world.setMaterial(MAT_GROUND, 0.9);
-    world.setMaterial(MAT_PROP, 0.6);
+    world.setSolver({ dt: DT, iterations: 10, flags: lookAhead ? world.flags.SPEC_VELOCITY : 0 });
+    const MAT_GROUND = { friction: 0.9 }, MAT_PROP = { friction: 0.6 };
 
     const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
-    const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
-    const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => {
-      const body = world.addBody({ p, q, flags: 0 });
-      world.addCollider({ body, shape: 2, material, params: [...half, Math.hypot(...half)] });
-      return body;
+    const boxI = (m, hx, hy, hz) => [(m * (hy * hy + hz * hz)) / 3, (m * (hx * hx + hz * hz)) / 3, (m * (hx * hx + hy * hy)) / 3];
+    // Every body this page made and how it started, for reset (R).
+    const made = [];
+    const body = (def, shape, material, mass = null) => {
+      const id = world.createBody(def);
+      world.createShape(id, { material }, shape);
+      if (mass) world.bodySetMassData(id, mass[0], [0, 0, 0], mass[1]);
+      made.push({ id, def });
+      return id;
     };
-    const kinematicBox = (p, half, q = [0, 0, 0, 1]) => {
-      const body = world.addBody({ p, q, flags: M.BODY_KINEMATIC | 8 });
-      world.addCollider({ body, shape: 2, material: MAT_GROUND, params: [...half, Math.hypot(...half)] });
-      return body;
-    };
-    const dynBox = (p, half, mass, q = [0, 0, 0, 1], flags = 0) => {
-      const body = world.addBody({ p, q, invMass: 1 / mass, invI: boxInv(mass, ...half), flags: 1 | 8 | flags });
-      world.addCollider({ body, shape: 2, material: MAT_PROP, params: [...half, Math.hypot(...half)] });
-      return body;
-    };
-    const dynBall = (p, r, mass, v = [0, 0, 0], flags = 0) => {
-      const i = 2.5 / (mass * r * r);
-      const body = world.addBody({ p, invMass: 1 / mass, invI: [i, i, i], flags: 1 | 8 | flags, v });
-      world.addCollider({ body, shape: 0, material: MAT_PROP, params: [r, 0, 0, r] });
-      return body;
-    };
+    const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => body({ position: p, rotation: q }, { box: { half } }, material);
+    const kinematicBox = (p, half, q = [0, 0, 0, 1]) => body({ type: 'kinematic', position: p, rotation: q }, { box: { half } }, MAT_GROUND);
+    const dynBox = (p, half, mass, q = [0, 0, 0, 1]) => body({ type: 'dynamic', position: p, rotation: q }, { box: { half } }, MAT_PROP, [mass, boxI(mass, ...half)]);
+    // Parked far below until launched: asleep dynamic bodies (CCD for `ccd`).
+    const parked = (p, shape, mass, inertia, ccd) => body({ type: 'dynamic', position: p, isAwake: false, isBullet: ccd }, shape, MAT_PROP, [mass, inertia]);
     // Ground slab: collider 0, drawn as the grid plane.
     staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
 
+    // Characters: handle -> { start, jumps sent }.
+    const characters = new Map();
+    const addCharacter = (desc, p) => { const h = world.createCharacter(desc, p, 0); characters.set(h, { start: p, jumps: 0 }); return h; };
+    // Input with a jump counter (a new value jumps once), as the HUD keys count jumps.
+    const setCharacterInput = (h, v, jumpSeq) => {
+      const c = characters.get(h);
+      world.characterSetInput(h, v, jumpSeq !== c.jumps);
+      c.jumps = jumpSeq;
+    };
+
     // Scene state the HUD and the checks read.
     const S = { lanes: [], shower: null, player: -1, npcs: [], platform: null, lift: null, walls: [], targets: [], log: [] };
-    const say = (m) => { S.log.unshift(`${world.steps}: ${m}`); S.log.length = Math.min(S.log.length, 40); };
+    const say = (m) => { S.log.unshift(`${world.stepCount()}: ${m}`); S.log.length = Math.min(S.log.length, 40); };
 
     if (scene === 'ccd') {
       // Each lane: a control ball (no CCD) and a CCD ball (BODY_CCD), 2 m apart,
@@ -168,9 +162,7 @@
           L[side + 'Bricks'] = bricks.filter((b) => Math.abs(b.p[0] - (L.x + dx)) < 0.25).map((b) => b.body);
         // Parked far below until fired (static until then).
         const ball = (dx, ccd) => {
-          const body = world.addBody({ p: [L.x + dx, -500, 0], invMass: 1 / 5, invI: [250, 250, 250], flags: ccd ? M.BODY_CCD : 0 });
-          world.addCollider({ body, shape: 0, material: MAT_PROP, params: [BALL_R, 0, 0, BALL_R] });
-          return body;
+          return parked([L.x + dx, -500, 0], { sphere: { radius: BALL_R } }, 5, [1 / 250, 1 / 250, 1 / 250], ccd);
         };
         S.lanes.push({ ...L, wallZ: WALL_Z, control: ball(-1.0, false), ccd: ball(1.0, true), result: { control: '—', ccd: '—' }, tally: { control: 0, ccd: 0, shots: 0 } });
       }
@@ -180,8 +172,7 @@
       S.shower = { control: [], ccd: [] };
       for (const [side, x0, ccd] of [['control', -6, false], ['ccd', 6, true]]) {
         for (let i = 0; i < 49; i++) {
-          const body = world.addBody({ p: [x0 + (i % 7) * 0.6 - 1.8, -600, -14 + Math.floor(i / 7) * 0.6 - 1.8], invMass: 1 / 0.3, invI: boxInv(0.3, 0.05, 0.05, 0.05), flags: ccd ? M.BODY_CCD : 0 });
-          world.addCollider({ body, shape: 2, material: MAT_PROP, params: [0.05, 0.05, 0.05, 0.0866] });
+          const body = parked([x0 + (i % 7) * 0.6 - 1.8, -600, -14 + Math.floor(i / 7) * 0.6 - 1.8], { box: { half: [0.05, 0.05, 0.05] } }, 0.3, boxI(0.3, 0.05, 0.05, 0.05), ccd);
           S.shower[side].push({ body, x: x0 + (i % 7) * 0.6 - 1.8, z: -14 + Math.floor(i / 7) * 0.6 - 1.8, y: 9 + 0.13 * (i % 5) });
         }
       }
@@ -208,44 +199,29 @@
       for (let iy = 0; iy < 10; iy++) for (let ix = 0; ix < 16; ix++) dynBox([14 + ix * 0.4 - 3, 0.1 + iy * 0.2, 14], [0.2, 0.1, 0.1], 6);
       for (let i = 0; i < 120; i++) dynBox([-12 + (i % 6) * 0.3, 0.15 + Math.floor(i / 36) * 0.3, 4 + (Math.floor(i / 6) % 6) * 0.3], [0.12, 0.12, 0.12], 2);
       // The player and three NPCs.
-      S.player = world.addCharacter({ radius: 0.3, half_height: 0.6 }, [0, 1.0, 0]);
-      for (let k = 0; k < 3; k++) S.npcs.push({ h: world.addCharacter({ radius: 0.28, half_height: 0.55 }, [-4 + 2 * k, 1.0, -2]), phase: k * 2.1 });
+      S.player = addCharacter({ radius: 0.3, half_height: 0.6 }, [0, 1.0, 0]);
+      for (let k = 0; k < 3; k++) S.npcs.push({ h: addCharacter({ radius: 0.28, half_height: 0.55 }, [-4 + 2 * k, 1.0, -2]), phase: k * 2.1 });
       // Rockets: parked CCD balls.
       S.rockets = [];
       for (let i = 0; i < 8; i++) {
-        const body = world.addBody({ p: [-3000 - i * 5, -3000, -3000], invMass: 1 / 4, invI: [250, 250, 250], flags: M.BODY_CCD });
-        world.addCollider({ body, shape: 0, material: MAT_PROP, params: [0.12, 0, 0, 0.12] });
-        S.rockets.push(body);
+        S.rockets.push(parked([-3000 - i * 5, -3000, -3000], { sphere: { radius: 0.12 } }, 4, [1 / 250, 1 / 250, 1 / 250], true));
       }
     } else {
       // Five 5 cm walls, then three dynamic targets.
       for (let k = 0; k < 5; k++) S.walls.push(staticBox([0, 1.5, 10 + 2 * k + 0.025], [2, 1.5, 0.025]));
       for (let k = 0; k < 3; k++) S.targets.push(dynBox([(k - 1) * 1.2, 0.4, 24], [0.4, 0.4, 0.4], 3));
     }
-    const initial = world.snapshot();
-    statusEl.textContent = `scene ready · ${world.bodyCount} bodies · ${world.colliderCount} colliders`;
+    statusEl.textContent = `scene ready · ${world.bodyCount()} bodies · ${world.colliderCount()} colliders`;
 
     // ---------------------------------------------------------------- body writes
-    const bodyRecord = (body) => new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
-    function launch(body, p, v, keepCcd = true) {
-      const words = bodyRecord(body);
-      const f = new Float32Array(words.buffer);
-      const ccd = words[11] & M.BODY_CCD;
-      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8 | (keepCcd ? ccd : 0);
-      f.set(v, 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
-      f.set(p, 20); f.set([0, 0, 0, 1], 24);
-      world.backend.writeBody(body, words);
-    }
-    function park(body, p) {
-      const words = bodyRecord(body);
-      const f = new Float32Array(words.buffer);
-      const ccd = words[11] & M.BODY_CCD;
-      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = ccd; f.set([0, 0, 0], 12); f.set([0, 0, 0], 16); f.set(p, 20);
-      world.backend.writeBody(body, words);
+    function launch(body, p, v) {
+      world.bodySetTransform(body, p, [0, 0, 0, 1]);
+      world.bodySetVelocity(body, v, [0, 0, 0]);
+      world.bodySetAwake(body, true);
     }
     function fireVolley() {
       for (const L of S.lanes) {
-        L.fired = world.steps;
+        L.fired = world.stepCount();
         L.result = { control: 'flying', ccd: 'flying' };
         L.tally.shots++;
         launch(L.control, [L.x - 1.0, 1.4, 4], [0, 0, shotSpeed]);
@@ -253,7 +229,7 @@
       }
       if (S.shower) {
         for (const side of ['control', 'ccd']) for (const c of S.shower[side]) launch(c.body, [c.x, c.y, c.z], [0, -40, 0]);
-        S.shower.fired = world.steps;
+        S.shower.fired = world.stepCount();
       }
       say(`volley at ${shotSpeed} m/s`);
     }
@@ -363,7 +339,7 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
 
 // Projectiles: tracers from the pool records (alive ones only).
 @vertex fn vsShot(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
-  let rec = ${world.mlayout.projectileBase}u + inst * ${M.PROJ_STRIDE}u;
+  let rec = ${world.projectileLayout().projectileBase}u + inst * ${world.projectileLayout().projectileStride}u;
   let p = pool[rec];
   let v = pool[rec + 1u];
   let alive = (bitcast<u32>(pool[rec + 2u].x) & 1u) != 0u;
@@ -422,9 +398,16 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
     const shotPipe = pipe('vsShot', 'fsShot', vtx6, 'none');
     const groundPipe = pipe('vsGround', 'fsGround', [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'none');
     const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
-    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
-    const shotBind = bind(shotPipe, [[1, frameBuf], [3, world.bufs[33]]]);
-    const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf]]);
+    // The world's buffers can be replaced when they grow: rebind when one is a new object.
+    let colBind = null, shotBind = null, groundBind = null, bound = [];
+    const rebind = () => {
+      const bufs = [world.bodyBuffer(), world.colliderBuffer(), world.motionBuffer()];
+      if (bufs.every((b, i) => b === bound[i])) return;
+      bound = bufs;
+      colBind = bind(colPipe, [[0, bufs[0]], [1, frameBuf], [2, bufs[1]]]);
+      shotBind = bind(shotPipe, [[1, frameBuf], [3, bufs[2]]]);
+      groundBind = bind(groundPipe, [[0, bufs[0]], [1, frameBuf]]);
+    };
     let depth = null;
 
     // ---------------------------------------------------------------- camera / input
@@ -476,7 +459,7 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
     function fire() {
       if (scene === 'ccd') return fireVolley();
       if (scene === 'bullets') {
-        for (let k = 0; k < 3; k++) world.spawnProjectile({ p: [(k - 1) * 1.2, 0.5, 0], v: [0, 0.6, 900], mass: 0.01, cost: 5000 });
+        for (let k = 0; k < 3; k++) world.spawnProjectile({ position: [(k - 1) * 1.2, 0.5, 0], velocity: [0, 0.6, 900], mass: 0.01, penetrationCost: 5000, maxHitsPerStep: 8 });
         say('3 bullets at 900 m/s (5,000 J/m to cross a wall)');
         return;
       }
@@ -485,7 +468,7 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
       const eye = eyeOf();
       const dir = norm3(sub3(cam.target, eye));
       const from = [c.position[0], c.position[1] + 0.6, c.position[2]];
-      world.spawnProjectile({ p: from, v: dir.map((d) => d * 600), mass: 0.012, cost: 20000, excludeBody: world.characters[S.player].body });
+      world.spawnProjectile({ position: from, velocity: dir.map((d) => d * 600), mass: 0.012, penetrationCost: 20000, maxHitsPerStep: 8, ignoreBody: world.characterBody(S.player) });
       say('bullet at 600 m/s');
     }
     function rocket() {
@@ -498,7 +481,15 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
       say('CCD rocket at 150 m/s');
     }
     function resetScene() {
-      world.restore(initial);
+      // Every body and character back to its start, at rest (parked bodies asleep again).
+      for (const { id, def } of made) {
+        if (def.type !== 'dynamic' && def.type !== 'kinematic') continue;
+        world.bodySetTransform(id, def.position, def.rotation ?? [0, 0, 0, 1]);
+        world.bodySetVelocity(id, [0, 0, 0], [0, 0, 0]);
+        if (def.isAwake === false) world.bodySetAwake(id, false);
+      }
+      for (const [h, c] of characters) { world.characterTeleport(h, c.start); world.characterSetInput(h, [0, 0, 0], false); }
+      lastKinFlip = -1;
       for (const L of S.lanes) { L.result = { control: '—', ccd: '—' }; L.tally = { control: 0, ccd: 0, shots: 0 }; }
       S.log.length = 0;
       jumpSeq = 0;
@@ -516,55 +507,53 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
       let vx = (fx * fwd - fz * side), vz = (fz * fwd + fx * side);
       const l = Math.hypot(vx, vz) || 1;
       if (fwd || side) { vx = (vx / l) * speed; vz = (vz / l) * speed; } else { vx = 0; vz = 0; }
-      if (!S.scripted) world.setCharacterInput(S.player, [vx, 0, vz], jumpSeq);
+      if (!S.scripted) setCharacterInput(S.player, [vx, 0, vz], jumpSeq);
       // NPCs walk circles.
-      const t = world.steps * DT;
-      for (const n of S.npcs) world.setCharacterInput(n.h, [2 * Math.cos(t * 0.6 + n.phase), 0, 2 * Math.sin(t * 0.6 + n.phase)], 0);
+      const steps = world.stepCount();
+      const t = steps * DT;
+      for (const n of S.npcs) setCharacterInput(n.h, [2 * Math.cos(t * 0.6 + n.phase), 0, 2 * Math.sin(t * 0.6 + n.phase)], 0);
       // Platform back and forth (3 s each way); the lift up and down.
-      if (world.steps - lastKinFlip >= 180 || world.steps === 0) {
-        const dir = Math.floor(world.steps / 180) % 2 ? -1 : 1;
-        world.setKinematicVelocity(S.platform, [1.5 * dir, 0, 0]);
-        world.setKinematicVelocity(S.lift, [0, 1.0 * dir, 0]);
-        lastKinFlip = world.steps;
+      if (steps - lastKinFlip >= 180 || steps === 0 || lastKinFlip < 0) {
+        const dir = Math.floor(steps / 180) % 2 ? -1 : 1;
+        world.bodySetVelocity(S.platform, [1.5 * dir, 0, 0], [0, 0, 0]);
+        world.bodySetVelocity(S.lift, [0, 1.0 * dir, 0], [0, 0, 0]);
+        lastKinFlip = steps;
       }
     }
-    function stepOnce(enc) {
+    // One step if it can be taken without waiting on a readback (its inputs first).
+    function tryStep() {
+      if (!world.canStep()) return false;
       driveScene();
-      world.encodeStep(enc);
+      return world.step();
     }
 
-    // ---------------------------------------------------------------- readback
-    const tracked = () => {
-      const ids = [];
-      for (const L of S.lanes) ids.push(L.control, L.ccd, ...(L.controlBricks || []), ...(L.ccdBricks || []));
-      if (S.shower) for (const side of ['control', 'ccd']) for (const c of S.shower[side]) ids.push(c.body);
-      for (const t of S.targets) ids.push(t);
-      return ids;
-    };
-    const trackedIds = tracked();
-    const RB = 3;
-    const rbBytes = 80 + trackedIds.length * 112;
-    const rbFree = Array.from({ length: RB }, () => device.createBuffer({ size: Math.max(rbBytes, 96), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
-    const bodyState = new Map();
+    // ---------------------------------------------------------------- frames
+    const poses = new Poses(4096);
     let lastCounters = null;
-    function encodeReadback(enc, rb) {
-      enc.copyBufferToBuffer(world.bufs[7], 0, rb, 0, 80);
-      trackedIds.forEach((id, k) => enc.copyBufferToBuffer(world.bufs[0], id * 112, rb, 80 + k * 112, 112));
-    }
-    function decode(rb) {
-      const all = new Uint32Array(rb.getMappedRange().slice(0, rbBytes));
-      rb.unmap();
-      const c = all.subarray(0, 20);
-      lastCounters = { contact: c[2], candidate: c[4], awake: c[5], overflow: c[7] };
-      world.setLastCounters(c);
-      if (c[7]) say(`overflow flags 0x${c[7].toString(16)}`);
-      const f = new Float32Array(all.buffer);
-      trackedIds.forEach((id, k) => {
-        const o = 20 + k * 28;
-        bodyState.set(id, { p: [f[o], f[o + 1], f[o + 2]], v: [f[o + 12], f[o + 13], f[o + 14]], flags: all[o + 11] });
-      });
+    const bodyState = { get: (id) => ({ p: poses.position(world.bodySlot(id)) }) };
+    function onFrame(f) {
+      if (f.empty) return;
+      poses.apply(f);
+      const c = f.counters();
+      if (c) {
+        lastCounters = { contact: c.contacts, candidate: c.candidates, awake: c.awake, overflow: c.overflow };
+        if (c.overflow) say(`overflow flags 0x${c.overflow.toString(16)}`);
+      }
+      const motion = { characters: f.characters(), projectiles: f.projectiles() };
+      if (motion.characters.length || motion.projectiles.length || !S.motion) {
+        // Characters by handle (the HUD and checks look them up by S.player).
+        motion.characters = Object.fromEntries(motion.characters.map((c) => [c.id, c]));
+        S.motion = { ...S.motion, ...motion };
+      }
+      for (const e of f.projectileEvents()) {
+        let collider = '?';
+        try { collider = world.shapeCollider(e.shape); } catch {}
+        say(`projectile ${e.id % 2 ** 32} hit collider ${collider}${e.type === 'stopped' ? ' and stopped' : ` (${e.thickness.toFixed(2)} m through)`}`);
+      }
+      for (const e of f.characterEvents()) say(`character ${e.id % 2 ** 32} ${e.type}`);
       judge();
     }
+    const pollFrame = () => poll(world, onFrame);
     // Lanes: a ball past the wall's far face tunnelled; one stopped short of it held.
     function judge() {
       for (const L of S.lanes) {
@@ -579,7 +568,7 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
             L.result[side] = L.dynamic && moved ? 'smashed through' : 'TUNNELLED';
             if (side === 'ccd' && L.result[side] === 'TUNNELLED') say(`${L.name}: CCD ball tunnelled`);
           }
-          else if (world.steps - L.fired > 30 && st.p[2] < far) { L.result[side] = st.p[2] + r <= L.wallZ + 0.03 ? 'stopped at wall' : 'embedded'; }
+          else if (world.stepCount() - L.fired > 30 && st.p[2] < far) { L.result[side] = st.p[2] + r <= L.wallZ + 0.03 ? 'stopped at wall' : 'embedded'; }
         }
       }
       if (S.shower && S.shower.fired !== undefined) {
@@ -601,29 +590,14 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
         h += `<div class="muted">0.1 m balls at ${shotSpeed} m/s (${(shotSpeed * DT).toFixed(2)} m per step) · look-ahead ${lookAhead ? 'on' : 'off'}</div>`;
       } else if (S.motion) {
         const c = S.motion.characters[S.player];
-        if (c) h += `<div>player: <b class="${c.ground === 'ground' ? 'ok' : c.ground === 'steep' ? 'warn' : ''}">${c.ground}</b> · (${c.position.map((x) => x.toFixed(2)).join(', ')}) · ${Math.hypot(c.velocity[0], c.velocity[2]).toFixed(2)} m/s${c.flags & 1 ? ' · stepped up' : ''}${c.push[1] < 0 ? ` · ${(-c.push[1]).toFixed(0)} N on body ${c.groundBody}` : ''}</div>`;
+        if (c) h += `<div>player: <b class="${c.ground === 'ground' ? 'ok' : c.ground === 'steep' ? 'warn' : ''}">${c.ground}</b> · (${c.position.map((x) => x.toFixed(2)).join(', ')}) · ${Math.hypot(c.velocity[0], c.velocity[2]).toFixed(2)} m/s${c.push[1] < 0 ? ` · ${(-c.push[1]).toFixed(0)} N on body ${c.groundBody}` : ''}</div>`;
         const alive = S.motion.projectiles.filter((p) => p.alive).length;
-        h += `<div class="muted">${world.characters.length} characters · ${alive}/${S.motion.projectiles.length} projectiles in flight</div>`;
+        h += `<div class="muted">${characters.size} characters · ${alive}/${S.motion.projectiles.length} projectiles in flight</div>`;
       }
-      if (lastCounters) h += `<div class="muted">bodies ${world.bodyCount} · contacts ${lastCounters.contact} · awake ${lastCounters.awake}${lastCounters.overflow ? ` · <span class="bad">overflow 0x${lastCounters.overflow.toString(16)}</span>` : ''}</div>`;
+      if (lastCounters) h += `<div class="muted">bodies ${world.bodyCount()} · contacts ${lastCounters.contact} · awake ${lastCounters.awake}${lastCounters.overflow ? ` · <span class="bad">overflow 0x${lastCounters.overflow.toString(16)}</span>` : ''}</div>`;
       statsBody.innerHTML = h;
       logEl.textContent = S.log.join('\n');
     }
-    let motionPoll = 0;
-    function pollMotion() {
-      if (world.steps - motionPoll < 4) return;
-      motionPoll = world.steps;
-      world.readMotion().then(handleMotion).catch(fail);
-    }
-    function handleMotion(m) {
-      if (!m) return;
-      S.motion = m;
-      for (const e of m.events) {
-        if (e.type === 'projectileHit') say(`projectile ${e.id} hit collider ${e.a}${e.b < 0 ? ' and stopped' : ` (${e.b.toFixed(2)} m through)`}`);
-        else if (e.type !== 'projectileStopped') say(`character ${e.id} ${e.type}`);
-      }
-    }
-
     function updateCamera(dt) {
       if (scene === 'character' && S.motion?.characters[S.player]) {
         const p = S.motion.characters[S.player].position;
@@ -641,13 +615,15 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
       device.queue.writeBuffer(frameBuf, 0, frameF);
     }
     function drawScene(enc) {
+      rebind();
       const rp = enc.beginRenderPass({
         colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
       rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
-      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
-      if (world.projectileCount) { rp.setPipeline(shotPipe); rp.setBindGroup(0, shotBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.projectileCount); }
+      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount() - 1);
+      const shots = world.projectileLayout().projectileSlots;
+      if (shots) { rp.setPipeline(shotPipe); rp.setBindGroup(0, shotBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, shots); }
       rp.end();
     }
 
@@ -662,20 +638,19 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
       lastT = now;
       fpsAcc += dt; fpsN++;
       if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
-      if (rbFree.length === 0 || manual) { if (manual) { updateCamera(dt); const e = device.createCommandEncoder(); drawScene(e); device.queue.submit([e.finish()]); } requestAnimationFrame(frame); return; }
+      if (manual) { updateCamera(dt); const e = device.createCommandEncoder(); drawScene(e); device.queue.submit([e.finish()]); requestAnimationFrame(frame); return; }
       // Demo cadence: a volley every 3 s in the gallery, a burst every 2 s on the range.
-      if (autoFire && scene === 'ccd' && world.steps % 180 === 20) fireVolley();
-      if (autoFire && scene === 'bullets' && world.steps % 120 === 20) fire();
+      const steps = world.stepCount();
+      if (world.canStep() && autoFire && scene === 'ccd' && steps % 180 === 20) fireVolley();
+      if (world.canStep() && autoFire && scene === 'bullets' && steps % 120 === 20) fire();
+      tryStep();
+      pollFrame();
+      updateHud();
       updateCamera(dt);
       const enc = device.createCommandEncoder();
-      stepOnce(enc);
       drawScene(enc);
-      const rb = rbFree.pop();
-      encodeReadback(enc, rb);
       device.queue.submit([enc.finish()]);
-      rb.mapAsync(GPUMapMode.READ).then(() => { decode(rb); rbFree.push(rb); updateHud(); }).catch(fail);
-      pollMotion();
-      statusEl.textContent = `step ${world.steps} · ${fpsShow.toFixed(0)} fps`;
+      statusEl.textContent = `step ${world.stepCount()} · ${fpsShow.toFixed(0)} fps`;
       requestAnimationFrame(frame);
     }
 
@@ -683,29 +658,13 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
     // __step(n): n physics steps without rendering; returns counters and tracked bodies.
     window.__step = async (n = 1) => {
       manual = true;
-      for (let i = 0; i < n; i++) {
-        const enc = device.createCommandEncoder();
-        stepOnce(enc);
-        device.queue.submit([enc.finish()]);
-        // Counters feed the next step's plan (warm hash, colour headroom).
-        if (i % 8 === 7 || i === n - 1) {
-          while (rbFree.length === 0) await new Promise((r) => setTimeout(r, 2));
-          const rb = rbFree.pop();
-          const e2 = device.createCommandEncoder();
-          encodeReadback(e2, rb);
-          device.queue.submit([e2.finish()]);
-          await rb.mapAsync(GPUMapMode.READ);
-          decode(rb);
-          rbFree.push(rb);
-        }
-      }
-      handleMotion(await world.readMotion());
+      await stepFrames(world, n, onFrame, driveScene);
       updateHud();
       updateCamera(0);
       const e3 = device.createCommandEncoder();
       drawScene(e3);
       device.queue.submit([e3.finish()]);
-      return { steps: world.steps, counters: lastCounters };
+      return { steps: world.stepCount(), counters: lastCounters };
     };
     // __check(): the scene's end-to-end script, run frame-locked; returns metrics.
     window.__check = async () => {
@@ -726,12 +685,14 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
         fire();
         await window.__step(10);
         const hits = S.log.filter((l) => l.includes('hit collider'));
-        return { scene, projectiles: S.motion.projectiles, hitLines: hits, targets: S.targets.map((t) => bodyState.get(t)) };
+        const st = await world.readBodies(S.targets.map((t) => world.bodySlot(t)));
+        const targets = S.targets.map((t, k) => ({ p: Array.from(st.subarray(k * 14, k * 14 + 3)), v: Array.from(st.subarray(k * 14 + 7, k * 14 + 10)) }));
+        return { scene, projectiles: S.motion.projectiles, hitLines: hits, targets };
       }
       // Character: walk to the stairs and up them, jump on top, ride the platform.
       S.scripted = true;
       const ground = [];
-      const walk = async (v, n) => { world.setCharacterInput(S.player, v, jumpSeq); for (let i = 0; i < n; i += 4) { await window.__step(4); ground.push(S.motion.characters[S.player].ground); } };
+      const walk = async (v, n) => { setCharacterInput(S.player, v, jumpSeq); for (let i = 0; i < n; i += 4) { await window.__step(4); ground.push(S.motion.characters[S.player].ground); } };
       await walk([0, 0, 0], 30);
       // From (0, 0) to the stairs' lane (z = 6), then up the stairs along +x.
       await walk([0, 0, 3], 120);

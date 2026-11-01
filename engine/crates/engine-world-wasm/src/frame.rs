@@ -82,3 +82,101 @@ impl WebFrame {
         o.into()
     }
 }
+
+fn js(v: serde_json::Value) -> JsValue {
+    use serde::Serialize;
+    v.serialize(&serde_wasm_bindgen::Serializer::json_compatible()).unwrap_or(JsValue::NULL)
+}
+
+fn id(bits: u64) -> f64 {
+    bits as f64
+}
+
+fn ground(g: GroundState) -> &'static str {
+    match g {
+        GroundState::OnGround => "ground",
+        GroundState::OnSteepGround => "steep",
+        GroundState::InAir => "air",
+    }
+}
+
+#[wasm_bindgen]
+impl WebFrame {
+    /// Every character as the last step left it: `{ id, position, velocity,
+    /// ground ('ground' | 'steep' | 'air'), groundNormal, groundBody (handle or
+    /// null), groundVelocity, push, userData }`.
+    pub fn characters(&self) -> JsValue {
+        js(self
+            .frame
+            .characters
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": id(c.character.to_bits()), "position": c.position, "velocity": c.velocity,
+                    "ground": ground(c.ground), "groundNormal": c.ground_normal,
+                    "groundBody": (!c.ground_body.is_null()).then(|| id(c.ground_body.to_bits())),
+                    "groundVelocity": c.ground_velocity, "push": c.push, "userData": c.user_data,
+                })
+            })
+            .collect())
+    }
+
+    /// `{ id, type ('landed' | 'supportLost' | 'crushed'), groundBody, userData }`.
+    #[wasm_bindgen(js_name = characterEvents)]
+    pub fn character_events(&self) -> JsValue {
+        js(self
+            .frame
+            .character_events
+            .iter()
+            .map(|e| {
+                let kind = match e.kind {
+                    CharacterEventKind::Landed => "landed",
+                    CharacterEventKind::SupportLost => "supportLost",
+                    CharacterEventKind::Crushed => "crushed",
+                };
+                serde_json::json!({
+                    "id": id(e.character.to_bits()), "type": kind,
+                    "groundBody": (!e.ground_body.is_null()).then(|| id(e.ground_body.to_bits())),
+                    "userData": e.user_data,
+                })
+            })
+            .collect())
+    }
+
+    /// Every projectile in flight, and each one that stopped: `{ id, position,
+    /// velocity, alive, energy, hits, userData }`.
+    pub fn projectiles(&self) -> JsValue {
+        js(self
+            .frame
+            .projectiles
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": id(p.projectile.to_bits()), "position": p.position, "velocity": p.velocity,
+                    "alive": p.alive, "energy": p.energy, "hits": p.hits, "userData": p.user_data,
+                })
+            })
+            .collect())
+    }
+
+    /// `{ id, shape, body, type ('passed' | 'stopped'), thickness, userData }`.
+    #[wasm_bindgen(js_name = projectileEvents)]
+    pub fn projectile_events(&self) -> JsValue {
+        js(self
+            .frame
+            .projectile_events
+            .iter()
+            .map(|e| {
+                let (kind, thickness) = match e.kind {
+                    ProjectileEventKind::Passed { thickness } => ("passed", thickness),
+                    ProjectileEventKind::Stopped => ("stopped", 0.0),
+                };
+                serde_json::json!({
+                    "id": id(e.projectile.to_bits()), "shape": id(e.shape.to_bits()),
+                    "body": id(e.body.to_bits()), "type": kind, "thickness": thickness,
+                    "userData": e.user_data,
+                })
+            })
+            .collect())
+    }
+}

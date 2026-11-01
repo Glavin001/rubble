@@ -79,7 +79,7 @@ for (const page of pages) {
   await send('Page.navigate', { url: `${base}/${page}` });
   let ready = false;
   for (let i = 0; i < 1800 && !ready; i++) {
-    const s = await evaluate('JSON.stringify({ready: !!window.__ready, failed: window.__failed || null})').catch(() => null);
+    const s = await evaluate('JSON.stringify({ready: !!window.__ready || (typeof window.__step === "function" && !!window.__vehicleState?.()), failed: window.__failed || null})').catch(() => null);
     const st = s ? JSON.parse(s) : {};
     if (st.failed) throw new Error(`${page}: ${st.failed}`);
     ready = !!st.ready;

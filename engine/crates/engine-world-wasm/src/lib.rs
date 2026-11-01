@@ -17,6 +17,8 @@ use wasm_bindgen::prelude::*;
 
 mod defs;
 mod frame;
+mod motion;
+mod read;
 
 pub use frame::WebFrame;
 

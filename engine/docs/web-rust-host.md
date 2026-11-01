@@ -105,6 +105,20 @@ Each page moves in its own commit.
   (16-21 / 37-49): a 2,000-body pile is chaotic, and GPU float order already
   varied between runs.
 
+- **motion.html.** Characters (`createCharacter`, `characterSetInput`), projectiles
+  (`spawnProjectile`, drawn from the world's motion pool in place) and kinematic
+  platforms (`bodySetVelocity`). Parked balls, debris and rockets used to be static
+  bodies switched to dynamic by rewriting their records. They are now asleep
+  dynamic bodies, woken by `bodySetTransform` + `bodySetVelocity`. Projectiles keep
+  the JS host's 8 hits per step (`maxHitsPerStep: 8`); `World`'s default is 4.
+  `motion-check.mjs` passes every check: CCD at 60, 140 and 250 m/s, the character
+  stairs and jump, and bullets through five walls. Reset (R) teleports bodies and
+  characters back to their starts. It does not clear projectiles in flight, which
+  the JS host's full-buffer restore did. The HUD no longer shows "stepped up" (the
+  character's output flags), which `World`'s `CharacterOutput` does not carry.
+- **Non-blocking reads.** `readBodies(slots)` returns a Promise (a copy, then
+  `mapAsync`) for checks that need velocities.
+
 ## Step time, before and after
 
 `node engine/crates/engine-webgpu/tools/page-bench.mjs '<page>'`. This is headless
@@ -116,3 +130,8 @@ steps. It covers the host's encode, submit and readback as well as the GPU work.
 |---|---|---|
 | terrain.html?n=2000 | 2.43 | 2.36 |
 | terrain.html?n=10000 | 3.45 | 3.09 |
+| motion.html (CCD gallery, idle) | 0.72 | 0.008 |
+| motion.html?scene=character | 1.04 | 1.08 |
+
+`motion.html`'s CCD gallery is at rest until a volley: `World` skips a step when
+nothing is awake and nothing was written, and the JS host never did.

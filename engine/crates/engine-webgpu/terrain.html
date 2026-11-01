@@ -37,7 +37,7 @@
   </div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, Poses, stepFrames } from './rubble-world.mjs';
+    import { createWorld, Poses, pollFrame, stepFrames } from './rubble-world.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -436,9 +436,7 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
       if (manual) { requestAnimationFrame(frame); return; }
       const t0 = performance.now();
       world.step();
-      const f = world.poll();
-      onFrame(f);
-      f.free();
+      pollFrame(world, onFrame);
       physMs = performance.now() - t0;
       draw();
       const c = lastCounters;
