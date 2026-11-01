@@ -347,6 +347,12 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     fn adopt_spawned(&mut self, _adopted: Vec<AdoptedBody>, _retired: &[stress_ref::engine::BodyKey]) -> Result<(), String> {
         Err("this engine makes no bodies on the GPU".into())
     }
+    /// Per engine collider in `range`, a chunk's undeformed placement (`ColliderRest`),
+    /// for the GPU to move it with its chunk's deformation (`shapes::ShapeDeform`); None
+    /// for a collider of no chunk. None: the engine does not say (its shapes stay).
+    fn collider_rest(&self, _range: std::ops::Range<u32>) -> Option<Vec<Option<ColliderRest>>> {
+        None
+    }
     /// The engine's collider capacity.
     fn collider_capacity(&self) -> u32 {
         0
@@ -383,6 +389,18 @@ pub struct AdoptedBody {
     /// frame to the engine body's), as `cook_with` reports them.
     pub com: [f64; 3],
     pub principal: [f64; 4],
+}
+
+/// A chunk's engine collider as it was placed undeformed: its chunk, its body's centre of
+/// mass and principal rotation in the cluster frame (`AdoptedBody`'s), and its local
+/// position and rotation in the body frame (`to_body (x - com)`).
+#[derive(Clone, Copy, Debug)]
+pub struct ColliderRest {
+    pub chunk: (usize, usize),
+    pub com: Vec3,
+    pub principal: Quat,
+    pub local_pos: [f32; 3],
+    pub local_rot: [f32; 4],
 }
 
 /// A resident engine shared between the world's shell (as its `RigidEngine`) and the
