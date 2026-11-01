@@ -195,6 +195,18 @@ pub fn world_def(v: JsValue) -> Result<WorldDef, JsValue> {
         d.gpu_timing = gpu_timing(&s)?;
     }
     f.u32("readbackFrames", &mut d.readback_frames)?;
+    // Where the world ends: `killBelow: y` (a floor) or `killBounds: { min, max }`.
+    if let Some(v) = f.take("killBelow") {
+        let y = v.as_f64().ok_or_else(|| crate::err("WorldDef.killBelow: expected a number"))?;
+        d.kill_bounds = Some(KillBounds::below(y as f32));
+    }
+    if let Some(mut k) = f.object("killBounds")? {
+        let mut b = KillBounds::below(f32::NEG_INFINITY);
+        k.floats("min", &mut b.min)?;
+        k.floats("max", &mut b.max)?;
+        k.finish()?;
+        d.kill_bounds = Some(b);
+    }
     f.f32("hitEventThreshold", &mut d.hit_event_threshold)?;
     if let Some(s) = f.string("backpressure")? {
         d.backpressure = match s.as_str() {

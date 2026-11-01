@@ -67,7 +67,7 @@ pub use engine_terrain::{
 pub use engine_webgpu::TerrainStepReport;
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
-    coalesce, BodyEvents, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
+    coalesce, BodyEvents, BodyLeftWorld, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
     ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,
     RayBatchResult, SensorEvent, SensorEvents, SkinId, SkinOutput, SoftOutput, StepGpuTime,
     VehicleOutput,
@@ -135,6 +135,28 @@ pub enum GpuContext {
     },
 }
 
+/// The box a world ends at (`WorldDef::kill_bounds`), world frame. Infinite
+/// sides are open.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KillBounds {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+impl KillBounds {
+    /// Only a floor: everything below `y`.
+    pub fn below(y: f32) -> Self {
+        Self {
+            min: [f32::NEG_INFINITY, y, f32::NEG_INFINITY],
+            max: [f32::INFINITY; 3],
+        }
+    }
+
+    pub fn contains(&self, p: [f32; 3]) -> bool {
+        (0..3).all(|k| p[k] >= self.min[k] && p[k] <= self.max[k])
+    }
+}
+
 /// A world (Box3D `b3WorldDef`, plus what a GPU world fixes at creation).
 #[derive(Clone, Debug)]
 pub struct WorldDef {
@@ -179,6 +201,13 @@ pub struct WorldDef {
     /// cluster keeps about a dozen). More fails the step (`OVERFLOW_SLEEP_ARCHIVE`).
     /// `None`: 16 a body slot.
     pub sleep_archive_rows: Option<u32>,
+    /// Where the world ends: a dynamic body (one the application created, not a
+    /// vehicle part, piece, character or soft node) whose origin a frame reports
+    /// outside this box is destroyed in that poll and reported in
+    /// `BodyEvents::left_world`. For debris that falls off the map, which would
+    /// otherwise fall (and stay awake) forever. Bodies inside are never touched.
+    /// `None`: no bounds.
+    pub kill_bounds: Option<KillBounds>,
 }
 
 impl Default for WorldDef {
@@ -199,6 +228,7 @@ impl Default for WorldDef {
             hit_event_threshold: 1.0,
             fracture_pieces: None,
             sleep_archive_rows: None,
+            kill_bounds: None,
             backpressure: Backpressure::Block,
             guidance: None,
             gpu_timing: GpuTiming::Off,
@@ -481,6 +511,10 @@ pub struct World {
     pub(crate) fracture_pieces: Option<u32>,
     /// `WorldDef::sleep_archive_rows`.
     pub(crate) sleep_archive_rows: Option<u32>,
+    kill_bounds: Option<KillBounds>,
+    /// Bodies found outside `kill_bounds` while frames were built, destroyed at
+    /// the end of that poll: `(handle, position)`.
+    leaving: Vec<(BodyId, [f32; 3])>,
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
     fracture: threshold::Fracture,
@@ -566,6 +600,8 @@ impl World {
             hit_event_threshold: def.hit_event_threshold,
             fracture_pieces: def.fracture_pieces,
             sleep_archive_rows: def.sleep_archive_rows,
+            kill_bounds: def.kill_bounds,
+            leaving: Vec::new(),
             contact_storage: contacts,
             motion: Default::default(),
             resync: false,
@@ -2257,6 +2293,30 @@ impl World {
 
     // ----- internals -------------------------------------------------------
 
+    /// Destroy the bodies frames found outside `kill_bounds`, each reported in
+    /// the last frame (the one whose pose put it outside).
+    fn remove_leaving(&mut self, frames: &mut [Frame]) -> anyhow::Result<()> {
+        let leaving = std::mem::take(&mut self.leaving);
+        let mut left = Vec::with_capacity(leaving.len());
+        for (body, position) in leaving {
+            if !self.body_is_valid(body) {
+                continue; // Found twice, or destroyed by the host meanwhile.
+            }
+            let user_data = self.body_user_data(body)?;
+            self.destroy_body(body)?;
+            left.push(BodyLeftWorld {
+                body,
+                position,
+                user_data,
+            });
+        }
+        match frames.last_mut() {
+            Some(f) => f.body_events.left_world.extend(left),
+            None => anyhow::bail!("bodies left the world outside any frame"),
+        }
+        Ok(())
+    }
+
     fn collect(&mut self, wait: bool) -> anyhow::Result<Vec<Frame>> {
         let mut frames = std::mem::take(&mut self.ready_frames);
         while let Some(front) = self.readback.pending.front() {
@@ -2298,6 +2358,9 @@ impl World {
         }
         for f in &mut frames {
             f.terrain_bakes = self.terrain_take_bakes(f.step);
+        }
+        if !self.leaving.is_empty() {
+            self.remove_leaving(&mut frames)?;
         }
         if let Some(last) = frames.last_mut() {
             let (ends, sensor_ends) = self.take_pending_contact_ends();
@@ -2481,6 +2544,14 @@ impl World {
             if matches!(slot.owner, Owner::SoftNode | Owner::Character) {
                 continue;
             }
+            if let Some(k) = &self.kill_bounds {
+                if slot.owner == Owner::User
+                    && slot.body_type == BodyType::Dynamic
+                    && !k.contains(transform.position)
+                {
+                    self.leaving.push((BodyId::new(r.body(), slot.generation), transform.position));
+                }
+            }
             let report = match slot.moves {
                 MoveReports::All => true,
                 MoveReports::SleepWake => r.slept() || r.woke() || r.first(),
@@ -2613,7 +2684,7 @@ impl World {
         Ok(Frame {
             step,
             ran: true,
-            body_events: BodyEvents { moves },
+            body_events: BodyEvents { moves, left_world: Vec::new() },
             destruction_events: destruction,
             vehicles,
             soft,

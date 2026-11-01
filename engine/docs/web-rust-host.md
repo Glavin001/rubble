@@ -612,3 +612,25 @@ Findings:
   host's 1.4-1.9 ms: the extra is World's host step and poll (moved-pose readback
   of the awake bodies, frame decode). Max FPS is ~300 instead of ~600; the GPU,
   not the frame, bounds the step rate here.
+
+### With large maps (#92) and a kill floor
+
+After merging `feat/large-maps` into this branch, `World` gained
+`WorldDef::kill_bounds`. A user-created dynamic body whose reported origin
+leaves the box is destroyed in that poll. The removal is reported in
+`BodyEvents::left_world`, as `leftWorld()` in frames and `RbFrame::left_world`
+in the C ABI. It is opt-in, and bodies inside the box are never touched.
+
+demo.html turns it on 50 m below the ground (`?kill=<y>`, `?kill=off`). In the
+110k ring with sleep on, the debris the ball throws off the 180 m slab used to
+fall forever and keep the world awake. It is now removed:
+
+| Time | Awake | GPU per step | Frame | Max FPS |
+|---|---|---|---|---|
+| 8 s (ball through) | 60,365 | 9.7 ms | 3.3 ms | 300 |
+| 20 s | 1,815 | 6.0 ms | 2.2 ms | 449 |
+| 22 s | 0 | 5.9 ms | 1.7 ms | 607 |
+| 24-32 s | 0 | none (step skipped) | 1.35-1.5 ms | 670-740 |
+
+Every body sleeps by 22 s. From then on `World` dispatches no step, and the page
+is bound by drawing the 110k boxes (about 700 FPS).

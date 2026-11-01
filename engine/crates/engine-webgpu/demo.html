@@ -237,6 +237,9 @@
     const info = probe.info || {};
     const liveTiming = wantTimestamps ? 'step' : 'off';
     statusEl.textContent = `building ${scene}…`;
+    const killParam = new URLSearchParams(location.search).get('kill');
+    const killBelow = killParam === 'off' ? null : Number(killParam ?? -50);
+    if (killBelow !== null && !Number.isFinite(killBelow)) throw new Error(`kill=${killParam}: a height or off`);
     const world = await createWorld({
       gravity: [0, snap?.meta.params?.gravityY ?? -10, 0],
       capacity: cfg.cap,
@@ -244,6 +247,10 @@
       features: Q.features,
       solver,
       gpuTiming: liveTiming,
+      // Where the world ends: bodies thrown off the ground fall forever and never
+      // sleep, so a fully settled scene could never stop stepping. Below this they
+      // are destroyed (reported in each frame's leftWorld). ?kill=<y>, ?kill=off.
+      ...(killBelow === null ? {} : { killBelow }),
     });
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
@@ -277,7 +284,9 @@
     let last = { contact: 0, candidate: 0, awake: bodyCount - 1, color: 0, manifold: 0, overflow: 0, colorRounds: 0 };
     const submitted = new Map();
     let lastCompletion = 0;
+    let leftWorld = 0;
     function onFrame(f) {
+      leftWorld += f.leftWorld().length / 5;
       const c = f.counters();
       if (c) last = { contact: c.contacts, candidate: c.candidates, awake: c.awake, color: c.colors, manifold: c.manifolds, overflow: c.overflow, colorRounds: c.colorRounds };
       if (f.empty) return;
@@ -532,6 +541,7 @@ struct VsOut {
 
     function restoreScene() {
       world.restoreState(initialState);
+      leftWorld = 0;
       if (jointControls) jointControls.reset();
       last = { ...last, awake: bodyCount - 1 };
     }
@@ -911,7 +921,7 @@ struct VsOut {
 
     function statusLine(timingLabel, settleLabel = '') {
       const dyn = bodyCount - 1;
-      return `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${solver.iterations} iters · ${timingLabel} · step ${simStep()} · contacts ${last.contact} · awake ${last.awake}${settleLabel} · ov 0x${last.overflow.toString(16)}`;
+      return `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${solver.iterations} iters · ${timingLabel} · step ${simStep()} · contacts ${last.contact} · awake ${last.awake}${leftWorld ? ` · ${leftWorld} left the world` : ''}${settleLabel} · ov 0x${last.overflow.toString(16)}`;
     }
 
     async function frame(now) {
@@ -923,7 +933,7 @@ struct VsOut {
         if (frozen) {
           pollFrame(world, onFrame);
           drawWorld();
-          statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${bodyCount - 1} bodies · stopped at step ${simStep()} (stopAt) · contacts ${last.contact} · awake ${last.awake} · ov 0x${last.overflow.toString(16)}`;
+          statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${bodyCount - 1} bodies · stopped at step ${simStep()} (stopAt) · contacts ${last.contact} · awake ${last.awake}${leftWorld ? ` · ${leftWorld} left the world` : ''} · ov 0x${last.overflow.toString(16)}`;
           requestAnimationFrame(frame);
           return;
         }

@@ -28,6 +28,18 @@ pub struct BodyMoveEvent {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BodyEvents {
     pub moves: Vec<BodyMoveEvent>,
+    /// Bodies that left `WorldDef::kill_bounds` this step and were destroyed
+    /// (their handles are now stale; their last move is in `moves`).
+    pub left_world: Vec<BodyLeftWorld>,
+}
+
+/// A body destroyed for leaving the world's bounds (`WorldDef::kill_bounds`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyLeftWorld {
+    pub body: BodyId,
+    /// Its origin when it was found outside.
+    pub position: [f32; 3],
+    pub user_data: u64,
 }
 
 /// Something broke.
@@ -339,6 +351,8 @@ pub struct CoalescedFrame {
     /// Per body: the latest transform, the earliest previous transform, and
     /// the net sleep change across the steps.
     pub moves: Vec<BodyMoveEvent>,
+    /// Every body destroyed for leaving the world's bounds, in step order.
+    pub left_world: Vec<BodyLeftWorld>,
     /// Every destruction event, in step order, with its step.
     pub destruction_events: Vec<(u64, DestructionEvent)>,
     /// The latest output per vehicle, soft body and skin.
@@ -417,6 +431,7 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
                 })
                 .or_insert(m);
         }
+        out.left_world.extend(f.body_events.left_world);
         out.destruction_events
             .extend(f.destruction_events.into_iter().map(|e| (f.step, e)));
         for v in f.vehicles {
@@ -489,7 +504,7 @@ mod tests {
         Frame {
             step,
             ran: true,
-            body_events: BodyEvents { moves },
+            body_events: BodyEvents { moves, ..BodyEvents::default() },
             ..Frame::default()
         }
     }

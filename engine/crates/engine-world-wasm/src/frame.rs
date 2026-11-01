@@ -63,6 +63,20 @@ impl WebFrame {
         out
     }
 
+    /// Bodies destroyed for leaving the world (`WorldDef.killBelow` /
+    /// `killBounds`), 5 floats each: slot, generation, position xyz. Their
+    /// handles are stale; a renderer hides their slot.
+    #[wasm_bindgen(js_name = leftWorld)]
+    pub fn left_world(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.frame.left_world.len() * 5);
+        for l in &self.frame.left_world {
+            out.push(l.body.index() as f32);
+            out.push(l.body.generation() as f32);
+            out.extend_from_slice(&l.position);
+        }
+        out
+    }
+
     /// The last step's counters (`StepCounters`) as an object, or `null`.
     pub fn counters(&self) -> JsValue {
         let Some(c) = self.frame.counters else {
