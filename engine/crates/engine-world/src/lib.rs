@@ -2064,10 +2064,13 @@ impl World {
             });
         // `RUBBLE_GPU_TIMING=1` (diagnostic): each phase's GPU time, printed per step.
         let marks = engine_webgpu::gpu_marks::GpuMarks::enabled(self.sim.device()).then(|| {
-            std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new(
-                self.sim.device(),
-                96,
-            ))
+            // A mark per dispatch (`RUBBLE_GPU_TIMING_DISPATCH=1`) needs more room.
+            let cap = if std::env::var("RUBBLE_GPU_TIMING_DISPATCH").is_ok() {
+                2048
+            } else {
+                96
+            };
+            std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new(self.sim.device(), cap))
         });
         if let Some(m) = &marks {
             m.mark(&mut enc, "begin");

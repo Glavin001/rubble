@@ -52,6 +52,24 @@ pub(crate) fn terrain_buffer(device: &wgpu::Device, binding: usize, bytes: u64) 
 impl WgpuSim {
     /// Size the terrain buffers for `config` (and drop any particles).
     pub fn terrain_enable(&mut self, config: &TerrainConfig) -> anyhow::Result<()> {
+        // The MPM's indirect dispatches (`mpmWriteArgs`): one workgroup per block, and one
+        // per 64 particles or parcels (a bake may count up to twice the particle cap before
+        // it reports the overflow). Each must stay within the device's workgroups per
+        // dimension: native devices do not clamp indirect arguments (`instance_flags`).
+        let groups = self.device.limits().max_compute_workgroups_per_dimension;
+        for (what, n) in [
+            ("max_blocks", u64::from(config.max_blocks)),
+            (
+                "max_particles (twice, for a bake)",
+                2 * u64::from(config.max_particles).div_ceil(64),
+            ),
+            ("max_parcels", u64::from(config.max_parcels).div_ceil(64)),
+        ] {
+            anyhow::ensure!(
+                n <= u64::from(groups),
+                "TerrainConfig::{what} needs {n} workgroups in one indirect dispatch; the device allows {groups}"
+            );
+        }
         let plan = TerrainPlan::new(config)?;
         let sizes = plan.buffer_sizes();
         let limits = self.device.limits();

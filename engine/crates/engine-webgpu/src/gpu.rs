@@ -419,6 +419,20 @@ fn persistent_entry(name: &str) -> &str {
     }
 }
 
+/// Instance flags of the devices engine-webgpu creates: wgpu's release defaults without
+/// its indirect-call validation (`WGPU_VALIDATION_INDIRECT_CALL=1` turns it back on, as do
+/// the other `WGPU_*` flag variables). That validation runs an extra compute pass before
+/// every indirect dispatch to clamp its arguments to the device limits; a step has dozens of
+/// indirect dispatches, and it cost about 0.5 ms a step (city drive, 256 houses). The
+/// plans' indirect arguments are always within the limits: the step's come from
+/// `writeDispatchArgs` / `writeGroupArgs` (at most 32,768 groups a row, rows below the
+/// limit), and the terrain's particle, parcel and block counts are checked at
+/// `terrain_enable`. The browser validates indirect dispatches itself.
+pub fn instance_flags() -> wgpu::InstanceFlags {
+    (wgpu::InstanceFlags::from_build_config() - wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
+        .with_env()
+}
+
 /// A high-performance adapter's device with its full limits.
 pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
     default_device_with(false)
@@ -431,6 +445,7 @@ pub fn default_device_with(
 ) -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL;
+    desc.flags = instance_flags();
     let instance = wgpu::Instance::new(desc);
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -2466,6 +2481,7 @@ impl WgpuSim {
     /// it timed (see [`WgpuSim::set_gpu_timing`]).
     fn encode_passes(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], mut hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) -> Vec<&'static str> {
         let split = std::env::var("RUBBLE_PASS_PER_PHASE").is_ok_and(|v| v == "1");
+        let per_dispatch = std::env::var("RUBBLE_GPU_TIMING_DISPATCH").is_ok_and(|v| v == "1");
         let queries = self
             .step_queries
             .as_ref()
@@ -2555,6 +2571,21 @@ impl WgpuSim {
                         self.disp_work(pass, kernel, slot, Some(p));
                     }
                 }
+            }
+            // `RUBBLE_GPU_TIMING_DISPATCH=1` with marks (diagnostic): a mark after every
+            // dispatch, named by its kernel.
+            if let (
+                Some(m),
+                true,
+                rigid_plan::Cmd::Dispatch { kernel, .. } | rigid_plan::Cmd::Indirect { kernel, .. },
+            ) = (self.marks.as_ref(), per_dispatch, c)
+            {
+                #[allow(unused_assignments)]
+                {
+                    pass = None;
+                }
+                m.mark(enc, kernel);
+                pass = Some(begin_timed(enc, queries, segments.len()));
             }
         }
         let pass_open = pass.is_some();

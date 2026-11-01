@@ -103,6 +103,9 @@ fn run(asset: &DestructibleAssetDesc, k: usize, scenario: &'static str, sleep: b
         gpu_ms.push(w.last_step_gpu_ms().unwrap_or_else(|| w.profile_ms()));
     }
     let awake = w.counters().map(|c| c.awake_count).unwrap_or(0);
+    if std::env::var("CITY_DEBUG").is_ok() {
+        eprintln!("counters at the end: {:?}", w.counters());
+    }
     Run {
         k,
         scenario,
