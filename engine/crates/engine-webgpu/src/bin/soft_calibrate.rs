@@ -316,6 +316,11 @@ struct RorState {
     broken: Vec<bool>,
 }
 
+/// Where the RoR scene sits: Rigs of Rods' collision hash only covers non-negative x
+/// and z (its maps start at the origin), so the scene is moved into that quadrant and
+/// positions are reported back relative to it.
+const ROR_ORIGIN: Vec3 = Vec3::new(1000.0, 0.0, 1000.0);
+
 impl RorPipe {
     fn send(&mut self, cmd: &str) {
         use std::io::Write;
@@ -349,7 +354,7 @@ impl RorPipe {
                 .split_whitespace()
                 .map(|t| t.parse().unwrap())
                 .collect();
-            st.x.push(Vec3::new(f[0], f[1], f[2]));
+            st.x.push(Vec3::new(f[0], f[1], f[2]) - ROR_ORIGIN);
             st.v.push(Vec3::new(f[3], f[4], f[5]));
             st.m.push(f[6]);
         }
@@ -381,11 +386,13 @@ impl Ror {
             state: None,
         };
         for w in walls {
+            let c = w.center + ROR_ORIGIN;
             pipe.send(&format!(
                 "wall {} {} {} {} {} {}",
-                w.center.x, w.center.y, w.center.z, w.half.x, w.half.y, w.half.z
+                c.x, c.y, c.z, w.half.x, w.half.y, w.half.z
             ));
         }
+        let at = at + ROR_ORIGIN;
         // A car on RoR tyres stands on them (RoR's spawn placement); a bare body
         // stands where the GPU and the oracle put it.
         let spawn = if car.core { "spawn_ground" } else { "spawn" };

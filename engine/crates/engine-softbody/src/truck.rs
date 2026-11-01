@@ -135,6 +135,9 @@ pub struct TruckFile {
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
     pub cameras: Option<RefNodes>,
+    /// `cinecam` points and their 8 body nodes: Rigs of Rods spawns a node there with
+    /// 8 beams, which take part in the dry-mass split (see [`distribute_masses`]).
+    pub cinecams: Vec<([f32; 3], [u32; 8])>,
     pub warnings: Vec<String>,
 }
 
@@ -563,6 +566,17 @@ impl Parser {
                 if self.sequential() {
                     self.next_number += 1;
                 }
+                if t.len() >= 11 {
+                    let nodes: Option<Vec<u32>> = t[3..11].iter().map(|k| self.node(k)).collect();
+                    if let Some(nodes) = nodes {
+                        self.out.cinecams.push((
+                            [f(t, 0, 0.0), f(t, 1, 0.0), f(t, 2, 0.0)],
+                            nodes.try_into().unwrap(),
+                        ));
+                    }
+                } else {
+                    self.warn("cinecam line needs x, y, z and 8 nodes".into());
+                }
             }
         }
     }
@@ -886,16 +900,30 @@ pub fn distribute_masses(file: &mut TruckFile) {
         halves.push((b.a, 0.5 * l));
         halves.push((b.b, 0.5 * l));
     }
-    // Wheel spokes from each axle node to the tyre rings (two per ray per axle node:
-    // to its own rim side and across), approximated from radius and width.
+    // Wheel spokes from each axle node to the tyre rings, as RoR builds them
+    // (`BuildWheelBeams`): per ray, one to its own ring at the radius and one across
+    // the axle (RoR spans the axle's length, not the declared width). Only the axle
+    // end holds mass; tyre nodes are excluded, and rim beams join tyre nodes only.
     for w in &file.wheels {
+        let axle = (pos(w.node2) - pos(w.node1)).length();
         let near = w.radius;
-        let across = (w.radius * w.radius + w.width * w.width).sqrt();
-        for axle in [w.node1, w.node2] {
-            halves.push((axle, 0.5 * w.rays as f32 * (near + across)));
+        let across = (w.radius * w.radius + axle * axle).sqrt();
+        for node in [w.node1, w.node2] {
+            halves.push((node, 0.5 * w.rays as f32 * (near + across)));
         }
     }
-    let total: f32 = halves.iter().map(|h| h.1).sum();
+    // Cinecam beams: RoR's cinecam node and its 8 beams to the body. Both halves
+    // count in the split; the cinecam's own share is lost (RoR then sets that node's
+    // mass from the cinecam definition), the body ends keep theirs.
+    let mut lost = 0.0;
+    for (p, nodes) in &file.cinecams {
+        for &k in nodes {
+            let l = (Vec3::from_array(*p) - pos(k)).length();
+            halves.push((k, 0.5 * l));
+            lost += 0.5 * l;
+        }
+    }
+    let total: f32 = halves.iter().map(|h| h.1).sum::<f32>() + lost;
     if total > 0.0 && file.dry_mass > 0.0 {
         for &(i, h) in &halves {
             mass[i as usize] += file.dry_mass * h / total;
