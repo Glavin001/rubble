@@ -476,16 +476,6 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         .arg(slang_root.join("kernels/soft_skin.slang"))
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
-    // Rigs of Rods' explicit step (slang/kernels/ror_step.slang): standalone module.
-    let ror = wgsl_dir.join("ror_step.wgsl");
-    let status = std::process::Command::new(find_slangc()?)
-        .args(["-target", "wgsl"])
-        .args(["-entry", "ror_frame", "-stage", "compute"])
-        .arg("-o")
-        .arg(&ror)
-        .arg(slang_root.join("kernels/ror_step.slang"))
-        .status()?;
-    anyhow::ensure!(status.success(), "slangc failed for ror_step.slang");
     // MPM material probe (tests/mpm_material.rs): standalone, with its own bindings,
     // so it stays out of the world's pipeline table.
     compile_with_defines(

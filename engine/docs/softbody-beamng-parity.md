@@ -195,7 +195,10 @@ depth: 240 Hz × 10 → 1.36 (25.1 cm against 25.6); 120 Hz × 10 → 2.35 still
 threshold changes the material, a trade-off for the user to choose. BeamNG.tech
 recordings and the 15-vehicle set are not available here.
 
-### Matching Rigs of Rods: RoR's step on the GPU (2026-11-01, DECISIONS s34)
+### Matching Rigs of Rods: RoR's step on the GPU (2026-11-01, DECISIONS s34; code removed, s35)
+
+The code measured here was translated from RoR's source and has been removed; the
+numbers are the target for the clean-room `explicit_beams` solver (s35).
 
 The implicit solver's gap to RoR is in its model (converging it further moves it
 away), so Rubble now runs RoR's own step: `engine_softbody::ror` on the CPU (exact

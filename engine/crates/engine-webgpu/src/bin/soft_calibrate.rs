@@ -452,88 +452,6 @@ impl Runner for Ror {
     }
 }
 
-/// Rigs of Rods' step on the GPU (`RorGpu`, `SETTINGS=ror`): RoR's explicit 0.5 ms
-/// step, every step of a frame in one dispatch. No rigid core: bare bodies only.
-struct RorGpuRun {
-    gpu: engine_webgpu::RorGpu,
-    masses: Vec<f32>,
-    t: f64,
-    steps: u64,
-}
-
-impl RorGpuRun {
-    fn new(car: &Car, at: Vec3, vel: Vec3, walls: &[Wall]) -> Self {
-        let (_, device, queue) = engine_webgpu::default_device().expect("wgpu");
-        let text = car.truck.as_deref().expect("a .truck car");
-        let mut sim = if car.core {
-            // On RoR's soft tyres, standing on them as RoR places a new vehicle (its
-            // lowest node 2 cm above the ground), like the RoR reference runner.
-            let mut sim = engine_softbody::ror::RorSim::from_truck(
-                text,
-                Vec3::new(at.x, 0.0, at.z),
-                vel,
-                Default::default(),
-            );
-            let lowest = sim.nodes.iter().map(|n| n.rel.y).fold(f32::MAX, f32::min);
-            for n in &mut sim.nodes {
-                n.rel.y += 0.02 - lowest;
-            }
-            sim
-        } else {
-            engine_softbody::ror::RorSim::from_truck(text, at, vel, Default::default())
-        };
-        for w in walls {
-            sim.boxes.push(engine_softbody::ror::RorBox {
-                lo: w.center - w.half,
-                hi: w.center + w.half,
-            });
-        }
-        Self {
-            gpu: engine_webgpu::RorGpu::new(&device, &queue, &[sim]),
-            masses: car.desc.nodes.iter().map(|n| n.mass).collect(),
-            t: 0.0,
-            steps: 0,
-        }
-    }
-}
-
-impl Runner for RorGpuRun {
-    fn frame(&mut self) {
-        // Whole 0.5 ms steps up to the sample time, the remainder carried (RoR's
-        // ActorManager).
-        self.t += 1.0 / f64::from(SAMPLE_HZ);
-        let due = (self.t / f64::from(engine_softbody::ror::PHYSICS_DT)) as u64;
-        let n = due - self.steps;
-        self.steps = due;
-        self.gpu.frame(n as u32);
-    }
-    fn time(&self) -> f64 {
-        self.t
-    }
-    fn positions(&self) -> Vec<Vec3> {
-        let mut p = self.gpu.positions().swap_remove(0);
-        p.truncate(self.masses.len());
-        p
-    }
-    fn velocities(&self) -> Vec<Vec3> {
-        let mut v = self.gpu.velocities().swap_remove(0);
-        v.truncate(self.masses.len());
-        v
-    }
-    fn masses(&self) -> Vec<f32> {
-        self.masses.clone()
-    }
-    fn broken(&self) -> Vec<bool> {
-        self.gpu.beams()[0].iter().map(|b| b.0).collect()
-    }
-    fn yielded(&self) -> usize {
-        0
-    }
-    fn kick(&mut self, node: u32, velocity: Vec3) {
-        self.gpu.set_velocity(0, node, velocity);
-    }
-}
-
 /// The car under test and the node sets the metrics read.
 struct Car {
     name: String,
@@ -870,7 +788,6 @@ fn wall_crash(car: &Car, r: &mut dyn Runner, at: Vec3, v: f32) -> Crash {
 /// Builds a runner: the oracle (`None`) or the GPU at a setting.
 fn runner(s: Option<Setting>, car: &Car, at: Vec3, vel: Vec3, walls: &[Wall]) -> Box<dyn Runner> {
     match s {
-        Some(s) if s.iterations == 0 => Box::new(RorGpuRun::new(car, at, vel, walls)),
         Some(s) => Box::new(Gpu::new(s, car, at, vel, walls)),
         None if std::env::var("REF").as_deref() == Ok("ror") => {
             Box::new(Ror::new(car, at, vel, walls))
@@ -977,11 +894,7 @@ fn main() {
         Ok(v) => v
             .split(',')
             .map(|p| {
-                // `ror`: Rigs of Rods' explicit step on the GPU (marked by 0 iterations).
-                if p == "ror" {
-                    return (2000.0, 0);
-                }
-                let (hz, it) = p.split_once('x').expect("SETTINGS=HZxITERS,... or ror");
+                let (hz, it) = p.split_once('x').expect("SETTINGS=HZxITERS,...");
                 (hz.parse().unwrap(), it.parse().unwrap())
             })
             .collect(),
