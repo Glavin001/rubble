@@ -199,8 +199,8 @@ pub fn broadside_extra_vertices() -> Vec<f32> {
     })
 }
 
-/// Vertices each piece of debris takes ([`splinter_vertices`]).
-const SPLINTER_VERTS: u32 = (SHARDS * 12) as u32;
+/// Vertices each piece of debris takes ([`splinter_vertices`]): a box's 36.
+const SPLINTER_VERTS: u32 = 36;
 
 /// The vertex where debris `k`'s vertices start in [`broadside_extra_vertices`] (the
 /// captain's and the balls' come first): the page appends new debris there.
@@ -236,12 +236,9 @@ pub fn broadside_splinter_vertices(from: u32) -> Vec<f32> {
     })
 }
 
-/// Shards a crush particle is drawn as.
-const SHARDS: usize = 3;
-
-/// Debris `k`'s vertices, all [`SPLINTER_VERTS`] of them: a crush particle as `SHARDS`
-/// thin pointed slivers of fresh-split wood about it (lengths, tilts and shades of their
-/// own), a box fragment as its box (padded to the same count with degenerate triangles).
+/// Debris `k`'s vertices, all [`SPLINTER_VERTS`] of them: a crush particle as one thin
+/// pointed sliver of fresh-split wood centred on its body (length, thickness and shade of
+/// its own), a box fragment as its box (padded to the same count with degenerate triangles).
 fn splinter_vertices(k: u32, s: &broadside::Splinter, id: f32, out: &mut Vec<f32>) {
     let h = |i: u32| {
         let x = k.wrapping_mul(0x9E37_79B1) ^ i.wrapping_mul(0x85EB_CA77);
@@ -251,37 +248,26 @@ fn splinter_vertices(k: u32, s: &broadside::Splinter, id: f32, out: &mut Vec<f32
     let start = out.len();
     if s.particle {
         let r = s.half[0];
-        for j in 0..SHARDS as u32 {
-            let g = |i: u32| h(16 * j + i);
-            let shade = 0.78 + 0.34 * g(0);
-            let color = SPLINTER.map(|c| (c * shade).min(1.0));
-            let (len, t) = (r * (1.6 + 1.6 * g(1)), r * (0.16 + 0.14 * g(2)));
-            let q = glam::Quat::from_euler(
-                glam::EulerRot::XYZ,
-                6.28 * g(3),
-                6.28 * g(4),
-                6.28 * g(5),
-            );
-            let at = glam::Vec3::new(g(6) - 0.5, g(7) - 0.5, g(8) - 0.5) * (1.6 * r);
-            // A wedge: a point at one end, a small triangle at the other.
-            let p = [
-                glam::Vec3::new(0.5 * len, 0.0, 0.0),
-                glam::Vec3::new(-0.5 * len, t, 0.0),
-                glam::Vec3::new(-0.5 * len, -0.5 * t, 0.87 * t),
-                glam::Vec3::new(-0.5 * len, -0.5 * t, -0.87 * t),
-            ]
-            .map(|v| at + q * v);
-            let centre = (p[0] + p[1] + p[2] + p[3]) * 0.25;
-            for [a, b, c] in [[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]] {
-                let mut n = (p[b] - p[a]).cross(p[c] - p[a]).normalize_or_zero();
-                let (mut b, mut c) = (b, c);
-                if n.dot(p[a] - centre) < 0.0 {
-                    n = -n;
-                    std::mem::swap(&mut b, &mut c);
-                }
-                for v in [a, b, c] {
-                    vertex(p[v].to_array(), n.to_array(), color, id, out);
-                }
+        let shade = 0.78 + 0.34 * h(0);
+        let color = SPLINTER.map(|c| (c * shade).min(1.0));
+        let (len, t) = (r * (2.2 + 2.0 * h(1)), r * (0.22 + 0.16 * h(2)));
+        // A wedge: a point at one end, a small triangle at the other.
+        let p = [
+            glam::Vec3::new(0.5 * len, 0.0, 0.0),
+            glam::Vec3::new(-0.5 * len, t, 0.0),
+            glam::Vec3::new(-0.5 * len, -0.5 * t, 0.87 * t),
+            glam::Vec3::new(-0.5 * len, -0.5 * t, -0.87 * t),
+        ];
+        let centre = (p[0] + p[1] + p[2] + p[3]) * 0.25;
+        for [a, b, c] in [[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]] {
+            let mut n = (p[b] - p[a]).cross(p[c] - p[a]).normalize_or_zero();
+            let (mut b, mut c) = (b, c);
+            if n.dot(p[a] - centre) < 0.0 {
+                n = -n;
+                std::mem::swap(&mut b, &mut c);
+            }
+            for v in [a, b, c] {
+                vertex((p[v] - centre).to_array(), n.to_array(), color, id, out);
             }
         }
     } else {
