@@ -427,18 +427,23 @@ fn persistent_entry(name: &str) -> &str {
     }
 }
 
-/// Instance flags of the devices engine-webgpu creates: wgpu's release defaults without
-/// its indirect-call validation (`WGPU_VALIDATION_INDIRECT_CALL=1` turns it back on, as do
+/// Instance flags of the devices engine-webgpu creates: in release builds, wgpu's
+/// defaults without its indirect-call validation (`WGPU_VALIDATION_INDIRECT_CALL=1` turns it back on, as do
 /// the other `WGPU_*` flag variables). That validation runs an extra compute pass before
 /// every indirect dispatch to clamp its arguments to the device limits; a step has dozens of
 /// indirect dispatches, and it cost about 0.5 ms a step (city drive, 256 houses). The
 /// plans' indirect arguments are always within the limits: the step's come from
 /// `writeDispatchArgs` / `writeGroupArgs` (at most 32,768 groups a row, rows below the
 /// limit), and the terrain's particle, parcel and block counts are checked at
-/// `terrain_enable`. The browser validates indirect dispatches itself.
+/// `terrain_enable` (tests/indirect_args_writers.rs fails on any other writer). Debug
+/// builds keep the validation (wgpu's debug defaults). The browser validates indirect
+/// dispatches itself.
 pub fn instance_flags() -> wgpu::InstanceFlags {
-    (wgpu::InstanceFlags::from_build_config() - wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
-        .with_env()
+    let mut flags = wgpu::InstanceFlags::from_build_config();
+    if !cfg!(debug_assertions) {
+        flags -= wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL;
+    }
+    flags.with_env()
 }
 
 /// The host words as the scratch block (binding 21) starts a step: word 5, the
