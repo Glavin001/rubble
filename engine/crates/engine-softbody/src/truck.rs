@@ -783,9 +783,12 @@ pub fn parse_truck(src: &str) -> TruckFile {
             continue;
         }
         if word == "minimass" && t.len() > 1 {
-            // Inline form: `minimass 50 l`.
-            p.out.minimass = fd(&t, 1, DEFAULT_MINIMASS);
-            p.out.minimass_skip_loaded = t.get(2) == Some(&"l");
+            // Not Rigs of Rods syntax: `minimass` is a block keyword (value on the next
+            // line); RoR reads this line as data of the section before it.
+            p.warn(format!(
+                "`{}`: minimass takes its value on the next line; line ignored",
+                t.join(" ")
+            ));
             continue;
         }
         if t.len() == 1

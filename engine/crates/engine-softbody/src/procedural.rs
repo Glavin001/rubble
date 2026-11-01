@@ -162,7 +162,47 @@ pub fn car_truck(p: &CarParams) -> String {
 /// parameters include).
 pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
     let (text, layout) = car_truck_layout(p);
-    let mut d = crate::truck::load_truck(&text);
+    (desc_with_parts(&text, &layout), layout)
+}
+
+/// Sections a bare body leaves out: the drivetrain and the Rigs of Rods tyres.
+const BARE_DROP: [&str; 3] = ["wheels", "engine", "brakes"];
+
+/// The car's `.truck` text without `wheels`, `engine` and `brakes`: the node–beam
+/// body alone, as the oracle and the GPU simulate it without a rigid core, and as a
+/// Rigs of Rods reference reads it (both sides load the same text).
+pub fn car_truck_bare(p: &CarParams) -> String {
+    strip_truck_sections(&car_truck(p), &BARE_DROP)
+}
+
+/// [`car_desc`] of [`car_truck_bare`]: node masses without the wheels' share.
+pub fn car_desc_bare(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
+    let (text, layout) = car_truck_layout(p);
+    (
+        desc_with_parts(&strip_truck_sections(&text, &BARE_DROP), &layout),
+        layout,
+    )
+}
+
+/// Drops whole `.truck` sections (the keyword line and its data lines).
+pub fn strip_truck_sections(text: &str, drop: &[&str]) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in text.lines() {
+        let word = line.split([' ', ',', '\t']).next().unwrap_or("");
+        if word.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            skipping = drop.contains(&word);
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn desc_with_parts(text: &str, layout: &CarLayout) -> crate::SoftVehicleDesc {
+    let mut d = crate::truck::load_truck(text);
     let ring_nodes = (layout.stations * CAR_RING) as u32;
     let mut body: Vec<u32> = (0..ring_nodes).collect();
     body.extend(ring_nodes..ring_nodes + 8); // axle nodes follow the rings
@@ -189,7 +229,7 @@ pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
             nodes,
         })
         .collect();
-    (d, layout)
+    d
 }
 
 /// What the visual mesh needs to know about the procedural car's node layout.
@@ -240,7 +280,8 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         "globals\n{:.1}, {:.1}, tracks/semi\n",
         p.dry_mass, p.cargo_mass
     );
-    let _ = writeln!(s, "minimass {:.1}\n", p.minimass);
+    // `minimass` is a block keyword in Rigs of Rods: the value goes on the next line.
+    let _ = writeln!(s, "minimass\n{:.1}\n", p.minimass);
     let _ = writeln!(s, "enable_advanced_deformation");
     let _ = writeln!(
         s,
@@ -1178,7 +1219,7 @@ pub fn box_truck(
     let _ = writeln!(s, "lattice box {nx}x{ny}x{nz}\nfileformatversion 450");
     let _ = writeln!(
         s,
-        "globals\n{mass:.1}, 0.0, tracks/semi\nminimass 0.5\nenable_advanced_deformation"
+        "globals\n{mass:.1}, 0.0, tracks/semi\nminimass\n0.5\nenable_advanced_deformation"
     );
     let _ = writeln!(
         s,
