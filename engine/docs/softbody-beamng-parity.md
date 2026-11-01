@@ -171,8 +171,10 @@ not throughput, blocks the plan's high-res targets.
 | 2 substeps | 35 | 6.9 / 39.9 / 68.4 | 19 19 15 | 48 | 5.1 |
 | 2 substeps, 12 iterations | 37 | 6.0 / 34.4 / 80.5 | 20 19 5 | 49 | 5.3 |
 
-Off by default: a core-jointed body couples wrongly in substeps (the core steps
-whole). Next: interpolate the core pose in the joint rows during substeps.
+The core coupling is fixed (DECISIONS s32: joint and contact rows read both bodies
+at the same fraction of the step), so islands now work on cars with a rigid core.
+Still off by default: with 2 substeps the sedan loses its tuned 20–35 g crumple
+plateau (13 g), so the procedural cars need re-tuning first.
 
 ### Phase 6 — BDF2 against the oracle (spike, s23 confirmed)
 

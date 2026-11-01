@@ -2075,7 +2075,7 @@ void soft_primal_bodies(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
             uint S = softSubsteps(gid.x);
             uint per = max(PARAMS.iterations * softSweeps() / S, 1u);
             uint j = min(PASS_U / per, S - 1u);
-            code = 1u | (j == 0u ? 2u : 0u) | ((PASS_U - j * per) << 8);
+            code = 1u | (j == 0u ? 2u : 0u) | (j << 2) | ((PASS_U - j * per) << 8);
         }
         gsUniformLanes = code;
     }
@@ -2085,12 +2085,15 @@ void soft_primal_bodies(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     if ((island & 1u) != 0u && chebPass == 0u)
     {
         float hs = softH(gid.x);
+        // The fraction of the step this substep ends at: what the particles'
+        // iterates stand for in the rigid rows (world_step.slang bodyAtTime).
+        float f = float(((island >> 2) & 63u) + 1u) / float(softSubsteps(gid.x));
         for (uint c = 0u; c < allColors; c++)
         {
             uint4 slot = SU(base + c / 2u);
             uint2 cr = (c & 1u) == 0u ? slot.xy : slot.zw;
             for (uint t = local; t < cr.y; t += 256u)
-                softSubstepParticle(cr.x + t, hs, (island & 2u) != 0u);
+                softSubstepParticle(cr.x + t, hs, (island & 2u) != 0u, f);
         }
         DeviceMemoryBarrierWithGroupSync();
     }
@@ -2494,7 +2497,7 @@ float softBeamYield(uint i, inout SoftBeam e, float force, float delta)
 // A crash island's particle at a substep boundary: `restart` (pass 0) sets the
 // first substep from the step's start with hₛ; otherwise the substep that ended
 // becomes the next one's start, at the velocity it reached.
-void softSubstepParticle(uint li, float h, bool restart)
+void softSubstepParticle(uint li, float h, bool restart, float f)
 {
     uint4 ent = SU(softListBase() + li);
     uint body = ent.x;
@@ -2513,6 +2516,7 @@ void softSubstepParticle(uint li, float h, bool restart)
     float3 o = softOrigin(sb);
     gAabbs[body].mn = o + y;
     softSetLocal(body, ord, sb, y);
+    gBodies[body].initialPad = -f;
     // Chebyshev history restarts at the substep's guess.
     uint q = softChebBase() + 3u * li;
     gSoftData[q] = float4(y, 0.0);

@@ -5003,6 +5003,31 @@ void addVehicleBlock(inout Mat6 A, inout Vec6 rhs, uint at)
 
 // Accumulate body Newton's system for adjacency entries lane, lane+lanes, ...
 // Lane 0 also adds the inertial mass block (three-avbd accumulate).
+// Crash-island substeps (soft_step.slang): a particle part way through the
+// step carries the fraction f of the step its iterate stands for, as −f in
+// initialPad (no particle uses that word for anything else during the solve;
+// every other value reads as the whole step).
+float bodyTimeFrac(BodyState b)
+{
+    return ((b.flags & BODY_PARTICLE) != 0u && b.initialPad < 0.0) ? -b.initialPad : 1.0;
+}
+
+// `o` as it stands at fraction f of the step, from its step-start pose and its
+// iterate (which stands for its own fraction): a rigid core read by a particle
+// mid-step is taken part way, a particle read by the core is carried on to the
+// step's end. Unchanged when the fractions match (every row without islands).
+BodyState bodyAtTime(BodyState o, float f)
+{
+    float fo = bodyTimeFrac(o);
+    if (fo == f) return o;
+    float r = f / fo;
+    o.position = o.initialPos + (o.position - o.initialPos) * r;
+    float4 q = o.orientation;
+    if (dot(q, o.initialRot) < 0.0) q = -q;
+    o.orientation = quatNormalize(o.initialRot + (q - o.initialRot) * r);
+    return o;
+}
+
 void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 rhs)
 {
     A = mat6Zero();
@@ -5092,8 +5117,10 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             bool anySphere = shapeIsRound(colA.shape) || shapeIsRound(colB.shape);
 #endif
             bool isA = ba == bodyIdx;
-            BodyState bA = gBodies[ba];
-            BodyState bB = gBodies[bb];
+            // Both bodies at this body's time (crash-island substeps).
+            float fSelf = bodyTimeFrac(b);
+            BodyState bA = bodyAtTime(gBodies[ba], fSelf);
+            BodyState bB = bodyAtTime(gBodies[bb], fSelf);
             // Track belt: the pair's tangential target this step (zero off belts).
             float3 belt = float3(0, 0, 0);
 #if defined(ENGINE_COMPACT_SOLVE)
@@ -5223,12 +5250,16 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             if (jointHeaderIsBall(jflags, gJoints[id].motion))
             {
                 JointBall jb = loadJointBall(id);
-                jointContributeBall(A, rhs, jb, gBodies[jb.bodyA], gBodies[jb.bodyB], jb.bodyA == bodyIdx, p.alpha, p.kStart);
+                float fSelf = bodyTimeFrac(b);
+                jointContributeBall(A, rhs, jb, bodyAtTime(gBodies[jb.bodyA], fSelf), bodyAtTime(gBodies[jb.bodyB], fSelf),
+                                    jb.bodyA == bodyIdx, p.alpha, p.kStart);
             }
             else
             {
                 Joint j = gJoints[id];
-                jointContributePrimal(A, rhs, j, gBodies[j.bodyA], gBodies[j.bodyB], j.bodyA == bodyIdx, p.alpha, p.dt, p.kStart,
+                float fSelf = bodyTimeFrac(b);
+                jointContributePrimal(A, rhs, j, bodyAtTime(gBodies[j.bodyA], fSelf), bodyAtTime(gBodies[j.bodyB], fSelf),
+                                      j.bodyA == bodyIdx, p.alpha, p.dt, p.kStart,
                                       (p.flags & FLAG_BOND_GEOMETRIC) != 0u);
             }
         }
@@ -5612,7 +5643,9 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         if (live && jointHeaderIsBall(jflags, gJoints[i].motion))
         {
             JointBall jb = loadJointBall(i);
-            jointDualBall(jb, gBodies[jb.bodyA], gBodies[jb.bodyB], p.alpha, p.kStart, p.kMaxN, p.betaLin);
+            // Multipliers at the step's end (a crash-island particle carried on).
+            jointDualBall(jb, bodyAtTime(gBodies[jb.bodyA], 1.0), bodyAtTime(gBodies[jb.bodyB], 1.0),
+                          p.alpha, p.kStart, p.kMaxN, p.betaLin);
             force = length(jb.lambda);
             broke = last && force > jb.breakForce;
             gJoints[i].lambdaLo.xyz = broke ? float3(0.0) : jb.lambda;
@@ -5621,8 +5654,8 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         else if (live)
         {
             Joint j = gJoints[i];
-            BodyState a = gBodies[j.bodyA];
-            BodyState b = gBodies[j.bodyB];
+            BodyState a = bodyAtTime(gBodies[j.bodyA], 1.0);
+            BodyState b = bodyAtTime(gBodies[j.bodyB], 1.0);
             float4 frameB0 = j.frameB;
             bool mayBreak = last && (!jointIsBond(j) || (p.flags & FLAG_BOND_PRELOAD) == 0u);
             broke = jointDual(j, a, b, p.alpha, p.dt, p.kStart, p.kMaxN, p.betaLin, p.betaAng, mayBreak, force, torque);

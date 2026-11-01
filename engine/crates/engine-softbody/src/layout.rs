@@ -388,10 +388,10 @@ pub struct SoftSettings {
     /// of its particles within the last 50 ms splits its step into this many
     /// substeps (its iterations shared among them), at
     /// no extra particle sweeps. Rigid bodies and contacts still take one step:
-    /// within it they are fixed obstacles to the substeps. 1 = off (the default):
-    /// a body jointed to a rigid core couples wrongly, since the core takes the
-    /// whole step while the substeps pull its axle nodes half way (a buggy
-    /// yielded 70 beams settling on spawn); DECISIONS s31.
+    /// within it they are fixed obstacles to the substeps; joint and contact rows
+    /// see each body at the same fraction of the step (`bodyAtTime`). 1 = off, the
+    /// default until the procedural cars are re-tuned for it: with 2 the sedan's
+    /// designed 20–35 g crumple plateau became 13 g (DECISIONS s32).
     pub crash_substeps: u32,
     /// Second-order BDF2 for the particles instead of backward Euler (BDF1):
     /// far less numerical damping of the structure's vibration at a given step
