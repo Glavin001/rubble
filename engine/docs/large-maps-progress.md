@@ -155,3 +155,133 @@ Two "hangs" on the way were not engine cost:
   Metal pipeline compile, which I kept killing before it was cached.
 - Placement deadlocked because each house's uploads were never waited on (fixed in
   4911eb28).
+
+## Awake-only passes (2026-11-01, `claude/awake-only-passes`)
+
+The next L1 target above. What drive's cost was made of, measured on `World` at 256 and
+1,024 houses (`CITY_SLEEP=1 CITY_POOL=32768`; A/B by switching single kernels or
+features off):
+
+- **The resting-pair carry: about half.** `carry_rest_pairs` re-emits every manifold of a
+  pair at rest (both bodies asleep or static) every step, and each one goes through the
+  convex narrowphase (SAT and clipping), the warm hash, persistence, the CSR passes and
+  four dual iterations: 9,708 pairs and 26,254 contact rows at 64 houses, about 150,000
+  and 400,000 at 1,024. Leaving out `carry_rest_pairs` alone took K=1,024 drive from
+  13.3 to 7.4 ms.
+- **The broadphase over every collider** (732,160 at K=1,024): bounds, insert and query
+  each ran one thread per collider, about 1 ms.
+- **wgpu's indirect-call validation:** a validation pass before each of the step's
+  dozens of indirect dispatches, about 0.5 ms a step at any size.
+- The empty colour dispatches (four colours plus the sparse tail, per iteration) cost
+  about 0.6 ms at any size. The per-body passes cost about 0.1 ms at K=256.
+
+### Done (lossless)
+
+- **No indirect-call validation on native devices** (`gpu::instance_flags`). Every
+  indirect argument the plans write is within the device limits already; the terrain's
+  MPM dispatches are checked against the workgroup limit at `terrain_enable`, with the
+  limit named. `WGPU_VALIDATION_INDIRECT_CALL=1` restores it. Pure dispatch overhead.
+- **Awake-indexed broadphase** (`EngineFeatures::awake_broadphase`, hierarchical grids;
+  `ENGINE_BROADPHASE=full` or the lab's `?broadphase=full` turn it off). Static and
+  sleeping colliders stay in the fracture lab's persistent resting table; a step lists the
+  colliders of its moving bodies (`list_moving_colliders`, one cheap scan reading each
+  collider's body flags) and bounds, inserts and queries only those; coarse movers scan
+  finer resting cells. The table is rebuilt on the GPU after a step with sleep events, and
+  on the host's request after any write to bodies, colliders, materials, hulls or
+  params, after commands, and after any step that did not keep it. Characters and soft
+  bodies keep the full pass. `tests/awake_broadphase.rs` runs both on the same GPU state
+  every sixth step of a 480-step scene (piles that settle and sleep, a coarse mover over
+  them, moving and stopped kinematics, thrown cubes, a CCD bullet): the same candidate
+  pairs and bit-identical collider bounds every time.
+- **`broadphase_fast` sized from the fast list** (`write_fast_args`): it launched all
+  16,384 workgroups whenever the fast list was scheduled; now one per listed collider,
+  numbered as before (compared against the full-size dispatch in the same test).
+
+City, native, wall ms per step (median of 120 waited steps; GPU of other sessions was
+busy at times, ±0.3 ms). "Before" is this branch with `ENGINE_BROADPHASE=full
+WGPU_VALIDATION_INDIRECT_CALL=1`, run back to back with "after":
+
+| K | scenario | before | after | after, carry off (decision below) |
+|---|---|---|---|---|
+| 64 | drive | 2.38 | 1.96 | 1.60 |
+| 64 | war | 4.96 | 4.96 | 4.64 |
+| 256 | drive | 4.91 | 4.26 | 2.67 |
+| 256 | war | 8.35 | 8.11 | 6.62 |
+| 1,024 | drive | 13.82 | 12.39 | 6.35 |
+| 1,024 | war | 20.49 | 16.85 | 10.94 |
+
+War at K=64 breaks the same 2,630 bonds with 1,034 bodies awake before and after; at the
+larger K the shots are chaotic (see the threshold notes above) and the counts move by a
+few percent either way.
+
+GPU time of drive from the step's pass marks (`RUBBLE_GPU_TIMING=1`): K=1,024 6.1 ms
+after (the carry's rows dominate it); with the carry off, 1.0 ms at K=256 and 1.3 ms at
+K=1,024, roughly flat. The waited wall time is still not flat with the carry off (2.7 →
+6.4 ms): `poll_blocking` waits 2.2 ms at K=256 and 6.0 ms at K=1,024 for work the marks
+do not see. That is outside the rigid plan: the threshold fracture's
+`fr_loads` / `fr_breaks` still run over every chunk and bond each frame (L2 §4), and the
+readback copies a pose buffer sized to every body (L2 §2).
+
+Fracture lab grid (ball in flight, one CCD ball among 49 sleeping houses, 64 bodies
+awake): GPU 1.93 → 1.71 ms per step, pipelined 3.13 → 2.62 ms (same build,
+`?broadphase=full` vs default). The lab plan's 1.0 ms is not reached: what is left is
+the carry and fixed per-step work (eight solver iterations of colour dispatches and the
+sparse tail, the stabilization pass, the per-body passes).
+
+### Decision: the resting-pair carry
+
+`carry_rest` (on by default) keeps a resting pair's contacts alive through sleep by
+re-emitting its manifold every step. That was written for the JS host, where contact
+reuse (`FLAG_REUSE_CONTACTS`) copied the rows with their warm λ. `World`'s large-map
+policy runs canonical contacts without contact reuse, so each carried pair is
+re-detected from scratch every step: fresh rows with λ = 0 and k = 1 (verified on the
+GPU: all 6,524 carried rows at K=16 have λN = 0), which persistence leaves as they are
+and the dual leaves alone (both ends at rest). The rows do nothing except:
+
+1. **They mask the sleep archive.** When a body wakes, its pairs find last step's
+   carried row in the warm hash (λ = 0), so `archiveFind` never runs for them: the woken
+   body restarts its resting contacts cold, which is what the archive was built to avoid
+   (the threshold-sleep notes above describe the archive as if sleeping pairs had no
+   rows).
+2. **They give a body woken inside the narrowphase its supports that same step**, and
+   wake propagates through them within the step (deterministically one hop when a sphere
+   pair wakes the body in `convex_classify`, racily further in `convex_manifold`).
+
+So removing the carry's cost cannot be made bit-for-bit lossless cheaply. Two options:
+
+- **A. Turn the carry off where the sleep archive is on** (`ENGINE_REST=drop` today).
+  Sleeping pairs then have no rows, as the archive design assumed: a woken body's pairs
+  warm-start from the archive, and `archive_emit` gives a touched sleeper its resting
+  pairs on the wake step. This changes results: woken pairs start warm instead of cold,
+  and wakes no longer chain through resting pairs within a step. It is the large win in
+  the table above (K=1,024 drive 12.4 → 6.4 ms, war 16.9 → 10.9 ms). It needs the
+  `sleep_policy_ensemble` gate rerun with it before adoption. **Recommended.**
+- **B. Keep today's behaviour and make it cheap**: a persistent store of the resting
+  pairs (no per-step re-emission), the "virtual hit" (a pair that was carried last step
+  skips `archiveFind`, as its λ = 0 row would have made it), and the woken bodies' pairs
+  emitted or replayed in the dispatch order that reproduces today's wake propagation.
+  Lossless up to which of today's racy outcomes it picks, but a large change for
+  behaviour that is itself an accident of the two features meeting.
+
+Not adopted: either changes code paths whose results the user signs off.
+
+### Left for the next step
+
+- The decision above.
+- Fixed solver cost when few bodies are awake: per iteration, four colour dispatches and
+  the sparse tail even with nothing to colour (about 0.6 ms natively, more in Dawn). The
+  lab's single-dispatch sparse solve uses 8 lanes per body where the colour kernel picks
+  lanes by degree, so switching to it changes the float summation order; a lossless
+  version needs a sparse kernel with the colour kernel's lane choice.
+- The moving-collider list is one cheap scan over every collider (one word of each
+  collider record and its body's flags): about 0.1 ms at 732,160 colliders. A
+  body-to-collider index (colliders are not sorted by body once threshold splits
+  re-parent them) would make it proportional to the awake bodies.
+- The resting table is rebuilt over every collider after any step with sleep events
+  (war: often). Incremental insert of the new sleepers needs the stale R entries of
+  re-sleeping bodies removed first.
+- Per-body passes (predict, extract, the colour tiles and the CSR) still run over every
+  body slot. `predict_bodies` has an awake-list mode, but kinematic bodies are not on the
+  awake list.
+- Outside the rigid plan: the threshold fracture's per-frame passes over every chunk and
+  bond, and the pose readback sized to every body.
