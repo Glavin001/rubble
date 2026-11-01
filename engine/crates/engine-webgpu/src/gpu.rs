@@ -295,7 +295,9 @@ pub struct WgpuSim {
 
 /// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
 pub(crate) fn body_motion_flags(bodies: &[BodyState]) -> (bool, bool) {
-    let ccd = bodies.iter().any(|b| b.flags & BODY_CCD != 0);
+    let ccd = bodies
+        .iter()
+        .any(|b| b.flags & (BODY_CCD | engine_schema::BODY_CCD_FAST) != 0);
     let kin = bodies.iter().any(|b| {
         b.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32)
             == BodyFlags::Kinematic as u32
@@ -511,6 +513,7 @@ impl WgpuSim {
         let SimOptions {
             contacts,
             vehicles: vehicle_capacity,
+            characters: char_cap,
             soft,
             features,
             pose_output,
@@ -543,6 +546,7 @@ impl WgpuSim {
             compact_contacts,
             persistent_contacts,
             vehicle_capacity,
+            char_cap,
             features,
             pose_output,
             info,
@@ -580,6 +584,7 @@ impl WgpuSim {
         compact_contacts: bool,
         persistent_contacts: bool,
         vehicle_capacity: VehicleCapacity,
+        char_cap: engine_schema::character::CharacterCapacity,
         features: EngineFeatures,
         pose_output: bool,
         info: wgpu::AdapterInfo,
@@ -600,7 +605,6 @@ impl WgpuSim {
         sizes[9] +=
             u64::from(4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels)) * 32;
         sizes[31] = vehicle_capacity.bytes().max(16);
-        let char_cap = engine_schema::character::CharacterCapacity::default();
         sizes[33] = char_cap.bytes().max(16);
         let limits = device.limits();
         for (i, &bytes) in sizes.iter().enumerate() {
@@ -2611,6 +2615,7 @@ impl WgpuSim {
             guidance: self.guidance_active(),
             guide_slots: self.guide.as_ref().map_or(0, |g| g.cap.plan_budget),
             explosion_count: self.explosion_count,
+            post_stabilize: self.params.flags & engine_schema::FLAG_POST_STAB != 0,
         }
     }
 

@@ -187,6 +187,8 @@ impl EngineFeatures {
 pub struct SimOptions {
     pub contacts: ContactStorage,
     pub vehicles: VehicleCapacity,
+    /// The character, query and projectile pool (binding 33).
+    pub characters: engine_schema::character::CharacterCapacity,
     /// A soft-body arena; needs [`ContactStorage::Canonical`].
     pub soft: Option<SoftCapacity>,
     pub features: EngineFeatures,

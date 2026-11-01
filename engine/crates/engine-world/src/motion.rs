@@ -11,7 +11,7 @@ use engine_schema::character::{
 };
 use engine_webgpu::{CharacterHandle, MotionEvent};
 
-pub use engine_schema::character::{CharacterDesc, GroundState};
+pub use engine_schema::character::{CharacterCapacity, CharacterDesc, GroundState};
 
 handle!(
     /// A capsule character controller.

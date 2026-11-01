@@ -22,6 +22,25 @@ pub enum BodyType {
     Dynamic,
 }
 
+/// Which of a body's moves a frame reports ([`World::set_body_move_reports`]). A host that
+/// draws the body from the exported GPU poses ([`World::export_poses`]) needs only its sleep
+/// and wake changes, so the moves stay O(events) on the CPU. The simulation is the same either
+/// way: this filters what [`Frame`] carries, nothing else.
+///
+/// [`World::set_body_move_reports`]: crate::World::set_body_move_reports
+/// [`World::export_poses`]: crate::World::export_poses
+/// [`Frame`]: crate::Frame
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MoveReports {
+    /// Every step it moves (the default).
+    #[default]
+    All,
+    /// Only the steps it falls asleep, wakes, or is first reported.
+    SleepWake,
+    /// Never.
+    None,
+}
+
 /// Axes a body may not translate along or rotate about (not yet supported).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MotionLocks {
@@ -88,6 +107,11 @@ pub struct BodyDef {
     /// reach, the fast broadphase list and a time-of-impact contact, so a
     /// fast body never tunnels (projectiles, debris, vehicles at speed).
     pub is_bullet: bool,
+    /// Continuous collision only on the steps the body moves fast (`BODY_CCD_FAST`):
+    /// as `is_bullet` while it moves more than a couple of contact offsets a step, off
+    /// once it slows, so many small bodies (crush particles, debris) take the bullet
+    /// passes' slots (`CCD_BODY_CAP`) only while they could pass through something.
+    pub ccd_when_fast: bool,
     /// Not yet per body (sleep is per world); `false` is refused.
     pub enable_sleep: bool,
     pub is_awake: bool,
@@ -114,6 +138,7 @@ impl Default for BodyDef {
             sleep_threshold: None,
             motion_locks: MotionLocks::default(),
             is_bullet: false,
+            ccd_when_fast: false,
             enable_sleep: true,
             is_awake: true,
             is_enabled: true,

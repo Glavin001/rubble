@@ -137,6 +137,14 @@ bool kinematicMoving(BodyState b)
         (dot(b.linearVel, b.linearVel) > 0.0 || dot(b.angularVel, b.angularVel) > 0.0);
 }
 // Continuous collision (ccd_step.slang): an awake dynamic body flagged BODY_CCD.
+// BODY_CCD_FAST: continuous collision for the next step only if it moves far enough
+// this step to pass through something (CCD_FAST_REACH contact offsets).
+uint ccdFastLatch(uint flags, float3 v, float dt)
+{
+    bool fast = length(v) * dt > CCD_FAST_REACH * PARAMS.contactOffset;
+    return fast ? flags | BODY_CCD : flags & ~BODY_CCD;
+}
+
 bool bodyIsCcd(BodyState b)
 {
     return (b.flags & BODY_CCD) != 0u && bodyIsDynamic(b) && !bodyIsSleeping(b) && (b.flags & BODY_VEHICLE) == 0u;
@@ -5805,6 +5813,7 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
         b.sleepTimer = 0.0;
         b.flags |= BODY_AWAKE;
     }
+    if ((b.flags & BODY_CCD_FAST) != 0u) b.flags = ccdFastLatch(b.flags, b.linearVel, dt);
     gBodies[i].linearVel = b.linearVel;
     gBodies[i].angularVel = b.angularVel;
     gBodies[i].sleepTimer = b.sleepTimer;

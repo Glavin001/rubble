@@ -48,9 +48,10 @@ pub use blast::{
 pub use debug_draw::{
     DebugColor, DebugDraw, DebugDrawOptions, COLOR_ASLEEP, COLOR_AWAKE, COLOR_STATIC,
 };
-pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
+pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, MoveReports, ShapeDef, SurfaceMaterial};
 pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
+    CRUSH_PARTICLE_GROUP,
     DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats,
     Preload, StrengthModel,
 };
@@ -71,7 +72,7 @@ pub use joints::{
 };
 pub use math::Transform;
 pub use motion::{
-    CastDef, CastHit, CastId, CastResult, CastShape, CharacterDef, CharacterDesc, CharacterEvent,
+    CastDef, CastHit, CastId, CastResult, CastShape, CharacterCapacity, CharacterDef, CharacterDesc, CharacterEvent,
     CharacterEventKind, CharacterId, CharacterOutput, GroundState, ProjectileDef, ProjectileEvent,
     ProjectileEventKind, ProjectileId, ProjectileOutput,
 };
@@ -139,6 +140,8 @@ pub struct WorldDef {
     pub capacity: WorldCapacity,
     pub contacts: ContactStorage,
     pub vehicles: VehicleCapacity,
+    /// Characters, in-step queries and projectiles the world holds.
+    pub characters: engine_schema::character::CharacterCapacity,
     /// A soft-body arena (needs [`ContactStorage::Canonical`]).
     pub soft: Option<SoftCapacity>,
     /// Step size, iterations, sleep thresholds and solver constants
@@ -167,6 +170,7 @@ impl Default for WorldDef {
             capacity: WorldCapacity::small(),
             contacts: ContactStorage::Persistent,
             vehicles: VehicleCapacity::default(),
+            characters: Default::default(),
             soft: None,
             solver: AvbdParams::default(),
             features: EngineFeatures::default(),
@@ -299,12 +303,17 @@ struct BodySlot {
     last_asleep: bool,
     /// The solver pose last delivered, for the resync diff.
     last_solver: Option<Transform>,
+    /// Which moves frames report.
+    moves: MoveReports,
     /// Damping (linear, angular) and gravity scale, sent each step as a
     /// command while they differ from (0, 0, 1).
     damping: (f32, f32),
     gravity_scale: f32,
     locks: u32,
     bullet: bool,
+    /// Continuous collision only on steps it moves fast (a crush particle:
+    /// `BODY_CCD_FAST`).
+    pub(crate) ccd_when_fast: bool,
 }
 
 impl BodySlot {
@@ -379,8 +388,19 @@ fn retired_collider(body: u32) -> Collider {
 }
 
 /// A simulated world.
+/// Pose exports into host-owned buffers ([`World::export_poses`]).
+struct PoseExports {
+    /// The poses before the latest step (Rubble-owned, a copy of the pose buffer taken at the
+    /// start of each step), so an export carries that step's own previous poses.
+    previous: wgpu::Buffer,
+    /// Tickets of exports whose GPU copies have finished.
+    completed: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    next_ticket: u64,
+}
+
 pub struct World {
     sim: WgpuSim,
+    pose_exports: Option<PoseExports>,
     hulls: HullArena,
     bodies: Vec<BodySlot>,
     free_bodies: Vec<u32>,
@@ -450,6 +470,7 @@ impl World {
         let options = SimOptions {
             contacts,
             vehicles: def.vehicles,
+            characters: def.characters,
             soft: def.soft,
             features,
             pose_output: true,
@@ -475,6 +496,7 @@ impl World {
         let readback = ReadbackRing::new(&sim, def.readback_frames);
         Ok(Self {
             sim,
+            pose_exports: None,
             hulls: HullArena::new(),
             bodies: Vec::new(),
             free_bodies: Vec::new(),
@@ -520,6 +542,98 @@ impl World {
     }
 
     /// The simulation underneath, for reads this API does not cover yet.
+    /// Copy the latest step's render poses into host-owned GPU buffers on the same device:
+    /// `current` gets that step's poses and `previous` the poses before it, at the given byte
+    /// offsets, `bytes` long (32-byte [`engine_webgpu::PoseRecord`]s in Rubble's frame, indexed
+    /// by [`World::body_pose_index`]). Renderers read them in place to draw and interpolate
+    /// within the latest step, with no readback.
+    ///
+    /// The copies are submitted now. The result is a ticket: the host reads the buffers only
+    /// once [`World::completed_pose_export`] reaches it, and must not reuse them for an export
+    /// while its own GPU work still reads them (host buffers need not be hazard-tracked).
+    /// Lossless: the step computes the same either way.
+    pub fn export_poses(
+        &mut self,
+        current: &wgpu::Buffer,
+        current_offset: u64,
+        previous: &wgpu::Buffer,
+        previous_offset: u64,
+        bytes: u64,
+    ) -> anyhow::Result<u64> {
+        let have = self.sim.pose_buffer().size();
+        anyhow::ensure!(bytes > 0 && bytes <= have, "export of {bytes} bytes: the pose buffer holds {have}");
+        anyhow::ensure!(
+            bytes % 4 == 0 && current_offset % 4 == 0 && previous_offset % 4 == 0,
+            "pose export offsets and size must be multiples of 4"
+        );
+        anyhow::ensure!(
+            current_offset + bytes <= current.size() && previous_offset + bytes <= previous.size(),
+            "pose export range past the end of a host buffer"
+        );
+        let mut enc = self.sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pose export"),
+        });
+        if self.pose_exports.is_none() {
+            // From now on each step keeps the poses before it. Until the next step, previous =
+            // current (nothing has moved since).
+            let previous = self.sim.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("poses before the latest step"),
+                size: have,
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            enc.copy_buffer_to_buffer(self.sim.pose_buffer(), 0, &previous, 0, have);
+            self.pose_exports = Some(PoseExports {
+                previous,
+                completed: Default::default(),
+                next_ticket: 1,
+            });
+        }
+        let exports = self.pose_exports.as_mut().expect("set above");
+        enc.copy_buffer_to_buffer(self.sim.pose_buffer(), 0, current, current_offset, bytes);
+        enc.copy_buffer_to_buffer(&exports.previous, 0, previous, previous_offset, bytes);
+        let ticket = exports.next_ticket;
+        exports.next_ticket += 1;
+        let queue = self.sim.queue();
+        queue.submit([enc.finish()]);
+        let completed = exports.completed.clone();
+        queue.on_submitted_work_done(move || {
+            completed.fetch_max(ticket, std::sync::atomic::Ordering::AcqRel);
+        });
+        Ok(ticket)
+    }
+
+    /// The latest pose export ([`World::export_poses`]) whose copies have finished on the GPU,
+    /// 0 for none. Never waits.
+    pub fn completed_pose_export(&self) -> anyhow::Result<u64> {
+        let Some(exports) = &self.pose_exports else {
+            return Ok(0);
+        };
+        let _ = self.sim.device().poll(wgpu::PollType::Poll);
+        Ok(exports.completed.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// Where a body's origin is relative to its pose record in the pose buffer and its exports
+    /// ([`World::export_poses`]): origin = record × offset, that is
+    /// `origin.p = record.p + record.q * offset.p` and `origin.q = record.q * offset.q`. Records
+    /// are the solver's poses (centre of mass and its axes); the offset is the identity for a
+    /// body whose centre of mass is its origin. It changes only when the body's shapes change.
+    pub fn body_pose_offset(&self, id: BodyId) -> anyhow::Result<Transform> {
+        anyhow::ensure!(self.body_is_valid(id), "stale body handle");
+        let frame = self.bodies[id.index() as usize].frame_at(u64::MAX);
+        let q = frame.axes.conjugate();
+        Ok(Transform {
+            position: (-(q * frame.center)).to_array(),
+            rotation: q.normalize().to_array(),
+        })
+    }
+
+    /// Where a body's pose is in the pose buffer and its exports (its GPU slot).
+    pub fn body_pose_index(&self, id: BodyId) -> anyhow::Result<u32> {
+        anyhow::ensure!(self.body_is_valid(id), "stale body handle");
+        Ok(id.index())
+    }
+
     pub fn sim(&self) -> &WgpuSim {
         &self.sim
     }
@@ -629,10 +743,12 @@ impl World {
                 last_transform: None,
                 last_asleep: asleep,
                 last_solver: None,
+                moves: MoveReports::All,
                 damping: (d.linear_damping, d.angular_damping),
                 gravity_scale: d.gravity_scale,
                 locks: d.motion_locks.bits(),
                 bullet: d.is_bullet && d.body_type == BodyType::Dynamic,
+                ccd_when_fast: d.ccd_when_fast && d.body_type == BodyType::Dynamic,
             };
             let state = body_state(&slot);
             match self.reusable_body_slot() {
@@ -725,6 +841,13 @@ impl World {
         Ok(self.bodies[self.live_body(id)?].body_type)
     }
 
+    /// Which of the body's moves frames report (default [`MoveReports::All`]).
+    pub fn set_body_move_reports(&mut self, id: BodyId, reports: MoveReports) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        self.bodies[i].moves = reports;
+        Ok(())
+    }
+
     pub fn body_user_data(&self, id: BodyId) -> anyhow::Result<u64> {
         Ok(self.bodies[self.live_body(id)?].user_data)
     }
@@ -745,6 +868,12 @@ impl World {
     /// body's first frame). Frame-latent by design: no hidden readback.
     pub fn body_transform(&self, id: BodyId) -> anyhow::Result<Option<Transform>> {
         Ok(self.bodies[self.live_body(id)?].last_transform)
+    }
+
+    /// The body origin's pose when it was created (a destructible's chunk: where its asset and
+    /// placement put it). Hosts place what they draw with it before the first frame arrives.
+    pub fn body_initial_transform(&self, id: BodyId) -> anyhow::Result<Transform> {
+        Ok(self.bodies[self.live_body(id)?].origin)
     }
 
     /// Whether the body was awake as of the last polled frame.
@@ -1755,6 +1884,11 @@ impl World {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("world step"),
             });
+        if let Some(e) = &self.pose_exports {
+            // The poses before this step, for exports (a GPU copy in the step's own submission).
+            // If the step does not run, nothing moves and previous = current is right.
+            enc.copy_buffer_to_buffer(self.sim.pose_buffer(), 0, &e.previous, 0, e.previous.size());
+        }
         // The terrain's substeps go first: the rigid step applies their reactions.
         self.terrain_open_strike()?;
         let terrain = self.terrain_encode(&mut enc)?;
@@ -2114,6 +2248,14 @@ impl World {
                 slot.last_asleep = false;
             }
             if matches!(slot.owner, Owner::SoftNode | Owner::Character) {
+                continue;
+            }
+            let report = match slot.moves {
+                MoveReports::All => true,
+                MoveReports::SleepWake => r.slept() || r.woke() || r.first(),
+                MoveReports::None => false,
+            };
+            if !report {
                 continue;
             }
             moves.push(BodyMoveEvent {
@@ -2643,10 +2785,12 @@ impl World {
                 last_transform: None,
                 last_asleep: false,
                 last_solver: None,
+                moves: MoveReports::All,
                 damping: (0.0, 0.0),
                 gravity_scale: 1.0,
                 locks: 0,
                 bullet: false,
+                ccd_when_fast: false,
             });
         }
     }
@@ -2704,6 +2848,10 @@ fn body_state(slot: &BodySlot) -> BodyState {
     };
     if slot.bullet {
         b.flags |= engine_schema::BODY_CCD;
+    }
+    if slot.ccd_when_fast {
+        // Latched on (the GPU clears it at the end of a slow step).
+        b.flags |= engine_schema::BODY_CCD | engine_schema::BODY_CCD_FAST;
     }
     if slot.body_type == BodyType::Dynamic {
         b.flags |= slot.locks << engine_schema::BODY_LOCK_SHIFT;
