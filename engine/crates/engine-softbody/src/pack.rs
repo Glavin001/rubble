@@ -247,11 +247,15 @@ pub fn pack_soft(
                 },
                 f32::INFINITY,
             ),
-            BeamKind::Normal => (sb.deform, sb.deform),
+            BeamKind::Normal | BeamKind::Anisotropic => (sb.deform, sb.deform),
             _ => (f32::INFINITY, f32::INFINITY),
         };
+        // Normal beams: plastic rest-length limits (JBeam deformLimit and
+        // deformLimitExpansion, ratios of L₀).
         let (short_bound, long_bound) = match sb.kind {
-            BeamKind::Bounded | BeamKind::Support => (sb.short_bound, sb.long_bound),
+            BeamKind::Bounded | BeamKind::Support | BeamKind::Normal | BeamKind::Anisotropic => {
+                (sb.short_bound, sb.long_bound)
+            }
             _ => (0.0, 0.0),
         };
         let beam = Beam {
@@ -284,6 +288,16 @@ pub fn pack_soft(
             lambda: 0.0,
             deform_t,
             force: 0.0,
+            spring_exp: if sb.kind == BeamKind::Anisotropic && sb.spring_expansion > 0.0 {
+                sb.spring_expansion
+            } else {
+                sb.spring
+            },
+            damp_exp: if sb.kind == BeamKind::Anisotropic && sb.damp_expansion > 0.0 {
+                sb.damp_expansion
+            } else {
+                sb.damp
+            },
         };
         let id = beams.len() as u32;
         adjacency[sb.a as usize].push(id);

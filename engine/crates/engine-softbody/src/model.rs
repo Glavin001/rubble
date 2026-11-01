@@ -90,6 +90,10 @@ pub struct BeamT<T> {
     pub deform_t: T,
     /// Signed axial force (+ = compression) at the end of the last step.
     pub force: T,
+    /// Spring and damping while longer than rest (anisotropic beams; the others
+    /// keep `spring` and `damp` here). Stored beside the 16 words.
+    pub spring_exp: T,
+    pub damp_exp: T,
 }
 
 /// The GPU's beam: f32 throughout.
@@ -118,6 +122,8 @@ impl Beam {
             lambda: U::of(self.lambda),
             deform_t: U::of(self.deform_t),
             force: U::of(self.force),
+            spring_exp: U::of(self.spring_exp),
+            damp_exp: U::of(self.damp_exp),
         }
     }
 }
@@ -127,6 +133,12 @@ pub const KIND_SUPPORT: u32 = 1;
 pub const KIND_ROPE: u32 = 2;
 pub const KIND_BOUNDED: u32 = 3;
 pub const KIND_HYDRO: u32 = 4;
+pub const KIND_ANISOTROPIC: u32 = 5;
+
+/// Normal and anisotropic beams yield and break by the plastic rules.
+pub fn kind_plastic(kind: u32) -> bool {
+    kind == KIND_NORMAL || kind == KIND_ANISOTROPIC
+}
 
 impl Beam {
     pub fn to_words(&self) -> [u32; 16] {
@@ -176,6 +188,8 @@ impl Beam {
             lambda: f(BW_LAMBDA),
             deform_t: f(BW_DEFORM_T),
             force: f(BW_FORCE),
+            spring_exp: f(BW_SPRING),
+            damp_exp: f(BW_DAMP),
         }
     }
 }
@@ -213,6 +227,11 @@ pub fn elastic_terms<T: Real>(beam: &BeamT<T>, len: T, k: T) -> (T, T) {
             }
             (d1, d2)
         }
+        // Longer than rest: the expansion spring, scaled like the penalty ramp.
+        KIND_ANISOTROPIC if delta > T::ZERO && beam.spring > T::ZERO => {
+            let ke = k * beam.spring_exp / beam.spring;
+            (ke * delta, ke)
+        }
         _ => {
             if beam.hard() {
                 (k * delta + beam.lambda, k)
@@ -228,7 +247,12 @@ pub fn damping_coef<T: Real>(beam: &BeamT<T>, len: T, scale: T) -> T {
     let delta = len - beam.rest;
     let slack = (beam.kind == KIND_SUPPORT && delta > T::ZERO)
         || (beam.kind == KIND_ROPE && delta < T::ZERO);
-    beam.damp * scale * if slack { T::of(0.1) } else { T::ONE }
+    let damp = if beam.kind == KIND_ANISOTROPIC && delta > T::ZERO {
+        beam.damp_exp
+    } else {
+        beam.damp
+    };
+    damp * scale * if slack { T::of(0.1) } else { T::ONE }
 }
 
 /// Gradient and Hessian block of `beam` for the particle at `xa` (the other end at
@@ -252,7 +276,7 @@ pub fn beam_block(
 /// curvature is 0 there, which lets an undamped per-particle Newton step
 /// overshoot; k bounds it from above, so every step still lowers the energy.
 pub fn yield_cap<T: Real>(beam: &BeamT<T>, d1: T, scale: T) -> T {
-    if beam.kind != KIND_NORMAL || beam.spring <= T::ZERO || beam.hard() {
+    if !kind_plastic(beam.kind) || beam.spring <= T::ZERO || beam.hard() {
         return d1;
     }
     d1.clamp(-beam.deform_c * scale, beam.deform_t * scale)
@@ -333,8 +357,14 @@ pub fn plastic_update<T: Real>(
     }
     let delta = len - beam.rest;
     let mut out_force = force;
-    if plasticity && beam.kind == KIND_NORMAL && beam.spring > T::ZERO {
+    if plasticity && kind_plastic(beam.kind) && beam.spring > T::ZERO {
         let k = beam.spring;
+        // Tension on an anisotropic beam yields against its expansion spring.
+        let kt = if beam.kind == KIND_ANISOTROPIC {
+            beam.spring_exp
+        } else {
+            k
+        };
         if force > beam.deform_c && delta < T::ZERO {
             // Compression past the threshold: the rest length moves so the beam
             // sits on the yield surface; the threshold hardens as it shortens.
@@ -354,13 +384,13 @@ pub fn plastic_update<T: Real>(
             // until it tears.
             out_force = -beam.deform_t;
             let old = beam.rest;
-            let deform = delta - beam.deform_t * (T::ONE - beam.coef) / k;
+            let deform = delta - beam.deform_t * (T::ONE - beam.coef) / kt;
             beam.rest += deform;
             if beam.long_bound > T::ZERO {
                 beam.rest = beam.rest.min(beam.rest0 * beam.long_bound);
             }
             beam.deform_t *= beam.rest / old;
-            beam.strength -= deform * k;
+            beam.strength -= deform * kt;
             beam.flags |= BEAM_YIELDED;
             out.yielded = true;
         }
@@ -405,6 +435,8 @@ mod tests {
             lambda: 0.0,
             deform_t: 1.0e4,
             force: 0.0,
+            spring_exp: 1.0e6,
+            damp_exp: 0.0,
         }
     }
 

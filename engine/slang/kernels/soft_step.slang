@@ -36,6 +36,8 @@ static const uint BEAM_SUPPORT = 1u;
 static const uint BEAM_ROPE = 2u;
 static const uint BEAM_BOUNDED = 3u;
 static const uint BEAM_HYDRO = 4u;
+// Normal, with its own spring and damping while longer than rest (beamExtraBase).
+static const uint BEAM_ANISOTROPIC = 5u;
 
 static const uint BEAM_BROKEN = 16u;
 static const uint BEAM_HARD = 32u;
@@ -114,6 +116,8 @@ uint softTriExtraBase() { return SU(9u).w; }
 uint softPairCacheBase() { return SU(10u).x; }
 uint softLocalBase() { return SU(10u).y; }
 uint softOriginBase() { return SU(10u).z; }
+// Per beam: an anisotropic beam's expansion spring and damping.
+uint softBeamExtraBase() { return SU(11u).y; }
 // Least speed (m/s) at which a soft contact pushes out an overlap it started the
 // step with (SoftSettings::contact_push_out).
 float softPushOut() { return SD(10u).w; }
@@ -242,11 +246,24 @@ void storeBeamState(uint e, SoftBeam r)
     gSoftData[q + 3u] = float4(r.penalty, r.lambda, r.deformT, r.force);
 }
 
+bool beamPlastic(uint kind) { return kind == BEAM_NORMAL || kind == BEAM_ANISOTROPIC; }
+// An anisotropic beam's expansion spring and damping (others: their own).
+float2 beamExpansion(SoftBeam e, uint i)
+{
+    return beamKind(e) == BEAM_ANISOTROPIC ? SD(softBeamExtraBase() + i).xy : float2(e.spring, e.damp);
+}
+
 // φ'(ℓ), φ''(ℓ) of the elastic energy with stiffness k (engine-softbody model.rs).
-float2 beamElastic(SoftBeam e, float len, float k)
+// `i` is the beam's index (for an anisotropic beam's expansion rates).
+float2 beamElastic(SoftBeam e, uint i, float len, float k)
 {
     float delta = len - e.rest;
     uint kind = beamKind(e);
+    if (kind == BEAM_ANISOTROPIC && delta > 0.0 && e.spring > 0.0)
+    {
+        float ke = k * beamExpansion(e, i).x / e.spring;
+        return float2(ke * delta, ke);
+    }
     if (kind == BEAM_SUPPORT && delta > 0.0) return float2(0.0, 0.0);
     if (kind == BEAM_ROPE && delta < 0.0) return float2(0.0, 0.0);
     if (kind == BEAM_BOUNDED)
@@ -263,19 +280,20 @@ float2 beamElastic(SoftBeam e, float len, float k)
     return float2(k * delta, k);
 }
 
-float beamDampCoef(SoftBeam e, float len)
+float beamDampCoef(SoftBeam e, uint i, float len)
 {
     float delta = len - e.rest;
     uint kind = beamKind(e);
     bool slack = (kind == BEAM_SUPPORT && delta > 0.0) || (kind == BEAM_ROPE && delta < 0.0);
-    return e.damp * softDampScale() * (slack ? 0.1 : 1.0);
+    float c = kind == BEAM_ANISOTROPIC && delta > 0.0 ? beamExpansion(e, i).y : e.damp;
+    return c * softDampScale() * (slack ? 0.1 : 1.0);
 }
 
 // Signed axial force, + = compression (Rigs of Rods `slen`), material stiffness.
-float beamReadout(SoftBeam e, float len, float len0, float h)
+float beamReadout(SoftBeam e, uint i, float len, float len0, float h)
 {
-    float spring = beamHard(e) ? (e.penalty * (len - e.rest) + e.lambda) : beamElastic(e, len, e.spring).x;
-    return -(spring + beamDampCoef(e, len) * (len - len0) / h);
+    float spring = beamHard(e) ? (e.penalty * (len - e.rest) + e.lambda) : beamElastic(e, i, len, e.spring).x;
+    return -(spring + beamDampCoef(e, i, len) * (len - len0) / h);
 }
 
 // ---------------------------------------------------------------------------
@@ -1425,13 +1443,13 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
         float len = length(d);
         if (len < 1e-6) continue;
         float3 n = d / len;
-        float2 el = beamElastic(sb, len, sb.penalty);
-        float c = beamDampCoef(sb, len);
+        float2 el = beamElastic(sb, e, len, sb.penalty);
+        float c = beamDampCoef(sb, e, len);
         float len0 = length(xa0 - oPos0);
         float d1 = el.x + c / h * (len - len0);
         float d2 = el.y + c / h;
         float tension = el.x;
-        if (plastic && beamKind(sb) == BEAM_NORMAL && sb.spring > 0.0 && !beamHard(sb))
+        if (plastic && beamPlastic(beamKind(sb)) && sb.spring > 0.0 && !beamHard(sb))
         {
             // In-solve plasticity (engine_softbody::model::yield_cap): past its
             // threshold the beam flows at it. The curvature stays elastic, an upper
@@ -2100,13 +2118,15 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
     // A sleeping end did not move: its step-start position is where it is.
     float3 la0 = movingA ? softLocal0(ob + e.a) : la, lb0 = movingB ? softLocal0(ob + e.b) : lb;
     float len0 = length(la0 - lb0);
-    float force = beamReadout(e, len, len0, h);
+    float force = beamReadout(e, i, len, len0, h);
     uint flags = softFlags();
     float delta = len - e.rest;
     float ts = softThresholdScale();
-    if ((flags & SOFT_PLASTICITY) != 0u && beamKind(e) == BEAM_NORMAL && e.spring > 0.0)
+    if ((flags & SOFT_PLASTICITY) != 0u && beamPlastic(beamKind(e)) && e.spring > 0.0)
     {
         float k = e.spring;
+        // Tension on an anisotropic beam yields against its expansion spring.
+        float kt = beamExpansion(e, i).x;
         float dc = e.deformC * ts;
         float dt = e.deformT * ts;
         if (force > dc && delta < 0.0)
@@ -2128,11 +2148,11 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
             // its strength until it tears.
             force = -dt;
             float old = e.rest;
-            float deform = delta - dt * (1.0 - e.coef) / k;
+            float deform = delta - dt * (1.0 - e.coef) / kt;
             e.rest += deform;
             if (e.longB > 0.0) e.rest = min(e.rest, e.rest0 * e.longB);
             e.deformT *= e.rest / old;
-            e.strength -= deform * k / ts;
+            e.strength -= deform * kt / ts;
             e.meta |= BEAM_YIELDED;
             softQuietReset(beamSoftBody(e));
             softBdf2Interrupt(beamSoftBody(e), e.a, e.b);

@@ -809,10 +809,14 @@ fn expand(
                                     fields.insert(k.clone(), x);
                                 }
                             }
-                        } else if let Some(h) = header.get(i) {
-                            if let Some(x) = resolve(v, vars) {
-                                fields.insert(h.trim_end_matches(':').to_string(), x);
-                            }
+                        } else if let Some(x) = resolve(v, vars) {
+                            // Columns past the header keep their position ("#2"):
+                            // an LBEAM row's third node in a two-node beam table.
+                            let key = header
+                                .get(i)
+                                .filter(|h| !h.is_empty())
+                                .map_or_else(|| format!("#{i}"), |h| h.trim_end_matches(':').to_string());
+                            fields.insert(key, x);
                         }
                     }
                     out.push((pi, fields));
@@ -829,8 +833,6 @@ pub fn to_rubble(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], -p[1]]
 }
 
-/// Load a vehicle from its `.jbeam` files (`(file name, source)`) and an
-/// optional `.pc` configuration.
 /// A triangle's `externalCollisionBias` (m, ≥ 0).
 fn tri_bias(f: &Map<String, Value>) -> f32 {
     f.get("externalCollisionBias")
@@ -851,6 +853,8 @@ fn tri_group(f: &Map<String, Value>, groups: &HashMap<String, u32>) -> u32 {
     name.and_then(|n| groups.get(n).copied()).unwrap_or(0)
 }
 
+/// Load a vehicle from its `.jbeam` files (`(file name, source)`) and an
+/// optional `.pc` configuration.
 pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVehicleDesc, String> {
     let mut db = JbeamDb::default();
     for (name, src) in files {
@@ -998,8 +1002,29 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             .unwrap_or("|NORMAL")
             .trim_start_matches('|')
             .to_ascii_uppercase();
+        let g = |k: &str, d: f32| f.get(k).and_then(as_f32).unwrap_or(d);
+        if ty == "LBEAM" {
+            // Three nodes; the angle at the middle one (the plan's reading: BeamNG's
+            // documentation does not name the vertex). A row without a third node
+            // is skipped.
+            if let Some(c) = node(&f, "id3").or_else(|| node(&f, "#2")) {
+                desc.elements.push(SoftElement {
+                    kind: ElementKind::Lbeam,
+                    nodes: [a, b, c, u32::MAX],
+                    spring: g("beamSpring", 4_300_000.0),
+                    damp: g("beamDamp", 580.0),
+                    deform: g("beamDeform", 220_000.0),
+                    strength: g("beamStrength", f32::INFINITY),
+                    break_group: 0,
+                });
+            } else {
+                *skipped.entry("LBEAM without id3".to_string()).or_default() += 1;
+            }
+            continue;
+        }
         let kind = match ty.as_str() {
-            "NORMAL" | "ANISOTROPIC" | "PRESSURED" | "" => BeamKind::Normal,
+            "NORMAL" | "PRESSURED" | "" => BeamKind::Normal,
+            "ANISOTROPIC" => BeamKind::Anisotropic,
             "SUPPORT" => BeamKind::Support,
             "BOUNDED" => BeamKind::Bounded,
             "HYDRO" => BeamKind::Hydro,
@@ -1009,12 +1034,11 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 continue;
             }
         };
-        if matches!(ty.as_str(), "ANISOTROPIC" | "PRESSURED") {
+        if ty == "PRESSURED" {
             *skipped
                 .entry(format!("beam type {ty} (simulated as NORMAL)"))
                 .or_default() += 1;
         }
-        let g = |k: &str, d: f32| f.get(k).and_then(as_f32).unwrap_or(d);
         let group = match f.get("breakGroup") {
             Some(Value::String(s)) if !s.is_empty() => {
                 let n = groups.len() as u32 + 1;
@@ -1045,6 +1069,16 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             hydro_factor: 0.0,
             break_group: group,
             visible: true,
+            spring_expansion: if ty == "ANISOTROPIC" {
+                g("springExpansion", 0.0)
+            } else {
+                0.0
+            },
+            damp_expansion: if ty == "ANISOTROPIC" {
+                g("dampExpansion", 0.0)
+            } else {
+                0.0
+            },
         };
         match kind {
             BeamKind::Support => {
@@ -1074,7 +1108,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                     beam.hydro_factor = 0.0;
                 }
             }
-            BeamKind::Normal => {
+            BeamKind::Normal | BeamKind::Anisotropic => {
                 // deformLimit / deformLimitExpansion: plastic rest-length ratios of L₀.
                 if let Some(l) = f
                     .get("deformLimit")
@@ -1236,10 +1270,91 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         }
     }
 
+    // Torsion bars: four nodes, twist about 2–3.
+    for (_, f) in expand(&db, &parts, "torsionbars", &vars) {
+        let ids = ["id1", "id2", "id3", "id4"].map(|k| node(&f, k));
+        let [Some(n1), Some(n2), Some(n3), Some(n4)] = ids else {
+            continue;
+        };
+        let g = |k: &str, d: f32| f.get(k).and_then(as_f32).unwrap_or(d);
+        desc.elements.push(SoftElement {
+            kind: ElementKind::Torsion,
+            nodes: [n1, n2, n3, n4],
+            spring: g("spring", 0.0),
+            damp: g("damp", 0.0),
+            deform: g("deform", f32::INFINITY),
+            strength: g("strength", f32::INFINITY),
+            break_group: 0,
+        });
+    }
+    // Rails: an object keyed by name ("rails"), or a table ("rails2").
+    let mut rail_rows: Vec<(String, Map<String, Value>)> = Vec::new();
+    for p in &parts {
+        if let Some(rails) = db.parts[&p.name].get("rails").and_then(Value::as_object) {
+            for (name, r) in rails {
+                if let Some(r) = r.as_object() {
+                    rail_rows.push((name.clone(), r.clone()));
+                }
+            }
+        }
+    }
+    for (_, f) in expand(&db, &parts, "rails2", &vars) {
+        if let Some(name) = f.get("id").and_then(Value::as_str) {
+            rail_rows.push((name.to_string(), f.clone()));
+        }
+    }
+    for (name, r) in rail_rows {
+        let links = r
+            .get("links:")
+            .or_else(|| r.get("links"))
+            .and_then(Value::as_array)
+            .map(|l| {
+                l.iter()
+                    .filter_map(|n| n.as_str().and_then(|n| ids.get(n).copied()))
+                    .collect::<Vec<u32>>()
+            })
+            .unwrap_or_default();
+        if links.len() < 2 {
+            continue;
+        }
+        let flag = |k: &str| r.get(k).and_then(Value::as_bool).unwrap_or(false);
+        desc.rails.retain(|x| x.name != name);
+        desc.rails.push(SoftRail {
+            name,
+            nodes: links,
+            looped: flag("looped"),
+            capped: flag("capped"),
+        });
+    }
+    for (_, f) in expand(&db, &parts, "slidenodes", &vars) {
+        let Some(n) = node(&f, "id") else {
+            continue;
+        };
+        let Some(rail) = f
+            .get("railName")
+            .and_then(Value::as_str)
+            .and_then(|r| desc.rails.iter().position(|x| x.name == r))
+        else {
+            *skipped
+                .entry("slidenode on an unknown rail".to_string())
+                .or_default() += 1;
+            continue;
+        };
+        let g = |k: &str, d: f32| f.get(k).and_then(as_f32).unwrap_or(d);
+        let b = |k: &str| f.get(k).and_then(Value::as_bool).unwrap_or(true);
+        desc.slidenodes.push(SoftSlideNode {
+            node: n,
+            rail: rail as u32,
+            attached: b("attached"),
+            tolerance: g("tolerance", 0.0).max(0.0),
+            spring: g("spring", 4_300_000.0),
+            damp: g("damp", 0.0),
+            strength: g("strength", f32::INFINITY),
+            cap_strength: g("capStrength", f32::INFINITY),
+        });
+    }
+
     for section in [
-        "torsionbars",
-        "rails",
-        "slidenodes",
         "flexbodies",
         "props",
         "thrusters",

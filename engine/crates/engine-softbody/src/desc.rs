@@ -35,6 +35,9 @@ pub enum BeamKind {
     Bounded,
     /// Rest length follows an input: L = L₀(1 − input·factor). Never deforms.
     Hydro,
+    /// Normal, with its own spring and damping while longer than rest (JBeam
+    /// ANISOTROPIC: `springExpansion`, `dampExpansion`).
+    Anisotropic,
 }
 
 impl BeamKind {
@@ -45,6 +48,7 @@ impl BeamKind {
             BeamKind::Rope => 2,
             BeamKind::Bounded => 3,
             BeamKind::Hydro => 4,
+            BeamKind::Anisotropic => 5,
         }
     }
 }
@@ -120,6 +124,10 @@ pub struct SoftBeam {
     /// Break group (0 = none). Breaking any beam of a group breaks the whole group.
     pub break_group: u32,
     pub visible: bool,
+    /// Anisotropic beams (JBeam ANISOTROPIC): spring and damping while longer
+    /// than rest (0 = the same as in compression).
+    pub spring_expansion: f32,
+    pub damp_expansion: f32,
 }
 
 impl Default for SoftBeam {
@@ -139,6 +147,93 @@ impl Default for SoftBeam {
             hydro_factor: 0.0,
             break_group: 0,
             visible: true,
+            spring_expansion: 0.0,
+            damp_expansion: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElementKind {
+    /// Three nodes a, m, b: resists change of the angle at m (JBeam LBEAM).
+    #[default]
+    Lbeam,
+    /// Four nodes: resists twist about the 2–3 axis (JBeam torsionbars).
+    Torsion,
+}
+
+/// A multi-node element ([`crate::elements`]). Unused node slots are `u32::MAX`.
+/// Stiffness in N·m/rad, damping in N·m·s/rad, deform and strength as moments
+/// (N·m); the rest angle is the spawn shape's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SoftElement {
+    pub kind: ElementKind,
+    pub nodes: [u32; 4],
+    pub spring: f32,
+    pub damp: f32,
+    #[serde(with = "inf_f32")]
+    pub deform: f32,
+    #[serde(with = "inf_f32")]
+    pub strength: f32,
+    pub break_group: u32,
+}
+
+impl Default for SoftElement {
+    fn default() -> Self {
+        Self {
+            kind: ElementKind::Lbeam,
+            nodes: [u32::MAX; 4],
+            spring: 0.0,
+            damp: 0.0,
+            deform: f32::INFINITY,
+            strength: f32::INFINITY,
+            break_group: 0,
+        }
+    }
+}
+
+/// A rail: a polyline of nodes slidenodes ride on (JBeam rails).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SoftRail {
+    pub name: String,
+    pub nodes: Vec<u32>,
+    pub looped: bool,
+    /// The ends hold the slidenode (else it runs off and detaches).
+    pub capped: bool,
+}
+
+/// A node held to a rail, free along it (JBeam slidenodes).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SoftSlideNode {
+    pub node: u32,
+    pub rail: u32,
+    pub attached: bool,
+    /// Distance from the rail before it pulls (m).
+    pub tolerance: f32,
+    pub spring: f32,
+    pub damp: f32,
+    /// Force at which the node comes off the rail; at the caps, `cap_strength`.
+    #[serde(with = "inf_f32")]
+    pub strength: f32,
+    #[serde(with = "inf_f32")]
+    pub cap_strength: f32,
+}
+
+impl Default for SoftSlideNode {
+    fn default() -> Self {
+        Self {
+            node: 0,
+            rail: 0,
+            attached: true,
+            tolerance: 0.0,
+            spring: 4_300_000.0,
+            damp: 0.0,
+            strength: f32::INFINITY,
+            cap_strength: f32::INFINITY,
         }
     }
 }
@@ -329,6 +424,10 @@ pub struct SoftVehicleDesc {
     pub nodes: Vec<SoftNode>,
     pub beams: Vec<SoftBeam>,
     pub triangles: Vec<SoftTriangle>,
+    /// LBEAMs and torsion bars.
+    pub elements: Vec<SoftElement>,
+    pub rails: Vec<SoftRail>,
+    pub slidenodes: Vec<SoftSlideNode>,
     pub wheels: Vec<SoftWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_torque: Option<f32>,

@@ -260,6 +260,12 @@ impl SoftHost {
             })
             .collect();
         backend.write_soft_slots(l.beam_base + BEAM_STRIDE * first_beam, &words);
+        let extra: Vec<Slot> = packed
+            .beams
+            .iter()
+            .map(|b| [b.spring_exp.to_bits(), b.damp_exp.to_bits(), 0, 0])
+            .collect();
+        backend.write_soft_slots(l.beam_extra_base + first_beam, &extra);
         self.beams_used += packed.beams.len() as u32;
         // Triangles (static): global particle indices, owner and collide flag.
         let first_tri = self.tris_used;
@@ -713,7 +719,12 @@ impl SoftHost {
                 l.origin_base,
                 st.contact_push_out.max(0.0).to_bits(),
             ],
-            [st.displacement_bound.clamp(0.0, 0.49).to_bits(), 0, 0, 0],
+            [
+                st.displacement_bound.clamp(0.0, 0.49).to_bits(),
+                l.beam_extra_base,
+                0,
+                0,
+            ],
         ];
         backend.write_soft_slots(0, &header);
     }

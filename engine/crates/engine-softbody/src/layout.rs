@@ -28,6 +28,7 @@
 //!                        position at the step start, inertial target, where its
 //!                        contacts were detected
 //! originBase + s         soft body s's local-frame origin (whole metres)
+//! beamExtraBase + e      beam e: [expansion spring, expansion damping] (anisotropic)
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -206,6 +207,8 @@ pub struct SoftLayout {
     pub local_base: u32,
     /// Per soft body: the origin of its local frame.
     pub origin_base: u32,
+    /// Per beam: [expansion spring, expansion damping] (anisotropic beams).
+    pub beam_extra_base: u32,
     pub total_slots: u32,
 }
 
@@ -267,7 +270,8 @@ impl SoftCapacity {
             pair_cache_base,
             local_base,
             origin_base,
-            total_slots: origin_base + self.max_bodies,
+            beam_extra_base: origin_base + self.max_bodies,
+            total_slots: origin_base + self.max_bodies + self.max_beams,
         }
     }
 
@@ -395,7 +399,8 @@ mod tests {
         assert_eq!(l.tri_extra_base + c.max_triangles, l.pair_cache_base);
         assert_eq!(l.pair_cache_base + c.max_particles, l.local_base);
         assert_eq!(l.local_base + LOCAL_STRIDE * c.max_particles, l.origin_base);
-        assert_eq!(l.origin_base + c.max_bodies, l.total_slots);
+        assert_eq!(l.origin_base + c.max_bodies, l.beam_extra_base);
+        assert_eq!(l.beam_extra_base + c.max_beams, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }

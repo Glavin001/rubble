@@ -17,7 +17,7 @@
 //! This replaces "Rubble at 960 Hz × 30" as the reference: that shares the
 //! implicit solver's biases (backward Euler's damping, unconverged sweeps).
 
-use crate::desc::SoftVehicleDesc;
+use crate::desc::{ElementKind, SoftVehicleDesc};
 use crate::layout::{BEAM_BROKEN, BEAM_YIELDED};
 use crate::model::{plastic_update, readout_force_rate, BeamT};
 use crate::pack::{pack_soft, Placement, SpawnOptions};
@@ -107,6 +107,67 @@ pub struct OracleTri {
     pub group_beam: Option<u32>,
     /// Its nodes' shared self-collision group (0 = none or mixed).
     pub group: u32,
+}
+
+/// An LBEAM or torsion bar in the oracle (global node indices).
+#[derive(Clone, Copy, Debug)]
+pub struct OracleElement {
+    pub kind: ElementKind,
+    pub nodes: [u32; 4],
+    pub spring: f64,
+    pub damp: f64,
+    pub deform: f64,
+    pub strength: f64,
+    /// Rest angle (moves with plasticity).
+    pub rest: f64,
+    pub broken: bool,
+    pub yielded: bool,
+}
+
+impl OracleElement {
+    pub fn count(&self) -> usize {
+        match self.kind {
+            ElementKind::Lbeam => 3,
+            ElementKind::Torsion => 4,
+        }
+    }
+
+    pub fn angle(&self, x: &[DVec3]) -> f64 {
+        let p = |i: usize| x[self.nodes[i] as usize];
+        match self.kind {
+            ElementKind::Lbeam => crate::elements::angle(p(0), p(1), p(2)),
+            ElementKind::Torsion => crate::elements::dihedral([p(0), p(1), p(2), p(3)]),
+        }
+    }
+
+    /// ∂angle/∂x per node.
+    pub fn jacobian(&self, x: &[DVec3]) -> [DVec3; 4] {
+        let p = |i: usize| x[self.nodes[i] as usize];
+        match self.kind {
+            ElementKind::Lbeam => {
+                // k = 1 and a rest one radian off gives ∂θ/∂x itself.
+                let th = crate::elements::angle(p(0), p(1), p(2));
+                let g = crate::elements::lbeam_gradient(p(0), p(1), p(2), th - 1.0, 1.0);
+                [g[0], g[1], g[2], DVec3::ZERO]
+            }
+            ElementKind::Torsion => crate::elements::dihedral_jacobian([p(0), p(1), p(2), p(3)]),
+        }
+    }
+}
+
+/// A slidenode on its rail in the oracle (global node indices).
+#[derive(Clone, Debug)]
+pub struct OracleSlide {
+    pub node: u32,
+    pub rail: Vec<u32>,
+    pub looped: bool,
+    pub capped: bool,
+    pub attached: bool,
+    pub tolerance: f64,
+    pub spring: f64,
+    pub damp: f64,
+    pub strength: f64,
+    pub cap_strength: f64,
 }
 
 /// One vehicle's ranges in the oracle's arrays.
@@ -289,6 +350,10 @@ pub struct ExplicitSim {
     pub tris: Vec<OracleTri>,
     pub bodies: Vec<OracleBody>,
     pub obstacles: Vec<Obstacle>,
+    /// LBEAMs and torsion bars (global node indices) with their plastic state.
+    pub elements: Vec<OracleElement>,
+    /// Slidenodes on rails (global node indices).
+    pub slides: Vec<OracleSlide>,
     pub settings: ExplicitSettings,
     /// (node, triangle) → the side (±1) the node came from.
     pub pairs: HashMap<(u32, u32), f64>,
@@ -329,6 +394,8 @@ impl ExplicitSim {
             tris: Vec::new(),
             bodies: Vec::new(),
             obstacles: Vec::new(),
+            elements: Vec::new(),
+            slides: Vec::new(),
             settings,
             pairs: HashMap::new(),
             excluded: Default::default(),
@@ -444,6 +511,37 @@ impl ExplicitSim {
                 }
             }
         }
+        for e in &desc.elements {
+            let nodes = e.nodes.map(|k| if k == u32::MAX { k } else { k + first });
+            let mut el = OracleElement {
+                kind: e.kind,
+                nodes,
+                spring: f64::from(e.spring),
+                damp: f64::from(e.damp),
+                deform: f64::from(e.deform),
+                strength: f64::from(e.strength),
+                rest: 0.0,
+                broken: false,
+                yielded: false,
+            };
+            el.rest = el.angle(&self.x);
+            self.elements.push(el);
+        }
+        for sn in &desc.slidenodes {
+            let rail = &desc.rails[sn.rail as usize];
+            self.slides.push(OracleSlide {
+                node: sn.node + first,
+                rail: rail.nodes.iter().map(|&k| k + first).collect(),
+                looped: rail.looped,
+                capped: rail.capped,
+                attached: sn.attached,
+                tolerance: f64::from(sn.tolerance),
+                spring: f64::from(sn.spring),
+                damp: f64::from(sn.damp),
+                strength: f64::from(sn.strength),
+                cap_strength: f64::from(sn.cap_strength),
+            });
+        }
         self.bodies.push(rec);
         self.grid.fresh = 0;
         self.hz = self.settings.hz.max(self.stable_hz());
@@ -470,6 +568,26 @@ impl ExplicitSim {
             for n in [b.a, b.b] {
                 ksum[n as usize] += k;
                 csum[n as usize] += b.damp * self.settings.damping_scale;
+            }
+        }
+        // Elements: an angular spring k over an arm L is k/L² across it.
+        for e in &self.elements {
+            let n = e.count();
+            for i in 0..n {
+                let arm = (0..n)
+                    .filter(|&j| j != i)
+                    .map(|j| (self.x[e.nodes[i] as usize] - self.x[e.nodes[j] as usize]).length())
+                    .fold(f64::MAX, f64::min)
+                    .max(1e-3);
+                ksum[e.nodes[i] as usize] += 4.0 * e.spring / (arm * arm);
+                csum[e.nodes[i] as usize] +=
+                    4.0 * e.damp * self.settings.damping_scale / (arm * arm);
+            }
+        }
+        for sl in &self.slides {
+            for k in std::iter::once(sl.node).chain(sl.rail.iter().copied()) {
+                ksum[k as usize] += sl.spring;
+                csum[k as usize] += sl.damp;
             }
         }
         let mut hz: f64 = 0.0;
@@ -546,6 +664,8 @@ impl ExplicitSim {
                 }
             }
         }
+        self.element_forces(&mut f);
+        self.slide_forces(&mut f);
         self.obstacle_forces(&mut f);
         self.triangle_forces(&mut f);
         for i in 0..n {
@@ -561,6 +681,99 @@ impl ExplicitSim {
         self.yielded_events += u64::from(rep.yielded);
         self.broken_events += u64::from(rep.broke);
         rep
+    }
+
+    /// LBEAMs and torsion bars: −k(angle − rest)∂angle/∂x and an angular dashpot,
+    /// with rest-angle plasticity and breaking every substep (as the beams).
+    fn element_forces(&mut self, f: &mut [DVec3]) {
+        let st = self.settings;
+        for e in &mut self.elements {
+            if e.broken {
+                continue;
+            }
+            let ang = e.angle(&self.x);
+            let err = match e.kind {
+                ElementKind::Lbeam => ang - e.rest,
+                ElementKind::Torsion => crate::elements::wrap(ang - e.rest),
+            };
+            if st.plasticity {
+                let (y, b) = crate::elements::angular_plastic(
+                    &mut e.rest,
+                    &mut e.deform,
+                    e.strength,
+                    e.spring,
+                    err,
+                );
+                e.yielded |= y;
+                if b && st.breaking {
+                    e.broken = true;
+                    continue;
+                }
+            }
+            let err = match e.kind {
+                ElementKind::Lbeam => ang - e.rest,
+                ElementKind::Torsion => crate::elements::wrap(ang - e.rest),
+            };
+            let jac = e.jacobian(&self.x);
+            let n = e.count();
+            let rate: f64 = (0..n)
+                .map(|i| jac[i].dot(self.v[e.nodes[i] as usize]))
+                .sum();
+            let torque = e.spring * err + e.damp * st.damping_scale * rate;
+            for i in 0..n {
+                f[e.nodes[i] as usize] -= jac[i] * torque;
+            }
+        }
+    }
+
+    /// Slidenodes: a spring to the rail across it (outside the tolerance), the
+    /// reaction on the rail's segment, end caps; it comes off past its strength,
+    /// or off an uncapped end.
+    fn slide_forces(&mut self, f: &mut [DVec3]) {
+        for sl in &mut self.slides {
+            if !sl.attached {
+                continue;
+            }
+            let rail: Vec<DVec3> = sl.rail.iter().map(|&k| self.x[k as usize]).collect();
+            let p = self.x[sl.node as usize];
+            let (q, t, seg, u) = crate::elements::rail_closest(p, &rail, sl.looped);
+            let last = rail.len() - 2;
+            let off_end = !sl.looped
+                && ((seg == 0 && u <= 0.0 && (p - q).dot(t) < -1e-9)
+                    || (seg == last && u >= 1.0 && (p - q).dot(t) > 1e-9));
+            if off_end && !sl.capped {
+                sl.attached = false;
+                continue;
+            }
+            let d = p - q;
+            let along = if off_end { DVec3::ZERO } else { t * d.dot(t) };
+            let perp = d - along;
+            let len = perp.length();
+            if len <= sl.tolerance || len < 1e-12 {
+                continue;
+            }
+            let dir = perp / len;
+            let (ia, ib) = (
+                sl.rail[seg] as usize,
+                sl.rail[(seg + 1) % sl.rail.len()] as usize,
+            );
+            let vq = self.v[ia] * (1.0 - u) + self.v[ib] * u;
+            let rel = (self.v[sl.node as usize] - vq).dot(dir);
+            let force = sl.spring * (len - sl.tolerance) + sl.damp * rel;
+            let limit = if off_end {
+                sl.cap_strength
+            } else {
+                sl.strength
+            };
+            if force.abs() > limit {
+                sl.attached = false;
+                continue;
+            }
+            let fv = dir * force;
+            f[sl.node as usize] -= fv;
+            f[ia] += fv * (1.0 - u);
+            f[ib] += fv * u;
+        }
     }
 
     fn contact_damping(&self, m: f64) -> f64 {
@@ -887,6 +1100,8 @@ mod tests {
             lambda: 0.0,
             deform_t: f64::INFINITY,
             force: 0.0,
+            spring_exp: 1.0e4,
+            damp_exp: 0.0,
         });
         sim.bodies.push(OracleBody {
             nodes: 2,
