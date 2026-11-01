@@ -431,3 +431,25 @@ runs are 3.05 (JS) and 2.95 (World), and the best runs differ by 10-20 %. The
 terrain work is identical. On top of it, World copies the open areas' live
 heights back every step, and the page reads the buggy's chassis with
 `readBodies` every step.
+
+## 110k ring with sleep on (demo.html)
+
+`demo.html?scene=ring110k&sleep=on` in the page's own loop
+(`tools/ring-sleep.js`). The JS host's figures, before demo.html moves:
+
+| Time | Step | Awake | GPU ms/step | Render ms/frame |
+|---|---|---|---|---|
+| 2 s | 176 | 38,057 | 9.7 | 1.7 |
+| 8 s (ball through) | 537 | 53,731 | 9.9 | 1.6 |
+| 20 s | 1,257 | 506 | 5.0 | 1.7 |
+| 60 s | 3,779 | 506 | 8.8 | 1.5 |
+| 300 s | 18,054 | 506 | 9.3 | 1.4 |
+
+- **It never fully sleeps.** 506 bodies stay awake for at least five minutes.
+- **A mostly-asleep step still costs 5-9 ms.** The JS host runs passes over all
+  110k bodies, and the cost grows while the awake count holds steady.
+- **Drawing is cheap.** Drawing the 110k boxes takes about 1.4 ms a frame, so a
+  step that costs nothing at rest would allow 600+ FPS.
+
+On `World`, a fully asleep world skips the GPU step entirely, and a mostly asleep
+one should cost in proportion to its awake bodies.
