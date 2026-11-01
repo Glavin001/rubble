@@ -515,7 +515,9 @@ impl World {
             guidance: def.guidance,
         };
         let (info, device, queue) = match gpu {
-            GpuContext::Default => engine_webgpu::default_device()?,
+            GpuContext::Default => {
+                engine_webgpu::default_device_with(def.gpu_timing != GpuTiming::Off)?
+            }
             GpuContext::Shared {
                 info,
                 device,

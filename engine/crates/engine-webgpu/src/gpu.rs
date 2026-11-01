@@ -361,6 +361,14 @@ fn persistent_entry(name: &str) -> &str {
 
 /// A high-performance adapter's device with its full limits.
 pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
+    default_device_with(false)
+}
+
+/// [`default_device`], also with timestamp queries when `timestamps` and the
+/// adapter has them (`WorldDef::gpu_timing`).
+pub fn default_device_with(
+    timestamps: bool,
+) -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL;
     let instance = wgpu::Instance::new(desc);
@@ -376,13 +384,14 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
             label: Some("engine-webgpu-sim"),
             // Per-phase GPU timing (`RUBBLE_GPU_TIMING=1`, and the terrain's
             // `RUBBLE_TERRAIN_TIMING` / `RUBBLE_TERRAIN_GPU_MS`) needs timestamp queries.
-            required_features: if [
-                "RUBBLE_GPU_TIMING",
-                "RUBBLE_TERRAIN_TIMING",
-                "RUBBLE_TERRAIN_GPU_MS",
-            ]
-            .iter()
-            .any(|k| std::env::var(k).is_ok_and(|v| v == "1"))
+            required_features: if timestamps
+                || [
+                    "RUBBLE_GPU_TIMING",
+                    "RUBBLE_TERRAIN_TIMING",
+                    "RUBBLE_TERRAIN_GPU_MS",
+                ]
+                .iter()
+                .any(|k| std::env::var(k).is_ok_and(|v| v == "1"))
             {
                 adapter.features()
                     & (wgpu::Features::TIMESTAMP_QUERY

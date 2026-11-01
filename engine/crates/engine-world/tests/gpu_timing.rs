@@ -5,8 +5,7 @@
 use rubble::*;
 
 fn world(mode: GpuTiming) -> (World, BodyId) {
-    // The default device asks for timestamp queries under this variable.
-    std::env::set_var("RUBBLE_GPU_TIMING", "1");
+    // `gpu_timing` asks the default device for timestamp queries.
     let mut w = World::new(
         GpuContext::Default,
         &WorldDef {
