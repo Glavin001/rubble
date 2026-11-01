@@ -47,6 +47,17 @@ fn world_for(asset: &DestructibleAssetDesc, offset: [f32; 3]) -> World {
         contacts: ContactStorage::Canonical,
         ..WorldDef::default()
     };
+    // THRESHOLD_CARRY=on|off (probe): force the resting-pair carry (`EngineFeatures::carry_rest`).
+    let mut def = def;
+    // THRESHOLD_FEATURES_ENV=1: the `ENGINE_*` feature controls (A/B runs).
+    if std::env::var("THRESHOLD_FEATURES_ENV").is_ok() {
+        def.features = engine_webgpu::EngineFeatures::from_env();
+    }
+    match std::env::var("THRESHOLD_CARRY").as_deref() {
+        Ok("on") => def.features.carry_rest = true,
+        Ok("off") => def.features.carry_rest = false,
+        _ => {}
+    }
     let mut w = World::new(GpuContext::Default, &def).unwrap();
     let stress = asset.stress.as_ref().expect("stress source");
     if let Some(h) = stress.ground_height() {
@@ -802,7 +813,7 @@ fn sleep_policy_ensemble() {
     let (asset, lab) = house();
     let delay = std::env::var("ENSEMBLE_DELAY").unwrap_or_else(|_| "0".into());
     let only = std::env::var("ENSEMBLE_ONLY").ok();
-    let policies: [(&str, &[(&str, &str)]); 5] = [
+    let policies: [(&str, &[(&str, &str)]); 7] = [
         ("never asleep", &[]),
         (
             "start asleep, never re-sleep (Unreal's town)",
@@ -821,6 +832,14 @@ fn sleep_policy_ensemble() {
             &[("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1")],
         ),
         ("sleep, archive", &[("THRESHOLD_SLEEP", "1")]),
+        (
+            "carry on: sleep, archive, wake on touch",
+            &[("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1"), ("THRESHOLD_CARRY", "on")],
+        ),
+        (
+            "carry off: sleep, archive, wake on touch",
+            &[("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1"), ("THRESHOLD_CARRY", "off")],
+        ),
     ];
     let stats = |v: &[f64]| {
         let n = v.len() as f64;
@@ -839,6 +858,7 @@ fn sleep_policy_ensemble() {
             "THRESHOLD_SLEEP",
             "THRESHOLD_WAKE_ON_TOUCH",
             "THRESHOLD_START_ASLEEP",
+            "THRESHOLD_CARRY",
         ] {
             std::env::remove_var(k);
         }
