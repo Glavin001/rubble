@@ -6,7 +6,8 @@
 //   STEPS=300 WARM=60 node ... --json out.json
 //
 // SHOT=<dir> saves a screenshot after SHOT_MS of the page's own loop instead.
-// READY=<expr> also counts the page as ready when <expr> is true.
+// READY=<expr> also counts the page as ready when <expr> is true; READY_S=<s> waits that
+// long for it (default 180).
 // CHECK=1 runs window.__check() (or the expression EXPR) instead and prints its result.
 //
 // Prints, per page, ms per step (wall time of frame-locked automation steps, which
@@ -79,7 +80,7 @@ const results = [];
 for (const page of pages) {
   await send('Page.navigate', { url: `${base}/${page}` });
   let ready = false;
-  for (let i = 0; i < 1800 && !ready; i++) {
+  for (let i = 0; i < 10 * Number(process.env.READY_S || 180) && !ready; i++) {
     const s = await evaluate('JSON.stringify({ready: ' + (process.env.READY || 'false') + ' || !!window.__ready || (typeof window.__step === "function" && !!window.__vehicleState?.()), failed: window.__failed || null})').catch(() => null);
     const st = s ? JSON.parse(s) : {};
     if (st.failed) throw new Error(`${page}: ${st.failed}`);
