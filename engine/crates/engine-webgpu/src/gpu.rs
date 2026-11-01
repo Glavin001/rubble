@@ -41,6 +41,64 @@ struct Pipe {
     bindings: Vec<u32>,
 }
 
+/// One kernel's pipeline and bind group over `bufs`.
+fn build_pipe(device: &wgpu::Device, name: &str, wgsl: String, bufs: &[wgpu::Buffer]) -> Pipe {
+    let binds = bindings_of(&wgsl);
+    let mut entries = Vec::new();
+    for b in &binds {
+        let dynamic = b.index == 22;
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: b.index,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: if b.uniform {
+                    wgpu::BufferBindingType::Uniform
+                } else {
+                    wgpu::BufferBindingType::Storage { read_only: false }
+                },
+                has_dynamic_offset: dynamic,
+                min_binding_size: if dynamic {
+                    std::num::NonZeroU64::new(16)
+                } else {
+                    None
+                },
+            },
+            count: None,
+        });
+    }
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(name),
+        entries: &entries,
+    });
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(name),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(name),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(name),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            }),
+        ),
+        module: &module,
+        entry_point: None,
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let bindings: Vec<u32> = binds.iter().map(|b| b.index).collect();
+    let bind = make_bind_group(device, name, &layout, &bindings, bufs);
+    Pipe {
+        pipeline,
+        bind,
+        dynamic_pass: binds.iter().any(|b| b.index == 22),
+        layout,
+        bindings,
+    }
+}
+
 fn make_bind_group(
     device: &wgpu::Device,
     label: &str,
@@ -176,6 +234,8 @@ pub struct WgpuSim {
     capacity: WorldCapacity,
     params: AvbdParams,
     pipes: HashMap<String, Pipe>,
+    /// Kernels compiled on first use: name -> WGSL (`ensure_motion_pipes`).
+    deferred_pipes: HashMap<String, String>,
     bufs: Vec<wgpu::Buffer>,
     body_count: u32,
     collider_count: u32,
@@ -705,6 +765,7 @@ impl WgpuSim {
 
         let shaders = crate::WebGpuWorld::compile_shaders_report();
         let mut pipes = HashMap::new();
+        let mut deferred_pipes = HashMap::new();
         for (name, canonical) in &shaders {
             // Persistent variants load under their canonical aliases; reuse-copy
             // entries keep their own names (they have no canonical twin).
@@ -736,63 +797,13 @@ impl WgpuSim {
                 .as_ref()
                 .map_err(|e| anyhow::anyhow!("{entry}: {e}"))?
                 .clone();
-            let binds = bindings_of(&wgsl);
-            let mut entries = Vec::new();
-            for b in &binds {
-                let dynamic = b.index == 22;
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: b.index,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: if b.uniform {
-                            wgpu::BufferBindingType::Uniform
-                        } else {
-                            wgpu::BufferBindingType::Storage { read_only: false }
-                        },
-                        has_dynamic_offset: dynamic,
-                        min_binding_size: if dynamic {
-                            std::num::NonZeroU64::new(16)
-                        } else {
-                            None
-                        },
-                    },
-                    count: None,
-                });
+            // The motion kernels (characters, queries, projectiles) compile when a world
+            // first has any (`ensure_motion_pipes`): most worlds never run them.
+            if rigid_plan::CHARACTER_ENTRIES.contains(&name.as_str()) {
+                deferred_pipes.insert(name.clone(), wgsl);
+                continue;
             }
-            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some(&name),
-                entries: &entries,
-            });
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(&name),
-                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-            });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(&name),
-                layout: Some(
-                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some(&name),
-                        bind_group_layouts: &[Some(&layout)],
-                        immediate_size: 0,
-                    }),
-                ),
-                module: &module,
-                entry_point: None,
-                compilation_options: Default::default(),
-                cache: None,
-            });
-            let bindings: Vec<u32> = binds.iter().map(|b| b.index).collect();
-            let bind = make_bind_group(&device, name, &layout, &bindings, &bufs);
-            pipes.insert(
-                name.clone(),
-                Pipe {
-                    pipeline,
-                    bind,
-                    dynamic_pass: binds.iter().any(|b| b.index == 22),
-                    layout,
-                    bindings,
-                },
-            );
+            pipes.insert(name.clone(), build_pipe(&device, name, wgsl, &bufs));
         }
 
         let _ = mats;
@@ -843,6 +854,7 @@ impl WgpuSim {
             capacity,
             params: AvbdParams::default(),
             pipes,
+            deferred_pipes,
             bufs,
             body_count: 0,
             collider_count: 0,
@@ -2431,9 +2443,21 @@ impl WgpuSim {
         self.encode_dispatches_hooked(enc, cmds, None);
     }
 
+    /// Compile the motion kernels (characters, queries, projectiles), deferred at
+    /// creation, the first time a step needs them.
+    fn ensure_motion_pipes(&mut self) {
+        for (name, wgsl) in std::mem::take(&mut self.deferred_pipes) {
+            let pipe = build_pipe(&self.device, &name, wgsl, &self.bufs);
+            self.pipes.insert(name, pipe);
+        }
+    }
+
     /// [`Self::encode_dispatches`], with `hook` encoded into `enc` where the plan marks
     /// the end of phase `hook.0` (the step's pass ends before it and resumes after).
     fn encode_dispatches_hooked(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) {
+        if self.character_count() > 0 || self.query_count > 0 || self.projectile_count() > 0 {
+            self.ensure_motion_pipes();
+        }
         let segments = self.encode_passes(enc, cmds, hook);
         self.timed_segments = segments;
     }
@@ -2490,7 +2514,11 @@ impl WgpuSim {
             match *c {
                 // Native per-phase marks (`RUBBLE_GPU_TIMING`): a mark between passes.
                 rigid_plan::Cmd::Phase { name } if self.marks.is_some() => {
-                    pass = None;
+                    // Ends the pass (its borrow of `enc`) before the mark.
+                    #[allow(unused_assignments)]
+                    {
+                        pass = None;
+                    }
                     self.marks.as_ref().expect("marks").mark(enc, name);
                     segments.push(name);
                     dispatched = false;
