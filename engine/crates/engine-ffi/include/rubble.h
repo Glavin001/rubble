@@ -1242,6 +1242,18 @@ enum RbResult rbWorld_Step(struct RbWorld *world);
 // (optional): how many kernels this call built.
 enum RbResult rbWorld_Prewarm(struct RbWorld *world, uint32_t groups, uint32_t *out_built);
 
+// `rbWorld_Prewarm` on background threads, several kernels at once: returns
+// at once, so a loading screen keeps animating. Poll
+// `rbWorld_GetPrewarmProgress` each frame; the world can step meanwhile (a step
+// that needs a kernel still compiling waits for that one).
+enum RbResult rbWorld_PrewarmAsync(struct RbWorld *world, uint32_t groups);
+
+// Progress of the world's background prewarms: kernels compiled so far and in
+// all (`done == total` when finished; both 0 when none was started).
+enum RbResult rbWorld_GetPrewarmProgress(struct RbWorld *world,
+                                         uint32_t *out_done,
+                                         uint32_t *out_total);
+
 // Results of finished steps. `coalesce`: fold every ready step into one
 // frame (latest poses, earliest previous poses, all events). Otherwise hand
 // out one step per call; `has_frame` is false when none is ready. `wait`:

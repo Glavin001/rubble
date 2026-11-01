@@ -28,11 +28,15 @@ int main(void) {
     RbWorld *world = NULL;
     check(rbCreateWorld(&wd, &world), "rbCreateWorld");
     /* Kernels compile on the first step that runs them; a host that will add
-     * characters later can compile theirs now (a loading screen). */
-    uint32_t prewarmed = 0;
-    check(rbWorld_Prewarm(world, RB_KERNELS_CHARACTERS, &prewarmed), "rbWorld_Prewarm");
-    if (prewarmed != 2) {
-        fprintf(stderr, "prewarm built %u character kernels, expected 2\n", prewarmed);
+     * characters later can compile theirs now, in the background, while a
+     * loading screen keeps drawing (here: until it reports done). */
+    check(rbWorld_PrewarmAsync(world, RB_KERNELS_CHARACTERS), "rbWorld_PrewarmAsync");
+    uint32_t done = 0, total = 0;
+    do {
+        check(rbWorld_GetPrewarmProgress(world, &done, &total), "rbWorld_GetPrewarmProgress");
+    } while (done < total);
+    if (total != 2) {
+        fprintf(stderr, "prewarm compiled %u character kernels, expected 2\n", total);
         return 1;
     }
 

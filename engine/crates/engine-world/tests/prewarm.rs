@@ -58,3 +58,25 @@ fn a_world_builds_only_the_kernels_it_runs_until_prewarmed() {
     }
     w.poll_blocking().unwrap();
 }
+
+#[test]
+fn a_background_prewarm_reports_progress_while_the_world_steps() {
+    let mut w = world();
+    let p = w.prewarm_async(KernelGroups::VEHICLES | KernelGroups::PROJECTILES);
+    let (_, total) = p.progress();
+    assert!(total > 2, "the vehicle kernels and projectile_step: {total}");
+    // The world keeps stepping while the kernels compile.
+    let mut steps = 0;
+    while !p.is_done() {
+        w.step().unwrap();
+        w.poll().unwrap();
+        steps += 1;
+        assert!(steps < 100_000, "the prewarm never finished");
+    }
+    w.poll_blocking().unwrap();
+    assert_eq!(p.progress(), (total, total));
+    assert!(w.sim().kernel_is_built("projectile_step"));
+    assert!(w.sim().kernel_is_built("vehicle_iterate"));
+    assert!(!w.sim().kernel_is_built("char_move"));
+    assert_eq!(w.prewarm(KernelGroups::VEHICLES | KernelGroups::PROJECTILES), 0);
+}

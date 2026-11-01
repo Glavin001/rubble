@@ -833,6 +833,8 @@ pub struct RbWorld {
     /// Joints whose drive is a length (prismatic, distance); the rest drive
     /// angles (`rbJoint_SetDrive`).
     linear_joints: std::collections::HashSet<u64>,
+    /// Background prewarms (`rbWorld_PrewarmAsync`), their progress summed.
+    prewarms: Vec<Prewarm>,
 }
 
 thread_local! {
@@ -1519,6 +1521,7 @@ pub unsafe extern "C" fn rbCreateWorld(def: *const RbWorldDef, out: *mut *mut Rb
             store: FrameStore::default(),
             pending: VecDeque::new(),
             linear_joints: Default::default(),
+            prewarms: Vec::new(),
         });
         write(out, Box::into_raw(boxed))
     })
@@ -1556,6 +1559,41 @@ pub unsafe extern "C" fn rbWorld_Prewarm(
             *out_built = built as u32;
         }
         Ok(())
+    })
+}
+
+/// `rbWorld_Prewarm` on background threads, several kernels at once: returns
+/// at once, so a loading screen keeps animating. Poll
+/// `rbWorld_GetPrewarmProgress` each frame; the world can step meanwhile (a step
+/// that needs a kernel still compiling waits for that one).
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_PrewarmAsync(world: *mut RbWorld, groups: u32) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let p = w.world.prewarm_async(KernelGroups(groups));
+        w.prewarms.retain(|p| !p.is_done());
+        w.prewarms.push(p);
+        Ok(())
+    })
+}
+
+/// Progress of the world's background prewarms: kernels compiled so far and in
+/// all (`done == total` when finished; both 0 when none was started).
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_GetPrewarmProgress(
+    world: *mut RbWorld,
+    out_done: *mut u32,
+    out_total: *mut u32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let (done, total) = w
+            .prewarms
+            .iter()
+            .map(Prewarm::progress)
+            .fold((0, 0), |(d, t), (a, b)| (d + a, t + b));
+        write(out_done, done as u32)?;
+        write(out_total, total as u32)
     })
 }
 

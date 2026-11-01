@@ -20,7 +20,7 @@ pub use features::{
 };
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    default_device, CharacterHandle, MotionEvent, RingEvents, SimSnapshot, SoftEvents, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
+    default_device, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
     POSES_BINDING, POSE_HEADER_BINDING, POSE_RECORD_BYTES,
 };
 #[cfg(feature = "gpu")]

@@ -25,6 +25,8 @@ use engine_softbody::{
     SoftBackend, SoftCapacity, SoftHandle, SoftHost, SoftSettings, SoftVehicleDesc, SpawnOptions,
 };
 
+use std::sync::Arc;
+
 /// Bindings of the render-pose buffers, after the shared plan's `BIND_COUNT`.
 pub const POSES_BINDING: usize = BIND_COUNT;
 pub const POSE_HEADER_BINDING: usize = BIND_COUNT + 1;
@@ -33,10 +35,10 @@ pub const MOVED_BINDING: usize = BIND_COUNT + 2;
 pub const POSE_RECORD_BYTES: u64 = 32;
 
 struct Pipe {
-    /// Built on the first dispatch ([`Pipe::pipeline`]): a world compiles only the
-    /// kernels it runs, not every character, vehicle, soft-body and terrain kernel.
-    pipeline: std::sync::OnceLock<wgpu::ComputePipeline>,
-    wgsl: String,
+    /// Built on the first dispatch ([`Pipe::pipeline`]) or by a prewarm: a world
+    /// compiles only the kernels it runs, not every character, vehicle, soft-body
+    /// and terrain kernel. Shared with prewarm threads.
+    kernel: Arc<LazyKernel>,
     bind: wgpu::BindGroup,
     dynamic_pass: bool,
     /// Kept so bind groups can be rebuilt when a buffer is replaced (hull growth).
@@ -46,6 +48,20 @@ struct Pipe {
 
 impl Pipe {
     fn pipeline(&self, device: &wgpu::Device, name: &str) -> &wgpu::ComputePipeline {
+        self.kernel.build(device, name)
+    }
+}
+
+/// A kernel's pipeline, compiled once by whichever thread asks first (a step or a
+/// prewarm thread; another thread asking meanwhile waits for that compile).
+struct LazyKernel {
+    pipeline: std::sync::OnceLock<wgpu::ComputePipeline>,
+    wgsl: String,
+    layout: wgpu::BindGroupLayout,
+}
+
+impl LazyKernel {
+    fn build(&self, device: &wgpu::Device, name: &str) -> &wgpu::ComputePipeline {
         self.pipeline.get_or_init(|| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(name),
@@ -66,6 +82,27 @@ impl Pipe {
                 cache: None,
             })
         })
+    }
+}
+
+/// A prewarm running on background threads ([`WgpuSim::prewarm_async`]): poll
+/// [`Self::progress`] each frame to draw a loading screen. Dropping it does not
+/// stop the compile; the world can step meanwhile (a step that needs a kernel
+/// being compiled waits for that one).
+pub struct Prewarm {
+    done: Arc<std::sync::atomic::AtomicUsize>,
+    total: usize,
+}
+
+impl Prewarm {
+    /// Kernels compiled so far, and how many this prewarm compiles in all.
+    pub fn progress(&self) -> (usize, usize) {
+        (self.done.load(std::sync::atomic::Ordering::Acquire), self.total)
+    }
+
+    pub fn is_done(&self) -> bool {
+        let (done, total) = self.progress();
+        done == total
     }
 }
 
@@ -721,8 +758,11 @@ impl WgpuSim {
             pipes.insert(
                 name.clone(),
                 Pipe {
-                    pipeline: std::sync::OnceLock::new(),
-                    wgsl,
+                    kernel: Arc::new(LazyKernel {
+                        pipeline: std::sync::OnceLock::new(),
+                        wgsl,
+                        layout: layout.clone(),
+                    }),
                     bind,
                     dynamic_pass: binds.iter().any(|b| b.index == 22),
                     layout,
@@ -2807,19 +2847,66 @@ impl WgpuSim {
     /// kernel the first time a step runs it), so no later step pays for them.
     /// Blocks while they compile; returns how many were built by this call.
     pub fn prewarm(&self, groups: crate::KernelGroups) -> usize {
-        let mut built = 0;
-        for (name, pipe) in &self.pipes {
-            if groups.covers(name) && pipe.pipeline.get().is_none() {
-                pipe.pipeline(&self.device, name);
-                built += 1;
-            }
+        let todo = self.unbuilt(groups);
+        for (name, kernel) in &todo {
+            kernel.build(&self.device, name);
         }
-        built
+        todo.len()
     }
 
-    /// Whether `kernel`'s pipeline has been built (by a step or [`Self::prewarm`]).
+    /// [`Self::prewarm`] on background threads, several kernels at once: returns
+    /// at once with a [`Prewarm`] whose progress a loading screen polls each frame.
+    /// The world can step meanwhile. On wasm (no threads) it compiles inline.
+    pub fn prewarm_async(&self, groups: crate::KernelGroups) -> Prewarm {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let todo = Arc::new(self.unbuilt(groups));
+        let done = Arc::new(AtomicUsize::new(0));
+        let total = todo.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // The platform compilers (Metal's compiler service, Vulkan and D3D drivers)
+            // build pipelines in parallel; leave the host some cores.
+            let threads = std::thread::available_parallelism()
+                .map_or(2, |n| (n.get() / 2).clamp(1, 4))
+                .min(total);
+            let next = Arc::new(AtomicUsize::new(0));
+            for _ in 0..threads {
+                let (todo, done, next) = (todo.clone(), done.clone(), next.clone());
+                let device = self.device.clone();
+                std::thread::spawn(move || loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((name, kernel)) = todo.get(i) else { break };
+                    kernel.build(&device, name);
+                    done.fetch_add(1, Ordering::Release);
+                });
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        for (name, kernel) in todo.iter() {
+            kernel.build(&self.device, name);
+            done.fetch_add(1, Ordering::Release);
+        }
+        Prewarm { done, total }
+    }
+
+    /// The kernels of `groups` not built yet, slowest first (the largest WGSL), so
+    /// parallel threads finish together.
+    fn unbuilt(&self, groups: crate::KernelGroups) -> Vec<(String, Arc<LazyKernel>)> {
+        let mut todo: Vec<(String, Arc<LazyKernel>)> = self
+            .pipes
+            .iter()
+            .filter(|(name, p)| groups.covers(name) && p.kernel.pipeline.get().is_none())
+            .map(|(name, p)| (name.clone(), p.kernel.clone()))
+            .collect();
+        todo.sort_by(|a, b| b.1.wgsl.len().cmp(&a.1.wgsl.len()).then(a.0.cmp(&b.0)));
+        todo
+    }
+
+    /// Whether `kernel`'s pipeline has been built (by a step or a prewarm).
     pub fn kernel_is_built(&self, kernel: &str) -> bool {
-        self.pipes.get(kernel).is_some_and(|p| p.pipeline.get().is_some())
+        self.pipes
+            .get(kernel)
+            .is_some_and(|p| p.kernel.pipeline.get().is_some())
     }
 
     /// Rebuild the bind groups that use `binding` after its buffer was replaced.
