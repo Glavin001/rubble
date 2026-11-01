@@ -20,22 +20,7 @@ fn sim(d: &engine_softbody::SoftVehicleDesc) -> ExplicitSim {
 /// would let it hinge.
 #[test]
 fn lbeam_holds_an_arm_straight() {
-    let jb = |lbeam: bool| {
-        format!(
-            r#"{{"arm": {{"slotType": "main",
-            "nodes": [["id", "posX", "posY", "posZ"], {{"nodeWeight": 2}},
-                ["r1", 0, 0, 1, {{"fixed": true}}], ["r2", 0, 0, 1.2, {{"fixed": true}}],
-                ["m", 0, -0.5, 1], ["t", 0, -1.0, 1]],
-            "beams": [["id1:", "id2:"], {{"beamSpring": 2000000, "beamDamp": 200}},
-                ["r1", "m"], ["r2", "m"], ["m", "t"]{}]
-            }}}}"#,
-            if lbeam {
-                r#", {"beamType": "|LBEAM", "beamSpring": 20000, "beamDamp": 50}, ["r1", "m", "t"]"#
-            } else {
-                ""
-            }
-        )
-    };
+    let jb = engine_softbody::elements::fixtures::lbeam_arm;
     let droop = |lbeam: bool| {
         let d = load_jbeam(&[("arm.jbeam", &jb(lbeam))], None).unwrap();
         assert_eq!(d.elements.len(), usize::from(lbeam));
@@ -57,13 +42,7 @@ fn lbeam_holds_an_arm_straight() {
 /// one end needs the bar's stiffness k, and the angle returns when released.
 #[test]
 fn torsion_bar_resists_twist() {
-    let jb = r#"{"tb": {"slotType": "main",
-        "nodes": [["id", "posX", "posY", "posZ"], {"nodeWeight": 1},
-            ["a", 1, 0, 0, {"fixed": true}], ["b", 0, 0, 0, {"fixed": true}],
-            ["c", 0, 1, 0, {"fixed": true}], ["d", 1, 1, 0]],
-        "beams": [["id1:", "id2:"], {"beamSpring": 1000000, "beamDamp": 100}, ["c", "d"], ["b", "d"]],
-        "torsionbars": [["id1:", "id2:", "id3:", "id4:"], {"spring": 500, "damp": 5}, ["a", "b", "c", "d"]]
-    }}"#;
+    let jb = engine_softbody::elements::fixtures::TORSION_BAR;
     let d = load_jbeam(&[("tb.jbeam", jb)], None).unwrap();
     assert_eq!(d.elements.len(), 1);
     assert_eq!(d.elements[0].kind, ElementKind::Torsion);
@@ -81,18 +60,7 @@ fn torsion_bar_resists_twist() {
 /// the cap; uncapped, it runs off the end and comes free.
 #[test]
 fn slidenode_slides_to_the_cap_or_off_the_end() {
-    let jb = |capped: bool| {
-        format!(
-            r#"{{"rail": {{"slotType": "main",
-            "nodes": [["id", "posX", "posY", "posZ"], {{"nodeWeight": 1}},
-                ["r0", 0, 0, 1, {{"fixed": true}}], ["r1", 0, -1, 0.5, {{"fixed": true}}],
-                ["r2", 0, -2, 0, {{"fixed": true}}], ["s", 0, -0.2, 0.9]],
-            "rails": {{"slope": {{"links:": ["r0", "r1", "r2"], "looped": false, "capped": {capped}}}}},
-            "slidenodes": [["id:", "railName", "attached", "fixToRail", "tolerance", "spring"],
-                ["s", "slope", true, true, 0, 100000]]
-            }}}}"#
-        )
-    };
+    let jb = |capped: bool| engine_softbody::elements::fixtures::slide_rail(capped, 0.0);
     for capped in [true, false] {
         let d = load_jbeam(&[("r.jbeam", &jb(capped))], None).unwrap();
         assert_eq!(d.rails.len(), 1);

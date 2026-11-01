@@ -118,6 +118,9 @@ uint softLocalBase() { return SU(10u).y; }
 uint softOriginBase() { return SU(10u).z; }
 // Per beam: an anisotropic beam's expansion spring and damping.
 uint softBeamExtraBase() { return SU(11u).y; }
+uint softElementCount() { return SU(11u).z; }
+uint softElementBase() { return SU(11u).w; }
+uint softRailNodeBase() { return SU(12u).x; }
 // Least speed (m/s) at which a soft contact pushes out an overlap it started the
 // step with (SoftSettings::contact_push_out).
 float softPushOut() { return SD(10u).w; }
@@ -1362,6 +1365,215 @@ static const uint SOFT_SKIP = 0u;
 static const uint SOFT_FOLLOW = 1u;
 static const uint SOFT_SOLVE = 2u;
 
+// ---------------------------------------------------------------------------
+// Elements (engine-softbody elements.rs): LBEAMs (the angle at the middle of
+// three nodes), torsion bars (the dihedral of four about the 2–3 axis) and
+// slidenodes on rails. Records at elementBase + 3·k: [nodes, or the slidenode,
+// its rail list start and length, flags], [kind | flags | soft body << 16,
+// spring, damping, rest angle], [deform, strength, tolerance, cap strength].
+// A particle lists the elements it takes part in after its triangles.
+// ---------------------------------------------------------------------------
+static const uint ELEMENT_STRIDE = 3u;
+static const uint ELEMENT_LBEAM = 0u;
+static const uint ELEMENT_TORSION = 1u;
+static const uint ELEMENT_SLIDE = 2u;
+static const uint ELEMENT_BROKEN = 256u;
+static const uint ELEMENT_YIELDED = 512u;
+static const uint SLIDE_LOOPED = 1u;
+static const uint SLIDE_CAPPED = 2u;
+static const uint SLIDE_ATTACHED = 4u;
+static const uint ENTRY_ELEMENT_SHIFT = 18u;
+static const float SOFT_PI = 3.14159265358979;
+
+uint railNode(uint i) { return SU(softRailNodeBase() + (i >> 2))[i & 3u]; }
+float wrapAngle(float a)
+{
+    float t = 2.0 * SOFT_PI;
+    a = a - t * floor((a + SOFT_PI) / t);
+    return a;
+}
+float3 elemPos(uint ob, uint body) { return softLocal(ob + body); }
+float3 elemPos0(uint ob, uint body) { return softLocal0(ob + body); }
+
+// ∂θ/∂(a, m, b) of the angle at m, scaled by s/|u×v| where s is the generalised
+// force; `straight` (θ₀ = π with the arms collinear) takes the limit −1/(|u||v|).
+void lbeamDirs(float3 u, float3 v, out float3 da, out float3 db, out float cross_, out float theta)
+{
+    float lu2 = max(dot(u, u), 1e-12), lv2 = max(dot(v, v), 1e-12);
+    cross_ = length(cross(u, v));
+    theta = atan2(cross_, dot(u, v));
+    da = -(v - u * (dot(u, v) / lu2));
+    db = -(u - v * (dot(u, v) / lv2));
+}
+
+// Dihedral angle of 1–2–3–4 about 2→3 and its Jacobian (Blondel & Karplus);
+// zero Jacobian where a plane is degenerate.
+float dihedralOf(float3 x1, float3 x2, float3 x3, float3 x4, out float3 j1, out float3 j2, out float3 j3, out float3 j4)
+{
+    float3 b1 = x2 - x1, b2 = x3 - x2, b3 = x4 - x3;
+    float3 n1 = cross(b1, b2), n2 = cross(b2, b3);
+    float l1 = dot(n1, n1), l2 = dot(n2, n2), lb = length(b2);
+    float phi = atan2(lb * dot(b1, n2), dot(n1, n2));
+    j1 = float3(0, 0, 0); j2 = j1; j3 = j1; j4 = j1;
+    if (l1 < 1e-18 || l2 < 1e-18 || lb < 1e-9) return phi;
+    j1 = -n1 * (lb / l1);
+    j4 = n2 * (lb / l2);
+    float p = -dot(b1, b2) / (lb * lb), q = -dot(b3, b2) / (lb * lb);
+    j2 = j1 * (p - 1.0) - j4 * q;
+    j3 = j4 * (q - 1.0) - j1 * p;
+    return phi;
+}
+
+// Closest point of p on rail (start, count) of local positions: the point, the
+// unit tangent, the segment's end bodies and the parameter u on it.
+void railClosest(uint ob, uint start, uint count, bool looped, float3 p,
+    out float3 q, out float3 t, out uint ba, out uint bb, out float u, out bool offEnd)
+{
+    uint segs = looped ? count : count - 1u;
+    float best = 1e30;
+    q = p; t = float3(1, 0, 0); ba = railNode(start); bb = ba; u = 0.0;
+    uint bestSeg = 0u;
+    for (uint k = 0u; k < segs; k++)
+    {
+        uint na = railNode(start + k), nb = railNode(start + (k + 1u) % count);
+        float3 a = elemPos(ob, na), b = elemPos(ob, nb);
+        float3 ab = b - a;
+        float l2 = max(dot(ab, ab), 1e-18);
+        float s = clamp(dot(p - a, ab) / l2, 0.0, 1.0);
+        float3 c = a + ab * s;
+        float d = dot(p - c, p - c);
+        if (d < best) { best = d; q = c; t = ab * rsqrt(l2); ba = na; bb = nb; u = s; bestSeg = k; }
+    }
+    offEnd = !looped && ((bestSeg == 0u && u <= 0.0 && dot(p - q, t) < -1e-9)
+        || (bestSeg == segs - 1u && u >= 1.0 && dot(p - q, t) > 1e-9));
+}
+
+// This particle's share (gradient, block) of element k.
+void softElementTerm(uint k, uint body, uint ob, float h, inout float3 g, inout float3x3 H)
+{
+    uint q = softElementBase() + ELEMENT_STRIDE * k;
+    uint4 nodes = SU(q);
+    uint4 r1 = SU(q + 1u);
+    uint kind = r1.x & 255u;
+    if ((r1.x & ELEMENT_BROKEN) != 0u) return;
+    float kk = asfloat(r1.y), c = asfloat(r1.z) * softDampScale(), rest = asfloat(r1.w);
+    float keff = kk + c / h;
+    float3x3 I3 = float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1);
+    if (kind == ELEMENT_LBEAM)
+    {
+        float3 xa = elemPos(ob, nodes.x), xm = elemPos(ob, nodes.y), xb = elemPos(ob, nodes.z);
+        float3 u = xa - xm, v = xb - xm;
+        float3 da, db; float cr, theta;
+        lbeamDirs(u, v, da, db, cr, theta);
+        float3 u0 = elemPos0(ob, nodes.x) - elemPos0(ob, nodes.y), v0 = elemPos0(ob, nodes.z) - elemPos0(ob, nodes.y);
+        float theta0 = atan2(length(cross(u0, v0)), dot(u0, v0));
+        float sGen = kk * (theta - rest) + c / h * (theta - theta0);
+        float lu = length(u), lv = length(v);
+        float ratio;
+        if (cr > 1e-6 * lu * lv) ratio = sGen / cr;
+        // Straight arms with a straight rest: (θ − π)/|u×v| → −1/(|u||v|).
+        else if (abs(rest - SOFT_PI) < 1e-4) ratio = -kk / max(lu * lv, 1e-12);
+        else ratio = 0.0;
+        float3 ga = da * ratio, gb = db * ratio;
+        float3 un = u / max(lu, 1e-9), vn = v / max(lv, 1e-9);
+        float3x3 ha = (I3 - float3x3(un * un.x, un * un.y, un * un.z)) * (keff / max(lu * lu, 1e-12));
+        float3x3 hb = (I3 - float3x3(vn * vn.x, vn * vn.y, vn * vn.z)) * (keff / max(lv * lv, 1e-12));
+        if (body == nodes.x) { g += ga; H += ha; }
+        else if (body == nodes.z) { g += gb; H += hb; }
+        else { g -= ga + gb; H += (ha + hb) * 2.0; }
+        return;
+    }
+    if (kind == ELEMENT_TORSION)
+    {
+        float3 j1, j2, j3, j4, i1, i2, i3, i4;
+        float phi = dihedralOf(elemPos(ob, nodes.x), elemPos(ob, nodes.y), elemPos(ob, nodes.z), elemPos(ob, nodes.w), j1, j2, j3, j4);
+        float phi0 = dihedralOf(elemPos0(ob, nodes.x), elemPos0(ob, nodes.y), elemPos0(ob, nodes.z), elemPos0(ob, nodes.w), i1, i2, i3, i4);
+        float sGen = kk * wrapAngle(phi - rest) + c / h * wrapAngle(phi - phi0);
+        float3 jm = body == nodes.x ? j1 : (body == nodes.y ? j2 : (body == nodes.z ? j3 : j4));
+        g += jm * sGen;
+        H += float3x3(jm * jm.x, jm * jm.y, jm * jm.z) * keff;
+        return;
+    }
+    // Slidenode.
+    if ((nodes.w & SLIDE_ATTACHED) == 0u) return;
+    uint4 r2 = SU(q + 2u);
+    float tol = asfloat(r2.z);
+    float3 p = elemPos(ob, nodes.x);
+    float3 cq, t; uint ba, bb; float uu; bool offEnd;
+    railClosest(ob, nodes.y, nodes.z, (nodes.w & SLIDE_LOOPED) != 0u, p, cq, t, ba, bb, uu, offEnd);
+    float3 d = p - cq;
+    float3 perp = offEnd ? d : d - t * dot(d, t);
+    float len = length(perp);
+    if (len <= tol || len < 1e-9) return;
+    float3 dir = perp / len;
+    // Damping on the change of the across-rail offset this step.
+    float3 p0 = elemPos0(ob, nodes.x);
+    float3 q0 = elemPos0(ob, ba) * (1.0 - uu) + elemPos0(ob, bb) * uu;
+    float rate = (len - dot(p0 - q0, dir)) / h;
+    float f = kk * (len - tol) + c * rate;
+    float3 gn = dir * f;
+    float3x3 hn = (offEnd ? I3 : (I3 - float3x3(t * t.x, t * t.y, t * t.z))) * keff;
+    if (body == nodes.x) { g += gn; H += hn; }
+    else if (body == ba) { g -= gn * (1.0 - uu); H += hn * ((1.0 - uu) * (1.0 - uu)); }
+    else if (body == bb) { g -= gn * uu; H += hn * (uu * uu); }
+}
+
+// Post-step: rest-angle plasticity and breaking (LBEAM, torsion bar), and a
+// slidenode coming off its rail (past its strength, or off an uncapped end).
+void softElementPlastic(uint k)
+{
+    uint q = softElementBase() + ELEMENT_STRIDE * k;
+    uint4 nodes = SU(q);
+    uint4 r1 = SU(q + 1u);
+    if ((r1.x & ELEMENT_BROKEN) != 0u) return;
+    uint s = r1.x >> 16;
+    if (softIsRigid(s)) return;
+    uint ob = asuint(softBodyRec1(s).w) - softBodyRec(s).x;
+    uint kind = r1.x & 255u;
+    float4 r2 = SD(q + 2u);
+    float kk = asfloat(r1.y), rest = asfloat(r1.w);
+    if (kind == ELEMENT_SLIDE)
+    {
+        if ((nodes.w & SLIDE_ATTACHED) == 0u) return;
+        float3 p = elemPos(ob, nodes.x);
+        float3 cq, t; uint ba, bb; float uu; bool offEnd;
+        railClosest(ob, nodes.y, nodes.z, (nodes.w & SLIDE_LOOPED) != 0u, p, cq, t, ba, bb, uu, offEnd);
+        float3 d = p - cq;
+        float len = length(offEnd ? d : d - t * dot(d, t));
+        float f = kk * max(len - r2.z, 0.0);
+        bool capped = (nodes.w & SLIDE_CAPPED) != 0u;
+        bool off = (offEnd && !capped) || f > (offEnd ? r2.y : r2.x) * softThresholdScale();
+        if (off && (softFlags() & SOFT_BREAKING) != 0u)
+            gSoftData[q] = asfloat(uint4(nodes.xyz, nodes.w & ~SLIDE_ATTACHED));
+        return;
+    }
+    float ang, err;
+    if (kind == ELEMENT_LBEAM)
+    {
+        float3 u = elemPos(ob, nodes.x) - elemPos(ob, nodes.y), v = elemPos(ob, nodes.z) - elemPos(ob, nodes.y);
+        ang = atan2(length(cross(u, v)), dot(u, v));
+        err = ang - rest;
+    }
+    else
+    {
+        float3 j1, j2, j3, j4;
+        ang = dihedralOf(elemPos(ob, nodes.x), elemPos(ob, nodes.y), elemPos(ob, nodes.z), elemPos(ob, nodes.w), j1, j2, j3, j4);
+        err = wrapAngle(ang - rest);
+    }
+    float moment = kk * err;
+    float deform = r2.x * softThresholdScale();
+    float carried = abs(moment);
+    uint flags = r1.x;
+    if ((softFlags() & SOFT_PLASTICITY) != 0u && abs(moment) > deform)
+    {
+        rest += sign(err) * (abs(moment) - deform) / kk;
+        carried = deform;
+        flags |= ELEMENT_YIELDED;
+    }
+    if ((softFlags() & SOFT_BREAKING) != 0u && carried > r2.y * softThresholdScale()) flags |= ELEMENT_BROKEN;
+    gSoftData[q + 1u] = asfloat(uint4(flags, r1.y, r1.z, asuint(rest)));
+}
+
 // VBD block of one particle (colour-list entry `ent`), split over `lanes` lanes:
 // this lane's share (lane 0: inertia, rigid edges and its node contact; beams and
 // contact triangles strided over the lanes). The block is the sum of the shares.
@@ -1465,6 +1677,14 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
     }
     // Contacts between bodies: in the world (both sides' world copies).
     softContactsFor(body, ordBase + body, b.position, b.initialPos, ent.y + 2u * nBeams, ent.z >> 16, lane, lanes, g, H);
+    // Elements, after the triangles in the adjacency.
+    uint nElem = ent.w >> ENTRY_ELEMENT_SHIFT;
+    uint elemStart = ent.y + 2u * nBeams + (ent.z >> 16);
+    for (uint k = lane; k < nElem; k += lanes)
+    {
+        uint wi = elemStart + k;
+        softElementTerm(SU(adj + (wi >> 2))[wi & 3u], body, ordBase, h, g, H);
+    }
     return SOFT_SOLVE;
 }
 
@@ -2101,6 +2321,8 @@ void soft_dual(uint3 tid : SV_DispatchThreadID)
 void soft_plastic(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
+    // Elements ride the beams' threads (dispatched one per beam).
+    for (uint k = i; k < softElementCount(); k += max(softBeamCount(), 1u)) softElementPlastic(k);
     if (i >= softBeamCount()) return;
     SoftBeam e = loadBeam(i);
     if (beamBroken(e)) return;

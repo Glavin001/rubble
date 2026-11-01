@@ -11,7 +11,8 @@ use engine_softbody::{
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
-/// [maxBodies, maxBeams, maxParticles, maxColors, maxGroups, maxTriangles, maxObstacles].
+/// [maxBodies, maxBeams, maxParticles, maxColors, maxGroups, maxTriangles, maxObstacles,
+/// maxElements, maxRailNodes] (missing words take the defaults).
 pub(crate) fn soft_capacity(v: &[u32]) -> SoftCapacity {
     let d = SoftCapacity::default();
     let g = |i: usize, def: u32| v.get(i).copied().unwrap_or(def);
@@ -23,6 +24,8 @@ pub(crate) fn soft_capacity(v: &[u32]) -> SoftCapacity {
         max_groups: g(4, d.max_groups),
         max_triangles: g(5, d.max_triangles),
         max_obstacles: g(6, d.max_obstacles),
+        max_elements: g(7, d.max_elements),
+        max_rail_nodes: g(8, d.max_rail_nodes),
     }
 }
 

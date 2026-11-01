@@ -295,3 +295,48 @@ mod tests {
         assert!(b);
     }
 }
+
+/// Small original JBeam fixtures for the element tests (oracle and GPU).
+pub mod fixtures {
+    /// A three-node arm sticking out from two fixed nodes, with (or without) an
+    /// LBEAM at its middle node.
+    pub fn lbeam_arm(lbeam: bool) -> String {
+        format!(
+            r#"{{"arm": {{"slotType": "main",
+            "nodes": [["id", "posX", "posY", "posZ"], {{"nodeWeight": 2}},
+                ["r1", 0, 0, 1, {{"fixed": true}}], ["r2", 0, 0, 1.2, {{"fixed": true}}],
+                ["m", 0, -0.5, 1], ["t", 0, -1.0, 1]],
+            "beams": [["id1:", "id2:"], {{"beamSpring": 2000000, "beamDamp": 200}},
+                ["r1", "m"], ["r2", "m"], ["m", "t"]{}]
+            }}}}"#,
+            if lbeam {
+                r#", {"beamType": "|LBEAM", "beamSpring": 20000, "beamDamp": 50}, ["r1", "m", "t"]"#
+            } else {
+                ""
+            }
+        )
+    }
+
+    /// A free node held by a torsion bar about the fixed b–c axis (1 m arm).
+    pub const TORSION_BAR: &str = r#"{"tb": {"slotType": "main",
+        "nodes": [["id", "posX", "posY", "posZ"], {"nodeWeight": 1},
+            ["a", 1, 0, 0, {"fixed": true}], ["b", 0, 0, 0, {"fixed": true}],
+            ["c", 0, 1, 0, {"fixed": true}], ["d", 1, 1, 0]],
+        "beams": [["id1:", "id2:"], {"beamSpring": 1000000, "beamDamp": 100}, ["c", "d"], ["b", "d"]],
+        "torsionbars": [["id1:", "id2:", "id3:", "id4:"], {"spring": 500, "damp": 5}, ["a", "b", "c", "d"]]
+    }}"#;
+
+    /// A slidenode on a sloped rail of fixed nodes (capped or not), with damping.
+    pub fn slide_rail(capped: bool, damp: f32) -> String {
+        format!(
+            r#"{{"rail": {{"slotType": "main",
+            "nodes": [["id", "posX", "posY", "posZ"], {{"nodeWeight": 1}},
+                ["r0", 0, 0, 1, {{"fixed": true}}], ["r1", 0, -1, 0.5, {{"fixed": true}}],
+                ["r2", 0, -2, 0, {{"fixed": true}}], ["s", 0, -0.2, 0.9]],
+            "rails": {{"slope": {{"links:": ["r0", "r1", "r2"], "looped": false, "capped": {capped}}}}},
+            "slidenodes": [["id:", "railName", "attached", "fixToRail", "tolerance", "spring", "damp"],
+                ["s", "slope", true, true, 0, 100000, {damp}]]
+            }}}}"#
+        )
+    }
+}

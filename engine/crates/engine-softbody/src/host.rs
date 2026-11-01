@@ -51,6 +51,8 @@ pub struct SoftEntry {
     pub adjacency: Vec<Vec<u32>>,
     /// Triangles (relative) touching each node.
     pub tri_adjacency: Vec<Vec<u32>>,
+    /// Per node: the elements (global ids) it takes part in.
+    pub element_adjacency: Vec<Vec<u32>>,
     pub first_tri: u32,
     pub tris: u32,
     /// Ordinal of the first particle across all soft bodies.
@@ -94,6 +96,8 @@ pub struct SoftHost {
     groups_used: u32,
     tris_used: u32,
     particles_used: u32,
+    elements_used: u32,
+    rail_nodes_used: u32,
     /// Thin static obstacles (collider indices) tested against soft triangles.
     obstacles: Vec<u32>,
     /// Steering input per soft body (hydros).
@@ -133,6 +137,8 @@ impl SoftHost {
             beams_used: 0,
             groups_used: 0,
             tris_used: 0,
+            elements_used: 0,
+            rail_nodes_used: 0,
             particles_used: 0,
             obstacles: Vec::new(),
             steer: Vec::new(),
@@ -170,12 +176,10 @@ impl SoftHost {
                 && self.tris_used > 0
                 && (self.entries.len() > 1
                     || !self.obstacles.is_empty()
-                    || self.entries.iter().any(|e| {
-                        e.desc
-                            .nodes
-                            .iter()
-                            .any(|n| n.self_collision && n.collision)
-                    })),
+                    || self
+                        .entries
+                        .iter()
+                        .any(|e| e.desc.nodes.iter().any(|n| n.self_collision && n.collision))),
             dual: self.settings.ramp_start < 1.0,
             sweeps: self.settings.sweeps.max(1),
         }
@@ -205,6 +209,18 @@ impl SoftHost {
         }
         if self.particles_used + desc.nodes.len() as u32 > self.capacity.max_particles {
             return Err("particle capacity exhausted".into());
+        }
+        let new_elements = (desc.elements.len() + desc.slidenodes.len()) as u32;
+        let new_rail_nodes: u32 = desc
+            .slidenodes
+            .iter()
+            .map(|sn| desc.rails[sn.rail as usize].nodes.len() as u32)
+            .sum();
+        if self.elements_used + new_elements > self.capacity.max_elements
+            || self.rail_nodes_used.next_multiple_of(4) + new_rail_nodes
+                > self.capacity.max_rail_nodes
+        {
+            return Err("element (LBEAM, torsion bar, slidenode) capacity exhausted".into());
         }
         if self.tris_used + desc.triangles.len() as u32 > self.capacity.max_triangles {
             return Err("triangle capacity exhausted".into());
@@ -317,7 +333,9 @@ impl SoftHost {
             // Edge beams and a break-group beam (global ids).
             let mut by_edge = std::collections::HashMap::new();
             for (k, b) in desc.beams.iter().enumerate() {
-                by_edge.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(k as u32);
+                by_edge
+                    .entry((b.a.min(b.b), b.a.max(b.b)))
+                    .or_insert(k as u32);
             }
             let extra: Vec<Slot> = desc
                 .triangles
@@ -330,7 +348,11 @@ impl SoftHost {
                             .map_or(SOFT_NONE, |&k| first_beam + k)
                     };
                     let group = (tri.break_group != 0)
-                        .then(|| desc.beams.iter().position(|b| b.break_group == tri.break_group))
+                        .then(|| {
+                            desc.beams
+                                .iter()
+                                .position(|b| b.break_group == tri.break_group)
+                        })
                         .flatten()
                         .map_or(SOFT_NONE, |k| first_beam + k as u32);
                     [edge(a, b), edge(b, c), edge(c, a), group]
@@ -339,6 +361,97 @@ impl SoftHost {
             backend.write_soft_slots(l.tri_extra_base + first_tri, &extra);
         }
         self.tris_used += tri_slots.len() as u32;
+        // Elements (LBEAMs, torsion bars, then slidenodes): records, rail node
+        // lists and each node's element adjacency. Rest angles from the desc shape.
+        let mut element_adjacency = vec![Vec::new(); desc.nodes.len()];
+        let mut records: Vec<Slot> = Vec::new();
+        let rest_pos = |i: u32| Vec3::from_array(desc.nodes[i as usize].position).as_dvec3();
+        let none = |k: u32| {
+            if k == u32::MAX {
+                SOFT_NONE
+            } else {
+                first_body + k
+            }
+        };
+        for el in &desc.elements {
+            let id = self.elements_used + (records.len() / ELEMENT_STRIDE as usize) as u32;
+            let (kind, rest) = match el.kind {
+                crate::desc::ElementKind::Lbeam => (
+                    ELEMENT_LBEAM,
+                    crate::elements::angle(
+                        rest_pos(el.nodes[0]),
+                        rest_pos(el.nodes[1]),
+                        rest_pos(el.nodes[2]),
+                    ),
+                ),
+                crate::desc::ElementKind::Torsion => (
+                    ELEMENT_TORSION,
+                    crate::elements::dihedral(el.nodes.map(rest_pos)),
+                ),
+            };
+            for &n in el.nodes.iter().filter(|&&n| n != u32::MAX) {
+                element_adjacency[n as usize].push(id);
+            }
+            records.push(el.nodes.map(none));
+            records.push([
+                kind | (s << 16),
+                el.spring.to_bits(),
+                el.damp.to_bits(),
+                (rest as f32).to_bits(),
+            ]);
+            records.push([el.deform.to_bits(), el.strength.to_bits(), 0, 0]);
+        }
+        let mut rail_list: Vec<u32> = Vec::new();
+        let rail_first = self.rail_nodes_used.next_multiple_of(4);
+        for sn in &desc.slidenodes {
+            let id = self.elements_used + (records.len() / ELEMENT_STRIDE as usize) as u32;
+            let rail = &desc.rails[sn.rail as usize];
+            element_adjacency[sn.node as usize].push(id);
+            for &n in &rail.nodes {
+                if !element_adjacency[n as usize].contains(&id) {
+                    element_adjacency[n as usize].push(id);
+                }
+            }
+            let start = rail_first + rail_list.len() as u32;
+            rail_list.extend(rail.nodes.iter().map(|&n| first_body + n));
+            let flags = u32::from(rail.looped) * SLIDE_LOOPED
+                | u32::from(rail.capped) * SLIDE_CAPPED
+                | u32::from(sn.attached) * SLIDE_ATTACHED;
+            records.push([first_body + sn.node, start, rail.nodes.len() as u32, flags]);
+            records.push([
+                ELEMENT_SLIDE | (s << 16),
+                sn.spring.to_bits(),
+                sn.damp.to_bits(),
+                0,
+            ]);
+            records.push([
+                sn.strength.to_bits(),
+                sn.cap_strength.to_bits(),
+                sn.tolerance.to_bits(),
+                0,
+            ]);
+        }
+        if !records.is_empty() {
+            backend.write_soft_slots(
+                l.element_base + ELEMENT_STRIDE * self.elements_used,
+                &records,
+            );
+        }
+        if !rail_list.is_empty() {
+            // This vehicle's rail lists start on a slot boundary, so whole slots are
+            // written without reading back.
+            let slots: Vec<Slot> = rail_list
+                .chunks(4)
+                .map(|c| {
+                    let mut w = [SOFT_NONE; 4];
+                    w[..c.len()].copy_from_slice(c);
+                    w
+                })
+                .collect();
+            backend.write_soft_slots(l.rail_node_base + rail_first / 4, &slots);
+        }
+        self.elements_used += (records.len() / ELEMENT_STRIDE as usize) as u32;
+        self.rail_nodes_used = rail_first + rail_list.len() as u32;
         let ordinal_base = self.particles_used;
         self.particles_used += desc.nodes.len() as u32;
         // Node contact slots start empty (fixed particles are never rewritten).
@@ -353,7 +466,12 @@ impl SoftHost {
         let origin = place.position.round();
         backend.write_soft_slots(
             l.origin_base + s,
-            &[[origin.x.to_bits(), origin.y.to_bits(), origin.z.to_bits(), 0]],
+            &[[
+                origin.x.to_bits(),
+                origin.y.to_bits(),
+                origin.z.to_bits(),
+                0,
+            ]],
         );
         let rel = place.position - origin;
         let locals: Vec<Slot> = desc
@@ -585,6 +703,7 @@ impl SoftHost {
             colors: packed.colors,
             adjacency: packed.adjacency,
             tri_adjacency,
+            element_adjacency,
             first_tri,
             tris: desc.triangles.len() as u32,
             ordinal_base,
@@ -712,7 +831,12 @@ impl SoftHost {
                 l.tri_plane_base,
                 l.body_pair_base,
             ],
-            [l.bdf_base, l.contact_list_base, l.part_base, l.tri_extra_base],
+            [
+                l.bdf_base,
+                l.contact_list_base,
+                l.part_base,
+                l.tri_extra_base,
+            ],
             [
                 l.pair_cache_base,
                 l.local_base,
@@ -722,9 +846,10 @@ impl SoftHost {
             [
                 st.displacement_bound.clamp(0.0, 0.49).to_bits(),
                 l.beam_extra_base,
-                0,
-                0,
+                self.elements_used,
+                l.element_base,
             ],
+            [l.rail_node_base, 0, 0, 0],
         ];
         backend.write_soft_slots(0, &header);
     }
@@ -760,6 +885,9 @@ impl SoftHost {
                 for &t in &e.tri_adjacency[i] {
                     adj.push(e.first_tri + t);
                 }
+                for &k in &e.element_adjacency[i] {
+                    adj.push(k);
+                }
                 let counts = e.adjacency[i].len() as u32 | (e.tri_adjacency[i].len() as u32) << 16;
                 let nd = &e.desc.nodes[i];
                 let flags = if nd.collision {
@@ -768,7 +896,13 @@ impl SoftHost {
                 } else {
                     0
                 };
-                lists[c as usize].push([e.first_body + i as u32, start, counts, s as u32 | flags]);
+                let elements = (e.element_adjacency[i].len() as u32) << ENTRY_ELEMENT_SHIFT;
+                lists[c as usize].push([
+                    e.first_body + i as u32,
+                    start,
+                    counts,
+                    s as u32 | flags | elements,
+                ]);
             }
         }
         let mut color_slots = Vec::with_capacity(lists.len());

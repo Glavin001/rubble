@@ -262,7 +262,8 @@ stored. Kinds:
 
 | Kind | Behaviour | Sources |
 |---|---|---|
-| Normal | Elastic, yields and breaks (RoR rules below) | RoR beams; JBeam NORMAL, ANISOTROPIC and PRESSURED (the last two simulated as NORMAL) |
+| Normal | Elastic, yields and breaks (RoR rules below) | RoR beams; JBeam NORMAL and PRESSURED (simulated as NORMAL) |
+| Anisotropic | Normal, with its own spring and damping while longer than rest | JBeam ANISOTROPIC |
 | Support | No energy when stretched (damping × 0.1); breaks past L·factor | RoR `s`, JBeam SUPPORT |
 | Rope | No energy when compressed | RoR `r` |
 | Bounded | Spring-damper plus a stiff limit spring outside [L(1 − short), L(1 + long)]; never deforms | RoR shocks / shocks2 / shocks3 (in-rates), JBeam BOUNDED (`beamLimitSpring`) |
@@ -373,7 +374,11 @@ MIT-licensed editors as references):
 * the powertrain graph, to find driven wheels;
 * the frame: JBeam (+X left, +Y rear, +Z up) becomes Rubble (+X left, +Y up, +Z forward).
 
-LBEAM, torsion bars, rails, slidenodes, flexbodies and props are counted and skipped.
+LBEAMs (the angle at the row's middle node), torsion bars, rails (`rails` and
+`rails2`) and slidenodes are simulated (`elements.rs`, `soft_step.slang`: per-particle
+block terms, rest-angle plasticity, breaking, slidenodes coming off their rail).
+ANISOTROPIC beams use `springExpansion` / `dampExpansion` while longer than rest.
+Flexbodies and props are counted and skipped.
 
 **Licensing.** The design doc lists BeamNG's `agenty_legocar` and `legotrailer` as CC0.
 They are not. The `tests/LICENSE.txt` of Blender-JBeam-Editor is CC0, but the vehicles
@@ -800,8 +805,8 @@ comes on top of the rigid step's fixed 7.5 ms per frame at 240 Hz.
 * A triangle records at most four nodes for the triangle side of node–triangle
   contacts; further nodes still get their own side.
 * The RoR cab-node exception (keep the last beams on a collision node) is not
-  implemented. LBEAM, torsion bars, pressured beams and node–beam tyres are not
-  simulated (JBeam PRESSURED and ANISOTROPIC run as NORMAL).
+  implemented. Pressured beams and node–beam tyres are not simulated (JBeam
+  PRESSURED runs as NORMAL).
 * Particles are solved in their body's local frame (an origin on a 1 m grid, moved
   when the body wanders 32 m), with world copies in the body buffer for the rigid
   pipeline (decision s28). Contacts with rigid geometry stay in world f32.

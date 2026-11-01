@@ -131,3 +131,16 @@ the step start under crash loads.
 \* one torn shell node; the profile agrees with 960 Hz × 30. At production settings a
 BeamNG-resolution car is badly under-converged (it collapses), so phases 5, 7 and 8
 carry the high-res target.
+
+### Phase 3 — JBeam features (DECISIONS s30)
+
+Done: LBEAM, torsion bars, rails and slidenodes (capped, looped, tolerance, strength,
+cap strength, coming off), ANISOTROPIC (`springExpansion`, `dampExpansion`), and the
+fix that lets `deformLimit` / `deformLimitExpansion` reach the solver. Each element has
+finite-difference gradient and PSD tests (`elements.rs`), oracle behaviour tests
+(`elements_oracle.rs`) and GPU-vs-oracle static tests (`soft_elements.rs`, < 0.1 mm).
+
+Open: `deformLimitStress`, `precompressionRange` and `beamPrecompressionTime`,
+`breakGroupType`, the 2 cm minimum deformed length (RoR's 0.1 m floor stays), the
+anisotropic `transitionZone`, and checking the legocar's skipped sections (needs
+`RUBBLE_JBEAM_DIR`, not available here).

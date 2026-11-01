@@ -29,11 +29,15 @@
 //!                        contacts were detected
 //! originBase + s         soft body s's local-frame origin (whole metres)
 //! beamExtraBase + e      beam e: [expansion spring, expansion damping] (anisotropic)
+//! elementBase + 3·k      element k (LBEAM, torsion bar, slidenode): nodes or the
+//!                        slidenode and its rail list; kind, spring, damping, rest
+//!                        angle; deform, strength, tolerance, cap strength
+//! railNodeBase + i/4     rail node lists (body indices)
 //! ```
 
 use serde::{Deserialize, Serialize};
 
-pub const HEADER_SLOTS: u32 = 12;
+pub const HEADER_SLOTS: u32 = 13;
 /// Slots per soft body in the pair list (a count and up to 31 bodies).
 pub const SOFT_PAIR_STRIDE: u32 = 8;
 /// Slots per particle in the contact list (a count and up to 15 contacts).
@@ -100,6 +104,21 @@ pub const SOFT_SLEEP_SYNC: u32 = 4;
 /// Node–triangle and triangle–obstacle contacts.
 pub const SOFT_CONTACTS: u32 = 8;
 
+/// Slots per element record (LBEAM, torsion bar, slidenode).
+pub const ELEMENT_STRIDE: u32 = 3;
+pub const ELEMENT_LBEAM: u32 = 0;
+pub const ELEMENT_TORSION: u32 = 1;
+pub const ELEMENT_SLIDE: u32 = 2;
+/// Element record flags (slot 1 .x, above the kind).
+pub const ELEMENT_BROKEN: u32 = 1 << 8;
+pub const ELEMENT_YIELDED: u32 = 1 << 9;
+/// Slidenode flags (slot 0 .w).
+pub const SLIDE_LOOPED: u32 = 1;
+pub const SLIDE_CAPPED: u32 = 2;
+pub const SLIDE_ATTACHED: u32 = 4;
+/// List entry: the particle's element count sits above the flags.
+pub const ENTRY_ELEMENT_SHIFT: u32 = 18;
+
 /// List entry flags (word w, above the soft body index).
 pub const ENTRY_CONTACTER: u32 = 1 << 16;
 /// The node collides with its own body's triangles (`SoftNode::self_collision`).
@@ -139,6 +158,10 @@ pub struct SoftCapacity {
     pub max_triangles: u32,
     /// Thin static obstacles (spheres, capsules) tested against soft triangles.
     pub max_obstacles: u32,
+    /// LBEAMs, torsion bars and slidenodes across all soft bodies.
+    pub max_elements: u32,
+    /// Nodes of all rails (each slidenode lists its rail's).
+    pub max_rail_nodes: u32,
 }
 
 impl Default for SoftCapacity {
@@ -151,6 +174,8 @@ impl Default for SoftCapacity {
             max_groups: 4096,
             max_triangles: 32768,
             max_obstacles: 64,
+            max_elements: 8192,
+            max_rail_nodes: 8192,
         }
     }
 }
@@ -209,6 +234,11 @@ pub struct SoftLayout {
     pub origin_base: u32,
     /// Per beam: [expansion spring, expansion damping] (anisotropic beams).
     pub beam_extra_base: u32,
+    /// Per element: `ELEMENT_STRIDE` slots (nodes; kind and flags, spring, damping,
+    /// rest angle; deform, strength, tolerance, cap strength).
+    pub element_base: u32,
+    /// Rail node lists (body indices, 4 per slot).
+    pub rail_node_base: u32,
     pub total_slots: u32,
 }
 
@@ -222,7 +252,12 @@ impl SoftCapacity {
         let adj_base = list_base + self.max_particles;
         // Every beam appears in the adjacency of both particles (two words each:
         // the beam and the other end), every triangle in three.
-        let adj_slots = (4 * self.max_beams + 3 * self.max_triangles).div_ceil(4);
+        // Elements: up to four nodes each, a slidenode's rail nodes besides.
+        let adj_slots = (4 * self.max_beams
+            + 3 * self.max_triangles
+            + 4 * self.max_elements
+            + self.max_rail_nodes)
+            .div_ceil(4);
         let cheb_base = adj_base + adj_slots;
         let tri_base = cheb_base + 3 * self.max_particles;
         let tri_rest_base = tri_base + self.max_triangles;
@@ -271,7 +306,16 @@ impl SoftCapacity {
             local_base,
             origin_base,
             beam_extra_base: origin_base + self.max_bodies,
-            total_slots: origin_base + self.max_bodies + self.max_beams,
+            element_base: origin_base + self.max_bodies + self.max_beams,
+            rail_node_base: origin_base
+                + self.max_bodies
+                + self.max_beams
+                + ELEMENT_STRIDE * self.max_elements,
+            total_slots: origin_base
+                + self.max_bodies
+                + self.max_beams
+                + ELEMENT_STRIDE * self.max_elements
+                + self.max_rail_nodes.div_ceil(4),
         }
     }
 
@@ -374,7 +418,9 @@ mod tests {
         assert_eq!(l.beam_base - l.body_base, BODY_STRIDE * c.max_bodies);
         assert_eq!(l.group_base - l.beam_base, 4 * c.max_beams);
         assert_eq!(
-            l.adj_base + (4 * c.max_beams + 3 * c.max_triangles).div_ceil(4),
+            l.adj_base
+                + (4 * c.max_beams + 3 * c.max_triangles + 4 * c.max_elements + c.max_rail_nodes)
+                    .div_ceil(4),
             l.cheb_base
         );
         assert_eq!(l.rigid_base + 2 * c.max_particles, l.body_color_base);
@@ -400,7 +446,15 @@ mod tests {
         assert_eq!(l.pair_cache_base + c.max_particles, l.local_base);
         assert_eq!(l.local_base + LOCAL_STRIDE * c.max_particles, l.origin_base);
         assert_eq!(l.origin_base + c.max_bodies, l.beam_extra_base);
-        assert_eq!(l.beam_extra_base + c.max_beams, l.total_slots);
+        assert_eq!(l.beam_extra_base + c.max_beams, l.element_base);
+        assert_eq!(
+            l.element_base + ELEMENT_STRIDE * c.max_elements,
+            l.rail_node_base
+        );
+        assert_eq!(
+            l.rail_node_base + c.max_rail_nodes.div_ceil(4),
+            l.total_slots
+        );
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }
