@@ -7,6 +7,9 @@
 //!                one device, impact islands routed before the step, no frame rewind
 //!   rubble-gpu-redo   the same with the reference's verify-and-redo
 //!   rubble-gpu-2dev   rubble on its own device, with redo (the first coupling)
+//!   fracture-gpu the GPU-resident fracture world (`stress_rubble::threshold`) under
+//!                `--config threshold|load_path|impact_local`; the scene's first impactor
+//!                launched as its shot (a sphere), the others ignored
 //! (PhysX GPU, the same coupled frame with PhysX, is `realtime_peak` in the PhysX
 //! repository; `regimes` here are its scenes, so the outcomes compare one to one.)
 //!
@@ -21,6 +24,9 @@
 //!   cargo run --release -p stress-rubble --features gpu --example stress_bench -- \
 //!       [--solver oracle|rubble-gpu] [--only REGIME] [--seconds 0.25] [--repeats 1]
 //!       [--pack PATH ...]   (any scene packs, idle and rammed, as the packs set)
+//!       [--set shots]       (the fracture world's regimes: shots into anchored walls, a
+//!                           weight on a cantilever plate, the idle house; run the oracle on
+//!                           them with `--config realtime` for the reference)
 
 use std::time::Instant;
 
@@ -315,6 +321,38 @@ pub fn scale(seconds: f64) -> Vec<(&'static str, Scene)> {
     out
 }
 
+/// The shots set (the fracture world's models; `--solver fracture-gpu` and the oracle):
+/// a 4.1 kg steel ball (radius 0.05 m) into a 0.2 m anchored concrete wall above and below
+/// its ballistic limit (about 151 m/s, stress-ref impact_local.rs) and into a row of two,
+/// a 250 kg ball set on a cantilever plate's tip, and the idle house. Each shot starts more
+/// than a frame's travel away (the fracture world predicts a strike at the end of a frame).
+pub fn shots(seconds: f64) -> Vec<(&'static str, Scene)> {
+    use stress_rubble::scenes::{cantilever_plate, shot_at, shot_row, shot_wall};
+    let ball = |mut s: Scene, speed: f64| {
+        let dt = s.sim.frame_dt;
+        let r = 0.05;
+        let mass = 7850.0 * 4.0 / 3.0 * std::f64::consts::PI * r * r * r;
+        let mut shot = shot_at(r, mass, [0.05, -(1.5 * speed * dt + 0.2), 0.55], [0.0, speed, 0.0]);
+        shot.name = "ram".into();
+        s.impactors.push(shot);
+        configure(s, seconds)
+    };
+    let mut plate = cantilever_plate(8);
+    let mut weight = shot_at(0.15, 250.0, [0.72, 0.0, 1.1 + 0.15 + 5e-4], [0.0; 3]);
+    weight.name = "ram".into();
+    plate.impactors.push(weight);
+    let mut idle = configure(house(), seconds);
+    idle.name = "house_idle".into();
+    idle.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    vec![
+        ("wall_shot_spall", ball(shot_wall(2, true), 100.0)),
+        ("wall_shot_perforate", ball(shot_wall(2, true), 250.0)),
+        ("wall_row_shot", ball(shot_row(2, 2, true), 250.0)),
+        ("plate_weight", configure(plate, seconds)),
+        ("house_idle", idle),
+    ]
+}
+
 pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     let mut idle = configure(house(), seconds);
     idle.name = "house_idle".into();
@@ -547,6 +585,56 @@ fn run_oracle(scene: &Scene) -> Run {
     Run { frames, waits: Vec::new(), ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, metrics, digest }
 }
 
+/// The GPU-resident fracture world (`stress_rubble::threshold::ThresholdWorld`) under the
+/// `--config` profile (`threshold` without one): the scene's first impactor launched at the
+/// start as its shot. Each frame waited for (its GPU time in the frame's).
+#[cfg(feature = "gpu")]
+fn run_fracture_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene) -> Run {
+    let profile = PROFILE.get().copied().unwrap_or(stress_ref::capability::Profile::Threshold);
+    let shot = scene.impactors.first();
+    let (radius, mass) = shot.map_or((0.1, 1.0), |i| {
+        let r = match i.shape {
+            stress_ref::scene::ImpactorShape::Sphere { radius } => radius,
+            stress_ref::scene::ImpactorShape::Box { half_extents } => half_extents.iter().copied().fold(f64::INFINITY, f64::min),
+        };
+        (r, i.mass)
+    });
+    let mut s = scene.clone();
+    s.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    let mut w = stress_rubble::threshold::ThresholdWorld::with_profile(gpu, &s, radius, mass, profile).unwrap_or_else(|e| panic!("fracture world: {e}"));
+    if let Some(i) = shot {
+        w.launch(gpu, i);
+    }
+    let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
+    let mut frames = Vec::with_capacity(n);
+    for _ in 0..n {
+        let t = Instant::now();
+        w.step_frame(gpu).unwrap_or_else(|e| panic!("frame: {e}"));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        frames.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let c = w.fracture.counters(gpu);
+    let bodies = w.fracture.chunk_bodies(gpu);
+    let fragments = bodies.iter().collect::<std::collections::HashSet<_>>().len() as f64;
+    let ram = w.shot_states(gpu).first().map_or(0.0, |(_, v, _)| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt());
+    // FNV-1a of the bonds' states and the chunks' bodies.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in w.fracture.bonds_intact(gpu).iter().map(|&b| b as u32).chain(bodies.iter().copied()) {
+        for x in b.to_le_bytes() {
+            h = (h ^ x as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+    let wall = w.tables.chunk_body.first().map_or(0, |&b| b as usize);
+    let record = w.fracture.strike_records(gpu).get(wall).copied().unwrap_or_default();
+    let fracture = serde_json::json!({
+        "profile": profile.name(), "error": c.error, "pieces": c.pieces,
+        "strikes": {"bounce": c.bounces, "crater": c.craters, "spall": c.spalls, "perforate": c.perforations},
+        "peak_utilization": c.peak_utilization,
+        "last_strike": {"thickness": record.thickness, "ballistic_speed": record.ballistic_speed, "residual_speed": record.residual_speed, "outcome": record.outcome},
+    });
+    Run { frames, waits: Vec::new(), ram, fragments, broken: c.broken as f64, redone: 0, unverified: 0, profile: fracture, metrics: serde_json::Value::Null, digest: format!("{h:016x}") }
+}
+
 #[cfg(feature = "gpu")]
 fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, no_redo: bool, islands: bool) -> Run {
     // STRESS_BENCH_WRITE_SCENE=path: the scene as run, as JSON (for `stress-ref run`).
@@ -737,7 +825,7 @@ fn main() {
         match a.as_str() {
             "--solver" => solver = args.next().expect("--solver NAME"),
             "--only" => only = args.next(),
-            "--set" => set = args.next().expect("--set realtime|accuracy|towns|scale|packs"),
+            "--set" => set = args.next().expect("--set realtime|accuracy|towns|scale|packs|shots"),
             "--config" => config = args.next().expect("--config LADDER-RUNG"),
             // A model feature on or off on top of the configuration (e.g. crushing=off).
             "--feature" => {
@@ -779,6 +867,7 @@ fn main() {
         "accuracy" => named(accuracy(seconds)),
         "towns" => named(towns(seconds)),
         "scale" => named(scale(seconds)),
+        "shots" => named(shots(seconds)),
         "packs" if !pack_paths.is_empty() => packs_at(&pack_paths, seconds),
         "packs" => packs(seconds),
         _ => named(regimes(seconds)),
@@ -815,6 +904,8 @@ fn main() {
                 "rubble-gpu-redo" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, false, false, islands),
                 #[cfg(feature = "gpu")]
                 "rubble-gpu-2dev" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, true, false, islands),
+                #[cfg(feature = "gpu")]
+                "fracture-gpu" => run_fracture_gpu(gpu.as_ref().unwrap(), &scene),
                 other => panic!("unknown solver {other} (rubble-gpu needs --features gpu)"),
             }));
             let run = match run {

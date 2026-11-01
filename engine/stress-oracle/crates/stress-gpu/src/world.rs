@@ -404,11 +404,7 @@ impl GpuWorld {
         // The threshold profile predicts strikes before the engine steps: the routing check
         // (the tiered coupling's) at the end of every resident frame, no impact islands.
         if profile.predicts_strikes() {
-            self.predict_strikes = true;
-            self.set_tiered(true).expect("the threshold profile is quasi-static");
-            // No check has run before the first resident frame: it predicts (a strike may
-            // come in the frame after it).
-            self.route_next = true;
+            self.set_strike_prediction(true).expect("the threshold profile is quasi-static");
         }
         // The profile's resident frame runs the GPU's split path.
         if profile.resident() {
@@ -418,6 +414,24 @@ impl GpuWorld {
 
     pub fn set_impact_islands(&mut self, on: bool) {
         self.shell.impact_islands = on;
+    }
+
+    /// Strike prediction (forward only, no re-simulation): at the end of every resident
+    /// frame the routing check finds a shot that will reach a structure within the next
+    /// frame, `threshold_predict` breaks the bonds its strike breaks, and the structure
+    /// splits before the engine steps, so the shot meets the pieces instead of the whole
+    /// body (off, the engine's contact with the whole body comes first and the shot
+    /// rebounds off it). Needs the tiered (quasi-static) coupling; errors where it cannot
+    /// run.
+    pub fn set_strike_prediction(&mut self, on: bool) -> Result<(), String> {
+        if on {
+            self.set_tiered(true)?;
+            // No check has run before the next resident frame: it predicts (a strike may
+            // come in the frame after it).
+            self.route_next = true;
+        }
+        self.predict_strikes = on;
+        Ok(())
     }
 
     /// Strict mode: fail when a structure's certified explicit stress step is below

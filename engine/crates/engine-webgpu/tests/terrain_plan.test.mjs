@@ -40,13 +40,12 @@ const BAKE = ['mpm_write_args', 'mpm_bake_edge_clear', 'mpm_bake_edge_count', 'm
 // The last area's bake also lands any parcels still in flight before the pool
 // empties (a forced close; settling waits for them).
 const LAST_BAKE = [...BAKE.slice(0, -2), 'mpm_parcels_land', ...BAKE.slice(-2)];
-// A bake that leaves areas open then trims the pool: it ends after its last slot
-// still held, and the parcels in flight are packed to its front.
-const TRIM = ['mpm_write_args', 'mpm_pool_reserve', 'mpm_pool_top', 'mpm_parcels_pack', 'mpm_parcels_unpack', 'mpm_pool_trim'];
-const AREA_BAKE = [...BAKE.slice(0, -2), ...TRIM, ...BAKE.slice(-2)];
-// Activation: the particles past the pool's end take the slots baked areas and
-// landed parcels left (the holes), then the region's particles and, on the
-// default absorbing ground, its boundary nodes.
+// A bake that leaves areas open then trims the pool (plan.rs `pool_trim`): it ends
+// after its last slot still held and packs the parcels in flight to the front.
+const OPEN_BAKE = [...BAKE.slice(0, -2), 'mpm_write_args', 'mpm_pool_reserve', 'mpm_pool_top',
+  'mpm_parcels_pack', 'mpm_parcels_unpack', 'mpm_pool_trim', ...BAKE.slice(-2)];
+// An activation: its particles past the pool's end take the free slots first
+// (plan.rs `pool_holes`), then the absorbing ground's boundary nodes.
 const ACTIVATE = ['mpm_activate_count', 'mpm_activate_scan', 'mpm_write_args', 'mpm_pool_reserve',
   'mpm_pool_holes_count', 'mpm_pool_holes_scan', 'mpm_pool_holes_list', 'mpm_pool_finish',
   'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init'];
@@ -150,7 +149,7 @@ test('several impacts: far apart they open areas that bake on their own; near on
   assert.equal(f[0], 3);
   const blocks = decodeBlocks(f, 2).blocks;
   assert.equal(blocks.length, 2);
-  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), AREA_BAKE);
+  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), OPEN_BAKE);
   assert.ok(blocks[1].cmds.some((c) => c.kernel === 'mpm_p2g'));
   assert.equal(JSON.parse(p.areas()).length, 1);
   // Bake the rest now.
