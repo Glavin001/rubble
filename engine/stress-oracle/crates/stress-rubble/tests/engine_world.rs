@@ -24,6 +24,7 @@ fn cube(key: BodyKey, at: Vec3, chunk: usize, mass: f64) -> EngineBody {
         pose: Pose::new(at, Quat::IDENTITY),
         velocity: Vec3::ZERO,
         angular_velocity: Vec3::ZERO,
+        poses: None,
     }
 }
 
@@ -118,6 +119,7 @@ fn a_ccd_impactor_stops_at_a_thin_wall_without_substeps() {
             pose: Pose::new(Vec3::new(10.05, 0.0, 0.0), Quat::IDENTITY),
             velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
+            poses: None,
         };
         let ball = EngineBody {
             key: BodyKey::Impactor(0),
@@ -128,6 +130,7 @@ fn a_ccd_impactor_stops_at_a_thin_wall_without_substeps() {
             pose: Pose::new(Vec3::new(0.37, 0.03, 0.02), Quat::IDENTITY),
             velocity: Vec3::new(250.0, 0.0, 0.0),
             angular_velocity: Vec3::ZERO,
+            poses: None,
         };
         e.sync_bodies(&[wall, ball]);
         let mut max_x = f64::MIN;
