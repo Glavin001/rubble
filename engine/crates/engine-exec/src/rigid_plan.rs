@@ -84,6 +84,18 @@ pub struct StepModes {
     /// Some body has motion locks: `lock_predict` after `predict_bodies` and
     /// `lock_project` after the solve.
     pub motion_locks: bool,
+    /// Awake-indexed broadphase (hierarchical grids only): static and sleeping
+    /// colliders stay in the persistent resting table, and only the colliders of
+    /// moving bodies are bounded, inserted and queried (`list_moving_colliders`,
+    /// world_step.slang's rest tables). The same candidate pairs as the full pass.
+    pub awake_broadphase: bool,
+    /// With `awake_broadphase`: rebuild the resting table this step (the host wrote
+    /// bodies or colliders, or the last step did not keep the table). Steps after
+    /// one where bodies fell asleep rebuild it on the GPU (host word 5).
+    pub rest_rebuild: bool,
+    /// With `awake_broadphase`: bound every collider this step (`build_aabbs`), not
+    /// only the moving ones (a host write may have moved a static).
+    pub full_bounds: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -318,6 +330,17 @@ pub fn encode_step(
                     size: 4,
                 });
             }
+            if awake_broadphase(m, i) {
+                // Last step's sleep events: write_moved_args rebuilds the resting
+                // table after any (a new sleeper is missing from it).
+                e.0.push(Cmd::Copy {
+                    src: COUNTERS_BINDING,
+                    src_offset: 36,
+                    dst: HOST_UNIFORM_BINDING,
+                    dst_offset: host_word_offset(5),
+                    size: 4,
+                });
+            }
         }
         e.0.push(Cmd::Copy {
             src: COUNTER_UPLOAD,
@@ -350,7 +373,35 @@ pub fn encode_step(
         // A soft body sleeps and wakes as a whole.
         e.d("soft_wake", u64::from(i.soft.bodies) * 64);
     }
-    if !reuse_manifolds {
+    let rest = awake_broadphase(m, i);
+    if !reuse_manifolds && rest {
+        // Moving colliders (slot 81), their bounds (or every collider's after a host
+        // write), then the resting table: rebuilt after sleep events or host writes
+        // (slots 79/80 are empty otherwise), its lists published, CCD lists reset.
+        e.d("list_moving_colliders", n_cols);
+        e.d("write_awake_collider_args", 64);
+        if m.full_bounds {
+            e.d("build_aabbs", n_cols);
+        } else {
+            e.w("build_aabbs_listed", 81);
+        }
+        if i.joint_count > 0 {
+            e.d("joint_hash_clear", u64::from(i.joint_hash_slots));
+            e.d("joint_hash_insert", n_joints);
+        }
+        e.d("write_moved_args", 64);
+        e.w("rest_clear", 79);
+        e.w("rest_insert", 80);
+        e.d("rest_publish", 64);
+        if mo.ccd {
+            e.d("ccd_register", n_bodies);
+        }
+        e.w("broadphase_insert_awake", 81);
+        e.w("broadphase_query_awake", 81);
+        // Resting colliders finer than a coarse mover: the mover scans their cells.
+        e.d("write_finer_args", 64);
+        e.w("broadphase_query_finer", 77);
+    } else if !reuse_manifolds {
         e.d("build_aabbs", n_cols);
         if i.joint_count > 0 {
             e.d("joint_hash_clear", u64::from(i.joint_hash_slots));
@@ -365,6 +416,8 @@ pub fn encode_step(
         }
         e.d("broadphase_insert", n_cols);
         e.d("broadphase_query", n_cols);
+    }
+    if !reuse_manifolds {
         if fast_list_scheduled(&mo) {
             // Sweeps longer than a cell query along their path (row 1).
             e.phase("broadphaseGrid");
@@ -390,6 +443,10 @@ pub fn encode_step(
         }
         if mo.characters > 0 {
             e.d("char_move", u64::from(mo.characters) * 64);
+        }
+        if rest {
+            // Every walker of this step's tables is done: empty W's heads.
+            e.w("broadphase_clear_awake", 81);
         }
     }
     if m.sleep_archive_blocks > 0 && !reuse_manifolds {
@@ -762,6 +819,14 @@ pub fn encode_step(
     e.0
 }
 
+/// Whether this step runs the awake-indexed broadphase ([`StepModes::awake_broadphase`],
+/// which hosts set for hierarchical grids only): not with characters (they move
+/// kinematic bodies without a velocity, which the moving-collider list cannot see)
+/// or soft bodies.
+pub fn awake_broadphase(m: &StepModes, i: &StepInputs) -> bool {
+    m.awake_broadphase && i.motion.characters == 0 && i.soft.bodies == 0
+}
+
 /// Entries a persistent-contact host replays (every name `encode_step` can
 /// emit, resolved with [`resolve_entry`]). Native hosts compile exactly these.
 pub const PERSISTENT_ENTRIES: &[&str] = &[
@@ -801,6 +866,18 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "broadphase_clear",
     "broadphase_insert",
     "broadphase_query",
+    "list_moving_colliders",
+    "write_awake_collider_args",
+    "build_aabbs_listed",
+    "write_moved_args",
+    "rest_clear",
+    "rest_insert",
+    "rest_publish",
+    "broadphase_insert_awake",
+    "broadphase_query_awake",
+    "write_finer_args",
+    "broadphase_query_finer",
+    "broadphase_clear_awake",
     "write_work_args",
     "write_work_args_copy_persistent",
     "carry_rest_pairs",
@@ -1071,7 +1148,7 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[11] = b(c.max_bodies, 4);
     s[12] = b(c.max_bodies, 4);
     s[13] = b(c.max_bodies + 1, 4);
-    s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1) * 4;
+    s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1 + rest_table_words(c)) * 4;
     s[15] = b(c.max_bodies * (c.max_colors + 2), 4);
     s[16] = b(c.max_colors * c.max_bodies.div_ceil(64).max(1), 4);
     s[17] = b(c.max_colors.max(128), 4);
@@ -1083,8 +1160,9 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[21] = u64::from(engine_schema::SCRATCH_WORDS) * 4;
     s[22] = PASS_SLOTS * PASS_ALIGN;
     // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
-    // contacts 73), convex 74..76.
-    s[23] = b(c.max_colors.max(77) * 3, 4);
+    // contacts 73), convex 74..76, the awake-indexed broadphase's 77..81 (finer
+    // scan, moved list, resting-table rebuild, moving colliders).
+    s[23] = b(c.max_colors.max(82) * 3, 4);
     s[24] = b(c.max_colliders, 80);
     s[25] = b(c.max_candidates, 32);
     s[26] = b(c.max_bodies, 32);
@@ -1200,7 +1278,24 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
         | (u32::from(fast_list_scheduled(&mo)) << 4);
     // Bit 5: the sleep archive (world_step.slang sleepArchive).
     s[30] |= u32::from(m.sleep_archive_blocks > 0) << 5;
+    if awake_broadphase(m, i) {
+        // Rest tables (bit 0); bit 1 rebuilds them this step. Word 5: last step's
+        // sleep events (a pipelined step copies them on the GPU), in the uniform
+        // only: the scratch block's word 5 is the finer-scan count, which hosts
+        // start at zero (the awake broadphase runs on WGSL hosts, whose HOST_S
+        // reads the uniform).
+        s[25] = 1 | (u32::from(m.rest_rebuild) << 1);
+        s[5] = i.last.sleep_events;
+    }
     s
+}
+
+/// Words of binding 14 past the CSR index that the awake-indexed broadphase uses
+/// (world_step.slang restBase): a 32-word header, the resting and awake heads, a
+/// resting link per collider and the awake-collider list.
+pub fn rest_table_words(c: &WorldCapacity) -> u64 {
+    let grid = u64::from(grid_hash_words(c, c.max_colliders, false, false));
+    32 + 2 * grid + 2 * u64::from(c.max_colliders)
 }
 
 /// The step's host uniform (params + the first 32 host words).
@@ -1282,6 +1377,56 @@ mod tests {
             pose_output: false,
             ..StepModes::default()
         }
+    }
+
+    #[test]
+    fn awake_broadphase_runs_over_moving_colliders_only() {
+        let names = |m: &StepModes, i: &StepInputs| -> Vec<&'static str> {
+            encode_step(m, i, false, true)
+                .iter()
+                .filter_map(|c| match *c {
+                    Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => Some(kernel),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut i = inputs(10, 0);
+        i.motion.queries = 1;
+        let m = StepModes {
+            awake_broadphase: true,
+            ..fast()
+        };
+        let k = names(&m, &i);
+        let at = |n: &str| {
+            k.iter()
+                .position(|x| *x == n)
+                .unwrap_or_else(|| panic!("{n} missing"))
+        };
+        // No pass over every collider but the cheap moving-collider scan.
+        for full in ["build_aabbs", "broadphase_clear", "broadphase_insert", "broadphase_query"] {
+            assert!(!k.contains(&full), "{full} still runs");
+        }
+        assert!(at("list_moving_colliders") < at("build_aabbs_listed"));
+        assert!(at("build_aabbs_listed") < at("rest_insert"));
+        assert!(at("rest_publish") < at("broadphase_insert_awake"));
+        assert!(at("broadphase_query_awake") < at("broadphase_query_finer"));
+        // W is emptied after every walker of the step's tables, before narrowphase.
+        assert!(at("query_batch") < at("broadphase_clear_awake"));
+        assert!(at("broadphase_clear_awake") < at("narrowphase_defer_copy_persistent"));
+        // A host write bounds every collider; characters keep the full broadphase.
+        let full_bounds = StepModes {
+            full_bounds: true,
+            ..m
+        };
+        assert!(names(&full_bounds, &i).contains(&"build_aabbs"));
+        i.motion.characters = 1;
+        assert!(names(&m, &i).contains(&"broadphase_query"));
+        // The pipelined step forwards last step's sleep events to host word 5.
+        i.motion.characters = 0;
+        assert!(encode_step(&m, &i, false, true).iter().any(|c| matches!(
+            c,
+            Cmd::Copy { src_offset: 36, dst_offset, .. } if *dst_offset == host_word_offset(5)
+        )));
     }
 
     #[test]

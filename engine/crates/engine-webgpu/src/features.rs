@@ -113,6 +113,10 @@ pub struct EngineFeatures {
     pub local_repair: bool,
     /// Carry resting pairs across sleep (`ENGINE_REST=drop` turns it off).
     pub carry_rest: bool,
+    /// Awake-indexed broadphase on hierarchical grids: a persistent resting table for
+    /// static and sleeping colliders, and only moving colliders bounded, inserted and
+    /// queried each step (`ENGINE_BROADPHASE=full` turns it off; same pairs).
+    pub awake_broadphase: bool,
     pub grid: GridLayout,
     /// Hierarchical grid override (`ENGINE_GRID_LEVELS=on|off`; `None`: convex scenes).
     pub grid_levels: Option<bool>,
@@ -138,6 +142,7 @@ impl Default for EngineFeatures {
             persist_list: true,
             local_repair: true,
             carry_rest: true,
+            awake_broadphase: true,
             grid: GridLayout::Split,
             grid_levels: None,
             color_headroom: Some(4),
@@ -175,6 +180,7 @@ impl EngineFeatures {
                 && env_default_on("ENGINE_PERSIST", &["scan"]),
             local_repair: env_default_on("ENGINE_REPAIR", &["rounds"]),
             carry_rest: env_default_on("ENGINE_REST", &["drop"]),
+            awake_broadphase: env_default_on("ENGINE_BROADPHASE", &["full"]),
             grid: match env_str("ENGINE_GRID").as_deref() {
                 Some("scaled") => GridLayout::Scaled,
                 Some("fixed") => GridLayout::Fixed,

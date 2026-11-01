@@ -12,6 +12,7 @@
 //! CITY_K=16,64,256 cargo test -p engine-world --release --test city_scale -- --ignored --nocapture
 //! CITY_SLEEP=1: the large-map sleep policy (`sleeping_solver_for`; the threshold solver's
 //! own suggestion is never asleep).
+//! CITY_FEATURES_ENV=1 takes `WorldDef::features` from the `ENGINE_*` controls (A/B runs).
 //! CITY_JSON=path appends one JSON line per run. RUBBLE_GPU_TIMING=1: the GPU column is every
 //! pass of the step (its timestamp marks; the waits they add inflate the wall column).
 #![cfg(feature = "stress")]
@@ -52,7 +53,12 @@ fn def(k: usize, sleep: bool) -> CityDef {
 
 fn city(asset: &DestructibleAssetDesc, k: usize, sleep: bool) -> (World, City) {
     let def = def(k, sleep);
-    let mut w = World::new(GpuContext::Default, &def.world_def(asset).unwrap()).unwrap();
+    let mut wd = def.world_def(asset).unwrap();
+    // CITY_FEATURES_ENV=1: the `ENGINE_*` feature controls (A/B measurements).
+    if std::env::var("CITY_FEATURES_ENV").is_ok() {
+        wd.features = EngineFeatures::from_env();
+    }
+    let mut w = World::new(GpuContext::Default, &wd).unwrap();
     let t = Instant::now();
     let mut c = City::begin(&mut w, asset, def).unwrap();
     c.place(&mut w, k).unwrap();

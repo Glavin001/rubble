@@ -36,6 +36,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "broadphase_insert",
     "broadphase_query",
     "broadphase_query_awake",
+    "list_moving_colliders",
+    "build_aabbs_listed",
     "broadphase_query_finer",
     "write_finer_args",
     "write_moved_args",

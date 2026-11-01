@@ -1102,7 +1102,10 @@ static const uint REST_HEADER = 32u;
 // 11..20 oversized statics.
 
 bool restTables() { return (HOST_S(25) & 1u) != 0u; }
-uint restBase() { return HOST_S(24) + HOST_S(1) + 1u + HOST_S(9); } // past the tagged warm hash
+bool warmTagged();
+// Past the tagged warm hash when there is one (HOST_S(9) varies step to step with the
+// contact count, so World's untagged tables sit right past the CSR index instead).
+uint restBase() { return HOST_S(24) + HOST_S(1) + 1u + (warmTagged() ? HOST_S(9) : 0u); }
 uint restHeads() { return restBase() + REST_HEADER; }
 uint awakeHeads() { return restHeads() + gridHashSize(); }
 uint restLinks() { return awakeHeads() + gridHashSize(); }
@@ -2092,6 +2095,60 @@ void broadphase_clear_awake(uint3 tid : SV_DispatchThreadID)
     uint level = hierLevel(box._pad0);
     if (level < HOST_S(18))
         ASTORE(gConstraintIds[awakeHeads() + hierHash(hierCell(box, level), level)], 0xFFFFFFFFu);
+}
+
+// ---- Awake-indexed broadphase (World's rigid_plan, HOST_S(25) bit 0) ----
+// Static and sleeping colliders stay in the resting table R between steps; a step
+// lists the colliders of its moving bodies (bodyMovingOrKinematic: exactly the
+// colliders hierQuery treats as active) and only they are bounded, inserted (into W)
+// and queried. The list is one cheap scan over the colliders (each reads its body's
+// flags), counted per workgroup so a fully awake world does not serialize on one
+// atomic; within a workgroup the order is the colliders' own.
+groupshared uint gsMoverFlags[64];
+groupshared uint gsMoverBase;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void list_moving_colliders(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
+{
+    uint c = dispatchIndex(tid);
+    uint local = lid.x;
+    bool moving = false;
+    if (c < gCounters[0].colliderCount)
+        moving = bodyMovingOrKinematic(gBodies[gColliders[c].body]);
+    gsMoverFlags[local] = moving ? 1u : 0u;
+    GROUP_SYNC();
+    if (local == 0u)
+    {
+        uint n = 0u;
+        for (uint k = 0u; k < 64u; k++) n += gsMoverFlags[k];
+        uint base = 0u;
+        if (n > 0u) AADD3(gScratchAtomics[AWAKE_COLLIDER_COUNT_SLOT], n, base);
+        gsMoverBase = base;
+    }
+    GROUP_SYNC();
+    if (moving)
+    {
+        uint rank = 0u;
+        for (uint k = 0u; k < local; k++) rank += gsMoverFlags[k];
+        ASTORE(gConstraintIds[awakeColliderBase() + gsMoverBase + rank], c);
+    }
+}
+
+// Bounds of the listed moving colliders (slot 81), as the full build_aabbs pass
+// builds them. The pass keeps every other collider's bounds: a sleeping body's
+// (as the full pass does after step 0), and a static's or a stopped kinematic's,
+// which the full pass would rebuild to the same values from the same pose and
+// parameters (hosts run the full pass after any write that could change them).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void build_aabbs_listed(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    uint c = awakeCollider(li);
+    Collider col = gColliders[c];
+    buildColliderBounds(c, col, gBodies[col.body]);
 }
 
 [shader("compute")]
