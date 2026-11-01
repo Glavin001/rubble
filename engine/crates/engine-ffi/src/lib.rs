@@ -36,6 +36,30 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub const RB_VERSION_MAJOR: u32 = 0;
 pub const RB_VERSION_MINOR: u32 = 1;
+
+// Kernel groups for `rbWorld_Prewarm` (combine with `|`).
+pub const RB_KERNELS_CHARACTERS: u32 = 1 << 0;
+pub const RB_KERNELS_QUERIES: u32 = 1 << 1;
+pub const RB_KERNELS_PROJECTILES: u32 = 1 << 2;
+pub const RB_KERNELS_VEHICLES: u32 = 1 << 3;
+pub const RB_KERNELS_SOFT_BODIES: u32 = 1 << 4;
+pub const RB_KERNELS_TERRAIN: u32 = 1 << 5;
+pub const RB_KERNELS_GUIDANCE: u32 = 1 << 6;
+pub const RB_KERNELS_EXPLOSIONS: u32 = 1 << 7;
+pub const RB_KERNELS_CCD: u32 = 1 << 8;
+pub const RB_KERNELS_ALL: u32 = 0xFFFF_FFFF;
+const _: () = {
+    assert!(RB_KERNELS_CHARACTERS == KernelGroups::CHARACTERS.0);
+    assert!(RB_KERNELS_QUERIES == KernelGroups::QUERIES.0);
+    assert!(RB_KERNELS_PROJECTILES == KernelGroups::PROJECTILES.0);
+    assert!(RB_KERNELS_VEHICLES == KernelGroups::VEHICLES.0);
+    assert!(RB_KERNELS_SOFT_BODIES == KernelGroups::SOFT_BODIES.0);
+    assert!(RB_KERNELS_TERRAIN == KernelGroups::TERRAIN.0);
+    assert!(RB_KERNELS_GUIDANCE == KernelGroups::GUIDANCE.0);
+    assert!(RB_KERNELS_EXPLOSIONS == KernelGroups::EXPLOSIONS.0);
+    assert!(RB_KERNELS_CCD == KernelGroups::CCD.0);
+    assert!(RB_KERNELS_ALL == KernelGroups::ALL.0);
+};
 const COOKIE: u32 = 0x5242_4C45; // "RBLE"
 
 /// A body handle (Box3D `b3BodyId`, packed). 0 is null.
@@ -1511,6 +1535,28 @@ pub unsafe extern "C" fn rbDestroyWorld(world: *mut RbWorld) {
 #[no_mangle]
 pub unsafe extern "C" fn rbWorld_Step(world: *mut RbWorld) -> RbResult {
     guard_args(|| world_mut(world)?.world.step())
+}
+
+/// Compile the kernels of `groups` (`RB_KERNELS_*`, combined with `|`) now.
+/// A world builds each GPU kernel the first time a step runs it, so the first
+/// step with a character, vehicle, soft body, ... pays that compile; call this
+/// at load time to move it there. Blocks while they compile. `out_built`
+/// (optional): how many kernels this call built.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_Prewarm(
+    world: *mut RbWorld,
+    groups: u32,
+    out_built: *mut u32,
+) -> RbResult {
+    guard_args(|| {
+        let built = world_mut(world)?
+            .world
+            .prewarm(KernelGroups(groups));
+        if !out_built.is_null() {
+            *out_built = built as u32;
+        }
+        Ok(())
+    })
 }
 
 /// Results of finished steps. `coalesce`: fold every ready step into one

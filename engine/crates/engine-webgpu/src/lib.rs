@@ -15,7 +15,8 @@ mod poses;
 mod soft_skin;
 #[cfg(feature = "gpu")]
 pub use features::{
-    ContactStorage, EngineFeatures, GridLayout, ManifoldPersistence, SimOptions, WarmHash,
+    ContactStorage, EngineFeatures, GridLayout, KernelGroups, ManifoldPersistence, SimOptions,
+    WarmHash,
 };
 #[cfg(feature = "gpu")]
 pub use gpu::{

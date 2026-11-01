@@ -27,6 +27,14 @@ int main(void) {
     wd.gravity = (RbVec3){0, 0, -981}; /* cm/s^2 */
     RbWorld *world = NULL;
     check(rbCreateWorld(&wd, &world), "rbCreateWorld");
+    /* Kernels compile on the first step that runs them; a host that will add
+     * characters later can compile theirs now (a loading screen). */
+    uint32_t prewarmed = 0;
+    check(rbWorld_Prewarm(world, RB_KERNELS_CHARACTERS, &prewarmed), "rbWorld_Prewarm");
+    if (prewarmed != 2) {
+        fprintf(stderr, "prewarm built %u character kernels, expected 2\n", prewarmed);
+        return 1;
+    }
 
     const RbTransform identity = {{0, 0, 0}, {0, 0, 0, 1}};
     RbShapeDef sd = rbDefaultShapeDef();

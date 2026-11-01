@@ -854,6 +854,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |
 | Collider debug view | `World::draw`; `rbWorld_DebugDraw` (C callbacks) | ✅ |
 | Fixed rate, several steps per frame, pause, single step, sleep skip | `step`, `rbWorld_Step`, `rbWorld_Poll(coalesce)` | ✅ |
+| Compile kernels ahead of first use (loading screen) | `prewarm(KernelGroups)`, `rbWorld_Prewarm(RB_KERNELS_*)`; otherwise a kernel compiles on the first step that runs it | ✅ |
 | Reset | destroy and recreate the world, or remove and re-add; snapshot and restore is P6 | ✅ (P6 later) |
 | GPU step timings | `profile_ms`, `rbWorld_GetProfileMs` (per-kernel breakdown later) | ✅ |
 

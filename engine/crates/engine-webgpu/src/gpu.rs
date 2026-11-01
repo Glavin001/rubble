@@ -2803,6 +2803,25 @@ impl WgpuSim {
         self.last_timings.total_gpu
     }
 
+    /// Compile now the kernels of `groups` this world has (a world builds each
+    /// kernel the first time a step runs it), so no later step pays for them.
+    /// Blocks while they compile; returns how many were built by this call.
+    pub fn prewarm(&self, groups: crate::KernelGroups) -> usize {
+        let mut built = 0;
+        for (name, pipe) in &self.pipes {
+            if groups.covers(name) && pipe.pipeline.get().is_none() {
+                pipe.pipeline(&self.device, name);
+                built += 1;
+            }
+        }
+        built
+    }
+
+    /// Whether `kernel`'s pipeline has been built (by a step or [`Self::prewarm`]).
+    pub fn kernel_is_built(&self, kernel: &str) -> bool {
+        self.pipes.get(kernel).is_some_and(|p| p.pipeline.get().is_some())
+    }
+
     /// Rebuild the bind groups that use `binding` after its buffer was replaced.
     fn rebind_buffer(&mut self, binding: u32) {
         for (name, pipe) in self.pipes.iter_mut() {

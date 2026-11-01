@@ -210,6 +210,78 @@ impl SimOptions {
     }
 }
 
+/// Features whose kernels a host can compile before it uses them
+/// ([`crate::WgpuSim::prewarm`]). A world builds each kernel the first time it
+/// runs, so the first step with a character, vehicle, soft body, … pays that
+/// feature's compile; prewarming moves it to when the host chooses (a loading
+/// screen). Combine with `|`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct KernelGroups(pub u32);
+
+impl KernelGroups {
+    pub const NONE: Self = Self(0);
+    /// Character controllers (`char_move`, `char_post`).
+    pub const CHARACTERS: Self = Self(1 << 0);
+    /// Batched ray casts and overlap queries.
+    pub const QUERIES: Self = Self(1 << 1);
+    /// Projectiles (`projectile_step`).
+    pub const PROJECTILES: Self = Self(1 << 2);
+    /// Vehicles and their wheels.
+    pub const VEHICLES: Self = Self(1 << 3);
+    /// Soft bodies.
+    pub const SOFT_BODIES: Self = Self(1 << 4);
+    /// Deformable terrain (MPM soil and its surface).
+    pub const TERRAIN: Self = Self(1 << 5);
+    /// Directed debris.
+    pub const GUIDANCE: Self = Self(1 << 6);
+    /// Explosions.
+    pub const EXPLOSIONS: Self = Self(1 << 7);
+    /// Continuous collision (time-of-impact) for fast bodies.
+    pub const CCD: Self = Self(1 << 8);
+    /// Every kernel the world has: no step ever compiles one.
+    pub const ALL: Self = Self(u32::MAX);
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether `kernel` (a pipeline's name) belongs to one of these groups.
+    pub fn covers(self, kernel: &str) -> bool {
+        use engine_exec::rigid_plan::VEHICLE_ENTRIES;
+        if self == Self::ALL {
+            return true;
+        }
+        let groups: [(Self, bool); 9] = [
+            (Self::CHARACTERS, kernel.starts_with("char_")),
+            (
+                Self::QUERIES,
+                matches!(kernel, "query_batch" | "raycast_batch" | "overlap_query"),
+            ),
+            (Self::PROJECTILES, kernel == "projectile_step"),
+            (
+                Self::VEHICLES,
+                kernel.starts_with("vehicle_") || kernel.starts_with("wheel_") || VEHICLE_ENTRIES.contains(&kernel),
+            ),
+            (Self::SOFT_BODIES, kernel.starts_with("soft_")),
+            (
+                Self::TERRAIN,
+                kernel.starts_with("mpm_") || kernel.starts_with("terrain_"),
+            ),
+            (Self::GUIDANCE, kernel.starts_with("guide_")),
+            (Self::EXPLOSIONS, kernel == "explode"),
+            (Self::CCD, kernel.starts_with("ccd_")),
+        ];
+        groups.iter().any(|&(g, hit)| hit && self.contains(g))
+    }
+}
+
+impl std::ops::BitOr for KernelGroups {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
 /// ENGINE_AUDIT P0: every measured win is the default on every host; an
 /// `ENGINE_*` variable set to its control value restores the old path.
 pub(crate) fn env_str(name: &str) -> Option<String> {
@@ -264,6 +336,19 @@ mod tests {
     use super::*;
     use engine_exec::rigid_plan;
     use engine_schema::WorldCapacity;
+
+    #[test]
+    fn kernel_groups_cover_their_feature_kernels() {
+        use crate::KernelGroups as K;
+        assert!(K::CHARACTERS.covers("char_move") && K::CHARACTERS.covers("char_post"));
+        assert!(K::VEHICLES.covers("vehicle_iterate") && K::VEHICLES.covers("wheel_soil"));
+        assert!(K::VEHICLES.covers("raycast_batch") && K::QUERIES.covers("raycast_batch"));
+        assert!(K::TERRAIN.covers("mpm_grid") && K::TERRAIN.covers("terrain_surface_resolve"));
+        assert!((K::SOFT_BODIES | K::CCD).covers("ccd_emit"));
+        assert!(!K::CHARACTERS.covers("projectile_step"));
+        assert!(!(K::CHARACTERS | K::VEHICLES | K::TERRAIN).covers("narrowphase"));
+        assert!(K::ALL.covers("narrowphase") && !K::NONE.covers("char_move"));
+    }
 
     #[test]
     fn capacity_past_a_small_device_fails_with_a_clear_error() {

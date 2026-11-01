@@ -103,7 +103,7 @@ pub use engine_vehicle::{
     FunctionalState, GearRequest, MountLoad, VehicleCapacity, VehicleDesc, VehicleHandle,
     VehicleInput, VehicleState, WheelState,
 };
-pub use engine_webgpu::{ContactStorage, EngineFeatures, WgpuSim};
+pub use engine_webgpu::{ContactStorage, EngineFeatures, KernelGroups, WgpuSim};
 
 use engine_schema::convex::HullArena;
 use engine_schema::{BodyState, Collider, GpuCommand, ShapeType};
@@ -522,6 +522,13 @@ impl World {
     /// The simulation underneath, for reads this API does not cover yet.
     pub fn sim(&self) -> &WgpuSim {
         &self.sim
+    }
+
+    /// Compile `groups`' kernels now instead of on the first step that runs them
+    /// (a loading screen before the first character, vehicle, …). Blocks while
+    /// they compile; returns how many were built.
+    pub fn prewarm(&self, groups: KernelGroups) -> usize {
+        self.sim.prewarm(groups)
     }
 
     pub fn device(&self) -> &wgpu::Device {
