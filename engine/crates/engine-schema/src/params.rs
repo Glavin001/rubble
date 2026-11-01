@@ -11,6 +11,13 @@ pub const FLAG_REUSE_CONTACTS: u32 = 1;
 /// `contact_offset` deep (three-avbd).
 pub const FLAG_CONTACT_GAP: u32 = 32;
 
+/// `AvbdParams::flags` bit: post-stabilization. The velocity is recorded after
+/// the iterations (`record_stab_velocity`), then one primal pass with α = 0
+/// removes the step-start error without adding its correction to the velocity.
+/// A step plan must dispatch both: `extract_velocity_sleep` then leaves the
+/// velocity as recorded.
+pub const FLAG_POST_STAB: u32 = 4096;
+
 /// `AvbdParams::flags` bit: look-ahead (speculative) contacts sized to each
 /// body's motion this step (`world_step.slang` FLAG_SPEC_VELOCITY). Bodies
 /// flagged `BODY_CCD` get uncapped reach and time-of-impact contacts.

@@ -185,6 +185,12 @@ impl Scene {
             .map(|(s, _)| Scene(s))
             .map_err(err)
     }
+    /// The glass tower and the pavilion it can be felled onto, as a scene pack's bytes
+    /// (engine-fracture `glass_tower.rs`; load it with `fromPack`).
+    #[wasm_bindgen(js_name = glassTowerPack)]
+    pub fn glass_tower_pack() -> Result<Vec<u8>, JsError> {
+        serde_json::to_vec(&engine_fracture::glass_tower::felling_scene_pack()).map_err(err)
+    }
     /// Collision-cost benchmark scene (`count` stacks of shape `a` under `b`).
     #[wasm_bindgen(js_name = pairs)]
     pub fn pairs(a: &str, b: &str, count: u32) -> Result<Scene, JsError> {

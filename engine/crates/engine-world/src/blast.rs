@@ -267,6 +267,7 @@ impl crate::DestructibleAssetDesc {
                     }],
                     fragment: None,
                     node: None,
+                    node_frame: None,
                 });
             }
         }
