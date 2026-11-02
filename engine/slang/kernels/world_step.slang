@@ -3862,8 +3862,14 @@ Contact archiveRowOf(uint body, uint slot)
 // broadphase stays within WebGPU's storage-buffer budget).
 void archiveMark(uint body)
 {
-    // The touch query (archiveTouchQuery) lists every touched sleeper, archive or not.
-    if (!archiveTouchQuery() && ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
+    if (ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
+    archiveList(body);
+}
+
+// List `body` once this step (the touch query, archiveTouchQuery, lists every touched
+// sleeper, archive or not).
+void archiveList(uint body)
+{
     uint stamp = HOST_S(17) + 1u;
     uint old;
     AXCHG3(gScratchAtomics[arTouched(body)], stamp, old);
@@ -3881,9 +3887,9 @@ void archiveTouch(uint i, uint j)
     BodyState a = gBodies[bi];
     BodyState b = gBodies[bj];
     if (bodyMovingOrKinematic(a) && bodyIsDynamic(b) && bodyIsSleeping(b))
-        archiveMark(bj);
+        archiveTouchQuery() ? archiveList(bj) : archiveMark(bj);
     else if (bodyMovingOrKinematic(b) && bodyIsDynamic(a) && bodyIsSleeping(a))
-        archiveMark(bi);
+        archiveTouchQuery() ? archiveList(bi) : archiveMark(bi);
 }
 
 // A listed sleeper's archived resting pairs (each pair once; a pair whose partner
@@ -3932,7 +3938,7 @@ void touchEmit(uint i, Collider a, uint j, bool lowerOwns, bool probeHasObb, Box
         BodyState ob = gBodies[b.body];
         if (bodyIsDynamic(ob) && bodyIsSleeping(ob) && !bodiesJointed(a.body, b.body) &&
             !(probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)))
-            archiveMark(b.body);
+            archiveList(b.body);
         return;
     }
     // A touched partner (asleep at the broadphase, perhaps woken since by a projectile

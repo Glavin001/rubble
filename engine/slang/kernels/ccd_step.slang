@@ -1668,6 +1668,6 @@ void apply_impulses(uint3 tid : SV_DispatchThreadID)
     // A sleeper a projectile hit wakes after the broadphase: list it for the sleep
     // archive's touch query (archive_touch), which forms its resting pairs this step.
     if (PASS_U == 1u && bodyIsSleeping(b) && archiveTouchQuery())
-        archiveMark(body);
+        archiveList(body);
 #endif
 }
