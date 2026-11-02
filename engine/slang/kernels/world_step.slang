@@ -2392,7 +2392,6 @@ void restScanCellUniform(uint i, Collider col, Aabb box, float3 cA, float rA,
         if (guard == 4096u)
             AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
         if (cur == i || (ownCell && awakeEntry && cur <= i)) continue;
-        if (rest && restTombstone(cur)) continue;
         int3 candidateCell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
         if (any(candidateCell != cell)) continue;
         float rB = ab._pad0;
@@ -2406,6 +2405,8 @@ void restScanCellUniform(uint i, Collider col, Aabb box, float3 cA, float rA,
             box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
             box.mx.z < ab.mn.z || ab.mx.z < box.mn.z)
             continue;
+        // Tombstones last: the test only filters, and most entries fail the cheaper ones.
+        if (rest && restTombstone(cur)) continue;
         if (awakeEntry && boxOversize(ab, cellSize)) continue;
         Collider other = gColliders[cur];
         bool keep;
@@ -2457,7 +2458,6 @@ void restOversizeQueryUniform(uint i, Collider col, Aabb box, float3 cA, float r
             guard++;
             if (guard == 4096u) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
             if (cur == i) continue;
-            if (rest && restTombstone(cur)) continue;
             if (any(int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize)) != int3(x, y, z))) continue;
             float rB = ab._pad0;
             if (rB > 0.0)
@@ -2467,6 +2467,7 @@ void restOversizeQueryUniform(uint i, Collider col, Aabb box, float3 cA, float r
                 if (dot(d, d) > rr * rr) continue;
             }
             if (!aabbOverlap(box, ab)) continue;
+            if (rest && restTombstone(cur)) continue;
             if (awakeEntry && !ownsAwakePair(i, box, cur, ab, cellSize)) continue;
             Collider other = gColliders[cur];
             if (other.body == col.body || other.shape == SHAPE_PLANE || bodiesJointed(col.body, other.body)) continue;
@@ -4838,9 +4839,9 @@ void touchQueryGridRest(uint i, Collider col, Aabb box, float cellSize, bool que
             Aabb ab = gAabbs[base + cur];
             link = ALOAD(gConstraintIds[restLinks() + cur]);
             guard++;
-            if (cur == i || restTombstone(cur)) continue;
+            if (cur == i) continue;
             int3 cell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
-            if (any(cell != int3(x, y, z)) || !aabbOverlap(box, ab)) continue;
+            if (any(cell != int3(x, y, z)) || !aabbOverlap(box, ab) || restTombstone(cur)) continue;
             if (queryLarge && bodyIsDynamic(gBodies[gColliders[cur].body])) continue;
             touchEmit(i, col, cur, true, probeIsBox, probeObb, faceGap, mark);
         }

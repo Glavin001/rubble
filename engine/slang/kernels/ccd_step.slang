@@ -96,8 +96,7 @@ void restFastWalkCell(uint i, Collider a, bool aDyn, Aabb aa, int3 cell, float c
             Aabb ab = gAabbs[base + cur];
             link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : asuint(ab._pad1);
             guard++;
-            if (rest && restTombstone(cur)) continue;
-            if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell))
+            if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell) && !(rest && restTombstone(cur)))
                 fastAccept(i, a, aDyn, aa, cur);
         }
         if (link != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
@@ -1195,6 +1194,22 @@ void ccd_slot_reach(uint3 tid : SV_DispatchThreadID)
 {
     uint c = dispatchIndex(tid);
     if (c >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[c];
+    BodyState b = gBodies[col.body];
+    uint slot = ccdSlotOf(col.body, b);
+    if (slot == CCD_NO_PAIR || !ccdUnholds(b)) return;
+    AMAX2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + CCD_REACH_WORD], asuint(colliderExtent(col)));
+}
+
+// ccd_slot_reach over the moving colliders the awake-indexed broadphase listed (slot 81):
+// a CCD slot's body was moving when it registered, so all its colliders are listed.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_slot_reach_listed(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    uint c = awakeCollider(li);
     Collider col = gColliders[c];
     BodyState b = gBodies[col.body];
     uint slot = ccdSlotOf(col.body, b);

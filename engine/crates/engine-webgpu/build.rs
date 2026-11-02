@@ -144,6 +144,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "ccd_unhold",
     "ccd_reach_args",
     "ccd_slot_reach",
+    "ccd_slot_reach_listed",
     "ccd_wake_colliders",
     "ccd_unhold_colliders",
     "ccd_unhold_slots",

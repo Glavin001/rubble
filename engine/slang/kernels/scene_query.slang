@@ -546,8 +546,7 @@ void restSceneWalkCell<V : IColliderVisitor>(int3 cell, float cs, inout V v)
             Aabb ab = gAabbs[base + cur];
             link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : asuint(ab._pad1);
             guard++;
-            if (rest && restTombstone(cur)) continue;
-            if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell)) v.visit(cur);
+            if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell) && !(rest && restTombstone(cur))) v.visit(cur);
         }
     }
 }

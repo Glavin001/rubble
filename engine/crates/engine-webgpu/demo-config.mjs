@@ -270,15 +270,16 @@ export function parseDemoQuery(search) {
   if (broadphase === 'full') features.awakeBroadphase = false;
   if (broadphase === 'hier') features.awakeUniform = false;
   // ?costfloor=off: the per-step work over every collider and body slot as before the
-  // cost-floor passes (each gives the same results; for A/B timing).
+  // cost-floor passes (each gives the same results; for A/B timing). A comma list turns
+  // off only those parts: uniform, incremental, ccd, body, tail.
   const costFloor = qs.get('costfloor');
-  if (costFloor !== null && !['on', 'off'].includes(costFloor)) throw new Error('costfloor must be on or off');
-  if (costFloor === 'off') {
-    features.awakeUniform = false;
-    features.restIncremental = false;
-    features.ccdByCollider = false;
-    features.awakeBodyPasses = false;
-    features.primalTail = false;
+  const floorParts = { uniform: 'awakeUniform', incremental: 'restIncremental', ccd: 'ccdByCollider', body: 'awakeBodyPasses', tail: 'primalTail' };
+  if (costFloor !== null && costFloor !== 'on') {
+    const off = costFloor === 'off' ? Object.keys(floorParts) : costFloor.split(',');
+    for (const part of off) {
+      if (!(part in floorParts)) throw new Error(`costfloor must be on, off or a list of ${Object.keys(floorParts).join(', ')}`);
+      features[floorParts[part]] = false;
+    }
   }
   // CSR endpoints follow the contact storage in Rust's plan (pairs when persistent).
   const endpoints = qs.get('endpoints') || (persistent ? 'pairs' : 'manifold');

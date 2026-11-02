@@ -585,7 +585,12 @@ pub fn encode_step(
         // Sleepers in a fast CCD body's path wake before the narrowphase.
         if m.ccd_by_collider {
             e.d("ccd_reach_args", 64);
-            e.w("ccd_slot_reach", 87);
+            // A CCD slot's colliders are among the listed movers on awake-indexed steps.
+            if rest {
+                e.w("ccd_slot_reach_listed", 81);
+            } else {
+                e.w("ccd_slot_reach", 87);
+            }
             e.w("ccd_wake_colliders", 87);
         } else {
             e.d("ccd_wake", n_bodies);
@@ -1034,6 +1039,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_unhold",
     "ccd_reach_args",
     "ccd_slot_reach",
+    "ccd_slot_reach_listed",
     "ccd_wake_colliders",
     "ccd_unhold_colliders",
     "ccd_unhold_slots",
