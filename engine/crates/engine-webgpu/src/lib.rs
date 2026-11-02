@@ -100,29 +100,21 @@ impl WebGpuWorld {
             .map(|(n, w)| {
                 (
                     (*n).to_string(),
-                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if n
-                        .starts_with("solve_primal_sparse")
-                        || n.starts_with("soft_primal_fused")
-                        || n.starts_with("soft_primal_bodies")
-                        || n.starts_with("color_bodies_local")
-                        || n.starts_with("color_bodies_tail")
-                    {
-                        // These entries access buffers only. Slang over-lowers
-                        // DeviceMemoryBarrierWithGroupSync to a texture barrier
-                        // unavailable in the supported WGSL/Naga version, and
-                        // ends it with an empty statement (`;;`) that Tint
-                        // accepts but Safari's WGSL parser rejects.
-                        w.replace(
+                    // No entry uses storage textures. Slang over-lowers
+                    // DeviceMemoryBarrierWithGroupSync to a texture barrier
+                    // unavailable in the supported WGSL/Naga version, and ends it
+                    // with an empty statement (`;;`) that Tint accepts but
+                    // Safari's WGSL parser rejects.
+                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(
+                        &w.replace(
                             "storageBarrier(); textureBarrier(); workgroupBarrier();;",
                             "storageBarrier(); workgroupBarrier();",
                         )
                         .replace(
                             "storageBarrier(); textureBarrier(); workgroupBarrier();",
                             "storageBarrier(); workgroupBarrier();",
-                        )
-                    } else {
-                        w.to_string()
-                    }))),
+                        ),
+                    ))),
                 )
             })
             .collect()
