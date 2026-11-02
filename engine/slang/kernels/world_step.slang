@@ -3770,8 +3770,20 @@ uint archiveOwner(Contact c)
     return ARCHIVE_NONE;
 }
 
+// An archived row from before its collider was re-parented: its anchors (old frame)
+// are not pinned (persistence keeps a row's anchors only while it sticks).
+Contact archiveStaleRow(Contact prev)
+{
+    prev._pad0 = 0.0;
+    return prev;
+}
+
 // A warm-start miss: the row this pair fell asleep with, in either body's archive
-// (same feature, nearest anchors; else the nearest anchor within the fraction).
+// (same feature, nearest anchors; else the nearest anchor within the fraction). With
+// the touch query, a row whose collider has since been re-parented (a split: the key
+// differs, its anchors are in the old body frame) still lends a same-feature match its
+// impulses and stiffness, as the previous step's row does without the archive; its
+// anchors are not kept (archiveStaleRow).
 bool archiveFind(Contact c, out Contact found)
 {
     Collider colA = gColliders[c.colliderA];
@@ -3782,8 +3794,11 @@ bool archiveFind(Contact c, out Contact found)
     float bestNear = NEAREST_FRACTION * minSide;
     bool haveFeature = false;
     bool haveNear = false;
+    bool haveStale = false;
+    bool staleOk = archiveTouchQuery();
     found = c;
     Contact near = c;
+    Contact stale = c;
     uint owners[2] = { colA.body, colB.body };
     for (uint side = 0u; side < 2u; side++)
     {
@@ -3799,7 +3814,14 @@ bool archiveFind(Contact c, out Contact found)
             if (prev.colliderA != c.colliderA || prev.colliderB != c.colliderB)
                 continue;
             if (asuint(prev._pad1) != key)
+            {
+                if (staleOk && !haveStale && prev.featureId == c.featureId)
+                {
+                    stale = archiveStaleRow(prev);
+                    haveStale = true;
+                }
                 continue;
+            }
             float3 dA = prev.anchorA - c.anchorA;
             float3 dB = prev.anchorB - c.anchorB;
             if (prev.featureId == c.featureId)
@@ -3815,7 +3837,8 @@ bool archiveFind(Contact c, out Contact found)
         }
     }
     if (!haveFeature && haveNear) found = near;
-    return haveFeature || haveNear;
+    else if (!haveFeature && haveStale) found = stale;
+    return haveFeature || haveNear || haveStale;
 }
 
 // The archived row at `slot` of `body`'s archive (walking its block chain).

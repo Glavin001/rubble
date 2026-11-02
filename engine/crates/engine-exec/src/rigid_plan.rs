@@ -478,8 +478,11 @@ pub fn encode_step(
                 // Sleepers a fast CCD body's step will solve (world_step.slang archive_touch_ccd).
                 e.d("archive_touch_ccd", n_bodies);
             }
-            e.d("archive_touch_snap", 64);
-            e.d("archive_touch_spread", 4096);
+            // One hop, and `archive_spread_rounds` more (measurement variant).
+            for _ in 0..=m.archive_spread_rounds {
+                e.d("archive_touch_snap", 64);
+                e.d("archive_touch_spread", 4096);
+            }
             e.d("archive_touch", 4096);
         } else {
             // Measurement variant: sleepers resting on touched ones, one archived hop a round.
