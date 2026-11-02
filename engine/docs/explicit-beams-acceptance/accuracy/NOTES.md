@@ -136,3 +136,26 @@ in all six runs.
   CPU agree at the origin (86 mm through this crash) but not about 190 m out,
   so the open suspect is GPU float rounding far from the origin.
 - Six samples per engine is too few to settle either point.
+
+## JBeam car idle: broken counts are noise too
+
+The converted high-resolution JBeam car breaks beams under its own weight at
+rest, in both engines.
+
+**Scene:** RoR's `free` scene at (200, 0.02, 200), so its lowest node starts 2
+cm up; drag off; 1 s. Each row is one nudged spawn.
+
+| Nudge | RoR broken | CPU broken |
+|---|---|---|
+| none | 13 | 12 |
+| x + 2e-5 m | 10 | 10 |
+| y + 1e-5 m | 9 | 4 |
+| z + 2e-5 m | 10 | 11 |
+| vx + 0.1 mm/s | 17 | 12 |
+| vz + 0.1 mm/s | 11 | 4 |
+
+**Reading:**
+- RoR ranges 9–17 and the CPU 4–12; both medians are 10.5.
+- The CPU is 6–7 mm node RMS from RoR at 0.5–2.5 s on the unnudged spawn.
+- The acceptance run's single idle sample (Rubble 3 against RoR's 5–5) falls on
+  this noise. A single-sample rule can't separate it from real error.
