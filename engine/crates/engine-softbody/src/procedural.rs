@@ -1186,12 +1186,16 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     // Reference frame: centre, back, left.
     let mid = ring(n / 2, 0);
     let _ = writeln!(s, "\ncameras\n{}, {}, {}", ring(n - 1, 6), ring(0, 6), mid);
-    let _ = writeln!(s, "\nwheels");
+    // Soft tyres (a node–beam solver's wheels) take the beam defaults in force:
+    // reset them from the body's last, weak panel values to the format's defaults.
+    // Tyre damping 300 N·s/m: a tyre node is 15 kg / 24 and carries ~6 beams, so an
+    // explicit 0.5 ms step stays stable (h·c·6/m ≈ 1.4 < 2).
+    let _ = writeln!(s, "\nset_beam_defaults -1, -1, -1, -1\nwheels");
     for &(n1, n2, z) in &wheel_axles {
         // Rear-wheel drive (as the sedan preset): weight moves onto the rear axle
         // under acceleration, so it puts more power down than front drive.
         let propulsed = if z < 0.0 { 1 } else { 0 };
-        let _ = writeln!(s, "{:.3}, 0.20, 12, {n1}, {n2}, 9999, 1, {propulsed}, 9999, 15.0, 800000, 4000, tracks/wheelface, tracks/wheelband1", p.wheel_radius);
+        let _ = writeln!(s, "{:.3}, 0.20, 12, {n1}, {n2}, 9999, 1, {propulsed}, 9999, 15.0, 800000, 300, tracks/wheelface, tracks/wheelband1", p.wheel_radius);
     }
     let _ = writeln!(
         s,

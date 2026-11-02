@@ -75,6 +75,84 @@ fn main() -> anyhow::Result<()> {
             Vec3::new(v[3], v[4], v[5]),
         ));
     }
+    // `ground=1`: stand the vehicle on its lowest node, 2 cm above the ground.
+    if kv.get("ground") == Some(&"1") {
+        let lowest = cpu.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+        for n in &mut cpu.nodes {
+            n.pos.y += 0.02 - lowest;
+        }
+    }
+    // `scene=<file.json>`: what a renderer needs besides the trace: the skin
+    // (every `cab` triangle, collision or not), each tyre's node rings, the boxes.
+    if let Some(out) = kv.get("scene") {
+        let desc = engine_softbody::truck::load_truck(&text);
+        let file = engine_softbody::truck::parse_truck(&text);
+        let mut base = desc.nodes.len();
+        let tyres: Vec<String> = file
+            .wheels
+            .iter()
+            .map(|w| {
+                let t = format!(
+                    "{{\"axle\":[{},{}],\"first\":{base},\"rays\":{}}}",
+                    w.node1, w.node2, w.rays
+                );
+                base += 2 * w.rays as usize;
+                t
+            })
+            .collect();
+        let tris: Vec<String> = desc
+            .triangles
+            .iter()
+            .map(|t| format!("[{},{},{}]", t.nodes[0], t.nodes[1], t.nodes[2]))
+            .collect();
+        let boxes: Vec<String> = cpu
+            .boxes
+            .iter()
+            .map(|b| {
+                let (c, h) = ((b.lo + b.hi) * 0.5, (b.hi - b.lo) * 0.5);
+                format!("[{},{},{},{},{},{}]", c.x, c.y, c.z, h.x, h.y, h.z)
+            })
+            .collect();
+        // `visual=sedan`: the procedural sedan's render mesh (its nodes are the truck's
+        // first nodes): per vertex the frame nodes and coordinates, triangles, materials.
+        let visual = if kv.get("visual") == Some(&"sedan") {
+            let (mesh, _) = engine_softbody::visual::procedural_car_visual(&CarParams::sedan());
+            let verts: Vec<String> = mesh
+                .bindings
+                .iter()
+                .map(|b| {
+                    format!(
+                        "[{},{},{},{},{},{}]",
+                        b.nodes[0], b.nodes[1], b.nodes[2], b.coords[0], b.coords[1], b.coords[2]
+                    )
+                })
+                .collect();
+            let vt: Vec<String> = mesh
+                .tris
+                .iter()
+                .map(|t| format!("[{},{},{}]", t[0], t[1], t[2]))
+                .collect();
+            let mats: Vec<String> = mesh.tri_material.iter().map(|m| m.to_string()).collect();
+            format!(
+                ",\"visual\":{{\"bindings\":[{}],\"triangles\":[{}],\"materials\":[{}]}}",
+                verts.join(","),
+                vt.join(","),
+                mats.join(",")
+            )
+        } else {
+            String::new()
+        };
+        std::fs::write(
+            out,
+            format!(
+                "{{\"nodes\":{},\"triangles\":[{}],\"tyres\":[{}],\"boxes\":[{}]{visual}}}",
+                cpu.nodes.len(),
+                tris.join(","),
+                tyres.join(","),
+                boxes.join(",")
+            ),
+        )?;
+    }
     let (info, device, queue) = default_device()?;
     println!(
         "{}: {} nodes, {} beams, {} collision triangles, {} contacters ({})",
