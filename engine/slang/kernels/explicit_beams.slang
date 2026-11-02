@@ -44,7 +44,8 @@
 //            the gLists positions of its end a's and end b's incidence entries.
 //   gNodes   per node 3 × float4: (relative position, mass), (velocity, friction),
 //            (force, 0).
-//   gBeams   per beam 3 × float4: (L, Tc, Tt, G), (S, last force, broken, 0), (0);
+//   gBeams   per beam 3 × float4: (L, Tc, Tt, G), (S, last force when S or broken
+//            last changed, broken, 0), (0);
 //            at incBase per gLists position, the force of an incidence entry's beam
 //            on that node (unused at candidate positions).
 //   gAcc     per node 3 × int: self-collision force in 1/32 N.
@@ -501,8 +502,12 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
             }
         }
     }
-    gBeams[gj * 3u] = float4(rest, tc, tt, gate);
-    gBeams[gj * 3u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, 0.0);
+    // State records only when they change (yield, break): most steps change
+    // neither. The last force (.y) is kept for a read-back only, so it is stored
+    // with the record, not every step.
+    float4 n0 = float4(rest, tc, tt, gate);
+    if (any(n0 != s0)) gBeams[gj * 3u] = n0;
+    if (strength != s1.x || broken) gBeams[gj * 3u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, 0.0);
     float3 push = d * (f * inv);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
