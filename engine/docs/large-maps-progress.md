@@ -316,7 +316,17 @@ Neither variant passes the gate. What this shows:
   solve's warm start and wake. The remaining candidate is the threshold fracture: its
   contact ingest (stress-gpu `ingest.rs`) reads the step's contact rows, and resting pairs
   that keep rows (carry on) or lose them (carry off) may change what it treats as
-  supported or loaded, even at λ = 0. Not yet measured.
+  supported or loaded, even at λ = 0. **Ruled out by the code:** `ingest_rows`
+  (stress-gpu `shaders/coupling.slang`) turns a row into chunk records only through its
+  impulse `−(n·λN + t1·λT1 + t2·λT2)·h`, and returns before writing any record when that
+  is zero. A carried row (λ = 0) gives the fracture no support, load or contact.
+
+The mechanism is still open: on the rigid side the carried rows only (1) mask the
+archive (a), (2) give same-step rows and wake chaining to bodies touched or woken in
+the narrowphase (b covers the archived part of that), and (3) are inert otherwise; the
+fracture ignores them. What (b) does not reproduce is chaining over resting pairs that
+are in no archive (a pair whose partner fell asleep later is in only that partner's
+archive) and the racy in-dispatch order of today's chain.
 
 Until that is understood, option A cannot be made to pass by fixing the rigid side, and
 option B (keep the carry's behaviour, make it cheap) is the safer route to the cost.
