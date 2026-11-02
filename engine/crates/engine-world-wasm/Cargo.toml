@@ -3,7 +3,7 @@ name = "engine-world-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Rubble's world API in the browser: Broadside (broadside.html), a Shardwright wooden ship shot apart around a walking captain, stepped in Rust on the module's WebGPU device; the page draws its poses"
+description = "Rubble's world API in the browser: Broadside (broadside.html), a Shardwright wooden ship shot apart around a walking captain, and the timber yard (timber.html), a timber-frame house and plank walls to shoot apart; stepped in Rust on the module's WebGPU device; the page draws its poses (engine-viewer's world_viewer draws them natively)"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

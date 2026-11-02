@@ -89,6 +89,12 @@ fn stands(level: u8) {
         asset.chunks.len(),
         ms
     );
-    assert_eq!(broken, 0, "L{level}: the yard breaks nothing under its own weight");
-    assert_eq!(crushed, 0, "L{level}: nothing is crushed under its own weight");
+    assert_eq!(
+        broken, 0,
+        "L{level}: the yard breaks nothing under its own weight"
+    );
+    assert_eq!(
+        crushed, 0,
+        "L{level}: nothing is crushed under its own weight"
+    );
 }
