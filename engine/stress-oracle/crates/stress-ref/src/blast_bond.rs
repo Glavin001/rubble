@@ -95,6 +95,13 @@ pub struct BlastMaterial {
     /// Young's modulus the bonds of this material are weighted by (0: [`MODULUS_REFERENCE`]).
     #[serde(default)]
     pub modulus: f64,
+    /// Mohr-Coulomb joint shear (`PxDestructionMaterial::shearFriction`, the stage's
+    /// `PX_DESTRUCTION_MOHR_COULOMB_SHEAR`): the friction coefficient the compression across a
+    /// joint adds to its shear strength (0: none), capped at `shear_capacity_limit` (0: uncapped).
+    #[serde(default)]
+    pub shear_friction: f64,
+    #[serde(default)]
+    pub shear_capacity_limit: f64,
 }
 
 impl BlastMaterial {
@@ -108,6 +115,8 @@ impl BlastMaterial {
         shear_fatal: 4e6,
         residual_area_fraction: 0.0,
         modulus: 30e9,
+        shear_friction: 0.0,
+        shear_capacity_limit: 0.0,
     };
 }
 
@@ -145,7 +154,10 @@ pub struct BlastSettings {
     pub first_preconditioner: FirstPreconditioner,
     /// [`SolverKind::Native`]: Krylov carry (`BLAST_STRESS_CARRY_KRYLOV`): `None` is the
     /// target's default, on with per-bond rotational stiffness and off without.
-    pub carry_krylov: Option<bool>,
+    pub carry_krylov: Option<bool>,    /// Bending and twist from each bond's own section (`PxDestructionStressDesc::sectionBending`,
+    /// `extStressCalcBondStressSection`), the moment taken at the bond's centroid; on whenever
+    /// the rotational stiffness is (as the stage has it).
+    pub section_bending: bool,
 }
 
 /// The native solve's first iteration (`firstPreconditionerMode`).
@@ -198,6 +210,7 @@ impl Default for BlastSettings {
             force_tolerance: 0.0,
             first_preconditioner: FirstPreconditioner::Identity,
             carry_krylov: None,
+            section_bending: false,
         }
     }
 }
@@ -366,6 +379,8 @@ pub struct BlastGraph {
     /// [`BlastGraph::set_shear_stiffness`]: the linear block `s Al`, `Wl = Al^2`.
     pub rotation: Vec<[[f64; 6]; 2]>,
     pub shear: Vec<[[f64; 6]; 2]>,
+    /// Each bond's section (`PxDestructionStressDesc::bondSections`), or empty (square patches).
+    pub sections: Vec<BondSection>,
 }
 
 /// A bond's section on its principal axes (`PxDestructionBondSection`): the unit axis in the
@@ -377,6 +392,15 @@ pub struct BondSection {
     pub gyration0: f64,
     pub gyration1: f64,
     pub polar_gyration: f64,
+    /// Elastic section moduli about the axis and about `normal x axis`, and the polar modulus
+    /// (`extStressCalcBondStressSection`); any `<= 0` takes the square patch of the area.
+    pub bend_modulus0: f64,
+    pub bend_modulus1: f64,
+    pub twist_modulus: f64,
+    /// A fastened bearing joint (`PxDestructionBondSection::bearingDepth0/1`): its fasteners'
+    /// depths from the bearing edge about each axis; 0 for none.
+    pub bearing_depth0: f64,
+    pub bearing_depth1: f64,
 }
 
 /// A packed symmetric 3x3 times a vector.
@@ -568,6 +592,7 @@ impl BlastGraph {
             node_refs,
             rotation: Vec::new(),
             shear: Vec::new(),
+            sections: Vec::new(),
         })
     }
 
@@ -990,16 +1015,36 @@ impl BlastSolver {
         if !(area > 0.0) {
             return BondStress::default();
         }
-        let s = &self.graph.settings;
-        bond_stress(
-            self.impulse(bond),
-            self.graph.normal[bond],
-            area,
-            self.graph.node_distance[bond],
-            s.bend_gain_max,
-            s.fibres,
-        )
+        self.graph.bond_stress_of(bond, self.impulse(bond), area)
     }
+}
+
+impl BlastGraph {
+    /// Bond `bond`'s stresses from its physical wrench over `area` (its remaining area), as the
+    /// stage evaluates them: the section path with `section_bending` (or the rotational
+    /// stiffness), else `extStressCalcBondStress`.
+    pub fn bond_stress_of(&self, bond: usize, impulse: AngLin, area: f64) -> BondStress {
+        let g = self;
+        let s = &g.settings;
+        if s.section_bending || !g.rotation.is_empty() {
+            let mut impulse = impulse;
+            // The solver's wrench acts at the chunks' midpoint between two dynamic chunks; the
+            // section is at the centroid: M_c = M_P + (c - P) x F. With the rotational stiffness
+            // the spring, and so the moment, is already at the centroid.
+            let b = &g.bonds[bond];
+            let [n0, n1] = b.nodes;
+            if g.rotation.is_empty() && !g.weight[n0].is_static() && !g.weight[n1].is_static() {
+                let midpoint = (g.nodes[n0].position + g.nodes[n1].position) * 0.5;
+                impulse.ang += (b.centroid - midpoint).cross(impulse.lin);
+            }
+            let section = g.sections.get(bond).copied().unwrap_or_default();
+            return bond_stress_section(impulse, g.normal[bond], area, b.area, &section, s.fibres);
+        }
+        bond_stress(impulse, g.normal[bond], area, g.node_distance[bond], s.bend_gain_max, s.fibres)
+    }
+}
+
+impl BlastSolver {
 
     /// The bond's damage this tick (`extStressBondDamage`).
     pub fn damage(&self, bond: usize, material: &BlastMaterial, dt: f64) -> Damage {
@@ -1335,6 +1380,77 @@ pub fn bond_stress(
     out
 }
 
+/// `extStressCalcBondStressSection` then `extStressFibre` and the bearing joint
+/// (`evaluateBondMaterials` with `sectionBending`): bending as `|M0|/S0 + |M1|/S1` on the
+/// section's principal axes and twist `|T|/Zt`, both scaled by the live fraction of the
+/// authored area; without section moduli the square patch of the remaining area (`S = a^3/6`,
+/// `Zt = sqrt(2) a^3/6`), uncapped. A bearing joint grades its fasteners' tension
+/// `max(0, M0/d0 + M1/d1 + N)/A` instead of the fibre tension.
+pub fn bond_stress_section(
+    impulse: AngLin,
+    normal: Vec3,
+    area: f64,
+    original_area: f64,
+    section: &BondSection,
+    fibres: bool,
+) -> BondStress {
+    let perpendicular = |v: Vec3, along: f64| (v - normal * along).norm();
+    let linear_normal = impulse.lin.dot(normal);
+    let mut out = BondStress {
+        normal: linear_normal / area,
+        shear: perpendicular(impulse.lin, linear_normal) / area,
+        ..Default::default()
+    };
+    let angular_normal = impulse.ang.dot(normal);
+    let twist = angular_normal.abs();
+    let axis1 = normal.cross(section.axis);
+    let s = section;
+    if s.bend_modulus0 > 0.0 && s.bend_modulus1 > 0.0 && s.twist_modulus > 0.0 && original_area > 0.0 {
+        let live = area / original_area;
+        let m0 = impulse.ang.dot(s.axis).abs();
+        let m1 = impulse.ang.dot(axis1).abs();
+        out.bend = (m0 / s.bend_modulus0 + m1 / s.bend_modulus1) / live;
+        out.shear += twist / (s.twist_modulus * live);
+    } else {
+        let cube = area * area.sqrt();
+        out.bend = 6.0 * perpendicular(impulse.ang, angular_normal) / cube;
+        out.shear += twist * (6.0 / 2f64.sqrt()) / cube;
+    }
+    if !fibres {
+        let combined = out.normal + out.bend.copysign(out.normal);
+        out.compression = if combined <= 0.0 { -combined } else { 0.0 };
+        out.tension = combined.max(0.0);
+    } else {
+        out.tension = (out.normal + out.bend).max(0.0);
+        out.compression = (out.bend - out.normal).max(0.0);
+    }
+    if s.bearing_depth0 > 0.0 && s.bearing_depth1 > 0.0 {
+        let m0 = impulse.ang.dot(s.axis).abs();
+        let m1 = impulse.ang.dot(axis1).abs();
+        out.tension = (m0 / s.bearing_depth0 + m1 / s.bearing_depth1 + out.normal * area).max(0.0) / area;
+    }
+    out
+}
+
+/// `extStressFrictionStrength`: the shear strength `mu sigma_c` the compression across a joint
+/// adds (none in tension), capped so the fatal limit plus it stays within `cap` (0: uncapped).
+pub fn friction_strength(normal: f64, mu: f64, cap: f64, shear_fatal: f64) -> f64 {
+    if !(mu > 0.0) || !(normal < 0.0) {
+        return 0.0;
+    }
+    let term = -mu * normal;
+    if cap > 0.0 {
+        let room = cap - shear_fatal;
+        if room > 0.0 {
+            term.min(room)
+        } else {
+            0.0
+        }
+    } else {
+        term
+    }
+}
+
 /// `extStressBondDamage`: compression and tension take the larger excess, shear adds; at or
 /// above 1 the bond fails outright, otherwise it loses `health min(m dt rate, 1)` (all of
 /// `health m` with `dt = 0`), floored by the residual area.
@@ -1371,8 +1487,15 @@ pub fn bond_damage(
     ) {
         axial = axial.max(t);
     }
-    out.multiplier =
-        axial + excess(stress.shear, material.shear_elastic, material.shear_fatal).unwrap_or(0.0);
+    // Mohr-Coulomb joint shear: graded net of the friction the compression adds.
+    let shear = if material.shear_friction > 0.0 {
+        (stress.shear
+            - friction_strength(stress.normal, material.shear_friction, material.shear_capacity_limit, material.shear_fatal))
+        .max(0.0)
+    } else {
+        stress.shear
+    };
+    out.multiplier = axial + excess(shear, material.shear_elastic, material.shear_fatal).unwrap_or(0.0);
     out.command = out.multiplier > 0.0;
     if !out.command {
         return out;

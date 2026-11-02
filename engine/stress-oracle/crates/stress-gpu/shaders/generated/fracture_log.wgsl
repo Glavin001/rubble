@@ -3,7 +3,7 @@ struct LogParams_std140_0
     @align(16) chunk_count_0 : u32,
     @align(4) bond_count_0 : u32,
     @align(8) body_count_0 : u32,
-    @align(4) step_0 : u32,
+    @align(4) w_stamp_0 : u32,
     @align(16) w_alive_0 : u32,
     @align(4) cap_bonds_0 : u32,
     @align(8) cap_chunks_0 : u32,
@@ -76,7 +76,7 @@ fn log_bonds(@builtin(global_invocation_id) id_0 : vec3<u32>)
     {
         var _S4 : u32 = l_bonds_0();
         atomicStore(&(log_0[_S4 + u32(2) * at_1]), j_0);
-        atomicStore(&(log_0[_S4 + u32(2) * at_1 + u32(1)]), params_0.step_0);
+        atomicStore(&(log_0[_S4 + u32(2) * at_1 + u32(1)]), work_0[params_0.w_stamp_0]);
     }
     return;
 }
@@ -114,7 +114,7 @@ fn log_chunks(@builtin(global_invocation_id) id_1 : vec3<u32>)
         var _S7 : u32 = l_chunks_0();
         atomicStore(&(log_0[_S7 + u32(3) * at_2]), c_0);
         atomicStore(&(log_0[_S7 + u32(3) * at_2 + u32(1)]), body_0);
-        atomicStore(&(log_0[_S7 + u32(3) * at_2 + u32(2)]), params_0.step_0);
+        atomicStore(&(log_0[_S7 + u32(3) * at_2 + u32(2)]), work_0[params_0.w_stamp_0]);
     }
     return;
 }
@@ -175,7 +175,7 @@ fn log_frames(@builtin(global_invocation_id) id_2 : vec3<u32>)
     {
         var e_0 : u32 = l_frames_0() + u32(10) * at_3;
         atomicStore(&(log_0[e_0]), b_0);
-        atomicStore(&(log_0[e_0 + u32(1)]), params_0.step_0);
+        atomicStore(&(log_0[e_0 + u32(1)]), work_0[params_0.w_stamp_0]);
         w_0 = u32(0);
         loop
         {

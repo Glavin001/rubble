@@ -28,6 +28,8 @@ struct BlastParams_std140_0
     @align(16) rotation_0 : u32,
     @align(4) node_vectors_0 : u32,
     @align(8) carry_0 : u32,
+    @align(4) section_bending_0 : u32,
+    @align(16) chunk_loads_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;
@@ -50,6 +52,8 @@ struct BlastBond_std430_0
 @binding(5) @group(0) var<storage, read_write> out_0 : array<vec4<f32>>;
 
 @binding(3) @group(0) var<storage, read> geometry_0 : array<vec4<f32>>;
+
+@binding(8) @group(0) var<storage, read> sections_0 : array<vec4<f32>>;
 
 @binding(4) @group(0) var<storage, read> materials_0 : array<vec4<f32>>;
 
@@ -175,79 +179,172 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
     var bend_0 : f32 = perpendicular_0(ia_0, n_1, angular_normal_0) / b_1.health_0;
     var gain_max_0 : f32 = params_0.bend_gain_max_0;
     var bend_stress_0 : f32;
+    var bearing_tension_0 : f32;
     var normal_1 : f32;
     var shear_1 : f32;
-    if((params_0.bend_gain_max_0) > 0.0f)
+    var _S13 : bool;
+    if((params_0.section_bending_0) != u32(0))
     {
-        var _S13 : bool = (b_1.health_0) > 9.99999997475242708e-07f;
+        var _S14 : u32 = j_1 * u32(3);
+        var s0_0 : vec4<f32> = sections_0[_S14];
+        var s1_0 : vec4<f32> = sections_0[_S14 + u32(1)];
+        var m_1 : vec3<f32> = ia_0 + cross(sections_0[_S14 + u32(2)].xyz, il_0);
+        var m_normal_0 : f32 = fdot_0(m_1, n_1);
+        var tw_0 : f32 = abs(m_normal_0);
+        var axis_0 : vec3<f32> = s0_0.xyz;
+        var _S15 : f32 = n_1.y;
+        var _S16 : f32 = axis_0.z;
+        var _S17 : f32 = n_1.z;
+        var _S18 : f32 = axis_0.y;
+        var _S19 : f32 = axis_0.x;
+        var _S20 : f32 = n_1.x;
+        var axis1_0 : vec3<f32> = vec3<f32>(fma(_S15, _S16, - _S17 * _S18), fma(_S17, _S19, - _S20 * _S16), fma(_S20, _S18, - _S15 * _S19));
+        var original_0 : f32 = g1_0.x;
+        var _S21 : f32 = s0_0.w;
+        if(_S21 > 0.0f)
+        {
+            _S13 = (s1_0.x) > 0.0f;
+        }
+        else
+        {
+            _S13 = false;
+        }
         if(_S13)
         {
-            bend_stress_0 = b_1.health_0;
+            _S13 = (s1_0.y) > 0.0f;
         }
         else
         {
-            bend_stress_0 = 9.99999997475242708e-07f;
+            _S13 = false;
         }
-        var torsion_0 : f32 = 4.80999994277954102f / sqrt(bend_stress_0);
-        if(torsion_0 < gain_max_0)
-        {
-            bend_stress_0 = torsion_0;
-        }
-        else
-        {
-            bend_stress_0 = gain_max_0;
-        }
-        var _S14 : f32 = fma(twist_0, bend_stress_0, shear_0);
         if(_S13)
         {
-            bend_stress_0 = b_1.health_0;
+            _S13 = original_0 > 0.0f;
         }
         else
         {
-            bend_stress_0 = 9.99999997475242708e-07f;
+            _S13 = false;
         }
-        var section_0 : f32 = 6.0f / sqrt(bend_stress_0);
-        if(section_0 < gain_max_0)
+        if(_S13)
         {
-            bend_stress_0 = section_0;
+            var live_0 : f32 = b_1.health_0 / original_0;
+            var _S22 : f32 = fma(tw_0, 1.0f / (s1_0.y * live_0), shear_0);
+            bend_stress_0 = (abs(fdot_0(m_1, axis_0)) / _S21 + abs(fdot_0(m_1, axis1_0)) / s1_0.x) / live_0;
+            normal_1 = _S22;
         }
         else
         {
-            bend_stress_0 = gain_max_0;
+            var cube_0 : f32 = b_1.health_0 * sqrt(b_1.health_0);
+            var _S23 : f32 = fma(tw_0, 4.24264049530029297f / cube_0, shear_0);
+            bend_stress_0 = 6.0f * perpendicular_0(m_1, n_1, m_normal_0) / cube_0;
+            normal_1 = _S23;
         }
-        bend_stress_0 = bend_0 * bend_stress_0;
+        var _S24 : f32 = s1_0.z;
+        if(_S24 > 0.0f)
+        {
+            _S13 = (s1_0.w) > 0.0f;
+        }
+        else
+        {
+            _S13 = false;
+        }
+        if(_S13)
+        {
+            bearing_tension_0 = max(0.0f, abs(dot(m_1, axis_0)) / _S24 + abs(dot(m_1, axis1_0)) / s1_0.w + normal_0 * b_1.health_0) / b_1.health_0;
+        }
+        else
+        {
+            bearing_tension_0 = -1.0f;
+        }
+        var _S25 : f32 = normal_1;
         normal_1 = normal_0;
-        shear_1 = _S14;
+        shear_1 = _S25;
     }
     else
     {
-        var shear_2 : f32 = shear_0 + twist_0 * 2.0f / node_distance_0;
-        var folded_0 : f32 = bend_0 * 2.0f / node_distance_0;
-        if((((bitcast<u32>((normal_0))) & (u32(2147483648)))) != u32(0))
+        if(gain_max_0 > 0.0f)
         {
-            bend_stress_0 = - folded_0;
+            var _S26 : bool = (b_1.health_0) > 9.99999997475242708e-07f;
+            if(_S26)
+            {
+                bend_stress_0 = b_1.health_0;
+            }
+            else
+            {
+                bend_stress_0 = 9.99999997475242708e-07f;
+            }
+            var torsion_0 : f32 = 4.80999994277954102f / sqrt(bend_stress_0);
+            if(torsion_0 < gain_max_0)
+            {
+                bend_stress_0 = torsion_0;
+            }
+            else
+            {
+                bend_stress_0 = gain_max_0;
+            }
+            var _S27 : f32 = fma(twist_0, bend_stress_0, shear_0);
+            if(_S26)
+            {
+                bend_stress_0 = b_1.health_0;
+            }
+            else
+            {
+                bend_stress_0 = 9.99999997475242708e-07f;
+            }
+            var section_0 : f32 = 6.0f / sqrt(bend_stress_0);
+            if(section_0 < gain_max_0)
+            {
+                bend_stress_0 = section_0;
+            }
+            else
+            {
+                bend_stress_0 = gain_max_0;
+            }
+            bend_stress_0 = bend_0 * bend_stress_0;
+            bearing_tension_0 = normal_0;
+            normal_1 = _S27;
         }
         else
         {
-            bend_stress_0 = folded_0;
+            var shear_2 : f32 = shear_0 + twist_0 * 2.0f / node_distance_0;
+            var folded_0 : f32 = bend_0 * 2.0f / node_distance_0;
+            if((((bitcast<u32>((normal_0))) & (u32(2147483648)))) != u32(0))
+            {
+                bend_stress_0 = - folded_0;
+            }
+            else
+            {
+                bend_stress_0 = folded_0;
+            }
+            var normal_2 : f32 = normal_0 + bend_stress_0;
+            bend_stress_0 = 0.0f;
+            bearing_tension_0 = normal_2;
+            normal_1 = shear_2;
         }
-        var normal_2 : f32 = normal_0 + bend_stress_0;
-        bend_stress_0 = 0.0f;
-        normal_1 = normal_2;
-        shear_1 = shear_2;
+        var _S28 : f32 = bearing_tension_0;
+        var _S29 : f32 = normal_1;
+        bearing_tension_0 = -1.0f;
+        normal_1 = _S28;
+        shear_1 = _S29;
     }
-    var _S15 : bool;
     if((params_0.fibres_0) == u32(0))
     {
-        _S15 = true;
+        _S13 = true;
     }
     else
     {
-        _S15 = gain_max_0 <= 0.0f;
+        if(gain_max_0 <= 0.0f)
+        {
+            _S13 = (params_0.section_bending_0) == u32(0);
+        }
+        else
+        {
+            _S13 = false;
+        }
     }
     var compression_0 : f32;
     var tension_0 : f32;
-    if(_S15)
+    if(_S13)
     {
         if((((bitcast<u32>((normal_1))) & (u32(2147483648)))) != u32(0))
         {
@@ -295,28 +392,80 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
         {
             tension_0 = 0.0f;
         }
-        var _S16 : f32 = compression_0;
+        var _S30 : f32 = compression_0;
         compression_0 = tension_0;
-        tension_0 = _S16;
+        tension_0 = _S30;
+    }
+    if(bearing_tension_0 >= 0.0f)
+    {
+        tension_0 = bearing_tension_0;
+    }
+    else
+    {
     }
     out_0[_S11 + u32(2)] = vec4<f32>(normal_1, shear_1, bend_stress_0, compression_0);
-    var _S17 : u32 = (bitcast<u32>((g1_0.y))) * u32(2);
-    var m0_0 : vec4<f32> = materials_0[_S17];
-    var m1_0 : vec4<f32> = materials_0[_S17 + u32(1)];
-    var _S18 : f32 = m0_0.x;
-    var axial_0 : f32;
-    if(compression_0 > _S18)
+    var _S31 : u32 = (bitcast<u32>((g1_0.y))) * u32(3);
+    var m0_0 : vec4<f32> = materials_0[_S31];
+    var m1_0 : vec4<f32> = materials_0[_S31 + u32(1)];
+    var m2_0 : vec4<f32> = materials_0[_S31 + u32(2)];
+    var _S32 : f32 = m2_0.x;
+    if(_S32 > 0.0f)
     {
-        axial_0 = excess_0(compression_0, _S18, m0_0.y);
+        _S13 = normal_1 < 0.0f;
+    }
+    else
+    {
+        _S13 = false;
+    }
+    var graded_shear_0 : f32;
+    if(_S13)
+    {
+        var term_0 : f32 = - _S32 * normal_1;
+        var _S33 : f32 = m2_0.y;
+        if(_S33 > 0.0f)
+        {
+            var room_0 : f32 = _S33 - m1_0.y;
+            if(room_0 > 0.0f)
+            {
+                if(term_0 < room_0)
+                {
+                    bend_stress_0 = term_0;
+                }
+                else
+                {
+                    bend_stress_0 = room_0;
+                }
+            }
+            else
+            {
+                bend_stress_0 = 0.0f;
+            }
+            graded_shear_0 = bend_stress_0;
+        }
+        else
+        {
+            graded_shear_0 = term_0;
+        }
+        graded_shear_0 = max(0.0f, shear_1 - graded_shear_0);
+    }
+    else
+    {
+        graded_shear_0 = shear_1;
+    }
+    var _S34 : f32 = m0_0.x;
+    var axial_0 : f32;
+    if(compression_0 > _S34)
+    {
+        axial_0 = excess_0(compression_0, _S34, m0_0.y);
     }
     else
     {
         axial_0 = 0.0f;
     }
-    var _S19 : f32 = m0_0.z;
-    if(tension_0 > _S19)
+    var _S35 : f32 = m0_0.z;
+    if(tension_0 > _S35)
     {
-        var t_1 : f32 = excess_0(tension_0, _S19, m0_0.w);
+        var t_1 : f32 = excess_0(tension_0, _S35, m0_0.w);
         if(axial_0 < t_1)
         {
             bend_stress_0 = t_1;
@@ -330,11 +479,11 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
     else
     {
     }
-    var _S20 : f32 = m1_0.x;
+    var _S36 : f32 = m1_0.x;
     var multiplier_0 : f32;
-    if(shear_1 > _S20)
+    if(graded_shear_0 > _S36)
     {
-        multiplier_0 = axial_0 + excess_0(shear_1, _S20, m1_0.y);
+        multiplier_0 = axial_0 + excess_0(graded_shear_0, _S36, m1_0.y);
     }
     else
     {
@@ -370,13 +519,13 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
         }
         if(multiplier_0 < 1.0f)
         {
-            _S15 = (m1_0.z) > 0.0f;
+            _S13 = (m1_0.z) > 0.0f;
         }
         else
         {
-            _S15 = false;
+            _S13 = false;
         }
-        if(_S15)
+        if(_S13)
         {
             var floor_0 : f32 = g1_0.x * m1_0.z;
             if((b_1.health_0 - damage_0) < floor_0)
@@ -414,17 +563,17 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
     out_0[_S11 + u32(3)] = vec4<f32>(tension_0, damage_0, multiplier_0, bend_stress_0);
     if((params_0.apply_damage_0) != u32(0))
     {
-        _S15 = command_0;
+        _S13 = command_0;
     }
     else
     {
-        _S15 = false;
+        _S13 = false;
     }
-    if(_S15)
+    if(_S13)
     {
         var health_1 : f32 = b_1.health_0 - damage_0;
-        var _S21 : bool = health_1 > 0.0f;
-        if(_S21)
+        var _S37 : bool = health_1 > 0.0f;
+        if(_S37)
         {
             bend_stress_0 = health_1;
         }
@@ -433,11 +582,11 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
             bend_stress_0 = 0.0f;
         }
         bonds_0[j_1].health_0 = bend_stress_0;
-        if(!_S21)
+        if(!_S37)
         {
-            var _S22 : vec4<f32> = vec4<f32>(0.0f);
-            x_0[_S9] = _S22;
-            x_0[_S10] = _S22;
+            var _S38 : vec4<f32> = vec4<f32>(0.0f);
+            x_0[_S9] = _S38;
+            x_0[_S10] = _S38;
             atomicStore(&(topo_0[topo_dirty_0(params_0.node_count_0)]), u32(1));
         }
     }

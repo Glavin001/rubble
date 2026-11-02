@@ -7,7 +7,7 @@ struct LogParams_0
     uint chunk_count_0;
     uint bond_count_0;
     uint body_count_0;
-    uint step_0;
+    uint w_stamp_0;
     uint w_alive_0;
     uint cap_bonds_0;
     uint cap_chunks_0;
@@ -84,7 +84,7 @@ uint l_bonds_0()
     {
         uint _S4 = l_bonds_0();
         atomic_store_explicit((&kernelContext_1)->log_0+(_S4 + 2U * at_1), j_0, memory_order_relaxed);
-        atomic_store_explicit((&kernelContext_1)->log_0+(_S4 + 2U * at_1 + 1U), (&kernelContext_1)->params_0->step_0, memory_order_relaxed);
+        atomic_store_explicit((&kernelContext_1)->log_0+(_S4 + 2U * at_1 + 1U), (&kernelContext_1)->work_0[(&kernelContext_1)->params_0->w_stamp_0], memory_order_relaxed);
     }
     return;
 }
@@ -127,7 +127,7 @@ uint l_chunks_0(KernelContext_0 thread* kernelContext_3)
         uint _S8 = l_chunks_0(&kernelContext_4);
         atomic_store_explicit((&kernelContext_4)->log_0+(_S8 + 3U * at_2), c_0, memory_order_relaxed);
         atomic_store_explicit((&kernelContext_4)->log_0+(_S8 + 3U * at_2 + 1U), body_0, memory_order_relaxed);
-        atomic_store_explicit((&kernelContext_4)->log_0+(_S8 + 3U * at_2 + 2U), (&kernelContext_4)->params_0->step_0, memory_order_relaxed);
+        atomic_store_explicit((&kernelContext_4)->log_0+(_S8 + 3U * at_2 + 2U), (&kernelContext_4)->work_0[(&kernelContext_4)->params_0->w_stamp_0], memory_order_relaxed);
     }
     return;
 }
@@ -195,7 +195,7 @@ uint l_frames_0(KernelContext_0 thread* kernelContext_6)
         uint _S13 = l_frames_0(&kernelContext_7);
         uint e_0 = _S13 + 10U * at_3;
         atomic_store_explicit((&kernelContext_7)->log_0+e_0, b_0, memory_order_relaxed);
-        atomic_store_explicit((&kernelContext_7)->log_0+(e_0 + 1U), (&kernelContext_7)->params_0->step_0, memory_order_relaxed);
+        atomic_store_explicit((&kernelContext_7)->log_0+(e_0 + 1U), (&kernelContext_7)->work_0[(&kernelContext_7)->params_0->w_stamp_0], memory_order_relaxed);
         w_0 = 0U;
         for(;;)
         {

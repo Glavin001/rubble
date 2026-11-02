@@ -105,7 +105,20 @@ pub struct EngineIngest {
     counts: wgpu::Buffer,
     /// Per substep, the engine's contact rows (`ingest_rows`; `record_live`).
     row_counts: wgpu::Buffer,
+    /// The parameters and bind groups of recent passes, by their parameters and the buffers
+    /// they bind: a steady frame creates and uploads nothing.
+    cache: std::sync::Mutex<Vec<Cached>>,
 }
+
+/// One pass's parameters and bind groups (`EngineIngest::cache`).
+struct Cached {
+    key: [u32; 5],
+    buffers: Vec<wgpu::Buffer>,
+    binds: Vec<wgpu::BindGroup>,
+}
+
+/// Passes kept in the cache (substeps, and the merge).
+const CACHED: usize = 16;
 
 impl EngineIngest {
     /// An ingest for up to `max_substeps` engine substeps per frame of up to `max_rows`
@@ -141,7 +154,29 @@ impl EngineIngest {
             manifolds: storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records),
             counts: storage("ingest counts", 4 * 2 * n),
             row_counts: storage("ingest row counts", 4 * 1024),
+            cache: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// The bind groups of `kernels` over `params` (made by `make` on a miss), cached by `key` and
+    /// every buffer bound.
+    fn binds(&self, gpu: &Gpu, kernels: &[&Kernel], key: [u32; 5], e: &EngineBuffers, make: impl FnOnce() -> IngestParams) -> Vec<wgpu::BindGroup> {
+        let buffers: Vec<wgpu::Buffer> = [e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts, &self.row_counts]
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(i) = cache.iter().position(|c| c.key == key && c.buffers == buffers) {
+            let hit = cache.remove(i);
+            let binds = hit.binds.clone();
+            cache.insert(0, hit);
+            return binds;
+        }
+        let params = gpu.uniform("ingest params", &make());
+        let binds: Vec<wgpu::BindGroup> = kernels.iter().map(|k| self.bind(gpu, k, &params, e)).collect();
+        cache.insert(0, Cached { key, buffers, binds: binds.clone() });
+        cache.truncate(CACHED);
+        binds
     }
 
     pub fn chunk_count(&self) -> u32 {
@@ -192,7 +227,7 @@ impl EngineIngest {
                 mapped_at_creation: false,
             });
         }
-        gpu.queue.write_buffer(&self.collider_info, 0, bytemuck::cast_slice(table(colliders)));
+        gpu.write_buffer(&self.collider_info, 0, bytemuck::cast_slice(table(colliders)));
     }
 
     fn bind(&self, gpu: &Gpu, kernel: &Kernel, params: &wgpu::Buffer, e: &EngineBuffers) -> wgpu::BindGroup {
@@ -204,7 +239,7 @@ impl EngineIngest {
         encoder.copy_buffer_to_buffer(e.bodies, 0, &self.start_bodies, 0, BODY_BYTES * self.max_bodies as u64);
     }
 
-    fn params(&self, gpu: &Gpu, row_offset: u32, substep: u32, h: f64) -> wgpu::Buffer {
+    fn params(&self, row_offset: u32, substep: u32, h: f64) -> IngestParams {
         let p = IngestParams {
             row_offset,
             max_rows: self.max_rows,
@@ -215,15 +250,15 @@ impl EngineIngest {
             h: h as f32,
             pad: 0,
         };
-        gpu.uniform("ingest params", &p)
+        p
     }
 
     /// One engine substep's rows (the step just encoded or submitted before this):
     /// its records, at slot `substep`.
     pub fn substep(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, row_offset: u32, substep: u32, h: f64) {
         assert!(substep < self.max_substeps, "ingest: {substep} substeps, room for {}", self.max_substeps);
-        let params = self.params(gpu, row_offset, substep, h);
-        let bind = self.bind(gpu, &self.rows, &params, e);
+        let key = [0, row_offset, substep, (h as f32).to_bits(), 0];
+        let bind = self.binds(gpu, &[&self.rows], key, e, || self.params(row_offset, substep, h)).remove(0);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.rows.pipeline);
         pass.set_bind_group(0, &bind, &[]);
@@ -248,11 +283,11 @@ impl EngineIngest {
         if substeps == 0 {
             params.record_count = 0;
         }
-        let params = gpu.uniform("ingest params", &params);
         let records = (2 * self.max_rows * substeps.max(1)) as usize;
         let n = self.chunk_count as usize;
-        for (k, size) in [(&self.clear, groups(2 * n, 64)), (&self.count, groups(records, 64)), (&self.scan, 1), (&self.scatter, groups(records, 64)), (&self.merge, groups(n, 64))] {
-            let bind = self.bind(gpu, k, &params, e);
+        let kernels = [&self.clear, &self.count, &self.scan, &self.scatter, &self.merge];
+        let binds = self.binds(gpu, &kernels, [1, 0, 0, 0, substeps], e, || params);
+        for ((k, size), bind) in kernels.into_iter().zip([groups(2 * n, 64), groups(records, 64), 1, groups(records, 64), groups(n, 64)]).zip(binds) {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &bind, &[]);

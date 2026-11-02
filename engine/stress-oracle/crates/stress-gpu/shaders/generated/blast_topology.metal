@@ -42,6 +42,8 @@ struct BlastParams_0
     uint rotation_0;
     uint node_vectors_0;
     uint carry_0;
+    uint section_bending_0;
+    uint chunk_loads_0;
 };
 
 struct BlastBond_natural_0

@@ -262,7 +262,7 @@ pub mod shaders {
     );
     pub const FRACTURE: ShaderSet = shader_set!(
         "fracture",
-        [
+        [("fr_frame_begin", (1, 1, 1)), 
             ("fr_loads", (64, 1, 1)),
             ("fr_breaks", (64, 1, 1)),
             ("fr_gate", (1, 1, 1)),

@@ -119,6 +119,8 @@ struct BlastParams_0
     uint rotation_0;
     uint node_vectors_0;
     uint carry_0;
+    uint section_bending_0;
+    uint chunk_loads_0;
 };
 
 struct BlastBond_natural_0
@@ -173,29 +175,65 @@ struct KernelContext_0
     Quat_0 _S15 = quat_mul_0(&_S13, &_S14);
     thread Quat_0 _S16 = _S15;
     Quat_0 _S17 = normalized_0(&_S16);
-    float4 _S18 = float4(*((&kernelContext_0)->node_frame_0+k_0)) ;
+    uint _S18 = 6U * k_0;
+    float4 _S19 = float4(*((&kernelContext_0)->node_frame_0+_S18)) ;
     float3 f_0 = (float4(*((&kernelContext_0)->loads_0+k_0)) ).yzw;
-    float3 _S19 = (&kernelContext_0)->params_0->gravity_0.xyz;
-    float _S20 = _S18.w;
-    float3 _S21;
-    if(_S20 > 0.0f)
+    float3 _S20 = (&kernelContext_0)->params_0->gravity_0.xyz;
+    float _S21 = _S19.w;
+    bool _S22 = _S21 > 0.0f;
+    float3 alpha_0;
+    if(_S22)
     {
-        _S21 = f_0 / float3(_S20) ;
+        alpha_0 = f_0 / float3(_S21) ;
     }
     else
     {
-        _S21 = float3(0.0f) ;
+        alpha_0 = float3(0.0f) ;
     }
-    float3 a_1 = _S19 + _S21;
-    thread Quat_0 _S22 = _S17;
-    float3 _S23 = inverse_rotate_0(&_S22, a_1);
-    float3 _S24 = from_rubble_0((float4(*((&kernelContext_0)->bodies_0+(b_0 + 4U))) ).xyz);
+    float3 a_1 = _S20 + alpha_0;
+    float3 _S23 = float3(0.0f) ;
+    bool _S24;
+    if(((&kernelContext_0)->params_0->chunk_loads_0) != 0U)
+    {
+        _S24 = _S22;
+    }
+    else
+    {
+        _S24 = false;
+    }
+    float3 a_2;
+    if(_S24)
+    {
+        float3 torque_0 = (float4(*((&kernelContext_0)->node_frame_0+(_S18 + 4U))) ).xyz + (float4(*((&kernelContext_0)->node_frame_0+(_S18 + 5U))) ).xyz / float3((&kernelContext_0)->params_0->dt_0) ;
+        float3 a_3 = a_1 + ((float4(*((&kernelContext_0)->node_frame_0+(_S18 + 2U))) ).xyz + (float4(*((&kernelContext_0)->node_frame_0+(_S18 + 3U))) ).xyz / float3((&kernelContext_0)->params_0->dt_0) ) / float3(_S21) ;
+        float inertia_0 = (float4(*((&kernelContext_0)->node_frame_0+(_S18 + 1U))) ).x;
+        if(inertia_0 > 0.0f)
+        {
+            alpha_0 = - torque_0 / float3(inertia_0) ;
+        }
+        else
+        {
+            alpha_0 = _S23;
+        }
+        a_2 = a_3;
+    }
+    else
+    {
+        alpha_0 = _S23;
+        a_2 = a_1;
+    }
     thread Quat_0 _S25 = _S17;
-    float3 _S26 = inverse_rotate_0(&_S25, _S24);
-    float3 a_local_0 = _S23 - cross(_S26, cross(_S26, _S18.xyz - (float4(*((&kernelContext_0)->frames_0+_S8)) ).xyz));
-    uint _S27 = 2U * k_0;
-    *((&kernelContext_0)->accel_0+_S27) = packed_float4(float4(0.0f) ) ;
-    *((&kernelContext_0)->accel_0+(_S27 + 1U)) = packed_float4(float4(a_local_0, 0.0f)) ;
+    float3 _S26 = inverse_rotate_0(&_S25, a_2);
+    float3 _S27 = from_rubble_0((float4(*((&kernelContext_0)->bodies_0+(b_0 + 4U))) ).xyz);
+    thread Quat_0 _S28 = _S17;
+    float3 _S29 = inverse_rotate_0(&_S28, _S27);
+    float3 a_local_0 = _S26 - cross(_S29, cross(_S29, _S19.xyz - (float4(*((&kernelContext_0)->frames_0+_S8)) ).xyz));
+    uint _S30 = 2U * k_0;
+    packed_float4 device* _S31 = (&kernelContext_0)->accel_0+_S30;
+    thread Quat_0 _S32 = _S17;
+    float3 _S33 = inverse_rotate_0(&_S32, alpha_0);
+    *_S31 = packed_float4(float4(_S33, 0.0f)) ;
+    *((&kernelContext_0)->accel_0+(_S30 + 1U)) = packed_float4(float4(a_local_0, 0.0f)) ;
     return;
 }
 
@@ -212,16 +250,16 @@ struct KernelContext_0
     (&kernelContext_1)->bonds_0 = bonds_2;
     (&kernelContext_1)->atom_0 = atom_2;
     uint j_0 = id_1.x;
-    bool _S28;
+    bool _S34;
     if(j_0 >= (params_2->bond_count_0))
     {
-        _S28 = true;
+        _S34 = true;
     }
     else
     {
-        _S28 = (*((&kernelContext_1)->work_0+((&kernelContext_1)->params_0->w_alive_0 + j_0))) == 0U;
+        _S34 = (*((&kernelContext_1)->work_0+((&kernelContext_1)->params_0->w_alive_0 + j_0))) == 0U;
     }
-    if(_S28)
+    if(_S34)
     {
         return;
     }
@@ -231,9 +269,9 @@ struct KernelContext_0
         return;
     }
     *((&kernelContext_1)->work_0+((&kernelContext_1)->params_0->w_alive_0 + j_0)) = 0U;
-    uint _S29 = atomic_fetch_or_explicit((&kernelContext_1)->atom_0+((&kernelContext_1)->params_0->a_dirty_0 + *((&kernelContext_1)->work_0+bond_0.n0_0)), 1U, memory_order_relaxed);
-    uint _S30 = atomic_fetch_add_explicit((&kernelContext_1)->atom_0+(&kernelContext_1)->params_0->a_counters_0, 1U, memory_order_relaxed);
-    uint _S31 = atomic_fetch_add_explicit((&kernelContext_1)->atom_0+((&kernelContext_1)->params_0->a_counters_0 + 1U), 1U, memory_order_relaxed);
+    uint _S35 = atomic_fetch_or_explicit((&kernelContext_1)->atom_0+((&kernelContext_1)->params_0->a_dirty_0 + *((&kernelContext_1)->work_0+bond_0.n0_0)), 1U, memory_order_relaxed);
+    uint _S36 = atomic_fetch_add_explicit((&kernelContext_1)->atom_0+(&kernelContext_1)->params_0->a_counters_0, 1U, memory_order_relaxed);
+    uint _S37 = atomic_fetch_add_explicit((&kernelContext_1)->atom_0+((&kernelContext_1)->params_0->a_counters_0 + 1U), 1U, memory_order_relaxed);
     return;
 }
 

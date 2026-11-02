@@ -18,7 +18,7 @@ import blast_common;
 // material index as bits, 0, 0).
 [[vk::binding(3, 0)]] StructuredBuffer<float4> geometry;
 // Per material: (compression elastic, fatal, tension elastic, fatal), (shear elastic, fatal,
-// residual area fraction, 0).
+// residual area fraction, 0), (Mohr-Coulomb shear friction, shear capacity limit, 0, 0).
 [[vk::binding(4, 0)]] StructuredBuffer<float4> materials;
 // Per bond slot: impulse angular, linear; (normal, shear, bend, compression);
 // (tension, damage, multiplier, command).
@@ -27,6 +27,9 @@ import blast_common;
 [[vk::binding(6, 0)]] RWStructuredBuffer<Atomic<uint>> topo;
 // blast_native_ops.slangh's: the per-bond stiffness tensors (params.rotation).
 [[vk::binding(7, 0)]] StructuredBuffer<float4> stiffness;
+// Per bond (section_bending): (axis, bend modulus 0), (bend modulus 1, twist modulus, bearing
+// depth 0, bearing depth 1), (centroid - midpoint between two dynamic chunks (m), 0).
+[[vk::binding(8, 0)]] StructuredBuffer<float4> sections;
 
 // A packed symmetric 3x3 (`which`: 0 A, 2 Al) of bond j times v.
 float3 stiff(uint j, uint which, float3 v)
@@ -103,7 +106,42 @@ void blast_bond_stress(uint3 id : SV_DispatchThreadID)
     float bend = perpendicular(ia, n, angular_normal) / area;
     float gain_max = params.bend_gain_max;
     float bend_stress = 0.0;
-    if (gain_max > 0.0)
+    float bearing_tension = -1.0;
+    if (params.section_bending != 0)
+    {
+        // extStressCalcBondStressSection, the moment at the centroid: M_c = M_P + (c - P) x F.
+        float4 s0 = sections[j * 3];
+        float4 s1 = sections[j * 3 + 1];
+        float3 lever = sections[j * 3 + 2].xyz;
+        float3 m = ia + cross(lever, il);
+        float m_normal = fdot(m, n);
+        float tw = abs(m_normal);
+        float3 axis = s0.xyz;
+        float3 axis1 = float3(fma(n.y, axis.z, -n.z * axis.y), fma(n.z, axis.x, -n.x * axis.z), fma(n.x, axis.y, -n.y * axis.x));
+        float original = g1.x;
+        if (s0.w > 0.0 && s1.x > 0.0 && s1.y > 0.0 && original > 0.0)
+        {
+            float live = area / original;
+            float m0 = abs(fdot(m, axis));
+            float m1 = abs(fdot(m, axis1));
+            bend_stress = (m0 / s0.w + m1 / s1.x) / live;
+            shear = fma(tw, 1.0 / (s1.y * live), shear);
+        }
+        else
+        {
+            float cube = area * sqrt(area);
+            bend_stress = 6.0 * perpendicular(m, n, m_normal) / cube;
+            shear = fma(tw, 4.2426407 / cube, shear);
+        }
+        // A bearing joint: the fasteners take T = M0/d0 + M1/d1 + N.
+        if (s1.z > 0.0 && s1.w > 0.0)
+        {
+            float m0 = abs(dot(m, axis));
+            float m1 = abs(dot(m, axis1));
+            bearing_tension = max(0.0, m0 / s1.z + m1 / s1.w + normal * area) / area;
+        }
+    }
+    else if (gain_max > 0.0)
     {
         float torsion = 4.81 / sqrt(area > 1.0e-6 ? area : 1.0e-6);
         shear = fma(twist, torsion < gain_max ? torsion : gain_max, shear);
@@ -120,7 +158,7 @@ void blast_bond_stress(uint3 id : SV_DispatchThreadID)
     // extStressFibre.
     float compression;
     float tension;
-    if (params.fibres == 0 || gain_max <= 0.0)
+    if (params.fibres == 0 || (gain_max <= 0.0 && params.section_bending == 0))
     {
         float combined = normal + ((asuint(normal) & 0x80000000u) != 0 ? -bend_stress : bend_stress);
         compression = combined <= 0.0 ? -combined : 0.0;
@@ -133,12 +171,28 @@ void blast_bond_stress(uint3 id : SV_DispatchThreadID)
         tension = t > 0.0 ? t : 0.0;
         compression = c > 0.0 ? c : 0.0;
     }
+    if (bearing_tension >= 0.0)
+        tension = bearing_tension;
     out[j * 4 + 2] = float4(normal, shear, bend_stress, compression);
 
     // extStressBondDamage.
     uint m = asuint(g1.y);
-    float4 m0 = materials[m * 2];
-    float4 m1 = materials[m * 2 + 1];
+    float4 m0 = materials[m * 3];
+    float4 m1 = materials[m * 3 + 1];
+    float4 m2 = materials[m * 3 + 2];
+    // Mohr-Coulomb joint shear (extStressFrictionStrength): graded net of the friction the
+    // compression across the joint adds, capped so the fatal limit plus it stays within the cap.
+    float graded_shear = shear;
+    if (m2.x > 0.0 && normal < 0.0)
+    {
+        float term = -m2.x * normal;
+        if (m2.y > 0.0)
+        {
+            float room = m2.y - m1.y;
+            term = room > 0.0 ? (term < room ? term : room) : 0.0;
+        }
+        graded_shear = max(0.0, shear - term);
+    }
     float axial = 0.0;
     if (compression > m0.x)
         axial = excess(compression, m0.x, m0.y);
@@ -148,8 +202,8 @@ void blast_bond_stress(uint3 id : SV_DispatchThreadID)
         axial = axial < t ? t : axial;
     }
     float multiplier = axial;
-    if (shear > m1.x)
-        multiplier += excess(shear, m1.x, m1.y);
+    if (graded_shear > m1.x)
+        multiplier += excess(graded_shear, m1.x, m1.y);
     float damage = 0.0;
     bool command = multiplier > 0.0;
     if (command)

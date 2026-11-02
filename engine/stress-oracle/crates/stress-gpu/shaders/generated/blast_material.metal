@@ -32,6 +32,8 @@ struct BlastParams_0
     uint rotation_0;
     uint node_vectors_0;
     uint carry_0;
+    uint section_bending_0;
+    uint chunk_loads_0;
 };
 
 struct BlastBond_natural_0
@@ -52,6 +54,7 @@ struct KernelContext_0
     packed_float4 device* stiffness_0;
     packed_float4 device* out_0;
     packed_float4 device* geometry_0;
+    packed_float4 device* sections_0;
     packed_float4 device* materials_0;
     atomic<uint> device* topo_0;
 };
@@ -120,7 +123,7 @@ uint topo_dirty_0(uint node_count_2)
     return topo_total_0(node_count_2) + 4U;
 }
 
-[[kernel]] void blast_bond_stress(uint3 id_0 [[thread_position_in_grid]], BlastParams_0 constant* params_1 [[buffer(0)]], BlastBond_natural_0 device* bonds_1 [[buffer(1)]], packed_float4 device* x_1 [[buffer(2)]], packed_float4 device* stiffness_1 [[buffer(7)]], packed_float4 device* out_1 [[buffer(5)]], packed_float4 device* geometry_1 [[buffer(3)]], packed_float4 device* materials_1 [[buffer(4)]], atomic<uint> device* topo_1 [[buffer(6)]])
+[[kernel]] void blast_bond_stress(uint3 id_0 [[thread_position_in_grid]], BlastParams_0 constant* params_1 [[buffer(0)]], BlastBond_natural_0 device* bonds_1 [[buffer(1)]], packed_float4 device* x_1 [[buffer(2)]], packed_float4 device* stiffness_1 [[buffer(7)]], packed_float4 device* out_1 [[buffer(5)]], packed_float4 device* geometry_1 [[buffer(3)]], packed_float4 device* sections_1 [[buffer(8)]], packed_float4 device* materials_1 [[buffer(4)]], atomic<uint> device* topo_1 [[buffer(6)]])
 {
     thread KernelContext_0 kernelContext_1;
     (&kernelContext_1)->params_0 = params_1;
@@ -129,6 +132,7 @@ uint topo_dirty_0(uint node_count_2)
     (&kernelContext_1)->stiffness_0 = stiffness_1;
     (&kernelContext_1)->out_0 = out_1;
     (&kernelContext_1)->geometry_0 = geometry_1;
+    (&kernelContext_1)->sections_0 = sections_1;
     (&kernelContext_1)->materials_0 = materials_1;
     (&kernelContext_1)->topo_0 = topo_1;
     uint j_1 = id_0.x;
@@ -185,79 +189,172 @@ uint topo_dirty_0(uint node_count_2)
     float bend_0 = perpendicular_0(ia_0, n_1, angular_normal_0) / b_1.health_0;
     float gain_max_0 = (&kernelContext_1)->params_0->bend_gain_max_0;
     float bend_stress_0;
+    float bearing_tension_0;
     float normal_1;
     float shear_1;
-    if(((&kernelContext_1)->params_0->bend_gain_max_0) > 0.0f)
+    bool _S17;
+    if(((&kernelContext_1)->params_0->section_bending_0) != 0U)
     {
-        bool _S17 = (b_1.health_0) > 9.99999997475242708e-07f;
+        uint _S18 = j_1 * 3U;
+        float4 _S19 = float4(*((&kernelContext_1)->sections_0+_S18)) ;
+        float4 _S20 = float4(*((&kernelContext_1)->sections_0+(_S18 + 1U))) ;
+        float3 m_1 = ia_0 + cross((float4(*((&kernelContext_1)->sections_0+(_S18 + 2U))) ).xyz, il_0);
+        float m_normal_0 = fdot_0(m_1, n_1);
+        float tw_0 = abs(m_normal_0);
+        float3 axis_0 = _S19.xyz;
+        float _S21 = n_1.y;
+        float _S22 = axis_0.z;
+        float _S23 = n_1.z;
+        float _S24 = axis_0.y;
+        float _S25 = axis_0.x;
+        float _S26 = n_1.x;
+        float3 axis1_0 = float3(fma(_S21, _S22, - _S23 * _S24), fma(_S23, _S25, - _S26 * _S22), fma(_S26, _S24, - _S21 * _S25));
+        float original_0 = _S16.x;
+        float _S27 = _S19.w;
+        if(_S27 > 0.0f)
+        {
+            _S17 = (_S20.x) > 0.0f;
+        }
+        else
+        {
+            _S17 = false;
+        }
         if(_S17)
         {
-            bend_stress_0 = b_1.health_0;
+            _S17 = (_S20.y) > 0.0f;
         }
         else
         {
-            bend_stress_0 = 9.99999997475242708e-07f;
+            _S17 = false;
         }
-        float torsion_0 = 4.80999994277954102f / sqrt(bend_stress_0);
-        if(torsion_0 < gain_max_0)
-        {
-            bend_stress_0 = torsion_0;
-        }
-        else
-        {
-            bend_stress_0 = gain_max_0;
-        }
-        float _S18 = fma(twist_0, bend_stress_0, shear_0);
         if(_S17)
         {
-            bend_stress_0 = b_1.health_0;
+            _S17 = original_0 > 0.0f;
         }
         else
         {
-            bend_stress_0 = 9.99999997475242708e-07f;
+            _S17 = false;
         }
-        float section_0 = 6.0f / sqrt(bend_stress_0);
-        if(section_0 < gain_max_0)
+        if(_S17)
         {
-            bend_stress_0 = section_0;
+            float live_0 = b_1.health_0 / original_0;
+            float _S28 = fma(tw_0, 1.0f / (_S20.y * live_0), shear_0);
+            bend_stress_0 = (abs(fdot_0(m_1, axis_0)) / _S27 + abs(fdot_0(m_1, axis1_0)) / _S20.x) / live_0;
+            normal_1 = _S28;
         }
         else
         {
-            bend_stress_0 = gain_max_0;
+            float cube_0 = b_1.health_0 * sqrt(b_1.health_0);
+            float _S29 = fma(tw_0, 4.24264049530029297f / cube_0, shear_0);
+            bend_stress_0 = 6.0f * perpendicular_0(m_1, n_1, m_normal_0) / cube_0;
+            normal_1 = _S29;
         }
-        bend_stress_0 = bend_0 * bend_stress_0;
+        float _S30 = _S20.z;
+        if(_S30 > 0.0f)
+        {
+            _S17 = (_S20.w) > 0.0f;
+        }
+        else
+        {
+            _S17 = false;
+        }
+        if(_S17)
+        {
+            bearing_tension_0 = max(0.0f, abs(dot(m_1, axis_0)) / _S30 + abs(dot(m_1, axis1_0)) / _S20.w + normal_0 * b_1.health_0) / b_1.health_0;
+        }
+        else
+        {
+            bearing_tension_0 = -1.0f;
+        }
+        float _S31 = normal_1;
         normal_1 = normal_0;
-        shear_1 = _S18;
+        shear_1 = _S31;
     }
     else
     {
-        float shear_2 = shear_0 + twist_0 * 2.0f / node_distance_0;
-        float folded_0 = bend_0 * 2.0f / node_distance_0;
-        if(((as_type<uint>((normal_0))) & 2147483648U) != 0U)
+        if(gain_max_0 > 0.0f)
         {
-            bend_stress_0 = - folded_0;
+            bool _S32 = (b_1.health_0) > 9.99999997475242708e-07f;
+            if(_S32)
+            {
+                bend_stress_0 = b_1.health_0;
+            }
+            else
+            {
+                bend_stress_0 = 9.99999997475242708e-07f;
+            }
+            float torsion_0 = 4.80999994277954102f / sqrt(bend_stress_0);
+            if(torsion_0 < gain_max_0)
+            {
+                bend_stress_0 = torsion_0;
+            }
+            else
+            {
+                bend_stress_0 = gain_max_0;
+            }
+            float _S33 = fma(twist_0, bend_stress_0, shear_0);
+            if(_S32)
+            {
+                bend_stress_0 = b_1.health_0;
+            }
+            else
+            {
+                bend_stress_0 = 9.99999997475242708e-07f;
+            }
+            float section_0 = 6.0f / sqrt(bend_stress_0);
+            if(section_0 < gain_max_0)
+            {
+                bend_stress_0 = section_0;
+            }
+            else
+            {
+                bend_stress_0 = gain_max_0;
+            }
+            bend_stress_0 = bend_0 * bend_stress_0;
+            bearing_tension_0 = normal_0;
+            normal_1 = _S33;
         }
         else
         {
-            bend_stress_0 = folded_0;
+            float shear_2 = shear_0 + twist_0 * 2.0f / node_distance_0;
+            float folded_0 = bend_0 * 2.0f / node_distance_0;
+            if(((as_type<uint>((normal_0))) & 2147483648U) != 0U)
+            {
+                bend_stress_0 = - folded_0;
+            }
+            else
+            {
+                bend_stress_0 = folded_0;
+            }
+            float normal_2 = normal_0 + bend_stress_0;
+            bend_stress_0 = 0.0f;
+            bearing_tension_0 = normal_2;
+            normal_1 = shear_2;
         }
-        float normal_2 = normal_0 + bend_stress_0;
-        bend_stress_0 = 0.0f;
-        normal_1 = normal_2;
-        shear_1 = shear_2;
+        float _S34 = bearing_tension_0;
+        float _S35 = normal_1;
+        bearing_tension_0 = -1.0f;
+        normal_1 = _S34;
+        shear_1 = _S35;
     }
-    bool _S19;
     if(((&kernelContext_1)->params_0->fibres_0) == 0U)
     {
-        _S19 = true;
+        _S17 = true;
     }
     else
     {
-        _S19 = gain_max_0 <= 0.0f;
+        if(gain_max_0 <= 0.0f)
+        {
+            _S17 = ((&kernelContext_1)->params_0->section_bending_0) == 0U;
+        }
+        else
+        {
+            _S17 = false;
+        }
     }
     float compression_0;
     float tension_0;
-    if(_S19)
+    if(_S17)
     {
         if(((as_type<uint>((normal_1))) & 2147483648U) != 0U)
         {
@@ -305,28 +402,77 @@ uint topo_dirty_0(uint node_count_2)
         {
             tension_0 = 0.0f;
         }
-        float _S20 = compression_0;
+        float _S36 = compression_0;
         compression_0 = tension_0;
-        tension_0 = _S20;
+        tension_0 = _S36;
+    }
+    if(bearing_tension_0 >= 0.0f)
+    {
+        tension_0 = bearing_tension_0;
     }
     *((&kernelContext_1)->out_0+(_S13 + 2U)) = packed_float4(float4(normal_1, shear_1, bend_stress_0, compression_0)) ;
-    uint _S21 = (as_type<uint>((_S16.y))) * 2U;
-    float4 _S22 = float4(*((&kernelContext_1)->materials_0+_S21)) ;
-    float4 _S23 = float4(*((&kernelContext_1)->materials_0+(_S21 + 1U))) ;
-    float _S24 = _S22.x;
-    float axial_0;
-    if(compression_0 > _S24)
+    uint _S37 = (as_type<uint>((_S16.y))) * 3U;
+    float4 _S38 = float4(*((&kernelContext_1)->materials_0+_S37)) ;
+    float4 _S39 = float4(*((&kernelContext_1)->materials_0+(_S37 + 1U))) ;
+    float4 _S40 = float4(*((&kernelContext_1)->materials_0+(_S37 + 2U))) ;
+    float _S41 = _S40.x;
+    if(_S41 > 0.0f)
     {
-        axial_0 = excess_0(compression_0, _S24, _S22.y);
+        _S17 = normal_1 < 0.0f;
+    }
+    else
+    {
+        _S17 = false;
+    }
+    float graded_shear_0;
+    if(_S17)
+    {
+        float term_0 = - _S41 * normal_1;
+        float _S42 = _S40.y;
+        if(_S42 > 0.0f)
+        {
+            float room_0 = _S42 - _S39.y;
+            if(room_0 > 0.0f)
+            {
+                if(term_0 < room_0)
+                {
+                    bend_stress_0 = term_0;
+                }
+                else
+                {
+                    bend_stress_0 = room_0;
+                }
+            }
+            else
+            {
+                bend_stress_0 = 0.0f;
+            }
+            graded_shear_0 = bend_stress_0;
+        }
+        else
+        {
+            graded_shear_0 = term_0;
+        }
+        graded_shear_0 = max(0.0f, shear_1 - graded_shear_0);
+    }
+    else
+    {
+        graded_shear_0 = shear_1;
+    }
+    float _S43 = _S38.x;
+    float axial_0;
+    if(compression_0 > _S43)
+    {
+        axial_0 = excess_0(compression_0, _S43, _S38.y);
     }
     else
     {
         axial_0 = 0.0f;
     }
-    float _S25 = _S22.z;
-    if(tension_0 > _S25)
+    float _S44 = _S38.z;
+    if(tension_0 > _S44)
     {
-        float t_1 = excess_0(tension_0, _S25, _S22.w);
+        float t_1 = excess_0(tension_0, _S44, _S38.w);
         if(axial_0 < t_1)
         {
             bend_stress_0 = t_1;
@@ -337,11 +483,11 @@ uint topo_dirty_0(uint node_count_2)
         }
         axial_0 = bend_stress_0;
     }
-    float _S26 = _S23.x;
+    float _S45 = _S39.x;
     float multiplier_0;
-    if(shear_1 > _S26)
+    if(graded_shear_0 > _S45)
     {
-        multiplier_0 = axial_0 + excess_0(shear_1, _S26, _S23.y);
+        multiplier_0 = axial_0 + excess_0(graded_shear_0, _S45, _S39.y);
     }
     else
     {
@@ -377,15 +523,15 @@ uint topo_dirty_0(uint node_count_2)
         }
         if(multiplier_0 < 1.0f)
         {
-            _S19 = (_S23.z) > 0.0f;
+            _S17 = (_S39.z) > 0.0f;
         }
         else
         {
-            _S19 = false;
+            _S17 = false;
         }
-        if(_S19)
+        if(_S17)
         {
-            float floor_0 = _S16.x * _S23.z;
+            float floor_0 = _S16.x * _S39.z;
             if((b_1.health_0 - damage_0) < floor_0)
             {
                 if((b_1.health_0) > floor_0)
@@ -404,7 +550,7 @@ uint topo_dirty_0(uint node_count_2)
     {
         damage_0 = 0.0f;
     }
-    packed_float4 device* _S27 = (&kernelContext_1)->out_0+(_S13 + 3U);
+    packed_float4 device* _S46 = (&kernelContext_1)->out_0+(_S13 + 3U);
     if(command_0)
     {
         bend_stress_0 = 1.0f;
@@ -413,20 +559,20 @@ uint topo_dirty_0(uint node_count_2)
     {
         bend_stress_0 = 0.0f;
     }
-    *_S27 = packed_float4(float4(tension_0, damage_0, multiplier_0, bend_stress_0)) ;
+    *_S46 = packed_float4(float4(tension_0, damage_0, multiplier_0, bend_stress_0)) ;
     if(((&kernelContext_1)->params_0->apply_damage_0) != 0U)
     {
-        _S19 = command_0;
+        _S17 = command_0;
     }
     else
     {
-        _S19 = false;
+        _S17 = false;
     }
-    if(_S19)
+    if(_S17)
     {
         float health_1 = b_1.health_0 - damage_0;
-        bool _S28 = health_1 > 0.0f;
-        if(_S28)
+        bool _S47 = health_1 > 0.0f;
+        if(_S47)
         {
             bend_stress_0 = health_1;
         }
@@ -435,11 +581,11 @@ uint topo_dirty_0(uint node_count_2)
             bend_stress_0 = 0.0f;
         }
         ((&kernelContext_1)->bonds_0+j_1)->health_0 = bend_stress_0;
-        if(!_S28)
+        if(!_S47)
         {
-            packed_float4 _S29 = packed_float4(float4(0.0f) ) ;
-            *((&kernelContext_1)->x_0+_S9) = _S29;
-            *((&kernelContext_1)->x_0+_S10) = _S29;
+            packed_float4 _S48 = packed_float4(float4(0.0f) ) ;
+            *((&kernelContext_1)->x_0+_S9) = _S48;
+            *((&kernelContext_1)->x_0+_S10) = _S48;
             atomic_store_explicit((&kernelContext_1)->topo_0+topo_dirty_0((&kernelContext_1)->params_0->node_count_0), 1U, memory_order_relaxed);
         }
     }

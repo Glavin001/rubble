@@ -66,6 +66,11 @@ public struct BlastParams
     public uint node_vectors;
     // blast_native*.slang: Krylov carry (BLAST_STRESS_CARRY_KRYLOV) on a warm solve.
     public uint carry;
+    // blast_material.slang: bending from each bond's own section, the moment at its centroid
+    // (sectionBending; on with the rotational stiffness).
+    public uint section_bending;
+    // blast_fracture.slang: this frame's chunk loads (the host's, for one frame) in `node_frame`.
+    public uint chunk_loads;
 };
 
 // `topo` (blast_topology.slang): the totals after the per-node and per-block words: islands,

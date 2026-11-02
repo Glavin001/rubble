@@ -55,6 +55,8 @@ struct BlastParams_std140_0
     @align(16) rotation_0 : u32,
     @align(4) node_vectors_0 : u32,
     @align(8) carry_0 : u32,
+    @align(4) section_bending_0 : u32,
+    @align(16) chunk_loads_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;

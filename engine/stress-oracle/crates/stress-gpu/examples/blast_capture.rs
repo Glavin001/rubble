@@ -30,6 +30,8 @@ const MATERIAL: BlastMaterial = BlastMaterial {
     shear_fatal: 2.0,
     residual_area_fraction: 0.0,
     modulus: 0.0,
+    shear_friction: 0.0,
+    shear_capacity_limit: 0.0,
 };
 
 fn words(path: &Path) -> Vec<u32> {

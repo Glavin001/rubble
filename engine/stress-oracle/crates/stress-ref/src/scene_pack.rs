@@ -284,6 +284,8 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
                         shear_fatal: f(m, "shearFatal"),
                         residual_area_fraction: m["residualAreaFraction"].as_f64().unwrap_or(0.0),
                         modulus: f(m, "elasticModulus"),
+                        shear_friction: m["shearFriction"].as_f64().unwrap_or(0.0),
+                        shear_capacity_limit: m["shearCapacityLimit"].as_f64().unwrap_or(0.0),
                     })
                     .collect()
             })

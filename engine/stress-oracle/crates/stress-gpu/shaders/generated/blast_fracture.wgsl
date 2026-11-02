@@ -28,6 +28,8 @@ struct BlastParams_std140_0
     @align(16) rotation_0 : u32,
     @align(4) node_vectors_0 : u32,
     @align(8) carry_0 : u32,
+    @align(4) section_bending_0 : u32,
+    @align(16) chunk_loads_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;
@@ -154,24 +156,58 @@ fn blast_loads(@builtin(global_invocation_id) id_0 : vec3<u32>)
     var b_0 : u32 = u32(7) * work_0[k_0];
     var _S5 : u32 = u32(2) * work_0[k_0];
     var q_6 : Quat_0 = normalized_0(quat_mul_0(rot_from_rubble_0(quat_of_0(bodies_0[b_0 + u32(1)])), conj_0(quat_of_0(frames_0[_S5 + u32(1)]))));
-    var node_0 : vec4<f32> = node_frame_0[k_0];
+    var _S6 : u32 = u32(6) * k_0;
+    var node_0 : vec4<f32> = node_frame_0[_S6];
     var f_0 : vec3<f32> = loads_0[k_0].yzw;
-    var _S6 : vec3<f32> = params_0.gravity_0.xyz;
-    var _S7 : f32 = node_0.w;
-    var _S8 : vec3<f32>;
-    if(_S7 > 0.0f)
+    var _S7 : vec3<f32> = params_0.gravity_0.xyz;
+    var _S8 : f32 = node_0.w;
+    var _S9 : bool = _S8 > 0.0f;
+    var alpha_0 : vec3<f32>;
+    if(_S9)
     {
-        _S8 = f_0 / vec3<f32>(_S7);
+        alpha_0 = f_0 / vec3<f32>(_S8);
     }
     else
     {
-        _S8 = vec3<f32>(0.0f);
+        alpha_0 = vec3<f32>(0.0f);
+    }
+    var a_1 : vec3<f32> = _S7 + alpha_0;
+    var _S10 : vec3<f32> = vec3<f32>(0.0f);
+    var _S11 : bool;
+    if((params_0.chunk_loads_0) != u32(0))
+    {
+        _S11 = _S9;
+    }
+    else
+    {
+        _S11 = false;
+    }
+    var a_2 : vec3<f32>;
+    if(_S11)
+    {
+        var torque_0 : vec3<f32> = node_frame_0[_S6 + u32(4)].xyz + node_frame_0[_S6 + u32(5)].xyz / vec3<f32>(params_0.dt_0);
+        var a_3 : vec3<f32> = a_1 + (node_frame_0[_S6 + u32(2)].xyz + node_frame_0[_S6 + u32(3)].xyz / vec3<f32>(params_0.dt_0)) / vec3<f32>(_S8);
+        var inertia_0 : f32 = node_frame_0[_S6 + u32(1)].x;
+        if(inertia_0 > 0.0f)
+        {
+            alpha_0 = (vec3<f32>(0) - torque_0) / vec3<f32>(inertia_0);
+        }
+        else
+        {
+            alpha_0 = _S10;
+        }
+        a_2 = a_3;
+    }
+    else
+    {
+        alpha_0 = _S10;
+        a_2 = a_1;
     }
     var w_1 : vec3<f32> = inverse_rotate_0(q_6, from_rubble_0(bodies_0[b_0 + u32(4)].xyz));
-    var a_local_0 : vec3<f32> = inverse_rotate_0(q_6, _S6 + _S8) - cross(w_1, cross(w_1, node_0.xyz - frames_0[_S5].xyz));
-    var _S9 : u32 = u32(2) * k_0;
-    accel_0[_S9] = vec4<f32>(0.0f);
-    accel_0[_S9 + u32(1)] = vec4<f32>(a_local_0, 0.0f);
+    var a_local_0 : vec3<f32> = inverse_rotate_0(q_6, a_2) - cross(w_1, cross(w_1, node_0.xyz - frames_0[_S5].xyz));
+    var _S12 : u32 = u32(2) * k_0;
+    accel_0[_S12] = vec4<f32>(inverse_rotate_0(q_6, alpha_0), 0.0f);
+    accel_0[_S12 + u32(1)] = vec4<f32>(a_local_0, 0.0f);
     return;
 }
 
@@ -180,16 +216,16 @@ fn blast_loads(@builtin(global_invocation_id) id_0 : vec3<u32>)
 fn blast_breaks(@builtin(global_invocation_id) id_1 : vec3<u32>)
 {
     var j_0 : u32 = id_1.x;
-    var _S10 : bool;
+    var _S13 : bool;
     if(j_0 >= (params_0.bond_count_0))
     {
-        _S10 = true;
+        _S13 = true;
     }
     else
     {
-        _S10 = work_0[params_0.w_alive_0 + j_0] == u32(0);
+        _S13 = work_0[params_0.w_alive_0 + j_0] == u32(0);
     }
-    if(_S10)
+    if(_S13)
     {
         return;
     }
@@ -199,9 +235,9 @@ fn blast_breaks(@builtin(global_invocation_id) id_1 : vec3<u32>)
         return;
     }
     work_0[params_0.w_alive_0 + j_0] = u32(0);
-    var _S11 : u32 = atomicOr(&(atom_0[params_0.a_dirty_0 + work_0[bond_0.n0_0]]), u32(1));
-    var _S12 : u32 = atomicAdd(&(atom_0[params_0.a_counters_0]), u32(1));
-    var _S13 : u32 = atomicAdd(&(atom_0[params_0.a_counters_0 + u32(1)]), u32(1));
+    var _S14 : u32 = atomicOr(&(atom_0[params_0.a_dirty_0 + work_0[bond_0.n0_0]]), u32(1));
+    var _S15 : u32 = atomicAdd(&(atom_0[params_0.a_counters_0]), u32(1));
+    var _S16 : u32 = atomicAdd(&(atom_0[params_0.a_counters_0 + u32(1)]), u32(1));
     return;
 }
 

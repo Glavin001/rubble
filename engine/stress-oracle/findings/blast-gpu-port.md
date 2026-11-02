@@ -86,7 +86,63 @@ The force difference is `|rubble - physx| / |physx|` over live bonds. Exactness 
 
 rubble follows the target's carry as written. These captures were recorded 2026-10-07 by a build nine days older than the target commit, so the difference is left to fresh captures from the target build.
 
+### The stage's material evaluation (`evaluateBondMaterials`)
+
+**Production path.** With vibe-land's settings, rubble's `blast_material.slang` is line for line the target's: `extStressCalcBondStress` (fused dots, torsion and section gains capped at 3), `extStressFibre` and `extStressBondDamage` (excess, rate, residual floor). The city's materials (skyline-stable) use neither crush nor friction.
+
+**The opt-in features, now ported as flags,** in the reference (`BlastGraph::bond_stress_of`, `bond_stress_section`, `friction_strength`) and the GPU:
+- **Section bending** (`BlastSettings::section_bending`; on with the rotational stiffness, as in the stage), from `extStressCalcBondStressSection`:
+  - bending `|M0|/S0 + |M1|/S1` on the section's principal axes and twist `|T|/Zt`, both over the live fraction of the authored area;
+  - without moduli, the square patch of the remaining area;
+  - the moment moved to the bond's centroid, except where the rotational springs already sit there.
+- **Bearing joints:** the fasteners' tension `max(0, M0/d0 + M1/d1 + N)/A` replaces the fibre tension.
+- **Mohr–Coulomb joint shear** (`BlastMaterial::shear_friction`, `shear_capacity_limit`; read from packs as `shearFriction`, `shearCapacityLimit`): shear is graded net of the friction the compression adds, with the cap.
+
+**Tests:**
+- Closed-form section, patch, bearing and friction tests, written from the formulas' definitions.
+- On the house, the GPU matches the reference formula on all 877 bonds' stresses and damage verdicts (862 commands), with sections, bearing joints and friction all on.
+
+**Not yet in the Blast stage:** crush (`evaluateChunkMaterials`, the chunk virial of the Blast bond forces). rubble's crush law is the same one (`crush.slang`), but it runs on the fracture's own loads (contacts, and the support-loss flow), not the Blast bond forces.
+
 **`BLAST_STRESS_FIRST_PRECONDITIONER`** (the target's A/B switch) is now `BlastSettings::first_preconditioner`: identity (the default), polynomial or warm. It is ported to the reference and both GPU paths, and tested against the f32 reference.
+
+### Load assembly (`prepareLoads`, `routeContacts`, `routeConstraintLoads`)
+
+**What already matched.** rubble's `blast_loads` builds the same linear input as the target, in the structure frame:
+- gravity;
+- minus the centrifugal term `w x (w x r)`, about the body's centre of mass;
+- plus each chunk's contact force over its mass.
+
+The target's contacts add only force to the solve. Their torque goes only to the crush virial, and rubble's do the same.
+
+**Added: host chunk loads** (PhysX's `PxDestructionChunkLoad`, `BlastFrame::set_chunk_loads`).
+- A force and impulse, and a torque and angular impulse, on chunks, for one frame.
+- They enter as `(F + J/dt)/m` and `-(T + L/dt)/I`. Blast's angular coordinates are of the opposite hand, hence the minus.
+- A frame without new loads has none, as in the target.
+- Test: on the anchored house, the device matches the f32 reference given the same accelerations within 7.5e-6. The load moves the bond forces by 56% on its frame, and the next frames carry no load.
+
+**Not ported:**
+- **Constraint loads** (joint impulses on chunks, `routeConstraintLoads`): rubble's fracture has no joints on chunks to route.
+- **`disableGravity` chunks under chunk loads:** rubble's destructible bodies have no per-body gravity switch.
+
+The goal's scenes (buildings and the city) use neither.
+
+### Zero host traffic at rest
+
+stress-gpu's `Gpu` counts every byte it sends the device (`Gpu::uploads`): `write_buffer`, and the contents of the buffers it creates. The destruction stage's writes go through it: the fracture, its change log, the Blast solver and the contact ingest. rubble's rigid engine has its own device wrapper and is outside this count.
+
+**Before, every frame:**
+- the fracture parameters, for the pool's parity and the step;
+- the change log's stamp;
+- the Blast parameters;
+- a new uniform buffer and bind groups for each ingest pass.
+
+**Now:**
+- **Frame state on the GPU.** The parity, step and stamp live in three `work` words, and a one-thread kernel (`fr_frame_begin`) advances them. The host mirrors them and writes them only when its step is not the one after the last: the first frame, or a jump. The log reads its stamp from them.
+- **Blast parameters** are written only when they change.
+- **The ingest** caches its passes' parameters and bind groups, keyed by the parameters and every buffer they bind (wgpu buffers compare by identity).
+
+**Test** (`stress-rubble tests/blast_gpu_world.rs`): the house in the GPU-only world, warm, sends 0 bytes over 30 frames at rest. Stimuli (shots, host breaks) and acknowledging read events are the host's only traffic.
 
 ## Update: the native (resident) solve, 2026-10-25
 

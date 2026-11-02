@@ -26,8 +26,10 @@ import blast_common;
 [[vk::binding(3, 0)]] StructuredBuffer<float4> frames;
 [[vk::binding(4, 0)]] StructuredBuffer<float4> bodies;
 [[vk::binding(5, 0)]] StructuredBuffer<float4> loads;
-// Per node: Blast's position (structure frame) and mass.
+// Per node NODE_FRAME float4: Blast's position (structure frame) and mass; (inertia, 0, 0, 0);
+// then the host's chunk load (world): force, impulse, torque, angular impulse (params.chunk_loads).
 [[vk::binding(6, 0)]] StructuredBuffer<float4> node_frame;
+static const uint NODE_FRAME = 6;
 [[vk::binding(7, 0)]] RWStructuredBuffer<float4> accel;
 [[vk::binding(8, 0)]] StructuredBuffer<BlastBond> bonds;
 
@@ -47,14 +49,26 @@ void blast_loads(uint3 id: SV_DispatchThreadID)
     // The structure frame's rotation in the world (fracture.slang `structure_pose`).
     Quat p_inv = conj(quat_of(frames[2 * slot + 1]));
     Quat q = normalized(quat_mul(rot_from_rubble(quat_of(bodies[b + 1])), p_inv));
-    float4 node = node_frame[k];
+    float4 node = node_frame[NODE_FRAME * k];
     float3 f = loads[k].yzw;
     float3 a = params.gravity.xyz + (node.w > 0.0 ? f / node.w : float3(0.0));
+    // A host chunk load (prepareLoads): its force over the mass, and the angular input
+    // -torque / inertia (Blast's angular coordinates are of the opposite hand); impulses over dt.
+    float3 alpha = float3(0.0);
+    if (params.chunk_loads != 0 && node.w > 0.0)
+    {
+        float3 force = node_frame[NODE_FRAME * k + 2].xyz + node_frame[NODE_FRAME * k + 3].xyz / params.dt;
+        float3 torque = node_frame[NODE_FRAME * k + 4].xyz + node_frame[NODE_FRAME * k + 5].xyz / params.dt;
+        a += force / node.w;
+        float inertia = node_frame[NODE_FRAME * k + 1].x;
+        if (inertia > 0.0)
+            alpha = -torque / inertia;
+    }
     float3 a_local = inverse_rotate(q, a);
     float3 w = inverse_rotate(q, from_rubble(bodies[b + 4].xyz));
     float3 r = node.xyz - frames[2 * slot].xyz;
     a_local -= cross(w, cross(w, r));
-    accel[2 * k] = float4(0.0);
+    accel[2 * k] = float4(inverse_rotate(q, alpha), 0.0);
     accel[2 * k + 1] = float4(a_local, 0.0);
 }
 

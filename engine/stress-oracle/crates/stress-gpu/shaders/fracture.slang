@@ -259,7 +259,7 @@ void fr_loads(uint3 id: SV_DispatchThreadID)
     float3 t_total;
     bool overflow;
     uint kept;
-    uint from = params.parity;
+    uint from = frame_parity();
     uint to = 1 - from;
     uint off = work[w_pulses() + 4 * k + 2 * from];
     uint carried = work[w_pulses() + 4 * k + 2 * from + 1];
@@ -335,6 +335,17 @@ void set_args(uint at, uint x)
     args[3 * at + 2] = 1;
 }
 
+// One thread, first in a frame: the frame's state advances (the pool's halves swap, the step
+// and the log's stamp move on by one).
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void fr_frame_begin(uint3 id: SV_DispatchThreadID)
+{
+    work[w_frame()] = 1 - work[w_frame()];
+    work[w_frame() + 1] = work[w_frame() + 1] + 1;
+    work[w_frame() + 2] = work[w_frame() + 2] + 1;
+}
+
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void fr_gate(uint3 id: SV_DispatchThreadID)
@@ -342,7 +353,7 @@ void fr_gate(uint3 id: SV_DispatchThreadID)
     bool run = atom[a_counters() + C_FRAME_BROKEN].load() != 0;
     atom[a_counters() + C_FRAME_BROKEN].store(0);
     // The half this frame read is the next frame's to write.
-    atom[a_counters() + C_POOL_TOP + params.parity].store(0);
+    atom[a_counters() + C_POOL_TOP + frame_parity()].store(0);
     if (run)
         atom[a_counters() + C_SPLIT_FRAMES].add(1);
     set_args(ARG_CHUNKS, run ? groups_of(params.chunk_count, 64) : 0);
@@ -706,7 +717,7 @@ void fr_piece(uint3 id: SV_DispatchThreadID)
     frames[st + 3] = float4(velocity, 0.0);
     // Its generation: the engine's next step, so no contact cached before the re-parent
     // warm-starts it (world_step.slang `generated < max(generation)`).
-    frames[st + 4] = float4(spin, asfloat(params.step));
+    frames[st + 4] = float4(spin, asfloat(frame_step()));
     frames[st + 5] = float4(0.0);
     frames[st + 6] = float4(0.0, 0.0, 0.0, 1.0);
     frames[st + 7] = float4(com, frames[2 * parent].w);
@@ -1303,6 +1314,12 @@ uint w_host_breaks() { return w_il_tube() + 2 * params.chunk_count; }
 // The engine's contact rows this step (its `StepCounters` word 2, copied in by
 // `encode_contact_fracture`), after the host's breaks.
 uint w_cs_rows() { return w_host_breaks() + 1 + params.bond_count; }
+// The frame's state, kept on the GPU (`fr_frame_begin` advances it; the host writes it only when
+// its next step is not the one after the last): the pool's half this frame reads, the engine's
+// next step (a re-parented body's generation), the change log's stamp.
+uint w_frame() { return w_cs_rows() + 1; }
+uint frame_parity() { return work[w_frame()]; }
+uint frame_step() { return work[w_frame() + 1]; }
 
 // `add64` for terms up to 2^62 (a load's): the magnitude split into two words exactly (it
 // has 24 significant bits), negated as a 64-bit integer.
@@ -3341,7 +3358,7 @@ void crush_loads_flow(uint k)
             tau = max(tau, min(duration, dt));
         }
     }
-    uint from = params.parity;
+    uint from = frame_parity();
     uint off = work[w_pulses() + 4 * k + 2 * from];
     uint carried = work[w_pulses() + 4 * k + 2 * from + 1];
     uint src = l_pool(from) + 3 * off;
@@ -3456,7 +3473,7 @@ void fr_crush_loads(uint3 id: SV_DispatchThreadID)
             tau = max(tau, min(duration, dt));
         }
     }
-    uint from = params.parity;
+    uint from = frame_parity();
     uint off = work[w_pulses() + 4 * k + 2 * from];
     uint carried = work[w_pulses() + 4 * k + 2 * from + 1];
     uint src = l_pool(from) + 3 * off;
@@ -3950,7 +3967,7 @@ void write_body(uint slot, float3 pos, float inv_mass, Quat orientation, float3 
         bodies[b + 2] = float4(inv_inertia, asfloat(flags));
         bodies[b + 3] = float4(v, 0.0);
         // Its generation: the engine's next step (no cached contact warm-starts it).
-        bodies[b + 4] = float4(w, asfloat(params.step));
+        bodies[b + 4] = float4(w, asfloat(frame_step()));
         bodies[b + 5] = float4(0.0);
         bodies[b + 6] = float4(0.0, 0.0, 0.0, 1.0);
     }

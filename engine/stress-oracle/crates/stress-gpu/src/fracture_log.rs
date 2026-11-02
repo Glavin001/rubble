@@ -19,7 +19,7 @@ struct LogParams {
     chunk_count: u32,
     bond_count: u32,
     body_count: u32,
-    step: u32,
+    w_stamp: u32,
     w_alive: u32,
     cap_bonds: u32,
     cap_chunks: u32,
@@ -54,10 +54,11 @@ pub struct LogEntries {
 
 pub struct FractureLog {
     params: LogParams,
-    params_buf: wgpu::Buffer,
     pub buffer: wgpu::Buffer,
     kernels: [Kernel; 3],
     bind: wgpu::BindGroup,
+    /// The cursor last acknowledged: an unchanged one is not written again.
+    acked: std::sync::Mutex<Option<LogCursor>>,
 }
 
 impl FractureLog {
@@ -76,7 +77,7 @@ impl FractureLog {
             chunk_count: n,
             bond_count: e,
             body_count: b,
-            step: 0,
+            w_stamp: layout.w_frame() + 2,
             w_alive: layout.w_alive(),
             cap_bonds: e.clamp(1, 2048),
             cap_chunks: n.clamp(1, 2048),
@@ -104,24 +105,16 @@ impl FractureLog {
         );
         FractureLog {
             params,
-            params_buf,
             buffer,
             kernels,
             bind,
+            acked: std::sync::Mutex::new(None),
         }
     }
 
     /// The log's bytes (one readback copy of the whole ring).
     pub fn bytes(&self) -> u64 {
         self.buffer.size()
-    }
-
-    pub fn set_step(&mut self, gpu: &Gpu, step: u32) {
-        if self.params.step != step {
-            self.params.step = step;
-            gpu.queue
-                .write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
-        }
     }
 
     /// Record the frame's log after its split, sized by the fracture's gate (`args`: bonds,
@@ -191,11 +184,14 @@ impl FractureLog {
     /// Acknowledge everything up to `cursor` (and clear an overflow the host has handled with a
     /// full read): the GPU may reuse those entries.
     pub fn acknowledge(&self, gpu: &Gpu, cursor: LogCursor, clear_overflow: bool) {
-        gpu.queue
-            .write_buffer(&self.buffer, 16, bytemuck::cast_slice(&cursor));
+        let mut acked = self.acked.lock().unwrap();
+        if *acked == Some(cursor) && !clear_overflow {
+            return;
+        }
+        *acked = Some(cursor);
+        gpu.write_buffer(&self.buffer, 16, bytemuck::cast_slice(&cursor));
         if clear_overflow {
-            gpu.queue
-                .write_buffer(&self.buffer, 12, bytemuck::bytes_of(&0u32));
+            gpu.write_buffer(&self.buffer, 12, bytemuck::bytes_of(&0u32));
         }
     }
 }

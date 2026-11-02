@@ -65,6 +65,8 @@ pub struct Params {
     pub node_vectors: u32,
     /// Krylov carry on this (warm) solve (`BlastSettings::carry_krylov`).
     pub carry: u32,
+    pub section_bending: u32,
+    pub chunk_loads: u32,
 }
 
 #[repr(C)]
@@ -92,7 +94,7 @@ struct BondGpu {
 use Binding::{Storage as R, StorageRw as W, Uniform as U};
 const CGLS_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
 const NATIVE_BINDINGS: [Binding; 11] = [U, W, R, R, W, R, W, W, W, R, R];
-const MATERIAL_BINDINGS: [Binding; 8] = [U, W, W, R, R, W, W, R];
+const MATERIAL_BINDINGS: [Binding; 9] = [U, W, W, R, R, W, W, R, R];
 const TOPOLOGY_BINDINGS: [Binding; 8] = [U, R, R, W, W, W, W, W];
 const MOTION_BINDINGS: [Binding; 7] = [U, W, W, R, R, R, W];
 /// `blast_common.slang` `FRAME_WORDS` / 4: each island's rigid-mode frame, in `islands` after
@@ -146,6 +148,28 @@ fn native_node_vectors(g: &BlastGraph) -> usize {
     } else {
         NATIVE_NODE_VECTORS_SHEAR
     }
+}
+
+/// Each bond's section and the lever from the chunks' midpoint to its centroid, where the
+/// section's moment is taken (zero against a support, or with the rotational stiffness, whose
+/// springs already sit at the centroid), as `blast_material.slang` reads them.
+fn section_rows(g: &BlastGraph) -> Vec<[f32; 4]> {
+    let m = g.bond_count();
+    let mut rows = vec![[0.0f32; 4]; 3 * m.max(1)];
+    for j in 0..m {
+        let s = g.sections.get(j).copied().unwrap_or_default();
+        let b = &g.bonds[j];
+        let [n0, n1] = b.nodes;
+        let lever = if g.rotation.is_empty() && !g.weight[n0].is_static() && !g.weight[n1].is_static() {
+            b.centroid - (g.nodes[n0].position + g.nodes[n1].position) * 0.5
+        } else {
+            Vec3::ZERO
+        };
+        rows[3 * j] = [s.axis.x as f32, s.axis.y as f32, s.axis.z as f32, s.bend_modulus0 as f32];
+        rows[3 * j + 1] = [s.bend_modulus1 as f32, s.twist_modulus as f32, s.bearing_depth0 as f32, s.bearing_depth1 as f32];
+        rows[3 * j + 2] = f4(lever);
+    }
+    rows
 }
 
 /// The per-bond stiffness tensors as `blast_native_ops.slangh` reads them (zeros when unset).
@@ -216,6 +240,8 @@ pub struct BlastBuffers {
     pub out: wgpu::Buffer,
     /// Per bond `STIFFNESS_WORDS` float4: A, W, Al, Wl (`BlastGraph::rotation`, `shear`).
     pub stiffness: wgpu::Buffer,
+    /// Per bond 3 float4: its section and the lever to its centroid (`blast_material.slang`).
+    pub sections: wgpu::Buffer,
 }
 
 /// Blast's stress solver on a device, for one support graph.
@@ -234,6 +260,8 @@ pub struct GpuBlastSolver {
     /// The native solve's rigid-mode frames (`blast_motion.slang`), built after each island
     /// rebuild, with its node records.
     motion: Option<(Kernel, wgpu::BindGroup, wgpu::Buffer)>,
+    /// The parameters last written (`write_params`).
+    written: std::sync::Mutex<Option<Params>>,
     /// The native solve of islands over `wide_min` nodes (`blast_native_wide.slang`).
     wide: Option<Wide>,
 }
@@ -375,11 +403,12 @@ impl GpuBlastSolver {
                         m.residual_area_fraction as f32,
                         0.0,
                     ],
+                    [m.shear_friction as f32, m.shear_capacity_limit as f32, 0.0, 0.0],
                 ]
             })
             .collect();
         if material_rows.is_empty() {
-            material_rows = vec![[0.0; 4]; 2];
+            material_rows = vec![[0.0; 4]; 3];
         }
         // The islands are built before the first solve (a pending rebuild).
         let mut topo = vec![0u32; topo_total(n.max(1)) + 5];
@@ -414,6 +443,7 @@ impl GpuBlastSolver {
             materials: gpu.storage("blast materials", &material_rows),
             out: gpu.storage("blast out", &vec![[0.0f32; 4]; 4 * m.max(1)]),
             stiffness: gpu.storage("blast stiffness", &stiffness_rows(&graph)),
+            sections: gpu.storage("blast sections", &section_rows(&graph)),
         };
         let native = graph.settings.solver == SolverKind::Native;
         let solve = if native {
@@ -450,6 +480,7 @@ impl GpuBlastSolver {
                 &b.out,
                 &b.topo,
                 &b.stiffness,
+                &b.sections,
             ],
         );
         let topology_bind = gpu.bind(
@@ -471,6 +502,7 @@ impl GpuBlastSolver {
             topology_bind,
             has_warm_start: false,
             motion: None,
+            written: std::sync::Mutex::new(None),
             wide: None,
         };
         let mut s = s;
@@ -543,16 +575,21 @@ impl GpuBlastSolver {
             wide_blocks: self.wide.as_ref().map_or(0, |w| w.blocks),
             rotation: rotation_mode(g),
             node_vectors: native_node_vectors(g) as u32,
+            section_bending: (s.section_bending || !g.rotation.is_empty()) as u32,
             carry: (warm && s.warm_start && self.has_warm_start && s.carry_krylov.unwrap_or(!g.rotation.is_empty())) as u32,
             first_polynomial: s.first_preconditioner.polynomial_first(warm && s.warm_start && self.has_warm_start) as u32,
             ..Default::default()
         }
     }
 
+    /// The solve's parameters, written only when they changed (a steady frame writes none).
     pub fn write_params(&self, p: &Params) {
-        self.gpu
-            .queue
-            .write_buffer(&self.buffers.params, 0, bytemuck::bytes_of(p));
+        let mut written = self.written.lock().unwrap();
+        if written.as_ref().is_some_and(|w| bytemuck::bytes_of(w) == bytemuck::bytes_of(p)) {
+            return;
+        }
+        self.gpu.write_buffer(&self.buffers.params, 0, bytemuck::bytes_of(p));
+        *written = Some(*p);
     }
 
     /// Record the islands' rebuild from the bonds' health. It runs only when a bond broke since
@@ -663,9 +700,7 @@ impl GpuBlastSolver {
         );
         let a: Vec<[f32; 4]> = accel.iter().flat_map(|v| [f4(v.ang), f4(v.lin)]).collect();
         if !a.is_empty() {
-            self.gpu
-                .queue
-                .write_buffer(&self.buffers.accel, 0, bytemuck::cast_slice(&a));
+            self.gpu.write_buffer(&self.buffers.accel, 0, bytemuck::cast_slice(&a));
         }
         self.write_params(&self.params(true, skip_settled, 0.0, false));
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
@@ -832,7 +867,7 @@ impl GpuBlastSolver {
         assert_eq!(x.len(), self.graph.bond_count());
         let words: Vec<[f32; 4]> = x.iter().flat_map(|v| [f4(v.ang), f4(v.lin)]).collect();
         if !words.is_empty() {
-            self.gpu.queue.write_buffer(&self.buffers.x, 0, bytemuck::cast_slice(&words));
+            self.gpu.write_buffer(&self.buffers.x, 0, bytemuck::cast_slice(&words));
         }
         self.has_warm_start = true;
     }
@@ -855,18 +890,12 @@ impl GpuBlastSolver {
     pub fn set_health(&mut self, bond: usize, health: f64) {
         let h = health.max(0.0) as f32;
         let at = (bond * std::mem::size_of::<BondGpu>() + 12) as u64;
-        self.gpu
-            .queue
-            .write_buffer(&self.buffers.bonds, at, bytemuck::bytes_of(&h));
+        self.gpu.write_buffer(&self.buffers.bonds, at, bytemuck::bytes_of(&h));
         if !(h > 0.0) {
-            self.gpu
-                .queue
-                .write_buffer(&self.buffers.x, (bond * 32) as u64, &[0u8; 32]);
+            self.gpu.write_buffer(&self.buffers.x, (bond * 32) as u64, &[0u8; 32]);
         }
         let dirty = 4 * (topo_total(self.graph.node_count().max(1)) + 4) as u64;
-        self.gpu
-            .queue
-            .write_buffer(&self.buffers.topo, dirty, bytemuck::bytes_of(&1u32));
+        self.gpu.write_buffer(&self.buffers.topo, dirty, bytemuck::bytes_of(&1u32));
     }
 }
 
@@ -887,9 +916,29 @@ pub struct FractureBuffers<'a> {
 /// fracture's loads, Blast's inputs, its islands (when a bond broke), the solve, the stresses
 /// and damage, and the bonds that broke marked in the fracture for its split. The fracture's
 /// chunks and bonds are the graph's nodes and bonds, index for index.
+/// A host's load on one chunk for one frame (PhysX's `PxDestructionChunkLoad`), in the
+/// fracture's world frame (Z up): the stress solve takes `(force + impulse / dt) / mass` and
+/// `-(torque + angular_impulse / dt) / inertia` on the chunk. The rigid bodies are the host's
+/// to push.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChunkLoad {
+    pub chunk: u32,
+    pub force: Vec3,
+    pub impulse: Vec3,
+    pub torque: Vec3,
+    pub angular_impulse: Vec3,
+}
+
+/// `blast_fracture.slang` `NODE_FRAME`: float4s per node.
+const NODE_FRAME: usize = 6;
+
 pub struct BlastFrame {
     pub solver: GpuBlastSolver,
     node_frame: wgpu::Buffer,
+    /// Chunk loads set for the coming frame (`set_chunk_loads`); they apply to it alone.
+    chunk_loads: bool,
+    /// Chunks the last loads touched (cleared before new ones are written).
+    loaded: Vec<u32>,
     loads: Kernel,
     breaks: Kernel,
     bind: Option<wgpu::BindGroup>,
@@ -909,13 +958,11 @@ impl BlastFrame {
         let node_frame: Vec<[f32; 4]> = graph
             .nodes
             .iter()
-            .map(|n| {
-                [
-                    n.position.x as f32,
-                    n.position.y as f32,
-                    n.position.z as f32,
-                    n.mass as f32,
-                ]
+            .flat_map(|n| {
+                let mut rows = [[0.0f32; 4]; NODE_FRAME];
+                rows[0] = [n.position.x as f32, n.position.y as f32, n.position.z as f32, n.mass as f32];
+                rows[1][0] = n.effective_inertia() as f32;
+                rows
             })
             .collect();
         let node_frame = gpu.storage(
@@ -932,6 +979,8 @@ impl BlastFrame {
         BlastFrame {
             solver,
             node_frame,
+            chunk_loads: false,
+            loaded: Vec::new(),
             loads,
             breaks,
             bind: None,
@@ -940,6 +989,26 @@ impl BlastFrame {
             a_dirty: 0,
             a_counters: 0,
         }
+    }
+
+    /// Loads on chunks for the coming frame alone (PhysX's `setChunkLoads`: a frame without
+    /// new loads has none). A host stimulus: the only upload it makes.
+    pub fn set_chunk_loads(&mut self, gpu: &Gpu, loads: &[ChunkLoad]) -> Result<(), String> {
+        let n = self.solver.graph.node_count();
+        if let Some(l) = loads.iter().find(|l| l.chunk as usize >= n) {
+            return Err(format!("chunk load on chunk {} of {n}", l.chunk));
+        }
+        // The last loads' rows cleared, then the new ones written.
+        for &k in &self.loaded {
+            gpu.write_buffer(&self.node_frame, (16 * (NODE_FRAME * k as usize + 2)) as u64, bytemuck::cast_slice(&[[0.0f32; 4]; 4]));
+        }
+        for l in loads {
+            let rows = [f4(l.force), f4(l.impulse), f4(l.torque), f4(l.angular_impulse)];
+            gpu.write_buffer(&self.node_frame, (16 * (NODE_FRAME * l.chunk as usize + 2)) as u64, bytemuck::cast_slice(&rows));
+        }
+        self.loaded = loads.iter().map(|l| l.chunk).collect();
+        self.chunk_loads = !loads.is_empty();
+        Ok(())
     }
 
     /// Bind the fracture's buffers (again whenever they change).
@@ -970,6 +1039,8 @@ impl BlastFrame {
         let g = self.gravity;
         p.gravity = [g.x as f32, g.y as f32, g.z as f32, 0.0];
         (p.w_alive, p.a_dirty, p.a_counters) = (self.w_alive, self.a_dirty, self.a_counters);
+        p.chunk_loads = self.chunk_loads as u32;
+        self.chunk_loads = false;
         self.solver.write_params(&p);
         let (n, m) = (
             self.solver.graph.node_count(),

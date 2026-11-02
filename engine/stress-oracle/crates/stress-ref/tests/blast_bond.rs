@@ -527,3 +527,75 @@ fn section_bending_and_torsion_use_the_patch() {
         "{s:?}"
     );
 }
+
+#[test]
+fn a_section_turns_moments_into_fibre_and_twist_stresses() {
+    // extStressCalcBondStressSection: on the section's principal axes (e0 = x, e1 = n x e0 = -x
+    // x... with n = y: e1 = y x x = -z), bending |M0|/S0 + |M1|/S1 and twist |T|/Zt, over the
+    // live fraction of the authored area.
+    let n = Vec3::Y;
+    let section = BondSection {
+        axis: Vec3::X,
+        bend_modulus0: 2e-3,
+        bend_modulus1: 5e-3,
+        twist_modulus: 4e-3,
+        ..Default::default()
+    };
+    let wrench = AngLin {
+        ang: Vec3::new(30.0, 8.0, -10.0),
+        lin: Vec3::new(0.0, -100.0, 0.0),
+    };
+    let s = bond_stress_section(wrench, n, 0.05, 0.1, &section, true);
+    let live = 0.5;
+    assert!((s.bend - (30.0 / 2e-3 + 10.0 / 5e-3) / live).abs() < 1e-6 * s.bend);
+    assert!((s.shear - 8.0 / (4e-3 * live)).abs() < 1e-6 * s.shear);
+    assert!((s.normal - -100.0 / 0.05).abs() < 1e-9);
+    // Fibres: tension and compression from the axial stress and the bending either side.
+    assert!((s.tension - (s.normal + s.bend).max(0.0)).abs() < 1e-9 && (s.compression - (s.bend - s.normal)).abs() < 1e-6);
+    // No moduli: the square patch of the remaining area, a^3 / 6, and sqrt(2) a^3 / 6 in twist.
+    let patch = bond_stress_section(wrench, n, 0.04, 0.04, &BondSection::default(), true);
+    let cube = 0.04f64 * 0.04f64.sqrt();
+    assert!((patch.bend - 6.0 * (30.0f64.powi(2) + 10.0f64.powi(2)).sqrt() / cube).abs() < 1e-6 * patch.bend);
+    assert!((patch.shear - 8.0 * 6.0 / 2f64.sqrt() / cube).abs() < 1e-6 * patch.shear);
+}
+
+#[test]
+fn a_bearing_joint_grades_its_fasteners_in_tension() {
+    // PxDestructionBondSection::bearingDepth0/1: the contact bears at its edge, the fasteners
+    // take T = M0/d0 + M1/d1 + N (N signed, compression negative), never below 0.
+    let section = BondSection {
+        axis: Vec3::X,
+        bearing_depth0: 0.2,
+        bearing_depth1: 0.1,
+        ..Default::default()
+    };
+    let wrench = |m0: f64, n: f64| AngLin {
+        ang: Vec3::new(m0, 0.0, 0.0),
+        lin: Vec3::new(0.0, n, 0.0),
+    };
+    let s = bond_stress_section(wrench(40.0, -100.0), Vec3::Y, 0.01, 0.01, &section, true);
+    assert!((s.tension - (40.0 / 0.2 - 100.0) / 0.01).abs() < 1e-6);
+    let s = bond_stress_section(wrench(10.0, -100.0), Vec3::Y, 0.01, 0.01, &section, true);
+    assert_eq!(s.tension, 0.0);
+}
+
+#[test]
+fn compression_across_a_joint_adds_friction_to_its_shear_strength() {
+    // extStressFrictionStrength: mu sigma_c in compression, none in tension, capped so the fatal
+    // limit plus it stays within the capacity; the damage law grades the shear net of it.
+    assert_eq!(friction_strength(-2e6, 0.4, 0.0, 1e6), 0.8e6);
+    assert_eq!(friction_strength(2e6, 0.4, 0.0, 1e6), 0.0);
+    assert_eq!(friction_strength(-2e6, 0.4, 1.5e6, 1e6), 0.5e6);
+    let material = BlastMaterial {
+        shear_friction: 0.4,
+        ..BlastMaterial::CONCRETE
+    };
+    let stress = BondStress {
+        normal: -3e6,
+        shear: 2.0e6,
+        ..Default::default()
+    };
+    // 2.0 MPa less 1.2 MPa of friction is under the 1.6 MPa elastic limit: no damage.
+    assert!(!bond_damage(stress, 1.0, 1.0, &material, 1.0 / 60.0, 2.0).command);
+    assert!(bond_damage(stress, 1.0, 1.0, &BlastMaterial::CONCRETE, 1.0 / 60.0, 2.0).command);
+}

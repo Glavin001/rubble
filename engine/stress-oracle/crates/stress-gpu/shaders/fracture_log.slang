@@ -22,7 +22,7 @@ struct LogParams
     uint chunk_count;
     uint bond_count;
     uint body_count;
-    uint step;       // the engine's next step (fracture.slang's `step`): the change's step
+    uint w_stamp;    // fracture.slang `work`: the frame's stamp (`w_frame() + 2`): the change's step
     uint w_alive;    // fracture.slang `work`: the bonds' alive flags
     uint cap_bonds;
     uint cap_chunks;
@@ -82,7 +82,7 @@ void log_bonds(uint3 id: SV_DispatchThreadID)
     if (alive == 0 && claim(0, params.cap_bonds, at))
     {
         log[l_bonds() + BOND_WORDS * at].store(j);
-        log[l_bonds() + BOND_WORDS * at + 1].store(params.step);
+        log[l_bonds() + BOND_WORDS * at + 1].store(work[params.w_stamp]);
     }
 }
 
@@ -102,7 +102,7 @@ void log_chunks(uint3 id: SV_DispatchThreadID)
     {
         log[l_chunks() + CHUNK_WORDS * at].store(c);
         log[l_chunks() + CHUNK_WORDS * at + 1].store(body);
-        log[l_chunks() + CHUNK_WORDS * at + 2].store(params.step);
+        log[l_chunks() + CHUNK_WORDS * at + 2].store(work[params.w_stamp]);
     }
 }
 
@@ -129,7 +129,7 @@ void log_frames(uint3 id: SV_DispatchThreadID)
     {
         uint e = l_frames() + FRAME_WORDS * at;
         log[e].store(b);
-        log[e + 1].store(params.step);
+        log[e + 1].store(work[params.w_stamp]);
         for (uint w = 0; w < 4; w++)
         {
             log[e + 2 + w].store(f0[w]);

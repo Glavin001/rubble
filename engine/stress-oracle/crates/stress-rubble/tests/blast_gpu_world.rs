@@ -137,3 +137,76 @@ fn a_struck_house_breaks_splits_and_repeats() {
     let again = strike(&gpu);
     assert_eq!(again.0, intact, "the run repeats bit for bit");
 }
+
+#[test]
+fn a_frame_at_rest_sends_the_gpu_nothing() {
+    let Ok(gpu) = Gpu::new() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    // The destruction stage keeps its state on the GPU: once warm, a frame without stimuli
+    // writes no buffer and creates none (stress-gpu's `Gpu::uploads` counts every byte it
+    // sends: the fracture's frame state, the Blast parameters, the ingest's passes).
+    let scene = house();
+    let mut w = world(&gpu, &scene);
+    for _ in 0..5 {
+        w.step_frame(&gpu).expect("frame");
+    }
+    let before = gpu.upload_bytes();
+    for _ in 0..30 {
+        w.step_frame(&gpu).expect("frame");
+    }
+    let sent = gpu.upload_bytes() - before;
+    println!("30 frames at rest: {sent} bytes uploaded");
+    assert_eq!(sent, 0, "{sent} bytes over 30 frames at rest");
+}
+
+#[test]
+fn a_chunk_load_loads_the_solve_for_one_frame() {
+    let Ok(gpu) = Gpu::new() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    // PhysX's chunk loads: a force and a torque on two chunks for one frame enter the solve as
+    // F/m and -T/I (prepareLoads); the frame after has none. The anchored house's structure
+    // frame is the world's, so the reference takes them as they are.
+    use stress_gpu::blast::ChunkLoad;
+    let scene = house();
+    let mut w = world(&gpu, &scene);
+    let graph = w.fracture.blast().expect("Blast set").solver.graph.clone();
+    let mut reference = BlastSolver::new(graph.clone());
+    reference.device_precision = true;
+    let g = Vec3::from_array(scene.gravity);
+    let gravity = vec![AngLin { ang: Vec3::ZERO, lin: g }; graph.node_count()];
+    let dynamic: Vec<usize> = (0..graph.node_count()).filter(|&k| graph.nodes[k].mass > 0.0).collect();
+    let loads = [
+        ChunkLoad { chunk: dynamic[dynamic.len() / 3] as u32, force: Vec3::new(3e4, 0.0, -8e4), torque: Vec3::new(2e3, -4e3, 1e3), ..Default::default() },
+        ChunkLoad { chunk: dynamic[2 * dynamic.len() / 3] as u32, force: Vec3::new(0.0, -5e4, 0.0), torque: Vec3::new(0.0, 0.0, 6e3), ..Default::default() },
+    ];
+    let mut loaded = gravity.clone();
+    for l in &loads {
+        let n = graph.nodes[l.chunk as usize];
+        loaded[l.chunk as usize].lin = g + l.force * (1.0 / n.mass);
+        loaded[l.chunk as usize].ang = l.torque * (-1.0 / n.effective_inertia());
+    }
+    let mut unloaded = BlastSolver::new(graph.clone());
+    unloaded.device_precision = true;
+    for frame in 0..6 {
+        let accel = if frame == 3 { &loaded } else { &gravity };
+        if frame == 3 {
+            w.fracture.blast_mut().unwrap().set_chunk_loads(&gpu, &loads).unwrap();
+        }
+        w.step_frame(&gpu).expect("frame");
+        reference.solve(accel, true);
+        unloaded.solve(&gravity, true);
+        let device = w.fracture.blast().unwrap().solver.impulses();
+        let r: Vec<AngLin> = (0..graph.bond_count()).map(|j| reference.impulse(j)).collect();
+        let u: Vec<AngLin> = (0..graph.bond_count()).map(|j| unloaded.impulse(j)).collect();
+        let (e, moved) = (difference(&device, &r), difference(&r, &u));
+        println!("frame {frame}: {e:.3e} from the reference; the load moved it {moved:.3e}");
+        assert!(e < 3e-2, "frame {frame}: {e:.3e}");
+        if frame == 3 {
+            assert!(moved > 0.1, "the chunk loads change the bond forces: {moved:.3e}");
+        }
+    }
+}

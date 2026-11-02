@@ -391,3 +391,67 @@ fn krylov_carry_tracks_the_f32_reference_in_one_group_and_many() {
     capped_frames(&gpu, settings, u32::MAX, |_| {});
     capped_frames(&gpu, settings, 0, |_| {});
 }
+
+#[test]
+fn section_bending_bearing_and_friction_match_the_reference_formula() {
+    let Some(gpu) = gpu() else { return };
+    // The stage's material evaluation with its opt-in features: section bending (half the bonds
+    // with a section of their own, the rest the square patch, the moment moved to the
+    // centroid), bearing joints on some, Mohr-Coulomb friction, and limits low enough that
+    // gravity overloads bonds; against the reference's formula and law on the device's impulses.
+    let (mut graph, mut materials, g) = house(BlastSettings { section_bending: true, ..BlastSettings::native() });
+    for m in &mut materials {
+        for v in [&mut m.compression_elastic, &mut m.compression_fatal, &mut m.tension_elastic, &mut m.tension_fatal, &mut m.shear_elastic, &mut m.shear_fatal] {
+            *v *= 1e-3;
+        }
+        m.shear_friction = 0.4;
+        m.shear_capacity_limit = 2.0 * m.shear_fatal;
+    }
+    graph.sections = (0..graph.bond_count())
+        .map(|j| {
+            let n = graph.normal[j];
+            let axis = n.cross(if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y }).normalized();
+            let side = graph.bonds[j].area.sqrt();
+            let modulus = side * side * side / 6.0;
+            match j % 4 {
+                0 => BondSection { axis, bend_modulus0: modulus, bend_modulus1: 2.0 * modulus, twist_modulus: 1.5 * modulus, ..Default::default() },
+                1 => BondSection { axis, bearing_depth0: 0.5 * side, bearing_depth1: 0.25 * side, ..Default::default() },
+                _ => BondSection { axis, ..Default::default() },
+            }
+        })
+        .collect();
+    let mut device = GpuBlastSolver::new(&gpu, graph.clone(), materials.clone());
+    let accel = uniform(graph.node_count(), g);
+    for _ in 0..4 {
+        device.solve(&accel, false);
+    }
+    let dt = 1.0 / 60.0;
+    let results = device.bond_results(dt, false);
+    let healths = device.health();
+    let (mut commands, mut agree) = (0, 0);
+    for (j, d) in results.iter().enumerate() {
+        let health = healths[j];
+        if !(health > 0.0) {
+            continue;
+        }
+        let r = graph.bond_stress_of(j, d.impulse, health);
+        let scale = r.compression.max(r.tension).max(r.shear).max(r.normal.abs()).max(1e-30);
+        for (a, b, what) in [
+            (d.stress.normal, r.normal, "normal"),
+            (d.stress.shear, r.shear, "shear"),
+            (d.stress.bend, r.bend, "bend"),
+            (d.stress.compression, r.compression, "compression"),
+            (d.stress.tension, r.tension, "tension"),
+        ] {
+            assert!((a - b).abs() <= 1e-5 * scale, "bond {j} {what}: {a} vs {b}");
+        }
+        let material = &materials[graph.bonds[j].material];
+        let rd = bond_damage(r, health, graph.bonds[j].area, material, dt, graph.settings.damage_rate);
+        commands += rd.command as usize;
+        agree += (rd.command == d.damage.command) as usize;
+    }
+    println!("section bending: {agree} of the verdicts agree; {commands} commands");
+    assert!(commands > 0, "the limits are low enough to command damage");
+    let live = healths.iter().filter(|h| **h > 0.0).count();
+    assert!(agree + 2 >= live, "{agree} of {live}");
+}

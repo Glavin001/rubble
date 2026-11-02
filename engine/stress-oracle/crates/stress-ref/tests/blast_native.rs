@@ -286,6 +286,7 @@ fn round_section(b: &BlastBond, r: f64) -> BondSection {
         gyration0: r,
         gyration1: r,
         polar_gyration: r,
+        ..Default::default()
     }
 }
 
