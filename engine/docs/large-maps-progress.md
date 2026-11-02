@@ -608,3 +608,204 @@ Cost: no archived rows also drops the five row passes, so `sleepMain` on gables5
 `RUBBLE_GPU_TIMING_DISPATCH=1`. "100k Grid" with 200 awake: 173 dispatches a step, of which
 82 primal colour dispatches, 12 sparse and 12 dual (12 iterations, colours dispatched =
 last step's + 4). This is the next step's starting point (the cost floor).
+
+## Cost floor (2026-11-02, `claude/cost-floor`)
+
+The per-step work that did not shrink with the awake count (about 3 ms of gables506k's
+4.8 ms with ~9k awake): the uniform grid's clear, insert and query over every collider,
+per-body passes over every body slot, `ccd_wake`'s collider search per sleeping body,
+and the primal's dispatch per colour. Every change below gives the same results as the
+pass it replaces, and each has a switch back.
+
+### Done
+
+- **Uniform-grid rest tables** (`EngineFeatures::awake_uniform`, on; `ENGINE_BROADPHASE=hier`
+  or `?broadphase=hier` keep the full pass on uniform grids; world_step.slang
+  `restUniform`). The split grid's other table (sleepers and small statics) is kept across
+  steps as the resting table R (the hierarchical grid's `restHeads` / `restLinks`); each
+  step only the moving colliders (`list_moving_colliders`) are bounded, inserted into W
+  (`awakeHeads`, links in the AABB spare word, as the full pass's awake table) and query
+  (`broadphase_query_awake_uniform`: `broadphase_query`'s awake branch with the other
+  table read from R). A collider in W this step is a tombstone in R: its stamp
+  (`restStampBase`, this step's index) is tested by every R walk (the awake query, the
+  oversize query, `broadphase_fast`, `sceneWalk`, the touch query), so a body woken after
+  the inserts (a projectile's late impulse) is still found in R by the walks that run
+  later, as the full pass's other table held it. Planes, oversized statics and resting
+  large dynamics are listed in R's header and published into the scratch lists the full
+  pass fills (overflows flagged every step, as it flags them). The sleepers' pairs with
+  the large-dynamic list (the only pairs a sleeper's own thread emits in the full pass)
+  come from `broadphase_sleeper_large_walk`: a lane per R cell that can hold an entry
+  overlapping a large dynamic (bounded by the largest half extent of R's entries, header
+  word 29), each entry at its true cell only, plus the listed large ones; a thread per
+  collider (`broadphase_sleeper_large`) only if a large box spans more than 32,768 such
+  cells. Not with kinematic bodies (they sit in the other table while they move) or at
+  or below the pairwise path's 512 colliders. Taken only while at most 10% of the
+  bodies are awake, until more than 15% are (`uniform_rest_wanted`): the pass costs a
+  scan over every collider plus the awake ones' work, and at ring110k's 22% awake it was
+  slower than the full pass (0.8 → 1.0 ms). `set_uniform_rest_always` for tests.
+- **Incremental rest inserts** (`EngineFeatures::rest_incremental`, on;
+  `ENGINE_REST_TABLE=rebuild`), both grids, so also `?gridlevels=on`: instead of
+  rebuilding R after every step with sleep events, the colliders that came to rest this
+  step (slot 81 still lists them) join R at the end of it (`rest_sleepers_mark`,
+  `rest_unlink`, `rest_push`). A collider already in R at its bucket (a tombstone of a
+  body that fell asleep again in the same cell) is valid again as it is; one in another
+  bucket is spliced out of that chain first, one thread per claimed bucket (its W head,
+  empty after the step's queries, is the claim). A rebuild only when a hierarchical
+  collider moves between a cell and the oversized list (header word 31). Each collider's
+  R bucket is kept (`restAtBase`); `rest_table_words` grows by three words a collider.
+- **`ccd_wake` by collider** (`EngineFeatures::ccd_by_collider`, on; `ENGINE_CCD_WAKE=body`):
+  a body lies within reach × r + own of a sweep iff one of its colliders c lies within
+  reach × r + extent(c) (own is the largest extent; rounding is monotone), so
+  `ccd_wake_colliders` tests a thread per collider, with each CCD slot's r taken once
+  (`ccd_slot_reach`, or `ccd_slot_reach_listed` over the listed movers on awake-indexed
+  steps: a registered CCD body was moving when it registered). Work slot 87 is empty
+  unless some CCD body moves more than four contact offsets a step (`ccdUnholds`), when
+  `ccd_wake` could wake nothing; the earlier pass searched the colliders of every
+  sleeping body whenever a CCD body existed. It also drops `ccd_wake`'s assumption that
+  colliders are sorted by body (a binary search, which threshold splits break). Bodies
+  without colliders are never woken by it, so a host whose mirror has a dynamic body
+  without colliders keeps `ccd_wake`. `ccd_unhold` stays per body: it searches colliders
+  only for the few bodies whose wake is deferred, and a per-collider version cost 0.1 ms
+  more on gables while the ball flies (so the sorted assumption remains there, for those
+  bodies only).
+- **Awake-list body passes** (`EngineFeatures::awake_body_passes`, on; `ENGINE_BODY_PASSES=all`):
+  `predict_bodies` and `extract_velocity_sleep` in their existing PASS_U = 1 mode, a
+  thread per awake-list entry (slot 67), where nothing changes a body between
+  `build_awake_list` and them: not with vehicles, characters, soft bodies or directed
+  debris, and prediction not with kinematic bodies.
+- **Velocity-only commands** no longer bound every collider: only commands that may move
+  a pose or a collider that does not move after (teleport, reparent, mass frame,
+  kinematic target) bound every collider, and they now also rebuild R, which they did
+  not on hierarchical grids (a teleported static stayed in its old cell)
+  (`commands_move_poses`).
+- **The primal tail** (`EngineFeatures::primal_tail`, opt-in: `ENGINE_PRIMAL=tail`):
+  the headroom colours (from last step's colour count to the sparse tail's first) solved
+  in the sparse tail's single workgroup with the colour dispatches' lanes, accumulation
+  and reduction (`solve_primal_sparse_tail`), then the sparse colours as before: one
+  dispatch an iteration instead of one per headroom colour. Bit-identical bodies, but
+  not adopted: in Chrome the empty headroom dispatches it saves cost next to nothing
+  (legacyGrid100k, 12 iterations, 48 fewer dispatches a step: primal within noise of
+  the per-colour dispatches), and a step whose colour count grew solves the new colours
+  in one workgroup. Natively, on "100k Grid" with 200 awake (`floor_probe`, per-dispatch
+  marks), it takes the step from 145 to 110 dispatches (colour dispatches 79 → 34, plus
+  12 tails); the native totals were within the noise of the background load.
+- Demo switches for A/B timing in one build: `?broadphase=full|hier`, and `?costfloor=off`
+  (or a list of the parts to turn off: `uniform`, `incremental`, `ccd`, `body`, `tail`).
+
+### Correctness
+
+- `tests/awake_broadphase.rs`: a new uniform-grid scene (a plane, small and wide
+  statics, 576 cubes in piles that settle and sleep, two 2.5 m spheres in the
+  large-dynamic list, one resting against a pile and one rolling into another, thrown
+  cubes, a CCD bullet, a moving kinematic late): the same candidate pairs and
+  bit-identical bounds as the full pass at 78 of 86 compared steps (the kinematic turns
+  the awake pass off after), with incremental inserts and with rebuilds
+  (`ENGINE_REST_TABLE=rebuild`). The hierarchical test passes with incremental inserts.
+- `tests/ccd_wake_colliders.rs` (new): a brick wall and compound sleepers struck by fast
+  CCD balls, every step of the strikes run from the same saved state (`debug_step_until`)
+  with each variant and with the reference twice: `ccd_wake` by collider gives the same
+  body flags and timers (220 comparisons, 286 wakes); the awake-list passes and the
+  primal tail give bit-identical bodies before the sleep gate and the same poses and
+  sleep timers after it (the in-place gate's revocations travel as far as scheduling
+  lets them, so which bodies fall asleep can differ between two runs of the same passes;
+  one reference run in 220 differed from itself).
+- The 61-shot gate (house and masonry arch, `sleep_policy_power`, carry off + archive):
+  every shot and per-step break timeline bit-identical to the base (a28112a4).
+- `tests/grid_strike.rs`, two runs each (native runs are not bit-reproducible); boxes
+  moved > 0.1 m, awake at step 1,000, without CCD: base 628, 618 / 788, 735; this branch
+  458, 449 / 634, 641 (one build earlier 367, 551 / 584, 812), the spread of the cold
+  archive runs above. With the ball's CCD on (the probe's default) base and this branch
+  alike drop 2,300-2,700 boxes through the ground (lowest y ≈ −360 m at step 1,000): a
+  problem of the CCD strike on this scene that predates these changes.
+- Suites: engine-world (all but the known `cuboid_house_breaks_and_splits_as_in_the_lab`,
+  the same failure as the base), engine-webgpu broadphase_oracle, awake_broadphase,
+  gables_hold, ring_hold, columns_hold, static_pairs, pipelined_gate, heightfield,
+  ccd_wake_colliders, engine-ffi, engine-metal `vehicle_parity`: pass.
+
+### Cost (demo, `__profileNow()`: plan-phase GPU ms, median of 10 profiled steps)
+
+Headless Chrome, `?sleep=on`, persistent contacts, the default `?rest=archive`. "Base" is
+a28112a4's build, "off" this build with `?costfloor=off`, "now" this build; each cell the
+median of two interleaved rounds. The machine was not quiet: an orphaned headless Chrome
+from this session's own profiling kept running ring110k throughout (it could not be
+stopped from here), and another session's builds and tests ran in between, so whole
+rounds moved by 20-40% together (gables420's GPU span read 6.2 ms in one round and 7.5 ms
+in another, for the same build). Within a round the phases this work touches moved
+consistently; the others (narrowphase, primal) are noise between columns.
+
+| Phase | gables506k step 420 (~26k awake): base | off | now | step 1,200 (~9k awake): base | off | now |
+|---|---|---|---|---|---|---|
+| broadphaseGrid | 1.58 | 1.56 | 0.99 | 1.90 | 1.72 | 1.19 |
+| broadphase (archive passes) | 0.34 | 0.34 | 0.46 | 0.42 | 0.45 | 0.42 |
+| ccdToi | 0.34 | 0.34 | 0.37 | 0.41 | 0.44 | 0.33 |
+| topology | 0.62 | 0.64 | 0.52 | 0.69 | 0.65 | 0.51 |
+| sleepMain + sleep | 0.50 | 0.52 | 0.47 | 0.54 | 0.50 | 0.42 |
+| primal | 1.32 | 1.62 | 1.73 | 1.17 | 1.29 | 1.23 |
+| GPU span | 7.29 | 8.94 | 7.49 | 7.29 | 6.97 | 5.79 |
+
+| Phase | ring110k step 780 (~26k of 110k awake): base | off | now | legacyGrid100k step 560, F at 400 (~150 awake): base | off | now |
+|---|---|---|---|---|---|---|
+| broadphaseGrid | 1.44 | 1.45 | 1.49 | 0.47 | 0.44 | 0.78 |
+| broadphase | 0.50 | 0.49 | 0.59 | 0.29 | 0.15 | 0.05 |
+| ccdToi | 0.18 | 0.18 | 0.23 | 0.11 | 0.11 | 0.08 |
+| topology | 0.18 | 0.20 | 0.21 | 0.15 | 0.14 | 0.14 |
+| sleepMain + sleep | 0.43 | 0.40 | 0.41 | 0.19 | 0.18 | 0.21 |
+| primal | 3.40 | 3.61 | 3.81 | 3.12 | 2.48 | 2.98 |
+| GPU span | 8.75 | 8.84 | 10.00 | 4.98 | 4.30 | 5.64 |
+
+The earlier, quieter rounds (an earlier build: the walk in one workgroup, the per-collider
+`ccd_unhold`, the primal tail on, no awake-fraction switch) agree on gables: broadphaseGrid
+1.79 → 0.93 ms (step 420) and 1.51 → 0.93 ms (step 1,200), sleepMain 0.55 → 0.35 and
+0.40 → 0.26, topology 0.64 → 0.56 and 0.59 → 0.54, GPU span 7.58 → 6.77 and 5.33 → 4.42
+(off → now). The gables floor that this work set out to cut (broadphaseGrid 1.4-1.6,
+sleepMain 0.4-0.5, topology 0.6, ccdToi 0.3) is down by about 0.6-0.8 ms of GPU time a
+step: the uniform broadphase's part roughly halves, the sleep pass loses about a third
+(the extraction over the awake list), the topology pass about a sixth (prediction over the
+awake list). On ring110k (22% awake) the uniform rest pass is off by the awake-fraction
+switch, so it runs the full pass as before; the differences there are noise. On
+legacyGrid100k with ~150 awake the uniform rest pass did not measure faster in the
+browser (broadphaseGrid + broadphase 0.76 base, 0.59 off, 0.83 now, with the same
+spread between rounds); the per-step work it saves on 100k colliders (the clear, the
+inserts and the queries over every collider, about 0.2 ms) is of the size of the
+noise here, and natively (`floor_probe`, "100k Grid", 200 awake) the GPU totals of the
+two were within each other's run-to-run spread.
+
+`?gridlevels=on` (gables506k on the hierarchical grid, step 420): incremental rest inserts
+against the rebuild after every step with sleep events (`?costfloor=incremental`),
+broadphaseGrid 1.93 → 0.96 ms, GPU span 9.89 → 7.87 ms.
+
+### What is left in the floor
+
+On gables506k the uniform broadphase's fixed part is now the scan over every collider
+that lists the movers (`list_moving_colliders`, one collider word and one body word each)
+and `ccd_register`'s scan over every body; the rest is the awake colliders' own work.
+Other passes still run over every body slot, and are not proportional to the awake count
+without changing what they produce or the order they produce it in:
+
+- **`list_moving_colliders`**: without an index from bodies to their colliders it has to
+  read every collider's body. Threshold splits re-parent colliders on the GPU
+  (`fr_reparent`) with no host write, so such an index would have to be kept on the GPU.
+- **`build_awake_list`, the CSR (`csr_clear`, the prefix passes) and the colour tiles
+  (`count_color_tiles`, `prefix_color_tiles_parallel`, `scatter_color_tiles`)**: indexed by
+  body. The colour lists keep each colour's bodies in body-index order, which the solve's
+  order (and so its float sums) follows; built from the awake list (atomic order) they
+  would need a sort to come out the same.
+- **`pose_pack`**: must see every body whose pose or sleep state changed, including ones
+  changed outside the awake list (bodies `ccd_respond_apply` wakes at the end of the step,
+  host writes, a threshold split's re-framed bodies between steps).
+- **The primal's colour dispatches**: one per colour of last step's count per iteration;
+  their cost in Chrome is their work, not the empty headroom dispatches (see the tail
+  above). Moving colours to the sparse kernel changes the lanes per body.
+- **The contact hash clear**: the record hash is sized at least four slots a body, so its
+  clear scales with the bodies; a smaller table changes probe sequences and its overflow
+  behaviour, so it is not shown lossless.
+- **The sleep island gate**: eight rounds over the manifolds (contact-proportional).
+- **`build_aabbs` in moved-only mode** still finds a body's colliders by binary search.
+  Only engine-fracture's planner enables that mode (HOST_S(19); World and Metal leave it
+  0), and only for scenes whose colliders it found sorted at load (`bounds_sortable`);
+  a planner whose splits re-parent colliders after load would have to clear that flag.
+  The kernel is shared with Metal, so it was left.
+- **The uniform rest pass at high awake fractions**: below 10% awake it saves the clear,
+  insert and query over every collider; above, its per-collider scan plus the awake
+  colliders' R walks (a link and a stamp load an entry, where the full pass's other table
+  keeps its link in the AABB) cost more than the full pass, so the host switches.
