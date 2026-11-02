@@ -206,7 +206,16 @@ fn run_world_among(
     let nudge: f64 = std::env::var("THRESHOLD_NUDGE")
         .map(|v| v.parse().unwrap())
         .unwrap_or(0.0);
-    let origin = [origin[0] + nudge, origin[1], origin[2]];
+    // THRESHOLD_SHOT_DY=dy (probe): the shot's origin moved dy metres up.
+    let dy: f64 = std::env::var("THRESHOLD_SHOT_DY")
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(0.0);
+    // THRESHOLD_SHOT_SPEED=s (probe): the shot's velocity scaled by s.
+    let speed: f64 = std::env::var("THRESHOLD_SHOT_SPEED")
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(1.0);
+    let v = v.map(|x| x * speed);
+    let origin = [origin[0] + nudge, origin[1] + dy, origin[2]];
     let at = [0, 1, 2].map(|k| (origin[k] + offset[k] as f64) as f32);
     let ball = w
         .create_body(&BodyDef {
@@ -837,11 +846,19 @@ fn sleep_policy_ensemble() {
         ("sleep, archive", &[("THRESHOLD_SLEEP", "1")]),
         (
             "carry on: sleep, archive, wake on touch",
-            &[("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1"), ("THRESHOLD_CARRY", "on")],
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "on"),
+            ],
         ),
         (
             "carry off: sleep, archive, wake on touch",
-            &[("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1"), ("THRESHOLD_CARRY", "off")],
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "off"),
+            ],
         ),
         // Why carry-off breaks more: the archive's warm start, and wakes chaining through
         // resting pairs within a step (measurement variants, EngineFeatures).
@@ -917,5 +934,68 @@ fn sleep_policy_ensemble() {
             stats(&broken),
             stats(&bodies)
         );
+    }
+}
+
+/// Statistical power of the sleep-policy comparison (probe, ignored): one policy
+/// (`POWER_POLICY` = never | carry_on | carry_off), one asset (`POWER_ASSET` = house |
+/// arch), shots over `POWER_NUDGES` nudges (mm, comma list or `a..b`), `POWER_DY` vertical
+/// offsets (m, comma list) and `POWER_SPEEDS` speed scales (comma list). Prints one line
+/// per shot: `shot <policy> <asset> <nudge_mm> <dy> <speed> <broken> <bodies>`.
+#[test]
+#[ignore]
+fn sleep_policy_power() {
+    let asset_name = std::env::var("POWER_ASSET").unwrap_or_else(|_| "house".into());
+    let (asset, lab) = match asset_name.as_str() {
+        "arch" => arch(),
+        _ => house(),
+    };
+    let policy = std::env::var("POWER_POLICY").unwrap_or_else(|_| "never".into());
+    for k in [
+        "THRESHOLD_SLEEP",
+        "THRESHOLD_WAKE_ON_TOUCH",
+        "THRESHOLD_START_ASLEEP",
+        "THRESHOLD_CARRY",
+    ] {
+        std::env::remove_var(k);
+    }
+    match policy.as_str() {
+        "never" => {}
+        "carry_on" | "carry_off" => {
+            std::env::set_var("THRESHOLD_SLEEP", "1");
+            std::env::set_var("THRESHOLD_WAKE_ON_TOUCH", "1");
+            std::env::set_var(
+                "THRESHOLD_CARRY",
+                if policy == "carry_on" { "on" } else { "off" },
+            );
+        }
+        p => panic!("unknown POWER_POLICY {p}"),
+    }
+    let list = |key: &str, default: &str| -> Vec<f64> {
+        let v = std::env::var(key).unwrap_or_else(|_| default.into());
+        if let Some((a, b)) = v.split_once("..") {
+            let (a, b): (i64, i64) = (a.parse().unwrap(), b.parse().unwrap());
+            (a..=b).map(|x| x as f64).collect()
+        } else {
+            v.split(',').map(|x| x.parse().unwrap()).collect()
+        }
+    };
+    let nudges = list("POWER_NUDGES", "-10..10");
+    let dys = list("POWER_DY", "0");
+    let speeds = list("POWER_SPEEDS", "1");
+    std::env::set_var("ENSEMBLE_LENIENT", "1");
+    for &speed in &speeds {
+        for &dy in &dys {
+            for &n in &nudges {
+                std::env::set_var("THRESHOLD_NUDGE", format!("{}", n * 1e-3));
+                std::env::set_var("THRESHOLD_SHOT_DY", format!("{dy}"));
+                std::env::set_var("THRESHOLD_SHOT_SPEED", format!("{speed}"));
+                let o = run_world(&asset, &lab, 120);
+                println!(
+                    "shot {policy} {asset_name} {n} {dy} {speed} {} {}",
+                    o.broken, o.bodies
+                );
+            }
+        }
     }
 }
