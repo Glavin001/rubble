@@ -277,6 +277,22 @@ impl WgpuSim {
             return;
         }
         let mut cmds = std::mem::take(&mut self.pending_commands);
+        // Commands that only change velocities, forces, locks or sleep leave every pose and
+        // collider where it was (the bodies they wake are moving, so the awake-indexed
+        // broadphase bounds them); the others may move a body that does not move after
+        // (a static, a sleeper, a stopped kinematic) or a collider.
+        use engine_schema::commands::CommandType as T;
+        let keeps_poses = [
+            T::WakeBody,
+            T::SetVelocity,
+            T::AttachForce,
+            T::ApplyImpulse,
+            T::AddForceAt,
+            T::AngularImpulse,
+            T::Damp,
+            T::SetLocks,
+        ];
+        self.commands_move_poses |= cmds.iter().any(|c| !keeps_poses.iter().any(|&k| k as u32 == c.op));
         cmds.sort_by_key(|c| c.a);
         let mut start = 0;
         while start < cmds.len() {

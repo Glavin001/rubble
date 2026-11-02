@@ -204,6 +204,18 @@ pub struct WgpuSim {
     pub(crate) carry_rest: bool,
     /// Awake-indexed broadphase on hierarchical grids (`EngineFeatures::awake_broadphase`).
     pub(crate) awake_broadphase: bool,
+    /// ...and on the uniform split grid (`EngineFeatures::awake_uniform`).
+    pub(crate) awake_uniform: bool,
+    /// Incremental resting-table inserts (`EngineFeatures::rest_incremental`).
+    pub(crate) rest_incremental: bool,
+    /// `ccd_wake` / `ccd_unhold` a thread per collider (`EngineFeatures::ccd_by_collider`),
+    /// unless a dynamic body has no collider (`colliderless`, from the mirror; the
+    /// per-collider passes never see such a body, which `ccd_wake` may wake).
+    ccd_by_collider: bool,
+    /// Prediction and velocity extraction over the awake list
+    /// (`EngineFeatures::awake_body_passes`).
+    awake_body_passes: bool,
+    colliderless: std::cell::Cell<Option<bool>>,
     /// Measurement variants of the sleep archive (`EngineFeatures::archive_cold`,
     /// `archive_spread_rounds`).
     archive_cold: bool,
@@ -257,6 +269,10 @@ pub struct WgpuSim {
     collider_count: u32,
     joint_count: u32,
     command_count: u32,
+    /// This step's commands may move a pose or a collider that does not move after
+    /// (any but the velocity, force, lock and wake commands): the awake-indexed
+    /// broadphase bounds every collider and rebuilds its resting table.
+    pub(crate) commands_move_poses: bool,
     /// Run `pose_pack` each step (render poses and the moved-body list).
     pose_output: bool,
     /// Deformable-terrain MPM pool (`terrain_enable`).
@@ -885,6 +901,11 @@ impl WgpuSim {
             local_repair: features.local_repair,
             carry_rest: features.carry_rest,
             awake_broadphase: features.awake_broadphase,
+            awake_uniform: features.awake_uniform,
+            rest_incremental: features.rest_incremental,
+            ccd_by_collider: features.ccd_by_collider,
+            awake_body_passes: features.awake_body_passes,
+            colliderless: std::cell::Cell::new(None),
             archive_cold: features.archive_cold,
             archive_spread_rounds: features.archive_spread_rounds,
             archive_touch_query: features.archive_touch_query,
@@ -914,6 +935,7 @@ impl WgpuSim {
             collider_count: 0,
             joint_count: 0,
             command_count: 0,
+            commands_move_poses: false,
             pose_output,
             terrain: None,
             terrain_impulses_pending: false,
@@ -1370,6 +1392,7 @@ impl WgpuSim {
         self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
         self.manifolds_valid = false;
         self.wake_pending = true;
+        self.colliderless.set(None);
         self.note_motion_flags(bodies);
     }
 
@@ -1384,6 +1407,7 @@ impl WgpuSim {
         b.flags = 0;
         self.manifolds_valid = false;
         self.wake_pending = true;
+        self.colliderless.set(None);
     }
 
     /// Colliders a GPU kernel already rewrote in place (as `set_colliders`): the host's
@@ -1402,6 +1426,7 @@ impl WgpuSim {
             .iter()
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
+        self.colliderless.set(None);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
         self.has_height_field |= cols
             .iter()
@@ -1576,6 +1601,7 @@ impl WgpuSim {
             .iter()
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
+        self.colliderless.set(None);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
         self.has_height_field |= cols
             .iter()
@@ -2059,6 +2085,37 @@ impl WgpuSim {
             .collect()
     }
 
+    /// Diagnostic: this step's plan up to (not including) its phase marker `phase`, on
+    /// the GPU state as it is (no step is counted; commands are not flushed). For
+    /// comparing passes on the same state (restore a `save_state` between runs).
+    pub fn debug_step_until(&mut self, phase: &str) {
+        self.refresh_cell();
+        self.write_host_uniforms_ex(false);
+        let cmds = rigid_plan::encode_step(&self.step_modes(), &self.step_inputs(), false, false);
+        let cut = cmds
+            .iter()
+            .position(|c| matches!(c, rigid_plan::Cmd::Phase { name } if *name == phase))
+            .expect("phase marker");
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("step-until"),
+            });
+        self.encode_dispatches(&mut enc, &cmds[..cut]);
+        self.queue.submit([enc.finish()]);
+    }
+
+    /// Prediction and velocity extraction over the awake list or every body slot
+    /// (`EngineFeatures::awake_body_passes`).
+    pub fn set_awake_body_passes(&mut self, on: bool) {
+        self.awake_body_passes = on;
+    }
+
+    /// `ccd_wake` / `ccd_unhold` by collider or by body (`EngineFeatures::ccd_by_collider`).
+    pub fn set_ccd_by_collider(&mut self, on: bool) {
+        self.ccd_by_collider = on;
+    }
+
     /// Diagnostic read of `count` words of a binding from word `first` (waits
     /// for the GPU). For tests and probes; never on a host's hot path.
     pub fn read_words(&self, binding: usize, first: u64, count: usize) -> Vec<u32> {
@@ -2162,6 +2219,27 @@ impl WgpuSim {
             eprintln!("rest table stale: {}", std::panic::Location::caller());
         }
         self.rest_stale = true;
+        self.colliderless.set(None);
+    }
+
+    /// Whether some dynamic body of the host's mirror has no collider (cached until a
+    /// write or mirror update).
+    fn has_colliderless_dynamic(&self) -> bool {
+        if let Some(v) = self.colliderless.get() {
+            return v;
+        }
+        let mut has = vec![false; self.host_bodies.len()];
+        for c in &self.host_cols[..self.collider_count as usize] {
+            if let Some(h) = has.get_mut(c.body as usize) {
+                *h = true;
+            }
+        }
+        let v = self.host_bodies[..self.body_count as usize]
+            .iter()
+            .zip(&has)
+            .any(|(b, &h)| !h && b.is_dynamic());
+        self.colliderless.set(Some(v));
+        v
     }
 
     /// The awake-indexed broadphase on or off (`EngineFeatures::awake_broadphase`):
@@ -2170,6 +2248,23 @@ impl WgpuSim {
     /// rebuilds the table.
     pub fn set_awake_broadphase(&mut self, on: bool) {
         self.awake_broadphase = on;
+    }
+
+    /// Incremental resting-table inserts on or off (`EngineFeatures::rest_incremental`).
+    pub fn set_rest_incremental(&mut self, on: bool) {
+        self.rest_incremental = on;
+    }
+
+    /// Whether the next step runs the awake-indexed broadphase (its gates on the
+    /// grid, kinematics, characters and soft bodies all met). For tests.
+    pub fn awake_broadphase_planned(&self) -> bool {
+        rigid_plan::awake_broadphase(&self.step_modes(), &self.step_inputs())
+    }
+
+    /// The awake-indexed broadphase on the uniform split grid too
+    /// (`EngineFeatures::awake_uniform`), or on hierarchical grids only.
+    pub fn set_awake_uniform(&mut self, on: bool) {
+        self.awake_uniform = on;
     }
 
     /// Force the hierarchical grid on or off (`None`: convex scenes use it), as
@@ -2886,6 +2981,7 @@ impl WgpuSim {
             self.contacts_parity ^= 1;
             self.steps_done = self.steps_done.saturating_add(1);
             self.command_count = 0;
+            self.commands_move_poses = false;
             self.explosion_count = 0;
             self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
             return Ok(self.last_counters);
@@ -2902,6 +2998,7 @@ impl WgpuSim {
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
         self.command_count = 0;
+        self.commands_move_poses = false;
         self.explosion_count = 0;
         self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
         self.last_counters = counters;
@@ -2991,10 +3088,15 @@ impl WgpuSim {
             pose_output: self.pose_output,
             contact_events: self.contact_events,
             motion_locks: self.motion_locks,
-            awake_broadphase: self.awake_broadphase && self.grid_levels > 0,
-            rest_rebuild: self.rest_stale,
-            // Host commands may move statics or kinematics (apply_commands, this step).
-            full_bounds: self.rest_stale || self.command_count > 0,
+            awake_broadphase: self.awake_broadphase && (self.grid_levels > 0 || self.awake_uniform),
+            rest_uniform: self.grid_levels == 0,
+            rest_incremental: self.rest_incremental,
+            ccd_by_collider: self.ccd_by_collider && !self.has_colliderless_dynamic(),
+            awake_body_passes: self.awake_body_passes,
+            // Host commands that may move statics, sleepers, kinematics or colliders
+            // (apply_commands, this step): every bound, and the table rebuilt.
+            rest_rebuild: self.rest_stale || self.commands_move_poses,
+            full_bounds: self.rest_stale || self.commands_move_poses,
             fast_indirect: !self.fast_direct,
             archive_cold: self.archive_cold,
             archive_spread_rounds: self.archive_spread_rounds,
@@ -3251,6 +3353,10 @@ impl WgpuSim {
                 r
             }
         };
+        // The resting table's cells and levels are this grid's: another one rebuilds it.
+        if cell != self.params.grid_cell_size || levels != self.grid_levels {
+            self.mark_rest_stale();
+        }
         self.params.grid_cell_size = cell;
         self.grid_levels = levels;
     }

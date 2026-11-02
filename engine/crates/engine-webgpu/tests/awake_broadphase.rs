@@ -184,3 +184,163 @@ fn awake_broadphase_finds_the_full_broadphase_pairs() {
     assert!(compared > 40, "compared {compared} steps with pairs");
     assert!(most_asleep >= 100, "at most {most_asleep} bodies asleep");
 }
+
+/// A body with one primitive collider (box half extents, sphere radius or plane in
+/// `params`).
+fn primitive(sim: &mut WgpuSim, pos: Vec3, shape: ShapeType, params: [f32; 4], inv_mass: f32, flags: u32, v: Vec3) -> u32 {
+    let i = if inv_mass > 0.0 {
+        match shape {
+            ShapeType::Sphere => 2.5 * inv_mass / (params[0] * params[0]),
+            _ => 3.0 * inv_mass / (params[0] * params[0] + params[1] * params[1]),
+        }
+    } else {
+        0.0
+    };
+    let p = pos.to_array();
+    let b = sim.add_body(BodyState {
+        position: p,
+        inv_mass,
+        orientation: [0.0, 0.0, 0.0, 1.0],
+        inv_inertia: [i; 3],
+        flags,
+        linear_vel: v.to_array(),
+        sleep_timer: 0.0,
+        angular_vel: [0.0; 3],
+        generation: 0,
+        initial_pos: p,
+        initial_pad: 0.0,
+        initial_rot: [0.0, 0.0, 0.0, 1.0],
+    });
+    sim.add_collider(Collider {
+        body: b,
+        shape: shape as u32,
+        material: 0,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params,
+    });
+    b
+}
+
+fn cube(sim: &mut WgpuSim, pos: Vec3, h: f32, inv_mass: f32, flags: u32, v: Vec3) -> u32 {
+    primitive(sim, pos, ShapeType::Box, [h, h, h, h * 3f32.sqrt()], inv_mass, flags, v)
+}
+
+/// The uniform split grid (box and sphere colliders, no hulls): the awake-indexed pass
+/// keeps the other table as the resting table across steps. A ground plane, small static
+/// boxes (in the grid) and wide ones (the oversized-static list), piles of small cubes
+/// that settle and sleep, two large spheres (wider than a cell: the large-dynamic list;
+/// one comes to rest and sleeps beside a pile, one rolls into another), cubes thrown into
+/// the piles, a fast CCD bullet, and a moving kinematic late (which turns the awake pass
+/// off while it exists): the same pairs and bounds as the full pass every few steps.
+#[test]
+fn awake_broadphase_on_the_uniform_grid_finds_the_full_broadphase_pairs() {
+    let mut sim = WgpuSim::new(WorldCapacity {
+        max_bodies: 4096,
+        max_colliders: 4096,
+        max_contacts: 131_072,
+        max_joints: 64,
+        max_candidates: 262_144,
+        max_colors: 32,
+        max_commands: 256,
+        max_hull_vertices: 1024,
+    })
+    .expect("wgpu");
+    let mut p = AvbdParams::default();
+    p.dt = 1.0 / 60.0;
+    sim.set_params(p);
+    let zero = Vec3::ZERO;
+    primitive(&mut sim, zero, ShapeType::Plane, [0.0, 1.0, 0.0, 0.0], 0.0, 0, zero);
+    for k in 0..8 {
+        // Small statics (in the grid) and wide ones (listed).
+        let h = [0.15, 0.3, 1.2, 2.5][k % 4];
+        cube(&mut sim, Vec3::new(-14.0 + 4.0 * k as f32, h, 10.0), h, 0.0, 0, zero);
+    }
+    let piles: Vec<(f32, f32)> = (0..8).map(|k| (-14.0 + 4.0 * k as f32, -6.0 + 6.0 * (k % 2) as f32)).collect();
+    for &(x, z) in &piles {
+        for i in 0..3 {
+            for j in 0..3 {
+                for k in 0..8 {
+                    let at = Vec3::new(x + 0.42 * i as f32, 0.2 + 0.4 * k as f32, z + 0.42 * j as f32);
+                    cube(&mut sim, at, 0.2, 1.0, DYNAMIC, zero);
+                }
+            }
+        }
+    }
+    // A large sphere that comes to rest (and sleeps) beside the second pile.
+    primitive(&mut sim, Vec3::new(-7.0, 2.5, 3.0), ShapeType::Sphere, [2.5, 0.0, 0.0, 2.5], 0.02, DYNAMIC, zero);
+    let mut compared = 0;
+    let mut most_asleep = 0;
+    let mut awake_steps = 0;
+    let mut thrown = 0;
+    for step in 0..520u32 {
+        if step == 200 {
+            // A large sphere rolls into the first pile.
+            primitive(&mut sim, Vec3::new(-19.0, 2.6, -5.6), ShapeType::Sphere, [2.5, 0.0, 0.0, 2.5], 0.02, DYNAMIC, Vec3::new(4.0, 0.0, 0.0));
+        }
+        if step == 300 {
+            // A fast CCD bullet through the fifth pile (the fast list walks both tables).
+            cube(&mut sim, Vec3::new(-6.5, 0.6, -5.6), 0.1, 2.0, DYNAMIC | 256, Vec3::new(45.0, 0.0, 0.0));
+        }
+        if step >= 240 && step % 40 == 0 && thrown < 5 {
+            let (x, z) = piles[1 + thrown % 7];
+            cube(&mut sim, Vec3::new(x + 0.4, 4.5, z + 0.4), 0.15, 1.0, DYNAMIC, Vec3::new(0.0, -6.0, 0.0));
+            thrown += 1;
+        }
+        if step == 470 {
+            // A moving kinematic: the uniform awake pass gives way to the full one.
+            cube(&mut sim, Vec3::new(10.0, 0.5, 2.0), 0.4, 0.0, KINEMATIC, Vec3::new(0.0, 0.0, -1.0));
+        }
+        if step % 6 == 3 {
+            let bounds = |sim: &WgpuSim| -> Vec<u32> {
+                let n = sim.collider_count() as usize;
+                let at = u64::from(sim.capacity().max_bodies) * 8;
+                let mut w = sim.read_words(9, at, n * 8);
+                for box_ in w.chunks_mut(8) {
+                    box_[7] = 0;
+                }
+                w
+            };
+            sim.set_awake_broadphase(true);
+            awake_steps += usize::from(sim.awake_broadphase_planned());
+            let awake = sorted(sim.debug_broadphase_pairs());
+            let awake_bounds = bounds(&sim);
+            sim.set_awake_broadphase(false);
+            sim.set_fast_indirect(false);
+            let full = sorted(sim.debug_broadphase_pairs());
+            let full_bounds = bounds(&sim);
+            sim.set_fast_indirect(true);
+            sim.set_awake_broadphase(true);
+            assert!(awake_bounds == full_bounds, "step {step}: collider bounds differ");
+            if awake != full {
+                let bodies = sim.download_bodies();
+                let show = |v: &Vec<(u32, u32)>, w: &Vec<(u32, u32)>| -> Vec<String> {
+                    v.iter()
+                        .filter(|x| !w.contains(x))
+                        .map(|&(a, b)| {
+                            let (ca, cb) = (sim.collider(a), sim.collider(b));
+                            let f = |c: &Collider| bodies[c.body as usize].flags;
+                            format!("({a} b{} f{}, {b} b{} f{})", ca.body, f(&ca), cb.body, f(&cb))
+                        })
+                        .collect()
+                };
+                panic!(
+                    "step {step}: awake-only extra {:?}; full-only extra {:?}",
+                    show(&awake, &full),
+                    show(&full, &awake)
+                );
+            }
+            compared += usize::from(!full.is_empty());
+        }
+        sim.step().expect("step");
+        let asleep = sim.download_bodies().iter().filter(|b| b.is_dynamic() && b.is_sleeping()).count();
+        most_asleep = most_asleep.max(asleep);
+    }
+    eprintln!("uniform: compared {compared} steps with pairs, {awake_steps} on the awake pass, at most {most_asleep} asleep");
+    assert!(sim.collider_count() > 512, "past the pairwise path");
+    assert!(compared > 50, "compared {compared} steps with pairs");
+    assert!(awake_steps > 60, "the uniform awake pass ran on {awake_steps} compared steps");
+    assert!(most_asleep >= 300, "at most {most_asleep} bodies asleep");
+}

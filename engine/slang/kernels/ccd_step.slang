@@ -80,6 +80,30 @@ void fastAccept(uint i, Collider a, bool aDyn, Aabb aa, uint j)
 
 static const uint FAST_MAX_CELLS = 262144u;
 
+// One uniform cell on the rest tables (world_step.slang restUniform): W, then R
+// without its tombstones, each entry whose true cell this is.
+void restFastWalkCell(uint i, Collider a, bool aDyn, Aabb aa, int3 cell, float cs)
+{
+    uint base = HOST_S(1);
+    for (uint t = 0u; t < 2u; t++)
+    {
+        bool rest = t == 1u;
+        uint link = ALOAD(gConstraintIds[(rest ? restHeads() : awakeHeads()) + gridHash(cell.x, cell.y, cell.z)]);
+        uint guard = 0u;
+        while (link != 0xFFFFFFFFu && guard < 4096u)
+        {
+            uint cur = link & GRID_COLLIDER_MASK;
+            Aabb ab = gAabbs[base + cur];
+            link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : asuint(ab._pad1);
+            guard++;
+            if (rest && restTombstone(cur)) continue;
+            if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell))
+                fastAccept(i, a, aDyn, aa, cur);
+        }
+        if (link != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+    }
+}
+
 // Every cell of one grid level whose entries can overlap the swept box: the
 // box padded by the entries' largest reach from their centre (E), then only
 // cells within reach of the sweep segment (a tube, so a diagonal sweep does
@@ -107,6 +131,13 @@ void fastWalkLevel(uint i, Collider a, bool aDyn, Aabb aa, float3 s0, float3 s1,
             int(k / uint(span.x * span.y)));
         float3 cc = (float3(cell) + 0.5) * cs;
         if (segmentPointDistance(s0, s1, cc) > tube) continue;
+#if defined(ENGINE_WGSL)
+        if (!hier && restUniform())
+        {
+            restFastWalkCell(i, a, aDyn, aa, cell, cs);
+            continue;
+        }
+#endif
         if (!hier)
         {
             uint tables = gridSplit() ? 2u : 1u;
@@ -1123,6 +1154,113 @@ void ccd_unhold(uint3 tid : SV_DispatchThreadID)
             if (ccdReleasesHeld(other, bo) || (!bodyIsSleeping(bo) && !wakePending(bo))) ASTORE(gScratchAtomics[r + 15u], 0u);
         }
     }
+}
+
+// ---- ccd_wake / ccd_unhold by collider (World's plan; WGSL hosts) ----
+// The same tests as ccd_wake and ccd_unhold without a collider search per body: a
+// body lies within reach × r + own of a sweep (own its largest collider extent) iff
+// one of its colliders c lies within reach × r + extent(c) of it (adding to the
+// largest extent gives the largest bound), so a thread per collider tests its own
+// extent, and the sweeping body's r (the largest extent of its colliders) is taken
+// once per CCD slot by a thread per collider (ccd_slot_reach). Both scan the
+// colliders, so colliders need not be sorted by body (threshold splits re-parent
+// them), and both run only while some CCD body moves more than four contact offsets
+// a step (ccdUnholds; work slot 87 is empty otherwise, when neither pass could wake or
+// release anything). A body without colliders is never woken here; hosts with such
+// bodies keep ccd_wake.
+// The slot's r: carry word 28 (ccd_respond's partner dw, written only after the
+// solve; read here from ccd_wake's place to ccd_unhold's).
+static const uint CCD_REACH_WORD = 28u;
+
+// Work slot 87 (a thread per collider) when a CCD body sweeps fast; slot r words zeroed.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_reach_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    uint n = ccdBodyCount();
+    bool any = false;
+    for (uint k = 0u; k < n; k++)
+    {
+        ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * k + CCD_REACH_WORD], 0u);
+        if (ccdUnholds(gBodies[ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k])])) any = true;
+    }
+    writeDispatchArgs(87u, sceneHasCcd() && any ? gCounters[0].colliderCount : 0u);
+}
+
+// Largest collider extent of each fast CCD body (non-negative floats order as their bits).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_slot_reach(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = dispatchIndex(tid);
+    if (c >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[c];
+    BodyState b = gBodies[col.body];
+    uint slot = ccdSlotOf(col.body, b);
+    if (slot == CCD_NO_PAIR || !ccdUnholds(b)) return;
+    AMAX2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + CCD_REACH_WORD], asuint(colliderExtent(col)));
+}
+
+// ccdNearFastSweepStart's test for one collider of `b` (extent `own`).
+bool ccdColliderNearFastSweep(BodyState b, float reach, float own)
+{
+    uint n = ccdBodyCount();
+    for (uint k = 0u; k < n; k++)
+    {
+        BodyState bf = gBodies[ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k])];
+        if (!ccdUnholds(bf)) continue;
+        float r = asfloat(ALOAD(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * k + CCD_REACH_WORD]));
+        float3 a = bf.position;
+        float3 d = bf.linearVel * PARAMS.dt;
+        float t = clamp(dot(b.position - a, d) / max(dot(d, d), 1e-20), 0.0, 1.0);
+        if (length(a + d * t - b.position) <= reach * r + own) return true;
+    }
+    return false;
+}
+
+// ccd_wake, a thread per collider (slot 87).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_wake_colliders(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = dispatchIndex(tid);
+    if (c >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[c];
+    uint i = col.body;
+    BodyState b = gBodies[i];
+    if (!bodyIsDynamic(b) || !bodyIsSleeping(b)) return;
+    if (!ccdColliderNearFastSweep(b, 1.25, colliderExtent(col))) return;
+    gBodies[i].flags = (b.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
+    gBodies[i].sleepTimer = 0.0;
+}
+
+// ccd_unhold's release of held bodies, a thread per collider (slot 87).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_unhold_colliders(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = dispatchIndex(tid);
+    if (c >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[c];
+    uint i = col.body;
+    BodyState b = gBodies[i];
+    if (!wakePending(b) || bodyIsSleeping(b) || !bodyIsDynamic(b)) return;
+    if (ccdColliderNearFastSweep(b, 3.0, colliderExtent(col))) gBodies[i].flags = b.flags & ~BODY_WAKE_PENDING;
+}
+
+// ccd_unhold's slot part, after ccd_unhold_colliders: a partner released there is
+// awake with its wake no longer deferred, which the second test covers.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_unhold_slots(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sceneHasCcd() || i >= ccdBodyCount()) return;
+    uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * i;
+    if ((ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * i + 3u]) & CCD_RESPOND) == 0u) return;
+    BodyState bo = gBodies[ALOAD(gScratchAtomics[r + 7u])];
+    if (!bodyIsSleeping(bo) && !wakePending(bo)) ASTORE(gScratchAtomics[r + 15u], 0u);
 }
 
 // Trust region of the bodies a CCD body can strike (after predict_bodies,

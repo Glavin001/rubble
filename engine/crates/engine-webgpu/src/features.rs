@@ -137,6 +137,22 @@ pub struct EngineFeatures {
     /// static and sleeping colliders, and only moving colliders bounded, inserted and
     /// queried each step (`ENGINE_BROADPHASE=full` turns it off; same pairs).
     pub awake_broadphase: bool,
+    /// With `awake_broadphase`: the uniform split grid's other table kept across steps as
+    /// the resting table too, and only moving colliders inserted and queried
+    /// (`ENGINE_BROADPHASE=hier` keeps the full pass on uniform grids; same pairs).
+    pub awake_uniform: bool,
+    /// With `awake_broadphase`: colliders that come to rest join the resting table at the
+    /// end of their step instead of a rebuild of the whole table after every step with
+    /// sleep events (`ENGINE_REST_TABLE=rebuild` turns it off; same pairs).
+    pub rest_incremental: bool,
+    /// `ccd_wake` and `ccd_unhold` as passes a thread per collider, dispatched only while
+    /// a CCD body sweeps fast (`ENGINE_CCD_WAKE=body` keeps the per-body passes, whose
+    /// collider search assumes colliders sorted by body; same results otherwise).
+    pub ccd_by_collider: bool,
+    /// `predict_bodies` and `extract_velocity_sleep` over this step's awake list where
+    /// nothing else changes a body between the list and them (`ENGINE_BODY_PASSES=all`
+    /// runs them over every body slot; same results).
+    pub awake_body_passes: bool,
     /// Woken pairs start cold (λ = 0, stiffness at its floor), as the resting-pair carry
     /// restarts them (its carried rows are re-detected at rest each step), not from the
     /// sleep archive's rows (default; `ENGINE_ARCHIVE=warm` warm-starts them from the
@@ -185,6 +201,10 @@ impl Default for EngineFeatures {
             local_repair: true,
             carry_rest: true,
             awake_broadphase: true,
+            awake_uniform: true,
+            rest_incremental: true,
+            ccd_by_collider: true,
+            awake_body_passes: true,
             archive_cold: true,
             archive_spread_rounds: 0,
             archive_touch_query: true,
@@ -228,6 +248,10 @@ impl EngineFeatures {
             local_repair: env_default_on("ENGINE_REPAIR", &["rounds"]),
             carry_rest: env_default_on("ENGINE_REST", &["drop"]),
             awake_broadphase: env_default_on("ENGINE_BROADPHASE", &["full"]),
+            awake_uniform: env_default_on("ENGINE_BROADPHASE", &["full", "hier"]),
+            rest_incremental: env_default_on("ENGINE_REST_TABLE", &["rebuild"]),
+            ccd_by_collider: env_default_on("ENGINE_CCD_WAKE", &["body"]),
+            awake_body_passes: env_default_on("ENGINE_BODY_PASSES", &["all"]),
             archive_cold: env_str("ENGINE_ARCHIVE").as_deref() != Some("warm"),
             archive_spread_rounds: env_str("ENGINE_ARCHIVE_SPREAD")
                 .and_then(|v| v.parse::<u32>().ok())
