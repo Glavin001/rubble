@@ -6988,6 +6988,93 @@ void solve_primal_sparse_tail(uint3 lid : SV_GroupThreadID)
     }
 }
 
+// Every solver iteration of the step in one workgroup (World's plan, while few bodies are
+// awake): pass value LOOP_PASS, bits 0..7 the first colour of the sparse tail q, bits
+// 8..15 the iterations. Each iteration solves the colours in order, colours below q as
+// solve_primal_color solves them (the same lanes per body, accumulation and halving
+// reduction) and the rest as solve_primal_sparse does (8 lanes), then every contact's
+// and joint's dual as solve_dual (solveDualAt), the last iteration flagged as its
+// dispatch flags it. A body's and a contact's update depend only on their lanes and the
+// state the previous colour or phase published (a storage barrier between them), so the
+// bodies and multipliers come out as the dispatch per colour and per dual gives them.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void solve_primal_sparse_loop(uint3 lid : SV_GroupThreadID)
+{
+    uint local = lid.x;
+    uint maxB = HOST_S(1);
+    uint sparseFrom = PASS_U & 255u;
+    uint iterations = (PASS_U >> 8) & 255u;
+    gStabilize = false;
+    for (uint iter = 0u; iter < iterations; iter++)
+    {
+        if (local == 0u) gsUniformLanes = min(ALOAD(gCounters[0].colorCount), min(HOST_S(4), COLOR_DEGREE_BASE));
+        GROUP_SYNC();
+        uint colorLimit = gsUniformLanes;
+        GROUP_SYNC();
+        for (uint color = 0u; color < colorLimit; color++)
+        {
+            if (local == 0u) gsUniformLanes = SOLVE_COUNT(color);
+            GROUP_SYNC();
+            uint count = gsUniformLanes;
+            GROUP_SYNC();
+            uint lanes = 8u;
+            if (color < sparseFrom)
+            {
+                if (local == 0u)
+                    gsUniformLanes = primalLanesForDegree(
+                        count, HOST_S(29) != 0u ? SOLVE_COUNT(COLOR_DEGREE_BASE + color) : 0u);
+                GROUP_SYNC();
+                lanes = gsUniformLanes;
+                GROUP_SYNC();
+            }
+            uint perBatch = 64u / lanes;
+            uint lane = local % lanes;
+            uint slot = local / lanes;
+            uint spanBodies = perBatch << 15;
+            for (uint span = 0u; span < count; span += spanBodies)
+            for (uint base = span; base < min(count, span + spanBodies); base += perBatch)
+            {
+                uint bodySlot = base + slot;
+                bool live = bodySlot < count;
+                uint bodyIdx = 0u;
+                Mat6 A = mat6Zero();
+                Vec6 rhs = vec6Zero();
+                if (live)
+                {
+                    bodyIdx = gColorLists[color * maxB + bodySlot];
+                    primalAccumulate(bodyIdx, lane, lanes, A, rhs);
+                }
+                if (lanes == 1u)
+                {
+                    if (live) primalApply(bodyIdx, A, rhs);
+                }
+                else
+                {
+                    if (lanes >= 64u) primalReduceStep(32u, live, lane, slot, A, rhs);
+                    if (lanes >= 32u) primalReduceStep(16u, live, lane, slot, A, rhs);
+                    if (lanes >= 16u) primalReduceStep(8u, live, lane, slot, A, rhs);
+                    if (lanes >= 8u) primalReduceStep(4u, live, lane, slot, A, rhs);
+                    if (lanes >= 4u) primalReduceStep(2u, live, lane, slot, A, rhs);
+                    primalReduceStep(1u, live, lane, slot, A, rhs);
+                    if (live && lane == 0u) primalApply(bodyIdx, A, rhs);
+                }
+                GROUP_SYNC();
+            }
+            if (count > 0u) DeviceMemoryBarrierWithGroupSync();
+        }
+        // The dual over max(contacts, joints), as solve_dual's dispatch (slot 65) covers.
+        if (local == 0u) gsUniformLanes = max(min(ALOAD(gCounters[0].contactCount), HOST_S(3)), gCounters[0].jointCount);
+        GROUP_SYNC();
+        // Every thread of that dispatch (rounded up to its workgroups) runs solveDualAt.
+        uint duals = (gsUniformLanes + 63u) / 64u * 64u;
+        GROUP_SYNC();
+        bool lastIter = iter + 1u == iterations;
+        for (uint k = local; k < duals; k += 64u) solveDualAt(k, lastIter);
+        DeviceMemoryBarrierWithGroupSync();
+    }
+}
+
 // Small-scene GS: one body per dispatch (gPassUniform = body index). Host walks
 // bodies high→low like three-avbd CPU so impacts propagate through stacks.
 [shader("compute")]
@@ -7003,8 +7090,13 @@ void solve_primal_one(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void solve_dual(uint3 tid : SV_DispatchThreadID)
 {
+    solveDualAt(dispatchIndex(tid), PASS_U != 0u);
+}
+
+// Contact i's and joint i's dual update; `lastIter`: the step's final iteration.
+void solveDualAt(uint i, bool lastIter)
+{
     // Per-contact dual (Metal occupancy). CSR/primal still use manifolds (Stage 8b).
-    uint i = dispatchIndex(tid);
     uint n = ALOAD(gCounters[0].contactCount);
     AvbdParams p = PARAMS;
     if (i < n)
@@ -7112,7 +7204,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
 #if defined(ENGINE_COMPACT_SOLVE)
             // The final iteration publishes the canonical warm-start/debug state.
             // Earlier iterations touch only the compact hot records.
-            if (PASS_U != 0u)
+            if (lastIter)
 #endif
             {
             gContacts[curOff + i].penetration = c.penetration;
@@ -7140,7 +7232,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         // constraint force: breaking is decided there (bonds never while a host
         // preloads a structure), and a joint whose multipliers still move is
         // marked unsettled so its bodies cannot fall asleep on it.
-        bool last = PASS_U != 0u;
+        bool last = lastIter;
         float4 lamLo0 = gJoints[i].lambdaLo;
         float4 lamHi0 = gJoints[i].lambdaHi;
         bool broke = false;

@@ -224,6 +224,9 @@ pub struct WgpuSim {
     /// The primal's headroom colours in the sparse tail's workgroup
     /// (`EngineFeatures::primal_tail`).
     primal_tail: bool,
+    /// The solver iterations in one workgroup while few are awake
+    /// (`EngineFeatures::solve_loop`).
+    solve_loop: bool,
     colliderless: std::cell::Cell<Option<bool>>,
     /// Measurement variants of the sleep archive (`EngineFeatures::archive_cold`,
     /// `archive_spread_rounds`).
@@ -325,6 +328,10 @@ pub struct WgpuSim {
     grid_levels: u32,
     /// (collider count, base cell, levels): recomputed only when colliders change.
     grid_cache: Option<(u32, f32, u32)>,
+    /// The uniform grid's cell (`grid_cell_with` over every collider of the mirror), kept
+    /// until a write or a mirror update could change it: computing it is a pass over every
+    /// collider on the CPU each step.
+    uniform_cell: Option<(f32, u32)>,
     /// Colliders were added after step 0; see `build_all_bounds`.
     bounds_dirty: bool,
     /// Diagnostic GPU timing marks at the plan's phases (`set_marks`, `RUBBLE_GPU_TIMING`).
@@ -456,6 +463,7 @@ fn persistent_entry(name: &str) -> &str {
         "solve_primal_color_compact" => "solve_primal_color_persistent",
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
         "solve_primal_sparse_tail_compact" => "solve_primal_sparse_tail_persistent",
+        "solve_primal_sparse_loop_compact" => "solve_primal_sparse_loop_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
         "solve_dual_compact" => "solve_dual_persistent",
         "convex_classify" => "convex_classify_persistent",
@@ -924,6 +932,7 @@ impl WgpuSim {
             ccd_by_collider: features.ccd_by_collider,
             awake_body_passes: features.awake_body_passes,
             primal_tail: features.primal_tail,
+            solve_loop: features.solve_loop,
             colliderless: std::cell::Cell::new(None),
             archive_cold: features.archive_cold,
             archive_spread_rounds: features.archive_spread_rounds,
@@ -981,6 +990,7 @@ impl WgpuSim {
             has_height_field: false,
             grid_levels: 0,
             grid_cache: None,
+            uniform_cell: None,
             bounds_dirty: false,
             marks: None,
             sleep_archive_blocks: 0,
@@ -1363,6 +1373,8 @@ impl WgpuSim {
             self.host_bodies.extend_from_slice(bodies);
             self.body_count += count;
             self.manifolds_valid = false;
+            self.colliderless.set(None);
+            self.uniform_cell = None;
             self.note_motion_flags(bodies);
         }
         let col_start = self.collider_count;
@@ -1384,6 +1396,8 @@ impl WgpuSim {
             self.manifolds_valid = false;
             self.host_cols.extend_from_slice(colliders);
             self.collider_count += count;
+            // The resting table's per-collider words are laid out by the collider count.
+            self.mark_rest_stale();
             for col in colliders {
                 if let Some(r) = engine_schema::collider_reach(col) {
                     let b = col.body as usize;
@@ -1412,6 +1426,7 @@ impl WgpuSim {
         self.manifolds_valid = false;
         self.wake_pending = true;
         self.colliderless.set(None);
+        self.uniform_cell = None;
         self.note_motion_flags(bodies);
     }
 
@@ -1427,6 +1442,7 @@ impl WgpuSim {
         self.manifolds_valid = false;
         self.wake_pending = true;
         self.colliderless.set(None);
+        self.uniform_cell = None;
     }
 
     /// Colliders a GPU kernel already rewrote in place (as `set_colliders`): the host's
@@ -1446,6 +1462,7 @@ impl WgpuSim {
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.colliderless.set(None);
+        self.uniform_cell = None;
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
         self.has_height_field |= cols
             .iter()
@@ -1456,6 +1473,7 @@ impl WgpuSim {
             self.has_filters = self.host_cols.iter().any(CollisionFilter::is_set);
         }
         self.grid_cache = None;
+        self.uniform_cell = None;
         self.manifolds_valid = false;
     }
 
@@ -1591,6 +1609,7 @@ impl WgpuSim {
             .any(engine_schema::convex::CollisionFilter::is_set);
         self.host_cols = cols;
         self.grid_cache = None;
+        self.uniform_cell = None;
         self.manifolds_valid = false;
         self.wake_pending = true;
         self.remap_motion(&body_map, &col_map);
@@ -1621,6 +1640,7 @@ impl WgpuSim {
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.colliderless.set(None);
+        self.uniform_cell = None;
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
         self.has_height_field |= cols
             .iter()
@@ -1631,6 +1651,7 @@ impl WgpuSim {
             self.has_filters = self.host_cols.iter().any(CollisionFilter::is_set);
         }
         self.grid_cache = None;
+        self.uniform_cell = None;
         self.manifolds_valid = false;
     }
 
@@ -2130,6 +2151,12 @@ impl WgpuSim {
         self.awake_body_passes = on;
     }
 
+    /// The solver iterations in one workgroup while few are awake, or a dispatch per
+    /// colour and dual (`EngineFeatures::solve_loop`).
+    pub fn set_solve_loop(&mut self, on: bool) {
+        self.solve_loop = on;
+    }
+
     /// The primal's headroom colours in one tail dispatch, or one dispatch each
     /// (`EngineFeatures::primal_tail`).
     pub fn set_primal_tail(&mut self, on: bool) {
@@ -2245,6 +2272,7 @@ impl WgpuSim {
         }
         self.rest_stale = true;
         self.colliderless.set(None);
+        self.uniform_cell = None;
     }
 
     /// The uniform grid's awake-indexed pass while at most [`UNIFORM_REST_ENTER`] of the
@@ -2321,6 +2349,8 @@ impl WgpuSim {
     pub fn set_grid_levels(&mut self, mode: Option<bool>) {
         self.grid_levels_mode = mode;
         self.grid_cache = None;
+        self.uniform_cell = None;
+        self.uniform_cell = None;
     }
 
     /// Size the broadphase grid for a moving collider of radius `radius` (m) even while
@@ -2333,6 +2363,8 @@ impl WgpuSim {
         if radius > self.movable_radius {
             self.movable_radius = radius;
             self.grid_cache = None;
+        self.uniform_cell = None;
+            self.uniform_cell = None;
         }
     }
 
@@ -3144,6 +3176,7 @@ impl WgpuSim {
             ccd_by_collider: self.ccd_by_collider && !self.has_colliderless_dynamic(),
             awake_body_passes: self.awake_body_passes,
             primal_tail: self.primal_tail,
+            solve_loop: self.solve_loop,
             // Host commands that may move statics, sleepers, kinematics or colliders
             // (apply_commands, this step): every bound, and the table rebuilt.
             rest_rebuild: self.rest_stale || self.commands_move_poses,
@@ -3389,8 +3422,9 @@ impl WgpuSim {
 
     fn refresh_cell(&mut self) {
         let hier = self.grid_levels_mode.unwrap_or(self.has_convex);
-        let (cell, levels) = match self.grid_cache {
-            Some((n, cell, levels)) if hier && n == self.collider_count => (cell, levels),
+        let (cell, levels) = match (self.grid_cache, self.uniform_cell) {
+            (Some((n, cell, levels)), _) if hier && n == self.collider_count => (cell, levels),
+            (_, Some(c)) if !hier => c,
             _ => {
                 let r = rigid_plan::grid_cell_with(
                     &self.host_cols,
@@ -3400,6 +3434,8 @@ impl WgpuSim {
                 );
                 if hier {
                     self.grid_cache = Some((self.collider_count, r.0, r.1));
+                } else {
+                    self.uniform_cell = Some(r);
                 }
                 r
             }

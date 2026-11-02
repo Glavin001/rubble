@@ -159,6 +159,10 @@ pub struct EngineFeatures {
     /// empty headroom dispatches it saves cost next to nothing, and a step whose colours
     /// grew solves the new ones in one workgroup.
     pub primal_tail: bool,
+    /// Every solver iteration in one workgroup while at most 256 bodies were awake and
+    /// 4,096 contacts formed last step (`ENGINE_SOLVE=dispatch` keeps a dispatch per colour
+    /// and dual; same results).
+    pub solve_loop: bool,
     /// Woken pairs start cold (λ = 0, stiffness at its floor), as the resting-pair carry
     /// restarts them (its carried rows are re-detected at rest each step), not from the
     /// sleep archive's rows (default; `ENGINE_ARCHIVE=warm` warm-starts them from the
@@ -212,6 +216,7 @@ impl Default for EngineFeatures {
             ccd_by_collider: true,
             awake_body_passes: true,
             primal_tail: false,
+            solve_loop: true,
             archive_cold: true,
             archive_spread_rounds: 0,
             archive_touch_query: true,
@@ -260,6 +265,7 @@ impl EngineFeatures {
             ccd_by_collider: env_default_on("ENGINE_CCD_WAKE", &["body"]),
             awake_body_passes: env_default_on("ENGINE_BODY_PASSES", &["all"]),
             primal_tail: env_str("ENGINE_PRIMAL").as_deref() == Some("tail"),
+            solve_loop: env_default_on("ENGINE_SOLVE", &["dispatch"]),
             archive_cold: env_str("ENGINE_ARCHIVE").as_deref() != Some("warm"),
             archive_spread_rounds: env_str("ENGINE_ARCHIVE_SPREAD")
                 .and_then(|v| v.parse::<u32>().ok())

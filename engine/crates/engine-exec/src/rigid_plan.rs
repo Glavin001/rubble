@@ -114,6 +114,10 @@ pub struct StepModes {
     /// of one per headroom colour, with each body's update as its colour's dispatch
     /// gives it. WGSL hosts.
     pub primal_tail: bool,
+    /// Every solver iteration in one workgroup while few bodies are awake
+    /// (`solve_primal_sparse_loop`, [`solve_loop`]): one dispatch for what is otherwise a
+    /// dispatch per colour and a dual per iteration, with the same updates. WGSL hosts.
+    pub solve_loop: bool,
     /// With `awake_broadphase`: rebuild the resting table this step (the host wrote
     /// bodies or colliders, or the last step did not keep the table). Steps after
     /// one where bodies fell asleep rebuild it on the GPU (host word 5).
@@ -287,6 +291,34 @@ pub fn primal_tail(m: &StepModes, i: &StepInputs, max_c: u32, sparse_start: u32)
     (q > p && q - p <= TAIL_HEADROOM_MAX).then_some((p, q))
 }
 
+/// Whether the step's solver iterations run in one workgroup ([`StepModes::solve_loop`]):
+/// while few bodies were awake last step (the loop is one workgroup), without soft bodies
+/// or vehicles (their passes run between the iterations) and for at most
+/// [`LOOP_ITERATIONS_MAX`] iterations.
+pub fn solve_loop(m: &StepModes, i: &StepInputs) -> bool {
+    m.solve_loop
+        && i.steps_done > 0
+        && i.soft.bodies == 0
+        && i.vehicle_count == 0
+        && (1..=LOOP_ITERATIONS_MAX).contains(&i.iterations)
+        && i.last.awake_count <= LOOP_AWAKE_MAX
+        && i.last.contact_count.max(i.joint_count) <= LOOP_CONTACTS_MAX
+}
+
+/// The solve loop's limits: awake bodies and contacts (or joints) last step, iterations.
+pub const LOOP_AWAKE_MAX: u32 = 256;
+pub const LOOP_CONTACTS_MAX: u32 = 4096;
+pub const LOOP_ITERATIONS_MAX: u32 = 32;
+/// First pass-table slot of the solve loop: `q * (LOOP_ITERATIONS_MAX + 1) + iterations`
+/// for q (the first sparse colour) in 0..=32.
+pub const LOOP_PASS: u32 = TAIL_PASS + 2 * TAIL_SLOTS;
+const LOOP_SLOTS: u32 = 33 * (LOOP_ITERATIONS_MAX + 1);
+
+/// Pass-table slot of the solve loop.
+pub fn loop_pass(q: u32, iterations: u32) -> u32 {
+    LOOP_PASS + q * (LOOP_ITERATIONS_MAX + 1) + iterations
+}
+
 /// Widest headroom the tail's pass table covers.
 pub const TAIL_HEADROOM_MAX: u32 = 8;
 /// First pass-table slot of the primal tail: `p * (TAIL_HEADROOM_MAX + 1) + (q - p)`
@@ -318,6 +350,7 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "solve_primal_color_compact" => "solve_primal_color_persistent",
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
         "solve_primal_sparse_tail_compact" => "solve_primal_sparse_tail_persistent",
+        "solve_primal_sparse_loop_compact" => "solve_primal_sparse_loop_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
         "solve_dual_compact" => "solve_dual_persistent",
         "convex_classify" => "convex_classify_persistent",
@@ -832,7 +865,20 @@ pub fn encode_step(
     } else {
         "solve_primal_sparse_tail"
     };
-    for iter in 0..i.iterations {
+    let looped = solve_loop(m, i);
+    if looped {
+        // Every iteration in one workgroup (few bodies awake): the same colours, lanes,
+        // order and dual updates as the dispatches below.
+        let kernel = if m.compact_contacts {
+            "solve_primal_sparse_loop_compact"
+        } else {
+            "solve_primal_sparse_loop"
+        };
+        e.dp(kernel, 64, loop_pass(max_c.min(sparse_start), i.iterations));
+        // Timed as one primal phase (the duals run inside it).
+        e.phase("primal");
+    }
+    for iter in 0..if looped { 0 } else { i.iterations } {
         for color in 0..solo {
             e.wp(primal, color, color);
         }
@@ -1138,6 +1184,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "solve_primal_color_persistent",
     "solve_primal_sparse_persistent",
     "solve_primal_sparse_tail_persistent",
+    "solve_primal_sparse_loop_persistent",
     "solve_dual_persistent",
     "record_stab_velocity",
     "extract_velocity_sleep",
@@ -1293,7 +1340,7 @@ pub const BIND_COUNT: usize = 34;
 /// Pass-uniform slot stride (binding 22, dynamic offsets).
 pub const PASS_ALIGN: u64 = 256;
 /// Pass-uniform slots (binding 22): see [`pass_table`].
-pub const PASS_SLOTS: u64 = 160 + 2 * 33 * 9;
+pub const PASS_SLOTS: u64 = 160 + 2 * 33 * 9 + 33 * 33;
 /// First post-stabilization slot: `STAB_PASS + c` holds `256 | c` (colour c at α = 0).
 pub const STAB_PASS: u32 = 96;
 
@@ -1410,6 +1457,10 @@ pub fn pass_table() -> Vec<u8> {
         } else if i < 68 {
             let k = i - 48;
             (1u32 << k) | ((k & 1) << 31)
+        } else if i >= LOOP_PASS {
+            // The solve loop: first sparse colour, iterations.
+            let k = i - LOOP_PASS;
+            (k / (LOOP_ITERATIONS_MAX + 1)) | ((k % (LOOP_ITERATIONS_MAX + 1)) << 8)
         } else if i >= TAIL_PASS {
             // The primal tail: first colour, stabilization flag, first sparse colour.
             let k = i - TAIL_PASS;
@@ -1703,6 +1754,35 @@ mod tests {
     }
 
     #[test]
+    fn solve_loop_takes_every_iteration_in_one_dispatch() {
+        let mut m = fast();
+        m.solve_loop = true;
+        let mut i = inputs(10, 0);
+        i.last.awake_count = 40;
+        i.last.contact_count = 300;
+        let cmds = encode_step(&m, &i, false, false);
+        let count = |k: &str| cmds.iter().filter(|c| matches!(c, Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } if *kernel == k)).count();
+        assert_eq!(count("solve_primal_color_compact"), 0);
+        assert_eq!(count("solve_dual_compact"), 0);
+        assert_eq!(count("solve_primal_sparse_compact"), 0);
+        let pass = cmds.iter().find_map(|c| match c {
+            Cmd::Dispatch { kernel: "solve_primal_sparse_loop_compact", pass, threads } => {
+                assert_eq!(*threads, 64);
+                Some(*pass)
+            }
+            _ => None,
+        });
+        assert_eq!(pass, Some(loop_pass(14, 4)));
+        let table = pass_table();
+        let o = (loop_pass(14, 4) as u64 * PASS_ALIGN) as usize;
+        assert_eq!(u32::from_le_bytes(table[o..o + 4].try_into().unwrap()), 14 | (4 << 8));
+        assert!(u64::from(loop_pass(32, LOOP_ITERATIONS_MAX)) < PASS_SLOTS);
+        // Many awake: the dispatches as before.
+        i.last.awake_count = 5000;
+        assert!(!solve_loop(&m, &i));
+    }
+
+    #[test]
     fn adaptive_counts_keep_completeness_tails() {
         let cmds = encode_step(&fast(), &inputs(10, 0), false, false);
         let primal = cmds
@@ -1805,6 +1885,7 @@ mod tests {
                     m.ccd_by_collider = awake;
                     m.awake_body_passes = awake;
                     m.primal_tail = awake;
+                    m.solve_loop = awake;
                     let mut i = inputs(10, 0);
                     i.joint_count = 3;
                     i.has_convex = true;

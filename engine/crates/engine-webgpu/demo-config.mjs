@@ -271,9 +271,9 @@ export function parseDemoQuery(search) {
   if (broadphase === 'hier') features.awakeUniform = false;
   // ?costfloor=off: the per-step work over every collider and body slot as before the
   // cost-floor passes (each gives the same results; for A/B timing). A comma list turns
-  // off only those parts: uniform, incremental, ccd, body, tail.
+  // off only those parts: uniform, incremental, ccd, body, tail, loop.
   const costFloor = qs.get('costfloor');
-  const floorParts = { uniform: 'awakeUniform', incremental: 'restIncremental', ccd: 'ccdByCollider', body: 'awakeBodyPasses', tail: 'primalTail' };
+  const floorParts = { uniform: 'awakeUniform', incremental: 'restIncremental', ccd: 'ccdByCollider', body: 'awakeBodyPasses', tail: 'primalTail', loop: 'solveLoop' };
   if (costFloor !== null && costFloor !== 'on') {
     const off = costFloor === 'off' ? Object.keys(floorParts) : costFloor.split(',');
     for (const part of off) {

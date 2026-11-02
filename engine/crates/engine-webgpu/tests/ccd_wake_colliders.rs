@@ -207,7 +207,23 @@ fn awake_list_body_passes_change_the_same_bodies() {
 #[test]
 fn primal_tail_solves_the_same_bodies() {
     let all = without_gate;
-    let (compared, changed) = compare(&|s, on| s.set_primal_tail(on), &["dual", "sleep"], &all);
+    // The tail only exists in the per-colour dispatches, which the solve loop replaces.
+    let (compared, changed) = compare(
+        &|s, on| {
+            s.set_solve_loop(false);
+            s.set_primal_tail(on)
+        },
+        &["dual", "sleep"],
+        &all,
+    );
     eprintln!("primal tail: compared {compared} phases, {changed} body changes");
     assert!(compared >= 150, "compared {compared}");
+}
+
+#[test]
+fn solve_loop_solves_the_same_bodies() {
+    let all = without_gate;
+    let (compared, changed) = compare(&|s, on| s.set_solve_loop(on), &["sleep"], &all);
+    eprintln!("solve loop: compared {compared} phases, {changed} body changes");
+    assert!(compared >= 100, "compared {compared}");
 }

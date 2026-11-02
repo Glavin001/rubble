@@ -7,4 +7,5 @@
 #define solve_dual solve_dual_compact
 #define solve_primal_sparse solve_primal_sparse_compact
 #define solve_primal_sparse_tail solve_primal_sparse_tail_compact
+#define solve_primal_sparse_loop solve_primal_sparse_loop_compact
 #include "world_step.slang"
