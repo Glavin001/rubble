@@ -204,6 +204,10 @@ pub struct WgpuSim {
     pub(crate) carry_rest: bool,
     /// Awake-indexed broadphase on hierarchical grids (`EngineFeatures::awake_broadphase`).
     pub(crate) awake_broadphase: bool,
+    /// Measurement variants of the sleep archive (`EngineFeatures::archive_cold`,
+    /// `archive_spread_rounds`).
+    archive_cold: bool,
+    archive_spread_rounds: u32,
     /// The resting table no longer matches the bodies and colliders: a host wrote
     /// them, or the last step did not keep the table. The next awake-indexed step
     /// rebuilds it and bounds every collider.
@@ -875,6 +879,8 @@ impl WgpuSim {
             local_repair: features.local_repair,
             carry_rest: features.carry_rest,
             awake_broadphase: features.awake_broadphase,
+            archive_cold: features.archive_cold,
+            archive_spread_rounds: features.archive_spread_rounds,
             rest_stale: true,
             fast_direct: false,
             persist_list: persistent_contacts && features.reuse_copy && features.persist_list,
@@ -2886,6 +2892,8 @@ impl WgpuSim {
             // Host commands may move statics or kinematics (apply_commands, this step).
             full_bounds: self.rest_stale || self.command_count > 0,
             fast_indirect: !self.fast_direct,
+            archive_cold: self.archive_cold,
+            archive_spread_rounds: self.archive_spread_rounds,
         }
     }
 

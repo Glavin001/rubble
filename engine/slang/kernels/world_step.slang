@@ -3722,6 +3722,10 @@ static const uint ARCHIVE_NONE = 0xFFFFFFFFu;
 static const uint ARCHIVE_JUST_SLEPT = 0xFFFFFFFEu;
 static const uint OVERFLOW_SLEEP_ARCHIVE = 131072u;
 bool sleepArchive() { return (HOST_S(30) & 32u) != 0u; }
+// Measurement variants (HOST_S(30) bits 6 and 7; off by default): a woken pair starts
+// cold instead of from its archived row; archive_spread lists the sleepers resting on a
+// touched sleeper (over the archived adjacency) so archive_emit gives them rows too.
+bool archiveCold() { return (HOST_S(30) & 64u) != 0u; }
 uint archiveBlocks() { return ALOAD(gScratchAtomics[archiveMeta() + 1u]); }
 uint archiveMeta() { return EXPLODE_BASE + 4u + 8u * 16u; }
 uint arTop() { return archiveMeta(); }
@@ -3972,7 +3976,7 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
         if (havePrev)
             prev = READ_CONTACT(prevOff + bestJ);
 #if !defined(ENGINE_PERSISTENT_CONTACTS)
-        else if (sleepArchive())
+        else if (sleepArchive() && !archiveCold())
             havePrev = archiveFind(c, prev);
 #endif
         if (havePrev)
@@ -6322,6 +6326,33 @@ void archive_scatter(uint3 tid : SV_DispatchThreadID)
 // archive_emit, after the broadphase (4,096 threads striding over this step's touched
 // sleepers): their archived resting pairs join the candidates. It also empties the other
 // step's touched count (the next step lists into it).
+// archive_spread (measurement variant, scheduled before archive_emit in rounds): every
+// listed touched sleeper lists its archived partners that are asleep too, one archived
+// hop a round, so their resting pairs are emitted as well and a wake can chain through
+// them within the step, as it could through carried resting pairs.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_spread(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive()) return;
+    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1));
+    for (uint k = i; k < n && k < 1048576u; k += 4096u)
+    {
+        uint body = ALOAD(gScratchAtomics[arTouchedList(k)]);
+        uint m = min(ALOAD(gScratchAtomics[arCount(body)]), 2048u);
+        for (uint slot = 0u; slot < m && slot < 2048u; slot++)
+        {
+            Contact r = archiveRowOf(body, slot);
+            uint a = gColliders[r.colliderA].body;
+            uint other = a == body ? gColliders[r.colliderB].body : a;
+            BodyState ob = gBodies[other];
+            if (bodyIsDynamic(ob) && bodyIsSleeping(ob))
+                archiveMark(other);
+        }
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void archive_emit(uint3 tid : SV_DispatchThreadID)

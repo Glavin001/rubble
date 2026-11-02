@@ -100,6 +100,12 @@ pub struct StepModes {
     /// slot 82) instead of dispatching all FAST_CAP workgroups (the same groups do
     /// the work; the rest returned at once).
     pub fast_indirect: bool,
+    /// Measurement variant (sleep archive): a woken pair starts cold instead of from its
+    /// archived row (host word 30 bit 6).
+    pub archive_cold: bool,
+    /// Measurement variant (sleep archive): `archive_spread` rounds before `archive_emit`,
+    /// each listing the sleepers resting on listed ones (0: off).
+    pub archive_spread_rounds: u32,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -460,6 +466,10 @@ pub fn encode_step(
         }
     }
     if m.sleep_archive_blocks > 0 && !reuse_manifolds {
+        // Measurement variant: sleepers resting on touched ones, one archived hop a round.
+        for _ in 0..m.archive_spread_rounds {
+            e.d("archive_spread", 4096);
+        }
         // Touched sleepers' archived resting pairs (world_step.slang archive_emit).
         e.d("archive_emit", 4096);
     }
@@ -1289,6 +1299,8 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
         | (u32::from(fast_list_scheduled(&mo)) << 4);
     // Bit 5: the sleep archive (world_step.slang sleepArchive).
     s[30] |= u32::from(m.sleep_archive_blocks > 0) << 5;
+    // Bit 6: the archive's cold-start variant (world_step.slang archiveCold).
+    s[30] |= u32::from(m.archive_cold) << 6;
     if awake_broadphase(m, i) {
         // Rest tables (bit 0); bit 1 rebuilds them this step. Word 5: last step's
         // sleep events (a pipelined step copies them on the GPU), in the uniform

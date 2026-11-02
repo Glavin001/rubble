@@ -117,6 +117,12 @@ pub struct EngineFeatures {
     /// static and sleeping colliders, and only moving colliders bounded, inserted and
     /// queried each step (`ENGINE_BROADPHASE=full` turns it off; same pairs).
     pub awake_broadphase: bool,
+    /// Measurement variant: woken pairs start cold, not from the sleep archive's rows
+    /// (`ENGINE_ARCHIVE=cold`; default warm).
+    pub archive_cold: bool,
+    /// Measurement variant: rounds of `archive_spread` (sleepers resting on touched ones
+    /// get their archived pairs too; `ENGINE_ARCHIVE_SPREAD=n`; default 0).
+    pub archive_spread_rounds: u32,
     pub grid: GridLayout,
     /// Hierarchical grid override (`ENGINE_GRID_LEVELS=on|off`; `None`: convex scenes).
     pub grid_levels: Option<bool>,
@@ -143,6 +149,8 @@ impl Default for EngineFeatures {
             local_repair: true,
             carry_rest: true,
             awake_broadphase: true,
+            archive_cold: false,
+            archive_spread_rounds: 0,
             grid: GridLayout::Split,
             grid_levels: None,
             color_headroom: Some(4),
@@ -181,6 +189,10 @@ impl EngineFeatures {
             local_repair: env_default_on("ENGINE_REPAIR", &["rounds"]),
             carry_rest: env_default_on("ENGINE_REST", &["drop"]),
             awake_broadphase: env_default_on("ENGINE_BROADPHASE", &["full"]),
+            archive_cold: env_str("ENGINE_ARCHIVE").as_deref() == Some("cold"),
+            archive_spread_rounds: env_str("ENGINE_ARCHIVE_SPREAD")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0),
             grid: match env_str("ENGINE_GRID").as_deref() {
                 Some("scaled") => GridLayout::Scaled,
                 Some("fixed") => GridLayout::Fixed,

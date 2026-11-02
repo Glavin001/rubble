@@ -813,7 +813,7 @@ fn sleep_policy_ensemble() {
     let (asset, lab) = house();
     let delay = std::env::var("ENSEMBLE_DELAY").unwrap_or_else(|_| "0".into());
     let only = std::env::var("ENSEMBLE_ONLY").ok();
-    let policies: [(&str, &[(&str, &str)]); 7] = [
+    let policies: [(&str, &[(&str, &str)]); 10] = [
         ("never asleep", &[]),
         (
             "start asleep, never re-sleep (Unreal's town)",
@@ -840,6 +840,39 @@ fn sleep_policy_ensemble() {
             "carry off: sleep, archive, wake on touch",
             &[("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1"), ("THRESHOLD_CARRY", "off")],
         ),
+        // Why carry-off breaks more: the archive's warm start, and wakes chaining through
+        // resting pairs within a step (measurement variants, EngineFeatures).
+        (
+            "carry off, cold wake: sleep, archive, wake on touch",
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "off"),
+                ("THRESHOLD_FEATURES_ENV", "1"),
+                ("ENGINE_ARCHIVE", "cold"),
+            ],
+        ),
+        (
+            "carry off, spread wake: sleep, archive, wake on touch",
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "off"),
+                ("THRESHOLD_FEATURES_ENV", "1"),
+                ("ENGINE_ARCHIVE_SPREAD", "8"),
+            ],
+        ),
+        (
+            "carry off, cold and spread wake: sleep, archive, wake on touch",
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "off"),
+                ("THRESHOLD_FEATURES_ENV", "1"),
+                ("ENGINE_ARCHIVE", "cold"),
+                ("ENGINE_ARCHIVE_SPREAD", "8"),
+            ],
+        ),
     ];
     let stats = |v: &[f64]| {
         let n = v.len() as f64;
@@ -859,6 +892,9 @@ fn sleep_policy_ensemble() {
             "THRESHOLD_WAKE_ON_TOUCH",
             "THRESHOLD_START_ASLEEP",
             "THRESHOLD_CARRY",
+            "THRESHOLD_FEATURES_ENV",
+            "ENGINE_ARCHIVE",
+            "ENGINE_ARCHIVE_SPREAD",
         ] {
             std::env::remove_var(k);
         }

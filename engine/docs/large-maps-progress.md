@@ -284,10 +284,56 @@ WGPU_VALIDATION_INDIRECT_CALL=1`, so this branch's other changes do not move the
 differ from the October ensemble above because the house and shot have changed since;
 the reference was rerun alongside.)
 
-Why carry-off breaks more is not established. Candidates: woken pairs now start from
-the archive's λ (the rows the pair fell asleep with, not the converged rows of the
-moment it is struck), and wakes no longer chain through resting pairs within a step,
-so for a step a struck cluster may rest on sleepers acting as walls.
+**Why carry-off breaks more (2026-11-01).** The two suspects, each a measurement variant
+behind a switch with today's default untouched (`EngineFeatures::archive_cold`,
+`ENGINE_ARCHIVE=cold`: a woken pair skips the archive and starts cold;
+`archive_spread_rounds`, `ENGINE_ARCHIVE_SPREAD=n`: before `archive_emit`, each touched
+sleeper lists the sleepers in its archive, one hop a round, so their archived pairs are
+emitted too and a wake can chain through them within the step), plus a third check
+(`RUBBLE_SKIP_KERNELS=archive_emit`: no archived pairs emitted on a touch at all). Same
+ensemble:
+
+| Policy | Bonds broken | Bodies |
+|---|---|---|
+| never asleep (the reference) | 57.3 ± 2.5 [53, 62] | 107.5 ± 0.6 [107, 109] |
+| carry on (today) | 56.3 ± 1.2 [55, 60] | 108.0 ± 0.2 [108, 109] |
+| carry off | 60.9 ± 2.3 [57, 66] | 107.7 ± 0.7 [106, 109] |
+| carry off, cold wake (a) | 61.5 ± 2.6 [57, 66] | 107.8 ± 0.9 [106, 109] |
+| carry off, spread wake, 8 rounds (b) | 65.7 ± 1.6 [63, 69] | 108.8 ± 0.7 [108, 110] |
+| carry off, cold and spread wake | 67.4 ± 2.4 [62, 72] | 109.4 ± 1.1 [108, 111] |
+| carry on, no `archive_emit` | 55.5 ± 2.4 [53, 62] | 106.4 ± 1.0 [105, 109] |
+| carry off, no `archive_emit` | 61.3 ± 2.5 [59, 70] | 107.9 ± 0.6 [107, 109] |
+
+Neither variant passes the gate. What this shows:
+
+- **Not the warm start.** Starting woken pairs cold changes nothing measurable (61.5 vs
+  60.9).
+- **Not the missing wake chain, as far as the archived adjacency reaches.** Restoring
+  chained wakes and their resting rows through the archive makes it worse (65.7). The
+  rows `archive_emit` adds hardly matter either way (removing them moves carry on by
+  −0.8 and carry off by +0.4).
+- So the carried λ = 0 rows must matter through something other than the rigid
+  solve's warm start and wake. The remaining candidate is the threshold fracture: its
+  contact ingest (stress-gpu `ingest.rs`) reads the step's contact rows, and resting pairs
+  that keep rows (carry on) or lose them (carry off) may change what it treats as
+  supported or loaded, even at λ = 0. Not yet measured.
+
+Until that is understood, option A cannot be made to pass by fixing the rigid side, and
+option B (keep the carry's behaviour, make it cheap) is the safer route to the cost.
+
+### Pre-existing test failures (checked 2026-11-01)
+
+- `engine-webgpu` `heightfield::bodies_rest_on_uneven_terrain_without_sinking_in` passes
+  on `origin/main` (3169cde2, 3 runs) and fails on this branch's base a56c45e5 (3 runs,
+  deterministic: body 38 at 0.0678 m/s against the 0.05 m/s limit). Bisected to
+  8ff688ab, "Sleep that threshold fracture cannot tell from staying awake" (the sleep
+  archive). Its parent leaves body 38 at 0.0472 m/s, already just under the limit. The
+  commit's new kernel paths are all gated (`sleepArchive()`, `wakeOnTouch()`) and the
+  test enables neither, so its logic is unchanged for the test; the edits to hot kernels
+  (`emitCandidate`, `wakeFromContact`, persistence) shift their shader codegen, and the
+  marginal body ends a little faster. Not fixed yet.
+- The three WGSL lib tests (`char_move`, `mpm_wheel_loads` codegen) fail on `origin/main`
+  too: the local toolchain's Slang output, not this branch.
 
 ### Left for the next step
 
