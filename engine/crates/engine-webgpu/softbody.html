@@ -855,22 +855,31 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
 }
 // Beams: tyres always (dark); with the beam view every beam, green intact, yellow
 // to red bent (rest length off its spawn length by 0.1 % to 8 %), magenta broken.
+// Four vertices per beam: 0–1 the beam (2–3 hidden); a broken beam instead draws a
+// short stub at each of its nodes (0–1 at one end, 2–3 at the other), since its
+// two nodes may since have flown metres apart.
 @vertex fn vsXBeam(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Out {
   let rec = xrecs[inst];
   let v = rec.z & 0xffffu;
   let tyre = (rec.z >> 16u) != 0u;
-  let p = xpos(select(rec.y, rec.x, vi == 0u), v);
+  let pa = xpos(rec.x, v);
+  let pb = xpos(rec.y, v);
   let s0 = xbeams[inst * 2u];
   let s1 = xbeams[inst * 2u + 1u];
   let broken = s1.z != 0.0;
   let rest0 = bitcast<f32>(rec.w);
   let bend = abs(s0.x - rest0) / max(rest0, 1e-6);
+  let q0 = select(pa, pb, vi >= 2u);
+  let q1 = select(pb, pa, vi >= 2u);
+  let stub = min(0.25 * rest0, 0.06) / max(length(q1 - q0), 1e-6);
+  let far = select(q1, mix(q0, q1, min(stub, 1.0)), broken);
+  let p = select(far, q0, (vi & 1u) == 0u);
   var o: Out;
   o.w = p; o.center = p; o.r = 0.0; o.n = vec3f(0.0, 1.0, 0.0);
   o.c = select(vec3f(0.15, 0.85, 0.35), vec3f(0.12, 0.12, 0.13), tyre && frame.opts.x < 0.5);
   if (bend > 1e-3) { o.c = mix(vec3f(1.0, 0.85, 0.1), vec3f(1.0, 0.1, 0.05), clamp(bend / 0.08, 0.0, 1.0)); }
   if (broken) { o.c = vec3f(0.95, 0.1, 0.9); }
-  let shown = select(tyre && !broken, true, frame.opts.x > 0.5);
+  let shown = select(tyre && !broken, true, frame.opts.x > 0.5) && (broken || vi < 2u);
   o.clip = select(HIDE, frame.viewProj * vec4f(p, 1.0), shown);
   return o;
 }
@@ -1548,7 +1557,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (xsim) {
         const xb = xBindings();
         rp.setPipeline(xSkinPipe); rp.setBindGroup(0, xb.skin); rp.draw(xlayout.triangles * 3);
-        rp.setPipeline(xBeamPipe); rp.setBindGroup(0, xb.beam); rp.draw(2, xlayout.beams);
+        rp.setPipeline(xBeamPipe); rp.setBindGroup(0, xb.beam); rp.draw(4, xlayout.beams);
       }
       if (world.wheelCount()) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.wheelCount()); }
       buggyR?.draw(rp);
