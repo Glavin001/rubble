@@ -46,6 +46,19 @@ impl ContactStorage {
     }
 }
 
+/// GPU timestamps around the rigid step ([`crate::WgpuSim::set_gpu_timing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GpuTiming {
+    /// No timestamp queries (the shipped default).
+    #[default]
+    Off,
+    /// One pair around the step's compute pass: its GPU time.
+    Step,
+    /// A pass and a pair per phase of the plan (`broadphase`, `narrowphase`,
+    /// `warm`, `graph`, ..., each iteration's `primal` and `dual`, `sleep`).
+    Phases,
+}
+
 /// How manifolds persist between steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ManifoldPersistence {
@@ -187,6 +200,8 @@ impl EngineFeatures {
 pub struct SimOptions {
     pub contacts: ContactStorage,
     pub vehicles: VehicleCapacity,
+    /// The character, query and projectile pool (binding 33).
+    pub characters: engine_schema::character::CharacterCapacity,
     /// A soft-body arena; needs [`ContactStorage::Canonical`].
     pub soft: Option<SoftCapacity>,
     pub features: EngineFeatures,

@@ -588,6 +588,153 @@ impl JointDesc {
     }
 }
 
+impl JointDesc {
+    /// The description a fresh GPU record was made from: the inverse of
+    /// [`JointDesc::to_gpu`] (`from_gpu(j)?.to_gpu()` gives `j` back bit for
+    /// bit). For scenes stored as raw records (`WorldSnapshot`). A record
+    /// carrying solver state a description cannot hold is refused: broken,
+    /// idle, unsettled or tyre flags, warm-start multipliers or row
+    /// coordinates, penalties outside a bond, or a rest frame plastic yield
+    /// moved.
+    pub fn from_gpu(j: &Joint) -> Result<Self, String> {
+        let known = JOINT_FLAG_COLLIDE
+            | JOINT_FLAG_RADIAL
+            | JOINT_FLAG_CONE
+            | JOINT_FLAG_DRIVE
+            | JOINT_FLAG_BOND
+            | (0xFF << JOINT_DRIVE_DOF_SHIFT)
+            | (0xFF << JOINT_PRESET_SHIFT);
+        if j.flags & !known != 0 {
+            return Err(format!(
+                "joint flags {:#x} carry solver state (broken, idle, unsettled or tyre)",
+                j.flags & !known
+            ));
+        }
+        let preset = match j.preset() {
+            0 => JointType::Ball,
+            1 => JointType::Fixed,
+            2 => JointType::Hinge,
+            3 => JointType::Slider,
+            4 => JointType::D6,
+            5 => JointType::Distance,
+            6 => JointType::MaxDistance,
+            7 => JointType::Spring,
+            8 => JointType::Cone,
+            9 => JointType::Bond,
+            p => return Err(format!("unknown joint preset {p}")),
+        };
+        let bond = j.flags & JOINT_FLAG_BOND != 0;
+        let zero = |v: &[f32]| v.iter().all(|&x| x == 0.0);
+        if !zero(&j.lambda) || !zero(&j.c0) {
+            return Err("joint record carries warm-start state (lambda or c0)".into());
+        }
+        if !zero(&j.penalty[if bond { 6 } else { 0 }..]) {
+            return Err("joint record carries row penalties outside a bond".into());
+        }
+        if j.rest_start != j.frame_b {
+            return Err("joint rest frame differs from frame B (plastic yield)".into());
+        }
+        let mut motion = [Motion::Locked; 6];
+        for (i, m) in motion.iter_mut().enumerate() {
+            *m = match (j.motion >> (2 * i)) & 3 {
+                MOTION_LOCKED => Motion::Locked,
+                MOTION_LIMITED => Motion::Limited,
+                MOTION_FREE => Motion::Free,
+                v => return Err(format!("joint DOF {i} has motion {v}")),
+            };
+        }
+        if j.motion >> 12 != 0 {
+            return Err(format!(
+                "joint motion word {:#x} past the six DOFs",
+                j.motion
+            ));
+        }
+        let drive = if j.flags & JOINT_FLAG_DRIVE != 0 {
+            let dof = match (j.flags >> JOINT_DRIVE_DOF_SHIFT) & 0xFF {
+                0 => Dof::X,
+                1 => Dof::Y,
+                2 => Dof::Z,
+                3 => Dof::Twist,
+                4 => Dof::Swing1,
+                5 => Dof::Swing2,
+                d => return Err(format!("joint drive DOF {d}")),
+            };
+            Some(JointDrive {
+                dof,
+                target: j.drive_target,
+                velocity: j.drive_velocity,
+                stiffness: j.drive_stiffness,
+                damping: j.drive_damping,
+                force_limit: j.drive_force_limit,
+            })
+        } else {
+            if j.drive_target != 0.0
+                || j.drive_velocity != 0.0
+                || j.drive_stiffness != 0.0
+                || j.drive_damping != 0.0
+                || j.drive_force_limit != 0.0
+                || (j.flags >> JOINT_DRIVE_DOF_SHIFT) & 0xFF != 0
+            {
+                return Err("joint drive fields set without the drive flag".into());
+            }
+            None
+        };
+        let radial = (j.flags & JOINT_FLAG_RADIAL != 0).then_some((j.radial_min, j.radial_max));
+        if radial.is_none() && (j.radial_min != 0.0 || j.radial_max != 0.0) {
+            return Err("joint radial limits set without the radial flag".into());
+        }
+        let desc = Self {
+            preset,
+            body_a: j.body_a,
+            body_b: j.body_b,
+            frame_a: JointFrame {
+                anchor: Vec3::from_array(j.anchor_a),
+                rot: Quat::from_array(j.frame_a),
+            },
+            frame_b: JointFrame {
+                anchor: Vec3::from_array(j.anchor_b),
+                rot: Quat::from_array(j.frame_b),
+            },
+            motion,
+            lin_lo: if bond {
+                Vec3::ZERO
+            } else {
+                Vec3::from_array(j.lin_lo)
+            },
+            lin_hi: Vec3::from_array(j.lin_hi),
+            twist: (if bond { 0.0 } else { j.twist_lo }, j.twist_hi),
+            swing: (j.swing_y, j.swing_z),
+            cone: j.flags & JOINT_FLAG_CONE != 0,
+            radial,
+            lin_stiffness: j.lin_stiffness,
+            ang_stiffness: j.ang_stiffness,
+            limit_stiffness: j.limit_stiffness,
+            limit_damping: j.limit_damping,
+            break_force: j.break_force,
+            break_torque: j.break_torque,
+            yield_torque: j.yield_torque,
+            break_bend: j.break_bend,
+            drive,
+            collide: j.flags & JOINT_FLAG_COLLIDE != 0,
+            torque_arm: j.torque_arm,
+            bond: bond.then(|| BondSpec {
+                k: j.penalty[..6].try_into().expect("six bond penalties"),
+                strength: j.bond_strength(),
+            }),
+        };
+        // Frames are stored normalised and the torque arm positive: anything
+        // else would not come back from `to_gpu` unchanged.
+        if bytemuck::bytes_of(&desc.to_gpu()) != bytemuck::bytes_of(j) {
+            return Err(
+                "joint record is not one JointDesc::to_gpu writes (unnormalised \
+                        frames, a zero torque arm or a zero drive force limit)"
+                    .into(),
+            );
+        }
+        Ok(desc)
+    }
+}
+
 /// Bounding reach of a collider from its body's center (None for planes).
 pub fn collider_reach(col: &crate::Collider) -> Option<f32> {
     if col.shape == crate::ShapeType::Plane as u32 {
@@ -641,6 +788,60 @@ mod tests {
         let qa = Quat::from_rotation_y(0.4);
         let qb = qa * rest;
         assert!((qa * fa).dot(qb * Quat::from_array(j.frame_b)).abs() > 0.99999);
+    }
+
+    #[test]
+    fn from_gpu_inverts_to_gpu() {
+        let fa = JointFrame::with_axis(Vec3::new(0.1, 0.2, 0.3), Vec3::new(0.0, 1.0, 1.0));
+        let fb = JointFrame::at(Vec3::new(-0.4, 0.0, 0.5));
+        let descs = [
+            JointDesc::ball(1, 2, Vec3::X, Vec3::Y)
+                .with_stiffness(5000.0, 0.0)
+                .with_torque_arm(1.0),
+            JointDesc::hinge(3, 4, fa, fb)
+                .with_twist_limit(-0.5, 0.75)
+                .with_drive(JointDrive::motor(Dof::Twist, 1.5, 40.0))
+                .with_collision(true),
+            JointDesc::d6(0, 5, fa, fb)
+                .with_linear_limit(Dof::X, -0.2, 0.3)
+                .with_drive(JointDrive::servo(Dof::Swing1, 1.5, 200.0, 4.0, 0.0))
+                .with_soft_limits(10.0, 1.0)
+                .with_break(100.0, 50.0)
+                .with_yield(20.0, 0.4),
+            JointDesc::spring(6, 7, Vec3::ZERO, Vec3::Z, 2.0, 30.0),
+            JointDesc::bond(
+                8,
+                9,
+                Vec3::X,
+                Vec3::NEG_X,
+                Vec3::Y,
+                Vec3::X,
+                Quat::from_rotation_z(0.1),
+                BondSpec {
+                    k: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                    strength: [7.0, 8.0, 9.0, 10.0],
+                },
+            ),
+        ];
+        for d in descs {
+            let mut j = d.to_gpu();
+            if d.torque_arm <= 0.0 {
+                // Hosts pick the arm when the description leaves it at 0.
+                j.torque_arm = 2.5;
+            }
+            let back = JointDesc::from_gpu(&j).expect("a record to_gpu wrote");
+            assert_eq!(
+                bytemuck::bytes_of(&back.to_gpu()),
+                bytemuck::bytes_of(&j),
+                "{d:?}"
+            );
+        }
+        let mut broken = JointDesc::ball(0, 1, Vec3::ZERO, Vec3::ZERO).to_gpu();
+        broken.flags |= JOINT_FLAG_BROKEN;
+        assert!(JointDesc::from_gpu(&broken).is_err());
+        let mut warm = JointDesc::ball(0, 1, Vec3::ZERO, Vec3::ZERO).to_gpu();
+        warm.lambda[0] = 1.0;
+        assert!(JointDesc::from_gpu(&warm).is_err());
     }
 
     #[test]

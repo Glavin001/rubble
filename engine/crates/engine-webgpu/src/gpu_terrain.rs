@@ -38,7 +38,9 @@ pub(crate) fn terrain_buffer(device: &wgpu::Device, binding: usize, bytes: u64) 
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_DST
             | wgpu::BufferUsages::COPY_SRC
-            | if binding == MPM_ARGS_BINDING {
+            // The surface's debris list doubles as a renderer's indirect
+            // draw arguments (`SURFACE_DEBRIS_ARGS_WORD`).
+            | if binding == MPM_ARGS_BINDING || binding == engine_terrain::surface::SURFACE_BINDING {
                 wgpu::BufferUsages::INDIRECT
             } else {
                 wgpu::BufferUsages::empty()
@@ -64,6 +66,23 @@ impl WgpuSim {
             plan,
             gpu_ms: std::cell::Cell::new(None),
         });
+        Ok(())
+    }
+
+    /// Start the terrain pool over (a scene reset): a fresh plan with the
+    /// same limits, no area open, the counters zeroed. Nothing is baked: what
+    /// the open areas held is dropped. The material must be set again
+    /// ([`Self::terrain_set_material`]).
+    pub fn terrain_reset(&mut self) -> anyhow::Result<()> {
+        let config = self.terrain_plan()?.config().clone();
+        *self.terrain_plan()? = TerrainPlan::new(&config)?;
+        let words = vec![0u32; MPM_COUNTER_WORDS];
+        self.queue.write_buffer(
+            &self.bufs[MPM_COUNTERS_BINDING],
+            0,
+            bytemuck::cast_slice(&words),
+        );
+        self.terrain_impulses_pending = false;
         Ok(())
     }
 
@@ -491,6 +510,17 @@ impl WgpuSim {
         &self.bufs[MPM_COUNTERS_BINDING]
     }
 
+    /// The particle pool (`MpmParticle` records), for renderers that draw the
+    /// open areas' sand in place (the counters' particle count bounds it).
+    pub fn terrain_particle_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[MPM_PARTICLES_BINDING]
+    }
+
+    /// The ejecta parcels (`MpmParcel` records), for renderers.
+    pub fn terrain_parcel_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[MPM_PARCELS_BINDING]
+    }
+
     /// The hull arena (binding 18): a heightfield's samples are the f32 words
     /// from its collider's base + 2, row-major, for hosts that copy them into
     /// their readback.
@@ -727,8 +757,15 @@ impl WgpuSim {
         } else {
             Some(surface.frame(plan, gravity)?)
         };
-        if let Some(ops) = ops {
-            self.terrain_submit(&ops, "terrain surface");
+        match ops {
+            Some(ops) => self.terrain_submit(&ops, "terrain surface"),
+            // No patches to sink: the surface is no longer valid (the
+            // retire's own first write, which renderers read).
+            None => self.queue.write_buffer(
+                &self.bufs[engine_terrain::surface::SURFACE_BINDING],
+                4 * u64::from(engine_terrain::surface::SURFACE_VALID_WORD),
+                bytemuck::bytes_of(&0u32),
+            ),
         }
         for p in surface.patches().to_vec() {
             let body = self.collider(p.collider).body;

@@ -44,7 +44,8 @@ fn map_material(name: &str) -> (&'static str, &'static str) {
     match name {
         "brick_clay" | "ceramic" => ("brick", "mortar"),
         "sandstone" => ("stone", "mortar"),
-        "pine" => ("timber", "timber"),
+        // Shardwright's woods; the finishes (tarred, stained, painted) change only colour.
+        "pine" | "pine_tarred" | "oak" | "oak_dark" | "oak_ochre" => ("timber", "timber"),
         "glass_annealed" | "glass_tempered" => ("glass", "glass"),
         "steel_s355" => ("steel", "steel"),
         // Gypsum board: weak, brittle and light; mortar is the closest preset.

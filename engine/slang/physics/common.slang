@@ -35,6 +35,11 @@ static const uint BODY_FOLLOW = 128u;
 // broadphase list and time-of-impact contacts. While registered for a step,
 // initialPad holds asfloat(CCD slot); vehicle chassis cannot be CCD bodies.
 static const uint BODY_CCD = 256u;
+// Continuous collision only while fast (a crush particle): extract_velocity_sleep sets or
+// clears BODY_CCD each step from the velocity it leaves the body with (|v| h past
+// CCD_FAST_REACH contact offsets), so the next step sees one answer throughout.
+static const uint BODY_CCD_FAST = 32768u;
+static const float CCD_FAST_REACH = 2.0;
 // Motion locks (world axes): bits 9..11 linear x, y, z; 12..14 angular x, y, z.
 // Read only by the lock_predict / lock_project passes.
 static const uint BODY_LOCK_SHIFT = 9u;
@@ -235,7 +240,7 @@ static const uint OVERFLOW_LARGE_DYNAMICS = 2048u; // uniform grid: more than 16
 static const uint OVERFLOW_CCD_BODIES = 4096u; // more awake CCD bodies than CCD_BODY_CAP
 static const uint OVERFLOW_IMPULSES = 8192u; // more impulse records than IMPULSE_CAP
 static const uint OVERFLOW_CCD_PAIRS = 32768u; // more CCD candidate pairs than CCD_PAIR_CAP
-static const uint OVERFLOW_CCD_LATE = 131072u; // more late-sweep colliders than CCD_LATE_CAP
+static const uint OVERFLOW_CCD_LATE = 262144u; // more late-sweep colliders than CCD_LATE_CAP
 
 struct GpuCommand
 {

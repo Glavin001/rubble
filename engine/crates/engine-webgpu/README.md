@@ -56,9 +56,9 @@ a million tiny uploads before the first GPU submission.
 
 ## Vehicle demo
 
-`vehicle.html` drives the same WGSL kernels through `world-host.mjs` (a port of
-`WgpuSim::step`) and `vehicle.mjs` (a thin wrapper over `engine-vehicle`'s packer and
-`VehicleHost`, compiled to wasm from `../engine-vehicle-wasm`). Run
+`vehicle.html` runs on rubble's `World` (`engine-world-wasm`, the host native and Unreal
+run; see `engine/docs/web-rust-host.md`); `vehicle.mjs` gives it `engine-vehicle`'s layout
+constants and scene builders, compiled to wasm from `../engine-vehicle-wasm`. Run
 `cargo run -p engine-webgpu --release --bin wgsl_export` first: it also writes
 `generated/vehicle_presets.json` and builds `generated/vehicle_wasm/` with `wasm-pack`
 (needs the `wasm32-unknown-unknown` target). `node --test tests/vehicle_layout.test.mjs`
@@ -82,8 +82,8 @@ See [../../docs/vehicles.md](../../docs/vehicles.md).
 
 ## Motion demo (CCD, characters, bullets)
 
-`motion.html` runs the continuous-collision, character and projectile kernels
-through `world-host.mjs` (same `wgsl_export` step as the vehicle demo):
+`motion.html` runs the continuous-collision, character and projectile kernels on
+`World` (same `wgsl_export` step as the vehicle demo):
 
 - `?scene=ccd&speed=60|140|250`: balls at a 0.05/0.2/1 m slab and a brick wall,
   CCD off and on side by side, plus a debris shower through a slab.
@@ -110,6 +110,13 @@ python3 -m http.server 8765 --bind 127.0.0.1 --directory crates/engine-webgpu
 ```
 
 Open `http://127.0.0.1:8765/demo.html?scene=ring110k`. Reload after each export.
+`demo.html` runs on `World` (engine-world-wasm, rebuilt with `wasm-pack`, see
+`../../docs/web-rust-host.md`): its step is `World::step`, and its URL switches are
+`WorldDef` settings (`contacts`, `features` = the native `ENGINE_*` controls,
+`gpuTiming`); `demo-config.mjs` maps them. The JS host's experiments with no Rust
+path (`coloring=rebuild`, `prefix=serial`, `packing=atomic`, `adjacency=append`,
+`endpoints=` against the contact storage, `profile=detail|graph|colors`) are refused
+with the reason. The paragraphs below record measurements made on the JS host.
 Normal playback runs continuously without benchmark pauses or resets. To measure,
 add `&bench=1`; playback pauses after the impact, then restarts after measurement.
 In that mode the console emits `BENCH` with wall time, active bodies, contact count and overflow.
@@ -193,9 +200,9 @@ Use `?scene=gables506k&check=gables` for the 240-step full-size gables check.
 Add `&bench=1` to either check to measure wall time after validation. Rendering
 intentionally pauses during a check and stops at its result.
 Use the page's live-demo link to resume ordinary playback. The page must finish with `PASS`; the console emits `RING_CHECK` or `GABLES_CHECK` samples
-and a final `REGRESSION` report. Add `&batch=1` to drain the queue after each step.
-Both modes intentionally avoid CPU counter readbacks between checkpoints, so they
-exercise GPU warm-start metadata rather than relying on cached host counts.
+and a final `REGRESSION` report (also `window.__CHECK__`). `&batch=1` reads bodies
+after every step instead of every ten. On `World` every step reads its counters back
+and plans the next from the latest polled ones.
 
 Coloring reuses valid colors by default and compacts local priority maxima before
 repairing conflicts. To run the diagnostic control, append `&coloring=rebuild` to
@@ -342,8 +349,9 @@ The probe uses its own device/buffers and does not modify the physics backend.
 ## Joint scenes in the browser
 
 `demo.html?scene=joints` (also `ragdolls`, `ragdolls10k`, `hingechains10k`, `motorfield10k`)
-loads scenes built by `engine-scenes` and exported as raw GPU records
-(`cargo run -p engine-scenes --release --bin scene_export`), so the browser steps exactly
-the records the native tests use. Alt-drag grabs a body, `F` fires a ball, `M` toggles
+loads scenes built by `engine-scenes` and exported as RUBSNAP1 records
+(`cargo run -p engine-scenes --release --bin scene_export`); `World::import_snapshot`
+rebuilds them as bodies, shapes and joints, so the browser steps the records the native
+tests use. Alt-drag grabs a body, `F` fires a ball, `M` toggles
 motors. `node tools/record-joints.mjs` records each scene in headless Chrome WebGPU to
 `test-results/joints/`. See `engine/docs/JOINTS.md`.

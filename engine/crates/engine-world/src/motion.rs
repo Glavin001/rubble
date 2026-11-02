@@ -11,7 +11,7 @@ use engine_schema::character::{
 };
 use engine_webgpu::{CharacterHandle, MotionEvent};
 
-pub use engine_schema::character::{CharacterDesc, GroundState};
+pub use engine_schema::character::{CharacterCapacity, CharacterDesc, GroundState};
 
 handle!(
     /// A capsule character controller.
@@ -252,6 +252,11 @@ pub(crate) struct MotionState {
 impl MotionState {
     pub(crate) fn has_characters(&self) -> bool {
         self.characters.iter().any(|c| c.alive)
+    }
+
+    /// No character or projectile was ever made (save/restore leaves them out).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.characters.is_empty() && self.projectiles.is_empty()
     }
 }
 

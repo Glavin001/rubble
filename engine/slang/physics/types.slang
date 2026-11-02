@@ -24,6 +24,7 @@ public static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
 public static const uint BODY_PARTICLE = 64u;
 public static const uint BODY_FOLLOW = 128u;
 public static const uint BODY_CCD = 256u;
+public static const uint BODY_CCD_FAST = 32768u;
 public static const uint BODY_LOCK_SHIFT = 9u;
 public static const uint BODY_LOCK_MASK = 0x7E00u;
 
@@ -219,7 +220,7 @@ public static const uint OVERFLOW_LARGE_DYNAMICS = 2048u; // uniform grid: more 
 public static const uint OVERFLOW_CCD_BODIES = 4096u; // more awake CCD bodies than CCD_BODY_CAP
 public static const uint OVERFLOW_IMPULSES = 8192u; // more impulse records than IMPULSE_CAP
 public static const uint OVERFLOW_CCD_PAIRS = 32768u; // more CCD candidate pairs than CCD_PAIR_CAP
-public static const uint OVERFLOW_CCD_LATE = 131072u; // more late-sweep colliders than CCD_LATE_CAP
+public static const uint OVERFLOW_CCD_LATE = 262144u; // more late-sweep colliders than CCD_LATE_CAP
 
 public struct GpuCommand
 {

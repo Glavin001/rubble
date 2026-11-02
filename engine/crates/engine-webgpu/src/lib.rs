@@ -10,16 +10,20 @@ mod features;
 #[cfg(feature = "gpu")]
 mod gpu;
 #[cfg(feature = "gpu")]
+pub mod gpu_marks;
+#[cfg(feature = "gpu")]
 mod poses;
+#[cfg(all(feature = "gpu", target_vendor = "apple"))]
+pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]
 pub use features::{
-    ContactStorage, EngineFeatures, GridLayout, ManifoldPersistence, SimOptions, WarmHash,
+    ContactStorage, EngineFeatures, GpuTiming, GridLayout, ManifoldPersistence, SimOptions, WarmHash,
 };
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    default_device, CharacterHandle, MotionEvent, RingEvents, SimSnapshot, SoftEvents, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
+    default_device, default_device_with, CharacterHandle, MotionEvent, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
     POSES_BINDING, POSE_HEADER_BINDING, POSE_RECORD_BYTES,
 };
 #[cfg(feature = "gpu")]
@@ -30,6 +34,10 @@ pub use soft_skin::SoftSkinner;
 /// The skinning kernels as one WGSL module (entries `soft_skin_vertices`,
 /// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
 pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
+
+/// A buffer's extent for compact snapshots (`slang/kernels/state_extent.slang`,
+/// entry `state_extent`; `WgpuSim::measure_state`).
+pub const STATE_EXTENT_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/state_extent.wgsl"));
 
 /// The MPM material probe (`slang/kernels/mpm_material_probe.slang`, entry
 /// `mpm_material_probe`): runs `physics/mpm_material.slang` on test cases so

@@ -6,8 +6,8 @@
 //! sizes, the host-uploaded words and the host state machine (awake lists,
 //! persistent broadphase, tagged warm hash, colour estimates, bond phases), and
 //! emits each tick as a flat command list ([`Command`]) that a host executes in
-//! order: WebGPU (`fracture/simulation.mjs`) and Metal
-//! (`engine-viewer/src/fracture/sim.rs`). The schedule mirrors
+//! order: the Metal viewer (`engine-viewer/src/fracture/sim.rs`; the browser lab
+//! now runs on `World`, `engine/docs/web-rust-host.md`). The schedule mirrors
 //! engine-webgpu/src/gpu.rs in its persistent-contact mode.
 
 use crate::scene::{Body, Collider, Joint, Scene, SceneParams, SHAPE_CONVEX};

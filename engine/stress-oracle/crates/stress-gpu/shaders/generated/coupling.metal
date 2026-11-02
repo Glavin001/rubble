@@ -86,6 +86,7 @@ struct KernelContext_0
     EngineBody_natural_0 device* start_bodies_0;
     atomic<uint> device* counts_0;
     uint device* sort_0;
+    uint device* scan_blocks_0;
     Record_natural_0 device* manifolds_0;
     array<uint, int(1024)> threadgroup* g_scan_0;
 };
@@ -114,7 +115,7 @@ struct Record_0
     uint4 key_0;
 };
 
-[[kernel]] void ingest_rows(uint3 id_0 [[thread_position_in_grid]], IngestParams_0 constant* params_2 [[buffer(0)]], uint device* row_counts_1 [[buffer(11)]], uint device* counters_1 [[buffer(5)]], Record_natural_0 device* records_1 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_1 [[buffer(1)]], EngineCollider_natural_0 device* colliders_1 [[buffer(2)]], EngineBody_natural_0 device* bodies_1 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_1 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_1 [[buffer(4)]], atomic<uint> device* counts_1 [[buffer(10)]], uint device* sort_1 [[buffer(8)]], Record_natural_0 device* manifolds_1 [[buffer(9)]])
+[[kernel]] void ingest_rows(uint3 id_0 [[thread_position_in_grid]], IngestParams_0 constant* params_2 [[buffer(0)]], uint device* row_counts_1 [[buffer(11)]], uint device* counters_1 [[buffer(5)]], Record_natural_0 device* records_1 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_1 [[buffer(1)]], EngineCollider_natural_0 device* colliders_1 [[buffer(2)]], EngineBody_natural_0 device* bodies_1 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_1 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_1 [[buffer(4)]], atomic<uint> device* counts_1 [[buffer(10)]], uint device* sort_1 [[buffer(8)]], uint device* scan_blocks_1 [[buffer(12)]], Record_natural_0 device* manifolds_1 [[buffer(9)]])
 {
     thread KernelContext_0 kernelContext_1;
     (&kernelContext_1)->params_1 = params_2;
@@ -128,6 +129,7 @@ struct Record_0
     (&kernelContext_1)->start_bodies_0 = start_bodies_1;
     (&kernelContext_1)->counts_0 = counts_1;
     (&kernelContext_1)->sort_0 = sort_1;
+    (&kernelContext_1)->scan_blocks_0 = scan_blocks_1;
     (&kernelContext_1)->manifolds_0 = manifolds_1;
     threadgroup array<uint, int(1024)> g_scan_1;
     (&kernelContext_1)->g_scan_0 = &g_scan_1;
@@ -356,7 +358,7 @@ struct Record_0
     return;
 }
 
-[[kernel]] void ingest_clear(uint3 id_1 [[thread_position_in_grid]], IngestParams_0 constant* params_3 [[buffer(0)]], uint device* row_counts_2 [[buffer(11)]], uint device* counters_2 [[buffer(5)]], Record_natural_0 device* records_2 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_2 [[buffer(1)]], EngineCollider_natural_0 device* colliders_2 [[buffer(2)]], EngineBody_natural_0 device* bodies_2 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_2 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_2 [[buffer(4)]], atomic<uint> device* counts_2 [[buffer(10)]], uint device* sort_2 [[buffer(8)]], Record_natural_0 device* manifolds_2 [[buffer(9)]])
+[[kernel]] void ingest_clear(uint3 id_1 [[thread_position_in_grid]], IngestParams_0 constant* params_3 [[buffer(0)]], uint device* row_counts_2 [[buffer(11)]], uint device* counters_2 [[buffer(5)]], Record_natural_0 device* records_2 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_2 [[buffer(1)]], EngineCollider_natural_0 device* colliders_2 [[buffer(2)]], EngineBody_natural_0 device* bodies_2 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_2 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_2 [[buffer(4)]], atomic<uint> device* counts_2 [[buffer(10)]], uint device* sort_2 [[buffer(8)]], uint device* scan_blocks_2 [[buffer(12)]], Record_natural_0 device* manifolds_2 [[buffer(9)]])
 {
     thread KernelContext_0 kernelContext_2;
     (&kernelContext_2)->params_1 = params_3;
@@ -370,6 +372,7 @@ struct Record_0
     (&kernelContext_2)->start_bodies_0 = start_bodies_2;
     (&kernelContext_2)->counts_0 = counts_2;
     (&kernelContext_2)->sort_0 = sort_2;
+    (&kernelContext_2)->scan_blocks_0 = scan_blocks_2;
     (&kernelContext_2)->manifolds_0 = manifolds_2;
     threadgroup array<uint, int(1024)> g_scan_2;
     (&kernelContext_2)->g_scan_0 = &g_scan_2;
@@ -390,7 +393,7 @@ bool record_live_0(uint slot_0, KernelContext_0 thread* kernelContext_3)
     return _S38 < (*(kernelContext_3->row_counts_0+_S39));
 }
 
-[[kernel]] void ingest_count(uint3 id_2 [[thread_position_in_grid]], IngestParams_0 constant* params_4 [[buffer(0)]], uint device* row_counts_3 [[buffer(11)]], uint device* counters_3 [[buffer(5)]], Record_natural_0 device* records_3 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_3 [[buffer(1)]], EngineCollider_natural_0 device* colliders_3 [[buffer(2)]], EngineBody_natural_0 device* bodies_3 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_3 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_3 [[buffer(4)]], atomic<uint> device* counts_3 [[buffer(10)]], uint device* sort_3 [[buffer(8)]], Record_natural_0 device* manifolds_3 [[buffer(9)]])
+[[kernel]] void ingest_count(uint3 id_2 [[thread_position_in_grid]], IngestParams_0 constant* params_4 [[buffer(0)]], uint device* row_counts_3 [[buffer(11)]], uint device* counters_3 [[buffer(5)]], Record_natural_0 device* records_3 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_3 [[buffer(1)]], EngineCollider_natural_0 device* colliders_3 [[buffer(2)]], EngineBody_natural_0 device* bodies_3 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_3 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_3 [[buffer(4)]], atomic<uint> device* counts_3 [[buffer(10)]], uint device* sort_3 [[buffer(8)]], uint device* scan_blocks_3 [[buffer(12)]], Record_natural_0 device* manifolds_3 [[buffer(9)]])
 {
     thread KernelContext_0 kernelContext_4;
     (&kernelContext_4)->params_1 = params_4;
@@ -404,6 +407,7 @@ bool record_live_0(uint slot_0, KernelContext_0 thread* kernelContext_3)
     (&kernelContext_4)->start_bodies_0 = start_bodies_3;
     (&kernelContext_4)->counts_0 = counts_3;
     (&kernelContext_4)->sort_0 = sort_3;
+    (&kernelContext_4)->scan_blocks_0 = scan_blocks_3;
     (&kernelContext_4)->manifolds_0 = manifolds_3;
     threadgroup array<uint, int(1024)> g_scan_3;
     (&kernelContext_4)->g_scan_0 = &g_scan_3;
@@ -433,167 +437,143 @@ bool record_live_0(uint slot_0, KernelContext_0 thread* kernelContext_3)
     return;
 }
 
-[[kernel]] void ingest_scan(uint3 thread_0 [[thread_position_in_threadgroup]], IngestParams_0 constant* params_5 [[buffer(0)]], uint device* row_counts_4 [[buffer(11)]], uint device* counters_4 [[buffer(5)]], Record_natural_0 device* records_4 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_4 [[buffer(1)]], EngineCollider_natural_0 device* colliders_4 [[buffer(2)]], EngineBody_natural_0 device* bodies_4 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_4 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_4 [[buffer(4)]], atomic<uint> device* counts_4 [[buffer(10)]], uint device* sort_4 [[buffer(8)]], Record_natural_0 device* manifolds_4 [[buffer(9)]])
+void group_scan_0(uint tid_0, KernelContext_0 thread* kernelContext_5)
 {
-    thread KernelContext_0 kernelContext_5;
-    (&kernelContext_5)->params_1 = params_5;
-    (&kernelContext_5)->row_counts_0 = row_counts_4;
-    (&kernelContext_5)->counters_0 = counters_4;
-    (&kernelContext_5)->records_0 = records_4;
-    (&kernelContext_5)->contacts_0 = contacts_4;
-    (&kernelContext_5)->colliders_0 = colliders_4;
-    (&kernelContext_5)->bodies_0 = bodies_4;
-    (&kernelContext_5)->collider_info_0 = collider_info_4;
-    (&kernelContext_5)->start_bodies_0 = start_bodies_4;
-    (&kernelContext_5)->counts_0 = counts_4;
-    (&kernelContext_5)->sort_0 = sort_4;
-    (&kernelContext_5)->manifolds_0 = manifolds_4;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint step_0 = 1U;
+    for(;;)
+    {
+        if(step_0 < 1024U)
+        {
+        }
+        else
+        {
+            break;
+        }
+        uint add_0;
+        if(tid_0 >= step_0)
+        {
+            add_0 = (*kernelContext_5->g_scan_0)[tid_0 - step_0];
+        }
+        else
+        {
+            add_0 = 0U;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        (*kernelContext_5->g_scan_0)[tid_0] = (*kernelContext_5->g_scan_0)[tid_0] + add_0;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        step_0 = step_0 << 1U;
+    }
+    return;
+}
+
+[[kernel]] void ingest_scan(uint3 thread_0 [[thread_position_in_threadgroup]], uint3 group_0 [[threadgroup_position_in_grid]], IngestParams_0 constant* params_5 [[buffer(0)]], uint device* row_counts_4 [[buffer(11)]], uint device* counters_4 [[buffer(5)]], Record_natural_0 device* records_4 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_4 [[buffer(1)]], EngineCollider_natural_0 device* colliders_4 [[buffer(2)]], EngineBody_natural_0 device* bodies_4 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_4 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_4 [[buffer(4)]], atomic<uint> device* counts_4 [[buffer(10)]], uint device* sort_4 [[buffer(8)]], uint device* scan_blocks_4 [[buffer(12)]], Record_natural_0 device* manifolds_4 [[buffer(9)]])
+{
+    thread KernelContext_0 kernelContext_6;
+    (&kernelContext_6)->params_1 = params_5;
+    (&kernelContext_6)->row_counts_0 = row_counts_4;
+    (&kernelContext_6)->counters_0 = counters_4;
+    (&kernelContext_6)->records_0 = records_4;
+    (&kernelContext_6)->contacts_0 = contacts_4;
+    (&kernelContext_6)->colliders_0 = colliders_4;
+    (&kernelContext_6)->bodies_0 = bodies_4;
+    (&kernelContext_6)->collider_info_0 = collider_info_4;
+    (&kernelContext_6)->start_bodies_0 = start_bodies_4;
+    (&kernelContext_6)->counts_0 = counts_4;
+    (&kernelContext_6)->sort_0 = sort_4;
+    (&kernelContext_6)->scan_blocks_0 = scan_blocks_4;
+    (&kernelContext_6)->manifolds_0 = manifolds_4;
     threadgroup array<uint, int(1024)> g_scan_4;
-    (&kernelContext_5)->g_scan_0 = &g_scan_4;
-    uint tid_0 = thread_0.x;
-    uint n_1 = params_5->chunk_count_0;
+    (&kernelContext_6)->g_scan_0 = &g_scan_4;
+    uint tid_1 = thread_0.x;
+    uint _S43 = group_0.x;
+    uint k_0 = _S43 * 1024U + tid_1;
+    bool _S44 = k_0 < (params_5->chunk_count_0);
+    uint v_2;
+    if(_S44)
+    {
+        uint _S45 = atomic_load_explicit((&kernelContext_6)->counts_0+k_0, memory_order_relaxed);
+        v_2 = _S45;
+    }
+    else
+    {
+        v_2 = 0U;
+    }
+    (*(&kernelContext_6)->g_scan_0)[tid_1] = v_2;
+    group_scan_0(tid_1, &kernelContext_6);
+    if(_S44)
+    {
+        *((&kernelContext_6)->sort_0+k_0) = (*(&kernelContext_6)->g_scan_0)[tid_1] - v_2;
+    }
+    if(tid_1 == 1023U)
+    {
+        *((&kernelContext_6)->scan_blocks_0+_S43) = (*(&kernelContext_6)->g_scan_0)[int(1023)];
+    }
+    return;
+}
+
+[[kernel]] void ingest_scan_blocks(uint3 thread_1 [[thread_position_in_threadgroup]], IngestParams_0 constant* params_6 [[buffer(0)]], uint device* row_counts_5 [[buffer(11)]], uint device* counters_5 [[buffer(5)]], Record_natural_0 device* records_5 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_5 [[buffer(1)]], EngineCollider_natural_0 device* colliders_5 [[buffer(2)]], EngineBody_natural_0 device* bodies_5 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_5 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_5 [[buffer(4)]], atomic<uint> device* counts_5 [[buffer(10)]], uint device* sort_5 [[buffer(8)]], uint device* scan_blocks_5 [[buffer(12)]], Record_natural_0 device* manifolds_5 [[buffer(9)]])
+{
+    thread KernelContext_0 kernelContext_7;
+    (&kernelContext_7)->params_1 = params_6;
+    (&kernelContext_7)->row_counts_0 = row_counts_5;
+    (&kernelContext_7)->counters_0 = counters_5;
+    (&kernelContext_7)->records_0 = records_5;
+    (&kernelContext_7)->contacts_0 = contacts_5;
+    (&kernelContext_7)->colliders_0 = colliders_5;
+    (&kernelContext_7)->bodies_0 = bodies_5;
+    (&kernelContext_7)->collider_info_0 = collider_info_5;
+    (&kernelContext_7)->start_bodies_0 = start_bodies_5;
+    (&kernelContext_7)->counts_0 = counts_5;
+    (&kernelContext_7)->sort_0 = sort_5;
+    (&kernelContext_7)->scan_blocks_0 = scan_blocks_5;
+    (&kernelContext_7)->manifolds_0 = manifolds_5;
+    threadgroup array<uint, int(1024)> g_scan_5;
+    (&kernelContext_7)->g_scan_0 = &g_scan_5;
+    uint tid_2 = thread_1.x;
+    uint _S46 = (params_6->chunk_count_0 + 1023U) / 1024U;
     uint base_1 = 0U;
     uint carry_0 = 0U;
     for(;;)
     {
-        if(base_1 < n_1)
+        if(base_1 < _S46)
         {
         }
         else
         {
             break;
         }
-        uint k_0 = base_1 + tid_0;
-        bool _S43 = k_0 < n_1;
-        uint v_2;
-        if(_S43)
+        uint b_1 = base_1 + tid_2;
+        bool _S47 = b_1 < _S46;
+        uint v_3;
+        if(_S47)
         {
-            uint _S44 = atomic_load_explicit((&kernelContext_5)->counts_0+k_0, memory_order_relaxed);
-            v_2 = _S44;
+            v_3 = *((&kernelContext_7)->scan_blocks_0+b_1);
         }
         else
         {
-            v_2 = 0U;
+            v_3 = 0U;
         }
-        (*(&kernelContext_5)->g_scan_0)[tid_0] = v_2;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        uint step_0 = 1U;
-        for(;;)
+        (*(&kernelContext_7)->g_scan_0)[tid_2] = v_3;
+        group_scan_0(tid_2, &kernelContext_7);
+        if(_S47)
         {
-            if(step_0 < 1024U)
-            {
-            }
-            else
-            {
-                break;
-            }
-            uint add_0;
-            if(tid_0 >= step_0)
-            {
-                add_0 = (*(&kernelContext_5)->g_scan_0)[tid_0 - step_0];
-            }
-            else
-            {
-                add_0 = 0U;
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            (*(&kernelContext_5)->g_scan_0)[tid_0] = (*(&kernelContext_5)->g_scan_0)[tid_0] + add_0;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            step_0 = step_0 << 1U;
-        }
-        if(_S43)
-        {
-            *((&kernelContext_5)->sort_0+k_0) = carry_0 + (*(&kernelContext_5)->g_scan_0)[tid_0] - v_2;
+            *((&kernelContext_7)->scan_blocks_0+b_1) = carry_0 + (*(&kernelContext_7)->g_scan_0)[tid_2] - v_3;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        uint carry_1 = carry_0 + (*(&kernelContext_5)->g_scan_0)[int(1023)];
+        uint carry_1 = carry_0 + (*(&kernelContext_7)->g_scan_0)[int(1023)];
         base_1 = base_1 + 1024U;
         carry_0 = carry_1;
     }
-    if(tid_0 == 0U)
+    if(tid_2 == 0U)
     {
-        *((&kernelContext_5)->sort_0+n_1) = carry_0;
+        *((&kernelContext_7)->sort_0+params_6->chunk_count_0) = carry_0;
     }
     return;
 }
 
-[[kernel]] void ingest_scatter(uint3 id_3 [[thread_position_in_grid]], IngestParams_0 constant* params_6 [[buffer(0)]], uint device* row_counts_5 [[buffer(11)]], uint device* counters_5 [[buffer(5)]], Record_natural_0 device* records_5 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_5 [[buffer(1)]], EngineCollider_natural_0 device* colliders_5 [[buffer(2)]], EngineBody_natural_0 device* bodies_5 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_5 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_5 [[buffer(4)]], atomic<uint> device* counts_5 [[buffer(10)]], uint device* sort_5 [[buffer(8)]], Record_natural_0 device* manifolds_5 [[buffer(9)]])
+[[kernel]] void ingest_scan_add(uint3 id_3 [[thread_position_in_grid]], IngestParams_0 constant* params_7 [[buffer(0)]], uint device* row_counts_6 [[buffer(11)]], uint device* counters_6 [[buffer(5)]], Record_natural_0 device* records_6 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_6 [[buffer(1)]], EngineCollider_natural_0 device* colliders_6 [[buffer(2)]], EngineBody_natural_0 device* bodies_6 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_6 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_6 [[buffer(4)]], atomic<uint> device* counts_6 [[buffer(10)]], uint device* sort_6 [[buffer(8)]], uint device* scan_blocks_6 [[buffer(12)]], Record_natural_0 device* manifolds_6 [[buffer(9)]])
 {
-    thread KernelContext_0 kernelContext_6;
-    (&kernelContext_6)->params_1 = params_6;
-    (&kernelContext_6)->row_counts_0 = row_counts_5;
-    (&kernelContext_6)->counters_0 = counters_5;
-    (&kernelContext_6)->records_0 = records_5;
-    (&kernelContext_6)->contacts_0 = contacts_5;
-    (&kernelContext_6)->colliders_0 = colliders_5;
-    (&kernelContext_6)->bodies_0 = bodies_5;
-    (&kernelContext_6)->collider_info_0 = collider_info_5;
-    (&kernelContext_6)->start_bodies_0 = start_bodies_5;
-    (&kernelContext_6)->counts_0 = counts_5;
-    (&kernelContext_6)->sort_0 = sort_5;
-    (&kernelContext_6)->manifolds_0 = manifolds_5;
-    threadgroup array<uint, int(1024)> g_scan_5;
-    (&kernelContext_6)->g_scan_0 = &g_scan_5;
-    uint _S45 = params_6->chunk_count_0;
-    uint i_2 = id_3.x;
-    for(;;)
-    {
-        if(i_2 < ((&kernelContext_6)->params_1->record_count_0))
-        {
-        }
-        else
-        {
-            break;
-        }
-        bool _S46 = record_live_0(i_2, &kernelContext_6);
-        if(!_S46)
-        {
-            i_2 = i_2 + 4194240U;
-            continue;
-        }
-        uint4 _S47 = uint4((*((&kernelContext_6)->records_0+i_2)).ids_0) ;
-        if((_S47.w) == 0U)
-        {
-            i_2 = i_2 + 4194240U;
-            continue;
-        }
-        uint _S48 = _S47.x;
-        uint at_0 = atomic_fetch_add_explicit((&kernelContext_6)->counts_0+(_S45 + _S48), 1U, memory_order_relaxed);
-        *((&kernelContext_6)->sort_0+(2U * _S45 + 1U + *((&kernelContext_6)->sort_0+_S48) + at_0)) = i_2;
-        i_2 = i_2 + 4194240U;
-    }
-    return;
-}
-
-bool record_before_0(uint a_1, uint b_1, KernelContext_0 thread* kernelContext_7)
-{
-    uint4 _S49 = uint4((kernelContext_7->records_0+a_1)->key_0) ;
-    uint4 _S50 = uint4((kernelContext_7->records_0+b_1)->key_0) ;
-    uint q_1 = 0U;
-    for(;;)
-    {
-        if(q_1 < 4U)
-        {
-        }
-        else
-        {
-            break;
-        }
-        uint _S51 = q_1;
-        uint _S52 = q_1;
-        if((_S49[q_1]) != (_S50[q_1]))
-        {
-            return (_S49[_S51]) < (_S50[_S52]);
-        }
-        q_1 = q_1 + 1U;
-    }
-    return a_1 < b_1;
-}
-
-[[kernel]] void ingest_merge(uint3 id_4 [[thread_position_in_grid]], IngestParams_0 constant* params_7 [[buffer(0)]], uint device* row_counts_6 [[buffer(11)]], uint device* counters_6 [[buffer(5)]], Record_natural_0 device* records_6 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_6 [[buffer(1)]], EngineCollider_natural_0 device* colliders_6 [[buffer(2)]], EngineBody_natural_0 device* bodies_6 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_6 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_6 [[buffer(4)]], atomic<uint> device* counts_6 [[buffer(10)]], uint device* sort_6 [[buffer(8)]], Record_natural_0 device* manifolds_6 [[buffer(9)]])
-{
-    uint b_2;
-    uint m_0;
     thread KernelContext_0 kernelContext_8;
     (&kernelContext_8)->params_1 = params_7;
     (&kernelContext_8)->row_counts_0 = row_counts_6;
@@ -606,73 +586,177 @@ bool record_before_0(uint a_1, uint b_1, KernelContext_0 thread* kernelContext_7
     (&kernelContext_8)->start_bodies_0 = start_bodies_6;
     (&kernelContext_8)->counts_0 = counts_6;
     (&kernelContext_8)->sort_0 = sort_6;
+    (&kernelContext_8)->scan_blocks_0 = scan_blocks_6;
     (&kernelContext_8)->manifolds_0 = manifolds_6;
     threadgroup array<uint, int(1024)> g_scan_6;
     (&kernelContext_8)->g_scan_0 = &g_scan_6;
-    uint k_1 = id_4.x;
-    uint n_2 = params_7->chunk_count_0;
-    if(k_1 >= (params_7->chunk_count_0))
+    uint k_1 = id_3.x;
+    if(k_1 < (params_7->chunk_count_0))
     {
-        return;
+        uint device* _S48 = (&kernelContext_8)->sort_0+k_1;
+        *_S48 = *_S48 + *((&kernelContext_8)->scan_blocks_0+k_1 / 1024U);
     }
-    uint device* _S53 = (&kernelContext_8)->sort_0+k_1;
-    uint begin_0 = *_S53;
-    uint _S54 = *((&kernelContext_8)->sort_0+(k_1 + 1U));
-    uint _S55 = 2U * n_2 + 1U;
-    uint a_2 = *_S53 + 1U;
+    return;
+}
+
+[[kernel]] void ingest_scatter(uint3 id_4 [[thread_position_in_grid]], IngestParams_0 constant* params_8 [[buffer(0)]], uint device* row_counts_7 [[buffer(11)]], uint device* counters_7 [[buffer(5)]], Record_natural_0 device* records_7 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_7 [[buffer(1)]], EngineCollider_natural_0 device* colliders_7 [[buffer(2)]], EngineBody_natural_0 device* bodies_7 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_7 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_7 [[buffer(4)]], atomic<uint> device* counts_7 [[buffer(10)]], uint device* sort_7 [[buffer(8)]], uint device* scan_blocks_7 [[buffer(12)]], Record_natural_0 device* manifolds_7 [[buffer(9)]])
+{
+    thread KernelContext_0 kernelContext_9;
+    (&kernelContext_9)->params_1 = params_8;
+    (&kernelContext_9)->row_counts_0 = row_counts_7;
+    (&kernelContext_9)->counters_0 = counters_7;
+    (&kernelContext_9)->records_0 = records_7;
+    (&kernelContext_9)->contacts_0 = contacts_7;
+    (&kernelContext_9)->colliders_0 = colliders_7;
+    (&kernelContext_9)->bodies_0 = bodies_7;
+    (&kernelContext_9)->collider_info_0 = collider_info_7;
+    (&kernelContext_9)->start_bodies_0 = start_bodies_7;
+    (&kernelContext_9)->counts_0 = counts_7;
+    (&kernelContext_9)->sort_0 = sort_7;
+    (&kernelContext_9)->scan_blocks_0 = scan_blocks_7;
+    (&kernelContext_9)->manifolds_0 = manifolds_7;
+    threadgroup array<uint, int(1024)> g_scan_7;
+    (&kernelContext_9)->g_scan_0 = &g_scan_7;
+    uint _S49 = params_8->chunk_count_0;
+    uint i_2 = id_4.x;
     for(;;)
     {
-        if(a_2 < _S54)
+        if(i_2 < ((&kernelContext_9)->params_1->record_count_0))
         {
         }
         else
         {
             break;
         }
-        uint v_3 = *((&kernelContext_8)->sort_0+(_S55 + a_2));
-        b_2 = a_2;
+        bool _S50 = record_live_0(i_2, &kernelContext_9);
+        if(!_S50)
+        {
+            i_2 = i_2 + 4194240U;
+            continue;
+        }
+        uint4 _S51 = uint4((*((&kernelContext_9)->records_0+i_2)).ids_0) ;
+        if((_S51.w) == 0U)
+        {
+            i_2 = i_2 + 4194240U;
+            continue;
+        }
+        uint _S52 = _S51.x;
+        uint at_0 = atomic_fetch_add_explicit((&kernelContext_9)->counts_0+(_S49 + _S52), 1U, memory_order_relaxed);
+        *((&kernelContext_9)->sort_0+(2U * _S49 + 1U + *((&kernelContext_9)->sort_0+_S52) + at_0)) = i_2;
+        i_2 = i_2 + 4194240U;
+    }
+    return;
+}
+
+bool record_before_0(uint a_1, uint b_2, KernelContext_0 thread* kernelContext_10)
+{
+    uint4 _S53 = uint4((kernelContext_10->records_0+a_1)->key_0) ;
+    uint4 _S54 = uint4((kernelContext_10->records_0+b_2)->key_0) ;
+    uint q_1 = 0U;
+    for(;;)
+    {
+        if(q_1 < 4U)
+        {
+        }
+        else
+        {
+            break;
+        }
+        uint _S55 = q_1;
+        uint _S56 = q_1;
+        if((_S53[q_1]) != (_S54[q_1]))
+        {
+            return (_S53[_S55]) < (_S54[_S56]);
+        }
+        q_1 = q_1 + 1U;
+    }
+    return a_1 < b_2;
+}
+
+[[kernel]] void ingest_merge(uint3 id_5 [[thread_position_in_grid]], IngestParams_0 constant* params_9 [[buffer(0)]], uint device* row_counts_8 [[buffer(11)]], uint device* counters_8 [[buffer(5)]], Record_natural_0 device* records_8 [[buffer(7)]], EngineContactRow_natural_0 device* contacts_8 [[buffer(1)]], EngineCollider_natural_0 device* colliders_8 [[buffer(2)]], EngineBody_natural_0 device* bodies_8 [[buffer(3)]], ColliderInfo_natural_0 device* collider_info_8 [[buffer(6)]], EngineBody_natural_0 device* start_bodies_8 [[buffer(4)]], atomic<uint> device* counts_8 [[buffer(10)]], uint device* sort_8 [[buffer(8)]], uint device* scan_blocks_8 [[buffer(12)]], Record_natural_0 device* manifolds_8 [[buffer(9)]])
+{
+    uint b_3;
+    uint m_0;
+    thread KernelContext_0 kernelContext_11;
+    (&kernelContext_11)->params_1 = params_9;
+    (&kernelContext_11)->row_counts_0 = row_counts_8;
+    (&kernelContext_11)->counters_0 = counters_8;
+    (&kernelContext_11)->records_0 = records_8;
+    (&kernelContext_11)->contacts_0 = contacts_8;
+    (&kernelContext_11)->colliders_0 = colliders_8;
+    (&kernelContext_11)->bodies_0 = bodies_8;
+    (&kernelContext_11)->collider_info_0 = collider_info_8;
+    (&kernelContext_11)->start_bodies_0 = start_bodies_8;
+    (&kernelContext_11)->counts_0 = counts_8;
+    (&kernelContext_11)->sort_0 = sort_8;
+    (&kernelContext_11)->scan_blocks_0 = scan_blocks_8;
+    (&kernelContext_11)->manifolds_0 = manifolds_8;
+    threadgroup array<uint, int(1024)> g_scan_8;
+    (&kernelContext_11)->g_scan_0 = &g_scan_8;
+    uint k_2 = id_5.x;
+    uint n_1 = params_9->chunk_count_0;
+    if(k_2 >= (params_9->chunk_count_0))
+    {
+        return;
+    }
+    uint device* _S57 = (&kernelContext_11)->sort_0+k_2;
+    uint begin_0 = *_S57;
+    uint _S58 = *((&kernelContext_11)->sort_0+(k_2 + 1U));
+    uint _S59 = 2U * n_1 + 1U;
+    uint a_2 = *_S57 + 1U;
+    for(;;)
+    {
+        if(a_2 < _S58)
+        {
+        }
+        else
+        {
+            break;
+        }
+        uint v_4 = *((&kernelContext_11)->sort_0+(_S59 + a_2));
+        b_3 = a_2;
         for(;;)
         {
-            bool _S56;
-            if(b_2 > begin_0)
+            bool _S60;
+            if(b_3 > begin_0)
             {
-                bool _S57 = record_before_0(v_3, *((&kernelContext_8)->sort_0+(_S55 + b_2 - 1U)), &kernelContext_8);
-                _S56 = _S57;
+                bool _S61 = record_before_0(v_4, *((&kernelContext_11)->sort_0+(_S59 + b_3 - 1U)), &kernelContext_11);
+                _S60 = _S61;
             }
             else
             {
-                _S56 = false;
+                _S60 = false;
             }
-            if(_S56)
+            if(_S60)
             {
             }
             else
             {
                 break;
             }
-            uint _S58 = _S55 + b_2;
-            *((&kernelContext_8)->sort_0+_S58) = *((&kernelContext_8)->sort_0+(_S58 - 1U));
-            b_2 = b_2 - 1U;
+            uint _S62 = _S59 + b_3;
+            *((&kernelContext_11)->sort_0+_S62) = *((&kernelContext_11)->sort_0+(_S62 - 1U));
+            b_3 = b_3 - 1U;
         }
-        *((&kernelContext_8)->sort_0+(_S55 + b_2)) = v_3;
+        *((&kernelContext_11)->sort_0+(_S59 + b_3)) = v_4;
         a_2 = a_2 + 1U;
     }
     a_2 = begin_0;
-    b_2 = 0U;
+    b_3 = 0U;
     for(;;)
     {
-        if(a_2 < _S54)
+        if(a_2 < _S58)
         {
         }
         else
         {
             break;
         }
-        Record_natural_0 r_1 = *((&kernelContext_8)->records_0+*((&kernelContext_8)->sort_0+(_S55 + a_2)));
+        Record_natural_0 r_1 = *((&kernelContext_11)->records_0+*((&kernelContext_11)->sort_0+(_S59 + a_2)));
         uint q_2 = 0U;
         for(;;)
         {
-            if(q_2 < b_2)
+            if(q_2 < b_3)
             {
             }
             else
@@ -680,7 +764,7 @@ bool record_before_0(uint a_1, uint b_1, KernelContext_0 thread* kernelContext_7
                 m_0 = 4294967295U;
                 break;
             }
-            if(((uint4(((&kernelContext_8)->manifolds_0+(begin_0 + q_2))->ids_0) ).y) == ((uint4(r_1.ids_0) ).y))
+            if(((uint4(((&kernelContext_11)->manifolds_0+(begin_0 + q_2))->ids_0) ).y) == ((uint4(r_1.ids_0) ).y))
             {
                 m_0 = q_2;
                 break;
@@ -689,43 +773,43 @@ bool record_before_0(uint a_1, uint b_1, KernelContext_0 thread* kernelContext_7
         }
         if(m_0 == 4294967295U)
         {
-            *((&kernelContext_8)->manifolds_0+(begin_0 + b_2)) = r_1;
-            b_2 = b_2 + 1U;
+            *((&kernelContext_11)->manifolds_0+(begin_0 + b_3)) = r_1;
+            b_3 = b_3 + 1U;
             a_2 = a_2 + 1U;
             continue;
         }
-        uint _S59 = begin_0 + m_0;
-        Record_natural_0 device* _S60 = (&kernelContext_8)->manifolds_0+_S59;
-        float4 _S61 = float4((*_S60).point_0) ;
-        float4 _S62 = float4((*_S60).impulse_0) ;
-        float4 _S63 = float4((*_S60).other_0) ;
-        uint4 _S64 = uint4((*_S60).key_0) ;
+        uint _S63 = begin_0 + m_0;
+        Record_natural_0 device* _S64 = (&kernelContext_11)->manifolds_0+_S63;
+        float4 _S65 = float4((*_S64).point_0) ;
+        float4 _S66 = float4((*_S64).impulse_0) ;
+        float4 _S67 = float4((*_S64).other_0) ;
+        uint4 _S68 = uint4((*_S64).key_0) ;
         thread Record_0 acc_0;
-        (&acc_0)->ids_0 = uint4((*_S60).ids_0) ;
-        (&acc_0)->point_0 = _S61;
-        (&acc_0)->impulse_0 = _S62;
-        (&acc_0)->other_0 = _S63;
-        (&acc_0)->key_0 = _S64;
+        (&acc_0)->ids_0 = uint4((*_S64).ids_0) ;
+        (&acc_0)->point_0 = _S65;
+        (&acc_0)->impulse_0 = _S66;
+        (&acc_0)->other_0 = _S67;
+        (&acc_0)->key_0 = _S68;
         float w0_0 = (&acc_0)->point_0.w;
-        float4 _S65 = float4(r_1.point_0) ;
-        float w_0 = _S65.w;
+        float4 _S69 = float4(r_1.point_0) ;
+        float w_0 = _S69.w;
         float total_0 = w0_0 + w_0;
         if(total_0 > 0.0f)
         {
-            (&acc_0)->point_0.xyz = ((&acc_0)->point_0.xyz * float3(w0_0)  + _S65.xyz * float3(w_0) ) / float3(total_0) ;
+            (&acc_0)->point_0.xyz = ((&acc_0)->point_0.xyz * float3(w0_0)  + _S69.xyz * float3(w_0) ) / float3(total_0) ;
             (&acc_0)->impulse_0.w = ((&acc_0)->impulse_0.w * w0_0 + (float4(r_1.impulse_0) ).w * w_0) / total_0;
         }
         (&acc_0)->impulse_0.xyz = (&acc_0)->impulse_0.xyz + (float4(r_1.impulse_0) ).xyz;
         (&acc_0)->point_0.w = total_0;
-        Record_natural_0 device* _S66 = (&kernelContext_8)->manifolds_0+_S59;
-        _S66->ids_0 = packed_uint4(acc_0.ids_0) ;
-        _S66->point_0 = packed_float4(acc_0.point_0) ;
-        _S66->impulse_0 = packed_float4(acc_0.impulse_0) ;
-        _S66->other_0 = packed_float4(acc_0.other_0) ;
-        _S66->key_0 = packed_uint4(acc_0.key_0) ;
+        Record_natural_0 device* _S70 = (&kernelContext_11)->manifolds_0+_S63;
+        _S70->ids_0 = packed_uint4(acc_0.ids_0) ;
+        _S70->point_0 = packed_float4(acc_0.point_0) ;
+        _S70->impulse_0 = packed_float4(acc_0.impulse_0) ;
+        _S70->other_0 = packed_float4(acc_0.other_0) ;
+        _S70->key_0 = packed_uint4(acc_0.key_0) ;
         a_2 = a_2 + 1U;
     }
-    *((&kernelContext_8)->sort_0+(n_2 + 1U + k_1)) = b_2;
+    *((&kernelContext_11)->sort_0+(n_1 + 1U + k_2)) = b_3;
     return;
 }
 

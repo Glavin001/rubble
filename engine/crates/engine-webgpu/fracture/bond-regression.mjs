@@ -1,10 +1,11 @@
-// Breakable bond joints (JOINT_BOND) on the GPU, run in the browser:
-//   import('./bond-regression.mjs').then(m=>m.runBondGpuTests(device))
+// Breakable bond joints (JOINT_BOND) on the GPU, on rubble's World (StrengthModel::Bonds),
+// run in the lab's page (any scene loaded):
+//   import('./bond-regression.mjs').then(m=>m.runBondGpuTests())
 // Each case is a small scene of unit-density boxes welded by bonds, judged by
 // physical invariants (a strong weld holds, a weak one breaks the right way).
-import {createSimulation} from './simulation.mjs';
+import {createLabWorld,bondAsset} from './lab-world.mjs';
 import {quatMul,quatConjugate,inverseRotate,sub} from './vec.mjs';
-import {scaleBondSprings} from './wasm.mjs';
+import {scaleBondSprings,sceneHandle,sceneObject} from './wasm.mjs';
 
 const H=0.25,MASS=1000*(2*H)**3,G=9.81;
 const box=(p,q=[0,0,0,1])=>({p,q,invMass:1/MASS,invI:Array(3).fill(1/(MASS*(2*H)**2/6)),flags:9});
@@ -29,13 +30,13 @@ function scene(bodies,joints,extra=[]){
 let penaltyScale;
 async function run(device,sc,steps){
   sc={...sc,joints:scaleBondSprings(sc.joints,sc.bodies,1/120,penaltyScale)};
-  const sim=await createSimulation(device,sc);
-  try{for(let s=0;s<steps;s+=4)await sim.step(4);const snap=await sim.snapshot(),flags=await sim.jointFlags();
-    return {pos:i=>[snap[i*28],snap[i*28+1],snap[i*28+2]],rot:i=>[snap[i*28+4],snap[i*28+5],snap[i*28+6],snap[i*28+7]],flags:[...flags],counters:sim.counters};}
+  const scene=sceneObject(sceneHandle(sc)),sim=await createLabWorld(scene,bondAsset(scene));
+  try{await sim.step(steps);const snap=await sim.snapshot(),flags=Array.from(sim.bondsIntact(),k=>k?0:1);
+    return {pos:i=>[snap[i*28],snap[i*28+1],snap[i*28+2]],rot:i=>[snap[i*28+4],snap[i*28+5],snap[i*28+6],snap[i*28+7]],flags,counters:sim.counters};}
   finally{sim.dispose()}
 }
 
-export async function runBondGpuTests(device,{scale}={}){
+export async function runBondGpuTests(device=null,{scale}={}){
   penaltyScale=scale;
   const out={},weight=MASS*G;
   const ground={p:[0,0,0],q:[0,0,0,1],invMass:0,invI:[0,0,0],flags:0};

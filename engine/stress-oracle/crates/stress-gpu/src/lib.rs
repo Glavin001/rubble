@@ -7,6 +7,7 @@
 //! Everything on the GPU is f32; accuracy against the reference is measured, not assumed.
 
 pub mod colliders;
+pub mod shapes;
 
 /// The GPU's split path: splits laid out on the GPU (`STRESS_GPU_LAYOUT`), and a frame's
 /// cascade and splits in one submission (`STRESS_GPU_FRAME`). On when a capability profile
@@ -172,7 +173,7 @@ pub mod shaders {
     );
     pub const COUPLING: ShaderSet = shader_set!(
         "coupling",
-        [("ingest_rows", (64, 1, 1)), ("ingest_clear", (64, 1, 1)), ("ingest_count", (64, 1, 1)), ("ingest_scan", (1024, 1, 1)), ("ingest_scatter", (64, 1, 1)), ("ingest_merge", (64, 1, 1))]
+        [("ingest_rows", (64, 1, 1)), ("ingest_clear", (64, 1, 1)), ("ingest_count", (64, 1, 1)), ("ingest_scan", (1024, 1, 1)), ("ingest_scan_blocks", (1024, 1, 1)), ("ingest_scan_add", (64, 1, 1)), ("ingest_scatter", (64, 1, 1)), ("ingest_merge", (64, 1, 1))]
     );
     pub const RESIDENT: ShaderSet = shader_set!("resident", [("resident_poses", (64, 1, 1)), ("resident_filter", (64, 1, 1)), ("resident_static_loads", (256, 1, 1))]);
     pub const CASCADE: ShaderSet = shader_set!("cascade", [("cascade_begin", (64, 1, 1)), ("cascade_gate", (64, 1, 1)), ("cascade_fixed", (64, 1, 1)), ("cascade_restore", (64, 1, 1)), ("cascade_settle", (64, 1, 1)), ("cascade_end", (256, 1, 1)), ("cascade_backup", (64, 1, 1))]);
@@ -212,6 +213,7 @@ pub mod shaders {
             ("spawn_colliders_phased", (64, 1, 1)),
         ]
     );
+    pub const SHAPES: ShaderSet = shader_set!("shapes", [("shapes_deform", (64, 1, 1))]);
     pub const COLLIDERS: ShaderSet = shader_set!("colliders", [("collider_keys", (64, 1, 1)), ("collider_slots", (64, 1, 1)), ("collider_refresh", (64, 1, 1))]);
     pub const PASS: ShaderSet = shader_set!(
         "pass",
@@ -263,6 +265,7 @@ pub mod shaders {
             ("fr_strike_nearest", (64, 1, 1)),
             ("fr_strike_force", (64, 1, 1)),
             ("fr_strike_breaks", (64, 1, 1)),
+            ("fr_events_reset", (1, 1, 1)),
             ("fr_lp_clear", (64, 1, 1)),
             ("fr_lp_sum", (64, 1, 1)),
             ("fr_lp_relief", (64, 1, 1)),
@@ -326,7 +329,7 @@ pub mod shaders {
 
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
-        WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, CRUSH_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
+        WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, CRUSH_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, SHAPES, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
         HUD_OVERLAY, THRESHOLD, FRACTURE,
     ];
 }

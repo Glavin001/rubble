@@ -627,7 +627,6 @@ impl RigidStep {
             sparse_start: 32,
             color_headroom: Some(2),
             color_round_headroom: Some(2),
-            tail_ok: self.cap.max_bodies <= (1 << 16) * 8,
             ..Default::default()
         }
     }
@@ -680,6 +679,7 @@ impl RigidStep {
             guidance: self.guide_active(),
             guide_slots: self.guide.as_ref().map_or(0, |g| g.cap.plan_budget),
             explosion_count: 0,
+            post_stabilize: self.params.flags & engine_schema::FLAG_POST_STAB != 0,
             // counts[18]: bit 0 CCD bodies, bit 1 kinematic bodies, bit 2 impulse
             // records this step, bit 3 heightfield colliders (has_height_field,
             // below); counts[19] projectiles, counts[20] characters, counts[21]

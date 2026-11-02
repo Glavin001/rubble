@@ -101,7 +101,10 @@ fn a_block_freed_on_the_gpu_lands_on_the_ground() {
         assert!(w.launch(&gpu, &desc), "shot launched");
     }
     let mut lowest = f64::INFINITY;
-    for _ in 0..400 {
+    // 20 s: the CCD shots (`ImpactorDesc::ccd`) break the columns differently from one
+    // frame to the next, and the block can settle on their stubs and slide off them late
+    // (from 2.4 m up to 2.0 m at about 18 s) before it rests.
+    for _ in 0..1200 {
         w.step_frame(&gpu).expect("frame");
         let c = w.chunk_centres(&gpu);
         lowest = lowest.min(height(c[top].0));

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use stress_gpu::gpu::Gpu;
 use stress_gpu::ingest::{ColliderInfo, EngineBuffers, EngineIngest, KIND_BODY, KIND_STATIC, NONE};
-use stress_gpu::resident::{EngineFrame, OtherProps, ResidentEngine};
+use stress_gpu::resident::{ColliderRest, EngineFrame, OtherProps, ResidentEngine};
 use stress_ref::engine::BodyKey;
 use stress_ref::math::Vec3;
 
@@ -231,6 +231,7 @@ impl ResidentEngine for RubbleEngine {
                     ccd: a.ccd,
                     // Only CCD bodies' substep bound reads it.
                     thin: a.thin,
+                    poses: None,
                 },
             );
         }
@@ -260,6 +261,20 @@ impl ResidentEngine for RubbleEngine {
         }
         self.colliders_changed(col_range);
         Ok(())
+    }
+
+    fn collider_rest(&self, range: std::ops::Range<u32>) -> Option<Vec<Option<ColliderRest>>> {
+        Some(
+            (range.start..range.end)
+                .map(|i| match self.owners[i as usize] {
+                    Owner::Body { key, chunk: Some(chunk) } => self.bodies.get(&key).map(|e| {
+                        let c = &self.cols[i as usize];
+                        ColliderRest { chunk, com: e.com, principal: e.principal, local_pos: c.local_pos, local_rot: c.local_rot }
+                    }),
+                    _ => None,
+                })
+                .collect(),
+        )
     }
 
     fn collider_capacity(&self) -> u32 {

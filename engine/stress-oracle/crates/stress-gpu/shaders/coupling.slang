@@ -10,7 +10,7 @@
 //                   stress-rubble `contacts_of_step` and world_coupling.rs
 //                   `engine_contacts_to_impulses` compute them; records at fixed slots
 //                   (substep, row, side), so their order is the host's;
-//   ingest_count, ingest_scan, ingest_scatter   the frame's records grouped by chunk
+//   ingest_count, ingest_scan*, ingest_scatter   the frame's records grouped by chunk
 //                   (a counting sort; atomics only on integer counts);
 //   ingest_merge    one thread per chunk: its records in slot order, merged per other
 //                   body in order of first appearance (coupled.rs `manifolds`): summed
@@ -113,6 +113,8 @@ struct Record
 // Per substep: the engine's contact rows it had (`ingest_rows`); the records of rows past
 // them are stale and not read (`record_live`).
 [[vk::binding(11, 0)]] RWStructuredBuffer<uint> row_counts;
+// Per block of 1024 chunks: its count total, then its first segment start (`ingest_scan`).
+[[vk::binding(12, 0)]] RWStructuredBuffer<uint> scan_blocks;
 
 // Whether record `slot` belongs to a row of its substep (rows past the substep's count are
 // neither written nor read).
@@ -245,37 +247,75 @@ void ingest_count(uint3 id: SV_DispatchThreadID)
     }
 }
 
-// Segment starts: an exclusive scan of the counts by one group (chunk_count / 1024 rounds).
+// Segment starts: an exclusive scan of the counts in three passes, so its cost spreads
+// over the GPU instead of one group walking every chunk (city_scale: 732k chunks, 3.8 ms
+// a frame in one group). Integer sums, so the starts are the same in any grouping.
+//   ingest_scan          one group per 1024 chunks: the exclusive scan within the block,
+//                        and the block's total (`scan_blocks`);
+//   ingest_scan_blocks   one group: the exclusive scan of the block totals, and the
+//                        frame's total (`sort[n]`);
+//   ingest_scan_add      one thread per chunk: its block's start added.
 groupshared uint g_scan[1024];
+
+// The inclusive scan of `g_scan` by the group (each thread's value already stored).
+void group_scan(uint tid)
+{
+    GroupMemoryBarrierWithGroupSync();
+    for (uint step = 1; step < 1024; step <<= 1)
+    {
+        uint add = tid >= step ? g_scan[tid - step] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        g_scan[tid] += add;
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
 
 [shader("compute")]
 [numthreads(1024, 1, 1)]
-void ingest_scan(uint3 thread: SV_GroupThreadID)
+void ingest_scan(uint3 thread: SV_GroupThreadID, uint3 group: SV_GroupID)
 {
     uint tid = thread.x;
     uint n = params.chunk_count;
+    uint k = group.x * 1024 + tid;
+    uint v = k < n ? counts[k].load() : 0;
+    g_scan[tid] = v;
+    group_scan(tid);
+    if (k < n)
+        sort[k] = g_scan[tid] - v;
+    if (tid == 1023)
+        scan_blocks[group.x] = g_scan[1023];
+}
+
+[shader("compute")]
+[numthreads(1024, 1, 1)]
+void ingest_scan_blocks(uint3 thread: SV_GroupThreadID)
+{
+    uint tid = thread.x;
+    uint blocks = (params.chunk_count + 1023) / 1024;
     uint carry = 0;
-    for (uint base = 0; base < n; base += 1024)
+    for (uint base = 0; base < blocks; base += 1024)
     {
-        uint k = base + tid;
-        uint v = k < n ? counts[k].load() : 0;
+        uint b = base + tid;
+        uint v = b < blocks ? scan_blocks[b] : 0;
         g_scan[tid] = v;
-        GroupMemoryBarrierWithGroupSync();
-        for (uint step = 1; step < 1024; step <<= 1)
-        {
-            uint add = tid >= step ? g_scan[tid - step] : 0;
-            GroupMemoryBarrierWithGroupSync();
-            g_scan[tid] += add;
-            GroupMemoryBarrierWithGroupSync();
-        }
-        if (k < n)
-            sort[k] = carry + g_scan[tid] - v;
+        group_scan(tid);
+        if (b < blocks)
+            scan_blocks[b] = carry + g_scan[tid] - v;
         uint total = g_scan[1023];
         GroupMemoryBarrierWithGroupSync();
         carry += total;
     }
     if (tid == 0)
-        sort[n] = carry;
+        sort[params.chunk_count] = carry;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ingest_scan_add(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k < params.chunk_count)
+        sort[k] += scan_blocks[k / 1024];
 }
 
 [shader("compute")]

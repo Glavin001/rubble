@@ -24,14 +24,26 @@ fn capacity(asset: &DestructibleAssetDesc) -> WorldCapacity {
 /// A world with the asset's threshold solver and the stress scene's ground, `offset`
 /// placing the asset.
 fn world_for(asset: &DestructibleAssetDesc, offset: [f32; 3]) -> World {
-    let solver = asset
+    let mut solver = asset
         .solver_for(StrengthModel::Threshold)
         .expect("threshold solver");
+    // THRESHOLD_SLEEP=1 (probe): the engine's default sleep thresholds instead of never.
+    let sleep = std::env::var("THRESHOLD_SLEEP").is_ok();
+    if sleep {
+        if std::env::var("THRESHOLD_WAKE_ON_TOUCH").is_ok() {
+            solver = asset.sleeping_solver_for(StrengthModel::Threshold).unwrap();
+        } else {
+            let d = AvbdParams::default();
+            solver.sleep_lin = d.sleep_lin;
+            solver.sleep_ang = d.sleep_ang;
+            solver.sleep_time = d.sleep_time;
+        }
+    }
     let def = WorldDef {
         capacity: capacity(asset),
         gravity: [0.0, solver.gravity_y, 0.0],
         solver,
-        enable_sleep: false,
+        enable_sleep: sleep,
         contacts: ContactStorage::Canonical,
         ..WorldDef::default()
     };
@@ -84,47 +96,108 @@ struct Outcome {
 
 /// Place `asset` as a threshold destructible, fire the lab's shot, step `frames`.
 fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames: u32) -> Outcome {
-    run_world_with(asset, lab, frames, false, &mut |_, _| {})
+    run_world_among(asset, lab, frames, false, None, false, &mut |_, _| {}).unwrap()
 }
 
-/// `run_world` with the destructible a bullet (`DestructibleDef::is_bullet`) as given, and
-/// `inspect` shown the world and the destructible after the last frame.
-fn run_world_with(
+/// `run_world`, with `neighbours`: copies of the asset placed 80 m and 160 m along x in
+/// the same world (one more placed and destroyed before the shot's target, whose freed
+/// tables the target then takes), and the first neighbour destroyed at the end. The
+/// neighbours never break, and the target breaks as it does alone. The target a bullet
+/// (`DestructibleDef::is_bullet`) as given, and `inspect` shown the world and the target
+/// after the last frame.
+fn run_world_among(
     asset: &DestructibleAssetDesc,
     lab: &engine_fracture::Scene,
     frames: u32,
+    neighbours: bool,
+    pool: Option<u32>,
     is_bullet: bool,
     inspect: &mut dyn FnMut(&mut World, DestructibleId),
-) -> Outcome {
-    let (mut w, id, _) = shoot(asset, lab, is_bullet);
-    run_shot(&mut w, id, asset, frames, inspect)
-}
-
-/// `asset` placed as a threshold destructible (at the lab's stress world; a bullet when
-/// `is_bullet`) with the lab's shot fired at it: the world, the destructible and its
-/// instance transform.
-fn shoot(
-    asset: &DestructibleAssetDesc,
-    lab: &engine_fracture::Scene,
-    is_bullet: bool,
-) -> (World, DestructibleId, Transform) {
+) -> anyhow::Result<Outcome> {
     let placement = asset.stress.as_ref().unwrap().placement();
     // The lab's stress world is the asset frame less its placement.
     let offset = placement.map(|x| -x as f32);
-    let mut w = world_for(asset, offset);
+    let mut w = if neighbours {
+        let mut def = asset.solver_for(StrengthModel::Threshold).unwrap();
+        def.sleep_lin = -1.0;
+        let mut c = capacity(asset);
+        c.max_bodies *= 4;
+        c.max_colliders = c.max_colliders.max(1 << 14) * 4;
+        c.max_hull_vertices *= 4;
+        let mut w = World::new(
+            GpuContext::Default,
+            &WorldDef {
+                capacity: c,
+                gravity: [0.0, def.gravity_y, 0.0],
+                solver: def,
+                enable_sleep: false,
+                contacts: ContactStorage::Canonical,
+                fracture_pieces: pool,
+                ..WorldDef::default()
+            },
+        )
+        .unwrap();
+        let stress = asset.stress.as_ref().unwrap();
+        let h = stress.ground_height().unwrap();
+        let g = w.create_body(&BodyDef::default()).unwrap();
+        w.create_shape(
+            g,
+            &ShapeDef::default(),
+            Geometry::Plane {
+                normal: [0.0, 1.0, 0.0],
+                offset: h + offset[1],
+            },
+        )
+        .unwrap();
+        w
+    } else {
+        world_for(asset, offset)
+    };
     let a = w.create_destructible_asset(asset).unwrap();
+    let place = |w: &mut World, dx: f32| {
+        w.create_destructible(&DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: Transform::new([offset[0] + dx, offset[1], offset[2]], [0.0, 0.0, 0.0, 1.0]),
+            asleep: false,
+            ..DestructibleDef::new(a)
+        })
+        .unwrap()
+    };
+    let mut others = Vec::new();
+    if neighbours {
+        others.push(place(&mut w, 80.0));
+        let gone = place(&mut w, 240.0);
+        w.destroy_destructible(gone).unwrap();
+    }
     let id = w
         .create_destructible(&DestructibleDef {
             model: StrengthModel::Threshold,
             transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
-            asleep: false,
+            asleep: std::env::var("THRESHOLD_START_ASLEEP").is_ok(),
             is_bullet,
             ..DestructibleDef::new(a)
         })
         .unwrap();
+    if neighbours {
+        others.push(place(&mut w, 160.0));
+    }
     let stats = w.destructible_stats(id).unwrap();
     assert!(stats.chunks > 10 && stats.bonds > 10, "{stats:?}");
+    // THRESHOLD_SHOT_DELAY=n (probe): the structure stands n steps before the shot.
+    let delay: u32 = std::env::var("THRESHOLD_SHOT_DELAY")
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(0);
+    for _ in 0..delay {
+        // A pool too small fails the step that splits.
+        w.step()?;
+        w.poll_blocking().unwrap();
+    }
     let (origin, v, r, m) = lab_shot(lab, target(asset));
+    // THRESHOLD_NUDGE=dx (probe): the shot's origin moved dx metres along x.
+    let nudge: f64 = std::env::var("THRESHOLD_NUDGE")
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(0.0);
+    let origin = [origin[0] + nudge, origin[1], origin[2]];
     let at = [0, 1, 2].map(|k| (origin[k] + offset[k] as f64) as f32);
     // A bullet, as the lab's shot is a CCD impactor (`ImpactorDesc::ccd`).
     let ball = w
@@ -156,24 +229,26 @@ fn shoot(
     .unwrap();
     w.body_set_projectile(ball, Some(Projectile::default()))
         .unwrap();
-    (w, id, Transform::new(offset, [0.0, 0.0, 0.0, 1.0]))
-}
-
-fn run_shot(
-    w: &mut World,
-    id: DestructibleId,
-    asset: &DestructibleAssetDesc,
-    frames: u32,
-    inspect: &mut dyn FnMut(&mut World, DestructibleId),
-) -> Outcome {
     let mut broken = 0;
+    let mut settled_breaks = 0u32;
     let mut timeline = Vec::new();
     let mut splits = 0;
     let mut new_bodies = Vec::new();
     // Splits to check a frame later: (frame, parent body, its pose then, children).
     let mut fresh: Vec<(u32, BodyId, Transform, Vec<BodyId>)> = Vec::new();
     let dt = asset.solver_for(StrengthModel::Threshold).unwrap().dt;
+    let wake_at: Option<u32> = std::env::var("THRESHOLD_WAKE_AT")
+        .ok()
+        .map(|v| v.parse().unwrap());
     for n in 0..frames {
+        if Some(n) == wake_at {
+            for c in 0..stats.chunks {
+                let b = w.destructible_chunk_body(id, c).unwrap();
+                if w.body_type(b).unwrap() == BodyType::Dynamic {
+                    w.body_set_awake(b, true).unwrap();
+                }
+            }
+        }
         w.step().unwrap();
         // A piece starts with its parent's rigid motion: right after the split its
         // origin (the instance frame carried along) is where its parent's was.
@@ -194,7 +269,7 @@ fn run_shot(
                 assert!(d < 2.0 * v * dt + 0.02 && a < 2.0 * spin * dt + 0.01, "frame {at}: piece {c:?} starts {d} m and {a} rad from where its parent was (v {v} m/s, w {spin} rad/s)");
             }
         }
-        for f in w.poll_blocking().unwrap() {
+        for f in w.poll_blocking()? {
             for e in &f.destruction_events {
                 match e {
                     DestructionEvent::BondsBroken {
@@ -202,7 +277,16 @@ fn run_shot(
                         bonds,
                         ..
                     } => {
-                        assert_eq!(*destructible, id);
+                        if *destructible != id && n < 10 {
+                            // A house settling under its own weight can break a bond or two
+                            // at the edge of its capacity; the shot is what is checked.
+                            settled_breaks += bonds.len() as u32;
+                            continue;
+                        }
+                        assert_eq!(
+                            *destructible, id,
+                            "only the shot's target breaks after settling"
+                        );
                         broken += bonds.len() as u32;
                     }
                     DestructionEvent::Split {
@@ -261,20 +345,105 @@ fn run_shot(
         assert!(w.body_is_valid(body));
         assert_eq!(w.destructible_actor_of(id, c).unwrap().bodies, vec![body]);
     }
-    for b in new_bodies.iter().filter(|b| w.body_is_valid(**b)) {
+    // ENSEMBLE_LENIENT (the ensemble probe): pieces of a split asleep cluster may report
+    // no pose (a known gap of the start-asleep path); the probe counts breaks only.
+    let lenient = std::env::var("ENSEMBLE_LENIENT").is_ok();
+    for b in new_bodies
+        .iter()
+        .filter(|b| w.body_is_valid(**b) && !lenient)
+    {
         assert!(
             w.body_transform(*b).unwrap().is_some(),
             "piece {b:?} has a reported pose"
         );
     }
-    inspect(w, id);
+    if neighbours {
+        let lost: u32 = others
+            .iter()
+            .map(|o| {
+                let s = w.destructible_stats(*o).unwrap();
+                s.bonds - s.bonds_intact
+            })
+            .sum();
+        assert_eq!(
+            lost, settled_breaks,
+            "neighbours lose only what they broke settling"
+        );
+        // The first neighbour goes; the target's pieces (some on spare slots it reserved)
+        // stay valid and the world keeps stepping.
+        w.destroy_destructible(others[0]).unwrap();
+        for _ in 0..10 {
+            w.step().unwrap();
+            w.poll_blocking().unwrap();
+        }
+        for c in 0..stats.chunks {
+            assert!(w.body_is_valid(w.destructible_chunk_body(id, c).unwrap()));
+        }
+    }
+    inspect(&mut w, id);
     w.destroy_destructible(id).unwrap();
-    Outcome {
+    Ok(Outcome {
         broken,
         bodies: stats.actors,
         splits,
         timeline,
-    }
+    })
+}
+
+/// `asset` placed as a threshold destructible (at the lab's stress world) with the lab's
+/// shot fired at it: the world, the destructible and its instance transform.
+fn shoot(
+    asset: &DestructibleAssetDesc,
+    lab: &engine_fracture::Scene,
+) -> (World, DestructibleId, Transform) {
+    let placement = asset.stress.as_ref().unwrap().placement();
+    // The lab's stress world is the asset frame less its placement.
+    let offset = placement.map(|x| -x as f32);
+    let mut w = world_for(asset, offset);
+    let a = w.create_destructible_asset(asset).unwrap();
+    let id = w
+        .create_destructible(&DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
+            asleep: false,
+            ..DestructibleDef::new(a)
+        })
+        .unwrap();
+    let stats = w.destructible_stats(id).unwrap();
+    assert!(stats.chunks > 10 && stats.bonds > 10, "{stats:?}");
+    let (origin, v, r, m) = lab_shot(lab, target(asset));
+    let at = [0, 1, 2].map(|k| (origin[k] + offset[k] as f64) as f32);
+    // A bullet, as the lab's shot is a CCD impactor (`ImpactorDesc::ccd`).
+    let ball = w
+        .create_body(&BodyDef {
+            linear_velocity: v.map(|x| x as f32),
+            is_bullet: true,
+            ..BodyDef::dynamic(at)
+        })
+        .unwrap();
+    w.create_sphere_shape(
+        ball,
+        &ShapeDef {
+            update_body_mass: false,
+            ..ShapeDef::default()
+        },
+        [0.0; 3],
+        r as f32,
+    )
+    .unwrap();
+    let i = (0.4 * m * r * r) as f32;
+    w.body_set_mass_data(
+        ball,
+        MassData {
+            mass: m as f32,
+            center: [0.0; 3],
+            rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]],
+        },
+    )
+    .unwrap();
+    w.body_set_projectile(ball, Some(Projectile::default()))
+        .unwrap();
+    (w, id, Transform::new(offset, [0.0, 0.0, 0.0, 1.0]))
 }
 
 /// The lab's `ThresholdWorld` on the same scene and shot (stress frame: the asset frame
@@ -364,6 +533,15 @@ fn house() -> (DestructibleAssetDesc, engine_fracture::Scene) {
 fn check(name: &str, (asset, lab): (DestructibleAssetDesc, engine_fracture::Scene)) {
     let frames = 120;
     let world = run_world(&asset, &lab, frames);
+    if std::env::var("THRESHOLD_TIMELINE").is_ok() {
+        let at: Vec<String> = [
+            88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 119,
+        ]
+        .iter()
+        .map(|&f| format!("{f}:{}", world.timeline[f]))
+        .collect();
+        eprintln!("{name} timeline {}", at.join(" "));
+    }
     let (lab_broken, lab_bodies, lab_timeline) = run_lab(&asset, &lab, frames);
     eprintln!("{name}: world broke {} bonds into {} bodies ({} splits); the lab {lab_broken} into {lab_bodies}", world.broken, world.bodies, world.splits);
     assert!(
@@ -387,6 +565,63 @@ fn check(name: &str, (asset, lab): (DestructibleAssetDesc, engine_fracture::Scen
     );
 }
 
+/// A world piece pool (`WorldDef::fracture_pieces`): no destructible reserves a slot per
+/// chunk; the house among neighbours breaks as alone, its pieces in pool slots, and a
+/// destroyed destructible's pieces go back to the pool. Too small a pool fails the split.
+#[test]
+fn a_piece_pool_serves_every_destructible() {
+    let (asset, lab) = house();
+    let frames = 120;
+    let alone = run_world(&asset, &lab, frames);
+    let pooled = run_world_among(&asset, &lab, frames, true, Some(256), false, &mut |_, _| {}).unwrap();
+    eprintln!(
+        "alone {} bonds into {} bodies; pooled {} into {}",
+        alone.broken, alone.bodies, pooled.broken, pooled.bodies
+    );
+    assert_eq!(
+        first_break(&pooled.timeline),
+        first_break(&alone.timeline),
+        "the first break"
+    );
+    let ratio = pooled.bodies as f64 / alone.bodies as f64;
+    assert!(
+        (0.75..=1.33).contains(&ratio),
+        "{} bodies against {} alone",
+        pooled.bodies,
+        alone.bodies
+    );
+    let e = run_world_among(&asset, &lab, frames, true, Some(4), false, &mut |_, _| {})
+        .err()
+        .expect("4 slots cannot hold the pieces");
+    assert!(e.to_string().contains("no free body slot"), "{e}");
+}
+
+/// Destructibles share one fracture per world: the cuboid house breaks among neighbours as
+/// it does alone (in tables placed after others, into a destroyed one's freed range).
+#[test]
+fn a_house_among_neighbours_breaks_as_alone() {
+    let (asset, lab) = house();
+    let frames = 120;
+    let alone = run_world(&asset, &lab, frames);
+    let among = run_world_among(&asset, &lab, frames, true, None, false, &mut |_, _| {}).unwrap();
+    eprintln!(
+        "alone {} bonds into {} bodies; among neighbours {} into {}",
+        alone.broken, alone.bodies, among.broken, among.bodies
+    );
+    assert_eq!(
+        first_break(&among.timeline),
+        first_break(&alone.timeline),
+        "the first break"
+    );
+    let ratio = among.bodies as f64 / alone.bodies as f64;
+    assert!(
+        (0.75..=1.33).contains(&ratio),
+        "{} bodies against {} alone",
+        among.bodies,
+        alone.bodies
+    );
+}
+
 #[test]
 fn masonry_arch_breaks_and_splits_as_in_the_lab() {
     check("arch", arch());
@@ -405,7 +640,7 @@ fn cuboid_house_breaks_and_splits_as_in_the_lab() {
 #[test]
 fn consecutive_splits_keep_pieces_in_place() {
     let (asset, lab) = arch();
-    let (mut w, id, instance) = shoot(&asset, &lab, false);
+    let (mut w, id, instance) = shoot(&asset, &lab);
     let dt = asset.solver_for(StrengthModel::Threshold).unwrap().dt;
     let chunks = w.destructible_stats(id).unwrap().chunks;
     let same = |a: &Transform, b: &Transform, tol: f32| {
@@ -567,6 +802,76 @@ fn limits_fail_loudly() {
     }
 }
 
+/// Probe (ignored): the cuboid-house shot is chaotic (moving the shot 0.1 mm changes the
+/// bonds broken from 47 to 20), so a sleep policy is compared with never-asleep over an
+/// ensemble of nudged shots, not one shot. Prints each policy's bonds broken and bodies
+/// over 21 nudges (-10..10 mm): mean, standard deviation, min, max.
+/// cargo test -p engine-world --release --test threshold sleep_policy_ensemble -- --ignored --nocapture
+#[test]
+#[ignore]
+fn sleep_policy_ensemble() {
+    let (asset, lab) = house();
+    let delay = std::env::var("ENSEMBLE_DELAY").unwrap_or_else(|_| "0".into());
+    let only = std::env::var("ENSEMBLE_ONLY").ok();
+    let policies: [(&str, &[(&str, &str)]); 5] = [
+        ("never asleep", &[]),
+        (
+            "start asleep, never re-sleep (Unreal's town)",
+            &[("THRESHOLD_START_ASLEEP", "1")],
+        ),
+        (
+            "start asleep, sleep, archive, wake on touch",
+            &[
+                ("THRESHOLD_START_ASLEEP", "1"),
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+            ],
+        ),
+        (
+            "sleep, archive, wake on touch",
+            &[("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1")],
+        ),
+        ("sleep, archive", &[("THRESHOLD_SLEEP", "1")]),
+    ];
+    let stats = |v: &[f64]| {
+        let n = v.len() as f64;
+        let mean = v.iter().sum::<f64>() / n;
+        let sd = (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+        let (lo, hi) = v
+            .iter()
+            .fold((f64::MAX, f64::MIN), |a, &x| (a.0.min(x), a.1.max(x)));
+        format!("{mean:.1} ± {sd:.1} [{lo}, {hi}]")
+    };
+    for (name, env) in policies {
+        if only.as_deref().is_some_and(|o| !name.starts_with(o)) {
+            continue;
+        }
+        for k in [
+            "THRESHOLD_SLEEP",
+            "THRESHOLD_WAKE_ON_TOUCH",
+            "THRESHOLD_START_ASLEEP",
+        ] {
+            std::env::remove_var(k);
+        }
+        for (k, v) in env {
+            std::env::set_var(k, v);
+        }
+        std::env::set_var("THRESHOLD_SHOT_DELAY", &delay);
+        let (mut broken, mut bodies) = (Vec::new(), Vec::new());
+        for i in -10..=10 {
+            std::env::set_var("THRESHOLD_NUDGE", format!("{}", i as f64 * 1e-3));
+            let o = run_world(&asset, &lab, 120);
+            broken.push(o.broken as f64);
+            bodies.push(o.bodies as f64);
+        }
+        eprintln!(
+            "{name}: bonds broken {}, bodies {}",
+            stats(&broken),
+            stats(&bodies)
+        );
+    }
+}
+
 /// A bullet destructible (`DestructibleDef::is_bullet`): after the shot splits it, every
 /// dynamic piece's body is a continuous-collision body (`BODY_CCD`, from its chunks'
 /// `INFO_CCD` on the GPU, also off an anchored parent); an anchored piece is static, and a
@@ -576,7 +881,7 @@ fn every_dynamic_piece_of_a_bullet_destructible_is_a_bullet() {
     let (asset, lab) = arch();
     for is_bullet in [true, false] {
         let mut seen = 0;
-        let outcome = run_world_with(&asset, &lab, 60, is_bullet, &mut |w, id| {
+        let outcome = run_world_among(&asset, &lab, 60, false, None, is_bullet, &mut |w, id| {
             let stats = w.destructible_stats(id).unwrap();
             let mut bodies: Vec<BodyId> = (0..stats.chunks).map(|c| w.destructible_chunk_body(id, c).unwrap()).collect();
             bodies.sort_by_key(|b| b.index());
@@ -588,7 +893,8 @@ fn every_dynamic_piece_of_a_bullet_destructible_is_a_bullet() {
                 assert_eq!(ccd, is_bullet && dynamic, "piece {b:?} (dynamic {dynamic}): BODY_CCD {ccd}, the destructible a bullet {is_bullet}");
                 seen += dynamic as usize;
             }
-        });
+        })
+        .unwrap();
         eprintln!("bullet {is_bullet}: {} splits, {seen} dynamic pieces checked", outcome.splits);
         assert!(outcome.splits > 0 && seen > 1, "the shot splits the arch into dynamic pieces");
     }

@@ -8,8 +8,13 @@
 
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
 
-/// Jones-Plassmann rounds a step may use (dispatched plus tail).
+/// Jones-Plassmann rounds a step may dispatch (more run in the tail).
 pub const COLOR_ROUND_LIMIT: u32 = 32;
+/// Rounds `color_bodies_tail` may run in all (the dispatched ones included). It stops as
+/// soon as every body is coloured, so the limit costs nothing until a dense pile (a
+/// razed ship's wreck) has longer chains of blocking neighbours than the dispatched
+/// rounds; past it the step reports `OVERFLOW_COLORS`.
+pub const COLOR_TAIL_ROUND_LIMIT: u32 = 1024;
 /// Sleep times at or above this never elapse in a run (benchmarks use 1e6 s).
 pub const SLEEP_NEVER_S: f32 = 1.0e5;
 /// Buffer id of the host-written counter block a pipelined step copies into
@@ -52,6 +57,9 @@ pub enum Cmd {
 /// Modes a host resolved for this step (already gated on each other).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StepModes {
+    /// Sleep archive blocks (`world_step.slang` archiveMeta, host word 30 bit 5; 0: off). Canonical
+    /// contacts only: a pair that falls asleep keeps its rows for its wake.
+    pub sleep_archive_blocks: u32,
     pub compact_contacts: bool,
     pub persistent_contacts: bool,
     pub manifold_persistence: bool,
@@ -67,8 +75,6 @@ pub struct StepModes {
     pub sparse_start: u32,
     pub color_headroom: Option<u32>,
     pub color_round_headroom: Option<u32>,
-    /// The sparse tail's single-workgroup loop can cover the body capacity.
-    pub tail_ok: bool,
     /// Append `pose_pack` after the sleep commit: compact render poses and the
     /// list of bodies that moved (bindings 34-36, after BIND_COUNT; read-only on physics state).
     pub pose_output: bool,
@@ -121,6 +127,9 @@ pub struct StepInputs {
     pub soil: bool,
     /// Queued explosions (`explode` runs after the commands when non-zero).
     pub explosion_count: u32,
+    /// `FLAG_POST_STAB`: record the velocity after the iterations, then one
+    /// primal pass with α = 0 (pass `STAB_PASS + colour`).
+    pub post_stabilize: bool,
 }
 
 /// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
@@ -205,7 +214,7 @@ pub fn color_rounds_dispatched(m: &StepModes, last: &StepCounters) -> u32 {
 /// Primal colours dispatched one by one; later colours run in the sparse tail.
 pub fn primal_colors_dispatched(m: &StepModes, i: &StepInputs, max_c: u32) -> u32 {
     let estimate = match m.color_headroom {
-        Some(h) if m.tail_ok && i.steps_done > 0 => (i.last.color_count + h).max(1),
+        Some(h) if i.steps_done > 0 => (i.last.color_count + h).max(1),
         _ => max_c,
     };
     estimate.min(m.sparse_start).min(max_c)
@@ -383,6 +392,10 @@ pub fn encode_step(
             e.d("char_move", u64::from(mo.characters) * 64);
         }
     }
+    if m.sleep_archive_blocks > 0 && !reuse_manifolds {
+        // Touched sleepers' archived resting pairs (world_step.slang archive_emit).
+        e.d("archive_emit", 4096);
+    }
     e.d(work_args, 64);
     e.phase("broadphase");
     if m.carry_rest && !reuse_manifolds {
@@ -526,13 +539,16 @@ pub fn encode_step(
         e.d("color_bodies_local", 64);
     }
     // Rounds dispatched: last step's need plus headroom; color_bodies_tail runs
-    // any further rounds in one workgroup up to the same limit, so colouring
-    // always finishes (8cl). Pass value = round index (slots 0..47 hold i).
+    // any further rounds in one workgroup up to COLOR_TAIL_ROUND_LIMIT, so
+    // colouring finishes (8cl). It returns at once when the dispatched rounds
+    // did, so the adaptive plan always has it (a pile may need more than
+    // COLOR_ROUND_LIMIT rounds); full controls dispatch exactly the 32 rounds.
+    // Pass value = round index (slots 0..47 hold i).
     let rounds = color_rounds_dispatched(m, &i.last);
     for round in 0..rounds {
         e.wp("color_bodies", 69, round);
     }
-    if rounds < COLOR_ROUND_LIMIT {
+    if rounds < COLOR_ROUND_LIMIT || m.color_round_headroom.is_some() {
         e.dp("color_bodies_tail", 64, rounds);
     }
     e.phase("coloring");
@@ -657,6 +673,16 @@ pub fn encode_step(
         }
         e.phase("dual");
     }
+    if i.post_stabilize {
+        e.d("record_stab_velocity", n_bodies);
+        for color in 0..max_c.min(sparse_start) {
+            e.wp(primal, color, STAB_PASS + color);
+        }
+        if sparse_start < max_c {
+            e.dp(sparse, 64, STAB_PASS + sparse_start);
+        }
+        e.phase("stabilize");
+    }
     if soft {
         // Plasticity and breaking at the converged state, then detacher groups.
         e.d("soft_plastic", u64::from(i.soft.beams.max(1)));
@@ -716,6 +742,14 @@ pub fn encode_step(
         }
     }
     e.w("sleep_island_commit", 67);
+    if m.sleep_archive_blocks > 0 {
+        // Archive what just fell asleep (awake list, then this step's rows).
+        e.w("archive_free", 67);
+        e.w("archive_count", 65);
+        e.w("archive_alloc", 67);
+        e.w("archive_scatter", 65);
+        e.w("archive_seal", 67);
+    }
     if mo.ccd && !reuse_manifolds {
         // CCD impacts on dynamic bodies: the momentum exchange (ccd_step.slang).
         e.phase("sleepMain");
@@ -822,6 +856,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "solve_primal_color_persistent",
     "solve_primal_sparse_persistent",
     "solve_dual_persistent",
+    "record_stab_velocity",
     "extract_velocity_sleep",
     "write_sleep_args",
     "sleep_island_gate",
@@ -974,6 +1009,10 @@ pub fn pair_warm_key(a: u32, b: u32) -> u32 {
 pub const BIND_COUNT: usize = 34;
 /// Pass-uniform slot stride (binding 22, dynamic offsets).
 pub const PASS_ALIGN: u64 = 256;
+/// Pass-uniform slots (binding 22): see [`pass_table`].
+pub const PASS_SLOTS: u64 = 160;
+/// First post-stabilization slot: `STAB_PASS + c` holds `256 | c` (colour c at α = 0).
+pub const STAB_PASS: u32 = 96;
 
 /// `gConstraintIds` words before the CSR index (grid heads, warm hash, ids).
 pub fn constraint_id_words(c: &WorldCapacity) -> u32 {
@@ -1048,7 +1087,7 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     // Scratch: host-reset words 0..63, uniform-grid large list 64..79, the
     // oversized-static count (80), then the event ring and the static list.
     s[21] = u64::from(engine_schema::SCRATCH_WORDS) * 4;
-    s[22] = 96 * PASS_ALIGN;
+    s[22] = PASS_SLOTS * PASS_ALIGN;
     // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
     // contacts 73), convex 74..76.
     s[23] = b(c.max_colors.max(77) * 3, 4);
@@ -1074,15 +1113,18 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
 }
 
 /// Pass uniform table (binding 22): slot i holds i below 48, block-scan
-/// constants at 48..67, zero above.
+/// constants at 48..67, zero to 95, and `256 | colour` from [`STAB_PASS`] (the
+/// post-stabilization primal pass).
 pub fn pass_table() -> Vec<u8> {
-    let mut pass = vec![0u8; (96 * PASS_ALIGN) as usize];
-    for i in 0..96u32 {
+    let mut pass = vec![0u8; (PASS_SLOTS * PASS_ALIGN) as usize];
+    for i in 0..PASS_SLOTS as u32 {
         let v = if i < 48 {
             i
         } else if i < 68 {
             let k = i - 48;
             (1u32 << k) | ((k & 1) << 31)
+        } else if i >= STAB_PASS {
+            256 | (i - STAB_PASS)
         } else {
             0
         };
@@ -1162,6 +1204,8 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     let mo = i.motion;
     s[30] |= (u32::from(mo.ccd) << 2) | (u32::from(mo.kinematic) << 3)
         | (u32::from(fast_list_scheduled(&mo)) << 4);
+    // Bit 5: the sleep archive (world_step.slang sleepArchive).
+    s[30] |= u32::from(m.sleep_archive_blocks > 0) << 5;
     s
 }
 
@@ -1184,7 +1228,7 @@ pub fn step_counters(i: &StepInputs) -> StepCounters {
         collider_count: i.collider_count,
         joint_count: i.joint_count,
         // Read by color_bodies_tail: rounds allowed this step.
-        color_round_limit: COLOR_ROUND_LIMIT,
+        color_round_limit: COLOR_TAIL_ROUND_LIMIT,
         ..StepCounters::default()
     }
 }
@@ -1223,6 +1267,7 @@ mod tests {
             guide_slots: 0,
             soil: false,
             explosion_count: 0,
+            post_stabilize: false,
         }
     }
 
@@ -1240,7 +1285,6 @@ mod tests {
             sparse_start: 32,
             color_headroom: Some(4),
             color_round_headroom: Some(2),
-            tail_ok: true,
             pose_output: false,
             ..StepModes::default()
         }
@@ -1621,5 +1665,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The schedule properties demo.html's node tests checked on its own JS
+    /// encoder (tests/persistence_schedule.test.mjs), now on the plan every host
+    /// runs: each mode's contact writers, persistence, packing, CSR and solve
+    /// stay in dependency order.
+    #[test]
+    fn every_mode_keeps_its_contact_dependencies() {
+        let kernel = |c: &Cmd| match *c {
+            Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => Some(kernel),
+            _ => None,
+        };
+        for storage in ["canonical", "compact", "persistent"] {
+            for persistence in ["contacts", "manifolds", "fused"] {
+                if persistence == "fused" && storage == "canonical" {
+                    continue;
+                }
+                for reuse in [false, true] {
+                    for fast_paths in [false, true] {
+                        let persistent = storage == "persistent";
+                        let compact = storage != "canonical";
+                        let copy = persistent && persistence == "contacts" && fast_paths;
+                        let m = StepModes {
+                            compact_contacts: compact,
+                            persistent_contacts: persistent,
+                            manifold_persistence: persistence == "manifolds",
+                            fused_persistence: compact && persistence == "fused",
+                            manifold_insert: fast_paths && reuse,
+                            copy_reuse: copy,
+                            split_np: copy,
+                            listed_persist: copy,
+                            carry_rest: fast_paths,
+                            local_repair: fast_paths,
+                            grid_split: fast_paths,
+                            sparse_start: 10,
+                            color_headroom: Some(4),
+                            color_round_headroom: Some(2),
+                            ..StepModes::default()
+                        };
+                        let i = StepInputs { reuse_contacts: reuse, sleep_time: 0.5, ..inputs(10, 3) };
+                        let cmds = encode_step(&m, &i, false, true);
+                        let label = format!("{storage} {persistence} reuse={reuse} fast={fast_paths}");
+                        let names: Vec<&str> = cmds.iter().filter_map(kernel).collect();
+                        let first = |pred: &dyn Fn(&str) -> bool| names.iter().position(|n| pred(n));
+                        let last = |pred: &dyn Fn(&str) -> bool| names.iter().rposition(|n| pred(n));
+                        let np_last = last(&|n| n.starts_with("narrowphase")).expect("narrowphase");
+                        let persist_first = first(&|n| n.starts_with("persist_")).expect("a persistence pass");
+                        let primal = first(&|n| n.starts_with("solve_primal")).expect("a solve");
+                        assert!(np_last < persist_first, "{label}: persistence after every narrowphase pass");
+                        assert!(persist_first < primal, "{label}: persistence before the solve");
+                        if compact && persistence != "fused" {
+                            let pack = first(&|n| n == "pack_solver_contacts").expect("pack");
+                            assert_eq!(names.iter().filter(|n| **n == "pack_solver_contacts").count(), 1, "{label}: packed once");
+                            assert!(persist_first < pack && pack < primal, "{label}: packed between persistence and the solve");
+                            if persistent && persistence == "contacts" {
+                                let csr = first(&|n| n == "csr_degree_contacts").unwrap();
+                                assert!(pack < csr, "{label}: CSR reads the packed pairs");
+                            }
+                            if !persistent {
+                                let clear = first(&|n| n == "clear_solver_contacts").expect("clear");
+                                assert!(clear < pack, "{label}: cleared before packing");
+                            }
+                        }
+                        if m.manifold_insert {
+                            let insert = first(&|n| n == "contact_hash_insert_manifolds").unwrap();
+                            assert!(insert < first(&|n| n.starts_with("narrowphase")).unwrap(), "{label}: manifold insert before narrowphase overwrites them");
+                        }
+                        if m.split_np {
+                            let defer = first(&|n| n == "narrowphase_defer_copy_persistent").unwrap();
+                            let fresh = first(&|n| n == "narrowphase_fresh_copy_persistent").unwrap();
+                            assert!(defer < fresh && fresh < persist_first, "{label}: defer, then fresh pairs");
+                        }
+                        if m.listed_persist {
+                            let at = |slot| cmds.iter().position(|c| matches!(c, Cmd::Indirect { kernel, slot: s, .. } if kernel.starts_with("persist_") && *s == slot));
+                            let (list, scan) = (at(70).expect("list on slot 70"), at(71).expect("overflow scan on slot 71"));
+                            let np = cmds.iter().rposition(|c| kernel(c).is_some_and(|k| k.starts_with("narrowphase"))).unwrap();
+                            let args = cmds.iter().skip(np).position(|c| kernel(c).is_some_and(|k| k.starts_with("write_work_args"))).unwrap() + np;
+                            assert!(args < list && list < scan, "{label}: list then scan, after the narrowphase work args");
+                        }
+                        if m.carry_rest {
+                            let carry = first(&|n| n == "carry_rest_pairs").unwrap();
+                            assert!(first(&|n| n == "broadphase_query").unwrap() < carry && carry < first(&|n| n.starts_with("narrowphase")).unwrap(), "{label}: carried pairs join the broadphase's before narrowphase");
+                        }
+                        if m.local_repair {
+                            let local = first(&|n| n == "color_bodies_local").unwrap();
+                            assert!(first(&|n| n == "init_colors").unwrap() < local && local < first(&|n| n == "color_bodies").unwrap(), "{label}: local repair before the global rounds");
+                        }
+                        assert_eq!(names.iter().filter(|n| **n == "sleep_island_gate").count(), 8, "{label}: the island gate runs with sleep on");
+                    }
+                }
+            }
+        }
+        // A sleep time past any run (1e6 s, the ring and gables benchmarks) has
+        // nothing for the gate to revoke.
+        let cmds = encode_step(&fast(), &inputs(10, 0), false, true);
+        assert!(!cmds.iter().any(|c| kernel(c) == Some("sleep_island_gate")));
     }
 }

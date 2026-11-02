@@ -11,6 +11,13 @@ pub const FLAG_REUSE_CONTACTS: u32 = 1;
 /// `contact_offset` deep (three-avbd).
 pub const FLAG_CONTACT_GAP: u32 = 32;
 
+/// `AvbdParams::flags` bit: post-stabilization. The velocity is recorded after
+/// the iterations (`record_stab_velocity`), then one primal pass with α = 0
+/// removes the step-start error without adding its correction to the velocity.
+/// A step plan must dispatch both: `extract_velocity_sleep` then leaves the
+/// velocity as recorded.
+pub const FLAG_POST_STAB: u32 = 4096;
+
 /// `AvbdParams::flags` bit: look-ahead (speculative) contacts sized to each
 /// body's motion this step (`world_step.slang` FLAG_SPEC_VELOCITY). Bodies
 /// flagged `BODY_CCD` get uncapped reach and time-of-impact contacts.
@@ -19,6 +26,10 @@ pub const FLAG_SPEC_VELOCITY: u32 = 16384;
 /// `AvbdParams::flags` bit: the primal inertial block uses the world inertia
 /// `R·diag(I)·Rᵀ`. Without it (three-avbd) principal moments act on world axes.
 pub const FLAG_WORLD_INERTIA: u32 = 64;
+/// A sleeping body wakes on any contact with an awake one, not only above the sleep
+/// speeds (`world_step.slang` `FLAG_WAKE_ON_TOUCH`): sleep never makes a body a static
+/// wall to slow neighbours.
+pub const FLAG_WAKE_ON_TOUCH: u32 = 16_777_216;
 
 /// Giles/Diaz/Yuksel AVBD parameters (avbd-demo3d `Solver::defaultParams`).
 #[repr(C)]

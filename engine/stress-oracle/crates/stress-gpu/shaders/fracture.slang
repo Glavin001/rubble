@@ -62,7 +62,17 @@ struct FractureParams
     float scale_j;
     float strike_speed;  // a slower closing is no strike (world_coupling.rs `tiered_impact_speed`)
     uint shot_count;     // the shots (`shots`), parked ones included
-    float pad3;
+    // Chunks and bonds in use: the first `chunk_used` chunks and `bond_used` bonds (a
+    // world's shared fracture places destructibles into capacity-sized tables; the layout
+    // is sized by `chunk_count` and `bond_count`). A chunk in that range with body NONE
+    // is a free one.
+    uint chunk_used;
+    uint bond_used;
+    // Room in this frame's event lists (`a_events`, `f_events`): bonds broken, chunks
+    // moved, body frames changed. Zero: no events kept. More is an error (C_ERROR 16).
+    uint ev_broken_cap;
+    uint ev_moved_cap;
+    uint ev_frames_cap;
     // The load and strike models (stress-ref `capability::LoadModel`, `StrikeModel`).
     uint load_model;     // 0 threshold (`fr_breaks`), 1 load path (`fr_lp_*`)
     uint strike_model;   // 0 Hertz (`fr_strike_breaks`), 1 analytic (`fr_il_*`)
@@ -134,8 +144,11 @@ static const uint NONE = 0xffffffffu;
 static const uint BODY_WORDS = 7;
 static const uint FLAG_DYNAMIC = 1;
 static const uint FLAG_AWAKE = 8;
-// engine_schema::BODY_CCD: continuous collision, which every free piece of a CCD chunk has.
-static const uint FLAG_CCD = 256;
+// rubble's BODY_CCD and BODY_CCD_FAST: continuous collision, which every free piece of a
+// CCD chunk has, and a crush particle's while it moves fast (world_step.slang ccdFastLatch
+// clears it once it slows).
+static const uint FLAG_CCD = 256u;
+static const uint FLAG_CCD_FAST = 32768u;
 static const uint INFO_SUPPORT = 1;
 static const uint INFO_CCD = 2;
 static const uint SUMS = 20;      // per root: mass, first moment (3), second moment (6), 64-bit each
@@ -171,7 +184,13 @@ uint a_counters() { return a_best_root() + params.body_count; }
 // Per body slot 9 words for the strike: its bounds (ordered floats: low xyz, high xyz), the
 // entry time (float bits), the entry chunk's distance to the path (float bits), the entry
 // chunk.
-uint a_strike() { return a_counters() + 20; }
+uint a_strike() { return a_counters() + 24; }
+// This frame's events: the bonds broken, then (chunk, its new body) per chunk moved.
+// After the strike distances (`a_strike_dist`, below with the strike kernels).
+uint a_events() { return a_strike_dist() + params.chunk_count; }
+uint a_moved() { return a_events() + params.ev_broken_cap; }
+// `frames` float4: per changed body this frame (slot as bits, -), its 2 frame float4.
+uint f_events() { return 2 * params.body_count + 9 * params.chunk_count + 3 * params.body_count; }
 
 // Counters (`a_counters` + i).
 static const uint C_FRAME_BROKEN = 0; // bonds broken this frame (fr_gate clears it)
@@ -179,7 +198,7 @@ static const uint C_BROKEN = 1;       // bonds broken in all
 static const uint C_PIECES = 2;       // new bodies in all
 static const uint C_ERROR = 3;        // bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 a pulse found no room,
                                       // 16 a crush found the fragment pool spent, 32 more crushes than the events' room,
-                                      // 64 a load-path block was not positive definite
+                                      // 64 a load-path block was not positive definite, 128 an event list was full
 static const uint C_SPLIT_FRAMES = 4;
 static const uint C_POOL_TOP = 5;     // + the half: pulses claimed in it this frame (5, 6)
 // 7..10: chunk crushing's (`C_CRUSH_EVENTS`, below).
@@ -196,6 +215,11 @@ static const uint C_CS_STRIKES = 16;
 static const uint C_CS_BREAKS = 17;
 static const uint C_CS_BODIES = 18; // this step's struck structures (`fr_cs_record`)
 static const uint C_CS_CURSOR = 19; // their chunks listed so far (`fr_cs_base`)
+// This frame's events (fr_events_reset clears them).
+static const uint C_EV_BROKEN = 20;
+static const uint C_EV_MOVED = 21;
+static const uint C_EV_FRAMES = 22;
+static const uint ERROR_EVENTS = 128; // an event list was full (C_ERROR)
 
 // `loads` layout: per chunk 1 float4 (its load), then the two halves of the pulse pool
 // (`pool_cap` pulses of 3 float4 each). A frame reads its chunks' carried pulses from one
@@ -226,7 +250,22 @@ static const uint ARG_CS_SAVE = 13;   // the step's contact rows when a bond bro
 
 uint body_of(uint c) { return work[w_body() + c]; }
 bool dirty(uint body) { return atom[a_dirty() + body].load() != 0; }
+// A placed chunk (`chunk_used`, its body set).
+bool live(uint c) { return c < params.chunk_used && body_of(c) != NONE; }
 uint groups_of(uint n, uint size) { return (n + size - 1) / size; }
+
+// This frame's event lists (a host reads them instead of every chunk and bond): kept only
+// when they have room (`ev_*_cap`); a full list is an error, never a silent drop.
+void event_broken(uint bond)
+{
+    if (params.ev_broken_cap == 0)
+        return;
+    uint i = atom[a_counters() + C_EV_BROKEN].add(1u);
+    if (i < params.ev_broken_cap)
+        atom[a_events() + i].store(bond);
+    else
+        atom[a_counters() + C_ERROR].or(ERROR_EVENTS);
+}
 
 // A body slot's structure-frame pose in the world (Z-up): the rotation and origin of its
 // structure's frame, from the engine's record (`bodies` at word `b`) and the slot's frame.
@@ -238,12 +277,22 @@ void structure_pose(uint slot, uint b, out Quat q, out float3 origin)
     origin = from_rubble(bodies[b].xyz) - rotate(q, com);
 }
 
+// A frame's first kernel: its event lists start empty.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void fr_events_reset(uint3 id: SV_DispatchThreadID)
+{
+    atom[a_counters() + C_EV_BROKEN].store(0);
+    atom[a_counters() + C_EV_MOVED].store(0);
+    atom[a_counters() + C_EV_FRAMES].store(0);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void fr_loads(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count)
+    if (!live(k))
         return;
     uint slot = body_of(k);
     uint b = BODY_WORDS * slot;
@@ -293,7 +342,7 @@ void fr_loads(uint3 id: SV_DispatchThreadID)
 void fr_breaks(uint3 id: SV_DispatchThreadID)
 {
     uint i = id.x;
-    if (i >= params.bond_count || work[w_alive() + i] == 0)
+    if (i >= params.bond_used || work[w_alive() + i] == 0)
         return;
     uint4 bond = bonds[i];
     float demand = max(loads[bond.x].x, loads[bond.y].x);
@@ -303,6 +352,7 @@ void fr_breaks(uint3 id: SV_DispatchThreadID)
         atom[a_dirty() + body_of(bond.x)].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
     }
 }
 
@@ -324,6 +374,7 @@ void fr_host_breaks(uint3 id: SV_DispatchThreadID)
     atom[a_dirty() + body_of(bonds[b].x)].or(1u);
     atom[a_counters() + C_FRAME_BROKEN].add(1u);
     atom[a_counters() + C_BROKEN].add(1u);
+    event_broken(b);
 }
 
 void set_args(uint at, uint x)
@@ -343,10 +394,10 @@ void fr_gate(uint3 id: SV_DispatchThreadID)
     atom[a_counters() + C_POOL_TOP + params.parity].store(0);
     if (run)
         atom[a_counters() + C_SPLIT_FRAMES].add(1);
-    set_args(ARG_CHUNKS, run ? groups_of(params.chunk_count, 64) : 0);
-    set_args(ARG_BONDS, run ? groups_of(params.bond_count, 64) : 0);
+    set_args(ARG_CHUNKS, run ? groups_of(params.chunk_used, 64) : 0);
+    set_args(ARG_BONDS, run ? groups_of(params.bond_used, 64) : 0);
     set_args(ARG_BODIES, run ? groups_of(params.body_count, 64) : 0);
-    set_args(ARG_SCAN_CHUNKS, run ? groups_of(params.chunk_count, 1024) : 0);
+    set_args(ARG_SCAN_CHUNKS, run ? groups_of(params.chunk_used, 1024) : 0);
     set_args(ARG_SCAN_BODIES, run ? groups_of(params.body_count, 1024) : 0);
     set_args(ARG_ONE, run ? 1 : 0);
 }
@@ -356,7 +407,7 @@ void fr_gate(uint3 id: SV_DispatchThreadID)
 void fr_uf_init(uint3 id: SV_DispatchThreadID)
 {
     uint c = id.x;
-    if (c >= params.chunk_count || !dirty(body_of(c)))
+    if (!live(c) || !dirty(body_of(c)))
         return;
     atom[a_parent() + c].store(c);
     atom[a_count() + c].store(0);
@@ -400,7 +451,7 @@ uint find(uint x)
 void fr_uf_union(uint3 id: SV_DispatchThreadID)
 {
     uint i = id.x;
-    if (i >= params.bond_count || work[w_alive() + i] == 0)
+    if (i >= params.bond_used || work[w_alive() + i] == 0)
         return;
     uint4 bond = bonds[i];
     if (!dirty(body_of(bond.x)))
@@ -459,7 +510,7 @@ float read64(uint at, float scale)
 void fr_uf_flatten(uint3 id: SV_DispatchThreadID)
 {
     uint c = id.x;
-    if (c >= params.chunk_count || !dirty(body_of(c)))
+    if (!live(c) || !dirty(body_of(c)))
         return;
     uint r = find(c);
     work[w_label() + c] = r;
@@ -489,7 +540,7 @@ void fr_uf_flatten(uint3 id: SV_DispatchThreadID)
 
 bool is_root(uint c)
 {
-    return c < params.chunk_count && dirty(body_of(c)) && work[w_label() + c] == c;
+    return live(c) && dirty(body_of(c)) && work[w_label() + c] == c;
 }
 
 [shader("compute")]
@@ -520,7 +571,7 @@ void fr_best_root(uint3 id: SV_DispatchThreadID)
 void fr_mark(uint3 id: SV_DispatchThreadID)
 {
     uint c = id.x;
-    if (c >= params.chunk_count)
+    if (c >= params.chunk_used)
         return;
     work[w_new() + c] = is_root(c) && atom[a_best_root() + body_of(c)].load() != c ? 1u : 0u;
 }
@@ -728,6 +779,19 @@ void fr_commit(uint3 id: SV_DispatchThreadID)
             bodies[BODY_WORDS * (slot + region * params.max_bodies) + w] = frames[st + w];
     frames[2 * slot] = frames[st + 7];
     frames[2 * slot + 1] = frames[st + 8];
+    if (params.ev_frames_cap != 0)
+    {
+        uint i = atom[a_counters() + C_EV_FRAMES].add(1u);
+        if (i < params.ev_frames_cap)
+        {
+            uint at = f_events() + 3 * i;
+            frames[at] = float4(asfloat(slot), 0.0, 0.0, 0.0);
+            frames[at + 1] = frames[st + 7];
+            frames[at + 2] = frames[st + 8];
+        }
+        else
+            atom[a_counters() + C_ERROR].or(ERROR_EVENTS);
+    }
 }
 
 // The chunk's colliders on its piece's body (`member_colliders`), and the ingest's view
@@ -737,10 +801,21 @@ void fr_commit(uint3 id: SV_DispatchThreadID)
 void fr_reparent(uint3 id: SV_DispatchThreadID)
 {
     uint c = id.x;
-    if (c >= params.chunk_count || !dirty(body_of(c)))
+    if (!live(c) || !dirty(body_of(c)))
         return;
     uint r = work[w_label() + c];
     uint slot = work[w_slot() + r];
+    if (slot != body_of(c) && params.ev_moved_cap != 0)
+    {
+        uint i = atom[a_counters() + C_EV_MOVED].add(1u);
+        if (i < params.ev_moved_cap)
+        {
+            atom[a_moved() + 2 * i].store(c);
+            atom[a_moved() + 2 * i + 1].store(slot);
+        }
+        else
+            atom[a_counters() + C_ERROR].or(ERROR_EVENTS);
+    }
     work[w_body() + c] = slot;
     float3 com = frames[2 * slot].xyz;
     Quat to_body = conj(quat_of(frames[2 * slot + 1]));
@@ -857,7 +932,7 @@ float3 chunk_world(uint k)
 void fr_view_chunks(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count)
+    if (!live(k))
         return;
     uint slot = body_of(k);
     uint b = BODY_WORDS * slot;
@@ -914,7 +989,7 @@ void write_line_vertex(uint v, float3 p)
 void fr_view_bonds(uint3 id: SV_DispatchThreadID)
 {
     uint i = id.x;
-    if (i >= params.bond_count)
+    if (i >= params.bond_used)
         return;
     uint4 bond = bonds[i];
     float3 a = chunk_world(bond.x);
@@ -994,7 +1069,7 @@ void fr_strike_reset(uint3 id: SV_DispatchThreadID)
 void fr_strike_bounds(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count || params.shot_count == 0)
+    if (!live(k) || params.shot_count == 0)
         return;
     Quat q;
     float3 c = chunk_box_world(k, q);
@@ -1072,7 +1147,7 @@ bool struck(uint b, out uint shot)
 void fr_strike_entry(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count || params.shot_count == 0)
+    if (!live(k) || params.shot_count == 0)
         return;
     uint b = body_of(k);
     uint shot;
@@ -1127,7 +1202,7 @@ void fr_strike_entry(uint3 id: SV_DispatchThreadID)
 void fr_strike_nearest(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
-    if (k >= params.chunk_count || params.shot_count == 0)
+    if (!live(k) || params.shot_count == 0)
         return;
     uint b = body_of(k);
     uint shot;
@@ -1197,7 +1272,7 @@ bool strike_share_breaks(uint4 bond, float3 contact, float force)
 void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
 {
     uint i = id.x;
-    if (i >= params.bond_count || params.shot_count == 0 || work[w_alive() + i] == 0)
+    if (i >= params.bond_used || params.shot_count == 0 || work[w_alive() + i] == 0)
         return;
     uint4 bond = bonds[i];
     uint b = body_of(bond.x);
@@ -1211,6 +1286,7 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
         atom[a_dirty() + b].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
     }
 }
 
@@ -3079,7 +3155,9 @@ void fr_cs_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 // it; at D >= 1 it is crushed: every bond of it breaks (the split above re-splits its
 // body), and after the split its body is parked out of the world (removed) and, with
 // `crush.mode` 1 (conserve), `crush.fragments` small boxes from a reserved pool take its
-// mass and momentum. Forward only: decided from this frame's loads and the predicted
+// mass and momentum, or with mode 2 (particles) the chunk's own count of small spheres
+// (its crush row's .w: from its volume, set by the host) that never rotate and never
+// collide with one another (their colliders share a negative filter group). Forward only: decided from this frame's loads and the predicted
 // strike, applied before the engine's next step.
 //
 // The stress estimate (threshold mode solves no bond forces): the chunk's external forces
@@ -3107,14 +3185,15 @@ void fr_cs_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 //   fr_crush_mark, fr_crush_gate
 //                    the chunks crushed this frame (scan input), and the indirect sizes
 //                    of what follows (zero on a frame with none);
-//   (the scan: each crushed chunk's rank, its event and fragments in chunk order)
+//   (the scan: each crushed chunk's rank, its event and fragments in chunk order; the
+//    scanned value packs one event (CRUSH_EVENT_ONE) and its pool entries below it)
 //   fr_crush_apply   one thread per crushed chunk: its event, its fragments, its body parked;
 //   fr_crush_end     one thread: the frame's counts.
 
 struct CrushParams
 {
     uint enabled;
-    uint mode;        // 0 remove, 1 conserve
+    uint mode;        // 0 remove, 1 conserve (boxes), 2 particles
     uint fragments;   // per crushed chunk (conserve), a power of two
     uint pool_size;   // fragment bodies reserved
     uint max_events;  // crushes a frame at most
@@ -3131,12 +3210,12 @@ struct CrushParams
     uint t_normal;    // crush_tab: per bond its normal (structure frame)
     uint r_flow;      // crush_rw: per bond its compressive flow load (N), 4 per float4
     uint r_blast;     // crush_rw: per chunk a blast window's (damage, peak p, peak q, -)
-    float pad0;
+    uint particle_ccd; // mode 2: the particles' continuous collision while fast
     float pad1;
 };
 
 // Per chunk 2 float4: (capPressure, cohesion, frictionSlope, crushEnergy), (crushViscosity,
-// volume, flags as bits (1 crushable), -); then the tables at `crush.t_*`.
+// volume, flags as bits (1 crushable), particles (mode 2)); then the tables at `crush.t_*`.
 [[vk::binding(26, 0)]] StructuredBuffer<float4> crush_tab;
 // Per chunk (damage, peak p, peak q, flags as bits: 1 crushed, 2 crushed this frame, cause
 // << 4 (1 contact, 2 impact)); then the per-body bill, per-shot impulses and the events.
@@ -3158,6 +3237,30 @@ static const uint ARG_CRUSH_CHUNKS = 14;
 static const uint ARG_CRUSH_SCAN = 15;
 static const uint ARG_CRUSH_ONE = 16;
 static const uint MAX_SHOTS = 64;
+// The crush scan's value: one event in the high bits, the chunk's pool entries below
+// (the host keeps the pool under CRUSH_POOL_SPAN and the events a frame under 4096).
+static const uint CRUSH_EVENT_ONE = 1u << 20;
+static const uint CRUSH_POOL_SPAN = CRUSH_EVENT_ONE - 1u;
+
+// Pool entries a crushed chunk takes: the fixed box count, its own particle count, none.
+uint crush_pieces(uint k)
+{
+    if (crush.mode == 1)
+        return crush.fragments;
+    if (crush.mode == 2)
+        return uint(crush_tab[2 * k + 1].w + 0.5);
+    return 0u;
+}
+
+// A particle's spot in its chunk's box, each coordinate in [-1, 1]: a hash of the chunk and
+// the particle (the host's mirror computes the same).
+float3 crush_particle_spot(uint k, uint i)
+{
+    uint h = (k * 0x9E3779B1u) ^ (i * 0x85EBCA77u);
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;
+    uint h2 = h * 0x9E3779B1u + 0x7F4A7C15u;
+    return float3(float(h & 0x3FFu), float((h >> 10) & 0x3FFu), float(h2 & 0x3FFu)) / 511.5 - 1.0;
+}
 
 bool crushable(uint k)
 {
@@ -3499,7 +3602,7 @@ static const uint BILL_WORDS = 4;    // crush_rw float4 per body at r_bill
 static const float COVER_MISS = 1e30; // a depth no line reaches (no infinities: fast math)
 
 // Per body slot 2 words per cell: the first depth (ordered float bits), the chunk there.
-uint a_cover() { return a_strike_dist() + params.chunk_count; }
+uint a_cover() { return a_moved() + 2 * params.ev_moved_cap; }
 
 // Cell s of a patch of radius a about the axis d: its offset from the axis, and rho.
 float3 cover_offset(uint s, float3 d, float a, out float rho)
@@ -3897,7 +4000,7 @@ void fr_crush_mark(uint3 id: SV_DispatchThreadID)
     if (c >= params.chunk_count || crush.enabled == 0)
         return;
     uint now = (crush_flags(c) & CR_NOW) != 0 ? 1u : 0u;
-    work[w_new() + c] = now;
+    work[w_new() + c] = now != 0 ? CRUSH_EVENT_ONE | crush_pieces(c) : 0u;
     if (now != 0)
         atom[a_counters() + C_FRAME_CRUSHED].add(1u);
 }
@@ -3951,14 +4054,16 @@ void fr_crush_apply(uint3 id: SV_DispatchThreadID)
     float3 w = bodies[bw + 4].xyz;
     float mass = chunks[4 * k].w;
     float volume = crush_tab[2 * k + 1].y;
-    uint rank = work[w_rank() + k];
+    uint scanned = work[w_rank() + k];
+    uint rank = scanned / CRUSH_EVENT_ONE;
+    uint pieces = crush_pieces(k);
     if (rank >= crush.max_events)
         atom[a_counters() + C_ERROR].or(32u);
     uint first = NONE;
     float3 half = float3(0.0);
     if (crush.mode == 1 && crush.fragments > 0)
     {
-        uint base = atom[a_counters() + C_FRAGMENTS].load() + rank * crush.fragments;
+        uint base = atom[a_counters() + C_FRAGMENTS].load() + (scanned & CRUSH_POOL_SPAN);
         // The pool is the engine-wide budget: more is an error, never a silent drop.
         if (base + crush.fragments > crush.pool_size)
             atom[a_counters() + C_ERROR].or(16u);
@@ -4007,6 +4112,48 @@ void fr_crush_apply(uint3 id: SV_DispatchThreadID)
             collider_info[2 * fc + 1] = uint4(asuint(mf), asuint(e), asuint(face), 0u);
         }
     }
+    if (crush.mode == 2 && pieces > 0)
+    {
+        uint base = atom[a_counters() + C_FRAGMENTS].load() + (scanned & CRUSH_POOL_SPAN);
+        if (base + pieces > crush.pool_size)
+            atom[a_counters() + C_ERROR].or(16u);
+        else
+            first = base;
+        // Particles: spheres of the chunk's volume shared out (no rotation, so no inertia),
+        // spread through its box about its centre of mass (a hash per particle), each with
+        // the chunk's velocity at its spot.
+        Quat q;
+        float3 origin;
+        structure_pose(slot, bw, q, origin);
+        float3 com = origin + rotate(q, chunks[4 * k].xyz);
+        Quat box = normalized(quat_mul(q, quat_of(geometry[3 * k + 2])));
+        float3 h = geometry[3 * k + 1].xyz;
+        float r = max(pow(0.75 * volume / (3.14159265 * float(pieces)), 1.0 / 3.0), 0.002);
+        half = float3(r, r, r);
+        float mf = mass / float(pieces);
+        float e = chunks[4 * k + 3].x;
+        // Inside the box by a radius where it is wide enough, the spots' mean on the
+        // centre of mass (so the particles' momentum is the chunk's: Σ w×(x - b0) = 0).
+        float3 room = max(h - r, 0.25 * h);
+        float3 mean = float3(0.0);
+        for (uint i = 0; i < pieces; i++)
+            mean += crush_particle_spot(k, i);
+        mean /= float(pieces);
+        for (uint i = 0; i < pieces && first != NONE; i++)
+        {
+            float3 x = to_rubble(com + rotate(box, room * (crush_particle_spot(k, i) - mean)));
+            float4 entry = crush_tab[crush.t_pool + first + i];
+            uint fs = asuint(entry.x);
+            uint fc = asuint(entry.y);
+            write_body(fs, x, 1.0 / mf, quat_of(float4(0.0, 0.0, 0.0, 1.0)), float3(0.0), FLAG_DYNAMIC | FLAG_AWAKE | (crush.particle_ccd != 0 ? FLAG_CCD | FLAG_CCD_FAST : 0u), v + cross(w, x - b0.xyz), float3(0.0));
+            colliders[4 * fc + 1] = float4(0.0, 0.0, 0.0, colliders[4 * fc + 1].w);
+            colliders[4 * fc + 2] = float4(0.0, 0.0, 0.0, 1.0);
+            colliders[4 * fc + 3] = float4(r, 0.0, 0.0, r);
+            uint4 a = collider_info[2 * fc];
+            collider_info[2 * fc] = uint4(NONE, fs, KIND_BODY, a.w);
+            collider_info[2 * fc + 1] = uint4(asuint(mf), asuint(e), asuint(r), 0u);
+        }
+    }
     if (rank < crush.max_events)
     {
         uint ev = crush.r_events + 6 * rank;
@@ -4028,8 +4175,8 @@ void fr_crush_end(uint3 id: SV_DispatchThreadID)
 {
     uint blocks = (params.chunk_count + 1023) / 1024;
     uint total = work[scan_new_blocks() + blocks];
-    atom[a_counters() + C_CRUSH_EVENTS].store(total);
-    atom[a_counters() + C_CRUSHED].add(total);
-    if (crush.mode == 1)
-        atom[a_counters() + C_FRAGMENTS].add(total * crush.fragments);
+    uint events = total / CRUSH_EVENT_ONE;
+    atom[a_counters() + C_CRUSH_EVENTS].store(events);
+    atom[a_counters() + C_CRUSHED].add(events);
+    atom[a_counters() + C_FRAGMENTS].add(total & CRUSH_POOL_SPAN);
 }

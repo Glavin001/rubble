@@ -24,6 +24,7 @@ fn cube(key: BodyKey, at: Vec3, chunk: usize, mass: f64) -> EngineBody {
         pose: Pose::new(at, Quat::IDENTITY),
         velocity: Vec3::ZERO,
         angular_velocity: Vec3::ZERO,
+        poses: None,
     }
 }
 
@@ -118,6 +119,7 @@ fn a_ccd_impactor_stops_at_a_thin_wall_without_substeps() {
             pose: Pose::new(Vec3::new(10.05, 0.0, 0.0), Quat::IDENTITY),
             velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
+            poses: None,
         };
         let ball = EngineBody {
             key: BodyKey::Impactor(0),
@@ -128,6 +130,7 @@ fn a_ccd_impactor_stops_at_a_thin_wall_without_substeps() {
             pose: Pose::new(Vec3::new(0.37, 0.03, 0.02), Quat::IDENTITY),
             velocity: Vec3::new(250.0, 0.0, 0.0),
             angular_velocity: Vec3::ZERO,
+            poses: None,
         };
         e.sync_bodies(&[wall, ball]);
         let mut max_x = f64::MIN;
@@ -338,6 +341,7 @@ fn a_ccd_body_struck_within_the_step_stops_at_a_slab() {
             key: BodyKey::Cluster(1),
             signature: 1,
             geometry: BodyGeometry::Boxes(vec![BoxShape { local: Pose::default(), half_extents: Vec3::new(0.5, 0.025, 0.5), mass: 100.0, chunk: Some((0, 0)), hull: None }].into()),
+            poses: None,
             fixed: true,
             ccd: false,
             pose: Pose::new(Vec3::new(0.0, 1.025, 0.0), Quat::IDENTITY),
@@ -353,11 +357,12 @@ fn a_ccd_body_struck_within_the_step_stops_at_a_slab() {
                 }
             }
         }
-        let wall = EngineBody { key: BodyKey::Cluster(2), signature: 2, geometry: BodyGeometry::Boxes(boxes.into()), fixed: false, ccd, pose: Pose::default(), velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO };
+        let wall = EngineBody { key: BodyKey::Cluster(2), signature: 2, geometry: BodyGeometry::Boxes(boxes.into()), poses: None, fixed: false, ccd, pose: Pose::default(), velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO };
         let ram = EngineBody {
             key: BodyKey::Impactor(0),
             signature: 3,
             geometry: BodyGeometry::Boxes(vec![BoxShape { local: Pose::default(), half_extents: Vec3::splat(0.1), mass: 2000.0, chunk: None, hull: None }].into()),
+            poses: None,
             fixed: false,
             ccd: true,
             pose: Pose::new(Vec3::new(0.0, 0.4 - 0.1 - 100.0 / 120.0, 0.0), Quat::IDENTITY),

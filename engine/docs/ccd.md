@@ -22,7 +22,7 @@ steps, all inside the GPU step (`slang/kernels/ccd_step.slang`, scheduled by
 apply_impulses (host records)
 build_aabbs                 swept boxes; CCD and kinematic reach uncapped
 broadphase_clear
-ccd_register                one slot per BODY_CCD body (scratch, cap 1024)
+ccd_register                one slot per BODY_CCD body (scratch, cap 16384)
 broadphase_insert           sweeps longer than a cell go to the fast list
 broadphase_query            grid entries only
 broadphase_fast             each fast collider walks the cells along its sweep
@@ -240,13 +240,13 @@ look-ahead on for the scene by itself).
 
 | Limit | Value | Over it |
 |---|---|---|
-| CCD bodies per step | 1024 | `OVERFLOW_CCD_BODIES` (4096) |
+| CCD bodies per step | 16,384 | `OVERFLOW_CCD_BODIES` (4096) |
 | Fast list | 16,384 colliders (one workgroup each), 262,144 cells per level walked | `OVERFLOW_FAST_LIST` (1024) |
 | Impulse records | 1024 | host panic / `OVERFLOW_IMPULSES` (8192) |
 | GJK iterations | 32 | not an overflow: counted in `ccd_fallbacks()`, and the pair keeps its ordinary look-ahead contact |
 | Large dynamics on the uniform grid | 16 | `OVERFLOW_LARGE_DYNAMICS` (2048) |
 | Candidate pairs of CCD bodies (post-solve check) | 131,072 | `OVERFLOW_CCD_PAIRS` (32768) |
-| Late-sweep colliders a step (CCD bodies carried past their bounds) | 16,384 | `OVERFLOW_CCD_LATE` (65536) |
+| Late-sweep colliders a step (CCD bodies carried past their bounds) | 16,384 | `OVERFLOW_CCD_LATE` (262144) |
 
 Manifold reuse (`step_reuse_manifolds`, the lab's reuse mode) is off while CCD
 bodies exist: a reused step would keep last step's TOI contacts.
