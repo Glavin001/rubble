@@ -26,11 +26,20 @@ fn run(y: &mut TimberYard, seconds: f32) -> f64 {
     let frames = (seconds / y.dt).round() as u32;
     let t0 = Instant::now();
     for _ in 0..frames {
+        let crushed = y.total.crushed;
         y.step().unwrap();
         y.poll_blocking().unwrap();
+        PEAK_CRUSHED.fetch_max(
+            y.total.crushed - crushed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     t0.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64
 }
+
+/// The most chunks crushed in one step so far (a step's crushes against
+/// `Crush::max_per_step`).
+static PEAK_CRUSHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Fire a ball from `STAND_OFF` m in front of `target` (−z) straight at it.
 fn shoot_from_front(y: &mut TimberYard, target: [f32; 3]) {
@@ -113,6 +122,10 @@ fn report(what: &str, y: &TimberYard, ms: f64, l: &[(&'static str, usize, f32)])
         y.total.broken,
         y.total.crushed,
         y.splinters.len()
+    );
+    eprintln!(
+        "  most crushed in one step: {}",
+        PEAK_CRUSHED.swap(0, std::sync::atomic::Ordering::Relaxed)
     );
     for (name, n, s) in l {
         eprintln!("  {name}: {:.1}% of {n} loose", 100.0 * s);
@@ -207,4 +220,53 @@ fn every_level_loads_and_steps() {
         );
         assert!(y.total.broken > 0, "L{level}: the shot breaks bonds");
     }
+}
+
+/// Sustained free fire (a player's session): a ball every 0.4 s for 100 s into the house,
+/// spread over its front, sides and back, low to high. The wreck piles up and loads what is
+/// left, so many chunks can crush in one step; every step must stay within the range's
+/// crush capacity (`Crush::max_per_step`).
+#[test]
+fn sustained_fire() {
+    use yard::*;
+    let (mut y, rest) = yard(YardTake::Free);
+    let every = (0.4 / y.dt).round() as u32;
+    let steps = (100.0 / y.dt).round() as u32;
+    let t0 = Instant::now();
+    for k in 0..steps {
+        if k % every == 0 {
+            let n = k / every;
+            // A scattered point on the house (a fixed sequence).
+            let h = |s: u32| {
+                ((n.wrapping_mul(2654435761) ^ s.wrapping_mul(40503)) % 1000) as f32 / 1000.0
+            };
+            let at = [
+                HOUSE_X[0] + 0.3 + 7.4 * h(1),
+                PLINTH + 0.3 + (CEILING + 1.5 - PLINTH) * h(2),
+                HOUSE_Z[0] + 6.0 * h(3),
+            ];
+            let from = match n % 4 {
+                0 => [at[0], at[1] + 1.0, HOUSE_Z[0] - STAND_OFF],
+                1 => [at[0], at[1] + 1.0, HOUSE_Z[1] + STAND_OFF],
+                2 => [HOUSE_X[0] - STAND_OFF, at[1] + 1.0, at[2]],
+                _ => [HOUSE_X[1] + STAND_OFF, at[1] + 1.0, at[2]],
+            };
+            let d = glam::Vec3::from(at) - glam::Vec3::from(from);
+            y.shoot(from, (d.normalize() * BALL_SPEED).to_array());
+        }
+        let crushed = y.total.crushed;
+        y.step().unwrap();
+        y.poll_blocking().unwrap();
+        PEAK_CRUSHED.fetch_max(
+            y.total.crushed - crushed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1e3 / steps as f64;
+    let l = loose(&y, &rest);
+    report("sustained fire", &y, ms, &l);
+    assert!(
+        share(&l, "house") > 0.2,
+        "sustained fire wrecks much of the house"
+    );
 }
