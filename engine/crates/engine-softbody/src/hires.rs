@@ -51,6 +51,10 @@ pub struct HiresParams {
     /// Panel mounts' break strength over the body's.
     pub mount_strength: f32,
     pub wheel_radius: f32,
+    /// Beams shorter than this get this length's stiffness (`spring`·0.15/L is
+    /// capped here). 0.03 m by default; a fixed explicit step needs longer (about
+    /// 0.12 m with 2 kg nodes at 0.5 ms), or the short panel mounts outrun it.
+    pub stiffness_length: f32,
 }
 
 impl Default for HiresParams {
@@ -73,6 +77,7 @@ impl Default for HiresParams {
             gearbox_mass: 60.0,
             mount_strength: 0.3,
             wheel_radius: 0.32,
+            stiffness_length: 0.03,
         }
     }
 }
@@ -144,7 +149,7 @@ impl Builder {
         {
             return;
         }
-        let l = (self.nodes[a].p - self.nodes[b].p).length().max(0.03);
+        let l = (self.nodes[a].p - self.nodes[b].p).length().max(self.p.stiffness_length);
         // Two significant digits, so modifier rows repeat.
         let k = round2(self.p.spring * kscale * 0.15 / l);
         self.beams.push((
@@ -162,7 +167,7 @@ impl Builder {
     }
 
     fn support(&mut self, a: usize, b: usize) {
-        let l = (self.nodes[a].p - self.nodes[b].p).length().max(0.03);
+        let l = (self.nodes[a].p - self.nodes[b].p).length().max(self.p.stiffness_length);
         self.beams.push((
             a,
             b,

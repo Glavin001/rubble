@@ -13,7 +13,7 @@
 //! # a BeamNG JBeam vehicle (a directory of .jbeam files, optional .pc config) as .truck
 //! cargo run -p engine-softbody --release --example ror_compare -- jbeam <dir-or-file> <out.truck> [config.pc]
 //! # Rubble's high-resolution test car (JBeam) as .truck
-//! cargo run -p engine-softbody --release --example ror_compare -- hires <out.truck> [node_weight=1] [spring=3e6] [damp=250]
+//! cargo run -p engine-softbody --release --example ror_compare -- hires <out.truck> [node_weight=1] [spring=3e6] [damp=250] [stiffness_length=0.03]
 //! # Rubble's explicit-beams solver on the harness's `free` scene, against RoR's node dump
 //! cargo run -p engine-softbody --release --example ror_compare -- free <file.truck> <nodes.csv> pos=x,y,z vel=… box=… drag=0 secs=1
 //! ```
@@ -93,6 +93,8 @@ fn main() {
                         .map_or(d.node_weight, |s| s.parse().unwrap()),
                     spring: kv(&a[2..], "spring").map_or(d.spring, |s| s.parse().unwrap()),
                     damp: kv(&a[2..], "damp").map_or(d.damp, |s| s.parse().unwrap()),
+                    stiffness_length: kv(&a[2..], "stiffness_length")
+                        .map_or(d.stiffness_length, |s| s.parse().unwrap()),
                     ..d
                 };
                 let (text, _) = hires_car_jbeam(&p);
