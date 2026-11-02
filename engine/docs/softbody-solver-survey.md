@@ -7,8 +7,7 @@ PhysX GPU deformables, NVIDIA Newton (VBD/XPBD), MuJoCo and MuJoCo Warp flex,
 the AVBD codebases, and JGS2 together with an elasticity-solver benchmark.
 
 The notes describe behaviour in our own words. No code was copied or
-translated (clean-room rule). The raw reading notes live in the gitignored
-`inspiration/research-reports/`.
+translated (clean-room rule). The per-engine notes are in [softbody-research/](softbody-research/README.md).
 
 ## Findings that hold across engines
 
