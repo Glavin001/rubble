@@ -59,6 +59,11 @@ public struct BlastParams
     // blast_native*.slang: the polynomial from the first iteration (BLAST_STRESS_FIRST_PRECONDITIONER;
     // 0: a projected steepest-descent step first).
     public uint first_polynomial;
+    // Per-bond stiffness tensors (StressBondRotation.cuh) in `stiffness`: 0 none (s I), 1 the
+    // rotational stiffness (s A on the angular rows), 2 also the shear stiffness (s Al).
+    public uint rotation;
+    // blast_native*.slang: float4s of scratch per node (more with the shear stiffness's block).
+    public uint node_vectors;
 };
 
 // `topo` (blast_topology.slang): the totals after the per-node and per-block words: islands,

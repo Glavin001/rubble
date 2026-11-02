@@ -123,6 +123,17 @@ struct Island<'a, T> {
     o0: &'a [[T; 3]],
     o1: &'a [[T; 3]],
     ends: &'a [[usize; 2]],
+    /// Per bond `A` and `Al` (`s A`, `s Al` in `S`), or empty.
+    rot: &'a [[T; 6]],
+    shear: &'a [[T; 6]],
+}
+
+fn sym<T: Real>(m: &[T; 6], v: [T; 3]) -> [T; 3] {
+    [
+        m[0] * v[0] + m[3] * v[1] + m[4] * v[2],
+        m[3] * v[0] + m[1] * v[1] + m[5] * v[2],
+        m[4] * v[0] + m[5] * v[1] + m[2] * v[2],
+    ]
 }
 
 impl<T: Real> Island<'_, T> {
@@ -142,21 +153,19 @@ impl<T: Real> Island<'_, T> {
         };
         let (p0, p1) = (at(n0), at(n1));
         let s = self.s[j];
+        let a = sub(p0.a, p1.a);
+        let l = add(sub(p0.l, p1.l), sub(cross(self.o0[j], p0.a), cross(self.o1[j], p1.a)));
         Pair {
-            a: scale(sub(p0.a, p1.a), s),
-            l: scale(
-                add(
-                    sub(p0.l, p1.l),
-                    sub(cross(self.o0[j], p0.a), cross(self.o1[j], p1.a)),
-                ),
-                s,
-            ),
+            a: scale(self.rot.get(j).map_or(a, |m| sym(m, a)), s),
+            l: scale(self.shear.get(j).map_or(l, |m| sym(m, l)), s),
         }
     }
 
     /// Bond `j`'s share (bond vector `y`, carrying `S` once more) at an endpoint, before `D`.
     fn share(&self, j: usize, second: bool, y: Pair<T>) -> Pair<T> {
-        let (ya, yl) = (scale(y.a, self.s[j]), scale(y.l, self.s[j]));
+        let ya = self.rot.get(j).map_or(y.a, |m| sym(m, y.a));
+        let yl = self.shear.get(j).map_or(y.l, |m| sym(m, y.l));
+        let (ya, yl) = (scale(ya, self.s[j]), scale(yl, self.s[j]));
         if second {
             Pair {
                 a: sub(cross(self.o1[j], yl), ya),
@@ -340,6 +349,8 @@ pub(super) fn native_pcg<T: Real>(
     let o0: Vec<[T; 3]> = g.offset0.iter().map(|&o| of3(o)).collect();
     let o1: Vec<[T; 3]> = g.offset1.iter().map(|&o| of3(o)).collect();
     let ends: Vec<[usize; 2]> = g.bonds.iter().map(|b| b.nodes).collect();
+    let rot: Vec<[T; 6]> = g.rotation.iter().map(|r| r[0].map(T::of)).collect();
+    let shear: Vec<[T; 6]> = g.shear.iter().map(|r| r[0].map(T::of)).collect();
     // The rigid-mode frame's inputs, as the device holds them.
     let f32x3 = |v: Vec3| [v.x as f32, v.y as f32, v.z as f32];
     let o0_f32: Vec<[f32; 3]> = g.offset0.iter().map(|&o| f32x3(o)).collect();
@@ -391,6 +402,8 @@ pub(super) fn native_pcg<T: Real>(
                 o0: &o0,
                 o1: &o1,
                 ends: &ends,
+                rot: &rot,
+                shear: &shear,
             };
             let count = isl.nodes.len();
 
@@ -606,6 +619,11 @@ pub(super) fn native_pcg<T: Real>(
                     };
                     if step.finite() {
                         travel = travel + step;
+                    }
+                    // Only a preconditioned step is judged: not the projected steepest-descent
+                    // step of iteration 0 (small exactly when the error sits in soft modes).
+                    if !(iteration > 0 || first_polynomial) {
+                        step = T::of(f64::INFINITY);
                     }
                 }
                 previous = gamma;

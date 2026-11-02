@@ -70,6 +70,8 @@ struct Capture {
     /// The forces the stage ended with.
     lambda: Vec<AngLin>,
     tolerance: f64,
+    /// Per-bond rotational stiffness `A` (packed xx yy zz xy xz yz), when captured.
+    rotation: Vec<[f64; 6]>,
 }
 
 fn v3(w: &[u32]) -> Vec3 {
@@ -114,6 +116,7 @@ fn load(meta: &Path) -> Capture {
         components: Vec::new(),
         lambda: Vec::new(),
         tolerance: 0.0,
+        rotation: Vec::new(),
     };
     for r in nodes.chunks_exact(16) {
         c.weight.push((f(r[0]), f(r[1])));
@@ -151,6 +154,13 @@ fn load(meta: &Path) -> Capture {
         if b2 > 0.0 && c.tolerance == 0.0 {
             c.tolerance = (f(r[9]) / b2).sqrt();
         }
+    }
+    if m.get("rotation").is_some_and(|r| !r.is_null()) {
+        c.rotation = part("rotation")
+            .chunks_exact(6)
+            .map(|r| std::array::from_fn(|k| f(r[k])))
+            .collect();
+        assert_eq!(c.rotation.len(), mb, "truncated rotation capture");
     }
     for r in part("lambda").chunks_exact(8) {
         c.lambda.push(AngLin {
@@ -193,6 +203,8 @@ fn graph(c: &Capture, settings: BlastSettings) -> BlastGraph {
         .map(|&(ang, lin)| Weight { ang, lin })
         .collect();
     g.col_scale = c.scale.clone();
+    // The stage's A as captured (its offsets already the centroids'), W = A^2.
+    g.rotation = c.rotation.iter().map(|a| [*a, sym_square(a)]).collect();
     g
 }
 

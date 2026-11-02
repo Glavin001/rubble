@@ -67,7 +67,7 @@ float bond_pass(uint tid, uint b0, uint b1, uint v)
         float3 ta = float3(0.0);
         float3 tl = float3(0.0);
         if (b.health > 0.0)
-            bond_term(b, v, ta, tl);
+            bond_term(b, j, v, ta, tl);
         z += norm2(ta, tl);
         scratch[bs(j)] = float4(ta, 0.0);
         scratch[bs(j) + 1] = float4(tl, 0.0);
@@ -300,7 +300,7 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
                 BlastBond b = bonds[j];
                 float3 ta;
                 float3 tl;
-                bond_term(b, N_U, ta, tl);
+                bond_term(b, j, N_U, ta, tl);
                 f += norm2(x[j * 2].xyz + ta, x[j * 2 + 1].xyz + tl);
             }
             if (step <= params.force_tolerance * sqrt(blast_group_sum(tid, float2(f, 0.0)).x))
@@ -397,6 +397,9 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             step = den > 0.0 && gamma > 0.0 ? gamma / sqrt(den) : float_bits(0x7f800000u);
             if (isfinite(step))
                 travel += step;
+            // Only a preconditioned step is judged: not iteration 0's steepest-descent step.
+            if (!(iteration > 0 || params.first_polynomial != 0))
+                step = float_bits(0x7f800000u);
         }
         previous = gamma;
         iteration++;
@@ -426,7 +429,7 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         }
         float3 ta;
         float3 tl;
-        bond_term(b, N_U, ta, tl);
+        bond_term(b, j, N_U, ta, tl);
         x[j * 2] = float4(x[j * 2].xyz + ta, 0.0);
         x[j * 2 + 1] = float4(x[j * 2 + 1].xyz + tl, 0.0);
     }

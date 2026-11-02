@@ -25,6 +25,21 @@ import blast_common;
 [[vk::binding(5, 0)]] RWStructuredBuffer<float4> out;
 // blast_topology.slang's: a break marks the islands for rebuilding (`topo_dirty`).
 [[vk::binding(6, 0)]] RWStructuredBuffer<Atomic<uint>> topo;
+// blast_native_ops.slangh's: the per-bond stiffness tensors (params.rotation).
+[[vk::binding(7, 0)]] StructuredBuffer<float4> stiffness;
+
+// A packed symmetric 3x3 (`which`: 0 A, 2 Al) of bond j times v.
+float3 stiff(uint j, uint which, float3 v)
+{
+    uint at = 6 * which;
+    float m[6];
+    for (uint k = 0; k < 6; k++)
+    {
+        float4 q = stiffness[j * 6 + (at + k) / 4];
+        m[k] = q[(at + k) % 4];
+    }
+    return float3(m[0] * v.x + m[3] * v.y + m[4] * v.z, m[3] * v.x + m[1] * v.y + m[5] * v.z, m[4] * v.x + m[5] * v.y + m[2] * v.z);
+}
 
 // |v - (v.n) n| with fused components (extStressPerpendicularMagnitude).
 float perpendicular(float3 v, float3 n, float along)
@@ -56,8 +71,15 @@ void blast_bond_stress(uint3 id : SV_DispatchThreadID)
     if (j >= params.bond_count)
         return;
     BlastBond b = bonds[j];
-    float3 ia = x[j * 2].xyz * (b.s * params.angular_scale);
-    float3 il = x[j * 2 + 1].xyz * (b.s * params.linear_scale);
+    // With per-bond stiffness the physical moment (force) is s A (s Al) times the variable.
+    float3 xa = x[j * 2].xyz;
+    float3 xl = x[j * 2 + 1].xyz;
+    if (params.rotation != 0)
+        xa = stiff(j, 0, xa);
+    if (params.rotation == 2)
+        xl = stiff(j, 2, xl);
+    float3 ia = xa * (b.s * params.angular_scale);
+    float3 il = xl * (b.s * params.linear_scale);
     out[j * 4] = float4(ia, 0.0);
     out[j * 4 + 1] = float4(il, 0.0);
     float area = b.health;

@@ -58,6 +58,8 @@ struct BlastParams_0
     uint wide_blocks_0;
     uint opaque_zero_0;
     uint first_polynomial_0;
+    uint rotation_0;
+    uint node_vectors_0;
 };
 
 struct KernelContext_0

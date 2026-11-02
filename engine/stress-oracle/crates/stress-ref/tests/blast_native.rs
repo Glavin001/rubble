@@ -276,3 +276,84 @@ fn the_settled_certificate_skips_only_a_verified_island() {
     let heavier = uniform(solver.graph.node_count(), g * 1.5);
     assert!(!solver.solve(&heavier, false)[0].skipped);
 }
+
+/// A section whose radii of gyration are all `r`, on an axis in the bond's plane.
+fn round_section(b: &BlastBond, r: f64) -> BondSection {
+    let n = b.normal;
+    let axis = n.cross(if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y }).normalized();
+    BondSection {
+        axis,
+        gyration0: r,
+        gyration1: r,
+        polar_gyration: r,
+    }
+}
+
+/// A two-storey frame of 2 x 2 columns on supports, bonded to its neighbours at their midpoints.
+fn frame(settings: BlastSettings) -> BlastGraph {
+    let mut nodes = vec![];
+    for z in 0..3 {
+        for x in 0..2 {
+            for y in 0..2 {
+                let mass = if z == 0 { 0.0 } else { 1.0 + x as f64 };
+                nodes.push(node(x as f64, y as f64, z as f64, mass));
+            }
+        }
+    }
+    let mut bonds = vec![];
+    for a in 0..nodes.len() {
+        for b in a + 1..nodes.len() {
+            let near = (nodes[a].position - nodes[b].position).norm() < 1.01;
+            if near && (nodes[a].mass > 0.0 || nodes[b].mass > 0.0) {
+                bonds.push(bond(a, b, &nodes, 0.1));
+            }
+        }
+    }
+    BlastGraph::new(nodes, bonds, settings).unwrap()
+}
+
+#[test]
+fn rotational_stiffness_of_unit_radius_is_the_uniform_solve() {
+    // A = sum (r/L) e e' over an orthonormal frame is I when every radius is L: the same
+    // operator as without rotational stiffness (the offsets move to the centroids, here the
+    // midpoints), so the same converged forces.
+    let plain = frame(native(20_000, 1e-10));
+    let mut rotated = plain.clone();
+    let sections: Vec<BondSection> =
+        rotated.bonds.iter().map(|b| round_section(b, plain.length_scale)).collect();
+    rotated.set_rotational_stiffness(Some(&sections)).unwrap();
+    let load = AngLin {
+        ang: Vec3::new(0.3, 0.0, 0.1),
+        lin: Vec3::new(1.0, 0.5, -G),
+    };
+    let accel = vec![load; plain.node_count()];
+    let (mut a, mut b) = (BlastSolver::new(plain), BlastSolver::new(rotated));
+    assert!(a.solve(&accel, false)[0].converged && b.solve(&accel, false)[0].converged);
+    let e = difference(&impulses(&b), &impulses(&a));
+    assert!(e < 1e-7, "{e:.2e}");
+}
+
+#[test]
+fn parallel_bonds_share_a_moment_by_their_rotational_stiffness() {
+    // Two bonds from a support to one chunk at the same centroid, one with twice the radii of
+    // gyration: four times the rotational stiffness (W = (r/L)^2), so four times the moment.
+    let nodes = vec![node(0.0, 0.0, 0.0, 0.0), node(1.0, 0.0, 0.0, 2.0)];
+    let bonds = vec![bond(0, 1, &nodes, 0.1), bond(0, 1, &nodes, 0.1)];
+    let mut graph = BlastGraph::new(nodes, bonds, native(20_000, 1e-10)).unwrap();
+    let sections = vec![round_section(&graph.bonds[0], 0.1), round_section(&graph.bonds[1], 0.2)];
+    graph.set_rotational_stiffness(Some(&sections)).unwrap();
+    let load = AngLin {
+        ang: Vec3::new(0.7, -0.4, 0.2),
+        lin: Vec3::new(0.0, 0.0, -G),
+    };
+    let accel = vec![AngLin::ZERO, load];
+    let mut s = BlastSolver::new(graph);
+    assert!(s.solve(&accel, false)[0].converged);
+    let (m0, m1) = (s.impulse(0).ang, s.impulse(1).ang);
+    for k in 0..3 {
+        assert!((m1[k] - 4.0 * m0[k]).abs() <= 1e-6 * m1[k].abs().max(1e-9), "{m0:?} {m1:?}");
+    }
+    // The linear forces still balance the weight, equally (the same compliance).
+    let (f0, f1) = (s.impulse(0).lin, s.impulse(1).lin);
+    assert!((f0 - f1).norm() <= 1e-6 * f0.norm(), "{f0:?} {f1:?}");
+}

@@ -17,10 +17,10 @@ import blast_common;
 
 #include "blast_native_ops.slangh"
 
-[[vk::binding(10, 0)]] RWStructuredBuffer<float4> wide;
-[[vk::binding(11, 0)]] RWStructuredBuffer<Atomic<uint>> meta;
+[[vk::binding(11, 0)]] RWStructuredBuffer<float4> wide;
+[[vk::binding(12, 0)]] RWStructuredBuffer<Atomic<uint>> meta;
 // blast_topology.slang's `args` (word 3: the island count).
-[[vk::binding(12, 0)]] StructuredBuffer<uint> topo_args;
+[[vk::binding(13, 0)]] StructuredBuffer<uint> topo_args;
 
 static const uint ROW_WORDS = 16;
 static const uint PARTIAL = 6;
@@ -383,12 +383,12 @@ void bond_r(uint3 group, uint tid, bool only_rebuild)
         float3 tl = float3(0.0);
         if (bd.health > 0.0)
         {
-            bond_term(bd, N_R, ta, tl);
+            bond_term(bd, j, N_R, ta, tl);
             if (params.force_tolerance > 0.0)
             {
                 float3 ua;
                 float3 ul;
-                bond_term(bd, N_U, ua, ul);
+                bond_term(bd, j, N_U, ua, ul);
                 f = norm2(x[j * 2].xyz + ua, x[j * 2 + 1].xyz + ul);
             }
         }
@@ -587,7 +587,7 @@ void w_bond_loc(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     float3 ta = float3(0.0);
     float3 tl = float3(0.0);
     if (bd.health > 0.0)
-        bond_term(bd, N_LOC, ta, tl);
+        bond_term(bd, j, N_LOC, ta, tl);
     scratch[bs(j)] = float4(ta, 0.0);
     scratch[bs(j) + 1] = float4(tl, 0.0);
 }
@@ -758,7 +758,7 @@ void w_bond_p(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         float3 ta = float3(0.0);
         float3 tl = float3(0.0);
         if (bd.health > 0.0)
-            bond_term(bd, N_P, ta, tl);
+            bond_term(bd, j, N_P, ta, tl);
         z = norm2(ta, tl);
         scratch[bs(j)] = float4(ta, 0.0);
         scratch[bs(j) + 1] = float4(tl, 0.0);
@@ -808,6 +808,9 @@ void w_den(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         s1.w = den > 0.0 && gamma > 0.0 ? gamma / sqrt(den) : float_bits(0x7f800000u);
         if (isfinite(s1.w))
             cnt.y += s1.w;
+        // Only a preconditioned step is judged: not iteration 0's steepest-descent step.
+        if (!(asuint(cnt.z) > 0 || params.first_polynomial != 0))
+            s1.w = float_bits(0x7f800000u);
     }
     s0.z = gamma;
     uint it = asuint(cnt.z) + 1;
@@ -868,7 +871,7 @@ void w_final(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     float3 ta;
     float3 tl;
-    bond_term(bd, N_U, ta, tl);
+    bond_term(bd, j, N_U, ta, tl);
     x[j * 2] = float4(x[j * 2].xyz + ta, 0.0);
     x[j * 2 + 1] = float4(x[j * 2 + 1].xyz + tl, 0.0);
 }

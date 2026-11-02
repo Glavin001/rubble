@@ -167,7 +167,7 @@ fn converged_native_solves_are_the_f64_answer() {
 fn capped_native_frames_track_the_f32_reference() {
     let Some(gpu) = gpu() else { return };
     // vibe-land's Mac budget: 16 iterations a frame, warm-started, the settled certificate on.
-    capped_frames(&gpu, BlastSettings::native(), u32::MAX);
+    capped_frames(&gpu, BlastSettings::native(), u32::MAX, |_| {});
 }
 
 #[test]
@@ -177,15 +177,16 @@ fn the_polynomial_first_tracks_the_f32_reference_in_one_group_and_many() {
     // `warm`, which differs from it only on a cold solve.
     for first in [FirstPreconditioner::Polynomial, FirstPreconditioner::Warm] {
         let settings = BlastSettings { first_preconditioner: first, ..BlastSettings::native() };
-        capped_frames(&gpu, settings, u32::MAX);
-        capped_frames(&gpu, settings, 0);
+        capped_frames(&gpu, settings, u32::MAX, |_| {});
+        capped_frames(&gpu, settings, 0, |_| {});
     }
 }
 
 /// Capped warm frames on the house, the device (one group per island, or every island over
 /// `wide_min` nodes on many) against the f32 reference.
-fn capped_frames(gpu: &Gpu, settings: BlastSettings, wide_min: u32) {
-    let (graph, materials, g) = house(settings);
+fn capped_frames(gpu: &Gpu, settings: BlastSettings, wide_min: u32, edit: fn(&mut BlastGraph)) {
+    let (mut graph, materials, g) = house(settings);
+    edit(&mut graph);
     let loads: Vec<_> = (0..24)
         .map(|f| uniform(graph.node_count(), g * if f < 12 { 1.0 } else { 1.2 }))
         .collect();
@@ -328,4 +329,47 @@ fn a_native_rerun_is_bit_identical() {
             .collect::<Vec<_>>()
     };
     assert_eq!(bits(&a), bits(&b));
+}
+
+/// The house with per-bond rotational stiffness (each bond's square patch, as the stage takes
+/// it without section data); with `shear`, also half the shear stiffness of the normal one.
+fn stiffen(graph: &mut BlastGraph, shear: bool) {
+    graph.set_rotational_stiffness(None).unwrap();
+    if shear {
+        graph.set_shear_stiffness(&vec![0.5; graph.bond_count()]).unwrap();
+    }
+}
+
+#[test]
+fn per_bond_stiffness_matches_the_reference() {
+    let Some(gpu) = gpu() else { return };
+    // Rotational stiffness (s A on the angular rows: the Schur block with W), and with the shear
+    // stiffness (s Al on the linear rows: the whole 6x6 block and its inverse): converged forces
+    // against f64; capped warm frames against f32, in one group and in many.
+    for shear in [false, true] {
+        let (mut graph, materials, g) = house(BlastSettings {
+            max_iterations: 4000,
+            tolerance: 1e-4,
+            ..BlastSettings::native()
+        });
+        stiffen(&mut graph, shear);
+        let accel = uniform(graph.node_count(), g);
+        let mut reference = BlastSolver::new(graph.clone());
+        let r = reference.solve(&accel, false);
+        let mut device = GpuBlastSolver::new(&gpu, graph.clone(), materials.clone());
+        device.solve(&accel, false);
+        let e = difference(&device.impulses(), &reference_impulses(&reference));
+        println!("stiffness (shear {shear}): converged {e:.3e} from f64 ({} iterations)", r[0].iterations);
+        assert!(r[0].converged, "{r:?}");
+        assert!(e < 1e-4, "shear {shear}: {e:.3e}");
+        // The stiffness changes the answer: not the uniform solve's forces.
+        let (plain, _, _) = house(BlastSettings { max_iterations: 4000, tolerance: 1e-4, ..BlastSettings::native() });
+        let mut uniform_solve = BlastSolver::new(plain);
+        uniform_solve.solve(&accel, false);
+        assert!(difference(&reference_impulses(&uniform_solve), &reference_impulses(&reference)) > 1e-2);
+    }
+    capped_frames(&gpu, BlastSettings::native(), u32::MAX, |g| stiffen(g, false));
+    capped_frames(&gpu, BlastSettings::native(), 0, |g| stiffen(g, false));
+    capped_frames(&gpu, BlastSettings::native(), u32::MAX, |g| stiffen(g, true));
+    capped_frames(&gpu, BlastSettings::native(), 0, |g| stiffen(g, true));
 }

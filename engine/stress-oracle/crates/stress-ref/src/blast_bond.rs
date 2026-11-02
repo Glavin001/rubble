@@ -356,6 +356,43 @@ pub struct BlastGraph {
     /// Node -> incident bonds, `(bond, is_second)`.
     pub node_begin: Vec<usize>,
     pub node_refs: Vec<(usize, bool)>,
+    /// Per-bond stiffness tensors (`StressBondRotation.cuh`), packed symmetric 3x3 (xx yy zz xy
+    /// xz yz); empty for the uniform `s I`. [`BlastGraph::set_rotational_stiffness`]: the
+    /// angular block of `S` is `s A` and `L`'s carries `s^2 W`, `W = A^2`;
+    /// [`BlastGraph::set_shear_stiffness`]: the linear block `s Al`, `Wl = Al^2`.
+    pub rotation: Vec<[[f64; 6]; 2]>,
+    pub shear: Vec<[[f64; 6]; 2]>,
+}
+
+/// A bond's section on its principal axes (`PxDestructionBondSection`): the unit axis in the
+/// bond's plane and the radii of gyration about it, about `normal x axis` and about the normal.
+/// A gyration of 0 takes the square patch of the bond's area.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BondSection {
+    pub axis: Vec3,
+    pub gyration0: f64,
+    pub gyration1: f64,
+    pub polar_gyration: f64,
+}
+
+/// A packed symmetric 3x3 times a vector.
+pub fn sym_apply(m: &[f64; 6], v: Vec3) -> Vec3 {
+    Vec3::new(
+        m[0] * v.x + m[3] * v.y + m[4] * v.z,
+        m[3] * v.x + m[1] * v.y + m[5] * v.z,
+        m[4] * v.x + m[5] * v.y + m[2] * v.z,
+    )
+}
+
+/// The packed square of a packed symmetric 3x3.
+pub fn sym_square(a: &[f64; 6]) -> [f64; 6] {
+    let col = |c: usize| {
+        let mut e = Vec3::ZERO;
+        e[c] = 1.0;
+        sym_apply(a, sym_apply(a, e))
+    };
+    let (x, y, z) = (col(0), col(1), col(2));
+    [x.x, y.y, z.z, y.x, z.x, z.y]
 }
 
 impl BlastGraph {
@@ -525,7 +562,93 @@ impl BlastGraph {
             node_distance,
             node_begin,
             node_refs,
+            rotation: Vec::new(),
+            shear: Vec::new(),
         })
+    }
+
+    /// Per-bond rotational stiffness from each bond's section (PhysX's
+    /// `ExtStressGpuSetBondRotationalStiffness`, the stage's `sectionRotationalStiffness`):
+    /// `A = sum_k (r_k / L) e_k e_k'` over the section's principal axes `(e0, n x e0, n)`, and
+    /// `W` in f64 alike. The rotational spring sits at the bond's centroid, so a bond between two
+    /// dynamic nodes takes centroid offsets instead of the midpoint. `sections` `None` (or a
+    /// gyration of 0) takes the square patch of the bond's area, as the stage does.
+    pub fn set_rotational_stiffness(&mut self, sections: Option<&[BondSection]>) -> Result<(), String> {
+        if !self.rotation.is_empty() {
+            return Err("rotational stiffness is already set".into());
+        }
+        let m = self.bond_count();
+        if sections.is_some_and(|s| s.len() != m) {
+            return Err(format!("{} sections for {m} bonds", sections.unwrap().len()));
+        }
+        let (row, col) = ([0usize, 1, 2, 0, 0, 1], [0usize, 1, 2, 1, 2, 2]);
+        let mut rotation = Vec::with_capacity(m);
+        for j in 0..m {
+            let n = self.bonds[j].normal.normalized();
+            let n = if n.norm2() > 0.0 { n } else { self.normal[j] };
+            let s = sections.map_or(BondSection::default(), |s| s[j]);
+            let (mut axis, mut r) = (s.axis, [s.gyration0, s.gyration1, s.polar_gyration]);
+            if !(r[0] > 0.0) {
+                let side = (self.bonds[j].area / 12.0).sqrt();
+                r = [side, side, side * 2f64.sqrt()];
+                axis = n.cross(if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y }).normalized();
+            }
+            let axis = (axis - n * axis.dot(n)).normalized();
+            if !r.iter().all(|v| v.is_finite() && *v > 0.0) || !(axis.norm2() > 0.0) {
+                return Err(format!("bond {j}: section radii {r:?} or axis {axis:?}"));
+            }
+            let e1 = n.cross(axis);
+            let axes = [axis, e1, n];
+            let (mut a, mut w) = ([0.0; 6], [0.0; 6]);
+            for k in 0..6 {
+                for (i, e) in axes.iter().enumerate() {
+                    let p = e[row[k]] * e[col[k]];
+                    let q = r[i] / self.length_scale;
+                    a[k] += q * p;
+                    w[k] += q * q * p;
+                }
+            }
+            rotation.push([a, w]);
+            let [i0, i1] = self.bonds[j].nodes;
+            if !self.weight[i0].is_static() && !self.weight[i1].is_static() {
+                let c = self.bonds[j].centroid;
+                self.offset0[j] = (c - self.nodes[i0].position) / self.length_scale;
+                self.offset1[j] = (c - self.nodes[i1].position) / self.length_scale;
+            }
+        }
+        self.rotation = rotation;
+        Ok(())
+    }
+
+    /// Per-bond shear stiffness (`ExtStressGpuSetBondShearStiffness`, the stage's
+    /// `PX_DESTRUCTION_SHEAR_STIFFNESS`): each bond's linear block becomes `s Al`,
+    /// `Al = n n' + sqrt(gamma) (I - n n')`: its normal stiffness stays `s^2`, its shear stiffness
+    /// is `gamma s^2`. Requires the rotational stiffness, as there.
+    pub fn set_shear_stiffness(&mut self, gamma: &[f64]) -> Result<(), String> {
+        if self.rotation.is_empty() || !self.shear.is_empty() || gamma.len() != self.bond_count() {
+            return Err("shear stiffness needs the rotational stiffness first, and one ratio per bond".into());
+        }
+        let (row, col) = ([0usize, 1, 2, 0, 0, 1], [0usize, 1, 2, 1, 2, 2]);
+        self.shear = (0..self.bond_count())
+            .map(|j| {
+                let g = gamma[j];
+                let n = self.normal[j];
+                let root = g.sqrt();
+                let (mut a, mut w) = ([0.0; 6], [0.0; 6]);
+                for k in 0..6 {
+                    let p = n[row[k]] * n[col[k]];
+                    let identity = if row[k] == col[k] { 1.0 } else { 0.0 };
+                    a[k] = p + root * (identity - p);
+                    w[k] = p + g * (identity - p);
+                }
+                [a, w]
+            })
+            .collect();
+        if gamma.iter().any(|g| !(g.is_finite() && *g > 0.0)) {
+            self.shear.clear();
+            return Err("shear stiffness ratios must be positive".into());
+        }
+        Ok(())
     }
 
     pub fn node_count(&self) -> usize {
@@ -836,9 +959,17 @@ impl BlastSolver {
         let s = g.col_scale[bond];
         let linear = g.length_scale * g.mass_scale * s;
         let angular = g.length_scale * linear;
+        // With per-bond stiffness the physical moment (force) is s A (s Al) times the variable.
+        let mut x = self.x[bond];
+        if let Some(r) = g.rotation.get(bond) {
+            x.ang = sym_apply(&r[0], x.ang);
+        }
+        if let Some(r) = g.shear.get(bond) {
+            x.lin = sym_apply(&r[0], x.lin);
+        }
         AngLin {
-            ang: self.x[bond].ang * angular,
-            lin: self.x[bond].lin * linear,
+            ang: x.ang * angular,
+            lin: x.lin * linear,
         }
     }
 

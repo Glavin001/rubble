@@ -52,12 +52,20 @@ All earlier suites still pass, on Metal and on WGSL at 10 storage buffers.
 | m1 | 40 | 64 iterations | 40 | 40 | all | 1.1e-5 | 40 |
 | c2 | 182 | 64 iterations | 182 | 182 | all | 3.9e-5 | 180 |
 | c3 | 82 | 64 iterations | 82 | 82 | all | 1.5e-5 | 82 |
-| f1 | 688 | force tolerance 1e-3 | 688 | 688 | all | 4.9e-5 | 688 |
-| f2 | 688 | force tolerance 1e-3 | 405 | 688 | all | 1.6e-1 | 433 |
+| f2 | 688 | force tolerance 1e-3 | 688 | 688 | all | 4.2e-5 | 688 |
+| f1 (older force rule) | 688 | force tolerance 1e-3 | 366 | 688 | all | 3.5e-1 | 688 |
+| rot/veneer-nocarry | 5 | rotational stiffness, 16 iterations | 5 | 5 | all | 1.7e-5 | 5 |
+| rot/mailbox-1 | 6 | rotational stiffness, 16 iterations | 6 | 6 | all | 7.3e-6 | 6 |
+| rot/tree-101 | 6 | rotational stiffness, 16 iterations | 6 | 6 | all | 4.0e-2 | 6 |
 
 The force difference is `|rubble - physx| / |physx|` over live bonds. Exactness counts solves where rubble is within 1% of PhysX's own distance from the exact answer.
 
-**f2 is a variant I could not identify.** It was recorded ten minutes after f1, with the same cars. Where its iteration counts differ, PhysX ran about 22 iterations where the force test stops both f1 and rubble after 1. No force tolerance (1e-4 to 5e-3) and no first-iteration preconditioner (identity, polynomial, warm) reproduces it, and no record of its settings survives. The way to settle it is fresh captures from the target commit.
+**f1 against f2: the force test's first step.** At the target commit, the force test judges only a preconditioned step. The projected steepest-descent step of iteration 0 is never judged, unless the polynomial runs first. The target's own comment gives the reason: judged from iteration 0, captured car solves stopped after one step with up to 42% force error.
+- rubble had judged iteration 0, and so matched f1, an older build.
+- rubble now follows the target. f2, recorded ten minutes later with the same cars, then matches in every solve.
+- f1's iteration counts are expected to differ under the target's rule. rubble stays as close to the exact forces as PhysX was on them.
+
+**Rotational stiffness on PhysX's systems:** the `rot` captures store each bond's `A`. rubble's solve with it matches iterations, convergence and frames. tree-101's force difference of 4e-2 comes with both 0.4 to 0.7 from the exact answer at 16 iterations (an unconverged tree), and rubble no farther.
 
 **`BLAST_STRESS_FIRST_PRECONDITIONER`** (the target's A/B switch) is now `BlastSettings::first_preconditioner`: identity (the default), polynomial or warm. It is ported to the reference and both GPU paths, and tested against the f32 reference.
 

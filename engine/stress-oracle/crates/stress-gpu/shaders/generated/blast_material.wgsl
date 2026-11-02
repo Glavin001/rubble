@@ -25,6 +25,8 @@ struct BlastParams_std140_0
     @align(4) wide_blocks_0 : u32,
     @align(8) opaque_zero_0 : u32,
     @align(4) first_polynomial_0 : u32,
+    @align(16) rotation_0 : u32,
+    @align(4) node_vectors_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;
@@ -42,6 +44,8 @@ struct BlastBond_std430_0
 
 @binding(2) @group(0) var<storage, read_write> x_0 : array<vec4<f32>>;
 
+@binding(7) @group(0) var<storage, read> stiffness_0 : array<vec4<f32>>;
+
 @binding(5) @group(0) var<storage, read_write> out_0 : array<vec4<f32>>;
 
 @binding(3) @group(0) var<storage, read> geometry_0 : array<vec4<f32>>;
@@ -50,34 +54,58 @@ struct BlastBond_std430_0
 
 @binding(6) @group(0) var<storage, read_write> topo_0 : array<atomic<u32>>;
 
+fn stiff_0( j_0 : u32,  which_0 : u32,  v_0 : vec3<f32>) -> vec3<f32>
+{
+    var _S1 : u32 = u32(6) * which_0;
+    var m_0 : array<f32, i32(6)>;
+    var k_0 : u32 = u32(0);
+    loop
+    {
+        if(k_0 < u32(6))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var _S2 : u32 = _S1 + k_0;
+        m_0[k_0] = stiffness_0[j_0 * u32(6) + _S2 / u32(4)][_S2 % u32(4)];
+        k_0 = k_0 + u32(1);
+    }
+    var _S3 : f32 = v_0.x;
+    var _S4 : f32 = v_0.y;
+    var _S5 : f32 = v_0.z;
+    return vec3<f32>(m_0[i32(0)] * _S3 + m_0[i32(3)] * _S4 + m_0[i32(4)] * _S5, m_0[i32(3)] * _S3 + m_0[i32(1)] * _S4 + m_0[i32(5)] * _S5, m_0[i32(4)] * _S3 + m_0[i32(5)] * _S4 + m_0[i32(2)] * _S5);
+}
+
 fn fdot_0( a_0 : vec3<f32>,  b_0 : vec3<f32>) -> f32
 {
     return fma(a_0.z, b_0.z, fma(a_0.y, b_0.y, a_0.x * b_0.x));
 }
 
-fn perpendicular_0( v_0 : vec3<f32>,  n_0 : vec3<f32>,  along_0 : f32) -> f32
+fn perpendicular_0( v_1 : vec3<f32>,  n_0 : vec3<f32>,  along_0 : f32) -> f32
 {
-    var _S1 : f32 = - along_0;
-    var px_0 : f32 = fma(_S1, n_0.x, v_0.x);
-    var py_0 : f32 = fma(_S1, n_0.y, v_0.y);
-    var pz_0 : f32 = fma(_S1, n_0.z, v_0.z);
+    var _S6 : f32 = - along_0;
+    var px_0 : f32 = fma(_S6, n_0.x, v_1.x);
+    var py_0 : f32 = fma(_S6, n_0.y, v_1.y);
+    var pz_0 : f32 = fma(_S6, n_0.z, v_1.z);
     return sqrt(fma(pz_0, pz_0, fma(py_0, py_0, px_0 * px_0)));
 }
 
 fn excess_0( value_0 : f32,  elastic_0 : f32,  fatal_0 : f32) -> f32
 {
     var d_0 : f32 = fatal_0 - elastic_0;
-    var _S2 : f32 = value_0 - elastic_0;
-    var _S3 : f32;
+    var _S7 : f32 = value_0 - elastic_0;
+    var _S8 : f32;
     if(d_0 > 0.0f)
     {
-        _S3 = d_0;
+        _S8 = d_0;
     }
     else
     {
-        _S3 = 1.0f;
+        _S8 = 1.0f;
     }
-    return _S2 / _S3;
+    return _S7 / _S8;
 }
 
 fn topo_total_0( node_count_1 : u32) -> u32
@@ -94,28 +122,48 @@ fn topo_dirty_0( node_count_2 : u32) -> u32
 @workgroup_size(64, 1, 1)
 fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
 {
-    var j_0 : u32 = id_0.x;
-    if(j_0 >= (params_0.bond_count_0))
+    var j_1 : u32 = id_0.x;
+    if(j_1 >= (params_0.bond_count_0))
     {
         return;
     }
-    var b_1 : BlastBond_std430_0 = bonds_0[j_0];
-    var _S4 : u32 = j_0 * u32(2);
-    var ia_0 : vec3<f32> = x_0[_S4].xyz * vec3<f32>((bonds_0[j_0].s_0 * params_0.angular_scale_0));
-    var _S5 : u32 = _S4 + u32(1);
-    var il_0 : vec3<f32> = x_0[_S5].xyz * vec3<f32>((bonds_0[j_0].s_0 * params_0.linear_scale_0));
-    var _S6 : u32 = j_0 * u32(4);
-    out_0[_S6] = vec4<f32>(ia_0, 0.0f);
-    out_0[_S6 + u32(1)] = vec4<f32>(il_0, 0.0f);
+    var b_1 : BlastBond_std430_0 = bonds_0[j_1];
+    var _S9 : u32 = j_1 * u32(2);
+    var xa_0 : vec3<f32> = x_0[_S9].xyz;
+    var _S10 : u32 = _S9 + u32(1);
+    var xl_0 : vec3<f32> = x_0[_S10].xyz;
+    var xa_1 : vec3<f32>;
+    if((params_0.rotation_0) != u32(0))
+    {
+        xa_1 = stiff_0(j_1, u32(0), xa_0);
+    }
+    else
+    {
+        xa_1 = xa_0;
+    }
+    var xl_1 : vec3<f32>;
+    if((params_0.rotation_0) == u32(2))
+    {
+        xl_1 = stiff_0(j_1, u32(2), xl_0);
+    }
+    else
+    {
+        xl_1 = xl_0;
+    }
+    var ia_0 : vec3<f32> = xa_1 * vec3<f32>((b_1.s_0 * params_0.angular_scale_0));
+    var il_0 : vec3<f32> = xl_1 * vec3<f32>((b_1.s_0 * params_0.linear_scale_0));
+    var _S11 : u32 = j_1 * u32(4);
+    out_0[_S11] = vec4<f32>(ia_0, 0.0f);
+    out_0[_S11 + u32(1)] = vec4<f32>(il_0, 0.0f);
     if(!((b_1.health_0) > 0.0f))
     {
-        var _S7 : vec4<f32> = vec4<f32>(0.0f);
-        out_0[_S6 + u32(2)] = _S7;
-        out_0[_S6 + u32(3)] = _S7;
+        var _S12 : vec4<f32> = vec4<f32>(0.0f);
+        out_0[_S11 + u32(2)] = _S12;
+        out_0[_S11 + u32(3)] = _S12;
         return;
     }
-    var g0_0 : vec4<f32> = geometry_0[_S4];
-    var g1_0 : vec4<f32> = geometry_0[_S5];
+    var g0_0 : vec4<f32> = geometry_0[_S9];
+    var g1_0 : vec4<f32> = geometry_0[_S10];
     var n_1 : vec3<f32> = g0_0.xyz;
     var node_distance_0 : f32 = g0_0.w;
     var linear_normal_0 : f32 = fdot_0(il_0, n_1);
@@ -130,8 +178,8 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
     var shear_1 : f32;
     if((params_0.bend_gain_max_0) > 0.0f)
     {
-        var _S8 : bool = (b_1.health_0) > 9.99999997475242708e-07f;
-        if(_S8)
+        var _S13 : bool = (b_1.health_0) > 9.99999997475242708e-07f;
+        if(_S13)
         {
             bend_stress_0 = b_1.health_0;
         }
@@ -148,8 +196,8 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
         {
             bend_stress_0 = gain_max_0;
         }
-        var _S9 : f32 = fma(twist_0, bend_stress_0, shear_0);
-        if(_S8)
+        var _S14 : f32 = fma(twist_0, bend_stress_0, shear_0);
+        if(_S13)
         {
             bend_stress_0 = b_1.health_0;
         }
@@ -168,7 +216,7 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
         }
         bend_stress_0 = bend_0 * bend_stress_0;
         normal_1 = normal_0;
-        shear_1 = _S9;
+        shear_1 = _S14;
     }
     else
     {
@@ -187,18 +235,18 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
         normal_1 = normal_2;
         shear_1 = shear_2;
     }
-    var _S10 : bool;
+    var _S15 : bool;
     if((params_0.fibres_0) == u32(0))
     {
-        _S10 = true;
+        _S15 = true;
     }
     else
     {
-        _S10 = gain_max_0 <= 0.0f;
+        _S15 = gain_max_0 <= 0.0f;
     }
     var compression_0 : f32;
     var tension_0 : f32;
-    if(_S10)
+    if(_S15)
     {
         if((((bitcast<u32>((normal_1))) & (u32(2147483648)))) != u32(0))
         {
@@ -246,28 +294,28 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
         {
             tension_0 = 0.0f;
         }
-        var _S11 : f32 = compression_0;
+        var _S16 : f32 = compression_0;
         compression_0 = tension_0;
-        tension_0 = _S11;
+        tension_0 = _S16;
     }
-    out_0[_S6 + u32(2)] = vec4<f32>(normal_1, shear_1, bend_stress_0, compression_0);
-    var _S12 : u32 = (bitcast<u32>((g1_0.y))) * u32(2);
-    var m0_0 : vec4<f32> = materials_0[_S12];
-    var m1_0 : vec4<f32> = materials_0[_S12 + u32(1)];
-    var _S13 : f32 = m0_0.x;
+    out_0[_S11 + u32(2)] = vec4<f32>(normal_1, shear_1, bend_stress_0, compression_0);
+    var _S17 : u32 = (bitcast<u32>((g1_0.y))) * u32(2);
+    var m0_0 : vec4<f32> = materials_0[_S17];
+    var m1_0 : vec4<f32> = materials_0[_S17 + u32(1)];
+    var _S18 : f32 = m0_0.x;
     var axial_0 : f32;
-    if(compression_0 > _S13)
+    if(compression_0 > _S18)
     {
-        axial_0 = excess_0(compression_0, _S13, m0_0.y);
+        axial_0 = excess_0(compression_0, _S18, m0_0.y);
     }
     else
     {
         axial_0 = 0.0f;
     }
-    var _S14 : f32 = m0_0.z;
-    if(tension_0 > _S14)
+    var _S19 : f32 = m0_0.z;
+    if(tension_0 > _S19)
     {
-        var t_1 : f32 = excess_0(tension_0, _S14, m0_0.w);
+        var t_1 : f32 = excess_0(tension_0, _S19, m0_0.w);
         if(axial_0 < t_1)
         {
             bend_stress_0 = t_1;
@@ -281,11 +329,11 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
     else
     {
     }
-    var _S15 : f32 = m1_0.x;
+    var _S20 : f32 = m1_0.x;
     var multiplier_0 : f32;
-    if(shear_1 > _S15)
+    if(shear_1 > _S20)
     {
-        multiplier_0 = axial_0 + excess_0(shear_1, _S15, m1_0.y);
+        multiplier_0 = axial_0 + excess_0(shear_1, _S20, m1_0.y);
     }
     else
     {
@@ -321,13 +369,13 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
         }
         if(multiplier_0 < 1.0f)
         {
-            _S10 = (m1_0.z) > 0.0f;
+            _S15 = (m1_0.z) > 0.0f;
         }
         else
         {
-            _S10 = false;
+            _S15 = false;
         }
-        if(_S10)
+        if(_S15)
         {
             var floor_0 : f32 = g1_0.x * m1_0.z;
             if((b_1.health_0 - damage_0) < floor_0)
@@ -362,20 +410,20 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
     {
         bend_stress_0 = 0.0f;
     }
-    out_0[_S6 + u32(3)] = vec4<f32>(tension_0, damage_0, multiplier_0, bend_stress_0);
+    out_0[_S11 + u32(3)] = vec4<f32>(tension_0, damage_0, multiplier_0, bend_stress_0);
     if((params_0.apply_damage_0) != u32(0))
     {
-        _S10 = command_0;
+        _S15 = command_0;
     }
     else
     {
-        _S10 = false;
+        _S15 = false;
     }
-    if(_S10)
+    if(_S15)
     {
         var health_1 : f32 = b_1.health_0 - damage_0;
-        var _S16 : bool = health_1 > 0.0f;
-        if(_S16)
+        var _S21 : bool = health_1 > 0.0f;
+        if(_S21)
         {
             bend_stress_0 = health_1;
         }
@@ -383,12 +431,12 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
         {
             bend_stress_0 = 0.0f;
         }
-        bonds_0[j_0].health_0 = bend_stress_0;
-        if(!_S16)
+        bonds_0[j_1].health_0 = bend_stress_0;
+        if(!_S21)
         {
-            var _S17 : vec4<f32> = vec4<f32>(0.0f);
-            x_0[_S4] = _S17;
-            x_0[_S5] = _S17;
+            var _S22 : vec4<f32> = vec4<f32>(0.0f);
+            x_0[_S9] = _S22;
+            x_0[_S10] = _S22;
             atomicStore(&(topo_0[topo_dirty_0(params_0.node_count_0)]), u32(1));
         }
     }

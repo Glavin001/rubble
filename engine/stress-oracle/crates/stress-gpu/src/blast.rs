@@ -10,7 +10,7 @@
 //! of each, which the GPU rebuilds when a bond breaks, so a frame reads nothing back to run.
 
 use bytemuck::{Pod, Zeroable};
-use stress_ref::blast_bond::{RigidFrame, SolverKind, 
+use stress_ref::blast_bond::{sym_apply, RigidFrame, SolverKind, 
     AngLin, BlastGraph, BlastMaterial, BondStress, Damage, IslandReport, Islands, NO_ISLAND,
 };
 use stress_ref::math::Vec3;
@@ -22,6 +22,10 @@ const REF_SECOND: u32 = 0x8000_0000;
 const NODE_VECTORS: usize = 10;
 /// `blast_native.slang` `NV`: its scratch float4s per node.
 const NATIVE_NODE_VECTORS: usize = 24;
+/// With the shear stiffness: the node's whole 6x6 block and its inverse (`N_FULL_INV` + 6).
+const NATIVE_NODE_VECTORS_SHEAR: usize = 30;
+/// `blast_native_ops.slangh` `STIFFNESS_WORDS`: per bond A, W, Al, Wl.
+const STIFFNESS_WORDS: usize = 6;
 const SCAN_BLOCK: usize = 1024;
 const REPORT_CONVERGED: u32 = 1;
 const REPORT_SKIPPED: u32 = 2;
@@ -56,6 +60,9 @@ pub struct Params {
     /// 0 (`blast_common.slang` `opaque_zero`).
     pub opaque_zero: u32,
     pub first_polynomial: u32,
+    /// 0 none, 1 rotational stiffness, 2 also shear stiffness (`BlastGraph::rotation`, `shear`).
+    pub rotation: u32,
+    pub node_vectors: u32,
 }
 
 #[repr(C)]
@@ -82,8 +89,8 @@ struct BondGpu {
 
 use Binding::{Storage as R, StorageRw as W, Uniform as U};
 const CGLS_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
-const NATIVE_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
-const MATERIAL_BINDINGS: [Binding; 7] = [U, W, W, R, R, W, W];
+const NATIVE_BINDINGS: [Binding; 11] = [U, R, R, R, W, R, W, W, W, R, R];
+const MATERIAL_BINDINGS: [Binding; 8] = [U, W, W, R, R, W, W, R];
 const TOPOLOGY_BINDINGS: [Binding; 8] = [U, R, R, W, W, W, W, W];
 const MOTION_BINDINGS: [Binding; 7] = [U, W, W, R, R, R, W];
 /// `blast_common.slang` `FRAME_WORDS` / 4: each island's rigid-mode frame, in `islands` after
@@ -118,6 +125,48 @@ const ARGS_BYTES: u64 = 80;
 
 fn f4(v: Vec3) -> [f32; 4] {
     [v.x as f32, v.y as f32, v.z as f32, 0.0]
+}
+
+/// `blast_common.slang` `rotation`.
+fn rotation_mode(g: &BlastGraph) -> u32 {
+    if !g.shear.is_empty() {
+        2
+    } else if !g.rotation.is_empty() {
+        1
+    } else {
+        0
+    }
+}
+
+fn native_node_vectors(g: &BlastGraph) -> usize {
+    if g.shear.is_empty() {
+        NATIVE_NODE_VECTORS
+    } else {
+        NATIVE_NODE_VECTORS_SHEAR
+    }
+}
+
+/// The per-bond stiffness tensors as `blast_native_ops.slangh` reads them (zeros when unset).
+fn stiffness_rows(g: &BlastGraph) -> Vec<[f32; 4]> {
+    let m = g.bond_count();
+    let mut rows = vec![[0.0f32; 4]; STIFFNESS_WORDS * m.max(1)];
+    for j in 0..m {
+        let mut w = [0.0f32; 24];
+        for (k, which) in [g.rotation.get(j).map(|r| r[0]), g.rotation.get(j).map(|r| r[1]), g.shear.get(j).map(|r| r[0]), g.shear.get(j).map(|r| r[1])]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(t) = which {
+                for i in 0..6 {
+                    w[6 * k + i] = t[i] as f32;
+                }
+            }
+        }
+        for q in 0..STIFFNESS_WORDS {
+            rows[STIFFNESS_WORDS * j + q] = [w[4 * q], w[4 * q + 1], w[4 * q + 2], w[4 * q + 3]];
+        }
+    }
+    rows
 }
 
 fn v3(a: [f32; 4]) -> Vec3 {
@@ -163,6 +212,8 @@ pub struct BlastBuffers {
     /// Per bond 4 float4: impulse (angular, linear), (normal, shear, bend, compression),
     /// (tension, damage, multiplier, command).
     pub out: wgpu::Buffer,
+    /// Per bond `STIFFNESS_WORDS` float4: A, W, Al, Wl (`BlastGraph::rotation`, `shear`).
+    pub stiffness: wgpu::Buffer,
 }
 
 /// Blast's stress solver on a device, for one support graph.
@@ -250,7 +301,7 @@ const WIDE_ITERATION: &[(&str, Grid)] = &[
     ("w_update", Grid::Nodes),
 ];
 const WIDE_END: &[(&str, Grid)] = &[("w_final", Grid::Bonds), ("w_report", Grid::Rows)];
-const WIDE_BINDINGS: [Binding; 13] = [U, R, R, R, W, R, W, W, W, R, W, W, R];
+const WIDE_BINDINGS: [Binding; 14] = [U, R, R, R, W, R, W, W, W, R, R, W, W, R];
 /// `blast_native_wide.slang` `ROW_WORDS`, `PARTIAL`, `M_ROWS`.
 const WIDE_ROW_WORDS: u32 = 16;
 const WIDE_PARTIAL: u32 = 6;
@@ -345,7 +396,7 @@ impl GpuBlastSolver {
             x: gpu.storage("blast x", &vec![[0.0f32; 4]; 2 * m.max(1)]),
             scratch: gpu.storage(
                 "blast scratch",
-                &vec![[0.0f32; 4]; NODE_VECTORS.max(NATIVE_NODE_VECTORS) * n.max(1) + 2 * m.max(1)],
+                &vec![[0.0f32; 4]; NODE_VECTORS.max(native_node_vectors(&graph)) * n.max(1) + 2 * m.max(1)],
             ),
             report: gpu.storage("blast report", &vec![[0u32; 4]; n.max(1)]),
             lists: gpu.storage("blast lists", &vec![0u32; (n + m).max(1)]),
@@ -360,6 +411,7 @@ impl GpuBlastSolver {
             geometry: gpu.storage("blast geometry", &geometry),
             materials: gpu.storage("blast materials", &material_rows),
             out: gpu.storage("blast out", &vec![[0.0f32; 4]; 4 * m.max(1)]),
+            stiffness: gpu.storage("blast stiffness", &stiffness_rows(&graph)),
         };
         let native = graph.settings.solver == SolverKind::Native;
         let solve = if native {
@@ -383,8 +435,8 @@ impl GpuBlastSolver {
             })
             .collect();
         let b = &buffers;
-        let solve_buffers = [&b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.accel, &b.x, &b.scratch, &b.report, &b.lists];
-        let solve_bind = gpu.bind(&solve.group, &solve_buffers);
+        let solve_buffers = [&b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.accel, &b.x, &b.scratch, &b.report, &b.lists, &b.stiffness];
+        let solve_bind = gpu.bind(&solve.group, &solve_buffers[..if native { 11 } else { 10 }]);
         let stress_bind = gpu.bind(
             &stress.group,
             &[
@@ -395,6 +447,7 @@ impl GpuBlastSolver {
                 &b.materials,
                 &b.out,
                 &b.topo,
+                &b.stiffness,
             ],
         );
         let topology_bind = gpu.bind(
@@ -446,7 +499,7 @@ impl GpuBlastSolver {
             mapped_at_creation: false,
         });
         let b = &self.buffers;
-        let buffers = [&b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.accel, &b.x, &b.scratch, &b.report, &b.lists, &wide, &meta, &b.args];
+        let buffers = [&b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.accel, &b.x, &b.scratch, &b.report, &b.lists, &b.stiffness, &wide, &meta, &b.args];
         let kernels = WIDE_SETUP
             .iter()
             .chain(WIDE_ITERATION)
@@ -486,6 +539,8 @@ impl GpuBlastSolver {
             wide_min: self.wide.as_ref().map_or(u32::MAX, |w| w.min),
             wide_rows: self.wide.as_ref().map_or(0, |w| w.rows),
             wide_blocks: self.wide.as_ref().map_or(0, |w| w.blocks),
+            rotation: rotation_mode(g),
+            node_vectors: native_node_vectors(g) as u32,
             first_polynomial: s.first_preconditioner.polynomial_first(warm && s.warm_start && self.has_warm_start) as u32,
             ..Default::default()
         }
@@ -758,9 +813,12 @@ impl GpuBlastSolver {
             .map(|j| {
                 let linear = g.length_scale * g.mass_scale * g.col_scale[j];
                 let angular = g.length_scale * linear;
+                // With per-bond stiffness the physical moment (force) is s A (s Al) times the variable.
+                let ang = g.rotation.get(j).map_or(x[j].ang, |r| sym_apply(&r[0], x[j].ang));
+                let lin = g.shear.get(j).map_or(x[j].lin, |r| sym_apply(&r[0], x[j].lin));
                 AngLin {
-                    ang: x[j].ang * angular,
-                    lin: x[j].lin * linear,
+                    ang: ang * angular,
+                    lin: lin * linear,
                 }
             })
             .collect()
