@@ -469,35 +469,57 @@ fn load_average() -> f64 {
         .unwrap_or(f64::NAN)
 }
 
-/// The GPU's busy share in percent (macOS: the accelerator's "Device
-/// Utilization %"), the highest of three samples a quarter second apart; NaN where
-/// it cannot be read.
+/// Other processes' share of the GPU in percent over one second (macOS: the
+/// accelerator's per-client accumulated GPU time, every client but this process);
+/// NaN where it cannot be read. The device-wide utilisation counter is not used:
+/// it reads high while no process is using the GPU.
 fn gpu_busy() -> f64 {
-    let sample = || {
-        std::process::Command::new("ioreg")
-            .args(["-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"])
+    // Per client process: accumulated GPU nanoseconds.
+    let sample = || -> Option<HashMap<String, u64>> {
+        let xml = std::process::Command::new("ioreg")
+            .args(["-r", "-c", "AGXDeviceUserClient", "-w", "0", "-a"])
             .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|t| {
-                let k = "\"Device Utilization %\"=";
-                let i = t.find(k)? + k.len();
-                t[i..]
-                    .split(|c: char| !c.is_ascii_digit())
-                    .next()?
-                    .parse::<f64>()
-                    .ok()
-            })
-            .unwrap_or(f64::NAN)
-    };
-    (0..3)
-        .map(|i| {
-            if i > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(250));
+            .ok()?
+            .stdout;
+        let mut plutil = std::process::Command::new("plutil")
+            .args(["-convert", "json", "-o", "-", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        use std::io::Write;
+        plutil.stdin.take()?.write_all(&xml).ok()?;
+        let out = plutil.wait_with_output().ok()?;
+        let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+        let me = format!("pid {},", std::process::id());
+        let mut t = HashMap::new();
+        for c in v.as_array()? {
+            let who = c["IOUserClientCreator"].as_str().unwrap_or("?").to_string();
+            if who.starts_with(&me) {
+                continue;
             }
-            sample()
-        })
-        .fold(f64::NAN, f64::max)
+            let ns: u64 = c["AppUsage"]
+                .as_array()
+                .map(|u| {
+                    u.iter()
+                        .filter_map(|x| x["accumulatedGPUTime"].as_u64())
+                        .sum()
+                })
+                .unwrap_or(0);
+            *t.entry(who).or_insert(0) += ns;
+        }
+        Some(t)
+    };
+    let Some(a) = sample() else { return f64::NAN };
+    let t0 = Instant::now();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let Some(b) = sample() else { return f64::NAN };
+    let dt = t0.elapsed().as_secs_f64();
+    let used: u64 = b
+        .iter()
+        .map(|(k, v)| v.saturating_sub(*a.get(k).unwrap_or(v)))
+        .sum();
+    100.0 * used as f64 * 1e-9 / dt
 }
 
 /// Wait for a quiet machine: 1-minute load average under `max_load` and the GPU
