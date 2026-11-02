@@ -195,6 +195,9 @@ struct Parser {
     next_number: u32,
     skipped: HashMap<String, u32>,
     line_no: usize,
+    /// A `submesh` came earlier: `cab` lines only count inside one, as Rigs of Rods
+    /// reads them (a `cab` before any `submesh` is ignored there).
+    in_submesh: bool,
     /// `cameras` lines, resolved after the file (they may precede `nodes`).
     cameras: Vec<(usize, Vec<String>)>,
 }
@@ -338,6 +341,11 @@ impl Parser {
             | "globeams" => Section::Skipped,
             _ => return false,
         };
+        if section == Section::Cab && !self.in_submesh {
+            self.warn("`cab` outside a `submesh`: ignored (Rigs of Rods ignores it)".into());
+            self.section = Section::Skipped;
+            return true;
+        }
         if section == Section::Skipped {
             *self.skipped.entry(word.to_string()).or_default() += 1;
             // Multi-line blocks that end with their own terminator.
@@ -428,6 +436,7 @@ impl Parser {
                 if word == "submesh" {
                     // A new submesh: its `cab` lines follow.
                     self.section = Section::None;
+                    self.in_submesh = true;
                 }
             }
             _ => return false,
@@ -824,6 +833,7 @@ pub fn parse_truck(src: &str) -> TruckFile {
         next_number: 0,
         skipped: HashMap::new(),
         line_no: 0,
+        in_submesh: false,
         cameras: Vec::new(),
     };
     let mut have_title = false;
@@ -1133,6 +1143,7 @@ beams
 1, 3, s
 2, 3, r
 
+submesh
 cab
 0, 1, 2, c
 0, 2, 3

@@ -1119,7 +1119,7 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         }
     }
     // Collision skin: every outer face of the shell, counter-clockwise from outside.
-    let _ = writeln!(s, "\ncab");
+    let _ = writeln!(s, "\nsubmesh\ncab");
     let quad = |s: &mut String, a: usize, b: usize, c: usize, d: usize| {
         let _ = writeln!(s, "{a}, {b}, {c}, c");
         let _ = writeln!(s, "{a}, {c}, {d}, c");
@@ -1266,7 +1266,7 @@ pub fn box_truck(
             }
         }
     }
-    let _ = writeln!(s, "cab");
+    let _ = writeln!(s, "submesh\ncab");
     let face = |s: &mut String, a: usize, b: usize, c: usize, d: usize| {
         let _ = writeln!(s, "{a}, {b}, {c}, c\n{a}, {c}, {d}, c");
     };

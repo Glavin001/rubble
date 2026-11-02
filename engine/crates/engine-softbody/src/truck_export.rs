@@ -223,7 +223,7 @@ pub fn desc_to_truck(desc: &SoftVehicleDesc, tyres: TyreDefaults) -> (String, Ve
 
     // Triangles.
     if !desc.triangles.is_empty() {
-        writeln!(t, "\ncab").unwrap();
+        writeln!(t, "\nsubmesh\ncab").unwrap();
         for tr in &desc.triangles {
             let opts = if tr.collision { "c" } else { "n" };
             writeln!(

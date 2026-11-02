@@ -585,6 +585,7 @@ cinecam
 0.5, 1.0, 0.5, 0, 1, 2, 3, 4, 5, 6, 7, 8000, 800, 20
 contacters
 2
+submesh
 cab
 0, 1, 2, c
 end

@@ -2606,6 +2606,7 @@ detacher_group 21
 362, 146
 detacher_group end
 
+submesh
 cab
 0, 8, 14, c
 0, 14, 6, c

@@ -15,7 +15,7 @@
 //! # Rubble's high-resolution test car (JBeam) as .truck
 //! cargo run -p engine-softbody --release --example ror_compare -- hires <out.truck> [node_weight=1] [spring=3e6] [damp=250] [stiffness_length=0.03]
 //! # Rubble's explicit-beams solver on the harness's `free` scene, against RoR's node dump
-//! cargo run -p engine-softbody --release --example ror_compare -- free <file.truck> <nodes.csv> pos=x,y,z vel=… box=… drag=0 secs=1
+//! cargo run -p engine-softbody --release --example ror_compare -- free <file.truck> <nodes.csv> pos=x,y,z vel=… box=… drag=0 roll=1 secs=1
 //! ```
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
 use engine_softbody::hires::{hires_car_jbeam, HiresParams};
@@ -241,6 +241,9 @@ fn spawn(truck: &str, nodes_csv: &str, beams_csv: Option<&str>) {
             ("damp", f64::from(b.damp), r[4]),
             ("strength", f64::from(b.strength), r[9]),
             ("plastic", f64::from(b.plastic_coef), r[10]),
+            // RoR's yield threshold at spawn (max positive and negative stress).
+            ("deform+", f64::from(b.deform.min(1e30)), r[7].min(1e30)),
+            ("deform-", f64::from(b.deform.min(1e30)), (-r[8]).min(1e30)),
         ];
         for (name, ours, theirs) in checks {
             let tol = 1e-5 * theirs.abs().max(1.0);
@@ -277,6 +280,9 @@ fn free(truck: &str, nodes_csv: &str, args: &[String]) {
         fast_inv_sqrt: kv(args, "fastinv") != Some("0"),
     };
     let mut sim = ExplicitBeams::from_truck(&text, v3("pos"), v3("vel"), settings).unwrap();
+    if kv(args, "roll") == Some("1") {
+        sim.roll_tyres(v3("vel"));
+    }
     if let Some(b) = kv(args, "box") {
         let c = floats(b);
         sim.boxes.push(StaticBox::centered(
@@ -303,6 +309,22 @@ fn free(truck: &str, nodes_csv: &str, args: &[String]) {
         .collect();
     let rms = (d.iter().map(|v| v * v).sum::<f32>() / d.len() as f32).sqrt();
     let max = d.iter().cloned().fold(0.0, f32::max);
+    // `worst=N`: the N nodes furthest from Rigs of Rods' (index, distance, both positions).
+    if let Some(n) = kv(args, "worst").map(|s| s.parse::<usize>().unwrap()) {
+        let mut idx: Vec<usize> = (0..d.len()).collect();
+        idx.sort_by(|&a, &b| d[b].total_cmp(&d[a]));
+        for &i in idx.iter().take(n) {
+            let r = &ror[i];
+            println!(
+                "node {i}: {:.1} mm, rubble {:?} ror ({:.4}, {:.4}, {:.4})",
+                d[i] * 1e3,
+                x[i],
+                r[5],
+                r[6],
+                r[7]
+            );
+        }
+    }
     let (broken, bent) = sim.damage();
     println!(
         "explicit_beams vs Rigs of Rods after {secs} s: nodes {} / {}, node distance RMS {:.3} mm, max {:.3} mm; rubble: broken {broken}, bent {bent}; {ms:.1} ms CPU",
