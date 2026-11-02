@@ -727,15 +727,19 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
     TriGeo t = triangleGeo(gt, origin, r);
-    int3 c0 = int3(floor((t.lo - origin) / cell));
-    int3 c1 = int3(floor((t.hi - origin) / cell));
-    int3 span = c1 - c0 + int3(1, 1, 1);
-    if (span.x * span.y * span.z > int(GRID_MAX_CELLS))
+    // The box's cells, counted in float: a stretched or non-finite triangle (a
+    // flung node) must take the every-candidate path, not overflow an integer
+    // product into an unbounded cell loop (a GPU hang).
+    float3 f0 = floor((t.lo - origin) / cell);
+    float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
+    if (!(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS)))
     {
         for (uint k = sub; k < candCount; k += GRID_SUBS)
             tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
         return;
     }
+    int3 c0 = int3(f0);
+    int3 span = int3(fs);
     uint yz = uint(span.y * span.z);
     uint cells = uint(span.x) * yz;
     for (uint i = sub; i < cells; i += GRID_SUBS)
@@ -1112,15 +1116,19 @@ void triangleGridWide(uint gt, uint sub, uint v, float3 origin, float r, float c
                       uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     TriGeo t = triangleGeo(gt, origin, r);
-    int3 c0 = int3(floor((t.lo - origin) / cell));
-    int3 c1 = int3(floor((t.hi - origin) / cell));
-    int3 span = c1 - c0 + int3(1, 1, 1);
-    if (span.x * span.y * span.z > int(GRID_MAX_CELLS))
+    // The box's cells, counted in float: a stretched or non-finite triangle (a
+    // flung node) must take the every-candidate path, not overflow an integer
+    // product into an unbounded cell loop (a GPU hang).
+    float3 f0 = floor((t.lo - origin) / cell);
+    float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
+    if (!(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS)))
     {
         for (uint k = sub; k < candCount; k += GRID_SUBS)
             tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
         return;
     }
+    int3 c0 = int3(f0);
+    int3 span = int3(fs);
     uint yz = uint(span.y * span.z);
     uint cells = uint(span.x) * yz;
     for (uint i = sub; i < cells; i += GRID_SUBS)
