@@ -506,6 +506,29 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             "storageBarrier(); workgroupBarrier();",
         );
     std::fs::write(&beams, text)?;
+    // The wide passes: one module per entry point.
+    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close"] {
+        let entry = format!("explicit_beams_wide_{pass}");
+        let out = wgsl_dir.join(format!("{entry}.wgsl"));
+        compile_with_defines(
+            &slang_root.join("kernels/explicit_beams.slang"),
+            &entry,
+            SlangTarget::Wgsl,
+            &out,
+            &[],
+            &[("ENGINE_WGSL", "1")],
+        )?;
+        let text = std::fs::read_to_string(&out)?
+            .replace(
+                "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+                "storageBarrier(); workgroupBarrier();",
+            )
+            .replace(
+                "storageBarrier(); textureBarrier(); workgroupBarrier();",
+                "storageBarrier(); workgroupBarrier();",
+            );
+        std::fs::write(&out, text)?;
+    }
     // The same module with 512 lanes per vehicle, for large vehicles.
     let wide = wgsl_dir.join("explicit_beams_wide.wgsl");
     compile_with_defines(

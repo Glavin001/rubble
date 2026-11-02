@@ -163,6 +163,10 @@ fn main() -> anyhow::Result<()> {
         None => None,
     };
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    // `wide=0|1`: force one workgroup per vehicle or the wide passes.
+    if let Some(w) = kv.get("wide") {
+        gpu.set_wide(*w == "1");
+    }
     let mut clock = FrameClock::default();
     let frames = (secs * 60.0).round() as u32;
     let mut write_sample = |gpu: &ExplicitBeamsGpu| -> anyhow::Result<()> {
@@ -285,6 +289,9 @@ fn run_bench(
             })
             .collect();
         let mut gpu = ExplicitBeamsGpu::new(device, queue, &fleet);
+        if let Some(w) = kv.get("wide") {
+            gpu.set_wide(*w == "1");
+        }
         // Warm up (pipeline creation, GPU clocks), then time each frame + wait;
         // the median resists other work on the machine.
         for _ in 0..60 {
@@ -337,6 +344,23 @@ fn run_bench(
                     "  {n} vehicles, {dispatches:3} dispatches of {steps:2} steps in one pass: {:.3} ms per frame",
                     t.elapsed().as_secs_f64() * 1e3 / 60.0
                 );
+            }
+        }
+        // `profile=1`: GPU time per wide pass kind over a 17-step frame (best of 20).
+        if kv.get("profile") == Some(&"1") {
+            let mut best: Vec<(&str, f64)> = Vec::new();
+            for _ in 0..20 {
+                let p = gpu.profile_wide_frame(17);
+                if best.is_empty() {
+                    best = p;
+                } else {
+                    for (b, (_, v)) in best.iter_mut().zip(p) {
+                        b.1 = b.1.min(v);
+                    }
+                }
+            }
+            for (name, ms) in &best {
+                println!("  {name}: {ms:.3} ms per 17-step frame");
             }
         }
         // The fixed cost: a frame of a single step, submit to completion.

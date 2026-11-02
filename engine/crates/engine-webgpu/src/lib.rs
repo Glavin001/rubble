@@ -45,6 +45,18 @@ pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/so
 pub const EXPLICIT_BEAMS_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams.wgsl"));
 
+/// The explicit-beams wide passes (entry, WGSL), one module each: one thread per
+/// element over every vehicle, a dispatch per pass ([`ExplicitBeamsGpu::set_wide`]).
+pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 7] = [
+    ("explicit_beams_wide_begin", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_begin.wgsl"))),
+    ("explicit_beams_wide_rebase", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_rebase.wgsl"))),
+    ("explicit_beams_wide_nodes", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nodes.wgsl"))),
+    ("explicit_beams_wide_beams", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_beams.wgsl"))),
+    ("explicit_beams_wide_tris", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_tris.wgsl"))),
+    ("explicit_beams_wide_end", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_end.wgsl"))),
+    ("explicit_beams_wide_close", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_close.wgsl"))),
+];
+
 /// [`EXPLICIT_BEAMS_WGSL`] with 512 lanes per vehicle, for large vehicles.
 pub const EXPLICIT_BEAMS_WIDE_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide.wgsl"));

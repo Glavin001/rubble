@@ -52,6 +52,7 @@
 //   gGroups  two parities × per vehicle group slot: index (local) of the first
 //            breaking master, 0xFFFFFFFF when none.
 //   gNext    per candidate (gLists position) its grid bucket | rank in it << 10.
+//   Node info .w and triangle records .w hold the vehicle index (wide passes).
 //   gMisc    per vehicle (origin bits xyz, steps run); then per triangle
 //            (wait, idle) as int bits, hit this step (0 between steps).
 
@@ -93,7 +94,21 @@ struct Params
     uint slotBase; // gLists entry of beam 0's two incidence positions
     uint gridBase; // gBeams record of the self-collision grid's sorted runs
     uint grid; // nonzero when any vehicle uses the grid (the scan phase runs)
-    uint pad2;
+    uint pad2; // the wide passes: the step within the frame (per-step parameter copies)
+    // The wide passes (explicit_beams_wide_*): element totals and gAcc / gMisc /
+    // gLists regions.
+    uint totalNodes;
+    uint totalBeams;
+    uint totalTris;
+    uint totalCands;
+    uint wideMisc; // gMisc: (unused) then per vehicle its rebase shift
+    uint gridCountBase; // gAcc: per vehicle GRID_BUCKETS counts
+    uint gridOffBase; // gNext: per vehicle GRID_BUCKETS + 1 offsets
+    uint testedBase; // gAcc: per vehicle 2 tested counts (by step parity)
+    uint testedListBase; // gNext: per triangle (vehicle's list at its triOff)
+    uint candTable; // gLists: per candidate its gLists position
+    uint slotBase16; // gBeams: per vehicle and bucket WIDE_SLOTS (position, node)
+    uint overflowBase; // gAcc: per vehicle the overflow count; gNext: overflow nodes at candOff
 };
 
 struct Surface
@@ -277,7 +292,9 @@ float3 beamSum(uint4 info, uint beamOff, uint groupOff, uint groupCount, uint pa
 {
     uint base = gP.incBase + info.y;
     float3 f = float3(0.0, 0.0, 0.0);
-    if (groupCount == 0u)
+    // Slot 0 of the vehicle's groups (no group has index 0) records that some
+    // master broke in that step: without one no beam drops its force.
+    if (groupCount == 0u || gGroups[groupSlot(parity, groupOff, 0u)].load() == NO_GROUP)
     {
         uint k = 0u;
         for (; k + 4u <= info.z; k += 4u)
@@ -498,7 +515,11 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
             {
                 broken = true;
                 f = 0.0;
-                if (group > 0) gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+                if (group > 0)
+                {
+                    gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+                    gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+                }
             }
         }
     }
@@ -875,4 +896,269 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         for (uint j = lane; j < beamCount; j += LANES) groupDrops(beamOff + j, beamOff, groupOff, last, true);
     }
     if (lane == 0u) gMisc[v] = uint4(misc.xyz, stepBase + gP.steps);
+}
+
+// Bucket slots of the wide passes' grid (a fuller bucket overflows to a list).
+static const uint WIDE_SLOTS = 16u;
+
+// --- Wide passes: one thread per element across every vehicle, a dispatch per
+// pass, for large vehicles (the whole GPU on one vehicle). Per frame:
+// wide_begin, wide_rebase, then per step wide_nodes, wide_beams, wide_tris
+// (each step binding its own parameter copy, whose pad2 is the step), then
+// wide_end, wide_close. Same per-element functions as
+// explicit_beams_frame, in the same order within a step; the grid offsets and
+// tested lists live in buffers instead of workgroup memory, and the grid is
+// fixed bucket slots (no scan). Every vehicle in
+// a wide dispatch has run the same number of steps (the host checks).
+
+// The wide passes' vehicle table, in constant memory: per vehicle its 4 static
+// records, then per vehicle (origin bits xyz, steps run) copied from gMisc after
+// the frame's rebase.
+static const uint WIDE_MAX_VEHICLES = 256u;
+struct VehicleTable
+{
+    uint4 rec[WIDE_MAX_VEHICLES * 5u];
+};
+[[vk::binding(9, 0)]] ConstantBuffer<VehicleTable> gVt;
+
+struct Vehicle
+{
+    uint nodeOff, nodeCount, beamOff, beamCount, triOff, triCount, boxOff, boxCount;
+    uint candOff, candCount, groupOff, groupCount, flags;
+    float ground, range, cell;
+};
+
+Vehicle vehicleAt(uint v)
+{
+    uint4 r0 = gVt.rec[v * 4u];
+    uint4 r1 = gVt.rec[v * 4u + 1u];
+    uint4 r2 = gVt.rec[v * 4u + 2u];
+    uint4 r3 = gVt.rec[v * 4u + 3u];
+    Vehicle x;
+    x.nodeOff = r0.x; x.nodeCount = r0.y; x.beamOff = r0.z; x.beamCount = r0.w;
+    x.triOff = r1.x; x.triCount = r1.y; x.boxOff = r1.z; x.boxCount = r1.w;
+    x.candOff = r2.x; x.candCount = r2.y; x.groupOff = r2.z; x.groupCount = r2.w;
+    x.flags = r3.x; x.ground = asfloat(r3.y); x.range = asfloat(r3.z); x.cell = asfloat(r3.w);
+    return x;
+}
+
+// The step within the frame (each step's dispatches bind their own parameter
+// copy) and a vehicle's step.
+uint wideStep() { return gP.pad2; }
+uint vehicleStep(uint v) { return gVt.rec[WIDE_MAX_VEHICLES * 4u + v].w + wideStep(); }
+float3 vehicleOrigin(uint v) { return asfloat(gVt.rec[WIDE_MAX_VEHICLES * 4u + v].xyz); }
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_begin(uint3 id : SV_DispatchThreadID)
+{
+    uint v = id.x;
+    if (v >= gP.vehicles) return;
+    Vehicle x = vehicleAt(v);
+    float3 first = gNodes[x.nodeOff * 3u].xyz;
+    float3 shift = length(first) > REBASE_RADIUS ? first : float3(0.0, 0.0, 0.0);
+    gMisc[gP.wideMisc + 1u + v] = uint4(asuint(shift), 0u);
+    gAcc[gP.testedBase + v * 2u].store(0);
+    gAcc[gP.testedBase + v * 2u + 1u].store(0);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_rebase(uint3 id : SV_DispatchThreadID)
+{
+    uint gi = id.x;
+    if (gi >= gP.totalNodes) return;
+    uint v = gStatic[gP.nodeInfoBase + gi].w;
+    float3 shift = asfloat(gMisc[gP.wideMisc + 1u + v].xyz);
+    if (all(shift == float3(0.0, 0.0, 0.0))) return;
+    float4 P = gNodes[gi * 3u];
+    gNodes[gi * 3u] = float4(P.xyz - shift, P.w);
+    if (gi == gStatic[v * 4u].x)
+    {
+        uint4 m = gMisc[v];
+        gMisc[v] = uint4(asuint(asfloat(m.xyz) + shift), m.w);
+    }
+}
+
+// Nodes, then group slots, grid counts (and overflow and this step's tested counts).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i < gP.totalNodes)
+    {
+        uint4 info = gStatic[gP.nodeInfoBase + i];
+        uint v = info.w;
+        Vehicle x = vehicleAt(v);
+        float3 origin = vehicleOrigin(v);
+        nodeUpdate(i, info, v, i - x.nodeOff, vehicleStep(v), origin, x.flags, x.ground, x.boxOff, x.boxCount,
+                   x.beamOff, x.groupOff, x.groupCount, true);
+        return;
+    }
+    i -= gP.totalNodes;
+    if (i < gP.groupTotal)
+    {
+        // Every vehicle has the same step parity.
+        gGroups[groupSlot(vehicleStep(0u) & 1u, 0u, i)].store(NO_GROUP);
+        return;
+    }
+    i -= gP.groupTotal;
+    if (i < gP.vehicles * GRID_BUCKETS)
+    {
+        gAcc[gP.gridCountBase + i].store(0);
+        if (i < gP.vehicles)
+        {
+            gAcc[gP.overflowBase + i].store(0);
+            gAcc[gP.testedBase + i * 2u + (vehicleStep(i) & 1u)].store(0);
+        }
+    }
+}
+
+// Beams, then grid filling (candidates), then triangles' throttle and tested list.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i < gP.totalBeams)
+    {
+        uint v = gStatic[gP.nodeInfoBase + gStatic[gP.beamBase + i * 3u].x].w;
+        Vehicle x = vehicleAt(v);
+        beamUpdate(i, i - x.beamOff, (x.flags & FLAG_FAST_INV_SQRT) != 0u, x.groupOff, vehicleStep(v) & 1u);
+        return;
+    }
+    i -= gP.totalBeams;
+    if (i < gP.totalCands)
+    {
+        uint pos = gLists[gP.candTable + i];
+        uint h = gLists[pos];
+        uint v = gStatic[gP.nodeInfoBase + h].w;
+        float cell = asfloat(gVt.rec[v * 4u + 3u].w);
+        if (cell > 0.0)
+        {
+            float3 p = gNodes[h * 3u].xyz;
+            uint b = gridBucket(int3(floor(p / cell)));
+            uint rank = uint(gAcc[gP.gridCountBase + v * GRID_BUCKETS + b].add(1));
+            if (rank < WIDE_SLOTS)
+                gBeams[gP.slotBase16 + (v * GRID_BUCKETS + b) * WIDE_SLOTS + rank] = float4(p, asfloat(h));
+            else
+            {
+                uint o = uint(gAcc[gP.overflowBase + v].add(1));
+                gNext[gVt.rec[v * 4u + 2u].x + o] = h;
+            }
+        }
+        return;
+    }
+    i -= gP.totalCands;
+    if (i < gP.totalTris)
+    {
+        // The last step's throttle, and this step's tested list (independent of the
+        // beams).
+        uint v = gStatic[gP.triBase + i].w;
+        Vehicle x = vehicleAt(v);
+        if (x.candCount == 0u) return;
+        int w = wideStep() > 0u ? triangleFinish(i) : asint(gMisc[gP.vehicles + i].x);
+        if (w <= 0)
+        {
+            uint k = uint(gAcc[gP.testedBase + v * 2u + (vehicleStep(v) & 1u)].add(1));
+            gNext[gP.testedListBase + x.triOff + k] = i - x.triOff;
+        }
+    }
+}
+
+// triangleGrid with the offsets in gAcc.
+void triangleGridWide(uint gt, uint sub, uint v, float3 origin, float r, float cell, uint candOff, uint candCount,
+                      uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    TriGeo t = triangleGeo(gt, origin, r);
+    int3 c0 = int3(floor((t.lo - origin) / cell));
+    int3 c1 = int3(floor((t.hi - origin) / cell));
+    int3 span = c1 - c0 + int3(1, 1, 1);
+    if (span.x * span.y * span.z > int(GRID_MAX_CELLS))
+    {
+        for (uint k = sub; k < candCount; k += GRID_SUBS)
+            tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
+        return;
+    }
+    uint yz = uint(span.y * span.z);
+    uint cells = uint(span.x) * yz;
+    for (uint i = sub; i < cells; i += GRID_SUBS)
+    {
+        uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
+        bool dup = false;
+        for (uint j = 0u; j < i; j++)
+            dup = dup || gridBucket(c0 + int3(int(j / yz), int((j / uint(span.z)) % uint(span.y)), int(j % uint(span.z)))) == b;
+        if (dup) continue;
+        uint n = min(uint(gAcc[gP.gridCountBase + v * GRID_BUCKETS + b].load()), WIDE_SLOTS);
+        uint base = gP.slotBase16 + (v * GRID_BUCKETS + b) * WIDE_SLOTS;
+        for (uint e = 0u; e < n; e++)
+        {
+            float4 E = gBeams[base + e];
+            float3 p = origin + E.xyz;
+            if (any(p < t.lo) || any(p > t.hi)) continue;
+            tryContact(t, asuint(E.w), origin, r, beamOff, groupOff, groupCount, parity);
+        }
+    }
+    // Candidates past a full bucket: every triangle tests them (its share of lanes).
+    uint over = uint(gAcc[gP.overflowBase + v].load());
+    for (uint k = sub; k < over; k += GRID_SUBS)
+        tryContact(t, gNext[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
+}
+
+// GRID_SUBS lanes per listed triangle (a vehicle's k-th listed triangle on the
+// lanes of its k-th triangle record).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_tris(uint3 id : SV_DispatchThreadID)
+{
+    uint gt = id.x / GRID_SUBS;
+    uint sub = id.x % GRID_SUBS;
+    if (gt >= gP.totalTris) return;
+    uint v = gStatic[gP.triBase + gt].w;
+    Vehicle x = vehicleAt(v);
+    if (x.candCount == 0u) return;
+    uint step = vehicleStep(v);
+    uint k = gt - x.triOff;
+    if (k >= uint(gAcc[gP.testedBase + v * 2u + (step & 1u)].load())) return;
+    uint t = x.triOff + gNext[gP.testedListBase + x.triOff + k];
+    float3 origin = vehicleOrigin(v);
+    if (x.cell > 0.0)
+        triangleGridWide(t, sub, v, origin, x.range, x.cell, x.candOff, x.candCount, x.beamOff, x.groupOff,
+                         x.groupCount, step & 1u);
+    else
+        triangleTest(t, sub, GRID_SUBS, origin, x.range, x.candOff, x.candCount, x.beamOff, x.groupOff,
+                     x.groupCount, step & 1u);
+}
+
+// After the last step: its triangles' throttle and its group breaks.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_end(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (gP.steps == 0u) return;
+    if (i < gP.totalTris)
+    {
+        uint v = gStatic[gP.triBase + i].w;
+        if (gStatic[v * 4u + 2u].y > 0u) triangleFinish(i);
+        return;
+    }
+    i -= gP.totalTris;
+    if (i < gP.totalBeams)
+    {
+        uint v = gStatic[gP.nodeInfoBase + gStatic[gP.beamBase + i * 3u].x].w;
+        Vehicle x = vehicleAt(v);
+        if (x.groupCount > 0u) groupDrops(i, x.beamOff, x.groupOff, (vehicleStep(v) - 1u) & 1u, true);
+    }
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_close(uint3 id : SV_DispatchThreadID)
+{
+    uint v = id.x;
+    if (v >= gP.vehicles) return;
+    uint4 m = gMisc[v];
+    gMisc[v] = uint4(m.xyz, m.w + wideStep());
 }

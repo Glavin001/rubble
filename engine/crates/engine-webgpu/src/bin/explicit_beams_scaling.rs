@@ -151,6 +151,21 @@ fn spawn(text: &str, at: Vec3, vel: Vec3) -> ExplicitBeams {
     sim
 }
 
+/// `wide=0|1`: force one workgroup per vehicle or the wide passes (default: the
+/// host's choice, wide for large vehicles).
+static WIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+
+fn apply_wide(gpu: &mut ExplicitBeamsGpu) {
+    let on = match WIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => gpu.set_wide(false),
+        1 => gpu.set_wide(true),
+        _ => gpu.is_wide(),
+    };
+    if std::env::var("EB_SHOW_WIDE").is_ok() {
+        eprintln!("wide passes: {on}");
+    }
+}
+
 /// `roll=0`: spawn tyres still (every node at the spawn velocity) on both engines.
 static ROLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 /// `drag=0`: no per-node aerodynamic drag or turbulence on both engines (that model
@@ -333,6 +348,7 @@ fn run_rubble(
     let n = fleet.len();
     // Pipelined, with the GPU time of each frame.
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
+    apply_wide(&mut gpu);
     for _ in 0..warm {
         gpu.frame(steps);
     }
@@ -353,6 +369,7 @@ fn run_rubble(
     drop(gpu);
     // Blocking: submit to completion, every frame.
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
+    apply_wide(&mut gpu);
     for _ in 0..warm {
         gpu.frame(steps);
     }
@@ -603,6 +620,9 @@ fn main() -> anyhow::Result<()> {
         kv(&args, "roll") != Some("0"),
         std::sync::atomic::Ordering::Relaxed,
     );
+    if let Some(w) = kv(&args, "wide") {
+        WIDE.store(u8::from(w == "1"), std::sync::atomic::Ordering::Relaxed);
+    }
     DRAG.store(
         kv(&args, "drag") != Some("0"),
         std::sync::atomic::Ordering::Relaxed,
@@ -651,6 +671,7 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
         let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+        apply_wide(&mut gpu);
         let mut w = std::io::BufWriter::new(std::fs::File::create(trace)?);
         w.write_all(&((one.nodes.len() * n) as u32).to_le_bytes())?;
         w.write_all(&((one.beams.len() * n) as u32).to_le_bytes())?;
@@ -703,6 +724,9 @@ fn main() -> anyhow::Result<()> {
     let mut blocking: HashMap<(Scenario, usize), Vec<f64>> = HashMap::new();
     let mut blocking_frames: HashMap<(Scenario, usize), Vec<f64>> = HashMap::new();
     let mut accuracy: HashMap<(Scenario, usize), Vec<Value>> = HashMap::new();
+    // Runs that started on a busy machine (the wait gave up): none may count.
+    let mut busy_runs = 0usize;
+    let mut run_count = 0usize;
 
     for trial in 0..trials {
         for &sc in &scenarios {
@@ -735,6 +759,11 @@ fn main() -> anyhow::Result<()> {
                         rubble_run = Some(run_rubble(&device, &queue, &fleet, warm, frames, steps));
                     }
                 }
+                run_count += loads.len();
+                busy_runs += loads
+                    .iter()
+                    .filter(|(l, g)| !(*l < max_load) || *g >= max_gpu)
+                    .count();
                 let r = rubble_run.unwrap();
                 let key = (sc, n);
                 gpu_means.entry(key).or_default().push(mean(&r.gpu_ms));
@@ -1017,6 +1046,103 @@ fn main() -> anyhow::Result<()> {
             "sensitivity": scenarios.iter().map(|s| (s.name(), sensitivity.get(s).cloned().unwrap_or(Value::Null))).collect::<HashMap<_, _>>(),
         }))?,
     )?;
+    // Acceptance: every criterion with its measured values, PASS or FAIL.
+    if ror_bin.is_some() {
+        let mut fails = 0usize;
+        let mut line = |md: &mut String, ok: bool, what: String| {
+            fails += (!ok) as usize;
+            writeln!(md, "| {} | {what} |", if ok { "PASS" } else { "FAIL" }).unwrap();
+        };
+        writeln!(
+            md,
+            "## Acceptance\n\nCommand: `{}`\n",
+            std::env::args().collect::<Vec<_>>().join(" ")
+        )
+        .unwrap();
+        writeln!(md, "| result | criterion |\n|---|---|").unwrap();
+        line(
+            &mut md,
+            busy_runs == 0,
+            format!("{run_count} runs started on a quiet machine (load < {max_load}, GPU < {max_gpu} %): {busy_runs} did not"),
+        );
+        for &sc in &scenarios {
+            let sens = &sensitivity[&sc];
+            let s_rms = sens["rms_mm"].as_f64().unwrap();
+            let range = |k: &str| {
+                let a = sens[k][0].as_f64().unwrap();
+                let b = sens[k][1].as_f64().unwrap();
+                (0.9 * a.min(b), 1.1 * a.max(b))
+            };
+            for &n in &counts {
+                for c in accuracy.get(&(sc, n)).into_iter().flatten() {
+                    let rms = c["rms_mm"].as_f64().unwrap();
+                    let limit = (1.5 * s_rms).max(1.0);
+                    line(&mut md, rms <= limit, format!(
+                        "{} N={n} vehicle {}: node RMS {rms:.2} mm <= {limit:.2} mm (1.5x RoR's own {s_rms:.2} mm, at least 1 mm)",
+                        sc.name(), c["index"]));
+                    for k in ["broken", "bent"] {
+                        let (lo, hi) = range(k);
+                        let v = c["rubble"][k].as_f64().unwrap();
+                        line(&mut md, v >= lo.floor() && v <= hi.ceil(), format!(
+                            "{} N={n} vehicle {}: {k} {v} within RoR's {}–{} widened 10% ({:.0}–{:.0})",
+                            sc.name(), c["index"], sens[k][0], sens[k][1], lo.floor(), hi.ceil()));
+                    }
+                }
+            }
+            for &n in &counts {
+                let key = (sc, n);
+                let (Some(rm), Some(rf)) = (ror_means.get(&key), ror_frames.get(&key)) else {
+                    continue;
+                };
+                let gm = &gpu_means[&key];
+                let logs: Vec<f64> = rm.iter().zip(gm).map(|(a, b)| (a / b).ln()).collect();
+                let c = ci(&logs);
+                line(&mut md, c.1.exp() > 1.0, format!(
+                    "{} N={n}: speed-up {:.2}x, 95% CI [{:.2}, {:.2}] excludes 1 (RoR {:.3} ms, Rubble GPU {:.3} ms)",
+                    sc.name(), c.0.exp(), c.1.exp(), c.2.exp(), mean(rm), mean(gm)));
+                let pw = mean(&piped[&key]);
+                line(
+                    &mut md,
+                    pw < mean(rm),
+                    format!(
+                        "{} N={n}: Rubble pipelined wall {pw:.3} ms < RoR mean {:.3} ms",
+                        sc.name(),
+                        mean(rm)
+                    ),
+                );
+                let gf = &gpu_frames[&key];
+                let (rp, gp) = (percentile(rf, 0.99), percentile(gf, 0.99));
+                let (rx, gx) = (
+                    rf.iter().copied().fold(f64::MIN, f64::max),
+                    gf.iter().copied().fold(f64::MIN, f64::max),
+                );
+                line(
+                    &mut md,
+                    gp < rp && gx < rx,
+                    format!(
+                        "{} N={n}: Rubble p99 {gp:.3} < RoR {rp:.3} ms, max {gx:.3} < {rx:.3} ms",
+                        sc.name()
+                    ),
+                );
+            }
+            if sc == Scenario::Impact {
+                if let Some(gf) = gpu_frames.get(&(sc, 64)) {
+                    let p = percentile(gf, 0.99);
+                    line(
+                        &mut md,
+                        p <= 8.33,
+                        format!("impact N=64: Rubble p99 GPU frame {p:.3} ms <= 8.33 ms"),
+                    );
+                }
+            }
+        }
+        writeln!(
+            md,
+            "\n**{}** ({fails} failing)",
+            if fails == 0 { "ALL PASS" } else { "NOT MET" }
+        )
+        .unwrap();
+    }
     std::fs::write(out.join("summary.md"), &md)?;
     println!("{md}");
     Ok(())
