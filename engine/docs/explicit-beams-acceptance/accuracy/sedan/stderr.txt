@@ -1,6 +1,6 @@
-trial 0 idle     1: rubble gpu 0.235 ms, pipelined 0.378 ms, ror 0.261 ms
-trial 0 drive     1: rubble gpu 0.228 ms, pipelined 0.237 ms, ror 0.280 ms
-trial 0 impact     1: rubble gpu 0.215 ms, pipelined 0.225 ms, ror 0.233 ms
+trial 0 idle     1: rubble gpu 0.225 ms, pipelined 0.234 ms, ror 0.233 ms
+trial 0 drive     1: rubble gpu 0.222 ms, pipelined 0.231 ms, ror 0.232 ms
+trial 0 impact     1: rubble gpu 0.228 ms, pipelined 0.237 ms, ror 0.229 ms
 ensemble idle 0: broken rubble 0 / ror 0
 ensemble idle 1: broken rubble 0 / ror 0
 ensemble idle 2: broken rubble 0 / ror 0

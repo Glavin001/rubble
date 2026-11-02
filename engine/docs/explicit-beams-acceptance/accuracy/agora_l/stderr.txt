@@ -1,6 +1,6 @@
-trial 0 idle     1: rubble gpu 0.221 ms, pipelined 0.236 ms, ror 0.182 ms
-trial 0 drive     1: rubble gpu 0.220 ms, pipelined 0.234 ms, ror 0.187 ms
-trial 0 impact     1: rubble gpu 0.227 ms, pipelined 0.241 ms, ror 0.221 ms
+trial 0 idle     1: rubble gpu 0.242 ms, pipelined 0.250 ms, ror 0.179 ms
+trial 0 drive     1: rubble gpu 0.241 ms, pipelined 0.250 ms, ror 0.197 ms
+trial 0 impact     1: rubble gpu 0.245 ms, pipelined 0.255 ms, ror 0.225 ms
 ensemble idle 0: broken rubble 0 / ror 0
 ensemble idle 1: broken rubble 0 / ror 0
 ensemble idle 2: broken rubble 0 / ror 0
@@ -19,9 +19,9 @@ ensemble drive 6: broken rubble 0 / ror 0
 ensemble drive 7: broken rubble 0 / ror 0
 ensemble impact 0: broken rubble 30 / ror 30
 ensemble impact 1: broken rubble 30 / ror 30
-ensemble impact 2: broken rubble 30 / ror 30
-ensemble impact 3: broken rubble 31 / ror 31
-ensemble impact 4: broken rubble 28 / ror 31
-ensemble impact 5: broken rubble 29 / ror 31
-ensemble impact 6: broken rubble 28 / ror 31
-ensemble impact 7: broken rubble 29 / ror 31
+ensemble impact 2: broken rubble 29 / ror 30
+ensemble impact 3: broken rubble 30 / ror 31
+ensemble impact 4: broken rubble 31 / ror 31
+ensemble impact 5: broken rubble 31 / ror 31
+ensemble impact 6: broken rubble 31 / ror 31
+ensemble impact 7: broken rubble 30 / ror 31

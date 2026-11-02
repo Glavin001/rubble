@@ -182,11 +182,48 @@ Surface boxSurface()
 
 // --- numerical primitives (compatible profile) ---
 
-float fastInvSqrt(float x)
+// Strict float arithmetic where a decision or a bit trick depends on rounding.
+// Metal compiles with fast math (fused multiply-add, reassociation, approximate
+// division and square root). Then a contacter lying in a triangle's plane can see
+// the other sign of δ than the CPU reference and be pushed out the other side, and
+// the bit-trick exponential (a·x + b to integer bits) can land on other bits. These
+// helpers give IEEE single precision in the CPU's order: every intermediate passes
+// through an XOR with a uniform the compiler cannot know is zero (no fusing or
+// reassociation across it); division and square root take one exact fma
+// correction.
+uint noFuseBits() { return gP.vehicles >> 31; }
+float nf(float x) { return asfloat(asuint(x) ^ noFuseBits()); }
+float3 nf3(float3 v) { return float3(nf(v.x), nf(v.y), nf(v.z)); }
+float smul(float a, float b) { return nf(a * b); }
+float sdot(float3 a, float3 b) { return nf(nf(smul(a.x, b.x) + smul(a.y, b.y)) + smul(a.z, b.z)); }
+float3 scross(float3 a, float3 b)
+{
+    return float3(nf(smul(a.y, b.z) - smul(b.y, a.z)), nf(smul(a.z, b.x) - smul(b.z, a.x)),
+                  nf(smul(a.x, b.y) - smul(b.x, a.y)));
+}
+float3 sscale(float3 v, float k) { return float3(smul(v.x, k), smul(v.y, k), smul(v.z, k)); }
+float sdiv(float a, float b)
+{
+    float r = 1.0 / b;
+    float q = nf(a * r);
+    return nf(fma(fma(-q, b, a), r, q));
+}
+float ssqrt(float x)
+{
+    if (x <= 0.0) return sqrt(x);
+    float s = nf(sqrt(x));
+    return nf(fma(fma(-s, s, x), 0.5 / s, s));
+}
+
+float3 sadd3(float3 a, float3 b) { return nf3(a + b); }
+float3 ssub3(float3 a, float3 b) { return nf3(a - b); }
+float3 sdiv3(float3 v, float k) { return float3(sdiv(v.x, k), sdiv(v.y, k), sdiv(v.z, k)); }
+
+float sFastInvSqrt(float x)
 {
     int i = 0x5f3759df - (asint(x) >> 1);
     float y = asfloat(i);
-    return y * (1.5 - 0.5 * x * y * y);
+    return smul(y, nf(1.5 - smul(smul(smul(0.5, x), y), y)));
 }
 
 float approxSqrt(float x)
@@ -199,13 +236,13 @@ float approxExp(float x)
 {
     if (x < -15.0) return 0.0;
     if (x > 88.0) return 1e38;
-    return asfloat(int(12102203.0 * x + 1064652319.0));
+    return asfloat(int(nf(smul(12102203.0, x) + 1064652319.0)));
 }
 
 float approxPow(float x, float y)
 {
     float e = float(asint(x) - 1065353216);
-    return asfloat(int(y * e + 1065353216.0));
+    return asfloat(int(nf(smul(y, e) + 1065353216.0)));
 }
 
 // Turbulence: a well-mixed hash per vehicle, step, node and axis, as a value in
@@ -224,21 +261,23 @@ float noise(uint vehicle, uint step, uint node, uint axis)
 float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, float friction)
 {
     if (p < 0.0) return float3(0.0, 0.0, 0.0);
-    float vn = dot(v, n);
-    float fn = dot(f, n);
+    // Strict, in the CPU reference's order (its branches decide on these values).
+    float vn = sdot(v, n);
+    float fn = sdot(f, n);
     float r = -fn;
-    if (vn < 0.0) r -= (0.8 * vn - 0.2 * p / STEP) * m / STEP;
+    if (vn < 0.0)
+        r = nf(r - sdiv(smul(nf(smul(0.8, vn) - sdiv(smul(0.2, p), STEP)), m), STEP));
     if (r <= 0.0) return float3(0.0, 0.0, 0.0);
-    float3 sf = f - fn * n;
-    float3 sl = v - vn * n;
-    float sigma = length(sl);
-    if (sigma > 0.0) sl = sl / sigma;
-    float gr = r * s.strength * friction;
-    float ms = s.ms * gr;
-    if (sigma < s.va && gr > 0.0 && dot(sf, sf) <= ms * ms)
-        return r * n - ms * (1.0 - approxExp(-sigma / s.va)) * sl - sf;
-    float g = s.mc + (s.ms - s.mc) * approxExp(-approxPow(sigma / s.vs, s.alpha));
-    return r * n - (g + min(s.t2 * sigma, 5.0)) * gr * sl;
+    float3 sf = ssub3(f, sscale(n, fn));
+    float3 sl = ssub3(v, sscale(n, vn));
+    float sigma = ssqrt(sdot(sl, sl));
+    if (sigma > 0.0) sl = sdiv3(sl, sigma);
+    float gr = smul(smul(r, s.strength), friction);
+    float ms = smul(s.ms, gr);
+    if (sigma < s.va && gr > 0.0 && sdot(sf, sf) <= smul(ms, ms))
+        return ssub3(ssub3(sscale(n, r), sscale(sl, smul(ms, nf(1.0 - approxExp(-sdiv(sigma, s.va)))))), sf);
+    float g = nf(s.mc + smul(nf(s.ms - s.mc), approxExp(-approxPow(sdiv(sigma, s.vs), s.alpha))));
+    return ssub3(sscale(n, r), sscale(sl, smul(nf(g + min(smul(s.t2, sigma), 5.0)), gr)));
 }
 
 float3 accForce(uint node)
@@ -285,13 +324,13 @@ bool groupDrops(uint j, uint beamOff, uint groupOff, uint parity, bool mark)
     return j - beamOff > master;
 }
 
-// The sum of a node's beam forces. The beam phase writes each beam's force on each
-// end into that end's incidence entry, so the entries of one node are contiguous
-// and independent loads (no load waits on another's index).
-float3 beamSum(uint4 info, uint beamOff, uint groupOff, uint groupCount, uint parity, bool mark)
+// A node's force slot `f` plus its beam forces, in beam order as the CPU adds them.
+// The beam phase writes each beam's force on each end into that end's incidence
+// entry, so the entries of one node are contiguous and independent loads (no load
+// waits on another's index).
+float3 beamSum(float3 f, uint4 info, uint beamOff, uint groupOff, uint groupCount, uint parity, bool mark)
 {
     uint base = gP.incBase + info.y;
-    float3 f = float3(0.0, 0.0, 0.0);
     // Slot 0 of the vehicle's groups (no group has index 0) records that some
     // master broke in that step: without one no beam drops its force.
     if (groupCount == 0u || gGroups[groupSlot(parity, groupOff, 0u)].load() == NO_GROUP)
@@ -303,18 +342,18 @@ float3 beamSum(uint4 info, uint beamOff, uint groupOff, uint groupCount, uint pa
             float3 b = gBeams[base + k + 1u].xyz;
             float3 c = gBeams[base + k + 2u].xyz;
             float3 d = gBeams[base + k + 3u].xyz;
-            f = f + a;
-            f = f + b;
-            f = f + c;
-            f = f + d;
+            f = sadd3(f, a);
+            f = sadd3(f, b);
+            f = sadd3(f, c);
+            f = sadd3(f, d);
         }
-        for (; k < info.z; k++) f = f + gBeams[base + k].xyz;
+        for (; k < info.z; k++) f = sadd3(f, gBeams[base + k].xyz);
         return f;
     }
     for (uint k = 0u; k < info.z; k++)
     {
         float3 push = gBeams[base + k].xyz;
-        if (!groupDrops(gLists[info.y + k] >> 1, beamOff, groupOff, parity, mark)) f = f + push;
+        if (!groupDrops(gLists[info.y + k] >> 1, beamOff, groupOff, parity, mark)) f = sadd3(f, push);
     }
     return f;
 }
@@ -327,7 +366,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
     float4 P = gNodes[gi * 3u];
     float4 V = gNodes[gi * 3u + 1u];
     // Last step's beams (with its group breaks) and self-collision.
-    float3 f = gNodes[gi * 3u + 2u].xyz + beamSum(info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
+    float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
     {
         f = f + accForce(gi);
@@ -363,8 +402,8 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
     }
     if ((flags & NODE_IMMOVABLE) == 0u)
     {
-        vel = vel + f / mass * STEP;
-        pos = pos + vel * STEP;
+        vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
+        pos = sadd3(pos, sscale(vel, STEP));
     }
     f = float3(0.0, mass * GRAVITY, 0.0);
     if ((flagsV & FLAG_DRAG) != 0u)
@@ -422,27 +461,28 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     float tt = s0.z;
     float gate = s0.w;
     float strength = s1.x;
-    float3 d = pa.xyz - pb.xyz;
-    float q = dot(d, d);
-    float inv = fast ? fastInvSqrt(q) : 1.0 / sqrt(q);
-    float len = q * inv;
-    float e = len - rest;
-    float u = dot(va - vb, d) * inv;
+    // Strict, in the CPU reference's order (yield and break decide on these).
+    float3 d = ssub3(pa.xyz, pb.xyz);
+    float q = sdot(d, d);
+    float inv = fast ? sFastInvSqrt(q) : sdiv(1.0, ssqrt(q));
+    float len = smul(q, inv);
+    float e = nf(len - rest);
+    float u = smul(sdot(ssub3(va, vb), d), inv);
     float k = c1.x;
     float c = c1.y;
     bool broken = false;
     bool supportBroke = false;
     if (kind == KIND_LIMITED)
     {
-        float lb = c2.y * rest;
-        float sb = c2.x * rest;
+        float lb = smul(c2.y, rest);
+        float sb = smul(c2.x, rest);
         float o = 0.0;
-        if (e > lb) o = e - lb;
-        else if (e < -sb) o = -e - sb;
+        if (e > lb) o = nf(e - lb);
+        else if (e < -sb) o = nf(-e - sb);
         if (o != 0.0)
         {
-            k = k + (c1.z - k) * o;
-            c = c + (c1.w - c) * o;
+            k = nf(k + smul(nf(c1.z - k), o));
+            c = nf(c + smul(nf(c1.w - c), o));
         }
     }
     else if (kind == KIND_SUPPORT)
@@ -450,9 +490,9 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
         if (e > 0.0)
         {
             k = 0.0;
-            c = c * 0.1;
+            c = smul(c, 0.1);
             float factor = c2.y > 0.0 ? c2.y : SUPPORT_BREAK_FACTOR;
-            if (e > rest * factor)
+            if (e > smul(rest, factor))
             {
                 broken = true;
                 supportBroke = true;
@@ -464,10 +504,10 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
         if (e < 0.0)
         {
             k = 0.0;
-            c = c * 0.1;
+            c = smul(c, 0.1);
         }
     }
-    float f = -k * e - c * u;
+    float f = nf(smul(-k, e) - smul(c, u));
     float last = f;
     float tau = abs(f);
     if (!supportBroke && tau > gate)
@@ -476,30 +516,30 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
         {
             if (f > tc && e < 0.0)
             {
-                float delta = e + (tc / k) * (1.0 - c2.z);
+                float delta = nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z)));
                 float old = rest;
-                rest = max(rest + delta, MIN_REST);
-                f -= (f - tc) / 2.0;
+                rest = max(nf(rest + delta), MIN_REST);
+                f = nf(f - sdiv(nf(f - tc), 2.0));
                 tau = f;
                 if (rest < old)
                 {
-                    tc = tc * old / rest;
+                    tc = sdiv(smul(tc, old), rest);
                     gate = min(min(tc, tt), strength);
                 }
             }
             else if (f < -tt && e > 0.0)
             {
-                float delta = e - (tt / k) * (1.0 - c2.z);
+                float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
                 float old = rest;
-                rest += delta;
-                f -= (f + tt) / 2.0;
+                rest = nf(rest + delta);
+                f = nf(f - sdiv(nf(f + tt), 2.0));
                 tau = -f;
                 if (rest > old)
                 {
-                    tt = tt * rest / old;
+                    tt = sdiv(smul(tt, rest), old);
                     gate = min(min(tc, tt), strength);
                 }
-                strength -= delta * k;
+                strength = nf(strength - smul(delta, k));
             }
         }
         if (tau > strength)
@@ -529,7 +569,7 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     float4 n0 = float4(rest, tc, tt, gate);
     if (any(n0 != s0)) gBeams[gj * 2u] = n0;
     if (strength != s1.x || broken) gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, 0.0);
-    float3 push = d * (f * inv);
+    float3 push = sscale(d, smul(f, inv));
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
 }
@@ -585,19 +625,19 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
     uint4 tn = t.tn;
     if (h == tn.x || h == tn.y || h == tn.z) return;
     float4 P = gNodes[h * 3u];
-    float3 p = origin + P.xyz;
+    float3 p = nf3(origin + P.xyz);
     if (any(p < t.lo) || any(p > t.hi)) return;
-    float3 q = p - t.p0;
+    float3 q = nf3(p - t.p0);
     float alpha = 0.0;
     float beta = 0.0;
     float delta = 0.0;
     if (t.solvable)
     {
-        alpha = dot(t.ra, q);
-        beta = dot(t.rb, q);
-        delta = dot(t.rn, q);
+        alpha = sdot(t.ra, q);
+        beta = sdot(t.rb, q);
+        delta = sdot(t.rn, q);
     }
-    float gamma = 1.0 - alpha - beta;
+    float gamma = nf(nf(1.0 - alpha) - beta);
     if (!(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r)) return;
     gMisc[t.mi].w = 1u;
     gsHit = 1u;
@@ -615,7 +655,7 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
                         + gamma * gNodes[tn.x * 3u + 1u].xyz);
     float mt = alpha * P1.w + beta * P2.w + gamma * P0.w;
     float m = P.w * mt / (P.w + mt);
-    float3 fh = gNodes[h * 3u + 2u].xyz + beamSum(gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity, false)
+    float3 fh = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity, false)
         + accForce(h);
     float3 f = contactForce(fh, v, m, nn, boxSurface(), r - delta, V.w);
     accAdd(h, f);
@@ -630,20 +670,20 @@ TriGeo triangleGeo(uint gt, float3 origin, float r)
     TriGeo t;
     t.mi = gP.vehicles + gt;
     t.tn = gStatic[gP.triBase + gt];
-    t.p0 = origin + gNodes[t.tn.x * 3u].xyz;
-    float3 p1 = origin + gNodes[t.tn.y * 3u].xyz;
-    float3 p2 = origin + gNodes[t.tn.z * 3u].xyz;
-    float3 u = p1 - t.p0;
-    float3 w = p2 - t.p0;
-    float3 cr = cross(u, w);
-    float cl = length(cr);
-    t.n = cl > 0.0 ? cr / cl : cr;
-    float det = dot(u, cross(w, t.n));
+    t.p0 = nf3(origin + gNodes[t.tn.x * 3u].xyz);
+    float3 p1 = nf3(origin + gNodes[t.tn.y * 3u].xyz);
+    float3 p2 = nf3(origin + gNodes[t.tn.z * 3u].xyz);
+    float3 u = nf3(p1 - t.p0);
+    float3 w = nf3(p2 - t.p0);
+    float3 cr = scross(u, w);
+    float cl = ssqrt(sdot(cr, cr));
+    t.n = cl > 0.0 ? float3(sdiv(cr.x, cl), sdiv(cr.y, cl), sdiv(cr.z, cl)) : cr;
+    float det = sdot(u, scross(w, t.n));
     t.solvable = abs(det) > 1e-6;
-    float rd = t.solvable ? 1.0 / det : 0.0;
-    t.ra = cross(w, t.n) * rd;
-    t.rb = cross(t.n, u) * rd;
-    t.rn = cross(u, w) * rd;
+    float rd = t.solvable ? sdiv(1.0, det) : 0.0;
+    t.ra = sscale(scross(w, t.n), rd);
+    t.rb = sscale(scross(t.n, u), rd);
+    t.rn = sscale(scross(u, w), rd);
     t.lo = min(min(t.p0, p1), p2) - float3(r, r, r);
     t.hi = max(max(t.p0, p1), p2) + float3(r, r, r);
     return t;
