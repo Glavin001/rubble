@@ -510,3 +510,42 @@ awake / contact rows:
 
 No cascade on the grid, the ring settles, and gables tracks the carry's awake count with
 2% of its contact rows.
+
+### Cost (demo, `__profileNow()`: plan-phase GPU ms, median of 10 profiled steps)
+
+Before: the carry (`?rest=carry`, the earlier default). After: the archive (default).
+
+| Phase | gables506k, step 1,200, ~9k awake: carry | archive | ring110k, step 780, ~22k awake: carry | archive |
+|---|---|---|---|---|
+| broadphaseGrid | 1.44 | 1.42 | 0.65 | 0.72 |
+| broadphase (archive passes) | 0.01 | 0.24 | 0.01 | 0.27 |
+| ccdToi | 3.26 | 0.29 | 0.31 | 0.09 |
+| narrowphaseMain | 5.25 | 0.51 | 1.43 | 0.70 |
+| warm | 4.93 | 0.04 | 0.98 | 0.13 |
+| graph | 1.53 | 0.29 | 0.27 | 0.17 |
+| topology | 0.56 | 0.56 | 0.11 | 0.11 |
+| primal | 0.63 | 0.60 | 1.60 | 1.43 |
+| dual | 3.39 | 0.05 | 0.93 | 0.15 |
+| sleepMain | 6.69 | 0.56 | 0.58 | 0.33 |
+| pose | 0.17 | 0.17 | 0.02 | 0.03 |
+| GPU span | 28.05 | 4.81 | 6.99 | 4.24 |
+
+The touch query's own passes went 0.51 → 0.13 ms on gables (settled) when a touched
+sleeper is listed only if the touch can wake it (the narrowphase's wake rule on the same
+velocities: one it cannot wake stays asleep with its pairs at rest, which nothing reads that
+step) and each pass runs a thread per listed sleeper; scanning the colliders instead of a
+body's run (needed once threshold splits leave colliders non-contiguous) brought them back
+to 0.24 ms. Both bit-identical on the gate.
+
+Where gables506k's 6.7 ms goes with 26k bricks awake (step 420): broadphaseGrid 1.45,
+narrowphase 1.07, primal 1.15 (8 iterations), sleepMain 0.68, topology 0.58, graph 0.57,
+ccdToi 0.31, archive passes 0.30, warm 0.16, pose 0.16. About 3 ms of it does not scale with
+the awake count: the uniform grid's per-step clear, insert and query over every collider
+(1.4 ms; `build_aabbs` already skips sleepers), the per-body passes over every body slot
+(topology, sleep, pose) and `ccd_wake` / `ccd_unhold` (a collider binary search per sleeping
+body while a fast CCD body exists). The awake-indexed broadphase exists only for hierarchical
+grids; `?gridlevels=on` puts gables on it, but there the resting table is rebuilt over every
+collider after each step with sleep events (every step while a pile settles: 1.40 ms). Next:
+a persistent resting table for the uniform split grid (its "other" table kept across steps,
+movers in the awake table only), and incremental resting-table inserts for steps whose new
+sleepers have not moved cell (their tombstone entries are valid again); both lossless.
