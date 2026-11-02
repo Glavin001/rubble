@@ -408,3 +408,89 @@ flight, GPU 2.09 → 1.95 ms, pipelined 3.37 → 2.96 ms (medians of three; the 
 no sleep archive, so the carry still runs there). Busy pages, ms per step: ring110k
 10.46, gables506k 29.88, softbody traffic (20 cars) 2.44, vehicle driving 1.09, vehicle
 traffic driving 2.38, all at or below the table's earlier values.
+
+## Carry off + archive as the default: the touch query (2026-11-02)
+
+**Why carry-off broke more, found.** Deterministic traces of the house's nudge-0 shot
+(`THRESHOLD_TRACE`, every body's GPU record each step; `THRESHOLD_TRACE_CONTACTS`, the
+step's contact rows; `THRESHOLD_TRACE_ARCHIVE`, a body's archived rows) show that at the
+impact step (96) the clusters the hit wakes had no resting contacts in carry-off: they
+fell freely (vy −0.14 m/s, vz 0) where never-asleep and carry-on push them (body 14:
+vz −2.09 / −1.97), and the next step they were slammed (6 extra breaks). Three causes:
+
+1. `archiveEmitResting` reads only the touched sleeper's own archive, but `archiveOwner`
+   files a pair under one body (the first that fell asleep with a resting partner), so a
+   touched sleeper's pairs filed under its partners never formed.
+2. Only sleepers a moving body's *candidate* touched were listed. In the house the ball's
+   pairs wake a cluster in the narrowphase's sphere pass, and that cluster wakes the
+   clusters it rests on in the hull pass of the same step: those were never listed, so
+   they were solved without supports (carry-on has every resting pair already).
+3. A pair at rest stored its fresh row (λ = 0) even with an archive behind it, and the
+   warm start then found that row first when the pair woke.
+
+**The touch query** (`EngineFeatures::archive_touch_query`, on; `ENGINE_ARCHIVE_WAKE=emit`
+selects the earlier `archive_emit` path for A/B runs), world_step.slang:
+
+- Every sleeper a moving body's candidate pair includes is listed (`archiveMark`, archive
+  or not), and so is a sleeper a projectile hits after the broadphase (`apply_impulses`'
+  late pass).
+- `archive_touch_spread` lists the sleepers the listed ones overlap (one hop, from a
+  snapshot of the list so the hop count does not depend on thread order).
+- `archive_touch` queries each listed sleeper's colliders as if awake, against the
+  colliders at rest only (a mover's pairs are its own query's), on hierarchical grids
+  (resting table or full grid, own and coarser levels plus the finer scan), uniform grids
+  (split or one table) and the small pairwise path. Each pair is emitted once: between
+  two listed sleepers at one level the lower collider index emits it, across levels the
+  finer one.
+- Persistence warms each such pair from either body's archive (`archiveFind`), at rest
+  too (`archiveRestRow`), and a row whose collider a split re-parented (key mismatch)
+  still lends a same-feature match its λ and k, with its old-frame anchors dropped
+  (`archiveStaleRow`), as the previous step's row does without the archive.
+- Not with the carry (`rigid_plan::archive_touch`): the carried pairs already include
+  a touched sleeper's.
+
+Measured and not kept: more spread hops (`ENGINE_ARCHIVE_SPREAD=1|3`: 53.9 ± 1.7, the
+same for both), marking every sleeper within reach of a fast CCD body's sweep (bit
+identical on the 61 shots: the ball's own candidates list them), and searching the archive
+of the body a split took a collider from (identical).
+
+The nudge-0 trace now matches carry-on at the impact step (body 14 vz −1.97 against
+carry-on's −1.97 and never's −2.09; bodies 3–19 within a few cm/s of carry-on).
+
+**Gate**, 61 shots nudged −30..30 mm, 120 frames, bonds broken, mean ± sd [min, max]
+(`sleep_policy_power`; paired: the same shot under carry-on):
+
+| Policy | House | Paired vs carry-on | Masonry arch |
+|---|---|---|---|
+| never asleep (reference) | 57.1 ± 2.4 [53, 62] | −0.90 ± 2.79 | 127.5 ± 5.0 [116, 139] |
+| carry on | 56.2 ± 1.7 [52, 60] | | 127.5 ± 5.0 [116, 139] |
+| carry off, archive, `archive_emit` (before) | 60.6 ± 2.7 [56, 70] | | 127.5 ± 5.0 [116, 139] |
+| carry off, archive, touch query (now) | 55.1 ± 2.1 [52, 65] | −1.08 ± 2.25 | 127.5 ± 5.0 [116, 139] |
+
+The arch never sleeps before its hit, so all four agree bit for bit there. On the house
+the touch query sits 1.1 bonds below carry-on (as carry-on sits 0.9 below never asleep),
+inside the reference spread except one shot (nudge 14: 65). The pair sets of the woken
+bodies match carry-on's at steps 96–98 on the most divergent shots (only pairs with
+λ = 0 differ); what remains is the solve diverging after the hit.
+
+City (`CITY_SLEEP=1 CITY_POOL=32768`, one run each; wall median ms, awake, bonds broken):
+
+| K | scenario | carry (`ENGINE_REST=keep`) | archive_emit (before) | touch query (now) |
+|---|---|---|---|---|
+| 64 | war | 4.65, 1,034, 2,630 | 4.21, 1,041, 2,391 | 4.45, 1,090, 2,516 |
+| 256 | war | 6.75, 1,055, 2,425 | 5.39, 1,139, 2,389 | 6.06, 1,016, 2,368 |
+| 64 | drive | 1.85 | 1.36 | 1.39 |
+| 256 | drive | 3.17 | 1.58 | 1.62 |
+
+**Default.** `EngineFeatures::resting_contacts` (`RestingContacts::Archive`, `Carry`,
+`Drop`; `ENGINE_REST=carry|drop`): `World::new` enables the archive in every world with
+sleep on canonical or persistent contacts (compact contacts keep the carry), sized
+`WorldDef::sleep_archive_rows` or the contact capacity. The archive now runs on
+persistent contacts too (rows past the two halves of bindings 4 and 27,
+`archive_count_persistent` / `archive_scatter_persistent`; WGSL only, so Metal and CUDA
+codegen is unchanged). The wasm `features.restingContacts`, the demo's `?rest=` (archive
+by default; the "Carry resting pairs" checkbox switches the carry live) and the C ABI's
+`RbWorldDef::resting_contacts` / `sleep_archive_rows` follow; the Unreal plugin takes
+`rbDefaultWorldDef`'s default. `tests/world.rs struck_sleeping_pile_moves_as_with_the_carry`
+strikes a sleeping pile on canonical and persistent contacts with the archive and the
+carry.
