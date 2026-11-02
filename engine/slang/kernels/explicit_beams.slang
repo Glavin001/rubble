@@ -7,15 +7,15 @@
 // is three phases with a barrier after each:
 //
 //   nodes      the force consumed is the node's force slot (last step's restart)
-//              plus its beams' slots, summed through its incidence list, plus its
+//              plus its incidence entries' beam forces (contiguous), plus its
 //              self-collision accumulator; then ground and box contact, integrate,
 //              and restart the force slot (gravity, drag, turbulence)
-//   beams      force, kind rules, yield, break test; the force on end a goes to the
-//              beam's slot (end b takes its negative); a breaking group master
+//   beams      force, kind rules, yield, break test; the force on each end goes to
+//              that end's incidence entry; a breaking group master
 //              records its index in its group slot (atomic minimum)
 //   collide    contacters against the vehicle's collision triangles, forces into
 //              per-node integer atomics in fixed point (1/32 N); a node's current
-//              force is its force slot plus its beams' slots plus its accumulator
+//              force is its force slot plus its incidence entries plus its accumulator
 //
 // Detacher groups: the group slots are double-buffered by step parity. A beam of a
 // group whose slot holds a master index counts as broken from the next node phase
@@ -38,16 +38,18 @@
 //            float bits; at triBase per triangle (n0, n1, n2, 0); at boxBase per box
 //            (lo bits, 0), (hi bits, 0). Node and beam indices are global.
 //   gLists   (read-only uint) incidence entries (global beam << 1 | is end b) and
-//            self-collision candidates (global node indices).
+//            self-collision candidates (global node indices); at slotBase per beam
+//            the gLists positions of its end a's and end b's incidence entries.
 //   gNodes   per node 3 × float4: (relative position, mass), (velocity, friction),
 //            (force, 0).
-//   gBeams   per beam 3 × float4: (L, Tc, Tt, G), (S, last force, broken, 0),
-//            (force on end a, 0).
+//   gBeams   per beam 3 × float4: (L, Tc, Tt, G), (S, last force, broken, 0), (0);
+//            at incBase per gLists position, the force of an incidence entry's beam
+//            on that node (unused at candidate positions).
 //   gAcc     per node 3 × int: self-collision force in 1/32 N.
 //   gGroups  two parities × per vehicle group slot: index (local) of the first
 //            breaking master, 0xFFFFFFFF when none.
 //   gMisc    per vehicle (origin bits xyz, steps run); then per triangle
-//            (wait, idle) as int bits.
+//            (wait, idle) as int bits, hit this step (0 between steps).
 
 static const float STEP = 0.0005;
 static const float GRAVITY = -9.807;
@@ -83,7 +85,11 @@ struct Params
     uint triBase;
     uint boxBase;
     uint groupTotal; // group slots per parity (all vehicles)
+    uint incBase; // gBeams record of incidence entry 0's force
+    uint slotBase; // gLists entry of beam 0's two incidence positions
+    uint pad0;
     uint pad1;
+    uint pad2;
 };
 
 struct Surface
@@ -105,6 +111,11 @@ struct Surface
 [[vk::binding(5, 0)]] RWStructuredBuffer<Atomic<int>> gAcc;
 [[vk::binding(6, 0)]] RWStructuredBuffer<Atomic<uint>> gGroups;
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint4> gMisc;
+
+// Nonzero when a self-collision hit may have left forces in gAcc since the node
+// phase last read and cleared it (set at frame start, since the last frame's
+// last step may have hit): without one, every accumulator is zero.
+groupshared uint gsHit;
 
 // Storage writes visible to the whole workgroup.
 void sync()
@@ -211,17 +222,15 @@ uint groupSlot(uint parity, uint groupOff, uint g)
     return parity * gP.groupTotal + groupOff + g;
 }
 
-// Beam j's force on its end a as a node phase sees it: none for a beam after the
-// first master that broke its group (step parity `parity`), which, when `mark`, also
-// marks the beam broken.
-float3 beamPush(uint j, uint beamOff, uint groupOff, uint groupCount, uint parity, bool mark)
+// Beam j's group break as a node phase sees it: true for a beam after the first
+// master that broke its group (step parity `parity`), which then drops the force it
+// computed; when `mark`, any beam of such a group is marked broken.
+bool groupDrops(uint j, uint beamOff, uint groupOff, uint parity, bool mark)
 {
-    float3 push = gBeams[j * 3u + 2u].xyz;
-    if (groupCount == 0u) return push;
     int g = asint(gStatic[gP.beamBase + j * 3u].w);
-    if (g == 0) return push;
+    if (g == 0) return false;
     uint master = gGroups[groupSlot(parity, groupOff, uint(abs(g)))].load();
-    if (master == NO_GROUP) return push;
+    if (master == NO_GROUP) return false;
     if (mark)
     {
         float4 s1 = gBeams[j * 3u + 1u];
@@ -231,37 +240,58 @@ float3 beamPush(uint j, uint beamOff, uint groupOff, uint groupCount, uint parit
             gBeams[j * 3u + 1u] = s1;
         }
     }
-    return j - beamOff > master ? float3(0.0, 0.0, 0.0) : push;
+    return j - beamOff > master;
 }
 
-// The sum of a node's beam forces.
-float3 beamSum(uint gi, uint beamOff, uint groupOff, uint groupCount, uint parity, bool mark)
+// The sum of a node's beam forces. The beam phase writes each beam's force on each
+// end into that end's incidence entry, so the entries of one node are contiguous
+// and independent loads (no load waits on another's index).
+float3 beamSum(uint4 info, uint beamOff, uint groupOff, uint groupCount, uint parity, bool mark)
 {
-    uint4 info = gStatic[gP.nodeInfoBase + gi];
+    uint base = gP.incBase + info.y;
     float3 f = float3(0.0, 0.0, 0.0);
+    if (groupCount == 0u)
+    {
+        uint k = 0u;
+        for (; k + 4u <= info.z; k += 4u)
+        {
+            float3 a = gBeams[base + k].xyz;
+            float3 b = gBeams[base + k + 1u].xyz;
+            float3 c = gBeams[base + k + 2u].xyz;
+            float3 d = gBeams[base + k + 3u].xyz;
+            f = f + a;
+            f = f + b;
+            f = f + c;
+            f = f + d;
+        }
+        for (; k < info.z; k++) f = f + gBeams[base + k].xyz;
+        return f;
+    }
     for (uint k = 0u; k < info.z; k++)
     {
-        uint entry = gLists[info.y + k];
-        float3 push = beamPush(entry >> 1, beamOff, groupOff, groupCount, parity, mark);
-        f = (entry & 1u) != 0u ? f - push : f + push;
+        float3 push = gBeams[base + k].xyz;
+        if (!groupDrops(gLists[info.y + k] >> 1, beamOff, groupOff, parity, mark)) f = f + push;
     }
     return f;
 }
 
 // --- passes ---
 
-void nodeUpdate(uint gi, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
-                uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount)
+void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
+                uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits)
 {
     float4 P = gNodes[gi * 3u];
     float4 V = gNodes[gi * 3u + 1u];
     // Last step's beams (with its group breaks) and self-collision.
-    float3 f = gNodes[gi * 3u + 2u].xyz + beamSum(gi, beamOff, groupOff, groupCount, (step + 1u) & 1u, true)
-        + accForce(gi);
-    gAcc[gi * 3u].store(0);
-    gAcc[gi * 3u + 1u].store(0);
-    gAcc[gi * 3u + 2u].store(0);
-    uint flags = gStatic[gP.nodeInfoBase + gi].x;
+    float3 f = gNodes[gi * 3u + 2u].xyz + beamSum(info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
+    if (hits)
+    {
+        f = f + accForce(gi);
+        gAcc[gi * 3u].store(0);
+        gAcc[gi * 3u + 1u].store(0);
+        gAcc[gi * 3u + 2u].store(0);
+    }
+    uint flags = info.x;
     float3 pos = P.xyz;
     float3 vel = V.xyz;
     float mass = P.w;
@@ -328,7 +358,8 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     float4 s1 = gBeams[gj * 3u + 1u];
     if (s1.z != 0.0)
     {
-        gBeams[gj * 3u + 2u] = float4(0.0, 0.0, 0.0, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(0.0, 0.0, 0.0, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
@@ -446,11 +477,16 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     }
     gBeams[gj * 3u] = float4(rest, tc, tt, gate);
     gBeams[gj * 3u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, 0.0);
-    gBeams[gj * 3u + 2u] = float4(d * (f * inv), 0.0);
+    float3 push = d * (f * inv);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
 }
 
-void triangleUpdate(uint gt, float3 origin, float r, uint candOff, uint candCount, uint beamOff, uint groupOff,
-                    uint groupCount, uint parity)
+// A triangle's throttle after a step: a waiting triangle counts down (and its idle
+// steps up); one that was tested restarts its wait from its hit (gMisc .w, set by
+// any of its lanes) or counts it up. A triangle that comes off idle waits at most
+// 12 steps and is tested that same step (triangleTest reads it as not waiting).
+void triangleFinish(uint gt)
 {
     uint mi = gP.vehicles + gt;
     uint4 th = gMisc[mi];
@@ -458,14 +494,28 @@ void triangleUpdate(uint gt, float3 origin, float r, uint candOff, uint candCoun
     int idle = asint(th.y);
     if (wait > 0)
     {
-        gMisc[mi] = uint4(asuint(wait - 1), asuint(idle + 1), 0u, 0u);
-        return;
+        wait = wait - 1;
+        idle = idle + 1;
     }
-    else if (idle > 0)
+    else
     {
-        wait = min(idle, 12);
-        idle = 0;
+        if (idle > 0)
+        {
+            wait = min(idle, 12);
+            idle = 0;
+        }
+        wait = th.w != 0u ? -20000 : wait + 1;
     }
+    gMisc[mi] = uint4(asuint(wait), asuint(idle), 0u, 0u);
+}
+
+// Lane `sub` of the `lanes` lanes of triangle gt tests candidates sub, sub + lanes, …
+// Forces go to fixed-point atomics, so the lanes' order does not change the sums.
+void triangleTest(uint gt, uint sub, uint lanes, float3 origin, float r, uint candOff, uint candCount,
+                  uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint mi = gP.vehicles + gt;
+    if (asint(gMisc[mi].x) > 0) return;
     uint4 tn = gStatic[gP.triBase + gt];
     float3 p0 = origin + gNodes[tn.x * 3u].xyz;
     float3 p1 = origin + gNodes[tn.y * 3u].xyz;
@@ -483,8 +533,7 @@ void triangleUpdate(uint gt, float3 origin, float r, uint candOff, uint candCoun
     float3 rn = cross(u, w) * rd;
     float3 lo = min(min(p0, p1), p2) - float3(r, r, r);
     float3 hi = max(max(p0, p1), p2) + float3(r, r, r);
-    bool hit = false;
-    for (uint k = 0u; k < candCount; k++)
+    for (uint k = sub; k < candCount; k += lanes)
     {
         uint h = gLists[candOff + k];
         if (h == tn.x || h == tn.y || h == tn.z) continue;
@@ -503,7 +552,8 @@ void triangleUpdate(uint gt, float3 origin, float r, uint candOff, uint candCoun
         }
         float gamma = 1.0 - alpha - beta;
         if (!(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r)) continue;
-        hit = true;
+        gMisc[mi].w = 1u;
+        gsHit = 1u;
         float3 nn = n;
         if (delta < 0.0)
         {
@@ -518,7 +568,7 @@ void triangleUpdate(uint gt, float3 origin, float r, uint candOff, uint candCoun
                             + gamma * gNodes[tn.x * 3u + 1u].xyz);
         float mt = alpha * P1.w + beta * P2.w + gamma * P0.w;
         float m = P.w * mt / (P.w + mt);
-        float3 fh = gNodes[h * 3u + 2u].xyz + beamSum(h, beamOff, groupOff, groupCount, parity, false)
+        float3 fh = gNodes[h * 3u + 2u].xyz + beamSum(gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity, false)
             + accForce(h);
         float3 f = contactForce(fh, v, m, nn, boxSurface(), r - delta, V.w);
         accAdd(h, f);
@@ -526,8 +576,6 @@ void triangleUpdate(uint gt, float3 origin, float r, uint candOff, uint candCoun
         accAdd(tn.z, -beta * f);
         accAdd(tn.x, -gamma * f);
     }
-    wait = hit ? -20000 : wait + 1;
-    gMisc[mi] = uint4(asuint(wait), asuint(idle), 0u, 0u);
 }
 
 [shader("compute")]
@@ -577,32 +625,50 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint4 misc = gMisc[v];
     float3 origin = asfloat(misc.xyz);
     uint stepBase = misc.w;
+    if (lane == 0u) gsHit = 1u;
+    // Static records the lane reads every step, kept in registers: its first node's.
+    uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
     sync();
 
     for (uint s = 0u; s < gP.steps; s++)
     {
         uint step = stepBase + s;
         uint parity = step & 1u;
+        bool hits = gsHit != 0u;
         for (uint i = lane; i < nodeCount; i += 256u)
-            nodeUpdate(nodeOff + i, v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
-                       groupCount);
+            nodeUpdate(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
+                       groupCount, hits);
         for (uint g = lane; g < groupCount; g += 256u) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
+        if (s > 0u && candCount > 0u)
+        {
+            for (uint t = lane; t < triCount; t += 256u) triangleFinish(triOff + t);
+        }
         sync();
+        if (lane == 0u) gsHit = 0u;
         for (uint j = lane; j < beamCount; j += 256u) beamUpdate(beamOff + j, j, fast, groupOff, parity);
         sync();
         if (candCount > 0u)
         {
-            for (uint t = lane; t < triCount; t += 256u)
-                triangleUpdate(triOff + t, origin, range, candOff, candCount, beamOff, groupOff, groupCount, parity);
+            // Up to 256 lanes per step: `lanes` per triangle, one per candidate when
+            // they fit.
+            uint lanes = clamp(256u / max(triCount, 1u), 1u, candCount);
+            uint stride = (256u / lanes) * lanes;
+            for (uint p = lane; p < triCount * lanes && lane < stride; p += stride)
+                triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
+                             groupOff, groupCount, parity);
         }
         sync();
+    }
+    if (gP.steps > 0u && candCount > 0u)
+    {
+        for (uint t = lane; t < triCount; t += 256u) triangleFinish(triOff + t);
     }
     // The last step's group breaks, for a read-back (the next node phase applies
     // them to the forces).
     if (gP.steps > 0u && groupCount > 0u)
     {
         uint last = (stepBase + gP.steps - 1u) & 1u;
-        for (uint j = lane; j < beamCount; j += 256u) beamPush(beamOff + j, beamOff, groupOff, groupCount, last, true);
+        for (uint j = lane; j < beamCount; j += 256u) groupDrops(beamOff + j, beamOff, groupOff, last, true);
     }
     if (lane == 0u) gMisc[v] = uint4(misc.xyz, stepBase + gP.steps);
 }

@@ -51,7 +51,7 @@ pub struct ExplicitBeamsGpu {
     misc: wgpu::Buffer,
     spans: Vec<Span>,
     rest0: Vec<f32>,
-    words: [u32; 8],
+    words: [u32; 12],
 }
 
 impl ExplicitBeamsGpu {
@@ -82,6 +82,8 @@ impl ExplicitBeamsGpu {
         let mut rest0 = Vec::with_capacity(total_beams);
         let (mut node_off, mut beam_off, mut tri_off, mut box_off) = (0u32, 0u32, 0u32, 0u32);
         let bits = |v: Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits(), 0];
+        // Per beam, the lists positions of its end a's and end b's incidence entries.
+        let mut slots: Vec<[u32; 2]> = vec![[u32::MAX; 2]; total_beams];
         for v in vehicles {
             let group_count = v
                 .beams
@@ -99,6 +101,14 @@ impl ExplicitBeamsGpu {
                 for &j in inc {
                     let b = &v.beams[j as usize];
                     let is_b = (b.b == i as u32 && b.a != i as u32) as u32;
+                    let slot = &mut slots[(beam_off + j) as usize];
+                    // A beam from a node to itself has both entries in one list.
+                    let end = if is_b == 1 || slot[0] != u32::MAX {
+                        1
+                    } else {
+                        0
+                    };
+                    slot[end] = lists.len() as u32;
                     lists.push(((beam_off + j) << 1) | is_b);
                 }
             }
@@ -178,6 +188,11 @@ impl ExplicitBeamsGpu {
             box_off += v.boxes.len() as u32;
         }
         misc.extend(tri_misc);
+        debug_assert!(slots.iter().flatten().all(|&s| s != u32::MAX));
+        let inc_base = beams.len() as u32;
+        beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
+        let slot_base = lists.len() as u32;
+        lists.extend(slots.iter().flatten());
         let mut statics = vehicle_recs;
         statics.extend(node_info);
         statics.extend(beam_recs);
@@ -223,6 +238,10 @@ impl ExplicitBeamsGpu {
             tri_base as u32,
             box_base as u32,
             group_total,
+            inc_base,
+            slot_base,
+            0,
+            0,
             0,
         ];
         let params = init(

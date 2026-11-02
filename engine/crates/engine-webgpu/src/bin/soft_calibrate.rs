@@ -330,6 +330,16 @@ impl RorPipe {
         writeln!(self.stdin, "{cmd}").unwrap();
     }
 
+    /// Beams bent and not broken (rest length moved more than 0.1 %).
+    fn deformed(&mut self) -> usize {
+        use std::io::{BufRead, Write};
+        writeln!(self.stdin, "deformed").unwrap();
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        self.out.read_line(&mut line).unwrap();
+        line.trim().parse().expect("RoR reference deformed count")
+    }
+
     fn state(&mut self) -> RorState {
         use std::io::{BufRead, Write};
         if let Some(s) = &self.state {
@@ -442,7 +452,7 @@ impl Runner for Ror {
         self.pipe.borrow_mut().state().broken
     }
     fn yielded(&self) -> usize {
-        0 // not reported by the harness
+        self.pipe.borrow_mut().deformed()
     }
     fn kick(&mut self, node: u32, velocity: Vec3) {
         self.pipe.get_mut().send(&format!(

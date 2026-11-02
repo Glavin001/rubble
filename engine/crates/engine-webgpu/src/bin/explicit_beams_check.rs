@@ -328,6 +328,21 @@ fn run_bench(
         }
         gpu.wait();
         let piped = t.elapsed().as_secs_f64() * 1e3 / 120.0;
+        // Pipelined cost per dispatch for 1, 33 and 132 steps (`slope=1`): the slope
+        // is the GPU's cost per step, the intercept the cost per dispatch.
+        if kv.get("slope") == Some(&"1") {
+            for steps in [1u32, 33, 132] {
+                let t = Instant::now();
+                for _ in 0..120 {
+                    gpu.frame(steps);
+                }
+                gpu.wait();
+                println!(
+                    "  {n} vehicles, {steps:3} steps per dispatch: {:.3} ms per dispatch",
+                    t.elapsed().as_secs_f64() * 1e3 / 120.0
+                );
+            }
+        }
         // The fixed cost: a frame of a single step, submit to completion.
         let mut one: Vec<f64> = (0..60)
             .map(|_| {
