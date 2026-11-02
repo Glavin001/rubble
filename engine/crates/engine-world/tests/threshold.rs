@@ -1024,6 +1024,17 @@ fn sleep_policy_power() {
                     "shot {policy} {asset_name} {n} {dy} {speed} {} {}",
                     o.broken, o.bodies
                 );
+                // POWER_TIMELINE=1: the frames that broke bonds (`frame:count`).
+                if std::env::var("POWER_TIMELINE").is_ok() {
+                    let t: Vec<String> = o
+                        .timeline
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &b)| b > 0)
+                        .map(|(f, b)| format!("{f}:{b}"))
+                        .collect();
+                    println!("timeline {}", t.join(" "));
+                }
             }
         }
     }
