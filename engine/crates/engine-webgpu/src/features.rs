@@ -99,9 +99,9 @@ pub enum GridLayout {
 /// `World` applies it when sleep is on).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RestingContacts {
-    /// The sleep archive (the shipped default): a body falling asleep keeps its resting
-    /// rows, a sleeper a moving body touches forms all its resting pairs in that step,
-    /// and woken pairs restart from their archived impulses and stiffness. A sleeping
+    /// The sleep archive (the shipped default): a sleeper a moving body touches forms
+    /// all its resting pairs in that step, and woken pairs restart cold as the carry's do
+    /// (`EngineFeatures::archive_cold`; warm from archived rows with it off). A sleeping
     /// pair costs nothing per step. Canonical and persistent contacts; compact contacts
     /// keep the carry.
     #[default]

@@ -791,8 +791,9 @@ impl World {
     }
 
     /// Keep sleeping bodies' resting contacts through sleep (the sleep archive,
-    /// `WgpuSim::enable_sleep_archive`, which threshold destructibles turn on): a woken
-    /// body restarts them with the impulses and stiffness it fell asleep with. Room for
+    /// `WgpuSim::enable_sleep_archive`, which threshold destructibles turn on): a touched
+    /// sleeper forms its resting pairs in that step (warm from the archived rows only
+    /// with `EngineFeatures::archive_cold` off). Room for
     /// `rows` rows (`None`: [`WorldDef::sleep_archive_rows`], else the contact
     /// capacity). Worlds with sleep turn it on at creation
     /// (`EngineFeatures::resting_contacts`); this is for worlds that opted out. Canonical

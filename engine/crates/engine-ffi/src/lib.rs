@@ -167,9 +167,9 @@ pub enum RbContacts {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RbRestingContacts {
-    /// The sleep archive (default): a body falling asleep keeps its resting contacts, a
-    /// sleeper a moving body touches forms them all in that step, and woken contacts
-    /// restart from their archived forces. A sleeping pair costs nothing per step.
+    /// The sleep archive (default): a sleeper a moving body touches forms all its resting
+    /// contacts in that step, and woken contacts restart as the carry's do. A sleeping
+    /// pair costs nothing per step.
     /// Compact contacts keep the carry instead.
     RB_RESTING_ARCHIVE = 0,
     /// The resting-pair carry (opt-out): every pair at rest is re-emitted and kept each
