@@ -100,9 +100,8 @@ pub struct StepModes {
     /// a rebuild the next step after every sleep event; a rebuild only when one cannot
     /// be placed (world_step.slang restIncremental).
     pub rest_incremental: bool,
-    /// `ccd_wake` and `ccd_unhold` a thread per collider (ccd_step.slang
-    /// ccd_wake_colliders), only while a CCD body sweeps fast (work slot 87); WGSL
-    /// hosts.
+    /// `ccd_wake` a thread per collider (ccd_step.slang ccd_wake_colliders), only while
+    /// a CCD body sweeps fast (work slot 87); WGSL hosts. `ccd_unhold` stays per body.
     pub ccd_by_collider: bool,
     /// `predict_bodies` and `extract_velocity_sleep` a thread per entry of this step's
     /// awake list (their PASS_U = 1 mode, work slot 67) instead of a thread per body
@@ -471,8 +470,10 @@ pub fn encode_step(
             }
             e.w("broadphase_insert_awake_uniform", 81);
             e.w("broadphase_query_awake_uniform", 81);
-            // Sleepers' pairs with the large dynamics (slot 85: empty without any).
+            // Sleepers' pairs with the large dynamics: a walk from each (slot 88), or a
+            // thread per collider for a very large one (slot 85); empty without any.
             e.d("write_sleeper_large_args", 64);
+            e.w("broadphase_sleeper_large_walk", 88);
             e.w("broadphase_sleeper_large", 85);
         } else {
             e.w("rest_insert", 80);
@@ -744,12 +745,10 @@ pub fn encode_step(
     e.d("write_color_args", 64);
     if mo.ccd && !reuse_manifolds {
         // Bodies a fast CCD body woke this step are solved this step (ccd_step.slang).
-        if m.ccd_by_collider {
-            e.w("ccd_unhold_colliders", 87);
-            e.d("ccd_unhold_slots", u64::from(CCD_BODY_CAP));
-        } else {
-            e.d("ccd_unhold", n_bodies);
-        }
+        // Per body: it reads a body's flags and searches colliders only for the few whose
+        // wake is deferred: cheaper than a scan of every collider (one measured 0.1 ms
+        // more on gables506k while the ball flies).
+        e.d("ccd_unhold", n_bodies);
     }
     if i.guidance {
         // After the graph (free flight = no contacts or joints this step) and
@@ -1041,8 +1040,6 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_slot_reach",
     "ccd_slot_reach_listed",
     "ccd_wake_colliders",
-    "ccd_unhold_colliders",
-    "ccd_unhold_slots",
     "ccd_validate",
     "ccd_clamp",
     "ccd_emit_persistent",
@@ -1084,6 +1081,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "broadphase_query_awake_uniform",
     "write_sleeper_large_args",
     "broadphase_sleeper_large",
+    "broadphase_sleeper_large_walk",
     "broadphase_clear_awake_uniform",
     "rest_sleepers_mark",
     "write_rest_dirty_args",
@@ -1375,7 +1373,8 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     // contacts 73), convex 74..76, the awake-indexed broadphase's 77..81 (finer
     // scan, moved list, resting-table rebuild, moving colliders), the fast list's 82, the
     // sleep archive's touch query 83 and 84, the uniform rest tables' sleeper scan 85,
-    // the incremental rest inserts' unlink 86, the CCD wake by collider 87.
+    // the incremental rest inserts' unlink 86, the CCD wake by collider 87, the
+    // sleepers' walk from the large dynamics 88.
     s[23] = b(c.max_colors.max(90) * 3, 4);
     s[24] = b(c.max_colliders, 80);
     s[25] = b(c.max_candidates, 32);

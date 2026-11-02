@@ -206,6 +206,12 @@ pub struct WgpuSim {
     pub(crate) awake_broadphase: bool,
     /// ...and on the uniform split grid (`EngineFeatures::awake_uniform`).
     pub(crate) awake_uniform: bool,
+    /// Whether the uniform grid takes the awake-indexed pass now: while few bodies are
+    /// awake (it costs a scan over every collider plus work per awake one, the full
+    /// pass work per collider), with hysteresis ([`UNIFORM_REST_ENTER`], [`UNIFORM_REST_LEAVE`]).
+    uniform_rest_now: std::cell::Cell<bool>,
+    /// Test control: the uniform grid's awake-indexed pass at any awake fraction.
+    uniform_rest_always: bool,
     /// Incremental resting-table inserts (`EngineFeatures::rest_incremental`).
     pub(crate) rest_incremental: bool,
     /// `ccd_wake` / `ccd_unhold` a thread per collider (`EngineFeatures::ccd_by_collider`),
@@ -427,6 +433,12 @@ fn bindings_of(wgsl: &str) -> Vec<Bind> {
     out.sort_by_key(|b| b.index);
     out
 }
+
+/// Awake fraction of the bodies below which the uniform grid enters its awake-indexed
+/// pass, and above which it leaves it (measured: gables506k, 5% awake, 1.5 → 0.8 ms;
+/// ring110k, 22% awake, 0.8 → 1.0 ms).
+const UNIFORM_REST_ENTER: f64 = 0.10;
+const UNIFORM_REST_LEAVE: f64 = 0.15;
 
 /// Word offset where the CSR index lives inside `gConstraintIds` on the WGSL path.
 fn persistent_entry(name: &str) -> &str {
@@ -906,6 +918,8 @@ impl WgpuSim {
             carry_rest: features.carry_rest,
             awake_broadphase: features.awake_broadphase,
             awake_uniform: features.awake_uniform,
+            uniform_rest_now: std::cell::Cell::new(true),
+            uniform_rest_always: false,
             rest_incremental: features.rest_incremental,
             ccd_by_collider: features.ccd_by_collider,
             awake_body_passes: features.awake_body_passes,
@@ -2233,6 +2247,24 @@ impl WgpuSim {
         self.colliderless.set(None);
     }
 
+    /// The uniform grid's awake-indexed pass while at most [`UNIFORM_REST_ENTER`] of the
+    /// bodies were awake last step, until more than [`UNIFORM_REST_LEAVE`] are (both
+    /// passes give the same pairs; the choice is cost only).
+    fn uniform_rest_wanted(&self) -> bool {
+        if self.uniform_rest_always {
+            return true;
+        }
+        let awake = f64::from(self.last_counters.awake_count);
+        let bodies = f64::from(self.body_count.max(1));
+        let on = if self.uniform_rest_now.get() {
+            awake <= UNIFORM_REST_LEAVE * bodies
+        } else {
+            awake <= UNIFORM_REST_ENTER * bodies
+        };
+        self.uniform_rest_now.set(on);
+        on
+    }
+
     /// Whether some dynamic body of the host's mirror has no collider (cached until a
     /// write or mirror update).
     fn has_colliderless_dynamic(&self) -> bool {
@@ -2259,6 +2291,12 @@ impl WgpuSim {
     /// rebuilds the table.
     pub fn set_awake_broadphase(&mut self, on: bool) {
         self.awake_broadphase = on;
+    }
+
+    /// Test control: the uniform grid's awake-indexed pass at any awake fraction (it is
+    /// otherwise taken only while few bodies are awake).
+    pub fn set_uniform_rest_always(&mut self, on: bool) {
+        self.uniform_rest_always = on;
     }
 
     /// Incremental resting-table inserts on or off (`EngineFeatures::rest_incremental`).
@@ -3099,7 +3137,8 @@ impl WgpuSim {
             pose_output: self.pose_output,
             contact_events: self.contact_events,
             motion_locks: self.motion_locks,
-            awake_broadphase: self.awake_broadphase && (self.grid_levels > 0 || self.awake_uniform),
+            awake_broadphase: self.awake_broadphase
+                && (self.grid_levels > 0 || (self.awake_uniform && self.uniform_rest_wanted())),
             rest_uniform: self.grid_levels == 0,
             rest_incremental: self.rest_incremental,
             ccd_by_collider: self.ccd_by_collider && !self.has_colliderless_dynamic(),

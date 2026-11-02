@@ -251,6 +251,9 @@ fn awake_broadphase_on_the_uniform_grid_finds_the_full_broadphase_pairs() {
     let mut p = AvbdParams::default();
     p.dt = 1.0 / 60.0;
     sim.set_params(p);
+    // The uniform awake pass also while the piles are mostly awake (hosts take it only
+    // below an awake fraction, for cost).
+    sim.set_uniform_rest_always(true);
     let zero = Vec3::ZERO;
     primitive(&mut sim, zero, ShapeType::Plane, [0.0, 1.0, 0.0, 0.0], 0.0, 0, zero);
     for k in 0..8 {

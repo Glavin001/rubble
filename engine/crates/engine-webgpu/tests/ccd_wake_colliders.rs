@@ -179,9 +179,22 @@ fn ccd_passes_by_collider_wake_and_release_the_same_bodies() {
     assert!(compared >= 150, "compared {compared}");
 }
 
+/// A body's record without what the sleep island gate decides (whether it fell asleep
+/// this step, and with it its zeroed velocities): the in-place gate's revocations travel
+/// as far as thread scheduling lets them within its rounds, so that outcome may differ
+/// between two runs of the same passes on the same state. Pose, extracted sleep timer and
+/// the rest compare exactly.
+fn without_gate(b: &BodyState) -> Vec<u8> {
+    let mut b = *b;
+    b.flags &= !(4 | 8);
+    b.linear_vel = [0.0; 3];
+    b.angular_vel = [0.0; 3];
+    bytemuck::bytes_of(&b).to_vec()
+}
+
 #[test]
 fn awake_list_body_passes_change_the_same_bodies() {
-    let all = |b: &BodyState| bytemuck::bytes_of(b).to_vec();
+    let all = without_gate;
     let (compared, changed) = compare(
         &|s, on| s.set_awake_body_passes(on),
         &["topology", "sleep"],
@@ -193,7 +206,7 @@ fn awake_list_body_passes_change_the_same_bodies() {
 
 #[test]
 fn primal_tail_solves_the_same_bodies() {
-    let all = |b: &BodyState| bytemuck::bytes_of(b).to_vec();
+    let all = without_gate;
     let (compared, changed) = compare(&|s, on| s.set_primal_tail(on), &["dual", "sleep"], &all);
     eprintln!("primal tail: compared {compared} phases, {changed} body changes");
     assert!(compared >= 150, "compared {compared}");

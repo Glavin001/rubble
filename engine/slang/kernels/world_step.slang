@@ -2214,6 +2214,9 @@ bool restUniform() { return false; }
 // (their colliders at scratch LARGE_STATIC_BASE, as the full pass lists them).
 static const uint REST_U_LARGE_MAX = 16u;
 static const uint REST_U_STATICS = 28u;
+// Header word 29: the largest AABB half extent of the entries pushed onto R's chains
+// (asuint; half extents are not negative), so a walk can bound where they lie.
+static const uint REST_U_HALF = 29u;
 // Per-collider words past the moving-collider list: this step's W stamp, and the R
 // chain a collider sits in (its bucket, REST_AT_LISTED in a header list, REST_AT_NONE).
 static const uint REST_AT_NONE = 0xFFFFFFFFu;
@@ -2285,6 +2288,7 @@ void restInsertUniform(uint i, Collider col, BodyState b)
     ASTORE(gConstraintIds[restLinks() + i], prev);
     ASTORE(gConstraintIds[restAtBase() + i], h);
     AADD2(gConstraintIds[hdr], 1u);
+    AMAX2(gConstraintIds[hdr + REST_U_HALF], asuint(boxHalfMax(box)));
 }
 
 // Each step, before the awake inserts: R's lists into the scratch words the full pass
@@ -2623,14 +2627,119 @@ void restQueryUniform(uint i)
     }
 }
 
-// Work slot 85: broadphase_sleeper_large over every collider, only while the step's
-// large-dynamic list is not empty (after the awake inserts appended to it).
+// The sleepers' pairs with the step's large dynamics (after the awake inserts appended
+// to the list), found from the large ones: work slot 88, a workgroup per listed large
+// dynamic walking the R cells that can hold a collider overlapping it
+// (broadphase_sleeper_large_walk). Should a large box span more than
+// SLEEPER_WALK_MAX_CELLS of them, slot 85 instead: broadphase_sleeper_large, a thread per
+// collider (the full pass's sleeper threads). Both empty without a large dynamic.
+static const uint SLEEPER_WALK_MAX_CELLS = 32768u;
+
+int3 sleeperWalkSpan(Aabb lb, float cs, float h, out int3 lo)
+{
+    // Padded past the rounding of a centre and a half extent: a superset of cells.
+    h = h * 1.001 + 1.0e-4;
+    lo = int3(floor((lb.mn - h) / cs));
+    int3 hi = int3(floor((lb.mx + h) / cs));
+    return hi - lo + int3(1, 1, 1);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void write_sleeper_large_args(uint3 tid : SV_DispatchThreadID)
 {
     if (dispatchIndex(tid) != 0u) return;
-    writeDispatchArgs(85u, ALOAD(gScratchAtomics[25]) != 0u ? gCounters[0].colliderCount : 0u);
+    uint n = min(ALOAD(gScratchAtomics[25]), 16u);
+    bool walk = ALOAD(gScratchAtomics[25]) <= 16u;
+    float cs = max(PARAMS.gridCellSize, 0.5);
+    float h = asfloat(ALOAD(gConstraintIds[restBase() + REST_U_HALF]));
+    for (uint k = 0u; k < n; k++)
+    {
+        int3 lo;
+        int3 span = sleeperWalkSpan(gAabbs[HOST_S(1) + ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k])], cs, h, lo);
+        if (float(span.x) * float(span.y) * float(span.z) > float(SLEEPER_WALK_MAX_CELLS)) walk = false;
+    }
+    writeDispatchArgs(85u, n != 0u && !walk ? gCounters[0].colliderCount : 0u);
+    // Slot 88: x = chunks of 64 cells (the most any listed large one has), y = listed.
+    uint chunks = 0u;
+    for (uint k = 0u; k < n && walk; k++)
+    {
+        int3 lo;
+        int3 span = sleeperWalkSpan(gAabbs[HOST_S(1) + ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k])], cs, h, lo);
+        chunks = max(chunks, (uint(span.x) * uint(span.y) * uint(span.z) + 63u) / 64u);
+    }
+    gIndirectArgs[88u * 3u] = walk ? max(chunks, 1u) : 0u;
+    gIndirectArgs[88u * 3u + 1u] = walk && n != 0u ? n : 1u;
+    gIndirectArgs[88u * 3u + 2u] = 1u;
+}
+
+// broadphase_sleeper_large's test for sleeper collider i (small or large) and listed
+// large dynamic j: the pair as the sleeper's thread of the full pass emits it.
+void sleeperLargePair(uint i, uint j)
+{
+    if (j == i) return;
+    uint base = HOST_S(1);
+    Collider col = gColliders[i];
+    BodyState b = gBodies[col.body];
+    if (col.shape == SHAPE_PLANE || colliderIsFast(i, col, b)) return;
+    if (!bodyIsDynamic(b) || !bodyIsSleeping(b)) return;
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
+    float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    bool queryLarge = rA > cellSize;
+    Collider other = gColliders[j];
+    if (other.body == col.body || bodiesJointed(col.body, other.body)) return;
+    BodyState ob = gBodies[other.body];
+    if (queryLarge && bodyIsDynamic(ob) && j < i) return;
+    if (carryRestPairs() && bodyIsSleeping(ob)) return; // carried
+    Aabb box = gAabbs[base + i];
+    Aabb ab = gAabbs[base + j];
+    if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) return;
+    if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) return;
+    if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) return;
+    emitCandidate(i, j);
+}
+
+// Workgroups (chunk, k) for each listed large dynamic L (k): a lane per R cell that can
+// hold an entry overlapping L (an entry's centre lies in its cell, within its half
+// extent, at most header word 29, of any point of its box), each entry taken at its
+// true cell only; chunk 0 also takes the listed large dynamics (sleeping large ones are
+// listed, not in the chains). Every sleeper a pair with L can come from is in one of
+// them, so the pairs are the full pass's.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_sleeper_large_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint k = gid.y;
+    if (k >= min(ALOAD(gScratchAtomics[25]), 16u)) return;
+    uint j = ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k]);
+    uint base = HOST_S(1);
+    Aabb lb = gAabbs[base + j];
+    float cs = max(PARAMS.gridCellSize, 0.5);
+    float h = asfloat(ALOAD(gConstraintIds[restBase() + REST_U_HALF]));
+    int3 lo;
+    int3 span = sleeperWalkSpan(lb, cs, h, lo);
+    uint cells = uint(span.x) * uint(span.y) * uint(span.z);
+    uint t = gid.x * 64u + lid.x;
+    if (t < cells)
+    {
+        int3 cell = lo + int3(int(t % uint(span.x)), int((t / uint(span.x)) % uint(span.y)), int(t / uint(span.x * span.y)));
+        uint link = ALOAD(gConstraintIds[restHeads() + gridHash(cell.x, cell.y, cell.z)]);
+        uint guard = 0u;
+        while (link != 0xFFFFFFFFu && guard < 4096u)
+        {
+            uint cur = link & GRID_COLLIDER_MASK;
+            Aabb ab = gAabbs[base + cur];
+            link = ALOAD(gConstraintIds[restLinks() + cur]);
+            guard++;
+            if (any(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) != cell)) continue;
+            if (!aabbOverlap(ab, lb) || restTombstone(cur)) continue;
+            sleeperLargePair(cur, j);
+        }
+        if (link != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+    }
+    uint n = min(ALOAD(gScratchAtomics[25]), 16u);
+    if (gid.x == 0u && lid.x < n)
+        sleeperLargePair(ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + lid.x]), j);
 }
 
 // A sleeper's thread of the full broadphase_query: its pairs with the large dynamics.
@@ -2743,8 +2852,11 @@ void rest_sleepers_mark(uint3 tid : SV_DispatchThreadID)
     uint level;
     uint h = restBucket(c, col, b, level);
     uint cur = ALOAD(gConstraintIds[restAtBase() + c]);
-    if (h == cur) return;
     uint hdr = restBase();
+    // Its bounds now (an entry valid again keeps its place but may have grown).
+    if (restUniform() && h != REST_AT_LISTED)
+        AMAX2(gConstraintIds[hdr + REST_U_HALF], asuint(boxHalfMax(gAabbs[HOST_S(1) + c])));
+    if (h == cur) return;
     if (h == REST_AT_LISTED || cur == REST_AT_LISTED)
     {
         // Uniform header lists: a plane or large dynamic not listed yet joins them
@@ -2836,7 +2948,11 @@ void rest_push(uint3 tid : SV_DispatchThreadID)
     AXCHG3(gConstraintIds[restHeads() + h], c, prev);
     ASTORE(gConstraintIds[restLinks() + c], prev);
     ASTORE(gConstraintIds[restAtBase() + c], h);
-    if (restUniform()) AADD2(gConstraintIds[hdr], 1u);
+    if (restUniform())
+    {
+        AADD2(gConstraintIds[hdr], 1u);
+        AMAX2(gConstraintIds[hdr + REST_U_HALF], asuint(boxHalfMax(gAabbs[HOST_S(1) + c])));
+    }
     else AOR2(gConstraintIds[hdr], 1u << level);
 }
 

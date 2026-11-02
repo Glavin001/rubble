@@ -1155,20 +1155,21 @@ void ccd_unhold(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-// ---- ccd_wake / ccd_unhold by collider (World's plan; WGSL hosts) ----
-// The same tests as ccd_wake and ccd_unhold without a collider search per body: a
+// ---- ccd_wake by collider (World's plan; WGSL hosts) ----
+// The same test as ccd_wake without a collider search per body: a
 // body lies within reach × r + own of a sweep (own its largest collider extent) iff
 // one of its colliders c lies within reach × r + extent(c) of it (adding to the
 // largest extent gives the largest bound), so a thread per collider tests its own
 // extent, and the sweeping body's r (the largest extent of its colliders) is taken
-// once per CCD slot by a thread per collider (ccd_slot_reach). Both scan the
-// colliders, so colliders need not be sorted by body (threshold splits re-parent
-// them), and both run only while some CCD body moves more than four contact offsets
-// a step (ccdUnholds; work slot 87 is empty otherwise, when neither pass could wake or
-// release anything). A body without colliders is never woken here; hosts with such
-// bodies keep ccd_wake.
+// once per CCD slot (ccd_slot_reach, or ccd_slot_reach_listed over the listed movers).
+// Both scan colliders, so colliders need not be sorted by body (threshold splits
+// re-parent them), and both run only while some CCD body moves more than four contact
+// offsets a step (ccdUnholds; work slot 87 is empty otherwise, when ccd_wake could wake
+// nothing). A body without colliders is never woken here; hosts with such bodies keep
+// ccd_wake. ccd_unhold stays per body (it searches colliders only for the few bodies
+// whose wake is deferred).
 // The slot's r: carry word 28 (ccd_respond's partner dw, written only after the
-// solve; read here from ccd_wake's place to ccd_unhold's).
+// solve; read here in ccd_wake's place).
 static const uint CCD_REACH_WORD = 28u;
 
 // Work slot 87 (a thread per collider) when a CCD body sweeps fast; slot r words zeroed.
@@ -1248,34 +1249,6 @@ void ccd_wake_colliders(uint3 tid : SV_DispatchThreadID)
     if (!ccdColliderNearFastSweep(b, 1.25, colliderExtent(col))) return;
     gBodies[i].flags = (b.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
     gBodies[i].sleepTimer = 0.0;
-}
-
-// ccd_unhold's release of held bodies, a thread per collider (slot 87).
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void ccd_unhold_colliders(uint3 tid : SV_DispatchThreadID)
-{
-    uint c = dispatchIndex(tid);
-    if (c >= gCounters[0].colliderCount) return;
-    Collider col = gColliders[c];
-    uint i = col.body;
-    BodyState b = gBodies[i];
-    if (!wakePending(b) || bodyIsSleeping(b) || !bodyIsDynamic(b)) return;
-    if (ccdColliderNearFastSweep(b, 3.0, colliderExtent(col))) gBodies[i].flags = b.flags & ~BODY_WAKE_PENDING;
-}
-
-// ccd_unhold's slot part, after ccd_unhold_colliders: a partner released there is
-// awake with its wake no longer deferred, which the second test covers.
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void ccd_unhold_slots(uint3 tid : SV_DispatchThreadID)
-{
-    uint i = dispatchIndex(tid);
-    if (!sceneHasCcd() || i >= ccdBodyCount()) return;
-    uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * i;
-    if ((ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * i + 3u]) & CCD_RESPOND) == 0u) return;
-    BodyState bo = gBodies[ALOAD(gScratchAtomics[r + 7u])];
-    if (!bodyIsSleeping(bo) && !wakePending(bo)) ASTORE(gScratchAtomics[r + 15u], 0u);
 }
 
 // Trust region of the bodies a CCD body can strike (after predict_bodies,
