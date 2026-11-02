@@ -194,13 +194,14 @@ fn resting_and_rolling_ccd_balls_are_left_alone() {
 /// More awake CCD bodies than CCD_BODY_CAP fail the step loudly.
 #[test]
 fn too_many_ccd_bodies_fail_loudly() {
-    let cap = WorldCapacity { max_bodies: 1200, max_colliders: 1200, max_contacts: 1 << 16, max_candidates: 1 << 16, max_colors: 32, ..WorldCapacity::small() };
+    let n = engine_schema::CCD_BODY_CAP + 8;
+    let cap = WorldCapacity { max_bodies: n + 64, max_colliders: n + 64, max_contacts: 1 << 16, max_candidates: 1 << 16, max_colors: 32, ..WorldCapacity::small() };
     let mut sim = WgpuSim::new(cap).unwrap();
     let mut p = AvbdParams::default();
     p.gravity_y = 0.0;
     sim.set_params(p);
-    for k in 0..(engine_schema::CCD_BODY_CAP + 8) {
-        add_ball(&mut sim, [(k % 40) as f32, (k / 40) as f32, 0.0], 0.1, 1.0, 9 | BODY_CCD, [0.0, 0.0, 1.0]);
+    for k in 0..n {
+        add_ball(&mut sim, [(k % 128) as f32, (k / 128) as f32, 0.0], 0.1, 1.0, 9 | BODY_CCD, [0.0, 0.0, 1.0]);
     }
     match sim.step() {
         Err(engine_exec::ExecError::Overflow(f)) => assert!(f & OVERFLOW_CCD_BODIES != 0, "overflow flags {f:#x}"),

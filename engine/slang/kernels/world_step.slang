@@ -615,7 +615,7 @@ static const uint IMPULSE_COUNT = CCD_BASE + 2u;
 static const uint CCD_FALLBACKS = CCD_BASE + 3u;
 // Impulse records from the host (the late apply_impulses pass starts after them).
 static const uint IMPULSE_FIRST = CCD_BASE + 4u;
-static const uint CCD_BODY_CAP = 1024u;
+static const uint CCD_BODY_CAP = 16384u;
 static const uint CCD_BODY_BASE = CCD_BASE + 8u;
 static const uint FAST_CAP = 16384u;
 static const uint FAST_BASE = CCD_BODY_BASE + 4u * CCD_BODY_CAP;

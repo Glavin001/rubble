@@ -275,7 +275,7 @@ pub const CCD_FALLBACKS: u32 = CCD_BASE + 3;
 /// Host impulse records this step (`apply_impulses`' late pass starts after them).
 pub const IMPULSE_FIRST: u32 = CCD_BASE + 4;
 /// Awake `BODY_CCD` bodies a step can hold; more set `OVERFLOW_CCD_BODIES`.
-pub const CCD_BODY_CAP: u32 = 1024;
+pub const CCD_BODY_CAP: u32 = 16384;
 /// Four words per CCD body: body, min TOI bits, winning candidate, flags.
 pub const CCD_BODY_BASE: u32 = CCD_BASE + 8;
 /// Colliders whose sweep is longer than a grid cell (fast list); more set
