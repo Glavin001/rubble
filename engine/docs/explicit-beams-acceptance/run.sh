@@ -9,7 +9,8 @@
 #
 # Bounded pieces: one process per vehicle and scenario, written to
 # <vehicle>/<scenario>/. Each run inside a piece lasts seconds to a few minutes;
-# RUN_LIMIT (default 7200 s, quiet-machine waits included) kills a runaway piece.
+# RUN_LIMIT (default 21600 s, quiet-machine waits included) kills a runaway piece; the
+# waits dominate on a busy machine, each timed run itself lasts seconds to minutes.
 # A finished piece (its summary.md) is skipped, so the script resumes where it
 # stopped. ONLY=<vehicle> runs one vehicle.
 # Run from engine/: sh docs/explicit-beams-acceptance/run.sh
@@ -17,7 +18,7 @@ set -e
 D=docs/explicit-beams-acceptance
 : "${ROR_BIN:?set ROR_BIN to the ror_ref harness binary}"
 : "${CONTENT:?set CONTENT to the RigsOfRods/content folder}"
-LIMIT=${RUN_LIMIT:-7200}
+LIMIT=${RUN_LIMIT:-21600}
 cargo build --release -p engine-webgpu --bin explicit_beams_scaling
 # The BeamNG-resolution JBeam car first: the target class of vehicle.
 for v in "jbeam_car:$D/vehicles/rubble_hires_jbeam.truck" \
