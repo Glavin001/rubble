@@ -404,7 +404,7 @@ fracture's per-frame passes over every chunk and bond (`fr_loads`, `fr_breaks`),
 pose readback sized to every body. Those are the next targets (L2 §2, §4).
 
 Web, same build (`?broadphase=full` for the left column): fracture lab grid, ball in
-flight, GPU 2.10 → 1.95 ms, pipelined 3.30 → 2.96 ms (medians of three; the lab grid has
+flight, GPU 2.09 → 1.95 ms, pipelined 3.37 → 2.96 ms (medians of three; the lab grid has
 no sleep archive, so the carry still runs there). Busy pages, ms per step: ring110k
 10.46, gables506k 29.88, softbody traffic (20 cars) 2.44, vehicle driving 1.09, vehicle
 traffic driving 2.38, all at or below the table's earlier values.
