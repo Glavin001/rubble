@@ -173,7 +173,7 @@ pub mod shaders {
     );
     pub const COUPLING: ShaderSet = shader_set!(
         "coupling",
-        [("ingest_rows", (64, 1, 1)), ("ingest_clear", (64, 1, 1)), ("ingest_count", (64, 1, 1)), ("ingest_scan", (1024, 1, 1)), ("ingest_scan_blocks", (1024, 1, 1)), ("ingest_scan_add", (64, 1, 1)), ("ingest_scatter", (64, 1, 1)), ("ingest_merge", (64, 1, 1))]
+        [("ingest_rows", (64, 1, 1)), ("ingest_clear", (64, 1, 1)), ("ingest_count", (64, 1, 1)), ("ingest_scan", (1024, 1, 1)), ("ingest_scan_blocks", (1024, 1, 1)), ("ingest_scan_add", (64, 1, 1)), ("ingest_scatter", (64, 1, 1)), ("ingest_merge", (64, 1, 1)), ("ingest_clear_listed", (64, 1, 1)), ("ingest_clear_manifold_counts", (64, 1, 1)), ("ingest_list_reset", (1, 1, 1)), ("ingest_count_listed", (64, 1, 1)), ("ingest_list_args", (1, 1, 1)), ("ingest_scan_listed", (64, 1, 1)), ("ingest_merge_listed", (64, 1, 1))]
     );
     pub const RESIDENT: ShaderSet = shader_set!("resident", [("resident_poses", (64, 1, 1)), ("resident_filter", (64, 1, 1)), ("resident_static_loads", (256, 1, 1))]);
     pub const CASCADE: ShaderSet = shader_set!("cascade", [("cascade_begin", (64, 1, 1)), ("cascade_gate", (64, 1, 1)), ("cascade_fixed", (64, 1, 1)), ("cascade_restore", (64, 1, 1)), ("cascade_settle", (64, 1, 1)), ("cascade_end", (256, 1, 1)), ("cascade_backup", (64, 1, 1))]);
@@ -324,6 +324,11 @@ pub mod shaders {
             ("fr_strike_cover", (64, 1, 1)),
             ("fr_strike_claim", (64, 1, 1)),
             ("fr_host_breaks", (64, 1, 1)),
+            ("fr_list_touched", (64, 1, 1)),
+            ("fr_list_all", (64, 1, 1)),
+            ("fr_list_args", (1, 1, 1)),
+            ("fr_loads_listed", (64, 1, 1)),
+            ("fr_breaks_listed", (64, 1, 1)),
         ]
     );
 
