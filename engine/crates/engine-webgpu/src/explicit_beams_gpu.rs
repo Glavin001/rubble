@@ -569,6 +569,75 @@ impl ExplicitBeamsGpu {
             .collect()
     }
 
+    /// Resolve the timed frames since [`Self::enable_frame_timing`] into a new
+    /// mappable buffer and restart timing empty, without waiting: the buffer
+    /// holds a (begin, end) pair of ticks per frame, the count is the frames.
+    /// Map it once the queue reaches it (browsers: `mapAsync`) and scale the
+    /// ticks by [`Self::timestamp_period_ms`]. `None` with no timing or no frames.
+    pub fn take_frame_times(&mut self) -> Option<(wgpu::Buffer, u32)> {
+        let t = self.timing.as_mut()?;
+        let used = std::mem::take(&mut t.used);
+        if used == 0 {
+            return None;
+        }
+        let size = u64::from(used) * 16;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-frame-times"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        enc.resolve_query_set(&t.set, 0..2 * used, &t.resolve, 0);
+        enc.copy_buffer_to_buffer(&t.resolve, 0, &staging, 0, size);
+        self.queue.submit([enc.finish()]);
+        Some((staging, used))
+    }
+
+    /// Milliseconds per timestamp tick.
+    pub fn timestamp_period_ms(&self) -> f64 {
+        f64::from(self.queue.get_timestamp_period()) * 1e-6
+    }
+
+    /// The node state buffer, 3 `vec4<f32>` per node in vehicle order: position
+    /// relative to the vehicle's origin and mass, velocity and friction, force.
+    /// Vehicle `v`'s nodes start at [`Self::node_offset`]`(v)`.
+    pub fn nodes_buffer(&self) -> &wgpu::Buffer {
+        &self.nodes
+    }
+
+    /// The beam state buffer: 2 `vec4<f32>` per beam in vehicle order, (rest
+    /// length, compression and tension yield, gate) and (strength, last force,
+    /// broken as 0 or 1, 0), then the kernel's scratch. Vehicle `v`'s beams start
+    /// at [`Self::beam_offset`]`(v)`.
+    pub fn beams_buffer(&self) -> &wgpu::Buffer {
+        &self.beams
+    }
+
+    /// The per-vehicle buffer: vehicle `v`'s record (`vec4<u32>`) at index `v` holds
+    /// its origin's bits (xyz) and the steps it has run (w); triangle and wide
+    /// pass scratch follows.
+    pub fn misc_buffer(&self) -> &wgpu::Buffer {
+        &self.misc
+    }
+
+    /// The first node of vehicle `v` in [`Self::nodes_buffer`] (in nodes).
+    pub fn node_offset(&self, v: usize) -> u32 {
+        self.spans[v].node_off
+    }
+
+    /// The first beam of vehicle `v` in [`Self::beams_buffer`] (in beams).
+    pub fn beam_offset(&self, v: usize) -> u32 {
+        self.spans[v].beam_off
+    }
+
+    /// Spawn rest lengths of every beam, in buffer order.
+    pub fn rest0(&self) -> &[f32] {
+        &self.rest0
+    }
+
     /// Vehicles simulated.
     pub fn vehicle_count(&self) -> usize {
         self.spans.len()

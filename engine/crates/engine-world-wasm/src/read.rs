@@ -72,8 +72,16 @@ pub(crate) fn read_ranges_with(
     ranges: Vec<(wgpu::Buffer, u64, u64)>,
     decode: impl FnOnce(Vec<u32>) -> Result<JsValue, JsValue> + 'static,
 ) -> js_sys::Promise {
-    let device = world.device().clone();
-    let queue = world.queue().clone();
+    read_ranges_on(world.device().clone(), world.queue().clone(), ranges, decode)
+}
+
+/// [`read_ranges_with`] on any device and queue (the explicit solver's buffers).
+pub(crate) fn read_ranges_on(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    ranges: Vec<(wgpu::Buffer, u64, u64)>,
+    decode: impl FnOnce(Vec<u32>) -> Result<JsValue, JsValue> + 'static,
+) -> js_sys::Promise {
     wasm_bindgen_futures::future_to_promise(async move {
         let total: u64 = ranges.iter().map(|r| r.2).sum();
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
