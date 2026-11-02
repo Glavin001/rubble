@@ -34,11 +34,21 @@
 //! trials' log ratios) with a verdict only when the interval excludes 1; and the
 //! peak frames: p99, maximum and the share of frames over the frame budget.
 //!
-//! Accuracy. In every run the first and last vehicle's end state (node positions,
-//! broken and bent beams, travel along the forward axis, and the crush: loss of
-//! length along it) is compared with Rigs of Rods' same vehicle; and per scenario,
-//! Rigs of Rods against itself with the spawn speed 0.1 mm/s higher, the
-//! sensitivity a match cannot be expected to beat.
+//! Accuracy. Crashes (and a vehicle that breaks beams under its own weight) are
+//! chaotic: a float-level change to the spawn moves Rigs of Rods' own end state by
+//! up to metres. So accuracy compares ensembles. Per scenario, `nudges=` K one-vehicle
+//! runs on each engine (default 8), run k spawned 0.1 mm/s × k faster:
+//! * RoR's spread: node RMS between every pair of RoR runs;
+//! * Rubble against RoR: node RMS from every Rubble run to every RoR run;
+//! * pass when the median Rubble–RoR distance is at most 1.5× RoR's median spread
+//!   (or at most 1 mm), with a bootstrap 95 % interval of the ratio reported; and
+//!   Rubble's median broken and bent counts lie within RoR's range over its runs,
+//!   widened 10 %;
+//! * a fleet's first and last vehicle (trial 0, moved to the one-vehicle spawn):
+//!   median distance to the RoR runs within the same limit.
+//! Every run also compares the sampled vehicles with Rigs of Rods' same vehicle
+//! (end state: node positions, broken and bent beams, travel along the forward
+//! axis, crush: loss of length along it), reported but not judged.
 //!
 //! `trace=<file>` (with `trace_scene=<json>`, `trace_every=`, `cols=` for the grid's
 //! columns) records the first scenario and count on Rubble's GPU for the crash
@@ -299,6 +309,123 @@ struct RubbleRun {
     pipelined_ms: f64,
     blocking_ms: Vec<f64>,
     end: Vec<EndState>,
+}
+
+/// One scenario's accuracy ensemble: per nudged run its spawn positions and each
+/// engine's end state.
+#[derive(Default)]
+struct Ensemble {
+    start: Vec<Vec<Vec3>>,
+    ror: Vec<EndState>,
+    rubble: Vec<EndState>,
+}
+
+impl Ensemble {
+    fn json(&self, g: &Geometry) -> Value {
+        let side = |v: &[EndState]| -> Vec<Value> {
+            v.iter().zip(&self.start).map(|(e, s)| e.json(g, s)).collect()
+        };
+        json!({"ror": side(&self.ror), "rubble": side(&self.rubble)})
+    }
+
+    /// The distances, their medians and ratio (with a bootstrap 95 % interval over
+    /// runs), and the broken and bent counts.
+    fn judge(&self) -> Value {
+        let k = self.ror.len();
+        let rms = |a: &EndState, b: &EndState| f64::from(rms_max(&a.pos, &b.pos).0) * 1e3;
+        let rr: Vec<Vec<f64>> = (0..k).map(|i| (0..k).map(|j| rms(&self.ror[i], &self.ror[j])).collect()).collect();
+        let xr: Vec<Vec<f64>> = (0..k).map(|i| (0..k).map(|j| rms(&self.rubble[i], &self.ror[j])).collect()).collect();
+        let medians = |xi: &[usize], ri: &[usize]| {
+            let mut a = Vec::new();
+            for (p, &i) in ri.iter().enumerate() {
+                for &j in &ri[p + 1..] {
+                    if i != j {
+                        a.push(rr[i][j]);
+                    }
+                }
+            }
+            let xr = &xr;
+            let b: Vec<f64> = xi.iter().flat_map(|&i| ri.iter().map(move |&j| xr[i][j])).collect();
+            (median(&b), median(&a))
+        };
+        let all: Vec<usize> = (0..k).collect();
+        let (mx, mr) = medians(&all, &all);
+        let floor = |m: f64| m.max(1.0 / 1.5);
+        let ratio = mx / floor(mr);
+        // Bootstrap: resample each engine's runs with replacement (fixed seed).
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut draw = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % k as u64) as usize
+        };
+        let mut ratios: Vec<f64> = (0..2000)
+            .filter_map(|_| {
+                let xi: Vec<usize> = (0..k).map(|_| draw()).collect();
+                let ri: Vec<usize> = (0..k).map(|_| draw()).collect();
+                let (x, r) = medians(&xi, &ri);
+                (!r.is_nan()).then(|| x / floor(r))
+            })
+            .collect();
+        ratios.sort_by(f64::total_cmp);
+        let q = |p: f64| ratios.get(((ratios.len() - 1) as f64 * p).round() as usize).copied().unwrap_or(f64::NAN);
+        let counts = |f: fn(&EndState) -> usize| {
+            let r: Vec<f64> = self.ror.iter().map(|e| f(e) as f64).collect();
+            let x: Vec<f64> = self.rubble.iter().map(|e| f(e) as f64).collect();
+            json!({"rubble_median": median(&x), "ror_min": r.iter().copied().fold(f64::MAX, f64::min),
+                   "ror_max": r.iter().copied().fold(f64::MIN, f64::max), "rubble": x, "ror": r})
+        };
+        json!({
+            "runs": k, "median_rubble_ror_mm": mx, "median_ror_ror_mm": mr,
+            "ratio": ratio, "ratio_ci": [q(0.025), q(0.975)],
+            "ror_ror_mm": rr, "rubble_ror_mm": xr,
+            "broken": counts(|e| e.broken), "bent": counts(|e| e.bent),
+        })
+    }
+
+    /// Median node RMS (mm) from a fleet vehicle, moved by its spawn offset to the
+    /// one-vehicle spawn, to every RoR run.
+    fn median_to_ror(&self, end: &EndState, start: &[Vec3]) -> f64 {
+        let shift = self.start[0][0] - start[0];
+        let moved = EndState {
+            pos: end.pos.iter().map(|p| *p + shift).collect(),
+            ..end.clone()
+        };
+        let d: Vec<f64> = self.ror.iter().map(|r| f64::from(rms_max(&moved.pos, &r.pos).0) * 1e3).collect();
+        median(&d)
+    }
+}
+
+fn median(x: &[f64]) -> f64 {
+    if x.is_empty() {
+        return f64::NAN;
+    }
+    let mut v = x.to_vec();
+    v.sort_by(f64::total_cmp);
+    let m = v.len() / 2;
+    if v.len() % 2 == 1 {
+        v[m]
+    } else {
+        0.5 * (v[m - 1] + v[m])
+    }
+}
+
+/// One vehicle on Rubble's GPU for `frames` frames: its end state.
+fn run_rubble_end(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    fleet: &[ExplicitBeams],
+    frames: u32,
+    steps: u32,
+) -> EndState {
+    let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
+    apply_wide(&mut gpu);
+    for _ in 0..frames {
+        gpu.frame(steps);
+    }
+    gpu.wait();
+    rubble_end(&gpu, fleet.len()).remove(0)
 }
 
 fn samples(n: usize) -> Vec<usize> {
@@ -746,6 +873,8 @@ fn main() -> anyhow::Result<()> {
     let mut blocking: HashMap<(Scenario, usize), Vec<f64>> = HashMap::new();
     let mut blocking_frames: HashMap<(Scenario, usize), Vec<f64>> = HashMap::new();
     let mut accuracy: HashMap<(Scenario, usize), Vec<Value>> = HashMap::new();
+    // Trial 0's sampled Rubble vehicles: end state and spawn positions.
+    let mut fleet_ends: HashMap<(Scenario, usize), Vec<(EndState, Vec<Vec3>)>> = HashMap::new();
     // Runs that started on a busy machine (the wait gave up): none may count.
     let mut busy_runs = 0usize;
     let mut run_count = 0usize;
@@ -788,6 +917,9 @@ fn main() -> anyhow::Result<()> {
                     .count();
                 let r = rubble_run.unwrap();
                 let key = (sc, n);
+                if trial == 0 {
+                    fleet_ends.insert(key, r.end.iter().cloned().zip(start.iter().cloned()).collect());
+                }
                 gpu_means.entry(key).or_default().push(mean(&r.gpu_ms));
                 gpu_frames.entry(key).or_default().extend(&r.gpu_ms);
                 piped.entry(key).or_default().push(r.pipelined_ms);
@@ -844,27 +976,28 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Rigs of Rods against itself, 0.1 mm/s faster: the chaos floor.
-    let mut sensitivity: HashMap<Scenario, Value> = HashMap::new();
+    // Accuracy ensembles: per scenario K one-vehicle runs per engine, run k spawned
+    // 0.1 mm/s × k faster.
+    let nudges: usize = kv(&args, "nudges").map_or(8, |s| s.parse().unwrap());
+    let mut ensembles: HashMap<Scenario, Ensemble> = HashMap::new();
     if let Some(bin) = &ror_bin {
         for &sc in &scenarios {
-            let a = scene(sc, 1, &g, speed, seconds, 0.0, None);
-            let b = scene(sc, 1, &g, speed, seconds, 1e-4, None);
-            let fa = out.join(format!("sens_{}_a.txt", sc.name()));
-            let fb = out.join(format!("sens_{}_b.txt", sc.name()));
-            write_scene(&fa, &a);
-            write_scene(&fb, &b);
-            let ra = run_ror(bin, &truck, &fa, 1, warm, frames, steps);
-            let rb = run_ror(bin, &truck, &fb, 1, warm, frames, steps);
-            let (rms, max) = rms_max(&ra.end[0].pos, &rb.end[0].pos);
-            sensitivity.insert(
-                sc,
-                json!({"rms_mm": rms * 1e3, "max_mm": max * 1e3,
-                       "broken": [ra.end[0].broken, rb.end[0].broken],
-                       "bent": [ra.end[0].bent, rb.end[0].bent]}),
-            );
+            let mut e = Ensemble::default();
+            for k in 0..nudges {
+                let s = scene(sc, 1, &g, speed, seconds, k as f32 * 1e-4, None);
+                let file = out.join(format!("ens_{}_{k}.txt", sc.name()));
+                write_scene(&file, &s);
+                let fleet = rubble_fleet(&text, &s);
+                e.start.push(fleet[0].positions());
+                e.ror.push(run_ror(bin, &truck, &file, 1, warm, frames, steps).end.remove(0));
+                e.rubble.push(run_rubble_end(&device, &queue, &fleet, warm + frames, steps));
+                eprintln!("ensemble {} {k}: broken rubble {} / ror {}", sc.name(),
+                    e.rubble[k].broken, e.ror[k].broken);
+            }
+            ensembles.insert(sc, e);
         }
     }
+    let judged: HashMap<Scenario, Value> = ensembles.iter().map(|(sc, e)| (*sc, e.judge())).collect();
 
     // Summary.
     let mut md = String::new();
@@ -1044,16 +1177,14 @@ fn main() -> anyhow::Result<()> {
                     .unwrap();
                 }
             }
-            if let Some(s) = sensitivity.get(&sc) {
+            if let Some(a) = judged.get(&sc) {
                 writeln!(
                     md,
-                    "\nRigs of Rods against itself, spawn speed 0.1 mm/s higher: node RMS {:.2} mm, max {:.2} mm; broken {} / {}, bent {} / {}.\n",
-                    s["rms_mm"].as_f64().unwrap(),
-                    s["max_mm"].as_f64().unwrap(),
-                    s["broken"][0],
-                    s["broken"][1],
-                    s["bent"][0],
-                    s["bent"][1]
+                    "\nAccuracy ensembles ({} runs per engine, spawn speed + 0.1 mm/s × k): median node RMS Rubble–RoR {:.2} mm, RoR–RoR {:.2} mm, ratio {:.2} [95 % bootstrap {:.2}, {:.2}]; broken: Rubble median {}, RoR {}–{}; bent: Rubble median {}, RoR {}–{}.\n",
+                    a["runs"], a["median_rubble_ror_mm"].as_f64().unwrap(), a["median_ror_ror_mm"].as_f64().unwrap(),
+                    a["ratio"].as_f64().unwrap(), a["ratio_ci"][0].as_f64().unwrap(), a["ratio_ci"][1].as_f64().unwrap(),
+                    a["broken"]["rubble_median"], a["broken"]["ror_min"], a["broken"]["ror_max"],
+                    a["bent"]["rubble_median"], a["bent"]["ror_min"], a["bent"]["ror_max"],
                 )
                 .unwrap();
             }
@@ -1065,7 +1196,9 @@ fn main() -> anyhow::Result<()> {
             "truck": truck.display().to_string(), "adapter": info.name,
             "trials": trials, "warm": warm, "frames": frames, "speed": speed,
             "runs": all,
-            "sensitivity": scenarios.iter().map(|s| (s.name(), sensitivity.get(s).cloned().unwrap_or(Value::Null))).collect::<HashMap<_, _>>(),
+            "nudges": nudges,
+            "ensembles": scenarios.iter().map(|s| (s.name(), ensembles.get(s).map(|e| e.json(&g)).unwrap_or(Value::Null))).collect::<HashMap<_, _>>(),
+            "accuracy": scenarios.iter().map(|s| (s.name(), judged.get(s).cloned().unwrap_or(Value::Null))).collect::<HashMap<_, _>>(),
         }))?,
     )?;
     // Acceptance: every criterion with its measured values, PASS or FAIL.
@@ -1088,27 +1221,27 @@ fn main() -> anyhow::Result<()> {
             format!("{run_count} runs started on a quiet machine (load < {max_load}, GPU < {max_gpu} %): {busy_runs} did not"),
         );
         for &sc in &scenarios {
-            let sens = &sensitivity[&sc];
-            let s_rms = sens["rms_mm"].as_f64().unwrap();
-            let range = |k: &str| {
-                let a = sens[k][0].as_f64().unwrap();
-                let b = sens[k][1].as_f64().unwrap();
-                (0.9 * a.min(b), 1.1 * a.max(b))
-            };
-            for &n in &counts {
-                for c in accuracy.get(&(sc, n)).into_iter().flatten() {
-                    let rms = c["rms_mm"].as_f64().unwrap();
-                    let limit = (1.5 * s_rms).max(1.0);
-                    line(&mut md, rms <= limit, format!(
-                        "{} N={n} vehicle {}: node RMS {rms:.2} mm <= {limit:.2} mm (1.5x RoR's own {s_rms:.2} mm, at least 1 mm)",
-                        sc.name(), c["index"]));
-                    for k in ["broken", "bent"] {
-                        let (lo, hi) = range(k);
-                        let v = c["rubble"][k].as_f64().unwrap();
-                        line(&mut md, v >= lo.floor() && v <= hi.ceil(), format!(
-                            "{} N={n} vehicle {}: {k} {v} within RoR's {}–{} widened 10% ({:.0}–{:.0})",
-                            sc.name(), c["index"], sens[k][0], sens[k][1], lo.floor(), hi.ceil()));
-                    }
+            let a = &judged[&sc];
+            let e = &ensembles[&sc];
+            let (rr, xr) = (a["median_ror_ror_mm"].as_f64().unwrap(), a["median_rubble_ror_mm"].as_f64().unwrap());
+            let limit = (1.5 * rr).max(1.0);
+            line(&mut md, xr <= limit, format!(
+                "{} N=1 ({} runs per engine): median node RMS Rubble–RoR {xr:.2} mm <= {limit:.2} mm (1.5x RoR–RoR median {rr:.2} mm, at least 1 mm); ratio {:.2} [95 % {:.2}, {:.2}]",
+                sc.name(), a["runs"], a["ratio"].as_f64().unwrap(), a["ratio_ci"][0].as_f64().unwrap(), a["ratio_ci"][1].as_f64().unwrap()));
+            for k in ["broken", "bent"] {
+                let (lo, hi) = (a[k]["ror_min"].as_f64().unwrap(), a[k]["ror_max"].as_f64().unwrap());
+                let (lo, hi) = ((0.9 * lo).floor(), (1.1 * hi).ceil());
+                let v = a[k]["rubble_median"].as_f64().unwrap();
+                line(&mut md, v >= lo && v <= hi, format!(
+                    "{} N=1: Rubble median {k} {v} within RoR's {}–{} widened 10% ({lo:.0}–{hi:.0})",
+                    sc.name(), a[k]["ror_min"], a[k]["ror_max"]));
+            }
+            for &n in counts.iter().filter(|&&n| n > 1) {
+                for (end, start) in fleet_ends.get(&(sc, n)).into_iter().flatten() {
+                    let d = e.median_to_ror(end, start);
+                    line(&mut md, d <= limit, format!(
+                        "{} N={n} vehicle {}: median node RMS to the RoR runs {d:.2} mm <= {limit:.2} mm",
+                        sc.name(), end.index));
                 }
             }
             for &n in &counts {
