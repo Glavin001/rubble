@@ -104,7 +104,8 @@ pub struct StepModes {
     /// archived row (host word 30 bit 6).
     pub archive_cold: bool,
     /// Measurement variant (sleep archive): `archive_spread` rounds before `archive_emit`,
-    /// each listing the sleepers resting on listed ones (0: off).
+    /// each listing the sleepers resting on listed ones (0: off); with the touch query,
+    /// that many more `archive_touch_spread` hops than its one.
     pub archive_spread_rounds: u32,
     /// Sleep archive: a sleeper touched by a moving body forms all its resting pairs
     /// before this step's narrowphase (`archive_touch`, host word 30 bit 8), and its
@@ -477,10 +478,6 @@ pub fn encode_step(
         if archive_touch(m) {
             // Touched sleepers' resting pairs, queried (world_step.slang archive_touch),
             // after listing the sleepers those woken since the broadphase rest on.
-            if mo.ccd {
-                // Sleepers a fast CCD body's step will solve (world_step.slang archive_touch_ccd).
-                e.d("archive_touch_ccd", n_bodies);
-            }
             // One hop, and `archive_spread_rounds` more (measurement variant).
             for _ in 0..=m.archive_spread_rounds {
                 e.d("archive_touch_snap", 64);

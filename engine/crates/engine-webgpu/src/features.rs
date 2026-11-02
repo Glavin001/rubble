@@ -141,7 +141,8 @@ pub struct EngineFeatures {
     /// (`ENGINE_ARCHIVE=cold`; default warm).
     pub archive_cold: bool,
     /// Measurement variant: rounds of `archive_spread` (sleepers resting on touched ones
-    /// get their archived pairs too; `ENGINE_ARCHIVE_SPREAD=n`; default 0).
+    /// get their archived pairs too; `ENGINE_ARCHIVE_SPREAD=n`; default 0). With the touch
+    /// query: that many more hops of its spread than the one it always runs.
     pub archive_spread_rounds: u32,
     /// Sleep archive: a sleeper a moving body touches forms all its resting pairs in the
     /// step it is touched (`archive_touch`), and its resting rows keep their archived warm

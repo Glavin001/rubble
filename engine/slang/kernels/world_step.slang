@@ -6723,8 +6723,6 @@ void archive_touch(uint3 tid : SV_DispatchThreadID)
 // runs after the first pass, a projectile or ccd_wake wakes it before the
 // narrowphase), which are then solved with their whole contact set. One hop: the
 // carry's racier chains further in are not followed.
-bool ccdNearFastSweepStart(uint body, BodyState b, float reach);
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void archive_touch_spread(uint3 tid : SV_DispatchThreadID)
