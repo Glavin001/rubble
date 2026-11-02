@@ -41,51 +41,61 @@ quiet-machine gate, so the timings in these results are not acceptance timings.
 **Next:** find which GPU operations differ, and make them match without
 changing the physics.
 
-## Agora S wall: the source is self-collision (CPU reference against RoR)
+## Agora S wall: a chaotic crash (CPU reference against RoR)
+
+Corrects an earlier version of this section (cb43a476). A shell quoting error
+had dropped the wall, the tyre rolling and the duration from some RoR runs, so
+it reported RoR against itself as 24 mm and the CPU against RoR as 5.2 m. Both
+figures were wrong.
 
 Scene: RoR's `free` scene, spawned at (189.45, 0.5, 100), moving at −27.78 m/s
 along x, into the box (174.06, 3, 101.25) with half extents (0.5, 3, 2.25), drag
-off, tyres rolling. Commands are below.
+off, tyres rolling, 2.5 s.
 
-**Node RMS, CPU against RoR:**
+**RoR against itself, one nudge at a time** (node RMS at 2.5 s, broken beams):
 
-| | 0.6 s (impact) | 1 s | 2.5 s | Broken beams |
-|---|---|---|---|---|
-| As specified | 10 mm | 266 mm | 5.2 m | 21 against RoR's 21 |
-| Self-collision off on both sides (RoR `selfcol=0`) | 0.005 mm | 2.6 mm | 35 mm | 19 against 19 |
+| Nudge | Node RMS | Broken |
+|---|---|---|
+| x + 2e-5 m | 119 mm | 21 |
+| y + 1e-5 m | 864 mm | 19 |
+| z + 1e-5 m | 678 mm | 19 |
+| vx + 0.1 mm/s | 895 mm | 19 |
+| vy + 0.1 mm/s | 1409 mm | 21 |
 
-RoR against itself, spawn speed 0.1 mm/s higher, with self-collision: 24 mm at
-2.5 s. Everything else in the solver matches RoR through the crash, so the gap
-is in self-collision.
+**The CPU reference against RoR:** 947 mm, 21 broken. That is inside RoR's own
+spread.
 
-**Ruled out** (experiment switches tested locally, not kept):
-- box face choice and the order of the ground and box contacts. A stiff-cube
-  probe matches RoR to within RoR's own noise: 16 mm against 17 mm at 1 s.
-- the triangle throttle;
-- treating tyre nodes as candidates (530 mm);
-- skipping back-side hits;
-- always taking the front normal, or always the back normal;
-- the self-collision friction surface;
-- skipping the resting contacts below.
+**Self-collision off on both sides:** the CPU against RoR is 35 mm; RoR against
+itself, nudged by +0.1 mm/s, is 74 mm.
 
-**Lead:** contacter nodes 60 and 62 lie exactly in the planes of collision
-triangles (1, 96, 61) and (63, 97, 79) from spawn. They hit every step with
-δ ≈ 0, and Rubble's side test (the sign of δ) flips the contact normal from
-step to step. The divergence from RoR grows from these contacts after the bus
-lands at about 0.12 s. RoR evidently chooses the contact side differently for
-nodes in a triangle's plane. Determine its behaviour with black-box probes (a
-triangle and a contacter in its plane, then with neighbours on either side),
-then specify and implement it clean-room.
+**Self-collision behaves like RoR's.** A clean-room probe study ran RoR's
+program only, without its source: triangle windings, both approach sides,
+contacters in the plane (22 random cases), tunnelling, the contact range, and
+the throttle. Rubble's rule matched RoR at every decision point. RoR pushes a
+node toward the side it is on now (the sign of δ, with δ = 0 going to the
+winding normal), with no memory of the previous side and no vote among
+neighbours. A resting table with no contacters is also within RoR's own noise:
+0.057 mm against 0.197 mm at 1 s.
 
-**Commands** (from the repository root):
+**What this means for acceptance item 2:**
+- The wall crashes are chaotic. One nudge at the level of float rounding moves
+  RoR's own end state by 0.1–1.4 m and changes its broken count between 19 and
+  21.
+- A limit of 1.5 times a single RoR-against-itself sample is therefore noisy.
+  Under the same test, RoR fails against itself with the vy nudge: 1409 mm
+  against 1.5 × 895 mm.
+- The GPU's 2149 mm in the acceptance run is above every RoR sample above, so it
+  needs a distribution, not a single sample: several nudged runs on each engine.
+
+**Commands** (from the repository root; RoR's arguments must be separate
+words):
 
 ```bash
 inspiration/ror-harness/bin/ror_ref <agoras.truck> free pos=189.45,0.5,100 vel=-27.78,0,0 \
-  box=174.06,3,101.25,0.5,3,2.25 drag=0 roll=1 [selfcol=0] secs=2.5 out=r.csv
+  box=174.06,3,101.25,0.5,3,2.25 drag=0 roll=1 secs=2.5 [selfcol=0] out=r.csv
 cargo run --release -p engine-softbody --example ror_compare -- free <agoras.truck> r.csv \
   pos=189.45,0.5,100 vel=-27.78,0,0 box=174.06,3,101.25,0.5,3,2.25 drag=0 roll=1 secs=2.5
 ```
 
-**RoR quirk:** RoR's static boxes do not register at negative coordinates. A
-cube and a bus passed through boxes placed there. Keep probe scenes at positive
-coordinates.
+**RoR quirk:** RoR's static boxes do not register at negative coordinates.
+Keep probe scenes at positive coordinates.
