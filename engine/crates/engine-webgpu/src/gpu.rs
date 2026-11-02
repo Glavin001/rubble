@@ -208,6 +208,8 @@ pub struct WgpuSim {
     /// `archive_spread_rounds`).
     archive_cold: bool,
     archive_spread_rounds: u32,
+    /// Keep the resting-pair carry when the sleep archive is enabled.
+    carry_with_archive: bool,
     /// The resting table no longer matches the bodies and colliders: a host wrote
     /// them, or the last step did not keep the table. The next awake-indexed step
     /// rebuilds it and bounds every collider.
@@ -881,6 +883,7 @@ impl WgpuSim {
             awake_broadphase: features.awake_broadphase,
             archive_cold: features.archive_cold,
             archive_spread_rounds: features.archive_spread_rounds,
+            carry_with_archive: features.carry_with_archive,
             rest_stale: true,
             fast_direct: false,
             persist_list: persistent_contacts && features.reuse_copy && features.persist_list,
@@ -2437,7 +2440,8 @@ impl WgpuSim {
     /// Keep resting contacts through sleep (`world_step.slang` archiveMeta): a pair
     /// that falls asleep keeps its contact rows, and when it forms again its body
     /// restarts them warm, with the impulses and stiffness it fell asleep with, instead
-    /// of from rest. Room for `rows` archived rows (in blocks of 8 a body; an archive
+    /// of from rest. Turns the resting-pair carry off (the archive replaces it).
+    /// Room for `rows` archived rows (in blocks of 8 a body; an archive
     /// that would hold more fails the step, `OVERFLOW_SLEEP_ARCHIVE`). Canonical
     /// contacts only. The contact and scratch buffers grow (their contents kept): hosts
     /// holding them bind them again.
@@ -2496,6 +2500,14 @@ impl WgpuSim {
         self.rebind_buffer(4);
         self.rebind_buffer(21);
         self.sleep_archive_blocks = blocks;
+        // The archive keeps resting rows through sleep, so the resting-pair carry
+        // (8ep, which re-emits every resting pair each step to keep its warm start)
+        // is off: a sleeping pair then costs nothing per step. city_scale drive
+        // (1,024 houses, all asleep): 422k contacts solved per step -> 0.
+        // `EngineFeatures::carry_with_archive` keeps it (the behaviour before, for A/B runs).
+        if !self.carry_with_archive {
+            self.carry_rest = false;
+        }
         Ok(())
     }
 

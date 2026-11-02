@@ -123,6 +123,9 @@ pub struct EngineFeatures {
     /// Measurement variant: rounds of `archive_spread` (sleepers resting on touched ones
     /// get their archived pairs too; `ENGINE_ARCHIVE_SPREAD=n`; default 0).
     pub archive_spread_rounds: u32,
+    /// Keep the resting-pair carry when a world enables the sleep archive (which turns it
+    /// off by default; `ENGINE_REST=keep`): the behaviour before that change.
+    pub carry_with_archive: bool,
     pub grid: GridLayout,
     /// Hierarchical grid override (`ENGINE_GRID_LEVELS=on|off`; `None`: convex scenes).
     pub grid_levels: Option<bool>,
@@ -151,6 +154,7 @@ impl Default for EngineFeatures {
             awake_broadphase: true,
             archive_cold: false,
             archive_spread_rounds: 0,
+            carry_with_archive: false,
             grid: GridLayout::Split,
             grid_levels: None,
             color_headroom: Some(4),
@@ -193,6 +197,7 @@ impl EngineFeatures {
             archive_spread_rounds: env_str("ENGINE_ARCHIVE_SPREAD")
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(0),
+            carry_with_archive: env_str("ENGINE_REST").as_deref() == Some("keep"),
             grid: match env_str("ENGINE_GRID").as_deref() {
                 Some("scaled") => GridLayout::Scaled,
                 Some("fixed") => GridLayout::Fixed,

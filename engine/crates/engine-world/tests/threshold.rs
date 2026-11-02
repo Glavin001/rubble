@@ -54,7 +54,10 @@ fn world_for(asset: &DestructibleAssetDesc, offset: [f32; 3]) -> World {
         def.features = engine_webgpu::EngineFeatures::from_env();
     }
     match std::env::var("THRESHOLD_CARRY").as_deref() {
-        Ok("on") => def.features.carry_rest = true,
+        Ok("on") => {
+            def.features.carry_rest = true;
+            def.features.carry_with_archive = true;
+        }
         Ok("off") => def.features.carry_rest = false,
         _ => {}
     }
