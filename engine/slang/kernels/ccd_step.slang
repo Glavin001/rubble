@@ -4,7 +4,7 @@
 //
 // Step placement (engine_exec::rigid_plan::encode_step):
 //   apply_impulses → … → broadphase_clear → ccd_register → broadphase_insert
-//   → broadphase_query → broadphase_fast → … → ccd_toi → ccd_pick
+//   → broadphase_query → broadphase_fast → … → ccd_toi → ccd_pick_key → ccd_pick
 //   → narrowphase (skips each CCD body's winning pair) → convex → ccd_emit
 //   → … → predict_bodies (CCD bodies start at their TOI pose)
 //
@@ -48,6 +48,8 @@ void ccd_register(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 8u], CCD_TOI_NONE);
     ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 10u], CCD_TOI_NONE);
     ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 11u], 0u);
+    // ccd_pick_key's (word 0 is ccd_mark's again once the pick is made).
+    ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot], 0u);
     gBodies[i].initialPad = asfloat(slot);
     AMAX2(gScratchAtomics[CCD_MAX_REACH], asuint(length(b.linearVel) * PARAMS.dt));
 }
@@ -651,16 +653,49 @@ void ccd_toi(uint3 tid : SV_DispatchThreadID)
     AMIN2(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 1u], asuint(t));
 }
 
-// A candidate whose contact ccd_emit builds at its time of impact (the
-// narrowphase skips it): each CCD body's winner (ccd_mark) and its ties (ccd_pick).
-static const uint CCD_WIN = 0x40000000u;
+// The other side's collider of candidate `pair` at its CCD body's minimum TOI
+// (slot `slot`), or false.
+bool ccdAtMinimum(CandidatePair pair, out uint slot, out uint other)
+{
+    slot = CCD_NO_PAIR;
+    other = 0u;
+    if ((pair._pad & (CONVEX_DEFER | CCD_WIN)) != 0u || pair._pad == 0u) return false;
+    Collider ca = gColliders[pair.colliderA];
+    Collider cb = gColliders[pair.colliderB];
+    BodyState ba = gBodies[ca.body];
+    BodyState bb = gBodies[cb.body];
+    if (!bodyIsCcd(ba) && !bodyIsCcd(bb)) return false;
+    bool fastIsA = ccdFastIsA(ba, ca.body, bb, cb.body);
+    slot = ccdSlotOf(fastIsA ? ca.body : cb.body, fastIsA ? ba : bb);
+    if (slot == CCD_NO_PAIR) return false;
+    other = fastIsA ? pair.colliderB : pair.colliderA;
+    return pair._pad - 1u == ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 1u]);
+}
 
-// Second pass: among pairs at their body's minimum TOI, the lowest candidate
-// index wins (deterministic whatever the thread order). Every pair whose TOI is
-// within contact depth of that minimum is a tie and gets a TOI contact too: a
-// flat face meets several colliders at once (a ram's face on four bricks of a
-// wall), and given to one of them the whole impact landed off centre and spun a
-// wall struck square at 2 rad/s from 5 m/s, 100 rad/s from 100 m/s.
+// Second pass: among pairs at their body's minimum TOI, the least other
+// collider (its complement's maximum in carry word 0). The candidates are
+// appended with atomics, so their order is no tie-break: coplanar pieces met
+// at one TOI (a structure split in the same frame) gave a different winner run
+// to run.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_pick_key(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= min(ALOAD(gCounters[0].candidateCount), HOST_S(2))) return;
+    uint slot;
+    uint other;
+    if (ccdAtMinimum(gCandidates[i], slot, other))
+        AMAX2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot], ~other);
+}
+
+// Third pass: of those, the pair with that collider wins; the lowest candidate
+// index only between pairs of one CCD body's colliders with the same one (a
+// compound CCD body). Every pair whose TOI is within contact depth of that
+// minimum is a tie and gets a TOI contact too: a flat face meets several
+// colliders at once (a ram's face on four bricks of a wall), and given to one of
+// them the whole impact landed off centre and spun a wall struck square at
+// 2 rad/s from 5 m/s, 100 rad/s from 100 m/s.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void ccd_pick(uint3 tid : SV_DispatchThreadID)
@@ -689,10 +724,13 @@ void ccd_pick(uint3 tid : SV_DispatchThreadID)
         ASTORE(gScratchAtomics[CCD_PAIR_BASE + 2u * at + 1u], pair.colliderB);
     }
     else if (at == CCD_PAIR_CAP) AOR2(gCounters[0].overflowFlags, OVERFLOW_CCD_PAIRS);
-    uint minBits = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 1u]);
     if (pair._pad != 0u)
     {
-        if (pair._pad - 1u == minBits) AMIN2(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 2u], i);
+        uint s2;
+        uint other;
+        if (ccdAtMinimum(pair, s2, other) && ~other == ALOAD(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot]))
+            AMIN2(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 2u], i);
+        uint minBits = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 1u]);
         BodyState bf = fastIsA ? ba : bb;
         float travel = length(bf.linearVel) * PARAMS.dt;
         if ((asfloat(pair._pad - 1u) - asfloat(minBits)) * travel <= PARAMS.contactOffset)
@@ -706,9 +744,11 @@ void ccd_pick(uint3 tid : SV_DispatchThreadID)
     if (ccdApartAlongSweep(ca, ba, cb, bb, 1.0)) gCandidates[i]._pad = CCD_BEYOND;
 }
 
-// Third pass, one thread per CCD body: tag its winning candidate in place, so
+// Fourth pass, one thread per CCD body: tag its winning candidate in place, so
 // the narrowphase and ccd_emit find it without the scratch buffer (the
-// narrowphase entries are at WebGPU's ten storage buffers).
+// narrowphase entries are at WebGPU's ten storage buffers). ccd_pick tagged the
+// ties already.
+static const uint CCD_WIN = 0x40000000u;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]

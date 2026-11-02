@@ -144,7 +144,11 @@ Beyond the basics:
 ### C and C++ (Unreal, Unity, Godot, custom engines)
 
 `engine/crates/engine-ffi` builds `librubble_ffi` (static and dynamic) with the
-generated header [`include/rubble.h`](engine/crates/engine-ffi/include/rubble.h):
+generated header [`include/rubble.h`](engine/crates/engine-ffi/include/rubble.h).
+Each CI run uploads a ready-to-link package per platform (`rubble-macos`,
+`rubble-linux`, `rubble-windows`). `engine/scripts/build-ffi.sh` builds the same
+package locally and runs [`examples/hello.c`](engine/crates/engine-ffi/examples/hello.c),
+a complete program.
 
 ```c
 #include "rubble.h"
@@ -163,7 +167,7 @@ rbCreateBody(world, &bd, &body);
 
 RbShapeDef sd = rbDefaultShapeDef();
 sd.density = 0.0005f;                        /* kg/cm^3 */
-RbShapeId shape;
+RbShapeId shape;                             /* {0}: no offset, identity rotation */
 rbCreateBoxShape(world, body, &sd, (RbVec3){50, 50, 50}, (RbTransform){0}, &shape);
 
 for (;;) {
@@ -178,7 +182,8 @@ rbDestroyWorld(world);
 
 Definitions must come from their `rbDefault*Def()` function: one built any other way
 returns `RB_INVALID_ARGUMENT`. See the [engine-ffi README](engine/crates/engine-ffi/README.md)
-for the rules on handles, frames and coordinates.
+for linking, GPU and threading requirements, and the rules on handles, frames and
+coordinates.
 
 ## Documentation
 
