@@ -2553,6 +2553,12 @@ impl WgpuSim {
         Ok(())
     }
 
+    /// Whether the sleep archive would keep rows: not when woken pairs start cold and the
+    /// touch query forms their pairs (`EngineFeatures::archive_cold`, `archive_touch_query`).
+    pub fn sleep_archive_keeps_rows(&self) -> bool {
+        !(self.archive_cold && self.archive_touch_query)
+    }
+
     /// The sleep archive's blocks in use and in all (diagnostic read; waits for the GPU).
     pub fn sleep_archive_use(&self) -> (u32, u32) {
         if self.sleep_archive_blocks == 0 {

@@ -137,8 +137,13 @@ pub struct EngineFeatures {
     /// static and sleeping colliders, and only moving colliders bounded, inserted and
     /// queried each step (`ENGINE_BROADPHASE=full` turns it off; same pairs).
     pub awake_broadphase: bool,
-    /// Measurement variant: woken pairs start cold, not from the sleep archive's rows
-    /// (`ENGINE_ARCHIVE=cold`; default warm).
+    /// Woken pairs start cold (λ = 0, stiffness at its floor), as the resting-pair carry
+    /// restarts them (its carried rows are re-detected at rest each step), not from the
+    /// sleep archive's rows (default; `ENGINE_ARCHIVE=warm` warm-starts them from the
+    /// archive, the earlier default). A struck sleeping grid: warm-started, a woken box is
+    /// gripped by its neighbours' full resting load from its first step and a ball barely
+    /// dents the stack; cold, it collapses as with the carry. With the touch query, cold
+    /// keeps no archived rows at all.
     pub archive_cold: bool,
     /// Measurement variant: rounds of `archive_spread` (sleepers resting on touched ones
     /// get their archived pairs too; `ENGINE_ARCHIVE_SPREAD=n`; default 0). With the touch
@@ -180,7 +185,7 @@ impl Default for EngineFeatures {
             local_repair: true,
             carry_rest: true,
             awake_broadphase: true,
-            archive_cold: false,
+            archive_cold: true,
             archive_spread_rounds: 0,
             archive_touch_query: true,
             carry_with_archive: false,
@@ -223,7 +228,7 @@ impl EngineFeatures {
             local_repair: env_default_on("ENGINE_REPAIR", &["rounds"]),
             carry_rest: env_default_on("ENGINE_REST", &["drop"]),
             awake_broadphase: env_default_on("ENGINE_BROADPHASE", &["full"]),
-            archive_cold: env_str("ENGINE_ARCHIVE").as_deref() == Some("cold"),
+            archive_cold: env_str("ENGINE_ARCHIVE").as_deref() != Some("warm"),
             archive_spread_rounds: env_str("ENGINE_ARCHIVE_SPREAD")
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(0),

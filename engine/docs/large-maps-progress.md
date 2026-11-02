@@ -549,3 +549,46 @@ collider after each step with sleep events (every step while a pile settles: 1.4
 a persistent resting table for the uniform split grid (its "other" table kept across steps,
 movers in the awake table only), and incremental resting-table inserts for steps whose new
 sleepers have not moved cell (their tombstone entries are valid again); both lossless.
+
+## The struck grid: woken pairs start cold (2026-11-02)
+
+**Report.** `demo.html?scene=legacyGrid100k&sleep=on`, F at step 400: with the carry the
+ball knocks bottom boxes out and the column above falls (awake ~200 at step 560, rising to
+~550); with the archive the ball barely dents the face and everything is asleep again ~100
+steps later. The 61-shot house gate missed it.
+
+**Gate.** `tests/grid_strike.rs` (`grid_strike_probe`, ignored): the "100k Grid" scene
+(`engine_scenes::build_host`, the demo's snapshot) imported into a `World`, settled asleep
+(sleep time 0.5 s, as the demo), the demo's ball (8 kg, r 0.35 m, 30 m/s from the camera
+towards the look point) fired at step 400; awake count every 50 steps, boxes moved. Never
+asleep is no reference here: the grid collapses by itself without sleep (98k boxes moved).
+Native, ball without CCD (`STRIKE_NO_CCD=1`), two runs each (native runs are not
+bit-reproducible), awake at step 550 / 700 / 1,000, boxes moved > 0.1 m:
+
+| Policy | Run 1 | Run 2 |
+|---|---|---|
+| carry | 175 / 552 / ~800, 312 | 172 / 432 / ~750, 309 |
+| archive, woken pairs warm (the default before) | 58 / 198 / ~400, 116 | 65 / 228 / ~420, 275 |
+| archive, woken pairs cold (now) | 174 / 470 / ~500, 285 | 174 / 527 / ~700, 515 |
+
+**Root cause: the warm start.** A woken box's pairs restarted from the archive with their
+resting λ and stiffness: from its first step the box is gripped by its full resting load
+(friction μ·λN against the sleeping boxes around it, which act as static walls), so it
+barely moves, wakes few neighbours and the stack falls asleep again. The carry's rows are
+re-detected at rest every step (λ = 0, stiffness at its floor: `World` runs without contact
+reuse), so a box it wakes restarts cold, slides, and wakes the boxes it disturbs. Starting
+woken pairs cold (`EngineFeatures::archive_cold`, now the default; `ENGINE_ARCHIVE=warm`
+for the earlier behaviour) matches the carry. With the touch query a cold archive needs no
+rows, so `archive_free` .. `archive_seal` no longer run (`rigid_plan::archive_rows`) and
+`World` sizes the archive to one block.
+
+**And a lost pair.** Comparing the house's contact rows with carry-on at the impact step
+found pairs between two listed sleepers at different grid levels emitted by neither: the
+finer one returned on a touched partner at a coarser level, and the coarser one's finer
+scan skips touched colliders by design. The finer one now emits them (`touchEmit`). House
+gate after the fix (61 shots): archive warm 54.5 ± 1.2 [52, 58], archive cold 54.3 ± 1.5
+[51, 60], against carry-on 56.2 ± 1.7 [52, 60] and never asleep 57.1 ± 2.4 [53, 62]
+(paired against carry-on −1.7 and −1.9; carry-on against never −0.9). Both ranges now sit
+inside the references'. The carry itself emits some pairs twice: at the house's impact step
+body 5's pairs with its neighbours appear as two identical manifolds (`(5, 8)`, colliders
+646/649, three rows each, twice), so carry-on is not a clean reference either.

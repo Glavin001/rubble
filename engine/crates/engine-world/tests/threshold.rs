@@ -313,12 +313,15 @@ fn run_world_among(
                     for c in w.sim().last_contacts().unwrap().iter().filter(|c| c.alive != 0) {
                         writeln!(
                             f,
-                            "{n} contact {} {} {:.4} k {:.0} c0 {:.4}",
+                            "{n} contact {} {} {:.4} k {:.0} c0 {:.4} cols {} {} f {:x}",
                             cols[c.collider_a as usize].body,
                             cols[c.collider_b as usize].body,
                             c.lambda_n,
                             c.k_n,
-                            c.c0_n
+                            c.c0_n,
+                            c.collider_a,
+                            c.collider_b,
+                            c.feature_id
                         )
                         .unwrap();
                     }

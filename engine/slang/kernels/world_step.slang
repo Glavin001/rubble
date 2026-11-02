@@ -3950,7 +3950,9 @@ void archiveEmitResting(uint body)
 bool archiveTouchedNow(uint body) { return ALOAD(gScratchAtomics[arTouched(body)]) == HOST_S(17) + 1u; }
 
 // Touched collider i's pair with collider j (a candidate by bounds): j at rest, on
-// another body, not jointed; `lowerOwns`: a touched partner's pair goes to the lower index.
+// another body, not jointed; `lowerOwns` (both scan each other): a touched partner's pair
+// goes to the lower index; otherwise only i reaches j (a coarser level: j's finer scan
+// skips touched colliders), so i emits it.
 // `mark` (archive_touch_spread): list a sleeping partner instead of emitting the pair.
 void touchEmit(uint i, Collider a, uint j, bool lowerOwns, bool probeHasObb, BoxObb probe, float faceGap, bool mark)
 {
@@ -3969,7 +3971,7 @@ void touchEmit(uint i, Collider a, uint j, bool lowerOwns, bool probeHasObb, Box
     // hit) also queries; any other moving partner emitted the pair from its own query.
     if (archiveTouchedNow(b.body))
     {
-        if (!lowerOwns || j < i) return;
+        if (lowerOwns && j < i) return;
     }
     else if (bodyMovingOrKinematic(gBodies[b.body])) return;
     if (bodiesJointed(a.body, b.body)) return;

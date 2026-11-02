@@ -544,6 +544,7 @@ impl World {
             (def.contacts, def.features.clone())
         };
         let resting = features.resting_contacts;
+        let cold_touch = features.archive_cold && features.archive_touch_query;
         let options = SimOptions {
             contacts,
             vehicles: def.vehicles,
@@ -577,7 +578,8 @@ impl World {
             // archive where the contact storage keeps one, else the carry.
             match resting {
                 engine_webgpu::RestingContacts::Archive if contacts != ContactStorage::Compact => {
-                    let rows = def.sleep_archive_rows.unwrap_or(def.capacity.max_contacts);
+                    // Cold wakes with the touch query keep no rows: one block.
+                    let rows = if cold_touch { 8 } else { def.sleep_archive_rows.unwrap_or(def.capacity.max_contacts) };
                     sim.enable_sleep_archive(rows)?;
                 }
                 engine_webgpu::RestingContacts::Drop => sim.set_carry_rest(false),
@@ -797,9 +799,12 @@ impl World {
     /// or persistent contacts. Turns the resting-pair carry off unless
     /// `EngineFeatures::carry_with_archive`.
     pub fn enable_sleep_archive(&mut self, rows: Option<u32>) -> anyhow::Result<()> {
-        let rows = rows
-            .or(self.sleep_archive_rows)
-            .unwrap_or(self.sim.capacity().max_contacts);
+        let rows = if self.sim.sleep_archive_keeps_rows() {
+            rows.or(self.sleep_archive_rows)
+                .unwrap_or(self.sim.capacity().max_contacts)
+        } else {
+            8
+        };
         self.sim.enable_sleep_archive(rows)
     }
 

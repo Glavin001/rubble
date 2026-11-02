@@ -100,8 +100,9 @@ pub struct StepModes {
     /// slot 82) instead of dispatching all FAST_CAP workgroups (the same groups do
     /// the work; the rest returned at once).
     pub fast_indirect: bool,
-    /// Measurement variant (sleep archive): a woken pair starts cold instead of from its
-    /// archived row (host word 30 bit 6).
+    /// Sleep archive: a woken pair starts cold instead of from its archived row (host
+    /// word 30 bit 6); with the touch query no rows are archived then
+    /// ([`archive_rows`]).
     pub archive_cold: bool,
     /// Measurement variant (sleep archive): `archive_spread` rounds before `archive_emit`,
     /// each listing the sleepers resting on listed ones (0: off); with the touch query,
@@ -839,7 +840,7 @@ pub fn encode_step(
         }
     }
     e.w("sleep_island_commit", 67);
-    if m.sleep_archive_blocks > 0 {
+    if archive_rows(m) {
         // Archive what just fell asleep (awake list, then this step's rows).
         e.w("archive_free", 67);
         e.w("archive_count", 65);
@@ -861,6 +862,13 @@ pub fn encode_step(
         e.phase("pose");
     }
     e.0
+}
+
+/// Whether the sleep archive keeps rows (`archive_free` .. `archive_seal` after the
+/// sleep pass): only when something reads them, a warm start (not
+/// [`StepModes::archive_cold`]) or the earlier `archive_emit` path.
+pub fn archive_rows(m: &StepModes) -> bool {
+    m.sleep_archive_blocks > 0 && !(m.archive_cold && archive_touch(m))
 }
 
 /// Whether the sleep archive's touch query runs ([`StepModes::archive_touch_query`]):
