@@ -3818,6 +3818,64 @@ void archiveEmitResting(uint body)
 
 // Shared point update; callers choose contact or manifold scheduling. Pair bodies
 // are immutable during persistence, so manifold scheduling can load them once.
+#if !defined(ENGINE_PERSISTENT_CONTACTS)
+// persistContact's warm start from an archived row (a woken pair's resting contact):
+// the same rules as a previous-step row.
+Contact archiveWarmContact(Contact c, BodyState ba, BodyState bb, AvbdParams p)
+{
+    Contact prev;
+    if (!archiveFind(c, prev))
+        return c;
+    // Refuse warm-start across SAT axis flips: λ from the old normal on a new
+    // normal injects energy (random Box Pile). three-avbd avoids this via
+    // reuseContacts keeping the manifold; without reuse, require n·n_prev>0.9.
+    float nAgree = dot(prev.normal, c.normal);
+    // Nor from a time-of-impact row (ccd_emit's features): its force
+    // stopped a fast body within one step, often rigidly against a
+    // partner held still, and ccd_respond already exchanged that
+    // impact's momentum. Carried over, the rigid stiffness and the
+    // stopping force held the striker dead against the struck body the
+    // next step while the body moved off (an edge hit lost 84% of the
+    // momentum).
+    uint prevTag = prev.featureId >> 16;
+    bool prevToi = prevTag == 0x0CCDu || prevTag == 0x0CCEu || prevTag == 0x0CCFu;
+    if (nAgree > 0.9 && !prevToi)
+    {
+        c.lambdaN = prev.lambdaN;
+        c.lambdaT1 = prev.lambdaT1;
+        c.lambdaT2 = prev.lambdaT2;
+        c.kN = prev.kN;
+        c.kT = prev.kT;
+        c._pad2 = prev._pad2;
+        // three-avbd: keep old anchors while static friction held (stick).
+        // Not for round shapes (spheres, capsules) — the contact point
+        // slides over their surface as they roll; pinned anchors rotate
+        // with the body, glue/stop smash balls, and let a rolling capsule
+        // sink through the ground (its pinned anchor rises off the true
+        // contact point every step).
+        Collider colA = gColliders[c.colliderA];
+        Collider colB = gColliders[c.colliderB];
+        bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE ||
+            colA.shape == SHAPE_CAPSULE || colB.shape == SHAPE_CAPSULE;
+        // Nor for track belts: the surface runs past the contact every step.
+        bool belt = colliderIsBeltLazy(colA) || colliderIsBeltLazy(colB);
+        if (prev._pad0 > 0.5 && !anySphere && !belt)
+        {
+            c.anchorA = prev.anchorA;
+            c.anchorB = prev.anchorB;
+            float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
+            float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
+            float3 d = wb - wa;
+            c.c0N = contactC0N(dot(c.normal, d), p.contactOffset);
+            c.c0T1 = dot(c.tangent1, d);
+            c.c0T2 = dot(c.tangent2, d);
+            c.penetration = c.c0N;
+            c._pad0 = 1.0;
+        }
+    }
+    return c;
+}
+#endif
 Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState bb)
 {
     AvbdParams p = PARAMS;
@@ -3910,16 +3968,9 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
                 }
             }
         }
-        Contact prev = c;
-        bool havePrev = bestJ != CONTACT_HASH_EMPTY;
-        if (havePrev)
-            prev = READ_CONTACT(prevOff + bestJ);
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
-        else if (sleepArchive())
-            havePrev = archiveFind(c, prev);
-#endif
-        if (havePrev)
+        if (bestJ != CONTACT_HASH_EMPTY)
         {
+            Contact prev = READ_CONTACT(prevOff + bestJ);
             // Refuse warm-start across SAT axis flips: λ from the old normal on a new
             // normal injects energy (random Box Pile). three-avbd avoids this via
             // reuseContacts keeping the manifold; without reuse, require n·n_prev>0.9.
@@ -3968,6 +4019,12 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
                 }
             }
         }
+#if !defined(ENGINE_PERSISTENT_CONTACTS)
+        // A warm-start miss: the sleep archive (archiveWarmContact). Kept out of the
+        // block above so its codegen is unchanged without the archive.
+        else if (sleepArchive())
+            c = archiveWarmContact(c, ba, bb, p);
+#endif
     }
     c = finishWarmContact(c, ba, bb);
     STORE_CONTACT(curOff + i, c);
