@@ -23,7 +23,9 @@ const BODY_COMMANDS: [u32; 11] = [
 /// Every GPU buffer and the host mirror of a [`WgpuSim`] at one instant
 /// ([`WgpuSim::save_state`]).
 pub struct SimSnapshot {
-    bufs: Vec<(wgpu::Buffer, u64)>,
+    /// Per binding: the copy, the bytes copied, and whether the live buffer's bytes
+    /// past them were zeros (a compact snapshot), cleared again on restore.
+    bufs: Vec<(wgpu::Buffer, u64, bool)>,
     body_count: u32,
     collider_count: u32,
     joint_count: u32,
@@ -44,7 +46,39 @@ pub struct SimSnapshot {
     last_contact_offset: u32,
     vehicles: Option<engine_vehicle::VehicleHost>,
     events_seen: u32,
+    /// The event ring's other readers' cursors: the ring's words are restored
+    /// with the buffers, so each reader must go back to where it was.
+    mount_events_seen: u32,
+    beam_events_seen: u32,
+    motion_events_seen: u32,
+    soft: Option<engine_softbody::SoftHost>,
     free_joints: Vec<u32>,
+}
+
+/// The terrain pool's bindings (MPM and the live surface), which snapshots skip.
+/// A compact snapshot's measure in flight ([`WgpuSim::measure_state`]).
+pub struct StateMeasure {
+    staging: wgpu::Buffer,
+    measured: Vec<bool>,
+    stamp: [u32; 5],
+}
+
+impl StateMeasure {
+    /// The extents, one `u32` per binding: map it for reading, then pass its words to
+    /// [`WgpuSim::save_state_measured`].
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.staging
+    }
+
+    /// The extents' count: the simulation's bindings.
+    pub fn bindings(&self) -> usize {
+        self.measured.len()
+    }
+}
+
+fn is_terrain_binding(i: usize) -> bool {
+    (engine_terrain::layout::MPM_PARAMS_BINDING..=engine_terrain::surface::SURFACE_BINDING)
+        .contains(&i)
 }
 
 impl WgpuSim {
@@ -83,8 +117,28 @@ impl WgpuSim {
         &self.bufs[4]
     }
 
+    /// The joint records (binding 5, `Joint`, by joint slot): renderers read a bond's
+    /// broken flag (word 2, bit 0) in place.
+    pub fn joint_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[5]
+    }
+
     pub fn counters_buffer(&self) -> &wgpu::Buffer {
         &self.bufs[7]
+    }
+
+    /// The step's colour bucket sizes (binding 17: bodies per primal colour in
+    /// words `[0, max_colors)`, then per-colour max degrees), for checks that
+    /// the colouring covered every awake body.
+    pub fn color_count_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[17]
+    }
+
+    /// The soft-body arena (binding 32, `vec4<u32>` slots laid out by
+    /// `SoftCapacity::layout`: body records, beams, groups, triangles, ...),
+    /// for renderers (beam views) and reads of soft state.
+    pub fn soft_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[32]
     }
 
     /// The step's broadphase candidate pairs (binding 10, `CandidatePair`: two colliders),
@@ -270,16 +324,160 @@ impl WgpuSim {
     /// instant exactly. The hull arena (binding 18) is the host's: a host that
     /// inserts hulls between save and restore keeps them.
     pub fn save_state(&self) -> SimSnapshot {
-        self.save_into(Vec::new())
+        self.save_into(Vec::new(), None)
     }
 
     /// `save_state` into an older snapshot's GPU buffers where their sizes still fit
     /// (no allocation per save for a host that saves every frame).
     pub fn save_state_reusing(&self, old: SimSnapshot) -> SimSnapshot {
-        self.save_into(old.bufs)
+        self.save_into(old.bufs, None)
     }
 
-    fn save_into(&self, old: Vec<(wgpu::Buffer, u64)>) -> SimSnapshot {
+    /// First half of a compact snapshot: measure each buffer's extent (one plus its
+    /// last non-zero word, `state_extent.slang`) into [`StateMeasure::buffer`]. Map
+    /// that buffer, then [`WgpuSim::save_state_measured`] with its words before
+    /// anything else touches the simulation. A compact snapshot copies only the
+    /// words below each extent and restores the zeros past them, so it restores the
+    /// same bytes as [`WgpuSim::save_state`] in a fraction of the memory when the
+    /// buffers are mostly unused (a scene before its first step: contacts, solver
+    /// rows and archives are empty).
+    pub fn measure_state(&self) -> StateMeasure {
+        let device = &self.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("state_extent"),
+            source: wgpu::ShaderSource::Wgsl(crate::STATE_EXTENT_WGSL.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("state_extent"),
+            layout: None,
+            module: &module,
+            entry_point: Some("state_extent"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let n = self.bufs.len();
+        let extents = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("state extents"),
+            size: (n.max(1) * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("state extents read"),
+            size: (n.max(1) * 4) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let max_binding = device.limits().max_storage_buffer_binding_size as u64;
+        // Measured: storage buffers that bind whole; the rest are copied whole.
+        let measured: Vec<bool> = self
+            .bufs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                b.usage().contains(wgpu::BufferUsages::STORAGE)
+                    && b.size() >= 4
+                    && b.size() % 4 == 0
+                    && b.size() <= max_binding
+                    && !(self.terrain.is_some() && is_terrain_binding(i))
+            })
+            .collect();
+        let mut groups_of = Vec::new();
+        let params: Vec<Option<(wgpu::BindGroup, u32)>> = self
+            .bufs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                if !measured[i] {
+                    return None;
+                }
+                let words = (b.size() / 4) as u32;
+                let groups = words.div_ceil(64).clamp(1, 4096);
+                let p = wgpu::util::DeviceExt::create_buffer_init(device, &wgpu::util::BufferInitDescriptor {
+                    label: Some("state extent params"),
+                    contents: bytemuck::cast_slice(&[words, i as u32, groups * 64, 0]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("state extent"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: b.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: extents.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: p.as_entire_binding() },
+                    ],
+                });
+                groups_of.push(p);
+                Some((bg, groups))
+            })
+            .collect();
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("measure-state"),
+        });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("state_extent"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            for (bg, groups) in params.iter().flatten() {
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(*groups, 1, 1);
+            }
+        }
+        enc.copy_buffer_to_buffer(&extents, 0, &staging, 0, (n.max(1) * 4) as u64);
+        self.queue.submit([enc.finish()]);
+        StateMeasure {
+            staging,
+            measured,
+            stamp: self.state_stamp(),
+        }
+    }
+
+    /// Second half of a compact snapshot: `extents` are [`StateMeasure::buffer`]'s
+    /// words, read after [`WgpuSim::measure_state`]. Fails if the simulation stepped
+    /// or took commands or records since the measure.
+    pub fn save_state_measured(&self, m: &StateMeasure, extents: &[u32]) -> anyhow::Result<SimSnapshot> {
+        anyhow::ensure!(
+            m.stamp == self.state_stamp(),
+            "the simulation changed between measure_state and save_state_measured"
+        );
+        anyhow::ensure!(extents.len() >= self.bufs.len(), "extents of another simulation");
+        let sizes: Vec<Option<u64>> = (0..self.bufs.len())
+            .map(|i| m.measured[i].then(|| u64::from(extents[i]) * 4))
+            .collect();
+        Ok(self.save_into(Vec::new(), Some(&sizes)))
+    }
+
+    /// A compact snapshot, waiting for the measure (native hosts; the web maps
+    /// [`StateMeasure::buffer`] itself).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_state_compact(&self) -> anyhow::Result<SimSnapshot> {
+        let m = self.measure_state();
+        let slice = m.staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv()??;
+        let extents: Vec<u32> = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
+        m.staging.unmap();
+        self.save_state_measured(&m, &extents)
+    }
+
+    /// What a measure must still match when its snapshot is taken.
+    fn state_stamp(&self) -> [u32; 5] {
+        [
+            self.steps_done,
+            self.command_count,
+            self.body_count,
+            self.collider_count,
+            self.joint_count,
+        ]
+    }
+
+    fn save_into(&self, old: Vec<(wgpu::Buffer, u64, bool)>, compact: Option<&[Option<u64>]>) -> SimSnapshot {
         let mut old = old.into_iter();
         let mut enc = self
             .device
@@ -291,18 +489,30 @@ impl WgpuSim {
             .iter()
             .enumerate()
             .map(|(i, b)| {
-                let size = b.size();
+                // The terrain pool is not saved (its buffers are the
+                // largest): a restore starts it over (`terrain_reset`). A compact
+                // snapshot copies a measured buffer up to its extent.
+                let measured = compact.and_then(|c| c[i]);
+                let size = if self.terrain.is_some() && is_terrain_binding(i) {
+                    0
+                } else if let Some(extent) = measured {
+                    extent.min(b.size())
+                } else {
+                    b.size()
+                };
                 let copy = match old.next() {
-                    Some((buf, s)) if s == size => buf,
+                    Some((buf, s, _)) if s == size => buf,
                     _ => self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("snapshot-b{i}")),
-                        size,
+                        size: size.max(4),
                         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
                         mapped_at_creation: false,
                     }),
                 };
-                enc.copy_buffer_to_buffer(b, 0, &copy, 0, size);
-                (copy, size)
+                if size > 0 {
+                    enc.copy_buffer_to_buffer(b, 0, &copy, 0, size);
+                }
+                (copy, size, measured.is_some())
             })
             .collect();
         self.queue.submit([enc.finish()]);
@@ -328,6 +538,10 @@ impl WgpuSim {
             last_contact_offset: self.last_contact_offset,
             vehicles: self.vehicles.clone(),
             events_seen: self.events_seen,
+            mount_events_seen: self.mount_events_seen,
+            beam_events_seen: self.beam_events_seen,
+            motion_events_seen: self.motion_events_seen,
+            soft: self.soft.clone(),
             free_joints: self.free_joints.clone(),
         }
     }
@@ -344,11 +558,19 @@ impl WgpuSim {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("restore-state"),
             });
-        for (i, (copy, size)) in s.bufs.iter().enumerate() {
+        for (i, (copy, size, zero_tail)) in s.bufs.iter().enumerate() {
             if i == 18 {
                 continue; // the hull arena stays the host's
             }
-            enc.copy_buffer_to_buffer(copy, 0, &self.bufs[i], 0, (*size).min(self.bufs[i].size()));
+            let live = self.bufs[i].size();
+            if *size > 0 {
+                enc.copy_buffer_to_buffer(copy, 0, &self.bufs[i], 0, (*size).min(live));
+            }
+            // A compact snapshot's buffer was zeros past what it copied. (Otherwise a
+            // size of 0 is the terrain pool, which was not saved.)
+            if *zero_tail && *size < live {
+                enc.clear_buffer(&self.bufs[i], *size, None);
+            }
         }
         self.queue.submit([enc.finish()]);
         self.body_count = s.body_count;
@@ -375,6 +597,12 @@ impl WgpuSim {
             v.dirty = true;
         }
         self.events_seen = s.events_seen;
+        self.mount_events_seen = s.mount_events_seen;
+        self.beam_events_seen = s.beam_events_seen;
+        self.motion_events_seen = s.motion_events_seen;
+        if s.soft.is_some() {
+            self.soft.clone_from(&s.soft);
+        }
         self.free_joints.clone_from(&s.free_joints);
         // The restored state may have bodies awake that the last step did not.
         self.wake_pending = true;
@@ -499,5 +727,105 @@ mod tests {
         );
         sim.step().unwrap();
         assert!(sim.read_body(body).position[1] < 3.0);
+    }
+
+    /// Every byte of a buffer (COPY_SRC).
+    fn bytes_of_buffer(sim: &WgpuSim, b: &wgpu::Buffer, size: u64) -> Vec<u8> {
+        if size == 0 {
+            return Vec::new();
+        }
+        let staging = sim.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(b, 0, &staging, 0, size);
+        sim.queue.submit([enc.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().unwrap().unwrap();
+        let out = staging.slice(..).get_mapped_range().expect("mapped").to_vec();
+        staging.unmap();
+        out
+    }
+
+    /// A compact snapshot restores the same bytes as a full one: saved together after
+    /// a pile has settled into contact, the world stepped on (every buffer written),
+    /// then restored from the compact one, every buffer equals the full copy. And it
+    /// is smaller: most of a small world's capacity is unused.
+    #[test]
+    fn compact_snapshot_restores_every_byte() {
+        let Ok(mut sim) = WgpuSim::new_with_compact_contacts(WorldCapacity::small(), false) else {
+            eprintln!("no wgpu adapter; skipping");
+            return;
+        };
+        sim.set_params(AvbdParams {
+            gravity_y: -9.81,
+            flags: FLAG_CONTACT_GAP | FLAG_WORLD_INERTIA,
+            ..AvbdParams::default()
+        });
+        let ground = sim.add_body(BodyState::static_plane_support());
+        sim.add_collider(Collider {
+            body: ground,
+            shape: ShapeType::Plane as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [0.0, 1.0, 0.0, 0.0],
+        });
+        for k in 0..12 {
+            let mass = 2.0;
+            let body = sim.add_body(BodyState::dynamic(
+                glam::Vec3::new((k % 4) as f32 * 0.6, 0.3 + (k / 4) as f32 * 0.65, 0.0),
+                glam::Quat::from_rotation_y(0.1 * k as f32),
+                mass,
+                glam::Vec3::splat(mass * 0.18 / 3.0),
+            ));
+            sim.add_collider(Collider {
+                body,
+                shape: ShapeType::Box as u32,
+                material: 0,
+                generation: 0,
+                local_pos: [0.0; 3],
+                density: 1000.0,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: [0.25, 0.3, 0.25, 0.0],
+            });
+        }
+        for _ in 0..40 {
+            sim.step().unwrap();
+        }
+        let full = sim.save_state();
+        let compact = sim.save_state_compact().unwrap();
+        let full_bytes: u64 = full.bufs.iter().map(|b| b.1).sum();
+        let compact_bytes: u64 = compact.bufs.iter().map(|b| b.1).sum();
+        assert!(
+            compact_bytes * 2 < full_bytes,
+            "compact {compact_bytes} B against full {full_bytes} B"
+        );
+        for _ in 0..25 {
+            sim.step().unwrap();
+        }
+        sim.restore_state(&compact);
+        for (i, (copy, size, _)) in full.bufs.iter().enumerate() {
+            if i == 18 {
+                continue; // the hull arena is the host's, not restored
+            }
+            let live = bytes_of_buffer(&sim, &sim.bufs[i], *size);
+            let saved = bytes_of_buffer(&sim, copy, *size);
+            assert!(live == saved, "binding {i}: restored bytes differ from the full snapshot");
+        }
+
+        // Stepping or a new record after the measure refuses the snapshot.
+        let m = sim.measure_state();
+        sim.step().unwrap();
+        assert!(sim.save_state_measured(&m, &vec![0; sim.bufs.len()]).is_err());
     }
 }

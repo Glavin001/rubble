@@ -60,7 +60,7 @@ pub struct EngineBuffers<'a> {
     pub counters: &'a wgpu::Buffer,
 }
 
-const BINDINGS: [Binding; 12] = [
+const BINDINGS: [Binding; 13] = [
     Binding::Uniform,   // params
     Binding::Storage,   // contacts
     Binding::Storage,   // colliders
@@ -73,6 +73,7 @@ const BINDINGS: [Binding; 12] = [
     Binding::StorageRw, // manifolds
     Binding::StorageRw, // counts
     Binding::StorageRw, // row counts (per substep)
+    Binding::StorageRw, // scan blocks (per 1024 chunks)
 ];
 
 const BODY_BYTES: u64 = 112;
@@ -91,6 +92,8 @@ pub struct EngineIngest {
     clear: Kernel,
     count: Kernel,
     scan: Kernel,
+    scan_top: Kernel,
+    scan_add: Kernel,
     scatter: Kernel,
     merge: Kernel,
     max_rows: u32,
@@ -105,6 +108,8 @@ pub struct EngineIngest {
     counts: wgpu::Buffer,
     /// Per substep, the engine's contact rows (`ingest_rows`; `record_live`).
     row_counts: wgpu::Buffer,
+    /// Per block of 1024 chunks, the scan's block totals and starts (`ingest_scan`).
+    scan_blocks: wgpu::Buffer,
 }
 
 impl EngineIngest {
@@ -128,6 +133,8 @@ impl EngineIngest {
             clear: k("ingest_clear"),
             count: k("ingest_count"),
             scan: k("ingest_scan"),
+            scan_top: k("ingest_scan_blocks"),
+            scan_add: k("ingest_scan_add"),
             scatter: k("ingest_scatter"),
             merge: k("ingest_merge"),
             max_rows,
@@ -141,6 +148,7 @@ impl EngineIngest {
             manifolds: storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records),
             counts: storage("ingest counts", 4 * 2 * n),
             row_counts: storage("ingest row counts", 4 * 1024),
+            scan_blocks: storage("ingest scan blocks", 4 * n.div_ceil(1024)),
         }
     }
 
@@ -196,7 +204,7 @@ impl EngineIngest {
     }
 
     fn bind(&self, gpu: &Gpu, kernel: &Kernel, params: &wgpu::Buffer, e: &EngineBuffers) -> wgpu::BindGroup {
-        gpu.bind(&kernel.group, &[params, e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts, &self.row_counts])
+        gpu.bind(&kernel.group, &[params, e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts, &self.row_counts, &self.scan_blocks])
     }
 
     /// The frame's start: the engine's bodies as they are now (closing speeds use them).
@@ -224,7 +232,7 @@ impl EngineIngest {
         assert!(substep < self.max_substeps, "ingest: {substep} substeps, room for {}", self.max_substeps);
         let params = self.params(gpu, row_offset, substep, h);
         let bind = self.bind(gpu, &self.rows, &params, e);
-        let mut pass = encoder.begin_compute_pass(&Default::default());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ingest rows"), timestamp_writes: None });
         pass.set_pipeline(&self.rows.pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.dispatch_workgroups(groups(self.max_rows as usize, 64), 1, 1);
@@ -251,9 +259,9 @@ impl EngineIngest {
         let params = gpu.uniform("ingest params", &params);
         let records = (2 * self.max_rows * substeps.max(1)) as usize;
         let n = self.chunk_count as usize;
-        for (k, size) in [(&self.clear, groups(2 * n, 64)), (&self.count, groups(records, 64)), (&self.scan, 1), (&self.scatter, groups(records, 64)), (&self.merge, groups(n, 64))] {
+        for (k, size, label) in [(&self.clear, groups(2 * n, 64), "ingest clear"), (&self.count, groups(records, 64), "ingest count"), (&self.scan, groups(n, 1024), "ingest scan"), (&self.scan_top, 1, "ingest scan blocks"), (&self.scan_add, groups(n, 64), "ingest scan add"), (&self.scatter, groups(records, 64), "ingest scatter"), (&self.merge, groups(n, 64), "ingest merge")] {
             let bind = self.bind(gpu, k, &params, e);
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(size, 1, 1);

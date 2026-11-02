@@ -380,3 +380,70 @@ fn several_impacts_open_areas_that_settle_and_bake_on_their_own() {
         "volume kept to the quantum"
     );
 }
+
+/// A scene reset with terrain (the web pages' R key): a save with no area
+/// open, an impact that digs and bakes a crater, then a restore with another
+/// area open. The open area is dropped, not baked, the heightfield is back to
+/// its saved samples on the GPU and in the mirror, and the same impact digs
+/// the same crater again.
+#[test]
+fn restore_drops_open_areas_and_puts_the_heightfield_back() {
+    let mut w = world();
+    let def = TerrainDef {
+        surface: Some(TerrainSurfaceDef {
+            patch_samples: 0,
+            max_debris: 0,
+            ..TerrainSurfaceDef::default()
+        }),
+        ..terrain_def()
+    };
+    w.enable_terrain(&def).unwrap();
+    let impact = ImpactSource {
+        impactor_radius: 0.005,
+        impactor_density: 2700.0,
+        velocity: glam::DVec3::new(0.0, -2000.0, 0.0),
+        target: CraterTarget::sand(&def.material).unwrap(),
+    };
+    let spacing = 0.147 / 8.0;
+    let (ground, field) = flat_ground(&mut w, 97, spacing);
+    let saved = w.save_state().unwrap();
+    // Dig and bake a crater (closed once formed), then open another area.
+    let dig = |w: &mut World| {
+        w.terrain_impact(ground, &impact, [0.0, 0.0, 0.0]).unwrap();
+        for _ in 0..8 {
+            w.step().unwrap();
+        }
+        w.terrain_close().unwrap();
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        w.read_height_field(ground).unwrap()
+    };
+    let first = dig(&mut w);
+    assert!(first != field.heights(), "a crater was baked");
+    w.terrain_impact(ground, &impact, [0.5, 0.0, 0.5]).unwrap();
+    w.step().unwrap();
+    assert!(w.save_state().is_err(), "no save with an area open");
+    w.restore_state(&saved).unwrap();
+    assert!(w.terrain_areas().is_empty(), "the open area was dropped");
+    assert_eq!(
+        mirror(&w, ground),
+        field.heights(),
+        "the mirror is the saved field"
+    );
+    assert_eq!(
+        w.read_height_field(ground).unwrap(),
+        field.heights(),
+        "the GPU's samples are the saved field"
+    );
+    w.poll_blocking().unwrap();
+    let again = dig(&mut w);
+    let worst = first
+        .iter()
+        .zip(&again)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst < 1e-4,
+        "the same impact digs the same crater ({worst} m apart)"
+    );
+}

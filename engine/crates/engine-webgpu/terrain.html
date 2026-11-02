@@ -35,13 +35,13 @@
     <div id="status" class="muted">starting…</div>
     <div id="err"></div>
   </div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, sceneCapacity } from './world-host.mjs';
-    import { M, heightFieldArena } from './vehicle.mjs';
+    import { createWorld, Poses, pollFrame, stepFrames, errorText } from './rubble-world.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
-    const fail = (e) => { errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
+    const fail = (e) => { errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
     addEventListener('error', (e) => fail(e.error || e.message));
 
@@ -53,15 +53,13 @@
     countSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('n', countSel.value); location.href = u.href; };
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('no WebGPU adapter');
-    const device = await adapter.requestDevice({
-      requiredLimits: {
-        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
-        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-        maxBufferSize: adapter.limits.maxBufferSize,
-      },
+    // The world opens the device; the page renders on it and reads the world's buffers in place.
+    const world = await createWorld({
+      gravity: [0, -9.81, 0],
+      contacts: 'canonical',
+      capacity: { maxBodies: N + 8, maxColliders: N + 8, maxCommands: 4 * (N + 8), maxHullVertices: 65536 },
     });
+    const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
     const canvas = document.getElementById('c');
@@ -87,29 +85,24 @@
     let heights = initialHeights.slice();
 
     // ---------------------------------------------------------------- world
-    const cap = { ...sceneCapacity(N + 8, N + 8), maxHull: 8192 };
-    const world = await createWorld(device, { cap, status: (s) => { statusEl.textContent = s; } });
     const DT = 1 / 60;
-    world.params.dt = DT;
-    world.params.iterations = 10;
-    world.params.gravityY = -9.81;
-    world.params.flags = M.FLAG_SPEC_VELOCITY;
-    world.setMaterial(0, 0.8);
+    world.setSolver({ dt: DT, iterations: 10, flags: world.flags.SPEC_VELOCITY });
+    const material = { friction: 0.8 };
 
-    // Collider 0: the terrain (records packed in Rust, engine_schema::heightfield).
-    const ground = world.addBody({ p: [0, 0, 0], flags: 0 });
-    let arena = heightFieldArena(NX, NZ, DX, DZ, heights);
-    world.setHullRecords(arena.records);
-    world.addCollider({ body: ground, shape: 5, material: 0, params: arena.params });
-    const hfBase = arena.base;
+    // The terrain: a static heightfield (its first collider).
+    const ground = world.createBody({});
+    const terrain = world.createHeightField(ground, { material }, NX, NZ, DX, DZ, heights);
+    if (world.shapeCollider(terrain) !== 0) throw new Error('the terrain must be collider 0');
 
-    // Bodies: boxes, spheres and capsules on a jittered grid above the hills.
+    // Bodies: boxes, spheres and capsules on a jittered grid above the hills. Each has
+    // mass 1 and the inertia given here (not derived from its shape).
     const rand = (() => { let s = 12345; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); })();
-    const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
+    const boxI = (m, hx, hy, hz) => [(m * (hy * hy + hz * hz)) / 3, (m * (hx * hx + hz * hz)) / 3, (m * (hx * hx + hy * hy)) / 3];
     const qRand = () => { const a = rand() * 6.283, b = rand() * 6.283; const s = Math.sin(a / 2); return [Math.cos(b) * s, Math.sin(b) * s * 0.5, 0.6 * s, Math.cos(a / 2)]; };
     const norm4 = (q) => { const l = Math.hypot(...q); return q.map((x) => x / l); };
     const side = Math.ceil(Math.sqrt(N / 6));
     const spacing = 1.1;
+    const bodies = []; // { id, slot, p, q }
     for (let k = 0; k < N; k++) {
       const layer = Math.floor(k / (side * side));
       const cell = k % (side * side);
@@ -119,22 +112,34 @@
       const q = norm4(qRand());
       const m = 1;
       const kind = k % 3;
+      const id = world.createBody({ type: 'dynamic', position: [x, y, z], rotation: q });
+      let inertia;
       if (kind === 0) {
         const h = [0.15 + 0.15 * rand(), 0.12 + 0.12 * rand(), 0.15 + 0.15 * rand()];
-        const body = world.addBody({ p: [x, y, z], q, invMass: 1 / m, invI: boxInv(m, ...h), flags: 1 | 8 });
-        world.addCollider({ body, shape: 2, params: [...h, Math.hypot(...h)] });
+        world.createShape(id, { material }, { box: { half: h } });
+        inertia = boxI(m, ...h);
       } else if (kind === 1) {
-        const r = 0.15 + 0.1 * rand(), i = 2.5 / (m * r * r);
-        const body = world.addBody({ p: [x, y, z], q, invMass: 1 / m, invI: [i, i, i], flags: 1 | 8 });
-        world.addCollider({ body, shape: 0, params: [r, 0, 0, r] });
+        const r = 0.15 + 0.1 * rand(), i = (m * r * r) / 2.5;
+        world.createShape(id, { material }, { sphere: { radius: r } });
+        inertia = [i, i, i];
       } else {
         const r = 0.12, hh = 0.18 + 0.1 * rand(), len = 2 * (hh + r);
-        const ia = 12 / (m * (3 * r * r + len * len)), iy = 2 / (m * r * r);
-        const body = world.addBody({ p: [x, y, z], q, invMass: 1 / m, invI: [ia, iy, ia], flags: 1 | 8 });
-        world.addCollider({ body, shape: 1, params: [r, hh, 0, r + hh] });
+        world.createShape(id, { material }, { capsule: { radius: r, halfLen: hh } });
+        inertia = [(m * (3 * r * r + len * len)) / 12, (m * r * r) / 2, (m * (3 * r * r + len * len)) / 12];
       }
+      world.bodySetMassData(id, m, [0, 0, 0], inertia);
+      bodies.push({ id, slot: world.bodySlot(id), p: [x, y, z], q });
     }
-    const initial = world.snapshot();
+    // Every body's pose as the last polled frame left it.
+    const poses = new Poses(N + 8);
+    for (const b of bodies) poses.pose.set([...b.p, ...b.q], b.slot * 7);
+    let lastCounters = null;
+    const onFrame = (f) => {
+      poses.apply(f);
+      const c = f.counters();
+      if (c) lastCounters = { contact: c.contacts, awake: c.awake, overflow: c.overflow };
+    };
+    const surfaceAt = (x, z) => { const h = world.heightFieldSurface(terrain, x, z); return Number.isNaN(h) ? null : h; };
 
     // ---------------------------------------------------------------- renderer
     const SHADER = /* wgsl */`
@@ -228,7 +233,7 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
 
 // The terrain straight from the physics records (engine_schema::heightfield):
 // header (magic, nx, nz, flags), (dx, dz, min, max), then heights, four per record.
-const HF_BASE = ${hfBase}u;
+const HF_BASE = ${world.shapeArenaBase(terrain)}u;
 fn hfH(i: u32, j: u32, nx: u32) -> f32 {
   let k = j * nx + i;
   let r = hulls[HF_BASE + 2u + (k >> 2u)];
@@ -289,9 +294,15 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
     const colPipe = pipe('vsCol', 'fsCol', vtx6);
     const terrainPipe = pipe('vsTerrain', 'fsTerrain', []);
     const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
-    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
-    // The hull arena buffer is replaced only when it grows; this page sizes it once (cap.maxHull).
-    const terrainBind = bind(terrainPipe, [[1, frameBuf], [3, world.bufs[18]]]);
+    // The world's buffers can be replaced when they grow: rebind when one is a new object.
+    let colBind = null, terrainBind = null, bound = [];
+    const rebind = () => {
+      const bufs = [world.bodyBuffer(), world.colliderBuffer(), world.hullArenaBuffer()];
+      if (bufs.every((b, i) => b === bound[i])) return;
+      bound = bufs;
+      colBind = bind(colPipe, [[0, bufs[0]], [1, frameBuf], [2, bufs[1]]]);
+      terrainBind = bind(terrainPipe, [[1, frameBuf], [3, bufs[2]]]);
+    };
     let depth = null;
 
     // ---------------------------------------------------------------- camera / input
@@ -333,44 +344,8 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
     document.getElementById('craterBtn').onclick = () => crater();
     document.getElementById('rainBtn').onclick = () => rain();
 
-    // ---------------------------------------------------------------- body readback
-    // Every body's pose, a few times a second, for the blast and the checks.
-    const allBytes = world.bodyCount * 112;
-    const poseRb = device.createBuffer({ size: allBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    let poseBusy = false;
-    let poses = null; // Float32Array of BodyState records
-    let poseFlags = null;
-    async function readPoses(enc) {
-      poseBusy = true;
-      enc.copyBufferToBuffer(world.bufs[0], 0, poseRb, 0, allBytes);
-      return () => poseRb.mapAsync(GPUMapMode.READ).then(() => {
-        const bytes = poseRb.getMappedRange().slice(0);
-        poseRb.unmap();
-        poses = new Float32Array(bytes);
-        poseFlags = new Uint32Array(bytes);
-        poseBusy = false;
-      });
-    }
-    const counterRb = [0, 1, 2].map(() => device.createBuffer({ size: 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
-    let lastCounters = null;
-
     // ---------------------------------------------------------------- edits
-    // Surface height of the collider's triangle under (x, z) (the same split the
-    // GPU uses), for the checks and the blast.
-    function surfaceAt(x, z) {
-      const fx = (x - X0) / DX, fz = (z - Z0) / DZ;
-      if (fx < 0 || fz < 0 || fx > NX - 1 || fz > NZ - 1) return null;
-      const i = Math.min(Math.floor(fx), NX - 2), j = Math.min(Math.floor(fz), NZ - 2);
-      const u = fx - i, v = fz - j;
-      const h = (a, b) => heights[(j + b) * NX + i + a];
-      return u >= v ? h(0, 0) + u * (h(1, 0) - h(0, 0)) + v * (h(1, 1) - h(1, 0)) : h(0, 0) + v * (h(0, 1) - h(0, 0)) + u * (h(1, 1) - h(0, 1));
-    }
-    function uploadHeights() {
-      arena = heightFieldArena(NX, NZ, DX, DZ, heights);
-      world.setHullRecords(arena.records);
-      // The collider's bounds follow the new height range.
-      world.backend.writeCollider(0, world.colliderWords.slice(0, 16).map((w, k) => (k >= 12 ? new Uint32Array(Float32Array.of(arena.params[k - 12]).buffer)[0] : w)));
-    }
+    const uploadHeights = () => world.setHeightFieldRegion(terrain, 0, 0, NX, NZ, heights);
     let craters = 0;
     function crater(at) {
       const c = at || [(rand() - 0.5) * 24, (rand() - 0.5) * 24];
@@ -390,38 +365,32 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
       }
       uploadHeights();
       // Blast: an outward and upward impulse on bodies within 2R (wakes them).
-      if (poses) {
-        for (let b = 1; b < world.bodyCount; b++) {
-          const o = b * 28;
-          const p = [poses[o], poses[o + 1], poses[o + 2]];
-          const dx = p[0] - c[0], dz = p[2] - c[1];
-          const r = Math.hypot(dx, dz);
-          if (r > 2 * R) continue;
-          const k = 6 * (1 - r / (2 * R));
-          world.applyImpulse(b, [k * dx / (r + 0.3), k * 1.2, k * dz / (r + 0.3)], p);
-        }
+      for (const b of bodies) {
+        const p = poses.position(b.slot);
+        const dx = p[0] - c[0], dz = p[2] - c[1];
+        const r = Math.hypot(dx, dz);
+        if (r > 2 * R) continue;
+        const k = 6 * (1 - r / (2 * R));
+        world.bodyApplyLinearImpulse(b.id, [k * dx / (r + 0.3), k * 1.2, k * dz / (r + 0.3)], p, true);
       }
       craters++;
     }
     function rain() {
-      if (!poses) return;
-      // Lift a random tenth of the bodies 10 m up (teleport through the body record).
-      for (let b = 1; b < world.bodyCount; b++) {
+      // Lift a random tenth of the bodies 10 m up, at rest.
+      for (const b of bodies) {
         if (rand() > 0.1) continue;
-        const words = world.bodyWords.slice(b * 28, b * 28 + 28);
-        const f = new Float32Array(words.buffer);
-        const o = b * 28;
-        f[0] = poses[o] + (rand() - 0.5) * 2; f[1] = Math.max(poses[o + 1], surfaceAt(poses[o], poses[o + 2]) ?? 0) + 10; f[2] = poses[o + 2] + (rand() - 0.5) * 2;
-        for (let k = 4; k < 8; k++) f[k] = poses[o + k];
-        f[12] = 0; f[13] = 0; f[14] = 0; f[16] = 0; f[17] = 0; f[18] = 0;
-        words[11] = (poseFlags[o + 11] | 8) >>> 0;
-        f[20] = f[0]; f[21] = f[1]; f[22] = f[2];
-        for (let k = 24; k < 28; k++) f[k] = f[k - 20];
-        world.backend.writeBody(b, words);
+        const p = poses.position(b.slot);
+        const to = [p[0] + (rand() - 0.5) * 2, Math.max(p[1], surfaceAt(p[0], p[2]) ?? 0) + 10, p[2] + (rand() - 0.5) * 2];
+        world.bodySetTransform(b.id, to, poses.rotation(b.slot));
+        world.bodySetVelocity(b.id, [0, 0, 0], [0, 0, 0]);
       }
     }
     function reset() {
-      world.restore(initial);
+      // Every body back to its start, at rest.
+      for (const b of bodies) {
+        world.bodySetTransform(b.id, b.p, b.q);
+        world.bodySetVelocity(b.id, [0, 0, 0], [0, 0, 0]);
+      }
       heights = initialHeights.slice();
       uploadHeights();
       craters = 0;
@@ -440,51 +409,39 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
       device.queue.writeBuffer(frameBuf, 0, frameF);
     }
     function drawScene(enc) {
+      rebind();
       const rp = enc.beginRenderPass({
         colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
       rp.setPipeline(terrainPipe); rp.setBindGroup(0, terrainBind); rp.draw((NX - 1) * (NZ - 1) * 6);
-      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
+      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount() - 1);
       rp.end();
+    }
+    function draw() {
+      updateCamera();
+      const enc = device.createCommandEncoder();
+      drawScene(enc);
+      device.queue.submit([enc.finish()]);
     }
     const frameF = new Float32Array(24);
     let manual = false;
     let lastT = performance.now(), fpsAcc = 0, fpsN = 0, fpsShow = 0, physMs = 0;
     const statsEl = document.getElementById('stats');
-    function stepOnce(enc) { world.encodeStep(enc); }
-    async function counters(enc) {
-      const rb = counterRb.pop();
-      if (!rb) return null;
-      enc.copyBufferToBuffer(world.bufs[7], 0, rb, 0, 80);
-      return () => rb.mapAsync(GPUMapMode.READ).then(() => {
-        const c = new Uint32Array(rb.getMappedRange().slice(0));
-        rb.unmap();
-        counterRb.push(rb);
-        world.setLastCounters(c);
-        lastCounters = { contact: c[2], awake: c[5], overflow: c[7] };
-      });
-    }
-    async function frame(now) {
+    function frame(now) {
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
       fpsAcc += dt; fpsN++;
       if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
       if (manual) { requestAnimationFrame(frame); return; }
-      updateCamera();
-      const enc = device.createCommandEncoder();
       const t0 = performance.now();
-      stepOnce(enc);
-      drawScene(enc);
-      const done = await counters(enc);
-      const poseDone = !poseBusy && world.steps % 15 === 0 ? await readPoses(enc) : null;
-      device.queue.submit([enc.finish()]);
+      world.step();
+      pollFrame(world, onFrame);
       physMs = performance.now() - t0;
-      if (done) done().catch(fail);
-      if (poseDone) poseDone().catch(fail);
+      draw();
       const c = lastCounters;
-      statsEl.innerHTML = `${world.bodyCount - 1} bodies · ${craters} craters` + (c ? ` · contacts ${c.contact} · awake ${c.awake}${c.overflow ? ` · <span class="bad">overflow 0x${c.overflow.toString(16)}</span>` : ''}` : '');
-      statusEl.textContent = `step ${world.steps} · ${fpsShow.toFixed(0)} fps · encode ${physMs.toFixed(1)} ms`;
+      statsEl.innerHTML = `${bodies.length} bodies · ${craters} craters` + (c ? ` · contacts ${c.contact} · awake ${c.awake}${c.overflow ? ` · <span class="bad">overflow 0x${c.overflow.toString(16)}</span>` : ''}` : '');
+      statusEl.textContent = `step ${world.stepCount()} · ${fpsShow.toFixed(0)} fps · host ${physMs.toFixed(1)} ms`;
       requestAnimationFrame(frame);
     }
 
@@ -492,20 +449,9 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
     // __step(n): n physics steps, frame-locked; then counters and every pose.
     window.__step = async (n = 1) => {
       manual = true;
-      for (let i = 0; i < n; i++) {
-        const enc = device.createCommandEncoder();
-        stepOnce(enc);
-        const done = (i % 8 === 7 || i === n - 1) ? await counters(enc) : null;
-        device.queue.submit([enc.finish()]);
-        if (done) await done();
-      }
-      const enc = device.createCommandEncoder();
-      const poseDone = await readPoses(enc);
-      updateCamera();
-      drawScene(enc);
-      device.queue.submit([enc.finish()]);
-      await poseDone();
-      return { steps: world.steps, counters: lastCounters };
+      await stepFrames(world, n, onFrame);
+      draw();
+      return { steps: world.stepCount(), counters: lastCounters };
     };
     // __check(): settle, dig a crater under the pile, settle again; every body
     // must stay on or above the terrain (centre above the surface under it).
@@ -516,15 +462,14 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
       const below = () => {
         let n = 0, off = 0, deepest = 0;
         const cases = [];
-        for (let b = 1; b < world.bodyCount; b++) {
-          const o = b * 28;
-          const x = poses[o], z = poses[o + 2];
+        for (const b of bodies) {
+          const [x, y, z] = poses.position(b.slot);
           const h = Math.abs(x) < -X0 - margin && Math.abs(z) < -Z0 - margin ? surfaceAt(x, z) : null;
           if (h === null) { off++; continue; }
-          const d = h - poses[o + 1];
+          const d = h - y;
           if (d > 0) {
             n++; deepest = Math.max(deepest, d);
-            if (cases.length < 6) cases.push({ b, shape: world.colliderWords[b * 16 + 1], p: [x, poses[o + 1], z].map((v) => +v.toFixed(2)), surface: +h.toFixed(2), v: [poses[o + 12], poses[o + 13], poses[o + 14]].map((v) => +v.toFixed(2)) });
+            if (cases.length < 6) cases.push({ slot: b.slot, p: [x, y, z].map((v) => +v.toFixed(2)), surface: +h.toFixed(2) });
           }
         }
         return { below: n, off, deepest, cases };
@@ -534,7 +479,7 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
       crater([0, 0]);
       await window.__step(240);
       const afterCrater = { ...below(), counters: lastCounters };
-      return { bodies: world.bodyCount - 1, settled, afterCrater };
+      return { bodies: bodies.length, settled, afterCrater };
     };
     window.__world = world;
     window.__ready = true;

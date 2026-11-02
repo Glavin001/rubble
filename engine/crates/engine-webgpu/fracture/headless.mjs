@@ -4,7 +4,7 @@
 // and prints its JSON result. No npm dependencies (Node 22: fetch, WebSocket).
 //
 //   node headless.mjs [scene=grid] [warm=420] [measure=120] [profile=1]
-//                     [trace=0] [shot=row|none] [budget='{"deterministic":true}']
+//                     [trace=0] [shot=row|none] [budget='{"contactsPerCollider":16}']
 //   CHROME=/path/to/chrome node headless.mjs ...   (default: Google Chrome)
 //   CHROME_ARGS='--enable-dawn-features=disable_robustness' adds browser flags
 import http from 'node:http';
@@ -15,7 +15,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const types = {'.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.wgsl': 'text/plain', '.glb': 'model/gltf-binary', '.json': 'application/json'};
+const types = {'.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.wgsl': 'text/plain', '.glb': 'model/gltf-binary', '.json': 'application/json', '.wasm': 'application/wasm'};
 const params = new URLSearchParams(process.argv.slice(2).map((arg) => arg.includes('=') ? arg : `scene=${arg}`).join('&'));
 const chrome = process.env.CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const timeoutMs = Number(process.env.TIMEOUT_MS ?? 600000);
