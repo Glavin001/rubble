@@ -88,6 +88,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "archive_touch",
     "archive_touch_spread",
     "archive_touch_snap",
+    "archive_touch_args",
     "archive_count_persistent",
     "archive_scatter_persistent",
     "init_colors",

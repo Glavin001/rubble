@@ -3880,6 +3880,22 @@ void archiveList(uint body)
         ASTORE(gScratchAtomics[arTouchedList(at)], body);
 }
 
+// The touch query lists a touched sleeper only if the touch can wake it this step
+// (wakeFromContact's rule on the same velocities): one it cannot wake stays asleep, its
+// pairs stay at rest, and nothing this step reads them.
+bool touchMayWake(BodyState m, BodyState s, uint cm, uint cs)
+{
+    bool awake = (bodyIsDynamic(m) && !bodyIsSleeping(m) && canWake(m)) || kinematicMoving(m);
+    if (!awake) return false;
+    if (wakeOnTouch()) return true;
+    float3 vRel = m.linearVel - s.linearVel;
+    float thresh = PARAMS.sleepLin;
+    if (pointSpeedSleep())
+        return length(vRel) + length(m.angularVel) * colliderExtent(gColliders[cm]) +
+            length(s.angularVel) * colliderExtent(gColliders[cs]) >= thresh;
+    return dot(vRel, vRel) >= thresh * thresh || length(m.angularVel) + length(s.angularVel) >= PARAMS.sleepAng;
+}
+
 void archiveTouch(uint i, uint j)
 {
     uint bi = gColliders[i].body;
@@ -3887,9 +3903,15 @@ void archiveTouch(uint i, uint j)
     BodyState a = gBodies[bi];
     BodyState b = gBodies[bj];
     if (bodyMovingOrKinematic(a) && bodyIsDynamic(b) && bodyIsSleeping(b))
-        archiveTouchQuery() ? archiveList(bj) : archiveMark(bj);
+    {
+        if (!archiveTouchQuery()) archiveMark(bj);
+        else if (touchMayWake(a, b, i, j)) archiveList(bj);
+    }
     else if (bodyMovingOrKinematic(b) && bodyIsDynamic(a) && bodyIsSleeping(a))
-        archiveTouchQuery() ? archiveList(bi) : archiveMark(bi);
+    {
+        if (!archiveTouchQuery()) archiveMark(bi);
+        else if (touchMayWake(b, a, j, i)) archiveList(bi);
+    }
 }
 
 // A listed sleeper's archived resting pairs (each pair once; a pair whose partner
@@ -6707,20 +6729,29 @@ void archive_emit(uint3 tid : SV_DispatchThreadID)
         archiveEmitResting(ALOAD(gScratchAtomics[arTouchedList(k)]));
 }
 
-// archive_touch, in place of archive_emit with the touch query (4,096 threads striding
-// over this step's touched sleepers): each one's resting pairs (touchQueryBody).
+// archive_touch, in place of archive_emit with the touch query (slot 83: a thread a
+// listed sleeper): each one's resting pairs (touchQueryBody).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void archive_touch(uint3 tid : SV_DispatchThreadID)
 {
-    uint i = dispatchIndex(tid);
+    uint k = dispatchIndex(tid);
     if (!sleepArchive()) return;
-    uint step = HOST_S(17);
-    if (i == 0u)
-        ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], 0u);
-    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(step)]), HOST_S(1));
-    for (uint k = i; k < n && k < 1048576u; k += 4096u)
+    if (k < min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1)))
         touchQueryBody(ALOAD(gScratchAtomics[arTouchedList(k)]), false);
+}
+
+// archive_touch_args (one thread, after the spread): archive_touch's work (slot 83, a
+// thread a listed sleeper), and the next step's count word emptied (it held the
+// spread's snapshot).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u || !sleepArchive()) return;
+    uint step = HOST_S(17);
+    writeDispatchArgs(83u, min(ALOAD(gScratchAtomics[arTouchedCount(step)]), HOST_S(1)));
+    ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], 0u);
 }
 
 // archive_touch_spread, before archive_touch: the sleepers the listed ones rest on are
@@ -6733,23 +6764,25 @@ void archive_touch(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void archive_touch_spread(uint3 tid : SV_DispatchThreadID)
 {
-    uint i = dispatchIndex(tid);
+    uint k = dispatchIndex(tid);
     if (!sleepArchive()) return;
     // The list as archive_touch_snap left it (entries listed here are not followed).
-    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17) + 1u)]), HOST_S(1));
-    for (uint k = i; k < n && k < 1048576u; k += 4096u)
+    if (k < min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17) + 1u)]), HOST_S(1)))
         touchQueryBody(ALOAD(gScratchAtomics[arTouchedList(k)]), true);
 }
 
 // archive_touch_snap (one thread, before archive_touch_spread): the listed count, in
-// the next step's count word (archive_touch empties it again).
+// the next step's count word (archive_touch_args empties it again), and the spread's
+// work (slot 83, a thread a listed sleeper).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void archive_touch_snap(uint3 tid : SV_DispatchThreadID)
 {
     if (dispatchIndex(tid) != 0u || !sleepArchive()) return;
     uint step = HOST_S(17);
-    ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], ALOAD(gScratchAtomics[arTouchedCount(step)]));
+    uint n = ALOAD(gScratchAtomics[arTouchedCount(step)]);
+    ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], n);
+    writeDispatchArgs(83u, min(n, HOST_S(1)));
 }
 
 // archive_seal, over this step's awake list: the step's archiving is done.
