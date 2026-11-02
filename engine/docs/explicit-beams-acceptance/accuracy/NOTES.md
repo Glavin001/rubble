@@ -99,3 +99,40 @@ cargo run --release -p engine-softbody --example ror_compare -- free <agoras.tru
 
 **RoR quirk:** RoR's static boxes do not register at negative coordinates.
 Keep probe scenes at positive coordinates.
+
+## Agora S wall: spread over speed nudges (single vehicle)
+
+**GPU, acceptance scene** (`explicit_beams_scaling ... scenarios=impact counts=1
+speed=<s>`): Rubble GPU against RoR at the same speed, plus RoR's own
+sensitivity sample (RoR at that speed against itself 0.1 mm/s faster).
+
+| speed (m/s) | GPU against RoR | Broken (GPU / RoR) | Travel (GPU / RoR, m) | RoR against itself |
+|---|---|---|---|---|
+| 27.7798 | 2027 mm | 21 / 19 | 11.03 / 9.07 | 70 mm |
+| 27.7799 | 1971 mm | 21 / 19 | 11.04 / 9.15 | 346 mm |
+| 27.78 | 2149 mm | 21 / 19 | 10.99 / 8.95 | 639 mm |
+| 27.7801 | 663 mm | 19 / 19 | 9.37 / 8.91 | 630 mm |
+| 27.7802 | 1788 mm | 20 / 19 | 10.60 / 9.00 | 518 mm |
+| 27.7803 | 566 mm | 19 / 19 | 8.96 / 9.01 | 33 mm |
+
+The GPU splits into two outcomes: travel close to RoR's (2 of 6), or about 2 m
+further with 20–21 broken beams (4 of 6). RoR's travel stays within 8.9–9.15 m
+in all six runs.
+
+**CPU, `free` scene,** each against the RoR base run at −27.78 m/s:
+
+| vx (m/s) | CPU against RoR base | CPU broken | RoR at this speed against RoR base |
+|---|---|---|---|
+| −27.78 | 947 mm | 21 | 0 mm |
+| −27.7801 | 986 mm | 21 | 894 mm |
+| −27.7802 | 1425 mm | 19 | 188 mm |
+| −27.7803 | 207 mm | 21 | 822 mm |
+| −27.7799 | 817 mm | 19 | 827 mm |
+| −27.7798 | 1399 mm | 19 | 639 mm |
+
+**Reading:**
+- The CPU's spread overlaps RoR's.
+- The GPU's spread looks shifted toward the 2 m-further outcome. The GPU and
+  CPU agree at the origin (86 mm through this crash) but not about 190 m out,
+  so the open suspect is GPU float rounding far from the origin.
+- Six samples per engine is too few to settle either point.
