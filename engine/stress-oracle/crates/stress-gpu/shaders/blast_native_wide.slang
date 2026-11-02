@@ -28,9 +28,8 @@ static const uint PARTIAL = 6;
 static const uint S_SCALARS = 0;  // (delta^2, num, gamma_prev, best)
 static const uint S_STEP = 1;     // (gamma, alpha, beta, force step)
 static const uint S_COUNT = 2;    // (force start, travel, iteration bits, flags bits)
-static const uint S_CENTRE = 3;   // (centre, best iteration bits)
-static const uint S_COEF = 4;     // 4, 5: the projection's coefficients (w, t)
-static const uint S_GRAM = 6;     // 6..14: the rigid modes' Gram matrix (36 floats)
+static const uint S_BEST = 3;     // (0, 0, 0, best iteration bits)
+static const uint S_COEF = 4;     // 4, 5: the projection's rigid motion (omega, t)
 // Flags.
 static const uint F_ACTIVE = 1;
 static const uint F_CONVERGED = 2;
@@ -191,8 +190,7 @@ uint4 row_range(uint tid, uint row)
 
 // ------------------------------------------------------------------ set-up
 
-// b, the residual's start, the input kept, the blocks; partials: 0 (target, singular, differs,
-// 0), 1 (sum w p, sum w) for the rigid modes' centre.
+// b, the residual's start, the input kept, the blocks; partial 0 (target, singular, differs, 0).
 [shader("compute")]
 [numthreads(1024, 1, 1)]
 void w_init_nodes(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
@@ -202,7 +200,6 @@ void w_init_nodes(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     if (b.begin >= b.end)
         return;
     float4 p0 = float4(0.0);
-    float4 p1 = float4(0.0);
     uint p = b.begin + tid;
     if (p < b.end)
     {
@@ -223,14 +220,11 @@ void w_init_nodes(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         set_v(i, N_P, float3(0.0), float3(0.0));
         if (!build_block(i))
             p0.y = 1.0;
-        float w = 1.0 / (n.w_lin * n.w_lin);
-        p1 = float4(n.position.xyz * w, w);
     }
     write_partial(tid, b.row, group.x, 0, p0);
-    write_partial(tid, b.row, group.x, 1, p1);
 }
 
-// Partial 2: (whether a live bond reaches a support, 0, 0, 0); a cold start's x cleared.
+// A cold start's x cleared.
 [shader("compute")]
 [numthreads(1024, 1, 1)]
 void w_init_bonds(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
@@ -239,24 +233,17 @@ void w_init_bonds(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     Block b = bond_block(group, tid);
     if (b.begin >= b.end)
         return;
-    float anchor = 0.0;
     uint p = b.begin + tid;
-    if (p < b.end)
+    if (p < b.end && params.warm == 0)
     {
         uint j = lists[p];
-        BlastBond bd = bonds[j];
-        if (bd.health > 0.0 && (!(nodes[bd.n0].w_lin > 0.0) || !(nodes[bd.n1].w_lin > 0.0)))
-            anchor = 1.0;
-        if (params.warm == 0)
-        {
-            x[j * 2] = float4(0.0);
-            x[j * 2 + 1] = float4(0.0);
-        }
+        x[j * 2] = float4(0.0);
+        x[j * 2 + 1] = float4(0.0);
     }
-    write_partial(tid, b.row, group.x, 2, float4(anchor, 0.0, 0.0, 0.0));
 }
 
-// The row's start: the certificate's skip, the target, a zero load, whether free, the centre.
+// The row's start: the certificate's skip, the target, a zero load, whether free (the frame,
+// blast_motion.slang; one it could not build fails the row).
 [shader("compute")]
 [numthreads(1024, 1, 1)]
 void w_setup(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
@@ -266,10 +253,7 @@ void w_setup(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     uint island = group_uniform(row_island(row), tid);
     uint4 r = group_uniform4(islands[island], tid);
     uint nb = blocks(r.y - r.x);
-    uint bb = blocks(r.w - r.z);
     float4 s0 = row_sum(tid, row, nb, 0);
-    float4 s1 = row_sum(tid, row, nb, 1);
-    float4 s2 = row_sum(tid, row, bb, 2);
     if (tid != 0)
         return;
     uint4 last = report[island];
@@ -280,104 +264,17 @@ void w_setup(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     float delta2 = s0.x * params.tolerance * params.tolerance;
     if (f == F_ACTIVE)
     {
-        if (s0.y > 0.0)
+        if (s0.y > 0.0 || frame_word(island, F_ERROR) != 0)
             f = F_FAILED;
         else if (!(delta2 > 0.0))
             f = F_ZERO | F_CONVERGED;
     }
-    if (s2.x == 0.0)
+    if (frame_word(island, F_ANCHORED) == 0)
         f |= F_FREE;
     wide[st(row, S_SCALARS)] = float4(delta2, 0.0, 0.0, float_bits(0x7f800000u));
     wide[st(row, S_STEP)] = float4(0.0, 0.0, 0.0, float_bits(0x7f800000u));
     wide[st(row, S_COUNT)] = float4(0.0, 0.0, asfloat(0u), asfloat(f));
-    wide[st(row, S_CENTRE)] = float4(s1.y > 0.0 ? s1.xyz / s1.w : float3(0.0), asfloat(0u));
-}
-
-float3 wide_rel(uint row, uint n)
-{
-    return nodes[n].position.xyz - wide[st(row, S_CENTRE)].xyz;
-}
-
-// The Gram matrix's 22 sums (blast_native.slang `build_modes`), partials 0..5.
-[shader("compute")]
-[numthreads(1024, 1, 1)]
-void w_gram_nodes(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
-{
-    uint tid = thread.x;
-    Block b = node_block(group, tid);
-    if (b.begin >= b.end || (b.flags & F_FREE) == 0 || (b.flags & F_ACTIVE) == 0)
-        return;
-    float rr[6];
-    float3 rt[3];
-    for (uint z = 0; z < 6; z++)
-        rr[z] = 0.0;
-    for (uint z = 0; z < 3; z++)
-        rt[z] = float3(0.0);
-    float tt = 0.0;
-    uint p = b.begin + tid;
-    if (p < b.end)
-    {
-        uint i = lists[p];
-        BlastNode n = nodes[i];
-        float wa = 1.0 / (n.w_ang * n.w_ang);
-        float wl = 1.0 / (n.w_lin * n.w_lin);
-        float3 q = wide_rel(b.row, i);
-        float3 c[3] = { cross(q, float3(1, 0, 0)), cross(q, float3(0, 1, 0)), cross(q, float3(0, 0, 1)) };
-        rr[0] = wa + wl * dot(c[0], c[0]);
-        rr[1] = wa + wl * dot(c[1], c[1]);
-        rr[2] = wa + wl * dot(c[2], c[2]);
-        rr[3] = wl * dot(c[0], c[1]);
-        rr[4] = wl * dot(c[0], c[2]);
-        rr[5] = wl * dot(c[1], c[2]);
-        for (uint kk = 0; kk < 3; kk++)
-            rt[kk] = wl * c[kk];
-        tt = wl;
-    }
-    write_partial(tid, b.row, group.x, 0, float4(rr[0], rr[1], rr[2], rr[3]));
-    write_partial(tid, b.row, group.x, 1, float4(rr[4], rr[5], rt[0].x, rt[0].y));
-    write_partial(tid, b.row, group.x, 2, float4(rt[0].z, rt[1].x, rt[1].y, rt[1].z));
-    write_partial(tid, b.row, group.x, 3, float4(rt[2], tt));
-}
-
-[shader("compute")]
-[numthreads(1024, 1, 1)]
-void w_gram(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
-{
-    uint tid = thread.x;
-    uint row = group.x;
-    uint f = group_uniform(flags_of(row), tid);
-    if ((f & F_FREE) == 0 || (f & F_ACTIVE) == 0)
-        return;
-    uint4 r = row_range(tid, row);
-    uint nb = blocks(r.y - r.x);
-    float4 a = row_sum(tid, row, nb, 0);
-    float4 b = row_sum(tid, row, nb, 1);
-    float4 c = row_sum(tid, row, nb, 2);
-    float4 d = row_sum(tid, row, nb, 3);
-    if (tid != 0)
-        return;
-    float m[36];
-    for (uint z = 0; z < 36; z++)
-        m[z] = 0.0;
-    m[0] = a.x; m[7] = a.y; m[14] = a.z;
-    m[1] = a.w; m[6] = a.w;
-    m[2] = b.x; m[12] = b.x;
-    m[8] = b.y; m[13] = b.y;
-    float3 r0 = float3(b.z, b.w, c.x);
-    float3 r1 = float3(c.y, c.z, c.w);
-    float3 r2 = d.xyz;
-    for (uint j = 0; j < 3; j++)
-    {
-        m[0 * 6 + 3 + j] = r0[j];
-        m[1 * 6 + 3 + j] = r1[j];
-        m[2 * 6 + 3 + j] = r2[j];
-        m[(3 + j) * 6 + 0] = r0[j];
-        m[(3 + j) * 6 + 1] = r1[j];
-        m[(3 + j) * 6 + 2] = r2[j];
-        m[(3 + j) * 6 + 3 + j] = d.w;
-    }
-    for (uint z = 0; z < 9; z++)
-        wide[st(row, S_GRAM + z)] = float4(m[4 * z], m[4 * z + 1], m[4 * z + 2], m[4 * z + 3]);
+    wide[st(row, S_BEST)] = float4(0.0, 0.0, 0.0, asfloat(0u));
 }
 
 // A warm start's residual b - D C S x0.
@@ -407,25 +304,23 @@ bool runs(uint flags, bool only_rebuild)
     return (flags & F_ACTIVE) != 0 && (!only_rebuild || (flags & F_REBUILD) != 0);
 }
 
-// Partials 0, 1: the projection's right-hand side for node vector v.
+// Partials 0, 1: the projection's right-hand side for node vector v (frame_terms).
 void proj_part(uint3 group, uint tid, uint v, bool only_rebuild)
 {
     Block b = node_block(group, tid);
     if (b.begin >= b.end || !runs(b.flags, only_rebuild) || (b.flags & F_FREE) == 0)
         return;
-    float3 sr = float3(0.0);
-    float3 stt = float3(0.0);
+    float s[6];
+    for (uint z = 0; z < 6; z++)
+        s[z] = 0.0;
     uint p = b.begin + tid;
     if (p < b.end)
     {
-        uint i = lists[p];
-        BlastNode n = nodes[i];
-        float3 lin = vl(i, v) / n.w_lin;
-        sr = va(i, v) / n.w_ang - cross(wide_rel(b.row, i), lin);
-        stt = lin;
+        uint k = row_island(b.row);
+        frame_terms(k, frame_word(k, F_ROTATIONS), lists[p], v, s);
     }
-    write_partial(tid, b.row, group.x, 0, float4(sr, stt.x));
-    write_partial(tid, b.row, group.x, 1, float4(stt.yz, 0.0, 0.0));
+    write_partial(tid, b.row, group.x, 0, float4(s[0], s[1], s[2], s[3]));
+    write_partial(tid, b.row, group.x, 1, float4(s[4], s[5], 0.0, 0.0));
 }
 
 void proj_solve(uint3 group, uint tid, bool only_rebuild)
@@ -440,58 +335,13 @@ void proj_solve(uint3 group, uint tid, bool only_rebuild)
     float4 b = row_sum(tid, row, nb, 1);
     if (tid != 0)
         return;
-    float g[6][6];
-    float rhs[6] = { a.x, a.y, a.z, a.w, b.x, b.y };
-    for (uint z = 0; z < 36; z++)
-    {
-        float4 w = wide[st(row, S_GRAM + z / 4)];
-        g[z / 6][z % 6] = w[z % 4];
-    }
-    // Gaussian elimination with partial pivoting (blast_native.slang `solve_gram`).
-    float c[6];
-    bool ok = true;
-    for (uint col = 0; col < 6; col++)
-    {
-        uint piv = col;
-        for (uint rr = col + 1; rr < 6; rr++)
-            if (abs(g[rr][col]) > abs(g[piv][col]))
-                piv = rr;
-        for (uint k = 0; k < 6; k++)
-        {
-            float t = g[col][k];
-            g[col][k] = g[piv][k];
-            g[piv][k] = t;
-        }
-        float tb = rhs[col];
-        rhs[col] = rhs[piv];
-        rhs[piv] = tb;
-        if (!(abs(g[col][col]) > 0.0))
-        {
-            ok = false;
-            break;
-        }
-        for (uint rr = col + 1; rr < 6; rr++)
-        {
-            float fct = g[rr][col] / g[col][col];
-            for (uint k = col; k < 6; k++)
-                g[rr][k] -= fct * g[col][k];
-            rhs[rr] -= fct * rhs[col];
-        }
-    }
-    for (uint z = 0; z < 6; z++)
-        c[z] = 0.0;
-    if (ok)
-    {
-        for (int rr = 5; rr >= 0; rr--)
-        {
-            float s = rhs[rr];
-            for (uint k = uint(rr) + 1; k < 6; k++)
-                s -= g[rr][k] * c[k];
-            c[rr] = s / g[rr][rr];
-        }
-    }
-    wide[st(row, S_COEF)] = float4(c[0], c[1], c[2], 0.0);
-    wide[st(row, S_COEF + 1)] = float4(c[3], c[4], c[5], 0.0);
+    uint k = row_island(row);
+    float sum[6] = { a.x, a.y, a.z, a.w, b.x, b.y };
+    float3 omega;
+    float3 t;
+    frame_solve(k, frame_word(k, F_ROTATIONS), sum, omega, t);
+    wide[st(row, S_COEF)] = float4(omega, 0.0);
+    wide[st(row, S_COEF + 1)] = float4(t, 0.0);
 }
 
 void proj_apply(uint3 group, uint tid, uint v, bool only_rebuild)
@@ -502,11 +352,7 @@ void proj_apply(uint3 group, uint tid, uint v, bool only_rebuild)
     uint p = b.begin + tid;
     if (p >= b.end)
         return;
-    uint i = lists[p];
-    BlastNode n = nodes[i];
-    float3 w = wide[st(b.row, S_COEF)].xyz;
-    float3 t = wide[st(b.row, S_COEF + 1)].xyz;
-    set_v(i, v, va(i, v) - w / n.w_ang, vl(i, v) - (t + cross(wide_rel(b.row, i), w)) / n.w_lin);
+    frame_apply(lists[p], v, wide[st(b.row, S_COEF)].xyz, wide[st(b.row, S_COEF + 1)].xyz);
 }
 
 [shader("compute")] [numthreads(1024, 1, 1)] void w_proj_part_r(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) { proj_part(g, t.x, N_R, false); }
@@ -605,7 +451,7 @@ void w_test(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     set_flags(row, f);
     // The exact force norm for the force test, from this pass.
     float4 cnt = wide[st(row, S_COUNT)];
-    wide[st(row, S_CENTRE)] = float4(wide[st(row, S_CENTRE)].xyz, wide[st(row, S_CENTRE)].w);
+    wide[st(row, S_BEST)] = float4(wide[st(row, S_BEST)].xyz, wide[st(row, S_BEST)].w);
     wide[pt(row, 0, 5)] = float4(z.y, 0.0, 0.0, 0.0);
     wide[st(row, S_COUNT)] = cnt;
 }
@@ -654,7 +500,7 @@ void w_decide(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     float4 s0 = wide[st(row, S_SCALARS)];
     float4 s1 = wide[st(row, S_STEP)];
     float4 cnt = wide[st(row, S_COUNT)];
-    float4 cen = wide[st(row, S_CENTRE)];
+    float4 cen = wide[st(row, S_BEST)];
     float delta2 = s0.x;
     float num = s0.y;
     bool hold = (f & F_HOLD) != 0;
@@ -694,7 +540,7 @@ void w_decide(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         f &= ~F_ACTIVE;
     s0.y = num;
     wide[st(row, S_SCALARS)] = s0;
-    wide[st(row, S_CENTRE)] = float4(cen.xyz, asfloat(best_it));
+    wide[st(row, S_BEST)] = float4(cen.xyz, asfloat(best_it));
     set_flags(row, f);
 }
 

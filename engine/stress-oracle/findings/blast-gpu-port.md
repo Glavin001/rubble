@@ -6,6 +6,40 @@
 
 **The plan:** `~/.claude/plans/in-rubble-we-have-cheeky-feather.md`.
 
+## Parity with PhysX's native stage, 2026-11-01
+
+**Target:** the GPU stress solver of the PhysX fork's native destruction stage, `Glavin001/PhysX` branch `integration/oracle-stress-gpu`, commit `ec8118341` (2026-10-16). It was read to understand the algorithm, never built against. The record is `reference/blast-gpu-port/provenance.json`.
+
+**vibe-land's native configuration** (`sim-native/src/city.rs`, `scripts/perf/garage-vehicle-server.sh`, `destruction/src/native_runtime.rs`):
+- 16 iterations, tolerance 1e-3, force tolerance 1e-3, warm start, damage rate 2, bend gain cap 3, fibre bending.
+- **On:** incremental motion forest, incremental topology, the bond-balanced operator, unconverged steps published, and (always, on CuMetal) the float-expansion motion forest.
+- **Off:** Krylov carry (on by default only with section rotational stiffness), section bending and rotational stiffness, shear stiffness, Mohr–Coulomb shear, rebearing, bearing joints. These stay opt-in flags here too, off in `blast_gpu`.
+
+### Step 1: rigid modes as the target builds them
+
+**Before:** the modes were taken from the authored node positions about their weighted centre, always six, and the Gram matrix was solved by Gaussian elimination in f32 every solve.
+
+**Now** (`shaders/blast_motion.slang`; reference `stress-ref blast_bond/motion.rs`, following `StressMotionForest.cuh`): the frame is built once per island rebuild, on the GPU.
+- **Positions** come from the live bond equations: exact float-expansion sums of each tree bond's `o0 - o1` from the island's root.
+- **Closures:** a cycle that closes on more than 2^-17 of its coordinate scale is a real moment. One such closure leaves one rotation about it; two that are not exactly collinear leave none.
+- **The frame:** the centre, the Gram matrix and its diagonally scaled Cholesky factor are built in float pairs and stored in f32. Each node's offset from the centre replaces its position for the projection.
+
+**Deviations, on purpose:**
+- **The tree.** The target takes each tree edge from whichever union wins a lock-free race. Here the tree is deterministic: levels from the root, each node taking its lowest-index live bond to the level before. Since the sums are exact, positions differ from any other tree only by the offsets' rounding residue, and reruns stay bit-identical.
+- **The collinearity test.** The target's test sums binary64 products. With no f64 in WGSL, it grows float two-products here, up to 64 terms. Overflow reports the frame inexact (an error, as the target's expansion overflow is), never a silent answer.
+
+**Fast math.** WGSL and Metal source are compiled by the driver with fast math. That folds TwoSum's error term to 0: a test measured `1 + 1e-8` giving error 0 on both paths. Multiplying intermediates by an unseen 1.0 does not help, because the compiler factors it out of a sum and reassociates the rest. Each intermediate's bits are XORed with an unseen 0 (`params.opaque_zero`) instead, which float algebra cannot see through. The precompiled Metal library uses precise math either way.
+
+**Tests** (`stress-gpu tests/blast_motion.rs`), on the Metal library, Metal source and WGSL paths:
+- **Arithmetic:** two-sum and two-product are exact on every path.
+- **house-1story and villa-savoye, standing and freed from their supports:** the frames match the reference within 1e-5: anchoring, rotations, scale, factor and every node's offset.
+- **Dyadic offsets:**
+  - with consistent offsets, every cycle closes exactly and all three rotations stay;
+  - one bond bent leaves one rotation, about the bend;
+  - two non-collinear bends leave none.
+
+All earlier suites still pass, on Metal and on WGSL at 10 storage buffers.
+
 ## Update: the native (resident) solve, 2026-10-25
 
 `blast_gpu` now runs PhysX's native destruction solver (`componentStressSolve`), the one vibe-land runs on the Mac: `shaders/blast_native.slang`, with the reference in `stress-ref/src/blast_bond/native.rs`. The host-path CG stays available as `STRESS_BLAST_SOLVER=host`.

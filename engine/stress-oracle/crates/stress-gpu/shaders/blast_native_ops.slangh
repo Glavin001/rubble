@@ -33,6 +33,70 @@ static const uint N_INV = 21;  // its inverse: (S^-1 xx, yy, zz, xy), (S^-1 xz, 
 uint ns(uint n, uint v) { return n * NV + v; }
 uint bs(uint j) { return params.node_count * NV + 2 * j; }
 
+// Island k's rigid-mode frame (blast_motion.slang; blast_common.slang FRAME_WORDS).
+uint frame_word(uint k, uint w)
+{
+    return islands[blast_frame(params.node_count, k) + w / 4][w % 4];
+}
+float frame_float(uint k, uint w)
+{
+    return asfloat(frame_word(k, w));
+}
+// The basis axis of rotation kk: the frame's axis for a single rotation, else e_kk.
+float3 frame_axis(uint k, uint rotations, uint kk)
+{
+    if (rotations == 1)
+        return float3(frame_float(k, F_AXIS), frame_float(k, F_AXIS + 1), frame_float(k, F_AXIS + 2));
+    return float3(kk == 0 ? 1.0 : 0.0, kk == 1 ? 1.0 : 0.0, kk == 2 ? 1.0 : 0.0);
+}
+// Node i's terms of the projection's right-hand side for node vector v
+// (projectMotionComponent): axis_kk . (a / d_a - q x l / d_l) per rotation, then l / d_l.
+void frame_terms(uint k, uint rotations, uint i, uint v, inout float s[6])
+{
+    BlastNode n = nodes[i];
+    float3 lin = vl(i, v) / n.w_lin;
+    float3 rot = va(i, v) / n.w_ang - cross(n.position.xyz, lin);
+    for (uint kk = 0; kk < rotations; kk++)
+        s[kk] += dot(frame_axis(k, rotations, kk), rot);
+    for (uint j = 0; j < 3; j++)
+        s[rotations + j] += lin[j];
+}
+// The projection's coefficients from the summed terms: the scaled Cholesky factor's forward
+// and back substitution, then the rotation omega and translation t.
+void frame_solve(uint k, uint rotations, float sum[6], out float3 omega, out float3 t)
+{
+    uint d = rotations + 3;
+    float c[6];
+    for (uint z = 0; z < 6; z++)
+        c[z] = 0.0;
+    for (uint row = 0; row < d; row++)
+    {
+        float value = sum[row] * frame_float(k, F_SCALE + row);
+        for (uint j = 0; j < row; j++)
+            value -= frame_float(k, F_FACTOR + row * (row + 1) / 2 + j) * c[j];
+        c[row] = value / frame_float(k, F_FACTOR + row * (row + 1) / 2 + row);
+    }
+    for (int row = int(d) - 1; row >= 0; row--)
+    {
+        uint r = uint(row);
+        for (uint j = r + 1; j < d; j++)
+            c[r] -= frame_float(k, F_FACTOR + j * (j + 1) / 2 + r) * c[j];
+        c[r] /= frame_float(k, F_FACTOR + r * (r + 1) / 2 + r);
+    }
+    for (uint z = 0; z < d; z++)
+        c[z] *= frame_float(k, F_SCALE + z);
+    omega = float3(0.0);
+    for (uint kk = 0; kk < rotations; kk++)
+        omega += frame_axis(k, rotations, kk) * c[kk];
+    t = float3(c[rotations], c[rotations + 1], c[rotations + 2]);
+}
+// v -= the rigid motion (omega, t) at node i.
+void frame_apply(uint i, uint v, float3 omega, float3 t)
+{
+    BlastNode n = nodes[i];
+    set_v(i, v, va(i, v) - omega / n.w_ang, vl(i, v) - (t + cross(n.position.xyz, omega)) / n.w_lin);
+}
+
 static const float LOW_WEIGHT = 0.5779388123770052;
 static const float HIGH_WEIGHT = 2.6335678180143502;
 static const uint STAGNATION = 512;

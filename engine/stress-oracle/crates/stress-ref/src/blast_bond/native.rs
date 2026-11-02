@@ -25,10 +25,11 @@
 //!   10. `alpha = gamma / den`, `u += alpha p`, `r -= alpha q`;
 //! - then `x = x0 + B^T u`.
 //!
-//! The device builds the rigid modes in float-pair arithmetic from an exact spanning-forest
-//! frame (`StressMotionPair*.cuh`); here they are the island's node positions relative to its
-//! weighted centre, solved exactly in `T`.
+//! The rigid modes come from the live bond equations, not the authored positions: an exact
+//! spanning-tree frame with the rotations its cycle closures leave (`motion`, from
+//! `StressMotionForest.cuh`; the device builds it in float pairs, `StressMotionPair*.cuh`).
 
+use super::motion::{self, triangle, Frame};
 use super::*;
 
 /// The polynomial's weights: the reciprocals of the degree-2 Chebyshev roots on [0.1, 2.01]
@@ -230,82 +231,74 @@ impl<T: Real> Island<'_, T> {
     }
 }
 
-/// The rigid modes of a free island, in node-space coordinates (`b_rot,k = (e_k/d_a,
-/// (q x e_k)/d_l)`, `b_trans,j = (0, e_j/d_l)`, `q` the node's position about the weighted
-/// centre), and their Gram matrix: `project` removes their span (`StressMotionPairModes.cuh`).
+/// The rigid modes of a free island and their projection (`projectMotionComponent`), from the
+/// frame [`motion::frame`] builds; the projection runs in `T`, the frame converted once, as the
+/// device stores it in solver precision.
 struct Modes<T> {
-    basis: Vec<Vec<Pair<T>>>,
-    gram: Block<T>,
+    dimension: usize,
+    rotations: usize,
+    axis: [[T; 3]; 3],
+    relative: Vec<[T; 3]>,
+    scale: [T; 6],
+    factor: [T; 21],
 }
 
 impl<T: Real> Modes<T> {
-    fn new(isl: &Island<T>, position: &[[T; 3]]) -> Modes<T> {
-        let zero = T::default();
-        let one = T::of(1.0);
-        let (mut wsum, mut c) = (zero, [zero; 3]);
-        for (i, &n) in isl.nodes.iter().enumerate() {
-            let w = one / (isl.w[n].1 * isl.w[n].1);
-            wsum = wsum + w;
-            c = add(c, scale(position[i], w));
+    fn new(f: &Frame) -> Modes<T> {
+        let t3 = |v: [f64; 3]| [T::of(v[0]), T::of(v[1]), T::of(v[2])];
+        Modes {
+            dimension: f.dimension(),
+            rotations: f.rotations,
+            axis: std::array::from_fn(|k| if k < f.rotations { t3(f.axis(k)) } else { [T::default(); 3] }),
+            relative: f.relative.iter().map(|&q| t3(q)).collect(),
+            scale: f.scale.map(T::of),
+            factor: f.factor.map(T::of),
         }
-        let centre = scale(c, one / wsum);
-        let mut basis = Vec::with_capacity(6);
-        for axis in 0..3 {
-            let mut e = [zero; 3];
-            e[axis] = one;
-            basis.push(
-                isl.nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &n)| Pair {
-                        a: scale(e, one / isl.w[n].0),
-                        l: scale(cross(sub(position[i], centre), e), one / isl.w[n].1),
-                    })
-                    .collect::<Vec<_>>(),
-            );
-        }
-        for axis in 0..3 {
-            let mut e = [zero; 3];
-            e[axis] = one;
-            basis.push(
-                isl.nodes
-                    .iter()
-                    .map(|&n| Pair {
-                        a: [zero; 3],
-                        l: scale(e, one / isl.w[n].1),
-                    })
-                    .collect(),
-            );
-        }
-        let mut gram = [[zero; 6]; 6];
-        for a in 0..6 {
-            for b in 0..6 {
-                let mut s = zero;
-                for i in 0..isl.nodes.len() {
-                    s = s + dot(basis[a][i].a, basis[b][i].a) + dot(basis[a][i].l, basis[b][i].l);
-                }
-                gram[a][b] = s;
-            }
-        }
-        Modes { basis, gram }
     }
 
-    fn project(&self, v: &mut [Pair<T>]) {
-        let mut rhs = [T::default(); 6];
-        for (a, b) in self.basis.iter().enumerate() {
-            let mut s = T::default();
-            for i in 0..v.len() {
-                s = s + dot(b[i].a, v[i].a) + dot(b[i].l, v[i].l);
-            }
-            rhs[a] = s;
-        }
-        let Some(c) = solve_dense(self.gram, rhs, 6) else {
+    /// `v` by island node slot; `w` the nodes' `(d_a, d_l)`.
+    fn project(&self, v: &mut [Pair<T>], w: &[(T, T)], nodes: &[usize]) {
+        let d = self.dimension;
+        if d == 0 {
             return;
-        };
-        for (a, b) in self.basis.iter().enumerate() {
-            for i in 0..v.len() {
-                v[i] = v[i].plus(b[i], -c[a]);
+        }
+        let one = T::of(1.0);
+        let mut sum = [T::default(); 6];
+        for (i, &n) in nodes.iter().enumerate() {
+            let linear = scale(v[i].l, one / w[n].1);
+            let rotation = sub(scale(v[i].a, one / w[n].0), cross(self.relative[i], linear));
+            for k in 0..self.rotations {
+                sum[k] = sum[k] + dot(self.axis[k], rotation);
             }
+            for j in 0..3 {
+                sum[self.rotations + j] = sum[self.rotations + j] + linear[j];
+            }
+        }
+        let mut c = [T::default(); 6];
+        for row in 0..d {
+            let mut value = sum[row] * self.scale[row];
+            for j in 0..row {
+                value = value - self.factor[triangle(row, j)] * c[j];
+            }
+            c[row] = value / self.factor[triangle(row, row)];
+        }
+        for row in (0..d).rev() {
+            for j in row + 1..d {
+                c[row] = c[row] - self.factor[triangle(j, row)] * c[j];
+            }
+            c[row] = c[row] / self.factor[triangle(row, row)];
+        }
+        for k in 0..d {
+            c[k] = c[k] * self.scale[k];
+        }
+        let mut omega = [T::default(); 3];
+        for k in 0..self.rotations {
+            omega = add(omega, scale(self.axis[k], c[k]));
+        }
+        let translation = [c[self.rotations], c[self.rotations + 1], c[self.rotations + 2]];
+        for (i, &n) in nodes.iter().enumerate() {
+            v[i].a = sub(v[i].a, scale(omega, one / w[n].0));
+            v[i].l = sub(v[i].l, scale(add(translation, cross(self.relative[i], omega)), one / w[n].1));
         }
     }
 }
@@ -347,6 +340,11 @@ pub(super) fn native_pcg<T: Real>(
     let o0: Vec<[T; 3]> = g.offset0.iter().map(|&o| of3(o)).collect();
     let o1: Vec<[T; 3]> = g.offset1.iter().map(|&o| of3(o)).collect();
     let ends: Vec<[usize; 2]> = g.bonds.iter().map(|b| b.nodes).collect();
+    // The rigid-mode frame's inputs, as the device holds them.
+    let f32x3 = |v: Vec3| [v.x as f32, v.y as f32, v.z as f32];
+    let o0_f32: Vec<[f32; 3]> = g.offset0.iter().map(|&o| f32x3(o)).collect();
+    let o1_f32: Vec<[f32; 3]> = g.offset1.iter().map(|&o| f32x3(o)).collect();
+    let w64: Vec<(f64, f64)> = g.weight.iter().map(|w| (w.ang, w.lin)).collect();
     let recip_length = T::of(1.0 / g.length_scale);
     let force_tolerance = T::of(g.settings.force_tolerance);
     let (a_w, b_w) = (T::of(LOW_WEIGHT), T::of(HIGH_WEIGHT));
@@ -373,12 +371,9 @@ pub(super) fn native_pcg<T: Real>(
             slot[v] = i;
         }
         let mut incident = vec![Vec::new(); nodes.len()];
-        let mut anchored = false;
         for &j in &bonds {
             for (side, &v) in ends[j].iter().enumerate() {
-                if slot[v] == usize::MAX {
-                    anchored = true;
-                } else {
+                if slot[v] != usize::MAX {
                     incident[slot[v]].push((j, side == 1));
                 }
             }
@@ -472,21 +467,21 @@ pub(super) fn native_pcg<T: Real>(
                     }
                 }
             }
-            // A free island's rigid modes, about the positions the offsets chain to (midpoint
-            // offsets: the node centres over the length scale).
-            let modes = (!anchored).then(|| {
-                let position: Vec<[T; 3]> = isl
-                    .nodes
-                    .iter()
-                    .map(|&v| scale(of3(g.nodes[v].position), recip_length))
-                    .collect();
-                Modes::new(&isl, &position)
+            // A free island's rigid modes, from the live bond equations (`motion`).
+            let frame = motion::frame(&motion::Input {
+                nodes: &isl.nodes,
+                slot: &slot,
+                bonds: &isl.bonds,
+                ends: &ends,
+                o0: &o0_f32,
+                o1: &o1_f32,
+                w: &w64,
             });
-            let project = |v: &mut Vec<Pair<T>>| {
-                if let Some(m) = &modes {
-                    m.project(v);
-                }
-            };
+            if frame.error != 0 {
+                failed = true;
+            }
+            let modes = Modes::<T>::new(&frame);
+            let project = |v: &mut Vec<Pair<T>>| modes.project(v, &w, &isl.nodes);
             let blocks: Vec<Block<T>> = (0..count).map(|i| isl.block(i)).collect();
             let precondition = |v: &[Pair<T>]| -> Vec<Pair<T>> {
                 let local: Vec<Pair<T>> = (0..count)

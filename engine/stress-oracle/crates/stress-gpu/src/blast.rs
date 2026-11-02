@@ -10,7 +10,7 @@
 //! of each, which the GPU rebuilds when a bond breaks, so a frame reads nothing back to run.
 
 use bytemuck::{Pod, Zeroable};
-use stress_ref::blast_bond::{SolverKind, 
+use stress_ref::blast_bond::{RigidFrame, SolverKind, 
     AngLin, BlastGraph, BlastMaterial, BondStress, Damage, IslandReport, Islands, NO_ISLAND,
 };
 use stress_ref::math::Vec3;
@@ -53,7 +53,8 @@ pub struct Params {
     pub wide_min: u32,
     pub wide_rows: u32,
     pub wide_blocks: u32,
-    pub pad2: u32,
+    /// 0 (`blast_common.slang` `opaque_zero`).
+    pub opaque_zero: u32,
 }
 
 #[repr(C)]
@@ -83,6 +84,11 @@ const CGLS_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
 const NATIVE_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
 const MATERIAL_BINDINGS: [Binding; 7] = [U, W, W, R, R, W, W];
 const TOPOLOGY_BINDINGS: [Binding; 8] = [U, R, R, W, W, W, W, W];
+const MOTION_BINDINGS: [Binding; 7] = [U, W, W, R, R, R, W];
+/// `blast_common.slang` `FRAME_WORDS` / 4: each island's rigid-mode frame, in `islands` after
+/// the island records; `blast_motion.slang` `MOTION_WORDS`: its per-node float4s.
+const FRAME_ROWS: usize = 9;
+const MOTION_WORDS: usize = 7;
 const FRACTURE_BINDINGS: [Binding; 9] = [U, W, W, R, R, R, R, W, R];
 
 /// The topology kernels and their indirect sizes (`blast_topology.slang` `A_*`, words).
@@ -171,6 +177,9 @@ pub struct GpuBlastSolver {
     stress_bind: wgpu::BindGroup,
     topology_bind: wgpu::BindGroup,
     has_warm_start: bool,
+    /// The native solve's rigid-mode frames (`blast_motion.slang`), built after each island
+    /// rebuild, with its node records.
+    motion: Option<(Kernel, wgpu::BindGroup, wgpu::Buffer)>,
     /// The native solve of islands over `wide_min` nodes (`blast_native_wide.slang`).
     wide: Option<Wide>,
 }
@@ -207,8 +216,6 @@ const WIDE_SETUP: &[(&str, Grid)] = &[
     ("w_init_nodes", Grid::Nodes),
     ("w_init_bonds", Grid::Bonds),
     ("w_setup", Grid::Rows),
-    ("w_gram_nodes", Grid::Nodes),
-    ("w_gram", Grid::Rows),
     ("w_warm", Grid::Nodes),
 ];
 const WIDE_ITERATION: &[(&str, Grid)] = &[
@@ -325,7 +332,8 @@ impl GpuBlastSolver {
         topo[topo_total(n.max(1)) + 4] = 1;
         let buffers = BlastBuffers {
             params: gpu.uniform("blast params", &Params::default()),
-            islands: gpu.storage("blast islands", &vec![[0u32; 4]; n.max(1)]),
+            // The island records, then each island's rigid-mode frame.
+            islands: gpu.storage("blast islands", &vec![[0u32; 4]; n.max(1) * (1 + FRAME_ROWS)]),
             nodes: gpu.storage("blast nodes", &nodes),
             refs: gpu.storage(
                 "blast refs",
@@ -406,10 +414,16 @@ impl GpuBlastSolver {
             stress_bind,
             topology_bind,
             has_warm_start: false,
+            motion: None,
             wide: None,
         };
         let mut s = s;
         if native {
+            let motion = gpu.compute(&shaders::BLAST_MOTION, "blast_motion", &MOTION_BINDINGS);
+            let words = gpu.storage("blast motion", &vec![[0.0f32; 4]; MOTION_WORDS * n.max(1)]);
+            let b = &s.buffers;
+            let bind = gpu.bind(&motion.group, &[&b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.lists, &words]);
+            s.motion = Some((motion, bind, words));
             s.wide = Some(s.build_wide(gpu, wide_min));
         }
         s.write_params(&s.params(false, false, 0.0, false));
@@ -505,6 +519,14 @@ impl GpuBlastSolver {
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &self.topology_bind, &[]);
             pass.dispatch_workgroups_indirect(&self.buffers.dispatch, 4 * at);
+        }
+        // The rebuilt islands' rigid-mode frames, one group each (the sort's size: zero on a
+        // frame without a break).
+        if let Some((k, bind, _)) = &self.motion {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&k.pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            pass.dispatch_workgroups_indirect(&self.buffers.dispatch, 4 * A_SORT);
         }
     }
 
@@ -646,6 +668,42 @@ impl GpuBlastSolver {
             }
         }
         out
+    }
+
+    /// Every island's rigid-mode frame as `blast_motion.slang` built it (the native solve;
+    /// none for the host path).
+    pub fn rigid_frames(&self) -> Vec<RigidFrame> {
+        if self.motion.is_none() {
+            return Vec::new();
+        }
+        let n = self.graph.node_count().max(1);
+        let count = self.island_count();
+        let rows: Vec<[u32; 4]> = self.gpu.read_range(&self.buffers.islands, n, FRAME_ROWS * count);
+        let nodes: Vec<NodeGpu> = self.gpu.read_range(&self.buffers.nodes, 0, self.graph.node_count());
+        let islands = self.islands();
+        (0..count)
+            .map(|k| {
+                let w: Vec<u32> = rows[FRAME_ROWS * k..FRAME_ROWS * (k + 1)].iter().flatten().copied().collect();
+                let f = |i: usize| f32::from_bits(w[i]) as f64;
+                let anchored = w[0] != 0;
+                RigidFrame {
+                    anchored,
+                    rotations: w[1] as usize,
+                    error: w[2],
+                    axis: [f(4), f(5), f(6)],
+                    scale: std::array::from_fn(|i| f(8 + i)),
+                    factor: std::array::from_fn(|i| f(14 + i)),
+                    relative: if anchored {
+                        Vec::new()
+                    } else {
+                        (0..self.graph.node_count())
+                            .filter(|&i| islands.node[i] == k as u32)
+                            .map(|i| (i, std::array::from_fn(|c| nodes[i].position[c] as f64)))
+                            .collect()
+                    },
+                }
+            })
+            .collect()
     }
 
     /// Every bond's impulse, stresses and damage verdict; with `apply_damage`, the damage is

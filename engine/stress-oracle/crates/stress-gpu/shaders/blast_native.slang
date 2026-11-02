@@ -22,183 +22,38 @@
 
 #include "blast_native_ops.slangh"
 
-// The rigid modes' Gram matrix and frame, per group (thread 0 solves with them).
-groupshared float g_gram[6][6];
-groupshared float g_rhs[6];
-groupshared float g_coef[6];
-groupshared float3 g_centre;
+groupshared float3 g_omega;
+groupshared float3 g_t;
 
-// A free island's rigid modes at node n: rot k = (e_k / dA, (q x e_k) / dL), trans j = (0, e_j / dL).
-float3 rel(uint n)
-{
-    return nodes[n].position.xyz - g_centre;
-}
-
-// Solve g_gram c = g_rhs (6x6) into g_coef, thread 0 (Gaussian elimination, partial pivoting).
-void solve_gram()
-{
-    float a[6][6];
-    float b[6];
-    for (uint r = 0; r < 6; r++)
-    {
-        b[r] = g_rhs[r];
-        for (uint c = 0; c < 6; c++)
-            a[r][c] = g_gram[r][c];
-    }
-    for (uint c = 0; c < 6; c++)
-    {
-        uint p = c;
-        for (uint r = c + 1; r < 6; r++)
-            if (abs(a[r][c]) > abs(a[p][c]))
-                p = r;
-        for (uint k = 0; k < 6; k++)
-        {
-            float t = a[c][k];
-            a[c][k] = a[p][k];
-            a[p][k] = t;
-        }
-        float tb = b[c];
-        b[c] = b[p];
-        b[p] = tb;
-        float piv = a[c][c];
-        if (!(abs(piv) > 0.0))
-        {
-            for (uint z = 0; z < 6; z++)
-                g_coef[z] = 0.0;
-            return;
-        }
-        for (uint r = c + 1; r < 6; r++)
-        {
-            float f = a[r][c] / piv;
-            for (uint k = c; k < 6; k++)
-                a[r][k] -= f * a[c][k];
-            b[r] -= f * b[c];
-        }
-    }
-    for (int r = 5; r >= 0; r--)
-    {
-        float s = b[r];
-        for (uint k = uint(r) + 1; k < 6; k++)
-            s -= a[r][k] * g_coef[k];
-        g_coef[r] = s / a[r][r];
-    }
-}
-
-// Project node vector `v` of the island's nodes [n0, n1) off its rigid modes (`free` uniform).
-void project(uint tid, uint n0, uint n1, uint v, bool free)
+// Project node vector `v` of island k's nodes [n0, n1) off its rigid modes (`rotations` and
+// `free` uniform; blast_motion.slang built the frame).
+void project(uint tid, uint k, uint rotations, uint n0, uint n1, uint v, bool free)
 {
     if (!free)
         return;
-    float3 sr = float3(0.0);
-    float3 st = float3(0.0);
-    for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
-    {
-        uint i = lists[p];
-        BlastNode n = nodes[i];
-        float3 lin = vl(i, v) / n.w_lin;
-        sr += va(i, v) / n.w_ang - cross(rel(i), lin);
-        st += lin;
-    }
-    float2 a = blast_group_sum(tid, sr.xy);
-    float2 b = blast_group_sum(tid, float2(sr.z, st.x));
-    float2 c = blast_group_sum(tid, st.yz);
-    if (tid == 0)
-    {
-        g_rhs[0] = a.x;
-        g_rhs[1] = a.y;
-        g_rhs[2] = b.x;
-        g_rhs[3] = b.y;
-        g_rhs[4] = c.x;
-        g_rhs[5] = c.y;
-        solve_gram();
-    }
-    GroupMemoryBarrierWithGroupSync();
-    float3 w = float3(g_coef[0], g_coef[1], g_coef[2]);
-    float3 t = float3(g_coef[3], g_coef[4], g_coef[5]);
-    for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
-    {
-        uint i = lists[p];
-        BlastNode n = nodes[i];
-        set_v(i, v, va(i, v) - w / n.w_ang, vl(i, v) - (t + cross(rel(i), w)) / n.w_lin);
-    }
-    device_group_barrier();
-}
-
-// The rigid modes' frame and Gram matrix of a free island.
-void build_modes(uint tid, uint n0, uint n1)
-{
-    float4 cw = float4(0.0);
-    for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
-    {
-        uint i = lists[p];
-        float w = 1.0 / (nodes[i].w_lin * nodes[i].w_lin);
-        cw += float4(nodes[i].position.xyz * w, w);
-    }
-    float2 c0 = blast_group_sum(tid, cw.xy);
-    float2 c1 = blast_group_sum(tid, cw.zw);
-    if (tid == 0)
-        g_centre = float3(c0.x, c0.y, c1.x) / c1.y;
-    GroupMemoryBarrierWithGroupSync();
-    // rot-rot: sum e_k.e_l / dA^2 + (q x e_k).(q x e_l) / dL^2; rot-trans: sum (q x e_k)_j / dL^2;
-    // trans-trans: sum 1 / dL^2 on the diagonal.
-    float rr[6];   // xx, yy, zz, xy, xz, yz
-    float3 rt[3];  // rot k against trans j
+    float s[6];
     for (uint z = 0; z < 6; z++)
-        rr[z] = 0.0;
-    for (uint z = 0; z < 3; z++)
-        rt[z] = float3(0.0);
-    float tt = 0.0;
+        s[z] = 0.0;
     for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
-    {
-        uint i = lists[p];
-        BlastNode n = nodes[i];
-        float wa = 1.0 / (n.w_ang * n.w_ang);
-        float wl = 1.0 / (n.w_lin * n.w_lin);
-        float3 q = rel(i);
-        float3 c[3] = { cross(q, float3(1, 0, 0)), cross(q, float3(0, 1, 0)), cross(q, float3(0, 0, 1)) };
-        rr[0] += wa + wl * dot(c[0], c[0]);
-        rr[1] += wa + wl * dot(c[1], c[1]);
-        rr[2] += wa + wl * dot(c[2], c[2]);
-        rr[3] += wl * dot(c[0], c[1]);
-        rr[4] += wl * dot(c[0], c[2]);
-        rr[5] += wl * dot(c[1], c[2]);
-        for (uint kk = 0; kk < 3; kk++)
-            rt[kk] += wl * c[kk];
-        tt += wl;
-    }
-    float2 s0 = blast_group_sum(tid, float2(rr[0], rr[1]));
-    float2 s1 = blast_group_sum(tid, float2(rr[2], rr[3]));
-    float2 s2 = blast_group_sum(tid, float2(rr[4], rr[5]));
-    float2 s3 = blast_group_sum(tid, rt[0].xy);
-    float2 s4 = blast_group_sum(tid, float2(rt[0].z, rt[1].x));
-    float2 s5 = blast_group_sum(tid, rt[1].yz);
-    float2 s6 = blast_group_sum(tid, rt[2].xy);
-    float2 s7 = blast_group_sum(tid, float2(rt[2].z, tt));
+        frame_terms(k, rotations, lists[p], v, s);
+    float2 a = blast_group_sum(tid, float2(s[0], s[1]));
+    float2 b = blast_group_sum(tid, float2(s[2], s[3]));
+    float2 c = blast_group_sum(tid, float2(s[4], s[5]));
     if (tid == 0)
     {
-        float m[6][6];
-        m[0][0] = s0.x; m[1][1] = s0.y; m[2][2] = s1.x;
-        m[0][1] = s1.y; m[0][2] = s2.x; m[1][2] = s2.y;
-        m[1][0] = m[0][1]; m[2][0] = m[0][2]; m[2][1] = m[1][2];
-        float3 r0 = float3(s3.x, s3.y, s4.x);
-        float3 r1 = float3(s4.y, s5.x, s5.y);
-        float3 r2 = float3(s6.x, s6.y, s7.x);
-        for (uint j = 0; j < 3; j++)
-        {
-            m[0][3 + j] = r0[j];
-            m[1][3 + j] = r1[j];
-            m[2][3 + j] = r2[j];
-            m[3 + j][0] = r0[j];
-            m[3 + j][1] = r1[j];
-            m[3 + j][2] = r2[j];
-            for (uint l = 0; l < 3; l++)
-                m[3 + j][3 + l] = j == l ? s7.y : 0.0;
-        }
-        for (uint r = 0; r < 6; r++)
-            for (uint c2 = 0; c2 < 6; c2++)
-                g_gram[r][c2] = m[r][c2];
+        float sum[6] = { a.x, a.y, b.x, b.y, c.x, c.y };
+        float3 omega;
+        float3 t;
+        frame_solve(k, rotations, sum, omega, t);
+        g_omega = omega;
+        g_t = t;
     }
     GroupMemoryBarrierWithGroupSync();
+    float3 omega = g_omega;
+    float3 t = g_t;
+    for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
+        frame_apply(lists[p], v, omega, t);
+    device_group_barrier();
 }
 
 // t into the bond scratch for node vector v over the island's bonds, and sum |t|^2.
@@ -355,13 +210,6 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         if (!build_block(i))
             singular = 1.0;
     }
-    float anchor = 0.0;
-    for (uint q = b0 + tid; q < b1; q += BLAST_THREADS)
-    {
-        BlastBond b = bonds[lists[q]];
-        if (b.health > 0.0 && (!(nodes[b.n0].w_lin > 0.0) || !(nodes[b.n1].w_lin > 0.0)))
-            anchor = 1.0;
-    }
     if (!warm)
     {
         for (uint q = b0 + tid; q < b1; q += BLAST_THREADS)
@@ -373,8 +221,12 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     float2 tsum = blast_group_sum(tid, float2(target, singular));
     float delta2 = tsum.x * params.tolerance * params.tolerance;
-    bool failed = tsum.y > 0.0;
-    bool free = blast_group_sum(tid, float2(anchor, 0.0)).x == 0.0;
+    // The rigid-mode frame (blast_motion.slang): anchored, or free with its rotations; a frame
+    // that could not be built fails the solve.
+    uint3 frame = group_uniform4(uint4(frame_word(k, F_ANCHORED), frame_word(k, F_ROTATIONS), frame_word(k, F_ERROR), 0u), tid).xyz;
+    bool failed = tsum.y > 0.0 || frame.z != 0;
+    bool free = frame.x == 0;
+    uint rotations = frame.y;
     device_group_barrier();
 
     // A zero load: zero forces at once (retireHomogeneousTreeComponent).
@@ -390,8 +242,6 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             report[k] = uint4(0, REPORT_CONVERGED | (warm ? REPORT_SETTLED : 0u), asuint(0.0), asuint(delta2));
         return;
     }
-    if (free)
-        build_modes(tid, n0, n1);
     if (warm)
         rebuild(tid, n0, n1, false);
 
@@ -418,14 +268,14 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     while (!failed && iteration < params.max_iterations)
     {
-        project(tid, n0, n1, N_R, free);
+        project(tid, k, rotations, n0, n1, N_R, free);
         num = bond_pass(tid, b0, b1, N_R);
         bool hold = num <= delta2 && !(residual_norm(tid, n0, n1) <= delta2);
         if ((iteration > 0 || warm) && num <= delta2 && !hold)
         {
             rebuild(tid, n0, n1, true);
             previous = 0.0;
-            project(tid, n0, n1, N_R, free);
+            project(tid, k, rotations, n0, n1, N_R, free);
             num = bond_pass(tid, b0, b1, N_R);
             hold = num <= delta2 && !(residual_norm(tid, n0, n1) <= delta2);
         }
@@ -497,7 +347,7 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             }
         }
         device_group_barrier();
-        project(tid, n0, n1, N_G, free);
+        project(tid, k, rotations, n0, n1, N_G, free);
         float mloc = 0.0;
         for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
         {

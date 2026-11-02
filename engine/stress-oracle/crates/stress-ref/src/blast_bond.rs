@@ -29,6 +29,7 @@
 
 use crate::math::Vec3;
 
+mod motion;
 mod native;
 use native::native_pcg;
 use serde::{Deserialize, Serialize};
@@ -576,6 +577,58 @@ impl Islands {
             .collect();
         Islands { count, node, bond }
     }
+}
+
+/// An island's rigid-mode frame as the native solve builds it (`motion`: PhysX's
+/// `StressMotionForest.cuh` construction): for comparing the device's (`blast_motion.slang`).
+#[derive(Clone, Debug, Default)]
+pub struct RigidFrame {
+    /// A live bond to a support: no modes.
+    pub anchored: bool,
+    /// 3, or 1 about `axis`, or 0 (cycle closures leave no rotation).
+    pub rotations: usize,
+    pub axis: [f64; 3],
+    /// Each island node's offset from the frame's centre (over the length scale).
+    pub relative: Vec<(usize, [f64; 3])>,
+    /// The Gram matrix's diagonal scale and scaled Cholesky factor (packed lower triangle).
+    pub scale: [f64; 6],
+    pub factor: [f64; 21],
+    /// Construction errors (the target's `Status::error` bits).
+    pub error: u32,
+}
+
+/// Every island's rigid-mode frame over the bonds that are live at `health`.
+pub fn rigid_frames(graph: &BlastGraph, islands: &Islands, health: &[f64]) -> Vec<RigidFrame> {
+    let (n, m) = (graph.node_count(), graph.bond_count());
+    let f32x3 = |v: Vec3| [v.x as f32, v.y as f32, v.z as f32];
+    let o0: Vec<[f32; 3]> = graph.offset0.iter().map(|&o| f32x3(o)).collect();
+    let o1: Vec<[f32; 3]> = graph.offset1.iter().map(|&o| f32x3(o)).collect();
+    let ends: Vec<[usize; 2]> = graph.bonds.iter().map(|b| b.nodes).collect();
+    let w: Vec<(f64, f64)> = graph.weight.iter().map(|w| (w.ang, w.lin)).collect();
+    let mut slot = vec![usize::MAX; n];
+    (0..islands.count)
+        .map(|k| {
+            let nodes: Vec<usize> = (0..n).filter(|&i| islands.node[i] == k as u32).collect();
+            let bonds: Vec<usize> =
+                (0..m).filter(|&j| islands.bond[j] == k as u32 && health[j] > 0.0).collect();
+            for (i, &v) in nodes.iter().enumerate() {
+                slot[v] = i;
+            }
+            let f = motion::frame(&motion::Input { nodes: &nodes, slot: &slot, bonds: &bonds, ends: &ends, o0: &o0, o1: &o1, w: &w });
+            for &v in &nodes {
+                slot[v] = usize::MAX;
+            }
+            RigidFrame {
+                anchored: f.anchored,
+                rotations: f.rotations,
+                axis: f.axis,
+                relative: nodes.iter().copied().zip(f.relative.iter().copied()).collect(),
+                scale: f.scale,
+                factor: f.factor,
+                error: f.error,
+            }
+        })
+        .collect()
 }
 
 /// One island's outcome of a solve.

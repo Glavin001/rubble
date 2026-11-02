@@ -53,7 +53,9 @@ public struct BlastParams
     public uint wide_min;
     public uint wide_rows;
     public uint wide_blocks;
-    public uint pad2;
+    // 0, which the compiler cannot see: blast_motion.slang's error-free transformations XOR
+    // their intermediates' bits with it so fast math cannot reassociate them away.
+    public uint opaque_zero;
 };
 
 // `topo` (blast_topology.slang): the totals after the per-node and per-block words: islands,
@@ -68,6 +70,26 @@ public uint topo_dirty(uint node_count)
     return topo_total(node_count) + 4;
 }
 
+// A free island's rigid-mode frame (blast_motion.slang), FRAME_WORDS words in `islands` after
+// the island records: whether anchored (dimension 0), its rotations (3, 1 or 0), construction
+// errors, the axis of a single rotation, the Gram matrix's diagonal scale and its scaled
+// Cholesky factor (packed lower triangle, row * (row + 1) / 2 + col), in solver precision.
+public static const uint FRAME_WORDS = 36;
+public static const uint F_ANCHORED = 0;
+public static const uint F_ROTATIONS = 1;
+public static const uint F_ERROR = 2;
+public static const uint F_AXIS = 4;
+public static const uint F_SCALE = 8;
+public static const uint F_FACTOR = 14;
+public static const uint FRAME_ERROR_TOPOLOGY = 2;
+public static const uint FRAME_ERROR_FRAME = 4;
+public static const uint FRAME_ERROR_INEXACT = 16;
+// The uint4 index of island k's frame.
+public uint blast_frame(uint node_count, uint k)
+{
+    return node_count + (FRAME_WORDS / 4) * k;
+}
+
 // A dynamic node: its weights in D and its CSR range in `refs`.
 public struct BlastNode
 {
@@ -75,7 +97,8 @@ public struct BlastNode
     public float w_lin;
     public uint ref_begin;
     public uint ref_end;
-    // Its position over the length scale (the native solve's rigid modes).
+    // Its position over the length scale until blast_motion.slang replaces it with its offset
+    // from its island's centre in the rigid-mode frame (native solve).
     public float4 position;
 };
 

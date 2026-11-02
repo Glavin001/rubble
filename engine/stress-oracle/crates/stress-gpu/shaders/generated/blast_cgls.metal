@@ -37,7 +37,7 @@ struct BlastParams_0
     uint wide_min_0;
     uint wide_rows_0;
     uint wide_blocks_0;
-    uint pad2_0;
+    uint opaque_zero_0;
 };
 
 struct BlastNode_natural_0
