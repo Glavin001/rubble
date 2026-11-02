@@ -143,10 +143,12 @@ struct KernelContext_0
     packed_float4 device* loads_0;
     packed_float4 device* accel_0;
     BlastBond_natural_0 device* bonds_0;
+    packed_float4 device* x_1;
+    atomic<uint> device* topo_0;
     atomic<uint> device* atom_0;
 };
 
-[[kernel]] void blast_loads(uint3 id_0 [[thread_position_in_grid]], BlastParams_0 constant* params_1 [[buffer(0)]], uint device* work_1 [[buffer(1)]], packed_float4 device* frames_1 [[buffer(3)]], packed_float4 device* bodies_1 [[buffer(4)]], packed_float4 device* node_frame_1 [[buffer(6)]], packed_float4 device* loads_1 [[buffer(5)]], packed_float4 device* accel_1 [[buffer(7)]], BlastBond_natural_0 device* bonds_1 [[buffer(8)]], atomic<uint> device* atom_1 [[buffer(2)]])
+[[kernel]] void blast_loads(uint3 id_0 [[thread_position_in_grid]], BlastParams_0 constant* params_1 [[buffer(0)]], uint device* work_1 [[buffer(1)]], packed_float4 device* frames_1 [[buffer(3)]], packed_float4 device* bodies_1 [[buffer(4)]], packed_float4 device* node_frame_1 [[buffer(6)]], packed_float4 device* loads_1 [[buffer(5)]], packed_float4 device* accel_1 [[buffer(7)]], BlastBond_natural_0 device* bonds_1 [[buffer(8)]], packed_float4 device* x_2 [[buffer(10)]], atomic<uint> device* topo_1 [[buffer(9)]], atomic<uint> device* atom_1 [[buffer(2)]])
 {
     thread KernelContext_0 kernelContext_0;
     (&kernelContext_0)->params_0 = params_1;
@@ -157,6 +159,8 @@ struct KernelContext_0
     (&kernelContext_0)->loads_0 = loads_1;
     (&kernelContext_0)->accel_0 = accel_1;
     (&kernelContext_0)->bonds_0 = bonds_1;
+    (&kernelContext_0)->x_1 = x_2;
+    (&kernelContext_0)->topo_0 = topo_1;
     (&kernelContext_0)->atom_0 = atom_1;
     uint k_0 = id_0.x;
     if(k_0 >= (params_1->node_count_0))
@@ -237,7 +241,17 @@ struct KernelContext_0
     return;
 }
 
-[[kernel]] void blast_breaks(uint3 id_1 [[thread_position_in_grid]], BlastParams_0 constant* params_2 [[buffer(0)]], uint device* work_2 [[buffer(1)]], packed_float4 device* frames_2 [[buffer(3)]], packed_float4 device* bodies_2 [[buffer(4)]], packed_float4 device* node_frame_2 [[buffer(6)]], packed_float4 device* loads_2 [[buffer(5)]], packed_float4 device* accel_2 [[buffer(7)]], BlastBond_natural_0 device* bonds_2 [[buffer(8)]], atomic<uint> device* atom_2 [[buffer(2)]])
+uint topo_total_0(uint node_count_1)
+{
+    return 10U * node_count_1 + 3U * ((node_count_1 + 1023U) / 1024U);
+}
+
+uint topo_dirty_0(uint node_count_2)
+{
+    return topo_total_0(node_count_2) + 4U;
+}
+
+[[kernel]] void blast_sync(uint3 id_1 [[thread_position_in_grid]], BlastParams_0 constant* params_2 [[buffer(0)]], uint device* work_2 [[buffer(1)]], packed_float4 device* frames_2 [[buffer(3)]], packed_float4 device* bodies_2 [[buffer(4)]], packed_float4 device* node_frame_2 [[buffer(6)]], packed_float4 device* loads_2 [[buffer(5)]], packed_float4 device* accel_2 [[buffer(7)]], BlastBond_natural_0 device* bonds_2 [[buffer(8)]], packed_float4 device* x_3 [[buffer(10)]], atomic<uint> device* topo_2 [[buffer(9)]], atomic<uint> device* atom_2 [[buffer(2)]])
 {
     thread KernelContext_0 kernelContext_1;
     (&kernelContext_1)->params_0 = params_2;
@@ -248,6 +262,8 @@ struct KernelContext_0
     (&kernelContext_1)->loads_0 = loads_2;
     (&kernelContext_1)->accel_0 = accel_2;
     (&kernelContext_1)->bonds_0 = bonds_2;
+    (&kernelContext_1)->x_1 = x_3;
+    (&kernelContext_1)->topo_0 = topo_2;
     (&kernelContext_1)->atom_0 = atom_2;
     uint j_0 = id_1.x;
     bool _S34;
@@ -257,21 +273,63 @@ struct KernelContext_0
     }
     else
     {
-        _S34 = (*((&kernelContext_1)->work_0+((&kernelContext_1)->params_0->w_alive_0 + j_0))) == 0U;
+        _S34 = (*((&kernelContext_1)->work_0+((&kernelContext_1)->params_0->w_alive_0 + j_0))) != 0U;
     }
     if(_S34)
     {
         return;
     }
-    BlastBond_natural_0 bond_0 = (&kernelContext_1)->bonds_0[j_0];
-    if((bond_0.health_0) > 0.0f)
+    if(!(((*((&kernelContext_1)->bonds_0+j_0)).health_0) > 0.0f))
     {
         return;
     }
-    *((&kernelContext_1)->work_0+((&kernelContext_1)->params_0->w_alive_0 + j_0)) = 0U;
-    uint _S35 = atomic_fetch_or_explicit((&kernelContext_1)->atom_0+((&kernelContext_1)->params_0->a_dirty_0 + *((&kernelContext_1)->work_0+bond_0.n0_0)), 1U, memory_order_relaxed);
-    uint _S36 = atomic_fetch_add_explicit((&kernelContext_1)->atom_0+(&kernelContext_1)->params_0->a_counters_0, 1U, memory_order_relaxed);
-    uint _S37 = atomic_fetch_add_explicit((&kernelContext_1)->atom_0+((&kernelContext_1)->params_0->a_counters_0 + 1U), 1U, memory_order_relaxed);
+    ((&kernelContext_1)->bonds_0+j_0)->health_0 = 0.0f;
+    uint _S35 = j_0 * 2U;
+    packed_float4 _S36 = packed_float4(float4(0.0f) ) ;
+    *((&kernelContext_1)->x_1+_S35) = _S36;
+    *((&kernelContext_1)->x_1+(_S35 + 1U)) = _S36;
+    atomic_store_explicit((&kernelContext_1)->topo_0+topo_dirty_0((&kernelContext_1)->params_0->node_count_0), 1U, memory_order_relaxed);
+    return;
+}
+
+[[kernel]] void blast_breaks(uint3 id_2 [[thread_position_in_grid]], BlastParams_0 constant* params_3 [[buffer(0)]], uint device* work_3 [[buffer(1)]], packed_float4 device* frames_3 [[buffer(3)]], packed_float4 device* bodies_3 [[buffer(4)]], packed_float4 device* node_frame_3 [[buffer(6)]], packed_float4 device* loads_3 [[buffer(5)]], packed_float4 device* accel_3 [[buffer(7)]], BlastBond_natural_0 device* bonds_3 [[buffer(8)]], packed_float4 device* x_4 [[buffer(10)]], atomic<uint> device* topo_3 [[buffer(9)]], atomic<uint> device* atom_3 [[buffer(2)]])
+{
+    thread KernelContext_0 kernelContext_2;
+    (&kernelContext_2)->params_0 = params_3;
+    (&kernelContext_2)->work_0 = work_3;
+    (&kernelContext_2)->frames_0 = frames_3;
+    (&kernelContext_2)->bodies_0 = bodies_3;
+    (&kernelContext_2)->node_frame_0 = node_frame_3;
+    (&kernelContext_2)->loads_0 = loads_3;
+    (&kernelContext_2)->accel_0 = accel_3;
+    (&kernelContext_2)->bonds_0 = bonds_3;
+    (&kernelContext_2)->x_1 = x_4;
+    (&kernelContext_2)->topo_0 = topo_3;
+    (&kernelContext_2)->atom_0 = atom_3;
+    uint j_1 = id_2.x;
+    bool _S37;
+    if(j_1 >= (params_3->bond_count_0))
+    {
+        _S37 = true;
+    }
+    else
+    {
+        _S37 = (*((&kernelContext_2)->work_0+((&kernelContext_2)->params_0->w_alive_0 + j_1))) == 0U;
+    }
+    if(_S37)
+    {
+        return;
+    }
+    BlastBond_natural_0 device* _S38 = (&kernelContext_2)->bonds_0+j_1;
+    BlastBond_natural_0 bond_0 = *_S38;
+    if(((*_S38).health_0) > 0.0f)
+    {
+        return;
+    }
+    *((&kernelContext_2)->work_0+((&kernelContext_2)->params_0->w_alive_0 + j_1)) = 0U;
+    uint _S39 = atomic_fetch_or_explicit((&kernelContext_2)->atom_0+((&kernelContext_2)->params_0->a_dirty_0 + *((&kernelContext_2)->work_0+bond_0.n0_0)), 1U, memory_order_relaxed);
+    uint _S40 = atomic_fetch_add_explicit((&kernelContext_2)->atom_0+(&kernelContext_2)->params_0->a_counters_0, 1U, memory_order_relaxed);
+    uint _S41 = atomic_fetch_add_explicit((&kernelContext_2)->atom_0+((&kernelContext_2)->params_0->a_counters_0 + 1U), 1U, memory_order_relaxed);
     return;
 }
 

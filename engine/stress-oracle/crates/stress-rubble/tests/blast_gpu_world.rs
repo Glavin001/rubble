@@ -86,7 +86,7 @@ fn a_house_under_gravity_is_the_reference_solve_frame_for_frame() {
 }
 
 /// A ball through the house: the bonds Blast breaks split the house on the GPU.
-fn strike(gpu: &Gpu) -> (Vec<bool>, u32, u32) {
+fn strike(gpu: &Gpu) -> (Vec<bool>, u32, u32, Vec<f64>) {
     let scene = house();
     let mut w = world(gpu, &scene);
     let all: Vec<_> = scene.bodies.iter().flat_map(|b| &b.chunks).collect();
@@ -111,7 +111,8 @@ fn strike(gpu: &Gpu) -> (Vec<bool>, u32, u32) {
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
     let stats = w.poll(gpu);
     assert_eq!(stats.error, 0, "{stats:?}");
-    (w.fracture.bonds_intact(gpu), stats.broken, stats.bodies)
+    let blast = w.fracture.blast().unwrap().solver.health();
+    (w.fracture.bonds_intact(gpu), stats.broken, stats.bodies, blast)
 }
 
 #[test]
@@ -120,7 +121,7 @@ fn a_struck_house_breaks_splits_and_repeats() {
         eprintln!("no GPU; skipping");
         return;
     };
-    let (intact, broken, bodies) = strike(&gpu);
+    let (intact, broken, bodies, blast) = strike(&gpu);
     let intact_count = intact.iter().filter(|b| **b).count();
     println!(
         "{broken} bonds broken ({} of {} intact), {bodies} bodies",
@@ -134,6 +135,10 @@ fn a_struck_house_breaks_splits_and_repeats() {
     // The counters are read a frame or more late (`poll` never waits); the bonds were read after
     // the GPU finished.
     assert!(broken as usize <= intact.len() - intact_count);
+    // One bond state: every bond the fracture broke (Blast's breaks, and the strike's own
+    // predicted ones) is broken in Blast too, and the other way round.
+    let differ: Vec<usize> = (0..intact.len()).filter(|&j| intact[j] != (blast[j] > 0.0)).collect();
+    assert!(differ.is_empty(), "bonds whose state the fracture and Blast disagree on: {differ:?}");
     let again = strike(&gpu);
     assert_eq!(again.0, intact, "the run repeats bit for bit");
 }
@@ -209,4 +214,34 @@ fn a_chunk_load_loads_the_solve_for_one_frame() {
             assert!(moved > 0.1, "the chunk loads change the bond forces: {moved:.3e}");
         }
     }
+}
+
+#[test]
+fn bonds_the_fracture_breaks_itself_break_in_blast_too() {
+    let Ok(gpu) = Gpu::new() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    // One bond state, as the target has: a bond the fracture breaks itself (here the host's
+    // breaks; a predicted strike's or a crushed chunk's alike) leaves Blast's islands too,
+    // or Blast would go on loading a bond the split has cut.
+    let scene = house();
+    let mut w = world(&gpu, &scene);
+    for _ in 0..3 {
+        w.step_frame(&gpu).expect("frame");
+    }
+    let graph = w.fracture.blast().unwrap().solver.graph.clone();
+    let chosen: Vec<u32> = (0..graph.bond_count() as u32).step_by(97).collect();
+    w.fracture.break_bonds_sparse(&chosen);
+    for _ in 0..3 {
+        w.step_frame(&gpu).expect("frame");
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let intact = w.fracture.bonds_intact(&gpu);
+    let blast = w.fracture.blast().unwrap().solver.health();
+    for &j in &chosen {
+        assert!(!intact[j as usize] && !(blast[j as usize] > 0.0), "bond {j}: fracture intact {}, Blast health {}", intact[j as usize], blast[j as usize]);
+    }
+    let differ: Vec<usize> = (0..intact.len()).filter(|&j| intact[j] != (blast[j] > 0.0)).collect();
+    assert!(differ.is_empty(), "bonds whose state the fracture and Blast disagree on: {differ:?}");
 }

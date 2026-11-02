@@ -106,6 +106,14 @@ rubble follows the target's carry as written. These captures were recorded 2026-
 
 **`BLAST_STRESS_FIRST_PRECONDITIONER`** (the target's A/B switch) is now `BlastSettings::first_preconditioner`: identity (the default), polynomial or warm. It is ported to the reference and both GPU paths, and tested against the f32 reference.
 
+### One bond state (a bug fixed)
+
+Breaks had flowed only one way, from Blast to the fracture (`blast_breaks`). A bond the fracture broke itself kept its health in Blast: a predicted strike's break, a crushed chunk's bonds, or a host break. Blast then went on solving across a bond the split had cut, between pieces that were now separate bodies. The target has one bond state.
+
+**Fix:** `blast_sync`, the first kernel of each Blast frame, breaks in Blast every bond the fracture has marked broken: its health goes to 0, its impulse is cleared, and its islands are marked for rebuilding.
+
+**Test:** host breaks on the house. Without the sync, a broken bond kept health 0.49 in Blast; with it, the fracture and Blast agree on every bond. The struck-house test now checks the same.
+
 ### Standing under gravity
 
 240 frames of gravity alone in the GPU-only world (`fracture_glb`, `STRESS_PROFILE=blast_gpu`), after the changes above:
@@ -134,6 +142,8 @@ The target's contacts add only force to the solve. Their torque goes only to the
 - They enter as `(F + J/dt)/m` and `-(T + L/dt)/I`. Blast's angular coordinates are of the opposite hand, hence the minus.
 - A frame without new loads has none, as in the target.
 - Test: on the anchored house, the device matches the f32 reference given the same accelerations within 7.5e-6. The load moves the bond forces by 56% on its frame, and the next frames carry no load.
+
+**Fragment wake** is not a feature at the target commit. Its stage initialises a split's fragments awake, with their sleep accumulators zeroed, and optionally with gravity (`fragmentGravity`) and a depenetration clamp. rubble's split makes awake bodies under the engine's gravity.
 
 **Not ported:**
 - **Constraint loads** (joint impulses on chunks, `routeConstraintLoads`): rubble's fracture has no joints on chunks to route.

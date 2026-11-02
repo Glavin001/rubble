@@ -101,7 +101,7 @@ const MOTION_BINDINGS: [Binding; 7] = [U, W, W, R, R, R, W];
 /// the island records; `blast_motion.slang` `MOTION_WORDS`: its per-node float4s.
 const FRAME_ROWS: usize = 10;
 const MOTION_WORDS: usize = 7;
-const FRACTURE_BINDINGS: [Binding; 9] = [U, W, W, R, R, R, R, W, R];
+const FRACTURE_BINDINGS: [Binding; 11] = [U, W, W, R, R, R, R, W, W, W, W];
 
 /// The topology kernels and their indirect sizes (`blast_topology.slang` `A_*`, words).
 const TOPOLOGY: [(&str, u64); 12] = [
@@ -935,6 +935,7 @@ const NODE_FRAME: usize = 6;
 pub struct BlastFrame {
     pub solver: GpuBlastSolver,
     node_frame: wgpu::Buffer,
+    sync: Kernel,
     /// Chunk loads set for the coming frame (`set_chunk_loads`); they apply to it alone.
     chunk_loads: bool,
     /// Chunks the last loads touched (cleared before new ones are written).
@@ -973,12 +974,14 @@ impl BlastFrame {
                 node_frame
             },
         );
+        let sync = gpu.compute(&shaders::BLAST_FRACTURE, "blast_sync", &FRACTURE_BINDINGS);
         let loads = gpu.compute(&shaders::BLAST_FRACTURE, "blast_loads", &FRACTURE_BINDINGS);
         let breaks = gpu.compute(&shaders::BLAST_FRACTURE, "blast_breaks", &FRACTURE_BINDINGS);
         let solver = GpuBlastSolver::new(gpu, graph, materials);
         BlastFrame {
             solver,
             node_frame,
+            sync,
             chunk_loads: false,
             loaded: Vec::new(),
             loads,
@@ -1026,6 +1029,8 @@ impl BlastFrame {
                 &self.node_frame,
                 &b.accel,
                 &b.bonds,
+                &b.topo,
+                &b.x,
             ],
         ));
         (self.w_alive, self.a_dirty, self.a_counters) = (f.w_alive, f.a_dirty, f.a_counters);
@@ -1048,6 +1053,8 @@ impl BlastFrame {
         );
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
+            // The fracture's own breaks (strikes, crushes) into Blast first: one bond state.
+            self.sync.dispatch(&mut pass, bind, m.max(1));
             self.loads.dispatch(&mut pass, bind, n.max(1));
         }
         self.solver.record_topology(encoder);

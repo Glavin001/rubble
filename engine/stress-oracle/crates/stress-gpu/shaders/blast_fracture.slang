@@ -8,6 +8,10 @@
 //                  input), and the centrifugal load of its body's spin about its centre of
 //                  mass, -w x (w x r) (`addCentrifugalAcceleration`). Supports take none (their
 //                  weights in D are 0);
+//   blast_sync     one thread per bond, first: a bond the fracture broke itself (a predicted
+//                  strike, a crushed chunk) is broken in Blast too: one bond state, as the
+//                  target has (its health 0, its impulse cleared, the islands marked for
+//                  rebuilding);
 //   blast_breaks   one thread per bond, after blast_material.slang applied the damage: a bond
 //                  whose health reached 0 this frame breaks in the fracture (fr_breaks' marks:
 //                  alive cleared, its body dirty, the counters), whose split follows.
@@ -31,7 +35,10 @@ import blast_common;
 [[vk::binding(6, 0)]] StructuredBuffer<float4> node_frame;
 static const uint NODE_FRAME = 6;
 [[vk::binding(7, 0)]] RWStructuredBuffer<float4> accel;
-[[vk::binding(8, 0)]] StructuredBuffer<BlastBond> bonds;
+[[vk::binding(8, 0)]] RWStructuredBuffer<BlastBond> bonds;
+// blast_topology.slang's `topo` (its pending-rebuild word) and the solver variable.
+[[vk::binding(9, 0)]] RWStructuredBuffer<Atomic<uint>> topo;
+[[vk::binding(10, 0)]] RWStructuredBuffer<float4> x;
 
 static const uint BODY_WORDS = 7;
 static const uint C_FRAME_BROKEN = 0;
@@ -70,6 +77,22 @@ void blast_loads(uint3 id: SV_DispatchThreadID)
     a_local -= cross(w, cross(w, r));
     accel[2 * k] = float4(inverse_rotate(q, alpha), 0.0);
     accel[2 * k + 1] = float4(a_local, 0.0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void blast_sync(uint3 id: SV_DispatchThreadID)
+{
+    uint j = id.x;
+    if (j >= params.bond_count || work[params.w_alive + j] != 0)
+        return;
+    BlastBond bond = bonds[j];
+    if (!(bond.health > 0.0))
+        return;
+    bonds[j].health = 0.0;
+    x[j * 2] = float4(0.0);
+    x[j * 2 + 1] = float4(0.0);
+    topo[topo_dirty(params.node_count)].store(1);
 }
 
 [shader("compute")]
