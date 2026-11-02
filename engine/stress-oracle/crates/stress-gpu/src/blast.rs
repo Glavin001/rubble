@@ -274,7 +274,12 @@ struct Wide {
     /// Each kernel with its bind group (on WGSL past the device's storage limit, each entry has
     /// its own layout).
     kernels: Vec<(Kernel, Grid, wgpu::BindGroup)>,
+    /// `blast_wide_gate.slang`: before each iteration, the iterations' sizes zeroed once no
+    /// row is active.
+    gate: (Kernel, wgpu::BindGroup),
     meta: wgpu::Buffer,
+    /// The indirect sizes: the iterations' (the gate zeroes them; bytes 0..48), then the
+    /// set-up's and the end's (48..96).
     dispatch: wgpu::Buffer,
     rows: u32,
     blocks: u32,
@@ -334,6 +339,7 @@ const WIDE_ITERATION: &[(&str, Grid)] = &[
 ];
 const WIDE_END: &[(&str, Grid)] = &[("w_final", Grid::Bonds), ("w_report", Grid::Rows)];
 const WIDE_BINDINGS: [Binding; 14] = [U, W, R, R, W, R, W, W, W, R, R, W, W, R];
+const WIDE_GATE_BINDINGS: [Binding; 4] = [U, R, R, W];
 /// `blast_native_wide.slang` `ROW_WORDS`, `PARTIAL`, `M_ROWS`.
 const WIDE_ROW_WORDS: u32 = 16;
 const WIDE_PARTIAL: u32 = 6;
@@ -530,8 +536,8 @@ impl GpuBlastSolver {
         let meta = gpu.storage("blast wide meta", &vec![0u32; (WIDE_META_ROWS + rows) as usize]);
         let dispatch = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("blast wide dispatch"),
-            size: 48,
-            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            size: 96,
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let b = &self.buffers;
@@ -546,7 +552,9 @@ impl GpuBlastSolver {
                 (k, g, bind)
             })
             .collect();
-        Wide { kernels, meta, dispatch, rows, blocks, min }
+        let gate = gpu.compute(&shaders::BLAST_WIDE_GATE, "w_gate", &WIDE_GATE_BINDINGS);
+        let gate_bind = gpu.bind(&gate.group, &[&b.params, &wide, &meta, &dispatch]);
+        Wide { kernels, gate: (gate, gate_bind), meta, dispatch, rows, blocks, min }
     }
 
     /// The parameters of a solve (`blast_common.slang` `BlastParams`); `warm` as the settings
@@ -647,36 +655,42 @@ impl GpuBlastSolver {
     fn record_wide(&self, encoder: &mut wgpu::CommandEncoder, w: &Wide) {
         let setup = WIDE_SETUP.len();
         let iteration = WIDE_ITERATION.len();
-        let run = |pass: &mut wgpu::ComputePass<'_>, (k, grid, bind): &(Kernel, Grid, wgpu::BindGroup)| {
+        // `sizes`: the byte offset of the copy of the sizes a kernel takes (0: the iterations').
+        let run = |pass: &mut wgpu::ComputePass<'_>, (k, grid, bind): &(Kernel, Grid, wgpu::BindGroup), sizes: u64| {
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, bind, &[]);
             match grid {
                 Grid::One => pass.dispatch_workgroups(1, 1, 1),
                 Grid::Islands => pass.dispatch_workgroups(crate::gpu::groups(self.graph.node_count().max(1), k.workgroup), 1, 1),
-                Grid::Nodes => pass.dispatch_workgroups_indirect(&w.dispatch, 0),
-                Grid::Bonds => pass.dispatch_workgroups_indirect(&w.dispatch, 16),
-                Grid::Rows => pass.dispatch_workgroups_indirect(&w.dispatch, 32),
+                Grid::Nodes => pass.dispatch_workgroups_indirect(&w.dispatch, sizes),
+                Grid::Bonds => pass.dispatch_workgroups_indirect(&w.dispatch, sizes + 16),
+                Grid::Rows => pass.dispatch_workgroups_indirect(&w.dispatch, sizes + 32),
             }
         };
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             for k in &w.kernels[..3] {
-                run(&mut pass, k);
+                run(&mut pass, k, 48);
             }
         }
-        // meta words 4..16: the node, bond and row grids.
+        // meta words 4..16: the node, bond and row grids, once for the iterations and once for
+        // the set-up and the end.
         encoder.copy_buffer_to_buffer(&w.meta, 16, &w.dispatch, 0, 48);
+        encoder.copy_buffer_to_buffer(&w.meta, 16, &w.dispatch, 48, 48);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         for k in &w.kernels[3..setup] {
-            run(&mut pass, k);
+            run(&mut pass, k, 48);
         }
         for _ in 0..self.graph.settings.max_iterations {
+            pass.set_pipeline(&w.gate.0.pipeline);
+            pass.set_bind_group(0, &w.gate.1, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
             for k in &w.kernels[setup..setup + iteration] {
-                run(&mut pass, k);
+                run(&mut pass, k, 0);
             }
         }
         for k in &w.kernels[setup + iteration..] {
-            run(&mut pass, k);
+            run(&mut pass, k, 48);
         }
     }
 

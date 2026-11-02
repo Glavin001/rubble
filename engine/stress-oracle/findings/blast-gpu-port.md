@@ -140,7 +140,18 @@ Breaks had flowed only one way, from Blast to the fracture (`blast_breaks`). A b
 | After | 7.5 ms | at most 2, all 5 islands converged |
 | One group per island (`STRESS_BLAST_WIDE_MIN` above every island) | 38.7 ms | at most 2 |
 
-**What the 7.5 ms is.** Most of it is the recorded iterations of the many-group solve, which still dispatch after the island has stopped (16 x 26 kernels, each a no-op). Gating them is a lossless speedup for the speed phase.
+**What the 7.5 ms is.** Most of it is dispatches, not work. With the cap at 2 iterations the same frames take 2.9 ms. The other 14 recorded iterations of the many-group solve (28 kernels each) still dispatch after every row has stopped, and each kernel returns at once.
+
+**The gate** (`blast_wide_gate.slang`, lossless). Before each iteration, one thread checks whether any row is active. If none is, it zeroes the iterations' indirect sizes, so the rest of the frame's iterations dispatch no groups. The set-up and end kernels take their own copy of the sizes. Every suite is unchanged (Metal; WGSL at storage limit 10; the Blast world).
+- **Measured gain:** frames alternated in one process, gate on and off, because other work shared the machine. Median 8.87 → 8.08 ms.
+- **Why not more:** on Metal, a dispatch of zero groups costs nearly as much as one whose groups return at once. The overhead is per dispatch.
+
+**Where the rest goes** (measured, not adopted):
+- **wgpu's indirect-call validation.** wgpu 30 turns `InstanceFlags::VALIDATION_INDIRECT_CALL` on in release builds, which adds a validation dispatch before each indirect dispatch.
+  - Off, skyline goes 7.02 → 5.97 ms (two instances in one process, frames alternated).
+  - The flag is instance-wide. Without it, an indirect size above `max_compute_workgroups_per_dimension` is undefined behaviour. Turning it off first needs every kernel that writes indirect sizes to clamp them, and a test of that.
+- **Encoding.** Recording the frame's ~470 dispatches costs 0.5–1.8 ms of host time. It does not hold up the GPU, but it is host time every frame.
+- **Fewer kernels per iteration.** The 8 one-group-per-row kernels could fold into the next block kernel, each block repeating the row's fixed-order sum (bit-identical). That needs double-buffered row state.
 
 **The comparison with vibe-land.** Its city reports a stress solve of about 1 ms (`docs/performance-targets-status-2026-09-25.md`), but not on this scene and not this build. A matched comparison needs vibe-land native built from the target commit.
 
