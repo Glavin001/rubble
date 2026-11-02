@@ -38,7 +38,7 @@ fn js(v: serde_json::Value) -> JsValue {
 struct Spawned {
     name: String,
     sim: ExplicitBeams,
-    /// The node the pose reads follow (nearest the node box's centre at spawn).
+    /// The node the pose reads follow (structure near the node box's centre at spawn).
     reference: u32,
     forward: Vec3,
     warnings: Vec<String>,
@@ -236,13 +236,22 @@ impl ExplicitSim {
             }
             let (lo, hi) = bounds(&sim);
             let centre = 0.5 * (lo + hi);
-            let reference = (0..sim.nodes.len() as u32)
+            // The camera's reference: of the non-tyre nodes nearest the centre (a
+            // tenth, at least 8), the one with the most beams (body structure,
+            // not a panel that may come off).
+            let mut near: Vec<u32> = (0..sim.nodes.len() as u32)
                 .filter(|&i| sim.nodes[i as usize].flags & NODE_TYRE == 0)
-                .min_by(|&a, &b| {
-                    let da = sim.nodes[a as usize].pos.distance_squared(centre);
-                    let db = sim.nodes[b as usize].pos.distance_squared(centre);
-                    da.total_cmp(&db)
-                })
+                .collect();
+            near.sort_by(|&a, &b| {
+                let da = sim.nodes[a as usize].pos.distance_squared(centre);
+                let db = sim.nodes[b as usize].pos.distance_squared(centre);
+                da.total_cmp(&db)
+            });
+            near.truncate((near.len() / 10).max(8));
+            let reference = near
+                .iter()
+                .copied()
+                .max_by_key(|&i| (sim.incidence[i as usize].len(), std::cmp::Reverse(i)))
                 .unwrap_or(0);
             set_moving(&mut sim, forward * speed);
             if scene == "wall" {
@@ -599,4 +608,22 @@ pub fn hires_car_jbeam() -> String {
         ..Default::default()
     })
     .0
+}
+
+/// The procedural sedan for the explicit solver, as `.truck` text: the acceptance
+/// runs' car (`CarParams::sedan()`, 10 kg minimum node mass;
+/// `docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck` is its bare
+/// body), with its soft tyres when `tyres`.
+#[wasm_bindgen(js_name = explicitSedanTruck)]
+pub fn explicit_sedan_truck(tyres: bool) -> String {
+    use engine_softbody::procedural::{car_truck, car_truck_bare, CarParams};
+    let p = CarParams {
+        minimass: 10.0,
+        ..CarParams::sedan()
+    };
+    if tyres {
+        car_truck(&p)
+    } else {
+        car_truck_bare(&p)
+    }
 }
