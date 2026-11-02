@@ -146,7 +146,12 @@
       document.getElementById('xkeys').style.display = '';
       for (const id of ['softKeys', 'paramRow', 'presetSel']) document.getElementById(id).style.display = 'none';
       document.getElementById('infoTitle').innerHTML = '<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, Rigs of Rods parity</span>';
-      document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams, soft tyres and self-collision, every step of a frame in one GPU submit; rendered from its buffers.';
+      document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams, soft tyres and self-collision, every step of a frame in one GPU submit; rendered from its buffers. It has only these three scenes, static boxes and no drivetrain: the other scenes, driving and the dune buggy are on the soft solver (button above).';
+      // Only the explicit solver's own scenes and vehicles are offered: the soft
+      // scenes (poles, moving barriers, ramps, drivers) need the World's rigid
+      // bodies and drivetrains, which it does not couple to.
+      sceneSel.style.display = 'none';
+      for (const o of [...carSel.options]) if (o.value === 'buggy') o.remove();
     }
     // Crash-test presets (query strings) and the editable parameters of each scene.
     const PRESETS = [
