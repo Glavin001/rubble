@@ -245,3 +245,56 @@ fn bonds_the_fracture_breaks_itself_break_in_blast_too() {
     let differ: Vec<usize> = (0..intact.len()).filter(|&j| intact[j] != (blast[j] > 0.0)).collect();
     assert!(differ.is_empty(), "bonds whose state the fracture and Blast disagree on: {differ:?}");
 }
+
+#[test]
+fn crushing_in_blasts_frame_takes_the_bond_forces_virial() {
+    let Ok(gpu) = Gpu::new() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    // PhysX's evaluateChunkMaterials: a chunk's stress is the virial of its bonds' solved forces
+    // at their centroids (with its contacts', none on the standing house): its pressure and
+    // deviator after the first frame are those of Blast's own forces, as the host computes them.
+    use stress_rubble::threshold::FractureOptions;
+    let mut scene = house();
+    for (name, m) in scene.materials.iter_mut() {
+        if name != "projectile" {
+            m.crush = Some(stress_ref::crush::presets::concrete());
+        }
+    }
+    let mut w = ThresholdWorld::with_options(&gpu, &scene, 0.35, 1400.0, Profile::BlastGpu, FractureOptions { crush: true, ..FractureOptions::default() })
+        .expect("blast_gpu world with crushing");
+    w.step_frame(&gpu).expect("frame");
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let graph = w.fracture.blast().unwrap().solver.graph.clone();
+    let impulses = w.fracture.blast().unwrap().solver.impulses();
+    let health = w.fracture.blast().unwrap().solver.health();
+    let state = w.fracture.crush_state(&gpu);
+    let rows = &w.tables.crush.as_ref().unwrap().chunks;
+    let mut compared = 0;
+    for k in 0..graph.node_count() {
+        if rows[k][1][2].to_bits() & 1 == 0 {
+            continue;
+        }
+        let mut v = [0.0f64; 6];
+        for (j, b) in graph.bonds.iter().enumerate() {
+            if !(health[j] > 0.0) || !b.nodes.contains(&k) {
+                continue;
+            }
+            let f = if b.nodes[0] == k { impulses[j].lin } else { impulses[j].lin * -1.0 };
+            let r = b.centroid - graph.nodes[k].position;
+            let s = stress_ref::crush::sym_outer([r.x, r.y, r.z], [f.x, f.y, f.z]);
+            for c in 0..6 {
+                v[c] += s[c];
+            }
+        }
+        let (p, q) = stress_ref::crush::invariants(v, rows[k][1][1] as f64);
+        let (dp, dq) = (state[k][1] as f64, state[k][2] as f64);
+        let scale = p.abs().max(q).max(1.0);
+        assert!((dp - p.max(0.0)).abs() <= 1e-3 * scale, "chunk {k}: pressure {dp} vs {p}");
+        assert!((dq - q).abs() <= 1e-3 * scale, "chunk {k}: deviator {dq} vs {q}");
+        compared += 1;
+    }
+    println!("{compared} crushable chunks' stresses from Blast's bond forces");
+    assert!(compared > 100);
+}

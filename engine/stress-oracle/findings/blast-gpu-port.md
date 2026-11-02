@@ -102,7 +102,17 @@ rubble follows the target's carry as written. These captures were recorded 2026-
 - Closed-form section, patch, bearing and friction tests, written from the formulas' definitions.
 - On the house, the GPU matches the reference formula on all 877 bonds' stresses and damage verdicts (862 commands), with sections, bearing joints and friction all on.
 
-**Not yet in the Blast stage:** crush (`evaluateChunkMaterials`, the chunk virial of the Blast bond forces). rubble's crush law is the same one (`crush.slang`), but it runs on the fracture's own loads (contacts, and the support-loss flow), not the Blast bond forces.
+**Crush** (`evaluateChunkMaterials`). The law is the same (rubble's `crush.slang` is the target's `extStressCrushStep`). In `blast_gpu`, a chunk's stress now takes the target's load source: the virial of Blast's solved bond forces at their centroids (`blast_virial.slang`).
+- **When:** after the solve and before the frame's damage, so over the bonds the solve met.
+- **Contacts:** their virial is added on top.
+- **Which chunks:** every crushable chunk takes the step, loaded by contacts or not.
+- **Order:** `fr_crush_loads` runs after the Blast frame. Other profiles keep the area-shared reaction estimate, before the breaks.
+- **Test:** on a crushable house, all 315 crushable chunks' pressure and deviator after the first frame match the host's virial of the device's Blast forces (within 1e-3).
+
+**Deviations, on purpose:**
+- **Contact loads in rubble's crush** stay rubble's: each new impact's force at its Hertz peak for its duration. The target uses the frame's contact impulse over `dt`.
+- **No strain-rate strengthening:** rubble's crush materials carry no rate exponent, so there is none to apply.
+- **A crushed chunk** leaves forward, through rubble's crush events. The target uses a correction pass, which AGENTS.md forbids.
 
 **`BLAST_STRESS_FIRST_PRECONDITIONER`** (the target's A/B switch) is now `BlastSettings::first_preconditioner`: identity (the default), polynomial or warm. It is ported to the reference and both GPU paths, and tested against the f32 reference.
 

@@ -3151,6 +3151,8 @@ struct CrushParams
     uint r_flow;      // crush_rw: per bond its compressive flow load (N), 4 per float4
     uint r_blast;     // crush_rw: per chunk a blast window's (damage, peak p, peak q, -)
     uint particle_ccd; // mode 2: the particles' continuous collision while fast
+    uint r_virial;    // crush_rw: per chunk 2 float4, its bond virial from Blast's forces
+    uint bond_virial; // 1: the bonds' virial is Blast's solved forces' (blast_virial.slang)
     float pad1;
 };
 
@@ -3232,6 +3234,22 @@ float4 bond_centroid(uint k, Quat q, float3 origin, float3 centre)
         area += bc.w;
     }
     return float4(area > 0.0 ? sum / area : float3(0.0), area);
+}
+
+// A symmetric tensor (diagonal d, off-diagonal o: xy xz yz) in the frame q rotates into:
+// R S R^T.
+Sym sym_rotated(Quat q, float3 d, float3 o)
+{
+    float3x3 s = float3x3(d.x, o.x, o.y, o.x, d.y, o.z, o.y, o.z, d.z);
+    float3 c0 = rotate(q, float3(1.0, 0.0, 0.0));
+    float3 c1 = rotate(q, float3(0.0, 1.0, 0.0));
+    float3 c2 = rotate(q, float3(0.0, 0.0, 1.0));
+    float3x3 r = float3x3(c0.x, c1.x, c2.x, c0.y, c1.y, c2.y, c0.z, c1.z, c2.z);
+    float3x3 w = mul(mul(r, s), transpose(r));
+    Sym out_s;
+    out_s.d = float3(w[0][0], w[1][1], w[2][2]);
+    out_s.o = float3(w[0][1], w[0][2], w[1][2]);
+    return out_s;
 }
 
 // The balanced virial of a load set: its virial W, net force F and |f|-weighted branch sum
@@ -3485,6 +3503,18 @@ void fr_crush_loads(uint3 id: SV_DispatchThreadID)
         float mean = pulse_mean(a.x, a.y, a.z, a.w, bb.w, dt);
         if (mean != 0.0)
             add_load(wa, fa, sa, bb.xyz - centre, c.xyz * mean);
+    }
+    if (crush.bond_virial != 0)
+    {
+        // Blast's frame (evaluateChunkMaterials): the chunk's bonds carry Blast's solved forces
+        // at their centroids (blast_virial.slang, structure frame), with the contacts' virial;
+        // every crushable chunk takes the step, loaded by contacts or not.
+        Sym v = sym_rotated(q, crush_rw[crush.r_virial + 2 * k].xyz, crush_rw[crush.r_virial + 2 * k + 1].xyz);
+        Sym base_b = sym_add(wa, v);
+        Sym peak_b = sym_add(sym_add(wa, wb), v);
+        float4 st_b = crush_rw[k];
+        crush_record(k, crush_two(base_b, dt - tau, peak_b, tau, k, st_b.x), CAUSE_CONTACT);
+        return;
     }
     if (!(sa.w > 0.0) && !(sb.w > 0.0))
         return;

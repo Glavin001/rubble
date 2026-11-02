@@ -203,6 +203,8 @@ struct CrushParams {
     r_flow: u32,
     r_blast: u32,
     particle_ccd: u32,
+    r_virial: u32,
+    bond_virial: u32,
     pad1: f32,
 }
 
@@ -279,7 +281,9 @@ fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::B
     let r_blast = r_events + 6 * c.max_events;
     let r_flow = r_blast + n as u32;
     let flow_words = if c.flow { e.div_ceil(4) as u32 } else { 0 };
-    let rw_words = (r_flow + flow_words) as u64;
+    // Then per chunk 2 float4: its bond virial from Blast's forces (`blast_virial.slang`).
+    let r_virial = r_flow + flow_words;
+    let rw_words = (r_virial + 2 * n as u32) as u64;
     let params = CrushParams {
         enabled: 1,
         mode: match (c.conserve, c.particles) {
@@ -304,6 +308,7 @@ fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::B
         r_flow,
         r_blast,
         particle_ccd: (c.particles && c.particle_ccd) as u32,
+        r_virial,
         ..Default::default()
     };
     Ok((gpu.storage("fracture crush tables", &tab), storage_bytes(gpu, "fracture crush state", 16 * rw_words, wgpu::BufferUsages::empty()), gpu.uniform("fracture crush params", &params), params))
@@ -1390,6 +1395,11 @@ impl GpuFracture {
             return Err(format!("fracture: a Blast graph of {} nodes and {} bonds for {} chunks and {} bonds", g.node_count(), g.bond_count(), self.layout.n, self.layout.e));
         }
         self.blast = Some(blast);
+        // Crushing in Blast's frame takes the bonds' virial from Blast's solved forces.
+        if self.crush.enabled != 0 {
+            self.crush.bond_virial = 1;
+            gpu.write_buffer(&self.crush_buf, 0, bytemuck::bytes_of(&self.crush));
+        }
         self.rebind_blast(gpu);
         Ok(())
     }
@@ -1406,7 +1416,17 @@ impl GpuFracture {
     fn rebind_blast(&mut self, gpu: &Gpu) {
         let (Some(blast), Some(bodies)) = (self.blast.as_mut(), self.engine_bodies.as_ref()) else { return };
         let l = self.layout;
-        let f = crate::blast::FractureBuffers { work: &self.work, atom: &self.atom, frames: &self.frames, bodies, loads: &self.loads, w_alive: l.w_alive(), a_dirty: l.a_dirty(), a_counters: l.a_counters() };
+        let f = crate::blast::FractureBuffers {
+            work: &self.work,
+            atom: &self.atom,
+            frames: &self.frames,
+            bodies,
+            loads: &self.loads,
+            w_alive: l.w_alive(),
+            a_dirty: l.a_dirty(),
+            a_counters: l.a_counters(),
+            crush: (self.crush.enabled != 0).then_some((&self.crush_rw, self.crush.r_virial)),
+        };
         blast.bind(gpu, &f);
     }
 
@@ -1462,7 +1482,7 @@ impl GpuFracture {
                 // Done above, timed.
             } else {
             self.direct(&mut pass, "fr_loads", n);
-            if crush {
+            if crush && self.blast.is_none() {
                 // Before the breaks: the chunk's bonds as the frame's loads met them.
                 self.direct(&mut pass, "fr_crush_loads", n);
             }
@@ -1487,6 +1507,10 @@ impl GpuFracture {
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
+            if crush && self.blast.is_some() {
+                // After Blast's solve: its bond forces as the solve met them (blast_virial).
+                self.direct(&mut pass, "fr_crush_loads", n);
+            }
             if self.params.shot_count > 0 {
                 self.direct(&mut pass, "fr_strike_reset", b);
                 self.direct(&mut pass, "fr_strike_bounds", n);

@@ -67,6 +67,7 @@ pub struct Params {
     pub carry: u32,
     pub section_bending: u32,
     pub chunk_loads: u32,
+    pub r_virial: u32,
 }
 
 #[repr(C)]
@@ -102,6 +103,7 @@ const MOTION_BINDINGS: [Binding; 7] = [U, W, W, R, R, R, W];
 const FRAME_ROWS: usize = 10;
 const MOTION_WORDS: usize = 7;
 const FRACTURE_BINDINGS: [Binding; 11] = [U, W, W, R, R, R, R, W, W, W, W];
+const VIRIAL_BINDINGS: [Binding; 9] = [U, R, R, R, R, R, R, R, W];
 
 /// The topology kernels and their indirect sizes (`blast_topology.slang` `A_*`, words).
 const TOPOLOGY: [(&str, u64); 12] = [
@@ -910,6 +912,8 @@ pub struct FractureBuffers<'a> {
     pub w_alive: u32,
     pub a_dirty: u32,
     pub a_counters: u32,
+    /// With crushing: `crush_rw` and the word its bond virial starts at (`blast_virial.slang`).
+    pub crush: Option<(&'a wgpu::Buffer, u32)>,
 }
 
 /// Blast's solver in the GPU fracture's frame (`Profile::BlastGpu`): each frame, after the
@@ -936,6 +940,11 @@ pub struct BlastFrame {
     pub solver: GpuBlastSolver,
     node_frame: wgpu::Buffer,
     sync: Kernel,
+    /// The bonds' virial for crushing (`blast_virial.slang`): the kernel, its bonds' centroids,
+    /// and its bind group once the fracture crushes.
+    virial: Kernel,
+    centroids: wgpu::Buffer,
+    virial_bind: Option<(wgpu::BindGroup, u32)>,
     /// Chunk loads set for the coming frame (`set_chunk_loads`); they apply to it alone.
     chunk_loads: bool,
     /// Chunks the last loads touched (cleared before new ones are written).
@@ -975,6 +984,9 @@ impl BlastFrame {
             },
         );
         let sync = gpu.compute(&shaders::BLAST_FRACTURE, "blast_sync", &FRACTURE_BINDINGS);
+        let virial = gpu.compute(&shaders::BLAST_VIRIAL, "blast_virial", &VIRIAL_BINDINGS);
+        let centroids: Vec<[f32; 4]> = graph.bonds.iter().map(|b| f4(b.centroid)).collect();
+        let centroids = gpu.storage("blast bond centroids", &if centroids.is_empty() { vec![[0.0f32; 4]] } else { centroids });
         let loads = gpu.compute(&shaders::BLAST_FRACTURE, "blast_loads", &FRACTURE_BINDINGS);
         let breaks = gpu.compute(&shaders::BLAST_FRACTURE, "blast_breaks", &FRACTURE_BINDINGS);
         let solver = GpuBlastSolver::new(gpu, graph, materials);
@@ -982,6 +994,9 @@ impl BlastFrame {
             solver,
             node_frame,
             sync,
+            virial,
+            centroids,
+            virial_bind: None,
             chunk_loads: false,
             loaded: Vec::new(),
             loads,
@@ -1034,6 +1049,11 @@ impl BlastFrame {
             ],
         ));
         (self.w_alive, self.a_dirty, self.a_counters) = (f.w_alive, f.a_dirty, f.a_counters);
+        self.virial_bind = f.crush.map(|(crush_rw, at)| {
+            let b = &self.solver.buffers;
+            let bind = gpu.bind(&self.virial.group, &[&b.params, &b.nodes, &b.refs, &b.bonds, &b.x, &b.stiffness, &self.centroids, &self.node_frame, crush_rw]);
+            (bind, at)
+        });
     }
 
     /// Record the frame's Blast work after `fr_loads` (`dt`: the frame's duration, for the
@@ -1045,6 +1065,7 @@ impl BlastFrame {
         p.gravity = [g.x as f32, g.y as f32, g.z as f32, 0.0];
         (p.w_alive, p.a_dirty, p.a_counters) = (self.w_alive, self.a_dirty, self.a_counters);
         p.chunk_loads = self.chunk_loads as u32;
+        p.r_virial = self.virial_bind.as_ref().map_or(0, |v| v.1);
         self.chunk_loads = false;
         self.solver.write_params(&p);
         let (n, m) = (
@@ -1059,6 +1080,11 @@ impl BlastFrame {
         }
         self.solver.record_topology(encoder);
         self.solver.record_solve(encoder);
+        if let Some((bind, _)) = &self.virial_bind {
+            // The bonds' virial for crushing, before the frame's damage.
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            self.virial.dispatch(&mut pass, bind, n.max(1));
+        }
         self.solver.record_stress(encoder);
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());

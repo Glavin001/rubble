@@ -71,6 +71,8 @@ public struct BlastParams
     public uint section_bending;
     // blast_fracture.slang: this frame's chunk loads (the host's, for one frame) in `node_frame`.
     public uint chunk_loads;
+    // blast_virial.slang: where the bonds' virial starts in the fracture's `crush_rw` (float4s).
+    public uint r_virial;
 };
 
 // `topo` (blast_topology.slang): the totals after the per-node and per-block words: islands,
