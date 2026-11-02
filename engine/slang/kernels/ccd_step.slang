@@ -1251,6 +1251,32 @@ void ccd_wake_colliders(uint3 tid : SV_DispatchThreadID)
     gBodies[i].sleepTimer = 0.0;
 }
 
+// ccd_unhold reading a body's record only when its awake bit is set: it changes only
+// awake bodies (a deferred wake), and the slot part runs in the threads below the CCD
+// slot count whatever their bit.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_unhold_bits(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sceneHasCcd() || i >= gCounters[0].bodyCount) return;
+    if (awakeBit(i))
+    {
+        BodyState b = gBodies[i];
+        if (ccdReleasesHeld(i, b)) gBodies[i].flags = b.flags & ~BODY_WAKE_PENDING;
+    }
+    if (i < ccdBodyCount())
+    {
+        uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * i;
+        if ((ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * i + 3u]) & CCD_RESPOND) != 0u)
+        {
+            uint other = ALOAD(gScratchAtomics[r + 7u]);
+            BodyState bo = gBodies[other];
+            if (ccdReleasesHeld(other, bo) || (!bodyIsSleeping(bo) && !wakePending(bo))) ASTORE(gScratchAtomics[r + 15u], 0u);
+        }
+    }
+}
+
 // Trust region of the bodies a CCD body can strike (after predict_bodies,
 // before the solve). A free body struck by a fast one takes the impact through
 // the solve, a position correction of up to the closing speed times h, but the

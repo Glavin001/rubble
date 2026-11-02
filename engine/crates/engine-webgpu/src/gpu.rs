@@ -890,6 +890,15 @@ impl WgpuSim {
                 deferred_pipes.insert(name.clone(), wgsl);
                 continue;
             }
+            // The solve loop binds the primal's and the dual's buffers at once: past a
+            // device's storage-buffer limit (Chrome allows 10 a stage) it is not built,
+            // and the step keeps a dispatch per colour and dual.
+            if name.starts_with("solve_primal_sparse_loop")
+                && wgsl.matches("var<storage").count() as u32
+                    > device.limits().max_storage_buffers_per_shader_stage
+            {
+                continue;
+            }
             pipes.insert(name.clone(), build_pipe(&device, name, wgsl, &bufs));
         }
 
@@ -2151,6 +2160,17 @@ impl WgpuSim {
         self.awake_body_passes = on;
     }
 
+    /// Whether this device built the solve loop (it may bind more storage buffers than
+    /// the device allows a stage).
+    fn solve_loop_built(&self) -> bool {
+        let k = if self.compact_contacts {
+            "solve_primal_sparse_loop_compact"
+        } else {
+            "solve_primal_sparse_loop"
+        };
+        self.pipes.contains_key(k)
+    }
+
     /// The solver iterations in one workgroup while few are awake, or a dispatch per
     /// colour and dual (`EngineFeatures::solve_loop`).
     pub fn set_solve_loop(&mut self, on: bool) {
@@ -3176,7 +3196,7 @@ impl WgpuSim {
             ccd_by_collider: self.ccd_by_collider && !self.has_colliderless_dynamic(),
             awake_body_passes: self.awake_body_passes,
             primal_tail: self.primal_tail,
-            solve_loop: self.solve_loop,
+            solve_loop: self.solve_loop && self.solve_loop_built(),
             // Host commands that may move statics, sleepers, kinematics or colliders
             // (apply_commands, this step): every bound, and the table rebuilt.
             rest_rebuild: self.rest_stale || self.commands_move_poses,

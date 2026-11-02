@@ -493,10 +493,14 @@ pub fn encode_step(
             e.d("joint_hash_clear", u64::from(i.joint_hash_slots));
             e.d("joint_hash_insert", n_joints);
         }
-        e.d("write_moved_args", 64);
-        e.w("rest_clear", 79);
+        // The uniform table with incremental inserts is rebuilt only when the host asks
+        // (nothing on the GPU asks for it): otherwise these three would dispatch nothing.
+        if !(m.rest_uniform && m.rest_incremental && !m.rest_rebuild) {
+            e.d("write_moved_args", 64);
+            e.w("rest_clear", 79);
+            e.w(if m.rest_uniform { "rest_insert_uniform" } else { "rest_insert" }, 80);
+        }
         if m.rest_uniform {
-            e.w("rest_insert_uniform", 80);
             e.d("rest_publish_uniform", 64);
             if mo.ccd {
                 e.d("ccd_register", n_bodies);
@@ -509,7 +513,6 @@ pub fn encode_step(
             e.w("broadphase_sleeper_large_walk", 88);
             e.w("broadphase_sleeper_large", 85);
         } else {
-            e.w("rest_insert", 80);
             e.d("rest_publish", 64);
             if mo.ccd {
                 e.d("ccd_register", n_bodies);
@@ -729,7 +732,15 @@ pub fn encode_step(
         e.d("warmstart_joints", n_joints);
     }
     e.phase("warm");
-    e.d("build_awake_list", n_bodies);
+    // With the awake bitmap (awake-list body passes): the per-body passes below that act
+    // only on listed bodies read a bit per body before its record.
+    let bits = awake_body_passes(m, i).1;
+    if bits {
+        e.d("clear_awake_bits", n_bodies.div_ceil(32));
+        e.d("build_awake_list_bits", n_bodies);
+    } else {
+        e.d("build_awake_list", n_bodies);
+    }
     e.d(work_args, 64);
     e.d("csr_clear", n_bodies + 1);
     e.w("csr_degree_contacts", 66);
@@ -770,9 +781,9 @@ pub fn encode_step(
     }
     e.phase("coloring");
     let max_c = i.max_colors.min(32);
-    e.d("count_color_tiles", n_bodies);
+    e.d(if bits { "count_color_tiles_bits" } else { "count_color_tiles" }, n_bodies);
     e.d("prefix_color_tiles_parallel", u64::from(max_c) * 64);
-    e.d("scatter_color_tiles", n_bodies);
+    e.d(if bits { "scatter_color_tiles_bits" } else { "scatter_color_tiles" }, n_bodies);
     // Per-colour max CSR degree for degree-aware primal lanes (s[20]).
     e.w("record_color_degrees", 67);
     e.d("write_color_args", 64);
@@ -781,7 +792,7 @@ pub fn encode_step(
         // Per body: it reads a body's flags and searches colliders only for the few whose
         // wake is deferred: cheaper than a scan of every collider (one measured 0.1 ms
         // more on gables506k while the ball flies).
-        e.d("ccd_unhold", n_bodies);
+        e.d(if bits { "ccd_unhold_bits" } else { "ccd_unhold" }, n_bodies);
     }
     if i.guidance {
         // After the graph (free flight = no contacts or joints this step) and
@@ -1084,6 +1095,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_respond_apply",
     "ccd_trust",
     "ccd_unhold",
+    "ccd_unhold_bits",
     "ccd_reach_args",
     "ccd_slot_reach",
     "ccd_slot_reach_listed",
@@ -1161,6 +1173,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "contact_events_persistent",
     "warmstart_joints",
     "build_awake_list",
+    "clear_awake_bits",
+    "build_awake_list_bits",
     "csr_clear",
     "csr_degree_contacts_persistent",
     "csr_degree_joints",
@@ -1176,6 +1190,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "color_bodies",
     "color_bodies_tail",
     "count_color_tiles",
+    "count_color_tiles_bits",
+    "scatter_color_tiles_bits",
     "prefix_color_tiles_parallel",
     "scatter_color_tiles",
     "record_color_degrees",
@@ -1575,10 +1591,10 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
 /// (world_step.slang restBase): a 32-word header, the resting and awake heads, a
 /// resting link per collider, the awake-collider list, and per collider the uniform
 /// tables' awake stamp, the resting bucket and the incremental inserts' bucket list
-/// (restStampBase, restAtBase, restDirtyBase).
+/// (restStampBase, restAtBase, restDirtyBase), then the awake bitmap (awakeBitsBase).
 pub fn rest_table_words(c: &WorldCapacity) -> u64 {
     let grid = u64::from(grid_hash_words(c, c.max_colliders, false, false));
-    32 + 2 * grid + 5 * u64::from(c.max_colliders)
+    32 + 2 * grid + 5 * u64::from(c.max_colliders) + u64::from(c.max_bodies).div_ceil(32)
 }
 
 /// The step's host uniform (params + the first 32 host words).

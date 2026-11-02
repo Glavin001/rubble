@@ -5317,6 +5317,45 @@ void build_awake_list(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// ---- Awake bitmap (World's plan, HOST_S(25) bit 0 hosts; awakeBits) ----
+// A bit per body slot, set by build_awake_list_bits for every body it lists (dynamic and
+// not asleep), past the incremental rest inserts' bucket list. The per-body passes that
+// act only on such bodies, while no body's flags change between the list and them
+// (count_color_tiles, scatter_color_tiles, ccd_unhold), read one word per 32 bodies
+// first instead of each body's record: a body whose bit is clear is one they leave alone.
+uint awakeBitsBase() { return restDirtyBase() + gCounters[0].colliderCount; }
+bool awakeBit(uint body) { return (ALOAD(gConstraintIds[awakeBitsBase() + (body >> 5)]) & (1u << (body & 31u))) != 0u; }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void clear_awake_bits(uint3 tid : SV_DispatchThreadID)
+{
+    uint w = dispatchIndex(tid);
+    if (w < (gCounters[0].bodyCount + 31u) / 32u) ASTORE(gConstraintIds[awakeBitsBase() + w], 0u);
+}
+
+// build_awake_list, also setting each listed body's bit.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void build_awake_list_bits(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i == 0u)
+    {
+        ASTORE(gScratchAtomics[IMPULSE_COUNT], 0u);
+        ASTORE(gScratchAtomics[IMPULSE_FIRST], 0u);
+    }
+    if (i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (bodyIsDynamic(b) && !bodyIsSleeping(b))
+    {
+        uint slot;
+        AADD3(gCounters[0].awakeCount, 1, slot);
+        gAwakeList[slot] = i;
+        AOR2(gConstraintIds[awakeBitsBase() + (i >> 5)], 1u << (i & 31u));
+    }
+}
+
 // --- CSR adjacency (three-avbd: degree → scan → scatter → sort) ----------------------------
 // Constraint id: [0, jointCount) = joints; jointCount + mi = manifold mi (Stage 8b).
 // CINDEX(0..bodyCount): degree then exclusive starts; [bodyCount] = total.
@@ -6289,6 +6328,66 @@ void scatter_color_tiles(uint3 tid : SV_DispatchThreadID)
     uint body = dispatchIndex(tid);
     uint n = gCounters[0].bodyCount;
     if (body >= n) return;
+    BodyState b = gBodies[body];
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || (b.flags & BODY_PARTICLE) != 0u) return;
+    uint color = ALOAD(gBodyColor[body]);
+    if (color >= min(HOST_S(4), 64u)) return; // count pass reports overflow
+    uint groups = (n + 63u) / 64u;
+    uint slot = gColorOffsets[color * groups + body / 64u] + gCcdFlags[body];
+    uint maxB = HOST_S(1);
+    gColorLists[color * maxB + slot] = body;
+    if (HOST_S(26) != 0u) gColorLists[maxB * HOST_S(4) + body] = color + 1u;
+}
+
+// count_color_tiles and scatter_color_tiles reading a body's record only when its awake
+// bit is set (both act only on listed bodies; the rest of each is as theirs).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void count_color_tiles_bits(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
+{
+    uint body = dispatchIndex(tid);
+    uint local = lid.x;
+    uint palette = min(HOST_S(4), 64u);
+    uint n = gCounters[0].bodyCount;
+    uint groups = (n + 63u) / 64u;
+    ASTORE(gsPackHistogram[local], 0u);
+    uint color = 0xFFFFFFFFu;
+    if (body < n && awakeBit(body))
+    {
+        BodyState b = gBodies[body];
+        if (bodyIsDynamic(b) && !bodyIsSleeping(b) && (b.flags & BODY_PARTICLE) == 0u)
+        {
+            color = ALOAD(gBodyColor[body]);
+            if (color >= palette)
+            {
+                AOR2(gCounters[0].overflowFlags, OVERFLOW_COLORS);
+                color = 0xFFFFFFFFu;
+            }
+        }
+    }
+    gsPackColors[local] = color;
+    GROUP_SYNC();
+    if (color != 0xFFFFFFFFu)
+    {
+        uint rank = 0u;
+        for (uint j = 0u; j < local; j++)
+            if (gsPackColors[j] == color) rank++;
+        gCcdFlags[body] = rank;
+        AADD2(gsPackHistogram[color], 1u);
+    }
+    GROUP_SYNC();
+    uint group = body / 64u;
+    if (local < palette && group < groups)
+        gColorOffsets[local * groups + group] = ALOAD(gsPackHistogram[local]);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void scatter_color_tiles_bits(uint3 tid : SV_DispatchThreadID)
+{
+    uint body = dispatchIndex(tid);
+    uint n = gCounters[0].bodyCount;
+    if (body >= n || !awakeBit(body)) return;
     BodyState b = gBodies[body];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b) || (b.flags & BODY_PARTICLE) != 0u) return;
     uint color = ALOAD(gBodyColor[body]);
