@@ -94,7 +94,7 @@
   </div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, pollFrame, stepFrames, drain, macrotask, worldWasm } from './rubble-world.mjs';
+    import { createWorld, pollFrame, stepFrames, drain, macrotask, worldWasm, saveState } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { GROUND_WGSL, switchError } from './terrain-render.mjs';
 
@@ -249,7 +249,7 @@
     device.queue.writeBuffer(world.terrainSurfaceBuffer(), 4 * T.SURFACE_DEBRIS_ARGS_WORD, Uint32Array.of(6));
     const maxParticles = terrainSettings.config.maxParticles, maxParcels = terrainSettings.config.maxParcels;
     // The scene before any event (Replay goes back here; the terrain pool starts over).
-    const initial = world.saveState();
+    const initial = await saveState(world);
     // The terrain as the frames report it: the last counters, the open areas
     // (World's, current after every step) and the last live surface.
     const terrain = { report: null, areas: [], region: null, views: [], substeps: 0 };

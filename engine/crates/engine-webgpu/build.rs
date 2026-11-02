@@ -486,6 +486,16 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         .arg(slang_root.join("kernels/soft_skin.slang"))
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
+    // Compact snapshots' buffer extents (WgpuSim::measure_state): standalone.
+    let extent = wgsl_dir.join("state_extent.wgsl");
+    let status = std::process::Command::new(find_slangc()?)
+        .args(["-target", "wgsl"])
+        .args(["-entry", "state_extent", "-stage", "compute"])
+        .arg("-o")
+        .arg(&extent)
+        .arg(slang_root.join("kernels/state_extent.slang"))
+        .status()?;
+    anyhow::ensure!(status.success(), "slangc failed for state_extent.slang");
     // MPM material probe (tests/mpm_material.rs): standalone, with its own bindings,
     // so it stays out of the world's pipeline table.
     compile_with_defines(

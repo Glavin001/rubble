@@ -4027,7 +4027,7 @@ pub use terrain_watch::{TerrainStrike, TerrainWatch};
 #[path = "gpu_characters.rs"]
 mod characters;
 pub use characters::{CharacterHandle, MotionEvent};
-pub use host_state::SimSnapshot;
+pub use host_state::{SimSnapshot, StateMeasure};
 
 #[cfg(test)]
 #[path = "gpu_tests.rs"]

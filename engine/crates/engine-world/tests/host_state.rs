@@ -46,6 +46,30 @@ fn restore_repeats_the_steps_after_a_save() {
     assert!((again - first).abs() < 1e-3, "{again} vs {first}");
 }
 
+/// A compact save (before the first step, as the web pages take theirs) restores the
+/// same world as a full one: the steps after either fall the same way.
+#[test]
+fn a_compact_save_restores_as_a_full_one() {
+    let (mut w, b) = world();
+    let full = w.save_state().unwrap();
+    let compact = w.save_state_compact().unwrap();
+    let first = y_after(&mut w, b, 40);
+    w.restore_state(&compact).unwrap();
+    assert!((w.read_body_state(b).unwrap().transform.position[1] - 3.0).abs() < 1e-6);
+    let from_compact = y_after(&mut w, b, 40);
+    w.restore_state(&full).unwrap();
+    let from_full = y_after(&mut w, b, 40);
+    assert_eq!(
+        from_compact.to_bits(),
+        from_full.to_bits(),
+        "{from_compact} vs {from_full}"
+    );
+    assert!(
+        (from_compact - first).abs() < 1e-3,
+        "{from_compact} vs {first}"
+    );
+}
+
 /// A dynamic body parked static holds still; launched again it flies with its
 /// mass data intact.
 #[test]

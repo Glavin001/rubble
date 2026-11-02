@@ -365,3 +365,46 @@ option B (keep the carry's behaviour, make it cheap) is the safer route to the c
   awake list.
 - Outside the rigid plan: the threshold fracture's per-frame passes over every chunk and
   bond, and the pose readback sized to every body.
+
+## On top of #92's carry-off (2026-11-01, merge of #94 @ 47372a0b and 067504b2)
+
+#92 (`f9bd3887` on `feat/large-maps`) turned the resting-pair carry off wherever the sleep
+archive is on, and spread the coupling ingest scan over the GPU; `7e79e634` moved the
+archive's warm start out of `persistContact`'s hot block (the heightfield regression
+bisected above). This branch keeps both with the awake-indexed broadphase.
+`EngineFeatures::carry_with_archive` (`ENGINE_REST=keep`, `THRESHOLD_CARRY=on` in the
+ensemble) keeps the carry under the archive for A/B runs. The ensemble's default is now
+the carry-off row: 60.9 ± 2.3 [57, 66] bonds, 107.7 ± 0.7 bodies (never asleep 57.3 ±
+2.5); `awake_broadphase.rs` stays bit-identical and the heightfield test passes.
+
+City, native, quiet GPU, wall ms per step (median of 120 waited steps). "#94" is this
+branch with `ENGINE_BROADPHASE=full WGPU_VALIDATION_INDIRECT_CALL=1` (#94's head
+plus only this branch's fast-list sizing); drive at K=256 and 1,024 is the median of
+three runs each (the others were noisy: another session's CPU load showed in the host
+column):
+
+| K | scenario | #94 | this branch |
+|---|---|---|---|
+| 64 | drive | 1.77 | 1.42 |
+| 64 | war | 4.76 | 4.44 |
+| 256 | drive | 2.40 | 1.60 |
+| 256 | war | 6.78 | 5.98 |
+| 1,024 | drive | 4.19 | 2.52 |
+| 1,024 | war | 10.72 | 7.28 |
+
+Same breaks before and after at each K (K=64: 1,041 awake, 2,391 bonds; K=256 1,139 /
+2,389; K=1,024 1,070 / 2,251).
+
+Drive is now 1.4 → 2.5 ms from 64 to 1,024 houses. A per-dispatch profile
+(`RUBBLE_GPU_TIMING_DISPATCH=1`, K=64 against K=1,024, drive) finds no rigid pass that
+grows by more than about 0.1 ms: the largest are the awake insert and query and
+`archive_emit` (+0.12, +0.06, +0.05 ms, within the marks' noise). What still grows sits
+outside the rigid plan's marks: the frame wait (`poll_blocking`) for the threshold
+fracture's per-frame passes over every chunk and bond (`fr_loads`, `fr_breaks`), and the
+pose readback sized to every body. Those are the next targets (L2 §2, §4).
+
+Web, same build (`?broadphase=full` for the left column): fracture lab grid, ball in
+flight, GPU 2.10 → 1.95 ms, pipelined 3.30 → 2.96 ms (medians of three; the lab grid has
+no sleep archive, so the carry still runs there). Busy pages, ms per step: ring110k
+10.46, gables506k 29.88, softbody traffic (20 cars) 2.44, vehicle driving 1.09, vehicle
+traffic driving 2.38, all at or below the table's earlier values.

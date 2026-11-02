@@ -37,11 +37,11 @@
   </div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, Poses, pollFrame, stepFrames } from './rubble-world.mjs';
+    import { createWorld, Poses, pollFrame, stepFrames, errorText } from './rubble-world.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
-    const fail = (e) => { errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
+    const fail = (e) => { errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
     addEventListener('error', (e) => fail(e.error || e.message));
 

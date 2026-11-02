@@ -42,6 +42,29 @@ export async function createCity(opts, page = {}) {
   return { city, world };
 }
 
+/**
+ * A compact snapshot for `world.restoreState` (`World::measure_state`): each GPU
+ * buffer copied up to its last non-zero word, the same bytes on restore. A scene
+ * saved before it runs needs a fraction of `world.saveState()`'s GPU memory, which
+ * copies every buffer whole (phones run out). Take it before stepping again.
+ */
+export async function saveState(world) {
+  const measure = world.measureState();
+  try {
+    return world.saveStateMeasured(measure, await measure.extents());
+  } finally {
+    measure.free();
+  }
+}
+
+/** An error for a page's error line: its message, then its stack (Safari's stack
+ * leaves the message out). */
+export function errorText(e) {
+  if (!e || !e.stack) return String(e);
+  const stack = String(e.stack);
+  return e.message && !stack.includes(e.message) ? `${e.name || 'Error'}: ${e.message}\n${stack}` : stack;
+}
+
 /** Bytes of the wasm heap (its linear memory), once loaded. */
 export async function wasmHeapBytes() {
   return (await ready)?.memory?.buffer.byteLength ?? 0;
