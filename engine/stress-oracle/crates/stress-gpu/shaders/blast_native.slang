@@ -311,8 +311,9 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         }
         device_group_barrier();
 
-        // g: r on iteration 0, else P r = (a+b-ab) M r - ab M E M r, with E = L - the blocks.
-        if (iteration == 0)
+        // g: r on iteration 0 (unless the polynomial runs first), else P r = (a+b-ab) M r - ab M E M r,
+        // with E = L - the blocks.
+        if (iteration == 0 && params.first_polynomial == 0)
         {
             for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
             {
@@ -378,7 +379,7 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             failed = true;
             break;
         }
-        float beta = iteration > 1 && previous > 0.0 ? gamma / previous : 0.0;
+        float beta = (iteration > 1 || (params.first_polynomial != 0 && iteration > 0)) && previous > 0.0 ? gamma / previous : 0.0;
         for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
         {
             uint i = lists[p];

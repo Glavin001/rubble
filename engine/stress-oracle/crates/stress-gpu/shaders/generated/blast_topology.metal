@@ -38,6 +38,7 @@ struct BlastParams_0
     uint wide_rows_0;
     uint wide_blocks_0;
     uint opaque_zero_0;
+    uint first_polynomial_0;
 };
 
 struct BlastBond_natural_0

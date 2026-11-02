@@ -167,14 +167,32 @@ fn converged_native_solves_are_the_f64_answer() {
 fn capped_native_frames_track_the_f32_reference() {
     let Some(gpu) = gpu() else { return };
     // vibe-land's Mac budget: 16 iterations a frame, warm-started, the settled certificate on.
-    let (graph, materials, g) = house(BlastSettings::native());
+    capped_frames(&gpu, BlastSettings::native(), u32::MAX);
+}
+
+#[test]
+fn the_polynomial_first_tracks_the_f32_reference_in_one_group_and_many() {
+    let Some(gpu) = gpu() else { return };
+    // BLAST_STRESS_FIRST_PRECONDITIONER=polynomial: no steepest-descent first step; and
+    // `warm`, which differs from it only on a cold solve.
+    for first in [FirstPreconditioner::Polynomial, FirstPreconditioner::Warm] {
+        let settings = BlastSettings { first_preconditioner: first, ..BlastSettings::native() };
+        capped_frames(&gpu, settings, u32::MAX);
+        capped_frames(&gpu, settings, 0);
+    }
+}
+
+/// Capped warm frames on the house, the device (one group per island, or every island over
+/// `wide_min` nodes on many) against the f32 reference.
+fn capped_frames(gpu: &Gpu, settings: BlastSettings, wide_min: u32) {
+    let (graph, materials, g) = house(settings);
     let loads: Vec<_> = (0..24)
         .map(|f| uniform(graph.node_count(), g * if f < 12 { 1.0 } else { 1.2 }))
         .collect();
     let spread = rounding_spread(&graph, &loads);
     let bound = (10.0 * spread).max(1e-4);
     let mut reference = single(&graph);
-    let mut device = GpuBlastSolver::new(&gpu, graph, materials);
+    let mut device = GpuBlastSolver::with_wide_min(gpu, graph, materials, wide_min);
     let mut worst = 0.0f64;
     for (frame, accel) in loads.iter().enumerate() {
         let r = reference.solve(accel, false);
@@ -200,7 +218,8 @@ fn capped_native_frames_track_the_f32_reference() {
         assert!(e < bound, "frame {frame}: {e:.3e} (bound {bound:.3e})");
     }
     println!(
-        "capped frames: worst {worst:.3e} from the f32 reference (one-ulp spread {spread:.3e})"
+        "capped frames ({:?}, wide_min {wide_min}): worst {worst:.3e} from the f32 reference (one-ulp spread {spread:.3e})",
+        settings.first_preconditioner
     );
 }
 

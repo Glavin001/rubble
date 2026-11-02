@@ -40,6 +40,27 @@
 
 All earlier suites still pass, on Metal and on WGSL at 10 storage buffers.
 
+### Head-to-head on PhysX's own captured systems
+
+**Tool:** `stress-gpu examples/blast_capture.rs`. It reads solves the native stage recorded with its diagnostic capture runtime (`StressProblemCapture.cuh` v2): each node's `D` and `b`, each bond's ends, offsets, health, column scale and warm forces, each component's decisions, and the forces the solve ended with.
+- **The SDK:** vibe-land's `scripts/perf/build-stress-capture-sdk.sh`, PhysX `8bbfaac` (dirty), built 2026-10-07. That is near the target commit, not the target itself.
+- **The runs:** vibe-land's vehicle lab, 2026-10-01, `target/stress-capture/*`, read in place.
+- **The method:** rubble solves each system again from the same warm start on the GPU (Metal library), and both results are compared with the converged f64 answer. The captures are run-time input, not test fixtures.
+
+| Set | Solves | Settings | Iterations equal | Convergence equal | Frames (anchored, rotations) equal | Worst force difference | rubble no farther from exact |
+|---|---|---|---|---|---|---|---|
+| m1 | 40 | 64 iterations | 40 | 40 | all | 1.1e-5 | 40 |
+| c2 | 182 | 64 iterations | 182 | 182 | all | 3.9e-5 | 180 |
+| c3 | 82 | 64 iterations | 82 | 82 | all | 1.5e-5 | 82 |
+| f1 | 688 | force tolerance 1e-3 | 688 | 688 | all | 4.9e-5 | 688 |
+| f2 | 688 | force tolerance 1e-3 | 405 | 688 | all | 1.6e-1 | 433 |
+
+The force difference is `|rubble - physx| / |physx|` over live bonds. Exactness counts solves where rubble is within 1% of PhysX's own distance from the exact answer.
+
+**f2 is a variant I could not identify.** It was recorded ten minutes after f1, with the same cars. Where its iteration counts differ, PhysX ran about 22 iterations where the force test stops both f1 and rubble after 1. No force tolerance (1e-4 to 5e-3) and no first-iteration preconditioner (identity, polynomial, warm) reproduces it, and no record of its settings survives. The way to settle it is fresh captures from the target commit.
+
+**`BLAST_STRESS_FIRST_PRECONDITIONER`** (the target's A/B switch) is now `BlastSettings::first_preconditioner`: identity (the default), polynomial or warm. It is ported to the reference and both GPU paths, and tested against the f32 reference.
+
 ## Update: the native (resident) solve, 2026-10-25
 
 `blast_gpu` now runs PhysX's native destruction solver (`componentStressSolve`), the one vibe-land runs on the Mac: `shaders/blast_native.slang`, with the reference in `stress-ref/src/blast_bond/native.rs`. The host-path CG stays available as `STRESS_BLAST_SOLVER=host`.

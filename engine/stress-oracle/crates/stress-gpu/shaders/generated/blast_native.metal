@@ -38,6 +38,7 @@ struct BlastParams_0
     uint wide_rows_0;
     uint wide_blocks_0;
     uint opaque_zero_0;
+    uint first_polynomial_0;
 };
 
 struct BlastNode_natural_0
@@ -1289,7 +1290,16 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
             }
         }
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+        bool _S152;
         if(iteration_0 == 0U)
+        {
+            _S152 = ((&kernelContext_25)->params_0->first_polynomial_0) == 0U;
+        }
+        else
+        {
+            _S152 = false;
+        }
+        if(_S152)
         {
             p_4 = _S107;
             for(;;)
@@ -1302,9 +1312,9 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
                     break;
                 }
                 uint i_7 = (&kernelContext_25)->lists_0[p_4];
-                float3 _S152 = va_0(i_7, 0U, &kernelContext_25);
-                float3 _S153 = vl_0(i_7, 0U, &kernelContext_25);
-                set_v_0(i_7, 8U, _S152, _S153, &kernelContext_25);
+                float3 _S153 = va_0(i_7, 0U, &kernelContext_25);
+                float3 _S154 = vl_0(i_7, 0U, &kernelContext_25);
+                set_v_0(i_7, 8U, _S153, _S154, &kernelContext_25);
                 p_4 = p_4 + 1024U;
             }
         }
@@ -1321,18 +1331,18 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
                     break;
                 }
                 uint i_8 = (&kernelContext_25)->lists_0[p_4];
-                float3 _S154 = va_0(i_8, 0U, &kernelContext_25);
-                float3 _S155 = vl_0(i_8, 0U, &kernelContext_25);
+                float3 _S155 = va_0(i_8, 0U, &kernelContext_25);
+                float3 _S156 = vl_0(i_8, 0U, &kernelContext_25);
                 thread float3 a_6;
                 thread float3 l_5;
-                inverse_apply_0(i_8, _S154, _S155, &a_6, &l_5, &kernelContext_25);
+                inverse_apply_0(i_8, _S155, _S156, &a_6, &l_5, &kernelContext_25);
                 set_v_0(i_8, 10U, a_6, l_5, &kernelContext_25);
                 p_4 = p_4 + 1024U;
             }
             threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-            float _S156 = bond_pass_0(tid_7, b0_1, _S101, 10U, &kernelContext_25);
+            float _S157 = bond_pass_0(tid_7, b0_1, _S101, 10U, &kernelContext_25);
             threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-            float _S157 = node_pass_0(tid_7, n0_5, n1_5, 12U, &kernelContext_25);
+            float _S158 = node_pass_0(tid_7, n0_5, n1_5, 12U, &kernelContext_25);
             q_1 = _S107;
             for(;;)
             {
@@ -1344,23 +1354,23 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
                     break;
                 }
                 uint i_9 = (&kernelContext_25)->lists_0[q_1];
-                float3 _S158 = va_0(i_9, 10U, &kernelContext_25);
-                float3 _S159 = vl_0(i_9, 10U, &kernelContext_25);
+                float3 _S159 = va_0(i_9, 10U, &kernelContext_25);
+                float3 _S160 = vl_0(i_9, 10U, &kernelContext_25);
                 thread float3 sa_0;
                 thread float3 sl_0;
-                block_apply_0(i_9, _S158, _S159, &sa_0, &sl_0, &kernelContext_25);
-                float3 _S160 = va_0(i_9, 12U, &kernelContext_25);
-                float3 _S161 = _S160 - sa_0;
-                float3 _S162 = vl_0(i_9, 12U, &kernelContext_25);
+                block_apply_0(i_9, _S159, _S160, &sa_0, &sl_0, &kernelContext_25);
+                float3 _S161 = va_0(i_9, 12U, &kernelContext_25);
+                float3 _S162 = _S161 - sa_0;
+                float3 _S163 = vl_0(i_9, 12U, &kernelContext_25);
                 thread float3 ma_0;
                 thread float3 ml_0;
-                inverse_apply_0(i_9, _S161, _S162 - sl_0, &ma_0, &ml_0, &kernelContext_25);
-                float3 _S163 = va_0(i_9, 10U, &kernelContext_25);
-                float3 _S164 = float3(1.68946564197540283f) ;
-                float3 _S165 = float3(1.5220409631729126f) ;
-                float3 _S166 = _S164 * _S163 - _S165 * ma_0;
-                float3 _S167 = vl_0(i_9, 10U, &kernelContext_25);
-                set_v_0(i_9, 8U, _S166, _S164 * _S167 - _S165 * ml_0, &kernelContext_25);
+                inverse_apply_0(i_9, _S162, _S163 - sl_0, &ma_0, &ml_0, &kernelContext_25);
+                float3 _S164 = va_0(i_9, 10U, &kernelContext_25);
+                float3 _S165 = float3(1.68946564197540283f) ;
+                float3 _S166 = float3(1.5220409631729126f) ;
+                float3 _S167 = _S165 * _S164 - _S166 * ma_0;
+                float3 _S168 = vl_0(i_9, 10U, &kernelContext_25);
+                set_v_0(i_9, 8U, _S167, _S165 * _S168 - _S166 * ml_0, &kernelContext_25);
                 q_1 = q_1 + 1024U;
             }
         }
@@ -1378,33 +1388,33 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
                 break;
             }
             uint i_10 = (&kernelContext_25)->lists_0[p_4];
-            float3 _S168 = va_0(i_10, 8U, &kernelContext_25);
-            float3 a_7 = abs(_S168);
-            float3 _S169 = vl_0(i_10, 8U, &kernelContext_25);
-            float3 l_6 = abs(_S169);
-            float _S170 = max(mloc_0, max(max(max(a_7.x, a_7.y), max(a_7.z, l_6.x)), max(l_6.y, l_6.z)));
+            float3 _S169 = va_0(i_10, 8U, &kernelContext_25);
+            float3 a_7 = abs(_S169);
+            float3 _S170 = vl_0(i_10, 8U, &kernelContext_25);
+            float3 l_6 = abs(_S170);
+            float _S171 = max(mloc_0, max(max(max(a_7.x, a_7.y), max(a_7.z, l_6.x)), max(l_6.y, l_6.z)));
             uint p_5 = p_4 + 1024U;
-            mloc_0 = _S170;
+            mloc_0 = _S171;
             p_4 = p_5;
         }
-        float _S171 = group_max_0(tid_7, mloc_0, &kernelContext_25);
-        bool _S172;
-        if(!(_S171 > 0.0f))
+        float _S172 = group_max_0(tid_7, mloc_0, &kernelContext_25);
+        bool _S173;
+        if(!(_S172 > 0.0f))
         {
-            _S172 = true;
+            _S173 = true;
         }
         else
         {
-            _S172 = !isfinite(_S171);
+            _S173 = !isfinite(_S172);
         }
-        if(_S172)
+        if(_S173)
         {
             converged_0 = false;
             failed_0 = true;
             num_0 = num_1;
             break;
         }
-        float _S173 = 1.0f / _S171;
+        float _S174 = 1.0f / _S172;
         q_1 = _S107;
         float gl_0 = 0.0f;
         for(;;)
@@ -1417,48 +1427,64 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
                 break;
             }
             uint i_11 = (&kernelContext_25)->lists_0[q_1];
-            float3 _S174 = va_0(i_11, 8U, &kernelContext_25);
-            float3 _S175 = float3(_S173) ;
-            float3 ga_0 = _S174 * _S175;
-            float3 _S176 = vl_0(i_11, 8U, &kernelContext_25);
-            float3 gn_0 = _S176 * _S175;
+            float3 _S175 = va_0(i_11, 8U, &kernelContext_25);
+            float3 _S176 = float3(_S174) ;
+            float3 ga_0 = _S175 * _S176;
+            float3 _S177 = vl_0(i_11, 8U, &kernelContext_25);
+            float3 gn_0 = _S177 * _S176;
             set_v_0(i_11, 8U, ga_0, gn_0, &kernelContext_25);
-            float3 _S177 = va_0(i_11, 0U, &kernelContext_25);
-            float _S178 = dot(_S177, ga_0);
-            float3 _S179 = vl_0(i_11, 0U, &kernelContext_25);
-            float gl_1 = gl_0 + (_S178 + dot(_S179, gn_0));
+            float3 _S178 = va_0(i_11, 0U, &kernelContext_25);
+            float _S179 = dot(_S178, ga_0);
+            float3 _S180 = vl_0(i_11, 0U, &kernelContext_25);
+            float gl_1 = gl_0 + (_S179 + dot(_S180, gn_0));
             q_1 = q_1 + 1024U;
             gl_0 = gl_1;
         }
-        float2 _S180 = blast_group_sum_0(tid_7, float2(gl_0, 0.0f), &kernelContext_25);
-        float gamma_0 = _S180.x;
-        bool _S181 = gamma_0 > 0.0f;
-        bool _S182;
-        if(!_S181)
+        float2 _S181 = blast_group_sum_0(tid_7, float2(gl_0, 0.0f), &kernelContext_25);
+        float gamma_0 = _S181.x;
+        bool _S182 = gamma_0 > 0.0f;
+        bool _S183;
+        if(!_S182)
         {
-            _S182 = true;
+            _S183 = true;
         }
         else
         {
-            _S182 = !isfinite(gamma_0);
+            _S183 = !isfinite(gamma_0);
         }
-        if(_S182)
+        if(_S183)
         {
             converged_0 = false;
             failed_0 = true;
             num_0 = num_1;
             break;
         }
-        bool _S183;
+        bool _S184;
         if(iteration_0 > 1U)
         {
-            _S183 = previous_1 > 0.0f;
+            _S184 = true;
         }
         else
         {
-            _S183 = false;
+            if(((&kernelContext_25)->params_0->first_polynomial_0) != 0U)
+            {
+                _S184 = _S135;
+            }
+            else
+            {
+                _S184 = false;
+            }
         }
-        if(_S183)
+        bool _S185;
+        if(_S184)
+        {
+            _S185 = previous_1 > 0.0f;
+        }
+        else
+        {
+            _S185 = false;
+        }
+        if(_S185)
         {
             singular_0 = gamma_0 / previous_1;
         }
@@ -1479,40 +1505,40 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
             uint i_12 = (&kernelContext_25)->lists_0[p_6];
             if(singular_0 == 0.0f)
             {
-                float3 _S184 = va_0(i_12, 8U, &kernelContext_25);
-                float3 _S185 = vl_0(i_12, 8U, &kernelContext_25);
-                set_v_0(i_12, 2U, _S184, _S185, &kernelContext_25);
+                float3 _S186 = va_0(i_12, 8U, &kernelContext_25);
+                float3 _S187 = vl_0(i_12, 8U, &kernelContext_25);
+                set_v_0(i_12, 2U, _S186, _S187, &kernelContext_25);
             }
             else
             {
-                float3 _S186 = va_0(i_12, 8U, &kernelContext_25);
-                float3 _S187 = va_0(i_12, 2U, &kernelContext_25);
-                float3 _S188 = _S186 + _S187 * float3(singular_0) ;
-                float3 _S189 = vl_0(i_12, 8U, &kernelContext_25);
-                float3 _S190 = vl_0(i_12, 2U, &kernelContext_25);
-                set_v_0(i_12, 2U, _S188, _S189 + _S190 * float3(singular_0) , &kernelContext_25);
+                float3 _S188 = va_0(i_12, 8U, &kernelContext_25);
+                float3 _S189 = va_0(i_12, 2U, &kernelContext_25);
+                float3 _S190 = _S188 + _S189 * float3(singular_0) ;
+                float3 _S191 = vl_0(i_12, 8U, &kernelContext_25);
+                float3 _S192 = vl_0(i_12, 2U, &kernelContext_25);
+                set_v_0(i_12, 2U, _S190, _S191 + _S192 * float3(singular_0) , &kernelContext_25);
             }
             p_6 = p_6 + 1024U;
         }
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-        float _S191 = bond_pass_0(tid_7, b0_1, _S101, 2U, &kernelContext_25);
+        float _S193 = bond_pass_0(tid_7, b0_1, _S101, 2U, &kernelContext_25);
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-        float _S192 = node_pass_0(tid_7, n0_5, n1_5, 4U, &kernelContext_25);
-        bool _S193;
+        float _S194 = node_pass_0(tid_7, n0_5, n1_5, 4U, &kernelContext_25);
+        bool _S195;
         if(((&kernelContext_25)->params_0->force_tolerance_0) > 0.0f)
         {
-            if(_S191 > 0.0f)
+            if(_S193 > 0.0f)
             {
-                _S193 = _S181;
+                _S195 = _S182;
             }
             else
             {
-                _S193 = false;
+                _S195 = false;
             }
             float step_1;
-            if(_S193)
+            if(_S195)
             {
-                step_1 = gamma_0 / sqrt(_S191);
+                step_1 = gamma_0 / sqrt(_S193);
             }
             else
             {
@@ -1530,25 +1556,25 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
             step_0 = step_1;
             travel_0 = travel_1;
         }
-        uint _S194 = iteration_0 + 1U;
-        if(!(_S191 > 0.0f))
+        uint _S196 = iteration_0 + 1U;
+        if(!(_S193 > 0.0f))
         {
-            _S193 = true;
+            _S195 = true;
         }
         else
         {
-            _S193 = !isfinite(_S191);
+            _S195 = !isfinite(_S193);
         }
-        if(_S193)
+        if(_S195)
         {
-            bool _S195 = converged_0;
+            bool _S197 = converged_0;
             converged_0 = false;
-            failed_0 = _S195;
+            failed_0 = _S197;
             num_0 = num_1;
-            iteration_0 = _S194;
+            iteration_0 = _S196;
             break;
         }
-        float _S196 = gamma_0 / _S191;
+        float _S198 = gamma_0 / _S193;
         uint p_7 = _S107;
         for(;;)
         {
@@ -1560,25 +1586,25 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
                 break;
             }
             uint i_13 = (&kernelContext_25)->lists_0[p_7];
-            float3 _S197 = va_0(i_13, 6U, &kernelContext_25);
-            float3 _S198 = va_0(i_13, 2U, &kernelContext_25);
-            float3 _S199 = float3(_S196) ;
-            float3 _S200 = _S197 + _S198 * _S199;
-            float3 _S201 = vl_0(i_13, 6U, &kernelContext_25);
-            float3 _S202 = vl_0(i_13, 2U, &kernelContext_25);
-            set_v_0(i_13, 6U, _S200, _S201 + _S202 * _S199, &kernelContext_25);
-            float3 _S203 = va_0(i_13, 0U, &kernelContext_25);
-            float3 _S204 = va_0(i_13, 4U, &kernelContext_25);
-            float3 _S205 = _S203 - _S204 * _S199;
-            float3 _S206 = vl_0(i_13, 0U, &kernelContext_25);
-            float3 _S207 = vl_0(i_13, 4U, &kernelContext_25);
-            set_v_0(i_13, 0U, _S205, _S206 - _S207 * _S199, &kernelContext_25);
+            float3 _S199 = va_0(i_13, 6U, &kernelContext_25);
+            float3 _S200 = va_0(i_13, 2U, &kernelContext_25);
+            float3 _S201 = float3(_S198) ;
+            float3 _S202 = _S199 + _S200 * _S201;
+            float3 _S203 = vl_0(i_13, 6U, &kernelContext_25);
+            float3 _S204 = vl_0(i_13, 2U, &kernelContext_25);
+            set_v_0(i_13, 6U, _S202, _S203 + _S204 * _S201, &kernelContext_25);
+            float3 _S205 = va_0(i_13, 0U, &kernelContext_25);
+            float3 _S206 = va_0(i_13, 4U, &kernelContext_25);
+            float3 _S207 = _S205 - _S206 * _S201;
+            float3 _S208 = vl_0(i_13, 0U, &kernelContext_25);
+            float3 _S209 = vl_0(i_13, 4U, &kernelContext_25);
+            set_v_0(i_13, 0U, _S207, _S208 - _S209 * _S201, &kernelContext_25);
             p_7 = p_7 + 1024U;
         }
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         previous_0 = gamma_0;
         num_0 = num_1;
-        iteration_0 = _S194;
+        iteration_0 = _S196;
     }
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     q_1 = b0_1 + tid_7;
@@ -1592,23 +1618,23 @@ float group_max_0(uint tid_6, float v_12, KernelContext_0 thread* kernelContext_
             break;
         }
         uint j_6 = (&kernelContext_25)->lists_0[q_1];
-        thread BlastBond_natural_0 _S208 = *((&kernelContext_25)->bonds_0+j_6);
-        if(!(((&_S208)->health_0) > 0.0f))
+        thread BlastBond_natural_0 _S210 = *((&kernelContext_25)->bonds_0+j_6);
+        if(!(((&_S210)->health_0) > 0.0f))
         {
-            uint _S209 = j_6 * 2U;
-            packed_float4 _S210 = packed_float4(float4(0.0f) ) ;
-            *((&kernelContext_25)->x_0+_S209) = _S210;
-            *((&kernelContext_25)->x_0+(_S209 + 1U)) = _S210;
+            uint _S211 = j_6 * 2U;
+            packed_float4 _S212 = packed_float4(float4(0.0f) ) ;
+            *((&kernelContext_25)->x_0+_S211) = _S212;
+            *((&kernelContext_25)->x_0+(_S211 + 1U)) = _S212;
             q_1 = q_1 + 1024U;
             continue;
         }
         thread float3 ta_5;
         thread float3 tl_5;
-        bond_term_1(&_S208, 6U, &ta_5, &tl_5, &kernelContext_25);
-        uint _S211 = j_6 * 2U;
-        *((&kernelContext_25)->x_0+_S211) = packed_float4(float4((float4(*((&kernelContext_25)->x_0+_S211)) ).xyz + ta_5, 0.0f)) ;
-        uint _S212 = _S211 + 1U;
-        *((&kernelContext_25)->x_0+_S212) = packed_float4(float4((float4(*((&kernelContext_25)->x_0+_S212)) ).xyz + tl_5, 0.0f)) ;
+        bond_term_1(&_S210, 6U, &ta_5, &tl_5, &kernelContext_25);
+        uint _S213 = j_6 * 2U;
+        *((&kernelContext_25)->x_0+_S213) = packed_float4(float4((float4(*((&kernelContext_25)->x_0+_S213)) ).xyz + ta_5, 0.0f)) ;
+        uint _S214 = _S213 + 1U;
+        *((&kernelContext_25)->x_0+_S214) = packed_float4(float4((float4(*((&kernelContext_25)->x_0+_S214)) ).xyz + tl_5, 0.0f)) ;
         q_1 = q_1 + 1024U;
     }
     if(converged_0)

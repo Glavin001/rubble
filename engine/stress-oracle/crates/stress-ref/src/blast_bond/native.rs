@@ -350,6 +350,7 @@ pub(super) fn native_pcg<T: Real>(
     let (a_w, b_w) = (T::of(LOW_WEIGHT), T::of(HIGH_WEIGHT));
     let (diagonal, coupling) = (a_w + b_w - a_w * b_w, a_w * b_w);
     let max_iterations = g.settings.max_iterations;
+    let first_polynomial = g.settings.first_preconditioner.polynomial_first(warm);
 
     let mut members: Vec<(Vec<usize>, Vec<usize>)> = vec![(Vec::new(), Vec::new()); islands.count];
     for i in 0..n {
@@ -561,7 +562,7 @@ pub(super) fn native_pcg<T: Real>(
                         break;
                     }
                 }
-                let mut gdir = if iteration == 0 {
+                let mut gdir = if iteration == 0 && !first_polynomial {
                     r.clone()
                 } else {
                     precondition(&r)
@@ -584,7 +585,7 @@ pub(super) fn native_pcg<T: Real>(
                     failed = true;
                     break;
                 }
-                let beta = if iteration > 1 && previous > zero {
+                let beta = if (iteration > 1 || (first_polynomial && iteration > 0)) && previous > zero {
                     gamma / previous
                 } else {
                     zero

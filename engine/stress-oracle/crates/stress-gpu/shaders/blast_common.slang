@@ -56,6 +56,9 @@ public struct BlastParams
     // 0, which the compiler cannot see: blast_motion.slang's error-free transformations XOR
     // their intermediates' bits with it so fast math cannot reassociate them away.
     public uint opaque_zero;
+    // blast_native*.slang: the polynomial from the first iteration (BLAST_STRESS_FIRST_PRECONDITIONER;
+    // 0: a projected steepest-descent step first).
+    public uint first_polynomial;
 };
 
 // `topo` (blast_topology.slang): the totals after the per-node and per-block words: islands,

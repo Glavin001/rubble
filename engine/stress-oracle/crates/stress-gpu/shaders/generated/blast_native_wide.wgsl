@@ -30,6 +30,7 @@ struct BlastParams_std140_0
     @align(16) wide_rows_0 : u32,
     @align(4) wide_blocks_0 : u32,
     @align(8) opaque_zero_0 : u32,
+    @align(4) first_polynomial_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;
@@ -1685,6 +1686,14 @@ fn w_pre1(@builtin(workgroup_id) group_14 : vec3<u32>, @builtin(local_invocation
     var i_6 : u32 = lists_0[p_8];
     if((iteration_of_0(b_17.row_4)) == u32(0))
     {
+        _S116 = (params_0.first_polynomial_0) == u32(0);
+    }
+    else
+    {
+        _S116 = false;
+    }
+    if(_S116)
+    {
         set_v_0(i_6, u32(8), va_0(i_6, u32(0)), vl_0(i_6, u32(0)));
         return;
     }
@@ -1716,7 +1725,14 @@ fn w_bond_loc(@builtin(workgroup_id) group_15 : vec3<u32>, @builtin(local_invoca
     }
     else
     {
-        _S117 = (iteration_of_0(b_18.row_4)) == u32(0);
+        if((iteration_of_0(b_18.row_4)) == u32(0))
+        {
+            _S117 = (params_0.first_polynomial_0) == u32(0);
+        }
+        else
+        {
+            _S117 = false;
+        }
     }
     if(_S117)
     {
@@ -1773,7 +1789,14 @@ fn w_pre2(@builtin(workgroup_id) group_16 : vec3<u32>, @builtin(local_invocation
     }
     else
     {
-        _S122 = (iteration_of_0(b_19.row_4)) == u32(0);
+        if((iteration_of_0(b_19.row_4)) == u32(0))
+        {
+            _S122 = (params_0.first_polynomial_0) == u32(0);
+        }
+        else
+        {
+            _S122 = false;
+        }
     }
     if(_S122)
     {
@@ -2000,7 +2023,23 @@ fn w_gamma(@builtin(workgroup_id) group_20 : vec3<u32>, @builtin(local_invocatio
         return;
     }
     var s0_4 : vec4<f32> = wide_0[st_0(row_18, u32(0))];
-    if((iteration_of_0(row_18)) > u32(1))
+    var it_2 : u32 = iteration_of_0(row_18);
+    if(it_2 > u32(1))
+    {
+        _S134 = true;
+    }
+    else
+    {
+        if((params_0.first_polynomial_0) != u32(0))
+        {
+            _S134 = it_2 > u32(0);
+        }
+        else
+        {
+            _S134 = false;
+        }
+    }
+    if(_S134)
     {
         _S134 = (s0_4.z) > 0.0f;
     }
@@ -2326,7 +2365,7 @@ fn w_report(@builtin(workgroup_id) group_27 : vec3<u32>)
     {
         ok_0 = false;
     }
-    var it_2 : u32 = iteration_of_0(row_20);
+    var it_3 : u32 = iteration_of_0(row_20);
     var _S158 : u32;
     if(ok_0)
     {
@@ -2346,7 +2385,7 @@ fn w_report(@builtin(workgroup_id) group_27 : vec3<u32>)
     }
     if(ok_0)
     {
-        ok_0 = it_2 == u32(0);
+        ok_0 = it_3 == u32(0);
     }
     else
     {
@@ -2361,7 +2400,7 @@ fn w_report(@builtin(workgroup_id) group_27 : vec3<u32>)
     {
         _S159 = u32(0);
     }
-    report_0[island_2] = vec4<u32>(it_2, (_S158 | (_S159)), (bitcast<u32>((wide_0[st_0(row_20, u32(0))].y))), (bitcast<u32>((wide_0[st_0(row_20, u32(0))].x))));
+    report_0[island_2] = vec4<u32>(it_3, (_S158 | (_S159)), (bitcast<u32>((wide_0[st_0(row_20, u32(0))].y))), (bitcast<u32>((wide_0[st_0(row_20, u32(0))].x))));
     return;
 }
 

@@ -55,6 +55,7 @@ pub struct Params {
     pub wide_blocks: u32,
     /// 0 (`blast_common.slang` `opaque_zero`).
     pub opaque_zero: u32,
+    pub first_polynomial: u32,
 }
 
 #[repr(C)]
@@ -485,6 +486,7 @@ impl GpuBlastSolver {
             wide_min: self.wide.as_ref().map_or(u32::MAX, |w| w.min),
             wide_rows: self.wide.as_ref().map_or(0, |w| w.rows),
             wide_blocks: self.wide.as_ref().map_or(0, |w| w.blocks),
+            first_polynomial: s.first_preconditioner.polynomial_first(warm && s.warm_start && self.has_warm_start) as u32,
             ..Default::default()
         }
     }
@@ -762,6 +764,16 @@ impl GpuBlastSolver {
                 }
             })
             .collect()
+    }
+
+    /// Start the next solve warm from `x` (scaled units, as `BlastSolver::set_solution`).
+    pub fn set_solution(&mut self, x: &[AngLin]) {
+        assert_eq!(x.len(), self.graph.bond_count());
+        let words: Vec<[f32; 4]> = x.iter().flat_map(|v| [f4(v.ang), f4(v.lin)]).collect();
+        if !words.is_empty() {
+            self.gpu.queue.write_buffer(&self.buffers.x, 0, bytemuck::cast_slice(&words));
+        }
+        self.has_warm_start = true;
     }
 
     /// The solver variable by bond (scaled units, as `BlastSolver::x`).

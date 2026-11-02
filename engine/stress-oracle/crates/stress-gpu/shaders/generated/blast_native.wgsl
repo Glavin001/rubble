@@ -24,6 +24,7 @@ struct BlastParams_std140_0
     @align(16) wide_rows_0 : u32,
     @align(4) wide_blocks_0 : u32,
     @align(8) opaque_zero_0 : u32,
+    @align(4) first_polynomial_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;
@@ -1286,7 +1287,16 @@ fn blast_native(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
             }
         }
         device_group_barrier_0();
+        var _S104 : bool;
         if(iteration_0 == u32(0))
+        {
+            _S104 = (params_0.first_polynomial_0) == u32(0);
+        }
+        else
+        {
+            _S104 = false;
+        }
+        if(_S104)
         {
             p_4 = _S67;
             loop
@@ -1323,9 +1333,9 @@ fn blast_native(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
                 p_4 = p_4 + u32(1024);
             }
             device_group_barrier_0();
-            var _S104 : f32 = bond_pass_0(tid_7, b0_1, _S61, u32(10));
+            var _S105 : f32 = bond_pass_0(tid_7, b0_1, _S61, u32(10));
             device_group_barrier_0();
-            var _S105 : f32 = node_pass_0(tid_7, n0_5, n1_5, u32(12));
+            var _S106 : f32 = node_pass_0(tid_7, n0_5, n1_5, u32(12));
             q_1 = _S67;
             loop
             {
@@ -1343,9 +1353,9 @@ fn blast_native(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
                 var ma_0 : vec3<f32>;
                 var ml_0 : vec3<f32>;
                 inverse_apply_0(i_9, va_0(i_9, u32(12)) - sa_0, vl_0(i_9, u32(12)) - sl_0, &(ma_0), &(ml_0));
-                var _S106 : vec3<f32> = vec3<f32>(1.68946564197540283f);
-                var _S107 : vec3<f32> = vec3<f32>(1.5220409631729126f);
-                set_v_0(i_9, u32(8), _S106 * va_0(i_9, u32(10)) - _S107 * ma_0, _S106 * vl_0(i_9, u32(10)) - _S107 * ml_0);
+                var _S107 : vec3<f32> = vec3<f32>(1.68946564197540283f);
+                var _S108 : vec3<f32> = vec3<f32>(1.5220409631729126f);
+                set_v_0(i_9, u32(8), _S107 * va_0(i_9, u32(10)) - _S108 * ma_0, _S107 * vl_0(i_9, u32(10)) - _S108 * ml_0);
                 q_1 = q_1 + u32(1024);
             }
         }
@@ -1365,29 +1375,29 @@ fn blast_native(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
             var i_10 : u32 = lists_0[p_4];
             var a_8 : vec3<f32> = abs(va_0(i_10, u32(8)));
             var l_6 : vec3<f32> = abs(vl_0(i_10, u32(8)));
-            var _S108 : f32 = max(mloc_0, max(max(max(a_8.x, a_8.y), max(a_8.z, l_6.x)), max(l_6.y, l_6.z)));
+            var _S109 : f32 = max(mloc_0, max(max(max(a_8.x, a_8.y), max(a_8.z, l_6.x)), max(l_6.y, l_6.z)));
             var p_5 : u32 = p_4 + u32(1024);
-            mloc_0 = _S108;
+            mloc_0 = _S109;
             p_4 = p_5;
         }
         var mag_0 : f32 = group_max_0(tid_7, mloc_0);
-        var _S109 : bool;
+        var _S110 : bool;
         if(!(mag_0 > 0.0f))
         {
-            _S109 = true;
+            _S110 = true;
         }
         else
         {
-            _S109 = !isfinite_0(mag_0);
+            _S110 = !isfinite_0(mag_0);
         }
-        if(_S109)
+        if(_S110)
         {
             converged_0 = false;
             failed_0 = true;
             num_0 = num_2;
             break;
         }
-        var _S110 : f32 = 1.0f / mag_0;
+        var _S111 : f32 = 1.0f / mag_0;
         q_1 = _S67;
         var gl_0 : f32 = 0.0f;
         loop
@@ -1400,43 +1410,59 @@ fn blast_native(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
                 break;
             }
             var i_11 : u32 = lists_0[q_1];
-            var _S111 : vec3<f32> = vec3<f32>(_S110);
-            var ga_0 : vec3<f32> = va_0(i_11, u32(8)) * _S111;
-            var gn_0 : vec3<f32> = vl_0(i_11, u32(8)) * _S111;
+            var _S112 : vec3<f32> = vec3<f32>(_S111);
+            var ga_0 : vec3<f32> = va_0(i_11, u32(8)) * _S112;
+            var gn_0 : vec3<f32> = vl_0(i_11, u32(8)) * _S112;
             set_v_0(i_11, u32(8), ga_0, gn_0);
             var gl_1 : f32 = gl_0 + (dot(va_0(i_11, u32(0)), ga_0) + dot(vl_0(i_11, u32(0)), gn_0));
             q_1 = q_1 + u32(1024);
             gl_0 = gl_1;
         }
-        var _S112 : vec2<f32> = blast_group_sum_0(tid_7, vec2<f32>(gl_0, 0.0f));
-        var gamma_0 : f32 = _S112.x;
-        var _S113 : bool = gamma_0 > 0.0f;
-        var _S114 : bool;
-        if(!_S113)
+        var _S113 : vec2<f32> = blast_group_sum_0(tid_7, vec2<f32>(gl_0, 0.0f));
+        var gamma_0 : f32 = _S113.x;
+        var _S114 : bool = gamma_0 > 0.0f;
+        var _S115 : bool;
+        if(!_S114)
         {
-            _S114 = true;
+            _S115 = true;
         }
         else
         {
-            _S114 = !isfinite_0(gamma_0);
+            _S115 = !isfinite_0(gamma_0);
         }
-        if(_S114)
+        if(_S115)
         {
             converged_0 = false;
             failed_0 = true;
             num_0 = num_2;
             break;
         }
-        var _S115 : bool;
+        var _S116 : bool;
         if(iteration_0 > u32(1))
         {
-            _S115 = previous_1 > 0.0f;
+            _S116 = true;
         }
         else
         {
-            _S115 = false;
+            if((params_0.first_polynomial_0) != u32(0))
+            {
+                _S116 = _S88;
+            }
+            else
+            {
+                _S116 = false;
+            }
         }
-        if(_S115)
+        var _S117 : bool;
+        if(_S116)
+        {
+            _S117 = previous_1 > 0.0f;
+        }
+        else
+        {
+            _S117 = false;
+        }
+        if(_S117)
         {
             singular_0 = gamma_0 / previous_1;
         }
@@ -1468,20 +1494,20 @@ fn blast_native(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
         device_group_barrier_0();
         var den_0 : f32 = bond_pass_0(tid_7, b0_1, _S61, u32(2));
         device_group_barrier_0();
-        var _S116 : f32 = node_pass_0(tid_7, n0_5, n1_5, u32(4));
-        var _S117 : bool;
+        var _S118 : f32 = node_pass_0(tid_7, n0_5, n1_5, u32(4));
+        var _S119 : bool;
         if((params_0.force_tolerance_0) > 0.0f)
         {
             if(den_0 > 0.0f)
             {
-                _S117 = _S113;
+                _S119 = _S114;
             }
             else
             {
-                _S117 = false;
+                _S119 = false;
             }
             var step_1 : f32;
-            if(_S117)
+            if(_S119)
             {
                 step_1 = gamma_0 / sqrt(den_0);
             }
@@ -1501,25 +1527,25 @@ fn blast_native(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
             step_0 = step_1;
             travel_0 = travel_1;
         }
-        var _S118 : u32 = iteration_0 + u32(1);
+        var _S120 : u32 = iteration_0 + u32(1);
         if(!(den_0 > 0.0f))
         {
-            _S117 = true;
+            _S119 = true;
         }
         else
         {
-            _S117 = !isfinite_0(den_0);
+            _S119 = !isfinite_0(den_0);
         }
-        if(_S117)
+        if(_S119)
         {
-            var _S119 : bool = converged_0;
+            var _S121 : bool = converged_0;
             converged_0 = false;
-            failed_0 = _S119;
+            failed_0 = _S121;
             num_0 = num_2;
-            iteration_0 = _S118;
+            iteration_0 = _S120;
             break;
         }
-        var _S120 : f32 = gamma_0 / den_0;
+        var _S122 : f32 = gamma_0 / den_0;
         var p_7 : u32 = _S67;
         loop
         {
@@ -1531,15 +1557,15 @@ fn blast_native(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
                 break;
             }
             var i_13 : u32 = lists_0[p_7];
-            var _S121 : vec3<f32> = vec3<f32>(_S120);
-            set_v_0(i_13, u32(6), va_0(i_13, u32(6)) + va_0(i_13, u32(2)) * _S121, vl_0(i_13, u32(6)) + vl_0(i_13, u32(2)) * _S121);
-            set_v_0(i_13, u32(0), va_0(i_13, u32(0)) - va_0(i_13, u32(4)) * _S121, vl_0(i_13, u32(0)) - vl_0(i_13, u32(4)) * _S121);
+            var _S123 : vec3<f32> = vec3<f32>(_S122);
+            set_v_0(i_13, u32(6), va_0(i_13, u32(6)) + va_0(i_13, u32(2)) * _S123, vl_0(i_13, u32(6)) + vl_0(i_13, u32(2)) * _S123);
+            set_v_0(i_13, u32(0), va_0(i_13, u32(0)) - va_0(i_13, u32(4)) * _S123, vl_0(i_13, u32(0)) - vl_0(i_13, u32(4)) * _S123);
             p_7 = p_7 + u32(1024);
         }
         device_group_barrier_0();
         previous_0 = gamma_0;
         num_0 = num_2;
-        iteration_0 = _S118;
+        iteration_0 = _S120;
     }
     device_group_barrier_0();
     q_1 = b0_1 + tid_7;
@@ -1553,23 +1579,23 @@ fn blast_native(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
             break;
         }
         var j_6 : u32 = lists_0[q_1];
-        var _S122 : BlastBond_std430_0 = bonds_0[j_6];
-        if(!((_S122.health_0) > 0.0f))
+        var _S124 : BlastBond_std430_0 = bonds_0[j_6];
+        if(!((_S124.health_0) > 0.0f))
         {
-            var _S123 : u32 = j_6 * u32(2);
-            var _S124 : vec4<f32> = vec4<f32>(0.0f);
-            x_0[_S123] = _S124;
-            x_0[_S123 + u32(1)] = _S124;
+            var _S125 : u32 = j_6 * u32(2);
+            var _S126 : vec4<f32> = vec4<f32>(0.0f);
+            x_0[_S125] = _S126;
+            x_0[_S125 + u32(1)] = _S126;
             q_1 = q_1 + u32(1024);
             continue;
         }
         var ta_5 : vec3<f32>;
         var tl_5 : vec3<f32>;
-        bond_term_1(&(_S122), u32(6), &(ta_5), &(tl_5));
-        var _S125 : u32 = j_6 * u32(2);
-        x_0[_S125] = vec4<f32>(x_0[_S125].xyz + ta_5, 0.0f);
-        var _S126 : u32 = _S125 + u32(1);
-        x_0[_S126] = vec4<f32>(x_0[_S126].xyz + tl_5, 0.0f);
+        bond_term_1(&(_S124), u32(6), &(ta_5), &(tl_5));
+        var _S127 : u32 = j_6 * u32(2);
+        x_0[_S127] = vec4<f32>(x_0[_S127].xyz + ta_5, 0.0f);
+        var _S128 : u32 = _S127 + u32(1);
+        x_0[_S128] = vec4<f32>(x_0[_S128].xyz + tl_5, 0.0f);
         q_1 = q_1 + u32(1024);
     }
     if(converged_0)

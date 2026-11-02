@@ -140,6 +140,32 @@ pub struct BlastSettings {
     /// [`SolverKind::Native`]: also stop when a preconditioned step moves the forces by at most
     /// this fraction of them (`ExtStressGpuSolveParams::forceTolerance`; 0 off).
     pub force_tolerance: f64,
+    /// [`SolverKind::Native`]: the first iteration's direction
+    /// (`BLAST_STRESS_FIRST_PRECONDITIONER`, an A/B switch; identity by default).
+    pub first_preconditioner: FirstPreconditioner,
+}
+
+/// The native solve's first iteration (`firstPreconditionerMode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FirstPreconditioner {
+    /// A projected steepest-descent step, then the polynomial (the default).
+    #[default]
+    Identity,
+    /// The polynomial from the first iteration.
+    Polynomial,
+    /// The polynomial from the first iteration of a warm-started solve, else identity.
+    Warm,
+}
+
+impl FirstPreconditioner {
+    /// Whether the polynomial runs from the first iteration of a solve (`firstPolynomial`).
+    pub fn polynomial_first(self, warm: bool) -> bool {
+        match self {
+            FirstPreconditioner::Identity => false,
+            FirstPreconditioner::Polynomial => true,
+            FirstPreconditioner::Warm => warm,
+        }
+    }
 }
 
 /// Which solve runs.
@@ -167,6 +193,7 @@ impl Default for BlastSettings {
             damage_rate: 2.0,
             solver: SolverKind::HostCgls,
             force_tolerance: 0.0,
+            first_preconditioner: FirstPreconditioner::Identity,
         }
     }
 }
@@ -708,6 +735,13 @@ impl BlastSolver {
         }
         self.islands = Islands::compute(&self.graph, &self.health);
         self.last_converged.clear();
+    }
+
+    /// Start the next solve warm from `x` (scaled units), as if a solve had left it.
+    pub fn set_solution(&mut self, x: Vec<AngLin>) {
+        assert_eq!(x.len(), self.graph.bond_count());
+        self.x = x;
+        self.has_warm_start = true;
     }
 
     /// Solve the bond impulses for node accelerations `accel` (Blast's per-node "velocity":

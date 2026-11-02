@@ -559,7 +559,7 @@ void w_pre1(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     if (p >= b.end)
         return;
     uint i = lists[p];
-    if (iteration_of(b.row) == 0)
+    if (iteration_of(b.row) == 0 && params.first_polynomial == 0)
     {
         set_v(i, N_G, va(i, N_R), vl(i, N_R));
         return;
@@ -577,7 +577,7 @@ void w_bond_loc(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint tid = thread.x;
     Block b = bond_block(group, tid);
-    if (b.begin >= b.end || !runs(b.flags, false) || iteration_of(b.row) == 0)
+    if (b.begin >= b.end || !runs(b.flags, false) || (iteration_of(b.row) == 0 && params.first_polynomial == 0))
         return;
     uint p = b.begin + tid;
     if (p >= b.end)
@@ -599,7 +599,7 @@ void w_pre2(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint tid = thread.x;
     Block b = node_block(group, tid);
-    if (b.begin >= b.end || !runs(b.flags, false) || iteration_of(b.row) == 0)
+    if (b.begin >= b.end || !runs(b.flags, false) || (iteration_of(b.row) == 0 && params.first_polynomial == 0))
         return;
     uint p = b.begin + tid;
     if (p >= b.end)
@@ -713,7 +713,7 @@ void w_gamma(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     float4 s0 = wide[st(row, S_SCALARS)];
     uint it = iteration_of(row);
-    float beta = it > 1 && s0.z > 0.0 ? gamma / s0.z : 0.0;
+    float beta = (it > 1 || (params.first_polynomial != 0 && it > 0)) && s0.z > 0.0 ? gamma / s0.z : 0.0;
     float4 s1 = wide[st(row, S_STEP)];
     s1.x = gamma;
     s1.z = beta;

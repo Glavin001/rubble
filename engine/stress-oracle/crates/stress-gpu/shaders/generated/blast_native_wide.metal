@@ -28,6 +28,7 @@ struct BlastParams_0
     uint wide_rows_0;
     uint wide_blocks_0;
     uint opaque_zero_0;
+    uint first_polynomial_0;
 };
 
 struct BlastNode_natural_0
@@ -2109,6 +2110,14 @@ void inverse_apply_0(uint n_10, float3 a_4, float3 l_3, float3 thread* oa_0, flo
     uint _S203 = iteration_of_0(_S201.row_4, &kernelContext_55);
     if(_S203 == 0U)
     {
+        _S202 = ((&kernelContext_55)->params_0->first_polynomial_0) == 0U;
+    }
+    else
+    {
+        _S202 = false;
+    }
+    if(_S202)
+    {
         float3 _S204 = va_0(i_6, 0U, &kernelContext_55);
         float3 _S205 = vl_0(i_6, 0U, &kernelContext_55);
         set_v_0(i_6, 8U, _S204, _S205, &kernelContext_55);
@@ -2163,7 +2172,14 @@ void inverse_apply_0(uint n_10, float3 a_4, float3 l_3, float3 thread* oa_0, flo
     else
     {
         uint _S210 = iteration_of_0(_S208.row_4, &kernelContext_56);
-        _S209 = _S210 == 0U;
+        if(_S210 == 0U)
+        {
+            _S209 = ((&kernelContext_56)->params_0->first_polynomial_0) == 0U;
+        }
+        else
+        {
+            _S209 = false;
+        }
     }
     if(_S209)
     {
@@ -2239,7 +2255,14 @@ void block_apply_0(uint n_11, float3 a_6, float3 l_5, float3 thread* oa_1, float
     else
     {
         uint _S218 = iteration_of_0(_S216.row_4, &kernelContext_58);
-        _S217 = _S218 == 0U;
+        if(_S218 == 0U)
+        {
+            _S217 = ((&kernelContext_58)->params_0->first_polynomial_0) == 0U;
+        }
+        else
+        {
+            _S217 = false;
+        }
     }
     if(_S217)
     {
@@ -2554,6 +2577,21 @@ float wide_group_max_0(uint tid_21, float v_13, KernelContext_0 thread* kernelCo
     float4 _S253 = float4(*((&kernelContext_63)->wide_0+st_0(row_18, 0U))) ;
     uint _S254 = iteration_of_0(row_18, &kernelContext_63);
     if(_S254 > 1U)
+    {
+        _S252 = true;
+    }
+    else
+    {
+        if(((&kernelContext_63)->params_0->first_polynomial_0) != 0U)
+        {
+            _S252 = _S254 > 0U;
+        }
+        else
+        {
+            _S252 = false;
+        }
+    }
+    if(_S252)
     {
         _S252 = (_S253.z) > 0.0f;
     }
