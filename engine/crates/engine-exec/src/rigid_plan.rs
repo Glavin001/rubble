@@ -479,13 +479,15 @@ pub fn encode_step(
             // Touched sleepers' resting pairs, queried (world_step.slang archive_touch),
             // after listing the sleepers those woken since the broadphase rest on.
             // One hop, and `archive_spread_rounds` more (measurement variant).
-            // Work slot 83: a thread a listed sleeper (archive_touch_snap / _args).
+            // Work slots 83 (a thread a listed sleeper) and 84 (a thread a collider, or
+            // none when nothing is listed), written by archive_touch_snap / _args.
             for _ in 0..=m.archive_spread_rounds {
                 e.d("archive_touch_snap", 64);
-                e.w("archive_touch_spread", 83);
+                e.w("archive_touch_seed", 83);
+                e.w("archive_touch_spread", 84);
             }
             e.d("archive_touch_args", 64);
-            e.w("archive_touch", 83);
+            e.w("archive_touch", 84);
         } else {
             // Measurement variant: sleepers resting on touched ones, one archived hop a round.
             for _ in 0..m.archive_spread_rounds {
@@ -1212,8 +1214,8 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
     // contacts 73), convex 74..76, the awake-indexed broadphase's 77..81 (finer
     // scan, moved list, resting-table rebuild, moving colliders), the fast list's 82, the
-    // sleep archive's touch query 83.
-    s[23] = b(c.max_colors.max(84) * 3, 4);
+    // sleep archive's touch query 83 and 84.
+    s[23] = b(c.max_colors.max(85) * 3, 4);
     s[24] = b(c.max_colliders, 80);
     s[25] = b(c.max_candidates, 32);
     s[26] = b(c.max_bodies, 32);

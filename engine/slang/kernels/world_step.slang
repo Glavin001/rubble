@@ -3721,7 +3721,7 @@ bool contactPairAtRest(BodyState ba, BodyState bb)
 // scratch words in gScratchAtomics:
 //   [free top, blocks, touched count (two, by step parity)]
 //   [row count, first block, age, cursor, touched step] x maxBodies [next] x blocks
-//   [free stack] x blocks [touched list] x maxBodies
+//   [free stack] x blocks [touched list] x maxBodies [spread step] x maxBodies
 static const uint ARCHIVE_ROWS = 8u;
 static const uint ARCHIVE_NONE = 0xFFFFFFFFu;
 static const uint ARCHIVE_JUST_SLEPT = 0xFFFFFFFEu;
@@ -3745,6 +3745,8 @@ uint arNext(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + k; }
 uint arStack(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + archiveBlocks() + k; }
 uint arTouchedCount(uint step) { return archiveMeta() + 2u + (step & 1u); }
 uint arTouchedList(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + 2u * archiveBlocks() + k; }
+// The step a listed sleeper spreads in (archive_touch_seed), after the touched list.
+uint arSpread(uint b) { return archiveMeta() + 4u + 6u * HOST_S(1) + 2u * archiveBlocks() + b; }
 uint archiveRow(uint block, uint j) { return 2u * HOST_S(3) + block * ARCHIVE_ROWS + j; }
 
 // Both colliders' local poses: a split re-parents a collider (new local pose), and its
@@ -4154,17 +4156,13 @@ void touchQuerySmall(uint i, bool mark)
     }
 }
 
-void touchQueryBody(uint body, bool mark)
+// One collider of a listed sleeper (the passes scan the colliders: a threshold split
+// re-parents colliders, so a body's colliders need not be contiguous).
+void touchQueryCollider(uint c, bool mark)
 {
-    uint n = gCounters[0].colliderCount;
-    uint first = firstColliderOfBody(body);
-    for (uint c = first; c < n && c < first + 4096u; c++)
-    {
-        if (gColliders[c].body != body) break;
-        if (HOST_S(18) != 0u) touchQueryHier(c, mark);
-        else if (n <= 512u) touchQuerySmall(c, mark);
-        else touchQueryGrid(c, mark);
-    }
+    if (HOST_S(18) != 0u) touchQueryHier(c, mark);
+    else if (gCounters[0].colliderCount <= 512u) touchQuerySmall(c, mark);
+    else touchQueryGrid(c, mark);
 }
 #endif
 
@@ -6729,60 +6727,70 @@ void archive_emit(uint3 tid : SV_DispatchThreadID)
         archiveEmitResting(ALOAD(gScratchAtomics[arTouchedList(k)]));
 }
 
-// archive_touch, in place of archive_emit with the touch query (slot 83: a thread a
-// listed sleeper): each one's resting pairs (touchQueryBody).
+// The touch query's passes (archive_* in rigid_plan order): snap, seed and spread (one
+// hop), args, touch. Slot 83: a thread a listed sleeper; slot 84: a thread a collider,
+// or none when nothing is listed.
+//
+// archive_touch_snap (one thread): this step's listed sleepers so far, for the spread.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void archive_touch(uint3 tid : SV_DispatchThreadID)
+void archive_touch_snap(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u || !sleepArchive()) return;
+    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1));
+    writeDispatchArgs(83u, n);
+    writeDispatchArgs(84u, n > 0u ? gCounters[0].colliderCount : 0u);
+}
+
+// archive_touch_seed (slot 83): those sleepers spread this step (arSpread).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_seed(uint3 tid : SV_DispatchThreadID)
 {
     uint k = dispatchIndex(tid);
     if (!sleepArchive()) return;
     if (k < min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1)))
-        touchQueryBody(ALOAD(gScratchAtomics[arTouchedList(k)]), false);
+        ASTORE(gScratchAtomics[arSpread(ALOAD(gScratchAtomics[arTouchedList(k)]))], HOST_S(17) + 1u);
 }
 
-// archive_touch_args (one thread, after the spread): archive_touch's work (slot 83, a
-// thread a listed sleeper), and the next step's count word emptied (it held the
-// spread's snapshot).
+// archive_touch_spread (slot 84): the sleepers the seeded ones overlap are listed too. A
+// touched sleeper usually wakes (wake on touch), and once awake it wakes the sleepers it
+// rests on within the same step (its hull pairs' narrowphase runs after the first pass;
+// a projectile or ccd_wake wakes it before the narrowphase), which are then solved with
+// their whole contact set. One hop (sleepers listed here are not seeded): the carry's
+// racier chains further in are not followed.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_spread(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = dispatchIndex(tid);
+    if (!sleepArchive() || c >= gCounters[0].colliderCount) return;
+    if (ALOAD(gScratchAtomics[arSpread(gColliders[c].body)]) == HOST_S(17) + 1u)
+        touchQueryCollider(c, true);
+}
+
+// archive_touch_args (one thread, after the spread): archive_touch's work (slot 84), and
+// the next step's count word emptied (the next step lists into it).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void archive_touch_args(uint3 tid : SV_DispatchThreadID)
 {
     if (dispatchIndex(tid) != 0u || !sleepArchive()) return;
     uint step = HOST_S(17);
-    writeDispatchArgs(83u, min(ALOAD(gScratchAtomics[arTouchedCount(step)]), HOST_S(1)));
+    writeDispatchArgs(84u, ALOAD(gScratchAtomics[arTouchedCount(step)]) > 0u ? gCounters[0].colliderCount : 0u);
     ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], 0u);
 }
 
-// archive_touch_spread, before archive_touch: the sleepers the listed ones rest on are
-// listed too. A touched sleeper usually wakes (wake on touch), and once awake it
-// wakes the sleepers it rests on within the same step (its hull pairs' narrowphase
-// runs after the first pass, a projectile or ccd_wake wakes it before the
-// narrowphase), which are then solved with their whole contact set. One hop: the
-// carry's racier chains further in are not followed.
+// archive_touch, in place of archive_emit with the touch query (slot 84): each listed
+// sleeper's resting pairs.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void archive_touch_spread(uint3 tid : SV_DispatchThreadID)
+void archive_touch(uint3 tid : SV_DispatchThreadID)
 {
-    uint k = dispatchIndex(tid);
-    if (!sleepArchive()) return;
-    // The list as archive_touch_snap left it (entries listed here are not followed).
-    if (k < min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17) + 1u)]), HOST_S(1)))
-        touchQueryBody(ALOAD(gScratchAtomics[arTouchedList(k)]), true);
-}
-
-// archive_touch_snap (one thread, before archive_touch_spread): the listed count, in
-// the next step's count word (archive_touch_args empties it again), and the spread's
-// work (slot 83, a thread a listed sleeper).
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void archive_touch_snap(uint3 tid : SV_DispatchThreadID)
-{
-    if (dispatchIndex(tid) != 0u || !sleepArchive()) return;
-    uint step = HOST_S(17);
-    uint n = ALOAD(gScratchAtomics[arTouchedCount(step)]);
-    ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], n);
-    writeDispatchArgs(83u, min(n, HOST_S(1)));
+    uint c = dispatchIndex(tid);
+    if (!sleepArchive() || c >= gCounters[0].colliderCount) return;
+    if (archiveTouchedNow(gColliders[c].body))
+        touchQueryCollider(c, false);
 }
 
 // archive_seal, over this step's awake list: the step's archiving is done.

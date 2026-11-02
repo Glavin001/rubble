@@ -2500,7 +2500,8 @@ impl WgpuSim {
             grow.push((27, rows * 64));
         }
         let meta = engine_schema::SCRATCH_WORDS;
-        let scratch_words = u64::from(meta) + 4 + 6 * u64::from(mb) + 2 * u64::from(blocks);
+        // ... [touched list] x maxBodies [spread step] x maxBodies (archiveMeta).
+        let scratch_words = u64::from(meta) + 4 + 7 * u64::from(mb) + 2 * u64::from(blocks);
         let limits = self.device.limits();
         grow.push((21, 4 * scratch_words));
         for &(binding, bytes) in &grow {
@@ -2524,7 +2525,7 @@ impl WgpuSim {
         }
         self.queue.submit([enc.finish()]);
         // The records: no rows, no blocks, not just asleep; every block free.
-        let mut words = vec![0u32; (4 + 6 * mb + 2 * blocks) as usize];
+        let mut words = vec![0u32; (4 + 7 * mb + 2 * blocks) as usize];
         words[0] = blocks;
         words[1] = blocks;
         let (head, stack) = ((4 + mb) as usize, (4 + 5 * mb + blocks) as usize);
