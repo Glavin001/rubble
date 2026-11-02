@@ -455,3 +455,30 @@ fn section_bending_bearing_and_friction_match_the_reference_formula() {
     let live = healths.iter().filter(|h| **h > 0.0).count();
     assert!(agree + 2 >= live, "{agree} of {live}");
 }
+
+#[test]
+fn the_wide_solve_stops_on_the_force_test_as_the_one_group_solve_does() {
+    let Some(gpu) = gpu() else { return };
+    // vibe-land's force tolerance (1e-3): in f32 the house's residual never reaches its target,
+    // so the force test is what stops a solve, and its screen measures the step against the
+    // forces at the start plus the steps since. The many-group solve must start from the
+    // forces as the one-group solve does: it once started from 0 and never stopped.
+    let settings = BlastSettings { force_tolerance: 1e-3, ..BlastSettings::native() };
+    let (graph, materials, g) = house(settings);
+    let accel = uniform(graph.node_count(), g);
+    let mut wide = GpuBlastSolver::with_wide_min(&gpu, graph.clone(), materials.clone(), 0);
+    let mut group = GpuBlastSolver::with_wide_min(&gpu, graph, materials, u32::MAX);
+    let (mut stopped_wide, mut stopped_group) = (0, 0);
+    for frame in 0..60 {
+        let w = wide.solve(&accel, false);
+        let o = group.solve(&accel, false);
+        stopped_wide += (w[0].converged && w[0].iterations < 16) as usize;
+        stopped_group += (o[0].converged && o[0].iterations < 16) as usize;
+        if frame >= 20 {
+            assert_eq!((w[0].converged, w[0].skipped), (o[0].converged, o[0].skipped), "frame {frame}: {w:?} vs {o:?}");
+            assert!(w[0].iterations.abs_diff(o[0].iterations) <= 1, "frame {frame}: {w:?} vs {o:?}");
+        }
+    }
+    println!("frames stopped early by the force test: many groups {stopped_wide}, one group {stopped_group}");
+    assert!(stopped_group > 30 && stopped_wide > 30);
+}

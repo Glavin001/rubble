@@ -1024,22 +1024,25 @@ Block_0 bond_block_0(uint3 group_2, uint tid_4, KernelContext_0 thread* kernelCo
         return;
     }
     uint p_1 = _S94.begin_0 + tid_5;
-    bool _S95;
+    float f_0;
     if(p_1 < (_S94.end_0))
     {
-        _S95 = ((&kernelContext_20)->params_0->warm_0) == 0U;
+        uint j_5 = (&kernelContext_20)->lists_0[p_1];
+        if(((&kernelContext_20)->params_0->warm_0) == 0U)
+        {
+            uint _S95 = j_5 * 2U;
+            packed_float4 _S96 = packed_float4(float4(0.0f) ) ;
+            *((&kernelContext_20)->x_0+_S95) = _S96;
+            *((&kernelContext_20)->x_0+(_S95 + 1U)) = _S96;
+        }
+        uint _S97 = j_5 * 2U;
+        f_0 = norm2_0((float4(*((&kernelContext_20)->x_0+_S97)) ).xyz, (float4(*((&kernelContext_20)->x_0+(_S97 + 1U))) ).xyz);
     }
     else
     {
-        _S95 = false;
+        f_0 = 0.0f;
     }
-    if(_S95)
-    {
-        uint _S96 = (&kernelContext_20)->lists_0[p_1] * 2U;
-        packed_float4 _S97 = packed_float4(float4(0.0f) ) ;
-        *((&kernelContext_20)->x_0+_S96) = _S97;
-        *((&kernelContext_20)->x_0+(_S96 + 1U)) = _S97;
-    }
+    write_partial_0(tid_5, _S94.row_4, group_3.x, 2U, float4(f_0, 0.0f, 0.0f, 0.0f), &kernelContext_20);
     return;
 }
 
@@ -1180,83 +1183,84 @@ float float_bits_0(uint bits_0)
     uint4 r_3 = group_uniform4_0(uint4(*((&kernelContext_27)->islands_0+island_1)) , tid_7);
     uint _S107 = r_3.y - r_3.x;
     float4 _S108 = row_sum_0(tid_7, row_8, blocks_0(_S107), 0U, &kernelContext_27);
+    float4 _S109 = row_sum_0(tid_7, row_8, blocks_0(r_3.w - r_3.z), 2U, &kernelContext_27);
     if(tid_7 != 0U)
     {
         return;
     }
-    uint4 _S109 = uint4(*((&kernelContext_27)->report_0+island_1)) ;
-    bool _S110;
+    uint4 _S110 = uint4(*((&kernelContext_27)->report_0+island_1)) ;
+    bool _S111;
     if(((&kernelContext_27)->params_0->warm_0) != 0U)
     {
-        _S110 = ((_S109.y) & 4U) != 0U;
+        _S111 = ((_S110.y) & 4U) != 0U;
     }
     else
     {
-        _S110 = false;
+        _S111 = false;
     }
-    if(_S110)
+    if(_S111)
     {
-        _S110 = (_S108.z) == 0.0f;
+        _S111 = (_S108.z) == 0.0f;
     }
     else
     {
-        _S110 = false;
+        _S111 = false;
     }
-    uint f_0;
-    if(_S110)
+    uint f_1;
+    if(_S111)
     {
-        f_0 = 128U;
+        f_1 = 128U;
     }
     else
     {
-        f_0 = 1U;
+        f_1 = 1U;
     }
-    float _S111 = _S108.x;
-    float delta2_0 = _S111 * (&kernelContext_27)->params_0->tolerance_0 * (&kernelContext_27)->params_0->tolerance_0;
-    if(f_0 == 1U)
+    float _S112 = _S108.x;
+    float delta2_0 = _S112 * (&kernelContext_27)->params_0->tolerance_0 * (&kernelContext_27)->params_0->tolerance_0;
+    if(f_1 == 1U)
     {
         if((_S108.y) > 0.0f)
         {
-            _S110 = true;
+            _S111 = true;
         }
         else
         {
-            uint _S112 = frame_word_0(island_1, 2U, &kernelContext_27);
-            _S110 = _S112 != 0U;
+            uint _S113 = frame_word_0(island_1, 2U, &kernelContext_27);
+            _S111 = _S113 != 0U;
         }
-        if(_S110)
+        if(_S111)
         {
-            f_0 = 4U;
+            f_1 = 4U;
         }
         else
         {
             if(!(delta2_0 > 0.0f))
             {
-                f_0 = 18U;
+                f_1 = 18U;
             }
         }
     }
-    uint _S113 = frame_word_0(island_1, 0U, &kernelContext_27);
-    if(_S113 == 0U)
+    uint _S114 = frame_word_0(island_1, 0U, &kernelContext_27);
+    if(_S114 == 0U)
     {
-        f_0 = f_0 | 8U;
+        f_1 = f_1 | 8U;
     }
-    uint3 _S114 = carry_of_0(island_1, &kernelContext_27);
-    bool _S115 = carry_kept_0(_S114, _S107, &kernelContext_27);
-    if(_S115)
+    uint3 _S115 = carry_of_0(island_1, &kernelContext_27);
+    bool _S116 = carry_kept_0(_S115, _S107, &kernelContext_27);
+    if(_S116)
     {
-        _S110 = (_S108.w) <= ((&kernelContext_27)->params_0->tolerance_0 * (&kernelContext_27)->params_0->tolerance_0 * _S111);
+        _S111 = (_S108.w) <= ((&kernelContext_27)->params_0->tolerance_0 * (&kernelContext_27)->params_0->tolerance_0 * _S112);
     }
     else
     {
-        _S110 = false;
+        _S111 = false;
     }
     float previous_0;
-    if(_S110)
+    if(_S111)
     {
-        uint f_1 = f_0 | 256U;
-        previous_0 = (as_type<float>((_S114.z)));
-        f_0 = f_1;
+        uint f_2 = f_1 | 256U;
+        previous_0 = (as_type<float>((_S115.z)));
+        f_1 = f_2;
     }
     else
     {
@@ -1266,124 +1270,124 @@ float float_bits_0(uint bits_0)
     {
         set_carry_0(island_1, 0U, 0U, 0.0f, &kernelContext_27);
     }
-    float _S116 = float_bits_0(2139095040U);
-    *((&kernelContext_27)->wide_0+st_0(row_8, 0U)) = packed_float4(float4(delta2_0, 0.0f, previous_0, _S116)) ;
-    *((&kernelContext_27)->wide_0+st_0(row_8, 1U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, _S116)) ;
-    float _S117 = (as_type<float>((0U)));
-    *((&kernelContext_27)->wide_0+st_0(row_8, 2U)) = packed_float4(float4(0.0f, 0.0f, _S117, (as_type<float>((f_0))))) ;
-    packed_float4 device* _S118 = (&kernelContext_27)->wide_0+st_0(row_8, 3U);
-    if((f_0 & 256U) != 0U)
+    float _S117 = float_bits_0(2139095040U);
+    *((&kernelContext_27)->wide_0+st_0(row_8, 0U)) = packed_float4(float4(delta2_0, 0.0f, previous_0, _S117)) ;
+    *((&kernelContext_27)->wide_0+st_0(row_8, 1U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, _S117)) ;
+    float _S118 = (as_type<float>((0U)));
+    *((&kernelContext_27)->wide_0+st_0(row_8, 2U)) = packed_float4(float4(sqrt(_S109.x), 0.0f, _S118, (as_type<float>((f_1))))) ;
+    packed_float4 device* _S119 = (&kernelContext_27)->wide_0+st_0(row_8, 3U);
+    if((f_1 & 256U) != 0U)
     {
-        f_0 = _S114.y;
+        f_1 = _S115.y;
     }
     else
     {
-        f_0 = 0U;
+        f_1 = 0U;
     }
-    *_S118 = packed_float4(float4((as_type<float>((f_0))), 0.0f, 0.0f, _S117)) ;
+    *_S119 = packed_float4(float4((as_type<float>((f_1))), 0.0f, 0.0f, _S118)) ;
     return;
 }
 
-uint bs_0(uint j_5, KernelContext_0 thread* kernelContext_28)
+uint bs_0(uint j_6, KernelContext_0 thread* kernelContext_28)
 {
-    return kernelContext_28->params_0->node_count_0 * kernelContext_28->params_0->node_vectors_0 + 2U * j_5;
+    return kernelContext_28->params_0->node_count_0 * kernelContext_28->params_0->node_vectors_0 + 2U * j_6;
 }
 
-float3 rot_a_0(uint j_6, float3 v_9, KernelContext_0 thread* kernelContext_29)
+float3 rot_a_0(uint j_7, float3 v_9, KernelContext_0 thread* kernelContext_29)
 {
-    float3 _S119;
+    float3 _S120;
     if((kernelContext_29->params_0->rotation_0) != 0U)
     {
-        float3 _S120 = stiff_0(j_6, 0U, v_9, kernelContext_29);
-        _S119 = _S120;
+        float3 _S121 = stiff_0(j_7, 0U, v_9, kernelContext_29);
+        _S120 = _S121;
     }
     else
     {
-        _S119 = v_9;
+        _S120 = v_9;
     }
-    return _S119;
+    return _S120;
 }
 
-float3 rot_l_0(uint j_7, float3 v_10, KernelContext_0 thread* kernelContext_30)
+float3 rot_l_0(uint j_8, float3 v_10, KernelContext_0 thread* kernelContext_30)
 {
-    float3 _S121;
+    float3 _S122;
     if((kernelContext_30->params_0->rotation_0) == 2U)
     {
-        float3 _S122 = stiff_0(j_7, 2U, v_10, kernelContext_30);
-        _S121 = _S122;
+        float3 _S123 = stiff_0(j_8, 2U, v_10, kernelContext_30);
+        _S122 = _S123;
     }
     else
     {
-        _S121 = v_10;
+        _S122 = v_10;
     }
-    return _S121;
+    return _S122;
 }
 
-void bond_term_0(const BlastBond_natural_0 thread* b_6, uint j_8, uint v_11, float3 thread* ta_0, float3 thread* tl_0, KernelContext_0 thread* kernelContext_31)
+void bond_term_0(const BlastBond_natural_0 thread* b_6, uint j_9, uint v_11, float3 thread* ta_0, float3 thread* tl_0, KernelContext_0 thread* kernelContext_31)
 {
-    uint _S123 = b_6->n0_0;
+    uint _S124 = b_6->n0_0;
     BlastNode_natural_0 m0_0 = kernelContext_31->nodes_0[b_6->n0_0];
-    uint _S124 = b_6->n1_0;
+    uint _S125 = b_6->n1_0;
     BlastNode_natural_0 m1_0 = kernelContext_31->nodes_0[b_6->n1_0];
-    float3 _S125 = va_0(b_6->n0_0, v_11, kernelContext_31);
-    float3 a0_1 = _S125 * float3(m0_0.w_ang_0) ;
-    float3 _S126 = vl_0(_S123, v_11, kernelContext_31);
-    float3 l0_0 = _S126 * float3(m0_0.w_lin_0) ;
-    float3 _S127 = va_0(_S124, v_11, kernelContext_31);
-    float3 a1_1 = _S127 * float3(m1_0.w_ang_0) ;
-    float3 _S128 = vl_0(_S124, v_11, kernelContext_31);
-    float3 l1_0 = _S128 * float3(m1_0.w_lin_0) ;
+    float3 _S126 = va_0(b_6->n0_0, v_11, kernelContext_31);
+    float3 a0_1 = _S126 * float3(m0_0.w_ang_0) ;
+    float3 _S127 = vl_0(_S124, v_11, kernelContext_31);
+    float3 l0_0 = _S127 * float3(m0_0.w_lin_0) ;
+    float3 _S128 = va_0(_S125, v_11, kernelContext_31);
+    float3 a1_1 = _S128 * float3(m1_0.w_ang_0) ;
+    float3 _S129 = vl_0(_S125, v_11, kernelContext_31);
+    float3 l1_0 = _S129 * float3(m1_0.w_lin_0) ;
     if((kernelContext_31->params_0->rotation_0) == 0U)
     {
-        float3 _S129 = float3(b_6->s_0) ;
-        *ta_0 = (a0_1 - a1_1) * _S129;
-        *tl_0 = (l0_0 - l1_0 + (cross((float4(b_6->o0_0) ).xyz, a0_1) - cross((float4(b_6->o1_0) ).xyz, a1_1))) * _S129;
+        float3 _S130 = float3(b_6->s_0) ;
+        *ta_0 = (a0_1 - a1_1) * _S130;
+        *tl_0 = (l0_0 - l1_0 + (cross((float4(b_6->o0_0) ).xyz, a0_1) - cross((float4(b_6->o1_0) ).xyz, a1_1))) * _S130;
         return;
     }
-    float3 _S130 = rot_a_0(j_8, a0_1 - a1_1, kernelContext_31);
-    float3 _S131 = float3(b_6->s_0) ;
-    *ta_0 = _S130 * _S131;
-    float3 _S132 = rot_l_0(j_8, l0_0 - l1_0 + (cross((float4(b_6->o0_0) ).xyz, a0_1) - cross((float4(b_6->o1_0) ).xyz, a1_1)), kernelContext_31);
-    *tl_0 = _S132 * _S131;
+    float3 _S131 = rot_a_0(j_9, a0_1 - a1_1, kernelContext_31);
+    float3 _S132 = float3(b_6->s_0) ;
+    *ta_0 = _S131 * _S132;
+    float3 _S133 = rot_l_0(j_9, l0_0 - l1_0 + (cross((float4(b_6->o0_0) ).xyz, a0_1) - cross((float4(b_6->o1_0) ).xyz, a1_1)), kernelContext_31);
+    *tl_0 = _S133 * _S132;
     return;
 }
 
-void bond_term_1(const BlastBond_natural_0 thread* b_7, uint j_9, uint v_12, float3 thread* ta_1, float3 thread* tl_1, KernelContext_0 thread* kernelContext_32)
+void bond_term_1(const BlastBond_natural_0 thread* b_7, uint j_10, uint v_12, float3 thread* ta_1, float3 thread* tl_1, KernelContext_0 thread* kernelContext_32)
 {
-    uint _S133 = b_7->n0_0;
+    uint _S134 = b_7->n0_0;
     BlastNode_natural_0 m0_1 = kernelContext_32->nodes_0[b_7->n0_0];
-    uint _S134 = b_7->n1_0;
+    uint _S135 = b_7->n1_0;
     BlastNode_natural_0 m1_1 = kernelContext_32->nodes_0[b_7->n1_0];
-    float3 _S135 = va_0(b_7->n0_0, v_12, kernelContext_32);
-    float3 a0_2 = _S135 * float3(m0_1.w_ang_0) ;
-    float3 _S136 = vl_0(_S133, v_12, kernelContext_32);
-    float3 l0_1 = _S136 * float3(m0_1.w_lin_0) ;
-    float3 _S137 = va_0(_S134, v_12, kernelContext_32);
-    float3 a1_2 = _S137 * float3(m1_1.w_ang_0) ;
-    float3 _S138 = vl_0(_S134, v_12, kernelContext_32);
-    float3 l1_1 = _S138 * float3(m1_1.w_lin_0) ;
+    float3 _S136 = va_0(b_7->n0_0, v_12, kernelContext_32);
+    float3 a0_2 = _S136 * float3(m0_1.w_ang_0) ;
+    float3 _S137 = vl_0(_S134, v_12, kernelContext_32);
+    float3 l0_1 = _S137 * float3(m0_1.w_lin_0) ;
+    float3 _S138 = va_0(_S135, v_12, kernelContext_32);
+    float3 a1_2 = _S138 * float3(m1_1.w_ang_0) ;
+    float3 _S139 = vl_0(_S135, v_12, kernelContext_32);
+    float3 l1_1 = _S139 * float3(m1_1.w_lin_0) ;
     if((kernelContext_32->params_0->rotation_0) == 0U)
     {
-        float3 _S139 = float3(b_7->s_0) ;
-        *ta_1 = (a0_2 - a1_2) * _S139;
-        *tl_1 = (l0_1 - l1_1 + (cross((float4(b_7->o0_0) ).xyz, a0_2) - cross((float4(b_7->o1_0) ).xyz, a1_2))) * _S139;
+        float3 _S140 = float3(b_7->s_0) ;
+        *ta_1 = (a0_2 - a1_2) * _S140;
+        *tl_1 = (l0_1 - l1_1 + (cross((float4(b_7->o0_0) ).xyz, a0_2) - cross((float4(b_7->o1_0) ).xyz, a1_2))) * _S140;
         return;
     }
-    float3 _S140 = rot_a_0(j_9, a0_2 - a1_2, kernelContext_32);
-    float3 _S141 = float3(b_7->s_0) ;
-    *ta_1 = _S140 * _S141;
-    float3 _S142 = rot_l_0(j_9, l0_1 - l1_1 + (cross((float4(b_7->o0_0) ).xyz, a0_2) - cross((float4(b_7->o1_0) ).xyz, a1_2)), kernelContext_32);
-    *tl_1 = _S142 * _S141;
+    float3 _S141 = rot_a_0(j_10, a0_2 - a1_2, kernelContext_32);
+    float3 _S142 = float3(b_7->s_0) ;
+    *ta_1 = _S141 * _S142;
+    float3 _S143 = rot_l_0(j_10, l0_1 - l1_1 + (cross((float4(b_7->o0_0) ).xyz, a0_2) - cross((float4(b_7->o1_0) ).xyz, a1_2)), kernelContext_32);
+    *tl_1 = _S143 * _S142;
     return;
 }
 
 void gather_0(uint node_2, bool from_t_0, bool with_u_0, float3 thread* ang_0, float3 thread* lin_0, KernelContext_0 thread* kernelContext_33)
 {
     BlastNode_natural_0 n_8 = kernelContext_33->nodes_0[node_2];
-    float3 _S143 = float3(0.0f) ;
+    float3 _S144 = float3(0.0f) ;
     uint r_4 = n_8.ref_begin_0;
-    float3 acc_a_0 = _S143;
-    float3 acc_l_0 = _S143;
+    float3 acc_a_0 = _S144;
+    float3 acc_l_0 = _S144;
     for(;;)
     {
         if(r_4 < (n_8.ref_end_0))
@@ -1394,9 +1398,9 @@ void gather_0(uint node_2, bool from_t_0, bool with_u_0, float3 thread* ang_0, f
             break;
         }
         uint ref_2 = kernelContext_33->refs_0[r_4];
-        uint j_10 = ref_2 & 2147483647U;
-        thread BlastBond_natural_0 _S144 = *(kernelContext_33->bonds_0+j_10);
-        if(!(((&_S144)->health_0) > 0.0f))
+        uint j_11 = ref_2 & 2147483647U;
+        thread BlastBond_natural_0 _S145 = *(kernelContext_33->bonds_0+j_11);
+        if(!(((&_S145)->health_0) > 0.0f))
         {
             r_4 = r_4 + 1U;
             continue;
@@ -1405,21 +1409,21 @@ void gather_0(uint node_2, bool from_t_0, bool with_u_0, float3 thread* ang_0, f
         float3 yl_0;
         if(from_t_0)
         {
-            uint _S145 = bs_0(j_10, kernelContext_33);
-            float3 _S146 = (float4(*(kernelContext_33->scratch_0+(_S145 + 1U))) ).xyz;
-            ya_0 = (float4(*(kernelContext_33->scratch_0+_S145)) ).xyz;
-            yl_0 = _S146;
+            uint _S146 = bs_0(j_11, kernelContext_33);
+            float3 _S147 = (float4(*(kernelContext_33->scratch_0+(_S146 + 1U))) ).xyz;
+            ya_0 = (float4(*(kernelContext_33->scratch_0+_S146)) ).xyz;
+            yl_0 = _S147;
         }
         else
         {
-            uint _S147 = j_10 * 2U;
-            float3 ya_1 = (float4(*(kernelContext_33->x_0+_S147)) ).xyz;
-            float3 yl_1 = (float4(*(kernelContext_33->x_0+(_S147 + 1U))) ).xyz;
+            uint _S148 = j_11 * 2U;
+            float3 ya_1 = (float4(*(kernelContext_33->x_0+_S148)) ).xyz;
+            float3 yl_1 = (float4(*(kernelContext_33->x_0+(_S148 + 1U))) ).xyz;
             if(with_u_0)
             {
                 thread float3 ta_2;
                 thread float3 tl_2;
-                bond_term_0(&_S144, j_10, 6U, &ta_2, &tl_2, kernelContext_33);
+                bond_term_0(&_S145, j_11, 6U, &ta_2, &tl_2, kernelContext_33);
                 float3 yl_2 = yl_1 + tl_2;
                 ya_0 = ya_1 + ta_2;
                 yl_0 = yl_2;
@@ -1434,32 +1438,32 @@ void gather_0(uint node_2, bool from_t_0, bool with_u_0, float3 thread* ang_0, f
         float3 ya_2;
         if((kernelContext_33->params_0->rotation_0) == 0U)
         {
-            float3 _S148 = float3((&_S144)->s_0) ;
-            float3 ya_3 = ya_0 * _S148;
-            yl_3 = yl_0 * _S148;
+            float3 _S149 = float3((&_S145)->s_0) ;
+            float3 ya_3 = ya_0 * _S149;
+            yl_3 = yl_0 * _S149;
             ya_2 = ya_3;
         }
         else
         {
-            float3 _S149 = rot_a_0(j_10, ya_0, kernelContext_33);
-            float3 _S150 = float3((&_S144)->s_0) ;
-            float3 _S151 = _S149 * _S150;
-            float3 _S152 = rot_l_0(j_10, yl_0, kernelContext_33);
-            yl_3 = _S152 * _S150;
-            ya_2 = _S151;
+            float3 _S150 = rot_a_0(j_11, ya_0, kernelContext_33);
+            float3 _S151 = float3((&_S145)->s_0) ;
+            float3 _S152 = _S150 * _S151;
+            float3 _S153 = rot_l_0(j_11, yl_0, kernelContext_33);
+            yl_3 = _S153 * _S151;
+            ya_2 = _S152;
         }
         float3 acc_a_1;
         float3 acc_l_1;
         if((ref_2 & 2147483648U) != 0U)
         {
             float3 acc_l_2 = acc_l_0 - yl_3;
-            acc_a_1 = acc_a_0 + (cross((float4((&_S144)->o1_0) ).xyz, yl_3) - ya_2);
+            acc_a_1 = acc_a_0 + (cross((float4((&_S145)->o1_0) ).xyz, yl_3) - ya_2);
             acc_l_1 = acc_l_2;
         }
         else
         {
             float3 acc_l_3 = acc_l_0 + yl_3;
-            acc_a_1 = acc_a_0 + (ya_2 - cross((float4((&_S144)->o0_0) ).xyz, yl_3));
+            acc_a_1 = acc_a_0 + (ya_2 - cross((float4((&_S145)->o0_0) ).xyz, yl_3));
             acc_l_1 = acc_l_3;
         }
         acc_a_0 = acc_a_1;
@@ -1495,96 +1499,87 @@ void gather_0(uint node_2, bool from_t_0, bool with_u_0, float3 thread* ang_0, f
     threadgroup float g_wide_max_out_7;
     (&kernelContext_34)->g_wide_max_out_0 = &g_wide_max_out_7;
     uint tid_8 = thread_5.x;
-    Block_0 _S153 = node_block_0(group_5, tid_8, &kernelContext_34);
-    bool _S154;
-    if((_S153.begin_0) >= (_S153.end_0))
+    Block_0 _S154 = node_block_0(group_5, tid_8, &kernelContext_34);
+    bool _S155;
+    if((_S154.begin_0) >= (_S154.end_0))
     {
-        _S154 = true;
+        _S155 = true;
     }
     else
     {
-        _S154 = ((&kernelContext_34)->params_0->warm_0) == 0U;
+        _S155 = ((&kernelContext_34)->params_0->warm_0) == 0U;
     }
-    if(_S154)
+    if(_S155)
     {
-        _S154 = true;
+        _S155 = true;
     }
     else
     {
-        _S154 = ((_S153.flags_0) & 1U) == 0U;
+        _S155 = ((_S154.flags_0) & 1U) == 0U;
     }
-    if(_S154)
+    if(_S155)
     {
         return;
     }
-    uint p_2 = _S153.begin_0 + tid_8;
-    if(p_2 < (_S153.end_0))
+    uint p_2 = _S154.begin_0 + tid_8;
+    if(p_2 < (_S154.end_0))
     {
         uint i_1 = (&kernelContext_34)->lists_0[p_2];
         thread float3 a_2;
         thread float3 l_2;
         gather_0(i_1, false, false, &a_2, &l_2, &kernelContext_34);
-        float3 _S155 = va_0(i_1, 14U, &kernelContext_34);
-        float3 _S156 = _S155 - a_2;
-        float3 _S157 = vl_0(i_1, 14U, &kernelContext_34);
-        set_v_0(i_1, 0U, _S156, _S157 - l_2, &kernelContext_34);
+        float3 _S156 = va_0(i_1, 14U, &kernelContext_34);
+        float3 _S157 = _S156 - a_2;
+        float3 _S158 = vl_0(i_1, 14U, &kernelContext_34);
+        set_v_0(i_1, 0U, _S157, _S158 - l_2, &kernelContext_34);
     }
     return;
 }
 
 bool runs_0(uint flags_1, bool only_rebuild_0)
 {
-    bool _S158;
+    bool _S159;
     if((flags_1 & 1U) != 0U)
     {
         if(!only_rebuild_0)
         {
-            _S158 = true;
+            _S159 = true;
         }
         else
         {
-            _S158 = (flags_1 & 64U) != 0U;
+            _S159 = (flags_1 & 64U) != 0U;
         }
     }
     else
     {
-        _S158 = false;
+        _S159 = false;
     }
-    return _S158;
+    return _S159;
 }
 
 float frame_float_0(uint k_15, uint w_3, KernelContext_0 thread* kernelContext_35)
 {
-    uint _S159 = frame_word_1(k_15, w_3, kernelContext_35);
-    return (as_type<float>((_S159)));
+    uint _S160 = frame_word_1(k_15, w_3, kernelContext_35);
+    return (as_type<float>((_S160)));
 }
 
 float frame_float_1(uint k_16, uint w_4, KernelContext_0 thread* kernelContext_36)
 {
-    uint _S160 = frame_word_1(k_16, w_4, kernelContext_36);
-    return (as_type<float>((_S160)));
+    uint _S161 = frame_word_1(k_16, w_4, kernelContext_36);
+    return (as_type<float>((_S161)));
 }
 
 float3 frame_axis_0(uint k_17, uint rotations_0, uint kk_1, KernelContext_0 thread* kernelContext_37)
 {
     if(rotations_0 == 1U)
     {
-        float _S161 = frame_float_1(k_17, 4U, kernelContext_37);
-        float _S162 = frame_float_1(k_17, 5U, kernelContext_37);
-        float _S163 = frame_float_1(k_17, 6U, kernelContext_37);
-        return float3(_S161, _S162, _S163);
-    }
-    float _S164;
-    if(kk_1 == 0U)
-    {
-        _S164 = 1.0f;
-    }
-    else
-    {
-        _S164 = 0.0f;
+        float _S162 = frame_float_1(k_17, 4U, kernelContext_37);
+        float _S163 = frame_float_1(k_17, 5U, kernelContext_37);
+        float _S164 = frame_float_1(k_17, 6U, kernelContext_37);
+        return float3(_S162, _S163, _S164);
     }
     float _S165;
-    if(kk_1 == 1U)
+    if(kk_1 == 0U)
     {
         _S165 = 1.0f;
     }
@@ -1593,7 +1588,7 @@ float3 frame_axis_0(uint k_17, uint rotations_0, uint kk_1, KernelContext_0 thre
         _S165 = 0.0f;
     }
     float _S166;
-    if(kk_1 == 2U)
+    if(kk_1 == 1U)
     {
         _S166 = 1.0f;
     }
@@ -1601,16 +1596,25 @@ float3 frame_axis_0(uint k_17, uint rotations_0, uint kk_1, KernelContext_0 thre
     {
         _S166 = 0.0f;
     }
-    return float3(_S164, _S165, _S166);
+    float _S167;
+    if(kk_1 == 2U)
+    {
+        _S167 = 1.0f;
+    }
+    else
+    {
+        _S167 = 0.0f;
+    }
+    return float3(_S165, _S166, _S167);
 }
 
 void frame_terms_0(uint k_18, uint rotations_1, uint i_2, uint v_13, array<float, int(6)> thread* s_10, KernelContext_0 thread* kernelContext_38)
 {
     BlastNode_natural_0 n_9 = kernelContext_38->nodes_0[i_2];
-    float3 _S167 = vl_0(i_2, v_13, kernelContext_38);
-    float3 lin_1 = _S167 / float3(n_9.w_lin_0) ;
-    float3 _S168 = va_0(i_2, v_13, kernelContext_38);
-    float3 _S169 = _S168 / float3(n_9.w_ang_0)  - cross((float4(n_9.position_0) ).xyz, lin_1);
+    float3 _S168 = vl_0(i_2, v_13, kernelContext_38);
+    float3 lin_1 = _S168 / float3(n_9.w_lin_0) ;
+    float3 _S169 = va_0(i_2, v_13, kernelContext_38);
+    float3 _S170 = _S169 / float3(n_9.w_ang_0)  - cross((float4(n_9.position_0) ).xyz, lin_1);
     uint kk_2 = 0U;
     for(;;)
     {
@@ -1621,47 +1625,47 @@ void frame_terms_0(uint k_18, uint rotations_1, uint i_2, uint v_13, array<float
         {
             break;
         }
-        float3 _S170 = frame_axis_0(k_18, rotations_1, kk_2, kernelContext_38);
-        (*s_10)[kk_2] = (*s_10)[kk_2] + dot(_S170, _S169);
+        float3 _S171 = frame_axis_0(k_18, rotations_1, kk_2, kernelContext_38);
+        (*s_10)[kk_2] = (*s_10)[kk_2] + dot(_S171, _S170);
         kk_2 = kk_2 + 1U;
     }
-    uint j_11 = 0U;
+    uint j_12 = 0U;
     for(;;)
     {
-        if(j_11 < 3U)
+        if(j_12 < 3U)
         {
         }
         else
         {
             break;
         }
-        (*s_10)[rotations_1 + j_11] = (*s_10)[rotations_1 + j_11] + lin_1[j_11];
-        j_11 = j_11 + 1U;
+        (*s_10)[rotations_1 + j_12] = (*s_10)[rotations_1 + j_12] + lin_1[j_12];
+        j_12 = j_12 + 1U;
     }
     return;
 }
 
 void proj_part_0(uint3 group_6, uint tid_9, uint v_14, bool only_rebuild_1, KernelContext_0 thread* kernelContext_39)
 {
-    Block_0 _S171 = node_block_0(group_6, tid_9, kernelContext_39);
-    bool _S172;
-    if((_S171.begin_0) >= (_S171.end_0))
+    Block_0 _S172 = node_block_0(group_6, tid_9, kernelContext_39);
+    bool _S173;
+    if((_S172.begin_0) >= (_S172.end_0))
     {
-        _S172 = true;
+        _S173 = true;
     }
     else
     {
-        _S172 = !runs_0(_S171.flags_0, only_rebuild_1);
+        _S173 = !runs_0(_S172.flags_0, only_rebuild_1);
     }
-    if(_S172)
+    if(_S173)
     {
-        _S172 = true;
+        _S173 = true;
     }
     else
     {
-        _S172 = ((_S171.flags_0) & 8U) == 0U;
+        _S173 = ((_S172.flags_0) & 8U) == 0U;
     }
-    if(_S172)
+    if(_S173)
     {
         return;
     }
@@ -1679,16 +1683,16 @@ void proj_part_0(uint3 group_6, uint tid_9, uint v_14, bool only_rebuild_1, Kern
         s_11[z_1] = 0.0f;
         z_1 = z_1 + 1U;
     }
-    uint p_3 = _S171.begin_0 + tid_9;
-    if(p_3 < (_S171.end_0))
+    uint p_3 = _S172.begin_0 + tid_9;
+    if(p_3 < (_S172.end_0))
     {
-        uint _S173 = row_island_0(_S171.row_4, kernelContext_39);
-        uint _S174 = frame_word_0(_S173, 1U, kernelContext_39);
-        frame_terms_0(_S173, _S174, kernelContext_39->lists_0[p_3], v_14, &s_11, kernelContext_39);
+        uint _S174 = row_island_0(_S172.row_4, kernelContext_39);
+        uint _S175 = frame_word_0(_S174, 1U, kernelContext_39);
+        frame_terms_0(_S174, _S175, kernelContext_39->lists_0[p_3], v_14, &s_11, kernelContext_39);
     }
-    uint _S175 = group_6.x;
-    write_partial_0(tid_9, _S171.row_4, _S175, 0U, float4(s_11[int(0)], s_11[int(1)], s_11[int(2)], s_11[int(3)]), kernelContext_39);
-    write_partial_0(tid_9, _S171.row_4, _S175, 1U, float4(s_11[int(4)], s_11[int(5)], 0.0f, 0.0f), kernelContext_39);
+    uint _S176 = group_6.x;
+    write_partial_0(tid_9, _S172.row_4, _S176, 0U, float4(s_11[int(0)], s_11[int(1)], s_11[int(2)], s_11[int(3)]), kernelContext_39);
+    write_partial_0(tid_9, _S172.row_4, _S176, 1U, float4(s_11[int(4)], s_11[int(5)], 0.0f, 0.0f), kernelContext_39);
     return;
 }
 
@@ -1721,13 +1725,13 @@ void proj_part_0(uint3 group_6, uint tid_9, uint v_14, bool only_rebuild_1, Kern
 
 uint4 row_range_0(uint tid_10, uint row_9, KernelContext_0 thread* kernelContext_41)
 {
-    uint _S176 = row_island_0(row_9, kernelContext_41);
-    return group_uniform4_0(uint4(*(kernelContext_41->islands_0+group_uniform_0(_S176, tid_10))) , tid_10);
+    uint _S177 = row_island_0(row_9, kernelContext_41);
+    return group_uniform4_0(uint4(*(kernelContext_41->islands_0+group_uniform_0(_S177, tid_10))) , tid_10);
 }
 
 void frame_solve_0(uint k_19, uint rotations_2, const array<float, int(6)> thread* sum_0, float3 thread* omega_0, float3 thread* t_1, KernelContext_0 thread* kernelContext_42)
 {
-    uint j_12;
+    uint j_13;
     uint d_0 = rotations_2 + 3U;
     thread array<float, int(6)> c_3;
     uint z_2 = 0U;
@@ -1753,29 +1757,29 @@ void frame_solve_0(uint k_19, uint rotations_2, const array<float, int(6)> threa
         {
             break;
         }
-        float _S177 = (*sum_0)[row_10];
-        float _S178 = frame_float_0(k_19, 8U + row_10, kernelContext_42);
-        float _S179 = _S177 * _S178;
-        j_12 = 0U;
-        float value_2 = _S179;
+        float _S178 = (*sum_0)[row_10];
+        float _S179 = frame_float_0(k_19, 8U + row_10, kernelContext_42);
+        float _S180 = _S178 * _S179;
+        j_13 = 0U;
+        float value_2 = _S180;
         for(;;)
         {
-            if(j_12 < row_10)
+            if(j_13 < row_10)
             {
             }
             else
             {
                 break;
             }
-            float _S180 = frame_float_0(k_19, 14U + row_10 * (row_10 + 1U) / 2U + j_12, kernelContext_42);
-            float value_3 = value_2 - _S180 * c_3[j_12];
-            j_12 = j_12 + 1U;
+            float _S181 = frame_float_0(k_19, 14U + row_10 * (row_10 + 1U) / 2U + j_13, kernelContext_42);
+            float value_3 = value_2 - _S181 * c_3[j_13];
+            j_13 = j_13 + 1U;
             value_2 = value_3;
         }
-        uint _S181 = row_10 + 1U;
-        float _S182 = frame_float_0(k_19, 14U + row_10 * _S181 / 2U + row_10, kernelContext_42);
-        c_3[row_10] = value_2 / _S182;
-        row_10 = _S181;
+        uint _S182 = row_10 + 1U;
+        float _S183 = frame_float_0(k_19, 14U + row_10 * _S182 / 2U + row_10, kernelContext_42);
+        c_3[row_10] = value_2 / _S183;
+        row_10 = _S182;
     }
     int row_11 = int(d_0) - int(1);
     for(;;)
@@ -1788,24 +1792,24 @@ void frame_solve_0(uint k_19, uint rotations_2, const array<float, int(6)> threa
             break;
         }
         uint r_5 = uint(row_11);
-        uint _S183 = r_5 + 1U;
-        j_12 = _S183;
+        uint _S184 = r_5 + 1U;
+        j_13 = _S184;
         for(;;)
         {
-            if(j_12 < d_0)
+            if(j_13 < d_0)
             {
             }
             else
             {
                 break;
             }
-            uint _S184 = j_12 + 1U;
-            float _S185 = frame_float_0(k_19, 14U + j_12 * _S184 / 2U + r_5, kernelContext_42);
-            c_3[r_5] = c_3[r_5] - _S185 * c_3[j_12];
-            j_12 = _S184;
+            uint _S185 = j_13 + 1U;
+            float _S186 = frame_float_0(k_19, 14U + j_13 * _S185 / 2U + r_5, kernelContext_42);
+            c_3[r_5] = c_3[r_5] - _S186 * c_3[j_13];
+            j_13 = _S185;
         }
-        float _S186 = frame_float_0(k_19, 14U + r_5 * _S183 / 2U + r_5, kernelContext_42);
-        c_3[r_5] = c_3[r_5] / _S186;
+        float _S187 = frame_float_0(k_19, 14U + r_5 * _S184 / 2U + r_5, kernelContext_42);
+        c_3[r_5] = c_3[r_5] / _S187;
         row_11 = row_11 - int(1);
     }
     z_2 = 0U;
@@ -1818,24 +1822,24 @@ void frame_solve_0(uint k_19, uint rotations_2, const array<float, int(6)> threa
         {
             break;
         }
-        float _S187 = frame_float_0(k_19, 8U + z_2, kernelContext_42);
-        c_3[z_2] = c_3[z_2] * _S187;
+        float _S188 = frame_float_0(k_19, 8U + z_2, kernelContext_42);
+        c_3[z_2] = c_3[z_2] * _S188;
         z_2 = z_2 + 1U;
     }
     *omega_0 = float3(0.0f) ;
-    j_12 = 0U;
+    j_13 = 0U;
     for(;;)
     {
-        if(j_12 < rotations_2)
+        if(j_13 < rotations_2)
         {
         }
         else
         {
             break;
         }
-        float3 _S188 = frame_axis_0(k_19, rotations_2, j_12, kernelContext_42);
-        *omega_0 = *omega_0 + _S188 * float3(c_3[j_12]) ;
-        j_12 = j_12 + 1U;
+        float3 _S189 = frame_axis_0(k_19, rotations_2, j_13, kernelContext_42);
+        *omega_0 = *omega_0 + _S189 * float3(c_3[j_13]) ;
+        j_13 = j_13 + 1U;
     }
     *t_1 = float3(c_3[rotations_2], c_3[rotations_2 + 1U], c_3[rotations_2 + 2U]);
     return;
@@ -1844,47 +1848,47 @@ void frame_solve_0(uint k_19, uint rotations_2, const array<float, int(6)> threa
 void proj_solve_0(uint3 group_7, uint tid_11, bool only_rebuild_2, KernelContext_0 thread* kernelContext_43)
 {
     uint row_12 = group_7.x;
-    uint _S189 = flags_of_0(row_12, kernelContext_43);
-    uint f_2 = group_uniform_0(_S189, tid_11);
-    bool _S190;
-    if(!runs_0(f_2, only_rebuild_2))
+    uint _S190 = flags_of_0(row_12, kernelContext_43);
+    uint f_3 = group_uniform_0(_S190, tid_11);
+    bool _S191;
+    if(!runs_0(f_3, only_rebuild_2))
     {
-        _S190 = true;
+        _S191 = true;
     }
     else
     {
-        _S190 = (f_2 & 8U) == 0U;
+        _S191 = (f_3 & 8U) == 0U;
     }
-    if(_S190)
+    if(_S191)
     {
         return;
     }
-    uint4 _S191 = row_range_0(tid_11, row_12, kernelContext_43);
-    uint nb_1 = blocks_0(_S191.y - _S191.x);
-    float4 _S192 = row_sum_0(tid_11, row_12, nb_1, 0U, kernelContext_43);
-    float4 _S193 = row_sum_0(tid_11, row_12, nb_1, 1U, kernelContext_43);
+    uint4 _S192 = row_range_0(tid_11, row_12, kernelContext_43);
+    uint nb_1 = blocks_0(_S192.y - _S192.x);
+    float4 _S193 = row_sum_0(tid_11, row_12, nb_1, 0U, kernelContext_43);
+    float4 _S194 = row_sum_0(tid_11, row_12, nb_1, 1U, kernelContext_43);
     if(tid_11 != 0U)
     {
         return;
     }
-    uint _S194 = row_island_0(row_12, kernelContext_43);
-    float _S195 = _S192.x;
-    float _S196 = _S192.y;
-    float _S197 = _S192.z;
-    float _S198 = _S192.w;
-    float _S199 = _S193.x;
-    float _S200 = _S193.y;
-    uint _S201 = frame_word_0(_S194, 1U, kernelContext_43);
-    thread array<float, int(6)> _S202;
-    _S202[int(0)] = _S195;
-    _S202[int(1)] = _S196;
-    _S202[int(2)] = _S197;
-    _S202[int(3)] = _S198;
-    _S202[int(4)] = _S199;
-    _S202[int(5)] = _S200;
+    uint _S195 = row_island_0(row_12, kernelContext_43);
+    float _S196 = _S193.x;
+    float _S197 = _S193.y;
+    float _S198 = _S193.z;
+    float _S199 = _S193.w;
+    float _S200 = _S194.x;
+    float _S201 = _S194.y;
+    uint _S202 = frame_word_0(_S195, 1U, kernelContext_43);
+    thread array<float, int(6)> _S203;
+    _S203[int(0)] = _S196;
+    _S203[int(1)] = _S197;
+    _S203[int(2)] = _S198;
+    _S203[int(3)] = _S199;
+    _S203[int(4)] = _S200;
+    _S203[int(5)] = _S201;
     thread float3 omega_1;
     thread float3 t_2;
-    frame_solve_0(_S194, _S201, &_S202, &omega_1, &t_2, kernelContext_43);
+    frame_solve_0(_S195, _S202, &_S203, &omega_1, &t_2, kernelContext_43);
     *(kernelContext_43->wide_0+st_0(row_12, 4U)) = packed_float4(float4(omega_1, 0.0f)) ;
     *(kernelContext_43->wide_0+st_0(row_12, 5U)) = packed_float4(float4(t_2, 0.0f)) ;
     return;
@@ -1920,43 +1924,43 @@ void proj_solve_0(uint3 group_7, uint tid_11, bool only_rebuild_2, KernelContext
 void frame_apply_0(uint i_3, uint v_15, float3 omega_2, float3 t_4, KernelContext_0 thread* kernelContext_45)
 {
     BlastNode_natural_0 n_10 = kernelContext_45->nodes_0[i_3];
-    float3 _S203 = va_0(i_3, v_15, kernelContext_45);
-    float3 _S204 = _S203 - omega_2 / float3(n_10.w_ang_0) ;
-    float3 _S205 = vl_0(i_3, v_15, kernelContext_45);
-    set_v_0(i_3, v_15, _S204, _S205 - (t_4 + cross((float4(n_10.position_0) ).xyz, omega_2)) / float3(n_10.w_lin_0) , kernelContext_45);
+    float3 _S204 = va_0(i_3, v_15, kernelContext_45);
+    float3 _S205 = _S204 - omega_2 / float3(n_10.w_ang_0) ;
+    float3 _S206 = vl_0(i_3, v_15, kernelContext_45);
+    set_v_0(i_3, v_15, _S205, _S206 - (t_4 + cross((float4(n_10.position_0) ).xyz, omega_2)) / float3(n_10.w_lin_0) , kernelContext_45);
     return;
 }
 
 void proj_apply_0(uint3 group_8, uint tid_12, uint v_16, bool only_rebuild_3, KernelContext_0 thread* kernelContext_46)
 {
-    Block_0 _S206 = node_block_0(group_8, tid_12, kernelContext_46);
-    bool _S207;
-    if((_S206.begin_0) >= (_S206.end_0))
+    Block_0 _S207 = node_block_0(group_8, tid_12, kernelContext_46);
+    bool _S208;
+    if((_S207.begin_0) >= (_S207.end_0))
     {
-        _S207 = true;
+        _S208 = true;
     }
     else
     {
-        _S207 = !runs_0(_S206.flags_0, only_rebuild_3);
+        _S208 = !runs_0(_S207.flags_0, only_rebuild_3);
     }
-    if(_S207)
+    if(_S208)
     {
-        _S207 = true;
+        _S208 = true;
     }
     else
     {
-        _S207 = ((_S206.flags_0) & 8U) == 0U;
+        _S208 = ((_S207.flags_0) & 8U) == 0U;
     }
-    if(_S207)
+    if(_S208)
     {
         return;
     }
-    uint p_4 = _S206.begin_0 + tid_12;
-    if(p_4 >= (_S206.end_0))
+    uint p_4 = _S207.begin_0 + tid_12;
+    if(p_4 >= (_S207.end_0))
     {
         return;
     }
-    frame_apply_0(kernelContext_46->lists_0[p_4], v_16, (float4(*(kernelContext_46->wide_0+st_0(_S206.row_4, 4U))) ).xyz, (float4(*(kernelContext_46->wide_0+st_0(_S206.row_4, 5U))) ).xyz, kernelContext_46);
+    frame_apply_0(kernelContext_46->lists_0[p_4], v_16, (float4(*(kernelContext_46->wide_0+st_0(_S207.row_4, 4U))) ).xyz, (float4(*(kernelContext_46->wide_0+st_0(_S207.row_4, 5U))) ).xyz, kernelContext_46);
     return;
 }
 
@@ -2124,40 +2128,40 @@ void proj_apply_0(uint3 group_8, uint tid_12, uint v_16, bool only_rebuild_3, Ke
 
 void bond_r_0(uint3 group_9, uint tid_13, bool only_rebuild_4, KernelContext_0 thread* kernelContext_53)
 {
-    Block_0 _S208 = bond_block_0(group_9, tid_13, kernelContext_53);
-    bool _S209;
-    if((_S208.begin_0) >= (_S208.end_0))
+    Block_0 _S209 = bond_block_0(group_9, tid_13, kernelContext_53);
+    bool _S210;
+    if((_S209.begin_0) >= (_S209.end_0))
     {
-        _S209 = true;
+        _S210 = true;
     }
     else
     {
-        _S209 = !runs_0(_S208.flags_0, only_rebuild_4);
+        _S210 = !runs_0(_S209.flags_0, only_rebuild_4);
     }
-    if(_S209)
+    if(_S210)
     {
         return;
     }
-    uint p_5 = _S208.begin_0 + tid_13;
+    uint p_5 = _S209.begin_0 + tid_13;
     float z_3;
-    float f_3;
-    if(p_5 < (_S208.end_0))
+    float f_4;
+    if(p_5 < (_S209.end_0))
     {
-        uint j_13 = kernelContext_53->lists_0[p_5];
-        thread BlastBond_natural_0 _S210 = *(kernelContext_53->bonds_0+j_13);
-        float3 _S211 = float3(0.0f) ;
-        thread float3 ta_3 = _S211;
-        thread float3 tl_3 = _S211;
-        if(((&_S210)->health_0) > 0.0f)
+        uint j_14 = kernelContext_53->lists_0[p_5];
+        thread BlastBond_natural_0 _S211 = *(kernelContext_53->bonds_0+j_14);
+        float3 _S212 = float3(0.0f) ;
+        thread float3 ta_3 = _S212;
+        thread float3 tl_3 = _S212;
+        if(((&_S211)->health_0) > 0.0f)
         {
-            bond_term_0(&_S210, j_13, 0U, &ta_3, &tl_3, kernelContext_53);
+            bond_term_0(&_S211, j_14, 0U, &ta_3, &tl_3, kernelContext_53);
             if((kernelContext_53->params_0->force_tolerance_0) > 0.0f)
             {
                 thread float3 ua_0;
                 thread float3 ul_0;
-                bond_term_0(&_S210, j_13, 6U, &ua_0, &ul_0, kernelContext_53);
-                uint _S212 = j_13 * 2U;
-                z_3 = norm2_0((float4(*(kernelContext_53->x_0+_S212)) ).xyz + ua_0, (float4(*(kernelContext_53->x_0+(_S212 + 1U))) ).xyz + ul_0);
+                bond_term_0(&_S211, j_14, 6U, &ua_0, &ul_0, kernelContext_53);
+                uint _S213 = j_14 * 2U;
+                z_3 = norm2_0((float4(*(kernelContext_53->x_0+_S213)) ).xyz + ua_0, (float4(*(kernelContext_53->x_0+(_S213 + 1U))) ).xyz + ul_0);
             }
             else
             {
@@ -2168,20 +2172,20 @@ void bond_r_0(uint3 group_9, uint tid_13, bool only_rebuild_4, KernelContext_0 t
         {
             z_3 = 0.0f;
         }
-        float _S213 = norm2_0(ta_3, tl_3);
-        uint _S214 = bs_0(j_13, kernelContext_53);
-        *(kernelContext_53->scratch_0+_S214) = packed_float4(float4(ta_3, 0.0f)) ;
-        *(kernelContext_53->scratch_0+(_S214 + 1U)) = packed_float4(float4(tl_3, 0.0f)) ;
-        float _S215 = z_3;
-        z_3 = _S213;
-        f_3 = _S215;
+        float _S214 = norm2_0(ta_3, tl_3);
+        uint _S215 = bs_0(j_14, kernelContext_53);
+        *(kernelContext_53->scratch_0+_S215) = packed_float4(float4(ta_3, 0.0f)) ;
+        *(kernelContext_53->scratch_0+(_S215 + 1U)) = packed_float4(float4(tl_3, 0.0f)) ;
+        float _S216 = z_3;
+        z_3 = _S214;
+        f_4 = _S216;
     }
     else
     {
         z_3 = 0.0f;
-        f_3 = 0.0f;
+        f_4 = 0.0f;
     }
-    write_partial_0(tid_13, _S208.row_4, group_9.x, 2U, float4(z_3, f_3, 0.0f, 0.0f), kernelContext_53);
+    write_partial_0(tid_13, _S209.row_4, group_9.x, 2U, float4(z_3, f_4, 0.0f, 0.0f), kernelContext_53);
     return;
 }
 
@@ -2214,34 +2218,34 @@ void bond_r_0(uint3 group_9, uint tid_13, bool only_rebuild_4, KernelContext_0 t
 
 void node_rn_0(uint3 group_10, uint tid_14, bool only_rebuild_5, KernelContext_0 thread* kernelContext_55)
 {
-    Block_0 _S216 = node_block_0(group_10, tid_14, kernelContext_55);
-    bool _S217;
-    if((_S216.begin_0) >= (_S216.end_0))
+    Block_0 _S217 = node_block_0(group_10, tid_14, kernelContext_55);
+    bool _S218;
+    if((_S217.begin_0) >= (_S217.end_0))
     {
-        _S217 = true;
+        _S218 = true;
     }
     else
     {
-        _S217 = !runs_0(_S216.flags_0, only_rebuild_5);
+        _S218 = !runs_0(_S217.flags_0, only_rebuild_5);
     }
-    if(_S217)
+    if(_S218)
     {
         return;
     }
-    uint p_6 = _S216.begin_0 + tid_14;
+    uint p_6 = _S217.begin_0 + tid_14;
     float s_12;
-    if(p_6 < (_S216.end_0))
+    if(p_6 < (_S217.end_0))
     {
         uint i_4 = kernelContext_55->lists_0[p_6];
-        float3 _S218 = va_0(i_4, 0U, kernelContext_55);
-        float3 _S219 = vl_0(i_4, 0U, kernelContext_55);
-        s_12 = norm2_0(_S218, _S219);
+        float3 _S219 = va_0(i_4, 0U, kernelContext_55);
+        float3 _S220 = vl_0(i_4, 0U, kernelContext_55);
+        s_12 = norm2_0(_S219, _S220);
     }
     else
     {
         s_12 = 0.0f;
     }
-    write_partial_0(tid_14, _S216.row_4, group_10.x, 3U, float4(s_12, 0.0f, 0.0f, 0.0f), kernelContext_55);
+    write_partial_0(tid_14, _S217.row_4, group_10.x, 3U, float4(s_12, 0.0f, 0.0f, 0.0f), kernelContext_55);
     return;
 }
 
@@ -2331,12 +2335,12 @@ uint iteration_of_0(uint row_13, KernelContext_0 thread* kernelContext_59)
     return (as_type<uint>(((float4(*(kernelContext_59->wide_0+st_0(row_13, 2U))) ).z)));
 }
 
-void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60)
+void set_flags_0(uint row_14, uint f_5, KernelContext_0 thread* kernelContext_60)
 {
-    uint _S220 = st_0(row_14, 2U);
-    thread float4 c_4 = float4(*(kernelContext_60->wide_0+_S220)) ;
-    c_4.w = (as_type<float>((f_4)));
-    *(kernelContext_60->wide_0+_S220) = packed_float4(c_4) ;
+    uint _S221 = st_0(row_14, 2U);
+    thread float4 c_4 = float4(*(kernelContext_60->wide_0+_S221)) ;
+    c_4.w = (as_type<float>((f_5)));
+    *(kernelContext_60->wide_0+_S221) = packed_float4(c_4) ;
     return;
 }
 
@@ -2365,63 +2369,63 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
     (&kernelContext_61)->g_wide_max_out_0 = &g_wide_max_out_20;
     uint tid_15 = thread_6.x;
     uint row_15 = group_11.x;
-    uint _S221 = flags_of_0(row_15, &kernelContext_61);
-    uint f_5 = group_uniform_0(_S221, tid_15);
-    if((f_5 & 1U) == 0U)
+    uint _S222 = flags_of_0(row_15, &kernelContext_61);
+    uint f_6 = group_uniform_0(_S222, tid_15);
+    if((f_6 & 1U) == 0U)
     {
         return;
     }
-    uint4 _S222 = row_range_0(tid_15, row_15, &kernelContext_61);
-    float4 _S223 = row_sum_0(tid_15, row_15, blocks_0(_S222.w - _S222.z), 2U, &kernelContext_61);
-    float4 _S224 = row_sum_0(tid_15, row_15, blocks_0(_S222.y - _S222.x), 3U, &kernelContext_61);
+    uint4 _S223 = row_range_0(tid_15, row_15, &kernelContext_61);
+    float4 _S224 = row_sum_0(tid_15, row_15, blocks_0(_S223.w - _S223.z), 2U, &kernelContext_61);
+    float4 _S225 = row_sum_0(tid_15, row_15, blocks_0(_S223.y - _S223.x), 3U, &kernelContext_61);
     if(tid_15 != 0U)
     {
         return;
     }
-    uint _S225 = st_0(row_15, 0U);
-    float4 _S226 = float4(*((&kernelContext_61)->wide_0+_S225)) ;
-    thread float4 s0_0 = _S226;
-    float delta2_1 = _S226.x;
-    float _S227 = _S223.x;
-    bool _S228 = _S227 <= delta2_1;
+    uint _S226 = st_0(row_15, 0U);
+    float4 _S227 = float4(*((&kernelContext_61)->wide_0+_S226)) ;
+    thread float4 s0_0 = _S227;
+    float delta2_1 = _S227.x;
+    float _S228 = _S224.x;
+    bool _S229 = _S228 <= delta2_1;
     bool hold_0;
-    if(_S228)
+    if(_S229)
     {
-        hold_0 = !((_S224.x) <= delta2_1);
+        hold_0 = !((_S225.x) <= delta2_1);
     }
     else
     {
         hold_0 = false;
     }
-    uint _S229 = iteration_of_0(row_15, &kernelContext_61);
-    uint f_6 = f_5 & 4294967199U;
-    uint f_7;
+    uint _S230 = iteration_of_0(row_15, &kernelContext_61);
+    uint f_7 = f_6 & 4294967199U;
+    uint f_8;
     if(hold_0)
     {
-        f_7 = f_6 | 32U;
+        f_8 = f_7 | 32U;
     }
     else
     {
-        f_7 = f_6;
+        f_8 = f_7;
     }
-    bool _S230;
-    if(_S229 > 0U)
+    bool _S231;
+    if(_S230 > 0U)
     {
-        _S230 = true;
+        _S231 = true;
     }
     else
     {
-        _S230 = ((&kernelContext_61)->params_0->warm_0) != 0U;
+        _S231 = ((&kernelContext_61)->params_0->warm_0) != 0U;
     }
-    if(_S230)
+    if(_S231)
     {
-        _S230 = _S228;
+        _S231 = _S229;
     }
     else
     {
-        _S230 = false;
+        _S231 = false;
     }
-    if(_S230)
+    if(_S231)
     {
         hold_0 = !hold_0;
     }
@@ -2431,20 +2435,20 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
     }
     if(hold_0)
     {
-        f_7 = f_7 | 64U;
+        f_8 = f_8 | 64U;
     }
-    s0_0.y = _S227;
-    *((&kernelContext_61)->wide_0+_S225) = packed_float4(s0_0) ;
-    uint _S231 = st_0(row_15, 1U);
-    *((&kernelContext_61)->wide_0+_S231) = packed_float4(float4(*((&kernelContext_61)->wide_0+_S231)) ) ;
-    set_flags_0(row_15, f_7, &kernelContext_61);
-    uint _S232 = st_0(row_15, 2U);
-    float4 _S233 = float4(*((&kernelContext_61)->wide_0+_S232)) ;
-    uint _S234 = st_0(row_15, 3U);
-    *((&kernelContext_61)->wide_0+_S234) = packed_float4(float4((float4(*((&kernelContext_61)->wide_0+_S234)) ).xyz, (float4(*((&kernelContext_61)->wide_0+_S234)) ).w)) ;
-    uint _S235 = pt_0(row_15, 0U, 5U, &kernelContext_61);
-    *((&kernelContext_61)->wide_0+_S235) = packed_float4(float4(_S223.y, 0.0f, 0.0f, 0.0f)) ;
-    *((&kernelContext_61)->wide_0+_S232) = packed_float4(_S233) ;
+    s0_0.y = _S228;
+    *((&kernelContext_61)->wide_0+_S226) = packed_float4(s0_0) ;
+    uint _S232 = st_0(row_15, 1U);
+    *((&kernelContext_61)->wide_0+_S232) = packed_float4(float4(*((&kernelContext_61)->wide_0+_S232)) ) ;
+    set_flags_0(row_15, f_8, &kernelContext_61);
+    uint _S233 = st_0(row_15, 2U);
+    float4 _S234 = float4(*((&kernelContext_61)->wide_0+_S233)) ;
+    uint _S235 = st_0(row_15, 3U);
+    *((&kernelContext_61)->wide_0+_S235) = packed_float4(float4((float4(*((&kernelContext_61)->wide_0+_S235)) ).xyz, (float4(*((&kernelContext_61)->wide_0+_S235)) ).w)) ;
+    uint _S236 = pt_0(row_15, 0U, 5U, &kernelContext_61);
+    *((&kernelContext_61)->wide_0+_S236) = packed_float4(float4(_S224.y, 0.0f, 0.0f, 0.0f)) ;
+    *((&kernelContext_61)->wide_0+_S233) = packed_float4(_S234) ;
     return;
 }
 
@@ -2472,31 +2476,31 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
     threadgroup float g_wide_max_out_21;
     (&kernelContext_62)->g_wide_max_out_0 = &g_wide_max_out_21;
     uint tid_16 = thread_7.x;
-    Block_0 _S236 = node_block_0(group_12, tid_16, &kernelContext_62);
-    bool _S237;
-    if((_S236.begin_0) >= (_S236.end_0))
+    Block_0 _S237 = node_block_0(group_12, tid_16, &kernelContext_62);
+    bool _S238;
+    if((_S237.begin_0) >= (_S237.end_0))
     {
-        _S237 = true;
+        _S238 = true;
     }
     else
     {
-        _S237 = !runs_0(_S236.flags_0, true);
+        _S238 = !runs_0(_S237.flags_0, true);
     }
-    if(_S237)
+    if(_S238)
     {
         return;
     }
-    uint p_7 = _S236.begin_0 + tid_16;
-    if(p_7 < (_S236.end_0))
+    uint p_7 = _S237.begin_0 + tid_16;
+    if(p_7 < (_S237.end_0))
     {
         uint i_5 = (&kernelContext_62)->lists_0[p_7];
         thread float3 a_3;
         thread float3 l_3;
         gather_0(i_5, false, true, &a_3, &l_3, &kernelContext_62);
-        float3 _S238 = va_0(i_5, 14U, &kernelContext_62);
-        float3 _S239 = _S238 - a_3;
-        float3 _S240 = vl_0(i_5, 14U, &kernelContext_62);
-        set_v_0(i_5, 0U, _S239, _S240 - l_3, &kernelContext_62);
+        float3 _S239 = va_0(i_5, 14U, &kernelContext_62);
+        float3 _S240 = _S239 - a_3;
+        float3 _S241 = vl_0(i_5, 14U, &kernelContext_62);
+        set_v_0(i_5, 0U, _S240, _S241 - l_3, &kernelContext_62);
     }
     return;
 }
@@ -2526,46 +2530,46 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
     (&kernelContext_63)->g_wide_max_out_0 = &g_wide_max_out_22;
     uint tid_17 = thread_8.x;
     uint row_16 = group_13.x;
-    uint _S241 = flags_of_0(row_16, &kernelContext_63);
-    uint f_8 = group_uniform_0(_S241, tid_17);
-    if((f_8 & 1U) == 0U)
+    uint _S242 = flags_of_0(row_16, &kernelContext_63);
+    uint f_9 = group_uniform_0(_S242, tid_17);
+    if((f_9 & 1U) == 0U)
     {
         return;
     }
-    uint4 _S242 = row_range_0(tid_17, row_16, &kernelContext_63);
-    float4 _S243 = float4(0.0f) ;
-    bool _S244 = (f_8 & 64U) != 0U;
+    uint4 _S243 = row_range_0(tid_17, row_16, &kernelContext_63);
+    float4 _S244 = float4(0.0f) ;
+    bool _S245 = (f_9 & 64U) != 0U;
     float4 z_4;
     float4 rn_0;
-    if(_S244)
+    if(_S245)
     {
-        float4 _S245 = row_sum_0(tid_17, row_16, blocks_0(_S242.w - _S242.z), 2U, &kernelContext_63);
-        float4 _S246 = row_sum_0(tid_17, row_16, blocks_0(_S242.y - _S242.x), 3U, &kernelContext_63);
-        z_4 = _S245;
-        rn_0 = _S246;
+        float4 _S246 = row_sum_0(tid_17, row_16, blocks_0(_S243.w - _S243.z), 2U, &kernelContext_63);
+        float4 _S247 = row_sum_0(tid_17, row_16, blocks_0(_S243.y - _S243.x), 3U, &kernelContext_63);
+        z_4 = _S246;
+        rn_0 = _S247;
     }
     else
     {
-        z_4 = _S243;
-        rn_0 = _S243;
+        z_4 = _S244;
+        rn_0 = _S244;
     }
     if(tid_17 != 0U)
     {
         return;
     }
-    uint _S247 = st_0(row_16, 0U);
-    float4 _S248 = float4(*((&kernelContext_63)->wide_0+_S247)) ;
-    thread float4 s0_1 = _S248;
-    float4 _S249 = float4(*((&kernelContext_63)->wide_0+st_0(row_16, 1U))) ;
-    float4 _S250 = float4(*((&kernelContext_63)->wide_0+st_0(row_16, 2U))) ;
-    uint _S251 = st_0(row_16, 3U);
-    float4 _S252 = float4(*((&kernelContext_63)->wide_0+_S251)) ;
-    float delta2_2 = _S248.x;
-    float _S253 = _S248.y;
-    bool _S254 = (f_8 & 32U) != 0U;
+    uint _S248 = st_0(row_16, 0U);
+    float4 _S249 = float4(*((&kernelContext_63)->wide_0+_S248)) ;
+    thread float4 s0_1 = _S249;
+    float4 _S250 = float4(*((&kernelContext_63)->wide_0+st_0(row_16, 1U))) ;
+    float4 _S251 = float4(*((&kernelContext_63)->wide_0+st_0(row_16, 2U))) ;
+    uint _S252 = st_0(row_16, 3U);
+    float4 _S253 = float4(*((&kernelContext_63)->wide_0+_S252)) ;
+    float delta2_2 = _S249.x;
+    float _S254 = _S249.y;
+    bool _S255 = (f_9 & 32U) != 0U;
     bool hold_1;
     float num_0;
-    if(_S244)
+    if(_S245)
     {
         float num_1 = z_4.x;
         if(num_1 <= delta2_2)
@@ -2581,12 +2585,12 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
     }
     else
     {
-        num_0 = _S253;
-        hold_1 = _S254;
+        num_0 = _S254;
+        hold_1 = _S255;
     }
-    uint f_9 = f_8 & 4294967199U;
-    uint it_0 = (as_type<uint>((_S250.z)));
-    uint best_it_0 = (as_type<uint>((_S252.w)));
+    uint f_10 = f_9 & 4294967199U;
+    uint it_0 = (as_type<uint>((_S251.z)));
+    uint best_it_0 = (as_type<uint>((_S253.w)));
     bool stop_0;
     uint best_it_1;
     if(num_0 < (s0_1.w * 0.99000000953674316f))
@@ -2600,16 +2604,16 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
         stop_0 = (it_0 - best_it_0) >= 512U;
         best_it_1 = best_it_0;
     }
-    bool _S255;
+    bool _S256;
     if(!stop_0)
     {
-        _S255 = num_0 <= delta2_2;
+        _S256 = num_0 <= delta2_2;
     }
     else
     {
-        _S255 = false;
+        _S256 = false;
     }
-    if(_S255)
+    if(_S256)
     {
         hold_1 = !hold_1;
     }
@@ -2617,16 +2621,16 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
     {
         hold_1 = false;
     }
-    uint f_10;
+    uint f_11;
     if(hold_1)
     {
-        uint f_11 = f_9 | 2U;
+        uint f_12 = f_10 | 2U;
         stop_0 = true;
-        f_10 = f_11;
+        f_11 = f_12;
     }
     else
     {
-        f_10 = f_9;
+        f_11 = f_10;
     }
     if(!stop_0)
     {
@@ -2646,7 +2650,7 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
     }
     if(hold_1)
     {
-        hold_1 = (_S249.w) <= ((&kernelContext_63)->params_0->force_tolerance_0 * (_S250.x + _S250.y));
+        hold_1 = (_S250.w) <= ((&kernelContext_63)->params_0->force_tolerance_0 * (_S251.x + _S251.y));
     }
     else
     {
@@ -2654,14 +2658,14 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
     }
     if(hold_1)
     {
-        float _S256 = _S249.w;
-        float _S257 = (&kernelContext_63)->params_0->force_tolerance_0;
-        uint _S258 = pt_0(row_16, 0U, 5U, &kernelContext_63);
-        if(_S256 <= (_S257 * sqrt((float4(*((&kernelContext_63)->wide_0+_S258)) ).x)))
+        float _S257 = _S250.w;
+        float _S258 = (&kernelContext_63)->params_0->force_tolerance_0;
+        uint _S259 = pt_0(row_16, 0U, 5U, &kernelContext_63);
+        if(_S257 <= (_S258 * sqrt((float4(*((&kernelContext_63)->wide_0+_S259)) ).x)))
         {
-            uint f_12 = f_10 | 2U;
+            uint f_13 = f_11 | 2U;
             stop_0 = true;
-            f_10 = f_12;
+            f_11 = f_13;
         }
     }
     if(stop_0)
@@ -2674,12 +2678,12 @@ void set_flags_0(uint row_14, uint f_4, KernelContext_0 thread* kernelContext_60
     }
     if(hold_1)
     {
-        f_10 = f_10 & 4294967294U;
+        f_11 = f_11 & 4294967294U;
     }
     s0_1.y = num_0;
-    *((&kernelContext_63)->wide_0+_S247) = packed_float4(s0_1) ;
-    *((&kernelContext_63)->wide_0+_S251) = packed_float4(float4(_S252.xyz, (as_type<float>((best_it_1))))) ;
-    set_flags_0(row_16, f_10, &kernelContext_63);
+    *((&kernelContext_63)->wide_0+_S248) = packed_float4(s0_1) ;
+    *((&kernelContext_63)->wide_0+_S252) = packed_float4(float4(_S253.xyz, (as_type<float>((best_it_1))))) ;
+    set_flags_0(row_16, f_11, &kernelContext_63);
     return;
 }
 
@@ -2696,16 +2700,16 @@ void full_apply_0(uint n_11, uint at_1, float3 a_4, float3 l_4, float3 thread* o
         {
             break;
         }
-        uint _S259 = ns_0(n_11, at_1 + q_1, kernelContext_64);
-        float4 _S260 = float4(*(kernelContext_64->scratch_0+_S259)) ;
-        uint _S261 = 4U * q_1;
-        m_3[_S261] = _S260.x;
-        m_3[_S261 + 1U] = _S260.y;
-        m_3[_S261 + 2U] = _S260.z;
-        m_3[_S261 + 3U] = _S260.w;
+        uint _S260 = ns_0(n_11, at_1 + q_1, kernelContext_64);
+        float4 _S261 = float4(*(kernelContext_64->scratch_0+_S260)) ;
+        uint _S262 = 4U * q_1;
+        m_3[_S262] = _S261.x;
+        m_3[_S262 + 1U] = _S261.y;
+        m_3[_S262 + 2U] = _S261.z;
+        m_3[_S262 + 3U] = _S261.w;
         q_1 = q_1 + 1U;
     }
-    array<float, int(6)> _S262 = { { a_4.x, a_4.y, a_4.z, l_4.x, l_4.y, l_4.z } };
+    array<float, int(6)> _S263 = { { a_4.x, a_4.y, a_4.z, l_4.x, l_4.y, l_4.z } };
     thread array<float, int(6)> o_3;
     uint r_6 = 0U;
     for(;;)
@@ -2736,7 +2740,7 @@ void full_apply_0(uint n_11, uint at_1, float3 a_4, float3 l_4, float3 thread* o
             {
                 q_1 = c_5 * (c_5 + 1U) / 2U + r_6;
             }
-            float s_14 = s_13 + m_3[q_1] * _S262[c_5];
+            float s_14 = s_13 + m_3[q_1] * _S263[c_5];
             c_5 = c_5 + 1U;
             s_13 = s_14;
         }
@@ -2750,13 +2754,13 @@ void full_apply_0(uint n_11, uint at_1, float3 a_4, float3 l_4, float3 thread* o
 
 float3 sym_mul_0(float4 s0_2, float4 s1_0, float3 v_17)
 {
-    float _S263 = v_17.x;
-    float _S264 = s0_2.w;
-    float _S265 = v_17.y;
-    float _S266 = s1_0.x;
-    float _S267 = v_17.z;
-    float _S268 = s1_0.y;
-    return float3(s0_2.x * _S263 + _S264 * _S265 + _S266 * _S267, _S264 * _S263 + s0_2.y * _S265 + _S268 * _S267, _S266 * _S263 + _S268 * _S265 + s0_2.z * _S267);
+    float _S264 = v_17.x;
+    float _S265 = s0_2.w;
+    float _S266 = v_17.y;
+    float _S267 = s1_0.x;
+    float _S268 = v_17.z;
+    float _S269 = s1_0.y;
+    return float3(s0_2.x * _S264 + _S265 * _S266 + _S267 * _S268, _S265 * _S264 + s0_2.y * _S266 + _S269 * _S268, _S267 * _S264 + _S269 * _S266 + s0_2.z * _S268);
 }
 
 void inverse_apply_0(uint n_12, float3 a_5, float3 l_5, float3 thread* oa_1, float3 thread* ol_1, KernelContext_0 thread* kernelContext_65)
@@ -2766,12 +2770,12 @@ void inverse_apply_0(uint n_12, float3 a_5, float3 l_5, float3 thread* oa_1, flo
         full_apply_0(n_12, 24U, a_5, l_5, oa_1, ol_1, kernelContext_65);
         return;
     }
-    uint _S269 = ns_0(n_12, 21U, kernelContext_65);
-    float4 _S270 = float4(*(kernelContext_65->scratch_0+(_S269 + 1U))) ;
-    float3 kc_0 = (float4(*(kernelContext_65->scratch_0+(_S269 + 2U))) ).xyz;
-    float3 _S271 = sym_mul_0(float4(*(kernelContext_65->scratch_0+_S269)) , _S270, a_5 + cross(kc_0, l_5));
-    *oa_1 = _S271;
-    *ol_1 = l_5 * float3(_S270.z)  - cross(kc_0, _S271);
+    uint _S270 = ns_0(n_12, 21U, kernelContext_65);
+    float4 _S271 = float4(*(kernelContext_65->scratch_0+(_S270 + 1U))) ;
+    float3 kc_0 = (float4(*(kernelContext_65->scratch_0+(_S270 + 2U))) ).xyz;
+    float3 _S272 = sym_mul_0(float4(*(kernelContext_65->scratch_0+_S270)) , _S271, a_5 + cross(kc_0, l_5));
+    *oa_1 = _S272;
+    *ol_1 = l_5 * float3(_S271.z)  - cross(kc_0, _S272);
     return;
 }
 
@@ -2799,55 +2803,55 @@ void inverse_apply_0(uint n_12, float3 a_5, float3 l_5, float3 thread* oa_1, flo
     threadgroup float g_wide_max_out_23;
     (&kernelContext_66)->g_wide_max_out_0 = &g_wide_max_out_23;
     uint tid_18 = thread_9.x;
-    Block_0 _S272 = node_block_0(group_14, tid_18, &kernelContext_66);
-    bool _S273;
-    if((_S272.begin_0) >= (_S272.end_0))
+    Block_0 _S273 = node_block_0(group_14, tid_18, &kernelContext_66);
+    bool _S274;
+    if((_S273.begin_0) >= (_S273.end_0))
     {
-        _S273 = true;
+        _S274 = true;
     }
     else
     {
-        _S273 = !runs_0(_S272.flags_0, false);
+        _S274 = !runs_0(_S273.flags_0, false);
     }
-    if(_S273)
+    if(_S274)
     {
         return;
     }
-    uint p_8 = _S272.begin_0 + tid_18;
-    if(p_8 >= (_S272.end_0))
+    uint p_8 = _S273.begin_0 + tid_18;
+    if(p_8 >= (_S273.end_0))
     {
         return;
     }
     uint i_6 = (&kernelContext_66)->lists_0[p_8];
-    uint _S274 = iteration_of_0(_S272.row_4, &kernelContext_66);
-    if(_S274 == 0U)
+    uint _S275 = iteration_of_0(_S273.row_4, &kernelContext_66);
+    if(_S275 == 0U)
     {
-        _S273 = ((&kernelContext_66)->params_0->first_polynomial_0) == 0U;
+        _S274 = ((&kernelContext_66)->params_0->first_polynomial_0) == 0U;
     }
     else
     {
-        _S273 = false;
+        _S274 = false;
     }
-    if(_S273)
+    if(_S274)
     {
-        _S273 = ((_S272.flags_0) & 256U) == 0U;
+        _S274 = ((_S273.flags_0) & 256U) == 0U;
     }
     else
     {
-        _S273 = false;
+        _S274 = false;
     }
-    if(_S273)
+    if(_S274)
     {
-        float3 _S275 = va_0(i_6, 0U, &kernelContext_66);
-        float3 _S276 = vl_0(i_6, 0U, &kernelContext_66);
-        set_v_0(i_6, 8U, _S275, _S276, &kernelContext_66);
+        float3 _S276 = va_0(i_6, 0U, &kernelContext_66);
+        float3 _S277 = vl_0(i_6, 0U, &kernelContext_66);
+        set_v_0(i_6, 8U, _S276, _S277, &kernelContext_66);
         return;
     }
-    float3 _S277 = va_0(i_6, 0U, &kernelContext_66);
-    float3 _S278 = vl_0(i_6, 0U, &kernelContext_66);
+    float3 _S278 = va_0(i_6, 0U, &kernelContext_66);
+    float3 _S279 = vl_0(i_6, 0U, &kernelContext_66);
     thread float3 a_6;
     thread float3 l_6;
-    inverse_apply_0(i_6, _S277, _S278, &a_6, &l_6, &kernelContext_66);
+    inverse_apply_0(i_6, _S278, _S279, &a_6, &l_6, &kernelContext_66);
     set_v_0(i_6, 10U, a_6, l_6, &kernelContext_66);
     return;
 }
@@ -2876,61 +2880,61 @@ void inverse_apply_0(uint n_12, float3 a_5, float3 l_5, float3 thread* oa_1, flo
     threadgroup float g_wide_max_out_24;
     (&kernelContext_67)->g_wide_max_out_0 = &g_wide_max_out_24;
     uint tid_19 = thread_10.x;
-    Block_0 _S279 = bond_block_0(group_15, tid_19, &kernelContext_67);
-    bool _S280;
-    if((_S279.begin_0) >= (_S279.end_0))
+    Block_0 _S280 = bond_block_0(group_15, tid_19, &kernelContext_67);
+    bool _S281;
+    if((_S280.begin_0) >= (_S280.end_0))
     {
-        _S280 = true;
+        _S281 = true;
     }
     else
     {
-        _S280 = !runs_0(_S279.flags_0, false);
+        _S281 = !runs_0(_S280.flags_0, false);
     }
-    if(_S280)
+    if(_S281)
     {
-        _S280 = true;
+        _S281 = true;
     }
     else
     {
-        uint _S281 = iteration_of_0(_S279.row_4, &kernelContext_67);
-        if(_S281 == 0U)
+        uint _S282 = iteration_of_0(_S280.row_4, &kernelContext_67);
+        if(_S282 == 0U)
         {
-            _S280 = ((&kernelContext_67)->params_0->first_polynomial_0) == 0U;
+            _S281 = ((&kernelContext_67)->params_0->first_polynomial_0) == 0U;
         }
         else
         {
-            _S280 = false;
+            _S281 = false;
         }
-        if(_S280)
+        if(_S281)
         {
-            _S280 = ((_S279.flags_0) & 256U) == 0U;
+            _S281 = ((_S280.flags_0) & 256U) == 0U;
         }
         else
         {
-            _S280 = false;
+            _S281 = false;
         }
     }
-    if(_S280)
+    if(_S281)
     {
         return;
     }
-    uint p_9 = _S279.begin_0 + tid_19;
-    if(p_9 >= (_S279.end_0))
+    uint p_9 = _S280.begin_0 + tid_19;
+    if(p_9 >= (_S280.end_0))
     {
         return;
     }
-    uint j_14 = (&kernelContext_67)->lists_0[p_9];
-    thread BlastBond_natural_0 _S282 = *((&kernelContext_67)->bonds_0+j_14);
-    float3 _S283 = float3(0.0f) ;
-    thread float3 ta_4 = _S283;
-    thread float3 tl_4 = _S283;
-    if(((&_S282)->health_0) > 0.0f)
+    uint j_15 = (&kernelContext_67)->lists_0[p_9];
+    thread BlastBond_natural_0 _S283 = *((&kernelContext_67)->bonds_0+j_15);
+    float3 _S284 = float3(0.0f) ;
+    thread float3 ta_4 = _S284;
+    thread float3 tl_4 = _S284;
+    if(((&_S283)->health_0) > 0.0f)
     {
-        bond_term_1(&_S282, j_14, 10U, &ta_4, &tl_4, &kernelContext_67);
+        bond_term_1(&_S283, j_15, 10U, &ta_4, &tl_4, &kernelContext_67);
     }
-    uint _S284 = bs_0(j_14, &kernelContext_67);
-    *((&kernelContext_67)->scratch_0+_S284) = packed_float4(float4(ta_4, 0.0f)) ;
-    *((&kernelContext_67)->scratch_0+(_S284 + 1U)) = packed_float4(float4(tl_4, 0.0f)) ;
+    uint _S285 = bs_0(j_15, &kernelContext_67);
+    *((&kernelContext_67)->scratch_0+_S285) = packed_float4(float4(ta_4, 0.0f)) ;
+    *((&kernelContext_67)->scratch_0+(_S285 + 1U)) = packed_float4(float4(tl_4, 0.0f)) ;
     return;
 }
 
@@ -2941,11 +2945,11 @@ void block_apply_0(uint n_13, float3 a_7, float3 l_7, float3 thread* oa_2, float
         full_apply_0(n_13, 18U, a_7, l_7, oa_2, ol_2, kernelContext_68);
         return;
     }
-    uint _S285 = ns_0(n_13, 18U, kernelContext_68);
-    float4 _S286 = float4(*(kernelContext_68->scratch_0+(_S285 + 1U))) ;
-    float3 k_20 = (float4(*(kernelContext_68->scratch_0+(_S285 + 2U))) ).xyz;
-    *oa_2 = sym_mul_0(float4(*(kernelContext_68->scratch_0+_S285)) , _S286, a_7) - cross(k_20, l_7);
-    *ol_2 = cross(k_20, a_7) + float3(_S286.z)  * l_7;
+    uint _S286 = ns_0(n_13, 18U, kernelContext_68);
+    float4 _S287 = float4(*(kernelContext_68->scratch_0+(_S286 + 1U))) ;
+    float3 k_20 = (float4(*(kernelContext_68->scratch_0+(_S286 + 2U))) ).xyz;
+    *oa_2 = sym_mul_0(float4(*(kernelContext_68->scratch_0+_S286)) , _S287, a_7) - cross(k_20, l_7);
+    *ol_2 = cross(k_20, a_7) + float3(_S287.z)  * l_7;
     return;
 }
 
@@ -2973,46 +2977,46 @@ void block_apply_0(uint n_13, float3 a_7, float3 l_7, float3 thread* oa_2, float
     threadgroup float g_wide_max_out_25;
     (&kernelContext_69)->g_wide_max_out_0 = &g_wide_max_out_25;
     uint tid_20 = thread_11.x;
-    Block_0 _S287 = node_block_0(group_16, tid_20, &kernelContext_69);
-    bool _S288;
-    if((_S287.begin_0) >= (_S287.end_0))
+    Block_0 _S288 = node_block_0(group_16, tid_20, &kernelContext_69);
+    bool _S289;
+    if((_S288.begin_0) >= (_S288.end_0))
     {
-        _S288 = true;
+        _S289 = true;
     }
     else
     {
-        _S288 = !runs_0(_S287.flags_0, false);
+        _S289 = !runs_0(_S288.flags_0, false);
     }
-    if(_S288)
+    if(_S289)
     {
-        _S288 = true;
+        _S289 = true;
     }
     else
     {
-        uint _S289 = iteration_of_0(_S287.row_4, &kernelContext_69);
-        if(_S289 == 0U)
+        uint _S290 = iteration_of_0(_S288.row_4, &kernelContext_69);
+        if(_S290 == 0U)
         {
-            _S288 = ((&kernelContext_69)->params_0->first_polynomial_0) == 0U;
+            _S289 = ((&kernelContext_69)->params_0->first_polynomial_0) == 0U;
         }
         else
         {
-            _S288 = false;
+            _S289 = false;
         }
-        if(_S288)
+        if(_S289)
         {
-            _S288 = ((_S287.flags_0) & 256U) == 0U;
+            _S289 = ((_S288.flags_0) & 256U) == 0U;
         }
         else
         {
-            _S288 = false;
+            _S289 = false;
         }
     }
-    if(_S288)
+    if(_S289)
     {
         return;
     }
-    uint p_10 = _S287.begin_0 + tid_20;
-    if(p_10 >= (_S287.end_0))
+    uint p_10 = _S288.begin_0 + tid_20;
+    if(p_10 >= (_S288.end_0))
     {
         return;
     }
@@ -3020,20 +3024,20 @@ void block_apply_0(uint n_13, float3 a_7, float3 l_7, float3 thread* oa_2, float
     thread float3 oa_3;
     thread float3 ol_3;
     gather_0(i_7, true, false, &oa_3, &ol_3, &kernelContext_69);
-    float3 _S290 = va_0(i_7, 10U, &kernelContext_69);
-    float3 _S291 = vl_0(i_7, 10U, &kernelContext_69);
+    float3 _S291 = va_0(i_7, 10U, &kernelContext_69);
+    float3 _S292 = vl_0(i_7, 10U, &kernelContext_69);
     thread float3 sa_0;
     thread float3 sl_0;
-    block_apply_0(i_7, _S290, _S291, &sa_0, &sl_0, &kernelContext_69);
+    block_apply_0(i_7, _S291, _S292, &sa_0, &sl_0, &kernelContext_69);
     thread float3 ma_0;
     thread float3 ml_0;
     inverse_apply_0(i_7, oa_3 - sa_0, ol_3 - sl_0, &ma_0, &ml_0, &kernelContext_69);
-    float3 _S292 = va_0(i_7, 10U, &kernelContext_69);
-    float3 _S293 = float3(1.68946564197540283f) ;
-    float3 _S294 = float3(1.5220409631729126f) ;
-    float3 _S295 = _S293 * _S292 - _S294 * ma_0;
-    float3 _S296 = vl_0(i_7, 10U, &kernelContext_69);
-    set_v_0(i_7, 8U, _S295, _S293 * _S296 - _S294 * ml_0, &kernelContext_69);
+    float3 _S293 = va_0(i_7, 10U, &kernelContext_69);
+    float3 _S294 = float3(1.68946564197540283f) ;
+    float3 _S295 = float3(1.5220409631729126f) ;
+    float3 _S296 = _S294 * _S293 - _S295 * ma_0;
+    float3 _S297 = vl_0(i_7, 10U, &kernelContext_69);
+    set_v_0(i_7, 8U, _S296, _S294 * _S297 - _S295 * ml_0, &kernelContext_69);
     return;
 }
 
@@ -3063,9 +3067,9 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
         *kernelContext_70->g_wide_max_out_0 = (*kernelContext_70->g_wide_max_0)[int(0)];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    float threadgroup* _S297 = kernelContext_70->g_wide_max_out_0;
+    float threadgroup* _S298 = kernelContext_70->g_wide_max_out_0;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    return *_S297;
+    return *_S298;
 }
 
 [[kernel]] void w_max(uint3 group_17 [[threadgroup_position_in_grid]], uint3 thread_12 [[thread_position_in_threadgroup]], atomic<uint> device* meta_26 [[buffer(12)]], uint device* topo_args_26 [[buffer(13)]], packed_uint4 device* islands_26 [[buffer(1)]], BlastParams_0 constant* params_26 [[buffer(0)]], packed_float4 device* wide_26 [[buffer(11)]], uint device* lists_26 [[buffer(9)]], BlastNode_natural_0 device* nodes_26 [[buffer(2)]], packed_float4 device* accel_26 [[buffer(5)]], packed_float4 device* scratch_26 [[buffer(7)]], uint device* refs_26 [[buffer(3)]], BlastBond_natural_0 device* bonds_26 [[buffer(4)]], packed_float4 device* stiffness_26 [[buffer(10)]], packed_float4 device* x_26 [[buffer(6)]], packed_uint4 device* report_26 [[buffer(8)]])
@@ -3092,40 +3096,40 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     threadgroup float g_wide_max_out_26;
     (&kernelContext_71)->g_wide_max_out_0 = &g_wide_max_out_26;
     uint tid_22 = thread_12.x;
-    Block_0 _S298 = node_block_0(group_17, tid_22, &kernelContext_71);
-    bool _S299;
-    if((_S298.begin_0) >= (_S298.end_0))
+    Block_0 _S299 = node_block_0(group_17, tid_22, &kernelContext_71);
+    bool _S300;
+    if((_S299.begin_0) >= (_S299.end_0))
     {
-        _S299 = true;
+        _S300 = true;
     }
     else
     {
-        _S299 = !runs_0(_S298.flags_0, false);
+        _S300 = !runs_0(_S299.flags_0, false);
     }
-    if(_S299)
+    if(_S300)
     {
         return;
     }
-    uint p_11 = _S298.begin_0 + tid_22;
+    uint p_11 = _S299.begin_0 + tid_22;
     float m_4;
-    if(p_11 < (_S298.end_0))
+    if(p_11 < (_S299.end_0))
     {
         uint i_8 = (&kernelContext_71)->lists_0[p_11];
-        float3 _S300 = va_0(i_8, 8U, &kernelContext_71);
-        float3 a_8 = abs(_S300);
-        float3 _S301 = vl_0(i_8, 8U, &kernelContext_71);
-        float3 l_8 = abs(_S301);
+        float3 _S301 = va_0(i_8, 8U, &kernelContext_71);
+        float3 a_8 = abs(_S301);
+        float3 _S302 = vl_0(i_8, 8U, &kernelContext_71);
+        float3 l_8 = abs(_S302);
         m_4 = max(max(max(a_8.x, a_8.y), max(a_8.z, l_8.x)), max(l_8.y, l_8.z));
     }
     else
     {
         m_4 = 0.0f;
     }
-    float _S302 = wide_group_max_0(tid_22, m_4, &kernelContext_71);
+    float _S303 = wide_group_max_0(tid_22, m_4, &kernelContext_71);
     if(tid_22 == 0U)
     {
-        uint _S303 = pt_0(_S298.row_4, group_17.x, 4U, &kernelContext_71);
-        *((&kernelContext_71)->wide_0+_S303) = packed_float4(float4(_S302, 0.0f, 0.0f, 0.0f)) ;
+        uint _S304 = pt_0(_S299.row_4, group_17.x, 4U, &kernelContext_71);
+        *((&kernelContext_71)->wide_0+_S304) = packed_float4(float4(_S303, 0.0f, 0.0f, 0.0f)) ;
     }
     return;
 }
@@ -3155,54 +3159,54 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     (&kernelContext_72)->g_wide_max_out_0 = &g_wide_max_out_27;
     uint tid_23 = thread_13.x;
     uint row_17 = group_18.x;
-    uint _S304 = flags_of_0(row_17, &kernelContext_72);
-    uint f_13 = group_uniform_0(_S304, tid_23);
-    if((f_13 & 1U) == 0U)
+    uint _S305 = flags_of_0(row_17, &kernelContext_72);
+    uint f_14 = group_uniform_0(_S305, tid_23);
+    if((f_14 & 1U) == 0U)
     {
         return;
     }
-    uint4 _S305 = row_range_0(tid_23, row_17, &kernelContext_72);
-    uint _S306 = blocks_0(_S305.y - _S305.x);
+    uint4 _S306 = row_range_0(tid_23, row_17, &kernelContext_72);
+    uint _S307 = blocks_0(_S306.y - _S306.x);
     float m_5 = 0.0f;
     uint blk_0 = tid_23;
     for(;;)
     {
-        if(blk_0 < _S306)
+        if(blk_0 < _S307)
         {
         }
         else
         {
             break;
         }
-        uint _S307 = pt_0(row_17, blk_0, 4U, &kernelContext_72);
-        float _S308 = max(m_5, (float4(*((&kernelContext_72)->wide_0+_S307)) ).x);
+        uint _S308 = pt_0(row_17, blk_0, 4U, &kernelContext_72);
+        float _S309 = max(m_5, (float4(*((&kernelContext_72)->wide_0+_S308)) ).x);
         uint blk_1 = blk_0 + 1024U;
-        m_5 = _S308;
+        m_5 = _S309;
         blk_0 = blk_1;
     }
-    float _S309 = wide_group_max_0(tid_23, m_5, &kernelContext_72);
+    float _S310 = wide_group_max_0(tid_23, m_5, &kernelContext_72);
     if(tid_23 != 0U)
     {
         return;
     }
-    bool _S310;
-    if(!(_S309 > 0.0f))
+    bool _S311;
+    if(!(_S310 > 0.0f))
     {
-        _S310 = true;
+        _S311 = true;
     }
     else
     {
-        _S310 = !isfinite(_S309);
+        _S311 = !isfinite(_S310);
     }
-    if(_S310)
+    if(_S311)
     {
-        set_flags_0(row_17, (f_13 & 4294967294U) | 4U, &kernelContext_72);
+        set_flags_0(row_17, (f_14 & 4294967294U) | 4U, &kernelContext_72);
         return;
     }
-    uint _S311 = st_0(row_17, 1U);
-    thread float4 s1_1 = float4(*((&kernelContext_72)->wide_0+_S311)) ;
-    s1_1.y = 1.0f / _S309;
-    *((&kernelContext_72)->wide_0+_S311) = packed_float4(s1_1) ;
+    uint _S312 = st_0(row_17, 1U);
+    thread float4 s1_1 = float4(*((&kernelContext_72)->wide_0+_S312)) ;
+    s1_1.y = 1.0f / _S310;
+    *((&kernelContext_72)->wide_0+_S312) = packed_float4(s1_1) ;
     return;
 }
 
@@ -3230,42 +3234,42 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     threadgroup float g_wide_max_out_28;
     (&kernelContext_73)->g_wide_max_out_0 = &g_wide_max_out_28;
     uint tid_24 = thread_14.x;
-    Block_0 _S312 = node_block_0(group_19, tid_24, &kernelContext_73);
-    bool _S313;
-    if((_S312.begin_0) >= (_S312.end_0))
+    Block_0 _S313 = node_block_0(group_19, tid_24, &kernelContext_73);
+    bool _S314;
+    if((_S313.begin_0) >= (_S313.end_0))
     {
-        _S313 = true;
+        _S314 = true;
     }
     else
     {
-        _S313 = !runs_0(_S312.flags_0, false);
+        _S314 = !runs_0(_S313.flags_0, false);
     }
-    if(_S313)
+    if(_S314)
     {
         return;
     }
-    uint p_12 = _S312.begin_0 + tid_24;
+    uint p_12 = _S313.begin_0 + tid_24;
     float gl_0;
-    if(p_12 < (_S312.end_0))
+    if(p_12 < (_S313.end_0))
     {
         uint i_9 = (&kernelContext_73)->lists_0[p_12];
-        float inv_1 = (float4(*((&kernelContext_73)->wide_0+st_0(_S312.row_4, 1U))) ).y;
-        float3 _S314 = va_0(i_9, 8U, &kernelContext_73);
-        float3 _S315 = float3(inv_1) ;
-        float3 ga_0 = _S314 * _S315;
-        float3 _S316 = vl_0(i_9, 8U, &kernelContext_73);
-        float3 gn_0 = _S316 * _S315;
+        float inv_1 = (float4(*((&kernelContext_73)->wide_0+st_0(_S313.row_4, 1U))) ).y;
+        float3 _S315 = va_0(i_9, 8U, &kernelContext_73);
+        float3 _S316 = float3(inv_1) ;
+        float3 ga_0 = _S315 * _S316;
+        float3 _S317 = vl_0(i_9, 8U, &kernelContext_73);
+        float3 gn_0 = _S317 * _S316;
         set_v_0(i_9, 8U, ga_0, gn_0, &kernelContext_73);
-        float3 _S317 = va_0(i_9, 0U, &kernelContext_73);
-        float _S318 = dot(_S317, ga_0);
-        float3 _S319 = vl_0(i_9, 0U, &kernelContext_73);
-        gl_0 = _S318 + dot(_S319, gn_0);
+        float3 _S318 = va_0(i_9, 0U, &kernelContext_73);
+        float _S319 = dot(_S318, ga_0);
+        float3 _S320 = vl_0(i_9, 0U, &kernelContext_73);
+        gl_0 = _S319 + dot(_S320, gn_0);
     }
     else
     {
         gl_0 = 0.0f;
     }
-    write_partial_0(tid_24, _S312.row_4, group_19.x, 0U, float4(gl_0, 0.0f, 0.0f, 0.0f), &kernelContext_73);
+    write_partial_0(tid_24, _S313.row_4, group_19.x, 0U, float4(gl_0, 0.0f, 0.0f, 0.0f), &kernelContext_73);
     return;
 }
 
@@ -3294,71 +3298,71 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     (&kernelContext_74)->g_wide_max_out_0 = &g_wide_max_out_29;
     uint tid_25 = thread_15.x;
     uint row_18 = group_20.x;
-    uint _S320 = flags_of_0(row_18, &kernelContext_74);
-    uint f_14 = group_uniform_0(_S320, tid_25);
-    if((f_14 & 1U) == 0U)
+    uint _S321 = flags_of_0(row_18, &kernelContext_74);
+    uint f_15 = group_uniform_0(_S321, tid_25);
+    if((f_15 & 1U) == 0U)
     {
         return;
     }
-    uint4 _S321 = row_range_0(tid_25, row_18, &kernelContext_74);
-    float4 _S322 = row_sum_0(tid_25, row_18, blocks_0(_S321.y - _S321.x), 0U, &kernelContext_74);
-    float gamma_2 = _S322.x;
+    uint4 _S322 = row_range_0(tid_25, row_18, &kernelContext_74);
+    float4 _S323 = row_sum_0(tid_25, row_18, blocks_0(_S322.y - _S322.x), 0U, &kernelContext_74);
+    float gamma_2 = _S323.x;
     if(tid_25 != 0U)
     {
         return;
     }
-    bool _S323;
+    bool _S324;
     if(!(gamma_2 > 0.0f))
     {
-        _S323 = true;
+        _S324 = true;
     }
     else
     {
-        _S323 = !isfinite(gamma_2);
+        _S324 = !isfinite(gamma_2);
     }
-    if(_S323)
+    if(_S324)
     {
-        set_flags_0(row_18, (f_14 & 4294967294U) | 4U, &kernelContext_74);
+        set_flags_0(row_18, (f_15 & 4294967294U) | 4U, &kernelContext_74);
         return;
     }
-    float4 _S324 = float4(*((&kernelContext_74)->wide_0+st_0(row_18, 0U))) ;
-    uint _S325 = iteration_of_0(row_18, &kernelContext_74);
-    bool carried_0 = (f_14 & 256U) != 0U;
-    if(_S325 > 1U)
+    float4 _S325 = float4(*((&kernelContext_74)->wide_0+st_0(row_18, 0U))) ;
+    uint _S326 = iteration_of_0(row_18, &kernelContext_74);
+    bool carried_0 = (f_15 & 256U) != 0U;
+    if(_S326 > 1U)
     {
-        _S323 = true;
+        _S324 = true;
     }
     else
     {
         if(((&kernelContext_74)->params_0->first_polynomial_0) != 0U)
         {
-            _S323 = _S325 > 0U;
+            _S324 = _S326 > 0U;
         }
         else
         {
-            _S323 = false;
+            _S324 = false;
         }
     }
-    if(_S323)
+    if(_S324)
     {
-        _S323 = true;
+        _S324 = true;
     }
     else
     {
-        _S323 = carried_0;
+        _S324 = carried_0;
     }
-    if(_S323)
+    if(_S324)
     {
-        _S323 = (_S324.z) > 0.0f;
+        _S324 = (_S325.z) > 0.0f;
     }
     else
     {
-        _S323 = false;
+        _S324 = false;
     }
     float beta_0;
-    if(_S323)
+    if(_S324)
     {
-        beta_0 = gamma_2 / _S324.z;
+        beta_0 = gamma_2 / _S325.z;
     }
     else
     {
@@ -3366,29 +3370,29 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     }
     if(carried_0)
     {
-        _S323 = _S325 == 0U;
+        _S324 = _S326 == 0U;
     }
     else
     {
-        _S323 = false;
+        _S324 = false;
     }
-    if(_S323)
+    if(_S324)
     {
-        _S323 = !(beta_0 <= 16.0f);
+        _S324 = !(beta_0 <= 16.0f);
     }
     else
     {
-        _S323 = false;
+        _S324 = false;
     }
-    if(_S323)
+    if(_S324)
     {
         beta_0 = 0.0f;
     }
-    uint _S326 = st_0(row_18, 1U);
-    thread float4 s1_2 = float4(*((&kernelContext_74)->wide_0+_S326)) ;
+    uint _S327 = st_0(row_18, 1U);
+    thread float4 s1_2 = float4(*((&kernelContext_74)->wide_0+_S327)) ;
     s1_2.x = gamma_2;
     s1_2.z = beta_0;
-    *((&kernelContext_74)->wide_0+_S326) = packed_float4(s1_2) ;
+    *((&kernelContext_74)->wide_0+_S327) = packed_float4(s1_2) ;
     return;
 }
 
@@ -3416,42 +3420,42 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     threadgroup float g_wide_max_out_30;
     (&kernelContext_75)->g_wide_max_out_0 = &g_wide_max_out_30;
     uint tid_26 = thread_16.x;
-    Block_0 _S327 = node_block_0(group_21, tid_26, &kernelContext_75);
-    bool _S328;
-    if((_S327.begin_0) >= (_S327.end_0))
+    Block_0 _S328 = node_block_0(group_21, tid_26, &kernelContext_75);
+    bool _S329;
+    if((_S328.begin_0) >= (_S328.end_0))
     {
-        _S328 = true;
+        _S329 = true;
     }
     else
     {
-        _S328 = !runs_0(_S327.flags_0, false);
+        _S329 = !runs_0(_S328.flags_0, false);
     }
-    if(_S328)
+    if(_S329)
     {
         return;
     }
-    uint p_13 = _S327.begin_0 + tid_26;
-    if(p_13 >= (_S327.end_0))
+    uint p_13 = _S328.begin_0 + tid_26;
+    if(p_13 >= (_S328.end_0))
     {
         return;
     }
     uint i_10 = (&kernelContext_75)->lists_0[p_13];
-    float beta_1 = (float4(*((&kernelContext_75)->wide_0+st_0(_S327.row_4, 1U))) ).z;
+    float beta_1 = (float4(*((&kernelContext_75)->wide_0+st_0(_S328.row_4, 1U))) ).z;
     if(beta_1 == 0.0f)
     {
-        float3 _S329 = va_0(i_10, 8U, &kernelContext_75);
-        float3 _S330 = vl_0(i_10, 8U, &kernelContext_75);
-        set_v_0(i_10, 2U, _S329, _S330, &kernelContext_75);
+        float3 _S330 = va_0(i_10, 8U, &kernelContext_75);
+        float3 _S331 = vl_0(i_10, 8U, &kernelContext_75);
+        set_v_0(i_10, 2U, _S330, _S331, &kernelContext_75);
     }
     else
     {
-        float3 _S331 = va_0(i_10, 8U, &kernelContext_75);
-        float3 _S332 = va_0(i_10, 2U, &kernelContext_75);
-        float3 _S333 = float3(beta_1) ;
-        float3 _S334 = _S331 + _S332 * _S333;
-        float3 _S335 = vl_0(i_10, 8U, &kernelContext_75);
-        float3 _S336 = vl_0(i_10, 2U, &kernelContext_75);
-        set_v_0(i_10, 2U, _S334, _S335 + _S336 * _S333, &kernelContext_75);
+        float3 _S332 = va_0(i_10, 8U, &kernelContext_75);
+        float3 _S333 = va_0(i_10, 2U, &kernelContext_75);
+        float3 _S334 = float3(beta_1) ;
+        float3 _S335 = _S332 + _S333 * _S334;
+        float3 _S336 = vl_0(i_10, 8U, &kernelContext_75);
+        float3 _S337 = vl_0(i_10, 2U, &kernelContext_75);
+        set_v_0(i_10, 2U, _S335, _S336 + _S337 * _S334, &kernelContext_75);
     }
     return;
 }
@@ -3480,44 +3484,44 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     threadgroup float g_wide_max_out_31;
     (&kernelContext_76)->g_wide_max_out_0 = &g_wide_max_out_31;
     uint tid_27 = thread_17.x;
-    Block_0 _S337 = bond_block_0(group_22, tid_27, &kernelContext_76);
-    bool _S338;
-    if((_S337.begin_0) >= (_S337.end_0))
+    Block_0 _S338 = bond_block_0(group_22, tid_27, &kernelContext_76);
+    bool _S339;
+    if((_S338.begin_0) >= (_S338.end_0))
     {
-        _S338 = true;
+        _S339 = true;
     }
     else
     {
-        _S338 = !runs_0(_S337.flags_0, false);
+        _S339 = !runs_0(_S338.flags_0, false);
     }
-    if(_S338)
+    if(_S339)
     {
         return;
     }
-    uint p_14 = _S337.begin_0 + tid_27;
+    uint p_14 = _S338.begin_0 + tid_27;
     float z_5;
-    if(p_14 < (_S337.end_0))
+    if(p_14 < (_S338.end_0))
     {
-        uint j_15 = (&kernelContext_76)->lists_0[p_14];
-        thread BlastBond_natural_0 _S339 = *((&kernelContext_76)->bonds_0+j_15);
-        float3 _S340 = float3(0.0f) ;
-        thread float3 ta_5 = _S340;
-        thread float3 tl_5 = _S340;
-        if(((&_S339)->health_0) > 0.0f)
+        uint j_16 = (&kernelContext_76)->lists_0[p_14];
+        thread BlastBond_natural_0 _S340 = *((&kernelContext_76)->bonds_0+j_16);
+        float3 _S341 = float3(0.0f) ;
+        thread float3 ta_5 = _S341;
+        thread float3 tl_5 = _S341;
+        if(((&_S340)->health_0) > 0.0f)
         {
-            bond_term_1(&_S339, j_15, 2U, &ta_5, &tl_5, &kernelContext_76);
+            bond_term_1(&_S340, j_16, 2U, &ta_5, &tl_5, &kernelContext_76);
         }
-        float _S341 = norm2_0(ta_5, tl_5);
-        uint _S342 = bs_0(j_15, &kernelContext_76);
-        *((&kernelContext_76)->scratch_0+_S342) = packed_float4(float4(ta_5, 0.0f)) ;
-        *((&kernelContext_76)->scratch_0+(_S342 + 1U)) = packed_float4(float4(tl_5, 0.0f)) ;
-        z_5 = _S341;
+        float _S342 = norm2_0(ta_5, tl_5);
+        uint _S343 = bs_0(j_16, &kernelContext_76);
+        *((&kernelContext_76)->scratch_0+_S343) = packed_float4(float4(ta_5, 0.0f)) ;
+        *((&kernelContext_76)->scratch_0+(_S343 + 1U)) = packed_float4(float4(tl_5, 0.0f)) ;
+        z_5 = _S342;
     }
     else
     {
         z_5 = 0.0f;
     }
-    write_partial_0(tid_27, _S337.row_4, group_22.x, 1U, float4(z_5, 0.0f, 0.0f, 0.0f), &kernelContext_76);
+    write_partial_0(tid_27, _S338.row_4, group_22.x, 1U, float4(z_5, 0.0f, 0.0f, 0.0f), &kernelContext_76);
     return;
 }
 
@@ -3545,22 +3549,22 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     threadgroup float g_wide_max_out_32;
     (&kernelContext_77)->g_wide_max_out_0 = &g_wide_max_out_32;
     uint tid_28 = thread_18.x;
-    Block_0 _S343 = node_block_0(group_23, tid_28, &kernelContext_77);
-    bool _S344;
-    if((_S343.begin_0) >= (_S343.end_0))
+    Block_0 _S344 = node_block_0(group_23, tid_28, &kernelContext_77);
+    bool _S345;
+    if((_S344.begin_0) >= (_S344.end_0))
     {
-        _S344 = true;
+        _S345 = true;
     }
     else
     {
-        _S344 = !runs_0(_S343.flags_0, false);
+        _S345 = !runs_0(_S344.flags_0, false);
     }
-    if(_S344)
+    if(_S345)
     {
         return;
     }
-    uint p_15 = _S343.begin_0 + tid_28;
-    if(p_15 >= (_S343.end_0))
+    uint p_15 = _S344.begin_0 + tid_28;
+    if(p_15 >= (_S344.end_0))
     {
         return;
     }
@@ -3597,61 +3601,61 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     (&kernelContext_78)->g_wide_max_out_0 = &g_wide_max_out_33;
     uint tid_29 = thread_19.x;
     uint row_19 = group_24.x;
-    uint _S345 = flags_of_0(row_19, &kernelContext_78);
-    uint f_15 = group_uniform_0(_S345, tid_29);
-    if((f_15 & 1U) == 0U)
+    uint _S346 = flags_of_0(row_19, &kernelContext_78);
+    uint f_16 = group_uniform_0(_S346, tid_29);
+    if((f_16 & 1U) == 0U)
     {
         return;
     }
-    uint4 _S346 = row_range_0(tid_29, row_19, &kernelContext_78);
-    float4 _S347 = row_sum_0(tid_29, row_19, blocks_0(_S346.w - _S346.z), 1U, &kernelContext_78);
-    float den_0 = _S347.x;
+    uint4 _S347 = row_range_0(tid_29, row_19, &kernelContext_78);
+    float4 _S348 = row_sum_0(tid_29, row_19, blocks_0(_S347.w - _S347.z), 1U, &kernelContext_78);
+    float den_0 = _S348.x;
     if(tid_29 != 0U)
     {
         return;
     }
-    uint _S348 = st_0(row_19, 0U);
-    thread float4 s0_3 = float4(*((&kernelContext_78)->wide_0+_S348)) ;
-    uint _S349 = st_0(row_19, 1U);
-    float4 _S350 = float4(*((&kernelContext_78)->wide_0+_S349)) ;
-    thread float4 s1_3 = _S350;
-    uint _S351 = st_0(row_19, 2U);
-    thread float4 cnt_0 = float4(*((&kernelContext_78)->wide_0+_S351)) ;
-    float gamma_3 = _S350.x;
-    bool _S352;
+    uint _S349 = st_0(row_19, 0U);
+    thread float4 s0_3 = float4(*((&kernelContext_78)->wide_0+_S349)) ;
+    uint _S350 = st_0(row_19, 1U);
+    float4 _S351 = float4(*((&kernelContext_78)->wide_0+_S350)) ;
+    thread float4 s1_3 = _S351;
+    uint _S352 = st_0(row_19, 2U);
+    thread float4 cnt_0 = float4(*((&kernelContext_78)->wide_0+_S352)) ;
+    float gamma_3 = _S351.x;
+    bool _S353;
     if(((&kernelContext_78)->params_0->force_tolerance_0) > 0.0f)
     {
         if(den_0 > 0.0f)
         {
-            _S352 = gamma_3 > 0.0f;
+            _S353 = gamma_3 > 0.0f;
         }
         else
         {
-            _S352 = false;
+            _S353 = false;
         }
-        float _S353;
-        if(_S352)
+        float _S354;
+        if(_S353)
         {
-            _S353 = gamma_3 / sqrt(den_0);
+            _S354 = gamma_3 / sqrt(den_0);
         }
         else
         {
-            _S353 = float_bits_0(2139095040U);
+            _S354 = float_bits_0(2139095040U);
         }
-        s1_3.w = _S353;
+        s1_3.w = _S354;
         if(isfinite(s1_3.w))
         {
             cnt_0.y = cnt_0.y + s1_3.w;
         }
         if((as_type<uint>((cnt_0.z))) > 0U)
         {
-            _S352 = true;
+            _S353 = true;
         }
         else
         {
-            _S352 = ((&kernelContext_78)->params_0->first_polynomial_0) != 0U;
+            _S353 = ((&kernelContext_78)->params_0->first_polynomial_0) != 0U;
         }
-        if(!_S352)
+        if(!_S353)
         {
             s1_3.w = float_bits_0(2139095040U);
         }
@@ -3660,28 +3664,28 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     cnt_0.z = (as_type<float>(((as_type<uint>((cnt_0.z))) + 1U)));
     if(!(den_0 > 0.0f))
     {
-        _S352 = true;
+        _S353 = true;
     }
     else
     {
-        _S352 = !isfinite(den_0);
+        _S353 = !isfinite(den_0);
     }
-    uint f_16;
-    if(_S352)
+    uint f_17;
+    if(_S353)
     {
-        uint f_17 = f_15 & 4294967294U;
+        uint f_18 = f_16 & 4294967294U;
         s1_3.y = 0.0f;
-        f_16 = f_17;
+        f_17 = f_18;
     }
     else
     {
         s1_3.y = gamma_3 / den_0;
-        f_16 = f_15;
+        f_17 = f_16;
     }
-    *((&kernelContext_78)->wide_0+_S348) = packed_float4(s0_3) ;
-    *((&kernelContext_78)->wide_0+_S349) = packed_float4(s1_3) ;
-    cnt_0.w = (as_type<float>((f_16)));
-    *((&kernelContext_78)->wide_0+_S351) = packed_float4(cnt_0) ;
+    *((&kernelContext_78)->wide_0+_S349) = packed_float4(s0_3) ;
+    *((&kernelContext_78)->wide_0+_S350) = packed_float4(s1_3) ;
+    cnt_0.w = (as_type<float>((f_17)));
+    *((&kernelContext_78)->wide_0+_S352) = packed_float4(cnt_0) ;
     return;
 }
 
@@ -3709,40 +3713,40 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     threadgroup float g_wide_max_out_34;
     (&kernelContext_79)->g_wide_max_out_0 = &g_wide_max_out_34;
     uint tid_30 = thread_20.x;
-    Block_0 _S354 = node_block_0(group_25, tid_30, &kernelContext_79);
-    bool _S355;
-    if((_S354.begin_0) >= (_S354.end_0))
+    Block_0 _S355 = node_block_0(group_25, tid_30, &kernelContext_79);
+    bool _S356;
+    if((_S355.begin_0) >= (_S355.end_0))
     {
-        _S355 = true;
+        _S356 = true;
     }
     else
     {
-        _S355 = !runs_0(_S354.flags_0, false);
+        _S356 = !runs_0(_S355.flags_0, false);
     }
-    if(_S355)
+    if(_S356)
     {
         return;
     }
-    uint p_16 = _S354.begin_0 + tid_30;
-    if(p_16 >= (_S354.end_0))
+    uint p_16 = _S355.begin_0 + tid_30;
+    if(p_16 >= (_S355.end_0))
     {
         return;
     }
     uint i_12 = (&kernelContext_79)->lists_0[p_16];
-    float alpha_0 = (float4(*((&kernelContext_79)->wide_0+st_0(_S354.row_4, 1U))) ).y;
-    float3 _S356 = va_0(i_12, 6U, &kernelContext_79);
-    float3 _S357 = va_0(i_12, 2U, &kernelContext_79);
-    float3 _S358 = float3(alpha_0) ;
-    float3 _S359 = _S356 + _S357 * _S358;
-    float3 _S360 = vl_0(i_12, 6U, &kernelContext_79);
-    float3 _S361 = vl_0(i_12, 2U, &kernelContext_79);
-    set_v_0(i_12, 6U, _S359, _S360 + _S361 * _S358, &kernelContext_79);
-    float3 _S362 = va_0(i_12, 0U, &kernelContext_79);
-    float3 _S363 = va_0(i_12, 4U, &kernelContext_79);
-    float3 _S364 = _S362 - _S363 * _S358;
-    float3 _S365 = vl_0(i_12, 0U, &kernelContext_79);
-    float3 _S366 = vl_0(i_12, 4U, &kernelContext_79);
-    set_v_0(i_12, 0U, _S364, _S365 - _S366 * _S358, &kernelContext_79);
+    float alpha_0 = (float4(*((&kernelContext_79)->wide_0+st_0(_S355.row_4, 1U))) ).y;
+    float3 _S357 = va_0(i_12, 6U, &kernelContext_79);
+    float3 _S358 = va_0(i_12, 2U, &kernelContext_79);
+    float3 _S359 = float3(alpha_0) ;
+    float3 _S360 = _S357 + _S358 * _S359;
+    float3 _S361 = vl_0(i_12, 6U, &kernelContext_79);
+    float3 _S362 = vl_0(i_12, 2U, &kernelContext_79);
+    set_v_0(i_12, 6U, _S360, _S361 + _S362 * _S359, &kernelContext_79);
+    float3 _S363 = va_0(i_12, 0U, &kernelContext_79);
+    float3 _S364 = va_0(i_12, 4U, &kernelContext_79);
+    float3 _S365 = _S363 - _S364 * _S359;
+    float3 _S366 = vl_0(i_12, 0U, &kernelContext_79);
+    float3 _S367 = vl_0(i_12, 4U, &kernelContext_79);
+    set_v_0(i_12, 0U, _S365, _S366 - _S367 * _S359, &kernelContext_79);
     return;
 }
 
@@ -3770,50 +3774,50 @@ float wide_group_max_0(uint tid_21, float v_18, KernelContext_0 thread* kernelCo
     threadgroup float g_wide_max_out_35;
     (&kernelContext_80)->g_wide_max_out_0 = &g_wide_max_out_35;
     uint tid_31 = thread_21.x;
-    Block_0 _S367 = bond_block_0(group_26, tid_31, &kernelContext_80);
-    bool _S368;
-    if((_S367.begin_0) >= (_S367.end_0))
+    Block_0 _S368 = bond_block_0(group_26, tid_31, &kernelContext_80);
+    bool _S369;
+    if((_S368.begin_0) >= (_S368.end_0))
     {
-        _S368 = true;
+        _S369 = true;
     }
     else
     {
-        _S368 = ((_S367.flags_0) & 128U) != 0U;
+        _S369 = ((_S368.flags_0) & 128U) != 0U;
     }
-    if(_S368)
+    if(_S369)
     {
         return;
     }
-    uint p_17 = _S367.begin_0 + tid_31;
-    if(p_17 >= (_S367.end_0))
+    uint p_17 = _S368.begin_0 + tid_31;
+    if(p_17 >= (_S368.end_0))
     {
         return;
     }
-    uint j_16 = (&kernelContext_80)->lists_0[p_17];
-    thread BlastBond_natural_0 _S369 = *((&kernelContext_80)->bonds_0+j_16);
-    if(!(((&_S369)->health_0) > 0.0f))
+    uint j_17 = (&kernelContext_80)->lists_0[p_17];
+    thread BlastBond_natural_0 _S370 = *((&kernelContext_80)->bonds_0+j_17);
+    if(!(((&_S370)->health_0) > 0.0f))
     {
-        _S368 = true;
+        _S369 = true;
     }
     else
     {
-        _S368 = ((_S367.flags_0) & 16U) != 0U;
+        _S369 = ((_S368.flags_0) & 16U) != 0U;
     }
-    if(_S368)
+    if(_S369)
     {
-        uint _S370 = j_16 * 2U;
-        packed_float4 _S371 = packed_float4(float4(0.0f) ) ;
-        *((&kernelContext_80)->x_0+_S370) = _S371;
-        *((&kernelContext_80)->x_0+(_S370 + 1U)) = _S371;
+        uint _S371 = j_17 * 2U;
+        packed_float4 _S372 = packed_float4(float4(0.0f) ) ;
+        *((&kernelContext_80)->x_0+_S371) = _S372;
+        *((&kernelContext_80)->x_0+(_S371 + 1U)) = _S372;
         return;
     }
     thread float3 ta_6;
     thread float3 tl_6;
-    bond_term_1(&_S369, j_16, 6U, &ta_6, &tl_6, &kernelContext_80);
-    uint _S372 = j_16 * 2U;
-    *((&kernelContext_80)->x_0+_S372) = packed_float4(float4((float4(*((&kernelContext_80)->x_0+_S372)) ).xyz + ta_6, 0.0f)) ;
-    uint _S373 = _S372 + 1U;
-    *((&kernelContext_80)->x_0+_S373) = packed_float4(float4((float4(*((&kernelContext_80)->x_0+_S373)) ).xyz + tl_6, 0.0f)) ;
+    bond_term_1(&_S370, j_17, 6U, &ta_6, &tl_6, &kernelContext_80);
+    uint _S373 = j_17 * 2U;
+    *((&kernelContext_80)->x_0+_S373) = packed_float4(float4((float4(*((&kernelContext_80)->x_0+_S373)) ).xyz + ta_6, 0.0f)) ;
+    uint _S374 = _S373 + 1U;
+    *((&kernelContext_80)->x_0+_S374) = packed_float4(float4((float4(*((&kernelContext_80)->x_0+_S374)) ).xyz + tl_6, 0.0f)) ;
     return;
 }
 
@@ -3846,32 +3850,32 @@ uint carry_kept_iterations_0(uint row_20, KernelContext_0 thread* kernelContext_
     threadgroup float g_wide_max_out_36;
     (&kernelContext_82)->g_wide_max_out_0 = &g_wide_max_out_36;
     uint row_21 = group_27.x;
-    uint _S374 = row_island_0(row_21, &kernelContext_82);
-    uint _S375 = flags_of_0(row_21, &kernelContext_82);
-    uint4 _S376 = uint4(*((&kernelContext_82)->report_0+_S374)) ;
-    if((_S375 & 128U) != 0U)
+    uint _S375 = row_island_0(row_21, &kernelContext_82);
+    uint _S376 = flags_of_0(row_21, &kernelContext_82);
+    uint4 _S377 = uint4(*((&kernelContext_82)->report_0+_S375)) ;
+    if((_S376 & 128U) != 0U)
     {
-        *((&kernelContext_82)->report_0+_S374) = packed_uint4(uint4(0U, 7U, _S376.z, _S376.w)) ;
+        *((&kernelContext_82)->report_0+_S375) = packed_uint4(uint4(0U, 7U, _S377.z, _S377.w)) ;
         return;
     }
     bool ok_0;
-    if((_S375 & 2U) != 0U)
+    if((_S376 & 2U) != 0U)
     {
-        ok_0 = (_S375 & 4U) == 0U;
+        ok_0 = (_S376 & 4U) == 0U;
     }
     else
     {
         ok_0 = false;
     }
-    uint _S377 = iteration_of_0(row_21, &kernelContext_82);
-    uint _S378;
+    uint _S378 = iteration_of_0(row_21, &kernelContext_82);
+    uint _S379;
     if(ok_0)
     {
-        _S378 = 1U;
+        _S379 = 1U;
     }
     else
     {
-        _S378 = 0U;
+        _S379 = 0U;
     }
     if(ok_0)
     {
@@ -3883,27 +3887,27 @@ uint carry_kept_iterations_0(uint row_20, KernelContext_0 thread* kernelContext_
     }
     if(ok_0)
     {
-        ok_0 = _S377 == 0U;
+        ok_0 = _S378 == 0U;
     }
     else
     {
         ok_0 = false;
     }
-    uint _S379;
+    uint _S380;
     if(ok_0)
     {
-        _S379 = 4U;
+        _S380 = 4U;
     }
     else
     {
-        _S379 = 0U;
+        _S380 = 0U;
     }
-    float4 _S380 = float4(*((&kernelContext_82)->wide_0+st_0(row_21, 0U))) ;
-    *((&kernelContext_82)->report_0+_S374) = packed_uint4(uint4(_S377, _S378 | _S379, (as_type<uint>((_S380.y))), (as_type<uint>((_S380.x))))) ;
-    uint4 _S381 = uint4(*((&kernelContext_82)->islands_0+_S374)) ;
+    float4 _S381 = float4(*((&kernelContext_82)->wide_0+st_0(row_21, 0U))) ;
+    *((&kernelContext_82)->report_0+_S375) = packed_uint4(uint4(_S378, _S379 | _S380, (as_type<uint>((_S381.y))), (as_type<uint>((_S381.x))))) ;
+    uint4 _S382 = uint4(*((&kernelContext_82)->islands_0+_S375)) ;
     if(((&kernelContext_82)->params_0->carry_0) != 0U)
     {
-        ok_0 = (_S375 & 6U) == 0U;
+        ok_0 = (_S376 & 6U) == 0U;
     }
     else
     {
@@ -3911,17 +3915,17 @@ uint carry_kept_iterations_0(uint row_20, KernelContext_0 thread* kernelContext_
     }
     if(ok_0)
     {
-        uint _S382 = _S381.y - _S381.x;
-        if((_S375 & 256U) != 0U)
+        uint _S383 = _S382.y - _S382.x;
+        if((_S376 & 256U) != 0U)
         {
-            uint _S383 = carry_kept_iterations_0(row_21, &kernelContext_82);
-            _S378 = _S383;
+            uint _S384 = carry_kept_iterations_0(row_21, &kernelContext_82);
+            _S379 = _S384;
         }
         else
         {
-            _S378 = 0U;
+            _S379 = 0U;
         }
-        set_carry_0(_S374, _S382, _S378 + _S377, _S380.z, &kernelContext_82);
+        set_carry_0(_S375, _S383, _S379 + _S378, _S381.z, &kernelContext_82);
     }
     return;
 }

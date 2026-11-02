@@ -124,6 +124,28 @@ Breaks had flowed only one way, from Blast to the fracture (`blast_breaks`). A b
 
 **Test:** host breaks on the house. Without the sync, a broken bond kept health 0.49 in Blast; with it, the fracture and Blast agree on every bond. The struck-house test now checks the same.
 
+### The city's large island (a bug fixed), and speed
+
+**The bug.** skyline-stable has 29,592 chunks and 5 islands, the largest of 24,384 nodes. That island takes the many-group solve. Under vibe-land's settings (16 iterations, force tolerance 1e-3) it never stopped: it ran all 16 iterations every frame for 900 frames. The one-group solve of the same island stopped at 2 iterations.
+
+**Why.** The many-group solve never set its force test's start `|x0|`. It left it at 0, so the screen `step <= tol (start + travel)` measured each step against only the steps of the same solve. A warm start near the answer then almost never passes.
+
+**Fix:** the start is summed per block and read in `w_setup`. Test: the house forced onto the many-group solve stops on the force test as the one-group solve does. It failed before the fix.
+
+**Speed, skyline-stable, vibe-land's settings** (`blast_bench`, the solve submitted and waited for, the report read):
+
+| | Median | Iterations at frame 599 |
+|---|---|---|
+| Before the fix | 9.5 ms | 16 (never converged) |
+| After | 7.5 ms | at most 2, all 5 islands converged |
+| One group per island (`STRESS_BLAST_WIDE_MIN` above every island) | 38.7 ms | at most 2 |
+
+**What the 7.5 ms is.** Most of it is the recorded iterations of the many-group solve, which still dispatch after the island has stopped (16 x 26 kernels, each a no-op). Gating them is a lossless speedup for the speed phase.
+
+**The comparison with vibe-land.** Its city reports a stress solve of about 1 ms (`docs/performance-targets-status-2026-09-25.md`), but not on this scene and not this build. A matched comparison needs vibe-land native built from the target commit.
+
+**Large islands are the one place rubble does not follow the target's algorithm.** Above 8,192 nodes, the target solves a component with a cooperative kernel and a multilevel V-cycle preconditioner. rubble keeps its many-group solve with the small-component recurrence (the goal: "Large islands keep the wide path").
+
 ### Standing under gravity
 
 240 frames of gravity alone in the GPU-only world (`fracture_glb`, `STRESS_PROFILE=blast_gpu`), after the changes above:

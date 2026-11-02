@@ -39,6 +39,10 @@ fn main() {
     if let Ok(t) = std::env::var("STRESS_BLAST_FORCE_TOL") {
         settings.force_tolerance = t.parse().expect("STRESS_BLAST_FORCE_TOL");
     }
+    // `STRESS_BLAST_CARRY=1|0`: Krylov carry (`BLAST_STRESS_CARRY_KRYLOV`; default the target's).
+    if let Ok(c) = std::env::var("STRESS_BLAST_CARRY") {
+        settings.carry_krylov = Some(c == "1");
+    }
     let skip = !std::env::var("STRESS_BLAST_SKIP").is_ok_and(|v| v == "0");
     let (graph, materials) = BlastAuthoring::graph(&scene, settings).expect("graph");
     // The islands' sizes (nodes, bonds), largest first.

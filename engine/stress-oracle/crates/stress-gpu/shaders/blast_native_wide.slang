@@ -229,7 +229,7 @@ void w_init_nodes(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     write_partial(tid, b.row, group.x, 0, p0);
 }
 
-// A cold start's x cleared.
+// A cold start's x cleared; partial 2: (|x0|^2, 0, 0, 0), the force test's start.
 [shader("compute")]
 [numthreads(1024, 1, 1)]
 void w_init_bonds(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
@@ -238,13 +238,19 @@ void w_init_bonds(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     Block b = bond_block(group, tid);
     if (b.begin >= b.end)
         return;
+    float f = 0.0;
     uint p = b.begin + tid;
-    if (p < b.end && params.warm == 0)
+    if (p < b.end)
     {
         uint j = lists[p];
-        x[j * 2] = float4(0.0);
-        x[j * 2 + 1] = float4(0.0);
+        if (params.warm == 0)
+        {
+            x[j * 2] = float4(0.0);
+            x[j * 2 + 1] = float4(0.0);
+        }
+        f = norm2(x[j * 2].xyz, x[j * 2 + 1].xyz);
     }
+    write_partial(tid, b.row, group.x, 2, float4(f, 0.0, 0.0, 0.0));
 }
 
 // The row's start: the certificate's skip, the target, a zero load, whether free (the frame,
@@ -259,6 +265,7 @@ void w_setup(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     uint4 r = group_uniform4(islands[island], tid);
     uint nb = blocks(r.y - r.x);
     float4 s0 = row_sum(tid, row, nb, 0);
+    float4 s2 = row_sum(tid, row, blocks(r.w - r.z), 2);
     if (tid != 0)
         return;
     uint4 last = report[island];
@@ -288,7 +295,8 @@ void w_setup(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         set_carry(island, 0u, 0u, 0.0);
     wide[st(row, S_SCALARS)] = float4(delta2, 0.0, previous, float_bits(0x7f800000u));
     wide[st(row, S_STEP)] = float4(0.0, 0.0, 0.0, float_bits(0x7f800000u));
-    wide[st(row, S_COUNT)] = float4(0.0, 0.0, asfloat(0u), asfloat(f));
+    // The force test's start: |x0| (blast_native.slang `force_start`).
+    wide[st(row, S_COUNT)] = float4(sqrt(s2.x), 0.0, asfloat(0u), asfloat(f));
     wide[st(row, S_BEST)] = float4(asfloat((f & F_CARRIED) != 0 ? kept.y : 0u), 0.0, 0.0, asfloat(0u));
 }
 
