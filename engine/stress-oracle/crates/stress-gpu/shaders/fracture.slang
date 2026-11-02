@@ -93,7 +93,7 @@ struct FractureParams
     float cs_c2;
     uint cs_row_offset;  // this step's first contact row (rubble's contacts' parity)
     uint ext_sides;      // `ext` offset (float4s): the load path's bond sides (`lp_side`)
-    float pad8;          // to a multiple of 16 bytes (a uniform's size on WebGPU)
+    uint frame;          // frames encoded, from 1 (the listed frame's stamps: `fr_act_*`)
 };
 
 struct ScanParams
@@ -285,13 +285,9 @@ void fr_events_reset(uint3 id: SV_DispatchThreadID)
     atom[a_counters() + C_EV_FRAMES].store(0);
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void fr_loads(uint3 id: SV_DispatchThreadID)
+// A live chunk's load this frame: its manifolds and carried pulses (`fr_loads`).
+void chunk_loads(uint k)
 {
-    uint k = id.x;
-    if (!live(k))
-        return;
     uint slot = body_of(k);
     uint b = BODY_WORDS * slot;
     Quat q;
@@ -337,12 +333,17 @@ void fr_loads(uint3 id: SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void fr_breaks(uint3 id: SV_DispatchThreadID)
+void fr_loads(uint3 id: SV_DispatchThreadID)
 {
-    uint i = id.x;
-    if (i >= params.bond_used || work[w_alive() + i] == 0)
+    uint k = id.x;
+    if (!live(k))
         return;
-    uint4 bond = bonds[i];
+    chunk_loads(k);
+}
+
+// An intact bond breaks when the larger of its chunks' loads is over its capacity.
+void bond_breaks(uint i, uint4 bond)
+{
     float demand = max(loads[bond.x].x, loads[bond.y].x);
     if (demand > asfloat(bond.z))
     {
@@ -352,6 +353,16 @@ void fr_breaks(uint3 id: SV_DispatchThreadID)
         atom[a_counters() + C_BROKEN].add(1u);
         event_broken(i);
     }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_breaks(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= params.bond_used || work[w_alive() + i] == 0)
+        return;
+    bond_breaks(i, bonds[i]);
 }
 
 // The host's breaks between frames (support loss), one thread per listed bond, before the
@@ -3597,7 +3608,7 @@ static const uint BILL_WORDS = 4;    // crush_rw float4 per body at r_bill
 static const float COVER_MISS = 1e30; // a depth no line reaches (no infinities: fast math)
 
 // Per body slot 2 words per cell: the first depth (ordered float bits), the chunk there.
-uint a_cover() { return a_moved() + 2 * params.ev_moved_cap; }
+uint a_cover() { return a_act_n() + 2; }
 
 // Cell s of a patch of radius a about the axis d: its offset from the axis, and rho.
 float3 cover_offset(uint s, float3 d, float a, out float rho)
@@ -4174,4 +4185,122 @@ void fr_crush_end(uint3 id: SV_DispatchThreadID)
     atom[a_counters() + C_CRUSH_EVENTS].store(events);
     atom[a_counters() + C_CRUSHED].add(events);
     atom[a_counters() + C_FRAGMENTS].add(total & CRUSH_POOL_SPAN);
+}
+
+// The listed threshold frame (fracture.rs `listed`: the threshold model without crushing
+// or the in-step contact fracture). Only chunks a frame can load are loaded: those with a
+// manifold this frame (the ingest's list, coupling.slang `ingest_scatter`) and those that
+// kept pulses last frame (last frame's list). Any other chunk would sum no manifold and
+// carry no pulse: a zero load and nothing kept. So the loads are `fr_loads`'s over every
+// chunk (last frame's loaded chunks are zeroed first) and the breaks `fr_breaks`'s over
+// every bond: a bond of two unloaded chunks meets a demand of 0, and no capacity is
+// negative (fracture.rs checks). The cost follows the contacts, not the tables.
+//   fr_act_begin       one thread: this frame's list empty; the indirect sizes;
+//   fr_act_prev        last frame's list: loads zeroed, the chunks that kept pulses listed;
+//   fr_act_mani        the ingest's chunks with manifolds listed;
+//   fr_act_args        one thread: the list's size;
+//   fr_loads_listed, fr_breaks_listed   the listed chunks, and their bonds.
+// A frame's list is in the half of `w_act` its pool half is (`1 - parity`); a chunk is
+// listed once (its stamp, `a_stamp`, is the frame's number).
+static const uint ARG_ACT_PREV = 17;
+static const uint ARG_ACT_MANI = 18;
+static const uint ARG_ACT = 19;
+
+// Per chunk (first, count) of its bonds in `w_adj_list` (each bond under both its
+// chunks), then per half a frame's listed chunks.
+uint w_adj() { return w_cs_rows() + 1; }
+uint w_adj_list() { return w_adj() + 2 * params.chunk_count; }
+uint w_act(uint half) { return w_adj_list() + 2 * params.bond_count + half * params.chunk_count; }
+// Per chunk the frame it was last listed in; the two halves' list sizes.
+uint a_stamp() { return a_moved() + 2 * params.ev_moved_cap; }
+uint a_act_n() { return a_stamp() + params.chunk_count; }
+// The ingest's chunks with a manifold this frame (`sort`: their count at 2n + 1, then them).
+uint ingest_listed() { return sort[2 * params.chunk_count + 1]; }
+uint ingest_list(uint i) { return sort[2 * params.chunk_count + 2 + i]; }
+
+void act_append(uint k)
+{
+    if (atom[a_stamp() + k].exchange(params.frame) == params.frame)
+        return;
+    uint to = 1 - params.parity;
+    uint i = atom[a_act_n() + to].add(1u);
+    work[w_act(to) + i] = k;
+}
+
+uint act_count() { return atom[a_act_n() + 1 - params.parity].load(); }
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void fr_act_begin(uint3 id: SV_DispatchThreadID)
+{
+    uint from = params.parity;
+    atom[a_act_n() + 1 - from].store(0);
+    set_args(ARG_ACT_PREV, groups_of(atom[a_act_n() + from].load(), 64));
+    set_args(ARG_ACT_MANI, groups_of(ingest_listed(), 64));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_act_prev(uint3 id: SV_DispatchThreadID)
+{
+    uint from = params.parity;
+    if (id.x >= atom[a_act_n() + from].load())
+        return;
+    uint k = work[w_act(from) + id.x];
+    loads[k] = float4(0.0);
+    if (live(k) && work[w_pulses() + 4 * k + 2 * from + 1] != 0)
+        act_append(k);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_act_mani(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x >= ingest_listed())
+        return;
+    uint k = ingest_list(id.x);
+    if (live(k))
+        act_append(k);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void fr_act_args(uint3 id: SV_DispatchThreadID)
+{
+    set_args(ARG_ACT, groups_of(act_count(), 64));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_loads_listed(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x >= act_count())
+        return;
+    uint k = work[w_act(1 - params.parity) + id.x];
+    chunk_loads(k);
+    // Its carried pulses are read: the half holds none for it until a frame writes it.
+    work[w_pulses() + 4 * k + 2 * params.parity + 1] = 0;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_breaks_listed(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x >= act_count())
+        return;
+    uint k = work[w_act(1 - params.parity) + id.x];
+    uint first = work[w_adj() + 2 * k];
+    uint count = work[w_adj() + 2 * k + 1];
+    for (uint q = 0; q < count; q++)
+    {
+        uint i = work[w_adj_list() + first + q];
+        if (i >= params.bond_used || work[w_alive() + i] == 0)
+            continue;
+        uint4 bond = bonds[i];
+        uint other = bond.x == k ? bond.y : bond.x;
+        // A bond of two listed chunks is its first chunk's.
+        if (bond.x != k && atom[a_stamp() + other].load() == params.frame)
+            continue;
+        bond_breaks(i, bond);
+    }
 }

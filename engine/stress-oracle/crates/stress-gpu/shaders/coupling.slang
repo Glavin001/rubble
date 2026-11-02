@@ -102,13 +102,14 @@ struct Record
 [[vk::binding(5, 0)]] StructuredBuffer<uint> counters;           // engine-schema `StepCounters`
 [[vk::binding(6, 0)]] StructuredBuffer<ColliderInfo> collider_info;
 [[vk::binding(7, 0)]] RWStructuredBuffer<Record> records;
-// Per chunk: [0, n + 1) segment starts, then the sorted record slots; [n + 1, 2n + 1)
-// each chunk's manifold count.
+// [0, n + 1) the chunks' segment starts; [n + 1, 2n + 1) each chunk's manifold count;
+// 2n + 1 the count of chunks with a record, [2n + 2, 3n + 2) those chunks; from 3n + 2 the
+// sorted record slots.
 [[vk::binding(8, 0)]] RWStructuredBuffer<uint> sort;
 // Per record slot (in sorted position): the manifold, as a record (point, impulse with
 // closing speed, other).
 [[vk::binding(9, 0)]] RWStructuredBuffer<Record> manifolds;
-// Per chunk: [0, n) record counts, [n, 2n) fill cursors.
+// Per chunk: [0, n) record counts, [n, 2n) fill cursors; 2n the chunks with a record.
 [[vk::binding(10, 0)]] RWStructuredBuffer<Atomic<uint>> counts;
 // Per substep: the engine's contact rows it had (`ingest_rows`); the records of rows past
 // them are stale and not read (`record_live`).
@@ -223,7 +224,7 @@ void ingest_rows(uint3 id: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void ingest_clear(uint3 id: SV_DispatchThreadID)
 {
-    if (id.x < 2 * params.chunk_count)
+    if (id.x < 2 * params.chunk_count + 1)
         counts[id.x].store(0u);
 }
 
@@ -320,7 +321,11 @@ void ingest_scatter(uint3 id: SV_DispatchThreadID)
         return;
     uint n = params.chunk_count;
     uint at = counts[n + r.ids.x].add(1u);
-    sort[2 * n + 1 + sort[r.ids.x] + at] = id.x;
+    // The chunk's first record lists it (the chunks with manifolds: fracture.slang
+    // `ingest_listed`).
+    if (at == 0)
+        sort[2 * n + 2 + counts[2 * n].add(1u)] = r.ids.x;
+    sort[3 * n + 2 + sort[r.ids.x] + at] = id.x;
 }
 
 [shader("compute")]
@@ -329,11 +334,13 @@ void ingest_merge(uint3 id: SV_DispatchThreadID)
 {
     uint k = id.x;
     uint n = params.chunk_count;
+    if (k == 0)
+        sort[2 * n + 1] = counts[2 * n].load();
     if (k >= n)
         return;
     uint begin = sort[k];
     uint end = sort[k + 1];
-    uint slots = 2 * n + 1;
+    uint slots = 3 * n + 2;
     // The chunk's records in contact order (`record_before`: by substep and contact
     // identity, not by the slot the engine's atomic append gave the row, nor by the
     // scatter's order): insertion sort, the segments are short.

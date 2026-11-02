@@ -471,7 +471,8 @@ struct FractureParams {
     cs_c2: f32,
     cs_row_offset: u32,
     ext_sides: u32,
-    pad8: f32,
+    /// Frames encoded, from 1 (the listed frame's stamps, `fracture.slang` `fr_act_*`).
+    frame: u32,
 }
 
 /// What a fracture's tables hold room for (`GpuFracture::with_capacity`): its layout is
@@ -545,6 +546,8 @@ pub struct Layout {
     pub e: u32,
     pub b: u32,
     pub events: Events,
+    /// The listed threshold frame's tables (`GpuFracture::listed`).
+    pub listed: bool,
 }
 
 impl Layout {
@@ -612,8 +615,21 @@ impl Layout {
     pub fn w_cs_rows(&self) -> u32 {
         self.w_host_breaks() + 1 + self.e
     }
-    pub fn work_words(&self) -> u32 {
+    /// With the listed frame: per chunk (first, count) of its bonds in `w_adj_list`
+    /// (`fracture.slang` `w_adj`), each bond under both its chunks; then per half a
+    /// frame's listed chunks.
+    pub fn w_adj(&self) -> u32 {
         self.w_cs_rows() + 1
+    }
+    pub fn w_adj_list(&self) -> u32 {
+        self.w_adj() + 2 * self.n
+    }
+    pub fn work_words(&self) -> u32 {
+        if self.listed {
+            self.w_adj_list() + 2 * self.e + 2 * self.n
+        } else {
+            self.w_adj()
+        }
     }
     pub fn a_dirty(&self) -> u32 {
         3 * self.n + SUMS * self.n
@@ -654,8 +670,13 @@ impl Layout {
     pub fn a_moved(&self) -> u32 {
         self.a_events() + self.events.broken
     }
-    pub fn atom_words(&self) -> u32 {
+    /// Per chunk the frame it was last listed in, then the two halves' list sizes (the
+    /// listed frame's, `fracture.slang` `a_stamp`).
+    pub fn a_stamp(&self) -> u32 {
         self.a_moved() + 2 * self.events.moved
+    }
+    pub fn atom_words(&self) -> u32 {
+        self.a_stamp() + self.n + 2
     }
     /// With crushing, per body slot 2 words per cell of a strike's contact patch
     /// (`fracture.slang` `a_cover`): the first depth, the chunk there. After `atom_words`.
@@ -694,7 +715,7 @@ pub const LP_BODY: u32 = 7;
 /// The shots strike prediction checks, at most.
 pub const MAX_SHOTS: usize = 64;
 const BODY_WORDS: u32 = 7;
-const ARGS: u64 = 17;
+const ARGS: u64 = 20;
 const ARG_CHUNKS: u64 = 0;
 const ARG_BONDS: u64 = 1;
 const ARG_BODIES: u64 = 2;
@@ -712,6 +733,10 @@ const ARG_CS_SAVE: u64 = 13;
 const ARG_CRUSH_CHUNKS: u64 = 14;
 const ARG_CRUSH_SCAN: u64 = 15;
 const ARG_CRUSH_ONE: u64 = 16;
+// The listed threshold frame's (`fracture.slang` `fr_act_*`).
+const ARG_ACT_PREV: u64 = 17;
+const ARG_ACT_MANI: u64 = 18;
+const ARG_ACT: u64 = 19;
 
 /// The counters (`fracture.slang` `C_*`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -892,7 +917,7 @@ pub fn entries() -> &'static [&'static str] {
     &ENTRIES
 }
 
-const ENTRIES: [&str; 88] = [
+const ENTRIES: [&str; 94] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -981,6 +1006,12 @@ const ENTRIES: [&str; 88] = [
     "fr_strike_cover",
     "fr_strike_claim",
     "fr_host_breaks",
+    "fr_act_begin",
+    "fr_act_prev",
+    "fr_act_mani",
+    "fr_act_args",
+    "fr_loads_listed",
+    "fr_breaks_listed",
 ];
 
 #[repr(C)]
@@ -1109,6 +1140,42 @@ fn storage_bytes(gpu: &Gpu, label: &str, bytes: u64, extra: wgpu::BufferUsages) 
     })
 }
 
+/// The listed frame's adjacency of chunks `chunk..chunk + n` over bonds `bond..bond + e`
+/// (`bonds`, their ends table chunks in that range): per chunk (first, count) into the
+/// list, and the list (each bond under both its chunks, at `2 * bond` on). A capacity
+/// below zero is an error: the listed frame breaks only bonds with a loaded chunk, and
+/// such a bond would break with none.
+fn adjacency(chunk: u32, n: u32, bond: u32, bonds: &[[u32; 4]]) -> Result<(Vec<u32>, Vec<u32>), String> {
+    let mut count = vec![0u32; n as usize];
+    for (i, b) in bonds.iter().enumerate() {
+        for end in [b[0], b[1]] {
+            if end < chunk || end >= chunk + n {
+                return Err(format!("fracture: bond {} joins chunk {end}, outside the placed chunks {chunk}..{}", bond + i as u32, chunk + n));
+            }
+            count[(end - chunk) as usize] += 1;
+        }
+        if f32::from_bits(b[2]) < 0.0 {
+            return Err(format!("fracture: bond {} has a capacity below zero ({})", bond + i as u32, f32::from_bits(b[2])));
+        }
+    }
+    let mut heads = Vec::with_capacity(2 * n as usize);
+    let mut at = 2 * bond;
+    for &c in &count {
+        heads.extend_from_slice(&[at, c]);
+        at += c;
+    }
+    let mut fill: Vec<u32> = heads.chunks(2).map(|h| h[0] - 2 * bond).collect();
+    let mut list = vec![0u32; 2 * bonds.len()];
+    for (i, b) in bonds.iter().enumerate() {
+        for end in [b[0], b[1]] {
+            let f = &mut fill[(end - chunk) as usize];
+            list[*f as usize] = bond + i as u32;
+            *f += 1;
+        }
+    }
+    Ok((heads, list))
+}
+
 impl GpuFracture {
     /// The fracture of `t`, bound to the engine's buffers and the ingest's (both must keep
     /// their buffers while it lives; [`Self::rebind`] after either replaces one).
@@ -1158,11 +1225,19 @@ impl GpuFracture {
         {
             return Err("fracture: tables of mismatched lengths".into());
         }
+        // The listed threshold frame (`fracture.slang` `fr_act_*`): the threshold rule
+        // without crushing or the in-step contact fracture loads only the chunks a frame can
+        // load. `STRESS_FRACTURE_LISTED=0` (A/B): every chunk and bond, every frame.
+        let listed = t.load_model == LoadModel::Threshold
+            && t.crush.is_none()
+            && t.contact_sweeps == 0
+            && !std::env::var("STRESS_FRACTURE_LISTED").is_ok_and(|v| v == "0");
         let layout = Layout {
             n,
             e,
             b,
             events: room.events,
+            listed,
         };
         let [scale_m, scale_s, scale_j] = t.scales();
         let (ext_words, ext_chunks, ext_adj, ext_mat) = t.ext.words();
@@ -1280,6 +1355,13 @@ impl GpuFracture {
         words[..used_n as usize].copy_from_slice(&t.chunk_body);
         words[layout.w_alive() as usize..(layout.w_alive() + used_e) as usize].fill(1);
         words[layout.w_free() as usize..(layout.w_free() + b) as usize].copy_from_slice(&t.free);
+        if listed {
+            let (heads, list) = adjacency(0, used_n, 0, &t.bonds)?;
+            let at = layout.w_adj() as usize;
+            words[at..at + heads.len()].copy_from_slice(&heads);
+            let at = layout.w_adj_list() as usize;
+            words[at..at + list.len()].copy_from_slice(&list);
+        }
         let work = gpu.storage("fracture work", &words);
         let cover = if t.crush.is_some() { layout.cover_words() } else { 0 };
         let atom = storage_bytes(gpu, "fracture atom", 4 * (layout.atom_words() + cover) as u64, wgpu::BufferUsages::empty());
@@ -1543,6 +1625,15 @@ impl GpuFracture {
                 );
             }
         }
+        if l.listed {
+            let (heads, list) = adjacency(at.chunk, n, at.bond, &t.bonds)?;
+            if n > 0 {
+                q.write_buffer(&self.work, 4 * (l.w_adj() + 2 * at.chunk) as u64, bytemuck::cast_slice(&heads));
+            }
+            if e > 0 {
+                q.write_buffer(&self.work, 4 * (l.w_adj_list() + 2 * at.bond) as u64, bytemuck::cast_slice(&list));
+            }
+        }
         if e > 0 {
             q.write_buffer(
                 &self.bonds,
@@ -1729,6 +1820,7 @@ impl GpuFracture {
     pub fn encode_frame(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32) {
         // The pool's halves swap every frame.
         self.params.parity ^= 1;
+        self.params.frame += 1;
         self.params.step = step;
         gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         // The chunks and bonds in use (a shared fracture's tables are sized for its room).
@@ -1775,10 +1867,29 @@ impl GpuFracture {
             encoder.resolve_query_set(&t.queries, CS_STAMPS..CS_STAMPS + LP_STAMPS, &t.resolve, 256);
             encoder.copy_buffer_to_buffer(&t.resolve, 256, &t.read, 8 * CS_STAMPS as u64, 8 * LP_STAMPS as u64);
         }
+        if self.layout.listed {
+            // This frame's list (fracture.slang `fr_act_*`), each step's sizes copied for
+            // the next's indirect dispatches.
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("fracture list"), timestamp_writes: None });
+                self.direct(&mut pass, "fr_act_begin", 1);
+            }
+            encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("fracture list"), timestamp_writes: None });
+                self.indirect(&mut pass, "fr_act_prev", ARG_ACT_PREV, None);
+                self.indirect(&mut pass, "fr_act_mani", ARG_ACT_MANI, None);
+                self.direct(&mut pass, "fr_act_args", 1);
+            }
+            encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("fracture loads"), timestamp_writes: None });
             if self.params.load_model == 1 && self.cs_timing.is_some() {
                 // Done above, timed.
+            } else if self.layout.listed {
+                self.indirect(&mut pass, "fr_loads_listed", ARG_ACT, None);
+                self.indirect(&mut pass, "fr_breaks_listed", ARG_ACT, None);
             } else {
             self.direct(&mut pass, "fr_loads", n);
             if crush {

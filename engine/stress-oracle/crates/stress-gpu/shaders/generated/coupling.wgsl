@@ -408,7 +408,7 @@ fn ingest_rows(@builtin(global_invocation_id) id_0 : vec3<u32>)
 fn ingest_clear(@builtin(global_invocation_id) id_1 : vec3<u32>)
 {
     var _S28 : u32 = id_1.x;
-    if(_S28 < (u32(2) * params_0.chunk_count_0))
+    if(_S28 < (u32(2) * params_0.chunk_count_0 + u32(1)))
     {
         atomicStore(&(counts_0[_S28]), u32(0));
     }
@@ -600,14 +600,21 @@ fn ingest_scatter(@builtin(global_invocation_id) id_4 : vec3<u32>)
     var n_1 : u32 = params_0.chunk_count_0;
     var _S44 : u32 = r_2.ids_0.x;
     var at_0 : u32 = atomicAdd(&(counts_0[params_0.chunk_count_0 + _S44]), u32(1));
-    sort_0[u32(2) * n_1 + u32(1) + sort_0[_S44] + at_0] = _S41;
+    if(at_0 == u32(0))
+    {
+        var _S45 : u32 = u32(2) * n_1;
+        var _S46 : u32 = _S45 + u32(2);
+        var _S47 : u32 = atomicAdd(&(counts_0[_S45]), u32(1));
+        sort_0[_S46 + _S47] = _S44;
+    }
+    sort_0[u32(3) * n_1 + u32(2) + sort_0[_S44] + at_0] = _S41;
     return;
 }
 
 fn record_before_0( a_1 : u32,  b_2 : u32) -> bool
 {
-    var _S45 : vec4<u32> = records_0[a_1].key_0;
-    var _S46 : vec4<u32> = records_0[b_2].key_0;
+    var _S48 : vec4<u32> = records_0[a_1].key_0;
+    var _S49 : vec4<u32> = records_0[b_2].key_0;
     var q_1 : u32 = u32(0);
     loop
     {
@@ -618,11 +625,11 @@ fn record_before_0( a_1 : u32,  b_2 : u32) -> bool
         {
             break;
         }
-        var _S47 : u32 = q_1;
-        var _S48 : u32 = q_1;
-        if((_S45[q_1]) != (_S46[q_1]))
+        var _S50 : u32 = q_1;
+        var _S51 : u32 = q_1;
+        if((_S48[q_1]) != (_S49[q_1]))
         {
-            return (_S45[_S47]) < (_S46[_S48]);
+            return (_S48[_S50]) < (_S49[_S51]);
         }
         q_1 = q_1 + u32(1);
     }
@@ -637,62 +644,68 @@ fn ingest_merge(@builtin(global_invocation_id) id_5 : vec3<u32>)
     var m_0 : u32;
     var k_2 : u32 = id_5.x;
     var n_2 : u32 = params_0.chunk_count_0;
-    if(k_2 >= (params_0.chunk_count_0))
+    if(k_2 == u32(0))
+    {
+        var _S52 : u32 = u32(2) * n_2;
+        var _S53 : u32 = atomicLoad(&(counts_0[_S52]));
+        sort_0[_S52 + u32(1)] = _S53;
+    }
+    if(k_2 >= n_2)
     {
         return;
     }
     var begin_0 : u32 = sort_0[k_2];
-    var _S49 : u32 = sort_0[k_2 + u32(1)];
-    var _S50 : u32 = u32(2) * n_2 + u32(1);
+    var _S54 : u32 = sort_0[k_2 + u32(1)];
+    var _S55 : u32 = u32(3) * n_2 + u32(2);
     var a_2 : u32 = sort_0[k_2] + u32(1);
     loop
     {
-        if(a_2 < _S49)
+        if(a_2 < _S54)
         {
         }
         else
         {
             break;
         }
-        var v_4 : u32 = sort_0[_S50 + a_2];
+        var v_4 : u32 = sort_0[_S55 + a_2];
         b_3 = a_2;
         loop
         {
-            var _S51 : bool;
+            var _S56 : bool;
             if(b_3 > begin_0)
             {
-                _S51 = record_before_0(v_4, sort_0[_S50 + b_3 - u32(1)]);
+                _S56 = record_before_0(v_4, sort_0[_S55 + b_3 - u32(1)]);
             }
             else
             {
-                _S51 = false;
+                _S56 = false;
             }
-            if(_S51)
+            if(_S56)
             {
             }
             else
             {
                 break;
             }
-            var _S52 : u32 = _S50 + b_3;
-            sort_0[_S52] = sort_0[_S52 - u32(1)];
+            var _S57 : u32 = _S55 + b_3;
+            sort_0[_S57] = sort_0[_S57 - u32(1)];
             b_3 = b_3 - u32(1);
         }
-        sort_0[_S50 + b_3] = v_4;
+        sort_0[_S55 + b_3] = v_4;
         a_2 = a_2 + u32(1);
     }
     a_2 = begin_0;
     b_3 = u32(0);
     loop
     {
-        if(a_2 < _S49)
+        if(a_2 < _S54)
         {
         }
         else
         {
             break;
         }
-        var r_3 : Record_std430_0 = records_0[sort_0[_S50 + a_2]];
+        var r_3 : Record_std430_0 = records_0[sort_0[_S55 + a_2]];
         var q_2 : u32 = u32(0);
         loop
         {
@@ -718,34 +731,34 @@ fn ingest_merge(@builtin(global_invocation_id) id_5 : vec3<u32>)
             a_2 = a_2 + u32(1);
             continue;
         }
-        var _S53 : u32 = begin_0 + m_0;
+        var _S58 : u32 = begin_0 + m_0;
         var acc_0 : Record_0;
-        acc_0.ids_0 = manifolds_0[_S53].ids_0;
-        acc_0.point_0 = manifolds_0[_S53].point_0;
-        acc_0.impulse_0 = manifolds_0[_S53].impulse_0;
-        acc_0.other_0 = manifolds_0[_S53].other_0;
-        acc_0.key_0 = manifolds_0[_S53].key_0;
+        acc_0.ids_0 = manifolds_0[_S58].ids_0;
+        acc_0.point_0 = manifolds_0[_S58].point_0;
+        acc_0.impulse_0 = manifolds_0[_S58].impulse_0;
+        acc_0.other_0 = manifolds_0[_S58].other_0;
+        acc_0.key_0 = manifolds_0[_S58].key_0;
         var w0_0 : f32 = acc_0.point_0.w;
         var w_0 : f32 = r_3.point_0.w;
         var total_1 : f32 = w0_0 + w_0;
         if(total_1 > 0.0f)
         {
-            var _S54 : vec3<f32> = (acc_0.point_0.xyz * vec3<f32>(w0_0) + r_3.point_0.xyz * vec3<f32>(w_0)) / vec3<f32>(total_1);
-            acc_0.point_0.x = _S54.x;
-            acc_0.point_0.y = _S54.y;
-            acc_0.point_0.z = _S54.z;
+            var _S59 : vec3<f32> = (acc_0.point_0.xyz * vec3<f32>(w0_0) + r_3.point_0.xyz * vec3<f32>(w_0)) / vec3<f32>(total_1);
+            acc_0.point_0.x = _S59.x;
+            acc_0.point_0.y = _S59.y;
+            acc_0.point_0.z = _S59.z;
             acc_0.impulse_0[i32(3)] = (acc_0.impulse_0.w * w0_0 + r_3.impulse_0.w * w_0) / total_1;
         }
-        var _S55 : vec3<f32> = acc_0.impulse_0.xyz + r_3.impulse_0.xyz;
-        acc_0.impulse_0.x = _S55.x;
-        acc_0.impulse_0.y = _S55.y;
-        acc_0.impulse_0.z = _S55.z;
+        var _S60 : vec3<f32> = acc_0.impulse_0.xyz + r_3.impulse_0.xyz;
+        acc_0.impulse_0.x = _S60.x;
+        acc_0.impulse_0.y = _S60.y;
+        acc_0.impulse_0.z = _S60.z;
         acc_0.point_0[i32(3)] = total_1;
-        manifolds_0[_S53].ids_0 = acc_0.ids_0;
-        manifolds_0[_S53].point_0 = acc_0.point_0;
-        manifolds_0[_S53].impulse_0 = acc_0.impulse_0;
-        manifolds_0[_S53].other_0 = acc_0.other_0;
-        manifolds_0[_S53].key_0 = acc_0.key_0;
+        manifolds_0[_S58].ids_0 = acc_0.ids_0;
+        manifolds_0[_S58].point_0 = acc_0.point_0;
+        manifolds_0[_S58].impulse_0 = acc_0.impulse_0;
+        manifolds_0[_S58].other_0 = acc_0.other_0;
+        manifolds_0[_S58].key_0 = acc_0.key_0;
         a_2 = a_2 + u32(1);
     }
     sort_0[n_2 + u32(1) + k_2] = b_3;

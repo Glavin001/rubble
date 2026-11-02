@@ -324,6 +324,12 @@ pub mod shaders {
             ("fr_strike_cover", (64, 1, 1)),
             ("fr_strike_claim", (64, 1, 1)),
             ("fr_host_breaks", (64, 1, 1)),
+            ("fr_act_begin", (1, 1, 1)),
+            ("fr_act_prev", (64, 1, 1)),
+            ("fr_act_mani", (64, 1, 1)),
+            ("fr_act_args", (1, 1, 1)),
+            ("fr_loads_listed", (64, 1, 1)),
+            ("fr_breaks_listed", (64, 1, 1)),
         ]
     );
 

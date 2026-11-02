@@ -144,9 +144,9 @@ impl EngineIngest {
             start_bodies: storage("ingest start bodies", BODY_BYTES * max_bodies as u64),
             collider_info: gpu.storage("ingest collider info", table(colliders)),
             records: storage("ingest records", std::mem::size_of::<Record>() as u64 * records),
-            sort: storage("ingest sort", 4 * (2 * n + 1 + records)),
+            sort: storage("ingest sort", 4 * (3 * n + 2 + records)),
             manifolds: storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records),
-            counts: storage("ingest counts", 4 * 2 * n),
+            counts: storage("ingest counts", 4 * (2 * n + 1)),
             row_counts: storage("ingest row counts", 4 * 1024),
             scan_blocks: storage("ingest scan blocks", 4 * n.div_ceil(1024)),
         }
@@ -178,7 +178,7 @@ impl EngineIngest {
         };
         let n = self.chunk_count as u64;
         self.records = storage("ingest records", std::mem::size_of::<Record>() as u64 * records);
-        self.sort = storage("ingest sort", 4 * (2 * n + 1 + records));
+        self.sort = storage("ingest sort", 4 * (3 * n + 2 + records));
         self.manifolds = storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records);
         self.max_substeps = max_substeps;
     }
@@ -259,7 +259,7 @@ impl EngineIngest {
         let params = gpu.uniform("ingest params", &params);
         let records = (2 * self.max_rows * substeps.max(1)) as usize;
         let n = self.chunk_count as usize;
-        for (k, size, label) in [(&self.clear, groups(2 * n, 64), "ingest clear"), (&self.count, groups(records, 64), "ingest count"), (&self.scan, groups(n, 1024), "ingest scan"), (&self.scan_top, 1, "ingest scan blocks"), (&self.scan_add, groups(n, 64), "ingest scan add"), (&self.scatter, groups(records, 64), "ingest scatter"), (&self.merge, groups(n, 64), "ingest merge")] {
+        for (k, size, label) in [(&self.clear, groups(2 * n + 1, 64), "ingest clear"), (&self.count, groups(records, 64), "ingest count"), (&self.scan, groups(n, 1024), "ingest scan"), (&self.scan_top, 1, "ingest scan blocks"), (&self.scan_add, groups(n, 64), "ingest scan add"), (&self.scatter, groups(records, 64), "ingest scatter"), (&self.merge, groups(n, 64), "ingest merge")] {
             let bind = self.bind(gpu, k, &params, e);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
             pass.set_pipeline(&k.pipeline);
