@@ -112,6 +112,7 @@ impl<K: Clone> ReadbackRing<K> {
         enc: &mut wgpu::CommandEncoder,
         step: u64,
         extras: &[Extra<'_, K>],
+        late: &[(K, u64)],
     ) -> usize {
         let slot = self.free.pop().expect("a free readback slot");
         let bodies = sim.body_count();
@@ -122,6 +123,12 @@ impl<K: Clone> ReadbackRing<K> {
             end = end.div_ceil(ALIGN) * ALIGN;
             placed.push((e.kind.clone(), end, e.size));
             end += e.size;
+        }
+        // Copied by the host in a later submission (`late_target`).
+        for (kind, size) in late {
+            end = end.div_ceil(ALIGN) * ALIGN;
+            placed.push((kind.clone(), end, *size));
+            end += size;
         }
         let s = &mut self.slots[slot];
         if s.capacity < end {
@@ -159,6 +166,16 @@ impl<K: Clone> ReadbackRing<K> {
         s.extras = placed;
         self.pending.push_back(Pending::Mapped { step, slot });
         slot
+    }
+
+    /// Where the `i`-th late extra of `slot`'s last `encode` goes: the
+    /// slot's buffer and byte offset. The host copies it there in a
+    /// submission after the step's own, before [`ReadbackRing::map`].
+    pub fn late_target(&self, slot: usize, i: usize) -> (&wgpu::Buffer, u64) {
+        let s = &self.slots[slot];
+        let n = s.extras.len();
+        let (_, at, _) = &s.extras[n - 1 - i];
+        (&s.buffer, *at)
     }
 
     /// Start mapping `slot` (after its copies were submitted).

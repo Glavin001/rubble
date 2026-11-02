@@ -1,8 +1,8 @@
-// Soft-body (node–beam) vehicles for the WebGPU host: engine-softbody's SoftHost
-// and Rigs of Rods `.truck` importer compiled to wasm (crates/engine-vehicle-wasm,
-// built into generated/vehicle_wasm by wgsl_export). Like vehicle.mjs, every call
-// that touches GPU records returns an op stream replayed into the world backend.
-import { wasm, applyOps } from './vehicle.mjs';
+// Soft-body (node–beam) vehicle descriptors for the WebGPU pages: engine-softbody's
+// importers (Rigs of Rods `.truck`, JBeam) and procedural vehicles compiled to wasm
+// (crates/engine-vehicle-wasm, built into generated/vehicle_wasm by wgsl_export). The
+// pages spawn them on World (engine-world-wasm `addSoftVehicle`).
+import { wasm } from './vehicle.mjs';
 
 export const SOFT = JSON.parse(wasm.soft_constants());
 
@@ -31,56 +31,3 @@ export const proceduralCarVisual = () => wasm.soft_procedural_car_visual();
 export const proceduralCarDesc = () => JSON.parse(wasm.soft_procedural_car_desc());
 /** A braced lattice crate (n³ nodes) as `.truck` text. */
 export const latticeCrate = (n, step, mass, spring, deform, strength) => wasm.soft_box_truck(n, step, mass, spring, deform, strength);
-
-export class SoftHost {
-  constructor(cap) {
-    this.cap = { ...DEFAULT_SOFT_CAPACITY, ...cap };
-    this.inner = new wasm.WasmSoftHost(softCapWords(this.cap));
-    this.layout = JSON.parse(this.inner.layout());
-    this.entries = [];
-  }
-
-  get bodyCount() { return this.inner.body_count; }
-  /** Plan inputs (WasmSoftHost::counts). */
-  counts() { return this.inner.counts(); }
-
-  /**
-   * Spawn a soft vehicle at `position`/`rotation`; with wheels its rigid core joins
-   * `vehicles` (the world's VehicleHost). `opts` = engine_softbody::SpawnOptions.
-   */
-  add(backend, vehicles, desc, position, rotation = [0, 0, 0, 1], opts = {}) {
-    const h = this.inner.body_count;
-    const counts = Uint32Array.of(backend.bodyCount(), backend.colliderCount(), backend.jointCount());
-    applyOps(backend, this.inner.add(counts, JSON.stringify(desc), position, rotation, JSON.stringify(opts), vehicles.inner));
-    this.entries[h] = JSON.parse(this.inner.entry(h));
-    if (this.entries[h].core) vehicles.refreshEntry(this.entries[h].core.vehicle);
-    return h;
-  }
-
-  addObstacle(backend, collider) { applyOps(backend, this.inner.add_obstacle(collider)); }
-  setSettings(backend, settings) { applyOps(backend, this.inner.set_settings(JSON.stringify({ ...this.settings(), ...settings }))); }
-  settings() { return JSON.parse(this.inner.settings()); }
-  setSteer(backend, h, steer) { applyOps(backend, this.inner.set_steer(h, steer)); }
-
-  /**
-   * Bind render-mesh vertices (Float32Array xyz, the vehicle's own frame) to soft
-   * body `h`, only to part `part`'s nodes when given: 8 words per vertex
-   * (engine_softbody::SkinBinding) for soft-skin.mjs or your own shader.
-   */
-  bindMesh(h, vertices, part) { return this.inner.bind_mesh(h, vertices, part ?? undefined); }
-  /** Record beam breaks ([{beam, softBody}]); returns the pieces they cut loose:
-   * [{softBody, nodes, parts, mass}]. */
-  noteBreaks(breaks) {
-    const pairs = new Uint32Array(breaks.length * 2);
-    breaks.forEach((b, i) => { pairs[i * 2] = b.beam; pairs[i * 2 + 1] = b.softBody; });
-    return JSON.parse(this.inner.note_breaks(pairs));
-  }
-  /** Resynchronise `h`'s broken beams from a readback (16 words per beam). */
-  syncBroken(h, beamWords) { return JSON.parse(this.inner.sync_broken(h, beamWords)); }
-  /** Damage of `h` from a beam readback and optional positions (Float32Array xyz):
-   * {bent, broken, beams, plasticWork, maxBeamStrain, nodeDeformation, detached}. */
-  damage(h, beamWords, positions) { return JSON.parse(this.inner.damage(h, beamWords, positions ?? new Float32Array(0))); }
-
-  save() { return { inner: this.inner.save(), entries: structuredClone(this.entries) }; }
-  restore(snap) { this.inner.restore(snap.inner); this.entries = structuredClone(snap.entries); }
-}

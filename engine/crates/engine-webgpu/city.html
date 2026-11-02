@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Rubble city — large maps in the browser</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #10131a; color: #dfe4ee; font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel { position: fixed; background: rgba(16, 19, 26, 0.82); border: 1px solid #2c3346; border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
+    #hud { top: 12px; left: 12px; width: 27rem; max-width: calc(100vw - 48px); }
+    #hud h1 { font-size: 15px; margin: 0 0 6px; font-weight: 650; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+    .muted { color: #8d96aa; }
+    select, button { background: #1d2333; color: #dfe4ee; border: 1px solid #3a4360; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
+    button:hover { border-color: #6c7aa6; }
+    button.on { border-color: #e0a548; color: #ffd28a; }
+    button:disabled { color: #6b7387; cursor: default; }
+    #stats { display: grid; grid-template-columns: auto 1fr; column-gap: 12px; font-variant-numeric: tabular-nums; margin: 6px 0; }
+    #stats .k { color: #8d96aa; }
+    #bar { height: 4px; background: #252c3d; border-radius: 2px; overflow: hidden; margin: 4px 0; }
+    #bar > div { height: 100%; width: 0; background: #e0a548; }
+    #err { color: #ff8e8e; white-space: pre-wrap; }
+    a { color: #b8d7ff; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud" class="panel">
+    <h1>Rubble city · large maps in the browser</h1>
+    <div class="row">
+      <label class="muted" for="kSel">Houses</label><select id="kSel"></select>
+      <button id="still" data-s="still">Still</button>
+      <button id="drive" data-s="drive">Drive</button>
+      <button id="war" data-s="war">War</button>
+      <a href="./">All demos</a>
+    </div>
+    <div class="muted">The native benchmark's city (<code>rubble::city</code>): threshold cuboid houses on a 2.2 km map, sleeping once settled. Drag to orbit, right-drag to pan, scroll to zoom.</div>
+    <div id="bar"><div></div></div>
+    <div id="stats"></div>
+    <div id="status" class="muted">starting…</div>
+    <div id="err"></div>
+  </div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
+  <script type="module">
+    // The physics is rubble's World (engine-world-wasm) running the large-maps city the
+    // native benchmark runs (engine-world tests/city_scale.rs, both through
+    // rubble::city): same houses, layout, capacity, sleep policy, piece pool, scenarios
+    // and shots. The page places the houses a few per frame, settles the city, starts a
+    // scenario, and draws every collider from the world's buffers in place.
+    import { createCity, wasmHeapBytes, Poses, pollFrame, stepFrames, drain, macrotask, errorText } from './rubble-world.mjs';
+    import { lastPanic } from './generated/world-wasm/engine_world_wasm.js';
+
+    const statusEl = document.getElementById('status');
+    const errEl = document.getElementById('err');
+    const fail = (e) => {
+      const panic = (() => { try { return lastPanic(); } catch { return ''; } })();
+      errEl.textContent = errorText(e) + (panic ? `\n${panic}` : '');
+      statusEl.textContent = 'stopped';
+      window.__failed = String(e) + (panic ? ` (${panic})` : '');
+    };
+    addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
+    addEventListener('error', (e) => fail(e.error || e.message));
+
+    // ?k= houses (default 1,024: the native large-maps run), ?sleep=0|1 (default 1), ?pool=
+    // piece slots (default 32768; 'none': a slot per chunk), ?scenario=still|drive|war,
+    // ?car=vehicle|box (drive: a vehicle-API car, or the native benchmark's kinematic box),
+    // ?timing=step|off (GPU timestamps), ?kill=<y>|off, ?budget=<ms of placement per frame>.
+    const qs = new URLSearchParams(location.search);
+    const K = Number(qs.get('k') ?? 1024);
+    if (!(Number.isInteger(K) && K > 0)) throw new Error(`k=${qs.get('k')}: a house count`);
+    const SLEEP = qs.get('sleep') !== '0';
+    const POOL = qs.get('pool') === 'none' ? null : Number(qs.get('pool') ?? 32768);
+    const CAR = qs.get('car') ?? 'vehicle';
+    if (!['vehicle', 'box'].includes(CAR)) throw new Error(`car=${CAR}: vehicle or box`);
+    const BUDGET = Number(qs.get('budget') ?? 8);
+    const killParam = qs.get('kill');
+    const killBelow = killParam === 'off' ? null : Number(killParam ?? -50);
+    let scenario = qs.get('scenario') ?? 'still';
+    const SCENARIOS = ['still', 'drive', 'war'];
+    if (!SCENARIOS.includes(scenario)) throw new Error(`scenario=${scenario}: ${SCENARIOS.join(', ')}`);
+    const kSel = document.getElementById('kSel');
+    for (const n of [16, 64, 256, 1024, 2048, 4096]) kSel.add(new Option(n.toLocaleString(), n, false, n === K));
+    if (![16, 64, 256, 1024, 2048, 4096].includes(K)) kSel.add(new Option(K.toLocaleString(), K, true, true));
+    kSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('k', kSel.value); location.href = u.href; };
+
+    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
+    const probe = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!probe) throw new Error('no WebGPU adapter');
+    const limits = { maxBufferSize: probe.limits.maxBufferSize, maxStorageBufferBindingSize: probe.limits.maxStorageBufferBindingSize };
+    const TIMING = qs.get('timing') ?? (probe.features.has('timestamp-query') ? 'step' : 'off');
+    const page = { gpuTiming: TIMING, ...(killBelow === null ? {} : { killBelow }) };
+    const mb = (b) => `${(b / 2 ** 20).toFixed(0)} MiB`;
+
+    // ---------------------------------------------------------------- world and city
+    const cityOpts = { houses: K, sleep: SLEEP, pool: POOL };
+    let city, world, device, poses, layout, houseChunks;
+    statusEl.textContent = `creating the world for ${K} houses…`;
+    try {
+      ({ city, world } = await createCity(cityOpts, page));
+    } catch (e) {
+      // World::new checks every buffer against the device: say which limit the city passes.
+      throw new Error(`${K} houses do not fit this browser's WebGPU limits (maxBufferSize ${mb(limits.maxBufferSize)}, maxStorageBufferBindingSize ${mb(limits.maxStorageBufferBindingSize)}): ${e.message ?? e}`);
+    }
+    device = world.device();
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+    const capacity = city.capacity();
+    houseChunks = city.houseCounts()[0];
+
+    // Per scenario run: what the HUD and automation report.
+    let run = null;
+    const newRun = () => ({ scenario, placeMs: 0, placedAt: 0, startStep: -1, broken: 0, gpu: [], car: null, vehicle: null, chassis: -1 });
+    let counters = null, leftWorld = 0, vehicleState = null;
+    const onFrame = (f) => {
+      poses.apply(f);
+      leftWorld += f.leftWorld().length / 5;
+      const c = f.counters();
+      if (c) counters = c;
+      if (run) {
+        run.broken += f.bondsBroken();
+        for (const t of f.gpuTimes()) { run.gpu.push(t.totalMs); run.segments = t.segments; }
+        if (run.vehicle !== null) vehicleState = f.vehicleState(run.vehicle) ?? vehicleState;
+      }
+    };
+
+    // Build (or rebuild) the city: a world, then houses placed within BUDGET ms a frame.
+    let phase = 'placing';
+    let placeStart = 0;
+    async function build(next) {
+      if (world && run) {
+        // A fresh world on the same device, as the native benchmark builds one per scenario.
+        world.cityRebuild(city, page);
+      }
+      scenario = next;
+      run = newRun();
+      counters = null; leftWorld = 0; vehicleState = null;
+      poses = new Poses(capacity.maxBodies);
+      world.cityBegin(city);
+      layout = city.layout();
+      phase = 'placing';
+      placeStart = performance.now();
+      highlight();
+    }
+    // One frame's placement: houses until the budget is spent. Never waits on the GPU.
+    function placeSome() {
+      const t0 = performance.now();
+      let left = K - city.placed();
+      while (left > 0 && performance.now() - t0 < BUDGET) left = world.cityPlace(city, 1);
+      if (left === 0) {
+        run.placeMs = performance.now() - placeStart;
+        run.placedAt = world.stepCount();
+        phase = 'settling';
+      }
+    }
+
+    // The scenario, once settled (CITY_SETTLE = 120 steps): the native start, or for
+    // ?car=vehicle a vehicle-API car on the same street, at the same start, held to 15 m/s.
+    const SETTLE = 120;
+    let presets = null;
+    async function startScenario() {
+      if (scenario === 'drive' && CAR === 'vehicle') {
+        presets ??= await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json();
+        const sedan = presets.find((p) => p.name === 'sedan');
+        const [x, z] = layout.street;
+        // Yaw +90° about Y: the sedan's forward (+Z) along +X, the street's direction.
+        const q = [0, Math.SQRT1_2, 0, Math.SQRT1_2];
+        run.vehicle = world.addVehicle(sedan, [x, layout.ground + 1.2, z], q);
+        run.chassis = world.vehicleEntry(run.vehicle).chassis;
+      } else {
+        const added = world.cityStart(city, scenario);
+        if (scenario === 'drive') run.car = world.bodySlot(added[0]);
+      }
+      run.startStep = world.stepCount();
+      // Counted from the scenario's start, as the native benchmark counts.
+      run.broken = 0;
+      run.gpu = [];
+      phase = 'running';
+      aimCamera();
+    }
+    // The vehicle's driver: hold 15 m/s down the street (z = street), steering back to it.
+    function drive() {
+      if (run.vehicle === null) return;
+      const v = vehicleState?.forwardSpeed ?? 0;
+      const p = poses.position(run.chassis), q = poses.rotation(run.chassis);
+      // The heading's z component: the car's forward (+Z in its frame) rotated by q.
+      const headingZ = 1 - 2 * (q[0] * q[0] + q[1] * q[1]);
+      const e = 15 - v;
+      // Positive steer turns toward +Z when heading +X.
+      const steer = Math.max(-1, Math.min(1, -0.08 * (p[2] - layout.street[1]) - 1.5 * headingZ));
+      world.setVehicleInput(run.vehicle, { forward: Math.max(0, Math.min(1, e * 0.4)), brake: e < -1 ? Math.min(1, -e * 0.2) : 0, steer });
+    }
+
+    // ---------------------------------------------------------------- renderer
+    const canvas = document.getElementById('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    const configure = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      context.configure({ device, format, alphaMode: 'opaque' });
+    };
+    configure();
+    addEventListener('resize', configure);
+    // Every collider, an instance each, read from the world's collider and body buffers
+    // (a chunk's collider follows its body as clusters split, on the GPU): boxes, hulls
+    // (their bounds) and balls as boxes, the ground plane and anything else skipped. An 8-corner cube,
+    // faces flat-shaded from screen derivatives.
+    const SHADER = /* wgsl */`
+struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
+  linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
+struct Collider { body: u32, shape: u32, material: u32, generation: u32, localPos: vec3f, density: f32, localRot: vec4f, params: vec4f };
+struct Frame { viewProj: mat4x4f, eye: vec4f, ground: vec4f };
+@group(0) @binding(0) var<storage, read> bodies: array<Body>;
+@group(0) @binding(1) var<uniform> frame: Frame;
+@group(0) @binding(2) var<storage, read> cols: array<Collider>;
+@group(0) @binding(3) var<storage, read> hulls: array<vec4u>;
+
+fn qrot(q: vec4f, v: vec3f) -> vec3f {
+  let u = q.xyz;
+  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
+}
+fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
+fn fogged(c: vec3f, w: vec3f) -> vec3f {
+  let f = clamp(length(frame.eye.xyz - w) / 2600.0, 0.0, 1.0);
+  return mix(c, vec3f(0.52, 0.6, 0.7), f * f * 0.85);
+}
+
+struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1) c: vec3f };
+
+@vertex fn vsCol(@builtin(vertex_index) vi: u32, @builtin(instance_index) ci: u32) -> Out {
+  let col = cols[ci];
+  var o: Out;
+  if (col.shape > 3u || col.shape == 1u) { o.clip = vec4f(2.0, 2.0, 2.0, 1.0); return o; }
+  let b = bodies[col.body];
+  var half = col.params.xyz;
+  var centre = vec3f(0.0);
+  if (col.shape == 0u) { half = vec3f(col.params.x); }
+  if (col.shape == 3u) {
+    // A hull (the threshold chunks): its local bounds box (H+1 centre, H+2 half
+    // extents, engine_schema::convex), scaled by params.y. Exact for the city's boxes.
+    let base = bitcast<u32>(col.params.x) & 0x1FFFFFFFu;
+    centre = bitcast<vec3f>(hulls[base + 1u].xyz) * col.params.y;
+    half = bitcast<vec3f>(hulls[base + 2u].xyz) * col.params.y;
+  }
+  let corner = vec3f(f32(vi & 1u), f32((vi >> 1u) & 1u), f32((vi >> 2u) & 1u)) * 2.0 - 1.0;
+  let w = b.position + qrot(b.orientation, col.localPos + qrot(col.localRot, centre + corner * half));
+  o.w = w;
+  o.clip = frame.viewProj * vec4f(w, 1.0);
+  let h = hash(col.body * 7u + 3u);
+  let awake = (b.flags & 8u) != 0u;
+  var c = mix(vec3f(0.62, 0.55, 0.48), vec3f(0.78, 0.7, 0.6), h);
+  if (col.shape == 0u) { c = vec3f(0.85, 0.87, 0.9); }
+  else if (awake) { c = mix(vec3f(0.95, 0.55, 0.15), vec3f(1.0, 0.75, 0.3), h); }
+  o.c = c;
+  return o;
+}
+@fragment fn fsCol(i: Out) -> @location(0) vec4f {
+  var n = normalize(cross(dpdx(i.w), dpdy(i.w)));
+  if (dot(n, frame.eye.xyz - i.w) < 0.0) { n = -n; }
+  let l = normalize(vec3f(0.45, 0.85, 0.3));
+  let c = i.c * (0.35 + 0.15 * n.y + 0.6 * max(dot(n, l), 0.0));
+  return vec4f(fogged(c, i.w), 1.0);
+}
+
+// The ground plane, a quad over the map and past it, with a 100 m grid.
+@vertex fn vsGround(@builtin(vertex_index) vi: u32) -> Out {
+  let s = frame.ground.y;
+  let xz = array(vec2f(-1, -1), vec2f(1, -1), vec2f(1, 1), vec2f(-1, -1), vec2f(1, 1), vec2f(-1, 1))[vi] * s;
+  var o: Out;
+  o.w = vec3f(xz.x, frame.ground.x, xz.y);
+  o.clip = frame.viewProj * vec4f(o.w, 1.0);
+  o.c = vec3f(0.0);
+  return o;
+}
+@fragment fn fsGround(i: Out) -> @location(0) vec4f {
+  let g = abs(fract(i.w.xz / 100.0 + 0.5) - 0.5) * 100.0;
+  let px = fwidth(i.w.xz) * 1.2;
+  let line = 1.0 - min(1.0, min(g.x / px.x, g.y / px.y));
+  let inside = f32(max(abs(i.w.x), abs(i.w.z)) < frame.ground.z);
+  let c = mix(vec3f(0.2, 0.24, 0.2), vec3f(0.28, 0.33, 0.27), inside) + line * 0.06;
+  return vec4f(fogged(c, i.w), 1.0);
+}`;
+    const mod = device.createShaderModule({ label: 'city', code: SHADER });
+    const ci = await mod.getCompilationInfo();
+    const cerr = ci.messages.find((m) => m.type === 'error');
+    if (cerr) throw new Error(`city shader: ${cerr.message}`);
+    const depthStencil = { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less' };
+    const colPipe = device.createRenderPipeline({ layout: 'auto', vertex: { module: mod, entryPoint: 'vsCol' }, fragment: { module: mod, entryPoint: 'fsCol', targets: [{ format }] }, primitive: { cullMode: 'none' }, depthStencil });
+    const groundPipe = device.createRenderPipeline({ layout: 'auto', vertex: { module: mod, entryPoint: 'vsGround' }, fragment: { module: mod, entryPoint: 'fsGround', targets: [{ format }] }, primitive: { cullMode: 'none' }, depthStencil });
+    // The cube's 12 triangles over its 8 corners (bit 0 x, bit 1 y, bit 2 z).
+    const cubeIdx = new Uint16Array([0, 1, 3, 0, 3, 2, 4, 6, 7, 4, 7, 5, 0, 4, 5, 0, 5, 1, 2, 3, 7, 2, 7, 6, 0, 2, 6, 0, 6, 4, 1, 5, 7, 1, 7, 3]);
+    const indexBuf = device.createBuffer({ size: cubeIdx.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(indexBuf, 0, cubeIdx);
+    const frameBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const frameData = new Float32Array(24);
+    let colBind = null, groundBind = null, bound = [];
+    const rebind = () => {
+      const bufs = [world.bodyBuffer(), world.colliderBuffer(), world.hullArenaBuffer()];
+      if (bufs.every((b, i) => b === bound[i])) return;
+      bound = bufs;
+      colBind = device.createBindGroup({ layout: colPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: bufs[0] } }, { binding: 1, resource: { buffer: frameBuf } }, { binding: 2, resource: { buffer: bufs[1] } }, { binding: 3, resource: { buffer: bufs[2] } }] });
+      groundBind = device.createBindGroup({ layout: groundPipe.getBindGroupLayout(0), entries: [{ binding: 1, resource: { buffer: frameBuf } }] });
+    };
+    let depth = null;
+
+    // Camera: orbit about a target.
+    const cam = { yaw: 0.8, pitch: 0.55, dist: 2600, target: [0, 0, 0] };
+    let follow = false;
+    function aimCamera() {
+      if (scenario === 'drive') { follow = true; Object.assign(cam, { yaw: -0.6, pitch: 0.35, dist: 70 }); }
+      else if (scenario === 'war') {
+        follow = false;
+        const t = city.targets('war');
+        // One of the struck lots, seen from 70 m.
+        const i = Math.floor(t.length / 4) * 2;
+        Object.assign(cam, { yaw: 0.6, pitch: 0.38, dist: 70, target: [t[i], layout.ground, t[i + 1]] });
+      } else { follow = false; Object.assign(cam, { yaw: 0.8, pitch: 0.55, dist: layout.map * 1.2, target: [0, layout.ground, 0] }); }
+    }
+    let drag = null;
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey }; });
+    addEventListener('pointerup', () => { drag = null; });
+    addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      drag.x = e.clientX; drag.y = e.clientY;
+      if (drag.pan) {
+        follow = false;
+        const s = cam.dist * 0.0016, cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+        cam.target[0] -= (cy * dx - sy * dy) * s;
+        cam.target[2] -= (-sy * dx - cy * dy) * s;
+      } else {
+        cam.yaw -= dx * 0.005;
+        cam.pitch = Math.max(0.05, Math.min(1.5, cam.pitch + dy * 0.005));
+      }
+    });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); cam.dist = Math.max(8, Math.min(6000, cam.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+    const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    function viewProj(eye, at, aspect, near, far) {
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const v = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+        -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
+      const f = 1 / Math.tan(Math.PI / 8), nf = 1 / (near - far);
+      const p = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far * nf, -1, 0, 0, far * near * nf, 0];
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = p[r] * v[c * 4] + p[4 + r] * v[c * 4 + 1] + p[8 + r] * v[c * 4 + 2] + p[12 + r] * v[c * 4 + 3];
+      return o;
+    }
+    function draw() {
+      if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
+        depth?.destroy();
+        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      }
+      rebind();
+      if (follow && run && run.chassis >= 0) cam.target = poses.position(run.chassis);
+      else if (follow && run && run.car !== null) cam.target = poses.position(run.car);
+      const cp = Math.cos(cam.pitch);
+      const eye = [cam.target[0] + cam.dist * cp * Math.sin(cam.yaw), cam.target[1] + cam.dist * Math.sin(cam.pitch), cam.target[2] + cam.dist * cp * Math.cos(cam.yaw)];
+      frameData.set(viewProj(eye, cam.target, canvas.width / canvas.height, Math.max(0.3, cam.dist * 0.004), Math.max(4000, cam.dist * 4)));
+      frameData.set([...eye, 0], 16);
+      frameData.set([layout.ground, layout.map * 2, layout.map / 2, 0], 20);
+      device.queue.writeBuffer(frameBuf, 0, frameData);
+      const enc = device.createCommandEncoder();
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.52, 0.6, 0.7, 1], loadOp: 'clear', storeOp: 'store' }],
+        depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.draw(6);
+      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setIndexBuffer(indexBuf, 'uint16'); rp.drawIndexed(36, world.colliderCount());
+      rp.end();
+      device.queue.submit([enc.finish()]);
+    }
+
+    // ---------------------------------------------------------------- HUD
+    const statsEl = document.getElementById('stats');
+    const barEl = document.querySelector('#bar > div');
+    const buttons = SCENARIOS.map((s) => document.getElementById(s));
+    function highlight() { for (const b of buttons) b.classList.toggle('on', b.dataset.s === scenario); }
+    for (const b of buttons) b.onclick = () => { if (phase === 'running' || phase === 'settling') build(b.dataset.s).catch(fail); };
+    const median = (a) => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+    let fps = 0, frames = 0, fpsAt = performance.now(), heapBytes = 0;
+    function hud() {
+      const placed = city.placed();
+      barEl.style.width = `${(100 * placed / K).toFixed(1)}%`;
+      const gpuMs = median(run.gpu.slice(-60));
+      const rows = [
+        ['houses', `${placed.toLocaleString()} / ${K.toLocaleString()} · ${(K * houseChunks).toLocaleString()} chunks`],
+        ['scenario', `${scenario}${scenario === 'drive' ? ` (${CAR === 'vehicle' ? 'vehicle' : 'kinematic box, as native'})` : ''} · ${phase}`],
+        ['step', TIMING === 'off' ? 'GPU timing off' : Number.isFinite(gpuMs) ? `${gpuMs.toFixed(2)} ms GPU (median of the last ${Math.min(60, run.gpu.length)})` : phase === 'running' ? 'no GPU passes timed (nothing awake)' : '—'],
+        ['awake', counters ? counters.awake.toLocaleString() : '—'],
+        ['bodies', world.bodyCount().toLocaleString()],
+        ['bonds broken', run.broken.toLocaleString()],
+        ['FPS', fps.toFixed(0)],
+        ['placement', run.placeMs ? `${(run.placeMs / 1000).toFixed(1)} s` : `${((performance.now() - placeStart) / 1000).toFixed(1)} s…`],
+        ['limits', `buffer ${mb(limits.maxBufferSize)}, storage binding ${mb(limits.maxStorageBufferBindingSize)}`],
+        ['wasm heap', mb(heapBytes)],
+        ['capacity', `${capacity.maxBodies.toLocaleString()} bodies, ${capacity.maxColliders.toLocaleString()} colliders, ${capacity.maxContacts.toLocaleString()} contacts`],
+      ];
+      if (leftWorld) rows.push(['left the world', leftWorld]);
+      statsEl.innerHTML = rows.map(([k, v]) => `<span class="k">${k}</span><span>${v}</span>`).join('');
+    }
+
+    // ---------------------------------------------------------------- loop
+    let manual = false, busy = false;
+    function stepOnce() {
+      if (phase === 'running') drive();
+      world.step();
+    }
+    async function frame(now) {
+      frames++;
+      if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; wasmHeapBytes().then((b) => { heapBytes = b; }); }
+      try {
+        if (!manual && !busy) {
+          if (phase === 'placing') {
+            placeSome();
+            statusEl.textContent = `placing houses: ${city.placed()} / ${K}`;
+          } else {
+            // Settling steps one at a time, each after the last one's frame arrived, as the
+            // native benchmark does (a split is adopted from its frame, so readback lag would
+            // change the settled city); afterwards as fast as readbacks allow.
+            const waited = phase !== 'settling' || (world.lastPolledStep ?? -1) >= world.stepCount() - 1;
+            if (waited && world.canStep()) stepOnce();
+            pollFrame(world, onFrame);
+            if (phase === 'settling' && world.stepCount() - run.placedAt >= SETTLE) {
+              busy = true;
+              await startScenario();
+              busy = false;
+            }
+            statusEl.textContent = phase === 'settling' ? `settling: step ${world.stepCount() - run.placedAt} / ${SETTLE}` : `running ${scenario} · step ${world.stepCount() - run.startStep}`;
+          }
+        }
+        draw();
+        hud();
+      } catch (e) { fail(e); return; }
+      requestAnimationFrame(frame);
+    }
+
+    // ---------------------------------------------------------------- automation
+    // __scenario(name): a fresh city (placed over frames as live), settled, the scenario
+    // started; resolves with its placement time. __step(n): n steps, each waited for (the
+    // native benchmark's latency), with each step's wall ms and GPU ms.
+    window.__scenario = async (name) => {
+      if (!SCENARIOS.includes(name)) throw new Error(`scenario ${name}: ${SCENARIOS.join(', ')}`);
+      manual = false;
+      await build(name);
+      while (phase !== 'running') {
+        if (window.__failed) throw new Error(window.__failed);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return { scenario, placeMs: run.placeMs, houses: K };
+    };
+    window.__step = async (n = 1) => {
+      manual = true;
+      const wall = [], host = [];
+      const g0 = run.gpu.length;
+      for (let i = 0; i < n; i++) {
+        const t = performance.now();
+        while (!world.canStep()) { await macrotask(); pollFrame(world, onFrame); }
+        if (phase === 'running') drive();
+        const h = performance.now();
+        world.step();
+        host.push(performance.now() - h);
+        await drain(world, onFrame);
+        wall.push(performance.now() - t);
+      }
+      draw();
+      return {
+        steps: world.stepCount(), scenario, wallMs: wall, hostMs: host, gpuMs: run.gpu.slice(g0),
+        awake: counters?.awake ?? 0, bodies: world.bodyCount(), broken: run.broken, placeMs: run.placeMs,
+      };
+    };
+    // n steps as fast as readbacks allow (pipelined, as the live page steps): ms per step.
+    window.__throughput = async (n = 120) => {
+      manual = true;
+      const t = performance.now();
+      await stepFrames(world, n, onFrame, phase === 'running' ? drive : null);
+      return (performance.now() - t) / n;
+    };
+    // A native-style measurement of a scenario on a fresh city: CITY_MEASURE (120) steps,
+    // each waited for; then 120 more pipelined.
+    window.__measure = async (name) => {
+      const s = await window.__scenario(name);
+      const r = await window.__step(120);
+      const p95 = (a) => [...a].sort((x, y) => x - y)[Math.round(0.95 * (a.length - 1))];
+      const out = {
+        ...s, wallMedian: median(r.wallMs), wallP95: p95(r.wallMs), hostMedian: median(r.hostMs), gpuMedian: median(r.gpuMs),
+        awake: r.awake, broken: r.broken, bodies: r.bodies,
+      };
+      // The last measured step's GPU passes ([name, ms]), with GPU timing on.
+      out.segments = run.segments ?? null;
+      out.pipelinedMs = await window.__throughput(120);
+      out.heapMiB = (await wasmHeapBytes()) / 2 ** 20;
+      return out;
+    };
+    // The car's position and speed (drive), for checks.
+    window.__car = () => {
+      const slot = run.chassis >= 0 ? run.chassis : run.car;
+      return slot === null ? null : { position: poses.position(slot), speed: vehicleState?.forwardSpeed ?? null, street: layout.street };
+    };
+    // The last timed step's GPU passes ([name, ms]; ?timing=phases splits the step).
+    window.__segments = () => run.segments ?? null;
+    window.__live = () => { manual = false; };
+    window.__world = world;
+
+    await build(scenario);
+    // Ready once the first city is placed and its scenario started.
+    (async () => {
+      while (phase !== 'running' && !window.__failed) await new Promise((r) => setTimeout(r, 50));
+      window.__ready = true;
+    })();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

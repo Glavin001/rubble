@@ -76,6 +76,12 @@ const WORLD_ENTRIES: &[&str] = &[
     "color_bodies_local",
     "color_bodies_tail",
     "carry_rest_pairs",
+    "archive_free",
+    "archive_count",
+    "archive_alloc",
+    "archive_scatter",
+    "archive_seal",
+    "archive_emit",
     "init_colors",
     "pack_color_lists",
     "count_color_tiles",
@@ -520,6 +526,16 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             "storageBarrier(); workgroupBarrier();",
         );
     std::fs::write(&wide, text)?;
+    // Compact snapshots' buffer extents (WgpuSim::measure_state): standalone.
+    let extent = wgsl_dir.join("state_extent.wgsl");
+    let status = std::process::Command::new(find_slangc()?)
+        .args(["-target", "wgsl"])
+        .args(["-entry", "state_extent", "-stage", "compute"])
+        .arg("-o")
+        .arg(&extent)
+        .arg(slang_root.join("kernels/state_extent.slang"))
+        .status()?;
+    anyhow::ensure!(status.success(), "slangc failed for state_extent.slang");
     // MPM material probe (tests/mpm_material.rs): standalone, with its own bindings,
     // so it stays out of the world's pipeline table.
     compile_with_defines(
