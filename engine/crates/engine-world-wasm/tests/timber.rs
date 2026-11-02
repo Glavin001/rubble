@@ -192,3 +192,19 @@ fn the_raze() {
         assert!(share(&l, name) > 0.5, "{name} is wrecked");
     }
 }
+
+/// Every level loads into its world (the capacity fits its colliders: a coarse level's
+/// chunks are compounds of several hulls) and steps with a shot in flight.
+#[test]
+fn every_level_loads_and_steps() {
+    for level in 0..=2 {
+        let mut y = TimberYard::new(GpuContext::Default, GLB, level, YardTake::Free).unwrap();
+        shoot_from_front(&mut y, [-3.0, 1.2, yard::WALL_FACE_Z]);
+        run(&mut y, 0.5);
+        eprintln!(
+            "L{level}: {} chunks, {} bonds broken",
+            y.chunks, y.total.broken
+        );
+        assert!(y.total.broken > 0, "L{level}: the shot breaks bonds");
+    }
+}

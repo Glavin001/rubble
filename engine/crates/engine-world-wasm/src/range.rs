@@ -141,6 +141,17 @@ fn capacity(asset: &DestructibleAssetDesc) -> anyhow::Result<WorldCapacity> {
     // Every chunk may become a body, plus the crush splinters, the balls and a character.
     let bodies = chunks as u32 + CRUSH_BUDGET + MAX_BALLS as u32 + 64;
     c.max_bodies = c.max_bodies.max(bodies.next_power_of_two());
+    // Colliders: every chunk's hulls (a chunk of a coarse level is a compound of several),
+    // one for each splinter, ball and the rest.
+    let hulls: usize = scene
+        .bodies
+        .iter()
+        .flat_map(|b| &b.chunks)
+        .map(|c| c.compound.as_ref().map_or(1, |p| p.len().max(1)))
+        .sum();
+    c.max_colliders = c
+        .max_colliders
+        .max(hulls as u32 + CRUSH_BUDGET + MAX_BALLS as u32 + 64);
     // Contacts for every body the take may have: the wreck piles up on the ground.
     c.max_contacts = stress_rubble::threshold::contact_capacity(
         chunks + CRUSH_BUDGET as usize + MAX_BALLS,

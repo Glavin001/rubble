@@ -88,7 +88,7 @@ pub fn broadside_error() -> String {
     ERROR.with_borrow(|e| e.clone())
 }
 
-/// The ship's baked GLB for the next [`broadside_load`]. (A waiting export takes no
+/// The scene's baked GLB for the next [`broadside_load`], which takes it. (A waiting export takes no
 /// arguments: `WebAssembly.promising` calls the raw export, past wasm-bindgen's glue.)
 #[wasm_bindgen]
 pub fn broadside_set_asset(glb: Vec<u8>) {
@@ -130,7 +130,9 @@ pub fn broadside_load() -> bool {
 }
 
 fn load() -> anyhow::Result<Play> {
-    let glb = ASSET.with_borrow(|a| a.clone());
+    // Taken, not copied: a phone has no room for a second copy of a large GLB in this
+    // module's memory (which never shrinks). The page sets it again before each load.
+    let glb = ASSET.take();
     anyhow::ensure!(!glb.is_empty(), "broadside_set_asset first");
     let context = GPU.with_borrow(|g| {
         g.as_ref().map(|g| GpuContext::Shared {
