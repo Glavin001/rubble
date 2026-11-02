@@ -99,6 +99,8 @@
     statusEl.textContent = `creating the world for ${K} houses…`;
     try {
       ({ city, world } = await createCity(cityOpts, page));
+      // ?rest=carry: the resting-pair carry instead of the sleep archive (World::set_carry_rest).
+      if (qs.get('rest') === 'carry') world.setCarryRest(true);
     } catch (e) {
       // World::new checks every buffer against the device: say which limit the city passes.
       throw new Error(`${K} houses do not fit this browser's WebGPU limits (maxBufferSize ${mb(limits.maxBufferSize)}, maxStorageBufferBindingSize ${mb(limits.maxStorageBufferBindingSize)}): ${e.message ?? e}`);

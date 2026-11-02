@@ -6724,6 +6724,9 @@ void archive_emit(uint3 tid : SV_DispatchThreadID)
     uint step = HOST_S(17);
     if (i == 0u)
         ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], 0u);
+    // With the resting-pair carry on (EngineFeatures::carry_with_archive) the carried
+    // pairs already include these: emitting them again doubled their contact rows.
+    if (carryRestPairs()) return;
     uint n = min(ALOAD(gScratchAtomics[arTouchedCount(step)]), HOST_S(1));
     for (uint k = i; k < n && k < 1048576u; k += 4096u)
         archiveEmitResting(ALOAD(gScratchAtomics[arTouchedList(k)]));
