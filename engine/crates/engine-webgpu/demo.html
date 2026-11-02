@@ -336,6 +336,9 @@
 
     // The resting-pair carry, switched live (World::set_carry_rest).
     const dropCarry = document.getElementById('dropCarry');
+    // ?archive=1 (with ?contacts=canonical): the sleep archive, so a woken body restarts
+    // its resting contacts warm; it turns the carry off (the checkbox turns it back on).
+    if (Q.qs.get('archive') === '1') world.enableSleepArchive();
     dropCarry.checked = !world.carryRest();
     dropCarry.addEventListener('change', () => {
       world.setCarryRest(!dropCarry.checked);

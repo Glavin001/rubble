@@ -774,6 +774,19 @@ impl World {
         self.sim.set_gpu_timing(mode)
     }
 
+    /// Keep sleeping bodies' resting contacts through sleep (the sleep archive,
+    /// `WgpuSim::enable_sleep_archive`, which threshold destructibles turn on): a woken
+    /// body restarts them with the impulses and stiffness it fell asleep with. Room for
+    /// `rows` rows (`None`: [`WorldDef::sleep_archive_rows`], else 16 a body slot).
+    /// Canonical contacts only. Turns the resting-pair carry off unless
+    /// `EngineFeatures::carry_with_archive`.
+    pub fn enable_sleep_archive(&mut self, rows: Option<u32>) -> anyhow::Result<()> {
+        let rows = rows
+            .or(self.sleep_archive_rows)
+            .unwrap_or(self.sim.capacity().max_bodies.saturating_mul(16));
+        self.sim.enable_sleep_archive(rows)
+    }
+
     /// The resting-pair carry ([`EngineFeatures::carry_rest`]) from the next step on.
     pub fn set_carry_rest(&mut self, on: bool) {
         self.sim.set_carry_rest(on);
