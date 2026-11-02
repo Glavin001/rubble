@@ -298,3 +298,61 @@ fn crushing_in_blasts_frame_takes_the_bond_forces_virial() {
     println!("{compared} crushable chunks' stresses from Blast's bond forces");
     assert!(compared > 100);
 }
+
+/// The lab's cuboid house as stress-web loads it for `blast_gpu`: a scene without Blast
+/// authoring, so Blast's inputs come from the structures the threshold world resolved.
+fn cuboid_house() -> Scene {
+    let (_lab, json) = engine_fracture::samples::cuboid_stress_scene(None).expect("cuboid house");
+    let mut scene = stress_ref::shardwright::import_value_with(&json, "cuboid_houses", true).expect("import").with_derived();
+    scene.sim.methods = stress_ref::scene::Methods::established();
+    Profile::BlastGpu.apply_scene(&mut scene);
+    scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    scene
+}
+
+#[test]
+fn a_scene_without_blast_authoring_stands_and_breaks_under_blast() {
+    let Ok(gpu) = Gpu::new() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let scene = cuboid_house();
+    assert!(scene.blast.is_none());
+    // Under gravity alone the house stands: Blast breaks nothing.
+    let mut w = world(&gpu, &scene);
+    let graph = w.fracture.blast().expect("Blast set").solver.graph.clone();
+    assert_eq!(graph.node_count(), scene.bodies.iter().map(|b| b.chunks.len()).sum::<usize>());
+    for _ in 0..120 {
+        w.step_frame(&gpu).expect("frame");
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let stats = w.poll(&gpu);
+    assert_eq!(stats.error, 0, "{stats:?}");
+    assert_eq!(stats.broken, 0, "the house stands under gravity: {stats:?}");
+    // A ball through it breaks bonds and splits it.
+    let mut w = world(&gpu, &scene);
+    let all: Vec<_> = scene.bodies.iter().flat_map(|b| &b.chunks).collect();
+    let c = all[all.len() / 2].center;
+    let shot = ImpactorDesc {
+        name: "ball".into(),
+        shape: ImpactorShape::Sphere { radius: 0.35 },
+        mass: 1400.0,
+        position: [c[0] - 6.0, c[1], c[2]],
+        orientation: [1.0, 0.0, 0.0, 0.0],
+        velocity: [60.0, 0.0, 0.0],
+        angular_velocity: [0.0; 3],
+        material: "projectile".into(),
+        crush: None,
+    };
+    for frame in 0..60 {
+        if frame == 2 {
+            assert!(w.launch(&gpu, &shot));
+        }
+        w.step_frame(&gpu).expect("frame");
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let stats = w.poll(&gpu);
+    println!("struck: {stats:?}");
+    assert_eq!(stats.error, 0, "{stats:?}");
+    assert!(stats.broken > 0 && stats.bodies > 1, "the strike breaks bonds and splits the house: {stats:?}");
+}

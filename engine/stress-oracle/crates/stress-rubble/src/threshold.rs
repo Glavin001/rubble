@@ -434,7 +434,10 @@ impl ThresholdWorld {
         let ingest = EngineIngest::new(gpu, capacity.max_contacts, 1, capacity.max_bodies, chunk_count as u32, &table);
         let mut fracture = GpuFracture::new(gpu, &t, &engine.engine_buffers_now(), &ingest)?;
         if profile == Profile::BlastGpu {
-            let (graph, materials) = blast_graph(scene, &t, &bond_source)?;
+            let (graph, materials) = match &scene.blast {
+                Some(_) => blast_graph(scene, &t, &bond_source)?,
+                None => blast_graph_derived(m, &chunk_of, &t, &bond_source)?,
+            };
             fracture.set_blast(gpu, stress_gpu::blast::BlastFrame::new(gpu, graph, materials, Vec3::from_array(scene.gravity)))?;
         }
         // The punch list's sphere (world_coupling.rs `predict_punch`): bounding radius
@@ -881,6 +884,53 @@ fn blast_graph(scene: &Scene, t: &FractureTables, bond_source: &[(usize, usize)]
         bonds.push(BlastBond { nodes: [sb.a, sb.b], centroid: Vec3::from_array(d.centroid), normal: Vec3::from_array(d.normal), area: d.area, modulus: material.modulus, material: d.material });
     }
     Ok((BlastGraph::new(nodes, bonds, blast_settings()?)?, a.materials.clone()))
+}
+
+/// Blast's graph for a scene without Blast authoring (a GLB, the lab's cuboid houses): its
+/// inputs taken from the structures as the threshold world resolved them, every structure in
+/// one graph. A node is its chunk at its centre of mass (structure frame), with its mass and
+/// solid volume; a support is static (mass 0). A bond is its patch's centroid, normal and area;
+/// its material holds the bond's own strengths (Weibull factor applied) as both Blast limits,
+/// so a bond breaks where rubble's strength puts it (no gradual damage, which needs elastic
+/// limits the scene does not author), and Mohr-Coulomb off, as in vibe-land's native
+/// configuration. One material per distinct set of strengths.
+fn blast_graph_derived(m: &stress_ref::solver::ReferenceSolver, chunk_of: &[(usize, usize)], t: &FractureTables, bond_source: &[(usize, usize)]) -> Result<(stress_ref::blast_bond::BlastGraph, Vec<stress_ref::blast_bond::BlastMaterial>), String> {
+    use stress_ref::blast_bond::{BlastBond, BlastGraph, BlastMaterial, BlastNode};
+    let nodes = chunk_of
+        .iter()
+        .map(|&(s, c)| {
+            let ch = &m.structures[s].chunks[c];
+            BlastNode { position: ch.center, mass: if ch.support == Support::None { ch.mass } else { 0.0 }, inertia: 0.0, volume: ch.volume() }
+        })
+        .collect();
+    let mut materials: Vec<BlastMaterial> = Vec::new();
+    let mut bonds = Vec::with_capacity(t.bonds.len());
+    for (&(s, bi), tb) in bond_source.iter().zip(&t.bonds) {
+        let b = &m.bonds[s][bi];
+        let (st, w) = (&b.strength, b.weibull);
+        let material = BlastMaterial {
+            compression_elastic: st.compressive * w,
+            compression_fatal: st.compressive * w,
+            tension_elastic: st.tensile * w,
+            tension_fatal: st.tensile * w,
+            shear_elastic: st.cohesion * w,
+            shear_fatal: st.cohesion * w,
+            residual_area_fraction: 0.0,
+            modulus: st.youngs_modulus,
+            shear_friction: 0.0,
+            shear_capacity_limit: 0.0,
+        };
+        let index = match materials.iter().position(|x| *x == material) {
+            Some(i) => i,
+            None => {
+                materials.push(material);
+                materials.len() - 1
+            }
+        };
+        let g = &b.geometry;
+        bonds.push(BlastBond { nodes: [tb[0] as usize, tb[1] as usize], centroid: g.centroid, normal: g.normal, area: g.area, modulus: material.modulus, material: index });
+    }
+    Ok((BlastGraph::new(nodes, bonds, blast_settings()?)?, materials))
 }
 
 /// The profile's Blast solve: PhysX's native (resident) stage as vibe-land runs it on the Mac,

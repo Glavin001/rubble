@@ -311,6 +311,11 @@ These results come from `stress-gpu/tests/blast_host_vs_reference.rs` and `stres
 - **No re-simulation.** vibe-land replays a frame after a split (`VIBE_CITY_RESIM_PASSES`); AGENTS.md forbids it. Strikes are predicted instead, as `threshold` predicts them.
 - **Gravity loads every piece every frame.** vibe-land skips gravity on sleeping bodies untouched by contact. Here, a settled island's input repeats and the skip makes it free.
 - **Islands are numbered by their lowest node, not by first appearance over the bonds.** Only the ids change.
+- **Scenes without Blast authoring** (a fracture GLB, the lab's cuboid houses): Blast's inputs are derived from the structures the threshold world resolved (`blast_graph_derived`). A scene pack still supplies its own.
+  - **Nodes and bonds:** each node is a chunk's centre of mass, with its mass and solid volume. A support is static (mass 0). Each bond takes its patch's centroid, normal and area.
+  - **Limits:** each bond's material carries rubble's resolved strengths (tensile, compressive, cohesion, times the bond's Weibull factor) as both Blast limits.
+  - **What that changes:** a bond breaks at rubble's strength, with no gradual damage, because these scenes author no elastic limit. Mohr–Coulomb is off, as in vibe-land's native configuration.
+  - **Test:** the cuboid house stands 120 frames under gravity with 0 breaks; a 1,400 kg ball at 60 m/s breaks 314 bonds and splits it into 222 bodies.
 
 ## Next
 
