@@ -126,11 +126,18 @@ fn an_orbit_shot_puts_the_eye_where_asked_and_shoots_at_the_pointer() {
     c.frame_shot([3.0, 9.0, -14.0], [0.0, 2.0, 0.0]);
     let (eye, target) = ([-9.0, 4.5, -16.0], [-1.0, 1.8, 1.5]);
     c.orbit_shot(eye, target);
-    assert_eq!(c.mode, ViewMode::Orbit, "an orbit shot orbits (clicks shoot, drags orbit)");
+    assert_eq!(
+        c.mode,
+        ViewMode::Orbit,
+        "an orbit shot orbits (clicks shoot, drags orbit)"
+    );
     assert!(close(c.eye(ASPECT), eye, 1e-9), "the eye is where asked");
     let ahead = c.forward(ASPECT);
     let want = sub(target, eye);
-    assert!(dot(ahead, want) / length(want) > 1.0 - 1e-9, "it looks at the target");
+    assert!(
+        dot(ahead, want) / length(want) > 1.0 - 1e-9,
+        "it looks at the target"
+    );
     // A click at the centre fires along the view.
     let ray = c.aim(0.5, 0.5, ASPECT, 0.1);
     assert!(dot(ray.direction, ahead) > 1.0 - 1e-6);
