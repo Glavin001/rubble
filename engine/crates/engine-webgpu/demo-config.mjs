@@ -264,6 +264,22 @@ export function parseDemoQuery(search) {
   const gridLevels = qs.get('gridlevels');
   if (gridLevels !== null && !['on', 'off'].includes(gridLevels)) throw new Error('gridlevels must be on or off');
   if (gridLevels !== null) features.gridLevels = gridLevels === 'on';
+  // ?broadphase=full: no awake-indexed broadphase; =hier: on hierarchical grids only.
+  const broadphase = qs.get('broadphase');
+  if (broadphase !== null && !['full', 'hier', 'awake'].includes(broadphase)) throw new Error('broadphase must be full, hier or awake');
+  if (broadphase === 'full') features.awakeBroadphase = false;
+  if (broadphase === 'hier') features.awakeUniform = false;
+  // ?costfloor=off: the per-step work over every collider and body slot as before the
+  // cost-floor passes (each gives the same results; for A/B timing).
+  const costFloor = qs.get('costfloor');
+  if (costFloor !== null && !['on', 'off'].includes(costFloor)) throw new Error('costfloor must be on or off');
+  if (costFloor === 'off') {
+    features.awakeUniform = false;
+    features.restIncremental = false;
+    features.ccdByCollider = false;
+    features.awakeBodyPasses = false;
+    features.primalTail = false;
+  }
   // CSR endpoints follow the contact storage in Rust's plan (pairs when persistent).
   const endpoints = qs.get('endpoints') || (persistent ? 'pairs' : 'manifold');
   if (!['manifold', 'pairs'].includes(endpoints)) throw new Error('endpoints must be manifold or pairs');

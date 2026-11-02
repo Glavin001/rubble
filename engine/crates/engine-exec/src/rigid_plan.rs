@@ -1655,6 +1655,47 @@ mod tests {
     }
 
     #[test]
+    fn primal_tail_takes_the_headroom_colours_in_one_dispatch() {
+        let mut m = fast();
+        m.primal_tail = true;
+        let cmds = encode_step(&m, &inputs(10, 0), false, false);
+        let colors = cmds
+            .iter()
+            .filter(|c| matches!(c, Cmd::Indirect { kernel: "solve_primal_color_compact", .. }))
+            .count();
+        assert_eq!(colors, 4 * 10, "last step's colours one by one");
+        let tails: Vec<u32> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                Cmd::Dispatch { kernel: "solve_primal_sparse_tail_compact", pass, threads } => {
+                    assert_eq!(*threads, 64, "one workgroup");
+                    Some(*pass)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tails, vec![tail_pass(10, 14, false); 4], "one tail an iteration");
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::Dispatch { kernel: "solve_primal_sparse_compact", .. })));
+        // The table: first colour, stabilization flag, first sparse colour.
+        let table = pass_table();
+        let at = |slot: u32| {
+            let o = (slot as u64 * PASS_ALIGN) as usize;
+            u32::from_le_bytes(table[o..o + 4].try_into().unwrap())
+        };
+        assert_eq!(at(tail_pass(10, 14, false)), 10 | (14 << 16));
+        assert_eq!(at(tail_pass(32, 32 + TAIL_HEADROOM_MAX, true)), 32 | 256 | ((32 + TAIL_HEADROOM_MAX) << 16));
+        assert_eq!(at(STAB_PASS + 63), 256 | 63, "the stabilization slots below the tail's");
+        assert!(u64::from(tail_pass(32, 32 + TAIL_HEADROOM_MAX, true)) < PASS_SLOTS);
+        // The first step, and no headroom left: as before.
+        let mut i = inputs(10, 0);
+        i.steps_done = 0;
+        assert!(primal_tail(&m, &i, 32, primal_colors_dispatched(&m, &i, 32)).is_none());
+        assert!(primal_tail(&m, &inputs(32, 0), 32, 32).is_none());
+    }
+
+    #[test]
     fn adaptive_counts_keep_completeness_tails() {
         let cmds = encode_step(&fast(), &inputs(10, 0), false, false);
         let primal = cmds
