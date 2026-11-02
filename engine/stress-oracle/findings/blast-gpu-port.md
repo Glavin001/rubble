@@ -106,6 +106,20 @@ rubble follows the target's carry as written. These captures were recorded 2026-
 
 **`BLAST_STRESS_FIRST_PRECONDITIONER`** (the target's A/B switch) is now `BlastSettings::first_preconditioner`: identity (the default), polynomial or warm. It is ported to the reference and both GPU paths, and tested against the f32 reference.
 
+### Standing under gravity
+
+240 frames of gravity alone in the GPU-only world (`fracture_glb`, `STRESS_PROFILE=blast_gpu`), after the changes above:
+- **house-1story:** 0 bonds broken.
+- **villa-savoye:** 2 bonds broken, with or without the force tolerance.
+
+The two villa breaks are the model's verdict on this asset, not the solver's:
+- In the converged f64 solve under gravity, bonds 1583 and 1584 are already past their elastic limits: damage multipliers 0.053 and 0.061, with compression of 6.3 MPa including bending.
+- Blast's damage law removes area at `multiplier x dt x 2/s`. The stress rises as the area falls, and the bonds go.
+- Any solve that reaches the converged forces breaks them, PhysX's included.
+- The capped frames' transient peak (bond 1593 at 0.55 in the first frames) stays below fatal and causes no break.
+
+Whether vibe-land's villa stands because its loads differ, or because its export differs, is a question for the scene-level comparison. The pack here is rubble's copy.
+
 ### Load assembly (`prepareLoads`, `routeContacts`, `routeConstraintLoads`)
 
 **What already matched.** rubble's `blast_loads` builds the same linear input as the target, in the structure frame:
