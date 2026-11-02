@@ -124,7 +124,15 @@
     let counters = null, leftWorld = 0, vehicleState = null;
     const onFrame = (f) => {
       poses.apply(f);
-      leftWorld += f.leftWorld().length / 5;
+      // Bodies the world destroyed for leaving it (slot, generation, xyz each): a shell
+      // among them is gone, so it leaves the page's list before its slot is reused.
+      const left = f.leftWorld();
+      leftWorld += left.length / 5;
+      if (left.length && run) {
+        const gone = new Set();
+        for (let i = 0; i < left.length; i += 5) gone.add(left[i]);
+        run.shells = run.shells.filter((h) => !gone.has(world.bodySlot(h)));
+      }
       const c = f.counters();
       if (c) counters = c;
       if (run) {
