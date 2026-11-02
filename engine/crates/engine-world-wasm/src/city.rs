@@ -168,6 +168,21 @@ impl WebWorld {
         Ok(WebWorld { world })
     }
 
+    /// Diagnostic (`World::set_readback_check`): from the next step on, each frame's
+    /// moved records are compared against a full copy of the moved range.
+    #[wasm_bindgen(js_name = setReadbackCheck)]
+    pub fn set_readback_check(&mut self, on: bool) {
+        self.world.set_readback_check(on);
+    }
+
+    /// `[frames checked, frames differing, frames read from the spill]`
+    /// (`World::readback_check`).
+    #[wasm_bindgen(js_name = readbackCheck)]
+    pub fn readback_check(&self) -> Vec<f64> {
+        let (checked, differing, spills) = self.world.readback_check();
+        vec![checked as f64, differing as f64, spills as f64]
+    }
+
     /// Replace this world with a fresh one for `city` on the same device (a page
     /// rebuilding its city keeps its renderer's device and this object). The old world
     /// is dropped first: two map-sized worlds do not fit the wasm heap at once.
