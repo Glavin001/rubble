@@ -31,6 +31,7 @@ struct BlastParams_0
     uint first_polynomial_0;
     uint rotation_0;
     uint node_vectors_0;
+    uint carry_0;
 };
 
 struct BlastBond_natural_0

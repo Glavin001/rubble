@@ -250,7 +250,16 @@ fn solves(args: &[String]) -> Vec<PathBuf> {
                         && p.extension().is_some_and(|e| e == "json")
                 })
                 .collect();
-            v.sort();
+            // By structure, then solve number (solve-2 before solve-10).
+            let key = |p: &PathBuf| {
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                let (stem, rest) = name.split_once(".solve-").unwrap_or((&name, ""));
+                (
+                    stem.to_string(),
+                    rest.trim_end_matches(".json").parse::<u64>().unwrap_or(0),
+                )
+            };
+            v.sort_by_key(key);
             out.extend(v);
         } else {
             out.push(p);
@@ -274,7 +283,16 @@ fn main() {
         std::env::var("STRESS_CAPTURE_LIMIT").map_or(usize::MAX, |v| v.parse().expect("limit"));
     println!("solve\tcomponents\tframe(anch,rot) same\titer physx\titer rubble\tconv physx\tconv rubble\t|rubble-physx|/|physx|\t|physx-exact|\t|rubble-exact|");
     let (mut worst, mut frames_differ) = (0.0f64, 0usize);
-    for meta in solves(&args).into_iter().take(limit) {
+    // STRESS_CAPTURE_SEQUENCE=1: one solver across consecutive solves of the same structure (same
+    // health), each warm from rubble's own last solve, as the stage runs (the Krylov carry needs it).
+    let sequence = std::env::var("STRESS_CAPTURE_SEQUENCE").is_ok_and(|v| v == "1");
+    let mut kept: Option<(GpuBlastSolver, Vec<f64>)> = None;
+    // STRESS_CAPTURE_RESTART=n: start solve n afresh from its captured warm start (what a
+    // topology generation change does to the stage's carry), for diagnosis.
+    let restart: Option<usize> = std::env::var("STRESS_CAPTURE_RESTART")
+        .ok()
+        .map(|v| v.parse().expect("restart"));
+    for (index, meta) in solves(&args).into_iter().take(limit).enumerate() {
         let c = load(&meta);
         let settings = BlastSettings {
             max_iterations: iterations,
@@ -285,13 +303,21 @@ fn main() {
                 Ok("warm") => FirstPreconditioner::Warm,
                 _ => FirstPreconditioner::Identity,
             },
+            carry_krylov: std::env::var("STRESS_BLAST_CARRY").ok().map(|v| v == "1"),
             ..BlastSettings::native()
         };
         let g = graph(&c, settings);
         let live: Vec<bool> = c.health.iter().map(|&h| h > 0.0).collect();
         let a = accel(&c);
-        let mut solver = GpuBlastSolver::with_wide_min(&gpu, g.clone(), vec![MATERIAL], u32::MAX);
-        solver.set_solution(&c.warm);
+        let mut solver = match kept.take() {
+            Some((s, health)) if sequence && health == c.health && restart != Some(index) => s,
+            _ => {
+                let mut s =
+                    GpuBlastSolver::with_wide_min(&gpu, g.clone(), vec![MATERIAL], u32::MAX);
+                s.set_solution(&c.warm);
+                s
+            }
+        };
         let reports = solver.solve(&a, false);
         let ours = solver.solution();
         let frames = solver.rigid_frames();
@@ -346,6 +372,9 @@ fn main() {
             relative(&c.lambda, &exact.x, &live),
             relative(&ours, &exact.x, &live)
         );
+        if sequence {
+            kept = Some((solver, c.health.clone()));
+        }
     }
     println!("worst |rubble - physx| / |physx|: {worst:.3e}; components whose frame differs: {frames_differ}");
 }

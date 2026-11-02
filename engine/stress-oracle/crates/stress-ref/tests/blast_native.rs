@@ -357,3 +357,43 @@ fn parallel_bonds_share_a_moment_by_their_rotational_stiffness() {
     let (f0, f1) = (s.impulse(0).lin, s.impulse(1).lin);
     assert!((f0 - f1).norm() <= 1e-6 * f0.norm(), "{f0:?} {f1:?}");
 }
+
+#[test]
+fn krylov_carry_reaches_the_answer_restarting_stalls_short_of() {
+    // A capped, warm-started solve at rest restarts PCG every frame, losing the Krylov space the
+    // slow modes need; the carry continues it (BLAST_STRESS_CARRY_KRYLOV, on by default with the
+    // rotational stiffness). Every step is still an exact line search on the same energy: the
+    // carried frames approach the converged forces, and the carry changes no converged answer.
+    let settings = |carry: bool| BlastSettings {
+        carry_krylov: Some(carry),
+        ..native(4, 1e-6)
+    };
+    let stiff = |s: BlastSettings| {
+        let mut g = frame(s);
+        g.set_rotational_stiffness(None).unwrap();
+        g
+    };
+    let load = AngLin {
+        ang: Vec3::ZERO,
+        lin: Vec3::new(2.0, 0.0, -G),
+    };
+    let accel = vec![load; stiff(settings(true)).node_count()];
+    let mut exact = BlastSolver::new(stiff(native(20_000, 1e-10)));
+    assert!(exact.solve(&accel, false)[0].converged);
+    let error = |carry: bool, frames: usize| {
+        let mut s = BlastSolver::new(stiff(settings(carry)));
+        let mut converged_at = None;
+        for f in 0..frames {
+            if s.solve(&accel, false)[0].converged && converged_at.is_none() {
+                converged_at = Some(f);
+            }
+        }
+        (difference(&impulses(&s), &impulses(&exact)), converged_at)
+    };
+    let (carried, carried_at) = error(true, 40);
+    let (restarted, restarted_at) = error(false, 40);
+    println!("carry: {carried:.2e} (converged at {carried_at:?}); restarted: {restarted:.2e} ({restarted_at:?})");
+    assert!(carried_at.is_some(), "the carried solve converges");
+    assert!(carried < 1e-4, "{carried:.2e}");
+    assert!(carried_at < restarted_at.or(Some(usize::MAX)) || carried < restarted, "{carried_at:?} {restarted_at:?}");
+}

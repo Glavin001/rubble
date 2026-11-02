@@ -63,6 +63,8 @@ pub struct Params {
     /// 0 none, 1 rotational stiffness, 2 also shear stiffness (`BlastGraph::rotation`, `shear`).
     pub rotation: u32,
     pub node_vectors: u32,
+    /// Krylov carry on this (warm) solve (`BlastSettings::carry_krylov`).
+    pub carry: u32,
 }
 
 #[repr(C)]
@@ -89,13 +91,13 @@ struct BondGpu {
 
 use Binding::{Storage as R, StorageRw as W, Uniform as U};
 const CGLS_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
-const NATIVE_BINDINGS: [Binding; 11] = [U, R, R, R, W, R, W, W, W, R, R];
+const NATIVE_BINDINGS: [Binding; 11] = [U, W, R, R, W, R, W, W, W, R, R];
 const MATERIAL_BINDINGS: [Binding; 8] = [U, W, W, R, R, W, W, R];
 const TOPOLOGY_BINDINGS: [Binding; 8] = [U, R, R, W, W, W, W, W];
 const MOTION_BINDINGS: [Binding; 7] = [U, W, W, R, R, R, W];
 /// `blast_common.slang` `FRAME_WORDS` / 4: each island's rigid-mode frame, in `islands` after
 /// the island records; `blast_motion.slang` `MOTION_WORDS`: its per-node float4s.
-const FRAME_ROWS: usize = 9;
+const FRAME_ROWS: usize = 10;
 const MOTION_WORDS: usize = 7;
 const FRACTURE_BINDINGS: [Binding; 9] = [U, W, W, R, R, R, R, W, R];
 
@@ -301,7 +303,7 @@ const WIDE_ITERATION: &[(&str, Grid)] = &[
     ("w_update", Grid::Nodes),
 ];
 const WIDE_END: &[(&str, Grid)] = &[("w_final", Grid::Bonds), ("w_report", Grid::Rows)];
-const WIDE_BINDINGS: [Binding; 14] = [U, R, R, R, W, R, W, W, W, R, R, W, W, R];
+const WIDE_BINDINGS: [Binding; 14] = [U, W, R, R, W, R, W, W, W, R, R, W, W, R];
 /// `blast_native_wide.slang` `ROW_WORDS`, `PARTIAL`, `M_ROWS`.
 const WIDE_ROW_WORDS: u32 = 16;
 const WIDE_PARTIAL: u32 = 6;
@@ -541,6 +543,7 @@ impl GpuBlastSolver {
             wide_blocks: self.wide.as_ref().map_or(0, |w| w.blocks),
             rotation: rotation_mode(g),
             node_vectors: native_node_vectors(g) as u32,
+            carry: (warm && s.warm_start && self.has_warm_start && s.carry_krylov.unwrap_or(!g.rotation.is_empty())) as u32,
             first_polynomial: s.first_preconditioner.polynomial_first(warm && s.warm_start && self.has_warm_start) as u32,
             ..Default::default()
         }

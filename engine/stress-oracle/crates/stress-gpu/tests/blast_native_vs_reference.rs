@@ -199,16 +199,23 @@ fn capped_frames(gpu: &Gpu, settings: BlastSettings, wide_min: u32, edit: fn(&mu
         let r = reference.solve(accel, false);
         let d = device.solve(accel, false);
         for (k, (r, d)) in r.iter().zip(&d).enumerate() {
-            assert_eq!(
-                (r.skipped, r.converged),
-                (d.skipped, d.converged),
+            // At f32's residual floor the verdict is rounding (stressgpu/detail/README.md): a
+            // solve that stopped short within 2x of its target may be judged converged by the
+            // other order of sums (WGSL under the driver's fast math meets it). The forces,
+            // below, must agree either way.
+            let floor = r.converged != d.converged && r.residual2.max(d.residual2) <= 2.0 * r.target2;
+            // Converged a frame apart there, one side takes its settled certificate a frame
+            // before the other, which verifies the same output in 0 iterations.
+            let certified = (r.skipped && d.converged && d.iterations == 0) || (d.skipped && r.converged && r.iterations == 0);
+            assert!(
+                (r.skipped == d.skipped || certified) && (r.converged == d.converged || floor),
                 "frame {frame} island {k}: {r:?} vs {d:?}"
             );
             // A warm frame that converges at the edge of the tolerance may stop a few iterations
             // either side, or many when one sum order lands just under it (the forces, below,
             // agree either way).
-            let edge =
-                r.converged && d.converged && r.residual2.max(d.residual2) >= 0.5 * r.target2;
+            let edge = floor
+                || (r.converged && d.converged && r.residual2.max(d.residual2) >= 0.5 * r.target2);
             assert!(
                 edge || r.iterations.abs_diff(d.iterations) <= 2 + r.iterations / 5,
                 "frame {frame} island {k}: {r:?} vs {d:?}"
@@ -372,4 +379,15 @@ fn per_bond_stiffness_matches_the_reference() {
     capped_frames(&gpu, BlastSettings::native(), 0, |g| stiffen(g, false));
     capped_frames(&gpu, BlastSettings::native(), u32::MAX, |g| stiffen(g, true));
     capped_frames(&gpu, BlastSettings::native(), 0, |g| stiffen(g, true));
+}
+
+#[test]
+fn krylov_carry_tracks_the_f32_reference_in_one_group_and_many() {
+    let Some(gpu) = gpu() else { return };
+    // BLAST_STRESS_CARRY_KRYLOV=1 without the rotational stiffness (with it, the default, it runs
+    // in per_bond_stiffness_matches_the_reference): capped warm frames continue each
+    // unconverged solve's recurrence, on the device as in the reference.
+    let settings = BlastSettings { carry_krylov: Some(true), ..BlastSettings::native() };
+    capped_frames(&gpu, settings, u32::MAX, |_| {});
+    capped_frames(&gpu, settings, 0, |_| {});
 }

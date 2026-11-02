@@ -67,6 +67,25 @@ The force difference is `|rubble - physx| / |physx|` over live bonds. Exactness 
 
 **Rotational stiffness on PhysX's systems:** the `rot` captures store each bond's `A`. rubble's solve with it matches iterations, convergence and frames. tree-101's force difference of 4e-2 comes with both 0.4 to 0.7 from the exact answer at 16 iterations (an unconverged tree), and rubble no farther.
 
+**Krylov carry** (`BLAST_STRESS_CARRY_KRYLOV`, `BlastSettings::carry_krylov`; on by default with rotational stiffness, as in the target) is ported to the reference and both GPU paths.
+- An unconverged solve leaves its direction, gamma and recurrence count for the next solve of the same island.
+- It continues under the target's conditions: the same node count, fewer than `6 x nodes` recurrence iterations, and a load moved by at most the tolerance. A 16-fold gamma jump restarts.
+- An island rebuild clears it, with the rigid-mode frame.
+
+**What the carry does:**
+- On a capped frame at rest it converges in 5 frames instead of 19 (reference test), with the same converged answer.
+- The device tracks the f32 reference, carried or not, in one group and many.
+- A race was found and fixed. `group_uniform4` synchronises only on WGSL. On Metal, threads that read the carry words after thread 0 cleared them disagreed on whether the solve was carried.
+
+**Against the captured sequences:** `STRESS_CAPTURE_SEQUENCE=1` runs a capture's solves in order on one solver, warm from rubble's own last solve.
+- **Without carry (veneer-nocarry, 5 solves):** PhysX's forces within 1e-6, every solve.
+- **With carry (veneer-carry, 30 solves):**
+  - PhysX's solve 1 equals its own no-carry result. Its carry shows only from solve 2, consistent with one more topology-generation change voiding the first carry.
+  - From solve 2, PhysX's carried frames gain less than rubble's: at solve 5, 7.6e-2 from the exact forces against rubble's 1.7e-2.
+  - rubble is never farther from the exact answer.
+
+rubble follows the target's carry as written. These captures were recorded 2026-10-07 by a build nine days older than the target commit, so the difference is left to fresh captures from the target build.
+
 **`BLAST_STRESS_FIRST_PRECONDITIONER`** (the target's A/B switch) is now `BlastSettings::first_preconditioner`: identity (the default), polynomial or warm. It is ported to the reference and both GPU paths, and tested against the f32 reference.
 
 ## Update: the native (resident) solve, 2026-10-25

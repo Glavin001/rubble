@@ -9,7 +9,7 @@ uint4 group_uniform4_0(uint4 value_0, uint thread_0)
 
 uint blast_frame_0(uint node_count_0, uint k_0)
 {
-    return node_count_0 + 9U * k_0;
+    return node_count_0 + 10U * k_0;
 }
 
 struct BlastBond_natural_0
@@ -60,6 +60,7 @@ struct BlastParams_0
     uint first_polynomial_0;
     uint rotation_0;
     uint node_vectors_0;
+    uint carry_0;
 };
 
 struct KernelContext_0
@@ -1224,21 +1225,21 @@ bool ex_product_equal_0(const Ex_0 thread* a_27, const Ex_0 thread* b_18, const 
                     {
                         break;
                     }
-                    float carry_0;
+                    float carry_1;
                     if(half_0 == 0U)
                     {
-                        carry_0 = pe_0;
+                        carry_1 = pe_0;
                     }
                     else
                     {
-                        carry_0 = p_3;
+                        carry_1 = p_3;
                     }
-                    if(carry_0 == 0.0f)
+                    if(carry_1 == 0.0f)
                     {
                         half_0 = half_0 + 1U;
                         continue;
                     }
-                    float carry_1 = carry_0;
+                    float carry_2 = carry_1;
                     uint k_5 = 0U;
                     uint next_0 = 0U;
                     for(;;)
@@ -1252,7 +1253,7 @@ bool ex_product_equal_0(const Ex_0 thread* a_27, const Ex_0 thread* b_18, const 
                         }
                         thread float s_10;
                         thread float h_0;
-                        two_sum_0(carry_1, e_9[k_5], &s_10, &h_0, kernelContext_33);
+                        two_sum_0(carry_2, e_9[k_5], &s_10, &h_0, kernelContext_33);
                         if(h_0 != 0.0f)
                         {
                             uint _S151 = next_0 + 1U;
@@ -1261,11 +1262,11 @@ bool ex_product_equal_0(const Ex_0 thread* a_27, const Ex_0 thread* b_18, const 
                         }
                         float _S152 = s_10;
                         uint _S153 = k_5 + 1U;
-                        carry_1 = _S152;
+                        carry_2 = _S152;
                         k_5 = _S153;
                     }
                     uint next_1;
-                    if(carry_1 != 0.0f)
+                    if(carry_2 != 0.0f)
                     {
                         if(next_0 >= 64U)
                         {
@@ -1273,7 +1274,7 @@ bool ex_product_equal_0(const Ex_0 thread* a_27, const Ex_0 thread* b_18, const 
                             return false;
                         }
                         uint _S154 = next_0 + 1U;
-                        e_9[next_0] = carry_1;
+                        e_9[next_0] = carry_2;
                         next_1 = _S154;
                     }
                     else
@@ -1506,7 +1507,7 @@ struct BlastNode_0
         p_5 = 0U;
         for(;;)
         {
-            if(p_5 < 36U)
+            if(p_5 < 40U)
             {
             }
             else

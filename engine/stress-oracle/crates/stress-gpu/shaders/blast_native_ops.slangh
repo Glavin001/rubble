@@ -7,7 +7,7 @@ import common;
 import blast_common;
 
 [[vk::binding(0, 0)]] ConstantBuffer<BlastParams> params;
-[[vk::binding(1, 0)]] StructuredBuffer<uint4> islands;
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint4> islands;
 [[vk::binding(2, 0)]] StructuredBuffer<BlastNode> nodes;
 [[vk::binding(3, 0)]] StructuredBuffer<uint> refs;
 [[vk::binding(4, 0)]] RWStructuredBuffer<BlastBond> bonds;
@@ -59,6 +59,27 @@ float3 rot_l(uint j, float3 v) { return params.rotation == 2 ? stiff(j, 2, v) : 
 uint frame_word(uint k, uint w)
 {
     return islands[blast_frame(params.node_count, k) + w / 4][w % 4];
+}
+// Island k's Krylov carry: (node count, iterations, gamma bits), and setting it.
+uint3 carry_of(uint k)
+{
+    return uint3(frame_word(k, F_CARRY_COUNT), frame_word(k, F_CARRY_ITERATIONS), frame_word(k, F_CARRY_GAMMA));
+}
+void set_carry(uint k, uint count, uint iterations, float gamma)
+{
+    uint at = blast_frame(params.node_count, k) + F_CARRY_COUNT / 4;
+    uint4 v = islands[at];
+    v.x = count;
+    v.y = iterations;
+    v.z = asuint(gamma);
+    islands[at] = v;
+}
+// Whether a carry may continue (before the load check): same node count, fewer recurrence
+// iterations than the island has unknowns, a positive last gamma.
+bool carry_kept(uint3 c, uint count)
+{
+    float gamma = asfloat(c.z);
+    return params.carry != 0 && c.x == count && c.y < 6 * count && gamma > 0.0 && isfinite(gamma);
 }
 float frame_float(uint k, uint w)
 {
@@ -140,6 +161,12 @@ void bond_term(BlastBond b, uint j, uint v, out float3 ta, out float3 tl)
     float3 l0 = vl(b.n0, v) * m0.w_lin;
     float3 a1 = va(b.n1, v) * m1.w_ang;
     float3 l1 = vl(b.n1, v) * m1.w_lin;
+    if (params.rotation == 0)
+    {
+        ta = (a0 - a1) * b.s;
+        tl = ((l0 - l1) + (cross(b.o0.xyz, a0) - cross(b.o1.xyz, a1))) * b.s;
+        return;
+    }
     ta = rot_a(j, a0 - a1) * b.s;
     tl = rot_l(j, (l0 - l1) + (cross(b.o0.xyz, a0) - cross(b.o1.xyz, a1))) * b.s;
 }
@@ -177,8 +204,16 @@ void gather(uint node, bool from_t, bool with_u, out float3 ang, out float3 lin)
                 yl += tl;
             }
         }
-        ya = rot_a(j, ya) * b.s;
-        yl = rot_l(j, yl) * b.s;
+        if (params.rotation == 0)
+        {
+            ya *= b.s;
+            yl *= b.s;
+        }
+        else
+        {
+            ya = rot_a(j, ya) * b.s;
+            yl = rot_l(j, yl) * b.s;
+        }
         if ((ref & REF_SECOND) != 0)
         {
             acc_a += cross(b.o1.xyz, yl) - ya;
@@ -375,19 +410,21 @@ bool build_block(uint node)
             continue;
         float3 o = (ref & REF_SECOND) != 0 ? b.o1.xyz : b.o0.xyz;
         float s2 = b.s * b.s;
-        // The angular spring's I (or W with the rotational stiffness) plus [o]x [o]x^T.
-        float3 wd = float3(1.0);
-        float3 wo = float3(0.0);
+        // The angular spring (I, or W with the rotational stiffness) plus [o]x [o]x^T.
         if (params.rotation != 0)
         {
             float3 c0 = stiff(j, 1, float3(1, 0, 0));
             float3 c1 = stiff(j, 1, float3(0, 1, 0));
             float3 c2 = stiff(j, 1, float3(0, 0, 1));
-            wd = float3(c0.x, c1.y, c2.z);
-            wo = float3(c1.x, c2.x, c2.y);
+            diag += s2 * (float3(c0.x, c1.y, c2.z) + float3(dot(o, o)) - o * o);
+            offd += s2 * (float3(c1.x, c2.x, c2.y) - float3(o.x * o.y, o.x * o.z, o.y * o.z));
         }
-        diag += s2 * (wd + float3(dot(o, o)) - o * o);
-        offd += s2 * (wo - float3(o.x * o.y, o.x * o.z, o.y * o.z));
+        else
+        {
+            float oo = 1.0 + dot(o, o);
+            diag += s2 * (float3(oo) - o * o);
+            offd += s2 * -float3(o.x * o.y, o.x * o.z, o.y * o.z);
+        }
         ks += s2 * o;
         cs += s2;
     }

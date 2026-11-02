@@ -189,9 +189,19 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         }
     }
 
+    // Krylov carry: the last solve's recurrence, if it may continue (cleared here; set again
+    // by an unconverged solve).
+    uint3 kept = group_uniform4(uint4(carry_of(k), 0u), tid).xyz;
+    bool carried = carry_kept(kept, n1 - n0);
+    // Every thread has read it (group_uniform4 synchronises only on WGSL) before it is cleared.
+    device_group_barrier();
+    if (tid == 0 && params.carry != 0)
+        set_carry(k, 0u, 0u, 0.0);
+
     // b = -D^-1 a; the blocks and their inverses; whether the island is anchored.
     float target = 0.0;
     float singular = 0.0;
+    float change = 0.0;
     for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
     {
         uint i = lists[p];
@@ -201,12 +211,17 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         float3 ba = -a_ang.xyz * (n.w_ang > 0.0 ? 1.0 / n.w_ang : 1.0);
         float3 bl = -a_lin.xyz * (n.w_lin > 0.0 ? params.recip_length / n.w_lin : params.recip_length);
         target += norm2(ba, bl);
+        // The load's change since the last solve (N_B still holds its b).
+        if (carried)
+            change += norm2(ba - va(i, N_B), bl - vl(i, N_B));
         set_v(i, N_B, ba, bl);
         set_v(i, N_R, ba, bl);
         scratch[ns(i, N_LAST)] = a_ang;
         scratch[ns(i, N_LAST) + 1] = a_lin;
         set_v(i, N_U, float3(0.0), float3(0.0));
-        set_v(i, N_P, float3(0.0), float3(0.0));
+        // A restart writes p = g outright; only a carried direction is ever read.
+        if (params.carry == 0)
+            set_v(i, N_P, float3(0.0), float3(0.0));
         if (!build_block(i))
             singular = 1.0;
     }
@@ -221,6 +236,9 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     float2 tsum = blast_group_sum(tid, float2(target, singular));
     float delta2 = tsum.x * params.tolerance * params.tolerance;
+    // A load that moved by more than the solve resolves restarts: ||b - b_prev|| <= tol ||b||.
+    float moved = blast_group_sum(tid, float2(change, 0.0)).x;
+    carried = carried && moved <= params.tolerance * params.tolerance * tsum.x;
     // The rigid-mode frame (blast_motion.slang): anchored, or free with its rotations; a frame
     // that could not be built fails the solve.
     uint3 frame = group_uniform4(uint4(frame_word(k, F_ANCHORED), frame_word(k, F_ROTATIONS), frame_word(k, F_ERROR), 0u), tid).xyz;
@@ -247,7 +265,7 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 
     float diagonal = LOW_WEIGHT + HIGH_WEIGHT - LOW_WEIGHT * HIGH_WEIGHT;
     float coupling = LOW_WEIGHT * HIGH_WEIGHT;
-    float previous = 0.0;
+    float previous = carried ? asfloat(kept.z) : 0.0;
     float best = float_bits(0x7f800000u);
     uint best_iteration = 0;
     bool converged = false;
@@ -313,7 +331,7 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 
         // g: r on iteration 0 (unless the polynomial runs first), else P r = (a+b-ab) M r - ab M E M r,
         // with E = L - the blocks.
-        if (iteration == 0 && params.first_polynomial == 0)
+        if (iteration == 0 && params.first_polynomial == 0 && !carried)
         {
             for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
             {
@@ -379,7 +397,10 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             failed = true;
             break;
         }
-        float beta = (iteration > 1 || (params.first_polynomial != 0 && iteration > 0)) && previous > 0.0 ? gamma / previous : 0.0;
+        float beta = (iteration > 1 || (params.first_polynomial != 0 && iteration > 0) || carried) && previous > 0.0 ? gamma / previous : 0.0;
+        // A carried first step whose gamma grew 16-fold (a new load) restarts.
+        if (carried && iteration == 0 && !(beta <= 16.0))
+            beta = 0.0;
         for (uint p = n0 + tid; p < n1; p += BLAST_THREADS)
         {
             uint i = lists[p];
@@ -437,5 +458,10 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     // The certificate (commitNativeSettledReuse): a warm solve that converged with no update.
     uint flags = (ok ? REPORT_CONVERGED : 0u) | (ok && warm && iteration == 0 ? REPORT_SETTLED : 0u);
     if (tid == 0)
+    {
         report[k] = uint4(iteration, flags, asuint(num), asuint(delta2));
+        // Leave an unconverged solve's recurrence for the next solve of this island.
+        if (params.carry != 0 && !failed && !converged)
+            set_carry(k, n1 - n0, (carried ? kept.y : 0u) + iteration, previous);
+    }
 }

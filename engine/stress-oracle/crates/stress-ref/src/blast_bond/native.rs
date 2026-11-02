@@ -326,6 +326,26 @@ fn largest<T: Real>(v: &[Pair<T>]) -> T {
         .fold(zero, |m, x| if abs(x) > m { abs(x) } else { m })
 }
 
+/// Krylov carry (`BLAST_STRESS_CARRY_KRYLOV`): what an unconverged solve of an island leaves for
+/// the next solve of the same island (same islands, same node count): its last direction (by
+/// island node slot) and gamma, and the iterations its recurrence has run.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Carry {
+    pub count: usize,
+    pub iterations: u32,
+    pub previous: f64,
+    pub p: Vec<[f64; 6]>,
+}
+
+/// The carry's state across solves: whether it is on, each island's carry (cleared when the
+/// islands are rebuilt), and each node's last right-hand side `b`.
+#[derive(Clone, Debug, Default)]
+pub(super) struct CarryState {
+    pub on: bool,
+    pub islands: Vec<Option<Carry>>,
+    pub load: Vec<[f64; 6]>,
+}
+
 /// The resident solve of every island that enters (`live` bonds couple; a skipped island's are
 /// not live), in `T`. Fills each report's iterations, convergence and norms.
 pub(super) fn native_pcg<T: Real>(
@@ -336,7 +356,16 @@ pub(super) fn native_pcg<T: Real>(
     warm: bool,
     x_out: &mut [AngLin],
     reports: &mut [IslandReport],
+    carry: &mut CarryState,
 ) {
+    if carry.islands.len() != islands.count {
+        carry.islands = vec![None; islands.count];
+    }
+    if carry.load.len() != g.node_count() {
+        carry.load = vec![[0.0; 6]; g.node_count()];
+    }
+    // `carryKrylov`: only a warm solve continues one.
+    let carry_on = carry.on && warm;
     let (n, m) = (g.node_count(), g.bond_count());
     let zero = T::default();
     let one = T::of(1.0);
@@ -523,6 +552,35 @@ pub(super) fn native_pcg<T: Real>(
             let mut u = vec![Pair::<T>::default(); count];
             let mut p = vec![Pair::<T>::default(); count];
             let mut previous = zero;
+            // Krylov carry: continue the last solve's recurrence for the same operator and
+            // component, after an unconverged solve, while it has run fewer iterations than the
+            // island has unknowns, and while the load moved by at most the solve's tolerance.
+            let state = carry.islands[k].take();
+            let mut carried = carry_on
+                && state.as_ref().is_some_and(|c| {
+                    c.count == count && c.iterations < 6 * count as u32 && c.previous > 0.0 && c.previous.is_finite()
+                });
+            if carried {
+                let (mut change, mut load) = (zero, zero);
+                for (i, &v) in isl.nodes.iter().enumerate() {
+                    let last = carry.load[v];
+                    let bv = flat(b[i]);
+                    for c in 0..6 {
+                        let d = bv[c] - T::of(last[c]);
+                        change = change + d * d;
+                        load = load + bv[c] * bv[c];
+                    }
+                }
+                carried = change <= tol * tol * load;
+            }
+            let carried_iterations = if carried { state.as_ref().unwrap().iterations } else { 0 };
+            if carried {
+                let c = state.as_ref().unwrap();
+                previous = T::of(c.previous);
+                for i in 0..count {
+                    p[i] = pair(c.p[i].map(T::of));
+                }
+            }
             let (mut best, mut best_iteration) = (T::of(f64::INFINITY), 0u32);
             let mut converged = false;
             let mut iteration = 0u32;
@@ -575,7 +633,7 @@ pub(super) fn native_pcg<T: Real>(
                         break;
                     }
                 }
-                let mut gdir = if iteration == 0 && !first_polynomial {
+                let mut gdir = if iteration == 0 && !first_polynomial && !carried {
                     r.clone()
                 } else {
                     precondition(&r)
@@ -598,11 +656,15 @@ pub(super) fn native_pcg<T: Real>(
                     failed = true;
                     break;
                 }
-                let beta = if (iteration > 1 || (first_polynomial && iteration > 0)) && previous > zero {
+                let mut beta = if (iteration > 1 || (first_polynomial && iteration > 0) || carried) && previous > zero {
                     gamma / previous
                 } else {
                     zero
                 };
+                // A carried first step whose gamma grew 16-fold (a new load) restarts.
+                if carried && iteration == 0 && !(beta <= T::of(16.0)) {
+                    beta = zero;
+                }
                 for i in 0..count {
                     p[i] = if beta == zero {
                         gdir[i]
@@ -639,6 +701,20 @@ pub(super) fn native_pcg<T: Real>(
             }
             report.iterations = iteration;
             report.converged = converged && !failed;
+            if carry.on {
+                for (i, &v) in isl.nodes.iter().enumerate() {
+                    carry.load[v] = flat(b[i]).map(|x| x.to());
+                }
+            }
+            // Leave an unconverged solve's recurrence for the next solve of the same island.
+            if carry_on && !failed && !converged {
+                carry.islands[k] = Some(Carry {
+                    count,
+                    iterations: carried_iterations + iteration,
+                    previous: previous.to(),
+                    p: p.iter().map(|v| flat(*v).map(|x| x.to())).collect(),
+                });
+            }
 
             for (k2, &j) in isl.bonds.iter().enumerate() {
                 let x = x0[k2].plus(isl.term(j, &u), one);

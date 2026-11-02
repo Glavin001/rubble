@@ -64,6 +64,8 @@ public struct BlastParams
     public uint rotation;
     // blast_native*.slang: float4s of scratch per node (more with the shear stiffness's block).
     public uint node_vectors;
+    // blast_native*.slang: Krylov carry (BLAST_STRESS_CARRY_KRYLOV) on a warm solve.
+    public uint carry;
 };
 
 // `topo` (blast_topology.slang): the totals after the per-node and per-block words: islands,
@@ -78,17 +80,22 @@ public uint topo_dirty(uint node_count)
     return topo_total(node_count) + 4;
 }
 
-// A free island's rigid-mode frame (blast_motion.slang), FRAME_WORDS words in `islands` after
+// A free island's rigid-mode frame (blast_motion.slang) and its carry, FRAME_WORDS words in `islands` after
 // the island records: whether anchored (dimension 0), its rotations (3, 1 or 0), construction
 // errors, the axis of a single rotation, the Gram matrix's diagonal scale and its scaled
 // Cholesky factor (packed lower triangle, row * (row + 1) / 2 + col), in solver precision.
-public static const uint FRAME_WORDS = 36;
+public static const uint FRAME_WORDS = 40;
 public static const uint F_ANCHORED = 0;
 public static const uint F_ROTATIONS = 1;
 public static const uint F_ERROR = 2;
 public static const uint F_AXIS = 4;
 public static const uint F_SCALE = 8;
 public static const uint F_FACTOR = 14;
+// The native solve's Krylov carry (blast_native*.slang): an unconverged solve's island node
+// count, its recurrence's iterations, its last gamma. A rebuild zeroes them with the frame.
+public static const uint F_CARRY_COUNT = 36;
+public static const uint F_CARRY_ITERATIONS = 37;
+public static const uint F_CARRY_GAMMA = 38;
 public static const uint FRAME_ERROR_TOPOLOGY = 2;
 public static const uint FRAME_ERROR_FRAME = 4;
 public static const uint FRAME_ERROR_INEXACT = 16;

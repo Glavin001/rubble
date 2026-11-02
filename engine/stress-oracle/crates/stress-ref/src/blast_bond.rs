@@ -31,7 +31,7 @@ use crate::math::Vec3;
 
 mod motion;
 mod native;
-use native::native_pcg;
+use native::{native_pcg, CarryState};
 use serde::{Deserialize, Serialize};
 
 /// Reference modulus the compliance weight is relative to (concrete).
@@ -143,6 +143,9 @@ pub struct BlastSettings {
     /// [`SolverKind::Native`]: the first iteration's direction
     /// (`BLAST_STRESS_FIRST_PRECONDITIONER`, an A/B switch; identity by default).
     pub first_preconditioner: FirstPreconditioner,
+    /// [`SolverKind::Native`]: Krylov carry (`BLAST_STRESS_CARRY_KRYLOV`): `None` is the
+    /// target's default, on with per-bond rotational stiffness and off without.
+    pub carry_krylov: Option<bool>,
 }
 
 /// The native solve's first iteration (`firstPreconditionerMode`).
@@ -194,6 +197,7 @@ impl Default for BlastSettings {
             solver: SolverKind::HostCgls,
             force_tolerance: 0.0,
             first_preconditioner: FirstPreconditioner::Identity,
+            carry_krylov: None,
         }
     }
 }
@@ -830,6 +834,8 @@ pub struct BlastSolver {
     /// Settled-island skip: the last converged input per island.
     last_input: Vec<AngLin>,
     last_converged: Vec<bool>,
+    /// The native solve's Krylov carry across solves.
+    carry: CarryState,
 }
 
 impl BlastSolver {
@@ -846,6 +852,7 @@ impl BlastSolver {
             has_warm_start: false,
             last_input: vec![AngLin::ZERO; n],
             last_converged: Vec::new(),
+            carry: CarryState::default(),
         }
     }
 
@@ -858,6 +865,7 @@ impl BlastSolver {
         }
         self.islands = Islands::compute(&self.graph, &self.health);
         self.last_converged.clear();
+        self.carry.islands.clear();
     }
 
     /// Start the next solve warm from `x` (scaled units), as if a solve had left it.
@@ -928,10 +936,12 @@ impl BlastSolver {
                 cgls::<f64>(g, islands, accel, &live, &enters, &mut self.x, &mut reports)
             }
             (true, true) => {
-                native_pcg::<f32>(g, islands, accel, &live, warm, &mut self.x, &mut reports)
+                self.carry.on = g.settings.carry_krylov.unwrap_or(!g.rotation.is_empty());
+                native_pcg::<f32>(g, islands, accel, &live, warm, &mut self.x, &mut reports, &mut self.carry)
             }
             (true, false) => {
-                native_pcg::<f64>(g, islands, accel, &live, warm, &mut self.x, &mut reports)
+                self.carry.on = g.settings.carry_krylov.unwrap_or(!g.rotation.is_empty());
+                native_pcg::<f64>(g, islands, accel, &live, warm, &mut self.x, &mut reports, &mut self.carry)
             }
         }
 

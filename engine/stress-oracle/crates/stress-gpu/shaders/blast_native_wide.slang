@@ -28,7 +28,7 @@ static const uint PARTIAL = 6;
 static const uint S_SCALARS = 0;  // (delta^2, num, gamma_prev, best)
 static const uint S_STEP = 1;     // (gamma, alpha, beta, force step)
 static const uint S_COUNT = 2;    // (force start, travel, iteration bits, flags bits)
-static const uint S_BEST = 3;     // (0, 0, 0, best iteration bits)
+static const uint S_BEST = 3;     // (carried iterations bits, 0, 0, best iteration bits)
 static const uint S_COEF = 4;     // 4, 5: the projection's rigid motion (omega, t)
 // Flags.
 static const uint F_ACTIVE = 1;
@@ -39,6 +39,7 @@ static const uint F_ZERO = 16;
 static const uint F_HOLD = 32;
 static const uint F_REBUILD = 64;
 static const uint F_SKIPPED = 128;
+static const uint F_CARRIED = 256;
 // Meta words.
 static const uint M_COUNT = 0;
 static const uint M_NODE_BLOCKS = 1;
@@ -53,6 +54,7 @@ uint flags_of(uint row) { return asuint(wide[st(row, S_COUNT)].w); }
 void set_flags(uint row, uint f) { float4 c = wide[st(row, S_COUNT)]; c.w = asfloat(f); wide[st(row, S_COUNT)] = c; }
 uint iteration_of(uint row) { return asuint(wide[st(row, S_COUNT)].z); }
 uint blocks(uint n) { return (n + BLAST_THREADS - 1) / BLAST_THREADS; }
+uint carry_kept_iterations(uint row) { return asuint(wide[st(row, S_BEST)].x); }
 
 // ------------------------------------------------------------------ classification
 
@@ -190,7 +192,8 @@ uint4 row_range(uint tid, uint row)
 
 // ------------------------------------------------------------------ set-up
 
-// b, the residual's start, the input kept, the blocks; partial 0 (target, singular, differs, 0).
+// b, the residual's start, the input kept, the blocks; partial 0 (target, singular, differs,
+// the load's change since the last solve, for the carry).
 [shader("compute")]
 [numthreads(1024, 1, 1)]
 void w_init_nodes(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
@@ -212,12 +215,14 @@ void w_init_nodes(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         float3 ba = -a_ang.xyz * (n.w_ang > 0.0 ? 1.0 / n.w_ang : 1.0);
         float3 bl = -a_lin.xyz * (n.w_lin > 0.0 ? params.recip_length / n.w_lin : params.recip_length);
         p0.x = norm2(ba, bl);
+        p0.w = norm2(ba - va(i, N_B), bl - vl(i, N_B));
         set_v(i, N_B, ba, bl);
         set_v(i, N_R, ba, bl);
         scratch[ns(i, N_LAST)] = a_ang;
         scratch[ns(i, N_LAST) + 1] = a_lin;
         set_v(i, N_U, float3(0.0), float3(0.0));
-        set_v(i, N_P, float3(0.0), float3(0.0));
+        if (params.carry == 0)
+            set_v(i, N_P, float3(0.0), float3(0.0));
         if (!build_block(i))
             p0.y = 1.0;
     }
@@ -271,10 +276,20 @@ void w_setup(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     if (frame_word(island, F_ANCHORED) == 0)
         f |= F_FREE;
-    wide[st(row, S_SCALARS)] = float4(delta2, 0.0, 0.0, float_bits(0x7f800000u));
+    // Krylov carry (blast_native.slang): continue the last unconverged solve's recurrence.
+    uint3 kept = carry_of(island);
+    float previous = 0.0;
+    if (carry_kept(kept, r.y - r.x) && s0.w <= params.tolerance * params.tolerance * s0.x)
+    {
+        f |= F_CARRIED;
+        previous = asfloat(kept.z);
+    }
+    if (params.carry != 0)
+        set_carry(island, 0u, 0u, 0.0);
+    wide[st(row, S_SCALARS)] = float4(delta2, 0.0, previous, float_bits(0x7f800000u));
     wide[st(row, S_STEP)] = float4(0.0, 0.0, 0.0, float_bits(0x7f800000u));
     wide[st(row, S_COUNT)] = float4(0.0, 0.0, asfloat(0u), asfloat(f));
-    wide[st(row, S_BEST)] = float4(0.0, 0.0, 0.0, asfloat(0u));
+    wide[st(row, S_BEST)] = float4(asfloat((f & F_CARRIED) != 0 ? kept.y : 0u), 0.0, 0.0, asfloat(0u));
 }
 
 // A warm start's residual b - D C S x0.
@@ -559,7 +574,7 @@ void w_pre1(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     if (p >= b.end)
         return;
     uint i = lists[p];
-    if (iteration_of(b.row) == 0 && params.first_polynomial == 0)
+    if (iteration_of(b.row) == 0 && params.first_polynomial == 0 && (b.flags & F_CARRIED) == 0)
     {
         set_v(i, N_G, va(i, N_R), vl(i, N_R));
         return;
@@ -577,7 +592,7 @@ void w_bond_loc(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint tid = thread.x;
     Block b = bond_block(group, tid);
-    if (b.begin >= b.end || !runs(b.flags, false) || (iteration_of(b.row) == 0 && params.first_polynomial == 0))
+    if (b.begin >= b.end || !runs(b.flags, false) || (iteration_of(b.row) == 0 && params.first_polynomial == 0 && (b.flags & F_CARRIED) == 0))
         return;
     uint p = b.begin + tid;
     if (p >= b.end)
@@ -599,7 +614,7 @@ void w_pre2(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint tid = thread.x;
     Block b = node_block(group, tid);
-    if (b.begin >= b.end || !runs(b.flags, false) || (iteration_of(b.row) == 0 && params.first_polynomial == 0))
+    if (b.begin >= b.end || !runs(b.flags, false) || (iteration_of(b.row) == 0 && params.first_polynomial == 0 && (b.flags & F_CARRIED) == 0))
         return;
     uint p = b.begin + tid;
     if (p >= b.end)
@@ -713,7 +728,11 @@ void w_gamma(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     float4 s0 = wide[st(row, S_SCALARS)];
     uint it = iteration_of(row);
-    float beta = (it > 1 || (params.first_polynomial != 0 && it > 0)) && s0.z > 0.0 ? gamma / s0.z : 0.0;
+    bool carried = (f & F_CARRIED) != 0;
+    float beta = (it > 1 || (params.first_polynomial != 0 && it > 0) || carried) && s0.z > 0.0 ? gamma / s0.z : 0.0;
+    // A carried first step whose gamma grew 16-fold (a new load) restarts.
+    if (carried && it == 0 && !(beta <= 16.0))
+        beta = 0.0;
     float4 s1 = wide[st(row, S_STEP)];
     s1.x = gamma;
     s1.z = beta;
@@ -894,4 +913,8 @@ void w_report(uint3 group : SV_GroupID)
     uint flags = (ok ? REPORT_CONVERGED : 0u) | (ok && params.warm != 0 && it == 0 ? REPORT_SETTLED : 0u);
     float4 s0 = wide[st(row, S_SCALARS)];
     report[island] = uint4(it, flags, asuint(s0.y), asuint(s0.x));
+    // Leave an unconverged solve's recurrence for the next solve of this island.
+    uint4 range = islands[island];
+    if (params.carry != 0 && (f & (F_CONVERGED | F_FAILED)) == 0)
+        set_carry(island, range.y - range.x, ((f & F_CARRIED) != 0 ? carry_kept_iterations(row) : 0u) + it, s0.z);
 }

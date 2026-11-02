@@ -54,6 +54,7 @@ struct BlastParams_std140_0
     @align(4) first_polynomial_0 : u32,
     @align(16) rotation_0 : u32,
     @align(4) node_vectors_0 : u32,
+    @align(8) carry_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;
@@ -107,7 +108,7 @@ fn group_uniform4_0( value_0 : vec4<u32>,  thread_0 : u32) -> vec4<u32>
 
 fn blast_frame_0( node_count_1 : u32,  k_0 : u32) -> u32
 {
-    return node_count_1 + u32(9) * k_0;
+    return node_count_1 + u32(10) * k_0;
 }
 
 fn set_frame_0( k_1 : u32,  w_0 : u32,  value_1 : u32)
@@ -1182,21 +1183,21 @@ fn ex_product_equal_0( a_33 : Ex_0,  b_24 : Ex_0,  c_1 : Ex_0,  d_0 : Ex_0,  exa
                     {
                         break;
                     }
-                    var carry_0 : f32;
+                    var carry_1 : f32;
                     if(half_0 == u32(0))
                     {
-                        carry_0 = pe_0;
+                        carry_1 = pe_0;
                     }
                     else
                     {
-                        carry_0 = p_6;
+                        carry_1 = p_6;
                     }
-                    if(carry_0 == 0.0f)
+                    if(carry_1 == 0.0f)
                     {
                         half_0 = half_0 + u32(1);
                         continue;
                     }
-                    var carry_1 : f32 = carry_0;
+                    var carry_2 : f32 = carry_1;
                     var k_5 : u32 = u32(0);
                     var next_0 : u32 = u32(0);
                     loop
@@ -1210,7 +1211,7 @@ fn ex_product_equal_0( a_33 : Ex_0,  b_24 : Ex_0,  c_1 : Ex_0,  d_0 : Ex_0,  exa
                         }
                         var s_14 : f32;
                         var h_0 : f32;
-                        two_sum_3(carry_1, e_16[k_5], &(s_14), &(h_0));
+                        two_sum_3(carry_2, e_16[k_5], &(s_14), &(h_0));
                         if(h_0 != 0.0f)
                         {
                             var _S76 : u32 = next_0 + u32(1);
@@ -1219,11 +1220,11 @@ fn ex_product_equal_0( a_33 : Ex_0,  b_24 : Ex_0,  c_1 : Ex_0,  d_0 : Ex_0,  exa
                         }
                         var _S77 : f32 = s_14;
                         var _S78 : u32 = k_5 + u32(1);
-                        carry_1 = _S77;
+                        carry_2 = _S77;
                         k_5 = _S78;
                     }
                     var next_1 : u32;
-                    if(carry_1 != 0.0f)
+                    if(carry_2 != 0.0f)
                     {
                         if(next_0 >= u32(64))
                         {
@@ -1231,7 +1232,7 @@ fn ex_product_equal_0( a_33 : Ex_0,  b_24 : Ex_0,  c_1 : Ex_0,  d_0 : Ex_0,  exa
                             return false;
                         }
                         var _S79 : u32 = next_0 + u32(1);
-                        e_16[next_0] = carry_1;
+                        e_16[next_0] = carry_2;
                         next_1 = _S79;
                     }
                     else
@@ -1430,7 +1431,7 @@ fn blast_motion(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoc
         p_8 = u32(0);
         loop
         {
-            if(p_8 < u32(36))
+            if(p_8 < u32(40))
             {
             }
             else
