@@ -18,4 +18,6 @@
 #define csr_degree_contacts csr_degree_contacts_persistent
 #define csr_scatter_contacts csr_scatter_contacts_persistent
 #define contact_events contact_events_persistent
+#define archive_count archive_count_persistent
+#define archive_scatter archive_scatter_persistent
 #include "world_step.slang"

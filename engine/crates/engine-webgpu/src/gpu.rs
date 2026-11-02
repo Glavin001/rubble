@@ -431,6 +431,8 @@ fn persistent_entry(name: &str) -> &str {
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
         "vehicle_loads" => "vehicle_loads_persistent",
         "contact_events" => "contact_events_persistent",
+        "archive_count" => "archive_count_persistent",
+        "archive_scatter" => "archive_scatter_persistent",
         _ => name,
     }
 }
@@ -2462,28 +2464,46 @@ impl WgpuSim {
     /// restarts them warm, with the impulses and stiffness it fell asleep with, instead
     /// of from rest. Turns the resting-pair carry off (the archive replaces it).
     /// Room for `rows` archived rows (in blocks of 8 a body; an archive
-    /// that would hold more fails the step, `OVERFLOW_SLEEP_ARCHIVE`). Canonical
-    /// contacts only. The contact and scratch buffers grow (their contents kept): hosts
-    /// holding them bind them again.
+    /// that would hold more fails the step, `OVERFLOW_SLEEP_ARCHIVE`). Canonical or
+    /// persistent contacts (not compact ones; persistent ones need the touch query,
+    /// `EngineFeatures::archive_touch_query`). The contact and scratch buffers grow
+    /// (their contents kept): hosts holding them bind them again.
     pub fn enable_sleep_archive(&mut self, rows: u32) -> anyhow::Result<()> {
         if self.sleep_archive_blocks > 0 {
             return Ok(());
         }
         anyhow::ensure!(
-            !self.compact_contacts && !self.persistent_contacts,
-            "the sleep archive keeps canonical contact rows (ContactStorage::Canonical)"
+            !self.compact_contacts || self.persistent_contacts,
+            "the sleep archive keeps canonical or persistent contact rows (not ContactStorage::Compact)"
+        );
+        anyhow::ensure!(
+            !self.persistent_contacts || self.archive_touch_query,
+            "the sleep archive's persistent rows need its touch query (EngineFeatures::archive_touch_query)"
         );
         // world_step.slang ARCHIVE_ROWS: a sleeping body's rows, in blocks of 8.
         const ROWS: u32 = 8;
         let max_c = self.capacity.max_contacts;
         let blocks = (rows / ROWS).max(1);
         let mb = self.capacity.max_bodies;
-        let row_bytes = std::mem::size_of::<engine_schema::Contact>() as u64;
-        let contact_bytes = (2 * u64::from(max_c) + u64::from(blocks * ROWS)) * row_bytes;
+        // Canonical rows (128 B, binding 4), or persistent ones: 32 B of pair data
+        // (binding 4) and a 64 B solver point (binding 27) a row.
+        let rows = 2 * u64::from(max_c) + u64::from(blocks * ROWS);
+        let mut grow = vec![(
+            4usize,
+            rows * if self.persistent_contacts {
+                32
+            } else {
+                std::mem::size_of::<engine_schema::Contact>() as u64
+            },
+        )];
+        if self.persistent_contacts {
+            grow.push((27, rows * 64));
+        }
         let meta = engine_schema::SCRATCH_WORDS;
         let scratch_words = u64::from(meta) + 4 + 6 * u64::from(mb) + 2 * u64::from(blocks);
         let limits = self.device.limits();
-        for (binding, bytes) in [(4usize, contact_bytes), (21, 4 * scratch_words)] {
+        grow.push((21, 4 * scratch_words));
+        for &(binding, bytes) in &grow {
             check_limits(&limits, binding, bytes)?;
         }
         let mut enc = self
@@ -2491,7 +2511,7 @@ impl WgpuSim {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("sleep archive"),
             });
-        for (binding, bytes) in [(4usize, contact_bytes), (21, 4 * scratch_words)] {
+        for &(binding, bytes) in &grow {
             let old = &self.bufs[binding];
             let new = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("b{binding}")),
@@ -2517,8 +2537,9 @@ impl WgpuSim {
             u64::from(meta) * 4,
             bytemuck::cast_slice(&words),
         );
-        self.rebind_buffer(4);
-        self.rebind_buffer(21);
+        for &(binding, _) in &grow {
+            self.rebind_buffer(binding as u32);
+        }
         self.sleep_archive_blocks = blocks;
         // The archive keeps resting rows through sleep, so the resting-pair carry
         // (8ep, which re-emits every resting pair each step to keep its warm start)
@@ -2565,7 +2586,7 @@ impl WgpuSim {
     /// `body`'s archived resting rows (`world_step.slang` archiveRowOf; diagnostic read,
     /// waits for the GPU).
     pub fn sleep_archive_rows(&self, body: u32) -> Vec<engine_schema::Contact> {
-        if self.sleep_archive_blocks == 0 {
+        if self.sleep_archive_blocks == 0 || self.persistent_contacts {
             return Vec::new();
         }
         let meta = u64::from(engine_schema::SCRATCH_WORDS);

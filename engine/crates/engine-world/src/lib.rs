@@ -114,7 +114,7 @@ pub use engine_vehicle::{
     FunctionalState, GearRequest, MountLoad, VehicleCapacity, VehicleDesc, VehicleHandle,
     VehicleInput, VehicleState, WheelState,
 };
-pub use engine_webgpu::{ContactStorage, EngineFeatures, GpuTiming, WgpuSim};
+pub use engine_webgpu::{ContactStorage, EngineFeatures, GpuTiming, RestingContacts, WgpuSim};
 
 use engine_schema::convex::HullArena;
 use engine_schema::{BodyState, Collider, GpuCommand, ShapeType};
@@ -199,10 +199,11 @@ pub struct WorldDef {
     /// reserves a slot per chunk when placed, so no split can run out, at the cost of
     /// a body slot per chunk of every destructible in the world.
     pub fracture_pieces: Option<u32>,
-    /// Threshold worlds keep sleeping bodies' resting contacts (the sleep archive,
-    /// `WgpuSim::enable_sleep_archive`): room for this many contact rows (a sleeping
-    /// cluster keeps about a dozen). More fails the step (`OVERFLOW_SLEEP_ARCHIVE`).
-    /// `None`: 16 a body slot.
+    /// Worlds with sleep keep sleeping bodies' resting contacts (the sleep archive,
+    /// `WgpuSim::enable_sleep_archive`, unless `features.resting_contacts` opts out):
+    /// room for this many contact rows (a sleeping box keeps a few dozen, a cluster about
+    /// a dozen). More fails the step (`OVERFLOW_SLEEP_ARCHIVE`). `None`: the contact
+    /// capacity (what the resting-pair carry needs to hold every resting row).
     pub sleep_archive_rows: Option<u32>,
     /// Where the world ends: a dynamic body (one the application created, not a
     /// vehicle part, piece, character or soft node) whose origin a frame reports
@@ -542,6 +543,7 @@ impl World {
         } else {
             (def.contacts, def.features.clone())
         };
+        let resting = features.resting_contacts;
         let options = SimOptions {
             contacts,
             vehicles: def.vehicles,
@@ -570,6 +572,18 @@ impl World {
             params.sleep_time = f32::MAX;
         }
         sim.set_params(params);
+        if def.enable_sleep {
+            // Resting contacts through sleep (EngineFeatures::resting_contacts): the sleep
+            // archive where the contact storage keeps one, else the carry.
+            match resting {
+                engine_webgpu::RestingContacts::Archive if contacts != ContactStorage::Compact => {
+                    let rows = def.sleep_archive_rows.unwrap_or(def.capacity.max_contacts);
+                    sim.enable_sleep_archive(rows)?;
+                }
+                engine_webgpu::RestingContacts::Drop => sim.set_carry_rest(false),
+                _ => {}
+            }
+        }
         sim.set_gpu_timing(def.gpu_timing)?;
         let readback = ReadbackRing::new(&sim, def.readback_frames);
         Ok(Self {
@@ -777,13 +791,15 @@ impl World {
     /// Keep sleeping bodies' resting contacts through sleep (the sleep archive,
     /// `WgpuSim::enable_sleep_archive`, which threshold destructibles turn on): a woken
     /// body restarts them with the impulses and stiffness it fell asleep with. Room for
-    /// `rows` rows (`None`: [`WorldDef::sleep_archive_rows`], else 16 a body slot).
-    /// Canonical contacts only. Turns the resting-pair carry off unless
+    /// `rows` rows (`None`: [`WorldDef::sleep_archive_rows`], else the contact
+    /// capacity). Worlds with sleep turn it on at creation
+    /// (`EngineFeatures::resting_contacts`); this is for worlds that opted out. Canonical
+    /// or persistent contacts. Turns the resting-pair carry off unless
     /// `EngineFeatures::carry_with_archive`.
     pub fn enable_sleep_archive(&mut self, rows: Option<u32>) -> anyhow::Result<()> {
         let rows = rows
             .or(self.sleep_archive_rows)
-            .unwrap_or(self.sim.capacity().max_bodies.saturating_mul(16));
+            .unwrap_or(self.sim.capacity().max_contacts);
         self.sim.enable_sleep_archive(rows)
     }
 

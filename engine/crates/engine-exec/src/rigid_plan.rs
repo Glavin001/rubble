@@ -274,6 +274,9 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "contact_events" => "contact_events_persistent",
         // The one vehicle kernel that reads contacts (vehicle_step_persistent.slang).
         "vehicle_loads" => "vehicle_loads_persistent",
+        // The sleep archive's passes over this step's contact rows.
+        "archive_count" => "archive_count_persistent",
+        "archive_scatter" => "archive_scatter_persistent",
         _ => name,
     }
 }

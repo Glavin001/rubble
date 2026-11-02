@@ -51,8 +51,8 @@
       <label id="sleepLabel" for="sleepToggle" title="Let resting bodies fall asleep (URL: sleep=on|off)">
         <input type="checkbox" id="sleepToggle"> Sleep
       </label>
-      <label for="dropCarry" title="Experimental: stop re-emitting the contacts of pairs at rest every step (URL: rest=drop). Faster with many sleepers; failed the threshold accuracy gate (engine/docs/large-maps-progress.md)">
-        <input type="checkbox" id="dropCarry"> Drop resting carry
+      <label for="carryRest" title="Re-emit the contacts of every pair at rest each step instead of keeping them in the sleep archive (URL: rest=carry; the archive is the default, rest=archive)">
+        <input type="checkbox" id="carryRest"> Carry resting pairs
       </label>
       <button id="resetBtn" type="button" title="Restart this scene from its first step (R)" disabled>Reset</button>
       <a href="./" style="color:#b8d7ff;margin-left:10px">All demos</a>
@@ -334,16 +334,18 @@
       history.replaceState(null, '', next.href);
     });
 
-    // The resting-pair carry, switched live (World::set_carry_rest).
-    const dropCarry = document.getElementById('dropCarry');
-    // ?archive=1 (with ?contacts=canonical): the sleep archive, so a woken body restarts
-    // its resting contacts warm; it turns the carry off (the checkbox turns it back on).
-    if (Q.qs.get('archive') === '1') world.enableSleepArchive();
-    dropCarry.checked = !world.carryRest();
-    dropCarry.addEventListener('change', () => {
-      world.setCarryRest(!dropCarry.checked);
+    // Resting contacts (?rest=archive|carry|drop): the sleep archive by default (a world
+    // created with sleep on has it already; one created without gets it here, for the
+    // sleep toggle), and the resting-pair carry switched live (World::set_carry_rest),
+    // which takes over from the archive while it is on.
+    const carryRest = document.getElementById('carryRest');
+    const rest = Q.qs.get('rest') || 'archive';
+    if (rest === 'archive' && Q.contacts !== 'compact') world.enableSleepArchive();
+    carryRest.checked = world.carryRest();
+    carryRest.addEventListener('change', () => {
+      world.setCarryRest(carryRest.checked);
       const next = new URL(location.href);
-      next.searchParams.set('rest', dropCarry.checked ? 'drop' : 'carry');
+      next.searchParams.set('rest', carryRest.checked ? 'carry' : 'archive');
       history.replaceState(null, '', next.href);
     });
 

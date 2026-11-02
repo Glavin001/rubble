@@ -247,9 +247,12 @@ export function parseDemoQuery(search) {
   if (!['scan', 'list'].includes(persist)) throw new Error('persist must be scan or list');
   if (persist === 'list' && reuse !== 'copy') throw new Error('persist=list requires reuse=copy');
   features.persistList = persist === 'list';
-  const rest = qs.get('rest') || 'carry';
-  if (!['carry', 'drop'].includes(rest)) throw new Error('rest must be carry or drop');
-  features.carryRest = rest === 'carry';
+  // Resting contacts in a sleeping world: the sleep archive (default), the resting-pair
+  // carry (opt-out) or neither (measurement).
+  const rest = qs.get('rest') || 'archive';
+  if (!['archive', 'carry', 'drop'].includes(rest)) throw new Error('rest must be archive, carry or drop');
+  features.restingContacts = rest;
+  features.carryRest = rest !== 'drop';
   const repair = qs.get('repair') || 'local';
   if (!['rounds', 'local'].includes(repair)) throw new Error('repair must be rounds or local');
   features.localRepair = repair === 'local';

@@ -19,7 +19,8 @@ pub mod metal_interop;
 mod soft_skin;
 #[cfg(feature = "gpu")]
 pub use features::{
-    ContactStorage, EngineFeatures, GpuTiming, GridLayout, ManifoldPersistence, SimOptions, WarmHash,
+    ContactStorage, EngineFeatures, GpuTiming, GridLayout, ManifoldPersistence, RestingContacts,
+    SimOptions, WarmHash,
 };
 #[cfg(feature = "gpu")]
 pub use gpu::{

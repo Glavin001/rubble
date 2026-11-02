@@ -258,6 +258,14 @@ pub fn features(f: &mut Fields, d: &mut EngineFeatures) -> Result<(), JsValue> {
     f.bool("persistList", &mut d.persist_list)?;
     f.bool("localRepair", &mut d.local_repair)?;
     f.bool("carryRest", &mut d.carry_rest)?;
+    if let Some(s) = f.string("restingContacts")? {
+        d.resting_contacts = match s.as_str() {
+            "archive" => engine_webgpu::RestingContacts::Archive,
+            "carry" => engine_webgpu::RestingContacts::Carry,
+            "drop" => engine_webgpu::RestingContacts::Drop,
+            _ => return Err(crate::err(format!("features.restingContacts: unknown {s}"))),
+        };
+    }
     f.bool("awakeBroadphase", &mut d.awake_broadphase)?;
     if let Some(s) = f.string("grid")? {
         d.grid = match s.as_str() {

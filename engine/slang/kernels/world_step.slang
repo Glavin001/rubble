@@ -88,6 +88,11 @@ BIND(17) RWStructuredBuffer<uint> gSolveColorCounts;
 
 
 #include "../physics/contact_storage.slang"
+// The sleep archive's rows (archiveMeta): canonical contacts, and persistent ones on
+// WGSL hosts (the only hosts that enable it; Metal and CUDA keep their codegen).
+#if !defined(ENGINE_PERSISTENT_CONTACTS) || defined(ENGINE_WGSL)
+#define ENGINE_SLEEP_ARCHIVE 1
+#endif
 #include "../physics/convex.slang"
 #include "../physics/heightfield.slang"
 
@@ -875,7 +880,7 @@ void archiveTouch(uint i, uint j);
 
 void emitCandidate(uint i, uint j)
 {
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
     if (sleepArchive() && i != j)
         archiveTouch(i, j);
 #endif
@@ -3711,7 +3716,7 @@ bool contactPairAtRest(BodyState ba, BodyState bb)
 // less load than had it stayed awake. When a body falls asleep, the rows it rests on
 // (its partner static or asleep) are kept here; when the pair forms again, a warm-start
 // miss finds them, and the body wakes with the contacts it fell asleep with. Nothing
-// runs for a body while it sleeps. Rows live in gContacts past the two halves, in
+// runs for a body while it sleeps. Rows live in the contact rows past the two halves, in
 // blocks of ARCHIVE_ROWS; per body records and the free-block stack sit past the
 // scratch words in gScratchAtomics:
 //   [free top, blocks, touched count (two, by step parity)]
@@ -3754,7 +3759,7 @@ uint archiveKey(Collider a, Collider b)
     return h;
 }
 
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
 // The body a resting row is archived under: one that fell asleep this step, its
 // partner at rest (static or asleep); else none (the pair keeps forming).
 uint archiveOwner(Contact c)
@@ -3810,7 +3815,7 @@ bool archiveFind(Contact c, out Contact found)
         {
             if (slot > 0u && slot % ARCHIVE_ROWS == 0u)
                 k = ALOAD(gScratchAtomics[arNext(k)]);
-            Contact prev = gContacts[archiveRow(k, slot % ARCHIVE_ROWS)];
+            Contact prev = READ_CONTACT(archiveRow(k, slot % ARCHIVE_ROWS));
             if (prev.colliderA != c.colliderA || prev.colliderB != c.colliderB)
                 continue;
             if (asuint(prev._pad1) != key)
@@ -3847,7 +3852,7 @@ Contact archiveRowOf(uint body, uint slot)
     uint k = ALOAD(gScratchAtomics[arHead(body)]);
     for (uint h = slot / ARCHIVE_ROWS; h > 0u && h < 4096u; h--)
         k = ALOAD(gScratchAtomics[arNext(k)]);
-    return gContacts[archiveRow(k, slot % ARCHIVE_ROWS)];
+    return READ_CONTACT(archiveRow(k, slot % ARCHIVE_ROWS));
 }
 
 // A moving body's pair reaches a sleeping one with an archive: the first such touch in
@@ -4137,7 +4142,7 @@ void touchQueryBody(uint body, bool mark)
 
 // Shared point update; callers choose contact or manifold scheduling. Pair bodies
 // are immutable during persistence, so manifold scheduling can load them once.
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
 // persistContact's warm start from an archived row (a woken pair's resting contact):
 // the same rules as a previous-step row.
 Contact archiveWarmContact(Contact c, BodyState ba, BodyState bb, AvbdParams p)
@@ -4210,7 +4215,7 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
     c.alive = 1;
     if (contactPairAtRest(ba, bb))
     {
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
         // A touched sleeper's resting pair keeps its archived row (archiveRestRow).
         if (!reused && archiveTouchQuery())
             c = archiveRestRow(c, ba, bb);
@@ -4351,7 +4356,7 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
                 }
             }
         }
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
         // A warm-start miss: the sleep archive (archiveWarmContact). Kept out of the
         // block above so its codegen is unchanged without the archive.
         else if (sleepArchive())
@@ -6533,7 +6538,7 @@ void sleep_island_commit(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
 // Sleep archive passes, after sleep_island_commit (see archiveMeta).
 // archive_free, over this step's awake list: a body awake for a second step lets its
 // archive go (its pairs formed again by now); one that fell asleep again lets the old one
@@ -6587,8 +6592,8 @@ void archive_count(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     if (!sleepArchive() || ALOAD(gCounters[0].sleepEvents) == 0u) return;
     if (i >= min(ALOAD(gCounters[0].contactCount), HOST_S(3))) return;
-    Contact c = gContacts[HOST_S(11) + i];
-    if (c.alive == 0u) return;
+    if (CONTACT_STATE(HOST_S(11) + i) == 0u) return;
+    Contact c = READ_CONTACT(HOST_S(11) + i);
     uint owner = archiveOwner(c);
     if (owner != ARCHIVE_NONE)
         AADD2(gScratchAtomics[arCursor(owner)], 1u);
@@ -6636,8 +6641,8 @@ void archive_scatter(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     if (!sleepArchive() || ALOAD(gCounters[0].sleepEvents) == 0u) return;
     if (i >= min(ALOAD(gCounters[0].contactCount), HOST_S(3))) return;
-    Contact c = gContacts[HOST_S(11) + i];
-    if (c.alive == 0u) return;
+    if (CONTACT_STATE(HOST_S(11) + i) == 0u) return;
+    Contact c = READ_CONTACT(HOST_S(11) + i);
     uint owner = archiveOwner(c);
     if (owner == ARCHIVE_NONE) return;
     uint k = ALOAD(gScratchAtomics[arHead(owner)]);
@@ -6648,7 +6653,8 @@ void archive_scatter(uint3 tid : SV_DispatchThreadID)
     for (uint h = slot / ARCHIVE_ROWS; h > 0u && h < 4096u; h--)
         k = ALOAD(gScratchAtomics[arNext(k)]);
     c._pad1 = asfloat(archiveKey(gColliders[c.colliderA], gColliders[c.colliderB]));
-    gContacts[archiveRow(k, slot % ARCHIVE_ROWS)] = c;
+    c.alive = 1u;
+    STORE_NEW_CONTACT(archiveRow(k, slot % ARCHIVE_ROWS), 0u, c);
 }
 
 // archive_emit, after the broadphase (4,096 threads striding over this step's touched
@@ -6756,6 +6762,14 @@ void archive_seal(uint3 tid : SV_DispatchThreadID)
         ASTORE(gScratchAtomics[arCursor(body)], 0u);
     }
 }
+#else
+// Persistent rows off WGSL hosts (SPIR-V checks): no archive.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_count(uint3 tid : SV_DispatchThreadID) {}
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_scatter(uint3 tid : SV_DispatchThreadID) {}
 #endif
 
 [shader("compute")]

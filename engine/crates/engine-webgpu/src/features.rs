@@ -95,6 +95,26 @@ pub enum GridLayout {
     Fixed,
 }
 
+/// What a world with sleep does with the contacts of pairs at rest ([`EngineFeatures::resting_contacts`];
+/// `World` applies it when sleep is on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RestingContacts {
+    /// The sleep archive (the shipped default): a body falling asleep keeps its resting
+    /// rows, a sleeper a moving body touches forms all its resting pairs in that step,
+    /// and woken pairs restart from their archived impulses and stiffness. A sleeping
+    /// pair costs nothing per step. Canonical and persistent contacts; compact contacts
+    /// keep the carry.
+    #[default]
+    Archive,
+    /// The resting-pair carry (opt-out, `ENGINE_REST=carry`): every pair at rest is
+    /// re-emitted and kept each step (the earlier default; costs a row per resting
+    /// contact every step).
+    Carry,
+    /// Neither (measurement, `ENGINE_REST=drop`): a sleeping pair keeps no rows and a
+    /// woken one restarts cold.
+    Drop,
+}
+
 /// The engine's internal path switches. Every variant computes the same physics
 /// within its documented tolerance; the defaults are the measured fastest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +151,8 @@ pub struct EngineFeatures {
     /// Keep the resting-pair carry when a world enables the sleep archive (which turns it
     /// off by default; `ENGINE_REST=keep`): the behaviour before that change.
     pub carry_with_archive: bool,
+    /// Resting contacts in worlds with sleep (`World`; [`RestingContacts::Archive`] by default).
+    pub resting_contacts: RestingContacts,
     pub grid: GridLayout,
     /// Hierarchical grid override (`ENGINE_GRID_LEVELS=on|off`; `None`: convex scenes).
     pub grid_levels: Option<bool>,
@@ -161,6 +183,7 @@ impl Default for EngineFeatures {
             archive_spread_rounds: 0,
             archive_touch_query: true,
             carry_with_archive: false,
+            resting_contacts: RestingContacts::Archive,
             grid: GridLayout::Split,
             grid_levels: None,
             color_headroom: Some(4),
@@ -205,6 +228,11 @@ impl EngineFeatures {
                 .unwrap_or(0),
             archive_touch_query: env_str("ENGINE_ARCHIVE_WAKE").as_deref() != Some("emit"),
             carry_with_archive: env_str("ENGINE_REST").as_deref() == Some("keep"),
+            resting_contacts: match env_str("ENGINE_REST").as_deref() {
+                Some("carry") => RestingContacts::Carry,
+                Some("drop") => RestingContacts::Drop,
+                _ => d.resting_contacts,
+            },
             grid: match env_str("ENGINE_GRID").as_deref() {
                 Some("scaled") => GridLayout::Scaled,
                 Some("fixed") => GridLayout::Fixed,
