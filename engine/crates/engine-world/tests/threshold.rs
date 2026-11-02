@@ -266,6 +266,35 @@ fn run_world_among(
             }
         }
         w.step().unwrap();
+        // THRESHOLD_TRACE=path (probe): every body's GPU record after each step, one line
+        // a body (`frame body flags position orientation linear angular`, f32 bits), to
+        // find where two policies' runs of one shot first differ.
+        if let Ok(path) = std::env::var("THRESHOLD_TRACE") {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            let bits = |v: &[f32]| {
+                v.iter()
+                    .map(|x| format!("{:08x}", x.to_bits()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            for (i, b) in w.sim().download_bodies().iter().enumerate() {
+                writeln!(
+                    f,
+                    "{n} {i} {:x} {} {} {} {}",
+                    b.flags,
+                    bits(&b.position),
+                    bits(&b.orientation),
+                    bits(&b.linear_vel),
+                    bits(&b.angular_vel)
+                )
+                .unwrap();
+            }
+        }
         // A piece starts with its parent's rigid motion: right after the split its
         // origin (the instance frame carried along) is where its parent's was.
         for (at, parent, pose, children) in fresh.iter().filter(|s| s.0 + 1 == n) {
