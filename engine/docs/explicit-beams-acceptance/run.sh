@@ -10,10 +10,11 @@ D=docs/explicit-beams-acceptance
 : "${ROR_BIN:?set ROR_BIN to the ror_ref harness binary}"
 : "${CONTENT:?set CONTENT to the RigsOfRods/content folder}"
 cargo build --release -p engine-webgpu --bin explicit_beams_scaling
-for v in "agora_s:$CONTENT/agora/95bbUID-agoras.truck" \
+# The BeamNG-resolution JBeam car first: the target class of vehicle.
+for v in "jbeam_car:$D/vehicles/rubble_hires_jbeam.truck" \
+         "agora_s:$CONTENT/agora/95bbUID-agoras.truck" \
          "agora_l:$CONTENT/agora/95bbUID-agoral.truck" \
-         "sedan:$D/vehicles/rubble_sedan_ror.truck" \
-         "jbeam_car:$D/vehicles/rubble_hires_jbeam.truck"; do
+         "sedan:$D/vehicles/rubble_sedan_ror.truck"; do
     name=${v%%:*}
     file=${v#*:}
     mkdir -p "$D/$name"
