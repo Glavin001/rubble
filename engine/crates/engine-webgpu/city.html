@@ -134,6 +134,7 @@
       if (world && run) {
         // A fresh world on the same device, as the native benchmark builds one per scenario.
         world.cityRebuild(city, page);
+        if (qs.get('rest') === 'carry') world.setCarryRest(true);
       }
       scenario = next;
       run = newRun();
