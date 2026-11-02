@@ -43,6 +43,10 @@ pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/so
 pub const EXPLICIT_BEAMS_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams.wgsl"));
 
+/// [`EXPLICIT_BEAMS_WGSL`] with 512 lanes per vehicle, for large vehicles.
+pub const EXPLICIT_BEAMS_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide.wgsl"));
+
 /// The MPM material probe (`slang/kernels/mpm_material_probe.slang`, entry
 /// `mpm_material_probe`): runs `physics/mpm_material.slang` on test cases so
 /// `tests/mpm_material.rs` can compare it with the engine-terrain CPU mirror.

@@ -11,7 +11,7 @@
 //! [`ExplicitBeamsGpu::positions`], [`ExplicitBeamsGpu::velocities`] and
 //! [`ExplicitBeamsGpu::beams`].
 
-use crate::EXPLICIT_BEAMS_WGSL;
+use crate::{EXPLICIT_BEAMS_WGSL, EXPLICIT_BEAMS_WIDE_WGSL};
 use engine_softbody::explicit_beams::ExplicitBeams;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -139,7 +139,12 @@ impl ExplicitBeamsGpu {
                 v.boxes.len() as u32,
             ]);
             vehicle_recs.push([cand_off, v.candidates.len() as u32, group_off, group_count]);
-            vehicle_recs.push([flags, v.ground.to_bits(), v.collision_range.to_bits(), 0]);
+            vehicle_recs.push([
+                flags,
+                v.ground.to_bits(),
+                v.collision_range.to_bits(),
+                grid_cell(v).to_bits(),
+            ]);
             for n in &v.nodes {
                 nodes.push([n.pos.x, n.pos.y, n.pos.z, n.mass]);
                 nodes.push([n.vel.x, n.vel.y, n.vel.z, n.friction]);
@@ -200,6 +205,10 @@ impl ExplicitBeamsGpu {
         debug_assert!(slots.iter().flatten().all(|&s| s != u32::MAX));
         let inc_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
+        // The self-collision grid's sorted runs, at each vehicle's candidate offset.
+        let grid_base = beams.len() as u32;
+        beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
+        let grid = vehicles.iter().any(|v| grid_cell(v) > 0.0) as u32;
         let slot_base = lists.len() as u32;
         lists.extend(slots.iter().flatten());
         let mut statics = vehicle_recs;
@@ -210,7 +219,15 @@ impl ExplicitBeamsGpu {
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams"),
-            source: wgpu::ShaderSource::Wgsl(EXPLICIT_BEAMS_WGSL.into()),
+            // Large vehicles get twice the lanes (more loads in flight per step).
+            source: wgpu::ShaderSource::Wgsl(
+                if vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS) {
+                    EXPLICIT_BEAMS_WIDE_WGSL
+                } else {
+                    EXPLICIT_BEAMS_WGSL
+                }
+                .into(),
+            ),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("explicit_beams_frame"),
@@ -249,8 +266,8 @@ impl ExplicitBeamsGpu {
             group_total,
             inc_base,
             slot_base,
-            0,
-            0,
+            grid_base,
+            grid,
             0,
         ];
         let params = init(
@@ -263,6 +280,7 @@ impl ExplicitBeamsGpu {
             bytemuck::cast_slice(&statics),
             storage,
         );
+        let list_len = lists.len();
         let lists = init(
             "explicit-beams-lists",
             bytemuck::cast_slice(&lists),
@@ -281,6 +299,11 @@ impl ExplicitBeamsGpu {
             storage,
         );
         let misc = init("explicit-beams-misc", bytemuck::cast_slice(&misc), state);
+        let next = init(
+            "explicit-beams-grid-next",
+            bytemuck::cast_slice(&vec![0u32; list_len.max(1)]),
+            storage,
+        );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("explicit-beams"),
             layout: &pipeline.get_bind_group_layout(0),
@@ -293,6 +316,7 @@ impl ExplicitBeamsGpu {
                 (5, &acc),
                 (6, &groups),
                 (7, &misc),
+                (8, &next),
             ]
             .map(|(binding, b)| wgpu::BindGroupEntry {
                 binding,
@@ -411,6 +435,33 @@ impl ExplicitBeamsGpu {
         self.queue.submit([enc.finish()]);
     }
 
+    /// Submit `dispatches` dispatches of `steps` steps each in one compute pass (the
+    /// same simulation as one frame of their product): measures what a dispatch per
+    /// step costs. Does not wait.
+    pub fn frame_split(&mut self, steps: u32, dispatches: u32) {
+        if self.spans.is_empty() {
+            return;
+        }
+        self.words[0] = steps;
+        self.queue
+            .write_buffer(&self.params, 0, bytemuck::cast_slice(&self.words));
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("explicit_beams_split"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.group, &[]);
+            for _ in 0..dispatches {
+                pass.dispatch_workgroups(self.spans.len() as u32, 1, 1);
+            }
+        }
+        self.queue.submit([enc.finish()]);
+    }
+
     /// Block until submitted frames have run.
     pub fn wait(&self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
@@ -517,6 +568,34 @@ impl ExplicitBeamsGpu {
             })
             .collect()
     }
+}
+
+/// Beams above which a vehicle runs on the wide (512-lane) module.
+const WIDE_BEAMS: usize = 2048;
+
+/// Contacters above which self-collision uses the grid (below, testing every pair
+/// spreads better over the lanes).
+const GRID_MIN_CANDIDATES: usize = 64;
+
+/// The self-collision grid's cell size for a vehicle (0: all pairs): its median
+/// collision triangle's box at spawn, padded by the contact range, so a typical
+/// triangle covers at most 2 cells a side (a large one more, up to the kernel's
+/// limit, past which it tests every contacter).
+fn grid_cell(v: &ExplicitBeams) -> f32 {
+    if v.candidates.len() <= GRID_MIN_CANDIDATES || v.triangles.is_empty() {
+        return 0.0;
+    }
+    let mut extents: Vec<f32> = v
+        .triangles
+        .iter()
+        .map(|t| {
+            let p = t.nodes.map(|n| v.nodes[n as usize].pos);
+            let span = p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
+            span.max_element()
+        })
+        .collect();
+    extents.sort_by(f32::total_cmp);
+    (extents[extents.len() / 2] + 2.0 * v.collision_range).max(0.05)
 }
 
 /// What a renderer needs besides a trace of `copies` vehicles of one `.truck` file,

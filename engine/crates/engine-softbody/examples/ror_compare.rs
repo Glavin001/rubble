@@ -63,9 +63,23 @@ fn main() {
             for n in &mut sim.nodes {
                 n.pos.y += 0.02 - lowest;
             }
-            sim.run(secs);
+            let steps = (secs / engine_softbody::explicit_beams::STEP).round() as u32;
+            let (mut total, mut most) = (0u64, 0u32);
+            for i in 0..steps {
+                if i % 33 == 0 {
+                    sim.rebase_origin();
+                }
+                sim.step();
+                total += u64::from(sim.last_contacts);
+                most = most.max(sim.last_contacts);
+            }
             let (broken, bent) = sim.damage();
-            println!("after {secs} s: broken {broken}, bent {bent}");
+            println!(
+                "after {secs} s: broken {broken}, bent {bent}; self-collision contacts per step: mean {:.1}, max {most} ({} triangles, {} contacters)",
+                total as f64 / f64::from(steps.max(1)),
+                sim.triangles.len(),
+                sim.candidates.len()
+            );
             for (i, b) in sim
                 .beams
                 .iter()

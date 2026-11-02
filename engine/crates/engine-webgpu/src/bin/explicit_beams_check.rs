@@ -314,6 +314,21 @@ fn run_bench(
                 );
             }
         }
+        // `split=1`: 33 steps as 33 one-step dispatches in one pass, against one
+        // 33-step dispatch: the difference is 32 dispatches' overhead.
+        if kv.get("split") == Some(&"1") {
+            for (steps, dispatches) in [(33u32, 1u32), (1, 33), (1, 99)] {
+                let t = Instant::now();
+                for _ in 0..60 {
+                    gpu.frame_split(steps, dispatches);
+                }
+                gpu.wait();
+                println!(
+                    "  {n} vehicles, {dispatches:3} dispatches of {steps:2} steps in one pass: {:.3} ms per frame",
+                    t.elapsed().as_secs_f64() * 1e3 / 60.0
+                );
+            }
+        }
         // The fixed cost: a frame of a single step, submit to completion.
         let mut one: Vec<f64> = (0..60)
             .map(|_| {

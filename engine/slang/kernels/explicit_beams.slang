@@ -13,7 +13,9 @@
 //   beams      force, kind rules, yield, break test; the force on each end goes to
 //              that end's incidence entry; a breaking group master
 //              records its index in its group slot (atomic minimum)
-//   collide    contacters against the vehicle's collision triangles, forces into
+//   collide    contacters against the vehicle's collision triangles (all pairs, or
+//              with a grid cell size the contacters in the cells each triangle's
+//              box covers: the same contacts, fewer tests), forces into
 //              per-node integer atomics in fixed point (1/32 N); a node's current
 //              force is its force slot plus its incidence entries plus its accumulator
 //
@@ -31,7 +33,7 @@
 // Records (host: explicit_beams_gpu.rs):
 //   gStatic  (read-only uint4) per vehicle 4 records: (nodeOff, nodeCount, beamOff,
 //            beamCount), (triOff, triCount, boxOff, boxCount), (candOff, candCount,
-//            groupOff, groupCount), (flags, ground bits, range bits, 0); at
+//            groupOff, groupCount), (flags, ground bits, range bits, grid cell bits); at
 //            nodeInfoBase per node (flags, incidence start, incidence count, 0); at
 //            beamBase per beam 3 records: (a, b, kind | type << 8, group as int),
 //            (k, c, limit k, limit c), (short bound, long bound, plastic, L0) as
@@ -48,6 +50,7 @@
 //   gAcc     per node 3 × int: self-collision force in 1/32 N.
 //   gGroups  two parities × per vehicle group slot: index (local) of the first
 //            breaking master, 0xFFFFFFFF when none.
+//   gNext    per candidate (gLists position) its grid bucket | rank in it << 10.
 //   gMisc    per vehicle (origin bits xyz, steps run); then per triangle
 //            (wait, idle) as int bits, hit this step (0 between steps).
 
@@ -87,8 +90,8 @@ struct Params
     uint groupTotal; // group slots per parity (all vehicles)
     uint incBase; // gBeams record of incidence entry 0's force
     uint slotBase; // gLists entry of beam 0's two incidence positions
-    uint pad0;
-    uint pad1;
+    uint gridBase; // gBeams record of the self-collision grid's sorted runs
+    uint grid; // nonzero when any vehicle uses the grid (the scan phase runs)
     uint pad2;
 };
 
@@ -111,11 +114,34 @@ struct Surface
 [[vk::binding(5, 0)]] RWStructuredBuffer<Atomic<int>> gAcc;
 [[vk::binding(6, 0)]] RWStructuredBuffer<Atomic<uint>> gGroups;
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint4> gMisc;
+[[vk::binding(8, 0)]] RWStructuredBuffer<uint> gNext;
 
 // Nonzero when a self-collision hit may have left forces in gAcc since the node
 // phase last read and cleared it (set at frame start, since the last frame's
 // last step may have hit): without one, every accumulator is zero.
 groupshared uint gsHit;
+
+// Lanes per vehicle (one workgroup): 256, or 512 for large vehicles (a second
+// module, ENGINE: EXPLICIT_BEAMS_WIDE_WGSL).
+#ifndef EB_LANES
+#define EB_LANES 256
+#endif
+static const uint LANES = EB_LANES;
+
+// Self-collision grid (vehicles whose cell size, gStatic record 3 .w, is nonzero),
+// a counting sort each step: the node phase clears the bucket counts; the beam
+// phase (positions final for the step) counts each contacter into its bucket,
+// keeping its rank (gNext: bucket | rank << 10); a scan phase turns the counts into
+// offsets (gsOff, one past the end at GRID_BUCKETS); a scatter writes each
+// contacter's position and node index to its bucket's run at gridBase. A
+// triangle then reads its buckets' runs, contiguous independent loads.
+static const uint GRID_BUCKETS = 1024u;
+static const uint GRID_MAX_CELLS = 64u;
+static const uint GRID_BLOCKS = 16u;
+groupshared Atomic<uint> gsCount[GRID_BUCKETS];
+groupshared uint gsOff[GRID_BUCKETS + 1u];
+groupshared uint gsPart[LANES];
+groupshared uint gsBlk[GRID_BLOCKS];
 
 // Storage writes visible to the whole workgroup.
 void sync()
@@ -509,77 +535,152 @@ void triangleFinish(uint gt)
     gMisc[mi] = uint4(asuint(wait), asuint(idle), 0u, 0u);
 }
 
+// A triangle as its contact tests see it.
+struct TriGeo
+{
+    uint mi;
+    uint4 tn;
+    float3 p0;
+    float3 n;
+    float3 ra;
+    float3 rb;
+    float3 rn;
+    bool solvable;
+    float3 lo;
+    float3 hi;
+};
+
+// Contacter node h against triangle t: the contact force into the accumulators
+// (h, and the triangle's corners by their weights) when h is within r of the face.
+void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount,
+                uint parity)
+{
+    uint4 tn = t.tn;
+    if (h == tn.x || h == tn.y || h == tn.z) return;
+    float4 P = gNodes[h * 3u];
+    float3 p = origin + P.xyz;
+    if (any(p < t.lo) || any(p > t.hi)) return;
+    float3 q = p - t.p0;
+    float alpha = 0.0;
+    float beta = 0.0;
+    float delta = 0.0;
+    if (t.solvable)
+    {
+        alpha = dot(t.ra, q);
+        beta = dot(t.rb, q);
+        delta = dot(t.rn, q);
+    }
+    float gamma = 1.0 - alpha - beta;
+    if (!(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r)) return;
+    gMisc[t.mi].w = 1u;
+    gsHit = 1u;
+    float3 nn = t.n;
+    if (delta < 0.0)
+    {
+        nn = -t.n;
+        delta = -delta;
+    }
+    float4 V = gNodes[h * 3u + 1u];
+    float4 P0 = gNodes[tn.x * 3u];
+    float4 P1 = gNodes[tn.y * 3u];
+    float4 P2 = gNodes[tn.z * 3u];
+    float3 v = V.xyz - (alpha * gNodes[tn.y * 3u + 1u].xyz + beta * gNodes[tn.z * 3u + 1u].xyz
+                        + gamma * gNodes[tn.x * 3u + 1u].xyz);
+    float mt = alpha * P1.w + beta * P2.w + gamma * P0.w;
+    float m = P.w * mt / (P.w + mt);
+    float3 fh = gNodes[h * 3u + 2u].xyz + beamSum(gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity, false)
+        + accForce(h);
+    float3 f = contactForce(fh, v, m, nn, boxSurface(), r - delta, V.w);
+    accAdd(h, f);
+    accAdd(tn.y, -alpha * f);
+    accAdd(tn.z, -beta * f);
+    accAdd(tn.x, -gamma * f);
+}
+
+// Triangle gt's geometry; mi < vehicles (none) when it waits this step.
+TriGeo triangleGeo(uint gt, float3 origin, float r)
+{
+    TriGeo t;
+    t.mi = gP.vehicles + gt;
+    t.tn = gStatic[gP.triBase + gt];
+    t.p0 = origin + gNodes[t.tn.x * 3u].xyz;
+    float3 p1 = origin + gNodes[t.tn.y * 3u].xyz;
+    float3 p2 = origin + gNodes[t.tn.z * 3u].xyz;
+    float3 u = p1 - t.p0;
+    float3 w = p2 - t.p0;
+    float3 cr = cross(u, w);
+    float cl = length(cr);
+    t.n = cl > 0.0 ? cr / cl : cr;
+    float det = dot(u, cross(w, t.n));
+    t.solvable = abs(det) > 1e-6;
+    float rd = t.solvable ? 1.0 / det : 0.0;
+    t.ra = cross(w, t.n) * rd;
+    t.rb = cross(t.n, u) * rd;
+    t.rn = cross(u, w) * rd;
+    t.lo = min(min(t.p0, p1), p2) - float3(r, r, r);
+    t.hi = max(max(t.p0, p1), p2) + float3(r, r, r);
+    return t;
+}
+
 // Lane `sub` of the `lanes` lanes of triangle gt tests candidates sub, sub + lanes, …
 // Forces go to fixed-point atomics, so the lanes' order does not change the sums.
 void triangleTest(uint gt, uint sub, uint lanes, float3 origin, float r, uint candOff, uint candCount,
                   uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    uint mi = gP.vehicles + gt;
-    if (asint(gMisc[mi].x) > 0) return;
-    uint4 tn = gStatic[gP.triBase + gt];
-    float3 p0 = origin + gNodes[tn.x * 3u].xyz;
-    float3 p1 = origin + gNodes[tn.y * 3u].xyz;
-    float3 p2 = origin + gNodes[tn.z * 3u].xyz;
-    float3 u = p1 - p0;
-    float3 w = p2 - p0;
-    float3 cr = cross(u, w);
-    float cl = length(cr);
-    float3 n = cl > 0.0 ? cr / cl : cr;
-    float det = dot(u, cross(w, n));
-    bool solvable = abs(det) > 1e-6;
-    float rd = solvable ? 1.0 / det : 0.0;
-    float3 ra = cross(w, n) * rd;
-    float3 rb = cross(n, u) * rd;
-    float3 rn = cross(u, w) * rd;
-    float3 lo = min(min(p0, p1), p2) - float3(r, r, r);
-    float3 hi = max(max(p0, p1), p2) + float3(r, r, r);
+    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
+    TriGeo t = triangleGeo(gt, origin, r);
     for (uint k = sub; k < candCount; k += lanes)
+        tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
+}
+
+// The grid's bucket of a cell.
+uint gridBucket(int3 c)
+{
+    return (uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u) & (GRID_BUCKETS - 1u);
+}
+
+// Triangle gt against the contacters in the grid cells its box (padded by r)
+// covers: each covered bucket's list once (two cells can share a bucket). A box
+// over more than GRID_MAX_CELLS cells tests every candidate instead. The lists
+// hold every contacter, so the contacts found are the all-pairs test's.
+void triangleGrid(uint gt, float3 origin, float r, float cell, uint candOff, uint candCount, uint beamOff,
+                  uint groupOff, uint groupCount, uint parity)
+{
+    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
+    TriGeo t = triangleGeo(gt, origin, r);
+    int3 c0 = int3(floor((t.lo - origin) / cell));
+    int3 c1 = int3(floor((t.hi - origin) / cell));
+    int3 span = c1 - c0 + int3(1, 1, 1);
+    if (span.x * span.y * span.z > int(GRID_MAX_CELLS))
     {
-        uint h = gLists[candOff + k];
-        if (h == tn.x || h == tn.y || h == tn.z) continue;
-        float4 P = gNodes[h * 3u];
-        float3 p = origin + P.xyz;
-        if (any(p < lo) || any(p > hi)) continue;
-        float3 q = p - p0;
-        float alpha = 0.0;
-        float beta = 0.0;
-        float delta = 0.0;
-        if (solvable)
-        {
-            alpha = dot(ra, q);
-            beta = dot(rb, q);
-            delta = dot(rn, q);
-        }
-        float gamma = 1.0 - alpha - beta;
-        if (!(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r)) continue;
-        gMisc[mi].w = 1u;
-        gsHit = 1u;
-        float3 nn = n;
-        if (delta < 0.0)
-        {
-            nn = -n;
-            delta = -delta;
-        }
-        float4 V = gNodes[h * 3u + 1u];
-        float4 P0 = gNodes[tn.x * 3u];
-        float4 P1 = gNodes[tn.y * 3u];
-        float4 P2 = gNodes[tn.z * 3u];
-        float3 v = V.xyz - (alpha * gNodes[tn.y * 3u + 1u].xyz + beta * gNodes[tn.z * 3u + 1u].xyz
-                            + gamma * gNodes[tn.x * 3u + 1u].xyz);
-        float mt = alpha * P1.w + beta * P2.w + gamma * P0.w;
-        float m = P.w * mt / (P.w + mt);
-        float3 fh = gNodes[h * 3u + 2u].xyz + beamSum(gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity, false)
-            + accForce(h);
-        float3 f = contactForce(fh, v, m, nn, boxSurface(), r - delta, V.w);
-        accAdd(h, f);
-        accAdd(tn.y, -alpha * f);
-        accAdd(tn.z, -beta * f);
-        accAdd(tn.x, -gamma * f);
+        for (uint k = 0u; k < candCount; k++)
+            tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
+        return;
     }
+    uint seen[GRID_MAX_CELLS];
+    uint count = 0u;
+    for (int x = c0.x; x <= c1.x; x++)
+        for (int y = c0.y; y <= c1.y; y++)
+            for (int z = c0.z; z <= c1.z; z++)
+            {
+                uint b = gridBucket(int3(x, y, z));
+                bool dup = false;
+                for (uint i = 0u; i < count; i++) dup = dup || seen[i] == b;
+                if (dup) continue;
+                seen[count] = b;
+                count++;
+                for (uint e = gsOff[b]; e < gsOff[b + 1u]; e++)
+                {
+                    float4 E = gBeams[gP.gridBase + candOff + e];
+                    float3 p = origin + E.xyz;
+                    if (any(p < t.lo) || any(p > t.hi)) continue;
+                    tryContact(t, asuint(E.w), origin, r, beamOff, groupOff, groupCount, parity);
+                }
+            }
 }
 
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(EB_LANES, 1, 1)]
 void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.x;
@@ -603,6 +704,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint flagsV = r3.x;
     float ground = asfloat(r3.y);
     float range = asfloat(r3.z);
+    float cell = asfloat(r3.w);
     bool fast = (flagsV & FLAG_FAST_INV_SQRT) != 0u;
 
     // Origin rebase: every lane reads node 0 before any lane moves it.
@@ -610,7 +712,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     sync();
     if (length(first) > REBASE_RADIUS)
     {
-        for (uint i = lane; i < nodeCount; i += 256u)
+        for (uint i = lane; i < nodeCount; i += LANES)
         {
             float4 P = gNodes[(nodeOff + i) * 3u];
             gNodes[(nodeOff + i) * 3u] = float4(P.xyz - first, P.w);
@@ -635,24 +737,93 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint step = stepBase + s;
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
-        for (uint i = lane; i < nodeCount; i += 256u)
+        for (uint i = lane; i < nodeCount; i += LANES)
             nodeUpdate(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
-        for (uint g = lane; g < groupCount; g += 256u) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
+        for (uint g = lane; g < groupCount; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
         if (s > 0u && candCount > 0u)
         {
-            for (uint t = lane; t < triCount; t += 256u) triangleFinish(triOff + t);
+            for (uint t = lane; t < triCount; t += LANES) triangleFinish(triOff + t);
         }
+        for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
         sync();
         if (lane == 0u) gsHit = 0u;
-        for (uint j = lane; j < beamCount; j += 256u) beamUpdate(beamOff + j, j, fast, groupOff, parity);
-        sync();
-        if (candCount > 0u)
+        if (cell > 0.0)
         {
-            // Up to 256 lanes per step: `lanes` per triangle, one per candidate when
+            for (uint c = lane; c < candCount; c += LANES)
+            {
+                float3 p = gNodes[gLists[candOff + c] * 3u].xyz;
+                uint b = gridBucket(int3(floor(p / cell)));
+                gNext[candOff + c] = b | (gsCount[b].add(1u) << 10);
+            }
+        }
+        for (uint j = lane; j < beamCount; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
+        sync();
+        if (gP.grid != 0u)
+        {
+            // Offsets: per lane its buckets' sum, a scan over blocks of lanes, then
+            // the blocks' totals, then each lane's buckets.
+            uint per = GRID_BUCKETS / LANES;
+            uint block = LANES / GRID_BLOCKS;
+            uint sum = 0u;
+            for (uint k = 0u; k < per; k++) sum += gsCount[lane * per + k].load();
+            gsPart[lane] = sum;
+            sync();
+            if (lane < GRID_BLOCKS)
+            {
+                uint run = 0u;
+                for (uint k = 0u; k < block; k++)
+                {
+                    uint x = gsPart[lane * block + k];
+                    gsPart[lane * block + k] = run;
+                    run += x;
+                }
+                gsBlk[lane] = run;
+            }
+            sync();
+            if (lane == 0u)
+            {
+                uint run = 0u;
+                for (uint k = 0u; k < GRID_BLOCKS; k++)
+                {
+                    uint x = gsBlk[k];
+                    gsBlk[k] = run;
+                    run += x;
+                }
+                gsOff[GRID_BUCKETS] = run;
+            }
+            sync();
+            uint run = gsPart[lane] + gsBlk[lane / block];
+            for (uint k = 0u; k < per; k++)
+            {
+                gsOff[lane * per + k] = run;
+                run += gsCount[lane * per + k].load();
+            }
+            sync();
+            if (cell > 0.0)
+            {
+                for (uint c = lane; c < candCount; c += LANES)
+                {
+                    uint br = gNext[candOff + c];
+                    uint h = gLists[candOff + c];
+                    gBeams[gP.gridBase + candOff + gsOff[br & (GRID_BUCKETS - 1u)] + (br >> 10)] =
+                        float4(gNodes[h * 3u].xyz, asfloat(h));
+                }
+            }
+            sync();
+        }
+        if (candCount > 0u && cell > 0.0)
+        {
+            for (uint t = lane; t < triCount; t += LANES)
+                triangleGrid(triOff + t, origin, range, cell, candOff, candCount, beamOff, groupOff, groupCount,
+                             parity);
+        }
+        else if (candCount > 0u)
+        {
+            // Up to LANES lanes per step: `lanes` per triangle, one per candidate when
             // they fit.
-            uint lanes = clamp(256u / max(triCount, 1u), 1u, candCount);
-            uint stride = (256u / lanes) * lanes;
+            uint lanes = clamp(LANES / max(triCount, 1u), 1u, candCount);
+            uint stride = (LANES / lanes) * lanes;
             for (uint p = lane; p < triCount * lanes && lane < stride; p += stride)
                 triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
                              groupOff, groupCount, parity);
@@ -661,14 +832,14 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     }
     if (gP.steps > 0u && candCount > 0u)
     {
-        for (uint t = lane; t < triCount; t += 256u) triangleFinish(triOff + t);
+        for (uint t = lane; t < triCount; t += LANES) triangleFinish(triOff + t);
     }
     // The last step's group breaks, for a read-back (the next node phase applies
     // them to the forces).
     if (gP.steps > 0u && groupCount > 0u)
     {
         uint last = (stepBase + gP.steps - 1u) & 1u;
-        for (uint j = lane; j < beamCount; j += 256u) groupDrops(beamOff + j, beamOff, groupOff, last, true);
+        for (uint j = lane; j < beamCount; j += LANES) groupDrops(beamOff + j, beamOff, groupOff, last, true);
     }
     if (lane == 0u) gMisc[v] = uint4(misc.xyz, stepBase + gP.steps);
 }

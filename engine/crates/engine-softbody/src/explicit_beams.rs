@@ -308,6 +308,8 @@ pub struct ExplicitBeams {
     pub ground: f32,
     /// Self-collision range r (m).
     pub collision_range: f32,
+    /// Self-collision contacts in the last step (a statistic; not simulated state).
+    pub last_contacts: u32,
     pub settings: ExplicitBeamsSettings,
     /// Turbulence noise state (starts at 1).
     pub noise: i32,
@@ -436,6 +438,7 @@ impl ExplicitBeams {
             origin: Vec3::ZERO,
             ground: 0.0,
             collision_range: DEFAULT_COLLISION_RANGE,
+            last_contacts: 0,
             settings,
             noise: 1,
             incidence: Vec::new(),
@@ -862,6 +865,7 @@ impl ExplicitBeams {
     }
 
     fn collision_pass(&mut self) {
+        self.last_contacts = 0;
         let r = self.collision_range;
         let h = STEP;
         for t in 0..self.triangles.len() {
@@ -894,6 +898,7 @@ impl ExplicitBeams {
                     continue;
                 };
                 hit = true;
+                self.last_contacts += 1;
                 let node = self.nodes[hn as usize];
                 let (n0, n1, n2) = (
                     self.nodes[i0 as usize],

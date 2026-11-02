@@ -500,6 +500,26 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             "storageBarrier(); workgroupBarrier();",
         );
     std::fs::write(&beams, text)?;
+    // The same module with 512 lanes per vehicle, for large vehicles.
+    let wide = wgsl_dir.join("explicit_beams_wide.wgsl");
+    compile_with_defines(
+        &slang_root.join("kernels/explicit_beams.slang"),
+        "explicit_beams_frame",
+        SlangTarget::Wgsl,
+        &wide,
+        &[],
+        &[("ENGINE_WGSL", "1"), ("EB_LANES", "512")],
+    )?;
+    let text = std::fs::read_to_string(&wide)?
+        .replace(
+            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+            "storageBarrier(); workgroupBarrier();",
+        )
+        .replace(
+            "storageBarrier(); textureBarrier(); workgroupBarrier();",
+            "storageBarrier(); workgroupBarrier();",
+        );
+    std::fs::write(&wide, text)?;
     // MPM material probe (tests/mpm_material.rs): standalone, with its own bindings,
     // so it stays out of the world's pipeline table.
     compile_with_defines(
