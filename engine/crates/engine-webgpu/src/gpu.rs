@@ -978,6 +978,18 @@ impl WgpuSim {
         self.color_headroom = None;
     }
 
+    /// The resting-pair carry (`EngineFeatures::carry_rest`) from the next step on. Off
+    /// (`ENGINE_REST=drop`): a pair whose bodies are both at rest is no longer
+    /// re-emitted each step, so sleeping pairs keep no contact rows.
+    pub fn set_carry_rest(&mut self, on: bool) {
+        self.carry_rest = on;
+    }
+
+    /// Whether the resting-pair carry runs ([`Self::set_carry_rest`]).
+    pub fn carry_rest(&self) -> bool {
+        self.carry_rest
+    }
+
     /// The browser host's step modes (rigid_plan::StepModes::default): the
     /// control path for checks that matched the former JS host (world-host.mjs).
     pub fn use_control_modes(&mut self) {

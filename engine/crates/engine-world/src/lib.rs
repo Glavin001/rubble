@@ -774,6 +774,16 @@ impl World {
         self.sim.set_gpu_timing(mode)
     }
 
+    /// The resting-pair carry ([`EngineFeatures::carry_rest`]) from the next step on.
+    pub fn set_carry_rest(&mut self, on: bool) {
+        self.sim.set_carry_rest(on);
+    }
+
+    /// Whether the resting-pair carry runs ([`Self::set_carry_rest`]).
+    pub fn carry_rest(&self) -> bool {
+        self.sim.carry_rest()
+    }
+
     /// GPU time of the last step, every pass of it (`RUBBLE_GPU_TIMING=1`; else None).
     pub fn last_step_gpu_ms(&self) -> Option<f64> {
         self.last_gpu_ms

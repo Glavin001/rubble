@@ -51,6 +51,9 @@
       <label id="sleepLabel" for="sleepToggle" title="Let resting bodies fall asleep (URL: sleep=on|off)">
         <input type="checkbox" id="sleepToggle"> Sleep
       </label>
+      <label for="dropCarry" title="Experimental: stop re-emitting the contacts of pairs at rest every step (URL: rest=drop). Faster with many sleepers; failed the threshold accuracy gate (engine/docs/large-maps-progress.md)">
+        <input type="checkbox" id="dropCarry"> Drop resting carry
+      </label>
       <button id="resetBtn" type="button" title="Restart this scene from its first step (R)" disabled>Reset</button>
       <a href="./" style="color:#b8d7ff;margin-left:10px">All demos</a>
       <a href="./vehicle.html" style="color:#b8d7ff;margin-left:10px">Drive a vehicle →</a>
@@ -328,6 +331,16 @@
       setSleepEnabled(sleepToggle.checked);
       const next = new URL(location.href);
       next.searchParams.set('sleep', sleepToggle.checked ? 'on' : 'off');
+      history.replaceState(null, '', next.href);
+    });
+
+    // The resting-pair carry, switched live (World::set_carry_rest).
+    const dropCarry = document.getElementById('dropCarry');
+    dropCarry.checked = !world.carryRest();
+    dropCarry.addEventListener('change', () => {
+      world.setCarryRest(!dropCarry.checked);
+      const next = new URL(location.href);
+      next.searchParams.set('rest', dropCarry.checked ? 'drop' : 'carry');
       history.replaceState(null, '', next.href);
     });
 
