@@ -53,6 +53,8 @@ done
 
 # The Galleon stern (broadside.html) and the Shardwright commit that adds it.
 GALLEON_SHARDWRIGHT_REV=8c8036242076351deaa037d97d0eb3669578b695
+# The timber yard (timber.html: a timber house and two plank walls) and its Shardwright commit.
+TIMBER_SHARDWRIGHT_REV=03de08b46d44d12ba3fb47f98d8fcdd235381055
 
 # name  source (in the Shardwright checkout, or gen:NAME)  config  level for the oracle  [Shardwright commit]
 ASSETS=(
@@ -60,6 +62,7 @@ ASSETS=(
   "veneer-house-hull16 benchmarks/assets/veneer_house.glb $ENGINE/crates/engine-webgpu/fracture/assets/veneer-house-hull16.toml 0"
   "masonry-arch benchmarks/assets/masonry_arch.glb benchmarks/configs/building_lite.toml 0"
   "galleon-stern gen:galleon_stern $ENGINE/crates/engine-webgpu/fracture/assets/galleon-stern.toml 2 $GALLEON_SHARDWRIGHT_REV"
+  "timber-yard gen:timber_yard $ENGINE/crates/engine-webgpu/fracture/assets/timber-yard.toml 2 $TIMBER_SHARDWRIGHT_REV"
 )
 
 # shardwright REV: point SW, PF and SW_REV at a built Shardwright for that commit: the

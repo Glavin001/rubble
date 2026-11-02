@@ -16,9 +16,15 @@ use rubble::*;
 use wasm_bindgen::prelude::*;
 
 pub mod broadside;
-/// Broadside (`broadside.html`): its scene stepped in Rust, the page draws its poses.
+/// Broadside (`broadside.html`) and the timber yard (`timber.html`): their scenes stepped
+/// in Rust, the page draws their poses.
 mod broadside_page;
 pub use broadside_page::*;
+/// What a range page plays (also drawn natively by engine-viewer's `world_viewer`).
+pub mod play;
+/// The shooting range under Broadside and the timber yard.
+pub mod range;
+pub mod timber_yard;
 
 /// The large-maps city (`city.html`): `rubble::city` placed over frames.
 mod city;

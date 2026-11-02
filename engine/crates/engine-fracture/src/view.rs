@@ -149,6 +149,23 @@ impl Orbit {
         self.look_at(target);
     }
 
+    /// An orbit view from `eye` about `target`: orbit mode (drag orbits, a click shoots at
+    /// the pointer), its target, distance and angles set so the eye is at `eye` (narrow
+    /// viewports back off from it, as any orbit does).
+    pub fn orbit_shot(&mut self, eye: [f64; 3], target: [f64; 3]) {
+        let back = sub(eye, target);
+        let d = length(back);
+        if d < 1e-9 {
+            return;
+        }
+        let b = norm(back);
+        self.mode = ViewMode::Orbit;
+        self.target = target;
+        self.distance = d;
+        self.pitch = b[1].clamp(-1.0, 1.0).asin();
+        self.yaw = b[0].atan2(b[2]);
+    }
+
     /// Eye position; in orbit, narrow viewports back off so the scene still fits.
     pub fn eye(&self, aspect: f64) -> [f64; 3] {
         match self.mode {
