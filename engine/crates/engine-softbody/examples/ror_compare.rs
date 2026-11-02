@@ -7,12 +7,22 @@
 //! cargo run -p engine-softbody --release --example ror_compare -- spawn <file.truck> <nodes.csv> [beams.csv]
 //! # the body without wheels/engine/brakes, for both sides
 //! cargo run -p engine-softbody --release --example ror_compare -- bare <in.truck> <out.truck>
+//! # the procedural sedan as a .truck file for both sides: stations along its length
+//! # (21 by default; more for a higher resolution), minimum node mass, bare=1 body only
+//! cargo run -p engine-softbody --release --example ror_compare -- sedan <out.truck> stations=61 minimass=10
+//! # a BeamNG JBeam vehicle (a directory of .jbeam files, optional .pc config) as .truck
+//! cargo run -p engine-softbody --release --example ror_compare -- jbeam <dir-or-file> <out.truck> [config.pc]
+//! # Rubble's high-resolution test car (JBeam) as .truck
+//! cargo run -p engine-softbody --release --example ror_compare -- hires <out.truck> [node_weight=1] [spring=3e6] [damp=250]
 //! # Rubble's explicit-beams solver on the harness's `free` scene, against RoR's node dump
 //! cargo run -p engine-softbody --release --example ror_compare -- free <file.truck> <nodes.csv> pos=x,y,z vel=… box=… drag=0 secs=1
 //! ```
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
-use engine_softbody::procedural::strip_truck_sections;
+use engine_softbody::hires::{hires_car_jbeam, HiresParams};
+use engine_softbody::jbeam::load_jbeam;
+use engine_softbody::procedural::{car_truck, car_truck_bare, strip_truck_sections, CarParams};
 use engine_softbody::truck::{load_truck, parse_truck};
+use engine_softbody::truck_export::{desc_to_truck, TyreDefaults};
 use glam::Vec3;
 
 fn csv(path: &str) -> Vec<Vec<f64>> {
@@ -41,6 +51,124 @@ fn main() {
             .unwrap();
         }
         Some("free") => free(&a[1], &a[2], &a[3..]),
+        // The vehicle standing on the ground (lowest node 2 cm up) for secs=: the
+        // beams that broke or bent, with their nodes, kind and strength.
+        Some("rest") => {
+            let text = std::fs::read_to_string(&a[1]).unwrap();
+            let secs: f32 = kv(&a[2..], "secs").map_or(2.0, |s| s.parse().unwrap());
+            let mut sim =
+                ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, Default::default())
+                    .unwrap();
+            let lowest = sim.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+            for n in &mut sim.nodes {
+                n.pos.y += 0.02 - lowest;
+            }
+            sim.run(secs);
+            let (broken, bent) = sim.damage();
+            println!("after {secs} s: broken {broken}, bent {bent}");
+            for (i, b) in sim
+                .beams
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.broken)
+                .take(40)
+            {
+                println!(
+                    "broken beam {i}: nodes {}-{} ({:.2} / {:.2} kg) kind {:?} strength {:.0}",
+                    b.a,
+                    b.b,
+                    sim.nodes[b.a as usize].mass,
+                    sim.nodes[b.b as usize].mass,
+                    b.kind,
+                    b.strength
+                );
+            }
+        }
+        Some("jbeam") | Some("hires") => {
+            let (owned, out): (Vec<(String, String)>, &str) = if a[0] == "hires" {
+                // Tunables: node_weight= (kg), spring= (N/m for a 0.15 m beam), damp=.
+                let d = HiresParams::default();
+                let p = HiresParams {
+                    node_weight: kv(&a[2..], "node_weight")
+                        .map_or(d.node_weight, |s| s.parse().unwrap()),
+                    spring: kv(&a[2..], "spring").map_or(d.spring, |s| s.parse().unwrap()),
+                    damp: kv(&a[2..], "damp").map_or(d.damp, |s| s.parse().unwrap()),
+                    ..d
+                };
+                let (text, _) = hires_car_jbeam(&p);
+                (vec![("hires.jbeam".into(), text)], &a[1])
+            } else {
+                let path = std::path::Path::new(&a[1]);
+                let files: Vec<std::path::PathBuf> = if path.is_dir() {
+                    let mut v: Vec<_> = std::fs::read_dir(path)
+                        .unwrap()
+                        .filter_map(|e| e.ok().map(|e| e.path()))
+                        .filter(|p| p.extension().is_some_and(|x| x == "jbeam"))
+                        .collect();
+                    v.sort();
+                    v
+                } else {
+                    vec![path.to_path_buf()]
+                };
+                (
+                    files
+                        .iter()
+                        .map(|f| (f.display().to_string(), std::fs::read_to_string(f).unwrap()))
+                        .collect(),
+                    &a[2],
+                )
+            };
+            let config = a
+                .get(3)
+                .filter(|_| a[0] == "jbeam")
+                .map(|p| std::fs::read_to_string(p).unwrap());
+            let files: Vec<(&str, &str)> = owned
+                .iter()
+                .map(|(n, t)| (n.as_str(), t.as_str()))
+                .collect();
+            let desc = load_jbeam(&files, config.as_deref()).unwrap();
+            for w in &desc.warnings {
+                println!("jbeam warning: {w}");
+            }
+            let (text, warnings) = desc_to_truck(&desc, TyreDefaults::for_vehicle(&desc));
+            for w in &warnings {
+                println!("conversion: {w}");
+            }
+            let sim = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, Default::default())
+                .unwrap();
+            println!(
+                "{out}: {} nodes ({} in the JBeam), {} beams, {} collision triangles, {:.1} kg",
+                sim.nodes.len(),
+                desc.nodes.len(),
+                sim.beams.len(),
+                sim.triangles.len(),
+                sim.nodes.iter().map(|n| n.mass).sum::<f32>()
+            );
+            std::fs::write(out, text).unwrap();
+        }
+        Some("sedan") => {
+            let p = CarParams {
+                stations: kv(&a[2..], "stations").map_or(21, |s| s.parse().unwrap()),
+                minimass: kv(&a[2..], "minimass").map_or(10.0, |s| s.parse().unwrap()),
+                ..CarParams::sedan()
+            };
+            let text = if kv(&a[2..], "bare") == Some("1") {
+                car_truck_bare(&p)
+            } else {
+                car_truck(&p)
+            };
+            let sim = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, Default::default())
+                .unwrap();
+            println!(
+                "{}: {} stations, {} nodes, {} beams, {} collision triangles",
+                a[1],
+                p.stations,
+                sim.nodes.len(),
+                sim.beams.len(),
+                sim.triangles.len()
+            );
+            std::fs::write(&a[1], text).unwrap();
+        }
         _ => eprintln!(
             "usage: ror_compare spawn <file.truck> <nodes.csv> [beams.csv] | bare <in> <out>"
         ),

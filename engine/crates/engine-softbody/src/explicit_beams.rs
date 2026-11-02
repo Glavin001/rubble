@@ -562,6 +562,25 @@ impl ExplicitBeams {
         Ok(s)
     }
 
+    /// Spawn a BeamNG JBeam vehicle (`files`: name and text of each `.jbeam`,
+    /// `config` an optional `.pc`) through its `.truck` form
+    /// ([`crate::truck_export::desc_to_truck`]), the same text Rigs of Rods runs:
+    /// pressure wheels become soft tyres. Also returns that text and the
+    /// conversion's warnings.
+    pub fn from_jbeam(
+        files: &[(&str, &str)],
+        config: Option<&str>,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+    ) -> Result<(Self, String, Vec<String>), String> {
+        let desc = crate::jbeam::load_jbeam(files, config)?;
+        let (text, warnings) =
+            crate::truck_export::desc_to_truck(&desc, crate::truck_export::TyreDefaults::for_vehicle(&desc));
+        let sim = Self::from_truck(&text, position, velocity, settings)?;
+        Ok((sim, text, warnings))
+    }
+
     /// Spawn a desc (no tyres): its nodes at `position` moving at `velocity`, its
     /// beams in the desc's order, contacters as the desc marks them.
     pub fn new(

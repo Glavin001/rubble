@@ -18,7 +18,7 @@ pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]
-pub use explicit_beams_gpu::{ExplicitBeamsGpu, GpuBeam};
+pub use explicit_beams_gpu::{render_scene_json, ExplicitBeamsGpu, GpuBeam};
 #[cfg(feature = "gpu")]
 pub use features::{
     ContactStorage, EngineFeatures, GridLayout, ManifoldPersistence, SimOptions, WarmHash,

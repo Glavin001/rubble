@@ -27,6 +27,7 @@ pub mod model;
 pub mod pack;
 pub mod procedural;
 pub mod truck;
+pub mod truck_export;
 pub mod visual;
 
 pub use damage::{damage_summary, SoftDamage};

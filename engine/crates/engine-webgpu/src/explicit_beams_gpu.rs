@@ -518,3 +518,56 @@ impl ExplicitBeamsGpu {
             .collect()
     }
 }
+
+/// What a renderer needs besides a trace of `copies` vehicles of one `.truck` file,
+/// their nodes concatenated in order (as a trace of [`ExplicitBeamsGpu::positions`]
+/// writes them): `{"vehicles", "nodes", "triangles", "tyres", "boxes"}` with every
+/// `cab` triangle (collision or not) and each tyre's node rings, offset per copy, and
+/// the static boxes given (centre, half extents). `extra` is appended inside the
+/// object (`,"key":…`).
+pub fn render_scene_json(
+    text: &str,
+    nodes_per_vehicle: usize,
+    copies: usize,
+    boxes: &[(Vec3, Vec3)],
+    extra: &str,
+) -> String {
+    let desc = engine_softbody::truck::load_truck(text);
+    let file = engine_softbody::truck::parse_truck(text);
+    let mut tris = Vec::new();
+    let mut tyres = Vec::new();
+    for k in 0..copies {
+        let off = k * nodes_per_vehicle;
+        tris.extend(desc.triangles.iter().map(|t| {
+            format!(
+                "[{},{},{}]",
+                off + t.nodes[0] as usize,
+                off + t.nodes[1] as usize,
+                off + t.nodes[2] as usize
+            )
+        }));
+        // Tyre nodes follow the truck's nodes, two rings of `rays` per wheel.
+        let mut base = desc.nodes.len();
+        for w in &file.wheels {
+            tyres.push(format!(
+                "{{\"axle\":[{},{}],\"first\":{},\"rays\":{}}}",
+                off + w.node1 as usize,
+                off + w.node2 as usize,
+                off + base,
+                w.rays
+            ));
+            base += 2 * w.rays as usize;
+        }
+    }
+    let boxes: Vec<String> = boxes
+        .iter()
+        .map(|(c, h)| format!("[{},{},{},{},{},{}]", c.x, c.y, c.z, h.x, h.y, h.z))
+        .collect();
+    format!(
+        "{{\"vehicles\":{copies},\"nodes\":{},\"triangles\":[{}],\"tyres\":[{}],\"boxes\":[{}]{extra}}}",
+        nodes_per_vehicle * copies,
+        tris.join(","),
+        tyres.join(","),
+        boxes.join(",")
+    )
+}

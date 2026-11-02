@@ -15,8 +15,9 @@
 //!   drive   rolling at `speed=` m/s (default 15) along the vehicle's forward axis
 //!   impact  as drive, into its own static wall 1 + 0.5 v m ahead (hit about 0.57 s
 //!           in at 15 m/s, inside the timed frames)
-//! Every run: `warm=` untimed frames (default 30, 0.5 s), then `frames=` timed frames
-//! (default 120, 2 s) of 33 steps of 0.5 ms. Both engines read one scene file.
+//! Every run: `warm=` untimed frames (default 0.5 s worth), then `frames=` timed
+//! frames (default 2 s worth) at `fps=` (default 60: 33 steps of 0.5 ms a frame; 120:
+//! 17 steps and an 8.33 ms budget). Both engines read one scene file.
 //!
 //! Timing. Rigs of Rods: wall time per frame with its own per-step thread pool policy.
 //! Rubble: the GPU time of each frame (timestamps around the frame's pass), the
@@ -28,7 +29,8 @@
 //! `max_gpu=` % (default 10), and records both. Per count it reports the mean of
 //! the trial means and its 95 % confidence interval, the p95 frame, and the
 //! speed-up (Rigs of Rods' mean over Rubble's, a 95 % interval over the paired
-//! trials' log ratios) with a verdict only when the interval excludes 1.
+//! trials' log ratios) with a verdict only when the interval excludes 1; and the
+//! peak frames: p99, maximum and the share of frames over the frame budget.
 //!
 //! Accuracy. In every run the first and last vehicle's end state (node positions,
 //! broken and bent beams, travel along the forward axis, and the crush: loss of
@@ -36,12 +38,16 @@
 //! Rigs of Rods against itself with the spawn speed 0.1 mm/s higher, the
 //! sensitivity a match cannot be expected to beat.
 //!
+//! `trace=<file>` (with `trace_scene=<json>`, `trace_every=`, `cols=` for the grid's
+//! columns) records the first scenario and count on Rubble's GPU for the crash
+//! viewer instead of benchmarking.
+//!
 //! Writes `<out>/results.json` (every frame time and comparison) and
 //! `<out>/summary.md`.
 
 use engine_softbody::explicit_beams::{ExplicitBeams, StaticBox};
 use engine_softbody::truck::parse_truck;
-use engine_webgpu::{default_device, ExplicitBeamsGpu};
+use engine_webgpu::{default_device, render_scene_json, ExplicitBeamsGpu};
 use glam::Vec3;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -49,10 +55,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const STEPS_PER_FRAME: u32 = 33;
-const FRAME_HZ: f32 = 60.0;
 /// Rubble's frame budget lines in the summary.
-const BUDGETS_MS: [f64; 2] = [4.0, 16.7];
+const BUDGETS_MS: [f64; 3] = [2.0, 4.0, 8.33];
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Scenario {
@@ -143,9 +147,17 @@ struct Scene {
     walls: Vec<Option<(Vec3, Vec3)>>,
 }
 
-fn scene(sc: Scenario, n: usize, g: &Geometry, speed: f32, seconds: f32, extra: f32) -> Scene {
+fn scene(
+    sc: Scenario,
+    n: usize,
+    g: &Geometry,
+    speed: f32,
+    seconds: f32,
+    extra: f32,
+    cols: Option<usize>,
+) -> Scene {
     let v = if sc == Scenario::Idle { 0.0 } else { speed };
-    let cols = (n as f64).sqrt().ceil() as usize;
+    let cols = cols.unwrap_or((n as f64).sqrt().ceil() as usize).max(1);
     let width = g.across.1 - g.across.0;
     let length = g.along.1 - g.along.0;
     let travel = speed * seconds + 20.0;
@@ -299,18 +311,19 @@ fn run_rubble(
     fleet: &[ExplicitBeams],
     warm: u32,
     frames: u32,
+    steps: u32,
 ) -> RubbleRun {
     let n = fleet.len();
     // Pipelined, with the GPU time of each frame.
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
     for _ in 0..warm {
-        gpu.frame(STEPS_PER_FRAME);
+        gpu.frame(steps);
     }
     gpu.wait();
     let timed = gpu.enable_frame_timing(frames);
     let t = Instant::now();
     for _ in 0..frames {
-        gpu.frame(STEPS_PER_FRAME);
+        gpu.frame(steps);
     }
     gpu.wait();
     let pipelined_ms = t.elapsed().as_secs_f64() * 1e3 / f64::from(frames);
@@ -324,13 +337,13 @@ fn run_rubble(
     // Blocking: submit to completion, every frame.
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
     for _ in 0..warm {
-        gpu.frame(STEPS_PER_FRAME);
+        gpu.frame(steps);
     }
     gpu.wait();
     let blocking_ms = (0..frames)
         .map(|_| {
             let t = Instant::now();
-            gpu.frame(STEPS_PER_FRAME);
+            gpu.frame(steps);
             gpu.wait();
             t.elapsed().as_secs_f64() * 1e3
         })
@@ -343,7 +356,15 @@ fn run_rubble(
     }
 }
 
-fn run_ror(bin: &Path, truck: &Path, scene_file: &Path, n: usize, warm: u32, frames: u32) -> Run {
+fn run_ror(
+    bin: &Path,
+    truck: &Path,
+    scene_file: &Path,
+    n: usize,
+    warm: u32,
+    frames: u32,
+    steps: u32,
+) -> Run {
     let out = scene_file.with_extension("ror.json");
     let sample = samples(n)
         .iter()
@@ -356,6 +377,7 @@ fn run_ror(bin: &Path, truck: &Path, scene_file: &Path, n: usize, warm: u32, fra
         .arg(format!("scene={}", scene_file.display()))
         .arg(format!("warm={warm}"))
         .arg(format!("frames={frames}"))
+        .arg(format!("steps={steps}"))
         .arg(format!("sample={sample}"))
         .arg(format!("out={}", out.display()))
         .stderr(std::process::Stdio::null())
@@ -534,8 +556,13 @@ fn main() -> anyhow::Result<()> {
     let counts: Vec<usize> = list(kv(&args, "counts").unwrap_or("1,2,4,8,16,32,64,128,256"));
     let rubble_counts: Vec<usize> = list(kv(&args, "rubble_counts").unwrap_or("512,1024"));
     let trials: usize = kv(&args, "trials").map_or(5, |s| s.parse().unwrap());
-    let warm: u32 = kv(&args, "warm").map_or(30, |s| s.parse().unwrap());
-    let frames: u32 = kv(&args, "frames").map_or(120, |s| s.parse().unwrap());
+    // Frame rate: steps per frame (whole 0.5 ms steps, rounded) and the budget.
+    let fps: f32 = kv(&args, "fps").map_or(60.0, |s| s.parse().unwrap());
+    let steps = (1.0 / (fps * engine_softbody::explicit_beams::STEP)).round() as u32;
+    let budget_ms = 1000.0 / f64::from(fps);
+    let warm: u32 = kv(&args, "warm").map_or((0.5 * fps).round() as u32, |s| s.parse().unwrap());
+    let frames: u32 =
+        kv(&args, "frames").map_or((2.0 * fps).round() as u32, |s| s.parse().unwrap());
     let speed: f32 = kv(&args, "speed").map_or(15.0, |s| s.parse().unwrap());
     let max_load: f64 = kv(&args, "max_load").map_or(3.0, |s| s.parse().unwrap());
     let max_gpu: f64 = kv(&args, "max_gpu").map_or(10.0, |s| s.parse().unwrap());
@@ -545,7 +572,8 @@ fn main() -> anyhow::Result<()> {
     let ror_bin = kv(&args, "ror")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("ROR_BIN").map(PathBuf::from));
-    let seconds = (warm + frames) as f32 / FRAME_HZ;
+    let seconds = (warm + frames) as f32 / fps;
+    let cols: Option<usize> = kv(&args, "cols").map(|s| s.parse().unwrap());
 
     // Frame timestamps need the timestamp-query feature on the device.
     std::env::set_var("RUBBLE_GPU_TIMING", "1");
@@ -564,6 +592,74 @@ fn main() -> anyhow::Result<()> {
             .map_or("none".into(), |p| p.display().to_string())
     );
 
+    // `trace=<file>`: the first scenario and count on Rubble's GPU alone, every
+    // vehicle's nodes concatenated, sampled every `trace_every=` frames (default 1)
+    // through the warm and timed frames; `trace_scene=<json>` the matching render
+    // scene (`render_scene_json`). Format: u32 nodes, u32 beams, then per sample
+    // every node's position (f32 xyz) and every beam's broken flag (u8).
+    if let Some(trace) = kv(&args, "trace") {
+        use std::io::Write;
+        let (sc, n) = (
+            scenarios[0],
+            counts
+                .first()
+                .or(rubble_counts.first())
+                .copied()
+                .unwrap_or(1),
+        );
+        let every: u32 = kv(&args, "trace_every").map_or(1, |s| s.parse().unwrap());
+        let s = scene(sc, n, &g, speed, seconds, 0.0, cols);
+        let fleet = rubble_fleet(&text, &s);
+        if let Some(path) = kv(&args, "trace_scene") {
+            let boxes: Vec<(Vec3, Vec3)> = s.walls.iter().flatten().copied().collect();
+            std::fs::write(
+                path,
+                render_scene_json(&text, one.nodes.len(), n, &boxes, ""),
+            )?;
+        }
+        let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+        let mut w = std::io::BufWriter::new(std::fs::File::create(trace)?);
+        w.write_all(&((one.nodes.len() * n) as u32).to_le_bytes())?;
+        w.write_all(&((one.beams.len() * n) as u32).to_le_bytes())?;
+        let mut sample = |gpu: &ExplicitBeamsGpu| -> std::io::Result<()> {
+            for v in gpu.positions() {
+                for p in v {
+                    for c in p.to_array() {
+                        w.write_all(&c.to_le_bytes())?;
+                    }
+                }
+            }
+            for v in gpu.beams() {
+                w.write_all(&v.iter().map(|b| b.broken as u8).collect::<Vec<u8>>())?;
+            }
+            Ok(())
+        };
+        sample(&gpu)?;
+        for f in 1..=warm + frames {
+            gpu.frame(steps);
+            if f % every == 0 {
+                sample(&gpu)?;
+            }
+        }
+        drop(sample);
+        w.flush()?;
+        let beams = gpu.beams();
+        let broken: usize = beams
+            .iter()
+            .map(|v| v.iter().filter(|b| b.broken).count())
+            .sum();
+        let bent: usize = beams
+            .iter()
+            .map(|v| v.iter().filter(|b| b.bent()).count())
+            .sum();
+        println!(
+            "trace: {} {n} vehicles, {} frames every {every}: {broken} beams broken, {bent} bent in all",
+            sc.name(),
+            (warm + frames) / every + 1
+        );
+        return Ok(());
+    }
+
     let mut all: Vec<Value> = Vec::new();
     // Raw results: (scenario, count) -> per trial.
     let mut ror_means: HashMap<(Scenario, usize), Vec<f64>> = HashMap::new();
@@ -572,13 +668,14 @@ fn main() -> anyhow::Result<()> {
     let mut gpu_frames: HashMap<(Scenario, usize), Vec<f64>> = HashMap::new();
     let mut piped: HashMap<(Scenario, usize), Vec<f64>> = HashMap::new();
     let mut blocking: HashMap<(Scenario, usize), Vec<f64>> = HashMap::new();
+    let mut blocking_frames: HashMap<(Scenario, usize), Vec<f64>> = HashMap::new();
     let mut accuracy: HashMap<(Scenario, usize), Vec<Value>> = HashMap::new();
 
     for trial in 0..trials {
         for &sc in &scenarios {
             for &n in counts.iter().chain(&rubble_counts) {
                 let with_ror = ror_bin.is_some() && counts.contains(&n);
-                let s = scene(sc, n, &g, speed, seconds, 0.0);
+                let s = scene(sc, n, &g, speed, seconds, 0.0, cols);
                 let file = out.join(format!("scene_{}_{n}.txt", sc.name()));
                 write_scene(&file, &s);
                 let fleet = rubble_fleet(&text, &s);
@@ -598,10 +695,11 @@ fn main() -> anyhow::Result<()> {
                             n,
                             warm,
                             frames,
+                            steps,
                         ));
                     } else if !first {
                         loads.push(wait_quiet(max_load, max_gpu, quiet_wait));
-                        rubble_run = Some(run_rubble(&device, &queue, &fleet, warm, frames));
+                        rubble_run = Some(run_rubble(&device, &queue, &fleet, warm, frames, steps));
                     }
                 }
                 let r = rubble_run.unwrap();
@@ -610,6 +708,10 @@ fn main() -> anyhow::Result<()> {
                 gpu_frames.entry(key).or_default().extend(&r.gpu_ms);
                 piped.entry(key).or_default().push(r.pipelined_ms);
                 blocking.entry(key).or_default().push(mean(&r.blocking_ms));
+                blocking_frames
+                    .entry(key)
+                    .or_default()
+                    .extend(&r.blocking_ms);
                 let mut run_json = json!({
                     "trial": trial, "scenario": sc.name(), "vehicles": n, "load_average_gpu_busy": loads,
                     "rubble": {
@@ -662,14 +764,14 @@ fn main() -> anyhow::Result<()> {
     let mut sensitivity: HashMap<Scenario, Value> = HashMap::new();
     if let Some(bin) = &ror_bin {
         for &sc in &scenarios {
-            let a = scene(sc, 1, &g, speed, seconds, 0.0);
-            let b = scene(sc, 1, &g, speed, seconds, 1e-4);
+            let a = scene(sc, 1, &g, speed, seconds, 0.0, None);
+            let b = scene(sc, 1, &g, speed, seconds, 1e-4, None);
             let fa = out.join(format!("sens_{}_a.txt", sc.name()));
             let fb = out.join(format!("sens_{}_b.txt", sc.name()));
             write_scene(&fa, &a);
             write_scene(&fb, &b);
-            let ra = run_ror(bin, &truck, &fa, 1, warm, frames);
-            let rb = run_ror(bin, &truck, &fb, 1, warm, frames);
+            let ra = run_ror(bin, &truck, &fa, 1, warm, frames, steps);
+            let rb = run_ror(bin, &truck, &fb, 1, warm, frames, steps);
             let (rms, max) = rms_max(&ra.end[0].pos, &rb.end[0].pos);
             sensitivity.insert(
                 sc,
@@ -684,7 +786,7 @@ fn main() -> anyhow::Result<()> {
     let mut md = String::new();
     writeln!(
         md,
-        "# Explicit beams scaling: Rubble GPU vs Rigs of Rods\n\n`{}`: {} nodes, {} beams. {} ({:?}). {} trials × {} timed frames ({} untimed first) of {} steps of 0.5 ms; drive and impact at {} m/s.\n",
+        "# Explicit beams scaling: Rubble GPU vs Rigs of Rods\n\n`{}`: {} nodes, {} beams. {} ({:?}). {} trials × {} timed frames ({} untimed first) at {} fps: {} steps of 0.5 ms per frame, a {:.2} ms frame budget; drive and impact at {} m/s.\n",
         truck.file_name().unwrap().to_string_lossy(),
         one.nodes.len(),
         one.beams.len(),
@@ -693,7 +795,9 @@ fn main() -> anyhow::Result<()> {
         trials,
         frames,
         warm,
-        STEPS_PER_FRAME,
+        fps,
+        steps,
+        budget_ms,
         speed
     )
     .unwrap();
@@ -706,7 +810,7 @@ fn main() -> anyhow::Result<()> {
     };
     for &sc in &scenarios {
         writeln!(md, "## {}\n", sc.name()).unwrap();
-        writeln!(md, "ms per 60 fps frame: mean of trial means [95 % CI]; p95 over every frame. Speed-up: Rigs of Rods' time over Rubble's GPU time, geometric mean of paired trials [95 % CI].\n").unwrap();
+        writeln!(md, "ms per frame: mean of trial means [95 % CI]; p95 over every frame. Speed-up: Rigs of Rods' time over Rubble's GPU time, geometric mean of paired trials [95 % CI].\n").unwrap();
         writeln!(md, "| vehicles | RoR (thread pool) | RoR p95 | Rubble GPU | Rubble GPU p95 | Rubble pipelined wall | Rubble blocking wall | speed-up | verdict | µs per vehicle (Rubble GPU) |").unwrap();
         writeln!(md, "|---|---|---|---|---|---|---|---|---|---|").unwrap();
         for &n in counts.iter().chain(&rubble_counts) {
@@ -752,6 +856,39 @@ fn main() -> anyhow::Result<()> {
             )
             .unwrap();
         }
+        // The worst frames: what a fixed frame budget has to hold.
+        writeln!(md, "\nPeak frames (every frame of every trial): p99 and maximum ms, and the share of frames over the {budget_ms:.2} ms budget. Worst-frame speed-up: Rigs of Rods' maximum over Rubble's GPU maximum.\n").unwrap();
+        writeln!(md, "| vehicles | RoR p99 | RoR max | RoR over budget | Rubble GPU p99 | Rubble GPU max | Rubble GPU over budget | Rubble blocking p99 | Rubble blocking max | worst-frame speed-up |").unwrap();
+        writeln!(md, "|---|---|---|---|---|---|---|---|---|---|").unwrap();
+        let over = |v: &[f64]| {
+            100.0 * v.iter().filter(|&&x| x > budget_ms).count() as f64 / v.len().max(1) as f64
+        };
+        let peak = |v: &[f64]| v.iter().copied().fold(f64::NAN, f64::max);
+        for &n in counts.iter().chain(&rubble_counts) {
+            let key = (sc, n);
+            let gf = &gpu_frames[&key];
+            let bf = &blocking_frames[&key];
+            let (rp99, rmax, rover, worst) = match ror_frames.get(&key) {
+                Some(rf) => (
+                    format!("{:.3}", percentile(rf, 0.99)),
+                    format!("{:.3}", peak(rf)),
+                    format!("{:.1} %", over(rf)),
+                    format!("{:.2}×", peak(rf) / peak(gf)),
+                ),
+                None => ("—".into(), "—".into(), "—".into(), "—".into()),
+            };
+            writeln!(
+                md,
+                "| {n} | {rp99} | {rmax} | {rover} | {:.3} | {:.3} | {:.1} % | {:.3} | {:.3} | {worst} |",
+                percentile(gf, 0.99),
+                peak(gf),
+                over(gf),
+                percentile(bf, 0.99),
+                peak(bf),
+            )
+            .unwrap();
+        }
+        writeln!(md).unwrap();
         // Scaling law: least-squares fixed + per-vehicle cost.
         let fit = |pts: &[(f64, f64)]| {
             let n = pts.len() as f64;

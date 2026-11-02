@@ -26,7 +26,7 @@ use engine_softbody::explicit_beams::{
     ExplicitBeams, ExplicitBeamsSettings, FrameClock, StaticBox,
 };
 use engine_softbody::procedural::{car_truck_bare, strip_truck_sections, CarParams};
-use engine_webgpu::{default_device, ExplicitBeamsGpu};
+use engine_webgpu::{default_device, render_scene_json, ExplicitBeamsGpu};
 use glam::Vec3;
 use std::collections::HashMap;
 use std::io::Write;
@@ -85,33 +85,10 @@ fn main() -> anyhow::Result<()> {
     // `scene=<file.json>`: what a renderer needs besides the trace: the skin
     // (every `cab` triangle, collision or not), each tyre's node rings, the boxes.
     if let Some(out) = kv.get("scene") {
-        let desc = engine_softbody::truck::load_truck(&text);
-        let file = engine_softbody::truck::parse_truck(&text);
-        let mut base = desc.nodes.len();
-        let tyres: Vec<String> = file
-            .wheels
-            .iter()
-            .map(|w| {
-                let t = format!(
-                    "{{\"axle\":[{},{}],\"first\":{base},\"rays\":{}}}",
-                    w.node1, w.node2, w.rays
-                );
-                base += 2 * w.rays as usize;
-                t
-            })
-            .collect();
-        let tris: Vec<String> = desc
-            .triangles
-            .iter()
-            .map(|t| format!("[{},{},{}]", t.nodes[0], t.nodes[1], t.nodes[2]))
-            .collect();
-        let boxes: Vec<String> = cpu
+        let boxes: Vec<(Vec3, Vec3)> = cpu
             .boxes
             .iter()
-            .map(|b| {
-                let (c, h) = ((b.lo + b.hi) * 0.5, (b.hi - b.lo) * 0.5);
-                format!("[{},{},{},{},{},{}]", c.x, c.y, c.z, h.x, h.y, h.z)
-            })
+            .map(|b| ((b.lo + b.hi) * 0.5, (b.hi - b.lo) * 0.5))
             .collect();
         // `visual=sedan`: the procedural sedan's render mesh (its nodes are the truck's
         // first nodes): per vertex the frame nodes and coordinates, triangles, materials.
@@ -144,13 +121,7 @@ fn main() -> anyhow::Result<()> {
         };
         std::fs::write(
             out,
-            format!(
-                "{{\"nodes\":{},\"triangles\":[{}],\"tyres\":[{}],\"boxes\":[{}]{visual}}}",
-                cpu.nodes.len(),
-                tris.join(","),
-                tyres.join(","),
-                boxes.join(",")
-            ),
+            render_scene_json(&text, cpu.nodes.len(), 1, &boxes, &visual),
         )?;
     }
     let (info, device, queue) = default_device()?;
