@@ -123,6 +123,12 @@ fn run(asset: &DestructibleAssetDesc, k: usize, scenario: &'static str, sleep: b
         // RUBBLE_GPU_TIMING=1: every pass's GPU time (the step's marks), else the sim's.
         gpu_ms.push(w.last_step_gpu_ms().unwrap_or_else(|| w.profile_ms()));
     }
+    // RUBBLE_READBACK_CHECK=1: every frame's moved records against the full copy.
+    if std::env::var("RUBBLE_READBACK_CHECK").is_ok() {
+        let (checked, differing, spills) = w.readback_check();
+        eprintln!("readback check: {checked} frames, {differing} differing, {spills} spilled");
+        assert_eq!(differing, 0, "frames differ from the full pose copy");
+    }
     let awake = w.counters().map(|c| c.awake_count).unwrap_or(0);
     if std::env::var("CITY_DEBUG").is_ok() {
         eprintln!("counters at the end: {:?}", w.counters());

@@ -54,3 +54,50 @@ fn listed_fracture_passes_match_the_full_passes() {
     assert!(broken > 100, "the shots broke {broken} bonds");
     eprintln!("{checked} steps checked, {broken} bonds broken");
 }
+
+/// The pose readback sized to the last step's moved count plus headroom (the rest read
+/// from the slot's spill when a step moves more) delivers every frame's moved records
+/// byte for byte as the full copy (`World::set_readback_check`): the same city, settling,
+/// struck by 20 shots (a step that wakes hundreds of bodies overflows its slot's copy).
+#[test]
+fn sized_pose_readback_matches_the_full_copy() {
+    let house = city_house().unwrap();
+    let def = CityDef {
+        houses: 16,
+        map: 160.0,
+        sleep: true,
+        pool: Some(4096),
+    };
+    let mut w = World::new(GpuContext::Default, &def.world_def(&house).unwrap()).unwrap();
+    let mut c = City::begin(&mut w, &house, def).unwrap();
+    c.place(&mut w, 16).unwrap();
+    w.set_readback_check(true);
+    let mut moved = 0;
+    for i in 0..300 {
+        if i == 60 {
+            c.start(&mut w, CityScenario::War).unwrap();
+        }
+        w.step().unwrap();
+        // Every other step polled without waiting: frames left in flight.
+        let frames = if i % 2 == 0 {
+            w.poll().unwrap()
+        } else {
+            w.poll_blocking().unwrap()
+        };
+        moved += frames
+            .iter()
+            .map(|f| f.body_events.moves.len())
+            .sum::<usize>();
+    }
+    w.poll_blocking().unwrap();
+    let (checked, differing, spills) = w.readback_check();
+    eprintln!(
+        "{checked} frames checked, {differing} differing, {spills} spilled, {moved} body moves"
+    );
+    assert_eq!(
+        differing, 0,
+        "{differing} of {checked} frames differ from the full copy"
+    );
+    assert!(checked > 250, "{checked} frames checked");
+    assert!(spills > 50, "{spills} steps overflowed their slot's copy");
+}

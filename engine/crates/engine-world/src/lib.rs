@@ -571,7 +571,8 @@ impl World {
         }
         sim.set_params(params);
         sim.set_gpu_timing(def.gpu_timing)?;
-        let readback = ReadbackRing::new(&sim, def.readback_frames);
+        let mut readback = ReadbackRing::new(&sim, def.readback_frames);
+        readback.set_check(std::env::var("RUBBLE_READBACK_CHECK").is_ok_and(|v| v == "1"));
         Ok(Self {
             sim,
             pose_exports: None,
@@ -2265,6 +2266,20 @@ impl World {
         self.collect(false)
     }
 
+    /// Diagnostic: from the next step on, each step's readback also copies every
+    /// body's moved-record slot, and its frame's records are compared against that full
+    /// copy ([`World::readback_check`]). `RUBBLE_READBACK_CHECK=1` turns it on at creation.
+    pub fn set_readback_check(&mut self, on: bool) {
+        self.readback.set_check(on);
+    }
+
+    /// Frames compared by [`World::set_readback_check`] so far, how many of them
+    /// differed from the full copy, and how many frames (checked or not) moved more
+    /// records than their slot copied and read the rest from its spill.
+    pub fn readback_check(&self) -> (u64, u64, u64) {
+        (self.readback.checked.0, self.readback.checked.1, self.readback.spills)
+    }
+
     /// Every ready frame folded into one (several steps per display frame):
     /// latest transforms, earliest previous transforms, all events in order.
     /// Never blocks.
@@ -2351,7 +2366,7 @@ impl World {
                     let timing = std::env::var("RUBBLE_WORLD_TIMING")
                         .is_ok()
                         .then(std::time::Instant::now);
-                    if !self.readback.ready(self.sim.device(), slot, wait)? {
+                    if !self.readback.ready(self.sim.device(), self.sim.queue(), slot, wait)? {
                         break;
                     }
                     if let Some(t) = timing {
@@ -2396,7 +2411,7 @@ impl World {
             match front {
                 Pending::Empty { .. } => held.push(front),
                 Pending::Mapped { step, slot } => {
-                    self.readback.ready(self.sim.device(), slot, true)?;
+                    self.readback.ready(self.sim.device(), self.sim.queue(), slot, true)?;
                     let raw = self.readback.take(slot);
                     let frame = self.frame(step, raw)?;
                     self.ready_frames.push(frame);
