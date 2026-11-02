@@ -103,14 +103,14 @@
     // Physics: rubble's Rust World (engine-world-wasm), the host native and Unreal run.
     // This page keeps rendering, input, UI and its scene scripts; the street, meteor
     // and run builders (engine-vehicle-wasm) are Rust that only describe launches.
-    import { createWorld, pollFrame as poll, stepFrames, softCalibratedSettings } from './rubble-world.mjs';
+    import { createWorld, pollFrame as poll, stepFrames, softCalibratedSettings, saveState, errorText } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL, centerOfMass, Gauntlet, MeteorRange, MeteorRun } from './vehicle.mjs';
     import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
     import { duneBuggySoft } from './soft.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
-    const fail = (e) => { errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; window.__failed = String(e && e.message || e); };
+    const fail = (e) => { errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String(e && e.message || e); };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
     addEventListener('error', (e) => fail(e.error || e.message));
 
@@ -606,7 +606,7 @@
     const cannon = [];
     for (let i = 0; i < 12; i++) cannon.push(parked([-4000 - i * 5, -4000, -4000], { sphere: { radius: 0.6 } }, MAT_PROP, 400, ballI(400, 0.6), cannonCcd));
     for (const v of vehicles) if (v.ai) world.setVehicleInput(v.h, v.ai);
-    const initial = world.saveState();
+    const initial = await saveState(world);
     // ---------------------------------------------------------------- directed debris (gauntlet)
     const guideOn = document.getElementById('guideOn'), guideStrength = document.getElementById('guideStrength');
     const shellOn = document.getElementById('shellOn'), guideStatsEl = document.getElementById('guideStats');

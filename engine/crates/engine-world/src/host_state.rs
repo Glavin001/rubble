@@ -39,9 +39,42 @@ impl World {
     /// patches and watched shapes; the pool's buffers are not copied).
     pub fn save_state(&self) -> anyhow::Result<WorldSnapshot> {
         self.check_restorable()?;
+        self.snapshot_with(self.sim.save_state())
+    }
+
+    /// [`World::save_state`] in a fraction of the GPU memory when the world's buffers
+    /// are mostly unused (a scene before it runs): each buffer is copied up to its
+    /// last non-zero word and restored with zeros past it, the same bytes. Waits for
+    /// the GPU's measure (native hosts; the web uses [`World::measure_state`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_state_compact(&self) -> anyhow::Result<WorldSnapshot> {
+        self.check_restorable()?;
+        self.snapshot_with(self.sim.save_state_compact()?)
+    }
+
+    /// First half of a compact [`World::save_state`] without waiting: map
+    /// [`StateMeasure::buffer`](engine_webgpu::StateMeasure::buffer), then
+    /// [`World::save_state_measured`] with its words before stepping or changing the
+    /// world (that refuses a measure the world has moved on from).
+    pub fn measure_state(&self) -> anyhow::Result<engine_webgpu::StateMeasure> {
+        self.check_restorable()?;
+        Ok(self.sim.measure_state())
+    }
+
+    /// Second half of a compact snapshot ([`World::measure_state`]).
+    pub fn save_state_measured(
+        &self,
+        measure: &engine_webgpu::StateMeasure,
+        extents: &[u32],
+    ) -> anyhow::Result<WorldSnapshot> {
+        self.check_restorable()?;
+        self.snapshot_with(self.sim.save_state_measured(measure, extents)?)
+    }
+
+    fn snapshot_with(&self, sim: engine_webgpu::SimSnapshot) -> anyhow::Result<WorldSnapshot> {
         let terrain = self.terrain_save()?;
         Ok(WorldSnapshot {
-            sim: self.sim.save_state(),
+            sim,
             bodies: self.bodies.clone(),
             free_bodies: self.free_bodies.clone(),
             shapes: self.shapes.clone(),

@@ -52,7 +52,7 @@
   </div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, pollFrame, stepFrames, drain, macrotask, worldWasm } from './rubble-world.mjs';
+    import { createWorld, pollFrame, stepFrames, drain, macrotask, worldWasm, saveState } from './rubble-world.mjs';
     import { WHEEL_RIM_MATERIAL, L } from './vehicle.mjs';
     import { GROUND_WGSL, switchError } from './terrain-render.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
@@ -1046,7 +1046,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     entries[st.car] = world.vehicleEntry(st.car);
     const CHASSIS = entries[st.car].chassis;
     if (buggy) buggy.add(st.car);
-    const initial = world.saveState();
+    const initial = await saveState(world);
     SCHEDULE.forEach((s) => { s.state = 'wait'; });
 
     // ---- the schedule

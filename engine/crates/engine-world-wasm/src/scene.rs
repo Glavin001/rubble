@@ -12,6 +12,37 @@ pub struct WebSnapshot {
     snapshot: WorldSnapshot,
 }
 
+/// A compact snapshot's measure in flight (`WebWorld.measureState`).
+#[wasm_bindgen]
+pub struct WebStateMeasure {
+    measure: engine_webgpu::StateMeasure,
+    len: usize,
+}
+
+#[wasm_bindgen]
+impl WebStateMeasure {
+    /// The measured extents (a Promise of a `Uint32Array`) for `saveStateMeasured`.
+    pub fn extents(&self) -> js_sys::Promise {
+        let staging = self.measure.buffer().clone();
+        let len = self.len;
+        wasm_bindgen_futures::future_to_promise(async move {
+            let (tx, rx) = futures_channel::oneshot::channel();
+            staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            rx.await
+                .map_err(|_| err("measureState: map dropped"))?
+                .map_err(|e| err(format!("measureState: {e}")))?;
+            let words: Vec<u32> = {
+                let data = staging.slice(..).get_mapped_range().expect("mapped");
+                bytemuck::cast_slice::<u8, u32>(&data)[..len].to_vec()
+            };
+            staging.unmap();
+            Ok(js_sys::Uint32Array::from(words.as_slice()).into())
+        })
+    }
+}
+
 fn body_type(s: &str) -> Result<BodyType, JsValue> {
     Ok(match s {
         "static" => BodyType::Static,
@@ -27,6 +58,24 @@ impl WebWorld {
     #[wasm_bindgen(js_name = saveState)]
     pub fn save_state(&self) -> Result<WebSnapshot, JsValue> {
         Ok(WebSnapshot { snapshot: res(self.world.save_state())? })
+    }
+
+    /// First half of a compact `saveState` (`World::measure_state`): await the
+    /// measure's `extents()`, then `saveStateMeasured` before stepping or changing
+    /// the world. The snapshot copies each GPU buffer only up to its last non-zero
+    /// word (a scene before it runs needs a fraction of `saveState`'s memory) and
+    /// restores the same bytes. `rubble-world.mjs` `saveState(world)` does both.
+    #[wasm_bindgen(js_name = measureState)]
+    pub fn measure_state(&self) -> Result<WebStateMeasure, JsValue> {
+        let measure = res(self.world.measure_state())?;
+        let len = measure.bindings();
+        Ok(WebStateMeasure { measure, len })
+    }
+
+    /// Second half of a compact `saveState`: `extents` from the measure's `extents()`.
+    #[wasm_bindgen(js_name = saveStateMeasured)]
+    pub fn save_state_measured(&self, measure: &WebStateMeasure, extents: Vec<u32>) -> Result<WebSnapshot, JsValue> {
+        Ok(WebSnapshot { snapshot: res(self.world.save_state_measured(&measure.measure, &extents))? })
     }
 
     /// Back to a `saveState` snapshot (`World::restore_state`).

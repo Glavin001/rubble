@@ -49,14 +49,14 @@
     // rubble::city): same houses, layout, capacity, sleep policy, piece pool, scenarios
     // and shots. The page places the houses a few per frame, settles the city, starts a
     // scenario, and draws every collider from the world's buffers in place.
-    import { createCity, wasmHeapBytes, Poses, pollFrame, stepFrames, drain, macrotask } from './rubble-world.mjs';
+    import { createCity, wasmHeapBytes, Poses, pollFrame, stepFrames, drain, macrotask, errorText } from './rubble-world.mjs';
     import { lastPanic } from './generated/world-wasm/engine_world_wasm.js';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const fail = (e) => {
       const panic = (() => { try { return lastPanic(); } catch { return ''; } })();
-      errEl.textContent = String((e && e.stack) || e) + (panic ? `\n${panic}` : '');
+      errEl.textContent = errorText(e) + (panic ? `\n${panic}` : '');
       statusEl.textContent = 'stopped';
       window.__failed = String(e) + (panic ? ` (${panic})` : '');
     };

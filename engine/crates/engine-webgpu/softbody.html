@@ -62,14 +62,14 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings } from './rubble-world.mjs';
+    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
     import { createCarRenderer, LIGHTING_WGSL } from './car-render.mjs';
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
-    const fail = (e) => { if (!errEl.textContent) errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; window.__failed = String((e && e.message) || e); };
+    const fail = (e) => { if (!errEl.textContent) errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String((e && e.message) || e); };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
     addEventListener('error', (e) => fail(e.error || e.message));
 
@@ -445,7 +445,7 @@
     }
     world.reserveMovingRadius(0.5);
     const truckInfo = document.getElementById('truckInfo');
-    const initial = world.saveState();
+    const initial = await saveState(world);
 
     // ---------------------------------------------------------------- render data
     // Skin: every soft triangle (global particle indices) with its rest edge lengths.

@@ -74,7 +74,7 @@
     // rigid_plan); this page builds the scene through World, renders the world's
     // body and collider buffers in place, and keeps the camera, input, HUD,
     // benchmark protocol and checks.
-    import { createWorld, pollFrame, stepFrames, drain, macrotask } from './rubble-world.mjs';
+    import { createWorld, pollFrame, stepFrames, drain, macrotask, saveState, errorText } from './rubble-world.mjs';
     import { parseDemoQuery, demoSolver, sceneCap, SLEEP_OFF_TIME } from './demo-config.mjs';
     import { buildDemoScene, packDemoBodies } from './demo-scene.mjs';
     import { restoreSceneOrder } from './spatial-order.mjs';
@@ -86,7 +86,7 @@
     const errEl = document.getElementById('err');
     const warnEl = document.getElementById('warn');
     const canvas = document.getElementById('c');
-    const fail = (e) => { errEl.textContent = String(e && e.stack || e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
+    const fail = (e) => { errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
     // Setup runs at module top level (scene snapshots, world, pipelines); show
     // its failures on the page instead of only in the console.
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
@@ -277,7 +277,7 @@
     const drawCount = world.colliderCount() - 1;
     const projectileSlot = jointControls ? jointControls.projectileSlot : 0xffffffff;
     // The scene's first state: reset (R), and the benchmark's and checks' restarts.
-    const initialState = world.saveState();
+    const initialState = await saveState(world);
     const initialMaxY = sceneBodies ? sceneBodies.reduce((m, b, i) => (i > 0 ? Math.max(m, b.p[1]) : m), 0) : 0;
 
     // Frames: counters (named as the JS host's), GPU step times, overflow.
