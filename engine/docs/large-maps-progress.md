@@ -637,10 +637,7 @@ the defaults), and a CCD body. Each of these avoids it: `ENGINE_NP=fused` (lowes
 0.08 m), `ENGINE_REUSE=pass` (0.19 m), canonical contacts (0.19 m), the ball without CCD
 (0.15 m); `ENGINE_PERSIST=scan` does not. In the browser the same configuration makes the
 struck column "collapse" (boxes vanish under the floor and the awake count keeps rising);
-`demo.html?...&reuse=pass` struck runs settle back to sleep under both policies. Not fixed:
-the split narrowphase copies non-reused pairs to the candidate buffer's tail
-(`narrowphase_defer`) and tests them in `narrowphase_fresh`; what about that breaks the
-struck boxes' ground contacts when a CCD pair is present is still open.
+`demo.html?...&reuse=pass` struck runs settle back to sleep under both policies. **Fixed (root cause below).**
 
 Side-by-side recordings (headless Chrome, archive default left, `?rest=carry` right;
 `~/.cache/rubble-probe/side/`): `ring-archive-vs-carry.mp4` (ring110k to step 1,500: awake
@@ -652,3 +649,40 @@ each, both bimodal through the CCD fall-through above), `city-archive-vs-carry.m
 and `gauntlet-archive-vs-carry.mp4` (vehicle.html?scene=gauntlet, monster truck cruising
 with the cannon firing). No visible difference beyond run-to-run spread. `city.html` and
 `vehicle.html` take `?rest=carry` for this.
+
+
+## CCD fall-through: root cause and fix (2026-11-02)
+
+Traced with `grid_strike_probe`'s diagnostics (`STRIKE_ROWS`: a box's persistent contact rows
+and its candidate pairs each step, `WgpuSim::last_persistent_rows` / `last_candidates`):
+
+- A woken bottom box had pairs with the boxes above it but none with the ground, and fell.
+- Its ground pair was lost earlier, in the step the CCD body first exists: that step every
+  resting box-plane pair the carry re-emitted came out of `narrowphase_fresh` as a manifold
+  and rows with colliders (0, 0) (2,482 manifolds, 9,928 rows), though the deferred tail held
+  the right pair and `narrowphase_fresh` read it correctly (checked by writing what it read
+  back into the tail). The next step the carry re-emitted (0, 0), which `emitCandidateCore`
+  drops (i == j), so the box kept no ground pair while asleep, and had none when woken.
+- Needed: the split narrowphase (the fused one emits the same pairs correctly), persistent
+  contacts, and look-ahead on (a CCD body in the scene turns it on), i.e. the
+  `closingPoints` call in `emitContactManifold`: skipping it removed the (0, 0) manifolds,
+  and so does inlining it. The code is correct as written (the WGSL reads the pair once and
+  passes the struct by pointer); the call, compiled natively (wgpu on Metal), clobbers the
+  caller's pair. Fix: `[ForceInline]` on `closingPoints` (no other
+  change). Rebuilding the kept manifold point by point instead of copying it did not help.
+
+After the fix, `grid_strike_probe` with a CCD ball leaves no box below the ground (lowest
+0.16-0.19 m; carry and archive, the probe's ball and the demo's parked projectile with the
+demo's solver).
+
+**The browser never had the fall-through.** Counting bodies below the ground after a
+legacyGrid100k shot (`record-below.mjs`: `__world.readBodies` over every slot at step 900, F at
+step 400): 0 in every run, on this branch (5 archive, 5 carry) and on `origin/main` 09647583
+(5 runs). What the browser shows is a real collapse: the ball knocks bottom boxes out and the
+column above falls into the hole, sometimes, in all builds. Runs whose awake count was still
+above 100 at step ~880-900 (the column still falling): this branch after the fix, archive
+4 of 10 and carry 2 of 10 (live playback, `g10`), then archive 3 of 5, carry 2 of 5 and
+`origin/main` 5 of 5 (`g11`). So main with sleep on collapses too, at least as often; whether
+a shot collapses the column depends on where and when the ball lands (live playback timing),
+not on archive vs carry. The earlier `?reuse=pass` runs that settled (2) were within that
+spread. Native fall-through: present on `origin/main` and before this fix, gone after it.
