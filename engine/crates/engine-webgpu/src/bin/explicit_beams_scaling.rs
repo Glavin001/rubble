@@ -23,7 +23,7 @@
 //! pipelined wall time (frames submitted back to back, as a game loop does, total
 //! over frames), and in a second run the blocking time per frame (submit to
 //! completion). Trials alternate which engine runs first; before each run the tool
-//! waits (up to `quiet_wait=` s, default 600) for the 1-minute load average to drop
+//! waits (up to `quiet_wait=` s, default 600, then stops without measuring) for the 1-minute load average to drop
 //! under `max_load=` (default 3) and, on macOS, the GPU's busy share under
 //! `max_gpu=` % (default 10), and records both. Per count it reports the mean of
 //! the trial means and its 95 % confidence interval, the p95 frame, and the
@@ -443,8 +443,13 @@ fn wait_quiet(max_load: f64, max_gpu: f64, max_wait_s: f64) -> (f64, f64) {
     let t = Instant::now();
     loop {
         let (l, g) = (load_average(), gpu_busy());
-        if (!(l >= max_load) && !(g >= max_gpu)) || t.elapsed().as_secs_f64() > max_wait_s {
+        if !(l >= max_load) && !(g >= max_gpu) {
             return (l, g);
+        }
+        // A run on a busy machine would not measure either engine: stop instead.
+        if t.elapsed().as_secs_f64() > max_wait_s {
+            eprintln!("machine not quiet within {max_wait_s} s: stopping");
+            std::process::exit(2);
         }
         eprintln!(
             "load average {l:.2} (max {max_load}), GPU busy {g:.0} % (max {max_gpu}): waiting"

@@ -225,10 +225,12 @@ Otherwise:
   barriers under data-dependent branches: loop bounds from a uniform buffer, no early
   returns before a barrier; values decided by one lane pass through workgroup memory
   and a barrier).
-* No float atomics. Beam forces go to a per-beam slot; the node pass sums its beams
-  through a per-node incidence list (beam index plus an "is end b" bit). The
+* No float atomics. Each node has an incidence list (beam index plus an "is end b"
+  bit); the beam pass writes its force on each end into that end's incidence entry,
+  so the node pass sums a contiguous run of independent loads, in list order. The
   self-collision pass accumulates into per-node integer atomics in fixed point
-  (1/32 N).
+  (1/32 N), spreading (triangle, contacter) pairs over the lanes (the sums do not
+  depend on the order); a triangle's throttle is finished in the next node pass.
 * Detacher groups: a breaking master records its beam index into its group slot with
   an atomic minimum; after a barrier every live beam of a broken group breaks, and
   beams after the master's index drop this step's force (earlier ones keep it).
