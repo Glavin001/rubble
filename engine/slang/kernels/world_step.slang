@@ -2358,6 +2358,12 @@ void persistListAppend(uint first, uint count)
 // step: the relative normal velocity at the point, (vA + ωA×rA − vB − ωB×rB)·n,
 // over h. Points moving apart or sliding past each other get no speculative
 // contact (and no graph edge); touching points (gap ≤ contactOffset) are kept.
+// Inlined: called (as SPIR-V/WGSL lower it, with its arguments by pointer), it corrupted
+// its caller's candidate pair in narrowphase_fresh on Apple GPUs (Dawn and wgpu both): with
+// a CCD body in the scene (look-ahead on), the split narrowphase emitted resting box-plane
+// manifolds and rows as colliders (0, 0); the carry then dropped the pair, and a box woken
+// later had no ground contact and fell through the floor. Same code, inlined.
+[ForceInline]
 BoxManifold closingPoints(BoxManifold points, BodyState ba, Collider ca, BodyState bb, Collider cb)
 {
     bool moveA = bodyMovingOrKinematic(ba);
