@@ -2367,7 +2367,11 @@ impl WgpuSim {
             label: Some("step"),
             timestamp_writes: None,
         });
-        let split = std::env::var("RUBBLE_PASS_PER_PHASE").is_ok_and(|v| v == "1");
+        // `RUBBLE_PASS_PER_PHASE=1`: a pass per phase; `=2`: a pass per kernel, named for it
+        // (diagnostic, GPU traces).
+        let per_pass = std::env::var("RUBBLE_PASS_PER_PHASE").unwrap_or_default();
+        let split = per_pass == "1";
+        let per_kernel = per_pass == "2";
         // `RUBBLE_SKIP_KERNELS=a,b` (diagnostic, A/B timing): leave those out.
         let skip = std::env::var("RUBBLE_SKIP_KERNELS").unwrap_or_default();
         let skipped = |k: &str| !skip.is_empty() && skip.split(',').any(|s| s == k);
@@ -2393,6 +2397,10 @@ impl WgpuSim {
                     continue;
                 }
             }
+            if let (true, rigid_plan::Cmd::Dispatch { kernel, .. } | rigid_plan::Cmd::Indirect { kernel, .. }) = (per_kernel, c) {
+                drop(pass);
+                pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(kernel), timestamp_writes: None });
+            }
             match *c {
                 rigid_plan::Cmd::Phase { name } if self.marks.is_some() => {
                     drop(pass);
@@ -2402,10 +2410,11 @@ impl WgpuSim {
                         timestamp_writes: None,
                     });
                 }
-                rigid_plan::Cmd::Phase { .. } if split => {
+                rigid_plan::Cmd::Phase { name } if split => {
+                    // Each phase its own pass, named for it (GPU traces).
                     drop(pass);
                     pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("step"),
+                        label: Some(name),
                         timestamp_writes: None,
                     });
                 }
