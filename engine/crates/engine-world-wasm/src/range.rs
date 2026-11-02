@@ -174,9 +174,10 @@ impl Range {
         level: u8,
         ground_at: [f32; 2],
     ) -> anyhow::Result<Self> {
-        let asset = DestructibleAssetDesc::from_glb(glb, level)?;
         let parsed = engine_fracture::parse_fracture_glb(glb)?;
         let scene = engine_fracture::build_scene(&parsed, level, None)?;
+        let asset = DestructibleAssetDesc::from_parsed(&parsed, &scene, level)?;
+        drop(parsed);
         let solver = asset
             .solver_for(StrengthModel::Threshold)
             .ok_or_else(|| anyhow::anyhow!("asset has no threshold solver"))?;
