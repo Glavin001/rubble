@@ -793,8 +793,9 @@ pass it replaces, and each has a switch back.
   moved > 0.1 m, awake at step 1,000, without CCD: base 628, 618 / 788, 735; this branch
   458, 449 / 634, 641 (one build earlier 367, 551 / 584, 812), the spread of the cold
   archive runs above. With the ball's CCD on (the probe's default) base and this branch
-  alike drop 2,300-2,700 boxes through the ground (lowest y ≈ −360 m at step 1,000): a
-  problem of the CCD strike on this scene that predates these changes.
+  alike dropped 2,300-2,700 boxes through the ground (lowest y ≈ −360 m at step 1,000):
+  the native `closingPoints` miscompile ("CCD fall-through" above), fixed on
+  `claude/awake-only-passes` and merged here (see "Merged, then the floor again" below).
 - Suites: engine-world (all but the known `cuboid_house_breaks_and_splits_as_in_the_lab`,
   the same failure as the base), engine-webgpu broadphase_oracle, awake_broadphase,
   gables_hold, ring_hold, columns_hold, static_pairs, pipelined_gate, heightfield,

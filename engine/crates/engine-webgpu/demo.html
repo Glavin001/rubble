@@ -942,10 +942,24 @@ struct VsOut {
         world.setGpuTiming(timing);
         await drainAll();
         const s0 = simStep(), t0 = performance.now();
-        for (let i = 0; i < n; i++) await stepOne();
+        // CPU time in World's step() (encode and submit) and poll() (readback), and time
+        // spent waiting for a free readback slot.
+        let stepCpu = 0, pollCpu = 0, slotWait = 0;
+        const poll = () => { const t = performance.now(); pollFrame(world, onFrame); pollCpu += performance.now() - t; };
+        for (let i = 0; i < n; i++) {
+          const w0 = performance.now();
+          while (!world.canStep()) { await macrotask(); poll(); }
+          slotWait += performance.now() - w0;
+          if (jointControls) jointControls.beforeStep(simStep() * dt);
+          const t = performance.now();
+          world.step();
+          stepCpu += performance.now() - t;
+          poll();
+        }
         await drainAll();
-        const wallMs = (performance.now() - t0) / Math.max(1, simStep() - s0);
-        return { wallMs, steps: simStep() - s0, awake: last.awake };
+        const steps = Math.max(1, simStep() - s0);
+        const wallMs = (performance.now() - t0) / steps;
+        return { wallMs, steps, awake: last.awake, stepCpuMs: stepCpu / steps, pollCpuMs: pollCpu / steps, slotWaitMs: slotWait / steps };
       } finally { world.setGpuTiming(liveTiming); measuring = false; }
     };
     // The per-phase GPU split of 10 steps now (pauses the live loop meanwhile).
