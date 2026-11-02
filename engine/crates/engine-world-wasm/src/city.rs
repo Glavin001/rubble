@@ -224,6 +224,28 @@ impl WebWorld {
         Ok(added.into_iter().map(|b| handle(b.to_bits())).collect())
     }
 
+    /// A steel ball of `radius` m at `origin` moving at `velocity` (m/s), a projectile
+    /// (`rubble::city::city_shell`): its handle.
+    #[wasm_bindgen(js_name = cityShell)]
+    pub fn city_shell(
+        &mut self,
+        origin: &[f32],
+        velocity: &[f32],
+        radius: f32,
+    ) -> Result<f64, JsValue> {
+        let v3 = |a: &[f32], what: &str| -> Result<[f32; 3], JsValue> {
+            a.try_into()
+                .map_err(|_| err(format!("cityShell: {what} needs 3 numbers")))
+        };
+        let b = res(city_shell(
+            &mut self.world,
+            v3(origin, "origin")?,
+            v3(velocity, "velocity")?,
+            radius,
+        ))?;
+        Ok(handle(b.to_bits()))
+    }
+
     /// Houses' bonds intact, summed (as of the last polled frame).
     #[wasm_bindgen(js_name = cityBondsIntact)]
     pub fn city_bonds_intact(&self, city: &WebCity) -> Result<u32, JsValue> {
