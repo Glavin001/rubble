@@ -11,7 +11,8 @@
 //! 10). Options: `pos=x,y,z` spawn position, `vel=x,y,z` spawn velocity,
 //! `box=cx,cy,cz,hx,hy,hz` a static box (centre, half extents), `secs=` simulated
 //! time, `bare=1` drops the `wheels`, `engine` and `brakes` sections, `turb=1` turns
-//! turbulence on (off by default: CPU and GPU draw different noise),
+//! turbulence on (off by default: CPU and GPU draw different noise), `roll=1` spins
+//! the tyres to roll at the spawn velocity, `drag=0` turns the per-node drag off,
 //! `trace=<file>` with `trace_every=<frames>` (or `trace_steps=<steps>`, GPU only)
 //! writes the GPU run: u32 nodes, u32
 //! beams, then per sample every node's world position (f32 xyz) and every beam's
@@ -60,6 +61,7 @@ fn main() -> anyhow::Result<()> {
         text = strip_truck_sections(&text, &["wheels", "engine", "brakes"]);
     }
     let settings = ExplicitBeamsSettings {
+        drag: kv.get("drag") != Some(&"0"),
         turbulence: kv.get("turb") == Some(&"1"),
         ..Default::default()
     };
@@ -81,6 +83,10 @@ fn main() -> anyhow::Result<()> {
         for n in &mut cpu.nodes {
             n.pos.y += 0.02 - lowest;
         }
+    }
+    // `roll=1`: tyres rolling at the spawn velocity (not skidding).
+    if kv.get("roll") == Some(&"1") {
+        cpu.roll_tyres(vel);
     }
     // `scene=<file.json>`: what a renderer needs besides the trace: the skin
     // (every `cab` triangle, collision or not), each tyre's node rings, the boxes.

@@ -9,7 +9,9 @@
 //!     rubble_counts=512,1024 trials=5 out=<dir>
 //! ```
 //!
-//! Scenarios (each vehicle spawned with its lowest node 2 cm above flat ground, in a
+//! Scenarios (each vehicle spawned with its lowest node 2 cm above flat ground, its
+//! tyres rolling at the spawn velocity unless `roll=0`, with Rigs of Rods' per-node
+//! drag unless `drag=0`, in a
 //! grid far enough apart that no vehicle reaches another or another's wall):
 //!   idle    at rest
 //!   drive   rolling at `speed=` m/s (default 15) along the vehicle's forward axis
@@ -128,17 +130,32 @@ impl Geometry {
     }
 }
 
-/// One vehicle: spawned at (x, 0, z), lifted so its lowest node is 2 cm up.
+/// One vehicle: spawned at (x, 0, z), lifted so its lowest node is 2 cm up, its
+/// tyres rolling at `vel` (still with `roll=0`).
 fn spawn(text: &str, at: Vec3, vel: Vec3) -> ExplicitBeams {
-    let mut sim =
-        ExplicitBeams::from_truck(text, Vec3::new(at.x, 0.0, at.z), vel, Default::default())
-            .expect("explicit beams spawn");
+    let drag = DRAG.load(std::sync::atomic::Ordering::Relaxed);
+    let settings = engine_softbody::explicit_beams::ExplicitBeamsSettings {
+        drag,
+        turbulence: drag,
+        ..Default::default()
+    };
+    let mut sim = ExplicitBeams::from_truck(text, Vec3::new(at.x, 0.0, at.z), vel, settings)
+        .expect("explicit beams spawn");
     let lowest = sim.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
     for n in &mut sim.nodes {
         n.pos.y += 0.02 - lowest;
     }
+    if ROLL.load(std::sync::atomic::Ordering::Relaxed) {
+        sim.roll_tyres(vel);
+    }
     sim
 }
+
+/// `roll=0`: spawn tyres still (every node at the spawn velocity) on both engines.
+static ROLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// `drag=0`: no per-node aerodynamic drag or turbulence on both engines (that model
+/// gives every node the same force, so a vehicle of many light nodes brakes hard).
+static DRAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 struct Scene {
     /// Spawn point (y unused) and velocity.
@@ -378,6 +395,14 @@ fn run_ror(
         .arg(format!("warm={warm}"))
         .arg(format!("frames={frames}"))
         .arg(format!("steps={steps}"))
+        .arg(format!(
+            "roll={}",
+            ROLL.load(std::sync::atomic::Ordering::Relaxed) as u8
+        ))
+        .arg(format!(
+            "drag={}",
+            DRAG.load(std::sync::atomic::Ordering::Relaxed) as u8
+        ))
         .arg(format!("sample={sample}"))
         .arg(format!("out={}", out.display()))
         .stderr(std::process::Stdio::null())
@@ -574,6 +599,14 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var_os("ROR_BIN").map(PathBuf::from));
     let seconds = (warm + frames) as f32 / fps;
     let cols: Option<usize> = kv(&args, "cols").map(|s| s.parse().unwrap());
+    ROLL.store(
+        kv(&args, "roll") != Some("0"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    DRAG.store(
+        kv(&args, "drag") != Some("0"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     // Frame timestamps need the timestamp-query feature on the device.
     std::env::set_var("RUBBLE_GPU_TIMING", "1");

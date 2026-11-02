@@ -308,6 +308,8 @@ pub struct ExplicitBeams {
     pub ground: f32,
     /// Self-collision range r (m).
     pub collision_range: f32,
+    /// Soft tyres built from a `.truck` file's `wheels` (for [`Self::roll_tyres`]).
+    pub tyres: Vec<Tyre>,
     /// Self-collision contacts in the last step (a statistic; not simulated state).
     pub last_contacts: u32,
     pub settings: ExplicitBeamsSettings,
@@ -439,6 +441,7 @@ impl ExplicitBeams {
             ground: 0.0,
             collision_range: DEFAULT_COLLISION_RANGE,
             last_contacts: 0,
+            tyres: Vec::new(),
             settings,
             noise: 1,
             incidence: Vec::new(),
@@ -496,6 +499,12 @@ impl ExplicitBeams {
             let qv = half.sin() * axis;
             let rotate = |u: Vec3| u + 2.0 * qw * qv.cross(u) + 2.0 * qv.cross(qv.cross(u));
             let first = s.nodes.len() as u32;
+            s.tyres.push(Tyre {
+                axle: [a1, a2],
+                first,
+                count: 2 * n,
+                radius: w.radius,
+            });
             let tyre = |pos: Vec3| Node {
                 pos,
                 vel: velocity,
@@ -939,6 +948,36 @@ fn signed_group(b: &crate::desc::SoftBeam) -> i32 {
         -g
     } else {
         g
+    }
+}
+
+/// A soft tyre: its axle nodes and its ring nodes `first..first + count`.
+#[derive(Clone, Copy, Debug)]
+pub struct Tyre {
+    pub axle: [u32; 2],
+    pub first: u32,
+    pub count: u32,
+    pub radius: f32,
+}
+
+impl ExplicitBeams {
+    /// Set every tyre's ring nodes to roll without slipping at `velocity` on flat
+    /// ground (+Y up): the velocity plus the spin about the axle that makes the
+    /// contact point still, |ω| = |v| / radius. A vehicle spawned moving with
+    /// still tyres would skid them on the ground until they spun up.
+    pub fn roll_tyres(&mut self, velocity: Vec3) {
+        for t in &self.tyres {
+            let a0 = self.nodes[t.axle[0] as usize].pos;
+            let a1 = self.nodes[t.axle[1] as usize].pos;
+            let axis = (a1 - a0).normalize_or_zero();
+            let centre = 0.5 * (a0 + a1);
+            let spin = Vec3::Y.cross(velocity) / t.radius.max(1e-3);
+            let omega = spin.dot(axis) * axis;
+            for i in t.first..t.first + t.count {
+                let n = &mut self.nodes[i as usize];
+                n.vel = velocity + omega.cross(n.pos - centre);
+            }
+        }
     }
 }
 
