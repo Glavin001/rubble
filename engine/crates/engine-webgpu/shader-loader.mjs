@@ -1,4 +1,4 @@
-// Kernel loading shared by the WebGPU pages (demo.html, world-host.mjs, fracture/).
+// Kernel loading for the WebGPU pages' own compute (fracture/learned-impact.mjs).
 // WGSL is fetched with the default cache mode, so the browser revalidates by ETag:
 // it picks up a redeploy and does not re-download unchanged shaders. Fetching and
 // validation run in parallel. The status line only names a kernel whose pipeline is

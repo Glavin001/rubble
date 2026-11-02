@@ -663,10 +663,26 @@ impl VehicleHost {
     /// Mount loads of every part (part 0, the root, included for completeness)
     /// and wheel of `h`. Limits read 1e30 where unbreakable.
     pub fn read_mount_loads(&self, backend: &impl VehicleBackend, h: VehicleHandle) -> Vec<MountLoad> {
+        let [(ps, pn), (ws, wn)] = self.mount_load_slots(h);
+        self.decode_mount_loads(h, &backend.read_slots(ps, pn), &backend.read_slots(ws, wn))
+    }
+
+    /// The pool slot ranges `(first, count)` [`Self::decode_mount_loads`] reads
+    /// for `h`: its parts, then its wheels. A host that copies them itself reads
+    /// the loads without a blocking read.
+    pub fn mount_load_slots(&self, h: VehicleHandle) -> [(u32, u32); 2] {
         let l = self.capacity.layout();
         let e = &self.entries[h.0 as usize];
+        [
+            (l.part_base + e.slots.part_base * PART_STRIDE, e.desc.parts.len() as u32 * PART_STRIDE),
+            (l.wheel_base + e.slots.wheel_base * WHEEL_STRIDE, e.wheels_used * WHEEL_STRIDE),
+        ]
+    }
+
+    /// The mount loads of `h` from copies of its [`Self::mount_load_slots`].
+    pub fn decode_mount_loads(&self, h: VehicleHandle, parts: &[Slot], wheels: &[Slot]) -> Vec<MountLoad> {
+        let e = &self.entries[h.0 as usize];
         let mut out = Vec::new();
-        let parts = backend.read_slots(l.part_base + e.slots.part_base * PART_STRIDE, e.desc.parts.len() as u32 * PART_STRIDE);
         for i in 0..e.desc.parts.len() {
             let p = &parts[i * PART_STRIDE as usize..(i + 1) * PART_STRIDE as usize];
             let load = p[P_LOAD as usize];
@@ -680,7 +696,6 @@ impl VehicleHost {
                 peak_ratio: f32::from_bits(load[3]),
             });
         }
-        let wheels = backend.read_slots(l.wheel_base + e.slots.wheel_base * WHEEL_STRIDE, e.wheels_used * WHEEL_STRIDE);
         for wi in 0..e.wheels_used as usize {
             let w = &wheels[wi * WHEEL_STRIDE as usize..(wi + 1) * WHEEL_STRIDE as usize];
             let m = w[W_MOUNT as usize];

@@ -1,6 +1,7 @@
-// terrain-host.mjs executes engine_terrain::plan through the wasm TerrainStep: the
-// words it decodes must be the plan's blocks, and the region's lifecycle (open,
-// coupled frames, the counters' check, settling, bake) is Rust's. No GPU here.
+// The wasm TerrainStep executes engine_terrain::plan (the browser's former JS host,
+// terrain-host.mjs, replayed it; the pages now run World's terrain): the words it
+// emits must be the plan's blocks, and the region's lifecycle (open, coupled frames,
+// the counters' check, settling, bake) is Rust's. No GPU here.
 // Run `cargo run -p engine-webgpu --bin wgsl_export` first (writes generated/).
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,8 +12,7 @@ const { TerrainStep } = wasm;
 const KERNELS = JSON.parse(TerrainStep.kernels());
 const T = JSON.parse(TerrainStep.constants());
 
-// The decoder terrain-host.mjs uses (it imports world-host.mjs, which needs a
-// browser; keep the two in step).
+// The block decoder (as the former terrain-host.mjs decoded them).
 function decodeBlocks(words, at = 0, kernels = KERNELS) {
   const blocks = [];
   const n = words[at++];

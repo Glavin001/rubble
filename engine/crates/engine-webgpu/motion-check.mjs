@@ -175,7 +175,7 @@ const CHECKS = {
       expect(!err && status.startsWith('PASS'), `ring regression${q} passes`);
     }
   },
-  // vehicle.html (world-host.mjs): CCD cannonballs fired into the destruction scene.
+  // vehicle.html (Rust World): CCD cannonballs fired into the destruction scene.
   async vehicle() {
     await send('Page.navigate', { url: `${base}/vehicle.html?scene=destruction` });
     for (let i = 0; i < 1800 && !(await evaluate('!!window.__step || !!document.getElementById("err")?.textContent')); i++)
@@ -184,7 +184,8 @@ const CHECKS = {
     const key = async (code) => { for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, code, key: 'b', windowsVirtualKeyCode: 66 }); };
     for (let k = 0; k < 4; k++) { await key('KeyB'); r = await evaluate('window.__step(30).then((r) => JSON.stringify(r.counters))', true).then(JSON.parse); }
     const err = await evaluate('document.getElementById("err")?.textContent || ""');
-    const ccd = await evaluate('JSON.stringify(window.__world?.motion || null)');
+    // The page's World: does the step schedule the CCD passes?
+    const ccd = await evaluate('JSON.stringify(window.__world ? { ccd: window.__world.hasCcd() } : null)');
     console.log(`vehicle destruction, 4 cannonballs: counters ${JSON.stringify(r)}, motion ${ccd}${err ? `, ERROR ${err.slice(0, 300)}` : ''}`);
     expect(!err && r.overflow === 0, 'vehicle: CCD cannonballs fired with no GPU error or overflow');
     expect(ccd && JSON.parse(ccd).ccd === true, 'vehicle: the scene schedules the CCD passes');

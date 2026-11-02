@@ -3,9 +3,10 @@
 A local, dependency-free browser demo importing **one self-contained GLB** with
 `SHARDWRIGHT_fracture` v1. Shardwright does the slow fracture/hull cooking offline.
 The lab reads baked meshes, convex hulls, full mass/inertia tensors, bonds,
-hierarchy, and the resolved physical material library. Reading, scene building
-and the per-tick host plan run in Rust compiled to wasm (no fracture bake runs
-in the browser); the same Rust runs every scene natively on Metal
+hierarchy, and the resolved physical material library. Reading and scene building
+run in Rust compiled to wasm (no fracture bake runs in the browser), and the physics
+is rubble's `World` (`engine-world`, through `engine-world-wasm`): the host native and
+Unreal run. The same scene code runs every scene natively on Metal
 ([`fracture_viewer`](../../../README.md#native-fracture-viewer-macos--metal)).
 GPU shader compilation is a separate startup cost.
 
@@ -22,6 +23,9 @@ export RUSTUP_TOOLCHAIN=stable
 export WGPU_BACKEND=vulkan
 export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
 cargo run --manifest-path engine/Cargo.toml -p engine-webgpu --bin wgsl_export
+wasm-pack build engine/crates/engine-world-wasm --release --target web \
+  --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
+# The unit tests (Node) load the scene bindings alone:
 wasm-pack build engine/crates/engine-fracture-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
 python3 -m http.server 8777 --bind 127.0.0.1 --directory engine/crates/engine-webgpu
@@ -29,7 +33,7 @@ python3 -m http.server 8777 --bind 127.0.0.1 --directory engine/crates/engine-we
 
 Open <http://127.0.0.1:8777/fracture/> in a WebGPU-enabled browser. Generated WGSL
 and wasm are ignored by git, so rerun the export after checkout or shader changes,
-and the `wasm-pack` build after changes to `engine-fracture`. `wasm-pack` comes
+and the `wasm-pack` builds after changes to `engine-fracture` or `engine-world`. `wasm-pack` comes
 from `web/`'s devDependencies (`npm --prefix web ci`) or `cargo install wasm-pack`.
 
 **Reference rigs.** `packs/` holds blast-stress-solver's crush-wall and reference
@@ -48,28 +52,32 @@ Each piece of logic has one source, used by both hosts:
 | GLB / FRAC reader, metadata | `engine-fracture` `asset.rs` | wasm `Asset` | direct |
 | Scene building: levels, compound hulls, bonds, rows/grids/suburbs, roads, cuboid house, Scene menu | `engine-fracture` `scene.rs`, `cuboid.rs`, `bonds.rs`, `samples.rs` | wasm `Scene` | direct |
 | Hull cooking and the hull arena (ABI v2) | `engine-schema` `convex.rs` | wasm `HullArena` | direct |
-| Per-tick host plan: buffer sizes, host words, step state, ordered dispatches | `engine-fracture` `plan.rs` | `simulation.mjs` replays it | `engine-viewer` `sim.rs` replays it |
+| The physics host: bodies, destructibles, the step | `engine-world` `World` (bond modes: `StrengthModel::Bonds`; the threshold mode: `StrengthModel::Threshold`), the lab's scenes placed by `engine-world-wasm` `lab.rs` | wasm `WebWorld` (`lab-world.mjs`, `lab-sim.mjs`) | `engine-viewer` `sim.rs` replays the lab plan (`engine-fracture` `plan.rs`) |
 | Physics kernels | `slang/kernels/*.slang` (`ENGINE_WGSL` layout) | WGSL (`wgsl_export`) | MSL (`engine-viewer` `build.rs`, from the plan's entry list) |
 | Camera (orbit, first-person walk and fly), shot rays, floor, indexed mesh | `engine-fracture` `view.rs` | wasm `Orbit`, `camera-input.mjs` | direct (orbit) |
 | Draw shader | `slang/render/fracture_draw.slang` | WGSL (`wgsl_export`) | MSL |
 
-`engine-fracture-wasm` is the wasm-bindgen surface; `wasm.mjs` loads it and adapts
-types. `Planner` emits each tick as flat command words: a copy (from the tick's host
-upload or between buffers), a direct dispatch (kernel, workgroups, pass-uniform
-slot), an indirect dispatch (kernel, argument slot, pass slot) or a phase marker
-(profiling and frame-slicing boundaries). The hosts only create buffers and
-pipelines, replay commands, read counters back into the plan, and draw. The JS
-left is GPU I/O, the page and input. On a recording mock device the
-replayed commands are byte-identical to the former JS host's, uploads included.
+`engine-fracture-wasm` is the scene's wasm-bindgen surface. In the browser it is linked
+into `engine-world-wasm`, so a scene built in Rust goes to the World that steps it without
+a copy; `wasm.mjs` loads it and adapts types (Node, for the unit tests, loads
+`engine-fracture-wasm` alone). The page builds a scene, turns it into a destructible asset
+(`LabAsset`: `DestructibleAssetDesc::from_scene`, or the stress import for the threshold
+mode), places it in a `World` on one shared device (`labPlace`: the ground, the
+destructible, the parked shots) and steps the world from its frame loop without waiting
+(`World::can_step_without_waiting`). The bond modes draw from the world's body and joint
+buffers in place (scene body *i* is world slot *i*); the threshold mode's chunks move
+between bodies as they split, so it draws them from poses made each frame from the polled
+frames (`labPoses`). The JS left is the page, input and drawing.
 
-**Deterministic parity shot.** Both hosts can run the same scene, deterministic
-budget, shot and tick count:
+**Parity shot.** Both hosts can run the same scene, shot and tick count (the Metal viewer
+replays the lab plan with a deterministic budget; the browser runs World's plan, which
+has no such budget, so counts differ as the plans do; the table is the old JS host's):
 
 ```sh
 cargo run -p engine-viewer --release --example fracture_compare -- arch 0 240
 ```
 ```js
-(await import('./parity.mjs')).parityShot(__FRACTURE_DEMO__.device,{scene:'arch',level:0,ticks:240})
+(await import('./parity.mjs')).parityShot(null,{scene:'arch',level:0,ticks:240})
 ```
 
 Measured on an M3 Max after 240 ticks:
@@ -165,17 +173,10 @@ and 79-86 ticks/s with a frame rendered every tick; 19 of 49 houses collapse by
 20 s and up to ~20k pieces are awake. The hull grid of the same layout runs at
 ~33 ticks/s.
 
-**Overlap physics ticks** (checkbox, opt-in) stops waiting for each tick's
-counter readback: up to three ticks are queued ahead of the GPU and counters
-are read in the background. The GPU runs the same ticks in the same order;
-only host-side uses of the counters lag a tick or two (HUD, overflow report,
-colour-slot estimate, few-awake solver choice, the all-asleep skip, which now
-applies only when the counters describe the latest tick). On the cuboid grid
-after the shot, 1 tick per call goes from 100 ticks/s waiting to 274
-overlapped; the hull grid, GPU-bound at ~28 ms per tick, goes from 28.9 to
-30.2. In lockstep, overlapped and waiting runs stay bit-identical until the
-engine's own run-to-run nondeterminism appears (two plain runs of the cuboid
-grid diverge at tick ~296).
+World steps whole ticks and never waits: each frame takes the ticks that fell due while
+a readback slot is free (at most 4), the rest stay due for the next frame, and counters
+arrive a frame or two later. The old JS host's **Overlap physics ticks** checkbox and
+its slicing of heavy ticks across frames are gone with it.
 
 ### Scene menu
 
@@ -211,10 +212,10 @@ level, camera and shot rule, so the three can be compared:
 
 | Mode | What holds the fragments | Where it runs |
 |---|---|---|
-| **None** (default) | Nothing: pieces start asleep and wake when hit | rubble (this page's WGSL host) |
-| **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble (this page's WGSL host) |
+| **None** (default) | Nothing: pieces start asleep and wake when hit | rubble's World (`StrengthModel::Bonds`, no bonds), this page's renderer |
+| **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble's World (`StrengthModel::Bonds`), this page's renderer |
 | **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
-| **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`), forward only. A strike is predicted before rubble steps (its Hertz force against each bond's strength × area) and its island split first. After each step, a contact force beyond a bond's capacity breaks it. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
+| **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`), forward only. A strike is predicted before rubble steps (its Hertz force against each bond's strength × area) and its island split first. After each step, a contact force beyond a bond's capacity breaks it. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | rubble's World (`StrengthModel::Threshold` on the world's shared GPU fracture), this page's renderer. World predicts every shot's strike (the checkbox is on and fixed) and has no in-step contact fracture; its balls have no continuous collision, as the old `ThresholdWorld`'s |
 | **Stress solver · load path** | The threshold mode's GPU world (profile `load_path`) with a load path in place of the contact-force test: gravity and the contacts' forces and moments carried through the bond graph (a fixed number of warm-started relaxation sweeps a frame, as Blast's solver iterates), each bond checked against its tension, shear, compression and bending strengths. A weight on a cantilever breaks its root, not where it rests. Strikes as the threshold mode | As **Stress solver** |
 | **Stress solver · local impact** | The threshold mode's GPU world (profile `impact_local`) with an analytic local impact model for strikes: Hertz contact, a ballistic limit from crushing and plug shear, back-face spall, strain-rate strength. Below the limit a shot craters or spalls the wall; at or above it the plug comes out and leaves with the shot (Recht and Ipson's residual speed), before rubble steps. Contacts as the threshold mode | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
@@ -536,15 +537,12 @@ no source sidecars or runtime bake are required.
   `engine-schema`'s cooker (`hull-golden.json` pins its bytes). Each compound child
   is recentred on its own bounds and placed by the collider's local position. CPU
   work is decoding/conversion, not hull generation.
-- `simulation.mjs`: replays the plan (`engine-fracture/src/plan.rs`), which
-  schedules Rubble's **core** Slang AVBD kernels with
-  persistent hot/cold contacts, the hierarchical size-level broadphase, the convex
-  narrowphase (`convex_classify` / `convex_sat_small|large` / `convex_manifold`),
-  the block CSR scan, stable colour tiles, degree-aware primal lanes and sized
-  sleep work — the same schedule as `engine-webgpu/src/gpu.rs`. Rendering reads
-  GPU body poses directly. Batches contain 1–4 ticks with one counter readback per
-  batch; rendering is submitted before awaiting that readback. Slow ticks reduce
-  the batch size, and fully sleeping scenes skip GPU physics.
+- `lab-world.mjs` / `lab-sim.mjs`: the scene on rubble's `World` (`engine-world-wasm`
+  `lab.rs`), which schedules Rubble's **core** Slang AVBD kernels with persistent
+  contacts, the hierarchical broadphase and the convex narrowphase
+  (`engine-webgpu/src/gpu.rs`, the plan every host runs). Rendering reads the world's
+  body poses directly. Each frame steps the ticks a free readback slot allows; a world
+  with nothing awake skips the step.
 - Convex collision lives in the core library (`slang/physics/convex.slang`,
   `slang/kernels/convex_step.slang`); see
   [`engine/docs/convex-hulls.md`](../../../docs/convex-hulls.md). The former
@@ -597,10 +595,9 @@ or pair-truncating chain shortcut. Storage capacities still report overflow.
 
 The target remains **10,000+ active rigid bodies**. Correctness at that count does
 not imply a 120 TPS performance guarantee. Use the scale regression below and
-record hardware, active counts, candidates, contacts and timings. The optional
-`simulation.profileStep()` reports GPU timestamp phases when supported; ordinary
-HUD timings include queue/readback waits. Projectiles still use discrete collision,
-not CCD. Bonds remain inspection metadata rather than stress constraints.
+record hardware, active counts, candidates, contacts and timings. `?gputime=phases`
+makes World time each phase of the step (`simulation.gpuTime.segments`); the HUD shows
+the step's GPU time when the browser has timestamp queries.
 
 The Gauss-map/contact-selection port is based on three-avbd at `2bb1a318`;
 its MIT copyright/license is preserved in `engine/slang/THIRD_PARTY_LICENSES.txt`.
@@ -608,20 +605,21 @@ its MIT copyright/license is preserved in `engine/slang/THIRD_PARTY_LICENSES.txt
 ## Headless physics benchmark
 
 Physics only: no canvas and no renderer, with WebGPU on the real GPU in
-headless Chrome. It prints JSON with ms/tick (ticks queued back to back),
-the counters, and per-kernel GPU times.
+headless Chrome, on rubble's World. It prints JSON with ms/tick (ticks pipelined
+back to back), the counters, and World's per-phase GPU times of the last tick.
 
 ```sh
 nvm use
 node engine/crates/engine-webgpu/fracture/headless.mjs grid warm=420 measure=120
-node engine/crates/engine-webgpu/fracture/headless.mjs cuboidGrid budget='{"deterministic":true}' trace=60
+node engine/crates/engine-webgpu/fracture/headless.mjs cuboidGrid trace=60
 ```
 
 - Scenes: `grid`, `suburb`, `house`, `cuboidGrid`, `cuboids`.
-- `shot=none` skips the row shot. `profile=0` skips the kernel timings.
-- `budget` is merged into the scene capacity. Use
-  `{"deterministic":true}` for run-to-run identical results, so two shader
-  builds can be compared tick for tick.
+- `shot=none` skips the row shot. `profile=0` times the whole step only.
+- `budget` is merged into the scene capacity (its contact and candidate budgets size
+  the World). The lab plan's deterministic budget, its kernel profile and the sleep
+  diagnostics (`sleepdiag`, `sleeptrace`, `wakewatch`, `sleepwatch`, `lockstep`,
+  `timeline`) went with the JavaScript host.
 - `CHROME=` picks the browser (default: Google Chrome).
 - `bonds=1` uses the lab's breakable bonds. `columns=`/`rows=` change the
   grid layout.
@@ -638,8 +636,9 @@ node --test engine/crates/engine-webgpu/fracture/*.test.mjs
 cargo test --manifest-path engine/Cargo.toml -p engine-oracles --test convex_slang_cpu
 ```
 
-`simulation.test.mjs` drives the browser host with a mock WebGPU device against
-the exported WGSL (no GPU). The node tests run the lab's wasm path (build it
+`lab-sim.test.mjs` drives the page's World bookkeeping with a mock World (no GPU);
+the World side is tested in Rust (`cargo test -p engine-world`, and
+`-p engine-world-wasm --test lab`). The node tests run the lab's wasm path (build it
 first, see *Run*); the scene, bond, hull and cuboid-house logic is tested in Rust:
 
 ```sh

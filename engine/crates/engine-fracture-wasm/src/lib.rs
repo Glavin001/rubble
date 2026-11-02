@@ -112,6 +112,23 @@ impl Asset {
 #[wasm_bindgen]
 pub struct Scene(scene::Scene);
 
+/// Rust access for crates that link these bindings into their own module
+/// (`engine-world-wasm` hands a lab scene to its `World`).
+impl Scene {
+    pub fn scene(&self) -> &scene::Scene {
+        &self.0
+    }
+    pub fn from_scene(scene: scene::Scene) -> Scene {
+        Scene(scene)
+    }
+}
+
+impl Asset {
+    pub fn asset(&self) -> &FractureAsset {
+        &self.0
+    }
+}
+
 /// Scene fields other than the large arrays (those are typed-array getters).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

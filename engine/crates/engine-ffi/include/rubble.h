@@ -241,6 +241,12 @@ typedef struct RbWorldDef {
   bool reuse_contacts;
   // Begins at or above this approach speed are hits (world units/s).
   float hit_event_threshold;
+  // Where the world ends (`WorldDef::kill_bounds`): a dynamic body whose origin
+  // leaves the box `kill_min`..`kill_max` (world coordinates) is destroyed and
+  // reported in `RbFrame::left_world`. Off by default.
+  bool enable_kill_bounds;
+  struct RbVec3 kill_min;
+  struct RbVec3 kill_max;
   uint64_t user_data;
   uint32_t internal_value;
 } RbWorldDef;
@@ -273,6 +279,13 @@ typedef struct RbBodyMove {
   bool woke;
   uint64_t user_data;
 } RbBodyMove;
+
+// A body destroyed for leaving the world (`RbWorldDef::enable_kill_bounds`).
+typedef struct RbBodyLeftWorld {
+  RbBodyId body;
+  struct RbVec3 position;
+  uint64_t user_data;
+} RbBodyLeftWorld;
 
 // A joint handle. 0 is null.
 typedef uint64_t RbJointId;
@@ -578,6 +591,10 @@ typedef struct RbFrame {
   uint32_t contact_count;
   const struct RbBodyMove *moves;
   uint32_t move_count;
+  // Bodies destroyed for leaving the world (`enable_kill_bounds`); their handles
+  // are stale from now on.
+  const struct RbBodyLeftWorld *left_world;
+  uint32_t left_world_count;
   const struct RbDestructionEvent *destruction;
   uint32_t destruction_count;
   const struct RbVehicleOutput *vehicles;

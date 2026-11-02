@@ -2,7 +2,7 @@ import {Orbit,IndexedMesh,floorVertices,sceneHandle} from './wasm.mjs';
 import {attachCameraInput} from './camera-input.mjs';
 // WebGPU draw of the fracture lab. The shader is the shared Slang draw shader
 // (slang/render/fracture_draw.slang, exported to WGSL), reading live poses
-// from the body buffer; the camera (orbit, first-person walk and fly), shot
+// from the body buffer (the World's in the bond modes, labPoses' in the threshold mode); the camera (orbit, first-person walk and fly), shot
 // rays, floor and indexed mesh come from engine-fracture (view.rs). The Metal viewer draws the same way.
 export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>{}){
  const context=canvas.getContext('webgpu'),format=navigator.gpu.getPreferredCanvasFormat();context.configure({device,format,alphaMode:'opaque'});
@@ -27,7 +27,9 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const stream=data=>{const buffer=device.createBuffer({size:Math.max(16,data.byteLength),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});if(data.length)device.queue.writeBuffer(buffer,0,data);streams.push(buffer);
   return {count:data.length/10,group:device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:simulation.renderBodyBuffer??simulation.bodyBuffer}},{binding:1,resource:{buffer}},{binding:2,resource:{buffer:uniform}},{binding:3,resource:{buffer:joints}}]})}};
  const indexed=new IndexedMesh(scene.vertices),indices=indexed.index();
- const mesh=stream(indexed.vertices()),projectiles=stream(scene.projectileVertices),props=stream(scene.propVertices??new Float32Array(0)),lines=stream(scene.lines),roads=stream(scene.roadVertices),floor=stream(floorVertices(scene.extent));
+ // Streams drawn once name their bodies by the simulation's slots (`remap`: the World's).
+ const once=data=>simulation.remap?simulation.remap(data):data;
+ const mesh=stream(indexed.vertices()),projectiles=stream(once(scene.projectileVertices)),props=stream(once(scene.propVertices??new Float32Array(0))),lines=stream(scene.lines),roads=stream(scene.roadVertices),floor=stream(floorVertices(scene.extent));
  // Directed-debris zone outlines (engine-fracture guidance.rs), drawn over the scene.
  let zones=stream(new Float32Array(0));
  indexed.free();
@@ -82,6 +84,8 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
   if(data.length)device.queue.writeBuffer(dynBuf,at*40,data);
   dynVerts=at+data.length/10;return true;
  },
+ // The camera as a drag (px) and a scroll would move it (frame-locked recordings).
+ orbit(dx,dy){orbit.drag(dx,dy)},zoom(delta){orbit.zoom(delta)},
  // A scripted camera (a take's shot): fly mode, the eye at `eye` looking at `target`.
  lookAt(eye,target){orbit.lookAt(eye[0],eye[1],eye[2],target[0],target[1],target[2]);input.modeChanged()},
  // The camera's view mode (0 orbit, 1 first-person walk, 2 fly: engine-fracture ViewMode).

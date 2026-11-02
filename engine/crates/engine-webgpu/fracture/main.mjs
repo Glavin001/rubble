@@ -1,26 +1,13 @@
 import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,buildTowersScene,towersVolley,withCity,meteorShot,toppleShots,nearMissSettings,sceneHandle,glassTowerPack,SAMPLES} from './wasm.mjs';
-import {createSimulation} from './simulation.mjs';
-import {preloadBonds} from './bonds.mjs';
+import {createLabWorld,settleBonds,labDevice,bondAsset,thresholdAsset} from './lab-world.mjs';
 import {createRenderer} from './render.mjs';
 import {createRates} from './rates.mjs';
 const $=id=>document.getElementById(id),status=$('status');
+// The physics is rubble's World (lab-world.mjs): `sim` steps it, `renderer` draws its buffers.
 let device,asset,scene,sim,renderer,running=false,released=false,loading=true,frame=Promise.resolve(),loadTail=Promise.resolve(),last=0,accumulator=0;
-// Heavier steps than this are split across frames (see simulation encodeSlices);
-// back to whole steps once few bodies are awake.
-const SLICED_STEP_MS=12,SLICE_EXIT_AWAKE=20000;
-// Slices submitted per frame adapt to the frame time: more while frames stay
-// under the 60 FPS budget, fewer above it, so physics gets every spare
-// millisecond without dropping rendering below ~60 FPS. The budget sits just
-// above one 60 Hz vsync interval (16.7 ms): at 16.0 every vsync-paced frame
-// read as over budget and the rate sank to its floor (2-4 ticks/s).
-const FRAME_BUDGET_MS=17.5,MAX_SLICE_RATE=24;
-let sliceRate=1,sliceCredit=0,frameEma=FRAME_BUDGET_MS;
-// Whether the GPU finished the work submitted two frames ago before this
-// frame began (queue.onSubmittedWorkDone): then it is about to run dry, so
-// submit more slices; otherwise fewer. One frame of work stays queued, so the
-// GPU never idles between frames. Vsync-paced frame times jump between 16.7
-// and 33 ms, too coarse to steer by.
-let workDone=[{done:true},{done:true}];
+// Physics ticks one frame may take (World steps whole and never waits: a tick with no free
+// readback slot stays due for the next frame).
+const MAX_TICKS_PER_FRAME=4;
 let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=null,packBytes=null;
 // The towers showcase (engine-fracture towers.rs): a block of a pack's towers,
 // its own ball, bonds at 0.2× the pack's strength unless Bonds is None.
@@ -34,14 +21,12 @@ let volley=null;
 // positions come from a small async readback of the ball bodies each frame.
 let trails=[],trailRead=null;
 function resetTrails(){trails=scene?Array.from({length:scene.projectileCount},()=>({path:[],ccd:false})):[];renderer?.setTrails(new Float32Array(0))}
-function trailLaunched(id){const t=trails[id-scene.projectileStart];if(t){t.path=[];t.ccd=$('ball-ccd').checked&&!stressOn}}
+function trailLaunched(id){const t=trails[id-scene.projectileStart];if(t){t.path=[];t.ccd=thresholdOn||$('ball-ccd').checked&&!stressOn}}
 function updateTrails(){
  if(!sim||!renderer||trailRead||!sim.shots)return;
- const n=Math.min(sim.shots,scene.projectileCount),bytes=n*112,src=sim.renderBodyBuffer??sim.bodyBuffer;
- const buf=device.createBuffer({size:bytes,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),enc=device.createCommandEncoder();
- enc.copyBufferToBuffer(src,scene.projectileStart*112,buf,0,bytes);device.queue.submit([enc.finish()]);
- const r=renderer;trailRead=buf.mapAsync(GPUMapMode.READ).then(()=>{
-  const f=new Float32Array(buf.getMappedRange().slice(0));buf.destroy();if(r!==renderer)return;
+ const n=Math.min(sim.shots,scene.projectileCount);
+ const r=renderer;trailRead=sim.shotRecords().then(f=>{
+  if(r!==renderer)return;
   const out=[];
   for(let k=0;k<n;k++){
    const t=trails[k];if(!t)continue;const p=[f[k*28],f[k*28+1],f[k*28+2]];
@@ -50,15 +35,17 @@ function updateTrails(){
    for(let i=1;i<m;i++){const a=0.25+0.75*i/m;for(const v of [t.path[i-1],t.path[i]])out.push(v[0],v[1],v[2],0,c[0],c[1],c[2],a)}
   }
   renderer.setTrails(new Float32Array(out));
- }).catch(()=>buf.destroy()).finally(()=>{trailRead=null});
+ }).catch(()=>{}).finally(()=>{trailRead=null});
 }
 // Bond mode (the Bonds menu): 'none' (pieces sleep until hit), 'd6' (breakable D6
-// joints, AVBD welds), 'stress' (GPU stress solver on its own canvas), 'threshold' (the
-// same, with the v0 rule: a bond breaks on contact force alone, no solve), 'load_path' and
-// 'impact_local' (the same GPU world with a load path, or with the analytic local impact
-// model for strikes), 'blast' (the same GPU world, Blast's stress solver deciding the bonds:
-// profile blast_gpu), or 'learned' (lean MGN-T forward on this page's WebGPU — compute/timing
-// only; rubble stays unbonded).
+// joints, AVBD welds), 'threshold' (the v0 stress rule: a bond breaks on contact force
+// alone, no solve), all three on rubble's World (lab-world.mjs: StrengthModel::Bonds and
+// StrengthModel::Threshold) and this page's renderer; 'stress' (GPU stress solver on its own
+// canvas), 'load_path' and 'impact_local' (the same GPU world with a load path, or with the
+// analytic local impact model for strikes: stress-web, which World has no equivalent of),
+// 'blast' (the same GPU world, Blast's stress solver deciding the bonds: profile blast_gpu), or
+// 'learned' (lean MGN-T forward on this page's WebGPU — compute/timing only; rubble stays
+// unbonded).
 const bondMode=()=>$('bond-mode').value;
 // The controls panel collapses for a full view (remembered per viewer; phones start
 // collapsed). Collapsed, a quick button mirrors Start / Pause.
@@ -81,13 +68,13 @@ $('panel-toggle').onclick=()=>setPanel(document.body.classList.contains('collaps
 // the two can be compared shot for shot. Each shot re-arms the pieces.
 let bystanders=[],nearAt=0,nearBusy=false;
 function applyGuide(){
- if(!sim||!scene||stressOn)return;
+ if(!sim||!scene||stressOn||thresholdOn)return;
  sim.setGuidance($('guide').checked?nearMissSettings($('guide-strength').value):null,bystanders);
  renderer?.setZones(sceneHandle(scene).zoneOutline(bystanders));
 }
 function placeCrowd(ray){
  // The city block's zones sit on its cars and pedestrians.
- if(!scene||stressOn||towersBlock)return;
+ if(!scene||stressOn||thresholdOn||towersBlock)return;
  bystanders=sceneHandle(scene).nearMissZonesFor(Float64Array.from(ray.origin),Float64Array.from(ray.direction));
  applyGuide();$('near').textContent='0';
 }
@@ -96,14 +83,18 @@ function updateNear(now){
  sim.snapshot().then(s=>{if(sim&&scene)$('near').textContent=sceneHandle(scene).nearCounts(s,bystanders).reduce((a,b)=>a+b,0)}).catch(()=>{}).finally(()=>{nearBusy=false});
 }
 for(const id of ['guide','guide-strength'])$(id).onchange=()=>{applyGuide();$(id).blur()};
-// The stress solver's modes, and the capability profile each runs (stress-web).
-const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold',load_path:'load_path',impact_local:'impact_local',blast:'blast_gpu'};
+// The stress solver's modes on stress-web, and the capability profile each runs. The simple
+// threshold runs on World (thresholdMode).
+const STRESS_PROFILES={stress:'blast_parity',load_path:'load_path',impact_local:'impact_local',blast:'blast_gpu'};
+const thresholdMode=()=>bondMode()==='threshold';
 const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps',blast_gpu:"Blast's stress solver (vibe-land's model, Slang)"};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
 // The stress-solver modes wait on the GPU from Rust: through WebAssembly JavaScript Promise
 // Integration where the browser has it, else (Safari) through the Asyncify build
 // (gpu-wait.mjs, stress-mode.mjs).
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
+// The simple threshold on World: a StrengthModel::Threshold destructible drawn by this page.
+let thresholdOn=false;
 let learned=null,learnedMs=0,learnedBusy=false;
 // The bond graph and the View menu (0 materials, 1 sleep state, 2 bodies): this page's
 // renderer reads them as it draws; the stress modes draw with their own (Rust, stress-web),
@@ -152,7 +143,7 @@ function applyBallSpeed(){
  if(stressOn)stress?.setShotSpeedScale(k);else sim?.setProjectileSpeedScale(k);
 }
 // CCD balls: the next shots carry BODY_CCD (rubble modes; the stress modes fire their own).
-function applyBallCcd(){if(!stressOn)sim?.setProjectileCcd($('ball-ccd').checked)}
+function applyBallCcd(){if(!stressOn&&!thresholdOn)sim?.setProjectileCcd($('ball-ccd').checked)}
 function showBallRadius(){
  const r=stressOn?stress?.stats.ballRadius:scene?.projectileRadius;
  $('ball-radius-value').textContent=`${scaleLabel(radiusScale())}${r?` · ${r.toFixed(2)} m`:''}`;
@@ -163,7 +154,7 @@ function applyBallMass(){
  if(stressOn)stress?.setShotMassScale(k);else if(sim&&scene?.projectileMass)sim.setProjectileMass(scene.projectileMass*k);
 }
 // Physics ticks per second follow the scene's dt (120 Hz unless the scene says otherwise).
-const stepHz=()=>Math.round(1/(scene?.params?.dt||1/120));
+const stepHz=()=>Math.round(1/(sim?.dt||scene?.params?.dt||1/120));
 const rates=createRates(value=>{
  currentRates=value;
  $('tps').textContent=value?value.tps.toFixed(value.tps>0&&value.tps<10?1:0):'—';
@@ -175,15 +166,14 @@ const rates=createRates(value=>{
  $('step-ms').textContent=learned?`learned ${learnedMs.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n · ${learned.params} w`:
   value&&!value.stepMs&&sim?.counters.awake===0?'all asleep · no GPU work':
   value&&tickMs?`${tickMs.toFixed(1)} ms GPU/tick · max ${Math.floor(1000/tickMs)} TPS`:
-  value?.stepMs?`${value.stepMs.toFixed(1)} ms/tick`:`target ${stepHz()} TPS`;
+  value?.stepMs?`${value.stepMs.toFixed(2)} ms/tick CPU`:`target ${stepHz()} TPS`;
  $('frame-ms').textContent=value&&frameMs?`${frameMs.toFixed(1)} ms GPU/frame · max ${Math.floor(1000/frameMs)} FPS`:
   value?`${value.frameMs.toFixed(1)} ms/frame`:'frames / second';
  // Per tick: CPU time encoding and submitting the GPU work, then time spent
  // waiting on the GPU (the readback, or a full queue of overlapped ticks).
  // Sliced ticks run between frames, so no wait is measured for them.
  $('timing').textContent=!value?.stepMs?'TPS counts physics ticks; FPS counts rendered frames.':
-  value.sliced?`Physics per tick: ${value.encodeMs.toFixed(1)} ms CPU encode; GPU work spread across frames`:
-  `Physics per tick: ${value.encodeMs.toFixed(1)} ms CPU encode + ${value.waitMs.toFixed(1)} ms waiting on the GPU`;
+  `Physics per tick: ${value.encodeMs.toFixed(2)} ms CPU (World.step: encode and submit; results arrive a frame or two later, never waited for)`;
 },undefined,()=>stepHz());
 document.addEventListener('visibilitychange',()=>{last=0;accumulator=0;rates.reset()});
 const setStatus=text=>{status.textContent=text;status.classList.remove('error')};
@@ -203,6 +193,8 @@ async function loadLevel(level){
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   if(stressMode())return loadStress(level);
   stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;$('strike-prediction').disabled=true;$('contact-fracture').disabled=true;$('pack-shot-row').hidden=true;pendingShot=null;
+  if(thresholdMode())return loadThreshold(level);
+  thresholdOn=false;
   learned?.dispose();learned=null;learnedMs=0;
   const raw=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   const built=physicsHz()?withParams(raw,{dt:1/physicsHz()}):raw;
@@ -216,12 +208,13 @@ async function loadLevel(level){
   }else{
   if(bondMode()==='d6'&&!towersBlock)setStatus('Settling bonds under self-weight…');
   // Learned mode: rubble stays unbonded (same as none); the MGN-T forward is timed separately.
-  const one=bondMode()==='d6'?await preloadBonds(device,strengthScale()===1?built:withBondStrength(built,strengthScale())):withoutJoints(built);
+  // D6 bonds: one house settled on World (settleBonds), then laid out.
+  const one=bondMode()==='d6'?await settleBonds(strengthScale()===1?built:withBondStrength(built,strengthScale()),setStatus):withoutJoints(built);
   // Copies laid out as the sample says (procedural houses get a larger contact budget).
   const laid=layoutScene(one,layout,!!procedural);
   next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale())}}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
- scene=next;volley=null;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);resetTrails();
+ scene=next;volley=null;setStatus('Building the World…');sim=await createLabWorld(scene,bondAsset(scene),{gpuTiming:GPU_TIMING});renderer=await createRenderer(device,$('view'),sim,scene,shoot);resetTrails();
  renderer.colorMode=viewMode();applyCamera();applyBallMass();applyBallSpeed();applyBallCcd();showBallRadius();bystanders=towersBlock?sceneHandle(scene).cityZones():[];applyGuide();$('near').textContent='—';$('meteor').hidden=!towersMeteor;$('topple').hidden=!towersBlock;
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
@@ -245,7 +238,7 @@ async function loadStress(level){
  // sample's layout (every copy), or a scene pack.
  const cuboid=procedural==='cuboid',pack=procedural==='pack';
  if(!cuboid&&!pack&&(procedural||!assetBytes))throw new Error('The stress-solver mode runs a fracture GLB, a scene pack or the cuboid houses: pick one of those scenes.');
- learned?.dispose();learned=null;learnedMs=0;
+ thresholdOn=false;learned?.dispose();learned=null;learnedMs=0;
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
  $('view').hidden=true;$('stress-view').hidden=false;
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
@@ -266,6 +259,44 @@ async function loadStress(level){
  setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${PROFILE_NOTES[profile]??profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
  pendingShot=null;showPackShots();
 }
+// The simple threshold (the stress mode's v0 rule) on World: a StrengthModel::Threshold
+// destructible per copy on the world's shared GPU fracture, drawn by this page's renderer
+// from World's poses. A fracture GLB's level (one copy, as the stress mode imports it), the
+// cuboid houses in their sample's layout (every copy) or a scene pack.
+async function loadThreshold(level){
+ const cuboid=procedural==='cuboid',pack=procedural==='pack';
+ if(!cuboid&&!pack&&(procedural||!assetBytes))throw new Error('The threshold mode runs a fracture GLB, a scene pack or the cuboid houses: pick one of those scenes.');
+ learned?.dispose();learned=null;learnedMs=0;
+ renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
+ setStatus('Building the threshold World…');
+ // The scene World's asset is built from (DestructibleAssetDesc::from_glb: the level at the
+ // default hull budget), so its chunks are the drawn ones.
+ const raw=pack?buildPackScene(packBytes):cuboid?layoutScene(buildCuboidHouse(),layout,true):buildScene(asset,level);
+ const lab=radiusScale()===1?raw:withProjectileRadius(raw,radiusScale());
+ const source=thresholdAsset(pack?'pack':cuboid?'cuboid':'glb',pack?packBytes:cuboid?null:assetBytes,level);
+ const totals=source.totals();
+ try{sim=await createLabWorld(lab,source,{copies:lab.copies||1,physicsHz:physicsHz(),crush:crushMode(),strengthScale:strengthScale()})}finally{source.free()}
+ thresholdOn=true;scene=lab;volley=null;
+ renderer=await createRenderer(device,$('view'),sim,scene,shoot);resetTrails();
+ renderer.colorMode=viewMode();applyCamera();applyBallMass();applyBallSpeed();showBallRadius();bystanders=[];renderer.setZones(new Float32Array(0));
+ const copies=lab.copies||1;
+ $('fragments').textContent=totals[0]*copies;$('hulls').textContent=totals[1]*copies;$('bonds').textContent=totals[2]*copies;$('awake').textContent='0';$('contacts').textContent='0';$('near').textContent='—';
+ $('release').textContent='Start simulation';$('fire').hidden=true;$('volley').hidden=true;$('meteor').hidden=true;$('topple').hidden=true;
+ // World predicts every projectile's strike (World::body_set_projectile); it has no
+ // in-step contact fracture.
+ $('strike-prediction').checked=true;$('strike-prediction').disabled=true;$('contact-fracture').checked=false;$('contact-fracture').disabled=true;
+ const shots=pack?sim.packShots:[];
+ $('pack-shot').replaceChildren(...shots.map((s,i)=>new Option(`${s.label} · ${(s.mass/1000).toFixed(1)} t at ${s.speed.toFixed(1)} m/s`,i)));
+ $('pack-shot-row').hidden=!shots.length;$('pack-shot').title=shots.map(s=>`${s.label}: ${s.note}`).join('\n');
+ pendingShot=null;
+ if(urlShot!==null){const i=shots.findIndex(s=>s.label===urlShot||s.label===`${urlShot}x`);
+  if(i<0)throw new Error(`No authored shot ${urlShot}: ${shots.map(s=>s.label).join(', ')}`);
+  $('pack-shot').value=String(i);pendingShot={index:i,at:shots[i].launchAt};urlShot=null;released=true;running=true;$('release').textContent='Pause'}
+ setStatus(`Threshold (World) · ${totals[0]*copies} chunks · ${totals[2]*copies} bonds · ${PROFILE_NOTES.threshold}, ${stepHz()} Hz${cuboid||pack?'':' · one copy'} · click the model to shoot`);
+}
+// The threshold mode's status line.
+const thresholdStatus=()=>{const st=sim.stats(),b=sim.breaks;
+ return `${sim.shots} shots · ${sim.steps} frames · ${st.actors} bodies · ${st.bonds-st.bondsIntact} bonds broken${crushMode()?` · ${st.crushed} crushed`:' · crush off'} · ${(sim.steps/stepHz()).toFixed(2)} s`};
 async function importBytes(bytes,name,sampleKey="",entry={}){
  assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;towersBlock=false;
  const start=performance.now(),next=parseFractureGlb(bytes);const ms=performance.now()-start;
@@ -317,6 +348,8 @@ try{const index=await (await fetch('./packs/index.json')).json();
 // reference rig, the stress-solver mode (threshold unless bonds= says otherwise) and fires
 // the authored shot at its launch time (the source's 2 s settle); shot=1.4 matches 1.4x.
 const query=new URLSearchParams(location.search);
+// ?gputime=phases: World times each phase of the step (sim.gpuTime.segments); default the step.
+const GPU_TIMING=query.get('gputime')==='phases'?'phases':'step';
 let urlShot=null;
 {const pack=query.get('pack'),bonds=query.get('bonds');
  if(bonds&&$('bond-mode').querySelector(`option[value="${bonds}"]`))$('bond-mode').value=bonds;
@@ -333,10 +366,13 @@ function showPackShots(){
 // An authored shot waiting for its launch time (s of simulated time).
 let pendingShot=null;
 function firePendingShot(st){
+ if(thresholdOn){if(pendingShot&&sim&&sim.steps*sim.dt>=pendingShot.at){trailLaunched(sim.firePackShot(pendingShot.index));pendingShot=null}return}
  if(!pendingShot||(st.frames??0)/st.frameHz<pendingShot.at)return;
  stress.firePackShot(pendingShot.index);pendingShot=null;
 }
-$('fire-pack-shot').onclick=()=>{if(stressOn&&stress){stress.firePackShot(Number($('pack-shot').value));stress.running=true}};
+$('fire-pack-shot').onclick=()=>{
+ if(thresholdOn&&sim){trailLaunched(sim.firePackShot(Number($('pack-shot').value)));released=true;running=true;$('release').textContent='Pause';return}
+ if(stressOn&&stress){stress.firePackShot(Number($('pack-shot').value));stress.running=true}};
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
  if(entry.pack||entry.generated){
@@ -380,7 +416,7 @@ $('volley').onclick=()=>{if(sim&&towersBlock)startShots(towersVolley(scene))};
 $('meteor').onclick=()=>{if(sim&&towersMeteor)startShots([meteorShot(scene)])};
 $('topple').onclick=()=>{if(sim&&towersBlock)startShots(toppleShots(scene))};
 function fireVolley(){
- if(!volley||sim.slicing)return;
+ if(!volley)return;
  while(volley.next<volley.shots.length&&volley.shots[volley.next].step<=sim.steps){const s=volley.shots[volley.next++];trailLaunched(sim.launch(s.origin,s.dir,s.speed?{speed:s.speed,arc:false}:undefined))}
  if(volley.next>=volley.shots.length)volley=null;
 }
@@ -402,18 +438,24 @@ $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)
 $('crush').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('physics-hz').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{if(stressOn&&stress){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
-$('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();volley=null;resetTrails();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
+$('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}if(thresholdOn){await loadThreshold(Number($('level').value));return}
+ sim.reset();applyGuide();volley=null;resetTrails();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
 $('metadata').onclick=()=>{if(!asset)return;const url=URL.createObjectURL(new Blob([asset.metadataJson()],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='fracture-metadata.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.preventDefault();document.body.classList.add('drop')});
 window.addEventListener('dragleave',()=>document.body.classList.remove('drop'));
 window.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drop');const f=e.dataTransfer.files[0];if(f&&device)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))});
-window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
+window.__FRACTURE_DEMO__={
  // The stress modes, frame-locked for recording: ready once loaded; each advance runs one
- // display frame of `ms` (the Rust steps the physics frames that fell due, fires a URL
- // shot at its launch time and draws). orbit/zoom move the stress camera as a drag would.
- get stressReady(){return !loading&&stressOn&&!!stress},
- async stressAdvance(ms=1000/60){stressCapture=true;await frame;await stress.frame(ms);const st=stress.stats;firePendingShot(st);setStatus(stressStatus(st));return st},
- stressOrbit(dx,dy){stress.orbit(dx,dy)},stressZoom(delta){stress.zoom(delta)},
+ // display frame of `ms` (the physics frames that fell due, a URL shot at its launch time,
+ // the draw). orbit/zoom move the stress camera as a drag would. The threshold mode (World)
+ // steps those frames and waits for their results before drawing.
+ get stressReady(){return !loading&&(stressOn&&!!stress||thresholdOn&&!!sim)},
+ async stressAdvance(ms=1000/60){stressCapture=true;await frame;
+  if(thresholdOn){
+   lockedBehind+=ms/1000;const n=Math.floor(lockedBehind*stepHz()+1e-9);lockedBehind-=n/stepHz();
+   if(running&&n)await sim.step(n);firePendingShot(null);renderer.draw($('show-bonds').checked);setStatus(thresholdStatus());return thresholdStats()}
+  await stress.frame(ms);const st=stress.stats;firePendingShot(st);setStatus(stressStatus(st));return st},
+ stressOrbit(dx,dy){if(thresholdOn)renderer?.orbit(dx,dy);else stress.orbit(dx,dy)},stressZoom(delta){if(thresholdOn)renderer?.zoom(delta);else stress.zoom(delta)},
  get status(){return $('status').textContent},
  // The page's own shot (a click's path: queued behind the frame, the loop keeps running).
  shoot:ray=>shoot(ray),
@@ -426,22 +468,35 @@ window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
  // The current Near Miss crowd (one ring zone per bystander).
  get bystanders(){return bystanders},
  async fireRow(){running=false;await frame;return sim.launch(scene.rowShot.origin,scene.rowShot.direction)},
- // Repeatable row benchmark: fire, then every `every` steps record wall ms per
- // step, the ball, counters and (optionally) a per-phase GPU profile.
- async benchmarkRow({steps=600,every=60,profile=true}={}){
+ // Repeatable row benchmark: fire, then every `every` steps record wall ms per step, the
+ // ball and the counters (World's per-phase GPU split: `profile` takes
+ // GpuTiming::Phases, which this page does not ask for; `gpuMs` is the step's).
+ async benchmarkRow({steps=600,every=60}={}){
   running=false;await frame;const id=sim.launch(scene.rowShot.origin,scene.rowShot.direction),log=[];
   for(let done=0;done<steps;){
-   const n=Math.min(every,steps-done),t=performance.now();for(let k=0;k<n;k+=4)await sim.step(Math.min(4,n-k));done+=n;
+   const n=Math.min(every,steps-done),t=performance.now();await sim.step(n);done+=n;
    const ms=(performance.now()-t)/n,snap=await sim.snapshot(),c=sim.counters,o=id*28;
-   const p=profile?await sim.profileStep():null;if(p)done++;
    log.push({step:done,wallMs:+ms.toFixed(2),ballZ:+snap[o+2].toFixed(1),ballVz:+snap[o+14].toFixed(1),awake:c.awake,contacts:c.contact,
-    candidates:c.candidate,small:c.convexSmall,large:c.convexLarge,colors:c.color,overflow:c.overflow,
-    gpuMs:p?+p.gpuMs.toFixed(2):null,phases:p?Object.fromEntries(Object.entries(p.phases).map(([k,v])=>[k,+v.toFixed(2)])):null});
+    candidates:c.candidate,colors:c.color,overflow:c.overflow,gpuMs:sim.gpuTickMs==null?null:+sim.gpuTickMs.toFixed(2)});
   }
   renderer.draw($('show-bonds').checked);return log;
  },
- async stepFrames(count){running=false;await frame;for(let i=0;i<count;i++)await sim.step();renderer.draw($('show-bonds').checked);return sim.counters},
- async snapshot(){await frame;return sim.snapshot()},reset:()=>serializeLoad(async()=>sim.reset()),load:sample,selectLevel:level=>serializeLoad(async()=>{$("level").value=String(level);await loadLevel(level)})};
+ // `count` steps as fast as World's readbacks allow, every frame read, then a draw.
+ async stepFrames(count){running=false;await frame;await sim.step(count);renderer.draw($('show-bonds').checked);return sim.counters},
+ async snapshot(){await frame;return sim.snapshot()},reset:()=>serializeLoad(async()=>{if(thresholdOn)await loadThreshold(Number($('level').value));else{sim.reset();applyGuide()}}),load:sample,selectLevel:level=>serializeLoad(async()=>{$("level").value=String(level);await loadLevel(level)})};
+// page-bench.mjs: frame-locked steps.
+window.__step=n=>window.__FRACTURE_DEMO__.stepFrames(n);
+// Checks and benches (the before/after comparisons): steps, the breaks since the shot.
+let shotStep=0;
+window.__lab={
+ async step(n){await sim.step(n);return sim.counters},async one(){await sim.step(1);return sim.counters},
+ broken(){const st=sim.stats(),f=sim.breaks.firstStep;return {broken:st.bonds-st.bondsIntact,actors:st.actors,crushed:st.crushed,firstStep:f===null?null:f-shotStep+1}},
+ async fireRay(){const d=window.__FRACTURE_DEMO__,c=scene.center,e=Math.max(scene.extent,1);const id=await d.shootRay([c[0]+0.13,c[1],c[2]+3*e],[0,0,-1]);shotStep=sim.steps;return id},
+ reset(){return window.__FRACTURE_DEMO__.reset()},
+};
+// The threshold mode's numbers, as the stress modes' stats.
+let lockedBehind=0;
+const thresholdStats=()=>{const st=sim.stats();return {frames:sim.steps,shots:sim.shots,bodies:st.actors,brokenBonds:st.bonds-st.bondsIntact,crush:crushMode(),crushed:st.crushed,chunks:st.chunks,bonds:st.bonds,simSeconds:sim.steps*sim.dt,frameHz:stepHz()}};
 // One stress-mode frame: the Rust steps what fell due and draws; the HUD counts physics
 // frames and rendered frames per second from its stats.
 // What the stress import could not take from the scene as given (stress-web `warnings`).
@@ -466,65 +521,32 @@ function stressTick(now,elapsedMs){
 // Frame-locked capture (record-reactions.mjs): the stress mode steps only when asked.
 let stressCapture=false;
 function tick(now){
- if(stressOn&&stressCapture){requestAnimationFrame(tick);return}
+ if((stressOn||thresholdOn)&&stressCapture){requestAnimationFrame(tick);return}
  if(stressOn&&!loading&&stress){const ms=last?Math.min(250,now-last):0;last=now;return stressTick(now,ms)}
- const frameMs=last?now-last:FRAME_BUDGET_MS;
  const elapsed=last?Math.min(.04,(now-last)/1000):0;last=now;
- // Damped control on a smoothed frame time: cut quickly when over budget,
- // raise slowly when under, so one heavy frame does not swing the rate.
- frameEma+=0.2*(frameMs-frameEma);
- if(!sim?.slicing)sliceRate=Math.min(MAX_SLICE_RATE,Math.max(0.25,sliceRate*Math.min(1.03,Math.max(0.7,FRAME_BUDGET_MS/frameEma))));
  if(!loading&&renderer){frame=(async()=>{try{
-  let work=null,ticks=0;
+  let ticks=0;
   if(running)fireVolley();
   if(running){
-   accumulator=Math.min(accumulator+elapsed,4/stepHz());
-   if(sim.slicing){
-    // A heavy step in flight: this frame's share of slices, then its counters.
-    // Additive increase while the GPU keeps up, multiplicative cut when it
-    // does not, with the frame-time cut above as a backstop.
-    sliceRate=workDone[0].done&&frameEma<FRAME_BUDGET_MS?Math.min(MAX_SLICE_RATE,sliceRate+0.1):Math.max(0.25,sliceRate*0.85);
-    sliceCredit+=sliceRate;const n=Math.floor(sliceCredit);sliceCredit-=n;
-    const mark={done:false};workDone=[workDone[1],mark];device.queue.onSubmittedWorkDone().then(()=>{mark.done=true});
-    // Counters arrive asynchronously, so the queue keeps flowing.
-    if(sim.submitSlices(n))sim.finishSlicedStep().then(()=>{if(!document.hidden)rates.step(sim.timing)}).catch(fail);
-   }else{
-    // Bound outstanding work. Slow ticks get one tick per frame, rather than
-    // four serial GPU waits starving camera input and rendering.
-    // Overlapped ticks (opt-in) queue without waiting for counters, so the
-    // frame can carry the whole backlog (the simulation caps ticks in flight).
-    const overlap=$('overlap-ticks').checked;
-    // Sized by the tick's GPU time (timestamps, when the browser has them):
-    // the wall time also counts the counter readback, so at 9 ms wall a 6 ms
-    // GPU tick got one tick per frame and a 60 Hz display held physics at
-    // 60 TPS. Up to a 60 Hz frame's worth: a late frame catches up.
-    const tickMs=sim.gpuTickMs??sim.timing.wallMs;
-    const budget=overlap?4:Math.max(1,Math.min(4,Math.floor((sim.gpuTickMs?16:12)/Math.max(tickMs,0.1))));
-    ticks=Math.min(budget,Math.floor(accumulator*stepHz()));
-    if(ticks){
-     accumulator-=ticks/stepHz();
-     // Steps over ~12 ms run sliced across frames so rendering keeps its rate;
-     // the physics is the same, only spread over several frames.
-     const heavy=sim.timing.wallMs>SLICED_STEP_MS&&!(sim.timing.sliced&&sim.counters.awake<SLICE_EXIT_AWAKE);
-     if(heavy){ticks=0;if(sim.beginSlicedStep()&&sim.submitSlices(1))sim.finishSlicedStep().then(()=>{if(!document.hidden)rates.step(sim.timing)}).catch(fail)}
-     else work=sim.step(ticks,{wait:!overlap});
-    }
-   }
-  }
+   accumulator=Math.min(accumulator+elapsed,MAX_TICKS_PER_FRAME/stepHz());
+   // The due ticks World can take without waiting; the rest stay due (never dropped).
+   const due=Math.min(MAX_TICKS_PER_FRAME,Math.floor(accumulator*stepHz()+1e-9));
+   ticks=sim.tick(due);accumulator-=ticks/stepHz();
+   if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing);
+   if(thresholdOn)firePendingShot(null);
+  }else sim.poll();
   // Learned-impact: time one forward per frame when idle enough (discard output).
   if(learned&&!learnedBusy){learnedBusy=true;learned.run().then(ms=>{learnedMs=ms;learnedBusy=false;$('step-ms').textContent=`learned ${ms.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n · ${learned.params} w`}).catch(e=>{learnedBusy=false;fail(e)})}
-  // Queue the draw immediately behind physics; do not wait for CPU stats first.
   updateTrails();renderer.draw($('show-bonds').checked);
-  if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}
   if(running){const c=sim.counters;$("awake").textContent=c.awake;$("contacts").textContent=c.contact;updateNear(now)}
-  if(running){const c=sim.counters;setStatus(`${sim.shots} shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}
+  if(running)setStatus(thresholdOn?thresholdStatus():(()=>{const c=sim.counters;return `${sim.shots} shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`})());
   if(!document.hidden)rates.frame();
  }catch(e){fail(e)}})();frame.finally(()=>requestAnimationFrame(tick))}else requestAnimationFrame(tick);
 }
 try{
  if(!navigator.gpu)throw new Error('WebGPU is unavailable. Open this localhost page in a WebGPU-enabled browser.');
- const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error('No WebGPU adapter available');
- device=await adapter.requestDevice({requiredFeatures:adapter.features.has('timestamp-query')?['timestamp-query']:[],requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(16,adapter.limits.maxStorageBuffersPerShaderStage),maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
+ // World's device (lab-world.mjs): the physics and this page's renderer share it.
+ device=await labDevice();
  device.addEventListener('uncapturederror',e=>fail(e.error));device.lost.then(info=>fail(new Error(`GPU device lost: ${info.message}. Reload this page.`)));
  // ?scene=<key>&bonds=<mode>&crush=<0|1|2> preselect the panel (e.g. scene=crush-wall&bonds=threshold&crush=1).
  const q=new URLSearchParams(location.search);

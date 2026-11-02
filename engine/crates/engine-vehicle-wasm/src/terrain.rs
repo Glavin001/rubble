@@ -1,4 +1,4 @@
-//! Deformable terrain for a browser host (`engine-webgpu/terrain-host.mjs`): the
+//! Deformable terrain for a browser host (the pages now run World's terrain): the
 //! shared command plan (`engine_terrain::plan`) the native `WgpuSim` replays,
 //! plus the open areas' lifecycle: π-scaled impact and explosion regions with
 //! their Z-model source, each frame's coupled substeps from a speed bound the

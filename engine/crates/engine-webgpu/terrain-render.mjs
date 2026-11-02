@@ -2,12 +2,12 @@
 // records (engine_schema::heightfield) outside the open areas' windows, and
 // inside each the live surface the engine rebuilds every frame from that
 // area's particles (engine_terrain::surface, binding T.SURFACE; see
-// terrain-host.mjs { surface: true }). Each open area is a view of the
+// engine-world-wasm's TerrainDef surface). Each open area is a view of the
 // surface buffer (its window, its heights). Material above that surface by
 // more than a layer has left the ground: a page draws it, and the parcels, as
 // debris. No terrain logic here, only reads of what the GPU wrote.
 //
-//   const wgsl = GROUND_WGSL({ hfBase, surfaceBinding: 10 });
+//   const wgsl = GROUND_WGSL({ hfBase, surfaceBinding: 10, T: terrainLayout() });
 //   // needs `hulls: array<vec4u>` (binding 18's records) declared before it.
 //   groundHeight(i, j, live)   sample (i, j): live surface or heightfield
 //   groundAt(x, z, live)       bilinear height at local (x, z)
@@ -17,48 +17,33 @@
 //                              (more than a layer above the surface); draw them
 //                              with drawIndirect(surfaceBuffer, 4 * T.SURFACE_DEBRIS_ARGS_WORD)
 //                              after writing the vertex count to that word
-import { T } from './terrain-host.mjs';
-
-/** Words of the surface buffer (engine_terrain::surface). Header: [0] views
- * to scan, [4] the debris list's first word, [14] frames, [15] valid,
- * [16..20) the debris draw's arguments; then a view record per area slot. */
-export const SURFACE_WORDS = {
+/** Words of the surface buffer (engine_terrain::surface) for the layout `T`
+ * (engine-world-wasm `terrainLayout()`). Header: [0] views to scan, [4] the
+ * debris list's first word, [14] frames, [15] valid, [16..20) the debris
+ * draw's arguments; then a view record per area slot. */
+export const surfaceWords = (T) => ({
   views: 0, debrisBase: 4, frames: 14, valid: T.SURFACE_VALID_WORD, debrisArgs: T.SURFACE_DEBRIS_ARGS_WORD, debrisCount: T.SURFACE_DEBRIS_ARGS_WORD + 1,
   view: T.SURFACE_VIEW_WORD, viewWords: T.SURFACE_VIEW_WORDS, maxViews: T.MAX_SURFACE_VIEWS,
   // In a view record: flags (bit T.SURFACE_VIEW_OPEN), layers, heights' first word, …, window, bed, layer height.
   vFlags: 0, vHeights: 2, vWindow: T.SURFACE_VIEW_WINDOW, vBed: T.SURFACE_VIEW_WINDOW + 4, vLayer: T.SURFACE_VIEW_WINDOW + 5,
-};
-const W = SURFACE_WORDS;
+});
 
 /**
- * How far the last live surface is from the heightfield now (call right after
- * a bake: the bake does not touch the surface buffer, so this is the jump a
- * viewer would see at the switch). Test tooling: reads both, compares.
- * `slots`: the area slots that baked (default: every view the last surface
- * pass showed). Returns { rms, mean, worst, samples } in metres over their
- * windows.
+ * How far the last live surface was from the heightfield the bake left: the
+ * jump a viewer sees at the switch. `views`: the last frame's surface views
+ * before the bake (`WebFrame.terrainSurface()`: { slot, window, heights }),
+ * `heights`: the field's samples after it (`WebWorld.heightFieldHeights`,
+ * row-major, `nx` across), `slots`: the area slots that baked (default: every
+ * view). Test tooling. Returns { rms, mean, worst, samples } in metres over
+ * their windows.
  */
-export async function surfaceSwitchError(device, surfaceBuffer, hullBuffer, hfBase, nx, slots = null) {
-  const read = async (buf, offset, words) => {
-    const rb = device.createBuffer({ size: words * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(buf, offset, rb, 0, words * 4);
-    device.queue.submit([enc.finish()]);
-    await rb.mapAsync(GPUMapMode.READ);
-    const out = rb.getMappedRange().slice(0);
-    rb.unmap(); rb.destroy();
-    return out;
-  };
-  const table = new Uint32Array(await read(surfaceBuffer, 4 * W.view, W.viewWords * W.maxViews));
+export function switchError(views, heights, nx, slots = null) {
   let sum = 0, sq = 0, worst = 0, n = 0;
-  for (let s = 0; s < W.maxViews; s++) {
-    const v = table.subarray(s * W.viewWords, (s + 1) * W.viewWords);
-    if (!(v[W.vFlags] & T.SURFACE_VIEW_OPEN) || (slots && !slots.includes(s))) continue;
-    const [i0, j0, ni, nj] = v.subarray(W.vWindow, W.vWindow + 4);
-    const live = new Float32Array(await read(surfaceBuffer, 4 * v[W.vHeights], ni * nj));
-    const rows = new Float32Array(await read(hullBuffer, (hfBase + 2) * 16 + j0 * nx * 4, Math.ceil((nj * nx) / 4) * 4));
+  for (const v of views) {
+    if (slots && !slots.includes(v.slot)) continue;
+    const [i0, j0, ni, nj] = v.window;
     for (let j = 0; j < nj; j++) for (let i = 0; i < ni; i++) {
-      const d = live[j * ni + i] - rows[j * nx + i0 + i];
+      const d = v.heights[j * ni + i] - heights[(j0 + j) * nx + i0 + i];
       sum += d; sq += d * d; n++;
       if (Math.abs(d) > Math.abs(worst)) worst = d;
     }
@@ -66,7 +51,9 @@ export async function surfaceSwitchError(device, surfaceBuffer, hullBuffer, hfBa
   return { rms: n ? Math.sqrt(sq / n) : 0, mean: n ? sum / n : 0, worst, samples: n };
 }
 
-export const GROUND_WGSL = ({ hfBase, surfaceBinding }) => /* wgsl */`
+export const GROUND_WGSL = ({ hfBase, surfaceBinding, T }) => {
+  const W = surfaceWords(T);
+  return /* wgsl */`
 @group(0) @binding(${surfaceBinding}) var<storage, read> surf: array<u32>;
 const HF_BASE = ${hfBase}u;
 struct HfDims { nx: u32, nz: u32, dx: f32, dz: f32, x0: f32, z0: f32 };
@@ -131,3 +118,4 @@ fn groundAt(x: f32, z: f32, live: bool) -> f32 {
 // The k-th particle terrain_surface_debris listed (k < the debris count).
 fn debrisParticle(k: u32) -> u32 { return surf[surf[${W.debrisBase}u] + k]; }
 `;
+};
