@@ -106,6 +106,11 @@ pub struct StepModes {
     /// Measurement variant (sleep archive): `archive_spread` rounds before `archive_emit`,
     /// each listing the sleepers resting on listed ones (0: off).
     pub archive_spread_rounds: u32,
+    /// Sleep archive: a sleeper touched by a moving body forms all its resting pairs
+    /// before this step's narrowphase (`archive_touch`, host word 30 bit 8), and its
+    /// pairs at rest keep their archived rows; off: `archive_emit` emits the pairs
+    /// filed in the touched sleeper's own archive (the earlier path, for A/B runs).
+    pub archive_touch_query: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -466,12 +471,19 @@ pub fn encode_step(
         }
     }
     if m.sleep_archive_blocks > 0 && !reuse_manifolds {
-        // Measurement variant: sleepers resting on touched ones, one archived hop a round.
-        for _ in 0..m.archive_spread_rounds {
-            e.d("archive_spread", 4096);
+        if m.archive_touch_query {
+            // Touched sleepers' resting pairs, queried (world_step.slang archive_touch),
+            // after listing the sleepers those woken since the broadphase rest on.
+            e.d("archive_touch_spread", 4096);
+            e.d("archive_touch", 4096);
+        } else {
+            // Measurement variant: sleepers resting on touched ones, one archived hop a round.
+            for _ in 0..m.archive_spread_rounds {
+                e.d("archive_spread", 4096);
+            }
+            // Touched sleepers' archived resting pairs (world_step.slang archive_emit).
+            e.d("archive_emit", 4096);
         }
-        // Touched sleepers' archived resting pairs (world_step.slang archive_emit).
-        e.d("archive_emit", 4096);
     }
     e.d(work_args, 64);
     e.phase("broadphase");
@@ -1301,6 +1313,8 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     s[30] |= u32::from(m.sleep_archive_blocks > 0) << 5;
     // Bit 6: the archive's cold-start variant (world_step.slang archiveCold).
     s[30] |= u32::from(m.archive_cold) << 6;
+    // Bit 8: the archive's touch query (world_step.slang archiveTouchQuery).
+    s[30] |= u32::from(m.sleep_archive_blocks > 0 && m.archive_touch_query) << 8;
     if awake_broadphase(m, i) {
         // Rest tables (bit 0); bit 1 rebuilds them this step. Word 5: last step's
         // sleep events (a pipelined step copies them on the GPU), in the uniform

@@ -85,6 +85,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "archive_seal",
     "archive_emit",
     "archive_spread",
+    "archive_touch",
+    "archive_touch_spread",
     "init_colors",
     "pack_color_lists",
     "count_color_tiles",

@@ -282,6 +282,29 @@ fn run_world_among(
                     .collect::<Vec<_>>()
                     .join(",")
             };
+            let mut touched = w.sim().sleep_archive_touched();
+            touched.sort();
+            writeln!(f, "{n} touched {touched:?}").unwrap();
+            // THRESHOLD_TRACE_CONTACTS=a..b: the contact rows of those frames
+            // (`frame contact bodyA bodyB lambdaN`).
+            if let Some((a, b)) = std::env::var("THRESHOLD_TRACE_CONTACTS")
+                .ok()
+                .and_then(|v| v.split_once("..").map(|(a, b)| (a.parse::<u32>().unwrap(), b.parse::<u32>().unwrap())))
+            {
+                if (a..=b).contains(&n) {
+                    let cols = w.sim().download_colliders();
+                    for c in w.sim().last_contacts().unwrap().iter().filter(|c| c.alive != 0) {
+                        writeln!(
+                            f,
+                            "{n} contact {} {} {:.4}",
+                            cols[c.collider_a as usize].body,
+                            cols[c.collider_b as usize].body,
+                            c.lambda_n
+                        )
+                        .unwrap();
+                    }
+                }
+            }
             for (i, b) in w.sim().download_bodies().iter().enumerate() {
                 writeln!(
                     f,

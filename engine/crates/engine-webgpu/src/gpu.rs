@@ -208,6 +208,8 @@ pub struct WgpuSim {
     /// `archive_spread_rounds`).
     archive_cold: bool,
     archive_spread_rounds: u32,
+    /// The archive's touch query (`EngineFeatures::archive_touch_query`).
+    archive_touch_query: bool,
     /// Keep the resting-pair carry when the sleep archive is enabled.
     carry_with_archive: bool,
     /// The resting table no longer matches the bodies and colliders: a host wrote
@@ -883,6 +885,7 @@ impl WgpuSim {
             awake_broadphase: features.awake_broadphase,
             archive_cold: features.archive_cold,
             archive_spread_rounds: features.archive_spread_rounds,
+            archive_touch_query: features.archive_touch_query,
             carry_with_archive: features.carry_with_archive,
             rest_stale: true,
             fast_direct: false,
@@ -1870,6 +1873,11 @@ impl WgpuSim {
         self.read_body_range(0, self.body_count)
     }
 
+    /// Every collider's GPU record (diagnostic read; waits for the GPU).
+    pub fn download_colliders(&self) -> Vec<engine_schema::Collider> {
+        self.read_buffer_range(2, 0, self.collider_count as usize)
+    }
+
     fn read_body_range(&self, first: u32, count: u32) -> Vec<BodyState> {
         assert!(first <= self.body_count && count <= self.body_count - first);
         self.read_buffer_range(
@@ -2536,6 +2544,24 @@ impl WgpuSim {
         )
     }
 
+    /// The sleepers the last step listed for the sleep archive (`archiveMark`: touched by
+    /// a moving body, or hit since its broadphase); diagnostic read, waits for the GPU.
+    pub fn sleep_archive_touched(&self) -> Vec<u32> {
+        if self.sleep_archive_blocks == 0 || self.steps_done == 0 {
+            return Vec::new();
+        }
+        let meta = u64::from(engine_schema::SCRATCH_WORDS);
+        let step = self.steps_done - 1;
+        let n = self.read_buffer_range::<u32>(21, (meta + 2 + u64::from(step & 1)) * 4, 1)[0]
+            .min(self.capacity.max_bodies);
+        if n == 0 {
+            return Vec::new();
+        }
+        let mb = u64::from(self.capacity.max_bodies);
+        let list = meta + 4 + 5 * mb + 2 * u64::from(self.sleep_archive_blocks);
+        self.read_buffer_range::<u32>(21, list * 4, n as usize)
+    }
+
     /// Mark every phase of the steps encoded from now on (`None`: stop): diagnostic GPU
     /// timing a host reads with its own marks around the step.
     pub fn set_marks(&mut self, marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>) {
@@ -2918,6 +2944,7 @@ impl WgpuSim {
             fast_indirect: !self.fast_direct,
             archive_cold: self.archive_cold,
             archive_spread_rounds: self.archive_spread_rounds,
+            archive_touch_query: self.archive_touch_query,
         }
     }
 

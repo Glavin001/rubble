@@ -1664,4 +1664,10 @@ void apply_impulses(uint3 tid : SV_DispatchThreadID)
     gBodies[body].angularVel = b.angularVel + dw;
     gBodies[body].flags = (b.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
     gBodies[body].sleepTimer = 0.0;
+#if defined(ENGINE_WGSL) && !defined(ENGINE_PERSISTENT_CONTACTS)
+    // A sleeper a projectile hit wakes after the broadphase: list it for the sleep
+    // archive's touch query (archive_touch), which forms its resting pairs this step.
+    if (PASS_U == 1u && bodyIsSleeping(b) && archiveTouchQuery())
+        archiveMark(body);
+#endif
 }

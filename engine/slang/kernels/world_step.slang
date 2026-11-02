@@ -3722,6 +3722,8 @@ static const uint ARCHIVE_NONE = 0xFFFFFFFFu;
 static const uint ARCHIVE_JUST_SLEPT = 0xFFFFFFFEu;
 static const uint OVERFLOW_SLEEP_ARCHIVE = 131072u;
 bool sleepArchive() { return (HOST_S(30) & 32u) != 0u; }
+// The touch query (archive_touch; HOST_S(30) bit 8, set only with the archive).
+bool archiveTouchQuery() { return (HOST_S(30) & 256u) != 0u; }
 // Measurement variants (HOST_S(30) bits 6 and 7; off by default): a woken pair starts
 // cold instead of from its archived row; archive_spread lists the sleepers resting on a
 // touched sleeper (over the archived adjacency) so archive_emit gives them rows too.
@@ -3832,7 +3834,8 @@ Contact archiveRowOf(uint body, uint slot)
 // broadphase stays within WebGPU's storage-buffer budget).
 void archiveMark(uint body)
 {
-    if (ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
+    // The touch query (archiveTouchQuery) lists every touched sleeper, archive or not.
+    if (!archiveTouchQuery() && ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
     uint stamp = HOST_S(17) + 1u;
     uint old;
     AXCHG3(gScratchAtomics[arTouched(body)], stamp, old);
@@ -3873,6 +3876,238 @@ void archiveEmitResting(uint body)
         }
         if (first)
             emitCandidateCore(r.colliderA, r.colliderB);
+    }
+}
+
+// ---- Touch query (HOST_S(30) bit 8, with the sleep archive) ----
+// A sleeper touched by a moving body this step (archiveMark, from the moving body's
+// candidate pairs, or woken after the broadphase by a projectile hit, apply_impulses) forms every resting pair it has, before this step's narrowphase:
+// archive_touch queries each listed sleeper's colliders as if it were awake, against
+// the colliders at rest (static, or asleep: a mover's pairs are its own query's), so
+// when the touch wakes it its supports are in this step's contacts, as they would be
+// had it never slept, whichever body's archive holds them; persistence then warms each
+// from either body's archive (archiveFind). Each pair is emitted once: of two touched
+// sleepers at one grid level the lower collider index emits it, across levels the
+// finer one (the coarser one's finer scan skips touched partners).
+bool archiveTouchedNow(uint body) { return ALOAD(gScratchAtomics[arTouched(body)]) == HOST_S(17) + 1u; }
+
+// Touched collider i's pair with collider j (a candidate by bounds): j at rest, on
+// another body, not jointed; `lowerOwns`: a touched partner's pair goes to the lower index.
+// `mark` (archive_touch_spread): list a sleeping partner instead of emitting the pair.
+void touchEmit(uint i, Collider a, uint j, bool lowerOwns, bool probeHasObb, BoxObb probe, float faceGap, bool mark)
+{
+    if (j == i) return;
+    Collider b = gColliders[j];
+    if (b.body == a.body || b.shape == SHAPE_PLANE) return;
+    if (mark)
+    {
+        BodyState ob = gBodies[b.body];
+        if (bodyIsDynamic(ob) && bodyIsSleeping(ob) && !bodiesJointed(a.body, b.body) &&
+            !(probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)))
+            archiveMark(b.body);
+        return;
+    }
+    // A touched partner (asleep at the broadphase, perhaps woken since by a projectile
+    // hit) also queries; any other moving partner emitted the pair from its own query.
+    if (archiveTouchedNow(b.body))
+    {
+        if (!lowerOwns || j < i) return;
+    }
+    else if (bodyMovingOrKinematic(gBodies[b.body])) return;
+    if (bodiesJointed(a.body, b.body)) return;
+    if (probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)) return;
+    emitCandidateCore(i, j);
+}
+
+// Hierarchical grids: planes, oversized statics, the own and coarser levels' cells
+// (hierQuery's visit), then the finer levels' (hierScanFiner's acceptance test).
+void touchQueryHier(uint i, bool mark)
+{
+    Collider a = gColliders[i];
+    if (a.shape == SHAPE_PLANE) return;
+    uint base = HOST_S(1);
+    Aabb aa = gAabbs[base + i];
+    uint own = hierLevel(aa._pad0);
+    uint levels = HOST_S(18);
+    bool probeHasObb = shapeHasHull(a.shape);
+    BoxObb probe = probeHasObb ? worldObbFromCache(i)
+                               : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
+    float faceGap = max(0.001, speculativeMargin()) + (probeHasObb ? cachedReach(i) : 0.0);
+    uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
+    for (uint pi = 0u; pi < nPlanes && !mark; pi++)
+    {
+        uint j = ALOAD(gScratchAtomics[43u + pi]);
+        if (!aabbAbovePlane(aa, gColliders[j].params)) emitCandidateCore(i, j);
+    }
+    uint nLarge = min(ALOAD(gScratchAtomics[HIER_LARGE_COUNT_SLOT]), HIER_LARGE_MAX);
+    for (uint k = 0u; k < nLarge; k++)
+    {
+        uint j = ALOAD(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + k]);
+        if (aabbOverlap(aa, gAabbs[base + j]))
+            touchEmit(i, a, j, false, probeHasObb, probe, faceGap, mark);
+    }
+    if (own >= levels) return;
+    bool rest = restTables();
+    uint heads = rest ? restHeads() : 0u;
+    uint count = gCounters[0].colliderCount;
+    uint occupied = ALOAD(gScratchAtomics[HIER_LEVEL_MASK_SLOT]);
+    for (uint level = own; level < levels; level++)
+    {
+        if (((occupied >> level) & 1u) == 0u) continue;
+        float cs = hierCellSize(level);
+        int3 center = hierCell(aa, level);
+        int3 lo = max(int3(floor((aa.mn - 0.5 * cs) / cs)), center - 1);
+        int3 hi = min(int3(floor((aa.mx + 0.5 * cs) / cs)), center + 1);
+        for (int z = lo.z; z <= hi.z; z++)
+        for (int y = lo.y; y <= hi.y; y++)
+        for (int x = lo.x; x <= hi.x; x++)
+        {
+            int3 cell = int3(x, y, z);
+            uint j = ALOAD(gConstraintIds[heads + hierHash(cell, level)]);
+            uint guard = 0u;
+            while (j != 0xFFFFFFFFu && guard < count)
+            {
+                guard++;
+                Aabb ab = gAabbs[base + j];
+                uint next = rest ? ALOAD(gConstraintIds[restLinks() + j]) : asuint(ab._pad1);
+                if (j != i && aabbOverlap(aa, ab) && hierLevel(ab._pad0) == level &&
+                    all(hierCell(ab, level) == cell))
+                    touchEmit(i, a, j, level == own, probeHasObb, probe, faceGap, mark);
+                j = next;
+            }
+        }
+    }
+    uint mask = occupied & ((1u << own) - 1u);
+    float csM = hierCellSize(own);
+    int3 cellM = hierCell(aa, own);
+    for (uint level = 0u; level < own; level++)
+    {
+        if (((mask >> level) & 1u) == 0u) continue;
+        int3 lo;
+        uint3 span = finerSpan(aa, level, lo);
+        uint cells = span.x * span.y * span.z;
+        for (uint t = 0u; t < cells && t < 65536u; t++)
+        {
+            int3 cell = lo + int3(uint3(t % span.x, (t / span.x) % span.y, t / (span.x * span.y)));
+            uint j = ALOAD(gConstraintIds[heads + hierHash(cell, level)]);
+            uint guard = 0u;
+            while (j != 0xFFFFFFFFu && guard < count)
+            {
+                guard++;
+                Aabb ab = gAabbs[base + j];
+                uint next = rest ? ALOAD(gConstraintIds[restLinks() + j]) : asuint(ab._pad1);
+                if (aabbOverlap(aa, ab) && hierLevel(ab._pad0) == level &&
+                    all(hierCell(ab, level) == cell))
+                {
+                    int3 jc = hierCell(ab, own);
+                    int3 jlo = max(int3(floor((ab.mn - 0.5 * csM) / csM)), jc - 1);
+                    int3 jhi = min(int3(floor((ab.mx + 0.5 * csM) / csM)), jc + 1);
+                    // A touched finer partner emits the pair from its own coarser scan.
+                    if (!archiveTouchedNow(gColliders[j].body) && all(cellM >= jlo) && all(cellM <= jhi))
+                        touchEmit(i, a, j, false, probeHasObb, probe, faceGap, mark);
+                }
+                j = next;
+            }
+        }
+    }
+}
+
+// Uniform grids: planes, listed large statics, then the resting colliders in the 27
+// cells (the split grid's other table, or the one table's entries not awake). A large
+// touched collider walks the cells under its box for small statics instead (small
+// sleepers pair with it from their own query, as do large dynamics with everyone).
+void touchQueryGrid(uint i, bool mark)
+{
+    Collider col = gColliders[i];
+    if (col.shape == SHAPE_PLANE) return;
+    uint base = HOST_S(1);
+    Aabb box = gAabbs[base + i];
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
+    bool probeIsBox = shapeHasHull(col.shape);
+    BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
+    float faceGap = max(0.001, speculativeMargin()) + (probeIsBox ? cachedReach(i) : 0.0);
+    float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    bool queryLarge = rA > cellSize;
+    uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
+    for (uint pi = 0u; pi < nPlanes && !mark; pi++)
+        emitCandidateCore(i, ALOAD(gScratchAtomics[43u + pi]));
+    uint nListed = largeStaticCount();
+    for (uint t = 0u; t < nListed; t++)
+    {
+        uint j = largeStaticCollider(t);
+        if (aabbOverlap(box, gAabbs[base + j]))
+            touchEmit(i, col, j, false, probeIsBox, probeObb, faceGap, mark);
+    }
+    bool split = gridSplit();
+    uint tableBase = split ? gridHashSize() : 0u;
+    int3 lo, hi;
+    if (queryLarge)
+    {
+        lo = int3(floor(box.mn / cellSize));
+        hi = int3(floor(box.mx / cellSize));
+        int3 span = hi - lo + int3(1, 1, 1);
+        if (span.x * span.y * span.z > 512) return;
+    }
+    else
+    {
+        int3 cc = int3(floor((0.5 * (box.mn + box.mx)) / cellSize));
+        lo = cc - 1;
+        hi = cc + 1;
+    }
+    for (int z = lo.z; z <= hi.z; z++)
+    for (int y = lo.y; y <= hi.y; y++)
+    for (int x = lo.x; x <= hi.x; x++)
+    {
+        uint link = ALOAD(gConstraintIds[tableBase + gridHash(x, y, z)]);
+        uint guard = 0u;
+        while (link != 0xFFFFFFFFu && guard < 4096u)
+        {
+            uint cur = link & GRID_COLLIDER_MASK;
+            bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
+            Aabb ab = gAabbs[base + cur];
+            link = split ? asuint(ab._pad1) : gColorLists[cur];
+            guard++;
+            if (awakeEntry || cur == i) continue;
+            int3 cell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
+            if (any(cell != int3(x, y, z)) || !aabbOverlap(box, ab)) continue;
+            if (queryLarge && bodyIsDynamic(gBodies[gColliders[cur].body])) continue;
+            touchEmit(i, col, cur, true, probeIsBox, probeObb, faceGap, mark);
+        }
+    }
+}
+
+// Small worlds' exact pairwise scan: sleepers keep their static pairs there, so only
+// pairs with other sleepers are missing.
+void touchQuerySmall(uint i, bool mark)
+{
+    Collider col = gColliders[i];
+    if (col.shape == SHAPE_PLANE) return;
+    uint base = HOST_S(1);
+    Aabb box = gAabbs[base + i];
+    bool probeIsBox = shapeHasHull(col.shape);
+    BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
+    float faceGap = max(0.001, speculativeMargin()) + (probeIsBox ? cachedReach(i) : 0.0);
+    uint n = gCounters[0].colliderCount;
+    for (uint j = 0u; j < n && j < 512u; j++)
+    {
+        if (j == i || !aabbOverlap(box, gAabbs[base + j])) continue;
+        uint bj = gColliders[j].body;
+        BodyState ob = gBodies[bj];
+        if (!archiveTouchedNow(bj) && (!bodyIsDynamic(ob) || !bodyIsSleeping(ob))) continue;
+        touchEmit(i, col, j, true, probeIsBox, probeObb, faceGap, mark);
+    }
+}
+
+void touchQueryBody(uint body, bool mark)
+{
+    uint n = gCounters[0].colliderCount;
+    uint first = firstColliderOfBody(body);
+    for (uint c = first; c < n && c < first + 4096u; c++)
+    {
+        if (gColliders[c].body != body) break;
+        if (HOST_S(18) != 0u) touchQueryHier(c, mark);
+        else if (n <= 512u) touchQuerySmall(c, mark);
+        else touchQueryGrid(c, mark);
     }
 }
 #endif
@@ -3937,6 +4172,13 @@ Contact archiveWarmContact(Contact c, BodyState ba, BodyState bb, AvbdParams p)
     }
     return c;
 }
+// A fresh row of a pair at rest (a touched sleeper's, archive_touch) stores the
+// archived row's warm start: stored cold, it would mask the archive when the pair
+// wakes (the warm start finds the previous step's row first).
+Contact archiveRestRow(Contact c, BodyState ba, BodyState bb)
+{
+    return archiveWarmContact(c, ba, bb, PARAMS);
+}
 #endif
 Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState bb)
 {
@@ -3945,6 +4187,11 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
     c.alive = 1;
     if (contactPairAtRest(ba, bb))
     {
+#if !defined(ENGINE_PERSISTENT_CONTACTS)
+        // A touched sleeper's resting pair keeps its archived row (archiveRestRow).
+        if (!reused && archiveTouchQuery())
+            c = archiveRestRow(c, ba, bb);
+#endif
         STORE_CONTACT(curOff + i, c);
         return c;
     }
@@ -6423,6 +6670,40 @@ void archive_emit(uint3 tid : SV_DispatchThreadID)
     uint n = min(ALOAD(gScratchAtomics[arTouchedCount(step)]), HOST_S(1));
     for (uint k = i; k < n && k < 1048576u; k += 4096u)
         archiveEmitResting(ALOAD(gScratchAtomics[arTouchedList(k)]));
+}
+
+// archive_touch, in place of archive_emit with the touch query (4,096 threads striding
+// over this step's touched sleepers): each one's resting pairs (touchQueryBody).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive()) return;
+    uint step = HOST_S(17);
+    if (i == 0u)
+        ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], 0u);
+    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(step)]), HOST_S(1));
+    for (uint k = i; k < n && k < 1048576u; k += 4096u)
+        touchQueryBody(ALOAD(gScratchAtomics[arTouchedList(k)]), false);
+}
+
+// archive_touch_spread, before archive_touch: a listed sleeper woken since the
+// broadphase (a projectile hit) is awake when the narrowphase starts, so the touch
+// wakes the sleepers it rests on as a moving body's would: they are listed too.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_spread(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive()) return;
+    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1));
+    for (uint k = i; k < n && k < 1048576u; k += 4096u)
+    {
+        uint body = ALOAD(gScratchAtomics[arTouchedList(k)]);
+        if (bodyMoving(gBodies[body]))
+            touchQueryBody(body, true);
+    }
 }
 
 // archive_seal, over this step's awake list: the step's archiving is done.
