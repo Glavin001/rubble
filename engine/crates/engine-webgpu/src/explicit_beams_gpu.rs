@@ -573,29 +573,10 @@ impl ExplicitBeamsGpu {
 /// Beams above which a vehicle runs on the wide (512-lane) module.
 const WIDE_BEAMS: usize = 2048;
 
-/// Contacters above which self-collision uses the grid (below, testing every pair
-/// spreads better over the lanes).
-const GRID_MIN_CANDIDATES: usize = 64;
-
-/// The self-collision grid's cell size for a vehicle (0: all pairs): its median
-/// collision triangle's box at spawn, padded by the contact range, so a typical
-/// triangle covers at most 2 cells a side (a large one more, up to the kernel's
-/// limit, past which it tests every contacter).
+/// The self-collision grid's cell size for a vehicle (0: all pairs): the
+/// solver's own ([`ExplicitBeams::grid_cell`]), so CPU and GPU share it.
 fn grid_cell(v: &ExplicitBeams) -> f32 {
-    if v.candidates.len() <= GRID_MIN_CANDIDATES || v.triangles.is_empty() {
-        return 0.0;
-    }
-    let mut extents: Vec<f32> = v
-        .triangles
-        .iter()
-        .map(|t| {
-            let p = t.nodes.map(|n| v.nodes[n as usize].pos);
-            let span = p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
-            span.max_element()
-        })
-        .collect();
-    extents.sort_by(f32::total_cmp);
-    (extents[extents.len() / 2] + 2.0 * v.collision_range).max(0.05)
+    v.grid_cell
 }
 
 /// What a renderer needs besides a trace of `copies` vehicles of one `.truck` file,

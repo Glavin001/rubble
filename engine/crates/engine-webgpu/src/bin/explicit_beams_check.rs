@@ -84,6 +84,10 @@ fn main() -> anyhow::Result<()> {
             n.pos.y += 0.02 - lowest;
         }
     }
+    // `cell_scale=`: the self-collision grid's cell size times this.
+    if let Some(k) = kv.get("cell_scale").map(|s| s.parse::<f32>().unwrap()) {
+        cpu.grid_cell *= k;
+    }
     // `roll=1`: tyres rolling at the spawn velocity (not skidding).
     if kv.get("roll") == Some(&"1") {
         cpu.roll_tyres(vel);

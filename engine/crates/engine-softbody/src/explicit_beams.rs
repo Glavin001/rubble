@@ -1008,10 +1008,12 @@ struct CollisionGrid {
     start: Vec<u32>,
     /// Candidate indices, bucket by bucket.
     entries: Vec<u32>,
-    /// Scratch: each candidate's bucket, one triangle's buckets and candidates.
+    /// Scratch: each candidate's bucket, one triangle's buckets and candidates, and
+    /// a bit per candidate (to list them in candidate order without sorting).
     bucket_of: Vec<u32>,
     buckets: Vec<u32>,
     list: Vec<u32>,
+    bits: Vec<u64>,
 }
 
 fn grid_cell_of(p: Vec3, cell: f32) -> [i32; 3] {
@@ -1058,6 +1060,8 @@ impl CollisionGrid {
             return;
         }
         self.buckets.clear();
+        self.bits.clear();
+        self.bits.resize(self.bucket_of.len().div_ceil(64), 0);
         for x in c0[0]..=c1[0] {
             for y in c0[1]..=c1[1] {
                 for z in c0[2]..=c1[2] {
@@ -1065,12 +1069,20 @@ impl CollisionGrid {
                     if !self.buckets.contains(&b) {
                         self.buckets.push(b);
                         let (a, e) = (self.start[b as usize], self.start[b as usize + 1]);
-                        out.extend_from_slice(&self.entries[a as usize..e as usize]);
+                        for &k in &self.entries[a as usize..e as usize] {
+                            self.bits[k as usize / 64] |= 1 << (k % 64);
+                        }
                     }
                 }
             }
         }
-        out.sort_unstable();
+        for (w, &word) in self.bits.iter().enumerate() {
+            let mut m = word;
+            while m != 0 {
+                out.push(w as u32 * 64 + m.trailing_zeros());
+                m &= m - 1;
+            }
+        }
     }
 }
 
