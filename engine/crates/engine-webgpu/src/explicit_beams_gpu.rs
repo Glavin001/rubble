@@ -97,6 +97,8 @@ impl ExplicitBeamsGpu {
     /// state, throttles, origin).
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, vehicles: &[ExplicitBeams]) -> Self {
         let nv = vehicles.len();
+        // Beam records carry the vehicle index in 16 bits.
+        assert!(nv <= 1 << 16, "explicit beams GPU: at most 65536 vehicles, got {nv}");
         let total_nodes: usize = vehicles.iter().map(|v| v.nodes.len()).sum();
         let total_beams: usize = vehicles.iter().map(|v| v.beams.len()).sum();
         let total_tris: usize = vehicles.iter().map(|v| v.triangles.len()).sum();
@@ -112,7 +114,7 @@ impl ExplicitBeamsGpu {
         let mut box_recs: Vec<[u32; 4]> = Vec::new();
         let mut lists: Vec<u32> = Vec::new();
         let mut nodes: Vec<[f32; 4]> = Vec::with_capacity(total_nodes * 3);
-        let mut beams: Vec<[f32; 4]> = Vec::with_capacity(total_beams * 3);
+        let mut beams: Vec<[f32; 4]> = Vec::with_capacity(total_beams * 2);
         let mut groups: Vec<u32> = Vec::new();
         let mut misc: Vec<[u32; 4]> = Vec::with_capacity(nv + total_tris);
         let mut tri_misc: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
@@ -185,7 +187,7 @@ impl ExplicitBeamsGpu {
                 beam_recs.push([
                     node_off + b.a,
                     node_off + b.b,
-                    b.kind.code() | b.ty.code() << 8,
+                    b.kind.code() | b.ty.code() << 8 | (vi as u32) << 16,
                     b.group as u32,
                 ]);
                 beam_recs.push([
@@ -202,7 +204,6 @@ impl ExplicitBeamsGpu {
                 ]);
                 beams.push([b.rest, b.tc, b.tt, b.gate]);
                 beams.push([b.strength, b.force, b.broken as u32 as f32, 0.0]);
-                beams.push([0.0; 4]);
                 rest0.push(b.rest0);
             }
             for t in &v.triangles {
@@ -808,8 +809,8 @@ impl ExplicitBeamsGpu {
                     .map(|j| {
                         let g = (s.beam_off + j) as usize;
                         GpuBeam {
-                            broken: v[g * 3 + 1][2] != 0.0,
-                            rest: v[g * 3][0],
+                            broken: v[g * 2 + 1][2] != 0.0,
+                            rest: v[g * 2][0],
                             rest0: self.rest0[g],
                         }
                     })

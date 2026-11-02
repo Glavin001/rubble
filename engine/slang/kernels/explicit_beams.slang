@@ -35,7 +35,7 @@
 //            beamCount), (triOff, triCount, boxOff, boxCount), (candOff, candCount,
 //            groupOff, groupCount), (flags, ground bits, range bits, grid cell bits); at
 //            nodeInfoBase per node (flags, incidence start, incidence count, 0); at
-//            beamBase per beam 3 records: (a, b, kind | type << 8, group as int),
+//            beamBase per beam 3 records: (a, b, kind | type << 8 | vehicle << 16, group as int),
 //            (k, c, limit k, limit c), (short bound, long bound, plastic, L0) as
 //            float bits; at triBase per triangle (n0, n1, n2, 0); at boxBase per box
 //            (lo bits, 0), (hi bits, 0). Node and beam indices are global.
@@ -44,8 +44,8 @@
 //            the gLists positions of its end a's and end b's incidence entries.
 //   gNodes   per node 3 × float4: (relative position, mass), (velocity, friction),
 //            (force, 0).
-//   gBeams   per beam 3 × float4: (L, Tc, Tt, G), (S, last force when S or broken
-//            last changed, broken, 0), (0);
+//   gBeams   per beam 2 × float4: (L, Tc, Tt, G), (S, last force when S or broken
+//            last changed, broken, 0);
 //            at incBase per gLists position, the force of an incidence entry's beam
 //            on that node (unused at candidate positions).
 //   gAcc     per node 3 × int: self-collision force in 1/32 N.
@@ -275,11 +275,11 @@ bool groupDrops(uint j, uint beamOff, uint groupOff, uint parity, bool mark)
     if (master == NO_GROUP) return false;
     if (mark)
     {
-        float4 s1 = gBeams[j * 3u + 1u];
+        float4 s1 = gBeams[j * 2u + 1u];
         if (s1.z == 0.0)
         {
             s1.z = 1.0;
-            gBeams[j * 3u + 1u] = s1;
+            gBeams[j * 2u + 1u] = s1;
         }
     }
     return j - beamOff > master;
@@ -392,14 +392,14 @@ uint livePlain(uint node)
     {
         uint j = gLists[info.y + k] >> 1;
         uint kind = gStatic[gP.beamBase + j * 3u].z & 0xFFu;
-        if (kind == KIND_PLAIN && gBeams[j * 3u + 1u].z == 0.0) live++;
+        if (kind == KIND_PLAIN && gBeams[j * 2u + 1u].z == 0.0) live++;
     }
     return live;
 }
 
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
 {
-    float4 s1 = gBeams[gj * 3u + 1u];
+    float4 s1 = gBeams[gj * 2u + 1u];
     if (s1.z != 0.0)
     {
         gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(0.0, 0.0, 0.0, 0.0);
@@ -409,9 +409,9 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
     float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
     float4 c2 = asfloat(gStatic[gP.beamBase + gj * 3u + 2u]);
-    float4 s0 = gBeams[gj * 3u];
+    float4 s0 = gBeams[gj * 2u];
     uint kind = bn.z & 0xFFu;
-    uint type = bn.z >> 8;
+    uint type = (bn.z >> 8) & 0xFFu;
     int group = asint(bn.w);
     float4 pa = gNodes[bn.x * 3u];
     float4 pb = gNodes[bn.y * 3u];
@@ -527,8 +527,8 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     // neither. The last force (.y) is kept for a read-back only, so it is stored
     // with the record, not every step.
     float4 n0 = float4(rest, tc, tt, gate);
-    if (any(n0 != s0)) gBeams[gj * 3u] = n0;
-    if (strength != s1.x || broken) gBeams[gj * 3u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, 0.0);
+    if (any(n0 != s0)) gBeams[gj * 2u] = n0;
+    if (strength != s1.x || broken) gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, 0.0);
     float3 push = d * (f * inv);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
@@ -1023,7 +1023,7 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
     uint i = id.x;
     if (i < gP.totalBeams)
     {
-        uint v = gStatic[gP.nodeInfoBase + gStatic[gP.beamBase + i * 3u].x].w;
+        uint v = gStatic[gP.beamBase + i * 3u].z >> 16;
         Vehicle x = vehicleAt(v);
         beamUpdate(i, i - x.beamOff, (x.flags & FLAG_FAST_INV_SQRT) != 0u, x.groupOff, vehicleStep(v) & 1u);
         return;
@@ -1147,7 +1147,7 @@ void explicit_beams_wide_end(uint3 id : SV_DispatchThreadID)
     i -= gP.totalTris;
     if (i < gP.totalBeams)
     {
-        uint v = gStatic[gP.nodeInfoBase + gStatic[gP.beamBase + i * 3u].x].w;
+        uint v = gStatic[gP.beamBase + i * 3u].z >> 16;
         Vehicle x = vehicleAt(v);
         if (x.groupCount > 0u) groupDrops(i, x.beamOff, x.groupOff, (vehicleStep(v) - 1u) & 1u, true);
     }
