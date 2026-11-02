@@ -494,3 +494,19 @@ by default; the "Carry resting pairs" checkbox switches the carry live) and the 
 `rbDefaultWorldDef`'s default. `tests/world.rs struck_sleeping_pile_moves_as_with_the_carry`
 strikes a sleeping pile on canonical and persistent contacts with the archive and the
 carry.
+
+Demo recordings (headless Chrome, persistent contacts, the default `?rest=archive`;
+`~/.cache/rubble-probe/{grid4,ring4,gables4}` against the earlier `{grid3,ring2,gables3}`),
+awake / contact rows:
+
+| Scene, step | carry | carry dropped | archive_emit | touch query (default) |
+|---|---|---|---|---|
+| legacyGrid100k, 460 (ball at 300) | 204 / 405,224 | 740 / 4,104 | 104 / 785 | 74 / 758 |
+| legacyGrid100k, 900 | 278 / 405,650 | 13,812 / 73,217 | 1 / 1 | 1 / 1 |
+| ring110k, 1,020 | 14,989 / 1,001,535 | 78,931 / 674,009 | 12,681 / 104,993 | 8,681 / 101,924 |
+| ring110k, 1,500 | 465 / 1,007,698 | 73,587 / 657,002 | 0 / 0 | 0 / 0 |
+| gables506k, 630 | 23,290 / 3,925,735 | 26,671 / 130,525 | 23,795 / 122,128 | 24,314 / 129,991 |
+| gables506k, 1,200 | 9,579 / 3,900,238 | 31,700 / 187,487 | 8,566 / 51,178 | 9,962 / 64,201 |
+
+No cascade on the grid, the ring settles, and gables tracks the carry's awake count with
+2% of its contact rows.

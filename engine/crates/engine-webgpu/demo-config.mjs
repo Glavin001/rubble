@@ -259,6 +259,11 @@ export function parseDemoQuery(search) {
   const grid = qs.get('grid') || 'split';
   if (!['fixed', 'scaled', 'split'].includes(grid)) throw new Error('grid must be fixed, scaled or split');
   features.grid = grid;
+  // ?gridlevels=on|off: the hierarchical grid (and with it the awake-indexed broadphase)
+  // or the uniform one; unset: hierarchical for convex scenes only.
+  const gridLevels = qs.get('gridlevels');
+  if (gridLevels !== null && !['on', 'off'].includes(gridLevels)) throw new Error('gridlevels must be on or off');
+  if (gridLevels !== null) features.gridLevels = gridLevels === 'on';
   // CSR endpoints follow the contact storage in Rust's plan (pairs when persistent).
   const endpoints = qs.get('endpoints') || (persistent ? 'pairs' : 'manifold');
   if (!['manifold', 'pairs'].includes(endpoints)) throw new Error('endpoints must be manifold or pairs');
