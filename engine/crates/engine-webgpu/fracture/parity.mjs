@@ -1,9 +1,11 @@
-// Deterministic parity shot, the browser half of engine-viewer's
-// fracture_compare example: the same scene (shared Rust code), budget, shot
-// and tick count, and the same printout to diff against the Metal run.
-//   (await import('./parity.mjs')).parityShot(__FRACTURE_DEMO__.device,{scene:'arch',level:0,ticks:240})
+// Parity shot, the browser half of engine-viewer's fracture_compare example: the same
+// scene (shared Rust code), shot and tick count on rubble's World, and the same printout
+// to diff against the Metal run (World's plan, not the lab plan the Metal viewer replays:
+// expect the counts to differ as the two plans do; the budget's `deterministic` flag is the
+// lab plan's and World has no equivalent).
+//   (await import('./parity.mjs')).parityShot(null,{scene:'arch',level:0,ticks:240})
 import {parseFractureGlb,buildScene,buildCuboidHouse,layoutScene,withoutJoints,withCapacity,SAMPLES} from './wasm.mjs';
-import {createSimulation} from './simulation.mjs';
+import {createLabWorld,bondAsset} from './lab-world.mjs';
 
 export async function parityShot(device,{scene:key='arch',level,ticks=240}={}){
  const entry=SAMPLES.find(s=>s.key===key);if(!entry)throw new Error(`Unknown scene ${key}`);
@@ -14,7 +16,7 @@ export async function parityShot(device,{scene:key='arch',level,ticks=240}={}){
  }else{level??=0;one=buildCuboidHouse()}
  // Deterministic budget: no SAT-cache early-out, exact sleep gate.
  const scene=withCapacity(layoutScene(withoutJoints(one),entry.layout,!entry.file),{deterministic:true});
- const sim=await createSimulation(device,scene),lines=[];
+ const sim=await createLabWorld(scene,bondAsset(scene)),lines=[];
  try{
   // The row shot, else a ball at the highest piece from in front.
   const top=scene.bodies.slice(1,scene.projectileStart).reduce((a,b)=>b.p[1]>a.p[1]?b:a).p;
@@ -27,9 +29,6 @@ export async function parityShot(device,{scene:key='arch',level,ticks=240}={}){
   for(let i=1;i<scene.projectileStart;i++)if(Math.abs(snap[i*28+1]-bodies[i].p[1])<0.05)standing++;
   for(let i=1;i<n;i++)sum+=snap[i*28]+snap[i*28+1]+snap[i*28+2];
   lines.push(`${key} level ${level}: ${n} bodies · standing ${standing} of ${scene.projectileStart-1} · position sum ${sum.toFixed(4)}`);
-  const r=await sim.inspectCollisions(),pairs=new Set();
-  for(let i=0;i<r.contacts.length;i+=8)pairs.add(`${Math.min(r.contacts[i],r.contacts[i+1])},${Math.max(r.contacts[i],r.contacts[i+1])}`);
-  lines.push(`inspect: ${r.counters.contact} contacts · ${r.counters.candidate} candidates · ${r.counters.manifold} manifolds · ${pairs.size} colliding pairs`);
   return lines.join('\n');
  }finally{sim.dispose()}
 }

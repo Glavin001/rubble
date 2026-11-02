@@ -6,7 +6,7 @@
 //
 // A child of `threshold::imp`: it reads the threshold slots' state as they keep it.
 
-use super::ThresholdSlot;
+use super::{Frames, ThresholdSlot};
 use crate::blast::{model, ActiveBlast, ChunkBlastLoad, LoadCause, MIN_SCALED_DISTANCE};
 use crate::{DestructibleId, World};
 use engine_schema::BodyState;
@@ -347,7 +347,7 @@ impl World {
         let mut out = vec![Vec::new(); self.fracture.slots.len()];
         for &k in slots {
             let t = self.fracture.slots[k].as_ref().expect("live slot");
-            let frames = t.fracture.body_frames(gpu);
+            let frames = t.own().fracture.body_frames(gpu);
             out[k] = chunk_frames(t, &bodies, &frames);
         }
         out
@@ -713,9 +713,9 @@ impl World {
             let t = self.fracture.slots[k].as_mut().expect("live slot");
             let all: Vec<u32> = broken.iter().chain(&pending).copied().collect();
             // Broken on the GPU with the split below, each counted once.
-            t.fracture.break_bonds_sparse(&all);
+            t.own_mut().fracture.break_bonds_sparse(&all);
             if let Some(words) = &crush_words {
-                t.fracture
+                t.own_mut().fracture
                     .set_crush_blast(&gpu, words)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
@@ -724,14 +724,14 @@ impl World {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("blast split"),
                 });
-            t.fracture.encode_split_crush(
+            t.own_mut().fracture.encode_split_crush(
                 &gpu,
                 &mut enc,
                 self.sim.steps_done(),
                 crush_words.is_some(),
             );
             gpu.queue.submit([enc.finish()]);
-            let counters = t.fracture.counters(&gpu);
+            let counters = t.own_mut().fracture.counters(&gpu);
             anyhow::ensure!(
                 counters.error & stress_gpu::fracture::CRUSH_ERROR_FRAGMENTS == 0,
                 "step {step}: a blast's chunk crush found the fragment bodies spent: raise CrushMass::Conserve's budget"
@@ -746,12 +746,12 @@ impl World {
                 counters.error
             );
             if crush_words.is_some() {
-                crushes = t.fracture.crush_events(&gpu);
+                crushes = t.own_mut().fracture.crush_events(&gpu);
             }
-            let chunks = t.fracture.chunk_bodies(&gpu);
-            let intact = t.fracture.bonds_intact(&gpu);
+            let chunks = t.own_mut().fracture.chunk_bodies(&gpu);
+            let intact = t.own_mut().fracture.bonds_intact(&gpu);
             let frames: Vec<[f32; 4]> =
-                t.fracture.body_frames(&gpu).into_iter().flatten().collect();
+                t.own_mut().fracture.body_frames(&gpu).into_iter().flatten().collect();
             let crushed_now: Vec<u32> = crushes.iter().map(|e| e.chunk).collect();
             // The pieces take their frames from this step on: the step simulates them.
             let mut events = self.apply_fracture_from(
@@ -759,7 +759,7 @@ impl World {
                 step,
                 chunks,
                 intact,
-                &frames,
+                Frames::Dense(&frames),
                 &crushed_now,
                 crate::BreakCause::Blast,
             )?;

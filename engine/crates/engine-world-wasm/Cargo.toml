@@ -3,7 +3,7 @@ name = "engine-world-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Rubble's world API in the browser: Broadside (broadside.html), a Shardwright wooden ship shot apart around a walking captain, and the timber yard (timber.html), a timber-frame house and plank walls to shoot apart; stepped in Rust on the module's WebGPU device; the page draws its poses (engine-viewer's world_viewer draws them natively)"
+description = "Rubble's World in the browser (wasm-bindgen): the web pages' physics host on the browser's WebGPU, the same host native and Unreal run; also the range scenes, stepped in Rust: Broadside (broadside.html) and the timber yard (timber.html), which engine-viewer's world_viewer also draws natively"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -12,17 +12,29 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = false
 
 [dependencies]
-rubble = { package = "engine-world", path = "../engine-world" }
+engine-world = { path = "../engine-world" }
+engine-schema.workspace = true
+engine-softbody.workspace = true
+engine-terrain.workspace = true
+engine-webgpu = { workspace = true, features = ["gpu"] }
 engine-fracture.workspace = true
+# The fracture lab's scene bindings (Scene, Asset, Orbit, ...), linked into this module so
+# its scenes go to the World without a copy (lab.rs).
+engine-fracture-wasm = { path = "../engine-fracture-wasm" }
 engine-gpu-wait.workspace = true
+# Broadside's threshold destructible and its device (stress-gpu's `Gpu`).
 stress-gpu = { path = "../../stress-oracle/crates/stress-gpu" }
 stress-ref = { path = "../../stress-oracle/crates/stress-ref" }
 stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-features = false, features = ["gpu"] }
-anyhow.workspace = true
-glam.workspace = true
-serde_json.workspace = true
 wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-wasm-bindgen = "0.6"
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+futures-channel = "0.3"
 web-sys = { version = "0.3", features = ["console"] }

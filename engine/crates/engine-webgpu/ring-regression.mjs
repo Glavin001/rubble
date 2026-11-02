@@ -1,5 +1,5 @@
-// Browser counterpart to tests/ring_hold.rs. Run through the actual demo encoder,
-// including ten-step batches without CPU counter readbacks and scene reset.
+// Browser counterpart to tests/ring_hold.rs. Run through the page's World,
+// stepping ten-step batches between body reads, and its scene reset.
 const checkpoints = [1, 30, 60, 120, 240, 480];
 
 export async function runRingRegression({ initial, submit, read, progress, batchSize = 10 }) {
@@ -8,7 +8,7 @@ export async function runRingRegression({ initial, submit, read, progress, batch
   for (const target of checkpoints) {
     while (steps < target) {
       const end = Math.min(target, steps + batchSize);
-      while (steps < end) { submit(); steps++; }
+      while (steps < end) { await submit(); steps++; }
       // Yield for progress without introducing a counter readback. Warm-start
       // metadata must stay correct when the CPU's cached contact count is stale.
       await progress(steps);

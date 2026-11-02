@@ -398,7 +398,6 @@ impl WasmSoftHost {
     /// indices), soft body, then the frame coordinates and the frame's longest
     /// rest edge (f32 bits). Unbound vertices collapse onto their nearest node.
     pub fn flexbody(&self, h: u32, bulge: f32) -> Vec<u32> {
-        use engine_softbody::flexbody::{bind_to_triangles, rounded_skin};
         use glam::Vec3;
         let e = self.host.entry(SoftHandle(h));
         let nodes: Vec<Vec3> = e
@@ -408,50 +407,7 @@ impl WasmSoftHost {
             .map(|n| Vec3::from_array(n.position))
             .collect();
         let tris: Vec<[u32; 3]> = e.desc.triangles.iter().map(|t| t.nodes).collect();
-        let (verts, faces, sources) = rounded_skin(&nodes, &tris, bulge);
-        let binds = bind_to_triangles(&verts, &nodes, &sources);
-        let mut out = vec![verts.len() as u32, faces.len() as u32];
-        for (v, b) in verts.iter().zip(&binds) {
-            match b {
-                Some(b) => {
-                    let [c, x, y] = b.nodes;
-                    let rest = (nodes[x as usize] - nodes[c as usize])
-                        .length()
-                        .max((nodes[y as usize] - nodes[c as usize]).length());
-                    out.extend_from_slice(&[
-                        e.first_body + c,
-                        e.first_body + x,
-                        e.first_body + y,
-                        h,
-                    ]);
-                    out.extend(b.coords.iter().map(|f| f.to_bits()));
-                    out.push(rest.to_bits());
-                }
-                None => {
-                    let c = nodes
-                        .iter()
-                        .enumerate()
-                        .min_by(|a, b| {
-                            (*a.1 - *v)
-                                .length_squared()
-                                .total_cmp(&(*b.1 - *v).length_squared())
-                        })
-                        .map_or(0, |(i, _)| i as u32);
-                    out.extend_from_slice(&[
-                        e.first_body + c,
-                        e.first_body + c,
-                        e.first_body + c,
-                        h,
-                        0,
-                        0,
-                        0,
-                        1f32.to_bits(),
-                    ]);
-                }
-            }
-        }
-        out.extend(faces.iter().flatten());
-        out
+        engine_softbody::flexbody::flexbody_words(&nodes, &tris, e.first_body, h, bulge)
     }
 }
 

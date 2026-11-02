@@ -4,6 +4,7 @@
 // (driving, crushing, breaking, two-way contact) and saves a screenshot per scene.
 //
 //   cargo run -p engine-webgpu --release --bin wgsl_export      # WGSL + wasm first
+//   (and engine-world-wasm: scripts/build-web.sh, or wasm-pack as in docs/web-rust-host.md)
 //   node --experimental-websocket softbody-check.mjs [scene ...] [--out DIR]
 //   SOFT_QUERY='iters=5&sweeps=2' node --experimental-websocket softbody-check.mjs  # other solver settings
 //
@@ -24,6 +25,8 @@ const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 mkdirSync(OUT, { recursive: true });
 
+// PAGE=<file> checks another copy of the page (e.g. an older one, for comparisons).
+const PAGE = process.env.PAGE || 'softbody.html';
 const sum = (d, k) => d.reduce((n, x) => n + x[k], 0);
 // Each check: query, steps (240 Hz), optional input, camera, and an assertion on the result.
 const CHECKS = {
@@ -87,7 +90,7 @@ const CHECKS = {
   ...Object.fromEntries([['budget_240x10', 'scene=yard&hz=240&iters=10'], ['budget_60x8', 'scene=yard&hz=60&iters=8'], ['budget_yard_drive', 'scene=yard&drive=1'],
     ['budget_one_wall', 'scene=wall'], ['budget_one_soft_drive', 'scene=yard&rigid=0&drive=1'],
     ['budget_parked100', 'scene=traffic&cars=100&ai=0'], ['budget_cruise100', 'scene=traffic&cars=100&ai=cruise'], ['budget_traffic20', 'scene=traffic&cars=20'], ['budget_traffic50', 'scene=traffic&cars=50'], ['budget_traffic100', 'scene=traffic&cars=100']].map(([k, q]) => [k, {
-    query: process.env.BUDGET_SPLIT ? q + '&gputime' : q,
+    query: q,
     optIn: 'BUDGET',
     run: async (page) => {
       // drive=1: the player car drives (throttle, a gentle turn) through the run.
@@ -96,31 +99,26 @@ const CHECKS = {
       const step = await page.eval(`(async () => { const t = performance.now(); await window.__step(240, ${input}); return (performance.now() - t) / 240; })()`);
       const render = await page.eval(`window.__renderBench(60)`);
       if (process.env.BUDGET_SPLIT) console.log(q, 'skin ms/frame', (await page.eval(`window.__skinBench(60)`)).toFixed(2), 'render ms/frame', render.toFixed(2));
-      const info = await page.eval(`JSON.stringify({ counts: Array.from(window.__world.lastCounts), h: window.__world.dispatchHistogram() })`);
-      if (process.env.BUDGET_VERBOSE) console.log(q, info);
       const live = await page.eval(`window.__live(4000)`);
-      // CPU cost of encoding steps (JS + wasm plan + WebGPU encoding), no GPU wait.
-      const cpu = await page.eval(`(() => { const w = window.__world; const d = window.__device; const enc = d.createCommandEncoder(); const t = performance.now(); for (let i = 0; i < 64; i++) w.encodeStep(enc); const ms = (performance.now() - t) / 64; const t2 = performance.now(); d.queue.submit([enc.finish()]); return [ms, performance.now() - t2]; })()`);
+      // CPU cost of World.step (plan, encode and submit in wasm), no GPU wait: the
+      // steps taken while a readback slot is free (frames polled as rubble-world's
+      // pollFrame does; this measurement drops their events).
+      const cpu = await page.eval(`(async () => { const w = window.__world; let n = 0, ms = 0; for (let i = 0; i < 64; i++) { if (!w.canStep()) { await new Promise((r) => setTimeout(r, 0)); const f = w.poll(); if (!f.empty) w.lastPolledStep = f.lastStep; f.free(); continue; } const t = performance.now(); w.step(); ms += performance.now() - t; n++; } await window.__step(1); return [ms / Math.max(1, n), n]; })()`);
       if (process.env.BUDGET_SPLIT) {
         const split = await page.eval(`(async () => {
           const w = window.__world, out = {};
           const t = async (k) => { await window.__step(8); const t0 = performance.now(); await window.__step(64); out[k] = ((performance.now() - t0) / 64).toFixed(2); };
           await t('base');
-          const it = w.params.iterations; w.params.iterations = 1; await t('iters1'); w.params.iterations = it;
-          const acc = {};
-          for (let r = 0; r < 8; r++) { const p = await w.profileStep(); for (const k in p) acc[k] = (acc[k] || 0) + p[k] / 8; }
-          const tot = Object.values(acc).reduce((a, b) => a + b, 0);
-          out.gpu = tot.toFixed(2);
-          out.top = Object.entries(acc).sort((a, b) => b[1] - a[1]).slice(0, ${Number(process.env.BUDGET_TOP || 14)}).map(([k, v]) => k + ' ' + v.toFixed(3)).join(', ');
+          const it = w.solver().iterations; w.setSolver({ iterations: 1 }); await t('iters1'); w.setSolver({ iterations: it });
           return JSON.stringify(out);
         })()`);
         console.log(q, 'split', split);
       }
       const modes = await page.eval(`window.__world.readSoftModes().then((m) => Array.from(m).join(''))`);
       console.log(q, 'modes', modes);
-      const awake = await page.eval(`window.__step(1).then((r) => JSON.stringify({ awake: r.counters && r.counters.awake, bodies: window.__world.bodyCount, coreSleep: window.__world.soft.entries.filter((e) => e.core).length }))`);
+      const awake = await page.eval(`window.__step(1).then((r) => JSON.stringify({ awake: r.counters && r.counters.awake, bodies: window.__world.bodyCount(), cores: window.__entries.filter((e) => e.core).length }))`);
       console.log(q, 'awake', awake);
-      console.log(q, 'cpu encode ms/step', cpu[0].toFixed(3), 'finish+submit ms/64', cpu[1].toFixed(2));
+      console.log(q, 'cpu World.step ms', cpu[0].toFixed(3), `(${cpu[1]} steps)`);
       return { ok: true, msg: `${q}: physics ${step.toFixed(2)} ms/step, render ${render.toFixed(2)} ms/frame; live ${live.fps.toFixed(0)} fps, ${(live.realTime * 100).toFixed(0)}% real time` };
     },
   }])),
@@ -324,7 +322,7 @@ for (const name of names) {
   pageErrors.length = 0;
   // SOFT_QUERY appends to every scene's query (e.g. SOFT_QUERY='iters=5&sweeps=2').
   const extra = process.env.SOFT_QUERY ? `&${process.env.SOFT_QUERY}` : '';
-  await send('Page.navigate', { url: `${base}/softbody.html?${c.query}${extra}` });
+  await send('Page.navigate', { url: `${base}/${PAGE}?${c.query}${extra}` });
   let ready = false;
   for (let i = 0; i < 300 && !ready; i++) {
     await new Promise((r) => setTimeout(r, 200));

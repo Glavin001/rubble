@@ -1,9 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
-import {runInNewContext} from 'node:vm';
 import {mortonSceneOrder,restoreSceneOrder} from '../spatial-order.mjs';
 import {buildRing,buildGables,brickQuaternion,boxInvInertia,sphereMassProperties} from '../scene-builders.mjs';
+import {packDemoBodies,BODY_RECORD} from '../demo-scene.mjs';
 
 // Specification of the GPU upload order, written independently of the
 // implementation (bit-by-bit, no magic-number spreading):
@@ -131,31 +130,29 @@ test('invalid collider mappings and corrupt/truncated readbacks fail with identi
   for(const map of [[0,0],[0,2],[0,-1],[0,NaN]]) assert.throws(()=>restoreSceneOrder(new ArrayBuffer(224),map),/invalid or duplicate scene identity/);
 });
 
-const demo = readFileSync(new URL('../demo.html',import.meta.url),'utf8');
-const uploadStart = demo.indexOf('const storageOrder =');
-const uploadEnd = demo.indexOf('device.queue.writeBuffer(bufs[0]',uploadStart);
-assert.ok(uploadStart >= 0 && uploadEnd > uploadStart);
+// demo.html's upload: packDemoBodies turns scene bodies into World.createBodies
+// records in GPU slot order (World gives slot k to the k-th record, and the
+// k-th collider to its one shape, which the renderer draws as a pair).
 for (const spatialOrder of [false,true]) {
-  test(`shipped upload keeps renderer colliders and previous poses paired (Morton=${spatialOrder})`,()=>{
-    const bodies=[{p:[0,0,0],invMass:0},{p:[8,2,-9],invMass:1},{p:[-9,1,8],invMass:2},{p:[0,3,-4],invMass:3}];
-    const colliders=bodies.map((_,body)=>({body,shape:body===3?0:2,params:[body+1,body+2,body+3],density:body+4}));
-    const bodyWrites=new Map(), colliderWrites=new Map();
-    const context={spatialOrder,mortonSceneOrder,bodies,colliders,cap:{maxBodies:64},bodyBytes:{},colBytes:{},snap:null,
-      writeBody(_bytes,id,b){bodyWrites.set(id,b);},writeCollider(_bytes,id,c){colliderWrites.set(id,c);}};
-    runInNewContext(demo.slice(uploadStart,uploadEnd),context);
-    const map=spatialOrder?mortonSceneOrder(bodies,colliders).sceneToGpu:bodies.map((_,i)=>i);
-    assert.equal(bodyWrites.size,bodies.length*2,'Both current and previous-pose halves must be initialized.');
-    assert.equal(colliderWrites.size,bodies.length);
+  test(`shipped upload keeps renderer colliders and bodies paired (Morton=${spatialOrder})`,()=>{
+    const bodies=[{type:'static',p:[0,0,0],shape:'box',dims:[9,1,9],density:0},
+      ...[[8,2,-9],[-9,1,8],[0,3,-4]].map((p,k)=>({type:'dynamic',p,q:[0,0,0,1],mass:k+1,inertia:[k+1,k+2,k+3],
+        shape:k===2?'sphere':'box',dims:k===2?[0.5,0,0]:[k+1,k+2,k+3],density:k+4,v:[k,0,0]}))];
+    const before=bodies.map(b=>b.p.slice());
+    const {records,gpuToScene,sceneToGpu}=packDemoBodies(bodies,{spatialOrder});
+    const map=spatialOrder?mortonSceneOrder(bodies.map(b=>({p:b.p,invMass:b.type==='dynamic'?1/b.mass:0})),bodies.map((_,body)=>({body}))).sceneToGpu:bodies.map((_,i)=>i);
+    assert.equal(records.length,bodies.length*BODY_RECORD);
     for(let scene=0;scene<bodies.length;scene++){
-      const gpu=map[scene];
-      assert.equal(bodyWrites.get(gpu),bodies[scene],`scene ${scene}: wrong current body uploaded`);
-      assert.equal(bodyWrites.get(64+gpu),bodies[scene],`scene ${scene}: reset history uses a different identity`);
-      const collider=colliderWrites.get(gpu);
-      assert.equal(collider.body,gpu,`scene ${scene}: renderer and collision body index disagree`);
-      assert.equal(collider.shape,colliders[scene].shape,'Moving the sphere must preserve its collision/render shape.');
-      assert.deepEqual(collider.params,colliders[scene].params,'Spatial ordering must not change dimensions.');
-      assert.equal(collider.density,colliders[scene].density);
-      assert.equal(colliders[scene].body,scene,'Upload must not mutate the original scene identity.');
+      const gpu=map[scene], b=bodies[scene], r=records.subarray(gpu*BODY_RECORD,(gpu+1)*BODY_RECORD);
+      assert.equal(sceneToGpu[scene],gpu); assert.equal(gpuToScene[gpu],scene);
+      assert.deepEqual(Array.from(r.subarray(2,5)),b.p.map(Math.fround),`scene ${scene}: wrong body uploaded at slot ${gpu}`);
+      assert.equal(r[0],b.type==='dynamic'?2:0);
+      assert.equal(r[19],b.shape==='sphere'?0:2,'Moving a body must keep its collision/render shape.');
+      assert.deepEqual(Array.from(r.subarray(20,23)),b.dims.map(Math.fround),'Spatial ordering must not change dimensions.');
+      assert.equal(r[23],Math.fround(b.density));
+      if(b.type==='dynamic'){ assert.equal(r[15],b.mass); assert.deepEqual(Array.from(r.subarray(16,19)),b.inertia); assert.equal(r[9],b.v[0]); }
+      assert.deepEqual(b.p,before[scene],'Upload must not mutate the scene.');
     }
+    assert.equal(gpuToScene[0],0,'Ground must stay at renderer/collider index zero.');
   });
 }

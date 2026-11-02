@@ -204,8 +204,23 @@ pub struct RbWorldDef {
     pub reuse_contacts: bool,
     /// Begins at or above this approach speed are hits (world units/s).
     pub hit_event_threshold: f32,
+    /// Where the world ends (`WorldDef::kill_bounds`): a dynamic body whose origin
+    /// leaves the box `kill_min`..`kill_max` (world coordinates) is destroyed and
+    /// reported in `RbFrame::left_world`. Off by default.
+    pub enable_kill_bounds: bool,
+    pub kill_min: RbVec3,
+    pub kill_max: RbVec3,
     pub user_data: u64,
     pub internal_value: u32,
+}
+
+/// A body destroyed for leaving the world (`RbWorldDef::enable_kill_bounds`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbBodyLeftWorld {
+    pub body: RbBodyId,
+    pub position: RbVec3,
+    pub user_data: u64,
 }
 
 /// A body (`rbDefaultBodyDef`).
@@ -674,6 +689,10 @@ pub struct RbFrame {
     pub contact_count: u32,
     pub moves: *const RbBodyMove,
     pub move_count: u32,
+    /// Bodies destroyed for leaving the world (`enable_kill_bounds`); their handles
+    /// are stale from now on.
+    pub left_world: *const RbBodyLeftWorld,
+    pub left_world_count: u32,
     pub destruction: *const RbDestructionEvent,
     pub destruction_count: u32,
     pub vehicles: *const RbVehicleOutput,
@@ -740,6 +759,8 @@ impl RbFrame {
             contact_count: 0,
             moves: std::ptr::null(),
             move_count: 0,
+            left_world: std::ptr::null(),
+            left_world_count: 0,
             destruction: std::ptr::null(),
             destruction_count: 0,
             vehicles: std::ptr::null(),
@@ -788,6 +809,7 @@ impl RbFrame {
 #[derive(Default)]
 struct FrameStore {
     moves: Vec<RbBodyMove>,
+    left_world: Vec<RbBodyLeftWorld>,
     destruction: Vec<RbDestructionEvent>,
     piece_nodes: Vec<Vec<u32>>,
     vehicles: Vec<RbVehicleOutput>,
@@ -1023,6 +1045,15 @@ impl RbWorld {
                 fell_asleep: m.fell_asleep,
                 woke: m.woke,
                 user_data: m.user_data,
+            })
+            .collect();
+        s.left_world = c
+            .left_world
+            .iter()
+            .map(|l| RbBodyLeftWorld {
+                body: l.body.to_bits(),
+                position: RbVec3::of(coords.position_out(l.position)),
+                user_data: l.user_data,
             })
             .collect();
         for (step, e) in &c.destruction_events {
@@ -1378,6 +1409,8 @@ impl RbWorld {
             contact_count: counters.map_or(0, |c| c.contact_count),
             moves: s.moves.as_ptr(),
             move_count: s.moves.len() as u32,
+            left_world: s.left_world.as_ptr(),
+            left_world_count: s.left_world.len() as u32,
             destruction: s.destruction.as_ptr(),
             destruction_count: s.destruction.len() as u32,
             vehicles: s.vehicles.as_ptr(),
@@ -1469,6 +1502,17 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
         drop_frames: false,
         reuse_contacts: false,
         hit_event_threshold: 1.0,
+        enable_kill_bounds: false,
+        kill_min: RbVec3 {
+            x: -1.0e30,
+            y: -1.0e30,
+            z: -1.0e30,
+        },
+        kill_max: RbVec3 {
+            x: 1.0e30,
+            y: 1.0e30,
+            z: 1.0e30,
+        },
         user_data: 0,
         internal_value: COOKIE,
     }
@@ -1514,6 +1558,14 @@ fn world_def_of(d: &RbWorldDef) -> anyhow::Result<(WorldDef, Coords)> {
         } else {
             Backpressure::Block
         },
+        kill_bounds: d.enable_kill_bounds.then(|| {
+            // The corners in rubble's frame; an axis swap can flip their order.
+            let (a, b) = (coords.position_in(d.kill_min.a()), coords.position_in(d.kill_max.a()));
+            KillBounds {
+                min: [0, 1, 2].map(|k| a[k].min(b[k])),
+                max: [0, 1, 2].map(|k| a[k].max(b[k])),
+            }
+        }),
         ..WorldDef::default()
     };
     Ok((world_def, coords))

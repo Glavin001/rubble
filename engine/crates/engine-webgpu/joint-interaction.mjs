@@ -1,37 +1,46 @@
-// Interaction for Rust-exported joint scenes (thin: only patches GPU records).
+// Interaction for Rust-exported joint scenes on World (engine-world-wasm): the
+// page only calls World.
 //
-// Ctrl/Alt-drag grabs a body with the scene's soft drag joint (three-avbd
-// mouse spring). F launches the projectile, M toggles every velocity motor,
-// and position servos oscillate around their exported targets. All record
-// offsets come from the snapshot metadata (engine-schema `Joint`).
+// Ctrl/Alt-drag grabs a body with a soft drag joint (three-avbd mouse spring:
+// a ball joint from the scene's static mouse body, 5000 N/m, no angular rows).
+// F launches the projectile, M toggles every velocity motor, and position
+// servos oscillate around their exported targets. Joint and body handles come
+// from `World.importSnapshot`; the motors' and servos' drive values from the
+// snapshot's metadata and records.
 
-const BODY_STRIDE = 112;
+// engine-scenes scene_export's DRAG_STIFFNESS (three-avbd): its drag record's rows.
+const DRAG_STIFFNESS = 5000;
 
-export function installJointControls({ device, bodyBuffer, jointBuffer, snap, maxBodies, canvas, camera, projectileFlags = 1 | 8 }) {
+export function installJointControls({ world, snap, handles, canvas, camera, ccd = true }) {
   const meta = snap.meta;
   const L = meta.jointLayout;
-  const scratch = new ArrayBuffer(16);
-  const f32 = new Float32Array(scratch);
-  const u32 = new Uint32Array(scratch);
-  const readback = device.createBuffer({
-    size: meta.renderBodies * BODY_STRIDE,
-    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-  });
   const radius = new Float32Array(meta.renderBodies);
   {
     const cv = new DataView(snap.colliders.buffer, snap.colliders.byteOffset, snap.colliders.byteLength);
-    for (let i = 0; i < meta.renderBodies; i++) radius[i] = cv.getFloat32(i * 64 + 60, true);
+    for (let i = 0; i < meta.renderBodies && i * 64 + 64 <= snap.colliders.byteLength; i++) radius[i] = cv.getFloat32(i * 64 + 60, true);
   }
-  const templateFlags = new DataView(snap.joints.buffer, snap.joints.byteOffset + meta.dragJoint * L.stride + L.flags, 4)
-    .getUint32(0, true) & ~L.brokenFlag;
+  // Each drive's other value (a motor's target, a servo's speed), read from its record.
+  const jv = new DataView(snap.joints.buffer, snap.joints.byteOffset, snap.joints.byteLength);
+  const drive = (id) => ({ target: jv.getFloat32(id * L.stride + L.driveTarget, true), velocity: jv.getFloat32(id * L.stride + L.driveVelocity, true) });
+  const joint = (id) => {
+    const h = handles.joints[id];
+    if (h === null || h === undefined) throw new Error(`joint record ${id} has no joint (broken in the snapshot)`);
+    return h;
+  };
+  const motors = meta.motors.map((m) => ({ ...m, handle: joint(m.id), target: drive(m.id).target }));
+  const servos = meta.servos.map((s) => ({ ...s, handle: joint(s.id), velocity: drive(s.id).velocity }));
+  const mouse = handles.bodies[meta.mouseBody];
+  const projectile = handles.bodies[meta.projectile];
+  // A parked projectile: continuous collision once it is launched dynamic.
+  if (ccd) world.bodySetBullet(projectile, true);
+  const renderSlots = Array.from({ length: meta.renderBodies }, (_, i) => world.bodySlot(handles.bodies[i]));
+  // Grabbable: the dynamic records, and the projectile once launched.
+  const bv = new DataView(snap.bodies.buffer, snap.bodies.byteOffset, snap.bodies.byteLength);
+  const dynamic = Uint8Array.from({ length: meta.renderBodies }, (_, i) => (bv.getFloat32(i * 112 + 12, true) > 0 ? 1 : 0));
 
   let motorsOn = true;
   let grab = null;
   let busy = false;
-
-  const writeU32 = (buf, offset, values) => device.queue.writeBuffer(buf, offset, new Uint32Array(values));
-  const writeF32 = (buf, offset, values) => device.queue.writeBuffer(buf, offset, new Float32Array(values));
-  const jointOff = (id, field) => id * L.stride + field;
 
   function ray(e) {
     const rect = canvas.getBoundingClientRect();
@@ -50,56 +59,43 @@ export function installJointControls({ device, bodyBuffer, jointBuffer, snap, ma
     return { eye, dir };
   }
 
-  async function readBodies() {
-    const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(bodyBuffer, 0, readback, 0, meta.renderBodies * BODY_STRIDE);
-    device.queue.submit([enc.finish()]);
-    await readback.mapAsync(GPUMapMode.READ);
-    const copy = readback.getMappedRange().slice(0);
-    readback.unmap();
-    return new DataView(copy);
-  }
-
-  function setMouse(p) {
-    writeF32(bodyBuffer, meta.mouseBody * BODY_STRIDE, p);
-    writeF32(bodyBuffer, (maxBodies + meta.mouseBody) * BODY_STRIDE, p);
-  }
-
   async function startGrab(e) {
-    if (busy) return;
+    if (busy || grab) return;
     busy = true;
     try {
       const { eye, dir } = ray(e);
-      const bodies = await readBodies();
+      // Position xyz, rotation xyzw, velocities, awake (readBodies' 14 floats).
+      const b = await world.readBodies(renderSlots);
       let best = -1, bestT = Infinity;
       for (let i = 1; i < meta.renderBodies; i++) {
-        const o = i * BODY_STRIDE;
-        if (!(bodies.getFloat32(o + 12, true) > 0)) continue; // dynamic only
-        const c = [bodies.getFloat32(o, true), bodies.getFloat32(o + 4, true), bodies.getFloat32(o + 8, true)];
+        if (!dynamic[i]) continue;
+        const o = i * 14;
+        const c = [b[o], b[o + 1], b[o + 2]];
         const oc = eye.map((v, k) => v - c[k]);
-        const b = oc[0] * dir[0] + oc[1] * dir[1] + oc[2] * dir[2];
-        const h = b * b - (oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - radius[i] * radius[i]);
+        const p = oc[0] * dir[0] + oc[1] * dir[1] + oc[2] * dir[2];
+        const h = p * p - (oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - radius[i] * radius[i]);
         if (h < 0) continue;
-        const t = -b - Math.sqrt(h);
+        const t = -p - Math.sqrt(h);
         if (t > 0 && t < bestT) { bestT = t; best = i; }
       }
       if (best < 0) return;
-      const o = best * BODY_STRIDE;
-      const pos = [bodies.getFloat32(o, true), bodies.getFloat32(o + 4, true), bodies.getFloat32(o + 8, true)];
-      const q = [bodies.getFloat32(o + 16, true), bodies.getFloat32(o + 20, true), bodies.getFloat32(o + 24, true), bodies.getFloat32(o + 28, true)];
+      const o = best * 14;
+      const pos = [b[o], b[o + 1], b[o + 2]];
+      const q = [b[o + 3], b[o + 4], b[o + 5], b[o + 6]];
       const hit = eye.map((v, k) => v + dir[k] * bestT);
       // Local anchor = conj(q) * (hit - pos).
       const d = hit.map((v, k) => v - pos[k]);
       const [x, y, z, w] = [-q[0], -q[1], -q[2], q[3]];
       const tx = 2 * (y * d[2] - z * d[1]), ty = 2 * (z * d[0] - x * d[2]), tz = 2 * (x * d[1] - y * d[0]);
       const local = [d[0] + w * tx + (y * tz - z * ty), d[1] + w * ty + (z * tx - x * tz), d[2] + w * tz + (x * ty - y * tx)];
-      setMouse(hit);
-      // Wake the grabbed body (a static mouse body never wakes a sleeper).
-      const flags = bodies.getUint32(o + 44, true);
-      writeU32(bodyBuffer, o + 44, [((flags & ~4) | 8) >>> 0]);
-      writeF32(jointBuffer, jointOff(meta.dragJoint, L.anchorB), local);
-      writeU32(jointBuffer, jointOff(meta.dragJoint, L.bodyA), [meta.mouseBody, best, templateFlags]);
-      grab = { id: e.pointerId, depth: bestT, body: best };
+      world.bodySetTransform(mouse, hit, [0, 0, 0, 1]);
+      // A static mouse body never wakes a sleeper: wake the grabbed body.
+      world.bodySetAwake(handles.bodies[best], true);
+      const handle = world.createBallJoint({
+        bodyA: mouse, bodyB: handles.bodies[best], anchorA: [0, 0, 0], anchorB: local,
+        linearStiffness: DRAG_STIFFNESS, angularStiffness: 0, torqueArm: 1,
+      });
+      grab = { id: e.pointerId, depth: bestT, body: best, handle };
     } finally {
       busy = false;
     }
@@ -108,13 +104,13 @@ export function installJointControls({ device, bodyBuffer, jointBuffer, snap, ma
   function moveGrab(e) {
     if (!grab || grab.id !== e.pointerId) return false;
     const { eye, dir } = ray(e);
-    setMouse(eye.map((v, k) => v + dir[k] * grab.depth));
+    world.bodySetTransform(mouse, eye.map((v, k) => v + dir[k] * grab.depth), [0, 0, 0, 1]);
     return true;
   }
 
   function endGrab(e) {
     if (!grab || (e && grab.id !== e.pointerId)) return false;
-    writeU32(jointBuffer, jointOff(meta.dragJoint, L.bodyA), [0, 0, (templateFlags | L.brokenFlag) >>> 0]);
+    world.destroyJoint(grab.handle);
     grab = null;
     return true;
   }
@@ -124,33 +120,28 @@ export function installJointControls({ device, bodyBuffer, jointBuffer, snap, ma
     const r = radius[meta.projectile] || 0.35;
     const mass = 8;
     const inertia = 0.4 * mass * r * r;
-    const rec = new ArrayBuffer(BODY_STRIDE);
-    const v = new DataView(rec);
     const p = eye.map((c, k) => c + dir[k] * 2);
-    const vel = dir.map((c) => c * 30);
-    [p[0], p[1], p[2], 1 / mass, 0, 0, 0, 1, 1 / inertia, 1 / inertia, 1 / inertia].forEach((x, k) => v.setFloat32(k * 4, x, true));
-    v.setUint32(44, projectileFlags, true);
-    vel.forEach((x, k) => v.setFloat32(48 + k * 4, x, true));
-    [p[0], p[1], p[2], 0, 0, 0, 0, 1].forEach((x, k) => v.setFloat32(80 + k * 4, x, true));
-    device.queue.writeBuffer(bodyBuffer, meta.projectile * BODY_STRIDE, rec);
-    device.queue.writeBuffer(bodyBuffer, (maxBodies + meta.projectile) * BODY_STRIDE, rec);
+    world.bodySetType(projectile, 'dynamic', p, [0, 0, 0, 1], dir.map((c) => c * 30), [0, 0, 0]);
+    world.bodySetMassData(projectile, mass, [0, 0, 0], [inertia, inertia, inertia]);
+    dynamic[meta.projectile] = 1;
   }
 
   function toggleMotors() {
     motorsOn = !motorsOn;
-    for (const m of meta.motors) writeF32(jointBuffer, jointOff(m.id, L.driveVelocity), [motorsOn ? m.velocity : 0]);
+    for (const m of motors) world.jointSetDrive(m.handle, motorsOn ? m.velocity : 0, m.target);
     return motorsOn;
   }
 
   // Servos sweep sinusoidally between ±target (3 s period).
   function beforeStep(t) {
-    for (const s of meta.servos) writeF32(jointBuffer, jointOff(s.id, L.driveTarget), [s.target * Math.sin(t * 2 * Math.PI / 3)]);
+    for (const s of servos) world.jointSetDrive(s.handle, s.velocity, s.target * Math.sin(t * 2 * Math.PI / 3));
   }
 
-  // The page re-uploaded the scene's bodies and joints: drop the grab, motors back on.
+  // The page restored the scene's first state: the drag joint is gone, motors back on.
   function reset() {
     grab = null;
     motorsOn = true;
+    dynamic[meta.projectile] = 0;
   }
 
   addEventListener('keydown', (e) => {
@@ -160,6 +151,7 @@ export function installJointControls({ device, bodyBuffer, jointBuffer, snap, ma
 
   return {
     startGrab, moveGrab, endGrab, beforeStep, fire, toggleMotors, reset,
-    legend: `Ctrl/Alt-drag grabs a body (soft drag joint) · F fires a ball · M toggles ${meta.motors.length} motors · ${meta.servos.length} servo(s) sweep`,
+    projectileSlot: world.bodySlot(projectile),
+    legend: `Ctrl/Alt-drag grabs a body (soft drag joint) · F fires a ball · M toggles ${motors.length} motors · ${servos.length} servo(s) sweep`,
   };
 }
