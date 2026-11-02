@@ -96,7 +96,7 @@ export async function rangePage(cfg){
   broadside_set_scripted(true);
   // The director's camera starts as the take wants it (kept across restarts of one take).
   if(directorTake!==take()){$('director').checked=cfg.director(take());directorTake=take()}
-  if(!$('director').checked)renderer.lookAt(...cfg.view);
+  if(!$('director').checked)renderer.orbitFrom(...cfg.view);
   const s=stats();
   setStatus(`${s.chunks} chunks · ${s.bonds} bonds`);
   draw(0,0);

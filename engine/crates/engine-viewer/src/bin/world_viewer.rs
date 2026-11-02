@@ -209,7 +209,7 @@ impl App {
         let renderer = Renderer::new(&self.device, MTLPixelFormat::BGRA8Unorm, &scene)?;
         let mut orbit = Orbit::new(&scene);
         let (eye, target) = self.scene.view;
-        orbit.frame_shot(eye, target);
+        orbit.orbit_shot(eye, target);
         // The render scene's bodies, the captain, the balls and the crush budget.
         let bodies = play.render_bodies + 1 + MAX_BALLS + CRUSH_BUDGET as usize;
         let poses = self.device.new_buffer(
@@ -384,6 +384,19 @@ impl App {
         }
     }
 
+    /// The user takes the camera: the director's off, and an orbit about the free-fire view
+    /// (from the director's fly mode) so drags orbit and clicks shoot.
+    fn take_camera(&mut self) {
+        if !self.director {
+            return;
+        }
+        self.director = false;
+        if let Some(l) = &mut self.loaded {
+            let (eye, target) = self.scene.view;
+            l.orbit.orbit_shot(eye, target);
+        }
+    }
+
     fn key(&mut self, c: &str) {
         match c {
             "r" => self.load(),
@@ -396,12 +409,10 @@ impl App {
                 self.load();
             }
             "d" => {
-                self.director = !self.director;
-                if !self.director {
-                    if let Some(l) = &mut self.loaded {
-                        let (eye, target) = self.scene.view;
-                        l.orbit.frame_shot(eye, target);
-                    }
+                if self.director {
+                    self.take_camera();
+                } else {
+                    self.director = true;
                 }
             }
             _ => {}
@@ -468,7 +479,11 @@ impl ApplicationHandler for App {
                     }
                     if d.moved {
                         // Taking the camera turns the director off.
-                        self.director = false;
+                        if self.director {
+                            self.drag = None;
+                            self.take_camera();
+                            return;
+                        }
                         if let Some(l) = &mut self.loaded {
                             l.orbit.drag(
                                 (position.x - d.last.x) / scale,
@@ -502,7 +517,7 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => -y as f64 * 100.0,
                     MouseScrollDelta::PixelDelta(p) => -p.y,
                 };
-                self.director = false;
+                self.take_camera();
                 if let Some(l) = &mut self.loaded {
                     l.orbit.zoom(dy);
                 }
