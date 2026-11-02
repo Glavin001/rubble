@@ -293,13 +293,32 @@ fn run_world_among(
             {
                 if (a..=b).contains(&n) {
                     let cols = w.sim().download_colliders();
+                    // THRESHOLD_TRACE_ARCHIVE=b1,b2: those bodies' archived rows.
+                    for body in std::env::var("THRESHOLD_TRACE_ARCHIVE")
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter_map(|x| x.parse::<u32>().ok())
+                    {
+                        for c in w.sim().sleep_archive_rows(body) {
+                            writeln!(
+                                f,
+                                "{n} archive {body} {} {} {:.4}",
+                                cols[c.collider_a as usize].body,
+                                cols[c.collider_b as usize].body,
+                                c.lambda_n
+                            )
+                            .unwrap();
+                        }
+                    }
                     for c in w.sim().last_contacts().unwrap().iter().filter(|c| c.alive != 0) {
                         writeln!(
                             f,
-                            "{n} contact {} {} {:.4}",
+                            "{n} contact {} {} {:.4} k {:.0} c0 {:.4}",
                             cols[c.collider_a as usize].body,
                             cols[c.collider_b as usize].body,
-                            c.lambda_n
+                            c.lambda_n,
+                            c.k_n,
+                            c.c0_n
                         )
                         .unwrap();
                     }

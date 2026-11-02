@@ -471,9 +471,14 @@ pub fn encode_step(
         }
     }
     if m.sleep_archive_blocks > 0 && !reuse_manifolds {
-        if m.archive_touch_query {
+        if archive_touch(m) {
             // Touched sleepers' resting pairs, queried (world_step.slang archive_touch),
             // after listing the sleepers those woken since the broadphase rest on.
+            if mo.ccd {
+                // Sleepers a fast CCD body's step will solve (world_step.slang archive_touch_ccd).
+                e.d("archive_touch_ccd", n_bodies);
+            }
+            e.d("archive_touch_snap", 64);
             e.d("archive_touch_spread", 4096);
             e.d("archive_touch", 4096);
         } else {
@@ -849,6 +854,13 @@ pub fn encode_step(
         e.phase("pose");
     }
     e.0
+}
+
+/// Whether the sleep archive's touch query runs ([`StepModes::archive_touch_query`]):
+/// not with the resting-pair carry, whose carried pairs already include a touched
+/// sleeper's.
+pub fn archive_touch(m: &StepModes) -> bool {
+    m.sleep_archive_blocks > 0 && m.archive_touch_query && !m.carry_rest
 }
 
 /// Whether this step runs the awake-indexed broadphase ([`StepModes::awake_broadphase`],
@@ -1314,7 +1326,7 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     // Bit 6: the archive's cold-start variant (world_step.slang archiveCold).
     s[30] |= u32::from(m.archive_cold) << 6;
     // Bit 8: the archive's touch query (world_step.slang archiveTouchQuery).
-    s[30] |= u32::from(m.sleep_archive_blocks > 0 && m.archive_touch_query) << 8;
+    s[30] |= u32::from(archive_touch(m)) << 8;
     if awake_broadphase(m, i) {
         // Rest tables (bit 0); bit 1 rebuilds them this step. Word 5: last step's
         // sleep events (a pipelined step copies them on the GPU), in the uniform

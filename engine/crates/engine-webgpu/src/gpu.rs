@@ -2562,6 +2562,32 @@ impl WgpuSim {
         self.read_buffer_range::<u32>(21, list * 4, n as usize)
     }
 
+    /// `body`'s archived resting rows (`world_step.slang` archiveRowOf; diagnostic read,
+    /// waits for the GPU).
+    pub fn sleep_archive_rows(&self, body: u32) -> Vec<engine_schema::Contact> {
+        if self.sleep_archive_blocks == 0 {
+            return Vec::new();
+        }
+        let meta = u64::from(engine_schema::SCRATCH_WORDS);
+        let mb = u64::from(self.capacity.max_bodies);
+        let word = |at: u64| self.read_buffer_range::<u32>(21, at * 4, 1)[0];
+        let n = word(meta + 4 + u64::from(body));
+        let mut k = word(meta + 4 + mb + u64::from(body));
+        let row = std::mem::size_of::<engine_schema::Contact>() as u64;
+        let mut out = Vec::new();
+        for slot in 0..n.min(4096) {
+            if k == u32::MAX {
+                break;
+            }
+            if slot > 0 && slot % 8 == 0 {
+                k = word(meta + 4 + 5 * mb + u64::from(k));
+            }
+            let at = 2 * u64::from(self.capacity.max_contacts) + u64::from(k) * 8 + u64::from(slot % 8);
+            out.extend(self.read_buffer_range::<engine_schema::Contact>(4, at * row, 1));
+        }
+        out
+    }
+
     /// Mark every phase of the steps encoded from now on (`None`: stop): diagnostic GPU
     /// timing a host reads with its own marks around the step.
     pub fn set_marks(&mut self, marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>) {

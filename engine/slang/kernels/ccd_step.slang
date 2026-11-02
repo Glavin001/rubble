@@ -1084,6 +1084,24 @@ void ccd_wake(uint3 tid : SV_DispatchThreadID)
     gBodies[i].sleepTimer = 0.0;
 }
 
+#if !defined(ENGINE_PERSISTENT_CONTACTS)
+// archive_touch_ccd, before the sleep archive's touch query (world_step.slang
+// archive_touch): a sleeper ccd_wake wakes, or ccd_unhold solves this step once the
+// narrowphase wakes it (within three radii of a fast CCD body's sweep), is solved in
+// the step it wakes, so it is listed: its resting pairs, with the others' too, are
+// then in this step's contacts.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_ccd(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!archiveTouchQuery() || !sceneHasCcd() || i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (!bodyIsDynamic(b) || !bodyIsSleeping(b)) return;
+    if (ccdNearFastSweepStart(i, b, 3.0)) archiveMark(i);
+}
+#endif
+
 // Woken near a fast CCD body: solved this step (before predict_bodies). A body
 // the narrowphase wakes keeps still for the rest of its step (FLAG_DEFER_WAKE:
 // solved without its supports, a woken brick in a pile started with a kick).

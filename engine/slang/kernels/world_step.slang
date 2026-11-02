@@ -6688,22 +6688,35 @@ void archive_touch(uint3 tid : SV_DispatchThreadID)
         touchQueryBody(ALOAD(gScratchAtomics[arTouchedList(k)]), false);
 }
 
-// archive_touch_spread, before archive_touch: a listed sleeper woken since the
-// broadphase (a projectile hit) is awake when the narrowphase starts, so the touch
-// wakes the sleepers it rests on as a moving body's would: they are listed too.
+// archive_touch_spread, before archive_touch: the sleepers the listed ones rest on are
+// listed too. A touched sleeper usually wakes (wake on touch), and once awake it
+// wakes the sleepers it rests on within the same step (its hull pairs' narrowphase
+// runs after the first pass, a projectile or ccd_wake wakes it before the
+// narrowphase), which are then solved with their whole contact set. One hop: the
+// carry's racier chains further in are not followed.
+bool ccdNearFastSweepStart(uint body, BodyState b, float reach);
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void archive_touch_spread(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
     if (!sleepArchive()) return;
-    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1));
+    // The list as archive_touch_snap left it (entries listed here are not followed).
+    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17) + 1u)]), HOST_S(1));
     for (uint k = i; k < n && k < 1048576u; k += 4096u)
-    {
-        uint body = ALOAD(gScratchAtomics[arTouchedList(k)]);
-        if (bodyMoving(gBodies[body]))
-            touchQueryBody(body, true);
-    }
+        touchQueryBody(ALOAD(gScratchAtomics[arTouchedList(k)]), true);
+}
+
+// archive_touch_snap (one thread, before archive_touch_spread): the listed count, in
+// the next step's count word (archive_touch empties it again).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_snap(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u || !sleepArchive()) return;
+    uint step = HOST_S(17);
+    ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], ALOAD(gScratchAtomics[arTouchedCount(step)]));
 }
 
 // archive_seal, over this step's awake list: the step's archiving is done.
