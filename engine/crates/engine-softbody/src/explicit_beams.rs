@@ -319,6 +319,11 @@ pub struct ExplicitBeams {
     pub incidence: Vec<Vec<u32>>,
     /// Contacters that are not tyre nodes, in node order.
     pub candidates: Vec<u32>,
+    /// Self-collision grid cell size (0: test every candidate); see [`Self::finish`].
+    pub grid_cell: f32,
+    /// The grid's per-step scratch: bucket counts, offsets, sorted candidates, and
+    /// one triangle's candidates.
+    grid: CollisionGrid,
     /// Steps run so far.
     pub steps: u64,
     pub clock: FrameClock,
@@ -446,6 +451,8 @@ impl ExplicitBeams {
             noise: 1,
             incidence: Vec::new(),
             candidates: Vec::new(),
+            grid_cell: 0.0,
+            grid: CollisionGrid::default(),
             steps: 0,
             clock: FrameClock::default(),
         }
@@ -710,6 +717,28 @@ impl ExplicitBeams {
                 n.has(NODE_CONTACTER) && !n.has(NODE_TYRE)
             })
             .collect();
+        self.grid_cell = self.default_grid_cell();
+    }
+
+    /// The self-collision grid's cell size: the median collision triangle's box at
+    /// spawn padded by the contact range, for more than [`GRID_MIN_CANDIDATES`]
+    /// candidates (0 otherwise). The grid only skips candidates outside a
+    /// triangle's padded box, and the rest are tested in candidate order, so the
+    /// results are those of testing every candidate.
+    pub fn default_grid_cell(&self) -> f32 {
+        if self.candidates.len() <= GRID_MIN_CANDIDATES || self.triangles.is_empty() {
+            return 0.0;
+        }
+        let mut extents: Vec<f32> = self
+            .triangles
+            .iter()
+            .map(|t| {
+                let p = t.nodes.map(|n| self.nodes[n as usize].pos);
+                (p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).max_element()
+            })
+            .collect();
+        extents.sort_by(f32::total_cmp);
+        (extents[extents.len() / 2] + 2.0 * self.collision_range).max(0.05)
     }
 
     /// World positions of the nodes.
@@ -875,6 +904,12 @@ impl ExplicitBeams {
 
     fn collision_pass(&mut self) {
         self.last_contacts = 0;
+        if self.grid_cell > 0.0 {
+            let cell = self.grid_cell;
+            let nodes = &self.nodes;
+            self.grid
+                .build(self.candidates.iter().map(|&c| nodes[c as usize].pos), cell);
+        }
         let r = self.collision_range;
         let h = STEP;
         for t in 0..self.triangles.len() {
@@ -894,7 +929,16 @@ impl ExplicitBeams {
             let lo = p0.min(p1).min(p2) - Vec3::splat(r);
             let hi = p0.max(p1).max(p2) + Vec3::splat(r);
             let mut hit = false;
-            for k in 0..self.candidates.len() {
+            // The candidates to test, in candidate order: all of them, or those in
+            // the grid buckets the padded box covers.
+            let mut list = std::mem::take(&mut self.grid.list);
+            list.clear();
+            if self.grid_cell > 0.0 {
+                self.grid.gather(lo - self.origin, hi - self.origin, self.grid_cell, &mut list);
+            }
+            let count = if self.grid_cell > 0.0 { list.len() } else { self.candidates.len() };
+            for idx in 0..count {
+                let k = if self.grid_cell > 0.0 { list[idx] as usize } else { idx };
                 let hn = self.candidates[k];
                 if hn == i0 || hn == i1 || hn == i2 {
                     continue;
@@ -932,6 +976,7 @@ impl ExplicitBeams {
                 self.nodes[i2 as usize].force -= beta * f;
                 self.nodes[i0 as usize].force -= gamma * f;
             }
+            self.grid.list = list;
             let tri = &mut self.triangles[t];
             if hit {
                 tri.wait = -20000;
@@ -948,6 +993,84 @@ fn signed_group(b: &crate::desc::SoftBeam) -> i32 {
         -g
     } else {
         g
+    }
+}
+
+/// Candidates above which self-collision uses the grid.
+pub const GRID_MIN_CANDIDATES: usize = 64;
+const GRID_BUCKETS: usize = 2048;
+
+/// The self-collision grid: candidates counting-sorted into hashed buckets of
+/// their cell (positions relative to the origin) each step.
+#[derive(Clone, Debug, Default)]
+struct CollisionGrid {
+    /// Per bucket the first entry, one past the end at GRID_BUCKETS.
+    start: Vec<u32>,
+    /// Candidate indices, bucket by bucket.
+    entries: Vec<u32>,
+    /// Scratch: each candidate's bucket, one triangle's buckets and candidates.
+    bucket_of: Vec<u32>,
+    buckets: Vec<u32>,
+    list: Vec<u32>,
+}
+
+fn grid_cell_of(p: Vec3, cell: f32) -> [i32; 3] {
+    (p / cell).floor().as_ivec3().to_array()
+}
+
+fn grid_bucket(c: [i32; 3]) -> u32 {
+    ((c[0] as u32).wrapping_mul(73_856_093)
+        ^ (c[1] as u32).wrapping_mul(19_349_663)
+        ^ (c[2] as u32).wrapping_mul(83_492_791))
+        & (GRID_BUCKETS as u32 - 1)
+}
+
+impl CollisionGrid {
+    fn build(&mut self, positions: impl Iterator<Item = Vec3>, cell: f32) {
+        self.start.clear();
+        self.start.resize(GRID_BUCKETS + 1, 0);
+        self.bucket_of.clear();
+        for p in positions {
+            let b = grid_bucket(grid_cell_of(p, cell));
+            self.bucket_of.push(b);
+            self.start[b as usize + 1] += 1;
+        }
+        for b in 0..GRID_BUCKETS {
+            self.start[b + 1] += self.start[b];
+        }
+        self.entries.clear();
+        self.entries.resize(self.bucket_of.len(), 0);
+        let mut fill = self.start.clone();
+        for (k, &b) in self.bucket_of.iter().enumerate() {
+            self.entries[fill[b as usize] as usize] = k as u32;
+            fill[b as usize] += 1;
+        }
+    }
+
+    /// The candidates in the buckets of the cells the box `lo..hi` covers (each
+    /// bucket once), in candidate order; every candidate when the box covers too
+    /// many cells.
+    fn gather(&mut self, lo: Vec3, hi: Vec3, cell: f32, out: &mut Vec<u32>) {
+        let (c0, c1) = (grid_cell_of(lo, cell), grid_cell_of(hi, cell));
+        let cells: i64 = (0..3).map(|i| i64::from(c1[i] - c0[i] + 1)).product();
+        if cells > 64 {
+            out.extend(0..self.bucket_of.len() as u32);
+            return;
+        }
+        self.buckets.clear();
+        for x in c0[0]..=c1[0] {
+            for y in c0[1]..=c1[1] {
+                for z in c0[2]..=c1[2] {
+                    let b = grid_bucket([x, y, z]);
+                    if !self.buckets.contains(&b) {
+                        self.buckets.push(b);
+                        let (a, e) = (self.start[b as usize], self.start[b as usize + 1]);
+                        out.extend_from_slice(&self.entries[a as usize..e as usize]);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
     }
 }
 

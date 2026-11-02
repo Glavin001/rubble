@@ -731,3 +731,59 @@ fn an_unhit_triangle_backs_off_its_tests() {
         ]
     );
 }
+
+/// The self-collision grid only skips candidates outside a triangle's padded box
+/// and keeps candidate order: a run with it is bit for bit the run without it.
+#[test]
+fn collision_grid_matches_every_pair() {
+    use engine_softbody::hires::{hires_car_jbeam, HiresParams};
+    let (jbeam, _) = hires_car_jbeam(&HiresParams {
+        node_weight: 2.0,
+        spring: 1.5e6,
+        damp: 150.0,
+        stiffness_length: 0.15,
+        ..Default::default()
+    });
+    let files = [("hires.jbeam", jbeam.as_str())];
+    // Moving into a box, so contacts start and the throttle runs.
+    let spawn = || {
+        let (mut sim, _, _) = ExplicitBeams::from_jbeam(
+            &files,
+            None,
+            Vec3::new(0.0, 0.3, 0.0),
+            Vec3::new(0.0, 0.0, 15.0),
+            ExplicitBeamsSettings::default(),
+        )
+        .unwrap();
+        sim.boxes.push(StaticBox::centered(
+            Vec3::new(0.0, 1.0, 3.2),
+            Vec3::new(2.0, 1.0, 0.3),
+        ));
+        sim
+    };
+    let mut grid = spawn();
+    let mut all = spawn();
+    assert!(
+        grid.grid_cell > 0.0,
+        "the high-resolution car uses the grid"
+    );
+    all.grid_cell = 0.0;
+    for i in 0..400 {
+        if i % 33 == 0 {
+            grid.rebase_origin();
+            all.rebase_origin();
+        }
+        grid.step();
+        all.step();
+    }
+    assert!(
+        grid.damage().0 + grid.damage().1 > 0,
+        "the crash deforms the car"
+    );
+    for (a, b) in grid.positions().iter().zip(all.positions()) {
+        assert_eq!(
+            a.to_array().map(f32::to_bits),
+            b.to_array().map(f32::to_bits)
+        );
+    }
+}
