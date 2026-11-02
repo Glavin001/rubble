@@ -609,6 +609,84 @@ Cost: no archived rows also drops the five row passes, so `sleepMain` on gables5
 82 primal colour dispatches, 12 sparse and 12 dual (12 iterations, colours dispatched =
 last step's + 4). This is the next step's starting point (the cost floor).
 
+## Archive against carry, settled (2026-11-02, later)
+
+**The carry reference doubled contact rows.** With the carry and the archive both on
+(`EngineFeatures::carry_with_archive`, the threshold probe's `carry_on` and `ENGINE_REST=keep`),
+`archive_emit` still emitted a touched sleeper's archived pairs although the carry already
+re-emits every resting pair: the house's struck body had every pair with its neighbours
+twice (`RUBBLE_SKIP_KERNELS=archive_emit` removed the copy). `archive_emit` now emits
+nothing while the carry runs, and no archived rows are kept when nothing reads them
+(`rigid_plan::archive_rows`). With that, the 61-shot house gate is **bit-identical**
+between carry-on and the archive default: 54.3 ± 1.5 [51, 60] both, paired 0.00 on every
+shot (never asleep 57.1 ± 2.4; the 1.9-bond gap to carry-on reported earlier was this
+duplication). The arch is identical across all policies as before.
+
+**legacyGrid100k, 10 browser runs each** (headless, live playback, F at step 400, awake at
+step ~740 > 100 counted as a collapse): archive 6 of 10, carry 6 of 10. The "collapses" are
+not what they look like, though (next paragraph): with `?reuse=pass` both policies dent the
+face and fall asleep again.
+
+**CCD bullets push boxes through the ground (pre-existing).** `grid_strike_probe` with the
+ball a bullet (the demo's default): about 2,300 boxes end below the ground (lowest −360 m by
+step 1,000), under carry and archive alike, and on `origin/main` 09647583 (carry) too. The
+bottom boxes next to the ball's impact (bottom layer, front rows) sink below 0.1 m in the
+impact step and their columns follow them down, endlessly (they never sleep). It needs all
+of: persistent contacts, reuse-copy with the split narrowphase (`EngineFeatures::np_split`,
+the defaults), and a CCD body. Each of these avoids it: `ENGINE_NP=fused` (lowest box
+0.08 m), `ENGINE_REUSE=pass` (0.19 m), canonical contacts (0.19 m), the ball without CCD
+(0.15 m); `ENGINE_PERSIST=scan` does not. In the browser the same configuration makes the
+struck column "collapse" (boxes vanish under the floor and the awake count keeps rising);
+`demo.html?...&reuse=pass` struck runs settle back to sleep under both policies. **Fixed (root cause below).**
+
+Side-by-side recordings (headless Chrome, archive default left, `?rest=carry` right;
+`~/.cache/rubble-probe/side/`): `ring-archive-vs-carry.mp4` (ring110k to step 1,500: awake
+46,830 / 44,557 at step 316, 14,236 / 14,322 at 915, 0 / 0 at 1,500), `gables-archive-vs-carry.mp4`
+(gables506k to 1,200: 26,272 / 26,560 at 495, 8,729 / 8,962 at 1,200; the carry steps at
+27.9 ms GPU against 6.6), `grid-archive-vs-carry.mp4` (legacyGrid100k, F at 400; one run
+each, both bimodal through the CCD fall-through above), `city-archive-vs-carry.mp4`
+(city.html k=64 war, 600 steps: 188 / 301 awake, 2,995 / 2,784 bonds at the end; one run)
+and `gauntlet-archive-vs-carry.mp4` (vehicle.html?scene=gauntlet, monster truck cruising
+with the cannon firing). No visible difference beyond run-to-run spread. `city.html` and
+`vehicle.html` take `?rest=carry` for this.
+
+
+## CCD fall-through: root cause and fix (2026-11-02)
+
+Traced with `grid_strike_probe`'s diagnostics (`STRIKE_ROWS`: a box's persistent contact rows
+and its candidate pairs each step, `WgpuSim::last_persistent_rows` / `last_candidates`):
+
+- A woken bottom box had pairs with the boxes above it but none with the ground, and fell.
+- Its ground pair was lost earlier, in the step the CCD body first exists: that step every
+  resting box-plane pair the carry re-emitted came out of `narrowphase_fresh` as a manifold
+  and rows with colliders (0, 0) (2,482 manifolds, 9,928 rows), though the deferred tail held
+  the right pair and `narrowphase_fresh` read it correctly (checked by writing what it read
+  back into the tail). The next step the carry re-emitted (0, 0), which `emitCandidateCore`
+  drops (i == j), so the box kept no ground pair while asleep, and had none when woken.
+- Needed: the split narrowphase (the fused one emits the same pairs correctly), persistent
+  contacts, and look-ahead on (a CCD body in the scene turns it on), i.e. the
+  `closingPoints` call in `emitContactManifold`: skipping it removed the (0, 0) manifolds,
+  and so does inlining it. The code is correct as written (the WGSL reads the pair once and
+  passes the struct by pointer); the call, compiled natively (wgpu on Metal), clobbers the
+  caller's pair. Fix: `[ForceInline]` on `closingPoints` (no other
+  change). Rebuilding the kept manifold point by point instead of copying it did not help.
+
+After the fix, `grid_strike_probe` with a CCD ball leaves no box below the ground (lowest
+0.16-0.19 m; carry and archive, the probe's ball and the demo's parked projectile with the
+demo's solver).
+
+**The browser never had the fall-through.** Counting bodies below the ground after a
+legacyGrid100k shot (`record-below.mjs`: `__world.readBodies` over every slot at step 900, F at
+step 400): 0 in every run, on this branch (5 archive, 5 carry) and on `origin/main` 09647583
+(5 runs). What the browser shows is a real collapse: the ball knocks bottom boxes out and the
+column above falls into the hole, sometimes, in all builds. Runs whose awake count was still
+above 100 at step ~880-900 (the column still falling): this branch after the fix, archive
+4 of 10 and carry 2 of 10 (live playback, `g10`), then archive 3 of 5, carry 2 of 5 and
+`origin/main` 5 of 5 (`g11`). So main with sleep on collapses too, at least as often; whether
+a shot collapses the column depends on where and when the ball lands (live playback timing),
+not on archive vs carry. The earlier `?reuse=pass` runs that settled (2) were within that
+spread. Native fall-through: present on `origin/main` and before this fix, gone after it.
+
 ## Cost floor (2026-11-02, `claude/cost-floor`)
 
 The per-step work that did not shrink with the awake count (about 3 ms of gables506k's

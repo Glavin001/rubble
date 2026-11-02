@@ -982,9 +982,11 @@ pub fn encode_step(
 
 /// Whether the sleep archive keeps rows (`archive_free` .. `archive_seal` after the
 /// sleep pass): only when something reads them, a warm start (not
-/// [`StepModes::archive_cold`]) or the earlier `archive_emit` path.
+/// [`StepModes::archive_cold`]) or the earlier `archive_emit` path (which emits nothing
+/// while the carry runs).
 pub fn archive_rows(m: &StepModes) -> bool {
-    m.sleep_archive_blocks > 0 && !(m.archive_cold && archive_touch(m))
+    m.sleep_archive_blocks > 0
+        && (!m.archive_cold || (!m.archive_touch_query && !m.carry_rest))
 }
 
 /// Whether the sleep archive's touch query runs ([`StepModes::archive_touch_query`]):

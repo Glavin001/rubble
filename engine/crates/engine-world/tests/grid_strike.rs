@@ -30,8 +30,17 @@ fn strike(scene: &str, policy: &str, fire: u32, steps: u32) -> Strike {
             ..WorldCapacity::small()
         },
         enable_sleep: policy != "never",
+        contacts: if std::env::var("STRIKE_CANONICAL").is_ok() {
+            ContactStorage::Canonical
+        } else {
+            ContactStorage::Persistent
+        },
         ..WorldDef::default()
     };
+
+    if std::env::var("STRIKE_FEATURES_ENV").is_ok() {
+        def.features = engine_webgpu::EngineFeatures::from_env();
+    }
     match policy {
         "carry" => def.features.resting_contacts = RestingContacts::Carry,
         "cold" => def.features.archive_cold = true,
@@ -43,8 +52,33 @@ fn strike(scene: &str, policy: &str, fire: u32, steps: u32) -> Strike {
     let mut solver = w.solver();
     // The demo's sleep (0.5 s) or never.
     solver.sleep_time = if policy == "never" { 1.0e6 } else { 0.5 };
+    // STRIKE_DEMO_SOLVER=1: demo-config.mjs demoSolver (flags 0, alpha 0.99, betaLin 1e4,
+    // sleep thresholds 0.15).
+    if let Some(f) = std::env::var("STRIKE_FLAGS").ok().and_then(|v| u32::from_str_radix(&v, 16).ok()) {
+        solver.flags |= f;
+    }
+    if std::env::var("STRIKE_DEMO_SOLVER").is_ok() {
+        solver.flags = 0;
+        solver.alpha = 0.99;
+        solver.beta_lin = 10000.0;
+        solver.sleep_lin = 0.15;
+        solver.sleep_ang = 0.15;
+        solver.dt = 1.0 / 60.0;
+    }
     w.set_solver(solver);
     let boxes: Vec<BodyId> = imported.bodies.iter().copied().skip(1).collect();
+    // STRIKE_PARKED=1: the demo's way (scene_export.rs, joint-interaction.mjs): a static
+    // sphere parked below the ground from the start, a bullet, launched at the fire step.
+    let parked = std::env::var("STRIKE_PARKED").is_ok().then(|| {
+        let b = w
+            .create_body(&BodyDef { position: [0.0, -40.0, 0.0], ..BodyDef::default() })
+            .unwrap();
+        w.create_sphere_shape(b, &ShapeDef::default(), [0.0; 3], 0.35).unwrap();
+        if std::env::var("STRIKE_NO_CCD").is_err() {
+            w.body_set_bullet(b, true).unwrap();
+        }
+        b
+    });
     let mut awake = Vec::new();
     let mut start = Vec::new();
     for s in 1..=steps {
@@ -53,7 +87,21 @@ fn strike(scene: &str, policy: &str, fire: u32, steps: u32) -> Strike {
             // joint-interaction.mjs fire(): 8 kg, r 0.35, from the camera 2 m along the
             // view ray at 30 m/s (eye [46, 30, 58] towards look [0, 9, 0]).
             let eye = glam::Vec3::new(46.0, 30.0, 58.0);
-            let dir = (glam::Vec3::new(0.0, 9.0, 0.0) - eye).normalize();
+            let mut dir = (glam::Vec3::new(0.0, 9.0, 0.0) - eye).normalize();
+            // STRIKE_AWAY=1: fire away from the grid (the CCD body exists, touches nothing).
+            if std::env::var("STRIKE_AWAY").is_ok() {
+                dir = glam::Vec3::new(0.0, 0.6, 0.8).normalize();
+            }
+            if let Some(b) = parked {
+                let t = Transform { position: (eye + dir * 2.0).to_array(), ..Transform::default() };
+                w.body_set_type(b, BodyType::Dynamic, t, (dir * 30.0).to_array(), [0.0; 3]).unwrap();
+                let i = 0.4 * 8.0 * 0.35 * 0.35;
+                w.body_set_mass_data(
+                    b,
+                    MassData { mass: 8.0, center: [0.0; 3], rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]] },
+                )
+                .unwrap();
+            } else {
             let b = w
                 .create_body(&BodyDef {
                     linear_velocity: (dir * 30.0).to_array(),
@@ -66,11 +114,69 @@ fn strike(scene: &str, policy: &str, fire: u32, steps: u32) -> Strike {
             let m = 8.0f32;
             let d = ShapeDef { density: m / (4.0 / 3.0 * std::f32::consts::PI * r * r * r), ..ShapeDef::default() };
             w.create_sphere_shape(b, &d, [0.0; 3], r).unwrap();
+            }
         }
         w.step().unwrap();
         w.poll_blocking().unwrap();
+        // STRIKE_ROWS=body index (into the boxes): that box's contact rows each step
+        // from the fire step on, while it is below 0.3 m or for 200 steps.
+        if let Some(k) = std::env::var("STRIKE_ROWS").ok().and_then(|v| v.parse::<usize>().ok()) {
+            let from: u32 = std::env::var("STRIKE_DIAG_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(fire);
+            if s >= from && s < from + 200 {
+                let b = boxes[k];
+                let t = w.body_transform(b).unwrap().unwrap().position;
+                let cols = w.sim().download_colliders();
+                let bi = cols.iter().position(|c| c.body == b.index()).map(|c| c as u32);
+                let rows: Vec<String> = w
+                    .sim()
+                    .last_persistent_rows()
+                    .iter()
+                    .filter(|r| Some(r.0) == bi || Some(r.1) == bi)
+                    .map(|r| format!("{}-{} f{:x} t{:x} l{:.2} k{:.0} c{:.3}", cols[r.0 as usize].body, cols[r.1 as usize].body, r.2, r.3, r.4, r.5, r.6))
+                    .collect();
+                let c = w.sim().last_counters();
+                let all = w.sim().last_persistent_rows();
+                let plane_rows = all.iter().filter(|r| r.0 == 0 || r.1 == 0).count();
+                let dead = all.iter().filter(|r| (r.3 & 0x1FFF_FFFF) == 0).count();
+                eprintln!("strike: diag {s} rows {} plane rows {} dead {} manifolds {}", all.len(), plane_rows, dead, c.manifold_count);
+                let mw = w.sim().read_words(25, 0, c.manifold_count as usize * 8);
+                let pm: Vec<&[u32]> = mw.chunks(8).filter(|m| m[0] == 0 || m[1] == 0).collect();
+                let zero = pm.iter().filter(|m| m[3] == 0).count();
+                let both = pm.iter().filter(|m| m[0] == 0 && m[1] == 0).count();
+                let rows00 = all.iter().filter(|r| r.0 == 0 && r.1 == 0).count();
+                let (_, tail) = w.sim().last_candidates();
+                let t00 = tail.iter().filter(|p| p[0] == 0 && p[1] == 0).count();
+                let t0x = tail.iter().filter(|p| (p[0] == 0) != (p[1] == 0)).count();
+                eprintln!("strike: diag {s} manifolds (0,0) {both}, rows (0,0) {rows00}, tail (0,0) {t00}, tail plane {t0x}");
+                let tp: Vec<String> = tail.iter().filter(|p| p[0] == 0 && p[1] < 3000).take(4).map(|p| format!("{}-{} key {:x}", p[0], p[1], p[2])).collect();
+                eprintln!("strike: diag {s} tail plane sample {:?}", tp);
+                eprintln!("strike: diag {s} plane manifolds {} with no contacts {} first {:?}", pm.len(), zero, pm.first());
+                eprintln!("strike: diag {s} plane pairs {} plane manifolds~ {} deferred {}", c.pivot_floor_hits, c.convex_sat_large, c.narrowphase_deferred);
+                eprintln!("strike: rows {s} y {:.3}: {}", t[1], rows.join(" | "));
+                if let Some(bi) = bi {
+                    let (head, tail) = w.sim().last_candidates();
+                    let f = |v: &Vec<[u32; 4]>| {
+                        v.iter()
+                            .filter(|p| p[0] == bi || p[1] == bi)
+                            .map(|p| format!("{}-{}:{:x}", p[0], p[1], p[3]))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    eprintln!("strike: cands {s} n {} tail {}: head [{}] tail [{}]", head.len(), tail.len(), f(&head), f(&tail));
+                }
+            }
+        }
         if s % 50 == 0 {
             awake.push((s, w.counters().map_or(0, |c| c.awake_count)));
+            if std::env::var("STRIKE_BELOW").is_ok() && s >= fire {
+                let below: Vec<usize> = boxes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &b)| w.body_transform(b).unwrap().unwrap().position[1] < 0.1)
+                    .map(|(k, _)| k)
+                    .collect();
+                eprintln!("strike: step {s}: {} boxes below 0.1 m, first {:?}", below.len(), &below[..below.len().min(5)]);
+            }
         }
     }
     let d: Vec<f32> = boxes

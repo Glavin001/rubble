@@ -336,6 +336,40 @@ impl WgpuSim {
         ))
     }
 
+    /// Diagnostic: the last step's candidate pairs ([a, b, key, pad]) and the split
+    /// narrowphase's deferred tail (binding 10; waits).
+    pub fn last_candidates(&self) -> (Vec<[u32; 4]>, Vec<[u32; 4]>) {
+        if self.steps_done == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let cap = u64::from(self.capacity.max_candidates);
+        let n = u64::from(self.last_counters.candidate_count).min(cap);
+        let d = u64::from(self.last_counters.narrowphase_deferred).min(cap - n);
+        let head: Vec<u32> = self.read_buffer_range(10, 0, (n * 4) as usize);
+        let tail: Vec<u32> = self.read_buffer_range(10, (cap - d) * 16, (d * 4) as usize);
+        let q = |v: &[u32]| v.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect::<Vec<_>>();
+        (q(&head), q(&tail))
+    }
+
+    /// Diagnostic: the last step's persistent contact rows, as (colliderA, colliderB,
+    /// featureId, pair tag, λ normal, penalty normal, c0N) (bindings 4 and 27; waits).
+    pub fn last_persistent_rows(&self) -> Vec<(u32, u32, u32, u32, f32, f32, f32)> {
+        if !self.persistent_contacts || self.steps_done == 0 {
+            return Vec::new();
+        }
+        let n = self.last_counters.contact_count.min(self.capacity.max_contacts) as usize;
+        let at = u64::from(self.last_contact_offset);
+        let meta: Vec<u32> = self.read_buffer_range(4, at * 32, n * 8);
+        let pts: Vec<u32> = self.read_buffer_range(27, at * 64, n * 16);
+        (0..n)
+            .map(|k| {
+                let m = &meta[k * 8..k * 8 + 8];
+                let p = &pts[k * 16..k * 16 + 16];
+                (m[0], m[1], m[2], p[15], f32::from_bits(p[8]), f32::from_bits(p[12]), f32::from_bits(p[3]))
+            })
+            .collect()
+    }
+
     /// Copy every buffer and the host mirror (bodies, colliders, counters, contact
     /// ping-pong, warm-start state): `restore_state` returns the simulation to this
     /// instant exactly. The hull arena (binding 18) is the host's: a host that

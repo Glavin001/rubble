@@ -3138,6 +3138,13 @@ void persistListAppend(uint first, uint count)
 // step: the relative normal velocity at the point, (vA + ωA×rA − vB − ωB×rB)·n,
 // over h. Points moving apart or sliding past each other get no speculative
 // contact (and no graph edge); touching points (gap ≤ contactOffset) are kept.
+// Inlined: called (as WGSL lowers it, with its arguments by pointer), it corrupted its
+// caller's candidate pair in narrowphase_fresh natively (wgpu on Metal; Chrome's Dawn was
+// not seen to): with
+// a CCD body in the scene (look-ahead on), the split narrowphase emitted resting box-plane
+// manifolds and rows as colliders (0, 0); the carry then dropped the pair, and a box woken
+// later had no ground contact and fell through the floor. Same code, inlined.
+[ForceInline]
 BoxManifold closingPoints(BoxManifold points, BodyState ba, Collider ca, BodyState bb, Collider cb)
 {
     bool moveA = bodyMovingOrKinematic(ba);
@@ -7627,6 +7634,9 @@ void archive_emit(uint3 tid : SV_DispatchThreadID)
     uint step = HOST_S(17);
     if (i == 0u)
         ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], 0u);
+    // With the resting-pair carry on (EngineFeatures::carry_with_archive) the carried
+    // pairs already include these: emitting them again doubled their contact rows.
+    if (carryRestPairs()) return;
     uint n = min(ALOAD(gScratchAtomics[arTouchedCount(step)]), HOST_S(1));
     for (uint k = i; k < n && k < 1048576u; k += 4096u)
         archiveEmitResting(ALOAD(gScratchAtomics[arTouchedList(k)]));
