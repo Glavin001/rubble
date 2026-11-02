@@ -1,0 +1,3 @@
+trial 0 idle     1: rubble gpu 0.154 ms, pipelined 0.162 ms, ror 0.132 ms
+trial 0 drive     1: rubble gpu 0.154 ms, pipelined 0.163 ms, ror 0.139 ms
+trial 0 impact     1: rubble gpu 0.157 ms, pipelined 0.164 ms, ror 0.163 ms
