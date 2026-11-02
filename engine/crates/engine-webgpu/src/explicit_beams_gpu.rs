@@ -52,6 +52,15 @@ pub struct ExplicitBeamsGpu {
     spans: Vec<Span>,
     rest0: Vec<f32>,
     words: [u32; 12],
+    timing: Option<FrameTiming>,
+}
+
+/// Timestamps around each frame's pass ([`ExplicitBeamsGpu::enable_frame_timing`]).
+struct FrameTiming {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    capacity: u32,
+    used: u32,
 }
 
 impl ExplicitBeamsGpu {
@@ -302,7 +311,61 @@ impl ExplicitBeamsGpu {
             spans,
             rest0,
             words,
+            timing: None,
         }
+    }
+
+    /// Record the GPU time of each of the next `frames` frames (read with
+    /// [`Self::frame_times_ms`]). False when the device lacks timestamp queries.
+    pub fn enable_frame_timing(&mut self, frames: u32) -> bool {
+        if !self
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            return false;
+        }
+        let count = 2 * frames.max(1);
+        self.timing = Some(FrameTiming {
+            set: self.device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("explicit-beams-frame-timing"),
+                ty: wgpu::QueryType::Timestamp,
+                count,
+            }),
+            resolve: self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("explicit-beams-frame-timing"),
+                size: u64::from(count) * 8,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            capacity: frames.max(1),
+            used: 0,
+        });
+        true
+    }
+
+    /// GPU milliseconds of each timed frame since [`Self::enable_frame_timing`]
+    /// (waits for them); timing restarts empty.
+    pub fn frame_times_ms(&mut self) -> Vec<f64> {
+        let Some(t) = &mut self.timing else {
+            return Vec::new();
+        };
+        let used = std::mem::take(&mut t.used);
+        if used == 0 {
+            return Vec::new();
+        }
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        enc.resolve_query_set(&t.set, 0..2 * used, &t.resolve, 0);
+        self.queue.submit([enc.finish()]);
+        let period = f64::from(self.queue.get_timestamp_period()) * 1e-6;
+        let raw = self.read(&self.timing.as_ref().unwrap().resolve);
+        let ticks: &[u64] = bytemuck::cast_slice(&raw[..used as usize * 16]);
+        ticks
+            .chunks(2)
+            .map(|p| p[1].saturating_sub(p[0]) as f64 * period)
+            .collect()
     }
 
     /// Vehicles simulated.
@@ -327,9 +390,19 @@ impl ExplicitBeamsGpu {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
+            let timestamps = self.timing.as_mut().and_then(|t| {
+                (t.used < t.capacity).then(|| {
+                    t.used += 1;
+                    wgpu::ComputePassTimestampWrites {
+                        query_set: &t.set,
+                        beginning_of_pass_write_index: Some(2 * t.used - 2),
+                        end_of_pass_write_index: Some(2 * t.used - 1),
+                    }
+                })
+            });
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("explicit_beams"),
-                timestamp_writes: None,
+                timestamp_writes: timestamps,
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.group, &[]);
