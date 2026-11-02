@@ -592,3 +592,19 @@ gate after the fix (61 shots): archive warm 54.5 ± 1.2 [52, 58], archive cold 5
 inside the references'. The carry itself emits some pairs twice: at the house's impact step
 body 5's pairs with its neighbours appear as two identical manifolds (`(5, 8)`, colliders
 646/649, three rows each, twice), so carry-on is not a clean reference either.
+
+Browser check (same build, `?rest=archive` with cold wakes against `?rest=carry`, F at step
+400, awake count at steps 580 / 700 / 760): archive 205 / 309 / 275, 225 / 232 / 228,
+177 / 249 / 296; carry 201 / 264 / 377, 153 / 213 / 255, 214 / 268 / 207. The column above
+the struck boxes falls in all six. One earlier archive run (of five) dented the face
+without a collapse (awake back to 1 at step 620); every carry run so far collapsed.
+
+Cost: no archived rows also drops the five row passes, so `sleepMain` on gables506k goes
+0.56 → 0.39 ms (settled, ~9k awake) and 0.68 → 0.46 ms (~26k awake). GPU span 4.79 and
+6.41 ms.
+
+`tests/floor_probe.rs` (ignored) imports an engine-scenes scene, settles it asleep and keeps
+`FLOOR_WAKE` bodies nudged awake, printing each dispatch's GPU time with
+`RUBBLE_GPU_TIMING_DISPATCH=1`. "100k Grid" with 200 awake: 173 dispatches a step, of which
+82 primal colour dispatches, 12 sparse and 12 dual (12 iterations, colours dispatched =
+last step's + 4). This is the next step's starting point (the cost floor).
