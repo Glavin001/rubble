@@ -190,3 +190,11 @@ fn awake_list_body_passes_change_the_same_bodies() {
     eprintln!("body passes: compared {compared} phases, {changed} body changes");
     assert!(compared >= 150, "compared {compared}");
 }
+
+#[test]
+fn primal_tail_solves_the_same_bodies() {
+    let all = |b: &BodyState| bytemuck::bytes_of(b).to_vec();
+    let (compared, changed) = compare(&|s, on| s.set_primal_tail(on), &["dual", "sleep"], &all);
+    eprintln!("primal tail: compared {compared} phases, {changed} body changes");
+    assert!(compared >= 150, "compared {compared}");
+}

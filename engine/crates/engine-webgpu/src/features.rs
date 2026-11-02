@@ -153,6 +153,10 @@ pub struct EngineFeatures {
     /// nothing else changes a body between the list and them (`ENGINE_BODY_PASSES=all`
     /// runs them over every body slot; same results).
     pub awake_body_passes: bool,
+    /// The primal's headroom colours (past last step's colour count) solved with their
+    /// colour dispatches' lanes in the sparse tail's single workgroup, one dispatch an
+    /// iteration (`ENGINE_PRIMAL=dispatch` dispatches each headroom colour; same results).
+    pub primal_tail: bool,
     /// Woken pairs start cold (λ = 0, stiffness at its floor), as the resting-pair carry
     /// restarts them (its carried rows are re-detected at rest each step), not from the
     /// sleep archive's rows (default; `ENGINE_ARCHIVE=warm` warm-starts them from the
@@ -205,6 +209,7 @@ impl Default for EngineFeatures {
             rest_incremental: true,
             ccd_by_collider: true,
             awake_body_passes: true,
+            primal_tail: true,
             archive_cold: true,
             archive_spread_rounds: 0,
             archive_touch_query: true,
@@ -252,6 +257,7 @@ impl EngineFeatures {
             rest_incremental: env_default_on("ENGINE_REST_TABLE", &["rebuild"]),
             ccd_by_collider: env_default_on("ENGINE_CCD_WAKE", &["body"]),
             awake_body_passes: env_default_on("ENGINE_BODY_PASSES", &["all"]),
+            primal_tail: env_default_on("ENGINE_PRIMAL", &["dispatch"]),
             archive_cold: env_str("ENGINE_ARCHIVE").as_deref() != Some("warm"),
             archive_spread_rounds: env_str("ENGINE_ARCHIVE_SPREAD")
                 .and_then(|v| v.parse::<u32>().ok())

@@ -271,6 +271,7 @@ pub fn features(f: &mut Fields, d: &mut EngineFeatures) -> Result<(), JsValue> {
     f.bool("restIncremental", &mut d.rest_incremental)?;
     f.bool("ccdByCollider", &mut d.ccd_by_collider)?;
     f.bool("awakeBodyPasses", &mut d.awake_body_passes)?;
+    f.bool("primalTail", &mut d.primal_tail)?;
     if let Some(s) = f.string("grid")? {
         d.grid = match s.as_str() {
             "split" => engine_webgpu::GridLayout::Split,

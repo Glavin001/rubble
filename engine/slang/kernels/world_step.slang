@@ -6789,6 +6789,81 @@ void solve_primal_sparse(uint3 lid : SV_GroupThreadID)
     }
 }
 
+// The colour dispatches' headroom and the sparse tail in one workgroup (World's plan,
+// pass value TAIL_PASS: first colour p in bits 0..7, the stabilization flag 256, and
+// the first sparse colour q in bits 16..23). Colours [p, q) are solved as
+// solve_primal_color solves them: the same lanes per body (primalLanesForDegree of the
+// colour's count and degree), the same accumulation and the same halving reduction
+// within each body's lanes, one batch of 64 / lanes bodies at a time; colours from q as
+// solve_primal_sparse solves them. A body's update depends only on its lane count and
+// the poses of earlier colours, so each body gets what its own dispatch gave it, without
+// a dispatch (and a barrier) for each headroom colour, which is usually empty.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void solve_primal_sparse_tail(uint3 lid : SV_GroupThreadID)
+{
+    uint local = lid.x;
+    uint maxB = HOST_S(1);
+    if (local == 0u) gsUniformLanes = min(ALOAD(gCounters[0].colorCount), min(HOST_S(4), COLOR_DEGREE_BASE));
+    GROUP_SYNC();
+    uint colorLimit = gsUniformLanes;
+    GROUP_SYNC();
+    gStabilize = (PASS_U & 256u) != 0u;
+    uint sparseFrom = (PASS_U >> 16) & 255u;
+    for (uint color = PASS_U & 255u; color < colorLimit; color++)
+    {
+        if (local == 0u) gsUniformLanes = SOLVE_COUNT(color);
+        GROUP_SYNC();
+        uint count = gsUniformLanes;
+        GROUP_SYNC();
+        uint lanes = 8u;
+        if (color < sparseFrom)
+        {
+            if (local == 0u)
+                gsUniformLanes = primalLanesForDegree(
+                    count, HOST_S(29) != 0u ? SOLVE_COUNT(COLOR_DEGREE_BASE + color) : 0u);
+            GROUP_SYNC();
+            lanes = gsUniformLanes;
+            GROUP_SYNC();
+        }
+        uint perBatch = 64u / lanes;
+        uint lane = local % lanes;
+        uint slot = local / lanes;
+        uint spanBodies = perBatch << 15;
+        for (uint span = 0u; span < count; span += spanBodies)
+        for (uint base = span; base < min(count, span + spanBodies); base += perBatch)
+        {
+            uint bodySlot = base + slot;
+            bool live = bodySlot < count;
+            uint bodyIdx = 0u;
+            Mat6 A = mat6Zero();
+            Vec6 rhs = vec6Zero();
+            if (live)
+            {
+                bodyIdx = gColorLists[color * maxB + bodySlot];
+                primalAccumulate(bodyIdx, lane, lanes, A, rhs);
+            }
+            if (lanes == 1u)
+            {
+                if (live) primalApply(bodyIdx, A, rhs);
+            }
+            else
+            {
+                if (lanes >= 64u) primalReduceStep(32u, live, lane, slot, A, rhs);
+                if (lanes >= 32u) primalReduceStep(16u, live, lane, slot, A, rhs);
+                if (lanes >= 16u) primalReduceStep(8u, live, lane, slot, A, rhs);
+                if (lanes >= 8u) primalReduceStep(4u, live, lane, slot, A, rhs);
+                if (lanes >= 4u) primalReduceStep(2u, live, lane, slot, A, rhs);
+                primalReduceStep(1u, live, lane, slot, A, rhs);
+                if (live && lane == 0u) primalApply(bodyIdx, A, rhs);
+            }
+            GROUP_SYNC();
+        }
+        // Graph colors are Gauss-Seidel: publish every pose before the next color.
+        if (count > 0u) DeviceMemoryBarrierWithGroupSync();
+    }
+}
+
 // Small-scene GS: one body per dispatch (gPassUniform = body index). Host walks
 // bodies high→low like three-avbd CPU so impacts propagate through stacks.
 [shader("compute")]

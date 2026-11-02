@@ -109,6 +109,12 @@ pub struct StepModes {
     /// slot, where no body changes outside that list between `build_awake_list` and
     /// them ([`awake_body_passes`]): the bodies they change are exactly the listed ones.
     pub awake_body_passes: bool,
+    /// The primal's headroom colours (from last step's colour count to the sparse
+    /// tail's first) solved in the sparse tail's single workgroup with the colour
+    /// dispatches' lanes (`solve_primal_sparse_tail`): one dispatch an iteration instead
+    /// of one per headroom colour, with each body's update as its colour's dispatch
+    /// gives it. WGSL hosts.
+    pub primal_tail: bool,
     /// With `awake_broadphase`: rebuild the resting table this step (the host wrote
     /// bodies or colliders, or the last step did not keep the table). Steps after
     /// one where bodies fell asleep rebuild it on the GPU (host word 5).
@@ -269,6 +275,31 @@ pub fn primal_colors_dispatched(m: &StepModes, i: &StepInputs, max_c: u32) -> u3
     estimate.min(m.sparse_start).min(max_c)
 }
 
+/// Colours `(p, q)` of the primal tail ([`StepModes::primal_tail`]): `p` last step's
+/// colour count, `q` the first colour today's plan leaves to the sparse tail (all
+/// colours from `q` are solved there with 8 lanes a body, as before), when the headroom
+/// between them is not empty and no wider than [`TAIL_HEADROOM_MAX`].
+pub fn primal_tail(m: &StepModes, i: &StepInputs, max_c: u32, sparse_start: u32) -> Option<(u32, u32)> {
+    if !m.primal_tail || m.color_headroom.is_none() || i.steps_done == 0 {
+        return None;
+    }
+    let q = max_c.min(sparse_start);
+    let p = i.last.color_count.min(q);
+    (q > p && q - p <= TAIL_HEADROOM_MAX).then_some((p, q))
+}
+
+/// Widest headroom the tail's pass table covers.
+pub const TAIL_HEADROOM_MAX: u32 = 8;
+/// First pass-table slot of the primal tail: `p * (TAIL_HEADROOM_MAX + 1) + (q - p)`
+/// for p in 0..=32, then the same again with the stabilization flag.
+pub const TAIL_PASS: u32 = 160;
+const TAIL_SLOTS: u32 = 33 * (TAIL_HEADROOM_MAX + 1);
+
+/// Pass-table slot of the tail over colours [p, q) (colour lanes), then sparse.
+pub fn tail_pass(p: u32, q: u32, stab: bool) -> u32 {
+    TAIL_PASS + u32::from(stab) * TAIL_SLOTS + p * (TAIL_HEADROOM_MAX + 1) + (q - p)
+}
+
 /// Canonical entry → the variant a persistent-contact host compiled.
 pub fn resolve_entry(name: &str, persistent: bool) -> &str {
     if !persistent {
@@ -287,6 +318,7 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "csr_scatter_contacts" => "csr_scatter_contacts_persistent",
         "solve_primal_color_compact" => "solve_primal_color_persistent",
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
+        "solve_primal_sparse_tail_compact" => "solve_primal_sparse_tail_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
         "solve_dual_compact" => "solve_dual_persistent",
         "convex_classify" => "convex_classify_persistent",
@@ -786,11 +818,23 @@ pub fn encode_step(
     } else {
         ("solve_primal_color", "solve_primal_sparse", "solve_dual")
     };
+    // The headroom colours (past last step's count) and the sparse tail in one
+    // workgroup (`solve_primal_sparse_tail`, the colour dispatches' lanes for the
+    // headroom): colours [0, solo) dispatched one by one, the rest in the tail.
+    let tail = primal_tail(m, i, max_c, sparse_start);
+    let solo = tail.map_or(max_c.min(sparse_start), |(p, _)| p);
+    let tail_kernel = if m.compact_contacts {
+        "solve_primal_sparse_tail_compact"
+    } else {
+        "solve_primal_sparse_tail"
+    };
     for iter in 0..i.iterations {
-        for color in 0..max_c.min(sparse_start) {
+        for color in 0..solo {
             e.wp(primal, color, color);
         }
-        if sparse_start < max_c {
+        if let Some((p, q)) = tail {
+            e.dp(tail_kernel, 64, tail_pass(p, q, false));
+        } else if sparse_start < max_c {
             e.dp(sparse, 64, sparse_start);
         }
         if soft {
@@ -831,10 +875,12 @@ pub fn encode_step(
     }
     if i.post_stabilize {
         e.d("record_stab_velocity", n_bodies);
-        for color in 0..max_c.min(sparse_start) {
+        for color in 0..solo {
             e.wp(primal, color, STAB_PASS + color);
         }
-        if sparse_start < max_c {
+        if let Some((p, q)) = tail {
+            e.dp(tail_kernel, 64, tail_pass(p, q, true));
+        } else if sparse_start < max_c {
             e.dp(sparse, 64, STAB_PASS + sparse_start);
         }
         e.phase("stabilize");
@@ -1085,6 +1131,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "predict_bodies",
     "solve_primal_color_persistent",
     "solve_primal_sparse_persistent",
+    "solve_primal_sparse_tail_persistent",
     "solve_dual_persistent",
     "record_stab_velocity",
     "extract_velocity_sleep",
@@ -1240,7 +1287,7 @@ pub const BIND_COUNT: usize = 34;
 /// Pass-uniform slot stride (binding 22, dynamic offsets).
 pub const PASS_ALIGN: u64 = 256;
 /// Pass-uniform slots (binding 22): see [`pass_table`].
-pub const PASS_SLOTS: u64 = 160;
+pub const PASS_SLOTS: u64 = 160 + 2 * 33 * 9;
 /// First post-stabilization slot: `STAB_PASS + c` holds `256 | c` (colour c at α = 0).
 pub const STAB_PASS: u32 = 96;
 
@@ -1356,6 +1403,12 @@ pub fn pass_table() -> Vec<u8> {
         } else if i < 68 {
             let k = i - 48;
             (1u32 << k) | ((k & 1) << 31)
+        } else if i >= TAIL_PASS {
+            // The primal tail: first colour, stabilization flag, first sparse colour.
+            let k = i - TAIL_PASS;
+            let (stab, r) = (k / TAIL_SLOTS, k % TAIL_SLOTS);
+            let (p, d) = (r / (TAIL_HEADROOM_MAX + 1), r % (TAIL_HEADROOM_MAX + 1));
+            p | (stab << 8) | ((p + d) << 16)
         } else if i >= STAB_PASS {
             256 | (i - STAB_PASS)
         } else {
@@ -1703,6 +1756,7 @@ mod tests {
                     m.rest_incremental = listed;
                     m.ccd_by_collider = awake;
                     m.awake_body_passes = awake;
+                    m.primal_tail = awake;
                     let mut i = inputs(10, 0);
                     i.joint_count = 3;
                     i.has_convex = true;

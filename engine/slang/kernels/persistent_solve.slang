@@ -15,6 +15,7 @@
 #define solve_primal_one solve_primal_one_persistent
 #define solve_dual solve_dual_persistent
 #define solve_primal_sparse solve_primal_sparse_persistent
+#define solve_primal_sparse_tail solve_primal_sparse_tail_persistent
 #define csr_degree_contacts csr_degree_contacts_persistent
 #define csr_scatter_contacts csr_scatter_contacts_persistent
 #define contact_events contact_events_persistent

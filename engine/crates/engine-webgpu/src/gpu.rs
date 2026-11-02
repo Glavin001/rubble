@@ -215,6 +215,9 @@ pub struct WgpuSim {
     /// Prediction and velocity extraction over the awake list
     /// (`EngineFeatures::awake_body_passes`).
     awake_body_passes: bool,
+    /// The primal's headroom colours in the sparse tail's workgroup
+    /// (`EngineFeatures::primal_tail`).
+    primal_tail: bool,
     colliderless: std::cell::Cell<Option<bool>>,
     /// Measurement variants of the sleep archive (`EngineFeatures::archive_cold`,
     /// `archive_spread_rounds`).
@@ -440,6 +443,7 @@ fn persistent_entry(name: &str) -> &str {
         "csr_scatter_contacts" => "csr_scatter_contacts_persistent",
         "solve_primal_color_compact" => "solve_primal_color_persistent",
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
+        "solve_primal_sparse_tail_compact" => "solve_primal_sparse_tail_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
         "solve_dual_compact" => "solve_dual_persistent",
         "convex_classify" => "convex_classify_persistent",
@@ -905,6 +909,7 @@ impl WgpuSim {
             rest_incremental: features.rest_incremental,
             ccd_by_collider: features.ccd_by_collider,
             awake_body_passes: features.awake_body_passes,
+            primal_tail: features.primal_tail,
             colliderless: std::cell::Cell::new(None),
             archive_cold: features.archive_cold,
             archive_spread_rounds: features.archive_spread_rounds,
@@ -2111,6 +2116,12 @@ impl WgpuSim {
         self.awake_body_passes = on;
     }
 
+    /// The primal's headroom colours in one tail dispatch, or one dispatch each
+    /// (`EngineFeatures::primal_tail`).
+    pub fn set_primal_tail(&mut self, on: bool) {
+        self.primal_tail = on;
+    }
+
     /// `ccd_wake` / `ccd_unhold` by collider or by body (`EngineFeatures::ccd_by_collider`).
     pub fn set_ccd_by_collider(&mut self, on: bool) {
         self.ccd_by_collider = on;
@@ -3093,6 +3104,7 @@ impl WgpuSim {
             rest_incremental: self.rest_incremental,
             ccd_by_collider: self.ccd_by_collider && !self.has_colliderless_dynamic(),
             awake_body_passes: self.awake_body_passes,
+            primal_tail: self.primal_tail,
             // Host commands that may move statics, sleepers, kinematics or colliders
             // (apply_commands, this step): every bound, and the table rebuilt.
             rest_rebuild: self.rest_stale || self.commands_move_poses,
