@@ -27,7 +27,7 @@ struct IngestParams
     uint record_count;  // records in the frame (substeps x 2 x max_rows)
     uint max_bodies;    // the engine's body capacity (its previous rows follow)
     float h;            // the substep's duration (s)
-    uint pad;
+    uint list_base;     // `sort` word of the touched chunks' list (count, then chunks): after the record slots
 };
 
 // An engine body (engine-schema `BodyState`, 112 B).
@@ -349,6 +349,148 @@ void ingest_merge(uint3 id: SV_DispatchThreadID)
         sort[slots + b] = v;
     }
     // Manifolds per other body, in order of first appearance.
+    uint count = 0;
+    for (uint a = begin; a < end; a++)
+    {
+        Record r = records[sort[slots + a]];
+        uint m = NONE;
+        for (uint q = 0; q < count; q++)
+        {
+            if (manifolds[begin + q].ids.y == r.ids.y)
+            {
+                m = q;
+                break;
+            }
+        }
+        if (m == NONE)
+        {
+            manifolds[begin + count] = r;
+            count++;
+            continue;
+        }
+        Record acc = manifolds[begin + m];
+        float w0 = acc.point.w;
+        float w = r.point.w;
+        float total = w0 + w;
+        if (total > 0.0)
+        {
+            acc.point.xyz = (acc.point.xyz * w0 + r.point.xyz * w) / total;
+            acc.impulse.w = (acc.impulse.w * w0 + r.impulse.w * w) / total;
+        }
+        acc.impulse.xyz += r.impulse.xyz;
+        acc.point.w = total;
+        manifolds[begin + m] = acc;
+    }
+    sort[n + 1 + k] = count;
+}
+
+// ---- The listed merge (ingest.rs `EngineIngest::set_listed`) ----
+//
+// The same manifolds as the merge above, for only the chunks with records this frame:
+// the clear, the segment starts and the merge run over a list of the touched chunks
+// (`sort` from `list_base`: count, then chunks), so a frame costs what its contacts touch,
+// not every chunk. A chunk off the list has count 0 (`counts`, `sort[n + 1 + k]`): the
+// previous frame's list is cleared first. Segment starts are claimed with an atomic add,
+// in list order: where a segment lands does not matter (each chunk reads only its own,
+// sorted by `record_before`), so every chunk's manifolds are the merge's.
+// `counts` past 2n: [2n] the list's count, [2n + 1, 2n + 4) its indirect size (64 a
+// group), [2n + 4] the segment cursor.
+
+uint list_count_word() { return 2 * params.chunk_count; }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ingest_clear_listed(uint3 id: SV_DispatchThreadID)
+{
+    uint n = params.chunk_count;
+    if (id.x >= counts[list_count_word()].load())
+        return;
+    uint k = sort[params.list_base + 1 + id.x];
+    counts[k].store(0u);
+    counts[n + k].store(0u);
+    sort[n + 1 + k] = 0;
+}
+
+// Every chunk's manifold count cleared (the first listed frame after a full merge).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ingest_clear_manifold_counts(uint3 id: SV_DispatchThreadID)
+{
+    uint n = params.chunk_count;
+    if (id.x < n)
+        sort[n + 1 + id.x] = 0;
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void ingest_list_reset(uint3 id: SV_DispatchThreadID)
+{
+    counts[list_count_word()].store(0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ingest_count_listed(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x >= params.record_count || !record_live(id.x))
+        return;
+    Record r = records[id.x];
+    if (r.ids.w == 0)
+        return;
+    if (counts[r.ids.x].add(1u) == 0u)
+    {
+        uint i = counts[list_count_word()].add(1u);
+        sort[params.list_base + 1 + i] = r.ids.x;
+    }
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void ingest_list_args(uint3 id: SV_DispatchThreadID)
+{
+    uint w = list_count_word();
+    uint count = counts[w].load();
+    sort[params.list_base] = count;
+    counts[w + 1].store((count + 63) / 64);
+    counts[w + 2].store(1u);
+    counts[w + 3].store(1u);
+    counts[w + 4].store(0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ingest_scan_listed(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x >= counts[list_count_word()].load())
+        return;
+    uint k = sort[params.list_base + 1 + id.x];
+    sort[k] = counts[list_count_word() + 4].add(counts[k].load());
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ingest_merge_listed(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x >= counts[list_count_word()].load())
+        return;
+    uint k = sort[params.list_base + 1 + id.x];
+    uint n = params.chunk_count;
+    uint begin = sort[k];
+    uint end = begin + counts[k].load();
+    uint slots = 2 * n + 1;
+    // As ingest_merge: the chunk's records in contact order, then its manifolds per
+    // other body in order of first appearance.
+    for (uint a = begin + 1; a < end; a++)
+    {
+        uint v = sort[slots + a];
+        uint b = a;
+        while (b > begin && record_before(v, sort[slots + b - 1]))
+        {
+            sort[slots + b] = sort[slots + b - 1];
+            b--;
+        }
+        sort[slots + b] = v;
+    }
     uint count = 0;
     for (uint a = begin; a < end; a++)
     {

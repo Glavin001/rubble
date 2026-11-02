@@ -39,7 +39,11 @@ struct FractureParams_std140_0
     @align(16) cs_c2_0 : f32,
     @align(4) cs_row_offset_0 : u32,
     @align(8) ext_sides_0 : u32,
-    @align(4) pad8_0 : f32,
+    @align(4) list_atom_0 : u32,
+    @align(16) list_stamp_0 : u32,
+    @align(4) list_touched_0 : u32,
+    @align(8) pad9_0 : u32,
+    @align(4) pad10_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : FractureParams_std140_0;
@@ -9532,6 +9536,563 @@ fn fr_crush_end(@builtin(global_invocation_id) id_86 : vec3<u32>)
     atomicStore(&(atom_0[_S905 + u32(7)]), events_0);
     var _S906 : u32 = atomicAdd(&(atom_0[_S905 + u32(9)]), events_0);
     var _S907 : u32 = atomicAdd(&(atom_0[_S905 + u32(8)]), (total_3 & (u32(1048575))));
+    return;
+}
+
+fn l_mark_0( par_0 : u32,  k_77 : u32) -> u32
+{
+    return params_0.list_atom_0 + u32(2) + par_0 * params_0.chunk_count_0 + k_77;
+}
+
+fn l_count_0( par_1 : u32) -> u32
+{
+    return params_0.list_atom_0 + par_1;
+}
+
+fn l_entry_0( par_2 : u32,  i_29 : u32) -> u32
+{
+    return params_0.list_atom_0 + u32(2) + u32(2) * params_0.chunk_count_0 + par_2 * params_0.chunk_count_0 + i_29;
+}
+
+fn list_append_0( par_3 : u32,  k_78 : u32,  stamp_0 : u32)
+{
+    var _S908 : u32 = atomicExchange(&(atom_0[l_mark_0(par_3, k_78)]), stamp_0);
+    if(_S908 != stamp_0)
+    {
+        var i_30 : u32 = atomicAdd(&(atom_0[l_count_0(par_3)]), u32(1));
+        atomicStore(&(atom_0[l_entry_0(par_3, i_30)]), k_78);
+    }
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn fr_list_touched(@builtin(global_invocation_id) id_87 : vec3<u32>)
+{
+    var _S909 : u32 = id_87.x;
+    if(_S909 >= sort_0[params_0.list_touched_0])
+    {
+        return;
+    }
+    list_append_0(params_0.parity_0, sort_0[params_0.list_touched_0 + u32(1) + _S909], params_0.list_stamp_0);
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn fr_list_all(@builtin(global_invocation_id) id_88 : vec3<u32>)
+{
+    var _S910 : u32 = id_88.x;
+    if(live_0(_S910))
+    {
+        list_append_0(params_0.parity_0, _S910, params_0.list_stamp_0);
+    }
+    return;
+}
+
+@compute
+@workgroup_size(1, 1, 1)
+fn fr_list_args(@builtin(global_invocation_id) id_89 : vec3<u32>)
+{
+    var _S911 : u32 = atomicLoad(&(atom_0[l_count_0(params_0.parity_0)]));
+    var _S912 : u32 = groups_of_0(_S911, u32(64));
+    set_args_0(u32(17), _S912);
+    atomicStore(&(atom_0[l_count_0(u32(1) - params_0.parity_0)]), u32(0));
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn fr_loads_listed(@builtin(global_invocation_id) id_90 : vec3<u32>)
+{
+    var first_7 : bool;
+    var f_total_2 : vec3<f32>;
+    var m_11 : f32;
+    var p_27 : u32;
+    var kept_2 : u32;
+    var q3_1 : u32;
+    var overflow_2 : bool;
+    var overflow_3 : bool;
+    var f_total_3 : vec3<f32>;
+    var t_total_2 : vec3<f32>;
+    var _S913 : u32 = id_90.x;
+    var _S914 : u32 = atomicLoad(&(atom_0[l_count_0(params_0.parity_0)]));
+    if(_S913 >= _S914)
+    {
+        return;
+    }
+    var k_79 : u32 = atomicLoad(&(atom_0[l_entry_0(params_0.parity_0, _S913)]));
+    if(!live_0(k_79))
+    {
+        return;
+    }
+    var slot_26 : u32 = body_of_0(k_79);
+    var b_90 : u32 = u32(7) * slot_26;
+    var q_45 : Quat_0;
+    var origin_24 : vec3<f32>;
+    structure_pose_5(slot_26, b_90, &(q_45), &(origin_24));
+    var _S915 : u32 = u32(4) * k_79;
+    var c0_8 : vec4<f32> = chunks_0[_S915];
+    var centre_6 : vec3<f32> = origin_24 + rotate_0(q_45, c0_8.xyz);
+    var inv_mass_15 : f32 = bodies_0[b_90].w;
+    var m_body_3 : f32;
+    if(inv_mass_15 > 0.0f)
+    {
+        m_body_3 = 1.0f / inv_mass_15;
+    }
+    else
+    {
+        m_body_3 = float_bits_0(u32(2139095040));
+    }
+    var from_4 : u32 = params_0.parity_0;
+    var to_2 : u32 = u32(1) - params_0.parity_0;
+    var _S916 : u32 = w_pulses_0() + _S915;
+    var _S917 : u32 = _S916 + u32(2) * params_0.parity_0;
+    var off_1 : u32 = work_0[_S917];
+    var carried_1 : u32 = work_0[_S917 + u32(1)];
+    var room_2 : u32 = work_0[_S917 + u32(1)] + sort_0[params_0.chunk_count_0 + u32(1) + k_79];
+    var base_6 : u32;
+    var room_3 : u32;
+    if(room_2 != u32(0))
+    {
+        var _S918 : u32 = a_counters_0();
+        var base_7 : u32 = atomicAdd(&(atom_0[_S918 + u32(5) + to_2]), room_2);
+        if((base_7 + room_2) > (params_0.pool_cap_0))
+        {
+            var _S919 : u32 = atomicOr(&(atom_0[_S918 + u32(3)]), u32(8));
+            if(base_7 < (params_0.pool_cap_0))
+            {
+                base_6 = params_0.pool_cap_0 - base_7;
+            }
+            else
+            {
+                base_6 = u32(0);
+            }
+        }
+        else
+        {
+            base_6 = room_2;
+        }
+        var _S920 : u32 = base_6;
+        base_6 = base_7;
+        room_3 = _S920;
+    }
+    else
+    {
+        base_6 = u32(0);
+        room_3 = room_2;
+    }
+    var _S921 : u32 = params_0.chunk_count_0;
+    var _S922 : f32 = c0_8.w;
+    var _S923 : vec4<f32> = chunks_0[_S915 + u32(3)];
+    var _S924 : f32 = params_0.band_0;
+    var _S925 : f32 = params_0.dt_0;
+    var _S926 : bool = (params_0.impact_peak_0) != u32(0);
+    var _S927 : u32 = l_pool_0(from_4) + u32(3) * off_1;
+    var _S928 : u32 = l_pool_0(to_2) + u32(3) * base_6;
+    loop
+    {
+        var _S929 : vec3<f32> = vec3<f32>(0.0f);
+        var _S930 : u32 = sort_0[k_79];
+        var _S931 : u32 = sort_0[_S921 + u32(1) + k_79];
+        first_7 = true;
+        var last_1 : u32 = u32(0);
+        var step_10 : u32 = u32(0);
+        f_total_2 = _S929;
+        var t_total_3 : vec3<f32> = _S929;
+        loop
+        {
+            if(step_10 < _S931)
+            {
+            }
+            else
+            {
+                break;
+            }
+            p_27 = u32(4294967295);
+            kept_2 = u32(0);
+            q3_1 = u32(0);
+            loop
+            {
+                if(q3_1 < _S931)
+                {
+                }
+                else
+                {
+                    break;
+                }
+                var key_3 : u32 = manifolds_0[_S930 + q3_1].ids_0.y + u32(1);
+                if(first_7)
+                {
+                    overflow_2 = true;
+                }
+                else
+                {
+                    overflow_2 = key_3 > last_1;
+                }
+                if(overflow_2)
+                {
+                    if(p_27 == u32(4294967295))
+                    {
+                        overflow_3 = true;
+                    }
+                    else
+                    {
+                        overflow_3 = key_3 < kept_2;
+                    }
+                }
+                else
+                {
+                    overflow_3 = false;
+                }
+                if(overflow_3)
+                {
+                    p_27 = q3_1;
+                    kept_2 = key_3;
+                }
+                q3_1 = q3_1 + u32(1);
+            }
+            if(p_27 == u32(4294967295))
+            {
+                break;
+            }
+            var r_35 : Record_std430_0 = manifolds_0[_S930 + p_27];
+            var _S932 : vec3<f32> = r_35.impulse_0.xyz;
+            var j_17 : f32 = length(_S932);
+            if(j_17 == 0.0f)
+            {
+                var _S933 : u32 = step_10 + u32(1);
+                first_7 = false;
+                last_1 = kept_2;
+                step_10 = _S933;
+                continue;
+            }
+            var m_other_4 : f32 = r_35.other_0.x;
+            if(isinf_0(m_body_3))
+            {
+                if(isinf_0(m_other_4))
+                {
+                    m_11 = _S922;
+                }
+                else
+                {
+                    m_11 = m_other_4;
+                }
+            }
+            else
+            {
+                if(isinf_0(m_other_4))
+                {
+                    m_11 = m_body_3;
+                }
+                else
+                {
+                    m_11 = m_body_3 * m_other_4 / (m_body_3 + m_other_4);
+                }
+            }
+            var _S934 : f32 = min(j_17, 2.0f * m_11 * max(r_35.impulse_0.w - _S924, 0.0f));
+            if(_S934 < j_17)
+            {
+                var f_19 : vec3<f32> = _S932 / vec3<f32>(j_17) * vec3<f32>(((j_17 - _S934) / _S925));
+                var _S935 : vec3<f32> = t_total_3 + cross(r_35.point_0.xyz - centre_6, f_19);
+                f_total_3 = f_total_2 + f_19;
+                t_total_2 = _S935;
+            }
+            else
+            {
+                f_total_3 = f_total_2;
+                t_total_2 = t_total_3;
+            }
+            f_total_2 = f_total_3;
+            t_total_3 = t_total_2;
+            var _S933 : u32 = step_10 + u32(1);
+            first_7 = false;
+            last_1 = kept_2;
+            step_10 = _S933;
+        }
+        p_27 = u32(0);
+        kept_2 = u32(0);
+        loop
+        {
+            if(p_27 < carried_1)
+            {
+            }
+            else
+            {
+                break;
+            }
+            var _S936 : u32 = _S927 + u32(3) * p_27;
+            var a_19 : vec4<f32> = loads_0[_S936];
+            var b_91 : vec4<f32> = loads_0[_S936 + u32(1)];
+            var c_34 : vec4<f32> = loads_0[_S936 + u32(2)];
+            var _S937 : f32 = loads_0[_S936 + u32(1)].w;
+            var mean_7 : f32 = pulse_mean_0(loads_0[_S936].x, loads_0[_S936].y, loads_0[_S936].z, loads_0[_S936].w, _S937, _S925);
+            if(mean_7 != 0.0f)
+            {
+                var f_20 : vec3<f32> = c_34.xyz * vec3<f32>(mean_7);
+                var _S938 : vec3<f32> = t_total_3 + cross(b_91.xyz - centre_6, f_20);
+                f_total_2 = f_total_2 + f_20;
+                t_total_3 = _S938;
+            }
+            if((a_19.x + a_19.z + _S937) > _S925)
+            {
+                a_19[i32(0)] = a_19[i32(0)] - _S925;
+                var _S939 : u32 = _S928 + u32(3) * kept_2;
+                loads_0[_S939] = a_19;
+                loads_0[_S939 + u32(1)] = b_91;
+                loads_0[_S939 + u32(2)] = c_34;
+                kept_2 = kept_2 + u32(1);
+            }
+            p_27 = p_27 + u32(1);
+        }
+        q3_1 = u32(0);
+        overflow_2 = false;
+        loop
+        {
+            if(q3_1 < _S931)
+            {
+            }
+            else
+            {
+                break;
+            }
+            var r_36 : Record_std430_0 = manifolds_0[_S930 + q3_1];
+            var _S940 : vec3<f32> = r_36.impulse_0.xyz;
+            var j_18 : f32 = length(_S940);
+            if(j_18 == 0.0f)
+            {
+                overflow_3 = overflow_2;
+                q3_1 = q3_1 + u32(1);
+                overflow_2 = overflow_3;
+                continue;
+            }
+            var m_other_5 : f32 = r_36.other_0.x;
+            if(isinf_0(m_body_3))
+            {
+                if(isinf_0(m_other_5))
+                {
+                    m_11 = _S922;
+                }
+                else
+                {
+                    m_11 = m_other_5;
+                }
+            }
+            else
+            {
+                if(isinf_0(m_other_5))
+                {
+                    m_11 = m_body_3;
+                }
+                else
+                {
+                    m_11 = m_body_3 * m_other_5 / (m_body_3 + m_other_5);
+                }
+            }
+            var _S941 : f32 = r_36.impulse_0.w;
+            var _S942 : f32 = min(j_18, 2.0f * m_11 * max(_S941 - _S924, 0.0f));
+            if(_S942 <= 0.0f)
+            {
+                overflow_3 = overflow_2;
+                q3_1 = q3_1 + u32(1);
+                overflow_2 = overflow_3;
+                continue;
+            }
+            var _S943 : f32 = _S923.y;
+            var duration_4 : f32 = hertz_duration_0(m_11, min(r_36.other_0.z, _S923.z), 1.0f / ((1.0f - _S943 * _S943) / _S923.x + 1.0f / r_36.other_0.y), _S941);
+            var peak_4 : f32 = 3.14159274101257324f * _S942 / (2.0f * duration_4);
+            var dir_3 : vec3<f32> = _S940 / vec3<f32>(j_18);
+            var mean_8 : f32;
+            if(_S926)
+            {
+                mean_8 = peak_4;
+            }
+            else
+            {
+                mean_8 = pulse_mean_0(0.0f, 0.0f, 0.0f, peak_4, duration_4, _S925);
+            }
+            if(mean_8 != 0.0f)
+            {
+                var f_21 : vec3<f32> = dir_3 * vec3<f32>(mean_8);
+                var _S944 : vec3<f32> = t_total_3 + cross(r_36.point_0.xyz - centre_6, f_21);
+                f_total_3 = f_total_2 + f_21;
+                t_total_2 = _S944;
+            }
+            else
+            {
+                f_total_3 = f_total_2;
+                t_total_2 = t_total_3;
+            }
+            var kept_3 : u32;
+            if(duration_4 > _S925)
+            {
+                if(kept_2 < room_3)
+                {
+                    var _S945 : u32 = _S928 + u32(3) * kept_2;
+                    loads_0[_S945] = vec4<f32>(- _S925, 0.0f, 0.0f, peak_4);
+                    loads_0[_S945 + u32(1)] = vec4<f32>(r_36.point_0.xyz, duration_4);
+                    loads_0[_S945 + u32(2)] = vec4<f32>(dir_3, 0.0f);
+                    kept_3 = kept_2 + u32(1);
+                    overflow_3 = overflow_2;
+                }
+                else
+                {
+                    kept_3 = kept_2;
+                    overflow_3 = true;
+                }
+            }
+            else
+            {
+                kept_3 = kept_2;
+                overflow_3 = overflow_2;
+            }
+            f_total_2 = f_total_3;
+            t_total_3 = t_total_2;
+            kept_2 = kept_3;
+            q3_1 = q3_1 + u32(1);
+            overflow_2 = overflow_3;
+        }
+        break;
+    }
+    if(overflow_2)
+    {
+        var _S946 : u32 = atomicOr(&(atom_0[a_counters_0() + u32(3)]), u32(8));
+    }
+    var _S947 : u32 = _S916 + u32(2) * to_2;
+    work_0[_S947] = base_6;
+    work_0[_S947 + u32(1)] = kept_2;
+    var load_0 : f32 = length(f_total_2);
+    loads_0[k_79] = vec4<f32>(load_0, 0.0f, 0.0f, 0.0f);
+    if(base_6 != u32(0))
+    {
+        first_7 = true;
+    }
+    else
+    {
+        first_7 = kept_2 != u32(0);
+    }
+    if(first_7)
+    {
+        first_7 = true;
+    }
+    else
+    {
+        first_7 = off_1 != u32(0);
+    }
+    if(first_7)
+    {
+        first_7 = true;
+    }
+    else
+    {
+        first_7 = carried_1 != u32(0);
+    }
+    if(first_7)
+    {
+        first_7 = true;
+    }
+    else
+    {
+        first_7 = (bitcast<u32>((load_0))) != u32(0);
+    }
+    if(first_7)
+    {
+        list_append_0(to_2, k_79, params_0.list_stamp_0 + u32(1));
+    }
+    return;
+}
+
+fn adj_first_0( k_80 : u32) -> u32
+{
+    return info_0[params_0.chunk_count_0 + u32(2) * k_80];
+}
+
+fn adj_count_0( k_81 : u32) -> u32
+{
+    return info_0[params_0.chunk_count_0 + u32(2) * k_81 + u32(1)];
+}
+
+fn adj_at_0( j_19 : u32) -> u32
+{
+    return info_0[u32(3) * params_0.chunk_count_0 + j_19];
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn fr_breaks_listed(@builtin(global_invocation_id) id_91 : vec3<u32>)
+{
+    var par_4 : u32 = params_0.parity_0;
+    var _S948 : u32 = id_91.x;
+    var _S949 : u32 = atomicLoad(&(atom_0[l_count_0(params_0.parity_0)]));
+    if(_S948 >= _S949)
+    {
+        return;
+    }
+    var k_82 : u32 = atomicLoad(&(atom_0[l_entry_0(par_4, _S948)]));
+    var _S950 : u32 = adj_first_0(k_82);
+    var _S951 : u32 = adj_count_0(k_82);
+    var j_20 : u32 = u32(0);
+    loop
+    {
+        if(j_20 < _S951)
+        {
+        }
+        else
+        {
+            break;
+        }
+        var i_31 : u32 = adj_at_0(_S950 + j_20);
+        var _S952 : bool;
+        if(i_31 >= (params_0.bond_used_0))
+        {
+            _S952 = true;
+        }
+        else
+        {
+            _S952 = work_0[w_alive_0() + i_31] == u32(0);
+        }
+        if(_S952)
+        {
+            j_20 = j_20 + u32(1);
+            continue;
+        }
+        var bond_12 : vec4<u32> = bonds_0[i_31];
+        var _S953 : u32 = bond_12.x;
+        var other_2 : u32;
+        if(_S953 == k_82)
+        {
+            other_2 = bond_12.y;
+        }
+        else
+        {
+            other_2 = _S953;
+        }
+        var _S954 : bool;
+        if(other_2 < k_82)
+        {
+            var _S955 : u32 = atomicLoad(&(atom_0[l_mark_0(par_4, other_2)]));
+            _S954 = _S955 == (params_0.list_stamp_0);
+        }
+        else
+        {
+            _S954 = false;
+        }
+        if(_S954)
+        {
+            j_20 = j_20 + u32(1);
+            continue;
+        }
+        if((max(loads_0[_S953].x, loads_0[bond_12.y].x)) > (bitcast<f32>((bond_12.z))))
+        {
+            work_0[w_alive_0() + i_31] = u32(0);
+            var _S956 : u32 = atomicOr(&(atom_0[a_dirty_0() + body_of_0(_S953)]), u32(1));
+            var _S957 : u32 = a_counters_0();
+            var _S958 : u32 = atomicAdd(&(atom_0[_S957]), u32(1));
+            var _S959 : u32 = atomicAdd(&(atom_0[_S957 + u32(1)]), u32(1));
+            event_broken_0(i_31);
+        }
+        j_20 = j_20 + u32(1);
+    }
     return;
 }
 

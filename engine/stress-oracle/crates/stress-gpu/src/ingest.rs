@@ -49,7 +49,8 @@ struct IngestParams {
     record_count: u32,
     max_bodies: u32,
     h: f32,
-    pad: u32,
+    /// `sort` word of the touched chunks' list (coupling.slang `list_base`).
+    list_base: u32,
 }
 
 /// The engine's buffers the ingest reads.
@@ -77,6 +78,7 @@ const BINDINGS: [Binding; 13] = [
 ];
 
 const BODY_BYTES: u64 = 112;
+const LISTED: [&str; 7] = ["ingest_clear_listed", "ingest_clear_manifold_counts", "ingest_list_reset", "ingest_count_listed", "ingest_list_args", "ingest_scan_listed", "ingest_merge_listed"];
 const EMPTY_TABLE: [ColliderInfo; 1] = [ColliderInfo { a: [NONE, NONE, KIND_SKIP, 0], b: [0.0; 4] }];
 
 fn table(colliders: &[ColliderInfo]) -> &[ColliderInfo] {
@@ -96,6 +98,15 @@ pub struct EngineIngest {
     scan_add: Kernel,
     scatter: Kernel,
     merge: Kernel,
+    /// The listed merge's (coupling.slang, "The listed merge").
+    listed_kernels: [Kernel; 7],
+    /// Whether the merge runs over the touched chunks only ([`EngineIngest::set_listed`]).
+    listed: bool,
+    /// Whether the listed state is current: every count off the list zero and the last
+    /// frame's list in `sort` (false after a full merge or a new `sort`).
+    listed_ready: std::cell::Cell<bool>,
+    /// The touched list's indirect size (copied from `counts`; [`EngineIngest::list_args`]).
+    list_args: wgpu::Buffer,
     max_rows: u32,
     max_substeps: u32,
     max_bodies: u32,
@@ -137,6 +148,15 @@ impl EngineIngest {
             scan_add: k("ingest_scan_add"),
             scatter: k("ingest_scatter"),
             merge: k("ingest_merge"),
+            listed_kernels: LISTED.map(k),
+            listed: false,
+            listed_ready: std::cell::Cell::new(false),
+            list_args: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ingest list args"),
+                size: 16,
+                usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
             max_rows,
             max_substeps,
             max_bodies,
@@ -144,9 +164,9 @@ impl EngineIngest {
             start_bodies: storage("ingest start bodies", BODY_BYTES * max_bodies as u64),
             collider_info: gpu.storage("ingest collider info", table(colliders)),
             records: storage("ingest records", std::mem::size_of::<Record>() as u64 * records),
-            sort: storage("ingest sort", 4 * (2 * n + 1 + records)),
+            sort: storage("ingest sort", 4 * (2 * n + 1 + records + 1 + n)),
             manifolds: storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records),
-            counts: storage("ingest counts", 4 * 2 * n),
+            counts: storage("ingest counts", 4 * (2 * n + 5)),
             row_counts: storage("ingest row counts", 4 * 1024),
             scan_blocks: storage("ingest scan blocks", 4 * n.div_ceil(1024)),
         }
@@ -178,7 +198,8 @@ impl EngineIngest {
         };
         let n = self.chunk_count as u64;
         self.records = storage("ingest records", std::mem::size_of::<Record>() as u64 * records);
-        self.sort = storage("ingest sort", 4 * (2 * n + 1 + records));
+        self.sort = storage("ingest sort", 4 * (2 * n + 1 + records + 1 + n));
+        self.listed_ready.set(false);
         self.manifolds = storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records);
         self.max_substeps = max_substeps;
     }
@@ -221,7 +242,7 @@ impl EngineIngest {
             record_count: 2 * self.max_rows * self.max_substeps,
             max_bodies: self.max_bodies,
             h: h as f32,
-            pad: 0,
+            list_base: self.list_base(),
         };
         gpu.uniform("ingest params", &p)
     }
@@ -241,6 +262,16 @@ impl EngineIngest {
     /// The frame's manifolds, from the records of `substeps` substeps (the rest of the
     /// slots cleared).
     pub fn merge(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32) {
+        if self.listed {
+            let (params, records) = self.merge_params(gpu, substeps);
+            self.merge_listed(gpu, encoder, e, &params, records);
+        } else {
+            self.listed_ready.set(false);
+            self.merge_full(gpu, encoder, e, substeps);
+        }
+    }
+
+    fn merge_params(&self, gpu: &Gpu, substeps: u32) -> (wgpu::Buffer, usize) {
         // Only the substeps run are merged, and in each only its rows (`record_live`): the
         // rest of the records is never read, so nothing is cleared.
         let mut params = IngestParams {
@@ -251,13 +282,19 @@ impl EngineIngest {
             record_count: 2 * self.max_rows * substeps.max(1),
             max_bodies: self.max_bodies,
             h: 0.0,
-            pad: 0,
+            list_base: self.list_base(),
         };
         if substeps == 0 {
             params.record_count = 0;
         }
-        let params = gpu.uniform("ingest params", &params);
-        let records = (2 * self.max_rows * substeps.max(1)) as usize;
+        (gpu.uniform("ingest params", &params), (2 * self.max_rows * substeps.max(1)) as usize)
+    }
+
+    /// The merge over every chunk, whatever [`EngineIngest::set_listed`] says (a listed
+    /// ingest's next merge then starts over: [`ListedCheck`](crate::fracture::ListedCheck)
+    /// restores its state after this).
+    pub fn merge_full(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32) {
+        let (params, records) = self.merge_params(gpu, substeps);
         let n = self.chunk_count as usize;
         for (k, size, label) in [(&self.clear, groups(2 * n, 64), "ingest clear"), (&self.count, groups(records, 64), "ingest count"), (&self.scan, groups(n, 1024), "ingest scan"), (&self.scan_top, 1, "ingest scan blocks"), (&self.scan_add, groups(n, 64), "ingest scan add"), (&self.scatter, groups(records, 64), "ingest scatter"), (&self.merge, groups(n, 64), "ingest merge")] {
             let bind = self.bind(gpu, k, &params, e);
@@ -266,6 +303,70 @@ impl EngineIngest {
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(size, 1, 1);
         }
+    }
+
+    /// The merge over the touched chunks only (coupling.slang, "The listed merge"): the
+    /// same manifolds, counts and segments per chunk as the full merge.
+    fn merge_listed(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, params: &wgpu::Buffer, records: usize) {
+        let n = self.chunk_count as usize;
+        let run = |encoder: &mut wgpu::CommandEncoder, k: &Kernel, size: Option<u32>, label: &str| {
+            let bind = self.bind(gpu, k, params, e);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
+            pass.set_pipeline(&k.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            match size {
+                Some(g) => pass.dispatch_workgroups(g, 1, 1),
+                None => pass.dispatch_workgroups_indirect(&self.list_args, 0),
+            }
+        };
+        let [clear, clear_counts, reset, count, args, scan, merge] = &self.listed_kernels;
+        if self.listed_ready.get() {
+            // The last frame's touched chunks (its list and size are still in place).
+            run(encoder, clear, None, "ingest clear listed");
+        } else {
+            run(encoder, &self.clear, Some(groups(2 * n, 64)), "ingest clear");
+            run(encoder, clear_counts, Some(groups(n, 64)), "ingest clear manifold counts");
+        }
+        run(encoder, reset, Some(1), "ingest list reset");
+        run(encoder, count, Some(groups(records, 64)), "ingest count listed");
+        run(encoder, args, Some(1), "ingest list args");
+        encoder.copy_buffer_to_buffer(&self.counts, 4 * (2 * n as u64 + 1), &self.list_args, 0, 12);
+        run(encoder, scan, None, "ingest scan listed");
+        run(encoder, &self.scatter, Some(groups(records, 64)), "ingest scatter");
+        run(encoder, merge, None, "ingest merge listed");
+        self.listed_ready.set(true);
+    }
+
+    /// The merge over only the chunks with records this frame (`listed`), or over every
+    /// chunk (the default). Both give every chunk the same manifolds; the listed one also
+    /// keeps the frame's touched chunks in `sort` ([`EngineIngest::list_base`]) for the
+    /// fracture's listed passes.
+    pub fn set_listed(&mut self, listed: bool) {
+        if listed != self.listed {
+            self.listed = listed;
+            self.listed_ready.set(false);
+        }
+    }
+
+    pub fn listed(&self) -> bool {
+        self.listed
+    }
+
+    /// `sort` word of the touched chunks' list: its count, then the chunks.
+    pub fn list_base(&self) -> u32 {
+        2 * self.chunk_count + 1 + (2 * self.max_rows * self.max_substeps).max(1)
+    }
+
+    /// The touched list's indirect size (64 chunks a group), written by the last listed
+    /// merge; with [`EngineIngest::list_base`].
+    pub fn list_args(&self) -> &wgpu::Buffer {
+        &self.list_args
+    }
+
+    /// The buffers a listed merge changes besides its outputs (the counts and the list):
+    /// with `sort` and `manifolds`, a frame's ingest state (a diagnostic's backup).
+    pub fn counts(&self) -> &wgpu::Buffer {
+        &self.counts
     }
 
     /// Diagnostic read-back: each chunk's manifolds, in their order.

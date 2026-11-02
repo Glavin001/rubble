@@ -7,7 +7,7 @@ struct IngestParams_std140_0
     @align(16) record_count_0 : u32,
     @align(4) max_bodies_0 : u32,
     @align(8) h_0 : f32,
-    @align(4) pad_0 : u32,
+    @align(4) list_base_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : IngestParams_std140_0;
@@ -749,6 +749,241 @@ fn ingest_merge(@builtin(global_invocation_id) id_5 : vec3<u32>)
         a_2 = a_2 + u32(1);
     }
     sort_0[n_2 + u32(1) + k_2] = b_3;
+    return;
+}
+
+fn list_count_word_0() -> u32
+{
+    return u32(2) * params_0.chunk_count_0;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn ingest_clear_listed(@builtin(global_invocation_id) id_6 : vec3<u32>)
+{
+    var n_3 : u32 = params_0.chunk_count_0;
+    var _S56 : u32 = id_6.x;
+    var _S57 : u32 = atomicLoad(&(counts_0[list_count_word_0()]));
+    if(_S56 >= _S57)
+    {
+        return;
+    }
+    var k_3 : u32 = sort_0[params_0.list_base_0 + u32(1) + _S56];
+    atomicStore(&(counts_0[sort_0[params_0.list_base_0 + u32(1) + _S56]]), u32(0));
+    atomicStore(&(counts_0[n_3 + k_3]), u32(0));
+    sort_0[n_3 + u32(1) + k_3] = u32(0);
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn ingest_clear_manifold_counts(@builtin(global_invocation_id) id_7 : vec3<u32>)
+{
+    var n_4 : u32 = params_0.chunk_count_0;
+    var _S58 : u32 = id_7.x;
+    if(_S58 < (params_0.chunk_count_0))
+    {
+        sort_0[n_4 + u32(1) + _S58] = u32(0);
+    }
+    return;
+}
+
+@compute
+@workgroup_size(1, 1, 1)
+fn ingest_list_reset(@builtin(global_invocation_id) id_8 : vec3<u32>)
+{
+    atomicStore(&(counts_0[list_count_word_0()]), u32(0));
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn ingest_count_listed(@builtin(global_invocation_id) id_9 : vec3<u32>)
+{
+    var _S59 : u32 = id_9.x;
+    var _S60 : bool;
+    if(_S59 >= (params_0.record_count_0))
+    {
+        _S60 = true;
+    }
+    else
+    {
+        var _S61 : bool = record_live_0(_S59);
+        _S60 = !_S61;
+    }
+    if(_S60)
+    {
+        return;
+    }
+    var r_4 : Record_std430_0 = records_0[_S59];
+    if((records_0[_S59].ids_0.w) == u32(0))
+    {
+        return;
+    }
+    var _S62 : u32 = r_4.ids_0.x;
+    var _S63 : u32 = atomicAdd(&(counts_0[_S62]), u32(1));
+    if(_S63 == u32(0))
+    {
+        var i_3 : u32 = atomicAdd(&(counts_0[list_count_word_0()]), u32(1));
+        sort_0[params_0.list_base_0 + u32(1) + i_3] = _S62;
+    }
+    return;
+}
+
+@compute
+@workgroup_size(1, 1, 1)
+fn ingest_list_args(@builtin(global_invocation_id) id_10 : vec3<u32>)
+{
+    var w_1 : u32 = list_count_word_0();
+    var count_0 : u32 = atomicLoad(&(counts_0[w_1]));
+    sort_0[params_0.list_base_0] = count_0;
+    atomicStore(&(counts_0[w_1 + u32(1)]), (count_0 + u32(63)) / u32(64));
+    atomicStore(&(counts_0[w_1 + u32(2)]), u32(1));
+    atomicStore(&(counts_0[w_1 + u32(3)]), u32(1));
+    atomicStore(&(counts_0[w_1 + u32(4)]), u32(0));
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn ingest_scan_listed(@builtin(global_invocation_id) id_11 : vec3<u32>)
+{
+    var _S64 : u32 = id_11.x;
+    var _S65 : u32 = list_count_word_0();
+    var _S66 : u32 = atomicLoad(&(counts_0[_S65]));
+    if(_S64 >= _S66)
+    {
+        return;
+    }
+    var _S67 : u32 = atomicLoad(&(counts_0[sort_0[params_0.list_base_0 + u32(1) + _S64]]));
+    var _S68 : u32 = atomicAdd(&(counts_0[_S65 + u32(4)]), _S67);
+    sort_0[sort_0[params_0.list_base_0 + u32(1) + _S64]] = _S68;
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn ingest_merge_listed(@builtin(global_invocation_id) id_12 : vec3<u32>)
+{
+    var b_4 : u32;
+    var m_1 : u32;
+    var _S69 : u32 = id_12.x;
+    var _S70 : u32 = atomicLoad(&(counts_0[list_count_word_0()]));
+    if(_S69 >= _S70)
+    {
+        return;
+    }
+    var k_4 : u32 = sort_0[params_0.list_base_0 + u32(1) + _S69];
+    var n_5 : u32 = params_0.chunk_count_0;
+    var begin_1 : u32 = sort_0[sort_0[params_0.list_base_0 + u32(1) + _S69]];
+    var _S71 : u32 = atomicLoad(&(counts_0[sort_0[params_0.list_base_0 + u32(1) + _S69]]));
+    var _S72 : u32 = begin_1 + _S71;
+    var _S73 : u32 = u32(2) * n_5 + u32(1);
+    var a_3 : u32 = begin_1 + u32(1);
+    loop
+    {
+        if(a_3 < _S72)
+        {
+        }
+        else
+        {
+            break;
+        }
+        var v_5 : u32 = sort_0[_S73 + a_3];
+        b_4 = a_3;
+        loop
+        {
+            var _S74 : bool;
+            if(b_4 > begin_1)
+            {
+                _S74 = record_before_0(v_5, sort_0[_S73 + b_4 - u32(1)]);
+            }
+            else
+            {
+                _S74 = false;
+            }
+            if(_S74)
+            {
+            }
+            else
+            {
+                break;
+            }
+            var _S75 : u32 = _S73 + b_4;
+            sort_0[_S75] = sort_0[_S75 - u32(1)];
+            b_4 = b_4 - u32(1);
+        }
+        sort_0[_S73 + b_4] = v_5;
+        a_3 = a_3 + u32(1);
+    }
+    a_3 = begin_1;
+    b_4 = u32(0);
+    loop
+    {
+        if(a_3 < _S72)
+        {
+        }
+        else
+        {
+            break;
+        }
+        var r_5 : Record_std430_0 = records_0[sort_0[_S73 + a_3]];
+        var q_3 : u32 = u32(0);
+        loop
+        {
+            if(q_3 < b_4)
+            {
+            }
+            else
+            {
+                m_1 = u32(4294967295);
+                break;
+            }
+            if((manifolds_0[begin_1 + q_3].ids_0.y) == (r_5.ids_0.y))
+            {
+                m_1 = q_3;
+                break;
+            }
+            q_3 = q_3 + u32(1);
+        }
+        if(m_1 == u32(4294967295))
+        {
+            manifolds_0[begin_1 + b_4] = r_5;
+            b_4 = b_4 + u32(1);
+            a_3 = a_3 + u32(1);
+            continue;
+        }
+        var _S76 : u32 = begin_1 + m_1;
+        var acc_1 : Record_0;
+        acc_1.ids_0 = manifolds_0[_S76].ids_0;
+        acc_1.point_0 = manifolds_0[_S76].point_0;
+        acc_1.impulse_0 = manifolds_0[_S76].impulse_0;
+        acc_1.other_0 = manifolds_0[_S76].other_0;
+        acc_1.key_0 = manifolds_0[_S76].key_0;
+        var w0_1 : f32 = acc_1.point_0.w;
+        var w_2 : f32 = r_5.point_0.w;
+        var total_2 : f32 = w0_1 + w_2;
+        if(total_2 > 0.0f)
+        {
+            var _S77 : vec3<f32> = (acc_1.point_0.xyz * vec3<f32>(w0_1) + r_5.point_0.xyz * vec3<f32>(w_2)) / vec3<f32>(total_2);
+            acc_1.point_0.x = _S77.x;
+            acc_1.point_0.y = _S77.y;
+            acc_1.point_0.z = _S77.z;
+            acc_1.impulse_0[i32(3)] = (acc_1.impulse_0.w * w0_1 + r_5.impulse_0.w * w_2) / total_2;
+        }
+        var _S78 : vec3<f32> = acc_1.impulse_0.xyz + r_5.impulse_0.xyz;
+        acc_1.impulse_0.x = _S78.x;
+        acc_1.impulse_0.y = _S78.y;
+        acc_1.impulse_0.z = _S78.z;
+        acc_1.point_0[i32(3)] = total_2;
+        manifolds_0[_S76].ids_0 = acc_1.ids_0;
+        manifolds_0[_S76].point_0 = acc_1.point_0;
+        manifolds_0[_S76].impulse_0 = acc_1.impulse_0;
+        manifolds_0[_S76].other_0 = acc_1.other_0;
+        manifolds_0[_S76].key_0 = acc_1.key_0;
+        a_3 = a_3 + u32(1);
+    }
+    sort_0[n_5 + u32(1) + k_4] = b_4;
     return;
 }
 

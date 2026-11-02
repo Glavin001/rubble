@@ -117,7 +117,8 @@ mod imp {
     use glam::{DMat3, DQuat, DVec3, Vec3};
     use std::sync::Arc;
     use stress_gpu::fracture::{
-        self, CrushEvent, CrushTables, FractureTables, GpuFracture, INFO_SUPPORT,
+        self, CrushEvent, CrushTables, FractureTables, GpuFracture, ListedCheck,
+        INFO_SUPPORT,
     };
     use stress_gpu::gpu::Gpu;
     use stress_gpu::ingest::{
@@ -640,6 +641,17 @@ mod imp {
         dt: f32,
         /// Colliders the ingest now sees as projectiles.
         projectile_colliders: Vec<u32>,
+        /// `World::set_fracture_check`: the next frames' listed loads and breaks checked
+        /// against the full ones on the same state, and the last check run.
+        check: bool,
+        last_check: Option<Arc<ListedCheck>>,
+    }
+
+    /// Whether the threshold fracture's per-frame passes run over the chunks whose loads
+    /// can be non-zero (`GpuFracture::set_listed`, the default) or over every chunk and
+    /// bond (`ENGINE_FRACTURE_PASSES=full`, for A/B runs). Same results either way.
+    pub(crate) fn listed_passes() -> bool {
+        std::env::var("ENGINE_FRACTURE_PASSES").map_or(true, |v| v != "full")
     }
 
     /// The world's threshold destructibles.
@@ -1469,7 +1481,7 @@ mod imp {
                         b: [f32::INFINITY, ground_modulus as f32, 1.0, 0.0],
                     };
                 }
-                let ingest = EngineIngest::new(
+                let mut ingest = EngineIngest::new(
                     &gpu,
                     capacity.max_contacts,
                     1,
@@ -1477,8 +1489,10 @@ mod imp {
                     chunk_count as u32,
                     &table,
                 );
-                let fracture = GpuFracture::new(&gpu, &t, &buffers(&self.sim), &ingest)
+                ingest.set_listed(listed_passes());
+                let mut fracture = GpuFracture::new(&gpu, &t, &buffers(&self.sim), &ingest)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+                fracture.set_listed(listed_passes());
                 let own = Own {
                     ingest,
                     fracture,
@@ -1744,7 +1758,7 @@ mod imp {
                 events: EVENT_ROOM,
             };
             let table = vec![static_info; capacity.max_colliders as usize];
-            let ingest = EngineIngest::new(
+            let mut ingest = EngineIngest::new(
                 gpu,
                 capacity.max_contacts,
                 1,
@@ -1752,6 +1766,7 @@ mod imp {
                 room.chunks,
                 &table,
             );
+            ingest.set_listed(listed_passes());
             let empty = FractureTables {
                 max_bodies: capacity.max_bodies,
                 pool_cap: stress_rubble::threshold::pool_cap(capacity.max_contacts),
@@ -1763,9 +1778,10 @@ mod imp {
                 free: vec![0; capacity.max_bodies as usize],
                 ..Default::default()
             };
-            let fracture =
+            let mut fracture =
                 GpuFracture::with_capacity(gpu, &empty, room, &buffers(&self.sim), &ingest)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+            fracture.set_listed(listed_passes());
             self.fracture.shared = Some(Shared {
                 ingest,
                 fracture,
@@ -1777,6 +1793,8 @@ mod imp {
                 band,
                 dt,
                 projectile_colliders: Vec::new(),
+                check: false,
+                last_check: None,
             });
             if let Some(n) = self.fracture_pieces {
                 // The world's piece pool: parked static slots any split may take.
@@ -1840,6 +1858,31 @@ mod imp {
             }
         }
 
+        /// Diagnostic: while on, each step's shared-fracture loads and breaks also run the
+        /// full way on the same GPU state first (`stress_gpu::fracture::ListedCheck`);
+        /// [`World::fracture_check`] compares the last step's two runs.
+        pub fn set_fracture_check(&mut self, on: bool) {
+            if let Some(sh) = self.fracture.shared.as_mut() {
+                sh.check = on;
+            }
+        }
+
+        /// The last checked step's listed loads and breaks against the full ones (after
+        /// its frame is delivered): `Ok(false)` when no step was checked.
+        pub fn fracture_check(&mut self) -> anyhow::Result<bool> {
+            let (Some(gpu), Some(sh)) =
+                (self.fracture.gpu.clone(), self.fracture.shared.as_mut())
+            else {
+                return Ok(false);
+            };
+            let Some(c) = sh.last_check.take() else {
+                return Ok(false);
+            };
+            c.compare(&gpu, &sh.fracture)
+                .map_err(|e| anyhow::anyhow!("listed fracture passes: {e}"))?;
+            Ok(true)
+        }
+
         pub(crate) fn encode_fracture(&mut self, enc: &mut wgpu::CommandEncoder) {
             let Some(gpu) = self.fracture.gpu.clone() else {
                 return;
@@ -1850,6 +1893,11 @@ mod imp {
             let step = self.sim.steps_done();
             if let Some(sh) = self.fracture.shared.as_mut() {
                 sh.ingest.substep(&gpu, enc, &e, offset, 0, dt);
+                if sh.check {
+                    let c = ListedCheck::new(&gpu, &sh.fracture, &sh.ingest);
+                    c.encode_full(&gpu, enc, &mut sh.fracture, &sh.ingest, &e, 1);
+                    sh.last_check = Some(c);
+                }
                 sh.ingest.merge(&gpu, enc, &e, 1);
                 sh.fracture.encode_frame(&gpu, enc, step);
             }
