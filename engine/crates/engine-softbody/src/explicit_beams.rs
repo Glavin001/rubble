@@ -799,19 +799,29 @@ impl ExplicitBeams {
                 spawn_order.push(w);
             }
         }
+        // A turned spawn builds its tyres in the file's axes, then turns them like
+        // every other node.
+        let yawed = yaw_degrees != 0.0;
+        let local: Vec<Vec3> = if yawed {
+            desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect()
+        } else {
+            Vec::new()
+        };
         for w in spawn_order {
+            let at = |s: &Self, i: u32| if yawed { local[i as usize] } else { s.nodes[i as usize].pos };
+            let place = |p: Vec3| if yawed { position + yaw_offset(p, yaw_degrees) } else { p };
             // meshwheels2: the axle-to-own-ring spokes harden only past 0.15 L of
             // stretch.
             let spoke_long = if w.kind == "meshwheels2" { 0.15f32 } else { 0.0 };
             // The axle runs toward +z: the node of lower z is A1, whichever the
             // file names first (equal z keeps the file's order).
-            let (a1, a2) = if s.nodes[w.node1 as usize].pos.z > s.nodes[w.node2 as usize].pos.z {
+            let (a1, a2) = if at(&s, w.node1).z > at(&s, w.node2).z {
                 (w.node2, w.node1)
             } else {
                 (w.node1, w.node2)
             };
-            let pa1 = s.nodes[a1 as usize].pos;
-            let pa2 = s.nodes[a2 as usize].pos;
+            let pa1 = at(&s, a1);
+            let pa2 = at(&s, a2);
             let n = w.rays.max(1);
             let axis = (pa2 - pa1).normalize();
             let mut spoke = axis.cross(Vec3::X);
@@ -840,9 +850,9 @@ impl ExplicitBeams {
                 flags: NODE_CONTACTER | NODE_TYRE,
             };
             for _ in 0..n {
-                s.nodes.push(tyre(pa1 + spoke));
+                s.nodes.push(tyre(place(pa1 + spoke)));
                 spoke = rotate(spoke);
-                s.nodes.push(tyre(pa2 + spoke));
+                s.nodes.push(tyre(place(pa2 + spoke)));
                 spoke = rotate(spoke);
             }
             let outer = |i: u32| first + 2 * (i % n);
@@ -852,7 +862,7 @@ impl ExplicitBeams {
             let strength = w.beam.strength;
             let plastic = w.beam.plastic_coef;
             let rigidity = w.rigidity.map(|p| {
-                let pp = s.nodes[p as usize].pos;
+                let pp = at(&s, p);
                 (p, pp.distance_squared(pa1) < pp.distance_squared(pa2))
             });
             for i in 0..n {

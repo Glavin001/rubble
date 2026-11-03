@@ -521,3 +521,37 @@ fn the_contact_conserves_momentum() {
     // And the lower plate was pushed down.
     assert!(w.vehicles[0].nodes[2].vel.y < GRAVITY * STEP * steps as f32);
 }
+
+#[test]
+fn a_turned_spawn_turns_every_node_about_the_spawn_point() {
+    let at = Vec3::new(10.0, 0.5, -3.0);
+    let plain = ExplicitBeams::from_truck_config(CONTACT_TRUCK, None, at, Vec3::X, EXACT).unwrap();
+    let zero =
+        ExplicitBeams::from_truck_config_yaw(CONTACT_TRUCK, None, at, 0.0, Vec3::X, EXACT).unwrap();
+    assert_eq!(plain.nodes, zero.nodes, "yaw 0 is the plain spawn");
+    assert_eq!(plain.beams, zero.beams);
+    for yaw in [90.0f32, 180.0, -37.5] {
+        let s = ExplicitBeams::from_truck_config_yaw(CONTACT_TRUCK, None, at, yaw, Vec3::X, EXACT)
+            .unwrap();
+        assert_eq!(s.nodes.len(), plain.nodes.len());
+        // Every node (tyre nodes too: built in the file's axes, then turned) is the
+        // plain spawn's offset turned about +y.
+        for (a, b) in s.nodes.iter().zip(&plain.nodes) {
+            let want = at + yaw_offset(b.pos - at, yaw);
+            assert!(
+                a.pos.distance(want) < 1e-5,
+                "yaw {yaw}: {} vs {want}",
+                a.pos
+            );
+            assert_eq!(a.vel, b.vel, "the velocity is in world axes");
+        }
+        for (a, b) in s.beams.iter().zip(&plain.beams) {
+            assert!((a.rest - b.rest).abs() < 1e-5 * b.rest.max(1.0));
+        }
+    }
+    // +90° takes +x to −z and +z to +x.
+    let q = yaw_offset(Vec3::new(1.0, 2.0, 0.0), 90.0);
+    assert!(q.distance(Vec3::new(0.0, 2.0, -1.0)) < 1e-6, "{q}");
+    let q = yaw_offset(Vec3::new(0.0, 0.0, 1.0), 90.0);
+    assert!(q.distance(Vec3::new(1.0, 0.0, 0.0)) < 1e-6, "{q}");
+}

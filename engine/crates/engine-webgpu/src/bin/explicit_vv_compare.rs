@@ -14,6 +14,8 @@
 //!           `gap=` m (default 1) between them
 //!   headon  vehicle 1 ahead of vehicle 0, turned by `yaw=` degrees (default 180),
 //!           both at `speed=` towards each other
+//!   tbone   vehicle 1 standing across vehicle 0's lane (turned `yaw=`, default 90),
+//!           vehicle 0 into its side at `speed=`
 //!   pass    side by side lanes `lane=` m apart (default 6), vehicle 1 overtaking at
 //!           `speed=` (no contact: checks a two-vehicle world against single runs)
 //!
@@ -25,7 +27,7 @@
 //! Rubble sees) for the before-contact agreement, and RoR without vehicle contact
 //! (`vv=0`) for scale. `gpu=1` adds Rubble's GPU (`ExplicitBeamsGpu`).
 
-use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
+use engine_softbody::explicit_beams::{yaw_offset, ExplicitBeams, ExplicitBeamsSettings};
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
 use engine_softbody::truck::parse_truck;
 use glam::Vec3;
@@ -271,10 +273,28 @@ fn main() -> anyhow::Result<()> {
                     yaw: 0.0,
                 },
             ],
-            "headon" => {
-                let yaw = get("yaw", 180.0);
-                // Vehicle 1 turned about its spawn point: its nose (−lo along forward
-                // turned) faces vehicle 0's.
+            "headon" | "tbone" => {
+                // Vehicle 1 turned by `yaw=` (head-on 180°, T-bone 90°) about its
+                // spawn point, its near face `gap` ahead of vehicle 0's front,
+                // centred on vehicle 0's centre line; head-on both drive at
+                // `speed`, T-bone vehicle 1 stands.
+                let yaw = get("yaw", if scene == "headon" { 180.0 } else { 90.0 });
+                let turned: Vec<Vec3> =
+                    probe.nodes.iter().map(|n| yaw_offset(n.pos, yaw)).collect();
+                let span = |v: &[Vec3], axis: Vec3| {
+                    v.iter().fold((f32::MAX, f32::MIN), |(a, b), p| {
+                        (a.min(p.dot(axis)), b.max(p.dot(axis)))
+                    })
+                };
+                let own: Vec<Vec3> = probe.nodes.iter().map(|n| n.pos).collect();
+                let (alo, ahi) = span(&own, lateral);
+                let (rlo, _) = span(&turned, forward);
+                let (clo, chi) = span(&turned, lateral);
+                let v1 = if scene == "headon" {
+                    -forward * speed
+                } else {
+                    Vec3::ZERO
+                };
                 vec![
                     Spawn {
                         at: base,
@@ -282,8 +302,10 @@ fn main() -> anyhow::Result<()> {
                         yaw: 0.0,
                     },
                     Spawn {
-                        at: base + forward * (hi - lo + hi + lo + gap + (hi + lo).abs()),
-                        vel: -forward * speed,
+                        at: base
+                            + forward * (hi + gap - rlo)
+                            + lateral * (0.5 * (alo + ahi) - 0.5 * (clo + chi)),
+                        vel: v1,
                         yaw,
                     },
                 ]
@@ -303,6 +325,52 @@ fn main() -> anyhow::Result<()> {
             s => panic!("scene {s}: rear, headon or pass"),
         }
     };
+    if let Some(yaws) = kv.get("spawncheck") {
+        // Spawned node positions against ror_ref's (frames=0) for each yaw.
+        for yaw in yaws.split(',').map(|y| y.parse::<f32>().unwrap()) {
+            let sp = [
+                Spawn {
+                    at: Vec3::new(150.0, 0.0, 150.0),
+                    vel: Vec3::ZERO,
+                    yaw,
+                },
+                Spawn {
+                    at: Vec3::new(300.0, 0.0, 300.0),
+                    vel: Vec3::ZERO,
+                    yaw: 0.0,
+                },
+            ];
+            let r = run_ror(&bin, &truck, &dir, "spawn", &sp, 0, steps, true, config);
+            let c = spawn(&text, config, &sp[0]).positions();
+            let max = c
+                .iter()
+                .zip(&r.pos[0])
+                .map(|(a, b)| a.distance(*b))
+                .fold(0.0f32, f32::max);
+            let exact = c.iter().zip(&r.pos[0]).filter(|(a, b)| a == b).count();
+            println!(
+                "yaw {yaw}: rms {:.2e} m, max {max:.2e} m, bit-equal {exact}/{}",
+                rms(&c, &r.pos[0]),
+                c.len()
+            );
+            if kv.contains_key("verbose") {
+                let off: Vec<String> = c
+                    .iter()
+                    .zip(&r.pos[0])
+                    .enumerate()
+                    .filter(|(_, (a, b))| a.distance(**b) > 1e-3)
+                    .map(|(i, (a, b))| {
+                        format!(
+                            "{i}:{:.3},{:.3},{:.3}/{:.3},{:.3},{:.3}",
+                            a.x, a.y, a.z, b.x, b.y, b.z
+                        )
+                    })
+                    .collect();
+                println!("  off: {}", off.join(" "));
+            }
+        }
+        return Ok(());
+    }
     if let Some(counts) = kv.get("bench") {
         // GPU ms per frame (median of the timed frames), contact on and off, for
         // fleets of `counts` vehicles driving in a grid `spacing=` m apart (no
@@ -314,8 +382,17 @@ fn main() -> anyhow::Result<()> {
             let cols = (n as f32).sqrt().ceil() as usize;
             let fleet: Vec<ExplicitBeams> = (0..n)
                 .map(|k| {
-                    let at = base + lateral * (spacing * (k % cols) as f32) - forward * (spacing * 3.0 * (k / cols) as f32);
-                    spawn(&text, config, &Spawn { at: at + Vec3::new(500.0, 0.0, 500.0), vel: forward * speed, yaw: 0.0 })
+                    let at = base + lateral * (spacing * (k % cols) as f32)
+                        - forward * (spacing * 3.0 * (k / cols) as f32);
+                    spawn(
+                        &text,
+                        config,
+                        &Spawn {
+                            at: at + Vec3::new(500.0, 0.0, 500.0),
+                            vel: forward * speed,
+                            yaw: 0.0,
+                        },
+                    )
                 })
                 .collect();
             let mut out = Vec::new();
@@ -334,7 +411,11 @@ fn main() -> anyhow::Result<()> {
                 }
                 g.wait();
                 let wall = t0.elapsed().as_secs_f64() * 1e3 / f64::from(frames);
-                let mut t = if timed { g.frame_times_ms() } else { Vec::new() };
+                let mut t = if timed {
+                    g.frame_times_ms()
+                } else {
+                    Vec::new()
+                };
                 t.sort_by(f64::total_cmp);
                 out.push((on, t.get(t.len() / 2).copied().unwrap_or(wall)));
                 if on {
@@ -345,7 +426,12 @@ fn main() -> anyhow::Result<()> {
                 let v: Vec<f64> = out.iter().filter(|o| o.0 == on).map(|o| o.1).collect();
                 v.iter().sum::<f64>() / v.len() as f64
             };
-            println!("N={n}: GPU ms/frame contact on {:.4}, off {:.4} (ratio {:.3})", med(true), med(false), med(true) / med(false));
+            println!(
+                "N={n}: GPU ms/frame contact on {:.4}, off {:.4} (ratio {:.3})",
+                med(true),
+                med(false),
+                med(true) / med(false)
+            );
         }
         return Ok(());
     }
