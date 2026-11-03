@@ -573,6 +573,8 @@ struct VsOut {
 
     function restoreScene() {
       world.restoreState(initialState);
+      // The saved state carries the solver as the page loaded; keep the sleep toggle's.
+      world.setSolver({ sleepTime });
       leftWorld = 0;
       if (jointControls) jointControls.reset();
       last = { ...last, awake: bodyCount - 1 };
