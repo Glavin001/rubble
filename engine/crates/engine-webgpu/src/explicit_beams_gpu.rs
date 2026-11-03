@@ -2475,6 +2475,32 @@ impl Wide {
     }
 }
 
+/// Every shipped explicit-beams module as the host creates it (name, entry point,
+/// WGSL after the uniform-load rewrite): the browser check (`explicit-wgsl-check.mjs`
+/// via the `explicit_wgsl_dump` example) compiles each in Chrome.
+#[doc(hidden)]
+pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
+    let u = crate::uniformize_workgroup_lanes;
+    let mut out: Vec<(String, &'static str, String)> = vec![
+        ("explicit_beams".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_WGSL)),
+        ("explicit_beams_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_WIDE_WGSL)),
+        ("explicit_beams_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_AERO_WGSL)),
+        ("explicit_beams_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_AERO_WIDE_WGSL)),
+        ("explicit_beams_solo".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_WGSL)),
+        ("explicit_beams_solo_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_WIDE_WGSL)),
+        ("explicit_beams_solo_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_AERO_WGSL)),
+        ("explicit_beams_solo_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL)),
+        ("explicit_beams_contact".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_WGSL)),
+        ("explicit_beams_contact_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_WIDE_WGSL)),
+        ("explicit_beams_contact_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_AERO_WGSL)),
+        ("explicit_beams_contact_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL)),
+    ];
+    for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
+        out.push((e.to_string(), e, u(w)));
+    }
+    out
+}
+
 /// Fleets of at most this many vehicles run 512 lanes per vehicle (about one
 /// workgroup per GPU core: a vehicle's step latency sets the frame, and more lanes
 /// shorten it); larger fleets keep 256 (512 for large vehicles) for throughput.
