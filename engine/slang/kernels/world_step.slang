@@ -2668,9 +2668,7 @@ void write_sleeper_large_args(uint3 tid : SV_DispatchThreadID)
         int3 span = sleeperWalkSpan(gAabbs[HOST_S(1) + ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k])], cs, h, lo);
         chunks = max(chunks, (uint(span.x) * uint(span.y) * uint(span.z) + 63u) / 64u);
     }
-    gIndirectArgs[88u * 3u] = walk ? max(chunks, 1u) : 0u;
-    gIndirectArgs[88u * 3u + 1u] = walk && n != 0u ? n : 1u;
-    gIndirectArgs[88u * 3u + 2u] = 1u;
+    writeGroupGrid(88u, walk ? max(chunks, 1u) : 0u, walk && n != 0u ? n : 1u);
 }
 
 // broadphase_sleeper_large's test for sleeper collider i (small or large) and listed
@@ -6017,6 +6015,15 @@ void record_color_degrees(uint3 tid : SV_DispatchThreadID)
 // Hosts opting into incremental coloring (HOST_S(26)) also allocate slot 69.
 // CPU estimates from a prior
 // frame can miss most of the first ring/gables contacts and leave them unsolved.
+// Indirect args of a (x, y) grid of workgroups, each side within the 32,768 groups a
+// dimension may hold (broadphase_sleeper_large_walk: chunks of 64 cells by large dynamic).
+void writeGroupGrid(uint slot, uint x, uint y)
+{
+    gIndirectArgs[slot * 3u] = min(x, 32768u);
+    gIndirectArgs[slot * 3u + 1u] = min(y, 32768u);
+    gIndirectArgs[slot * 3u + 2u] = 1u;
+}
+
 void writeDispatchArgs(uint slot, uint threads)
 {
     uint groups = (threads + 63u) / 64u;

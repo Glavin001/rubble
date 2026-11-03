@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 /// (file name, function, reason) of each direct writer allowed besides the two helpers.
 const ALLOWED: &[(&str, &str, &str)] = &[
     ("world_step.slang", "writeDispatchArgs", "the helper: x = min(groups, 32768), y = rows"),
+    ("world_step.slang", "writeGroupGrid", "the helper: x and y each at most 32,768 groups"),
     ("convex_step.slang", "writeGroupArgs", "the helper: rows of at most 32,768 groups"),
     (
         "fracture_step.slang",
