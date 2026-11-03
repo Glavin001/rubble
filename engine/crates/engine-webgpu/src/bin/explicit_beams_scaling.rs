@@ -1195,7 +1195,7 @@ fn main() -> anyhow::Result<()> {
                     .unwrap();
                 }
             }
-            if let Some(a) = judged.get(&sc) {
+            if let Some(a) = judged.get(&sc).filter(|_| nudges > 0) {
                 writeln!(
                     md,
                     "\nAccuracy ensembles ({} runs per engine, spawn speed + 0.1 mm/s × k): median node RMS Rubble–RoR {:.2} mm, RoR–RoR {:.2} mm, ratio {:.2} [95 % bootstrap {:.2}, {:.2}]; broken: Rubble median {}, RoR {}–{}; bent: Rubble median {}, RoR {}–{}.\n",
@@ -1239,27 +1239,30 @@ fn main() -> anyhow::Result<()> {
             format!("{run_count} runs started on a quiet machine (load < {max_load}, GPU < {max_gpu} %): {busy_runs} did not"),
         );
         for &sc in &scenarios {
-            let a = &judged[&sc];
-            let e = &ensembles[&sc];
-            let (rr, xr) = (a["median_ror_ror_mm"].as_f64().unwrap(), a["median_rubble_ror_mm"].as_f64().unwrap());
-            let limit = (1.5 * rr).max(1.0);
-            line(&mut md, xr <= limit, format!(
-                "{} N=1 ({} runs per engine): median node RMS Rubble–RoR {xr:.2} mm <= {limit:.2} mm (1.5x RoR–RoR median {rr:.2} mm, at least 1 mm); ratio {:.2} [95 % {:.2}, {:.2}]",
-                sc.name(), a["runs"], a["ratio"].as_f64().unwrap(), a["ratio_ci"][0].as_f64().unwrap(), a["ratio_ci"][1].as_f64().unwrap()));
-            for k in ["broken", "bent"] {
-                let (lo, hi) = (a[k]["ror_min"].as_f64().unwrap(), a[k]["ror_max"].as_f64().unwrap());
-                let (lo, hi) = ((0.9 * lo).floor(), (1.1 * hi).ceil());
-                let v = a[k]["rubble_median"].as_f64().unwrap();
-                line(&mut md, v >= lo && v <= hi, format!(
-                    "{} N=1: Rubble median {k} {v} within RoR's {}–{} widened 10% ({lo:.0}–{hi:.0})",
-                    sc.name(), a[k]["ror_min"], a[k]["ror_max"]));
-            }
-            for &n in counts.iter().filter(|&&n| n > 1) {
-                for (end, start) in fleet_ends.get(&(sc, n)).into_iter().flatten() {
-                    let d = e.median_to_ror(end, start);
-                    line(&mut md, d <= limit, format!(
-                        "{} N={n} vehicle {}: median node RMS to the RoR runs {d:.2} mm <= {limit:.2} mm",
-                        sc.name(), end.index));
+            // Accuracy lines only with ensembles (`nudges=0`: speed alone).
+            if nudges > 0 {
+                let a = &judged[&sc];
+                let e = &ensembles[&sc];
+                let (rr, xr) = (a["median_ror_ror_mm"].as_f64().unwrap(), a["median_rubble_ror_mm"].as_f64().unwrap());
+                let limit = (1.5 * rr).max(1.0);
+                line(&mut md, xr <= limit, format!(
+                    "{} N=1 ({} runs per engine): median node RMS Rubble–RoR {xr:.2} mm <= {limit:.2} mm (1.5x RoR–RoR median {rr:.2} mm, at least 1 mm); ratio {:.2} [95 % {:.2}, {:.2}]",
+                    sc.name(), a["runs"], a["ratio"].as_f64().unwrap(), a["ratio_ci"][0].as_f64().unwrap(), a["ratio_ci"][1].as_f64().unwrap()));
+                for k in ["broken", "bent"] {
+                    let (lo, hi) = (a[k]["ror_min"].as_f64().unwrap(), a[k]["ror_max"].as_f64().unwrap());
+                    let (lo, hi) = ((0.9 * lo).floor(), (1.1 * hi).ceil());
+                    let v = a[k]["rubble_median"].as_f64().unwrap();
+                    line(&mut md, v >= lo && v <= hi, format!(
+                        "{} N=1: Rubble median {k} {v} within RoR's {}–{} widened 10% ({lo:.0}–{hi:.0})",
+                        sc.name(), a[k]["ror_min"], a[k]["ror_max"]));
+                }
+                for &n in counts.iter().filter(|&&n| n > 1) {
+                    for (end, start) in fleet_ends.get(&(sc, n)).into_iter().flatten() {
+                        let d = e.median_to_ror(end, start);
+                        line(&mut md, d <= limit, format!(
+                            "{} N={n} vehicle {}: median node RMS to the RoR runs {d:.2} mm <= {limit:.2} mm",
+                            sc.name(), end.index));
+                    }
                 }
             }
             for &n in &counts {
