@@ -406,6 +406,46 @@ Measured and not adopted: one barrier instead of two per `sync()` (Apple:
 about 0); the hit test in the beam phase as well (Viper slower: it hits every step,
 so the geometry ran twice); 1024 lanes.
 
+### Latency and throughput experiments (feat/explicit-latency)
+
+Every candidate below kept the state bit for bit (the frozen reference
+`explicit_beams_ref.slang` in the bitwise tests) and none was adopted: each one was
+slower or no faster. Before/after timings ran both kernels through the shipped
+pipelines (`RUBBLE_EB_SRC` / `RUBBLE_EB_REF` builds in their own target directory;
+the variant pipelines of `set_kernel_variant` run 2–4 µs per step slower, whatever
+the kernel). M3 Max, 120 fps, `speed=27.78`, `drag=0`, N=1 GPU µs per step (slope of
+17-step against 1-step frames), the reference first.
+
+* Where a step goes (ablation, N=1, drive). Agora S 12.7 µs, Viper 22.0 µs, E36
+  37.8 µs, Mustang 23.5 µs. Skipping the triangle phase saves 7, 8 and 16 µs on Agora
+  S, Viper and E36. Mustang (no self-collision hits) is mostly nodes (8.0 µs, of
+  which 2.9 µs is the second node of the 15 lanes past 512) and beams (9.4 µs, about
+  1.8 µs per beam a lane runs). Four extra barriers per step cost under 0.3 µs.
+  Plain instead of strict arithmetic (results differ; timing only) saves 1.9, 1.6 and
+  0.4 µs on Agora S, E36 and Mustang.
+* Hits per step (GPU count): Agora S 1.9 in 1 round, Viper 1.8 in 1 round (6.1 in
+  1.6 rounds in a wall crash), E36 6.0 in 2.0 rounds at rest and driving (16.5 in a
+  crash), Mustang and Audi 0 driving.
+* Hit records and the hit and pending counters in workgroup memory (the one-vehicle
+  frame): Agora S −0.2 µs, Viper −0.2, E36 +0.9, Mustang +0.6.
+* Round 1 of the ordered hits sharing the step-end barrier: E36 +0.6, Mustang +2.1
+  (its count and list loads on a step without hits; guarded, still no gain).
+* Both, plus the self-collision accumulators in workgroup memory for the frame:
+  Agora S −0.4, Viper +0.2 (+1.7 crash), E36 +2.1 (+3.0 crash), Mustang +0.7.
+* Node positions and velocities resident in workgroup memory for the frame (the
+  plan's A4; written through by the node phase, read by beams, triangles, wings,
+  slides; 13.8 KB for up to 576 nodes): Mustang +1.0 µs at N=1, and at large N far
+  worse, `mixed` Viper 2048: 16.0 → 24.8 ms per frame (+55 %).
+* Smaller workgroup lists (TRI_LIST 512, PAIR_LIST 256 or 512, a fallback past them):
+  N=1 within ±0.3 µs, Viper `mixed` 2048 +2 %.
+* 128 lanes per vehicle for fleets over 32: Viper `mixed` +13 %, E36 the same.
+* Removing code that never runs for the car (the one-lane overflow pass, the grid
+  walks) moves a step by ±0.5 µs: the size of the Metal compiler's code layout noise.
+
+So on Apple's GPU, with its on-chip memory shared between registers, threadgroup
+memory and cache, moving storage data into workgroup memory does not shorten the
+chains that set a step, and costs occupancy at large fleets.
+
 ### Bit-identity tests
 
 `slang/kernels/explicit_beams_baseline.slang` is the kernel before this work,
