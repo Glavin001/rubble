@@ -150,12 +150,118 @@ fn num(v: &serde_json::Value, key: &str, default: f64) -> f64 {
     v.get(key).and_then(|x| x.as_f64()).unwrap_or(default)
 }
 
+/// The `arena` scene's `ring` layout: `count` vehicles on concentric rings around the
+/// origin, every one facing the centre at its own speed in [speedMin, speedMax] m/s
+/// (a fixed low-discrepancy sequence in its index). The innermost ring has radius
+/// `ringRadius` (default 30 m) to the front faces; rings are a vehicle length plus
+/// 3 m apart, each holding as many vehicles as fit side by side with 1.5 m between
+/// them, so the rings arrive at the centre in waves.
+fn ring(spec: &serde_json::Value, n: usize, width: f32, length: f32) -> Vec<ArenaSpot> {
+    let (vmin, vmax) = (num(spec, "speedMin", 25.0) as f32, num(spec, "speedMax", 42.0) as f32);
+    let r0 = num(spec, "ringRadius", 30.0) as f32;
+    let golden = |i: usize, a: f64| ((i as f64 + 1.0) * a).fract() as f32;
+    let mut out = Vec::with_capacity(n);
+    let mut r = r0;
+    while out.len() < n {
+        let m = ((std::f32::consts::TAU * r / (width + 1.5)).floor() as usize).max(1).min(n - out.len());
+        // Each ring turned half a slot from the last, so waves interleave.
+        let phase = 0.5 * (out.len() % 2) as f32 + golden(out.len(), 0.618_033_988_75);
+        for j in 0..m {
+            let k = out.len();
+            let a = std::f32::consts::TAU * (j as f32 + phase) / m as f32;
+            let (sa, ca) = a.sin_cos();
+            // Facing the centre: forward = −(sin a, cos a); yaw 0 faces +Z.
+            out.push(ArenaSpot {
+                at: Vec3::new(r * sa, 0.0, r * ca),
+                yaw: a + std::f32::consts::PI,
+                speed: vmin + (vmax - vmin) * golden(k, 0.754_877_666_25),
+                boxes: Vec::new(),
+            });
+        }
+        r += length + 3.0;
+    }
+    out
+}
+
+/// One `arena` spawn: the middle of its front face, yaw, speed, and the static
+/// boxes it can hit.
+struct ArenaSpot {
+    at: Vec3,
+    yaw: f32,
+    speed: f32,
+    boxes: Vec<(Vec3, Vec3)>,
+}
+
+/// The `arena` scene: `count` copies of one vehicle (`width` across, `length` along)
+/// in rows facing each other in pairs across a long shared wall, `cols` lanes a row.
+/// Each vehicle has its own speed in [speedMin, speedMax] m/s and its own distance to
+/// the wall, so its hit lands at a time spread over [hitMin, hitMax] s (a fixed
+/// low-discrepancy sequence in the vehicle's index); every fourth lane has a pole a
+/// quarter of the vehicle's width off centre before the wall. Lanes are `width` + 3 m
+/// apart. `headOn` (0 to 1, default 0): that share of lanes has no wall, so the two
+/// vehicles facing each other there collide head-on (needs vehicle–vehicle contact).
+/// Returns the spawns and every box once (for rendering).
+fn arena(spec: &serde_json::Value, width: f32, length: f32) -> (Vec<ArenaSpot>, Vec<(Vec3, Vec3)>) {
+    let n = num(spec, "count", 256.0).max(1.0) as usize;
+    if spec.get("layout").and_then(|l| l.as_str()) == Some("ring") {
+        return (ring(spec, n, width, length), Vec::new());
+    }
+    let cols = num(spec, "cols", ((8 * n) as f64).sqrt().ceil()).max(1.0) as usize;
+    let (vmin, vmax) = (num(spec, "speedMin", 25.0) as f32, num(spec, "speedMax", 42.0) as f32);
+    let (tmin, tmax) = (num(spec, "hitMin", 0.3) as f32, num(spec, "hitMax", 1.2) as f32);
+    let golden = |i: usize, a: f64| ((i as f64 + 1.0) * a).fract() as f32;
+    let lane = width + 3.0;
+    let depth = vmax * tmax + length + 6.0;
+    let pair_pitch = 2.0 * depth + 1.0;
+    let rows = n.div_ceil(cols);
+    let head_on = num(spec, "headOn", 0.0) as f32;
+    // Per lane: a wall segment, unless the lane is head-on.
+    let open = |col: usize| golden(col, 0.569_840_290_998) < head_on;
+    let mut all = Vec::new();
+    for p in 0..rows.div_ceil(2) {
+        for col in (0..cols.min(n)).filter(|&c| !open(c)) {
+            let x = (col as f32 - 0.5 * (cols as f32 - 1.0)) * lane;
+            all.push((Vec3::new(x, 2.0, p as f32 * pair_pitch), Vec3::new(0.5 * lane, 2.0, 0.5)));
+        }
+    }
+    let spots = (0..n)
+        .map(|k| {
+            let (row, col) = (k / cols, k % cols);
+            let x = (col as f32 - 0.5 * (cols as f32 - 1.0)) * lane;
+            let wall = (Vec3::new(x, 2.0, (row / 2) as f32 * pair_pitch), Vec3::new(0.5 * lane, 2.0, 0.5));
+            let dir = if row % 2 == 0 { 1.0 } else { -1.0 };
+            let speed = vmin + (vmax - vmin) * golden(k, 0.618_033_988_75);
+            let gap = speed * (tmin + (tmax - tmin) * golden(k, 0.754_877_666_25));
+            let face = wall.0.z - dir * 0.5;
+            let mut boxes = if open(col) { Vec::new() } else { vec![wall] };
+            if col % 4 == 1 && !open(col) {
+                let side = if (k / 4) % 2 == 0 { 1.0 } else { -1.0 };
+                let pole = (
+                    Vec3::new(x + side * 0.25 * width, 2.0, face - dir * (0.5 * gap).min(8.0)),
+                    Vec3::new(0.25, 2.0, 0.25),
+                );
+                boxes.push(pole);
+                all.push(pole);
+            }
+            ArenaSpot {
+                at: Vec3::new(x, 0.0, face - dir * gap),
+                yaw: if dir > 0.0 { 0.0 } else { std::f32::consts::PI },
+                speed,
+                boxes,
+            }
+        })
+        .collect();
+    (spots, all)
+}
+
 #[wasm_bindgen]
 impl WebWorld {
     /// Explicit-beams vehicles on this world's device. `spec`: `{ vehicles: [{
     /// truck | jbeam: [[name, text], …] (+ pc) | desc, at: [x, z], yaw, front }], scene:
-    /// 'idle' | 'coast' | 'wall', speed (m/s, coast and wall), wallGap (m, default
-    /// 1 + 0.5·speed), drag, turbulence, fastInvSqrt (default true), timing
+    /// 'idle' | 'coast' | 'wall' | 'arena', speed (m/s, coast and wall), wallGap (m,
+    /// default 1 + 0.5·speed); arena (see `arena`): count, cols, speedMin, speedMax,
+    /// hitMin, hitMax, headOn, layout ('rows' | 'ring', see `ring`), ringRadius, the
+    /// first vehicle copied to every spawn, drag, turbulence, fastInvSqrt (default true), timing
     /// (default true: GPU timestamps when the device has them) }`.
     #[wasm_bindgen(js_name = explicitSim)]
     pub fn explicit_sim(&self, spec: JsValue) -> Result<ExplicitSim, JsValue> {
@@ -177,9 +283,9 @@ impl ExplicitSim {
             turbulence: flag("turbulence") && flag("drag"),
         };
         let scene = spec.get("scene").and_then(|s| s.as_str()).unwrap_or("idle");
-        if !matches!(scene, "idle" | "coast" | "wall") {
+        if !matches!(scene, "idle" | "coast" | "wall" | "arena") {
             return Err(format!(
-                "unknown explicit scene {scene}: idle, coast or wall"
+                "unknown explicit scene {scene}: idle, coast, wall or arena"
             ));
         }
         let speed = if scene == "idle" {
@@ -196,8 +302,32 @@ impl ExplicitSim {
         }
         let mut vehicles = Vec::new();
         let mut boxes = Vec::new();
-        for v in list {
-            let (mut sim, desc, warnings) = build(v, settings)?;
+        // `arena`: the first vehicle, built once, copied to every spawn.
+        let mut spots = Vec::new();
+        let template = if scene == "arena" {
+            let (mut sim, desc, warnings) = build(&list[0], settings)?;
+            let f = engine_softbody::pack::forward_axis(&desc);
+            turn(&mut sim, -f.x.atan2(f.z));
+            let (lo, hi) = bounds(&sim);
+            let (s, all) = arena(spec, hi.x - lo.x, hi.z - lo.z);
+            turn(&mut sim, f.x.atan2(f.z));
+            spots = s;
+            boxes = all;
+            Some((sim, desc, warnings))
+        } else {
+            None
+        };
+        let arena_list: Vec<serde_json::Value> = spots
+            .iter()
+            .map(|s| serde_json::json!({ "at": [s.at.x, s.at.z], "yaw": s.yaw, "front": true }))
+            .collect();
+        let list = if template.is_some() { &arena_list } else { list };
+        for (vi, v) in list.iter().enumerate() {
+            let (mut sim, desc, warnings) = match &template {
+                Some(t) => t.clone(),
+                None => build(v, settings)?,
+            };
+            let speed = spots.get(vi).map_or(speed, |s| s.speed);
             if sim.nodes.is_empty() {
                 return Err("the vehicle has no nodes".into());
             }
@@ -254,6 +384,11 @@ impl ExplicitSim {
                 .max_by_key(|&i| (sim.incidence[i as usize].len(), std::cmp::Reverse(i)))
                 .unwrap_or(0);
             set_moving(&mut sim, forward * speed);
+            if let Some(s) = spots.get(vi) {
+                for &(c, h) in &s.boxes {
+                    sim.boxes.push(StaticBox::centered(c, h));
+                }
+            }
             if scene == "wall" {
                 // A 4 m wall across the forward axis (snapped to x or z), `wallGap` ahead
                 // of the front, a metre wider than the vehicle each side.
