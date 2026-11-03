@@ -171,6 +171,26 @@ pub struct TruckWing {
     pub efficacy: f32,
 }
 
+/// A beam end: a node of the file, or one a `wheels` line generates (its wheel in
+/// [`TruckFile::wheels`] and its place in the rings, outer and inner alternating).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TruckNodeRef {
+    File(u32),
+    Tyre(u32, u32),
+}
+
+/// A `beams` line with an end on a generated tyre node (legacy numbering), which
+/// only solvers that build the tyre nodes spawn.
+#[derive(Clone, Debug)]
+pub struct TruckTyreBeam {
+    /// File beams ([`TruckFile::beams`]) before it.
+    pub position: usize,
+    pub a: TruckNodeRef,
+    pub b: TruckNodeRef,
+    /// Its parameters (`a`, `b` unset).
+    pub beam: SoftBeam,
+}
+
 /// The `fusedrag` line (the last one of the section).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruckFuseDrag {
@@ -213,6 +233,8 @@ pub struct TruckFile {
     pub actuator_gates: Vec<(usize, f32)>,
     pub wings: Vec<TruckWing>,
     pub fusedrag: Option<TruckFuseDrag>,
+    /// `beams` lines on generated tyre nodes.
+    pub tyre_beams: Vec<TruckTyreBeam>,
     pub warnings: Vec<String>,
 }
 
@@ -258,6 +280,9 @@ struct Parser {
     cameras: Vec<(usize, Vec<String>)>,
     /// `fusedrag … autocalc`: its area coefficient.
     fuse_area_coef: f32,
+    /// Legacy numbering: per `wheels` line its first generated number, count and
+    /// wheel index.
+    wheel_numbers: Vec<(u32, u32, u32)>,
 }
 
 impl Parser {
@@ -519,27 +544,36 @@ impl Parser {
                 if t.len() < 2 {
                     return;
                 }
-                let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
+                // A beam to a node a `wheels` line generated (legacy numbering):
+                // kept apart, for the solvers that build those nodes.
+                let ends = [self.tyre_ref(t[0]), self.tyre_ref(t[1])];
+                let (a, b) = if ends.iter().any(Option::is_some) {
+                    let file = |p: &mut Self, tok: &str, e: Option<TruckNodeRef>| match e {
+                        Some(r) => Some(r),
+                        None => p.node(tok).map(TruckNodeRef::File),
+                    };
+                    let (Some(ra), Some(rb)) =
+                        (file(self, t[0], ends[0]), file(self, t[1], ends[1]))
+                    else {
+                        return;
+                    };
+                    let mut beam = self.beam(0, 0);
+                    Self::beam_options(&mut beam, t);
+                    self.out.tyre_beams.push(TruckTyreBeam {
+                        position: self.out.beams.len(),
+                        a: ra,
+                        b: rb,
+                        beam,
+                    });
                     return;
+                } else {
+                    let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
+                        return;
+                    };
+                    (a, b)
                 };
                 let mut beam = self.beam(a, b);
-                let opts = t.get(2).copied().unwrap_or("n");
-                for c in opts.chars() {
-                    match c {
-                        'i' => beam.visible = false,
-                        'r' => beam.kind = BeamKind::Rope,
-                        's' => {
-                            beam.kind = BeamKind::Support;
-                            let factor = f(t, 3, DEFAULT_SUPPORT_BREAK_FACTOR);
-                            beam.long_bound = if factor > 0.0 {
-                                factor
-                            } else {
-                                DEFAULT_SUPPORT_BREAK_FACTOR
-                            };
-                        }
-                        _ => {}
-                    }
-                }
+                Self::beam_options(&mut beam, t);
                 self.out.beams.push(beam);
             }
             Section::Shocks | Section::Shocks2 | Section::Shocks3 => self.parse_shock(t),
@@ -562,6 +596,47 @@ impl Parser {
                 }
                 self.out.beams.push(beam);
             }
+            _ => self.data_rest(t),
+        }
+    }
+
+    /// A `beams` line's options (`i`, `r`, `s` with its break factor).
+    fn beam_options(beam: &mut SoftBeam, t: &[&str]) {
+        let opts = t.get(2).copied().unwrap_or("n");
+        for c in opts.chars() {
+            match c {
+                'i' => beam.visible = false,
+                'r' => beam.kind = BeamKind::Rope,
+                's' => {
+                    beam.kind = BeamKind::Support;
+                    let factor = f(t, 3, DEFAULT_SUPPORT_BREAK_FACTOR);
+                    beam.long_bound = if factor > 0.0 {
+                        factor
+                    } else {
+                        DEFAULT_SUPPORT_BREAK_FACTOR
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The node a legacy-numbered reference names among those a `wheels` line
+    /// generated (its wheel and the node's place in its rings), if any.
+    fn tyre_ref(&self, tok: &str) -> Option<TruckNodeRef> {
+        if !self.sequential() || self.ids.contains_key(tok) {
+            return None;
+        }
+        let n = tok.parse::<i64>().ok()?.unsigned_abs() as u32;
+        self.wheel_numbers
+            .iter()
+            .find_map(|&(first, count, wheel)| {
+                (n >= first && n < first + count).then_some(TruckNodeRef::Tyre(wheel, n - first))
+            })
+    }
+
+    fn data_rest(&mut self, t: &[&str]) {
+        match self.section {
             Section::Commands | Section::Commands2 => {
                 if t.len() < 2 {
                     return;
@@ -736,6 +811,8 @@ impl Parser {
                     self.warn("cinecam line needs x, y, z and 8 nodes".into());
                 }
             }
+            // Handled in `data`.
+            _ => {}
         }
     }
 
@@ -950,6 +1027,11 @@ impl Parser {
             node_friction: self.node_defaults.friction.unwrap_or(1.0),
         });
         if self.sequential() {
+            if kind == "wheels" {
+                let wheel = self.out.wheels.len() as u32 - 1;
+                self.wheel_numbers
+                    .push((self.next_number, nodes_per_ray * rays, wheel));
+            }
             self.next_number += nodes_per_ray * rays;
         }
     }
@@ -975,6 +1057,7 @@ pub fn parse_truck(src: &str) -> TruckFile {
         in_submesh: false,
         cameras: Vec::new(),
         fuse_area_coef: 1.0,
+        wheel_numbers: Vec::new(),
     };
     let mut have_title = false;
     for (i, raw) in src.lines().enumerate() {

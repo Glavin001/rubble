@@ -100,18 +100,24 @@ cinecam nodes and beam parameters are already exact. Then:
   file's `contacters` section (the desc marks every colliding node a contacter when
   that section is absent — do not use that here); tyre for tyre nodes.
 * **Beam order** (it matters for results): cinecam beams, tyre beams, then the file's
-  `beams` (plain, supports, ropes, in file order), then shocks, then hydros.
+  `beams` (plain, supports, ropes, in file order, including lines whose ends are
+  nodes a `wheels` line generated, which legacy numbering lets a file name), then
+  shocks, then commands (`commands`, `commands2`), then hydros.
 * **Rest length** L = L₀ = |xa − xb| from the spawned single-precision positions (so a
   vehicle spawned far from the origin carries that rounding); shocks multiply by their
   precompression.
 * **Deformable beams**: Tc = Tt = desc `deform`; G = Tc; S = desc strength.
-  **Actuators and virtual beams**: no yield; G = S.
+  **Hydros and commands**: actuators (no yield) with G = the deform threshold at
+  their line and S = the scaled break threshold, so they break only when
+  |F| > max(G, S) (checked against the reference: a hydro under a load above S but
+  below G holds). **Other actuators and virtual beams**: no yield; G = S.
   **Limited springs from shocks**: kℓ = desc `deform` (the limit spring), cℓ = desc
   `limit_damp` (12000 if 0), bounds from the desc.
 * **Tyres** (`wheels` section only; other wheel sections are an error): for each
   wheel, with axle nodes A1, A2 (spawned positions), radius R, ray count n, mass M,
   tyre spring and damping, the beam defaults at its line (unscaled break strength,
   deform threshold, plastic coefficient) and the node friction default:
+  * A1 is the axle node of lower z (the file's first on a tie), A2 the other;
   * axis = normalize(A2 − A1); first spoke s = normalize(axis × (1,0,0)) or, if that
     has squared length < 1e-12, normalize(axis × (0,1,0)); s ← R·s;
   * rotation angle θ = −360°/(2n), as a single-precision quaternion
@@ -124,6 +130,17 @@ cinecam nodes and beam parameters are already exact. Then:
     (A2, Oi), (A1, Ii) plain; rim: (Oi, Ii), (Oi, Onext), (Ii, Inext), (Ii, Onext)
     plain; if the wheel names a rigidity node P: one virtual beam (P, Oi) when P is
     nearer A1 than A2, else (P, Ii).
+
+## Wings, fuselage drag and commands
+
+`wings`, `fusedrag` and `commands`/`commands2` with no input follow
+`explicit-beams-aero-commands-spec.md` (`engine_softbody::explicit_aero`): per frame
+the wing break check runs before the origin rebase; per step, after the node pass,
+the wings add their forces, the fuselage drag D is computed for the next step's force
+restart (a vehicle with a `fusedrag` line gets D there instead of air drag and
+turbulence), and self-centering command beams move their rest lengths; then the
+beams. Airfoil tables are read at run time (`RUBBLE_AIRFOIL_DIR`, or a loader given
+to `from_truck_with_airfoils`); Rubble ships none.
 
 ## One frame
 
@@ -237,6 +254,13 @@ Otherwise:
 * The live-plain-beam count for the break exception reads the incidence list at the
   time of the test.
 * Every vehicle is independent; the dispatch scales with the vehicle count.
+* Fleets with wings, a `fusedrag` line or self-centering commands run a separately
+  compiled module (`EB_AERO`, 256 or 512 lanes) so every other fleet keeps the exact
+  old code: after the node pass a lane per wing computes its forces, a lane the
+  fuselage drag D, a lane per command its rest length; a barrier; then one lane adds
+  the wing forces in file order while the others run the beams. The specification's
+  double-precision sub-expressions run in strict single precision there. The wide
+  passes are off for such fleets.
 * Targets (M3 Max): the Agora S bus (195 nodes, 862 beams with tyres) at ≤ 0.6 ms per
   60 fps frame for 1–40 vehicles, ≤ 9 ms for 1000.
 

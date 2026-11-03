@@ -527,8 +527,13 @@ impl ExplicitBeams {
             s.push_desc_beam(b);
         }
         for w in &file.wheels {
-            let a1 = w.node1;
-            let a2 = w.node2;
+            // The axle runs toward +z: the node of lower z is A1, whichever the
+            // file names first (equal z keeps the file's order).
+            let (a1, a2) = if s.nodes[w.node1 as usize].pos.z > s.nodes[w.node2 as usize].pos.z {
+                (w.node2, w.node1)
+            } else {
+                (w.node1, w.node2)
+            };
             let pa1 = s.nodes[a1 as usize].pos;
             let pa2 = s.nodes[a2 as usize].pos;
             let n = w.rays.max(1);
@@ -618,8 +623,19 @@ impl ExplicitBeams {
             (false, 2) => 3,
             (false, c) => c,
         };
+        // `beams` lines on generated tyre nodes, at their place among the file's.
+        let tyre_node = |s: &Self, r: crate::truck::TruckNodeRef| match r {
+            crate::truck::TruckNodeRef::File(n) => n,
+            crate::truck::TruckNodeRef::Tyre(w, k) => s.tyres[w as usize].first + k,
+        };
+        let mut tyre_beams = file.tyre_beams.iter().peekable();
         for class in 0..4 {
             for (i, b) in rest.iter().enumerate().filter(|&(i, _)| order(i) == class) {
+                while class == 0 && tyre_beams.peek().is_some_and(|t| t.position <= i) {
+                    let t = tyre_beams.next().unwrap();
+                    let (a, b) = (tyre_node(&s, t.a), tyre_node(&s, t.b));
+                    s.push_desc_beam(&crate::desc::SoftBeam { a, b, ..t.beam.clone() });
+                }
                 let at = s.beams.len() as u32;
                 s.push_desc_beam(b);
                 if let Some(&g) = gates.get(&i) {
@@ -641,6 +657,12 @@ impl ExplicitBeams {
                         ));
                     }
                 }
+            }
+            // Tyre-node beams after the last plain one.
+            while class == 0 && tyre_beams.peek().is_some() {
+                let t = tyre_beams.next().unwrap();
+                let (a, b) = (tyre_node(&s, t.a), tyre_node(&s, t.b));
+                s.push_desc_beam(&crate::desc::SoftBeam { a, b, ..t.beam.clone() });
             }
         }
         s.collision_range = desc.collision_range;
