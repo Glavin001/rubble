@@ -368,7 +368,7 @@ const WIDE_CLOSE: usize = 6;
 const PARAM_STRIDE: u64 = 256;
 const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-const PARAM_WORDS: usize = 61;
+const PARAM_WORDS: usize = 63;
 /// Params word: the steps the contact plan's frame bounds cover.
 const W_VV_PLAN_STEPS: usize = 60;
 /// Steps a contact plan covers at least (frames shorter than this share a plan):
@@ -442,6 +442,8 @@ impl ExplicitBeamsGpu {
             "explicit beams GPU: too many nodes for the slide slots"
         );
         let mut vv_static: Vec<[u32; 4]> = Vec::with_capacity(nv);
+        // Per lists position (incidence entries) the entry's far end.
+        let mut nbr: Vec<u32> = Vec::new();
         let mut vv_tri: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
         for (vi, v) in vehicles.iter().enumerate() {
             let group_count = v
@@ -487,14 +489,18 @@ impl ExplicitBeamsGpu {
                     };
                     slot[end] = lists.len() as u32;
                     lists.push(((beam_off + j) << 1) | is_b);
+                    // Vehicle contact's side vote: the entry's far end.
+                    nbr.push(node_off + if is_b == 1 { b.a } else { b.b });
                 }
             }
             let cand_off = lists.len() as u32;
             cand_table.extend(cand_off..cand_off + v.candidates.len() as u32);
             lists.extend(v.candidates.iter().map(|&c| node_off + c));
+            nbr.extend(std::iter::repeat_n(0, v.candidates.len()));
             // Vehicle contact: the contact points (global nodes).
             vv_static.push([lists.len() as u32, v.contact_points.len() as u32, 0, 0]);
             lists.extend(v.contact_points.iter().map(|&c| node_off + c));
+            nbr.extend(std::iter::repeat_n(0, v.contact_points.len()));
             vv_tri.extend((0..v.triangles.len()).map(|t| {
                 let c = v.contact_throttle.get(t).copied().unwrap_or([0, 0]);
                 [c[0] as u32, c[1] as u32, 0, 0]
@@ -773,8 +779,11 @@ impl ExplicitBeamsGpu {
         let grid_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
         let grid = vehicles.iter().any(|v| grid_cell(v) > 0.0) as u32;
+        debug_assert_eq!(nbr.len(), lists.len());
         let slot_base = lists.len() as u32;
         lists.extend(slots.iter().flatten());
+        let vv_nbr = lists.len() as u32;
+        lists.extend(nbr);
         let cand_table_base = lists.len() as u32;
         let total_cands = cand_table.len() as u32;
         lists.extend(cand_table);
@@ -849,7 +858,9 @@ impl ExplicitBeamsGpu {
         let vv_grid = vv_pairs + 2 * vv_pair_cap;
         let vv_big = vv_grid + (vv_buckets * VV_SLOTS) as u32;
         let vv_rank = vv_big + nv as u32;
-        let next_len = vv_rank as usize + total_cp;
+        // Then the hit lists: per group two hits (two words each) per contact point.
+        let vv_hits = vv_rank + total_cp as u32;
+        let next_len = vv_hits as usize + 4 * total_cp;
         let mut next_init = vec![0u32; next_len.max(1)];
         if any_keys {
             for (vi, v) in vehicles.iter().enumerate() {
@@ -985,6 +996,8 @@ impl ExplicitBeamsGpu {
             vv_big,
             (nv <= FUSED_PAIRS_MAX) as u32,
             0,
+            vv_nbr,
+            vv_hits,
         ];
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),

@@ -148,12 +148,14 @@ struct Params
     uint vvGridMask; // buckets − 1
     uint vvCell; // float bits: the vehicle grid's cell size
     uint vvRun; // gBeams: per group its contact points sorted by cell
-    uint vvRank; // gNext: per run entry its bucket | rank << 10
-    uint vvRunCell; // float bits: the contact point grid's cell size
+    uint vvRank; // (unused)
+    uint vvRunCell; // (unused)
     uint vvMargin; // float bits: frame bounds margin past the travel at the fastest node's speed
     uint vvBig; // gNext: vehicles too big for the vehicle grid
     uint vvFusedPairs; // nonzero: explicit_beams_vv_group finds the pairs itself (small fleets)
     uint vvPlanSteps; // steps the plan's frame bounds cover (one frame or more)
+    uint vvNbr; // gLists: per incidence entry (same position + vvNbr) its far end
+    uint vvHits; // gNext: per group 2 × its points hits (triangle, node) of one owner
 };
 
 struct Surface
@@ -2253,6 +2255,7 @@ groupshared uint gsVvB[256];
 groupshared Atomic<uint> gsVvOffered[2];
 groupshared Atomic<uint> gsVvListed[2];
 groupshared Atomic<uint> gsVvCands[2];
+groupshared Atomic<uint> gsVvHits[2];
 groupshared uint gsVvReset[2];
 
 // Box coordinates as integers ordered like the floats (atomic minimum, maximum).
@@ -2663,7 +2666,7 @@ uint vvTestedAt(uint i) { return gP.vvMembers + 5u * gP.vehicles + i; }
 // adds into them), the tested-triangle list restarted per member, and a pending
 // reset of the self-collision throttles (a fast approach in the last contact pass)
 // applied after their update.
-void contactMemberStep(uint v, uint lane, uint s)
+void contactMemberStep(uint v, uint lane, uint s, bool first)
 {
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
@@ -2696,7 +2699,11 @@ void contactMemberStep(uint v, uint lane, uint s)
     uint step = misc.w + s;
     uint parity = step & 1u;
     bool pending = gMisc[vvRec(v, VV_FLAGS)].w != 0u;
-    if (lane == 0u) gsTestedCount[parity].store(0u);
+    if (lane == 0u)
+    {
+        gsTestedCount[parity].store(0u);
+        if (first) vvClearCounters();
+    }
     sync();
     {
         // The contact pass's box of this step (world positions after integration)
@@ -2971,14 +2978,22 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity)
     if (info.z > 3u)
     {
         float3 ob = asfloat(gMisc[vh].xyz);
-        for (uint k = 0u; k < info.z; k++)
+        uint base = gP.vvNbr + info.y;
+        // Four independent loads at a time (the far ends are a contiguous list).
+        uint k = 0u;
+        for (; k + 4u <= info.z; k += 4u)
         {
-            uint j = gLists[info.y + k] >> 1;
-            uint4 bn = gStatic[gP.beamBase + j * 3u];
-            uint far = bn.x == h ? bn.y : bn.x;
-            float3 e = ssub3(nf3(ob + gNodes[far * 3u].xyz), t.p0);
-            score += sdot(t.n, e) >= 0.0 ? 1 : -1;
+            float3 y0 = gNodes[gLists[base + k] * 3u].xyz;
+            float3 y1 = gNodes[gLists[base + k + 1u] * 3u].xyz;
+            float3 y2 = gNodes[gLists[base + k + 2u] * 3u].xyz;
+            float3 y3 = gNodes[gLists[base + k + 3u] * 3u].xyz;
+            score += sdot(t.n, ssub3(nf3(ob + y0), t.p0)) >= 0.0 ? 1 : -1;
+            score += sdot(t.n, ssub3(nf3(ob + y1), t.p0)) >= 0.0 ? 1 : -1;
+            score += sdot(t.n, ssub3(nf3(ob + y2), t.p0)) >= 0.0 ? 1 : -1;
+            score += sdot(t.n, ssub3(nf3(ob + y3), t.p0)) >= 0.0 ? 1 : -1;
         }
+        for (; k < info.z; k++)
+            score += sdot(t.n, ssub3(nf3(ob + gNodes[gLists[base + k] * 3u].xyz), t.p0)) >= 0.0 ? 1 : -1;
     }
     float3 nn = t.n;
     if (score < 0)
@@ -3016,36 +3031,69 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity)
 // against the owner's candidates (partner contact points inside the owner's box
 // grown by its range, compacted at the run offset): the box test, then the hit
 // test, vote and force; marks the triangle's record (z: had candidates, w: hit).
-void vvTriangleCands(uint va, uint gt, uint sub, uint runOff, uint cands, float r, uint parity)
+// The hit test of vvTry alone.
+bool vvInBand(VvTri t, float3 p, float r)
+{
+    float3 q = ssub3(p, t.p0);
+    float alpha = 0.0;
+    float beta = 0.0;
+    float delta = 0.0;
+    if (t.solvable)
+    {
+        alpha = sdot(t.ra, q);
+        beta = sdot(t.rb, q);
+        delta = sdot(t.rn, q);
+    }
+    float gamma = nf(nf(1.0 - alpha) - beta);
+    return alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r;
+}
+
+// Hit list entry `i` of the group's list of this owner (q its counter parity).
+uint vvHitAt(uint runOff, uint i) { return gP.vvHits + 2u * (2u * runOff + i); }
+
+void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r, uint parity,
+                     uint q)
 {
     VvTri t = vvTriangle(gt, asfloat(gMisc[va].xyz), r);
     bool cand = false;
     bool hit = false;
-    for (uint e = sub; e < cands; e += GRID_SUBS)
+    for (uint e = sub; e < cands; e += subs)
     {
         float4 E = gBeams[gP.vvRun + runOff + e];
         if (any(E.xyz < t.lo) || any(E.xyz > t.hi)) continue;
         uint h = asuint(E.w);
         cand = true;
-        hit = vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity) || hit;
+        if (!vvInBand(t, E.xyz, r)) continue;
+        hit = true;
+        // The force later, one lane per hit (the vote and the force read many
+        // nodes); a full list applies it here.
+        uint i = gsVvHits[q].add(1u);
+        if (i < 2u * points)
+        {
+            gNext[vvHitAt(runOff, i)] = gt;
+            gNext[vvHitAt(runOff, i) + 1u] = h;
+        }
+        else
+        {
+            vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity);
+        }
     }
     if (cand) gMisc[gP.vvTri + gt].z = 1u;
     if (hit) gMisc[gP.vvTri + gt].w = 1u;
 }
 
-// The member holding the group's contact point i (binary search of the members'
-// point prefixes).
-uint vvMemberOf(uint off, uint k, uint i)
+// The listed hits of owner va: one lane each, the vote and the force.
+void vvApplyHits(uint va, uint runOff, uint points, uint hits, float r, uint parity, uint lane)
 {
-    uint lo = 0u;
-    uint hi = k;
-    while (hi - lo > 1u)
+    float3 oa = asfloat(gMisc[va].xyz);
+    for (uint i = lane; i < min(hits, 2u * points); i += LANES)
     {
-        uint mid = (lo + hi) / 2u;
-        if (gNext[vvPrefixAt(off, mid)] <= i) lo = mid;
-        else hi = mid;
+        uint gt = gNext[vvHitAt(runOff, i)];
+        uint h = gNext[vvHitAt(runOff, i) + 1u];
+        uint vh = gStatic[gP.nodeInfoBase + h].w;
+        VvTri t = vvTriangle(gt, oa, r);
+        vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity);
     }
-    return lo;
 }
 
 // A tested triangle's throttle after its tests (a hit → 0, no candidate → + 1).
@@ -3058,9 +3106,9 @@ void vvThrottleEnd(uint gt)
     gMisc[gP.vvTri + gt] = uint4(asuint(cwait), c.y, 0u, 0u);
 }
 
-// Triangle gt of owner va: its box grown by the range overlaps a partner's box
-// (the partner's contact points all lie in it), so it may have candidates.
-bool vvNearPartner(uint gt, uint va, uint off, uint k, uint a, uint parity, float r)
+// Triangle gt of owner va: its box grown by the range overlaps the box `lo..hi`
+// (the partners' boxes' union), so it may have candidates.
+bool vvNearBox(uint gt, uint va, float r, float3 blo, float3 bhi)
 {
     uint4 tn = gStatic[gP.triBase + gt];
     float3 o = asfloat(gMisc[va].xyz);
@@ -3068,17 +3116,7 @@ bool vvNearPartner(uint gt, uint va, uint off, uint k, uint a, uint parity, floa
     float3 p1 = nf3(o + gNodes[tn.y * 3u].xyz);
     float3 p2 = nf3(o + gNodes[tn.z * 3u].xyz);
     float3 r3 = float3(r, r, r);
-    float3 lo = ssub3(min(min(p0, p1), p2), r3);
-    float3 hi = sadd3(max(max(p0, p1), p2), r3);
-    for (uint m = 0u; m < k; m++)
-    {
-        if (m == a || gNext[vvPartnerAt(off, m)] == 0u) continue;
-        uint kb = vvBoxKey(vvMember(off, m), parity);
-        float3 blo = float3(vvUnkey(gAcc[kb].load()), vvUnkey(gAcc[kb + 1u].load()), vvUnkey(gAcc[kb + 2u].load()));
-        float3 bhi = float3(vvUnkey(gAcc[kb + 3u].load()), vvUnkey(gAcc[kb + 4u].load()), vvUnkey(gAcc[kb + 5u].load()));
-        if (vvOverlap(lo, hi, blo, bhi)) return true;
-    }
-    return false;
+    return vvOverlap(ssub3(min(min(p0, p1), p2), r3), sadd3(max(max(p0, p1), p2), r3), blo, bhi);
 }
 
 void vvClearCounters()
@@ -3088,6 +3126,7 @@ void vvClearCounters()
         gsVvOffered[q].store(0u);
         gsVvListed[q].store(0u);
         gsVvCands[q].store(0u);
+        gsVvHits[q].store(0u);
         gsVvReset[q] = 0u;
     }
 }
@@ -3104,6 +3143,8 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     uint prevTri = 0u;
     uint prevListed = 0u;
+    uint prevVa = 0u;
+    float prevRange = 0.0;
     for (uint a = 0u; a < k; a++)
     {
         uint q = a & 1u;
@@ -3114,8 +3155,9 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         float3 alo = ssub3(blo, m3);
         float3 ahi = sadd3(bhi, m3);
         float3 va0 = gNodes[gStatic[va * 4u].x * 3u + 1u].xyz;
-        // Phase S.
+        // Phase S (with the previous owner's hits).
         for (uint i = lane; i < prevListed; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
+        if (a > 0u) vvApplyHits(prevVa, runOff, points, gsVvHits[q ^ 1u].load(), prevRange, parity, lane);
         for (uint b = lane; b < k; b += LANES)
         {
             uint vb = vvMember(off, b);
@@ -3148,6 +3190,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             gsVvOffered[q ^ 1u].store(0u);
             gsVvListed[q ^ 1u].store(0u);
             gsVvCands[q ^ 1u].store(0u);
+            gsVvHits[q ^ 1u].store(0u);
             gsVvReset[q ^ 1u] = 0u;
         }
         for (uint m = 0u; m < k; m++)
@@ -3158,6 +3201,16 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         }
         uint4 ra1 = gStatic[va * 4u + 1u];
         float range = asfloat(gStatic[va * 4u + 3u].z);
+        // The partners' boxes' union (their contact points all lie in it).
+        float3 plo = float3(3.0e38, 3.0e38, 3.0e38);
+        float3 phi = -plo;
+        for (uint m = 0u; m < k; m++)
+        {
+            if (m == a || gNext[vvPartnerAt(off, m)] == 0u) continue;
+            uint kb = vvBoxKey(vvMember(off, m), parity);
+            plo = min(plo, float3(vvUnkey(gAcc[kb].load()), vvUnkey(gAcc[kb + 1u].load()), vvUnkey(gAcc[kb + 2u].load())));
+            phi = max(phi, float3(vvUnkey(gAcc[kb + 3u].load()), vvUnkey(gAcc[kb + 4u].load()), vvUnkey(gAcc[kb + 5u].load())));
+        }
         for (uint t = lane; t < ra1.y; t += LANES)
         {
             uint4 c = gMisc[gP.vvTri + ra1.x + t];
@@ -3176,7 +3229,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             cwait = VV_MAX_WAIT < cidle ? VV_MAX_WAIT : cidle;
             // A triangle whose box (grown by the range) meets no partner's box has
             // no candidate: its throttle update at once, no tests.
-            if (!vvNearPartner(ra1.x + t, va, off, k, a, parity, range))
+            if (!vvNearBox(ra1.x + t, va, range, plo, phi))
             {
                 gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(cwait + 1), 0u, 0u, 0u);
                 continue;
@@ -3189,34 +3242,42 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             float3 r3 = float3(range, range, range);
             float3 clo = ssub3(blo, r3);
             float3 chi = sadd3(bhi, r3);
-            for (uint i = lane; i < points; i += LANES)
+            for (uint m = 0u; m < k; m++)
             {
-                uint m = vvMemberOf(off, k, i);
                 if (m == a || gNext[vvPartnerAt(off, m)] == 0u) continue;
                 uint v = vvMember(off, m);
-                uint h = gLists[vvCpOff(v) + i - gNext[vvPrefixAt(off, m)]];
-                float3 x = nf3(asfloat(gMisc[v].xyz) + gNodes[h * 3u].xyz);
-                if (any(x < clo) || any(x > chi)) continue;
-                gBeams[gP.vvRun + runOff + gsVvCands[q].add(1u)] = float4(x, asfloat(h));
+                uint4 cp = gStatic[gP.vvStatic + v];
+                float3 o = asfloat(gMisc[v].xyz);
+                for (uint i = lane; i < cp.y; i += LANES)
+                {
+                    uint h = gLists[cp.x + i];
+                    float3 x = nf3(o + gNodes[h * 3u].xyz);
+                    if (any(x < clo) || any(x > chi)) continue;
+                    gBeams[gP.vvRun + runOff + gsVvCands[q].add(1u)] = float4(x, asfloat(h));
+                }
             }
         }
         sync();
         // Phase T.
         uint listed = gsVvListed[q].load();
         uint cands = gsVvCands[q].load();
-        for (uint p = lane; p < listed * GRID_SUBS; p += LANES)
+        // Lanes per triangle: all the lanes over the listed triangles.
+        uint subs = clamp(LANES / max(listed, 1u), 1u, 64u);
+        for (uint p = lane; p < listed * subs; p += LANES)
         {
-            uint t = gNext[vvTestedAt(ra1.x + p / GRID_SUBS)];
-            vvTriangleCands(va, ra1.x + t, p % GRID_SUBS, runOff, cands, range, parity);
+            uint t = gNext[vvTestedAt(ra1.x + p / subs)];
+            vvTriangleCands(va, ra1.x + t, p % subs, subs, runOff, points, cands, range, parity, q);
         }
         sync();
         prevTri = ra1.x;
         prevListed = listed;
+        prevVa = va;
+        prevRange = range;
     }
     for (uint i = lane; i < prevListed; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
-    // Both parities' counters cleared for the next step's owners (the next
-    // step's member steps begin with a barrier).
-    if (lane == 0u) vvClearCounters();
+    if (k > 0u) vvApplyHits(prevVa, runOff, points, gsVvHits[(k - 1u) & 1u].load(), prevRange, parity, lane);
+    // (The counters are cleared by the next step's first member step, before its
+    // first barrier.)
 }
 
 [shader("compute")]
@@ -3263,7 +3324,7 @@ void contactGroup(uint g, uint lane)
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     for (uint s = 0u; s < gP.steps; s++)
     {
-        for (uint m = 0u; m < k; m++) contactMemberStep(vvMember(off, m), lane, s);
+        for (uint m = 0u; m < k; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
         vvPass(k, off, runOff, points, stepBase + s, lane);
     }
     for (uint m = 0u; m < k; m++) contactMemberEnd(vvMember(off, m), lane);

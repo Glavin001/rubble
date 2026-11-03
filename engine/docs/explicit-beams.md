@@ -384,13 +384,16 @@ for each owner **in vehicle order**, three barriers each: (S) the partner scan
 over the other members in parallel (box overlap; a fast approach sets both
 vehicles' contact throttle waits to 0 and marks their self-collision throttles for
 a reset, applied right after the next throttle update, which the GPU makes at the
-next node pass), with the previous owner's throttle updates; (P) the contact
-throttle resets, the owner's throttle step (only when its partners offer points),
-listing its tested triangles whose box grown by the range meets a partner's box
-(the others have no candidate: +1 at once), and the partners' contact points
-inside the owner's box grown by its range compacted into a candidate list; (T)
-the listed triangles against the candidates, `GRID_SUBS` lanes per triangle (box
-test, hit test, vote, force). The throttle update: a hit → 0, no candidate → +1.
+next node pass), with the previous owner's throttle updates and its hits' forces;
+(P) the contact throttle resets, the owner's throttle step (only when its partners
+offer points), listing its tested triangles whose box grown by the range meets the
+partners' boxes' union (the others have no candidate: +1 at once), and the
+partners' contact points inside the owner's box grown by its range compacted into
+a candidate list; (T) the listed triangles against the candidates, all lanes
+spread over them (box test, hit test), each hit appended to a list whose forces
+(the side vote over the node's neighbour far ends, kept as a flat list at upload,
+and the contact force) are applied one lane per hit in the next phase (S of the
+next owner, or after the last). The throttle update: a hit → 0, no candidate → +1.
 
 What the GPU does differently from the specification's exact order (§8.3):
 
