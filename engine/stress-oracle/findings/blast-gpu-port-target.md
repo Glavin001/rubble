@@ -144,18 +144,21 @@ Open:
    Krylov carry off and the relative-residual test behind a flag (off). Keep `ec8118341`'s
    behaviour behind flags. Tests from the CUDA definitions: the two convergence rules on one
    system, carry off reproducing the plain recurrence.
-4. **Exact forces at `a08abef50`.** Build the stress-problem capture SDK at `a08abef50` with
-   vibe-land's `scripts/perf/build-stress-capture-sdk.sh` (installs beside `garage-multihull`;
-   the shared install is untouched). Record solves on house-1story, villa-savoye, cannonball,
-   meteors and skyline-stable. Replay them in rubble (`stress-gpu/examples/blast_capture.rs`):
-   iterations, convergence and per-bond forces within f32 rounding.
-5. **Break sets and timing.** Run vibe-land's server-side harness on `garage-multihull` with
-   scripted strikes, recording per frame the broken bonds, body count, `cuda.stress` and
-   whole-tick time. Run rubble `blast_gpu` on the same packs and strikes. Compare: forces
-   within f32 spread; break sets and body counts identical or each difference explained (the
-   no-correction-pass deviation chief among them); 0 breaks at rest in both; speed, one engine
-   on the GPU at a time under vibe-land's GPU lock (`scripts/perf/gpu-run.sh`), each run under
-   10–20 min with a kill timer.
+4. **A PhysX-only harness (user decision, 2026-11-02: PhysX only, not vibe-land).** Temporary
+   C++ programs in `tools/physx-harness/`, linked against the `garage-multihull` install, build
+   the scenario directly on `PxScene` + `PxDestructionScene`: each pack's chunks as convex
+   shapes on one cluster body, the stress graph from the pack's Blast authoring (the same input
+   rubble's `blast_gpu` reads), the ground, the scripted ball. Per frame they record the
+   broken bonds (`bondHealth`, `bondVerdicts`), the body count, the bond forces
+   (`getDeviceView().bondForces`), the solve report (`getStressSolveReport`), and the stress
+   and whole-tick time. Done so far: `smoke` (PhysX's own package-consumer test) builds and
+   passes on the GPU here.
+5. **Head-to-head.** Run the harness and rubble `blast_gpu` on house-1story, villa-savoye,
+   cannonball, meteors and skyline-stable with the same strikes and the `a08abef50` settings.
+   Compare: per-bond forces after a solve within f32 rounding; break sets and body counts per
+   frame identical or each difference explained (the no-correction-pass deviation chief among
+   them); 0 breaks at rest in both; stress-stage and whole-tick time, one engine on the GPU at
+   a time, each run under 10–20 min with a kill timer.
 6. **Close differences.** Large components first (the V-cycle question), then anything the
    comparison shows. Record every result and deviation in `blast-gpu-port.md`, with side-by-side
    videos.
@@ -167,19 +170,16 @@ Done when every scene's forces and break sets match (or each difference is expla
 accepted), structures stand in both, and rubble's stress stage is no slower than vibe-land
 native on this Mac.
 
-## Open questions (need the user)
+## Decisions and open questions
 
-1. **A measurement harness in vibe-land.** No existing harness writes per-frame broken-bond sets
-   for a scripted strike (closest: `physx-bridge/tests/textbook/stage.rs`). Adding one means
-   editing vibe-land, which is otherwise off limits. Allowed on a new vibe-land branch in its
-   own worktree, or use only existing outputs (captures, solve reports, city-bench reports)?
-2. **Building in PhysX.** Step 4 adds an install under `PhysX/out/install/` beside the others.
-   Allowed?
-3. **Session access.** The rubble session can write only inside its worktree. Steps 4–5 need a
-   session started in `~/Development/PhysX` and `~/Development/vibe-land` (or the user runs
-   them).
-4. **vibe-land's play server** still defaults to the stale `macos-cumetal` (`696c341f`) install.
-   Whether to change that is vibe-land's decision.
+- **Decided (user, 2026-11-02):** compare against PhysX only, not vibe-land. Temporary scripts
+  in the rubble worktree may drive the installed PhysX SDK to recreate test scenarios. vibe-land
+  is read only to learn how it maps a pack onto PhysX (never built, run or depended on).
+- **Open:** how vibe-land maps a pack onto the stage (cluster bodies, contact indices,
+  `complianceScale`, supports, material limits) must be reproduced in the harness from its
+  reading of the code; each choice is recorded with the harness.
+- **Open, vibe-land's decision:** its play server still defaults to the stale `macos-cumetal`
+  (`696c341f`) install.
 
 ## Risks
 
