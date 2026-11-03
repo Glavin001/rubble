@@ -5,7 +5,7 @@
 //!   EQUIV_OUT=dir EQUIV_SCENE=<scene> EQUIV_SLEEP=on|off \
 //!     cargo test --release -p engine-world --test equivalence -- --ignored --nocapture record
 //! Scenes: house, arch (61 lab shots each, nudged -30..30 mm, 120 frames), grid (the demo's
-//! "100k Grid", a CCD ball fired at step 400, 900 steps), ring ("Brick Ring (28k)", 600
+//! "100k Grid", a CCD ball fired at step 400, 900 steps), ring ("Brick Ring (28k)", 400
 //! steps), gables (12 brick gables, two balls, 600 steps), city (16 threshold houses, the
 //! war scenario after settling, 240 steps), vehicle (engine-vehicle's rigid sedan at full
 //! throttle into a 160-brick wall, 600 steps).
@@ -427,8 +427,10 @@ fn record(scene: &str, sleep: bool) {
             });
         }
         "ring" => {
-            let (w, _) = snapshot_world("Brick Ring (28k)", sleep, 32);
-            stepped(w, &dir, 600, 50, |w, s| {
+            // 400 steps: from about step 440 the collapsed ring exhausts the record warm hash
+            // (OVERFLOW_WARM_HASH, 64 probes) on main and on the PR alike.
+            let (w, _) = snapshot_world("Brick Ring (28k)", sleep, 16);
+            stepped(w, &dir, 400, 50, |w, s| {
                 if s == 200 {
                     ball(w, [-80.0, 3.0, 0.0], [40.0, 0.0, 0.0], 2.0, 4000.0, true);
                 }
