@@ -168,7 +168,7 @@ pub struct EngineFeatures {
     /// grew solves the new ones in one workgroup.
     pub primal_tail: bool,
     /// Every solver iteration in one workgroup while at most 256 bodies were awake and
-    /// 4,096 contacts formed last step (`ENGINE_SOLVE=dispatch` keeps a dispatch per colour
+    /// 128 contacts formed last step (`ENGINE_SOLVE=dispatch` keeps a dispatch per colour
     /// and dual; same results).
     pub solve_loop: bool,
     /// Woken pairs start cold (λ = 0, stiffness at its floor), as the resting-pair carry

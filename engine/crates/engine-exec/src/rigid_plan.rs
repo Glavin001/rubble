@@ -310,8 +310,12 @@ pub fn solve_loop(m: &StepModes, i: &StepInputs) -> bool {
 }
 
 /// The solve loop's limits: awake bodies and contacts (or joints) last step, iterations.
+/// One workgroup runs every colour serially, so its cost grows with the contacts: on the
+/// 100k grid (M-series, 4 iterations) it beats the per-colour dispatches at 76 contacts
+/// (1.45 against 1.86 ms a step) and loses from 192 (2.95 against 2.51; 7.6 against 2.3
+/// at 800).
 pub const LOOP_AWAKE_MAX: u32 = 256;
-pub const LOOP_CONTACTS_MAX: u32 = 4096;
+pub const LOOP_CONTACTS_MAX: u32 = 128;
 pub const LOOP_ITERATIONS_MAX: u32 = 32;
 /// First pass-table slot of the solve loop: `q * (LOOP_ITERATIONS_MAX + 1) + iterations`
 /// for q (the first sparse colour) in 0..=32.
@@ -1879,7 +1883,7 @@ mod tests {
         m.solve_loop = true;
         let mut i = inputs(10, 0);
         i.last.awake_count = 40;
-        i.last.contact_count = 300;
+        i.last.contact_count = 100;
         let cmds = encode_step(&m, &i, false, false);
         let count = |k: &str| cmds.iter().filter(|c| matches!(c, Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } if *kernel == k)).count();
         assert_eq!(count("solve_primal_color_compact"), 0);
@@ -1897,8 +1901,11 @@ mod tests {
         let o = (loop_pass(14, 4) as u64 * PASS_ALIGN) as usize;
         assert_eq!(u32::from_le_bytes(table[o..o + 4].try_into().unwrap()), 14 | (4 << 8));
         assert!(u64::from(loop_pass(32, LOOP_ITERATIONS_MAX)) < PASS_SLOTS);
-        // Many awake: the dispatches as before.
+        // Many awake, or more contacts than the loop beats the dispatches at: as before.
         i.last.awake_count = 5000;
+        assert!(!solve_loop(&m, &i));
+        i.last.awake_count = 40;
+        i.last.contact_count = LOOP_CONTACTS_MAX + 1;
         assert!(!solve_loop(&m, &i));
     }
 
