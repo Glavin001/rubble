@@ -497,6 +497,9 @@ impl ExplicitBeamsGpu {
         // Per lists position (incidence entries) the entry's far end.
         let mut nbr: Vec<u32> = Vec::new();
         let mut vv_tri: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
+        // Per vehicle its slide slots (node → 1-based global slot) and slot range.
+        let mut slot_maps: Vec<Vec<u32>> = Vec::with_capacity(nv);
+        let mut slot_ranges: Vec<(u32, u32)> = Vec::with_capacity(nv);
         for (vi, v) in vehicles.iter().enumerate() {
             // The kernel packs a (triangle, candidate) pair into 16 bits each.
             assert!(
@@ -523,12 +526,14 @@ impl ExplicitBeamsGpu {
                     let b = &v.beams[seg.beam as usize];
                     [b.a, b.b]
                 }));
+            let slot_first = slot_count;
             for t in targets {
                 if slot_of[t as usize] == 0 {
                     slot_count += 1;
                     slot_of[t as usize] = slot_count;
                 }
             }
+            slot_ranges.push((slot_first, slot_count - slot_first));
             // Incidence lists, then the candidates.
             for (i, inc) in v.incidence.iter().enumerate() {
                 let n = &v.nodes[i];
@@ -658,6 +663,7 @@ impl ExplicitBeamsGpu {
             let mut m = bits(v.origin);
             m[3] = v.steps as u32;
             misc.push(m);
+            slot_maps.push(slot_of);
             spans.push(Span {
                 node_off,
                 nodes: v.nodes.len() as u32,
@@ -830,6 +836,45 @@ impl ExplicitBeamsGpu {
             beam_off += v.beams.len() as u32;
         }
         debug_assert!(slots.iter().flatten().all(|&s| s != u32::MAX));
+        // Slide nodes in parallel (the kernel's slideNode): per slot every
+        // contribution it can get in one step (its own slide nodes, and the ends of
+        // every segment of the rails its slide nodes can reach), as list capacity.
+        let mut slot_caps = vec![0u32; slot_count as usize];
+        for (vi, v) in vehicles.iter().enumerate() {
+            let slot_of = &slot_maps[vi];
+            for sl in &v.slides {
+                let mut seen = std::collections::BTreeSet::new();
+                if slot_of[sl.node as usize] != 0 {
+                    seen.insert((slot_of[sl.node as usize], 0));
+                }
+                let mut stack: Vec<u32> = sl.segment.into_iter().collect();
+                let mut visited = std::collections::BTreeSet::new();
+                while let Some(si) = stack.pop() {
+                    if !visited.insert(si) {
+                        continue;
+                    }
+                    let seg = &v.segments[si as usize];
+                    let b = &v.beams[seg.beam as usize];
+                    for (end, which) in [(b.a, 1), (b.b, 2)] {
+                        if slot_of[end as usize] != 0 {
+                            seen.insert((slot_of[end as usize], which));
+                        }
+                    }
+                    stack.extend(seg.prev);
+                    stack.extend(seg.next);
+                }
+                for (slot, _) in seen {
+                    slot_caps[slot as usize - 1] += 1;
+                }
+            }
+        }
+        let mut slot_recs: Vec<[u32; 4]> = Vec::with_capacity(slot_caps.len());
+        let mut slot_list_len = 0u32;
+        for &c in &slot_caps {
+            slot_recs.push([slot_list_len, c, 0, 0]);
+            slot_list_len += c;
+        }
+        let veh_ext: Vec<[u32; 4]> = slot_ranges.iter().map(|&(a, n)| [a, n, 0, 0]).collect();
         let inc_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
         // The self-collision grid's sorted runs, at each vehicle's candidate offset.
@@ -867,7 +912,9 @@ impl ExplicitBeamsGpu {
         let vv_label = vv_acc + 12 * nv as u32 + VV_CTL_WORDS;
         let vv_grid_count = vv_label + 4 * nv as u32;
         let vv_buckets = (8 * nv).max(1024).next_power_of_two();
-        let mut acc_init = vec![0i32; vv_grid_count as usize + vv_buckets];
+        // Then the slide slots' contribution counts.
+        let slot_cnt_base = (vv_grid_count as usize + vv_buckets) as u32;
+        let mut acc_init = vec![0i32; slot_cnt_base as usize + slot_count as usize];
         for v in 0..nv {
             for k in 0..12 {
                 acc_init[vv_acc as usize + 12 * v + k] = if k % 6 < 3 { i32::MAX } else { i32::MIN };
@@ -892,6 +939,8 @@ impl ExplicitBeamsGpu {
         beams.extend(slide_state);
         let slide_acc = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], slot_count as usize));
+        // The slide nodes' contributions (3 each; the kernel's slideContribBase).
+        beams.extend(std::iter::repeat_n([0.0f32; 4], 3 * slide_total as usize));
         // Vehicle contact: the groups' contact points sorted by cell.
         let total_cp: usize = vehicles.iter().map(|v| v.contact_points.len()).sum();
         let vv_run = beams.len() as u32;
@@ -917,7 +966,9 @@ impl ExplicitBeamsGpu {
         let vv_rank = vv_big + nv as u32;
         // Then the hit lists: per group two hits (two words each) per contact point.
         let vv_hits = vv_rank + total_cp as u32;
-        let next_len = vv_hits as usize + 4 * total_cp;
+        // Then the slide slots' contribution lists.
+        let slot_list_base = (vv_hits as usize + 4 * total_cp) as u32;
+        let next_len = slot_list_base as usize + slot_list_len as usize;
         let mut next_init = vec![0u32; next_len.max(1)];
         if any_keys {
             for (vi, v) in vehicles.iter().enumerate() {
@@ -949,6 +1000,11 @@ impl ExplicitBeamsGpu {
         statics.extend(seg_recs);
         let vv_static_base = statics.len() as u32;
         statics.extend(vv_static);
+        // Per vehicle its slide slots, then per slot its list (the kernel's
+        // slotRecBase is veh_ext_base + vehicles).
+        let veh_ext_base = statics.len() as u32;
+        statics.extend(veh_ext);
+        statics.extend(slot_recs);
 
         let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
         let lanes = frame_lanes(vehicles);
@@ -1035,7 +1091,7 @@ impl ExplicitBeamsGpu {
             slot_count,
             // Vehicle contact (vvOn is set per frame).
             0,
-            vv_solo,
+            veh_ext_base,
             vv_static_base,
             vv_tri_base,
             vv_veh,
@@ -1050,8 +1106,8 @@ impl ExplicitBeamsGpu {
             vv_buckets as u32 - 1,
             vv_cell(vehicles).to_bits(),
             vv_run,
-            vv_rank,
-            vv_run_cell(vehicles).to_bits(),
+            slot_cnt_base,
+            slot_list_base,
             DEFAULT_CONTACT_MARGIN.to_bits(),
             vv_big,
             (nv <= FUSED_PAIRS_MAX) as u32,
@@ -1966,20 +2022,25 @@ impl ExplicitBeamsGpu {
         let mut misc = words(&self.bufs[7]);
         let next = words(&self.bufs[8]);
         let nv = self.spans.len();
-        let (grid_base, aero_state, vv_run) = (w[9] as usize, w[27] as usize, w[54] as usize);
+        let (grid_base, aero_state) = (w[9] as usize, w[27] as usize);
+        // The aero, slide state and slide-force slots (the contributions after them
+        // are scratch).
+        let slide_end = (w[35] + w[38]) as usize;
         let (vv_veh, vv_groups) = (w[43] as usize, w[46] as usize);
         for v in 0..nv {
             misc[(vv_veh + v * VV_RECS + 4) * 4 + 2] = 0;
         }
         let mut beam_words = beams[..grid_base * 4].to_vec();
-        beam_words.extend_from_slice(&beams[aero_state * 4..vv_run * 4]);
+        beam_words.extend_from_slice(&beams[aero_state * 4..slide_end * 4]);
         vec![
             ("nodes", nodes),
             ("beams", beam_words),
             ("acc", acc[..3 * self.total[0] as usize].to_vec()),
             ("groups", groups),
             ("misc", misc[..vv_groups * 4].to_vec()),
-            ("keys", next[w[31] as usize..w[40] as usize].to_vec()),
+            // The trigger inputs: from keyBase to the contact lists (vvMembers −
+            // vehicles).
+            ("keys", next[w[31] as usize..w[47] as usize - nv].to_vec()),
         ]
     }
 
@@ -2403,28 +2464,6 @@ fn vv_cell(vehicles: &[ExplicitBeams]) -> f32 {
         .filter(|e| e.is_finite())
         .fold(0.0f32, f32::max);
     extent + 2.0 * (DEFAULT_CONTACT_MARGIN + 0.05) + 1.0
-}
-
-/// The contact point grid's cell size: the largest of the vehicles' median
-/// collision triangle extents (at upload) padded by twice their range.
-fn vv_run_cell(vehicles: &[ExplicitBeams]) -> f32 {
-    vehicles
-        .iter()
-        .filter(|v| !v.triangles.is_empty())
-        .map(|v| {
-            let mut e: Vec<f32> = v
-                .triangles
-                .iter()
-                .map(|t| {
-                    let p = t.nodes.map(|n| v.nodes[n as usize].pos);
-                    (p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).max_element()
-                })
-                .collect();
-            e.sort_by(f32::total_cmp);
-            e[e.len() / 2] + 2.0 * v.collision_range
-        })
-        .filter(|c| c.is_finite())
-        .fold(0.05f32, f32::max)
 }
 
 /// What a renderer needs besides a trace of `copies` vehicles of one `.truck` file,

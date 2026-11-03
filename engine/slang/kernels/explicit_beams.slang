@@ -133,7 +133,7 @@ struct Params
     // runs the vehicles of the solo list and checks their nodes stay in their
     // frame bounds.
     uint vvOn;
-    uint vvSolo; // (unused)
+    uint vehExtBase; // gStatic: per vehicle its slide slots (then the slot records)
     uint vvStatic; // gStatic: per vehicle (contact point offset in gLists, count, 0, 0)
     uint vvTri; // gMisc: per triangle (cwait, cidle, had candidates, hit)
     uint vvVeh; // gMisc: per vehicle VV_RECS records
@@ -148,8 +148,8 @@ struct Params
     uint vvGridMask; // buckets − 1
     uint vvCell; // float bits: the vehicle grid's cell size
     uint vvRun; // gBeams: per group its contact points sorted by cell
-    uint vvRank; // (unused)
-    uint vvRunCell; // (unused)
+    uint slotCntBase; // gAcc: per slide slot its contribution count
+    uint slotListBase; // gNext: the slide slots' contribution lists
     uint vvMargin; // float bits: frame bounds margin past the travel at the fastest node's speed
     uint vvBig; // gNext: vehicles too big for the vehicle grid
     uint vvFusedPairs; // nonzero: explicit_beams_vv_group finds the pairs itself (small fleets)
@@ -158,6 +158,14 @@ struct Params
     uint vvHits; // gNext: per group 2 × its points hits (triangle, node) of one owner
     uint ablate; // measurement builds only (EB_ABLATE): phases to skip
 };
+
+// Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
+// vehicle (first slide slot, slide slots, 0, 0), then per slide slot (list offset,
+// capacity, 0, 0); gAcc at slotCntBase per slot this step's contributions; gNext at
+// slotListBase the slots' contribution lists; gBeams after the slide-force slots
+// per slide node 3 contributions (own node, rail end a, rail end b).
+uint slotRecBase() { return gP.vehExtBase + gP.vehicles; }
+uint slideContribBase() { return gP.slideAcc + gP.slotTotal; }
 
 struct Surface
 {
@@ -1631,11 +1639,37 @@ void commandUpdateKeys(uint gc, uint vehicle, uint prev)
     gBeams[cmdState(gc)] = float4(mode, 0.0, 0.0, 0.0);
 }
 
+// Slot `slot`'s value `s` plus the contributions slideNode registered this step,
+// added in spawn order (slide node, then own node, rail end a, rail end b: the
+// order the serial pass adds them in); clears the registration.
+float3 slidePending(float3 s, uint slot, uint n)
+{
+    uint4 rec = gStatic[slotRecBase() + slot];
+    uint m = min(n, rec.y);
+    for (uint i = 1u; i < m; i++)
+    {
+        uint key = gNext[gP.slotListBase + rec.x + i];
+        uint j = i;
+        while (j > 0u && gNext[gP.slotListBase + rec.x + j - 1u] > key)
+        {
+            gNext[gP.slotListBase + rec.x + j] = gNext[gP.slotListBase + rec.x + j - 1u];
+            j--;
+        }
+        gNext[gP.slotListBase + rec.x + j] = key;
+    }
+    for (uint i = 0u; i < m; i++) s = sadd3(s, gBeams[slideContribBase() + gNext[gP.slotListBase + rec.x + i]].xyz);
+    gAcc[gP.slotCntBase + slot].store(0);
+    return s;
+}
+
 // The node phase: add and clear a slide target's forces (slot + 1 = slot1).
 float3 slideTake(float3 f, uint slot1)
 {
-    uint at = gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u);
+    uint slot = min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u);
+    uint at = gP.slideAcc + slot;
     float3 s = gBeams[at].xyz;
+    uint n = uint(gAcc[gP.slotCntBase + slot].load());
+    if (n != 0u) s = slidePending(s, slot, n);
     gBeams[at] = float4(0.0, 0.0, 0.0, 0.0);
     return sadd3(f, s);
 }
@@ -1732,6 +1766,74 @@ void slidePass(uint slideOff, uint slideCount, float3 origin, uint groupOff, uin
         }
         gBeams[gP.slideState + gs] = float4(float(best), away ? 1.0 : 0.0, 0.0, 0.0);
     }
+}
+
+// The frame runs the slide nodes in parallel, one lane each: slideNode is one
+// iteration of slidePass, but instead of adding into the slots in spawn order it
+// stores its contributions (at slideContrib, 3 per slide node) and registers each
+// with its slot (a count and a list, capacity: every contribution the slot can
+// get); the next node phase (slideTake) or the frame's end (slideSettle) adds them
+// in spawn order. The same sums, bit for bit; slide nodes do not read the slots.
+void slideEmit(uint node, float3 f, uint gs, uint which)
+{
+    uint slot1 = gStatic[gP.nodeInfoBase + node].x >> NODE_SLOT_SHIFT;
+    if (slot1 == 0u) return;
+    uint slot = min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u);
+    uint key = gs * 3u + which;
+    gBeams[slideContribBase() + key] = float4(f, 0.0);
+    uint4 rec = gStatic[slotRecBase() + slot];
+    uint i = uint(gAcc[gP.slotCntBase + slot].add(1));
+    if (i < rec.y) gNext[gP.slotListBase + rec.x + i] = key;
+}
+
+void slideNode(uint gs, float3 origin, uint groupOff, uint parity)
+{
+    float4 st = gBeams[gP.slideState + gs];
+    if (st.x < 0.0) return;
+    uint cur = clampSeg(uint(st.x));
+    uint4 seg = gStatic[gP.segBase + cur];
+    if (brokenNow(seg.x, groupOff, parity)) return;
+    uint4 S0 = gStatic[gP.slideBase + gs * 2u];
+    float4 S1 = asfloat(gStatic[gP.slideBase + gs * 2u + 1u]);
+    float3 x = nf3(origin + gNodes[S0.x * 3u].xyz);
+    uint best = cur;
+    SegPoint bp = segmentPoint(cur, origin, x);
+    if (seg.y != NONE)
+    {
+        SegPoint p = segmentPoint(clampSeg(seg.y), origin, x);
+        if (p.dist < bp.dist) { best = clampSeg(seg.y); bp = p; }
+    }
+    if (seg.z != NONE)
+    {
+        SegPoint p = segmentPoint(clampSeg(seg.z), origin, x);
+        if (p.dist < bp.dist) { best = clampSeg(seg.z); bp = p; }
+    }
+    bool away = st.y != 0.0;
+    if (!away)
+    {
+        float3 w = ssub3(bp.q, x);
+        float delta = slen(w);
+        w = snormalise(w);
+        float stretch = nf(delta - S1.z);
+        float fLen = smul(-S1.x, (0.0 < stretch) ? stretch : 0.0);
+        float3 P = sscale(w, fLen);
+        if (slen(P) > S1.y) away = true;
+        uint4 bn = gStatic[gP.beamBase + gStatic[gP.segBase + best].x * 3u];
+        slideEmit(S0.x, -P, gs, 0u);
+        slideEmit(bn.x, sscale(P, nf(1.0 - bp.ratio)), gs, 1u);
+        slideEmit(bn.y, sscale(P, bp.ratio), gs, 2u);
+    }
+    gBeams[gP.slideState + gs] = float4(float(best), away ? 1.0 : 0.0, 0.0, 0.0);
+}
+
+// The frame's end: add a slot's registered contributions into it (as the serial
+// pass would have left it).
+void slideSettle(uint slot)
+{
+    uint n = uint(gAcc[gP.slotCntBase + slot].load());
+    if (n == 0u) return;
+    uint at = gP.slideAcc + slot;
+    gBeams[at] = float4(slidePending(gBeams[at].xyz, slot, n), 0.0);
 }
 
 // nodeUpdate for a vehicle with a `fusedrag` line: the restart adds the stored
@@ -2196,8 +2298,12 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         if (lane == 0u) detApply(v, origin, range, beamOff, groupOff, groupCount, parity);
 #endif
 #ifdef EB_AERO
-        // Slide nodes, after this step's beams (one lane, alongside the contacts).
-        if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, origin, groupOff, parity);
+        // Slide nodes, after this step's beams (alongside the contacts), a lane each.
+        if ((flagsV & FLAG_SLIDES) != 0u)
+        {
+            uint count = min(aero2.y, gP.slideTotal - min(aero2.x, gP.slideTotal));
+            for (uint k = lane; k < count; k += LANES) slideNode(aero2.x + k, origin, groupOff, parity);
+        }
 #endif
         sync();
     }
@@ -2205,6 +2311,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     {
         for (uint t = lane; t < triCount; t += LANES) triangleFinish(triOff + t);
     }
+#ifdef EB_AERO
+    if ((flagsV & FLAG_SLIDES) != 0u)
+    {
+        uint4 ext = gStatic[gP.vehExtBase + v];
+        for (uint k = lane; k < ext.y; k += LANES) slideSettle(ext.x + k);
+    }
+#endif
     // The last step's group breaks, for a read-back (the next node phase applies
     // them to the forces).
     if (gP.steps > 0u && groupCount > 0u)
