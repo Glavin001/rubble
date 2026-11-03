@@ -10,7 +10,8 @@
 //! ```
 //!
 //! `jbeam=<vehicles dir>:<name>:<config.pc>` in place of the `.truck` file runs a
-//! BeamNG JBeam vehicle in the explicit solver's JBeam mode, Rubble only.
+//! BeamNG JBeam vehicle in the explicit solver's JBeam mode, Rubble only (a turned
+//! vehicle of `pileup`, `headon`, `tbone`: its description's nodes turned about +y).
 //!
 //! Scenarios (each vehicle spawned with its lowest node 2 cm above flat ground, its
 //! tyres rolling at the spawn velocity unless `roll=0`, with Rigs of Rods' per-node
@@ -238,12 +239,20 @@ fn spawn_yaw(text: &str, at: Vec3, yaw: f32, vel: Vec3) -> ExplicitBeams {
     let config = CONFIG.get().and_then(|c| c.as_deref());
     let at = Vec3::new(at.x, 0.0, at.z);
     let mut sim = if let Some((desc, tyres)) = JBEAM.get() {
-        // `jbeam=`: the explicit solver's JBeam mode (its own spawn, no yaw).
-        assert!(
-            yaw == 0.0,
-            "jbeam=: scenarios that turn vehicles (pileup, headon, tbone) are not supported"
-        );
-        ExplicitBeams::from_desc_jbeam(desc, *tyres, at, vel, settings).map(|(s, _)| s)
+        // `jbeam=`: the explicit solver's JBeam mode. A turned spawn turns the
+        // description's node offsets about +y before they are added to the spawn
+        // point (as `from_truck_config_yaw` does), so the tyres and every other part
+        // follow; a yaw of 0 spawns the description as it is.
+        if yaw == 0.0 {
+            ExplicitBeams::from_desc_jbeam(desc, *tyres, at, vel, settings)
+        } else {
+            let mut turned = desc.clone();
+            for n in &mut turned.nodes {
+                n.position = yaw_offset(Vec3::from_array(n.position), yaw).to_array();
+            }
+            ExplicitBeams::from_desc_jbeam(&turned, *tyres, at, vel, settings)
+        }
+        .map(|(s, _)| s)
     } else if yaw == 0.0 {
         ExplicitBeams::from_truck_config(text, config, at, vel, settings)
     } else {
