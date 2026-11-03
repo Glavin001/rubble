@@ -98,7 +98,12 @@
     if (!probe) throw new Error('no WebGPU adapter');
     const limits = { maxBufferSize: probe.limits.maxBufferSize, maxStorageBufferBindingSize: probe.limits.maxStorageBufferBindingSize };
     const TIMING = qs.get('timing') ?? (probe.features.has('timestamp-query') ? 'step' : 'off');
-    const page = { gpuTiming: TIMING, ...(killBelow === null ? {} : { killBelow }) };
+    // ?rest=touch: the touch query and cold wakes instead of main's warm archive (opt-in).
+    const page = {
+      gpuTiming: TIMING,
+      ...(killBelow === null ? {} : { killBelow }),
+      ...(qs.get('rest') === 'touch' ? { features: { restingContacts: 'touch' } } : {}),
+    };
     const mb = (b) => `${(b / 2 ** 20).toFixed(0)} MiB`;
 
     // ---------------------------------------------------------------- world and city

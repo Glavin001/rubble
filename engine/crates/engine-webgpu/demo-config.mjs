@@ -248,9 +248,10 @@ export function parseDemoQuery(search) {
   if (persist === 'list' && reuse !== 'copy') throw new Error('persist=list requires reuse=copy');
   features.persistList = persist === 'list';
   // Resting contacts in a sleeping world: the sleep archive (default), the resting-pair
-  // carry (opt-out) or neither (measurement).
+  // carry (opt-out), neither (measurement), or the touch query with cold wakes in
+  // canonical (threshold) worlds too (opt-in; the archive keeps main's warm wakes there).
   const rest = qs.get('rest') || 'archive';
-  if (!['archive', 'carry', 'drop'].includes(rest)) throw new Error('rest must be archive, carry or drop');
+  if (!['archive', 'carry', 'drop', 'touch'].includes(rest)) throw new Error('rest must be archive, carry, drop or touch');
   features.restingContacts = rest;
   features.carryRest = rest !== 'drop';
   const repair = qs.get('repair') || 'local';

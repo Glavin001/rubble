@@ -99,13 +99,21 @@ pub enum GridLayout {
 /// `World` applies it when sleep is on).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RestingContacts {
-    /// The sleep archive (the shipped default): a sleeper a moving body touches forms
-    /// all its resting pairs in that step, and woken pairs restart cold as the carry's do
-    /// (`EngineFeatures::archive_cold`; warm from archived rows with it off). A sleeping
-    /// pair costs nothing per step. Canonical and persistent contacts; compact contacts
-    /// keep the carry.
+    /// The sleep archive (the shipped default). Persistent contacts: a sleeper a moving
+    /// body touches forms all its resting pairs in that step, and woken pairs restart
+    /// cold as the carry's do (`EngineFeatures::archive_cold`, `archive_touch_query`).
+    /// Canonical contacts (threshold destructibles): as on main, the first threshold
+    /// destructible enables the archive, woken pairs warm-start from their archived rows
+    /// and `archive_emit` files them; until then (and in canonical worlds without one)
+    /// the carry runs. A sleeping pair costs nothing per step. Compact contacts keep the
+    /// carry.
     #[default]
     Archive,
+    /// Opt-in (`ENGINE_REST=touch`, the demo's `rest=touch`): the persistent worlds'
+    /// archive in canonical worlds too: the touch query and cold wakes (as the carry's),
+    /// enabled when the world is made. Threshold destructibles break differently from
+    /// main (house: 54.3 bonds a shot against 60.6).
+    Touch,
     /// The resting-pair carry (opt-out, `ENGINE_REST=carry`): every pair at rest is
     /// re-emitted and kept each step (the earlier default; costs a row per resting
     /// contact every step).
@@ -275,6 +283,7 @@ impl EngineFeatures {
             resting_contacts: match env_str("ENGINE_REST").as_deref() {
                 Some("carry") => RestingContacts::Carry,
                 Some("drop") => RestingContacts::Drop,
+                Some("touch") => RestingContacts::Touch,
                 _ => d.resting_contacts,
             },
             grid: match env_str("ENGINE_GRID").as_deref() {

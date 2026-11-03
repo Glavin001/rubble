@@ -543,7 +543,17 @@ impl World {
         } else {
             (def.contacts, def.features.clone())
         };
+        let mut features = features;
         let resting = features.resting_contacts;
+        // Canonical contacts (threshold destructibles) keep main's archive: warm wakes
+        // through `archive_emit`, enabled by the first threshold destructible
+        // (`RestingContacts::Archive`); `RestingContacts::Touch` opts in to the touch query.
+        let main_archive = resting == engine_webgpu::RestingContacts::Archive
+            && contacts == ContactStorage::Canonical;
+        if main_archive {
+            features.archive_cold = false;
+            features.archive_touch_query = false;
+        }
         let cold_touch = features.archive_cold && features.archive_touch_query;
         let options = SimOptions {
             contacts,
@@ -577,7 +587,11 @@ impl World {
             // Resting contacts through sleep (EngineFeatures::resting_contacts): the sleep
             // archive where the contact storage keeps one, else the carry.
             match resting {
-                engine_webgpu::RestingContacts::Archive if contacts != ContactStorage::Compact => {
+                // Main's archive: the first threshold destructible enables it.
+                engine_webgpu::RestingContacts::Archive if main_archive => {}
+                engine_webgpu::RestingContacts::Archive | engine_webgpu::RestingContacts::Touch
+                    if contacts != ContactStorage::Compact =>
+                {
                     // Cold wakes with the touch query keep no rows: one block.
                     let rows = if cold_touch { 8 } else { def.sleep_archive_rows.unwrap_or(def.capacity.max_contacts) };
                     sim.enable_sleep_archive(rows)?;

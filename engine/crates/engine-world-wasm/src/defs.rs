@@ -263,6 +263,7 @@ pub fn features(f: &mut Fields, d: &mut EngineFeatures) -> Result<(), JsValue> {
             "archive" => engine_webgpu::RestingContacts::Archive,
             "carry" => engine_webgpu::RestingContacts::Carry,
             "drop" => engine_webgpu::RestingContacts::Drop,
+            "touch" => engine_webgpu::RestingContacts::Touch,
             _ => return Err(crate::err(format!("features.restingContacts: unknown {s}"))),
         };
     }

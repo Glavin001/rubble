@@ -47,14 +47,18 @@ typedef enum RbContacts {
 typedef enum RbRestingContacts {
   // The sleep archive (default): a sleeper a moving body touches forms all its resting
   // contacts in that step, and woken contacts restart as the carry's do. A sleeping
-  // pair costs nothing per step.
-  // Compact contacts keep the carry instead.
+  // pair costs nothing per step. Canonical contacts (threshold destructibles) keep
+  // main's archive: warm wakes from archived rows, enabled by the first threshold
+  // destructible. Compact contacts keep the carry instead.
   RB_RESTING_ARCHIVE = 0,
   // The resting-pair carry (opt-out): every pair at rest is re-emitted and kept each
   // step (the earlier default).
   RB_RESTING_CARRY = 1,
   // Neither (measurement): a woken pair restarts cold.
   RB_RESTING_DROP = 2,
+  // Opt-in: the touch query and cold wakes in canonical worlds too (threshold
+  // destructibles then break differently from main).
+  RB_RESTING_TOUCH = 3,
 } RbRestingContacts;
 
 typedef enum RbResult {
