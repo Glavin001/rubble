@@ -984,8 +984,19 @@ awake path's pair test (lossless, the full pass is the reference), not a summati
 With sleep on, `ENGINE_BROADPHASE=full` alone still leaves 2,104 bonds; adding
 `ENGINE_CCD_WAKE=body` (main's per-body `ccd_wake`) brings the city to main's 2,030 bonds, 0
 awake-state differences, max 0.1 mm. The per-collider pass wakes 38 bodies on the first shell
-step where main's wakes 32: main's per-body search finds a body's colliders by
-`firstColliderOfBody` and a contiguous scan, which assumes colliders sorted by body.
+step where main's wakes 32, and that is main's bug, as the CCD fall-through was. The city's
+colliders are not in body order (its houses take pooled body slots: body 87's one collider is
+collider 587), and main's per-body pass finds a body's colliders by `firstColliderOfBody` (a
+binary search) and a contiguous run. From the state before that step (`tests/ccd_wake_city.rs`,
+ignored), both rules on the CPU give exactly the GPU's two answers: 16 sleepers woken by main's
+rule, 22 by the per-collider rule, the extra six bodies 87-92, each a house piece whose single
+hull collider (extent 3.95 m) lies outside main's run (`firstColliderOfBody` returns 827 for all
+six, a run of none, so main counts their extent as zero). Each is 4.30 m from its shell's sweep
+against the rule's 1.25 x 0.6 + 3.95 = 4.70 m: inside the wake reach, with the hull's bounding
+sphere 0.25 m into the shell's swept sphere. No split is needed for this: the slots are
+out of order from placement. `tests/ccd_wake_unsorted.rs` pins it: a sleeper whose collider
+follows a later body's, 2 m off a bullet's sweep, wakes in that step; with main's per-body
+rule it stays asleep and the test fails.
 
 **Memory** (headless Chrome, `mem.mjs`, MB peak; `demo.html?scene=<s>&sleep=on` 200 steps,
 `city.html` 1,024 houses 60 s):
