@@ -2448,6 +2448,43 @@ impl WgpuSim {
         rigid_plan::awake_broadphase(&self.step_modes(), &self.step_inputs())
     }
 
+    /// Diagnostic: a copy of one binding (for [`WgpuSim::debug_restore_binding`]), so
+    /// that two [`WgpuSim::debug_broadphase_pairs`] runs start from the same scratch
+    /// (the sleep archive lists touched sleepers per step there).
+    #[doc(hidden)]
+    pub fn debug_copy_binding(&self, binding: usize) -> wgpu::Buffer {
+        let src = &self.bufs[binding];
+        let copy = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("debug-copy"),
+            size: src.size(),
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        enc.copy_buffer_to_buffer(src, 0, &copy, 0, src.size());
+        self.queue.submit([enc.finish()]);
+        copy
+    }
+
+    /// Diagnostic: write back a [`WgpuSim::debug_copy_binding`] copy.
+    #[doc(hidden)]
+    pub fn debug_restore_binding(&self, binding: usize, copy: &wgpu::Buffer) {
+        let dst = &self.bufs[binding];
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        enc.copy_buffer_to_buffer(copy, 0, dst, 0, copy.size().min(dst.size()));
+        self.queue.submit([enc.finish()]);
+    }
+
+    /// Diagnostic: binding 14's word of the resting table's header (world_step.slang
+    /// restBase, untagged warm hash) and the grid's heads per table (gridHashSize).
+    #[doc(hidden)]
+    pub fn debug_rest_layout(&self) -> (u64, u32) {
+        let base = u64::from(rigid_plan::constraint_id_words(&self.capacity))
+            + u64::from(self.capacity.max_bodies)
+            + 1;
+        (base, self.grid_hash_words())
+    }
+
     /// The awake-indexed broadphase on the uniform split grid too
     /// (`EngineFeatures::awake_uniform`), or on hierarchical grids only.
     pub fn set_awake_uniform(&mut self, on: bool) {

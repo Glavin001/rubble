@@ -1054,6 +1054,12 @@ mod imp {
                         self.sim.queue().clone(),
                     );
                     self.fracture.gpu = Some(g.clone());
+                    // The fracture re-parents colliders, re-frames and retires bodies on
+                    // the GPU between steps, with no host write: the awake-indexed
+                    // broadphase's resting table and moved-only bounds would not see it
+                    // (city: a static chunk's bounds and cell went stale and a pair was
+                    // missed). Worlds with a GPU fracture take the full pass.
+                    self.sim.set_awake_broadphase(false);
                     g
                 }
             };

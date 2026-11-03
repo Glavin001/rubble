@@ -759,6 +759,14 @@ impl World {
         &self.sim
     }
 
+    /// The simulation, mutably: for tests and probes that run its diagnostics
+    /// (`WgpuSim::debug_broadphase_pairs`) between steps. Writing through it bypasses the
+    /// world's bookkeeping.
+    #[doc(hidden)]
+    pub fn sim_mut(&mut self) -> &mut WgpuSim {
+        &mut self.sim
+    }
+
     pub fn device(&self) -> &wgpu::Device {
         self.sim.device()
     }
