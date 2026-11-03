@@ -18,6 +18,7 @@ pub mod elements;
 pub mod explicit_aero;
 pub mod explicit_beams;
 pub mod explicit_ref;
+pub mod explicit_triggers;
 pub mod flexbody;
 pub mod hires;
 pub mod host;

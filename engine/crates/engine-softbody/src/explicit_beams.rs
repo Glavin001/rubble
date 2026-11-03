@@ -21,7 +21,8 @@ use crate::explicit_aero::{
     airfoil_from_env, chain_wings, Airfoil, CenteringCommand, FuseDrag, Wing, WingSide, BLD, BLU,
     BRD, BRU, FLD, FLU, FRD, FRU,
 };
-use crate::truck::{load_truck, parse_truck};
+use crate::explicit_triggers::{segment_point, KeyCommand, RailSegment, SlideNode, Trigger, KEYS};
+use crate::truck::{load_truck_config, parse_truck_config};
 use glam::Vec3;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -122,6 +123,10 @@ pub enum ExplicitKind {
     /// A `shocks2` progressive shock: its rates in [`ExplicitBeams::shocks2`] at
     /// [`Beam::shock`] ([`shock2_force`]).
     Shock2,
+    /// A trigger: no stiffness or damping (zero force); its keys in
+    /// [`ExplicitBeams::triggers`] at [`Beam::shock`], its bounds the short and long
+    /// bounds (`explicit_triggers`).
+    Trigger,
 }
 
 impl ExplicitKind {
@@ -132,6 +137,7 @@ impl ExplicitKind {
             ExplicitKind::Support => 2,
             ExplicitKind::Rope => 3,
             ExplicitKind::Shock2 => 4,
+            ExplicitKind::Trigger => 5,
         }
     }
 }
@@ -209,7 +215,8 @@ pub struct Beam {
     pub broken: bool,
     /// Last force (N, positive = compression).
     pub force: f32,
-    /// [`ExplicitKind::Shock2`]: its record in [`ExplicitBeams::shocks2`].
+    /// [`ExplicitKind::Shock2`]: its record in [`ExplicitBeams::shocks2`];
+    /// [`ExplicitKind::Trigger`]: its record in [`ExplicitBeams::triggers`].
     pub shock: u32,
 }
 
@@ -471,6 +478,16 @@ pub struct ExplicitBeams {
     pub centering: Vec<CenteringCommand>,
     /// `shocks2` rates, by [`Beam::shock`].
     pub shocks2: Vec<Shock2>,
+    /// Triggers, by [`Beam::shock`] of their beams; the keys they set in the last
+    /// beam pass (1.0 held), read and cleared by the next command pass.
+    pub triggers: Vec<Trigger>,
+    pub key_input: [f32; KEYS],
+    /// With triggers, every command line (self-centering ones too), moved by its
+    /// keys; [`Self::centering`] is then empty.
+    pub commands: Vec<KeyCommand>,
+    /// Slide nodes in spawn order and their rails' segments.
+    pub slides: Vec<SlideNode>,
+    pub segments: Vec<RailSegment>,
     /// Spawn notes (airfoil files not found: their tables are zero).
     pub warnings: Vec<String>,
 }
@@ -607,6 +624,11 @@ impl ExplicitBeams {
             fuse_force: Vec3::ZERO,
             centering: Vec::new(),
             shocks2: Vec::new(),
+            triggers: Vec::new(),
+            key_input: [0.0; KEYS],
+            commands: Vec::new(),
+            slides: Vec::new(),
+            segments: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -624,6 +646,26 @@ impl ExplicitBeams {
         Self::from_truck_with_airfoils(text, position, velocity, settings, &airfoil_from_env)
     }
 
+    /// [`Self::from_truck`] with a section configuration: `None` the file's default
+    /// (the first `section` name in byte order), `Some("")` the root alone
+    /// ([`crate::truck::parse_truck_config`]).
+    pub fn from_truck_config(
+        text: &str,
+        config: Option<&str>,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+    ) -> Result<Self, String> {
+        Self::from_truck_config_with_airfoils(
+            text,
+            config,
+            position,
+            velocity,
+            settings,
+            &airfoil_from_env,
+        )
+    }
+
     /// [`Self::from_truck`] with the airfoil files' text from `airfoil` (by file
     /// name; `None`: not found, all-zero tables).
     pub fn from_truck_with_airfoils(
@@ -633,7 +675,22 @@ impl ExplicitBeams {
         settings: ExplicitBeamsSettings,
         airfoil: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
-        let file = parse_truck(text);
+        Self::from_truck_config_with_airfoils(text, None, position, velocity, settings, airfoil)
+    }
+
+    /// [`Self::from_truck_config`] with the airfoil files' text from `airfoil`.
+    pub fn from_truck_config_with_airfoils(
+        text: &str,
+        config: Option<&str>,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+        airfoil: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        let file = parse_truck_config(text, config);
+        if !file.errors.is_empty() {
+            return Err(file.errors.join("; "));
+        }
         if let Some(w) = file
             .wheels
             .iter()
@@ -645,7 +702,7 @@ impl ExplicitBeams {
                 w.kind
             ));
         }
-        let desc = load_truck(text);
+        let desc = load_truck_config(text, config);
         let cine_beams = file.cinecams.len() * 8;
         let mut s = Self::spawn_nodes(&desc, position, velocity, settings);
         // Contacters exactly as listed in the file.
@@ -771,8 +828,35 @@ impl ExplicitBeams {
         let shocks2: HashMap<usize, &crate::truck::TruckShock2> =
             file.shocks2.iter().map(|c| (c.beam, c)).collect();
         let shocks3: std::collections::HashSet<usize> = file.shocks3.iter().copied().collect();
+        let triggers: HashMap<usize, &crate::truck::TruckTrigger> =
+            file.triggers.iter().map(|t| (t.beam, t)).collect();
+        let animators: std::collections::HashSet<usize> = file.animators.iter().copied().collect();
+        // With triggers, every command line moves by its keys (spec §2.6).
+        let keyed = !file.triggers.is_empty();
+        if keyed {
+            let held: std::collections::HashSet<i32> = file
+                .triggers
+                .iter()
+                .flat_map(|t| [t.short_key as i32, t.long_key as i32])
+                .collect();
+            for c in &file.commands {
+                if (held.contains(&c.contract_key) || held.contains(&c.extend_key))
+                    && (c.one_press || !c.no_inertia)
+                {
+                    return Err(format!(
+                        "a command on keys {}/{} that a trigger holds has key inertia or a \
+                         one-press option (`o`, `p`): not supported",
+                        c.contract_key, c.extend_key
+                    ));
+                }
+            }
+        }
         let order = |i: usize| {
-            if commands.contains_key(&i) {
+            if triggers.contains_key(&i) {
+                6
+            } else if animators.contains(&i) {
+                7
+            } else if commands.contains_key(&i) {
                 4
             } else if shocks2.contains_key(&i) {
                 2
@@ -791,7 +875,7 @@ impl ExplicitBeams {
             crate::truck::TruckNodeRef::Tyre(w, k) => s.tyres[tyre_of[w as usize] as usize].first + k,
         };
         let mut tyre_beams = file.tyre_beams.iter().peekable();
-        for class in 0..6 {
+        for class in 0..8 {
             for (i, b) in rest.iter().enumerate().filter(|&(i, _)| order(i) == class) {
                 while class == 0 && tyre_beams.peek().is_some_and(|t| t.position <= i) {
                     let t = tyre_beams.next().unwrap();
@@ -806,11 +890,35 @@ impl ExplicitBeams {
                 if let Some(sh) = shocks2.get(&i) {
                     s.make_shock2(at as usize, sh);
                 }
+                if let Some(t) = triggers.get(&i) {
+                    let beam = &mut s.beams[at as usize];
+                    beam.kind = ExplicitKind::Trigger;
+                    beam.short_bound = t.short_bound;
+                    beam.long_bound = t.long_bound;
+                    beam.shock = s.triggers.len() as u32;
+                    s.triggers.push(Trigger {
+                        beam: at,
+                        short_key: t.short_key,
+                        long_key: t.long_key,
+                        enabled: true,
+                    });
+                }
                 if let Some(c) = commands.get(&i) {
                     if c.rope {
                         s.beams[at as usize].kind = ExplicitKind::Rope;
                     }
-                    if c.centering {
+                    if keyed {
+                        s.commands.push(KeyCommand::new(
+                            at,
+                            c.shorten_rate,
+                            c.lengthen_rate,
+                            c.max_contraction,
+                            c.max_extension,
+                            c.contract_key,
+                            c.extend_key,
+                            c.centering,
+                        ));
+                    } else if c.centering {
                         s.centering.push(CenteringCommand::new(
                             at,
                             c.shorten_rate,
@@ -830,11 +938,92 @@ impl ExplicitBeams {
                 s.push_desc_beam(&crate::desc::SoftBeam { a, b, ..t.beam.clone() });
             }
         }
+        s.add_slidenodes(&file);
         s.collision_range = desc.collision_range;
         s.add_triangles(&desc);
         s.add_aero(&file, airfoil);
         s.finish();
         Ok(s)
+    }
+
+    /// Slide nodes and their rails, after every beam (spec §3.2): each rail pair is
+    /// the lowest-index beam on those two nodes, in that beam's direction; a rail
+    /// with a missing beam leaves its slide node inert. The current segment starts
+    /// as the nearest.
+    fn add_slidenodes(&mut self, file: &crate::truck::TruckFile) {
+        if file.slidenodes.is_empty() {
+            return;
+        }
+        let mut first: HashMap<(u32, u32), u32> = HashMap::new();
+        for (j, b) in self.beams.iter().enumerate() {
+            first
+                .entry((b.a.min(b.b), b.a.max(b.b)))
+                .or_insert(j as u32);
+        }
+        for sn in &file.slidenodes {
+            let beams: Option<Vec<u32>> = sn
+                .rail
+                .windows(2)
+                .map(|p| first.get(&(p[0].min(p[1]), p[0].max(p[1]))).copied())
+                .collect();
+            let mut slide = SlideNode {
+                node: sn.node,
+                spring: sn.spring,
+                break_force: sn.break_force,
+                tolerance: sn.tolerance,
+                segment: None,
+                broken_away: false,
+            };
+            let Some(beams) = beams else {
+                self.warnings.push(format!(
+                    "slide node {}: a rail pair has no beam; the node is inert",
+                    sn.node
+                ));
+                self.slides.push(slide);
+                continue;
+            };
+            let base = self.segments.len() as u32;
+            let n = beams.len() as u32;
+            let looped = sn.rail.first() == sn.rail.last();
+            for (k, &beam) in beams.iter().enumerate() {
+                let k = k as u32;
+                let prev = if k > 0 {
+                    Some(base + k - 1)
+                } else if looped {
+                    Some(base + n - 1)
+                } else {
+                    None
+                };
+                let next = if k + 1 < n {
+                    Some(base + k + 1)
+                } else if looped {
+                    Some(base)
+                } else {
+                    None
+                };
+                self.segments.push(RailSegment { beam, prev, next });
+            }
+            // The nearest segment (ties: the earliest).
+            let x = self.origin + self.nodes[sn.node as usize].pos;
+            let mut best = (base, f32::INFINITY);
+            for seg in base..base + n {
+                let d = self.segment_distance(seg, x).1;
+                if d < best.1 {
+                    best = (seg, d);
+                }
+            }
+            slide.segment = Some(best.0);
+            self.slides.push(slide);
+        }
+    }
+
+    /// The nearest point of segment `seg` to world point `x`, its distance and its
+    /// ratio along the segment.
+    fn segment_distance(&self, seg: u32, x: Vec3) -> (Vec3, f32, f32) {
+        let b = &self.beams[self.segments[seg as usize].beam as usize];
+        let p1 = self.origin + self.nodes[b.a as usize].pos;
+        let p2 = self.origin + self.nodes[b.b as usize].pos;
+        segment_point(p1, p2, x)
     }
 
     /// Turn beam `j` (spawned from a `shocks2` line's bounded beam) into a shock2
@@ -1169,12 +1358,17 @@ impl ExplicitBeams {
         if self.fusedrag.is_some() {
             self.fuse_pass();
         }
-        if !self.centering.is_empty() {
+        if !self.triggers.is_empty() {
+            self.key_command_pass();
+        } else if !self.centering.is_empty() {
             self.command_pass();
         }
         self.beam_pass();
         if !self.triangles.is_empty() && !self.candidates.is_empty() {
             self.collision_pass();
+        }
+        if !self.slides.is_empty() {
+            self.slide_pass();
         }
         self.steps += 1;
     }
@@ -1296,6 +1490,63 @@ impl ExplicitBeams {
         }
     }
 
+    /// Commands with key input (spec §2.6): this step's key values are the
+    /// triggers' inputs from the last beam pass, which are then cleared.
+    fn key_command_pass(&mut self) {
+        let mut values = [0.0f32; KEYS];
+        for (v, input) in values.iter_mut().zip(self.key_input.iter_mut()).skip(1) {
+            // max(player input 0, trigger input).
+            *v = if 0.0 < *input { *input } else { 0.0 };
+            *input = 0.0;
+        }
+        self.key_input[0] = 0.0;
+        for c in &mut self.commands {
+            let b = &mut self.beams[c.beam as usize];
+            b.rest = c.update(b.rest, b.rest0, STEP, &values);
+        }
+    }
+
+    /// Slide nodes in spawn order (spec §3.4), after self-collision.
+    fn slide_pass(&mut self) {
+        for i in 0..self.slides.len() {
+            let Some(cur) = self.slides[i].segment else {
+                continue;
+            };
+            if self.beams[self.segments[cur as usize].beam as usize].broken {
+                continue;
+            }
+            let x = self.origin + self.nodes[self.slides[i].node as usize].pos;
+            // At most one segment's hop: the previous one if nearer, then the next
+            // one if nearer still.
+            let mut best = (cur, self.segment_distance(cur, x));
+            let seg = self.segments[cur as usize];
+            if let Some(p) = seg.prev {
+                let d = self.segment_distance(p, x);
+                if d.1 < best.1 .1 {
+                    best = (p, d);
+                }
+            }
+            if let Some(n) = seg.next {
+                let d = self.segment_distance(n, x);
+                if d.1 < best.1 .1 {
+                    best = (n, d);
+                }
+            }
+            let (seg, (q, _, ratio)) = best;
+            let slide = &mut self.slides[i];
+            slide.segment = Some(seg);
+            if slide.broken_away {
+                continue;
+            }
+            let f = slide.force(q, x, ratio);
+            let node = slide.node;
+            let b = self.beams[self.segments[seg as usize].beam as usize];
+            self.nodes[node as usize].force += f.node;
+            self.nodes[b.a as usize].force += f.a;
+            self.nodes[b.b as usize].force += f.b;
+        }
+    }
+
     fn beam_pass(&mut self) {
         for j in 0..self.beams.len() {
             if self.beams[j].broken {
@@ -1310,6 +1561,13 @@ impl ExplicitBeams {
             } else {
                 beam_force(&mut beam, &na, &nb, self.settings.fast_inv_sqrt)
             };
+            if beam.kind == ExplicitKind::Trigger {
+                // The trigger test (spec §2.5), for the next step's command pass.
+                let t = self.triggers[beam.shock as usize];
+                if let Some(k) = t.held(out.e, beam.rest, beam.short_bound, beam.long_bound) {
+                    self.key_input[k as usize] = 1.0;
+                }
+            }
             let mut f = out.force;
             let mut cascade = false;
             if out.check_break {
@@ -1588,6 +1846,8 @@ pub struct BeamOut {
     /// a − b and 1/|a − b|.
     pub d: Vec3,
     pub inv: f32,
+    /// Extension ℓ − L.
+    pub e: f32,
     /// Force to apply (positive = compression), before the break test.
     pub force: f32,
     /// τ exceeded the strength: the beam breaks unless an end saves it.
@@ -1649,8 +1909,9 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
                 c *= 0.1;
             }
         }
-        // Shock2 beams take `shock2_force`; here they act as plain ones.
-        ExplicitKind::Plain | ExplicitKind::Shock2 => {}
+        // Shock2 beams take `shock2_force`; here they act as plain ones. Triggers
+        // have k = c = 0.
+        ExplicitKind::Plain | ExplicitKind::Shock2 | ExplicitKind::Trigger => {}
     }
     let mut f = -k * e - c * u;
     beam.force = f;
@@ -1689,6 +1950,7 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
     BeamOut {
         d,
         inv,
+        e,
         force: f,
         check_break,
     }
@@ -1714,6 +1976,7 @@ pub fn shock2_force(beam: &mut Beam, sh: &Shock2, na: &Node, nb: &Node, fast: bo
     BeamOut {
         d,
         inv,
+        e,
         force: f,
         check_break: tau > beam.gate && tau > beam.strength,
     }
