@@ -17,8 +17,14 @@
 //! profile; [`ExplicitBeamsSettings`] switches the optional ones.
 
 use crate::desc::{BeamKind, SoftVehicleDesc};
+use crate::explicit_aero::{
+    airfoil_from_env, chain_wings, Airfoil, CenteringCommand, FuseDrag, Wing, WingSide, BLD, BLU,
+    BRD, BRU, FLD, FLU, FRD, FRU,
+};
 use crate::truck::{load_truck, parse_truck};
 use glam::Vec3;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// The fixed step (s).
 pub const STEP: f32 = 0.0005;
@@ -327,6 +333,19 @@ pub struct ExplicitBeams {
     /// Steps run so far.
     pub steps: u64,
     pub clock: FrameClock,
+    /// Wing panels in file order ([`crate::explicit_aero`]).
+    pub wings: Vec<Wing>,
+    /// Airfoil tables the wings and the fuselage drag use, one per file name.
+    pub airfoils: Vec<Arc<Airfoil>>,
+    /// The `fusedrag` line: with one, the node pass adds [`Self::fuse_force`]
+    /// instead of the air drag and turbulence.
+    pub fusedrag: Option<FuseDrag>,
+    /// The fuselage drag on every node, from the previous step (0 at spawn).
+    pub fuse_force: Vec3,
+    /// Self-centering command beams (the only commands that move with no input).
+    pub centering: Vec<CenteringCommand>,
+    /// Spawn notes (airfoil files not found: their tables are zero).
+    pub warnings: Vec<String>,
 }
 
 // --- numerical primitives (compatible profile) ---
@@ -455,17 +474,36 @@ impl ExplicitBeams {
             grid: CollisionGrid::default(),
             steps: 0,
             clock: FrameClock::default(),
+            wings: Vec::new(),
+            airfoils: Vec::new(),
+            fusedrag: None,
+            fuse_force: Vec3::ZERO,
+            centering: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
     /// Spawn a `.truck` file with its node offsets at `position`, every node moving
     /// at `velocity`, its tyres built from the `wheels` section (other wheel
-    /// sections are an error).
+    /// sections are an error). Airfoil tables (`wings`, `fusedrag`) are read from
+    /// the directory in `RUBBLE_AIRFOIL_DIR` ([`crate::explicit_aero::airfoil_from_env`]).
     pub fn from_truck(
         text: &str,
         position: Vec3,
         velocity: Vec3,
         settings: ExplicitBeamsSettings,
+    ) -> Result<Self, String> {
+        Self::from_truck_with_airfoils(text, position, velocity, settings, &airfoil_from_env)
+    }
+
+    /// [`Self::from_truck`] with the airfoil files' text from `airfoil` (by file
+    /// name; `None`: not found, all-zero tables).
+    pub fn from_truck_with_airfoils(
+        text: &str,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+        airfoil: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let file = parse_truck(text);
         if let Some(w) = file.wheels.iter().find(|w| w.kind != "wheels") {
@@ -569,16 +607,91 @@ impl ExplicitBeams {
                 }
             }
         }
+        // Then the file's beams, shocks, commands and hydros. Commands and hydros
+        // gate their break test on the deform threshold at their line.
         let rest: Vec<_> = desc.beams[cine_beams.min(desc.beams.len())..].to_vec();
-        for class in 0..3 {
-            for b in rest.iter().filter(|b| order_class(b.kind) == class) {
+        let gates: HashMap<usize, f32> = file.actuator_gates.iter().copied().collect();
+        let commands: HashMap<usize, &crate::truck::TruckCommand> =
+            file.commands.iter().map(|c| (c.beam, c)).collect();
+        let order = |i: usize| match (commands.contains_key(&i), order_class(rest[i].kind)) {
+            (true, _) => 2,
+            (false, 2) => 3,
+            (false, c) => c,
+        };
+        for class in 0..4 {
+            for (i, b) in rest.iter().enumerate().filter(|&(i, _)| order(i) == class) {
+                let at = s.beams.len() as u32;
                 s.push_desc_beam(b);
+                if let Some(&g) = gates.get(&i) {
+                    s.beams[at as usize].gate = g;
+                }
+                if let Some(c) = commands.get(&i) {
+                    if c.rope {
+                        s.beams[at as usize].kind = ExplicitKind::Rope;
+                    }
+                    if c.centering {
+                        s.centering.push(CenteringCommand::new(
+                            at,
+                            c.shorten_rate,
+                            c.lengthen_rate,
+                            c.max_contraction,
+                            c.max_extension,
+                            c.contract_key,
+                            c.extend_key,
+                        ));
+                    }
+                }
             }
         }
         s.collision_range = desc.collision_range;
         s.add_triangles(&desc);
+        s.add_aero(&file, airfoil);
         s.finish();
         Ok(s)
+    }
+
+    /// Wings (break references, chains) and the fuselage drag from spawn
+    /// positions, with their airfoil tables.
+    fn add_aero(&mut self, file: &crate::truck::TruckFile, airfoil: &dyn Fn(&str) -> Option<String>) {
+        let table = |s: &mut Self, name: &str| -> u32 {
+            if let Some(i) = s.airfoils.iter().position(|a| a.name == name) {
+                return i as u32;
+            }
+            let a = match airfoil(name) {
+                Some(text) => Airfoil::parse(name, &text),
+                None => {
+                    s.warnings.push(format!("airfoil `{name}` not found: its tables are zero"));
+                    Airfoil::zero(name)
+                }
+            };
+            s.airfoils.push(Arc::new(a));
+            s.airfoils.len() as u32 - 1
+        };
+        let x: Vec<Vec3> = self.nodes.iter().map(|n| self.origin + n.pos).collect();
+        for w in &file.wings {
+            let t = table(self, &w.airfoil);
+            self.wings.push(Wing::new(w.nodes, w.efficacy, w.chord_point, w.control, t, &x));
+        }
+        chain_wings(&mut self.wings, &x);
+        if let Some(fd) = &file.fusedrag {
+            let t = table(self, &fd.airfoil);
+            self.fusedrag = Some(FuseDrag {
+                front: fd.front,
+                width: fd.width,
+                airfoil: t,
+            });
+        }
+        self.check_wings();
+    }
+
+    /// The wing break check on the current world positions (once per frame, before
+    /// the origin rebase, and at spawn).
+    pub fn check_wings(&mut self) {
+        let origin = self.origin;
+        let nodes = &self.nodes;
+        for w in &mut self.wings {
+            w.check_break(|i| origin + nodes[i as usize].pos);
+        }
     }
 
     /// Spawn a BeamNG JBeam vehicle (`files`: name and text of each `.jbeam`,
@@ -782,6 +895,7 @@ impl ExplicitBeams {
 
     /// One 60 fps frame: rebase, then its steps ([`FrameClock`]). Returns the steps.
     pub fn frame(&mut self) -> u32 {
+        self.check_wings();
         self.rebase_origin();
         let steps = self.clock.next();
         for _ in 0..steps {
@@ -798,9 +912,19 @@ impl ExplicitBeams {
         }
     }
 
-    /// One fixed step: nodes, beams, self-collision.
+    /// One fixed step: nodes, wings, fuselage drag, commands, beams,
+    /// self-collision.
     pub fn step(&mut self) {
         self.node_pass();
+        if !self.wings.is_empty() {
+            self.wing_pass();
+        }
+        if self.fusedrag.is_some() {
+            self.fuse_pass();
+        }
+        if !self.centering.is_empty() {
+            self.command_pass();
+        }
         self.beam_pass();
         if !self.triangles.is_empty() && !self.candidates.is_empty() {
             self.collision_pass();
@@ -849,7 +973,11 @@ impl ExplicitBeams {
                 n.pos += n.vel * h;
             }
             n.force = Vec3::new(0.0, n.mass * GRAVITY, 0.0);
-            if settings.drag {
+            if self.fusedrag.is_some() {
+                // The fuselage drag replaces the air drag and turbulence (no noise
+                // drawn).
+                n.force += self.fuse_force;
+            } else if settings.drag {
                 let s = approx_sqrt(n.vel.dot(n.vel));
                 n.force += -DRAG * s * n.vel;
                 if settings.turbulence {
@@ -861,6 +989,63 @@ impl ExplicitBeams {
                 }
             }
             self.nodes[i] = n;
+        }
+    }
+
+    /// Wings in file order: forces from this step's velocities and positions.
+    fn wing_pass(&mut self) {
+        for wi in 0..self.wings.len() {
+            let w = &self.wings[wi];
+            if w.broken {
+                continue;
+            }
+            let nodes = &self.nodes;
+            let y = self.origin.y + nodes[w.nodes[FLD] as usize].pos.y;
+            let out = w.forces(
+                |i| nodes[i as usize].pos,
+                |i| nodes[i as usize].vel,
+                y,
+                &self.airfoils[w.airfoil as usize],
+            );
+            let slots = w.nodes;
+            let mut add = |slot: usize, f: Vec3| self.nodes[slots[slot] as usize].force += f;
+            match out.induced {
+                Some((i, WingSide::Left)) => {
+                    add(BLU, i);
+                    add(BLD, i);
+                }
+                Some((i, WingSide::Right)) => {
+                    add(BRU, i);
+                    add(BRD, i);
+                }
+                None => {}
+            }
+            for s in [FLD, FLU, FRD, FRU] {
+                add(s, out.front);
+            }
+            for s in [BLD, BLU, BRD, BRU] {
+                add(s, out.back);
+            }
+        }
+    }
+
+    /// The fuselage drag D for the next step's force restart.
+    fn fuse_pass(&mut self) {
+        let Some(fd) = &self.fusedrag else {
+            return;
+        };
+        let p = &self.nodes[fd.front as usize];
+        let y = self.origin.y + p.pos.y;
+        if let Some(d) = fd.force(p.vel, y, self.nodes.len(), &self.airfoils[fd.airfoil as usize]) {
+            self.fuse_force = d;
+        }
+    }
+
+    /// Commands with no input: only self-centering beams change their rest length.
+    fn command_pass(&mut self) {
+        for c in &mut self.centering {
+            let b = &mut self.beams[c.beam as usize];
+            b.rest = c.update(b.rest, b.rest0, STEP);
         }
     }
 
