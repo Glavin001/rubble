@@ -870,7 +870,11 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
 // Four vertices per beam: 0–1 the beam (2–3 hidden); a broken beam instead draws a
 // short stub at each of its nodes (0–1 at one end, 2–3 at the other), since its
 // two nodes may since have flown metres apart.
-@vertex fn vsXBeam(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Out {
+// One draw of 4 vertices per beam (not an instance per beam: millions of 4-vertex
+// instances cost far more than the vertices themselves).
+@vertex fn vsXBeam(@builtin(vertex_index) vall: u32) -> Out {
+  let inst = vall / 4u;
+  let vi = vall % 4u;
   let rec = xrecs[inst];
   let v = rec.z & 0xffffu;
   let tyre = (rec.z >> 16u) != 0u;
@@ -1347,7 +1351,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // destruction events).
     let lastPlayer = null, lastCounters = null;
     const followBody = () => playerCore() ? playerCore().chassis : entries[player]?.firstBody ?? 1;
-    let damage = null, breaks = 0, damageRead = null, damageStep = -1, rigidCount = 0;
+    let damage = null, breaks = 0, damageRead = null, damageStep = -1, damageWall = -1e9, rigidCount = 0;
     const tornOff = []; // "car: part" per piece-detached event
     window.__tornOff = tornOff;
     function onFrame(f) {
@@ -1396,7 +1400,8 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (damageRead) return damageRead;
       if (EXPLICIT) {
         const sim = xsim;
-        damageRead = sim.readDamage().then((d) => {
+        // The display lists a few vehicles: a big fleet reads only the first 8.
+        damageRead = sim.readDamage(xlayout.vehicles.length > 16 ? 8 : undefined).then((d) => {
           damageRead = null;
           if (sim !== xsim) return damage;
           damage = d.map((x, i) => ({ name: xlayout.vehicles[i].name, beams: x.beams, yielded: x.bent, broken: x.broken }));
@@ -1429,7 +1434,8 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         xstatsEl.textContent = `soft AVBD · ${HZ} Hz × ${ITERS} it`;
       }
       if (lastPlayer) speedEl.innerHTML = `${(Math.hypot(...lastPlayer.v) * 3.6).toFixed(0)} <small>km/h</small>`;
-      if (simSteps() - damageStep >= 30) { damageStep = simSteps(); readDamage().catch(fail); }
+      // A few times a second of wall time (a slow frame takes many steps).
+      if (simSteps() - damageStep >= 30 && performance.now() - damageWall >= 250) { damageStep = simSteps(); damageWall = performance.now(); readDamage().catch(fail); }
       if (damage) {
         damageEl.innerHTML = damage.map((d, i) => ({ ...d, i })).filter((d) => d.i === player || (d.beams > 200 && (damage.length < 6 || d.yielded > 0))).slice(0, 8)
           .map((d) => `${d.i === player ? '▶ ' : ''}${d.name.split(' (')[0].slice(0, 22)}: ${d.yielded} bent · ${d.broken} broken / ${d.beams}`).join('<br>');
@@ -1569,7 +1575,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (xsim) {
         const xb = xBindings();
         rp.setPipeline(xSkinPipe); rp.setBindGroup(0, xb.skin); rp.draw(xlayout.triangles * 3);
-        rp.setPipeline(xBeamPipe); rp.setBindGroup(0, xb.beam); rp.draw(4, xlayout.beams);
+        rp.setPipeline(xBeamPipe); rp.setBindGroup(0, xb.beam); rp.draw(4 * xlayout.beams);
       }
       if (world.wheelCount()) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.wheelCount()); }
       buggyR?.draw(rp);
@@ -1619,7 +1625,11 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       return steps;
     }
     const launchExplicit = () => xsim.launch(XSPEED).catch(fail);
+    // Explicit frames in flight on the GPU: at most two, as a game loop keeps it, so
+    // the fps and real-time readouts count finished work, not submissions running ahead.
+    let xInFlight = 0;
     function frame(now) {
+      if (EXPLICIT && !manual && xInFlight >= 2) { requestAnimationFrame(frame); return; }
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
       fpsAcc += dt; fpsN++;
@@ -1641,6 +1651,8 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         const enc = device.createCommandEncoder();
         drawScene(enc);
         device.queue.submit([enc.finish()]);
+        xInFlight++;
+        device.queue.onSubmittedWorkDone().then(() => { xInFlight--; });
         updateHud();
         updateStatus();
         requestAnimationFrame(frame);

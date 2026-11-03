@@ -593,15 +593,17 @@ impl ExplicitSim {
         }))
     }
 
-    /// Damage of every vehicle from one copy of its beams, resolved once mapped:
-    /// `[{ broken, bent, beams }]` (bent: alive with its rest length off its spawn
-    /// length by over 0.1 %, as `GpuBeam::bent`).
+    /// Damage of the first `limit` vehicles (all when absent) from one copy of their
+    /// beams, resolved once mapped: `[{ broken, bent, beams }]` (bent: alive with its
+    /// rest length off its spawn length by over 0.1 %, as `GpuBeam::bent`). A large
+    /// fleet's display reads a few: every beam of thousands is tens of megabytes.
     #[wasm_bindgen(js_name = readDamage)]
-    pub fn read_damage(&self) -> js_sys::Promise {
+    pub fn read_damage(&self, limit: Option<u32>) -> js_sys::Promise {
         let buf = self.gpu.beams_buffer().clone();
         let mut ranges = Vec::new();
         let mut rest0 = Vec::new();
-        for (i, v) in self.vehicles.iter().enumerate() {
+        let count = limit.map_or(self.vehicles.len(), |l| (l as usize).min(self.vehicles.len()));
+        for (i, v) in self.vehicles.iter().enumerate().take(count) {
             let off = self.gpu.beam_offset(i) as usize;
             let n = v.sim.beams.len();
             ranges.push((buf.clone(), off as u64 * 32, n as u64 * 32));
