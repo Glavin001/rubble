@@ -1017,3 +1017,78 @@ Notes:
 - **grid_strike**, sleep on, persistent contacts: no box below 0.1 m from the strike to step
   1,000, lowest box centre 0.17 m. With `STRIKE_CANONICAL=1` (now the carry, as on main): no box
   below the ground, lowest centre 0.06 m, one box below 0.1 m at steps 850 and 1,000.
+
+## The city's pair set, and PR #97's memory (2026-11-03, later)
+
+**The pair.** City, sleep off, the war scenario: from the first shell steps the awake pass and
+the full pass disagree before the broadphase even runs. Up to 9,790 colliders' bounds differ
+(steps 20-23 and 38-41), and pairs go missing, for example (10486, 10562): a static 0.28 m
+chunk of body 9913 against a 2 m piece of body 9921 that moves; (12810, 13055) is the same
+case. The harness's step-78 contact is one of these. **Cause:** the threshold fracture changes
+colliders and bodies on the GPU between steps with no host write (fr_commit, fr_reparent,
+retire, re-frame), while the awake path rebuilds bounds only for this step's listed movers and
+keeps its resting table until the host marks it stale. A re-framed static chunk keeps its old
+bounds and its old cell. **Fix:** the first GPU fracture turns the awake pass off for its
+world (threshold.rs), so threshold worlds take the full pass, as on main. City sleep off is
+bit-identical to main again. Sleep on differs only by `ccd_by_collider` (2,104 bonds against
+main's 2,030; a0b23796 is on that). Making the awake pass follow the fracture would need a GPU
+signal from the fracture (its move and frame counters) that rebuilds bounds and the table; not
+done.
+
+**The test.** `engine-world/tests/awake_broadphase_scenes.rs` compares the awake pass with the
+full pass before each compared step, on the same GPU state, as exact sets of candidate pairs
+plus bit-identical collider bounds:
+- the demo's 100k Grid with its CCD ball, under the demo's planning (136 steps) and at every
+  awake fraction (150);
+- Brick Ring 28k at every step (400);
+- the city, which must take the full pass.
+
+The two runs must start from the same binding 21. The sleep archive's touch query lists
+touched sleepers there per step, and a second run spread one hop further from the first run's
+list. Without that restore the comparison reported pairs (two just-asleep ring bricks, a grid
+brick and the ground) that only the second run found. These were artifacts of running twice,
+not misses.
+
+**Memory.** Headless Chrome, `mem.mjs`, `demo.html?scene=<s>&sleep=on`, ~200 steps, MB of GPU
+buffers at peak, against main 0ab6a4dc:
+
+| page | main | PR before | this | what is over main |
+|---|---|---|---|---|
+| ring110k | 881.6 | 898.1 (+16.5) | 871.5 (-10.1) | below main: b14 -12.0, b21 +1.6, b22 +0.4 |
+| gables506k | 2,506.7 | 2,565.7 (+59.0) | 2,532.3 (+25.6) | b14 +18.9 (the awake pass's tables, in use), b21 +6.3 (the touch query's records), b22 +0.4 (pass table) |
+
+(Peak equals live in both: the grown binding 14 is created after the old one is freed. A first
+build that created it before freeing the old one peaked 21 MB higher on gables.)
+
+Three changes, each lossless:
+- **The pre-CSR region holds what its tables can reach.** `constraint_id_cap` keeps the power
+  of two every table is sized within, so the grid heads, the warm hash and the ids are
+  unchanged. `constraint_id_words` allocates only the most of them, and the rounding none of
+  them reaches is gone. 2 × (2^21 contacts + 64 joints) used to take 2^23 words (ring110k: 16.8
+  MB). Gables keeps its region: its record warm hash can reach all of it.
+- **The awake pass's tables are allocated on use.** `WgpuSim::ensure_rest_tables` grows
+  binding 14 the first time a step takes the awake pass, sized for the colliders present
+  (rounded up to a power of two, at most the capacity). It fails the step if the device cannot
+  hold it. Nothing else in binding 14 outlives a step, so the old buffer is freed first and
+  nothing is copied. Worlds that never take the awake pass spend nothing on it: fracture worlds,
+  and uniform grids that never drop below their awake fraction. The awake bitmap moves ahead of
+  the tables, because the awake-list body passes read it without them.
+- **An archive that keeps no rows is laid out without them** (`archiveCompact`, host word 30
+  bit 9). Cold wakes with the touch query are the default for persistent contacts, and they
+  never read rows, blocks or per-body row records. That leaves 3 words a body instead of 7. The
+  reset snapshot's copy of binding 21 shrinks with it (snapshot-b21 5.7 MB -> 0), and snapshots
+  skip the constant pass table.
+
+Gables506k stays above main because its uniform grid falls below 10% awake within the 200
+steps, so the awake pass runs and its tables are live: 2^20 heads twice (8.4 MB), and five
+words a collider for 2^19 colliders (10.5 MB). The touch query keeps three words a body. Going
+below main there would mean dropping work these paths do, or aliasing W into the pre-CSR region
+with a full clear every step.
+
+Gates on e9c6ae76..611507e9:
+- harness against mainA: house and arch identical (61/61, off and on); city off identical, on
+  as above; gables, ring and vehicle off identical, on within main's noise (gables mean 0.365 m,
+  ring 0.243 m); grid only main's fall-through;
+- grid_strike x2: no box below 0 (lowest 0.12 and 0.16 m);
+- engine-world (all but the known `cuboid_house_breaks_and_splits_as_in_the_lab`), the
+  engine-webgpu integration suites, engine-ffi and engine-metal `vehicle_parity` pass.
