@@ -302,12 +302,71 @@ fn crushing_in_blasts_frame_takes_the_bond_forces_virial() {
 /// The lab's cuboid house as stress-web loads it for `blast_gpu`: a scene without Blast
 /// authoring, so Blast's inputs come from the structures the threshold world resolved.
 fn cuboid_house() -> Scene {
+    cuboid_house_for(Profile::BlastGpu)
+}
+
+fn cuboid_house_for(p: Profile) -> Scene {
     let (_lab, json) = engine_fracture::samples::cuboid_stress_scene(None).expect("cuboid house");
     let mut scene = stress_ref::shardwright::import_value_with(&json, "cuboid_houses", true).expect("import").with_derived();
     scene.sim.methods = stress_ref::scene::Methods::established();
-    Profile::BlastGpu.apply_scene(&mut scene);
+    p.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     scene
+}
+
+/// The lab's own shot (its ball's mass, radius and default speed) fired level at the cuboid
+/// house's middle under profile `p`, strike prediction as the profile sets it: (bonds broken,
+/// bodies) after `frames`.
+fn lab_shot_on_cuboid(gpu: &Gpu, p: Profile, frames: u32) -> (u32, u32) {
+    let (lab, _) = engine_fracture::samples::cuboid_stress_scene(None).expect("cuboid house");
+    let scene = cuboid_house_for(p);
+    let r = lab.projectile_radius;
+    let mut w = ThresholdWorld::with_profile(gpu, &scene, r, lab.projectile_mass, p).expect("world");
+    let all: Vec<_> = scene.bodies.iter().flat_map(|b| &b.chunks).collect();
+    let (lo, hi) = all.iter().fold(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]), |(mut lo, mut hi), c| {
+        for k in 0..3 {
+            lo[k] = lo[k].min(c.center[k]);
+            hi[k] = hi[k].max(c.center[k]);
+        }
+        (lo, hi)
+    });
+    let mid = [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]), lo[2] + 0.35 * (hi[2] - lo[2])];
+    let speed = engine_fracture::plan::default_shot_speed(lab.extent, lab.projectile_speed);
+    let shot = ImpactorDesc {
+        name: "ball".into(),
+        shape: ImpactorShape::Sphere { radius: r },
+        mass: lab.projectile_mass,
+        position: [lo[0] - 4.0, mid[1], mid[2]],
+        orientation: [1.0, 0.0, 0.0, 0.0],
+        velocity: [speed, 0.0, 0.0],
+        angular_velocity: [0.0; 3],
+        material: "projectile".into(),
+        crush: None,
+    };
+    println!("{p:?}: ball {} kg, r {r} m, {speed} m/s", lab.projectile_mass);
+    for frame in 0..frames {
+        if frame == 2 {
+            assert!(w.launch(gpu, &shot));
+        }
+        w.step_frame(gpu).expect("frame");
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let stats = w.poll(gpu);
+    assert_eq!(stats.error, 0, "{stats:?}");
+    (w.fracture.bonds_intact(gpu).iter().filter(|b| !**b).count() as u32, stats.bodies)
+}
+
+#[test]
+fn the_labs_shot_breaks_the_cuboid_house_under_blast_as_under_the_load_path() {
+    let Ok(gpu) = Gpu::new() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let load_path = lab_shot_on_cuboid(&gpu, Profile::LoadPath, 120);
+    let blast = lab_shot_on_cuboid(&gpu, Profile::BlastGpu, 120);
+    println!("load path: {load_path:?}; blast: {blast:?}");
+    assert!(load_path.0 > 0, "the load path breaks the house: {load_path:?}");
+    assert!(blast.0 > 0, "Blast breaks the house too: {blast:?}");
 }
 
 #[test]

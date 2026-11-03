@@ -191,8 +191,11 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 
     // Krylov carry: the last solve's recurrence, if it may continue (cleared here; set again
     // by an unconverged solve).
-    uint3 kept = group_uniform4(uint4(carry_of(k), 0u), tid).xyz;
-    bool carried = carry_kept(kept, n1 - n0);
+    // The island's size goes through the same uniform load: `carried` steers barriers, and
+    // WGSL takes a value read from a storage buffer as non-uniform.
+    uint4 carry = group_uniform4(uint4(carry_of(k), n1 - n0), tid);
+    uint3 kept = carry.xyz;
+    bool carried = carry_kept(kept, carry.w);
     // Every thread has read it (group_uniform4 synchronises only on WGSL) before it is cleared.
     device_group_barrier();
     if (tid == 0 && params.carry != 0)

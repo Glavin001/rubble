@@ -1610,8 +1610,9 @@ float group_max_0(uint tid_6, float v_17, KernelContext_0 thread* kernelContext_
         }
     }
     uint3 _S172 = carry_of_0(k_19, &kernelContext_36);
-    uint3 kept_0 = group_uniform4_0(uint4(_S172, 0U), tid_7).xyz;
-    bool _S173 = carry_kept_0(kept_0, _S165, &kernelContext_36);
+    uint4 carry_1 = group_uniform4_0(uint4(_S172, _S165), tid_7);
+    uint3 kept_0 = carry_1.xyz;
+    bool _S173 = carry_kept_0(kept_0, carry_1.w, &kernelContext_36);
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     bool _S174 = tid_7 == 0U;
     if(_S174)
