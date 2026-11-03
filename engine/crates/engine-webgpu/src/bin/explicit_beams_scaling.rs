@@ -57,10 +57,15 @@
 //! columns) records the first scenario and count on Rubble's GPU for the crash
 //! viewer instead of benchmarking.
 //!
-//! Bounds. `max_frame_ms=` (default 100): before each count, an engine's frame time
+//! Bounds. `ceiling_ms=` (default 0: off) with `ceiling_frames=` (default 10): a
+//! run, warm frames included, stops once that many consecutive frames each take
+//! longer than the ceiling (RoR: its frame wall time; Rubble: per-frame wall time in
+//! the warm and blocking frames, GPU time in the pipelined ones); that engine is too
+//! slow at that count and runs no count from there on, in any trial, and the stopped
+//! run is kept only as a record. `max_frame_ms=` (default: the ceiling, else 100): before each count, an engine's frame time
 //! is predicted from its previous count (linearly in vehicles); past the limit that
 //! engine runs no larger count, in any trial (Rubble's limit ends the count for both).
-//! `deadline_s=` (default none): a run whose predicted wall time (the previous
+//! `deadline_s=` (default none; quiet-machine waits not counted): a run whose predicted wall time (the previous
 //! count's, scaled linearly) would end past the deadline is not started; the trials
 //! stop there and the summary covers what ran. `<out>/results.partial.json` holds
 //! every finished run after each one.
@@ -318,6 +323,8 @@ impl EndState {
 struct Run {
     frame_ms: Vec<f64>,
     end: Vec<EndState>,
+    /// Frame (warm frames counted) at which the frame ceiling stopped the run.
+    stopped_at: Option<u32>,
 }
 
 struct RubbleRun {
@@ -325,6 +332,32 @@ struct RubbleRun {
     pipelined_ms: f64,
     blocking_ms: Vec<f64>,
     end: Vec<EndState>,
+    stopped_at: Option<u32>,
+}
+
+/// The frame ceiling: a run stops after `frames` consecutive frames slower than
+/// `ms` (0: off).
+#[derive(Clone, Copy)]
+struct Ceiling {
+    ms: f64,
+    frames: u32,
+}
+
+impl Ceiling {
+    /// Index of the frame ending the first run of `frames` consecutive slow ones.
+    fn hit(self, frame_ms: impl IntoIterator<Item = f64>) -> Option<u32> {
+        if self.ms <= 0.0 {
+            return None;
+        }
+        let mut slow = 0;
+        for (i, t) in frame_ms.into_iter().enumerate() {
+            slow = if t > self.ms { slow + 1 } else { 0 };
+            if slow >= self.frames {
+                return Some(i as u32);
+            }
+        }
+        None
+    }
 }
 
 /// One scenario's accuracy ensemble: per nudged run its spawn positions and each
@@ -487,15 +520,30 @@ fn run_rubble(
     warm: u32,
     frames: u32,
     steps: u32,
+    ceiling: Ceiling,
 ) -> RubbleRun {
     let n = fleet.len();
-    // Pipelined, with the GPU time of each frame.
+    // Pipelined, with the GPU time of each frame. The untimed warm frames each wait
+    // for completion, so the ceiling can stop a run before its timed frames.
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
     apply_wide(&mut gpu);
-    for _ in 0..warm {
-        gpu.frame(steps);
+    let warm_ms: Vec<f64> = (0..warm)
+        .map(|_| {
+            let t = Instant::now();
+            gpu.frame(steps);
+            gpu.wait();
+            t.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    if let Some(at) = ceiling.hit(warm_ms.iter().copied()) {
+        return RubbleRun {
+            gpu_ms: Vec::new(),
+            pipelined_ms: f64::NAN,
+            blocking_ms: Vec::new(),
+            end: rubble_end(&gpu, n),
+            stopped_at: Some(at),
+        };
     }
-    gpu.wait();
     let timed = gpu.enable_frame_timing(frames);
     let t = Instant::now();
     for _ in 0..frames {
@@ -510,6 +558,15 @@ fn run_rubble(
     };
     let end = rubble_end(&gpu, n);
     drop(gpu);
+    if let Some(at) = ceiling.hit(gpu_ms.iter().copied()) {
+        return RubbleRun {
+            gpu_ms,
+            pipelined_ms,
+            blocking_ms: Vec::new(),
+            end,
+            stopped_at: Some(warm + at),
+        };
+    }
     // Blocking: submit to completion, every frame.
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
     apply_wide(&mut gpu);
@@ -517,19 +574,24 @@ fn run_rubble(
         gpu.frame(steps);
     }
     gpu.wait();
-    let blocking_ms = (0..frames)
-        .map(|_| {
-            let t = Instant::now();
-            gpu.frame(steps);
-            gpu.wait();
-            t.elapsed().as_secs_f64() * 1e3
-        })
-        .collect();
+    let mut blocking_ms = Vec::new();
+    let mut stopped_at = None;
+    for _ in 0..frames {
+        let t = Instant::now();
+        gpu.frame(steps);
+        gpu.wait();
+        blocking_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        if let Some(at) = ceiling.hit(blocking_ms.iter().copied().rev().take(ceiling.frames as usize)) {
+            stopped_at = Some(warm + blocking_ms.len() as u32 - ceiling.frames + at);
+            break;
+        }
+    }
     RubbleRun {
         gpu_ms,
         pipelined_ms,
         blocking_ms,
         end,
+        stopped_at,
     }
 }
 
@@ -541,6 +603,7 @@ fn run_ror(
     warm: u32,
     frames: u32,
     steps: u32,
+    ceiling: Ceiling,
 ) -> Run {
     let out = scene_file.with_extension("ror.json");
     let sample = samples(n)
@@ -564,6 +627,8 @@ fn run_ror(
             DRAG.load(std::sync::atomic::Ordering::Relaxed) as u8
         ))
         .arg(format!("sample={sample}"))
+        .arg(format!("ceiling_ms={}", ceiling.ms))
+        .arg(format!("ceiling_frames={}", ceiling.frames))
         .args(
             CONFIG
                 .get()
@@ -602,7 +667,8 @@ fn run_ror(
             }
         })
         .collect();
-    Run { frame_ms, end }
+    let stopped_at = v["stopped_at"].as_i64().filter(|&f| f >= 0).map(|f| f as u32);
+    Run { frame_ms, end, stopped_at }
 }
 
 fn load_average() -> f64 {
@@ -780,9 +846,18 @@ fn main() -> anyhow::Result<()> {
     let max_load: f64 = kv(&args, "max_load").map_or(3.0, |s| s.parse().unwrap());
     let max_gpu: f64 = kv(&args, "max_gpu").map_or(10.0, |s| s.parse().unwrap());
     let quiet_wait: f64 = kv(&args, "quiet_wait").map_or(600.0, |s| s.parse().unwrap());
-    let max_frame_ms: f64 = kv(&args, "max_frame_ms").map_or(100.0, |s| s.parse().unwrap());
+    let ceiling = Ceiling {
+        ms: kv(&args, "ceiling_ms").map_or(0.0, |s| s.parse().unwrap()),
+        frames: kv(&args, "ceiling_frames").map_or(10, |s| s.parse().unwrap()),
+    };
+    let max_frame_ms: f64 = kv(&args, "max_frame_ms").map_or(
+        if ceiling.ms > 0.0 { ceiling.ms } else { 100.0 },
+        |s| s.parse().unwrap(),
+    );
     let deadline_s: f64 = kv(&args, "deadline_s").map_or(f64::INFINITY, |s| s.parse().unwrap());
     let began = Instant::now();
+    // Time spent waiting for a quiet machine: not counted against the deadline.
+    let mut waited = 0.0f64;
     let out = PathBuf::from(kv(&args, "out").unwrap_or("explicit_beams_scaling"));
     std::fs::create_dir_all(&out)?;
     let ror_bin = kv(&args, "ror")
@@ -938,10 +1013,11 @@ fn main() -> anyhow::Result<()> {
                 }
                 let with_ror = ror_bin.is_some() && counts.contains(&n) && allowed(true);
                 let need = predict(false).1 + if with_ror { predict(true).1 } else { 0.0 };
-                if began.elapsed().as_secs_f64() + need > deadline_s {
+                let active = began.elapsed().as_secs_f64() - waited;
+                if active + need > deadline_s {
                     let why = format!(
-                        "deadline: trial {trial} {} {n} vehicles predicted {need:.0} s at {:.0} s of {deadline_s:.0} s; no further runs",
-                        sc.name(), began.elapsed().as_secs_f64()
+                        "deadline: trial {trial} {} {n} vehicles predicted {need:.0} s at {active:.0} s of {deadline_s:.0} s (quiet waits excluded); no further runs",
+                        sc.name()
                     );
                     eprintln!("{why}");
                     stopped = Some(why);
@@ -959,7 +1035,9 @@ fn main() -> anyhow::Result<()> {
                 // Alternate which engine runs first.
                 for first in [trial % 2 == 0, trial % 2 != 0] {
                     if first && with_ror {
+                        let w0 = Instant::now();
                         loads.push(wait_quiet(max_load, max_gpu, quiet_wait));
+                        waited += w0.elapsed().as_secs_f64();
                         let t0 = Instant::now();
                         let run = run_ror(
                             ror_bin.as_ref().unwrap(),
@@ -969,13 +1047,16 @@ fn main() -> anyhow::Result<()> {
                             warm,
                             frames,
                             steps,
+                            ceiling,
                         );
                         last.insert((sc, true), (n, mean(&run.frame_ms), t0.elapsed().as_secs_f64()));
                         ror_run = Some(run);
                     } else if !first {
+                        let w0 = Instant::now();
                         loads.push(wait_quiet(max_load, max_gpu, quiet_wait));
+                        waited += w0.elapsed().as_secs_f64();
                         let t0 = Instant::now();
-                        let run = run_rubble(&device, &queue, &fleet, warm, frames, steps);
+                        let run = run_rubble(&device, &queue, &fleet, warm, frames, steps, ceiling);
                         let frame = mean(&run.gpu_ms).max(run.pipelined_ms);
                         last.insert((sc, false), (n, frame, t0.elapsed().as_secs_f64()));
                         rubble_run = Some(run);
@@ -988,6 +1069,23 @@ fn main() -> anyhow::Result<()> {
                     .count();
                 let r = rubble_run.unwrap();
                 let key = (sc, n);
+                // The frame ceiling: a stopped run counts as too slow at this count; that
+                // engine runs no count from here on, and the run is kept only as a record.
+                let mut ror_run = ror_run;
+                if let Some(at) = ror_run.as_ref().and_then(|x| x.stopped_at) {
+                    eprintln!("{} RoR {n}: {} consecutive frames over {} ms at frame {at}: no count from {n} on", sc.name(), ceiling.frames, ceiling.ms);
+                    cut.insert((sc, true), n);
+                    all.push(json!({"trial": trial, "scenario": sc.name(), "vehicles": n, "ror_stopped_at": at,
+                        "ror": {"frame_ms": ror_run.take().unwrap().frame_ms}}));
+                }
+                if let Some(at) = r.stopped_at {
+                    eprintln!("{} Rubble {n}: {} consecutive frames over {} ms at frame {at}: no count from {n} on", sc.name(), ceiling.frames, ceiling.ms);
+                    cut.insert((sc, false), n);
+                    all.push(json!({"trial": trial, "scenario": sc.name(), "vehicles": n, "rubble_stopped_at": at,
+                        "rubble": {"gpu_ms": r.gpu_ms, "blocking_ms": r.blocking_ms}}));
+                    std::fs::write(out.join("results.partial.json"), serde_json::to_string(&all)?)?;
+                    continue;
+                }
                 if trial == 0 {
                     fleet_ends.insert(key, r.end.iter().cloned().zip(start.iter().cloned()).collect());
                 }
@@ -1064,7 +1162,7 @@ fn main() -> anyhow::Result<()> {
                 write_scene(&file, &s);
                 let fleet = rubble_fleet(&text, &s);
                 e.start.push(fleet[0].positions());
-                e.ror.push(run_ror(bin, &truck, &file, 1, warm, frames, steps).end.remove(0));
+                e.ror.push(run_ror(bin, &truck, &file, 1, warm, frames, steps, Ceiling { ms: 0.0, frames: 1 }).end.remove(0));
                 e.rubble.push(run_rubble_end(&device, &queue, &fleet, warm + frames, steps));
                 eprintln!("ensemble {} {k}: broken rubble {} / ror {}", sc.name(),
                     e.rubble[k].broken, e.ror[k].broken);
@@ -1106,7 +1204,7 @@ fn main() -> anyhow::Result<()> {
         .collect();
     cuts.sort();
     if !cuts.is_empty() || stopped.is_some() {
-        writeln!(md, "Bounds (max_frame_ms {max_frame_ms}, deadline_s {deadline_s}): not run past the frame limit: {}. {}\n",
+        writeln!(md, "Bounds (ceiling {} ms for {} consecutive frames, max_frame_ms {max_frame_ms} predicted, deadline_s {deadline_s} of running time): engines stopped or not run from: {}. {}\n", ceiling.ms, ceiling.frames,
             if cuts.is_empty() { "none".into() } else { cuts.join("; ") },
             stopped.as_deref().unwrap_or("All trials ran.")).unwrap();
     }
@@ -1213,11 +1311,12 @@ fn main() -> anyhow::Result<()> {
         )
         .unwrap();
         let mut ror_fit = None;
-        if ror_bin.is_some() {
-            let ror: Vec<(f64, f64)> = counts
-                .iter()
-                .map(|&n| (n as f64, mean(&ror_means[&(sc, n)])))
-                .collect();
+        // RoR's fit over the counts it ran (the frame ceiling may end it early).
+        let ror: Vec<(f64, f64)> = counts
+            .iter()
+            .filter_map(|&n| ror_means.get(&(sc, n)).map(|v| (n as f64, mean(v))))
+            .collect();
+        if ror.len() >= 2 {
             let (ra, rb) = fit(&ror);
             ror_fit = Some((ra, rb));
             write!(md, "; Rigs of Rods {ra:.3} ms + {:.2} µs × N", rb * 1e3).unwrap();
@@ -1280,7 +1379,7 @@ fn main() -> anyhow::Result<()> {
         serde_json::to_string(&json!({
             "truck": truck.display().to_string(), "adapter": info.name,
             "trials": trials, "warm": warm, "frames": frames, "speed": speed,
-            "stopped": stopped, "max_frame_ms": max_frame_ms,
+            "stopped": stopped, "max_frame_ms": max_frame_ms, "ceiling_ms": ceiling.ms, "ceiling_frames": ceiling.frames,
             "cut": cut.iter().map(|((sc, ror), n)| json!({"scenario": sc.name(), "engine": if *ror { "ror" } else { "rubble" }, "from": n})).collect::<Vec<_>>(),
             "runs": all,
             "nudges": nudges,
