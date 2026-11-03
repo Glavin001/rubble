@@ -2483,14 +2483,15 @@ impl WgpuSim {
         }
         check_limits(&self.device.limits(), 14, bytes)?;
         let usage = self.bufs[14].usage();
-        let new = self.device.create_buffer(&wgpu::BufferDescriptor {
+        // Freed before the new one is created (nothing is copied; work already submitted
+        // still completes), so the two never count together.
+        self.bufs[14].destroy();
+        self.bufs[14] = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("b14"),
             size: bytes,
             usage,
             mapped_at_creation: false,
         });
-        // Freed now (work already submitted still completes), not when collected.
-        std::mem::replace(&mut self.bufs[14], new).destroy();
         self.rebind_buffer(14);
         self.rest_stale = true;
         Ok(())

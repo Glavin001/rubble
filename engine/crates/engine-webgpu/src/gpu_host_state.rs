@@ -543,8 +543,9 @@ impl WgpuSim {
                 // The terrain pool is not saved (its buffers are the
                 // largest): a restore starts it over (`terrain_reset`). A compact
                 // snapshot copies a measured buffer up to its extent.
-                let measured = compact.and_then(|c| c[i]);
-                let size = if self.terrain.is_some() && is_terrain_binding(i) {
+                // The pass table (binding 22) is constant: written once at creation.
+                let measured = compact.and_then(|c| c[i]).filter(|_| i != 22);
+                let size = if (self.terrain.is_some() && is_terrain_binding(i)) || i == 22 {
                     0
                 } else if let Some(extent) = measured {
                     extent.min(b.size())
