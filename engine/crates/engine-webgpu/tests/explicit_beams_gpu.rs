@@ -222,3 +222,155 @@ fn glider_with_wings_fusedrag_and_commands_matches_cpu() {
     assert_eq!(gpu.wings_broken()[0], vec![cpu.wings[0].broken]);
     assert!(rms < 1e-3 && max < 3e-3, "rms {rms} max {max}");
 }
+
+/// A box-frame car on four `meshwheels2` tyres (with and without a rigidity
+/// node) and four `shocks2` (hard bump at the front, soft at the rear, metric
+/// bounds on one): the GPU's shocks2 rule and the mesh wheels' spawn against the
+/// CPU.
+fn shocks2_car() -> String {
+    let mut t = String::from(
+        "shocks2 car\nglobals\n600, 0, x\nenable_advanced_deformation\nset_beam_defaults 3000000, 2000, 25000, 60000\nnodes\n",
+    );
+    let mut n = 0;
+    let mut node = |t: &mut String, x: f32, y: f32, z: f32| {
+        t.push_str(&format!("{n}, {x}, {y}, {z}\n"));
+        n += 1;
+        n - 1
+    };
+    let mut frame = Vec::new();
+    for &x in &[-1.2f32, 1.2] {
+        for &y in &[0.35f32, 0.85] {
+            for &z in &[-0.6f32, 0.6] {
+                frame.push(node(&mut t, x, y, z));
+            }
+        }
+    }
+    // Per wheel: inner and outer axle node, and the frame corners it hangs from
+    // (lower front/back, upper).
+    let mut axles = Vec::new();
+    for &x in &[-0.9f32, 0.9] {
+        for &side in &[-1.0f32, 1.0] {
+            let inner = node(&mut t, x, 0.32, side * 0.62);
+            let outer = node(&mut t, x, 0.32, side * 0.85);
+            axles.push((x, side, inner, outer));
+        }
+    }
+    t.push_str("beams\n");
+    for i in 0..frame.len() {
+        for j in i + 1..frame.len() {
+            t.push_str(&format!("{}, {}\n", frame[i], frame[j]));
+        }
+    }
+    let corner = |x: f32, y: f32, side: f32| {
+        let xi = (x > 0.0) as usize;
+        let yi = (y > 0.5) as usize;
+        let zi = (side > 0.0) as usize;
+        frame[xi * 4 + yi * 2 + zi]
+    };
+    for &(x, side, inner, outer) in &axles {
+        let low = corner(x, 0.35, side);
+        let far = corner(-x, 0.35, side);
+        let up = corner(x, 0.85, side);
+        let other = corner(x, 0.35, -side);
+        t.push_str(&format!(
+            "{inner}, {outer}\n{inner}, {low}\n{inner}, {far}\n{outer}, {low}\n"
+        ));
+        t.push_str(&format!(
+            "{outer}, {far}\n{inner}, {other}\n{outer}, {up}\n"
+        ));
+    }
+    t.push_str("shocks2\n");
+    for &(x, side, inner, _) in &axles {
+        let up = corner(x, 0.85, side);
+        let opts = match (x > 0.0, side > 0.0) {
+            (false, false) => "n",
+            (false, true) => "m",
+            (true, false) => "s",
+            (true, true) => "si",
+        };
+        let (sb, lb) = if opts == "m" {
+            (0.1, 0.15)
+        } else {
+            (0.25, 0.35)
+        };
+        t.push_str(&format!(
+            "{inner}, {up}, 40000, 3000, 1.5, 0.5, 30000, 2500, 0.8, 1.5, {sb}, {lb}, 0.95, {opts}\n"
+        ));
+    }
+    t.push_str("set_beam_defaults 900000, 600, 400000, 3000000\nmeshwheels2\n");
+    for (k, &(_, _, inner, outer)) in axles.iter().enumerate() {
+        let rigidity = if k % 2 == 0 {
+            frame[0].to_string()
+        } else {
+            "9999".into()
+        };
+        t.push_str(&format!(
+            "0.3, 0.2, 0.2, 10, {inner}, {outer}, {rigidity}, 1, 0, {inner}, 20, 120000, 400, l, rim.mesh, mat\n"
+        ));
+    }
+    t.push_str("end\n");
+    t
+}
+
+#[test]
+fn meshwheels2_and_shocks2_car_matches_cpu() {
+    let text = shocks2_car();
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        ..Default::default()
+    };
+    let spawn = |vel: Vec3| {
+        let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, vel, settings).unwrap();
+        let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+        let mut s =
+            ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - low, 0.0), vel, settings)
+                .unwrap();
+        s.roll_tyres(vel);
+        s
+    };
+    // Dropped and settling for 1 s.
+    let mut cpu = spawn(Vec3::ZERO);
+    assert_eq!(cpu.shocks2.len(), 4);
+    assert_eq!(cpu.tyres.len(), 4);
+    let Some(gpu) = run_both(&mut cpu, 60) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let (rms, max) = rms_max(&cpu.positions(), &gpu.positions()[0]);
+    eprintln!(
+        "shocks2 car at rest 1 s: rms {:.4} mm max {:.4} mm",
+        rms * 1e3,
+        max * 1e3
+    );
+    assert_eq!(cpu.damage().0, 0);
+    assert!(rms < 1e-3 && max < 3e-3, "rms {rms} max {max}");
+
+    // Driven into a wall at 20 m/s for 0.8 s: the same damage.
+    let mut cpu = spawn(Vec3::new(-20.0, 0.0, 0.0));
+    let front = cpu.positions().iter().map(|p| p.x).fold(f32::MAX, f32::min);
+    cpu.boxes.push(StaticBox::centered(
+        Vec3::new(front - 0.5 - 1.0, 1.0, 0.0),
+        Vec3::new(1.0, 2.0, 3.0),
+    ));
+    let Some(gpu) = run_both(&mut cpu, 48) else {
+        return;
+    };
+    let (c_broken, c_bent) = cpu.damage();
+    let beams = &gpu.beams()[0];
+    let g_broken = beams.iter().filter(|b| b.broken).count();
+    let g_bent = beams.iter().filter(|b| b.bent()).count();
+    let (rms, max) = rms_max(&cpu.positions(), &gpu.positions()[0]);
+    eprintln!(
+        "shocks2 car crash 0.8 s: CPU broken {c_broken} bent {c_bent}; GPU broken {g_broken} bent {g_bent}; \
+         rms {:.1} mm max {:.1} mm",
+        rms * 1e3,
+        max * 1e3
+    );
+    assert!(
+        c_broken + c_bent > 10,
+        "the crash damages it ({c_broken}, {c_bent})"
+    );
+    let close = |a: usize, b: usize| (a as f32 - b as f32).abs() <= 0.05 * a.max(b) as f32 + 2.0;
+    assert!(close(c_broken, g_broken), "broken {c_broken} vs {g_broken}");
+    assert!(close(c_bent, g_bent), "bent {c_bent} vs {g_bent}");
+}

@@ -15,7 +15,7 @@ use crate::{
     EXPLICIT_BEAMS_AERO_WGSL, EXPLICIT_BEAMS_AERO_WIDE_WGSL, EXPLICIT_BEAMS_WGSL,
     EXPLICIT_BEAMS_WIDE_PASSES, EXPLICIT_BEAMS_WIDE_WGSL,
 };
-use engine_softbody::explicit_beams::ExplicitBeams;
+use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind};
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 
@@ -88,7 +88,7 @@ const WIDE_CLOSE: usize = 6;
 const PARAM_STRIDE: u64 = 256;
 const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-const PARAM_WORDS: usize = 30;
+const PARAM_WORDS: usize = 31;
 /// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
 const WIDE_MAX_VEHICLES: usize = 256;
 
@@ -129,6 +129,8 @@ impl ExplicitBeamsGpu {
         let mut spans = Vec::with_capacity(nv);
         let mut rest0 = Vec::with_capacity(total_beams);
         let (mut node_off, mut beam_off, mut tri_off, mut box_off) = (0u32, 0u32, 0u32, 0u32);
+        // shocks2 rates (EB_AERO modules), 2 records per shock, global indices.
+        let mut shock_recs: Vec<[u32; 4]> = Vec::new();
         let bits = |v: Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits(), 0];
         // Per beam, the lists positions of its end a's and end b's incidence entries.
         let mut slots: Vec<[u32; 2]> = vec![[u32::MAX; 2]; total_beams];
@@ -192,6 +194,21 @@ impl ExplicitBeamsGpu {
                 nodes.push([n.vel.x, n.vel.y, n.vel.z, n.friction]);
                 nodes.push([n.force.x, n.force.y, n.force.z, 0.0]);
             }
+            let shock_off = (shock_recs.len() / 2) as u32;
+            for sh in &v.shocks2 {
+                shock_recs.push([
+                    sh.k_out.to_bits(),
+                    sh.c_out.to_bits(),
+                    sh.pk_in.to_bits(),
+                    sh.pc_in.to_bits(),
+                ]);
+                shock_recs.push([
+                    sh.pk_out.to_bits(),
+                    sh.pc_out.to_bits(),
+                    (sh.soft as u32 as f32).to_bits(),
+                    0,
+                ]);
+            }
             for b in &v.beams {
                 beam_recs.push([
                     node_off + b.a,
@@ -205,10 +222,16 @@ impl ExplicitBeamsGpu {
                     b.limit_k.to_bits(),
                     b.limit_c.to_bits(),
                 ]);
+                // A shocks2 beam has no plastic coefficient: its shock's index.
+                let third = if b.kind == ExplicitKind::Shock2 {
+                    shock_off + b.shock
+                } else {
+                    b.plastic.to_bits()
+                };
                 beam_recs.push([
                     b.short_bound.to_bits(),
                     b.long_bound.to_bits(),
-                    b.plastic.to_bits(),
+                    third,
                     b.rest0.to_bits(),
                 ]);
                 beams.push([b.rest, b.tc, b.tt, b.gate]);
@@ -243,10 +266,11 @@ impl ExplicitBeamsGpu {
             box_off += v.boxes.len() as u32;
         }
         misc.extend(tri_misc);
-        // Wings, the fuselage drag and self-centering commands (the EB_AERO module).
-        let aero = vehicles
-            .iter()
-            .any(|v| !v.wings.is_empty() || v.fusedrag.is_some() || !v.centering.is_empty());
+        // Wings, the fuselage drag, self-centering commands and shocks2 (the EB_AERO
+        // modules).
+        let aero = vehicles.iter().any(|v| {
+            !v.wings.is_empty() || v.fusedrag.is_some() || !v.centering.is_empty() || !v.shocks2.is_empty()
+        });
         let mut aero_recs: Vec<[u32; 4]> = Vec::new();
         let mut wing_recs: Vec<[u32; 4]> = Vec::new();
         let mut cmd_recs: Vec<[u32; 4]> = Vec::new();
@@ -374,6 +398,9 @@ impl ExplicitBeamsGpu {
         statics.extend(wing_recs);
         statics.extend(cmd_recs);
         statics.extend(table_recs_aero);
+        let shock2_base = statics.len() as u32;
+        let shock2_count = (shock_recs.len() / 2) as u32;
+        statics.extend(shock_recs);
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams"),
@@ -445,7 +472,8 @@ impl ExplicitBeamsGpu {
             cmd_base,
             aero_state,
             total_wings as u32,
-            0,
+            shock2_base,
+            shock2_count,
         ];
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),
@@ -504,7 +532,7 @@ impl ExplicitBeamsGpu {
         let buffers = [
             &params, &statics, &lists, &nodes, &beams, &acc, &groups, &misc, &next,
         ];
-        // The wide passes do not run wings, the fuselage drag or commands.
+        // The wide passes do not run wings, the fuselage drag, commands or shocks2.
         let wide = (nv <= WIDE_MAX_VEHICLES && !aero)
             .then(|| Wide::new(device, queue, &buffers, &table_recs));
         let total = [

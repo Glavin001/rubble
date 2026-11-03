@@ -73,6 +73,7 @@ static const uint KIND_PLAIN = 0u;
 static const uint KIND_LIMITED = 1u;
 static const uint KIND_SUPPORT = 2u;
 static const uint KIND_ROPE = 3u;
+static const uint KIND_SHOCK2 = 4u; // EB_AERO modules only
 static const uint TYPE_DEFORMABLE = 0u;
 
 static const uint FLAG_FAST_INV_SQRT = 1u;
@@ -115,7 +116,8 @@ struct Params
     uint cmdBase; // gStatic: per self-centering command 2 records
     uint aeroState; // gBeams: per vehicle D, then per wing 4 records, then per command 1
     uint wingTotal; // wings over every vehicle
-    uint aeroPad;
+    uint shock2Base; // gStatic: per shocks2 shock 2 records (EB_AERO modules)
+    uint shock2Count; // shocks2 shocks over every vehicle
 };
 
 struct Surface
@@ -457,6 +459,10 @@ uint livePlain(uint node)
     return live;
 }
 
+#ifdef EB_AERO
+void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, uint4 bn, float4 s1);
+#endif
+
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
 {
     float4 s1 = gBeams[gj * 2u + 1u];
@@ -467,6 +473,13 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
         return;
     }
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
+#ifdef EB_AERO
+    if ((bn.z & 0xFFu) == KIND_SHOCK2)
+    {
+        shock2Update(gj, local, fast, groupOff, parity, bn, s1);
+        return;
+    }
+#endif
     float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
     float4 c2 = asfloat(gStatic[gP.beamBase + gj * 3u + 2u]);
     float4 s0 = gBeams[gj * 2u];
@@ -1012,6 +1025,141 @@ void commandUpdate(uint gc)
     }
     if (rest != s0.x) gBeams[j * 2u] = float4(rest, s0.yzw);
     gBeams[cmdState(gc)] = float4(mode, 0.0, 0.0, 0.0);
+}
+
+// --- shocks2 (engine/docs/explicit-beams-wheels2-shocks2-spec.md §6; CPU
+// reference engine_softbody::explicit_beams::Shock2) ---
+//   gStatic  the beam's records hold (k in, c in, bump k, bump c) and (short bound,
+//            long bound, shock index, L0); at shock2Base per shock (k out, c out,
+//            progression k in, progression c in), (progression k out, progression
+//            c out, soft bump, 0) as bits.
+// Every float expression strict, in the specification's order.
+
+// min(x, 1): 1 if 1 < x, else x (a NaN passes through).
+float min1(float x) { return (1.0 < x) ? 1.0 : x; }
+// max(a, b): b if a < b, else a.
+float maxAB(float a, float b) { return (a < b) ? b : a; }
+
+// k0 + (pk·k0)·λ and c0 + (pc·c0)·λ, λ = 1 for a zero bound, else min((e / (bound·L))², 1).
+float2 shock2Progressive(float k0, float c0, float pk, float pc, float e, float bound, float rest)
+{
+    float lambda = 1.0;
+    if (bound != 0.0)
+    {
+        float r = sdiv(e, smul(bound, rest));
+        lambda = min1(smul(r, r));
+    }
+    return float2(nf(k0 + smul(smul(pk, k0), lambda)), nf(c0 + smul(smul(pc, c0), lambda)));
+}
+
+// The soft bump on (k, c): k + ((k + 100)·pk)·μ, μ = 1 for a zero bound, else
+// min((((e − e_b)·5) / (bound·L))², 1).
+float2 shock2Bump(float2 kc, float pk, float pc, float excess, float bound, float rest)
+{
+    float mu = 1.0;
+    if (bound != 0.0)
+    {
+        float q = sdiv(smul(excess, 5.0), smul(bound, rest));
+        mu = min1(smul(q, q));
+    }
+    return float2(nf(kc.x + smul(smul(nf(kc.x + 100.0), pk), mu)), nf(kc.y + smul(smul(nf(kc.y + 100.0), pc), mu)));
+}
+
+void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, uint4 bn, float4 s1)
+{
+    float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
+    uint4 r2 = gStatic[gP.beamBase + gj * 3u + 2u];
+    // The host writes shock indices below shock2Count; clamp in any case.
+    uint si = min(r2.z, max(gP.shock2Count, 1u) - 1u);
+    float4 t0 = asfloat(gStatic[gP.shock2Base + si * 2u]);
+    float4 t1 = asfloat(gStatic[gP.shock2Base + si * 2u + 1u]);
+    float kIn = c1.x;
+    float cIn = c1.y;
+    float kBump = c1.z;
+    float cBump = c1.w;
+    float sb = asfloat(r2.x);
+    float lb = asfloat(r2.y);
+    float kOut = t0.x;
+    float cOut = t0.y;
+    float pkIn = t0.z;
+    float pcIn = t0.w;
+    float pkOut = t1.x;
+    float pcOut = t1.y;
+    bool soft = t1.z != 0.0;
+    int group = asint(bn.w);
+    float4 s0 = gBeams[gj * 2u];
+    float rest = s0.x;
+    float gate = s0.w;
+    float strength = s1.x;
+    float4 pa = gNodes[bn.x * 3u];
+    float4 pb = gNodes[bn.y * 3u];
+    float3 va = gNodes[bn.x * 3u + 1u].xyz;
+    float3 vb = gNodes[bn.y * 3u + 1u].xyz;
+    float3 d = ssub3(pa.xyz, pb.xyz);
+    float q = sdot(d, d);
+    float inv = fast ? sFastInvSqrt(q) : sdiv(1.0, ssqrt(q));
+    float len = smul(q, inv);
+    float e = nf(len - rest);
+    float u = smul(sdot(ssub3(va, vb), d), inv);
+    // §6.1: the velocity picks the side.
+    float2 kc = (u > 0.0) ? shock2Progressive(kOut, cOut, pkOut, pcOut, e, lb, rest)
+                          : shock2Progressive(kIn, cIn, pkIn, pcIn, e, sb, rest);
+    bool past = e > smul(lb, rest) || e < smul(-sb, rest);
+    if (!soft)
+    {
+        // §6.2: the bump rates replace.
+        if (past) kc = float2(kBump, cBump);
+    }
+    else
+    {
+        // §6.3.
+        float softRest = smul(rest, 0.8);
+        float el = smul(lb, softRest);
+        float es = smul(-sb, softRest);
+        if (e > el)
+        {
+            kc = shock2Bump(shock2Progressive(kOut, cOut, pkOut, pcOut, e, lb, rest), pkOut, pcOut, nf(e - el), lb,
+                            rest);
+            if (u < 0.0) kc = float2(kIn, cIn);
+        }
+        else if (e < es)
+        {
+            // The out factors here too (quirk).
+            kc = shock2Bump(shock2Progressive(kIn, cIn, pkIn, pcIn, e, sb, rest), pkOut, pcOut, nf(e - es), sb,
+                            rest);
+            if (u > 0.0) kc = float2(kOut, cOut);
+        }
+        if (past) kc = float2(maxAB(kc.x, kBump), maxAB(kc.y, cBump));
+    }
+    float f = nf(smul(-kc.x, e) - smul(kc.y, u));
+    float last = f;
+    float tau = abs(f);
+    bool broken = false;
+    // No yield; the break test when |F| exceeds the gate and the strength.
+    if (tau > gate && tau > strength)
+    {
+        bool saved = false;
+        if ((gStatic[gP.nodeInfoBase + bn.x].x & NODE_ON_TRIANGLE) != 0u && livePlain(bn.x) < 3u) saved = true;
+        if ((gStatic[gP.nodeInfoBase + bn.y].x & NODE_ON_TRIANGLE) != 0u && livePlain(bn.y) < 3u) saved = true;
+        if (saved)
+        {
+            strength = 2.0 * gate;
+        }
+        else
+        {
+            broken = true;
+            f = 0.0;
+            if (group > 0)
+            {
+                gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+                gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+            }
+        }
+    }
+    if (strength != s1.x || broken) gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, 0.0);
+    float3 push = sscale(d, smul(f, inv));
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
 }
 
 // nodeUpdate for a vehicle with a `fusedrag` line: the restart adds the stored
