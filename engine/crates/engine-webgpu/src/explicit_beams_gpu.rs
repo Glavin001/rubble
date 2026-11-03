@@ -41,6 +41,10 @@ struct Span {
     nodes: u32,
     beam_off: u32,
     beams: u32,
+    /// First slide node and rail segment (global) and the slide node count.
+    slide_off: u32,
+    slides: u32,
+    seg_off: u32,
 }
 
 pub struct ExplicitBeamsGpu {
@@ -52,11 +56,16 @@ pub struct ExplicitBeamsGpu {
     nodes: wgpu::Buffer,
     beams: wgpu::Buffer,
     misc: wgpu::Buffer,
+    /// gNext (grid ranks, wide-pass scratch, trigger inputs).
+    next: wgpu::Buffer,
     spans: Vec<Span>,
     rest0: Vec<f32>,
     words: [u32; PARAM_WORDS],
     /// gBeams record of the aero state and per vehicle its first wing and count.
     aero_state: u32,
+    /// gBeams record of the slide node states; gNext word of the trigger inputs.
+    slide_state: u32,
+    key_base: u32,
     wing_spans: Vec<(u32, u32)>,
     /// The wide passes (one thread per element over every vehicle), when used.
     wide: Option<Wide>,
@@ -88,7 +97,12 @@ const WIDE_CLOSE: usize = 6;
 const PARAM_STRIDE: u64 = 256;
 const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-const PARAM_WORDS: usize = 31;
+const PARAM_WORDS: usize = 39;
+/// The kernel's KEYS (trigger inputs per vehicle and step parity), NONE and node
+/// info flags shift of the slide slots.
+const KEYS: usize = engine_softbody::explicit_triggers::KEYS;
+const NONE: u32 = u32::MAX;
+const NODE_SLOT_SHIFT: u32 = 8;
 /// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
 const WIDE_MAX_VEHICLES: usize = 256;
 
@@ -135,6 +149,12 @@ impl ExplicitBeamsGpu {
         // Per beam, the lists positions of its end a's and end b's incidence entries.
         let mut slots: Vec<[u32; 2]> = vec![[u32::MAX; 2]; total_beams];
         let mut cand_table: Vec<u32> = Vec::new();
+        // Slide-force slots over every vehicle (1-based in the node info).
+        let mut slot_count = 0u32;
+        assert!(
+            total_nodes < (1 << (32 - NODE_SLOT_SHIFT)),
+            "explicit beams GPU: too many nodes for the slide slots"
+        );
         for (vi, v) in vehicles.iter().enumerate() {
             let group_count = v
                 .beams
@@ -145,10 +165,28 @@ impl ExplicitBeamsGpu {
                 .unwrap_or(0);
             let group_off = groups.len() as u32;
             groups.extend(std::iter::repeat_n(u32::MAX, group_count as usize));
+            // Slide targets (slide nodes and their rails' beam ends): a slot each,
+            // in the node info flags above NODE_SLOT_SHIFT (1-based).
+            let mut slot_of = vec![0u32; v.nodes.len()];
+            let targets = v
+                .slides
+                .iter()
+                .map(|sl| sl.node)
+                .chain(v.segments.iter().flat_map(|seg| {
+                    let b = &v.beams[seg.beam as usize];
+                    [b.a, b.b]
+                }));
+            for t in targets {
+                if slot_of[t as usize] == 0 {
+                    slot_count += 1;
+                    slot_of[t as usize] = slot_count;
+                }
+            }
             // Incidence lists, then the candidates.
             for (i, inc) in v.incidence.iter().enumerate() {
                 let n = &v.nodes[i];
-                node_info.push([n.flags, lists.len() as u32, inc.len() as u32, vi as u32]);
+                let flags = n.flags | slot_of[i] << NODE_SLOT_SHIFT;
+                node_info.push([flags, lists.len() as u32, inc.len() as u32, vi as u32]);
                 for &j in inc {
                     let b = &v.beams[j as usize];
                     let is_b = (b.b == i as u32 && b.a != i as u32) as u32;
@@ -169,7 +207,9 @@ impl ExplicitBeamsGpu {
             let flags = v.settings.fast_inv_sqrt as u32
                 | (v.settings.drag as u32) << 1
                 | (v.settings.turbulence as u32) << 2
-                | (v.fusedrag.is_some() as u32) << 3;
+                | (v.fusedrag.is_some() as u32) << 3
+                | (!v.triggers.is_empty() as u32) << 4
+                | (!v.slides.is_empty() as u32) << 5;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -222,9 +262,15 @@ impl ExplicitBeamsGpu {
                     b.limit_k.to_bits(),
                     b.limit_c.to_bits(),
                 ]);
-                // A shocks2 beam has no plastic coefficient: its shock's index.
+                // A shocks2 beam has no plastic coefficient: its shock's index; a
+                // trigger its keys and enabled flag.
                 let third = if b.kind == ExplicitKind::Shock2 {
                     shock_off + b.shock
+                } else if b.kind == ExplicitKind::Trigger {
+                    let t = &v.triggers[b.shock as usize];
+                    t.short_key.min(KEYS as u32 - 1)
+                        | t.long_key.min(KEYS as u32 - 1) << 8
+                        | (t.enabled as u32) << 16
                 } else {
                     b.plastic.to_bits()
                 };
@@ -259,6 +305,9 @@ impl ExplicitBeamsGpu {
                 nodes: v.nodes.len() as u32,
                 beam_off,
                 beams: v.beams.len() as u32,
+                slide_off: 0,
+                slides: v.slides.len() as u32,
+                seg_off: 0,
             });
             node_off += v.nodes.len() as u32;
             beam_off += v.beams.len() as u32;
@@ -269,8 +318,23 @@ impl ExplicitBeamsGpu {
         // Wings, the fuselage drag, self-centering commands and shocks2 (the EB_AERO
         // modules).
         let aero = vehicles.iter().any(|v| {
-            !v.wings.is_empty() || v.fusedrag.is_some() || !v.centering.is_empty() || !v.shocks2.is_empty()
+            !v.wings.is_empty()
+                || v.fusedrag.is_some()
+                || !v.centering.is_empty()
+                || !v.shocks2.is_empty()
+                || !v.triggers.is_empty()
+                || !v.commands.is_empty()
+                || !v.slides.is_empty()
         });
+        // Command records: with triggers every command line (keyed), else the
+        // self-centering ones.
+        let cmd_count = |v: &ExplicitBeams| {
+            if v.commands.is_empty() {
+                v.centering.len()
+            } else {
+                v.commands.len()
+            }
+        };
         let mut aero_recs: Vec<[u32; 4]> = Vec::new();
         let mut wing_recs: Vec<[u32; 4]> = Vec::new();
         let mut cmd_recs: Vec<[u32; 4]> = Vec::new();
@@ -281,15 +345,18 @@ impl ExplicitBeamsGpu {
         let mut wing_spans = Vec::with_capacity(nv);
         let base_static = (box_base + box_recs.len()) as u32;
         let aero_base = base_static;
-        let wing_base = aero_base + 2 * nv as u32;
+        let wing_base = aero_base + 3 * nv as u32;
         let total_wings: usize = vehicles.iter().map(|v| v.wings.len()).sum();
-        let total_cmds: usize = vehicles.iter().map(|v| v.centering.len()).sum();
+        let total_cmds: usize = vehicles.iter().map(cmd_count).sum();
         let cmd_base = wing_base + 4 * total_wings as u32;
         let table_base = cmd_base + 2 * total_cmds as u32;
         // Airfoil tables shared by name across vehicles.
         let mut tables: Vec<(String, u32)> = Vec::new();
         let (mut node_off, mut beam_off) = (0u32, 0u32);
-        for v in vehicles {
+        let mut slide_recs: Vec<[u32; 4]> = Vec::new();
+        let mut seg_recs: Vec<[u32; 4]> = Vec::new();
+        let mut slide_state: Vec<[f32; 4]> = Vec::new();
+        for (vi, v) in vehicles.iter().enumerate() {
             let table_of = |t: u32, tables: &mut Vec<(String, u32)>, recs: &mut Vec<[u32; 4]>| {
                 let a = &v.airfoils[t as usize];
                 if let Some((_, at)) = tables.iter().find(|(n, _)| *n == a.name) {
@@ -306,7 +373,7 @@ impl ExplicitBeamsGpu {
                 (wing_recs.len() / 4) as u32,
                 v.wings.len() as u32,
                 (cmd_recs.len() / 2) as u32,
-                v.centering.len() as u32,
+                cmd_count(v) as u32,
             ]);
             wing_spans.push(((wing_recs.len() / 4) as u32, v.wings.len() as u32));
             let fd = v.fusedrag.as_ref();
@@ -316,6 +383,35 @@ impl ExplicitBeamsGpu {
                 v.nodes.len() as u32,
                 0,
             ]);
+            let slide_off = (slide_recs.len() / 2) as u32;
+            let seg_off = seg_recs.len() as u32;
+            aero_recs.push([slide_off, v.slides.len() as u32, 0, 0]);
+            spans[vi].slide_off = slide_off;
+            spans[vi].seg_off = seg_off;
+            let seg_global = |s: Option<u32>| s.map_or(NONE, |s| seg_off + s);
+            for sl in &v.slides {
+                slide_recs.push([node_off + sl.node, seg_global(sl.segment), 0, 0]);
+                slide_recs.push([
+                    sl.spring.to_bits(),
+                    sl.break_force.to_bits(),
+                    sl.tolerance.to_bits(),
+                    0,
+                ]);
+                slide_state.push([
+                    sl.segment.map_or(-1.0, |s| (seg_off + s) as f32),
+                    sl.broken_away as u32 as f32,
+                    0.0,
+                    0.0,
+                ]);
+            }
+            for seg in &v.segments {
+                seg_recs.push([
+                    beam_off + seg.beam,
+                    seg_global(seg.prev),
+                    seg_global(seg.next),
+                    0,
+                ]);
+            }
             fuse_state.push([v.fuse_force.x, v.fuse_force.y, v.fuse_force.z, 0.0]);
             for w in &v.wings {
                 let g = |s: usize| node_off + w.nodes[s];
@@ -335,8 +431,34 @@ impl ExplicitBeamsGpu {
                 wing_state.push([w.broken as u32 as f32, 0.0, 0.0, 0.0]);
                 wing_state.extend([[0.0f32; 4]; 3]);
             }
-            for c in &v.centering {
-                cmd_recs.push([beam_off + c.beam, c.contract_first as u32, c.centre.to_bits(), 0]);
+            if v.commands.is_empty() {
+                for c in &v.centering {
+                    cmd_recs.push([
+                        beam_off + c.beam,
+                        c.contract_first as u32,
+                        c.centre.to_bits(),
+                        0,
+                    ]);
+                    cmd_recs.push([
+                        c.shorten_rate.to_bits(),
+                        c.lengthen_rate.to_bits(),
+                        c.max_contraction.to_bits(),
+                        c.max_extension.to_bits(),
+                    ]);
+                    cmd_state.push([c.mode as f32, 0.0, 0.0, 0.0]);
+                }
+            }
+            for c in &v.commands {
+                let keys = c.contract_key.min(KEYS as u32 - 1)
+                    | c.extend_key.min(KEYS as u32 - 1) << 8
+                    | (c.centering as u32) << 16
+                    | 1 << 17;
+                cmd_recs.push([
+                    beam_off + c.beam,
+                    c.contract_first as u32,
+                    c.centre.to_bits(),
+                    keys,
+                ]);
                 cmd_recs.push([
                     c.shorten_rate.to_bits(),
                     c.lengthen_rate.to_bits(),
@@ -382,11 +504,31 @@ impl ExplicitBeamsGpu {
         beams.extend(fuse_state);
         beams.extend(wing_state);
         beams.extend(cmd_state);
+        // The slide node states, then the slide-force slots.
+        let slide_state_base = beams.len() as u32;
+        let slide_total = slide_state.len() as u32;
+        beams.extend(slide_state);
+        let slide_acc = beams.len() as u32;
+        beams.extend(std::iter::repeat_n([0.0f32; 4], slot_count as usize));
         // gNext: per list position the grid rank, then the wide passes' grid
         // offsets and tested lists (plain words: only the counters are atomic).
         let grid_off_base = lists.len() as u32;
         let tested_list_base = grid_off_base + (nv * (WIDE_GRID_BUCKETS + 1)) as u32;
-        let next_len = tested_list_base as usize + total_tris;
+        // Then per vehicle and step parity the trigger inputs: those the next
+        // step's command pass reads (the last step's) at parity (steps & 1) ^ 1.
+        let key_base = tested_list_base + total_tris as u32;
+        let any_keys = vehicles.iter().any(|v| !v.triggers.is_empty());
+        let next_len = key_base as usize + if any_keys { nv * 2 * KEYS } else { 0 };
+        let mut next_init = vec![0u32; next_len.max(1)];
+        if any_keys {
+            for (vi, v) in vehicles.iter().enumerate() {
+                let parity = (v.steps as usize & 1) ^ 1;
+                let at = key_base as usize + (vi * 2 + parity) * KEYS;
+                for (k, &x) in v.key_input.iter().enumerate() {
+                    next_init[at + k] = (x != 0.0) as u32;
+                }
+            }
+        }
         let table_recs = vehicle_recs.clone();
         let mut statics = vehicle_recs;
         statics.extend(node_info);
@@ -401,6 +543,11 @@ impl ExplicitBeamsGpu {
         let shock2_base = statics.len() as u32;
         let shock2_count = (shock_recs.len() / 2) as u32;
         statics.extend(shock_recs);
+        let slide_base = statics.len() as u32;
+        statics.extend(slide_recs);
+        let seg_base = statics.len() as u32;
+        let seg_total = seg_recs.len() as u32;
+        statics.extend(seg_recs);
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams"),
@@ -474,6 +621,14 @@ impl ExplicitBeamsGpu {
             total_wings as u32,
             shock2_base,
             shock2_count,
+            key_base,
+            slide_base,
+            seg_base,
+            slide_state_base,
+            slide_acc,
+            slide_total,
+            seg_total,
+            slot_count,
         ];
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),
@@ -507,8 +662,8 @@ impl ExplicitBeamsGpu {
         let misc = init("explicit-beams-misc", bytemuck::cast_slice(&misc), state);
         let next = init(
             "explicit-beams-grid-next",
-            bytemuck::cast_slice(&vec![0u32; next_len.max(1)]),
-            storage,
+            bytemuck::cast_slice(&next_init),
+            storage | wgpu::BufferUsages::COPY_SRC,
         );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("explicit-beams"),
@@ -562,6 +717,9 @@ impl ExplicitBeamsGpu {
             rest0,
             words,
             aero_state,
+            slide_state: slide_state_base,
+            key_base,
+            next,
             wing_spans,
             timing: None,
             wide,
@@ -1028,6 +1186,46 @@ impl ExplicitBeamsGpu {
             .map(|i| {
                 let r = v[self.aero_state as usize + i];
                 Vec3::new(r[0], r[1], r[2])
+            })
+            .collect()
+    }
+
+    /// Per vehicle, each slide node's current segment (an index into its
+    /// `segments`; `None`: no rail) and broken-away flag.
+    pub fn slides(&self) -> Vec<Vec<(Option<u32>, bool)>> {
+        let raw = self.read(&self.beams);
+        let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
+        self.spans
+            .iter()
+            .map(|s| {
+                (0..s.slides)
+                    .map(|k| {
+                        let r = v[(self.slide_state + s.slide_off + k) as usize];
+                        let seg = (r[0] >= 0.0).then(|| r[0] as u32 - s.seg_off);
+                        (seg, r[1] != 0.0)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Per vehicle, the trigger inputs the next step's command pass reads (key
+    /// 0…84, 1.0 held), as [`ExplicitBeams::key_input`]; zeros for a vehicle
+    /// without triggers. `steps` is the steps every vehicle has run.
+    pub fn key_inputs(&self, steps: u64) -> Vec<[f32; KEYS]> {
+        let raw = self.read(&self.next);
+        let w: &[u32] = bytemuck::cast_slice(&raw);
+        let parity = (steps as usize & 1) ^ 1;
+        (0..self.spans.len())
+            .map(|vi| {
+                let mut out = [0.0f32; KEYS];
+                let at = self.key_base as usize + (vi * 2 + parity) * KEYS;
+                if at + KEYS <= w.len() {
+                    for (k, o) in out.iter_mut().enumerate() {
+                        *o = (w[at + k] != 0) as u32 as f32;
+                    }
+                }
+                out
             })
             .collect()
     }

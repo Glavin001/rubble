@@ -13,6 +13,8 @@
 //! time, `bare=1` drops the `wheels`, `engine` and `brakes` sections, `turb=1` turns
 //! turbulence on (off by default: CPU and GPU draw different noise), `roll=1` spins
 //! the tyres to roll at the spawn velocity, `drag=0` turns the per-node drag off,
+//! `config=<name>` the section configuration (as `ror_ref`'s `config=`; default the
+//! file's first `section` name in byte order, empty for the root alone),
 //! `trace=<file>` with `trace_every=<frames>` (or `trace_steps=<steps>`, GPU only)
 //! writes the GPU run: u32 nodes, u32
 //! beams, then per sample every node's world position (f32 xyz) and every beam's
@@ -67,8 +69,9 @@ fn main() -> anyhow::Result<()> {
     };
     let pos = kv.get("pos").map(|s| vec3(s)).unwrap_or(Vec3::ZERO);
     let vel = kv.get("vel").map(|s| vec3(s)).unwrap_or(Vec3::ZERO);
-    let mut cpu =
-        ExplicitBeams::from_truck(&text, pos, vel, settings).map_err(|e| anyhow::anyhow!(e))?;
+    let config = kv.get("config").copied();
+    let mut cpu = ExplicitBeams::from_truck_config(&text, config, pos, vel, settings)
+        .map_err(|e| anyhow::anyhow!(e))?;
     if let Some(b) = kv.get("box") {
         let v: Vec<f32> = b.split(',').map(|x| x.parse().expect("number")).collect();
         anyhow::ensure!(v.len() == 6, "box=cx,cy,cz,hx,hy,hz");

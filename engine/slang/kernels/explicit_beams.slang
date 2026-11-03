@@ -74,6 +74,7 @@ static const uint KIND_LIMITED = 1u;
 static const uint KIND_SUPPORT = 2u;
 static const uint KIND_ROPE = 3u;
 static const uint KIND_SHOCK2 = 4u; // EB_AERO modules only
+static const uint KIND_TRIGGER = 5u; // EB_AERO modules only
 static const uint TYPE_DEFORMABLE = 0u;
 
 static const uint FLAG_FAST_INV_SQRT = 1u;
@@ -111,13 +112,23 @@ struct Params
     uint slotBase16; // gBeams: per vehicle and bucket WIDE_SLOTS (position, node)
     uint overflowBase; // gAcc: per vehicle the overflow count; gNext: overflow nodes at candOff
     // Aerodynamics and commands (the EB_AERO modules only; see the aero section).
-    uint aeroBase; // gStatic: per vehicle 2 records
+    uint aeroBase; // gStatic: per vehicle 3 records
     uint wingBase; // gStatic: per wing 4 records
     uint cmdBase; // gStatic: per self-centering command 2 records
     uint aeroState; // gBeams: per vehicle D, then per wing 4 records, then per command 1
     uint wingTotal; // wings over every vehicle
     uint shock2Base; // gStatic: per shocks2 shock 2 records (EB_AERO modules)
     uint shock2Count; // shocks2 shocks over every vehicle
+    // Triggers, key-driven commands and slide nodes (EB_AERO modules; see that
+    // section).
+    uint keyBase; // gNext: per vehicle 2 parities × KEYS trigger inputs
+    uint slideBase; // gStatic: per slide node 2 records
+    uint segBase; // gStatic: per rail segment 1 record
+    uint slideState; // gBeams: per slide node (segment, broken away, 0, 0)
+    uint slideAcc; // gBeams: per slide target node its slide force
+    uint slideTotal; // slide nodes over every vehicle
+    uint segTotal; // rail segments over every vehicle
+    uint slotTotal; // slide target nodes over every vehicle
 };
 
 struct Surface
@@ -373,6 +384,12 @@ float3 beamSum(float3 f, uint4 info, uint beamOff, uint groupOff, uint groupCoun
 void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float ground, uint boxOff, uint boxCount,
                     uint beamOff, uint groupOff, uint groupCount, uint parity, bool hits);
 static const uint FLAG_FUSEDRAG = 8u;
+// Vehicle flags: it has triggers (key-driven commands), slide nodes.
+static const uint FLAG_KEYS = 16u;
+static const uint FLAG_SLIDES = 32u;
+// Node info flags above this shift: the node's slide-force slot + 1 (0: none).
+static const uint NODE_SLOT_SHIFT = 8u;
+float3 slideTake(float3 f, uint slot1);
 #endif
 
 void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
@@ -397,6 +414,9 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
         gAcc[gi * 3u + 1u].store(0);
         gAcc[gi * 3u + 2u].store(0);
     }
+#ifdef EB_AERO
+    if ((info.x >> NODE_SLOT_SHIFT) != 0u) f = slideTake(f, info.x >> NODE_SLOT_SHIFT);
+#endif
     uint flags = info.x;
     float3 pos = P.xyz;
     float3 vel = V.xyz;
@@ -461,6 +481,7 @@ uint livePlain(uint node)
 
 #ifdef EB_AERO
 void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, uint4 bn, float4 s1);
+void triggerUpdate(uint gj, bool fast, uint parity, uint4 bn);
 #endif
 
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
@@ -477,6 +498,11 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     if ((bn.z & 0xFFu) == KIND_SHOCK2)
     {
         shock2Update(gj, local, fast, groupOff, parity, bn, s1);
+        return;
+    }
+    if ((bn.z & 0xFFu) == KIND_TRIGGER)
+    {
+        triggerUpdate(gj, fast, parity, bn);
         return;
     }
 #endif
@@ -804,10 +830,12 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
 //
 //   gStatic at aeroBase per vehicle: (wingOff, wingCount, cmdOff, cmdCount) (wing and
 //            command indices global), (front node global, width bits, node count,
-//            0); at wingBase per wing: (FLD, FRD, FLU, FRU), (BLD, BRD, BLU, BRU)
+//            0), (first slide node global, slide node count, 0, 0); at wingBase per wing: (FLD, FRD, FLU, FRU), (BLD, BRD, BLU, BRU)
 //            (global nodes), (efficacy, break reference, table record, induced side
 //            0 none 1 left 2 right), (chain span, chain area, 0, 0) as bits; at
-//            cmdBase per command: (beam global, contract first, centre bits, 0),
+//            cmdBase per command: (beam global, contract first, centre bits, 0 for a
+//            self-centering command with no input, else contract key | extend key
+//            << 8 | self-centering << 16 | 1 << 17 for a vehicle with triggers),
 //            (shorten rate, lengthen rate, max contraction, max extension) bits;
 //            a table record holds 3601 (cl, cd, cm, 0) as bits.
 //   gBeams   at aeroState per vehicle (D, 0); then per wing (broken, 0, 0, 0),
@@ -1162,6 +1190,221 @@ void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, ui
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
 }
 
+// --- Triggers, key-driven commands and slide nodes
+// (engine/docs/explicit-beams-sections-triggers-slidenodes-spec.md §2–3, §6; CPU
+// reference engine_softbody::explicit_triggers) ---
+//   gStatic  a trigger beam's third record holds (short bound, long bound, short key
+//            | long key << 8 | enabled << 16, L0); at slideBase per slide node
+//            (node global, first segment global or NONE, 0, 0), (spring, break
+//            force, tolerance, 0) bits; at segBase per segment (beam global,
+//            previous segment global or NONE, next or NONE, 0).
+//   gNext    at keyBase per vehicle and step parity KEYS trigger inputs (1: held):
+//            the beam phase of step s writes parity s & 1, the command phase of
+//            step s + 1 reads it, the beam phase of step s + 1 clears it.
+//   gBeams   at slideState per slide node (current segment or -1, broken away, 0,
+//            0); at slideAcc per slide target node (a slide node or a rail end:
+//            node info flags >> NODE_SLOT_SHIFT, 1-based) the slide forces of the
+//            last step, added by its node phase and cleared.
+// One lane per vehicle runs its slide nodes in spawn order during the
+// self-collision phase (positions are final for the step there, and the beam
+// phase's breaks are visible), writing only the slots, which no other phase reads
+// before the next node phase. Every loop is bounded by a count from the static
+// records, every index clamped.
+static const uint KEYS = 85u;
+static const uint NONE = 0xFFFFFFFFu;
+
+uint keySlot(uint vehicle, uint parity, uint key)
+{
+    return gP.keyBase + (vehicle * 2u + parity) * KEYS + min(key, KEYS - 1u);
+}
+
+// A trigger beam: zero force (k = c = 0), then the bounds test for the next step's
+// command pass (spec §2.5).
+void triggerUpdate(uint gj, bool fast, uint parity, uint4 bn)
+{
+    uint4 r2 = gStatic[gP.beamBase + gj * 3u + 2u];
+    float4 s0 = gBeams[gj * 2u];
+    float rest = s0.x;
+    float4 pa = gNodes[bn.x * 3u];
+    float4 pb = gNodes[bn.y * 3u];
+    float3 va = gNodes[bn.x * 3u + 1u].xyz;
+    float3 vb = gNodes[bn.y * 3u + 1u].xyz;
+    float3 d = ssub3(pa.xyz, pb.xyz);
+    float q = sdot(d, d);
+    float inv = fast ? sFastInvSqrt(q) : sdiv(1.0, ssqrt(q));
+    float len = smul(q, inv);
+    float e = nf(len - rest);
+    float u = smul(sdot(ssub3(va, vb), d), inv);
+    float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
+    float f = nf(smul(-c1.x, e) - smul(c1.y, u));
+    float3 push = sscale(d, smul(f, inv));
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
+    uint keys = r2.z;
+    if (((keys >> 16) & 1u) == 0u) return;
+    float sb = asfloat(r2.x);
+    float lb = asfloat(r2.y);
+    uint vehicle = bn.z >> 16;
+    if (e > smul(lb, rest)) gNext[keySlot(vehicle, parity, (keys >> 8) & 0xFFu)] = 1u;
+    else if (e < smul(-sb, rest)) gNext[keySlot(vehicle, parity, keys & 0xFFu)] = 1u;
+}
+
+// One command line's step with key input (spec §2.6): both entries in key order,
+// the keys' values from the triggers of the last step (parity `prev`).
+void commandUpdateKeys(uint gc, uint vehicle, uint prev)
+{
+    uint4 R = gStatic[gP.cmdBase + gc * 2u];
+    float4 rates = asfloat(gStatic[gP.cmdBase + gc * 2u + 1u]);
+    uint j = R.x;
+    float centre = asfloat(R.z);
+    uint ck = R.w & 0xFFu;
+    uint ek = (R.w >> 8) & 0xFFu;
+    bool centering = ((R.w >> 16) & 1u) != 0u;
+    float vc = ck == 0u ? 0.0 : float(gNext[keySlot(vehicle, prev, ck)]);
+    float ve = ek == 0u ? 0.0 : float(gNext[keySlot(vehicle, prev, ek)]);
+    bool locked = centering && (vc >= 0.5 || ve >= 0.5);
+    float4 s0 = gBeams[j * 2u];
+    float rest = s0.x;
+    float rest0 = asfloat(gStatic[gP.beamBase + j * 3u + 2u].w);
+    float mode = gBeams[cmdState(gc)].x;
+    if (locked) mode = 0.0;
+    for (uint e = 0u; e < 2u; e++)
+    {
+        float sigma = (e == 0u) == (R.y != 0u) ? -1.0 : 1.0;
+        if (rest0 == 0.0 || rest == 0.0) continue;
+        if (centering && !locked)
+        {
+            float r = sdiv(rest, rest0);
+            if (abs(nf(r - centre)) < 1e-4) mode = 0.0;
+            else
+            {
+                float old = mode;
+                mode = r > centre ? -1.0 : 1.0;
+                if (old != 0.0 && old != mode)
+                {
+                    rest = smul(centre, rest0);
+                    mode = 0.0;
+                }
+            }
+        }
+        float r = sdiv(rest, rest0);
+        bool may = (sigma > 0.0 && r < rates.w) || (sigma < 0.0 && r > rates.z);
+        if (may)
+        {
+            float v = sigma > 0.0 ? ve : vc;
+            if (centering && !locked && sigma * mode > 0.0) v = 1.0;
+            float rate = sigma > 0.0 ? rates.y : rates.x;
+            float x = sdiv(smul(smul(smul(rate, v), 1.0), STEP), rest);
+            rest = nf(fma(sigma * x, rest, rest));
+        }
+    }
+    if (rest != s0.x) gBeams[j * 2u] = float4(rest, s0.yzw);
+    gBeams[cmdState(gc)] = float4(mode, 0.0, 0.0, 0.0);
+}
+
+// The node phase: add and clear a slide target's forces (slot + 1 = slot1).
+float3 slideTake(float3 f, uint slot1)
+{
+    uint at = gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u);
+    float3 s = gBeams[at].xyz;
+    gBeams[at] = float4(0.0, 0.0, 0.0, 0.0);
+    return sadd3(f, s);
+}
+
+void slideAdd(uint node, float3 f)
+{
+    uint slot1 = gStatic[gP.nodeInfoBase + node].x >> NODE_SLOT_SHIFT;
+    if (slot1 == 0u) return;
+    uint at = gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u);
+    gBeams[at] = float4(sadd3(gBeams[at].xyz, f), 0.0);
+}
+
+// Beam j is broken as the CPU sees it after this step's beam pass: its flag, or a
+// detacher-group break this step (the next node phase marks those).
+bool brokenNow(uint j, uint groupOff, uint parity)
+{
+    if (gBeams[j * 2u + 1u].z != 0.0) return true;
+    int g = asint(gStatic[gP.beamBase + j * 3u].w);
+    if (g == 0) return false;
+    return gGroups[groupSlot(parity, groupOff, uint(abs(g)))].load() != NO_GROUP;
+}
+
+// The nearest point of segment gs (world positions) to x, its distance and ratio.
+struct SegPoint
+{
+    float3 q;
+    float dist;
+    float ratio;
+};
+
+SegPoint segmentPoint(uint gs, float3 origin, float3 x)
+{
+    uint j = gStatic[gP.segBase + gs].x;
+    uint4 bn = gStatic[gP.beamBase + j * 3u];
+    float3 p1 = nf3(origin + gNodes[bn.x * 3u].xyz);
+    float3 p2 = nf3(origin + gNodes[bn.y * 3u].xyz);
+    float3 d = ssub3(p2, p1);
+    float beta = slen(d);
+    if (beta > 0.0) d = sscale(d, sdiv(1.0, beta));
+    float proj = sdot(ssub3(x, p1), d);
+    float m = (beta < proj) ? beta : proj;
+    float tau = (0.0 < m) ? m : 0.0;
+    SegPoint r;
+    r.q = sadd3(p1, sscale(d, tau));
+    r.dist = slen(ssub3(r.q, x));
+    r.ratio = beta > 0.0 ? sdiv(tau, beta) : 0.0;
+    return r;
+}
+
+uint clampSeg(uint gs) { return min(gs, max(gP.segTotal, 1u) - 1u); }
+
+// A vehicle's slide nodes in spawn order (spec §3.4), one lane.
+void slidePass(uint slideOff, uint slideCount, float3 origin, uint groupOff, uint parity)
+{
+    uint count = min(slideCount, gP.slideTotal - min(slideOff, gP.slideTotal));
+    for (uint k = 0u; k < count; k++)
+    {
+        uint gs = slideOff + k;
+        float4 st = gBeams[gP.slideState + gs];
+        if (st.x < 0.0) continue;
+        uint cur = clampSeg(uint(st.x));
+        uint4 seg = gStatic[gP.segBase + cur];
+        if (brokenNow(seg.x, groupOff, parity)) continue;
+        uint4 S0 = gStatic[gP.slideBase + gs * 2u];
+        float4 S1 = asfloat(gStatic[gP.slideBase + gs * 2u + 1u]);
+        float3 x = nf3(origin + gNodes[S0.x * 3u].xyz);
+        // At most one segment's hop.
+        uint best = cur;
+        SegPoint bp = segmentPoint(cur, origin, x);
+        if (seg.y != NONE)
+        {
+            SegPoint p = segmentPoint(clampSeg(seg.y), origin, x);
+            if (p.dist < bp.dist) { best = clampSeg(seg.y); bp = p; }
+        }
+        if (seg.z != NONE)
+        {
+            SegPoint p = segmentPoint(clampSeg(seg.z), origin, x);
+            if (p.dist < bp.dist) { best = clampSeg(seg.z); bp = p; }
+        }
+        bool away = st.y != 0.0;
+        if (!away)
+        {
+            float3 w = ssub3(bp.q, x);
+            float delta = slen(w);
+            w = snormalise(w);
+            float stretch = nf(delta - S1.z);
+            float fLen = smul(-S1.x, (0.0 < stretch) ? stretch : 0.0);
+            float3 P = sscale(w, fLen);
+            if (slen(P) > S1.y) away = true;
+            uint4 bn = gStatic[gP.beamBase + gStatic[gP.segBase + best].x * 3u];
+            slideAdd(S0.x, -P);
+            slideAdd(bn.x, sscale(P, nf(1.0 - bp.ratio)));
+            slideAdd(bn.y, sscale(P, bp.ratio));
+        }
+        gBeams[gP.slideState + gs] = float4(float(best), away ? 1.0 : 0.0, 0.0, 0.0);
+    }
+}
+
 // nodeUpdate for a vehicle with a `fusedrag` line: the restart adds the stored
 // fuselage drag D instead of the air drag and turbulence.
 void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float ground, uint boxOff, uint boxCount,
@@ -1177,6 +1420,7 @@ void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float grou
         gAcc[gi * 3u + 1u].store(0);
         gAcc[gi * 3u + 2u].store(0);
     }
+    if ((info.x >> NODE_SLOT_SHIFT) != 0u) f = slideTake(f, info.x >> NODE_SLOT_SHIFT);
     uint flags = info.x;
     float3 pos = P.xyz;
     float3 vel = V.xyz;
@@ -1243,8 +1487,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float cell = asfloat(r3.w);
     bool fast = (flagsV & FLAG_FAST_INV_SQRT) != 0u;
 #ifdef EB_AERO
-    uint4 aero0 = gStatic[gP.aeroBase + v * 2u];
-    uint4 aero1 = gStatic[gP.aeroBase + v * 2u + 1u];
+    uint4 aero0 = gStatic[gP.aeroBase + v * 3u];
+    uint4 aero1 = gStatic[gP.aeroBase + v * 3u + 1u];
+    uint4 aero2 = gStatic[gP.aeroBase + v * 3u + 2u];
     // The wing break check, once per frame on the positions before the rebase.
     {
         float3 o = asfloat(gMisc[v].xyz);
@@ -1321,9 +1566,22 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         // wings' forces in file order while the others start the beams.
         for (uint w = lane; w < aero0.y; w += LANES) wingForces(aero0.x + w, origin);
         if (lane == LANES - 1u && (flagsV & FLAG_FUSEDRAG) != 0u) fuseDrag(aero1, origin, v);
-        for (uint c = lane; c < aero0.w; c += LANES) commandUpdate(aero0.z + c);
+        if ((flagsV & FLAG_KEYS) != 0u)
+        {
+            for (uint c = lane; c < aero0.w; c += LANES) commandUpdateKeys(aero0.z + c, v, parity ^ 1u);
+        }
+        else
+        {
+            for (uint c = lane; c < aero0.w; c += LANES) commandUpdate(aero0.z + c);
+        }
         sync();
         if (lane == 0u) wingApply(aero0.x, aero0.y);
+        // The last step's trigger inputs, read by this step's commands: cleared for
+        // the next step's beam phase.
+        if ((flagsV & FLAG_KEYS) != 0u)
+        {
+            for (uint k = lane; k < KEYS; k += LANES) gNext[keySlot(v, parity ^ 1u, k)] = 0u;
+        }
 #endif
         for (uint j = lane; j < beamCount; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
         sync();
@@ -1400,6 +1658,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
                              groupOff, groupCount, parity);
         }
+#ifdef EB_AERO
+        // Slide nodes, after this step's beams (one lane, alongside the contacts).
+        if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, origin, groupOff, parity);
+#endif
         sync();
     }
     if (gP.steps > 0u && candCount > 0u)

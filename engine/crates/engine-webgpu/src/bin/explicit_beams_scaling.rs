@@ -50,6 +50,9 @@
 //! (end state: node positions, broken and bent beams, travel along the forward
 //! axis, crush: loss of length along it), reported but not judged.
 //!
+//! `config=<name>`: the section configuration on both engines (Rigs of Rods'
+//! default when absent: the first `section` name in byte order).
+//!
 //! `trace=<file>` (with `trace_scene=<json>`, `trace_every=`, `cols=` for the grid's
 //! columns) records the first scenario and count on Rubble's GPU for the crash
 //! viewer instead of benchmarking.
@@ -149,8 +152,10 @@ fn spawn(text: &str, at: Vec3, vel: Vec3) -> ExplicitBeams {
         turbulence: drag,
         ..Default::default()
     };
-    let mut sim = ExplicitBeams::from_truck(text, Vec3::new(at.x, 0.0, at.z), vel, settings)
-        .expect("explicit beams spawn");
+    let config = CONFIG.get().and_then(|c| c.as_deref());
+    let mut sim =
+        ExplicitBeams::from_truck_config(text, config, Vec3::new(at.x, 0.0, at.z), vel, settings)
+            .expect("explicit beams spawn");
     let lowest = sim.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
     for n in &mut sim.nodes {
         n.pos.y += 0.02 - lowest;
@@ -175,6 +180,9 @@ fn apply_wide(gpu: &mut ExplicitBeamsGpu) {
         eprintln!("wide passes: {on}");
     }
 }
+
+/// `config=<name>`: the section configuration (both engines).
+static CONFIG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 /// `roll=0`: spawn tyres still (every node at the spawn velocity) on both engines.
 static ROLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -548,6 +556,12 @@ fn run_ror(
             DRAG.load(std::sync::atomic::Ordering::Relaxed) as u8
         ))
         .arg(format!("sample={sample}"))
+        .args(
+            CONFIG
+                .get()
+                .and_then(|c| c.as_deref())
+                .map(|c| format!("config={c}")),
+        )
         .arg(format!("out={}", out.display()))
         .stderr(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -765,6 +779,7 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var_os("ROR_BIN").map(PathBuf::from));
     let seconds = (warm + frames) as f32 / fps;
     let cols: Option<usize> = kv(&args, "cols").map(|s| s.parse().unwrap());
+    let _ = CONFIG.set(kv(&args, "config").map(str::to_string));
     ROLL.store(
         kv(&args, "roll") != Some("0"),
         std::sync::atomic::Ordering::Relaxed,
