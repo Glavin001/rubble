@@ -32,6 +32,13 @@ fn out_dir(scene: &str, sleep: bool) -> PathBuf {
     d
 }
 
+/// `EQUIV_ENV=1`: the world reads the `ENGINE_*` benchmark variables (`WorldDef::env_overrides`),
+/// so a recording can be made with one engine switch flipped.
+fn env(mut def: WorldDef) -> WorldDef {
+    def.env_overrides = std::env::var("EQUIV_ENV").is_ok_and(|v| v == "1");
+    def
+}
+
 fn dump_bodies(w: &World, dir: &Path, tag: &str) {
     let mut bytes = Vec::new();
     for b in w.sim().download_bodies() {
@@ -153,7 +160,7 @@ fn shots(scene: &str, sleep: bool) {
             contacts: ContactStorage::Canonical,
             ..WorldDef::default()
         };
-        let mut w = World::new(GpuContext::Default, &def).unwrap();
+        let mut w = World::new(GpuContext::Default, &env(def)).unwrap();
         if let Some(h) = asset.stress.as_ref().unwrap().ground_height() {
             let g = w.create_body(&BodyDef::default()).unwrap();
             w.create_shape(
@@ -240,7 +247,7 @@ fn snapshot_world(name: &str, sleep: bool, per_body: u32) -> (World, Vec<BodyId>
         enable_sleep: sleep,
         ..WorldDef::default()
     };
-    let mut w = World::new(GpuContext::Default, &def).unwrap();
+    let mut w = World::new(GpuContext::Default, &env(def)).unwrap();
     let imported = w.import_snapshot(&snap).unwrap();
     // The snapshot's solver replaces the world's: set sleep again (the demo's 0.5 s, or never).
     let mut solver = w.solver();
@@ -298,7 +305,7 @@ fn gables(sleep: bool) -> World {
         enable_sleep: sleep,
         ..WorldDef::default()
     };
-    let mut w = World::new(GpuContext::Default, &def).unwrap();
+    let mut w = World::new(GpuContext::Default, &env(def)).unwrap();
     let mut solver = w.solver();
     solver.iterations = 3;
     solver.flags |= engine_schema::FLAG_REUSE_CONTACTS;
@@ -353,7 +360,7 @@ fn vehicle(sleep: bool) -> World {
         enable_sleep: sleep,
         ..WorldDef::default()
     };
-    let mut w = World::new(GpuContext::Default, &def).unwrap();
+    let mut w = World::new(GpuContext::Default, &env(def)).unwrap();
     w.set_gravity([0.0, -9.81, 0.0]).unwrap();
     let g = w
         .create_body(&BodyDef {
@@ -452,7 +459,8 @@ fn record(scene: &str, sleep: bool) {
                 sleep,
                 ..Default::default()
             };
-            let mut w = World::new(GpuContext::Default, &def.world_def(&house).unwrap()).unwrap();
+            let mut w =
+                World::new(GpuContext::Default, &env(def.world_def(&house).unwrap())).unwrap();
             let mut c = rubble::city::City::begin(&mut w, &house, def).unwrap();
             c.place(&mut w, 16).unwrap();
             for _ in 0..rubble::city::CITY_SETTLE {
