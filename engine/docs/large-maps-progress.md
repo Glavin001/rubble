@@ -927,12 +927,14 @@ smaller scene: a product decision, not done here.
 ## Equivalence: PR #97 against origin/main (2026-11-03)
 
 `engine/crates/engine-world/tests/equivalence.rs` (ignored; `EQUIV_OUT` records one scene and
-sleep mode per run, `EQUIV_COMPARE=dirA,dirB` compares two recordings). It uses only API that
-main has, so the same file runs on both builds. Reference: origin/main 0ab6a4dc, run twice (A,
-B) for the noise floor. Candidate: PR head 62a93fbc (main merged in). Native wgpu/Metal, each
-build's default, sleep on and off. Per-dump metric: every body slot's position, linear
-velocity and awake flag (parked slots excluded), plus contacts, awake bodies and bonds broken
-per step (per shot for house and arch).
+sleep mode per run, `EQUIV_COMPARE=dirA,dirB` compares two recordings, `EQUIV_ENV=1` lets a
+recording read the `ENGINE_*` switches; threshold scenes then need `ENGINE_CONTACTS=canonical`).
+It uses only API that main has, so the same file runs on both builds (main needs the
+`engine-scenes` dev-dependency). Reference: origin/main 0ab6a4dc, run twice (A, B) for the
+noise floor. Candidate: this branch with threshold destructibles on main's archive (below).
+Native wgpu/Metal, each build's default, sleep on and off. Per-dump metric: every body slot's
+position, linear velocity and awake flag (parked slots excluded), plus contacts, awake bodies
+and bonds broken per step (per shot for house and arch).
 
 Scenes: house and arch (the 61 lab shots, 120 frames each), grid (the demo's 100k Grid, a
 CCD ball at step 400, 900 steps), ring (Brick Ring 28k with its rolling ball, plus a 4 t ball
@@ -940,55 +942,78 @@ at step 200, 400 steps), gables (12 brick gables, two balls at step 150, 600 ste
 threshold houses, the war scenario, 240 steps), vehicle (engine-vehicle's rigid sedan at full
 throttle into a 160-brick wall, 600 steps).
 
+**Threshold destructibles keep main's archive.** Main runs two resting-contact designs: the
+carry in non-threshold worlds, and in threshold worlds (canonical contacts) a sleep archive the
+first threshold destructible enables, whose woken pairs warm-start from their archived rows
+through `archive_emit`. The PR had moved threshold worlds to its persistent worlds' archive
+(the touch query, cold wakes): the house broke 54.3 bonds a shot against main's 60.6 (warm wakes
+alone gave 54.5, so the touch query is most of it) and the city 6.5% more bonds. Canonical
+worlds with `RestingContacts::Archive` (the default) now do what main does;
+`RestingContacts::Touch` (`ENGINE_REST=touch`, `RB_RESTING_TOUCH`, `rest=touch` on the demo and
+city pages) opts in to the touch query there.
+
 | scene | floor (main A vs B) | main vs PR | verdict |
 |---|---|---|---|
-| house, sleep off | identical | identical, 57.1 bonds/shot, 61/61 shots | identical |
-| house, sleep on | identical (60.6) | 60.6 -> 54.3 bonds/shot, paired -6.26, 1/61 identical | differs: cold wakes (intended) |
-| arch, off / on | identical | identical, 127.5 bonds/shot, 61/61 | identical |
-| city, sleep off | identical | bonds identical (2,214); max 0.157 m, mean 0.0001 m | differs slightly, cause not isolated (see notes) |
-| city, sleep on | identical | bonds 2,030 -> 2,161 (+6.5%), 1,766 awake-state differences | differs: cold wakes (intended) |
+| house, off / on | identical | identical: 57.1 / 60.6 bonds a shot, 61/61 shots | identical |
+| arch, off / on | identical | identical: 127.5 bonds a shot, 61/61 | identical |
+| city, sleep off | identical | parts at step 78 (one candidate pair, one contact fewer); same 2,214 bonds; mean 0.1 mm, max 0.157 m | differs: the awake broadphase (below) |
+| city, sleep on | identical | 2,030 -> 2,127 bonds, 1,395 awake-state differences | differs: the awake broadphase and `ccd_by_collider` (below) |
 | gables, sleep off | identical | identical | identical |
-| gables, sleep on | mean 0.349 m, 1,806 awake diffs | mean 0.380 m, 2,041 | within noise |
+| gables, sleep on | mean 0.349 m, 1,806 awake diffs | mean 0.378 m, 2,242 | within noise |
 | grid, sleep off | identical | main: 100,000 bodies below the ground; PR: 0. Main with only `[ForceInline]` on `closingPoints` is bit-identical to the PR | differs: main's CCD fall-through (fixed) |
 | grid, sleep on | mean 0.063 m, 2,021 | main: 2,353 below the ground; PR: 0 | differs: main's CCD fall-through (fixed) |
 | ring, sleep off | identical | identical | identical |
-| ring, sleep on | mean 0.207 m, 8,720 | mean 0.243 m, 11,266 | within noise |
+| ring, sleep on | mean 0.207 m, 8,720 | mean 0.242 m, 11,981 | within noise |
 | vehicle, off / on | identical | identical (positions, velocities, sleep) | identical |
 
 Hard checks, every scene and mode: no NaNs, body counts equal, no body below the ground on the
-PR. The ring's two bodies below y = -1 (both builds, sleep off; 36 by step 450 in a longer run) are
-bricks knocked past the edge of the scene's 200 m ground slab (z 111-125 m), not fall-throughs.
-Final states at rest: wherever the floor is zero the final states are identical, except as
-listed; on the cold-wake and CCD rows they differ for the reasons given.
+PR. The ring's one or two bodies below y = -1 (both builds) are bricks knocked past the edge of
+the scene's 200 m ground slab (z 111-125 m), not fall-throughs. Final states at rest: identical
+wherever the table says identical.
 
-Notes on the differences:
+**The city's two causes.** A bisect of city sleep-off over main..62a93fbc (harness at every
+commit) finds 99a4c6cc (rigid_plan: awake-indexed broadphase on hierarchical grids) first;
+its parent 165e32e8 is bit-identical to main. With `ENGINE_BROADPHASE=full` the PR's city
+sleep-off run is bit-identical to main; `ENGINE_BROADPHASE=hier` is not. The bodies are
+bit-identical through step 77; at step 78 the awake broadphase emits 4,102 candidate pairs
+against the full pass's 4,103, and the missing pair is one manifold and one contact (9,416
+against 9,417). At step 74 it emitted one more than the full pass (no contact). So it does not
+form "the same pairs" as documented: it is a different pair set at the margins, not a reorder
+or rounding, and one of its misses was a real contact. Making it identical is a fix to the
+awake path's pair test (lossless, the full pass is the reference), not a summation-order change.
+With sleep on, `ENGINE_BROADPHASE=full` alone still leaves 2,104 bonds; adding
+`ENGINE_CCD_WAKE=body` (main's per-body `ccd_wake`) brings the city to main's 2,030 bonds, 0
+awake-state differences, max 0.1 mm. The per-collider pass wakes 38 bodies on the first shell
+step where main's wakes 32: main's per-body search finds a body's colliders by
+`firstColliderOfBody` and a contiguous scan, which assumes colliders sorted by body.
 
-- **Main's default is not one thing.** Non-threshold worlds (grid, ring, gables, vehicle) run
-  the resting-pair carry with no archive. Threshold worlds (house, arch, city) run the sleep
-  archive with carry off on the old `archive_emit` path, waking pairs warm. The PR's default is
-  the archive with the touch query and cold wakes everywhere. Where main carried (gables, ring,
-  vehicle), the PR matches it bit for bit with sleep off and within the floor with sleep on; the
-  vehicle scene matches with sleep on as well.
-- **Cold wakes** are the one intended physics change: a woken pair starts at lambda = 0 instead
-  of the archived impulse, which matches what carry did (fresh rows) and fixed the struck
-  grid's stiffness. On the house it costs 6.3 bonds/shot (60.6 -> 54.3; never sleeping gives
-  57.1). On the city it adds 6.5% more breaks. `ENGINE_ARCHIVE=warm` restores warm wakes.
-- **Contact counts with sleep on are lower on the PR** by design (gables 38k -> 11.5k, grid 404k
-  -> 3.7k, vehicle 1,440 -> 105): sleeping pairs are archived rather than re-emitted, so only
-  awake contacts are counted.
-- **city, sleep off: one contact.** The runs part at step 78, 9,417 contacts against 9,416, and
-  end 0.1 mm apart on average (max 0.157 m) with the same 2,214 bonds. Not `[ForceInline]` on
-  `closingPoints` (main with only that change is bit-identical to main here, and to the PR on
-  grid-off), and none of the PR's switches changes it (`ENGINE_BROADPHASE=full`, `_BODY_PASSES=all`,
-  `_CCD_WAKE=body`, `_REST_TABLE=rebuild`, `_SOLVE=dispatch`, `_REPAIR=rounds`, `_REST=drop`,
-  `_ARCHIVE=warm`, `_ARCHIVE_WAKE=emit` all leave the PR's run bit-identical). The remaining
-  candidate is codegen or ordering in shared kernels; a commit bisect would settle it.
-- **city-on's per-slot position difference (max 2,336 m)** is not a motion difference: once
-  bonds break differently, split pieces take different body slots, so slots are compared
-  across different chunks.
+**Memory** (headless Chrome, `mem.mjs`, MB peak; `demo.html?scene=<s>&sleep=on` 200 steps,
+`city.html` 1,024 houses 60 s):
+
+| page | main 0ab6a4dc GPU / wasm | 62a93fbc (touch, cold) | this branch |
+|---|---|---|---|
+| gables506k | 2,391 / 826 | 2,447 / 795 | 2,447 / 795 |
+| ring110k | 841 / 203 | 856 / 197 | 856 / 197 |
+| city | 2,653 / 1,408 | 2,045 / 1,328 | 2,561 / 1,411 |
+
+The city's archive keeps main's rows again (b4 640 MB, as on main), and the page is 92 MB under
+main. gables506k and ring110k are unchanged by this: +56 MB and +15 MB of GPU buffers over main
+(the awake broadphase's tables, binding 14, and the archive's per-body scratch, binding 21),
+offset by less wasm heap (-31 MB, -6 MB).
+
+Notes:
+
+- **Contact counts with sleep on are lower on the PR** where it archives persistent contacts
+  (gables 38k -> 11.6k, grid 404k -> 6, vehicle 1,440 -> 105): sleeping pairs are archived
+  rather than re-emitted, so only awake contacts are counted.
+- **city-on's per-slot position difference (max 2,337 m)** is not a motion difference: once
+  bonds break differently, split pieces take different body slots.
 - **Main's sleep-on runs of gables, grid and ring are not reproducible** on native wgpu (the
   floor column); house, arch, city and vehicle are, and so is every sleep-off run.
-- **The ring overflows main's record warm hash** (`OVERFLOW_WARM_HASH`, the 64-probe limit)
-  from about step 440 of the collapse, on both builds, which is why the ring run stops at 400.
-  This is an engine limit that fails loudly, not a harness choice; raising contact capacity
-  does not help (the hash is sized from the previous contact count, 4x bodies at least).
+- **The ring overflows the record warm hash** (`OVERFLOW_WARM_HASH`, 64 probes) from about step
+  440 of the collapse, on main and on the PR alike, so the ring run stops at 400. An engine
+  limit that fails loudly; more contact capacity does not help (the hash is sized from the
+  previous contact count).
+- **grid_strike**, sleep on, persistent contacts: no box below 0.1 m from the strike to step
+  1,000, lowest box centre 0.17 m. With `STRIKE_CANONICAL=1` (now the carry, as on main): no box
+  below the ground, lowest centre 0.06 m, one box below 0.1 m at steps 850 and 1,000.
