@@ -17,6 +17,14 @@
 //!   drive   rolling at `speed=` m/s (default 15) along the vehicle's forward axis
 //!   impact  as drive, into its own static wall 1 + 0.5 v m ahead (hit about 0.57 s
 //!           in at 15 m/s, inside the timed frames)
+//!   mixed   a fleet doing what traffic does, vehicle k by k mod 4: standing still;
+//!           driving; into a wall; into a narrow pole a quarter of its width off
+//!           centre. Moving vehicles at 0.6 to 1.0 × `speed=`, and each wall and pole
+//!           placed so its hit lands at a time spread evenly over the timed frames
+//!           (from 0.1 s after the warm frames to 0.5 s before the end), so crashes
+//!           keep happening through the run (a fixed sequence from k, the same on
+//!           both engines). Vehicles never reach one another: neither engine's
+//!           vehicle–vehicle contact is exercised.
 //! Every run: `warm=` untimed frames (default 0.5 s worth), then `frames=` timed
 //! frames (default 2 s worth) at `fps=` (default 60: 33 steps of 0.5 ms a frame; 120:
 //! 17 steps and an 8.33 ms budget). Both engines read one scene file.
@@ -91,6 +99,7 @@ enum Scenario {
     Idle,
     Drive,
     Impact,
+    Mixed,
 }
 
 impl Scenario {
@@ -99,7 +108,8 @@ impl Scenario {
             "idle" => Self::Idle,
             "drive" => Self::Drive,
             "impact" => Self::Impact,
-            _ => panic!("scenario {s}: idle, drive or impact"),
+            "mixed" => Self::Mixed,
+            _ => panic!("scenario {s}: idle, drive, impact or mixed"),
         }
     }
     fn name(self) -> &'static str {
@@ -107,6 +117,7 @@ impl Scenario {
             Self::Idle => "idle",
             Self::Drive => "drive",
             Self::Impact => "impact",
+            Self::Mixed => "mixed",
         }
     }
 }
@@ -210,6 +221,17 @@ struct Scene {
     walls: Vec<Option<(Vec3, Vec3)>>,
 }
 
+/// `mixed`: vehicle k's role (k mod 4: 0 still, 1 driving, 2 into a wall, 3 into a
+/// pole), its speed factor in [0.6, 1.0] and its hit time as a share of the timed
+/// window, both from a fixed low-discrepancy sequence in k.
+fn mixed_role(k: usize) -> (usize, f32, f32) {
+    let golden = |i: usize, a: f64| ((i as f64 + 1.0) * a).fract() as f32;
+    (k % 4, 0.6 + 0.4 * golden(k, 0.618_033_988_75), golden(k, 0.754_877_666_25))
+}
+
+/// Seconds of warm frames before the timed ones (for `mixed` hit times).
+static WARM_S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+
 fn scene(
     sc: Scenario,
     n: usize,
@@ -224,7 +246,8 @@ fn scene(
     let width = g.across.1 - g.across.0;
     let length = g.along.1 - g.along.0;
     let travel = speed * seconds + 20.0;
-    let lateral_step = width + 3.0;
+    // Mixed: lanes 12 m apart, so a vehicle deflected by a pole cannot reach the next.
+    let lateral_step = width + if sc == Scenario::Mixed { 12.0 } else { 3.0 };
     let row_step = length + travel;
     let mut origins: Vec<Vec3> = (0..n)
         .map(|k| {
@@ -246,14 +269,36 @@ fn scene(
     for o in &mut origins {
         *o += shift;
     }
+    let warm_s = WARM_S.get().copied().unwrap_or(0.0);
+    // Per vehicle: speed and, for a wall or pole, (gap to the front, half width
+    // across, lateral offset from the vehicle's centre line).
+    let plan: Vec<(f32, Option<(f32, f32, f32)>)> = (0..n)
+        .map(|k| match sc {
+            Scenario::Idle => (0.0, None),
+            Scenario::Drive => (v, None),
+            Scenario::Impact => (v, Some((1.0 + 0.5 * speed, 0.5 * width + 1.0, 0.0))),
+            Scenario::Mixed => {
+                let (role, f, when) = mixed_role(k);
+                let vk = speed * f;
+                let t_hit = (warm_s + 0.1) + when * (seconds - warm_s - 0.6).max(0.0);
+                let gap = 1.0 + vk * t_hit;
+                match role {
+                    0 => (0.0, None),
+                    1 => (vk, None),
+                    2 => (vk, Some((gap, 0.5 * width + 1.0, 0.0))),
+                    _ => (vk, Some((gap, 0.3, 0.25 * width))),
+                }
+            }
+        })
+        .collect();
     let walls = origins
         .iter()
-        .map(|o| {
-            (sc == Scenario::Impact).then(|| {
-                let face = o.dot(g.forward) + g.along.1 + 1.0 + 0.5 * speed;
-                let half_t = 0.5;
-                let side = 0.5 * width + 1.0;
-                let mid = o.dot(g.lateral) + 0.5 * (g.across.0 + g.across.1);
+        .zip(&plan)
+        .map(|(o, (_, wall))| {
+            wall.map(|(gap, side, offset)| {
+                let face = o.dot(g.forward) + g.along.1 + gap;
+                let half_t = if side < 1.0 { 0.3 } else { 0.5 };
+                let mid = o.dot(g.lateral) + 0.5 * (g.across.0 + g.across.1) + offset;
                 let centre = g.forward * (face + half_t) + g.lateral * mid + Vec3::Y * 3.0;
                 let half = if g.forward.x.abs() > 0.5 {
                     Vec3::new(half_t, 3.0, side)
@@ -267,7 +312,8 @@ fn scene(
     Scene {
         vehicles: origins
             .into_iter()
-            .map(|o| (o, g.forward * (v + extra)))
+            .zip(&plan)
+            .map(|(o, (vk, _))| (o, g.forward * (vk + extra)))
             .collect(),
         walls,
     }
@@ -864,6 +910,7 @@ fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("ROR_BIN").map(PathBuf::from));
     let seconds = (warm + frames) as f32 / fps;
+    let _ = WARM_S.set(warm as f32 / fps);
     let cols: Option<usize> = kv(&args, "cols").map(|s| s.parse().unwrap());
     let _ = CONFIG.set(kv(&args, "config").map(str::to_string));
     ROLL.store(
@@ -1289,6 +1336,30 @@ fn main() -> anyhow::Result<()> {
             .unwrap();
         }
         writeln!(md).unwrap();
+        // Real-time capacity: the largest count (every smaller one passing too) whose
+        // frames hold the budget at p99 and never pass the ceiling (30 fps unless
+        // ceiling_ms= says otherwise); a count the ceiling stopped fails.
+        let hard = if ceiling.ms > 0.0 { ceiling.ms } else { 1000.0 / 30.0 };
+        let holds = |v: Option<&Vec<f64>>| {
+            v.is_some_and(|v| !v.is_empty() && percentile(v, 0.99) <= budget_ms && peak(v) <= hard)
+        };
+        let capacity = |frames: &HashMap<(Scenario, usize), Vec<f64>>, of: &[usize]| {
+            of.iter().take_while(|&&n| holds(frames.get(&(sc, n)))).last().copied()
+        };
+        let all_n: Vec<usize> = counts.iter().chain(&rubble_counts).copied().collect();
+        let show = |c: Option<usize>| c.map_or("none".to_string(), |n| n.to_string());
+        writeln!(
+            md,
+            "Real-time capacity (largest count with p99 ≤ {budget_ms:.2} ms and every frame ≤ {hard:.1} ms, all smaller counts too): Rubble GPU time {}, Rubble blocking wall {}{}.\n",
+            show(capacity(&gpu_frames, &all_n)),
+            show(capacity(&blocking_frames, &all_n)),
+            if ror_bin.is_some() {
+                format!(", Rigs of Rods {} (of counts up to {})", show(capacity(&ror_frames, &counts)), counts.last().copied().unwrap_or(0))
+            } else {
+                String::new()
+            },
+        )
+        .unwrap();
         // Scaling law: least-squares fixed + per-vehicle cost.
         let fit = |pts: &[(f64, f64)]| {
             let n = pts.len() as f64;
