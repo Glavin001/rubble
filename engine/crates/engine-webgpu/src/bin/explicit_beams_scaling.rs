@@ -72,6 +72,14 @@
 //! (end state: node positions, broken and bent beams, travel along the forward
 //! axis, crush: loss of length along it), reported but not judged.
 //!
+//! Diagnostics: `engine=cpu` runs the ensembles' Rubble side on the CPU reference
+//! (`ExplicitBeamsWorld`, the specification's order); `kernel=det` (the test-only
+//! `EB_DET_HITS` build) or `kernel=probe` (the frozen baseline with its race probe)
+//! picks the GPU kernel; `ror_reuse=1` keeps an earlier RoR result of the same scene
+//! file in `out=`; `diff=1` steps nudge 0's scene on two GPU worlds and the CPU in
+//! lockstep and reports, per scenario, the first frame each pair differs bit for bit
+//! and the GPU–CPU distance over time (with `kernel=probe`, the frames each race hit).
+//!
 //! `config=<name>`: the section configuration on both engines (Rigs of Rods'
 //! default when absent: the first `section` name in byte order).
 //!
@@ -96,8 +104,9 @@
 //! `<out>/summary.md`.
 
 use engine_softbody::explicit_beams::{yaw_offset, ExplicitBeams, StaticBox};
+use engine_softbody::explicit_contact::ExplicitBeamsWorld;
 use engine_softbody::truck::parse_truck;
-use engine_webgpu::{default_device, render_scene_json, ExplicitBeamsGpu};
+use engine_webgpu::{default_device, render_scene_json, ExplicitBeamsGpu, KernelVariant};
 use glam::Vec3;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -682,6 +691,39 @@ fn median(x: &[f64]) -> f64 {
 
 /// A fleet (one vehicle, or one crash group) on Rubble's GPU for `frames` frames:
 /// its sampled vehicles' end states.
+/// `engine=cpu`: the accuracy ensembles' Rubble runs on the CPU reference
+/// (`ExplicitBeamsWorld`, the specification's order) instead of the GPU.
+static CPU_ENGINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `kernel=det`: the GPU runs the test-only `EB_DET_HITS` kernel variant (hits applied
+/// on one lane in a fixed order); `kernel=current` (default) the shipped kernel.
+static KERNEL: std::sync::OnceLock<Option<KernelVariant>> = std::sync::OnceLock::new();
+
+fn apply_kernel(gpu: &mut ExplicitBeamsGpu) {
+    if let Some(Some(v)) = KERNEL.get() {
+        gpu.set_kernel_variant(*v);
+    }
+}
+
+/// The CPU reference's end state of `fleet` after `frames` frames of `steps` steps.
+fn run_cpu_end(fleet: &[ExplicitBeams], frames: u32, steps: u32) -> Vec<EndState> {
+    let mut w = ExplicitBeamsWorld::new(fleet.to_vec());
+    for _ in 0..frames {
+        w.frame(steps);
+    }
+    samples(fleet.len())
+        .into_iter()
+        .map(|k| {
+            let v = &w.vehicles[k];
+            EndState {
+                index: k,
+                pos: v.positions(),
+                broken: v.beams.iter().filter(|b| b.broken).count(),
+                bent: v.beams.iter().filter(|b| b.bent()).count(),
+            }
+        })
+        .collect()
+}
+
 fn run_rubble_end(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -689,8 +731,12 @@ fn run_rubble_end(
     frames: u32,
     steps: u32,
 ) -> Vec<EndState> {
+    if CPU_ENGINE.load(std::sync::atomic::Ordering::Relaxed) {
+        return run_cpu_end(fleet, frames, steps);
+    }
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
     apply_wide(&mut gpu);
+    apply_kernel(&mut gpu);
     for _ in 0..frames {
         gpu.frame(steps);
     }
@@ -817,6 +863,7 @@ fn run_rubble(
     // for completion, so the ceiling can stop a run before its timed frames.
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
     apply_wide(&mut gpu);
+    apply_kernel(&mut gpu);
     let warm_ms: Vec<f64> = (0..warm)
         .map(|_| {
             let t = Instant::now();
@@ -862,6 +909,7 @@ fn run_rubble(
     // Blocking: submit to completion, every frame.
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
     apply_wide(&mut gpu);
+    apply_kernel(&mut gpu);
     for _ in 0..warm {
         gpu.frame(steps);
     }
@@ -943,6 +991,11 @@ fn run_ror(
         .status()
         .expect("ror_ref");
     assert!(status.success(), "ror_ref scale failed");
+    read_ror(&out)
+}
+
+/// A `ror_ref scale` result file.
+fn read_ror(out: &Path) -> Run {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
     let frame_ms = v["frame_ms"]
         .as_array()
@@ -1188,6 +1241,17 @@ fn main() -> anyhow::Result<()> {
         std::sync::atomic::Ordering::Relaxed,
     );
 
+    CPU_ENGINE.store(
+        kv(&args, "engine") == Some("cpu"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let _ = KERNEL.set(match kv(&args, "kernel") {
+        None | Some("current") => None,
+        Some("det") => Some(KernelVariant::CurrentDet),
+        Some("probe") => Some(KernelVariant::BaselineProbe),
+        Some(k) => panic!("kernel={k}: current or det"),
+    });
+
     // Frame timestamps need the timestamp-query feature on the device.
     std::env::set_var("RUBBLE_GPU_TIMING", "1");
     let (info, device, queue) = default_device()?;
@@ -1207,6 +1271,135 @@ fn main() -> anyhow::Result<()> {
             .as_ref()
             .map_or("none".into(), |p| p.display().to_string())
     );
+
+    // `diff=1`: per scenario, nudge 0's scene stepped on the GPU (twice, in
+    // lockstep: run-to-run determinism) and on the CPU reference, frame by frame:
+    // the first frame each pair differs bit for bit, and the GPU–CPU node distance
+    // over time. Then stops.
+    if kv(&args, "diff") == Some("1") {
+        for &sc in &scenarios {
+            let m = if sc.grouped() { 2 } else { 1 };
+            let s = scene(sc, m, &g, speed, seconds, 0.0, None);
+            let mut fleet = rubble_fleet(&text, &s);
+            if kv(&args, "notri") == Some("1") {
+                // Diagnostic: no self-collision on either engine.
+                for v in &mut fleet {
+                    v.candidates.clear();
+                }
+            }
+            let mut cpu = ExplicitBeamsWorld::new(fleet.clone());
+            let mut a = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+            let mut b = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+            for gpu in [&mut a, &mut b] {
+                apply_wide(gpu);
+                apply_kernel(gpu);
+            }
+            let (mut first_ab, mut first_cpu) = (None, None);
+            // `kernel=probe`: frames whose race probe flagged a contact race (bit 0)
+            // or a break-exception race (bit 2).
+            let probe = matches!(KERNEL.get(), Some(Some(KernelVariant::BaselineProbe)));
+            let (mut race_a, mut race_b, mut race_ab) = (0u32, 0u32, 0u32);
+            if probe {
+                a.take_race_flag();
+            }
+            let (mut hit_steps, mut hits, mut max_hits) = (0u64, 0u64, 0u32);
+            let total = warm + frames;
+            let mut line = String::new();
+            for f in 0..total {
+                a.frame(steps);
+                b.frame(steps);
+                if probe {
+                    let r = a.take_race_flag();
+                    assert_eq!(r & 2, 0, "the race probe gave up");
+                    race_a += r & 1;
+                    race_b += (r >> 2) & 1;
+                    race_ab += u32::from(r & 5 == 5);
+                }
+                for v in &mut cpu.vehicles {
+                    v.check_wings();
+                    v.rebase_origin();
+                }
+                for _ in 0..steps {
+                    cpu.step();
+                    let h: u32 = cpu.vehicles.iter().map(|v| v.last_contacts).sum();
+                    hits += u64::from(h);
+                    hit_steps += u64::from(h > 0);
+                    max_hits = max_hits.max(h);
+                }
+                let (pa, pb) = (a.positions(), b.positions());
+                let flat =
+                    |p: &Vec<Vec<Vec3>>| -> Vec<Vec3> { p.iter().flatten().copied().collect() };
+                let (fa, fb) = (flat(&pa), flat(&pb));
+                let fc: Vec<Vec3> = cpu.vehicles.iter().flat_map(|v| v.positions()).collect();
+                let bits = |x: &[Vec3], y: &[Vec3]| {
+                    x.iter()
+                        .zip(y)
+                        .filter(|(p, q)| {
+                            p.to_array().map(f32::to_bits) != q.to_array().map(f32::to_bits)
+                        })
+                        .count()
+                };
+                let ab = bits(&fa, &fb);
+                let ac = bits(&fa, &fc);
+                if ab > 0 && first_ab.is_none() {
+                    first_ab = Some(f);
+                }
+                if ac > 0 && first_cpu.is_none() {
+                    first_cpu = Some(f);
+                    let i = fa
+                        .iter()
+                        .zip(&fc)
+                        .position(|(p, q)| {
+                            p.to_array().map(f32::to_bits) != q.to_array().map(f32::to_bits)
+                        })
+                        .unwrap();
+                    let gv: Vec<Vec3> = a.velocities().into_iter().flatten().collect();
+                    let cv: Vec<Vec3> = cpu
+                        .vehicles
+                        .iter()
+                        .flat_map(|v| v.nodes.iter().map(|n| n.vel))
+                        .collect();
+                    let n0 = cpu.vehicles[0].nodes.len();
+                    let nd = &cpu.vehicles[i / n0].nodes[i % n0];
+                    println!(
+                        "  first differing node {i}: GPU pos {:?} vel {:?}; CPU pos {:?} vel {:?}; flags {:#x}, candidate {}",
+                        fa[i], gv[i], fc[i], cv[i], nd.flags, cpu.vehicles[i / n0].candidates.contains(&((i % n0) as u32))
+                    );
+                    let gb = a.beams();
+                    for (j, (x, y)) in gb[0].iter().zip(&cpu.vehicles[0].beams).enumerate() {
+                        if x.rest.to_bits() != y.rest.to_bits() || x.broken != y.broken {
+                            println!("  first differing beam {j}: GPU rest {} broken {}; CPU rest {} broken {} kind {:?} ends {} {}", x.rest, x.broken, y.rest, y.broken, y.kind, y.a, y.b);
+                            break;
+                        }
+                    }
+                }
+                let (rms, max) = rms_max(&fa, &fc);
+                let (rms_ab, _) = rms_max(&fa, &fb);
+                if f % 30 == 29 || f + 1 == total || (ac > 0 && first_cpu == Some(f)) {
+                    let _ = writeln!(
+                        line,
+                        "  frame {f:4}: GPU-CPU rms {:.4} mm max {:.4} mm ({ac} nodes differ); GPU-GPU rms {:.4} mm ({ab} nodes differ)",
+                        rms * 1e3,
+                        max * 1e3,
+                        rms_ab * 1e3
+                    );
+                }
+            }
+            if probe {
+                println!(
+                    "race probe {}: {race_a} of {total} frames with a contact race (a), {race_b} with a break-exception race (b), {race_ab} with both",
+                    sc.name()
+                );
+            }
+            println!(
+                "diff {}: GPU run-to-run first differs at frame {:?}; GPU vs CPU first differs at frame {:?} (of {total}); CPU self-collision: {hit_steps} steps with hits, {hits} hits, at most {max_hits} in a step\n{line}",
+                sc.name(),
+                first_ab,
+                first_cpu
+            );
+        }
+        return Ok(());
+    }
 
     // `trace=<file>`: the first scenario and count on Rubble's GPU alone, every
     // vehicle's nodes concatenated, sampled every `trace_every=` frames (default 1)
@@ -1488,6 +1681,7 @@ fn main() -> anyhow::Result<()> {
     // Accuracy ensembles: per scenario K one-vehicle runs per engine, run k spawned
     // 0.1 mm/s × k faster.
     let nudges: usize = kv(&args, "nudges").map_or(8, |s| s.parse().unwrap());
+    let ror_reuse = kv(&args, "ror_reuse") == Some("1");
     let mut ensembles: HashMap<Scenario, Ensemble> = HashMap::new();
     if let Some(bin) = &ror_bin {
         for &sc in &scenarios {
@@ -1503,22 +1697,32 @@ fn main() -> anyhow::Result<()> {
             for k in 0..nudges {
                 let s = scene(sc, m, &g, speed, seconds, k as f32 * 1e-4, None);
                 let file = out.join(format!("ens_{}_{k}.txt", sc.name()));
+                // `ror_reuse=1`: keep an earlier RoR run of the same scene file (RoR
+                // is deterministic for a scene: `threads=1` for groups).
+                let before = std::fs::read_to_string(&file).ok();
                 write_scene(&file, &s);
+                let same = ror_reuse
+                    && before.as_deref() == std::fs::read_to_string(&file).ok().as_deref()
+                    && file.with_extension("ror.json").exists();
                 let fleet = rubble_fleet(&text, &s);
                 e.start
                     .push(fleet.iter().flat_map(|v| v.positions()).collect());
                 e.ror.push(combine(
-                    &run_ror(
-                        bin,
-                        &truck,
-                        &file,
-                        m,
-                        warm,
-                        frames,
-                        steps,
-                        Ceiling { ms: 0.0, frames: 1 },
-                        threads,
-                    )
+                    &if same {
+                        read_ror(&file.with_extension("ror.json"))
+                    } else {
+                        run_ror(
+                            bin,
+                            &truck,
+                            &file,
+                            m,
+                            warm,
+                            frames,
+                            steps,
+                            Ceiling { ms: 0.0, frames: 1 },
+                            threads,
+                        )
+                    }
                     .end,
                 ));
                 e.rubble.push(combine(&run_rubble_end(

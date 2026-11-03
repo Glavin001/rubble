@@ -11,7 +11,8 @@
 //   * the break exception's live-plain-beam count of a node read in a beam phase in
 //     which a beam at that node breaks.
 // Per node two words in gProbe (binding 11): an epoch tag (24 bits) and data (8
-// bits); word 0 is the race flag.
+// bits); word 0 is the race flag: bit 0 a contact race, bit 2 a break-exception
+// race, bit 1 the probe gave up.
 // Explicit beams: Rubble's fixed-step node–beam solver on the GPU
 // (engine/docs/explicit-beams.md; CPU reference engine_softbody::explicit_beams,
 // host engine_webgpu::ExplicitBeamsGpu). Standalone WGSL module.
@@ -225,20 +226,20 @@ uint probeMerge(uint node, uint w, uint data, bool count)
             old = prev;
         }
     }
-    gProbe[0].store(2u);
+    gProbe[0].or(2u);
     return 0u;
 }
 // A hit's touch of a node (its force read when `read`).
 void probeTouch(uint node, bool read)
 {
     uint d = probeMerge(node, 0u, read ? 0x80u : 0u, true);
-    if ((d & 0x80u) != 0u && (d & 0x7Fu) >= 2u) gProbe[0].store(1u);
+    if ((d & 0x80u) != 0u && (d & 0x7Fu) >= 2u) gProbe[0].or(1u);
 }
 // The break exception's count read at a node (bit 0), a beam at it breaking (bit 1).
 void probeLive(uint node, uint bit)
 {
     uint d = probeMerge(node, 1u, bit, false);
-    if (d == 3u) gProbe[0].store(1u);
+    if (d == 3u) gProbe[0].or(4u);
 }
 #endif
 

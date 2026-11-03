@@ -1990,8 +1990,10 @@ impl ExplicitBeamsGpu {
     }
 
     /// Tests only: whether a frame run with [`KernelVariant::BaselineProbe`] since
-    /// the last call met one of the kernel's known races (1), or the probe gave up
-    /// (2); clears it.
+    /// the last call met one of the kernel's known races (bit 0: a self-collision or
+    /// vehicle-contact read raced with another hit's add; bit 2: the break
+    /// exception's live-beam count raced with a break), or the probe gave up (bit
+    /// 1); clears it.
     #[doc(hidden)]
     pub fn take_race_flag(&mut self) -> u32 {
         let Some(p) = &self.probe else { return 0 };

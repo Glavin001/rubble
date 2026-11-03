@@ -293,7 +293,7 @@ fn compare_steps(
         gpu.set_kernel_variant(KernelVariant::Current);
         gpu.frame(steps);
         gpu.wait();
-        assert_ne!(race, 2, "{label}: the race probe gave up at frame {f}");
+        assert_eq!(race & 2, 0, "{label}: the race probe gave up at frame {f}");
         if race != 0 {
             racy += 1;
             racy_same += (first_diff(&a, &b).is_none()) as u32;
