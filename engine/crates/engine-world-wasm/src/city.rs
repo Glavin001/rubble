@@ -165,6 +165,7 @@ impl WebWorld {
             },
             &def,
         ))?;
+        crate::creation_check(&world).await?;
         Ok(WebWorld { world })
     }
 

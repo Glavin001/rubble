@@ -97,6 +97,41 @@ async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), 
     Ok((info, device, queue))
 }
 
+/// The limits a world's buffers and kernels run into, as one line.
+pub(crate) fn limits_text(l: &wgpu::Limits) -> String {
+    format!(
+        "maxBufferSize {}, maxStorageBufferBindingSize {}, maxStorageBuffersPerShaderStage {}, maxBindGroups {}, maxBindingsPerBindGroup {}, maxComputeWorkgroupStorageSize {}, maxComputeInvocationsPerWorkgroup {}, maxComputeWorkgroupsPerDimension {}, maxUniformBufferBindingSize {}",
+        l.max_buffer_size,
+        l.max_storage_buffer_binding_size,
+        l.max_storage_buffers_per_shader_stage,
+        l.max_bind_groups,
+        l.max_bindings_per_bind_group,
+        l.max_compute_workgroup_storage_size,
+        l.max_compute_invocations_per_workgroup,
+        l.max_compute_workgroups_per_dimension,
+        l.max_uniform_buffer_binding_size,
+    )
+}
+
+/// Fails with every buffer, layout, shader or pipeline creation the browser rejected
+/// while the world was built (`engine_webgpu::creation_errors`), named, with the device's
+/// limits: the uncaptured error the page would see instead names none of them.
+pub(crate) async fn creation_check(world: &World) -> Result<(), JsValue> {
+    let errors = engine_webgpu::creation_errors().await;
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let (total, largest, at) = world.sim().buffer_bytes();
+    Err(err(format!(
+        "WebGPU rejected {} object(s) while building the world: {} — device limits: {}; world buffers {} MB, largest b{at} {} MB",
+        errors.len(),
+        errors.join(" | "),
+        limits_text(&world.device().limits()),
+        total >> 20,
+        largest >> 20
+    )))
+}
+
 /// A world and the device it runs on.
 #[wasm_bindgen]
 pub struct WebWorld {
@@ -110,7 +145,21 @@ impl WebWorld {
         let def = defs::world_def(def)?;
         let (info, device, queue) = web_device().await?;
         let world = res(World::new(GpuContext::Shared { info, device, queue }, &def))?;
+        creation_check(&world).await?;
         Ok(WebWorld { world })
+    }
+
+    /// The device's limits that size a world (requested as the adapter's): for a page's
+    /// error line and diagnostics.
+    #[wasm_bindgen(js_name = deviceLimits)]
+    pub fn device_limits(&self) -> String {
+        let (total, largest, at) = self.world.sim().buffer_bytes();
+        format!(
+            "{}; world buffers {} MB, largest b{at} {} MB",
+            limits_text(&self.world.device().limits()),
+            total >> 20,
+            largest >> 20
+        )
     }
 
     /// The world's `GPUDevice`: the page renders on it, so its passes read the

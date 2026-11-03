@@ -41,8 +41,76 @@ struct Pipe {
     bindings: Vec<u32>,
 }
 
+// ---- Creation error scopes (web) ----
+// A browser reports a failed buffer, layout, shader or pipeline creation only as an
+// uncaptured error, without saying which object failed (WebKit's text can be just
+// "Validation failure."). On wasm each creation below runs in its own validation and
+// out-of-memory scopes, and `creation_errors` (awaited by the web world's constructor)
+// names the object, its binding count and the device limits beside the browser's text.
+#[cfg(target_arch = "wasm32")]
+type ScopeFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Option<wgpu::Error>>>>;
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static CREATION_SCOPES: std::cell::RefCell<Vec<(String, ScopeFuture)>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+/// `f` inside validation and out-of-memory error scopes labelled `what()` (wasm only).
+pub(crate) fn scoped<T>(device: &wgpu::Device, what: impl FnOnce() -> String, f: impl FnOnce() -> T) -> T {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let val = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let r = f();
+        let v = val.pop();
+        let o = oom.pop();
+        let label = what();
+        CREATION_SCOPES.with(|s| {
+            let mut s = s.borrow_mut();
+            s.push((label.clone(), Box::pin(v)));
+            s.push((label, Box::pin(o)));
+        });
+        r
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (device, what);
+        f()
+    }
+}
+
+/// The creation errors captured since the last call, each `label: browser text`
+/// (empty off the web).
+pub async fn creation_errors() -> Vec<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let pending = CREATION_SCOPES.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        let mut out = Vec::new();
+        for (label, f) in pending {
+            if let Some(e) = f.await {
+                out.push(format!("{label}: {e}"));
+            }
+        }
+        out
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Vec::new()
+    }
+}
+
 /// One kernel's pipeline and bind group over `bufs`.
 fn build_pipe(device: &wgpu::Device, name: &str, wgsl: String, bufs: &[wgpu::Buffer]) -> Pipe {
+    let storage = wgsl.matches("var<storage").count();
+    let workgroup = wgsl.matches("var<workgroup>").count();
+    scoped(
+        device,
+        || format!("kernel {name} ({storage} storage buffers, {workgroup} workgroup arrays)"),
+        || build_pipe_inner(device, name, wgsl, bufs),
+    )
+}
+
+fn build_pipe_inner(device: &wgpu::Device, name: &str, wgsl: String, bufs: &[wgpu::Buffer]) -> Pipe {
     let binds = bindings_of(&wgsl);
     let mut entries = Vec::new();
     for b in &binds {
@@ -775,12 +843,18 @@ impl WgpuSim {
                 } else {
                     wgpu::BufferUsages::empty()
                 };
-            bufs.push(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("b{i}")),
-                size: bytes.max(4),
-                usage,
-                mapped_at_creation: false,
-            }));
+            bufs.push(scoped(
+                &device,
+                || format!("buffer b{i} ({} bytes)", bytes.max(4)),
+                || {
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("b{i}")),
+                        size: bytes.max(4),
+                        usage,
+                        mapped_at_creation: false,
+                    })
+                },
+            ));
         }
         // Render-pose buffers (pose_pack.slang), past the shared plan's bindings:
         // full size only when the host asked for pose output.
@@ -2320,12 +2394,13 @@ impl WgpuSim {
             return v;
         }
         let mut has = vec![false; self.host_bodies.len()];
-        for c in &self.host_cols[..self.collider_count as usize] {
+        for c in &self.host_cols[..(self.collider_count as usize).min(self.host_cols.len())] {
             if let Some(h) = has.get_mut(c.body as usize) {
                 *h = true;
             }
         }
-        let v = self.host_bodies[..self.body_count as usize]
+        let n = (self.body_count as usize).min(self.host_bodies.len());
+        let v = self.host_bodies[..n]
             .iter()
             .zip(&has)
             .any(|(b, &h)| !h && b.is_dynamic());
@@ -2350,6 +2425,21 @@ impl WgpuSim {
     /// Incremental resting-table inserts on or off (`EngineFeatures::rest_incremental`).
     pub fn set_rest_incremental(&mut self, on: bool) {
         self.rest_incremental = on;
+    }
+
+    /// Bytes of the simulation's GPU buffers (bindings, poses, terrain and guidance
+    /// placeholders): the total and the largest with its binding.
+    pub fn buffer_bytes(&self) -> (u64, u64, usize) {
+        let mut total = 0;
+        let (mut largest, mut at) = (0, 0);
+        for (i, b) in self.bufs.iter().enumerate() {
+            total += b.size();
+            if b.size() > largest {
+                largest = b.size();
+                at = i;
+            }
+        }
+        (total, largest, at)
     }
 
     /// Whether the next step runs the awake-indexed broadphase (its gates on the

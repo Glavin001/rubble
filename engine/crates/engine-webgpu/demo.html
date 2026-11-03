@@ -89,7 +89,19 @@
     const errEl = document.getElementById('err');
     const warnEl = document.getElementById('warn');
     const canvas = document.getElementById('c');
-    const fail = (e) => { errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
+    // The first failure stays on the page with what was running when it came (the status
+    // line) and the device's limits; later ones (a GPU error is often followed by a
+    // failed readback map) are appended, so the cause is not overwritten by its effects.
+    let diagLimits = '';
+    const fail = (e) => {
+      const text = `${errorText(e)}\n  [while: ${statusEl.textContent}]`;
+      errEl.textContent = errEl.textContent ? `${errEl.textContent}\n${text}` : `${text}${diagLimits ? `\n  [device: ${diagLimits}]` : ''}`;
+      statusEl.textContent = 'stopped';
+      window.__failed = window.__failed ? `${window.__failed}\n${String(e)}` : String(e);
+    };
+    // A GPUError's whole text: its type and message (WebKit's message can be terse; the
+    // type and the status line say more), and a device loss's reason and message.
+    const gpuErrorText = (err) => err ? `${err.constructor?.name ?? 'GPUError'}: ${err.message || String(err)}` : 'unknown GPU error';
     // Setup runs at module top level (scene snapshots, world, pipelines); show
     // its failures on the page instead of only in the console.
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
@@ -256,8 +268,10 @@
       ...(killBelow === null ? {} : { killBelow }),
     });
     const device = world.device();
-    device.lost.then((i) => fail('device lost: ' + i.message));
-    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + (e.error && e.error.message || e.error)));
+    diagLimits = world.deviceLimits?.() ?? '';
+    console.info(`rubble device limits: ${diagLimits}`);
+    device.lost.then((i) => fail(`device lost (${i.reason ?? 'unknown'}): ${i.message}`));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + gpuErrorText(e.error)));
 
     // Bodies: slot k draws with collider k (body 0 and collider 0: the ground).
     let handles, sceneBodies = null, order = null;

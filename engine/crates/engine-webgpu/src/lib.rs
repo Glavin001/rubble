@@ -23,6 +23,8 @@ pub use features::{
     SimOptions, WarmHash,
 };
 #[cfg(feature = "gpu")]
+pub use gpu::creation_errors;
+#[cfg(feature = "gpu")]
 pub use gpu::{
     default_device, default_device_with, instance_flags, CharacterHandle, MotionEvent, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
     POSES_BINDING, POSE_HEADER_BINDING, POSE_RECORD_BYTES,
@@ -101,14 +103,8 @@ impl WebGpuWorld {
             .map(|(n, w)| {
                 (
                     (*n).to_string(),
-                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if n
-                        .starts_with("solve_primal_sparse")
-                        || n.starts_with("soft_primal_fused")
-                        || n.starts_with("soft_primal_bodies")
-                        || n.starts_with("color_bodies_local")
-                        || n.starts_with("color_bodies_tail")
-                    {
-                        // These entries access buffers only. Slang over-lowers
+                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if !w.contains("texture_") {
+                        // Entries that bind no texture: Slang over-lowers
                         // DeviceMemoryBarrierWithGroupSync to a texture barrier
                         // unavailable in the supported WGSL/Naga version, and
                         // ends it with an empty statement (`;;`) that Tint
@@ -424,6 +420,29 @@ fn matching_brace(src: &str, open: usize) -> Option<usize> {
     None
 }
 
+/// `loop` statements in WGSL (the keyword before a block, as `cap_loop_iterations` finds them).
+#[cfg(test)]
+fn loop_statements(src: &str) -> usize {
+    let b = src.as_bytes();
+    let mut n = 0;
+    let mut i = 0;
+    while let Some(rel) = src[i..].find("loop") {
+        let at = i + rel;
+        let after = at + 4;
+        let word = (at == 0 || !(b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_'))
+            && (after >= b.len() || !(b[after].is_ascii_alphanumeric() || b[after] == b'_'));
+        let mut j = after;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if word && j < b.len() && b[j] == b'{' {
+            n += 1;
+        }
+        i = after;
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,7 +480,8 @@ mod tests {
         for (name, res) in WebGpuWorld::compile_shaders_report() {
             let wgsl = &res.unwrap();
             let loops = direct.iter().find(|(n, _)| *n == name).unwrap().1;
-            let raw = loops.matches("loop").count();
+            // `loop` statements, not the word inside names (solve_primal_sparse_loop).
+            let raw = loop_statements(loops);
             assert_eq!(
                 raw,
                 wgsl.matches("loopGuard").count() / 3,
@@ -479,12 +499,20 @@ mod tests {
     }
 
     /// Chrome exposes 10 storage buffers per compute stage. Every entry must fit,
-    /// which is why convex work is split out of `narrowphase`.
+    /// which is why convex work is split out of `narrowphase`; the one exception is the
+    /// solve loop on canonical and compact contacts (11), which `WgpuSim` builds only on
+    /// a device that allows that many (the step keeps its per-colour dispatches
+    /// otherwise). Its persistent-contact variant, the web demos' contacts, fits.
     #[test]
     fn every_entry_fits_the_webgpu_storage_buffer_budget() {
         for (name, res) in WebGpuWorld::compile_shaders_report() {
             let wgsl = res.unwrap();
             let storage = wgsl.matches("var<storage").count();
+            let guarded = name == "solve_primal_sparse_loop" || name == "solve_primal_sparse_loop_compact";
+            if guarded {
+                assert!(storage <= 11, "{name}: {storage} storage buffers > 11");
+                continue;
+            }
             assert!(storage <= 10, "{name}: {storage} storage buffers > 10");
         }
     }
