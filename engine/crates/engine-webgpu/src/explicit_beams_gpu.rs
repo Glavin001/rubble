@@ -123,7 +123,8 @@ const FUSED_PAIRS_MAX: usize = 2048;
 /// Frames between status reads.
 const STATUS_EVERY: u64 = 16;
 
-/// The contact error the status counters (outside, overflow, unconverged) report.
+/// The contact error the status counters (outside, overflow, unconverged, too big)
+/// report.
 fn contact_error(w: &[i32]) -> Result<(), String> {
     if w[0] > 0 {
         return Err(format!(
@@ -138,6 +139,12 @@ fn contact_error(w: &[i32]) -> Result<(), String> {
     }
     if w[2] != 0 {
         return Err("the contact grouping did not converge".into());
+    }
+    if w[3] != 0 {
+        return Err(
+            "a contact group had more than 64 vehicles (they ran without contact that frame)"
+                .into(),
+        );
     }
     Ok(())
 }

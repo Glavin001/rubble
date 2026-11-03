@@ -263,6 +263,38 @@ Otherwise:
 
 (exp≈ and pow≈ are the approximations above.)
 
+## Vehicle contact (`engine_softbody::explicit_contact`)
+
+Contact between vehicles follows `explicit-beams-vehicle-contact-spec.md`;
+`ExplicitBeamsWorld` steps several vehicles together. Spawn data (built by
+`ExplicitBeams::finish`): `contact_points` (contacters, plus the nodes with ground
+contact that lie on a collision triangle, or every such node when the vehicle has no
+collision triangles), `neighbours` (per node the far ends of its beams in beam
+order, duplicates and broken beams kept) and a contact throttle (cwait, cidle) per
+collision triangle. A file naming a contact surface other than `concrete`
+(`submesh_groundmodel`) or with more than 3000 collision triangles fails to spawn; a
+`cab` line with a solid and a buoyant option is two triangles.
+
+One world step: every vehicle's own step, in vehicle order; each vehicle's box (its
+node world positions, every node, grown by 0.05 m); then for each owner in vehicle
+order its partner scan (every other vehicle whose box overlaps; first nodes more
+than 4 m/s apart reset both vehicles' contact and self-collision throttle waits to
+0) and, when its partners offer a contact point, its triangle loop: per collision
+triangle in list order the contact throttle (wait 0 → wait min(idle, 12), tested;
+no candidate → +1; a hit → 0), the partners' contact points inside the triangle's
+box grown by the owner's range, the self-collision hit test, the side vote (3·sign δ
+plus, with more than 3 neighbours, the sign of each neighbour's height over the
+plane), and the contact force with the reduced mass, the owner's range and the
+concrete surface, its reaction on the triangle's nodes by their weights. The forces
+are read by the next step's node pass. `world.contact = false` (or vehicles whose
+boxes never overlap) gives each vehicle's results bit for bit as stepped alone.
+
+Spawning turned: `ExplicitBeams::from_truck_config_yaw(text, config, position,
+yaw_degrees, velocity, settings)` turns every node offset by the yaw about +y
+(x' = c·x + s·z, z' = −s·x + c·z) before adding the position; tyres are built in
+the file's axes and turned with the rest (Rigs of Rods' convention, checked against
+its spawned positions). The velocity is in world axes.
+
 ## GPU design (`ExplicitBeamsGpu`)
 
 * One 256-lane workgroup per vehicle; one dispatch per frame runs the origin rebase
@@ -301,6 +333,76 @@ Otherwise:
 * Targets (M3 Max): the Agora S bus (195 nodes, 862 beams with tyres) at ≤ 0.6 ms per
   60 fps frame for 1–40 vehicles, ≤ 9 ms for 1000.
 
+### Vehicle contact on the GPU
+
+On by default for a fleet of two or more vehicles (`set_vehicle_contact(false)`:
+the one-dispatch frame above, unchanged). A frame is then, in one compute pass:
+
+1. `explicit_beams_vv_bounds` (a workgroup per vehicle): the box of its node world
+   positions and its fastest node's speed; its *frame bounds*, the box grown by
+   2·(fastest speed)·(frame time) + a margin (`set_contact_margin`, default 1 m),
+   and its *padded frame box*, the bounds grown by 0.05 m; the padded box into a
+   hashed vehicle grid (a box over more than 27 cells, or a full bucket, goes on a
+   list tested against every vehicle).
+2. `explicit_beams_vv_group` (one workgroup; with more than 2048 vehicles the pair
+   search is its own pass, `explicit_beams_vv_pairs`, a thread per vehicle): the
+   pairs of overlapping padded frame boxes, their connected components (label
+   propagation with pointer jumping), the solo list, each group's members, and the
+   indirect dispatch arguments. With no pair it returns at once (all solo).
+3. `explicit_beams_frame`, indirect over the solo list: the frame exactly as above,
+   plus a check that every node stays inside its frame bounds every step.
+4. `explicit_beams_contact`, indirect, one workgroup per group: the members sorted
+   by vehicle index; each member's frame start (wing check, rebase); then per step
+   each member's step (a copy of the frame's step, every accumulator read, member
+   by member with the whole workgroup) followed by the contact pass; then each
+   member's frame end.
+
+Why the solo vehicles need no contact pass: two vehicles whose padded frame boxes do
+not overlap, each with every node inside its frame bounds at every step, have
+step boxes that cannot overlap, so they are never partners. A node leaving its
+frame bounds (a node accelerated past the bound within the frame) is reported:
+the host reads a status word every 16 frames without waiting and panics
+("vehicle N left its frame bounds … raise set_contact_margin"); `contact_status()`
+reads it at once. The margin trades grouping (time) for headroom, never results.
+
+The contact pass of a group, per step: each member's step box (fixed-point min/max
+keys of `origin + relative`; the members' boxes are also checked against their
+frame bounds); the members' contact points counted into the 1024 hashed cells of a
+grid (cell: the largest median triangle extent + 2r at upload), scanned, scattered
+into a run; then for each owner **in vehicle order**, with barriers between
+owners: the partner scan over the other members in parallel (box overlap; a fast
+approach sets both vehicles' contact throttle waits to 0 at once and marks their
+self-collision throttles for a reset, applied right after the next throttle update,
+which the GPU makes at the next node pass); the throttle step of the owner's
+triangles (only when its partners offer points); the tested triangles against the
+run cells their padded boxes cover, `GRID_SUBS` lanes per triangle; the throttle
+update (a hit → 0, no candidate → +1).
+
+What the GPU does differently from the specification's exact order (§8.3):
+
+* forces from the contact pass go to the same per-node integer atomics as
+  self-collision, in 1/32 N fixed point; a candidate's "current force" is its force
+  slot, its beams' incidence entries, its accumulator (and slide-node slot) at the
+  time of the read, so contributions are rounded to 1/32 N;
+* owners are processed strictly in vehicle order (exact), but an owner's triangles
+  are tested in parallel: a candidate hit by two triangles of the same owner in one
+  step reads its force with none, or part, of the other's contribution (the
+  self-collision precedent); candidates of one triangle in parallel (order changes
+  only rounding);
+* the partner scan runs over partners in parallel (the resets commute: exact).
+
+Costs and limits: a fleet where no padded frame boxes overlap pays the bounds pass
+(a read of every node), the grouping workgroup and two indirect dispatches per frame;
+the wide passes are not used while contact is active. A group's members are stepped
+one after another by one workgroup, so a group of k vehicles takes about k times a
+vehicle's frame (plus its contact passes). Limits, each failing loudly (the status
+above) rather than silently: a group of more than 64 vehicles runs alone that frame
+(no contact); more overlapping pairs than 16 per vehicle (at least 1024); a grouping
+that has not converged in 64 rounds. A vehicle whose frame box is not finite (a node
+at infinity or NaN) partners no one on the GPU, a deviation from the
+specification's rule (which makes it a partner of every vehicle and would group the
+whole fleet into one workgroup); the CPU follows the rule.
+
 ## Required API
 
 `engine_softbody::explicit_beams`:
@@ -313,8 +415,14 @@ frame), `positions()` (world), `STEP` = 0.0005.
 
 `engine_webgpu::ExplicitBeamsGpu`: `new(device, queue, &[ExplicitBeams])`,
 `frame(steps)`, `wait()`, `positions()`, `velocities()`, `beams()` (broken, L),
-`set_velocity(vehicle, node, v)`; WGSL via `build.rs` like `soft_skin`
-(`EXPLICIT_BEAMS_WGSL`).
+`set_velocity(vehicle, node, v)`, `set_vehicle_contact(on)`, `contact_active()`,
+`set_contact_margin(m)`, `contact_status()`, `contact_throttles()`; WGSL via
+`build.rs` like `soft_skin` (`EXPLICIT_BEAMS_WGSL`, `EXPLICIT_BEAMS_VV_PASSES`,
+`EXPLICIT_BEAMS_CONTACT_*`).
+
+`engine_softbody::explicit_contact`: `ExplicitBeamsWorld::new(vehicles)`, `step()`,
+`frame(steps)`, `frame_60()`, `contact` (on), `throttle` (on), statistics `last`,
+`total`, `first_hit_step`.
 
 ## Tests
 

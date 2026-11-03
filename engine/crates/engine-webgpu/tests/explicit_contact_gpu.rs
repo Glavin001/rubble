@@ -317,3 +317,25 @@ fn a_node_leaving_its_frame_bounds_is_reported() {
     let e = g.contact_status().unwrap_err();
     assert!(e.contains("vehicle 0 left its frame bounds"), "{e}");
 }
+
+#[test]
+fn a_group_over_the_limit_runs_alone_and_is_reported() {
+    // A chain of 70 still single-node vehicles 8 cm apart (margin 0: each padded
+    // box overlaps only its neighbours'): one group of 70, more than 64.
+    let fleet: Vec<ExplicitBeams> = (0..70)
+        .map(|k| point(Vec3::new(0.08 * k as f32, 5.0, 0.0), Vec3::ZERO, true))
+        .collect();
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    g.set_contact_margin(0.0);
+    g.frame(17);
+    let e = g.contact_status().unwrap_err();
+    assert!(e.contains("more than 64"), "{e}");
+    // 60 are one group: no error.
+    let mut g = gpu(&fleet[..60]).unwrap();
+    g.set_contact_margin(0.0);
+    g.frame(17);
+    g.contact_status().unwrap();
+}

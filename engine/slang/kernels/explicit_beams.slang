@@ -1510,6 +1510,7 @@ static const uint VV_GROUPS = 3u;
 static const uint VV_OUTSIDE = 4u;
 static const uint VV_OVERFLOW = 5u;
 static const uint VV_UNCONVERGED = 6u;
+static const uint VV_TOO_BIG = 7u;
 static const uint VV_CTL_WORDS = 8u;
 uint vvCtl(uint i) { return gP.vvAcc + gP.vehicles * 12u + i; }
 
@@ -2067,6 +2068,9 @@ static const uint VV_SLOTS = 8u;
 static const uint VV_MAX_SPAN = 3u;
 static const uint VV_MAX_CELLS = 27u;
 static const float VV_APPROACH_SQ = 16.0;
+// Members a contact group may have (one workgroup steps them one after another);
+// a larger group's vehicles run alone that frame and the host fails.
+static const uint VV_MAX_GROUP = 64u;
 static const int VV_MAX_WAIT = 12;
 
 [[vk::binding(10, 0)]] RWStructuredBuffer<uint> gArgs;
@@ -2173,8 +2177,12 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         gMisc[vvRec(v, VV_ALLOWED_HI)] = uint4(asuint(ahi), 0u);
         int3 c0;
         int3 span;
-        bool big = !vvCells(plo, phi, c0, span);
-        if (!big)
+        // A box that is not finite (a node at infinity or NaN) partners no one
+        // here (a GPU deviation: the specification's rule would partner it with
+        // every vehicle and group the whole fleet).
+        bool finite = all(abs(plo) < 3.0e38) && all(abs(phi) < 3.0e38);
+        bool big = finite && !vvCells(plo, phi, c0, span);
+        if (finite && !big)
         {
             for (int x = 0; x < span.x; x++)
                 for (int y = 0; y < span.y; y++)
@@ -2192,7 +2200,7 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
             gNext[gP.vvBig + at] = v;
         }
         uint4 fl = gMisc[vvRec(v, VV_FLAGS)];
-        gMisc[vvRec(v, VV_FLAGS)] = uint4(big ? 1u : 0u, 0u, 0u, fl.w);
+        gMisc[vvRec(v, VV_FLAGS)] = uint4(finite ? (big ? 1u : 0u) : 2u, 0u, 0u, fl.w);
     }
 }
 
@@ -2222,14 +2230,16 @@ void vvFindPairs(uint v)
 {
     float3 plo = asfloat(gMisc[vvRec(v, VV_P_LO)].xyz);
     float3 phi = asfloat(gMisc[vvRec(v, VV_P_HI)].xyz);
-    bool big = gMisc[vvRec(v, VV_FLAGS)].x != 0u;
-    if (big)
+    uint kind = gMisc[vvRec(v, VV_FLAGS)].x;
+    if (kind == 2u) return;
+    if (kind == 1u)
     {
         // Against every vehicle (two big ones once).
         for (uint w = 0u; w < gP.vehicles; w++)
         {
             if (w == v) continue;
-            if (gMisc[vvRec(w, VV_FLAGS)].x != 0u && w < v) continue;
+            uint kw = gMisc[vvRec(w, VV_FLAGS)].x;
+            if (kw == 2u || (kw == 1u && w < v)) continue;
             if (vvOverlap(plo, phi, asfloat(gMisc[vvRec(w, VV_P_LO)].xyz), asfloat(gMisc[vvRec(w, VV_P_HI)].xyz)))
                 vvEmitPair(v, w);
         }
@@ -2404,7 +2414,8 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     {
         uint m = uint(gAcc[vvSum(g, 0u)].load());
         uint pts = uint(gAcc[vvSum(g, 2u)].load());
-        gMisc[gP.vvGroups + g] = uint4(ra, m, rb, pts);
+        // Too many members: none stepped as a group (they run alone; reported).
+        gMisc[gP.vvGroups + g] = m <= VV_MAX_GROUP ? uint4(ra, m, rb, pts) : uint4(ra, 0u, rb, 0u);
         ra += m;
         rb += pts;
     }
@@ -2414,6 +2425,12 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         if (gMisc[vvRec(v, VV_FLAGS)].y != 0u)
         {
             uint g = gMisc[vvRec(v, VV_FLAGS)].z;
+            if (gMisc[gP.vvGroups + g].y == 0u)
+            {
+                gNext[gP.vvSolo + uint(gAcc[vvCtl(VV_SOLOS)].add(1))] = v;
+                gAcc[vvCtl(VV_TOO_BIG)].store(1);
+                continue;
+            }
             uint slot = uint(gAcc[vvSum(g, 1u)].add(1));
             gNext[gP.vvMembers + gMisc[gP.vvGroups + g].x + slot] = v;
         }
