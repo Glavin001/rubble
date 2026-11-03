@@ -16,9 +16,15 @@ use rubble::*;
 use wasm_bindgen::prelude::*;
 
 pub mod broadside;
-/// Broadside (`broadside.html`): its scene stepped in Rust, the page draws its poses.
+/// Broadside (`broadside.html`) and the timber yard (`timber.html`): their scenes stepped
+/// in Rust, the page draws their poses.
 mod broadside_page;
 pub use broadside_page::*;
+/// What a range page plays (also drawn natively by engine-viewer's `world_viewer`).
+pub mod play;
+/// The shooting range under Broadside and the timber yard.
+pub mod range;
+pub mod timber_yard;
 
 /// The large-maps city (`city.html`): `rubble::city` placed over frames.
 mod city;
@@ -46,8 +52,38 @@ fn err(e: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&e.to_string()).into()
 }
 
+/// An error, with the device's first uncaptured error or loss after it: a failed
+/// readback says only that the browser refused to map it.
 fn res<T>(r: anyhow::Result<T>) -> Result<T, JsValue> {
-    r.map_err(|e| err(format!("{e:#}")))
+    r.map_err(|e| {
+        let gpu = gpu_error();
+        if gpu.is_empty() {
+            err(format!("{e:#}"))
+        } else {
+            err(format!("{e:#} (GPU: {gpu})"))
+        }
+    })
+}
+
+static GPU_ERROR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The world device's first uncaptured WebGPU error and its loss, if any ("" while
+/// there is none): what a phone's missing console would otherwise hide.
+#[wasm_bindgen(js_name = gpuError)]
+pub fn gpu_error() -> String {
+    GPU_ERROR.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+fn note_gpu_error(what: String) {
+    web_sys::console::error_1(&what.clone().into());
+    if let Ok(mut e) = GPU_ERROR.lock() {
+        if e.len() < 2000 {
+            if !e.is_empty() {
+                e.push_str("; ");
+            }
+            e.push_str(&what);
+        }
+    }
 }
 
 #[wasm_bindgen(start)]
@@ -94,6 +130,8 @@ async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), 
         })
         .await
         .map_err(|e| err(format!("WebGPU device: {e}")))?;
+    device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| note_gpu_error(e.to_string())));
+    device.set_device_lost_callback(|reason, message| note_gpu_error(format!("device lost ({reason:?}): {message}")));
     Ok((info, device, queue))
 }
 

@@ -67,6 +67,25 @@ the lab) · C colour by sleep state. Live TPS/FPS and counters are in the window
 `fracture_compare` runs the deterministic parity shot (compare with `parity.mjs` in the
 browser); `fracture_snapshot` renders a scene offscreen to a BMP.
 
+### World viewer: the timber yard and Broadside
+
+The world API's range scenes (`crates/engine-world-wasm`: `timber_yard`, `broadside`),
+stepped in Rust exactly as `timber.html` and `broadside.html` step them, drawn with the
+same Metal renderer. The timber yard is Shardwright's two-storey timber-frame house and
+two plank walls (`fracture/assets/timber-yard.glb`): click to fire a 24-pounder
+cannonball where you point.
+
+```bash
+cargo run -p engine-viewer --release --bin world_viewer                       # timber yard, free fire
+cargo run -p engine-viewer --release --bin world_viewer -- timber --raze --level 1
+cargo run -p engine-viewer --release --bin world_viewer -- broadside
+cargo test -p engine-world-wasm --release --test timber -- --test-threads=1   # volleys and the raze
+```
+
+Keys: click to fire · drag to orbit · scroll to zoom · Space pause · R restart · T free
+fire / raze · 1 2 fracture level · D director's camera · Esc quit. `--capture DIR`
+writes a PNG a second (offscreen).
+
 ## Demo scenes
 
 Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):
@@ -96,7 +115,7 @@ Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):
 | `crates/engine-fracture-wasm` | wasm-bindgen bindings of `engine-fracture` for the browser fracture lab |
 | `crates/engine-slang-build` | Runs `slangc` offline and embeds the Metal / SPIR-V / CUDA artifacts |
 | `crates/engine-cuda` | `CudaSim` replays `rigid_plan` on NVIDIA (Slang → CUDA → PTX, driver API); GPU tests run on Modal, see [TOOLCHAIN.md](TOOLCHAIN.md#cuda-tests-on-modal) |
-| `crates/engine-viewer` | Buffer-shared draw; native Metal `fracture_viewer` |
+| `crates/engine-viewer` | Buffer-shared draw; native Metal `fracture_viewer` and `world_viewer` |
 | `conformance/` | Oracle scene schema + adapter JSON |
 | `stress-oracle/` | Destruction stress solver (own workspace): CPU reference, GPU solver, rubble coupling, `destruction-view`; see its README and [docs/stress-solver-tracker.md](docs/stress-solver-tracker.md) |
 | `docs/` | Design notes, benchmarks and baselines (`docs/baselines/`), joints (`docs/JOINTS.md`), convex hulls (`docs/convex-hulls.md`) |

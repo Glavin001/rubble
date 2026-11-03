@@ -103,23 +103,21 @@ impl WebGpuWorld {
             .map(|(n, w)| {
                 (
                     (*n).to_string(),
-                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if !w.contains("texture_") {
-                        // Entries that bind no texture: Slang over-lowers
-                        // DeviceMemoryBarrierWithGroupSync to a texture barrier
-                        // unavailable in the supported WGSL/Naga version, and
-                        // ends it with an empty statement (`;;`) that Tint
-                        // accepts but Safari's WGSL parser rejects.
-                        w.replace(
+                    // No entry uses storage textures. Slang over-lowers
+                    // DeviceMemoryBarrierWithGroupSync to a texture barrier
+                    // unavailable in the supported WGSL/Naga version, and ends it
+                    // with an empty statement (`;;`) that Tint accepts but
+                    // Safari's WGSL parser rejects.
+                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(
+                        &w.replace(
                             "storageBarrier(); textureBarrier(); workgroupBarrier();;",
                             "storageBarrier(); workgroupBarrier();",
                         )
                         .replace(
                             "storageBarrier(); textureBarrier(); workgroupBarrier();",
                             "storageBarrier(); workgroupBarrier();",
-                        )
-                    } else {
-                        w.to_string()
-                    }))),
+                        ),
+                    ))),
                 )
             })
             .collect()

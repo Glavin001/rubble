@@ -665,6 +665,27 @@ mod imp {
         /// parking): a crushed chunk that kept its parent's body leaves no record of where
         /// the parent was, and the split's other pieces start there (`World::frame`).
         pub crushed_origins: Vec<(u32, Transform)>,
+        /// Each asset's instance-independent build, shared by its instances.
+        templates: Vec<Arc<ThresholdTemplate>>,
+    }
+
+    /// What `create_threshold` derives from an asset alone, the same for every instance
+    /// (the city's houses): the stress scene and world, the cluster bodies cooked, each
+    /// cluster shape's geometry in the asset frame. Built for the first instance and
+    /// reused, so placing a copy only places it.
+    pub(crate) struct ThresholdTemplate {
+        /// The asset it was built from (assets are replaced, never mutated: identity).
+        asset: Arc<DestructibleAssetDesc>,
+        strength_scale: u32,
+        dt: u32,
+        scene: Scene,
+        world: stress_ref::world::World,
+        /// The cluster bodies.
+        bodies: Vec<stress_ref::engine::EngineBody>,
+        /// Each structure's stress frame in the asset frame.
+        structures: Vec<(DQuat, DVec3)>,
+        cooked: Vec<stress_rubble::Cooked>,
+        geometry: Vec<Vec<Geometry>>,
     }
 
     impl Fracture {
@@ -888,45 +909,31 @@ mod imp {
         /// Place a threshold destructible: one body per bonded cluster (the lab's
         /// `ThresholdWorld::new`), a reserved slot for every other piece a split can make,
         /// the fracture tables and the contact ingest.
-        pub(crate) fn create_threshold(
+        /// `asset`'s template for `def` ([`ThresholdTemplate`]): the stored one, or built
+        /// (and stored, unless `def` crushes: its materials change the scene).
+        fn threshold_template(
             &mut self,
             def: &DestructibleDef,
-            asset: Arc<DestructibleAssetDesc>,
-            index: usize,
-        ) -> anyhow::Result<()> {
-            let source = asset.stress.as_ref().ok_or_else(|| anyhow::anyhow!("StrengthModel::Threshold needs an asset with the stress oracle's input (from_glb, cuboid_house or from_pack)"))?;
-            // The ingest reads rubble's canonical contact rows, as the lab's engine keeps them.
-            anyhow::ensure!(
-                self.contact_storage == crate::ContactStorage::Canonical,
-                "StrengthModel::Threshold reads rubble's canonical contact rows: create the world with ContactStorage::Canonical (it uses {:?})",
-                self.contact_storage
-            );
-            let params = self.sim.params();
-            let mut scene = source.threshold_scene(def.strength_scale, params.dt)?;
+            asset: &Arc<DestructibleAssetDesc>,
+            source: &StressSource,
+        ) -> anyhow::Result<Arc<ThresholdTemplate>> {
+            let dt = self.sim.params().dt;
+            let (scale_bits, dt_bits) = (def.strength_scale.to_bits(), dt.to_bits());
+            if def.crush.is_none() {
+                if let Some(t) = self.fracture.templates.iter().find(|t| {
+                    Arc::ptr_eq(&t.asset, asset)
+                        && t.strength_scale == scale_bits
+                        && t.dt == dt_bits
+                }) {
+                    return Ok(t.clone());
+                }
+            }
+            let mut scene = source.threshold_scene(def.strength_scale, dt)?;
             if let Some(c) = &def.crush {
                 apply_crush_materials(&mut scene, c)?;
             }
             let world = stress_ref::world::World::new(&scene);
             let m = &world.solver;
-            let chunk_count: usize = m.structures.iter().map(|s| s.chunks.len()).sum();
-            let capacity = self.sim.capacity();
-            let gpu = match &self.fracture.gpu {
-                Some(g) => g.clone(),
-                None => {
-                    let g = Gpu::from_device(
-                        self.adapter.clone(),
-                        self.sim.device().clone(),
-                        self.sim.queue().clone(),
-                    );
-                    self.fracture.gpu = Some(g.clone());
-                    g
-                }
-            };
-            let instance = def.transform;
-            let (ip, iq) = (
-                DVec3::from(instance.p().as_dvec3()),
-                instance.q().as_dquat().normalize(),
-            );
             let placement = DVec3::from(source.placement);
             let r = to_y_up();
             let mut bodies = world.initial_engine_bodies();
@@ -949,26 +956,9 @@ mod imp {
                 .into_iter()
                 .map(|s| s.unwrap_or((r, placement)))
                 .collect();
-            // Global chunk numbering, structure by structure.
-            let mut offset = Vec::with_capacity(m.structures.len());
-            let mut chunk_of = Vec::with_capacity(chunk_count);
-            for (s, st) in m.structures.iter().enumerate() {
-                offset.push(chunk_of.len() as u32);
-                chunk_of.extend((0..st.chunks.len()).map(|c| (s, c)));
-            }
-            let global = |s: usize, c: usize| offset[s] + c as u32;
-            // The clusters' bodies, cooked as the lab cooks them.
             let mut cooker = stress_rubble::Cooker::default();
-            let shape_def = crate::ShapeDef {
-                update_body_mass: false,
-                ..def.shape.clone()
-            };
-            let material = self.intern_material(&shape_def.material)?;
-            let mut chunk_shapes: Vec<Vec<u32>> = vec![Vec::new(); chunk_count];
-            let mut chunk_parts: Vec<Vec<stress_rubble::Part>> = vec![Vec::new(); chunk_count];
-            let mut chunk_cols: Vec<Vec<u32>> = vec![Vec::new(); chunk_count];
-            let mut chunk_body = vec![u32::MAX; chunk_count];
-            let mut cluster_bodies = Vec::with_capacity(bodies.len());
+            let mut cooked = Vec::with_capacity(bodies.len());
+            let mut geometry = Vec::with_capacity(bodies.len());
             for b in &bodies {
                 let BodyKey::Cluster(id) = b.key else {
                     continue;
@@ -979,7 +969,129 @@ mod imp {
                     .find(|c| c.id == id)
                     .expect("a cluster of the world");
                 let (sq, st) = structures[cl.structure];
-                let cooked = cooker.cook(b, &mut self.hulls);
+                let c = cooker.cook(b, &mut self.hulls);
+                let BodyGeometry::Boxes(shapes) = &b.geometry else {
+                    anyhow::bail!("cluster {id} is not made of chunk shapes")
+                };
+                let mut g = Vec::with_capacity(shapes.len());
+                for (s, col) in shapes.iter().zip(&c.colliders) {
+                    let local = Transform::new(
+                        f3(st + sq * dv(s.local.position)),
+                        f4((sq * dq(s.local.rotation)).normalize()),
+                    );
+                    g.push(match &s.hull {
+                        Some(points)
+                            if col.shape == engine_schema::ShapeType::ConvexHull as u32 =>
+                        {
+                            let pts: Vec<Vec3> = points.iter().map(|p| dv(*p).as_vec3()).collect();
+                            let (hull, shift) = ConvexHull::from_points(&pts)
+                                .map_err(|e| anyhow::anyhow!("chunk {:?} hull: {e:?}", s.chunk))?
+                                .recentered();
+                            let at = local.q() * shift + local.p();
+                            Geometry::Hull {
+                                hull,
+                                transform: Transform::new(at.to_array(), local.rotation),
+                            }
+                        }
+                        _ => Geometry::Box {
+                            half: f3(dv(s.half_extents)),
+                            transform: local,
+                        },
+                    });
+                }
+                cooked.push(c);
+                geometry.push(g);
+            }
+            let template = Arc::new(ThresholdTemplate {
+                asset: asset.clone(),
+                strength_scale: scale_bits,
+                dt: dt_bits,
+                scene,
+                world,
+                bodies,
+                structures,
+                cooked,
+                geometry,
+            });
+            if def.crush.is_none() {
+                self.fracture.templates.push(template.clone());
+            }
+            Ok(template)
+        }
+
+        pub(crate) fn create_threshold(
+            &mut self,
+            def: &DestructibleDef,
+            asset: Arc<DestructibleAssetDesc>,
+            index: usize,
+        ) -> anyhow::Result<()> {
+            let source = asset.stress.as_ref().ok_or_else(|| anyhow::anyhow!("StrengthModel::Threshold needs an asset with the stress oracle's input (from_glb, cuboid_house or from_pack)"))?;
+            // The ingest reads rubble's canonical contact rows, as the lab's engine keeps them.
+            anyhow::ensure!(
+                self.contact_storage == crate::ContactStorage::Canonical,
+                "StrengthModel::Threshold reads rubble's canonical contact rows: create the world with ContactStorage::Canonical (it uses {:?})",
+                self.contact_storage
+            );
+            let template = self.threshold_template(def, &asset, source)?;
+            let ThresholdTemplate {
+                scene,
+                world,
+                bodies,
+                structures,
+                cooked: cooked_bodies,
+                geometry: body_geometry,
+                ..
+            } = &*template;
+            let m = &world.solver;
+            let chunk_count: usize = m.structures.iter().map(|s| s.chunks.len()).sum();
+            let capacity = self.sim.capacity();
+            let gpu = match &self.fracture.gpu {
+                Some(g) => g.clone(),
+                None => {
+                    let g = Gpu::from_device(
+                        self.adapter.clone(),
+                        self.sim.device().clone(),
+                        self.sim.queue().clone(),
+                    );
+                    self.fracture.gpu = Some(g.clone());
+                    g
+                }
+            };
+            let instance = def.transform;
+            let (ip, iq) = (
+                DVec3::from(instance.p().as_dvec3()),
+                instance.q().as_dquat().normalize(),
+            );
+            let structures = structures.clone();
+            // Global chunk numbering, structure by structure.
+            let mut offset = Vec::with_capacity(m.structures.len());
+            let mut chunk_of = Vec::with_capacity(chunk_count);
+            for (s, st) in m.structures.iter().enumerate() {
+                offset.push(chunk_of.len() as u32);
+                chunk_of.extend((0..st.chunks.len()).map(|c| (s, c)));
+            }
+            let global = |s: usize, c: usize| offset[s] + c as u32;
+            // The clusters' bodies, cooked as the lab cooks them (once an asset: the template).
+            let shape_def = crate::ShapeDef {
+                update_body_mass: false,
+                ..def.shape.clone()
+            };
+            let material = self.intern_material(&shape_def.material)?;
+            let mut chunk_shapes: Vec<Vec<u32>> = vec![Vec::new(); chunk_count];
+            let mut chunk_parts: Vec<Vec<stress_rubble::Part>> = vec![Vec::new(); chunk_count];
+            let mut chunk_cols: Vec<Vec<u32>> = vec![Vec::new(); chunk_count];
+            let mut chunk_body = vec![u32::MAX; chunk_count];
+            let mut cluster_bodies = Vec::with_capacity(bodies.len());
+            for ((b, cooked), geometries) in bodies.iter().zip(cooked_bodies).zip(body_geometry) {
+                let BodyKey::Cluster(id) = b.key else {
+                    continue;
+                };
+                let cl = m
+                    .clusters
+                    .iter()
+                    .find(|c| c.id == id)
+                    .expect("a cluster of the world");
+                let (sq, st) = structures[cl.structure];
                 let BodyGeometry::Boxes(shapes) = &b.geometry else {
                     anyhow::bail!("cluster {id} is not made of chunk shapes")
                 };
@@ -1020,34 +1132,17 @@ mod imp {
                 state.initial_pos = state.position;
                 state.initial_rot = state.orientation;
                 self.sim.write_bodies(bi as u32, &[state]);
-                for ((s, col), part) in shapes.iter().zip(&cooked.colliders).zip(&cooked.parts) {
+                for (((s, col), part), geometry) in shapes
+                    .iter()
+                    .zip(&cooked.colliders)
+                    .zip(&cooked.parts)
+                    .zip(geometries)
+                {
                     let (sc, cc) = s
                         .chunk
                         .ok_or_else(|| anyhow::anyhow!("cluster shape without a chunk"))?;
                     let k = global(sc, cc) as usize;
-                    let local = Transform::new(
-                        f3(st + sq * dv(s.local.position)),
-                        f4((sq * dq(s.local.rotation)).normalize()),
-                    );
-                    let geometry = match &s.hull {
-                        Some(points)
-                            if col.shape == engine_schema::ShapeType::ConvexHull as u32 =>
-                        {
-                            let pts: Vec<Vec3> = points.iter().map(|p| dv(*p).as_vec3()).collect();
-                            let (hull, shift) = ConvexHull::from_points(&pts)
-                                .map_err(|e| anyhow::anyhow!("chunk {k} hull: {e:?}"))?
-                                .recentered();
-                            let at = local.q() * shift + local.p();
-                            Geometry::Hull {
-                                hull,
-                                transform: Transform::new(at.to_array(), local.rotation),
-                            }
-                        }
-                        _ => Geometry::Box {
-                            half: f3(dv(s.half_extents)),
-                            transform: local,
-                        },
-                    };
+                    let geometry = geometry.clone();
                     let mut c = engine_schema::Collider {
                         body: bi as u32,
                         material,
