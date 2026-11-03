@@ -1359,7 +1359,8 @@ impl ExplicitBeams {
     /// `config` an optional `.pc`) through its `.truck` form
     /// ([`crate::truck_export::desc_to_truck`]), the same text Rigs of Rods runs:
     /// pressure wheels become soft tyres. Also returns that text and the
-    /// conversion's warnings.
+    /// conversion's warnings. This is the Rigs of Rods reading of the vehicle (what
+    /// RoR itself runs); [`Self::from_jbeam_native`] runs it with BeamNG's rules.
     pub fn from_jbeam(
         files: &[(&str, &str)],
         config: Option<&str>,

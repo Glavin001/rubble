@@ -147,6 +147,7 @@ fn main() {
     let steps = (secs * 2000.0) as u64;
     let every: u64 = opt("every=").map_or(2000, |s| s.parse().unwrap());
     let mut peak = 0.0f32;
+    let mut peak_at = (0u64, 0u32);
     let mut own = 0;
     let mut ke_node = vec![0.0f64; sim.nodes.len()];
     for s in 0..steps {
@@ -180,14 +181,27 @@ fn main() {
             }
         }
         if let Some(w) = opt("trace=") {
-            if s + 40 >= steps {
-                if let Some(i) = desc.nodes.iter().position(|n| n.name == w) {
-                    let n = &sim.nodes[i];
-                    println!(
-                        "trace {w} step {s}: pos {:.5} {:.5} {:.5} vel {:.3} {:.3} {:.3}",
-                        n.pos.x, n.pos.y, n.pos.z, n.vel.x, n.vel.y, n.vel.z
-                    );
-                }
+            let from: u64 =
+                opt("trace_from=").map_or(steps.saturating_sub(40), |x| x.parse().unwrap());
+            let idx = desc
+                .nodes
+                .iter()
+                .position(|n| n.name == w)
+                .or_else(|| w.strip_prefix('#').and_then(|x| x.parse().ok()));
+            if let (true, Some(i)) = (s >= from && s < from + 40, idx) {
+                let n = &sim.nodes[i];
+                let live: Vec<String> = sim.incidence[i]
+                    .iter()
+                    .filter(|&&j| !sim.beams[j as usize].broken)
+                    .map(|&j| {
+                        let b = &sim.beams[j as usize];
+                        format!("{j}:{:?}:F={:.0}", b.kind, b.force)
+                    })
+                    .collect();
+                println!(
+                    "trace {w} step {s}: pos {:.4} {:.4} {:.4} vel {:.2} {:.2} {:.2} live {live:?}",
+                    n.pos.x, n.pos.y, n.pos.z, n.vel.x, n.vel.y, n.vel.z
+                );
             }
         }
         if s + 2000 >= steps {
@@ -214,7 +228,13 @@ fn main() {
                 node_name(at as u32)
             );
         }
-        peak = peak.max(sim.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max));
+        for (i, n) in sim.nodes.iter().enumerate() {
+            let v = n.vel.length();
+            if v > peak {
+                peak = v;
+                peak_at = (s, i as u32);
+            }
+        }
         if sim.nodes.iter().any(|n| !n.pos.is_finite()) {
             println!("NaN at step {s}");
             break;
@@ -343,6 +363,15 @@ fn main() {
             b.tc
         );
     }
+    println!(
+        "peak node speed {peak:.2} m/s: node {} at step {} ({} live beams now)",
+        node_name(peak_at.1),
+        peak_at.0,
+        sim.incidence[peak_at.1 as usize]
+            .iter()
+            .filter(|&&j| !sim.beams[j as usize].broken)
+            .count()
+    );
     let (broken, bent) = sim.damage();
     let ke: f32 = sim
         .nodes
