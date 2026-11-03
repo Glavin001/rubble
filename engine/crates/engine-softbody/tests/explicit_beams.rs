@@ -556,8 +556,8 @@ fn tyres_are_two_rings_on_their_axle_with_eight_or_nine_beams_per_ray() {
     let src = TYRE_TRUCK.replace("0, 1, 2, 1, 0, 9999", "0, 1, 9999, 1, 0, 9999");
     let s = ExplicitBeams::from_truck(&src, Vec3::ZERO, Vec3::ZERO, EXACT).unwrap();
     assert_eq!(s.beams.len(), 8 * n + 6);
-    // Other wheel sections are an error.
-    let src = TYRE_TRUCK.replace("wheels\n", "meshwheels\n");
+    // `wheels2` (a real rim ring) is an error.
+    let src = TYRE_TRUCK.replace("wheels\n", "wheels2\n");
     assert!(ExplicitBeams::from_truck(&src, Vec3::ZERO, Vec3::ZERO, EXACT).is_err());
 }
 

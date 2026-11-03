@@ -119,6 +119,9 @@ pub enum ExplicitKind {
     Support,
     /// No stiffness when compressed.
     Rope,
+    /// A `shocks2` progressive shock: its rates in [`ExplicitBeams::shocks2`] at
+    /// [`Beam::shock`] ([`shock2_force`]).
+    Shock2,
 }
 
 impl ExplicitKind {
@@ -128,6 +131,7 @@ impl ExplicitKind {
             ExplicitKind::LimitedSpring => 1,
             ExplicitKind::Support => 2,
             ExplicitKind::Rope => 3,
+            ExplicitKind::Shock2 => 4,
         }
     }
 }
@@ -205,6 +209,8 @@ pub struct Beam {
     pub broken: bool,
     /// Last force (N, positive = compression).
     pub force: f32,
+    /// [`ExplicitKind::Shock2`]: its record in [`ExplicitBeams::shocks2`].
+    pub shock: u32,
 }
 
 impl Beam {
@@ -251,12 +257,131 @@ impl Beam {
             group: 0,
             broken: false,
             force: 0.0,
+            shock: 0,
         }
     }
 
     /// Yielded: alive with a rest length off its spawn length by more than 0.1 %.
     pub fn bent(&self) -> bool {
         !self.broken && (self.rest - self.rest0).abs() > 1e-3 * self.rest0
+    }
+}
+
+/// A `shocks2` shock's rates (`engine/docs/explicit-beams-wheels2-shocks2-spec.md`
+/// §5–6), fixed at spawn. Its beam holds the rest length and the bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shock2 {
+    pub k_in: f32,
+    pub c_in: f32,
+    pub k_out: f32,
+    pub c_out: f32,
+    /// Progression factors of the spring and damping, in and out.
+    pub pk_in: f32,
+    pub pc_in: f32,
+    pub pk_out: f32,
+    pub pc_out: f32,
+    /// Bump spring and damping (past the bounds).
+    pub k_bump: f32,
+    pub c_bump: f32,
+    /// Soft bump (option `s`).
+    pub soft: bool,
+}
+
+/// `min(x, 1)` as the spec writes it: 1 if 1 < x, else x (NaN passes through).
+fn min1(x: f32) -> f32 {
+    if 1.0 < x {
+        1.0
+    } else {
+        x
+    }
+}
+
+/// `max(a, b)`: b if a < b, else a.
+fn max_ab(a: f32, b: f32) -> f32 {
+    if a < b {
+        b
+    } else {
+        a
+    }
+}
+
+impl Shock2 {
+    /// Rates with progression: `k0 + (p_k·k0)·λ`, `c0 + (p_c·c0)·λ`, with
+    /// λ = 1 for a zero bound, else min((e / (bound·L))², 1).
+    fn progressive(k0: f32, c0: f32, pk: f32, pc: f32, e: f32, bound: f32, rest: f32) -> (f32, f32) {
+        let lambda = if bound == 0.0 {
+            1.0
+        } else {
+            let r = e / (bound * rest);
+            min1(r * r)
+        };
+        (k0 + (pk * k0) * lambda, c0 + (pc * c0) * lambda)
+    }
+
+    fn out_rates(&self, e: f32, lb: f32, rest: f32) -> (f32, f32) {
+        Self::progressive(self.k_out, self.c_out, self.pk_out, self.pc_out, e, lb, rest)
+    }
+
+    fn in_rates(&self, e: f32, sb: f32, rest: f32) -> (f32, f32) {
+        Self::progressive(self.k_in, self.c_in, self.pk_in, self.pc_in, e, sb, rest)
+    }
+
+    /// Stiffness and damping at extension `e` (positive extended) and relative
+    /// speed `u` (positive separating), with rest length `rest` and bounds `sb`,
+    /// `lb` (fractions of it): spec §6.1–6.3.
+    pub fn rates(&self, e: f32, u: f32, rest: f32, sb: f32, lb: f32) -> (f32, f32) {
+        // §6.1: the velocity picks the side.
+        let (mut k, mut c) = if u > 0.0 {
+            self.out_rates(e, lb, rest)
+        } else {
+            self.in_rates(e, sb, rest)
+        };
+        let past = e > lb * rest || e < (-sb) * rest;
+        if !self.soft {
+            // §6.2 hard bump: a replacement.
+            if past {
+                k = self.k_bump;
+                c = self.c_bump;
+            }
+            return (k, c);
+        }
+        // §6.3 soft bump.
+        let soft_rest = rest * 0.8;
+        let el = lb * soft_rest;
+        let es = (-sb) * soft_rest;
+        let bump = |k: f32, c: f32, bound: f32, q_num: f32| {
+            let mu = if bound == 0.0 {
+                1.0
+            } else {
+                let q = (q_num * 5.0) / (bound * rest);
+                min1(q * q)
+            };
+            (
+                k + ((k + 100.0) * self.pk_out) * mu,
+                c + ((c + 100.0) * self.pc_out) * mu,
+            )
+        };
+        if e > el {
+            let (k0, c0) = self.out_rates(e, lb, rest);
+            (k, c) = bump(k0, c0, lb, e - el);
+            if u < 0.0 {
+                k = self.k_in;
+                c = self.c_in;
+            }
+        } else if e < es {
+            let (k0, c0) = self.in_rates(e, sb, rest);
+            // The out factors here too (quirk).
+            (k, c) = bump(k0, c0, sb, e - es);
+            if u > 0.0 {
+                k = self.k_out;
+                c = self.c_out;
+            }
+        }
+        if past {
+            k = max_ab(k, self.k_bump);
+            c = max_ab(c, self.c_bump);
+        }
+        (k, c)
     }
 }
 
@@ -344,6 +469,8 @@ pub struct ExplicitBeams {
     pub fuse_force: Vec3,
     /// Self-centering command beams (the only commands that move with no input).
     pub centering: Vec<CenteringCommand>,
+    /// `shocks2` rates, by [`Beam::shock`].
+    pub shocks2: Vec<Shock2>,
     /// Spawn notes (airfoil files not found: their tables are zero).
     pub warnings: Vec<String>,
 }
@@ -479,6 +606,7 @@ impl ExplicitBeams {
             fusedrag: None,
             fuse_force: Vec3::ZERO,
             centering: Vec::new(),
+            shocks2: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -506,9 +634,14 @@ impl ExplicitBeams {
         airfoil: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let file = parse_truck(text);
-        if let Some(w) = file.wheels.iter().find(|w| w.kind != "wheels") {
+        if let Some(w) = file
+            .wheels
+            .iter()
+            .find(|w| !matches!(w.kind, "wheels" | "meshwheels" | "meshwheels2"))
+        {
             return Err(format!(
-                "`{}` wheels are not supported (only `wheels`)",
+                "unsupported section `{}` (the explicit solver builds tyres from `wheels`, \
+                 `meshwheels` and `meshwheels2` only)",
                 w.kind
             ));
         }
@@ -526,7 +659,20 @@ impl ExplicitBeams {
         for b in &desc.beams[..cine_beams.min(desc.beams.len())] {
             s.push_desc_beam(b);
         }
-        for w in &file.wheels {
+        // Wheels section by section (`wheels`, then `meshwheels`, then
+        // `meshwheels2`), each in file order; `tyre_of` maps a file wheel to its tyre.
+        let mut tyre_of = vec![0u32; file.wheels.len()];
+        let mut spawn_order = Vec::with_capacity(file.wheels.len());
+        for kind in ["wheels", "meshwheels", "meshwheels2"] {
+            for (i, w) in file.wheels.iter().enumerate().filter(|(_, w)| w.kind == kind) {
+                tyre_of[i] = spawn_order.len() as u32;
+                spawn_order.push(w);
+            }
+        }
+        for w in spawn_order {
+            // meshwheels2: the axle-to-own-ring spokes harden only past 0.15 L of
+            // stretch.
+            let spoke_long = if w.kind == "meshwheels2" { 0.15f32 } else { 0.0 };
             // The axle runs toward +z: the node of lower z is A1, whichever the
             // file names first (equal z keeps the file's order).
             let (a1, a2) = if s.nodes[w.node1 as usize].pos.z > s.nodes[w.node2 as usize].pos.z {
@@ -580,15 +726,18 @@ impl ExplicitBeams {
                 (p, pp.distance_squared(pa1) < pp.distance_squared(pa2))
             });
             for i in 0..n {
-                let add = |s: &mut Self, a: u32, b: u32, kind: ExplicitKind, ty: ExplicitType| {
+                let add = |s: &mut Self, a: u32, b: u32, kind: ExplicitKind, ty: ExplicitType, rim: bool| {
                     let rest = s.nodes[a as usize].pos.distance(s.nodes[b as usize].pos);
-                    let mut beam = Beam::new(
-                        a, b, kind, ty, w.spring, w.damp, rest, deform, strength, plastic,
-                    );
+                    let (k, c) = if rim {
+                        (w.rim_spring, w.rim_damp)
+                    } else {
+                        (w.spring, w.damp)
+                    };
+                    let mut beam = Beam::new(a, b, kind, ty, k, c, rest, deform, strength, plastic);
                     beam.group = group;
                     if kind == ExplicitKind::LimitedSpring {
                         beam.short_bound = 0.66;
-                        beam.long_bound = 0.0;
+                        beam.long_bound = spoke_long;
                         beam.limit_k = 9_000_000.0;
                         beam.limit_c = 12_000.0;
                     }
@@ -598,38 +747,51 @@ impl ExplicitBeams {
                 let lim = ExplicitKind::LimitedSpring;
                 let plain = ExplicitKind::Plain;
                 let def = ExplicitType::Deformable;
-                add(&mut s, a1, o, lim, def);
-                add(&mut s, a2, ii, lim, def);
-                add(&mut s, a2, o, plain, def);
-                add(&mut s, a1, ii, plain, def);
-                add(&mut s, o, ii, plain, def);
-                add(&mut s, o, outer(i + 1), plain, def);
-                add(&mut s, ii, inner(i + 1), plain, def);
-                add(&mut s, ii, outer(i + 1), plain, def);
+                add(&mut s, a1, o, lim, def, false);
+                add(&mut s, a2, ii, lim, def, false);
+                add(&mut s, a2, o, plain, def, false);
+                add(&mut s, a1, ii, plain, def, false);
+                add(&mut s, o, ii, plain, def, true);
+                add(&mut s, o, outer(i + 1), plain, def, true);
+                add(&mut s, ii, inner(i + 1), plain, def, true);
+                add(&mut s, ii, outer(i + 1), plain, def, true);
                 if let Some((p, near_a1)) = rigidity {
                     let end = if near_a1 { o } else { ii };
-                    add(&mut s, p, end, plain, ExplicitType::Virtual);
+                    add(&mut s, p, end, plain, ExplicitType::Virtual, false);
                 }
             }
         }
-        // Then the file's beams, shocks, commands and hydros. Commands and hydros
-        // gate their break test on the deform threshold at their line.
+        // Then the file's beams, shocks, shocks2, shocks3, commands and hydros, each
+        // section in file order. Commands and hydros gate their break test on the
+        // deform threshold at their line.
         let rest: Vec<_> = desc.beams[cine_beams.min(desc.beams.len())..].to_vec();
         let gates: HashMap<usize, f32> = file.actuator_gates.iter().copied().collect();
         let commands: HashMap<usize, &crate::truck::TruckCommand> =
             file.commands.iter().map(|c| (c.beam, c)).collect();
-        let order = |i: usize| match (commands.contains_key(&i), order_class(rest[i].kind)) {
-            (true, _) => 2,
-            (false, 2) => 3,
-            (false, c) => c,
+        let shocks2: HashMap<usize, &crate::truck::TruckShock2> =
+            file.shocks2.iter().map(|c| (c.beam, c)).collect();
+        let shocks3: std::collections::HashSet<usize> = file.shocks3.iter().copied().collect();
+        let order = |i: usize| {
+            if commands.contains_key(&i) {
+                4
+            } else if shocks2.contains_key(&i) {
+                2
+            } else if shocks3.contains(&i) {
+                3
+            } else {
+                match order_class(rest[i].kind) {
+                    2 => 5,
+                    c => c,
+                }
+            }
         };
         // `beams` lines on generated tyre nodes, at their place among the file's.
         let tyre_node = |s: &Self, r: crate::truck::TruckNodeRef| match r {
             crate::truck::TruckNodeRef::File(n) => n,
-            crate::truck::TruckNodeRef::Tyre(w, k) => s.tyres[w as usize].first + k,
+            crate::truck::TruckNodeRef::Tyre(w, k) => s.tyres[tyre_of[w as usize] as usize].first + k,
         };
         let mut tyre_beams = file.tyre_beams.iter().peekable();
-        for class in 0..4 {
+        for class in 0..6 {
             for (i, b) in rest.iter().enumerate().filter(|&(i, _)| order(i) == class) {
                 while class == 0 && tyre_beams.peek().is_some_and(|t| t.position <= i) {
                     let t = tyre_beams.next().unwrap();
@@ -640,6 +802,9 @@ impl ExplicitBeams {
                 s.push_desc_beam(b);
                 if let Some(&g) = gates.get(&i) {
                     s.beams[at as usize].gate = g;
+                }
+                if let Some(sh) = shocks2.get(&i) {
+                    s.make_shock2(at as usize, sh);
                 }
                 if let Some(c) = commands.get(&i) {
                     if c.rope {
@@ -670,6 +835,66 @@ impl ExplicitBeams {
         s.add_aero(&file, airfoil);
         s.finish();
         Ok(s)
+    }
+
+    /// Turn beam `j` (spawned from a `shocks2` line's bounded beam) into a shock2
+    /// beam (spec §5): bounds through the `m` / `M` options on the
+    /// un-precompressed length, rest length L₀·π, gate the deform threshold.
+    fn make_shock2(&mut self, j: usize, sh: &crate::truck::TruckShock2) {
+        let (a, b) = (self.beams[j].a as usize, self.beams[j].b as usize);
+        // Spawned positions are world positions here (the origin is zero at spawn).
+        let lw = self.nodes[a].pos.distance(self.nodes[b].pos);
+        let (mut sb, mut lb) = (sh.short_bound, sh.long_bound);
+        if sh.metric {
+            sb /= lw;
+            lb /= lw;
+        }
+        if sh.abs_metric {
+            sb = (lw - sb) / lw;
+            lb = (lb - lw) / lw;
+            if lb < 0.0 {
+                lb = 0.0;
+            }
+            if sb > 1.0 {
+                sb = 1.0;
+            }
+        }
+        let rest = lw * sh.precompression;
+        let index = self.shocks2.len() as u32;
+        self.shocks2.push(Shock2 {
+            k_in: sh.spring_in,
+            c_in: sh.damp_in,
+            k_out: sh.spring_out,
+            c_out: sh.damp_out,
+            pk_in: sh.prog_spring_in,
+            pc_in: sh.prog_damp_in,
+            pk_out: sh.prog_spring_out,
+            pc_out: sh.prog_damp_out,
+            k_bump: sh.bump_spring,
+            c_bump: sh.bump_damp,
+            soft: sh.soft,
+        });
+        let group = self.beams[j].group;
+        let mut beam = Beam::new(
+            a as u32,
+            b as u32,
+            ExplicitKind::Shock2,
+            ExplicitType::Actuator,
+            sh.spring_in,
+            sh.damp_in,
+            rest,
+            sh.gate,
+            sh.strength,
+            0.0,
+        );
+        beam.gate = sh.gate;
+        beam.limit_k = sh.bump_spring;
+        beam.limit_c = sh.bump_damp;
+        beam.short_bound = sb;
+        beam.long_bound = lb;
+        beam.group = group;
+        beam.shock = index;
+        self.beams[j] = beam;
     }
 
     /// Wings (break references, chains) and the fuselage drag from spawn
@@ -1079,7 +1304,12 @@ impl ExplicitBeams {
             let mut beam = self.beams[j];
             let na = self.nodes[beam.a as usize];
             let nb = self.nodes[beam.b as usize];
-            let out = beam_force(&mut beam, &na, &nb, self.settings.fast_inv_sqrt);
+            let out = if beam.kind == ExplicitKind::Shock2 {
+                let sh = self.shocks2[beam.shock as usize];
+                shock2_force(&mut beam, &sh, &na, &nb, self.settings.fast_inv_sqrt)
+            } else {
+                beam_force(&mut beam, &na, &nb, self.settings.fast_inv_sqrt)
+            };
             let mut f = out.force;
             let mut cascade = false;
             if out.check_break {
@@ -1419,7 +1649,8 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
                 c *= 0.1;
             }
         }
-        ExplicitKind::Plain => {}
+        // Shock2 beams take `shock2_force`; here they act as plain ones.
+        ExplicitKind::Plain | ExplicitKind::Shock2 => {}
     }
     let mut f = -k * e - c * u;
     beam.force = f;
@@ -1460,6 +1691,31 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         inv,
         force: f,
         check_break,
+    }
+}
+
+/// A shock2 beam's force (spec §6): the rates by [`Shock2::rates`], no yield,
+/// and the break test when |F| exceeds both the gate and the strength.
+pub fn shock2_force(beam: &mut Beam, sh: &Shock2, na: &Node, nb: &Node, fast: bool) -> BeamOut {
+    let d = na.pos - nb.pos;
+    let q = d.dot(d);
+    let inv = if fast {
+        fast_inv_sqrt(q)
+    } else {
+        1.0 / q.sqrt()
+    };
+    let len = q * inv;
+    let e = len - beam.rest;
+    let u = (na.vel - nb.vel).dot(d) * inv;
+    let (k, c) = sh.rates(e, u, beam.rest, beam.short_bound, beam.long_bound);
+    let f = -k * e - c * u;
+    beam.force = f;
+    let tau = f.abs();
+    BeamOut {
+        d,
+        inv,
+        force: f,
+        check_break: tau > beam.gate && tau > beam.strength,
     }
 }
 

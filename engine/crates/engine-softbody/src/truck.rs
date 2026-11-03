@@ -130,6 +130,11 @@ pub struct TruckWheel {
     /// node defaults in force at the line (Rigs of Rods' soft tyre, [`crate::ror`]).
     pub spring: f32,
     pub damp: f32,
+    /// The rim beams' spring and damping (the 4 tread-ring beams per ray): the tyre's
+    /// for `wheels` and `meshwheels`; for `meshwheels2` the beam defaults at the line,
+    /// unscaled (`engine/docs/explicit-beams-wheels2-shocks2-spec.md` §2.4).
+    pub rim_spring: f32,
+    pub rim_damp: f32,
     pub rigidity: Option<u32>,
     pub beam: SoftBeam,
     pub node_friction: f32,
@@ -169,6 +174,42 @@ pub struct TruckWing {
     /// Airfoil table file name (`.afl`).
     pub airfoil: String,
     pub efficacy: f32,
+}
+
+/// A `shocks2` line: a progressive shock with separate compression (in) and
+/// extension (out) rates and hard or soft bump limits
+/// (`engine/docs/explicit-beams-wheels2-shocks2-spec.md` §4–6). Its beam in
+/// [`TruckFile::beams`] is a bounded beam with the "in" pair, for the solvers that
+/// do not run the shocks2 force law.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruckShock2 {
+    /// Its beam in [`TruckFile::beams`].
+    pub beam: usize,
+    pub spring_in: f32,
+    pub damp_in: f32,
+    pub prog_spring_in: f32,
+    pub prog_damp_in: f32,
+    pub spring_out: f32,
+    pub damp_out: f32,
+    pub prog_spring_out: f32,
+    pub prog_damp_out: f32,
+    /// Bounds as written (before the `m` / `M` conversions, which need the spawn
+    /// positions).
+    pub short_bound: f32,
+    pub long_bound: f32,
+    /// Precompression as written (0 is accepted).
+    pub precompression: f32,
+    /// Options `m` (metric bounds), `M` (absolute metric bounds), `s` (soft bump).
+    pub metric: bool,
+    pub abs_metric: bool,
+    pub soft: bool,
+    /// Bump spring and damping: the beam defaults at the line, unscaled.
+    pub bump_spring: f32,
+    pub bump_damp: f32,
+    /// The deform threshold at the line (the break test's gate).
+    pub gate: f32,
+    /// 4 × the unscaled break threshold.
+    pub strength: f32,
 }
 
 /// A beam end: a node of the file, or one a `wheels` line generates (its wheel in
@@ -235,6 +276,10 @@ pub struct TruckFile {
     pub fusedrag: Option<TruckFuseDrag>,
     /// `beams` lines on generated tyre nodes.
     pub tyre_beams: Vec<TruckTyreBeam>,
+    /// `shocks2` lines in file order.
+    pub shocks2: Vec<TruckShock2>,
+    /// The beams ([`Self::beams`]) of `shocks3` lines.
+    pub shocks3: Vec<usize>,
     pub warnings: Vec<String>,
 }
 
@@ -283,6 +328,9 @@ struct Parser {
     /// Legacy numbering: per `wheels` line its first generated number, count and
     /// wheel index.
     wheel_numbers: Vec<(u32, u32, u32)>,
+    /// A `shocks2` line was discarded by validation: the next one is not validated
+    /// (Rigs of Rods' behaviour, spec §4).
+    shock2_skip_check: bool,
 }
 
 impl Parser {
@@ -893,12 +941,21 @@ impl Parser {
         let s = self.section;
         let need = match s {
             Section::Shocks => 7,
-            Section::Shocks2 => 11,
             _ => 13,
         };
         if t.len() < need {
             self.warn(format!("{s:?} line needs {need} fields"));
             return;
+        }
+        if s == Section::Shocks2 {
+            // Any numeric field below -0.8 discards the line; the line after a
+            // discarded one is not validated.
+            if std::mem::take(&mut self.shock2_skip_check) {
+            } else if (2..13).any(|i| f(t, i, 0.0) < -0.8) {
+                self.warn("shocks2 line with a field below -0.8: discarded".into());
+                self.shock2_skip_check = true;
+                return;
+            }
         }
         let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
             return;
@@ -912,14 +969,15 @@ impl Parser {
                 f(t, 6, 1.0),
                 7,
             ),
-            // shocks2: spring/damp in and out — use the "in" pair for the spring-damper.
+            // shocks2: spring/damp in and out — the "in" pair for the solvers
+            // without the shocks2 force law ([`TruckShock2`] has the rest).
             Section::Shocks2 => (
                 f(t, 2, 0.0),
                 f(t, 3, 0.0),
-                f(t, 8, 0.0),
-                f(t, 9, 0.0),
-                f(t, 10, 1.0),
-                11,
+                f(t, 10, 0.0),
+                f(t, 11, 0.0),
+                f(t, 12, 1.0),
+                13,
             ),
             // shocks3: spring_in, damp_in, damp_in_fast, vsplit_in, spring_out, …
             _ => (
@@ -932,6 +990,37 @@ impl Parser {
             ),
         };
         let mut beam = self.beam(a, b);
+        if s == Section::Shocks2 {
+            let opts = t.get(13).copied().unwrap_or("");
+            for c in opts.chars() {
+                if !matches!(c, 'i' | 's' | 'm' | 'M' | 'n' | 'v') {
+                    self.warn(format!("shocks2 option `{c}` ignored"));
+                }
+            }
+            self.out.shocks2.push(TruckShock2 {
+                beam: self.out.beams.len(),
+                spring_in: f(t, 2, 0.0),
+                damp_in: f(t, 3, 0.0),
+                prog_spring_in: f(t, 4, 0.0),
+                prog_damp_in: f(t, 5, 0.0),
+                spring_out: f(t, 6, 0.0),
+                damp_out: f(t, 7, 0.0),
+                prog_spring_out: f(t, 8, 0.0),
+                prog_damp_out: f(t, 9, 0.0),
+                short_bound: f(t, 10, 0.0),
+                long_bound: f(t, 11, 0.0),
+                precompression: f(t, 12, 0.0),
+                metric: opts.contains('m'),
+                abs_metric: opts.contains('M'),
+                soft: opts.contains('s'),
+                bump_spring: self.defaults.spring,
+                bump_damp: self.defaults.damp,
+                gate: beam.deform,
+                strength: 4.0 * self.defaults.brk,
+            });
+        } else if s == Section::Shocks3 {
+            self.out.shocks3.push(self.out.beams.len());
+        }
         beam.kind = BeamKind::Bounded;
         beam.spring = spring;
         beam.damp = damp;
@@ -974,7 +1063,10 @@ impl Parser {
             Section::MeshWheels2 => ("meshwheels2", 4, 2),
             _ => ("flexbodywheels", 4, 4),
         };
-        if t.len() < n1_col + 7 {
+        let mesh = matches!(s, Section::MeshWheels | Section::MeshWheels2);
+        // meshwheels / meshwheels2 have 16 arguments, all required.
+        let need = if mesh { 16 } else { n1_col + 7 };
+        if t.len() < need {
             self.warn(format!("{kind} line too short"));
             return;
         }
@@ -982,6 +1074,12 @@ impl Parser {
         let (Some(node1), Some(node2)) = (self.node(t[n1_col]), self.node(t[n1_col + 1])) else {
             return;
         };
+        if mesh && node1 == node2 {
+            self.warn(format!(
+                "{kind} line with the same axle node twice: ignored"
+            ));
+            return;
+        }
         let arm_tok = t[n1_col + 5];
         let arm = if arm_tok == "9999" || arm_tok == "-1" {
             None
@@ -1017,6 +1115,16 @@ impl Parser {
             kind,
             spring: f(t, n1_col + 7, 0.0),
             damp: f(t, n1_col + 8, 0.0),
+            rim_spring: if s == Section::MeshWheels2 {
+                self.defaults.spring
+            } else {
+                f(t, n1_col + 7, 0.0)
+            },
+            rim_damp: if s == Section::MeshWheels2 {
+                self.defaults.damp
+            } else {
+                f(t, n1_col + 8, 0.0)
+            },
             rigidity,
             beam: {
                 // AddBeam: unscaled break threshold, scaled deform threshold.
@@ -1027,7 +1135,7 @@ impl Parser {
             node_friction: self.node_defaults.friction.unwrap_or(1.0),
         });
         if self.sequential() {
-            if kind == "wheels" {
+            if matches!(kind, "wheels" | "meshwheels" | "meshwheels2") {
                 let wheel = self.out.wheels.len() as u32 - 1;
                 self.wheel_numbers
                     .push((self.next_number, nodes_per_ray * rays, wheel));
@@ -1058,6 +1166,7 @@ pub fn parse_truck(src: &str) -> TruckFile {
         cameras: Vec::new(),
         fuse_area_coef: 1.0,
         wheel_numbers: Vec::new(),
+        shock2_skip_check: false,
     };
     let mut have_title = false;
     for (i, raw) in src.lines().enumerate() {
