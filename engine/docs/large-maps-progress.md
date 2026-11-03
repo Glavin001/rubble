@@ -931,7 +931,8 @@ sleep mode per run, `EQUIV_COMPARE=dirA,dirB` compares two recordings, `EQUIV_EN
 recording read the `ENGINE_*` switches; threshold scenes then need `ENGINE_CONTACTS=canonical`).
 It uses only API that main has, so the same file runs on both builds (main needs the
 `engine-scenes` dev-dependency). Reference: origin/main 0ab6a4dc, run twice (A, B) for the
-noise floor. Candidate: this branch with threshold destructibles on main's archive (below).
+noise floor. Candidate: 5c56f691 (threshold destructibles on main's archive, below; threshold
+worlds on the full broadphase pass, "The city's pair set").
 Native wgpu/Metal, each build's default, sleep on and off. Per-dump metric: every body slot's
 position, linear velocity and awake flag (parked slots excluded), plus contacts, awake bodies
 and bonds broken per step (per shot for house and arch).
@@ -956,14 +957,14 @@ city pages) opts in to the touch query there.
 |---|---|---|---|
 | house, off / on | identical | identical: 57.1 / 60.6 bonds a shot, 61/61 shots | identical |
 | arch, off / on | identical | identical: 127.5 bonds a shot, 61/61 | identical |
-| city, sleep off | identical | parts at step 78 (one candidate pair, one contact fewer); same 2,214 bonds; mean 0.1 mm, max 0.157 m | differs: the awake broadphase (below) |
-| city, sleep on | identical | 2,030 -> 2,127 bonds, 1,395 awake-state differences | differs: the awake broadphase and `ccd_by_collider` (below) |
+| city, sleep off | identical | identical (2,214 bonds) | identical |
+| city, sleep on | identical | 2,030 -> 2,104 bonds, 1,395 awake-state differences | differs: `ccd_by_collider` wakes six sleepers main's rule misses (below) |
 | gables, sleep off | identical | identical | identical |
-| gables, sleep on | mean 0.349 m, 1,806 awake diffs | mean 0.378 m, 2,242 | within noise |
+| gables, sleep on | mean 0.349 m, 1,806 awake diffs | mean 0.369 m, 2,049 | within noise |
 | grid, sleep off | identical | main: 100,000 bodies below the ground; PR: 0. Main with only `[ForceInline]` on `closingPoints` is bit-identical to the PR | differs: main's CCD fall-through (fixed) |
 | grid, sleep on | mean 0.063 m, 2,021 | main: 2,353 below the ground; PR: 0 | differs: main's CCD fall-through (fixed) |
 | ring, sleep off | identical | identical | identical |
-| ring, sleep on | mean 0.207 m, 8,720 | mean 0.242 m, 11,981 | within noise |
+| ring, sleep on | mean 0.207 m, 8,720 | mean 0.239 m, 11,491 | within noise |
 | vehicle, off / on | identical | identical (positions, velocities, sleep) | identical |
 
 Hard checks, every scene and mode: no NaNs, body counts equal, no body below the ground on the
@@ -971,7 +972,7 @@ PR. The ring's one or two bodies below y = -1 (both builds) are bricks knocked p
 the scene's 200 m ground slab (z 111-125 m), not fall-throughs. Final states at rest: identical
 wherever the table says identical.
 
-**The city's two causes.** A bisect of city sleep-off over main..62a93fbc (harness at every
+**The city's two causes** (before 5c56f691; the first is fixed there). A bisect of city sleep-off over main..62a93fbc (harness at every
 commit) finds 99a4c6cc (rigid_plan: awake-indexed broadphase on hierarchical grids) first;
 its parent 165e32e8 is bit-identical to main. With `ENGINE_BROADPHASE=full` the PR's city
 sleep-off run is bit-identical to main; `ENGINE_BROADPHASE=hier` is not. The bodies are
@@ -998,7 +999,8 @@ out of order from placement. `tests/ccd_wake_unsorted.rs` pins it: a sleeper who
 follows a later body's, 2 m off a bullet's sweep, wakes in that step; with main's per-body
 rule it stays asleep and the test fails.
 
-**Memory** (headless Chrome, `mem.mjs`, MB peak; `demo.html?scene=<s>&sleep=on` 200 steps,
+**Memory at 438ae81e** (5c56f691's, after binding 14 and the archive scratch were resized, are in
+"The city's pair set" below; headless Chrome, `mem.mjs`, MB peak; `demo.html?scene=<s>&sleep=on` 200 steps,
 `city.html` 1,024 houses 60 s):
 
 | page | main 0ab6a4dc GPU / wasm | 62a93fbc (touch, cold) | this branch |
@@ -1015,7 +1017,7 @@ offset by less wasm heap (-31 MB, -6 MB).
 Notes:
 
 - **Contact counts with sleep on are lower on the PR** where it archives persistent contacts
-  (gables 38k -> 11.6k, grid 404k -> 6, vehicle 1,440 -> 105): sleeping pairs are archived
+  (gables 38k -> 11.2k, grid 404k -> 1.5k, vehicle 1,440 -> 105): sleeping pairs are archived
   rather than re-emitted, so only awake contacts are counted.
 - **city-on's per-slot position difference (max 2,337 m)** is not a motion difference: once
   bonds break differently, split pieces take different body slots.
