@@ -75,7 +75,8 @@ coefficient p (0..1); kind; type; limit stiffness kℓ and limit damping cℓ (l
 springs); short and long bounds sb, lb (fractions of L); detacher group g (0 none,
 > 0 a group master, < 0 a follower of group |g|); broken; last force.
 
-Kinds: **plain**, **limited spring** (shocks and some tyre spokes), **support**
+Kinds: **plain**, **limited spring** (shocks and some tyre spokes), **shock2**
+(`shocks2`, `explicit-beams-wheels2-shocks2-spec.md` §6), **support**
 (no stiffness when stretched), **rope** (no stiffness when compressed).
 Types: **deformable** (may yield), **actuator** (shocks and hydros; never yield),
 **virtual** (never yields; tyre rigidity beams).
@@ -102,7 +103,10 @@ cinecam nodes and beam parameters are already exact. Then:
 * **Beam order** (it matters for results): cinecam beams, tyre beams, then the file's
   `beams` (plain, supports, ropes, in file order, including lines whose ends are
   nodes a `wheels` line generated, which legacy numbering lets a file name), then
-  shocks, then commands (`commands`, `commands2`), then hydros.
+  shocks, then `shocks2`, then `shocks3`, then commands (`commands`, `commands2`),
+  then hydros, each section in file order. Tyre beams are those of every `wheels`
+  line, then every `meshwheels` line, then every `meshwheels2` line, whatever the
+  file order (legacy node numbers still follow the file order).
 * **Rest length** L = L₀ = |xa − xb| from the spawned single-precision positions (so a
   vehicle spawned far from the origin carries that rounding); shocks multiply by their
   precompression.
@@ -113,7 +117,10 @@ cinecam nodes and beam parameters are already exact. Then:
   below G holds). **Other actuators and virtual beams**: no yield; G = S.
   **Limited springs from shocks**: kℓ = desc `deform` (the limit spring), cℓ = desc
   `limit_damp` (12000 if 0), bounds from the desc.
-* **Tyres** (`wheels` section only; other wheel sections are an error): for each
+* **Tyres** (`wheels`, `meshwheels`, `meshwheels2`; `wheels2` and
+  `flexbodywheels` are an error). `meshwheels` is `wheels` with another argument
+  layout; `meshwheels2` differs in its rim beams' rates and its spokes' long bound
+  (`explicit-beams-wheels2-shocks2-spec.md` §2). For each
   wheel, with axle nodes A1, A2 (spawned positions), radius R, ray count n, mass M,
   tyre spring and damping, the beam defaults at its line (unscaled break strength,
   deform threshold, plastic coefficient) and the node friction default:
