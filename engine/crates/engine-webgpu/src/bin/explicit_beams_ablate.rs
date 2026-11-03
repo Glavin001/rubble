@@ -162,6 +162,15 @@ fn main() -> anyhow::Result<()> {
         };
         sim.boxes.push(StaticBox::centered(centre, half));
     }
+    eprintln!(
+        "{} nodes, {} beams, {} triangles, {} contacters, grid cell {}, {} wings",
+        sim.nodes.len(),
+        sim.beams.len(),
+        sim.triangles.len(),
+        sim.candidates.len(),
+        sim.grid_cell,
+        sim.wings.len()
+    );
     let (info, device, queue) = default_device_with(true)?;
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &[sim]);
     gpu.set_wide(false);

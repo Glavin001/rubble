@@ -498,6 +498,11 @@ impl ExplicitBeamsGpu {
         let mut nbr: Vec<u32> = Vec::new();
         let mut vv_tri: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
         for (vi, v) in vehicles.iter().enumerate() {
+            // The kernel packs a (triangle, candidate) pair into 16 bits each.
+            assert!(
+                v.triangles.len() < 1 << 16 && v.candidates.len() < 1 << 16,
+                "explicit beams GPU: at most 65535 collision triangles and contacters per vehicle"
+            );
             let group_count = v
                 .beams
                 .iter()

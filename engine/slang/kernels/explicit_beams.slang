@@ -1010,6 +1010,71 @@ void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, flo
     }
 }
 
+// A step without the grid finds its self-collision candidates early: the beam
+// phase (positions are final after the node phase) lists the (triangle, candidate)
+// pairs that pass the tests before tryContact's hit test (the box, and for a grid
+// vehicle the grid's covered buckets, with the same expressions), on the lanes the
+// beams leave idle; the triangle phase then runs tryContact on the listed pairs
+// only (usually none). A fuller list than PAIR_LIST runs the step's usual walk.
+static const uint PAIR_LIST = 1024u;
+groupshared uint gsPairs[PAIR_LIST];
+groupshared Atomic<uint> gsPairCount;
+
+void trianglePairs(uint t, uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
+                   uint candCount)
+{
+    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
+    uint4 tn = gStatic[gP.triBase + gt];
+    float3 p0 = nf3(origin + gNodes[tn.x * 3u].xyz);
+    float3 p1 = nf3(origin + gNodes[tn.y * 3u].xyz);
+    float3 p2 = nf3(origin + gNodes[tn.z * 3u].xyz);
+    float3 lo = min(min(p0, p1), p2) - float3(r, r, r);
+    float3 hi = max(max(p0, p1), p2) + float3(r, r, r);
+    bool every = true;
+    int3 c0 = int3(0, 0, 0);
+    int3 span = int3(0, 0, 0);
+    if (cell > 0.0)
+    {
+        float3 f0 = floor((lo - origin) / cell);
+        float3 fs = floor((hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
+        every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
+        if (!every)
+        {
+            c0 = int3(f0);
+            span = int3(fs);
+        }
+    }
+    uint yz = uint(span.y * span.z);
+    uint cells = uint(span.x) * yz;
+    for (uint k = sub; k < candCount; k += subs)
+    {
+        uint h = gLists[candOff + k];
+        if (h == tn.x || h == tn.y || h == tn.z) continue;
+        float3 e = gNodes[h * 3u].xyz;
+        if (!every)
+        {
+            // The grid walk's tests (triangleGridBrute).
+            float3 p = origin + e;
+            if (any(p < lo) || any(p > hi)) continue;
+            int3 c = int3(floor(e / cell));
+            if (!(all(c >= c0) && all(c < c0 + span)))
+            {
+                uint b = gridBucket(c);
+                bool covered = false;
+                for (uint i = 0u; i < cells; i++)
+                    covered = covered
+                        || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
+                if (!covered) continue;
+            }
+        }
+        // tryContact's box test.
+        float3 x = nf3(origin + e);
+        if (any(x < lo) || any(x > hi)) continue;
+        uint i = gsPairCount.add(1u);
+        if (i < PAIR_LIST) gsPairs[i] = (t << 16) | k;
+    }
+}
+
 #ifdef EB_DET_HITS
 // Tests only (EB_DET_HITS): the step's self-collision hits (found by the usual
 // lanes) applied on one lane, sorted by (triangle, node), so each hit sees every
@@ -1949,6 +2014,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             }
         }
         for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
+        if (lane == 0u) gsPairCount.store(0u);
         sync();
         if (lane == 0u)
         {
@@ -2006,6 +2072,21 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint beamEnd = beamCount;
 #endif
         for (uint j = lane; j < beamEnd; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
+        // Without the grid this step: list the candidate pairs now (lanes in
+        // reverse, so those with one beam fewer start first).
+        uint listedB = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
+        bool early = candCount > 0u && !(cell > 0.0 && listedB * candCount > BRUTE_PAIRS_PER_LANE * LANES);
+        if (early)
+        {
+            uint lanes = clamp(LANES / max(listedB, 1u), 1u, candCount);
+            uint stride = (LANES / lanes) * lanes;
+            uint rl = LANES - 1u - lane;
+            for (uint p = rl; p < listedB * lanes && rl < stride; p += stride)
+            {
+                uint t = triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
+                trianglePairs(t, triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount);
+            }
+        }
         sync();
         uint gridOn = gsUniformLanes;
 #ifdef EB_ABLATE
@@ -2065,10 +2146,20 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             }
             sync();
         }
+        uint pairs = gsPairCount.load();
 #ifdef EB_ABLATE
         if ((gP.ablate & 256u) != 0u) {} else
 #endif
-        if (candCount > 0u && cell > 0.0 && gridOn != 0u)
+        if (early && pairs <= PAIR_LIST)
+        {
+            for (uint i = lane; i < pairs; i += LANES)
+            {
+                uint e = gsPairs[i];
+                tryContact(triangleGeo(triOff + (e >> 16), origin, range), gLists[candOff + (e & 0xFFFFu)], origin,
+                           range, beamOff, groupOff, groupCount, parity);
+            }
+        }
+        else if (candCount > 0u && cell > 0.0 && gridOn != 0u)
         {
             uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
             for (uint p = lane; p < listed * GRID_SUBS; p += LANES)
