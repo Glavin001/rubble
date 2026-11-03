@@ -374,3 +374,107 @@ fn meshwheels2_and_shocks2_car_matches_cpu() {
     assert!(close(c_broken, g_broken), "broken {c_broken} vs {g_broken}");
     assert!(close(c_bent, g_bent), "bent {c_bent} vs {g_bent}");
 }
+
+/// A rail of three segments (the middle one's beam written in reverse) on immovable
+/// nodes, a slide node riding it, two triggers from the slide node to the rail's
+/// ends (one plain, one with `c`) holding keys 2 and then 3 / 4, and two command
+/// lines on those keys, each pushing a hanging node.
+const TRIGGER_RIG: &str = "trigger and slide node rig
+globals
+200, 0, mat
+minimass
+5
+nodes
+0, 0, 2, 0
+1, 1, 2, 0
+2, 2, 2, 0
+3, 3, 2, 0
+4, 0.3, 2.01, 0
+5, 0, 4, 1
+6, 0, 3, 1
+7, 1, 4, 1
+8, 1, 3, 1
+fixes
+0
+1
+2
+3
+5
+7
+beams
+0, 1
+2, 1
+2, 3
+triggers
+4, 0, 0.5, 2.0, 1, 2
+4, 3, 0.6, 0.4, 3, 4, c
+commands2
+5, 6, 0.5, 0.5, 0.7, 1.5, 3, 2, i
+7, 8, 1.0, 1.0, 0.7, 1.3, 3, 4, i
+slidenodes
+4, 0, 1, 2, 3, s20000
+end
+";
+
+#[test]
+fn explicit_triggers_commands_and_slidenodes_match_cpu() {
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        ..Default::default()
+    };
+    let mut cpu = ExplicitBeams::from_truck(TRIGGER_RIG, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
+    assert_eq!(
+        (cpu.triggers.len(), cpu.commands.len(), cpu.slides.len()),
+        (2, 2, 1)
+    );
+    // The slide node rides along the rail at 2 m/s.
+    cpu.nodes[4].vel = Vec3::new(2.0, 0.0, 0.0);
+    let cmd = [cpu.commands[0].beam as usize, cpu.commands[1].beam as usize];
+    let rest0 = cmd.map(|j| cpu.beams[j].rest0);
+    let (_, device, queue) = match default_device() {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("no GPU: skipped");
+            return;
+        }
+    };
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    let mut clock = FrameClock::default();
+    let mut max_ratio = [0.0f32; 2];
+    let mut segments_seen = std::collections::BTreeSet::new();
+    for f in 0..120 {
+        cpu.frame();
+        gpu.frame(clock.next());
+        for (k, &j) in cmd.iter().enumerate() {
+            max_ratio[k] = max_ratio[k].max(cpu.beams[j].rest / rest0[k]);
+        }
+        segments_seen.insert(cpu.slides[0].segment);
+        if f % 20 == 19 {
+            gpu.wait();
+            let (rms, max) = rms_max(&cpu.positions(), &gpu.positions()[0]);
+            let gb = &gpu.beams()[0];
+            let dl = cmd.map(|j| (gb[j].rest - cpu.beams[j].rest).abs());
+            eprintln!(
+                "t {:.2}: rms {:.4} mm max {:.4} mm; command L diff {:.2e} {:.2e}; cpu slide {:?} gpu {:?}",
+                (f + 1) as f32 / 60.0,
+                rms * 1e3,
+                max * 1e3,
+                dl[0],
+                dl[1],
+                cpu.slides[0].segment,
+                gpu.slides()[0][0].0
+            );
+            assert!(rms < 1e-3 && max < 3e-3, "rms {rms} max {max}");
+            assert!(dl[0] < 2e-3 && dl[1] < 2e-3, "{dl:?}");
+            assert_eq!(
+                gpu.slides()[0][0],
+                (cpu.slides[0].segment, cpu.slides[0].broken_away)
+            );
+            assert_eq!(gpu.key_inputs(cpu.steps)[0], cpu.key_input);
+        }
+    }
+    // The run exercised every part: both commands moved by their triggers' keys,
+    // and the slide node crossed every segment.
+    assert!(max_ratio[0] > 1.2 && max_ratio[1] > 1.2, "{max_ratio:?}");
+    assert_eq!(segments_seen.len(), 3, "{segments_seen:?}");
+}
