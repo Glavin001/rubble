@@ -555,25 +555,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         ("explicit_beams_aero", "256"),
         ("explicit_beams_aero_wide", "512"),
     ] {
-        let out = wgsl_dir.join(format!("{name}.wgsl"));
-        compile_with_defines(
-            &slang_root.join("kernels/explicit_beams.slang"),
-            "explicit_beams_frame",
-            SlangTarget::Wgsl,
-            &out,
-            &[],
-            &[("ENGINE_WGSL", "1"), ("EB_LANES", lanes), ("EB_AERO", "1")],
-        )?;
-        let text = std::fs::read_to_string(&out)?
-            .replace(
-                "storageBarrier(); textureBarrier(); workgroupBarrier();;",
-                "storageBarrier(); workgroupBarrier();",
-            )
-            .replace(
-                "storageBarrier(); textureBarrier(); workgroupBarrier();",
-                "storageBarrier(); workgroupBarrier();",
-            );
-        std::fs::write(&out, text)?;
+        explicit_frame_module(slang_root, &wgsl_dir, name, lanes, true)?;
     }
     // Vehicle–vehicle contact: the plan passes (one module each) and the contact
     // groups' entry at the frame module's four variants.
@@ -825,6 +807,25 @@ fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
 
 /// Lane counts of the current kernel's frame modules (the det variants cover each).
 const EXPLICIT_LANES: &[&str] = &["256", "512"];
+
+/// One frame module (entry `explicit_beams_frame`) at `lanes`, with or without
+/// `EB_AERO`.
+fn explicit_frame_module(slang_root: &Path, dir: &Path, name: &str, lanes: &str, aero: bool) -> Result<()> {
+    let out = dir.join(format!("{name}.wgsl"));
+    let mut d = vec![("ENGINE_WGSL", "1"), ("EB_LANES", lanes)];
+    if aero {
+        d.push(("EB_AERO", "1"));
+    }
+    compile_with_defines(
+        &slang_root.join("kernels/explicit_beams.slang"),
+        "explicit_beams_frame",
+        SlangTarget::Wgsl,
+        &out,
+        &[],
+        &d,
+    )?;
+    explicit_barriers(&out)
+}
 
 /// A module name's lane tag: 256 none, 512 `_wide`, else `_l<lanes>`.
 fn lane_tag(lanes: &str) -> String {

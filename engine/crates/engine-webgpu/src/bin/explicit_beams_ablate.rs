@@ -174,7 +174,8 @@ fn main() -> anyhow::Result<()> {
     let (load, busy) = wait_quiet(max_load, max_gpu);
     eprintln!("{} ({:?}); load {load:.2}, GPU busy {busy:.1} %", info.name, info.backend);
     // Warm the GPU's clocks (the first timed configuration otherwise pays the ramp).
-    for _ in 0..3 {
+    let warm = Instant::now();
+    while warm.elapsed().as_secs_f64() < 2.0 {
         gpu.restore(&snap);
         for _ in 0..frames {
             gpu.frame(17);

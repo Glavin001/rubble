@@ -80,7 +80,8 @@ pub struct ExplicitBeamsGpu {
     /// The bound buffers (bindings 0..8) and the module choice (aero, 512 lanes),
     /// for the test-only kernel variants ([`Self::set_kernel_variant`]).
     bufs: [wgpu::Buffer; 9],
-    module_kind: (bool, bool),
+    /// (aero, a vehicle over WIDE_BEAMS, lanes of the current frame modules).
+    module_kind: (bool, bool, u32),
     variant: KernelVariant,
     alts: Vec<(KernelVariant, AltPipes)>,
     probe: Option<wgpu::Buffer>,
@@ -944,18 +945,19 @@ impl ExplicitBeamsGpu {
         let vv_static_base = statics.len() as u32;
         statics.extend(vv_static);
 
+        let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
+        let lanes = frame_lanes(vehicles);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams"),
-            // Large vehicles get twice the lanes (more loads in flight per step).
+            // Large vehicles get twice the lanes (more loads in flight per step), a
+            // small fleet 1024 (frame_lanes).
             source: wgpu::ShaderSource::Wgsl(
-                crate::uniformize_workgroup_lanes(
-                    match (aero, vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS)) {
-                        (false, true) => EXPLICIT_BEAMS_WIDE_WGSL,
-                        (false, false) => EXPLICIT_BEAMS_WGSL,
-                        (true, true) => EXPLICIT_BEAMS_AERO_WIDE_WGSL,
-                        (true, false) => EXPLICIT_BEAMS_AERO_WGSL,
-                    },
-                )
+                crate::uniformize_workgroup_lanes(match (aero, lanes) {
+                    (false, 512) => EXPLICIT_BEAMS_WIDE_WGSL,
+                    (false, _) => EXPLICIT_BEAMS_WGSL,
+                    (true, 512) => EXPLICIT_BEAMS_AERO_WIDE_WGSL,
+                    (true, _) => EXPLICIT_BEAMS_AERO_WGSL,
+                })
                 .into(),
             ),
         });
@@ -1130,13 +1132,13 @@ impl ExplicitBeamsGpu {
         let contact = Contact::new(
             device,
             &buffers,
-            match (aero, vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS)) {
-                (false, false) => (EXPLICIT_BEAMS_CONTACT_WGSL, EXPLICIT_BEAMS_SOLO_WGSL),
-                (false, true) => (EXPLICIT_BEAMS_CONTACT_WIDE_WGSL, EXPLICIT_BEAMS_SOLO_WIDE_WGSL),
-                (true, false) => (EXPLICIT_BEAMS_CONTACT_AERO_WGSL, EXPLICIT_BEAMS_SOLO_AERO_WGSL),
-                (true, true) => (
-                    EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
-                    EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL,
+            match (aero, lanes) {
+                (false, 512) => (EXPLICIT_BEAMS_CONTACT_WIDE_WGSL, EXPLICIT_BEAMS_SOLO_WIDE_WGSL),
+                (false, _) => (EXPLICIT_BEAMS_CONTACT_WGSL, EXPLICIT_BEAMS_SOLO_WGSL),
+                (true, 512) => (EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL, EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL),
+                (true, _) => (
+                    EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
+                    EXPLICIT_BEAMS_SOLO_AERO_WGSL,
                 ),
             },
             &acc,
@@ -1176,7 +1178,7 @@ impl ExplicitBeamsGpu {
             total,
             contact,
             bufs,
-            module_kind: (aero, vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS)),
+            module_kind: (aero, big, lanes),
             variant: KernelVariant::Current,
             alts: Vec::new(),
             probe: None,
@@ -1748,7 +1750,7 @@ impl ExplicitBeamsGpu {
             let path = format!("{}/{name}.wgsl", crate::EXPLICIT_BEAMS_WGSL_DIR);
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
         };
-        let (aero, big) = self.module_kind;
+        let (aero, big, lanes) = self.module_kind;
         let (prefix, suffix) = match variant {
             KernelVariant::Baseline => ("explicit_baseline_", ""),
             KernelVariant::BaselineProbe => ("explicit_baseline_", "_probe"),
@@ -1757,12 +1759,14 @@ impl ExplicitBeamsGpu {
             KernelVariant::Ablate => ("explicit_ablate_", ""),
             KernelVariant::Current => unreachable!(),
         };
-        let tag = format!(
-            "{}{}{}",
-            if aero { "_aero" } else { "" },
-            if big { "_wide" } else { "" },
-            suffix
-        );
+        // The baseline picks its lanes as the old host did; the current kernel's
+        // variants the current host's.
+        let lane_tag = if prefix == "explicit_baseline_" {
+            if big { "_wide" } else { "" }
+        } else {
+            if lanes == 512 { "_wide" } else { "" }
+        };
+        let tag = format!("{}{}{}", if aero { "_aero" } else { "" }, lane_tag, suffix);
         let device = &self.device;
         let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
             binding,
@@ -2354,6 +2358,25 @@ impl Wide {
             enabled: false,
             table,
         }
+    }
+}
+
+/// Fleets of at most this many vehicles run 512 lanes per vehicle (about one
+/// workgroup per GPU core: a vehicle's step latency sets the frame, and more lanes
+/// shorten it); larger fleets keep 256 (512 for large vehicles) for throughput.
+/// Measured on an M3 Max, one vehicle, GPU µs per step (drive, 256 / 512 / 1024
+/// lanes): Viper 23.0 / 20.3 / 24.6, E36 39.4 / 31.0 / 38.8, Mustang 44.6 / 40.4 /
+/// 46.0 (1024 lanes is slower: wider barriers, a longer serial grid scan).
+const SMALL_FLEET: usize = 32;
+
+/// Lanes per vehicle workgroup for this fleet. `RUBBLE_EXPLICIT_LANES` (256 or
+/// 512; measurement) overrides the choice.
+fn frame_lanes(vehicles: &[ExplicitBeams]) -> u32 {
+    let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
+    let default = if vehicles.len() <= SMALL_FLEET || big { 512 } else { 256 };
+    match std::env::var("RUBBLE_EXPLICIT_LANES").ok().and_then(|v| v.parse().ok()) {
+        Some(n @ (256 | 512)) => n,
+        _ => default,
     }
 }
 
