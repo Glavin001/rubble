@@ -192,6 +192,12 @@ struct Surface
 [[vk::binding(6, 0)]] RWStructuredBuffer<Atomic<uint>> gGroups;
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint4> gMisc;
 [[vk::binding(8, 0)]] RWStructuredBuffer<uint> gNext;
+#ifdef EB_DET_HITS
+// Tests only: per vehicle a hit count and up to DET_CAP (triangle, node) hits of the
+// step's self-collision; after every vehicle's region, an overflow flag.
+[[vk::binding(12, 0)]] RWStructuredBuffer<Atomic<uint>> gDet;
+static const uint DET_CAP = 8192u;
+#endif
 #ifdef EB_RACE_PROBE
 [[vk::binding(11, 0)]] RWStructuredBuffer<Atomic<uint>> gProbe;
 static uint probeEpoch;
@@ -886,6 +892,18 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
     if (!(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r)) return;
     gMisc[t.mi].w = 1u;
     gsHit = 1u;
+#ifdef EB_DET_HITS
+    {
+        uint base = gStatic[gP.nodeInfoBase + h].w * (1u + 2u * DET_CAP);
+        uint i = gDet[base].add(1u);
+        if (i < DET_CAP)
+        {
+            gDet[base + 1u + 2u * i].store(t.mi - gP.vehicles);
+            gDet[base + 2u + 2u * i].store(h);
+        }
+        return;
+    }
+#endif
     float3 nn = t.n;
     if (delta < 0.0)
     {
@@ -1012,19 +1030,77 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
 }
 
 #ifdef EB_DET_HITS
-// Tests only (EB_DET_HITS): self-collision on one lane, every triangle not waiting
-// against every candidate in list order, so each hit sees every earlier one (no
-// race): the same hits as the grid and the lane-parallel test, in a fixed order.
-void detSelfCollide(uint triOff, uint triCount, float3 origin, float r, uint candOff, uint candCount,
-                    uint beamOff, uint groupOff, uint groupCount, uint parity)
+// Tests only (EB_DET_HITS): the step's self-collision hits (found by the usual
+// lanes) applied on one lane, sorted by (triangle, node), so each hit sees every
+// earlier one in a fixed order: tryContact's force part.
+void detApply(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    for (uint t = 0u; t < triCount; t++)
+    uint base = v * (1u + 2u * DET_CAP);
+    uint n = gDet[base].load();
+    if (n > DET_CAP)
     {
-        if (asint(gMisc[gP.vehicles + triOff + t].x) > 0) continue;
-        TriGeo g = triangleGeo(triOff + t, origin, r);
-        for (uint k = 0u; k < candCount; k++)
-            tryContact(g, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
+        gDet[gP.vehicles * (1u + 2u * DET_CAP)].store(1u);
+        n = DET_CAP;
     }
+    for (uint i = 1u; i < n; i++)
+    {
+        uint gt = gDet[base + 1u + 2u * i].load();
+        uint h = gDet[base + 2u + 2u * i].load();
+        uint j = i;
+        while (j > 0u)
+        {
+            uint pg = gDet[base + 1u + 2u * (j - 1u)].load();
+            uint ph = gDet[base + 2u + 2u * (j - 1u)].load();
+            if (pg < gt || (pg == gt && ph <= h)) break;
+            gDet[base + 1u + 2u * j].store(pg);
+            gDet[base + 2u + 2u * j].store(ph);
+            j--;
+        }
+        gDet[base + 1u + 2u * j].store(gt);
+        gDet[base + 2u + 2u * j].store(h);
+    }
+    for (uint i = 0u; i < n; i++)
+    {
+        uint gt = gDet[base + 1u + 2u * i].load();
+        uint h = gDet[base + 2u + 2u * i].load();
+        TriGeo t = triangleGeo(gt, origin, r);
+        uint4 tn = t.tn;
+        float4 P = gNodes[h * 3u];
+        float3 p = nf3(origin + P.xyz);
+        float3 q = nf3(p - t.p0);
+        float alpha = 0.0;
+        float beta = 0.0;
+        float delta = 0.0;
+        if (t.solvable)
+        {
+            alpha = sdot(t.ra, q);
+            beta = sdot(t.rb, q);
+            delta = sdot(t.rn, q);
+        }
+        float gamma = nf(nf(1.0 - alpha) - beta);
+        float3 nn = t.n;
+        if (delta < 0.0)
+        {
+            nn = -t.n;
+            delta = -delta;
+        }
+        float4 V = gNodes[h * 3u + 1u];
+        float4 P0 = gNodes[tn.x * 3u];
+        float4 P1 = gNodes[tn.y * 3u];
+        float4 P2 = gNodes[tn.z * 3u];
+        float3 vv = V.xyz - (alpha * gNodes[tn.y * 3u + 1u].xyz + beta * gNodes[tn.z * 3u + 1u].xyz
+                             + gamma * gNodes[tn.x * 3u + 1u].xyz);
+        float mt = alpha * P1.w + beta * P2.w + gamma * P0.w;
+        float m = P.w * mt / (P.w + mt);
+        float3 fh = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity, false)
+            + accForce(h);
+        float3 f = contactForce(fh, vv, m, nn, boxSurface(), r - delta, V.w);
+        accAdd(h, f);
+        accAdd(tn.y, -alpha * f);
+        accAdd(tn.z, -beta * f);
+        accAdd(tn.x, -gamma * f);
+    }
+    gDet[base].store(0u);
 }
 #endif
 
@@ -1997,10 +2073,6 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_RACE_PROBE
         probeEpoch = step * 128u + 127u;
 #endif
-#ifdef EB_DET_HITS
-        if (lane == 0u && candCount > 0u)
-            detSelfCollide(triOff, triCount, origin, range, candOff, candCount, beamOff, groupOff, groupCount, parity);
-#else
         if (candCount > 0u && cell > 0.0)
         {
             uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
@@ -2021,6 +2093,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
                              groupOff, groupCount, parity);
         }
+#ifdef EB_DET_HITS
+        sync();
+        if (lane == 0u) detApply(v, origin, range, beamOff, groupOff, groupCount, parity);
 #endif
 #ifdef EB_AERO
         // Slide nodes, after this step's beams (one lane, alongside the contacts).
@@ -2950,10 +3025,6 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
 #ifdef EB_RACE_PROBE
     probeEpoch = step * 128u + 127u;
 #endif
-#ifdef EB_DET_HITS
-    if (lane == 0u && candCount > 0u)
-        detSelfCollide(triOff, triCount, origin, range, candOff, candCount, beamOff, groupOff, groupCount, parity);
-#else
     if (candCount > 0u && cell > 0.0)
     {
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
@@ -2972,6 +3043,9 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
             triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff, groupOff,
                          groupCount, parity);
     }
+#ifdef EB_DET_HITS
+    sync();
+    if (lane == 0u) detApply(v, origin, range, beamOff, groupOff, groupCount, parity);
 #endif
 #ifdef EB_AERO
     if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, origin, groupOff, parity);

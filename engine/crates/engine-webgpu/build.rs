@@ -777,11 +777,12 @@ fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
         jobs.push((base.clone(), format!("explicit_baseline_{n}"), n, vec![("ENGINE_WGSL", "1")]));
     }
     // (source, file prefix, lane counts, extra define)
-    let sets: [(&PathBuf, &str, &[&str], Option<&str>); 4] = [
+    let sets: [(&PathBuf, &str, &[&str], Option<&str>); 5] = [
         (&base, "explicit_baseline_", &["256", "512"], None),
         (&base, "explicit_baseline_", &["256", "512"], Some("EB_RACE_PROBE")),
         (&base, "explicit_baseline_", &["256", "512"], Some("EB_DET_HITS")),
         (&cur, "explicit_det_", EXPLICIT_LANES, Some("EB_DET_HITS")),
+        (&cur, "explicit_ablate_", EXPLICIT_LANES, Some("EB_ABLATE")),
     ];
     for (src, prefix, lanes_list, extra) in sets {
         for &lanes in lanes_list {

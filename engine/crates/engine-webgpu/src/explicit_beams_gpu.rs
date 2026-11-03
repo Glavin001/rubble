@@ -84,6 +84,8 @@ pub struct ExplicitBeamsGpu {
     variant: KernelVariant,
     alts: Vec<(KernelVariant, AltPipes)>,
     probe: Option<wgpu::Buffer>,
+    /// The `EB_DET_HITS` variants' hit lists (binding 12).
+    det: Option<wgpu::Buffer>,
 }
 
 /// Which kernel runs the frames: the shipped one, or (tests only) the frozen
@@ -99,6 +101,9 @@ pub enum KernelVariant {
     /// (`EB_DET_HITS`): no race, so every frame compares.
     BaselineDet,
     CurrentDet,
+    /// Measurement only: the current kernel with phases skipped
+    /// ([`ExplicitBeamsGpu::set_ablation`]); results are meaningless.
+    Ablate,
 }
 
 /// A variant's pipelines and bind groups.
@@ -412,7 +417,9 @@ const WIDE_CLOSE: usize = 6;
 const PARAM_STRIDE: u64 = 256;
 const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-const PARAM_WORDS: usize = 63;
+const PARAM_WORDS: usize = 64;
+/// Params word: the phases a measurement build skips (`EB_ABLATE`).
+const W_ABLATE: usize = 63;
 /// Params word: the steps the contact plan's frame bounds cover.
 const W_VV_PLAN_STEPS: usize = 60;
 /// Steps a contact plan covers at least (frames shorter than this share a plan):
@@ -941,12 +948,14 @@ impl ExplicitBeamsGpu {
             label: Some("explicit_beams"),
             // Large vehicles get twice the lanes (more loads in flight per step).
             source: wgpu::ShaderSource::Wgsl(
-                match (aero, vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS)) {
-                    (false, true) => EXPLICIT_BEAMS_WIDE_WGSL,
-                    (false, false) => EXPLICIT_BEAMS_WGSL,
-                    (true, true) => EXPLICIT_BEAMS_AERO_WIDE_WGSL,
-                    (true, false) => EXPLICIT_BEAMS_AERO_WGSL,
-                }
+                crate::uniformize_workgroup_lanes(
+                    match (aero, vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS)) {
+                        (false, true) => EXPLICIT_BEAMS_WIDE_WGSL,
+                        (false, false) => EXPLICIT_BEAMS_WGSL,
+                        (true, true) => EXPLICIT_BEAMS_AERO_WIDE_WGSL,
+                        (true, false) => EXPLICIT_BEAMS_AERO_WGSL,
+                    },
+                )
                 .into(),
             ),
         });
@@ -1042,6 +1051,7 @@ impl ExplicitBeamsGpu {
             0,
             vv_nbr,
             vv_hits,
+            0,
         ];
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),
@@ -1170,6 +1180,7 @@ impl ExplicitBeamsGpu {
             variant: KernelVariant::Current,
             alts: Vec::new(),
             probe: None,
+            det: None,
         }
     }
 
@@ -1722,6 +1733,17 @@ impl ExplicitBeamsGpu {
                 mapped_at_creation: false,
             }));
         }
+        let det = matches!(variant, KernelVariant::BaselineDet | KernelVariant::CurrentDet);
+        if det && self.det.is_none() {
+            // The kernel's DET_CAP hits per vehicle.
+            let words = self.spans.len() as u64 * (1 + 2 * 8192) + 1;
+            self.det = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("explicit-beams-det-hits"),
+                size: words * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+        }
         let read = |name: &str| {
             let path = format!("{}/{name}.wgsl", crate::EXPLICIT_BEAMS_WGSL_DIR);
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
@@ -1732,6 +1754,7 @@ impl ExplicitBeamsGpu {
             KernelVariant::BaselineProbe => ("explicit_baseline_", "_probe"),
             KernelVariant::BaselineDet => ("explicit_baseline_", "_det"),
             KernelVariant::CurrentDet => ("explicit_det_", ""),
+            KernelVariant::Ablate => ("explicit_ablate_", ""),
             KernelVariant::Current => unreachable!(),
         };
         let tag = format!(
@@ -1804,12 +1827,13 @@ impl ExplicitBeamsGpu {
                 cache: None,
             })
         };
-        let extra: Vec<(u32, &wgpu::Buffer)> = self.probe.iter().filter(|_| probe).map(|b| (11, b)).collect();
+        let mut extra: Vec<(u32, &wgpu::Buffer)> = self.probe.iter().filter(|_| probe).map(|b| (11, b)).collect();
+        extra.extend(self.det.iter().filter(|_| det).map(|b| (12, b)));
         let (layout, group) = layout_with(&extra);
         let (plan_layout, plan_group) = layout_with(&[(10, &self.contact.args)]);
         let plan = ["bounds", "pairs", "group"].map(|p| {
             let e = format!("explicit_beams_vv_{p}");
-            if variant == KernelVariant::CurrentDet {
+            if matches!(variant, KernelVariant::CurrentDet | KernelVariant::Ablate) {
                 let wgsl = EXPLICIT_BEAMS_VV_PASSES.iter().find(|(n, _)| *n == e).unwrap().1;
                 make(&e, wgsl, &plan_layout)
             } else {
@@ -1825,6 +1849,28 @@ impl ExplicitBeamsGpu {
             plan_group,
         };
         self.alts.push((variant, pipes));
+    }
+
+    /// Measurement only: run the plain frame with the phases in `mask` skipped (1 the
+    /// grid scan, 2 every node, 4 node indices past the lane count, 8 the wing forces'
+    /// application, 16 the whole aero phase and its barrier, 32 the beams, 64 one
+    /// barrier per sync instead of two, 128 no barriers, 256 the triangles); 0 runs
+    /// the shipped kernel. Results are meaningless with a mask: time only.
+    #[doc(hidden)]
+    pub fn set_ablation(&mut self, mask: u32) {
+        self.words[W_ABLATE] = mask;
+        self.set_kernel_variant(if mask == 0 { KernelVariant::Current } else { KernelVariant::Ablate });
+    }
+
+    /// Tests only: whether an `EB_DET_HITS` frame had more self-collision hits in a
+    /// step than its list holds (the comparison is then void); clears it.
+    #[doc(hidden)]
+    pub fn take_det_overflow(&mut self) -> bool {
+        let Some(d) = &self.det else { return false };
+        let raw = self.read(d);
+        let at = raw.len() - 4;
+        let flag = u32::from_le_bytes(raw[at..].try_into().unwrap());
+        flag != 0
     }
 
     /// Tests only: whether a frame run with [`KernelVariant::BaselineProbe`] since

@@ -12,8 +12,9 @@
 //! is left out). The next frame starts from the current kernel's state.
 //!
 //! Every frame is also run on both kernels compiled with `EB_DET_HITS` (tests only):
-//! self-collision and vehicle-contact hits on one lane in a fixed order, so there is
-//! no race and every frame must match exactly, including heavy crashes (the E36's
+//! the hits are found by each kernel's own lanes (grid, brute force, contact
+//! candidates), then applied on one lane sorted by (triangle, node), so there is no
+//! race and every frame must match exactly, including heavy crashes (the E36's
 //! self-collision races in nearly every frame of the plain build).
 //!
 //! The races (both documented in `engine/docs/explicit-beams.md`): a contact
@@ -210,6 +211,7 @@ fn compare_steps(
         gpu.frame(steps);
         gpu.wait();
         let d = gpu.state_words();
+        assert!(!gpu.take_det_overflow(), "{label}: frame {f}: the fixed-order hit list overflowed");
         if let Some(x) = first_diff(&c, &d) {
             panic!("{label}: frame {f}: with fixed-order hits the current kernel differs from the baseline at {x}");
         }
