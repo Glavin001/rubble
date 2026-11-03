@@ -139,6 +139,66 @@ pub struct SoftBeam {
     /// (Rigs of Rods `sbd_damp`, the beam defaults' damping; 0 = the default damping).
     /// The matching spring is `deform` (RoR `sbd_spring`, JBeam `beamLimitSpring`).
     pub limit_damp: f32,
+    /// The JBeam values only the explicit solver's JBeam mode reads
+    /// ([`crate::explicit_beams::ExplicitBeams::from_desc_jbeam`],
+    /// `engine/docs/jbeam-semantics-spec.md`); `None` for other loaders.
+    pub jbeam: Option<JbeamBeam>,
+}
+
+/// A JBeam beam's values as the file gives them, for the explicit solver's JBeam
+/// mode (`engine/docs/jbeam-semantics-spec.md`). The other fields of [`SoftBeam`]
+/// keep the meanings the other paths give them.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JbeamBeam {
+    /// `beamDeform` (N; [`SoftBeam::deform`] holds other values for SUPPORT,
+    /// BOUNDED and HYDRO beams).
+    #[serde(with = "inf_f32")]
+    pub deform: f32,
+    /// `beamPrecompression` as a rest-length factor (after `precompressionRange`).
+    pub precompression: f32,
+    /// SUPPORT: `beamLongBound` (break past (1 + bound) × spawn length).
+    /// BOUNDED: `beamLongBound` / `beamShortBound` as fractions of the rest length
+    /// (after `longBoundRange` / `shortBoundRange`).
+    #[serde(with = "inf_f32")]
+    pub long_bound: f32,
+    pub short_bound: f32,
+    /// BOUNDED: `boundZone` (m), `beamLimitSpring` (N/m), `beamLimitDamp` (N·s/m).
+    pub bound_zone: f32,
+    pub limit_spring: f32,
+    pub limit_damp: f32,
+    /// BOUNDED: `beamDampFast` (N·s/m) above `beamDampVelocitySplit` (m/s).
+    pub damp_fast: f32,
+    #[serde(with = "inf_f32")]
+    pub damp_velocity_split: f32,
+    /// `deformLimit` / `deformLimitExpansion`: the plastic change of rest length in
+    /// compression / extension as a fraction of the spawn rest length
+    /// (`f32::INFINITY` = none).
+    #[serde(with = "inf_f32")]
+    pub deform_limit: f32,
+    #[serde(with = "inf_f32")]
+    pub deform_limit_expansion: f32,
+    /// `dampCutoffHz` (Hz; 0 = none): damping only below this frequency.
+    pub damp_cutoff_hz: f32,
+}
+
+impl Default for JbeamBeam {
+    fn default() -> Self {
+        Self {
+            deform: 220_000.0,
+            precompression: 1.0,
+            long_bound: 1.0,
+            short_bound: 1.0,
+            bound_zone: 1.0,
+            limit_spring: 1.0,
+            limit_damp: 1.0,
+            damp_fast: 0.0,
+            damp_velocity_split: f32::INFINITY,
+            deform_limit: f32::INFINITY,
+            deform_limit_expansion: f32::INFINITY,
+            damp_cutoff_hz: 0.0,
+        }
+    }
 }
 
 impl Default for SoftBeam {
@@ -163,6 +223,7 @@ impl Default for SoftBeam {
             deform_limit_stress: f32::INFINITY,
             break_group_passive: false,
             limit_damp: 0.0,
+            jbeam: None,
         }
     }
 }
@@ -461,6 +522,38 @@ pub struct SoftVehicleDesc {
     /// its render meshes to, and what [`crate::host::PieceDetached`] reports.
     /// A node may be in several parts.
     pub parts: Vec<SoftPart>,
+    /// Node pairs coupled at spawn (JBeam latches: advanced coupler controllers'
+    /// `couplerNodes` within their `couplingStartRadius`). Only the explicit
+    /// solver's JBeam mode simulates them.
+    pub couplers: Vec<SoftCoupler>,
+}
+
+/// Two nodes held together (BeamNG: "considered one" while coupled) until the
+/// force between them passes `strength` or their break group breaks.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SoftCoupler {
+    pub a: u32,
+    pub b: u32,
+    /// N (`autoCouplingStrength`; `f32::INFINITY` = unbreakable).
+    #[serde(with = "inf_f32")]
+    pub strength: f32,
+    /// Break group as the beams' (0 = none) and whether it is passive
+    /// (`breakGroupType` 1).
+    pub break_group: u32,
+    pub break_group_passive: bool,
+}
+
+impl Default for SoftCoupler {
+    fn default() -> Self {
+        Self {
+            a: 0,
+            b: 0,
+            strength: f32::INFINITY,
+            break_group: 0,
+            break_group_passive: false,
+        }
+    }
 }
 
 /// A named set of nodes (indices into [`SoftVehicleDesc::nodes`]).

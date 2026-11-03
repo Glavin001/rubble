@@ -129,6 +129,25 @@ pub enum ExplicitKind {
     /// [`ExplicitBeams::triggers`] at [`Beam::shock`], its bounds the short and long
     /// bounds (`explicit_triggers`).
     Trigger,
+    /// JBeam NORMAL (and HYDRO with no input) beams in JBeam mode
+    /// (`engine/docs/jbeam-semantics-spec.md` §3): the plain force and yield rule,
+    /// the rest length kept within `short_bound ..= long_bound` (m; `deformLimit`,
+    /// `deformLimitExpansion`), the yield thresholds hardening up to `limit_k`
+    /// (`deformLimitStress`), and no break exception.
+    JbeamPlain,
+    /// JBeam SUPPORT beams in JBeam mode (spec §4): no force at all while longer
+    /// than rest; break longer than `long_bound` (m: `(1 + beamLongBound)` × the
+    /// spawn length); in compression a [`ExplicitKind::JbeamPlain`] beam.
+    JbeamSupport,
+    /// JBeam BOUNDED beams in JBeam mode (spec §5): past the bounds (`short_bound`,
+    /// `long_bound` × rest) the spring and damping move to `limit_k`, `limit_c`
+    /// over the bound zone (`plastic`, m); damping `c` up to the velocity split
+    /// (`tc`, m/s) and `tt` past it. Never yields.
+    JbeamBounded,
+    /// A JBeam coupler in JBeam mode (spec §7): the two nodes held together by a
+    /// zero-length isotropic spring–damper (`k`, `c`, [`coupler_rates`]),
+    /// breaking when that force passes the strength.
+    JbeamCoupler,
 }
 
 impl ExplicitKind {
@@ -140,7 +159,22 @@ impl ExplicitKind {
             ExplicitKind::Rope => 3,
             ExplicitKind::Shock2 => 4,
             ExplicitKind::Trigger => 5,
+            ExplicitKind::JbeamPlain => 6,
+            ExplicitKind::JbeamSupport => 7,
+            ExplicitKind::JbeamBounded => 8,
+            ExplicitKind::JbeamCoupler => 9,
         }
+    }
+
+    /// One of the JBeam-mode kinds (no break exception; their own rules).
+    pub fn is_jbeam(self) -> bool {
+        matches!(
+            self,
+            ExplicitKind::JbeamPlain
+                | ExplicitKind::JbeamSupport
+                | ExplicitKind::JbeamBounded
+                | ExplicitKind::JbeamCoupler
+        )
     }
 }
 
@@ -218,7 +252,9 @@ pub struct Beam {
     /// Last force (N, positive = compression).
     pub force: f32,
     /// [`ExplicitKind::Shock2`]: its record in [`ExplicitBeams::shocks2`];
-    /// [`ExplicitKind::Trigger`]: its record in [`ExplicitBeams::triggers`].
+    /// [`ExplicitKind::Trigger`]: its record in [`ExplicitBeams::triggers`];
+    /// JBeam-mode kinds: 1 + its record in [`ExplicitBeams::damp_filters`]
+    /// (0 = unfiltered damping).
     pub shock: u32,
 }
 
@@ -501,6 +537,51 @@ pub struct ExplicitBeams {
     pub neighbours: Vec<u32>,
     /// Per collision triangle its vehicle-contact throttle (cwait, cidle).
     pub contact_throttle: Vec<[i32; 2]>,
+    /// JBeam mode's self-collision groups (`engine/docs/jbeam-semantics-spec.md`
+    /// §8): per node its group (0 = none); a node skips the collision triangles
+    /// whose three nodes are all in its group. Empty: no exclusion.
+    pub self_groups: Vec<u32>,
+    /// JBeam mode's damping filters (`dampCutoffHz`), by [`Beam::shock`] − 1.
+    pub damp_filters: Vec<DampFilter>,
+}
+
+/// A JBeam beam's damping low-pass (`dampCutoffHz`, spec §6): the damping uses
+/// y = a·(u + u₋₁) − b·y₋₁ of the extension rate u, the bilinear-transform
+/// first-order low-pass at the cutoff (no gain at the step's Nyquist rate).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DampFilter {
+    pub a: f32,
+    pub b: f32,
+    /// Last step's rate and output (state).
+    pub u: f32,
+    pub y: f32,
+}
+
+/// Highest cutoff a damping filter takes, as a fraction of the step rate: the
+/// bilinear filter's pole reaches the unit circle at the Nyquist rate (0.5).
+pub const DAMP_CUTOFF_MAX: f32 = 0.45;
+
+impl DampFilter {
+    /// The filter for a cutoff of `hz` at the fixed step (at most
+    /// [`DAMP_CUTOFF_MAX`] of the step rate).
+    pub fn new(hz: f32) -> Self {
+        let fc = (hz * STEP).min(DAMP_CUTOFF_MAX);
+        let k = (std::f32::consts::PI * fc).tan();
+        Self {
+            a: k / (1.0 + k),
+            b: (k - 1.0) / (k + 1.0),
+            u: 0.0,
+            y: 0.0,
+        }
+    }
+
+    /// Filter this step's rate.
+    pub fn step(&mut self, u: f32) -> f32 {
+        let y = self.a * (u + self.u) - self.b * self.y;
+        self.u = u;
+        self.y = y;
+        y
+    }
 }
 
 // --- numerical primitives (compatible profile) ---
@@ -652,6 +733,8 @@ impl ExplicitBeams {
             neighbour_start: Vec::new(),
             neighbours: Vec::new(),
             contact_throttle: Vec::new(),
+            self_groups: Vec::new(),
+            damp_filters: Vec::new(),
         }
     }
 
@@ -808,98 +891,7 @@ impl ExplicitBeams {
             Vec::new()
         };
         for w in spawn_order {
-            let at = |s: &Self, i: u32| if yawed { local[i as usize] } else { s.nodes[i as usize].pos };
-            let place = |p: Vec3| if yawed { position + yaw_offset(p, yaw_degrees) } else { p };
-            // meshwheels2: the axle-to-own-ring spokes harden only past 0.15 L of
-            // stretch.
-            let spoke_long = if w.kind == "meshwheels2" { 0.15f32 } else { 0.0 };
-            // The axle runs toward +z: the node of lower z is A1, whichever the
-            // file names first (equal z keeps the file's order).
-            let (a1, a2) = if at(&s, w.node1).z > at(&s, w.node2).z {
-                (w.node2, w.node1)
-            } else {
-                (w.node1, w.node2)
-            };
-            let pa1 = at(&s, a1);
-            let pa2 = at(&s, a2);
-            let n = w.rays.max(1);
-            let axis = (pa2 - pa1).normalize();
-            let mut spoke = axis.cross(Vec3::X);
-            if spoke.length_squared() < 1e-12 {
-                spoke = axis.cross(Vec3::Y);
-            }
-            let mut spoke = spoke.normalize() * w.radius;
-            let theta = -360.0f32 / (2 * n) as f32;
-            let half = (theta * 0.5).to_radians();
-            let qw = half.cos();
-            let qv = half.sin() * axis;
-            let rotate = |u: Vec3| u + 2.0 * qw * qv.cross(u) + 2.0 * qv.cross(qv.cross(u));
-            let first = s.nodes.len() as u32;
-            s.tyres.push(Tyre {
-                axle: [a1, a2],
-                first,
-                count: 2 * n,
-                radius: w.radius,
-            });
-            let tyre = |pos: Vec3| Node {
-                pos,
-                vel: velocity,
-                force: Vec3::ZERO,
-                mass: w.mass / (2 * n) as f32,
-                friction: w.node_friction,
-                flags: NODE_CONTACTER | NODE_TYRE,
-            };
-            for _ in 0..n {
-                s.nodes.push(tyre(place(pa1 + spoke)));
-                spoke = rotate(spoke);
-                s.nodes.push(tyre(place(pa2 + spoke)));
-                spoke = rotate(spoke);
-            }
-            let outer = |i: u32| first + 2 * (i % n);
-            let inner = |i: u32| first + 2 * (i % n) + 1;
-            let group = signed_group(&w.beam);
-            let deform = w.beam.deform;
-            let strength = w.beam.strength;
-            let plastic = w.beam.plastic_coef;
-            let rigidity = w.rigidity.map(|p| {
-                let pp = at(&s, p);
-                (p, pp.distance_squared(pa1) < pp.distance_squared(pa2))
-            });
-            for i in 0..n {
-                let add = |s: &mut Self, a: u32, b: u32, kind: ExplicitKind, ty: ExplicitType, rim: bool| {
-                    let rest = s.nodes[a as usize].pos.distance(s.nodes[b as usize].pos);
-                    let (k, c) = if rim {
-                        (w.rim_spring, w.rim_damp)
-                    } else {
-                        (w.spring, w.damp)
-                    };
-                    let mut beam = Beam::new(a, b, kind, ty, k, c, rest, deform, strength, plastic);
-                    beam.group = group;
-                    if kind == ExplicitKind::LimitedSpring {
-                        beam.short_bound = 0.66;
-                        beam.long_bound = spoke_long;
-                        beam.limit_k = 9_000_000.0;
-                        beam.limit_c = 12_000.0;
-                    }
-                    s.beams.push(beam);
-                };
-                let (o, ii) = (outer(i), inner(i));
-                let lim = ExplicitKind::LimitedSpring;
-                let plain = ExplicitKind::Plain;
-                let def = ExplicitType::Deformable;
-                add(&mut s, a1, o, lim, def, false);
-                add(&mut s, a2, ii, lim, def, false);
-                add(&mut s, a2, o, plain, def, false);
-                add(&mut s, a1, ii, plain, def, false);
-                add(&mut s, o, ii, plain, def, true);
-                add(&mut s, o, outer(i + 1), plain, def, true);
-                add(&mut s, ii, inner(i + 1), plain, def, true);
-                add(&mut s, ii, outer(i + 1), plain, def, true);
-                if let Some((p, near_a1)) = rigidity {
-                    let end = if near_a1 { o } else { ii };
-                    add(&mut s, p, end, plain, ExplicitType::Virtual, false);
-                }
-            }
+            s.add_tyre(w, position, yaw_degrees, velocity, &local);
         }
         // Then the file's beams, shocks, shocks2, shocks3, commands and hydros, each
         // section in file order. Commands and hydros gate their break test on the
@@ -1027,6 +1019,129 @@ impl ExplicitBeams {
         s.add_aero(&file, airfoil);
         s.finish();
         Ok(s)
+    }
+
+    /// One `wheels` / `meshwheels` / `meshwheels2` tyre (its nodes after the
+    /// existing ones, then its beams), spawned at `position` turned by
+    /// `yaw_degrees` (`local`: the file's node positions, for a turned spawn).
+    fn add_tyre(
+        &mut self,
+        w: &crate::truck::TruckWheel,
+        position: Vec3,
+        yaw_degrees: f32,
+        velocity: Vec3,
+        local: &[Vec3],
+    ) {
+        let yawed = yaw_degrees != 0.0;
+        let at = |s: &Self, i: u32| {
+            if yawed {
+                local[i as usize]
+            } else {
+                s.nodes[i as usize].pos
+            }
+        };
+        let place = |p: Vec3| {
+            if yawed {
+                position + yaw_offset(p, yaw_degrees)
+            } else {
+                p
+            }
+        };
+        // meshwheels2: the axle-to-own-ring spokes harden only past 0.15 L of
+        // stretch.
+        let spoke_long = if w.kind == "meshwheels2" {
+            0.15f32
+        } else {
+            0.0
+        };
+        // The axle runs toward +z: the node of lower z is A1, whichever the
+        // file names first (equal z keeps the file's order).
+        let (a1, a2) = if at(self, w.node1).z > at(self, w.node2).z {
+            (w.node2, w.node1)
+        } else {
+            (w.node1, w.node2)
+        };
+        let pa1 = at(self, a1);
+        let pa2 = at(self, a2);
+        let n = w.rays.max(1);
+        let axis = (pa2 - pa1).normalize();
+        let mut spoke = axis.cross(Vec3::X);
+        if spoke.length_squared() < 1e-12 {
+            spoke = axis.cross(Vec3::Y);
+        }
+        let mut spoke = spoke.normalize() * w.radius;
+        let theta = -360.0f32 / (2 * n) as f32;
+        let half = (theta * 0.5).to_radians();
+        let qw = half.cos();
+        let qv = half.sin() * axis;
+        let rotate = |u: Vec3| u + 2.0 * qw * qv.cross(u) + 2.0 * qv.cross(qv.cross(u));
+        let first = self.nodes.len() as u32;
+        self.tyres.push(Tyre {
+            axle: [a1, a2],
+            first,
+            count: 2 * n,
+            radius: w.radius,
+        });
+        let tyre = |pos: Vec3| Node {
+            pos,
+            vel: velocity,
+            force: Vec3::ZERO,
+            mass: w.mass / (2 * n) as f32,
+            friction: w.node_friction,
+            flags: NODE_CONTACTER | NODE_TYRE,
+        };
+        for _ in 0..n {
+            self.nodes.push(tyre(place(pa1 + spoke)));
+            spoke = rotate(spoke);
+            self.nodes.push(tyre(place(pa2 + spoke)));
+            spoke = rotate(spoke);
+        }
+        let outer = |i: u32| first + 2 * (i % n);
+        let inner = |i: u32| first + 2 * (i % n) + 1;
+        let group = signed_group(&w.beam);
+        let deform = w.beam.deform;
+        let strength = w.beam.strength;
+        let plastic = w.beam.plastic_coef;
+        let rigidity = w.rigidity.map(|p| {
+            let pp = at(self, p);
+            (p, pp.distance_squared(pa1) < pp.distance_squared(pa2))
+        });
+        for i in 0..n {
+            let add =
+                |s: &mut Self, a: u32, b: u32, kind: ExplicitKind, ty: ExplicitType, rim: bool| {
+                    let rest = s.nodes[a as usize].pos.distance(s.nodes[b as usize].pos);
+                    let (k, c) = if rim {
+                        (w.rim_spring, w.rim_damp)
+                    } else {
+                        (w.spring, w.damp)
+                    };
+                    let mut beam = Beam::new(a, b, kind, ty, k, c, rest, deform, strength, plastic);
+                    beam.group = group;
+                    if kind == ExplicitKind::LimitedSpring {
+                        beam.short_bound = 0.66;
+                        beam.long_bound = spoke_long;
+                        beam.limit_k = 9_000_000.0;
+                        beam.limit_c = 12_000.0;
+                    }
+                    s.beams.push(beam);
+                };
+            let (o, ii) = (outer(i), inner(i));
+            let lim = ExplicitKind::LimitedSpring;
+            let plain = ExplicitKind::Plain;
+            let def = ExplicitType::Deformable;
+            add(self, a1, o, lim, def, false);
+            add(self, a2, ii, lim, def, false);
+            add(self, a2, o, plain, def, false);
+            add(self, a1, ii, plain, def, false);
+            add(self, o, ii, plain, def, true);
+            add(self, o, outer(i + 1), plain, def, true);
+            add(self, ii, inner(i + 1), plain, def, true);
+            add(self, ii, outer(i + 1), plain, def, true);
+            if let Some((p, near_a1)) = rigidity {
+                let end = if near_a1 { o } else { ii };
+                add(self, p, end, plain, ExplicitType::Virtual, false);
+            }
+        }
     }
 
     /// Slide nodes and their rails, after every beam (spec §3.2): each rail pair is
@@ -1232,6 +1347,183 @@ impl ExplicitBeams {
         Ok((sim, text, warnings))
     }
 
+    /// Spawn a BeamNG JBeam vehicle (`files`: name and text of each `.jbeam`,
+    /// `config` an optional `.pc`) in JBeam mode ([`Self::from_desc_jbeam`]), with
+    /// [`crate::truck_export::TyreDefaults::for_vehicle`] for its wheels. Also
+    /// returns the loader's and the spawn's warnings (what is not simulated).
+    pub fn from_jbeam_native(
+        files: &[(&str, &str)],
+        config: Option<&str>,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+    ) -> Result<(Self, Vec<String>), String> {
+        let desc = crate::jbeam::load_jbeam(files, config)?;
+        let tyres = crate::truck_export::TyreDefaults::for_vehicle(&desc);
+        Self::from_desc_jbeam(&desc, tyres, position, velocity, settings)
+    }
+
+    /// Spawn a JBeam-loaded desc in JBeam mode (`engine/docs/jbeam-semantics-spec.md`):
+    /// the desc's nodes and beams directly, in desc order, with BeamNG's rules where
+    /// they differ from the `.truck` path's ([`ExplicitKind::JbeamPlain`],
+    /// [`ExplicitKind::JbeamSupport`], [`ExplicitKind::JbeamBounded`]): passive
+    /// break groups, precompression on every beam, supports that push only and
+    /// break by length, bounded beams with their bound zone and limit damping,
+    /// deform limits, no break exception, and self-collision for the nodes that
+    /// ask for it. Wheels become the `.truck` path's soft tyres (`tyres`), after
+    /// the desc's nodes and beams. Fails on more than [`MAX_COLLISION_TRIANGLES`]
+    /// collision triangles. Returns the desc's warnings and what this spawn does
+    /// not simulate.
+    pub fn from_desc_jbeam(
+        desc: &SoftVehicleDesc,
+        tyres: crate::truck_export::TyreDefaults,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+    ) -> Result<(Self, Vec<String>), String> {
+        let collision_tris = desc.triangles.iter().filter(|t| t.collision).count();
+        if collision_tris > MAX_COLLISION_TRIANGLES {
+            return Err(format!(
+                "{collision_tris} collision triangles: at most {MAX_COLLISION_TRIANGLES} per vehicle"
+            ));
+        }
+        let mut warnings = desc.warnings.clone();
+        // Exact beam lengths: the fast inverse square root is a Rigs of Rods
+        // compatibility rule (its 0.2 % error strains stiff beams at rest).
+        let settings = ExplicitBeamsSettings {
+            fast_inv_sqrt: false,
+            ..settings
+        };
+        let mut s = Self::spawn_nodes(desc, position, 0.0, velocity, settings);
+        for b in &desc.beams {
+            s.push_jbeam_beam(b);
+        }
+        for cp in &desc.couplers {
+            let (k, c) = coupler_rates(s.nodes[cp.a as usize].mass, s.nodes[cp.b as usize].mass);
+            let mut beam = Beam::new(
+                cp.a,
+                cp.b,
+                ExplicitKind::JbeamCoupler,
+                ExplicitType::Actuator,
+                k,
+                c,
+                0.0,
+                f32::INFINITY,
+                cp.strength,
+                0.0,
+            );
+            beam.group = if cp.break_group_passive {
+                -(cp.break_group as i32)
+            } else {
+                cp.break_group as i32
+            };
+            s.beams.push(beam);
+        }
+        if !desc.wheels.is_empty() {
+            // The `.truck` path's tyres, from the same text it writes.
+            let (text, _) = crate::truck_export::desc_to_truck(desc, tyres);
+            let file = parse_truck_config(&text, None);
+            for w in &file.wheels {
+                s.add_tyre(w, position, 0.0, velocity, &[]);
+            }
+            warnings.push(format!(
+                "{} pressure wheels simulated as {}-ray soft tyres ({} kg, {} N/m, {} N·s/m)",
+                desc.wheels.len(),
+                tyres.rays,
+                tyres.mass,
+                tyres.spring,
+                tyres.damp
+            ));
+        }
+        for (n, what) in [
+            (desc.elements.len(), "LBEAM and torsion bar elements"),
+            (desc.rails.len(), "rails"),
+            (desc.slidenodes.len(), "slide nodes"),
+            (desc.rigid_parts.len(), "rigid parts"),
+        ] {
+            if n > 0 {
+                warnings.push(format!(
+                    "{n} {what} are not simulated by the explicit solver"
+                ));
+            }
+        }
+        s.collision_range = if desc.collision_range > 0.0 {
+            desc.collision_range
+        } else {
+            DEFAULT_COLLISION_RANGE
+        };
+        s.add_triangles(desc);
+        s.finish();
+        // Self-collision: the nodes with `selfCollision` (and collision at all).
+        s.candidates = (0..desc.nodes.len() as u32)
+            .filter(|&i| {
+                let n = &desc.nodes[i as usize];
+                n.self_collision && n.collision && !n.fixed
+            })
+            .collect();
+        s.grid_cell = s.default_grid_cell();
+        if !desc.node_groups.is_empty() {
+            s.self_groups = (0..s.nodes.len())
+                .map(|i| desc.nodes.get(i).map_or(0, |n| n.self_group))
+                .collect();
+        }
+        Ok((s, warnings))
+    }
+
+    /// A desc beam in JBeam mode (spec §2–5).
+    fn push_jbeam_beam(&mut self, b: &crate::desc::SoftBeam) {
+        let jb = b.jbeam.unwrap_or(crate::desc::JbeamBeam {
+            deform: b.deform,
+            precompression: b.precompression,
+            ..Default::default()
+        });
+        let spawn = self.nodes[b.a as usize]
+            .pos
+            .distance(self.nodes[b.b as usize].pos);
+        let rest = spawn * jb.precompression;
+        let (kind, ty) = match b.kind {
+            BeamKind::Bounded => (ExplicitKind::JbeamBounded, ExplicitType::Actuator),
+            BeamKind::Support => (ExplicitKind::JbeamSupport, ExplicitType::Deformable),
+            _ => (ExplicitKind::JbeamPlain, ExplicitType::Deformable),
+        };
+        let mut beam = Beam::new(
+            b.a, b.b, kind, ty, b.spring, b.damp, rest, jb.deform, b.strength, 0.0,
+        );
+        beam.group = signed_group(b);
+        if jb.damp_cutoff_hz > 0.0 {
+            self.damp_filters.push(DampFilter::new(jb.damp_cutoff_hz));
+            beam.shock = self.damp_filters.len() as u32;
+        }
+        match kind {
+            ExplicitKind::JbeamBounded => {
+                beam.limit_k = jb.limit_spring;
+                beam.limit_c = jb.limit_damp;
+                beam.short_bound = jb.short_bound;
+                beam.long_bound = jb.long_bound;
+                beam.plastic = jb.bound_zone;
+                beam.tc = jb.damp_velocity_split;
+                beam.tt = jb.damp_fast;
+            }
+            _ => {
+                // The yield and break tests start at the lower of deform and strength.
+                beam.gate = jb.deform.min(b.strength);
+                beam.limit_k = b.deform_limit_stress;
+                // Rest-length limits and the support's break length, in metres.
+                beam.short_bound = if jb.deform_limit.is_finite() {
+                    (1.0 - jb.deform_limit) * rest
+                } else {
+                    0.0
+                };
+                beam.long_bound = if kind == ExplicitKind::JbeamSupport {
+                    (1.0 + jb.long_bound) * spawn
+                } else {
+                    (1.0 + jb.deform_limit_expansion) * rest
+                };
+            }
+        }
+        self.beams.push(beam);
+    }
+
     /// Spawn a desc (no tyres): its nodes at `position` moving at `velocity`, its
     /// beams in the desc's order, contacters as the desc marks them.
     pub fn new(
@@ -1409,6 +1701,22 @@ impl ExplicitBeams {
             .collect();
         extents.sort_by(f32::total_cmp);
         (extents[extents.len() / 2] + 2.0 * self.collision_range).max(0.05)
+    }
+
+    /// Collision triangle `t`'s self-collision group: its nodes' group when all
+    /// three share one (and the vehicle has [`Self::self_groups`]), else 0.
+    pub fn triangle_self_group(&self, t: usize) -> u32 {
+        if self.self_groups.is_empty() {
+            return 0;
+        }
+        let [a, b, c] = self.triangles[t]
+            .nodes
+            .map(|n| self.self_groups[n as usize]);
+        if a == b && b == c {
+            a
+        } else {
+            0
+        }
     }
 
     /// World positions of the nodes.
@@ -1676,9 +1984,30 @@ impl ExplicitBeams {
             let mut beam = self.beams[j];
             let na = self.nodes[beam.a as usize];
             let nb = self.nodes[beam.b as usize];
+            if beam.kind == ExplicitKind::JbeamCoupler {
+                let push = coupler_force(&mut beam, &na, &nb);
+                self.beams[j] = beam;
+                if beam.broken && beam.group > 0 {
+                    let g = beam.group;
+                    for other in &mut self.beams {
+                        if other.group.abs() == g {
+                            other.broken = true;
+                        }
+                    }
+                }
+                self.nodes[beam.a as usize].force += push;
+                self.nodes[beam.b as usize].force -= push;
+                continue;
+            }
             let out = if beam.kind == ExplicitKind::Shock2 {
                 let sh = self.shocks2[beam.shock as usize];
                 shock2_force(&mut beam, &sh, &na, &nb, self.settings.fast_inv_sqrt)
+            } else if beam.kind.is_jbeam() {
+                let filter = match beam.shock {
+                    0 => None,
+                    i => Some(&mut self.damp_filters[i as usize - 1]),
+                };
+                jbeam_force_filtered(&mut beam, &na, &nb, self.settings.fast_inv_sqrt, filter)
             } else {
                 beam_force(&mut beam, &na, &nb, self.settings.fast_inv_sqrt)
             };
@@ -1690,11 +2019,13 @@ impl ExplicitBeams {
                 }
             }
             let mut f = out.force;
-            let mut cascade = false;
+            // A JBeam support stretched past its break length breaks its group too.
+            let mut cascade = beam.broken && beam.kind.is_jbeam() && beam.group > 0;
             if out.check_break {
-                let saved = [beam.a, beam.b].iter().any(|&e| {
-                    self.nodes[e as usize].has(NODE_ON_TRIANGLE) && self.live_plain(e) < 3
-                });
+                let saved = !beam.kind.is_jbeam()
+                    && [beam.a, beam.b].iter().any(|&e| {
+                        self.nodes[e as usize].has(NODE_ON_TRIANGLE) && self.live_plain(e) < 3
+                    });
                 if saved {
                     beam.strength = 2.0 * beam.gate;
                 } else {
@@ -1739,6 +2070,7 @@ impl ExplicitBeams {
                 tri.idle = 0;
             }
             let [i0, i1, i2] = tri.nodes;
+            let tri_group = self.triangle_self_group(t);
             let world = |i: u32| self.origin + self.nodes[i as usize].pos;
             let (p0, p1, p2) = (world(i0), world(i1), world(i2));
             let frame = TriFrame::new(p0, p1, p2);
@@ -1757,6 +2089,9 @@ impl ExplicitBeams {
                 let k = if self.grid_cell > 0.0 { list[idx] as usize } else { idx };
                 let hn = self.candidates[k];
                 if hn == i0 || hn == i1 || hn == i2 {
+                    continue;
+                }
+                if tri_group != 0 && self.self_groups[hn as usize] == tri_group {
                     continue;
                 }
                 let p = self.origin + self.nodes[hn as usize].pos;
@@ -1980,6 +2315,9 @@ pub struct BeamOut {
 /// marked broken). The break test that needs the node graph is left to the caller
 /// (`check_break`).
 pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut {
+    if beam.kind.is_jbeam() {
+        return jbeam_force(beam, na, nb, fast);
+    }
     let d = na.pos - nb.pos;
     let q = d.dot(d);
     let inv = if fast {
@@ -2032,7 +2370,14 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         }
         // Shock2 beams take `shock2_force`; here they act as plain ones. Triggers
         // have k = c = 0.
-        ExplicitKind::Plain | ExplicitKind::Shock2 | ExplicitKind::Trigger => {}
+        // JBeam-mode kinds take `jbeam_force` (never here).
+        ExplicitKind::Plain
+        | ExplicitKind::Shock2
+        | ExplicitKind::Trigger
+        | ExplicitKind::JbeamPlain
+        | ExplicitKind::JbeamSupport
+        | ExplicitKind::JbeamBounded
+        | ExplicitKind::JbeamCoupler => {}
     }
     let mut f = -k * e - c * u;
     beam.force = f;
@@ -2074,6 +2419,163 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         e,
         force: f,
         check_break,
+    }
+}
+
+/// A JBeam-mode beam's force ([`ExplicitKind::JbeamPlain`], `JbeamSupport`,
+/// `JbeamBounded`; `engine/docs/jbeam-semantics-spec.md` §3–5). A support stretched
+/// past its break length is marked broken with no force (the caller breaks its
+/// group); the break test past the strength is left to the caller (`check_break`),
+/// which has no exception for these kinds.
+pub fn jbeam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut {
+    jbeam_force_filtered(beam, na, nb, fast, None)
+}
+
+/// [`jbeam_force`] with the beam's damping filter (`dampCutoffHz`): the damping
+/// takes the filtered extension rate.
+pub fn jbeam_force_filtered(
+    beam: &mut Beam,
+    na: &Node,
+    nb: &Node,
+    fast: bool,
+    filter: Option<&mut DampFilter>,
+) -> BeamOut {
+    let d = na.pos - nb.pos;
+    let q = d.dot(d);
+    let inv = if fast {
+        fast_inv_sqrt(q)
+    } else {
+        1.0 / q.sqrt()
+    };
+    let len = q * inv;
+    let e = len - beam.rest;
+    let u = (na.vel - nb.vel).dot(d) * inv;
+    let u = match filter {
+        Some(f) => f.step(u),
+        None => u,
+    };
+    let mut k = beam.k;
+    let c = beam.c;
+    // The damping force (positive along u).
+    let mut damp = c * u;
+    match beam.kind {
+        ExplicitKind::JbeamBounded => {
+            // Slow damping up to the split, the fast rate past it (continuous).
+            let split = beam.tc;
+            let au = u.abs();
+            if au > split {
+                damp = (c * split + beam.tt * (au - split)).copysign(u);
+            }
+            let long = beam.long_bound * beam.rest;
+            let short = beam.short_bound * beam.rest;
+            let o = if e > long {
+                e - long
+            } else if e < -short {
+                -e - short
+            } else {
+                0.0
+            };
+            if o > 0.0 {
+                let zone = beam.plastic;
+                let s = if zone > 0.0 { (o / zone).min(1.0) } else { 1.0 };
+                k += (beam.limit_k - k) * s;
+                damp += (beam.limit_c * u - damp) * s;
+            }
+        }
+        ExplicitKind::JbeamSupport => {
+            if e > 0.0 {
+                if len > beam.long_bound {
+                    beam.broken = true;
+                    beam.force = 0.0;
+                    return BeamOut {
+                        d,
+                        inv,
+                        e,
+                        force: 0.0,
+                        check_break: false,
+                    };
+                }
+                k = 0.0;
+                damp = 0.0;
+            }
+        }
+        _ => {}
+    }
+    let mut f = -k * e - damp;
+    beam.force = f;
+    let mut tau = f.abs();
+    if tau > beam.gate && beam.ty == ExplicitType::Deformable && k != 0.0 {
+        if f > beam.tc && e < 0.0 {
+            let delta = e + (beam.tc / k) * (1.0 - beam.plastic);
+            let old = beam.rest;
+            let floor = beam.short_bound.max(MIN_REST);
+            let free = beam.rest + delta;
+            if free < floor {
+                // At the compression limit: elastic about the limit length.
+                beam.rest = floor.min(old);
+                f = -k * (len - beam.rest) - damp;
+            } else {
+                beam.rest = free;
+                f -= (f - beam.tc) / 2.0;
+            }
+            tau = f.abs();
+            if beam.rest < old {
+                beam.tc = (beam.tc * old / beam.rest).min(beam.limit_k.max(beam.tc));
+                beam.gate = beam.tc.min(beam.tt).min(beam.strength);
+            }
+        } else if f < -beam.tt && e > 0.0 {
+            let delta = e - (beam.tt / k) * (1.0 - beam.plastic);
+            let old = beam.rest;
+            let ceiling = beam.long_bound;
+            let free = beam.rest + delta;
+            if free > ceiling {
+                // At the expansion limit: elastic about the limit length.
+                beam.rest = ceiling.max(old);
+                f = -k * (len - beam.rest) - damp;
+            } else {
+                beam.rest = free;
+                f -= (f + beam.tt) / 2.0;
+            }
+            tau = f.abs();
+            if beam.rest > old {
+                beam.tt = (beam.tt * beam.rest / old).min(beam.limit_k.max(beam.tt));
+                beam.gate = beam.tc.min(beam.tt).min(beam.strength);
+                beam.strength -= (beam.rest - old) * k;
+            }
+        }
+    }
+    BeamOut {
+        d,
+        inv,
+        e,
+        force: f,
+        check_break: tau > beam.strength,
+    }
+}
+
+/// A coupler's stiffness and damping for node masses `ma`, `mb`
+/// (`engine/docs/jbeam-semantics-spec.md` §7; BeamNG gives none, the nodes are
+/// "considered one"): the stiffest pair spring that stays well inside the fixed
+/// step's stability limit, ω·[`STEP`] = 0.4 on the pair's reduced mass μ, so
+/// k = 0.16·μ/STEP², with damping at a damping ratio of 0.5, c = √(k·μ).
+pub fn coupler_rates(ma: f32, mb: f32) -> (f32, f32) {
+    let mu = ma * mb / (ma + mb);
+    let k = 0.16 * mu / (STEP * STEP);
+    (k, (k * mu).sqrt())
+}
+
+/// A coupler's force on node a (b takes the opposite): −k·(a − b) − c·(v_a − v_b);
+/// when its magnitude passes the strength the coupler breaks (`broken`, no force).
+/// The magnitude is kept as the last force.
+pub fn coupler_force(beam: &mut Beam, na: &Node, nb: &Node) -> Vec3 {
+    let f = -beam.k * (na.pos - nb.pos) - beam.c * (na.vel - nb.vel);
+    let m = f.length();
+    beam.force = m;
+    if m > beam.strength {
+        beam.broken = true;
+        Vec3::ZERO
+    } else {
+        f
     }
 }
 
