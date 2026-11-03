@@ -31,6 +31,12 @@ pub const PARTICLE_CCD: bool = false;
 /// 23,000, so room for it and for free play after either take. A run that crushes more
 /// fails with an error.
 pub const CRUSH_BUDGET: u32 = 49152;
+/// Chunks one step may crush: the most the engine takes (its event table is under 4096; a
+/// step past it fails with an error). The default 256 is too few for a wrecked house: a
+/// pile of wreck coming down on weakened members crushes a burst of chunks at once (a
+/// player's sustained fire into the timber yard reached 183 in one step, and past 256).
+/// Each step reads back the table (96 bytes a slot, ~390 KB).
+pub const CRUSH_PER_STEP: u32 = 4095;
 
 /// Crushing for the wood: the stress import's `timber` (structural softwood, the stress
 /// oracle's preset). Iron and concrete are not crushed.
@@ -53,7 +59,7 @@ pub fn crush(budget: u32) -> Crush {
             budget,
             continuous: PARTICLE_CCD,
         },
-        ..Crush::default()
+        max_per_step: CRUSH_PER_STEP,
     }
 }
 
