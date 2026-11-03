@@ -14,7 +14,8 @@
 use crate::{
     EXPLICIT_BEAMS_AERO_WGSL, EXPLICIT_BEAMS_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
     EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_WGSL,
-    EXPLICIT_BEAMS_CONTACT_WIDE_WGSL, EXPLICIT_BEAMS_VV_PASSES, EXPLICIT_BEAMS_WGSL,
+    EXPLICIT_BEAMS_CONTACT_WIDE_WGSL, EXPLICIT_BEAMS_SOLO_AERO_WGSL, EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL,
+    EXPLICIT_BEAMS_SOLO_WGSL, EXPLICIT_BEAMS_SOLO_WIDE_WGSL, EXPLICIT_BEAMS_VV_PASSES, EXPLICIT_BEAMS_WGSL,
     EXPLICIT_BEAMS_WIDE_PASSES, EXPLICIT_BEAMS_WIDE_WGSL,
 };
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind};
@@ -85,6 +86,8 @@ struct Contact {
     /// The plan passes (bounds, pairs, group) and the contact groups' entry.
     plan: [wgpu::ComputePipeline; 3],
     groups: wgpu::ComputePipeline,
+    /// The solo vehicles' frame (`EB_VV_SOLO`).
+    solo: wgpu::ComputePipeline,
     plan_group: wgpu::BindGroup,
     contact_group: wgpu::BindGroup,
     /// Indirect arguments: the solo vehicles (word 0) and the groups (word 4).
@@ -102,6 +105,8 @@ struct Contact {
     replan: std::sync::atomic::AtomicBool,
     /// This frame runs the plan passes.
     planning: bool,
+    /// No plan has run since contact (re)started.
+    fresh: bool,
     /// The contact throttles' first record in gMisc.
     tri_base: u32,
 }
@@ -160,7 +165,7 @@ impl Contact {
     fn new(
         device: &wgpu::Device,
         buffers: &[&wgpu::Buffer; 9],
-        contact_wgsl: &str,
+        (contact_wgsl, solo_wgsl): (&str, &str),
         acc: &wgpu::Buffer,
         status_at: u64,
         tri_base: u32,
@@ -168,7 +173,9 @@ impl Contact {
         let args_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-vv-args"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
@@ -243,10 +250,12 @@ impl Contact {
         let (contact_layout, contact_group) = layout_with(false);
         let plan = EXPLICIT_BEAMS_VV_PASSES.map(|(entry, wgsl)| make(entry, wgsl, &plan_layout));
         let groups = make("explicit_beams_contact", contact_wgsl, &contact_layout);
+        let solo = make("explicit_beams_frame", solo_wgsl, &contact_layout);
         Self {
             on: true,
             plan,
             groups,
+            solo,
             plan_group,
             contact_group,
             args: args_buffer,
@@ -257,6 +266,7 @@ impl Contact {
             left: 0,
             replan: Default::default(),
             planning: false,
+            fresh: true,
             tri_base,
 
         }
@@ -1054,10 +1064,13 @@ impl ExplicitBeamsGpu {
             device,
             &buffers,
             match (aero, vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS)) {
-                (false, false) => EXPLICIT_BEAMS_CONTACT_WGSL,
-                (false, true) => EXPLICIT_BEAMS_CONTACT_WIDE_WGSL,
-                (true, false) => EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
-                (true, true) => EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
+                (false, false) => (EXPLICIT_BEAMS_CONTACT_WGSL, EXPLICIT_BEAMS_SOLO_WGSL),
+                (false, true) => (EXPLICIT_BEAMS_CONTACT_WIDE_WGSL, EXPLICIT_BEAMS_SOLO_WIDE_WGSL),
+                (true, false) => (EXPLICIT_BEAMS_CONTACT_AERO_WGSL, EXPLICIT_BEAMS_SOLO_AERO_WGSL),
+                (true, true) => (
+                    EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
+                    EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL,
+                ),
             },
             &acc,
             u64::from(vv_acc + 12 * nv as u32) * 4,
@@ -1092,6 +1105,9 @@ impl ExplicitBeamsGpu {
     /// runs when the fleet has more than one vehicle. Off, every vehicle steps
     /// alone (the one-dispatch frame).
     pub fn set_vehicle_contact(&mut self, on: bool) {
+        if on && !self.contact.on {
+            self.contact.fresh = true;
+        }
         self.contact.on = on;
         self.contact.left = 0;
     }
@@ -1128,6 +1144,16 @@ impl ExplicitBeamsGpu {
         let w: &[i32] = bytemuck::cast_slice(&raw);
         let at = (self.contact.status_at / 4) as usize;
         contact_error(&w[at + 4..at + 8])
+    }
+
+    /// The contact groups of the current plan (blocking read; 0 when contact is
+    /// not active).
+    pub fn contact_groups(&self) -> u32 {
+        if !self.contact_active() {
+            return 0;
+        }
+        let raw = self.read(&self.contact.args);
+        bytemuck::cast_slice::<u8, u32>(&raw)[4]
     }
 
     /// Per vehicle, its triangles' contact throttles (cwait, cidle).
@@ -1245,6 +1271,105 @@ impl ExplicitBeamsGpu {
             out[kind].1 += ticks[2 * i + 1].saturating_sub(ticks[2 * i]) as f64 * period;
         }
         out
+    }
+
+    /// One frame with each dispatch in its own timed pass (a diagnostic: the passes
+    /// add their own cost): GPU milliseconds per dispatch, labelled. Contact active:
+    /// the plan passes (on planning frames), the solo frame, the contact groups;
+    /// otherwise the one frame dispatch. Empty without timestamp queries.
+    pub fn profile_frame(&mut self, steps: u32) -> Vec<(&'static str, f64)> {
+        if !self
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            || self.spans.is_empty()
+        {
+            return Vec::new();
+        }
+        self.check_contact_status();
+        self.write_params(steps);
+        let nv = self.spans.len() as u32;
+        let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("explicit-beams-profile"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 12,
+        });
+        let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-profile"),
+            size: 12 * 8,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let mut labels: Vec<&'static str> = Vec::new();
+        {
+            let mut run = |label: &'static str,
+                           f: &mut dyn FnMut(&mut wgpu::ComputePass)| {
+                let k = 2 * labels.len() as u32;
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(label),
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: &set,
+                        beginning_of_pass_write_index: Some(k),
+                        end_of_pass_write_index: Some(k + 1),
+                    }),
+                });
+                f(&mut pass);
+                labels.push(label);
+            };
+            if self.contact_active() {
+                let c = &self.contact;
+                if c.planning {
+                    run("vv_bounds", &mut |p| {
+                        p.set_bind_group(0, &c.plan_group, &[]);
+                        p.set_pipeline(&c.plan[0]);
+                        p.dispatch_workgroups(nv, 1, 1);
+                    });
+                    if nv as usize > FUSED_PAIRS_MAX {
+                        run("vv_pairs", &mut |p| {
+                            p.set_bind_group(0, &c.plan_group, &[]);
+                            p.set_pipeline(&c.plan[1]);
+                            p.dispatch_workgroups(nv.div_ceil(256), 1, 1);
+                        });
+                    }
+                    run("vv_group", &mut |p| {
+                        p.set_bind_group(0, &c.plan_group, &[]);
+                        p.set_pipeline(&c.plan[2]);
+                        p.dispatch_workgroups(1, 1, 1);
+                    });
+                }
+                run("solo frame", &mut |p| {
+                    p.set_pipeline(&c.solo);
+                    p.set_bind_group(0, &c.contact_group, &[]);
+                    p.dispatch_workgroups(nv, 1, 1);
+                });
+                run("contact groups", &mut |p| {
+                    p.set_pipeline(&c.groups);
+                    p.set_bind_group(0, &c.contact_group, &[]);
+                    p.dispatch_workgroups_indirect(&c.args, 16);
+                });
+            } else {
+                let (pipeline, group) = (&self.pipeline, &self.group);
+                run("frame", &mut |p| {
+                    p.set_pipeline(pipeline);
+                    p.set_bind_group(0, group, &[]);
+                    p.dispatch_workgroups(nv, 1, 1);
+                });
+            }
+        }
+        let n = 2 * labels.len() as u32;
+        enc.resolve_query_set(&set, 0..n, &resolve, 0);
+        self.queue.submit([enc.finish()]);
+        let period = f64::from(self.queue.get_timestamp_period()) * 1e-6;
+        let raw = self.read(&resolve);
+        let ticks: &[u64] = bytemuck::cast_slice(&raw);
+        labels
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (*l, ticks[2 * i + 1].saturating_sub(ticks[2 * i]) as f64 * period))
+            .collect()
     }
 
     /// Record the GPU time of each of the next `frames` frames (read with
@@ -1423,11 +1548,10 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(&c.plan[2]);
                 pass.dispatch_workgroups(1, 1, 1);
             }
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.group, &[]);
-            pass.dispatch_workgroups_indirect(&c.args, 0);
-            pass.set_pipeline(&c.groups);
+            pass.set_pipeline(&c.solo);
             pass.set_bind_group(0, &c.contact_group, &[]);
+            pass.dispatch_workgroups(nv, 1, 1);
+            pass.set_pipeline(&c.groups);
             pass.dispatch_workgroups_indirect(&c.args, 16);
         } else if let Some(w) = self.wide.as_ref().filter(|w| w.enabled) {
             let plan = self.wide_plan(steps);
@@ -1483,6 +1607,7 @@ impl ExplicitBeamsGpu {
         if read {
             self.contact.map_status();
         }
+
     }
 
     /// Fail on a contact error a finished frame reported ([`Self::contact_status`]),
@@ -1514,8 +1639,14 @@ impl ExplicitBeamsGpu {
                 self.words[W_VV_PLAN_STEPS] = budget;
                 self.contact.left = budget;
                 self.contact.planning = true;
+                // The first plan since contact (re)started has no earlier bounds to
+                // check the positions against.
+                if self.contact.fresh {
+                    self.words[W_VV_ON] |= 4;
+                    self.contact.fresh = false;
+                }
             }
-            self.contact.left -= steps;
+            self.contact.left = self.contact.left.saturating_sub(steps);
         }
         let mut bytes = vec![0u8; (PARAM_STRIDE * u64::from(steps + 1)) as usize];
         for k in 0..=steps {

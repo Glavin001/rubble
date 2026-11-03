@@ -338,48 +338,55 @@ its spawned positions). The velocity is in world axes.
 On by default for a fleet of two or more vehicles (`set_vehicle_contact(false)`:
 the one-dispatch frame above, unchanged). A frame is then, in one compute pass:
 
-1. `explicit_beams_vv_bounds` (a workgroup per vehicle): the box of its node world
-   positions and its fastest node's speed; its *frame bounds*, the box grown by
-   2·(fastest speed)·(planned time) + a margin (`set_contact_margin`, default 1 m),
-   where a plan covers the next frames of at least 34 steps (every frame at 60 fps,
-   every other frame at 120; a new plan when a frame needs more, or after
-   `set_velocity`); steps 1–2 run only on planning frames;
-   and its *padded frame box*, the bounds grown by 0.05 m; the padded box into a
-   hashed vehicle grid (a box over more than 27 cells, or a full bucket, goes on a
-   list tested against every vehicle).
-2. `explicit_beams_vv_group` (one workgroup; with more than 2048 vehicles the pair
-   search is its own pass, `explicit_beams_vv_pairs`, a thread per vehicle): the
-   pairs of overlapping padded frame boxes, their connected components (label
-   propagation with pointer jumping), the solo list, each group's members, and the
-   indirect dispatch arguments. With no pair it returns at once (all solo).
-3. `explicit_beams_frame`, indirect over the solo list: the frame exactly as above,
-   plus a check that every node stays inside its frame bounds every step.
+1. `explicit_beams_vv_bounds` (a workgroup per vehicle; planning frames only): the
+   box of its node world positions (checked against the last plan's frame bounds)
+   and per axis the extreme node velocities; its *frame bounds*, each face of the
+   box moved out by 2·(the fastest node velocity that way)·(planned time) + a
+   margin (`set_contact_margin`, default 1 m), where a plan covers the next frames
+   of at least 34 steps (every frame at 60 fps, every other frame at 120; a new
+   plan when a frame needs more steps than are left, after `set_velocity`, or when
+   contact or the margin changes); its *padded frame box*, the bounds grown by
+   0.05 m, into a hashed vehicle grid (a box over more than 27 cells, or a full
+   bucket, goes on a list tested against every vehicle).
+2. `explicit_beams_vv_group` (one workgroup, planning frames only; with more than
+   2048 vehicles the pair search is its own pass, `explicit_beams_vv_pairs`, a
+   thread per vehicle): the pairs of overlapping padded frame boxes, their
+   connected components (label propagation with pointer jumping), each vehicle's
+   grouped flag, each group's members, and the groups' indirect dispatch
+   arguments. With no pair it returns at once (all solo).
+3. The solo frame, a workgroup per vehicle: `explicit_beams_frame` compiled with
+   `EB_VV_SOLO` (a separate module, so the plain frame's code is untouched): a
+   grouped vehicle's workgroup returns at once (a uniform decision through
+   workgroup memory); every other runs the frame, checking at the start of each
+   node update that the position the last step left is inside its frame bounds,
+   and the last step's positions at the frame's end.
 4. `explicit_beams_contact`, indirect, one workgroup per group: the members sorted
    by vehicle index; each member's frame start (wing check, rebase); then per step
    each member's step (a copy of the frame's step, every accumulator read, member
-   by member with the whole workgroup) followed by the contact pass; then each
-   member's frame end.
+   by member with the whole workgroup; its node phase also adds the member's step
+   box into fixed-point min/max keys and checks it against the frame bounds)
+   followed by the contact pass; then each member's frame end.
 
 Why the solo vehicles need no contact pass: two vehicles whose padded frame boxes do
 not overlap, each with every node inside its frame bounds at every step, have
 step boxes that cannot overlap, so they are never partners. A node leaving its
-frame bounds (a node accelerated past the bound within the frame) is reported:
-the host reads a status word every 16 frames without waiting and panics
-("vehicle N left its frame bounds … raise set_contact_margin"); `contact_status()`
-reads it at once. The margin trades grouping (time) for headroom, never results.
+frame bounds (a node accelerated past the bound) is reported: the host reads a
+status word every 16 frames without waiting and panics ("vehicle N left its frame
+bounds … raise set_contact_margin"); `contact_status()` reads it at once. The
+margin trades grouping (time) for headroom, never results.
 
-The contact pass of a group, per step: each member's step box (fixed-point min/max
-keys of `origin + relative`; the members' boxes are also checked against their
-frame bounds); the members' contact points counted into the 1024 hashed cells of a
-grid (cell: the largest median triangle extent + 2r at upload), scanned, scattered
-into a run; then for each owner **in vehicle order**, with barriers between
-owners: the partner scan over the other members in parallel (box overlap; a fast
-approach sets both vehicles' contact throttle waits to 0 at once and marks their
-self-collision throttles for a reset, applied right after the next throttle update,
-which the GPU makes at the next node pass); the throttle step of the owner's
-triangles (only when its partners offer points); the tested triangles against the
-run cells their padded boxes cover, `GRID_SUBS` lanes per triangle; the throttle
-update (a hit → 0, no candidate → +1).
+The contact pass of a group, per step (the members' boxes are already in the keys),
+for each owner **in vehicle order**, three barriers each: (S) the partner scan
+over the other members in parallel (box overlap; a fast approach sets both
+vehicles' contact throttle waits to 0 and marks their self-collision throttles for
+a reset, applied right after the next throttle update, which the GPU makes at the
+next node pass), with the previous owner's throttle updates; (P) the contact
+throttle resets, the owner's throttle step (only when its partners offer points),
+listing its tested triangles whose box grown by the range meets a partner's box
+(the others have no candidate: +1 at once), and the partners' contact points
+inside the owner's box grown by its range compacted into a candidate list; (T)
+the listed triangles against the candidates, `GRID_SUBS` lanes per triangle (box
+test, hit test, vote, force). The throttle update: a hit → 0, no candidate → +1.
 
 What the GPU does differently from the specification's exact order (§8.3):
 
@@ -394,8 +401,9 @@ What the GPU does differently from the specification's exact order (§8.3):
   only rounding);
 * the partner scan runs over partners in parallel (the resets commute: exact).
 
-Costs and limits: a fleet where no padded frame boxes overlap pays the bounds pass
-(a read of every node), the grouping workgroup and two indirect dispatches per frame;
+Costs and limits: a fleet where no padded frame boxes overlap pays, every other
+frame at 120 fps, the bounds pass (a read of every node) and the grouping
+workgroup, and every frame the frame bounds checks and an empty indirect dispatch;
 the wide passes are not used while contact is active. A group's members are stepped
 one after another by one workgroup, so a group of k vehicles takes about k times a
 vehicle's frame (plus its contact passes). Limits, each failing loudly (the status

@@ -597,7 +597,10 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         if aero {
             d.push(("EB_AERO", "1"));
         }
-        vv.push((name.to_string(), "explicit_beams_contact", d));
+        vv.push((name.to_string(), "explicit_beams_contact", d.clone()));
+        // The solo vehicles' frame (the frame entry with EB_VV_SOLO).
+        d.push(("EB_VV_SOLO", "1"));
+        vv.push((name.replace("contact", "solo"), "explicit_beams_frame", d));
     }
     for (name, entry, defines) in &vv {
         let out = wgsl_dir.join(format!("{name}.wgsl"));

@@ -371,6 +371,145 @@ fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if let Some(counts) = kv.get("profile") {
+        // Per-dispatch GPU time (each dispatch its own timed pass), contact on and
+        // off, for `counts` vehicles driving in a grid (no contact) or, with
+        // scene=headon, that many head-on pairs side by side.
+        use engine_webgpu::{default_device, ExplicitBeamsGpu};
+        let (_, device, queue) = default_device()?;
+        let spacing = get("spacing", 20.0);
+        let warm = get("warm", 20.0) as u32;
+        for n in counts.split(',').map(|c| c.parse::<usize>().unwrap()) {
+            let cols = (n as f32).sqrt().ceil() as usize;
+            let fleet: Vec<ExplicitBeams> = if scene == "headon" {
+                (0..n)
+                    .flat_map(|k| {
+                        let shift = lateral * (spacing * k as f32);
+                        spawns_for(0)
+                            .into_iter()
+                            .map(|sp| {
+                                spawn(
+                                    &text,
+                                    config,
+                                    &Spawn {
+                                        at: sp.at + shift,
+                                        ..sp
+                                    },
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            } else {
+                (0..n)
+                    .map(|k| {
+                        let at = base + lateral * (spacing * (k % cols) as f32)
+                            - forward * (spacing * 3.0 * (k / cols) as f32);
+                        spawn(
+                            &text,
+                            config,
+                            &Spawn {
+                                at: at + Vec3::new(500.0, 0.0, 500.0),
+                                vel: forward * speed,
+                                yaw: 0.0,
+                            },
+                        )
+                    })
+                    .collect()
+            };
+            for on in [false, true] {
+                let mut g = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+                g.set_vehicle_contact(on);
+                for _ in 0..warm {
+                    g.frame(steps);
+                }
+                g.wait();
+                let mut sums: Vec<(&str, f64, u32)> = Vec::new();
+                for _ in 0..frames {
+                    for (l, t) in g.profile_frame(steps) {
+                        match sums.iter_mut().find(|x| x.0 == l) {
+                            Some(x) => {
+                                x.1 += t;
+                                x.2 += 1;
+                            }
+                            None => sums.push((l, t, 1)),
+                        }
+                    }
+                }
+                let total: f64 = sums.iter().map(|x| x.1).sum::<f64>() / f64::from(frames);
+                let parts: Vec<String> = sums
+                    .iter()
+                    .map(|(l, t, c)| format!("{l} {:.4} ms (x{c})", t / f64::from(*c)))
+                    .collect();
+                println!(
+                    "N={n} contact {}: {:.4} ms/frame; {}",
+                    if on { "on " } else { "off" },
+                    total,
+                    parts.join(", ")
+                );
+                if on {
+                    g.contact_status().map_err(|e| anyhow::anyhow!(e))?;
+                }
+            }
+        }
+        return Ok(());
+    }
+    if let Some(counts) = kv.get("pairbench") {
+        // GPU ms per frame (median) for `counts` copies of the scene's two vehicles
+        // side by side `spacing=` m apart (grouped from the start with gap ≤ 0):
+        // the contact path's cost; and the same fleet with contact off.
+        use engine_webgpu::{default_device, ExplicitBeamsGpu};
+        let (_, device, queue) = default_device()?;
+        let spacing = get("spacing", 20.0);
+        for n in counts.split(',').map(|c| c.parse::<usize>().unwrap()) {
+            let fleet: Vec<ExplicitBeams> = (0..n)
+                .flat_map(|k| {
+                    let shift = lateral * (spacing * k as f32);
+                    spawns_for(0)
+                        .into_iter()
+                        .map(|sp| {
+                            spawn(
+                                &text,
+                                config,
+                                &Spawn {
+                                    at: sp.at + shift,
+                                    ..sp
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let mut line = format!("pairs={n}:");
+            for on in [true, false] {
+                let mut g = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+                g.set_vehicle_contact(on);
+                let timed = g.enable_frame_timing(frames);
+                assert!(timed, "needs RUBBLE_GPU_TIMING=1");
+                for _ in 0..frames {
+                    g.frame(steps);
+                }
+                g.wait();
+                let groups = g.contact_groups();
+                let mut t = g.frame_times_ms();
+                let mean = t.iter().sum::<f64>() / t.len() as f64;
+                t.sort_by(f64::total_cmp);
+                write!(
+                    line,
+                    " contact {}: median {:.3} mean {:.3} p99 {:.3} ms (groups at end {groups});",
+                    if on { "on" } else { "off" },
+                    t[t.len() / 2],
+                    mean,
+                    t[t.len() * 99 / 100]
+                )?;
+                if on {
+                    g.contact_status().map_err(|e| anyhow::anyhow!(e))?;
+                }
+            }
+            println!("{line}");
+        }
+        return Ok(());
+    }
     if let Some(counts) = kv.get("bench") {
         // GPU ms per frame (median of the timed frames), contact on and off, for
         // fleets of `counts` vehicles driving in a grid `spacing=` m apart (no

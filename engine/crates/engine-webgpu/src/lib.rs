@@ -82,6 +82,17 @@ pub const EXPLICIT_BEAMS_CONTACT_AERO_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero.wgsl"));
 pub const EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide.wgsl"));
+/// The frame entry for the vehicles stepped alone while contact is active
+/// (`EB_VV_SOLO`: the vehicle from the solo list, the frame bounds check), at the
+/// four variants; [`EXPLICIT_BEAMS_WGSL`] and the others stay the plain frame.
+pub const EXPLICIT_BEAMS_SOLO_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo.wgsl"));
+pub const EXPLICIT_BEAMS_SOLO_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_wide.wgsl"));
+pub const EXPLICIT_BEAMS_SOLO_AERO_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero.wgsl"));
+pub const EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide.wgsl"));
 /// A buffer's extent for compact snapshots (`slang/kernels/state_extent.slang`,
 /// entry `state_extent`; `WgpuSim::measure_state`).
 pub const STATE_EXTENT_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/state_extent.wgsl"));
