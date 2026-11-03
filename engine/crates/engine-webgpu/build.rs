@@ -634,6 +634,11 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             );
         std::fs::write(&out, text)?;
     }
+    // The frozen baseline of the explicit-beams kernel (a test oracle,
+    // `explicit_beams_baseline.slang`): every frame-entry variant and the plan passes
+    // as `wgsl/explicit_baseline_*.wgsl`, plus the race-probe variants (`EB_RACE_PROBE`).
+    // Read from OUT_DIR at run time by the bit-identity tests only (not embedded).
+    explicit_baseline(slang_root, &wgsl_dir)?;
     // Compact snapshots' buffer extents (WgpuSim::measure_state): standalone.
     let extent = wgsl_dir.join("state_extent.wgsl");
     let status = std::process::Command::new(find_slangc()?)
@@ -742,4 +747,89 @@ fn store(dir: &Path, out_dir: &Path, compiled: &Compiled) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Slang's storage barrier carries a texture barrier naga rejects (and an empty
+/// statement Safari's parser rejects): keep the storage and workgroup barriers.
+fn explicit_barriers(out: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(out)?
+        .replace(
+            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+            "storageBarrier(); workgroupBarrier();",
+        )
+        .replace(
+            "storageBarrier(); textureBarrier(); workgroupBarrier();",
+            "storageBarrier(); workgroupBarrier();",
+        );
+    std::fs::write(out, text)?;
+    Ok(())
+}
+
+/// The frozen baseline modules (see the call site), and the test-only
+/// deterministic-hits variants (`EB_DET_HITS`) of the baseline and the current
+/// kernel (`explicit_det_*.wgsl`).
+fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
+    let base = slang_root.join("kernels/explicit_beams_baseline.slang");
+    let cur = slang_root.join("kernels/explicit_beams.slang");
+    let mut jobs: Vec<(PathBuf, String, String, Vec<(&str, &str)>)> = Vec::new();
+    for p in ["bounds", "pairs", "group"] {
+        let n = format!("explicit_beams_vv_{p}");
+        jobs.push((base.clone(), format!("explicit_baseline_{n}"), n, vec![("ENGINE_WGSL", "1")]));
+    }
+    // (source, file prefix, lane counts, extra define)
+    let sets: [(&PathBuf, &str, &[&str], Option<&str>); 4] = [
+        (&base, "explicit_baseline_", &["256", "512"], None),
+        (&base, "explicit_baseline_", &["256", "512"], Some("EB_RACE_PROBE")),
+        (&base, "explicit_baseline_", &["256", "512"], Some("EB_DET_HITS")),
+        (&cur, "explicit_det_", EXPLICIT_LANES, Some("EB_DET_HITS")),
+    ];
+    for (src, prefix, lanes_list, extra) in sets {
+        for &lanes in lanes_list {
+            for aero in [false, true] {
+                let tag = format!(
+                    "{}{}{}",
+                    if aero { "_aero" } else { "" },
+                    lane_tag(lanes),
+                    match extra {
+                        Some("EB_RACE_PROBE") => "_probe",
+                        Some("EB_DET_HITS") if prefix == "explicit_baseline_" => "_det",
+                        _ => "",
+                    }
+                );
+                let mut d = vec![("ENGINE_WGSL", "1"), ("EB_LANES", lanes)];
+                if aero {
+                    d.push(("EB_AERO", "1"));
+                }
+                if let Some(x) = extra {
+                    d.push((x, "1"));
+                }
+                jobs.push((src.clone(), format!("{prefix}frame{tag}"), "explicit_beams_frame".into(), d.clone()));
+                d.push(("EB_VV_SOLO", "1"));
+                jobs.push((src.clone(), format!("{prefix}solo{tag}"), "explicit_beams_frame".into(), d.clone()));
+                d.push(("EB_VV_GROUPS", "1"));
+                jobs.push((src.clone(), format!("{prefix}contact{tag}"), "explicit_beams_frame".into(), d));
+            }
+        }
+    }
+    let results = par_map(&jobs, |(src, name, entry, defines)| -> Result<()> {
+        let out = dir.join(format!("{name}.wgsl"));
+        compile_with_defines(src, entry, SlangTarget::Wgsl, &out, &[], defines)?;
+        explicit_barriers(&out)
+    });
+    for r in results {
+        r?;
+    }
+    Ok(())
+}
+
+/// Lane counts of the current kernel's frame modules (the det variants cover each).
+const EXPLICIT_LANES: &[&str] = &["256", "512"];
+
+/// A module name's lane tag: 256 none, 512 `_wide`, else `_l<lanes>`.
+fn lane_tag(lanes: &str) -> String {
+    match lanes {
+        "256" => String::new(),
+        "512" => "_wide".into(),
+        l => format!("_l{l}"),
+    }
 }

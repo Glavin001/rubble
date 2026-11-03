@@ -20,7 +20,7 @@ pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]
-pub use explicit_beams_gpu::{render_scene_json, ExplicitBeamsGpu, GpuBeam};
+pub use explicit_beams_gpu::{render_scene_json, ExplicitBeamsGpu, GpuBeam, GpuSnapshot, KernelVariant};
 #[cfg(feature = "gpu")]
 pub use features::{
     ContactStorage, EngineFeatures, GpuTiming, GridLayout, ManifoldPersistence, SimOptions, WarmHash,
@@ -44,6 +44,10 @@ pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/so
 /// ([`ExplicitBeamsGpu`]), as `generated/wgsl/explicit_beams.wgsl`.
 pub const EXPLICIT_BEAMS_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams.wgsl"));
+/// The build's WGSL directory (native tests read the frozen baseline kernel,
+/// `explicit_baseline_*.wgsl`, from it at run time).
+#[doc(hidden)]
+pub const EXPLICIT_BEAMS_WGSL_DIR: &str = concat!(env!("OUT_DIR"), "/wgsl");
 
 /// The explicit-beams wide passes (entry, WGSL), one module each: one thread per
 /// element over every vehicle, a dispatch per pass ([`ExplicitBeamsGpu::set_wide`]).

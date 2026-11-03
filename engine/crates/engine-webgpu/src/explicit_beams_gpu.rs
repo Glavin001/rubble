@@ -77,6 +77,49 @@ pub struct ExplicitBeamsGpu {
     timing: Option<FrameTiming>,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
+    /// The bound buffers (bindings 0..8) and the module choice (aero, 512 lanes),
+    /// for the test-only kernel variants ([`Self::set_kernel_variant`]).
+    bufs: [wgpu::Buffer; 9],
+    module_kind: (bool, bool),
+    variant: KernelVariant,
+    alts: Vec<(KernelVariant, AltPipes)>,
+    probe: Option<wgpu::Buffer>,
+}
+
+/// Which kernel runs the frames: the shipped one, or (tests only) the frozen
+/// baseline (`explicit_beams_baseline.slang`, read from the build's WGSL directory)
+/// with or without its race probe. See [`ExplicitBeamsGpu::set_kernel_variant`].
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KernelVariant {
+    Current,
+    Baseline,
+    BaselineProbe,
+    /// Self-collision and vehicle-contact hits on one lane in a fixed order
+    /// (`EB_DET_HITS`): no race, so every frame compares.
+    BaselineDet,
+    CurrentDet,
+}
+
+/// A variant's pipelines and bind groups.
+struct AltPipes {
+    frame: wgpu::ComputePipeline,
+    solo: wgpu::ComputePipeline,
+    groups: wgpu::ComputePipeline,
+    plan: [wgpu::ComputePipeline; 3],
+    group: wgpu::BindGroup,
+    plan_group: wgpu::BindGroup,
+}
+
+/// A copy of every buffer a frame writes, and the host's contact plan state
+/// ([`ExplicitBeamsGpu::snapshot`]).
+#[doc(hidden)]
+pub struct GpuSnapshot {
+    copies: Vec<wgpu::Buffer>,
+    left: u32,
+    fresh: bool,
+    frames: u64,
+    replan: bool,
 }
 
 /// Vehicle–vehicle contact's pipelines, buffers and state.
@@ -175,7 +218,8 @@ impl Contact {
             size: 32,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
-                | wgpu::BufferUsages::COPY_SRC,
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
@@ -1021,18 +1065,18 @@ impl ExplicitBeamsGpu {
         let acc = init(
             "explicit-beams-acc",
             bytemuck::cast_slice(&acc_init),
-            storage | wgpu::BufferUsages::COPY_SRC,
+            state,
         );
         let groups = init(
             "explicit-beams-groups",
             bytemuck::cast_slice(&groups),
-            storage,
+            state,
         );
         let misc = init("explicit-beams-misc", bytemuck::cast_slice(&misc), state);
         let next = init(
             "explicit-beams-grid-next",
             bytemuck::cast_slice(&next_init),
-            storage | wgpu::BufferUsages::COPY_SRC,
+            state,
         );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("explicit-beams"),
@@ -1089,6 +1133,17 @@ impl ExplicitBeamsGpu {
             u64::from(vv_acc + 12 * nv as u32) * 4,
             vv_tri_base,
         );
+        let bufs = [
+            params.clone(),
+            statics.clone(),
+            lists.clone(),
+            nodes.clone(),
+            beams.clone(),
+            acc.clone(),
+            groups.clone(),
+            misc.clone(),
+            next.clone(),
+        ];
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -1110,6 +1165,11 @@ impl ExplicitBeamsGpu {
             wide,
             total,
             contact,
+            bufs,
+            module_kind: (aero, vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS)),
+            variant: KernelVariant::Current,
+            alts: Vec::new(),
+            probe: None,
         }
     }
 
@@ -1543,34 +1603,39 @@ impl ExplicitBeamsGpu {
                     end_of_pass_write_index: end.then_some(k + 1),
                 })
         };
+        let alt = self.alt_pipes();
         if self.contact_active() {
             let c = &self.contact;
+            let (plan, plan_group, solo, groups, contact_group) = match alt {
+                Some(a) => (&a.plan, &a.plan_group, &a.solo, &a.groups, &a.group),
+                None => (&c.plan, &c.plan_group, &c.solo, &c.groups, &c.contact_group),
+            };
             let nv = self.spans.len() as u32;
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("explicit_beams_contact"),
                 timestamp_writes: stamps(true, true),
             });
             if c.planning {
-                pass.set_bind_group(0, &c.plan_group, &[]);
-                pass.set_pipeline(&c.plan[0]);
+                pass.set_bind_group(0, plan_group, &[]);
+                pass.set_pipeline(&plan[0]);
                 pass.dispatch_workgroups(nv, 1, 1);
                 if nv as usize > FUSED_PAIRS_MAX {
-                    pass.set_pipeline(&c.plan[1]);
+                    pass.set_pipeline(&plan[1]);
                     pass.dispatch_workgroups(nv.div_ceil(256), 1, 1);
                 }
-                pass.set_pipeline(&c.plan[2]);
+                pass.set_pipeline(&plan[2]);
                 pass.dispatch_workgroups(1, 1, 1);
             }
             // The vehicles (grouped ones return at once) and, past them, the
             // contact groups, side by side.
             // The plan wrote one of the two non-empty: with no group the plain solo
             // frame, else the frame with the groups past the vehicles.
-            pass.set_pipeline(&c.solo);
-            pass.set_bind_group(0, &c.contact_group, &[]);
+            pass.set_pipeline(solo);
+            pass.set_bind_group(0, contact_group, &[]);
             pass.dispatch_workgroups_indirect(&c.args, 0);
-            pass.set_pipeline(&c.groups);
+            pass.set_pipeline(groups);
             pass.dispatch_workgroups_indirect(&c.args, 16);
-        } else if let Some(w) = self.wide.as_ref().filter(|w| w.enabled) {
+        } else if let Some(w) = self.wide.as_ref().filter(|w| w.enabled && alt.is_none()) {
             let plan = self.wide_plan(steps);
             // Begin and rebase, then the vehicles' origins and steps into the
             // table, then the steps.
@@ -1608,8 +1673,9 @@ impl ExplicitBeamsGpu {
                 label: Some("explicit_beams"),
                 timestamp_writes: stamps(true, true),
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.group, &[]);
+            let (pipeline, group) = alt.map_or((&self.pipeline, &self.group), |a| (&a.frame, &a.group));
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(self.spans.len() as u32, 1, 1);
         }
         // The status every STATUS_EVERY frames (the counters keep an error).
@@ -1625,6 +1691,241 @@ impl ExplicitBeamsGpu {
             self.contact.map_status();
         }
 
+    }
+
+    fn alt_pipes(&self) -> Option<&AltPipes> {
+        if self.variant == KernelVariant::Current {
+            return None;
+        }
+        self.alts.iter().find(|(v, _)| *v == self.variant).map(|(_, p)| p)
+    }
+
+    /// Tests only: run frames on the shipped kernel or on the frozen baseline
+    /// (`explicit_beams_baseline.slang`, its WGSL read from the build's output
+    /// directory, so native only), with or without its race probe
+    /// ([`Self::take_race_flag`]). The baseline never runs the wide passes.
+    #[doc(hidden)]
+    pub fn set_kernel_variant(&mut self, variant: KernelVariant) {
+        self.variant = variant;
+        if variant == KernelVariant::Current || self.alts.iter().any(|(v, _)| *v == variant) {
+            return;
+        }
+        let probe = variant == KernelVariant::BaselineProbe;
+        if probe && self.probe.is_none() {
+            let words = 1 + 2 * self.total[0] as u64;
+            self.probe = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("explicit-beams-race-probe"),
+                size: (words * 4).max(16),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let read = |name: &str| {
+            let path = format!("{}/{name}.wgsl", crate::EXPLICIT_BEAMS_WGSL_DIR);
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+        };
+        let (aero, big) = self.module_kind;
+        let (prefix, suffix) = match variant {
+            KernelVariant::Baseline => ("explicit_baseline_", ""),
+            KernelVariant::BaselineProbe => ("explicit_baseline_", "_probe"),
+            KernelVariant::BaselineDet => ("explicit_baseline_", "_det"),
+            KernelVariant::CurrentDet => ("explicit_det_", ""),
+            KernelVariant::Current => unreachable!(),
+        };
+        let tag = format!(
+            "{}{}{}",
+            if aero { "_aero" } else { "" },
+            if big { "_wide" } else { "" },
+            suffix
+        );
+        let device = &self.device;
+        let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let rw = wgpu::BufferBindingType::Storage { read_only: false };
+        let ro = wgpu::BufferBindingType::Storage { read_only: true };
+        let layout_with = |extra: &[(u32, &wgpu::Buffer)]| {
+            let mut entries = vec![
+                entry(0, wgpu::BufferBindingType::Uniform),
+                entry(1, ro),
+                entry(2, ro),
+            ];
+            entries.extend((3..9).map(|b| entry(b, rw)));
+            entries.extend(extra.iter().map(|(b, _)| entry(*b, rw)));
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("explicit-beams-variant"),
+                entries: &entries,
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("explicit-beams-variant"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let mut bind: Vec<wgpu::BindGroupEntry> = self
+                .bufs
+                .iter()
+                .enumerate()
+                .map(|(i, b)| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: b.as_entire_binding(),
+                })
+                .collect();
+            bind.extend(extra.iter().map(|(b, buf)| wgpu::BindGroupEntry {
+                binding: *b,
+                resource: buf.as_entire_binding(),
+            }));
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("explicit-beams-variant"),
+                layout: &layout,
+                entries: &bind,
+            });
+            (pipeline_layout, group)
+        };
+        let make = |entry: &str, wgsl: &str, layout: &wgpu::PipelineLayout| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(entry),
+                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(wgsl).into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let extra: Vec<(u32, &wgpu::Buffer)> = self.probe.iter().filter(|_| probe).map(|b| (11, b)).collect();
+        let (layout, group) = layout_with(&extra);
+        let (plan_layout, plan_group) = layout_with(&[(10, &self.contact.args)]);
+        let plan = ["bounds", "pairs", "group"].map(|p| {
+            let e = format!("explicit_beams_vv_{p}");
+            if variant == KernelVariant::CurrentDet {
+                let wgsl = EXPLICIT_BEAMS_VV_PASSES.iter().find(|(n, _)| *n == e).unwrap().1;
+                make(&e, wgsl, &plan_layout)
+            } else {
+                make(&e, &read(&format!("explicit_baseline_{e}")), &plan_layout)
+            }
+        });
+        let pipes = AltPipes {
+            frame: make("explicit_beams_frame", &read(&format!("{prefix}frame{tag}")), &layout),
+            solo: make("explicit_beams_frame", &read(&format!("{prefix}solo{tag}")), &layout),
+            groups: make("explicit_beams_frame", &read(&format!("{prefix}contact{tag}")), &layout),
+            plan,
+            group,
+            plan_group,
+        };
+        self.alts.push((variant, pipes));
+    }
+
+    /// Tests only: whether a frame run with [`KernelVariant::BaselineProbe`] since
+    /// the last call met one of the kernel's known races (1), or the probe gave up
+    /// (2); clears it.
+    #[doc(hidden)]
+    pub fn take_race_flag(&mut self) -> u32 {
+        let Some(p) = &self.probe else { return 0 };
+        let raw = self.read(p);
+        let flag = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+        self.queue.write_buffer(p, 0, &[0u8; 4]);
+        flag
+    }
+
+    /// Tests only: a copy of every buffer a frame writes and of the host's contact
+    /// plan state, to run the same frame again ([`Self::restore`]).
+    #[doc(hidden)]
+    pub fn snapshot(&self) -> GpuSnapshot {
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let copies = self
+            .snapshot_sources()
+            .iter()
+            .map(|b| {
+                let c = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("explicit-beams-snapshot"),
+                    size: b.size(),
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                enc.copy_buffer_to_buffer(b, 0, &c, 0, b.size());
+                c
+            })
+            .collect();
+        self.queue.submit([enc.finish()]);
+        GpuSnapshot {
+            copies,
+            left: self.contact.left,
+            fresh: self.contact.fresh,
+            frames: self.contact.frames,
+            replan: self.contact.replan.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Tests only: put back a [`Self::snapshot`].
+    #[doc(hidden)]
+    pub fn restore(&mut self, snap: &GpuSnapshot) {
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for (b, c) in self.snapshot_sources().iter().zip(&snap.copies) {
+            enc.copy_buffer_to_buffer(c, 0, b, 0, b.size());
+        }
+        self.queue.submit([enc.finish()]);
+        self.contact.left = snap.left;
+        self.contact.fresh = snap.fresh;
+        self.contact.frames = snap.frames;
+        self.contact
+            .replan
+            .store(snap.replan, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn snapshot_sources(&self) -> Vec<wgpu::Buffer> {
+        let mut v: Vec<wgpu::Buffer> = self.bufs[3..9].to_vec();
+        v.push(self.contact.args.clone());
+        v
+    }
+
+    /// Tests only: the state a frame leaves that does not depend on scheduling,
+    /// as named runs of words: every node record; the beam records, incidence
+    /// forces, aero, slide and trigger state; the self-collision accumulators; the
+    /// group slots; the per-vehicle and per-triangle records (the contact groups'
+    /// numbering, which follows atomic order, masked). Scratch whose order follows
+    /// the lanes (grid runs, tested lists, candidate lists) is left out.
+    #[doc(hidden)]
+    pub fn state_words(&self) -> Vec<(&'static str, Vec<u32>)> {
+        let w = &self.words;
+        let words = |b: &wgpu::Buffer| -> Vec<u32> { bytemuck::cast_slice(&self.read(b)).to_vec() };
+        let nodes = words(&self.bufs[3]);
+        let beams = words(&self.bufs[4]);
+        let acc = words(&self.bufs[5]);
+        let groups = words(&self.bufs[6]);
+        let mut misc = words(&self.bufs[7]);
+        let next = words(&self.bufs[8]);
+        let nv = self.spans.len();
+        let (grid_base, aero_state, vv_run) = (w[9] as usize, w[27] as usize, w[54] as usize);
+        let (vv_veh, vv_groups) = (w[43] as usize, w[46] as usize);
+        for v in 0..nv {
+            misc[(vv_veh + v * VV_RECS + 4) * 4 + 2] = 0;
+        }
+        let mut beam_words = beams[..grid_base * 4].to_vec();
+        beam_words.extend_from_slice(&beams[aero_state * 4..vv_run * 4]);
+        vec![
+            ("nodes", nodes),
+            ("beams", beam_words),
+            ("acc", acc[..3 * self.total[0] as usize].to_vec()),
+            ("groups", groups),
+            ("misc", misc[..vv_groups * 4].to_vec()),
+            ("keys", next[w[31] as usize..w[40] as usize].to_vec()),
+        ]
     }
 
     /// Fail on a contact error a finished frame reported ([`Self::contact_status`]),

@@ -937,6 +937,22 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
     }
 }
 
+#ifdef EB_DET_HITS
+// Tests only (EB_DET_HITS): self-collision on one lane, every triangle not waiting
+// against every candidate in list order, so each hit sees every earlier one (no
+// race): the same hits as the grid and the lane-parallel test, in a fixed order.
+void detSelfCollide(uint triOff, uint triCount, float3 origin, float r, uint candOff, uint candCount,
+                    uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    for (uint t = 0u; t < triCount; t++)
+    {
+        if (asint(gMisc[gP.vehicles + triOff + t].x) > 0) continue;
+        TriGeo g = triangleGeo(triOff + t, origin, r);
+        for (uint k = 0u; k < candCount; k++)
+            tryContact(g, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
+    }
+}
+#endif
 
 // --- Aerodynamics and commands with no input (EB_AERO modules) ---
 // engine/docs/explicit-beams-aero-commands-spec.md; CPU reference
@@ -1890,6 +1906,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             }
             sync();
         }
+#ifdef EB_DET_HITS
+        if (lane == 0u && candCount > 0u)
+            detSelfCollide(triOff, triCount, origin, range, candOff, candCount, beamOff, groupOff, groupCount, parity);
+#else
         if (candCount > 0u && cell > 0.0)
         {
             uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
@@ -1910,6 +1930,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
                              groupOff, groupCount, parity);
         }
+#endif
 #ifdef EB_AERO
         // Slide nodes, after this step's beams (one lane, alongside the contacts).
         if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, origin, groupOff, parity);
@@ -2832,6 +2853,10 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         }
         sync();
     }
+#ifdef EB_DET_HITS
+    if (lane == 0u && candCount > 0u)
+        detSelfCollide(triOff, triCount, origin, range, candOff, candCount, beamOff, groupOff, groupCount, parity);
+#else
     if (candCount > 0u && cell > 0.0)
     {
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
@@ -2850,6 +2875,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
             triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff, groupOff,
                          groupCount, parity);
     }
+#endif
 #ifdef EB_AERO
     if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, origin, groupOff, parity);
 #endif
@@ -3096,6 +3122,42 @@ void vvApplyHits(uint va, uint runOff, uint points, uint hits, float r, uint par
     }
 }
 
+#ifdef EB_DET_HITS
+// Tests only: vvApplyHits on one lane, the hits sorted by (triangle, node), so the
+// order is fixed and each hit sees every earlier one.
+void vvApplyHitsDet(uint va, uint runOff, uint points, uint hits, float r, uint parity, uint lane)
+{
+    if (lane != 0u) return;
+    uint n = min(hits, 2u * points);
+    for (uint i = 1u; i < n; i++)
+    {
+        uint gt = gNext[vvHitAt(runOff, i)];
+        uint h = gNext[vvHitAt(runOff, i) + 1u];
+        uint j = i;
+        while (j > 0u)
+        {
+            uint pg = gNext[vvHitAt(runOff, j - 1u)];
+            uint ph = gNext[vvHitAt(runOff, j - 1u) + 1u];
+            if (pg < gt || (pg == gt && ph <= h)) break;
+            gNext[vvHitAt(runOff, j)] = pg;
+            gNext[vvHitAt(runOff, j) + 1u] = ph;
+            j--;
+        }
+        gNext[vvHitAt(runOff, j)] = gt;
+        gNext[vvHitAt(runOff, j) + 1u] = h;
+    }
+    float3 oa = asfloat(gMisc[va].xyz);
+    for (uint i = 0u; i < n; i++)
+    {
+        uint gt = gNext[vvHitAt(runOff, i)];
+        uint h = gNext[vvHitAt(runOff, i) + 1u];
+        uint vh = gStatic[gP.nodeInfoBase + h].w;
+        VvTri t = vvTriangle(gt, oa, r);
+        vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity);
+    }
+}
+#endif
+
 // A tested triangle's throttle after its tests (a hit → 0, no candidate → + 1).
 void vvThrottleEnd(uint gt)
 {
@@ -3157,7 +3219,11 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         float3 va0 = gNodes[gStatic[va * 4u].x * 3u + 1u].xyz;
         // Phase S (with the previous owner's hits).
         for (uint i = lane; i < prevListed; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
+#ifdef EB_DET_HITS
+        if (a > 0u) vvApplyHitsDet(prevVa, runOff, points, gsVvHits[q ^ 1u].load(), prevRange, parity, lane);
+#else
         if (a > 0u) vvApplyHits(prevVa, runOff, points, gsVvHits[q ^ 1u].load(), prevRange, parity, lane);
+#endif
         for (uint b = lane; b < k; b += LANES)
         {
             uint vb = vvMember(off, b);
@@ -3275,7 +3341,11 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         prevRange = range;
     }
     for (uint i = lane; i < prevListed; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
+#ifdef EB_DET_HITS
+    if (k > 0u) vvApplyHitsDet(prevVa, runOff, points, gsVvHits[(k - 1u) & 1u].load(), prevRange, parity, lane);
+#else
     if (k > 0u) vvApplyHits(prevVa, runOff, points, gsVvHits[(k - 1u) & 1u].load(), prevRange, parity, lane);
+#endif
     // (The counters are cleared by the next step's first member step, before its
     // first barrier.)
 }
