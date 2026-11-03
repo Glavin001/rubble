@@ -265,6 +265,9 @@ fn spawn_yaw(text: &str, at: Vec3, yaw: f32, vel: Vec3) -> ExplicitBeams {
 static WIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
 
 fn apply_wide(gpu: &mut ExplicitBeamsGpu) {
+    if !CONTACT.load(std::sync::atomic::Ordering::Relaxed) {
+        gpu.set_vehicle_contact(false);
+    }
     let on = match WIDE.load(std::sync::atomic::Ordering::Relaxed) {
         0 => gpu.set_wide(false),
         1 => gpu.set_wide(true),
@@ -288,6 +291,9 @@ static JBEAM: std::sync::OnceLock<(
 
 /// `config=<name>`: the section configuration (both engines).
 static CONFIG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// `contact=0`: no vehicle–vehicle contact on Rubble (diagnosis; RoR keeps its own).
+static CONTACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// `roll=0`: spawn tyres still (every node at the spawn velocity) on both engines.
 static ROLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -1286,6 +1292,10 @@ fn main() -> anyhow::Result<()> {
     let _ = CONFIG.set(kv(&args, "config").map(str::to_string));
     ROLL.store(
         kv(&args, "roll") != Some("0"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    CONTACT.store(
+        kv(&args, "contact") != Some("0"),
         std::sync::atomic::Ordering::Relaxed,
     );
     if let Some(w) = kv(&args, "wide") {
