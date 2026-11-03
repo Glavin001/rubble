@@ -194,6 +194,41 @@ fn main() -> anyhow::Result<()> {
         b.roll_tyres(vel);
         fleet.push(b);
     }
+    // ring: `count=` (default 64) cars in rings around the origin, driving at the
+    // centre at 25 to 42 m/s (the web arena's `layout=ring`): one contact group
+    // from the first frame.
+    if scenario == "ring" {
+        let n = get("count", 64.0) as usize;
+        let lateral = Vec3::Y.cross(forward).normalize();
+        let (alo, ahi) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), q| (a.min(q.pos.dot(lateral)), b.max(q.pos.dot(lateral))));
+        let (flo, fhi) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), q| (a.min(q.pos.dot(forward)), b.max(q.pos.dot(forward))));
+        let (width, length) = (ahi - alo, fhi - flo);
+        let golden = |i: usize, a: f64| ((i as f64 + 1.0) * a).fract() as f32;
+        let settings = ExplicitBeamsSettings { drag: false, turbulence: false, ..Default::default() };
+        fleet.clear();
+        let mut r = 30.0f32;
+        while fleet.len() < n {
+            let m = ((std::f32::consts::TAU * r / (width + 1.5)).floor() as usize).max(1).min(n - fleet.len());
+            let phase = 0.5 * (fleet.len() % 2) as f32 + golden(fleet.len(), 0.618_033_988_75);
+            for j in 0..m {
+                let k = fleet.len();
+                let a = std::f32::consts::TAU * (j as f32 + phase) / m as f32;
+                let (sa, ca) = a.sin_cos();
+                let target = Vec3::new(-sa, 0.0, -ca);
+                let yaw = (target.x.atan2(target.z) - forward.x.atan2(forward.z)).to_degrees();
+                let centre = Vec3::new(r * sa, 0.0, r * ca) + Vec3::new(sa, 0.0, ca) * (0.5 * length) + Vec3::new(200.0, 0.0, 200.0);
+                let speed = 25.0 + 17.0 * golden(k, 0.754_877_666_25);
+                let mut b = ExplicitBeams::from_truck_config_yaw(&text, None, centre, yaw, target * speed, settings).expect("spawn");
+                let lowest = b.nodes.iter().map(|q| q.pos.y).fold(f32::MAX, f32::min);
+                for q in &mut b.nodes {
+                    q.pos.y += 0.02 - lowest;
+                }
+                b.roll_tyres(target * speed);
+                fleet.push(b);
+            }
+            r += length + 3.0;
+        }
+    }
     let warm_frames = if fleet.len() > 1 { 6 } else { 60 };
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
     gpu.set_wide(false);

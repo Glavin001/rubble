@@ -333,6 +333,61 @@ its spawned positions). The velocity is in world axes.
 * Targets (M3 Max): the Agora S bus (195 nodes, 862 beams with tyres) at ≤ 0.6 ms per
   60 fps frame for 1–40 vehicles, ≤ 9 ms for 1000.
 
+### Lower step latency (feat/explicit-gpu-parallel)
+
+Each of these keeps the results bit for bit (see *Bit-identity tests* below):
+
+* **Lanes.** Fleets of up to 32 vehicles (about one workgroup per GPU core, where a
+  vehicle's step latency sets the frame) run 512 lanes per vehicle; larger fleets
+  keep 256 (512 for vehicles over 2048 beams). 1024 lanes was slower on an M3 Max
+  (wider barriers, a longer serial grid scan) and is not shipped.
+* **Grid skip.** A step whose listed triangles × contacters is at most 16 × lanes
+  skips the grid's counting sort (five barriers) and tests every candidate, keeping
+  exactly those the grid walk would test (inside the triangle's box and in a bucket
+  its cells cover, with the grid's own expressions). The decision is one lane's,
+  read through `gsUniformLanes` (uniform for Chrome).
+* **Early pairs.** Without the grid, the beam phase lists the (triangle, contacter)
+  pairs that pass those tests and tryContact's box test, on the lanes the beams
+  leave idle (lanes in reverse); the triangle phase runs tryContact on the listed
+  pairs only. More than 1024 pairs: the usual walk.
+* **Slide nodes in parallel.** A lane per slide node computes its spring and
+  registers its three contributions with their slots (a count and a list whose
+  capacity, from the rails its slide nodes can reach, is every contribution the
+  slot can get); the next node phase (or the frame's end) adds a slot's
+  contributions in spawn order, as the one-lane pass did. Contact groups keep the
+  one-lane pass (the contact pass reads the slots).
+* **Wing forces per node.** A lane per wing node adds its entries in the order the
+  one-lane wingApply reached it.
+* **Small contact groups side by side.** A group of up to four vehicles splits the
+  workgroup's lanes into a power-of-two partition per member; partition m runs
+  member m's step exactly as the member-by-member path, with its tested list and
+  grid counts and offsets in the per-vehicle global regions the wide passes use.
+  Its contact pass runs every owner's scan, throttle step and candidates, and
+  triangle tests together, then applies the hits in levels: an owner joins the
+  level after every earlier owner with hits whose vehicles (itself and its
+  partners) it may touch, so each owner's hits read exactly the earlier owners'
+  forces. The throttle resets need no order (an owner with a fast partner resets
+  itself; a later owner's reset of an earlier owner is applied after that owner's
+  update). Larger groups keep the member-by-member path.
+
+Measured and not adopted (no gain): one barrier instead of two per `sync()` (Apple:
+about 0); the hit test in the beam phase as well (Viper slower: it hits every step,
+so the geometry ran twice); 1024 lanes.
+
+### Bit-identity tests
+
+`slang/kernels/explicit_beams_baseline.slang` is the kernel before this work,
+frozen (a test oracle, read from the build's WGSL directory at run time, never
+shipped). `tests/explicit_beams_bitwise.rs` runs it and the current kernel from one
+saved GPU state each frame (`ExplicitBeamsGpu::snapshot`/`restore`,
+`set_kernel_variant`): a frame the baseline's race probe (`EB_RACE_PROBE`) finds
+race-free must leave the same state, bit for bit (nodes, beams, incidence forces,
+accumulators, group slots, throttles, per-vehicle records); and every frame must
+match with both kernels compiled with `EB_DET_HITS` (hits found by each kernel's own
+lanes, then applied on one lane sorted by triangle and node). Real cars come from
+`RUBBLE_INSPIRATION` when set (Viper, E36, Mustang, Agora S); the repository's sedan
+always. `explicit-wgsl-check.mjs` compiles every shipped module in Chrome.
+
 ### Vehicle contact on the GPU
 
 On by default for a fleet of two or more vehicles (`set_vehicle_contact(false)`:
