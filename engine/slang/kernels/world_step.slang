@@ -1109,8 +1109,11 @@ static const uint REST_HEADER = 32u;
 bool restTables() { return (HOST_S(25) & 1u) != 0u; }
 bool warmTagged();
 // Past the tagged warm hash when there is one (HOST_S(9) varies step to step with the
-// contact count, so World's untagged tables sit right past the CSR index instead).
-uint restBase() { return HOST_S(24) + HOST_S(1) + 1u + (warmTagged() ? HOST_S(9) : 0u); }
+// contact count, so World's untagged tables sit right past the CSR index instead): the
+// awake bitmap (a word per 32 body slots, awakeBit), then the tables, which the host
+// allocates only once a step takes the awake-indexed broadphase (WgpuSim::ensure_rest_tables).
+uint awakeBitsBase() { return HOST_S(24) + HOST_S(1) + 1u + (warmTagged() ? HOST_S(9) : 0u); }
+uint restBase() { return awakeBitsBase() + ((HOST_S(1) + 31u) >> 5); }
 uint restHeads() { return restBase() + REST_HEADER; }
 uint awakeHeads() { return restHeads() + gridHashSize(); }
 uint restLinks() { return awakeHeads() + gridHashSize(); }
@@ -4507,6 +4510,9 @@ bool contactPairAtRest(BodyState ba, BodyState bb)
 //   [free top, blocks, touched count (two, by step parity)]
 //   [row count, first block, age, cursor, touched step] x maxBodies [next] x blocks
 //   [free stack] x blocks [touched list] x maxBodies [spread step] x maxBodies
+// An archive that keeps no rows (cold wakes with the touch query, HOST_S(30) bit 9,
+// archiveCompact) has only the touch query's records past the header:
+//   [touched step] x maxBodies [touched list] x maxBodies [spread step] x maxBodies
 static const uint ARCHIVE_ROWS = 8u;
 static const uint ARCHIVE_NONE = 0xFFFFFFFFu;
 static const uint ARCHIVE_JUST_SLEPT = 0xFFFFFFFEu;
@@ -4518,6 +4524,8 @@ bool archiveTouchQuery() { return (HOST_S(30) & 256u) != 0u; }
 // cold instead of from its archived row; archive_spread lists the sleepers resting on a
 // touched sleeper (over the archived adjacency) so archive_emit gives them rows too.
 bool archiveCold() { return (HOST_S(30) & 64u) != 0u; }
+// No rows, no blocks, no per-body row records (WgpuSim::enable_sleep_archive).
+bool archiveCompact() { return (HOST_S(30) & 512u) != 0u; }
 uint archiveBlocks() { return ALOAD(gScratchAtomics[archiveMeta() + 1u]); }
 uint archiveMeta() { return EXPLODE_BASE + 4u + 8u * 16u; }
 uint arTop() { return archiveMeta(); }
@@ -4525,13 +4533,19 @@ uint arCount(uint b) { return archiveMeta() + 4u + b; }
 uint arHead(uint b) { return archiveMeta() + 4u + HOST_S(1) + b; }
 uint arAge(uint b) { return archiveMeta() + 4u + 2u * HOST_S(1) + b; }
 uint arCursor(uint b) { return archiveMeta() + 4u + 3u * HOST_S(1) + b; }
-uint arTouched(uint b) { return archiveMeta() + 4u + 4u * HOST_S(1) + b; }
+uint arTouched(uint b) { return archiveMeta() + 4u + (archiveCompact() ? 0u : 4u * HOST_S(1)) + b; }
 uint arNext(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + k; }
 uint arStack(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + archiveBlocks() + k; }
 uint arTouchedCount(uint step) { return archiveMeta() + 2u + (step & 1u); }
-uint arTouchedList(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + 2u * archiveBlocks() + k; }
+uint arTouchedList(uint k)
+{
+    return archiveMeta() + 4u + (archiveCompact() ? HOST_S(1) : 5u * HOST_S(1) + 2u * archiveBlocks()) + k;
+}
 // The step a listed sleeper spreads in (archive_touch_seed), after the touched list.
-uint arSpread(uint b) { return archiveMeta() + 4u + 6u * HOST_S(1) + 2u * archiveBlocks() + b; }
+uint arSpread(uint b)
+{
+    return archiveMeta() + 4u + (archiveCompact() ? 2u * HOST_S(1) : 6u * HOST_S(1) + 2u * archiveBlocks()) + b;
+}
 uint archiveRow(uint block, uint j) { return 2u * HOST_S(3) + block * ARCHIVE_ROWS + j; }
 
 // Both colliders' local poses: a split re-parents a collider (new local pose), and its
@@ -4595,7 +4609,8 @@ bool archiveFind(Contact c, out Contact found)
     for (uint side = 0u; side < 2u; side++)
     {
         uint body = owners[side];
-        uint k = ALOAD(gScratchAtomics[arHead(body)]);
+        // A compact archive has no rows (and its words past the header are not records).
+        uint k = archiveCompact() ? ARCHIVE_NONE : ALOAD(gScratchAtomics[arHead(body)]);
         if (k == ARCHIVE_NONE) continue;
         uint n = ALOAD(gScratchAtomics[arCount(body)]);
         for (uint slot = 0u; slot < n && slot < 8192u; slot++)
@@ -4649,7 +4664,7 @@ Contact archiveRowOf(uint body, uint slot)
 // broadphase stays within WebGPU's storage-buffer budget).
 void archiveMark(uint body)
 {
-    if (ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
+    if (archiveCompact() || ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
     archiveList(body);
 }
 
@@ -4705,6 +4720,7 @@ void archiveTouch(uint i, uint j)
 // moves is emitted by it).
 void archiveEmitResting(uint body)
 {
+    if (archiveCompact()) return;
     uint n = min(ALOAD(gScratchAtomics[arCount(body)]), 2048u);
     for (uint slot = 0u; slot < n && slot < 2048u; slot++)
     {
@@ -5279,7 +5295,6 @@ void build_awake_list(uint3 tid : SV_DispatchThreadID)
 // act only on such bodies, while no body's flags change between the list and them
 // (count_color_tiles, scatter_color_tiles, ccd_unhold), read one word per 32 bodies
 // first instead of each body's record: a body whose bit is clear is one they leave alone.
-uint awakeBitsBase() { return restDirtyBase() + gCounters[0].colliderCount; }
 bool awakeBit(uint body) { return (ALOAD(gConstraintIds[awakeBitsBase() + (body >> 5)]) & (1u << (body & 31u))) != 0u; }
 
 [shader("compute")]
@@ -7626,7 +7641,7 @@ void sleep_island_commit(uint3 tid : SV_DispatchThreadID)
     AADD2(gCounters[0].sleepEvents, 1);
     gBodies[i] = b;
     // Its resting rows are archived by the archive_* passes that follow.
-    if (sleepArchive())
+    if (sleepArchive() && !archiveCompact())
     {
         ASTORE(gScratchAtomics[arAge(i)], ARCHIVE_JUST_SLEPT);
     }
@@ -7763,7 +7778,7 @@ void archive_scatter(uint3 tid : SV_DispatchThreadID)
 void archive_spread(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
-    if (!sleepArchive()) return;
+    if (!sleepArchive() || archiveCompact()) return;
     uint n = min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1));
     for (uint k = i; k < n && k < 1048576u; k += 4096u)
     {

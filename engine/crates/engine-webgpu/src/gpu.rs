@@ -406,6 +406,8 @@ pub struct WgpuSim {
     marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>,
     /// The sleep archive's blocks (`enable_sleep_archive`; 0: off).
     sleep_archive_blocks: u32,
+    /// The sleep archive keeps no rows and is laid out without them (archiveCompact).
+    sleep_archive_compact: bool,
     /// Any collider carries a collision filter (HOST_S(21)).
     has_filters: bool,
     /// Some heightfield in the hull arena carries a soil (vehicle ruts, T5):
@@ -1077,6 +1079,7 @@ impl WgpuSim {
             bounds_dirty: false,
             marks: None,
             sleep_archive_blocks: 0,
+            sleep_archive_compact: false,
             has_filters: false,
             has_soil: false,
             manifolds_valid: false,
@@ -2182,6 +2185,7 @@ impl WgpuSim {
     /// later in a step, so this is the only point where the pairs are readable.
     pub fn debug_broadphase_pairs(&mut self) -> Vec<(u32, u32)> {
         self.refresh_cell();
+        self.ensure_rest_tables().expect("the awake broadphase's tables fit the device");
         self.write_host_uniforms_ex(false);
         let cmds = rigid_plan::encode_step(&self.step_modes(), &self.step_inputs(), false, false);
         let cut = cmds
@@ -2213,6 +2217,7 @@ impl WgpuSim {
     /// comparing passes on the same state (restore a `save_state` between runs).
     pub fn debug_step_until(&mut self, phase: &str) {
         self.refresh_cell();
+        self.ensure_rest_tables().expect("the awake broadphase's tables fit the device");
         self.write_host_uniforms_ex(false);
         let cmds = rigid_plan::encode_step(&self.step_modes(), &self.step_inputs(), false, false);
         let cut = cmds
@@ -2448,6 +2453,49 @@ impl WgpuSim {
         rigid_plan::awake_broadphase(&self.step_modes(), &self.step_inputs())
     }
 
+    /// The awake-indexed broadphase's tables (rigid_plan::rest_table_words) in binding 14
+    /// before a step that takes that broadphase: binding 14 is created without them and
+    /// grows the first time a step needs them, for the colliders present (rounded up to a
+    /// power of two, at most the capacity), so a world whose steps never take it (a
+    /// fracture world, a uniform grid that never falls below its awake fraction) spends
+    /// nothing on them. Nothing in binding 14 outlives a step but those tables (the
+    /// constraint ids, CSR index, warm hash, grid heads and awake bitmap are rebuilt every
+    /// step), so the new buffer starts empty and the tables are rebuilt. A size past the
+    /// device's limits fails the step.
+    fn ensure_rest_tables(&mut self) -> anyhow::Result<()> {
+        if !rigid_plan::awake_broadphase(&self.step_modes(), &self.step_inputs()) {
+            return Ok(());
+        }
+        let c = &self.capacity;
+        let cols = self
+            .collider_count
+            .max(1)
+            .next_power_of_two()
+            .min(c.max_colliders)
+            .max(self.collider_count);
+        let base = u64::from(rigid_plan::constraint_id_words(c))
+            + u64::from(c.max_bodies)
+            + 1
+            + rigid_plan::awake_bits_words(c);
+        let bytes = 4 * (base + rigid_plan::rest_table_words(c, cols, self.grid_split, self.grid_fixed));
+        if self.bufs[14].size() >= bytes {
+            return Ok(());
+        }
+        check_limits(&self.device.limits(), 14, bytes)?;
+        let usage = self.bufs[14].usage();
+        let new = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("b14"),
+            size: bytes,
+            usage,
+            mapped_at_creation: false,
+        });
+        // Freed now (work already submitted still completes), not when collected.
+        std::mem::replace(&mut self.bufs[14], new).destroy();
+        self.rebind_buffer(14);
+        self.rest_stale = true;
+        Ok(())
+    }
+
     /// Diagnostic: a copy of one binding (for [`WgpuSim::debug_restore_binding`]), so
     /// that two [`WgpuSim::debug_broadphase_pairs`] runs start from the same scratch
     /// (the sleep archive lists touched sleepers per step there).
@@ -2481,7 +2529,8 @@ impl WgpuSim {
     pub fn debug_rest_layout(&self) -> (u64, u32) {
         let base = u64::from(rigid_plan::constraint_id_words(&self.capacity))
             + u64::from(self.capacity.max_bodies)
-            + 1;
+            + 1
+            + rigid_plan::awake_bits_words(&self.capacity);
         (base, self.grid_hash_words())
     }
 
@@ -2603,6 +2652,7 @@ impl WgpuSim {
             .is_ok()
             .then(web_time::Instant::now);
         self.refresh_cell();
+        self.ensure_rest_tables().map_err(|e| ExecError::Capacity(e.to_string()))?;
         let t_cell = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
         self.last_step_ran = true;
         self.flush_commands();
@@ -2829,8 +2879,13 @@ impl WgpuSim {
             }
         }
         let meta = engine_schema::SCRATCH_WORDS;
-        // ... [touched list] x maxBodies [spread step] x maxBodies (archiveMeta).
-        let scratch_words = u64::from(meta) + 4 + 7 * u64::from(mb) + 2 * u64::from(blocks);
+        // ... [touched list] x maxBodies [spread step] x maxBodies (archiveMeta). An archive
+        // that keeps no rows (cold wakes with the touch query: its rows, blocks and per-body
+        // row records are never read) holds only the touch query's three per-body words
+        // (archiveCompact).
+        let compact = !self.sleep_archive_keeps_rows();
+        let record_words = if compact { 3 * mb } else { 7 * mb + 2 * blocks };
+        let scratch_words = u64::from(meta) + 4 + u64::from(record_words);
         let limits = self.device.limits();
         grow.push((21, 4 * scratch_words));
         for &(binding, bytes) in &grow {
@@ -2859,14 +2914,17 @@ impl WgpuSim {
         for b in replaced {
             b.destroy();
         }
-        // The records: no rows, no blocks, not just asleep; every block free.
-        let mut words = vec![0u32; (4 + 7 * mb + 2 * blocks) as usize];
-        words[0] = blocks;
-        words[1] = blocks;
-        let (head, stack) = ((4 + mb) as usize, (4 + 5 * mb + blocks) as usize);
-        words[head..head + mb as usize].fill(u32::MAX);
-        for k in 0..blocks {
-            words[stack + k as usize] = k;
+        // The records: no rows, no blocks, not just asleep; every block free (compact:
+        // nothing touched, nothing listed, nothing spread).
+        let mut words = vec![0u32; (4 + record_words) as usize];
+        if !compact {
+            words[0] = blocks;
+            words[1] = blocks;
+            let (head, stack) = ((4 + mb) as usize, (4 + 5 * mb + blocks) as usize);
+            words[head..head + mb as usize].fill(u32::MAX);
+            for k in 0..blocks {
+                words[stack + k as usize] = k;
+            }
         }
         self.queue.write_buffer(
             &self.bufs[21],
@@ -2877,6 +2935,7 @@ impl WgpuSim {
             self.rebind_buffer(binding as u32);
         }
         self.sleep_archive_blocks = blocks;
+        self.sleep_archive_compact = compact;
         // The archive keeps resting rows through sleep, so the resting-pair carry
         // (8ep, which re-emits every resting pair each step to keep its warm start)
         // is off: a sleeping pair then costs nothing per step. city_scale drive
@@ -2896,7 +2955,8 @@ impl WgpuSim {
 
     /// The sleep archive's blocks in use and in all (diagnostic read; waits for the GPU).
     pub fn sleep_archive_use(&self) -> (u32, u32) {
-        if self.sleep_archive_blocks == 0 {
+        // A compact archive has no blocks.
+        if self.sleep_archive_blocks == 0 || self.sleep_archive_compact {
             return (0, 0);
         }
         let free =
@@ -2921,14 +2981,18 @@ impl WgpuSim {
             return Vec::new();
         }
         let mb = u64::from(self.capacity.max_bodies);
-        let list = meta + 4 + 5 * mb + 2 * u64::from(self.sleep_archive_blocks);
+        let list = if self.sleep_archive_compact {
+            meta + 4 + mb
+        } else {
+            meta + 4 + 5 * mb + 2 * u64::from(self.sleep_archive_blocks)
+        };
         self.read_buffer_range::<u32>(21, list * 4, n as usize)
     }
 
     /// `body`'s archived resting rows (`world_step.slang` archiveRowOf; diagnostic read,
     /// waits for the GPU).
     pub fn sleep_archive_rows(&self, body: u32) -> Vec<engine_schema::Contact> {
-        if self.sleep_archive_blocks == 0 || self.persistent_contacts {
+        if self.sleep_archive_blocks == 0 || self.persistent_contacts || self.sleep_archive_compact {
             return Vec::new();
         }
         let meta = u64::from(engine_schema::SCRATCH_WORDS);
@@ -3157,6 +3221,7 @@ impl WgpuSim {
             }
         };
         self.refresh_cell();
+        self.ensure_rest_tables().map_err(|e| ExecError::Capacity(e.to_string()))?;
         lap(&host_t, "refresh_cell");
         self.last_step_ran = true;
         self.flush_commands();
@@ -3344,6 +3409,7 @@ impl WgpuSim {
             archive_cold: self.archive_cold,
             archive_spread_rounds: self.archive_spread_rounds,
             archive_touch_query: self.archive_touch_query,
+            archive_compact: self.sleep_archive_compact,
         }
     }
 

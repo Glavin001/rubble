@@ -142,6 +142,10 @@ pub struct StepModes {
     /// pairs at rest keep their archived rows; off: `archive_emit` emits the pairs
     /// filed in the touched sleeper's own archive (the earlier path, for A/B runs).
     pub archive_touch_query: bool,
+    /// Sleep archive laid out without rows (host word 30 bit 9, world_step.slang
+    /// archiveCompact): only the touch query's per-body records, for an archive that
+    /// never keeps rows (cold wakes with the touch query).
+    pub archive_compact: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -1043,6 +1047,7 @@ pub fn encode_step(
 /// while the carry runs).
 pub fn archive_rows(m: &StepModes) -> bool {
     m.sleep_archive_blocks > 0
+        && !m.archive_compact
         && (!m.archive_cold || (!m.archive_touch_query && !m.carry_rest))
 }
 
@@ -1360,12 +1365,37 @@ pub const PASS_SLOTS: u64 = 160 + 2 * 33 * 9 + 33 * 33;
 /// First post-stabilization slot: `STAB_PASS + c` holds `256 | c` (colour c at α = 0).
 pub const STAB_PASS: u32 = 96;
 
-/// `gConstraintIds` words before the CSR index (grid heads, warm hash, ids).
-pub fn constraint_id_words(c: &WorldCapacity) -> u32 {
+/// The bound the pre-CSR region's tables are sized within (grid heads, warm hash):
+/// the constraint ids rounded up to a power of two. The region itself
+/// ([`constraint_id_words`]) holds only what those tables and the ids can reach.
+pub fn constraint_id_cap(c: &WorldCapacity) -> u32 {
     let words = (2 * (c.max_contacts + c.max_joints))
         .max(32768)
         .next_power_of_two() as u64;
     words.max(131072) as u32
+}
+
+/// `gConstraintIds` words before the CSR index (grid heads, warm hash, ids): the most
+/// any of them can use. Their sizes are those within [`constraint_id_cap`], so the
+/// tables are the same; only the words none of them can reach are not allocated
+/// (the ids' rounding to a power of two: 2 x (2^21 contacts + 64 joints) took 2^23
+/// words, half of them unused).
+pub fn constraint_id_words(c: &WorldCapacity) -> u32 {
+    let cap = constraint_id_cap(c);
+    let ids = 2 * (c.max_contacts + c.max_joints);
+    // Split grids: two tables (the most a grid takes, split or not).
+    let grid = 2 * grid_hash_words(c, c.max_colliders, true, false);
+    let fixed = 2 * grid_hash_words(c, c.max_colliders, true, true);
+    // The warm hash at the most contacts and bodies its callers pass (both clamped
+    // to the capacity), heads or records.
+    let heads = warm_hash_slots(c, c.max_bodies, c.max_contacts.max(256), false);
+    let records = 4 * warm_hash_slots(c, c.max_bodies, c.max_contacts.max(256), true);
+    ids.max(grid)
+        .max(fixed)
+        .max(heads)
+        .max(records)
+        .max(131072)
+        .min(cap)
 }
 
 /// Broadphase grid heads: at least twice the colliders (three-avbd), so 506k
@@ -1375,15 +1405,17 @@ pub fn grid_hash_words(c: &WorldCapacity, colliders: u32, split: bool, fixed: bo
     if fixed {
         return 131072;
     }
-    let region = constraint_id_words(c) / if split { 2 } else { 1 };
+    let region = constraint_id_cap(c) / if split { 2 } else { 1 };
     let cap = 1u32 << (31 - region.leading_zeros());
     (2 * colliders).max(131072).next_power_of_two().min(cap)
 }
 
 /// Warm hash size in slots: one word per slot (heads), or four-word record
 /// slots at ~2x manifolds, never below 4x bodies, within the pre-CSR region.
+/// `bodies` and `prev_contacts` are at most the capacity's ([`constraint_id_words`]
+/// holds the largest table).
 pub fn warm_hash_slots(c: &WorldCapacity, bodies: u32, prev_contacts: u32, record: bool) -> u32 {
-    let ids_len = constraint_id_words(c);
+    let ids_len = constraint_id_cap(c);
     if record {
         (prev_contacts / 2)
             .max(4 * bodies)
@@ -1423,7 +1455,9 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[11] = b(c.max_bodies, 4);
     s[12] = b(c.max_bodies, 4);
     s[13] = b(c.max_bodies + 1, 4);
-    s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1 + rest_table_words(c)) * 4;
+    // The constraint ids, the CSR index, the awake bitmap (the awake-indexed
+    // broadphase's tables are added once a step takes it).
+    s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1 + awake_bits_words(c)) * 4;
     s[15] = b(c.max_bodies * (c.max_colors + 2), 4);
     s[16] = b(c.max_colors * c.max_bodies.div_ceil(64).max(1), 4);
     s[17] = b(c.max_colors.max(128), 4);
@@ -1570,6 +1604,8 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     s[30] |= u32::from(m.archive_cold) << 6;
     // Bit 8: the archive's touch query (world_step.slang archiveTouchQuery).
     s[30] |= u32::from(archive_touch(m)) << 8;
+    // Bit 9: the archive's compact layout (world_step.slang archiveCompact).
+    s[30] |= u32::from(m.sleep_archive_blocks > 0 && m.archive_compact) << 9;
     if awake_broadphase(m, i) {
         // Rest tables (bit 0); bit 1 rebuilds them this step. Word 5: last step's
         // sleep events (a pipelined step copies them on the GPU), in the uniform
@@ -1587,14 +1623,22 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     s
 }
 
-/// Words of binding 14 past the CSR index that the awake-indexed broadphase uses
-/// (world_step.slang restBase): a 32-word header, the resting and awake heads, a
-/// resting link per collider, the awake-collider list, and per collider the uniform
-/// tables' awake stamp, the resting bucket and the incremental inserts' bucket list
-/// (restStampBase, restAtBase, restDirtyBase), then the awake bitmap (awakeBitsBase).
-pub fn rest_table_words(c: &WorldCapacity) -> u64 {
-    let grid = u64::from(grid_hash_words(c, c.max_colliders, false, false));
-    32 + 2 * grid + 5 * u64::from(c.max_colliders) + u64::from(c.max_bodies).div_ceil(32)
+/// Words of binding 14 past the CSR index every host allocates: the awake bitmap
+/// (world_step.slang awakeBitsBase, a word per 32 body slots).
+pub fn awake_bits_words(c: &WorldCapacity) -> u64 {
+    u64::from(c.max_bodies).div_ceil(32)
+}
+
+/// Words past the awake bitmap that the awake-indexed broadphase uses with up to
+/// `colliders` colliders on a grid of `split` / `fixed` layout (world_step.slang
+/// restBase): a 32-word header, the resting and awake heads, a resting link per
+/// collider, the awake-collider list, and per collider the uniform tables' awake stamp,
+/// the resting bucket and the incremental inserts' bucket list (restStampBase,
+/// restAtBase, restDirtyBase). Hosts grow binding 14 for them only once a step takes
+/// that broadphase (`WgpuSim::ensure_rest_tables`).
+pub fn rest_table_words(c: &WorldCapacity, colliders: u32, split: bool, fixed: bool) -> u64 {
+    let grid = u64::from(grid_hash_words(c, colliders, split, fixed));
+    32 + 2 * grid + 5 * u64::from(colliders)
 }
 
 /// The step's host uniform (params + the first 32 host words).
@@ -1676,6 +1720,66 @@ mod tests {
             pose_output: false,
             ..StepModes::default()
         }
+    }
+
+    /// The pre-CSR region holds every table its users can size (the grid, split or not,
+    /// fixed or not; the warm hash as heads or records at any contact and body count up
+    /// to the capacity; the ids), and those sizes are the ones within the power-of-two
+    /// cap, so a smaller region changes no table.
+    #[test]
+    fn constraint_id_region_holds_every_table() {
+        let caps = [
+            // ring110k, gables506k (demo-config.mjs sceneCap), small worlds, joints.
+            (131072, 262144, 2097152, 64),
+            (524288, 1048576, 6 * 1048576, 64),
+            (4096, 8192, 32768, 64),
+            (65536, 65536, 1048576, 10000),
+            (1024, 1024, 4096, 1),
+            (262144, 524288, 524288, 0),
+        ];
+        for (mb, mc, mcon, mj) in caps {
+            let c = WorldCapacity {
+                max_bodies: mb,
+                max_colliders: mc,
+                max_contacts: mcon,
+                max_joints: mj,
+                ..WorldCapacity::small()
+            };
+            let words = constraint_id_words(&c);
+            let cap = constraint_id_cap(&c);
+            assert!(words <= cap && words >= 2 * (mcon + mj), "{words} {cap}");
+            for colliders in [0, mc / 3, mc] {
+                for split in [false, true] {
+                    for fixed in [false, true] {
+                        let g = grid_hash_words(&c, colliders, split, fixed);
+                        assert!(g.is_power_of_two());
+                        let tables = if split { 2 } else { 1 };
+                        // The fixed control's split tables overlapped small regions before.
+                        if !(fixed && split && 2 * g > cap) {
+                            assert!(tables * g <= words, "grid {g} x{tables} > {words}");
+                        }
+                    }
+                }
+            }
+            for bodies in [0, mb / 2, mb] {
+                for prev in [256, mcon / 2, mcon.max(256)] {
+                    let h = warm_hash_slots(&c, bodies, prev, false);
+                    let r = warm_hash_slots(&c, bodies, prev, true);
+                    assert!(h.is_power_of_two() && r.is_power_of_two());
+                    assert!(h <= words && 4 * r <= words, "warm {h} / {r} records > {words}");
+                }
+            }
+        }
+        // The rounding no table reaches is not allocated: ring110k's region was 2^23 words.
+        let ring = WorldCapacity {
+            max_bodies: 131072,
+            max_colliders: 262144,
+            max_contacts: 2097152,
+            max_joints: 64,
+            ..WorldCapacity::small()
+        };
+        assert_eq!(constraint_id_cap(&ring), 1 << 23);
+        assert_eq!(constraint_id_words(&ring), 2 * (2097152 + 64));
     }
 
     #[test]
