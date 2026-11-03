@@ -109,6 +109,13 @@ struct Params
     uint candTable; // gLists: per candidate its gLists position
     uint slotBase16; // gBeams: per vehicle and bucket WIDE_SLOTS (position, node)
     uint overflowBase; // gAcc: per vehicle the overflow count; gNext: overflow nodes at candOff
+    // Aerodynamics and commands (the EB_AERO modules only; see the aero section).
+    uint aeroBase; // gStatic: per vehicle 2 records
+    uint wingBase; // gStatic: per wing 4 records
+    uint cmdBase; // gStatic: per self-centering command 2 records
+    uint aeroState; // gBeams: per vehicle D, then per wing 4 records, then per command 1
+    uint wingTotal; // wings over every vehicle
+    uint aeroPad;
 };
 
 struct Surface
@@ -360,9 +367,23 @@ float3 beamSum(float3 f, uint4 info, uint beamOff, uint groupOff, uint groupCoun
 
 // --- passes ---
 
+#ifdef EB_AERO
+void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float ground, uint boxOff, uint boxCount,
+                    uint beamOff, uint groupOff, uint groupCount, uint parity, bool hits);
+static const uint FLAG_FUSEDRAG = 8u;
+#endif
+
 void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
                 uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits)
 {
+#ifdef EB_AERO
+    if ((flagsV & FLAG_FUSEDRAG) != 0u)
+    {
+        nodeUpdateFuse(gi, info, vehicle, origin, ground, boxOff, boxCount, beamOff, groupOff, groupCount,
+                       (step + 1u) & 1u, hits);
+        return;
+    }
+#endif
     float4 P = gNodes[gi * 3u];
     float4 V = gNodes[gi * 3u + 1u];
     // Last step's beams (with its group breaks) and self-collision.
@@ -760,6 +781,292 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
     }
 }
 
+
+// --- Aerodynamics and commands with no input (EB_AERO modules) ---
+// engine/docs/explicit-beams-aero-commands-spec.md; CPU reference
+// engine_softbody::explicit_aero. The specification's double-precision
+// sub-expressions run in strict single precision here (WGSL has no f64), so the GPU
+// may differ from the CPU by an ulp in them; the angle of attack's acos is the
+// device's.
+//
+//   gStatic at aeroBase per vehicle: (wingOff, wingCount, cmdOff, cmdCount) (wing and
+//            command indices global), (front node global, width bits, node count,
+//            0); at wingBase per wing: (FLD, FRD, FLU, FRU), (BLD, BRD, BLU, BRU)
+//            (global nodes), (efficacy, break reference, table record, induced side
+//            0 none 1 left 2 right), (chain span, chain area, 0, 0) as bits; at
+//            cmdBase per command: (beam global, contract first, centre bits, 0),
+//            (shorten rate, lengthen rate, max contraction, max extension) bits;
+//            a table record holds 3601 (cl, cd, cm, 0) as bits.
+//   gBeams   at aeroState per vehicle (D, 0); then per wing (broken, 0, 0, 0),
+//            induced drag, front force, back force; then per command (mode, 0, 0, 0).
+#ifdef EB_AERO
+
+uint wingState(uint gw) { return gP.aeroState + gP.vehicles + gw * 4u; }
+uint cmdState(uint gc) { return gP.aeroState + gP.vehicles + gP.wingTotal * 4u + gc; }
+
+float slen(float3 v) { return ssqrt(sdot(v, v)); }
+float3 snormalise(float3 v)
+{
+    float l = slen(v);
+    if (l > 0.0) return sscale(v, sdiv(1.0, l));
+    return v;
+}
+
+// pow≈-based air density at height y; `t0` 288.15 (wings) or 288.1 (fuselage).
+float airDensity(float y, float t0)
+{
+    float t = nf(1.0 - sdiv(smul(0.0065, y), t0));
+    float p = smul(101325.0, approxPow(t, 5.24947));
+    return smul(p, 0.0000120896);
+}
+
+// The signed angle of attack (degrees), as the CPU reference evaluates it.
+float angleOfAttack(float3 c, float3 n, float3 b, float3 w)
+{
+    float3 q = snormalise(scross(n, c));
+    float3 g = -w;
+    float3 p;
+    for (uint i = 0u; i < 3u; i++)
+    {
+        float3 m = float3(-smul(q[i], q.x), -smul(q[i], q.y), -smul(q[i], q.z));
+        m[i] = nf(1.0 - smul(q[i], q[i]));
+        p[i] = nf(nf(smul(m.x, g.x) + smul(m.y, g.y)) + smul(m.z, g.z));
+    }
+    float3 u = c;
+    float3 t = -p;
+    float a = ssqrt(smul(sdot(u, u), sdot(t, t)));
+    float beta = nf(a + sdot(t, u));
+    if (abs(nf(beta - smul(2.0, a))) <= 1.1920929e-7 || a == 0.0) return 0.0;
+    float qw = beta;
+    float3 ax = scross(u, t);
+    if (beta < smul(1e-6, a))
+    {
+        qw = 0.0;
+        ax = abs(u.x) > abs(u.z) ? float3(-u.y, u.x, 0.0) : float3(0.0, -u.z, u.y);
+    }
+    float nq = ssqrt(nf(nf(nf(smul(qw, qw) + smul(ax.x, ax.x)) + smul(ax.y, ax.y)) + smul(ax.z, ax.z)));
+    float inv = sdiv(1.0, nq);
+    qw = smul(qw, inv);
+    ax = sscale(ax, inv);
+    float s2 = sdot(ax, ax);
+    float theta = 0.0;
+    float3 axis = float3(1.0, 0.0, 0.0);
+    if (s2 > 0.0)
+    {
+        float ac = qw >= 1.0 ? 0.0 : (qw <= -1.0 ? 3.14159274 : acos(qw));
+        theta = smul(2.0, ac);
+        axis = sscale(ax, sdiv(1.0, ssqrt(s2)));
+    }
+    float alpha = smul(theta, sdiv(180.0, 3.14159274));
+    return sdot(axis, b) > 0.0 ? -alpha : alpha;
+}
+
+// (cl, cd, cm) of table record `table` at angle a (degrees), no deflection.
+float3 airfoilLookup(uint table, float a)
+{
+    float k = trunc(sdiv(a, 360.0));
+    float w = nf(a - smul(k, 360.0));
+    if (w > 180.0) w = nf(w - 360.0);
+    if (w < -180.0) w = nf(w + 360.0);
+    float fi = trunc(smul(nf(w + 180.0), 10.0));
+    uint i = uint(clamp(fi, 0.0, 3600.0));
+    return asfloat(gStatic[table + i].xyz);
+}
+
+// Wing gw's forces this step into its state records (zero when broken).
+void wingForces(uint gw, float3 origin)
+{
+    uint ws = wingState(gw);
+    if (gBeams[ws].x != 0.0) return;
+    uint4 A = gStatic[gP.wingBase + gw * 4u];
+    uint4 B = gStatic[gP.wingBase + gw * 4u + 1u];
+    uint4 C = gStatic[gP.wingBase + gw * 4u + 2u];
+    float4 D = asfloat(gStatic[gP.wingBase + gw * 4u + 3u]);
+    float3 xfld = gNodes[A.x * 3u].xyz;
+    float3 xfrd = gNodes[A.y * 3u].xyz;
+    float3 xbld = gNodes[B.x * 3u].xyz;
+    float3 xbrd = gNodes[B.y * 3u].xyz;
+    float3 w = -sscale(sadd3(gNodes[A.x * 3u + 1u].xyz, gNodes[A.y * 3u + 1u].xyz), 0.5);
+    float speed = slen(w);
+    float3 c = sscale(sadd3(ssub3(xbld, xfld), ssub3(xbrd, xfrd)), 0.5);
+    float chord = slen(c);
+    float3 b = sscale(sadd3(ssub3(xfrd, xfld), ssub3(xbrd, xbld)), 0.5);
+    float span = slen(b);
+    float3 l = scross(b, -w);
+    float s = smul(span, chord);
+    float3 n = snormalise(scross(c, b));
+    float3 co = airfoilLookup(C.z, angleOfAttack(c, n, b, w));
+    float rho = airDensity(nf(origin.y + xfld.y), 288.15);
+    float kd = smul(smul(smul(smul(co.y, 0.5), rho), speed), s);
+    float3 wf = sscale(w, kd);
+    float3 ind = float3(0.0, 0.0, 0.0);
+    if (C.w != 0u)
+    {
+        float num = smul(smul(smul(smul(smul(smul(co.y, co.y), 0.25), rho), speed), D.y), D.y);
+        float den = smul(smul(3.14159, D.x), D.x);
+        ind = sscale(w, sdiv(num, den));
+    }
+    float kl = smul(smul(smul(smul(co.x, 0.5), rho), speed), chord);
+    wf = sadd3(wf, sscale(l, kl));
+    float mu = smul(smul(smul(smul(smul(-co.z, 0.5), rho), speed), speed), s);
+    float e = asfloat(C.x);
+    float em = smul(e, mu);
+    gBeams[ws + 1u] = float4(ind, 0.0);
+    gBeams[ws + 2u] = float4(sadd3(sscale(wf, smul(e, 0.1875)), sscale(n, em)), 0.0);
+    gBeams[ws + 3u] = float4(ssub3(sscale(wf, smul(e, 0.0625)), sscale(n, sdiv(em, 3.0))), 0.0);
+}
+
+void addForce(uint node, float3 f)
+{
+    float4 F = gNodes[node * 3u + 2u];
+    gNodes[node * 3u + 2u] = float4(sadd3(F.xyz, f), F.w);
+}
+
+// One lane adds a vehicle's wing forces in file order, slot by slot, as the CPU.
+void wingApply(uint wingOff, uint wingCount)
+{
+    for (uint k = 0u; k < wingCount; k++)
+    {
+        uint gw = wingOff + k;
+        uint ws = wingState(gw);
+        if (gBeams[ws].x != 0.0) continue;
+        uint4 A = gStatic[gP.wingBase + gw * 4u];
+        uint4 B = gStatic[gP.wingBase + gw * 4u + 1u];
+        uint side = gStatic[gP.wingBase + gw * 4u + 2u].w;
+        float3 ind = gBeams[ws + 1u].xyz;
+        float3 f1 = gBeams[ws + 2u].xyz;
+        float3 f2 = gBeams[ws + 3u].xyz;
+        if (side == 1u) { addForce(B.z, ind); addForce(B.x, ind); }
+        if (side == 2u) { addForce(B.w, ind); addForce(B.y, ind); }
+        addForce(A.x, f1); addForce(A.z, f1); addForce(A.y, f1); addForce(A.w, f1);
+        addForce(B.x, f2); addForce(B.z, f2); addForce(B.y, f2); addForce(B.w, f2);
+    }
+}
+
+// The per-frame break check on world positions (before the origin rebase).
+void wingCheck(uint gw, float3 origin)
+{
+    uint ws = wingState(gw);
+    if (gBeams[ws].x != 0.0) return;
+    uint4 A = gStatic[gP.wingBase + gw * 4u];
+    uint4 B = gStatic[gP.wingBase + gw * 4u + 1u];
+    float sref = asfloat(gStatic[gP.wingBase + gw * 4u + 2u].y);
+    float3 fld = nf3(origin + gNodes[A.x * 3u].xyz);
+    float3 frd = nf3(origin + gNodes[A.y * 3u].xyz);
+    float3 bld = nf3(origin + gNodes[B.x * 3u].xyz);
+    float3 brd = nf3(origin + gNodes[B.y * 3u].xyz);
+    float3 x = ssub3(frd, fld);
+    float3 cl = scross(x, ssub3(bld, fld));
+    float3 cr = scross(x, ssub3(brd, frd));
+    if (sdot(cl, cl) > sref || sdot(cr, cr) > sref) gBeams[ws] = float4(1.0, 0.0, 0.0, 0.0);
+}
+
+// The fuselage drag D from the front node's velocity and height, for the next step.
+void fuseDrag(uint4 rec, float3 origin, uint vehicle)
+{
+    float width = asfloat(rec.y);
+    if (!(width > 0.0)) return;
+    float3 a = -gNodes[rec.x * 3u + 1u].xyz;
+    float speed = slen(a);
+    float rho = airDensity(nf(origin.y + gNodes[rec.x * 3u].y), 288.1);
+    float k = sdiv(smul(smul(smul(smul(smul(width, width), 0.5), 0.5), rho), speed), float(rec.z));
+    gBeams[gP.aeroState + vehicle] = float4(sscale(a, k), 0.0);
+}
+
+// One self-centering command's step: both entries in key order.
+void commandUpdate(uint gc)
+{
+    uint4 R = gStatic[gP.cmdBase + gc * 2u];
+    float4 rates = asfloat(gStatic[gP.cmdBase + gc * 2u + 1u]);
+    uint j = R.x;
+    float centre = asfloat(R.z);
+    float4 s0 = gBeams[j * 2u];
+    float rest = s0.x;
+    float rest0 = asfloat(gStatic[gP.beamBase + j * 3u + 2u].w);
+    float mode = gBeams[cmdState(gc)].x;
+    for (uint e = 0u; e < 2u; e++)
+    {
+        float sigma = (e == 0u) == (R.y != 0u) ? -1.0 : 1.0;
+        if (rest0 == 0.0 || rest == 0.0) continue;
+        float r = sdiv(rest, rest0);
+        if (abs(nf(r - centre)) < 1e-4) mode = 0.0;
+        else
+        {
+            float old = mode;
+            mode = r > centre ? -1.0 : 1.0;
+            if (old != 0.0 && old != mode)
+            {
+                rest = smul(centre, rest0);
+                mode = 0.0;
+            }
+        }
+        r = sdiv(rest, rest0);
+        bool may = (sigma > 0.0 && r < rates.w) || (sigma < 0.0 && r > rates.z);
+        if (may)
+        {
+            float v = sigma * mode > 0.0 ? 1.0 : 0.0;
+            float rate = sigma > 0.0 ? rates.y : rates.x;
+            float x = sdiv(smul(smul(smul(rate, v), 1.0), STEP), rest);
+            rest = nf(fma(sigma * x, rest, rest));
+        }
+    }
+    if (rest != s0.x) gBeams[j * 2u] = float4(rest, s0.yzw);
+    gBeams[cmdState(gc)] = float4(mode, 0.0, 0.0, 0.0);
+}
+
+// nodeUpdate for a vehicle with a `fusedrag` line: the restart adds the stored
+// fuselage drag D instead of the air drag and turbulence.
+void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float ground, uint boxOff, uint boxCount,
+                    uint beamOff, uint groupOff, uint groupCount, uint parity, bool hits)
+{
+    float4 P = gNodes[gi * 3u];
+    float4 V = gNodes[gi * 3u + 1u];
+    float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, parity, true);
+    if (hits)
+    {
+        f = f + accForce(gi);
+        gAcc[gi * 3u].store(0);
+        gAcc[gi * 3u + 1u].store(0);
+        gAcc[gi * 3u + 2u].store(0);
+    }
+    uint flags = info.x;
+    float3 pos = P.xyz;
+    float3 vel = V.xyz;
+    float mass = P.w;
+    if ((flags & NODE_NO_GROUND) == 0u)
+    {
+        float3 x = origin + pos;
+        if (ground > x.y)
+            f += contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+        for (uint b = 0u; b < boxCount; b++)
+        {
+            float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u].xyz);
+            float3 hi = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u + 1u].xyz);
+            if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)
+            {
+                float3 n = float3(0.0, 0.0, -1.0);
+                float d = x.z - lo.z;
+                if (hi.z - x.z < d) { d = hi.z - x.z; n = float3(0.0, 0.0, 1.0); }
+                if (x.x - lo.x < d) { d = x.x - lo.x; n = float3(-1.0, 0.0, 0.0); }
+                if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
+                if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
+                if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
+                f += contactForce(f, vel, mass, n, boxSurface(), 0.0, V.w);
+            }
+        }
+    }
+    if ((flags & NODE_IMMOVABLE) == 0u)
+    {
+        vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
+        pos = sadd3(pos, sscale(vel, STEP));
+    }
+    f = sadd3(float3(0.0, smul(mass, GRAVITY), 0.0), gBeams[gP.aeroState + vehicle].xyz);
+    gNodes[gi * 3u] = float4(pos, mass);
+    gNodes[gi * 3u + 1u] = float4(vel, V.w);
+    gNodes[gi * 3u + 2u] = float4(f, 0.0);
+}
+#endif
+
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -787,6 +1094,15 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float range = asfloat(r3.z);
     float cell = asfloat(r3.w);
     bool fast = (flagsV & FLAG_FAST_INV_SQRT) != 0u;
+#ifdef EB_AERO
+    uint4 aero0 = gStatic[gP.aeroBase + v * 2u];
+    uint4 aero1 = gStatic[gP.aeroBase + v * 2u + 1u];
+    // The wing break check, once per frame on the positions before the rebase.
+    {
+        float3 o = asfloat(gMisc[v].xyz);
+        for (uint w = lane; w < aero0.y; w += LANES) wingCheck(aero0.x + w, o);
+    }
+#endif
 
     // Origin rebase: every lane reads node 0 before any lane moves it.
     float3 first = gNodes[nodeOff * 3u].xyz;
@@ -851,6 +1167,16 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 gNext[candOff + c] = b | (gsCount[b].add(1u) << 10);
             }
         }
+#ifdef EB_AERO
+        // Wings (forces from this step's integrated state), the fuselage drag for
+        // the next step, and the commands' rest lengths; then one lane adds the
+        // wings' forces in file order while the others start the beams.
+        for (uint w = lane; w < aero0.y; w += LANES) wingForces(aero0.x + w, origin);
+        if (lane == LANES - 1u && (flagsV & FLAG_FUSEDRAG) != 0u) fuseDrag(aero1, origin, v);
+        for (uint c = lane; c < aero0.w; c += LANES) commandUpdate(aero0.z + c);
+        sync();
+        if (lane == 0u) wingApply(aero0.x, aero0.y);
+#endif
         for (uint j = lane; j < beamCount; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
         sync();
         if (gP.grid != 0u)

@@ -549,6 +549,32 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             "storageBarrier(); workgroupBarrier();",
         );
     std::fs::write(&wide, text)?;
+    // With wings, the fuselage drag and command beams (EB_AERO), at both lane
+    // counts: the modules above stay those of vehicles without them.
+    for (name, lanes) in [
+        ("explicit_beams_aero", "256"),
+        ("explicit_beams_aero_wide", "512"),
+    ] {
+        let out = wgsl_dir.join(format!("{name}.wgsl"));
+        compile_with_defines(
+            &slang_root.join("kernels/explicit_beams.slang"),
+            "explicit_beams_frame",
+            SlangTarget::Wgsl,
+            &out,
+            &[],
+            &[("ENGINE_WGSL", "1"), ("EB_LANES", lanes), ("EB_AERO", "1")],
+        )?;
+        let text = std::fs::read_to_string(&out)?
+            .replace(
+                "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+                "storageBarrier(); workgroupBarrier();",
+            )
+            .replace(
+                "storageBarrier(); textureBarrier(); workgroupBarrier();",
+                "storageBarrier(); workgroupBarrier();",
+            );
+        std::fs::write(&out, text)?;
+    }
     // Compact snapshots' buffer extents (WgpuSim::measure_state): standalone.
     let extent = wgsl_dir.join("state_extent.wgsl");
     let status = std::process::Command::new(find_slangc()?)
