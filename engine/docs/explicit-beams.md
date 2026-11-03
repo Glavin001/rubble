@@ -149,6 +149,28 @@ turbulence), and self-centering command beams move their rest lengths; then the
 beams. Airfoil tables are read at run time (`RUBBLE_AIRFOIL_DIR`, or a loader given
 to `from_truck_with_airfoils`); Rubble ships none.
 
+## Sections, triggers, slide nodes, animators
+
+`section` / `end_section` configurations, `triggers` (with the command motion they
+drive), `slidenodes` and `tacho` animators with no engine follow
+`explicit-beams-sections-triggers-slidenodes-spec.md`
+(`engine_softbody::explicit_triggers`):
+
+* the loader spawns the root module plus one configuration
+  (`truck::parse_truck_config`, `ExplicitBeams::from_truck_config`; default the
+  first `section` name in byte order), every list's root lines before the module's;
+  `TruckFile::section_configs` and `section_config` report the names and the choice;
+* beam order after hydros: triggers (zero-force beams of kind trigger), then
+  animators (constant-length actuators); slide nodes add no beams;
+* per step: with triggers every command line moves by its keys in the command pass,
+  reading the trigger inputs the last beam pass set (one step of latency); the beam
+  pass runs each trigger's bounds test; after self-collision the slide nodes add their
+  spring forces in spawn order;
+* unsupported options (trigger `x b B A s h H t E` or long action −1, slide-node
+  `R D C G`, `railgroups`, `slidenode_connect_instantly`, animator sources other
+  than `tacho`, a trigger-held command with key inertia or `o`/`p`) are refused:
+  `from_truck` fails with the parser's `TruckFile::errors`.
+
 ## One frame
 
 Once per frame, before its steps: if node 0's relative position is farther than 100 m
@@ -268,6 +290,14 @@ Otherwise:
   the wing forces in file order while the others run the beams. The specification's
   double-precision sub-expressions run in strict single precision there. The wide
   passes are off for such fleets.
+* Triggers, key-driven commands and slide nodes also run in the `EB_AERO` modules
+  with no added barrier. A trigger beam stores 1 into its key's slot of a
+  per-vehicle, per-step-parity table (plain stores); the next step's command lanes
+  read the other parity, and its beam phase clears it. One lane per vehicle runs the
+  slide nodes in spawn order during the self-collision phase, adding into float
+  slots of the slide nodes and rail ends (flagged in their node info) that the next
+  node phase adds and clears. Slide-node loops are bounded by static counts and
+  every index is clamped.
 * Targets (M3 Max): the Agora S bus (195 nodes, 862 beams with tyres) at ≤ 0.6 ms per
   60 fps frame for 1–40 vehicles, ≤ 9 ms for 1000.
 
