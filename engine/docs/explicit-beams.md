@@ -341,12 +341,13 @@ Each of these keeps the results bit for bit (see *Bit-identity tests* below):
   vehicle's step latency sets the frame) run 512 lanes per vehicle; larger fleets
   keep 256 (512 for vehicles over 2048 beams). 1024 lanes was slower on an M3 Max
   (wider barriers, a longer serial grid scan) and is not shipped.
-* **Grid skip.** A step whose listed triangles × contacters is at most 16 × lanes
-  skips the grid's counting sort (five barriers) and tests every candidate, keeping
-  exactly those the grid walk would test (inside the triangle's box and in a bucket
-  its cells cover, with the grid's own expressions). The decision is one lane's,
-  read through `gsUniformLanes` (uniform for Chrome).
-* **Early pairs.** Without the grid, the beam phase lists the (triangle, contacter)
+* **Grid skip (off).** A step with few (triangle, contacter) pairs could skip the
+  grid's counting sort and test every candidate, keeping exactly the hits the grid
+  walk finds. It is built but off (`BRUTE_PAIRS_PER_LANE = 0`): it resolves the
+  documented same-contacter race differently (the lanes of a wave read before any
+  adds), and the E36 drive accuracy ensemble against RoR went from 115–150 mm (pass)
+  to 310–520 mm (fail). A vehicle with a grid always uses it.
+* **Early pairs.** For a vehicle without a grid, the beam phase lists the (triangle, contacter)
   pairs that pass those tests and tryContact's box test, on the lanes the beams
   leave idle (lanes in reverse); the triangle phase runs tryContact on the listed
   pairs only. More than 1024 pairs: the usual walk.
@@ -370,7 +371,7 @@ Each of these keeps the results bit for bit (see *Bit-identity tests* below):
   itself; a later owner's reset of an earlier owner is applied after that owner's
   update). Larger groups keep the member-by-member path.
 
-Measured and not adopted (no gain): one barrier instead of two per `sync()` (Apple:
+Measured and not adopted: the grid skip (accuracy, above); one barrier instead of two per `sync()` (Apple:
 about 0); the hit test in the beam phase as well (Viper slower: it hits every step,
 so the geometry ran twice); 1024 lanes.
 
