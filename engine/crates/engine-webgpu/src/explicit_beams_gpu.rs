@@ -444,7 +444,7 @@ const NONE: u32 = u32::MAX;
 const NODE_SLOT_SHIFT: u32 = 8;
 /// Per vehicle the kernel's self-collision hit list (HIT_CAP records of HIT_WORDS
 /// words) and pending-beam list (PEND_CAP) in gNext.
-const SELF_HIT_WORDS: usize = 256 * 8 + 64;
+const SELF_HIT_WORDS: usize = 256 * 24 + 64;
 /// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
 const WIDE_MAX_VEHICLES: usize = 256;
 

@@ -310,20 +310,27 @@ its spawned positions). The velocity is in world axes.
   (1/32 N); a triangle's throttle is finished in the next node pass.
 * Self-collision in the specification's order. The lanes find the hits in parallel
   ((triangle, contacter) pairs spread over the lanes, the grid or the grid skip
-  below) and record each in the vehicle's hit list as a key, triangle (file order)
-  << 16 | contacter (node order). Then `selfApply`: in rounds, every hit whose
-  earlier hits (smaller keys) touching its contacter node already have their force
-  computes its own: its node's force plus, in fixed point, the shares of exactly
-  those earlier hits, as the accumulator would read had the hits been added one by
-  one in key order. A round is two barriers; a step usually needs one or two
-  rounds (a chain of hits on one node needs one each; past 32 rounds one lane
-  finishes in key order). Then every hit adds its shares to the accumulators
-  (integer sums: any order). So the result is that of the sequential pass whatever
+  below) and record each in the vehicle's hit list: its key, triangle (file order)
+  << 16 | contacter (node order), the triangle's nodes, the contact's weights,
+  normal, penetration, relative velocity and reduced mass, and (unless beams of
+  this step are pending, below) its force as it is when no earlier hit touches the
+  contacter. Then `selfApply`, after a barrier: in rounds, every hit whose earlier
+  hits (smaller keys) touching its contacter node have their force takes the
+  shares of exactly those hits, in fixed point, as the accumulator would hold them
+  had the hits been added one by one in key order; with none it keeps the force
+  the finding lane computed, else it computes it again; then it adds its own
+  shares (integer sums: any order; the accumulators hold nothing else in this
+  phase). A round is one barrier (the flag of the last round with open hits only
+  grows within a step, so every lane reads the same decision); a step usually
+  needs one (a chain of hits on one node needs one each; past 32 rounds one lane
+  finishes in key order). So the result is that of the sequential pass whatever
   order the lanes found the hits in, and runs are deterministic. The hit force is
   computed in strict arithmetic in the CPU's order. A step with more than 256 hits
   (`HIT_CAP`) runs the whole self-collision of that vehicle and step on one lane
   in the specification's order instead (exact, slow; never seen in the test cars,
-  at most 37 hits in an E36 wall crash step).
+  at most 37 hits in an E36 wall crash step). The wide passes find hits in
+  `explicit_beams_wide_tris` and apply them in `explicit_beams_wide_hits`, a
+  workgroup per vehicle.
 * The break exception reads the beams in spawn order. A beam whose force passes its
   strength with an end on a collision triangle is deferred in the beam phase
   (marked pending, nothing else written); after the beam phase's barrier one lane
@@ -422,6 +429,84 @@ baseline one frame at a time from the CPU reference's state against the CPU. Rea
 cars come from `RUBBLE_INSPIRATION` when set (Viper, E36, Mustang, Agora S); the
 repository's sedan always. `explicit-wgsl-check.mjs` compiles every shipped module
 in Chrome.
+
+### Self-collision order (feat/explicit-selfcol-order)
+
+Measured on an M3 Max, 120 fps (17 steps a frame), `speed=27.78`, `drag=0`,
+single-car ensembles of 24 nudged runs per engine (`explicit_beams_scaling
+nudges=24`, 2.5 s; pairs 3.5 s) against RoR. `max_load=8 max_gpu=10` throughout: a
+macOS background service holds the load average at 4–6; every run started under
+both limits.
+
+Why the grid skip failed (E36 drive, M_XR against a limit of 1.5 × M_RR = 135.7 mm):
+
+| Rubble | M_XR (mm) | ratio [95 %] |
+|---|---|---|
+| CPU reference (`engine=cpu`, the specification's order) | 85.7 | 0.95 [0.73, 1.23] |
+| GPU, hits in lane order, grid always | 96.5 | 1.07 [0.79, 1.45] |
+| GPU, hits in lane order, grid skip | 348.3 (fail) | 3.85 [2.34, 5.67] |
+| GPU `EB_DET_HITS` (one lane, sorted), grid always | 80.8 | 0.89 [0.68, 1.20] |
+| GPU `EB_DET_HITS`, grid skip | 80.8 (the same runs, bit for bit) | 0.89 [0.68, 1.20] |
+| GPU, ordered hits (this kernel), grid skip | 91.3 | 1.01 [0.74, 1.33] |
+
+The race probe (baseline kernel) on the E36: a contact race in 300 of 300 frames
+idle, drive and impact; a break-exception race in 0 frames idle and drive, 4 of 300
+in the wall crash. So the same-contacter race drives it: in the skip's brute-force
+walk the lanes of a wave read a contacter's force before any of them adds, so two
+triangles hitting one contacter both cancel its whole normal force.
+
+Per frame from the CPU's state (`cpu_reference_per_frame`, 40 frames, node RMS to
+the CPU after one frame): E36 at rest median 0.213 mm (max 0.396) before, 0.001 mm
+(max 0.006) now; E36 into a wall 0.381 mm (max 3.92) before, 0.001 mm (max 0.0014)
+now; Viper into a wall max 0.68 mm before, 0.0006 mm now. Over whole runs the
+kernel is deterministic (two worlds in lockstep stay bit-identical, `diff=1`).
+
+Accuracy ensembles before (lane-order hits, grid always) and after (ordered hits,
+grid skip): every one of the 21 single-car and 6 two-car cases passes both times;
+RoR's runs are shared (`ror_reuse=1`). M_XR with its ratio to M_RR and the
+bootstrap interval; broken and bent are Rubble medians against RoR's range.
+
+| car | scenario | M_RR (mm) | before M_XR (ratio) | after M_XR (ratio) | broken before/after/RoR | bent before/after/RoR | verdict before | verdict after |
+|---|---|---|---|---|---|---|---|---|
+| e36 | idle | 4.76 | 3.83 (0.80 [0.66, 0.94]) | 4.03 (0.85 [0.69, 0.99]) | 0.0 / 0.0 / 0.0–0.0 | 13.0 / 13.5 / 12.0–15.0 | PASS | PASS |
+| e36 | drive | 90.44 | 77.67 (0.86 [0.68, 1.07]) | 91.34 (1.01 [0.74, 1.33]) | 0.0 / 0.0 / 0.0–0.0 | 11.0 / 11.0 / 10.0–13.0 | PASS | PASS |
+| e36 | impact | 554.07 | 663.46 (1.20 [1.01, 1.35]) | 546.82 (0.99 [0.87, 1.06]) | 90.5 / 63.0 / 54.0–121.0 | 532.5 / 542.0 / 511.0–557.0 | PASS | PASS |
+| viper | idle | 4.06 | 3.47 (0.85 [0.56, 1.29]) | 2.80 (0.69 [0.47, 1.00]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| viper | drive | 16.81 | 16.43 (0.98 [0.77, 1.09]) | 16.36 (0.97 [0.78, 1.09]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| viper | impact | 366.19 | 379.66 (1.04 [0.90, 1.29]) | 371.95 (1.02 [0.88, 1.24]) | 0.0 / 0.0 / 0.0–0.0 | 134.5 / 134.5 / 129.0–138.0 | PASS | PASS |
+| mustang | idle | 0.76 | 0.77 (1.02 [0.72, 1.23]) | 0.77 (1.02 [0.72, 1.23]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| mustang | drive | 16.94 | 16.65 (0.98 [0.81, 1.12]) | 16.65 (0.98 [0.81, 1.12]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| mustang | impact | 290.72 | 285.08 (0.98 [0.85, 1.13]) | 282.83 (0.97 [0.82, 1.21]) | 0.0 / 0.0 / 0.0–0.0 | 805.5 / 805.5 / 794.0–815.0 | PASS | PASS |
+| audi | idle | 2.58 | 2.75 (1.06 [0.80, 1.49]) | 2.75 (1.06 [0.80, 1.49]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| audi | drive | 237.58 | 265.84 (1.12 [0.80, 1.90]) | 265.84 (1.12 [0.80, 1.90]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| audi | impact | 638.54 | 545.47 (0.85 [0.61, 1.03]) | 557.68 (0.87 [0.62, 1.06]) | 167.0 / 167.5 / 157.0–178.0 | 445.0 / 444.5 / 423.0–458.0 | PASS | PASS |
+| agora_s | idle | 1.25 | 1.51 (1.20 [0.91, 1.45]) | 1.46 (1.16 [0.92, 1.51]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| agora_s | drive | 10.43 | 11.01 (1.06 [0.93, 1.26]) | 10.81 (1.04 [0.91, 1.23]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| agora_s | impact | 602.00 | 595.99 (0.99 [0.83, 1.94]) | 565.92 (0.94 [0.60, 1.47]) | 19.0 / 19.0 / 19.0–21.0 | 50.0 / 51.0 / 48.0–52.0 | PASS | PASS |
+| agora_l | idle | 6.98 | 7.02 (1.01 [0.85, 1.19]) | 6.59 (0.94 [0.81, 1.11]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| agora_l | drive | 11.09 | 11.31 (1.02 [0.92, 1.15]) | 10.41 (0.94 [0.86, 1.06]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| agora_l | impact | 465.43 | 455.47 (0.98 [0.88, 1.19]) | 459.24 (0.99 [0.89, 1.21]) | 30.0 / 30.5 / 28.0–31.0 | 67.0 / 67.0 / 65.0–70.0 | PASS | PASS |
+| sedan | idle | 0.20 | 0.26 (0.38 [0.31, 0.48]) | 0.26 (0.38 [0.31, 0.48]) | 0.0 / 0.0 / 0.0–0.0 | 0.0 / 0.0 / 0.0–0.0 | PASS | PASS |
+| sedan | drive | 1.69 | 1.66 (0.98 [0.78, 1.20]) | 1.66 (0.98 [0.78, 1.20]) | 0.0 / 0.0 / 0.0–0.0 | 11.0 / 11.0 / 10.0–11.0 | PASS | PASS |
+| sedan | impact | 259.68 | 254.25 (0.98 [0.91, 1.05]) | 254.25 (0.98 [0.91, 1.05]) | 344.0 / 344.0 / 344.0–345.0 | 543.5 / 543.5 / 530.0–556.0 | PASS | PASS |
+| viper | headon | 1236.76 | 1056.06 (0.85 [0.65, 1.46]) | 1065.43 (0.86 [0.69, 1.51]) | 0.0 / 0.0 / 0.0–0.0 | 339.0 / 304.0 / 294.0–330.0 | PASS | PASS |
+| viper | tbone | 702.60 | 653.19 (0.93 [0.76, 1.05]) | 644.23 (0.92 [0.81, 1.05]) | 2.0 / 2.0 / 0.0–2.0 | 79.0 / 69.0 / 62.0–104.0 | PASS | PASS |
+| e36 | headon | 745.29 | 685.23 (0.92 [0.81, 1.04]) | 731.82 (0.98 [0.84, 1.12]) | 264.0 / 278.0 / 232.0–356.0 | 1911.0 / 1859.0 / 1730.0–1942.0 | PASS | PASS |
+| e36 | tbone | 534.49 | 438.49 (0.82 [0.72, 1.11]) | 452.56 (0.85 [0.69, 1.16]) | 24.0 / 24.0 / 24.0–42.0 | 1464.0 / 1458.0 / 1422.0–1532.0 | PASS | PASS |
+| mustang | headon | 211.74 | 213.96 (1.01 [0.95, 1.10]) | 216.88 (1.02 [0.96, 1.11]) | 0.0 / 0.0 / 0.0–0.0 | 2317.0 / 2315.0 / 2198.0–2396.0 | PASS | PASS |
+| mustang | tbone | 234.89 | 246.28 (1.05 [0.85, 1.40]) | 233.29 (0.99 [0.83, 1.31]) | 0.0 / 0.0 / 0.0–0.0 | 1152.0 / 1145.0 / 1100.0–1202.0 | PASS | PASS |
+
+N=1 GPU ms per frame (3 trials, mean [95 %]), before → after: E36 idle 0.710 →
+0.689, drive 0.698 → 0.688, wall 0.754 → 0.999; Viper 0.533 → 0.426, 0.531 →
+0.424, 0.581 → 0.512; Mustang 0.436 → 0.455, 0.436 → 0.452, 0.516 → 0.588; Audi
+0.425 → 0.436, 0.420 → 0.432, 0.723 → 0.629; Agora S 0.224 → 0.282, 0.217 →
+0.285, 0.228 → 0.279; Agora L 0.252 → 0.311, 0.238 → 0.315, 0.255 → 0.306; sedan
+(wide passes) 0.252 → 0.311, 0.258 → 0.307, 0.258 → 0.323. The grid skip gains on
+grid vehicles; a step with hits pays one or two barriers and the force chain after
+them (about 3 µs on a small vehicle), and a crash step with many dependent hits a
+few rounds. RoR (thread pool) in the same session: E36 0.49 / 0.51 / 0.63, Viper
+0.25 / 0.25 / 0.31, Mustang 0.36 / 0.36 / 0.40, Audi 0.37 / 0.37 / 0.46, Agora S
+0.15 / 0.16 / 0.18, Agora L 0.21 / 0.22 / 0.25, sedan 0.27 / 0.26 / 0.27.
 
 ### Vehicle contact on the GPU
 

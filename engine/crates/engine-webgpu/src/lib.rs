@@ -389,26 +389,30 @@ pub const WGSL_LOOP_CAP: u32 = 1 << 16;
 /// Chrome treats a storage/workgroup load as non-uniform, so a later barrier
 /// inside `if (lanes == 1)` is rejected. `workgroupUniformLoad` makes it uniform.
 fn uniformize_workgroup_lanes(src: &str) -> String {
-    const NAME: &str = "gsUniformLanes_0";
-    if !src.contains(NAME) {
-        return src.to_string();
-    }
-    let mut out = String::with_capacity(src.len() + 256);
-    for line in src.lines() {
-        if line.contains("var<workgroup>") && line.contains(NAME) {
-            out.push_str(line);
-        } else {
-            out.push_str(
-                &line
-                    .replace(NAME, &format!("workgroupUniformLoad(&{NAME})"))
-                    // Restore stores only: `= ` must not also match a `==` read.
-                    .replace(
-                        "workgroupUniformLoad(&gsUniformLanes_0) = ",
-                        "gsUniformLanes_0 = ",
-                    ),
-            );
+    const NAMES: [&str; 3] = ["gsUniformLanes_0", "gsUniformHits_0", "gsUniformOpen_0"];
+    let mut out = src.to_string();
+    for name in NAMES {
+        if !out.contains(name) {
+            continue;
         }
-        out.push('\n');
+        let mut next = String::with_capacity(out.len() + 256);
+        for line in out.lines() {
+            if line.contains("var<workgroup>") && line.contains(name) {
+                next.push_str(line);
+            } else {
+                next.push_str(
+                    &line
+                        .replace(name, &format!("workgroupUniformLoad(&{name})"))
+                        // Restore stores only: `= ` must not also match a `==` read.
+                        .replace(
+                            &format!("workgroupUniformLoad(&{name}) = "),
+                            &format!("{name} = "),
+                        ),
+                );
+            }
+            next.push('\n');
+        }
+        out = next;
     }
     out
 }
