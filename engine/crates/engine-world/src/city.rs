@@ -103,7 +103,7 @@ impl CityDef {
     }
 
     /// Room for K houses: clusters (a few dozen a house) and the pool, or a slot per
-    /// chunk without one; the houses' own shapes; contacts for every chunk.
+    /// chunk without one; the houses' own shapes; contacts for every chunk and the pool.
     pub fn capacity(&self, house: &DestructibleAssetDesc) -> anyhow::Result<WorldCapacity> {
         let k = self.houses;
         let stress = house
@@ -133,6 +133,16 @@ impl CityDef {
             one.max_contacts * k as u32,
             1 << 30,
         );
+        // A shelled town's awake debris holds ~7.3 contacts a body (tests/city_barrage.rs:
+        // 658k at most on city.html's dense town and 131,072-slot pool): 8 for every slot
+        // of the pool, within the threshold contact ingest.
+        if let Some(p) = self.pool {
+            c.max_contacts = c.max_contacts.max(
+                (8 * p)
+                    .next_power_of_two()
+                    .min(stress_rubble::threshold::INGEST_CONTACTS),
+            );
+        }
         c.max_candidates = c.max_candidates.max(c.max_contacts);
         c.max_joints = c.max_joints.max(1 << 16);
         Ok(c)

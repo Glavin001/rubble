@@ -2416,15 +2416,17 @@ impl World {
         if stale {
             // From before a restore: neither the plan nor the event cursors use it.
         } else if self.newest_ran == Some(step) || (c.awake_count == 0 && quiet_since) {
-            self.sim
-                .drained(c)
-                .map_err(|e| anyhow::anyhow!("step {step}: {e:?}"))?;
+            self.sim.drained(c).map_err(|e| {
+                if c.overflow_flags != 0 {
+                    overflow_error(step, c.overflow_flags)
+                } else {
+                    anyhow::anyhow!("step {step}: {e:?}")
+                }
+            })?;
         } else {
-            anyhow::ensure!(
-                c.overflow_flags == 0,
-                "step {step}: capacity overflow (flags {:#x}); raise the WorldCapacity",
-                c.overflow_flags
-            );
+            if c.overflow_flags != 0 {
+                return Err(overflow_error(step, c.overflow_flags));
+            }
             self.sim.set_plan_hints(c.contact_count, c.color_count);
         }
         if let Some((contacts, colors)) = self.fracture.fixed_plan {
@@ -3121,6 +3123,14 @@ impl World {
             });
         }
     }
+}
+
+/// A step that ran out of a `WorldCapacity` buffer: which ones, and the flags.
+fn overflow_error(step: u64, flags: u32) -> anyhow::Error {
+    anyhow::anyhow!(
+        "step {step}: capacity overflow ({}; flags {flags:#x}); raise the WorldCapacity",
+        engine_schema::overflow_names(flags)
+    )
 }
 
 fn wake_flag(cmd: GpuCommand, wake: bool) -> GpuCommand {

@@ -571,6 +571,40 @@ pub const OVERFLOW_SOIL_SINKAGE: u32 = 65536;
 /// The sleep archive (`WgpuSim::enable_sleep_archive`) is full: more sleeping bodies'
 /// resting contact rows than its room (in blocks of 8 rows a body).
 pub const OVERFLOW_SLEEP_ARCHIVE: u32 = 131072;
+/// What each set overflow flag ran out of, comma-separated ("contacts, colors").
+pub fn overflow_names(flags: u32) -> String {
+    const NAMES: [(u32, &str); 18] = [
+        (OVERFLOW_CONTACTS, "contacts"),
+        (OVERFLOW_CANDIDATES, "candidates"),
+        (OVERFLOW_JOINTS, "joints"),
+        (OVERFLOW_COLORS, "colors"),
+        (CCD_BUDGET_EXHAUSTED, "CCD budget"),
+        (CCD_CANDIDATE_MISS, "CCD candidates"),
+        (OVERFLOW_MANIFOLDS, "manifolds"),
+        (OVERFLOW_BP_CHAIN, "broadphase chain"),
+        (OVERFLOW_WARM_HASH, "warm-start hash"),
+        (OVERFLOW_LARGE_STATICS, "large statics"),
+        (OVERFLOW_FAST_LIST, "fast list"),
+        (OVERFLOW_LARGE_DYNAMICS, "large dynamics"),
+        (OVERFLOW_CCD_BODIES, "CCD bodies"),
+        (OVERFLOW_IMPULSES, "impulses"),
+        (OVERFLOW_CHAR_CANDIDATES, "character candidates"),
+        (OVERFLOW_CCD_PAIRS, "CCD pairs"),
+        (OVERFLOW_SOIL_SINKAGE, "soil sinkage"),
+        (OVERFLOW_SLEEP_ARCHIVE, "sleep archive"),
+    ];
+    let known = NAMES.iter().fold(0, |m, (f, _)| m | f);
+    let mut names: Vec<String> = NAMES
+        .iter()
+        .filter(|(f, _)| flags & f != 0)
+        .map(|(_, n)| n.to_string())
+        .collect();
+    if flags & !known != 0 {
+        names.push(format!("unknown {:#x}", flags & !known));
+    }
+    names.join(", ")
+}
+
 /// Oversized-static list (statics wider than half a grid cell, uniform grid):
 /// this many collider ids in the scratch-atomics buffer at `LARGE_STATIC_BASE`.
 pub const LARGE_STATIC_CAP: u32 = 1024;
@@ -579,6 +613,16 @@ pub const LARGE_STATIC_CAP: u32 = 1024;
 mod tests {
     use super::*;
     use std::mem::{align_of, size_of};
+
+    #[test]
+    fn overflow_names_every_flag_set() {
+        assert_eq!(overflow_names(OVERFLOW_CONTACTS), "contacts");
+        assert_eq!(
+            overflow_names(OVERFLOW_CANDIDATES | OVERFLOW_SLEEP_ARCHIVE | 1 << 30),
+            "candidates, sleep archive, unknown 0x40000000"
+        );
+        assert_eq!(overflow_names(0), "");
+    }
 
     #[test]
     fn event_ring_decodes_new_breaks_and_counts_overwritten_ones() {

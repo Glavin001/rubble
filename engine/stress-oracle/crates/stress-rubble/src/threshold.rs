@@ -53,6 +53,11 @@ pub fn pool_cap(max_contacts: u32) -> u32 {
     2 * max_contacts * k.max(1)
 }
 
+/// The most contacts a threshold destructible's world may hold, as a power of two: its
+/// contact ingest merges two records a contact row in 64-thread groups, one dispatch
+/// dimension (WebGPU's 65,535 groups), so at most 65,535 x 32 rows.
+pub const INGEST_CONTACTS: u32 = 1 << 20;
+
 /// The engine's contacts for a world of `chunks` chunks: a collapsed structure has every
 /// piece resting on several others at a few points each (a whole suburb in a heap: about 8 a
 /// chunk; 12 a chunk here), within 2^19 and what one binding of rubble's 256-byte contact

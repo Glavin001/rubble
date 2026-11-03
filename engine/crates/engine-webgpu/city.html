@@ -151,7 +151,7 @@
         world.cityRebuild(city, page);
       }
       scenario = next;
-      barrage = false; poolNote = '';
+      barrage = false; fireNote = '';
       run = newRun();
       counters = null; leftWorld = 0; vehicleState = null;
       poses = new Poses(capacity.maxBodies);
@@ -222,14 +222,22 @@
     // strike prediction tracks at most 64 projectiles at once.
     const SHELL = { radius: 0.5, speed: 120 };
     const MAX_SHELLS = 48;
-    let barrage = false, automated = false, nextVolley = 0, poolNote = '';
+    let barrage = false, automated = false, nextVolley = 0, fireNote = '';
     function fire(origin, dir) {
       // A split with no free slot fails the frame: stop while the last shells' pieces fit.
       if (piecesLeft() < 2000) {
         setBarrage(false);
-        poolNote = `The piece pool is nearly full (${POOL.toLocaleString()} slots), so firing stopped. Reload with ?pool=${POOL * 2} for more.`;
+        fireNote = `The piece pool is nearly full (${POOL.toLocaleString()} slots), so firing stopped. Reload with ?pool=${POOL * 2} for more.`;
         return;
       }
+      // More contacts in a step than the world holds fails it too: stop while the debris
+      // still fits (it settles and sleeps once the shelling stops).
+      if (counters && counters.contacts > 0.8 * capacity.maxContacts) {
+        setBarrage(false);
+        fireNote = `Contacts are near the world's capacity (${counters.contacts.toLocaleString()} of ${capacity.maxContacts.toLocaleString()}), so firing stopped. Fire again once the debris settles.`;
+        return;
+      }
+      fireNote = '';
       const v = dir.map((d) => d * SHELL.speed);
       run.shells.push(world.cityShell(origin, v, SHELL.radius));
       run.fired++;
@@ -502,7 +510,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
         ['capacity', `${capacity.maxBodies.toLocaleString()} bodies, ${capacity.maxColliders.toLocaleString()} colliders, ${capacity.maxContacts.toLocaleString()} contacts`],
       ];
       if (leftWorld) rows.push(['left the world', leftWorld]);
-      if (poolNote) rows.push(['', poolNote]);
+      if (fireNote) rows.push(['', fireNote]);
       statsEl.innerHTML = rows.map(([k, v]) => `<span class="k">${k}</span><span>${v}</span>`).join('');
     }
 
