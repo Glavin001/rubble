@@ -981,7 +981,11 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
 // ones the grid walk would test: inside the triangle's box and in a bucket its
 // cells cover (or every candidate when the box covers too many cells), with the
 // grid's own expressions. So the hits are the grid's, bit for bit.
-static const uint BRUTE_PAIRS_PER_LANE = 16u;
+// 0: a vehicle with a grid always uses it. The skip (16 pairs a lane) gave the same
+// hits but resolves the documented same-contacter race differently (the lanes of a
+// wave read before any adds), which moved the E36 drive ensemble against RoR from
+// 115-150 mm to 310-520 mm (fail; 3 runs each): reverted for accuracy.
+static const uint BRUTE_PAIRS_PER_LANE = 0u;
 void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
                        uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {

@@ -1864,6 +1864,9 @@ impl ExplicitBeamsGpu {
             KernelVariant::Baseline => ("explicit_baseline_", ""),
             KernelVariant::BaselineProbe => ("explicit_baseline_", "_probe"),
             KernelVariant::BaselineDet => ("explicit_baseline_", "_det"),
+            // RUBBLE_DET_AA=1 (harness control): the baseline in place of the
+            // current kernel, to see what the comparison flags with equal kernels.
+            KernelVariant::CurrentDet if std::env::var("RUBBLE_DET_AA").is_ok() => ("explicit_baseline_", "_det"),
             KernelVariant::CurrentDet => ("explicit_det_", ""),
             KernelVariant::Ablate => ("explicit_ablate_", ""),
             KernelVariant::Current => unreachable!(),
@@ -1946,7 +1949,7 @@ impl ExplicitBeamsGpu {
         let (plan_layout, plan_group) = layout_with(&[(10, &self.contact.args)]);
         let plan = ["bounds", "pairs", "group"].map(|p| {
             let e = format!("explicit_beams_vv_{p}");
-            if matches!(variant, KernelVariant::CurrentDet | KernelVariant::Ablate) {
+            if matches!(variant, KernelVariant::CurrentDet | KernelVariant::Ablate) && prefix != "explicit_baseline_" {
                 let wgsl = EXPLICIT_BEAMS_VV_PASSES.iter().find(|(n, _)| *n == e).unwrap().1;
                 make(&e, wgsl, &plan_layout)
             } else {
