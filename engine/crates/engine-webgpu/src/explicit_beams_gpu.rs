@@ -874,7 +874,44 @@ impl ExplicitBeamsGpu {
             slot_recs.push([slot_list_len, c, 0, 0]);
             slot_list_len += c;
         }
-        let veh_ext: Vec<[u32; 4]> = slot_ranges.iter().map(|&(a, n)| [a, n, 0, 0]).collect();
+        // Wing forces per node (the kernel's wingGather): per wing node its entries
+        // (global wing << 2 | 0 induced, 1 front, 2 back) in wingApply's order.
+        let mut wing_nodes: Vec<(u32, Vec<u32>)> = Vec::new();
+        let mut wing_node_ranges: Vec<(u32, u32)> = Vec::with_capacity(nv);
+        {
+            let (mut node_off, mut wing_off) = (0u32, 0u32);
+            for v in vehicles {
+                let first = wing_nodes.len();
+                let mut at: std::collections::HashMap<u32, usize> = Default::default();
+                for (wi, w) in v.wings.iter().enumerate() {
+                    let gw = (wing_off + wi as u32) << 2;
+                    let n = |slot: usize| node_off + w.nodes[slot];
+                    let mut order: Vec<(u32, u32)> = Vec::new();
+                    match w.induced.map(|i| i.side) {
+                        Some(engine_softbody::explicit_aero::WingSide::Left) => order.extend([(n(6), 0), (n(4), 0)]),
+                        Some(_) => order.extend([(n(7), 0), (n(5), 0)]),
+                        None => {}
+                    }
+                    order.extend([(n(0), 1), (n(2), 1), (n(1), 1), (n(3), 1)]);
+                    order.extend([(n(4), 2), (n(6), 2), (n(5), 2), (n(7), 2)]);
+                    for (node, kind) in order {
+                        let i = *at.entry(node).or_insert_with(|| {
+                            wing_nodes.push((node, Vec::new()));
+                            wing_nodes.len() - 1
+                        });
+                        wing_nodes[i].1.push(gw | kind);
+                    }
+                }
+                wing_node_ranges.push(((first) as u32, (wing_nodes.len() - first) as u32));
+                node_off += v.nodes.len() as u32;
+                wing_off += v.wings.len() as u32;
+            }
+        }
+        let veh_ext: Vec<[u32; 4]> = slot_ranges
+            .iter()
+            .zip(&wing_node_ranges)
+            .map(|(&(a, n), &(wo, wn))| [a, n, wo, wn])
+            .collect();
         let inc_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
         // The self-collision grid's sorted runs, at each vehicle's candidate offset.
@@ -1005,6 +1042,12 @@ impl ExplicitBeamsGpu {
         let veh_ext_base = statics.len() as u32;
         statics.extend(veh_ext);
         statics.extend(slot_recs);
+        // Then the wing node records (the kernel's wingNodeBase), their entries at
+        // the end of the lists.
+        for (node, entries) in &wing_nodes {
+            statics.push([*node, lists.len() as u32, entries.len() as u32, 0]);
+            lists.extend(entries);
+        }
 
         let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
         let lanes = frame_lanes(vehicles);

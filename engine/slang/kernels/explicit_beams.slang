@@ -165,6 +165,9 @@ struct Params
 // slotListBase the slots' contribution lists; gBeams after the slide-force slots
 // per slide node 3 contributions (own node, rail end a, rail end b).
 uint slotRecBase() { return gP.vehExtBase + gP.vehicles; }
+// Then per wing node (EB_AERO frame, see wingGather) (node global, first entry in
+// gLists, entries, 0); a vehicle's wing nodes are its vehExt record's .z, .w.
+uint wingNodeBase() { return slotRecBase() + gP.slotTotal; }
 uint slideContribBase() { return gP.slideAcc + gP.slotTotal; }
 
 struct Surface
@@ -1321,6 +1324,25 @@ void wingApply(uint wingOff, uint wingCount)
     }
 }
 
+// The frame adds the wing forces per wing node instead of wingApply's one lane: a
+// lane per node adds its entries (wing << 2 | 0 induced drag, 1 front, 2 back) in
+// the order wingApply reaches that node (wings in file order, then its slots), so
+// each node's force is the same sum, bit for bit.
+void wingGather(uint wn)
+{
+    uint4 rec = gStatic[wingNodeBase() + wn];
+    float4 F = gNodes[rec.x * 3u + 2u];
+    float3 f = F.xyz;
+    for (uint k = 0u; k < rec.z; k++)
+    {
+        uint e = gLists[rec.y + k];
+        uint ws = wingState(e >> 2);
+        if (gBeams[ws].x != 0.0) continue;
+        f = sadd3(f, gBeams[ws + 1u + (e & 3u)].xyz);
+    }
+    gNodes[rec.x * 3u + 2u] = float4(f, F.w);
+}
+
 // The per-frame break check on world positions (before the origin rebase).
 void wingCheck(uint gw, float3 origin)
 {
@@ -2153,11 +2175,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             for (uint c = lane; c < aero0.w; c += LANES) commandUpdate(aero0.z + c);
         }
         sync();
+        {
+            uint4 ext = gStatic[gP.vehExtBase + v];
 #ifdef EB_ABLATE
-        if (lane == 0u && (gP.ablate & 8u) == 0u) wingApply(aero0.x, aero0.y);
-#else
-        if (lane == 0u) wingApply(aero0.x, aero0.y);
+            if ((gP.ablate & 8u) != 0u) ext.w = 0u;
 #endif
+            for (uint k = lane; k < ext.w; k += LANES) wingGather(ext.z + k);
+        }
         // The last step's trigger inputs, read by this step's commands: cleared for
         // the next step's beam phase.
         if ((flagsV & FLAG_KEYS) != 0u)
