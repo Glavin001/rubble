@@ -2684,16 +2684,22 @@ impl WgpuSim {
         // Canonical rows (128 B, binding 4), or persistent ones: 32 B of pair data
         // (binding 4) and a 64 B solver point (binding 27) a row.
         let rows = 2 * u64::from(max_c) + u64::from(blocks * ROWS);
-        let mut grow = vec![(
-            4usize,
-            rows * if self.persistent_contacts {
-                32
-            } else {
-                std::mem::size_of::<engine_schema::Contact>() as u64
-            },
-        )];
-        if self.persistent_contacts {
-            grow.push((27, rows * 64));
+        let mut grow = Vec::new();
+        // Cold wakes with the touch query read no archived rows (rigid_plan::archive_rows):
+        // the contact buffers keep their size (growing them doubled the largest buffers
+        // while the old ones waited for collection: gables506k 2.4 -> 3.6 GB).
+        if self.sleep_archive_keeps_rows() {
+            grow.push((
+                4usize,
+                rows * if self.persistent_contacts {
+                    32
+                } else {
+                    std::mem::size_of::<engine_schema::Contact>() as u64
+                },
+            ));
+            if self.persistent_contacts {
+                grow.push((27, rows * 64));
+            }
         }
         let meta = engine_schema::SCRATCH_WORDS;
         // ... [touched list] x maxBodies [spread step] x maxBodies (archiveMeta).
@@ -2708,6 +2714,7 @@ impl WgpuSim {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("sleep archive"),
             });
+        let mut replaced = Vec::new();
         for &(binding, bytes) in &grow {
             let old = &self.bufs[binding];
             let new = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2717,9 +2724,14 @@ impl WgpuSim {
                 mapped_at_creation: false,
             });
             enc.copy_buffer_to_buffer(old, 0, &new, 0, old.size().min(bytes));
-            self.bufs[binding] = new;
+            replaced.push(std::mem::replace(&mut self.bufs[binding], new));
         }
         self.queue.submit([enc.finish()]);
+        // Free the old buffers now (the copy above still completes), not whenever the
+        // browser collects them.
+        for b in replaced {
+            b.destroy();
+        }
         // The records: no rows, no blocks, not just asleep; every block free.
         let mut words = vec![0u32; (4 + 7 * mb + 2 * blocks) as usize];
         words[0] = blocks;

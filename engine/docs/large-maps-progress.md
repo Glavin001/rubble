@@ -888,3 +888,38 @@ without changing what they produce or the order they produce it in:
   insert and query over every collider; above, its per-collider scan plus the awake
   colliders' R walks (a link and a stamp load an entry, where the full pass's other table
   keeps its link in the AABB) cost more than the full pass, so the host switches.
+
+## Memory: what PR #97 added, and what fits on a phone (2026-11-03)
+
+Measured in headless Chrome (`mem.mjs`: `GPUDevice.createBuffer` / `destroy` wrapped before the
+page loads, the wasm memories, `performance.memory`), `demo.html?scene=<s>&sleep=on` after ~200
+steps; MB, peak:
+
+| Scene | Commit | GPU | largest buffer | wasm | JS heap | total |
+|---|---|---|---|---|---|---|
+| gables506k | main 09647583 | 2,390 | 768 | 825 | 259 | 3,475 |
+| gables506k | e0319a91 (#97 before the archive) | 2,414 | 768 | 825 | 259 | 3,499 |
+| gables506k | cb061d16 (archive) | 3,587 | 768 | 826 | 259 | 4,672 |
+| gables506k | a84adf59 (archive + cost floor) | 3,600 | 768 | 827 | 218 | 4,645 |
+| gables506k | this fix | 2,446 | 768 | 767 | 259 | 3,473 |
+| gables | main | 151 | 32 | 24 | 7 | 182 |
+| gables | a84adf59 | 204 | 32 | 25 | 8 | 238 |
+| gables | this fix | 155 | 32 | 25 | 8 | 189 |
+| ring110k | main | 840 | 256 | 195 | 62 | 1,099 |
+| ring110k | a84adf59 | 1,241 | 256 | 205 | 59 | 1,506 |
+| ring110k | this fix | 856 | 256 | 205 | 59 | 1,121 |
+
+The growth was the sleep archive's: `WgpuSim::enable_sleep_archive` re-created the contact
+buffers (bindings 4 and 27, persistent contacts) a few rows larger and dropped the old ones
+without `destroy()`, so the browser held both until it collected them (b27 768 -> 1,536 MB,
+b4 384 -> 768 MB on gables506k). With cold wakes and the touch query (the default) nothing
+reads archived rows, so the contact buffers are no longer grown at all, and any buffer the
+archive does replace is destroyed once the copy is submitted. What remains over main is the
+awake-indexed broadphase's tables (binding 14, +36 MB on gables506k) and the archive's
+per-body scratch (binding 21, +15 MB). House and arch gates bit-identical.
+
+**gables506k does not fit a phone on main either.** iOS gives a tab about 1.5 GB; the scene
+needs ~3.5 GB on main (2.4 GB of GPU buffers, its largest 768 MB, plus 0.8 GB of wasm heap),
+because its capacity (6M contacts, 4M candidates, sized for the all-awake start) is fixed at
+creation. A mobile budget would mean smaller capacities that fail loudly when exceeded, or a
+smaller scene: a product decision, not done here.
