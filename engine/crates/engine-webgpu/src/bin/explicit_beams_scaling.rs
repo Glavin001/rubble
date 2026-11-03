@@ -782,6 +782,9 @@ fn main() -> anyhow::Result<()> {
     let (info, device, queue) = default_device()?;
     let g = Geometry::of(&text);
     let one = spawn(&text, Vec3::ZERO, Vec3::ZERO);
+    for w in &one.warnings {
+        eprintln!("warning: {w} (set RUBBLE_AIRFOIL_DIR to the .afl directory)");
+    }
     println!(
         "{}: {} nodes, {} beams; {} ({:?}); Rigs of Rods reference: {}",
         truck.display(),

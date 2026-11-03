@@ -60,6 +60,12 @@ pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 7] = [
 /// [`EXPLICIT_BEAMS_WGSL`] with 512 lanes per vehicle, for large vehicles.
 pub const EXPLICIT_BEAMS_WIDE_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide.wgsl"));
+/// [`EXPLICIT_BEAMS_WGSL`] with wings, the fuselage drag and command beams
+/// (`EB_AERO`), for fleets that have them; 256 and 512 lanes.
+pub const EXPLICIT_BEAMS_AERO_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero.wgsl"));
+pub const EXPLICIT_BEAMS_AERO_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide.wgsl"));
 /// A buffer's extent for compact snapshots (`slang/kernels/state_extent.slang`,
 /// entry `state_extent`; `WgpuSim::measure_state`).
 pub const STATE_EXTENT_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/state_extent.wgsl"));

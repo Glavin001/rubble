@@ -104,3 +104,121 @@ fn sedan_crash_matches_cpu_counts() {
     assert!(close(c_broken, g_broken), "broken {c_broken} vs {g_broken}");
     assert!(close(c_bent, g_bent), "bent {c_bent} vs {g_bent}");
 }
+
+/// A box glider with a wing on its top face (the 4-node layout), a fuselage drag,
+/// a self-centering command, a rope command and a hydro: the GPU's aero module
+/// against the CPU. A synthetic airfoil table (no file needed).
+const GLIDER: &str = "glider
+globals
+400, 0, x
+enable_advanced_deformation
+set_beam_defaults 2000000, 3000, 900000, 300000, -1, -1, 0.0
+nodes
+0, 0, 0, 0
+1, 0, 0, -2
+2, 1, 0, -2
+3, 1, 0, 0
+4, 0, 0.4, 0
+5, 0, 0.4, -2
+6, 1, 0.4, -2
+7, 1, 0.4, 0
+beams
+0, 1
+1, 2
+2, 3
+3, 0
+4, 5
+5, 6
+6, 7
+7, 4
+0, 4
+1, 5
+2, 6
+3, 7
+0, 2
+1, 3
+4, 6
+5, 7
+0, 5
+1, 4
+2, 7
+3, 6
+0, 7
+3, 4
+1, 6
+2, 5
+hydros
+0, 6, 0.0
+commands2
+3, 5, 0.5, 0.25, 0.8, 1.5, 3, 4, c
+1, 7, 0.5, 0.5, 0.9, 1.2, 1, 2, r
+wings
+4, 5, 4, 5, 7, 6, 7, 6, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, n, 1.0, 0.0, 0.0, syn.afl 0.8
+fusedrag
+4, 6, 1.5, syn.afl
+end
+";
+
+fn synthetic_afl() -> String {
+    let mut s = String::from("A\n700 version\nalpha cl cd cm:\n");
+    for a10 in -1800i32..=1800 {
+        let a = a10 as f32 / 10.0;
+        let ip = a10 / 10;
+        let sign = if a10 < 0 && ip == 0 { "-" } else { "" };
+        let r = a.to_radians();
+        s.push_str(&format!(
+            "{sign}{ip}.{}  {}  {}  {}\n",
+            (a10 % 10).abs(),
+            1.1 * (2.0 * r).sin(),
+            0.01 + 1.2 * r.sin() * r.sin(),
+            -0.05 * (2.0 * r).sin()
+        ));
+    }
+    s
+}
+
+#[test]
+fn glider_with_wings_fusedrag_and_commands_matches_cpu() {
+    let afl = synthetic_afl();
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        ..Default::default()
+    };
+    let mut cpu = ExplicitBeams::from_truck_with_airfoils(
+        GLIDER,
+        Vec3::new(0.0, 1.5, 0.0),
+        Vec3::new(-30.0, 2.0, 0.0),
+        settings,
+        &|_| Some(afl.clone()),
+    )
+    .unwrap();
+    assert_eq!((cpu.wings.len(), cpu.centering.len()), (1, 1));
+    assert!(cpu.fusedrag.is_some());
+    let Some(gpu) = run_both(&mut cpu, 90) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let (rms, max) = rms_max(&cpu.positions(), &gpu.positions()[0]);
+    let b = &gpu.beams()[0];
+    let cmd = cpu.centering[0].beam as usize;
+    let d = gpu.fuse_forces()[0];
+    eprintln!(
+        "glider 1.5 s: rms {:.4} mm max {:.4} mm; centering rest CPU {} GPU {}; D CPU {:?} GPU {:?}; \
+         travel {:?}",
+        rms * 1e3,
+        max * 1e3,
+        cpu.beams[cmd].rest,
+        b[cmd].rest,
+        cpu.fuse_force,
+        d,
+        cpu.positions()[0]
+    );
+    // The wing lifts and drags it, the fuselage drag slows it (a check that the
+    // features act at all), and both engines agree.
+    assert!(cpu.fuse_force.length() > 1.0);
+    assert!((cpu.beams[cmd].rest - b[cmd].rest).abs() < 1e-5);
+    assert!(cpu.beams[cmd].rest > cpu.beams[cmd].rest0 + 0.1);
+    assert!((cpu.fuse_force - d).length() < 1e-3 * cpu.fuse_force.length());
+    assert_eq!(gpu.wings_broken()[0], vec![cpu.wings[0].broken]);
+    assert!(rms < 1e-3 && max < 3e-3, "rms {rms} max {max}");
+}

@@ -91,6 +91,8 @@ enum Section {
     Hydros,
     Commands,
     Commands2,
+    Wings,
+    FuseDrag,
     Fixes,
     Minimass,
     Cameras,
@@ -133,6 +135,73 @@ pub struct TruckWheel {
     pub node_friction: f32,
 }
 
+/// A `commands` / `commands2` line: a key-driven actuator beam. With no driver input
+/// only self-centering lines move (`engine/docs/explicit-beams-aero-commands-spec.md`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruckCommand {
+    /// Its beam in [`TruckFile::beams`].
+    pub beam: usize,
+    /// Rest-length rates (m/s) toward the contracted and the extended limit.
+    pub shorten_rate: f32,
+    pub lengthen_rate: f32,
+    /// Limits as multiples of the spawn length.
+    pub max_contraction: f32,
+    pub max_extension: f32,
+    pub contract_key: i32,
+    pub extend_key: i32,
+    /// Option `r`: no stiffness when shorter than its rest length.
+    pub rope: bool,
+    /// Option `c` (when it comes before `o` and `p`): drives toward the centre of
+    /// its limits with no input.
+    pub centering: bool,
+}
+
+/// A `wings` line: one aerodynamic panel on 8 node slots (front-left-down,
+/// front-right-down, front-left-up, front-right-up, then the same at the back).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruckWing {
+    pub nodes: [u32; 8],
+    /// Control-surface letter (`n` none).
+    pub control: char,
+    pub chord_point: f32,
+    pub min_deflection: f32,
+    pub max_deflection: f32,
+    /// Airfoil table file name (`.afl`).
+    pub airfoil: String,
+    pub efficacy: f32,
+}
+
+/// A beam end: a node of the file, or one a `wheels` line generates (its wheel in
+/// [`TruckFile::wheels`] and its place in the rings, outer and inner alternating).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TruckNodeRef {
+    File(u32),
+    Tyre(u32, u32),
+}
+
+/// A `beams` line with an end on a generated tyre node (legacy numbering), which
+/// only solvers that build the tyre nodes spawn.
+#[derive(Clone, Debug)]
+pub struct TruckTyreBeam {
+    /// File beams ([`TruckFile::beams`]) before it.
+    pub position: usize,
+    pub a: TruckNodeRef,
+    pub b: TruckNodeRef,
+    /// Its parameters (`a`, `b` unset).
+    pub beam: SoftBeam,
+}
+
+/// The `fusedrag` line (the last one of the section).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruckFuseDrag {
+    pub front: u32,
+    pub rear: u32,
+    /// The fuselage width; with `autocalc`, the file nodes' z extent × y extent ×
+    /// the area coefficient.
+    pub width: f32,
+    pub airfoil: String,
+}
+
 /// Parsed file before mass distribution, in file node indices.
 #[derive(Clone, Debug, Default)]
 pub struct TruckFile {
@@ -157,6 +226,15 @@ pub struct TruckFile {
     /// `cinecam` lines: Rigs of Rods spawns a camera node there on 8 beams, which
     /// take part in the dry-mass split ([`distribute_masses`]) and are simulated.
     pub cinecams: Vec<TruckCinecam>,
+    /// `commands` and `commands2` lines in file order.
+    pub commands: Vec<TruckCommand>,
+    /// The deform threshold in force at each hydro and command line (their beams
+    /// in [`Self::beams`] carry an infinite `deform`: they never yield), by beam.
+    pub actuator_gates: Vec<(usize, f32)>,
+    pub wings: Vec<TruckWing>,
+    pub fusedrag: Option<TruckFuseDrag>,
+    /// `beams` lines on generated tyre nodes.
+    pub tyre_beams: Vec<TruckTyreBeam>,
     pub warnings: Vec<String>,
 }
 
@@ -200,6 +278,11 @@ struct Parser {
     in_submesh: bool,
     /// `cameras` lines, resolved after the file (they may precede `nodes`).
     cameras: Vec<(usize, Vec<String>)>,
+    /// `fusedrag … autocalc`: its area coefficient.
+    fuse_area_coef: f32,
+    /// Legacy numbering: per `wheels` line its first generated number, count and
+    /// wheel index.
+    wheel_numbers: Vec<(u32, u32, u32)>,
 }
 
 impl Parser {
@@ -278,6 +361,8 @@ impl Parser {
             "hydros" => Section::Hydros,
             "commands" => Section::Commands,
             "commands2" => Section::Commands2,
+            "wings" => Section::Wings,
+            "fusedrag" => Section::FuseDrag,
             "fixes" => Section::Fixes,
             "minimass" => Section::Minimass,
             "cameras" => Section::Cameras,
@@ -296,7 +381,6 @@ impl Parser {
             | "ropes"
             | "ropables"
             | "triggers"
-            | "wings"
             | "turboprops"
             | "turboprops2"
             | "turbojets"
@@ -323,7 +407,6 @@ impl Parser {
             | "interaxles"
             | "transfercase"
             | "nodecollision"
-            | "fusedrag"
             | "description"
             | "help"
             | "comment"
@@ -461,27 +544,36 @@ impl Parser {
                 if t.len() < 2 {
                     return;
                 }
-                let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
+                // A beam to a node a `wheels` line generated (legacy numbering):
+                // kept apart, for the solvers that build those nodes.
+                let ends = [self.tyre_ref(t[0]), self.tyre_ref(t[1])];
+                let (a, b) = if ends.iter().any(Option::is_some) {
+                    let file = |p: &mut Self, tok: &str, e: Option<TruckNodeRef>| match e {
+                        Some(r) => Some(r),
+                        None => p.node(tok).map(TruckNodeRef::File),
+                    };
+                    let (Some(ra), Some(rb)) =
+                        (file(self, t[0], ends[0]), file(self, t[1], ends[1]))
+                    else {
+                        return;
+                    };
+                    let mut beam = self.beam(0, 0);
+                    Self::beam_options(&mut beam, t);
+                    self.out.tyre_beams.push(TruckTyreBeam {
+                        position: self.out.beams.len(),
+                        a: ra,
+                        b: rb,
+                        beam,
+                    });
                     return;
+                } else {
+                    let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
+                        return;
+                    };
+                    (a, b)
                 };
                 let mut beam = self.beam(a, b);
-                let opts = t.get(2).copied().unwrap_or("n");
-                for c in opts.chars() {
-                    match c {
-                        'i' => beam.visible = false,
-                        'r' => beam.kind = BeamKind::Rope,
-                        's' => {
-                            beam.kind = BeamKind::Support;
-                            let factor = f(t, 3, DEFAULT_SUPPORT_BREAK_FACTOR);
-                            beam.long_bound = if factor > 0.0 {
-                                factor
-                            } else {
-                                DEFAULT_SUPPORT_BREAK_FACTOR
-                            };
-                        }
-                        _ => {}
-                    }
-                }
+                Self::beam_options(&mut beam, t);
                 self.out.beams.push(beam);
             }
             Section::Shocks | Section::Shocks2 | Section::Shocks3 => self.parse_shock(t),
@@ -493,6 +585,9 @@ impl Parser {
                     return;
                 };
                 let mut beam = self.beam(a, b);
+                self.out
+                    .actuator_gates
+                    .push((self.out.beams.len(), beam.deform));
                 beam.kind = BeamKind::Hydro;
                 beam.hydro_factor = f(t, 2, 0.0);
                 beam.deform = f32::INFINITY;
@@ -501,6 +596,47 @@ impl Parser {
                 }
                 self.out.beams.push(beam);
             }
+            _ => self.data_rest(t),
+        }
+    }
+
+    /// A `beams` line's options (`i`, `r`, `s` with its break factor).
+    fn beam_options(beam: &mut SoftBeam, t: &[&str]) {
+        let opts = t.get(2).copied().unwrap_or("n");
+        for c in opts.chars() {
+            match c {
+                'i' => beam.visible = false,
+                'r' => beam.kind = BeamKind::Rope,
+                's' => {
+                    beam.kind = BeamKind::Support;
+                    let factor = f(t, 3, DEFAULT_SUPPORT_BREAK_FACTOR);
+                    beam.long_bound = if factor > 0.0 {
+                        factor
+                    } else {
+                        DEFAULT_SUPPORT_BREAK_FACTOR
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The node a legacy-numbered reference names among those a `wheels` line
+    /// generated (its wheel and the node's place in its rings), if any.
+    fn tyre_ref(&self, tok: &str) -> Option<TruckNodeRef> {
+        if !self.sequential() || self.ids.contains_key(tok) {
+            return None;
+        }
+        let n = tok.parse::<i64>().ok()?.unsigned_abs() as u32;
+        self.wheel_numbers
+            .iter()
+            .find_map(|&(first, count, wheel)| {
+                (n >= first && n < first + count).then_some(TruckNodeRef::Tyre(wheel, n - first))
+            })
+    }
+
+    fn data_rest(&mut self, t: &[&str]) {
+        match self.section {
             Section::Commands | Section::Commands2 => {
                 if t.len() < 2 {
                     return;
@@ -508,12 +644,65 @@ impl Parser {
                 let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
                     return;
                 };
-                // Key-bound actuators: simulated as fixed-length hydros (no input bound yet).
+                // Key-bound actuators: fixed-length hydros for the solvers without
+                // command input; the explicit solver reads `commands`.
                 let mut beam = self.beam(a, b);
+                let index = self.out.beams.len();
+                self.out.actuator_gates.push((index, beam.deform));
                 beam.kind = BeamKind::Hydro;
                 beam.hydro_factor = 0.0;
                 beam.deform = f32::INFINITY;
                 self.out.beams.push(beam);
+                // commands2: two rates; commands: one rate for both.
+                let two = self.section == Section::Commands2;
+                let r = |i: usize| f(t, i, 0.0);
+                let (shorten, lengthen, base) = if two {
+                    (r(2), r(3), 4)
+                } else {
+                    (r(2), r(2), 3)
+                };
+                let key = |i: usize| t.get(i).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+                let opts = t.get(base + 4).copied().unwrap_or("n");
+                // The first of o, p, c wins; the other two are dropped.
+                let mode = opts.chars().find(|c| matches!(c, 'o' | 'p' | 'c'));
+                self.out.commands.push(TruckCommand {
+                    beam: index,
+                    shorten_rate: shorten,
+                    lengthen_rate: lengthen,
+                    max_contraction: r(base),
+                    max_extension: r(base + 1),
+                    contract_key: key(base + 2),
+                    extend_key: key(base + 3),
+                    rope: opts.contains('r'),
+                    centering: mode == Some('c'),
+                });
+            }
+            Section::Wings => self.parse_wing(t),
+            Section::FuseDrag => {
+                if t.len() < 3 {
+                    self.warn("fusedrag line needs front node, rear node and width".into());
+                    return;
+                }
+                let (Some(front), Some(rear)) = (self.node(t[0]), self.node(t[1])) else {
+                    return;
+                };
+                let (width, airfoil) = if t[2] == "autocalc" {
+                    // The width is set after the file (it needs every node).
+                    (f32::NAN, t.get(4))
+                } else {
+                    (f(t, 2, 0.0), t.get(3))
+                };
+                self.fuse_area_coef = if t[2] == "autocalc" {
+                    f(t, 3, 1.0)
+                } else {
+                    1.0
+                };
+                self.out.fusedrag = Some(TruckFuseDrag {
+                    front,
+                    rear,
+                    width,
+                    airfoil: airfoil.copied().unwrap_or("NACA0009.afl").to_string(),
+                });
             }
             Section::Cab => {
                 if t.len() < 3 {
@@ -622,6 +811,8 @@ impl Parser {
                     self.warn("cinecam line needs x, y, z and 8 nodes".into());
                 }
             }
+            // Handled in `data`.
+            _ => {}
         }
     }
 
@@ -671,6 +862,31 @@ impl Parser {
         if self.section == Section::Nodes {
             self.next_number += 1;
         }
+    }
+
+    fn parse_wing(&mut self, t: &[&str]) {
+        if t.len() < 16 {
+            self.warn("wings line needs 8 nodes and 8 texture coordinates".into());
+            return;
+        }
+        let nodes: Option<Vec<u32>> = t[..8].iter().map(|k| self.node(k)).collect();
+        let Some(nodes) = nodes else {
+            return;
+        };
+        // A wing without an airfoil spawns nothing.
+        let Some(airfoil) = t.get(20) else {
+            self.warn("wing without an airfoil: ignored".into());
+            return;
+        };
+        self.out.wings.push(TruckWing {
+            nodes: nodes.try_into().unwrap(),
+            control: t.get(16).and_then(|s| s.chars().next()).unwrap_or('n'),
+            chord_point: f(t, 17, -1.0),
+            min_deflection: f(t, 18, -1.0),
+            max_deflection: f(t, 19, -1.0),
+            airfoil: airfoil.to_string(),
+            efficacy: f(t, 21, 1.0),
+        });
     }
 
     fn parse_shock(&mut self, t: &[&str]) {
@@ -811,6 +1027,11 @@ impl Parser {
             node_friction: self.node_defaults.friction.unwrap_or(1.0),
         });
         if self.sequential() {
+            if kind == "wheels" {
+                let wheel = self.out.wheels.len() as u32 - 1;
+                self.wheel_numbers
+                    .push((self.next_number, nodes_per_ray * rays, wheel));
+            }
             self.next_number += nodes_per_ray * rays;
         }
     }
@@ -835,6 +1056,8 @@ pub fn parse_truck(src: &str) -> TruckFile {
         line_no: 0,
         in_submesh: false,
         cameras: Vec::new(),
+        fuse_area_coef: 1.0,
+        wheel_numbers: Vec::new(),
     };
     let mut have_title = false;
     for (i, raw) in src.lines().enumerate() {
@@ -894,6 +1117,8 @@ pub fn parse_truck(src: &str) -> TruckFile {
                     | Section::Hydros
                     | Section::Commands
                     | Section::Commands2
+                    | Section::Wings
+                    | Section::FuseDrag
                     | Section::Cameras
             )
         {
@@ -915,6 +1140,19 @@ pub fn parse_truck(src: &str) -> TruckFile {
         if p.out.cameras.is_none() {
             p.out.cameras = Some(RefNodes { center, back, left });
         }
+    }
+    // `fusedrag … autocalc`: z extent × y extent of the file's nodes (as written)
+    // × the area coefficient, the extents starting at 1000 / −1000.
+    let coef = p.fuse_area_coef;
+    if let Some(fd) = p.out.fusedrag.as_mut().filter(|fd| fd.width.is_nan()) {
+        let (mut lo, mut hi) = ([1000.0f32; 2], [-1000.0f32; 2]);
+        for n in &p.out.nodes {
+            for (k, v) in [n.position[2], n.position[1]].into_iter().enumerate() {
+                lo[k] = lo[k].min(v);
+                hi[k] = hi[k].max(v);
+            }
+        }
+        fd.width = (hi[0] - lo[0]) * (hi[1] - lo[1]) * coef;
     }
     let mut skipped: Vec<_> = p.skipped.into_iter().collect();
     skipped.sort();

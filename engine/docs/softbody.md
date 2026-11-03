@@ -531,6 +531,52 @@ reference's 45). Prefer 240 Hz, or 240 Hz × 5 with 2 sweeps.
 These values come from one vehicle; the design's 15-vehicle set and Rigs of Rods
 reference runs remain to do.
 
+## The explicit solver in the demo
+
+The HUD's solver button (`?solver=explicit`) rebuilds the scene with the vehicle on
+the explicit 2 kHz node–beam solver instead ([explicit-beams.md](explicit-beams.md):
+Rigs of Rods parity, `ExplicitBeamsGpu`), and back. The URL keeps the state, so a
+link opens either solver.
+
+* **Vehicles** (`?car=`): `sedan` (on the explicit side the acceptance runs'
+  procedural sedan, `CarParams::sedan()` at a 10 kg minimum node mass, with soft
+  tyres, or `?tyres=0` its bare body as `rubble_sedan_ror.truck`; the soft side keeps
+  its procedural car with a rigid core and render mesh), `hires` (the high-resolution
+  test car, `engine_softbody::hires` JBeam with the explicit-step tuning its tests
+  use), `?truck=<url>` (any `.truck` the server can reach, e.g. the acceptance
+  vehicles or Agora S / L from RigsOfRods/content), or a loaded `.truck` / JBeam
+  folder (kept for the tab as `?car=import`). The buggy has rigid parts: the
+  explicit side runs the sedan. The soft side turns a non-procedural vehicle to +Z
+  with its front where the sedan's would be; the explicit side spawns the same way.
+* **Scenes** (`?xscene=`, the third menu): `idle` (at rest; `L` launches it at
+  100 km/h with its tyres rolling), `coast` (100 km/h) and `wall` (100 km/h into a
+  rigid wall 1 + 0.5·v m ahead). Each soft scene maps to the nearest: crash tests
+  to `wall`, ramp and rollover to `coast`, the rest to `idle`. `?xspeed=` sets the
+  speed (km/h), `?drag=0` turns off the per-node air drag and turbulence (as the
+  acceptance runs).
+* **What it shows**: the collision skin (orange or teal per vehicle, darker with
+  strain, torn triangles dropped), tyres as dark beam lines, and with `V` every beam:
+  green intact, yellow to red bent, magenta broken. The HUD gives the steps per
+  frame, the GPU milliseconds per frame (timestamps; `≈` submit-to-done without
+  them) and the broken and bent beams.
+* **How it runs**: `engine-world-wasm` `ExplicitSim` on the World's device. Each
+  frame submits `2000 × dt` steps (at most twice a 60 fps frame's share) without
+  waiting; the page draws straight from the solver's node, beam and per-vehicle
+  buffers. Damage, the camera's pose, GPU times and the launch are `mapAsync`
+  reads. The World keeps the ground and the wall (rendered as colliders) and is not
+  stepped.
+
+```bash
+python3 -m http.server 8791 --directory engine   # the page and the acceptance vehicles
+# http://127.0.0.1:8791/crates/engine-webgpu/softbody.html?solver=explicit&scene=wall&truck=../../docs/explicit-beams-acceptance/vehicles/rubble_hires_jbeam.truck
+CONTENT=<RigsOfRods/content> node --experimental-websocket crates/engine-webgpu/explicit-check.mjs
+```
+
+`explicit-check.mjs` runs each vehicle (sedan, hires, hires_truck, and agora_s /
+agora_l with `CONTENT`) idle then launched, into the wall, and through the solver
+button to the soft solver and back, failing on any page or GPU error or a vehicle
+that does not move or deform.
+
 ## Crash scenarios
 
 The demo's scenes take parameters (query string, or the panel's fields and its run

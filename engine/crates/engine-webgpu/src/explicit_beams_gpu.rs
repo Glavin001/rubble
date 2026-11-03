@@ -11,7 +11,10 @@
 //! [`ExplicitBeamsGpu::positions`], [`ExplicitBeamsGpu::velocities`] and
 //! [`ExplicitBeamsGpu::beams`].
 
-use crate::{EXPLICIT_BEAMS_WGSL, EXPLICIT_BEAMS_WIDE_PASSES, EXPLICIT_BEAMS_WIDE_WGSL};
+use crate::{
+    EXPLICIT_BEAMS_AERO_WGSL, EXPLICIT_BEAMS_AERO_WIDE_WGSL, EXPLICIT_BEAMS_WGSL,
+    EXPLICIT_BEAMS_WIDE_PASSES, EXPLICIT_BEAMS_WIDE_WGSL,
+};
 use engine_softbody::explicit_beams::ExplicitBeams;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -51,7 +54,10 @@ pub struct ExplicitBeamsGpu {
     misc: wgpu::Buffer,
     spans: Vec<Span>,
     rest0: Vec<f32>,
-    words: [u32; 24],
+    words: [u32; PARAM_WORDS],
+    /// gBeams record of the aero state and per vehicle its first wing and count.
+    aero_state: u32,
+    wing_spans: Vec<(u32, u32)>,
     /// The wide passes (one thread per element over every vehicle), when used.
     wide: Option<Wide>,
     total: [u32; 5],
@@ -81,6 +87,8 @@ const WIDE_CLOSE: usize = 6;
 /// step word) plus the frame's end, at the uniform offset alignment.
 const PARAM_STRIDE: u64 = 256;
 const PARAM_COPIES: u32 = 129;
+/// Words of the kernel's Params.
+const PARAM_WORDS: usize = 30;
 /// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
 const WIDE_MAX_VEHICLES: usize = 256;
 
@@ -158,7 +166,8 @@ impl ExplicitBeamsGpu {
             lists.extend(v.candidates.iter().map(|&c| node_off + c));
             let flags = v.settings.fast_inv_sqrt as u32
                 | (v.settings.drag as u32) << 1
-                | (v.settings.turbulence as u32) << 2;
+                | (v.settings.turbulence as u32) << 2
+                | (v.fusedrag.is_some() as u32) << 3;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -234,6 +243,87 @@ impl ExplicitBeamsGpu {
             box_off += v.boxes.len() as u32;
         }
         misc.extend(tri_misc);
+        // Wings, the fuselage drag and self-centering commands (the EB_AERO module).
+        let aero = vehicles
+            .iter()
+            .any(|v| !v.wings.is_empty() || v.fusedrag.is_some() || !v.centering.is_empty());
+        let mut aero_recs: Vec<[u32; 4]> = Vec::new();
+        let mut wing_recs: Vec<[u32; 4]> = Vec::new();
+        let mut cmd_recs: Vec<[u32; 4]> = Vec::new();
+        let mut table_recs_aero: Vec<[u32; 4]> = Vec::new();
+        let mut wing_state: Vec<[f32; 4]> = Vec::new();
+        let mut cmd_state: Vec<[f32; 4]> = Vec::new();
+        let mut fuse_state: Vec<[f32; 4]> = Vec::new();
+        let mut wing_spans = Vec::with_capacity(nv);
+        let base_static = (box_base + box_recs.len()) as u32;
+        let aero_base = base_static;
+        let wing_base = aero_base + 2 * nv as u32;
+        let total_wings: usize = vehicles.iter().map(|v| v.wings.len()).sum();
+        let total_cmds: usize = vehicles.iter().map(|v| v.centering.len()).sum();
+        let cmd_base = wing_base + 4 * total_wings as u32;
+        let table_base = cmd_base + 2 * total_cmds as u32;
+        // Airfoil tables shared by name across vehicles.
+        let mut tables: Vec<(String, u32)> = Vec::new();
+        let (mut node_off, mut beam_off) = (0u32, 0u32);
+        for v in vehicles {
+            let table_of = |t: u32, tables: &mut Vec<(String, u32)>, recs: &mut Vec<[u32; 4]>| {
+                let a = &v.airfoils[t as usize];
+                if let Some((_, at)) = tables.iter().find(|(n, _)| *n == a.name) {
+                    return *at;
+                }
+                let at = table_base + recs.len() as u32;
+                for i in 0..engine_softbody::explicit_aero::AIRFOIL_ENTRIES {
+                    recs.push([a.cl[i].to_bits(), a.cd[i].to_bits(), a.cm[i].to_bits(), 0]);
+                }
+                tables.push((a.name.clone(), at));
+                at
+            };
+            aero_recs.push([
+                (wing_recs.len() / 4) as u32,
+                v.wings.len() as u32,
+                (cmd_recs.len() / 2) as u32,
+                v.centering.len() as u32,
+            ]);
+            wing_spans.push(((wing_recs.len() / 4) as u32, v.wings.len() as u32));
+            let fd = v.fusedrag.as_ref();
+            aero_recs.push([
+                node_off + fd.map_or(0, |f| f.front),
+                fd.map_or(0.0f32, |f| f.width).to_bits(),
+                v.nodes.len() as u32,
+                0,
+            ]);
+            fuse_state.push([v.fuse_force.x, v.fuse_force.y, v.fuse_force.z, 0.0]);
+            for w in &v.wings {
+                let g = |s: usize| node_off + w.nodes[s];
+                wing_recs.push([g(0), g(1), g(2), g(3)]);
+                wing_recs.push([g(4), g(5), g(6), g(7)]);
+                let table = table_of(w.airfoil, &mut tables, &mut table_recs_aero);
+                let (side, span, area) = match w.induced {
+                    None => (0, 0.0f32, 0.0f32),
+                    Some(i) => (
+                        if i.side == engine_softbody::explicit_aero::WingSide::Left { 1 } else { 2 },
+                        i.span,
+                        i.area,
+                    ),
+                };
+                wing_recs.push([w.efficacy.to_bits(), w.break_ref.to_bits(), table, side]);
+                wing_recs.push([span.to_bits(), area.to_bits(), 0, 0]);
+                wing_state.push([w.broken as u32 as f32, 0.0, 0.0, 0.0]);
+                wing_state.extend([[0.0f32; 4]; 3]);
+            }
+            for c in &v.centering {
+                cmd_recs.push([beam_off + c.beam, c.contract_first as u32, c.centre.to_bits(), 0]);
+                cmd_recs.push([
+                    c.shorten_rate.to_bits(),
+                    c.lengthen_rate.to_bits(),
+                    c.max_contraction.to_bits(),
+                    c.max_extension.to_bits(),
+                ]);
+                cmd_state.push([c.mode as f32, 0.0, 0.0, 0.0]);
+            }
+            node_off += v.nodes.len() as u32;
+            beam_off += v.beams.len() as u32;
+        }
         debug_assert!(slots.iter().flatten().all(|&s| s != u32::MAX));
         let inc_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
@@ -263,6 +353,11 @@ impl ExplicitBeamsGpu {
                 nv * WIDE_GRID_BUCKETS * WIDE_SLOTS,
             ));
         }
+        // gBeams: the aero state (fuselage drag, wings, commands).
+        let aero_state = beams.len() as u32;
+        beams.extend(fuse_state);
+        beams.extend(wing_state);
+        beams.extend(cmd_state);
         // gNext: per list position the grid rank, then the wide passes' grid
         // offsets and tested lists (plain words: only the counters are atomic).
         let grid_off_base = lists.len() as u32;
@@ -274,15 +369,21 @@ impl ExplicitBeamsGpu {
         statics.extend(beam_recs);
         statics.extend(tri_recs);
         statics.extend(box_recs);
+        debug_assert_eq!(statics.len() as u32, aero_base);
+        statics.extend(aero_recs);
+        statics.extend(wing_recs);
+        statics.extend(cmd_recs);
+        statics.extend(table_recs_aero);
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams"),
             // Large vehicles get twice the lanes (more loads in flight per step).
             source: wgpu::ShaderSource::Wgsl(
-                if vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS) {
-                    EXPLICIT_BEAMS_WIDE_WGSL
-                } else {
-                    EXPLICIT_BEAMS_WGSL
+                match (aero, vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS)) {
+                    (false, true) => EXPLICIT_BEAMS_WIDE_WGSL,
+                    (false, false) => EXPLICIT_BEAMS_WGSL,
+                    (true, true) => EXPLICIT_BEAMS_AERO_WIDE_WGSL,
+                    (true, false) => EXPLICIT_BEAMS_AERO_WGSL,
                 }
                 .into(),
             ),
@@ -339,6 +440,12 @@ impl ExplicitBeamsGpu {
             cand_table_base,
             slot_base16,
             overflow_base,
+            aero_base,
+            wing_base,
+            cmd_base,
+            aero_state,
+            total_wings as u32,
+            0,
         ];
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),
@@ -397,8 +504,9 @@ impl ExplicitBeamsGpu {
         let buffers = [
             &params, &statics, &lists, &nodes, &beams, &acc, &groups, &misc, &next,
         ];
-        let wide =
-            (nv <= WIDE_MAX_VEHICLES).then(|| Wide::new(device, queue, &buffers, &table_recs));
+        // The wide passes do not run wings, the fuselage drag or commands.
+        let wide = (nv <= WIDE_MAX_VEHICLES && !aero)
+            .then(|| Wide::new(device, queue, &buffers, &table_recs));
         let total = [
             total_nodes as u32,
             total_beams as u32,
@@ -425,6 +533,8 @@ impl ExplicitBeamsGpu {
             spans,
             rest0,
             words,
+            aero_state,
+            wing_spans,
             timing: None,
             wide,
             total,
@@ -569,6 +679,75 @@ impl ExplicitBeamsGpu {
             .collect()
     }
 
+    /// Resolve the timed frames since [`Self::enable_frame_timing`] into a new
+    /// mappable buffer and restart timing empty, without waiting: the buffer
+    /// holds a (begin, end) pair of ticks per frame, the count is the frames.
+    /// Map it once the queue reaches it (browsers: `mapAsync`) and scale the
+    /// ticks by [`Self::timestamp_period_ms`]. `None` with no timing or no frames.
+    pub fn take_frame_times(&mut self) -> Option<(wgpu::Buffer, u32)> {
+        let t = self.timing.as_mut()?;
+        let used = std::mem::take(&mut t.used);
+        if used == 0 {
+            return None;
+        }
+        let size = u64::from(used) * 16;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-frame-times"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        enc.resolve_query_set(&t.set, 0..2 * used, &t.resolve, 0);
+        enc.copy_buffer_to_buffer(&t.resolve, 0, &staging, 0, size);
+        self.queue.submit([enc.finish()]);
+        Some((staging, used))
+    }
+
+    /// Milliseconds per timestamp tick.
+    pub fn timestamp_period_ms(&self) -> f64 {
+        f64::from(self.queue.get_timestamp_period()) * 1e-6
+    }
+
+    /// The node state buffer, 3 `vec4<f32>` per node in vehicle order: position
+    /// relative to the vehicle's origin and mass, velocity and friction, force.
+    /// Vehicle `v`'s nodes start at [`Self::node_offset`]`(v)`.
+    pub fn nodes_buffer(&self) -> &wgpu::Buffer {
+        &self.nodes
+    }
+
+    /// The beam state buffer: 2 `vec4<f32>` per beam in vehicle order, (rest
+    /// length, compression and tension yield, gate) and (strength, last force,
+    /// broken as 0 or 1, 0), then the kernel's scratch. Vehicle `v`'s beams start
+    /// at [`Self::beam_offset`]`(v)`.
+    pub fn beams_buffer(&self) -> &wgpu::Buffer {
+        &self.beams
+    }
+
+    /// The per-vehicle buffer: vehicle `v`'s record (`vec4<u32>`) at index `v` holds
+    /// its origin's bits (xyz) and the steps it has run (w); triangle and wide
+    /// pass scratch follows.
+    pub fn misc_buffer(&self) -> &wgpu::Buffer {
+        &self.misc
+    }
+
+    /// The first node of vehicle `v` in [`Self::nodes_buffer`] (in nodes).
+    pub fn node_offset(&self, v: usize) -> u32 {
+        self.spans[v].node_off
+    }
+
+    /// The first beam of vehicle `v` in [`Self::beams_buffer`] (in beams).
+    pub fn beam_offset(&self, v: usize) -> u32 {
+        self.spans[v].beam_off
+    }
+
+    /// Spawn rest lengths of every beam, in buffer order.
+    pub fn rest0(&self) -> &[f32] {
+        &self.rest0
+    }
+
     /// Vehicles simulated.
     pub fn vehicle_count(&self) -> usize {
         self.spans.len()
@@ -663,7 +842,7 @@ impl ExplicitBeamsGpu {
             let mut w = self.words;
             w[11] = k;
             let at = (PARAM_STRIDE * u64::from(k)) as usize;
-            bytes[at..at + 96].copy_from_slice(bytemuck::cast_slice(&w));
+            bytes[at..at + 4 * PARAM_WORDS].copy_from_slice(bytemuck::cast_slice(&w));
         }
         self.queue.write_buffer(&self.params, 0, &bytes);
     }
@@ -796,6 +975,33 @@ impl ExplicitBeamsGpu {
     /// Per vehicle, node velocities.
     pub fn velocities(&self) -> Vec<Vec<Vec3>> {
         self.node_field(1)
+    }
+
+    /// Per vehicle, its wings' broken flags (file order).
+    pub fn wings_broken(&self) -> Vec<Vec<bool>> {
+        let raw = self.read(&self.beams);
+        let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
+        let nv = self.spans.len() as u32;
+        self.wing_spans
+            .iter()
+            .map(|&(first, count)| {
+                (first..first + count)
+                    .map(|gw| v[(self.aero_state + nv + 4 * gw) as usize][0] != 0.0)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Per vehicle, the fuselage drag force on each node (the last step's D).
+    pub fn fuse_forces(&self) -> Vec<Vec3> {
+        let raw = self.read(&self.beams);
+        let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
+        (0..self.spans.len())
+            .map(|i| {
+                let r = v[self.aero_state as usize + i];
+                Vec3::new(r[0], r[1], r[2])
+            })
+            .collect()
     }
 
     /// Per vehicle, every beam's broken flag and rest length.

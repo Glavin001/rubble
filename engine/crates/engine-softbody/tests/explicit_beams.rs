@@ -788,3 +788,33 @@ fn collision_grid_matches_every_pair() {
         );
     }
 }
+
+#[test]
+fn a_tyre_starts_at_its_lower_z_axle_node() {
+    // The file names the axle from z = 1 to z = 0: the rings still start at the
+    // z = 0 node, first spoke up (the axle taken toward +z).
+    let text = "w
+globals
+100, 0, x
+nodes
+0, 0, 0.3, 1
+1, 0, 0.3, 0
+2, 1, 0.3, 0.5
+3, 0, 1, 0
+beams
+0, 1
+0, 2
+1, 2
+0, 3
+1, 3
+2, 3
+wheels
+0.3, 0.2, 4, 0, 1, 9999, 1, 0, 2, 20, 100000, 300
+end
+";
+    let s = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, EXACT).unwrap();
+    let first = s.tyres[0].first as usize;
+    assert_eq!(s.tyres[0].axle, [1, 0]);
+    assert!(s.nodes[first].pos.distance(Vec3::new(0.0, 0.6, 0.0)) < 1e-6);
+    assert!((s.nodes[first + 1].pos.z - 1.0).abs() < 1e-6);
+}
