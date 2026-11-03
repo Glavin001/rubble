@@ -75,6 +75,11 @@ static const uint KIND_SUPPORT = 2u;
 static const uint KIND_ROPE = 3u;
 static const uint KIND_SHOCK2 = 4u; // EB_AERO modules only
 static const uint KIND_TRIGGER = 5u; // EB_AERO modules only
+// JBeam mode (engine/docs/jbeam-semantics-spec.md; jbeamUpdate).
+static const uint KIND_JPLAIN = 6u;
+static const uint KIND_JSUPPORT = 7u;
+static const uint KIND_JBOUNDED = 8u;
+static const uint KIND_JCOUPLER = 9u;
 static const uint TYPE_DEFORMABLE = 0u;
 
 static const uint FLAG_FAST_INV_SQRT = 1u;
@@ -472,6 +477,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
     float4 P = gNodes[gi * 3u];
     float4 V = gNodes[gi * 3u + 1u];
     // Last step's beams (with its group breaks) and self-collision.
+    float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
     {
@@ -528,7 +534,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
     }
     gNodes[gi * 3u] = float4(pos, mass);
     gNodes[gi * 3u + 1u] = float4(vel, V.w);
-    gNodes[gi * 3u + 2u] = float4(f, 0.0);
+    gNodes[gi * 3u + 2u] = float4(f, selfGroup);
 }
 #ifdef EB_VV_SOLO
 #ifdef EB_AERO
@@ -552,6 +558,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
     if (any(abs(P.xyz - gsVvBounds[0]) > gsVvBounds[1])) vvReportOutside(vehicle);
     float4 V = gNodes[gi * 3u + 1u];
     // Last step's beams (with its group breaks) and self-collision.
+    float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
     {
@@ -608,7 +615,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
     }
     gNodes[gi * 3u] = float4(pos, mass);
     gNodes[gi * 3u + 1u] = float4(vel, V.w);
-    gNodes[gi * 3u + 2u] = float4(f, 0.0);
+    gNodes[gi * 3u + 2u] = float4(f, selfGroup);
     return 0u;
 }
 #endif
@@ -695,6 +702,185 @@ void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, ui
 void triggerUpdate(uint gj, bool fast, uint parity, uint4 bn);
 #endif
 
+// A JBeam-mode beam (kinds KIND_JPLAIN..KIND_JCOUPLER; the CPU reference's
+// jbeam_force_filtered, coupler_force and beam_pass; engine/docs/jbeam-semantics-spec.md).
+// Exact lengths (JBeam mode spawns without the fast inverse square root); no break
+// exception. Records: (k, c, limit k or the deformLimitStress cap, limit c),
+// (short, long, bound zone, damping filter record + 1 or 0); plain and support: the
+// rest-length limits and the support's break length in metres; bounded: the bounds as
+// fractions of the rest length, the velocity split and fast damping in Tc and Tt. A
+// filter record in gBeams is (last rate, last output, a, b).
+void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, float4 s1)
+{
+    float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
+    uint4 r2 = gStatic[gP.beamBase + gj * 3u + 2u];
+    float4 c2 = asfloat(r2);
+    float4 s0 = gBeams[gj * 2u];
+    uint kind = bn.z & 0xFFu;
+    uint type = (bn.z >> 8) & 0xFFu;
+    int group = asint(bn.w);
+    float4 pa = gNodes[bn.x * 3u];
+    float4 pb = gNodes[bn.y * 3u];
+    float3 va = gNodes[bn.x * 3u + 1u].xyz;
+    float3 vb = gNodes[bn.y * 3u + 1u].xyz;
+    bool broken = false;
+    float strength = s1.x;
+    if (kind == KIND_JCOUPLER)
+    {
+        float3 fc = ssub3(sscale(ssub3(pa.xyz, pb.xyz), -c1.x), sscale(ssub3(va, vb), c1.y));
+        float m = ssqrt(sdot(fc, fc));
+        if (m > strength)
+        {
+            broken = true;
+            fc = float3(0.0, 0.0, 0.0);
+            if (group > 0)
+            {
+                gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+                gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+            }
+        }
+        if (broken) gBeams[gj * 2u + 1u] = float4(strength, m, 1.0, 1.0);
+        else if (s1.w != 0.0) gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(fc, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-fc, 0.0);
+        return;
+    }
+    float rest = s0.x;
+    float tc = s0.y;
+    float tt = s0.z;
+    float gate = s0.w;
+    float3 d = ssub3(pa.xyz, pb.xyz);
+    float q = sdot(d, d);
+    float inv = sdiv(1.0, ssqrt(q));
+    float len = smul(q, inv);
+    float e = nf(len - rest);
+    float u = smul(sdot(ssub3(va, vb), d), inv);
+    if (r2.w != 0u)
+    {
+        // dampCutoffHz: the bilinear low-pass of the rate.
+        uint fi = r2.w - 1u;
+        float4 flt = gBeams[fi];
+        float y = nf(smul(flt.z, nf(u + flt.x)) - smul(flt.w, flt.y));
+        gBeams[fi] = float4(u, y, flt.z, flt.w);
+        u = y;
+    }
+    float k = c1.x;
+    float c = c1.y;
+    float damp = smul(c, u);
+    float last = 0.0;
+    float f = 0.0;
+    bool lengthBreak = false;
+    if (kind == KIND_JBOUNDED)
+    {
+        float au = abs(u);
+        if (au > tc)
+        {
+            float m = nf(smul(c, tc) + smul(tt, nf(au - tc)));
+            damp = u < 0.0 ? -m : m;
+        }
+        float lb = smul(c2.y, rest);
+        float sb = smul(c2.x, rest);
+        float o = 0.0;
+        if (e > lb) o = nf(e - lb);
+        else if (e < -sb) o = nf(-e - sb);
+        if (o > 0.0)
+        {
+            float sz = c2.z > 0.0 ? min(sdiv(o, c2.z), 1.0) : 1.0;
+            k = nf(k + smul(nf(c1.z - k), sz));
+            damp = nf(damp + smul(nf(smul(c1.w, u) - damp), sz));
+        }
+    }
+    else if (kind == KIND_JSUPPORT && e > 0.0)
+    {
+        if (len > c2.y) lengthBreak = true;
+        k = 0.0;
+        damp = 0.0;
+    }
+    if (lengthBreak)
+    {
+        broken = true;
+        if (group > 0)
+        {
+            gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+            gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+        }
+    }
+    else
+    {
+        f = nf(smul(-k, e) - damp);
+        last = f;
+        float tau = abs(f);
+        if (tau > gate && type == TYPE_DEFORMABLE && k != 0.0)
+        {
+            if (f > tc && e < 0.0)
+            {
+                float delta = nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z)));
+                float old = rest;
+                float floorLen = max(c2.x, MIN_REST);
+                float free = nf(rest + delta);
+                if (free < floorLen)
+                {
+                    rest = min(floorLen, old);
+                    f = nf(smul(-k, nf(len - rest)) - damp);
+                }
+                else
+                {
+                    rest = free;
+                    f = nf(f - sdiv(nf(f - tc), 2.0));
+                }
+                tau = abs(f);
+                if (rest < old)
+                {
+                    tc = min(sdiv(smul(tc, old), rest), max(c1.z, tc));
+                    gate = min(min(tc, tt), strength);
+                }
+            }
+            else if (f < -tt && e > 0.0)
+            {
+                float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
+                float old = rest;
+                float free = nf(rest + delta);
+                if (free > c2.y)
+                {
+                    rest = max(c2.y, old);
+                    f = nf(smul(-k, nf(len - rest)) - damp);
+                }
+                else
+                {
+                    rest = free;
+                    f = nf(f - sdiv(nf(f + tt), 2.0));
+                }
+                tau = abs(f);
+                if (rest > old)
+                {
+                    tt = min(sdiv(smul(tt, rest), old), max(c1.z, tt));
+                    gate = min(min(tc, tt), strength);
+                    strength = nf(strength - smul(nf(rest - old), k));
+                }
+            }
+        }
+        if (tau > strength)
+        {
+            broken = true;
+            f = 0.0;
+            if (group > 0)
+            {
+                gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+                gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+            }
+        }
+    }
+    float4 n0 = float4(rest, tc, tt, gate);
+    if (any(n0 != s0)) gBeams[gj * 2u] = n0;
+    if (strength != s1.x || broken)
+        gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, broken ? 1.0 : 0.0);
+    else if (s1.w != 0.0)
+        gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
+    float3 push = sscale(d, smul(f, inv));
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
+}
+
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
 {
     float4 s1 = gBeams[gj * 2u + 1u];
@@ -707,6 +893,11 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
         return;
     }
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
+    if ((bn.z & 0xFFu) >= KIND_JPLAIN)
+    {
+        jbeamUpdate(gj, local, groupOff, parity, bn, s1);
+        return;
+    }
 #ifdef EB_AERO
     if ((bn.z & 0xFFu) == KIND_SHOCK2)
     {
@@ -874,7 +1065,7 @@ int triangleFinish(uint gt)
         }
         wait = th.w != 0u ? -20000 : wait + 1;
     }
-    gMisc[mi] = uint4(asuint(wait), asuint(idle), 0u, 0u);
+    gMisc[mi] = uint4(asuint(wait), asuint(idle), th.z, 0u);
     return wait;
 }
 
@@ -921,6 +1112,9 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
 {
     uint4 tn = t.tn;
     if (h == tn.x || h == tn.y || h == tn.z) return;
+    // JBeam mode: a node skips the triangles of its own self-collision group.
+    uint tg = gMisc[t.mi].z;
+    if (tg != 0u && uint(gNodes[h * 3u + 2u].w) == tg) return;
     float4 P = gNodes[h * 3u];
     float3 p = nf3(origin + P.xyz);
     if (any(p < t.lo) || any(p > t.hi)) return;
@@ -1925,6 +2119,7 @@ void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float grou
 {
     float4 P = gNodes[gi * 3u];
     float4 V = gNodes[gi * 3u + 1u];
+    float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, parity, true);
     if (hits)
     {
@@ -1968,7 +2163,7 @@ void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float grou
     f = sadd3(float3(0.0, smul(mass, GRAVITY), 0.0), gBeams[gP.aeroState + vehicle].xyz);
     gNodes[gi * 3u] = float4(pos, mass);
     gNodes[gi * 3u + 1u] = float4(vel, V.w);
-    gNodes[gi * 3u + 2u] = float4(f, 0.0);
+    gNodes[gi * 3u + 2u] = float4(f, selfGroup);
 }
 #ifdef EB_VV_SOLO
 uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float ground, uint boxOff, uint boxCount,
@@ -1979,6 +2174,7 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
     // last at its end).
     if (any(abs(P.xyz - gsVvBounds[0]) > gsVvBounds[1])) vvReportOutside(vehicle);
     float4 V = gNodes[gi * 3u + 1u];
+    float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, parity, true);
     if (hits)
     {
@@ -2022,7 +2218,7 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
     f = sadd3(float3(0.0, smul(mass, GRAVITY), 0.0), gBeams[gP.aeroState + vehicle].xyz);
     gNodes[gi * 3u] = float4(pos, mass);
     gNodes[gi * 3u + 1u] = float4(vel, V.w);
-    gNodes[gi * 3u + 2u] = float4(f, 0.0);
+    gNodes[gi * 3u + 2u] = float4(f, selfGroup);
     return 0u;
 }
 #endif

@@ -487,6 +487,9 @@ impl ExplicitBeamsGpu {
         let mut tri_misc: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
         let mut spans = Vec::with_capacity(nv);
         let mut rest0 = Vec::with_capacity(total_beams);
+        // JBeam damping filters (global) and the beam records to point at them.
+        let mut filters: Vec<engine_softbody::explicit_beams::DampFilter> = Vec::new();
+        let mut filter_patches: Vec<(usize, usize)> = Vec::new();
         let (mut node_off, mut beam_off, mut tri_off, mut box_off) = (0u32, 0u32, 0u32, 0u32);
         // shocks2 rates (EB_AERO modules), 2 records per shock, global indices.
         let mut shock_recs: Vec<[u32; 4]> = Vec::new();
@@ -599,10 +602,12 @@ impl ExplicitBeamsGpu {
                 v.collision_range.to_bits(),
                 grid_cell(v).to_bits(),
             ]);
-            for n in &v.nodes {
+            for (i, n) in v.nodes.iter().enumerate() {
                 nodes.push([n.pos.x, n.pos.y, n.pos.z, n.mass]);
                 nodes.push([n.vel.x, n.vel.y, n.vel.z, n.friction]);
-                nodes.push([n.force.x, n.force.y, n.force.z, 0.0]);
+                // .w: the node's JBeam self-collision group (0 none).
+                let group = v.self_groups.get(i).copied().unwrap_or(0);
+                nodes.push([n.force.x, n.force.y, n.force.z, group as f32]);
             }
             let shock_off = (shock_recs.len() / 2) as u32;
             for sh in &v.shocks2 {
@@ -644,11 +649,22 @@ impl ExplicitBeamsGpu {
                 } else {
                     b.plastic.to_bits()
                 };
+                // JBeam-mode kinds: the damping filter's gBeams record + 1 (0 none),
+                // patched once the filter region's place is known.
+                let fourth = if b.kind.is_jbeam() {
+                    if b.shock > 0 {
+                        filter_patches.push((beam_recs.len(), filters.len()));
+                        filters.push(v.damp_filters[b.shock as usize - 1]);
+                    }
+                    0
+                } else {
+                    b.rest0.to_bits()
+                };
                 beam_recs.push([
                     b.short_bound.to_bits(),
                     b.long_bound.to_bits(),
                     third,
-                    b.rest0.to_bits(),
+                    fourth,
                 ]);
                 beams.push([b.rest, b.tc, b.tt, b.gate]);
                 beams.push([b.strength, b.force, b.broken as u32 as f32, 0.0]);
@@ -662,6 +678,11 @@ impl ExplicitBeamsGpu {
                     vi as u32,
                 ]);
                 tri_misc.push([t.wait as u32, t.idle as u32, 0, 0]);
+            }
+            // JBeam self-collision groups: per triangle in gMisc .z.
+            let first_tri = tri_misc.len() - v.triangles.len();
+            for t in 0..v.triangles.len() {
+                tri_misc[first_tri + t][2] = v.triangle_self_group(t);
             }
             for bx in &v.boxes {
                 box_recs.push(bits(bx.lo));
@@ -991,6 +1012,12 @@ impl ExplicitBeamsGpu {
         // kernel's vvPassSmall.)
         let vv_run = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * total_cp));
+        // JBeam damping filters: (last rate, last output, a, b) each.
+        let filter_base = beams.len();
+        beams.extend(filters.iter().map(|f| [f.u, f.y, f.a, f.b]));
+        for &(rec, i) in &filter_patches {
+            beam_recs[rec][3] = (filter_base + i + 1) as u32;
+        }
         // gNext: per list position the grid rank, then the wide passes' grid
         // offsets and tested lists (plain words: only the counters are atomic).
         let grid_off_base = lists.len() as u32;

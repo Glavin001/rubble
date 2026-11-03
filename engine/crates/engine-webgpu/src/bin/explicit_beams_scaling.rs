@@ -9,6 +9,9 @@
 //!     rubble_counts=512,1024 trials=5 out=<dir>
 //! ```
 //!
+//! `jbeam=<vehicles dir>:<name>:<config.pc>` in place of the `.truck` file runs a
+//! BeamNG JBeam vehicle in the explicit solver's JBeam mode, Rubble only.
+//!
 //! Scenarios (each vehicle spawned with its lowest node 2 cm above flat ground, its
 //! tyres rolling at the spawn velocity unless `roll=0`, with Rigs of Rods' per-node
 //! drag unless `drag=0`, in a
@@ -234,7 +237,14 @@ fn spawn_yaw(text: &str, at: Vec3, yaw: f32, vel: Vec3) -> ExplicitBeams {
     };
     let config = CONFIG.get().and_then(|c| c.as_deref());
     let at = Vec3::new(at.x, 0.0, at.z);
-    let mut sim = if yaw == 0.0 {
+    let mut sim = if let Some((desc, tyres)) = JBEAM.get() {
+        // `jbeam=`: the explicit solver's JBeam mode (its own spawn, no yaw).
+        assert!(
+            yaw == 0.0,
+            "jbeam=: scenarios that turn vehicles (pileup, headon, tbone) are not supported"
+        );
+        ExplicitBeams::from_desc_jbeam(desc, *tyres, at, vel, settings).map(|(s, _)| s)
+    } else if yaw == 0.0 {
         ExplicitBeams::from_truck_config(text, config, at, vel, settings)
     } else {
         ExplicitBeams::from_truck_config_yaw(text, config, at, yaw, vel, settings)
@@ -264,6 +274,17 @@ fn apply_wide(gpu: &mut ExplicitBeamsGpu) {
         eprintln!("wide passes: {on}");
     }
 }
+
+/// `jbeam=<vehicles dir>:<name>:<config.pc>`: a BeamNG JBeam vehicle, loaded at run
+/// time and spawned in the explicit solver's JBeam mode
+/// (`ExplicitBeams::from_desc_jbeam`, `engine/docs/jbeam-semantics-spec.md`), with
+/// its tyres from `TyreDefaults::for_vehicle`. Rubble only (Rigs of Rods cannot run
+/// it: `ror=` is refused); the vehicle's `.truck` form stands in for the geometry
+/// (reference nodes) and the trace scene.
+static JBEAM: std::sync::OnceLock<(
+    engine_softbody::desc::SoftVehicleDesc,
+    engine_softbody::truck_export::TyreDefaults,
+)> = std::sync::OnceLock::new();
 
 /// `config=<name>`: the section configuration (both engines).
 static CONFIG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -1184,11 +1205,42 @@ where
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let truck = PathBuf::from(
-        args.first()
-            .expect("usage: explicit_beams_scaling <file.truck> …"),
-    );
-    let text = std::fs::read_to_string(&truck)?;
+    let (truck, text) = if let Some(spec) = kv(&args, "jbeam") {
+        let [dir, name, pc] = spec.splitn(3, ':').collect::<Vec<_>>()[..] else {
+            anyhow::bail!("jbeam=<vehicles dir>:<name>:<config.pc>");
+        };
+        let dir = std::path::Path::new(dir);
+        let files =
+            engine_softbody::jbeam::read_vehicle_dir(dir, name).map_err(anyhow::Error::msg)?;
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let pc_text = std::fs::read_to_string(dir.join(name).join(pc))?;
+        let desc = engine_softbody::jbeam::load_jbeam(&refs, Some(&pc_text))
+            .map_err(anyhow::Error::msg)?;
+        let tyres = engine_softbody::truck_export::TyreDefaults::for_vehicle(&desc);
+        let (text, _) = engine_softbody::truck_export::desc_to_truck(&desc, tyres);
+        eprintln!(
+            "jbeam {name} {pc}: {} nodes, {} beams, {} triangles, {} wheels (JBeam mode)",
+            desc.nodes.len(),
+            desc.beams.len(),
+            desc.triangles.len(),
+            desc.wheels.len()
+        );
+        let _ = JBEAM.set((desc, tyres));
+        (
+            PathBuf::from(format!("{name}_{}.jbeam", pc.trim_end_matches(".pc"))),
+            text,
+        )
+    } else {
+        let truck = PathBuf::from(
+            args.first()
+                .expect("usage: explicit_beams_scaling <file.truck> | jbeam=<dir>:<name>:<pc> …"),
+        );
+        let text = std::fs::read_to_string(&truck)?;
+        (truck, text)
+    };
     let scenarios: Vec<Scenario> = kv(&args, "scenarios")
         .unwrap_or("idle,drive,impact")
         .split(',')
@@ -1225,6 +1277,9 @@ fn main() -> anyhow::Result<()> {
     let ror_bin = kv(&args, "ror")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("ROR_BIN").map(PathBuf::from));
+    if JBEAM.get().is_some() && ror_bin.is_some() {
+        anyhow::bail!("jbeam=: Rigs of Rods cannot run a JBeam vehicle (drop ror= / ROR_BIN)");
+    }
     let seconds = (warm + frames) as f32 / fps;
     let _ = WARM_S.set(warm as f32 / fps);
     let cols: Option<usize> = kv(&args, "cols").map(|s| s.parse().unwrap());

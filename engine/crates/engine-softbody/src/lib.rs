@@ -24,6 +24,7 @@ pub mod flexbody;
 pub mod hires;
 pub mod host;
 pub mod jbeam;
+pub mod jbeam_fixture;
 pub mod layout;
 pub mod metrics;
 pub mod model;
