@@ -57,6 +57,14 @@
 //! columns) records the first scenario and count on Rubble's GPU for the crash
 //! viewer instead of benchmarking.
 //!
+//! Bounds. `max_frame_ms=` (default 100): before each count, an engine's frame time
+//! is predicted from its previous count (linearly in vehicles); past the limit that
+//! engine runs no larger count, in any trial (Rubble's limit ends the count for both).
+//! `deadline_s=` (default none): a run whose predicted wall time (the previous
+//! count's, scaled linearly) would end past the deadline is not started; the trials
+//! stop there and the summary covers what ran. `<out>/results.partial.json` holds
+//! every finished run after each one.
+//!
 //! Writes `<out>/results.json` (every frame time and comparison) and
 //! `<out>/summary.md`.
 
@@ -772,6 +780,9 @@ fn main() -> anyhow::Result<()> {
     let max_load: f64 = kv(&args, "max_load").map_or(3.0, |s| s.parse().unwrap());
     let max_gpu: f64 = kv(&args, "max_gpu").map_or(10.0, |s| s.parse().unwrap());
     let quiet_wait: f64 = kv(&args, "quiet_wait").map_or(600.0, |s| s.parse().unwrap());
+    let max_frame_ms: f64 = kv(&args, "max_frame_ms").map_or(100.0, |s| s.parse().unwrap());
+    let deadline_s: f64 = kv(&args, "deadline_s").map_or(f64::INFINITY, |s| s.parse().unwrap());
+    let began = Instant::now();
     let out = PathBuf::from(kv(&args, "out").unwrap_or("explicit_beams_scaling"));
     std::fs::create_dir_all(&out)?;
     let ror_bin = kv(&args, "ror")
@@ -896,11 +907,46 @@ fn main() -> anyhow::Result<()> {
     // Runs that started on a busy machine (the wait gave up): none may count.
     let mut busy_runs = 0usize;
     let mut run_count = 0usize;
+    // Bounds: per (scenario, engine) the last count's vehicles, mean frame ms and
+    // wall seconds; the first count each engine skips (kept across trials).
+    let mut last: HashMap<(Scenario, bool), (usize, f64, f64)> = HashMap::new();
+    let mut cut: HashMap<(Scenario, bool), usize> = HashMap::new();
+    let mut stopped: Option<String> = None;
 
-    for trial in 0..trials {
+    'trials: for trial in 0..trials {
         for &sc in &scenarios {
             for &n in counts.iter().chain(&rubble_counts) {
-                let with_ror = ror_bin.is_some() && counts.contains(&n);
+                // (frame ms, wall s) predicted for an engine (true: RoR) at n.
+                let predict = |ror: bool| {
+                    last.get(&(sc, ror)).map_or((0.0, 0.0), |&(m, f, w)| {
+                        let k = n as f64 / m as f64;
+                        (f * k, w * k)
+                    })
+                };
+                for ror in [false, true] {
+                    if !cut.contains_key(&(sc, ror)) && predict(ror).0 > max_frame_ms {
+                        cut.insert((sc, ror), n);
+                        eprintln!(
+                            "{} {}: predicted {:.1} ms a frame at {n} vehicles > max_frame_ms {max_frame_ms}: no larger count",
+                            sc.name(), if ror { "RoR" } else { "Rubble" }, predict(ror).0
+                        );
+                    }
+                }
+                let allowed = |ror: bool| cut.get(&(sc, ror)).map_or(true, |&c| n < c);
+                if !allowed(false) {
+                    continue;
+                }
+                let with_ror = ror_bin.is_some() && counts.contains(&n) && allowed(true);
+                let need = predict(false).1 + if with_ror { predict(true).1 } else { 0.0 };
+                if began.elapsed().as_secs_f64() + need > deadline_s {
+                    let why = format!(
+                        "deadline: trial {trial} {} {n} vehicles predicted {need:.0} s at {:.0} s of {deadline_s:.0} s; no further runs",
+                        sc.name(), began.elapsed().as_secs_f64()
+                    );
+                    eprintln!("{why}");
+                    stopped = Some(why);
+                    break 'trials;
+                }
                 let s = scene(sc, n, &g, speed, seconds, 0.0, cols);
                 let file = out.join(format!("scene_{}_{n}.txt", sc.name()));
                 write_scene(&file, &s);
@@ -914,7 +960,8 @@ fn main() -> anyhow::Result<()> {
                 for first in [trial % 2 == 0, trial % 2 != 0] {
                     if first && with_ror {
                         loads.push(wait_quiet(max_load, max_gpu, quiet_wait));
-                        ror_run = Some(run_ror(
+                        let t0 = Instant::now();
+                        let run = run_ror(
                             ror_bin.as_ref().unwrap(),
                             &truck,
                             &file,
@@ -922,10 +969,16 @@ fn main() -> anyhow::Result<()> {
                             warm,
                             frames,
                             steps,
-                        ));
+                        );
+                        last.insert((sc, true), (n, mean(&run.frame_ms), t0.elapsed().as_secs_f64()));
+                        ror_run = Some(run);
                     } else if !first {
                         loads.push(wait_quiet(max_load, max_gpu, quiet_wait));
-                        rubble_run = Some(run_rubble(&device, &queue, &fleet, warm, frames, steps));
+                        let t0 = Instant::now();
+                        let run = run_rubble(&device, &queue, &fleet, warm, frames, steps);
+                        let frame = mean(&run.gpu_ms).max(run.pipelined_ms);
+                        last.insert((sc, false), (n, frame, t0.elapsed().as_secs_f64()));
+                        rubble_run = Some(run);
                     }
                 }
                 run_count += loads.len();
@@ -990,9 +1043,13 @@ fn main() -> anyhow::Result<()> {
                         .map_or(String::new(), |v| format!(", ror {:.3} ms", v[v.len() - 1]))
                 );
                 all.push(run_json);
+                std::fs::write(out.join("results.partial.json"), serde_json::to_string(&all)?)?;
             }
         }
     }
+    // The summary covers the counts that ran.
+    let counts: Vec<usize> = counts.into_iter().filter(|n| scenarios.iter().all(|s| gpu_means.contains_key(&(*s, *n)))).collect();
+    let rubble_counts: Vec<usize> = rubble_counts.into_iter().filter(|n| scenarios.iter().all(|s| gpu_means.contains_key(&(*s, *n)))).collect();
 
     // Accuracy ensembles: per scenario K one-vehicle runs per engine, run k spawned
     // 0.1 mm/s × k faster.
@@ -1043,6 +1100,16 @@ fn main() -> anyhow::Result<()> {
             format!("{:.3} [{:.3}, {:.3}]", c.0, c.1, c.2)
         }
     };
+    let mut cuts: Vec<String> = cut
+        .iter()
+        .map(|((sc, ror), n)| format!("{} {} from {n} vehicles", sc.name(), if *ror { "RoR" } else { "Rubble" }))
+        .collect();
+    cuts.sort();
+    if !cuts.is_empty() || stopped.is_some() {
+        writeln!(md, "Bounds (max_frame_ms {max_frame_ms}, deadline_s {deadline_s}): not run past the frame limit: {}. {}\n",
+            if cuts.is_empty() { "none".into() } else { cuts.join("; ") },
+            stopped.as_deref().unwrap_or("All trials ran.")).unwrap();
+    }
     for &sc in &scenarios {
         writeln!(md, "## {}\n", sc.name()).unwrap();
         writeln!(md, "ms per frame: mean of trial means [95 % CI]; p95 over every frame. Speed-up: Rigs of Rods' time over Rubble's GPU time, geometric mean of paired trials [95 % CI].\n").unwrap();
@@ -1213,6 +1280,8 @@ fn main() -> anyhow::Result<()> {
         serde_json::to_string(&json!({
             "truck": truck.display().to_string(), "adapter": info.name,
             "trials": trials, "warm": warm, "frames": frames, "speed": speed,
+            "stopped": stopped, "max_frame_ms": max_frame_ms,
+            "cut": cut.iter().map(|((sc, ror), n)| json!({"scenario": sc.name(), "engine": if *ror { "ror" } else { "rubble" }, "from": n})).collect::<Vec<_>>(),
             "runs": all,
             "nudges": nudges,
             "ensembles": scenarios.iter().map(|s| (s.name(), ensembles.get(s).map(|e| e.json(&g)).unwrap_or(Value::Null))).collect::<HashMap<_, _>>(),
