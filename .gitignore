@@ -3,7 +3,8 @@
 engine/target/
 Cargo.lock
 *.spv
-.claude/
+.claude/*
+!.claude/skills/
 inspiration/
 
 # Web build artifacts

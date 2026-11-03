@@ -32,6 +32,11 @@
     behind `STRESS_CORRECTION_LIMIT=1`, off by default.
   - Do not enable it in a profile or in production code.
 
+- Waiting on background work: never loop on `pgrep -f`/`ps | grep` or kill with
+  `pkill -f` (the pattern matches the waiter itself and other sessions). Run the work
+  in the background and let it notify, or wait on a PID with a timeout:
+  `.claude/skills/wait-for-process/` (SKILL.md and `wait_for_exit.py`).
+
 ## Cursor Cloud specific instructions
 
 > All standard build/test/lint/web commands and prerequisites are in `CONTRIBUTING.md`.
