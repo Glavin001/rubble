@@ -339,6 +339,11 @@ fn main() -> Result<()> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     println!("cargo:rerun-if-changed={}", slang_root.display());
     println!("cargo:rerun-if-env-changed=RUBBLE_SLANG_CACHE");
+    println!("cargo:rerun-if-env-changed=RUBBLE_EB_REF");
+    println!("cargo:rerun-if-env-changed=RUBBLE_EB_SRC");
+    if let Ok(f) = std::env::var("RUBBLE_EB_SRC") {
+        println!("cargo:rerun-if-changed={f}");
+    }
     let _ = find_slangc()?;
 
     // `RUBBLE_SLANG_CACHE`: a directory keeping these outputs between builds, keyed by
@@ -489,7 +494,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     // barriers alone.
     let beams = wgsl_dir.join("explicit_beams.wgsl");
     compile_with_defines(
-        &slang_root.join("kernels/explicit_beams.slang"),
+        &explicit_beams_source(slang_root),
         "explicit_beams_frame",
         SlangTarget::Wgsl,
         &beams,
@@ -511,7 +516,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         let entry = format!("explicit_beams_wide_{pass}");
         let out = wgsl_dir.join(format!("{entry}.wgsl"));
         compile_with_defines(
-            &slang_root.join("kernels/explicit_beams.slang"),
+            &explicit_beams_source(slang_root),
             &entry,
             SlangTarget::Wgsl,
             &out,
@@ -532,7 +537,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     // The same module with 512 lanes per vehicle, for large vehicles.
     let wide = wgsl_dir.join("explicit_beams_wide.wgsl");
     compile_with_defines(
-        &slang_root.join("kernels/explicit_beams.slang"),
+        &explicit_beams_source(slang_root),
         "explicit_beams_frame",
         SlangTarget::Wgsl,
         &wide,
@@ -598,7 +603,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             entry
         };
         compile_with_defines(
-            &slang_root.join("kernels/explicit_beams.slang"),
+            &explicit_beams_source(slang_root),
             entry,
             SlangTarget::Wgsl,
             &out,
@@ -753,18 +758,23 @@ fn explicit_barriers(out: &Path) -> Result<()> {
 fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
     let base = slang_root.join("kernels/explicit_beams_baseline.slang");
     let cur = slang_root.join("kernels/explicit_beams.slang");
+    let reference = slang_root.join("kernels/explicit_beams_ref.slang");
     let mut jobs: Vec<(PathBuf, String, String, Vec<(&str, &str)>)> = Vec::new();
     for p in ["bounds", "pairs", "group"] {
         let n = format!("explicit_beams_vv_{p}");
-        jobs.push((base.clone(), format!("explicit_baseline_{n}"), n, vec![("ENGINE_WGSL", "1")]));
+        jobs.push((base.clone(), format!("explicit_baseline_{n}"), n.clone(), vec![("ENGINE_WGSL", "1")]));
+        jobs.push((reference.clone(), format!("explicit_ref_{n}"), n, vec![("ENGINE_WGSL", "1")]));
     }
     // (source, file prefix, lane counts, extra define)
-    let sets: [(&PathBuf, &str, &[&str], Option<&str>); 5] = [
+    let sets: [(&PathBuf, &str, &[&str], Option<&str>); 6] = [
         (&base, "explicit_baseline_", &["256", "512"], None),
         (&base, "explicit_baseline_", &["256", "512"], Some("EB_RACE_PROBE")),
         (&base, "explicit_baseline_", &["256", "512"], Some("EB_DET_HITS")),
         (&cur, "explicit_det_", EXPLICIT_LANES, Some("EB_DET_HITS")),
         (&cur, "explicit_ablate_", EXPLICIT_LANES, Some("EB_ABLATE")),
+        // The frozen reference (explicit_beams_ref.slang): the kernel before the
+        // latency work, which the current kernel must match bit for bit.
+        (&reference, "explicit_ref_", EXPLICIT_LANES, None),
     ];
     for (src, prefix, lanes_list, extra) in sets {
         for &lanes in lanes_list {
@@ -817,7 +827,7 @@ fn explicit_frame_module(slang_root: &Path, dir: &Path, name: &str, lanes: &str,
         d.push(("EB_AERO", "1"));
     }
     compile_with_defines(
-        &slang_root.join("kernels/explicit_beams.slang"),
+        &explicit_beams_source(slang_root),
         "explicit_beams_frame",
         SlangTarget::Wgsl,
         &out,
@@ -825,6 +835,21 @@ fn explicit_frame_module(slang_root: &Path, dir: &Path, name: &str, lanes: &str,
         &d,
     )?;
     explicit_barriers(&out)
+}
+
+/// The shipped explicit-beams modules' source: `explicit_beams.slang`; for
+/// measurement builds only (each in its own target directory), `RUBBLE_EB_REF=1`
+/// the frozen reference `explicit_beams_ref.slang` and `RUBBLE_EB_SRC=<file>` any
+/// other file, so a before/after timing runs both kernels through the same pipelines.
+fn explicit_beams_source(slang_root: &Path) -> PathBuf {
+    if let Ok(f) = std::env::var("RUBBLE_EB_SRC") {
+        return PathBuf::from(f);
+    }
+    if std::env::var("RUBBLE_EB_REF").is_ok_and(|v| v == "1") {
+        slang_root.join("kernels/explicit_beams_ref.slang")
+    } else {
+        slang_root.join("kernels/explicit_beams.slang")
+    }
 }
 
 /// A module name's lane tag: 256 none, 512 `_wide`, else `_l<lanes>`.

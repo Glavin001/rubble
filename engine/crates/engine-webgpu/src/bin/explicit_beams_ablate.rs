@@ -12,8 +12,8 @@
 //! Scenarios as `explicit_beams_scaling` (spawned 2 cm above flat ground, tyres
 //! rolling, `drag=0`, 27.78 m/s): idle, drive, impact (its own wall 1 + 0.5 v m
 //! ahead; the timed frames start 0.5 s in, around the hit). Masks: see
-//! `set_ablation`; 2147483648 runs the frozen baseline kernel instead (before/after
-//! in one session).
+//! `set_ablation`; 2147483648 runs the frozen baseline kernel instead, 1073741824
+//! the frozen reference (`explicit_beams_ref.slang`; before/after in one session).
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
 use engine_softbody::truck::parse_truck;
@@ -107,6 +107,8 @@ fn wait_quiet(max_load: f64, max_gpu: f64) -> (f64, f64) {
 
 /// Mask value: the frozen baseline kernel (the shipped kernel before this work).
 const BASELINE: u32 = 1 << 31;
+/// Mask value: the frozen reference kernel (explicit_beams_ref.slang) instead.
+const REFERENCE: u32 = 1 << 30;
 
 fn mean(x: &[f64]) -> f64 {
     x.iter().sum::<f64>() / x.len().max(1) as f64
@@ -258,6 +260,9 @@ fn main() -> anyhow::Result<()> {
                 if m == BASELINE {
                     gpu.set_ablation(0);
                     gpu.set_kernel_variant(engine_webgpu::KernelVariant::Baseline);
+                } else if m == REFERENCE {
+                    gpu.set_ablation(0);
+                    gpu.set_kernel_variant(engine_webgpu::KernelVariant::Reference);
                 } else {
                     gpu.set_ablation(m);
                 }

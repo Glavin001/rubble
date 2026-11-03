@@ -105,6 +105,9 @@ pub enum KernelVariant {
     /// Measurement only: the current kernel with phases skipped
     /// ([`ExplicitBeamsGpu::set_ablation`]); results are meaningless.
     Ablate,
+    /// The frozen reference (`explicit_beams_ref.slang`, the kernel before the
+    /// latency work): the current kernel must leave its state bit for bit.
+    Reference,
 }
 
 /// A variant's pipelines and bind groups.
@@ -1882,6 +1885,7 @@ impl ExplicitBeamsGpu {
             KernelVariant::CurrentDet if std::env::var("RUBBLE_DET_AA").is_ok() => ("explicit_baseline_", "_det"),
             KernelVariant::CurrentDet => ("explicit_det_", ""),
             KernelVariant::Ablate => ("explicit_ablate_", ""),
+            KernelVariant::Reference => ("explicit_ref_", ""),
             KernelVariant::Current => unreachable!(),
         };
         // The baseline picks its lanes as the old host did; the current kernel's
@@ -1965,6 +1969,8 @@ impl ExplicitBeamsGpu {
             if matches!(variant, KernelVariant::CurrentDet | KernelVariant::Ablate) && prefix != "explicit_baseline_" {
                 let wgsl = EXPLICIT_BEAMS_VV_PASSES.iter().find(|(n, _)| *n == e).unwrap().1;
                 make(&e, wgsl, &plan_layout)
+            } else if variant == KernelVariant::Reference {
+                make(&e, &read(&format!("explicit_ref_{e}")), &plan_layout)
             } else {
                 make(&e, &read(&format!("explicit_baseline_{e}")), &plan_layout)
             }

@@ -13,6 +13,9 @@
 //! the frame met), both kernels compiled with `EB_DET_HITS` (tests only), and the
 //! current kernel twice. Checks per frame:
 //! * the current kernel twice: the same state (deterministic);
+//! * the frozen reference (`slang/kernels/explicit_beams_ref.slang`, the kernel at
+//!   feat/softbody-beamng-parity dcaa231b, before the latency and throughput work):
+//!   the same state as the current kernel, bit for bit, on every frame;
 //! * the baseline with `EB_DET_HITS` applies the hits found by its lanes on one lane
 //!   sorted by (triangle, node), the specification's order; the current kernel with
 //!   `EB_DET_HITS` (its ordered, parallel application with the baseline's hit
@@ -185,6 +188,8 @@ fn compare_steps(
     let mut retried = 0;
     let mut group_retries = 0;
     let mut groups = 0;
+    let mut same_as_ref = 0;
+    let mut ref_retries = 0;
     let frames: u32 = segments.iter().map(|s| s.0).sum();
     let plan: Vec<u32> = segments.iter().flat_map(|&(n, k)| std::iter::repeat_n(k, n as usize)).collect();
     let run = |gpu: &mut ExplicitBeamsGpu, snap: &engine_webgpu::GpuSnapshot, var: KernelVariant, steps: u32| {
@@ -223,6 +228,21 @@ fn compare_steps(
         if let Some(d) = nondet {
             panic!("{label}: frame {f}: the current kernel is not deterministic: {d}");
         }
+        // The frozen reference (the kernel before the latency work): the same state,
+        // bit for bit (a group frame may hit the group path's rare race: retried).
+        let mut refd = first_diff(&b, &run(&mut gpu, &snap, KernelVariant::Reference, steps));
+        for _ in 0..4 {
+            if refd.is_none() || grouped == 0 {
+                break;
+            }
+            ref_retries += 1;
+            let b2 = run(&mut gpu, &snap, KernelVariant::Current, steps);
+            refd = first_diff(&b2, &run(&mut gpu, &snap, KernelVariant::Reference, steps));
+        }
+        if let Some(d) = refd {
+            panic!("{label}: frame {f}: the current kernel differs from the frozen reference: {d}");
+        }
+        same_as_ref += 1;
         // The current kernel's ordered hit application (with the baseline's
         // arithmetic, EB_DET_HITS) against the baseline's hits applied on one lane in
         // the specification's order: the same state, bit for bit, unless the
@@ -261,12 +281,14 @@ fn compare_steps(
         gpu.wait();
     }
     eprintln!(
-        "{label}: {frames} frames deterministic ({group_retries} group frames retried); ordered hits = \
+        "{label}: {frames} frames deterministic ({group_retries} group frames retried), {same_as_ref} = the \
+         frozen reference ({ref_retries} retries); ordered hits = \
          the baseline's one-lane order in {det} ({retried} retries); {break_races} frames with a \
          break-exception race (not compared), {contact_races} with a contact race in the plain \
          baseline; contact groups seen {groups}"
     );
     assert_eq!(det + break_races, frames);
+    assert_eq!(same_as_ref, frames);
     Some((det, break_races))
 }
 
