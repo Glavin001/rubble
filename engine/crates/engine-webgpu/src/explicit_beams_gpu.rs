@@ -96,6 +96,12 @@ struct Contact {
     status: std::sync::Mutex<StatusRing>,
     /// Frames submitted with contact active.
     frames: u64,
+    /// Steps the current plan still covers; a new plan is due when a frame needs
+    /// more (or `replan` is set: velocities written by the host).
+    left: u32,
+    replan: std::sync::atomic::AtomicBool,
+    /// This frame runs the plan passes.
+    planning: bool,
     /// The contact throttles' first record in gMisc.
     tri_base: u32,
 }
@@ -248,6 +254,9 @@ impl Contact {
             status_at,
             status: Default::default(),
             frames: 0,
+            left: 0,
+            replan: Default::default(),
+            planning: false,
             tri_base,
 
         }
@@ -349,7 +358,12 @@ const WIDE_CLOSE: usize = 6;
 const PARAM_STRIDE: u64 = 256;
 const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-const PARAM_WORDS: usize = 60;
+const PARAM_WORDS: usize = 61;
+/// Params word: the steps the contact plan's frame bounds cover.
+const W_VV_PLAN_STEPS: usize = 60;
+/// Steps a contact plan covers at least (frames shorter than this share a plan):
+/// fewer plan passes, frame bounds a little wider.
+const VV_PLAN_STEPS: u32 = 34;
 /// Params words of vehicle contact: on, the frame bounds margin.
 const W_VV_ON: usize = 39;
 const W_VV_MARGIN: usize = 57;
@@ -960,6 +974,7 @@ impl ExplicitBeamsGpu {
             DEFAULT_CONTACT_MARGIN.to_bits(),
             vv_big,
             (nv <= FUSED_PAIRS_MAX) as u32,
+            0,
         ];
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),
@@ -1078,6 +1093,7 @@ impl ExplicitBeamsGpu {
     /// alone (the one-dispatch frame).
     pub fn set_vehicle_contact(&mut self, on: bool) {
         self.contact.on = on;
+        self.contact.left = 0;
     }
 
     /// Whether vehicle contact is on ([`Self::set_vehicle_contact`]).
@@ -1090,16 +1106,19 @@ impl ExplicitBeamsGpu {
         self.contact.on && self.spans.len() > 1
     }
 
-    /// The frame bounds margin (m, default [`DEFAULT_CONTACT_MARGIN`]): each frame,
-    /// a vehicle whose box, grown by twice the travel of its fastest node over the
-    /// frame plus this margin, overlaps no other's is stepped alone for the frame;
-    /// one that does is stepped with the vehicles it may meet, step by step. A node
-    /// leaving those bounds (accelerated past them within a frame) could have met a
-    /// vehicle unseen: the host then fails (panics) at a later frame or `wait`. A
-    /// larger margin groups more vehicles (slower), never changes results.
+    /// The frame bounds margin (m, default [`DEFAULT_CONTACT_MARGIN`]). A contact
+    /// plan covers the next frames of at least 34 steps (every frame at 60 fps,
+    /// every other at 120): a vehicle whose box, grown by twice the travel of its
+    /// fastest node over those steps plus this margin, overlaps no other's is
+    /// stepped alone; one that does is stepped with the vehicles it may meet, step
+    /// by step. A node leaving those bounds (accelerated past them) could have met
+    /// a vehicle unseen: the host then fails (panics) at a later frame or `wait`
+    /// ([`Self::contact_status`] at once). A larger margin groups more vehicles
+    /// (slower), never changes results.
     pub fn set_contact_margin(&mut self, metres: f32) {
         assert!(metres >= 0.0 && metres.is_finite(), "contact margin {metres}");
         self.words[W_VV_MARGIN] = metres.to_bits();
+        self.contact.left = 0;
     }
 
     /// The contact status (blocking): `Err` when a vehicle left its frame bounds,
@@ -1393,15 +1412,17 @@ impl ExplicitBeamsGpu {
                 label: Some("explicit_beams_contact"),
                 timestamp_writes: stamps(true, true),
             });
-            pass.set_bind_group(0, &c.plan_group, &[]);
-            pass.set_pipeline(&c.plan[0]);
-            pass.dispatch_workgroups(nv, 1, 1);
-            if nv as usize > FUSED_PAIRS_MAX {
-                pass.set_pipeline(&c.plan[1]);
-                pass.dispatch_workgroups(nv.div_ceil(256), 1, 1);
+            if c.planning {
+                pass.set_bind_group(0, &c.plan_group, &[]);
+                pass.set_pipeline(&c.plan[0]);
+                pass.dispatch_workgroups(nv, 1, 1);
+                if nv as usize > FUSED_PAIRS_MAX {
+                    pass.set_pipeline(&c.plan[1]);
+                    pass.dispatch_workgroups(nv.div_ceil(256), 1, 1);
+                }
+                pass.set_pipeline(&c.plan[2]);
+                pass.dispatch_workgroups(1, 1, 1);
             }
-            pass.set_pipeline(&c.plan[2]);
-            pass.dispatch_workgroups(1, 1, 1);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.group, &[]);
             pass.dispatch_workgroups_indirect(&c.args, 0);
@@ -1482,6 +1503,20 @@ impl ExplicitBeamsGpu {
         );
         self.words[0] = steps;
         self.words[W_VV_ON] = self.contact_active() as u32;
+        self.contact.planning = false;
+        if self.contact_active() {
+            let replan = self
+                .contact
+                .replan
+                .swap(false, std::sync::atomic::Ordering::Relaxed);
+            if replan || self.contact.left < steps {
+                let budget = steps.max(VV_PLAN_STEPS);
+                self.words[W_VV_PLAN_STEPS] = budget;
+                self.contact.left = budget;
+                self.contact.planning = true;
+            }
+            self.contact.left -= steps;
+        }
         let mut bytes = vec![0u8; (PARAM_STRIDE * u64::from(steps + 1)) as usize];
         for k in 0..=steps {
             let mut w = self.words;
@@ -1552,6 +1587,10 @@ impl ExplicitBeamsGpu {
         let offset = ((s.node_off + node) as u64 * 3 + 1) * 16;
         self.queue
             .write_buffer(&self.nodes, offset, bytemuck::cast_slice(&v.to_array()));
+        // The contact plan's frame bounds assumed the old speeds.
+        self.contact
+            .replan
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn read(&self, buffer: &wgpu::Buffer) -> Vec<u8> {

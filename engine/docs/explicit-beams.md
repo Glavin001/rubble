@@ -340,7 +340,10 @@ the one-dispatch frame above, unchanged). A frame is then, in one compute pass:
 
 1. `explicit_beams_vv_bounds` (a workgroup per vehicle): the box of its node world
    positions and its fastest node's speed; its *frame bounds*, the box grown by
-   2·(fastest speed)·(frame time) + a margin (`set_contact_margin`, default 1 m),
+   2·(fastest speed)·(planned time) + a margin (`set_contact_margin`, default 1 m),
+   where a plan covers the next frames of at least 34 steps (every frame at 60 fps,
+   every other frame at 120; a new plan when a frame needs more, or after
+   `set_velocity`); steps 1–2 run only on planning frames;
    and its *padded frame box*, the bounds grown by 0.05 m; the padded box into a
    hashed vehicle grid (a box over more than 27 cells, or a full bucket, goes on a
    list tested against every vehicle).

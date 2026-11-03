@@ -153,6 +153,7 @@ struct Params
     uint vvMargin; // float bits: frame bounds margin past the travel at the fastest node's speed
     uint vvBig; // gNext: vehicles too big for the vehicle grid
     uint vvFusedPairs; // nonzero: explicit_beams_vv_group finds the pairs itself (small fleets)
+    uint vvPlanSteps; // steps the plan's frame bounds cover (one frame or more)
 };
 
 struct Surface
@@ -2043,14 +2044,17 @@ void explicit_beams_wide_close(uint3 id : SV_DispatchThreadID)
 // A frame with vehicle contact on (more than one vehicle):
 //   explicit_beams_vv_bounds  one workgroup per vehicle: its box over the node
 //                             world positions; its frame bounds (the box grown by
-//                             the travel of its fastest node over the frame, twice,
-//                             plus a margin) and the padded frame box (+ 0.05 m);
+//                             the travel of its fastest node over the steps the plan
+//                             covers, twice, plus a margin) and the padded frame box
+//                             (+ 0.05 m);
 //                             the box into a hashed vehicle grid (or the big list)
 //   explicit_beams_vv_pairs   one thread per vehicle: pairs of overlapping padded
 //                             frame boxes
 //   explicit_beams_vv_group   one workgroup: connected components of the pairs
 //                             (label propagation), the solo list, the groups'
 //                             member lists, the indirect dispatch arguments
+//   (the plan passes run when the last plan's steps are used up: it covers at
+//   least VV_PLAN_STEPS on the host, so at 120 fps every other frame)
 //   explicit_beams_frame      (indirect) the solo vehicles, a whole frame each; a
 //                             node leaving its frame bounds is reported (loud)
 //   explicit_beams_contact    (indirect) one workgroup per group: every step, each
@@ -2164,7 +2168,7 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         float3 blo = float3(vvUnkey(gsVvBox[0].load()), vvUnkey(gsVvBox[1].load()), vvUnkey(gsVvBox[2].load()));
         float3 bhi = float3(vvUnkey(gsVvBox[3].load()), vvUnkey(gsVvBox[4].load()), vvUnkey(gsVvBox[5].load()));
         float vmax = sqrt(asfloat(gsVvBox[6].load()));
-        float travel = 2.0 * vmax * (float(gP.steps) * STEP) + asfloat(gP.vvMargin);
+        float travel = 2.0 * vmax * (float(gP.vvPlanSteps) * STEP) + asfloat(gP.vvMargin);
         float3 t3 = float3(travel, travel, travel);
         float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
         float3 alo = blo - t3;
