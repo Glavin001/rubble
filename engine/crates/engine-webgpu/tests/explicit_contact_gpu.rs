@@ -246,15 +246,33 @@ fn two_sedans_rear_end_match_cpu() {
     g.contact_status().unwrap();
     assert!(first.is_some(), "they met");
     assert!(w.total.hits > 100);
-    let beams = g.beams();
+    // After it, broken and bent counts: the GPU is not deterministic (atomic
+    // order) and the crash is chaotic, so the median of 5 GPU runs.
+    let mut runs = vec![(g.beams(), g.positions())];
+    for _ in 0..4 {
+        let mut g = gpu(&rear_end(15.0, 0.5)).unwrap();
+        for _ in 0..36 {
+            g.frame(17);
+        }
+        g.wait();
+        runs.push((g.beams(), g.positions()));
+    }
     for k in 0..2 {
         let (c_broken, c_bent) = w.vehicles[k].damage();
-        let g_broken = beams[k].iter().filter(|b| b.broken).count();
-        let g_bent = beams[k].iter().filter(|b| b.bent()).count();
-        let d = rms(&g.positions()[k], &w.vehicles[k].positions());
+        let median = |f: &dyn Fn(&engine_webgpu::GpuBeam) -> bool| {
+            let mut v: Vec<usize> = runs
+                .iter()
+                .map(|r| r.0[k].iter().filter(|b| f(b)).count())
+                .collect();
+            v.sort();
+            v[v.len() / 2]
+        };
+        let g_broken = median(&|b| b.broken);
+        let g_bent = median(&|b| b.bent());
+        let d = rms(&runs[0].1[k], &w.vehicles[k].positions());
         eprintln!(
-            "vehicle {k} after 0.6 s: CPU broken {c_broken} bent {c_bent}; GPU broken {g_broken} \
-             bent {g_bent}; positions rms {:.1} mm",
+            "vehicle {k} after 0.6 s: CPU broken {c_broken} bent {c_bent}; GPU median broken \
+             {g_broken} bent {g_bent}; positions rms {:.1} mm",
             d * 1e3
         );
         assert!(c_bent > 20, "the crash bends vehicle {k} ({c_bent})");

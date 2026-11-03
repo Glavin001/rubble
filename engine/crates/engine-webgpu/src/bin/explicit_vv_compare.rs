@@ -303,6 +303,52 @@ fn main() -> anyhow::Result<()> {
             s => panic!("scene {s}: rear, headon or pass"),
         }
     };
+    if let Some(counts) = kv.get("bench") {
+        // GPU ms per frame (median of the timed frames), contact on and off, for
+        // fleets of `counts` vehicles driving in a grid `spacing=` m apart (no
+        // contact): the cost of the contact plan when nothing meets.
+        use engine_webgpu::{default_device, ExplicitBeamsGpu};
+        let (_, device, queue) = default_device()?;
+        let spacing = get("spacing", 20.0);
+        for n in counts.split(',').map(|c| c.parse::<usize>().unwrap()) {
+            let cols = (n as f32).sqrt().ceil() as usize;
+            let fleet: Vec<ExplicitBeams> = (0..n)
+                .map(|k| {
+                    let at = base + lateral * (spacing * (k % cols) as f32) - forward * (spacing * 3.0 * (k / cols) as f32);
+                    spawn(&text, config, &Spawn { at: at + Vec3::new(500.0, 0.0, 500.0), vel: forward * speed, yaw: 0.0 })
+                })
+                .collect();
+            let mut out = Vec::new();
+            for trial in 0..4 {
+                let on = trial % 2 == 0;
+                let mut g = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+                g.set_vehicle_contact(on);
+                for _ in 0..10 {
+                    g.frame(steps);
+                }
+                g.wait();
+                let timed = g.enable_frame_timing(frames);
+                let t0 = std::time::Instant::now();
+                for _ in 0..frames {
+                    g.frame(steps);
+                }
+                g.wait();
+                let wall = t0.elapsed().as_secs_f64() * 1e3 / f64::from(frames);
+                let mut t = if timed { g.frame_times_ms() } else { Vec::new() };
+                t.sort_by(f64::total_cmp);
+                out.push((on, t.get(t.len() / 2).copied().unwrap_or(wall)));
+                if on {
+                    g.contact_status().map_err(|e| anyhow::anyhow!(e))?;
+                }
+            }
+            let med = |on: bool| {
+                let v: Vec<f64> = out.iter().filter(|o| o.0 == on).map(|o| o.1).collect();
+                v.iter().sum::<f64>() / v.len() as f64
+            };
+            println!("N={n}: GPU ms/frame contact on {:.4}, off {:.4} (ratio {:.3})", med(true), med(false), med(true) / med(false));
+        }
+        return Ok(());
+    }
     if let Some(n) = kv.get("stepwise") {
         // GPU against CPU step by step (one-step frames): node RMS per vehicle and
         // the triangles whose contact throttles differ.

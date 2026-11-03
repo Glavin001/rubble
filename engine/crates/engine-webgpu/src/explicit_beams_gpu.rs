@@ -94,6 +94,8 @@ struct Contact {
     acc: wgpu::Buffer,
     status_at: u64,
     status: std::sync::Mutex<StatusRing>,
+    /// Frames submitted with contact active.
+    frames: u64,
     /// The contact throttles' first record in gMisc.
     tri_base: u32,
 }
@@ -115,6 +117,11 @@ struct StatusRing {
 
 /// Staging buffers for status reads at most.
 const STATUS_READS: usize = 4;
+/// Fleets up to this size find their overlapping pairs in the grouping pass (one
+/// dispatch fewer per frame).
+const FUSED_PAIRS_MAX: usize = 2048;
+/// Frames between status reads.
+const STATUS_EVERY: u64 = 16;
 
 /// The contact error the status counters (outside, overflow, unconverged) report.
 fn contact_error(w: &[i32]) -> Result<(), String> {
@@ -233,6 +240,7 @@ impl Contact {
             acc: acc.clone(),
             status_at,
             status: Default::default(),
+            frames: 0,
             tri_base,
 
         }
@@ -334,7 +342,7 @@ const WIDE_CLOSE: usize = 6;
 const PARAM_STRIDE: u64 = 256;
 const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-const PARAM_WORDS: usize = 59;
+const PARAM_WORDS: usize = 60;
 /// Params words of vehicle contact: on, the frame bounds margin.
 const W_VV_ON: usize = 39;
 const W_VV_MARGIN: usize = 57;
@@ -944,6 +952,7 @@ impl ExplicitBeamsGpu {
             vv_run_cell(vehicles).to_bits(),
             DEFAULT_CONTACT_MARGIN.to_bits(),
             vv_big,
+            (nv <= FUSED_PAIRS_MAX) as u32,
         ];
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),
@@ -1380,8 +1389,10 @@ impl ExplicitBeamsGpu {
             pass.set_bind_group(0, &c.plan_group, &[]);
             pass.set_pipeline(&c.plan[0]);
             pass.dispatch_workgroups(nv, 1, 1);
-            pass.set_pipeline(&c.plan[1]);
-            pass.dispatch_workgroups(nv.div_ceil(256), 1, 1);
+            if nv as usize > FUSED_PAIRS_MAX {
+                pass.set_pipeline(&c.plan[1]);
+                pass.dispatch_workgroups(nv.div_ceil(256), 1, 1);
+            }
             pass.set_pipeline(&c.plan[2]);
             pass.dispatch_workgroups(1, 1, 1);
             pass.set_pipeline(&self.pipeline);
@@ -1432,11 +1443,16 @@ impl ExplicitBeamsGpu {
             pass.set_bind_group(0, &self.group, &[]);
             pass.dispatch_workgroups(self.spans.len() as u32, 1, 1);
         }
-        if self.contact_active() {
+        // The status every STATUS_EVERY frames (the counters keep an error).
+        let read = self.contact_active() && {
+            self.contact.frames += 1;
+            self.contact.frames % STATUS_EVERY == 1
+        };
+        if read {
             self.contact.read_status(&self.device, &mut enc);
         }
         self.queue.submit([enc.finish()]);
-        if self.contact_active() {
+        if read {
             self.contact.map_status();
         }
     }

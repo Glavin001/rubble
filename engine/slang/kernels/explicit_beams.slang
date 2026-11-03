@@ -152,6 +152,7 @@ struct Params
     uint vvRunCell; // float bits: the contact point grid's cell size
     uint vvMargin; // float bits: frame bounds margin past the travel at the fastest node's speed
     uint vvBig; // gNext: vehicles too big for the vehicle grid
+    uint vvFusedPairs; // nonzero: explicit_beams_vv_group finds the pairs itself (small fleets)
 };
 
 struct Surface
@@ -1512,11 +1513,13 @@ static const uint VV_UNCONVERGED = 6u;
 static const uint VV_CTL_WORDS = 8u;
 uint vvCtl(uint i) { return gP.vvAcc + gP.vehicles * 12u + i; }
 
-// A node outside a frame's bounds (relative positions).
-bool vvOutside(uint gi, float3 lo, float3 hi)
+// The frame bounds of the vehicle a frame entry workgroup steps (relative), and a
+// node outside them.
+groupshared float3 gsVvBounds[2];
+bool vvOutside(uint gi)
 {
     float3 p = gNodes[gi * 3u].xyz;
-    return any(p < lo) || any(p > hi);
+    return any(p < gsVvBounds[0]) || any(p > gsVvBounds[1]);
 }
 
 void vvReportOutside(uint v)
@@ -1592,13 +1595,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
     // Vehicle contact: the frame bounds its nodes must stay in (relative).
-    float3 vvLo = float3(0.0, 0.0, 0.0);
-    float3 vvHi = float3(0.0, 0.0, 0.0);
     bool vvOut = false;
-    if (gP.vvOn != 0u)
+    if (gP.vvOn != 0u && lane == 0u)
     {
-        vvLo = asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz) - origin;
-        vvHi = asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz) - origin;
+        gsVvBounds[0] = asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz) - origin;
+        gsVvBounds[1] = asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz) - origin;
     }
     sync();
 
@@ -1619,7 +1620,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             {
                 nodeUpdate(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                            groupCount, hits);
-                vvOut = vvOut || vvOutside(nodeOff + i, vvLo, vvHi);
+                vvOut = vvOut || vvOutside(nodeOff + i);
             }
         }
         for (uint g = lane; g < groupCount; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
@@ -2213,8 +2214,12 @@ void vvEmitPair(uint a, uint b)
 [numthreads(256, 1, 1)]
 void explicit_beams_vv_pairs(uint3 id : SV_DispatchThreadID)
 {
-    uint v = id.x;
-    if (v >= gP.vehicles) return;
+    if (id.x < gP.vehicles) vvFindPairs(id.x);
+}
+
+// The overlapping pairs of vehicle v's padded frame box (each pair once).
+void vvFindPairs(uint v)
+{
     float3 plo = asfloat(gMisc[vvRec(v, VV_P_LO)].xyz);
     float3 phi = asfloat(gMisc[vvRec(v, VV_P_HI)].xyz);
     bool big = gMisc[vvRec(v, VV_FLAGS)].x != 0u;
@@ -2266,7 +2271,33 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
 {
     uint lane = lid.x;
     uint nv = gP.vehicles;
+    if (gP.vvFusedPairs != 0u)
+    {
+        for (uint v = lane; v < nv; v += 256u) vvFindPairs(v);
+        sync();
+    }
     uint pairs = min(uint(gAcc[vvCtl(VV_PAIRS)].load()), gP.vvPairCap);
+    // No overlapping frame boxes (the common case): every vehicle is solo.
+    if (lane == 0u) gsUniformLanes = pairs;
+    sync();
+    uint anyPairs = gsUniformLanes;
+    sync();
+    if (anyPairs == 0u)
+    {
+        for (uint v = lane; v < nv; v += 256u) gNext[gP.vvSolo + v] = v;
+        for (uint b = lane; b <= gP.vvGridMask; b += 256u) gAcc[gP.vvGridCount + b].store(0);
+        if (lane == 0u)
+        {
+            gArgs[0] = nv;
+            gArgs[1] = 1u;
+            gArgs[2] = 1u;
+            gArgs[4] = 0u;
+            gArgs[5] = 1u;
+            gArgs[6] = 1u;
+            gAcc[vvCtl(VV_BIGS)].store(0);
+        }
+        return;
+    }
     for (uint v = lane; v < nv; v += 256u)
     {
         gAcc[gP.vvLabel + v].store(int(v));
