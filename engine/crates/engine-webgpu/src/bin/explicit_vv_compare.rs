@@ -303,6 +303,59 @@ fn main() -> anyhow::Result<()> {
             s => panic!("scene {s}: rear, headon or pass"),
         }
     };
+    if let Some(n) = kv.get("stepwise") {
+        // GPU against CPU step by step (one-step frames): node RMS per vehicle and
+        // the triangles whose contact throttles differ.
+        use engine_webgpu::{default_device, ExplicitBeamsGpu};
+        let n: u32 = n.parse()?;
+        let from: u32 = kv.get("from").map_or(0, |v| v.parse().unwrap());
+        let fleet: Vec<ExplicitBeams> = spawns_for(0)
+            .iter()
+            .map(|s| spawn(&text, config, s))
+            .collect();
+        let (_, device, queue) = default_device()?;
+        let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+        let mut w = ExplicitBeamsWorld::new(fleet);
+        for k in 0..n {
+            w.frame(1);
+            gpu.frame(1);
+            if k + 1 < from {
+                continue;
+            }
+            gpu.wait();
+            let gp = gpu.positions();
+            let ct = gpu.contact_throttles();
+            let st = gpu.self_collision_throttles();
+            let mut diff = Vec::new();
+            for v in 0..2 {
+                for (t, c) in ct[v].iter().enumerate() {
+                    if *c != w.vehicles[v].contact_throttle[t] {
+                        diff.push(format!(
+                            "c{v}.{t}:{c:?}/{:?}",
+                            w.vehicles[v].contact_throttle[t]
+                        ));
+                    }
+                }
+                for (t, c) in st[v].iter().enumerate() {
+                    let tr = &w.vehicles[v].triangles[t];
+                    if c[0] != tr.wait && !(c[0] <= 0 && tr.wait <= 0) {
+                        diff.push(format!("s{v}.{t}:{c:?}/{:?}", (tr.wait, tr.idle)));
+                    }
+                }
+            }
+            println!(
+                "step {} hits {} self {} {} rms {:.2e} {:.2e} diffs {}",
+                k + 1,
+                w.last.hits,
+                w.vehicles[0].last_contacts,
+                w.vehicles[1].last_contacts,
+                rms(&gp[0], &w.vehicles[0].positions()),
+                rms(&gp[1], &w.vehicles[1].positions()),
+                diff.iter().take(6).cloned().collect::<Vec<_>>().join(" ")
+            );
+        }
+        return Ok(());
+    }
     let mut report = String::new();
     writeln!(
         report,
@@ -311,8 +364,9 @@ fn main() -> anyhow::Result<()> {
     )?;
     writeln!(
         report,
-        "nodes {}, contact points {}, triangles {}",
+        "nodes {}, beams {}, contact points {}, triangles {}",
         probe.nodes.len(),
+        probe.beams.len(),
         probe.contact_points.len(),
         probe.triangles.len()
     )?;
@@ -348,6 +402,15 @@ fn main() -> anyhow::Result<()> {
             rms(&c.pos[0], &r.pos[0]),
             rms(&c.pos[1], &r.pos[1])
         )?;
+        if gpu {
+            let g = run_gpu(&text, config, &spawns_for(0), pre, steps);
+            writeln!(
+                report,
+                "before contact ({pre} frames): node RMS GPU–CPU vehicle 0 {:.2e} m, vehicle 1 {:.2e} m",
+                rms(&g.pos[0], &c.pos[0]),
+                rms(&g.pos[1], &c.pos[1])
+            )?;
+        }
     }
     // Ensembles.
     let ror: Vec<End> = (0..nudges)

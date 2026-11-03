@@ -575,6 +575,56 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             );
         std::fs::write(&out, text)?;
     }
+    // Vehicle–vehicle contact: the plan passes (one module each) and the contact
+    // groups' entry at the frame module's four variants.
+    let mut vv: Vec<(String, &str, Vec<(&str, &str)>)> = ["bounds", "pairs", "group"]
+        .iter()
+        .map(|p| {
+            (
+                format!("explicit_beams_vv_{p}"),
+                "",
+                vec![("ENGINE_WGSL", "1")],
+            )
+        })
+        .collect();
+    for (name, lanes, aero) in [
+        ("explicit_beams_contact", "256", false),
+        ("explicit_beams_contact_wide", "512", false),
+        ("explicit_beams_contact_aero", "256", true),
+        ("explicit_beams_contact_aero_wide", "512", true),
+    ] {
+        let mut d = vec![("ENGINE_WGSL", "1"), ("EB_LANES", lanes)];
+        if aero {
+            d.push(("EB_AERO", "1"));
+        }
+        vv.push((name.to_string(), "explicit_beams_contact", d));
+    }
+    for (name, entry, defines) in &vv {
+        let out = wgsl_dir.join(format!("{name}.wgsl"));
+        let entry = if entry.is_empty() {
+            name.as_str()
+        } else {
+            entry
+        };
+        compile_with_defines(
+            &slang_root.join("kernels/explicit_beams.slang"),
+            entry,
+            SlangTarget::Wgsl,
+            &out,
+            &[],
+            defines,
+        )?;
+        let text = std::fs::read_to_string(&out)?
+            .replace(
+                "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+                "storageBarrier(); workgroupBarrier();",
+            )
+            .replace(
+                "storageBarrier(); textureBarrier(); workgroupBarrier();",
+                "storageBarrier(); workgroupBarrier();",
+            );
+        std::fs::write(&out, text)?;
+    }
     // Compact snapshots' buffer extents (WgpuSim::measure_state): standalone.
     let extent = wgsl_dir.join("state_extent.wgsl");
     let status = std::process::Command::new(find_slangc()?)

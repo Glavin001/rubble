@@ -12,7 +12,9 @@
 //! [`ExplicitBeamsGpu::beams`].
 
 use crate::{
-    EXPLICIT_BEAMS_AERO_WGSL, EXPLICIT_BEAMS_AERO_WIDE_WGSL, EXPLICIT_BEAMS_WGSL,
+    EXPLICIT_BEAMS_AERO_WGSL, EXPLICIT_BEAMS_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
+    EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_WGSL,
+    EXPLICIT_BEAMS_CONTACT_WIDE_WGSL, EXPLICIT_BEAMS_VV_PASSES, EXPLICIT_BEAMS_WGSL,
     EXPLICIT_BEAMS_WIDE_PASSES, EXPLICIT_BEAMS_WIDE_WGSL,
 };
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind};
@@ -45,6 +47,7 @@ struct Span {
     slide_off: u32,
     slides: u32,
     seg_off: u32,
+    tris: u32,
 }
 
 pub struct ExplicitBeamsGpu {
@@ -71,6 +74,240 @@ pub struct ExplicitBeamsGpu {
     wide: Option<Wide>,
     total: [u32; 5],
     timing: Option<FrameTiming>,
+    /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
+    contact: Contact,
+}
+
+/// Vehicle–vehicle contact's pipelines, buffers and state.
+struct Contact {
+    /// On (the default); it runs only with more than one vehicle.
+    on: bool,
+    /// The plan passes (bounds, pairs, group) and the contact groups' entry.
+    plan: [wgpu::ComputePipeline; 3],
+    groups: wgpu::ComputePipeline,
+    plan_group: wgpu::BindGroup,
+    contact_group: wgpu::BindGroup,
+    /// Indirect arguments: the solo vehicles (word 0) and the groups (word 4).
+    args: wgpu::Buffer,
+    /// The status counters (gAcc at byte `status_at`), copied each frame into a
+    /// staging buffer and checked once mapped, a frame or two later (no waiting).
+    acc: wgpu::Buffer,
+    status_at: u64,
+    status: std::sync::Mutex<StatusRing>,
+    /// The contact throttles' first record in gMisc.
+    tri_base: u32,
+}
+
+/// A status read: its staging buffer and its map state (0 copied, not yet mapped;
+/// 1 map requested; 2 mapped; 3 map failed).
+struct StatusRead {
+    buffer: wgpu::Buffer,
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+
+/// Status reads in flight and free staging buffers.
+#[derive(Default)]
+struct StatusRing {
+    flight: Vec<StatusRead>,
+    free: Vec<wgpu::Buffer>,
+    made: usize,
+}
+
+/// Staging buffers for status reads at most.
+const STATUS_READS: usize = 4;
+
+/// The contact error the status counters (outside, overflow, unconverged) report.
+fn contact_error(w: &[i32]) -> Result<(), String> {
+    if w[0] > 0 {
+        return Err(format!(
+            "vehicle {} left its frame bounds (a node moved past the travel the frame's \
+             contact plan allowed, so a contact may have been missed); raise \
+             ExplicitBeamsGpu::set_contact_margin",
+            w[0] - 1
+        ));
+    }
+    if w[1] != 0 {
+        return Err("the overlapping-pair list overflowed".into());
+    }
+    if w[2] != 0 {
+        return Err("the contact grouping did not converge".into());
+    }
+    Ok(())
+}
+
+impl Contact {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        device: &wgpu::Device,
+        buffers: &[&wgpu::Buffer; 9],
+        contact_wgsl: &str,
+        acc: &wgpu::Buffer,
+        status_at: u64,
+        tri_base: u32,
+    ) -> Self {
+        let args_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-vv-args"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            mapped_at_creation: false,
+        });
+        let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let rw = wgpu::BufferBindingType::Storage { read_only: false };
+        let ro = wgpu::BufferBindingType::Storage { read_only: true };
+        // The plan passes bind the indirect arguments (binding 10); the contact
+        // entry, dispatched from them, must not.
+        let layout_with = |args: bool| {
+            let mut entries = vec![
+                entry(0, wgpu::BufferBindingType::Uniform),
+                entry(1, ro),
+                entry(2, ro),
+            ];
+            entries.extend((3..9).map(|b| entry(b, rw)));
+            if args {
+                entries.push(entry(10, rw));
+            }
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("explicit-beams-vv"),
+                entries: &entries,
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("explicit-beams-vv"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let mut bind: Vec<wgpu::BindGroupEntry> = buffers
+                .iter()
+                .enumerate()
+                .map(|(i, b)| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: b.as_entire_binding(),
+                })
+                .collect();
+            if args {
+                bind.push(wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: args_buffer.as_entire_binding(),
+                });
+            }
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("explicit-beams-vv"),
+                layout: &layout,
+                entries: &bind,
+            });
+            (pipeline_layout, group)
+        };
+        let make = |entry: &str, wgsl: &str, layout: &wgpu::PipelineLayout| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(entry),
+                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(wgsl).into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let (plan_layout, plan_group) = layout_with(true);
+        let (contact_layout, contact_group) = layout_with(false);
+        let plan = EXPLICIT_BEAMS_VV_PASSES.map(|(entry, wgsl)| make(entry, wgsl, &plan_layout));
+        let groups = make("explicit_beams_contact", contact_wgsl, &contact_layout);
+        Self {
+            on: true,
+            plan,
+            groups,
+            plan_group,
+            contact_group,
+            args: args_buffer,
+            acc: acc.clone(),
+            status_at,
+            status: Default::default(),
+            tri_base,
+
+        }
+    }
+
+    /// Copy the status counters into a staging buffer (none free: skip; the
+    /// counters keep an error until it is read).
+    fn read_status(&self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder) {
+        let mut ring = self.status.lock().unwrap();
+        let buffer = match ring.free.pop() {
+            Some(b) => b,
+            None if ring.made < STATUS_READS => {
+                ring.made += 1;
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("explicit-beams-vv-status"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            }
+            None => return,
+        };
+        enc.copy_buffer_to_buffer(&self.acc, self.status_at + 16, &buffer, 0, 16);
+        ring.flight.push(StatusRead {
+            buffer,
+            state: Default::default(),
+        });
+    }
+
+    /// Request the maps of the reads just submitted.
+    fn map_status(&self) {
+        let ring = self.status.lock().unwrap();
+        for r in ring.flight.iter().filter(|r| r.state.load(std::sync::atomic::Ordering::Acquire) == 0) {
+            r.state.store(1, std::sync::atomic::Ordering::Release);
+            let state = r.state.clone();
+            r.buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+                state.store(if res.is_ok() { 2 } else { 3 }, std::sync::atomic::Ordering::Release);
+            });
+        }
+    }
+
+    /// Process finished maps (polling the device without waiting).
+    fn poll_status(&self, device: &wgpu::Device) -> Option<String> {
+        if self.status.lock().unwrap().flight.is_empty() {
+            return None;
+        }
+        let _ = device.poll(wgpu::PollType::Poll);
+        self.ready_error()
+    }
+
+    /// The first error among the reads whose maps finished (recycling them).
+    fn ready_error(&self) -> Option<String> {
+        let mut ring = self.status.lock().unwrap();
+        let mut error = None;
+        let mut keep = Vec::new();
+        for r in std::mem::take(&mut ring.flight) {
+            match r.state.load(std::sync::atomic::Ordering::Acquire) {
+                2 => {
+                    {
+                        let view = r.buffer.slice(..).get_mapped_range().expect("mapped");
+                        let w: &[i32] = bytemuck::cast_slice(&view);
+                        if let Err(e) = contact_error(w) {
+                            error.get_or_insert(e);
+                        }
+                    }
+                    r.buffer.unmap();
+                    ring.free.push(r.buffer);
+                }
+                3 => ring.free.push(r.buffer),
+                _ => keep.push(r),
+            }
+        }
+        ring.flight = keep;
+        error
+    }
 }
 
 /// The wide passes' pipelines and bind group ([`ExplicitBeamsGpu::set_wide`]).
@@ -97,7 +334,17 @@ const WIDE_CLOSE: usize = 6;
 const PARAM_STRIDE: u64 = 256;
 const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-const PARAM_WORDS: usize = 39;
+const PARAM_WORDS: usize = 59;
+/// Params words of vehicle contact: on, the frame bounds margin.
+const W_VV_ON: usize = 39;
+const W_VV_MARGIN: usize = 57;
+/// The kernel's VV_RECS, VV_SLOTS and the counters' words (VV_CTL_WORDS).
+const VV_RECS: usize = 6;
+const VV_SLOTS: usize = 8;
+const VV_CTL_WORDS: u32 = 8;
+/// Frame bounds margin past the travel of a vehicle's fastest node (m): see
+/// [`ExplicitBeamsGpu::set_contact_margin`].
+pub const DEFAULT_CONTACT_MARGIN: f32 = 1.0;
 /// The kernel's KEYS (trigger inputs per vehicle and step parity), NONE and node
 /// info flags shift of the slide slots.
 const KEYS: usize = engine_softbody::explicit_triggers::KEYS;
@@ -155,6 +402,8 @@ impl ExplicitBeamsGpu {
             total_nodes < (1 << (32 - NODE_SLOT_SHIFT)),
             "explicit beams GPU: too many nodes for the slide slots"
         );
+        let mut vv_static: Vec<[u32; 4]> = Vec::with_capacity(nv);
+        let mut vv_tri: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
         for (vi, v) in vehicles.iter().enumerate() {
             let group_count = v
                 .beams
@@ -204,6 +453,13 @@ impl ExplicitBeamsGpu {
             let cand_off = lists.len() as u32;
             cand_table.extend(cand_off..cand_off + v.candidates.len() as u32);
             lists.extend(v.candidates.iter().map(|&c| node_off + c));
+            // Vehicle contact: the contact points (global nodes).
+            vv_static.push([lists.len() as u32, v.contact_points.len() as u32, 0, 0]);
+            lists.extend(v.contact_points.iter().map(|&c| node_off + c));
+            vv_tri.extend((0..v.triangles.len()).map(|t| {
+                let c = v.contact_throttle.get(t).copied().unwrap_or([0, 0]);
+                [c[0] as u32, c[1] as u32, 0, 0]
+            }));
             let flags = v.settings.fast_inv_sqrt as u32
                 | (v.settings.drag as u32) << 1
                 | (v.settings.turbulence as u32) << 2
@@ -308,6 +564,7 @@ impl ExplicitBeamsGpu {
                 slide_off: 0,
                 slides: v.slides.len() as u32,
                 seg_off: 0,
+                tris: v.triangles.len() as u32,
             });
             node_off += v.nodes.len() as u32;
             beam_off += v.beams.len() as u32;
@@ -485,12 +742,32 @@ impl ExplicitBeamsGpu {
         // The wide passes' step counter and per-vehicle rebase shift.
         let wide_misc = misc.len() as u32;
         misc.extend(std::iter::repeat_n([0u32; 4], 1 + nv));
+        // Vehicle contact: per triangle its contact throttle; per vehicle its records;
+        // per group its record.
+        let vv_tri_base = misc.len() as u32;
+        misc.extend(vv_tri);
+        let vv_veh = misc.len() as u32;
+        misc.extend(std::iter::repeat_n([0u32; 4], VV_RECS * nv));
+        let vv_groups = misc.len() as u32;
+        misc.extend(std::iter::repeat_n([0u32; 4], nv.max(1)));
         // gAcc: the accumulators, then the wide passes' grid counts and tested
         // counts (atomic).
         let grid_count_base = (total_nodes * 3) as u32;
         let tested_base = grid_count_base + (nv * WIDE_GRID_BUCKETS) as u32;
         let overflow_base = tested_base + 2 * nv as u32;
         let acc_len = overflow_base as usize + nv;
+        // Vehicle contact: per vehicle 2 parities of box keys, the counters, labels
+        // and group sums, the vehicle grid's bucket counts.
+        let vv_acc = acc_len as u32;
+        let vv_label = vv_acc + 12 * nv as u32 + VV_CTL_WORDS;
+        let vv_grid_count = vv_label + 4 * nv as u32;
+        let vv_buckets = (8 * nv).max(1024).next_power_of_two();
+        let mut acc_init = vec![0i32; vv_grid_count as usize + vv_buckets];
+        for v in 0..nv {
+            for k in 0..12 {
+                acc_init[vv_acc as usize + 12 * v + k] = if k % 6 < 3 { i32::MAX } else { i32::MIN };
+            }
+        }
         // gBeams: the wide grid's bucket slots, for vehicles on the wide passes.
         let slot_base16 = beams.len() as u32;
         if vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS) {
@@ -510,6 +787,10 @@ impl ExplicitBeamsGpu {
         beams.extend(slide_state);
         let slide_acc = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], slot_count as usize));
+        // Vehicle contact: the groups' contact points sorted by cell.
+        let total_cp: usize = vehicles.iter().map(|v| v.contact_points.len()).sum();
+        let vv_run = beams.len() as u32;
+        beams.extend(std::iter::repeat_n([0.0f32; 4], total_cp));
         // gNext: per list position the grid rank, then the wide passes' grid
         // offsets and tested lists (plain words: only the counters are atomic).
         let grid_off_base = lists.len() as u32;
@@ -519,6 +800,17 @@ impl ExplicitBeamsGpu {
         let key_base = tested_list_base + total_tris as u32;
         let any_keys = vehicles.iter().any(|v| !v.triggers.is_empty());
         let next_len = key_base as usize + if any_keys { nv * 2 * KEYS } else { 0 };
+        // Vehicle contact: the solo list, members (5 words per vehicle: lists,
+        // sorted, run prefixes, partner and reset flags) and the tested triangles,
+        // the pairs, the vehicle grid's slots, the big list, the run ranks.
+        let vv_solo = next_len as u32;
+        let vv_members = vv_solo + nv as u32;
+        let vv_pairs = vv_members + 5 * nv as u32 + total_tris as u32;
+        let vv_pair_cap = (16 * nv).max(1024) as u32;
+        let vv_grid = vv_pairs + 2 * vv_pair_cap;
+        let vv_big = vv_grid + (vv_buckets * VV_SLOTS) as u32;
+        let vv_rank = vv_big + nv as u32;
+        let next_len = vv_rank as usize + total_cp;
         let mut next_init = vec![0u32; next_len.max(1)];
         if any_keys {
             for (vi, v) in vehicles.iter().enumerate() {
@@ -548,6 +840,8 @@ impl ExplicitBeamsGpu {
         let seg_base = statics.len() as u32;
         let seg_total = seg_recs.len() as u32;
         statics.extend(seg_recs);
+        let vv_static_base = statics.len() as u32;
+        statics.extend(vv_static);
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams"),
@@ -629,6 +923,27 @@ impl ExplicitBeamsGpu {
             slide_total,
             seg_total,
             slot_count,
+            // Vehicle contact (vvOn is set per frame).
+            0,
+            vv_solo,
+            vv_static_base,
+            vv_tri_base,
+            vv_veh,
+            vv_acc,
+            vv_label,
+            vv_groups,
+            vv_members,
+            vv_pairs,
+            vv_pair_cap,
+            vv_grid,
+            vv_grid_count,
+            vv_buckets as u32 - 1,
+            vv_cell(vehicles).to_bits(),
+            vv_run,
+            vv_rank,
+            vv_run_cell(vehicles).to_bits(),
+            DEFAULT_CONTACT_MARGIN.to_bits(),
+            vv_big,
         ];
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),
@@ -651,8 +966,8 @@ impl ExplicitBeamsGpu {
         let beams = init("explicit-beams-beams", bytemuck::cast_slice(&beams), state);
         let acc = init(
             "explicit-beams-acc",
-            bytemuck::cast_slice(&vec![0i32; acc_len]),
-            storage,
+            bytemuck::cast_slice(&acc_init),
+            storage | wgpu::BufferUsages::COPY_SRC,
         );
         let groups = init(
             "explicit-beams-groups",
@@ -704,6 +1019,19 @@ impl ExplicitBeamsGpu {
             w.enabled = same_steps && vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
             w
         });
+        let contact = Contact::new(
+            device,
+            &buffers,
+            match (aero, vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS)) {
+                (false, false) => EXPLICIT_BEAMS_CONTACT_WGSL,
+                (false, true) => EXPLICIT_BEAMS_CONTACT_WIDE_WGSL,
+                (true, false) => EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
+                (true, true) => EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
+            },
+            &acc,
+            u64::from(vv_acc + 12 * nv as u32) * 4,
+            vv_tri_base,
+        );
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -724,14 +1052,86 @@ impl ExplicitBeamsGpu {
             timing: None,
             wide,
             total,
+            contact,
         }
+    }
+
+    /// Vehicle–vehicle contact between every vehicle of the fleet
+    /// (`engine/docs/explicit-beams-vehicle-contact-spec.md`): on by default; it
+    /// runs when the fleet has more than one vehicle. Off, every vehicle steps
+    /// alone (the one-dispatch frame).
+    pub fn set_vehicle_contact(&mut self, on: bool) {
+        self.contact.on = on;
+    }
+
+    /// Whether vehicle contact is on ([`Self::set_vehicle_contact`]).
+    pub fn vehicle_contact(&self) -> bool {
+        self.contact.on
+    }
+
+    /// Whether frames run the vehicle contact passes (on, more than one vehicle).
+    pub fn contact_active(&self) -> bool {
+        self.contact.on && self.spans.len() > 1
+    }
+
+    /// The frame bounds margin (m, default [`DEFAULT_CONTACT_MARGIN`]): each frame,
+    /// a vehicle whose box, grown by twice the travel of its fastest node over the
+    /// frame plus this margin, overlaps no other's is stepped alone for the frame;
+    /// one that does is stepped with the vehicles it may meet, step by step. A node
+    /// leaving those bounds (accelerated past them within a frame) could have met a
+    /// vehicle unseen: the host then fails (panics) at a later frame or `wait`. A
+    /// larger margin groups more vehicles (slower), never changes results.
+    pub fn set_contact_margin(&mut self, metres: f32) {
+        assert!(metres >= 0.0 && metres.is_finite(), "contact margin {metres}");
+        self.words[W_VV_MARGIN] = metres.to_bits();
+    }
+
+    /// The contact status (blocking): `Err` when a vehicle left its frame bounds,
+    /// the pair list overflowed or the grouping did not converge.
+    pub fn contact_status(&self) -> Result<(), String> {
+        let raw = self.read(&self.contact.acc);
+        let w: &[i32] = bytemuck::cast_slice(&raw);
+        let at = (self.contact.status_at / 4) as usize;
+        contact_error(&w[at + 4..at + 8])
+    }
+
+    /// Per vehicle, its triangles' contact throttles (cwait, cidle).
+    pub fn contact_throttles(&self) -> Vec<Vec<[i32; 2]>> {
+        let raw = self.read(&self.misc);
+        let m: &[[u32; 4]] = bytemuck::cast_slice(&raw);
+        let mut out = Vec::with_capacity(self.spans.len());
+        let mut t0 = self.contact.tri_base as usize;
+        for &n in &self.tri_counts() {
+            out.push(m[t0..t0 + n].iter().map(|r| [r[0] as i32, r[1] as i32]).collect());
+            t0 += n;
+        }
+        out
+    }
+
+    /// Per vehicle, its triangles' self-collision throttles (wait, idle).
+    pub fn self_collision_throttles(&self) -> Vec<Vec<[i32; 2]>> {
+        let raw = self.read(&self.misc);
+        let m: &[[u32; 4]] = bytemuck::cast_slice(&raw);
+        let mut out = Vec::with_capacity(self.spans.len());
+        let mut t0 = self.spans.len();
+        for &n in &self.tri_counts() {
+            out.push(m[t0..t0 + n].iter().map(|r| [r[0] as i32, r[1] as i32]).collect());
+            t0 += n;
+        }
+        out
+    }
+
+    fn tri_counts(&self) -> Vec<usize> {
+        self.spans.iter().map(|s| s.tris as usize).collect()
     }
 
     /// Run frames as the wide passes (one thread per element over every vehicle,
     /// a dispatch per pass) or as one workgroup per vehicle. Wide is the default
     /// when a vehicle has more than [`WIDE_BEAMS`] beams. Returns whether wide is on.
+    /// The wide passes do not run vehicle contact: while it is active
+    /// ([`Self::contact_active`]) frames run one workgroup per vehicle.
     pub fn is_wide(&self) -> bool {
-        self.wide.as_ref().is_some_and(|w| w.enabled)
+        self.wide.as_ref().is_some_and(|w| w.enabled) && !self.contact_active()
     }
 
     /// Run frames as the wide passes or one workgroup per vehicle (see
@@ -740,7 +1140,7 @@ impl ExplicitBeamsGpu {
         if let Some(w) = &mut self.wide {
             w.enabled = on;
         }
-        self.wide.as_ref().is_some_and(|w| w.enabled)
+        self.is_wide()
     }
 
     /// One wide frame with each dispatch in its own timed pass (a diagnostic: the
@@ -949,6 +1349,7 @@ impl ExplicitBeamsGpu {
         if self.spans.is_empty() {
             return;
         }
+        self.check_contact_status();
         self.write_params(steps);
         let mut enc = self
             .device
@@ -969,7 +1370,27 @@ impl ExplicitBeamsGpu {
                     end_of_pass_write_index: end.then_some(k + 1),
                 })
         };
-        if let Some(w) = self.wide.as_ref().filter(|w| w.enabled) {
+        if self.contact_active() {
+            let c = &self.contact;
+            let nv = self.spans.len() as u32;
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("explicit_beams_contact"),
+                timestamp_writes: stamps(true, true),
+            });
+            pass.set_bind_group(0, &c.plan_group, &[]);
+            pass.set_pipeline(&c.plan[0]);
+            pass.dispatch_workgroups(nv, 1, 1);
+            pass.set_pipeline(&c.plan[1]);
+            pass.dispatch_workgroups(nv.div_ceil(256), 1, 1);
+            pass.set_pipeline(&c.plan[2]);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.group, &[]);
+            pass.dispatch_workgroups_indirect(&c.args, 0);
+            pass.set_pipeline(&c.groups);
+            pass.set_bind_group(0, &c.contact_group, &[]);
+            pass.dispatch_workgroups_indirect(&c.args, 16);
+        } else if let Some(w) = self.wide.as_ref().filter(|w| w.enabled) {
             let plan = self.wide_plan(steps);
             // Begin and rebase, then the vehicles' origins and steps into the
             // table, then the steps.
@@ -1011,7 +1432,21 @@ impl ExplicitBeamsGpu {
             pass.set_bind_group(0, &self.group, &[]);
             pass.dispatch_workgroups(self.spans.len() as u32, 1, 1);
         }
+        if self.contact_active() {
+            self.contact.read_status(&self.device, &mut enc);
+        }
         self.queue.submit([enc.finish()]);
+        if self.contact_active() {
+            self.contact.map_status();
+        }
+    }
+
+    /// Fail on a contact error a finished frame reported ([`Self::contact_status`]),
+    /// without waiting for frames in flight.
+    fn check_contact_status(&mut self) {
+        if let Some(e) = self.contact.poll_status(&self.device) {
+            panic!("explicit beams vehicle contact: {e}");
+        }
     }
 
     /// The parameters for a frame of `steps` steps: copy k (at k × PARAM_STRIDE)
@@ -1023,6 +1458,7 @@ impl ExplicitBeamsGpu {
             PARAM_COPIES - 1
         );
         self.words[0] = steps;
+        self.words[W_VV_ON] = self.contact_active() as u32;
         let mut bytes = vec![0u8; (PARAM_STRIDE * u64::from(steps + 1)) as usize];
         for k in 0..=steps {
             let mut w = self.words;
@@ -1058,6 +1494,7 @@ impl ExplicitBeamsGpu {
             return;
         }
         self.words[0] = steps;
+        self.words[W_VV_ON] = 0;
         self.queue
             .write_buffer(&self.params, 0, bytemuck::cast_slice(&self.words));
         let mut enc = self
@@ -1077,9 +1514,13 @@ impl ExplicitBeamsGpu {
         self.queue.submit([enc.finish()]);
     }
 
-    /// Block until submitted frames have run.
+    /// Block until submitted frames have run. Fails (panics) when one reported a
+    /// vehicle-contact error ([`Self::contact_status`]).
     pub fn wait(&self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        if let Some(e) = self.contact.ready_error() {
+            panic!("explicit beams vehicle contact: {e}");
+        }
     }
 
     /// Set one node's velocity (vehicle index, node index within it).
@@ -1363,6 +1804,42 @@ impl Wide {
 /// solver's own ([`ExplicitBeams::grid_cell`]), so CPU and GPU share it.
 fn grid_cell(v: &ExplicitBeams) -> f32 {
     v.grid_cell
+}
+
+/// The vehicle grid's cell size: the largest vehicle extent (at upload), plus room
+/// for the frame bounds and the box margin.
+fn vv_cell(vehicles: &[ExplicitBeams]) -> f32 {
+    let extent = vehicles
+        .iter()
+        .map(|v| {
+            let (lo, hi) = v.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));
+            (hi - lo).max_element()
+        })
+        .filter(|e| e.is_finite())
+        .fold(0.0f32, f32::max);
+    extent + 2.0 * (DEFAULT_CONTACT_MARGIN + 0.05) + 1.0
+}
+
+/// The contact point grid's cell size: the largest of the vehicles' median
+/// collision triangle extents (at upload) padded by twice their range.
+fn vv_run_cell(vehicles: &[ExplicitBeams]) -> f32 {
+    vehicles
+        .iter()
+        .filter(|v| !v.triangles.is_empty())
+        .map(|v| {
+            let mut e: Vec<f32> = v
+                .triangles
+                .iter()
+                .map(|t| {
+                    let p = t.nodes.map(|n| v.nodes[n as usize].pos);
+                    (p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).max_element()
+                })
+                .collect();
+            e.sort_by(f32::total_cmp);
+            e[e.len() / 2] + 2.0 * v.collision_range
+        })
+        .filter(|c| c.is_finite())
+        .fold(0.05f32, f32::max)
 }
 
 /// What a renderer needs besides a trace of `copies` vehicles of one `.truck` file,

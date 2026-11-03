@@ -66,6 +66,22 @@ pub const EXPLICIT_BEAMS_AERO_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero.wgsl"));
 pub const EXPLICIT_BEAMS_AERO_WIDE_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide.wgsl"));
+/// Vehicle–vehicle contact of the explicit-beams solver: the per-frame plan passes
+/// (entry, WGSL) and the contact groups' entry `explicit_beams_contact` at the four
+/// frame module variants (256 lanes, 512, with `EB_AERO`, both).
+pub const EXPLICIT_BEAMS_VV_PASSES: [(&str, &str); 3] = [
+    ("explicit_beams_vv_bounds", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_bounds.wgsl"))),
+    ("explicit_beams_vv_pairs", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_pairs.wgsl"))),
+    ("explicit_beams_vv_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_group.wgsl"))),
+];
+pub const EXPLICIT_BEAMS_CONTACT_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact.wgsl"));
+pub const EXPLICIT_BEAMS_CONTACT_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_wide.wgsl"));
+pub const EXPLICIT_BEAMS_CONTACT_AERO_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero.wgsl"));
+pub const EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide.wgsl"));
 /// A buffer's extent for compact snapshots (`slang/kernels/state_extent.slang`,
 /// entry `state_extent`; `WgpuSim::measure_state`).
 pub const STATE_EXTENT_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/state_extent.wgsl"));
