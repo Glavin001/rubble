@@ -4885,15 +4885,14 @@ void touchQueryGrid(uint i, bool mark)
         if (aabbOverlap(box, gAabbs[base + j]))
             touchEmit(i, col, j, false, probeIsBox, probeObb, faceGap, mark);
     }
-#if defined(ENGINE_WGSL)
-    if (restUniform())
-    {
-        touchQueryGridRest(i, col, box, cellSize, queryLarge, probeIsBox, probeObb, faceGap, mark);
-        return;
-    }
-#endif
     bool split = gridSplit();
-    uint tableBase = split ? gridHashSize() : 0u;
+    // The uniform rest tables (restUniform): the other table is R, without its tombstones.
+#if defined(ENGINE_WGSL)
+    bool rest = restUniform();
+#else
+    bool rest = false;
+#endif
+    uint tableBase = rest ? restHeads() : split ? gridHashSize() : 0u;
     int3 lo, hi;
     if (queryLarge)
     {
@@ -4919,52 +4918,11 @@ void touchQueryGrid(uint i, bool mark)
             uint cur = link & GRID_COLLIDER_MASK;
             bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
             Aabb ab = gAabbs[base + cur];
-            link = split ? asuint(ab._pad1) : gColorLists[cur];
+            link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : split ? asuint(ab._pad1) : gColorLists[cur];
             guard++;
             if (awakeEntry || cur == i) continue;
             int3 cell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
-            if (any(cell != int3(x, y, z)) || !aabbOverlap(box, ab)) continue;
-            if (queryLarge && bodyIsDynamic(gBodies[gColliders[cur].body])) continue;
-            touchEmit(i, col, cur, true, probeIsBox, probeObb, faceGap, mark);
-        }
-    }
-}
-
-// touchQueryGrid's cells on the uniform rest tables: R (the other table) without the
-// colliders in W this step.
-void touchQueryGridRest(uint i, Collider col, Aabb box, float cellSize, bool queryLarge,
-    bool probeIsBox, BoxObb probeObb, float faceGap, bool mark)
-{
-    uint base = HOST_S(1);
-    int3 lo, hi;
-    if (queryLarge)
-    {
-        lo = int3(floor(box.mn / cellSize));
-        hi = int3(floor(box.mx / cellSize));
-        int3 span = hi - lo + int3(1, 1, 1);
-        if (span.x * span.y * span.z > 512) return;
-    }
-    else
-    {
-        int3 cc = int3(floor((0.5 * (box.mn + box.mx)) / cellSize));
-        lo = cc - 1;
-        hi = cc + 1;
-    }
-    for (int z = lo.z; z <= hi.z; z++)
-    for (int y = lo.y; y <= hi.y; y++)
-    for (int x = lo.x; x <= hi.x; x++)
-    {
-        uint link = ALOAD(gConstraintIds[restHeads() + gridHash(x, y, z)]);
-        uint guard = 0u;
-        while (link != 0xFFFFFFFFu && guard < 4096u)
-        {
-            uint cur = link & GRID_COLLIDER_MASK;
-            Aabb ab = gAabbs[base + cur];
-            link = ALOAD(gConstraintIds[restLinks() + cur]);
-            guard++;
-            if (cur == i) continue;
-            int3 cell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
-            if (any(cell != int3(x, y, z)) || !aabbOverlap(box, ab) || restTombstone(cur)) continue;
+            if (any(cell != int3(x, y, z)) || !aabbOverlap(box, ab) || (rest && restTombstone(cur))) continue;
             if (queryLarge && bodyIsDynamic(gBodies[gColliders[cur].body])) continue;
             touchEmit(i, col, cur, true, probeIsBox, probeObb, faceGap, mark);
         }

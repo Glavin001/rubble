@@ -80,28 +80,6 @@ void fastAccept(uint i, Collider a, bool aDyn, Aabb aa, uint j)
 
 static const uint FAST_MAX_CELLS = 262144u;
 
-// One uniform cell on the rest tables (world_step.slang restUniform): W, then R
-// without its tombstones, each entry whose true cell this is.
-void restFastWalkCell(uint i, Collider a, bool aDyn, Aabb aa, int3 cell, float cs)
-{
-    uint base = HOST_S(1);
-    for (uint t = 0u; t < 2u; t++)
-    {
-        bool rest = t == 1u;
-        uint link = ALOAD(gConstraintIds[(rest ? restHeads() : awakeHeads()) + gridHash(cell.x, cell.y, cell.z)]);
-        uint guard = 0u;
-        while (link != 0xFFFFFFFFu && guard < 4096u)
-        {
-            uint cur = link & GRID_COLLIDER_MASK;
-            Aabb ab = gAabbs[base + cur];
-            link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : asuint(ab._pad1);
-            guard++;
-            if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell) && !(rest && restTombstone(cur)))
-                fastAccept(i, a, aDyn, aa, cur);
-        }
-        if (link != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
-    }
-}
 
 // Every cell of one grid level whose entries can overlap the swept box: the
 // box padded by the entries' largest reach from their centre (E), then only
@@ -130,27 +108,29 @@ void fastWalkLevel(uint i, Collider a, bool aDyn, Aabb aa, float3 s0, float3 s1,
             int(k / uint(span.x * span.y)));
         float3 cc = (float3(cell) + 0.5) * cs;
         if (segmentPointDistance(s0, s1, cc) > tube) continue;
-#if defined(ENGINE_WGSL)
-        if (!hier && restUniform())
-        {
-            restFastWalkCell(i, a, aDyn, aa, cell, cs);
-            continue;
-        }
-#endif
         if (!hier)
         {
-            uint tables = gridSplit() ? 2u : 1u;
+            // The uniform rest tables (world_step.slang restUniform): W then R, R without
+            // its tombstones, through the same accept.
+#if defined(ENGINE_WGSL)
+            bool restU = restUniform();
+#else
+            bool restU = false;
+#endif
+            uint tables = restU || gridSplit() ? 2u : 1u;
             for (uint t = 0u; t < tables; t++)
             {
-                uint link = ALOAD(gConstraintIds[t * gridHashSize() + gridHash(cell.x, cell.y, cell.z)]);
+                bool rest = restU && t == 1u;
+                uint heads = restU ? (rest ? restHeads() : awakeHeads()) : t * gridHashSize();
+                uint link = ALOAD(gConstraintIds[heads + gridHash(cell.x, cell.y, cell.z)]);
                 uint guard = 0u;
                 while (link != 0xFFFFFFFFu && guard < 4096u)
                 {
                     uint cur = link & GRID_COLLIDER_MASK;
                     Aabb ab = gAabbs[base + cur];
-                    link = gridSplit() ? asuint(ab._pad1) : gColorLists[cur];
+                    link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : (gridSplit() ? asuint(ab._pad1) : gColorLists[cur]);
                     guard++;
-                    if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell))
+                    if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell) && !(rest && restTombstone(cur)))
                         fastAccept(i, a, aDyn, aa, cur);
                 }
                 if (link != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
