@@ -257,3 +257,75 @@ fn self_collision_skips_the_nodes_own_group() {
     assert!(!s.candidates.contains(&node(&d, "dl")));
     assert!(s.candidates.contains(&node(&d, "d1")));
 }
+
+#[test]
+fn dihedral_gradient_matches_the_f64_reference() {
+    use engine_softbody::elements;
+    use engine_softbody::explicit_beams::{dihedral, dihedral_jacobian};
+    let x = [
+        Vec3::new(0.3, -0.2, 0.9),
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.1, 1.0, 0.05),
+        Vec3::new(-0.7, 1.2, 0.4),
+    ];
+    let xd = x.map(|p| p.as_dvec3());
+    assert!((dihedral(x) as f64 - elements::dihedral(xd)).abs() < 1e-6);
+    for (g, r) in dihedral_jacobian(x)
+        .iter()
+        .zip(elements::dihedral_jacobian(xd))
+    {
+        assert!((g.as_dvec3() - r).length() < 1e-5, "{g} vs {r}");
+    }
+}
+
+#[test]
+fn torsion_bar_holds_its_angle_and_breaks_with_its_hinge() {
+    let (s, d) = spawn(Vec3::ZERO);
+    let t = s
+        .beams
+        .iter()
+        .position(|b| b.kind == ExplicitKind::JbeamTorsion)
+        .expect("the hinge torsion bar");
+    assert_eq!(s.beams[t + 1].kind, ExplicitKind::JbeamTorsionPair);
+    // Its links are watched: the detent d3-bh1's group (hinge_a, of which it is a
+    // passive member), and the axis bh1-bh2, which got a group of its own.
+    let watch = s.torsion_watch[s.beams[t].shock as usize - 1];
+    let detent = beam(&s, &d, "d3", "bh1");
+    let axis = beam(&s, &d, "bh1", "bh2");
+    assert_eq!(watch[0], s.beams[detent].group.unsigned_abs());
+    assert!(s.beams[axis].group > 0 && watch[1] == s.beams[axis].group as u32);
+    assert_eq!(
+        s.beams
+            .iter()
+            .filter(|b| b.group == s.beams[axis].group)
+            .count(),
+        1,
+        "a group of its own"
+    );
+    // Twisted, it pushes back; the torque is −k·Δφ.
+    let mut b = s.beams[t];
+    let mut nodes = [b.a, b.b, s.beams[t + 1].a, s.beams[t + 1].b].map(|n| s.nodes[n as usize]);
+    nodes[0].pos += Vec3::new(0.01, 0.0, 0.0);
+    let f = engine_softbody::explicit_beams::torsion_force(&mut b, &nodes);
+    assert!(f.iter().any(|f| f.length() > 0.0));
+    assert!(
+        b.force.abs() > 0.0 && b.force.abs() <= 2000.0 + 1e-3,
+        "torque {}",
+        b.force
+    );
+    // Its hinge group breaking (an active member, d1-bh1) breaks it the step after.
+    let (mut s, _) = spawn(Vec3::ZERO);
+    let hinge = beam(&s, &d, "d1", "bh1");
+    s.beams[hinge].strength = 1e-3;
+    s.beams[hinge].gate = 1e-3;
+    for _ in 0..400 {
+        s.step();
+        if s.beams[hinge].broken {
+            break;
+        }
+    }
+    assert!(s.beams[hinge].broken && s.beams[detent].broken);
+    assert!(!s.beams[t].broken, "not in the same step");
+    s.step();
+    assert!(s.beams[t].broken && s.beams[t + 1].broken);
+}

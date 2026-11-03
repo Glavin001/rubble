@@ -80,6 +80,8 @@ static const uint KIND_JPLAIN = 6u;
 static const uint KIND_JSUPPORT = 7u;
 static const uint KIND_JBOUNDED = 8u;
 static const uint KIND_JCOUPLER = 9u;
+static const uint KIND_JTORSION = 10u; // nodes 1-2; the next record carries nodes 3-4
+static const uint KIND_JTORSION2 = 11u;
 static const uint TYPE_DEFORMABLE = 0u;
 
 static const uint FLAG_FAST_INV_SQRT = 1u;
@@ -702,6 +704,93 @@ void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, ui
 void triggerUpdate(uint gj, bool fast, uint parity, uint4 bn);
 #endif
 
+// A JBeam torsion element (KIND_JTORSION, the CPU reference's torsion_force): the
+// torque -k wrap(phi - phi0) - c dphi/dt on the dihedral angle phi of nodes 1-2-3-4
+// about the 2->3 axis, as forces torque * dphi/dx_i on the four nodes (this record's
+// incidence entries for nodes 1 and 2, the next record's for 3 and 4). State: phi0 in
+// the rest slot, the deform torque in Tc. Static: (k, c, -, -), the watched break
+// groups (c2.xyz): it breaks the step after one of them breaks (the last step's
+// group slots, parity ^ 1).
+float wrapAngle(float a)
+{
+    if (a > 3.14159274) return nf(a - 6.28318548);
+    if (a <= -3.14159274) return nf(a + 6.28318548);
+    return a;
+}
+
+void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, float4 s1, float4 c1, uint4 r2,
+                    float3 x1, float3 x2, float3 v1, float3 v2)
+{
+    uint4 bn2 = gStatic[gP.beamBase + (gj + 1u) * 3u];
+    float4 s0 = gBeams[gj * 2u];
+    int group = asint(bn.w);
+    float3 x3 = gNodes[bn2.x * 3u].xyz;
+    float3 x4 = gNodes[bn2.y * 3u].xyz;
+    float3 v3 = gNodes[bn2.x * 3u + 1u].xyz;
+    float3 v4 = gNodes[bn2.y * 3u + 1u].xyz;
+    bool broken = false;
+    if (r2.x != 0u && gGroups[groupSlot(parity ^ 1u, groupOff, r2.x)].load() != NO_GROUP) broken = true;
+    if (r2.y != 0u && gGroups[groupSlot(parity ^ 1u, groupOff, r2.y)].load() != NO_GROUP) broken = true;
+    if (r2.z != 0u && gGroups[groupSlot(parity ^ 1u, groupOff, r2.z)].load() != NO_GROUP) broken = true;
+    float rest = s0.x;
+    float t = 0.0;
+    float3 g1 = float3(0.0, 0.0, 0.0);
+    float3 g2 = g1;
+    float3 g3 = g1;
+    float3 g4 = g1;
+    if (!broken)
+    {
+        float3 b1 = ssub3(x2, x1);
+        float3 b2 = ssub3(x3, x2);
+        float3 b3 = ssub3(x4, x3);
+        float3 n1 = scross(b1, b2);
+        float3 n2 = scross(b2, b3);
+        float l1 = sdot(n1, n1);
+        float l2 = sdot(n2, n2);
+        float ll = sdot(b2, b2);
+        float lb = ssqrt(ll);
+        float phi = atan2(smul(lb, sdot(b1, n2)), sdot(n1, n2));
+        if (!(l1 < 1e-12 || l2 < 1e-12 || ll < 1e-12))
+        {
+            g1 = sscale(n1, sdiv(-lb, l1));
+            g4 = sscale(n2, sdiv(lb, l2));
+            float p = sdiv(-sdot(b1, b2), ll);
+            float q = sdiv(-sdot(b3, b2), ll);
+            g2 = ssub3(sscale(g1, nf(p - 1.0)), sscale(g4, q));
+            g3 = ssub3(sscale(g4, nf(q - 1.0)), sscale(g1, p));
+        }
+        float rate = nf(nf(nf(sdot(g1, v1) + sdot(g2, v2)) + sdot(g3, v3)) + sdot(g4, v4));
+        float d = wrapAngle(nf(phi - rest));
+        if (smul(c1.x, abs(d)) > s0.y)
+        {
+            float m = sdiv(s0.y, c1.x);
+            d = d < 0.0 ? -m : m;
+            rest = wrapAngle(nf(phi - d));
+        }
+        t = nf(smul(-c1.x, d) - smul(c1.y, rate));
+        if (abs(t) > s1.x) broken = true;
+    }
+    if (broken)
+    {
+        t = 0.0;
+        if (group > 0)
+        {
+            gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+            gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+        }
+        gBeams[gj * 2u + 1u] = float4(s1.x, 0.0, 1.0, 1.0);
+        float4 p1 = gBeams[(gj + 1u) * 2u + 1u];
+        gBeams[(gj + 1u) * 2u + 1u] = float4(p1.x, 0.0, 1.0, 1.0);
+    }
+    else if (s1.w != 0.0)
+        gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
+    if (rest != s0.x) gBeams[gj * 2u] = float4(rest, s0.yzw);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sscale(g1, t), 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(sscale(g2, t), 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(sscale(g3, t), 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(sscale(g4, t), 0.0);
+}
+
 // A JBeam-mode beam (kinds KIND_JPLAIN..KIND_JCOUPLER; the CPU reference's
 // jbeam_force_filtered, coupler_force and beam_pass; engine/docs/jbeam-semantics-spec.md).
 // Exact lengths (JBeam mode spawns without the fast inverse square root); no break
@@ -725,6 +814,12 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     float3 vb = gNodes[bn.y * 3u + 1u].xyz;
     bool broken = false;
     float strength = s1.x;
+    if (kind == KIND_JTORSION2) return; // its element's first record writes its forces
+    if (kind == KIND_JTORSION)
+    {
+        jtorsionUpdate(gj, local, groupOff, parity, bn, s1, c1, r2, pa.xyz, pb.xyz, va, vb);
+        return;
+    }
     if (kind == KIND_JCOUPLER)
     {
         float3 fc = ssub3(sscale(ssub3(pa.xyz, pb.xyz), -c1.x), sscale(ssub3(va, vb), c1.y));

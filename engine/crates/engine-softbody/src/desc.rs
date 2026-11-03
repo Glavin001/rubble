@@ -253,6 +253,8 @@ pub struct SoftElement {
     #[serde(with = "inf_f32")]
     pub strength: f32,
     pub break_group: u32,
+    /// Torsion bars: `precompressionAngle` (rad) added to the spawn angle.
+    pub precompression_angle: f32,
 }
 
 impl Default for SoftElement {
@@ -265,6 +267,7 @@ impl Default for SoftElement {
             deform: f32::INFINITY,
             strength: f32::INFINITY,
             break_group: 0,
+            precompression_angle: 0.0,
         }
     }
 }

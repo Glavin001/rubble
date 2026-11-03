@@ -39,6 +39,7 @@ fn main() {
             w.width
         );
     }
+    let speed: f32 = opt("speed=").map_or(0.0, |s| s.parse().unwrap());
     let node_name = |i: u32| {
         desc.nodes
             .get(i as usize)
@@ -128,7 +129,24 @@ fn main() {
     for n in &mut sim.nodes {
         n.pos.y += 0.02 - lowest;
     }
+    if speed > 0.0 {
+        // Into a rigid wall 5 cm ahead, wider and taller than the vehicle.
+        let v = Vec3::new(0.0, 0.0, speed);
+        for n in &mut sim.nodes {
+            n.vel = v;
+        }
+        sim.roll_tyres(v);
+        let front = sim.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+        sim.boxes
+            .push(engine_softbody::explicit_beams::StaticBox::centered(
+                Vec3::new(0.0, 1.5, front + 0.05 + 1.0),
+                Vec3::new(4.0, 3.0, 1.0),
+            ));
+        println!("into a wall at {speed} m/s ({:.0} km/h)", speed * 3.6);
+    }
     let steps = (secs * 2000.0) as u64;
+    let every: u64 = opt("every=").map_or(2000, |s| s.parse().unwrap());
+    let mut peak = 0.0f32;
     let mut own = 0;
     let mut ke_node = vec![0.0f64; sim.nodes.len()];
     for s in 0..steps {
@@ -177,7 +195,7 @@ fn main() {
                 ke_node[i] += (0.5 * n.mass * n.vel.length_squared()) as f64 / 2000.0;
             }
         }
-        if (s + 1) % 2000 == 0 {
+        if (s + 1) % every == 0 {
             let ke: f32 = sim
                 .nodes
                 .iter()
@@ -196,6 +214,7 @@ fn main() {
                 node_name(at as u32)
             );
         }
+        peak = peak.max(sim.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max));
         if sim.nodes.iter().any(|n| !n.pos.is_finite()) {
             println!("NaN at step {s}");
             break;
@@ -306,6 +325,24 @@ fn main() {
             }
         }
     }
+    for (j, b) in sim
+        .beams
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.bent())
+        .take(12)
+    {
+        println!(
+            "  bent {j} {}-{} {:?} k={:.0} rest {:.4} rest0 {:.4} deform {:.0}",
+            node_name(b.a),
+            node_name(b.b),
+            b.kind,
+            b.k,
+            b.rest,
+            b.rest0,
+            b.tc
+        );
+    }
     let (broken, bent) = sim.damage();
     let ke: f32 = sim
         .nodes
@@ -313,7 +350,10 @@ fn main() {
         .map(|n| 0.5 * n.mass * n.vel.length_squared())
         .sum();
     println!(
-        "{name} {pc} ({path}): {} nodes, {} beams; after {secs} s at rest: {broken} broken ({own} on their own), {bent} bent, KE {ke:.3} J",
-        sim.nodes.len(), sim.beams.len()
+        "{name} {pc} ({path}): {} nodes, {} beams; after {secs} s{}: {broken} broken ({own} on their own), {bent} bent, KE {ke:.3} J, peak node speed {peak:.2} m/s, finite {}",
+        sim.nodes.len(),
+        sim.beams.len(),
+        if speed > 0.0 { format!(" into a wall at {speed} m/s") } else { " at rest".into() },
+        sim.nodes.iter().all(|n| n.pos.is_finite())
     );
 }

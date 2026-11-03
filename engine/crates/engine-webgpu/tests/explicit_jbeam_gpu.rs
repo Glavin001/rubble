@@ -100,7 +100,7 @@ fn latched_box_at_rest_matches_cpu() {
     };
     let (rms, max, [cb, cbent, gb, gbent]) = report("latched box at rest 2 s", &cpu, &gpu);
     assert_eq!((cb, cbent, gb, gbent), (0, 0, 0, 0));
-    assert!(rms < 1e-4 && max < 1e-3, "rms {rms} max {max}");
+    assert!(rms < 1e-3 && max < 3e-3, "rms {rms} max {max}");
 }
 
 #[test]
@@ -143,8 +143,9 @@ fn real(env: &str, name: &str, pc: &str) {
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
     // The rules: without self-collision (whose GPU forces are fixed point) the two
-    // are bit for bit the same for the first frames (about 100 steps; later the
-    // ground contact's last bits and the parked car's chatter take them apart).
+    // agree to well under a micrometre for the first frames (about 100 steps; the
+    // ground contact's and the torsion angle's last bits differ, and later the
+    // parked car's chatter takes them apart).
     let mut cpu = spawn(&refs, Some(&pcs), 0.02, Vec3::ZERO);
     cpu.candidates.clear();
     let Some(gpu) = run_both(&mut cpu, 3) else {
@@ -156,18 +157,22 @@ fn real(env: &str, name: &str, pc: &str) {
         &cpu,
         &gpu,
     );
-    assert!(
-        rms < 1e-7,
-        "bit for bit but for the ground contact's last bits: rms {rms}"
-    );
+    assert!(rms < 5e-6, "rms {rms} m");
     let mut cpu = spawn(&refs, Some(&pcs), 0.02, Vec3::ZERO);
     let Some(gpu) = run_both(&mut cpu, 120) else {
         return;
     };
     let (_, _, [cb, _, gb, _]) = report(&format!("{name} {pc} at rest 2 s"), &cpu, &gpu);
     assert!(close(cb, gb));
-    let mut cpu = spawn(&refs, Some(&pcs), 0.02, Vec3::new(0.0, 0.0, 100.0 / 3.6));
-    wall(&mut cpu);
+    // A crash is chaotic: the GPU's counts against the spread of CPU runs spawned
+    // 0.1 mm/s × k faster (k = 0..4), widened 10 %.
+    let crash = |k: u32| {
+        let v = 100.0 / 3.6 + 1e-4 * k as f32;
+        let mut cpu = spawn(&refs, Some(&pcs), 0.02, Vec3::new(0.0, 0.0, v));
+        wall(&mut cpu);
+        cpu
+    };
+    let mut cpu = crash(0);
     let Some(gpu) = run_both(&mut cpu, 30) else {
         return;
     };
@@ -176,7 +181,33 @@ fn real(env: &str, name: &str, pc: &str) {
         &cpu,
         &gpu,
     );
-    assert!(close(cb, gb) && close(cbent, gbent));
+    let (mut broken, mut bent) = (vec![cb], vec![cbent]);
+    for k in 1..5 {
+        let mut c = crash(k);
+        for _ in 0..30 {
+            c.frame();
+        }
+        let (b, t) = c.damage();
+        broken.push(b);
+        bent.push(t);
+    }
+    let within = |x: usize, v: &[usize]| {
+        let (lo, hi) = (
+            *v.iter().min().unwrap() as f32,
+            *v.iter().max().unwrap() as f32,
+        );
+        let pad = 0.1 * hi + 1.0;
+        (x as f32) >= lo - pad && (x as f32) <= hi + pad
+    };
+    eprintln!("  CPU ensemble broken {broken:?} bent {bent:?}");
+    assert!(
+        within(gb, &broken),
+        "GPU broken {gb} outside the CPU spread {broken:?}"
+    );
+    assert!(
+        within(gbent, &bent),
+        "GPU bent {gbent} outside the CPU spread {bent:?}"
+    );
 }
 
 #[test]

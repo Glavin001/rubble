@@ -34,7 +34,7 @@ pub struct GpuBeam {
 impl GpuBeam {
     /// Yielded, as [`engine_softbody::explicit_beams::Beam::bent`].
     pub fn bent(&self) -> bool {
-        !self.broken && (self.rest - self.rest0).abs() > 1e-3 * self.rest0
+        !self.broken && (self.rest - self.rest0).abs() > 1e-3 * self.rest0.abs()
     }
 }
 
@@ -651,7 +651,15 @@ impl ExplicitBeamsGpu {
                 };
                 // JBeam-mode kinds: the damping filter's gBeams record + 1 (0 none),
                 // patched once the filter region's place is known.
-                let fourth = if b.kind.is_jbeam() {
+                let fourth = if b.kind == ExplicitKind::JbeamTorsion {
+                    // The watched break groups (the kernel's jtorsionUpdate).
+                    let w = v.torsion_watch[b.shock as usize - 1];
+                    beam_recs.push([w[0], w[1], w[2], 0]);
+                    beams.push([b.rest, b.tc, b.tt, b.gate]);
+                    beams.push([b.strength, b.force, b.broken as u32 as f32, 0.0]);
+                    rest0.push(b.rest0);
+                    continue;
+                } else if b.kind.is_jbeam() {
                     if b.shock > 0 {
                         filter_patches.push((beam_recs.len(), filters.len()));
                         filters.push(v.damp_filters[b.shock as usize - 1]);

@@ -1128,6 +1128,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                     deform: g("beamDeform", 220_000.0),
                     strength: g("beamStrength", f32::INFINITY),
                     break_group: 0,
+                    precompression_angle: 0.0,
                 });
             } else {
                 *skipped.entry("LBEAM without id3".to_string()).or_default() += 1;
@@ -1534,22 +1535,46 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         }
     }
 
-    // Torsion bars: four nodes, twist about 2–3.
-    for (_, f) in expand(&db, &parts, "torsionbars", &vars) {
-        let ids = ["id1", "id2", "id3", "id4"].map(|k| node(&f, k));
-        let [Some(n1), Some(n2), Some(n3), Some(n4)] = ids else {
-            continue;
-        };
-        let g = |k: &str, d: f32| f.get(k).and_then(as_f32).unwrap_or(d);
-        desc.elements.push(SoftElement {
-            kind: ElementKind::Torsion,
-            nodes: [n1, n2, n3, n4],
-            spring: g("spring", 0.0),
-            damp: g("damp", 0.0),
-            deform: g("deform", f32::INFINITY),
-            strength: g("strength", f32::INFINITY),
-            break_group: 0,
-        });
+    // Torsion bars, and torsion hydros (with no input: torsion bars at their spawn
+    // angle): four nodes, twist about 2–3.
+    let mut torsion_unsupported: BTreeMap<&str, u32> = BTreeMap::new();
+    for section in ["torsionbars", "torsionHydros"] {
+        for (_, f) in expand(&db, &parts, section, &vars) {
+            let ids = ["id1", "id2", "id3", "id4"].map(|k| node(&f, k));
+            let [Some(n1), Some(n2), Some(n3), Some(n4)] = ids else {
+                continue;
+            };
+            let g = |k: &str, d: f32| f.get(k).and_then(as_f32).unwrap_or(d);
+            // breakGroupType 1 on a torsion bar is the same as no group (BeamNG docs).
+            let passive = g("breakGroupType", 0.0) as i32 == 1;
+            let break_group = match f.get("breakGroup") {
+                Some(Value::String(s)) if !s.is_empty() && !passive => {
+                    let n = groups.len() as u32 + 1;
+                    *groups.entry(s.clone()).or_insert(n)
+                }
+                _ => 0,
+            };
+            for key in ["spring2", "damp2", "precompressionTime"] {
+                if f.get(key).is_some_and(|v| v.as_str() != Some("")) {
+                    *torsion_unsupported.entry(key).or_default() += 1;
+                }
+            }
+            desc.elements.push(SoftElement {
+                kind: ElementKind::Torsion,
+                nodes: [n1, n2, n3, n4],
+                spring: g("spring", 0.0),
+                damp: g("damp", 0.0),
+                deform: g("deform", f32::INFINITY),
+                strength: g("strength", f32::INFINITY),
+                break_group,
+                precompression_angle: g("precompressionAngle", 0.0),
+            });
+        }
+    }
+    for (key, n) in torsion_unsupported {
+        desc.warnings.push(format!(
+            "{n} torsion bars set `{key}`, which no Rubble solver simulates yet"
+        ));
     }
     // Rails: an object keyed by name ("rails"), or a table ("rails2").
     let mut rail_rows: Vec<(String, Map<String, Value>)> = Vec::new();

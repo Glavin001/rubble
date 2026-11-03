@@ -3,8 +3,8 @@
 //! body with a door on its left side hung on two hinge break groups, held shut by
 //! a coupler latch, with a passive pop-open support, a bounded detent, a bounded
 //! limiter with fast damping and a damping cutoff, precompressed support beams in
-//! their own break group, deform limits, a damper-only beam, and self-collision
-//! groups (body and door). Written for Rubble; no third-party content.
+//! their own break group, deform limits, a damper-only beam, a torsion bar about the
+//! hinge, and self-collision groups (body and door). Written for Rubble; no third-party content.
 
 /// The fixture's JBeam text (one file, main part `jbm_box`).
 pub fn latched_box_jbeam() -> String {
@@ -85,6 +85,11 @@ pub fn latched_box_jbeam() -> String {
         {"beamSpring": 0, "beamDamp": 500, "beamDeform": 27600, "beamStrength": 75000, "dampCutoffHz": 1000},
         ["b1", "b8"], ["b2", "b7"],
         {"dampCutoffHz": ""}
+    ],
+    "torsionbars": [
+        ["id1:", "id2:", "id3:", "id4:"],
+        {"spring": 20000, "damp": 5, "deform": 2000, "strength": "FLT_MAX"},
+        ["d3", "bh1", "bh2", "b4"]
     ],
     "triangles": [
         ["id1:", "id2:", "id3:"],

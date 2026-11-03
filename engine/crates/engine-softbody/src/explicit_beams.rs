@@ -148,6 +148,17 @@ pub enum ExplicitKind {
     /// zero-length isotropic spring–damper (`k`, `c`, [`coupler_rates`]),
     /// breaking when that force passes the strength.
     JbeamCoupler,
+    /// A JBeam torsion bar (and a torsion hydro with no input) in JBeam mode (spec
+    /// §9), as two beam records: this one on nodes 1–2 computes the element, the
+    /// next ([`ExplicitKind::JbeamTorsionPair`], on nodes 3–4) only carries the
+    /// forces on nodes 3 and 4. Torque −k·wrap(φ − φ₀) − c·φ̇ on the dihedral angle φ
+    /// about the 2→3 axis ([`torsion_force`]): `k`, `c` (N·m/rad, N·m·s/rad), φ₀ the
+    /// rest angle in `rest` (spawn angle in `rest0`), the deform and break torques in
+    /// `tc` and `strength`.
+    JbeamTorsion,
+    /// The second record of a [`ExplicitKind::JbeamTorsion`] element (no force of
+    /// its own).
+    JbeamTorsionPair,
 }
 
 impl ExplicitKind {
@@ -163,6 +174,8 @@ impl ExplicitKind {
             ExplicitKind::JbeamSupport => 7,
             ExplicitKind::JbeamBounded => 8,
             ExplicitKind::JbeamCoupler => 9,
+            ExplicitKind::JbeamTorsion => 10,
+            ExplicitKind::JbeamTorsionPair => 11,
         }
     }
 
@@ -174,6 +187,8 @@ impl ExplicitKind {
                 | ExplicitKind::JbeamSupport
                 | ExplicitKind::JbeamBounded
                 | ExplicitKind::JbeamCoupler
+                | ExplicitKind::JbeamTorsion
+                | ExplicitKind::JbeamTorsionPair
         )
     }
 }
@@ -308,7 +323,7 @@ impl Beam {
 
     /// Yielded: alive with a rest length off its spawn length by more than 0.1 %.
     pub fn bent(&self) -> bool {
-        !self.broken && (self.rest - self.rest0).abs() > 1e-3 * self.rest0
+        !self.broken && (self.rest - self.rest0).abs() > 1e-3 * self.rest0.abs()
     }
 }
 
@@ -543,6 +558,15 @@ pub struct ExplicitBeams {
     pub self_groups: Vec<u32>,
     /// JBeam mode's damping filters (`dampCutoffHz`), by [`Beam::shock`] − 1.
     pub damp_filters: Vec<DampFilter>,
+    /// JBeam torsion elements' watched break groups (0 = none), by [`Beam::shock`]
+    /// − 1 of their [`ExplicitKind::JbeamTorsion`] record: the groups of the beams
+    /// between their consecutive nodes (spec §9). A torsion element breaks the
+    /// step after one of them breaks.
+    pub torsion_watch: Vec<[u32; 3]>,
+    /// Break groups set off in the last beam pass (for [`Self::torsion_watch`]) and
+    /// in this one (state).
+    pub groups_last: Vec<u32>,
+    pub groups_now: Vec<u32>,
 }
 
 /// A JBeam beam's damping low-pass (`dampCutoffHz`, spec §6): the damping uses
@@ -735,6 +759,9 @@ impl ExplicitBeams {
             contact_throttle: Vec::new(),
             self_groups: Vec::new(),
             damp_filters: Vec::new(),
+            torsion_watch: Vec::new(),
+            groups_last: Vec::new(),
+            groups_now: Vec::new(),
         }
     }
 
@@ -1398,6 +1425,83 @@ impl ExplicitBeams {
         for b in &desc.beams {
             s.push_jbeam_beam(b);
         }
+        // Torsion elements break when a beam between consecutive nodes breaks: each
+        // such beam's break group is watched (one of its own, numbered past the
+        // file's groups, when it has none).
+        let mut pair_beam: HashMap<(u32, u32), usize> = HashMap::new();
+        for (i, b) in s.beams.iter().enumerate() {
+            pair_beam.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(i);
+        }
+        let mut next_group = s
+            .beams
+            .iter()
+            .map(|b| b.group.unsigned_abs())
+            .chain(desc.elements.iter().map(|e| e.break_group))
+            .chain(desc.couplers.iter().map(|c| c.break_group))
+            .max()
+            .unwrap_or(0);
+        let mut unwatched = 0usize;
+        for e in desc
+            .elements
+            .iter()
+            .filter(|e| e.kind == crate::desc::ElementKind::Torsion)
+        {
+            let [n1, n2, n3, n4] = e.nodes;
+            let mut watch = [0u32; 3];
+            for (k, (p, q)) in [(n1, n2), (n2, n3), (n3, n4)].into_iter().enumerate() {
+                let Some(&i) = pair_beam.get(&(p.min(q), p.max(q))) else {
+                    continue;
+                };
+                let g = &mut s.beams[i].group;
+                if *g == 0 {
+                    next_group += 1;
+                    *g = next_group as i32;
+                } else if *g < 0 {
+                    // A passive member's own break does not set off its group.
+                    unwatched += 1;
+                }
+                watch[k] = g.unsigned_abs();
+            }
+            let x = [n1, n2, n3, n4].map(|n| s.nodes[n as usize].pos);
+            let phi0 = wrap_angle(dihedral(x) + e.precompression_angle);
+            let mut a = Beam::new(
+                n1,
+                n2,
+                ExplicitKind::JbeamTorsion,
+                ExplicitType::Actuator,
+                e.spring,
+                e.damp,
+                phi0,
+                f32::INFINITY,
+                e.strength,
+                0.0,
+            );
+            a.tc = e.deform;
+            a.group = e.break_group as i32;
+            s.torsion_watch.push(watch);
+            a.shock = s.torsion_watch.len() as u32;
+            let mut b = Beam::new(
+                n3,
+                n4,
+                ExplicitKind::JbeamTorsionPair,
+                ExplicitType::Actuator,
+                0.0,
+                0.0,
+                0.0,
+                f32::INFINITY,
+                f32::INFINITY,
+                0.0,
+            );
+            b.group = a.group;
+            s.beams.push(a);
+            s.beams.push(b);
+        }
+        if unwatched > 0 {
+            warnings.push(format!(
+                "{unwatched} torsion element links are passive break-group members: their \
+                 own breaks do not break the torsion element"
+            ));
+        }
         for cp in &desc.couplers {
             let (k, c) = coupler_rates(s.nodes[cp.a as usize].mass, s.nodes[cp.b as usize].mass);
             let mut beam = Beam::new(
@@ -1436,7 +1540,13 @@ impl ExplicitBeams {
             ));
         }
         for (n, what) in [
-            (desc.elements.len(), "LBEAM and torsion bar elements"),
+            (
+                desc.elements
+                    .iter()
+                    .filter(|e| e.kind == crate::desc::ElementKind::Lbeam)
+                    .count(),
+                "LBEAMs",
+            ),
             (desc.rails.len(), "rails"),
             (desc.slidenodes.len(), "slide nodes"),
             (desc.rigid_parts.len(), "rigid parts"),
@@ -1977,6 +2087,8 @@ impl ExplicitBeams {
     }
 
     fn beam_pass(&mut self) {
+        std::mem::swap(&mut self.groups_last, &mut self.groups_now);
+        self.groups_now.clear();
         for j in 0..self.beams.len() {
             if self.beams[j].broken {
                 continue;
@@ -1984,11 +2096,47 @@ impl ExplicitBeams {
             let mut beam = self.beams[j];
             let na = self.nodes[beam.a as usize];
             let nb = self.nodes[beam.b as usize];
+            if beam.kind == ExplicitKind::JbeamTorsionPair {
+                continue;
+            }
+            if beam.kind == ExplicitKind::JbeamTorsion {
+                let (c, d) = (self.beams[j + 1].a, self.beams[j + 1].b);
+                let nodes = [na, nb, self.nodes[c as usize], self.nodes[d as usize]];
+                let watch = self.torsion_watch[beam.shock as usize - 1];
+                let f = if watch
+                    .iter()
+                    .any(|&g| g != 0 && self.groups_last.contains(&g))
+                {
+                    beam.broken = true;
+                    beam.force = 0.0;
+                    [Vec3::ZERO; 4]
+                } else {
+                    torsion_force(&mut beam, &nodes)
+                };
+                self.beams[j] = beam;
+                if beam.broken {
+                    self.beams[j + 1].broken = true;
+                    if beam.group > 0 {
+                        let g = beam.group;
+                        self.groups_now.push(g as u32);
+                        for other in &mut self.beams {
+                            if other.group.abs() == g {
+                                other.broken = true;
+                            }
+                        }
+                    }
+                }
+                for (n, f) in [beam.a, beam.b, c, d].into_iter().zip(f) {
+                    self.nodes[n as usize].force += f;
+                }
+                continue;
+            }
             if beam.kind == ExplicitKind::JbeamCoupler {
                 let push = coupler_force(&mut beam, &na, &nb);
                 self.beams[j] = beam;
                 if beam.broken && beam.group > 0 {
                     let g = beam.group;
+                    self.groups_now.push(g as u32);
                     for other in &mut self.beams {
                         if other.group.abs() == g {
                             other.broken = true;
@@ -2037,6 +2185,7 @@ impl ExplicitBeams {
             self.beams[j] = beam;
             if cascade {
                 let g = beam.group;
+                self.groups_now.push(g as u32);
                 for other in &mut self.beams {
                     if other.group.abs() == g {
                         other.broken = true;
@@ -2377,7 +2526,9 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         | ExplicitKind::JbeamPlain
         | ExplicitKind::JbeamSupport
         | ExplicitKind::JbeamBounded
-        | ExplicitKind::JbeamCoupler => {}
+        | ExplicitKind::JbeamCoupler
+        | ExplicitKind::JbeamTorsion
+        | ExplicitKind::JbeamTorsionPair => {}
     }
     let mut f = -k * e - c * u;
     beam.force = f;
@@ -2551,6 +2702,69 @@ pub fn jbeam_force_filtered(
         force: f,
         check_break: tau > beam.strength,
     }
+}
+
+/// Dihedral angle φ ∈ (−π, π] of nodes 1–2–3–4 about the 2→3 axis.
+pub fn dihedral(x: [Vec3; 4]) -> f32 {
+    let (b1, b2, b3) = (x[1] - x[0], x[2] - x[1], x[3] - x[2]);
+    let (n1, n2) = (b1.cross(b2), b2.cross(b3));
+    (b2.length() * b1.dot(n2)).atan2(n1.dot(n2))
+}
+
+/// An angle difference of two angles in (−π, π] wrapped into (−π, π].
+pub fn wrap_angle(a: f32) -> f32 {
+    if a > std::f32::consts::PI {
+        a - std::f32::consts::TAU
+    } else if a <= -std::f32::consts::PI {
+        a + std::f32::consts::TAU
+    } else {
+        a
+    }
+}
+
+/// ∂φ/∂x of [`dihedral`] for the four nodes (Blondel and Karplus 1996); zero where
+/// a plane is degenerate.
+pub fn dihedral_jacobian(x: [Vec3; 4]) -> [Vec3; 4] {
+    let (b1, b2, b3) = (x[1] - x[0], x[2] - x[1], x[3] - x[2]);
+    let (n1, n2) = (b1.cross(b2), b2.cross(b3));
+    let (l1, l2) = (n1.dot(n1), n2.dot(n2));
+    let ll = b2.dot(b2);
+    if l1 < 1e-12 || l2 < 1e-12 || ll < 1e-12 {
+        return [Vec3::ZERO; 4];
+    }
+    let lb = ll.sqrt();
+    let g1 = n1 * (-lb / l1);
+    let g4 = n2 * (lb / l2);
+    let p = -b1.dot(b2) / ll;
+    let q = -b3.dot(b2) / ll;
+    let g2 = g1 * (p - 1.0) - g4 * q;
+    let g3 = g4 * (q - 1.0) - g1 * p;
+    [g1, g2, g3, g4]
+}
+
+/// A torsion element's forces on its four nodes ([`ExplicitKind::JbeamTorsion`];
+/// spec §9): the torque τ = −k·wrap(φ − φ₀) − c·φ̇ as forces τ·∂φ/∂xᵢ. Past the
+/// deform torque (`tc`) the rest angle follows φ so the spring torque stays at it;
+/// past the strength the element breaks (`broken`, no force). The torque is kept
+/// as the last force.
+pub fn torsion_force(beam: &mut Beam, n: &[Node; 4]) -> [Vec3; 4] {
+    let x = n.map(|n| n.pos);
+    let g = dihedral_jacobian(x);
+    let phi = dihedral(x);
+    let rate = g[0].dot(n[0].vel) + g[1].dot(n[1].vel) + g[2].dot(n[2].vel) + g[3].dot(n[3].vel);
+    let mut d = wrap_angle(phi - beam.rest);
+    if beam.k * d.abs() > beam.tc {
+        // Yield: the rest angle moves so the spring torque is the deform torque.
+        d = (beam.tc / beam.k).copysign(d);
+        beam.rest = wrap_angle(phi - d);
+    }
+    let t = -beam.k * d - beam.c * rate;
+    beam.force = t;
+    if t.abs() > beam.strength {
+        beam.broken = true;
+        return [Vec3::ZERO; 4];
+    }
+    g.map(|gi| gi * t)
 }
 
 /// A coupler's stiffness and damping for node masses `ma`, `mb`
