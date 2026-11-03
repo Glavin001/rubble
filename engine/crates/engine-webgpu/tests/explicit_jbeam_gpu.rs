@@ -262,3 +262,84 @@ fn divergence_trace() {
         );
     }
 }
+
+/// Median GPU-and-wait wall time per frame (ms) of `frames` 60 fps frames, after
+/// `warm` untimed ones; each frame waits for completion.
+fn median_frame_ms(gpu: &mut ExplicitBeamsGpu, warm: u32, frames: u32) -> f64 {
+    let mut clock = FrameClock::default();
+    for _ in 0..warm {
+        gpu.frame(clock.next());
+        gpu.wait();
+    }
+    let mut ms: Vec<f64> = (0..frames)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            gpu.frame(clock.next());
+            gpu.wait();
+            t.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    ms.sort_by(f64::total_cmp);
+    ms[ms.len() / 2]
+}
+
+/// A fleet of twelve JBeam vehicles (the latched box) driving in lanes 10 m apart,
+/// with vehicle–vehicle contact on, costs about what it costs with contact off: the
+/// vehicles never meet, so every frame steps them as solo vehicles (no contact
+/// group), the plan passes add only their own small cost, and the results are those
+/// without contact. A regression bound for a JBeam fleet of 8 or more vehicles whose
+/// contact frames ran about 100 times slower than contact off (generous ratio: a
+/// shared CI GPU is noisy).
+#[test]
+fn jbeam_fleet_apart_costs_about_the_same_with_contact() {
+    let text = latched_box_jbeam();
+    let d = load_jbeam(&[("box.jbeam", &text)], None).unwrap();
+    let tyres = TyreDefaults::for_vehicle(&d);
+    let n = 12;
+    let fleet: Vec<ExplicitBeams> = (0..n)
+        .map(|k| {
+            let at = Vec3::new(10.0 * (k % 4) as f32, 0.0, 30.0 * (k / 4) as f32);
+            let v = Vec3::new(0.0, 0.0, 15.0);
+            let (mut s, _) = ExplicitBeams::from_desc_jbeam(&d, tyres, at, v, settings()).unwrap();
+            let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+            for node in &mut s.nodes {
+                node.pos.y += 0.01 - low;
+            }
+            s
+        })
+        .collect();
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut on = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    let mut off = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    off.set_vehicle_contact(false);
+    assert!(on.contact_active() && !off.contact_active());
+    // Interleaved twice, so a slow spell of a shared GPU hits both.
+    let mut t_on = Vec::new();
+    let mut t_off = Vec::new();
+    for _ in 0..2 {
+        t_off.push(median_frame_ms(&mut off, 10, 40));
+        t_on.push(median_frame_ms(&mut on, 10, 40));
+        assert_eq!(on.contact_groups(), 0, "vehicles 10 m apart were grouped");
+    }
+    on.contact_status().unwrap();
+    let (a, b) = (on.positions(), off.positions());
+    for k in 0..n {
+        assert!(a[k].iter().all(|p| p.is_finite()), "vehicle {k}: NaN");
+        assert_eq!(
+            a[k], b[k],
+            "vehicle {k}: contact on changed a vehicle that met no one"
+        );
+    }
+    let (on_ms, off_ms) = (
+        t_on.iter().copied().fold(f64::MAX, f64::min),
+        t_off.iter().copied().fold(f64::MAX, f64::min),
+    );
+    eprintln!("{n} latched boxes apart: median frame {on_ms:.3} ms contact on, {off_ms:.3} ms off");
+    assert!(
+        on_ms <= 3.0 * off_ms + 1.0,
+        "contact on {on_ms:.3} ms per frame against {off_ms:.3} ms off"
+    );
+}
