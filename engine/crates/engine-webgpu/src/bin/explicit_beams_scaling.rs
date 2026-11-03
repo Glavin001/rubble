@@ -23,8 +23,20 @@
 //!           placed so its hit lands at a time spread evenly over the timed frames
 //!           (from 0.1 s after the warm frames to 0.5 s before the end), so crashes
 //!           keep happening through the run (a fixed sequence from k, the same on
-//!           both engines). Vehicles never reach one another: neither engine's
-//!           vehicle–vehicle contact is exercised.
+//!           both engines). Vehicles never reach one another (both engines run
+//!           vehicle–vehicle contact, but it never finds a partner).
+//!   pileup  vehicle–vehicle crashes in pairs: vehicles 2g and 2g + 1 form group g,
+//!           by g mod 3 a head-on (vehicle 2g + 1 turned 180° and driving at the
+//!           same speed towards 2g), a T-bone (2g + 1 turned 90°, standing across
+//!           2g's lane, centred on it) or a rear-end (2g + 1 ahead in the same lane
+//!           at half 2g's speed). Vehicle 2g at 0.6 to 1.0 × `speed=`; each pair's
+//!           gap set so its hit lands at a time spread over the timed frames as in
+//!           `mixed` (a fixed sequence from g). Groups sit in a grid of lanes
+//!           max(length, width) + 15 m apart and rows 2 × (length + `speed=` ×
+//!           run time) + 30 m apart, so only a group's own pair meets. An odd last
+//!           vehicle drives alone.
+//!   headon, tbone  as `pileup` with every group of that kind (the accuracy
+//!           ensembles run one group: two vehicles, the moving vehicle 2g nudged).
 //! Every run: `warm=` untimed frames (default 0.5 s worth), then `frames=` timed
 //! frames (default 2 s worth) at `fps=` (default 60: 33 steps of 0.5 ms a frame; 120:
 //! 17 steps and an 8.33 ms budget). Both engines read one scene file.
@@ -45,7 +57,9 @@
 //! Accuracy. Crashes (and a vehicle that breaks beams under its own weight) are
 //! chaotic: a float-level change to the spawn moves Rigs of Rods' own end state by
 //! up to metres. So accuracy compares ensembles. Per scenario, `nudges=` K one-vehicle
-//! runs on each engine (default 8), run k spawned 0.1 mm/s × k faster:
+//! runs on each engine (default 8; `pileup`, `headon`, `tbone`: one group, two
+//! vehicles, node distances over both and broken / bent counts summed; RoR with
+//! `threads=1`, its deterministic vehicle order), run k spawned 0.1 mm/s × k faster:
 //! * RoR's spread: node RMS between every pair of RoR runs;
 //! * Rubble against RoR: node RMS from every Rubble run to every RoR run;
 //! * pass when the median Rubble–RoR distance is at most 1.5× RoR's median spread
@@ -81,7 +95,7 @@
 //! Writes `<out>/results.json` (every frame time and comparison) and
 //! `<out>/summary.md`.
 
-use engine_softbody::explicit_beams::{ExplicitBeams, StaticBox};
+use engine_softbody::explicit_beams::{yaw_offset, ExplicitBeams, StaticBox};
 use engine_softbody::truck::parse_truck;
 use engine_webgpu::{default_device, render_scene_json, ExplicitBeamsGpu};
 use glam::Vec3;
@@ -100,6 +114,9 @@ enum Scenario {
     Drive,
     Impact,
     Mixed,
+    Pileup,
+    Headon,
+    Tbone,
 }
 
 impl Scenario {
@@ -109,7 +126,10 @@ impl Scenario {
             "drive" => Self::Drive,
             "impact" => Self::Impact,
             "mixed" => Self::Mixed,
-            _ => panic!("scenario {s}: idle, drive, impact or mixed"),
+            "pileup" => Self::Pileup,
+            "headon" => Self::Headon,
+            "tbone" => Self::Tbone,
+            _ => panic!("scenario {s}: idle, drive, impact, mixed, pileup, headon or tbone"),
         }
     }
     fn name(self) -> &'static str {
@@ -118,7 +138,14 @@ impl Scenario {
             Self::Drive => "drive",
             Self::Impact => "impact",
             Self::Mixed => "mixed",
+            Self::Pileup => "pileup",
+            Self::Headon => "headon",
+            Self::Tbone => "tbone",
         }
+    }
+    /// Vehicles in pairs that crash into each other.
+    fn grouped(self) -> bool {
+        matches!(self, Self::Pileup | Self::Headon | Self::Tbone)
     }
 }
 
@@ -132,6 +159,9 @@ struct Geometry {
     /// Node extent in x and z.
     lo: Vec3,
     hi: Vec3,
+    /// Turned by 90° and 180° about the spawn point: (extent along forward, centre
+    /// across).
+    turned: [((f32, f32), f32); 2],
 }
 
 impl Geometry {
@@ -156,7 +186,18 @@ impl Geometry {
         let (lo, hi) = sim.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| {
             (a.min(n.pos), b.max(n.pos))
         });
+        let turned = [90.0, 180.0].map(|yaw| {
+            let t: Vec<Vec3> = sim.nodes.iter().map(|n| yaw_offset(n.pos, yaw)).collect();
+            let span = |axis: Vec3| {
+                t.iter().fold((f32::MAX, f32::MIN), |(a, b), q| {
+                    (a.min(q.dot(axis)), b.max(q.dot(axis)))
+                })
+            };
+            let across = span(lateral);
+            (span(forward), 0.5 * (across.0 + across.1))
+        });
         Self {
+            turned,
             forward,
             lateral,
             along: span(forward),
@@ -170,6 +211,12 @@ impl Geometry {
 /// One vehicle: spawned at (x, 0, z), lifted so its lowest node is 2 cm up, its
 /// tyres rolling at `vel` (still with `roll=0`).
 fn spawn(text: &str, at: Vec3, vel: Vec3) -> ExplicitBeams {
+    spawn_yaw(text, at, 0.0, vel)
+}
+
+/// As [`spawn`], turned by `yaw` degrees about +y around the spawn point (Rigs of
+/// Rods' `vehicle … yaw` scene field); 0 is exactly [`spawn`].
+fn spawn_yaw(text: &str, at: Vec3, yaw: f32, vel: Vec3) -> ExplicitBeams {
     let drag = DRAG.load(std::sync::atomic::Ordering::Relaxed);
     let settings = engine_softbody::explicit_beams::ExplicitBeamsSettings {
         drag,
@@ -177,9 +224,13 @@ fn spawn(text: &str, at: Vec3, vel: Vec3) -> ExplicitBeams {
         ..Default::default()
     };
     let config = CONFIG.get().and_then(|c| c.as_deref());
-    let mut sim =
-        ExplicitBeams::from_truck_config(text, config, Vec3::new(at.x, 0.0, at.z), vel, settings)
-            .expect("explicit beams spawn");
+    let at = Vec3::new(at.x, 0.0, at.z);
+    let mut sim = if yaw == 0.0 {
+        ExplicitBeams::from_truck_config(text, config, at, vel, settings)
+    } else {
+        ExplicitBeams::from_truck_config_yaw(text, config, at, yaw, vel, settings)
+    }
+    .expect("explicit beams spawn");
     let lowest = sim.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
     for n in &mut sim.nodes {
         n.pos.y += 0.02 - lowest;
@@ -219,6 +270,8 @@ struct Scene {
     vehicles: Vec<(Vec3, Vec3)>,
     /// Per vehicle its wall (centre, half extents), if any.
     walls: Vec<Option<(Vec3, Vec3)>>,
+    /// Per vehicle its yaw (degrees about +y, around the spawn point).
+    yaws: Vec<f32>,
 }
 
 /// `mixed`: vehicle k's role (k mod 4: 0 still, 1 driving, 2 into a wall, 3 into a
@@ -226,11 +279,104 @@ struct Scene {
 /// window, both from a fixed low-discrepancy sequence in k.
 fn mixed_role(k: usize) -> (usize, f32, f32) {
     let golden = |i: usize, a: f64| ((i as f64 + 1.0) * a).fract() as f32;
-    (k % 4, 0.6 + 0.4 * golden(k, 0.618_033_988_75), golden(k, 0.754_877_666_25))
+    (
+        k % 4,
+        0.6 + 0.4 * golden(k, 0.618_033_988_75),
+        golden(k, 0.754_877_666_25),
+    )
 }
 
 /// Seconds of warm frames before the timed ones (for `mixed` hit times).
 static WARM_S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+
+/// `pileup`, `headon`, `tbone`: groups of two (see the module docs); `extra` m/s
+/// added to each group's moving vehicle 2g.
+fn group_scene(
+    sc: Scenario,
+    n: usize,
+    g: &Geometry,
+    speed: f32,
+    seconds: f32,
+    extra: f32,
+    cols: Option<usize>,
+) -> Scene {
+    let groups = n.div_ceil(2);
+    let cols = cols
+        .unwrap_or((groups as f64).sqrt().ceil() as usize)
+        .max(1);
+    let width = g.across.1 - g.across.0;
+    let length = g.along.1 - g.along.0;
+    let lateral_step = width.max(length) + 15.0;
+    let row_step = 2.0 * (length + speed * seconds) + 30.0;
+    let warm_s = WARM_S.get().copied().unwrap_or(0.0);
+    let mid = 0.5 * (g.across.0 + g.across.1);
+    let mut vehicles = Vec::with_capacity(n);
+    let mut yaws = Vec::with_capacity(n);
+    for grp in 0..groups {
+        let o = g.lateral * ((grp % cols) as f32 * lateral_step)
+            - g.forward * ((grp / cols) as f32 * row_step);
+        let (_, f, when) = mixed_role(grp);
+        let kind = match sc {
+            Scenario::Headon => 0,
+            Scenario::Tbone => 1,
+            _ => grp % 3,
+        };
+        let v0 = speed * f;
+        let t_hit = (warm_s + 0.1) + when * (seconds - warm_s - 0.6).max(0.0);
+        vehicles.push((o, g.forward * (v0 + extra)));
+        yaws.push(0.0);
+        if 2 * grp + 1 == n {
+            break;
+        }
+        let (at, vel, yaw) = match kind {
+            0 => {
+                let ((lo, _), c) = g.turned[1];
+                let gap = 2.0 * v0 * t_hit;
+                (
+                    o + g.forward * (g.along.1 + gap - lo) + g.lateral * (mid - c),
+                    -g.forward * v0,
+                    180.0,
+                )
+            }
+            1 => {
+                let ((lo, _), c) = g.turned[0];
+                let gap = v0 * t_hit;
+                (
+                    o + g.forward * (g.along.1 + gap - lo) + g.lateral * (mid - c),
+                    Vec3::ZERO,
+                    90.0,
+                )
+            }
+            _ => {
+                let gap = 0.5 * v0 * t_hit;
+                (
+                    o + g.forward * (g.along.1 + gap - g.along.0),
+                    g.forward * (0.5 * v0),
+                    0.0,
+                )
+            }
+        };
+        vehicles.push((at, vel));
+        yaws.push(yaw);
+    }
+    // Everything at x, z ≥ 100 (Rigs of Rods' collision hash): each group's whole
+    // rectangle (its lane, its row) counted.
+    let mut min = Vec3::MAX;
+    for grp in 0..groups {
+        let o = vehicles[2 * grp].0;
+        for a in [g.along.0 - 5.0, g.along.0 + row_step] {
+            for b in [-0.5 * lateral_step, 0.5 * lateral_step] {
+                min = min.min(o + g.forward * a + g.lateral * (mid + b));
+            }
+        }
+    }
+    let shift = Vec3::new(100.0 - min.x, 0.0, 100.0 - min.z);
+    Scene {
+        vehicles: vehicles.into_iter().map(|(o, v)| (o + shift, v)).collect(),
+        walls: vec![None; n],
+        yaws,
+    }
+}
 
 fn scene(
     sc: Scenario,
@@ -241,6 +387,9 @@ fn scene(
     extra: f32,
     cols: Option<usize>,
 ) -> Scene {
+    if sc.grouped() {
+        return group_scene(sc, n, g, speed, seconds, extra, cols);
+    }
     let v = if sc == Scenario::Idle { 0.0 } else { speed };
     let cols = cols.unwrap_or((n as f64).sqrt().ceil() as usize).max(1);
     let width = g.across.1 - g.across.0;
@@ -289,6 +438,7 @@ fn scene(
                     _ => (vk, Some((gap, 0.3, 0.25 * width))),
                 }
             }
+            Scenario::Pileup | Scenario::Headon | Scenario::Tbone => unreachable!(),
         })
         .collect();
     let walls = origins
@@ -316,6 +466,7 @@ fn scene(
             .map(|(o, (vk, _))| (o, g.forward * (vk + extra)))
             .collect(),
         walls,
+        yaws: vec![0.0; n],
     }
 }
 
@@ -325,8 +476,12 @@ fn write_scene(path: &Path, s: &Scene) {
         let (c, h) = w;
         writeln!(t, "box {} {} {} {} {} {}", c.x, c.y, c.z, h.x, h.y, h.z).unwrap();
     }
-    for (o, v) in &s.vehicles {
-        writeln!(t, "vehicle {} {} {} {} {}", o.x, o.z, v.x, v.y, v.z).unwrap();
+    for ((o, v), yaw) in s.vehicles.iter().zip(&s.yaws) {
+        if *yaw == 0.0 {
+            writeln!(t, "vehicle {} {} {} {} {}", o.x, o.z, v.x, v.y, v.z).unwrap();
+        } else {
+            writeln!(t, "vehicle {} {} {} {} {} {}", o.x, o.z, v.x, v.y, v.z, yaw).unwrap();
+        }
     }
     std::fs::write(path, t).unwrap();
 }
@@ -418,7 +573,10 @@ struct Ensemble {
 impl Ensemble {
     fn json(&self, g: &Geometry) -> Value {
         let side = |v: &[EndState]| -> Vec<Value> {
-            v.iter().zip(&self.start).map(|(e, s)| e.json(g, s)).collect()
+            v.iter()
+                .zip(&self.start)
+                .map(|(e, s)| e.json(g, s))
+                .collect()
         };
         json!({"ror": side(&self.ror), "rubble": side(&self.rubble)})
     }
@@ -428,8 +586,12 @@ impl Ensemble {
     fn judge(&self) -> Value {
         let k = self.ror.len();
         let rms = |a: &EndState, b: &EndState| f64::from(rms_max(&a.pos, &b.pos).0) * 1e3;
-        let rr: Vec<Vec<f64>> = (0..k).map(|i| (0..k).map(|j| rms(&self.ror[i], &self.ror[j])).collect()).collect();
-        let xr: Vec<Vec<f64>> = (0..k).map(|i| (0..k).map(|j| rms(&self.rubble[i], &self.ror[j])).collect()).collect();
+        let rr: Vec<Vec<f64>> = (0..k)
+            .map(|i| (0..k).map(|j| rms(&self.ror[i], &self.ror[j])).collect())
+            .collect();
+        let xr: Vec<Vec<f64>> = (0..k)
+            .map(|i| (0..k).map(|j| rms(&self.rubble[i], &self.ror[j])).collect())
+            .collect();
         let medians = |xi: &[usize], ri: &[usize]| {
             let mut a = Vec::new();
             for (p, &i) in ri.iter().enumerate() {
@@ -440,7 +602,10 @@ impl Ensemble {
                 }
             }
             let xr = &xr;
-            let b: Vec<f64> = xi.iter().flat_map(|&i| ri.iter().map(move |&j| xr[i][j])).collect();
+            let b: Vec<f64> = xi
+                .iter()
+                .flat_map(|&i| ri.iter().map(move |&j| xr[i][j]))
+                .collect();
             (median(&b), median(&a))
         };
         let all: Vec<usize> = (0..k).collect();
@@ -464,7 +629,12 @@ impl Ensemble {
             })
             .collect();
         ratios.sort_by(f64::total_cmp);
-        let q = |p: f64| ratios.get(((ratios.len() - 1) as f64 * p).round() as usize).copied().unwrap_or(f64::NAN);
+        let q = |p: f64| {
+            ratios
+                .get(((ratios.len() - 1) as f64 * p).round() as usize)
+                .copied()
+                .unwrap_or(f64::NAN)
+        };
         let counts = |f: fn(&EndState) -> usize| {
             let r: Vec<f64> = self.ror.iter().map(|e| f(e) as f64).collect();
             let x: Vec<f64> = self.rubble.iter().map(|e| f(e) as f64).collect();
@@ -487,7 +657,11 @@ impl Ensemble {
             pos: end.pos.iter().map(|p| *p + shift).collect(),
             ..end.clone()
         };
-        let d: Vec<f64> = self.ror.iter().map(|r| f64::from(rms_max(&moved.pos, &r.pos).0) * 1e3).collect();
+        let d: Vec<f64> = self
+            .ror
+            .iter()
+            .map(|r| f64::from(rms_max(&moved.pos, &r.pos).0) * 1e3)
+            .collect();
         median(&d)
     }
 }
@@ -506,24 +680,82 @@ fn median(x: &[f64]) -> f64 {
     }
 }
 
-/// One vehicle on Rubble's GPU for `frames` frames: its end state.
+/// A fleet (one vehicle, or one crash group) on Rubble's GPU for `frames` frames:
+/// its sampled vehicles' end states.
 fn run_rubble_end(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     fleet: &[ExplicitBeams],
     frames: u32,
     steps: u32,
-) -> EndState {
+) -> Vec<EndState> {
     let mut gpu = ExplicitBeamsGpu::new(device, queue, fleet);
     apply_wide(&mut gpu);
     for _ in 0..frames {
         gpu.frame(steps);
     }
     gpu.wait();
-    rubble_end(&gpu, fleet.len()).remove(0)
+    check_contact(&gpu);
+    rubble_end(&gpu, fleet.len())
 }
 
+/// Vehicle contact's frame bounds held (a violation is an error, never a silently
+/// missed contact).
+fn check_contact(gpu: &ExplicitBeamsGpu) {
+    if let Err(e) = gpu.contact_status() {
+        panic!("Rubble vehicle contact: {e}");
+    }
+}
+
+/// Grouped scenarios: at the end of a run no vehicle's box (padded 5 cm, the
+/// contact partner test) overlaps a vehicle of another group, so only the intended
+/// pairs met (a sort and sweep along x).
+fn check_groups_apart(gpu: &ExplicitBeamsGpu) {
+    if !GROUPED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let pos = gpu.positions();
+    let mut boxes: Vec<(Vec3, Vec3, usize)> = pos
+        .iter()
+        .enumerate()
+        .map(|(k, p)| {
+            let (lo, hi) = p
+                .iter()
+                .fold((Vec3::MAX, Vec3::MIN), |(a, b), q| (a.min(*q), b.max(*q)));
+            (lo - Vec3::splat(0.05), hi + Vec3::splat(0.05), k)
+        })
+        .collect();
+    boxes.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+    for i in 0..boxes.len() {
+        for j in i + 1..boxes.len() {
+            let (a, b) = (&boxes[i], &boxes[j]);
+            if b.0.x > a.1.x {
+                break;
+            }
+            let overlap = a.0.cmple(b.1).all() && b.0.cmple(a.1).all();
+            assert!(
+                !overlap || a.2 / 2 == b.2 / 2,
+                "vehicles {} and {} of different groups overlap at the end of the run",
+                a.2,
+                b.2
+            );
+        }
+    }
+}
+
+/// Whether the scenario being run is a grouped one (`pileup`, `headon`, `tbone`):
+/// its samples are the first and last group's vehicles.
+static GROUPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn samples(n: usize) -> Vec<usize> {
+    if GROUPED.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut v: Vec<usize> = [0, 1, n.saturating_sub(2), n - 1]
+            .into_iter()
+            .filter(|&k| k < n)
+            .collect();
+        v.dedup();
+        return v;
+    }
     if n > 1 {
         vec![0, n - 1]
     } else {
@@ -531,12 +763,24 @@ fn samples(n: usize) -> Vec<usize> {
     }
 }
 
+/// One end state of several vehicles (a crash group): positions concatenated,
+/// counts summed.
+fn combine(ends: &[EndState]) -> EndState {
+    EndState {
+        index: ends[0].index,
+        pos: ends.iter().flat_map(|e| e.pos.iter().copied()).collect(),
+        broken: ends.iter().map(|e| e.broken).sum(),
+        bent: ends.iter().map(|e| e.bent).sum(),
+    }
+}
+
 fn rubble_fleet(text: &str, s: &Scene) -> Vec<ExplicitBeams> {
     s.vehicles
         .iter()
         .zip(&s.walls)
-        .map(|((o, v), w)| {
-            let mut sim = spawn(text, *o, *v);
+        .zip(&s.yaws)
+        .map(|(((o, v), w), yaw)| {
+            let mut sim = spawn_yaw(text, *o, *yaw, *v);
             if let Some((c, h)) = w {
                 sim.boxes.push(StaticBox::centered(*c, *h));
             }
@@ -602,6 +846,8 @@ fn run_rubble(
     } else {
         Vec::new()
     };
+    check_contact(&gpu);
+    check_groups_apart(&gpu);
     let end = rubble_end(&gpu, n);
     drop(gpu);
     if let Some(at) = ceiling.hit(gpu_ms.iter().copied()) {
@@ -627,11 +873,19 @@ fn run_rubble(
         gpu.frame(steps);
         gpu.wait();
         blocking_ms.push(t.elapsed().as_secs_f64() * 1e3);
-        if let Some(at) = ceiling.hit(blocking_ms.iter().copied().rev().take(ceiling.frames as usize)) {
+        if let Some(at) = ceiling.hit(
+            blocking_ms
+                .iter()
+                .copied()
+                .rev()
+                .take(ceiling.frames as usize),
+        ) {
             stopped_at = Some(warm + blocking_ms.len() as u32 - ceiling.frames + at);
             break;
         }
     }
+    gpu.wait();
+    check_contact(&gpu);
     RubbleRun {
         gpu_ms,
         pipelined_ms,
@@ -650,6 +904,7 @@ fn run_ror(
     frames: u32,
     steps: u32,
     ceiling: Ceiling,
+    threads: Option<u32>,
 ) -> Run {
     let out = scene_file.with_extension("ror.json");
     let sample = samples(n)
@@ -675,6 +930,7 @@ fn run_ror(
         .arg(format!("sample={sample}"))
         .arg(format!("ceiling_ms={}", ceiling.ms))
         .arg(format!("ceiling_frames={}", ceiling.frames))
+        .args(threads.map(|t| format!("threads={t}")))
         .args(
             CONFIG
                 .get()
@@ -713,8 +969,15 @@ fn run_ror(
             }
         })
         .collect();
-    let stopped_at = v["stopped_at"].as_i64().filter(|&f| f >= 0).map(|f| f as u32);
-    Run { frame_ms, end, stopped_at }
+    let stopped_at = v["stopped_at"]
+        .as_i64()
+        .filter(|&f| f >= 0)
+        .map(|f| f as u32);
+    Run {
+        frame_ms,
+        end,
+        stopped_at,
+    }
 }
 
 fn load_average() -> f64 {
@@ -896,10 +1159,10 @@ fn main() -> anyhow::Result<()> {
         ms: kv(&args, "ceiling_ms").map_or(0.0, |s| s.parse().unwrap()),
         frames: kv(&args, "ceiling_frames").map_or(10, |s| s.parse().unwrap()),
     };
-    let max_frame_ms: f64 = kv(&args, "max_frame_ms").map_or(
-        if ceiling.ms > 0.0 { ceiling.ms } else { 100.0 },
-        |s| s.parse().unwrap(),
-    );
+    let max_frame_ms: f64 = kv(&args, "max_frame_ms")
+        .map_or(if ceiling.ms > 0.0 { ceiling.ms } else { 100.0 }, |s| {
+            s.parse().unwrap()
+        });
     let deadline_s: f64 = kv(&args, "deadline_s").map_or(f64::INFINITY, |s| s.parse().unwrap());
     let began = Instant::now();
     // Time spent waiting for a quiet machine: not counted against the deadline.
@@ -1037,6 +1300,7 @@ fn main() -> anyhow::Result<()> {
 
     'trials: for trial in 0..trials {
         for &sc in &scenarios {
+            GROUPED.store(sc.grouped(), std::sync::atomic::Ordering::Relaxed);
             for &n in counts.iter().chain(&rubble_counts) {
                 // (frame ms, wall s) predicted for an engine (true: RoR) at n.
                 let predict = |ror: bool| {
@@ -1095,8 +1359,12 @@ fn main() -> anyhow::Result<()> {
                             frames,
                             steps,
                             ceiling,
+                            None,
                         );
-                        last.insert((sc, true), (n, mean(&run.frame_ms), t0.elapsed().as_secs_f64()));
+                        last.insert(
+                            (sc, true),
+                            (n, mean(&run.frame_ms), t0.elapsed().as_secs_f64()),
+                        );
                         ror_run = Some(run);
                     } else if !first {
                         let w0 = Instant::now();
@@ -1130,11 +1398,23 @@ fn main() -> anyhow::Result<()> {
                     cut.insert((sc, false), n);
                     all.push(json!({"trial": trial, "scenario": sc.name(), "vehicles": n, "rubble_stopped_at": at,
                         "rubble": {"gpu_ms": r.gpu_ms, "blocking_ms": r.blocking_ms}}));
-                    std::fs::write(out.join("results.partial.json"), serde_json::to_string(&all)?)?;
+                    std::fs::write(
+                        out.join("results.partial.json"),
+                        serde_json::to_string(&all)?,
+                    )?;
                     continue;
                 }
                 if trial == 0 {
-                    fleet_ends.insert(key, r.end.iter().cloned().zip(start.iter().cloned()).collect());
+                    fleet_ends.insert(
+                        key,
+                        if sc.grouped() {
+                            // The first group (the same crash at every count) as one.
+                            let k = r.end.len().min(2);
+                            vec![(combine(&r.end[..k]), start[..k].concat())]
+                        } else {
+                            r.end.iter().cloned().zip(start.iter().cloned()).collect()
+                        },
+                    );
                 }
                 gpu_means.entry(key).or_default().push(mean(&r.gpu_ms));
                 gpu_frames.entry(key).or_default().extend(&r.gpu_ms);
@@ -1188,13 +1468,22 @@ fn main() -> anyhow::Result<()> {
                         .map_or(String::new(), |v| format!(", ror {:.3} ms", v[v.len() - 1]))
                 );
                 all.push(run_json);
-                std::fs::write(out.join("results.partial.json"), serde_json::to_string(&all)?)?;
+                std::fs::write(
+                    out.join("results.partial.json"),
+                    serde_json::to_string(&all)?,
+                )?;
             }
         }
     }
     // The summary covers the counts that ran.
-    let counts: Vec<usize> = counts.into_iter().filter(|n| scenarios.iter().all(|s| gpu_means.contains_key(&(*s, *n)))).collect();
-    let rubble_counts: Vec<usize> = rubble_counts.into_iter().filter(|n| scenarios.iter().all(|s| gpu_means.contains_key(&(*s, *n)))).collect();
+    let counts: Vec<usize> = counts
+        .into_iter()
+        .filter(|n| scenarios.iter().all(|s| gpu_means.contains_key(&(*s, *n))))
+        .collect();
+    let rubble_counts: Vec<usize> = rubble_counts
+        .into_iter()
+        .filter(|n| scenarios.iter().all(|s| gpu_means.contains_key(&(*s, *n))))
+        .collect();
 
     // Accuracy ensembles: per scenario K one-vehicle runs per engine, run k spawned
     // 0.1 mm/s × k faster.
@@ -1202,22 +1491,55 @@ fn main() -> anyhow::Result<()> {
     let mut ensembles: HashMap<Scenario, Ensemble> = HashMap::new();
     if let Some(bin) = &ror_bin {
         for &sc in &scenarios {
+            GROUPED.store(sc.grouped(), std::sync::atomic::Ordering::Relaxed);
+            // One vehicle, or one crash group of two (RoR single-threaded: its
+            // deterministic vehicle order).
+            let (m, threads) = if sc.grouped() {
+                (2, Some(1))
+            } else {
+                (1, None)
+            };
             let mut e = Ensemble::default();
             for k in 0..nudges {
-                let s = scene(sc, 1, &g, speed, seconds, k as f32 * 1e-4, None);
+                let s = scene(sc, m, &g, speed, seconds, k as f32 * 1e-4, None);
                 let file = out.join(format!("ens_{}_{k}.txt", sc.name()));
                 write_scene(&file, &s);
                 let fleet = rubble_fleet(&text, &s);
-                e.start.push(fleet[0].positions());
-                e.ror.push(run_ror(bin, &truck, &file, 1, warm, frames, steps, Ceiling { ms: 0.0, frames: 1 }).end.remove(0));
-                e.rubble.push(run_rubble_end(&device, &queue, &fleet, warm + frames, steps));
-                eprintln!("ensemble {} {k}: broken rubble {} / ror {}", sc.name(),
-                    e.rubble[k].broken, e.ror[k].broken);
+                e.start
+                    .push(fleet.iter().flat_map(|v| v.positions()).collect());
+                e.ror.push(combine(
+                    &run_ror(
+                        bin,
+                        &truck,
+                        &file,
+                        m,
+                        warm,
+                        frames,
+                        steps,
+                        Ceiling { ms: 0.0, frames: 1 },
+                        threads,
+                    )
+                    .end,
+                ));
+                e.rubble.push(combine(&run_rubble_end(
+                    &device,
+                    &queue,
+                    &fleet,
+                    warm + frames,
+                    steps,
+                )));
+                eprintln!(
+                    "ensemble {} {k}: broken rubble {} / ror {}",
+                    sc.name(),
+                    e.rubble[k].broken,
+                    e.ror[k].broken
+                );
             }
             ensembles.insert(sc, e);
         }
     }
-    let judged: HashMap<Scenario, Value> = ensembles.iter().map(|(sc, e)| (*sc, e.judge())).collect();
+    let judged: HashMap<Scenario, Value> =
+        ensembles.iter().map(|(sc, e)| (*sc, e.judge())).collect();
 
     // Summary.
     let mut md = String::new();
@@ -1247,7 +1569,13 @@ fn main() -> anyhow::Result<()> {
     };
     let mut cuts: Vec<String> = cut
         .iter()
-        .map(|((sc, ror), n)| format!("{} {} from {n} vehicles", sc.name(), if *ror { "RoR" } else { "Rubble" }))
+        .map(|((sc, ror), n)| {
+            format!(
+                "{} {} from {n} vehicles",
+                sc.name(),
+                if *ror { "RoR" } else { "Rubble" }
+            )
+        })
         .collect();
     cuts.sort();
     if !cuts.is_empty() || stopped.is_some() {
@@ -1339,12 +1667,19 @@ fn main() -> anyhow::Result<()> {
         // Real-time capacity: the largest count (every smaller one passing too) whose
         // frames hold the budget at p99 and never pass the ceiling (30 fps unless
         // ceiling_ms= says otherwise); a count the ceiling stopped fails.
-        let hard = if ceiling.ms > 0.0 { ceiling.ms } else { 1000.0 / 30.0 };
+        let hard = if ceiling.ms > 0.0 {
+            ceiling.ms
+        } else {
+            1000.0 / 30.0
+        };
         let holds = |v: Option<&Vec<f64>>| {
             v.is_some_and(|v| !v.is_empty() && percentile(v, 0.99) <= budget_ms && peak(v) <= hard)
         };
         let capacity = |frames: &HashMap<(Scenario, usize), Vec<f64>>, of: &[usize]| {
-            of.iter().take_while(|&&n| holds(frames.get(&(sc, n)))).last().copied()
+            of.iter()
+                .take_while(|&&n| holds(frames.get(&(sc, n))))
+                .last()
+                .copied()
         };
         let all_n: Vec<usize> = counts.iter().chain(&rubble_counts).copied().collect();
         let show = |c: Option<usize>| c.map_or("none".to_string(), |n| n.to_string());
@@ -1482,18 +1817,24 @@ fn main() -> anyhow::Result<()> {
             if nudges > 0 {
                 let a = &judged[&sc];
                 let e = &ensembles[&sc];
-                let (rr, xr) = (a["median_ror_ror_mm"].as_f64().unwrap(), a["median_rubble_ror_mm"].as_f64().unwrap());
+                let (rr, xr) = (
+                    a["median_ror_ror_mm"].as_f64().unwrap(),
+                    a["median_rubble_ror_mm"].as_f64().unwrap(),
+                );
                 let limit = (1.5 * rr).max(1.0);
                 line(&mut md, xr <= limit, format!(
-                    "{} N=1 ({} runs per engine): median node RMS Rubble–RoR {xr:.2} mm <= {limit:.2} mm (1.5x RoR–RoR median {rr:.2} mm, at least 1 mm); ratio {:.2} [95 % {:.2}, {:.2}]",
-                    sc.name(), a["runs"], a["ratio"].as_f64().unwrap(), a["ratio_ci"][0].as_f64().unwrap(), a["ratio_ci"][1].as_f64().unwrap()));
+                    "{} N={} ({} runs per engine): median node RMS Rubble–RoR {xr:.2} mm <= {limit:.2} mm (1.5x RoR–RoR median {rr:.2} mm, at least 1 mm); ratio {:.2} [95 % {:.2}, {:.2}]",
+                    sc.name(), if sc.grouped() { 2 } else { 1 }, a["runs"], a["ratio"].as_f64().unwrap(), a["ratio_ci"][0].as_f64().unwrap(), a["ratio_ci"][1].as_f64().unwrap()));
                 for k in ["broken", "bent"] {
-                    let (lo, hi) = (a[k]["ror_min"].as_f64().unwrap(), a[k]["ror_max"].as_f64().unwrap());
+                    let (lo, hi) = (
+                        a[k]["ror_min"].as_f64().unwrap(),
+                        a[k]["ror_max"].as_f64().unwrap(),
+                    );
                     let (lo, hi) = ((0.9 * lo).floor(), (1.1 * hi).ceil());
                     let v = a[k]["rubble_median"].as_f64().unwrap();
                     line(&mut md, v >= lo && v <= hi, format!(
-                        "{} N=1: Rubble median {k} {v} within RoR's {}–{} widened 10% ({lo:.0}–{hi:.0})",
-                        sc.name(), a[k]["ror_min"], a[k]["ror_max"]));
+                        "{} N={}: Rubble median {k} {v} within RoR's {}–{} widened 10% ({lo:.0}–{hi:.0})",
+                        sc.name(), if sc.grouped() { 2 } else { 1 }, a[k]["ror_min"], a[k]["ror_max"]));
                 }
                 for &n in counts.iter().filter(|&&n| n > 1) {
                     for (end, start) in fleet_ends.get(&(sc, n)).into_iter().flatten() {
