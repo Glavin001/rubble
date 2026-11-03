@@ -134,10 +134,11 @@
     solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz (RoR parity) ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
     solverBtn.onclick = () => { const u = new URL(location.href); if (EXPLICIT) u.searchParams.delete('solver'); else u.searchParams.set('solver', 'explicit'); location.href = u.href; };
     // The explicit solver's scenes; each soft scene maps to the nearest.
-    const XSCENES = { idle: 'Explicit: at rest (L launches at 100 km/h)', coast: 'Explicit: coasting at 100 km/h', wall: 'Explicit: 100 km/h into a rigid wall' };
+    const XSCENES = { idle: 'Explicit: at rest (L launches at 100 km/h)', coast: 'Explicit: coasting at 100 km/h', wall: 'Explicit: 100 km/h into a rigid wall', arena: 'Explicit: fleet arena (?n= vehicles, ?headOn= share)' };
     const XMAP = { yard: 'idle', crates: 'idle', traffic: 'idle', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
       wall: 'wall', pole: 'wall', sidepole: 'wall', tbone: 'wall', headon: 'wall', limbo: 'wall', sandwich: 'wall', import: 'wall' };
     const xscene = XSCENES[qs.get('xscene')] ? qs.get('xscene') : XMAP[scene];
+    const ARENA = EXPLICIT && xscene === 'arena';
     if (EXPLICIT) {
       const xs = document.getElementById('xsceneSel');
       for (const [id, t] of Object.entries(XSCENES)) xs.add(new Option(t, id, false, id === xscene));
@@ -400,6 +401,10 @@
       const [x, z] = XSPAWN[scene] ?? [0, 0];
       xsim = world.explicitSim({
         vehicles: [{ ...vehicleSource(), at: [x, z + CAR_FRONT], front: true, yaw: 0 }], scene: xscene, speed: XSPEED,
+        // arena: ?n= copies of the vehicle at 90–150 km/h into walls, poles and (?headOn=
+        // share of lanes) each other, or (?layout=ring) all at the centre from concentric
+        // rings (?ringRadius=); ?cols=, ?hitMax= s (the solver's defaults otherwise).
+        ...(xscene === 'arena' ? { count: P('n', 256), headOn: P('headOn', 0), ...(qs.has('cols') ? { cols: P('cols', 0) } : {}), ...(qs.has('hitMax') ? { hitMax: P('hitMax', 1.2) } : {}), layout: qs.get('layout') === 'ring' ? 'ring' : 'rows', ringRadius: P('ringRadius', 30) } : {}),
         // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
         drag: qs.get('drag') !== '0',
       });
@@ -408,8 +413,10 @@
     };
     if (EXPLICIT) {
       buildExplicit();
-      for (const [cx, cy, cz, hx, hy, hz] of xlayout.boxes) staticBox([cx, cy, cz], [hx, hy, hz]);
-      camMode = 'orbit'; orbit = { yaw: 2.2, pitch: 0.3, dist: 11, target: null };
+      // The explicit solver collides with its own copies; these only render (not soft
+      // obstacles: the arena has hundreds).
+      for (const [cx, cy, cz, hx, hy, hz] of xlayout.boxes) shapeOn(world.createBody({ position: [cx, cy, cz] }), { box: { half: [hx, hy, hz] } }, MAT_PROP);
+      camMode = 'orbit'; orbit = ARENA ? { yaw: 0.7, pitch: 0.55, dist: 650, target: [0, 1, xlayout.boxes.length ? xlayout.boxes.reduce((a, b) => a + b[2], 0) / xlayout.boxes.length : 0] } : { yaw: 2.2, pitch: 0.3, dist: 11, target: null };
     } else if (scene === 'yard') {
       addSoft(carDesc, [0, 0.05, 0]);
       // A wall, a row of poles, parked soft cars, crates, a ramp.
@@ -1073,7 +1080,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       drag = { x: e.clientX, y: e.clientY };
       if (camMode === 'chase') camMode = 'orbit';
     });
-    canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = Math.max(3, Math.min(120, orbit.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = Math.max(3, Math.min(ARENA ? 3000 : 120, orbit.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
     const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
     const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
     const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -1086,7 +1093,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
       const view = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
         -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
-      const f = 1 / Math.tan(Math.PI / 6), near = 0.05, far = 900;
+      const f = 1 / Math.tan(Math.PI / 6), near = ARENA ? 0.5 : 0.05, far = ARENA ? 4000 : 900;
       const proj = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far / (near - far), -1, 0, 0, (near * far) / (near - far), 0];
       const o = new Float32Array(16);
       for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = proj[r] * view[c * 4] + proj[4 + r] * view[c * 4 + 1] + proj[8 + r] * view[c * 4 + 2] + proj[12 + r] * view[c * 4 + 3];
