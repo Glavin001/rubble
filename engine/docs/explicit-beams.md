@@ -360,7 +360,11 @@ the one-dispatch frame above, unchanged). A frame is then, in one compute pass:
    workgroup memory); every other runs the frame, checking at the start of each
    node update that the position the last step left is inside its frame bounds,
    and the last step's positions at the frame's end.
-4. `explicit_beams_contact`, indirect, one workgroup per group: the members sorted
+4. The contact groups, one workgroup each, run in the same dispatch as the solo
+   vehicles (workgroups past the vehicles), so a crash pair and the other vehicles
+   step side by side: the plan writes two indirect argument sets, one of them
+   empty, and a frame with no group runs the module of step 3, a frame with groups
+   the same frame entry compiled also with `EB_VV_GROUPS`. A group's workgroup: the members sorted
    by vehicle index; each member's frame start (wing check, rebase); then per step
    each member's step (a copy of the frame's step, every accumulator read, member
    by member with the whole workgroup; its node phase also adds the member's step

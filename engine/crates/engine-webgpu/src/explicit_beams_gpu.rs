@@ -249,7 +249,7 @@ impl Contact {
         let (plan_layout, plan_group) = layout_with(true);
         let (contact_layout, contact_group) = layout_with(false);
         let plan = EXPLICIT_BEAMS_VV_PASSES.map(|(entry, wgsl)| make(entry, wgsl, &plan_layout));
-        let groups = make("explicit_beams_contact", contact_wgsl, &contact_layout);
+        let groups = make("explicit_beams_frame", contact_wgsl, &contact_layout);
         let solo = make("explicit_beams_frame", solo_wgsl, &contact_layout);
         Self {
             on: true,
@@ -1343,9 +1343,9 @@ impl ExplicitBeamsGpu {
                 run("solo frame", &mut |p| {
                     p.set_pipeline(&c.solo);
                     p.set_bind_group(0, &c.contact_group, &[]);
-                    p.dispatch_workgroups(nv, 1, 1);
+                    p.dispatch_workgroups_indirect(&c.args, 0);
                 });
-                run("contact groups", &mut |p| {
+                run("frame with groups", &mut |p| {
                     p.set_pipeline(&c.groups);
                     p.set_bind_group(0, &c.contact_group, &[]);
                     p.dispatch_workgroups_indirect(&c.args, 16);
@@ -1548,9 +1548,13 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(&c.plan[2]);
                 pass.dispatch_workgroups(1, 1, 1);
             }
+            // The vehicles (grouped ones return at once) and, past them, the
+            // contact groups, side by side.
+            // The plan wrote one of the two non-empty: with no group the plain solo
+            // frame, else the frame with the groups past the vehicles.
             pass.set_pipeline(&c.solo);
             pass.set_bind_group(0, &c.contact_group, &[]);
-            pass.dispatch_workgroups(nv, 1, 1);
+            pass.dispatch_workgroups_indirect(&c.args, 0);
             pass.set_pipeline(&c.groups);
             pass.dispatch_workgroups_indirect(&c.args, 16);
         } else if let Some(w) = self.wide.as_ref().filter(|w| w.enabled) {

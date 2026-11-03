@@ -1672,6 +1672,10 @@ void vvReportOutside(uint v)
     gAcc[vvCtl(VV_OUTSIDE)].max(int(v + 1u));
 }
 
+#ifdef EB_VV_GROUPS
+void contactGroup(uint g, uint lane);
+#endif
+
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -1679,6 +1683,15 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint v = gid.x;
     uint lane = lid.x;
 #ifdef EB_VV_SOLO
+#ifdef EB_VV_GROUPS
+    // Workgroups past the vehicles step the contact groups (one dispatch: groups
+    // and solo vehicles run side by side).
+    if (gid.x >= gP.vehicles)
+    {
+        contactGroup(gid.x - gP.vehicles, lane);
+        return;
+    }
+#endif
     // A vehicle of a contact group this frame is stepped by its group's workgroup.
     if (lane == 0u) gsUniformLanes = gMisc[vvRec(v, VV_FLAGS)].y;
     sync();
@@ -2376,6 +2389,18 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     }
 }
 
+// The frame's dispatch arguments: with no group the solo frame over the vehicles
+// (words 0..2), else the frame with the groups over vehicles + groups (words 4..6).
+void vvArgs(uint nv, uint groups)
+{
+    gArgs[0] = groups == 0u ? nv : 0u;
+    gArgs[1] = 1u;
+    gArgs[2] = 1u;
+    gArgs[4] = groups == 0u ? 0u : nv + groups;
+    gArgs[5] = 1u;
+    gArgs[6] = 1u;
+}
+
 void vvEmitPair(uint a, uint b)
 {
     uint at = uint(gAcc[vvCtl(VV_PAIRS)].add(1));
@@ -2469,12 +2494,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         for (uint b = lane; b <= gP.vvGridMask; b += 256u) gAcc[gP.vvGridCount + b].store(0);
         if (lane == 0u)
         {
-            gArgs[0] = nv;
-            gArgs[1] = 1u;
-            gArgs[2] = 1u;
-            gArgs[4] = 0u;
-            gArgs[5] = 1u;
-            gArgs[6] = 1u;
+            vvArgs(nv, 0u);
             gAcc[vvCtl(VV_BIGS)].store(0);
         }
         return;
@@ -2607,12 +2627,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     sync();
     if (lane == 0u)
     {
-        gArgs[0] = uint(gAcc[vvCtl(VV_SOLOS)].load());
-        gArgs[1] = 1u;
-        gArgs[2] = 1u;
-        gArgs[4] = groups;
-        gArgs[5] = 1u;
-        gArgs[6] = 1u;
+        vvArgs(nv, groups);
     }
     // Clear for the next frame.
     for (uint b = lane; b <= gP.vvGridMask; b += 256u) gAcc[gP.vvGridCount + b].store(0);
@@ -3208,8 +3223,13 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_contact(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    uint lane = lid.x;
-    uint4 G = gMisc[gP.vvGroups + gid.x];
+    contactGroup(gid.x, lid.x);
+}
+
+// Contact group g: its members stepped together with the contact pass.
+void contactGroup(uint g, uint lane)
+{
+    uint4 G = gMisc[gP.vvGroups + g];
     uint off = G.x;
     uint runOff = G.z;
     uint points = G.w;
