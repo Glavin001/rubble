@@ -17,6 +17,7 @@ pub mod desc;
 pub mod elements;
 pub mod explicit_aero;
 pub mod explicit_beams;
+pub mod explicit_contact;
 pub mod explicit_ref;
 pub mod explicit_triggers;
 pub mod flexbody;

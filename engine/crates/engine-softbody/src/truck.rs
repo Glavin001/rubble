@@ -341,6 +341,9 @@ pub struct TruckFile {
     /// Lines the explicit solver refuses (unsupported options): spawning fails with
     /// these.
     pub errors: Vec<String>,
+    /// The last `submesh_groundmodel` line's surface name (the contact surface of
+    /// the vehicle's collision triangles; none: concrete).
+    pub submesh_groundmodel: Option<String>,
 }
 
 fn tokens(line: &str) -> Vec<&str> {
@@ -746,6 +749,9 @@ impl Parser {
                 };
             }
             "set_collision_range" => self.out.collision_range = fd(t, 1, DEFAULT_COLLISION_RANGE),
+            "submesh_groundmodel" => {
+                self.out.submesh_groundmodel = t.get(1).map(|g| g.to_string());
+            }
             "fileformatversion" => self.out.file_format_version = f(t, 1, 0.0) as u32,
             "forwardcommands"
             | "importcommands"
@@ -764,7 +770,6 @@ impl Parser {
             | "prop_camera_mode"
             | "flexbody_camera_mode"
             | "add_animation"
-            | "submesh_groundmodel"
             | "speedlimiter"
             | "guid"
             | "author"
@@ -1002,14 +1007,19 @@ impl Parser {
                     return;
                 };
                 let opts = t.get(3).copied().unwrap_or("");
-                let collision = opts
-                    .chars()
-                    .any(|c| matches!(c, 'c' | 'p' | 'u' | 'D' | 'F' | 'S'));
-                self.out.triangles.push(SoftTriangle {
+                let solid = opts.chars().any(|c| matches!(c, 'c' | 'p' | 'u'));
+                let buoyant = opts.chars().any(|c| matches!(c, 'D' | 'F' | 'S'));
+                let tri = SoftTriangle {
                     nodes: [a, b, c],
-                    collision,
+                    collision: solid || buoyant,
                     ..Default::default()
-                });
+                };
+                // A line with a letter of each group is two collision triangles in
+                // Rigs of Rods (adjacent, same nodes).
+                if solid && buoyant {
+                    self.out.triangles.push(tri.clone());
+                }
+                self.out.triangles.push(tri);
             }
             Section::Contacters => {
                 for tok in t {

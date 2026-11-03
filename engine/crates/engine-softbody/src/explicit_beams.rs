@@ -43,6 +43,8 @@ pub const REBASE_RADIUS: f32 = 100.0;
 pub const TURBULENCE: f32 = 0.005;
 /// Collision range when the file gives none (m).
 pub const DEFAULT_COLLISION_RANGE: f32 = 0.02;
+/// Collision triangles a vehicle may have (a file with more fails to spawn).
+pub const MAX_COLLISION_TRIANGLES: usize = 3000;
 
 /// Node flags ([`Node::flags`]).
 pub const NODE_NO_GROUND: u32 = 1;
@@ -490,6 +492,15 @@ pub struct ExplicitBeams {
     pub segments: Vec<RailSegment>,
     /// Spawn notes (airfoil files not found: their tables are zero).
     pub warnings: Vec<String>,
+    /// Vehicle contact ([`crate::explicit_contact`]): the nodes other vehicles'
+    /// triangles test (contacters, then contactable nodes, merged in node order).
+    pub contact_points: Vec<u32>,
+    /// Vehicle contact's side vote: node i's spawn-time beam neighbours are
+    /// `neighbours[neighbour_start[i]..neighbour_start[i + 1]]`, in beam order.
+    pub neighbour_start: Vec<u32>,
+    pub neighbours: Vec<u32>,
+    /// Per collision triangle its vehicle-contact throttle (cwait, cidle).
+    pub contact_throttle: Vec<[i32; 2]>,
 }
 
 // --- numerical primitives (compatible profile) ---
@@ -530,6 +541,13 @@ pub fn approx_pow(x: f32, y: f32) -> f32 {
 pub fn noise_draw(state: &mut i32) -> f32 {
     *state = state.wrapping_mul(16807);
     f32::from_bits(0x4000_0000 | (*state as u32 & 0x007F_FFFF)) - 3.0
+}
+
+/// A node offset turned by `yaw_degrees` about +y, in single precision:
+/// (c·x + s·z, y, −s·x + c·z) with c, s the cosine and sine of the angle.
+pub fn yaw_offset(p: Vec3, yaw_degrees: f32) -> Vec3 {
+    let (s, c) = yaw_degrees.to_radians().sin_cos();
+    Vec3::new(c * p.x + s * p.z, p.y, -s * p.x + c * p.z)
 }
 
 /// The contact force on a node with force `f` and velocity `v` (relative to the
@@ -630,6 +648,10 @@ impl ExplicitBeams {
             slides: Vec::new(),
             segments: Vec::new(),
             warnings: Vec::new(),
+            contact_points: Vec::new(),
+            neighbour_start: Vec::new(),
+            neighbours: Vec::new(),
+            contact_throttle: Vec::new(),
         }
     }
 
@@ -687,9 +709,60 @@ impl ExplicitBeams {
         settings: ExplicitBeamsSettings,
         airfoil: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
+        Self::from_truck_yawed(text, config, position, 0.0, velocity, settings, airfoil)
+    }
+
+    /// [`Self::from_truck_config`] turned by `yaw_degrees` about +y: every node
+    /// offset is rotated ([`yaw_offset`]) before it is added to `position`, so the
+    /// tyres, rest lengths and everything else derive from the turned spawn.
+    /// `velocity` is in world axes. A yaw of 0 is exactly
+    /// [`Self::from_truck_config`]. Airfoils from `RUBBLE_AIRFOIL_DIR`.
+    pub fn from_truck_config_yaw(
+        text: &str,
+        config: Option<&str>,
+        position: Vec3,
+        yaw_degrees: f32,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+    ) -> Result<Self, String> {
+        Self::from_truck_yawed(
+            text,
+            config,
+            position,
+            yaw_degrees,
+            velocity,
+            settings,
+            &airfoil_from_env,
+        )
+    }
+
+    /// [`Self::from_truck_config_yaw`] with the airfoil files' text from `airfoil`.
+    pub fn from_truck_yawed(
+        text: &str,
+        config: Option<&str>,
+        position: Vec3,
+        yaw_degrees: f32,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+        airfoil: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
         let file = parse_truck_config(text, config);
         if !file.errors.is_empty() {
             return Err(file.errors.join("; "));
+        }
+        // Collision triangles take the concrete surface; a named one is not
+        // supported yet (refused rather than run on concrete).
+        if let Some(g) = file.submesh_groundmodel.as_deref().filter(|g| *g != "concrete") {
+            return Err(format!(
+                "`submesh_groundmodel {g}`: collision triangles on a surface other than \
+                 concrete are not supported"
+            ));
+        }
+        let collision_tris = file.triangles.iter().filter(|t| t.collision).count();
+        if collision_tris > MAX_COLLISION_TRIANGLES {
+            return Err(format!(
+                "{collision_tris} collision triangles: at most {MAX_COLLISION_TRIANGLES} per vehicle"
+            ));
         }
         if let Some(w) = file
             .wheels
@@ -704,7 +777,7 @@ impl ExplicitBeams {
         }
         let desc = load_truck_config(text, config);
         let cine_beams = file.cinecams.len() * 8;
-        let mut s = Self::spawn_nodes(&desc, position, velocity, settings);
+        let mut s = Self::spawn_nodes(&desc, position, yaw_degrees, velocity, settings);
         // Contacters exactly as listed in the file.
         for n in &mut s.nodes {
             n.flags &= !NODE_CONTACTER;
@@ -1157,7 +1230,7 @@ impl ExplicitBeams {
         velocity: Vec3,
         settings: ExplicitBeamsSettings,
     ) -> Self {
-        let mut s = Self::spawn_nodes(desc, position, velocity, settings);
+        let mut s = Self::spawn_nodes(desc, position, 0.0, velocity, settings);
         for b in &desc.beams {
             s.push_desc_beam(b);
         }
@@ -1174,6 +1247,7 @@ impl ExplicitBeams {
     fn spawn_nodes(
         desc: &SoftVehicleDesc,
         position: Vec3,
+        yaw_degrees: f32,
         velocity: Vec3,
         settings: ExplicitBeamsSettings,
     ) -> Self {
@@ -1189,8 +1263,14 @@ impl ExplicitBeams {
             if n.contacter {
                 flags |= NODE_CONTACTER;
             }
+            let offset = Vec3::from_array(n.position);
+            let offset = if yaw_degrees == 0.0 {
+                offset
+            } else {
+                yaw_offset(offset, yaw_degrees)
+            };
             s.nodes.push(Node {
-                pos: position + Vec3::from_array(n.position),
+                pos: position + offset,
                 vel: if n.fixed { Vec3::ZERO } else { velocity },
                 force: Vec3::ZERO,
                 mass: n.mass,
@@ -1267,6 +1347,37 @@ impl ExplicitBeams {
             })
             .collect();
         self.grid_cell = self.default_grid_cell();
+        self.finish_contact();
+    }
+
+    /// Vehicle contact's spawn data ([`crate::explicit_contact`], spec §2): the
+    /// contact points, the neighbour lists and zeroed contact throttles.
+    pub fn finish_contact(&mut self) {
+        let no_triangles = self.triangles.is_empty();
+        let mut on_triangle = vec![false; self.nodes.len()];
+        for t in &self.triangles {
+            for &n in &t.nodes {
+                on_triangle[n as usize] = true;
+            }
+        }
+        self.contact_points = (0..self.nodes.len() as u32)
+            .filter(|&i| {
+                let n = &self.nodes[i as usize];
+                n.has(NODE_CONTACTER)
+                    || (!n.has(NODE_NO_GROUND) && (on_triangle[i as usize] || no_triangles))
+            })
+            .collect();
+        self.neighbour_start = Vec::with_capacity(self.nodes.len() + 1);
+        self.neighbours.clear();
+        self.neighbour_start.push(0);
+        for (i, inc) in self.incidence.iter().enumerate() {
+            for &j in inc {
+                let b = &self.beams[j as usize];
+                self.neighbours.push(if b.a == i as u32 { b.b } else { b.a });
+            }
+            self.neighbour_start.push(self.neighbours.len() as u32);
+        }
+        self.contact_throttle = vec![[0, 0]; self.triangles.len()];
     }
 
     /// The self-collision grid's cell size: the median collision triangle's box at
