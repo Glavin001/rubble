@@ -241,6 +241,21 @@ void probeLive(uint node, uint bit)
     uint d = probeMerge(node, 1u, bit, false);
     if (d == 3u) gProbe[0].or(4u);
 }
+// A group master broke: every beam of its group breaks with it (a count read at
+// their ends in this pass may have seen them live or not).
+void probeGroup(uint v, uint g)
+{
+    uint4 r0 = gStatic[v * 4u];
+    for (uint k = 0u; k < r0.w; k++)
+    {
+        uint4 b = gStatic[gP.beamBase + (r0.z + k) * 3u];
+        if (uint(abs(asint(b.w))) == g)
+        {
+            probeLive(b.x, 2u);
+            probeLive(b.y, 2u);
+        }
+    }
+}
 #endif
 
 // Nonzero when a self-collision hit may have left forces in gAcc since the node
@@ -803,6 +818,9 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
                 if (group > 0)
                 {
                     gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+#ifdef EB_RACE_PROBE
+                    probeGroup(bn.z >> 16, uint(group));
+#endif
                     gGroups[groupSlot(parity, groupOff, 0u)].min(local);
                 }
             }
@@ -1468,6 +1486,9 @@ void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, ui
             if (group > 0)
             {
                 gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+#ifdef EB_RACE_PROBE
+                probeGroup(bn.z >> 16, uint(group));
+#endif
                 gGroups[groupSlot(parity, groupOff, 0u)].min(local);
             }
         }

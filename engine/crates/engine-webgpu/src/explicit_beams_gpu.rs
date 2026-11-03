@@ -412,6 +412,7 @@ const WIDE_BEAMS_PASS: usize = 3;
 const WIDE_TRIS: usize = 4;
 const WIDE_END: usize = 5;
 const WIDE_CLOSE: usize = 6;
+const WIDE_HITS: usize = 7;
 
 /// Parameter copies for the wide passes: one per step of a frame (its index in the
 /// step word) plus the frame's end, at the uniform offset alignment.
@@ -441,6 +442,9 @@ pub const DEFAULT_CONTACT_MARGIN: f32 = 1.0;
 const KEYS: usize = engine_softbody::explicit_triggers::KEYS;
 const NONE: u32 = u32::MAX;
 const NODE_SLOT_SHIFT: u32 = 8;
+/// Per vehicle the kernel's self-collision hit list (HIT_CAP records of HIT_WORDS
+/// words) and pending-beam list (PEND_CAP) in gNext.
+const SELF_HIT_WORDS: usize = 256 * 8 + 64;
 /// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
 const WIDE_MAX_VEHICLES: usize = 256;
 
@@ -1010,7 +1014,16 @@ impl ExplicitBeamsGpu {
         // and vvPassSmall's lists, twice the group's points for each of up to four
         // owners.)
         let slot_list_base = (vv_hits as usize + 16 * total_cp) as u32;
-        let next_len = slot_list_base as usize + slot_list_len as usize;
+        // Then per vehicle its self-collision hit list and pending beams (the
+        // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
+        let hit_base = slot_list_base as usize + slot_list_len as usize;
+        let next_len = hit_base + nv * SELF_HIT_WORDS;
+        let hit_acc = acc_init.len();
+        acc_init.extend(std::iter::repeat_n(0, 2 * nv));
+        for (k, rec) in vv_static.iter_mut().enumerate() {
+            rec[2] = (hit_base + k * SELF_HIT_WORDS) as u32;
+            rec[3] = (hit_acc + 2 * k) as u32;
+        }
         let mut next_init = vec![0u32; next_len.max(1)];
         if any_keys {
             for (vi, v) in vehicles.iter().enumerate() {
@@ -2083,7 +2096,15 @@ impl ExplicitBeamsGpu {
         for v in 0..nv {
             misc[(vv_veh + v * VV_RECS + 4) * 4 + 2] = 0;
         }
+        // The wide passes' per-frame rebase shifts (scratch).
+        let wide_misc = w[16] as usize;
+        misc[wide_misc * 4..(wide_misc + 1 + nv) * 4].fill(0);
         let mut beam_words = beams[..grid_base * 4].to_vec();
+        // A beam's "broke in the last beam phase" mark (.w of its second record) is
+        // read only within that step (the next beam phase clears it first).
+        for j in 0..self.total[1] as usize {
+            beam_words[(2 * j + 1) * 4 + 3] = 0;
+        }
         beam_words.extend_from_slice(&beams[aero_state * 4..slide_end * 4]);
         vec![
             ("nodes", nodes),
@@ -2156,6 +2177,8 @@ impl ExplicitBeamsGpu {
             plan.push((k, WIDE_NODES, groups(nodes + slots + buckets)));
             plan.push((k, WIDE_BEAMS_PASS, groups(beams + cands + tris)));
             plan.push((k, WIDE_TRIS, groups(tris * WIDE_SUBS)));
+            // One workgroup per vehicle: deferred breaks and self-collision hits.
+            plan.push((k, WIDE_HITS, nv));
         }
         plan.push((steps, WIDE_END, groups(tris + beams)));
         plan.push((steps, WIDE_CLOSE, groups(nv)));
@@ -2435,7 +2458,7 @@ impl Wide {
             .map(|(entry, wgsl)| {
                 let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(entry),
-                    source: wgpu::ShaderSource::Wgsl((*wgsl).into()),
+                    source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(wgsl).into()),
                 });
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),

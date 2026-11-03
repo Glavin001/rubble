@@ -507,7 +507,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         );
     std::fs::write(&beams, text)?;
     // The wide passes: one module per entry point.
-    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close"] {
+    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits"] {
         let entry = format!("explicit_beams_wide_{pass}");
         let out = wgsl_dir.join(format!("{entry}.wgsl"));
         compile_with_defines(

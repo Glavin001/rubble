@@ -2,25 +2,29 @@
 //! (`slang/kernels/explicit_beams_baseline.slang`, the kernel before the GPU
 //! parallelism work), bit for bit, frame by frame, on the same GPU state.
 //!
-//! Native wgpu worlds are not bit-reproducible run to run (the kernel has two known
-//! scheduling races), so two worlds stepped in lockstep drift. Instead each frame
-//! starts from one saved state and runs three times: the baseline, the baseline
-//! with its race probe (which reports whether the frame met a race), and the
-//! current kernel. A frame without a race must leave exactly the baseline's state:
-//! every node record, beam record, incidence force, self-collision accumulator,
-//! group slot, throttle and per-vehicle record (scratch whose order follows the lanes
-//! is left out). The next frame starts from the current kernel's state.
-//!
-//! Every frame is also run on both kernels compiled with `EB_DET_HITS` (tests only):
-//! the hits are found by each kernel's own lanes (grid, brute force, contact
-//! candidates), then applied on one lane sorted by (triangle, node), so there is no
-//! race and every frame must match exactly, including heavy crashes (the E36's
-//! self-collision races in nearly every frame of the plain build).
-//!
-//! The races (both documented in `engine/docs/explicit-beams.md`): a contact
-//! candidate whose force is read while another hit of the same phase adds to it,
-//! and the break exception's live-beam count read in the beam phase that breaks a
-//! beam at that node.
+//! The baseline has two scheduling races (both documented in
+//! `engine/docs/explicit-beams.md`): a self-collision or contact candidate whose
+//! force is read while another hit of the same phase adds to it, and the break
+//! exception's live-beam count read in the beam phase that breaks a beam at that
+//! node. The current kernel applies hits in the specification's order and resolves
+//! deferred breaks in spawn order, so it is deterministic. Native wgpu worlds are
+//! still compared from one saved state per frame: each frame starts from a snapshot
+//! and runs the baseline (with and without its race probe, which reports which race
+//! the frame met), both kernels compiled with `EB_DET_HITS` (tests only), and the
+//! current kernel twice. Checks per frame:
+//! * the current kernel twice: the same state (deterministic);
+//! * the baseline with `EB_DET_HITS` applies the hits found by its lanes on one lane
+//!   sorted by (triangle, node), the specification's order; the current kernel with
+//!   `EB_DET_HITS` (its ordered, parallel application with the baseline's hit
+//!   arithmetic): the same state, bit for bit, on every frame without a
+//!   break-exception race (every node record, beam record, incidence force,
+//!   accumulator, group slot, throttle and per-vehicle record; scratch whose order
+//!   follows the lanes is left out). The grid skip is on in the current kernel, so
+//!   this also shows the skip leaves the results unchanged.
+//! * a race-free frame of the probe build is the baseline's.
+//! The shipped kernel differs from its `EB_DET_HITS` build only in the hit force's
+//! arithmetic (strict, as the CPU reference; tests/explicit_beams_gpu.rs compares it
+//! with the CPU).
 //!
 //! Vehicles: the repository's sedan (`rubble_sedan_ror.truck`), the procedural
 //! sedan, and with `RUBBLE_INSPIRATION=<dir>` (the local, gitignored `inspiration/`
@@ -155,8 +159,10 @@ fn pair(text: &str, origin: Vec3, speed: f32, gap: f32, tbone: bool) -> Vec<Expl
     vec![a, spawn(text, at, yaw, vel)]
 }
 
-/// Per frame: baseline, baseline with the race probe, current kernel, each from the
-/// same saved state. Returns (frames compared exactly, frames with a race).
+/// Per frame, each from the same saved state: the baseline (and with its race
+/// probe), both kernels with `EB_DET_HITS`, and the current kernel twice. Returns
+/// (frames whose fixed-order hits matched the baseline's, frames with a
+/// break-exception race).
 fn compare(label: &str, fleet: &[ExplicitBeams], frames: u32, contact: bool) -> Option<(u32, u32)> {
     compare_steps(label, fleet, &[(frames, STEPS)], contact)
 }
@@ -173,151 +179,95 @@ fn compare_steps(
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, fleet);
     gpu.set_vehicle_contact(contact);
     gpu.set_wide(false);
-    let mut exact = 0;
-    let mut racy = 0;
-    let mut racy_same = 0;
+    let mut contact_races = 0;
+    let mut break_races = 0;
     let mut det = 0;
     let mut retried = 0;
+    let mut group_retries = 0;
     let mut groups = 0;
     let frames: u32 = segments.iter().map(|s| s.0).sum();
     let plan: Vec<u32> = segments.iter().flat_map(|&(n, k)| std::iter::repeat_n(k, n as usize)).collect();
+    let run = |gpu: &mut ExplicitBeamsGpu, snap: &engine_webgpu::GpuSnapshot, var: KernelVariant, steps: u32| {
+        gpu.restore(snap);
+        gpu.set_kernel_variant(var);
+        gpu.frame(steps);
+        gpu.wait();
+        gpu.state_words()
+    };
     for (f, &steps) in plan.iter().enumerate() {
         let snap = gpu.snapshot();
-        gpu.set_kernel_variant(KernelVariant::Baseline);
-        gpu.frame(steps);
-        gpu.wait();
-        let a = gpu.state_words();
-        gpu.restore(&snap);
-        gpu.set_kernel_variant(KernelVariant::BaselineProbe);
+        let a = run(&mut gpu, &snap, KernelVariant::Baseline, steps);
         gpu.take_race_flag();
-        gpu.frame(steps);
-        gpu.wait();
+        let a2 = run(&mut gpu, &snap, KernelVariant::BaselineProbe, steps);
         let race = gpu.take_race_flag();
-        let a2 = gpu.state_words();
-        gpu.restore(&snap);
-        gpu.set_kernel_variant(KernelVariant::Current);
-        gpu.frame(steps);
-        gpu.wait();
-        let b = gpu.state_words();
-        groups = groups.max(gpu.contact_groups());
-        // Both kernels with the hits on one lane in a fixed order: no race, so every
-        // frame must match exactly.
-        gpu.restore(&snap);
-        gpu.set_kernel_variant(KernelVariant::BaselineDet);
-        gpu.frame(steps);
-        gpu.wait();
-        let c = gpu.state_words();
-        gpu.restore(&snap);
-        gpu.set_kernel_variant(KernelVariant::CurrentDet);
-        gpu.frame(steps);
-        gpu.wait();
-        let d = gpu.state_words();
-        assert!(!gpu.take_det_overflow(), "{label}: frame {f}: the fixed-order hit list overflowed");
-        // The baseline's contact-group path is itself, rarely, not reproducible with
-        // fixed-order hits (the baseline against itself shows the same rare
-        // mismatches: RUBBLE_DET_AA=1). A logic difference is deterministic, so a
-        // mismatching frame is retried; it must match on a retry.
-        let mut diff = first_diff(&c, &d);
-        for _ in 0..4 {
-            if diff.is_none() {
-                break;
-            }
-            gpu.restore(&snap);
-            gpu.set_kernel_variant(KernelVariant::BaselineDet);
-            gpu.frame(steps);
-            gpu.wait();
-            let c2 = gpu.state_words();
-            gpu.restore(&snap);
-            gpu.set_kernel_variant(KernelVariant::CurrentDet);
-            gpu.frame(steps);
-            gpu.wait();
-            let d2 = gpu.state_words();
-            diff = first_diff(&c2, &d2);
-            retried += 1;
-        }
-        if let Some(x) = diff {
-            if std::env::var("BITWISE_DUMP").is_ok() {
-                let (mc, md) = (&c[4].1, &d[4].1);
-                for (i, (p, q)) in mc.iter().zip(md).enumerate() {
-                    if p != q {
-                        let r = i / 4;
-                        eprintln!("misc rec {r}: base {:?} cur {:?}", &mc[r * 4..r * 4 + 4], &md[r * 4..r * 4 + 4]);
-                    }
-                }
-                // Each det variant against itself (determinism).
-                for var in [KernelVariant::BaselineDet, KernelVariant::CurrentDet] {
-                    let mut runs = Vec::new();
-                    for _ in 0..3 {
-                        gpu.restore(&snap);
-                        gpu.set_kernel_variant(var);
-                        gpu.frame(steps);
-                        gpu.wait();
-                        runs.push(gpu.state_words());
-                    }
-                    eprintln!(
-                        "{var:?} self-consistency: {:?} {:?}",
-                        first_diff(&runs[0], &runs[1]),
-                        first_diff(&runs[0], &runs[2])
-                    );
-                }
-                // Per-step replay of the frame: which step first differs.
-                for k in 1..=steps {
-                    gpu.restore(&snap);
-                    gpu.set_kernel_variant(KernelVariant::BaselineDet);
-                    for _ in 0..k { gpu.frame(1); }
-                    gpu.wait();
-                    let c1 = gpu.state_words();
-                    gpu.restore(&snap);
-                    gpu.set_kernel_variant(KernelVariant::CurrentDet);
-                    for _ in 0..k { gpu.frame(1); }
-                    gpu.wait();
-                    let d1 = gpu.state_words();
-                    if let Some(x) = first_diff(&c1, &d1) {
-                        eprintln!("first differs after {k} single steps: {x}");
-                        let (mc, md) = (&c1[4].1, &d1[4].1);
-                        for (i, (p, q)) in mc.iter().zip(md).enumerate() {
-                            if p != q {
-                                let r = i / 4;
-                                eprintln!("misc rec {r}: base {:?} cur {:?}", &mc[r * 4..r * 4 + 4], &md[r * 4..r * 4 + 4]);
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-            panic!("{label}: frame {f}: with fixed-order hits the current kernel differs from the baseline at {x}");
-        }
-        det += 1;
-        // Continue from the current kernel's own (racy) frame.
-        gpu.restore(&snap);
-        gpu.set_kernel_variant(KernelVariant::Current);
-        gpu.frame(steps);
-        gpu.wait();
         assert_eq!(race & 2, 0, "{label}: the race probe gave up at frame {f}");
-        if race != 0 {
-            racy += 1;
-            racy_same += (first_diff(&a, &b).is_none()) as u32;
-            continue;
-        }
         // The probe changes no arithmetic: a race-free frame is the baseline's.
-        if let Some(d) = first_diff(&a, &a2) {
-            panic!("{label}: frame {f}: the probe build differs from the baseline at {d}");
+        if race == 0 {
+            if let Some(d) = first_diff(&a, &a2) {
+                panic!("{label}: frame {f}: the probe build differs from the baseline at {d}");
+            }
         }
-        if let Some(d) = first_diff(&a, &b) {
-            panic!("{label}: frame {f}: the current kernel differs from the baseline at {d}");
+        // The current kernel is deterministic: the same frame twice is the same. A
+        // frame with a contact group may rarely not be (the group path has a rare
+        // race of its own, outside the hit order: the baseline with fixed-order hits
+        // shows it against itself too); it must match on a retry.
+        let b = run(&mut gpu, &snap, KernelVariant::Current, steps);
+        let grouped = gpu.contact_groups();
+        groups = groups.max(grouped);
+        let mut nondet = first_diff(&b, &run(&mut gpu, &snap, KernelVariant::Current, steps));
+        if nondet.is_some() && grouped > 0 {
+            group_retries += 1;
+            nondet = first_diff(&b, &run(&mut gpu, &snap, KernelVariant::Current, steps))
+                .and(first_diff(&b, &run(&mut gpu, &snap, KernelVariant::Current, steps)));
         }
-        exact += 1;
+        if let Some(d) = nondet {
+            panic!("{label}: frame {f}: the current kernel is not deterministic: {d}");
+        }
+        // The current kernel's ordered hit application (with the baseline's
+        // arithmetic, EB_DET_HITS) against the baseline's hits applied on one lane in
+        // the specification's order: the same state, bit for bit, unless the
+        // baseline's break exception raced (the current kernel resolves it in spawn
+        // order; the baseline reads whatever the other lanes have written).
+        let d = run(&mut gpu, &snap, KernelVariant::CurrentDet, steps);
+        let c = run(&mut gpu, &snap, KernelVariant::BaselineDet, steps);
+        assert!(!gpu.take_det_overflow(), "{label}: frame {f}: the fixed-order hit list overflowed");
+        contact_races += race & 1;
+        if race & 4 != 0 {
+            break_races += 1;
+        } else {
+            // The baseline's contact-group path is itself, rarely, not reproducible
+            // with fixed-order hits (the baseline against itself shows the same rare
+            // mismatches: RUBBLE_DET_AA=1). A logic difference is deterministic, so a
+            // mismatching frame is retried; it must match on a retry.
+            let mut diff = first_diff(&c, &d);
+            for _ in 0..4 {
+                if diff.is_none() {
+                    break;
+                }
+                let c2 = run(&mut gpu, &snap, KernelVariant::BaselineDet, steps);
+                let d2 = run(&mut gpu, &snap, KernelVariant::CurrentDet, steps);
+                diff = first_diff(&c2, &d2);
+                retried += 1;
+            }
+            if let Some(x) = diff {
+                panic!("{label}: frame {f}: the ordered hits differ from the baseline's one-lane order at {x}");
+            }
+            det += 1;
+        }
+        // Continue from the current kernel's frame.
+        gpu.restore(&snap);
+        gpu.set_kernel_variant(KernelVariant::Current);
+        gpu.frame(steps);
+        gpu.wait();
     }
     eprintln!(
-        "{label}: {exact} frames bit-identical, {racy} frames with a known race ({racy_same} \
-         of them identical anyway); fixed-order hits: {det} of {frames} frames bit-identical \
-         ({retried} retries); contact groups seen {groups}"
+        "{label}: {frames} frames deterministic ({group_retries} group frames retried); ordered hits = \
+         the baseline's one-lane order in {det} ({retried} retries); {break_races} frames with a \
+         break-exception race (not compared), {contact_races} with a contact race in the plain \
+         baseline; contact groups seen {groups}"
     );
-    // Racy frames may differ (the documented exception); in practice the lanes of
-    // one SIMD group read before any of them adds, so they usually match too.
-    // Every frame was compared exactly with fixed-order hits (above).
-    assert_eq!(det, frames);
-    Some((exact, racy))
+    assert_eq!(det + break_races, frames);
+    Some((det, break_races))
 }
 
 fn first_diff(a: &[(&str, Vec<u32>)], b: &[(&str, Vec<u32>)]) -> Option<String> {
@@ -448,4 +398,125 @@ fn groups_of_three_and_four_bitwise() {
             chain_and_four(&t, name);
         }
     }
+}
+
+/// Per frame from the CPU reference's state: the GPU (current kernel, and the
+/// baseline for comparison) uploads the CPU's vehicle and runs one frame; the CPU
+/// runs it too. Returns per frame the node RMS (m) of (current, baseline) to the CPU.
+/// No air drag or turbulence (the GPU's turbulence draws are its own sequence).
+fn cpu_per_frame(text: &str, drive: bool, frames: u32) -> Option<Vec<(f32, f32)>> {
+    let (device, queue) = device()?;
+    let settings = ExplicitBeamsSettings::default();
+    let o = Vec3::new(100.0, 0.0, 100.0);
+    let g = geo(text);
+    let vel = if drive { g.forward * SPEED } else { Vec3::ZERO };
+    let mut cpu = ExplicitBeams::from_truck_config(text, None, o, vel, settings).expect("spawn");
+    let lowest = cpu.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    for n in &mut cpu.nodes {
+        n.pos.y += 0.02 - lowest;
+    }
+    cpu.roll_tyres(vel);
+    if drive {
+        let face = o.dot(g.forward) + g.along.1 + 1.0;
+        let mid = o.dot(g.lateral) + 0.5 * (g.across.0 + g.across.1);
+        let side = 0.5 * (g.across.1 - g.across.0) + 1.0;
+        let centre = g.forward * (face + 0.5) + g.lateral * mid + Vec3::Y * 3.0;
+        let half = if g.forward.x.abs() > 0.5 { Vec3::new(0.5, 3.0, side) } else { Vec3::new(side, 3.0, 0.5) };
+        cpu.boxes.push(StaticBox::centered(centre, half));
+    }
+    let mut out = Vec::new();
+    for _ in 0..frames {
+        let mut ends = Vec::new();
+        for var in [KernelVariant::Current, KernelVariant::Baseline] {
+            let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+            gpu.set_wide(false);
+            gpu.set_kernel_variant(var);
+            gpu.frame(STEPS);
+            gpu.wait();
+            ends.push(gpu.positions().remove(0));
+        }
+        cpu.check_wings();
+        cpu.rebase_origin();
+        for _ in 0..STEPS {
+            cpu.step();
+        }
+        let c = cpu.positions();
+        let rms = |p: &[Vec3]| {
+            (p.iter().zip(&c).map(|(a, b)| (*a - *b).length_squared()).sum::<f32>() / c.len() as f32).sqrt()
+        };
+        out.push((rms(&ends[0]), rms(&ends[1])));
+    }
+    Some(out)
+}
+
+/// The current kernel against the CPU reference, one frame at a time from the CPU's
+/// state: the self-collision order is the CPU's, so a frame lands within float noise
+/// of the CPU (the accumulators' 1/32 N fixed point and a few correctly rounded
+/// divisions apart), far closer than the baseline's lane-order hits.
+#[test]
+fn cpu_reference_per_frame() {
+    let mut cars = vec![("sedan".to_string(), repo_sedan())];
+    for (rel, name) in [(VIPER, "Viper"), (E36, "E36"), (MUSTANG, "Mustang"), (AGORA_S, "Agora S")] {
+        if let Some(t) = ror(rel) {
+            cars.push((name.to_string(), t));
+        }
+    }
+    for (name, text) in &cars {
+        for drive in [false, true] {
+            let Some(r) = cpu_per_frame(text, drive, 40) else { return };
+            let med = |k: usize| {
+                let mut v: Vec<f32> = r.iter().map(|x| if k == 0 { x.0 } else { x.1 }).collect();
+                v.sort_by(f32::total_cmp);
+                v[v.len() / 2]
+            };
+            let max = |k: usize| r.iter().map(|x| if k == 0 { x.0 } else { x.1 }).fold(0.0, f32::max);
+            eprintln!(
+                "{name} {}: per-frame node RMS to the CPU, current kernel median {:.5} mm max {:.5} mm; baseline median {:.5} mm max {:.5} mm",
+                if drive { "into a wall" } else { "idle" },
+                med(0) * 1e3,
+                max(0) * 1e3,
+                med(1) * 1e3,
+                max(1) * 1e3
+            );
+            // Float noise: at most 20 µm RMS in any frame (the baseline: up to 3.9 mm
+            // per frame in the E36's wall crash).
+            assert!(max(0) < 2e-5, "{name}: a frame {} mm RMS from the CPU", max(0) * 1e3);
+        }
+    }
+}
+
+/// The wide passes (a dispatch per pass, the hits applied by their own pass) against
+/// the one-workgroup frame, from the same state each frame: the same hits in the
+/// same order, so the same state bit for bit (the sedan into a wall: self-collision
+/// hits, deferred breaks and group breaks).
+#[test]
+fn wide_passes_match_the_frame_bitwise() {
+    let s = repo_sedan();
+    let Some((device, queue)) = device() else { return };
+    let fleet = [into_wall(&s, Vec3::new(100.0, 0.0, 100.0), SPEED, 1.0)];
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    gpu.set_vehicle_contact(false);
+    assert!(gpu.set_wide(true), "the sedan runs the wide passes");
+    let plan: Vec<u32> = [(3u32, STEPS), (200, 1), (60, STEPS)]
+        .iter()
+        .flat_map(|&(n, k)| std::iter::repeat_n(k, n as usize))
+        .collect();
+    for (f, &steps) in plan.iter().enumerate() {
+        let snap = gpu.snapshot();
+        gpu.set_wide(false);
+        gpu.frame(steps);
+        gpu.wait();
+        let a = gpu.state_words();
+        gpu.restore(&snap);
+        gpu.set_wide(true);
+        gpu.frame(steps);
+        gpu.wait();
+        let b = gpu.state_words();
+        if let Some(d) = first_diff(&a, &b) {
+            panic!("frame {f}: the wide passes differ from the frame at {d}");
+        }
+    }
+    let broken = gpu.beams()[0].iter().filter(|b| b.broken).count();
+    eprintln!("sedan wall, wide passes = frame on {} frames; {broken} beams broken", plan.len());
+    assert!(broken > 0);
 }

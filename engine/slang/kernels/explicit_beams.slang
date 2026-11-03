@@ -191,10 +191,9 @@ struct Surface
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint4> gMisc;
 [[vk::binding(8, 0)]] RWStructuredBuffer<uint> gNext;
 #ifdef EB_DET_HITS
-// Tests only: per vehicle a hit count and up to DET_CAP (triangle, node) hits of the
-// step's self-collision; after every vehicle's region, an overflow flag.
-[[vk::binding(12, 0)]] RWStructuredBuffer<Atomic<uint>> gDet;
-static const uint DET_CAP = 8192u;
+// Tests only: the self-collision hit forces with the frozen baseline's arithmetic
+// (hitForce), so this kernel's ordered application compares bit for bit with the
+// baseline's one-lane sorted one (EB_DET_HITS there).
 #endif
 
 // Nonzero when a self-collision hit may have left forces in gAcc since the node
@@ -609,18 +608,79 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
 }
 #endif
 
-// Live plain beams at a node, from the broken flags as they are now.
-uint livePlain(uint node)
+// Self-collision hits are found in parallel and applied in the specification's
+// order (triangles in file order, then candidates in node order): a hit's contact
+// force reads its node's force with every earlier hit's share added, as the CPU
+// reference does, whatever order the lanes find them in. The finding lanes record
+// each hit's key (triangle << 16 | node, both vehicle-local) in the vehicle's hit
+// list; selfApply then computes the forces in rounds (a hit waits until every
+// earlier hit touching its node has its force) and adds them to the fixed-point
+// accumulators. Per vehicle (gStatic at vvStatic, .z and .w): HIT_CAP records of
+// HIT_WORDS words in gNext (key, alpha, beta, force xyz, round) then PEND_CAP
+// pending beams; two gAcc counters (hits, pending beams), cleared by the node
+// phase.
+static const uint HIT_CAP = 256u;
+static const uint HIT_WORDS = 8u;
+static const uint PEND_CAP = 64u;
+uint hitList(uint v) { return gStatic[gP.vvStatic + v].z; }
+uint hitAcc(uint v) { return gStatic[gP.vvStatic + v].w; }
+uint pendList(uint v) { return hitList(v) + HIT_CAP * HIT_WORDS; }
+
+// The break exception (spec §2, step 4: an end on a collision triangle with fewer
+// than 3 live plain beams saves the beam) reads the beams' state in spawn order: a
+// beam sees the breaks of earlier beams in its step and none of later ones. The
+// beam phase runs in parallel, so a beam whose test reaches the exception is
+// deferred (marked pending: its record's .w = 2, nothing else written) and one lane
+// then resolves the vehicle's pending beams in spawn order (resolvePending), each
+// counting live beams as the sequential pass would see them. A beam that breaks in a
+// beam phase carries .w = 1 until its next beam phase clears it.
+static uint gResolving = 0u;
+
+// Live plain beams at `node` as beam `j` (vehicle-local) of this step's beam phase
+// sees them: broken before this step, by an earlier beam of this step, or by an
+// earlier master's group break of this step (group slot of this parity) is dead.
+uint liveAt(uint node, uint j, uint beamOff, uint groupOff, uint parity)
 {
     uint4 info = gStatic[gP.nodeInfoBase + node];
     uint live = 0u;
     for (uint k = 0u; k < info.z; k++)
     {
-        uint j = gLists[info.y + k] >> 1;
-        uint kind = gStatic[gP.beamBase + j * 3u].z & 0xFFu;
-        if (kind == KIND_PLAIN && gBeams[j * 2u + 1u].z == 0.0) live++;
+        uint b = gLists[info.y + k] >> 1;
+        uint4 bn = gStatic[gP.beamBase + b * 3u];
+        if ((bn.z & 0xFFu) != KIND_PLAIN) continue;
+        float4 s1 = gBeams[b * 2u + 1u];
+        bool dead = s1.z != 0.0 && !(s1.w == 1.0 && b - beamOff > j);
+        int g = asint(bn.w);
+        if (!dead && g != 0)
+        {
+            uint master = gGroups[groupSlot(parity, groupOff, uint(abs(g)))].load();
+            dead = master != NO_GROUP && master < j;
+        }
+        if (!dead) live++;
     }
     return live;
+}
+
+// The break exception of beam gj (vehicle-local index `local`) whose force passed its
+// strength: 0 it breaks, 1 an end saves it, 2 deferred (beam phase).
+uint breakException(uint gj, uint4 bn, uint local, uint groupOff, uint parity)
+{
+    bool ta = (gStatic[gP.nodeInfoBase + bn.x].x & NODE_ON_TRIANGLE) != 0u;
+    bool tb = (gStatic[gP.nodeInfoBase + bn.y].x & NODE_ON_TRIANGLE) != 0u;
+    if (!ta && !tb) return 0u;
+    uint v = bn.z >> 16;
+    if (gResolving == 0u)
+    {
+        uint i = uint(gAcc[hitAcc(v) + 1u].add(1));
+        if (i < PEND_CAP) gNext[pendList(v) + i] = local;
+        float4 s1 = gBeams[gj * 2u + 1u];
+        gBeams[gj * 2u + 1u] = float4(s1.xyz, 2.0);
+        return 2u;
+    }
+    uint beamOff = gStatic[v * 4u].z;
+    if (ta && liveAt(bn.x, local, beamOff, groupOff, parity) < 3u) return 1u;
+    if (tb && liveAt(bn.y, local, beamOff, groupOff, parity) < 3u) return 1u;
+    return 0u;
 }
 
 #ifdef EB_AERO
@@ -633,6 +693,8 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     float4 s1 = gBeams[gj * 2u + 1u];
     if (s1.z != 0.0)
     {
+        // Broken in the last beam phase: no longer this step's break.
+        if (s1.w != 0.0) gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
         gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(0.0, 0.0, 0.0, 0.0);
         gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
         return;
@@ -748,9 +810,9 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
         }
         if (tau > strength)
         {
-            bool saved = false;
-            if ((gStatic[gP.nodeInfoBase + bn.x].x & NODE_ON_TRIANGLE) != 0u && livePlain(bn.x) < 3u) saved = true;
-            if ((gStatic[gP.nodeInfoBase + bn.y].x & NODE_ON_TRIANGLE) != 0u && livePlain(bn.y) < 3u) saved = true;
+            uint ex = breakException(gj, bn, local, groupOff, parity);
+            if (ex == 2u) return;
+            bool saved = ex == 1u;
             if (saved)
             {
                 strength = 2.0 * gate;
@@ -772,7 +834,10 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     // with the record, not every step.
     float4 n0 = float4(rest, tc, tt, gate);
     if (any(n0 != s0)) gBeams[gj * 2u] = n0;
-    if (strength != s1.x || broken) gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, 0.0);
+    if (strength != s1.x || broken)
+        gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, broken ? 1.0 : 0.0);
+    else if (s1.w != 0.0)
+        gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
     float3 push = sscale(d, smul(f, inv));
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
@@ -821,8 +886,26 @@ struct TriGeo
     float3 hi;
 };
 
-// Contacter node h against triangle t: the contact force into the accumulators
-// (h, and the triangle's corners by their weights) when h is within r of the face.
+// The hit test of contacter node h against triangle t: (alpha, beta, delta) when
+// it hits, else none.
+bool triangleHit(TriGeo t, float3 p, float r, out float alpha, out float beta, out float gamma, out float delta)
+{
+    float3 q = nf3(p - t.p0);
+    alpha = 0.0;
+    beta = 0.0;
+    delta = 0.0;
+    if (t.solvable)
+    {
+        alpha = sdot(t.ra, q);
+        beta = sdot(t.rb, q);
+        delta = sdot(t.rn, q);
+    }
+    gamma = nf(nf(1.0 - alpha) - beta);
+    return alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r;
+}
+
+// Contacter node h against triangle t: when h is within r of the face, the hit is
+// recorded (the throttle's hit flag, and the vehicle's hit list for selfApply).
 void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount,
                 uint parity)
 {
@@ -831,54 +914,34 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
     float4 P = gNodes[h * 3u];
     float3 p = nf3(origin + P.xyz);
     if (any(p < t.lo) || any(p > t.hi)) return;
-    float3 q = nf3(p - t.p0);
-    float alpha = 0.0;
-    float beta = 0.0;
-    float delta = 0.0;
-    if (t.solvable)
-    {
-        alpha = sdot(t.ra, q);
-        beta = sdot(t.rb, q);
-        delta = sdot(t.rn, q);
-    }
-    float gamma = nf(nf(1.0 - alpha) - beta);
-    if (!(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r)) return;
+    float alpha;
+    float beta;
+    float gamma;
+    float delta;
+    if (!triangleHit(t, p, r, alpha, beta, gamma, delta)) return;
     gMisc[t.mi].w = 1u;
     gsHit = 1u;
-#ifdef EB_DET_HITS
+    uint v = tn.w;
+    uint i = uint(gAcc[hitAcc(v)].add(1));
+    if (i < HIT_CAP)
     {
-        uint base = gStatic[gP.nodeInfoBase + h].w * (1u + 2u * DET_CAP);
-        uint i = gDet[base].add(1u);
-        if (i < DET_CAP)
-        {
-            gDet[base + 1u + 2u * i].store(t.mi - gP.vehicles);
-            gDet[base + 2u + 2u * i].store(h);
-        }
-        return;
+        uint at = hitList(v) + i * HIT_WORDS;
+        gNext[at] = ((t.mi - gP.vehicles - gStatic[v * 4u + 1u].x) << 16) | (h - gStatic[v * 4u].x);
+        gNext[at + 6u] = 0u;
     }
-#endif
-    float3 nn = t.n;
-    if (delta < 0.0)
-    {
-        nn = -t.n;
-        delta = -delta;
-    }
-    float4 V = gNodes[h * 3u + 1u];
-    float4 P0 = gNodes[tn.x * 3u];
-    float4 P1 = gNodes[tn.y * 3u];
-    float4 P2 = gNodes[tn.z * 3u];
-    float3 v = V.xyz - (alpha * gNodes[tn.y * 3u + 1u].xyz + beta * gNodes[tn.z * 3u + 1u].xyz
-                        + gamma * gNodes[tn.x * 3u + 1u].xyz);
-    float mt = alpha * P1.w + beta * P2.w + gamma * P0.w;
-    float m = P.w * mt / (P.w + mt);
-    float3 fh = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity, false)
-        + accForce(h);
-    float3 f = contactForce(fh, v, m, nn, boxSurface(), r - delta, V.w);
-    accAdd(h, f);
-    accAdd(tn.y, -alpha * f);
-    accAdd(tn.z, -beta * f);
-    accAdd(tn.x, -gamma * f);
 }
+
+// The share of a hit's force f that node role r of the hit gets (1 the contacter,
+// 2..4 the triangle's n1, n2, n0), as the accumulators add it.
+float3 hitShare(float3 f, uint role, float alpha, float beta, float gamma)
+{
+    if (role == 1u) return f;
+    if (role == 2u) return -alpha * f;
+    if (role == 3u) return -beta * f;
+    return -gamma * f;
+}
+
+int3 toFixed3(float3 f) { return int3(toFixed(f.x), toFixed(f.y), toFixed(f.z)); }
 
 // Triangle gt's geometry; mi < vehicles (none) when it waits this step.
 TriGeo triangleGeo(uint gt, float3 origin, float r)
@@ -985,7 +1048,7 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
 // hits but resolves the documented same-contacter race differently (the lanes of a
 // wave read before any adds), which moved the E36 drive ensemble against RoR from
 // 115-150 mm to 310-520 mm (fail; 3 runs each): reverted for accuracy.
-static const uint BRUTE_PAIRS_PER_LANE = 0u;
+static const uint BRUTE_PAIRS_PER_LANE = 16u;
 void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
                        uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
@@ -1090,80 +1153,6 @@ void trianglePairs(uint t, uint gt, uint sub, uint subs, float3 origin, float r,
     }
 }
 
-#ifdef EB_DET_HITS
-// Tests only (EB_DET_HITS): the step's self-collision hits (found by the usual
-// lanes) applied on one lane, sorted by (triangle, node), so each hit sees every
-// earlier one in a fixed order: tryContact's force part.
-void detApply(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
-{
-    uint base = v * (1u + 2u * DET_CAP);
-    uint n = gDet[base].load();
-    if (n > DET_CAP)
-    {
-        gDet[gP.vehicles * (1u + 2u * DET_CAP)].store(1u);
-        n = DET_CAP;
-    }
-    for (uint i = 1u; i < n; i++)
-    {
-        uint gt = gDet[base + 1u + 2u * i].load();
-        uint h = gDet[base + 2u + 2u * i].load();
-        uint j = i;
-        while (j > 0u)
-        {
-            uint pg = gDet[base + 1u + 2u * (j - 1u)].load();
-            uint ph = gDet[base + 2u + 2u * (j - 1u)].load();
-            if (pg < gt || (pg == gt && ph <= h)) break;
-            gDet[base + 1u + 2u * j].store(pg);
-            gDet[base + 2u + 2u * j].store(ph);
-            j--;
-        }
-        gDet[base + 1u + 2u * j].store(gt);
-        gDet[base + 2u + 2u * j].store(h);
-    }
-    for (uint i = 0u; i < n; i++)
-    {
-        uint gt = gDet[base + 1u + 2u * i].load();
-        uint h = gDet[base + 2u + 2u * i].load();
-        TriGeo t = triangleGeo(gt, origin, r);
-        uint4 tn = t.tn;
-        float4 P = gNodes[h * 3u];
-        float3 p = nf3(origin + P.xyz);
-        float3 q = nf3(p - t.p0);
-        float alpha = 0.0;
-        float beta = 0.0;
-        float delta = 0.0;
-        if (t.solvable)
-        {
-            alpha = sdot(t.ra, q);
-            beta = sdot(t.rb, q);
-            delta = sdot(t.rn, q);
-        }
-        float gamma = nf(nf(1.0 - alpha) - beta);
-        float3 nn = t.n;
-        if (delta < 0.0)
-        {
-            nn = -t.n;
-            delta = -delta;
-        }
-        float4 V = gNodes[h * 3u + 1u];
-        float4 P0 = gNodes[tn.x * 3u];
-        float4 P1 = gNodes[tn.y * 3u];
-        float4 P2 = gNodes[tn.z * 3u];
-        float3 vv = V.xyz - (alpha * gNodes[tn.y * 3u + 1u].xyz + beta * gNodes[tn.z * 3u + 1u].xyz
-                             + gamma * gNodes[tn.x * 3u + 1u].xyz);
-        float mt = alpha * P1.w + beta * P2.w + gamma * P0.w;
-        float m = P.w * mt / (P.w + mt);
-        float3 fh = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity, false)
-            + accForce(h);
-        float3 f = contactForce(fh, vv, m, nn, boxSurface(), r - delta, V.w);
-        accAdd(h, f);
-        accAdd(tn.y, -alpha * f);
-        accAdd(tn.z, -beta * f);
-        accAdd(tn.x, -gamma * f);
-    }
-    gDet[base].store(0u);
-}
-#endif
 
 // --- Aerodynamics and commands with no input (EB_AERO modules) ---
 // engine/docs/explicit-beams-aero-commands-spec.md; CPU reference
@@ -1529,9 +1518,9 @@ void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, ui
     // No yield; the break test when |F| exceeds the gate and the strength.
     if (tau > gate && tau > strength)
     {
-        bool saved = false;
-        if ((gStatic[gP.nodeInfoBase + bn.x].x & NODE_ON_TRIANGLE) != 0u && livePlain(bn.x) < 3u) saved = true;
-        if ((gStatic[gP.nodeInfoBase + bn.y].x & NODE_ON_TRIANGLE) != 0u && livePlain(bn.y) < 3u) saved = true;
+        uint ex = breakException(gj, bn, local, groupOff, parity);
+        if (ex == 2u) return;
+        bool saved = ex == 1u;
         if (saved)
         {
             strength = 2.0 * gate;
@@ -1547,7 +1536,10 @@ void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, ui
             }
         }
     }
-    if (strength != s1.x || broken) gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, 0.0);
+    if (strength != s1.x || broken)
+        gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, broken ? 1.0 : 0.0);
+    else if (s1.w != 0.0)
+        gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
     float3 push = sscale(d, smul(f, inv));
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
@@ -2007,6 +1999,306 @@ uint vvCtl(uint i) { return gP.vvAcc + gP.vehicles * 12u + i; }
 // post-process turns its reads into workgroupUniformLoad).
 groupshared uint gsUniformLanes;
 
+// --- Self-collision hits in the specification's order (see tryContact) ---
+
+// Rounds of selfRound before one lane finishes what is left in key order.
+static const uint SELF_ROUNDS = 32u;
+// Per round parity, the hits still open over the workgroup.
+groupshared Atomic<uint> gsOpen[2];
+
+// Node `h`'s roles in the hit with key `key`: bit 0 the contacter, bits 1..3 the
+// triangle's n1, n2, n0 (a triangle may name a node twice); 0 none.
+uint hitRoles(uint key, uint h, uint nodeOff, uint triOff)
+{
+    if (nodeOff + (key & 0xFFFFu) == h) return 1u;
+    uint4 tn = gStatic[gP.triBase + triOff + (key >> 16)];
+    return (tn.y == h ? 2u : 0u) | (tn.z == h ? 4u : 0u) | (tn.x == h ? 8u : 0u);
+}
+
+// The accumulator shares (fixed point) node roles `roles` get from the computed hit
+// at record `at`, as accAdd adds them.
+int3 hitShareFixed(uint at, uint roles)
+{
+    float alpha = asfloat(gNext[at + 1u]);
+    float beta = asfloat(gNext[at + 2u]);
+    float gamma = nf(nf(1.0 - alpha) - beta);
+    float3 f = asfloat(uint3(gNext[at + 3u], gNext[at + 4u], gNext[at + 5u]));
+    int3 sum = int3(0, 0, 0);
+    for (uint role = 1u; role <= 4u; role++)
+    {
+        if ((roles & (1u << (role - 1u))) != 0u) sum += toFixed3(hitShare(f, role, alpha, beta, gamma));
+    }
+    return sum;
+}
+
+// A hit's contact force: contacter (velocity V, position and mass P) against the
+// triangle (masses P0..P2, velocities v0..v2) at weights (alpha, beta, gamma),
+// distance delta along normal nn; its force is fb (beams) plus a3 (accumulator).
+// Strict, in the CPU reference's order (the test-only EB_DET_HITS build of hitForce
+// keeps the frozen baseline's expressions instead).
+float3 hitContact(float4 V, float4 P, float4 P0, float4 P1, float4 P2, float3 v0, float3 v1, float3 v2, float alpha,
+                  float beta, float gamma, float delta, float3 nn, float3 fb, float3 a3, float r)
+{
+    float3 vv = ssub3(V.xyz, sadd3(sadd3(sscale(v1, alpha), sscale(v2, beta)), sscale(v0, gamma)));
+    float mt = nf(nf(smul(alpha, P1.w) + smul(beta, P2.w)) + smul(gamma, P0.w));
+    float m = sdiv(smul(P.w, mt), nf(P.w + mt));
+    return contactForce(sadd3(fb, a3), vv, m, nn, boxSurface(), nf(r - delta), V.w);
+}
+
+// The force of the hit at record `at` (key `key`) of vehicle v: its node's force,
+// with `sum` the fixed-point shares of every earlier hit on that node (as the
+// accumulator would hold them had the hits been added in order), then the contact
+// force; stored with its weights and `round`.
+void hitForce(uint v, uint at, uint key, int3 sum, uint round, float3 origin, float r, uint beamOff, uint groupOff,
+              uint groupCount, uint parity)
+{
+    uint h = gStatic[v * 4u].x + (key & 0xFFFFu);
+    TriGeo t = triangleGeo(gStatic[v * 4u + 1u].x + (key >> 16), origin, r);
+    uint4 tn = t.tn;
+    float4 P = gNodes[h * 3u];
+    float alpha;
+    float beta;
+    float gamma;
+    float delta;
+    triangleHit(t, nf3(origin + P.xyz), r, alpha, beta, gamma, delta);
+    float3 nn = t.n;
+    if (delta < 0.0)
+    {
+        nn = -t.n;
+        delta = -delta;
+    }
+    float4 V = gNodes[h * 3u + 1u];
+    float4 P0 = gNodes[tn.x * 3u];
+    float4 P1 = gNodes[tn.y * 3u];
+    float4 P2 = gNodes[tn.z * 3u];
+    // The accumulator as it would read with the earlier hits added (accForce).
+    int3 acc = int3(gAcc[h * 3u].load(), gAcc[h * 3u + 1u].load(), gAcc[h * 3u + 2u].load()) + sum;
+#ifdef EB_DET_HITS
+    // The frozen baseline's expressions, as its one-lane oracle writes them.
+    float3 vv = V.xyz - (alpha * gNodes[tn.y * 3u + 1u].xyz + beta * gNodes[tn.z * 3u + 1u].xyz
+                         + gamma * gNodes[tn.x * 3u + 1u].xyz);
+    float mt = alpha * P1.w + beta * P2.w + gamma * P0.w;
+    float m = P.w * mt / (P.w + mt);
+    float3 fh = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity, false)
+        + float3(float(acc.x), float(acc.y), float(acc.z)) * (1.0 / FIXED);
+    float3 f = contactForce(fh, vv, m, nn, boxSurface(), r - delta, V.w);
+#else
+    float3 a3 = float3(float(acc.x), float(acc.y), float(acc.z)) * (1.0 / FIXED);
+    float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount, parity,
+                        false);
+    float3 f = hitContact(V, P, P0, P1, P2, gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz,
+                          gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, delta, nn, fb, a3, r);
+#endif
+    gNext[at + 1u] = asuint(alpha);
+    gNext[at + 2u] = asuint(beta);
+    gNext[at + 3u] = asuint(f.x);
+    gNext[at + 4u] = asuint(f.y);
+    gNext[at + 5u] = asuint(f.z);
+    gNext[at + 6u] = round;
+}
+
+// One round over vehicle v's hits (lane `sub` of `lanes`): every open hit whose
+// earlier hits (smaller keys) on its node were computed in an earlier round is
+// computed now. `round` 0 takes any hit whose earlier hits on its node are computed
+// (the one-lane pass, in key order). Returns the hits left open.
+uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r, uint beamOff, uint groupOff,
+               uint groupCount, uint parity)
+{
+    uint count = uint(gAcc[hitAcc(v)].load());
+    if (count > HIT_CAP) return 0u;
+    uint base = hitList(v);
+    uint nodeOff = gStatic[v * 4u].x;
+    uint triOff = gStatic[v * 4u + 1u].x;
+    uint open = 0u;
+    for (uint i = sub; i < count; i += lanes)
+    {
+        uint at = base + i * HIT_WORDS;
+        if (gNext[at + 6u] != 0u) continue;
+        uint key = gNext[at];
+        uint h = nodeOff + (key & 0xFFFFu);
+        int3 sum = int3(0, 0, 0);
+        bool ready = true;
+        for (uint j = 0u; j < count; j++)
+        {
+            uint bj = base + j * HIT_WORDS;
+            uint kj = gNext[bj];
+            if (kj >= key) continue;
+            uint role = hitRoles(kj, h, nodeOff, triOff);
+            if (role == 0u) continue;
+            uint rj = gNext[bj + 6u];
+            if (rj == 0u || (round != 0u && rj == round))
+            {
+                ready = false;
+                break;
+            }
+            sum += hitShareFixed(bj, role);
+        }
+        if (ready)
+            hitForce(v, at, key, sum, round != 0u ? round : SELF_ROUNDS + 1u, origin, r, beamOff, groupOff,
+                     groupCount, parity);
+        else
+            open++;
+    }
+    return open;
+}
+
+// Vehicle v's self-collision hits of this step, after the lanes that found them
+// (and resolvePending) passed a barrier: rounds of selfRound until no hit of any
+// member is open (every lane of the workgroup runs them: barriers), then each hit's
+// shares into the accumulators. `on`: this lane's partition has a vehicle. More
+// hits than HIT_CAP: one lane runs the whole step's self-collision in order
+// (selfSerial) instead.
+void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity);
+
+void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, float r, uint beamOff, uint groupOff,
+               uint groupCount, uint parity)
+{
+    uint go = 0u;
+    for (uint round = 1u; round <= SELF_ROUNDS; round++)
+    {
+        if (lane == 0u) gsOpen[(round + 1u) & 1u].store(0u);
+        uint open = on ? selfRound(v, sub, lanes, round, origin, r, beamOff, groupOff, groupCount, parity) : 0u;
+        if (open != 0u) gsOpen[round & 1u].add(open);
+        sync();
+        if (lane == 0u) gsUniformLanes = gsOpen[round & 1u].load();
+        sync();
+        go = gsUniformLanes;
+        if (go == 0u) break;
+    }
+    if (go != 0u)
+    {
+        // A dependency chain longer than the rounds: one lane per vehicle finishes
+        // the open hits in key order.
+        if (on && sub == 0u)
+        {
+            for (uint it = 0u; it <= HIT_CAP; it++)
+            {
+                if (selfRound(v, 0u, 1u, 0u, origin, r, beamOff, groupOff, groupCount, parity) == 0u) break;
+            }
+        }
+        if (lane == 0u)
+        {
+            gsOpen[0].store(0u);
+            gsOpen[1].store(0u);
+        }
+        sync();
+    }
+    if (!on) return;
+    uint count = uint(gAcc[hitAcc(v)].load());
+    if (count > HIT_CAP)
+    {
+        if (sub == 0u) selfSerial(v, origin, r, beamOff, groupOff, groupCount, parity);
+        return;
+    }
+    uint base = hitList(v);
+    uint nodeOff = gStatic[v * 4u].x;
+    uint triOff = gStatic[v * 4u + 1u].x;
+    for (uint i = sub; i < count; i += lanes)
+    {
+        uint at = base + i * HIT_WORDS;
+        uint key = gNext[at];
+        uint4 tn = gStatic[gP.triBase + triOff + (key >> 16)];
+        float alpha = asfloat(gNext[at + 1u]);
+        float beta = asfloat(gNext[at + 2u]);
+        float gamma = nf(nf(1.0 - alpha) - beta);
+        float3 f = asfloat(uint3(gNext[at + 3u], gNext[at + 4u], gNext[at + 5u]));
+        accAdd(nodeOff + (key & 0xFFFFu), f);
+        accAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
+        accAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
+        accAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
+    }
+}
+
+// More hits in a step than the hit list holds: one lane runs vehicle v's
+// self-collision of this step exactly as the specification orders it (tested
+// triangles in file order, every candidate in node order, each hit added at once).
+// Slow, and only for a step with more than HIT_CAP hits.
+void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    for (uint t = 0u; t < r1.y; t++)
+    {
+        uint gt = r1.x + t;
+        if (asint(gMisc[gP.vehicles + gt].x) > 0) continue;
+        TriGeo T = triangleGeo(gt, origin, r);
+        uint4 tn = T.tn;
+        for (uint k = 0u; k < r2.y; k++)
+        {
+            uint h = gLists[r2.x + k];
+            if (h == tn.x || h == tn.y || h == tn.z) continue;
+            float4 P = gNodes[h * 3u];
+            float3 p = nf3(origin + P.xyz);
+            if (any(p < T.lo) || any(p > T.hi)) continue;
+            float alpha;
+            float beta;
+            float gamma;
+            float delta;
+            if (!triangleHit(T, p, r, alpha, beta, gamma, delta)) continue;
+            gMisc[T.mi].w = 1u;
+            float3 nn = T.n;
+            if (delta < 0.0)
+            {
+                nn = -T.n;
+                delta = -delta;
+            }
+            float4 V = gNodes[h * 3u + 1u];
+            float4 P0 = gNodes[tn.x * 3u];
+            float4 P1 = gNodes[tn.y * 3u];
+            float4 P2 = gNodes[tn.z * 3u];
+            float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount,
+                                parity, false);
+            float3 f = hitContact(V, P, P0, P1, P2, gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz,
+                                  gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, delta, nn, fb, accForce(h), r);
+            accAdd(h, f);
+            accAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
+            accAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
+            accAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
+        }
+    }
+}
+
+// Vehicle v's pending beams of this step's beam phase (breakException), on one lane
+// after a barrier: each beam's update again, in spawn order, with the exception's
+// live-beam counts as the sequential pass sees them.
+void resolvePending(uint v, uint parity)
+{
+    uint n = uint(gAcc[hitAcc(v) + 1u].load());
+    if (n == 0u) return;
+    uint4 r0 = gStatic[v * 4u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    bool fast = (gStatic[v * 4u + 3u].x & FLAG_FAST_INV_SQRT) != 0u;
+    gResolving = 1u;
+    if (n <= PEND_CAP)
+    {
+        uint base = pendList(v);
+        for (uint i = 1u; i < n; i++)
+        {
+            uint x = gNext[base + i];
+            uint j = i;
+            while (j > 0u && gNext[base + j - 1u] > x)
+            {
+                gNext[base + j] = gNext[base + j - 1u];
+                j--;
+            }
+            gNext[base + j] = x;
+        }
+        for (uint i = 0u; i < n; i++)
+        {
+            uint j = gNext[base + i];
+            beamUpdate(r0.z + j, j, fast, r2.z, parity);
+        }
+    }
+    else
+    {
+        for (uint j = 0u; j < r0.w; j++)
+        {
+            if (gBeams[(r0.z + j) * 2u + 1u].w == 2.0) beamUpdate(r0.z + j, j, fast, r2.z, parity);
+        }
+    }
+    gResolving = 0u;
+}
+
 
 
 void vvReportOutside(uint v)
@@ -2096,6 +2388,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsHit = 1u;
         gsTestedCount[0].store(0u);
         gsTestedCount[1].store(0u);
+        gsOpen[0].store(0u);
+        gsOpen[1].store(0u);
+        // Self-collision hits or pending beams possible (selfApply's barriers).
+        gsUniformLanes = triCount > 0u ? 1u : 0u;
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
@@ -2111,6 +2407,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
 
     sync();
+    uint selfOn = gsUniformLanes;
 
     for (uint s = 0u; s < gP.steps; s++)
     {
@@ -2142,7 +2439,12 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             }
         }
         for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
-        if (lane == 0u) gsPairCount.store(0u);
+        if (lane == 0u)
+        {
+            gsPairCount.store(0u);
+            gAcc[hitAcc(v)].store(0);
+            gAcc[hitAcc(v) + 1u].store(0);
+        }
         sync();
         if (lane == 0u)
         {
@@ -2219,6 +2521,8 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
         sync();
         uint gridOn = gsUniformLanes;
+        // This step's deferred breaks, in spawn order (before selfApply's barrier).
+        if (lane == 0u) resolvePending(v, parity);
 #ifdef EB_ABLATE
         if (gridOn != 0u && (gP.ablate & 1u) == 0u)
 #else
@@ -2321,12 +2625,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
                              groupOff, groupCount, parity);
         }
-#ifdef EB_DET_HITS
-        sync();
-        if (lane == 0u) detApply(v, origin, range, beamOff, groupOff, groupCount, parity);
-#endif
+        if (selfOn != 0u)
+        {
+            sync();
+            selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parity);
+        }
 #ifdef EB_AERO
-        // Slide nodes, after this step's beams (alongside the contacts), a lane each.
+        // Slide nodes, after this step's beams and self-collision, a lane each.
         if ((flagsV & FLAG_SLIDES) != 0u)
         {
             uint count = min(aero2.y, gP.slideTotal - min(aero2.x, gP.slideTotal));
@@ -2478,6 +2783,8 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
         {
             gAcc[gP.overflowBase + i].store(0);
             gAcc[gP.testedBase + i * 2u + (vehicleStep(i) & 1u)].store(0);
+            gAcc[hitAcc(i)].store(0);
+            gAcc[hitAcc(i) + 1u].store(0);
         }
     }
 }
@@ -2600,6 +2907,29 @@ void explicit_beams_wide_tris(uint3 id : SV_DispatchThreadID)
     else
         triangleTest(t, sub, GRID_SUBS, origin, x.range, x.candOff, x.candCount, x.beamOff, x.groupOff,
                      x.groupCount, step & 1u);
+}
+
+// After the triangles: a workgroup per vehicle resolves its deferred breaks and
+// applies its self-collision hits in order (selfApply).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint v = gid.x;
+    uint lane = lid.x;
+    Vehicle x = vehicleAt(v);
+    uint parity = vehicleStep(v) & 1u;
+    if (lane == 0u)
+    {
+        resolvePending(v, parity);
+        gsOpen[0].store(0u);
+        gsOpen[1].store(0u);
+        gsUniformLanes = x.triCount > 0u ? 1u : 0u;
+    }
+    sync();
+    uint on = gsUniformLanes;
+    if (on != 0u)
+        selfApply(v, true, lane, 256u, lane, vehicleOrigin(v), x.range, x.beamOff, x.groupOff, x.groupCount, parity);
 }
 
 // After the last step: its triangles' throttle and its group breaks.
@@ -3176,12 +3506,20 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         }
     }
     for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
+    if (lane == 0u)
+    {
+        gAcc[hitAcc(v)].store(0);
+        gAcc[hitAcc(v) + 1u].store(0);
+    }
     sync();
     if (lane == 0u && s > 0u) gMisc[vvRec(v, VV_FLAGS)].w = 0u;
     if (lane == 0u)
     {
+        // Bit 0: the grid this step; bit 1: self-collision hits or pending beams
+        // possible (selfApply's barriers).
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        gsUniformLanes = cell > 0.0 && candCount > 0u && listed * candCount > BRUTE_PAIRS_PER_LANE * LANES ? 1u : 0u;
+        gsUniformLanes = (cell > 0.0 && candCount > 0u && listed * candCount > BRUTE_PAIRS_PER_LANE * LANES ? 1u : 0u)
+            | (triCount > 0u ? 2u : 0u);
     }
     if (cell > 0.0)
     {
@@ -3212,7 +3550,9 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
 #endif
     for (uint j = lane; j < beamCount; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
     sync();
-    uint gridOn = gsUniformLanes;
+    uint flagsU = gsUniformLanes;
+    uint gridOn = flagsU & 1u;
+    if (lane == 0u) resolvePending(v, parity);
     if (gridOn != 0u)
     {
         uint per = GRID_BUCKETS / LANES;
@@ -3294,10 +3634,11 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
             triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff, groupOff,
                          groupCount, parity);
     }
-#ifdef EB_DET_HITS
-    sync();
-    if (lane == 0u) detApply(v, origin, range, beamOff, groupOff, groupCount, parity);
-#endif
+    if ((flagsU & 2u) != 0u)
+    {
+        sync();
+        selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parity);
+    }
 #ifdef EB_AERO
     if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, origin, groupOff, parity);
 #endif
@@ -3471,6 +3812,8 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
     {
         gsTestedM[2u * m + parity].store(0u);
         gsPairCountM[m].store(0u);
+        gAcc[hitAcc(v)].store(0);
+        gAcc[hitAcc(v) + 1u].store(0);
     }
     sync();
     {
@@ -3533,7 +3876,9 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
             uint4 q2 = gStatic[vj * 4u + 2u];
             float cj = asfloat(gStatic[vj * 4u + 3u].w);
             uint lj = gsTestedM[2u * j + (((gMisc[vj].w + s) & 1u))].load();
-            if (cj > 0.0 && q2.y > 0u && lj * q2.y > BRUTE_PAIRS_PER_LANE * P) any = 1u;
+            if (cj > 0.0 && q2.y > 0u && lj * q2.y > BRUTE_PAIRS_PER_LANE * P) any = any | 1u;
+            // Self-collision hits or pending beams possible (selfApply's barriers).
+            if (q1.y > 0u) any = any | 2u;
         }
         gsUniformLanes = any;
     }
@@ -3582,7 +3927,9 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         }
     }
     sync();
-    uint gridAny = gsUniformLanes;
+    uint flagsU = gsUniformLanes;
+    uint gridAny = flagsU & 1u;
+    if (on && pl == 0u) resolvePending(v, parity);
     if (gridAny != 0u)
     {
         uint per = GRID_BUCKETS / P;
@@ -3681,10 +4028,11 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
                          groupCount, parity);
         }
     }
-#ifdef EB_DET_HITS
-    sync();
-    if (on && pl == 0u) detApply(v, origin, range, beamOff, groupOff, groupCount, parity);
-#endif
+    if ((flagsU & 2u) != 0u)
+    {
+        sync();
+        selfApply(v, on, pl, P, lane, origin, range, beamOff, groupOff, groupCount, parity);
+    }
 #ifdef EB_AERO
     if (on && pl == P - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, origin, groupOff, parity);
 #endif
@@ -3917,55 +4265,54 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
     if (hit) gMisc[gP.vvTri + gt].w = 1u;
 }
 
-// The listed hits of owner va: one lane each, the vote and the force.
-void vvApplyHits(uint va, uint runOff, uint points, uint hits, float r, uint parity, uint lane)
+// Owner va's n listed hits (triangle, node: two words each from `base`) in the
+// specification's order (triangles in list order, then contact points in node
+// order). A hit reads its contact point's force and adds to it and to the owner's
+// triangle nodes; the owner's nodes are never contact points of its own hits, so
+// only the hits on one contact point depend on each other: one lane per contact
+// point runs its hits in triangle order (each reads the ones before), the points
+// side by side.
+void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes)
 {
     float3 oa = asfloat(gMisc[va].xyz);
-    for (uint i = lane; i < min(hits, 2u * points); i += LANES)
+    for (uint i = lane; i < n; i += lanes)
     {
-        uint gt = gNext[vvHitAt(runOff, i)];
-        uint h = gNext[vvHitAt(runOff, i) + 1u];
+        uint gt = gNext[base + 2u * i];
+        uint h = gNext[base + 2u * i + 1u];
+        bool first = true;
+        for (uint j = 0u; j < n; j++)
+        {
+            if (gNext[base + 2u * j + 1u] == h && gNext[base + 2u * j] < gt)
+            {
+                first = false;
+                break;
+            }
+        }
+        if (!first) continue;
         uint vh = gStatic[gP.nodeInfoBase + h].w;
-        VvTri t = vvTriangle(gt, oa, r);
-        vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity);
+        for (uint it = 0u; it < n; it++)
+        {
+            VvTri t = vvTriangle(gt, oa, r);
+            vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity);
+            // The point's next hit: the smallest later triangle.
+            uint next = 0xFFFFFFFFu;
+            for (uint j = 0u; j < n; j++)
+            {
+                uint gj = gNext[base + 2u * j];
+                if (gNext[base + 2u * j + 1u] == h && gj > gt && gj < next) next = gj;
+            }
+            if (next == 0xFFFFFFFFu) break;
+            gt = next;
+        }
     }
 }
 
-#ifdef EB_DET_HITS
-// Tests only: vvApplyHits on one lane, the hits sorted by (triangle, node), so the
-// order is fixed and each hit sees every earlier one.
-void vvApplyHitsDet(uint va, uint runOff, uint points, uint hits, float r, uint parity, uint lane)
+// The listed hits of owner va, in order (vvApplyOrdered).
+void vvApplyHits(uint va, uint runOff, uint points, uint hits, float r, uint parity, uint lane)
 {
-    if (lane != 0u) return;
-    uint n = min(hits, 2u * points);
-    for (uint i = 1u; i < n; i++)
-    {
-        uint gt = gNext[vvHitAt(runOff, i)];
-        uint h = gNext[vvHitAt(runOff, i) + 1u];
-        uint j = i;
-        while (j > 0u)
-        {
-            uint pg = gNext[vvHitAt(runOff, j - 1u)];
-            uint ph = gNext[vvHitAt(runOff, j - 1u) + 1u];
-            if (pg < gt || (pg == gt && ph <= h)) break;
-            gNext[vvHitAt(runOff, j)] = pg;
-            gNext[vvHitAt(runOff, j) + 1u] = ph;
-            j--;
-        }
-        gNext[vvHitAt(runOff, j)] = gt;
-        gNext[vvHitAt(runOff, j) + 1u] = h;
-    }
-    float3 oa = asfloat(gMisc[va].xyz);
-    for (uint i = 0u; i < n; i++)
-    {
-        uint gt = gNext[vvHitAt(runOff, i)];
-        uint h = gNext[vvHitAt(runOff, i) + 1u];
-        uint vh = gStatic[gP.nodeInfoBase + h].w;
-        VvTri t = vvTriangle(gt, oa, r);
-        vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity);
-    }
+    vvApplyOrdered(va, vvHitAt(runOff, 0u), min(hits, 2u * points), r, parity, lane, LANES);
 }
-#endif
+
 
 // A tested triangle's throttle after its tests (a hit → 0, no candidate → + 1).
 void vvThrottleEnd(uint gt)
@@ -4028,14 +4375,10 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         float3 va0 = gNodes[gStatic[va * 4u].x * 3u + 1u].xyz;
         // Phase S (with the previous owner's hits).
         for (uint i = lane; i < prevListed; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
-#ifdef EB_DET_HITS
-        if (a > 0u) vvApplyHitsDet(prevVa, runOff, points, gsVvHits[q ^ 1u].load(), prevRange, parity, lane);
-#else
 #ifdef EB_ABLATE
         if ((gP.ablate & 1024u) == 0u)
 #endif
         if (a > 0u) vvApplyHits(prevVa, runOff, points, gsVvHits[q ^ 1u].load(), prevRange, parity, lane);
-#endif
         for (uint b = lane; b < k; b += LANES)
         {
             uint vb = vvMember(off, b);
@@ -4160,11 +4503,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         prevRange = range;
     }
     for (uint i = lane; i < prevListed; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
-#ifdef EB_DET_HITS
-    if (k > 0u) vvApplyHitsDet(prevVa, runOff, points, gsVvHits[(k - 1u) & 1u].load(), prevRange, parity, lane);
-#else
     if (k > 0u) vvApplyHits(prevVa, runOff, points, gsVvHits[(k - 1u) & 1u].load(), prevRange, parity, lane);
-#endif
     // (The counters are cleared by the next step's first member step, before its
     // first barrier.)
 }
@@ -4256,39 +4595,6 @@ void vvTriangleCandsApply(uint va, uint gt, uint sub, uint subs, uint run, uint 
     }
 }
 
-#ifdef EB_DET_HITS
-// Tests only: owner a's listed hits on one lane, sorted (vvApplyHitsDet).
-void vvApplyHitsDetSmall(uint va, uint runOff, uint points, uint a, uint hits, float r, uint parity)
-{
-    uint n = min(hits, 2u * points);
-    for (uint i = 1u; i < n; i++)
-    {
-        uint gt = gNext[vvHitSmall(runOff, points, a, i)];
-        uint h = gNext[vvHitSmall(runOff, points, a, i) + 1u];
-        uint j = i;
-        while (j > 0u)
-        {
-            uint pg = gNext[vvHitSmall(runOff, points, a, j - 1u)];
-            uint ph = gNext[vvHitSmall(runOff, points, a, j - 1u) + 1u];
-            if (pg < gt || (pg == gt && ph <= h)) break;
-            gNext[vvHitSmall(runOff, points, a, j)] = pg;
-            gNext[vvHitSmall(runOff, points, a, j) + 1u] = ph;
-            j--;
-        }
-        gNext[vvHitSmall(runOff, points, a, j)] = gt;
-        gNext[vvHitSmall(runOff, points, a, j) + 1u] = h;
-    }
-    float3 oa = asfloat(gMisc[va].xyz);
-    for (uint i = 0u; i < n; i++)
-    {
-        uint gt = gNext[vvHitSmall(runOff, points, a, i)];
-        uint h = gNext[vvHitSmall(runOff, points, a, i) + 1u];
-        uint vh = gStatic[gP.nodeInfoBase + h].w;
-        VvTri t = vvTriangle(gt, oa, r);
-        vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity);
-    }
-}
-#endif
 
 // Owner a's level: 1 + the level of every earlier owner with hits whose vehicles
 // ({itself} and its partners) meet a's (0: a has no hits).
@@ -4481,18 +4787,6 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                 if (gsVvFix[a] != 0u) gMisc[gP.vvTri + gt].x = 0u;
             }
         }
-#ifdef EB_DET_HITS
-        if (lane == 0u)
-        {
-            for (uint a = 0u; a < k; a++)
-            {
-                if (vvLevel(a, k, points) != l) continue;
-                uint va = vvMember(off, a);
-                float range = asfloat(gStatic[va * 4u + 3u].z);
-                vvApplyHitsDetSmall(va, runOff, points, a, gsVvHit4[a].load(), range, parity);
-            }
-        }
-#else
         for (uint a = 0u; a < k; a++)
         {
             if (vvLevel(a, k, points) != l) continue;
@@ -4500,17 +4794,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             float range = asfloat(gStatic[va * 4u + 3u].z);
             uint hits = gsVvHit4[a].load();
             if (hits <= 2u * points)
-            {
-                float3 oa = asfloat(gMisc[va].xyz);
-                for (uint i = lane; i < hits; i += LANES)
-                {
-                    uint gt = gNext[vvHitSmall(runOff, points, a, i)];
-                    uint h = gNext[vvHitSmall(runOff, points, a, i) + 1u];
-                    uint vh = gStatic[gP.nodeInfoBase + h].w;
-                    VvTri t = vvTriangle(gt, oa, range);
-                    vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, range, parity);
-                }
-            }
+                vvApplyOrdered(va, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, LANES);
             else
             {
                 uint4 ra1 = gStatic[va * 4u + 1u];
@@ -4524,7 +4808,6 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                 }
             }
         }
-#endif
         sync();
     }
 }
@@ -4543,7 +4826,12 @@ void contactGroup(uint g, uint lane)
     uint off = G.x;
     uint runOff = G.z;
     uint points = G.w;
-    if (lane == 0u) gsUniformLanes = G.y;
+    if (lane == 0u)
+    {
+        gsUniformLanes = G.y;
+        gsOpen[0].store(0u);
+        gsOpen[1].store(0u);
+    }
     sync();
     uint k = gsUniformLanes;
     sync();

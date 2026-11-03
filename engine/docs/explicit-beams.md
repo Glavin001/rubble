@@ -307,13 +307,34 @@ its spawned positions). The velocity is in world axes.
   bit); the beam pass writes its force on each end into that end's incidence entry,
   so the node pass sums a contiguous run of independent loads, in list order. The
   self-collision pass accumulates into per-node integer atomics in fixed point
-  (1/32 N), spreading (triangle, contacter) pairs over the lanes (the sums do not
-  depend on the order); a triangle's throttle is finished in the next node pass.
+  (1/32 N); a triangle's throttle is finished in the next node pass.
+* Self-collision in the specification's order. The lanes find the hits in parallel
+  ((triangle, contacter) pairs spread over the lanes, the grid or the grid skip
+  below) and record each in the vehicle's hit list as a key, triangle (file order)
+  << 16 | contacter (node order). Then `selfApply`: in rounds, every hit whose
+  earlier hits (smaller keys) touching its contacter node already have their force
+  computes its own: its node's force plus, in fixed point, the shares of exactly
+  those earlier hits, as the accumulator would read had the hits been added one by
+  one in key order. A round is two barriers; a step usually needs one or two
+  rounds (a chain of hits on one node needs one each; past 32 rounds one lane
+  finishes in key order). Then every hit adds its shares to the accumulators
+  (integer sums: any order). So the result is that of the sequential pass whatever
+  order the lanes found the hits in, and runs are deterministic. The hit force is
+  computed in strict arithmetic in the CPU's order. A step with more than 256 hits
+  (`HIT_CAP`) runs the whole self-collision of that vehicle and step on one lane
+  in the specification's order instead (exact, slow; never seen in the test cars,
+  at most 37 hits in an E36 wall crash step).
+* The break exception reads the beams in spawn order. A beam whose force passes its
+  strength with an end on a collision triangle is deferred in the beam phase
+  (marked pending, nothing else written); after the beam phase's barrier one lane
+  re-runs the vehicle's pending beams in spawn order, each counting the live plain
+  beams at its ends as the sequential pass sees them: broken before the step, or
+  by an earlier beam this step (a beam that breaks carries a mark until its next
+  beam phase), or by an earlier master's group break this step, is dead; a later
+  beam's break this step is not yet. The counts no longer depend on lane timing.
 * Detacher groups: a breaking master records its beam index into its group slot with
   an atomic minimum; after a barrier every live beam of a broken group breaks, and
   beams after the master's index drop this step's force (earlier ones keep it).
-* The live-plain-beam count for the break exception reads the incidence list at the
-  time of the test.
 * Every vehicle is independent; the dispatch scales with the vehicle count.
 * Fleets with wings, a `fusedrag` line or self-centering commands run a separately
   compiled module (`EB_AERO`, 256 or 512 lanes) so every other fleet keeps the exact
@@ -341,12 +362,15 @@ Each of these keeps the results bit for bit (see *Bit-identity tests* below):
   vehicle's step latency sets the frame) run 512 lanes per vehicle; larger fleets
   keep 256 (512 for vehicles over 2048 beams). 1024 lanes was slower on an M3 Max
   (wider barriers, a longer serial grid scan) and is not shipped.
-* **Grid skip (off).** A step with few (triangle, contacter) pairs could skip the
-  grid's counting sort and test every candidate, keeping exactly the hits the grid
-  walk finds. It is built but off (`BRUTE_PAIRS_PER_LANE = 0`): it resolves the
-  documented same-contacter race differently (the lanes of a wave read before any
-  adds), and the E36 drive accuracy ensemble against RoR went from 115–150 mm (pass)
-  to 310–520 mm (fail). A vehicle with a grid always uses it.
+* **Grid skip.** A step with few (triangle, contacter) pairs (at most 16 per lane)
+  skips the grid's counting sort (its scan costs five barriers) and tests every
+  candidate, keeping exactly the hits the grid walk finds. It was switched off
+  while hits were applied in lane order: it resolved the same-contacter race the
+  other way (a wave's lanes read before any adds, so two triangles hitting one
+  contacter both cancelled its whole normal force) and the E36 drive ensemble
+  against RoR failed (348 mm against a 136 mm limit, ratio 3.85). With the hits in
+  the specification's order the hit set alone decides the result: on again, and
+  the bit-identity tests below run with it on against the baseline's grid.
 * **Early pairs.** For a vehicle without a grid, the beam phase lists the (triangle, contacter)
   pairs that pass those tests and tryContact's box test, on the lanes the beams
   leave idle (lanes in reverse); the triangle phase runs tryContact on the listed
@@ -371,7 +395,7 @@ Each of these keeps the results bit for bit (see *Bit-identity tests* below):
   itself; a later owner's reset of an earlier owner is applied after that owner's
   update). Larger groups keep the member-by-member path.
 
-Measured and not adopted: the grid skip (accuracy, above); one barrier instead of two per `sync()` (Apple:
+Measured and not adopted: one barrier instead of two per `sync()` (Apple:
 about 0); the hit test in the beam phase as well (Viper slower: it hits every step,
 so the geometry ran twice); 1024 lanes.
 
@@ -381,13 +405,23 @@ so the geometry ran twice); 1024 lanes.
 frozen (a test oracle, read from the build's WGSL directory at run time, never
 shipped). `tests/explicit_beams_bitwise.rs` runs it and the current kernel from one
 saved GPU state each frame (`ExplicitBeamsGpu::snapshot`/`restore`,
-`set_kernel_variant`): a frame the baseline's race probe (`EB_RACE_PROBE`) finds
-race-free must leave the same state, bit for bit (nodes, beams, incidence forces,
-accumulators, group slots, throttles, per-vehicle records); and every frame must
-match with both kernels compiled with `EB_DET_HITS` (hits found by each kernel's own
-lanes, then applied on one lane sorted by triangle and node). Real cars come from
-`RUBBLE_INSPIRATION` when set (Viper, E36, Mustang, Agora S); the repository's sedan
-always. `explicit-wgsl-check.mjs` compiles every shipped module in Chrome.
+`set_kernel_variant`). The baseline applies hits in lane order; its `EB_DET_HITS`
+build applies the hits its lanes found on one lane, sorted by (triangle, node): the
+specification's order. The current kernel compiled with `EB_DET_HITS` (tests only)
+differs from the shipped one only in the hit force's arithmetic (the baseline's
+expressions instead of strict). Per frame: the current kernel run twice leaves the
+same state (deterministic); its `EB_DET_HITS` build leaves exactly the baseline
+`EB_DET_HITS` state (nodes, beams, incidence forces, accumulators, group slots,
+throttles, per-vehicle records) on every frame where the baseline's race probe
+(`EB_RACE_PROBE`: bit 0 a contact read raced with an add, bit 2 a break-exception
+count raced with a break or a group break) finds no break-exception race; those
+frames may differ (the baseline reads whatever the other lanes wrote). The grid
+skip is on in the current kernel and off in the baseline, so this also checks that
+the skip changes nothing. `cpu_reference_per_frame` runs the shipped kernel and the
+baseline one frame at a time from the CPU reference's state against the CPU. Real
+cars come from `RUBBLE_INSPIRATION` when set (Viper, E36, Mustang, Agora S); the
+repository's sedan always. `explicit-wgsl-check.mjs` compiles every shipped module
+in Chrome.
 
 ### Vehicle contact on the GPU
 
@@ -457,11 +491,13 @@ What the GPU does differently from the specification's exact order (§8.3):
   self-collision, in 1/32 N fixed point; a candidate's "current force" is its force
   slot, its beams' incidence entries, its accumulator (and slide-node slot) at the
   time of the read, so contributions are rounded to 1/32 N;
-* owners are processed strictly in vehicle order (exact), but an owner's triangles
-  are tested in parallel: a candidate hit by two triangles of the same owner in one
-  step reads its force with none, or part, of the other's contribution (the
-  self-collision precedent); candidates of one triangle in parallel (order changes
-  only rounding);
+* owners are processed strictly in vehicle order (exact); an owner's triangles are
+  tested in parallel and its hits listed, then applied one lane per contact point,
+  each point's hits in triangle order (an owner's hits only read their contact
+  point, and only hits on the same point add to it), so a point hit by two
+  triangles reads the earlier one's force, as specified. A list fuller than twice
+  the group's contact points applies the rest while testing (lane order: the old
+  race, kept for that overflow);
 * the partner scan runs over partners in parallel (the resets commute: exact).
 
 Costs and limits: a fleet where no padded frame boxes overlap pays, every other
