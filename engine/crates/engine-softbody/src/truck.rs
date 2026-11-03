@@ -559,6 +559,8 @@ impl Parser {
             | "author"
             | "fileinfo"
             | "enable_advanced_deformation_end"
+            // `extcamera <mode> [node]`: one line, not a block (a camera setting).
+            | "extcamera"
             | "end_description"
             | "end_comment" => {
                 if word == "end_description" || word == "end_comment" {
