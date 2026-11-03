@@ -213,6 +213,55 @@ fn compare_steps(
         let d = gpu.state_words();
         assert!(!gpu.take_det_overflow(), "{label}: frame {f}: the fixed-order hit list overflowed");
         if let Some(x) = first_diff(&c, &d) {
+            if std::env::var("BITWISE_DUMP").is_ok() {
+                let (mc, md) = (&c[4].1, &d[4].1);
+                for (i, (p, q)) in mc.iter().zip(md).enumerate() {
+                    if p != q {
+                        let r = i / 4;
+                        eprintln!("misc rec {r}: base {:?} cur {:?}", &mc[r * 4..r * 4 + 4], &md[r * 4..r * 4 + 4]);
+                    }
+                }
+                // Each det variant against itself (determinism).
+                for var in [KernelVariant::BaselineDet, KernelVariant::CurrentDet] {
+                    let mut runs = Vec::new();
+                    for _ in 0..3 {
+                        gpu.restore(&snap);
+                        gpu.set_kernel_variant(var);
+                        gpu.frame(steps);
+                        gpu.wait();
+                        runs.push(gpu.state_words());
+                    }
+                    eprintln!(
+                        "{var:?} self-consistency: {:?} {:?}",
+                        first_diff(&runs[0], &runs[1]),
+                        first_diff(&runs[0], &runs[2])
+                    );
+                }
+                // Per-step replay of the frame: which step first differs.
+                for k in 1..=steps {
+                    gpu.restore(&snap);
+                    gpu.set_kernel_variant(KernelVariant::BaselineDet);
+                    for _ in 0..k { gpu.frame(1); }
+                    gpu.wait();
+                    let c1 = gpu.state_words();
+                    gpu.restore(&snap);
+                    gpu.set_kernel_variant(KernelVariant::CurrentDet);
+                    for _ in 0..k { gpu.frame(1); }
+                    gpu.wait();
+                    let d1 = gpu.state_words();
+                    if let Some(x) = first_diff(&c1, &d1) {
+                        eprintln!("first differs after {k} single steps: {x}");
+                        let (mc, md) = (&c1[4].1, &d1[4].1);
+                        for (i, (p, q)) in mc.iter().zip(md).enumerate() {
+                            if p != q {
+                                let r = i / 4;
+                                eprintln!("misc rec {r}: base {:?} cur {:?}", &mc[r * 4..r * 4 + 4], &md[r * 4..r * 4 + 4]);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
             panic!("{label}: frame {f}: with fixed-order hits the current kernel differs from the baseline at {x}");
         }
         det += 1;
@@ -348,4 +397,32 @@ fn mixed_fleet_bitwise() {
         }
     }
     compare("mixed pairs and solos", &fleet, 70, true);
+}
+
+/// Three cars in a chain (one driving into two standing nose to tail) and four (two
+/// head-on pairs side by side): contact groups of three and four, the owners' levels.
+fn chain_and_four(text: &str, name: &str) {
+    let g = geo(text);
+    let o = Vec3::new(100.0, 0.0, 100.0);
+    let len = g.along.1 - g.along.0;
+    let chain = vec![
+        spawn(text, o, 0.0, g.forward * (0.85 * SPEED)),
+        spawn(text, o + g.forward * (len + 1.5), 0.0, Vec3::ZERO),
+        spawn(text, o + g.forward * (2.0 * len + 2.0), 0.0, Vec3::ZERO),
+    ];
+    compare_steps(&format!("{name} chain of three"), &chain, &[(2, STEPS), (200, 1), (30, STEPS)], true);
+    let width = g.across.1 - g.across.0;
+    let mut four = pair(text, o, 0.85 * SPEED, 1.5, false);
+    four.extend(pair(text, o + g.lateral * (width + 0.6), 0.7 * SPEED, 1.5, false));
+    compare_steps(&format!("{name} two pairs side by side"), &four, &[(2, STEPS), (200, 1), (30, STEPS)], true);
+}
+
+#[test]
+fn groups_of_three_and_four_bitwise() {
+    chain_and_four(&repo_sedan(), "sedan");
+    for (rel, name) in [(VIPER, "Viper"), (MUSTANG, "Mustang")] {
+        if let Some(t) = ror(rel) {
+            chain_and_four(&t, name);
+        }
+    }
 }

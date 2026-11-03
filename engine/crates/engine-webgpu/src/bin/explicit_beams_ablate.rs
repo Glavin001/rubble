@@ -172,10 +172,33 @@ fn main() -> anyhow::Result<()> {
         sim.wings.len()
     );
     let (info, device, queue) = default_device_with(true)?;
-    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &[sim]);
+    // headon / tbone: a second car turned 180° (driving at it) or 90° (standing
+    // across its lane) 1.5 m ahead: a contact group from the first frame.
+    let mut fleet = vec![sim];
+    if scenario == "headon" || scenario == "tbone" {
+        let yaw = if scenario == "tbone" { 90.0 } else { 180.0 };
+        let lateral = Vec3::Y.cross(forward).normalize();
+        let t: Vec<Vec3> = probe.nodes.iter().map(|n| engine_softbody::explicit_beams::yaw_offset(n.pos, yaw)).collect();
+        let lo = t.iter().map(|q| q.dot(forward)).fold(f32::MAX, f32::min);
+        let hi = probe.nodes.iter().map(|n| n.pos.dot(forward)).fold(f32::MIN, f32::max);
+        let (clo, chi) = t.iter().fold((f32::MAX, f32::MIN), |(a, b), q| (a.min(q.dot(lateral)), b.max(q.dot(lateral))));
+        let (alo, ahi) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.dot(lateral)), b.max(n.pos.dot(lateral))));
+        let at2 = at + forward * (hi + 1.5 - lo) + lateral * (0.5 * (alo + ahi) - 0.5 * (clo + chi));
+        let vel = if scenario == "tbone" { Vec3::ZERO } else { -forward * speed };
+        let settings = ExplicitBeamsSettings { drag: false, turbulence: false, ..Default::default() };
+        let mut b = ExplicitBeams::from_truck_config_yaw(&text, None, at2, yaw, vel, settings).expect("spawn");
+        let lowest = b.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+        for n in &mut b.nodes {
+            n.pos.y += 0.02 - lowest;
+        }
+        b.roll_tyres(vel);
+        fleet.push(b);
+    }
+    let warm_frames = if fleet.len() > 1 { 6 } else { 60 };
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
     gpu.set_wide(false);
     // 0.5 s in (60 frames at 120 fps): the impact's hit lands about 0.04 s later.
-    for _ in 0..60 {
+    for _ in 0..warm_frames {
         gpu.frame(17);
     }
     gpu.wait();

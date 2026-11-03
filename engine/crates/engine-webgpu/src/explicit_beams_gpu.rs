@@ -980,8 +980,10 @@ impl ExplicitBeamsGpu {
         beams.extend(std::iter::repeat_n([0.0f32; 4], 3 * slide_total as usize));
         // Vehicle contact: the groups' contact points sorted by cell.
         let total_cp: usize = vehicles.iter().map(|v| v.contact_points.len()).sum();
+        // (Four times: a small group's owners each have their own run, the
+        // kernel's vvPassSmall.)
         let vv_run = beams.len() as u32;
-        beams.extend(std::iter::repeat_n([0.0f32; 4], total_cp));
+        beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * total_cp));
         // gNext: per list position the grid rank, then the wide passes' grid
         // offsets and tested lists (plain words: only the counters are atomic).
         let grid_off_base = lists.len() as u32;
@@ -1004,7 +1006,10 @@ impl ExplicitBeamsGpu {
         // Then the hit lists: per group two hits (two words each) per contact point.
         let vv_hits = vv_rank + total_cp as u32;
         // Then the slide slots' contribution lists.
-        let slot_list_base = (vv_hits as usize + 4 * total_cp) as u32;
+        // (Hits: per group 8 × its points hits of two words: the kernel's vvHitAt,
+        // and vvPassSmall's lists, twice the group's points for each of up to four
+        // owners.)
+        let slot_list_base = (vv_hits as usize + 16 * total_cp) as u32;
         let next_len = slot_list_base as usize + slot_list_len as usize;
         let mut next_init = vec![0u32; next_len.max(1)];
         if any_keys {
