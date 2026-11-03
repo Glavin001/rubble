@@ -121,11 +121,9 @@ Done, in PR #87 (`worktree-blast-gpu-port`):
 - `blast_gpu` in the fracture lab for packs, GLBs and the cuboid houses.
 
 Open:
-- **Chrome fix, uncommitted:** `blast_native` was rejected by Chrome (a barrier under
-  non-uniform control flow from the carry count); fixed, all 34 stress shaders compile in
-  Chrome, the lab's four stress modes pass in headless Chrome. Also uncommitted: the lab-shot
-  test, `stress-gpu/scripts/chrome_wgsl_check.mjs`, `engine-webgpu/fracture/stress-modes-check.mjs`.
-- **`main` has moved** (PR #95); merge again.
+- **Chrome fix committed** (`1e746ddb`): all 34 stress shaders compile in Chrome and the lab's
+  four stress modes pass in headless Chrome (`chrome_wgsl_check.mjs`, `stress-modes-check.mjs`).
+- **`main` has moved** (16 commits as of 2026-11-03); merge again.
 - **An intermittent lab error** on a fast scene-then-mode switch (an old device's buffer in the
   World renderer); not yet shown to predate this branch.
 - **No head-to-head on real scenes**, **no speed comparison**.
