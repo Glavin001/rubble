@@ -1133,14 +1133,13 @@ impl Parser {
         }
         let index = match &mut self.node_plan {
             Some((root, root_seen, module_seen)) => {
-                let i = if in_module {
+                if in_module {
                     *module_seen += 1;
                     *root + *module_seen - 1
                 } else {
                     *root_seen += 1;
                     *root_seen - 1
-                };
-                i
+                }
             }
             None => self.out.nodes.len() as u32,
         };
