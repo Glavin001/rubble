@@ -172,6 +172,15 @@ typedef enum RbStrengthModel {
   // The fracture lab's GPU threshold splitter: bonded clusters are bodies that
   // split on the GPU (its `threshold` mode). Projectiles: `rbBody_SetProjectile`.
   RB_STRENGTH_THRESHOLD = 1,
+  // The threshold model's GPU fracture with the load path deciding the bonds: gravity
+  // and the contact loads carried through the bond graph to the supports, each bond
+  // checked against its tension, shear, compression and bending capacities.
+  RB_STRENGTH_LOAD_PATH = 2,
+  // The threshold model with an analytic local impact deciding a predicted strike
+  // (ballistic limit, plug, back-face spall, strain-rate strength).
+  RB_STRENGTH_IMPACT_LOCAL = 3,
+  // vibe-land's GPU stress solver: Blast's bond-impulse solve decides the bonds each step.
+  RB_STRENGTH_BLAST_GPU = 4,
 } RbStrengthModel;
 
 // What becomes of a crushed chunk's mass.
@@ -182,6 +191,14 @@ typedef enum RbCrushMass {
   // Removed (dust): the host draws it from `RB_CHUNK_CRUSHED`.
   RB_CRUSH_REMOVE = 1,
 } RbCrushMass;
+
+// A stress model's fracture switch (`RbDestructibleDef::contact_fracture`,
+// `strike_prediction`): the model's own, on or off.
+typedef enum RbFractureSwitch {
+  RB_FRACTURE_MODEL_DEFAULT = 0,
+  RB_FRACTURE_ON = 1,
+  RB_FRACTURE_OFF = 2,
+} RbFractureSwitch;
 
 typedef enum RbVehicleDamageType {
   // The wheel falls off as a free body.
@@ -207,12 +224,72 @@ typedef enum RbZoneShape {
   RB_ZONE_ARC = 4,
 } RbZoneShape;
 
+// What a lab scene is built from.
+typedef enum RbLabSource {
+  // A fracture GLB (`bytes`) at hierarchy level `level`.
+  RB_LAB_GLB = 0,
+  // The procedural cuboid house (no bytes).
+  RB_LAB_CUBOID = 1,
+  // A scene pack's JSON (`bytes`).
+  RB_LAB_PACK = 2,
+  // The glass tower and its pavilion (generated; no bytes).
+  RB_LAB_GLASS_TOWER = 3,
+} RbLabSource;
+
+// How copies of the source are arranged.
+typedef enum RbLabArrangement {
+  RB_LAB_ONE = 0,
+  // `layout_columns` × `layout_rows` copies (a row or a grid), or a suburb of them.
+  RB_LAB_LAYOUT = 1,
+  // The 2×2 tower block of a pack with its city (cars, pedestrians).
+  RB_LAB_TOWER_BLOCK = 2,
+  // The tower block with the meteor's ball.
+  RB_LAB_METEOR_BLOCK = 3,
+} RbLabArrangement;
+
+// How the lab's bonds hold.
+typedef enum RbLabBonds {
+  // Loose pieces.
+  RB_LAB_BONDS_NONE = 0,
+  // Breakable D6 joints (settled under self-weight before placing).
+  RB_LAB_BONDS_D6 = 1,
+  // A stress model on the GPU fracture.
+  RB_LAB_BONDS_THRESHOLD = 2,
+  RB_LAB_BONDS_LOAD_PATH = 3,
+  RB_LAB_BONDS_IMPACT_LOCAL = 4,
+  RB_LAB_BONDS_BLAST_GPU = 5,
+} RbLabBonds;
+
+// Chunk crushing (stress models).
+typedef enum RbLabCrush {
+  RB_LAB_CRUSH_OFF = 0,
+  // The scene's own crush parameters.
+  RB_LAB_CRUSH_SCENE = 1,
+  // Those and the cited presets for the other materials.
+  RB_LAB_CRUSH_PRESETS = 2,
+} RbLabCrush;
+
+// A lab action (`rbLab_Queue`).
+typedef enum RbLabAction {
+  // A ball from `origin` along `direction`.
+  RB_LAB_SHOT = 0,
+  RB_LAB_ROW_SHOT = 1,
+  RB_LAB_VOLLEY = 2,
+  RB_LAB_TOPPLE = 3,
+  RB_LAB_METEOR = 4,
+  // The pack's authored shot `index`.
+  RB_LAB_PACK_SHOT = 5,
+} RbLabAction;
+
 typedef enum RbCastShape {
   RB_CAST_RAY = 0,
   RB_CAST_SPHERE = 1,
   // Upright capsule: `radius`, `half_height`.
   RB_CAST_CAPSULE = 2,
 } RbCastShape;
+
+// An opaque lab: its world and its placed scene.
+typedef struct RbLab RbLab;
 
 // An opaque world.
 typedef struct RbWorld RbWorld;
@@ -885,7 +962,7 @@ typedef struct RbDestructibleDef {
   float friction;
   uint64_t user_data;
   enum RbStrengthModel model;
-  // `RB_STRENGTH_THRESHOLD` only: support loss. Each anchored piece's weight flows down its
+  // Stress models only (every model but `RB_STRENGTH_BONDS`): support loss. Each anchored piece's weight flows down its
   // intact bonds, and a bond carrying more than its compressive capacity breaks, so a
   // structure whose supports are shot away collapses. Off by default.
   bool support_loss;
@@ -893,11 +970,18 @@ typedef struct RbDestructibleDef {
   // sudden loss of support (a bond is held to before + k (after - before)). 1 (the
   // default): quasi-static.
   float support_loss_dynamic_factor;
-  // `RB_STRENGTH_THRESHOLD` only: blasts (`rbWorld_Detonate`) load its exposed chunk
+  // Stress models only: blasts (`rbWorld_Detonate`) load its exposed chunk
   // faces with their face pressures. Off by default.
   bool blast_loading;
-  // `RB_STRENGTH_THRESHOLD` only: chunk crushing. Off by default.
+  // Stress models only: chunk crushing. Off by default.
   struct RbCrushDef crush;
+  // Stress models only: the in-step contact fracture (a contact closing on a structure
+  // faster than the strike speed has its load solved within the step, before the solve).
+  // The model's own by default: on for `RB_STRENGTH_LOAD_PATH`, off for the others.
+  enum RbFractureSwitch contact_fracture;
+  // Stress models only: strike prediction for projectiles (`rbBody_SetProjectile`). The
+  // model's own by default: on unless the contact fracture is.
+  enum RbFractureSwitch strike_prediction;
   uint32_t internal_value;
 } RbDestructibleDef;
 
@@ -1127,6 +1211,52 @@ typedef struct RbGuidanceZone {
   struct RbZonePathKey path[8];
   uint32_t internal_value;
 } RbGuidanceZone;
+
+// A lab run (`rbDefaultLabDef`).
+typedef struct RbLabDef {
+  enum RbLabSource source;
+  // The GLB or pack bytes (copied); null with length 0 for the generated sources.
+  const uint8_t *bytes;
+  size_t length;
+  uint8_t level;
+  enum RbLabArrangement arrangement;
+  uint32_t layout_columns;
+  uint32_t layout_rows;
+  bool layout_suburb;
+  enum RbLabBonds bonds;
+  // Physics steps per simulated second (default 60).
+  float physics_hz;
+  float strength_scale;
+  double ball_radius_scale;
+  double ball_mass_scale;
+  double ball_speed_scale;
+  // Continuous collision for the balls.
+  bool ccd;
+  // Stress models: the in-step contact fracture and strike prediction.
+  enum RbFractureSwitch contact_fracture;
+  enum RbFractureSwitch strike_prediction;
+  enum RbLabCrush crush;
+  uint32_t internal_value;
+} RbLabDef;
+
+// A lab's counts (`rbLab_GetStats`).
+typedef struct RbLabStats {
+  uint64_t steps;
+  uint32_t shots;
+  uint32_t chunks;
+  uint32_t bonds;
+  uint32_t bonds_intact;
+  uint32_t bodies;
+  uint32_t crushed;
+  uint32_t awake;
+  uint32_t contacts;
+  // GPU time of a physics step (ms), what it allows, and the share of a second real
+  // time takes; negative where the device does not time steps.
+  double gpu_step_ms;
+  double max_steps_per_second;
+  double realtime_share;
+  float physics_hz;
+} RbLabStats;
 
 // Deformable-terrain settings (from [`rbDefaultTerrainDef`]).
 typedef struct RbTerrainDef {
@@ -1962,6 +2092,30 @@ enum RbResult rbBody_SetGuided(struct RbWorld *world, RbBodyId body, uint32_t ta
 enum RbResult rbDestructible_SetGuided(struct RbWorld *world,
                                        RbDestructibleId id,
                                        uint32_t tag_mask);
+
+struct RbLabDef rbDefaultLabDef(void);
+
+// Build and place a lab run on the default GPU: its scene, its world (D6 bonds settle
+// first, blocking). A combination that cannot work fails with its reason
+// (`rbGetLastError`).
+enum RbResult rbCreateLab(const struct RbLabDef *def, struct RbLab **out);
+
+void rbDestroyLab(struct RbLab *lab);
+
+// Queue `action` to start `delay` steps from now (`origin` and `direction`: a shot's ray,
+// Rubble's frame; `index`: a pack shot's). An action the scene has none of is an error.
+enum RbResult rbLab_Queue(struct RbLab *lab,
+                          enum RbLabAction action,
+                          struct RbVec3 origin,
+                          struct RbVec3 direction,
+                          uint32_t index,
+                          uint64_t delay);
+
+// `steps` steps (each launching the shots due), waiting for each step's results.
+enum RbResult rbLab_Step(struct RbLab *lab, uint32_t steps);
+
+// The lab's counts as of its last step.
+enum RbResult rbLab_GetStats(struct RbLab *lab, struct RbLabStats *out);
 
 // Defaults in `coordinates`' units (lengths, speeds, densities, energies).
 struct RbTerrainDef rbDefaultTerrainDef(enum RbCoordinates coordinates);

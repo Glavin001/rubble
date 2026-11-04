@@ -1809,6 +1809,7 @@ void fr_lp_breaks(uint3 id: SV_DispatchThreadID)
         atom[a_dirty() + body_of(bond.x)].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
     }
 }
 
@@ -2467,6 +2468,7 @@ void il_breaks<let SRC : uint>(uint i)
         atom[a_dirty() + b].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
         if (SRC == 1)
             atom[a_counters() + C_CS_BREAKS].add(1u);
     }
@@ -2907,6 +2909,7 @@ void fr_cs_hertz(uint3 id: SV_DispatchThreadID)
         atom[a_dirty() + b].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
         atom[a_counters() + C_CS_BREAKS].add(1u);
     }
 }
@@ -3111,6 +3114,7 @@ void cs_break(uint i, uint s)
         atom[a_dirty() + s].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
         atom[a_counters() + C_CS_BREAKS].add(1u);
     }
 }
@@ -4033,6 +4037,7 @@ void fr_crush_bonds(uint3 id: SV_DispatchThreadID)
     atom[a_dirty() + body_of(bond.x)].or(1u);
     atom[a_counters() + C_FRAME_BROKEN].add(1u);
     atom[a_counters() + C_BROKEN].add(1u);
+    event_broken(i);
 }
 
 [shader("compute")]

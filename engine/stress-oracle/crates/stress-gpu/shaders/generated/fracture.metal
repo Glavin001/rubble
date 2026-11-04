@@ -1318,34 +1318,66 @@ uint a_counters_1(KernelContext_0 thread* kernelContext_55)
     return _S197 + kernelContext_55->params_0->body_count_0;
 }
 
-void il_breaks_0(uint i_0, KernelContext_0 thread* kernelContext_56)
+uint a_strike_dist_0(KernelContext_0 thread* kernelContext_56)
+{
+    uint _S198 = a_cs_0(0U, kernelContext_56);
+    return _S198 + 12U * kernelContext_56->params_0->body_count_0;
+}
+
+uint a_events_0(KernelContext_0 thread* kernelContext_57)
+{
+    uint _S199 = a_strike_dist_0(kernelContext_57);
+    return _S199 + kernelContext_57->params_0->chunk_count_0;
+}
+
+void event_broken_0(uint bond_0, KernelContext_0 thread* kernelContext_58)
+{
+    if((kernelContext_58->params_0->ev_broken_cap_0) == 0U)
+    {
+        return;
+    }
+    uint _S200 = a_counters_1(kernelContext_58);
+    uint i_0 = atomic_fetch_add_explicit(kernelContext_58->atom_0+(_S200 + 20U), 1U, memory_order_relaxed);
+    if(i_0 < (kernelContext_58->params_0->ev_broken_cap_0))
+    {
+        uint _S201 = a_events_0(kernelContext_58);
+        atomic_store_explicit(kernelContext_58->atom_0+(_S201 + i_0), bond_0, memory_order_relaxed);
+    }
+    else
+    {
+        uint _S202 = atomic_fetch_or_explicit(kernelContext_58->atom_0+(_S200 + 3U), 128U, memory_order_relaxed);
+    }
+    return;
+}
+
+void il_breaks_0(uint i_1, KernelContext_0 thread* kernelContext_59)
 {
     bool cut_0;
-    if(i_0 >= (kernelContext_56->params_0->bond_count_0))
+    if(i_1 >= (kernelContext_59->params_0->bond_count_0))
     {
         cut_0 = true;
     }
     else
     {
-        uint _S198 = w_alive_0(kernelContext_56);
-        cut_0 = (*(kernelContext_56->work_0+(_S198 + i_0))) == 0U;
+        uint _S203 = w_alive_0(kernelContext_59);
+        cut_0 = (*(kernelContext_59->work_0+(_S203 + i_1))) == 0U;
     }
     if(cut_0)
     {
         return;
     }
-    uint4 _S199 = uint4(*(kernelContext_56->bonds_0+i_0)) ;
-    uint _S200 = _S199.x;
-    uint _S201 = body_of_0(_S200, kernelContext_56);
-    bool _S202 = il_struck_0(_S201, kernelContext_56);
-    if(!_S202)
+    uint4 _S204 = uint4(*(kernelContext_59->bonds_0+i_1)) ;
+    uint _S205 = _S204.x;
+    uint _S206 = body_of_0(_S205, kernelContext_59);
+    bool _S207 = il_struck_0(_S206, kernelContext_59);
+    if(!_S207)
     {
         return;
     }
-    uint _S203 = lp_body_0(_S201, kernelContext_56);
-    float4 _S204 = float4(*(kernelContext_56->lp_0+_S203)) ;
-    float4 _S205 = float4(*(kernelContext_56->lp_0+(_S203 + 1U))) ;
-    uint outcome_3 = (as_type<uint>((_S204.w)));
+    uint _S208 = lp_body_0(_S206, kernelContext_59);
+    float4 _S209 = float4(*(kernelContext_59->lp_0+_S208)) ;
+    float4 _S210 = float4(*(kernelContext_59->lp_0+(_S208 + 1U))) ;
+    uint outcome_3 = (as_type<uint>((_S209.w)));
     if((outcome_3 & 14U) == 0U)
     {
         return;
@@ -1353,29 +1385,29 @@ void il_breaks_0(uint i_0, KernelContext_0 thread* kernelContext_56)
     thread float3 contact_5;
     thread float3 d_7;
     thread float speed_4;
-    il_path_0(_S201, &contact_5, &d_7, &speed_4, kernelContext_56);
-    uint _S206 = il_entry_0(_S201, kernelContext_56);
-    IlStriker_0 _S207 = il_striker_0(_S201, kernelContext_56);
-    float _S208 = max(_S207.radius_0, 0.00100000004749745f);
-    float h_3 = _S204.x;
-    IlPlace_0 _S209 = il_place_0(_S200, _S206, contact_5, d_7, _S208, h_3, kernelContext_56);
-    IlPlace_0 _S210 = il_place_0(_S199.y, _S206, contact_5, d_7, _S208, h_3, kernelContext_56);
-    thread IlPlace_0 _S211 = _S209;
-    bool _S212 = il_plug_0(outcome_3, _S208, h_3, &_S211);
-    thread IlPlace_0 _S213 = _S210;
-    bool _S214 = il_plug_0(outcome_3, _S208, h_3, &_S213);
-    if(_S212 != _S214)
+    il_path_0(_S206, &contact_5, &d_7, &speed_4, kernelContext_59);
+    uint _S211 = il_entry_0(_S206, kernelContext_59);
+    IlStriker_0 _S212 = il_striker_0(_S206, kernelContext_59);
+    float _S213 = max(_S212.radius_0, 0.00100000004749745f);
+    float h_3 = _S209.x;
+    IlPlace_0 _S214 = il_place_0(_S205, _S211, contact_5, d_7, _S213, h_3, kernelContext_59);
+    IlPlace_0 _S215 = il_place_0(_S204.y, _S211, contact_5, d_7, _S213, h_3, kernelContext_59);
+    thread IlPlace_0 _S216 = _S214;
+    bool _S217 = il_plug_0(outcome_3, _S213, h_3, &_S216);
+    thread IlPlace_0 _S218 = _S215;
+    bool _S219 = il_plug_0(outcome_3, _S213, h_3, &_S218);
+    if(_S217 != _S219)
     {
         cut_0 = true;
     }
     else
     {
-        float _S215 = _S205.y;
-        thread IlPlace_0 _S216 = _S209;
-        bool _S217 = il_scab_0(outcome_3, _S208, h_3, _S215, &_S216);
-        thread IlPlace_0 _S218 = _S210;
-        bool _S219 = il_scab_0(outcome_3, _S208, h_3, _S215, &_S218);
-        cut_0 = _S217 != _S219;
+        float _S220 = _S210.y;
+        thread IlPlace_0 _S221 = _S214;
+        bool _S222 = il_scab_0(outcome_3, _S213, h_3, _S220, &_S221);
+        thread IlPlace_0 _S223 = _S215;
+        bool _S224 = il_scab_0(outcome_3, _S213, h_3, _S220, &_S223);
+        cut_0 = _S222 != _S224;
     }
     if(cut_0)
     {
@@ -1383,11 +1415,11 @@ void il_breaks_0(uint i_0, KernelContext_0 thread* kernelContext_56)
     }
     else
     {
-        float _S220 = _S205.x;
-        float _S221 = _S205.z;
-        thread IlPlace_0 _S222 = _S209;
-        bool _S223 = il_crater_0(outcome_3, _S208, _S220, _S221, &_S222);
-        cut_0 = _S223;
+        float _S225 = _S210.x;
+        float _S226 = _S210.z;
+        thread IlPlace_0 _S227 = _S214;
+        bool _S228 = il_crater_0(outcome_3, _S213, _S225, _S226, &_S227);
+        cut_0 = _S228;
     }
     if(cut_0)
     {
@@ -1395,22 +1427,23 @@ void il_breaks_0(uint i_0, KernelContext_0 thread* kernelContext_56)
     }
     else
     {
-        float _S224 = _S205.x;
-        float _S225 = _S205.z;
-        thread IlPlace_0 _S226 = _S210;
-        bool _S227 = il_crater_0(outcome_3, _S208, _S224, _S225, &_S226);
-        cut_0 = _S227;
+        float _S229 = _S210.x;
+        float _S230 = _S210.z;
+        thread IlPlace_0 _S231 = _S215;
+        bool _S232 = il_crater_0(outcome_3, _S213, _S229, _S230, &_S231);
+        cut_0 = _S232;
     }
     if(cut_0)
     {
-        uint _S228 = w_alive_0(kernelContext_56);
-        *(kernelContext_56->work_0+(_S228 + i_0)) = 0U;
-        uint _S229 = a_dirty_0(kernelContext_56);
-        uint _S230 = atomic_fetch_or_explicit(kernelContext_56->atom_0+(_S229 + _S201), 1U, memory_order_relaxed);
-        uint _S231 = a_counters_1(kernelContext_56);
-        uint _S232 = atomic_fetch_add_explicit(kernelContext_56->atom_0+_S231, 1U, memory_order_relaxed);
-        uint _S233 = atomic_fetch_add_explicit(kernelContext_56->atom_0+(_S231 + 1U), 1U, memory_order_relaxed);
-        uint _S234 = atomic_fetch_add_explicit(kernelContext_56->atom_0+(_S231 + 17U), 1U, memory_order_relaxed);
+        uint _S233 = w_alive_0(kernelContext_59);
+        *(kernelContext_59->work_0+(_S233 + i_1)) = 0U;
+        uint _S234 = a_dirty_0(kernelContext_59);
+        uint _S235 = atomic_fetch_or_explicit(kernelContext_59->atom_0+(_S234 + _S206), 1U, memory_order_relaxed);
+        uint _S236 = a_counters_1(kernelContext_59);
+        uint _S237 = atomic_fetch_add_explicit(kernelContext_59->atom_0+_S236, 1U, memory_order_relaxed);
+        uint _S238 = atomic_fetch_add_explicit(kernelContext_59->atom_0+(_S236 + 1U), 1U, memory_order_relaxed);
+        event_broken_0(i_1, kernelContext_59);
+        uint _S239 = atomic_fetch_add_explicit(kernelContext_59->atom_0+(_S236 + 17U), 1U, memory_order_relaxed);
     }
     return;
 }
@@ -1420,53 +1453,53 @@ float3 to_rubble_0(float3 v_7)
     return float3(v_7.x, v_7.z, - v_7.y);
 }
 
-float read64_0(uint at_1, float scale_0, KernelContext_0 thread* kernelContext_57)
+float read64_0(uint at_1, float scale_0, KernelContext_0 thread* kernelContext_60)
 {
-    uint _S235 = atomic_load_explicit(kernelContext_57->atom_0+(at_1 + 1U), memory_order_relaxed);
-    int hi_1 = (as_type<int>((_S235)));
-    uint lo_1 = atomic_load_explicit(kernelContext_57->atom_0+at_1, memory_order_relaxed);
+    uint _S240 = atomic_load_explicit(kernelContext_60->atom_0+(at_1 + 1U), memory_order_relaxed);
+    int hi_1 = (as_type<int>((_S240)));
+    uint lo_1 = atomic_load_explicit(kernelContext_60->atom_0+at_1, memory_order_relaxed);
     return (float(hi_1) * 4.294967296e+09f + float(lo_1)) / scale_0;
 }
 
-void il_carry_0(uint k_12, KernelContext_0 thread* kernelContext_58)
+void il_carry_0(uint k_12, KernelContext_0 thread* kernelContext_61)
 {
-    if(k_12 >= (kernelContext_58->params_0->chunk_count_0))
+    if(k_12 >= (kernelContext_61->params_0->chunk_count_0))
     {
         return;
     }
-    uint _S236 = w_carry_0(kernelContext_58);
-    uint _S237 = _S236 + k_12;
-    uint device* _S238 = kernelContext_58->work_0+_S237;
-    uint c_2 = *_S238;
-    if((*_S238) == 0U)
+    uint _S241 = w_carry_0(kernelContext_61);
+    uint _S242 = _S241 + k_12;
+    uint device* _S243 = kernelContext_61->work_0+_S242;
+    uint c_2 = *_S243;
+    if((*_S243) == 0U)
     {
         return;
     }
-    *(kernelContext_58->work_0+_S237) = 0U;
+    *(kernelContext_61->work_0+_S242) = 0U;
     uint b0_0 = c_2 - 1U;
-    bool _S239 = il_struck_0(b0_0, kernelContext_58);
-    if(!_S239)
+    bool _S244 = il_struck_0(b0_0, kernelContext_61);
+    if(!_S244)
     {
         return;
     }
     thread float3 contact_6;
     thread float3 d_8;
     thread float speed_5;
-    il_path_0(b0_0, &contact_6, &d_8, &speed_5, kernelContext_58);
+    il_path_0(b0_0, &contact_6, &d_8, &speed_5, kernelContext_61);
     float3 dr_0 = to_rubble_0(d_8);
-    IlStriker_0 _S240 = il_striker_0(b0_0, kernelContext_58);
-    uint _S241 = a_il_0(b0_0, kernelContext_58);
-    float _S242 = read64_0(_S241 + 2U, kernelContext_58->params_0->scale_m_0, kernelContext_58);
-    float3 v_wall_0 = (float4(*(kernelContext_58->bodies_0+(7U * b0_0 + 3U))) ).xyz;
-    uint _S243 = 7U * _S240.body_0;
-    float3 v_shot_0 = (float4(*(kernelContext_58->bodies_0+(_S243 + 3U))) ).xyz;
+    IlStriker_0 _S245 = il_striker_0(b0_0, kernelContext_61);
+    uint _S246 = a_il_0(b0_0, kernelContext_61);
+    float _S247 = read64_0(_S246 + 2U, kernelContext_61->params_0->scale_m_0, kernelContext_61);
+    float3 v_wall_0 = (float4(*(kernelContext_61->bodies_0+(7U * b0_0 + 3U))) ).xyz;
+    uint _S248 = 7U * _S245.body_0;
+    float3 v_shot_0 = (float4(*(kernelContext_61->bodies_0+(_S248 + 3U))) ).xyz;
     float closing_0 = dot(v_shot_0 - v_wall_0, dr_0);
-    float v_r_0 = _S240.mass_0 * closing_0 / (_S240.mass_0 + _S242);
-    float3 _S244 = v_shot_0 + dr_0 * float3((v_r_0 - closing_0)) ;
-    float3 _S245 = v_wall_0 + dr_0 * float3(v_r_0) ;
-    float _S246 = il_t_in_0(b0_0, kernelContext_58);
-    float3 _S247 = (float4(*(kernelContext_58->bodies_0+_S243)) ).xyz + dr_0 * float3(((speed_5 - v_r_0) * clamp(_S246, 0.0f, kernelContext_58->params_0->dt_0))) ;
-    uint _S248 = body_of_0(k_12, kernelContext_58);
+    float v_r_0 = _S245.mass_0 * closing_0 / (_S245.mass_0 + _S247);
+    float3 _S249 = v_shot_0 + dr_0 * float3((v_r_0 - closing_0)) ;
+    float3 _S250 = v_wall_0 + dr_0 * float3(v_r_0) ;
+    float _S251 = il_t_in_0(b0_0, kernelContext_61);
+    float3 _S252 = (float4(*(kernelContext_61->bodies_0+_S248)) ).xyz + dr_0 * float3(((speed_5 - v_r_0) * clamp(_S251, 0.0f, kernelContext_61->params_0->dt_0))) ;
+    uint _S253 = body_of_0(k_12, kernelContext_61);
     uint region_0 = 0U;
     for(;;)
     {
@@ -1477,23 +1510,23 @@ void il_carry_0(uint k_12, KernelContext_0 thread* kernelContext_58)
         {
             break;
         }
-        uint s_at_0 = 7U * (_S240.body_0 + region_0 * kernelContext_58->params_0->max_bodies_0);
-        (*(kernelContext_58->bodies_0+s_at_0)).xyz = _S247;
-        (*(kernelContext_58->bodies_0+(s_at_0 + 3U))).xyz = _S244;
-        (*(kernelContext_58->bodies_0+(7U * (_S248 + region_0 * kernelContext_58->params_0->max_bodies_0) + 3U))).xyz = _S245;
+        uint s_at_0 = 7U * (_S245.body_0 + region_0 * kernelContext_61->params_0->max_bodies_0);
+        (*(kernelContext_61->bodies_0+s_at_0)).xyz = _S252;
+        (*(kernelContext_61->bodies_0+(s_at_0 + 3U))).xyz = _S249;
+        (*(kernelContext_61->bodies_0+(7U * (_S253 + region_0 * kernelContext_61->params_0->max_bodies_0) + 3U))).xyz = _S250;
         region_0 = region_0 + 1U;
     }
     return;
 }
 
-void add64_0(uint at_2, float value_0, float scale_1, KernelContext_0 thread* kernelContext_59)
+void add64_0(uint at_2, float value_0, float scale_1, KernelContext_0 thread* kernelContext_62)
 {
     float x_1 = round(value_0 * scale_1);
     float x_2;
     if(!((abs(x_1)) < 1.073741824e+09f))
     {
-        uint _S249 = a_counters_1(kernelContext_59);
-        uint _S250 = atomic_fetch_or_explicit(kernelContext_59->atom_0+(_S249 + 3U), 2U, memory_order_relaxed);
+        uint _S254 = a_counters_1(kernelContext_62);
+        uint _S255 = atomic_fetch_or_explicit(kernelContext_62->atom_0+(_S254 + 3U), 2U, memory_order_relaxed);
         x_2 = 0.0f;
     }
     else
@@ -1502,7 +1535,7 @@ void add64_0(uint at_2, float value_0, float scale_1, KernelContext_0 thread* ke
     }
     int v_8 = int(x_2);
     uint lo_2 = (as_type<uint>((v_8)));
-    uint old_0 = atomic_fetch_add_explicit(kernelContext_59->atom_0+at_2, lo_2, memory_order_relaxed);
+    uint old_0 = atomic_fetch_add_explicit(kernelContext_62->atom_0+at_2, lo_2, memory_order_relaxed);
     uint carry_0;
     if((old_0 + lo_2) < old_0)
     {
@@ -1512,39 +1545,39 @@ void add64_0(uint at_2, float value_0, float scale_1, KernelContext_0 thread* ke
     {
         carry_0 = 0U;
     }
-    uint _S251;
+    uint _S256;
     if(v_8 < int(0))
     {
-        _S251 = 4294967295U;
+        _S256 = 4294967295U;
     }
     else
     {
-        _S251 = 0U;
+        _S256 = 0U;
     }
-    uint hi_2 = _S251 + carry_0;
+    uint hi_2 = _S256 + carry_0;
     if(hi_2 != 0U)
     {
-        uint _S252 = atomic_fetch_add_explicit(kernelContext_59->atom_0+(at_2 + 1U), hi_2, memory_order_relaxed);
+        uint _S257 = atomic_fetch_add_explicit(kernelContext_62->atom_0+(at_2 + 1U), hi_2, memory_order_relaxed);
     }
     return;
 }
 
-void il_mark_0(uint k_13, KernelContext_0 thread* kernelContext_60)
+void il_mark_0(uint k_13, KernelContext_0 thread* kernelContext_63)
 {
-    if(k_13 >= (kernelContext_60->params_0->chunk_count_0))
+    if(k_13 >= (kernelContext_63->params_0->chunk_count_0))
     {
         return;
     }
-    uint _S253 = body_of_0(k_13, kernelContext_60);
-    bool _S254 = il_struck_0(_S253, kernelContext_60);
-    if(!_S254)
+    uint _S258 = body_of_0(k_13, kernelContext_63);
+    bool _S259 = il_struck_0(_S258, kernelContext_63);
+    if(!_S259)
     {
         return;
     }
-    uint _S255 = lp_body_0(_S253, kernelContext_60);
-    float4 _S256 = float4(*(kernelContext_60->lp_0+_S255)) ;
-    float4 _S257 = float4(*(kernelContext_60->lp_0+(_S255 + 1U))) ;
-    uint outcome_4 = (as_type<uint>((_S256.w)));
+    uint _S260 = lp_body_0(_S258, kernelContext_63);
+    float4 _S261 = float4(*(kernelContext_63->lp_0+_S260)) ;
+    float4 _S262 = float4(*(kernelContext_63->lp_0+(_S260 + 1U))) ;
+    uint outcome_4 = (as_type<uint>((_S261.w)));
     if((outcome_4 & 14U) == 0U)
     {
         return;
@@ -1552,23 +1585,23 @@ void il_mark_0(uint k_13, KernelContext_0 thread* kernelContext_60)
     thread float3 contact_7;
     thread float3 d_9;
     thread float speed_6;
-    il_path_0(_S253, &contact_7, &d_9, &speed_6, kernelContext_60);
-    uint _S258 = il_entry_0(_S253, kernelContext_60);
-    IlStriker_0 _S259 = il_striker_0(_S253, kernelContext_60);
-    float _S260 = max(_S259.radius_0, 0.00100000004749745f);
-    float _S261 = _S256.x;
-    IlPlace_0 _S262 = il_place_0(k_13, _S258, contact_7, d_9, _S260, _S261, kernelContext_60);
-    thread IlPlace_0 _S263 = _S262;
-    bool _S264 = il_plug_0(outcome_4, _S260, _S261, &_S263);
-    if((_S259.launch_0) != 0U)
+    il_path_0(_S258, &contact_7, &d_9, &speed_6, kernelContext_63);
+    uint _S263 = il_entry_0(_S258, kernelContext_63);
+    IlStriker_0 _S264 = il_striker_0(_S258, kernelContext_63);
+    float _S265 = max(_S264.radius_0, 0.00100000004749745f);
+    float _S266 = _S261.x;
+    IlPlace_0 _S267 = il_place_0(k_13, _S263, contact_7, d_9, _S265, _S266, kernelContext_63);
+    thread IlPlace_0 _S268 = _S267;
+    bool _S269 = il_plug_0(outcome_4, _S265, _S266, &_S268);
+    if((_S264.launch_0) != 0U)
     {
-        float2 _S265 = il_interval_0(k_13, contact_7 - d_9 * float3(_S259.bound_0) , d_9, _S259.bound_0, kernelContext_60);
-        float _S266 = _S265.x;
-        float _S267 = _S265.y;
+        float2 _S270 = il_interval_0(k_13, contact_7 - d_9 * float3(_S264.bound_0) , d_9, _S264.bound_0, kernelContext_63);
+        float _S271 = _S270.x;
+        float _S272 = _S270.y;
         bool path_0;
-        if(_S266 <= _S267)
+        if(_S271 <= _S272)
         {
-            path_0 = _S266 <= (_S261 + 2.0f * _S259.bound_0);
+            path_0 = _S271 <= (_S266 + 2.0f * _S264.bound_0);
         }
         else
         {
@@ -1576,13 +1609,13 @@ void il_mark_0(uint k_13, KernelContext_0 thread* kernelContext_60)
         }
         if(path_0)
         {
-            path_0 = _S267 >= 0.0f;
+            path_0 = _S272 >= 0.0f;
         }
         else
         {
             path_0 = false;
         }
-        if(_S264)
+        if(_S269)
         {
             path_0 = true;
         }
@@ -1592,10 +1625,10 @@ void il_mark_0(uint k_13, KernelContext_0 thread* kernelContext_60)
         }
         else
         {
-            float _S268 = _S257.y;
-            thread IlPlace_0 _S269 = _S262;
-            bool _S270 = il_scab_0(outcome_4, _S260, _S261, _S268, &_S269);
-            path_0 = _S270;
+            float _S273 = _S262.y;
+            thread IlPlace_0 _S274 = _S267;
+            bool _S275 = il_scab_0(outcome_4, _S265, _S266, _S273, &_S274);
+            path_0 = _S275;
         }
         if(path_0)
         {
@@ -1603,24 +1636,24 @@ void il_mark_0(uint k_13, KernelContext_0 thread* kernelContext_60)
         }
         else
         {
-            float _S271 = _S257.x;
-            float _S272 = _S257.z;
-            thread IlPlace_0 _S273 = _S262;
-            bool _S274 = il_crater_0(outcome_4, _S260, _S271, _S272, &_S273);
-            path_0 = _S274;
+            float _S276 = _S262.x;
+            float _S277 = _S262.z;
+            thread IlPlace_0 _S278 = _S267;
+            bool _S279 = il_crater_0(outcome_4, _S265, _S276, _S277, &_S278);
+            path_0 = _S279;
         }
         if(path_0)
         {
-            uint _S275 = w_marks_0(kernelContext_60);
-            *(kernelContext_60->work_0+(_S275 + k_13)) = _S259.launch_0;
+            uint _S280 = w_marks_0(kernelContext_63);
+            *(kernelContext_63->work_0+(_S280 + k_13)) = _S264.launch_0;
         }
     }
-    if(_S264)
+    if(_S269)
     {
-        uint _S276 = w_carry_0(kernelContext_60);
-        *(kernelContext_60->work_0+(_S276 + k_13)) = _S253 + 1U;
-        uint _S277 = a_il_0(_S253, kernelContext_60);
-        add64_0(_S277 + 2U, (float4(*(kernelContext_60->chunks_0+4U * k_13)) ).w, kernelContext_60->params_0->scale_m_0, kernelContext_60);
+        uint _S281 = w_carry_0(kernelContext_63);
+        *(kernelContext_63->work_0+(_S281 + k_13)) = _S258 + 1U;
+        uint _S282 = a_il_0(_S258, kernelContext_63);
+        add64_0(_S282 + 2U, (float4(*(kernelContext_63->chunks_0+4U * k_13)) ).w, kernelContext_63->params_0->scale_m_0, kernelContext_63);
     }
     return;
 }
@@ -1637,57 +1670,57 @@ struct JointMaterial_0
 float dif_factor_0(const JointMaterial_0 thread* mat_0, float strain_rate_0)
 {
     float r_16 = abs(strain_rate_0);
-    float4 _S278 = mat_0->dif_0;
+    float4 _S283 = mat_0->dif_0;
     float ref_0 = mat_0->dif_0.x;
     if(r_16 <= ref_0)
     {
         return 1.0f;
     }
-    float _S279 = _S278.z;
+    float _S284 = _S283.z;
     float f_0;
-    if(r_16 <= _S279)
+    if(r_16 <= _S284)
     {
-        float _S280 = (metal::fast::divide((r_16), (ref_0)));
-        float _S281 = (metal::fast::pow((_S280), (_S278.y)));
-        f_0 = _S281;
+        float _S285 = (metal::fast::divide((r_16), (ref_0)));
+        float _S286 = (metal::fast::pow((_S285), (_S283.y)));
+        f_0 = _S286;
     }
     else
     {
-        float _S282 = (metal::fast::divide((_S279), (ref_0)));
-        float _S283 = (metal::fast::pow((_S282), (_S278.y)));
-        float _S284 = (metal::fast::divide((r_16), (_S279)));
-        float _S285 = (metal::fast::pow((_S284), (_S278.w)));
-        f_0 = _S283 * _S285;
+        float _S287 = (metal::fast::divide((_S284), (ref_0)));
+        float _S288 = (metal::fast::pow((_S287), (_S283.y)));
+        float _S289 = (metal::fast::divide((r_16), (_S284)));
+        float _S290 = (metal::fast::pow((_S289), (_S283.w)));
+        f_0 = _S288 * _S290;
     }
     return clamp(f_0, 1.0f, mat_0->misc_0.x);
 }
 
-void il_impulse_0(uint b_20, uint sb_0, float m_shot_0, float3 contact_8, float3 d_10, float j_0, KernelContext_0 thread* kernelContext_61)
+void il_impulse_0(uint b_20, uint sb_0, float m_shot_0, float3 contact_8, float3 d_10, float j_0, KernelContext_0 thread* kernelContext_64)
 {
     float3 jr_0 = to_rubble_0(d_10) * float3(j_0) ;
     uint at_3 = 7U * b_20;
-    float inv_mass_1 = (float4(*(kernelContext_61->bodies_0+at_3)) ).w;
-    float3 _S286 = jr_0 * float3(inv_mass_1) ;
-    float3 _S287 = float3(0.0f) ;
+    float inv_mass_1 = (float4(*(kernelContext_64->bodies_0+at_3)) ).w;
+    float3 _S291 = jr_0 * float3(inv_mass_1) ;
+    float3 _S292 = float3(0.0f) ;
     float3 dw_0;
     if(inv_mass_1 > 0.0f)
     {
-        Quat_0 q_10 = quat_of_0(float4(*(kernelContext_61->bodies_0+(at_3 + 1U))) );
-        float3 r_17 = to_rubble_0(contact_8) - (float4(*(kernelContext_61->bodies_0+at_3)) ).xyz;
-        float3 _S288 = (float4(*(kernelContext_61->bodies_0+(at_3 + 2U))) ).xyz;
-        thread Quat_0 _S289 = q_10;
-        Quat_0 _S290 = conj_0(&_S289);
-        float3 _S291 = cross(r_17, jr_0);
-        thread Quat_0 _S292 = _S290;
-        float3 _S293 = rotate_0(&_S292, _S291);
-        float3 _S294 = _S288 * _S293;
-        thread Quat_0 _S295 = q_10;
-        float3 _S296 = rotate_0(&_S295, _S294);
-        dw_0 = _S296;
+        Quat_0 q_10 = quat_of_0(float4(*(kernelContext_64->bodies_0+(at_3 + 1U))) );
+        float3 r_17 = to_rubble_0(contact_8) - (float4(*(kernelContext_64->bodies_0+at_3)) ).xyz;
+        float3 _S293 = (float4(*(kernelContext_64->bodies_0+(at_3 + 2U))) ).xyz;
+        thread Quat_0 _S294 = q_10;
+        Quat_0 _S295 = conj_0(&_S294);
+        float3 _S296 = cross(r_17, jr_0);
+        thread Quat_0 _S297 = _S295;
+        float3 _S298 = rotate_0(&_S297, _S296);
+        float3 _S299 = _S293 * _S298;
+        thread Quat_0 _S300 = q_10;
+        float3 _S301 = rotate_0(&_S300, _S299);
+        dw_0 = _S301;
     }
     else
     {
-        dw_0 = _S287;
+        dw_0 = _S292;
     }
     uint region_1 = 0U;
     for(;;)
@@ -1699,46 +1732,46 @@ void il_impulse_0(uint b_20, uint sb_0, float m_shot_0, float3 contact_8, float3
         {
             break;
         }
-        uint s_at_1 = 7U * (sb_0 + region_1 * kernelContext_61->params_0->max_bodies_0) + 3U;
-        (*(kernelContext_61->bodies_0+s_at_1)).xyz = (float4(*(kernelContext_61->bodies_0+s_at_1)) ).xyz - jr_0 / float3(m_shot_0) ;
-        uint w_at_0 = 7U * (b_20 + region_1 * kernelContext_61->params_0->max_bodies_0);
-        uint _S297 = w_at_0 + 3U;
-        (*(kernelContext_61->bodies_0+_S297)).xyz = (float4(*(kernelContext_61->bodies_0+_S297)) ).xyz + _S286;
-        uint _S298 = w_at_0 + 4U;
-        (*(kernelContext_61->bodies_0+_S298)).xyz = (float4(*(kernelContext_61->bodies_0+_S298)) ).xyz + dw_0;
+        uint s_at_1 = 7U * (sb_0 + region_1 * kernelContext_64->params_0->max_bodies_0) + 3U;
+        (*(kernelContext_64->bodies_0+s_at_1)).xyz = (float4(*(kernelContext_64->bodies_0+s_at_1)) ).xyz - jr_0 / float3(m_shot_0) ;
+        uint w_at_0 = 7U * (b_20 + region_1 * kernelContext_64->params_0->max_bodies_0);
+        uint _S302 = w_at_0 + 3U;
+        (*(kernelContext_64->bodies_0+_S302)).xyz = (float4(*(kernelContext_64->bodies_0+_S302)) ).xyz + _S291;
+        uint _S303 = w_at_0 + 4U;
+        (*(kernelContext_64->bodies_0+_S303)).xyz = (float4(*(kernelContext_64->bodies_0+_S303)) ).xyz + dw_0;
         region_1 = region_1 + 1U;
     }
     return;
 }
 
-void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
+void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_65)
 {
     bool damage_0;
-    if(b_21 >= (kernelContext_62->params_0->body_count_0))
+    if(b_21 >= (kernelContext_65->params_0->body_count_0))
     {
         damage_0 = true;
     }
     else
     {
-        bool _S299 = il_struck_0(b_21, kernelContext_62);
-        damage_0 = !_S299;
+        bool _S304 = il_struck_0(b_21, kernelContext_65);
+        damage_0 = !_S304;
     }
     if(damage_0)
     {
         return;
     }
-    float _S300 = il_t_in_0(b_21, kernelContext_62);
-    uint _S301 = il_entry_0(b_21, kernelContext_62);
+    float _S305 = il_t_in_0(b_21, kernelContext_65);
+    uint _S306 = il_entry_0(b_21, kernelContext_65);
     thread float3 contact_9;
     thread float3 d_11;
     thread float speed_7;
-    il_path_0(b_21, &contact_9, &d_11, &speed_7, kernelContext_62);
-    IlStriker_0 _S302 = il_striker_0(b_21, kernelContext_62);
-    float _S303 = max(_S302.radius_0, 0.00100000004749745f);
-    if((_S302.launch_0) != 0U)
+    il_path_0(b_21, &contact_9, &d_11, &speed_7, kernelContext_65);
+    IlStriker_0 _S307 = il_striker_0(b_21, kernelContext_65);
+    float _S308 = max(_S307.radius_0, 0.00100000004749745f);
+    if((_S307.launch_0) != 0U)
     {
-        uint _S304 = w_marks_0(kernelContext_62);
-        damage_0 = (*(kernelContext_62->work_0+(_S304 + _S301))) == (_S302.launch_0);
+        uint _S309 = w_marks_0(kernelContext_65);
+        damage_0 = (*(kernelContext_65->work_0+(_S309 + _S306))) == (_S307.launch_0);
     }
     else
     {
@@ -1746,52 +1779,52 @@ void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
     }
     if(damage_0)
     {
-        uint _S305 = lp_body_0(b_21, kernelContext_62);
-        packed_float4 _S306 = packed_float4(float4(0.0f) ) ;
-        *(kernelContext_62->lp_0+_S305) = _S306;
-        *(kernelContext_62->lp_0+(_S305 + 1U)) = _S306;
+        uint _S310 = lp_body_0(b_21, kernelContext_65);
+        packed_float4 _S311 = packed_float4(float4(0.0f) ) ;
+        *(kernelContext_65->lp_0+_S310) = _S311;
+        *(kernelContext_65->lp_0+(_S310 + 1U)) = _S311;
         return;
     }
-    uint _S307 = a_il_0(b_21, kernelContext_62);
-    uint _S308 = atomic_load_explicit(kernelContext_62->atom_0+_S307, memory_order_relaxed);
-    float _S309 = max((as_type<float>((_S308))) - _S303, 9.99999997475242708e-07f);
-    uint o_2 = kernelContext_62->params_0->ext_chunks_0 + 4U * _S301;
-    float4 _S310 = float4(*(kernelContext_62->ext_0+(o_2 + 1U))) ;
+    uint _S312 = a_il_0(b_21, kernelContext_65);
+    uint _S313 = atomic_load_explicit(kernelContext_65->atom_0+_S312, memory_order_relaxed);
+    float _S314 = max((as_type<float>((_S313))) - _S308, 9.99999997475242708e-07f);
+    uint o_2 = kernelContext_65->params_0->ext_chunks_0 + 4U * _S306;
+    float4 _S315 = float4(*(kernelContext_65->ext_0+(o_2 + 1U))) ;
     thread JointMaterial_0 dm_0;
-    float4 _S311 = float4(0.0f) ;
-    (&dm_0)->strength_0 = _S311;
-    (&dm_0)->energy_0 = _S311;
-    (&dm_0)->dif_0 = float4(*(kernelContext_62->ext_0+(o_2 + 2U))) ;
-    float4 _S312 = float4(*(kernelContext_62->ext_0+(o_2 + 3U))) ;
-    float _S313 = _S312.x;
-    (&dm_0)->misc_0 = float4(_S313, 0.0f, 0.0f, 0.0f);
+    float4 _S316 = float4(0.0f) ;
+    (&dm_0)->strength_0 = _S316;
+    (&dm_0)->energy_0 = _S316;
+    (&dm_0)->dif_0 = float4(*(kernelContext_65->ext_0+(o_2 + 2U))) ;
+    float4 _S317 = float4(*(kernelContext_65->ext_0+(o_2 + 3U))) ;
+    float _S318 = _S317.x;
+    (&dm_0)->misc_0 = float4(_S318, 0.0f, 0.0f, 0.0f);
     (&dm_0)->kind_flags_0 = uint4(0U) ;
-    float nu_0 = _S312.y;
-    float e_target_0 = _S312.z / (1.0f - nu_0 * nu_0);
-    float e_star_0 = 1.0f / (1.0f / _S302.modulus_0 + 1.0f / e_target_0);
-    float _S314 = max(speed_7, 0.00100000004749745f);
-    float _S315 = sqrt(_S303);
-    float h0_0 = pow(15.0f * _S302.m_eff_0 * _S314 * _S314 / (16.0f * e_star_0 * _S315), 0.40000000596046448f);
-    float t_c_0 = 2.94000005722045898f * h0_0 / _S314;
-    float force_0 = 1.33333337306976318f * e_star_0 * _S315 * pow(h0_0, 1.5f);
-    float a_3 = sqrt(_S303 * h0_0);
+    float nu_0 = _S317.y;
+    float e_target_0 = _S317.z / (1.0f - nu_0 * nu_0);
+    float e_star_0 = 1.0f / (1.0f / _S307.modulus_0 + 1.0f / e_target_0);
+    float _S319 = max(speed_7, 0.00100000004749745f);
+    float _S320 = sqrt(_S308);
+    float h0_0 = pow(15.0f * _S307.m_eff_0 * _S319 * _S319 / (16.0f * e_star_0 * _S320), 0.40000000596046448f);
+    float t_c_0 = 2.94000005722045898f * h0_0 / _S319;
+    float force_0 = 1.33333337306976318f * e_star_0 * _S320 * pow(h0_0, 1.5f);
+    float a_3 = sqrt(_S308 * h0_0);
     float p0_0 = 3.0f * force_0 / (6.28318548202514648f * a_3 * a_3);
     float ring_0 = (1.0f - 2.0f * nu_0) * p0_0 / 3.0f;
     float k_14;
-    if(_S313 > 0.0f)
+    if(_S318 > 0.0f)
     {
-        float _S316 = _S314 / _S309;
-        thread JointMaterial_0 _S317 = dm_0;
-        float _S318 = dif_factor_0(&_S317, _S316);
-        k_14 = _S318;
+        float _S321 = _S319 / _S314;
+        thread JointMaterial_0 _S322 = dm_0;
+        float _S323 = dif_factor_0(&_S322, _S321);
+        k_14 = _S323;
     }
     else
     {
         k_14 = 1.0f;
     }
-    float ft_0 = k_14 * _S310.y;
-    float fc_0 = k_14 * _S310.z;
-    float tau_0 = k_14 * _S310.w;
+    float ft_0 = k_14 * _S315.y;
+    float fc_0 = k_14 * _S315.z;
+    float tau_0 = k_14 * _S315.w;
     if(p0_0 > fc_0)
     {
         damage_0 = true;
@@ -1800,26 +1833,26 @@ void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
     {
         damage_0 = ring_0 > ft_0;
     }
-    float _S319 = fc_0 * (3.14159274101257324f * _S303 * _S303);
-    float _S320 = min(_S319 * _S309, 1.57079637050628662f * (2.0f * _S303 + _S309) * _S309 * _S309 * tau_0);
-    float _S321 = 2.0f * _S320;
-    float v_bl_0 = sqrt(_S321 / _S302.m_eff_0);
+    float _S324 = fc_0 * (3.14159274101257324f * _S308 * _S308);
+    float _S325 = min(_S324 * _S314, 1.57079637050628662f * (2.0f * _S308 + _S314) * _S314 * _S314 * tau_0);
+    float _S326 = 2.0f * _S325;
+    float v_bl_0 = sqrt(_S326 / _S307.m_eff_0);
     bool perforate_0;
     if(damage_0)
     {
-        perforate_0 = _S314 >= v_bl_0;
+        perforate_0 = _S319 >= v_bl_0;
     }
     else
     {
         perforate_0 = false;
     }
-    float r2_0 = _S303 + _S309;
-    float _S322 = _S310.x;
-    float plug_0 = _S322 * 3.14159274101257324f * _S309 / 3.0f * (_S303 * _S303 + _S303 * r2_0 + r2_0 * r2_0);
+    float r2_0 = _S308 + _S314;
+    float _S327 = _S315.x;
+    float plug_0 = _S327 * 3.14159274101257324f * _S314 / 3.0f * (_S308 * _S308 + _S308 * r2_0 + r2_0 * r2_0);
     float v_res_0;
     if(perforate_0)
     {
-        v_res_0 = _S302.mass_0 / (_S302.mass_0 + plug_0) * sqrt(max(_S314 * _S314 - v_bl_0 * v_bl_0, 0.0f));
+        v_res_0 = _S307.mass_0 / (_S307.mass_0 + plug_0) * sqrt(max(_S319 * _S319 - v_bl_0 * v_bl_0, 0.0f));
     }
     else
     {
@@ -1837,30 +1870,30 @@ void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
     float depth_1;
     if(spall_0)
     {
-        depth_1 = min(0.5f * _S302.m_eff_0 * _S314 * _S314 / _S319, _S309);
+        depth_1 = min(0.5f * _S307.m_eff_0 * _S319 * _S319 / _S324, _S314);
     }
     else
     {
         depth_1 = 0.0f;
     }
     bool crater_0 = depth_1 > a_3;
-    float c_3 = sqrt(e_target_0 / _S322);
-    float z_t_0 = _S322 * c_3;
-    float rho_p_0 = _S302.mass_0 / (4.18879032135009766f * _S303 * _S303 * _S303);
-    float z_p_0 = rho_p_0 * sqrt(_S302.modulus_0 / rho_p_0);
+    float c_3 = sqrt(e_target_0 / _S327);
+    float z_t_0 = _S327 * c_3;
+    float rho_p_0 = _S307.mass_0 / (4.18879032135009766f * _S308 * _S308 * _S308);
+    float z_p_0 = rho_p_0 * sqrt(_S307.modulus_0 / rho_p_0);
     float mean_pressure_0 = force_0 / (3.14159274101257324f * a_3 * a_3);
-    float _S323 = min(min(z_t_0 * _S314 * z_p_0 / (z_p_0 + z_t_0), mean_pressure_0), fc_0);
+    float _S328 = min(min(z_t_0 * _S319 * z_p_0 / (z_p_0 + z_t_0), mean_pressure_0), fc_0);
     float source_radius_0;
     if(mean_pressure_0 > fc_0)
     {
-        source_radius_0 = max(a_3, _S303);
+        source_radius_0 = max(a_3, _S308);
     }
     else
     {
         source_radius_0 = a_3;
     }
     float pulse_0 = c_3 * t_c_0;
-    float back_0 = _S323 * min(source_radius_0 / _S309, 1.0f) * min(2.0f * _S309 / pulse_0, 1.0f);
+    float back_0 = _S328 * min(source_radius_0 / _S314, 1.0f) * min(2.0f * _S314 / pulse_0, 1.0f);
     if(damage_0)
     {
         spall_0 = !perforate_0;
@@ -1880,7 +1913,7 @@ void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
     float scab_1;
     if(spall_0)
     {
-        scab_1 = 0.5f * min(pulse_0, _S309);
+        scab_1 = 0.5f * min(pulse_0, _S314);
     }
     else
     {
@@ -1895,16 +1928,16 @@ void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
     {
         region_2 = 0U;
     }
-    uint _S324;
+    uint _S329;
     if(crater_0)
     {
-        _S324 = 2U;
+        _S329 = 2U;
     }
     else
     {
-        _S324 = 0U;
+        _S329 = 0U;
     }
-    uint _S325 = region_2 | _S324;
+    uint _S330 = region_2 | _S329;
     if(spall_0)
     {
         region_2 = 4U;
@@ -1913,7 +1946,7 @@ void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
     {
         region_2 = 0U;
     }
-    uint _S326 = _S325 | region_2;
+    uint _S331 = _S330 | region_2;
     if(perforate_0)
     {
         region_2 = 8U;
@@ -1922,10 +1955,10 @@ void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
     {
         region_2 = 0U;
     }
-    uint outcome_5 = _S326 | region_2;
-    uint _S327 = lp_body_0(b_21, kernelContext_62);
-    *(kernelContext_62->lp_0+_S327) = packed_float4(float4(_S309, v_bl_0, v_res_0, (as_type<float>((outcome_5))))) ;
-    packed_float4 device* _S328 = kernelContext_62->lp_0+(_S327 + 1U);
+    uint outcome_5 = _S331 | region_2;
+    uint _S332 = lp_body_0(b_21, kernelContext_65);
+    *(kernelContext_65->lp_0+_S332) = packed_float4(float4(_S314, v_bl_0, v_res_0, (as_type<float>((outcome_5))))) ;
+    packed_float4 device* _S333 = kernelContext_65->lp_0+(_S332 + 1U);
     if(crater_0)
     {
         k_14 = depth_1;
@@ -1934,46 +1967,46 @@ void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
     {
         k_14 = 0.0f;
     }
-    *_S328 = packed_float4(float4(k_14, scab_1, a_3, _S320)) ;
+    *_S333 = packed_float4(float4(k_14, scab_1, a_3, _S325)) ;
     if(perforate_0)
     {
-        uint _S329 = a_counters_1(kernelContext_62);
-        uint _S330 = atomic_fetch_add_explicit(kernelContext_62->atom_0+(_S329 + 14U), 1U, memory_order_relaxed);
+        uint _S334 = a_counters_1(kernelContext_65);
+        uint _S335 = atomic_fetch_add_explicit(kernelContext_65->atom_0+(_S334 + 14U), 1U, memory_order_relaxed);
     }
     else
     {
         if(spall_0)
         {
-            uint _S331 = a_counters_1(kernelContext_62);
-            uint _S332 = atomic_fetch_add_explicit(kernelContext_62->atom_0+(_S331 + 13U), 1U, memory_order_relaxed);
+            uint _S336 = a_counters_1(kernelContext_65);
+            uint _S337 = atomic_fetch_add_explicit(kernelContext_65->atom_0+(_S336 + 13U), 1U, memory_order_relaxed);
         }
         else
         {
             if(crater_0)
             {
-                uint _S333 = a_counters_1(kernelContext_62);
-                uint _S334 = atomic_fetch_add_explicit(kernelContext_62->atom_0+(_S333 + 12U), 1U, memory_order_relaxed);
+                uint _S338 = a_counters_1(kernelContext_65);
+                uint _S339 = atomic_fetch_add_explicit(kernelContext_65->atom_0+(_S338 + 12U), 1U, memory_order_relaxed);
             }
             else
             {
-                uint _S335 = a_counters_1(kernelContext_62);
-                uint _S336 = atomic_fetch_add_explicit(kernelContext_62->atom_0+(_S335 + 11U), 1U, memory_order_relaxed);
+                uint _S340 = a_counters_1(kernelContext_65);
+                uint _S341 = atomic_fetch_add_explicit(kernelContext_65->atom_0+(_S340 + 11U), 1U, memory_order_relaxed);
             }
         }
     }
     if(perforate_0)
     {
-        if((kernelContext_62->params_0->fracture_work_0) != 0U)
+        if((kernelContext_65->params_0->fracture_work_0) != 0U)
         {
-            il_impulse_0(b_21, _S302.body_0, _S302.mass_0, contact_9, d_11, _S302.m_eff_0 * (_S314 - sqrt(max(_S314 * _S314 - _S321 / _S302.m_eff_0, 0.0f))), kernelContext_62);
+            il_impulse_0(b_21, _S307.body_0, _S307.mass_0, contact_9, d_11, _S307.m_eff_0 * (_S319 - sqrt(max(_S319 * _S319 - _S326 / _S307.m_eff_0, 0.0f))), kernelContext_65);
         }
     }
     else
     {
         if(damage_0)
         {
-            il_impulse_0(b_21, _S302.body_0, _S302.mass_0, contact_9, d_11, _S302.m_eff_0 * _S314, kernelContext_62);
-            float3 _S337 = to_rubble_0(d_11) * float3((_S314 * clamp(_S300, 0.0f, kernelContext_62->params_0->dt_0))) ;
+            il_impulse_0(b_21, _S307.body_0, _S307.mass_0, contact_9, d_11, _S307.m_eff_0 * _S319, kernelContext_65);
+            float3 _S342 = to_rubble_0(d_11) * float3((_S319 * clamp(_S305, 0.0f, kernelContext_65->params_0->dt_0))) ;
             region_2 = 0U;
             for(;;)
             {
@@ -1984,8 +2017,8 @@ void il_strike_0(uint b_21, KernelContext_0 thread* kernelContext_62)
                 {
                     break;
                 }
-                uint _S338 = 7U * (_S302.body_0 + region_2 * kernelContext_62->params_0->max_bodies_0);
-                (*(kernelContext_62->bodies_0+_S338)).xyz = (float4(*(kernelContext_62->bodies_0+_S338)) ).xyz + _S337;
+                uint _S343 = 7U * (_S307.body_0 + region_2 * kernelContext_65->params_0->max_bodies_0);
+                (*(kernelContext_65->bodies_0+_S343)).xyz = (float4(*(kernelContext_65->bodies_0+_S343)) ).xyz + _S342;
                 region_2 = region_2 + 1U;
             }
         }
@@ -2003,11 +2036,11 @@ float group_uniform_float_0(float value_2, uint thread_1)
     return value_2;
 }
 
-void il_run_0(uint b_22, uint i_1, KernelContext_0 thread* kernelContext_63)
+void il_run_0(uint b_22, uint i_2, KernelContext_0 thread* kernelContext_66)
 {
-    bool _S339 = il_struck_0(b_22, kernelContext_63);
+    bool _S344 = il_struck_0(b_22, kernelContext_66);
     uint j_1;
-    if(_S339)
+    if(_S344)
     {
         j_1 = 1U;
     }
@@ -2015,39 +2048,39 @@ void il_run_0(uint b_22, uint i_1, KernelContext_0 thread* kernelContext_63)
     {
         j_1 = 0U;
     }
-    if((group_uniform_0(j_1, i_1)) == 0U)
+    if((group_uniform_0(j_1, i_2)) == 0U)
     {
         return;
     }
-    IlStriker_0 _S340 = il_striker_0(b_22, kernelContext_63);
-    float _S341 = 0.00100000004749745f + 0.01999999955296516f * _S340.radius_0;
-    uint _S342 = a_il_0(b_22, kernelContext_63);
-    uint _S343 = atomic_load_explicit(kernelContext_63->atom_0+(_S342 + 4U), memory_order_relaxed);
-    uint _S344 = atomic_load_explicit(kernelContext_63->atom_0+(_S342 + 1U), memory_order_relaxed);
-    uint _S345 = atomic_load_explicit(kernelContext_63->atom_0+_S342, memory_order_relaxed);
-    float end_0 = group_uniform_float_0((as_type<float>((_S345))), i_1);
+    IlStriker_0 _S345 = il_striker_0(b_22, kernelContext_66);
+    float _S346 = 0.00100000004749745f + 0.01999999955296516f * _S345.radius_0;
+    uint _S347 = a_il_0(b_22, kernelContext_66);
+    uint _S348 = atomic_load_explicit(kernelContext_66->atom_0+(_S347 + 4U), memory_order_relaxed);
+    uint _S349 = atomic_load_explicit(kernelContext_66->atom_0+(_S347 + 1U), memory_order_relaxed);
+    uint _S350 = atomic_load_explicit(kernelContext_66->atom_0+_S347, memory_order_relaxed);
+    float end_0 = group_uniform_float_0((as_type<float>((_S350))), i_2);
     for(;;)
     {
         float best_0 = end_0;
-        j_1 = i_1;
+        j_1 = i_2;
         for(;;)
         {
-            if(j_1 < _S344)
+            if(j_1 < _S349)
             {
             }
             else
             {
                 break;
             }
-            uint _S346 = w_il_tube_0(kernelContext_63);
-            uint at_4 = _S346 + 2U * (_S343 + j_1);
-            if((as_type<float>((*(kernelContext_63->work_0+at_4)))) <= (end_0 + _S341))
+            uint _S351 = w_il_tube_0(kernelContext_66);
+            uint at_4 = _S351 + 2U * (_S348 + j_1);
+            if((as_type<float>((*(kernelContext_66->work_0+at_4)))) <= (end_0 + _S346))
             {
-                best_0 = max(best_0, (as_type<float>((*(kernelContext_63->work_0+(at_4 + 1U))))));
+                best_0 = max(best_0, (as_type<float>((*(kernelContext_66->work_0+(at_4 + 1U))))));
             }
             j_1 = j_1 + 64U;
         }
-        (*kernelContext_63->g_il_best_0)[i_1] = best_0;
+        (*kernelContext_66->g_il_best_0)[i_2] = best_0;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         uint step_1 = 32U;
         for(;;)
@@ -2059,14 +2092,14 @@ void il_run_0(uint b_22, uint i_1, KernelContext_0 thread* kernelContext_63)
             {
                 break;
             }
-            if(i_1 < step_1)
+            if(i_2 < step_1)
             {
-                (*kernelContext_63->g_il_best_0)[i_1] = max((*kernelContext_63->g_il_best_0)[i_1], (*kernelContext_63->g_il_best_0)[i_1 + step_1]);
+                (*kernelContext_66->g_il_best_0)[i_2] = max((*kernelContext_66->g_il_best_0)[i_2], (*kernelContext_66->g_il_best_0)[i_2 + step_1]);
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             step_1 = step_1 >> 1U;
         }
-        float next_0 = group_uniform_float_0((*kernelContext_63->g_il_best_0)[int(0)], i_1);
+        float next_0 = group_uniform_float_0((*kernelContext_66->g_il_best_0)[int(0)], i_2);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if(!(next_0 > end_0))
         {
@@ -2074,146 +2107,146 @@ void il_run_0(uint b_22, uint i_1, KernelContext_0 thread* kernelContext_63)
         }
         end_0 = next_0;
     }
-    if(i_1 == 0U)
+    if(i_2 == 0U)
     {
-        atomic_store_explicit(kernelContext_63->atom_0+_S342, (as_type<uint>((end_0))), memory_order_relaxed);
+        atomic_store_explicit(kernelContext_66->atom_0+_S347, (as_type<uint>((end_0))), memory_order_relaxed);
     }
     return;
 }
 
-void il_tube_collect_0(uint k_15, KernelContext_0 thread* kernelContext_64)
+void il_tube_collect_0(uint k_15, KernelContext_0 thread* kernelContext_67)
 {
     thread uint b_23;
     thread float2 t_3;
-    bool _S347 = il_tube_0(k_15, &b_23, &t_3, kernelContext_64);
-    if(!_S347)
+    bool _S352 = il_tube_0(k_15, &b_23, &t_3, kernelContext_67);
+    if(!_S352)
     {
         return;
     }
-    uint _S348 = w_il_tube_0(kernelContext_64);
-    uint _S349 = a_il_0(b_23, kernelContext_64);
-    uint _S350 = atomic_load_explicit(kernelContext_64->atom_0+(_S349 + 4U), memory_order_relaxed);
-    uint _S351 = a_il_0(b_23, kernelContext_64);
-    uint _S352 = atomic_fetch_add_explicit(kernelContext_64->atom_0+(_S351 + 5U), 1U, memory_order_relaxed);
-    uint at_5 = _S348 + 2U * (_S350 + _S352);
-    *(kernelContext_64->work_0+at_5) = (as_type<uint>((t_3.x)));
-    *(kernelContext_64->work_0+(at_5 + 1U)) = (as_type<uint>((t_3.y)));
+    uint _S353 = w_il_tube_0(kernelContext_67);
+    uint _S354 = a_il_0(b_23, kernelContext_67);
+    uint _S355 = atomic_load_explicit(kernelContext_67->atom_0+(_S354 + 4U), memory_order_relaxed);
+    uint _S356 = a_il_0(b_23, kernelContext_67);
+    uint _S357 = atomic_fetch_add_explicit(kernelContext_67->atom_0+(_S356 + 5U), 1U, memory_order_relaxed);
+    uint at_5 = _S353 + 2U * (_S355 + _S357);
+    *(kernelContext_67->work_0+at_5) = (as_type<uint>((t_3.x)));
+    *(kernelContext_67->work_0+(at_5 + 1U)) = (as_type<uint>((t_3.y)));
     return;
 }
 
-uint a_il_cursor_1(KernelContext_0 thread* kernelContext_65)
+uint a_il_cursor_1(KernelContext_0 thread* kernelContext_68)
 {
-    uint _S353 = a_first_0(0U, kernelContext_65);
-    return _S353 + 64U;
+    uint _S358 = a_first_0(0U, kernelContext_68);
+    return _S358 + 64U;
 }
 
-void il_tube_base_0(uint b_24, KernelContext_0 thread* kernelContext_66)
+void il_tube_base_0(uint b_24, KernelContext_0 thread* kernelContext_69)
 {
-    bool _S354;
-    if(b_24 < (kernelContext_66->params_0->body_count_0))
+    bool _S359;
+    if(b_24 < (kernelContext_69->params_0->body_count_0))
     {
-        bool _S355 = il_struck_0(b_24, kernelContext_66);
-        _S354 = _S355;
+        bool _S360 = il_struck_0(b_24, kernelContext_69);
+        _S359 = _S360;
     }
     else
     {
-        _S354 = false;
+        _S359 = false;
     }
-    if(_S354)
+    if(_S359)
     {
-        uint _S356 = a_il_0(b_24, kernelContext_66);
-        atomic<uint> device* _S357 = kernelContext_66->atom_0+(_S356 + 4U);
-        uint _S358 = a_il_cursor_1(kernelContext_66);
-        atomic<uint> device* _S359 = kernelContext_66->atom_0+_S358;
-        uint _S360 = atomic_load_explicit(kernelContext_66->atom_0+(_S356 + 1U), memory_order_relaxed);
-        uint _S361 = atomic_fetch_add_explicit(_S359, _S360, memory_order_relaxed);
-        atomic_store_explicit(_S357, _S361, memory_order_relaxed);
+        uint _S361 = a_il_0(b_24, kernelContext_69);
+        atomic<uint> device* _S362 = kernelContext_69->atom_0+(_S361 + 4U);
+        uint _S363 = a_il_cursor_1(kernelContext_69);
+        atomic<uint> device* _S364 = kernelContext_69->atom_0+_S363;
+        uint _S365 = atomic_load_explicit(kernelContext_69->atom_0+(_S361 + 1U), memory_order_relaxed);
+        uint _S366 = atomic_fetch_add_explicit(_S364, _S365, memory_order_relaxed);
+        atomic_store_explicit(_S362, _S366, memory_order_relaxed);
     }
     return;
 }
 
-void il_tube_count_0(uint k_16, KernelContext_0 thread* kernelContext_67)
+void il_tube_count_0(uint k_16, KernelContext_0 thread* kernelContext_70)
 {
     thread uint b_25;
     thread float2 t_4;
-    bool _S362 = il_tube_0(k_16, &b_25, &t_4, kernelContext_67);
-    if(_S362)
+    bool _S367 = il_tube_0(k_16, &b_25, &t_4, kernelContext_70);
+    if(_S367)
     {
-        uint _S363 = a_il_0(b_25, kernelContext_67);
-        uint _S364 = atomic_fetch_add_explicit(kernelContext_67->atom_0+(_S363 + 1U), 1U, memory_order_relaxed);
+        uint _S368 = a_il_0(b_25, kernelContext_70);
+        uint _S369 = atomic_fetch_add_explicit(kernelContext_70->atom_0+(_S368 + 1U), 1U, memory_order_relaxed);
     }
     return;
 }
 
-void il_begin_0(uint b_26, KernelContext_0 thread* kernelContext_68)
+void il_begin_0(uint b_26, KernelContext_0 thread* kernelContext_71)
 {
-    bool _S365;
-    if(b_26 >= (kernelContext_68->params_0->body_count_0))
+    bool _S370;
+    if(b_26 >= (kernelContext_71->params_0->body_count_0))
     {
-        _S365 = true;
+        _S370 = true;
     }
     else
     {
-        bool _S366 = il_struck_0(b_26, kernelContext_68);
-        _S365 = !_S366;
+        bool _S371 = il_struck_0(b_26, kernelContext_71);
+        _S370 = !_S371;
     }
-    if(_S365)
+    if(_S370)
     {
         return;
     }
     thread float3 contact_10;
     thread float3 d_12;
     thread float speed_8;
-    il_path_0(b_26, &contact_10, &d_12, &speed_8, kernelContext_68);
-    uint _S367 = il_entry_0(b_26, kernelContext_68);
-    IlStriker_0 _S368 = il_striker_0(b_26, kernelContext_68);
-    float2 _S369 = il_interval_0(_S367, contact_10, d_12, _S368.radius_0, kernelContext_68);
-    uint _S370 = a_il_0(b_26, kernelContext_68);
-    atomic_store_explicit(kernelContext_68->atom_0+_S370, (as_type<uint>((max(_S369.y, 0.0f)))), memory_order_relaxed);
-    uint i_2 = 1U;
+    il_path_0(b_26, &contact_10, &d_12, &speed_8, kernelContext_71);
+    uint _S372 = il_entry_0(b_26, kernelContext_71);
+    IlStriker_0 _S373 = il_striker_0(b_26, kernelContext_71);
+    float2 _S374 = il_interval_0(_S372, contact_10, d_12, _S373.radius_0, kernelContext_71);
+    uint _S375 = a_il_0(b_26, kernelContext_71);
+    atomic_store_explicit(kernelContext_71->atom_0+_S375, (as_type<uint>((max(_S374.y, 0.0f)))), memory_order_relaxed);
+    uint i_3 = 1U;
     for(;;)
     {
-        if(i_2 < 6U)
+        if(i_3 < 6U)
         {
         }
         else
         {
             break;
         }
-        atomic_store_explicit(kernelContext_68->atom_0+(_S370 + i_2), 0U, memory_order_relaxed);
-        i_2 = i_2 + 1U;
+        atomic_store_explicit(kernelContext_71->atom_0+(_S375 + i_3), 0U, memory_order_relaxed);
+        i_3 = i_3 + 1U;
     }
     return;
 }
 
-void il_breaks_1(uint i_3, KernelContext_0 thread* kernelContext_69)
+void il_breaks_1(uint i_4, KernelContext_0 thread* kernelContext_72)
 {
     bool cut_1;
-    if(i_3 >= (kernelContext_69->params_0->bond_count_0))
+    if(i_4 >= (kernelContext_72->params_0->bond_count_0))
     {
         cut_1 = true;
     }
     else
     {
-        uint _S371 = w_alive_0(kernelContext_69);
-        cut_1 = (*(kernelContext_69->work_0+(_S371 + i_3))) == 0U;
+        uint _S376 = w_alive_0(kernelContext_72);
+        cut_1 = (*(kernelContext_72->work_0+(_S376 + i_4))) == 0U;
     }
     if(cut_1)
     {
         return;
     }
-    uint4 _S372 = uint4(*(kernelContext_69->bonds_0+i_3)) ;
-    uint _S373 = _S372.x;
-    uint _S374 = body_of_0(_S373, kernelContext_69);
-    bool _S375 = il_struck_1(_S374, kernelContext_69);
-    if(!_S375)
+    uint4 _S377 = uint4(*(kernelContext_72->bonds_0+i_4)) ;
+    uint _S378 = _S377.x;
+    uint _S379 = body_of_0(_S378, kernelContext_72);
+    bool _S380 = il_struck_1(_S379, kernelContext_72);
+    if(!_S380)
     {
         return;
     }
-    uint _S376 = lp_body_0(_S374, kernelContext_69);
-    float4 _S377 = float4(*(kernelContext_69->lp_0+_S376)) ;
-    float4 _S378 = float4(*(kernelContext_69->lp_0+(_S376 + 1U))) ;
-    uint outcome_6 = (as_type<uint>((_S377.w)));
+    uint _S381 = lp_body_0(_S379, kernelContext_72);
+    float4 _S382 = float4(*(kernelContext_72->lp_0+_S381)) ;
+    float4 _S383 = float4(*(kernelContext_72->lp_0+(_S381 + 1U))) ;
+    uint outcome_6 = (as_type<uint>((_S382.w)));
     if((outcome_6 & 14U) == 0U)
     {
         return;
@@ -2221,29 +2254,29 @@ void il_breaks_1(uint i_3, KernelContext_0 thread* kernelContext_69)
     thread float3 contact_11;
     thread float3 d_13;
     thread float speed_9;
-    il_path_1(_S374, &contact_11, &d_13, &speed_9, kernelContext_69);
-    uint _S379 = il_entry_1(_S374, kernelContext_69);
-    IlStriker_0 _S380 = il_striker_1(_S374, kernelContext_69);
-    float _S381 = max(_S380.radius_0, 0.00100000004749745f);
-    float h_4 = _S377.x;
-    IlPlace_0 _S382 = il_place_0(_S373, _S379, contact_11, d_13, _S381, h_4, kernelContext_69);
-    IlPlace_0 _S383 = il_place_0(_S372.y, _S379, contact_11, d_13, _S381, h_4, kernelContext_69);
-    thread IlPlace_0 _S384 = _S382;
-    bool _S385 = il_plug_0(outcome_6, _S381, h_4, &_S384);
-    thread IlPlace_0 _S386 = _S383;
-    bool _S387 = il_plug_0(outcome_6, _S381, h_4, &_S386);
-    if(_S385 != _S387)
+    il_path_1(_S379, &contact_11, &d_13, &speed_9, kernelContext_72);
+    uint _S384 = il_entry_1(_S379, kernelContext_72);
+    IlStriker_0 _S385 = il_striker_1(_S379, kernelContext_72);
+    float _S386 = max(_S385.radius_0, 0.00100000004749745f);
+    float h_4 = _S382.x;
+    IlPlace_0 _S387 = il_place_0(_S378, _S384, contact_11, d_13, _S386, h_4, kernelContext_72);
+    IlPlace_0 _S388 = il_place_0(_S377.y, _S384, contact_11, d_13, _S386, h_4, kernelContext_72);
+    thread IlPlace_0 _S389 = _S387;
+    bool _S390 = il_plug_0(outcome_6, _S386, h_4, &_S389);
+    thread IlPlace_0 _S391 = _S388;
+    bool _S392 = il_plug_0(outcome_6, _S386, h_4, &_S391);
+    if(_S390 != _S392)
     {
         cut_1 = true;
     }
     else
     {
-        float _S388 = _S378.y;
-        thread IlPlace_0 _S389 = _S382;
-        bool _S390 = il_scab_0(outcome_6, _S381, h_4, _S388, &_S389);
-        thread IlPlace_0 _S391 = _S383;
-        bool _S392 = il_scab_0(outcome_6, _S381, h_4, _S388, &_S391);
-        cut_1 = _S390 != _S392;
+        float _S393 = _S383.y;
+        thread IlPlace_0 _S394 = _S387;
+        bool _S395 = il_scab_0(outcome_6, _S386, h_4, _S393, &_S394);
+        thread IlPlace_0 _S396 = _S388;
+        bool _S397 = il_scab_0(outcome_6, _S386, h_4, _S393, &_S396);
+        cut_1 = _S395 != _S397;
     }
     if(cut_1)
     {
@@ -2251,11 +2284,11 @@ void il_breaks_1(uint i_3, KernelContext_0 thread* kernelContext_69)
     }
     else
     {
-        float _S393 = _S378.x;
-        float _S394 = _S378.z;
-        thread IlPlace_0 _S395 = _S382;
-        bool _S396 = il_crater_0(outcome_6, _S381, _S393, _S394, &_S395);
-        cut_1 = _S396;
+        float _S398 = _S383.x;
+        float _S399 = _S383.z;
+        thread IlPlace_0 _S400 = _S387;
+        bool _S401 = il_crater_0(outcome_6, _S386, _S398, _S399, &_S400);
+        cut_1 = _S401;
     }
     if(cut_1)
     {
@@ -2263,64 +2296,65 @@ void il_breaks_1(uint i_3, KernelContext_0 thread* kernelContext_69)
     }
     else
     {
-        float _S397 = _S378.x;
-        float _S398 = _S378.z;
-        thread IlPlace_0 _S399 = _S383;
-        bool _S400 = il_crater_0(outcome_6, _S381, _S397, _S398, &_S399);
-        cut_1 = _S400;
+        float _S402 = _S383.x;
+        float _S403 = _S383.z;
+        thread IlPlace_0 _S404 = _S388;
+        bool _S405 = il_crater_0(outcome_6, _S386, _S402, _S403, &_S404);
+        cut_1 = _S405;
     }
     if(cut_1)
     {
-        uint _S401 = w_alive_0(kernelContext_69);
-        *(kernelContext_69->work_0+(_S401 + i_3)) = 0U;
-        uint _S402 = a_dirty_0(kernelContext_69);
-        uint _S403 = atomic_fetch_or_explicit(kernelContext_69->atom_0+(_S402 + _S374), 1U, memory_order_relaxed);
-        uint _S404 = a_counters_1(kernelContext_69);
-        uint _S405 = atomic_fetch_add_explicit(kernelContext_69->atom_0+_S404, 1U, memory_order_relaxed);
-        uint _S406 = atomic_fetch_add_explicit(kernelContext_69->atom_0+(_S404 + 1U), 1U, memory_order_relaxed);
+        uint _S406 = w_alive_0(kernelContext_72);
+        *(kernelContext_72->work_0+(_S406 + i_4)) = 0U;
+        uint _S407 = a_dirty_0(kernelContext_72);
+        uint _S408 = atomic_fetch_or_explicit(kernelContext_72->atom_0+(_S407 + _S379), 1U, memory_order_relaxed);
+        uint _S409 = a_counters_1(kernelContext_72);
+        uint _S410 = atomic_fetch_add_explicit(kernelContext_72->atom_0+_S409, 1U, memory_order_relaxed);
+        uint _S411 = atomic_fetch_add_explicit(kernelContext_72->atom_0+(_S409 + 1U), 1U, memory_order_relaxed);
+        event_broken_0(i_4, kernelContext_72);
     }
     return;
 }
 
-void il_carry_1(uint k_17, KernelContext_0 thread* kernelContext_70)
+void il_carry_1(uint k_17, KernelContext_0 thread* kernelContext_73)
 {
-    if(k_17 >= (kernelContext_70->params_0->chunk_count_0))
+    if(k_17 >= (kernelContext_73->params_0->chunk_count_0))
     {
         return;
     }
-    uint _S407 = w_carry_0(kernelContext_70);
-    uint _S408 = _S407 + k_17;
-    uint device* _S409 = kernelContext_70->work_0+_S408;
-    uint c_4 = *_S409;
-    if((*_S409) == 0U)
+    uint _S412 = w_carry_0(kernelContext_73);
+    uint _S413 = _S412 + k_17;
+    uint device* _S414 = kernelContext_73->work_0+_S413;
+    uint c_4 = *_S414;
+    if((*_S414) == 0U)
     {
         return;
     }
-    *(kernelContext_70->work_0+_S408) = 0U;
+    *(kernelContext_73->work_0+_S413) = 0U;
     uint b0_1 = c_4 - 1U;
-    bool _S410 = il_struck_1(b0_1, kernelContext_70);
-    if(!_S410)
+    bool _S415 = il_struck_1(b0_1, kernelContext_73);
+    if(!_S415)
     {
         return;
     }
     thread float3 contact_12;
     thread float3 d_14;
     thread float speed_10;
-    il_path_1(b0_1, &contact_12, &d_14, &speed_10, kernelContext_70);
+    il_path_1(b0_1, &contact_12, &d_14, &speed_10, kernelContext_73);
     float3 dr_1 = to_rubble_0(d_14);
-    IlStriker_0 _S411 = il_striker_1(b0_1, kernelContext_70);
-    uint _S412 = a_il_0(b0_1, kernelContext_70);
-    float _S413 = read64_0(_S412 + 2U, kernelContext_70->params_0->scale_m_0, kernelContext_70);
-    float3 v_wall_1 = (float4(*(kernelContext_70->bodies_0+(7U * b0_1 + 3U))) ).xyz;
-    uint _S414 = 7U * _S411.body_0;
-    float3 v_shot_1 = (float4(*(kernelContext_70->bodies_0+(_S414 + 3U))) ).xyz;
+    IlStriker_0 _S416 = il_striker_1(b0_1, kernelContext_73);
+    uint _S417 = a_il_0(b0_1, kernelContext_73);
+    float _S418 = read64_0(_S417 + 2U, kernelContext_73->params_0->scale_m_0, kernelContext_73);
+    float3 v_wall_1 = (float4(*(kernelContext_73->bodies_0+(7U * b0_1 + 3U))) ).xyz;
+    uint _S419 = 7U * _S416.body_0;
+    float3 v_shot_1 = (float4(*(kernelContext_73->bodies_0+(_S419 + 3U))) ).xyz;
     float closing_1 = dot(v_shot_1 - v_wall_1, dr_1);
-    float v_r_1 = _S411.mass_0 * closing_1 / (_S411.mass_0 + _S413);
-    float3 _S415 = v_shot_1 + dr_1 * float3((v_r_1 - closing_1)) ;
-    float3 _S416 = v_wall_1 + dr_1 * float3(v_r_1) ;
-    float _S417 = il_t_in_1(b0_1, kernelContext_70);
-    float3 _S418 = (float4(*(kernelContext_70->bodies_0+_S414)) ).xyz + dr_1 * float3(((speed_10 - v_r_1) * clamp(_S417, 0.0f, kernelContext_70->params_0->dt_0))) ;
-    uint _S419 = body_of_0(k_17, kernelContext_70);
+    float v_r_1 = _S416.mass_0 * closing_1 / (_S416.mass_0 + _S418);
+    float3 _S420 = v_shot_1 + dr_1 * float3((v_r_1 - closing_1)) ;
+    float3 _S421 = v_wall_1 + dr_1 * float3(v_r_1) ;
+    float _S422 = il_t_in_1(b0_1, kernelContext_73);
+    float3 _S423 = (float4(*(kernelContext_73->bodies_0+_S419)) ).xyz + dr_1 * float3(((speed_10 - v_r_1) * clamp(_S422, 0.0f, kernelContext_73->params_0->dt_0))) ;
+    uint _S424 = body_of_0(k_17, kernelContext_73);
     uint region_3 = 0U;
     for(;;)
     {
@@ -2331,31 +2365,31 @@ void il_carry_1(uint k_17, KernelContext_0 thread* kernelContext_70)
         {
             break;
         }
-        uint s_at_2 = 7U * (_S411.body_0 + region_3 * kernelContext_70->params_0->max_bodies_0);
-        (*(kernelContext_70->bodies_0+s_at_2)).xyz = _S418;
-        (*(kernelContext_70->bodies_0+(s_at_2 + 3U))).xyz = _S415;
-        (*(kernelContext_70->bodies_0+(7U * (_S419 + region_3 * kernelContext_70->params_0->max_bodies_0) + 3U))).xyz = _S416;
+        uint s_at_2 = 7U * (_S416.body_0 + region_3 * kernelContext_73->params_0->max_bodies_0);
+        (*(kernelContext_73->bodies_0+s_at_2)).xyz = _S423;
+        (*(kernelContext_73->bodies_0+(s_at_2 + 3U))).xyz = _S420;
+        (*(kernelContext_73->bodies_0+(7U * (_S424 + region_3 * kernelContext_73->params_0->max_bodies_0) + 3U))).xyz = _S421;
         region_3 = region_3 + 1U;
     }
     return;
 }
 
-void il_mark_1(uint k_18, KernelContext_0 thread* kernelContext_71)
+void il_mark_1(uint k_18, KernelContext_0 thread* kernelContext_74)
 {
-    if(k_18 >= (kernelContext_71->params_0->chunk_count_0))
+    if(k_18 >= (kernelContext_74->params_0->chunk_count_0))
     {
         return;
     }
-    uint _S420 = body_of_0(k_18, kernelContext_71);
-    bool _S421 = il_struck_1(_S420, kernelContext_71);
-    if(!_S421)
+    uint _S425 = body_of_0(k_18, kernelContext_74);
+    bool _S426 = il_struck_1(_S425, kernelContext_74);
+    if(!_S426)
     {
         return;
     }
-    uint _S422 = lp_body_0(_S420, kernelContext_71);
-    float4 _S423 = float4(*(kernelContext_71->lp_0+_S422)) ;
-    float4 _S424 = float4(*(kernelContext_71->lp_0+(_S422 + 1U))) ;
-    uint outcome_7 = (as_type<uint>((_S423.w)));
+    uint _S427 = lp_body_0(_S425, kernelContext_74);
+    float4 _S428 = float4(*(kernelContext_74->lp_0+_S427)) ;
+    float4 _S429 = float4(*(kernelContext_74->lp_0+(_S427 + 1U))) ;
+    uint outcome_7 = (as_type<uint>((_S428.w)));
     if((outcome_7 & 14U) == 0U)
     {
         return;
@@ -2363,23 +2397,23 @@ void il_mark_1(uint k_18, KernelContext_0 thread* kernelContext_71)
     thread float3 contact_13;
     thread float3 d_15;
     thread float speed_11;
-    il_path_1(_S420, &contact_13, &d_15, &speed_11, kernelContext_71);
-    uint _S425 = il_entry_1(_S420, kernelContext_71);
-    IlStriker_0 _S426 = il_striker_1(_S420, kernelContext_71);
-    float _S427 = max(_S426.radius_0, 0.00100000004749745f);
-    float _S428 = _S423.x;
-    IlPlace_0 _S429 = il_place_0(k_18, _S425, contact_13, d_15, _S427, _S428, kernelContext_71);
-    thread IlPlace_0 _S430 = _S429;
-    bool _S431 = il_plug_0(outcome_7, _S427, _S428, &_S430);
-    if((_S426.launch_0) != 0U)
+    il_path_1(_S425, &contact_13, &d_15, &speed_11, kernelContext_74);
+    uint _S430 = il_entry_1(_S425, kernelContext_74);
+    IlStriker_0 _S431 = il_striker_1(_S425, kernelContext_74);
+    float _S432 = max(_S431.radius_0, 0.00100000004749745f);
+    float _S433 = _S428.x;
+    IlPlace_0 _S434 = il_place_0(k_18, _S430, contact_13, d_15, _S432, _S433, kernelContext_74);
+    thread IlPlace_0 _S435 = _S434;
+    bool _S436 = il_plug_0(outcome_7, _S432, _S433, &_S435);
+    if((_S431.launch_0) != 0U)
     {
-        float2 _S432 = il_interval_0(k_18, contact_13 - d_15 * float3(_S426.bound_0) , d_15, _S426.bound_0, kernelContext_71);
-        float _S433 = _S432.x;
-        float _S434 = _S432.y;
+        float2 _S437 = il_interval_0(k_18, contact_13 - d_15 * float3(_S431.bound_0) , d_15, _S431.bound_0, kernelContext_74);
+        float _S438 = _S437.x;
+        float _S439 = _S437.y;
         bool path_1;
-        if(_S433 <= _S434)
+        if(_S438 <= _S439)
         {
-            path_1 = _S433 <= (_S428 + 2.0f * _S426.bound_0);
+            path_1 = _S438 <= (_S433 + 2.0f * _S431.bound_0);
         }
         else
         {
@@ -2387,13 +2421,13 @@ void il_mark_1(uint k_18, KernelContext_0 thread* kernelContext_71)
         }
         if(path_1)
         {
-            path_1 = _S434 >= 0.0f;
+            path_1 = _S439 >= 0.0f;
         }
         else
         {
             path_1 = false;
         }
-        if(_S431)
+        if(_S436)
         {
             path_1 = true;
         }
@@ -2403,10 +2437,10 @@ void il_mark_1(uint k_18, KernelContext_0 thread* kernelContext_71)
         }
         else
         {
-            float _S435 = _S424.y;
-            thread IlPlace_0 _S436 = _S429;
-            bool _S437 = il_scab_0(outcome_7, _S427, _S428, _S435, &_S436);
-            path_1 = _S437;
+            float _S440 = _S429.y;
+            thread IlPlace_0 _S441 = _S434;
+            bool _S442 = il_scab_0(outcome_7, _S432, _S433, _S440, &_S441);
+            path_1 = _S442;
         }
         if(path_1)
         {
@@ -2414,56 +2448,56 @@ void il_mark_1(uint k_18, KernelContext_0 thread* kernelContext_71)
         }
         else
         {
-            float _S438 = _S424.x;
-            float _S439 = _S424.z;
-            thread IlPlace_0 _S440 = _S429;
-            bool _S441 = il_crater_0(outcome_7, _S427, _S438, _S439, &_S440);
-            path_1 = _S441;
+            float _S443 = _S429.x;
+            float _S444 = _S429.z;
+            thread IlPlace_0 _S445 = _S434;
+            bool _S446 = il_crater_0(outcome_7, _S432, _S443, _S444, &_S445);
+            path_1 = _S446;
         }
         if(path_1)
         {
-            uint _S442 = w_marks_0(kernelContext_71);
-            *(kernelContext_71->work_0+(_S442 + k_18)) = _S426.launch_0;
+            uint _S447 = w_marks_0(kernelContext_74);
+            *(kernelContext_74->work_0+(_S447 + k_18)) = _S431.launch_0;
         }
     }
-    if(_S431)
+    if(_S436)
     {
-        uint _S443 = w_carry_0(kernelContext_71);
-        *(kernelContext_71->work_0+(_S443 + k_18)) = _S420 + 1U;
-        uint _S444 = a_il_0(_S420, kernelContext_71);
-        add64_0(_S444 + 2U, (float4(*(kernelContext_71->chunks_0+4U * k_18)) ).w, kernelContext_71->params_0->scale_m_0, kernelContext_71);
+        uint _S448 = w_carry_0(kernelContext_74);
+        *(kernelContext_74->work_0+(_S448 + k_18)) = _S425 + 1U;
+        uint _S449 = a_il_0(_S425, kernelContext_74);
+        add64_0(_S449 + 2U, (float4(*(kernelContext_74->chunks_0+4U * k_18)) ).w, kernelContext_74->params_0->scale_m_0, kernelContext_74);
     }
     return;
 }
 
-void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
+void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_75)
 {
     bool damage_1;
-    if(b_27 >= (kernelContext_72->params_0->body_count_0))
+    if(b_27 >= (kernelContext_75->params_0->body_count_0))
     {
         damage_1 = true;
     }
     else
     {
-        bool _S445 = il_struck_1(b_27, kernelContext_72);
-        damage_1 = !_S445;
+        bool _S450 = il_struck_1(b_27, kernelContext_75);
+        damage_1 = !_S450;
     }
     if(damage_1)
     {
         return;
     }
-    float _S446 = il_t_in_1(b_27, kernelContext_72);
-    uint _S447 = il_entry_1(b_27, kernelContext_72);
+    float _S451 = il_t_in_1(b_27, kernelContext_75);
+    uint _S452 = il_entry_1(b_27, kernelContext_75);
     thread float3 contact_14;
     thread float3 d_16;
     thread float speed_12;
-    il_path_1(b_27, &contact_14, &d_16, &speed_12, kernelContext_72);
-    IlStriker_0 _S448 = il_striker_1(b_27, kernelContext_72);
-    float _S449 = max(_S448.radius_0, 0.00100000004749745f);
-    if((_S448.launch_0) != 0U)
+    il_path_1(b_27, &contact_14, &d_16, &speed_12, kernelContext_75);
+    IlStriker_0 _S453 = il_striker_1(b_27, kernelContext_75);
+    float _S454 = max(_S453.radius_0, 0.00100000004749745f);
+    if((_S453.launch_0) != 0U)
     {
-        uint _S450 = w_marks_0(kernelContext_72);
-        damage_1 = (*(kernelContext_72->work_0+(_S450 + _S447))) == (_S448.launch_0);
+        uint _S455 = w_marks_0(kernelContext_75);
+        damage_1 = (*(kernelContext_75->work_0+(_S455 + _S452))) == (_S453.launch_0);
     }
     else
     {
@@ -2471,59 +2505,59 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
     }
     if(damage_1)
     {
-        uint _S451 = lp_body_0(b_27, kernelContext_72);
-        packed_float4 _S452 = packed_float4(float4(0.0f) ) ;
-        *(kernelContext_72->lp_0+_S451) = _S452;
-        *(kernelContext_72->lp_0+(_S451 + 1U)) = _S452;
+        uint _S456 = lp_body_0(b_27, kernelContext_75);
+        packed_float4 _S457 = packed_float4(float4(0.0f) ) ;
+        *(kernelContext_75->lp_0+_S456) = _S457;
+        *(kernelContext_75->lp_0+(_S456 + 1U)) = _S457;
         return;
     }
-    uint _S453 = a_il_0(b_27, kernelContext_72);
-    uint _S454 = atomic_load_explicit(kernelContext_72->atom_0+_S453, memory_order_relaxed);
-    float _S455 = max((as_type<float>((_S454))) - _S449, 9.99999997475242708e-07f);
-    if(!(_S446 > 0.0f))
+    uint _S458 = a_il_0(b_27, kernelContext_75);
+    uint _S459 = atomic_load_explicit(kernelContext_75->atom_0+_S458, memory_order_relaxed);
+    float _S460 = max((as_type<float>((_S459))) - _S454, 9.99999997475242708e-07f);
+    if(!(_S451 > 0.0f))
     {
-        uint _S456 = lp_body_0(b_27, kernelContext_72);
-        *(kernelContext_72->lp_0+_S456) = packed_float4(float4(_S455, 0.0f, 0.0f, 0.0f)) ;
-        *(kernelContext_72->lp_0+(_S456 + 1U)) = packed_float4(float4(0.0f) ) ;
+        uint _S461 = lp_body_0(b_27, kernelContext_75);
+        *(kernelContext_75->lp_0+_S461) = packed_float4(float4(_S460, 0.0f, 0.0f, 0.0f)) ;
+        *(kernelContext_75->lp_0+(_S461 + 1U)) = packed_float4(float4(0.0f) ) ;
         return;
     }
-    uint o_3 = kernelContext_72->params_0->ext_chunks_0 + 4U * _S447;
-    float4 _S457 = float4(*(kernelContext_72->ext_0+(o_3 + 1U))) ;
+    uint o_3 = kernelContext_75->params_0->ext_chunks_0 + 4U * _S452;
+    float4 _S462 = float4(*(kernelContext_75->ext_0+(o_3 + 1U))) ;
     thread JointMaterial_0 dm_1;
-    float4 _S458 = float4(0.0f) ;
-    (&dm_1)->strength_0 = _S458;
-    (&dm_1)->energy_0 = _S458;
-    (&dm_1)->dif_0 = float4(*(kernelContext_72->ext_0+(o_3 + 2U))) ;
-    float4 _S459 = float4(*(kernelContext_72->ext_0+(o_3 + 3U))) ;
-    float _S460 = _S459.x;
-    (&dm_1)->misc_0 = float4(_S460, 0.0f, 0.0f, 0.0f);
+    float4 _S463 = float4(0.0f) ;
+    (&dm_1)->strength_0 = _S463;
+    (&dm_1)->energy_0 = _S463;
+    (&dm_1)->dif_0 = float4(*(kernelContext_75->ext_0+(o_3 + 2U))) ;
+    float4 _S464 = float4(*(kernelContext_75->ext_0+(o_3 + 3U))) ;
+    float _S465 = _S464.x;
+    (&dm_1)->misc_0 = float4(_S465, 0.0f, 0.0f, 0.0f);
     (&dm_1)->kind_flags_0 = uint4(0U) ;
-    float nu_1 = _S459.y;
-    float e_target_1 = _S459.z / (1.0f - nu_1 * nu_1);
-    float e_star_1 = 1.0f / (1.0f / _S448.modulus_0 + 1.0f / e_target_1);
-    float _S461 = max(speed_12, 0.00100000004749745f);
-    float _S462 = sqrt(_S449);
-    float h0_1 = pow(15.0f * _S448.m_eff_0 * _S461 * _S461 / (16.0f * e_star_1 * _S462), 0.40000000596046448f);
-    float t_c_1 = 2.94000005722045898f * h0_1 / _S461;
-    float force_1 = 1.33333337306976318f * e_star_1 * _S462 * pow(h0_1, 1.5f);
-    float a_4 = sqrt(_S449 * h0_1);
+    float nu_1 = _S464.y;
+    float e_target_1 = _S464.z / (1.0f - nu_1 * nu_1);
+    float e_star_1 = 1.0f / (1.0f / _S453.modulus_0 + 1.0f / e_target_1);
+    float _S466 = max(speed_12, 0.00100000004749745f);
+    float _S467 = sqrt(_S454);
+    float h0_1 = pow(15.0f * _S453.m_eff_0 * _S466 * _S466 / (16.0f * e_star_1 * _S467), 0.40000000596046448f);
+    float t_c_1 = 2.94000005722045898f * h0_1 / _S466;
+    float force_1 = 1.33333337306976318f * e_star_1 * _S467 * pow(h0_1, 1.5f);
+    float a_4 = sqrt(_S454 * h0_1);
     float p0_1 = 3.0f * force_1 / (6.28318548202514648f * a_4 * a_4);
     float ring_1 = (1.0f - 2.0f * nu_1) * p0_1 / 3.0f;
     float k_19;
-    if(_S460 > 0.0f)
+    if(_S465 > 0.0f)
     {
-        float _S463 = _S461 / _S455;
-        thread JointMaterial_0 _S464 = dm_1;
-        float _S465 = dif_factor_0(&_S464, _S463);
-        k_19 = _S465;
+        float _S468 = _S466 / _S460;
+        thread JointMaterial_0 _S469 = dm_1;
+        float _S470 = dif_factor_0(&_S469, _S468);
+        k_19 = _S470;
     }
     else
     {
         k_19 = 1.0f;
     }
-    float ft_1 = k_19 * _S457.y;
-    float fc_1 = k_19 * _S457.z;
-    float tau_1 = k_19 * _S457.w;
+    float ft_1 = k_19 * _S462.y;
+    float fc_1 = k_19 * _S462.z;
+    float tau_1 = k_19 * _S462.w;
     if(p0_1 > fc_1)
     {
         damage_1 = true;
@@ -2532,26 +2566,26 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
     {
         damage_1 = ring_1 > ft_1;
     }
-    float _S466 = fc_1 * (3.14159274101257324f * _S449 * _S449);
-    float _S467 = min(_S466 * _S455, 1.57079637050628662f * (2.0f * _S449 + _S455) * _S455 * _S455 * tau_1);
-    float _S468 = 2.0f * _S467;
-    float v_bl_1 = sqrt(_S468 / _S448.m_eff_0);
+    float _S471 = fc_1 * (3.14159274101257324f * _S454 * _S454);
+    float _S472 = min(_S471 * _S460, 1.57079637050628662f * (2.0f * _S454 + _S460) * _S460 * _S460 * tau_1);
+    float _S473 = 2.0f * _S472;
+    float v_bl_1 = sqrt(_S473 / _S453.m_eff_0);
     bool perforate_1;
     if(damage_1)
     {
-        perforate_1 = _S461 >= v_bl_1;
+        perforate_1 = _S466 >= v_bl_1;
     }
     else
     {
         perforate_1 = false;
     }
-    float r2_1 = _S449 + _S455;
-    float _S469 = _S457.x;
-    float plug_1 = _S469 * 3.14159274101257324f * _S455 / 3.0f * (_S449 * _S449 + _S449 * r2_1 + r2_1 * r2_1);
+    float r2_1 = _S454 + _S460;
+    float _S474 = _S462.x;
+    float plug_1 = _S474 * 3.14159274101257324f * _S460 / 3.0f * (_S454 * _S454 + _S454 * r2_1 + r2_1 * r2_1);
     float v_res_1;
     if(perforate_1)
     {
-        v_res_1 = _S448.mass_0 / (_S448.mass_0 + plug_1) * sqrt(max(_S461 * _S461 - v_bl_1 * v_bl_1, 0.0f));
+        v_res_1 = _S453.mass_0 / (_S453.mass_0 + plug_1) * sqrt(max(_S466 * _S466 - v_bl_1 * v_bl_1, 0.0f));
     }
     else
     {
@@ -2569,30 +2603,30 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
     float depth_2;
     if(spall_1)
     {
-        depth_2 = min(0.5f * _S448.m_eff_0 * _S461 * _S461 / _S466, _S455);
+        depth_2 = min(0.5f * _S453.m_eff_0 * _S466 * _S466 / _S471, _S460);
     }
     else
     {
         depth_2 = 0.0f;
     }
     bool crater_1 = depth_2 > a_4;
-    float c_5 = sqrt(e_target_1 / _S469);
-    float z_t_1 = _S469 * c_5;
-    float rho_p_1 = _S448.mass_0 / (4.18879032135009766f * _S449 * _S449 * _S449);
-    float z_p_1 = rho_p_1 * sqrt(_S448.modulus_0 / rho_p_1);
+    float c_5 = sqrt(e_target_1 / _S474);
+    float z_t_1 = _S474 * c_5;
+    float rho_p_1 = _S453.mass_0 / (4.18879032135009766f * _S454 * _S454 * _S454);
+    float z_p_1 = rho_p_1 * sqrt(_S453.modulus_0 / rho_p_1);
     float mean_pressure_1 = force_1 / (3.14159274101257324f * a_4 * a_4);
-    float _S470 = min(min(z_t_1 * _S461 * z_p_1 / (z_p_1 + z_t_1), mean_pressure_1), fc_1);
+    float _S475 = min(min(z_t_1 * _S466 * z_p_1 / (z_p_1 + z_t_1), mean_pressure_1), fc_1);
     float source_radius_1;
     if(mean_pressure_1 > fc_1)
     {
-        source_radius_1 = max(a_4, _S449);
+        source_radius_1 = max(a_4, _S454);
     }
     else
     {
         source_radius_1 = a_4;
     }
     float pulse_1 = c_5 * t_c_1;
-    float back_1 = _S470 * min(source_radius_1 / _S455, 1.0f) * min(2.0f * _S455 / pulse_1, 1.0f);
+    float back_1 = _S475 * min(source_radius_1 / _S460, 1.0f) * min(2.0f * _S460 / pulse_1, 1.0f);
     if(damage_1)
     {
         spall_1 = !perforate_1;
@@ -2612,7 +2646,7 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
     float scab_2;
     if(spall_1)
     {
-        scab_2 = 0.5f * min(pulse_1, _S455);
+        scab_2 = 0.5f * min(pulse_1, _S460);
     }
     else
     {
@@ -2627,16 +2661,16 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
     {
         region_4 = 0U;
     }
-    uint _S471;
+    uint _S476;
     if(crater_1)
     {
-        _S471 = 2U;
+        _S476 = 2U;
     }
     else
     {
-        _S471 = 0U;
+        _S476 = 0U;
     }
-    uint _S472 = region_4 | _S471;
+    uint _S477 = region_4 | _S476;
     if(spall_1)
     {
         region_4 = 4U;
@@ -2645,7 +2679,7 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
     {
         region_4 = 0U;
     }
-    uint _S473 = _S472 | region_4;
+    uint _S478 = _S477 | region_4;
     if(perforate_1)
     {
         region_4 = 8U;
@@ -2654,10 +2688,10 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
     {
         region_4 = 0U;
     }
-    uint outcome_8 = _S473 | region_4;
-    uint _S474 = lp_body_0(b_27, kernelContext_72);
-    *(kernelContext_72->lp_0+_S474) = packed_float4(float4(_S455, v_bl_1, v_res_1, (as_type<float>((outcome_8))))) ;
-    packed_float4 device* _S475 = kernelContext_72->lp_0+(_S474 + 1U);
+    uint outcome_8 = _S478 | region_4;
+    uint _S479 = lp_body_0(b_27, kernelContext_75);
+    *(kernelContext_75->lp_0+_S479) = packed_float4(float4(_S460, v_bl_1, v_res_1, (as_type<float>((outcome_8))))) ;
+    packed_float4 device* _S480 = kernelContext_75->lp_0+(_S479 + 1U);
     if(crater_1)
     {
         k_19 = depth_2;
@@ -2666,46 +2700,46 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
     {
         k_19 = 0.0f;
     }
-    *_S475 = packed_float4(float4(k_19, scab_2, a_4, _S467)) ;
+    *_S480 = packed_float4(float4(k_19, scab_2, a_4, _S472)) ;
     if(perforate_1)
     {
-        uint _S476 = a_counters_1(kernelContext_72);
-        uint _S477 = atomic_fetch_add_explicit(kernelContext_72->atom_0+(_S476 + 14U), 1U, memory_order_relaxed);
+        uint _S481 = a_counters_1(kernelContext_75);
+        uint _S482 = atomic_fetch_add_explicit(kernelContext_75->atom_0+(_S481 + 14U), 1U, memory_order_relaxed);
     }
     else
     {
         if(spall_1)
         {
-            uint _S478 = a_counters_1(kernelContext_72);
-            uint _S479 = atomic_fetch_add_explicit(kernelContext_72->atom_0+(_S478 + 13U), 1U, memory_order_relaxed);
+            uint _S483 = a_counters_1(kernelContext_75);
+            uint _S484 = atomic_fetch_add_explicit(kernelContext_75->atom_0+(_S483 + 13U), 1U, memory_order_relaxed);
         }
         else
         {
             if(crater_1)
             {
-                uint _S480 = a_counters_1(kernelContext_72);
-                uint _S481 = atomic_fetch_add_explicit(kernelContext_72->atom_0+(_S480 + 12U), 1U, memory_order_relaxed);
+                uint _S485 = a_counters_1(kernelContext_75);
+                uint _S486 = atomic_fetch_add_explicit(kernelContext_75->atom_0+(_S485 + 12U), 1U, memory_order_relaxed);
             }
             else
             {
-                uint _S482 = a_counters_1(kernelContext_72);
-                uint _S483 = atomic_fetch_add_explicit(kernelContext_72->atom_0+(_S482 + 11U), 1U, memory_order_relaxed);
+                uint _S487 = a_counters_1(kernelContext_75);
+                uint _S488 = atomic_fetch_add_explicit(kernelContext_75->atom_0+(_S487 + 11U), 1U, memory_order_relaxed);
             }
         }
     }
     if(perforate_1)
     {
-        if((kernelContext_72->params_0->fracture_work_0) != 0U)
+        if((kernelContext_75->params_0->fracture_work_0) != 0U)
         {
-            il_impulse_0(b_27, _S448.body_0, _S448.mass_0, contact_14, d_16, _S448.m_eff_0 * (_S461 - sqrt(max(_S461 * _S461 - _S468 / _S448.m_eff_0, 0.0f))), kernelContext_72);
+            il_impulse_0(b_27, _S453.body_0, _S453.mass_0, contact_14, d_16, _S453.m_eff_0 * (_S466 - sqrt(max(_S466 * _S466 - _S473 / _S453.m_eff_0, 0.0f))), kernelContext_75);
         }
     }
     else
     {
         if(damage_1)
         {
-            il_impulse_0(b_27, _S448.body_0, _S448.mass_0, contact_14, d_16, _S448.m_eff_0 * _S461, kernelContext_72);
-            float3 _S484 = to_rubble_0(d_16) * float3((_S461 * clamp(_S446, 0.0f, kernelContext_72->params_0->dt_0))) ;
+            il_impulse_0(b_27, _S453.body_0, _S453.mass_0, contact_14, d_16, _S453.m_eff_0 * _S466, kernelContext_75);
+            float3 _S489 = to_rubble_0(d_16) * float3((_S466 * clamp(_S451, 0.0f, kernelContext_75->params_0->dt_0))) ;
             region_4 = 0U;
             for(;;)
             {
@@ -2716,8 +2750,8 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
                 {
                     break;
                 }
-                uint _S485 = 7U * (_S448.body_0 + region_4 * kernelContext_72->params_0->max_bodies_0);
-                (*(kernelContext_72->bodies_0+_S485)).xyz = (float4(*(kernelContext_72->bodies_0+_S485)) ).xyz + _S484;
+                uint _S490 = 7U * (_S453.body_0 + region_4 * kernelContext_75->params_0->max_bodies_0);
+                (*(kernelContext_75->bodies_0+_S490)).xyz = (float4(*(kernelContext_75->bodies_0+_S490)) ).xyz + _S489;
                 region_4 = region_4 + 1U;
             }
         }
@@ -2725,11 +2759,11 @@ void il_strike_1(uint b_27, KernelContext_0 thread* kernelContext_72)
     return;
 }
 
-void il_run_1(uint b_28, uint i_4, KernelContext_0 thread* kernelContext_73)
+void il_run_1(uint b_28, uint i_5, KernelContext_0 thread* kernelContext_76)
 {
-    bool _S486 = il_struck_1(b_28, kernelContext_73);
+    bool _S491 = il_struck_1(b_28, kernelContext_76);
     uint j_2;
-    if(_S486)
+    if(_S491)
     {
         j_2 = 1U;
     }
@@ -2737,39 +2771,39 @@ void il_run_1(uint b_28, uint i_4, KernelContext_0 thread* kernelContext_73)
     {
         j_2 = 0U;
     }
-    if((group_uniform_0(j_2, i_4)) == 0U)
+    if((group_uniform_0(j_2, i_5)) == 0U)
     {
         return;
     }
-    IlStriker_0 _S487 = il_striker_1(b_28, kernelContext_73);
-    float _S488 = 0.00100000004749745f + 0.01999999955296516f * _S487.radius_0;
-    uint _S489 = a_il_0(b_28, kernelContext_73);
-    uint _S490 = atomic_load_explicit(kernelContext_73->atom_0+(_S489 + 4U), memory_order_relaxed);
-    uint _S491 = atomic_load_explicit(kernelContext_73->atom_0+(_S489 + 1U), memory_order_relaxed);
-    uint _S492 = atomic_load_explicit(kernelContext_73->atom_0+_S489, memory_order_relaxed);
-    float end_1 = group_uniform_float_0((as_type<float>((_S492))), i_4);
+    IlStriker_0 _S492 = il_striker_1(b_28, kernelContext_76);
+    float _S493 = 0.00100000004749745f + 0.01999999955296516f * _S492.radius_0;
+    uint _S494 = a_il_0(b_28, kernelContext_76);
+    uint _S495 = atomic_load_explicit(kernelContext_76->atom_0+(_S494 + 4U), memory_order_relaxed);
+    uint _S496 = atomic_load_explicit(kernelContext_76->atom_0+(_S494 + 1U), memory_order_relaxed);
+    uint _S497 = atomic_load_explicit(kernelContext_76->atom_0+_S494, memory_order_relaxed);
+    float end_1 = group_uniform_float_0((as_type<float>((_S497))), i_5);
     for(;;)
     {
         float best_1 = end_1;
-        j_2 = i_4;
+        j_2 = i_5;
         for(;;)
         {
-            if(j_2 < _S491)
+            if(j_2 < _S496)
             {
             }
             else
             {
                 break;
             }
-            uint _S493 = w_il_tube_0(kernelContext_73);
-            uint at_6 = _S493 + 2U * (_S490 + j_2);
-            if((as_type<float>((*(kernelContext_73->work_0+at_6)))) <= (end_1 + _S488))
+            uint _S498 = w_il_tube_0(kernelContext_76);
+            uint at_6 = _S498 + 2U * (_S495 + j_2);
+            if((as_type<float>((*(kernelContext_76->work_0+at_6)))) <= (end_1 + _S493))
             {
-                best_1 = max(best_1, (as_type<float>((*(kernelContext_73->work_0+(at_6 + 1U))))));
+                best_1 = max(best_1, (as_type<float>((*(kernelContext_76->work_0+(at_6 + 1U))))));
             }
             j_2 = j_2 + 64U;
         }
-        (*kernelContext_73->g_il_best_0)[i_4] = best_1;
+        (*kernelContext_76->g_il_best_0)[i_5] = best_1;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         uint step_2 = 32U;
         for(;;)
@@ -2781,14 +2815,14 @@ void il_run_1(uint b_28, uint i_4, KernelContext_0 thread* kernelContext_73)
             {
                 break;
             }
-            if(i_4 < step_2)
+            if(i_5 < step_2)
             {
-                (*kernelContext_73->g_il_best_0)[i_4] = max((*kernelContext_73->g_il_best_0)[i_4], (*kernelContext_73->g_il_best_0)[i_4 + step_2]);
+                (*kernelContext_76->g_il_best_0)[i_5] = max((*kernelContext_76->g_il_best_0)[i_5], (*kernelContext_76->g_il_best_0)[i_5 + step_2]);
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             step_2 = step_2 >> 1U;
         }
-        float next_1 = group_uniform_float_0((*kernelContext_73->g_il_best_0)[int(0)], i_4);
+        float next_1 = group_uniform_float_0((*kernelContext_76->g_il_best_0)[int(0)], i_5);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if(!(next_1 > end_1))
         {
@@ -2796,231 +2830,231 @@ void il_run_1(uint b_28, uint i_4, KernelContext_0 thread* kernelContext_73)
         }
         end_1 = next_1;
     }
-    if(i_4 == 0U)
+    if(i_5 == 0U)
     {
-        atomic_store_explicit(kernelContext_73->atom_0+_S489, (as_type<uint>((end_1))), memory_order_relaxed);
+        atomic_store_explicit(kernelContext_76->atom_0+_S494, (as_type<uint>((end_1))), memory_order_relaxed);
     }
     return;
 }
 
-void il_tube_collect_1(uint k_20, KernelContext_0 thread* kernelContext_74)
+void il_tube_collect_1(uint k_20, KernelContext_0 thread* kernelContext_77)
 {
     thread uint b_29;
     thread float2 t_5;
-    bool _S494 = il_tube_1(k_20, &b_29, &t_5, kernelContext_74);
-    if(!_S494)
+    bool _S499 = il_tube_1(k_20, &b_29, &t_5, kernelContext_77);
+    if(!_S499)
     {
         return;
     }
-    uint _S495 = w_il_tube_0(kernelContext_74);
-    uint _S496 = a_il_0(b_29, kernelContext_74);
-    uint _S497 = atomic_load_explicit(kernelContext_74->atom_0+(_S496 + 4U), memory_order_relaxed);
-    uint _S498 = a_il_0(b_29, kernelContext_74);
-    uint _S499 = atomic_fetch_add_explicit(kernelContext_74->atom_0+(_S498 + 5U), 1U, memory_order_relaxed);
-    uint at_7 = _S495 + 2U * (_S497 + _S499);
-    *(kernelContext_74->work_0+at_7) = (as_type<uint>((t_5.x)));
-    *(kernelContext_74->work_0+(at_7 + 1U)) = (as_type<uint>((t_5.y)));
+    uint _S500 = w_il_tube_0(kernelContext_77);
+    uint _S501 = a_il_0(b_29, kernelContext_77);
+    uint _S502 = atomic_load_explicit(kernelContext_77->atom_0+(_S501 + 4U), memory_order_relaxed);
+    uint _S503 = a_il_0(b_29, kernelContext_77);
+    uint _S504 = atomic_fetch_add_explicit(kernelContext_77->atom_0+(_S503 + 5U), 1U, memory_order_relaxed);
+    uint at_7 = _S500 + 2U * (_S502 + _S504);
+    *(kernelContext_77->work_0+at_7) = (as_type<uint>((t_5.x)));
+    *(kernelContext_77->work_0+(at_7 + 1U)) = (as_type<uint>((t_5.y)));
     return;
 }
 
-void il_tube_base_1(uint b_30, KernelContext_0 thread* kernelContext_75)
+void il_tube_base_1(uint b_30, KernelContext_0 thread* kernelContext_78)
 {
-    bool _S500;
-    if(b_30 < (kernelContext_75->params_0->body_count_0))
+    bool _S505;
+    if(b_30 < (kernelContext_78->params_0->body_count_0))
     {
-        bool _S501 = il_struck_1(b_30, kernelContext_75);
-        _S500 = _S501;
+        bool _S506 = il_struck_1(b_30, kernelContext_78);
+        _S505 = _S506;
     }
     else
     {
-        _S500 = false;
+        _S505 = false;
     }
-    if(_S500)
+    if(_S505)
     {
-        uint _S502 = a_il_0(b_30, kernelContext_75);
-        atomic<uint> device* _S503 = kernelContext_75->atom_0+(_S502 + 4U);
-        uint _S504 = a_il_cursor_1(kernelContext_75);
-        atomic<uint> device* _S505 = kernelContext_75->atom_0+_S504;
-        uint _S506 = atomic_load_explicit(kernelContext_75->atom_0+(_S502 + 1U), memory_order_relaxed);
-        uint _S507 = atomic_fetch_add_explicit(_S505, _S506, memory_order_relaxed);
-        atomic_store_explicit(_S503, _S507, memory_order_relaxed);
+        uint _S507 = a_il_0(b_30, kernelContext_78);
+        atomic<uint> device* _S508 = kernelContext_78->atom_0+(_S507 + 4U);
+        uint _S509 = a_il_cursor_1(kernelContext_78);
+        atomic<uint> device* _S510 = kernelContext_78->atom_0+_S509;
+        uint _S511 = atomic_load_explicit(kernelContext_78->atom_0+(_S507 + 1U), memory_order_relaxed);
+        uint _S512 = atomic_fetch_add_explicit(_S510, _S511, memory_order_relaxed);
+        atomic_store_explicit(_S508, _S512, memory_order_relaxed);
     }
     return;
 }
 
-void il_tube_count_1(uint k_21, KernelContext_0 thread* kernelContext_76)
+void il_tube_count_1(uint k_21, KernelContext_0 thread* kernelContext_79)
 {
     thread uint b_31;
     thread float2 t_6;
-    bool _S508 = il_tube_1(k_21, &b_31, &t_6, kernelContext_76);
-    if(_S508)
+    bool _S513 = il_tube_1(k_21, &b_31, &t_6, kernelContext_79);
+    if(_S513)
     {
-        uint _S509 = a_il_0(b_31, kernelContext_76);
-        uint _S510 = atomic_fetch_add_explicit(kernelContext_76->atom_0+(_S509 + 1U), 1U, memory_order_relaxed);
+        uint _S514 = a_il_0(b_31, kernelContext_79);
+        uint _S515 = atomic_fetch_add_explicit(kernelContext_79->atom_0+(_S514 + 1U), 1U, memory_order_relaxed);
     }
     return;
 }
 
-uint a_first_1(uint shot_3, KernelContext_0 thread* kernelContext_77)
+uint a_first_1(uint shot_3, KernelContext_0 thread* kernelContext_80)
 {
-    uint _S511 = a_strike_0(kernelContext_77);
-    return _S511 + 29U * kernelContext_77->params_0->body_count_0 + shot_3;
+    uint _S516 = a_strike_0(kernelContext_80);
+    return _S516 + 29U * kernelContext_80->params_0->body_count_0 + shot_3;
 }
 
-void il_begin_1(uint b_32, KernelContext_0 thread* kernelContext_78)
+void il_begin_1(uint b_32, KernelContext_0 thread* kernelContext_81)
 {
-    bool _S512;
-    if(b_32 >= (kernelContext_78->params_0->body_count_0))
+    bool _S517;
+    if(b_32 >= (kernelContext_81->params_0->body_count_0))
     {
-        _S512 = true;
+        _S517 = true;
     }
     else
     {
-        bool _S513 = il_struck_1(b_32, kernelContext_78);
-        _S512 = !_S513;
+        bool _S518 = il_struck_1(b_32, kernelContext_81);
+        _S517 = !_S518;
     }
-    if(_S512)
+    if(_S517)
     {
         return;
     }
     thread uint shot_4;
-    bool _S514 = struck_0(b_32, &shot_4, kernelContext_78);
-    uint _S515 = a_strike_0(kernelContext_78);
-    uint _S516 = atomic_load_explicit(kernelContext_78->atom_0+(_S515 + 9U * b_32 + 6U), memory_order_relaxed);
-    uint _S517 = a_first_1(shot_4, kernelContext_78);
-    uint _S518 = atomic_load_explicit(kernelContext_78->atom_0+_S517, memory_order_relaxed);
-    if(_S516 != _S518)
+    bool _S519 = struck_0(b_32, &shot_4, kernelContext_81);
+    uint _S520 = a_strike_0(kernelContext_81);
+    uint _S521 = atomic_load_explicit(kernelContext_81->atom_0+(_S520 + 9U * b_32 + 6U), memory_order_relaxed);
+    uint _S522 = a_first_1(shot_4, kernelContext_81);
+    uint _S523 = atomic_load_explicit(kernelContext_81->atom_0+_S522, memory_order_relaxed);
+    if(_S521 != _S523)
     {
-        uint _S519 = strike_at_0(b_32, kernelContext_78);
-        (*(kernelContext_78->frames_0+_S519))[int(3)] = 0.0f;
+        uint _S524 = strike_at_0(b_32, kernelContext_81);
+        (*(kernelContext_81->frames_0+_S524))[int(3)] = 0.0f;
         return;
     }
     thread float3 contact_15;
     thread float3 d_17;
     thread float speed_13;
-    il_path_1(b_32, &contact_15, &d_17, &speed_13, kernelContext_78);
-    uint _S520 = il_entry_1(b_32, kernelContext_78);
-    IlStriker_0 _S521 = il_striker_1(b_32, kernelContext_78);
-    float2 _S522 = il_interval_0(_S520, contact_15, d_17, _S521.radius_0, kernelContext_78);
-    uint _S523 = a_il_0(b_32, kernelContext_78);
-    atomic_store_explicit(kernelContext_78->atom_0+_S523, (as_type<uint>((max(_S522.y, 0.0f)))), memory_order_relaxed);
-    uint i_5 = 1U;
+    il_path_1(b_32, &contact_15, &d_17, &speed_13, kernelContext_81);
+    uint _S525 = il_entry_1(b_32, kernelContext_81);
+    IlStriker_0 _S526 = il_striker_1(b_32, kernelContext_81);
+    float2 _S527 = il_interval_0(_S525, contact_15, d_17, _S526.radius_0, kernelContext_81);
+    uint _S528 = a_il_0(b_32, kernelContext_81);
+    atomic_store_explicit(kernelContext_81->atom_0+_S528, (as_type<uint>((max(_S527.y, 0.0f)))), memory_order_relaxed);
+    uint i_6 = 1U;
     for(;;)
     {
-        if(i_5 < 6U)
+        if(i_6 < 6U)
         {
         }
         else
         {
             break;
         }
-        atomic_store_explicit(kernelContext_78->atom_0+(_S523 + i_5), 0U, memory_order_relaxed);
-        i_5 = i_5 + 1U;
+        atomic_store_explicit(kernelContext_81->atom_0+(_S528 + i_6), 0U, memory_order_relaxed);
+        i_6 = i_6 + 1U;
     }
     return;
 }
 
 [[kernel]] void fr_events_reset(uint3 id_0 [[thread_position_in_grid]], FractureParams_0 constant* params_1 [[buffer(0)]], atomic<uint> device* atom_1 [[buffer(5)]], uint device* work_1 [[buffer(4)]], packed_float4 device* frames_1 [[buffer(6)]], packed_float4 device* bodies_1 [[buffer(7)]], packed_float4 device* chunks_1 [[buffer(1)]], uint device* sort_1 [[buffer(11)]], Record_natural_0 device* manifolds_1 [[buffer(10)]], packed_float4 device* loads_1 [[buffer(12)]], packed_uint4 device* bonds_1 [[buffer(2)]], uint device* args_1 [[buffer(13)]], uint device* info_1 [[buffer(15)]], ScanParams_0 constant* scan_1 [[buffer(14)]], packed_float4 device* parts_1 [[buffer(3)]], packed_float4 device* colliders_1 [[buffer(8)]], packed_uint4 device* collider_info_1 [[buffer(9)]], packed_float4 device* view_chunks_1 [[buffer(17)]], ViewParams_0 constant* view_1 [[buffer(16)]], packed_float4 device* objects_1 [[buffer(18)]], uint device* shot_bodies_1 [[buffer(20)]], float device* lines_1 [[buffer(19)]], packed_float4 device* geometry_1 [[buffer(21)]], packed_float4 device* shots_1 [[buffer(22)]], packed_float4 device* lp_1 [[buffer(24)]], packed_float4 device* ext_2 [[buffer(23)]], packed_float4 device* engine_contacts_1 [[buffer(25)]], CrushParams_0 constant* crush_1 [[buffer(28)]], packed_float4 device* crush_rw_1 [[buffer(27)]], packed_float4 device* crush_tab_1 [[buffer(26)]])
 {
-    thread KernelContext_0 kernelContext_79;
-    (&kernelContext_79)->params_0 = params_1;
-    (&kernelContext_79)->atom_0 = atom_1;
-    (&kernelContext_79)->work_0 = work_1;
-    (&kernelContext_79)->frames_0 = frames_1;
-    (&kernelContext_79)->bodies_0 = bodies_1;
-    (&kernelContext_79)->chunks_0 = chunks_1;
-    (&kernelContext_79)->sort_0 = sort_1;
-    (&kernelContext_79)->manifolds_0 = manifolds_1;
-    (&kernelContext_79)->loads_0 = loads_1;
-    (&kernelContext_79)->bonds_0 = bonds_1;
-    (&kernelContext_79)->args_0 = args_1;
-    (&kernelContext_79)->info_0 = info_1;
-    (&kernelContext_79)->scan_0 = scan_1;
-    (&kernelContext_79)->parts_0 = parts_1;
-    (&kernelContext_79)->colliders_0 = colliders_1;
-    (&kernelContext_79)->collider_info_0 = collider_info_1;
-    (&kernelContext_79)->view_chunks_0 = view_chunks_1;
-    (&kernelContext_79)->view_0 = view_1;
-    (&kernelContext_79)->objects_0 = objects_1;
-    (&kernelContext_79)->shot_bodies_0 = shot_bodies_1;
-    (&kernelContext_79)->lines_0 = lines_1;
-    (&kernelContext_79)->geometry_0 = geometry_1;
-    (&kernelContext_79)->shots_0 = shots_1;
-    (&kernelContext_79)->lp_0 = lp_1;
-    (&kernelContext_79)->ext_0 = ext_2;
-    (&kernelContext_79)->engine_contacts_0 = engine_contacts_1;
-    (&kernelContext_79)->crush_0 = crush_1;
-    (&kernelContext_79)->crush_rw_0 = crush_rw_1;
-    (&kernelContext_79)->crush_tab_0 = crush_tab_1;
+    thread KernelContext_0 kernelContext_82;
+    (&kernelContext_82)->params_0 = params_1;
+    (&kernelContext_82)->atom_0 = atom_1;
+    (&kernelContext_82)->work_0 = work_1;
+    (&kernelContext_82)->frames_0 = frames_1;
+    (&kernelContext_82)->bodies_0 = bodies_1;
+    (&kernelContext_82)->chunks_0 = chunks_1;
+    (&kernelContext_82)->sort_0 = sort_1;
+    (&kernelContext_82)->manifolds_0 = manifolds_1;
+    (&kernelContext_82)->loads_0 = loads_1;
+    (&kernelContext_82)->bonds_0 = bonds_1;
+    (&kernelContext_82)->args_0 = args_1;
+    (&kernelContext_82)->info_0 = info_1;
+    (&kernelContext_82)->scan_0 = scan_1;
+    (&kernelContext_82)->parts_0 = parts_1;
+    (&kernelContext_82)->colliders_0 = colliders_1;
+    (&kernelContext_82)->collider_info_0 = collider_info_1;
+    (&kernelContext_82)->view_chunks_0 = view_chunks_1;
+    (&kernelContext_82)->view_0 = view_1;
+    (&kernelContext_82)->objects_0 = objects_1;
+    (&kernelContext_82)->shot_bodies_0 = shot_bodies_1;
+    (&kernelContext_82)->lines_0 = lines_1;
+    (&kernelContext_82)->geometry_0 = geometry_1;
+    (&kernelContext_82)->shots_0 = shots_1;
+    (&kernelContext_82)->lp_0 = lp_1;
+    (&kernelContext_82)->ext_0 = ext_2;
+    (&kernelContext_82)->engine_contacts_0 = engine_contacts_1;
+    (&kernelContext_82)->crush_0 = crush_1;
+    (&kernelContext_82)->crush_rw_0 = crush_rw_1;
+    (&kernelContext_82)->crush_tab_0 = crush_tab_1;
     threadgroup array<uint, int(1024)> g_scan_1;
-    (&kernelContext_79)->g_scan_0 = &g_scan_1;
+    (&kernelContext_82)->g_scan_0 = &g_scan_1;
     threadgroup array<float, int(64)> g_il_best_1;
-    (&kernelContext_79)->g_il_best_0 = &g_il_best_1;
-    uint _S524 = a_counters_1(&kernelContext_79);
-    atomic_store_explicit((&kernelContext_79)->atom_0+(_S524 + 20U), 0U, memory_order_relaxed);
-    atomic_store_explicit((&kernelContext_79)->atom_0+(_S524 + 21U), 0U, memory_order_relaxed);
-    atomic_store_explicit((&kernelContext_79)->atom_0+(_S524 + 22U), 0U, memory_order_relaxed);
+    (&kernelContext_82)->g_il_best_0 = &g_il_best_1;
+    uint _S529 = a_counters_1(&kernelContext_82);
+    atomic_store_explicit((&kernelContext_82)->atom_0+(_S529 + 20U), 0U, memory_order_relaxed);
+    atomic_store_explicit((&kernelContext_82)->atom_0+(_S529 + 21U), 0U, memory_order_relaxed);
+    atomic_store_explicit((&kernelContext_82)->atom_0+(_S529 + 22U), 0U, memory_order_relaxed);
     return;
 }
 
-bool live_0(uint c_6, KernelContext_0 thread* kernelContext_80)
+bool live_0(uint c_6, KernelContext_0 thread* kernelContext_83)
 {
-    bool _S525;
-    if(c_6 < (kernelContext_80->params_0->chunk_used_0))
+    bool _S530;
+    if(c_6 < (kernelContext_83->params_0->chunk_used_0))
     {
-        uint _S526 = body_of_0(c_6, kernelContext_80);
-        _S525 = _S526 != 4294967295U;
+        uint _S531 = body_of_0(c_6, kernelContext_83);
+        _S530 = _S531 != 4294967295U;
     }
     else
     {
-        _S525 = false;
+        _S530 = false;
     }
-    return _S525;
+    return _S530;
 }
 
-uint w_cs_rows_1(KernelContext_0 thread* kernelContext_81)
+uint w_cs_rows_1(KernelContext_0 thread* kernelContext_84)
 {
-    uint _S527 = w_host_breaks_0(kernelContext_81);
-    return _S527 + 1U + kernelContext_81->params_0->bond_count_0;
+    uint _S532 = w_host_breaks_0(kernelContext_84);
+    return _S532 + 1U + kernelContext_84->params_0->bond_count_0;
 }
 
-uint w_frame_0(KernelContext_0 thread* kernelContext_82)
+uint w_frame_0(KernelContext_0 thread* kernelContext_85)
 {
-    uint _S528 = w_cs_rows_1(kernelContext_82);
-    return _S528 + 1U;
+    uint _S533 = w_cs_rows_1(kernelContext_85);
+    return _S533 + 1U;
 }
 
-uint frame_parity_0(KernelContext_0 thread* kernelContext_83)
+uint frame_parity_0(KernelContext_0 thread* kernelContext_86)
 {
-    uint _S529 = w_frame_0(kernelContext_83);
-    return *(kernelContext_83->work_0+_S529);
+    uint _S534 = w_frame_0(kernelContext_86);
+    return *(kernelContext_86->work_0+_S534);
 }
 
-uint l_pool_0(uint half_1, KernelContext_0 thread* kernelContext_84)
+uint l_pool_0(uint half_1, KernelContext_0 thread* kernelContext_87)
 {
-    return kernelContext_84->params_0->chunk_count_0 + 3U * kernelContext_84->params_0->pool_cap_0 * half_1;
+    return kernelContext_87->params_0->chunk_count_0 + 3U * kernelContext_87->params_0->pool_cap_0 * half_1;
 }
 
 float pulse_mean_0(float start_0, float plateau_0, float plateau_time_0, float peak_0, float duration_0, float dt_1)
 {
-    float _S530 = start_0 + plateau_time_0;
-    float sum_0 = plateau_0 * max(min(_S530, dt_1) - max(start_0, 0.0f), 0.0f);
-    float _S531 = max(0.0f, _S530);
-    float _S532 = min(dt_1, _S530 + duration_0);
-    bool _S533;
-    if(_S532 > _S531)
+    float _S535 = start_0 + plateau_time_0;
+    float sum_0 = plateau_0 * max(min(_S535, dt_1) - max(start_0, 0.0f), 0.0f);
+    float _S536 = max(0.0f, _S535);
+    float _S537 = min(dt_1, _S535 + duration_0);
+    bool _S538;
+    if(_S537 > _S536)
     {
-        _S533 = duration_0 > 0.0f;
+        _S538 = duration_0 > 0.0f;
     }
     else
     {
-        _S533 = false;
+        _S538 = false;
     }
     float sum_1;
-    if(_S533)
+    if(_S538)
     {
         float w_2 = 3.14159274101257324f / duration_0;
-        sum_1 = sum_0 + peak_0 / w_2 * (cos(w_2 * (_S531 - _S530)) - cos(w_2 * (_S532 - _S530)));
+        sum_1 = sum_0 + peak_0 / w_2 * (cos(w_2 * (_S536 - _S535)) - cos(w_2 * (_S537 - _S535)));
     }
     else
     {
@@ -3034,9 +3068,9 @@ float hertz_duration_0(float m_0, float r_18, float e_2, float v_9)
     return 2.86999988555908203f * pow(m_0 * m_0 / (r_18 * e_2 * e_2 * max(abs(v_9), 0.00100000004749745f)), 0.20000000298023224f);
 }
 
-uint l_vec_0(KernelContext_0 thread* kernelContext_85)
+uint l_vec_0(KernelContext_0 thread* kernelContext_88)
 {
-    return kernelContext_85->params_0->chunk_count_0 + 6U * kernelContext_85->params_0->pool_cap_0;
+    return kernelContext_88->params_0->chunk_count_0 + 6U * kernelContext_88->params_0->pool_cap_0;
 }
 
 [[kernel]] void fr_loads(uint3 id_1 [[thread_position_in_grid]], FractureParams_0 constant* params_2 [[buffer(0)]], atomic<uint> device* atom_2 [[buffer(5)]], uint device* work_2 [[buffer(4)]], packed_float4 device* frames_2 [[buffer(6)]], packed_float4 device* bodies_2 [[buffer(7)]], packed_float4 device* chunks_2 [[buffer(1)]], uint device* sort_2 [[buffer(11)]], Record_natural_0 device* manifolds_2 [[buffer(10)]], packed_float4 device* loads_2 [[buffer(12)]], packed_uint4 device* bonds_2 [[buffer(2)]], uint device* args_2 [[buffer(13)]], uint device* info_2 [[buffer(15)]], ScanParams_0 constant* scan_2 [[buffer(14)]], packed_float4 device* parts_2 [[buffer(3)]], packed_float4 device* colliders_2 [[buffer(8)]], packed_uint4 device* collider_info_2 [[buffer(9)]], packed_float4 device* view_chunks_2 [[buffer(17)]], ViewParams_0 constant* view_2 [[buffer(16)]], packed_float4 device* objects_2 [[buffer(18)]], uint device* shot_bodies_2 [[buffer(20)]], float device* lines_2 [[buffer(19)]], packed_float4 device* geometry_2 [[buffer(21)]], packed_float4 device* shots_2 [[buffer(22)]], packed_float4 device* lp_2 [[buffer(24)]], packed_float4 device* ext_3 [[buffer(23)]], packed_float4 device* engine_contacts_2 [[buffer(25)]], CrushParams_0 constant* crush_2 [[buffer(28)]], packed_float4 device* crush_rw_2 [[buffer(27)]], packed_float4 device* crush_tab_2 [[buffer(26)]])
@@ -3051,58 +3085,58 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
     bool overflow_1;
     float3 f_total_1;
     float3 t_total_1;
-    thread KernelContext_0 kernelContext_86;
-    (&kernelContext_86)->params_0 = params_2;
-    (&kernelContext_86)->atom_0 = atom_2;
-    (&kernelContext_86)->work_0 = work_2;
-    (&kernelContext_86)->frames_0 = frames_2;
-    (&kernelContext_86)->bodies_0 = bodies_2;
-    (&kernelContext_86)->chunks_0 = chunks_2;
-    (&kernelContext_86)->sort_0 = sort_2;
-    (&kernelContext_86)->manifolds_0 = manifolds_2;
-    (&kernelContext_86)->loads_0 = loads_2;
-    (&kernelContext_86)->bonds_0 = bonds_2;
-    (&kernelContext_86)->args_0 = args_2;
-    (&kernelContext_86)->info_0 = info_2;
-    (&kernelContext_86)->scan_0 = scan_2;
-    (&kernelContext_86)->parts_0 = parts_2;
-    (&kernelContext_86)->colliders_0 = colliders_2;
-    (&kernelContext_86)->collider_info_0 = collider_info_2;
-    (&kernelContext_86)->view_chunks_0 = view_chunks_2;
-    (&kernelContext_86)->view_0 = view_2;
-    (&kernelContext_86)->objects_0 = objects_2;
-    (&kernelContext_86)->shot_bodies_0 = shot_bodies_2;
-    (&kernelContext_86)->lines_0 = lines_2;
-    (&kernelContext_86)->geometry_0 = geometry_2;
-    (&kernelContext_86)->shots_0 = shots_2;
-    (&kernelContext_86)->lp_0 = lp_2;
-    (&kernelContext_86)->ext_0 = ext_3;
-    (&kernelContext_86)->engine_contacts_0 = engine_contacts_2;
-    (&kernelContext_86)->crush_0 = crush_2;
-    (&kernelContext_86)->crush_rw_0 = crush_rw_2;
-    (&kernelContext_86)->crush_tab_0 = crush_tab_2;
+    thread KernelContext_0 kernelContext_89;
+    (&kernelContext_89)->params_0 = params_2;
+    (&kernelContext_89)->atom_0 = atom_2;
+    (&kernelContext_89)->work_0 = work_2;
+    (&kernelContext_89)->frames_0 = frames_2;
+    (&kernelContext_89)->bodies_0 = bodies_2;
+    (&kernelContext_89)->chunks_0 = chunks_2;
+    (&kernelContext_89)->sort_0 = sort_2;
+    (&kernelContext_89)->manifolds_0 = manifolds_2;
+    (&kernelContext_89)->loads_0 = loads_2;
+    (&kernelContext_89)->bonds_0 = bonds_2;
+    (&kernelContext_89)->args_0 = args_2;
+    (&kernelContext_89)->info_0 = info_2;
+    (&kernelContext_89)->scan_0 = scan_2;
+    (&kernelContext_89)->parts_0 = parts_2;
+    (&kernelContext_89)->colliders_0 = colliders_2;
+    (&kernelContext_89)->collider_info_0 = collider_info_2;
+    (&kernelContext_89)->view_chunks_0 = view_chunks_2;
+    (&kernelContext_89)->view_0 = view_2;
+    (&kernelContext_89)->objects_0 = objects_2;
+    (&kernelContext_89)->shot_bodies_0 = shot_bodies_2;
+    (&kernelContext_89)->lines_0 = lines_2;
+    (&kernelContext_89)->geometry_0 = geometry_2;
+    (&kernelContext_89)->shots_0 = shots_2;
+    (&kernelContext_89)->lp_0 = lp_2;
+    (&kernelContext_89)->ext_0 = ext_3;
+    (&kernelContext_89)->engine_contacts_0 = engine_contacts_2;
+    (&kernelContext_89)->crush_0 = crush_2;
+    (&kernelContext_89)->crush_rw_0 = crush_rw_2;
+    (&kernelContext_89)->crush_tab_0 = crush_tab_2;
     threadgroup array<uint, int(1024)> g_scan_2;
-    (&kernelContext_86)->g_scan_0 = &g_scan_2;
+    (&kernelContext_89)->g_scan_0 = &g_scan_2;
     threadgroup array<float, int(64)> g_il_best_2;
-    (&kernelContext_86)->g_il_best_0 = &g_il_best_2;
+    (&kernelContext_89)->g_il_best_0 = &g_il_best_2;
     uint k_22 = id_1.x;
-    bool _S534 = live_0(k_22, &kernelContext_86);
-    if(!_S534)
+    bool _S539 = live_0(k_22, &kernelContext_89);
+    if(!_S539)
     {
         return;
     }
-    uint _S535 = body_of_0(k_22, &kernelContext_86);
-    uint b_33 = 7U * _S535;
+    uint _S540 = body_of_0(k_22, &kernelContext_89);
+    uint b_33 = 7U * _S540;
     thread Quat_0 q_11;
     thread float3 origin_3;
-    structure_pose_0(_S535, b_33, &q_11, &origin_3, &kernelContext_86);
-    uint _S536 = 4U * k_22;
-    float4 _S537 = float4(*((&kernelContext_86)->chunks_0+_S536)) ;
-    float3 _S538 = _S537.xyz;
-    thread Quat_0 _S539 = q_11;
-    float3 _S540 = rotate_0(&_S539, _S538);
-    float3 centre_0 = origin_3 + _S540;
-    float inv_mass_2 = (float4(*((&kernelContext_86)->bodies_0+b_33)) ).w;
+    structure_pose_0(_S540, b_33, &q_11, &origin_3, &kernelContext_89);
+    uint _S541 = 4U * k_22;
+    float4 _S542 = float4(*((&kernelContext_89)->chunks_0+_S541)) ;
+    float3 _S543 = _S542.xyz;
+    thread Quat_0 _S544 = q_11;
+    float3 _S545 = rotate_0(&_S544, _S543);
+    float3 centre_0 = origin_3 + _S545;
+    float inv_mass_2 = (float4(*((&kernelContext_89)->bodies_0+b_33)) ).w;
     float m_body_0;
     if(inv_mass_2 > 0.0f)
     {
@@ -3112,27 +3146,27 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
     {
         m_body_0 = float_bits_0(2139095040U);
     }
-    uint _S541 = frame_parity_0(&kernelContext_86);
-    uint to_0 = 1U - _S541;
-    uint _S542 = w_pulses_0(&kernelContext_86);
-    uint _S543 = _S542 + _S536;
-    uint _S544 = _S543 + 2U * _S541;
-    uint off_0 = *((&kernelContext_86)->work_0+_S544);
-    uint device* _S545 = (&kernelContext_86)->work_0+(_S544 + 1U);
-    uint carried_0 = *_S545;
-    uint room_0 = *_S545 + (&kernelContext_86)->sort_0[(&kernelContext_86)->params_0->chunk_count_0 + 1U + k_22];
+    uint _S546 = frame_parity_0(&kernelContext_89);
+    uint to_0 = 1U - _S546;
+    uint _S547 = w_pulses_0(&kernelContext_89);
+    uint _S548 = _S547 + _S541;
+    uint _S549 = _S548 + 2U * _S546;
+    uint off_0 = *((&kernelContext_89)->work_0+_S549);
+    uint device* _S550 = (&kernelContext_89)->work_0+(_S549 + 1U);
+    uint carried_0 = *_S550;
+    uint room_0 = *_S550 + (&kernelContext_89)->sort_0[(&kernelContext_89)->params_0->chunk_count_0 + 1U + k_22];
     uint base_0;
     uint room_1;
     if(room_0 != 0U)
     {
-        uint _S546 = a_counters_1(&kernelContext_86);
-        uint base_1 = atomic_fetch_add_explicit((&kernelContext_86)->atom_0+(_S546 + 5U + to_0), room_0, memory_order_relaxed);
-        if((base_1 + room_0) > ((&kernelContext_86)->params_0->pool_cap_0))
+        uint _S551 = a_counters_1(&kernelContext_89);
+        uint base_1 = atomic_fetch_add_explicit((&kernelContext_89)->atom_0+(_S551 + 5U + to_0), room_0, memory_order_relaxed);
+        if((base_1 + room_0) > ((&kernelContext_89)->params_0->pool_cap_0))
         {
-            uint _S547 = atomic_fetch_or_explicit((&kernelContext_86)->atom_0+(_S546 + 3U), 8U, memory_order_relaxed);
-            if(base_1 < ((&kernelContext_86)->params_0->pool_cap_0))
+            uint _S552 = atomic_fetch_or_explicit((&kernelContext_89)->atom_0+(_S551 + 3U), 8U, memory_order_relaxed);
+            if(base_1 < ((&kernelContext_89)->params_0->pool_cap_0))
             {
-                base_0 = (&kernelContext_86)->params_0->pool_cap_0 - base_1;
+                base_0 = (&kernelContext_89)->params_0->pool_cap_0 - base_1;
             }
             else
             {
@@ -3143,38 +3177,38 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
         {
             base_0 = room_0;
         }
-        uint _S548 = base_0;
+        uint _S553 = base_0;
         base_0 = base_1;
-        room_1 = _S548;
+        room_1 = _S553;
     }
     else
     {
         base_0 = 0U;
         room_1 = room_0;
     }
-    uint _S549 = (&kernelContext_86)->params_0->chunk_count_0;
-    float _S550 = _S537.w;
-    float4 _S551 = float4(*((&kernelContext_86)->chunks_0+(_S536 + 3U))) ;
-    float _S552 = (&kernelContext_86)->params_0->band_0;
-    float _S553 = (&kernelContext_86)->params_0->dt_0;
-    bool _S554 = ((&kernelContext_86)->params_0->impact_peak_0) != 0U;
-    uint _S555 = l_pool_0(_S541, &kernelContext_86);
-    uint _S556 = _S555 + 3U * off_0;
-    uint _S557 = l_pool_0(to_0, &kernelContext_86);
-    uint _S558 = _S557 + 3U * base_0;
+    uint _S554 = (&kernelContext_89)->params_0->chunk_count_0;
+    float _S555 = _S542.w;
+    float4 _S556 = float4(*((&kernelContext_89)->chunks_0+(_S541 + 3U))) ;
+    float _S557 = (&kernelContext_89)->params_0->band_0;
+    float _S558 = (&kernelContext_89)->params_0->dt_0;
+    bool _S559 = ((&kernelContext_89)->params_0->impact_peak_0) != 0U;
+    uint _S560 = l_pool_0(_S546, &kernelContext_89);
+    uint _S561 = _S560 + 3U * off_0;
+    uint _S562 = l_pool_0(to_0, &kernelContext_89);
+    uint _S563 = _S562 + 3U * base_0;
     for(;;)
     {
-        float3 _S559 = float3(0.0f) ;
-        uint _S560 = (&kernelContext_86)->sort_0[k_22];
-        uint _S561 = (&kernelContext_86)->sort_0[_S549 + 1U + k_22];
+        float3 _S564 = float3(0.0f) ;
+        uint _S565 = (&kernelContext_89)->sort_0[k_22];
+        uint _S566 = (&kernelContext_89)->sort_0[_S554 + 1U + k_22];
         bool first_0 = true;
         uint last_0 = 0U;
         uint step_3 = 0U;
-        f_total_0 = _S559;
-        t_total_0 = _S559;
+        f_total_0 = _S564;
+        t_total_0 = _S564;
         for(;;)
         {
-            if(step_3 < _S561)
+            if(step_3 < _S566)
             {
             }
             else
@@ -3186,14 +3220,14 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
             q3_0 = 0U;
             for(;;)
             {
-                if(q3_0 < _S561)
+                if(q3_0 < _S566)
                 {
                 }
                 else
                 {
                     break;
                 }
-                uint key_1 = (uint4((&kernelContext_86)->manifolds_0[_S560 + q3_0].ids_0) ).y + 1U;
+                uint key_1 = (uint4((&kernelContext_89)->manifolds_0[_S565 + q3_0].ids_0) ).y + 1U;
                 if(first_0)
                 {
                     overflow_0 = true;
@@ -3228,16 +3262,16 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
             {
                 break;
             }
-            Record_natural_0 r_19 = (&kernelContext_86)->manifolds_0[_S560 + p_10];
-            float4 _S562 = float4(r_19.impulse_0) ;
-            float3 _S563 = _S562.xyz;
-            float j_3 = length(_S563);
+            Record_natural_0 r_19 = (&kernelContext_89)->manifolds_0[_S565 + p_10];
+            float4 _S567 = float4(r_19.impulse_0) ;
+            float3 _S568 = _S567.xyz;
+            float j_3 = length(_S568);
             if(j_3 == 0.0f)
             {
-                uint _S564 = step_3 + 1U;
+                uint _S569 = step_3 + 1U;
                 first_0 = false;
                 last_0 = kept_0;
-                step_3 = _S564;
+                step_3 = _S569;
                 continue;
             }
             float m_other_0 = (float4(r_19.other_0) ).x;
@@ -3245,7 +3279,7 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
             {
                 if(isinf(m_other_0))
                 {
-                    m_1 = _S550;
+                    m_1 = _S555;
                 }
                 else
                 {
@@ -3263,13 +3297,13 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
                     m_1 = m_body_0 * m_other_0 / (m_body_0 + m_other_0);
                 }
             }
-            float _S565 = min(j_3, 2.0f * m_1 * max(_S562.w - _S552, 0.0f));
-            if(_S565 < j_3)
+            float _S570 = min(j_3, 2.0f * m_1 * max(_S567.w - _S557, 0.0f));
+            if(_S570 < j_3)
             {
-                float3 f_1 = _S563 / float3(j_3)  * float3(((j_3 - _S565) / _S553)) ;
-                float3 _S566 = t_total_0 + cross((float4(r_19.point_0) ).xyz - centre_0, f_1);
+                float3 f_1 = _S568 / float3(j_3)  * float3(((j_3 - _S570) / _S558)) ;
+                float3 _S571 = t_total_0 + cross((float4(r_19.point_0) ).xyz - centre_0, f_1);
                 f_total_1 = f_total_0 + f_1;
-                t_total_1 = _S566;
+                t_total_1 = _S571;
             }
             else
             {
@@ -3278,10 +3312,10 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
             }
             f_total_0 = f_total_1;
             t_total_0 = t_total_1;
-            uint _S564 = step_3 + 1U;
+            uint _S569 = step_3 + 1U;
             first_0 = false;
             last_0 = kept_0;
-            step_3 = _S564;
+            step_3 = _S569;
         }
         p_10 = 0U;
         kept_0 = 0U;
@@ -3294,27 +3328,27 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
             {
                 break;
             }
-            uint _S567 = _S556 + 3U * p_10;
-            float4 _S568 = float4(*((&kernelContext_86)->loads_0+_S567)) ;
-            thread float4 a_5 = _S568;
-            float4 _S569 = float4(*((&kernelContext_86)->loads_0+(_S567 + 1U))) ;
-            float4 _S570 = float4(*((&kernelContext_86)->loads_0+(_S567 + 2U))) ;
-            float _S571 = _S569.w;
-            float mean_0 = pulse_mean_0(_S568.x, _S568.y, _S568.z, _S568.w, _S571, _S553);
+            uint _S572 = _S561 + 3U * p_10;
+            float4 _S573 = float4(*((&kernelContext_89)->loads_0+_S572)) ;
+            thread float4 a_5 = _S573;
+            float4 _S574 = float4(*((&kernelContext_89)->loads_0+(_S572 + 1U))) ;
+            float4 _S575 = float4(*((&kernelContext_89)->loads_0+(_S572 + 2U))) ;
+            float _S576 = _S574.w;
+            float mean_0 = pulse_mean_0(_S573.x, _S573.y, _S573.z, _S573.w, _S576, _S558);
             if(mean_0 != 0.0f)
             {
-                float3 f_2 = _S570.xyz * float3(mean_0) ;
-                float3 _S572 = t_total_0 + cross(_S569.xyz - centre_0, f_2);
+                float3 f_2 = _S575.xyz * float3(mean_0) ;
+                float3 _S577 = t_total_0 + cross(_S574.xyz - centre_0, f_2);
                 f_total_0 = f_total_0 + f_2;
-                t_total_0 = _S572;
+                t_total_0 = _S577;
             }
-            if((a_5.x + a_5.z + _S571) > _S553)
+            if((a_5.x + a_5.z + _S576) > _S558)
             {
-                a_5.x = a_5.x - _S553;
-                uint _S573 = _S558 + 3U * kept_0;
-                *((&kernelContext_86)->loads_0+_S573) = packed_float4(a_5) ;
-                *((&kernelContext_86)->loads_0+(_S573 + 1U)) = packed_float4(_S569) ;
-                *((&kernelContext_86)->loads_0+(_S573 + 2U)) = packed_float4(_S570) ;
+                a_5.x = a_5.x - _S558;
+                uint _S578 = _S563 + 3U * kept_0;
+                *((&kernelContext_89)->loads_0+_S578) = packed_float4(a_5) ;
+                *((&kernelContext_89)->loads_0+(_S578 + 1U)) = packed_float4(_S574) ;
+                *((&kernelContext_89)->loads_0+(_S578 + 2U)) = packed_float4(_S575) ;
                 kept_0 = kept_0 + 1U;
             }
             p_10 = p_10 + 1U;
@@ -3323,17 +3357,17 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
         overflow_0 = false;
         for(;;)
         {
-            if(q3_0 < _S561)
+            if(q3_0 < _S566)
             {
             }
             else
             {
                 break;
             }
-            Record_natural_0 r_20 = (&kernelContext_86)->manifolds_0[_S560 + q3_0];
-            float4 _S574 = float4(r_20.impulse_0) ;
-            float3 _S575 = _S574.xyz;
-            float j_4 = length(_S575);
+            Record_natural_0 r_20 = (&kernelContext_89)->manifolds_0[_S565 + q3_0];
+            float4 _S579 = float4(r_20.impulse_0) ;
+            float3 _S580 = _S579.xyz;
+            float j_4 = length(_S580);
             if(j_4 == 0.0f)
             {
                 overflow_1 = overflow_0;
@@ -3341,13 +3375,13 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
                 overflow_0 = overflow_1;
                 continue;
             }
-            float4 _S576 = float4(r_20.other_0) ;
-            float m_other_1 = _S576.x;
+            float4 _S581 = float4(r_20.other_0) ;
+            float m_other_1 = _S581.x;
             if(isinf(m_body_0))
             {
                 if(isinf(m_other_1))
                 {
-                    m_1 = _S550;
+                    m_1 = _S555;
                 }
                 else
                 {
@@ -3365,34 +3399,34 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
                     m_1 = m_body_0 * m_other_1 / (m_body_0 + m_other_1);
                 }
             }
-            float _S577 = _S574.w;
-            float _S578 = min(j_4, 2.0f * m_1 * max(_S577 - _S552, 0.0f));
-            if(_S578 <= 0.0f)
+            float _S582 = _S579.w;
+            float _S583 = min(j_4, 2.0f * m_1 * max(_S582 - _S557, 0.0f));
+            if(_S583 <= 0.0f)
             {
                 overflow_1 = overflow_0;
                 q3_0 = q3_0 + 1U;
                 overflow_0 = overflow_1;
                 continue;
             }
-            float _S579 = _S551.y;
-            float duration_1 = hertz_duration_0(m_1, min(_S576.z, _S551.z), 1.0f / ((1.0f - _S579 * _S579) / _S551.x + 1.0f / _S576.y), _S577);
-            float peak_1 = 3.14159274101257324f * _S578 / (2.0f * duration_1);
-            float3 dir_0 = _S575 / float3(j_4) ;
+            float _S584 = _S556.y;
+            float duration_1 = hertz_duration_0(m_1, min(_S581.z, _S556.z), 1.0f / ((1.0f - _S584 * _S584) / _S556.x + 1.0f / _S581.y), _S582);
+            float peak_1 = 3.14159274101257324f * _S583 / (2.0f * duration_1);
+            float3 dir_0 = _S580 / float3(j_4) ;
             float mean_1;
-            if(_S554)
+            if(_S559)
             {
                 mean_1 = peak_1;
             }
             else
             {
-                mean_1 = pulse_mean_0(0.0f, 0.0f, 0.0f, peak_1, duration_1, _S553);
+                mean_1 = pulse_mean_0(0.0f, 0.0f, 0.0f, peak_1, duration_1, _S558);
             }
             if(mean_1 != 0.0f)
             {
                 float3 f_3 = dir_0 * float3(mean_1) ;
-                float3 _S580 = t_total_0 + cross((float4(r_20.point_0) ).xyz - centre_0, f_3);
+                float3 _S585 = t_total_0 + cross((float4(r_20.point_0) ).xyz - centre_0, f_3);
                 f_total_1 = f_total_0 + f_3;
-                t_total_1 = _S580;
+                t_total_1 = _S585;
             }
             else
             {
@@ -3400,14 +3434,14 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
                 t_total_1 = t_total_0;
             }
             uint kept_1;
-            if(duration_1 > _S553)
+            if(duration_1 > _S558)
             {
                 if(kept_0 < room_1)
                 {
-                    uint _S581 = _S558 + 3U * kept_0;
-                    *((&kernelContext_86)->loads_0+_S581) = packed_float4(float4(- _S553, 0.0f, 0.0f, peak_1)) ;
-                    *((&kernelContext_86)->loads_0+(_S581 + 1U)) = packed_float4(float4((float4(r_20.point_0) ).xyz, duration_1)) ;
-                    *((&kernelContext_86)->loads_0+(_S581 + 2U)) = packed_float4(float4(dir_0, 0.0f)) ;
+                    uint _S586 = _S563 + 3U * kept_0;
+                    *((&kernelContext_89)->loads_0+_S586) = packed_float4(float4(- _S558, 0.0f, 0.0f, peak_1)) ;
+                    *((&kernelContext_89)->loads_0+(_S586 + 1U)) = packed_float4(float4((float4(r_20.point_0) ).xyz, duration_1)) ;
+                    *((&kernelContext_89)->loads_0+(_S586 + 2U)) = packed_float4(float4(dir_0, 0.0f)) ;
                     kept_1 = kept_0 + 1U;
                     overflow_1 = overflow_0;
                 }
@@ -3432,51 +3466,19 @@ uint l_vec_0(KernelContext_0 thread* kernelContext_85)
     }
     if(overflow_0)
     {
-        uint _S582 = a_counters_1(&kernelContext_86);
-        uint _S583 = atomic_fetch_or_explicit((&kernelContext_86)->atom_0+(_S582 + 3U), 8U, memory_order_relaxed);
+        uint _S587 = a_counters_1(&kernelContext_89);
+        uint _S588 = atomic_fetch_or_explicit((&kernelContext_89)->atom_0+(_S587 + 3U), 8U, memory_order_relaxed);
     }
-    uint _S584 = _S543 + 2U * to_0;
-    *((&kernelContext_86)->work_0+_S584) = base_0;
-    *((&kernelContext_86)->work_0+(_S584 + 1U)) = kept_0;
-    *((&kernelContext_86)->loads_0+k_22) = packed_float4(float4(length(f_total_0), f_total_0)) ;
-    if(((&kernelContext_86)->params_0->load_model_0) == 1U)
+    uint _S589 = _S548 + 2U * to_0;
+    *((&kernelContext_89)->work_0+_S589) = base_0;
+    *((&kernelContext_89)->work_0+(_S589 + 1U)) = kept_0;
+    *((&kernelContext_89)->loads_0+k_22) = packed_float4(float4(length(f_total_0), f_total_0)) ;
+    if(((&kernelContext_89)->params_0->load_model_0) == 1U)
     {
-        uint _S585 = l_vec_0(&kernelContext_86);
-        uint _S586 = _S585 + 2U * k_22;
-        *((&kernelContext_86)->loads_0+_S586) = packed_float4(float4(f_total_0, 0.0f)) ;
-        *((&kernelContext_86)->loads_0+(_S586 + 1U)) = packed_float4(float4(t_total_0, 0.0f)) ;
-    }
-    return;
-}
-
-uint a_strike_dist_0(KernelContext_0 thread* kernelContext_87)
-{
-    uint _S587 = a_cs_0(0U, kernelContext_87);
-    return _S587 + 12U * kernelContext_87->params_0->body_count_0;
-}
-
-uint a_events_0(KernelContext_0 thread* kernelContext_88)
-{
-    uint _S588 = a_strike_dist_0(kernelContext_88);
-    return _S588 + kernelContext_88->params_0->chunk_count_0;
-}
-
-void event_broken_0(uint bond_0, KernelContext_0 thread* kernelContext_89)
-{
-    if((kernelContext_89->params_0->ev_broken_cap_0) == 0U)
-    {
-        return;
-    }
-    uint _S589 = a_counters_1(kernelContext_89);
-    uint i_6 = atomic_fetch_add_explicit(kernelContext_89->atom_0+(_S589 + 20U), 1U, memory_order_relaxed);
-    if(i_6 < (kernelContext_89->params_0->ev_broken_cap_0))
-    {
-        uint _S590 = a_events_0(kernelContext_89);
-        atomic_store_explicit(kernelContext_89->atom_0+(_S590 + i_6), bond_0, memory_order_relaxed);
-    }
-    else
-    {
-        uint _S591 = atomic_fetch_or_explicit(kernelContext_89->atom_0+(_S589 + 3U), 128U, memory_order_relaxed);
+        uint _S590 = l_vec_0(&kernelContext_89);
+        uint _S591 = _S590 + 2U * k_22;
+        *((&kernelContext_89)->loads_0+_S591) = packed_float4(float4(f_total_0, 0.0f)) ;
+        *((&kernelContext_89)->loads_0+(_S591 + 1U)) = packed_float4(float4(t_total_0, 0.0f)) ;
     }
     return;
 }
@@ -7895,6 +7897,7 @@ float4 failure_indices_0(const JointMaterial_0 thread* mat_1, const JointBond_0 
         uint _S1186 = atomic_fetch_or_explicit((&kernelContext_159)->atom_0+(_S1184 + _S1185), 1U, memory_order_relaxed);
         uint _S1187 = atomic_fetch_add_explicit((&kernelContext_159)->atom_0+_S1181, 1U, memory_order_relaxed);
         uint _S1188 = atomic_fetch_add_explicit((&kernelContext_159)->atom_0+(_S1181 + 1U), 1U, memory_order_relaxed);
+        event_broken_0(i_19, &kernelContext_159);
     }
     return;
 }
@@ -9312,6 +9315,7 @@ uint w_cs_bodies_0(KernelContext_0 thread* kernelContext_177)
         uint _S1248 = a_counters_1(&kernelContext_191);
         uint _S1249 = atomic_fetch_add_explicit((&kernelContext_191)->atom_0+_S1248, 1U, memory_order_relaxed);
         uint _S1250 = atomic_fetch_add_explicit((&kernelContext_191)->atom_0+(_S1248 + 1U), 1U, memory_order_relaxed);
+        event_broken_0(i_20, &kernelContext_191);
         uint _S1251 = atomic_fetch_add_explicit((&kernelContext_191)->atom_0+(_S1248 + 17U), 1U, memory_order_relaxed);
     }
     return;
@@ -9980,6 +9984,7 @@ void cs_break_0(uint i_21, uint s_20, KernelContext_0 thread* kernelContext_201)
         uint _S1371 = a_counters_1(kernelContext_201);
         uint _S1372 = atomic_fetch_add_explicit(kernelContext_201->atom_0+_S1371, 1U, memory_order_relaxed);
         uint _S1373 = atomic_fetch_add_explicit(kernelContext_201->atom_0+(_S1371 + 1U), 1U, memory_order_relaxed);
+        event_broken_0(i_21, kernelContext_201);
         uint _S1374 = atomic_fetch_add_explicit(kernelContext_201->atom_0+(_S1371 + 17U), 1U, memory_order_relaxed);
     }
     return;
@@ -12193,6 +12198,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_35, float3 v_19)
     uint _S1708 = a_counters_1(&kernelContext_223);
     uint _S1709 = atomic_fetch_add_explicit((&kernelContext_223)->atom_0+_S1708, 1U, memory_order_relaxed);
     uint _S1710 = atomic_fetch_add_explicit((&kernelContext_223)->atom_0+(_S1708 + 1U), 1U, memory_order_relaxed);
+    event_broken_0(i_24, &kernelContext_223);
     return;
 }
 

@@ -1083,6 +1083,9 @@ pub struct GpuFracture {
     /// Per engine contact row the in-step contact fracture's saved anchors (2 float4).
     /// `STRESS_CS_TIMING=1`: its stages' timestamps.
     cs_timing: Option<CsTiming>,
+    /// This step's event lists were opened by the in-step contact fracture (which records
+    /// its breaks and splits into them before the frame's own): the frame keeps them.
+    events_opened: bool,
     engine_counters: Option<wgpu::Buffer>,
     /// Chunk crushing's tables, state and params (placeholders without it).
     pub crush_tab: wgpu::Buffer,
@@ -1392,6 +1395,7 @@ impl GpuFracture {
             ext,
             lp,
             cs_timing: CsTiming::new(gpu),
+            events_opened: false,
             engine_counters: None,
             binds: Vec::new(),
             scan_binds: Vec::new(),
@@ -1758,6 +1762,8 @@ impl GpuFracture {
             w_alive: l.w_alive(),
             a_dirty: l.a_dirty(),
             a_counters: l.a_counters(),
+            a_events: l.a_events(),
+            ev_broken_cap: l.events.broken,
             crush: (self.crush.enabled != 0).then_some((&self.crush_rw, self.crush.r_virial)),
         };
         blast.bind(gpu, &f);
@@ -1777,7 +1783,8 @@ impl GpuFracture {
         let (n, e, b) = (self.params.chunk_used as usize, self.params.bond_used as usize, self.layout.b as usize);
         let crush = self.crush.enabled != 0;
         let host_breaks = self.upload_host_breaks(gpu);
-        let events = self.layout.events != Events::default();
+        // Opened before the step's in-step contact fracture, which recorded into them.
+        let events = self.layout.events != Events::default() && !std::mem::take(&mut self.events_opened);
         if events || host_breaks > 0 {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             if events {
@@ -2041,6 +2048,13 @@ impl GpuFracture {
     pub fn encode_contact_fracture(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if self.params.cs_sweeps == 0 {
             return;
+        }
+        if self.layout.events != Events::default() {
+            // The step's event lists start here: the contact fracture's breaks and splits are
+            // the step's first (`encode_frame` then keeps them).
+            let mut p = encoder.begin_compute_pass(&Default::default());
+            self.direct(&mut p, "fr_events_reset", 1);
+            self.events_opened = true;
         }
         // The step's contact rows' count (`StepCounters` word 2) where the kernels read it.
         let counters = self.engine_counters.as_ref().expect("engine bound");

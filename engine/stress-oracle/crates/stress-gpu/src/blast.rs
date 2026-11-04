@@ -68,6 +68,9 @@ pub struct Params {
     pub section_bending: u32,
     pub chunk_loads: u32,
     pub r_virial: u32,
+    /// The fracture's broken-bond event list in `atom`, and its room (0: none).
+    pub a_events: u32,
+    pub ev_broken_cap: u32,
 }
 
 #[repr(C)]
@@ -926,6 +929,9 @@ pub struct FractureBuffers<'a> {
     pub w_alive: u32,
     pub a_dirty: u32,
     pub a_counters: u32,
+    /// The broken-bond event list (`fracture.slang` `a_events`) and its room (0: none).
+    pub a_events: u32,
+    pub ev_broken_cap: u32,
     /// With crushing: `crush_rw` and the word its bond virial starts at (`blast_virial.slang`).
     pub crush: Option<(&'a wgpu::Buffer, u32)>,
 }
@@ -970,6 +976,8 @@ pub struct BlastFrame {
     w_alive: u32,
     a_dirty: u32,
     a_counters: u32,
+    a_events: u32,
+    ev_broken_cap: u32,
 }
 
 impl BlastFrame {
@@ -1020,6 +1028,8 @@ impl BlastFrame {
             w_alive: 0,
             a_dirty: 0,
             a_counters: 0,
+            a_events: 0,
+            ev_broken_cap: 0,
         }
     }
 
@@ -1063,6 +1073,7 @@ impl BlastFrame {
             ],
         ));
         (self.w_alive, self.a_dirty, self.a_counters) = (f.w_alive, f.a_dirty, f.a_counters);
+        (self.a_events, self.ev_broken_cap) = (f.a_events, f.ev_broken_cap);
         self.virial_bind = f.crush.map(|(crush_rw, at)| {
             let b = &self.solver.buffers;
             let bind = gpu.bind(&self.virial.group, &[&b.params, &b.nodes, &b.refs, &b.bonds, &b.x, &b.stiffness, &self.centroids, &self.node_frame, crush_rw]);
@@ -1078,6 +1089,7 @@ impl BlastFrame {
         let g = self.gravity;
         p.gravity = [g.x as f32, g.y as f32, g.z as f32, 0.0];
         (p.w_alive, p.a_dirty, p.a_counters) = (self.w_alive, self.a_dirty, self.a_counters);
+        (p.a_events, p.ev_broken_cap) = (self.a_events, self.ev_broken_cap);
         p.chunk_loads = self.chunk_loads as u32;
         p.r_virial = self.virial_bind.as_ref().map_or(0, |v| v.1);
         self.chunk_loads = false;

@@ -33,6 +33,9 @@ mod guidance;
 mod handles;
 mod host_state;
 mod joints;
+/// The fracture lab as one API (scenes, bond models, settings, actions, stats).
+#[cfg(feature = "stress")]
+pub mod lab;
 mod math;
 mod motion;
 mod queries;
@@ -60,7 +63,7 @@ pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
     CRUSH_PARTICLE_GROUP,
     DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructiblePreload,
-    DestructibleStats, Preload, StrengthModel,
+    DestructibleStats, FractureOptions, Preload, StrengthModel,
 };
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
@@ -471,6 +474,8 @@ pub struct World {
     tuned: std::collections::BTreeSet<u32>,
     /// The last step's GPU time from its marks (`RUBBLE_GPU_TIMING=1`).
     last_gpu_ms: Option<f64>,
+    /// The latest delivered step's GPU time (`WorldDef::gpu_timing`).
+    last_step_gpu_time: Option<StepGpuTime>,
     shapes: Vec<ShapeSlot>,
     free_shapes: Vec<u32>,
     /// Retired colliders: `(collider, released at step)`.
@@ -613,6 +618,7 @@ impl World {
             free_bodies: Vec::new(),
             tuned: std::collections::BTreeSet::new(),
             last_gpu_ms: None,
+            last_step_gpu_time: None,
             shapes: Vec::new(),
             free_shapes: Vec::new(),
             free_colliders: Vec::new(),
@@ -856,6 +862,12 @@ impl World {
     /// Whether the resting-pair carry runs ([`Self::set_carry_rest`]).
     pub fn carry_rest(&self) -> bool {
         self.sim.carry_rest()
+    }
+
+    /// The latest delivered step's GPU time ([`WorldDef::gpu_timing`]; `None` until a
+    /// timed step's frame is polled, or where the device has no timestamp queries).
+    pub fn last_step_gpu_time(&self) -> Option<&StepGpuTime> {
+        self.last_step_gpu_time.as_ref()
     }
 
     /// GPU time of the last step, every pass of it (`RUBBLE_GPU_TIMING=1`; else None).
@@ -2221,9 +2233,18 @@ impl World {
             }
             self.encode_fracture_begin(&mut enc);
         }
-        self.sim
-            .step_encode(&mut enc)
-            .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
+        #[cfg(feature = "stress")]
+        let in_step = fracture && self.fracture_in_step();
+        #[cfg(not(feature = "stress"))]
+        let in_step = false;
+        if in_step {
+            #[cfg(feature = "stress")]
+            self.step_encode_contact(&mut enc)?;
+        } else {
+            self.sim
+                .step_encode(&mut enc)
+                .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
+        }
         let ran = self.sim.last_step_ran();
         lap("rigid encoded");
         if let Some(m) = &marks {
@@ -2860,6 +2881,11 @@ impl World {
             terrain_debris,
             terrain_bakes: Vec::new(),
             gpu_time,
+        })
+        .inspect(|f| {
+            if f.gpu_time.is_some() {
+                self.last_step_gpu_time = f.gpu_time.clone();
+            }
         })
     }
 

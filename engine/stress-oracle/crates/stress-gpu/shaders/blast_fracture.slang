@@ -43,6 +43,9 @@ static const uint NODE_FRAME = 6;
 static const uint BODY_WORDS = 7;
 static const uint C_FRAME_BROKEN = 0;
 static const uint C_BROKEN = 1;
+static const uint C_ERROR = 3;
+static const uint C_EV_BROKEN = 20;
+static const uint ERROR_EVENTS = 128;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -109,4 +112,13 @@ void blast_breaks(uint3 id: SV_DispatchThreadID)
     atom[params.a_dirty + work[bond.n0]].or(1u);
     atom[params.a_counters + C_FRAME_BROKEN].add(1u);
     atom[params.a_counters + C_BROKEN].add(1u);
+    // fracture.slang `event_broken`: the frame's event list, for a host that reads it.
+    if (params.ev_broken_cap != 0)
+    {
+        uint i = atom[params.a_counters + C_EV_BROKEN].add(1u);
+        if (i < params.ev_broken_cap)
+            atom[params.a_events + i].store(j);
+        else
+            atom[params.a_counters + C_ERROR].or(ERROR_EVENTS);
+    }
 }

@@ -73,6 +73,10 @@ public struct BlastParams
     public uint chunk_loads;
     // blast_virial.slang: where the bonds' virial starts in the fracture's `crush_rw` (float4s).
     public uint r_virial;
+    // blast_fracture.slang: where fracture.slang's broken-bond event list starts in `atom`, and
+    // its room (0: no list).
+    public uint a_events;
+    public uint ev_broken_cap;
 };
 
 // `topo` (blast_topology.slang): the totals after the per-node and per-block words: islands,

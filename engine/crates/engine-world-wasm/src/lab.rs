@@ -120,7 +120,7 @@ impl LabAsset {
         let s = scene.scene();
         let def = match self.model {
             StrengthModel::Bonds => bonds_world(s, &self.desc, &o)?,
-            StrengthModel::Threshold => threshold_world(s, &self.desc, &o)?,
+            _ => threshold_world(s, &self.desc, &o)?,
         };
         Ok(def)
     }
@@ -512,7 +512,7 @@ impl WebWorld {
         let s = scene.scene();
         match asset.model {
             StrengthModel::Bonds => res(self.place_bonds(id, s)),
-            StrengthModel::Threshold => res(self.place_threshold(id, asset, s, &o)),
+            _ => res(self.place_threshold(id, asset, s, &o)),
         }
     }
 
@@ -1068,7 +1068,7 @@ impl WebWorld {
                     .body_set_type(body, BodyType::Dynamic, at, f3(v), f3(w))?;
                 self.world.body_set_mass_data(body, mass_data)?;
             }
-            StrengthModel::Threshold => {
+            _ => {
                 if lab.shots.len() >= count.min(STRESS_SHOTS) as usize {
                     let old = lab.shots.remove(0);
                     self.world.destroy_body(old)?;

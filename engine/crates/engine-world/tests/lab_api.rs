@@ -1,0 +1,188 @@
+//! The fracture lab's Rust API (`rubble::lab`): a scene placed under every bond model with
+//! the same settings, actions queued at steps, the stats a host shows; and the combinations
+//! that cannot work failing with their reason.
+//!
+//!   cargo test --release -p engine-world --test lab_api -- --test-threads=1 --nocapture
+#![cfg(feature = "stress")]
+
+use rubble::lab::*;
+use rubble::*;
+use std::sync::Arc;
+
+fn house_1story() -> LabSource {
+    LabSource::Pack {
+        bytes: Arc::new(include_bytes!("../../../stress-oracle/packs/house-1story.json").to_vec()),
+    }
+}
+
+/// Build, settle (D6), place: the world and the lab.
+fn place(def: &LabDef) -> anyhow::Result<(World, Lab)> {
+    let mut plan = LabPlan::new(def)?;
+    let mut world = World::new(GpuContext::Default, &plan.world_def()?)?;
+    if plan.needs_settle() {
+        plan.settle(world.gpu_context())?;
+        world = World::new(world.gpu_context(), &plan.world_def()?)?;
+    }
+    let lab = Lab::place(&mut world, &plan)?;
+    Ok((world, lab))
+}
+
+fn run(world: &mut World, lab: &mut Lab, steps: u32) -> anyhow::Result<LabStats> {
+    for _ in 0..steps {
+        lab.step(world)?;
+        world.poll_blocking()?;
+    }
+    lab.stats(world)
+}
+
+/// The scene's centre from straight in front (the lab's click at the middle of the view).
+fn centre_shot(lab: &Lab) -> LabAction {
+    let s = lab.scene();
+    let c = s.center;
+    LabAction::Shot {
+        origin: [c[0], c[1], c[2] + 3.0 * s.extent.max(1.0)],
+        direction: [0.0, 0.0, -1.0],
+    }
+}
+
+/// Every bond model takes the same scene and the same shot; the breakable ones break it.
+#[test]
+fn every_bond_model_runs_the_cuboid_house_and_the_breakable_ones_break_it() {
+    for bonds in LabBonds::ALL {
+        let def = LabDef {
+            source: LabSource::Cuboid,
+            arrangement: LabArrangement::One,
+            settings: LabSettings {
+                bonds,
+                // The analytic strike holes a wall only above its ballistic limit.
+                ball_speed_scale: if bonds == LabBonds::Model(StrengthModel::ImpactLocal) { 6.0 } else { 1.0 },
+                ..LabSettings::default()
+            },
+        };
+        let (mut world, mut lab) = place(&def).unwrap_or_else(|e| panic!("{}: {e:#}", bonds.name()));
+        assert_eq!(lab.settings().physics_hz, DEFAULT_PHYSICS_HZ, "{}", bonds.name());
+        let at_rest = run(&mut world, &mut lab, 30).unwrap();
+        lab.queue(&world, &centre_shot(&lab), 0).unwrap();
+        let st = run(&mut world, &mut lab, 150).unwrap();
+        eprintln!(
+            "{}: {} shots · {} bodies · {} of {} bonds broken (at rest {}) · {} awake · {} contacts",
+            bonds.name(),
+            st.shots,
+            st.bodies,
+            st.bonds - st.bonds_intact,
+            st.bonds,
+            at_rest.bonds - at_rest.bonds_intact,
+            st.awake,
+            st.contacts
+        );
+        assert_eq!(st.shots, 1, "{}: the shot fired", bonds.name());
+        assert_eq!(st.steps, 180);
+        if bonds != LabBonds::None {
+            assert!(st.bonds > 0, "{}: bonds", bonds.name());
+            assert!(st.bonds_intact < st.bonds, "{}: the shot breaks bonds", bonds.name());
+        }
+        assert!(lab.queue(&world, &LabAction::Volley, 0).is_err(), "{}: no volley without the block", bonds.name());
+        if bonds.stress().is_some() {
+            assert!(lab.draws_poses());
+            let poses = lab.poses(&world).unwrap();
+            assert_eq!(poses.len(), RECORD_FLOATS * lab.scene().bodies.len());
+        }
+    }
+}
+
+/// The tower block of house-1story (four copies, the city's cars and pedestrians) under
+/// `blast_gpu`: the volley fires every shot at its step and breaks the towers.
+#[test]
+fn the_tower_block_runs_its_volley_under_blast_gpu() {
+    let def = LabDef {
+        source: house_1story(),
+        arrangement: LabArrangement::TowerBlock { meteor: false },
+        settings: LabSettings {
+            bonds: LabBonds::Model(StrengthModel::BlastGpu),
+            ccd: true,
+            ..LabSettings::default()
+        },
+    };
+    let (mut world, mut lab) = place(&def).unwrap();
+    assert_eq!(lab.destructibles().len(), 4, "four towers");
+    assert!(lab.props().is_some(), "the city's props");
+    lab.queue(&world, &LabAction::Volley, 0).unwrap();
+    let queued = lab.queued();
+    assert!(queued > 0);
+    let (_, _, every) = engine_fracture::towers::VOLLEY;
+    let steps = 60 + every * queued as u32;
+    let st = run(&mut world, &mut lab, steps).unwrap();
+    eprintln!(
+        "tower block (house-1story) blast_gpu volley: {} shots · {} bodies · {} of {} bonds broken · {} awake",
+        st.shots,
+        st.bodies,
+        st.bonds - st.bonds_intact,
+        st.bonds,
+        st.awake
+    );
+    assert_eq!(lab.queued(), 0, "every shot fired");
+    assert_eq!(st.shots as usize, queued);
+    assert!(st.bonds_intact < st.bonds, "the volley breaks the towers");
+    // The topple and meteor are the block's too; a cuboid house has neither.
+    lab.queue(&world, &LabAction::Topple, 0).unwrap();
+    lab.queue(&world, &LabAction::Meteor, 0).unwrap();
+}
+
+/// What cannot work fails with its reason; nothing is substituted.
+#[test]
+fn combinations_that_cannot_work_say_why() {
+    let err = |def: LabDef| match LabPlan::new(&def) {
+        Ok(_) => panic!("{def:?} should fail"),
+        Err(e) => e.to_string(),
+    };
+    let base = LabDef {
+        source: LabSource::Cuboid,
+        arrangement: LabArrangement::One,
+        settings: LabSettings::default(),
+    };
+    let e = err(LabDef {
+        settings: LabSettings {
+            crush: LabCrush::Scene,
+            ..LabSettings::default()
+        },
+        ..base.clone()
+    });
+    assert!(e.contains("crushing is a stress model's"), "{e}");
+    let e = err(LabDef {
+        arrangement: LabArrangement::TowerBlock { meteor: false },
+        ..base.clone()
+    });
+    assert!(e.contains("tower block"), "{e}");
+    let e = err(LabDef {
+        settings: LabSettings {
+            physics_hz: 0.0,
+            ..LabSettings::default()
+        },
+        ..base.clone()
+    });
+    assert!(e.contains("physics rate"), "{e}");
+    let e = err(LabDef {
+        settings: LabSettings {
+            fracture: FractureOptions {
+                contact_fracture: Some(true),
+                ..FractureOptions::default()
+            },
+            ..LabSettings::default()
+        },
+        ..base.clone()
+    });
+    assert!(e.contains("contact fracture"), "{e}");
+    // A scene's suggested settings change nothing unless applied.
+    let block = LabDef {
+        source: house_1story(),
+        arrangement: LabArrangement::TowerBlock { meteor: false },
+        settings: LabSettings {
+            bonds: LabBonds::Model(StrengthModel::Threshold),
+            ..LabSettings::default()
+        },
+    };
+    let suggested = block.suggested_settings(&block.settings);
+    assert_eq!(suggested.bonds, LabBonds::Model(StrengthModel::Bonds));
+    assert_eq!(block.settings.bonds, LabBonds::Model(StrengthModel::Threshold));
+    assert_eq!(LabPlan::new(&block).unwrap().def().settings.bonds, LabBonds::Model(StrengthModel::Threshold));
+}
