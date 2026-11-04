@@ -594,7 +594,7 @@ fn interior(built: &Built) -> Vec<Piece> {
         let mut m = Mesh::default();
         for &(c, h, tilt, mt) in parts {
             let rot = glam::Quat::from_rotation_x(tilt);
-            m.block(c, rot * Vec3::X, rot * Vec3::Y, rot * Vec3::Z, h, mt, 0.8);
+            m.block(c, rot * Vec3::X, rot * Vec3::Y, rot * Vec3::Z, h, mt, 0.3);
         }
         out.push(Piece {
             name: name.into(),
@@ -642,7 +642,7 @@ fn interior(built: &Built) -> Vec<Piece> {
             &[(0.168, 0.0), (0.185, 0.017), (0.202, 0.0), (0.185, -0.017), (0.168, 0.0)],
             36,
             |_, _| mat::DASH,
-            |_| 0.9,
+            |_| 0.35,
             false,
         );
         m.block(c - axis * 0.03, Vec3::X, axis.cross(Vec3::X), axis, Vec3::new(0.06, 0.05, 0.04), mat::DASH, 0.8);

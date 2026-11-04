@@ -77,7 +77,9 @@ try {
     read: device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
     pending: false, ms: [],
   } : null;
-  if (qs.has('perf') && !tq) console.warn('perf: no timestamp-query on this device');
+  let batchPending = false;
+  const adapterInfo = await navigator.gpu.requestAdapter().then((a) => a?.info ? `${a.info.vendor} ${a.info.architecture} ${a.info.description}` : '?');
+  const batchMs = [];
   const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES });
   r.setSolver(sim.nodesBuffer(), sim.miscBuffer());
   layout.vehicles.forEach((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, vehicle: i }));
@@ -194,7 +196,7 @@ try {
     const light = [0.45, 0.8, 0.4];
     const fr = new Float32Array(28); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20); fr.set([target[0], target[2], 0, 0], 24);
     device.queue.writeBuffer(frameBuf, 0, fr);
-    const target = context.getCurrentTexture().createView();
+    const outView = context.getCurrentTexture().createView();
     if (tq) {
       // ?perf: the car in its own pass, timed (GPU timestamps).
       const p0 = enc.beginRenderPass({
@@ -204,7 +206,7 @@ try {
       p0.setPipeline(scenePipe); p0.setBindGroup(0, sceneBind); p0.setVertexBuffer(0, sceneBuf); p0.draw(verts.length / 9);
       p0.end();
       const p1 = enc.beginRenderPass({
-        colorAttachments: [{ view: msaa.createView(), resolveTarget: target, loadOp: 'load', storeOp: 'discard' }],
+        colorAttachments: [{ view: msaa.createView(), resolveTarget: outView, loadOp: 'load', storeOp: 'discard' }],
         depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
         timestampWrites: { querySet: tq.set, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 },
       });
@@ -214,7 +216,7 @@ try {
       if (!tq.pending) enc.copyBufferToBuffer(tq.resolve, 0, tq.read, 0, 16);
     } else {
       const pass = enc.beginRenderPass({
-        colorAttachments: [{ view: msaa.createView(), resolveTarget: target, loadOp: 'clear', storeOp: 'discard', clearValue: { r: 0.40, g: 0.415, b: 0.44, a: 1 } }],
+        colorAttachments: [{ view: msaa.createView(), resolveTarget: outView, loadOp: 'clear', storeOp: 'discard', clearValue: { r: 0.40, g: 0.415, b: 0.44, a: 1 } }],
         depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'clear', depthClearValue: 1, depthStoreOp: 'store' },
       });
       pass.setPipeline(scenePipe); pass.setBindGroup(0, sceneBind); pass.setVertexBuffer(0, sceneBuf); pass.draw(verts.length / 9);
@@ -222,6 +224,30 @@ try {
       pass.end();
     }
     device.queue.submit([enc.finish()]);
+    // ?perf without timestamp queries: time a batch of 20 car-only passes
+    // (skin + draw) by the queue's completion, now and then.
+    if (qs.has('perf') && !tq && !batchPending && frames % 20 === 10) {
+      batchPending = true;
+      device.queue.onSubmittedWorkDone().then(() => {
+        const t0 = performance.now();
+        const e2 = device.createCommandEncoder();
+        for (let k = 0; k < 20; k++) {
+          r.update(e2);
+          const p = e2.beginRenderPass({
+            colorAttachments: [{ view: msaa.createView(), loadOp: 'load', storeOp: 'store' }],
+            depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
+          });
+          r.draw(p, { viewProj: vp, eye, light });
+          p.end();
+        }
+        device.queue.submit([e2.finish()]);
+        return device.queue.onSubmittedWorkDone().then(() => {
+          batchMs.push((performance.now() - t0) / 20);
+          if (batchMs.length > 5) batchMs.shift();
+          batchPending = false;
+        });
+      });
+    }
     if (tq && !tq.pending) {
       tq.pending = true;
       tq.read.mapAsync(GPUMapMode.READ).then(() => {
@@ -239,9 +265,10 @@ try {
     hud.textContent = `${qs.get('style') ?? 'sedan'} ${res}: ${c.nodes} nodes, ${c.beams} beams, ${c.collisionTriangles} collision tris, ${car.visual.indices.length / 3} visual tris, ${c.mass.toFixed(0)} kg\n` +
       `scene ${scene} ${kmh} km/h × ${n}   t ${simTime.toFixed(2)} s   GPU ${isNaN(gm) ? '–' : gm.toFixed(2)} ms/frame   build ${buildMs.toFixed(0)} ms` +
       (damage ? `\nbroken ${damage.broken}  bent ${damage.bent}` : '') +
-      (tq?.ms.length ? `\ncar render ${(tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length).toFixed(3)} ms (GPU pass)` : '');
-    const renderMs = tq?.ms.length ? tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length : undefined;
-    window.__state = { ready: frames > 3, time: simTime, frozen: simTime >= freeze, gpuMs: gm, renderMs, damage, counts: c };
+      (tq?.ms.length ? `\ncar render ${(tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length).toFixed(3)} ms (GPU pass)` : '') +
+      (batchMs.length ? `\ncar skin + render ${Math.min(...batchMs).toFixed(3)} ms (batch of 20, queue time) on ${adapterInfo}` : '');
+    const renderMs = tq?.ms.length ? tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length : batchMs.length ? Math.min(...batchMs) : undefined;
+    window.__state = { ready: frames > 3 && (!qs.has('perf') || renderMs !== undefined), time: simTime, frozen: simTime >= freeze, gpuMs: gm, renderMs, damage, counts: c };
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

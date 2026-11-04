@@ -56,6 +56,8 @@ pub struct Styling {
     pub intake: Vec<(f32, f32)>,
     pub taillight: Vec<(f32, f32)>,
     pub arch_radius: f32,
+    /// Exhaust tips: |x|, y, radius (rear view).
+    pub exhaust: [f32; 3],
     pub paint: [f32; 3],
 }
 
@@ -152,10 +154,12 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
             (-0.285, -0.17),
         ],
         intake: vec![
-            (-0.52, -0.33),
-            (0.52, -0.33),
-            (0.48, -0.44),
-            (-0.48, -0.44),
+            (-0.50, -0.29),
+            (0.50, -0.29),
+            (0.56, -0.33),
+            (0.50, -0.42),
+            (-0.50, -0.42),
+            (-0.56, -0.33),
         ],
         taillight: vec![
             (0.49, -0.018),
@@ -167,6 +171,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
             (0.49, -0.140),
         ],
         arch_radius: 0.362,
+        exhaust: [0.47, 0.46, 0.042],
         paint: def.look.paint,
     }
 }
@@ -292,6 +297,13 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         let ring = (g - 0.5 * st.frame).abs() - 0.5 * st.frame - 0.003;
         ring.min(b_pillar(i, p))
     };
+    // Exhaust cut-outs in the rear valance (rear view circles).
+    let exhaust_hole = |p: Vec3| -> f32 {
+        if p.z > 0.35 {
+            return 1.0;
+        }
+        glam::Vec2::new(p.x.abs() - st.exhaust[0], p.y - st.exhaust[1]).length() - st.exhaust[2] - 0.008
+    };
     // Openings in the body panels (negative inside the hole).
     let openings = |i: usize, p: Vec3| -> f32 {
         let mut o = arch(p);
@@ -303,6 +315,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         o = o.min(backlight(i, p));
         o = o.min(glass_side(i, p) - st.frame);
         o = o.min(b_pillar(i, p));
+        o = o.min(exhaust_hole(p));
         o
     };
     let open = trim::field(m, openings);
@@ -361,7 +374,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     let bumper_r: Region = Box::new(|_, p| smax(p.z - bumper_rz(p.y), p.y - st.bumper_r[0], 0.04));
     // Black lower lip under the front bumper, black diffuser under the rear.
     let lip_f: Region = Box::new(|_, p| smax(bumper_fz(p.y) - p.z, p.y - 0.285, 0.02));
-    let valance_r: Region = Box::new(|_, p| smax(p.z - bumper_rz(p.y), p.y - 0.375, 0.03));
+    let valance_r: Region = Box::new(|_, p| smax(p.z - bumper_rz(p.y), p.y - 0.505, 0.03));
     let rocker: Region = Box::new(|_, p| {
         if p.x.abs() < 0.4 {
             return 1.0;
@@ -657,7 +670,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         depth: 0.06,
         surround: 0.0,
         surround_mat: mat::TRIM,
-        slats: vec![(-0.365, mat::TRIM), (-0.405, mat::TRIM)],
+        slats: vec![(-0.33, mat::TRIM), (-0.37, mat::TRIM)],
         slat_half: 0.006,
         slat_back: 0.02,
         back_mat: mat::GRILLE,
@@ -757,15 +770,31 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         bind: Bind::Vote,
     });
     for sx in [1.0f32, -1.0] {
-        let tip_z = 0.09;
-        let y = prof.bottom.eval(tip_z) - 0.09;
+        // The tip sits just inside its cut-out in the valance.
+        let a = surf.band.half - 0.0;
+        let _ = a;
+        let x = sx * st.exhaust[0];
+        let y = st.exhaust[1];
+        let mut tip_z = 0.0f32;
+        for k in 0..200 {
+            // Rear surface z at (x, y): march the tail's band points.
+            let ar = 0.2 + 0.005 * k as f32;
+            let th = ar.min(surf.band.half);
+            let sc = surf.band.section(th);
+            let v = surf.band.v_at(&sc, y);
+            let q = surf.band.point_in(&sc, v);
+            if q.x >= st.exhaust[0] {
+                tip_z = q.z;
+                break;
+            }
+        }
         pieces.push(Piece {
             name: "exhaust".into(),
             mesh: fixtures::exhaust(
                 Vec3::new(sx * 0.3, 0.21, 1.25),
-                Vec3::new(sx * 0.46, y, tip_z),
+                Vec3::new(x, y, tip_z + 0.012),
                 -Vec3::Z,
-                0.042,
+                st.exhaust[2],
             ),
             bind: Bind::Vote,
         });

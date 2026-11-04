@@ -86,6 +86,7 @@ const RUNS = [
   ['wall_120', 'scene=wall&speed=120&runUp=0.6&freeze=1.0&cam=three&dist=7'],
   ['interior', 'scene=idle&freeze=1.0&cam=left&dist=3.2'],
   ['perf', 'scene=idle&freeze=0&cam=three&perf=1'],
+  ['perf_far', 'scene=idle&freeze=0&cam=three&perf=1&dist=30'],
 ];
 let failed = 0;
 const only = opt('--only', null);
