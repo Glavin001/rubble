@@ -54,19 +54,23 @@ try {
   const canvas = document.getElementById('c');
   const context = canvas.getContext('webgpu');
   const format = navigator.gpu.getPreferredCanvasFormat();
-  let depth = null;
+  // 4× MSAA: panel gaps and trim are a few millimetres wide.
+  const SAMPLES = 4;
+  let depth = null, msaa = null;
   const configure = () => {
     const dpr = Math.min(devicePixelRatio || 1, 2);
     canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
     context.configure({ device, format, alphaMode: 'opaque' });
     depth?.destroy();
-    depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    msaa?.destroy();
+    depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    msaa = device.createTexture({ size: [canvas.width, canvas.height], format, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
   };
   configure();
   addEventListener('resize', configure);
 
-  const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus' });
+  const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES });
   r.setSolver(sim.nodesBuffer(), sim.miscBuffer());
   layout.vehicles.forEach((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, vehicle: i }));
 
@@ -80,16 +84,20 @@ try {
     }
     @fragment fn fs(i: O) -> @location(0) vec4f {
       var c = i.c;
+      let fw = fwidth(i.w.xz);
       if (i.n.y > 0.99 && i.w.y < 0.001) {
         let g = abs(fract(i.w.xz) - 0.5);
-        let line = select(1.0, 0.82, g.x > 0.49 || g.y > 0.49);
+        let gl = smoothstep(vec2f(0.5) - fw * 1.5, vec2f(0.5), g);
+        let line = 1.0 - 0.1 * max(gl.x, gl.y);
         let d = length(i.w.xz - f.eye.xz);
-        c = mix(c * line, vec3f(0.55, 0.6, 0.66), clamp(d / 120.0, 0.0, 1.0));
-        // A soft contact shadow under the car (f.light.w: its heading).
+        c = mix(c * line, vec3f(0.135, 0.142, 0.158), clamp(d / 60.0, 0.0, 1.0));
+        // A soft contact shadow under the car (f.shadow.z: its heading): a
+        // rounded footprint, darkest at its core.
         let q = i.w.xz - f.shadow.xy;
         let cs = cos(f.shadow.z); let sn = sin(f.shadow.z);
-        let lq = vec2f(cs * q.x - sn * q.y, sn * q.x + cs * q.y) / vec2f(1.05, 2.5);
-        c *= 1.0 - 0.6 * exp(-pow(length(lq), 4.0));
+        let lq = vec2f(cs * q.x - sn * q.y, sn * q.x + cs * q.y);
+        let fp = length(max(abs(lq) - vec2f(0.72, 2.05), vec2f(0.0))) - 0.18;
+        c *= 1.0 - 0.55 * exp(-max(fp, 0.0) * 6.0) * (0.75 + 0.25 * smoothstep(0.0, -0.6, fp));
       }
       let l = max(dot(normalize(i.n), normalize(f.light.xyz)), 0.0);
       let col = c * (0.35 + 0.75 * l);
@@ -102,10 +110,11 @@ try {
     fragment: { module: sm, entryPoint: 'fs', targets: [{ format }] },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: SAMPLES },
   });
   const verts = [];
   const quad = (a, b, c, d, nrm, col) => { for (const p of [a, b, c, a, c, d]) verts.push(...p, ...nrm, ...col); };
-  quad([-200, 0, -200], [200, 0, -200], [200, 0, 200], [-200, 0, 200], [0, 1, 0], [0.32, 0.33, 0.34]);
+  quad([-200, 0, -200], [200, 0, -200], [200, 0, 200], [-200, 0, 200], [0, 1, 0], [0.26, 0.265, 0.275]);
   const conc = [0.62, 0.6, 0.56];
   for (const b of layout.boxes) {
     const [cx, cy, cz, hx, hy, hz, qx, qy, qz, qw, kind] = b;
@@ -178,7 +187,7 @@ try {
     const fr = new Float32Array(28); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20); fr.set([target[0], target[2], 0, 0], 24);
     device.queue.writeBuffer(frameBuf, 0, fr);
     const pass = enc.beginRenderPass({
-      colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0.55, g: 0.63, b: 0.74, a: 1 } }],
+      colorAttachments: [{ view: msaa.createView(), resolveTarget: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'discard', clearValue: { r: 0.40, g: 0.415, b: 0.44, a: 1 } }],
       depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'clear', depthClearValue: 1, depthStoreOp: 'store' },
     });
     pass.setPipeline(scenePipe); pass.setBindGroup(0, sceneBind); pass.setVertexBuffer(0, sceneBuf); pass.draw(verts.length / 9);

@@ -36,11 +36,15 @@
 // weighted (1 − α − β, α, β); node normals are computed each frame from the skin
 // triangles (`normalTris`, per node `nodeTriStart`/`nodeTriList`, `nodeRestNormal`).
 //
-// Materials (ids, `visual.materials`): paint, glass, chrome, trim, headlight,
-// taillight, tyre, rim, gap (tail-light lens), underbody, plate, grille, seat,
-// dash, doorcard, headliner, carpet; `visual.seam` (1 along panel gaps, drawn
-// as a thin groove); glass is drawn blended in a second pass; base colours in
-// `visual.colors` (linear RGB), the paint colour from the wasm's `paint` param.
+// Materials (ids, `visual.materials`): paint (metallic flake base under a
+// clearcoat), glass, chrome, trim (gloss black plastic), headlight (projector,
+// emissive), taillight, tyre, rim, gap, underbody, plate, grille, seat, dash,
+// doorcard, headliner, carpet, lens (clear lamp lens), drl (emissive white),
+// reflector, tail_lens (red), tail_led (emissive red), brake, caliper,
+// tail_back. Glass and both lenses are drawn blended in a second pass. Base
+// colours in `visual.colors` (linear RGB; the paint from the wasm's `paint`
+// param), baked ambient occlusion in `visual.ao`. Reflections come from a
+// procedural studio (cyclorama, overhead softbox, side strips, a key box).
 
 const WG = 64;
 
@@ -126,11 +130,11 @@ struct VOut {
   @location(2) color: vec3f,
   @location(3) @interpolate(flat) mat: u32,
   @location(4) torn: f32,
-  @location(5) seam: f32,
+  @location(5) ao: f32,
 };
 
 @vertex
-fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f, @location(3) mat: u32, @location(4) seam: f32) -> VOut {
+fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f, @location(3) mat: u32, @location(4) ao: f32) -> VOut {
   var o: VOut;
   o.clip = frame.viewProj * vec4f(pt.xyz, 1.0);
   o.world = pt.xyz;
@@ -138,72 +142,156 @@ fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f
   o.color = color;
   o.mat = mat;
   o.torn = pt.w;
-  o.seam = seam;
+  o.ao = ao;
   return o;
 }
 
-fn sky(d: vec3f) -> vec3f {
-  let up = clamp(d.y, -1.0, 1.0);
-  var c = mix(vec3f(0.62, 0.70, 0.80), vec3f(0.20, 0.36, 0.66), pow(max(up, 0.0), 0.6));
-  c = select(c, mix(vec3f(0.45, 0.45, 0.43), vec3f(0.14, 0.14, 0.13), clamp(-up * 3.0, 0.0, 1.0)), up < 0.0);
+// A procedural photo studio: a neutral cyclorama (bright horizon, darker
+// ceiling and floor), a large overhead softbox, two long strip lights at the
+// sides and a key box in front. rough widens every edge (a cheap prefilter), so
+// sharp clearcoat reflections show crisp softboxes and rough metal soft blobs.
+fn softbox(d: vec3f, c: vec3f, r: vec3f, u: vec3f, ha: f32, hb: f32, w: f32) -> f32 {
+  let z = dot(d, c);
+  if (z <= 0.05) { return 0.0; }
+  let x = dot(d, r) / z;
+  let y = dot(d, u) / z;
+  let mx = 1.0 - smoothstep(ha - w, ha + w, abs(x));
+  let my = 1.0 - smoothstep(hb - w, hb + w, abs(y));
+  return mx * my * (ha * hb) / ((ha + w) * (hb + w));
+}
+fn env(d: vec3f, rough: f32) -> vec3f {
+  let w = 0.015 + rough * 1.1;
+  let up = d.y;
+  // Cyclorama.
+  var c = mix(vec3f(0.62, 0.64, 0.67), vec3f(0.30, 0.32, 0.36), smoothstep(0.0, 0.9, up));
+  c = mix(c, vec3f(0.16, 0.16, 0.17), smoothstep(0.0, -0.25 - rough * 0.3, up));
+  c = c + vec3f(0.25) * exp(-abs(up) * (14.0 / (1.0 + rough * 6.0)));   // horizon glow
+  // Overhead softbox.
+  c += vec3f(3.2, 3.15, 3.0) * softbox(d, vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), vec3f(0.0, 0.0, 1.0), 0.55, 1.1, w);
+  // Side strips (long, horizontal-ish, a little above the horizon).
+  let sA = normalize(vec3f(1.0, 0.35, 0.15));
+  let sB = normalize(vec3f(-1.0, 0.35, -0.2));
+  c += vec3f(2.4) * softbox(d, sA, normalize(cross(vec3f(0.0, 1.0, 0.0), sA)), normalize(cross(sA, cross(vec3f(0.0, 1.0, 0.0), sA))), 1.6, 0.07, w);
+  c += vec3f(2.0) * softbox(d, sB, normalize(cross(vec3f(0.0, 1.0, 0.0), sB)), normalize(cross(sB, cross(vec3f(0.0, 1.0, 0.0), sB))), 1.6, 0.07, w);
+  // Key box in front, high.
+  let k = normalize(vec3f(0.35, 0.55, 1.0));
+  c += vec3f(2.6, 2.5, 2.35) * softbox(d, k, normalize(cross(vec3f(0.0, 1.0, 0.0), k)), normalize(cross(k, cross(vec3f(0.0, 1.0, 0.0), k))), 0.32, 0.22, w);
+  // Sun (the scene's light) as a small hot disc.
   let s = max(dot(d, normalize(frame.light.xyz)), 0.0);
-  return c + vec3f(1.0, 0.92, 0.8) * (pow(s, 600.0) * 20.0);
+  c += vec3f(1.0, 0.95, 0.85) * pow(s, 400.0 / (1.0 + rough * 300.0)) * (6.0 / (1.0 + rough * 30.0));
+  return c;
+}
+// Diffuse irradiance (a few env taps round the normal).
+fn irradiance(n: vec3f) -> vec3f {
+  let a = env(n, 1.0);
+  let b = env(normalize(n + vec3f(0.0, 0.6, 0.0)), 1.0);
+  return (a * 0.6 + b * 0.4) * 0.55;
 }
 
-// rough, metal, coat per material id.
+fn ggx(ndh: f32, a: f32) -> f32 {
+  let a2 = a * a;
+  let d = ndh * ndh * (a2 - 1.0) + 1.0;
+  return a2 / (3.14159 * d * d);
+}
+fn hash3(p: vec3f) -> f32 {
+  return fract(sin(dot(p, vec3f(127.1, 311.7, 74.7))) * 43758.5453);
+}
+
+// Per material: rough, metal (F0 scale), clearcoat.
 fn props(m: u32) -> vec3f {
   switch m {
-    case 0u: { return vec3f(0.35, 0.0, 1.0); }   // paint
-    case 1u: { return vec3f(0.04, 0.0, 1.0); }   // glass
-    case 2u: { return vec3f(0.12, 1.0, 0.0); }   // chrome
-    case 3u: { return vec3f(0.6, 0.0, 0.2); }    // trim
-    case 4u: { return vec3f(0.05, 0.0, 1.0); }   // headlight
-    case 5u: { return vec3f(0.15, 0.0, 1.0); }   // taillight
-    case 6u: { return vec3f(0.85, 0.0, 0.0); }   // tyre
-    case 7u: { return vec3f(0.25, 1.0, 0.0); }   // rim
-    case 10u: { return vec3f(0.5, 0.0, 0.0); }   // plate
+    case 0u: { return vec3f(0.38, 0.0, 1.0); }   // paint (base under clearcoat)
+    case 2u: { return vec3f(0.04, 1.0, 0.0); }   // chrome
+    case 3u: { return vec3f(0.16, 0.0, 0.0); }   // trim: gloss black plastic
+    case 6u: { return vec3f(0.72, 0.0, 0.0); }   // tyre
+    case 7u: { return vec3f(0.22, 1.0, 0.0); }   // rim
+    case 9u: { return vec3f(0.7, 0.0, 0.0); }    // underbody
+    case 10u: { return vec3f(0.45, 0.0, 0.0); }  // plate
+    case 11u: { return vec3f(0.55, 0.0, 0.0); }  // grille back
+    case 19u: { return vec3f(0.12, 1.0, 0.0); }  // reflector
+    case 22u: { return vec3f(0.45, 1.0, 0.0); }  // brake disc / barrel
+    case 23u: { return vec3f(0.3, 0.0, 0.6); }   // caliper
+    case 24u: { return vec3f(0.2, 0.0, 0.5); }   // tail lamp back
     default: { return vec3f(0.8, 0.0, 0.0); }
   }
 }
 
+fn tonemap(c: vec3f) -> vec3f {
+  let x = c * 0.8;
+  let m = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+  return pow(m, vec3f(1.0 / 2.2));
+}
+
 @fragment
-fn fs(i: VOut) -> @location(0) vec4f {
+fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   if (i.torn > 0.001) { discard; }
   var n = normalize(i.normal);
   let v = normalize(frame.eye.xyz - i.world);
-  // Two-sided: light the side facing the camera (the mesh's winding varies).
+  // The inside of a body panel (seen through a window or a tear): bare, dark.
+  if (!front && i.mat == 0u) {
+    let d = vec3f(0.035, 0.035, 0.038) * (0.4 + 0.6 * clamp(i.ao, 0.0, 1.0));
+    return vec4f(tonemap(d * (irradiance(-n) + vec3f(0.2))), 1.0);
+  }
+  // Two-sided: light the side facing the camera.
   if (dot(n, v) < 0.0) { n = -n; }
   let l = normalize(frame.light.xyz);
-  let pr = props(i.mat);
-  let rough = pr.x; let metal = pr.y; let coat = pr.z;
-  let albedo = i.color;
-  let h = normalize(v + l);
+  let ao = clamp(i.ao, 0.0, 1.0);
   let ndl = max(dot(n, l), 0.0);
   let ndv = max(dot(n, v), 1e-3);
+  let h = normalize(v + l);
   let ndh = max(dot(n, h), 0.0);
-  let a = max(rough * rough, 0.002);
-  let d = a * a / (3.14159 * pow(ndh * ndh * (a * a - 1.0) + 1.0, 2.0));
-  let f0 = mix(vec3f(0.04), albedo, metal);
-  let fres = f0 + (1.0 - f0) * pow(1.0 - ndv, 5.0);
+  let r = reflect(-v, n);
+  let sun = vec3f(1.0, 0.96, 0.9) * 1.6;
+  let fres = pow(1.0 - ndv, 5.0);
+  let albedo = i.color;
+  let m = i.mat;
+  // Emissive lamps.
+  if (m == 18u) { return vec4f(tonemap(albedo * 6.0 + env(r, 0.05) * 0.04), 1.0); }
+  if (m == 21u) { return vec4f(tonemap(albedo * 3.5), 1.0); }
+  if (m == 4u) { return vec4f(tonemap(vec3f(2.2, 2.25, 2.4) + env(r, 0.02) * 0.2), 1.0); }
+  // Transparent: glass, clear lens, red lens (blended pass).
+  if (m == 1u || m == 17u || m == 20u) {
+    let f = 0.04 + 0.96 * fres;
+    let refl = env(r, 0.0) * f;
+    var tint = vec3f(0.01, 0.012, 0.014);
+    var a = 0.78;
+    if (m == 17u) { tint = vec3f(0.0); a = 0.08; }
+    if (m == 20u) { tint = vec3f(0.30, 0.01, 0.01); a = 0.6; }
+    let alpha = clamp(a + f * (1.0 - a), 0.0, 1.0);
+    return vec4f(tonemap((tint * a + refl) / alpha), alpha);
+  }
+  let pr = props(m);
+  let rough = pr.x; let metal = pr.y; let coat = pr.z;
+  let a = max(rough * rough, 0.0015);
   let k = a * 0.5;
   let g = ndl / (ndl * (1.0 - k) + k) * ndv / (ndv * (1.0 - k) + k);
-  let spec = fres * d * g / max(4.0 * ndl * ndv, 1e-3);
-  let sun = vec3f(1.0, 0.95, 0.86) * 3.0;
-  let amb = mix(vec3f(0.12, 0.12, 0.11), vec3f(0.34, 0.42, 0.56), n.y * 0.5 + 0.5);
-  let r = reflect(-v, n);
-  let env = mix(sky(r), mix(vec3f(0.2), vec3f(0.45, 0.55, 0.7), r.y * 0.5 + 0.5), clamp(rough * 1.4, 0.0, 1.0));
-  var c = albedo * (1.0 - metal) * (sun * ndl / 3.14159 + amb) + spec * sun * ndl + env * fres * (0.3 + 0.7 * metal);
-  let cf = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
-  c = c * (1.0 - coat * cf) + coat * cf * sky(r);
-  if (i.mat == 4u) { c += albedo * 0.6; }   // headlight glow
-  if (i.mat == 5u) { c += albedo * 0.5; }   // tail light glow
-  let x = c * 0.85;
-  let m = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
-  // Panel gaps: a thin dark groove along each seam.
-  let groove = select(1.0, 0.06, i.seam > 0.8);
-  // Glass is drawn see-through in its own pass.
-  let alpha = select(1.0, 0.55, i.mat == 1u);
-  return vec4f(pow(m, vec3f(1.0 / 2.2)) * groove, alpha);
+  var c: vec3f;
+  if (m == 0u) {
+    // Car paint: a tinted metallic-flake base under a clearcoat.
+    let cf = 0.04 + 0.96 * fres;
+    let diffuse = albedo * (irradiance(n) * ao + sun * ndl / 3.14159);
+    let flakeF0 = albedo * 0.55 + vec3f(0.03);
+    let flake = flakeF0 * (env(r, 0.42) * ao * 0.9 + sun * ggx(ndh, 0.17) * g / max(4.0 * ndv, 1e-3));
+    // Sparkle: tiny flakes catching the sun.
+    let cell = floor(i.world * 900.0);
+    let sp = step(0.992, hash3(cell)) * pow(ndh, 40.0) * ndl * 2.5;
+    let base = diffuse * 0.75 + flake + albedo * sp;
+    let coatSpec = sun * ggx(ndh, 0.0016) * cf / max(4.0 * ndv, 1e-3) * ndl * 0.25;
+    c = base * (1.0 - cf) + env(r, 0.01) * cf * mix(0.6, 1.0, ao) + coatSpec;
+  } else if (metal > 0.5) {
+    let f0 = albedo;
+    let f = f0 + (vec3f(1.0) - f0) * fres;
+    c = f * (env(r, rough) * mix(0.35, 1.0, ao) + sun * ggx(ndh, a) * g / max(4.0 * ndv, 1e-3) * ndl);
+  } else {
+    let f = 0.04 + 0.96 * fres;
+    let spec = env(r, rough) * f * mix(0.3, 1.0, ao) + sun * ggx(ndh, a) * g * f / max(4.0 * ndv, 1e-3) * ndl;
+    c = albedo * (irradiance(n) * ao + sun * ndl / 3.14159 * mix(0.5, 1.0, ao)) * (1.0 - f) + spec;
+    if (coat > 0.0) {
+      let cf = 0.04 + 0.96 * fres;
+      c = c * (1.0 - cf * coat) + env(r, 0.03) * cf * coat * ao;
+    }
+  }
+  return vec4f(tonemap(c), 1.0);
 }
 `;
 
@@ -329,13 +417,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const au = new Uint32Array(attr);
       for (let i = 0; i < n; i++) {
         af.set(visual.colors.subarray(3 * i, 3 * i + 3), 5 * i);
-        af[5 * i + 3] = visual.seam ? visual.seam[i] : 0;
+        af[5 * i + 3] = visual.ao ? visual.ao[i] : 1;
         au[5 * i + 4] = visual.material[i];
       }
       // Opaque triangles first, glass (material 1) after.
       const tri = visual.indices;
       const opaque = [], glass = [];
-      for (let t = 0; t < tri.length; t += 3) (visual.material[tri[t]] === 1 ? glass : opaque).push(tri[t], tri[t + 1], tri[t + 2]);
+      const TRANSPARENT = new Set([1, 17, 20]);
+      for (let t = 0; t < tri.length; t += 3) (TRANSPARENT.has(visual.material[tri[t]]) ? glass : opaque).push(tri[t], tri[t + 1], tri[t + 2]);
       const ordered = new Uint32Array([...opaque, ...glass]);
       const attrs = device.createBuffer({ label: 'showcase-attrs', size: attr.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(attrs, 0, attr);
