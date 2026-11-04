@@ -216,13 +216,35 @@ pub fn box_truss(
         }
     }
     // Catchers: static contact is per node, so a bay longer than `CATCH` gets
-    // nodes along two of its lines at most `CATCH` apart, each braced to both
-    // stations of its line and of the next line (a pole between two stations
-    // still meets nodes that carry its load into the member).
+    // nodes along one of its lines at most `CATCH` apart, each braced to both
+    // stations of its line and of the opposite line (a pole between two
+    // stations still meets nodes that carry its load into the member).
     for i in 0..if catch { n.saturating_sub(1) } else { 0 } {
         let (s0, s1) = (truss.stations[i], truss.stations[i + 1]);
         let m = mat(0.5 * (truss.t[i] + truss.t[i + 1])).stiffer(0.4);
-        for c in [0usize, 1] {
+        // One line: a vertical pole meets every line of a bay at once (the
+        // section's lines are at the same place in plan view, or beside each
+        // other along the pole's path).
+        // The outer line (mirrored members get mirrored lanes), else the lower.
+        let pick = {
+            let (a, b) = (sk.pos(s0[0]) + sk.pos(s1[0]), sk.pos(s0[1]) + sk.pos(s1[1]));
+            if (a.x.abs() - b.x.abs()).abs() > 2e-2 {
+                usize::from(b.x.abs() > a.x.abs())
+            } else if (a.y - b.y).abs() > 2e-2 {
+                usize::from(b.y < a.y)
+            } else {
+                usize::from(b.z > a.z)
+            }
+        };
+        // A member on the centre line with its lines either side (the tunnel):
+        // both, so it stays symmetric.
+        let (a, b) = (sk.pos(s0[0]) + sk.pos(s1[0]), sk.pos(s0[1]) + sk.pos(s1[1]));
+        let lines: Vec<usize> = if (a.x + b.x).abs() < 2e-2 && a.x.abs() > 2e-2 {
+            vec![0, 1]
+        } else {
+            vec![pick]
+        };
+        for c in lines {
             // Each line by its own length (snapped stations bend them).
             let l = sk.pos(s0[c]).distance(sk.pos(s1[c]));
             let cuts = (l / CATCH - 1e-3).ceil() as usize;

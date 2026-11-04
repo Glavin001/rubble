@@ -29,6 +29,9 @@ pub const C_RATIO: f32 = 1500.0;
 pub const TIE_LENGTH: f32 = 0.3;
 /// Lightest node (kg).
 pub const MIN_NODE_MASS: f32 = 0.05;
+/// A beam shorter than [`MIN_YIELD_LENGTH`] breaks at this many times its yield
+/// force (it cannot yield).
+pub const SHORT_BREAK: f32 = 2.0;
 /// Shortest beam a yield threshold may act on: the solver keeps every yielded
 /// beam at least this long, so a shorter one is made elastic up to its break.
 pub const MIN_YIELD_LENGTH: f32 = 0.1;
@@ -605,17 +608,21 @@ impl Skeleton {
             .map(|b| {
                 let l = self.pos(b.a).distance(self.pos(b.b));
                 let k = round2(b.mat.k_at(l));
-                // Too short to yield safely: elastic up to its break.
-                let d = if l < MIN_YIELD_LENGTH {
-                    b.mat.strength.max(b.mat.deform)
+                // Too short to yield safely: elastic up to its break, which is
+                // then near the yield force (a ductile grade's break is far past
+                // its yield: elastic all that way, a short beam would store the
+                // crash and spring it back).
+                let (d, st) = if l < MIN_YIELD_LENGTH {
+                    let st = b.mat.strength.min(SHORT_BREAK * b.mat.deform);
+                    (st, st)
                 } else {
-                    b.mat.deform
+                    (b.mat.deform, b.mat.strength)
                 };
                 Line {
                     k,
                     c: round2(b.mat.damp),
                     d: round2(d),
-                    st: round2(b.mat.strength),
+                    st: round2(st),
                     p: b.mat.plastic,
                     group: b.group,
                     support: match b.ty {

@@ -71,6 +71,32 @@ fn main() {
             eprintln!("  node {i} {} {g} at {:.2?}: floor {:.2} fixed {:.2} deg {deg} shortest {short:.3}", sk.parts[n.part as usize], n.p, fl[i], n.fixed);
         }
     }
+    if std::env::var("CORNERS").is_ok() {
+        for (w, wh) in sk.wheels.iter().enumerate() {
+            let a = wh.a1 as usize;
+            for k in 5..11 {
+                let i = (a + k) as u32;
+                let ties: Vec<String> = sk
+                    .beams
+                    .iter()
+                    .filter(|x| x.a == i || x.b == i)
+                    .map(|x| if x.a == i { x.b } else { x.a })
+                    .filter(|&o| sk.parts[sk.nodes[o as usize].part as usize] != "suspension")
+                    .map(|o| {
+                        let g = b
+                            .groups
+                            .iter()
+                            .filter(|(k, _)| k.as_str() != "suspension")
+                            .find(|(_, g)| g.contains(&o))
+                            .map(|(k, _)| k.as_str())
+                            .unwrap_or("shell");
+                        format!("{g}@{:.2}", sk.pos(o).distance(sk.pos(i)))
+                    })
+                    .collect();
+                eprintln!("wheel {w} pivot {k}: {ties:?}");
+            }
+        }
+    }
     if let Ok(n) = std::env::var("NODE") {
         let i: u32 = n.parse().unwrap();
         let fl = sk.floors(1.0);
@@ -118,7 +144,9 @@ fn main() {
         settings,
     )
     .unwrap();
-    s.roll_tyres(vel);
+    if std::env::var("NOROLL").is_err() {
+        s.roll_tyres(vel);
+    }
     let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
     let side = s.positions().iter().map(|p| p.x).fold(f32::MIN, f32::max);
     match scene {
@@ -561,10 +589,58 @@ fn main() {
     };
     let mut reported = false;
     let breaks = std::env::var("BREAKS").is_ok();
+    let wheel_trace = std::env::var("WHEEL")
+        .ok()
+        .and_then(|w| w.parse::<usize>().ok());
     for f in 0..frames {
         s.frame();
+        if let Some(w) = wheel_trace {
+            if f % 3 == 0 {
+                let wh = &sk.wheels[w];
+                let (p1, p2) = (s.nodes[wh.a1 as usize].pos, s.nodes[wh.a2 as usize].pos);
+                let tops: Vec<u32> = sk.shocks.iter().map(|x| x.b).collect();
+                let top = s.nodes[tops[w] as usize].pos;
+                let a = wh.a1 as usize;
+                let d = |i: usize, j: usize| {
+                    (s.nodes[i].pos.distance(s.nodes[j].pos)
+                        / sk.nodes[i].p.distance(sk.nodes[j].p)
+                        - 1.0)
+                        * 100.0
+                };
+                eprintln!(
+                    "  f {f}: arm strain % kl-plf {:.1} kl-plr {:.1} ku-puf {:.1} ku-pur {:.1} ks-pt {:.1} a1-ku {:.1} a2-kl {:.1}",
+                    d(a + 3, a + 5), d(a + 3, a + 6), d(a + 2, a + 7), d(a + 2, a + 8), d(a + 4, a + 9), d(a, a + 2), d(a + 1, a + 3)
+                );
+                if std::env::var("KNUCKLE").is_ok() {
+                    let o = s.nodes[a + 2].pos;
+                    eprintln!(
+                        "  f {f}: rel to ku: a1 {:.3?} a2 {:.3?} kl {:.3?} ks {:.3?} | rest a1 {:.3?} a2 {:.3?} kl {:.3?} ks {:.3?}",
+                        s.nodes[a].pos - o, s.nodes[a + 1].pos - o, s.nodes[a + 3].pos - o, s.nodes[a + 4].pos - o,
+                        sk.nodes[a].p - sk.nodes[a + 2].p, sk.nodes[a + 1].p - sk.nodes[a + 2].p, sk.nodes[a + 3].p - sk.nodes[a + 2].p, sk.nodes[a + 4].p - sk.nodes[a + 2].p
+                    );
+                }
+                eprintln!(
+                    "  f {f}: wheel {w} axis {:.2?} centre-top {:.2?} shock len {:.3}",
+                    (p2 - p1).normalize(),
+                    0.5 * (p1 + p2) - top,
+                    s.nodes[sk.shocks[w].a as usize].pos.distance(top)
+                );
+            }
+        }
         if breaks && f + 1 == frames {
             summary(&s);
+        }
+        if scene == "pole" && f + 1 == frames {
+            let pz = front + 0.05 + 0.125;
+            let mut by: std::collections::BTreeMap<String, (usize, f32)> = Default::default();
+            for (i, n) in s.nodes.iter().enumerate() {
+                if n.pos.z > pz + 0.125 && (n.pos.x - offset).abs() < 0.125 {
+                    let e = by.entry(label(i as u32)).or_default();
+                    e.0 += 1;
+                    e.1 += n.mass;
+                }
+            }
+            eprintln!("  past the pole in its lane: {by:?}");
         }
         if std::env::var("FASTEST").is_ok() && f + 1 == frames {
             let mut idx: Vec<usize> = (0..s.nodes.len()).collect();

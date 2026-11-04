@@ -124,6 +124,11 @@ pub struct BlockSpec {
     pub reach: f32,
     pub mount_grade: String,
     pub mount_scale: f32,
+    /// Bearing (m, 0: none): the block's rear face pushes on the structure
+    /// behind it within this reach (compression-only beams, as an engine
+    /// driven back meets the firewall and tunnel in a crash).
+    #[serde(default)]
+    pub bear: f32,
 }
 
 /// A long diagonal across a panel the body's torsion runs through (and its
@@ -435,6 +440,7 @@ impl Grades {
             "plastic" => self.plastic,
             "glass" => self.glass,
             "rigid" => self.rigid,
+            "link" => self.link,
             _ => return Err(format!("unknown material grade `{name}`")),
         })
     }
@@ -454,6 +460,7 @@ impl Grades {
             plastic: self.plastic.scaled(s),
             glass: self.glass.scaled(s),
             rigid: self.rigid,
+            link: self.link,
         }
     }
 }
@@ -1026,6 +1033,36 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .collect();
         // Mounts from the block's outer nodes to the structure within reach.
         attach(&mut sk, &outer, &chassis, bl.mounts, bl.reach, mount);
+        if bl.bear > 0.0 {
+            // The rear face on what is behind it, the side faces on what is
+            // beside them (rails, subframe, towers): compression-only beams
+            // that never tear on stretch, so a block knocked loose still meets
+            // the structure instead of passing through it.
+            let bear = grades.uhss;
+            for face in [-Vec3::Z, Vec3::X, -Vec3::X] {
+                let lim = c.dot(face) + h.dot(face.abs());
+                let on: Vec<u32> = outer
+                    .iter()
+                    .copied()
+                    .filter(|&i| sk.pos(i).dot(face) > lim - 1e-3)
+                    .collect();
+                let beyond: Vec<u32> = chassis
+                    .iter()
+                    .copied()
+                    .filter(|&j| sk.pos(j).dot(face) > lim)
+                    .collect();
+                for &a in &on {
+                    for b in sk.nearest(sk.pos(a), &beyond, 2) {
+                        let l = sk.pos(a).distance(sk.pos(b));
+                        if l <= bl.bear {
+                            let st = l.max(super::material::REF_LENGTH)
+                                / super::skeleton::TIE_LENGTH.max(l);
+                            sk.beam_with(a, b, bear.stiffer(st), BeamType::Support(10.0), 0);
+                        }
+                    }
+                }
+            }
+        }
         groups.insert(bl.name.clone(), nodes);
     }
     // Suspension.
@@ -1033,14 +1070,14 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let mut wheel_nodes = Vec::new();
     for c in &def.corners {
         for side in [1.0f32, -1.0] {
-            let cn = corner(&mut sk, c, side, susp, grades.rigid);
+            let cn = corner(&mut sk, c, side, susp, grades.link);
             // Pivots and the tower top into the body.
             let mut ties = cn.pivots.clone();
             ties.push(cn.shock_top);
             for &t in &ties {
                 for c2 in sk.nearest(sk.pos(t), &chassis, 4) {
                     if sk.pos(c2).distance(sk.pos(t)) <= 0.35 {
-                        sk.fixed_beam(t, c2, grades.rigid);
+                        sk.fixed_beam(t, c2, grades.link);
                     }
                 }
             }
