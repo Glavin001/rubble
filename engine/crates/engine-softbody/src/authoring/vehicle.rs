@@ -632,9 +632,9 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let mut truss_names: Vec<String> = Vec::new();
     for m in &def.members {
         let base = grades.get(&m.grade)?;
-        let up = Vec3::from_array(m.up);
         let sides: &[f32] = if m.mirrored { &[1.0, -1.0] } else { &[1.0] };
         for &side in sides {
+            let up = Vec3::new(side * m.up[0], m.up[1], m.up[2]);
             let path: Vec<Vec3> = m
                 .path
                 .iter()

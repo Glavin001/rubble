@@ -64,6 +64,7 @@ fn main() {
     }
     let settings = ExplicitBeamsSettings {
         turbulence: false,
+        drag: std::env::var("DRAG").is_ok(),
         ..Default::default()
     };
     let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings).unwrap();

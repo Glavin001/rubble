@@ -17,10 +17,12 @@ pub const STEP: f32 = 0.0005;
 /// Largest Σk/m a node may carry (1/s²) on its own (the per-node bound
 /// [`Skeleton::floors`] starts from).
 pub const K_RATIO: f32 = 1.0e7;
-/// Bound on h²ω² + 2hγ per node (the stability of a damped mode under
-/// symplectic Euler needs it under 4), as a rate: 0.9 × 4/h², the Gershgorin row
-/// estimate of both, [`Skeleton::floors`].
-pub const G_LIMIT: f32 = 0.9 * 4.0 / (STEP * STEP);
+/// Bound on the Gershgorin row estimate of h²ω² + 2hγ per node, as a rate
+/// (symplectic Euler with damping is stable while h²ω² + 2hγ < 4). The row sum
+/// overestimates a lattice's highest mode, so the bound is 1.2 × 4/h²: checked
+/// against 10 s at rest and crashes at every resolution (1.5 × diverges, 1.0 ×
+/// leaves the body a third as stiff). [`Skeleton::floors`].
+pub const G_LIMIT: f32 = 1.2 * 4.0 / (STEP * STEP);
 /// Largest Σc/m a node may carry (1/s): h·Σc/m ≤ 0.75.
 pub const C_RATIO: f32 = 1500.0;
 /// Lightest node (kg).

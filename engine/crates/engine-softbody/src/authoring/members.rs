@@ -14,11 +14,18 @@ pub struct Truss {
     pub stations: Vec<[u32; 4]>,
     /// Arc fraction of each station along the path (0 at its start).
     pub t: Vec<f32>,
+    /// Contact nodes between stations (see [`CATCH`]).
+    pub catchers: Vec<u32>,
 }
+
+/// The longest gap between a member's nodes along its length (m): a 20 cm pole
+/// always meets one.
+pub const CATCH: f32 = 0.11;
 
 impl Truss {
     pub fn nodes(&self) -> Vec<u32> {
         let mut v: Vec<u32> = self.stations.iter().flatten().copied().collect();
+        v.extend_from_slice(&self.catchers);
         v.sort();
         v.dedup();
         v
@@ -110,12 +117,10 @@ pub fn box_truss(
     let pts = resample(path, spacing);
     let mut truss = Truss::default();
     for (i, &(p, t)) in pts.iter().enumerate() {
-        let tan = if i + 1 < pts.len() {
-            pts[i + 1].0 - p
-        } else {
-            p - pts[i - 1].0
-        }
-        .normalize_or_zero();
+        // Central differences (symmetric paths give mirrored sections).
+        let prev = if i > 0 { pts[i - 1].0 } else { p };
+        let next = if i + 1 < pts.len() { pts[i + 1].0 } else { p };
+        let tan = (next - prev).normalize_or_zero();
         let mut side = tan.cross(up);
         if side.length_squared() < 1e-6 {
             side = tan.cross(Vec3::X);
@@ -176,6 +181,32 @@ pub fn box_truss(
             for e in 0..4 {
                 sk.beam(s[e], q[(e + 1) % 4], diag);
                 sk.beam(s[(e + 1) % 4], q[e], diag);
+            }
+        }
+    }
+    // Catchers: static contact is per node, so a bay longer than `CATCH` gets
+    // nodes along two of its lines at most `CATCH` apart, each braced to both
+    // stations of its line and of the next line (a pole between two stations
+    // still meets nodes that carry its load into the member).
+    for i in 0..n.saturating_sub(1) {
+        let (s0, s1) = (truss.stations[i], truss.stations[i + 1]);
+        let l = sk.pos(s0[0]).distance(sk.pos(s1[0]));
+        let cuts = (l / CATCH - 1e-3).ceil() as usize;
+        if cuts < 2 {
+            continue;
+        }
+        let m = mat(0.5 * (truss.t[i] + truss.t[i + 1])).stiffer(0.2);
+        let lines: [usize; 2] = [0, 1];
+        for &c in &lines {
+            let c2 = if section == 2 { 1 - c } else { 3 - c };
+            for j in 1..cuts {
+                let t = j as f32 / cuts as f32;
+                let p = sk.pos(s0[c]).lerp(sk.pos(s1[c]), t);
+                let q = sk.node(p, part);
+                truss.catchers.push(q);
+                for e in [s0[c], s1[c], s0[c2], s1[c2]] {
+                    sk.beam(q, e, m);
+                }
             }
         }
     }

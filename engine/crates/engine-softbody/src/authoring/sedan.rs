@@ -391,8 +391,8 @@ pub fn sedan() -> VehicleDef {
         stations(
             member(
                 "sill",
-                &[(0.80, 0.30, 1.34), (0.80, 0.30, 3.38)],
-                0.12,
+                &[(0.78, 0.30, 1.34), (0.78, 0.30, 3.38)],
+                0.18,
                 0.24,
                 UP,
                 "uhss",
@@ -403,6 +403,57 @@ pub fn sedan() -> VehicleDef {
             ),
             0.4,
         ),
+        // The floor as a plan-view truss: diagonals from each sill station to the
+        // tunnel at the next cross member (side impacts load the sill between
+        // cross members; the floor's whole width carries it).
+        ladder(member(
+            "floor_brace1",
+            &[(0.70, 0.27, 1.40), (0.08, 0.30, 1.90)],
+            0.10,
+            0.10,
+            UP,
+            "uhss",
+            [1.0, 1.0],
+            0,
+            true,
+            2,
+        )),
+        ladder(member(
+            "floor_brace2",
+            &[(0.70, 0.27, 2.24), (0.08, 0.30, 1.80)],
+            0.10,
+            0.10,
+            UP,
+            "uhss",
+            [1.0, 1.0],
+            0,
+            true,
+            2,
+        )),
+        ladder(member(
+            "floor_brace3",
+            &[(0.70, 0.27, 2.30), (0.08, 0.30, 2.80)],
+            0.10,
+            0.10,
+            UP,
+            "uhss",
+            [1.0, 1.0],
+            0,
+            true,
+            2,
+        )),
+        ladder(member(
+            "floor_brace4",
+            &[(0.70, 0.27, 3.30), (0.08, 0.30, 2.85)],
+            0.10,
+            0.10,
+            UP,
+            "uhss",
+            [1.0, 1.0],
+            0,
+            true,
+            2,
+        )),
         stations(
             member(
                 "pillar_a",
