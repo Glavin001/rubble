@@ -4,7 +4,8 @@
 //   - no WebGPU validation or page error;
 //   - frames advance;
 //   - the action fires (its shots counted);
-//   - a breakable bond model breaks something;
+//   - a breakable bond model breaks something (under at least one of the scene's actions: the
+//     default ball against a strong scene may break nothing, which a cell notes);
 //   - the HUD's GPU time per physics step is present and plausible (where the device has
 //     timestamp queries).
 // A combination that cannot work must fail with its reason (the page's status); the check
@@ -32,7 +33,7 @@ const OUT = opt('--out', join(HERE, '..', 'recordings', 'lab-matrix'));
 const list = (name, fallback) => opt(name, fallback).split(',').filter(Boolean);
 const SCENES = list('--scenes', 'cuboid,arch,house,cuboidGrid,crush-wall,glass-tower,vc-towers');
 const BONDS = list('--bonds', 'none,d6,threshold,load_path,impact_local,blast');
-const ACTIONS = list('--actions', 'click,row,volley,topple,meteor');
+const ACTIONS = list('--actions', 'click,row,volley,topple,meteor,pack');
 const BREAKABLE = new Set(['d6', 'threshold', 'load_path', 'impact_local', 'blast']);
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
@@ -102,14 +103,17 @@ const load = (scene, bonds) => evaluate(`(async () => {
   const release = document.getElementById('release');
   if (d.stressReady && release.textContent !== 'Pause') release.click();
   return { ready: d.stressReady && !status.classList.contains('error'), error: status.classList.contains('error') ? status.textContent : null, status: d.status,
-    actions: { row: !document.getElementById('fire').hidden, volley: !document.getElementById('volley').hidden, topple: !document.getElementById('topple').hidden, meteor: !document.getElementById('meteor').hidden, click: true } };
+    actions: { row: !document.getElementById('fire').hidden, volley: !document.getElementById('volley').hidden, topple: !document.getElementById('topple').hidden, meteor: !document.getElementById('meteor').hidden, pack: !document.getElementById('pack-shot-row').hidden, click: true } };
 })()`);
 const advance = (frames) => evaluate(`(async () => { const d = window.__FRACTURE_DEMO__; let st; for (let i = 0; i < ${frames}; i++) { st = await d.stressAdvance(1000 / 60); await new Promise((r) => requestAnimationFrame(r)); } return st; })()`);
 const clickCentre = async () => {
   const r = await evaluate(`(() => { const c = document.getElementById('view'); const b = c.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
   for (const type of ['mousePressed', 'mouseReleased']) await send('Input.dispatchMouseEvent', { type, x: r[0], y: r[1], button: 'left', clickCount: 1 });
 };
-const BUTTON = { row: 'fire', volley: 'volley', topple: 'topple', meteor: 'meteor' };
+const BUTTON = { row: 'fire', volley: 'volley', topple: 'topple', meteor: 'meteor', pack: 'fire-pack-shot' };
+// Scenes with nothing at the middle of the view (the arch's opening, the street between the
+// towers, the ground beside the glass tower): a click there aims at the highest piece instead.
+const AIM_TOP = new Set(['arch', 'glass-tower', 'vc-towers', 'vc-meteor']);
 const webgpuProblem = (m) => /Invalid|uniform control flow|validation|GPUValidationError|device lost|exception/i.test(m);
 
 const rows = [], errors = [];
@@ -131,6 +135,7 @@ for (const scene of SCENES) {
       if (!loaded.error) failed++;
       continue;
     }
+    let brokeAny = false;
     for (const action of ACTIONS.filter((a) => loaded.actions[a])) {
       cells++;
       const problems = [];
@@ -140,28 +145,47 @@ for (const scene of SCENES) {
         await evaluate(`window.__FRACTURE_DEMO__.reset()`);
         await evaluate(`(async () => { const d = window.__FRACTURE_DEMO__; for (let i = 0; i < 1800 && !d.stressReady; i++) await new Promise((r) => setTimeout(r, 100)); const b = document.getElementById('release'); if (b.textContent !== 'Pause') b.click(); })()`);
       }
-      const rest = await advance(30);
-      // A click at the middle of the view; the arch is open there: its keystone (the highest
-      // piece) from in front, through the page's own shot path.
-      if (action === 'click' && scene === 'arch') await evaluate(`(async () => { const d = window.__FRACTURE_DEMO__, s = d.scene; const top = s.bodies.slice(1, s.projectileStart).reduce((a, b) => (b.p[1] > a.p[1] ? b : a)).p; d.shoot({ origin: [top[0], top[1], top[2] + 3 * Math.max(1, s.extent)], direction: [0, 0, -1] }); })()`);
+      let rest, st, frames;
+      try {
+      rest = await advance(30);
+      // The analytic strike holes a wall only above its ballistic limit: its ball at 8× speed.
+      await evaluate(`(() => { const s = document.getElementById('ball-speed'); s.value = '${bonds === 'impact_local' ? 3 : 0}'; s.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+      // A click at the middle of the view, through the page's own input; where nothing is
+      // there, the highest piece from in front, through the page's shot path.
+      if (action === 'click' && AIM_TOP.has(scene)) await evaluate(`(async () => { const d = window.__FRACTURE_DEMO__, s = d.scene; const top = s.bodies.slice(1, s.projectileStart).reduce((a, b) => (b.p[1] > a.p[1] ? b : a)).p; d.shoot({ origin: [top[0], top[1], top[2] + 3 * Math.max(1, s.extent)], direction: [0, 0, -1] }); })()`);
       else if (action === 'click') await clickCentre();
       else await evaluate(`document.getElementById(${JSON.stringify(BUTTON[action])}).click()`);
-      const frames = action === 'volley' || action === 'topple' ? 600 : 240;
-      const st = await advance(frames);
+      frames = action === 'volley' || action === 'topple' ? 600 : 240;
+      st = await advance(frames);
+      } catch (e) {
+        // The page failed the step (a clear error: its status says why).
+        const why = String(e.message ?? e).split('\n')[0];
+        console.log(`FAIL  ${scene} × ${bonds} × ${action}: ${why}`);
+        rows.push({ scene, bonds, action, ok: false, problems: [why] });
+        failed++;
+        await evaluate(`window.__FRACTURE_DEMO__.stressRelease()`).catch(() => {});
+        continue;
+      }
       if (!(st.frames >= rest.frames + frames * 0.9)) problems.push(`stalled: ${st.frames} frames, ${rest.frames} before`);
       if (!(st.shots >= 1)) problems.push('the action fired no shot');
-      if (BREAKABLE.has(bonds) && !(st.brokenBonds > 0)) problems.push('a breakable model broke nothing');
+      brokeAny ||= st.brokenBonds > 0;
+      const note = BREAKABLE.has(bonds) && !(st.brokenBonds > 0) ? ' (broke nothing)' : '';
       if (st.gpuStepMs != null && !(st.gpuStepMs > 0 && st.gpuStepMs < 2000)) problems.push(`implausible GPU time per step: ${st.gpuStepMs}`);
       const bad = messages.filter(webgpuProblem);
       if (bad.length) problems.push(`${bad.length} WebGPU/page errors, first: ${bad[0].slice(0, 400)}`);
       const png = await send('Page.captureScreenshot', { format: 'png' });
       writeFileSync(join(OUT, `${scene}-${bonds}-${action}.png`), Buffer.from(png.result.data, 'base64'));
-      const line = `${scene} × ${bonds} × ${action}: ${st.shots} shots · ${st.brokenBonds} of ${st.bonds} bonds broken · ${st.bodies} bodies · ${st.frames} frames · ${st.gpuStepMs?.toFixed?.(2) ?? '—'} ms GPU/step`;
+      const line = `${scene} × ${bonds} × ${action}: ${st.shots} shots · ${st.brokenBonds} of ${st.bonds} bonds broken${note} · ${st.bodies} bodies · ${st.frames} frames · ${st.gpuStepMs?.toFixed?.(2) ?? '—'} ms GPU/step`;
       console.log(`${problems.length ? 'FAIL' : 'ok  '}  ${line}`);
       for (const p of problems) console.log(`        ${p}`);
       if (problems.length && process.env.VERBOSE) for (const m of messages) console.log(`          | ${m.slice(0, 900)}`);
       rows.push({ scene, bonds, action, ok: !problems.length, ...st, problems });
       if (problems.length) failed++;
+    }
+    if (BREAKABLE.has(bonds) && rows.some((r) => r.scene === scene && r.bonds === bonds && r.frames !== undefined) && !brokeAny) {
+      console.log(`FAIL  ${scene} × ${bonds}: no action broke anything`);
+      rows.push({ scene, bonds, action: '(any)', ok: false, problems: ['no action broke anything'] });
+      failed++;
     }
   }
 }

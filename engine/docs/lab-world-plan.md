@@ -52,13 +52,51 @@ one host works in the others.
   a second GPU device, and the renderer drew on one while the world ran on the other
   (`lab-world.mjs` now shares the one promise).
 
-### Open
+## Results (2026-11-04, M3 Max, Chrome headless WebGPU)
 
-- **The load path on the fractured tower** (vibe-city `fracturedTower`): the struck tower reports
-  "a load-path block was not positive definite" (fracture.slang `fr_lp_block`) at step 89, alone
-  as in the block. The lab's own fracture world on the same shot does not reach it, and every
-  chunk's block in that run factors in f64 and in f32 (stress-rubble example
-  `load_path_blocks`); the cause is not found yet.
+**Native** (`cargo test --release -p engine-world --test stress_models --test stress_block
+--test lab_api`): every stress model agrees with the lab's fracture world on house-1story and
+the cuboid house (the strike's first break exactly; broken sets' Jaccard 0.82–1.00; bodies
+within 13%); `blast_gpu`'s forces are the f32 reference's frame for frame; 2×2 blocks break as
+one copy does.
+
+**Matrix** (`lab-matrix-check.mjs`): the cuboid house, the arch, the veneer house, the 7×7
+cuboid grid (35,035 bodies), the punch-through wall, the glass tower and the fractured-tower
+block (14,844 pieces, its city), under none, D6, threshold, load path, local impact and
+`blast_gpu`, with click, row, volley, topple and authored shots: every cell steps, fires its
+action and draws with no WebGPU error, except those listed under Open. GPU time per step
+1–16 ms.
+
+**Cross-host** (`lab-cross-host.mjs`): the fractured-tower block under `blast_gpu`, the
+volley, 480 steps:
+
+| host | shots | chunks | bonds | bodies | broken |
+|---|---|---|---|---|---|
+| native Rust | 11 | 14,844 | 43,280 | 9 | 112 |
+| C (`lab.c`) | 11 | 14,844 | 43,280 | 9 | 112 |
+| web | 11 | 14,844 | 43,280 | 10 | 121 |
+
+## Open
+
+- **The load path on the fractured tower** (vibe-city `fracturedTower`, alone, in the block and
+  in the page's volley): "a load-path block was not positive definite" (fracture.slang
+  `fr_lp_block`, error bit 64) once a chunk is left hanging by one of two of its 10,820 bonds:
+  each of those bonds' single-bond block factors in f64 and not in f32 (stress-rubble example
+  `load_path_blocks`). The lever arm's coupling (|r|² × axial stiffness) swamps the rotational
+  stiffness, and the Cholesky's Schur complement cancels in f32. The lab's world on the same
+  shot does not leave such a chunk; World's run does. World fails the step with the reason
+  (the lab's world holds the chunk still and reports it). The lossless fix: factor each block
+  about its bonds' stiffness-weighted centre (the elastic centre, where the coupling vanishes
+  for one bond), the sweeps transforming back; it changes the load path's kernels and their
+  host-twin parity, so it is its own change.
+- **D6 on the punch-through wall** (`crush-wall` pack): the settle overflows the warm-start
+  hash (`Overflow(256)`, `OVERFLOW_WARM_HASH`) at step 107. The settle's world is sized as the
+  old page sized it; not yet checked on main.
 - **The cuboid house settling**: the lab's world breaks 2 bonds at frame 2, `World` none (the two
   rigid engines differ in contact count from step 1). Present on main before this work; the
   strike's breaks agree.
+- **The default ball on strong scenes**: the glass tower under D6 and threshold breaks nothing to
+  one click at its top (its other models do); the tower block under D6 at the pack's strength
+  breaks little (its suggested settings: 0.2×, 16× balls).
+- **Non-convex hulls**: stress-rubble's cooker replaces nine of the fractured tower's hulls with
+  their boxes (with a warning); pre-existing, a candidate for re-export from Shardwright.

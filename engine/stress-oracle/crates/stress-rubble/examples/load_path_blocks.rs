@@ -54,6 +54,35 @@ fn main() {
     // Each frame: every non-support chunk's block over its intact bonds, factored in f64
     // and in f32 (the GPU's precision, the same algorithm as `fr_lp_block`).
     let net = w.load_path_network();
+    // Each bond alone: the block of a chunk held by that bond only (what a chunk is left with
+    // once its other bonds break). A bond whose stiffness spans fewer than six directions
+    // makes it singular whatever the precision.
+    {
+        let (mut bad64, mut bad32) = (Vec::new(), 0usize);
+        for i in 0..net.bonds.len() {
+            let mut alive = vec![false; net.bonds.len()];
+            alive[i] = true;
+            for k in [net.bonds[i].a, net.bonds[i].b] {
+                if net.chunks[k].support {
+                    continue;
+                }
+                let a = net.block(k, &alive);
+                if cholesky6(&a).is_none() {
+                    bad64.push((i, k));
+                } else if !cholesky6_f32(&a) {
+                    bad32 += 1;
+                }
+            }
+        }
+        println!("single-bond blocks: {} of {} bonds f64-singular {:?}; {} more f32-singular", bad64.len(), net.bonds.len(), &bad64[..bad64.len().min(8)], bad32);
+        for &(i, k) in bad64.iter().take(3) {
+            let mut alive = vec![false; net.bonds.len()];
+            alive[i] = true;
+            let a = net.block(k, &alive);
+            println!("  bond {i} chunk {k} diagonal {:?}", (0..6).map(|j| format!("{:.2e}", a[j][j])).collect::<Vec<_>>());
+            println!("  {:?}", net.bonds[i]);
+        }
+    }
     let mut first_f32 = None;
     for frame in 1..=240 {
         w.step_frame(&gpu).unwrap();
