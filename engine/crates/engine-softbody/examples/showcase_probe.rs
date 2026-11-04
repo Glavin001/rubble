@@ -867,7 +867,7 @@ fn main() {
                     &n,
                     &vis.colors,
                     &vis.material,
-                    &vis.seam,
+                    &vis.ao,
                     &vis.indices,
                     cc + eye,
                     cc + Vec3::new(0.0, -0.05, 0.0),
@@ -961,7 +961,7 @@ pub fn render(
     nrm: &[Vec3],
     col: &[[f32; 3]],
     mats: &[u8],
-    seam: &[f32],
+    ao: &[f32],
     idx: &[u32],
     eye: Vec3,
     target: Vec3,
@@ -1060,9 +1060,8 @@ pub fn render(
                     0.0
                 };
                 let c = base * (diff * 0.75 + sky) + Vec3::splat(spec + env);
-                let sm =
-                    seam[t[0] as usize] * w0 + seam[t[1] as usize] * w1 + seam[t[2] as usize] * w2;
-                let c = if sm > 0.8 { c * 0.08 } else { c };
+                let occ = ao[t[0] as usize] * w0 + ao[t[1] as usize] * w1 + ao[t[2] as usize] * w2;
+                let c = c * occ;
                 let c = c.powf(1.0 / 2.2);
                 for (i, ch) in c.to_array().iter().enumerate() {
                     img[k * 3 + i] = (ch.clamp(0.0, 1.0) * 255.0) as u8;

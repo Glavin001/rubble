@@ -17,6 +17,7 @@ pub mod body;
 pub mod curve;
 pub mod hatchback;
 pub mod material;
+pub mod parts;
 pub mod members;
 pub mod sedan;
 pub mod skeleton;

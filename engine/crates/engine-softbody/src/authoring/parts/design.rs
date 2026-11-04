@@ -1,0 +1,844 @@
+//! The sedan's styling and the layout of its parts.
+//!
+//! [`Styling`] holds every visual design number (shut lines, openings, lamp
+//! outlines, trim) in the definition's coordinates; [`assemble`] builds the
+//! body surface, cuts the panels, and places the fixtures. A new body style
+//! changes these numbers (and its `BodyProfile`), not the tools.
+//!
+//! Views used by the outlines:
+//! * side view (z, y);
+//! * plan (x, z);
+//! * *arc* view (a, h): a = arc length round the plan outline from the front
+//!   centre (or from the rear centre for the tail), h = height relative to the
+//!   band's top edge at that place. Lamps and grilles are drawn here, so they
+//!   wrap round the corners exactly as the body does.
+
+use super::body::{BodyStyle, BodySurface, SectionShape};
+use super::trim::{self, EdgeStyle};
+use super::{fixtures, smax, smin, Bind, Mesh, Piece, Shape};
+use crate::authoring::curve::Curve;
+use crate::authoring::skin::mat;
+use crate::authoring::vehicle::VehicleDef;
+use glam::Vec3;
+
+/// Visual design inputs.
+#[derive(Clone, Debug)]
+pub struct Styling {
+    pub body: BodyStyle,
+    /// Bonnet: rear (cowl) edge z, lateral cut beyond the top line, front edge
+    /// above the band's top.
+    pub cowl: [f32; 2],
+    pub hood_side: f32,
+    /// Door cuts (side view, z at the sill line and the slope dz/dy): front door
+    /// front edge, B-pillar, rear door rear edge; sill cut height.
+    pub door_front: [f32; 2],
+    pub b_cut: [f32; 2],
+    pub door_rear: [f32; 2],
+    pub sill: f32,
+    /// Front bumper / fender cut: z at y = 0.52 and dz/dy.
+    pub bumper_f: [f32; 2],
+    /// Rear bumper top (y) and its side cut (z at that height, dz/dy).
+    pub bumper_r: [f32; 3],
+    /// Deck lid: front edge z, half width on top and on the tail face, lower edge y.
+    pub deck: [f32; 4],
+    /// Glass: windscreen (z0, z1), backlight (z0, z1), side windows' z spans
+    /// (front, rear, quarter), A-pillar inset on top, rail inset.
+    pub windscreen: [f32; 2],
+    pub backlight: [f32; 2],
+    pub side_windows: [[f32; 2]; 3],
+    pub pillar: f32,
+    pub rail: f32,
+    pub frame: f32,
+    /// Arc-view outlines (a, h): headlight, grille, intake, fog; tail light (a
+    /// from the rear centre).
+    pub headlight: Vec<(f32, f32)>,
+    pub grille: Vec<(f32, f32)>,
+    pub intake: Vec<(f32, f32)>,
+    pub taillight: Vec<(f32, f32)>,
+    pub arch_radius: f32,
+    pub paint: [f32; 3],
+}
+
+pub fn sedan_styling(def: &VehicleDef) -> Styling {
+    let side = SectionShape {
+        lower: 0.11,
+        d_lower: -0.022,
+        crease: f32::NAN,
+        a_below: 0.10,
+        a_above: 0.22,
+        d_top: -0.05,
+        m_top: 0.25,
+        tuck: 0.06,
+    };
+    let nose = SectionShape {
+        lower: 0.06,
+        d_lower: -0.03,
+        crease: 0.50,
+        a_below: 0.20,
+        a_above: 0.08,
+        d_top: -0.06,
+        m_top: 0.55,
+        tuck: 0.07,
+    };
+    let tail = SectionShape {
+        lower: 0.08,
+        d_lower: -0.04,
+        crease: 0.66,
+        a_below: 0.16,
+        a_above: 0.10,
+        d_top: -0.06,
+        m_top: 0.8,
+        tuck: 0.07,
+    };
+    let body = BodyStyle {
+        crease: Curve::new(&[
+            (0.00, 0.80),
+            (0.40, 0.86),
+            (1.00, 0.85),
+            (1.80, 0.82),
+            (2.60, 0.80),
+            (3.40, 0.78),
+            (4.10, 0.74),
+            (4.70, 0.66),
+        ]),
+        side,
+        nose,
+        tail,
+        nose_bow: 0.06,
+        tail_bow: 0.09,
+        nose_corner: 0.42,
+        tail_corner: 0.38,
+        flare: 0.03,
+        flare_width: 0.17,
+        lid_crown: 0.022,
+        step: 0.012,
+        step_along: 0.02,
+    };
+    let _ = def;
+    Styling {
+        body,
+        cowl: [3.47, 3.56],
+        hood_side: 0.035,
+        door_front: [3.30, -0.08],
+        b_cut: [2.24, 0.02],
+        door_rear: [1.46, 0.10],
+        sill: 0.265,
+        bumper_f: [4.10, 1.15],
+        bumper_r: [0.70, 0.40, 1.25],
+        deck: [0.79, 0.62, 0.47, 0.71],
+        windscreen: [2.74, 3.47],
+        backlight: [0.84, 1.36],
+        side_windows: [[2.31, 3.45], [1.64, 2.17], [1.30, 1.58]],
+        pillar: 0.035,
+        rail: 0.045,
+        frame: 0.022,
+        headlight: vec![
+            (0.31, -0.105),
+            (0.31, -0.018),
+            (0.55, -0.014),
+            (0.80, -0.014),
+            (0.98, -0.016),
+            (1.03, -0.036),
+            (0.92, -0.060),
+            (0.70, -0.082),
+            (0.48, -0.100),
+        ],
+        grille: vec![
+            (-0.295, -0.022),
+            (0.295, -0.022),
+            (0.285, -0.17),
+            (0.24, -0.215),
+            (-0.24, -0.215),
+            (-0.285, -0.17),
+        ],
+        intake: vec![
+            (-0.52, -0.33),
+            (0.52, -0.33),
+            (0.48, -0.44),
+            (-0.48, -0.44),
+        ],
+        taillight: vec![
+            (0.49, -0.018),
+            (0.75, -0.016),
+            (1.00, -0.020),
+            (1.13, -0.050),
+            (0.98, -0.095),
+            (0.70, -0.130),
+            (0.49, -0.140),
+        ],
+        arch_radius: 0.362,
+        paint: def.look.paint,
+    }
+}
+
+/// A body vertex's views.
+struct At<'a> {
+    s: &'a BodySurface,
+}
+
+impl At<'_> {
+    fn ytop(&self, i: usize) -> f32 {
+        self.s.ytop[i]
+    }
+}
+
+/// Build every visual piece of the car.
+pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
+    let prof = &def.profile;
+    let surf = BodySurface::build(prof, &st.body);
+    let at = At { s: &surf };
+    let m = &surf.mesh;
+    let half = surf.band.half;
+    let mut pieces = Vec::new();
+    // --- Region terms ------------------------------------------------------
+    let lidrow = |z: f32| surf.lid_row(z);
+    let arch = |p: Vec3| -> f32 {
+        if p.x.abs() < 0.45 {
+            return 1.0;
+        }
+        prof.wells
+            .iter()
+            .map(|w| glam::Vec2::new(p.z - w.z, p.y - w.y).length() - st.arch_radius)
+            .fold(f32::MAX, f32::min)
+    };
+    let mirror_a = |a: &[(f32, f32)]| -> Vec<(f32, f32)> { a.to_vec() };
+    let head = Shape::smooth(&mirror_a(&st.headlight));
+    let grille = Shape::smooth(&st.grille);
+    let intake = Shape::smooth(&st.intake);
+    let tail = Shape::smooth(&st.taillight);
+    // Arc-view coordinates: (a from the front, h) and (a from the rear, h).
+    let front_ah = |i: usize, p: Vec3| -> (f32, f32) { (surf.arc[i], p.y - at.ytop(i)) };
+    let rear_ah = |i: usize, p: Vec3| -> (f32, f32) { (half - surf.arc[i], p.y - at.ytop(i)) };
+    let on_band = |i: usize| !surf.lid[i];
+    let headlamp = |i: usize, p: Vec3| -> f32 {
+        if !on_band(i) {
+            return 1.0;
+        }
+        let (a, h) = front_ah(i, p);
+        head.sd(a, h)
+    };
+    let grille_f = |i: usize, p: Vec3| -> f32 {
+        if !on_band(i) || surf.arc[i] > 0.7 {
+            return 1.0;
+        }
+        let (a, h) = front_ah(i, p);
+        grille.sd(a, h)
+    };
+    let intake_f = |i: usize, p: Vec3| -> f32 {
+        if !on_band(i) || surf.arc[i] > 0.8 {
+            return 1.0;
+        }
+        let (a, h) = front_ah(i, p);
+        intake.sd(a, h)
+    };
+    let taillamp = |i: usize, p: Vec3| -> f32 {
+        if !on_band(i) {
+            return 1.0;
+        }
+        let (a, h) = rear_ah(i, p);
+        tail.sd(a, h)
+    };
+    // Glass.
+    let windscreen = |i: usize, p: Vec3| -> f32 {
+        if !surf.lid[i] {
+            return 1.0;
+        }
+        let r = lidrow(p.z);
+        let f = smax(st.windscreen[0] - p.z, p.z - st.windscreen[1], 0.08);
+        smax(f, p.x.abs() - (r.x_r - st.pillar), 0.10).max(r.y_t + 0.03 - p.y)
+    };
+    let backlight = |i: usize, p: Vec3| -> f32 {
+        if !surf.lid[i] {
+            return 1.0;
+        }
+        let r = lidrow(p.z);
+        let f = smax(st.backlight[0] - p.z, p.z - st.backlight[1], 0.08);
+        smax(f, p.x.abs() - (r.x_r - st.pillar - 0.01), 0.10).max(r.y_t + 0.03 - p.y)
+    };
+    let side_window = |k: usize, i: usize, p: Vec3| -> f32 {
+        if !surf.lid[i] || p.x.abs() < 0.3 {
+            return 1.0;
+        }
+        let r = lidrow(p.z);
+        let [z0, z1] = st.side_windows[k];
+        let fy = smax(r.y_t + 0.018 - p.y, p.y - (r.y_e - st.rail), 0.05);
+        let fz = if k == 2 {
+            // Quarter glass: its rear edge follows the C-pillar's slope.
+            let zc = z0 + 0.55 * (p.y - r.y_t);
+            smax(zc - p.z, p.z - z1, 0.04)
+        } else {
+            smax(z0 - p.z, p.z - z1, 0.04)
+        };
+        smax(fy, fz, 0.05)
+    };
+    let glass_side = |i: usize, p: Vec3| -> f32 {
+        side_window(0, i, p)
+            .min(side_window(1, i, p))
+            .min(side_window(2, i, p))
+    };
+    let b_pillar = |i: usize, p: Vec3| -> f32 {
+        if !surf.lid[i] || p.x.abs() < 0.3 {
+            return 1.0;
+        }
+        let r = lidrow(p.z);
+        let fy = smax(r.y_t + 0.018 - p.y, p.y - (r.y_e - st.rail), 0.03);
+        let z0 = st.side_windows[1][1];
+        let z1 = st.side_windows[0][0];
+        smax(fy, smax(z0 - p.z, p.z - z1, 0.01), 0.02)
+    };
+    // Window frames: a ring round the side glass, plus the B-pillar.
+    let frame = |i: usize, p: Vec3| -> f32 {
+        let g = glass_side(i, p);
+        let ring = (g - 0.5 * st.frame).abs() - 0.5 * st.frame - 0.003;
+        ring.min(b_pillar(i, p))
+    };
+    // Openings in the body panels (negative inside the hole).
+    let openings = |i: usize, p: Vec3| -> f32 {
+        let mut o = arch(p);
+        o = o.min(headlamp(i, p) - 0.0);
+        o = o.min(grille_f(i, p));
+        o = o.min(intake_f(i, p));
+        o = o.min(taillamp(i, p));
+        o = o.min(windscreen(i, p));
+        o = o.min(backlight(i, p));
+        o = o.min(glass_side(i, p) - st.frame);
+        o = o.min(b_pillar(i, p));
+        o
+    };
+    let open = trim::field(m, openings);
+    // --- Panels --------------------------------------------------------------
+    let ytl = |p: Vec3| lidrow(p.z).y_t;
+    let door_front_z = |y: f32| st.door_front[0] + st.door_front[1] * (y - 0.3);
+    let b_z = |y: f32| st.b_cut[0] + st.b_cut[1] * (y - 0.3);
+    let door_rear_z = |y: f32| st.door_rear[0] + st.door_rear[1] * (y - 0.6);
+    let bumper_fz = |y: f32| st.bumper_f[0] + st.bumper_f[1] * (y - 0.52);
+    let bumper_rz = |y: f32| st.bumper_r[1] + st.bumper_r[2] * (st.bumper_r[0] - y);
+    type Region<'a> = Box<dyn Fn(usize, Vec3) -> f32 + 'a>;
+    let hood: Region = Box::new(|_, p| {
+        let r = lidrow(p.z);
+        let f = smax(st.cowl[1] - p.z, p.x.abs() - (r.x_r + st.hood_side), 0.06);
+        smax(f, r.y_t + 0.012 - p.y, 0.03)
+    });
+    let cowl: Region = Box::new(|i, p| {
+        if !surf.lid[i] {
+            return 1.0;
+        }
+        let r = lidrow(p.z);
+        let f = smax(st.cowl[0] - p.z, p.z - st.cowl[1], 0.0);
+        smax(f, p.x.abs() - (r.x_r + st.hood_side), 0.03)
+    });
+    let bumper_f: Region = Box::new(|_, p| bumper_fz(p.y) - p.z);
+    let a_base = move |p: Vec3| -> f32 {
+        // The A-pillar base (lid behind the cowl line): not fender.
+        smax(ytl(p) + 0.012 - p.y, p.z - st.cowl[0] - 0.02, 0.02)
+    };
+    let fender: Region = Box::new(move |_, p| smax(door_front_z(p.y) - p.z, -a_base(p), 0.02));
+    let in_door_band = move |p: Vec3| smax(st.sill - p.y, p.y - (ytl(p) + 0.004), 0.02);
+    let door_f: Region = Box::new(move |_, p| {
+        smax(
+            smax(p.z - door_front_z(p.y), b_z(p.y) - p.z, 0.025),
+            in_door_band(p),
+            0.025,
+        )
+    });
+    let rear_arch = prof.wells.iter().min_by(|a, b| a.z.total_cmp(&b.z)).copied();
+    let door_r: Region = Box::new(move |_, p| {
+        let mut f = smax(
+            smax(p.z - b_z(p.y), door_rear_z(p.y) - p.z, 0.025),
+            in_door_band(p),
+            0.025,
+        );
+        if let Some(w) = rear_arch {
+            let r = glam::Vec2::new(p.z - w.z, p.y - w.y).length();
+            f = smax(f, st.arch_radius + 0.07 - r, 0.04);
+        }
+        f
+    });
+    let deck: Region = Box::new(|_, p| {
+        let xd = st.deck[2] + (st.deck[1] - st.deck[2]) * super::smoothstep(0.86, 0.95, p.y);
+        smax(smax(p.z - st.deck[0], p.x.abs() - xd, 0.05), st.deck[3] - p.y, 0.04)
+    });
+    let bumper_r: Region = Box::new(|_, p| smax(p.z - bumper_rz(p.y), p.y - st.bumper_r[0], 0.04));
+    // Black lower lip under the front bumper, black diffuser under the rear.
+    let lip_f: Region = Box::new(|_, p| smax(bumper_fz(p.y) - p.z, p.y - 0.285, 0.02));
+    let valance_r: Region = Box::new(|_, p| smax(p.z - bumper_rz(p.y), p.y - 0.375, 0.03));
+    let rocker: Region = Box::new(|_, p| {
+        if p.x.abs() < 0.4 {
+            return 1.0;
+        }
+        p.y - st.sill
+    });
+    // (name, region, material, sided)
+    let panels: Vec<(&str, Region, u8, bool)> = vec![
+        ("bonnet", hood, mat::PAINT, false),
+        ("cowl", cowl, mat::TRIM, false),
+        ("lip_f", lip_f, mat::TRIM, false),
+        ("bumper_f", bumper_f, mat::PAINT, false),
+        ("fender", fender, mat::PAINT, true),
+        ("door_f", door_f, mat::PAINT, true),
+        ("door_r", door_r, mat::PAINT, true),
+        ("deck", deck, mat::PAINT, false),
+        ("valance_r", valance_r, mat::TRIM, false),
+        ("bumper_r", bumper_r, mat::PAINT, false),
+        ("rocker", rocker, mat::TRIM, true),
+        ("body", Box::new(|_, _| -1.0), mat::PAINT, false),
+    ];
+    let mut taken: Vec<f32> = vec![f32::MAX; m.len()];
+    let edge_style = |p: Vec3| -> EdgeStyle {
+        if arch(p) < 0.012 {
+            EdgeStyle::ARCH
+        } else {
+            EdgeStyle::SHUT
+        }
+    };
+    for (name, region, material, sided) in &panels {
+        let raw = trim::field(m, |i, p| region(i, p));
+        // Inside this region, outside every earlier panel and every opening.
+        let f: Vec<f32> = (0..m.len())
+            .map(|i| raw[i].max(-taken[i]).max(-open[i]))
+            .collect();
+        let f = metric(m, &f);
+        for (k, v) in raw.iter().enumerate() {
+            taken[k] = taken[k].min(*v);
+        }
+        let sides: &[f32] = if *sided { &[1.0, -1.0] } else { &[0.0] };
+        for &sx in sides {
+            let fs: Vec<f32> = if sx == 0.0 {
+                f.clone()
+            } else {
+                f.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect()
+            };
+            let level = -(EdgeStyle::SHUT.gap + EdgeStyle::SHUT.roll);
+            let mut c = trim::clip(m, &fs, level);
+            if c.mesh.is_empty() {
+                continue;
+            }
+            c.mesh.mat.iter_mut().for_each(|x| *x = *material);
+            trim::edge_ao(&mut c, level, 0.25, 0.008);
+            let loops = std::mem::take(&mut c.loops);
+            for (l, closed) in &loops {
+                // Per vertex: arch lips get the big roll, the rest shut lines.
+                let lp: Vec<u32> = l.clone();
+                let mid = c.mesh.pos[lp[lp.len() / 2] as usize];
+                let sty = edge_style(mid);
+                roll_mixed(&mut c.mesh, &lp, *closed, &edge_style, sty);
+            }
+            let nm = if sx > 0.0 {
+                format!("{name}_l")
+            } else if sx < 0.0 {
+                format!("{name}_r")
+            } else {
+                name.to_string()
+            };
+            pieces.push(Piece {
+                name: nm,
+                mesh: c.mesh,
+                bind: Bind::Vote,
+            });
+        }
+    }
+    // --- Glass and frames -----------------------------------------------------
+    let glass_regions: Vec<(&str, Box<dyn Fn(usize, Vec3) -> f32 + '_>, f32)> = vec![
+        ("windscreen", Box::new(windscreen), 0.06),
+        ("backlight", Box::new(backlight), 0.05),
+        ("glass_side", Box::new(glass_side), 0.0),
+    ];
+    for (name, region, frit) in glass_regions {
+        let f = metric(m, &trim::field(m, |i, p| region(i, p)));
+        for sx in [1.0f32, -1.0] {
+            let fs: Vec<f32> = if name == "glass_side" {
+                f.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect()
+            } else if sx > 0.0 {
+                f.clone()
+            } else {
+                continue;
+            };
+            let c = trim::clip(m, &fs, 0.012);
+            let gm = if name == "windscreen" { mat::SCREEN } else { mat::GLASS };
+            let mut g = trim::offset(&c.mesh, -0.006, false, Some(gm), 1.0);
+            g.smooth.iter_mut().for_each(|s| *s = 1);
+            if frit > 0.0 {
+                // The black frit: printed on the inside of the glass's border.
+                let fr = trim::clip_between(&c.mesh, &c.field, -frit, 0.012);
+                let fm = trim::offset(&fr.mesh, -0.0075, false, Some(mat::TRIM), 0.6);
+                g.append(&fm);
+            }
+            let nm = if name == "glass_side" {
+                format!("{name}_{}", if sx > 0.0 { "l" } else { "r" })
+            } else {
+                name.to_string()
+            };
+            pieces.push(Piece {
+                name: nm,
+                mesh: g,
+                bind: Bind::Vote,
+            });
+        }
+    }
+    // Black window frames and B-pillar appliques.
+    let ff = metric(m, &trim::field(m, frame));
+    for sx in [1.0f32, -1.0] {
+        let fs: Vec<f32> = ff.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect();
+        let mut c = trim::clip(m, &fs, -0.001);
+        c.mesh.mat.iter_mut().for_each(|x| *x = mat::TRIM);
+        let mut mesh = trim::offset(&c.mesh, 0.0015, false, None, 1.0);
+        let loops = trim::boundary_loops(&mesh);
+        for (l, closed) in &loops {
+            trim::roll_loop(&mut mesh, l, *closed, EdgeStyle::TRIM);
+        }
+        pieces.push(Piece {
+            name: format!("frame_{}", if sx > 0.0 { "l" } else { "r" }),
+            mesh,
+            bind: Bind::Vote,
+        });
+    }
+    // --- Trim on the body: plate, tail garnish, belt mouldings ---------------
+    let strip = |name: &str, f: &[f32], lift: f32, mtl: u8, roll: EdgeStyle, sided: bool, pieces: &mut Vec<Piece>| {
+        let sides: &[f32] = if sided { &[1.0, -1.0] } else { &[0.0] };
+        for &sx in sides {
+            let fs: Vec<f32> = if sx == 0.0 {
+                f.to_vec()
+            } else {
+                f.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect()
+            };
+            let c = trim::clip(m, &fs, 0.0);
+            if c.mesh.is_empty() {
+                continue;
+            }
+            let mut mesh = trim::offset(&c.mesh, lift, false, Some(mtl), 1.0);
+            mesh.smooth.iter_mut().for_each(|x| *x = 1);
+            let loops = trim::boundary_loops(&mesh);
+            for (l, closed) in &loops {
+                trim::roll_loop(&mut mesh, l, *closed, roll);
+            }
+            pieces.push(Piece {
+                name: name.to_string(),
+                mesh,
+                bind: Bind::Vote,
+            });
+        }
+    };
+    let plate_f = metric(m, &trim::field(m, |i, p| {
+        if !on_band(i) {
+            return 1.0;
+        }
+        let (a, _) = rear_ah(i, p);
+        smax(a - 0.265, (p.y - 0.565).abs() - 0.064, 0.025)
+    }));
+    let plate_back: Vec<f32> = plate_f.iter().map(|v| v - 0.008).collect();
+    strip("plate_surround", &plate_back, 0.001, mat::TRIM, EdgeStyle::TRIM, false, &mut pieces);
+    strip(
+        "plate",
+        &plate_f,
+        0.006,
+        mat::PLATE,
+        EdgeStyle {
+            gap: 0.0,
+            roll: 0.0015,
+            depth: 0.005,
+            flange: 0.0,
+            ao_floor: 0.4,
+        },
+        false,
+        &mut pieces,
+    );
+    let garnish = metric(m, &trim::field(m, |i, p| {
+        if !on_band(i) {
+            return 1.0;
+        }
+        let (a, h) = rear_ah(i, p);
+        smax(a - 0.455, (h + 0.075).abs() - 0.008, 0.012)
+    }));
+    strip("garnish", &garnish, 0.0025, mat::CHROME, EdgeStyle::TRIM, false, &mut pieces);
+    let belt = metric(m, &trim::field(m, |i, p| {
+        if p.x.abs() < 0.5 {
+            return 1.0;
+        }
+        let h = p.y - surf.ytop[i];
+        let fz = smax(st.door_rear[0] + 0.04 - p.z, p.z - (st.door_front[0] - 0.035), 0.01);
+        smax(fz, (h + 0.004).abs() - 0.0065, 0.004)
+    }));
+    strip("belt", &belt, 0.002, mat::CHROME, EdgeStyle::TRIM, true, &mut pieces);
+    // --- Fixtures ----------------------------------------------------------
+    let avg_in = |f: &[f32]| -> Vec3 {
+        let mut a = Vec3::ZERO;
+        for (k, v) in f.iter().enumerate() {
+            if *v < 0.0 {
+                a -= m.nrm[k];
+            }
+        }
+        a.normalize_or(-Vec3::Z)
+    };
+    let sided = |f: &[f32], sx: f32| -> Vec<f32> {
+        f.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect()
+    };
+    // Headlights.
+    let hf = metric(m, &trim::field(m, headlamp));
+    for sx in [1.0f32, -1.0] {
+        let f = sided(&hf, sx);
+        let axis = (avg_in(&f) * 0.6 - Vec3::Z * 0.4).normalize();
+        let projectors = [0.48f32, 0.66]
+            .iter()
+            .map(|&a| {
+                let y = surf.band_top_y(a) - 0.042;
+                surf.band_at(a, y, sx).0
+            })
+            .collect();
+        let spec = fixtures::LampSpec {
+            axis,
+            depth: 0.09,
+            lens: mat::LENS,
+            housing: mat::TRIM,
+            reflector: mat::TRIM,
+            guides: vec![(-0.011, -0.0045, mat::DRL)],
+            guide_depth: 0.006,
+            projectors,
+            projector_r: 0.03,
+        };
+        pieces.push(Piece {
+            name: format!("headlight_{}", if sx > 0.0 { "l" } else { "r" }),
+            mesh: fixtures::lamp(m, &f, &spec),
+            bind: Bind::Rigid,
+        });
+    }
+    // Tail lights.
+    let tf = metric(m, &trim::field(m, taillamp));
+    for sx in [1.0f32, -1.0] {
+        let f = sided(&tf, sx);
+        let axis = (avg_in(&f) * 0.6 + Vec3::Z * 0.4).normalize();
+        let spec = fixtures::LampSpec {
+            axis,
+            depth: 0.07,
+            lens: mat::TAIL_LENS,
+            housing: mat::TRIM,
+            reflector: mat::TAIL_BACK,
+            guides: vec![
+                (-0.012, -0.0055, mat::TAIL_LED),
+                (-0.034, -0.0275, mat::TAIL_LED),
+                (-0.056, -0.0495, mat::TAIL_LED),
+            ],
+            guide_depth: 0.008,
+            projectors: Vec::new(),
+            projector_r: 0.0,
+        };
+        pieces.push(Piece {
+            name: format!("taillight_{}", if sx > 0.0 { "l" } else { "r" }),
+            mesh: fixtures::lamp(m, &f, &spec),
+            bind: Bind::Rigid,
+        });
+    }
+    // Grille and lower intake.
+    let hfield: Vec<f32> = (0..m.len()).map(|i| m.pos[i].y - surf.ytop[i]).collect();
+    let gf = metric(m, &trim::field(m, grille_f));
+    let spec = fixtures::GrilleSpec {
+        axis: -Vec3::Z,
+        depth: 0.07,
+        surround: 0.009,
+        surround_mat: mat::TRIM,
+        slats: vec![
+            (-0.048, mat::CHROME),
+            (-0.085, mat::TRIM),
+            (-0.118, mat::TRIM),
+            (-0.151, mat::TRIM),
+            (-0.184, mat::TRIM),
+        ],
+        slat_half: 0.0075,
+        slat_back: 0.018,
+        back_mat: mat::GRILLE,
+    };
+    pieces.push(Piece {
+        name: "grille".into(),
+        mesh: fixtures::grille(m, &gf, &hfield, &spec),
+        bind: Bind::Vote,
+    });
+    let inf = metric(m, &trim::field(m, intake_f));
+    let spec = fixtures::GrilleSpec {
+        axis: -Vec3::Z,
+        depth: 0.06,
+        surround: 0.0,
+        surround_mat: mat::TRIM,
+        slats: vec![(-0.365, mat::TRIM), (-0.405, mat::TRIM)],
+        slat_half: 0.006,
+        slat_back: 0.02,
+        back_mat: mat::GRILLE,
+    };
+    pieces.push(Piece {
+        name: "intake".into(),
+        mesh: fixtures::grille(m, &inf, &hfield, &spec),
+        bind: Bind::Vote,
+    });
+    // Wheels, brakes, arch liners.
+    for c in &def.corners {
+        for sx in [1.0f32, -1.0] {
+            let front = c.z > 0.5 * prof.length;
+            let w = fixtures::WheelSpec {
+                centre: Vec3::new(sx * c.x, c.y, c.z),
+                out: Vec3::X * sx,
+                radius: c.tyre_radius,
+                width: c.tyre_width,
+                rim_radius: c.tyre_radius * 0.67,
+                spokes: 5,
+                disc_radius: if front { 0.155 } else { 0.145 },
+            };
+            pieces.push(Piece {
+                name: "wheel".into(),
+                mesh: fixtures::wheel(&w),
+                bind: Bind::Wheel(u16::MAX),
+            });
+            pieces.push(Piece {
+                name: "caliper".into(),
+                mesh: fixtures::caliper(&w, if front { 0.7 } else { -0.9 }, -Vec3::Z),
+                bind: Bind::Hub(u16::MAX),
+            });
+        }
+    }
+    for wl in &prof.wells {
+        for sx in [1.0f32, -1.0] {
+            let x_out = prof.half_width.eval(wl.z) - 0.02;
+            pieces.push(Piece {
+                name: "arch_liner".into(),
+                mesh: fixtures::arch_liner(
+                    Vec3::new(0.0, wl.y, wl.z),
+                    sx,
+                    st.arch_radius + 0.012,
+                    x_out,
+                    wl.inner_x - 0.05,
+                ),
+                bind: Bind::Vote,
+            });
+        }
+    }
+    // Mirrors and handles.
+    for sx in [1.0f32, -1.0] {
+        let z = st.door_front[0] - 0.12;
+        let r = lidrow(z);
+        let base = Vec3::new(sx * (r.x_t - 0.012), r.y_t + 0.03, z);
+        pieces.push(Piece {
+            name: "mirror".into(),
+            mesh: fixtures::mirror(base, Vec3::X * sx, -Vec3::Z, mat::PAINT),
+            bind: Bind::Rigid,
+        });
+        for zc in [st.b_cut[0] + 0.3, st.door_rear[0] + 0.24] {
+            let mut path = Vec::new();
+            let mut nrm = Vec::new();
+            for k in 0..=12 {
+                let z = zc + 0.09 - 0.18 * k as f32 / 12.0;
+                let y = st.body.crease.eval(z) - 0.035;
+                let a = surf.arc_at_z(z);
+                let (p, n) = surf.band_at(a, y, sx);
+                path.push(p);
+                nrm.push(n);
+            }
+            pieces.push(Piece {
+                name: "handle".into(),
+                mesh: fixtures::handle(&path, &nrm, mat::CHROME),
+                bind: Bind::Rigid,
+            });
+        }
+    }
+    // Underbody and exhaust.
+    let mut rows = Vec::new();
+    let mut z = 0.12;
+    while z < prof.length - 0.15 {
+        let th = surf.band.half - surf.arc_at_z(z);
+        let edge = surf.band.point(th, 0.0);
+        let mut w = edge.x - 0.005;
+        for wl in &prof.wells {
+            if (z - wl.z).abs() < st.arch_radius + 0.02 {
+                w = w.min(wl.inner_x - 0.06);
+            }
+        }
+        rows.push((z, edge.y + 0.004, w.max(0.1)));
+        z += 0.05;
+    }
+    pieces.push(Piece {
+        name: "underbody".into(),
+        mesh: fixtures::underbody(&rows),
+        bind: Bind::Vote,
+    });
+    for sx in [1.0f32, -1.0] {
+        let tip_z = 0.09;
+        let y = prof.bottom.eval(tip_z) - 0.09;
+        pieces.push(Piece {
+            name: "exhaust".into(),
+            mesh: fixtures::exhaust(
+                Vec3::new(sx * 0.3, 0.21, 1.25),
+                Vec3::new(sx * 0.46, y, tip_z),
+                -Vec3::Z,
+                0.042,
+            ),
+            bind: Bind::Vote,
+        });
+    }
+    let _ = smin;
+    pieces
+}
+
+/// Roll a loop with a per-vertex style (arch lips vs shut lines): split it into
+/// runs of one style.
+fn roll_mixed(m: &mut Mesh, l: &[u32], closed: bool, style_at: &dyn Fn(Vec3) -> EdgeStyle, _d: EdgeStyle) {
+    let n = l.len();
+    let styles: Vec<bool> = l.iter().map(|&v| style_at(m.pos[v as usize]).roll > 0.005).collect();
+    if styles.iter().all(|&s| s == styles[0]) {
+        let s = if styles[0] { EdgeStyle::ARCH } else { EdgeStyle::SHUT };
+        trim::roll_loop(m, l, closed, s);
+        return;
+    }
+    // Rotate so a run starts at 0 (closed loops), then roll each run (sharing
+    // its end vertex with the next, so the edge is continuous).
+    let start = if closed {
+        (0..n).find(|&k| styles[k] != styles[(k + n - 1) % n]).unwrap_or(0)
+    } else {
+        0
+    };
+    let ord: Vec<usize> = (0..n).map(|k| (start + k) % n).collect();
+    let mut run = vec![l[ord[0]]];
+    let mut cur = styles[ord[0]];
+    for &k in ord.iter().skip(1) {
+        run.push(l[k]);
+        if styles[k] != cur {
+            let s = if cur { EdgeStyle::ARCH } else { EdgeStyle::SHUT };
+            trim::roll_loop(m, &run, false, s);
+            run = vec![l[k]];
+            cur = styles[k];
+        }
+    }
+    if closed {
+        run.push(l[ord[0]]);
+    }
+    let s = if cur { EdgeStyle::ARCH } else { EdgeStyle::SHUT };
+    trim::roll_loop(m, &run, false, s);
+}
+
+/// Make a field metric on the surface: divide by its gradient's length (per
+/// vertex, from the triangles' linear gradients), so cut levels are distances.
+pub fn metric(m: &Mesh, f: &[f32]) -> Vec<f32> {
+    let mut g = vec![0.0f32; m.len()];
+    let mut w = vec![0.0f32; m.len()];
+    for t in m.idx.chunks(3) {
+        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        let e1 = m.pos[b] - m.pos[a];
+        let e2 = m.pos[c] - m.pos[a];
+        let n = e1.cross(e2);
+        let n2 = n.length_squared();
+        if n2 < 1e-16 {
+            continue;
+        }
+        let grad = ((f[b] - f[a]) * e2.cross(n) + (f[c] - f[a]) * n.cross(e1)) / n2;
+        let gl = grad.length();
+        if !gl.is_finite() {
+            continue;
+        }
+        for i in [a, b, c] {
+            g[i] += gl;
+            w[i] += 1.0;
+        }
+    }
+    f.iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let gl = if w[i] > 0.0 { g[i] / w[i] } else { 1.0 };
+            v / gl.clamp(0.2, 50.0)
+        })
+        .collect()
+}

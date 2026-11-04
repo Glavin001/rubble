@@ -14,6 +14,26 @@
 
 #define RB_VERSION_MINOR 1
 
+#define RB_KERNELS_CHARACTERS (1 << 0)
+
+#define RB_KERNELS_QUERIES (1 << 1)
+
+#define RB_KERNELS_PROJECTILES (1 << 2)
+
+#define RB_KERNELS_VEHICLES (1 << 3)
+
+#define RB_KERNELS_SOFT_BODIES (1 << 4)
+
+#define RB_KERNELS_TERRAIN (1 << 5)
+
+#define RB_KERNELS_GUIDANCE (1 << 6)
+
+#define RB_KERNELS_EXPLOSIONS (1 << 7)
+
+#define RB_KERNELS_CCD (1 << 8)
+
+#define RB_KERNELS_ALL 4294967295
+
 // Motion-lock bits (`RbBodyDef::motion_locks`, `rbBody_SetMotionLocks`).
 #define RB_LOCK_LINEAR_X 1
 
@@ -41,6 +61,25 @@ typedef enum RbContacts {
   // Needed for soft bodies.
   RB_CONTACTS_CANONICAL = 2,
 } RbContacts;
+
+// What a world with sleep does with the contacts of pairs at rest
+// (`RbWorldDef::resting_contacts`, rubble's `RestingContacts`).
+typedef enum RbRestingContacts {
+  // The sleep archive (default): a sleeper a moving body touches forms all its resting
+  // contacts in that step, and woken contacts restart as the carry's do. A sleeping
+  // pair costs nothing per step. Canonical contacts (threshold destructibles) keep
+  // main's archive: warm wakes from archived rows, enabled by the first threshold
+  // destructible. Compact contacts keep the carry instead.
+  RB_RESTING_ARCHIVE = 0,
+  // The resting-pair carry (opt-out): every pair at rest is re-emitted and kept each
+  // step (the earlier default).
+  RB_RESTING_CARRY = 1,
+  // Neither (measurement): a woken pair restarts cold.
+  RB_RESTING_DROP = 2,
+  // Opt-in: the touch query and cold wakes in canonical worlds too (threshold
+  // destructibles then break differently from main).
+  RB_RESTING_TOUCH = 3,
+} RbRestingContacts;
 
 typedef enum RbResult {
   RB_OK = 0,
@@ -219,6 +258,11 @@ typedef struct RbWorldDef {
   // (three-avbd's `reuseContacts`, `FLAG_REUSE_CONTACTS`; demo.html turns it on for its brick
   // and box scenes). Off by default.
   bool reuse_contacts;
+  // Resting contacts in a world with sleep (`RB_RESTING_ARCHIVE` by default).
+  enum RbRestingContacts resting_contacts;
+  // Room in the sleep archive, in contact rows (0: the contact capacity); more fails
+  // the step.
+  uint32_t sleep_archive_rows;
   // Begins at or above this approach speed are hits (world units/s).
   float hit_event_threshold;
   // Where the world ends (`WorldDef::kill_bounds`): a dynamic body whose origin
@@ -1327,6 +1371,25 @@ void rbDestroyWorld(struct RbWorld *world);
 
 // Advance one fixed step. Never waits on results (see `rbWorld_Poll`).
 enum RbResult rbWorld_Step(struct RbWorld *world);
+
+// Compile the kernels of `groups` (`RB_KERNELS_*`, combined with `|`) now.
+// A world builds each GPU kernel the first time a step runs it, so the first
+// step with a character, vehicle, soft body, ... pays that compile; call this
+// at load time to move it there. Blocks while they compile. `out_built`
+// (optional): how many kernels this call built.
+enum RbResult rbWorld_Prewarm(struct RbWorld *world, uint32_t groups, uint32_t *out_built);
+
+// `rbWorld_Prewarm` on background threads, several kernels at once: returns
+// at once, so a loading screen keeps animating. Poll
+// `rbWorld_GetPrewarmProgress` each frame; the world can step meanwhile (a step
+// that needs a kernel still compiling waits for that one).
+enum RbResult rbWorld_PrewarmAsync(struct RbWorld *world, uint32_t groups);
+
+// Progress of the world's background prewarms: kernels compiled so far and in
+// all (`done == total` when finished; both 0 when none was started).
+enum RbResult rbWorld_GetPrewarmProgress(struct RbWorld *world,
+                                         uint32_t *out_done,
+                                         uint32_t *out_total);
 
 // Results of finished steps. `coalesce`: fold every ready step into one
 // frame (latest poses, earliest previous poses, all events). Otherwise hand

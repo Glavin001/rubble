@@ -3,7 +3,8 @@
 //! a captain (a scripted walker the camera follows) who walks down the quarterdeck stairs while
 //! broadsides from both sides shoot the ship apart around him, and both batteries at once
 //! once he stops. Everything is authored here; the page only draws
-//! (`lib.rs` hands it the meshes and poses) and picks the playback rate.
+//! (`lib.rs` hands it the meshes and poses) and picks the playback rate. The ship, its
+//! balls and its debris are a [`Range`] (`range.rs`), shared with the timber yard.
 //!
 //! Frames. The world is the ship's own Shardwright frame (metres, Y up; x runs aft from
 //! the cut-away end at 0 to the transom at 22, z across the beam, the main deck at 3.08,
@@ -13,19 +14,12 @@
 
 use rubble::*;
 
+pub use crate::range::*;
+
 /// The galleon stern's levels: 0 its 566 members whole (they part at their joints),
 /// 1 each member in about 0.3 m pieces, 2 (the leaf, the default) in grain-stretched
 /// cells. The take runs at any of them.
 pub const LEVEL: u8 = 2;
-/// A cannonball: 24 lb of iron (10.9 kg, 0.074 m radius).
-pub const BALL_MASS: f32 = 10.9;
-pub const BALL_RADIUS: f32 = 0.074;
-/// Muzzle velocity: a 24-pounder's ~450 m/s, spent to this at close range.
-pub const BALL_SPEED: f32 = 300.0;
-/// Balls in flight or at rest the scene keeps (the oldest is removed past this).
-pub const MAX_BALLS: usize = 256;
-/// Balls in strike prediction's shot table at once (its limit is 64).
-pub const MAX_STRIKING: usize = 64;
 /// The barrage: a gun fires every `FIRE_EVERY` steps, alternately at the nearest unhit
 /// point of the aft just behind the captain (the chase) and at the rest of the aft.
 pub const FIRE_EVERY: u32 = 1;
@@ -193,21 +187,6 @@ pub fn finale_targets() -> Vec<([f32; 3], f32)> {
     t
 }
 
-/// Crushed wood becomes particles (`CrushMass::Particles`): about one per `PARTICLE_SIZE`
-/// cube of the chunk's volume, at most `PARTICLES_PER_CHUNK`, its mass conserved. Each
-/// collides with the ship and the ground but not with another particle; the page draws
-/// each as a few splinters.
-pub const PARTICLE_SIZE: f32 = 0.08;
-pub const PARTICLES_PER_CHUNK: u32 = 24;
-/// Continuous collision for fast particles. Off: the takes have more fast particles at
-/// once than the engine's CCD slots (`CCD_BODY_CAP`), so a fast particle may pass
-/// through a thin plank.
-pub const PARTICLE_CCD: bool = false;
-/// Particle bodies reserved when the ship is placed: the raze leaves about 23,000, so
-/// room for it and for free play after either take. A run that crushes more fails with
-/// an error.
-pub const CRUSH_BUDGET: u32 = 49152;
-
 /// The take's script.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Take {
@@ -221,85 +200,15 @@ pub enum Take {
     Raze,
 }
 
-/// Raze: a chunk in a piece of fewer than this many chunks is destroyed (loose wreckage).
-pub const RAZE_PIECE: usize = 8;
-/// Guns firing each step, rising through the take.
-pub const RAZE_GUNS: [(f32, u32); 3] = [(0.0, 1), (6.0, 2), (14.0, 3)];
-/// Seconds one sweep of the ship's length takes.
-pub const RAZE_SWEEP: f32 = 7.0;
-/// A chunk aimed at is not aimed at again for this long (its ball breaks it first).
-pub const RAZE_REAIM: f32 = 0.8;
-/// The closing volley fires once the intact share is under this, once it has stopped
-/// falling (by `RAZE_PROGRESS` in `RAZE_STALL` seconds: what is left is wreckage the balls
-/// no longer break, or the anchored keel), or at `RAZE_SECONDS`.
-pub const RAZE_DONE: f32 = 0.03;
-pub const RAZE_SECONDS: f32 = 40.0;
-pub const RAZE_PROGRESS: f32 = 0.005;
-pub const RAZE_STALL: f32 = 3.0;
-/// Balls in the closing volley.
-pub const RAZE_VOLLEY: usize = 40;
-
-/// Crushing for the ship's wood: the stress import's `timber` (structural softwood, the
-/// stress oracle's preset). The iron guns are ductile and never crush.
-pub fn crush(budget: u32) -> Crush {
-    let p = stress_ref::crush::presets::softwood();
-    Crush {
-        materials: vec![(
-            "timber".into(),
-            CrushMaterial {
-                cap_pressure: p.cap_pressure,
-                cohesion: p.cohesion,
-                friction_slope: p.friction_slope,
-                crush_energy: p.crush_energy,
-                crush_viscosity: p.crush_viscosity,
-            },
-        )],
-        mass: CrushMass::Particles {
-            size: PARTICLE_SIZE,
-            max_per_chunk: PARTICLES_PER_CHUNK,
-            budget,
-            continuous: PARTICLE_CCD,
-        },
-        ..Crush::default()
-    }
-}
-
-/// Crushed wood's debris: a crush particle (`half` its radius, thrice; drawn as a few
-/// splinters) or a box fragment (`half` its extents); where it was made.
-#[derive(Clone, Copy, Debug)]
-pub struct Splinter {
-    pub body: BodyId,
-    pub half: [f32; 3],
-    pub at: [f32; 3],
-    pub particle: bool,
-}
-
-/// What a frame did (since the last `take_report`).
-#[derive(Clone, Debug, Default)]
-pub struct Report {
-    pub broken: usize,
-    pub crushed: usize,
-    pub splits: usize,
-    pub shots: usize,
-}
-
+/// The galleon on a [`Range`] (its `structure`; `Deref`s to it), with the take's script.
 pub struct Broadside {
+    pub range: Range,
     pub take: Take,
-    pub world: World,
+    /// The ship (the range's structure).
     pub ship: DestructibleId,
     /// Where the walk has got to (m along it); the walker is a scripted point the
     /// barrage keys off and the camera follows (no physical character).
     walked: f32,
-    pub dt: f32,
-    /// Steps taken.
-    pub frame: u32,
-    /// Each chunk's rest pose in the render scene (`engine_fracture::build_scene`), the
-    /// frame its render vertices are in.
-    pub rest: Vec<Transform>,
-    pub chunks: u32,
-    /// Each chunk's Shardwright fragment and its render colour (its mesh's mean).
-    pub fragment: Vec<Option<u32>>,
-    pub color: Vec<[f32; 3]>,
     targets: Vec<Target>,
     /// Targets shot so far.
     hit: Vec<bool>,
@@ -313,57 +222,23 @@ pub struct Broadside {
     pub captain_ground: bool,
     stopped_at: Option<u32>,
     pub finale: Option<u32>,
-    /// Balls in the world, oldest first, with the frame each was fired.
-    pub balls: Vec<(BodyId, u32)>,
-    /// The balls still in strike prediction's shot table, oldest first.
-    striking: Vec<(BodyId, u32)>,
-    /// Every shot fired: (frame, from, velocity), for the camera and the report.
-    pub log: Vec<(u32, [f32; 3], [f32; 3])>,
-    pub total: Report,
-    /// Free play: shots asked for by the page, fired before the next step.
-    pending: Vec<([f32; 3], [f32; 3])>,
     /// The take's script (barrage, walk, finale) runs; off: free play only.
     pub scripted: bool,
-    /// Chunks crushed so far (hidden: their mass is in `splinters`).
-    pub crushed: Vec<bool>,
-    /// What crushed wood left (particles or box fragments); `splinters_version` counts
-    /// changes.
-    pub splinters: Vec<Splinter>,
-    pub splinters_version: u32,
-    /// Raze: the frame each chunk was last aimed at, the chunks still in large pieces
-    /// (refreshed every few steps) and their share of the ship.
-    aimed: Vec<Option<u32>>,
-    intact: Vec<u32>,
-    pub intact_share: f32,
-    /// The lowest intact share so far and the frame it last fell by `RAZE_PROGRESS`.
-    progress: (f32, u32),
+    /// Raze's aim and progress.
+    pub razing: Razing,
 }
 
-fn capacity(asset: &DestructibleAssetDesc) -> anyhow::Result<WorldCapacity> {
-    let stress = asset
-        .stress
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("asset has no stress import"))?;
-    let solver = asset
-        .solver_for(StrengthModel::Threshold)
-        .ok_or_else(|| anyhow::anyhow!("asset has no threshold solver"))?;
-    let scene = stress.threshold_scene(1.0, solver.dt)?;
-    let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
-    let mut c = stress_rubble::capacity_for(&scene);
-    // Every chunk may become a body, plus the crush splinters, the balls and the captain.
-    let bodies = chunks as u32 + CRUSH_BUDGET + MAX_BALLS as u32 + 64;
-    c.max_bodies = c.max_bodies.max(bodies.next_power_of_two());
-    // Contacts for every body the take may have: the wreck piles up on the ground.
-    c.max_contacts = stress_rubble::threshold::contact_capacity(
-        chunks + CRUSH_BUDGET as usize + MAX_BALLS,
-        c.max_contacts,
-        1 << 30,
-    );
-    c.max_candidates = c.max_candidates.max(c.max_contacts);
-    // A deep pile of wreck needs more colours than standing structure; colours past the
-    // planned ones run in the sparse tail, solved the same way.
-    c.max_colors = c.max_colors.max(64);
-    Ok(c)
+impl std::ops::Deref for Broadside {
+    type Target = Range;
+    fn deref(&self) -> &Range {
+        &self.range
+    }
+}
+
+impl std::ops::DerefMut for Broadside {
+    fn deref_mut(&mut self) -> &mut Range {
+        &mut self.range
+    }
 }
 
 impl Broadside {
@@ -379,89 +254,18 @@ impl Broadside {
 
     /// The ship at fracture `level`, running `take`'s script.
     pub fn with_take(gpu: GpuContext, glb: &[u8], level: u8, take: Take) -> anyhow::Result<Self> {
-        let asset = DestructibleAssetDesc::from_glb(glb, level)?;
-        let parsed = engine_fracture::parse_fracture_glb(glb)?;
-        let scene = engine_fracture::build_scene(&parsed, level, None)?;
-        let solver = asset
-            .solver_for(StrengthModel::Threshold)
-            .ok_or_else(|| anyhow::anyhow!("asset has no threshold solver"))?;
-        let def = WorldDef {
-            capacity: capacity(&asset)?,
-            gravity: [0.0, solver.gravity_y, 0.0],
-            solver,
-            enable_sleep: false,
-            contacts: ContactStorage::Canonical,
-            // One character; its candidate scratch is CHAR_MAX_CANDIDATES records.
-            characters: CharacterCapacity {
-                max_characters: 4,
-                ..Default::default()
-            },
-            ..WorldDef::default()
-        };
-        let mut world = World::new(gpu, &def)?;
-        let a = world.create_destructible_asset(&asset)?;
-        let placement = asset
-            .stress
-            .as_ref()
-            .map(|s| s.placement())
-            .unwrap_or([0.0; 3]);
-        let ship = world.create_destructible(&DestructibleDef {
-            model: StrengthModel::Threshold,
-            transform: Transform::new(placement.map(|x| -x as f32), [0.0, 0.0, 0.0, 1.0]),
-            asleep: false,
-            support_loss: true,
-            crush: Some(crush(CRUSH_BUDGET)),
-            ..DestructibleDef::new(a)
-        })?;
-        // The ground the wreck falls on: a static slab, its top at y 0 under the keel
-        // (the drawn ground; the ship stands only by its anchored keel).
-        let ground = world.create_body(&BodyDef {
-            position: [11.0, -5.0, 0.0],
-            ..BodyDef::default()
-        })?;
-        world.create_box_shape(ground, &ShapeDef::default(), [200.0, 5.0, 200.0])?;
-        let chunks = asset.chunks.len() as u32;
-        // Render bodies: the ground (0), then one per chunk in order (from_glb's order).
-        let f = |v: [f64; 3]| v.map(|x| x as f32);
-        let rest: Vec<Transform> = scene
-            .bodies
-            .iter()
-            .skip(1)
-            .take(chunks as usize)
-            .map(|b| Transform::new(f(b.p), b.q.map(|x| x as f32)))
-            .collect();
-        let fragment = asset.chunks.iter().map(|c| c.fragment).collect();
-        let mut sums = vec![([0.0f32; 3], 0u32); chunks as usize];
-        for v in scene.vertices.chunks_exact(10) {
-            if let Some(k) = (v[9] as usize)
-                .checked_sub(1)
-                .filter(|&k| k < chunks as usize)
-            {
-                for i in 0..3 {
-                    sums[k].0[i] += v[6 + i];
-                }
-                sums[k].1 += 1;
-            }
-        }
-        let color = sums
-            .iter()
-            .map(|(c, n)| c.map(|x| x / (*n).max(1) as f32))
-            .collect();
+        // The ground under the ship's length (x 0..22).
+        let range = Range::new(gpu, glb, level, [11.0, 0.0])?;
+        let chunks = range.chunks as usize;
         let path = walk();
         let start = path[0];
         let targets = targets();
         let hit = vec![false; targets.len()];
         Ok(Self {
+            ship: range.structure,
+            range,
             take,
-            world,
-            ship,
             walked: 0.0,
-            dt: solver.dt,
-            frame: 0,
-            rest,
-            chunks,
-            fragment,
-            color,
             targets,
             hit,
             captain_at: [start[0], start[1] + CAPTAIN_HALF + CAPTAIN_RADIUS, start[2]],
@@ -472,24 +276,9 @@ impl Broadside {
             path,
             stopped_at: None,
             finale: None,
-            balls: Vec::new(),
-            striking: Vec::new(),
-            log: Vec::new(),
-            total: Report::default(),
-            pending: Vec::new(),
             scripted: true,
-            crushed: vec![false; chunks as usize],
-            splinters: Vec::new(),
-            splinters_version: 0,
-            aimed: vec![None; chunks as usize],
-            intact: Vec::new(),
-            intact_share: 1.0,
-            progress: (1.0, 0),
+            razing: Razing::new(chunks),
         })
-    }
-
-    pub fn seconds(&self) -> f32 {
-        self.frame as f32 * self.dt
     }
 
     /// The take is over: its closing volley landed and the wreck has had time to fall.
@@ -501,21 +290,6 @@ impl Broadside {
     /// The captain's walk is over (he has stopped on the main deck).
     pub fn captain_stopped(&self) -> bool {
         self.stopped_at.is_some()
-    }
-
-    /// Fire a ball from `from` at `velocity` before the next step.
-    pub fn shoot(&mut self, from: [f32; 3], velocity: [f32; 3]) {
-        self.pending.push((from, velocity));
-    }
-
-    /// The launch that reaches `target` from `from` in `t` seconds under gravity.
-    pub fn launch(&self, from: [f32; 3], target: [f32; 3], t: f32) -> [f32; 3] {
-        let g = -9.81f32;
-        [
-            (target[0] - from[0]) / t,
-            (target[1] - from[1]) / t - 0.5 * g * t,
-            (target[2] - from[2]) / t,
-        ]
     }
 
     /// A gun's muzzle: out of frame on battery `side` (+1 starboard, −1 port), `drop`
@@ -533,69 +307,6 @@ impl Broadside {
         let p1 = Vec3::from(target) + d.normalize_or_zero() * 8.0;
         let (q0, q1) = (c - Vec3::Y * CAPTAIN_HALF, c + Vec3::Y * CAPTAIN_HALF);
         segment_distance(p0, p1, q0, q1)
-    }
-
-    /// Balls half a second old are spent (through the ship or stopped in it): they leave
-    /// strike prediction's shot table (64 at most) and roll on as plain rigid balls.
-    fn retire_spent(&mut self) -> anyhow::Result<()> {
-        let spent = (0.5 / self.dt).round() as u32;
-        while self
-            .striking
-            .first()
-            .is_some_and(|&(_, f)| self.frame >= f + spent)
-        {
-            let (ball, _) = self.striking.remove(0);
-            if self.world.body_is_valid(ball) {
-                self.world.body_set_projectile(ball, None)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn spawn_ball(&mut self, from: [f32; 3], v: [f32; 3]) -> anyhow::Result<()> {
-        if self.balls.len() >= MAX_BALLS {
-            let (old, _) = self.balls.remove(0);
-            self.striking.retain(|(b, _)| *b != old);
-            self.world.destroy_body(old)?;
-        }
-        // A full shot table (raze fires up to three a step): the oldest leaves it early,
-        // long through the ship by now.
-        if self.striking.len() >= MAX_STRIKING {
-            let (old, _) = self.striking.remove(0);
-            if self.world.body_is_valid(old) {
-                self.world.body_set_projectile(old, None)?;
-            }
-        }
-        let ball = self.world.create_body(&BodyDef {
-            linear_velocity: v,
-            is_bullet: true,
-            ..BodyDef::dynamic(from)
-        })?;
-        self.world.create_sphere_shape(
-            ball,
-            &ShapeDef {
-                update_body_mass: false,
-                ..ShapeDef::default()
-            },
-            [0.0; 3],
-            BALL_RADIUS,
-        )?;
-        let i = 0.4 * BALL_MASS * BALL_RADIUS * BALL_RADIUS;
-        self.world.body_set_mass_data(
-            ball,
-            MassData {
-                mass: BALL_MASS,
-                center: [0.0; 3],
-                rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]],
-            },
-        )?;
-        self.world
-            .body_set_projectile(ball, Some(Projectile::default()))?;
-        self.balls.push((ball, self.frame));
-        self.striking.push((ball, self.frame));
-        self.log.push((self.frame, from, v));
-        self.total.shots += 1;
-        Ok(())
     }
 
     /// The scripted part of a step: the barrage, the captain's input along his walk, and
@@ -729,26 +440,6 @@ impl Broadside {
         Ok(())
     }
 
-    /// Chunks still in large pieces: not crushed, and on a body with at least
-    /// [`RAZE_PIECE`] of the ship's chunks.
-    fn refresh_intact(&mut self) {
-        let bodies: Vec<Option<BodyId>> = (0..self.chunks)
-            .map(|c| {
-                (!self.crushed[c as usize])
-                    .then(|| self.world.destructible_chunk_body(self.ship, c).ok())
-                    .flatten()
-            })
-            .collect();
-        let mut count = std::collections::HashMap::<BodyId, usize>::new();
-        for b in bodies.iter().flatten() {
-            *count.entry(*b).or_default() += 1;
-        }
-        self.intact = (0..self.chunks)
-            .filter(|&c| bodies[c as usize].is_some_and(|b| count[&b] >= RAZE_PIECE))
-            .collect();
-        self.intact_share = self.intact.len() as f32 / self.chunks.max(1) as f32;
-    }
-
     /// Raze's guns for one step: each aims at an intact chunk near the sweep (a plane
     /// running the ship's length and back), scattered across it, from the near battery,
     /// plunging into the decks from above. Once almost nothing is intact (or at
@@ -758,54 +449,23 @@ impl Broadside {
         if self.finale.is_some() {
             return Ok(());
         }
-        if self.frame % 6 == 0 || self.intact.is_empty() {
-            self.refresh_intact();
-        }
-        let t = self.seconds();
-        if self.intact_share < self.progress.0 - RAZE_PROGRESS {
-            self.progress = (self.intact_share, self.frame);
-        }
-        let stalled = self.frame >= self.progress.1 + (RAZE_STALL / self.dt).round() as u32;
-        if self.frame > 30 && (self.intact_share < RAZE_DONE || stalled || t >= RAZE_SECONDS) {
+        if self.razing.finished(&self.range) {
             return self.raze_volley();
         }
-        let guns = RAZE_GUNS
-            .iter()
-            .rev()
-            .find(|(after, _)| t >= *after)
-            .map_or(1, |g| g.1);
+        let t = self.seconds();
+        let guns = Razing::guns(t);
         // The sweep: transom (x 22) to the cut-away end (x 0) and back.
-        let phase = (t / RAZE_SWEEP).fract();
-        let sweep = 22.0 * (2.0 * phase - 1.0).abs();
+        let sweep = Razing::sweep(t, 0.0, 22.0);
         let poses = self.chunk_poses();
-        let reaim = (RAZE_REAIM / self.dt).round() as u32;
         let frame = self.frame;
-        let free = |c: u32, aimed: &[Option<u32>]| {
-            aimed[c as usize].is_none_or(|f| frame >= f + reaim)
-        };
         for gun in 0..guns {
-            let h = |c: u32| (c ^ frame.wrapping_mul(97) ^ gun.wrapping_mul(7919)).wrapping_mul(2654435761);
-            // Intact chunks within 1.5 m of the sweep, in a scattered order; else the
-            // nearest to it.
-            let near = self
-                .intact
-                .iter()
-                .copied()
-                .filter(|&c| free(c, &self.aimed))
-                .filter(|&c| (poses[c as usize].position[0] - sweep).abs() < 1.5)
-                .min_by_key(|&c| h(c));
-            let pick = near.or_else(|| {
-                self.intact
-                    .iter()
-                    .copied()
-                    .filter(|&c| free(c, &self.aimed))
-                    .min_by(|&a, &b| {
-                        let d = |c: u32| (poses[c as usize].position[0] - sweep).abs();
-                        d(a).total_cmp(&d(b))
-                    })
-            });
+            let h = |c: u32| {
+                (c ^ frame.wrapping_mul(97) ^ gun.wrapping_mul(7919)).wrapping_mul(2654435761)
+            };
+            let pick = self
+                .razing
+                .pick(&self.range, &poses, gun, |p| (p[0] - sweep).abs());
             let Some(c) = pick else { break };
-            self.aimed[c as usize] = Some(frame);
             let target = poses[c as usize].position;
             // Decks are struck from above; everything else from the near battery, one ball
             // in four from the far one (raking through the hull).
@@ -830,12 +490,13 @@ impl Broadside {
     /// across the wreck if nothing is), ripple-fired a frame apart in pairs.
     fn raze_volley(&mut self) -> anyhow::Result<()> {
         self.finale = Some(self.frame);
-        self.refresh_intact();
+        self.razing.refresh(&self.range);
         let poses = self.chunk_poses();
         let mut aims: Vec<[f32; 3]> = self
+            .razing
             .intact
             .iter()
-            .step_by((self.intact.len() / RAZE_VOLLEY).max(1))
+            .step_by((self.razing.intact.len() / RAZE_VOLLEY).max(1))
             .take(RAZE_VOLLEY)
             .map(|&c| poses[c as usize].position)
             .collect();
@@ -858,121 +519,12 @@ impl Broadside {
 
     /// One step; its events come back on a later `poll`.
     pub fn step(&mut self) -> anyhow::Result<()> {
-        self.retire_spent()?;
+        self.range.begin_step()?;
         if self.scripted {
             self.direct()?;
         }
-        for (from, v) in std::mem::take(&mut self.pending) {
-            self.spawn_ball(from, v)?;
-        }
-        self.world.step()?;
-        self.frame += 1;
-        Ok(())
+        self.range.end_step()
     }
-
-    /// Collect the frames the GPU has finished: destruction counts and the captain.
-    pub fn poll(&mut self) -> anyhow::Result<Report> {
-        let mut r = Report::default();
-        for f in self.world.poll()? {
-            self.absorb(&f, &mut r);
-        }
-        Ok(r)
-    }
-
-    /// Wait for every step in flight.
-    pub fn poll_blocking(&mut self) -> anyhow::Result<Report> {
-        let mut r = Report::default();
-        for f in self.world.poll_blocking()? {
-            self.absorb(&f, &mut r);
-        }
-        Ok(r)
-    }
-
-    fn absorb(&mut self, f: &Frame, r: &mut Report) {
-        for e in &f.destruction_events {
-            match e {
-                DestructionEvent::BondsBroken { bonds, .. } => r.broken += bonds.len(),
-                DestructionEvent::ChunkCrushed {
-                    chunk, fragments, ..
-                } => {
-                    r.crushed += 1;
-                    if let Some(c) = self.crushed.get_mut(*chunk as usize) {
-                        *c = true;
-                    }
-                    for &f in fragments {
-                        let half = self
-                            .world
-                            .body_shapes(f)
-                            .ok()
-                            .and_then(|s| s.first().copied())
-                            .and_then(|s| match self.world.shape_geometry(s) {
-                                Ok(Geometry::Box { half, .. }) => Some(*half),
-                                Ok(Geometry::Sphere { radius: r, .. }) => Some([*r; 3]),
-                                _ => None,
-                            });
-                        let particle = half.is_some_and(|h| h[0] == h[1] && h[1] == h[2]);
-                        let at = self
-                            .world
-                            .body_transform(f)
-                            .ok()
-                            .flatten()
-                            .map_or([0.0; 3], |t| t.position);
-                        if let Some(half) = half {
-                            self.splinters.push(Splinter {
-                                body: f,
-                                half,
-                                at,
-                                particle,
-                            });
-                        }
-                    }
-                    self.splinters_version += 1;
-                }
-                DestructionEvent::Split { .. } => r.splits += 1,
-                _ => {}
-            }
-        }
-        self.total.broken += r.broken;
-        self.total.crushed += r.crushed;
-        self.total.splits += r.splits;
-        r.broken = 0;
-        r.crushed = 0;
-        r.splits = 0;
-    }
-
-    /// Each chunk's world pose: its body's transform (every body origin is the instance
-    /// frame) times its render rest pose. A chunk whose body has no pose yet is at rest.
-    pub fn chunk_poses(&self) -> Vec<Transform> {
-        (0..self.chunks)
-            .map(|c| {
-                let body = self.world.destructible_chunk_body(self.ship, c).ok();
-                let t = body
-                    .and_then(|b| self.world.body_transform(b).ok().flatten())
-                    .unwrap_or(Transform::IDENTITY);
-                compose(&t, &self.rest[c as usize])
-            })
-            .collect()
-    }
-
-    /// Every ball's pose, oldest first.
-    pub fn ball_poses(&self) -> Vec<Transform> {
-        self.balls
-            .iter()
-            .filter_map(|(b, _)| self.world.body_transform(*b).ok().flatten())
-            .collect()
-    }
-}
-
-pub fn compose(a: &Transform, b: &Transform) -> Transform {
-    let (qa, pa) = (
-        glam::Quat::from_array(a.rotation),
-        glam::Vec3::from(a.position),
-    );
-    let (qb, pb) = (
-        glam::Quat::from_array(b.rotation),
-        glam::Vec3::from(b.position),
-    );
-    Transform::new((pa + qa * pb).to_array(), (qa * qb).normalize().to_array())
 }
 
 /// The take's camera and playback rate, authored with the choreography: a low shot ahead

@@ -1259,7 +1259,7 @@ fn hash_clear_covers_more_than_one_webgpu_dispatch_row() {
         let p = &sim.pipes["contact_hash_clear"];
         let bind = sim.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("large hash regression"),
-            layout: &p.pipeline.get_bind_group_layout(0),
+            layout: &p.pipeline(&sim.device, "contact_hash_clear").get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 6,
@@ -1280,7 +1280,7 @@ fn hash_clear_covers_more_than_one_webgpu_dispatch_row() {
         let mut enc = sim.device.create_command_encoder(&Default::default());
         {
             let mut pass = enc.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&p.pipeline);
+            pass.set_pipeline(p.pipeline(&sim.device, "contact_hash_clear"));
             pass.set_bind_group(0, &bind, &[]);
             let (x, y) = groups(n as u64);
             pass.dispatch_workgroups(x, y, 1);

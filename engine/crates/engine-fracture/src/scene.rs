@@ -1001,39 +1001,40 @@ pub fn build_scene(
         if kept == 0 {
             bail!("Fragment {}: every collision hull has zero volume; recook the source collision asset", f.id);
         }
-        let node = &asset.json["nodes"][f.node.max(0) as usize];
         let mesh = if f.node >= 0 {
-            node["mesh"]
-                .as_u64()
-                .map(|m| &asset.json["meshes"][m as usize])
+            asset
+                .json
+                .nodes
+                .get(f.node as usize)
+                .and_then(|n| n.mesh)
+                .and_then(|m| asset.json.meshes.get(m))
         } else {
             None
         };
-        let Some(mesh) = mesh.filter(|m| m.is_object()) else {
+        let Some(mesh) = mesh else {
             bail!("Fragment {} has no render mesh", f.id);
         };
-        for prim in mesh["primitives"].as_array().map_or(&[][..], Vec::as_slice) {
-            if prim.get("mode").and_then(|m| m.as_u64()).unwrap_or(4) != 4 {
+        for prim in &mesh.primitives {
+            if prim.mode != 4 {
                 bail!("Demo supports triangle meshes");
             }
-            let index = |v: &serde_json::Value| v.as_u64().map(|x| x as usize);
-            let positions =
-                asset.accessor(index(&prim["attributes"]["POSITION"]).ok_or_else(|| {
-                    anyhow!("Missing or sparse accessor unsupported in this demo")
-                })?)?;
-            let normals = match index(&prim["attributes"]["NORMAL"]) {
+            let positions = asset.accessor(prim.attributes.position.ok_or_else(|| {
+                anyhow!("Missing or sparse accessor unsupported in this demo")
+            })?)?;
+            let normals = match prim.attributes.normal {
                 Some(i) => Some(asset.accessor(i)?),
                 None => None,
             };
-            let indices: Vec<usize> = match index(&prim["indices"]) {
+            let indices: Vec<usize> = match prim.indices {
                 Some(i) => asset.accessor(i)?.iter().map(|v| v[0] as usize).collect(),
                 None => (0..positions.len()).collect(),
             };
-            let factor = &asset.json["materials"]
-                [prim["material"].as_u64().unwrap_or(u64::MAX) as usize]["pbrMetallicRoughness"]
-                ["baseColorFactor"];
-            let color = match factor.as_array() {
-                Some(c) if c.len() >= 3 => [0, 1, 2].map(|k| c[k].as_f64().unwrap_or(0.0)),
+            let factor = prim
+                .material
+                .and_then(|m| asset.json.materials.get(m))
+                .and_then(|m| m.pbr_metallic_roughness.base_color_factor.as_ref());
+            let color = match factor {
+                Some(c) if c.len() >= 3 => [c[0], c[1], c[2]],
                 _ => [0.65, 0.58, 0.47],
             };
             let at = |rows: &Vec<Vec<f64>>, i: usize| [rows[i][0], rows[i][1], rows[i][2]];

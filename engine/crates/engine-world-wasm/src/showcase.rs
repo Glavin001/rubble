@@ -69,8 +69,9 @@ pub fn showcase_car_truck(params: JsValue) -> Result<String, JsValue> {
 /// indices (Uint32Array), bindNodes (Uint32Array, 3 solver node indices per
 /// vertex, tyre nodes included), bindCoords (Float32Array, α β h per vertex),
 /// bindNormal (Float32Array, the rest normal in the triangle frame), bindRest
-/// (Float32Array, the triangle's rest |e₁| |e₂|), seam (Float32Array, 1 along
-/// panel gaps), smooth (Uint8Array), normalTris, nodeTriStart, nodeTriList
+/// (Float32Array, the triangle's rest |e₁| |e₂|), ao (Float32Array, baked
+/// ambient occlusion, 1 open), smooth (Uint8Array), rigid (Uint8Array: 1 where
+/// (α, β, h) are an offset in the triangle's orthonormal frame), normalTris, nodeTriStart, nodeTriList
 /// (Uint32Array), nodeRestNormal (Float32Array) (smooth shading from node
 /// normals; see `ShowcaseVisual::smooth`), nodeCount, vertexCount }`.
 /// `showcase-car-render.mjs` documents the binding.
@@ -143,12 +144,13 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
         "bindRest",
         &f32s(v.bind_rest.iter().flatten().copied()),
     );
-    set(&vis, "seam", &f32s(v.seam.iter().copied()));
+    set(&vis, "ao", &f32s(v.ao.iter().copied()));
     set(
         &vis,
         "smooth",
         &Uint8Array::from(v.smooth.as_slice()).into(),
     );
+    set(&vis, "rigid", &Uint8Array::from(v.rigid.as_slice()).into());
     let nt: Vec<u32> = v.normal_tris.iter().flatten().copied().collect();
     set(&vis, "normalTris", &Uint32Array::from(nt.as_slice()).into());
     set(

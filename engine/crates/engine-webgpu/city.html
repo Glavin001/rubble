@@ -34,9 +34,10 @@
       <button id="still" data-s="still">Still</button>
       <button id="drive" data-s="drive">Drive</button>
       <button id="war" data-s="war">War</button>
+      <button id="barrage" title="Shells fall on the houses around the view's centre (B)">Barrage <kbd>B</kbd></button>
       <a href="./">All demos</a>
     </div>
-    <div class="muted">The native benchmark's city (<code>rubble::city</code>): threshold cuboid houses on a 2.2 km map, sleeping once settled. Drag to orbit, right-drag to pan, scroll to zoom.</div>
+    <div class="muted">The native benchmark's city (<code>rubble::city</code>): threshold cuboid houses on 16 m lots (<code>?spacing=bench</code>: the benchmark's 2.2 km map), sleeping once settled. War: the benchmark's 20 shots, then a barrage. Click to fire a shell, drag to orbit, right-drag to pan, scroll to zoom.</div>
     <div id="bar"><div></div></div>
     <div id="stats"></div>
     <div id="status" class="muted">starting…</div>
@@ -64,14 +65,21 @@
     addEventListener('error', (e) => fail(e.error || e.message));
 
     // ?k= houses (default 1,024: the native large-maps run), ?sleep=0|1 (default 1), ?pool=
-    // piece slots (default 32768; 'none': a slot per chunk), ?scenario=still|drive|war,
+    // piece slots (default 32768 on the benchmark's map, 131072 on the dense town; 'none': a
+    // slot per chunk), ?scenario=still|drive|war,
     // ?car=vehicle|box (drive: a vehicle-API car, or the native benchmark's kinematic box),
-    // ?timing=step|off (GPU timestamps), ?kill=<y>|off, ?budget=<ms of placement per frame>.
+    // ?timing=step|off (GPU timestamps), ?kill=<y>|off, ?budget=<ms of placement per frame>,
+    // ?spacing=<lot pitch, m>|bench (default 16 m lots; bench: the benchmark's 2.2 km map).
     const qs = new URLSearchParams(location.search);
     const K = Number(qs.get('k') ?? 1024);
     if (!(Number.isInteger(K) && K > 0)) throw new Error(`k=${qs.get('k')}: a house count`);
     const SLEEP = qs.get('sleep') !== '0';
-    const POOL = qs.get('pool') === 'none' ? null : Number(qs.get('pool') ?? 32768);
+    const spacing = qs.get('spacing') ?? '16';
+    const PITCH = spacing === 'bench' ? null : Number(spacing);
+    if (PITCH !== null && !(PITCH > 0)) throw new Error(`spacing=${spacing}: a lot pitch in metres, or bench`);
+    // The benchmark's pool, or on the dense town four times it: room for a long barrage
+    // (a heavy shell splits a few hundred pieces off, and pieces are never returned).
+    const POOL = qs.get('pool') === 'none' ? null : Number(qs.get('pool') ?? (PITCH === null ? 32768 : 131072));
     const CAR = qs.get('car') ?? 'vehicle';
     if (!['vehicle', 'box'].includes(CAR)) throw new Error(`car=${CAR}: vehicle or box`);
     const BUDGET = Number(qs.get('budget') ?? 8);
@@ -90,15 +98,23 @@
     if (!probe) throw new Error('no WebGPU adapter');
     const limits = { maxBufferSize: probe.limits.maxBufferSize, maxStorageBufferBindingSize: probe.limits.maxStorageBufferBindingSize };
     const TIMING = qs.get('timing') ?? (probe.features.has('timestamp-query') ? 'step' : 'off');
-    const page = { gpuTiming: TIMING, ...(killBelow === null ? {} : { killBelow }) };
+    // ?rest=touch: the touch query and cold wakes instead of main's warm archive (opt-in).
+    const page = {
+      gpuTiming: TIMING,
+      ...(killBelow === null ? {} : { killBelow }),
+      ...(qs.get('rest') === 'touch' ? { features: { restingContacts: 'touch' } } : {}),
+    };
     const mb = (b) => `${(b / 2 ** 20).toFixed(0)} MiB`;
 
     // ---------------------------------------------------------------- world and city
-    const cityOpts = { houses: K, sleep: SLEEP, pool: POOL };
+    // The map: a ceil(sqrt(K))² grid of PITCH m lots (rubble::city lays the lots over it).
+    const cityOpts = { houses: K, sleep: SLEEP, pool: POOL, ...(PITCH === null ? {} : { map: Math.ceil(Math.sqrt(K)) * PITCH }) };
     let city, world, device, poses, layout, houseChunks;
     statusEl.textContent = `creating the world for ${K} houses…`;
     try {
       ({ city, world } = await createCity(cityOpts, page));
+      // ?rest=carry: the resting-pair carry instead of the sleep archive (World::set_carry_rest).
+      if (qs.get('rest') === 'carry') world.setCarryRest(true);
     } catch (e) {
       // World::new checks every buffer against the device: say which limit the city passes.
       throw new Error(`${K} houses do not fit this browser's WebGPU limits (maxBufferSize ${mb(limits.maxBufferSize)}, maxStorageBufferBindingSize ${mb(limits.maxStorageBufferBindingSize)}): ${e.message ?? e}`);
@@ -111,11 +127,19 @@
 
     // Per scenario run: what the HUD and automation report.
     let run = null;
-    const newRun = () => ({ scenario, placeMs: 0, placedAt: 0, startStep: -1, broken: 0, gpu: [], car: null, vehicle: null, chassis: -1 });
+    const newRun = () => ({ scenario, placeMs: 0, placedAt: 0, startStep: -1, broken: 0, gpu: [], car: null, vehicle: null, chassis: -1, shells: [], fired: 0 });
     let counters = null, leftWorld = 0, vehicleState = null;
     const onFrame = (f) => {
       poses.apply(f);
-      leftWorld += f.leftWorld().length / 5;
+      // Bodies the world destroyed for leaving it (slot, generation, xyz each): a shell
+      // among them is gone, so it leaves the page's list before its slot is reused.
+      const left = f.leftWorld();
+      leftWorld += left.length / 5;
+      if (left.length && run) {
+        const gone = new Set();
+        for (let i = 0; i < left.length; i += 5) gone.add(left[i]);
+        run.shells = run.shells.filter((h) => !gone.has(world.bodySlot(h)));
+      }
       const c = f.counters();
       if (c) counters = c;
       if (run) {
@@ -132,8 +156,10 @@
       if (world && run) {
         // A fresh world on the same device, as the native benchmark builds one per scenario.
         world.cityRebuild(city, page);
+        if (qs.get('rest') === 'carry') world.setCarryRest(true);
       }
       scenario = next;
+      barrage = false; poolNote = '';
       run = newRun();
       counters = null; leftWorld = 0; vehicleState = null;
       poses = new Poses(capacity.maxBodies);
@@ -171,8 +197,14 @@
       } else {
         const added = world.cityStart(city, scenario);
         if (scenario === 'drive') run.car = world.bodySlot(added[0]);
+        // The war's shots count against the shell limit with the page's own.
+        if (scenario === 'war') run.shells.push(...added);
       }
       run.startStep = world.stepCount();
+      run.startBodies = world.bodyCount();
+      // Live, war goes on as a barrage (the measurement hooks keep the benchmark's 20 shots).
+      barrage = scenario === 'war' && !automated;
+      highlight();
       // Counted from the scenario's start, as the native benchmark counts.
       run.broken = 0;
       run.gpu = [];
@@ -191,6 +223,48 @@
       const steer = Math.max(-1, Math.min(1, -0.08 * (p[2] - layout.street[1]) - 1.5 * headingZ));
       world.setVehicleInput(run.vehicle, { forward: Math.max(0, Math.min(1, e * 0.4)), brake: e < -1 ? Math.min(1, -e * 0.2) : 0, steer });
     }
+
+    // ---------------------------------------------------------------- shells
+    // A shell: rubble::city's steel ball (a projectile the threshold fracture predicts,
+    // swept as a bullet). At most MAX_SHELLS stay in the world, the oldest going first:
+    // strike prediction tracks at most 64 projectiles at once.
+    const SHELL = { radius: 0.5, speed: 120 };
+    const MAX_SHELLS = 48;
+    let barrage = false, automated = false, nextVolley = 0, poolNote = '';
+    function fire(origin, dir) {
+      // A split with no free slot fails the frame: stop while the last shells' pieces fit.
+      if (piecesLeft() < 2000) {
+        setBarrage(false);
+        poolNote = `The piece pool is nearly full (${POOL.toLocaleString()} slots), so firing stopped. Reload with ?pool=${POOL * 2} for more.`;
+        return;
+      }
+      const v = dir.map((d) => d * SHELL.speed);
+      run.shells.push(world.cityShell(origin, v, SHELL.radius));
+      run.fired++;
+      while (run.shells.length > MAX_SHELLS) world.destroyBody(run.shells.shift());
+    }
+    // The barrage: a volley every 0.4 s onto random lots within reach of the view's centre,
+    // each shell falling from 200 m at a slant.
+    // Pieces split off since the scenario started (each took a pool slot), and what is left.
+    const piecesLeft = () => POOL === null || run.startStep < 0 ? Infinity : POOL - (world.bodyCount() - run.startBodies - run.shells.length);
+    function barrageTick(now) {
+      if (!barrage || phase !== 'running' || now < nextVolley) return;
+      nextVolley = now + 500;
+      const reach = Math.max(40, Math.min(cam.dist * 0.6, layout.map / 2));
+      const near = [];
+      for (let i = 0; i < layout.lots.length; i += 2) {
+        if (Math.hypot(layout.lots[i] - cam.target[0], layout.lots[i + 1] - cam.target[2]) < reach) near.push(i);
+      }
+      if (!near.length) return;
+      for (let n = 0; n < 2; n++) {
+        const i = near[Math.floor(Math.random() * near.length)];
+        const at = [layout.lots[i] + (Math.random() - 0.5) * 8, layout.ground + 3, layout.lots[i + 1] + (Math.random() - 0.5) * 6];
+        const a = Math.random() * 2 * Math.PI;
+        const from = [at[0] + 60 * Math.cos(a), layout.ground + 200, at[2] + 60 * Math.sin(a)];
+        fire(from, norm3(sub3(at, from)));
+      }
+    }
+    function setBarrage(on) { barrage = on; highlight(); }
 
     // ---------------------------------------------------------------- renderer
     const canvas = document.getElementById('c');
@@ -311,7 +385,11 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     let follow = false;
     function aimCamera() {
       if (scenario === 'drive') { follow = true; Object.assign(cam, { yaw: -0.6, pitch: 0.35, dist: 70 }); }
-      else if (scenario === 'war') {
+      else if (scenario === 'war' && PITCH !== null) {
+        // The town's middle, from close enough to see the houses break.
+        follow = false;
+        Object.assign(cam, { yaw: 0.6, pitch: 0.42, dist: Math.min(180, layout.map), target: [0, layout.ground, 0] });
+      } else if (scenario === 'war') {
         follow = false;
         const t = city.targets('war');
         // One of the struck lots, seen from 70 m.
@@ -321,12 +399,23 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     }
     let drag = null;
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-    canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey }; });
-    addEventListener('pointerup', () => { drag = null; });
+    canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey, moved: 0, button: e.button }; });
+    addEventListener('pointerup', (e) => {
+      // A click (not a drag): a shell from the eye through the pointer.
+      if (drag && drag.moved < 5 && drag.button === 0 && !drag.pan && e.target === canvas && phase === 'running') {
+        const r = canvas.getBoundingClientRect();
+        const { eye, dir } = pointerRay((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+        fire(eye, dir);
+      }
+      drag = null;
+    });
+    addEventListener('keydown', (e) => { if (e.code === 'KeyB' && phase === 'running') setBarrage(!barrage); });
     addEventListener('pointermove', (e) => {
       if (!drag) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.x = e.clientX; drag.y = e.clientY;
+      drag.moved += Math.abs(dx) + Math.abs(dy);
+      if (drag.moved < 5) return;
       if (drag.pan) {
         follow = false;
         const s = cam.dist * 0.0016, cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
@@ -351,6 +440,19 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
       for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = p[r] * v[c * 4] + p[4 + r] * v[c * 4 + 1] + p[8 + r] * v[c * 4 + 2] + p[12 + r] * v[c * 4 + 3];
       return o;
     }
+    const FOCAL = 1 / Math.tan(Math.PI / 8);
+    function eyeOf() {
+      const cp = Math.cos(cam.pitch);
+      return [cam.target[0] + cam.dist * cp * Math.sin(cam.yaw), cam.target[1] + cam.dist * Math.sin(cam.pitch), cam.target[2] + cam.dist * cp * Math.cos(cam.yaw)];
+    }
+    // The ray from the eye through (u, v) of the canvas (0..1, v down), as viewProj projects.
+    function pointerRay(u, v) {
+      const eye = eyeOf();
+      const z = norm3(sub3(eye, cam.target)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const sx = (2 * u - 1) * (canvas.width / canvas.height) / FOCAL, sy = (1 - 2 * v) / FOCAL;
+      const dir = norm3([0, 1, 2].map((k) => -z[k] + x[k] * sx + y[k] * sy));
+      return { eye: eye.map((e, k) => e + dir[k] * 2), dir };
+    }
     function draw() {
       if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
         depth?.destroy();
@@ -359,8 +461,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
       rebind();
       if (follow && run && run.chassis >= 0) cam.target = poses.position(run.chassis);
       else if (follow && run && run.car !== null) cam.target = poses.position(run.car);
-      const cp = Math.cos(cam.pitch);
-      const eye = [cam.target[0] + cam.dist * cp * Math.sin(cam.yaw), cam.target[1] + cam.dist * Math.sin(cam.pitch), cam.target[2] + cam.dist * cp * Math.cos(cam.yaw)];
+      const eye = eyeOf();
       frameData.set(viewProj(eye, cam.target, canvas.width / canvas.height, Math.max(0.3, cam.dist * 0.004), Math.max(4000, cam.dist * 4)));
       frameData.set([...eye, 0], 16);
       frameData.set([layout.ground, layout.map * 2, layout.map / 2, 0], 20);
@@ -380,7 +481,12 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     const statsEl = document.getElementById('stats');
     const barEl = document.querySelector('#bar > div');
     const buttons = SCENARIOS.map((s) => document.getElementById(s));
-    function highlight() { for (const b of buttons) b.classList.toggle('on', b.dataset.s === scenario); }
+    const barrageBtn = document.getElementById('barrage');
+    function highlight() {
+      for (const b of buttons) b.classList.toggle('on', b.dataset.s === scenario);
+      barrageBtn.classList.toggle('on', barrage);
+    }
+    barrageBtn.onclick = () => { if (phase === 'running') setBarrage(!barrage); };
     for (const b of buttons) b.onclick = () => { if (phase === 'running' || phase === 'settling') build(b.dataset.s).catch(fail); };
     const median = (a) => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
     let fps = 0, frames = 0, fpsAt = performance.now(), heapBytes = 0;
@@ -395,6 +501,8 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
         ['awake', counters ? counters.awake.toLocaleString() : '—'],
         ['bodies', world.bodyCount().toLocaleString()],
         ['bonds broken', run.broken.toLocaleString()],
+        ['shells', `${run.fired.toLocaleString()} fired${barrage ? ' · barrage' : ''}`],
+        ['pieces', POOL === null || run.startStep < 0 ? '—' : `${Math.max(0, POOL - piecesLeft()).toLocaleString()} of the pool's ${POOL.toLocaleString()} slots`],
         ['FPS', fps.toFixed(0)],
         ['placement', run.placeMs ? `${(run.placeMs / 1000).toFixed(1)} s` : `${((performance.now() - placeStart) / 1000).toFixed(1)} s…`],
         ['limits', `buffer ${mb(limits.maxBufferSize)}, storage binding ${mb(limits.maxStorageBufferBindingSize)}`],
@@ -402,6 +510,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
         ['capacity', `${capacity.maxBodies.toLocaleString()} bodies, ${capacity.maxColliders.toLocaleString()} colliders, ${capacity.maxContacts.toLocaleString()} contacts`],
       ];
       if (leftWorld) rows.push(['left the world', leftWorld]);
+      if (poolNote) rows.push(['', poolNote]);
       statsEl.innerHTML = rows.map(([k, v]) => `<span class="k">${k}</span><span>${v}</span>`).join('');
     }
 
@@ -424,7 +533,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
             // native benchmark does (a split is adopted from its frame, so readback lag would
             // change the settled city); afterwards as fast as readbacks allow.
             const waited = phase !== 'settling' || (world.lastPolledStep ?? -1) >= world.stepCount() - 1;
-            if (waited && world.canStep()) stepOnce();
+            if (waited && world.canStep()) { if (!manual) barrageTick(now); stepOnce(); }
             pollFrame(world, onFrame);
             if (phase === 'settling' && world.stepCount() - run.placedAt >= SETTLE) {
               busy = true;
@@ -447,6 +556,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     window.__scenario = async (name) => {
       if (!SCENARIOS.includes(name)) throw new Error(`scenario ${name}: ${SCENARIOS.join(', ')}`);
       manual = false;
+      automated = true;
       await build(name);
       while (phase !== 'running') {
         if (window.__failed) throw new Error(window.__failed);
@@ -505,6 +615,9 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     // The last timed step's GPU passes ([name, ms]; ?timing=phases splits the step).
     window.__segments = () => run.segments ?? null;
     window.__live = () => { manual = false; };
+    // Fire a shell from the eye through (u, v) of the view; the barrage on or off.
+    window.__shoot = (u = 0.5, v = 0.5) => { const { eye, dir } = pointerRay(u, v); fire(eye, dir); return run.fired; };
+    window.__barrage = (on = true) => setBarrage(on);
     window.__world = world;
 
     await build(scenario);

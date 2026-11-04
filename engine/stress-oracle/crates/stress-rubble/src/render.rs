@@ -761,14 +761,14 @@ impl Renderer {
     /// recorded into `encoder` before this): nothing read from the host but the ground's
     /// object and the camera. `line_vertices`: the bond lines' vertices to draw (0: none).
     #[allow(clippy::too_many_arguments)]
-    pub fn draw_resident(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, view_proj: [[f32; 4]; 4], eye: Vec3, line_vertices: u32) {
+    pub fn draw_resident(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, view_proj: [[f32; 4]; 4], eye: Vec3, line_vertices: u32, timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>) {
         let ground = if self.ground { Object { rows: rows(Mat3::IDENTITY, Vec3::ZERO), color: [0.56, 0.58, 0.55, 2.0] } } else { Object { rows: [[0.0; 4]; 3], color: [0.0; 4] } };
         gpu.queue.write_buffer(&self.objects, 0, bytemuck::bytes_of(&ground));
-        self.pass(gpu, encoder, target, view_proj, eye, line_vertices.min(self.line_capacity as u32));
+        self.pass(gpu, encoder, target, view_proj, eye, line_vertices.min(self.line_capacity as u32), timestamp_writes);
     }
 
     /// The camera, then the geometry and `line_vertices` of the bond lines into `target`.
-    fn pass(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, view_proj: [[f32; 4]; 4], eye: Vec3, line_vertices: u32) {
+    fn pass(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, view_proj: [[f32; 4]; 4], eye: Vec3, line_vertices: u32, timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>) {
         let light = Vec3::new(-0.45, -0.55, 0.70).normalized();
         let uniform = CameraUniform {
             view_proj,
@@ -791,7 +791,7 @@ impl Renderer {
                 depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes,
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -871,7 +871,7 @@ impl Renderer {
             line_verts.truncate(self.line_capacity);
             gpu.queue.write_buffer(&self.lines, 0, bytemuck::cast_slice(&line_verts));
         }
-        self.pass(gpu, encoder, target, view_proj, eye, line_verts.len() as u32);
+        self.pass(gpu, encoder, target, view_proj, eye, line_verts.len() as u32, None);
     }
 }
 
