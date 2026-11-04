@@ -75,6 +75,8 @@ const RUNS = [
   ['pole_50', 'scene=pole&speed=50&runUp=0.4&freeze=1.4&cam=three'],
   ['sidepole_32', 'scene=sidepole&speed=32&runUp=0.3&freeze=1.2&cam=front&dist=6'],
   ['drop_15', 'scene=drop&height=15&freeze=3.5&cam=three'],
+  ['wall_120', 'scene=wall&speed=120&runUp=0.6&freeze=1.0&cam=three&dist=7'],
+  ['interior', 'scene=idle&freeze=1.0&cam=left&dist=3.2'],
 ];
 let failed = 0;
 const only = opt('--only', null);
