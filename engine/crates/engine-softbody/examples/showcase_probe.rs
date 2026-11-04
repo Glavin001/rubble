@@ -386,7 +386,12 @@ fn main() {
         }
         let mut ev: Vec<_> = en.into_iter().collect();
         ev.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (k, e) in ev.iter().take(15) {
+        for (k, e) in ev.iter().take(
+            std::env::var("TOP")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(15),
+        ) {
             eprintln!("    elastic {k:>36}: {e:8.0} J");
         }
         let mut v: Vec<_> = by.into_iter().filter(|(_, x)| x.0 + x.1 > 0).collect();
@@ -768,8 +773,148 @@ fn main() {
     let wheel_trace = std::env::var("WHEEL")
         .ok()
         .and_then(|w| w.parse::<usize>().ok());
+    let zone = |i: u32| -> &'static str {
+        if (i as usize) >= sk.nodes.len() {
+            return "tyres";
+        }
+        let l = label(i);
+        let z = sk.nodes[i as usize].p.z;
+        let l = l.as_str();
+        if l == "suspension" {
+            return if z > 2.4 { "susp front" } else { "susp rear" };
+        }
+        if ["powertrain", "radiator", "battery"].contains(&l) {
+            return "engine bay masses";
+        }
+        if l.starts_with("seat") {
+            return "seats";
+        }
+        if l.starts_with("door") {
+            return "doors";
+        }
+        if [
+            "rail_f",
+            "apron",
+            "tower_f",
+            "subframe_f1",
+            "subframe_f2",
+            "bumper_beam_f",
+            "rad_post",
+            "rad_top",
+        ]
+        .contains(&l)
+        {
+            return "front structure";
+        }
+        if [
+            "rail",
+            "quarter_inner",
+            "subframe_r1",
+            "subframe_r2",
+            "bumper_beam",
+            "tower",
+        ]
+        .contains(&l)
+        {
+            return "rear structure";
+        }
+        if b.groups.contains_key(l) || b.groups.contains_key(&format!("{l}_r")) {
+            return "cabin members";
+        }
+        if z > 3.36 {
+            "skin front"
+        } else {
+            "skin cabin/rear"
+        }
+    };
+    let mut rebound = 0.0f32;
     for f in 0..frames {
         s.frame();
+        if let Ok(zones) = std::env::var("RELAX") {
+            // Diagnostic: at frame RELAX_AT, every beam within (or between)
+            // the listed zones takes its current length as its rest length
+            // (its stored energy removed): which zone's energy drives the
+            // rebound. RELAX=all: every beam.
+            let at: usize = std::env::var("RELAX_AT")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(4);
+            if f == at {
+                let zs: Vec<&str> = zones.split('|').collect();
+                let mut freed = 0.0f64;
+                for bm in s.beams.iter_mut().filter(|x| !x.broken) {
+                    if bm.kind == engine_softbody::explicit_beams::ExplicitKind::LimitedSpring {
+                        continue;
+                    }
+                    let (za, zb) = (zone(bm.a), zone(bm.b));
+                    if zones != "all" && !(zs.contains(&za) && zs.contains(&zb)) {
+                        continue;
+                    }
+                    let l = s.nodes[bm.a as usize]
+                        .pos
+                        .distance(s.nodes[bm.b as usize].pos);
+                    if bm.kind == engine_softbody::explicit_beams::ExplicitKind::Support
+                        && l > bm.rest
+                    {
+                        continue;
+                    }
+                    freed += 0.5 * bm.k as f64 * ((l - bm.rest) as f64).powi(2);
+                    bm.rest = l;
+                }
+                eprintln!("  relaxed {:.1} kJ at frame {f}", freed / 1e3);
+            }
+            let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+            let vz = s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>() / m;
+            rebound = rebound.max(-vz);
+            if f + 1 == frames {
+                eprintln!("  rebound {rebound:.2} m/s");
+            }
+        }
+        if let Ok(at) = std::env::var("ESPLIT") {
+            // Elastic energy by coarse zone at the listed frames (kJ): what
+            // is stored at the stop and what of it is released into the
+            // rebound.
+            if at.split(',').any(|x| x.parse::<usize>().ok() == Some(f)) {
+                let mut en: std::collections::BTreeMap<String, f64> = Default::default();
+                for bm in s.beams.iter().filter(|x| !x.broken) {
+                    let l = s.nodes[bm.a as usize]
+                        .pos
+                        .distance(s.nodes[bm.b as usize].pos);
+                    if bm.kind == engine_softbody::explicit_beams::ExplicitKind::Support
+                        && l > bm.rest
+                    {
+                        continue;
+                    }
+                    let (za, zb) = (zone(bm.a), zone(bm.b));
+                    let key = if za == zb {
+                        za.to_string()
+                    } else if za < zb {
+                        format!("{za}~{zb}")
+                    } else {
+                        format!("{zb}~{za}")
+                    };
+                    let key = if bm.kind
+                        == engine_softbody::explicit_beams::ExplicitKind::LimitedSpring
+                    {
+                        format!("{key} (springs)")
+                    } else {
+                        key
+                    };
+                    *en.entry(key).or_default() +=
+                        0.5 * bm.k as f64 * ((l - bm.rest) as f64).powi(2) / 1e3;
+                }
+                let mut ev: Vec<_> = en.into_iter().filter(|x| x.1 > 0.05).collect();
+                ev.sort_by(|a, c| c.1.total_cmp(&a.1));
+                let total: f64 = ev.iter().map(|x| x.1).sum();
+                eprintln!(
+                    "  f {f} elastic {total:.1} kJ: {}",
+                    ev.iter()
+                        .map(|(k, e)| format!("{k} {e:.1}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
         if std::env::var("TRACE_VZ").is_ok() && f < 40 {
             let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
             let vz = s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>() / m;
@@ -818,7 +963,12 @@ fn main() {
             eprintln!("{line}");
         }
         if let Some(w) = wheel_trace {
-            if f % 3 == 0 {
+            if f % std::env::var("WHEEL_EVERY")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(3usize)
+                == 0
+            {
                 let wh = &sk.wheels[w];
                 let (p1, p2) = (s.nodes[wh.a1 as usize].pos, s.nodes[wh.a2 as usize].pos);
                 let tops: Vec<u32> = sk.shocks.iter().map(|x| x.b).collect();
@@ -854,6 +1004,124 @@ fn main() {
                     }
                     eprintln!("  f {f}: spokes worst strain {worst:.2}, past bounds {past}");
                 }
+                if std::env::var("BRACKET").is_ok() {
+                    // The pivot bracket (a+5..=a+10): its worst internal
+                    // strain, its rotation against its rest frame, the
+                    // knuckle's rotation in the bracket's frame, and the
+                    // bracket-to-body ties (strain, plastic set, broken).
+                    let piv: Vec<usize> = (a + 5..=a + 10).collect();
+                    let fr = |p: &dyn Fn(usize) -> Vec3, i: usize, j: usize, k: usize| {
+                        let x = (p(j) - p(i)).normalize();
+                        let z = x.cross(p(k) - p(i)).normalize();
+                        glam::Mat3::from_cols(x, z.cross(x), z)
+                    };
+                    let now = |i: usize| s.nodes[i].pos;
+                    let rest = |i: usize| sk.nodes[i].p;
+                    let ang = |m: glam::Mat3| {
+                        ((m.x_axis.x + m.y_axis.y + m.z_axis.z - 1.0) * 0.5)
+                            .clamp(-1.0, 1.0)
+                            .acos()
+                            .to_degrees()
+                    };
+                    // The cabin's frame: the left sill's ends and the right sill's
+                    // first node (the car's own motion drops out).
+                    let (sl, sr) = (&b.groups["sill"], &b.groups["sill_r"]);
+                    let (c0, c1, c2) =
+                        (sl[0] as usize, *sl.last().unwrap() as usize, sr[0] as usize);
+                    let cnow = fr(&now, c0, c1, c2);
+                    let crest = fr(&rest, c0, c1, c2);
+                    let bnow = cnow.transpose() * fr(&now, piv[0], piv[1], piv[2]);
+                    let brest = crest.transpose() * fr(&rest, piv[0], piv[1], piv[2]);
+                    let pitch = ang(cnow * crest.transpose());
+                    if std::env::var("BRACKET").as_deref() == Ok("2") {
+                        // Each pivot's and knuckle node's displacement in the
+                        // cabin frame (cm).
+                        let o_now = now(c0);
+                        let o_rest = rest(c0);
+                        let d: Vec<String> = (a..=a + 10)
+                            .map(|i| {
+                                let v = cnow.transpose() * (now(i) - o_now)
+                                    - crest.transpose() * (rest(i) - o_rest);
+                                format!(
+                                    "{}:{:.0},{:.0},{:.0}",
+                                    i - a,
+                                    v.x * 100.0,
+                                    v.y * 100.0,
+                                    v.z * 100.0
+                                )
+                            })
+                            .collect();
+                        eprintln!("  f {f}: moved in the cabin (cm) {}", d.join(" "));
+                        let w: Vec<String> = (a..=a + 10)
+                            .map(|i| {
+                                let v = (now(i) - now(c0)) - (rest(i) - rest(c0));
+                                format!(
+                                    "{}:{:.0},{:.0},{:.0}",
+                                    i - a,
+                                    v.x * 100.0,
+                                    v.y * 100.0,
+                                    v.z * 100.0
+                                )
+                            })
+                            .collect();
+                        eprintln!("  f {f}: moved in the world from c0 (cm) {}", w.join(" "));
+                    }
+                    let know = cnow.transpose() * fr(&now, a + 2, a + 3, a + 4);
+                    let krest = crest.transpose() * fr(&rest, a + 2, a + 3, a + 4);
+                    let (mut worst, mut wp) = (0.0f32, (0, 0));
+                    for x in 0..piv.len() {
+                        for y in x + 1..piv.len() {
+                            let e = now(piv[x]).distance(now(piv[y]))
+                                / rest(piv[x]).distance(rest(piv[y]))
+                                - 1.0;
+                            if e.abs() > worst.abs() {
+                                worst = e;
+                                wp = (x + 5, y + 5);
+                            }
+                        }
+                    }
+                    let mut ties = String::new();
+                    for &bi in piv.iter().flat_map(|&i| s.incidence[i].iter()) {
+                        let bm = &s.beams[bi as usize];
+                        let (i, o) = if piv.contains(&(bm.a as usize)) {
+                            (bm.a as usize, bm.b as usize)
+                        } else {
+                            (bm.b as usize, bm.a as usize)
+                        };
+                        if o >= sk.nodes.len()
+                            || piv.contains(&o)
+                            || sk.nodes[o].part == sk.nodes[i].part
+                        {
+                            continue;
+                        }
+                        let l = now(i).distance(now(o));
+                        let mv = (cnow.transpose() * (now(o) - now(c0))
+                            - crest.transpose() * (rest(o) - rest(c0)))
+                        .length();
+                        ties += &format!(
+                            " {}-{}{}@{:.0}cm:{:+.0}%{}{}",
+                            i - a,
+                            label(o as u32),
+                            o,
+                            mv * 100.0,
+                            (l / bm.rest0 - 1.0) * 100.0,
+                            if (bm.rest - bm.rest0).abs() > 1e-3 {
+                                "p"
+                            } else {
+                                ""
+                            },
+                            if bm.broken { "X" } else { "" }
+                        );
+                    }
+                    eprintln!(
+                        "  f {f}: cabin turned {pitch:.0}°; bracket worst strain {:+.1}% ({}-{}), turned in the cabin {:.0}°; knuckle in bracket {:.0}°; ties{ties}",
+                        worst * 100.0,
+                        wp.0,
+                        wp.1,
+                        ang(bnow * brest.transpose()),
+                        ang((bnow.transpose() * know) * (brest.transpose() * krest).transpose())
+                    );
+                }
                 if std::env::var("KNUCKLE").is_ok() {
                     let o = s.nodes[a + 2].pos;
                     eprintln!(
@@ -873,6 +1141,32 @@ fn main() {
         let at: Option<usize> = std::env::var("SUMMARY_AT")
             .ok()
             .and_then(|x| x.parse().ok());
+        if let Ok(pair) = std::env::var("BROKEN_PAIR") {
+            // Broken or bent beams between two labels at the last frame:
+            // where they were, their kind, stiffness and strength.
+            if f + 1 == frames {
+                for (bi, bm) in s.beams.iter().enumerate() {
+                    let (la, lb) = (label(bm.a), label(bm.b));
+                    let key = if la <= lb {
+                        format!("{la}~{lb}")
+                    } else {
+                        format!("{lb}~{la}")
+                    };
+                    if key != pair || !(bm.broken || (bm.rest - bm.rest0).abs() > 0.001 * bm.rest0)
+                    {
+                        continue;
+                    }
+                    let pa = sk.nodes[bm.a as usize].p;
+                    let pb = sk.nodes[bm.b as usize].p;
+                    eprintln!(
+                        "  {} beam {bi} {}-{} {pa:.2?} {pb:.2?} rest0 {:.3} rest {:.3} k {:.0} tc {:.0} tt {:.0} strength {:.0} masses {:.2}/{:.2} {:?}",
+                        if bm.broken { "broken" } else { "bent" },
+                        bm.a, bm.b, bm.rest0, bm.rest, bm.k, bm.tc, bm.tt, bm.strength,
+                        s.nodes[bm.a as usize].mass, s.nodes[bm.b as usize].mass, bm.kind
+                    );
+                }
+            }
+        }
         if breaks && (f + 1 == frames || Some(f) == at) {
             if Some(f) == at {
                 eprintln!("  -- at frame {f}:");
@@ -918,6 +1212,46 @@ fn main() {
                 g.iter().map(|&i| s.nodes[i as usize].vel).sum::<Vec3>() / g.len() as f32
             };
             eprintln!("  group velocities: sill {:.2?} sill_r {:.2?} tunnel {:.2?} roof_rail {:.2?} bumper_beam_r {:.2?}", gv("sill"), gv("sill_r"), gv("tunnel"), gv("roof_rail"), gv("bumper_beam_r"));
+            if std::env::var("CONTACTS").is_ok() {
+                // Self-contact: collision triangles within 5 cm of the
+                // fastest nodes (projected inside the triangle).
+                for &i in idx.iter().take(6) {
+                    let p = s.nodes[i].pos;
+                    for t in &s.triangles {
+                        let [a0, a1, a2] = t.nodes;
+                        if [a0, a1, a2].contains(&(i as u32)) {
+                            continue;
+                        }
+                        let (q0, q1, q2) = (
+                            s.nodes[a0 as usize].pos,
+                            s.nodes[a1 as usize].pos,
+                            s.nodes[a2 as usize].pos,
+                        );
+                        let n = (q1 - q0).cross(q2 - q0);
+                        if n.length() < 1e-6 {
+                            continue;
+                        }
+                        let n = n.normalize();
+                        let d = (p - q0).dot(n);
+                        if d.abs() > 0.05 {
+                            continue;
+                        }
+                        let x = p - d * n;
+                        let inside = [(q0, q1), (q1, q2), (q2, q0)]
+                            .iter()
+                            .all(|&(u, w)| (w - u).cross(x - u).dot(n) >= -1e-4);
+                        if inside {
+                            eprintln!(
+                                "  node {i} ({}) {d:+.3} m from triangle {a0}-{a1}-{a2} ({} {} {})",
+                                label(i as u32),
+                                label(a0),
+                                label(a1),
+                                label(a2)
+                            );
+                        }
+                    }
+                }
+            }
             for &i in idx.iter().take(16) {
                 let free = s.incidence[i].iter().all(|&x| s.beams[x as usize].broken);
                 let live = s.incidence[i]

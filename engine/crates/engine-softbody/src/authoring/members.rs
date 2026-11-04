@@ -25,6 +25,14 @@ pub const CATCH: f32 = 0.15;
 /// A suspension upright's beams against the link grade.
 pub const KNUCKLE: f32 = 4.0;
 
+/// A corner's articulation stops' bounds (fraction of the spawn length).
+pub const STRAP: f32 = 0.2;
+
+/// The toe link's stiffness against the arms' (it alone holds the knuckle's
+/// toe, on a 13 cm lever: in a 40 g frontal crash the wheel's inertia, 10 cm
+/// outboard of the kingpin, loads it ~18 kN).
+pub const TOE: f32 = 4.0;
+
 /// A section ring's stiffness against the member's grade (its ties are
 /// short: [`Skeleton::tie`]).
 pub const RING: f32 = 0.25;
@@ -93,6 +101,13 @@ pub struct MemberSpec {
     /// start and end (a crush gradient: weak at the bumper, strong at the cell).
     pub grade: String,
     pub scale: [f32; 2],
+    /// A knee in the threshold gradient: at this arc fraction of the path the
+    /// scale is this (piecewise linear from `scale[0]` through it to
+    /// `scale[1]`). A rear rail is strong over the axle (it carries the
+    /// suspension and the rear's inertia in a frontal crash) and folds only
+    /// behind it.
+    #[serde(default)]
+    pub knee: Option<[f32; 2]>,
     /// Every this many stations the section is weaker (crush beads: the member
     /// folds there first, in an accordion). 0: none.
     pub beads: usize,
@@ -121,6 +136,18 @@ pub struct MemberSpec {
     /// the main load paths (rails, sills) are heavier sections of their steel.
     #[serde(default = "unit")]
     pub stiff: f32,
+}
+
+impl MemberSpec {
+    /// The threshold scale at arc fraction `t` (0 at the path's start).
+    pub fn scale_at(&self, t: f32) -> f32 {
+        let [s0, s1] = self.scale;
+        match self.knee {
+            Some([tk, sk]) if t <= tk => s0 + (sk - s0) * t / tk.max(1e-6),
+            Some([tk, sk]) => sk + (s1 - sk) * (t - tk) / (1.0 - tk).max(1e-6),
+            None => s0 + (s1 - s0) * t,
+        }
+    }
 }
 
 fn unit() -> f32 {
@@ -495,6 +522,13 @@ pub struct Corner {
     pub damper: f32,
     pub driven: bool,
     pub braked: bool,
+    /// The subframe's cross tubes: k·L (N) of a beam from each of the left
+    /// corner's arm pivots to the right's (0: none; each side's pivots are
+    /// tied only to the body beside them). In a frontal crash the wheel's
+    /// inertia pushes one pivot of each arm in and pulls the other out; the
+    /// tubes carry that across the car axially instead of bending the rails.
+    #[serde(default)]
+    pub cross: f32,
 }
 
 /// What a corner built: its nodes, and the chassis pivots to tie into the body.
@@ -542,7 +576,7 @@ pub fn corner(sk: &mut Skeleton, c: &Corner, side: f32, part: u16, rigid: Materi
     sk.fixed_beam(kl, plr, arm);
     sk.fixed_beam(ku, puf, arm);
     sk.fixed_beam(ku, pur, arm);
-    sk.fixed_beam(ks, pt, arm);
+    sk.fixed_beam(ks, pt, arm.stiffer(TOE));
     // The pivots as one subframe bracket.
     let pivots = vec![plf, plr, puf, pur, pt, top];
     // The arms' and subframe brackets' own mass.
@@ -564,6 +598,26 @@ pub fn corner(sk: &mut Skeleton, c: &Corner, side: f32, part: u16, rigid: Materi
         stop: 5.0e5,
         precomp: 1.0,
     });
+    // Articulation stops: the upper ball joint's distance to the lower arm's
+    // pivots stays within ±STRAP of its spawn length through the
+    // suspension's travel (about ±13 % for ±9 cm); past that the knuckle
+    // would fold round the lower ball joint (the upper arm swung under its
+    // pivots), which the wheelhouse and the arms' stops forbid in a real car.
+    for p in [plf, plr] {
+        if 1.0 == 0.0 {
+            break;
+        }
+        sk.straps.push(SkShock {
+            a: ku,
+            b: p,
+            spring: 0.0,
+            damp: 0.0,
+            short: STRAP,
+            long: STRAP,
+            stop: 5.0e5,
+            precomp: 1.0,
+        });
+    }
     sk.wheels.push(SkWheel {
         a1,
         a2,
