@@ -98,6 +98,10 @@ pub struct BodyStyle {
     /// leading edge and a crisp boot deck.
     pub nose_ramp: f32,
     pub tail_ramp: f32,
+    /// The deck's side roll-over (m) behind z = `deck_ramp[0]` (blended in
+    /// over 0.3 m): a crisp edge between the quarters and the boot lid
+    /// instead of the greenhouse's long tumblehome ramp.
+    pub deck_ramp: [f32; 2],
     /// Bonnet power dome: the creases' half spacing at the nose and at the
     /// cowl, the dome's rise between them and the creases' rounding (m); the
     /// bonnet's z span (cowl, nose).
@@ -551,10 +555,27 @@ impl BodySurface {
             (0.55 / step).ceil() as usize,
             (0.28 / step).ceil() as usize,
         );
-        let nrows = r_curl + r_low + r_up;
-        band.v_lower = r_curl as f32 / nrows as f32;
-        band.v_crease = (r_curl + r_low) as f32 / nrows as f32;
-        band.v_scoop = (r_curl + (r_low as f32 * 0.45).round() as usize) as f32 / nrows as f32;
+        let nr0 = r_curl + r_low + r_up;
+        band.v_lower = r_curl as f32 / nr0 as f32;
+        band.v_crease = (r_curl + r_low) as f32 / nr0 as f32;
+        band.v_scoop = (r_curl + (r_low as f32 * 0.45).round() as usize) as f32 / nr0 as f32;
+        // Row fractions: uniform, plus a pair of rows a few millimetres either
+        // side of the crease and of the lower-door feature line, so the smooth
+        // normals turn within a tight fillet there (a crisp line of light)
+        // instead of over a whole row.
+        let (vl, vc, vs) = (band.v_lower, band.v_crease, band.v_scoop);
+        let mut vrows: Vec<f32> = (0..=nr0).map(|r| r as f32 / nr0 as f32).collect();
+        for v in [
+            vc - (vc - vs) * 0.018,
+            vc + (1.0 - vc) * 0.03,
+            vs - (vs - vl) * 0.035,
+            vs + (vc - vs) * 0.03,
+        ] {
+            vrows.push(v);
+        }
+        vrows.sort_by(|a, b| a.total_cmp(b));
+        vrows.dedup_by(|a, b| (*a - *b).abs() < 1e-5);
+        let nrows = vrows.len() - 1;
         let h = (band.half / style.step_along).ceil() as usize;
         let ncol = 2 * h;
         let mut mesh = Mesh::default();
@@ -575,7 +596,7 @@ impl BodySurface {
             .collect();
         let mut ids = vec![0u32; ncol * (nrows + 1)];
         for r in 0..=nrows {
-            let v = r as f32 / nrows as f32;
+            let v = vrows[r];
             for c in 0..ncol {
                 let (theta, sx) = theta_of(c);
                 let sc = &sections[if c <= h { c } else { ncol - c }];
@@ -632,8 +653,12 @@ impl BodySurface {
         // Lid height at plan (x, z): the edge height at the nearest edge point,
         // ramped up to the top line by the plan distance from the edge.
         let ramp_of = |z: f32| -> f32 {
-            (prof.half_width.eval(z) + prof.side_bulge - (prof.top_half_width.eval(z) - tr))
-                .max(0.08)
+            let r = (prof.half_width.eval(z) + prof.side_bulge
+                - (prof.top_half_width.eval(z) - tr))
+                .max(0.08);
+            let [zd, rd] = style.deck_ramp;
+            let w = 1.0 - smoothstep(zd, zd + 0.3, z);
+            r + (r.min(rd) - r) * w
         };
         // Per edge point: how much it faces forward (nose) or back (tail): the
         // lid rolls over its leading and trailing edges in a short, crisp ramp.

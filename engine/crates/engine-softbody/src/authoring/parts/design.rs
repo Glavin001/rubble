@@ -75,13 +75,13 @@ pub struct Styling {
 pub fn sedan_styling(def: &VehicleDef) -> Styling {
     let side = SectionShape {
         lower: 0.11,
-        d_lower: -0.022,
+        d_lower: -0.03,
         crease: f32::NAN,
-        a_below: 0.13,
-        a_above: 0.32,
+        a_below: 0.17,
+        a_above: 0.45,
         d_top: -0.05,
         m_top: 0.25,
-        tuck: 0.06,
+        tuck: 0.07,
     };
     // An upright fascia: its widest line high (at the lamps' lower edge), the
     // lower bumper drawn back under it (a shorter-looking overhang), and a
@@ -93,7 +93,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         a_below: 0.07,
         a_above: 0.32,
         d_top: -0.10,
-        m_top: 0.85,
+        m_top: 0.55,
         tuck: 0.04,
     };
     let tail = SectionShape {
@@ -134,13 +134,14 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         lid_crown: 0.022,
         step: 0.022,
         step_along: 0.035,
-        nose_ramp: 0.07,
-        tail_ramp: 0.06,
+        nose_ramp: 0.045,
+        tail_ramp: 0.04,
+        deck_ramp: [0.85, 0.10],
         hood_crease: [0.22, 0.60, 0.014, 0.004],
         hood_z: [3.36, 4.70],
         deck_lip: [0.026, 0.24, 0.60],
         scoop: Curve::new(&[(1.30, 0.60), (2.20, 0.53), (3.00, 0.46), (3.45, 0.43)]),
-        scoop_depth: 0.016,
+        scoop_depth: 0.024,
         scoop_z: [1.42, 1.80, 3.10, 3.40],
     };
     let _ = def;
@@ -368,10 +369,12 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             return 1.0;
         }
         let r = lidrow(p.z);
-        let fy = smax(r.y_t + 0.018 - p.y, p.y - (r.y_e - st.rail), 0.03);
         let z0 = st.side_windows[1][1];
         let z1 = st.side_windows[0][0];
-        smax(fy, smax(z0 - p.z, p.z - z1, 0.01), 0.02)
+        // Square to the belt (no rounding at the bottom: it reads as a
+        // point once the doors move).
+        let fy = smax(r.y_t + 0.018 - p.y, p.y - (r.y_e - st.rail), 0.004);
+        smax(fy, smax(z0 - p.z, p.z - z1, 0.004), 0.004)
     };
     // Exhaust cut-outs in the rear valance (rear view circles).
     let exhaust_hole = |p: Vec3| -> f32 {
@@ -669,18 +672,29 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             }
             mesh.append(&s);
         }
-        let bs: Vec<f32> = bp
-            .iter()
-            .zip(&m.pos)
-            .map(|(v, p)| v.max(-p.x * sx))
-            .collect();
-        let b = trim::clip(m, &bs, 0.0);
-        let mut bm = trim::offset(&b.mesh, 0.0015, false, Some(mat::TRIM), 1.0);
-        let loops = trim::boundary_loops(&bm);
-        for (l, closed) in &loops {
-            trim::roll_loop(&mut bm, l, *closed, EdgeStyle::TRIM);
+        // The B-pillar applique in two halves, one on each door's frame (split
+        // at the shut line), so each rides its own door.
+        for (half, k) in [("f", 1.0f32), ("r", -1.0)] {
+            let bs: Vec<f32> = bp
+                .iter()
+                .zip(&m.pos)
+                .map(|(v, p)| v.max(-p.x * sx).max(k * (b_z(p.y) - p.z) + 0.0025))
+                .collect();
+            let b = trim::clip(m, &bs, 0.0);
+            if b.mesh.is_empty() {
+                continue;
+            }
+            let mut bm = trim::offset(&b.mesh, 0.0015, false, Some(mat::TRIM), 1.0);
+            let loops = trim::boundary_loops(&bm);
+            for (l, closed) in &loops {
+                trim::roll_loop(&mut bm, l, *closed, EdgeStyle::TRIM);
+            }
+            pieces.push(Piece {
+                name: format!("b_pillar_{half}_{}", if sx > 0.0 { "l" } else { "r" }),
+                mesh: bm,
+                bind: Bind::Vote,
+            });
         }
-        mesh.append(&bm);
         pieces.push(Piece {
             name: format!("frame_{}", if sx > 0.0 { "l" } else { "r" }),
             mesh,

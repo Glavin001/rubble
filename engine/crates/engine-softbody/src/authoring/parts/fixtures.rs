@@ -398,6 +398,36 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
             };
             m.uv[k] = [u, v];
         }
+        // The lettering's seam: a triangle spanning u = 1 → 0 would run the
+        // text backwards across it; give its low-u corners copies at u + 1.
+        let tyre_tris = m.idx.len();
+        let mut copies = std::collections::HashMap::new();
+        for t in 0..tyre_tris / 3 {
+            let ids = [m.idx[3 * t], m.idx[3 * t + 1], m.idx[3 * t + 2]];
+            if ids.iter().any(|&i| (i as usize) < tyre_first) {
+                continue;
+            }
+            let us = ids.map(|i| m.uv[i as usize][0]);
+            let (lo, hi) = (
+                us.iter().cloned().fold(9.0, f32::min),
+                us.iter().cloned().fold(-9.0, f32::max),
+            );
+            if hi - lo < 0.5 {
+                continue;
+            }
+            for (j, &i) in ids.iter().enumerate() {
+                if us[j] < 0.5 {
+                    let c = *copies.entry(i).or_insert_with(|| {
+                        let i = i as usize;
+                        let c = m.vert(m.pos[i], m.nrm[i], m.mat[i], m.ao[i]);
+                        m.smooth[c as usize] = m.smooth[i];
+                        m.uv[c as usize] = [m.uv[i][0] + 1.0, m.uv[i][1]];
+                        c
+                    });
+                    m.idx[3 * t + j] = c;
+                }
+            }
+        }
     }
     // Rim barrel and lips: outer lip, barrel inside (darker), inner lip.
     let rim_prof = [

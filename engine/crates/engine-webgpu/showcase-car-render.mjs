@@ -343,7 +343,7 @@ fn props(m: u32) -> vec3f {
     case 3u: { return vec3f(0.16, 0.0, 0.0); }   // trim: gloss black plastic
     case 6u: { return vec3f(0.62, 0.0, 0.0); }   // tyre (satin sidewall)
     case 7u: { return vec3f(0.32, 1.0, 0.0); }   // rim (gunmetal)
-    case 28u: { return vec3f(0.1, 1.0, 0.0); }   // machined spoke faces
+    case 28u: { return vec3f(0.26, 1.0, 0.0); }  // machined spoke faces (satin bright)
     case 8u: { return vec3f(0.5, 0.0, 0.0); }    // a shut line's wall
     case 9u: { return vec3f(0.95, 0.0, 0.0); }   // underbody
     case 10u: { return vec3f(0.45, 0.0, 0.0); }  // plate

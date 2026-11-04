@@ -40,8 +40,8 @@ impl EdgeStyle {
     pub const SHUT: Self = Self {
         gap: 0.0022,
         roll: 0.0028,
-        depth: 0.012,
-        flange: 0.006,
+        depth: 0.009,
+        flange: 0.004,
         ao_floor: 0.12,
         seal: false,
     };

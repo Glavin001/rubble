@@ -299,11 +299,18 @@ struct BgOut { @builtin(position) clip: vec4f, @location(0) ndc: vec2f };
   var o: BgOut; o.clip = vec4f(p, 0.99999, 1.0); o.ndc = p; return o;
 }
 fn backdrop(ndc: vec2f) -> vec3f {
-  let top = vec3f(0.035, 0.055, 0.1);
-  let mid = vec3f(0.07, 0.1, 0.17);
-  let t = clamp(ndc.y * 0.5 + 0.5, 0.0, 1.0);
-  let c = mix(mid, top, t);
-  let vig = 1.0 - 0.35 * dot(ndc * vec2f(0.6, 0.8), ndc * vec2f(0.6, 0.8));
+  // A cyclorama seen along the view ray: a lit horizon band (it frames the car
+  // and matches the bright horizon its paint reflects) under a deep navy
+  // ceiling, with a soft vignette.
+  let nearP = frame.invViewProj * vec4f(ndc, 0.0, 1.0);
+  let farP = frame.invViewProj * vec4f(ndc, 1.0, 1.0);
+  let d = normalize(farP.xyz / farP.w - nearP.xyz / nearP.w);
+  let up = max(d.y, 0.0);
+  let top = vec3f(0.03, 0.045, 0.085);
+  let mid = vec3f(0.09, 0.12, 0.2);
+  var c = mix(mid, top, smoothstep(0.0, 0.6, up));
+  c = c + vec3f(0.07, 0.085, 0.12) * exp(-up * 14.0);
+  let vig = 1.0 - 0.3 * dot(ndc * vec2f(0.6, 0.8), ndc * vec2f(0.6, 0.8));
   return c * vig;
 }
 struct BgFrag { @location(0) c: vec4f, @builtin(frag_depth) depth: f32 };
