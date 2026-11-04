@@ -65,7 +65,12 @@ traction control. It is attached by D6 ball joints to the wheels' axle nodes onl
 all the bodywork stays free to crumple. The core takes a share of every node's mass
 (25%), so its inertia follows the vehicle's mass distribution. The wheel queries
 ignore the vehicle's own node spheres: the core and its nodes share a negative
-collision group.
+collision group, and both query modes (the broadphase grid walk and the full scan)
+skip it. A crushed wheel arch or a pitched-down nose would otherwise sit in the
+suspension rays, and the wheels would snap between the ground and their own nodes.
+Pieces that tore off keep the group, so a car's wheels also roll through its own
+debris (as the debris already passes through the rest of the car); other vehicles'
+debris is driven over. Test: `wheel_rays_ignore_their_own_bodywork`.
 
 **Authored cores and bolted rigid parts.** A `SoftVehicleDesc` may bring its own core
 (`SoftCore`). This is a complete `VehicleDesc` (wheels, drivetrain, and parts with their
@@ -262,7 +267,8 @@ stored. Kinds:
 
 | Kind | Behaviour | Sources |
 |---|---|---|
-| Normal | Elastic, yields and breaks (RoR rules below) | RoR beams; JBeam NORMAL, ANISOTROPIC and PRESSURED (the last two simulated as NORMAL) |
+| Normal | Elastic, yields and breaks (RoR rules below) | RoR beams; JBeam NORMAL and PRESSURED (simulated as NORMAL) |
+| Anisotropic | Normal, with its own spring and damping while longer than rest | JBeam ANISOTROPIC |
 | Support | No energy when stretched (damping × 0.1); breaks past L·factor | RoR `s`, JBeam SUPPORT |
 | Rope | No energy when compressed | RoR `r` |
 | Bounded | Spring-damper plus a stiff limit spring outside [L(1 − short), L(1 + long)]; never deforms | RoR shocks / shocks2 / shocks3 (in-rates), JBeam BOUNDED (`beamLimitSpring`) |
@@ -295,12 +301,27 @@ stiff (decision s12). A broken beam with a detacher group breaks its whole group
 * **Node spheres** (radius 0.06 m) go through the existing broadphase, narrowphase and
   contact persistence against rigid bodies, terrain and other vehicles' nodes. The
   node's block takes the linear part of the contact rows.
-* **Node–triangle** contacts between soft bodies. Each contacter node finds the closest
-  collision triangle of another vehicle that it is in front of (prism test, step-start
-  side). Each triangle collects up to four nodes that chose it. With two, a crushed
-  front pressing many nodes into one panel lost most of the triangle side, and the cars
-  overlapped visibly. Normals and
-  barycentrics are frozen for the step; the gap is re-evaluated every iteration.
+* **Node–triangle** contacts, BeamNG style: only nodes collide, against other
+  vehicles' collision triangles (contacter nodes, BeamNG `collision`) and their own
+  (`SoftNode::self_collision`, BeamNG `selfCollision`; on for Rigs of Rods and the
+  procedural cars, off unless asked in JBeam). Each node takes the triangle it presses
+  on most (prism test); each triangle collects up to four nodes that chose it. Normals
+  and barycentrics are frozen for the step; the gap is re-evaluated every iteration.
+  * **Anti-clip.** Triangles are two-sided. A per-node cache keeps the side a node was
+    on when it first took a contact with a triangle (four triangles per node,
+    `pairCacheBase`), so a node pushed through is pushed back to its own side however
+    deep, instead of being handed the other side at the next step start. A new pair
+    takes the step-start side, counting a node up to 5 cm behind the front face as in
+    front. Entries leave once the node is 10 cm in front, 30 cm behind or off the
+    triangle.
+  * **Self-collision exclusion.** A node skips its own triangles it is a corner of.
+    With JBeam node groups (BeamNG), it skips triangles whose three nodes share its
+    first group; without groups, any triangle it sat over within 12 cm in the rest
+    body (decision s18).
+  * **Thickness:** the vehicle's δ plus the triangle's `externalCollisionBias`.
+    `NONCOLLIDABLE` triangles keep sides (anti-clip) with no force in front.
+  * **Breaking:** a triangle stops colliding once a beam along an edge, or its
+    `breakGroup`, breaks (or it stretches past 2.5× rest).
 * **Triangle–obstacle** contacts against thin static spheres and capsules registered
   with `add_soft_obstacle`. These are the poles and bollards narrower than the node
   spacing that would otherwise pass between nodes.
@@ -309,9 +330,9 @@ stiff (decision s12). A broken beam with a detacher group breaks its whole group
   corrected per step. Without that, a node freed inside a crushed panel was fired out
   at about 35 m/s. A per-particle flag skips the slot reads for particles with no soft
   contact this step.
-* Not done: rigid boxes and hulls against soft triangles (walls are wide enough for
-  node spheres), self-collision, edge–edge contacts, and conservative displacement
-  bounds or substeps for highway-speed tunnelling.
+* Not done: rigid hulls against soft triangles (boxes, spheres and capsules registered
+  as obstacles are), edge–edge contacts, and conservative displacement bounds for
+  highway-speed tunnelling (`softbody-beamng-parity.md`, phase 2).
 
 **Soft-scene parameters.** `soft_scene_params(hz, iterations)` raises the contact
 penalty ramp `beta_lin` from 10⁴ to 10⁷. A light node's contact must reach its own
@@ -358,7 +379,11 @@ MIT-licensed editors as references):
 * the powertrain graph, to find driven wheels;
 * the frame: JBeam (+X left, +Y rear, +Z up) becomes Rubble (+X left, +Y up, +Z forward).
 
-LBEAM, torsion bars, rails, slidenodes, flexbodies and props are counted and skipped.
+LBEAMs (the angle at the row's middle node), torsion bars, rails (`rails` and
+`rails2`) and slidenodes are simulated (`elements.rs`, `soft_step.slang`: per-particle
+block terms, rest-angle plasticity, breaking, slidenodes coming off their rail).
+ANISOTROPIC beams use `springExpansion` / `dampExpansion` while longer than rest.
+Flexbodies and props are counted and skipped.
 
 **Licensing.** The design doc lists BeamNG's `agenty_legocar` and `legotrailer` as CC0.
 They are not. The `tests/LICENSE.txt` of Blender-JBeam-Editor is CC0, but the vehicles
@@ -510,6 +535,52 @@ reference's 45). Prefer 240 Hz, or 240 Hz × 5 with 2 sweeps.
 
 These values come from one vehicle; the design's 15-vehicle set and Rigs of Rods
 reference runs remain to do.
+
+## The explicit solver in the demo
+
+The HUD's solver button (`?solver=explicit`) rebuilds the scene with the vehicle on
+the explicit 2 kHz node–beam solver instead ([explicit-beams.md](explicit-beams.md):
+Rigs of Rods parity, `ExplicitBeamsGpu`), and back. The URL keeps the state, so a
+link opens either solver.
+
+* **Vehicles** (`?car=`): `sedan` (on the explicit side the acceptance runs'
+  procedural sedan, `CarParams::sedan()` at a 10 kg minimum node mass, with soft
+  tyres, or `?tyres=0` its bare body as `rubble_sedan_ror.truck`; the soft side keeps
+  its procedural car with a rigid core and render mesh), `hires` (the high-resolution
+  test car, `engine_softbody::hires` JBeam with the explicit-step tuning its tests
+  use), `?truck=<url>` (any `.truck` the server can reach, e.g. the acceptance
+  vehicles or Agora S / L from RigsOfRods/content), or a loaded `.truck` / JBeam
+  folder (kept for the tab as `?car=import`). The buggy has rigid parts: the
+  explicit side runs the sedan. The soft side turns a non-procedural vehicle to +Z
+  with its front where the sedan's would be; the explicit side spawns the same way.
+* **Scenes** (`?xscene=`, the third menu): `idle` (at rest; `L` launches it at
+  100 km/h with its tyres rolling), `coast` (100 km/h) and `wall` (100 km/h into a
+  rigid wall 1 + 0.5·v m ahead). Each soft scene maps to the nearest: crash tests
+  to `wall`, ramp and rollover to `coast`, the rest to `idle`. `?xspeed=` sets the
+  speed (km/h), `?drag=0` turns off the per-node air drag and turbulence (as the
+  acceptance runs).
+* **What it shows**: the collision skin (orange or teal per vehicle, darker with
+  strain, torn triangles dropped), tyres as dark beam lines, and with `V` every beam:
+  green intact, yellow to red bent, magenta broken. The HUD gives the steps per
+  frame, the GPU milliseconds per frame (timestamps; `≈` submit-to-done without
+  them) and the broken and bent beams.
+* **How it runs**: `engine-world-wasm` `ExplicitSim` on the World's device. Each
+  frame submits `2000 × dt` steps (at most twice a 60 fps frame's share) without
+  waiting; the page draws straight from the solver's node, beam and per-vehicle
+  buffers. Damage, the camera's pose, GPU times and the launch are `mapAsync`
+  reads. The World keeps the ground and the wall (rendered as colliders) and is not
+  stepped.
+
+```bash
+python3 -m http.server 8791 --directory engine   # the page and the acceptance vehicles
+# http://127.0.0.1:8791/crates/engine-webgpu/softbody.html?solver=explicit&scene=wall&truck=../../docs/explicit-beams-acceptance/vehicles/rubble_hires_jbeam.truck
+CONTENT=<RigsOfRods/content> node --experimental-websocket crates/engine-webgpu/explicit-check.mjs
+```
+
+`explicit-check.mjs` runs each vehicle (sedan, hires, hires_truck, and agora_s /
+agora_l with `CONTENT`) idle then launched, into the wall, and through the solver
+button to the soft solver and back, failing on any page or GPU error or a vehicle
+that does not move or deform.
 
 ## Crash scenarios
 
@@ -785,8 +856,11 @@ comes on top of the rigid step's fixed 7.5 ms per frame at 240 Hz.
 * A triangle records at most four nodes for the triangle side of node–triangle
   contacts; further nodes still get their own side.
 * The RoR cab-node exception (keep the last beams on a collision node) is not
-  implemented. LBEAM, torsion bars, pressured beams and node–beam tyres are not
-  simulated (JBeam PRESSURED and ANISOTROPIC run as NORMAL).
+  implemented. Pressured beams and node–beam tyres are not simulated (JBeam
+  PRESSURED runs as NORMAL).
+* Particles are solved in their body's local frame (an origin on a 1 m grid, moved
+  when the body wanders 32 m), with world copies in the body buffer for the rigid
+  pipeline (decision s28). Contacts with rigid geometry stay in world f32.
 * Only the native wgpu host and the browser run soft bodies. The Metal (`MetalSim`)
   and CUDA hosts compile and plan no soft passes (`SoftCounts::default`).
 * Rigid parts hang one level deep on nodes (no rigid part carries another).

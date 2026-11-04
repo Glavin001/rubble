@@ -22,6 +22,7 @@
 #include "DynamicRHI.h"
 #include "RenderTimer.h"
 #include "RubbleAbiBackend.h"
+#include "RubbleFilmCapture.h"
 #include "RubbleFilmRig.h"
 #include "RubbleFracture.h"
 #include "RubbleGpuPoses.h"
@@ -29,6 +30,7 @@
 #include "RubblePrimitives.h"
 #include "RubbleReplayBackend.h"
 #include "RubbleSoftBodies.h"
+#include "RubbleVehicles.h"
 #include "RubbleSubsystem.h"
 #include "Tests/AutomationCommon.h"
 #include "UnrealClient.h"
@@ -1043,3 +1045,346 @@ bool FRubbleVideoGlassTower::RunTest(const FString& Parameters)
 }
 #endif
 
+#if WITH_DEV_AUTOMATION_TESTS
+namespace SoftCrashFilm
+{
+	/** A crash test filmed: its scene and where the cars meet (cm). */
+	struct FCrash
+	{
+		const TCHAR* Name;
+		const TCHAR* Scene;
+		FVector Impact;
+	};
+	// softbody.html's head-on (two cars at 29 km/h from X ±800) and full-width wall (at 56 km/h
+	// from X -1200 into the wall's face at X 220); both meet about 0.8 s in. The wall's cameras
+	// aim at the car's front half, clear of the wall's face.
+	static const FCrash Crashes[] = {
+		{ TEXT("headon"), TEXT("soft:headon"), FVector(0, 0, 70) },
+		{ TEXT("wall"), TEXT("soft:wall?speed=56"), FVector(80, 0, 70) },
+	};
+	enum class ERide : uint8
+	{
+		Fixed,  // standing still (offsets from the impact)
+		Orbit,  // circling the impact
+		Chase,  // behind the player car and above it, looking past it at the impact
+	};
+	struct FView
+	{
+		const TCHAR* Name;
+		ERide Ride;
+		FVector Eye; // from the impact
+		FVector Target;
+		float Fov;
+	};
+	static const FView Views[] = {
+		// Low at the side, at bumper height: the fronts fold toward the lens.
+		{ TEXT("side"), ERide::Fixed, FVector(-60, -780, 55), FVector(0, 0, 0), 48.0f },
+		{ TEXT("closeup"), ERide::Fixed, FVector(-330, -300, 60), FVector(-60, 0, 0), 40.0f },
+		{ TEXT("overhead"), ERide::Fixed, FVector(-40, -120, 880), FVector(0, 0, -70), 62.0f },
+		{ TEXT("chase"), ERide::Chase, FVector(-720, -280, 240), FVector(250, 0, 40), 60.0f },
+		{ TEXT("orbit"), ERide::Orbit, FVector::ZeroVector, FVector::ZeroVector, 55.0f },
+	};
+	/** Seconds of world time: real speed, then a fifth of it from just before the impact until the
+	 *  wreck has settled, then real speed to the end. */
+	constexpr double SlowFrom = 0.55, SlowTo = 1.75, SlowScale = 0.2, End = 3.5;
+	double ScaleAt(double WorldT) { return WorldT >= SlowFrom && WorldT < SlowTo ? SlowScale : 1.0; }
+}
+
+/**
+ * Rubble.Video.SoftCrash: the soft-body crash tests in Unreal, on the engine's car mesh (the
+ * softbody page's: paint, glass, chrome, lamps) skinned part by part, with the damage it measures
+ * (crumpled and scraped paint, cracked and shattered glass, torn panels) and the debris it sheds.
+ * Each crash runs once, slowed to a fifth around the impact, and every camera of
+ * SoftCrashFilm::Views films it together (FRubbleFilmCapture: a scene capture per camera, read
+ * back asynchronously into ffmpeg's hardware encoder) to RubbleShots/video/softcrash/
+ * <crash>-<camera>.mp4. scripts/unreal/video.sh softcrash adds the multicam.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleVideoSoftCrash, "Rubble.Video.SoftCrash",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubbleVideoSoftCrash::RunTest(const FString& Parameters)
+{
+	using namespace SoftCrashFilm;
+	FString Error;
+	if (!TestTrue(TEXT("the engine's ABI"), Rubble() && FRubbleAbiBackend::CheckVersion(Error)))
+	{
+		return false;
+	}
+	Rubble()->SetBackend(MakeUnique<FRubbleAbiBackend>());
+	constexpr int32 Fps = 30;
+	// -RubbleFilmCrash=wall films one crash; -RubbleFilmViews=N only the first N cameras;
+	// -RubbleFilmSize=WxH (1280x720).
+	FString Only;
+	FParse::Value(FCommandLine::Get(), TEXT("RubbleFilmCrash="), Only);
+	int32 NumViews = UE_ARRAY_COUNT(Views);
+	FParse::Value(FCommandLine::Get(), TEXT("RubbleFilmViews="), NumViews);
+	NumViews = FMath::Clamp(NumViews, 1, int32(UE_ARRAY_COUNT(Views)));
+	FIntPoint Size(1280, 720);
+	FString SizeText;
+	if (FParse::Value(FCommandLine::Get(), TEXT("RubbleFilmSize="), SizeText))
+	{
+		FString W, H;
+		if (SizeText.Split(TEXT("x"), &W, &H))
+		{
+			Size = FIntPoint(FCString::Atoi(*W), FCString::Atoi(*H));
+		}
+	}
+	TArray<int32> Films;
+	for (int32 c = 0; c < UE_ARRAY_COUNT(Crashes); ++c)
+	{
+		if (Only.IsEmpty() || Only == Crashes[c].Name)
+		{
+			Films.Add(c);
+		}
+	}
+	const FString Root = ShotDir() / TEXT("video") / TEXT("softcrash");
+	IFileManager::Get().DeleteDirectory(*Root, false, true);
+	IFileManager::Get().MakeDirectory(*Root, true);
+	struct FState
+	{
+		int32 Film = 0;
+		int32 Frame = -100; // -100: the crash starts
+		double WorldT = 0.0;
+		double Started = 0.0;
+		TArray<FTransform> Rides; // per camera: a chase camera's smoothed frame
+		TArray<bool> Riding;
+		TArray<TUniquePtr<FRubbleFilmCapture>> Cameras;
+		TWeakObjectPtr<ARubbleFilmRig> Rig;
+		bool bDone = false;
+	};
+	TSharedRef<FState> S = MakeShared<FState>();
+	ARubbleFilmRig* Rig = GameWorld()->SpawnActor<ARubbleFilmRig>();
+	S->Rig = Rig;
+	if (!Rig->GetRootComponent())
+	{
+		USceneComponent* RootComp = NewObject<USceneComponent>(Rig);
+		Rig->SetRootComponent(RootComp);
+		RootComp->RegisterComponent();
+	}
+	// The viewport draws nothing while the cameras film (they are the only renders).
+	if (GEngine && GEngine->GameViewport)
+	{
+		GEngine->GameViewport->bDisableWorldRendering = true;
+	}
+	// Where camera v looks this frame.
+	auto Pose = [S, Films](int32 v, FVector& Eye, FRotator& View, float& Fov) {
+		const FCrash& C = Crashes[Films[S->Film]];
+		const FView& V = Views[v];
+		Fov = V.Fov;
+		switch (V.Ride)
+		{
+		case ERide::Fixed:
+			Eye = C.Impact + V.Eye;
+			View = (V.Target - V.Eye).Rotation();
+			return true;
+		case ERide::Orbit:
+		{
+			// A quarter turn round the impact from the near side, closing in as it slows.
+			const float u = float(FMath::Clamp(S->WorldT / End, 0.0, 1.0));
+			const float Angle = FMath::DegreesToRadians(FMath::Lerp(-70.0f, 20.0f, u));
+			const float Radius = FMath::Lerp(1100.0f, 750.0f, u);
+			Eye = C.Impact + FVector(Radius * FMath::Sin(Angle), -Radius * FMath::Cos(Angle), 260.0f);
+			View = (C.Impact - Eye).Rotation();
+			return true;
+		}
+		case ERide::Chase:
+		{
+			FTransform Car;
+			for (TActorIterator<ARubbleVehicles> It(GameWorld()); It; ++It)
+			{
+				It->PlayerTransform(Car);
+			}
+			if (Car.GetLocation().IsNearlyZero())
+			{
+				return false; // no wheels drawn yet
+			}
+			// Its heading taken once, from the car toward the impact (the core's own frame comes
+			// from the wheel hubs, which jolt and tip in the crash); then it follows the car,
+			// smoothed.
+			if (!S->Riding[v])
+			{
+				const FVector Ahead = (C.Impact - Car.GetLocation()) * FVector(1, 1, 0);
+				S->Rides[v] = FTransform(Ahead.Rotation(), Car.GetLocation());
+				S->Riding[v] = true;
+			}
+			S->Rides[v].SetLocation(FMath::Lerp(S->Rides[v].GetLocation(), Car.GetLocation(), 0.3));
+			Eye = S->Rides[v].TransformPosition(V.Eye);
+			View = (S->Rides[v].TransformPosition(V.Target) - Eye).Rotation();
+			return true;
+		}
+		}
+		return false;
+	};
+	// The cameras aim and shoot after the renderers have drawn the frame (a chase camera sees
+	// the car where it is drawn).
+	Rig->Late = [S, Pose]() {
+		if (S->Frame == -100 || S->bDone)
+		{
+			return;
+		}
+		for (int32 v = 0; v < S->Cameras.Num(); ++v)
+		{
+			FVector Eye;
+			FRotator View;
+			float Fov = 60.0f;
+			if (Pose(v, Eye, View, Fov))
+			{
+				S->Cameras[v]->Aim(Eye, View, Fov);
+			}
+			// Settling frames render too (each camera's temporal history and Lumen), but only
+			// frame 0 on goes into the video.
+			if (S->Frame >= 0)
+			{
+				S->Cameras[v]->Shoot();
+			}
+			else
+			{
+				S->Cameras[v]->Warm();
+			}
+		}
+	};
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, S, Root, Fps, Films, NumViews, Size]() {
+		if (!Films.IsValidIndex(S->Film))
+		{
+			FApp::SetUseFixedTimeStep(false);
+			Rubble()->TimeScale = 1.0;
+			if (GEngine && GEngine->GameViewport)
+			{
+				GEngine->GameViewport->bDisableWorldRendering = false;
+			}
+			if (S->Rig.IsValid())
+			{
+				S->Rig->Destroy();
+			}
+			return true;
+		}
+		const FCrash& C = Crashes[Films[S->Film]];
+		if (S->Frame == -100)
+		{
+			FApp::SetUseFixedTimeStep(true);
+			FApp::SetFixedDeltaTime(1.0 / Fps);
+			FString LoadError;
+			FRubbleSceneRequest R;
+			FRubbleSceneRequest::Parse(C.Scene, R, LoadError);
+			if (!Rubble()->LoadScene(R, LoadError))
+			{
+				AddError(FString::Printf(TEXT("%s: %s"), C.Scene, *LoadError));
+				S->Film = Films.Num();
+				return false;
+			}
+			Rubble()->bPaused = true;
+			Rubble()->TimeScale = 1.0;
+			S->Cameras.Reset();
+			S->Rides.Init(FTransform::Identity, NumViews);
+			S->Riding.Init(false, NumViews);
+			for (int32 v = 0; v < NumViews; ++v)
+			{
+				const FString Path = FPaths::ConvertRelativePathToFull(Root / FString::Printf(TEXT("%s-%s.mp4"), C.Name, Views[v].Name));
+				S->Cameras.Add(MakeUnique<FRubbleFilmCapture>(S->Rig.Get(), Path, Size.X, Size.Y, Fps));
+				if (!S->Cameras.Last()->IsOpen())
+				{
+					AddError(FString::Printf(TEXT("ffmpeg for %s"), *Path));
+				}
+			}
+			S->WorldT = 0.0;
+			S->Started = FPlatformTime::Seconds();
+			// Frames -40..-1 settle the cameras and Lumen; the world runs from -10.
+			S->Frame = -40;
+			S->bDone = false;
+		}
+		if (S->Frame == -10)
+		{
+			Rubble()->bPaused = false;
+		}
+		if (S->Frame < 0)
+		{
+			++S->Frame;
+			return false;
+		}
+		// Real speed, then a fifth of it around the impact.
+		Rubble()->TimeScale = ScaleAt(S->WorldT);
+		S->WorldT += Rubble()->TimeScale / Fps;
+		++S->Frame;
+		if (S->WorldT < End)
+		{
+			return false;
+		}
+		// This frame's shots were taken by the rig's late hook; close the videos.
+		S->bDone = true;
+		int32 Written = 0;
+		for (TUniquePtr<FRubbleFilmCapture>& Camera : S->Cameras)
+		{
+			Camera->Finish();
+			Written = FMath::Max(Written, Camera->FramesWritten());
+		}
+		UE_LOG(LogRubble, Display, TEXT("Rubble.Video.SoftCrash: %s, %d cameras x %d frames in %.1f s"),
+			*FString(C.Name), S->Cameras.Num(), Written, FPlatformTime::Seconds() - S->Started);
+		S->Cameras.Reset();
+		S->Frame = -100;
+		++S->Film;
+		return false;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	return true;
+}
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+/**
+ * Rubble.Render.CarDesign: the soft car parked in the yard, shot from eight angles for a design
+ * review (RubbleShots/design/<view>.png): the three-quarter views, the side, front and rear, from
+ * above, the windscreen and a wheel up close. -RubbleCarScene=<scene> picks another scene.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleRenderCarDesign, "Rubble.Render.CarDesign",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubbleRenderCarDesign::RunTest(const FString& Parameters)
+{
+	FString Scene = TEXT("soft:yard");
+	FParse::Value(FCommandLine::Get(), TEXT("RubbleCarScene="), Scene);
+	if (!TestTrue(*FString::Printf(TEXT("%s loads"), *Scene), Rubble() && Load(*Scene)))
+	{
+		return false;
+	}
+	struct FView
+	{
+		const TCHAR* Name;
+		FVector Eye;
+		FVector Target;
+		float Fov;
+	};
+	// The car stands at the origin facing +X; its body is about 4 m long and 1.4 m tall.
+	static const FView Views[] = {
+		{ TEXT("front34"), FVector(430, -340, 150), FVector(0, 0, 70), 45.0f },
+		{ TEXT("side"), FVector(0, -640, 100), FVector(0, 0, 70), 45.0f },
+		{ TEXT("rear34"), FVector(-430, -340, 160), FVector(0, 0, 70), 45.0f },
+		{ TEXT("front"), FVector(680, 0, 110), FVector(0, 0, 70), 40.0f },
+		{ TEXT("rear"), FVector(-680, 0, 110), FVector(0, 0, 70), 40.0f },
+		{ TEXT("top"), FVector(20, -40, 760), FVector(0, 0, 0), 45.0f },
+		{ TEXT("windscreen"), FVector(260, -160, 190), FVector(20, 0, 115), 45.0f },
+		{ TEXT("wheel"), FVector(250, -250, 60), FVector(120, -80, 35), 45.0f },
+	};
+	const FString Dir = ShotDir() / TEXT("design");
+	IFileManager::Get().MakeDirectory(*Dir, true);
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(3.0f)); // parked and settled
+	for (const FView& V : Views)
+	{
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([V]() {
+			if (ARubblePawn* Pawn = Cast<ARubblePawn>(GameWorld()->GetFirstPlayerController()->GetPawn()))
+			{
+				Pawn->ViewFrom(V.Eye, (V.Target - V.Eye).Rotation(), V.Fov);
+			}
+			return true;
+		}));
+		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.8f)); // Lumen and TAA settle
+		const FString Path = Dir / (FString(V.Name) + TEXT(".png"));
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Path]() {
+			FScreenshotRequest::RequestScreenshot(Path, /*bShowUI=*/false, /*bAddFilenameSuffix=*/false);
+			return true;
+		}));
+		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.3f));
+	}
+	return true;
+}
+#endif

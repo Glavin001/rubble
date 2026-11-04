@@ -3,6 +3,8 @@ use engine_slang_build::{compile, compile_with_defines, find_slangc, par_map, Sl
 use std::env;
 use std::path::{Path, PathBuf};
 
+include!("src/wgsl_loop_cap.rs");
+
 /// Same world_step entries as `engine-metal`, minus `broadphase_grid` (thin wrapper;
 /// slangc SIGSEGV on SPIR-V — runtime aliases to `broadphase_query`).
 const WORLD_ENTRIES: &[&str] = &[
@@ -377,6 +379,13 @@ fn main() -> Result<()> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     println!("cargo:rerun-if-changed={}", slang_root.display());
     println!("cargo:rerun-if-env-changed=RUBBLE_SLANG_CACHE");
+    println!("cargo:rerun-if-env-changed=RUBBLE_EB_REF");
+    println!("cargo:rerun-if-env-changed=RUBBLE_EB_SRC");
+    println!("cargo:rerun-if-env-changed=RUBBLE_EB_REF_UNCAPPED");
+    println!("cargo:rerun-if-changed=src/wgsl_loop_cap.rs");
+    if let Ok(f) = std::env::var("RUBBLE_EB_SRC") {
+        println!("cargo:rerun-if-changed={f}");
+    }
     let _ = find_slangc()?;
 
     // `RUBBLE_SLANG_CACHE`: a directory keeping these outputs between builds, keyed by
@@ -520,6 +529,118 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         .arg(slang_root.join("kernels/soft_skin.slang"))
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
+    // Explicit beams (`ExplicitBeamsGpu`): one standalone module, entry
+    // `explicit_beams_frame`. Its barriers order storage only: Slang lowers
+    // DeviceMemoryBarrierWithGroupSync with a texture barrier naga rejects (and an
+    // empty statement Safari's parser rejects), so keep the storage and workgroup
+    // barriers alone.
+    // Every explicit module is regenerated below: clear the previous build's, so a
+    // module that no longer exists does not linger in the output directory (the loop-cap
+    // test reads every `explicit_*.wgsl` there).
+    for entry in std::fs::read_dir(&wgsl_dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("explicit_") && name.ends_with(".wgsl") {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    let beams = wgsl_dir.join("explicit_beams.wgsl");
+    compile_with_defines(
+        &explicit_beams_source(slang_root),
+        "explicit_beams_frame",
+        SlangTarget::Wgsl,
+        &beams,
+        &[],
+        &[("ENGINE_WGSL", "1")],
+    )?;
+    explicit_post(&beams)?;
+    // The wide passes: one module per entry point.
+    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits"] {
+        let entry = format!("explicit_beams_wide_{pass}");
+        let out = wgsl_dir.join(format!("{entry}.wgsl"));
+        compile_with_defines(
+            &explicit_beams_source(slang_root),
+            &entry,
+            SlangTarget::Wgsl,
+            &out,
+            &[],
+            &[("ENGINE_WGSL", "1")],
+        )?;
+        explicit_post(&out)?;
+    }
+    // The same module with 512 lanes per vehicle, for large vehicles.
+    let wide = wgsl_dir.join("explicit_beams_wide.wgsl");
+    compile_with_defines(
+        &explicit_beams_source(slang_root),
+        "explicit_beams_frame",
+        SlangTarget::Wgsl,
+        &wide,
+        &[],
+        &[("ENGINE_WGSL", "1"), ("EB_LANES", "512")],
+    )?;
+    explicit_post(&wide)?;
+    // With wings, the fuselage drag and command beams (EB_AERO), at both lane
+    // counts: the modules above stay those of vehicles without them.
+    for (name, lanes) in [
+        ("explicit_beams_aero", "256"),
+        ("explicit_beams_aero_wide", "512"),
+    ] {
+        explicit_frame_module(slang_root, &wgsl_dir, name, lanes, true)?;
+    }
+    // Vehicle–vehicle contact: the plan passes (one module each) and the contact
+    // groups' entry at the frame module's four variants.
+    let mut vv: Vec<(String, &str, Vec<(&str, &str)>)> = ["bounds", "pairs", "group"]
+        .iter()
+        .map(|p| {
+            (
+                format!("explicit_beams_vv_{p}"),
+                "",
+                vec![("ENGINE_WGSL", "1")],
+            )
+        })
+        .collect();
+    for (name, lanes, aero) in [
+        ("explicit_beams_contact", "256", false),
+        ("explicit_beams_contact_wide", "512", false),
+        ("explicit_beams_contact_aero", "256", true),
+        ("explicit_beams_contact_aero_wide", "512", true),
+    ] {
+        let mut d = vec![("ENGINE_WGSL", "1"), ("EB_LANES", lanes)];
+        if aero {
+            d.push(("EB_AERO", "1"));
+        }
+        // The solo vehicles' frame (the frame entry with EB_VV_SOLO), and the same
+        // with the contact groups past the vehicles (EB_VV_GROUPS).
+        d.push(("EB_VV_SOLO", "1"));
+        vv.push((
+            name.replace("contact", "solo"),
+            "explicit_beams_frame",
+            d.clone(),
+        ));
+        d.push(("EB_VV_GROUPS", "1"));
+        vv.push((name.to_string(), "explicit_beams_frame", d));
+    }
+    for (name, entry, defines) in &vv {
+        let out = wgsl_dir.join(format!("{name}.wgsl"));
+        let entry = if entry.is_empty() {
+            name.as_str()
+        } else {
+            entry
+        };
+        compile_with_defines(
+            &explicit_beams_source(slang_root),
+            entry,
+            SlangTarget::Wgsl,
+            &out,
+            &[],
+            defines,
+        )?;
+        explicit_post(&out)?;
+    }
+    // The frozen baseline of the explicit-beams kernel (a test oracle,
+    // `explicit_beams_baseline.slang`): every frame-entry variant and the plan passes
+    // as `wgsl/explicit_baseline_*.wgsl`, plus the race-probe variants (`EB_RACE_PROBE`).
+    // Read from OUT_DIR at run time by the bit-identity tests only (not embedded).
+    explicit_baseline(slang_root, &wgsl_dir)?;
     // Compact snapshots' buffer extents (WgpuSim::measure_state): standalone.
     let extent = wgsl_dir.join("state_extent.wgsl");
     let status = std::process::Command::new(find_slangc()?)
@@ -562,7 +683,7 @@ fn cache_key(manifest: &Path, slang_root: &Path) -> Result<String> {
     for f in &files {
         (f.strip_prefix(slang_root)?, std::fs::read(f)?).hash(&mut h);
     }
-    for f in ["build.rs", "../engine-slang-build/src/lib.rs"] {
+    for f in ["build.rs", "src/wgsl_loop_cap.rs", "../engine-slang-build/src/lib.rs"] {
         std::fs::read(manifest.join(f))?.hash(&mut h);
     }
     Ok(format!("engine-webgpu-{:016x}", h.finish()))
@@ -628,4 +749,143 @@ fn store(dir: &Path, out_dir: &Path, compiled: &Compiled) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// An explicit-beams module as slangc wrote it, made ready to ship. Slang's storage
+/// barrier carries a texture barrier naga rejects (and an empty statement Safari's
+/// parser rejects): keep the storage and workgroup barriers. Every loop is capped
+/// (`src/wgsl_loop_cap.rs`, `cap_explicit_loops`): a runaway loop stops, flagged,
+/// instead of holding the GPU. Measurement builds only (in their own target
+/// directory): `RUBBLE_EB_REF_UNCAPPED=1` leaves the frozen reference modules
+/// (`explicit_ref_*`) uncapped, so `tests/explicit_beams_bitwise.rs` compares the
+/// capped kernel with the uncapped one bit for bit.
+fn explicit_post(out: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(out)?
+        .replace(
+            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+            "storageBarrier(); workgroupBarrier();",
+        )
+        .replace(
+            "storageBarrier(); textureBarrier(); workgroupBarrier();",
+            "storageBarrier(); workgroupBarrier();",
+        );
+    let name = out.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let uncapped = name.starts_with("explicit_ref_")
+        && std::env::var("RUBBLE_EB_REF_UNCAPPED").is_ok_and(|v| v == "1");
+    let text = if uncapped {
+        text
+    } else {
+        cap_explicit_loops(&text).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?
+    };
+    std::fs::write(out, text)?;
+    Ok(())
+}
+
+/// The frozen baseline modules (see the call site), and the test-only
+/// deterministic-hits variants (`EB_DET_HITS`) of the baseline and the current
+/// kernel (`explicit_det_*.wgsl`).
+fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
+    let base = slang_root.join("kernels/explicit_beams_baseline.slang");
+    let cur = slang_root.join("kernels/explicit_beams.slang");
+    let reference = slang_root.join("kernels/explicit_beams_ref.slang");
+    let mut jobs: Vec<(PathBuf, String, String, Vec<(&str, &str)>)> = Vec::new();
+    for p in ["bounds", "pairs", "group"] {
+        let n = format!("explicit_beams_vv_{p}");
+        jobs.push((base.clone(), format!("explicit_baseline_{n}"), n.clone(), vec![("ENGINE_WGSL", "1")]));
+        jobs.push((reference.clone(), format!("explicit_ref_{n}"), n, vec![("ENGINE_WGSL", "1")]));
+    }
+    // (source, file prefix, lane counts, extra define)
+    let sets: [(&PathBuf, &str, &[&str], Option<&str>); 6] = [
+        (&base, "explicit_baseline_", &["256", "512"], None),
+        (&base, "explicit_baseline_", &["256", "512"], Some("EB_RACE_PROBE")),
+        (&base, "explicit_baseline_", &["256", "512"], Some("EB_DET_HITS")),
+        (&cur, "explicit_det_", EXPLICIT_LANES, Some("EB_DET_HITS")),
+        (&cur, "explicit_ablate_", EXPLICIT_LANES, Some("EB_ABLATE")),
+        // The frozen reference (explicit_beams_ref.slang): the kernel before the
+        // latency work, which the current kernel must match bit for bit.
+        (&reference, "explicit_ref_", EXPLICIT_LANES, None),
+    ];
+    for (src, prefix, lanes_list, extra) in sets {
+        for &lanes in lanes_list {
+            for aero in [false, true] {
+                let tag = format!(
+                    "{}{}{}",
+                    if aero { "_aero" } else { "" },
+                    lane_tag(lanes),
+                    match extra {
+                        Some("EB_RACE_PROBE") => "_probe",
+                        Some("EB_DET_HITS") if prefix == "explicit_baseline_" => "_det",
+                        _ => "",
+                    }
+                );
+                let mut d = vec![("ENGINE_WGSL", "1"), ("EB_LANES", lanes)];
+                if aero {
+                    d.push(("EB_AERO", "1"));
+                }
+                if let Some(x) = extra {
+                    d.push((x, "1"));
+                }
+                jobs.push((src.clone(), format!("{prefix}frame{tag}"), "explicit_beams_frame".into(), d.clone()));
+                d.push(("EB_VV_SOLO", "1"));
+                jobs.push((src.clone(), format!("{prefix}solo{tag}"), "explicit_beams_frame".into(), d.clone()));
+                d.push(("EB_VV_GROUPS", "1"));
+                jobs.push((src.clone(), format!("{prefix}contact{tag}"), "explicit_beams_frame".into(), d));
+            }
+        }
+    }
+    let results = par_map(&jobs, |(src, name, entry, defines)| -> Result<()> {
+        let out = dir.join(format!("{name}.wgsl"));
+        compile_with_defines(src, entry, SlangTarget::Wgsl, &out, &[], defines)?;
+        explicit_post(&out)
+    });
+    for r in results {
+        r?;
+    }
+    Ok(())
+}
+
+/// Lane counts of the current kernel's frame modules (the det variants cover each).
+const EXPLICIT_LANES: &[&str] = &["256", "512"];
+
+/// One frame module (entry `explicit_beams_frame`) at `lanes`, with or without
+/// `EB_AERO`.
+fn explicit_frame_module(slang_root: &Path, dir: &Path, name: &str, lanes: &str, aero: bool) -> Result<()> {
+    let out = dir.join(format!("{name}.wgsl"));
+    let mut d = vec![("ENGINE_WGSL", "1"), ("EB_LANES", lanes)];
+    if aero {
+        d.push(("EB_AERO", "1"));
+    }
+    compile_with_defines(
+        &explicit_beams_source(slang_root),
+        "explicit_beams_frame",
+        SlangTarget::Wgsl,
+        &out,
+        &[],
+        &d,
+    )?;
+    explicit_post(&out)
+}
+
+/// The shipped explicit-beams modules' source: `explicit_beams.slang`; for
+/// measurement builds only (each in its own target directory), `RUBBLE_EB_REF=1`
+/// the frozen reference `explicit_beams_ref.slang` and `RUBBLE_EB_SRC=<file>` any
+/// other file, so a before/after timing runs both kernels through the same pipelines.
+fn explicit_beams_source(slang_root: &Path) -> PathBuf {
+    if let Ok(f) = std::env::var("RUBBLE_EB_SRC") {
+        return PathBuf::from(f);
+    }
+    if std::env::var("RUBBLE_EB_REF").is_ok_and(|v| v == "1") {
+        slang_root.join("kernels/explicit_beams_ref.slang")
+    } else {
+        slang_root.join("kernels/explicit_beams.slang")
+    }
+}
+
+/// A module name's lane tag: 256 none, 512 `_wide`, else `_l<lanes>`.
+fn lane_tag(lanes: &str) -> String {
+    match lanes {
+        "256" => String::new(),
+        "512" => "_wide".into(),
+        l => format!("_l{l}"),
+    }
 }

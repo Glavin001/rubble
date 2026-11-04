@@ -41,6 +41,26 @@ pub struct CarParams {
     /// `pillar_strength` × strength, then they snap. A low bar that catches the
     /// pillars shears the roof off instead of folding it (underride).
     pub pillar_strength: f32,
+    /// A crash structure on the bonnet (with `panels`): a crease across its middle, pre-
+    /// raised and weaker, so a frontal crash folds it upward in a tent, and its hinge and
+    /// latch mounts strong enough to keep it on while its middle lifts off.
+    pub bonnet_crease: bool,
+    /// Front crash rails: two box-section rails inside the engine bay from the bumper beam
+    /// (through crash boxes, its first and weakest bay) to the firewall, yielding at
+    /// `rail_deform` × a grade that rises from 0.5 at the bumper to 1.5 at the firewall, so
+    /// they fold front first and carry the crash's load at a steady level into the sills.
+    pub rails: bool,
+    pub rail_deform: f32,
+    /// The bay's other solid parts (with `engine_block`): a gearbox bolted behind the engine
+    /// (the two stack up against the firewall as one powertrain), a radiator pack at the
+    /// front (light, crushable, on mounts that tear) and a battery on a tray that can tear
+    /// loose. Each is its own node cluster with its own mass.
+    pub components: bool,
+    /// Pillars that run down into a bay (the windscreen pillars to the cowl, the rear
+    /// pillars to the boot) are safety-cell structure, ductile at the cell's threshold,
+    /// rather than brittle: a frontal crash bends them, never snaps them, so the bay can't
+    /// slide in under the roof.
+    pub cell_pillar_bases: bool,
 }
 
 impl Default for CarParams {
@@ -67,6 +87,34 @@ impl Default for CarParams {
             engine_block: true,
             engine_mass: 160.0,
             pillar_strength: 0.05,
+            bonnet_crease: false,
+            rails: false,
+            rail_deform: 15_000.0,
+            components: false,
+            cell_pillar_bases: false,
+        }
+    }
+}
+
+impl CarParams {
+    /// The crash-test car: the default car on 21 rings (20 cm apart, so a crash folds the
+    /// front in short buckles rather than a few long ones), with box-section crash rails
+    /// (45 kN), the bonnet crease and a safety cell stronger than the rails. At 56 km/h
+    /// into a rigid wall it crushes about 0.55 m at a steady ~30 g (no hard stop at the
+    /// cell), stops in about 0.1 s and keeps its cabin (`engine-webgpu` tests/soft_crumple.rs).
+    pub fn sedan() -> Self {
+        Self {
+            name: "Rubble Sedan (procedural soft-body crash-test car)".into(),
+            stations: 21,
+            bonnet_crease: true,
+            rails: true,
+            rail_deform: 45_000.0,
+            components: true,
+            cell_pillar_bases: true,
+            // The safety cell: stronger than the rails it carries, so it stays whole.
+            cell_deform_scale: 5.0,
+            cell_strength_scale: 3.0,
+            ..Self::default()
         }
     }
 }
@@ -114,7 +162,47 @@ pub fn car_truck(p: &CarParams) -> String {
 /// parameters include).
 pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
     let (text, layout) = car_truck_layout(p);
-    let mut d = crate::truck::load_truck(&text);
+    (desc_with_parts(&text, &layout), layout)
+}
+
+/// Sections a bare body leaves out: the drivetrain and the Rigs of Rods tyres.
+const BARE_DROP: [&str; 3] = ["wheels", "engine", "brakes"];
+
+/// The car's `.truck` text without `wheels`, `engine` and `brakes`: the node–beam
+/// body alone, as the oracle and the GPU simulate it without a rigid core, and as a
+/// Rigs of Rods reference reads it (both sides load the same text).
+pub fn car_truck_bare(p: &CarParams) -> String {
+    strip_truck_sections(&car_truck(p), &BARE_DROP)
+}
+
+/// [`car_desc`] of [`car_truck_bare`]: node masses without the wheels' share.
+pub fn car_desc_bare(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
+    let (text, layout) = car_truck_layout(p);
+    (
+        desc_with_parts(&strip_truck_sections(&text, &BARE_DROP), &layout),
+        layout,
+    )
+}
+
+/// Drops whole `.truck` sections (the keyword line and its data lines).
+pub fn strip_truck_sections(text: &str, drop: &[&str]) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in text.lines() {
+        let word = line.split([' ', ',', '\t']).next().unwrap_or("");
+        if word.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            skipping = drop.contains(&word);
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn desc_with_parts(text: &str, layout: &CarLayout) -> crate::SoftVehicleDesc {
+    let mut d = crate::truck::load_truck(text);
     let ring_nodes = (layout.stations * CAR_RING) as u32;
     let mut body: Vec<u32> = (0..ring_nodes).collect();
     body.extend(ring_nodes..ring_nodes + 8); // axle nodes follow the rings
@@ -129,6 +217,10 @@ pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
     parts.push(("bumper_rear", layout.rear_bumper.clone()));
     parts.push(("engine", layout.engine.clone()));
     parts.push(("roof", layout.roof.clone()));
+    parts.push(("gearbox", layout.gearbox.clone()));
+    parts.push(("radiator", layout.radiator.clone()));
+    parts.push(("battery", layout.battery.clone()));
+    parts.push(("rails", layout.rails.clone()));
     d.parts = parts
         .into_iter()
         .filter(|(_, n)| !n.is_empty())
@@ -137,7 +229,7 @@ pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
             nodes,
         })
         .collect();
-    (d, layout)
+    d
 }
 
 /// What the visual mesh needs to know about the procedural car's node layout.
@@ -164,6 +256,14 @@ pub struct CarLayout {
     pub engine: Vec<u32>,
     /// Roof nodes (the passenger cell's top rows).
     pub roof: Vec<u32>,
+    /// The front crash rails' nodes (with `rails`): per bay ring from the firewall forward,
+    /// each side's box corners (inner lower, inner upper, outer lower, outer upper), left first.
+    pub rails: Vec<u32>,
+    /// The bay's components (with `components`): the gearbox's eight corners, the radiator
+    /// pack's four, the battery's eight.
+    pub gearbox: Vec<u32>,
+    pub radiator: Vec<u32>,
+    pub battery: Vec<u32>,
 }
 
 /// [`car_truck`] and the layout of its nodes.
@@ -180,7 +280,8 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         "globals\n{:.1}, {:.1}, tracks/semi\n",
         p.dry_mass, p.cargo_mass
     );
-    let _ = writeln!(s, "minimass {:.1}\n", p.minimass);
+    // `minimass` is a block keyword in Rigs of Rods: the value goes on the next line.
+    let _ = writeln!(s, "minimass\n{:.1}\n", p.minimass);
     let _ = writeln!(s, "enable_advanced_deformation");
     let _ = writeln!(
         s,
@@ -261,8 +362,10 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     };
     // Panel node index per (panel, ring position, row position).
     let mut panel_nodes: Vec<Vec<Vec<usize>>> = Vec::new();
-    for (ks, rows) in &panel_specs {
+    for (pi, (ks, rows)) in panel_specs.iter().enumerate() {
         let mut grid = Vec::new();
+        // The bonnet's crease ring (its middle), pre-raised so compression folds it up.
+        let crease = (p.bonnet_crease && pi == 0).then(|| ks[ks.len() / 2]);
         for &k in ks {
             let centre = {
                 let c: [f32; 3] = (0..6).fold([0.0; 3], |a, j| {
@@ -282,9 +385,18 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                 };
                 let l = (dx * dx + dy * dy).sqrt().max(1e-4);
                 col.push(nodes.len());
+                let rise = if crease == Some(k) {
+                    if j == 7 {
+                        0.035
+                    } else {
+                        0.02
+                    }
+                } else {
+                    0.0
+                };
                 nodes.push([
                     q[0] + 0.05 * dx / l,
-                    q[1] + 0.05 * dy / l + if j < 2 { 0.03 } else { 0.0 },
+                    q[1] + 0.05 * dy / l + if j < 2 { 0.03 } else { 0.0 } + rise,
                     q[2],
                 ]);
             }
@@ -318,6 +430,10 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             .filter(|&k| cabin[k])
             .flat_map(|k| [4usize, 5, 7].map(|j| (k * CAR_RING + j) as u32))
             .collect(),
+        rails: Vec::new(),
+        gearbox: Vec::new(),
+        radiator: Vec::new(),
+        battery: Vec::new(),
     };
     if p.panels {
         layout.rear_bumper = (rear_bumper_first as u32..rear_bumper_first as u32 + 6).collect();
@@ -344,6 +460,65 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         }
         layout.engine = (engine_first as u32..engine_first as u32 + 8).collect();
     }
+    // Front crash rails: box sections, per ring from the firewall (the cabin's last ring)
+    // to the front, four corners each side (inner/outer × lower/upper), inside the bay.
+    let rail_first = nodes.len();
+    let rail_rings: Vec<usize> = if p.rails {
+        (front_bay - 1..n).collect()
+    } else {
+        Vec::new()
+    };
+    for &k in &rail_rings {
+        let z = ring_z(k);
+        for side in [1.0f32, -1.0] {
+            for x in [0.38f32, 0.5] {
+                for y in [0.3f32, 0.46] {
+                    nodes.push([side * x, y, z]);
+                }
+            }
+        }
+    }
+    layout.rails = (rail_first as u32..nodes.len() as u32).collect();
+    // Corner c of a rail's box: inner lower, inner upper, outer lower, outer upper.
+    let rail = |ri: usize, side: usize, c: usize| rail_first + ri * 8 + side * 4 + c;
+    // The bay's components, with their masses (kg per node).
+    let mut node_mass: std::collections::HashMap<usize, f32> = Default::default();
+    let mut boxed = |nodes: &mut Vec<[f32; 3]>, c: [f32; 3], h: [f32; 3], kg: f32| -> Vec<u32> {
+        let first = nodes.len();
+        for &y in &[c[1] - h[1], c[1] + h[1]] {
+            for &z in &[c[2] - h[2], c[2] + h[2]] {
+                for &x in &[c[0] + h[0], c[0] - h[0]] {
+                    node_mass.insert(nodes.len(), kg / 8.0);
+                    nodes.push([x, y, z]);
+                }
+            }
+        }
+        (first as u32..first as u32 + 8).collect()
+    };
+    if p.components && p.engine_block {
+        // Behind the engine, a little lower and narrower.
+        layout.gearbox = boxed(
+            &mut nodes,
+            [0.0, 0.44, engine_z - 0.4],
+            [0.17, 0.11, 0.15],
+            60.0,
+        );
+        layout.battery = boxed(
+            &mut nodes,
+            [0.62, 0.7, engine_z + 0.12],
+            [0.1, 0.09, 0.13],
+            18.0,
+        );
+        let z = ring_z(n - 1) - 0.12;
+        let first = nodes.len();
+        for &y in &[0.36f32, 0.66] {
+            for &x in &[0.34f32, -0.34] {
+                node_mass.insert(nodes.len(), 3.0);
+                nodes.push([x, y, z]);
+            }
+        }
+        layout.radiator = (first as u32..first as u32 + 4).collect();
+    }
     // Shell faces a panel covers (it is the skin there): (ring k, row a, row b).
     let covered = |k: usize, a: usize, b: usize| {
         panel_specs.iter().any(|(ks, rows)| {
@@ -368,6 +543,8 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                 q[2],
                 p.engine_mass / 8.0
             );
+        } else if let Some(kg) = node_mass.get(&i) {
+            let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l, {kg:.1}", q[0], q[1], q[2]);
         } else if floor {
             let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l", q[0], q[1], q[2]);
         } else {
@@ -451,7 +628,10 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     };
     let roof_node =
         |i: usize| i < ring_nodes && cabin[i / CAR_RING] && matches!(i % CAR_RING, 4 | 5 | 7);
-    let pillar = |a: usize, b: usize| roof_node(a) != roof_node(b);
+    let bay_node = |i: usize| i < ring_nodes && !cabin[i / CAR_RING];
+    let pillar = |a: usize, b: usize| {
+        roof_node(a) != roof_node(b) && !(p.cell_pillar_bases && (bay_node(a) || bay_node(b)))
+    };
     let _ = writeln!(s, "beams");
     for zone_crumple in [false, true] {
         let (deform, strength) = if zone_crumple {
@@ -549,8 +729,14 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         // to the shell on its own detacher group (groups 2…).
         let mut group = 2;
         let mut sheets: Vec<(Vec<(usize, usize)>, Vec<(usize, usize)>)> = Vec::new();
+        // The bonnet crease's beams (yielding early) and the bonnet's hinge and latch mounts
+        // (strong) and middle mounts (weak), written apart from the rest.
+        let mut crease_sheet = Vec::new();
+        let mut held_mounts = Vec::new();
+        let mut lifting_mounts = Vec::new();
         for (pi, (ks, rows)) in panel_specs.iter().enumerate() {
             let g = &panel_nodes[pi];
+            let crease = (p.bonnet_crease && pi == 0).then(|| ks.len() / 2);
             let mut sheet = Vec::new();
             let mut mounts = Vec::new();
             for (ki, &k) in ks.iter().enumerate() {
@@ -560,10 +746,17 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                         sheet.push((pn, g[ki][ri + 1]));
                     }
                     if ki + 1 < ks.len() {
-                        sheet.push((pn, g[ki + 1][ri]));
+                        // Beams into or out of the crease ring fold first.
+                        let into_crease = crease.is_some_and(|c| ki + 1 == c || ki == c);
+                        let list = if into_crease {
+                            &mut crease_sheet
+                        } else {
+                            &mut sheet
+                        };
+                        list.push((pn, g[ki + 1][ri]));
                         if ri + 1 < rows.len() {
-                            sheet.push((pn, g[ki + 1][ri + 1]));
-                            sheet.push((g[ki][ri + 1], g[ki + 1][ri]));
+                            list.push((pn, g[ki + 1][ri + 1]));
+                            list.push((g[ki][ri + 1], g[ki + 1][ri]));
                         }
                     }
                     // Mounts: the shell nodes of the neighbouring rings (same row)
@@ -581,6 +774,17 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                     // Out-of-plane anchor: the section's floor centre (a door must not
                     // tie the roof to the body).
                     mounts.push((pn, ring(k, 6)));
+                    if crease.is_some() {
+                        // Bonnet: the hinge (rear row) and latch (front row) hold, the rest
+                        // let the middle lift into its tent.
+                        let mine: Vec<(usize, usize)> =
+                            mounts.drain(..).filter(|m| m.0 == pn).collect();
+                        if ki == 0 || ki + 1 == ks.len() {
+                            held_mounts.extend(mine);
+                        } else {
+                            lifting_mounts.extend(mine);
+                        }
+                    }
                 }
             }
             sheets.push((sheet, mounts));
@@ -635,6 +839,20 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                 let _ = writeln!(s, "{a}, {b}");
             }
         }
+        if !crease_sheet.is_empty() {
+            // The crease yields at a third of the panel's threshold (and keeps its strength).
+            let _ = writeln!(
+                s,
+                "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                p.spring,
+                p.damp,
+                p.deform * p.cell_deform_scale / 3.0,
+                p.strength * p.cell_strength_scale
+            );
+            for (a, b) in &crease_sheet {
+                let _ = writeln!(s, "{a}, {b}");
+            }
+        }
         let _ = writeln!(
             s,
             "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
@@ -643,10 +861,33 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             p.deform,
             p.strength * p.mount_strength
         );
-        for (_, mounts) in &sheets {
+        for (si, (_, mounts)) in sheets.iter().enumerate() {
             let _ = writeln!(s, "detacher_group {group}");
             for (a, b) in mounts {
                 let _ = writeln!(s, "{a}, {b}");
+            }
+            if si == 0 && (!held_mounts.is_empty() || !lifting_mounts.is_empty()) {
+                for (scale, list) in [(3.0, &held_mounts), (0.5, &lifting_mounts)] {
+                    let _ = writeln!(
+                        s,
+                        "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                        p.spring,
+                        p.damp,
+                        p.deform,
+                        p.strength * p.mount_strength * scale
+                    );
+                    for (a, b) in list {
+                        let _ = writeln!(s, "{a}, {b}");
+                    }
+                }
+                let _ = writeln!(
+                    s,
+                    "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                    p.spring,
+                    p.damp,
+                    p.deform,
+                    p.strength * p.mount_strength
+                );
             }
             group += 1;
         }
@@ -704,8 +945,181 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             let _ = writeln!(s, "{a}, {b}");
         }
     }
+    if !rail_rings.is_empty() {
+        // Crash rails. Each bay of each rail: four longitudinals and both diagonals of each
+        // face (a closed box that can only fold along its length), at a yield that rises
+        // from the bumper to the firewall.
+        let bays = rail_rings.len() - 1;
+        // The box's faces as corner pairs: inner, outer, bottom, top.
+        const FACES: [(usize, usize); 4] = [(0, 1), (2, 3), (0, 2), (1, 3)];
+        for ri in 0..bays {
+            // 0 at the firewall bay, 1 at the bumper's.
+            let u = (ri as f32 + 0.5) / bays as f32;
+            let grade = 1.5 - u;
+            let _ = writeln!(
+                s,
+                "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                p.spring,
+                p.damp,
+                p.rail_deform * grade,
+                p.strength * 4.0
+            );
+            for side in 0..2 {
+                for c in 0..4 {
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c), rail(ri + 1, side, c));
+                }
+                for (c0, c1) in FACES {
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c0), rail(ri + 1, side, c1));
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c1), rail(ri + 1, side, c0));
+                }
+            }
+        }
+        // Ties: each rail ring's box section (its four sides and a diagonal), and the box to
+        // the shell's floor and belt on its side and to the floor centre; at the firewall,
+        // back into the sill and tunnel (the load path into the cabin). Three times the
+        // rails' yield, so the rails fold before their ties give and carry the load.
+        let _ = writeln!(
+            s,
+            "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            (p.rail_deform * 3.0).max(p.deform * p.cell_deform_scale),
+            p.strength * p.cell_strength_scale * 2.0
+        );
+        for (ri, &k) in rail_rings.iter().enumerate() {
+            for side in 0..2 {
+                let (floor, belt) = if side == 0 { (0, 2) } else { (1, 3) };
+                for (c0, c1) in FACES.iter().copied().chain([(0, 3), (1, 2)]) {
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c0), rail(ri, side, c1));
+                }
+                for (c, j) in [(2, floor), (0, 6), (3, belt), (1, belt), (3, floor)] {
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c), ring(k, j));
+                }
+                if ri == 0 && k > 0 {
+                    for (c, j) in [(2, floor), (0, 6), (3, belt), (0, floor)] {
+                        let _ = writeln!(s, "{}, {}", rail(ri, side, c), ring(k - 1, j));
+                    }
+                }
+            }
+            // A cross member between the rails' inner bottoms.
+            let _ = writeln!(s, "{}, {}", rail(ri, 0, 0), rail(ri, 1, 0));
+        }
+        if p.bumper {
+            // Crash boxes: the rails' front ends to the bumper beam, its first and softest
+            // stage. They hold the beam on when its shell mounts tear, so the rails take the
+            // load; a hard enough hit breaks them too.
+            let last = rail_rings.len() - 1;
+            let b0 = bumper_first;
+            let _ = writeln!(
+                s,
+                "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                p.spring,
+                p.damp,
+                p.rail_deform * 0.4,
+                p.strength * 0.5
+            );
+            for (side, (lo, hi)) in [(0usize, (b0, b0 + 3)), (1, (b0 + 2, b0 + 5))] {
+                for c in 0..4 {
+                    for bb in [lo, hi] {
+                        let _ = writeln!(s, "{}, {}", rail(last, side, c), bb);
+                    }
+                }
+            }
+        }
+    }
+    if !layout.gearbox.is_empty() {
+        let near = |q: [f32; 3], pool: &[usize], k: usize| -> Vec<usize> {
+            let mut d: Vec<(f32, usize)> = pool
+                .iter()
+                .map(|&i| {
+                    let r = nodes[i];
+                    (
+                        ((r[0] - q[0]).powi(2) + (r[1] - q[1]).powi(2) + (r[2] - q[2]).powi(2))
+                            .sqrt(),
+                        i,
+                    )
+                })
+                .collect();
+            d.sort_by(|a, b| a.0.total_cmp(&b.0));
+            d.into_iter().take(k).map(|x| x.1).collect()
+        };
+        let solid = |s: &mut String, list: &[u32]| {
+            for a in 0..list.len() {
+                for b in a + 1..list.len() {
+                    let _ = writeln!(s, "{}, {}", list[a], list[b]);
+                }
+            }
+        };
+        // Gearbox and battery: rigid boxes, as the engine block. The gearbox bolts to the
+        // engine's rear corners (as strong as the engine itself).
+        let _ = writeln!(
+            s,
+            "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring * 2.0,
+            p.damp,
+            p.deform * 40.0,
+            p.strength * 20.0
+        );
+        solid(&mut s, &layout.gearbox);
+        solid(&mut s, &layout.battery);
+        let engine: Vec<usize> = layout.engine.iter().map(|&i| i as usize).collect();
+        for &g in &layout.gearbox {
+            for e in near(nodes[g as usize], &engine, 2) {
+                let _ = writeln!(s, "{g}, {e}");
+            }
+        }
+        // The gearbox's mounts to the tunnel and rails: bend, then tear, as the engine's.
+        let shell_floor: Vec<usize> = (front_bay.saturating_sub(2)..n)
+            .flat_map(|k| [ring(k, 6), ring(k, 0), ring(k, 1)])
+            .chain(layout.rails.iter().map(|&i| i as usize))
+            .collect();
+        let _ = writeln!(
+            s,
+            "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            p.deform * 2.0,
+            p.strength * 0.6
+        );
+        for &g in &layout.gearbox[..4] {
+            for t in near(nodes[g as usize], &shell_floor, 3) {
+                let _ = writeln!(s, "{g}, {t}");
+            }
+        }
+        // Radiator pack: a light braced panel, crushable (the base thresholds).
+        let r = &layout.radiator;
+        let _ = writeln!(
+            s,
+            "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring, p.damp, p.deform, p.strength
+        );
+        solid(&mut s, r);
+        // Its mounts and the battery tray's: weak, each on its own detacher group, so a hard
+        // hit tears either loose whole.
+        let bay: Vec<usize> = (front_bay..n)
+            .flat_map(|k| (0..CAR_RING).map(move |j| ring(k, j)))
+            .chain(layout.rails.iter().map(|&i| i as usize))
+            .collect();
+        let _ = writeln!(
+            s,
+            "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            p.deform,
+            p.strength * p.mount_strength
+        );
+        for (group, list, k) in [(20, r, 3), (21, &layout.battery, 2)] {
+            let _ = writeln!(s, "detacher_group {group}");
+            for &a in list.iter() {
+                for t in near(nodes[a as usize], &bay, k) {
+                    let _ = writeln!(s, "{a}, {t}");
+                }
+            }
+            let _ = writeln!(s, "detacher_group end");
+        }
+    }
     // Collision skin: every outer face of the shell, counter-clockwise from outside.
-    let _ = writeln!(s, "\ncab");
+    let _ = writeln!(s, "\nsubmesh\ncab");
     let quad = |s: &mut String, a: usize, b: usize, c: usize, d: usize| {
         let _ = writeln!(s, "{a}, {b}, {c}, c");
         let _ = writeln!(s, "{a}, {c}, {d}, c");
@@ -772,12 +1186,16 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     // Reference frame: centre, back, left.
     let mid = ring(n / 2, 0);
     let _ = writeln!(s, "\ncameras\n{}, {}, {}", ring(n - 1, 6), ring(0, 6), mid);
-    let _ = writeln!(s, "\nwheels");
+    // Soft tyres (a node–beam solver's wheels) take the beam defaults in force:
+    // reset them from the body's last, weak panel values to the format's defaults.
+    // Tyre damping 300 N·s/m: a tyre node is 15 kg / 24 and carries ~6 beams, so an
+    // explicit 0.5 ms step stays stable (h·c·6/m ≈ 1.4 < 2).
+    let _ = writeln!(s, "\nset_beam_defaults -1, -1, -1, -1\nwheels");
     for &(n1, n2, z) in &wheel_axles {
         // Rear-wheel drive (as the sedan preset): weight moves onto the rear axle
         // under acceleration, so it puts more power down than front drive.
         let propulsed = if z < 0.0 { 1 } else { 0 };
-        let _ = writeln!(s, "{:.3}, 0.20, 12, {n1}, {n2}, 9999, 1, {propulsed}, 9999, 15.0, 800000, 4000, tracks/wheelface, tracks/wheelband1", p.wheel_radius);
+        let _ = writeln!(s, "{:.3}, 0.20, 12, {n1}, {n2}, 9999, 1, {propulsed}, 9999, 15.0, 800000, 300, tracks/wheelface, tracks/wheelband1", p.wheel_radius);
     }
     let _ = writeln!(
         s,
@@ -805,7 +1223,7 @@ pub fn box_truck(
     let _ = writeln!(s, "lattice box {nx}x{ny}x{nz}\nfileformatversion 450");
     let _ = writeln!(
         s,
-        "globals\n{mass:.1}, 0.0, tracks/semi\nminimass 0.5\nenable_advanced_deformation"
+        "globals\n{mass:.1}, 0.0, tracks/semi\nminimass\n0.5\nenable_advanced_deformation"
     );
     let _ = writeln!(
         s,
@@ -848,7 +1266,7 @@ pub fn box_truck(
             }
         }
     }
-    let _ = writeln!(s, "cab");
+    let _ = writeln!(s, "submesh\ncab");
     let face = |s: &mut String, a: usize, b: usize, c: usize, d: usize| {
         let _ = writeln!(s, "{a}, {b}, {c}, c\n{a}, {c}, {d}, c");
     };

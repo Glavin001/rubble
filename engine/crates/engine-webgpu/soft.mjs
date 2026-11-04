@@ -9,8 +9,9 @@ export const SOFT = JSON.parse(wasm.soft_constants());
 /** Soft arena capacity (binding 32). Smaller than the native default for the browser. */
 export const DEFAULT_SOFT_CAPACITY = {
   maxBodies: 32, maxBeams: 24576, maxParticles: 4096, maxColors: 64, maxGroups: 1024, maxTriangles: 12288, maxObstacles: 64,
+  maxElements: 2048, maxRailNodes: 2048,
 };
-export const softCapWords = (c) => Uint32Array.of(c.maxBodies, c.maxBeams, c.maxParticles, c.maxColors, c.maxGroups, c.maxTriangles, c.maxObstacles);
+export const softCapWords = (c) => Uint32Array.of(c.maxBodies, c.maxBeams, c.maxParticles, c.maxColors, c.maxGroups, c.maxTriangles, c.maxObstacles, c.maxElements, c.maxRailNodes);
 
 /** `.truck` text → SoftVehicleDesc (masses distributed, warnings listed). */
 export const loadTruck = (src) => JSON.parse(wasm.soft_load_truck(src));

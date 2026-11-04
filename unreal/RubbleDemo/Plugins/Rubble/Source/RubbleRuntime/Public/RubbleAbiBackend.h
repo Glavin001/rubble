@@ -102,9 +102,9 @@ private:
 		TArray<float> WheelRadius;
 		TArray<float> Spin;
 		TArray<FVector> LastHub;
-		TArray<TArray<int32>> Neighbours; // per skin vertex
-		TArray<TArray<float>> RestLength;
-		TArray<uint32> Triangles;
+		/** The hubs' mean speed along the car last output (cm/s), and whether it has crashed. */
+		float HubSpeed = 0.0f;
+		bool bCrashed = false;
 	};
 	TArray<FSoftCar> SoftCars;
 	TMap<uint32, int32> SoftCarOfSkin;

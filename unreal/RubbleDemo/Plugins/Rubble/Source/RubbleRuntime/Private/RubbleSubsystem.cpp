@@ -12,6 +12,7 @@ DEFINE_LOG_CATEGORY(LogRubble);
 void URubbleSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+	bInterpolate = FParse::Param(FCommandLine::Get(), TEXT("RubbleInterpolate"));
 	// The real engine through its C ABI by default; -RubbleBackend=mock for the stand-in alone.
 	FString Which = TEXT("rubble");
 	FParse::Value(FCommandLine::Get(), TEXT("RubbleBackend="), Which);
@@ -101,7 +102,7 @@ void URubbleSubsystem::Advance(double RealSeconds)
 	BackendImpl->Poll(Frames);
 	if (FRubbleGpuPoses* Gpu = BackendImpl->GpuPoses())
 	{
-		Gpu->Update(float(Clock.Alpha()));
+		Gpu->Update(float(Alpha()));
 	}
 	Stats.BackendMs = 1000.0 * (FPlatformTime::Seconds() - Start);
 	Stats.Steps = Steps;

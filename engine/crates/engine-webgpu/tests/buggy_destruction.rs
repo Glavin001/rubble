@@ -373,3 +373,38 @@ fn core_part_names() {
     );
     assert!(names.contains(&"engine"));
 }
+
+/// What keeps the buggy soft on its run-up (crash islands probe).
+#[test]
+#[ignore]
+fn run_up_probe() {
+    use engine_softbody::SoftBackend;
+    let mut sim = world();
+    let h = spawn(&mut sim, [0.0, 0.05, 0.0], Quat::IDENTITY, [0.0, 0.0, 16.0]);
+    let core = sim.soft_host().entry(h).core.unwrap();
+    sim.set_vehicle_input(
+        core.0,
+        VehicleInput {
+            forward: 1.0,
+            ..Default::default()
+        },
+    );
+    let l = engine_softbody::SoftCapacity::default().layout();
+    for k in 0..30 {
+        run(&mut sim, 10);
+        let isl = sim.read_soft_slots(l.island_base, 1)[0];
+        let mode = sim.read_soft_slots(l.body_base + 6 * 0 + 3, 1)[0];
+        let y = sim
+            .read_soft_beams(h)
+            .iter()
+            .filter(|b| b.flags & engine_softbody::BEAM_YIELDED != 0)
+            .count();
+        eprintln!(
+            "step {}: island {:?} mode {:?} yielded {y} rigid {}",
+            (k + 1) * 10,
+            isl,
+            mode,
+            sim.read_soft_rigid(h)
+        );
+    }
+}

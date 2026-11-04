@@ -6,9 +6,12 @@
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
+  hiresCarJbeam, explicitSedanTruck,
 } from './generated/world-wasm/engine_world_wasm.js';
 
-export { WebWorld, WebCity, softCalibratedSettings };
+// hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
+// explicitSedanTruck(tyres): the explicit solver's procedural sedan as .truck text.
+export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck };
 let ready = null;
 
 /** The wasm's world-less functions (terrain settings, predictions, buffer layout), once loaded. */

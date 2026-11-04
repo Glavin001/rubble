@@ -846,7 +846,8 @@ pub fn encode_step(
             e.d("soft_tri_planes", u64::from(i.soft.triangles.max(1)));
             // SOFT_NODE_LANES (8) lanes per node.
             e.d("soft_collide_nodes", u64::from(i.soft.particles.max(1)) * 8);
-            e.d("soft_collide_tris", u64::from(i.soft.triangles.max(1)));
+            // One 64-lane workgroup per triangle.
+            e.d("soft_collide_tris", u64::from(i.soft.triangles.max(1)) * 64);
             e.d("soft_contact_lists", u64::from(i.soft.particles.max(1)));
         }
         // Rigid mode: promote / demote before the solve (soft_step.slang).

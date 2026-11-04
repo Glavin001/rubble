@@ -10,36 +10,128 @@
 
 use crate::layout::*;
 use glam::{Mat3, Vec3};
+use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign};
 
-/// Beam record in host form (the 16 GPU words, typed).
+/// Scalar the beam rules are written over: `f32` for the GPU twin and the
+/// implicit CPU reference, `f64` for the explicit oracle (`explicit_ref`), so both
+/// run the same rules.
+pub trait Real:
+    Copy
+    + PartialOrd
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Div<Output = Self>
+    + Neg<Output = Self>
+    + AddAssign
+    + SubAssign
+    + MulAssign
+{
+    const ZERO: Self;
+    const ONE: Self;
+    fn of(x: f32) -> Self;
+    fn max(self, o: Self) -> Self;
+    fn min(self, o: Self) -> Self;
+    fn abs(self) -> Self;
+    fn clamp(self, lo: Self, hi: Self) -> Self {
+        self.max(lo).min(hi)
+    }
+}
+
+macro_rules! impl_real {
+    ($t:ty) => {
+        impl Real for $t {
+            const ZERO: Self = 0.0;
+            const ONE: Self = 1.0;
+            fn of(x: f32) -> Self {
+                x as $t
+            }
+            fn max(self, o: Self) -> Self {
+                <$t>::max(self, o)
+            }
+            fn min(self, o: Self) -> Self {
+                <$t>::min(self, o)
+            }
+            fn abs(self) -> Self {
+                <$t>::abs(self)
+            }
+        }
+    };
+}
+impl_real!(f32);
+impl_real!(f64);
+
+/// Beam record in host form (the 16 GPU words, typed), over a scalar `T`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Beam {
+pub struct BeamT<T> {
     pub a: u32,
     pub b: u32,
-    pub rest: f32,
-    pub rest0: f32,
-    pub spring: f32,
-    pub damp: f32,
+    pub rest: T,
+    pub rest0: T,
+    pub spring: T,
+    pub damp: T,
     /// Compression yield threshold; for bounded beams the limit spring.
-    pub deform_c: f32,
-    pub strength: f32,
+    pub deform_c: T,
+    pub strength: T,
     /// Plastic coefficient, or hydro factor for hydros.
-    pub coef: f32,
+    pub coef: T,
     /// Bounded beams: bounds as fractions of L (short = compression). Normal beams:
     /// plastic rest-length limits as ratios of L₀ (0 = none). Supports: long =
     /// break factor.
-    pub short_bound: f32,
-    pub long_bound: f32,
+    pub short_bound: T,
+    pub long_bound: T,
     pub kind: u32,
     pub flags: u32,
     pub body: u32,
     pub group: u32,
-    pub penalty: f32,
-    pub lambda: f32,
+    pub penalty: T,
+    pub lambda: T,
     /// Tension yield threshold (positive).
-    pub deform_t: f32,
+    pub deform_t: T,
     /// Signed axial force (+ = compression) at the end of the last step.
-    pub force: f32,
+    pub force: T,
+    /// Spring and damping while longer than rest (anisotropic beams; the others
+    /// keep `spring` and `damp` here). Stored beside the 16 words.
+    pub spring_exp: T,
+    pub damp_exp: T,
+    /// Ceiling on `deform_c` as it hardens (∞ = none).
+    pub deform_limit: T,
+    /// Breaking does not trigger its group (the group still breaks it).
+    pub group_passive: bool,
+}
+
+/// The GPU's beam: f32 throughout.
+pub type Beam = BeamT<f32>;
+
+impl Beam {
+    /// The same beam over another scalar (the explicit oracle's f64).
+    pub fn cast<U: Real>(&self) -> BeamT<U> {
+        BeamT {
+            a: self.a,
+            b: self.b,
+            rest: U::of(self.rest),
+            rest0: U::of(self.rest0),
+            spring: U::of(self.spring),
+            damp: U::of(self.damp),
+            deform_c: U::of(self.deform_c),
+            strength: U::of(self.strength),
+            coef: U::of(self.coef),
+            short_bound: U::of(self.short_bound),
+            long_bound: U::of(self.long_bound),
+            kind: self.kind,
+            flags: self.flags,
+            body: self.body,
+            group: self.group,
+            penalty: U::of(self.penalty),
+            lambda: U::of(self.lambda),
+            deform_t: U::of(self.deform_t),
+            force: U::of(self.force),
+            spring_exp: U::of(self.spring_exp),
+            damp_exp: U::of(self.damp_exp),
+            deform_limit: U::of(self.deform_limit),
+            group_passive: self.group_passive,
+        }
+    }
 }
 
 pub const KIND_NORMAL: u32 = 0;
@@ -47,6 +139,12 @@ pub const KIND_SUPPORT: u32 = 1;
 pub const KIND_ROPE: u32 = 2;
 pub const KIND_BOUNDED: u32 = 3;
 pub const KIND_HYDRO: u32 = 4;
+pub const KIND_ANISOTROPIC: u32 = 5;
+
+/// Normal and anisotropic beams yield and break by the plastic rules.
+pub fn kind_plastic(kind: u32) -> bool {
+    kind == KIND_NORMAL || kind == KIND_ANISOTROPIC
+}
 
 impl Beam {
     pub fn to_words(&self) -> [u32; 16] {
@@ -96,9 +194,15 @@ impl Beam {
             lambda: f(BW_LAMBDA),
             deform_t: f(BW_DEFORM_T),
             force: f(BW_FORCE),
+            spring_exp: f(BW_SPRING),
+            damp_exp: f(BW_DAMP),
+            deform_limit: f32::INFINITY,
+            group_passive: false,
         }
     }
+}
 
+impl<T> BeamT<T> {
     pub fn broken(&self) -> bool {
         self.flags & BEAM_BROKEN != 0
     }
@@ -110,17 +214,17 @@ impl Beam {
 
 /// φ'(ℓ) and φ''(ℓ) of the elastic part. `k` is the stiffness in use (the AVBD
 /// penalty while it ramps, the material k* for the readout).
-pub fn elastic_terms(beam: &Beam, len: f32, k: f32) -> (f32, f32) {
+pub fn elastic_terms<T: Real>(beam: &BeamT<T>, len: T, k: T) -> (T, T) {
     let l = beam.rest;
     let delta = len - l;
     match beam.kind {
-        KIND_SUPPORT if delta > 0.0 => (0.0, 0.0),
-        KIND_ROPE if delta < 0.0 => (0.0, 0.0),
+        KIND_SUPPORT if delta > T::ZERO => (T::ZERO, T::ZERO),
+        KIND_ROPE if delta < T::ZERO => (T::ZERO, T::ZERO),
         KIND_BOUNDED => {
             let mut d1 = k * delta;
             let mut d2 = k;
-            let lo = l * (1.0 - beam.short_bound);
-            let hi = l * (1.0 + beam.long_bound);
+            let lo = l * (T::ONE - beam.short_bound);
+            let hi = l * (T::ONE + beam.long_bound);
             let kl = beam.deform_c;
             if len < lo {
                 d1 += kl * (len - lo);
@@ -130,6 +234,11 @@ pub fn elastic_terms(beam: &Beam, len: f32, k: f32) -> (f32, f32) {
                 d2 += kl;
             }
             (d1, d2)
+        }
+        // Longer than rest: the expansion spring, scaled like the penalty ramp.
+        KIND_ANISOTROPIC if delta > T::ZERO && beam.spring > T::ZERO => {
+            let ke = k * beam.spring_exp / beam.spring;
+            (ke * delta, ke)
         }
         _ => {
             if beam.hard() {
@@ -142,11 +251,16 @@ pub fn elastic_terms(beam: &Beam, len: f32, k: f32) -> (f32, f32) {
 }
 
 /// Damping coefficient in use for this state (supports and ropes slack at 10%).
-pub fn damping_coef(beam: &Beam, len: f32, scale: f32) -> f32 {
+pub fn damping_coef<T: Real>(beam: &BeamT<T>, len: T, scale: T) -> T {
     let delta = len - beam.rest;
-    let slack =
-        (beam.kind == KIND_SUPPORT && delta > 0.0) || (beam.kind == KIND_ROPE && delta < 0.0);
-    beam.damp * scale * if slack { 0.1 } else { 1.0 }
+    let slack = (beam.kind == KIND_SUPPORT && delta > T::ZERO)
+        || (beam.kind == KIND_ROPE && delta < T::ZERO);
+    let damp = if beam.kind == KIND_ANISOTROPIC && delta > T::ZERO {
+        beam.damp_exp
+    } else {
+        beam.damp
+    };
+    damp * scale * if slack { T::of(0.1) } else { T::ONE }
 }
 
 /// Gradient and Hessian block of `beam` for the particle at `xa` (the other end at
@@ -169,8 +283,8 @@ pub fn beam_block(
 /// dashpot. The curvature stays the elastic one: the capped energy's true
 /// curvature is 0 there, which lets an undamped per-particle Newton step
 /// overshoot; k bounds it from above, so every step still lowers the energy.
-pub fn yield_cap(beam: &Beam, d1: f32, scale: f32) -> f32 {
-    if beam.kind != KIND_NORMAL || beam.spring <= 0.0 || beam.hard() {
+pub fn yield_cap<T: Real>(beam: &BeamT<T>, d1: T, scale: T) -> T {
+    if !kind_plastic(beam.kind) || beam.spring <= T::ZERO || beam.hard() {
         return d1;
     }
     d1.clamp(-beam.deform_c * scale, beam.deform_t * scale)
@@ -212,14 +326,19 @@ pub fn beam_block_plastic(
 
 /// Signed axial force (+ = compression, RoR's `slen`) with the material stiffness:
 /// F = −(k*(ℓ − L) + c(ℓ − ℓ_prev)/h). Hard beams report their multiplier.
-pub fn readout_force(beam: &Beam, len: f32, len0: f32, h: f32, damp_scale: f32) -> f32 {
+pub fn readout_force<T: Real>(beam: &BeamT<T>, len: T, len0: T, h: T, damp_scale: T) -> T {
+    readout_force_rate(beam, len, (len - len0) / h, damp_scale)
+}
+
+/// [`readout_force`] from the length rate ℓ̇ directly (the explicit oracle).
+pub fn readout_force_rate<T: Real>(beam: &BeamT<T>, len: T, rate: T, damp_scale: T) -> T {
     let (spring, _) = if beam.hard() {
-        (beam.penalty * (len - beam.rest) + beam.lambda, 0.0)
+        (beam.penalty * (len - beam.rest) + beam.lambda, T::ZERO)
     } else {
         elastic_terms(beam, len, beam.spring)
     };
     let c = damping_coef(beam, len, damp_scale);
-    -(spring + c * (len - len0) / h)
+    -(spring + c * rate)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -231,11 +350,11 @@ pub struct PlasticOutcome {
 /// Post-step plasticity and breaking (RoR rules) at the converged length.
 /// `force` is [`readout_force`]. Only normal beams deform; hydros, shocks and
 /// supports never do.
-pub fn plastic_update(
-    beam: &mut Beam,
-    len: f32,
-    force: f32,
-    min_length: f32,
+pub fn plastic_update<T: Real>(
+    beam: &mut BeamT<T>,
+    len: T,
+    force: T,
+    min_length: T,
     plasticity: bool,
     breaking: bool,
 ) -> PlasticOutcome {
@@ -246,34 +365,40 @@ pub fn plastic_update(
     }
     let delta = len - beam.rest;
     let mut out_force = force;
-    if plasticity && beam.kind == KIND_NORMAL && beam.spring > 0.0 {
+    if plasticity && kind_plastic(beam.kind) && beam.spring > T::ZERO {
         let k = beam.spring;
-        if force > beam.deform_c && delta < 0.0 {
+        // Tension on an anisotropic beam yields against its expansion spring.
+        let kt = if beam.kind == KIND_ANISOTROPIC {
+            beam.spring_exp
+        } else {
+            k
+        };
+        if force > beam.deform_c && delta < T::ZERO {
             // Compression past the threshold: the rest length moves so the beam
             // sits on the yield surface; the threshold hardens as it shortens.
             // The solve capped it there, so that is the force it carried.
             out_force = beam.deform_c;
             let old = beam.rest;
-            let deform = delta + beam.deform_c * (1.0 - beam.coef) / k;
+            let deform = delta + beam.deform_c * (T::ONE - beam.coef) / k;
             beam.rest = (beam.rest + deform).max(min_length);
-            if beam.short_bound > 0.0 {
+            if beam.short_bound > T::ZERO {
                 beam.rest = beam.rest.max(beam.rest0 * beam.short_bound);
             }
-            beam.deform_c *= old / beam.rest;
+            beam.deform_c = (beam.deform_c * (old / beam.rest)).min(beam.deform_limit);
             beam.flags |= BEAM_YIELDED;
             out.yielded = true;
-        } else if -force > beam.deform_t && delta > 0.0 {
+        } else if -force > beam.deform_t && delta > T::ZERO {
             // Tension: symmetric, and the beam weakens by the plastic stretch
             // until it tears.
             out_force = -beam.deform_t;
             let old = beam.rest;
-            let deform = delta - beam.deform_t * (1.0 - beam.coef) / k;
+            let deform = delta - beam.deform_t * (T::ONE - beam.coef) / kt;
             beam.rest += deform;
-            if beam.long_bound > 0.0 {
+            if beam.long_bound > T::ZERO {
                 beam.rest = beam.rest.min(beam.rest0 * beam.long_bound);
             }
             beam.deform_t *= beam.rest / old;
-            beam.strength -= deform * k;
+            beam.strength -= deform * kt;
             beam.flags |= BEAM_YIELDED;
             out.yielded = true;
         }
@@ -282,7 +407,7 @@ pub fn plastic_update(
     if breaking {
         let broke = match beam.kind {
             // A support breaks once stretched past L·factor.
-            KIND_SUPPORT => delta > beam.rest * beam.long_bound && beam.long_bound > 0.0,
+            KIND_SUPPORT => delta > beam.rest * beam.long_bound && beam.long_bound > T::ZERO,
             _ => out_force.abs() > beam.strength,
         };
         if broke {
@@ -318,6 +443,10 @@ mod tests {
             lambda: 0.0,
             deform_t: 1.0e4,
             force: 0.0,
+            spring_exp: 1.0e6,
+            damp_exp: 0.0,
+            deform_limit: f32::INFINITY,
+            group_passive: false,
         }
     }
 
@@ -389,6 +518,18 @@ mod tests {
             b.rest
         );
         assert!(b.deform_c > 1.0e4, "hardens as it shortens");
+    }
+
+    #[test]
+    fn hardening_stops_at_the_deform_limit_stress() {
+        let mut b = beam(1.0);
+        b.strength = 1.0e9;
+        b.deform_limit = 1.2e4;
+        for len in [0.9f32, 0.8, 0.7] {
+            let f = readout_force(&b, len, len, 0.01, 1.0);
+            plastic_update(&mut b, len, f, 0.1, true, true);
+        }
+        assert!((b.deform_c - 1.2e4).abs() < 1e-3, "{}", b.deform_c);
     }
 
     #[test]

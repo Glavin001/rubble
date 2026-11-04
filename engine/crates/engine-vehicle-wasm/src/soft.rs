@@ -11,7 +11,8 @@ use engine_softbody::{
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
-/// [maxBodies, maxBeams, maxParticles, maxColors, maxGroups, maxTriangles, maxObstacles].
+/// [maxBodies, maxBeams, maxParticles, maxColors, maxGroups, maxTriangles, maxObstacles,
+/// maxElements, maxRailNodes] (missing words take the defaults).
 pub(crate) fn soft_capacity(v: &[u32]) -> SoftCapacity {
     let d = SoftCapacity::default();
     let g = |i: usize, def: u32| v.get(i).copied().unwrap_or(def);
@@ -23,6 +24,8 @@ pub(crate) fn soft_capacity(v: &[u32]) -> SoftCapacity {
         max_groups: g(4, d.max_groups),
         max_triangles: g(5, d.max_triangles),
         max_obstacles: g(6, d.max_obstacles),
+        max_elements: g(7, d.max_elements),
+        max_rail_nodes: g(8, d.max_rail_nodes),
     }
 }
 
@@ -63,18 +66,7 @@ pub fn soft_dune_buggy(mount_scale: f32) -> String {
 /// bits), 4 per triangle (vertices, material).
 #[wasm_bindgen]
 pub fn soft_procedural_car_visual() -> Vec<u32> {
-    use engine_softbody::procedural::car_truck_layout;
-    use engine_softbody::visual::car_visual;
-    use glam::Vec3;
-    let p = CarParams::default();
-    let (text, layout) = car_truck_layout(&p);
-    let d = load_truck(&text);
-    let nodes: Vec<Vec3> = d
-        .nodes
-        .iter()
-        .map(|n| Vec3::from_array(n.position))
-        .collect();
-    let v = car_visual(&p, &layout, &nodes);
+    let (v, nodes) = engine_softbody::visual::procedural_car_visual(&CarParams::default());
     let mut out = vec![v.vertices.len() as u32, v.tris.len() as u32];
     for (i, b) in v.bindings.iter().enumerate() {
         let [c, x, y] = b.nodes;

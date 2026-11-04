@@ -6,6 +6,8 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 #[cfg(feature = "gpu")]
+mod explicit_beams_gpu;
+#[cfg(feature = "gpu")]
 mod features;
 #[cfg(feature = "gpu")]
 mod gpu;
@@ -17,6 +19,10 @@ mod poses;
 pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
+#[cfg(feature = "gpu")]
+pub use explicit_beams_gpu::{
+    explicit_beams_shipped_wgsl, render_scene_json, ExplicitBeamsGpu, GpuBeam, GpuSnapshot, KernelVariant,
+};
 #[cfg(feature = "gpu")]
 pub use features::{
     ContactStorage, EngineFeatures, GpuTiming, GridLayout, KernelGroups, ManifoldPersistence,
@@ -38,6 +44,65 @@ pub use soft_skin::SoftSkinner;
 /// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
 pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
 
+/// The explicit-beams solver (`slang/kernels/explicit_beams.slang`, entry
+/// `explicit_beams_frame`): one workgroup per vehicle runs a whole frame of steps
+/// ([`ExplicitBeamsGpu`]), as `generated/wgsl/explicit_beams.wgsl`.
+pub const EXPLICIT_BEAMS_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams.wgsl"));
+/// The build's WGSL directory (native tests read the frozen baseline kernel,
+/// `explicit_baseline_*.wgsl`, from it at run time).
+#[doc(hidden)]
+pub const EXPLICIT_BEAMS_WGSL_DIR: &str = concat!(env!("OUT_DIR"), "/wgsl");
+
+/// The explicit-beams wide passes (entry, WGSL), one module each: one thread per
+/// element over every vehicle, a dispatch per pass ([`ExplicitBeamsGpu::set_wide`]).
+pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 8] = [
+    ("explicit_beams_wide_begin", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_begin.wgsl"))),
+    ("explicit_beams_wide_rebase", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_rebase.wgsl"))),
+    ("explicit_beams_wide_nodes", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nodes.wgsl"))),
+    ("explicit_beams_wide_beams", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_beams.wgsl"))),
+    ("explicit_beams_wide_tris", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_tris.wgsl"))),
+    ("explicit_beams_wide_end", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_end.wgsl"))),
+    ("explicit_beams_wide_close", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_close.wgsl"))),
+    ("explicit_beams_wide_hits", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_hits.wgsl"))),
+];
+
+/// [`EXPLICIT_BEAMS_WGSL`] with 512 lanes per vehicle, for large vehicles.
+pub const EXPLICIT_BEAMS_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide.wgsl"));
+/// [`EXPLICIT_BEAMS_WGSL`] with wings, the fuselage drag and command beams
+/// (`EB_AERO`), for fleets that have them; 256 and 512 lanes.
+pub const EXPLICIT_BEAMS_AERO_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero.wgsl"));
+pub const EXPLICIT_BEAMS_AERO_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide.wgsl"));
+/// Vehicle–vehicle contact of the explicit-beams solver: the per-frame plan passes
+/// (entry, WGSL) and the contact groups' entry `explicit_beams_contact` at the four
+/// frame module variants (256 lanes, 512, with `EB_AERO`, both).
+pub const EXPLICIT_BEAMS_VV_PASSES: [(&str, &str); 3] = [
+    ("explicit_beams_vv_bounds", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_bounds.wgsl"))),
+    ("explicit_beams_vv_pairs", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_pairs.wgsl"))),
+    ("explicit_beams_vv_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_group.wgsl"))),
+];
+pub const EXPLICIT_BEAMS_CONTACT_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact.wgsl"));
+pub const EXPLICIT_BEAMS_CONTACT_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_wide.wgsl"));
+pub const EXPLICIT_BEAMS_CONTACT_AERO_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero.wgsl"));
+pub const EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide.wgsl"));
+/// The frame entry for the vehicles stepped alone while contact is active
+/// (`EB_VV_SOLO`: the vehicle from the solo list, the frame bounds check), at the
+/// four variants; [`EXPLICIT_BEAMS_WGSL`] and the others stay the plain frame.
+pub const EXPLICIT_BEAMS_SOLO_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo.wgsl"));
+pub const EXPLICIT_BEAMS_SOLO_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_wide.wgsl"));
+pub const EXPLICIT_BEAMS_SOLO_AERO_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero.wgsl"));
+pub const EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide.wgsl"));
 /// A buffer's extent for compact snapshots (`slang/kernels/state_extent.slang`,
 /// entry `state_extent`; `WgpuSim::measure_state`).
 pub const STATE_EXTENT_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/state_extent.wgsl"));
@@ -312,65 +377,36 @@ fn fix_naga_loop_exits(src: &str) -> String {
     s
 }
 
-/// Hard cap on every WGSL loop. A non-terminating kernel on Apple Silicon can stall the
-/// window server and take the whole machine down, so no loop may run unbounded.
-pub const WGSL_LOOP_CAP: u32 = 1 << 16;
+include!("wgsl_loop_cap.rs");
 
 /// Chrome treats a storage/workgroup load as non-uniform, so a later barrier
 /// inside `if (lanes == 1)` is rejected. `workgroupUniformLoad` makes it uniform.
 fn uniformize_workgroup_lanes(src: &str) -> String {
-    const NAME: &str = "gsUniformLanes_0";
-    if !src.contains(NAME) {
-        return src.to_string();
-    }
-    let mut out = String::with_capacity(src.len() + 256);
-    for line in src.lines() {
-        if line.contains("var<workgroup>") && line.contains(NAME) {
-            out.push_str(line);
-        } else {
-            out.push_str(
-                &line
-                    .replace(NAME, &format!("workgroupUniformLoad(&{NAME})"))
-                    // Restore stores only: `= ` must not also match a `==` read.
-                    .replace(
-                        "workgroupUniformLoad(&gsUniformLanes_0) = ",
-                        "gsUniformLanes_0 = ",
-                    ),
-            );
+    const NAMES: [&str; 3] = ["gsUniformLanes_0", "gsUniformHits_0", "gsUniformOpen_0"];
+    let mut out = src.to_string();
+    for name in NAMES {
+        if !out.contains(name) {
+            continue;
         }
-        out.push('\n');
-    }
-    out
-}
-
-fn cap_loop_iterations(src: &str) -> String {
-    let b = src.as_bytes();
-    let mut out = String::with_capacity(src.len() + 8192);
-    let mut last = 0usize;
-    let mut i = 0usize;
-    let mut k = 0usize;
-    while let Some(rel) = src[i..].find("loop") {
-        let at = i + rel;
-        let after = at + 4;
-        let word = (at == 0 || !(b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_'))
-            && (after >= b.len() || !(b[after].is_ascii_alphanumeric() || b[after] == b'_'));
-        let mut j = after;
-        while j < b.len() && b[j].is_ascii_whitespace() {
-            j += 1;
+        let mut next = String::with_capacity(out.len() + 256);
+        for line in out.lines() {
+            if line.contains("var<workgroup>") && line.contains(name) {
+                next.push_str(line);
+            } else {
+                next.push_str(
+                    &line
+                        .replace(name, &format!("workgroupUniformLoad(&{name})"))
+                        // Restore stores only: `= ` must not also match a `==` read.
+                        .replace(
+                            &format!("workgroupUniformLoad(&{name}) = "),
+                            &format!("{name} = "),
+                        ),
+                );
+            }
+            next.push('\n');
         }
-        if word && j < b.len() && b[j] == b'{' {
-            out.push_str(&src[last..at]);
-            out.push_str(&format!(
-                "var loopGuard{k}: u32 = 0u;\nloop {{\n loopGuard{k} += 1u; if (loopGuard{k} > {WGSL_LOOP_CAP}u) {{ break; }}\n"
-            ));
-            k += 1;
-            last = j + 1;
-            i = j + 1;
-        } else {
-            i = after;
-        }
+        out = next;
     }
-    out.push_str(&src[last..]);
     out
 }
 

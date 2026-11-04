@@ -1,122 +1,773 @@
 //! Soft-body calibration harness (design: "Calibration and validation") on the
-//! native wgpu host. Runs the standard tests on the procedural car at a reference
-//! setting (a fine step and many iterations, standing in for a 2,000 Hz explicit
-//! engine when no Rigs of Rods recording is available) and at candidate settings,
-//! reports the metrics, and fits the global threshold scale per step rate so the
-//! 60 km/h wall crush matches the reference.
+//! native wgpu host. Runs the standard tests on a procedural car with the
+//! explicit oracle (`engine_softbody::explicit_ref`: f64 symplectic Euler at
+//! ≥ 2 kHz, the Rigs of Rods / BeamNG scheme) as the reference, and at candidate
+//! GPU settings, through the same scenes and the same metrics
+//! (`engine_softbody::metrics`). Every vehicle spawns without a rigid core (the
+//! oracle has none), standing on its node spheres.
 //!
 //! ```bash
 //! cargo run -p engine-webgpu --release --bin soft_calibrate
-//! # a custom sweep: step rate × iterations, Chebyshev ρ, particle sweeps per iteration, no fit
-//! SETTINGS=120x10,120x20,240x10 CHEB=0 SWEEPS=2 FIT=0 cargo run -p engine-webgpu --release --bin soft_calibrate
-//! # candidates with BDF2 particles
-//! SETTINGS=120x10,240x10 BDF2=1 FIT=0 cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # a custom sweep: step rate × iterations, Chebyshev ρ, particle sweeps per iteration
+//! SETTINGS=120x10,240x10,960x30 CHEB=0 SWEEPS=2 cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # candidates with BDF2 particles; the default hatchback instead of the sedan
+//! SETTINGS=240x10 BDF2=1 CAR=default cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # fit the global threshold scale per step rate to the oracle's 56 km/h crush
+//! FIT=1 cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # crash islands: 2 substeps per step for bodies in contact
+//! SUBSTEPS=2 SETTINGS=240x10 cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # Rigs of Rods' own solver as the reference (local harness, see inspiration/ror-harness)
+//! REF=ror ROR_BIN=<path>/ror_ref CAR=sedan_ror SETTINGS=240x10 cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # a published Rigs of Rods vehicle against RoR's own solver (rigid core + raycast wheels here)
+//! REF=ror ROR_BIN=<path>/ror_ref CAR=truck:<content>/agora/95bbUID-agoras.truck SETTINGS=240x10 cargo run ...
+//! # the GPU scenes 10 km from the origin (f32 precision)
+//! OFFSET=10000 SETTINGS=240x10 cargo run -p engine-webgpu --release --bin soft_calibrate
 //! ```
 use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity};
 use engine_softbody::calibrate::*;
-use engine_softbody::procedural::{car_truck, CarParams};
-use engine_softbody::truck::load_truck;
+use engine_softbody::explicit_ref::{ExplicitSettings, ExplicitSim, Shape};
+use engine_softbody::hires::{hires_car_desc, named, ring_nodes, HiresParams};
+use engine_softbody::metrics::*;
+use engine_softbody::procedural::{
+    car_desc, car_desc_bare, car_truck, car_truck_bare, CarParams, CAR_RING,
+};
 use engine_softbody::{
     soft_scene_params, SoftCapacity, SoftHandle, SoftSettings, SoftVehicleDesc, SpawnOptions,
 };
 use engine_vehicle::VehicleCapacity;
 use engine_webgpu::WgpuSim;
-use glam::Vec3;
+use glam::{DQuat, DVec3, Quat, Vec3};
+
+/// Friction the GPU uses between nodes (0.8) and the ground and walls (1.0): the
+/// geometric mean.
+const MU: f64 = 0.894;
+/// Metrics sample rate (Hz).
+const SAMPLE_HZ: f32 = 240.0;
 
 #[derive(Clone, Copy)]
 struct Setting {
     hz: f32,
     iterations: u32,
     threshold_scale: f32,
-    /// The reference ignores the sweep's CHEB and HARD overrides.
-    reference: bool,
 }
 
-fn world(s: Setting) -> WgpuSim {
-    let cap = WorldCapacity {
-        max_bodies: 4096,
-        max_colliders: 8192,
-        max_contacts: 65_536,
-        max_joints: 512,
-        max_candidates: 131_072,
-        max_colors: 32,
-        max_commands: 64,
-        max_hull_vertices: 64,
-    };
-    let mut sim = WgpuSim::new_with_soft(cap, VehicleCapacity::default(), SoftCapacity::default())
-        .expect("wgpu");
-    let mut p = soft_scene_params(s.hz, s.iterations);
-    p.sleep_time = 1.0e6;
-    sim.set_params(p);
-    let d = SoftSettings::default();
-    sim.set_soft_settings(SoftSettings {
-        threshold_scale: s.threshold_scale,
-        chebyshev_rho: env_f32("CHEB")
-            .filter(|_| !s.reference)
-            .unwrap_or(d.chebyshev_rho),
-        sweeps: env_f32("SWEEPS")
-            .filter(|_| !s.reference)
-            .map_or(d.sweeps, |v| v as u32),
-        plasticity: std::env::var("PLASTIC").as_deref() != Ok("0") || s.reference,
-        // BDF2=1: candidates integrate the particles with BDF2 (the reference stays BDF1).
-        bdf2: std::env::var("BDF2").as_deref() == Ok("1") && !s.reference,
-        ..d
-    });
-    sim.set_material(
-        0,
-        Material {
-            friction: 1.0,
-            restitution: 0.0,
-            contact_offset: 0.01,
-            _pad: 0.0,
-        },
-    );
-    sim.set_material(
-        9,
-        Material {
-            friction: 0.8,
-            restitution: 0.0,
-            contact_offset: 0.01,
-            _pad: 0.0,
-        },
-    );
-    let g = sim.add_body(BodyState::static_plane_support());
-    sim.add_collider(Collider {
-        body: g,
-        shape: ShapeType::Box as u32,
-        material: 0,
-        generation: 0,
-        local_pos: [0.0, -5.0, 0.0],
-        density: 0.0,
-        local_rot: [0.0, 0.0, 0.0, 1.0],
-        params: [400.0, 5.0, 400.0, 566.0],
-    });
-    sim
+/// A static box: centre and half extents.
+#[derive(Clone, Copy)]
+struct Wall {
+    center: Vec3,
+    half: Vec3,
+}
+
+/// One scene running on the GPU or on the oracle.
+trait Runner {
+    /// Advances one sample period.
+    fn frame(&mut self);
+    fn time(&self) -> f64;
+    fn positions(&self) -> Vec<Vec3>;
+    fn velocities(&self) -> Vec<Vec3>;
+    fn masses(&self) -> Vec<f32>;
+    /// Broken flag per beam (desc order).
+    fn broken(&self) -> Vec<bool>;
+    fn yielded(&self) -> usize;
+    fn kick(&mut self, node: u32, velocity: Vec3);
+}
+
+struct Gpu {
+    sim: WgpuSim,
+    h: SoftHandle,
+    /// The whole scene sits here (`OFFSET=d` puts it at (d, 0, d)); positions are
+    /// reported relative to it.
+    offset: Vec3,
+    steps: u32,
+    dt: f64,
+    t: f64,
 }
 
 fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())
 }
 
-fn positions(sim: &WgpuSim, h: SoftHandle) -> Vec<Vec3> {
-    sim.read_soft_particles(h)
-        .iter()
-        .map(|b| Vec3::from_array(b.position))
-        .collect()
-}
-
-fn kinetic(sim: &WgpuSim, h: SoftHandle) -> f32 {
-    sim.read_soft_particles(h)
-        .iter()
-        .filter(|b| b.inv_mass > 0.0)
-        .map(|b| 0.5 / b.inv_mass * Vec3::from_array(b.linear_vel).length_squared())
-        .sum()
-}
-
-fn run_s(sim: &mut WgpuSim, s: Setting, seconds: f32) {
-    for _ in 0..(s.hz * seconds) as u32 {
-        sim.step().expect("step");
+impl Gpu {
+    fn new(s: Setting, car: &Car, at: Vec3, vel: Vec3, walls: &[Wall]) -> Self {
+        let desc = &car.desc;
+        let d = env_f32("OFFSET").unwrap_or(0.0);
+        let offset = Vec3::new(d, 0.0, d);
+        let cap = WorldCapacity {
+            max_bodies: 4096,
+            max_colliders: 8192,
+            max_contacts: 65_536,
+            max_joints: 512,
+            max_candidates: 131_072,
+            max_colors: 32,
+            max_commands: 64,
+            max_hull_vertices: 64,
+        };
+        let mut sim =
+            WgpuSim::new_with_soft(cap, VehicleCapacity::default(), SoftCapacity::default())
+                .expect("wgpu");
+        let mut p = soft_scene_params(s.hz, s.iterations);
+        p.sleep_time = 1.0e6;
+        sim.set_params(p);
+        let d = SoftSettings::default();
+        sim.set_soft_settings(SoftSettings {
+            threshold_scale: s.threshold_scale,
+            chebyshev_rho: env_f32("CHEB").unwrap_or(d.chebyshev_rho),
+            sweeps: env_f32("SWEEPS").map_or(d.sweeps, |v| v as u32),
+            plasticity: std::env::var("PLASTIC").as_deref() != Ok("0"),
+            bdf2: std::env::var("BDF2").as_deref() == Ok("1"),
+            crash_substeps: env_f32("SUBSTEPS").map_or(d.crash_substeps, |v| v as u32),
+            ..d
+        });
+        for (i, mu) in [(0, 1.0), (9, 0.8)] {
+            sim.set_material(
+                i,
+                Material {
+                    friction: mu,
+                    restitution: 0.0,
+                    contact_offset: 0.01,
+                    _pad: 0.0,
+                },
+            );
+        }
+        let ground = Wall {
+            center: Vec3::new(0.0, -5.0, 0.0),
+            half: Vec3::new(400.0, 5.0, 400.0),
+        };
+        for w in std::iter::once(&ground).chain(walls) {
+            let b = sim.add_body(BodyState::static_plane_support());
+            sim.add_collider(Collider {
+                body: b,
+                shape: ShapeType::Box as u32,
+                material: 0,
+                generation: 0,
+                local_pos: (w.center + offset).to_array(),
+                density: 0.0,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: [w.half.x, w.half.y, w.half.z, w.half.length()],
+            });
+        }
+        let h = sim
+            .add_soft_vehicle(
+                desc,
+                (at + offset).to_array(),
+                [0.0, 0.0, 0.0, 1.0],
+                &SpawnOptions {
+                    rigid_core: car.core,
+                    core_mass_fraction: env_f32("CORE_FRAC")
+                        .unwrap_or(SpawnOptions::default().core_mass_fraction),
+                    velocity: vel.to_array(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let steps = ((s.hz / SAMPLE_HZ).round() as u32).max(1);
+        Self {
+            sim,
+            h,
+            offset,
+            steps,
+            dt: 1.0 / f64::from(s.hz),
+            t: 0.0,
+        }
     }
+}
+
+impl Runner for Gpu {
+    fn frame(&mut self) {
+        for _ in 0..self.steps {
+            self.sim.step().expect("step");
+            self.t += self.dt;
+        }
+    }
+    fn time(&self) -> f64 {
+        self.t
+    }
+    fn positions(&self) -> Vec<Vec3> {
+        self.sim
+            .read_soft_particles(self.h)
+            .iter()
+            .map(|b| Vec3::from_array(b.position) - self.offset)
+            .collect()
+    }
+    fn velocities(&self) -> Vec<Vec3> {
+        self.sim
+            .read_soft_particles(self.h)
+            .iter()
+            .map(|b| Vec3::from_array(b.linear_vel))
+            .collect()
+    }
+    fn masses(&self) -> Vec<f32> {
+        self.sim
+            .read_soft_particles(self.h)
+            .iter()
+            .map(|b| {
+                if b.inv_mass > 0.0 {
+                    1.0 / b.inv_mass
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+    fn broken(&self) -> Vec<bool> {
+        self.sim
+            .read_soft_beams(self.h)
+            .iter()
+            .map(|b| b.broken())
+            .collect()
+    }
+    fn yielded(&self) -> usize {
+        self.sim
+            .read_soft_beams(self.h)
+            .iter()
+            .filter(|b| b.flags & engine_softbody::BEAM_YIELDED != 0)
+            .count()
+    }
+    fn kick(&mut self, node: u32, velocity: Vec3) {
+        let i = self.sim.soft_host().entry(self.h).first_body + node;
+        let mut b = self.sim.read_body(i);
+        b.linear_vel = velocity.to_array();
+        engine_vehicle::VehicleBackend::write_body(&mut self.sim, i, &b);
+    }
+}
+
+struct Oracle {
+    sim: ExplicitSim,
+    per: u32,
+}
+
+impl Oracle {
+    fn new(desc: &SoftVehicleDesc, at: Vec3, vel: Vec3, walls: &[Wall]) -> Self {
+        let mut sim = ExplicitSim::new(ExplicitSettings::default());
+        sim.add_vehicle(desc, at, Quat::IDENTITY, vel);
+        sim.add_obstacle(
+            Shape::Plane {
+                normal: DVec3::Y,
+                offset: 0.0,
+            },
+            MU,
+        );
+        for w in walls {
+            sim.add_obstacle(
+                Shape::Box {
+                    center: w.center.as_dvec3(),
+                    half: w.half.as_dvec3(),
+                    rotation: DQuat::IDENTITY,
+                },
+                MU,
+            );
+        }
+        let per = (sim.hz() / f64::from(SAMPLE_HZ)).round() as u32;
+        Self { sim, per }
+    }
+}
+
+impl Runner for Oracle {
+    fn frame(&mut self) {
+        for _ in 0..self.per {
+            self.sim.substep();
+        }
+    }
+    fn time(&self) -> f64 {
+        self.sim.time
+    }
+    fn positions(&self) -> Vec<Vec3> {
+        self.sim.positions()
+    }
+    fn velocities(&self) -> Vec<Vec3> {
+        self.sim.body_velocities(0)
+    }
+    fn masses(&self) -> Vec<f32> {
+        self.sim.mass.iter().map(|&m| m as f32).collect()
+    }
+    fn broken(&self) -> Vec<bool> {
+        self.sim.beams.iter().map(|b| b.broken()).collect()
+    }
+    fn yielded(&self) -> usize {
+        self.sim.yielded_beams(0)
+    }
+    fn kick(&mut self, node: u32, velocity: Vec3) {
+        self.sim.v[node as usize] = velocity.as_dvec3();
+    }
+}
+
+/// The Rigs of Rods reference: RoR's own solver (`inspiration/ror-harness`, local
+/// only, never built or required here) driven over a pipe. `ROR_BIN` names its
+/// binary; it reads the same `.truck` text the GPU and the oracle load.
+struct Ror {
+    child: std::process::Child,
+    pipe: std::cell::RefCell<RorPipe>,
+    t: f64,
+    /// The `.truck` nodes come first in RoR's node and position order (cinecam and
+    /// tyre nodes follow); only those are compared.
+    nodes: usize,
+}
+
+struct RorPipe {
+    stdin: std::process::ChildStdin,
+    out: std::io::BufReader<std::process::ChildStdout>,
+    /// The state after the last command, read on demand.
+    state: Option<RorState>,
+}
+
+#[derive(Clone)]
+struct RorState {
+    x: Vec<Vec3>,
+    v: Vec<Vec3>,
+    m: Vec<f32>,
+    broken: Vec<bool>,
+}
+
+/// Where the RoR scene sits: Rigs of Rods' collision hash only covers non-negative x
+/// and z (its maps start at the origin), so the scene is moved into that quadrant and
+/// positions are reported back relative to it.
+const ROR_ORIGIN: Vec3 = Vec3::new(1000.0, 0.0, 1000.0);
+
+impl RorPipe {
+    fn send(&mut self, cmd: &str) {
+        use std::io::Write;
+        self.state = None;
+        writeln!(self.stdin, "{cmd}").unwrap();
+    }
+
+    /// Beams bent and not broken (rest length moved more than 0.1 %).
+    fn deformed(&mut self) -> usize {
+        use std::io::{BufRead, Write};
+        writeln!(self.stdin, "deformed").unwrap();
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        self.out.read_line(&mut line).unwrap();
+        line.trim().parse().expect("RoR reference deformed count")
+    }
+
+    fn state(&mut self) -> RorState {
+        use std::io::{BufRead, Write};
+        if let Some(s) = &self.state {
+            return s.clone();
+        }
+        writeln!(self.stdin, "state").unwrap();
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        let mut next = |line: &mut String| {
+            line.clear();
+            self.out.read_line(line).unwrap();
+        };
+        next(&mut line);
+        let n: usize = line.trim().parse().expect("RoR reference state");
+        let mut st = RorState {
+            x: Vec::with_capacity(n),
+            v: Vec::with_capacity(n),
+            m: Vec::with_capacity(n),
+            broken: Vec::new(),
+        };
+        for _ in 0..n {
+            next(&mut line);
+            let f: Vec<f32> = line
+                .split_whitespace()
+                .map(|t| t.parse().unwrap())
+                .collect();
+            st.x.push(Vec3::new(f[0], f[1], f[2]) - ROR_ORIGIN);
+            st.v.push(Vec3::new(f[3], f[4], f[5]));
+            st.m.push(f[6]);
+        }
+        next(&mut line);
+        next(&mut line);
+        st.broken = line.trim().bytes().map(|b| b == b'1').collect();
+        self.state = Some(st.clone());
+        st
+    }
+}
+
+impl Ror {
+    fn new(car: &Car, at: Vec3, vel: Vec3, walls: &[Wall]) -> Self {
+        let truck = car.truck.as_deref().expect("REF=ror needs a .truck car");
+        let bin = std::env::var("ROR_BIN").expect("REF=ror needs ROR_BIN=<path to ror_ref>");
+        let path = std::env::temp_dir().join(format!("rubble_ror_{}.truck", std::process::id()));
+        std::fs::write(&path, truck).expect("write .truck for the RoR reference");
+        let mut child = std::process::Command::new(&bin)
+            .arg(&path)
+            .arg("serve")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("{bin}: {e}"));
+        let mut pipe = RorPipe {
+            stdin: child.stdin.take().unwrap(),
+            out: std::io::BufReader::new(child.stdout.take().unwrap()),
+            state: None,
+        };
+        for w in walls {
+            let c = w.center + ROR_ORIGIN;
+            pipe.send(&format!(
+                "wall {} {} {} {} {} {}",
+                c.x, c.y, c.z, w.half.x, w.half.y, w.half.z
+            ));
+        }
+        let at = at + ROR_ORIGIN;
+        // A car on RoR tyres stands on them (RoR's spawn placement); a bare body
+        // stands where the GPU and the oracle put it.
+        let spawn = if car.core { "spawn_ground" } else { "spawn" };
+        let y = if car.core { 0.0 } else { at.y };
+        pipe.send(&format!(
+            "{spawn} {} {y} {} {} {} {}",
+            at.x, at.z, vel.x, vel.y, vel.z
+        ));
+        Self {
+            child,
+            pipe: pipe.into(),
+            t: 0.0,
+            nodes: car.desc.nodes.len(),
+        }
+    }
+}
+
+impl Drop for Ror {
+    fn drop(&mut self) {
+        self.pipe.get_mut().send("quit");
+        let _ = self.child.wait();
+    }
+}
+
+impl Runner for Ror {
+    fn frame(&mut self) {
+        self.pipe
+            .get_mut()
+            .send(&format!("frame {}", 1.0 / f64::from(SAMPLE_HZ)));
+        self.t += 1.0 / f64::from(SAMPLE_HZ);
+    }
+    fn time(&self) -> f64 {
+        self.t
+    }
+    fn positions(&self) -> Vec<Vec3> {
+        self.pipe.borrow_mut().state().x[..self.nodes].to_vec()
+    }
+    fn velocities(&self) -> Vec<Vec3> {
+        self.pipe.borrow_mut().state().v[..self.nodes].to_vec()
+    }
+    fn masses(&self) -> Vec<f32> {
+        self.pipe.borrow_mut().state().m[..self.nodes].to_vec()
+    }
+    fn broken(&self) -> Vec<bool> {
+        self.pipe.borrow_mut().state().broken
+    }
+    fn yielded(&self) -> usize {
+        self.pipe.borrow_mut().deformed()
+    }
+    fn kick(&mut self, node: u32, velocity: Vec3) {
+        self.pipe.get_mut().send(&format!(
+            "kick {node} {} {} {}",
+            velocity.x, velocity.y, velocity.z
+        ));
+    }
+}
+
+/// Rubble's explicit-beams solver on the GPU (`ExplicitBeamsGpu`, `SETTINGS=explicit`):
+/// fixed 0.5 ms explicit steps, every step of a frame in one dispatch. A car with
+/// wheels runs on its soft tyres, standing on them (lowest node 2 cm up), as the RoR
+/// reference does.
+struct ExplicitGpuRun {
+    gpu: engine_webgpu::ExplicitBeamsGpu,
+    masses: Vec<f32>,
+    t: f64,
+    steps: u64,
+}
+
+impl ExplicitGpuRun {
+    fn new(car: &Car, at: Vec3, vel: Vec3, walls: &[Wall]) -> Self {
+        use engine_softbody::explicit_beams::{ExplicitBeams, StaticBox};
+        let (_, device, queue) = engine_webgpu::default_device().expect("wgpu");
+        let text = car
+            .truck
+            .as_deref()
+            .expect("SETTINGS=explicit needs a .truck car");
+        let mut sim = if car.core {
+            let mut sim = ExplicitBeams::from_truck(
+                text,
+                Vec3::new(at.x, 0.0, at.z),
+                vel,
+                Default::default(),
+            )
+            .expect("explicit beams spawn");
+            let lowest = sim.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+            for n in &mut sim.nodes {
+                n.pos.y += 0.02 - lowest;
+            }
+            sim
+        } else {
+            ExplicitBeams::from_truck(text, at, vel, Default::default())
+                .expect("explicit beams spawn")
+        };
+        for w in walls {
+            sim.boxes.push(StaticBox::centered(w.center, w.half));
+        }
+        Self {
+            gpu: engine_webgpu::ExplicitBeamsGpu::new(&device, &queue, &[sim]),
+            masses: car.desc.nodes.iter().map(|n| n.mass).collect(),
+            t: 0.0,
+            steps: 0,
+        }
+    }
+}
+
+impl Runner for ExplicitGpuRun {
+    fn frame(&mut self) {
+        // Whole 0.5 ms steps up to the sample time, the remainder carried.
+        self.t += 1.0 / f64::from(SAMPLE_HZ);
+        let due = (self.t / f64::from(engine_softbody::explicit_beams::STEP)) as u64;
+        let n = due - self.steps;
+        self.steps = due;
+        self.gpu.frame(n as u32);
+    }
+    fn time(&self) -> f64 {
+        self.t
+    }
+    fn positions(&self) -> Vec<Vec3> {
+        let mut p = self.gpu.positions().swap_remove(0);
+        p.truncate(self.masses.len());
+        p
+    }
+    fn velocities(&self) -> Vec<Vec3> {
+        let mut v = self.gpu.velocities().swap_remove(0);
+        v.truncate(self.masses.len());
+        v
+    }
+    fn masses(&self) -> Vec<f32> {
+        self.masses.clone()
+    }
+    fn broken(&self) -> Vec<bool> {
+        self.gpu.beams()[0].iter().map(|b| b.broken).collect()
+    }
+    fn yielded(&self) -> usize {
+        self.gpu.beams()[0].iter().filter(|b| b.bent()).count()
+    }
+    fn kick(&mut self, node: u32, velocity: Vec3) {
+        self.gpu.set_velocity(0, node, velocity);
+    }
+}
+
+/// The car under test and the node sets the metrics read.
+struct Car {
+    name: String,
+    desc: SoftVehicleDesc,
+    /// The `.truck` text `desc` was loaded from (for the Rigs of Rods reference).
+    truck: Option<String>,
+    /// Driving direction and its horizontal perpendicular (crash and metrics axes).
+    forward: Vec3,
+    lateral: Vec3,
+    /// Spawns with the rigid core and raycast wheels (a real `.truck` with wheels);
+    /// otherwise the bare node–beam body on its node spheres.
+    core: bool,
+    /// Tap test: the kicked roof node and the floor node below it.
+    tap: (u32, u32),
+    /// Standing height (lowest node sphere on the ground).
+    lift: f32,
+    body: Vec<u32>,
+    cabin: Vec<u32>,
+    rear: Vec<u32>,
+    /// The firewall ring's nodes (intrusion probes).
+    firewall: Vec<u32>,
+    engine: Vec<u32>,
+}
+
+impl Car {
+    /// `CAR=default` (the hatchback), `CAR=hires` (the ~1,000-node JBeam car), or
+    /// the sedan.
+    fn from_env() -> Self {
+        match std::env::var("CAR").as_deref() {
+            Ok("hires") => Self::hires(&HiresParams::default()),
+            Ok(v) if v.starts_with("truck:") => Self::truck_file(&v["truck:".len()..], false),
+            // The same file without wheels, engine and brakes: the node–beam body on
+            // its node spheres, comparable with the oracle and a bare GPU body.
+            Ok(v) if v.starts_with("truck_bare:") => {
+                Self::truck_file(&v["truck_bare:".len()..], true)
+            }
+            Ok("default") => Self::procedural(&CarParams::default(), false),
+            // The sedan as Rigs of Rods can run it at its fixed 2 kHz (10 kg minimum
+            // node mass instead of 5), body only: the RoR comparison car.
+            Ok("sedan_ror") => Self::procedural(
+                &CarParams {
+                    minimass: 10.0,
+                    ..CarParams::sedan()
+                },
+                true,
+            ),
+            _ => Self::procedural(&CarParams::sedan(), false),
+        }
+    }
+
+    fn procedural(p: &CarParams, bare: bool) -> Self {
+        let (desc, layout) = if bare { car_desc_bare(p) } else { car_desc(p) };
+        let shell = (layout.stations * CAR_RING) as u32;
+        let body: Vec<u32> = desc.part("body").unwrap().nodes.clone();
+        let ring_of = |i: u32| i as usize / CAR_RING;
+        let cabin = (0..shell).filter(|&i| layout.cabin[ring_of(i)]).collect();
+        let rear = (0..shell)
+            .filter(|&i| ring_of(i) <= layout.cabin_first)
+            .collect();
+        let firewall = (0..shell)
+            .filter(|&i| ring_of(i) == layout.cabin_last)
+            .collect();
+        let engine = desc
+            .part("engine")
+            .map(|p| p.nodes.clone())
+            .unwrap_or_default();
+        let front = ((layout.stations - 1) * CAR_RING) as u32;
+        Self {
+            name: p.name.clone(),
+            truck: Some(if bare {
+                car_truck_bare(p)
+            } else {
+                car_truck(p)
+            }),
+            forward: Vec3::Z,
+            lateral: Vec3::X,
+            core: false,
+            tap: (front + 4, front),
+            lift: 0.06 - desc.bounds().0[1],
+            desc,
+            body,
+            cabin,
+            rear,
+            firewall,
+            engine,
+        }
+    }
+
+    /// A Rigs of Rods `.truck` file as published (RigsOfRods/content: local only, not
+    /// in the repo). Forward from its `cameras` line (centre minus back node; RoR
+    /// vehicles face −X), the rear 40% along it as the reference frame, rigid core
+    /// and raycast wheels when it has wheels.
+    fn truck_file(path: &str, bare: bool) -> Self {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let text = if bare {
+            engine_softbody::procedural::strip_truck_sections(
+                &text,
+                &["wheels", "engine", "brakes"],
+            )
+        } else {
+            text
+        };
+        let file = engine_softbody::truck::parse_truck(&text);
+        let desc = engine_softbody::truck::load_truck(&text);
+        let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
+        let forward = file
+            .cameras
+            .as_ref()
+            .map(|c| {
+                let d = p(c.center) - p(c.back);
+                Vec3::new(d.x, 0.0, d.z).normalize()
+            })
+            .unwrap_or(-Vec3::X);
+        let lateral = Vec3::Y.cross(forward).normalize();
+        let n = desc.nodes.len() as u32;
+        let along: Vec<f32> = (0..n).map(|i| p(i).dot(forward)).collect();
+        let (lo, hi) = along
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        let rear: Vec<u32> = (0..n)
+            .filter(|&i| along[i as usize] < lo + 0.4 * (hi - lo))
+            .collect();
+        let cabin: Vec<u32> = (0..n)
+            .filter(|&i| along[i as usize] < lo + 0.6 * (hi - lo))
+            .collect();
+        // Tap: the highest node and the lowest node nearest below it.
+        let top = (0..n).max_by(|&a, &b| p(a).y.total_cmp(&p(b).y)).unwrap();
+        let floor = (0..n)
+            .filter(|&i| i != top)
+            .min_by(|&a, &b| {
+                let h = |i: u32| (p(i) - p(top)).with_y(0.0).length() + 0.1 * p(i).y;
+                h(a).total_cmp(&h(b))
+            })
+            .unwrap();
+        Self {
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            truck: Some(text),
+            forward,
+            lateral,
+            core: !file.wheels.is_empty(),
+            tap: (top, floor),
+            lift: if file.wheels.is_empty() { 0.06 } else { 0.25 } - desc.bounds().0[1],
+            body: (0..n).collect(),
+            cabin,
+            rear,
+            firewall: Vec::new(),
+            engine: Vec::new(),
+            desc,
+        }
+    }
+
+    /// Wall in front of the car at rest pose `at`, and the start that leaves time to
+    /// settle on the suspension: for the procedural cars, the original scene.
+    fn wall_scene(&self, v: f32) -> (Vec3, Wall) {
+        if !self.core && self.forward == Vec3::Z {
+            return (Vec3::new(0.0, self.lift, -1.0), WALL);
+        }
+        let at = Vec3::new(0.0, self.lift, 0.0);
+        let front = self
+            .desc
+            .nodes
+            .iter()
+            .map(|n| Vec3::from_array(n.position).dot(self.forward))
+            .fold(f32::MIN, f32::max);
+        // A car on wheels gets half a second to settle on its suspension; a bare
+        // body slides on its nodes, so the wall is right in front of it (impact
+        // speed then does not depend on the ground friction model).
+        let face = front + if self.core { 1.0 + 0.5 * v } else { 0.3 };
+        let half = Vec3::new(6.0, 3.0, 0.5);
+        let center = self.forward * (face + half.z) + Vec3::Y * half.y;
+        let half = if self.forward.x.abs() > 0.5 {
+            Vec3::new(half.z, half.y, half.x)
+        } else {
+            half
+        };
+        (at, Wall { center, half })
+    }
+
+    fn hires(p: &HiresParams) -> Self {
+        let (desc, layout) = hires_car_desc(p);
+        let rings = |r: std::ops::RangeInclusive<usize>| -> Vec<u32> {
+            r.flat_map(|k| ring_nodes(&desc, k)).collect()
+        };
+        let front = ring_nodes(&desc, layout.stations - 1);
+        Self {
+            name: p.name.clone(),
+            truck: None,
+            forward: Vec3::Z,
+            lateral: Vec3::X,
+            core: false,
+            tap: (front[6], front[1]),
+            lift: 0.06 - desc.bounds().0[1],
+            body: named(&desc, "s"),
+            cabin: rings(layout.cabin_first..=layout.cabin_last),
+            rear: rings(0..=layout.cabin_first),
+            firewall: ring_nodes(&desc, layout.cabin_last),
+            engine: named(&desc, "eng"),
+            desc,
+        }
+    }
+
+    fn rest(&self, at: Vec3) -> Vec<Vec3> {
+        self.desc
+            .nodes
+            .iter()
+            .map(|n| Vec3::from_array(n.position) + at)
+            .collect()
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+struct Crash {
+    crush: (f32, f32),
+    profile: Vec<f32>,
+    broken: Vec<u32>,
+    absorbed: f32,
+    penetrations: PenetrationCount,
+    intrusion: f32,
+    engine_back: f32,
+    peak_g: f64,
+    stop: Option<f64>,
+    rebound: f32,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -125,224 +776,289 @@ struct Metrics {
     tap_hz: f32,
     drop_yield: usize,
     crush30: (f32, f32),
-    crush60: (f32, f32),
-    broken60: Vec<u32>,
-    absorbed60: f32,
+    crash56: Crash,
+    crush100: (f32, f32),
 }
 
-fn rest_and_tap(desc: &SoftVehicleDesc, s: Setting) -> (f32, f32) {
-    let mut sim = world(s);
-    let h = sim
-        .add_soft_vehicle(
-            desc,
-            [0.0, 0.05, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-            &SpawnOptions::default(),
-        )
-        .unwrap();
-    let rest = positions(&sim, h);
-    run_s(&mut sim, s, 3.0);
-    let sag = rms_max(&residual_displacement(&rest, &positions(&sim, h))).0;
-    // Tap: a downward 1 m/s kick on the front-left roof node, then record a
-    // structural length (roof node to the floor node below it), which the
-    // suspension's rigid bounce leaves alone.
-    let first = sim.soft_host().entry(h).first_body;
-    let stations = CarParams::default().stations;
-    let ring = (stations - 1) * engine_softbody::procedural::CAR_RING;
-    let (node, floor) = (first + (ring + 4) as u32, first + ring as u32);
-    let mut b = sim.read_body(node);
-    b.linear_vel = [0.0, -1.0, 0.0];
-    engine_vehicle::VehicleBackend::write_body(&mut sim, node, &b);
-    let mut sig = Vec::new();
-    for _ in 0..(s.hz * 1.0) as u32 {
-        sim.step().unwrap();
-        let (p, q) = (
-            Vec3::from_array(sim.read_body(node).position),
-            Vec3::from_array(sim.read_body(floor).position),
-        );
-        sig.push((p - q).length());
+/// Rest 3 s, then a 1 m/s downward kick on the front-left roof node and the
+/// dominant frequency of the roof-to-floor length (a structural mode).
+fn rest_and_tap(car: &Car, r: &mut dyn Runner, at: Vec3) -> (f32, f32) {
+    let rest = car.rest(at);
+    for _ in 0..(3.0 * SAMPLE_HZ) as u32 {
+        r.frame();
     }
-    (sag, dominant_frequency(&sig, 1.0 / s.hz, 0.5 * s.hz))
+    let sag = rms_max(&residual_displacement(&rest, &r.positions())).0;
+    let (node, floor) = car.tap;
+    r.kick(node, Vec3::new(0.0, -1.0, 0.0));
+    let mut sig = Vec::new();
+    for _ in 0..SAMPLE_HZ as u32 {
+        r.frame();
+        let x = r.positions();
+        sig.push((x[node as usize] - x[floor as usize]).length());
+    }
+    (
+        sag,
+        dominant_frequency(&sig, 1.0 / SAMPLE_HZ, 0.5 * SAMPLE_HZ),
+    )
 }
 
-fn drop_test(desc: &SoftVehicleDesc, s: Setting) -> usize {
-    let mut sim = world(s);
-    let h = sim
-        .add_soft_vehicle(
-            desc,
-            [0.0, 1.05, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-            &SpawnOptions::default(),
-        )
-        .unwrap();
-    run_s(&mut sim, s, 2.0);
-    sim.read_soft_beams(h)
-        .iter()
-        .filter(|b| b.flags & engine_softbody::BEAM_YIELDED != 0)
-        .count()
+fn drop_test(r: &mut dyn Runner) -> usize {
+    for _ in 0..(2.0 * SAMPLE_HZ) as u32 {
+        r.frame();
+    }
+    r.yielded()
 }
 
-fn wall(desc: &SoftVehicleDesc, s: Setting, kmh: f32) -> ((f32, f32), Vec<u32>, f32) {
-    let mut sim = world(s);
-    let b = sim.add_body(BodyState::static_plane_support());
-    sim.add_collider(Collider {
-        body: b,
-        shape: ShapeType::Box as u32,
-        material: 0,
-        generation: 0,
-        local_pos: [0.0, 1.5, 3.0],
-        density: 0.0,
-        local_rot: [0.0, 0.0, 0.0, 1.0],
-        params: [3.0, 1.5, 0.2, 3.4],
-    });
-    let v = kmh / 3.6;
-    let h = sim
-        .add_soft_vehicle(
-            desc,
-            [0.0, 0.05, -1.0],
-            [0.0, 0.0, 0.0, 1.0],
-            &SpawnOptions {
-                velocity: [0.0, 0.0, v],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    let rest = positions(&sim, h);
-    let mass: f32 = sim
-        .read_soft_particles(h)
+const WALL: Wall = Wall {
+    center: Vec3::new(0.0, 1.5, 3.0),
+    half: Vec3::new(3.0, 1.5, 0.2),
+};
+
+fn wall_crash(car: &Car, r: &mut dyn Runner, at: Vec3, v: f32) -> Crash {
+    let rest = car.rest(at);
+    let mass = r.masses();
+    let m: f32 = mass.iter().sum();
+    let ke0 = 0.5 * m * v * v;
+    let mut tr = PenetrationTracker::new(vec![TrackedBody::from_desc(&car.desc, 0)]);
+    let mut decel = DecelTracker::default();
+    let mut rebound: f32 = 0.0;
+    let mut impact = None;
+    for _ in 0..(1.5 * SAMPLE_HZ) as u32 {
+        r.frame();
+        let x = r.positions();
+        tr.update(&x, Some(&[r.broken()]));
+        let vc = centroid_velocity(&r.velocities(), &mass, &car.cabin);
+        let vf = vc.dot(car.forward);
+        if impact.is_none() && vf < 0.97 * v {
+            impact = Some(r.time());
+        }
+        rebound = rebound.min(vf);
+        decel.push(r.time(), vc);
+    }
+    let now = r.positions();
+    let ke1: f32 = r
+        .velocities()
         .iter()
-        .filter(|b| b.inv_mass > 0.0)
-        .map(|b| 1.0 / b.inv_mass)
+        .zip(&mass)
+        .map(|(v, m)| 0.5 * m * v.length_squared())
         .sum();
-    let ke0 = 0.5 * mass * v * v;
-    run_s(&mut sim, s, 1.5);
-    let now = positions(&sim, h);
-    // The bumper may detach: measure the body (every node but the last six).
-    let n = now.len() - 6;
-    let crush = rms_max(&residual_displacement(&rest[..n], &now[..n]));
-    let broken: Vec<u32> = sim
-        .read_soft_beams(h)
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.broken())
-        .map(|(i, _)| i as u32)
-        .collect();
-    let absorbed = (ke0 - kinetic(&sim, h)) / ke0;
-    (crush, broken, absorbed)
+    let body_rest: Vec<Vec3> = car.body.iter().map(|&i| rest[i as usize]).collect();
+    let body_now: Vec<Vec3> = car.body.iter().map(|&i| now[i as usize]).collect();
+    Crash {
+        crush: rms_max(&residual_displacement(&body_rest, &body_now)),
+        profile: crush_profile(
+            &rest,
+            &now,
+            &car.body,
+            &car.rear,
+            car.forward,
+            car.lateral,
+            5,
+        )
+        .into_iter()
+        .filter(|c| !c.is_nan())
+        .collect(),
+        broken: r
+            .broken()
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| **b)
+            .map(|(i, _)| i as u32)
+            .collect(),
+        absorbed: (ke0 - ke1) / ke0,
+        penetrations: tr.max,
+        intrusion: intrusion(&rest, &now, &car.cabin, &car.firewall),
+        engine_back: if car.engine.is_empty() {
+            0.0
+        } else {
+            block_travel(&rest, &now, &car.cabin, &car.engine, car.forward).1
+        },
+        peak_g: decel.peak_decel_g(0.01),
+        stop: impact.and_then(|t0| decel.time_to_stop(t0, 0.5)),
+        rebound: -rebound,
+    }
 }
 
-fn metrics(desc: &SoftVehicleDesc, s: Setting) -> Metrics {
-    let (sag_rms, tap_hz) = rest_and_tap(desc, s);
-    let (crush30, _, _) = wall(desc, s, 30.0);
-    let (crush60, broken60, absorbed60) = wall(desc, s, 60.0);
+/// Builds a runner: the oracle (`None`) or the GPU at a setting.
+fn runner(s: Option<Setting>, car: &Car, at: Vec3, vel: Vec3, walls: &[Wall]) -> Box<dyn Runner> {
+    match s {
+        Some(s) if s.iterations == 0 => Box::new(ExplicitGpuRun::new(car, at, vel, walls)),
+        Some(s) => Box::new(Gpu::new(s, car, at, vel, walls)),
+        None if std::env::var("REF").as_deref() == Ok("ror") => {
+            Box::new(Ror::new(car, at, vel, walls))
+        }
+        None => {
+            assert!(
+                !car.core,
+                "the oracle has no rigid core: use CAR=truck_bare:"
+            );
+            Box::new(Oracle::new(&car.desc, at, vel, walls))
+        }
+    }
+}
+
+fn metrics(car: &Car, s: Option<Setting>) -> Metrics {
+    // QUICK=1: the 56 and 100 km/h crashes only.
+    let quick = std::env::var("QUICK").as_deref() == Ok("1");
+    let still = Vec3::new(0.0, car.lift, 0.0);
+    let (sag_rms, tap_hz) = if quick {
+        (f32::NAN, f32::NAN)
+    } else {
+        rest_and_tap(car, &mut *runner(s, car, still, Vec3::ZERO, &[]), still)
+    };
+    let high = Vec3::new(0.0, car.lift + 1.0, 0.0);
+    let drop_yield = if quick {
+        0
+    } else {
+        drop_test(&mut *runner(s, car, high, Vec3::ZERO, &[]))
+    };
+    let crash = |kmh: f32| {
+        let v = kmh / 3.6;
+        let (start, wall) = car.wall_scene(v);
+        wall_crash(
+            car,
+            &mut *runner(s, car, start, car.forward * v, &[wall]),
+            start,
+            v,
+        )
+    };
     Metrics {
         sag_rms,
         tap_hz,
-        drop_yield: drop_test(desc, s),
-        crush30,
-        crush60,
-        broken60,
-        absorbed60,
+        drop_yield,
+        crush30: if quick {
+            (f32::NAN, f32::NAN)
+        } else {
+            crash(30.0).crush
+        },
+        crash56: crash(56.0),
+        crush100: crash(100.0).crush,
     }
 }
 
+fn cm(v: &[f32]) -> String {
+    v.iter()
+        .map(|c| format!("{:.0}", c * 100.0))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn main() {
-    let desc = engine_softbody::procedural::car_desc(&CarParams::default()).0;
-    let reference = Setting {
-        hz: 960.0,
-        iterations: 30,
-        threshold_scale: 1.0,
-        reference: true,
-    };
+    let car = Car::from_env();
+    eprintln!(
+        "{}: {} nodes, {} beams, {} triangles",
+        car.name,
+        car.desc.nodes.len(),
+        car.desc.beams.len(),
+        car.desc.triangles.len()
+    );
     let t = std::time::Instant::now();
-    let r = metrics(&desc, reference);
-    eprintln!("reference done in {:.1} s", t.elapsed().as_secs_f32());
-    println!("| setting | sag RMS (mm) | tap (Hz) | 1 m drop: bent | crush 30 km/h RMS/max (cm) | crush 60 km/h RMS/max (cm) | broken-set Jaccard 60 | KE absorbed 60 |");
-    println!("|---|---|---|---|---|---|---|---|");
+    let r = metrics(&car, None);
+    let reference = if std::env::var("REF").as_deref() == Ok("ror") {
+        "Rigs of Rods (2 kHz)"
+    } else {
+        "oracle (explicit)"
+    };
+    eprintln!("{reference} done in {:.1} s", t.elapsed().as_secs_f32());
+    println!("| setting | sag RMS (mm) | tap (Hz) | 1 m drop: bent | crush 30 / 56 / 100 km/h max (cm) | 56 km/h: profile (cm) | Jaccard | KE absorbed | rebound (m/s) | peak (g) | stop (s) | intrusion (cm) | engine back (cm) | penetrations self/ext |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let row = |name: &str, m: &Metrics| {
+        let c = &m.crash56;
         println!(
-            "| {name} | {:.2} | {:.1} | {} | {:.1} / {:.1} | {:.1} / {:.1} | {:.2} | {:.0}% |",
+            "| {name} | {:.2} | {:.1} | {} | {:.1} / {:.1} / {:.1} | {} | {:.2} | {:.0}% | {:.1} | {:.0} | {} | {:.1} | {:.1} | {}/{} |",
             m.sag_rms * 1e3,
             m.tap_hz,
             m.drop_yield,
-            m.crush30.0 * 100.0,
             m.crush30.1 * 100.0,
-            m.crush60.0 * 100.0,
-            m.crush60.1 * 100.0,
-            jaccard(&m.broken60, &r.broken60),
-            m.absorbed60 * 100.0
+            c.crush.1 * 100.0,
+            m.crush100.1 * 100.0,
+            cm(&c.profile),
+            jaccard(&c.broken, &r.crash56.broken),
+            c.absorbed * 100.0,
+            c.rebound,
+            c.peak_g,
+            c.stop.map_or("—".into(), |s| format!("{s:.2}")),
+            c.intrusion * 100.0,
+            c.engine_back * 100.0,
+            c.penetrations.self_,
+            c.penetrations.external,
         );
     };
-    row("reference 960 Hz × 30", &r);
+    row(reference, &r);
     let sweep: Vec<(f32, u32)> = match std::env::var("SETTINGS") {
         Ok(v) => v
             .split(',')
             .map(|p| {
-                let (hz, it) = p.split_once('x').expect("SETTINGS=HZxITERS,...");
+                // `explicit`: the explicit-beams solver on the GPU (marked by 0 iterations).
+                if p == "explicit" {
+                    return (2000.0, 0);
+                }
+                let (hz, it) = p
+                    .split_once('x')
+                    .expect("SETTINGS=HZxITERS,... or explicit");
                 (hz.parse().unwrap(), it.parse().unwrap())
             })
             .collect(),
-        Err(_) => vec![(120.0, 10), (240.0, 10), (240.0, 20), (480.0, 10)],
+        Err(_) => vec![
+            (120.0, 10),
+            (240.0, 10),
+            (240.0, 20),
+            (480.0, 10),
+            (960.0, 30),
+        ],
     };
     for (hz, it) in sweep {
         let s = Setting {
             hz,
             iterations: it,
             threshold_scale: 1.0,
-            reference: false,
         };
         let t = std::time::Instant::now();
-        let m = metrics(&desc, s);
+        let m = metrics(&car, Some(s));
         eprintln!("{hz} Hz × {it} done in {:.1} s", t.elapsed().as_secs_f32());
-        row(&format!("{hz} Hz × {it}"), &m);
+        row(
+            &if it == 0 {
+                "Rubble explicit beams (GPU)".to_string()
+            } else {
+                format!("{hz} Hz × {it}")
+            },
+            &m,
+        );
     }
-    if std::env::var("FIT").as_deref() == Ok("0") {
+    if std::env::var("FIT").as_deref() != Ok("1") {
         return;
     }
-    // Fit: one global threshold scale per step rate so the 60 km/h crush depth
-    // (max residual) matches the reference.
+    // Fit: one global threshold scale per step rate so the 56 km/h crush depth
+    // (max residual) matches the oracle.
     println!();
     println!(
-        "| step rate | fitted threshold scale | crush 60 km/h max (cm), reference {:.1} |",
-        r.crush60.1 * 100.0
+        "| step rate | fitted threshold scale | crush 56 km/h max (cm), oracle {:.1} |",
+        r.crash56.crush.1 * 100.0
     );
     println!("|---|---|---|");
-    for hz in [120.0, 240.0] {
-        let target = r.crush60.1;
-        let scale = minimize_1d(
-            |k| {
-                rel_error(
-                    wall(
-                        &desc,
-                        Setting {
-                            hz,
-                            iterations: 10,
-                            threshold_scale: k,
-                            reference: false,
-                        },
-                        60.0,
-                    )
-                    .0
-                     .1,
-                    target,
-                )
-            },
-            0.2,
-            1.5,
-            8,
-        );
-        let fitted = wall(
-            &desc,
-            Setting {
-                hz,
-                iterations: 10,
-                threshold_scale: scale,
-                reference: false,
-            },
-            60.0,
+    let v = 56.0 / 3.6;
+    let (start, wall) = car.wall_scene(v);
+    let crush = |hz: f32, k: f32| {
+        let s = Setting {
+            hz,
+            iterations: 10,
+            threshold_scale: k,
+        };
+        wall_crash(
+            &car,
+            &mut *runner(Some(s), &car, start, car.forward * v, &[wall]),
+            start,
+            v,
         )
-        .0
-         .1;
-        println!("| {hz} Hz × 10 | {scale:.2} | {:.1} |", fitted * 100.0);
+        .crush
+        .1
+    };
+    for hz in [120.0, 240.0] {
+        let target = r.crash56.crush.1;
+        let scale = minimize_1d(|k| rel_error(crush(hz, k), target), 0.2, 3.0, 8);
+        println!(
+            "| {hz} Hz × 10 | {scale:.2} | {:.1} |",
+            crush(hz, scale) * 100.0
+        );
     }
 }

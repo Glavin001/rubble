@@ -192,7 +192,7 @@ impl CpuSoft {
             rep.yielded += u32::from(o.yielded);
             if o.broke {
                 rep.broke += 1;
-                if b.group != 0 {
+                if b.group != 0 && !b.group_passive {
                     groups.push(b.group);
                 }
             }

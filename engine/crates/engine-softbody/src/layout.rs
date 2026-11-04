@@ -19,11 +19,27 @@
 //! aabbBase + 2·s         soft body s bounds this step: min, max
 //! partBase + 3·(32·s+k)  soft body s's bolted part k: [body, firstJoint, joints, 0],
 //!                        its position and orientation in the core frame
+//! triExtraBase + t       triangle t: the beams along its edges ab, bc, ca and a beam
+//!                        of its break group (SOFT_NONE = none): once one breaks,
+//!                        the triangle stops colliding
+//! pairCacheBase + o      particle ordinal o: its anti-clip side cache, four
+//!                        (triangle + 1) << 1 | back entries (0 = empty)
+//! localBase + 4·o        particle ordinal o in its body's local frame: position,
+//!                        position at the step start, inertial target, where its
+//!                        contacts were detected
+//! originBase + s         soft body s's local-frame origin (whole metres)
+//! beamExtraBase + e      beam e: [expansion spring, expansion damping] (anisotropic)
+//! elementBase + 3·k      element k (LBEAM, torsion bar, slidenode): nodes or the
+//!                        slidenode and its rail list; kind, spring, damping, rest
+//!                        angle; deform, strength, tolerance, cap strength
+//! railNodeBase + i/4     rail node lists (body indices)
+//! islandBase + s         soft body s: [substeps this step, steps since its last
+//!                        contact or yield, 0, 0] (crash islands)
 //! ```
 
 use serde::{Deserialize, Serialize};
 
-pub const HEADER_SLOTS: u32 = 10;
+pub const HEADER_SLOTS: u32 = 13;
 /// Slots per soft body in the pair list (a count and up to 31 bodies).
 pub const SOFT_PAIR_STRIDE: u32 = 8;
 /// Slots per particle in the contact list (a count and up to 15 contacts).
@@ -36,9 +52,17 @@ pub const BODY_STRIDE: u32 = 6;
 pub const BEAM_STRIDE: u32 = 4;
 /// Node contacts a triangle records (its side of node–triangle contacts).
 pub const TRI_NODE_CONTACTS: u32 = 4;
-pub const TRI_CONTACT_STRIDE: u32 = 3 + 3 * TRI_NODE_CONTACTS;
-/// Node contact slot stride (normal + triangle, barycentrics + δ, initial gap).
-pub const NODE_SLOT_STRIDE: u32 = 3;
+/// Per triangle: its obstacle (3 slots), its node contacts (3 each), and the
+/// nearest node's distance in front of it (the displacement bound).
+pub const TRI_CONTACT_STRIDE: u32 = 4 + 3 * TRI_NODE_CONTACTS;
+/// Slots per particle in the local-frame region: position, step-start position,
+/// inertial target, detection position.
+pub const LOCAL_STRIDE: u32 = 4;
+/// Node contacts per node (its side-cached triangles, all enforced).
+pub const NODE_CONTACTS: u32 = 4;
+/// Node contact slot stride: per contact (normal + triangle, barycentrics + δ,
+/// initial gap).
+pub const NODE_SLOT_STRIDE: u32 = 3 * NODE_CONTACTS;
 
 /// Beam record words (u32/f32 view of its 4 slots).
 pub const BW_A: usize = 0;
@@ -82,8 +106,29 @@ pub const SOFT_SLEEP_SYNC: u32 = 4;
 /// Node–triangle and triangle–obstacle contacts.
 pub const SOFT_CONTACTS: u32 = 8;
 
+/// Slots per element record (LBEAM, torsion bar, slidenode).
+pub const ELEMENT_STRIDE: u32 = 3;
+pub const ELEMENT_LBEAM: u32 = 0;
+pub const ELEMENT_TORSION: u32 = 1;
+pub const ELEMENT_SLIDE: u32 = 2;
+/// Element record flags (slot 1 .x, above the kind).
+pub const ELEMENT_BROKEN: u32 = 1 << 8;
+pub const ELEMENT_YIELDED: u32 = 1 << 9;
+/// Slidenode flags (slot 0 .w).
+pub const SLIDE_LOOPED: u32 = 1;
+pub const SLIDE_CAPPED: u32 = 2;
+pub const SLIDE_ATTACHED: u32 = 4;
+/// List entry: the particle's element count sits above the flags.
+pub const ENTRY_ELEMENT_SHIFT: u32 = 18;
+
 /// List entry flags (word w, above the soft body index).
 pub const ENTRY_CONTACTER: u32 = 1 << 16;
+/// The node collides with its own body's triangles (`SoftNode::self_collision`).
+pub const ENTRY_SELF: u32 = 1 << 17;
+/// Rest slot .w of a particle: its self-collision group (low 16 bits), with this
+/// bit set when its body has groups (BeamNG content: the group rule applies
+/// instead of the rest-distance rule).
+pub const NODE_GROUPED: u32 = 1 << 31;
 
 /// Body flag marking a particle (3-DOF node) in `gBodies`.
 pub const BODY_PARTICLE: u32 = 64;
@@ -115,6 +160,10 @@ pub struct SoftCapacity {
     pub max_triangles: u32,
     /// Thin static obstacles (spheres, capsules) tested against soft triangles.
     pub max_obstacles: u32,
+    /// LBEAMs, torsion bars and slidenodes across all soft bodies.
+    pub max_elements: u32,
+    /// Nodes of all rails (each slidenode lists its rail's).
+    pub max_rail_nodes: u32,
 }
 
 impl Default for SoftCapacity {
@@ -127,6 +176,8 @@ impl Default for SoftCapacity {
             max_groups: 4096,
             max_triangles: 32768,
             max_obstacles: 64,
+            max_elements: 8192,
+            max_rail_nodes: 8192,
         }
     }
 }
@@ -173,6 +224,27 @@ pub struct SoftLayout {
     pub contact_list_base: u32,
     /// Bolted parts: `MAX_RIGID_PARTS` records of `PART_STRIDE` slots per soft body.
     pub part_base: u32,
+    /// Per triangle: its edge beams and a break-group beam (global beam ids).
+    pub tri_extra_base: u32,
+    /// Per particle (ordinal): the anti-clip side cache.
+    pub pair_cache_base: u32,
+    /// Per particle (ordinal), 3 slots: its local position, local position at the
+    /// step start and inertial target (the solver's state, precise at any
+    /// distance from the world origin).
+    pub local_base: u32,
+    /// Per soft body: the origin of its local frame.
+    pub origin_base: u32,
+    /// Per beam: [expansion spring, expansion damping (anisotropic beams), deform
+    /// threshold ceiling, 1 = breaking does not trigger its group].
+    pub beam_extra_base: u32,
+    /// Per element: `ELEMENT_STRIDE` slots (nodes; kind and flags, spring, damping,
+    /// rest angle; deform, strength, tolerance, cap strength).
+    pub element_base: u32,
+    /// Rail node lists (body indices, 4 per slot).
+    pub rail_node_base: u32,
+    /// Per soft body: [substeps this step (crash island), steps since its last
+    /// contact or yield, 0, 0].
+    pub island_base: u32,
     pub total_slots: u32,
 }
 
@@ -186,7 +258,12 @@ impl SoftCapacity {
         let adj_base = list_base + self.max_particles;
         // Every beam appears in the adjacency of both particles (two words each:
         // the beam and the other end), every triangle in three.
-        let adj_slots = (4 * self.max_beams + 3 * self.max_triangles).div_ceil(4);
+        // Elements: up to four nodes each, a slidenode's rail nodes besides.
+        let adj_slots = (4 * self.max_beams
+            + 3 * self.max_triangles
+            + 4 * self.max_elements
+            + self.max_rail_nodes)
+            .div_ceil(4);
         let cheb_base = adj_base + adj_slots;
         let tri_base = cheb_base + 3 * self.max_particles;
         let tri_rest_base = tri_base + self.max_triangles;
@@ -203,6 +280,10 @@ impl SoftCapacity {
         let bdf_base = body_pair_base + SOFT_PAIR_STRIDE * self.max_bodies;
         let contact_list_base = bdf_base + self.max_particles;
         let part_base = contact_list_base + CONTACT_LIST_STRIDE * self.max_particles;
+        let tri_extra_base = part_base + PART_STRIDE * MAX_RIGID_PARTS * self.max_bodies;
+        let pair_cache_base = tri_extra_base + self.max_triangles;
+        let local_base = pair_cache_base + self.max_particles;
+        let origin_base = local_base + LOCAL_STRIDE * self.max_particles;
         SoftLayout {
             body_base,
             beam_base,
@@ -226,7 +307,26 @@ impl SoftCapacity {
             bdf_base,
             contact_list_base,
             part_base,
-            total_slots: part_base + PART_STRIDE * MAX_RIGID_PARTS * self.max_bodies,
+            tri_extra_base,
+            pair_cache_base,
+            local_base,
+            origin_base,
+            beam_extra_base: origin_base + self.max_bodies,
+            element_base: origin_base + self.max_bodies + self.max_beams,
+            rail_node_base: origin_base
+                + self.max_bodies
+                + self.max_beams
+                + ELEMENT_STRIDE * self.max_elements,
+            island_base: origin_base
+                + self.max_bodies
+                + self.max_beams
+                + ELEMENT_STRIDE * self.max_elements
+                + self.max_rail_nodes.div_ceil(4),
+            total_slots: origin_base
+                + 2 * self.max_bodies
+                + self.max_beams
+                + ELEMENT_STRIDE * self.max_elements
+                + self.max_rail_nodes.div_ceil(4),
         }
     }
 
@@ -273,6 +373,27 @@ pub struct SoftSettings {
     /// bodies couple to the rigid passes only through their core joints, so
     /// extra sweeps converge them at about half the cost of extra iterations.
     pub sweeps: u32,
+    /// Least speed (m/s) at which a soft contact pushes out an overlap present at
+    /// the step start. AVBD's α alone corrects 1% of it per step (α = 0.99), which
+    /// held a crushed node 2 cm behind a panel for a third of a second; 0 = α only.
+    pub contact_push_out: f32,
+    /// Displacement bound relaxation γ (BeamNG-parity phase 2, after Offset
+    /// Geometric Contact): a particle in a soft contact moves toward a face it is
+    /// in front of by at most γ × its distance at detection, and a triangle vertex
+    /// along its normal by γ × the nearest node's, so no node crosses a face within
+    /// a step. Below 1/2; 0 = off (the default: at 240 Hz × 10 it cut a 100 km/h
+    /// wall's penetrations from 33 to 25 but raised a 2 × 80 km/h head-on's
+    /// car-to-car ones from 1 to 12; DECISIONS s29).
+    pub displacement_bound: f32,
+    /// Crash islands (BeamNG-parity phase 5): a soft body with a contact on one
+    /// of its particles within the last 50 ms splits its step into this many
+    /// substeps (its iterations shared among them), at
+    /// no extra particle sweeps. Rigid bodies and contacts still take one step:
+    /// within it they are fixed obstacles to the substeps; joint and contact rows
+    /// see each body at the same fraction of the step (`bodyAtTime`). 1 = off, the
+    /// default until the procedural cars are re-tuned for it: with 2 the sedan's
+    /// designed 20–35 g crumple plateau became 13 g (DECISIONS s32).
+    pub crash_substeps: u32,
     /// Second-order BDF2 for the particles instead of backward Euler (BDF1):
     /// far less numerical damping of the structure's vibration at a given step
     /// (experimental; validate with `soft_calibrate`). Backward Euler wherever a
@@ -299,6 +420,9 @@ impl Default for SoftSettings {
             rigid_mode: false,
             rigid_quiet: 0.5,
             bdf2: false,
+            contact_push_out: 1.0,
+            displacement_bound: 0.0,
+            crash_substeps: 1,
         }
     }
 }
@@ -315,7 +439,9 @@ mod tests {
         assert_eq!(l.beam_base - l.body_base, BODY_STRIDE * c.max_bodies);
         assert_eq!(l.group_base - l.beam_base, 4 * c.max_beams);
         assert_eq!(
-            l.adj_base + (4 * c.max_beams + 3 * c.max_triangles).div_ceil(4),
+            l.adj_base
+                + (4 * c.max_beams + 3 * c.max_triangles + 4 * c.max_elements + c.max_rail_nodes)
+                    .div_ceil(4),
             l.cheb_base
         );
         assert_eq!(l.rigid_base + 2 * c.max_particles, l.body_color_base);
@@ -335,8 +461,22 @@ mod tests {
         );
         assert_eq!(
             l.part_base + PART_STRIDE * MAX_RIGID_PARTS * c.max_bodies,
-            l.total_slots
+            l.tri_extra_base
         );
+        assert_eq!(l.tri_extra_base + c.max_triangles, l.pair_cache_base);
+        assert_eq!(l.pair_cache_base + c.max_particles, l.local_base);
+        assert_eq!(l.local_base + LOCAL_STRIDE * c.max_particles, l.origin_base);
+        assert_eq!(l.origin_base + c.max_bodies, l.beam_extra_base);
+        assert_eq!(l.beam_extra_base + c.max_beams, l.element_base);
+        assert_eq!(
+            l.element_base + ELEMENT_STRIDE * c.max_elements,
+            l.rail_node_base
+        );
+        assert_eq!(
+            l.rail_node_base + c.max_rail_nodes.div_ceil(4),
+            l.island_base
+        );
+        assert_eq!(l.island_base + c.max_bodies, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }

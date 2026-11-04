@@ -8,6 +8,9 @@
 //! Reports wall time per step and per 60 fps frame (4 steps), after warm-up.
 //! `CAR=buggy`: the hybrid dune buggy (152 nodes, 861 beams, 10 bolted parts)
 //! instead, and with `--rigid` the rigid `dune_buggy` preset it is built from.
+//! `CAR=truck:<file>`: a Rigs of Rods `.truck` file (e.g. RigsOfRods/content buses).
+//! `CAR=sedan`: the procedural sedan (367 nodes, 2,170 beams).
+//! `CAR=hires`: the BeamNG-resolution JBeam car (1,014 nodes, 5,774 beams).
 use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity};
 use engine_softbody::procedural::{car_truck, CarParams};
 use engine_softbody::truck::load_truck;
@@ -29,6 +32,15 @@ fn main() -> anyhow::Result<()> {
     let buggy = std::env::var("CAR").as_deref() == Ok("buggy");
     let desc = if buggy {
         engine_softbody::buggy::dune_buggy_soft()
+    } else if let Some(path) = std::env::var("CAR")
+        .ok()
+        .and_then(|c| c.strip_prefix("truck:").map(str::to_string))
+    {
+        load_truck(&std::fs::read_to_string(&path).expect("read .truck"))
+    } else if std::env::var("CAR").as_deref() == Ok("sedan") {
+        engine_softbody::procedural::car_desc(&CarParams::sedan()).0
+    } else if std::env::var("CAR").as_deref() == Ok("hires") {
+        engine_softbody::hires::hires_car_desc(&Default::default()).0
     } else {
         engine_softbody::procedural::car_desc(&CarParams::default()).0
     };
@@ -112,10 +124,16 @@ fn main() -> anyhow::Result<()> {
             params: [500.0, 5.0, 500.0, 707.0],
         });
         let cols = (n as f32).sqrt().ceil() as usize;
+        // Grid spacing from the vehicle's footprint (buses are 12 m long).
+        let (lo, hi) = desc.bounds();
+        let (sx, sz) = (
+            (hi[0] - lo[0]).max(4.0) + 2.0,
+            (hi[2] - lo[2]).max(7.0) + 2.0,
+        );
         let mut cores = Vec::new();
         let mut handles = Vec::new();
         for i in 0..n {
-            let (x, z) = ((i % cols) as f32 * 6.0, (i / cols) as f32 * 9.0);
+            let (x, z) = ((i % cols) as f32 * sx, (i / cols) as f32 * sz);
             if rigid {
                 // Baseline: the rigid sedan preset, same count, no soft bodies.
                 let preset = if buggy {
@@ -136,7 +154,7 @@ fn main() -> anyhow::Result<()> {
             let h = sim
                 .add_soft_vehicle(
                     &desc,
-                    [x, 0.05, z],
+                    [x - lo[0], 0.25 - lo[1], z - lo[2]],
                     [0.0, 0.0, 0.0, 1.0],
                     &SpawnOptions::default(),
                 )

@@ -1,0 +1,118 @@
+# Explicit beams scaling: Rubble GPU vs Rigs of Rods
+
+`95bbUID-agoral.truck`: 297 nodes, 1328 beams. Apple M3 Max (Metal). 1 trials × 240 timed frames (60 untimed first) at 120 fps: 17 steps of 0.5 ms per frame, a 8.33 ms frame budget; drive and impact at 27.78 m/s.
+
+## idle
+
+ms per frame: mean of trial means [95 % CI]; p95 over every frame. Speed-up: Rigs of Rods' time over Rubble's GPU time, geometric mean of paired trials [95 % CI].
+
+| vehicles | RoR (thread pool) | RoR p95 | Rubble GPU | Rubble GPU p95 | Rubble pipelined wall | Rubble blocking wall | speed-up | verdict | µs per vehicle (Rubble GPU) |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.179 | 0.202 | 0.242 | 0.264 | 0.250 | 0.501 | 0.74× | inconclusive | 241.85 |
+
+Peak frames (every frame of every trial): p99 and maximum ms, and the share of frames over the 8.33 ms budget. Worst-frame speed-up: Rigs of Rods' maximum over Rubble's GPU maximum.
+
+| vehicles | RoR p99 | RoR max | RoR over budget | Rubble GPU p99 | Rubble GPU max | Rubble GPU over budget | Rubble blocking p99 | Rubble blocking max | worst-frame speed-up |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.233 | 0.251 | 0.0 % | 0.282 | 0.285 | 0.0 % | 0.927 | 0.940 | 0.88× |
+
+
+Scaling (least squares, time = fixed + per vehicle × N): Rubble GPU NaN ms + NaN µs × N; Rigs of Rods NaN ms + NaN µs × N.
+
+Vehicles in a 2 ms physics budget (from the fit): Rubble 0, Rigs of Rods 0.  
+Vehicles in a 4 ms physics budget (from the fit): Rubble 0, Rigs of Rods 0.  
+Vehicles in a 8.33 ms physics budget (from the fit): Rubble 0, Rigs of Rods 0.  
+
+Accuracy, end of the run (trial 0), sampled vehicles: node distance Rubble–RoR; broken / bent beams, travel, crush, each Rubble / RoR.
+
+| vehicles | vehicle | node RMS (mm) | node max (mm) | broken | bent | travel (m) | crush (cm) |
+|---|---|---|---|---|---|---|---|
+| 1 | 0 | 6.99 | 11.90 | 0 / 0 | 0 / 0 | 0.025 / 0.030 | -3.55 / -3.54 |
+
+Accuracy ensembles (8 runs per engine, spawn speed + 0.1 mm/s × k): median node RMS Rubble–RoR 8.08 mm, RoR–RoR 8.90 mm, ratio 0.91 [95 % bootstrap 0.70, 1.22]; broken: Rubble median 0.0, RoR 0.0–0.0; bent: Rubble median 0.0, RoR 0.0–0.0.
+
+## drive
+
+ms per frame: mean of trial means [95 % CI]; p95 over every frame. Speed-up: Rigs of Rods' time over Rubble's GPU time, geometric mean of paired trials [95 % CI].
+
+| vehicles | RoR (thread pool) | RoR p95 | Rubble GPU | Rubble GPU p95 | Rubble pipelined wall | Rubble blocking wall | speed-up | verdict | µs per vehicle (Rubble GPU) |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.197 | 0.219 | 0.241 | 0.267 | 0.250 | 0.486 | 0.82× | inconclusive | 240.58 |
+
+Peak frames (every frame of every trial): p99 and maximum ms, and the share of frames over the 8.33 ms budget. Worst-frame speed-up: Rigs of Rods' maximum over Rubble's GPU maximum.
+
+| vehicles | RoR p99 | RoR max | RoR over budget | Rubble GPU p99 | Rubble GPU max | Rubble GPU over budget | Rubble blocking p99 | Rubble blocking max | worst-frame speed-up |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.231 | 0.257 | 0.0 % | 0.276 | 0.278 | 0.0 % | 0.797 | 0.838 | 0.93× |
+
+
+Scaling (least squares, time = fixed + per vehicle × N): Rubble GPU NaN ms + NaN µs × N; Rigs of Rods NaN ms + NaN µs × N.
+
+Vehicles in a 2 ms physics budget (from the fit): Rubble 0, Rigs of Rods 0.  
+Vehicles in a 4 ms physics budget (from the fit): Rubble 0, Rigs of Rods 0.  
+Vehicles in a 8.33 ms physics budget (from the fit): Rubble 0, Rigs of Rods 0.  
+
+Accuracy, end of the run (trial 0), sampled vehicles: node distance Rubble–RoR; broken / bent beams, travel, crush, each Rubble / RoR.
+
+| vehicles | vehicle | node RMS (mm) | node max (mm) | broken | bent | travel (m) | crush (cm) |
+|---|---|---|---|---|---|---|---|
+| 1 | 0 | 9.53 | 21.67 | 0 / 0 | 0 / 0 | 63.376 / 63.380 | -3.69 / -3.75 |
+
+Accuracy ensembles (8 runs per engine, spawn speed + 0.1 mm/s × k): median node RMS Rubble–RoR 10.06 mm, RoR–RoR 10.90 mm, ratio 0.92 [95 % bootstrap 0.77, 1.39]; broken: Rubble median 0.0, RoR 0.0–0.0; bent: Rubble median 0.0, RoR 0.0–0.0.
+
+## impact
+
+ms per frame: mean of trial means [95 % CI]; p95 over every frame. Speed-up: Rigs of Rods' time over Rubble's GPU time, geometric mean of paired trials [95 % CI].
+
+| vehicles | RoR (thread pool) | RoR p95 | Rubble GPU | Rubble GPU p95 | Rubble pipelined wall | Rubble blocking wall | speed-up | verdict | µs per vehicle (Rubble GPU) |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.225 | 0.269 | 0.245 | 0.274 | 0.255 | 0.516 | 0.92× | inconclusive | 244.66 |
+
+Peak frames (every frame of every trial): p99 and maximum ms, and the share of frames over the 8.33 ms budget. Worst-frame speed-up: Rigs of Rods' maximum over Rubble's GPU maximum.
+
+| vehicles | RoR p99 | RoR max | RoR over budget | Rubble GPU p99 | Rubble GPU max | Rubble GPU over budget | Rubble blocking p99 | Rubble blocking max | worst-frame speed-up |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.283 | 0.312 | 0.0 % | 0.285 | 0.346 | 0.0 % | 0.941 | 0.988 | 0.90× |
+
+
+Scaling (least squares, time = fixed + per vehicle × N): Rubble GPU NaN ms + NaN µs × N; Rigs of Rods NaN ms + NaN µs × N.
+
+Vehicles in a 2 ms physics budget (from the fit): Rubble 0, Rigs of Rods 0.  
+Vehicles in a 4 ms physics budget (from the fit): Rubble 0, Rigs of Rods 0.  
+Vehicles in a 8.33 ms physics budget (from the fit): Rubble 0, Rigs of Rods 0.  
+
+Accuracy, end of the run (trial 0), sampled vehicles: node distance Rubble–RoR; broken / bent beams, travel, crush, each Rubble / RoR.
+
+| vehicles | vehicle | node RMS (mm) | node max (mm) | broken | bent | travel (m) | crush (cm) |
+|---|---|---|---|---|---|---|---|
+| 1 | 0 | 308.39 | 672.22 | 30 / 30 | 65 / 65 | 10.871 / 10.816 | 167.97 / 167.87 |
+
+Accuracy ensembles (8 runs per engine, spawn speed + 0.1 mm/s × k): median node RMS Rubble–RoR 346.40 mm, RoR–RoR 370.29 mm, ratio 0.94 [95 % bootstrap 0.74, 1.23]; broken: Rubble median 30.0, RoR 30.0–31.0; bent: Rubble median 67.0, RoR 65.0–68.0.
+
+## Acceptance
+
+Command: `./target/release/explicit_beams_scaling /Users/glavin/Development/rubble-beamng-parity/engine/../inspiration/ror-content/agora/95bbUID-agoral.truck ror=/Users/glavin/Development/rubble-beamng-parity/engine/../inspiration/ror-harness/bin/ror_ref scenarios=idle,drive,impact counts=1 rubble_counts= fps=120 speed=27.78 drag=0 trials=1 nudges=8 max_load=1000 max_gpu=100000 out=docs/explicit-beams-acceptance/accuracy/agora_l`
+
+| result | criterion |
+|---|---|
+| PASS | 6 runs started on a quiet machine (load < 1000, GPU < 100000 %): 0 did not |
+| PASS | idle N=1 (8 runs per engine): median node RMS Rubble–RoR 8.08 mm <= 13.34 mm (1.5x RoR–RoR median 8.90 mm, at least 1 mm); ratio 0.91 [95 % 0.70, 1.22] |
+| PASS | idle N=1: Rubble median broken 0 within RoR's 0.0–0.0 widened 10% (0–0) |
+| PASS | idle N=1: Rubble median bent 0 within RoR's 0.0–0.0 widened 10% (0–0) |
+| FAIL | idle N=1: speed-up 0.74x, 95% CI [NaN, NaN] excludes 1 (RoR 0.179 ms, Rubble GPU 0.242 ms) |
+| FAIL | idle N=1: Rubble pipelined wall 0.250 ms < RoR mean 0.179 ms |
+| FAIL | idle N=1: Rubble p99 0.282 < RoR 0.233 ms, max 0.285 < 0.251 ms |
+| PASS | drive N=1 (8 runs per engine): median node RMS Rubble–RoR 10.06 mm <= 16.34 mm (1.5x RoR–RoR median 10.90 mm, at least 1 mm); ratio 0.92 [95 % 0.77, 1.39] |
+| PASS | drive N=1: Rubble median broken 0 within RoR's 0.0–0.0 widened 10% (0–0) |
+| PASS | drive N=1: Rubble median bent 0 within RoR's 0.0–0.0 widened 10% (0–0) |
+| FAIL | drive N=1: speed-up 0.82x, 95% CI [NaN, NaN] excludes 1 (RoR 0.197 ms, Rubble GPU 0.241 ms) |
+| FAIL | drive N=1: Rubble pipelined wall 0.250 ms < RoR mean 0.197 ms |
+| FAIL | drive N=1: Rubble p99 0.276 < RoR 0.231 ms, max 0.278 < 0.257 ms |
+| PASS | impact N=1 (8 runs per engine): median node RMS Rubble–RoR 346.40 mm <= 555.44 mm (1.5x RoR–RoR median 370.29 mm, at least 1 mm); ratio 0.94 [95 % 0.74, 1.23] |
+| PASS | impact N=1: Rubble median broken 30 within RoR's 30.0–31.0 widened 10% (27–35) |
+| PASS | impact N=1: Rubble median bent 67 within RoR's 65.0–68.0 widened 10% (58–75) |
+| FAIL | impact N=1: speed-up 0.92x, 95% CI [NaN, NaN] excludes 1 (RoR 0.225 ms, Rubble GPU 0.245 ms) |
+| FAIL | impact N=1: Rubble pipelined wall 0.255 ms < RoR mean 0.225 ms |
+| FAIL | impact N=1: Rubble p99 0.285 < RoR 0.283 ms, max 0.346 < 0.312 ms |
+
+**NOT MET** (9 failing)

@@ -1,0 +1,19 @@
+thin box plate
+; Four nodes in a 0.3 m x 0.5 m horizontal rectangle, braced by its diagonals:
+; two node lines 0.5 m apart (z = -0.25 and +0.25), for driving along -x past
+; a static box narrower than the line spacing (tests/explicit_thin_box.rs).
+globals
+40, 0, tracks/semi
+nodes
+0, 0.0, 0.0, -0.25
+1, 0.0, 0.0, 0.25
+2, 0.3, 0.0, -0.25
+3, 0.3, 0.0, 0.25
+beams
+0, 1
+2, 3
+0, 2
+1, 3
+0, 3
+1, 2
+end

@@ -99,6 +99,22 @@ enum class ERubbleMaterial : uint8
 	Count
 };
 
+/** A soft car's surfaces (engine_softbody::visual::material, rbCreateSoftCarVisual). */
+enum class ERubbleCarSurface : uint8
+{
+	Paint,
+	Glass,
+	Chrome,
+	Trim,
+	Headlight,
+	Taillight,
+	Underbody,
+	Interior,
+	Engine,
+	Grille,
+	Count
+};
+
 /** A triangle mesh in its body's (or chunk's) local frame. Winding is Unreal's (clockwise front). */
 struct FRubbleMeshData
 {
@@ -109,6 +125,10 @@ struct FRubbleMeshData
 	/** Per-triangle material; empty means Material for every triangle. */
 	TArray<ERubbleMaterial> TriangleMaterials;
 	ERubbleMaterial Material = ERubbleMaterial::Concrete;
+	/** The engine's soft car mesh (rbCreateSoftCarVisual): per triangle, its car surface
+	 *  (ERubbleCarSurface); per vertex, 1 on a seam between panels. Empty for other meshes. */
+	TArray<uint8> CarSurfaces;
+	TArray<uint8> Seams;
 
 	int32 NumTriangles() const { return Indices.Num() / 3; }
 };
@@ -361,6 +381,9 @@ struct FRubbleSoftSkin
 	TArray<float> Strain;
 	/** Per triangle: torn (no longer drawn). */
 	TBitArray<> TornTriangles;
+	/** Per triangle, when the engine measured it: crumple strain against the rest triangle
+	 *  (a pane past 0.06 has shattered); empty otherwise. */
+	TArray<float> FaceStrain;
 };
 
 /** One step's results (rubble Frame). */

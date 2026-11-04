@@ -180,6 +180,11 @@ impl SoftSkinner {
         self.vertices
     }
 
+    /// Triangles skinned (16 bytes each in `faces`).
+    pub fn triangle_count(&self) -> u32 {
+        self.triangles
+    }
+
     /// Skin the mesh from the current body buffer (after a step).
     pub fn encode(&self, enc: &mut wgpu::CommandEncoder) {
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {

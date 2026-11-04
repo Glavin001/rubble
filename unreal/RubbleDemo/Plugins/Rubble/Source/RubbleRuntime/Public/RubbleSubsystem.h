@@ -52,8 +52,13 @@ public:
 	/** One display frame: real time in, steps taken, finished frames merged and broadcast. */
 	void Advance(double RealSeconds);
 
-	/** Where the display is between the last step and the next (renderers interpolate by it). */
-	double Alpha() const { return Clock.Alpha(); }
+	/** Where the display is between the last step and the next (renderers interpolate by it):
+	 *  1 (the latest step, raw) unless bInterpolate. */
+	double Alpha() const { return bInterpolate ? Clock.Alpha() : 1.0; }
+	/** Blend between the last two steps for smoother motion when the display outruns the step
+	 *  rate (-RubbleInterpolate). Off by default: every frame shows exactly the latest step the
+	 *  engine computed. */
+	bool bInterpolate = false;
 	const FRubbleFrameStats& Stats() const { return LastStats; }
 
 	// Input and actions, forwarded to the backend.

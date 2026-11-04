@@ -76,3 +76,8 @@ required-features = ["gpu"]
 name = "gpu_dispatch_probe"
 path = "src/bin/gpu_dispatch_probe.rs"
 required-features = ["gpu"]
+
+[[bin]]
+name = "explicit_beams_check"
+path = "src/bin/explicit_beams_check.rs"
+required-features = ["gpu"]

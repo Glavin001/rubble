@@ -62,7 +62,22 @@ private:
 	/** A collapse's cloud where Bonds bonds broke: puffs scaled with the break, lingering. */
 	void Collapse(const FVector& At, int32 Bonds, ERubbleMaterial Material, const FLinearColor& Color);
 	void Sparks(const FVector& At, const FVector& Normal, int32 Count);
+	/** A soft car's damage since the last frame, from its skin's face strain (car-render.mjs's
+	 *  spawnFx): a torn panel sheds a paint chip, a pane that shatters a shard, a sudden crumple
+	 *  a spark and a little dust. */
+	void SoftDamage(const FRubbleSoftSkin& Skin, float Dt);
 	FPool& PoolOf(EKind Kind) { return Pools[int32(Kind)]; }
+
+	/** Per soft body: its triangles, their car surfaces and paint, and last frame's skin. */
+	struct FSoftState
+	{
+		TArray<uint32> Indices;
+		TArray<uint8> Surfaces;
+		FLinearColor Paint = FLinearColor::White;
+		TArray<float> PrevStrain;
+		TArray<FVector3f> PrevPositions;
+	};
+	TArray<FSoftState> Soft;
 
 	FPool Pools[3];
 	FRandomStream Random{ 77 };

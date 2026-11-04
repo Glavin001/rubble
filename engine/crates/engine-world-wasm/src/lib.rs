@@ -30,6 +30,7 @@ pub mod timber_yard;
 mod city;
 mod defs;
 mod demo;
+mod explicit;
 mod frame;
 mod guidance;
 /// The fracture lab (`fracture/`): its scenes as destructibles, its shots.
@@ -47,6 +48,7 @@ pub use lab::{check_lab_chunk_order, LabAsset, LabPreload, LabScene};
 /// The lab's scene bindings (`engine-fracture-wasm`), exported from this module too.
 pub use engine_fracture_wasm;
 pub use scene::WebSnapshot;
+pub use explicit::ExplicitSim;
 
 fn err(e: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&e.to_string()).into()

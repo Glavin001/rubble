@@ -16,6 +16,9 @@
     .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
     .row input[type=number] { width: 58px; background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 2px 4px; font: inherit; }
     .row label.p { color: #9aa4b2; }
+    .row label.p:has(input[type=range]) { display: flex; align-items: center; gap: 6px; width: 100%; }
+    .row input[type=range] { flex: 1; min-width: 120px; accent-color: #5b9cff; }
+    .row .pv { min-width: 40px; text-align: right; color: #e6e9ef; font-variant-numeric: tabular-nums; }
     button, select, label.file { background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
     button:hover, label.file:hover { background: #26324a; }
     #status { bottom: 10px; left: 10px; font: 12px ui-monospace, monospace; }
@@ -27,11 +30,12 @@
 <body>
   <canvas id="c"></canvas>
   <div class="panel" id="info">
-    <div><b>Soft-body vehicles</b> <span class="muted">— node–beam bodies (Rigs of Rods / BeamNG style) in Rubble's AVBD solver</span></div>
-    <div class="muted">Particles + plastic, breakable beams solved on the GPU in the same step as rigid bodies; raycast wheels and drivetrain on a rigid core.</div>
+    <div id="infoTitle"><b>Soft-body vehicles</b> <span class="muted">— node–beam bodies (Rigs of Rods / BeamNG style) in Rubble's AVBD solver</span></div>
+    <div class="muted" id="infoText">Particles + plastic, breakable beams solved on the GPU in the same step as rigid bodies; raycast wheels and drivetrain on a rigid core.</div>
     <div class="row">
       <select id="sceneSel"></select>
       <select id="carSel" title="The vehicle every scene crashes"></select>
+      <select id="xsceneSel" title="The explicit solver's scene" style="display:none"></select>
       <label class="file">Load .truck <input id="truckFile" type="file" accept=".truck,.load,.car,.trailer,.boat,.airplane,.fixed,.train" hidden /></label>
       <label class="file" title="A BeamNG vehicle folder (.jbeam parts, optional .pc config)">Load JBeam folder <input id="jbeamDir" type="file" webkitdirectory multiple hidden /></label>
       <button id="beamsBtn">beams (V)</button>
@@ -42,13 +46,18 @@
     </div>
     <div class="row" id="paramRow"></div>
     <div class="row"><label class="p">camera</label><select id="camSel"></select><select id="camTargetSel" title="what it looks at"></select><label class="p" id="camFromLbl">from</label><select id="camFromSel" title="what it rides on"></select></div>
-    <div class="muted" style="margin-top:6px">
+    <div class="muted" style="margin-top:6px;display:none" id="xkeys">
+      Explicit solver: no drivetrain. <kbd>L</kbd> launch at 100 km/h · <kbd>R</kbd> restart · <kbd>V</kbd> beams (green intact, yellow→red bent, magenta broken) · <kbd>C</kbd> camera · drag to orbit, wheel to zoom
+    </div>
+    <div class="muted" style="margin-top:6px" id="softKeys">
       <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>C</kbd> camera · <kbd>V</kbd> beam view (load, plastic strain) · <kbd>M</kbd> flexbody / collision skin ·
       <kbd>B</kbd> fire a 300 kg ball · <kbd>T</kbd> side ram · drag to orbit, wheel to zoom
     </div>
     <div class="muted" id="truckInfo"></div>
   </div>
   <div class="panel" id="hud">
+    <div><button id="solverBtn" title="Rebuild this scene with the other solver (?solver=explicit)">solver</button></div>
+    <div class="damage" id="xstats"></div>
     <div id="speed">0 <small>km/h</small></div>
     <div class="damage" id="damage">—</div>
     <div class="damage muted" id="events"></div>
@@ -62,7 +71,7 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText } from './rubble-world.mjs';
+    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
@@ -98,13 +107,73 @@
     // The vehicle every scene crashes (?car=): the procedural sedan, or the hybrid
     // dune buggy (engine_softbody::buggy: node–beam tube frame, rigid drivetrain
     // core, bolted parts on breakable joints; ?strength= scales its mounts).
-    const CARS = { sedan: 'Car: procedural sedan (soft body)', buggy: 'Car: dune buggy (soft frame + rigid parts)' };
-    const carKind = CARS[qs.get('car')] ? qs.get('car') : 'sedan';
-    const buggy = carKind === 'buggy';
+    // ?solver=explicit: the scene's vehicle runs on the explicit 2 kHz solver
+    // (engine_softbody::explicit_beams on the GPU, Rigs of Rods parity) instead of
+    // the soft AVBD solver; the button rebuilds the scene with the other one.
+    const EXPLICIT = qs.get('solver') === 'explicit';
+    // The vehicle: also the high-resolution JBeam test car, or an imported .truck /
+    // JBeam (?truck=<url>, or a loaded file kept for this tab as ?car=import).
+    const IMPORT_KEY = 'rubble-softbody-import';
+    let importSrc = null; // { kind: 'truck', text, label } | { kind: 'jbeam', files, pc, label }
+    if (qs.get('truck')) {
+      const url = qs.get('truck');
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`?truck=${url}: ${r.status} ${r.statusText}`);
+      importSrc = { kind: 'truck', text: await r.text(), label: url.split('/').pop() };
+    } else if (qs.get('car') === 'import') {
+      try { importSrc = JSON.parse(sessionStorage.getItem(IMPORT_KEY) || 'null'); } catch { importSrc = null; }
+    }
+    const CARS = { sedan: 'Car: procedural sedan (soft body)', buggy: 'Car: dune buggy (soft frame + rigid parts)', hires: 'Car: hi-res JBeam test car (1,110 nodes)' };
+    if (importSrc) CARS.import = `Car: ${importSrc.label} (imported)`;
+    const carKind = importSrc ? 'import' : CARS[qs.get('car')] ? qs.get('car') : 'sedan';
+    const buggy = carKind === 'buggy' && !EXPLICIT;
     const carSel = document.getElementById('carSel');
     for (const [id, t] of Object.entries(CARS)) carSel.add(new Option(t, id, false, id === carKind));
-    carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); location.href = u.href; };
-    sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); if (buggy) u.searchParams.set('car', 'buggy'); location.href = u.href; };
+    carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') u.searchParams.delete('truck'); location.href = u.href; };
+    // Query parameters a scene change keeps: the solver and the vehicle.
+    const keep = (u) => { for (const k of ['solver', 'car', 'truck']) if (qs.has(k)) u.searchParams.set(k, qs.get(k)); return u; };
+    sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = keep(u).href; };
+    const solverBtn = document.getElementById('solverBtn');
+    solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz (RoR parity) ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
+    solverBtn.onclick = () => { const u = new URL(location.href); if (EXPLICIT) u.searchParams.delete('solver'); else u.searchParams.set('solver', 'explicit'); location.href = u.href; };
+    // The explicit solver's scenes; each soft scene maps to the nearest.
+    const XSCENES = { idle: 'Explicit: at rest (L launches at 100 km/h)', coast: 'Explicit: coasting at 100 km/h', wall: 'Explicit: 100 km/h into a rigid wall', arena: 'Explicit: fleet arena (?n= vehicles, ?headOn= share)',
+      headon: 'Explicit: head-on, two cars (overlap)', tbone: 'Explicit: T-bone into a standing car', pole: 'Explicit: into a 20 cm pole',
+      sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar', drop: 'Explicit: drop test' };
+    // Explicit scenes' knobs (the solver's crash_scene and arena): [url key, label,
+    // default, [min, max, step]]. km/h knobs go to the solver in m/s; angles in degrees.
+    const KMH = [0, 200, 1], OVERLAP = [0.05, 1, 0.05], ANGLE = [-90, 90, 1], ALONG = [-2.5, 2.5, 0.05];
+    const XPARAMS = {
+      coast: [['xspeed', 'km/h', 100, KMH]],
+      wall: [['speed', 'km/h', 100, KMH], ['overlap', 'overlap', 1, OVERLAP], ['angle', 'angle °', 0, ANGLE]],
+      headon: [['speed', 'car 1 km/h', 56, KMH], ['speed2', 'car 2 km/h', 56, KMH], ['overlap', 'overlap', 1, OVERLAP], ['angle', 'car 2 angle °', 0, ANGLE]],
+      tbone: [['speed', 'striking km/h', 50, KMH], ['carSpeed', 'struck km/h', 0, KMH], ['at', 'hit at m', 0, ALONG], ['angle', 'angle °', 90, [0, 180, 1]]],
+      pole: [['speed', 'km/h', 60, KMH], ['offset', 'offset m', 0, [-1.5, 1.5, 0.01]], ['angle', 'angle °', 0, ANGLE]],
+      sidepole: [['speed', 'km/h', 32, KMH], ['at', 'hit at m', 0, ALONG]],
+      limbo: [['speed', 'km/h', 60, KMH], ['bar', 'bar height m', 1, [0.3, 2, 0.05]]],
+      drop: [['height', 'height m', 8, [0.5, 40, 0.5]], ['speed', 'forward km/h', 0, KMH]],
+      arena: [['n', 'vehicles', 256, [1, 4096, 1]], ['headOn', 'head-on share', 0, [0, 1, 0.05]], ['speedMin', 'min km/h', 90, KMH], ['speedMax', 'max km/h', 150, KMH]],
+    };
+    const XCRASH = new Set(['wall', 'headon', 'tbone', 'pole', 'sidepole', 'limbo', 'drop']);
+    const XMAP = { yard: 'idle', crates: 'idle', traffic: 'idle', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
+      wall: 'wall', pole: 'pole', sidepole: 'sidepole', tbone: 'tbone', headon: 'headon', limbo: 'limbo', sandwich: 'wall', import: 'wall', drop: 'drop' };
+    const xscene = XSCENES[qs.get('xscene')] ? qs.get('xscene') : XMAP[scene];
+    const ARENA = EXPLICIT && xscene === 'arena';
+    if (EXPLICIT) {
+      const xs = document.getElementById('xsceneSel');
+      for (const [id, t] of Object.entries(XSCENES)) xs.add(new Option(t, id, false, id === xscene));
+      xs.style.display = '';
+      xs.onchange = () => { const u = new URL(location.href); u.searchParams.set('xscene', xs.value); location.href = u.href; };
+      document.getElementById('xkeys').style.display = '';
+      for (const id of ['softKeys', 'presetSel']) document.getElementById(id).style.display = 'none';
+      document.getElementById('infoTitle').innerHTML = '<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, Rigs of Rods parity</span>';
+      document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams, soft tyres and self-collision, every step of a frame in one GPU submit; rendered from its buffers. Crash scenes with knobs (speeds, angles, overlap), static boxes, vehicle–vehicle contact and no drivetrain: driving, moving rigid bodies and the dune buggy are on the soft solver (button above).';
+      // Only the explicit solver's own scenes and vehicles are offered: the soft
+      // scenes (poles, moving barriers, ramps, drivers) need the World's rigid
+      // bodies and drivetrains, which it does not couple to.
+      sceneSel.style.display = 'none';
+      for (const o of [...carSel.options]) if (o.value === 'buggy') o.remove();
+    }
     // Crash-test presets (query strings) and the editable parameters of each scene.
     const PRESETS = [
       ['Frontal, full width, 56 km/h (NCAP-style)', 'scene=wall&speed=56'],
@@ -155,18 +224,33 @@
         const match = [...pq].every(([k, v]) => here.get(k) === v) && [...here.keys()].every((k) => pq.has(k) || !['scene', 'speed', 'overlap', 'angle', 'offset', 'at', 'mass', 'carSpeed', 'height', 'pitch'].includes(k));
         presetSel.add(new Option(label, q, false, match));
       }
-      presetSel.onchange = () => { if (presetSel.value) location.search = presetSel.value + (buggy ? '&car=buggy' : ''); };
+      presetSel.onchange = () => { if (presetSel.value) { const u = new URL(location.href); u.search = presetSel.value; location.href = keep(u).href; } };
       const row = document.getElementById('paramRow');
-      const fields = PARAMS[scene] || [];
-      for (const [k, unit, d] of fields) {
+      // Explicit mode: the explicit scene's fields (its crash scenes share the soft ones').
+      const pscene = EXPLICIT ? xscene : scene;
+      const fields = (EXPLICIT ? XPARAMS[pscene] : PARAMS[pscene]) || [];
+      for (const [k, unit, d, range] of fields) {
         const l = document.createElement('label'); l.className = 'p'; l.textContent = unit + ' ';
-        const inp = document.createElement('input'); inp.type = 'number'; inp.step = 'any'; inp.id = 'p_' + k;
-        inp.value = here.has(k) ? here.get(k) : d;
-        inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') run(); };
-        l.appendChild(inp); row.appendChild(l);
+        const inp = document.createElement('input'); inp.id = 'p_' + k;
+        const v = here.has(k) ? here.get(k) : d;
+        if (range) {
+          // A slider with its value beside it; the scene rebuilds on release.
+          const [min, max, step] = range;
+          Object.assign(inp, { type: 'range', min, max, step, value: v });
+          const out = document.createElement('span'); out.className = 'pv'; out.textContent = v;
+          inp.oninput = () => { out.textContent = inp.value; };
+          inp.onchange = () => run();
+          inp.onkeydown = (e) => e.stopPropagation();
+          l.append(inp, out);
+        } else {
+          Object.assign(inp, { type: 'number', step: 'any', value: v });
+          inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') run(); };
+          l.appendChild(inp);
+        }
+        row.appendChild(l);
       }
-      const run = () => { const u = new URLSearchParams(location.search); u.set('scene', scene); for (const [k] of fields) u.set(k, document.getElementById('p_' + k).value); location.search = u.toString(); };
-      if (fields.length) { const b = document.createElement('button'); b.textContent = 'run'; b.onclick = run; row.appendChild(b); }
+      const run = () => { const u = new URLSearchParams(location.search); u.set(EXPLICIT ? 'xscene' : 'scene', pscene); for (const [k] of fields) u.set(k, document.getElementById('p_' + k).value); location.search = u.toString(); };
+      if (fields.length) { const b = document.createElement('button'); b.textContent = EXPLICIT ? 'restart' : 'run'; b.onclick = run; row.appendChild(b); }
     }
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
@@ -179,12 +263,24 @@
     // Traffic scales the arenas with its car count (161 particles, 923 beams each).
     const NCARS = scene === 'traffic' ? Math.max(1, Math.min(128, Number(qs.get('cars')) || 20)) : 0;
     const big = Math.max(NCARS, 24);
+    // Per-car soft capacity from the car actually loaded (an imported or hi-res car can
+    // have several times the procedural sedan's beams), at least the sedan's.
+    const carSize = (() => {
+      if (EXPLICIT || (carKind !== 'import' && carKind !== 'hires')) return null;
+      const d = carKind === 'hires' ? loadJbeam([['hires.jbeam', hiresCarJbeam()]])
+        : importSrc.kind === 'jbeam' ? loadJbeam(importSrc.files, importSrc.pc) : loadTruck(importSrc.text);
+      const groups = new Set(d.beams.map((b) => b.break_group ?? b.breakGroup ?? 0).filter((g) => g)).size;
+      return { particles: d.nodes.length, beams: d.beams.length, triangles: (d.triangles ?? []).length, groups };
+    })();
+    const perCar = { beams: Math.max(1000, (carSize?.beams ?? 0) + 64), particles: Math.max(170, (carSize?.particles ?? 0) + 16), triangles: Math.max(400, (carSize?.triangles ?? 0) + 16), groups: carSize?.groups ?? 0 };
     const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
     // Sized as the JS host's sceneCapacity(200·big + 2000 bodies, 220·big + 4000 colliders).
-    const estBodies = 200 * big + 2000, maxBodies = nextPow2(Math.max(estBodies, 4096));
+    // Bodies per car: a soft car's node spheres and core (the procedural sedan's ~200, an
+    // imported car's its node count), plus the scene's own.
+    const estBodies = Math.max(200, (carSize?.particles ?? 0) + 32) * big + 2000, maxBodies = nextPow2(Math.max(estBodies, 4096));
     const capacity = {
       maxBodies,
-      maxColliders: nextPow2(Math.max(220 * big + 4000, maxBodies * 2, 8192)),
+      maxColliders: nextPow2(Math.max(Math.max(220, (carSize?.particles ?? 0) + 48) * big + 4000, maxBodies * 2, 8192)),
       maxContacts: Math.min(nextPow2(Math.max(estBodies * 16, 65536)), 1 << 21),
       // The buggy holds 8 core joints and 30 bolted-part joints.
       maxJoints: 512 + (buggy ? 48 : 16) * big,
@@ -205,7 +301,7 @@
       // (World's default 3 would cap 240 Hz at 3 steps a frame, 75 % real time).
       readbackFrames: 2 * STEPS_PER_FRAME + 2,
       vehicles: { maxVehicles: big + 8, maxWheels: 4 * big + 32, maxCurvePoints: 4096, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 16 },
-      soft: { maxBodies: big + 16, maxBeams: 1000 * big + 8192, maxParticles: 170 * big + 2048, maxColors: 64, maxGroups: 1024, maxTriangles: 400 * big + 4096, maxObstacles: 64 },
+      soft: { maxBodies: big + 16, maxBeams: perCar.beams * big + 8192, maxParticles: perCar.particles * big + 2048, maxColors: 64, maxGroups: Math.max(1024, perCar.groups * big + 64), maxTriangles: perCar.triangles * big + 4096, maxObstacles: 64 },
     });
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
@@ -225,7 +321,9 @@
     const ITERS = Number(qs.get('iters')) || 10;
     world.setSolver({ dt: 1 / HZ, iterations: ITERS, gravityY: -9.81, betaLin: 1e7 });
     // The simulation's clock: steps since the scene started or was reset.
-    const simSteps = () => world.simSteps();
+    // (Explicit mode: the explicit solver's steps in this rate's units, so reads and
+    // the camera's lead keep their cadence.)
+    const simSteps = () => EXPLICIT ? Math.floor((xsim?.steps() ?? 0) * HZ / 2000) : world.simSteps();
     const MAT_GROUND = 0, MAT_PROP = 1, MAT_NODE = 9;
     // The JS host's material table (64 slots, friction 0.6 unless set): soft nodes
     // name slot 9 and wheel rims slot 7 directly, and shapes of a given friction
@@ -272,15 +370,44 @@
 
     // The procedural car with named parts (bonnet, doors, bumpers, engine…);
     // ?deform= rebuilds it from .truck text with another threshold (no parts).
-    const carDesc = buggy ? duneBuggySoft(Math.max(0.01, Number(qs.get('strength')) || 1))
+    // The vehicle's source for either solver: `.truck` text, JBeam files, or (soft
+    // only) a desc. The procedural sedan is the same `.truck` text on both.
+    const hiresJbeam = carKind === 'hires' ? [['hires.jbeam', hiresCarJbeam()]] : null;
+    const vehicleSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
+      : carKind === 'import' ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc } : { truck: importSrc.text })
+      // The sedan as the acceptance runs build it (?tyres=0: its bare body).
+      : { truck: explicitSedanTruck(qs.get('tyres') !== '0') };
+    const carDesc = EXPLICIT ? null : buggy ? duneBuggySoft(Math.max(0.01, Number(qs.get('strength')) || 1))
+      : carKind === 'hires' ? loadJbeam(hiresJbeam)
+      : carKind === 'import' ? (importSrc.kind === 'jbeam' ? loadJbeam(importSrc.files, importSrc.pc) : loadTruck(importSrc.text))
       : qs.get('deform') ? loadTruck(proceduralCar(Number(qs.get('deform')), 0)) : proceduralCarDesc();
+    // A non-procedural vehicle (hi-res car, imports) is turned so its forward axis
+    // is the scene's +Z, its front face centred where the sedan's would be (CAR_FRONT
+    // ahead of the spawn point), its lowest node 10 cm up.
+    const placed = carKind === 'hires' || carKind === 'import';
     const softs = []; // {h, name, core, car, buggy}
     const entries = []; // World's softEntry of each soft body
     const addSoftAt = (desc, p, q, opts = {}) => {
+      if (placed && desc === carDesc) {
+        const f = forwardOf(desc), fix = qAxis([0, 1, 0], -Math.atan2(f[0], f[2]));
+        const turn = (a, b) => [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+          a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
+        q = turn(q, fix);
+        const rot = (v) => { const c = [q[1] * v[2] - q[2] * v[1], q[2] * v[0] - q[0] * v[2], q[0] * v[1] - q[1] * v[0]];
+          const d = 2 * (q[0] * v[0] + q[1] * v[1] + q[2] * v[2]), w2 = q[3] * q[3] - (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+          return [0, 1, 2].map((i) => q[i] * d + v[i] * w2 + c[i] * 2 * q[3]); };
+        const ps = desc.nodes.map((n) => rot(n.position));
+        // Its forward and left in the world (the scene's yaw).
+        const fw = rot(f), l = [fw[2], 0, -fw[0]];
+        const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        const along = Math.max(...ps.map((r) => dot(r, fw))), lats = ps.map((r) => dot(r, l));
+        const mid = (Math.min(...lats) + Math.max(...lats)) / 2, low = Math.min(...ps.map((r) => r[1]));
+        p = [0, 1, 2].map((i) => i === 1 ? p[1] + 0.05 - low : p[i] + fw[i] * (CAR_FRONT - along) - l[i] * mid);
+      }
       const h = world.addSoftVehicle(desc, p, q, opts);
       const e = entries[h] = world.softEntry(h);
       // `car`: drawn by the procedural car's mesh; `buggy`: by the buggy's.
-      softs.push({ h, name: e.name, core: e.core, car: desc === carDesc && !buggy, buggy: desc === carDesc && buggy });
+      softs.push({ h, name: e.name, core: e.core, car: desc === carDesc && carKind === 'sedan', buggy: desc === carDesc && buggy });
       return h;
     };
     const addSoft = (desc, p, yaw = 0, opts = {}) => addSoftAt(desc, p, qAxis([0, 1, 0], yaw), opts);
@@ -308,7 +435,42 @@
     // ?carSpeed=, ?height=, ?pitch=); defaults are each scene's standard test.
     const P = (k, d) => (qs.has(k) && qs.get(k) !== '' && Number.isFinite(Number(qs.get(k))) ? Number(qs.get(k)) : d);
     const CAR_HW = 0.85, CAR_FRONT = 2.2; // half width, bumper face ahead of the centre
-    if (scene === 'yard') {
+    // ---------------------------------------------------------------- explicit solver
+    // The vehicle on the explicit solver (engine-world-wasm ExplicitSim on this
+    // world's device), at the soft scene's spawn facing +Z; the world holds the
+    // scene's ground and static boxes (the wall) and renders them.
+    let xsim = null, xlayout = null;
+    const XSPEED = (Number(qs.get('xspeed')) || 100) / 3.6;
+    const XSPAWN = { wall: [0, -2 - runup], pole: [0, -2 - runup], limbo: [0, -2 - runup], headon: [0, -3 - runup / 2] };
+    const buildExplicit = () => {
+      xsim?.free();
+      // Its front face where the sedan's would be (CAR_FRONT ahead of the spawn).
+      const [x, z] = XSPAWN[scene] ?? [0, 0];
+      xsim = world.explicitSim({
+        vehicles: [{ ...vehicleSource(), at: [x, z + CAR_FRONT], front: true, yaw: 0 }], scene: xscene, speed: XSPEED,
+        // arena: ?n= copies of the vehicle at 90–150 km/h into walls, poles and (?headOn=
+        // share of lanes) each other, or (?layout=ring) all at the centre from concentric
+        // rings (?ringRadius=); ?cols=, ?hitMax= s (the solver's defaults otherwise).
+        // The scene's fields (XPARAMS), km/h to m/s.
+        ...Object.fromEntries((XPARAMS[xscene] || []).filter(([k]) => k !== 'n' && k !== 'xspeed').map(([k, label, d]) => [k, P(k, d) / (label.includes('km/h') ? 3.6 : 1)])),
+        ...(xscene === 'arena' ? { count: P('n', 256), headOn: P('headOn', 0), ...(qs.has('cols') ? { cols: P('cols', 0) } : {}), ...(qs.has('hitMax') ? { hitMax: P('hitMax', 1.2) } : {}), layout: qs.get('layout') === 'ring' ? 'ring' : 'rows', ringRadius: P('ringRadius', 30) } : {}),
+        // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
+        drag: qs.get('drag') !== '0',
+      });
+      xlayout = xsim.layout();
+      return xsim;
+    };
+    if (EXPLICIT) {
+      buildExplicit();
+      // The explicit solver collides with its own copies; these only render (not soft
+      // obstacles: the arena has hundreds).
+      // Rows [centre, half, rotation, kind]: 0/1 box, 2 vertical cylinder (a 16-sided
+      // hull: radius hx, half height hy), 3 capsule along its y, 4 sphere.
+      const xGeom = (k, hx, hy, hz) => k === 2 ? { hull: { points: Array.from({ length: 32 }, (_, i) => { const a = (i >> 1) * Math.PI / 8; return [hx * Math.cos(a), i & 1 ? hy : -hy, hx * Math.sin(a)]; }).flat() } }
+        : k === 3 ? { capsule: { radius: hx, halfLen: hy } } : k === 4 ? { sphere: { radius: hx } } : { box: { half: [hx, hy, hz] } };
+      for (const [cx, cy, cz, hx, hy, hz, qx = 0, qy = 0, qz = 0, qw = 1, k = 0] of xlayout.boxes) shapeOn(world.createBody({ position: [cx, cy, cz], rotation: [qx, qy, qz, qw] }), xGeom(k, hx, hy, hz), MAT_PROP);
+      camMode = 'orbit'; orbit = ARENA ? { yaw: 0.7, pitch: 0.55, dist: 650, target: [0, 1, xlayout.boxes.length ? xlayout.boxes.reduce((a, b) => a + b[2], 0) / xlayout.boxes.length : 0] } : { yaw: 2.2, pitch: 0.3, dist: 11, target: null };
+    } else if (scene === 'yard') {
       addSoft(carDesc, [0, 0.05, 0]);
       // A wall, a row of poles, parked soft cars, crates, a ramp.
       staticBox([0, 1.5, 60], [8, 1.5, 0.3]);
@@ -721,6 +883,75 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
   let base = mix(vec3f(0.2, 0.2, 0.21), vec3f(0.31, 0.31, 0.32), grain) * (1.0 - 0.25 * line);
   return vec4f(shadeR(base, vec3f(0.0, 1.0, 0.0), i.w, 0.85, 0.0), 1.0);
 }
+
+// Explicit solver (?solver=explicit): read straight from its buffers. Nodes are 3
+// vec4 each (position relative to the vehicle's origin first); the origin is the
+// vehicle's misc record. Triangles: (a, b, c, vehicle) then their spawn edges.
+// Beams: records (a, b, vehicle | tyre << 16, spawn rest) and state ((rest, ..),
+// (strength, force, broken, 0)).
+@group(0) @binding(13) var<storage, read> xnodes: array<vec4f>;
+@group(0) @binding(14) var<storage, read> xmisc: array<vec4u>;
+@group(0) @binding(15) var<storage, read> xtris: array<vec4u>;
+@group(0) @binding(16) var<storage, read> xrecs: array<vec4u>;
+@group(0) @binding(17) var<storage, read> xbeams: array<vec4f>;
+fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xmisc[v].xyz); }
+// The collision skin: panels go dark with strain, a triangle past 1.8× its spawn
+// edges reads as torn and is dropped.
+@vertex fn vsXSkin(@builtin(vertex_index) vi: u32) -> Out {
+  let t = xtris[(vi / 3u) * 2u];
+  let r = bitcast<vec4f>(xtris[(vi / 3u) * 2u + 1u]);
+  let pa = xpos(t.x, t.w);
+  let pb = xpos(t.y, t.w);
+  let pc = xpos(t.z, t.w);
+  let k = vi % 3u;
+  let p = select(select(pc, pb, k == 1u), pa, k == 0u);
+  let la = length(pa - pb) / max(r.x, 1e-4);
+  let lb = length(pb - pc) / max(r.y, 1e-4);
+  let lc = length(pc - pa) / max(r.z, 1e-4);
+  let strain = max(max(abs(la - 1.0), abs(lb - 1.0)), abs(lc - 1.0));
+  let torn = max(max(la, lb), lc) > 1.8;
+  var o: Out;
+  o.w = p; o.center = p; o.r = 0.0;
+  o.n = normalize(cross(pb - pa, pc - pa));
+  let base = mix(vec3f(0.95, 0.55, 0.12), vec3f(0.1, 0.62, 0.6), step(0.5, hash(t.w * 7u + 3u)));
+  o.c = mix(base, vec3f(0.18, 0.16, 0.15), clamp(strain * 6.0, 0.0, 0.85));
+  o.clip = select(frame.viewProj * vec4f(p, 1.0), HIDE, torn);
+  return o;
+}
+// Beams: tyres always (dark); with the beam view every beam, green intact, yellow
+// to red bent (rest length off its spawn length by 0.1 % to 8 %), magenta broken.
+// Four vertices per beam: 0–1 the beam (2–3 hidden); a broken beam instead draws a
+// short stub at each of its nodes (0–1 at one end, 2–3 at the other), since its
+// two nodes may since have flown metres apart.
+// One draw of 4 vertices per beam (not an instance per beam: millions of 4-vertex
+// instances cost far more than the vertices themselves).
+@vertex fn vsXBeam(@builtin(vertex_index) vall: u32) -> Out {
+  let inst = vall / 4u;
+  let vi = vall % 4u;
+  let rec = xrecs[inst];
+  let v = rec.z & 0xffffu;
+  let tyre = (rec.z >> 16u) != 0u;
+  let pa = xpos(rec.x, v);
+  let pb = xpos(rec.y, v);
+  let s0 = xbeams[inst * 2u];
+  let s1 = xbeams[inst * 2u + 1u];
+  let broken = s1.z != 0.0;
+  let rest0 = bitcast<f32>(rec.w);
+  let bend = abs(s0.x - rest0) / max(rest0, 1e-6);
+  let q0 = select(pa, pb, vi >= 2u);
+  let q1 = select(pb, pa, vi >= 2u);
+  let stub = min(0.25 * rest0, 0.06) / max(length(q1 - q0), 1e-6);
+  let far = select(q1, mix(q0, q1, min(stub, 1.0)), broken);
+  let p = select(far, q0, (vi & 1u) == 0u);
+  var o: Out;
+  o.w = p; o.center = p; o.r = 0.0; o.n = vec3f(0.0, 1.0, 0.0);
+  o.c = select(vec3f(0.15, 0.85, 0.35), vec3f(0.12, 0.12, 0.13), tyre && frame.opts.x < 0.5);
+  if (bend > 1e-3) { o.c = mix(vec3f(1.0, 0.85, 0.1), vec3f(1.0, 0.1, 0.05), clamp(bend / 0.08, 0.0, 1.0)); }
+  if (broken) { o.c = vec3f(0.95, 0.1, 0.9); }
+  let shown = select(tyre && !broken, true, frame.opts.x > 0.5) && (broken || vi < 2u);
+  o.clip = select(HIDE, frame.viewProj * vec4f(p, 1.0), shown);
+  return o;
+}
 `;
     const mod = device.createShaderModule({ label: 'softbody-render', code: SHADER });
     const info = await mod.getCompilationInfo();
@@ -773,6 +1004,8 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const skinPipe = pipe('vsSkin', 'fsSkin', [], 'none');
     const beamPipe = pipe('vsBeam', 'fsBeam', [], 'none', 'line-list');
     const flexPipe = pipe('vsFlex', 'fsFlex', [], 'none');
+    const xSkinPipe = pipe('vsXSkin', 'fsSkin', [], 'none');
+    const xBeamPipe = pipe('vsXBeam', 'fsBeam', [], 'none', 'line-list');
     const skyPipe = device.createRenderPipeline({
       layout: 'auto', vertex: { module: mod, entryPoint: 'vsSky' }, fragment: { module: mod, entryPoint: 'fsSky', targets: [{ format }] },
       primitive: { cullMode: 'none' }, depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less-equal' }, multisample: { count: SAMPLES },
@@ -824,6 +1057,20 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     device.queue.writeBuffer(hideBuf, 0, hideWords);
     const skyBind = bind(skyPipe, [[1, frameBuf]]);
     const colShadow = shadowPipe('vsCol', vtx6), wheelShadow = shadowPipe('vsWheel', vtx6), flexShadow = shadowPipe('vsFlex', []);
+    const xSkinShadow = EXPLICIT ? shadowPipe('vsXSkin', []) : null;
+    // The explicit solver's bind groups, made again when it is rebuilt (new buffers).
+    let xBinds = null;
+    const xBindings = () => {
+      if (xBinds?.sim === xsim) return xBinds;
+      const n = xsim.nodesBuffer(), m = xsim.miscBuffer();
+      xBinds = {
+        sim: xsim,
+        skin: bind(xSkinPipe, [[1, frameBuf], [13, n], [14, m], [15, xsim.trisBuffer()], ...SH]),
+        shadow: bind(xSkinShadow, [[1, frameBuf], [13, n], [14, m], [15, xsim.trisBuffer()]]),
+        beam: bind(xBeamPipe, [[1, frameBuf], [13, n], [14, m], [16, xsim.beamRecordsBuffer()], [17, xsim.beamsBuffer()]]),
+      };
+      return xBinds;
+    };
     let flexShadowBind = null, skinBind = null;
     // The world's buffers can be replaced when they grow: rebind when one is a new object.
     let bound = [], wheelBind = null, wheelShadowBind = null, groundBind = null, beamBind = null;
@@ -856,7 +1103,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     let camEye = [0, 6, -14], camTarget = [0, 1, 0];
     // Camera views on subjects (?cam=, ?camTarget=, ?camFrom= by subject name).
     const CAM_MODES = [['orbit', 'orbit (free)'], ['chase', 'chase'], ['front', 'front'], ['rear', 'rear'], ['left', 'left side (port)'], ['right', 'right side (starboard)'], ['top', 'top down'], ['driver', "driver's seat"], ['mount', 'mounted on… looking at target']];
-    const camSubjects = [
+    const camSubjects = EXPLICIT ? [{ name: 'car 0 (player, explicit)', key: 'car0', body: -1, mount: [0.36, 0.95, 0.05] }] : [
       ...softs.map((s, i) => s.core ? { name: `car ${i}${i === player ? ' (player)' : ''}`, key: `car${i}`, body: s.core.chassis, mount: [0.36, 0.95, 0.05] } : null).filter(Boolean),
       ...subjects.map((x) => ({ ...x, key: x.name.replace(/\s+/g, '_') })),
     ];
@@ -890,7 +1137,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       drag = { x: e.clientX, y: e.clientY };
       if (camMode === 'chase') camMode = 'orbit';
     });
-    canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = Math.max(3, Math.min(120, orbit.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = Math.max(3, Math.min(ARENA ? 3000 : 120, orbit.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
     const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
     const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
     const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -903,7 +1150,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
       const view = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
         -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
-      const f = 1 / Math.tan(Math.PI / 6), near = 0.05, far = 900;
+      const f = 1 / Math.tan(Math.PI / 6), near = ARENA ? 0.5 : 0.05, far = ARENA ? 4000 : 900;
       const proj = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far / (near - far), -1, 0, 0, (near * far) / (near - far), 0];
       const o = new Float32Array(16);
       for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = proj[r] * view[c * 4] + proj[4 + r] * view[c * 4 + 1] + proj[8 + r] * view[c * 4 + 2] + proj[12 + r] * view[c * 4 + 3];
@@ -916,11 +1163,12 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
       if (e.repeat) return;
       if (e.code === 'KeyR') resetScene();
+      else if (EXPLICIT && e.code === 'KeyL') launchExplicit();
       else if (e.code === 'KeyC') { const i = CAM_MODES.findIndex(([m]) => m === camMode); camMode = CAM_MODES[(i + 1) % CAM_MODES.length][0]; if (camMode === 'orbit') orbit.target = null; window.__camSync?.(); }
       else if (e.code === 'KeyV') beamView = !beamView;
       else if (e.code === 'KeyM') skinMode = skinMode === 'flex' ? 'collision' : 'flex';
-      else if (e.code === 'KeyB') fireCannon();
-      else if (e.code === 'KeyT') launchRam();
+      else if (e.code === 'KeyB' && !EXPLICIT) fireCannon();
+      else if (e.code === 'KeyT' && !EXPLICIT) launchRam();
     });
     addEventListener('keyup', (e) => keys.delete(e.code));
     addEventListener('blur', () => keys.clear());
@@ -1053,6 +1301,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     function resetScene() {
       resetGen++;
+      if (EXPLICIT) { buildExplicit(); xAcc = 0; xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; return; }
       if (crusher) { crusher.start = null; crusher.reading = false; crusher.heavy = false; }
       world.restoreState(initial);
       while (softs.length > initialSoftCount) softs.pop();
@@ -1083,7 +1332,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     window.__spawnImported = (desc, label = 'imported') => spawnImported(desc, label);
     // Forward of a desc (engine_softbody::pack::forward_axis): reference nodes, else
     // the steering axle, else −X like most Rigs of Rods trucks.
-    const forwardOf = (d) => {
+    function forwardOf(d) {
       const p = (i) => d.nodes[i].position;
       const flat = (v) => { const l = Math.hypot(v[0], v[2]); return l > 1e-4 ? [v[0] / l, 0, v[2] / l] : null; };
       if (d.refs) { const f = flat(p(d.refs.center).map((x, i) => x - p(d.refs.back)[i])); if (f) return f; }
@@ -1092,7 +1341,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const st = d.wheels.filter((w) => w.steerable), other = d.wheels.filter((w) => !w.steerable);
       if (st.length && other.length) { const f = flat(mean(st).map((x, i) => x - mean(other)[i])); if (f) return f; }
       return [-1, 0, 0];
-    };
+    }
     // Launch an imported vehicle along +Z at `speed` m/s so its front is `gap` m short
     // of the import scene's target at z = 12; it becomes the followed vehicle.
     window.__crashImported = (desc, { speed = 11, gap = 3, label = 'imported' } = {}) => {
@@ -1113,10 +1362,27 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     function place(desc, label) {
       if (scene === 'import') { resetScene(); window.__crashImported(desc, { label }); } else spawnImported(desc, label);
     }
+    // The page's URL with the remembered import as its vehicle.
+    const importUrl = () => { const u = new URL(location.href); u.searchParams.set('car', 'import'); u.searchParams.delete('truck'); return u; };
+    function rememberImport(src) {
+      try {
+        sessionStorage.setItem(IMPORT_KEY, JSON.stringify(src));
+        history.replaceState(null, '', importUrl().href);
+        return true;
+      } catch (err) {
+        truckInfo.textContent += ' · too large to keep for the solver toggle';
+        return false;
+      }
+    }
     document.getElementById('truckFile').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
-      try { place(loadTruck(await file.text()), file.name); } catch (err) { truckInfo.textContent = `${file.name}: ${err.message || err}`; }
+      try {
+        const text = await file.text();
+        // Kept for this tab (?car=import): the solver toggle rebuilds with it.
+        if (rememberImport({ kind: 'truck', text, label: file.name }) && EXPLICIT) { location.href = importUrl().href; return; }
+        if (!EXPLICIT) place(loadTruck(text), file.name);
+      } catch (err) { truckInfo.textContent = `${file.name}: ${err.message || err}`; }
       e.target.value = '';
     });
     document.getElementById('jbeamDir').addEventListener('change', async (e) => {
@@ -1126,7 +1392,9 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         const pcs = all.filter((f) => f.name.endsWith('.pc'));
         const pcFile = pcs.find((f) => f.name === 'start.pc') || pcs[0];
         const pc = pcFile ? await pcFile.text() : undefined;
-        place(loadJbeam(files, pc), `${files.length} jbeam files${pcFile ? ' + ' + pcFile.name : ''}`);
+        const label = `${files.length} jbeam files${pcFile ? ' + ' + pcFile.name : ''}`;
+        if (rememberImport({ kind: 'jbeam', files, pc, label }) && EXPLICIT) { location.href = importUrl().href; return; }
+        if (!EXPLICIT) place(loadJbeam(files, pc), label);
       } catch (err) { truckInfo.textContent = `JBeam: ${err.message || err}`; }
       e.target.value = '';
     });
@@ -1136,7 +1404,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // destruction events).
     let lastPlayer = null, lastCounters = null;
     const followBody = () => playerCore() ? playerCore().chassis : entries[player]?.firstBody ?? 1;
-    let damage = null, breaks = 0, damageRead = null, damageStep = -1, rigidCount = 0;
+    let damage = null, breaks = 0, damageRead = null, damageStep = -1, damageWall = -1e9, rigidCount = 0;
     const tornOff = []; // "car: part" per piece-detached event
     window.__tornOff = tornOff;
     function onFrame(f) {
@@ -1157,6 +1425,16 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     let poseRead = null;
     function readPoses() {
       if (poseRead) return poseRead;
+      if (EXPLICIT) {
+        const sim = xsim, step = simSteps();
+        poseRead = sim.readPoses().then((f) => {
+          poseRead = null;
+          if (sim !== xsim) return;
+          lastPlayer = { p: [f[0], f[1], f[2]], q: [0, 0, 0, 1], v: [f[3], f[4], f[5]], step };
+          camTargetPose = camFromPose = lastPlayer;
+        }, (e) => { poseRead = null; throw e; });
+        return poseRead;
+      }
       const tb = camSubjects[camTarget2]?.body ?? followBody(), fb = camSubjects[camFrom]?.body ?? tb;
       const step = simSteps(), core = !!playerCore();
       poseRead = world.readBodies([followBody(), tb, fb]).then((f) => {
@@ -1173,6 +1451,18 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // and how many cars ride rigidly.
     function readDamage() {
       if (damageRead) return damageRead;
+      if (EXPLICIT) {
+        const sim = xsim;
+        // The display lists a few vehicles: a big fleet reads only the first 8.
+        damageRead = sim.readDamage(xlayout.vehicles.length > 16 ? 8 : undefined).then((d) => {
+          damageRead = null;
+          if (sim !== xsim) return damage;
+          damage = d.map((x, i) => ({ name: xlayout.vehicles[i].name, beams: x.beams, yielded: x.bent, broken: x.broken }));
+          breaks = d.reduce((n, x) => n + x.broken, 0);
+          return damage;
+        }, (e) => { damageRead = null; throw e; });
+        return damageRead;
+      }
       if (!entries.length) return Promise.resolve(damage);
       const ents = entries.slice();
       damageRead = Promise.all([world.readSoftDamage(), world.readSoftModes()]).then(([d, m]) => {
@@ -1186,9 +1476,19 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
 
     // ---------------------------------------------------------------- frame
     const speedEl = document.getElementById('speed'), damageEl = document.getElementById('damage'), eventsEl = document.getElementById('events');
+    const xstatsEl = document.getElementById('xstats');
+    const xnote = EXPLICIT && carKind === 'buggy' ? '<br>(the buggy has rigid parts: the sedan runs here)' : '';
     function updateHud() {
+      if (EXPLICIT) {
+        const d = damage?.[0];
+        xstatsEl.innerHTML = `explicit 2 kHz · ${xLastSteps} steps/frame${xlayout.wide ? ' · wide' : ''}<br>GPU ${xGpuMs == null ? '…' : (xGpuApprox ? '≈' : '') + xGpuMs.toFixed(2)} ms/frame`
+          + (d ? `<br>${d.broken} broken · ${d.yielded} bent / ${d.beams} beams` : '') + xnote;
+      } else {
+        xstatsEl.textContent = `soft AVBD · ${HZ} Hz × ${ITERS} it`;
+      }
       if (lastPlayer) speedEl.innerHTML = `${(Math.hypot(...lastPlayer.v) * 3.6).toFixed(0)} <small>km/h</small>`;
-      if (simSteps() - damageStep >= 30) { damageStep = simSteps(); readDamage().catch(fail); }
+      // A few times a second of wall time (a slow frame takes many steps).
+      if (simSteps() - damageStep >= 30 && performance.now() - damageWall >= 250) { damageStep = simSteps(); damageWall = performance.now(); readDamage().catch(fail); }
       if (damage) {
         damageEl.innerHTML = damage.map((d, i) => ({ ...d, i })).filter((d) => d.i === player || (d.beams > 200 && (damage.length < 6 || d.yielded > 0))).slice(0, 8)
           .map((d) => `${d.i === player ? '▶ ' : ''}${d.name.split(' (')[0].slice(0, 22)}: ${d.yielded} bent · ${d.broken} broken / ${d.beams}`).join('<br>');
@@ -1301,6 +1601,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       refreshColliders();
       if (colIdxN) { sp.setPipeline(colShadow); sp.setBindGroup(0, colShadowBind); sp.setVertexBuffer(0, cubeVbo); sp.draw(36, colIdxN); }
       if (world.wheelCount()) { sp.setPipeline(wheelShadow); sp.setBindGroup(0, wheelShadowBind); sp.setVertexBuffer(0, cylVbo); sp.draw(cyl.length / 6, world.wheelCount()); }
+      if (xsim) { sp.setPipeline(xSkinShadow); sp.setBindGroup(0, xBindings().shadow); sp.draw(xlayout.triangles * 3); }
       if (flexMode) {
         carR.drawShadow(sp);
         if (flexCount) {
@@ -1324,6 +1625,11 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         }
       } else if (triCount) { rp.setPipeline(skinPipe); rp.setBindGroup(0, skinBind); rp.draw(triCount * 3); }
       if (beamView && beamTotal) { rp.setPipeline(beamPipe); rp.setBindGroup(0, beamBind); rp.draw(2, beamTotal); }
+      if (xsim) {
+        const xb = xBindings();
+        rp.setPipeline(xSkinPipe); rp.setBindGroup(0, xb.skin); rp.draw(xlayout.triangles * 3);
+        rp.setPipeline(xBeamPipe); rp.setBindGroup(0, xb.beam); rp.draw(4 * xlayout.beams);
+      }
       if (world.wheelCount()) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.wheelCount()); }
       buggyR?.draw(rp);
       if (flexMode) { carR.drawGlass(rp); if (FX) carR.drawFx(rp); }
@@ -1334,6 +1640,12 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     let lastT = performance.now();
     let fpsAcc = 0, fpsN = 0, fpsShow = 0;
     const updateStatus = () => {
+      if (EXPLICIT) {
+        const n = xsim.steps();
+        statusEl.textContent = `explicit beams · ${xlayout.vehicles[0].name.split(' (')[0]}: ${xlayout.nodes} nodes, ${xlayout.beams} beams, ${xlayout.triangles} triangles · 2000 Hz · step ${n} (${(n / 2000).toFixed(1)} s)`
+          + (manual ? '' : ` · ${fpsShow.toFixed(0)} fps · ${(realTime * 100).toFixed(0)}% real time`);
+        return;
+      }
       statusEl.textContent = `${world.bodyCount()} bodies (${entries.reduce((n, e) => n + e.particles, 0)} particles, ${beamTotal} beams) · ${HZ} Hz × ${ITERS} it · step ${simSteps()} (${(simSteps() / HZ).toFixed(1)} s)`
         + ` · ${rigidCount}/${softs.filter((x) => x.core).length} rigid`
         + (manual ? '' : ` · ${fpsShow.toFixed(0)} fps · ${(realTime * 100).toFixed(0)}% real time`) + (lastCounters ? ` · contacts ${lastCounters.contact} · awake ${lastCounters.awake}` : '');
@@ -1343,7 +1655,34 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // known state: ?stopAt=0 leaves every step to __step).
     const stopAt = qs.has('stopAt') ? Number(qs.get('stopAt')) : Infinity;
     let stepAcc = 0, simAcc = 0, wallAcc = 0, realTime = 1;
+    // Explicit solver frames: 2,000 steps per second of wall time (a slow frame
+    // catches up with up to twice its share, as the soft loop does), each frame's
+    // steps in one submit; its GPU time from timestamps a few times a second.
+    const XRATE = 2000, XSTEPS = Math.round(XRATE / 60);
+    let xAcc = 0, xFrameN = 0, xGpuMs = null, xGpuApprox = false, xTimesRead = null, xLastSteps = 0;
+    function explicitFrame(dt) {
+      xAcc += Math.max(0, dt) * XRATE;
+      const steps = Math.max(0, Math.min(Math.floor(xAcc), 2 * XSTEPS, xsim.maxFrameSteps()));
+      xAcc = Math.min(xAcc - steps, XSTEPS);
+      const t0 = performance.now();
+      xsim.frame(steps);
+      xLastSteps = steps;
+      if (++xFrameN % 30 === 0 && !xTimesRead) {
+        const sim = xsim;
+        // Without timestamp queries: submit-to-done time of this frame (an upper bound).
+        xTimesRead = sim.timed()
+          ? sim.readFrameTimes().then((t) => { if (t.length && sim === xsim) xGpuMs = t.reduce((a, b) => a + b, 0) / t.length; })
+          : device.queue.onSubmittedWorkDone().then(() => { xGpuMs = performance.now() - t0; xGpuApprox = true; });
+        xTimesRead.finally(() => { xTimesRead = null; }).catch(fail);
+      }
+      return steps;
+    }
+    const launchExplicit = () => xsim.launch(XSPEED).catch(fail);
+    // Explicit frames in flight on the GPU: at most two, as a game loop keeps it, so
+    // the fps and real-time readouts count finished work, not submissions running ahead.
+    let xInFlight = 0;
     function frame(now) {
+      if (EXPLICIT && !manual && xInFlight >= 2) { requestAnimationFrame(frame); return; }
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
       fpsAcc += dt; fpsN++;
@@ -1353,6 +1692,22 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         const enc = device.createCommandEncoder();
         drawScene(enc);
         device.queue.submit([enc.finish()]);
+        requestAnimationFrame(frame);
+        return;
+      }
+      if (EXPLICIT) {
+        const steps = explicitFrame(dt);
+        simAcc += steps / XRATE; wallAcc += dt;
+        if (wallAcc > 0.5) { realTime = simAcc / wallAcc; simAcc = 0; wallAcc = 0; }
+        readPoses().catch(fail);
+        updateCamera(dt, false);
+        const enc = device.createCommandEncoder();
+        drawScene(enc);
+        device.queue.submit([enc.finish()]);
+        xInFlight++;
+        device.queue.onSubmittedWorkDone().then(() => { xInFlight--; });
+        updateHud();
+        updateStatus();
         requestAnimationFrame(frame);
         return;
       }
@@ -1403,6 +1758,29 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // __step(n, input): advance n physics steps (no rAF), return the player state and damage.
     window.__step = async (n = 1, input = null) => {
       manual = true;
+      if (EXPLICIT) {
+        // Explicit mode: n explicit steps (2 kHz), a frame of up to 33 at a time,
+        // each waited on.
+        for (let i = 0; i < n;) {
+          const k = Math.min(XSTEPS, n - i);
+          xsim.frame(k); xLastSteps = k; i += k;
+          await device.queue.onSubmittedWorkDone();
+        }
+        const times = await xsim.readFrameTimes();
+        if (times.length) xGpuMs = times.reduce((a, b) => a + b, 0) / times.length;
+        if (poseRead) await poseRead.catch(() => {});
+        await readPoses();
+        if (damageRead) await damageRead.catch(() => {});
+        await readDamage();
+        updateHud();
+        updateStatus();
+        updateCamera(0.1, false);
+        const xenc = device.createCommandEncoder();
+        drawScene(xenc);
+        device.queue.submit([xenc.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        return { steps: xsim.steps(), player: lastPlayer, damage, breaks, counters: null, solver: 'explicit' };
+      }
       const core = playerCore();
       if (input && core) world.setVehicleInput(core.vehicle, input);
       for (let i = 0; i < n; i += 8) {
@@ -1485,6 +1863,12 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       }
       return (performance.now() - t) / n;
     };
+    // Explicit mode: the solver, its layout, a launch (resolves once written) and
+    // the GPU time per frame (timestamps, or ≈ submit-to-done).
+    // The import scene crashes an imported vehicle (?car=import, ?truck=) into its target.
+    if (!EXPLICIT && scene === 'import' && carKind === 'import') window.__crashImported({ ...carDesc }, { label: importSrc.label });
+    window.__solver = EXPLICIT ? 'explicit' : 'soft';
+    window.__explicit = EXPLICIT ? { sim: () => xsim, layout: () => xlayout, launch: () => xsim.launch(XSPEED), gpuMs: () => xGpuMs } : null;
     window.__ready = true;
     statusEl.textContent = `scene ready · ${world.bodyCount()} bodies · ${softs.length} soft bodies`;
     requestAnimationFrame(frame);
