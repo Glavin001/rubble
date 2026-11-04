@@ -731,3 +731,66 @@ fn adding_a_collider_keeps_resting_contacts_warm() {
     eprintln!("tower's fastest body: {resting:.2e} m/s resting, {after:.2e} m/s after the new collider");
     assert!(after <= 2.0 * resting + 1e-3, "{after} m/s after a far collider was added; {resting} m/s before");
 }
+
+/// A settled 3×3×3 pile, all asleep, struck from the side by a heavy 0.5 m ball at 12 m/s:
+/// each box's displacement 4 s later, with `contacts` storage and `resting` contacts.
+fn struck_pile(contacts: ContactStorage, resting: RestingContacts) -> Vec<f32> {
+    let mut d = def(contacts);
+    d.features.resting_contacts = resting;
+    let mut w = World::new(GpuContext::Default, &d).unwrap();
+    let ids = pile(&mut w, 3);
+    let frames = run(&mut w, 1500);
+    assert!(!frames.last().unwrap().ran, "the pile settles asleep");
+    let before: Vec<[f32; 3]> = ids
+        .iter()
+        .map(|&b| w.body_transform(b).unwrap().unwrap().position)
+        .collect();
+    let ball = w
+        .create_body(&BodyDef {
+            linear_velocity: [12.0, 1.0, 0.0],
+            ..BodyDef::dynamic([-2.0, 1.55, 1.1])
+        })
+        .unwrap();
+    let heavy = ShapeDef {
+        density: 8000.0,
+        ..ShapeDef::default()
+    };
+    w.create_sphere_shape(ball, &heavy, [0.0; 3], 0.5).unwrap();
+    run(&mut w, 240);
+    ids.iter()
+        .zip(&before)
+        .map(|(&b, p0)| {
+            let p = w.body_transform(b).unwrap().unwrap().position;
+            assert!(
+                p.iter().all(|x| x.is_finite()) && p[1] > 0.2,
+                "box {b:?} at {p:?}"
+            );
+            Vec3::from(p).distance(Vec3::from(*p0))
+        })
+        .collect()
+}
+
+/// The sleep archive (the default with sleep) against the resting-pair carry it
+/// replaces, on canonical and persistent contacts: a struck sleeping pile moves the
+/// same boxes about as far.
+#[test]
+fn struck_sleeping_pile_moves_as_with_the_carry() {
+    let mut runs = Vec::new();
+    for contacts in [ContactStorage::Canonical, ContactStorage::Persistent] {
+        for resting in [RestingContacts::Carry, RestingContacts::Archive] {
+            let d = struck_pile(contacts, resting);
+            let moved = d.iter().filter(|&&x| x > 0.05).count();
+            let total: f32 = d.iter().sum();
+            eprintln!("{contacts:?} {resting:?}: {moved} boxes moved, {total:.2} m in all");
+            runs.push((moved, total));
+        }
+    }
+    let (carry_moved, carry_total) = (runs[0].0 as f32, runs[0].1);
+    for &(moved, total) in &runs[1..] {
+        assert!((moved as f32 - carry_moved).abs() <= 4.0, "{runs:?}");
+        assert!(
+            (total - carry_total).abs() <= 0.35 * carry_total.max(1.0),
+            "{runs:?}"
+        );
+    }
+}

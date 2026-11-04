@@ -162,6 +162,27 @@ pub enum RbContacts {
     RB_CONTACTS_CANONICAL = 2,
 }
 
+/// What a world with sleep does with the contacts of pairs at rest
+/// (`RbWorldDef::resting_contacts`, rubble's `RestingContacts`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbRestingContacts {
+    /// The sleep archive (default): a sleeper a moving body touches forms all its resting
+    /// contacts in that step, and woken contacts restart as the carry's do. A sleeping
+    /// pair costs nothing per step. Canonical contacts (threshold destructibles) keep
+    /// main's archive: warm wakes from archived rows, enabled by the first threshold
+    /// destructible. Compact contacts keep the carry instead.
+    RB_RESTING_ARCHIVE = 0,
+    /// The resting-pair carry (opt-out): every pair at rest is re-emitted and kept each
+    /// step (the earlier default).
+    RB_RESTING_CARRY = 1,
+    /// Neither (measurement): a woken pair restarts cold.
+    RB_RESTING_DROP = 2,
+    /// Opt-in: the touch query and cold wakes in canonical worlds too (threshold
+    /// destructibles then break differently from main).
+    RB_RESTING_TOUCH = 3,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RbBodyType {
@@ -202,6 +223,11 @@ pub struct RbWorldDef {
     /// (three-avbd's `reuseContacts`, `FLAG_REUSE_CONTACTS`; demo.html turns it on for its brick
     /// and box scenes). Off by default.
     pub reuse_contacts: bool,
+    /// Resting contacts in a world with sleep (`RB_RESTING_ARCHIVE` by default).
+    pub resting_contacts: RbRestingContacts,
+    /// Room in the sleep archive, in contact rows (0: the contact capacity); more fails
+    /// the step.
+    pub sleep_archive_rows: u32,
     /// Begins at or above this approach speed are hits (world units/s).
     pub hit_event_threshold: f32,
     /// Where the world ends (`WorldDef::kill_bounds`): a dynamic body whose origin
@@ -1501,6 +1527,8 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
         readback_frames: 3,
         drop_frames: false,
         reuse_contacts: false,
+        resting_contacts: RbRestingContacts::RB_RESTING_ARCHIVE,
+        sleep_archive_rows: 0,
         hit_event_threshold: 1.0,
         enable_kill_bounds: false,
         kill_min: RbVec3 {
@@ -1558,6 +1586,16 @@ fn world_def_of(d: &RbWorldDef) -> anyhow::Result<(WorldDef, Coords)> {
         } else {
             Backpressure::Block
         },
+        features: EngineFeatures {
+            resting_contacts: match d.resting_contacts {
+                RbRestingContacts::RB_RESTING_ARCHIVE => RestingContacts::Archive,
+                RbRestingContacts::RB_RESTING_CARRY => RestingContacts::Carry,
+                RbRestingContacts::RB_RESTING_DROP => RestingContacts::Drop,
+                RbRestingContacts::RB_RESTING_TOUCH => RestingContacts::Touch,
+            },
+            ..EngineFeatures::default()
+        },
+        sleep_archive_rows: (d.sleep_archive_rows > 0).then_some(d.sleep_archive_rows),
         kill_bounds: d.enable_kill_bounds.then(|| {
             // The corners in rubble's frame; an axis swap can flip their order.
             let (a, b) = (coords.position_in(d.kill_min.a()), coords.position_in(d.kill_max.a()));

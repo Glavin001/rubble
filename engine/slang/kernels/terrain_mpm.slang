@@ -3654,7 +3654,9 @@ bool mpmWheelOnSand(uint wr, MpmParams p, out float3 force, out float3 x, out ui
     float3 t = gVehicleData[wr + W_C3].xyz;
     float3 s = gVehicleData[wr + W_C4].xyz;
     force = -(nrm * f.x - t * f.y - s * f.z);
-    return all(isfinite(force)) && dot(force, force) > 0.0;
+    // Finite by its exponent bits (not 255): isfinite's test, which the SPIR-V path
+    // lowers to IsInf/IsNan that naga's SPIR-V reader rejects.
+    return all((asuint(force) & 0x7F800000u) != 0x7F800000u) && dot(force, force) > 0.0;
 }
 
 // Once per coupled frame, one thread: the wheels on open sand, in wheel order

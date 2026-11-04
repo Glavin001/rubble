@@ -247,15 +247,41 @@ export function parseDemoQuery(search) {
   if (!['scan', 'list'].includes(persist)) throw new Error('persist must be scan or list');
   if (persist === 'list' && reuse !== 'copy') throw new Error('persist=list requires reuse=copy');
   features.persistList = persist === 'list';
-  const rest = qs.get('rest') || 'carry';
-  if (!['carry', 'drop'].includes(rest)) throw new Error('rest must be carry or drop');
-  features.carryRest = rest === 'carry';
+  // Resting contacts in a sleeping world: the sleep archive (default), the resting-pair
+  // carry (opt-out), neither (measurement), or the touch query with cold wakes in
+  // canonical (threshold) worlds too (opt-in; the archive keeps main's warm wakes there).
+  const rest = qs.get('rest') || 'archive';
+  if (!['archive', 'carry', 'drop', 'touch'].includes(rest)) throw new Error('rest must be archive, carry, drop or touch');
+  features.restingContacts = rest;
+  features.carryRest = rest !== 'drop';
   const repair = qs.get('repair') || 'local';
   if (!['rounds', 'local'].includes(repair)) throw new Error('repair must be rounds or local');
   features.localRepair = repair === 'local';
   const grid = qs.get('grid') || 'split';
   if (!['fixed', 'scaled', 'split'].includes(grid)) throw new Error('grid must be fixed, scaled or split');
   features.grid = grid;
+  // ?gridlevels=on|off: the hierarchical grid (and with it the awake-indexed broadphase)
+  // or the uniform one; unset: hierarchical for convex scenes only.
+  const gridLevels = qs.get('gridlevels');
+  if (gridLevels !== null && !['on', 'off'].includes(gridLevels)) throw new Error('gridlevels must be on or off');
+  if (gridLevels !== null) features.gridLevels = gridLevels === 'on';
+  // ?broadphase=full: no awake-indexed broadphase; =hier: on hierarchical grids only.
+  const broadphase = qs.get('broadphase');
+  if (broadphase !== null && !['full', 'hier', 'awake'].includes(broadphase)) throw new Error('broadphase must be full, hier or awake');
+  if (broadphase === 'full') features.awakeBroadphase = false;
+  if (broadphase === 'hier') features.awakeUniform = false;
+  // ?costfloor=off: the per-step work over every collider and body slot as before the
+  // cost-floor passes (each gives the same results; for A/B timing). A comma list turns
+  // off only those parts: uniform, incremental, ccd, body, tail, loop.
+  const costFloor = qs.get('costfloor');
+  const floorParts = { uniform: 'awakeUniform', incremental: 'restIncremental', ccd: 'ccdByCollider', body: 'awakeBodyPasses', tail: 'primalTail', loop: 'solveLoop' };
+  if (costFloor !== null && costFloor !== 'on') {
+    const off = costFloor === 'off' ? Object.keys(floorParts) : costFloor.split(',');
+    for (const part of off) {
+      if (!(part in floorParts)) throw new Error(`costfloor must be on, off or a list of ${Object.keys(floorParts).join(', ')}`);
+      features[floorParts[part]] = false;
+    }
+  }
   // CSR endpoints follow the contact storage in Rust's plan (pairs when persistent).
   const endpoints = qs.get('endpoints') || (persistent ? 'pairs' : 'manifold');
   if (!['manifold', 'pairs'].includes(endpoints)) throw new Error('endpoints must be manifold or pairs');
