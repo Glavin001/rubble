@@ -18,6 +18,10 @@ metal.workspace = true
 objc.workspace = true
 core-graphics-types.workspace = true
 winit.workspace = true
+# world_viewer: the world API's scenes (Broadside, the timber yard) drawn natively.
+engine-world-wasm = { path = "../engine-world-wasm" }
+rubble = { package = "engine-world", path = "../engine-world" }
+serde_json.workspace = true
 
 [build-dependencies]
 engine-slang-build.workspace = true
@@ -32,3 +36,7 @@ path = "src/bin/fracture_viewer.rs"
 [[bin]]
 name = "towers_capture"
 path = "src/bin/towers_capture.rs"
+
+[[bin]]
+name = "world_viewer"
+path = "src/bin/world_viewer.rs"

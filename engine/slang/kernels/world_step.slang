@@ -88,6 +88,11 @@ BIND(17) RWStructuredBuffer<uint> gSolveColorCounts;
 
 
 #include "../physics/contact_storage.slang"
+// The sleep archive's rows (archiveMeta): canonical contacts, and persistent ones on
+// WGSL hosts (the only hosts that enable it; Metal and CUDA keep their codegen).
+#if !defined(ENGINE_PERSISTENT_CONTACTS) || defined(ENGINE_WGSL)
+#define ENGINE_SLEEP_ARCHIVE 1
+#endif
 #include "../physics/convex.slang"
 #include "../physics/heightfield.slang"
 
@@ -875,7 +880,7 @@ void archiveTouch(uint i, uint j);
 
 void emitCandidate(uint i, uint j)
 {
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
     if (sleepArchive() && i != j)
         archiveTouch(i, j);
 #endif
@@ -1102,7 +1107,13 @@ static const uint REST_HEADER = 32u;
 // 11..20 oversized statics.
 
 bool restTables() { return (HOST_S(25) & 1u) != 0u; }
-uint restBase() { return HOST_S(24) + HOST_S(1) + 1u + HOST_S(9); } // past the tagged warm hash
+bool warmTagged();
+// Past the tagged warm hash when there is one (HOST_S(9) varies step to step with the
+// contact count, so World's untagged tables sit right past the CSR index instead): the
+// awake bitmap (a word per 32 body slots, awakeBit), then the tables, which the host
+// allocates only once a step takes the awake-indexed broadphase (WgpuSim::ensure_rest_tables).
+uint awakeBitsBase() { return HOST_S(24) + HOST_S(1) + 1u + (warmTagged() ? HOST_S(9) : 0u); }
+uint restBase() { return awakeBitsBase() + ((HOST_S(1) + 31u) >> 5); }
 uint restHeads() { return restBase() + REST_HEADER; }
 uint awakeHeads() { return restHeads() + gridHashSize(); }
 uint restLinks() { return awakeHeads() + gridHashSize(); }
@@ -1973,7 +1984,11 @@ void write_moved_args(uint3 tid : SV_DispatchThreadID)
 {
     if (dispatchIndex(tid) != 0u) return;
     writeDispatchArgs(78u, HOST_S(6));
-    bool rebuild = restTables() && (HOST_S(5) != 0u || (HOST_S(25) & 2u) != 0u);
+    // With incremental inserts (HOST_S(25) bit 5) only when they could not place a new
+    // sleeper (header word 31); otherwise after any sleep event (HOST_S(5)).
+    bool due = restIncremental() ? ALOAD(gConstraintIds[restBase() + REST_REBUILD_WORD]) != 0u
+                                 : HOST_S(5) != 0u;
+    bool rebuild = restTables() && (due || (HOST_S(25) & 2u) != 0u);
     writeDispatchArgs(79u, rebuild ? REST_HEADER + 2u * gridHashSize() : 0u);
     writeDispatchArgs(80u, rebuild ? gCounters[0].colliderCount : 0u);
 }
@@ -1996,6 +2011,8 @@ void rest_insert(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
     if (i >= gCounters[0].colliderCount) return;
+    // Where the collider sits in R, for the incremental inserts (rest_sleepers_mark).
+    ASTORE(gConstraintIds[restAtBase() + i], REST_AT_NONE);
     Collider col = gColliders[i];
     if (bodyMoving(gBodies[col.body])) return;
     uint hdr = restBase();
@@ -2005,6 +2022,7 @@ void rest_insert(uint3 tid : SV_DispatchThreadID)
         AADD3(gConstraintIds[hdr + 1u], 1u, slot);
         if (slot < 8u) ASTORE(gConstraintIds[hdr + 2u + slot], i);
         else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        ASTORE(gConstraintIds[restAtBase() + i], REST_AT_LISTED);
         return;
     }
     Aabb box = gAabbs[HOST_S(1) + i];
@@ -2015,12 +2033,15 @@ void rest_insert(uint3 tid : SV_DispatchThreadID)
         AADD3(gConstraintIds[hdr + 10u], 1u, slot);
         if (slot < HIER_LARGE_MAX) ASTORE(gConstraintIds[hdr + 11u + slot], i);
         else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        ASTORE(gConstraintIds[restAtBase() + i], REST_AT_LISTED);
         return;
     }
     AOR2(gConstraintIds[hdr], 1u << level);
+    uint h = hierHash(hierCell(box, level), level);
     uint prev;
-    AXCHG3(gConstraintIds[restHeads() + hierHash(hierCell(box, level), level)], i, prev);
+    AXCHG3(gConstraintIds[restHeads() + h], i, prev);
     ASTORE(gConstraintIds[restLinks() + i], prev);
+    ASTORE(gConstraintIds[restAtBase() + i], h);
 }
 
 // Each step, before the awake inserts: R's levels, planes and oversized
@@ -2094,6 +2115,60 @@ void broadphase_clear_awake(uint3 tid : SV_DispatchThreadID)
         ASTORE(gConstraintIds[awakeHeads() + hierHash(hierCell(box, level), level)], 0xFFFFFFFFu);
 }
 
+// ---- Awake-indexed broadphase (World's rigid_plan, HOST_S(25) bit 0) ----
+// Static and sleeping colliders stay in the resting table R between steps; a step
+// lists the colliders of its moving bodies (bodyMovingOrKinematic: exactly the
+// colliders hierQuery treats as active) and only they are bounded, inserted (into W)
+// and queried. The list is one cheap scan over the colliders (each reads its body's
+// flags), counted per workgroup so a fully awake world does not serialize on one
+// atomic; within a workgroup the order is the colliders' own.
+groupshared uint gsMoverFlags[64];
+groupshared uint gsMoverBase;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void list_moving_colliders(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
+{
+    uint c = dispatchIndex(tid);
+    uint local = lid.x;
+    bool moving = false;
+    if (c < gCounters[0].colliderCount)
+        moving = bodyMovingOrKinematic(gBodies[gColliders[c].body]);
+    gsMoverFlags[local] = moving ? 1u : 0u;
+    GROUP_SYNC();
+    if (local == 0u)
+    {
+        uint n = 0u;
+        for (uint k = 0u; k < 64u; k++) n += gsMoverFlags[k];
+        uint base = 0u;
+        if (n > 0u) AADD3(gScratchAtomics[AWAKE_COLLIDER_COUNT_SLOT], n, base);
+        gsMoverBase = base;
+    }
+    GROUP_SYNC();
+    if (moving)
+    {
+        uint rank = 0u;
+        for (uint k = 0u; k < local; k++) rank += gsMoverFlags[k];
+        ASTORE(gConstraintIds[awakeColliderBase() + gsMoverBase + rank], c);
+    }
+}
+
+// Bounds of the listed moving colliders (slot 81), as the full build_aabbs pass
+// builds them. The pass keeps every other collider's bounds: a sleeping body's
+// (as the full pass does after step 0), and a static's or a stopped kinematic's,
+// which the full pass would rebuild to the same values from the same pose and
+// parameters (hosts run the full pass after any write that could change them).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void build_aabbs_listed(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    uint c = awakeCollider(li);
+    Collider col = gColliders[c];
+    buildColliderBounds(c, col, gBodies[col.body]);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void broadphase_query_finer(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -2112,6 +2187,774 @@ void broadphase_query_finer(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID
 void broadphase_grid(uint3 tid : SV_DispatchThreadID)
 {
     broadphase_query(tid);
+}
+
+// ---- Uniform rest tables (World, uniform split grid; HOST_S(25) bits 0 and 4) ----
+// The split grid's other table (sleepers and small statics) kept across steps as R
+// (restHeads, a link per collider at restLinks), and its awake table filled each step
+// as W (awakeHeads, links in the AABB spare word) from the moving colliders only
+// (list_moving_colliders), which alone query (broadphase_query_awake_uniform). R is
+// rebuilt as the hierarchical one is (write_moved_args), and between rebuilds holds
+// every collider at rest at its current cell: no collider stops moving between them.
+// A collider in W this step (its stamp is this step's index, HOST_S(17)) is a
+// tombstone in R: every R walk skips it, and W has it, as the full pass's awake table
+// had it and its other table did not. The stamp, not the body's flags, decides, so a
+// body woken after the inserts (a projectile's late impulse) is still found in R by
+// the walks that run later in the step, as the full pass's other table held it.
+// Sleepers' pairs with the large-dynamic list come from broadphase_sleeper_large, a
+// thread per collider dispatched only while that list is non-empty. Planes, oversized
+// statics and resting large dynamics are listed in the header (oversized statics in
+// the scratch list the full pass keeps) and published into the step's scratch lists.
+// The pairs are the full pass's; only their append order differs. WGSL hosts only:
+// Metal's HOST_S(25) is a scratch word.
+#if defined(ENGINE_WGSL)
+bool restUniform() { return (HOST_S(25) & 17u) == 17u; }
+#else
+bool restUniform() { return false; }
+#endif
+// Uniform R header words (restBase): 0 entries in R chains, 1 planes, 2..9 their
+// colliders, 10 resting large dynamics, 11..26 their colliders, 28 oversized statics
+// (their colliders at scratch LARGE_STATIC_BASE, as the full pass lists them).
+static const uint REST_U_LARGE_MAX = 16u;
+static const uint REST_U_STATICS = 28u;
+// Header word 29: the largest AABB half extent of the entries pushed onto R's chains
+// (asuint; half extents are not negative), so a walk can bound where they lie.
+static const uint REST_U_HALF = 29u;
+// Per-collider words past the moving-collider list: this step's W stamp, and the R
+// chain a collider sits in (its bucket, REST_AT_LISTED in a header list, REST_AT_NONE).
+static const uint REST_AT_NONE = 0xFFFFFFFFu;
+static const uint REST_AT_LISTED = 0xFFFFFFFEu;
+uint restStampBase() { return restLinks() + 2u * gCounters[0].colliderCount; }
+uint restAtBase() { return restLinks() + 3u * gCounters[0].colliderCount; }
+bool restTombstone(uint c) { return ALOAD(gConstraintIds[restStampBase() + c]) == HOST_S(17); }
+
+// Uniform-grid cell of an AABB's centre (broadphase_insert's).
+int3 uniformCell(Aabb box, float cellSize) { return int3(floor((0.5 * (box.mn + box.mx)) / cellSize)); }
+
+// Rebuild 2 (uniform): every collider at rest into R by broadphase_insert's rules for
+// colliders not awake (sleepers, statics; kinematics never take this path).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void rest_insert_uniform(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].colliderCount) return;
+    ASTORE(gConstraintIds[restStampBase() + i], REST_AT_NONE);
+    ASTORE(gConstraintIds[restAtBase() + i], REST_AT_NONE);
+    Collider col = gColliders[i];
+    BodyState b = gBodies[col.body];
+    if (bodyMoving(b)) return;
+    restInsertUniform(i, col, b);
+}
+
+void restInsertUniform(uint i, Collider col, BodyState b)
+{
+    uint hdr = restBase();
+    if (col.shape == SHAPE_PLANE)
+    {
+        uint slot;
+        AADD3(gConstraintIds[hdr + 1u], 1u, slot);
+        if (slot < 8u) ASTORE(gConstraintIds[hdr + 2u + slot], i);
+        ASTORE(gConstraintIds[restAtBase() + i], REST_AT_LISTED);
+        return;
+    }
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
+    Aabb box = gAabbs[HOST_S(1) + i];
+    float3 ext = box.mx - box.mn;
+    float boundR = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    if (!bodyIsDynamic(b) && boundR > 0.5 * cellSize)
+    {
+        uint slot;
+        AADD3(gConstraintIds[hdr + REST_U_STATICS], 1u, slot);
+        if (slot < LARGE_STATIC_CAP)
+        {
+            ASTORE(gScratchAtomics[LARGE_STATIC_BASE + slot], i);
+            ASTORE(gConstraintIds[restAtBase() + i], REST_AT_LISTED);
+            return;
+        }
+    }
+    if (!bodyIsDynamic(b) &&
+        (ext.x >= cellSize * 4.0 || ext.y >= cellSize * 4.0 || ext.z >= cellSize * 4.0))
+        return;
+    if (bodyIsDynamic(b) && boundR > cellSize)
+    {
+        uint slot;
+        AADD3(gConstraintIds[hdr + 10u], 1u, slot);
+        if (slot < REST_U_LARGE_MAX) ASTORE(gConstraintIds[hdr + 11u + slot], i);
+        ASTORE(gConstraintIds[restAtBase() + i], REST_AT_LISTED);
+        return;
+    }
+    int3 cc = uniformCell(box, cellSize);
+    uint h = gridHash(cc.x, cc.y, cc.z);
+    uint prev;
+    AXCHG3(gConstraintIds[restHeads() + h], i, prev);
+    ASTORE(gConstraintIds[restLinks() + i], prev);
+    ASTORE(gConstraintIds[restAtBase() + i], h);
+    AADD2(gConstraintIds[hdr], 1u);
+    AMAX2(gConstraintIds[hdr + REST_U_HALF], asuint(boxHalfMax(box)));
+}
+
+// Each step, before the awake inserts: R's lists into the scratch words the full pass
+// fills (planes 42.., large dynamics 25 / 64.., oversized statics 80, the other
+// table's occupancy 52), leaving out colliders that move this step (W lists them).
+// Overflows are flagged every step, as the full pass flags them.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void rest_publish_uniform(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    uint hdr = restBase();
+    ASTORE(gScratchAtomics[CCD_BODY_COUNT], 0u);
+    ASTORE(gScratchAtomics[FAST_COUNT], 0u);
+    ASTORE(gScratchAtomics[CCD_FALLBACKS], 0u);
+    ASTORE(gScratchAtomics[CCD_PAIR_COUNT], 0u);
+    ASTORE(gScratchAtomics[CCD_MAX_REACH], 0u);
+    ASTORE(gScratchAtomics[52], ALOAD(gConstraintIds[hdr]));
+    uint planes = ALOAD(gConstraintIds[hdr + 1u]), np = 0u;
+    for (uint k = 0u; k < min(planes, 8u); k++)
+    {
+        uint c = ALOAD(gConstraintIds[hdr + 2u + k]);
+        if (bodyMoving(gBodies[gColliders[c].body])) continue;
+        ASTORE(gScratchAtomics[43u + np], c);
+        np++;
+    }
+    ASTORE(gScratchAtomics[42], planes > 8u ? planes : np);
+    uint large = ALOAD(gConstraintIds[hdr + 10u]), nl = 0u;
+    for (uint k = 0u; k < min(large, REST_U_LARGE_MAX); k++)
+    {
+        uint c = ALOAD(gConstraintIds[hdr + 11u + k]);
+        if (bodyMoving(gBodies[gColliders[c].body])) continue;
+        ASTORE(gScratchAtomics[LEGACY_LARGE_BASE + nl], c);
+        nl++;
+    }
+    if (large > REST_U_LARGE_MAX)
+    {
+        nl = large;
+        AOR2(gCounters[0].overflowFlags, OVERFLOW_LARGE_DYNAMICS);
+    }
+    ASTORE(gScratchAtomics[25], nl);
+    uint statics = ALOAD(gConstraintIds[hdr + REST_U_STATICS]);
+    ASTORE(gScratchAtomics[LARGE_STATIC_COUNT], statics);
+    if (statics > LARGE_STATIC_CAP) AOR2(gCounters[0].overflowFlags, OVERFLOW_LARGE_STATICS);
+}
+
+// Listed moving colliders into W (one thread each, slot 81), by broadphase_insert's
+// rules for awake dynamics; each is stamped (a tombstone in R this step).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_insert_awake_uniform(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    uint c = awakeCollider(li);
+    ASTORE(gConstraintIds[restStampBase() + c], HOST_S(17));
+    Collider col = gColliders[c];
+    BodyState b = gBodies[col.body];
+    if (colliderIsFast(c, col, b))
+    {
+        fastListAppend(c);
+        return;
+    }
+    if (col.shape == SHAPE_PLANE)
+    {
+        uint slot;
+        AADD3(gScratchAtomics[42], 1, slot);
+        if (slot < 8u) ASTORE(gScratchAtomics[43u + slot], c);
+        return;
+    }
+    uint base = HOST_S(1);
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
+    Aabb box = gAabbs[base + c];
+    float radius = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    if (radius > cellSize)
+    {
+        uint slot;
+        AADD3(gScratchAtomics[25], 1, slot);
+        if (slot < 16u) ASTORE(gScratchAtomics[LEGACY_LARGE_BASE + slot], c);
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_LARGE_DYNAMICS);
+        return;
+    }
+    int3 cc = uniformCell(box, cellSize);
+    uint prev;
+    AXCHG3(gConstraintIds[awakeHeads() + gridHash(cc.x, cc.y, cc.z)], c | GRID_AWAKE_DYNAMIC, prev);
+    gAabbs[base + c]._pad1 = asfloat(prev);
+}
+
+// One cell of W (awake entries) or R (resting entries, tombstones skipped) as an awake
+// querier sees it: gridScanCell's tests on the same values.
+void restScanCellUniform(uint i, Collider col, Aabb box, float3 cA, float rA,
+    bool probeIsBox, BoxObb probeObb, float faceGap, float cellSize, int3 cell,
+    bool rest, bool ownCell)
+{
+    uint base = HOST_S(1);
+    uint link = ALOAD(gConstraintIds[(rest ? restHeads() : awakeHeads()) + gridHash(cell.x, cell.y, cell.z)]);
+    uint guard = 0;
+    while (link != 0xFFFFFFFFu && guard < 4096u)
+    {
+        uint cur = link & GRID_COLLIDER_MASK;
+        bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
+        Aabb ab = gAabbs[base + cur];
+        link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : asuint(ab._pad1);
+        guard++;
+        if (guard == 4096u)
+            AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        if (cur == i || (ownCell && awakeEntry && cur <= i)) continue;
+        int3 candidateCell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
+        if (any(candidateCell != cell)) continue;
+        float rB = ab._pad0;
+        if (rB > 0.0)
+        {
+            float3 d = cA - 0.5 * (ab.mn + ab.mx);
+            float rr = rA + rB;
+            if (dot(d, d) > rr * rr) continue;
+        }
+        if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
+            box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
+            box.mx.z < ab.mn.z || ab.mx.z < box.mn.z)
+            continue;
+        // Tombstones last: the test only filters, and most entries fail the cheaper ones.
+        if (rest && restTombstone(cur)) continue;
+        if (awakeEntry && boxOversize(ab, cellSize)) continue;
+        Collider other = gColliders[cur];
+        bool keep;
+        if (awakeEntry)
+            keep = true;
+        else
+        {
+            BodyState ob = gBodies[other.body];
+            bool otherSleep = bodyIsDynamic(ob) && bodyIsSleeping(ob);
+            keep = cur > i || otherSleep || !bodyIsDynamic(ob);
+        }
+        if (!keep || other.body == col.body || bodiesJointed(col.body, other.body) ||
+            other.shape == SHAPE_PLANE)
+            continue;
+        if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)) continue;
+        if (awakeEntry) emitCandidate(min(i, cur), max(i, cur));
+        else emitCandidate(i, cur);
+    }
+}
+
+// oversizeQuery over W and R (tombstones skipped).
+void restOversizeQueryUniform(uint i, Collider col, Aabb box, float3 cA, float rA,
+    bool probeIsBox, BoxObb probeObb, float faceGap, float cellSize)
+{
+    uint base = HOST_S(1);
+    float h = boxHalfMax(box);
+    int3 lo = int3(floor((box.mn - h) / cellSize));
+    int3 hi = int3(floor((box.mx + h) / cellSize));
+    int3 span = hi - lo + int3(1, 1, 1);
+    if (span.x * span.y * span.z > OVERSIZE_MAX_CELLS)
+    {
+        AOR2(gCounters[0].overflowFlags, OVERFLOW_FAST_LIST);
+        return;
+    }
+    for (int z = lo.z; z <= hi.z; z++)
+    for (int y = lo.y; y <= hi.y; y++)
+    for (int x = lo.x; x <= hi.x; x++)
+    for (uint t = 0u; t < 2u; t++)
+    {
+        bool rest = t == 1u;
+        uint link = ALOAD(gConstraintIds[(rest ? restHeads() : awakeHeads()) + gridHash(x, y, z)]);
+        uint guard = 0u;
+        while (link != 0xFFFFFFFFu && guard < 4096u)
+        {
+            uint cur = link & GRID_COLLIDER_MASK;
+            bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
+            Aabb ab = gAabbs[base + cur];
+            link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : asuint(ab._pad1);
+            guard++;
+            if (guard == 4096u) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+            if (cur == i) continue;
+            if (any(int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize)) != int3(x, y, z))) continue;
+            float rB = ab._pad0;
+            if (rB > 0.0)
+            {
+                float3 d = cA - 0.5 * (ab.mn + ab.mx);
+                float rr = rA + rB;
+                if (dot(d, d) > rr * rr) continue;
+            }
+            if (!aabbOverlap(box, ab)) continue;
+            if (rest && restTombstone(cur)) continue;
+            if (awakeEntry && !ownsAwakePair(i, box, cur, ab, cellSize)) continue;
+            Collider other = gColliders[cur];
+            if (other.body == col.body || other.shape == SHAPE_PLANE || bodiesJointed(col.body, other.body)) continue;
+            if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)) continue;
+            emitCandidate(i, cur);
+        }
+    }
+}
+
+// broadphase_query for a listed (awake dynamic) collider on the uniform split grid,
+// past the small-world pairwise path (hosts take this path above 512 colliders): the
+// awake table is W, the other table R.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_query_awake_uniform(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    restQueryUniform(awakeCollider(li));
+}
+
+void restQueryUniform(uint i)
+{
+    Collider col = gColliders[i];
+    BodyState b = gBodies[col.body];
+    if (col.shape == SHAPE_PLANE) return;
+    if (colliderIsFast(i, col, b)) return;
+    uint base = HOST_S(1);
+    Aabb box = gAabbs[base + i];
+    bool probeIsBox = shapeHasHull(col.shape);
+    BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
+    float faceGap = max(0.001, speculativeMargin()) + (probeIsBox ? cachedReach(i) : 0.0);
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
+    float3 center = 0.5 * (box.mn + box.mx);
+    int3 cc = int3(floor(center / cellSize));
+    float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    bool queryLarge = rA > cellSize;
+    rA = max(rA + colliderReach(b, col), box._pad0);
+    uint nLarge = min(ALOAD(gScratchAtomics[25]), 16u);
+    for (uint k = 0u; k < nLarge; k++)
+    {
+        uint j = ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k]);
+        if (j == i) continue;
+        Collider other = gColliders[j];
+        if (other.body == col.body || bodiesJointed(col.body, other.body)) continue;
+        BodyState ob = gBodies[other.body];
+        if (queryLarge && bodyIsDynamic(ob) && j < i) continue;
+        Aabb ab = gAabbs[base + j];
+        if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
+        if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
+        if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
+        emitCandidate(i, j);
+    }
+    uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
+    for (uint pi = 0u; pi < nPlanes; pi++)
+        emitCandidate(i, ALOAD(gScratchAtomics[43u + pi]));
+    float3 cA = 0.5 * (box.mn + box.mx);
+    if (!queryLarge && boxOversize(box, cellSize))
+    {
+        restOversizeQueryUniform(i, col, box, cA, rA, probeIsBox, probeObb, faceGap, cellSize);
+    }
+    else if (!queryLarge)
+    {
+        for (uint c = 0u; c < 14u; c++)
+        {
+            int3 off = gridForwardOffset(c);
+            restScanCellUniform(i, col, box, cA, rA, probeIsBox, probeObb, faceGap, cellSize,
+                cc + off, false, c == 0u);
+        }
+        if (ALOAD(gScratchAtomics[52]) != 0u)
+        {
+            for (int z = cc.z - 1; z <= cc.z + 1; z++)
+            for (int y = cc.y - 1; y <= cc.y + 1; y++)
+            for (int x = cc.x - 1; x <= cc.x + 1; x++)
+                restScanCellUniform(i, col, box, cA, rA, probeIsBox, probeObb, faceGap, cellSize,
+                    int3(x, y, z), true, false);
+        }
+    }
+    if (queryLarge)
+    {
+        int3 lo = int3(floor(box.mn / cellSize));
+        int3 hi = int3(floor(box.mx / cellSize));
+        int3 span = hi - lo + int3(1, 1, 1);
+        if (span.x * span.y * span.z <= 512)
+        {
+            for (int z = lo.z; z <= hi.z; z++)
+            for (int y = lo.y; y <= hi.y; y++)
+            for (int x = lo.x; x <= hi.x; x++)
+            {
+                uint link = ALOAD(gConstraintIds[restHeads() + gridHash(x, y, z)]);
+                uint guard = 0u;
+                while (link != 0xFFFFFFFFu && guard < 4096u)
+                {
+                    uint cur = link & GRID_COLLIDER_MASK;
+                    Aabb ab = gAabbs[base + cur];
+                    link = ALOAD(gConstraintIds[restLinks() + cur]);
+                    guard++;
+                    int3 cell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
+                    if (cell.x != x || cell.y != y || cell.z != z) continue;
+                    if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
+                        box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
+                        box.mx.z < ab.mn.z || ab.mx.z < box.mn.z)
+                        continue;
+                    Collider other = gColliders[cur];
+                    if (other.body == col.body || other.shape == SHAPE_PLANE) continue;
+                    if (bodyIsDynamic(gBodies[other.body])) continue;
+                    if (bodiesJointed(col.body, other.body)) continue;
+                    if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)) continue;
+                    emitCandidate(i, cur);
+                }
+            }
+        }
+    }
+    uint nLargeStatic = ALOAD(gScratchAtomics[LARGE_STATIC_COUNT]);
+    uint nListed = largeStaticCount();
+    bool listOverflow = nLargeStatic > LARGE_STATIC_CAP;
+    uint nProbe = nListed + (listOverflow ? 2u : 0u);
+    for (uint t = 0u; t < nProbe; t++)
+    {
+        if (gCounters[0].colliderCount == 0u) break;
+        bool endpoint = t >= nListed;
+        uint j = !endpoint ? largeStaticCollider(t)
+            : ((t == nListed) ? 0u : (gCounters[0].colliderCount - 1u));
+        if (j == i || (endpoint && t > nListed && j == 0u)) continue;
+        if (endpoint)
+        {
+            bool listed = false;
+            for (uint u = 0u; u < nListed; u++)
+                if (largeStaticCollider(u) == j) listed = true;
+            if (listed) continue;
+        }
+        Collider other = gColliders[j];
+        if (other.shape == SHAPE_PLANE || other.body == col.body) continue;
+        Aabb ab = gAabbs[base + j];
+        float3 ext = ab.mx - ab.mn;
+        if (endpoint && ext.x < cellSize * 4.0 && ext.y < cellSize * 4.0 && ext.z < cellSize * 4.0)
+            continue;
+        BodyState ob = gBodies[other.body];
+        if (bodyIsDynamic(ob)) continue;
+        if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
+        if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
+        if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
+        if (probeIsBox && shapeHasHull(other.shape) && boxesSeparatedOnFaceAxis(probeObb, j, faceGap))
+            continue;
+        if (other.shape == SHAPE_SPHERE)
+        {
+            float3 d = b.position - ob.position;
+            float rr = other.params.x + (col.params.w > 0.0 ? col.params.w : length(col.params.xyz))
+                + colliderReach(b, col) + colliderReach(ob, other);
+            if (dot(d, d) > rr * rr) continue;
+        }
+        emitCandidate(i, j);
+    }
+}
+
+// The sleepers' pairs with the step's large dynamics (after the awake inserts appended
+// to the list), found from the large ones: work slot 88, a workgroup per listed large
+// dynamic walking the R cells that can hold a collider overlapping it
+// (broadphase_sleeper_large_walk). Should a large box span more than
+// SLEEPER_WALK_MAX_CELLS of them, slot 85 instead: broadphase_sleeper_large, a thread per
+// collider (the full pass's sleeper threads). Both empty without a large dynamic.
+static const uint SLEEPER_WALK_MAX_CELLS = 32768u;
+
+int3 sleeperWalkSpan(Aabb lb, float cs, float h, out int3 lo)
+{
+    // Padded past the rounding of a centre and a half extent: a superset of cells.
+    h = h * 1.001 + 1.0e-4;
+    lo = int3(floor((lb.mn - h) / cs));
+    int3 hi = int3(floor((lb.mx + h) / cs));
+    return hi - lo + int3(1, 1, 1);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void write_sleeper_large_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    uint n = min(ALOAD(gScratchAtomics[25]), 16u);
+    bool walk = ALOAD(gScratchAtomics[25]) <= 16u;
+    float cs = max(PARAMS.gridCellSize, 0.5);
+    float h = asfloat(ALOAD(gConstraintIds[restBase() + REST_U_HALF]));
+    for (uint k = 0u; k < n; k++)
+    {
+        int3 lo;
+        int3 span = sleeperWalkSpan(gAabbs[HOST_S(1) + ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k])], cs, h, lo);
+        if (float(span.x) * float(span.y) * float(span.z) > float(SLEEPER_WALK_MAX_CELLS)) walk = false;
+    }
+    writeDispatchArgs(85u, n != 0u && !walk ? gCounters[0].colliderCount : 0u);
+    // Slot 88: x = chunks of 64 cells (the most any listed large one has), y = listed.
+    uint chunks = 0u;
+    for (uint k = 0u; k < n && walk; k++)
+    {
+        int3 lo;
+        int3 span = sleeperWalkSpan(gAabbs[HOST_S(1) + ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k])], cs, h, lo);
+        chunks = max(chunks, (uint(span.x) * uint(span.y) * uint(span.z) + 63u) / 64u);
+    }
+    writeGroupGrid(88u, walk ? max(chunks, 1u) : 0u, walk && n != 0u ? n : 1u);
+}
+
+// broadphase_sleeper_large's test for sleeper collider i (small or large) and listed
+// large dynamic j: the pair as the sleeper's thread of the full pass emits it.
+void sleeperLargePair(uint i, uint j)
+{
+    if (j == i) return;
+    uint base = HOST_S(1);
+    Collider col = gColliders[i];
+    BodyState b = gBodies[col.body];
+    if (col.shape == SHAPE_PLANE || colliderIsFast(i, col, b)) return;
+    if (!bodyIsDynamic(b) || !bodyIsSleeping(b)) return;
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
+    float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    bool queryLarge = rA > cellSize;
+    Collider other = gColliders[j];
+    if (other.body == col.body || bodiesJointed(col.body, other.body)) return;
+    BodyState ob = gBodies[other.body];
+    if (queryLarge && bodyIsDynamic(ob) && j < i) return;
+    if (carryRestPairs() && bodyIsSleeping(ob)) return; // carried
+    Aabb box = gAabbs[base + i];
+    Aabb ab = gAabbs[base + j];
+    if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) return;
+    if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) return;
+    if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) return;
+    emitCandidate(i, j);
+}
+
+// Workgroups (chunk, k) for each listed large dynamic L (k): a lane per R cell that can
+// hold an entry overlapping L (an entry's centre lies in its cell, within its half
+// extent, at most header word 29, of any point of its box), each entry taken at its
+// true cell only; chunk 0 also takes the listed large dynamics (sleeping large ones are
+// listed, not in the chains). Every sleeper a pair with L can come from is in one of
+// them, so the pairs are the full pass's.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_sleeper_large_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint k = gid.y;
+    if (k >= min(ALOAD(gScratchAtomics[25]), 16u)) return;
+    uint j = ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k]);
+    uint base = HOST_S(1);
+    Aabb lb = gAabbs[base + j];
+    float cs = max(PARAMS.gridCellSize, 0.5);
+    float h = asfloat(ALOAD(gConstraintIds[restBase() + REST_U_HALF]));
+    int3 lo;
+    int3 span = sleeperWalkSpan(lb, cs, h, lo);
+    uint cells = uint(span.x) * uint(span.y) * uint(span.z);
+    uint t = gid.x * 64u + lid.x;
+    if (t < cells)
+    {
+        int3 cell = lo + int3(int(t % uint(span.x)), int((t / uint(span.x)) % uint(span.y)), int(t / uint(span.x * span.y)));
+        uint link = ALOAD(gConstraintIds[restHeads() + gridHash(cell.x, cell.y, cell.z)]);
+        uint guard = 0u;
+        while (link != 0xFFFFFFFFu && guard < 4096u)
+        {
+            uint cur = link & GRID_COLLIDER_MASK;
+            Aabb ab = gAabbs[base + cur];
+            link = ALOAD(gConstraintIds[restLinks() + cur]);
+            guard++;
+            if (any(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) != cell)) continue;
+            if (!aabbOverlap(ab, lb) || restTombstone(cur)) continue;
+            sleeperLargePair(cur, j);
+        }
+        if (link != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+    }
+    uint n = min(ALOAD(gScratchAtomics[25]), 16u);
+    if (gid.x == 0u && lid.x < n)
+        sleeperLargePair(ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + lid.x]), j);
+}
+
+// A sleeper's thread of the full broadphase_query: its pairs with the large dynamics.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_sleeper_large(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[i];
+    BodyState b = gBodies[col.body];
+    if (col.shape == SHAPE_PLANE || colliderIsFast(i, col, b)) return;
+    if (!bodyIsDynamic(b) || !bodyIsSleeping(b)) return;
+    uint base = HOST_S(1);
+    Aabb box = gAabbs[base + i];
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
+    float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    bool queryLarge = rA > cellSize;
+    uint nLarge = min(ALOAD(gScratchAtomics[25]), 16u);
+    for (uint k = 0u; k < nLarge; k++)
+    {
+        uint j = ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k]);
+        if (j == i) continue;
+        Collider other = gColliders[j];
+        if (other.body == col.body || bodiesJointed(col.body, other.body)) continue;
+        BodyState ob = gBodies[other.body];
+        if (queryLarge && bodyIsDynamic(ob) && j < i) continue;
+        if (carryRestPairs() && bodyIsSleeping(ob)) continue; // carried
+        Aabb ab = gAabbs[base + j];
+        if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
+        if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
+        if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
+        emitCandidate(i, j);
+    }
+}
+
+// After every walker of this step's tables: empty the W heads the listed colliders
+// may have filled (slot 81; a listed collider not in W clears a head that is empty).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_clear_awake_uniform(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    int3 cc = uniformCell(gAabbs[HOST_S(1) + awakeCollider(li)], max(PARAMS.gridCellSize, 0.5));
+    ASTORE(gConstraintIds[awakeHeads() + gridHash(cc.x, cc.y, cc.z)], 0xFFFFFFFFu);
+}
+
+// ---- Incremental resting-table inserts (HOST_S(25) bit 5, both grids) ----
+// After the sleep commit, instead of a rebuild the next step: the colliders listed as
+// moving this step (slot 81) whose bodies are at rest now go into R, so R again holds
+// every collider at rest at its current bucket, as a rebuild would. A collider already
+// in R at that bucket (a tombstone of a body that woke and fell asleep again in the
+// same cell, or one whose cell moved within the bucket) is valid again as it is. One in
+// another bucket is unlinked from that chain first: each such bucket is claimed once
+// (its W head, empty after the step's queries, serves as the claim), and one thread per
+// claimed bucket splices its leaving colliders out (rest_unlink, which also empties that
+// W head again); then every collider
+// not in R is pushed (rest_push). A collider R cannot place incrementally (a
+// hierarchical collider moving between a cell and the oversized list) asks for a
+// rebuild at the next step (header word 31). Every chain then holds the colliders a
+// rebuild would put in it, plus tombstones, in another order; walks test each entry's
+// true cell and skip tombstones, so they find the same colliders.
+static const uint REST_REBUILD_WORD = 31u;
+static const uint REST_DIRTY_WORD = 30u;
+static const uint REST_AT_LEAVING = 0xFFFFFFFDu;
+// A W head claimed for rest_unlink (no grid entry has this value: ids are below 2^31-2).
+static const uint REST_CLAIMED = 0xFFFFFFFEu;
+bool restIncremental() { return (HOST_S(25) & 32u) != 0u; }
+uint restDirtyBase() { return restLinks() + 4u * gCounters[0].colliderCount; }
+
+// Bucket of a collider at rest in R: its centre's uniform cell, or its hierarchical
+// cell and level; REST_AT_LISTED for the header lists (planes, uniform large dynamics,
+// hierarchical oversized colliders).
+uint restBucket(uint c, Collider col, BodyState b, out uint level)
+{
+    level = 0u;
+    if (col.shape == SHAPE_PLANE) return REST_AT_LISTED;
+    Aabb box = gAabbs[HOST_S(1) + c];
+    if (restUniform())
+    {
+        float cellSize = max(PARAMS.gridCellSize, 0.5);
+        float boundR = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+        if (bodyIsDynamic(b) && boundR > cellSize) return REST_AT_LISTED;
+        int3 cc = uniformCell(box, cellSize);
+        return gridHash(cc.x, cc.y, cc.z);
+    }
+    level = hierLevel(box._pad0);
+    if (level >= HOST_S(18)) return REST_AT_LISTED;
+    return hierHash(hierCell(box, level), level);
+}
+
+// A listed collider at rest now (the listing's test: hierarchical lists kinematics too).
+bool restSleeperNow(Collider col)
+{
+    BodyState b = gBodies[col.body];
+    return restUniform() ? !bodyMoving(b) : !bodyMovingOrKinematic(b);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void rest_sleepers_mark(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    uint c = awakeCollider(li);
+    Collider col = gColliders[c];
+    if (!restSleeperNow(col)) return;
+    BodyState b = gBodies[col.body];
+    uint level;
+    uint h = restBucket(c, col, b, level);
+    uint cur = ALOAD(gConstraintIds[restAtBase() + c]);
+    uint hdr = restBase();
+    // Its bounds now (an entry valid again keeps its place but may have grown).
+    if (restUniform() && h != REST_AT_LISTED)
+        AMAX2(gConstraintIds[hdr + REST_U_HALF], asuint(boxHalfMax(gAabbs[HOST_S(1) + c])));
+    if (h == cur) return;
+    if (h == REST_AT_LISTED || cur == REST_AT_LISTED)
+    {
+        // Uniform header lists: a plane or large dynamic not listed yet joins them
+        // (they are listed by its shape, which never changes). Anything else moving
+        // between a list and a chain: rebuild.
+        if (restUniform() && cur == REST_AT_NONE)
+        {
+            bool plane = col.shape == SHAPE_PLANE;
+            uint slot;
+            AADD3(gConstraintIds[hdr + (plane ? 1u : 10u)], 1u, slot);
+            if (slot < (plane ? 8u : REST_U_LARGE_MAX))
+                ASTORE(gConstraintIds[hdr + (plane ? 2u : 11u) + slot], c);
+            ASTORE(gConstraintIds[restAtBase() + c], REST_AT_LISTED);
+        }
+        else
+            ASTORE(gConstraintIds[hdr + REST_REBUILD_WORD], 1u);
+        return;
+    }
+    if (cur == REST_AT_NONE) return; // rest_push inserts it
+    // In another chain: leave it (claim that bucket for one unlinking thread).
+    ASTORE(gConstraintIds[restAtBase() + c], REST_AT_LEAVING);
+    uint prev;
+    AXCHG3(gConstraintIds[awakeHeads() + cur], REST_CLAIMED, prev);
+    if (prev != REST_CLAIMED)
+    {
+        uint k;
+        AADD3(gConstraintIds[hdr + REST_DIRTY_WORD], 1u, k);
+        ASTORE(gConstraintIds[restDirtyBase() + k], cur);
+    }
+}
+
+// Work slot 86: one thread per claimed bucket.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void write_rest_dirty_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    writeDispatchArgs(86u, ALOAD(gConstraintIds[restBase() + REST_DIRTY_WORD]));
+}
+
+// One claimed bucket: its leaving colliders spliced out (no other thread walks it).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void rest_unlink(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = dispatchIndex(tid);
+    uint hdr = restBase();
+    if (k >= ALOAD(gConstraintIds[hdr + REST_DIRTY_WORD])) return;
+    uint h = ALOAD(gConstraintIds[restDirtyBase() + k]);
+    uint count = gCounters[0].colliderCount;
+    uint before = 0xFFFFFFFFu;
+    uint j = ALOAD(gConstraintIds[restHeads() + h]);
+    uint guard = 0u;
+    while (j != 0xFFFFFFFFu && guard < count)
+    {
+        guard++;
+        uint next = ALOAD(gConstraintIds[restLinks() + j]);
+        if (ALOAD(gConstraintIds[restAtBase() + j]) == REST_AT_LEAVING)
+        {
+            if (before == 0xFFFFFFFFu) ASTORE(gConstraintIds[restHeads() + h], next);
+            else ASTORE(gConstraintIds[restLinks() + before], next);
+            ASTORE(gConstraintIds[restAtBase() + j], REST_AT_NONE);
+            if (restUniform()) AADD2(gConstraintIds[hdr], 0xFFFFFFFFu);
+        }
+        else
+            before = j;
+        j = next;
+    }
+    ASTORE(gConstraintIds[awakeHeads() + h], 0xFFFFFFFFu);
+}
+
+// Listed colliders at rest and not in R: pushed onto their bucket's chain.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void rest_push(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    uint hdr = restBase();
+    if (li == 0u) ASTORE(gConstraintIds[hdr + REST_DIRTY_WORD], 0u);
+    uint c = awakeCollider(li);
+    if (ALOAD(gConstraintIds[restAtBase() + c]) != REST_AT_NONE) return;
+    Collider col = gColliders[c];
+    if (!restSleeperNow(col)) return;
+    uint level;
+    uint h = restBucket(c, col, gBodies[col.body], level);
+    if (h == REST_AT_LISTED) return; // marked above (or a rebuild is due)
+    uint prev;
+    AXCHG3(gConstraintIds[restHeads() + h], c, prev);
+    ASTORE(gConstraintIds[restLinks() + c], prev);
+    ASTORE(gConstraintIds[restAtBase() + c], h);
+    if (restUniform())
+    {
+        AADD2(gConstraintIds[hdr], 1u);
+        AMAX2(gConstraintIds[hdr + REST_U_HALF], asuint(boxHalfMax(gAabbs[HOST_S(1) + c])));
+    }
+    else AOR2(gConstraintIds[hdr], 1u << level);
 }
 
 // Emit one contact. C0 matches three-avbd: n·(xB−xA)+margin with n = A→B (compression ⇒ C0 < 0),
@@ -2296,6 +3139,13 @@ void persistListAppend(uint first, uint count)
 // step: the relative normal velocity at the point, (vA + ωA×rA − vB − ωB×rB)·n,
 // over h. Points moving apart or sliding past each other get no speculative
 // contact (and no graph edge); touching points (gap ≤ contactOffset) are kept.
+// Inlined: called (as WGSL lowers it, with its arguments by pointer), it corrupted its
+// caller's candidate pair in narrowphase_fresh natively (wgpu on Metal; Chrome's Dawn was
+// not seen to): with
+// a CCD body in the scene (look-ahead on), the split narrowphase emitted resting box-plane
+// manifolds and rows as colliders (0, 0); the carry then dropped the pair, and a box woken
+// later had no ground contact and fell through the floor. Same code, inlined.
+[ForceInline]
 BoxManifold closingPoints(BoxManifold points, BodyState ba, Collider ca, BodyState bb, Collider cb)
 {
     bool moveA = bodyMovingOrKinematic(ba);
@@ -3654,17 +4504,28 @@ bool contactPairAtRest(BodyState ba, BodyState bb)
 // less load than had it stayed awake. When a body falls asleep, the rows it rests on
 // (its partner static or asleep) are kept here; when the pair forms again, a warm-start
 // miss finds them, and the body wakes with the contacts it fell asleep with. Nothing
-// runs for a body while it sleeps. Rows live in gContacts past the two halves, in
+// runs for a body while it sleeps. Rows live in the contact rows past the two halves, in
 // blocks of ARCHIVE_ROWS; per body records and the free-block stack sit past the
 // scratch words in gScratchAtomics:
 //   [free top, blocks, touched count (two, by step parity)]
 //   [row count, first block, age, cursor, touched step] x maxBodies [next] x blocks
-//   [free stack] x blocks [touched list] x maxBodies
+//   [free stack] x blocks [touched list] x maxBodies [spread step] x maxBodies
+// An archive that keeps no rows (cold wakes with the touch query, HOST_S(30) bit 9,
+// archiveCompact) has only the touch query's records past the header:
+//   [touched step] x maxBodies [touched list] x maxBodies [spread step] x maxBodies
 static const uint ARCHIVE_ROWS = 8u;
 static const uint ARCHIVE_NONE = 0xFFFFFFFFu;
 static const uint ARCHIVE_JUST_SLEPT = 0xFFFFFFFEu;
 static const uint OVERFLOW_SLEEP_ARCHIVE = 131072u;
 bool sleepArchive() { return (HOST_S(30) & 32u) != 0u; }
+// The touch query (archive_touch; HOST_S(30) bit 8, set only with the archive).
+bool archiveTouchQuery() { return (HOST_S(30) & 256u) != 0u; }
+// Measurement variants (HOST_S(30) bits 6 and 7; off by default): a woken pair starts
+// cold instead of from its archived row; archive_spread lists the sleepers resting on a
+// touched sleeper (over the archived adjacency) so archive_emit gives them rows too.
+bool archiveCold() { return (HOST_S(30) & 64u) != 0u; }
+// No rows, no blocks, no per-body row records (WgpuSim::enable_sleep_archive).
+bool archiveCompact() { return (HOST_S(30) & 512u) != 0u; }
 uint archiveBlocks() { return ALOAD(gScratchAtomics[archiveMeta() + 1u]); }
 uint archiveMeta() { return EXPLODE_BASE + 4u + 8u * 16u; }
 uint arTop() { return archiveMeta(); }
@@ -3672,11 +4533,19 @@ uint arCount(uint b) { return archiveMeta() + 4u + b; }
 uint arHead(uint b) { return archiveMeta() + 4u + HOST_S(1) + b; }
 uint arAge(uint b) { return archiveMeta() + 4u + 2u * HOST_S(1) + b; }
 uint arCursor(uint b) { return archiveMeta() + 4u + 3u * HOST_S(1) + b; }
-uint arTouched(uint b) { return archiveMeta() + 4u + 4u * HOST_S(1) + b; }
+uint arTouched(uint b) { return archiveMeta() + 4u + (archiveCompact() ? 0u : 4u * HOST_S(1)) + b; }
 uint arNext(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + k; }
 uint arStack(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + archiveBlocks() + k; }
 uint arTouchedCount(uint step) { return archiveMeta() + 2u + (step & 1u); }
-uint arTouchedList(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + 2u * archiveBlocks() + k; }
+uint arTouchedList(uint k)
+{
+    return archiveMeta() + 4u + (archiveCompact() ? HOST_S(1) : 5u * HOST_S(1) + 2u * archiveBlocks()) + k;
+}
+// The step a listed sleeper spreads in (archive_touch_seed), after the touched list.
+uint arSpread(uint b)
+{
+    return archiveMeta() + 4u + (archiveCompact() ? 2u * HOST_S(1) : 6u * HOST_S(1) + 2u * archiveBlocks()) + b;
+}
 uint archiveRow(uint block, uint j) { return 2u * HOST_S(3) + block * ARCHIVE_ROWS + j; }
 
 // Both colliders' local poses: a split re-parents a collider (new local pose), and its
@@ -3691,7 +4560,7 @@ uint archiveKey(Collider a, Collider b)
     return h;
 }
 
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
 // The body a resting row is archived under: one that fell asleep this step, its
 // partner at rest (static or asleep); else none (the pair keeps forming).
 uint archiveOwner(Contact c)
@@ -3707,8 +4576,20 @@ uint archiveOwner(Contact c)
     return ARCHIVE_NONE;
 }
 
+// An archived row from before its collider was re-parented: its anchors (old frame)
+// are not pinned (persistence keeps a row's anchors only while it sticks).
+Contact archiveStaleRow(Contact prev)
+{
+    prev._pad0 = 0.0;
+    return prev;
+}
+
 // A warm-start miss: the row this pair fell asleep with, in either body's archive
-// (same feature, nearest anchors; else the nearest anchor within the fraction).
+// (same feature, nearest anchors; else the nearest anchor within the fraction). With
+// the touch query, a row whose collider has since been re-parented (a split: the key
+// differs, its anchors are in the old body frame) still lends a same-feature match its
+// impulses and stiffness, as the previous step's row does without the archive; its
+// anchors are not kept (archiveStaleRow).
 bool archiveFind(Contact c, out Contact found)
 {
     Collider colA = gColliders[c.colliderA];
@@ -3719,24 +4600,35 @@ bool archiveFind(Contact c, out Contact found)
     float bestNear = NEAREST_FRACTION * minSide;
     bool haveFeature = false;
     bool haveNear = false;
+    bool haveStale = false;
+    bool staleOk = archiveTouchQuery();
     found = c;
     Contact near = c;
+    Contact stale = c;
     uint owners[2] = { colA.body, colB.body };
     for (uint side = 0u; side < 2u; side++)
     {
         uint body = owners[side];
-        uint k = ALOAD(gScratchAtomics[arHead(body)]);
+        // A compact archive has no rows (and its words past the header are not records).
+        uint k = archiveCompact() ? ARCHIVE_NONE : ALOAD(gScratchAtomics[arHead(body)]);
         if (k == ARCHIVE_NONE) continue;
         uint n = ALOAD(gScratchAtomics[arCount(body)]);
         for (uint slot = 0u; slot < n && slot < 8192u; slot++)
         {
             if (slot > 0u && slot % ARCHIVE_ROWS == 0u)
                 k = ALOAD(gScratchAtomics[arNext(k)]);
-            Contact prev = gContacts[archiveRow(k, slot % ARCHIVE_ROWS)];
+            Contact prev = READ_CONTACT(archiveRow(k, slot % ARCHIVE_ROWS));
             if (prev.colliderA != c.colliderA || prev.colliderB != c.colliderB)
                 continue;
             if (asuint(prev._pad1) != key)
+            {
+                if (staleOk && !haveStale && prev.featureId == c.featureId)
+                {
+                    stale = archiveStaleRow(prev);
+                    haveStale = true;
+                }
                 continue;
+            }
             float3 dA = prev.anchorA - c.anchorA;
             float3 dB = prev.anchorB - c.anchorB;
             if (prev.featureId == c.featureId)
@@ -3752,7 +4644,8 @@ bool archiveFind(Contact c, out Contact found)
         }
     }
     if (!haveFeature && haveNear) found = near;
-    return haveFeature || haveNear;
+    else if (!haveFeature && haveStale) found = stale;
+    return haveFeature || haveNear || haveStale;
 }
 
 // The archived row at `slot` of `body`'s archive (walking its block chain).
@@ -3761,7 +4654,7 @@ Contact archiveRowOf(uint body, uint slot)
     uint k = ALOAD(gScratchAtomics[arHead(body)]);
     for (uint h = slot / ARCHIVE_ROWS; h > 0u && h < 4096u; h--)
         k = ALOAD(gScratchAtomics[arNext(k)]);
-    return gContacts[archiveRow(k, slot % ARCHIVE_ROWS)];
+    return READ_CONTACT(archiveRow(k, slot % ARCHIVE_ROWS));
 }
 
 // A moving body's pair reaches a sleeping one with an archive: the first such touch in
@@ -3771,7 +4664,14 @@ Contact archiveRowOf(uint body, uint slot)
 // broadphase stays within WebGPU's storage-buffer budget).
 void archiveMark(uint body)
 {
-    if (ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
+    if (archiveCompact() || ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
+    archiveList(body);
+}
+
+// List `body` once this step (the touch query, archiveTouchQuery, lists every touched
+// sleeper, archive or not).
+void archiveList(uint body)
+{
     uint stamp = HOST_S(17) + 1u;
     uint old;
     AXCHG3(gScratchAtomics[arTouched(body)], stamp, old);
@@ -3782,6 +4682,22 @@ void archiveMark(uint body)
         ASTORE(gScratchAtomics[arTouchedList(at)], body);
 }
 
+// The touch query lists a touched sleeper only if the touch can wake it this step
+// (wakeFromContact's rule on the same velocities): one it cannot wake stays asleep, its
+// pairs stay at rest, and nothing this step reads them.
+bool touchMayWake(BodyState m, BodyState s, uint cm, uint cs)
+{
+    bool awake = (bodyIsDynamic(m) && !bodyIsSleeping(m) && canWake(m)) || kinematicMoving(m);
+    if (!awake) return false;
+    if (wakeOnTouch()) return true;
+    float3 vRel = m.linearVel - s.linearVel;
+    float thresh = PARAMS.sleepLin;
+    if (pointSpeedSleep())
+        return length(vRel) + length(m.angularVel) * colliderExtent(gColliders[cm]) +
+            length(s.angularVel) * colliderExtent(gColliders[cs]) >= thresh;
+    return dot(vRel, vRel) >= thresh * thresh || length(m.angularVel) + length(s.angularVel) >= PARAMS.sleepAng;
+}
+
 void archiveTouch(uint i, uint j)
 {
     uint bi = gColliders[i].body;
@@ -3789,15 +4705,22 @@ void archiveTouch(uint i, uint j)
     BodyState a = gBodies[bi];
     BodyState b = gBodies[bj];
     if (bodyMovingOrKinematic(a) && bodyIsDynamic(b) && bodyIsSleeping(b))
-        archiveMark(bj);
+    {
+        if (!archiveTouchQuery()) archiveMark(bj);
+        else if (touchMayWake(a, b, i, j)) archiveList(bj);
+    }
     else if (bodyMovingOrKinematic(b) && bodyIsDynamic(a) && bodyIsSleeping(a))
-        archiveMark(bi);
+    {
+        if (!archiveTouchQuery()) archiveMark(bi);
+        else if (touchMayWake(b, a, j, i)) archiveList(bi);
+    }
 }
 
 // A listed sleeper's archived resting pairs (each pair once; a pair whose partner
 // moves is emitted by it).
 void archiveEmitResting(uint body)
 {
+    if (archiveCompact()) return;
     uint n = min(ALOAD(gScratchAtomics[arCount(body)]), 2048u);
     for (uint slot = 0u; slot < n && slot < 2048u; slot++)
     {
@@ -3814,17 +4737,254 @@ void archiveEmitResting(uint body)
             emitCandidateCore(r.colliderA, r.colliderB);
     }
 }
+
+// ---- Touch query (HOST_S(30) bit 8, with the sleep archive) ----
+// A sleeper touched by a moving body this step (archiveMark, from the moving body's
+// candidate pairs, or woken after the broadphase by a projectile hit, apply_impulses) forms every resting pair it has, before this step's narrowphase:
+// archive_touch queries each listed sleeper's colliders as if it were awake, against
+// the colliders at rest (static, or asleep: a mover's pairs are its own query's), so
+// when the touch wakes it its supports are in this step's contacts, as they would be
+// had it never slept, whichever body's archive holds them; persistence then warms each
+// from either body's archive (archiveFind). Each pair is emitted once: of two touched
+// sleepers at one grid level the lower collider index emits it, across levels the
+// finer one (the coarser one's finer scan skips touched partners).
+bool archiveTouchedNow(uint body) { return ALOAD(gScratchAtomics[arTouched(body)]) == HOST_S(17) + 1u; }
+
+// Touched collider i's pair with collider j (a candidate by bounds): j at rest, on
+// another body, not jointed; `lowerOwns` (both scan each other): a touched partner's pair
+// goes to the lower index; otherwise only i reaches j (a coarser level: j's finer scan
+// skips touched colliders), so i emits it.
+// `mark` (archive_touch_spread): list a sleeping partner instead of emitting the pair.
+void touchEmit(uint i, Collider a, uint j, bool lowerOwns, bool probeHasObb, BoxObb probe, float faceGap, bool mark)
+{
+    if (j == i) return;
+    Collider b = gColliders[j];
+    if (b.body == a.body || b.shape == SHAPE_PLANE) return;
+    if (mark)
+    {
+        BodyState ob = gBodies[b.body];
+        if (bodyIsDynamic(ob) && bodyIsSleeping(ob) && !bodiesJointed(a.body, b.body) &&
+            !(probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)))
+            archiveList(b.body);
+        return;
+    }
+    // A touched partner (asleep at the broadphase, perhaps woken since by a projectile
+    // hit) also queries; any other moving partner emitted the pair from its own query.
+    if (archiveTouchedNow(b.body))
+    {
+        if (lowerOwns && j < i) return;
+    }
+    else if (bodyMovingOrKinematic(gBodies[b.body])) return;
+    if (bodiesJointed(a.body, b.body)) return;
+    if (probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)) return;
+    emitCandidateCore(i, j);
+}
+
+// Hierarchical grids: planes, oversized statics, the own and coarser levels' cells
+// (hierQuery's visit), then the finer levels' (hierScanFiner's acceptance test).
+void touchQueryHier(uint i, bool mark)
+{
+    Collider a = gColliders[i];
+    if (a.shape == SHAPE_PLANE) return;
+    uint base = HOST_S(1);
+    Aabb aa = gAabbs[base + i];
+    uint own = hierLevel(aa._pad0);
+    uint levels = HOST_S(18);
+    bool probeHasObb = shapeHasHull(a.shape);
+    BoxObb probe = probeHasObb ? worldObbFromCache(i)
+                               : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
+    float faceGap = max(0.001, speculativeMargin()) + (probeHasObb ? cachedReach(i) : 0.0);
+    uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
+    for (uint pi = 0u; pi < nPlanes && !mark; pi++)
+    {
+        uint j = ALOAD(gScratchAtomics[43u + pi]);
+        if (!aabbAbovePlane(aa, gColliders[j].params)) emitCandidateCore(i, j);
+    }
+    uint nLarge = min(ALOAD(gScratchAtomics[HIER_LARGE_COUNT_SLOT]), HIER_LARGE_MAX);
+    for (uint k = 0u; k < nLarge; k++)
+    {
+        uint j = ALOAD(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + k]);
+        if (aabbOverlap(aa, gAabbs[base + j]))
+            touchEmit(i, a, j, false, probeHasObb, probe, faceGap, mark);
+    }
+    if (own >= levels) return;
+    bool rest = restTables();
+    uint heads = rest ? restHeads() : 0u;
+    uint count = gCounters[0].colliderCount;
+    uint occupied = ALOAD(gScratchAtomics[HIER_LEVEL_MASK_SLOT]);
+    for (uint level = own; level < levels; level++)
+    {
+        if (((occupied >> level) & 1u) == 0u) continue;
+        float cs = hierCellSize(level);
+        int3 center = hierCell(aa, level);
+        int3 lo = max(int3(floor((aa.mn - 0.5 * cs) / cs)), center - 1);
+        int3 hi = min(int3(floor((aa.mx + 0.5 * cs) / cs)), center + 1);
+        for (int z = lo.z; z <= hi.z; z++)
+        for (int y = lo.y; y <= hi.y; y++)
+        for (int x = lo.x; x <= hi.x; x++)
+        {
+            int3 cell = int3(x, y, z);
+            uint j = ALOAD(gConstraintIds[heads + hierHash(cell, level)]);
+            uint guard = 0u;
+            while (j != 0xFFFFFFFFu && guard < count)
+            {
+                guard++;
+                Aabb ab = gAabbs[base + j];
+                uint next = rest ? ALOAD(gConstraintIds[restLinks() + j]) : asuint(ab._pad1);
+                if (j != i && aabbOverlap(aa, ab) && hierLevel(ab._pad0) == level &&
+                    all(hierCell(ab, level) == cell))
+                    touchEmit(i, a, j, level == own, probeHasObb, probe, faceGap, mark);
+                j = next;
+            }
+        }
+    }
+    uint mask = occupied & ((1u << own) - 1u);
+    float csM = hierCellSize(own);
+    int3 cellM = hierCell(aa, own);
+    for (uint level = 0u; level < own; level++)
+    {
+        if (((mask >> level) & 1u) == 0u) continue;
+        int3 lo;
+        uint3 span = finerSpan(aa, level, lo);
+        uint cells = span.x * span.y * span.z;
+        for (uint t = 0u; t < cells && t < 65536u; t++)
+        {
+            int3 cell = lo + int3(uint3(t % span.x, (t / span.x) % span.y, t / (span.x * span.y)));
+            uint j = ALOAD(gConstraintIds[heads + hierHash(cell, level)]);
+            uint guard = 0u;
+            while (j != 0xFFFFFFFFu && guard < count)
+            {
+                guard++;
+                Aabb ab = gAabbs[base + j];
+                uint next = rest ? ALOAD(gConstraintIds[restLinks() + j]) : asuint(ab._pad1);
+                if (aabbOverlap(aa, ab) && hierLevel(ab._pad0) == level &&
+                    all(hierCell(ab, level) == cell))
+                {
+                    int3 jc = hierCell(ab, own);
+                    int3 jlo = max(int3(floor((ab.mn - 0.5 * csM) / csM)), jc - 1);
+                    int3 jhi = min(int3(floor((ab.mx + 0.5 * csM) / csM)), jc + 1);
+                    // A touched finer partner emits the pair from its own coarser scan.
+                    if (!archiveTouchedNow(gColliders[j].body) && all(cellM >= jlo) && all(cellM <= jhi))
+                        touchEmit(i, a, j, false, probeHasObb, probe, faceGap, mark);
+                }
+                j = next;
+            }
+        }
+    }
+}
+
+// Uniform grids: planes, listed large statics, then the resting colliders in the 27
+// cells (the split grid's other table, or the one table's entries not awake). A large
+// touched collider walks the cells under its box for small statics instead (small
+// sleepers pair with it from their own query, as do large dynamics with everyone).
+void touchQueryGrid(uint i, bool mark)
+{
+    Collider col = gColliders[i];
+    if (col.shape == SHAPE_PLANE) return;
+    uint base = HOST_S(1);
+    Aabb box = gAabbs[base + i];
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
+    bool probeIsBox = shapeHasHull(col.shape);
+    BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
+    float faceGap = max(0.001, speculativeMargin()) + (probeIsBox ? cachedReach(i) : 0.0);
+    float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    bool queryLarge = rA > cellSize;
+    uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
+    for (uint pi = 0u; pi < nPlanes && !mark; pi++)
+        emitCandidateCore(i, ALOAD(gScratchAtomics[43u + pi]));
+    uint nListed = largeStaticCount();
+    for (uint t = 0u; t < nListed; t++)
+    {
+        uint j = largeStaticCollider(t);
+        if (aabbOverlap(box, gAabbs[base + j]))
+            touchEmit(i, col, j, false, probeIsBox, probeObb, faceGap, mark);
+    }
+    bool split = gridSplit();
+    // The uniform rest tables (restUniform): the other table is R, without its tombstones.
+#if defined(ENGINE_WGSL)
+    bool rest = restUniform();
+#else
+    bool rest = false;
+#endif
+    uint tableBase = rest ? restHeads() : split ? gridHashSize() : 0u;
+    int3 lo, hi;
+    if (queryLarge)
+    {
+        lo = int3(floor(box.mn / cellSize));
+        hi = int3(floor(box.mx / cellSize));
+        int3 span = hi - lo + int3(1, 1, 1);
+        if (span.x * span.y * span.z > 512) return;
+    }
+    else
+    {
+        int3 cc = int3(floor((0.5 * (box.mn + box.mx)) / cellSize));
+        lo = cc - 1;
+        hi = cc + 1;
+    }
+    for (int z = lo.z; z <= hi.z; z++)
+    for (int y = lo.y; y <= hi.y; y++)
+    for (int x = lo.x; x <= hi.x; x++)
+    {
+        uint link = ALOAD(gConstraintIds[tableBase + gridHash(x, y, z)]);
+        uint guard = 0u;
+        while (link != 0xFFFFFFFFu && guard < 4096u)
+        {
+            uint cur = link & GRID_COLLIDER_MASK;
+            bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
+            Aabb ab = gAabbs[base + cur];
+            link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : split ? asuint(ab._pad1) : gColorLists[cur];
+            guard++;
+            if (awakeEntry || cur == i) continue;
+            int3 cell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
+            if (any(cell != int3(x, y, z)) || !aabbOverlap(box, ab) || (rest && restTombstone(cur))) continue;
+            if (queryLarge && bodyIsDynamic(gBodies[gColliders[cur].body])) continue;
+            touchEmit(i, col, cur, true, probeIsBox, probeObb, faceGap, mark);
+        }
+    }
+}
+
+// Small worlds' exact pairwise scan: sleepers keep their static pairs there, so only
+// pairs with other sleepers are missing.
+void touchQuerySmall(uint i, bool mark)
+{
+    Collider col = gColliders[i];
+    if (col.shape == SHAPE_PLANE) return;
+    uint base = HOST_S(1);
+    Aabb box = gAabbs[base + i];
+    bool probeIsBox = shapeHasHull(col.shape);
+    BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
+    float faceGap = max(0.001, speculativeMargin()) + (probeIsBox ? cachedReach(i) : 0.0);
+    uint n = gCounters[0].colliderCount;
+    for (uint j = 0u; j < n && j < 512u; j++)
+    {
+        if (j == i || !aabbOverlap(box, gAabbs[base + j])) continue;
+        uint bj = gColliders[j].body;
+        BodyState ob = gBodies[bj];
+        if (!archiveTouchedNow(bj) && (!bodyIsDynamic(ob) || !bodyIsSleeping(ob))) continue;
+        touchEmit(i, col, j, true, probeIsBox, probeObb, faceGap, mark);
+    }
+}
+
+// One collider of a listed sleeper (the passes scan the colliders: a threshold split
+// re-parents colliders, so a body's colliders need not be contiguous).
+void touchQueryCollider(uint c, bool mark)
+{
+    if (HOST_S(18) != 0u) touchQueryHier(c, mark);
+    else if (gCounters[0].colliderCount <= 512u) touchQuerySmall(c, mark);
+    else touchQueryGrid(c, mark);
+}
 #endif
 
 // Shared point update; callers choose contact or manifold scheduling. Pair bodies
 // are immutable during persistence, so manifold scheduling can load them once.
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
 // persistContact's warm start from an archived row (a woken pair's resting contact):
 // the same rules as a previous-step row.
 Contact archiveWarmContact(Contact c, BodyState ba, BodyState bb, AvbdParams p)
 {
     Contact prev;
-    if (!archiveFind(c, prev))
+    // archiveCold (measurement variant): the pair starts cold.
+    if (archiveCold() || !archiveFind(c, prev))
         return c;
     // Refuse warm-start across SAT axis flips: λ from the old normal on a new
     // normal injects energy (random Box Pile). three-avbd avoids this via
@@ -3875,6 +5035,13 @@ Contact archiveWarmContact(Contact c, BodyState ba, BodyState bb, AvbdParams p)
     }
     return c;
 }
+// A fresh row of a pair at rest (a touched sleeper's, archive_touch) stores the
+// archived row's warm start: stored cold, it would mask the archive when the pair
+// wakes (the warm start finds the previous step's row first).
+Contact archiveRestRow(Contact c, BodyState ba, BodyState bb)
+{
+    return archiveWarmContact(c, ba, bb, PARAMS);
+}
 #endif
 Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState bb)
 {
@@ -3883,6 +5050,11 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
     c.alive = 1;
     if (contactPairAtRest(ba, bb))
     {
+#if defined(ENGINE_SLEEP_ARCHIVE)
+        // A touched sleeper's resting pair keeps its archived row (archiveRestRow).
+        if (!reused && archiveTouchQuery())
+            c = archiveRestRow(c, ba, bb);
+#endif
         STORE_CONTACT(curOff + i, c);
         return c;
     }
@@ -4019,7 +5191,7 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
                 }
             }
         }
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
         // A warm-start miss: the sleep archive (archiveWarmContact). Kept out of the
         // block above so its codegen is unchanged without the archive.
         else if (sleepArchive())
@@ -4114,6 +5286,44 @@ void build_awake_list(uint3 tid : SV_DispatchThreadID)
         uint slot;
         AADD3(gCounters[0].awakeCount, 1, slot);
         gAwakeList[slot] = i;
+    }
+}
+
+// ---- Awake bitmap (World's plan, HOST_S(25) bit 0 hosts; awakeBits) ----
+// A bit per body slot, set by build_awake_list_bits for every body it lists (dynamic and
+// not asleep), past the incremental rest inserts' bucket list. The per-body passes that
+// act only on such bodies, while no body's flags change between the list and them
+// (count_color_tiles, scatter_color_tiles, ccd_unhold), read one word per 32 bodies
+// first instead of each body's record: a body whose bit is clear is one they leave alone.
+bool awakeBit(uint body) { return (ALOAD(gConstraintIds[awakeBitsBase() + (body >> 5)]) & (1u << (body & 31u))) != 0u; }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void clear_awake_bits(uint3 tid : SV_DispatchThreadID)
+{
+    uint w = dispatchIndex(tid);
+    if (w < (gCounters[0].bodyCount + 31u) / 32u) ASTORE(gConstraintIds[awakeBitsBase() + w], 0u);
+}
+
+// build_awake_list, also setting each listed body's bit.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void build_awake_list_bits(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i == 0u)
+    {
+        ASTORE(gScratchAtomics[IMPULSE_COUNT], 0u);
+        ASTORE(gScratchAtomics[IMPULSE_FIRST], 0u);
+    }
+    if (i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (bodyIsDynamic(b) && !bodyIsSleeping(b))
+    {
+        uint slot;
+        AADD3(gCounters[0].awakeCount, 1, slot);
+        gAwakeList[slot] = i;
+        AOR2(gConstraintIds[awakeBitsBase() + (i >> 5)], 1u << (i & 31u));
     }
 }
 
@@ -4820,6 +6030,15 @@ void record_color_degrees(uint3 tid : SV_DispatchThreadID)
 // Hosts opting into incremental coloring (HOST_S(26)) also allocate slot 69.
 // CPU estimates from a prior
 // frame can miss most of the first ring/gables contacts and leave them unsolved.
+// Indirect args of a (x, y) grid of workgroups, each side within the 32,768 groups a
+// dimension may hold (broadphase_sleeper_large_walk: chunks of 64 cells by large dynamic).
+void writeGroupGrid(uint slot, uint x, uint y)
+{
+    gIndirectArgs[slot * 3u] = min(x, 32768u);
+    gIndirectArgs[slot * 3u + 1u] = min(y, 32768u);
+    gIndirectArgs[slot * 3u + 2u] = 1u;
+}
+
 void writeDispatchArgs(uint slot, uint threads)
 {
     uint groups = (threads + 63u) / 64u;
@@ -5089,6 +6308,66 @@ void scatter_color_tiles(uint3 tid : SV_DispatchThreadID)
     uint body = dispatchIndex(tid);
     uint n = gCounters[0].bodyCount;
     if (body >= n) return;
+    BodyState b = gBodies[body];
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || (b.flags & BODY_PARTICLE) != 0u) return;
+    uint color = ALOAD(gBodyColor[body]);
+    if (color >= min(HOST_S(4), 64u)) return; // count pass reports overflow
+    uint groups = (n + 63u) / 64u;
+    uint slot = gColorOffsets[color * groups + body / 64u] + gCcdFlags[body];
+    uint maxB = HOST_S(1);
+    gColorLists[color * maxB + slot] = body;
+    if (HOST_S(26) != 0u) gColorLists[maxB * HOST_S(4) + body] = color + 1u;
+}
+
+// count_color_tiles and scatter_color_tiles reading a body's record only when its awake
+// bit is set (both act only on listed bodies; the rest of each is as theirs).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void count_color_tiles_bits(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
+{
+    uint body = dispatchIndex(tid);
+    uint local = lid.x;
+    uint palette = min(HOST_S(4), 64u);
+    uint n = gCounters[0].bodyCount;
+    uint groups = (n + 63u) / 64u;
+    ASTORE(gsPackHistogram[local], 0u);
+    uint color = 0xFFFFFFFFu;
+    if (body < n && awakeBit(body))
+    {
+        BodyState b = gBodies[body];
+        if (bodyIsDynamic(b) && !bodyIsSleeping(b) && (b.flags & BODY_PARTICLE) == 0u)
+        {
+            color = ALOAD(gBodyColor[body]);
+            if (color >= palette)
+            {
+                AOR2(gCounters[0].overflowFlags, OVERFLOW_COLORS);
+                color = 0xFFFFFFFFu;
+            }
+        }
+    }
+    gsPackColors[local] = color;
+    GROUP_SYNC();
+    if (color != 0xFFFFFFFFu)
+    {
+        uint rank = 0u;
+        for (uint j = 0u; j < local; j++)
+            if (gsPackColors[j] == color) rank++;
+        gCcdFlags[body] = rank;
+        AADD2(gsPackHistogram[color], 1u);
+    }
+    GROUP_SYNC();
+    uint group = body / 64u;
+    if (local < palette && group < groups)
+        gColorOffsets[local * groups + group] = ALOAD(gsPackHistogram[local]);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void scatter_color_tiles_bits(uint3 tid : SV_DispatchThreadID)
+{
+    uint body = dispatchIndex(tid);
+    uint n = gCounters[0].bodyCount;
+    if (body >= n || !awakeBit(body)) return;
     BodyState b = gBodies[body];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b) || (b.flags & BODY_PARTICLE) != 0u) return;
     uint color = ALOAD(gBodyColor[body]);
@@ -5713,6 +6992,168 @@ void solve_primal_sparse(uint3 lid : SV_GroupThreadID)
     }
 }
 
+// The colour dispatches' headroom and the sparse tail in one workgroup (World's plan,
+// pass value TAIL_PASS: first colour p in bits 0..7, the stabilization flag 256, and
+// the first sparse colour q in bits 16..23). Colours [p, q) are solved as
+// solve_primal_color solves them: the same lanes per body (primalLanesForDegree of the
+// colour's count and degree), the same accumulation and the same halving reduction
+// within each body's lanes, one batch of 64 / lanes bodies at a time; colours from q as
+// solve_primal_sparse solves them. A body's update depends only on its lane count and
+// the poses of earlier colours, so each body gets what its own dispatch gave it, without
+// a dispatch (and a barrier) for each headroom colour, which is usually empty.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void solve_primal_sparse_tail(uint3 lid : SV_GroupThreadID)
+{
+    uint local = lid.x;
+    uint maxB = HOST_S(1);
+    if (local == 0u) gsUniformLanes = min(ALOAD(gCounters[0].colorCount), min(HOST_S(4), COLOR_DEGREE_BASE));
+    GROUP_SYNC();
+    uint colorLimit = gsUniformLanes;
+    GROUP_SYNC();
+    gStabilize = (PASS_U & 256u) != 0u;
+    uint sparseFrom = (PASS_U >> 16) & 255u;
+    for (uint color = PASS_U & 255u; color < colorLimit; color++)
+    {
+        if (local == 0u) gsUniformLanes = SOLVE_COUNT(color);
+        GROUP_SYNC();
+        uint count = gsUniformLanes;
+        GROUP_SYNC();
+        uint lanes = 8u;
+        if (color < sparseFrom)
+        {
+            if (local == 0u)
+                gsUniformLanes = primalLanesForDegree(
+                    count, HOST_S(29) != 0u ? SOLVE_COUNT(COLOR_DEGREE_BASE + color) : 0u);
+            GROUP_SYNC();
+            lanes = gsUniformLanes;
+            GROUP_SYNC();
+        }
+        uint perBatch = 64u / lanes;
+        uint lane = local % lanes;
+        uint slot = local / lanes;
+        uint spanBodies = perBatch << 15;
+        for (uint span = 0u; span < count; span += spanBodies)
+        for (uint base = span; base < min(count, span + spanBodies); base += perBatch)
+        {
+            uint bodySlot = base + slot;
+            bool live = bodySlot < count;
+            uint bodyIdx = 0u;
+            Mat6 A = mat6Zero();
+            Vec6 rhs = vec6Zero();
+            if (live)
+            {
+                bodyIdx = gColorLists[color * maxB + bodySlot];
+                primalAccumulate(bodyIdx, lane, lanes, A, rhs);
+            }
+            if (lanes == 1u)
+            {
+                if (live) primalApply(bodyIdx, A, rhs);
+            }
+            else
+            {
+                if (lanes >= 64u) primalReduceStep(32u, live, lane, slot, A, rhs);
+                if (lanes >= 32u) primalReduceStep(16u, live, lane, slot, A, rhs);
+                if (lanes >= 16u) primalReduceStep(8u, live, lane, slot, A, rhs);
+                if (lanes >= 8u) primalReduceStep(4u, live, lane, slot, A, rhs);
+                if (lanes >= 4u) primalReduceStep(2u, live, lane, slot, A, rhs);
+                primalReduceStep(1u, live, lane, slot, A, rhs);
+                if (live && lane == 0u) primalApply(bodyIdx, A, rhs);
+            }
+            GROUP_SYNC();
+        }
+        // Graph colors are Gauss-Seidel: publish every pose before the next color.
+        if (count > 0u) DeviceMemoryBarrierWithGroupSync();
+    }
+}
+
+// Every solver iteration of the step in one workgroup (World's plan, while few bodies are
+// awake): pass value LOOP_PASS, bits 0..7 the first colour of the sparse tail q, bits
+// 8..15 the iterations. Each iteration solves the colours in order, colours below q as
+// solve_primal_color solves them (the same lanes per body, accumulation and halving
+// reduction) and the rest as solve_primal_sparse does (8 lanes), then every contact's
+// and joint's dual as solve_dual (solveDualAt), the last iteration flagged as its
+// dispatch flags it. A body's and a contact's update depend only on their lanes and the
+// state the previous colour or phase published (a storage barrier between them), so the
+// bodies and multipliers come out as the dispatch per colour and per dual gives them.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void solve_primal_sparse_loop(uint3 lid : SV_GroupThreadID)
+{
+    uint local = lid.x;
+    uint maxB = HOST_S(1);
+    uint sparseFrom = PASS_U & 255u;
+    uint iterations = (PASS_U >> 8) & 255u;
+    gStabilize = false;
+    for (uint iter = 0u; iter < iterations; iter++)
+    {
+        if (local == 0u) gsUniformLanes = min(ALOAD(gCounters[0].colorCount), min(HOST_S(4), COLOR_DEGREE_BASE));
+        GROUP_SYNC();
+        uint colorLimit = gsUniformLanes;
+        GROUP_SYNC();
+        for (uint color = 0u; color < colorLimit; color++)
+        {
+            if (local == 0u) gsUniformLanes = SOLVE_COUNT(color);
+            GROUP_SYNC();
+            uint count = gsUniformLanes;
+            GROUP_SYNC();
+            uint lanes = 8u;
+            if (color < sparseFrom)
+            {
+                if (local == 0u)
+                    gsUniformLanes = primalLanesForDegree(
+                        count, HOST_S(29) != 0u ? SOLVE_COUNT(COLOR_DEGREE_BASE + color) : 0u);
+                GROUP_SYNC();
+                lanes = gsUniformLanes;
+                GROUP_SYNC();
+            }
+            uint perBatch = 64u / lanes;
+            uint lane = local % lanes;
+            uint slot = local / lanes;
+            uint spanBodies = perBatch << 15;
+            for (uint span = 0u; span < count; span += spanBodies)
+            for (uint base = span; base < min(count, span + spanBodies); base += perBatch)
+            {
+                uint bodySlot = base + slot;
+                bool live = bodySlot < count;
+                uint bodyIdx = 0u;
+                Mat6 A = mat6Zero();
+                Vec6 rhs = vec6Zero();
+                if (live)
+                {
+                    bodyIdx = gColorLists[color * maxB + bodySlot];
+                    primalAccumulate(bodyIdx, lane, lanes, A, rhs);
+                }
+                if (lanes == 1u)
+                {
+                    if (live) primalApply(bodyIdx, A, rhs);
+                }
+                else
+                {
+                    if (lanes >= 64u) primalReduceStep(32u, live, lane, slot, A, rhs);
+                    if (lanes >= 32u) primalReduceStep(16u, live, lane, slot, A, rhs);
+                    if (lanes >= 16u) primalReduceStep(8u, live, lane, slot, A, rhs);
+                    if (lanes >= 8u) primalReduceStep(4u, live, lane, slot, A, rhs);
+                    if (lanes >= 4u) primalReduceStep(2u, live, lane, slot, A, rhs);
+                    primalReduceStep(1u, live, lane, slot, A, rhs);
+                    if (live && lane == 0u) primalApply(bodyIdx, A, rhs);
+                }
+                GROUP_SYNC();
+            }
+            if (count > 0u) DeviceMemoryBarrierWithGroupSync();
+        }
+        // The dual over max(contacts, joints), as solve_dual's dispatch (slot 65) covers.
+        if (local == 0u) gsUniformLanes = max(min(ALOAD(gCounters[0].contactCount), HOST_S(3)), gCounters[0].jointCount);
+        GROUP_SYNC();
+        // Every thread of that dispatch (rounded up to its workgroups) runs solveDualAt.
+        uint duals = (gsUniformLanes + 63u) / 64u * 64u;
+        GROUP_SYNC();
+        bool lastIter = iter + 1u == iterations;
+        for (uint k = local; k < duals; k += 64u) solveDualAt(k, lastIter);
+        DeviceMemoryBarrierWithGroupSync();
+    }
+}
+
 // Small-scene GS: one body per dispatch (gPassUniform = body index). Host walks
 // bodies high→low like three-avbd CPU so impacts propagate through stacks.
 [shader("compute")]
@@ -5728,8 +7169,13 @@ void solve_primal_one(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void solve_dual(uint3 tid : SV_DispatchThreadID)
 {
+    solveDualAt(dispatchIndex(tid), PASS_U != 0u);
+}
+
+// Contact i's and joint i's dual update; `lastIter`: the step's final iteration.
+void solveDualAt(uint i, bool lastIter)
+{
     // Per-contact dual (Metal occupancy). CSR/primal still use manifolds (Stage 8b).
-    uint i = dispatchIndex(tid);
     uint n = ALOAD(gCounters[0].contactCount);
     AvbdParams p = PARAMS;
     if (i < n)
@@ -5837,7 +7283,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
 #if defined(ENGINE_COMPACT_SOLVE)
             // The final iteration publishes the canonical warm-start/debug state.
             // Earlier iterations touch only the compact hot records.
-            if (PASS_U != 0u)
+            if (lastIter)
 #endif
             {
             gContacts[curOff + i].penetration = c.penetration;
@@ -5865,7 +7311,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         // constraint force: breaking is decided there (bonds never while a host
         // preloads a structure), and a joint whose multipliers still move is
         // marked unsettled so its bodies cannot fall asleep on it.
-        bool last = PASS_U != 0u;
+        bool last = lastIter;
         float4 lamLo0 = gJoints[i].lambdaLo;
         float4 lamHi0 = gJoints[i].lambdaHi;
         bool broke = false;
@@ -6195,13 +7641,13 @@ void sleep_island_commit(uint3 tid : SV_DispatchThreadID)
     AADD2(gCounters[0].sleepEvents, 1);
     gBodies[i] = b;
     // Its resting rows are archived by the archive_* passes that follow.
-    if (sleepArchive())
+    if (sleepArchive() && !archiveCompact())
     {
         ASTORE(gScratchAtomics[arAge(i)], ARCHIVE_JUST_SLEPT);
     }
 }
 
-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+#if defined(ENGINE_SLEEP_ARCHIVE)
 // Sleep archive passes, after sleep_island_commit (see archiveMeta).
 // archive_free, over this step's awake list: a body awake for a second step lets its
 // archive go (its pairs formed again by now); one that fell asleep again lets the old one
@@ -6255,8 +7701,8 @@ void archive_count(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     if (!sleepArchive() || ALOAD(gCounters[0].sleepEvents) == 0u) return;
     if (i >= min(ALOAD(gCounters[0].contactCount), HOST_S(3))) return;
-    Contact c = gContacts[HOST_S(11) + i];
-    if (c.alive == 0u) return;
+    if (CONTACT_STATE(HOST_S(11) + i) == 0u) return;
+    Contact c = READ_CONTACT(HOST_S(11) + i);
     uint owner = archiveOwner(c);
     if (owner != ARCHIVE_NONE)
         AADD2(gScratchAtomics[arCursor(owner)], 1u);
@@ -6304,8 +7750,8 @@ void archive_scatter(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     if (!sleepArchive() || ALOAD(gCounters[0].sleepEvents) == 0u) return;
     if (i >= min(ALOAD(gCounters[0].contactCount), HOST_S(3))) return;
-    Contact c = gContacts[HOST_S(11) + i];
-    if (c.alive == 0u) return;
+    if (CONTACT_STATE(HOST_S(11) + i) == 0u) return;
+    Contact c = READ_CONTACT(HOST_S(11) + i);
     uint owner = archiveOwner(c);
     if (owner == ARCHIVE_NONE) return;
     uint k = ALOAD(gScratchAtomics[arHead(owner)]);
@@ -6316,12 +7762,40 @@ void archive_scatter(uint3 tid : SV_DispatchThreadID)
     for (uint h = slot / ARCHIVE_ROWS; h > 0u && h < 4096u; h--)
         k = ALOAD(gScratchAtomics[arNext(k)]);
     c._pad1 = asfloat(archiveKey(gColliders[c.colliderA], gColliders[c.colliderB]));
-    gContacts[archiveRow(k, slot % ARCHIVE_ROWS)] = c;
+    c.alive = 1u;
+    STORE_NEW_CONTACT(archiveRow(k, slot % ARCHIVE_ROWS), 0u, c);
 }
 
 // archive_emit, after the broadphase (4,096 threads striding over this step's touched
 // sleepers): their archived resting pairs join the candidates. It also empties the other
 // step's touched count (the next step lists into it).
+// archive_spread (measurement variant, scheduled before archive_emit in rounds): every
+// listed touched sleeper lists its archived partners that are asleep too, one archived
+// hop a round, so their resting pairs are emitted as well and a wake can chain through
+// them within the step, as it could through carried resting pairs.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_spread(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive() || archiveCompact()) return;
+    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1));
+    for (uint k = i; k < n && k < 1048576u; k += 4096u)
+    {
+        uint body = ALOAD(gScratchAtomics[arTouchedList(k)]);
+        uint m = min(ALOAD(gScratchAtomics[arCount(body)]), 2048u);
+        for (uint slot = 0u; slot < m && slot < 2048u; slot++)
+        {
+            Contact r = archiveRowOf(body, slot);
+            uint a = gColliders[r.colliderA].body;
+            uint other = a == body ? gColliders[r.colliderB].body : a;
+            BodyState ob = gBodies[other];
+            if (bodyIsDynamic(ob) && bodyIsSleeping(ob))
+                archiveMark(other);
+        }
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void archive_emit(uint3 tid : SV_DispatchThreadID)
@@ -6331,9 +7805,78 @@ void archive_emit(uint3 tid : SV_DispatchThreadID)
     uint step = HOST_S(17);
     if (i == 0u)
         ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], 0u);
+    // With the resting-pair carry on (EngineFeatures::carry_with_archive) the carried
+    // pairs already include these: emitting them again doubled their contact rows.
+    if (carryRestPairs()) return;
     uint n = min(ALOAD(gScratchAtomics[arTouchedCount(step)]), HOST_S(1));
     for (uint k = i; k < n && k < 1048576u; k += 4096u)
         archiveEmitResting(ALOAD(gScratchAtomics[arTouchedList(k)]));
+}
+
+// The touch query's passes (archive_* in rigid_plan order): snap, seed and spread (one
+// hop), args, touch. Slot 83: a thread a listed sleeper; slot 84: a thread a collider,
+// or none when nothing is listed.
+//
+// archive_touch_snap (one thread): this step's listed sleepers so far, for the spread.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_snap(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u || !sleepArchive()) return;
+    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1));
+    writeDispatchArgs(83u, n);
+    writeDispatchArgs(84u, n > 0u ? gCounters[0].colliderCount : 0u);
+}
+
+// archive_touch_seed (slot 83): those sleepers spread this step (arSpread).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_seed(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = dispatchIndex(tid);
+    if (!sleepArchive()) return;
+    if (k < min(ALOAD(gScratchAtomics[arTouchedCount(HOST_S(17))]), HOST_S(1)))
+        ASTORE(gScratchAtomics[arSpread(ALOAD(gScratchAtomics[arTouchedList(k)]))], HOST_S(17) + 1u);
+}
+
+// archive_touch_spread (slot 84): the sleepers the seeded ones overlap are listed too. A
+// touched sleeper usually wakes (wake on touch), and once awake it wakes the sleepers it
+// rests on within the same step (its hull pairs' narrowphase runs after the first pass;
+// a projectile or ccd_wake wakes it before the narrowphase), which are then solved with
+// their whole contact set. One hop (sleepers listed here are not seeded): the carry's
+// racier chains further in are not followed.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_spread(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = dispatchIndex(tid);
+    if (!sleepArchive() || c >= gCounters[0].colliderCount) return;
+    if (ALOAD(gScratchAtomics[arSpread(gColliders[c].body)]) == HOST_S(17) + 1u)
+        touchQueryCollider(c, true);
+}
+
+// archive_touch_args (one thread, after the spread): archive_touch's work (slot 84), and
+// the next step's count word emptied (the next step lists into it).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u || !sleepArchive()) return;
+    uint step = HOST_S(17);
+    writeDispatchArgs(84u, ALOAD(gScratchAtomics[arTouchedCount(step)]) > 0u ? gCounters[0].colliderCount : 0u);
+    ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], 0u);
+}
+
+// archive_touch, in place of archive_emit with the touch query (slot 84): each listed
+// sleeper's resting pairs.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_touch(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = dispatchIndex(tid);
+    if (!sleepArchive() || c >= gCounters[0].colliderCount) return;
+    if (archiveTouchedNow(gColliders[c].body))
+        touchQueryCollider(c, false);
 }
 
 // archive_seal, over this step's awake list: the step's archiving is done.
@@ -6350,6 +7893,14 @@ void archive_seal(uint3 tid : SV_DispatchThreadID)
         ASTORE(gScratchAtomics[arCursor(body)], 0u);
     }
 }
+#else
+// Persistent rows off WGSL hosts (SPIR-V checks): no archive.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_count(uint3 tid : SV_DispatchThreadID) {}
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_scatter(uint3 tid : SV_DispatchThreadID) {}
 #endif
 
 [shader("compute")]

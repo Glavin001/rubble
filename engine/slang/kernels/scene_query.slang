@@ -587,18 +587,28 @@ void sceneWalk<V : IColliderVisitor>(uint lane, bool live, float3 a, float3 b, f
             if (segmentPointDistance(a, b, cc) > rad + 0.8660254 * cs + 1.7320508 * pad) continue;
             if (!hier)
             {
-                uint tables = gridSplit() ? 2u : 1u;
+                // The uniform rest tables (world_step.slang restUniform): W then R, R
+                // without its tombstones, through the same visit (one copy of the visitor
+                // in the kernel).
+#if defined(ENGINE_WGSL)
+                bool restU = restUniform();
+#else
+                bool restU = false;
+#endif
+                uint tables = restU || gridSplit() ? 2u : 1u;
                 for (uint t = 0u; t < tables; t++)
                 {
-                    uint link = ALOAD(gConstraintIds[t * gridHashSize() + gridHash(cell.x, cell.y, cell.z)]);
+                    bool rest = restU && t == 1u;
+                    uint heads = restU ? (rest ? restHeads() : awakeHeads()) : t * gridHashSize();
+                    uint link = ALOAD(gConstraintIds[heads + gridHash(cell.x, cell.y, cell.z)]);
                     uint guard = 0u;
                     while (link != 0xFFFFFFFFu && guard < 4096u)
                     {
                         uint cur = link & GRID_COLLIDER_MASK;
                         Aabb ab = gAabbs[base + cur];
-                        link = gridSplit() ? asuint(ab._pad1) : gColorLists[cur];
+                        link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : (gridSplit() ? asuint(ab._pad1) : gColorLists[cur]);
                         guard++;
-                        if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell)) v.visit(cur);
+                        if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell) && !(rest && restTombstone(cur))) v.visit(cur);
                     }
                 }
             }

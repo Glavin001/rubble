@@ -95,6 +95,34 @@ pub enum GridLayout {
     Fixed,
 }
 
+/// What a world with sleep does with the contacts of pairs at rest ([`EngineFeatures::resting_contacts`];
+/// `World` applies it when sleep is on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RestingContacts {
+    /// The sleep archive (the shipped default). Persistent contacts: a sleeper a moving
+    /// body touches forms all its resting pairs in that step, and woken pairs restart
+    /// cold as the carry's do (`EngineFeatures::archive_cold`, `archive_touch_query`).
+    /// Canonical contacts (threshold destructibles): as on main, the first threshold
+    /// destructible enables the archive, woken pairs warm-start from their archived rows
+    /// and `archive_emit` files them; until then (and in canonical worlds without one)
+    /// the carry runs. A sleeping pair costs nothing per step. Compact contacts keep the
+    /// carry.
+    #[default]
+    Archive,
+    /// Opt-in (`ENGINE_REST=touch`, the demo's `rest=touch`): the persistent worlds'
+    /// archive in canonical worlds too: the touch query and cold wakes (as the carry's),
+    /// enabled when the world is made. Threshold destructibles break differently from
+    /// main (house: 54.3 bonds a shot against 60.6).
+    Touch,
+    /// The resting-pair carry (opt-out, `ENGINE_REST=carry`): every pair at rest is
+    /// re-emitted and kept each step (the earlier default; costs a row per resting
+    /// contact every step).
+    Carry,
+    /// Neither (measurement, `ENGINE_REST=drop`): a sleeping pair keeps no rows and a
+    /// woken one restarts cold.
+    Drop,
+}
+
 /// The engine's internal path switches. Every variant computes the same physics
 /// within its documented tolerance; the defaults are the measured fastest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +141,58 @@ pub struct EngineFeatures {
     pub local_repair: bool,
     /// Carry resting pairs across sleep (`ENGINE_REST=drop` turns it off).
     pub carry_rest: bool,
+    /// Awake-indexed broadphase on hierarchical grids: a persistent resting table for
+    /// static and sleeping colliders, and only moving colliders bounded, inserted and
+    /// queried each step (`ENGINE_BROADPHASE=full` turns it off; same pairs).
+    pub awake_broadphase: bool,
+    /// With `awake_broadphase`: the uniform split grid's other table kept across steps as
+    /// the resting table too, and only moving colliders inserted and queried
+    /// (`ENGINE_BROADPHASE=hier` keeps the full pass on uniform grids; same pairs).
+    pub awake_uniform: bool,
+    /// With `awake_broadphase`: colliders that come to rest join the resting table at the
+    /// end of their step instead of a rebuild of the whole table after every step with
+    /// sleep events (`ENGINE_REST_TABLE=rebuild` turns it off; same pairs).
+    pub rest_incremental: bool,
+    /// `ccd_wake` as a pass a thread per collider, dispatched only while a CCD body sweeps
+    /// fast (`ENGINE_CCD_WAKE=body` keeps the per-body pass, whose collider search assumes
+    /// colliders sorted by body; same results otherwise).
+    pub ccd_by_collider: bool,
+    /// `predict_bodies` and `extract_velocity_sleep` over this step's awake list where
+    /// nothing else changes a body between the list and them (`ENGINE_BODY_PASSES=all`
+    /// runs them over every body slot; same results).
+    pub awake_body_passes: bool,
+    /// The primal's headroom colours (past last step's colour count) solved with their
+    /// colour dispatches' lanes in the sparse tail's single workgroup, one dispatch an
+    /// iteration (`ENGINE_PRIMAL=tail`; same results). Off by default: in Chrome the
+    /// empty headroom dispatches it saves cost next to nothing, and a step whose colours
+    /// grew solves the new ones in one workgroup.
+    pub primal_tail: bool,
+    /// Every solver iteration in one workgroup while at most 256 bodies were awake and
+    /// 128 contacts formed last step (`ENGINE_SOLVE=dispatch` keeps a dispatch per colour
+    /// and dual; same results).
+    pub solve_loop: bool,
+    /// Woken pairs start cold (λ = 0, stiffness at its floor), as the resting-pair carry
+    /// restarts them (its carried rows are re-detected at rest each step), not from the
+    /// sleep archive's rows (default; `ENGINE_ARCHIVE=warm` warm-starts them from the
+    /// archive, the earlier default). A struck sleeping grid: warm-started, a woken box is
+    /// gripped by its neighbours' full resting load from its first step and a ball barely
+    /// dents the stack; cold, it collapses as with the carry. With the touch query, cold
+    /// keeps no archived rows at all.
+    pub archive_cold: bool,
+    /// Measurement variant: rounds of `archive_spread` (sleepers resting on touched ones
+    /// get their archived pairs too; `ENGINE_ARCHIVE_SPREAD=n`; default 0). With the touch
+    /// query: that many more hops of its spread than the one it always runs.
+    pub archive_spread_rounds: u32,
+    /// Sleep archive: a sleeper a moving body touches forms all its resting pairs in the
+    /// step it is touched (`archive_touch`), and its resting rows keep their archived warm
+    /// start (`ENGINE_ARCHIVE_WAKE=emit` turns it off: only the pairs filed in its own
+    /// archive are emitted, the earlier path).
+    pub archive_touch_query: bool,
+    /// Keep the resting-pair carry when a world enables the sleep archive (which turns it
+    /// off by default; `ENGINE_REST=keep`): the behaviour before that change.
+    pub carry_with_archive: bool,
+    /// Resting contacts in worlds with sleep (`World`; [`RestingContacts::Archive`] by default).
+    pub resting_contacts: RestingContacts,
     pub grid: GridLayout,
     /// Hierarchical grid override (`ENGINE_GRID_LEVELS=on|off`; `None`: convex scenes).
     pub grid_levels: Option<bool>,
@@ -138,6 +218,18 @@ impl Default for EngineFeatures {
             persist_list: true,
             local_repair: true,
             carry_rest: true,
+            awake_broadphase: true,
+            awake_uniform: true,
+            rest_incremental: true,
+            ccd_by_collider: true,
+            awake_body_passes: true,
+            primal_tail: false,
+            solve_loop: true,
+            archive_cold: true,
+            archive_spread_rounds: 0,
+            archive_touch_query: true,
+            carry_with_archive: false,
+            resting_contacts: RestingContacts::Archive,
             grid: GridLayout::Split,
             grid_levels: None,
             color_headroom: Some(4),
@@ -175,6 +267,25 @@ impl EngineFeatures {
                 && env_default_on("ENGINE_PERSIST", &["scan"]),
             local_repair: env_default_on("ENGINE_REPAIR", &["rounds"]),
             carry_rest: env_default_on("ENGINE_REST", &["drop"]),
+            awake_broadphase: env_default_on("ENGINE_BROADPHASE", &["full"]),
+            awake_uniform: env_default_on("ENGINE_BROADPHASE", &["full", "hier"]),
+            rest_incremental: env_default_on("ENGINE_REST_TABLE", &["rebuild"]),
+            ccd_by_collider: env_default_on("ENGINE_CCD_WAKE", &["body"]),
+            awake_body_passes: env_default_on("ENGINE_BODY_PASSES", &["all"]),
+            primal_tail: env_str("ENGINE_PRIMAL").as_deref() == Some("tail"),
+            solve_loop: env_default_on("ENGINE_SOLVE", &["dispatch"]),
+            archive_cold: env_str("ENGINE_ARCHIVE").as_deref() != Some("warm"),
+            archive_spread_rounds: env_str("ENGINE_ARCHIVE_SPREAD")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0),
+            archive_touch_query: env_str("ENGINE_ARCHIVE_WAKE").as_deref() != Some("emit"),
+            carry_with_archive: env_str("ENGINE_REST").as_deref() == Some("keep"),
+            resting_contacts: match env_str("ENGINE_REST").as_deref() {
+                Some("carry") => RestingContacts::Carry,
+                Some("drop") => RestingContacts::Drop,
+                Some("touch") => RestingContacts::Touch,
+                _ => d.resting_contacts,
+            },
             grid: match env_str("ENGINE_GRID").as_deref() {
                 Some("scaled") => GridLayout::Scaled,
                 Some("fixed") => GridLayout::Fixed,

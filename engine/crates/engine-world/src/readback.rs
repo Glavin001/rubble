@@ -215,33 +215,54 @@ impl<K: Clone> ReadbackRing<K> {
         }
     }
 
-    /// Read a mapped slot, unmap it and return it to the free list.
+    /// Read a mapped slot, unmap it and return it to the free list. Only the ranges in
+    /// use are viewed: the counters, ring and moved header, the moved records the header
+    /// counts (the slot holds room for every body, but a step moves few), and the extras.
+    /// On the web each view is copied into wasm memory, so viewing the whole slot copied a
+    /// record per body every step.
     pub fn take(&mut self, slot: usize) -> Readback<K> {
         let ring_bytes = self.ring_bytes;
         let header = self.header;
         let s = &mut self.slots[slot];
         let out = {
-            let data = s
+            let head = s
                 .buffer
-                .slice(..s.mapped)
+                .slice(..header + 16)
                 .get_mapped_range()
                 .expect("mapped range");
-            let words: &[u32] = bytemuck::cast_slice(&data[..header as usize + 16]);
+            let words: &[u32] = bytemuck::cast_slice(&head[..]);
             let w = |byte: u64| (byte / 4) as usize;
             let counters: StepCounters = bytemuck::pod_read_unaligned(
-                &data[COUNTERS_OFFSET as usize..][..COUNTERS_BYTES as usize],
+                &head[COUNTERS_OFFSET as usize..][..COUNTERS_BYTES as usize],
             );
             let ring = words[w(RING_OFFSET)..w(RING_OFFSET + ring_bytes)].to_vec();
             let count = (words[w(header)] as usize).min(s.record_capacity as usize);
-            let records = &data[s.records as usize..];
-            let moved = (0..count)
-                .map(|k| bytemuck::pod_read_unaligned(&records[k * 32..k * 32 + 32]))
-                .collect();
+            drop(head);
+            let moved = if count > 0 {
+                let records = s
+                    .buffer
+                    .slice(s.records..s.records + count as u64 * 32)
+                    .get_mapped_range()
+                    .expect("mapped range");
+                (0..count)
+                    .map(|k| bytemuck::pod_read_unaligned(&records[k * 32..k * 32 + 32]))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let extras = s
                 .extras
                 .iter()
                 .map(|(kind, at, size)| {
-                    let bytes = data[*at as usize..(*at + *size) as usize].to_vec();
+                    let bytes = if *size > 0 {
+                        s.buffer
+                            .slice(*at..*at + *size)
+                            .get_mapped_range()
+                            .expect("mapped range")
+                            .to_vec()
+                    } else {
+                        Vec::new()
+                    };
                     (kind.clone(), bytes)
                 })
                 .collect();

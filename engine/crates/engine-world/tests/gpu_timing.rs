@@ -10,6 +10,12 @@ fn world(mode: GpuTiming) -> (World, BodyId) {
         GpuContext::Default,
         &WorldDef {
             gpu_timing: mode,
+            // A dispatch per colour and dual, so each iteration's primal and dual are
+            // timed apart (the solve loop takes them in one pass while few are awake).
+            features: rubble::EngineFeatures {
+                solve_loop: false,
+                ..rubble::EngineFeatures::default()
+            },
             ..WorldDef::default()
         },
     )

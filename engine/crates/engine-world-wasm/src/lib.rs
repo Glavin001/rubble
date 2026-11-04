@@ -16,9 +16,15 @@ use rubble::*;
 use wasm_bindgen::prelude::*;
 
 pub mod broadside;
-/// Broadside (`broadside.html`): its scene stepped in Rust, the page draws its poses.
+/// Broadside (`broadside.html`) and the timber yard (`timber.html`): their scenes stepped
+/// in Rust, the page draws their poses.
 mod broadside_page;
 pub use broadside_page::*;
+/// What a range page plays (also drawn natively by engine-viewer's `world_viewer`).
+pub mod play;
+/// The shooting range under Broadside and the timber yard.
+pub mod range;
+pub mod timber_yard;
 
 /// The large-maps city (`city.html`): `rubble::city` placed over frames.
 mod city;
@@ -46,8 +52,38 @@ fn err(e: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&e.to_string()).into()
 }
 
+/// An error, with the device's first uncaptured error or loss after it: a failed
+/// readback says only that the browser refused to map it.
 fn res<T>(r: anyhow::Result<T>) -> Result<T, JsValue> {
-    r.map_err(|e| err(format!("{e:#}")))
+    r.map_err(|e| {
+        let gpu = gpu_error();
+        if gpu.is_empty() {
+            err(format!("{e:#}"))
+        } else {
+            err(format!("{e:#} (GPU: {gpu})"))
+        }
+    })
+}
+
+static GPU_ERROR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The world device's first uncaptured WebGPU error and its loss, if any ("" while
+/// there is none): what a phone's missing console would otherwise hide.
+#[wasm_bindgen(js_name = gpuError)]
+pub fn gpu_error() -> String {
+    GPU_ERROR.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+fn note_gpu_error(what: String) {
+    web_sys::console::error_1(&what.clone().into());
+    if let Ok(mut e) = GPU_ERROR.lock() {
+        if e.len() < 2000 {
+            if !e.is_empty() {
+                e.push_str("; ");
+            }
+            e.push_str(&what);
+        }
+    }
 }
 
 #[wasm_bindgen(start)]
@@ -94,7 +130,44 @@ async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), 
         })
         .await
         .map_err(|e| err(format!("WebGPU device: {e}")))?;
+    device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| note_gpu_error(e.to_string())));
+    device.set_device_lost_callback(|reason, message| note_gpu_error(format!("device lost ({reason:?}): {message}")));
     Ok((info, device, queue))
+}
+
+/// The limits a world's buffers and kernels run into, as one line.
+pub(crate) fn limits_text(l: &wgpu::Limits) -> String {
+    format!(
+        "maxBufferSize {}, maxStorageBufferBindingSize {}, maxStorageBuffersPerShaderStage {}, maxBindGroups {}, maxBindingsPerBindGroup {}, maxComputeWorkgroupStorageSize {}, maxComputeInvocationsPerWorkgroup {}, maxComputeWorkgroupsPerDimension {}, maxUniformBufferBindingSize {}",
+        l.max_buffer_size,
+        l.max_storage_buffer_binding_size,
+        l.max_storage_buffers_per_shader_stage,
+        l.max_bind_groups,
+        l.max_bindings_per_bind_group,
+        l.max_compute_workgroup_storage_size,
+        l.max_compute_invocations_per_workgroup,
+        l.max_compute_workgroups_per_dimension,
+        l.max_uniform_buffer_binding_size,
+    )
+}
+
+/// Fails with every buffer, layout, shader or pipeline creation the browser rejected
+/// while the world was built (`engine_webgpu::creation_errors`), named, with the device's
+/// limits: the uncaptured error the page would see instead names none of them.
+pub(crate) async fn creation_check(world: &World) -> Result<(), JsValue> {
+    let errors = engine_webgpu::creation_errors().await;
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let (total, largest, at) = world.sim().buffer_bytes();
+    Err(err(format!(
+        "WebGPU rejected {} object(s) while building the world: {} — device limits: {}; world buffers {} MB, largest b{at} {} MB",
+        errors.len(),
+        errors.join(" | "),
+        limits_text(&world.device().limits()),
+        total >> 20,
+        largest >> 20
+    )))
 }
 
 /// A world and the device it runs on.
@@ -110,7 +183,21 @@ impl WebWorld {
         let def = defs::world_def(def)?;
         let (info, device, queue) = web_device().await?;
         let world = res(World::new(GpuContext::Shared { info, device, queue }, &def))?;
+        creation_check(&world).await?;
         Ok(WebWorld { world })
+    }
+
+    /// The device's limits that size a world (requested as the adapter's): for a page's
+    /// error line and diagnostics.
+    #[wasm_bindgen(js_name = deviceLimits)]
+    pub fn device_limits(&self) -> String {
+        let (total, largest, at) = self.world.sim().buffer_bytes();
+        format!(
+            "{}; world buffers {} MB, largest b{at} {} MB",
+            limits_text(&self.world.device().limits()),
+            total >> 20,
+            largest >> 20
+        )
     }
 
     /// The world's `GPUDevice`: the page renders on it, so its passes read the

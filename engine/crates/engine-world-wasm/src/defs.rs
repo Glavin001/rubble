@@ -258,6 +258,22 @@ pub fn features(f: &mut Fields, d: &mut EngineFeatures) -> Result<(), JsValue> {
     f.bool("persistList", &mut d.persist_list)?;
     f.bool("localRepair", &mut d.local_repair)?;
     f.bool("carryRest", &mut d.carry_rest)?;
+    if let Some(s) = f.string("restingContacts")? {
+        d.resting_contacts = match s.as_str() {
+            "archive" => engine_webgpu::RestingContacts::Archive,
+            "carry" => engine_webgpu::RestingContacts::Carry,
+            "drop" => engine_webgpu::RestingContacts::Drop,
+            "touch" => engine_webgpu::RestingContacts::Touch,
+            _ => return Err(crate::err(format!("features.restingContacts: unknown {s}"))),
+        };
+    }
+    f.bool("awakeBroadphase", &mut d.awake_broadphase)?;
+    f.bool("awakeUniform", &mut d.awake_uniform)?;
+    f.bool("restIncremental", &mut d.rest_incremental)?;
+    f.bool("ccdByCollider", &mut d.ccd_by_collider)?;
+    f.bool("awakeBodyPasses", &mut d.awake_body_passes)?;
+    f.bool("primalTail", &mut d.primal_tail)?;
+    f.bool("solveLoop", &mut d.solve_loop)?;
     if let Some(s) = f.string("grid")? {
         d.grid = match s.as_str() {
             "split" => engine_webgpu::GridLayout::Split,

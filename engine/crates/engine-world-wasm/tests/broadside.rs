@@ -369,7 +369,7 @@ fn the_raze() {
                 b.total.broken,
                 b.total.crushed,
                 b.splinters.len(),
-                100.0 * b.intact_share,
+                100.0 * b.razing.intact_share,
                 t0.elapsed().as_secs_f64() * 1e3 / b.frame as f64
             );
         }
