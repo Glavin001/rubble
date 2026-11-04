@@ -817,6 +817,21 @@ mod imp {
     }
 
     impl Fracture {
+        /// The buffers a step's fracture writes last (its atomics and work), for a GPU span
+        /// that must end after them.
+        pub(crate) fn state_buffers(&self) -> Vec<&wgpu::Buffer> {
+            let mut out = Vec::new();
+            if let Some(sh) = &self.shared {
+                out.push(&sh.fracture.atom);
+                out.push(&sh.fracture.work);
+            }
+            for o in self.slots.iter().flatten().filter_map(|t| t.own.as_ref()) {
+                out.push(&o.fracture.atom);
+                out.push(&o.fracture.work);
+            }
+            out
+        }
+
         pub fn active(&self) -> bool {
             self.slots.iter().any(|s| s.is_some())
         }
@@ -2258,6 +2273,34 @@ mod imp {
             {
                 o.ingest.begin_frame(enc, &e);
             }
+        }
+
+        /// Directed debris on what the stress models' splits make: every reserved body slot a
+        /// split may move a piece onto (the shared pool and each own fracture's spares) armed
+        /// with `tag_mask` (0: off), so a piece that breaks off is guided as a chunk body is.
+        /// A parked slot is static and out of every pair; the record waits for its free flight.
+        pub(crate) fn guide_fracture_spares(&mut self, tag_mask: u32) -> anyhow::Result<()> {
+            let mut slots: Vec<u32> = self.fracture.spare.iter().copied().collect();
+            for o in self.fracture.slots.iter().flatten().filter_map(|t| t.own.as_ref()) {
+                slots.extend(&o.spare);
+            }
+            slots.sort_unstable();
+            slots.dedup();
+            let records: Vec<(u32, engine_schema::guidance::GuideBodyGpu)> = slots
+                .into_iter()
+                .map(|b| {
+                    let r = if tag_mask == 0 {
+                        engine_schema::guidance::GuideBodyGpu::default()
+                    } else {
+                        engine_schema::guidance::GuideBodyGpu::armed(self.bodies[b as usize].generation, tag_mask)
+                    };
+                    (b, r)
+                })
+                .collect();
+            for (first, run) in runs(records) {
+                self.sim.write_guide_bodies(first, &run)?;
+            }
+            Ok(())
         }
 
         /// Diagnostic (`blast_gpu`): the shared fracture's Blast graph, for a reference

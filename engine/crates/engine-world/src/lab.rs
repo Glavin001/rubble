@@ -88,6 +88,18 @@ impl LabBonds {
     }
 }
 
+/// A stress model's own fracture switches, resolved (in-step contact fracture, strike
+/// prediction): what `FractureOptions::default()` gives it. A host shows these, and sends
+/// the user's choice back explicitly.
+pub fn fracture_defaults(model: StrengthModel) -> anyhow::Result<(bool, bool)> {
+    let def = DestructibleDef {
+        model,
+        ..DestructibleDef::new(DestructibleAssetId(0))
+    };
+    let s = crate::threshold::setup_of(&def)?;
+    Ok((s.contact_sweeps > 0, s.predict_strikes))
+}
+
 /// Chunk crushing in the stress models: off, the scene's own crush parameters (a ScenePack
 /// v3's `materials[].crush`), or those and the cited presets for the other materials.
 /// Crushed chunks are removed (dust).
@@ -151,6 +163,10 @@ pub enum LabSource {
     Cuboid,
     /// A scene pack (ScenePack JSON: the reference rigs, vibe-city presets, the glass tower).
     Pack { bytes: Arc<Vec<u8>> },
+    /// A lab scene a host built itself (benchmarks, synthetic bond tests), placed as given:
+    /// the bond models only (it has no stress import). `settle`: its D6 bonds settle under
+    /// self-weight first.
+    Scene { scene: Arc<Scene>, settle: bool },
 }
 
 impl LabSource {
@@ -315,6 +331,14 @@ impl LabPlan {
             }
             LabSource::Cuboid => engine_fracture::cuboid::build_cuboid_house(&Default::default())?,
             LabSource::Pack { bytes } => engine_fracture::pack::build_pack_scene(bytes)?.0,
+            LabSource::Scene { scene, .. } => {
+                anyhow::ensure!(
+                    s.bonds.stress().is_none(),
+                    "a prebuilt lab scene has no stress import: the {} model needs a GLB, a pack or the cuboid house",
+                    s.bonds.name()
+                );
+                (**scene).clone()
+            }
         };
         let mut one = raw;
         one.params.dt = dt as f32;
@@ -331,6 +355,7 @@ impl LabPlan {
                     LabSource::Cuboid => {
                         (DestructibleAssetDesc::cuboid_house(&Default::default())?, Vec::new())
                     }
+                    LabSource::Scene { .. } => unreachable!("refused above"),
                 };
                 let stress = desc
                     .stress
@@ -380,7 +405,12 @@ impl LabPlan {
     /// preload): [`Self::settle`] natively, [`Self::begin_settle`] in a host that must
     /// not wait.
     pub fn needs_settle(&self) -> bool {
-        !self.settled
+        let wanted = match &self.def.source {
+            LabSource::Scene { settle, .. } => *settle,
+            _ => true,
+        };
+        wanted
+            && !self.settled
             && self.def.settings.bonds == LabBonds::Model(StrengthModel::Bonds)
             && !self.one.joints.is_empty()
             && !matches!(self.def.arrangement, LabArrangement::TowerBlock { .. })
@@ -1219,8 +1249,12 @@ impl Lab {
         }
         world.set_guidance_zones(&out)?;
         let mask = if on { u32::MAX } else { 0 };
-        for &d in &self.destructibles {
+        for &d in self.destructibles.iter().chain(&self.props) {
             world.destructible_set_guided(d, mask)?;
+        }
+        if self.draws_poses() {
+            // The stress models' pieces break onto reserved slots: those are armed too.
+            world.guide_fracture_spares(mask)?;
         }
         world.reset_guidance_claims()?;
         self.guidance = settings.map(|s| (s, zones.to_vec()));
@@ -1278,7 +1312,11 @@ impl Lab {
             st.awake = c.awake_count;
             st.contacts = c.contact_count;
         }
-        st.gpu_step_ms = world.last_step_gpu_time().map(|t| t.total_ms);
+        // The whole tick (rigid step and fracture) where the world times it, else the rigid
+        // step's own passes.
+        st.gpu_step_ms = world
+            .tick_gpu_ms()
+            .or_else(|| world.last_step_gpu_time().map(|t| t.total_ms));
         if let Some(ms) = st.gpu_step_ms.filter(|&ms| ms > 0.0) {
             st.max_steps_per_second = Some(1000.0 / ms);
             st.realtime_share = Some(self.settings.physics_hz as f64 * ms / 1000.0);

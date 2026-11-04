@@ -195,32 +195,40 @@ The native viewer numbers the same scenes 1–9 in this order.
 ### Fractured towers · 2×2 city block (CCD showcase)
 
 Under Vibe City presets when the generated packs are present. Four copies of
-`fracturedTower` (14,844 pieces) with their breakable welds at 0.2× strength
-and the pack's 1 m, 30 t ball; the scene sets Bonds to breakable D6, Ball
-speed to 16× and CCD balls on. **Fire the volley** fires the scripted 24 shots
-(`engine-fracture/src/towers.rs`, the same as the Metal viewer's `fracture_viewer
-towers --volley`): eight raking shots at 20–45° off a face that clip a tower and
-carry on into the next, then sixteen at the lower floors until the towers fall
-into each other. Ball trails show every ball's path (cyan with CCD, red
-without); untick CCD balls and fire again to see plain balls pass through
-walls. See engine/docs/ccd.md, "The towers showcase".
+`fracturedTower` (14,844 pieces), the city's parked cars and pedestrians in the streets,
+and the block's 1 m, 30 t ball, under whichever bond model the panel has. Selecting the
+scene changes no setting: **Use the scene's suggested settings** applies the ones it was
+tuned with (breakable D6 at 0.2× strength, CCD balls at 16× speed) and reloads. **Fire the
+volley** queues the scripted 24 shots on World (`engine-fracture/src/towers.rs`, the same as
+the Metal viewer's `fracture_viewer towers --volley`): eight raking shots at 20–45° off a
+face that clip a tower and carry on into the next, then sixteen at the lower floors until
+the towers fall into each other. **Topple** and **Meteor strike** queue theirs the same way.
+Ball trails show every ball's path (cyan with CCD, red without). See engine/docs/ccd.md,
+"The towers showcase".
 
 ### Bond modes
 
-The **Bonds** menu picks how the baked bonds hold the fragments, on the same asset,
-level, camera and shot rule, so the three can be compared:
+Every run is one rubble `World` and this page's renderer, through the lab API every host
+calls (engine-world `rubble::lab`, engine/docs/lab-world-plan.md): the scene, the bond
+model, the settings and the actions are independent choices, and any scene runs under any
+bond model. A combination that cannot work fails with its reason in the status line. The
+page wires its controls to that API and draws what it reports.
 
-| Mode | What holds the fragments | Where it runs |
-|---|---|---|
-| **None** (default) | Nothing: pieces start asleep and wake when hit | rubble's World (`StrengthModel::Bonds`, no bonds), this page's renderer |
-| **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble's World (`StrengthModel::Bonds`), this page's renderer |
-| **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
-| **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`), forward only. A strike is predicted before rubble steps (its Hertz force against each bond's strength × area) and its island split first. After each step, a contact force beyond a bond's capacity breaks it. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | rubble's World (`StrengthModel::Threshold` on the world's shared GPU fracture), this page's renderer. World predicts every shot's strike (the checkbox is on and fixed) and has no in-step contact fracture; its balls have no continuous collision, as the old `ThresholdWorld`'s |
-| **Stress solver · load path** | The threshold mode's GPU world (profile `load_path`) with a load path in place of the contact-force test: gravity and the contacts' forces and moments carried through the bond graph (a fixed number of warm-started relaxation sweeps a frame, as Blast's solver iterates), each bond checked against its tension, shear, compression and bending strengths. A weight on a cantilever breaks its root, not where it rests. Strikes as the threshold mode | As **Stress solver** |
-| **Stress solver · local impact** | The threshold mode's GPU world (profile `impact_local`) with an analytic local impact model for strikes: Hertz contact, a ballistic limit from crushing and plug shear, back-face spall, strain-rate strength. Below the limit a shot craters or spalls the wall; at or above it the plug comes out and leaves with the shot (Recht and Ipson's residual speed), before rubble steps. Contacts as the threshold mode | As **Stress solver** |
-| **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
+| Mode | What holds the fragments |
+|---|---|
+| **None** (default) | Nothing: pieces start asleep and wake when hit (`LabBonds::None`) |
+| **Breakable D6 joints** | Each bond a breakable AVBD weld, settled under self-weight first (`StrengthModel::Bonds`; below) |
+| **Stress · simple threshold** | `StrengthModel::Threshold` on World's GPU fracture: a contact force beyond a bond's capacity breaks it; a predicted strike's Hertz force against each bond's strength × area; breaks split fragments into new bodies on the GPU |
+| **Stress · load path** | `StrengthModel::LoadPath`: gravity and the contacts' forces and moments carried through the bond graph (warm-started relaxation sweeps a step), each bond checked against its tension, shear, compression and bending strengths. A weight on a cantilever breaks its root, not where it rests |
+| **Stress · local impact** | `StrengthModel::ImpactLocal`: an analytic local impact model for strikes: Hertz contact, a ballistic limit from crushing and plug shear, back-face spall, strain-rate strength |
+| **Stress · vibe-land's GPU stress solver** | `StrengthModel::BlastGpu`: Blast's bond-impulse solve decides the bonds each step (gravity, the contact forces and the centrifugal load in) |
+| **Learned impact** | **Compute only**: a lean MGN-T forward on the house-1story pack graph, timed on this page's WebGPU; the pieces are loose on World |
+| **blast_parity · a separate engine** | The stress oracle's quasi-static stress cascade (profile `blast_parity`) on its own engine, canvas and HUD (`stress-oracle/crates/stress-web`): it waits on the GPU every frame, so it cannot run in World yet. One structure |
 
-**Strike prediction (stress modes).** The checkbox beside **Bonds**. On, each shot's strike
+The stress models share one fracture per world, so a GLB's layout, the cuboid houses' grid
+and the tower block's four copies all break, each copy at its own offset in the tables.
+
+**Strike prediction (stress models).** The checkbox beside **Bonds**. On, each shot's strike
 is predicted at the end of the frame before it reaches a structure, and the bonds the strike
 breaks are broken before rubble steps, so the shot meets the pieces and carries on through
 (forward only, no re-simulation). Which bonds break is the strike model's call, not the
@@ -230,13 +238,13 @@ stress solve's:
 - `local impact`: its ballistic limit and plug cone.
 
 Off, rubble meets the whole structure first and the shot rebounds, whatever breaks after.
-Each mode starts with its own setting: on for threshold, load path and local impact, off for
-the blast_parity stress solver. Switching it applies at once.
+Each model starts at its own setting (`rubble::lab::fracture_defaults`): off for the load
+path, whose in-step contact fracture takes the strikes, on for the others. Switching it
+reloads the scene.
 `stress-rubble/tests/strike_through.rs` checks both on the cuboid house.
 
-**In-step contact fracture (fracture-world stress modes).** The checkbox beside
-**Strike prediction**; on by default in **load path**, available in **threshold** and
-**local impact** too, and it reloads the scene. Within rubble's step, after its contacts are
+**In-step contact fracture (stress models).** The checkbox beside **Strike prediction**;
+on by default in **load path**, available in every stress model, and it reloads the scene. Within rubble's step, after its contacts are
 made and before it solves them, rubble's own contacts are the strikes: a contact closing on a
 structure faster than 5 m/s is judged by the mode's own stress solver:
 - **threshold**: a bond breaks when its share of the strike's Hertz force beats its tensile
@@ -277,16 +285,15 @@ same order, `engine-fracture` `tests/bond_lines.rs`), and the draw reads that jo
 flag (`fracture_draw.slang`). With **None** there are no joints, so a line hides once its
 pieces part. The stress modes draw their own (see Stress solver, View options).
 
-**Physics rate.** The **Physics** menu sets the simulated frames per second and reloads
-the level:
-- **Auto** keeps each mode's own rate: 120 Hz for rubble's modes, 60 Hz for the stress
-  solver.
-- **60 Hz** and **120 Hz** force the rate (rubble's `params.dt`, or the stress scene's
-  `sim.frame_dt`).
+**Physics rate.** The **Physics** menu sets the simulated steps per second, one explicit
+rate for every bond model (60 Hz by default, `rubble::lab::DEFAULT_PHYSICS_HZ`; 120 Hz
+selectable), and reloads the level. No model picks its own, so models are compared at the
+same rate. Breakable D6 joints were tuned at 120 Hz.
 
-Breakable D6 joints are tuned for 120 Hz. In the stress modes, each animation frame catches
-up on up to 0.1 s of simulated time. Before, it caught up on at most two physics frames, so
-a 60 Hz display running a 120 Hz simulation dropped time even when a frame took 3 ms.
+**HUD.** The GPU time of a physics step is World's (`LabStats`: the whole tick, the rigid
+step and the fracture, from marker passes over the buffers the tick writes, so a browser
+orders them after its work), with what it allows (steps a second, the share of each second
+real time takes); the draw's GPU time and the frame rate are the page's.
 
 **Ground bonds (stress modes).** A Shardwright piece bonded to the world (the door frame,
 the fence posts, the walls' bottom courses) is held by a breakable bond to a thin fixed

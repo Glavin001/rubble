@@ -186,3 +186,47 @@ fn combinations_that_cannot_work_say_why() {
     assert_eq!(block.settings.bonds, LabBonds::Model(StrengthModel::Threshold));
     assert_eq!(LabPlan::new(&block).unwrap().def().settings.bonds, LabBonds::Model(StrengthModel::Threshold));
 }
+
+/// The cross-host scenario (engine/docs/lab-world-plan.md, Checks): a pack's tower block
+/// under `blast_gpu`, the volley, 480 steps; one stats line, as the C example (`lab.c`) and
+/// the web page print it, for `engine/scripts/lab-cross-host.mjs` to compare. The pack:
+/// `LAB_CROSS_HOST_PACK`, else the fractured tower when generated, else house-1story.
+#[test]
+fn cross_host_tower_block_reference() {
+    let generated = concat!(env!("CARGO_MANIFEST_DIR"), "/../engine-webgpu/generated/vibe-city/fracturedTower.json");
+    let path = std::env::var("LAB_CROSS_HOST_PACK").unwrap_or_else(|_| {
+        if std::path::Path::new(generated).exists() {
+            generated.to_string()
+        } else {
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../stress-oracle/packs/house-1story.json").to_string()
+        }
+    });
+    let bonds = std::env::var("LAB_CROSS_HOST_BONDS").unwrap_or_else(|_| "blast_gpu".into());
+    let steps: u32 = std::env::var("LAB_CROSS_HOST_STEPS").map_or(480, |v| v.parse().unwrap());
+    let def = LabDef {
+        source: LabSource::Pack {
+            bytes: Arc::new(std::fs::read(&path).unwrap()),
+        },
+        arrangement: LabArrangement::TowerBlock { meteor: false },
+        settings: LabSettings {
+            bonds: LabBonds::parse(&bonds).expect("a bond model"),
+            ccd: true,
+            ..LabSettings::default()
+        },
+    };
+    let (mut world, mut lab) = place(&def).unwrap();
+    lab.queue(&world, &LabAction::Volley, 0).unwrap();
+    let s = run(&mut world, &mut lab, steps).unwrap();
+    println!(
+        "LAB_STATS host=native pack={} model={bonds} steps={} shots={} bodies={} broken={} crushed={} bonds={} chunks={}",
+        path.rsplit('/').next().unwrap(),
+        s.steps,
+        s.shots,
+        s.bodies,
+        s.bonds - s.bonds_intact,
+        s.crushed,
+        s.bonds,
+        s.chunks
+    );
+    assert!(s.bonds_intact < s.bonds, "the volley breaks the block");
+}

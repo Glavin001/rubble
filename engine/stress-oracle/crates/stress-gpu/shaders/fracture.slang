@@ -2507,13 +2507,17 @@ void fr_il_tube_collect(uint3 id: SV_DispatchThreadID)
         il_tube_collect<0>(id.x);
 }
 
-// A group per body slot (most leave at once: not struck).
+// A group per body slot (most leave at once: not struck), the groups in rows of
+// IL_RUN_ROW (WebGPU dispatches at most 65,535 groups along a dimension; a world's body
+// slots can be more).
+static const uint IL_RUN_ROW = 65535;
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void fr_il_run(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
-    if (params.shot_count > 0)
-        il_run<0>(group.x, thread.x);
+    uint b = group.y * IL_RUN_ROW + group.x;
+    if (params.shot_count > 0 && b < params.body_count)
+        il_run<0>(b, thread.x);
 }
 
 [shader("compute")]

@@ -1,8 +1,8 @@
 // The lab's World bookkeeping (lab-sim.mjs) against a mock World: the frame loop takes only
 // the steps a free readback slot allows and keeps the rest due, frames feed the counters
-// and the breaks, captured steps and launches stay in order, and the threshold mode's poses
-// are written only when a frame brought new ones. The physics itself is Rust's (engine-world,
-// engine-world-wasm lab.rs: its Rust tests).
+// and the breaks, queued shots launch with the step that fires them, captured steps and
+// launches stay in order, and the stress models' poses are written only when a frame brought
+// new ones. The physics itself is Rust's (engine-world `rubble::lab`: its Rust tests).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {labSimulation} from './lab-sim.mjs';
@@ -17,8 +17,10 @@ function mockWorld({slots=3,latency=2,breaks={}}={}){
  const world={
   log,
   device:()=>device,solver:()=>({dt:1/60}),
-  canStep:()=>inFlight.length<slots,
-  step(){if(inFlight.length>=slots)throw new Error('stepped without a free readback slot');inFlight.push({step:log.steps++,due:polls+latency})},
+  // labStep: undefined without a free readback slot; else the queued shots due, then the step.
+  labStep(lab){if(inFlight.length>=slots)return undefined;const fired=lab.queue.splice(0).map(()=>7);inFlight.push({step:log.steps++,due:polls+latency});return fired},
+  labQueue(lab,action){log.launches.push(action);lab.queue.push(action)},
+  labClearQueue(lab){lab.queue.length=0},
   stepCount:()=>BigInt(log.steps),
   poll(){
    polls++;const ready=inFlight.filter(f=>f.due<=polls);inFlight=inFlight.filter(f=>f.due>polls);
@@ -30,27 +32,25 @@ function mockWorld({slots=3,latency=2,breaks={}}={}){
   },
   readBodySlots:slots=>{log.reads++;return Promise.resolve(new Float32Array(slots.length*28).fill(log.steps))},
   labPoses:()=>new Float32Array(28*4),
-  labLaunch:(lab,o,d)=>{log.launches.push([...o]);return 7},
-  labStats:()=>({chunks:3,bonds:2,bondsIntact:1,actors:2,crushed:0}),
+  labStats:()=>({chunks:3,bonds:2,bondsIntact:1,bodies:2,crushed:0}),
   labReset(){log.reset=true},
   bodyBuffer:()=>'bodies',jointBuffer:()=>'joints',
   free(){log.freed=true},
  };
  return world;
 }
-const bondLab={slotOf:()=>[0,1,2,3],shots:0,shotSpeed:10,free(){}};
-const thresholdLab={slotOf:()=>[],shots:0,shotSpeed:10,free(){}};
+const lab=drawsPoses=>({slotOf:()=>drawsPoses?[]:[0,1,2,3],drawsPoses,physicsHz:60,queue:[],shots:0,shotSpeed:10,free(){}});
 const scene={bodyCount:4,jointCount:1,projectileStart:3,projectileCount:1};
 
 test('the frame loop takes only the steps a readback slot allows, never waiting',()=>{
- const w=mockWorld({slots:3,latency:5}),sim=labSimulation(w,bondLab,scene);
+ const w=mockWorld({slots:3,latency:5}),sim=labSimulation(w,lab(false),scene);
  assert.equal(sim.tick(4),3,'three slots, three steps; the fourth stays due');
  assert.equal(sim.tick(4),0,'no slot free: nothing stepped, nothing waited for');
  assert.equal(w.log.steps,3);
 });
 
 test('step(n) takes every step and returns once their frames are read',async()=>{
- const w=mockWorld({slots:2,latency:2,breaks:{4:3,6:1}}),sim=labSimulation(w,bondLab,scene);
+ const w=mockWorld({slots:2,latency:2,breaks:{4:3,6:1}}),sim=labSimulation(w,lab(false),scene);
  await sim.step(10);
  assert.equal(w.log.steps,10);
  assert.equal(w.lastPolledStep,9,'the last step\'s frame arrived');
@@ -62,28 +62,31 @@ test('step(n) takes every step and returns once their frames are read',async()=>
  assert.ok(w.log.reset);assert.deepEqual(sim.breaks,{broken:0,crushed:0,firstStep:null});
 });
 
-test('captured steps and launches stay in order, one snapshot per step',async()=>{
- const w=mockWorld(),sim=labSimulation(w,bondLab,scene);
+test('a queued shot launches with the step that fires it; captures stay in order',async()=>{
+ const w=mockWorld(),sim=labSimulation(w,lab(false),scene),launched=[];
+ sim.onLaunch(id=>launched.push(id));
  sim.captureSteps(true);
  await sim.step(2);
- assert.equal(sim.launch([1,2,3],[0,0,-1]),7);
+ sim.shoot([1,2,3],[0,0,-1]);
+ assert.deepEqual(launched,[],'queued, not yet fired');
  await sim.step(1);
+ assert.deepEqual(launched,[7],'fired by the next step');
  const out=await sim.takeCaptured();
- assert.deepEqual(out.map(e=>e.launch!==undefined?'launch':'step'),['step','step','launch','step']);
+ assert.deepEqual(out.map(e=>e.launch!==undefined?'launch':e.queued?'queued':'step'),['step','step','queued','launch','step']);
  assert.equal(out[0].bodies.length,4*28,'every scene body');
- assert.deepEqual(w.log.launches,[[1,2,3]]);
+ assert.deepEqual(w.log.launches,[{shot:{origin:[1,2,3],direction:[0,0,-1]}}]);
 });
 
-test('bond modes draw the world\'s buffers; the threshold mode its poses, written on new frames only',async()=>{
- const bond=labSimulation(mockWorld(),bondLab,scene);
+test('bond models draw the world\'s buffers; the stress models their poses, written on new frames only',async()=>{
+ const bond=labSimulation(mockWorld(),lab(false),scene);
  assert.equal(bond.bodyBuffer,'bodies');assert.equal(bond.jointBuffer,'joints');
- const w=mockWorld({latency:1}),sim=labSimulation(w,thresholdLab,scene);
+ const w=mockWorld({latency:1}),sim=labSimulation(w,lab(true),scene);
  assert.notEqual(sim.bodyBuffer,'bodies');assert.equal(sim.jointBuffer,null);
  const first=w.log.writes;
  sim.poll();
  assert.equal(w.log.writes,first,'no frame, no write');
  sim.tick(1);sim.poll();
  assert.equal(w.log.writes,first+1,'one new frame, one write');
- assert.throws(()=>sim.reset(),/reloads/);
+ assert.throws(()=>sim.reset(),/reload/);
  sim.dispose();assert.ok(w.log.freed);
 });

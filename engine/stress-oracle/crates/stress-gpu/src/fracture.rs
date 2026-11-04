@@ -897,6 +897,9 @@ pub const MODEL_ENTRIES: [&str; 44] = [
 ];
 
 /// Every fracture entry point (`fracture.slang`), crush ones included.
+/// `fr_il_run`'s groups per row (`fracture.slang` `IL_RUN_ROW`).
+const IL_RUN_ROW: u32 = 65_535;
+
 pub fn entries() -> &'static [&'static str] {
     &ENTRIES
 }
@@ -1884,8 +1887,9 @@ impl GpuFracture {
                     self.direct(&mut pass, "fr_il_tube_count", n);
                     self.direct(&mut pass, "fr_il_tube_base", b);
                     self.direct(&mut pass, "fr_il_tube_collect", n);
-                    // A group per body slot.
-                    self.direct(&mut pass, "fr_il_run", 64 * b);
+                    // A group per body slot, in rows of `IL_RUN_ROW` groups (WebGPU's
+                    // largest dispatch dimension).
+                    self.direct_rows(&mut pass, "fr_il_run", b, IL_RUN_ROW);
                     self.direct(&mut pass, "fr_il_strike", b);
                     self.direct(&mut pass, "fr_il_mark", n);
                     self.direct(&mut pass, "fr_il_breaks", e);
@@ -2250,6 +2254,16 @@ impl GpuFracture {
             gpu.write_buffer(&self.work, 4 * self.layout.w_frame() as u64, bytemuck::cast_slice(&words));
         }
         self.frame = Some(want);
+    }
+
+    /// `groups` workgroups of kernel `name` in rows of `row` (x), as many rows as they take
+    /// (y): the kernel numbers its group `y * row + x` and leaves past `groups`.
+    fn direct_rows(&self, pass: &mut wgpu::ComputePass<'_>, name: &str, groups: usize, row: u32) {
+        let (i, k) = self.kernel(name);
+        let groups = groups.max(1) as u32;
+        pass.set_pipeline(&k.pipeline);
+        pass.set_bind_group(0, self.binds[i].as_ref().expect("bound kernel"), &[]);
+        pass.dispatch_workgroups(groups.min(row), groups.div_ceil(row), 1);
     }
 
     fn direct(&self, pass: &mut wgpu::ComputePass<'_>, name: &str, n: usize) {

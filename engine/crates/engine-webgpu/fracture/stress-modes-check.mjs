@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// The fracture lab's stress modes in Chrome WebGPU, end to end: the built site
+// The fracture lab's stress models in Chrome WebGPU, end to end (load_path, impact_local and
+// blast on World; stress, blast_parity, on its own engine): the built site
 // (scripts/build-web.sh, engine/web-dist) served locally, each mode loaded on a scene,
 // stepped at rest, then shot through the page's own click path and stepped on. A mode
 // fails on a WebGPU validation message (a pipeline Chrome rejects stalls the frame
@@ -98,7 +99,8 @@ const load = (mode) => evaluate(`(async () => {
 const advance = (frames) => evaluate(`(async () => { const d = window.__FRACTURE_DEMO__; let st; for (let i = 0; i < ${frames}; i++) { st = await d.stressAdvance(1000 / 60); await new Promise((r) => requestAnimationFrame(r)); } return st; })()`);
 // The page's click path: a press and release at the canvas centre.
 const clickCentre = async () => {
-  const r = await evaluate(`(() => { const c = document.getElementById('stress-view'); const b = c.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
+  // The canvas in view: World's (#view), or blast_parity's own (#stress-view).
+  const r = await evaluate(`(() => { const c = [document.getElementById('view'), document.getElementById('stress-view')].find((v) => !v.hidden); const b = c.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
   for (const type of ['mousePressed', 'mouseReleased']) await send('Input.dispatchMouseEvent', { type, x: r[0], y: r[1], button: 'left', clickCount: 1 });
 };
 const webgpuProblem = (m) => /Invalid|uniform control flow|validation|GPUValidationError|device lost|exception/i.test(m);

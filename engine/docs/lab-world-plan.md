@@ -24,10 +24,10 @@ one host works in the others.
 |---|---|---|
 | 1 | One profile set-up (stress-rubble `ProfileSetup`, `apply_profile`) for `ThresholdWorld` and `World`; `StrengthModel::{LoadPath, ImpactLocal, BlastGpu}` and `FractureOptions`; C ABI values; packs imported per profile | Done. `tests/stress_models.rs`: every model, `World` against `ThresholdWorld`, house-1story and the cuboid house |
 | 2 | Several destructibles under every stress model (one shared fracture, laid out again at each placement for the models `GpuFracture::append` cannot carry) | Done. `tests/stress_block.rs`: house-1story's 2×2 block under all four; the fractured tower under threshold, impact_local, blast_gpu |
-| 3 | The lab as a Rust API: `rubble::lab` (`LabPlan`, `Lab`, `LabAction`, `LabStats`), the C ABI (`rbCreateLab`, `rbLab_Queue`, `rbLab_Step`, `rbLab_GetStats`), `examples/lab.c` | Rust and C written; `tests/lab_api.rs` |
-| 4 | The lab page as a thin page over it; the stress world's host removed | Next |
-| 5 | One set of settings; `gpu_marks` bound | |
-| 6 | Matrix check, cross-host check, docs | |
+| 3 | The lab as a Rust API: `rubble::lab` (`LabPlan`, `Lab`, `LabAction`, `LabStats`), the C ABI (`rbCreateLab`, `rbLab_Queue`, `rbLab_Step`, `rbLab_GetStats`), `examples/lab.c` | Done. `tests/lab_api.rs`; `lab.c` runs the tower block |
+| 4 | The lab page over it: one load path (`createLab`), every scene under every bond model, actions queued on World; `blast_parity` the one model on its own engine | Done. `lab-matrix-check.mjs` |
+| 5 | One set of settings (explicit physics rate, 60 Hz default; the fracture switches for every stress model; crushing; directed debris, a split's pieces included); the whole tick's GPU time (`World::tick_gpu_ms`, marker passes over the buffers it writes) | Done |
+| 6 | The matrix check (`lab-matrix-check.mjs`), the cross-host check (`lab-cross-host.mjs`), docs (fracture README) | Scripts in place; results below |
 
 ### Decisions taken (recommended in the plan)
 
@@ -48,6 +48,9 @@ one host works in the others.
   Blast's warm-started solves at their first, unconverged answer; it now steps them, as the lab's
   world does.
 - `World`'s fracture errors name every error bit.
+- The page's device holder raced: a scene chosen before the page's first load finished made
+  a second GPU device, and the renderer drew on one while the world ran on the other
+  (`lab-world.mjs` now shares the one promise).
 
 ### Open
 
