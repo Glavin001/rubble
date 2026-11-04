@@ -16,6 +16,29 @@ it fails with a clear error naming the reason. It is never hidden, silently chan
 substituted. Comparisons between bond models are then like for like: the same rigid-body
 engine, timestep, projectiles, renderer and timing.
 
+## Principles: one library, every host
+
+Rubble is one library: GPU work in Slang, host work in Rust. Every front end is a thin binding
+over the same Rust API:
+- the web, through wasm and a little JavaScript;
+- Unreal or any C engine, through the C ABI;
+- native Rust demos, directly.
+
+What works in one host then works in the others, with the same capabilities and results. For
+this plan that means:
+
+1. **Every capability the lab shows is a Rust API in `engine-world`** (with `engine-fracture`
+   for scene content). That covers placing a scene, the bond models and their settings,
+   launching and scheduling actions, and stats and GPU timing, with clear errors for
+   combinations that cannot work. Each is reachable unchanged through wasm and the C ABI.
+2. **JavaScript only wires the page:** DOM controls to Rust calls, the canvas, and drawing what
+   Rust reports. It makes no physics decision and holds no scene, action or bond-model logic.
+   The same goes for the C layer.
+3. **No second implementation.** A capability exists once, in Rust or Slang. The stress world's
+   separate host, renderer and HUD go away. They don't get ported to JavaScript.
+4. **Parity is tested across hosts.** The same scenario, run from native Rust, from C and from
+   the web, gives the same result within a documented tolerance.
+
 ## Today: two simulators behind one panel
 
 The lab page drives two separate physics hosts and switches between them by bond model.
@@ -82,30 +105,57 @@ but with the simple threshold rule hard-coded (`Profile::Threshold` in
   60 KB a step at most) and emits `BondsBroken` and `Split`. Every stress model reports through
   it unchanged.
 
-### 2. The lab runs every bond model on `World` (engine-webgpu/fracture, engine-world-wasm)
+### 2. Scenarios and actions in Rust (engine-world, engine-fracture)
 
-- **One load path.** The scene builder produces the lab scene and its `World` placements for
-  every bond model. `loadStress` and the `stressOn` branches go, and so do `#stress-view` and
-  `stress-mode.mjs` in the lab.
-- **Scenes, each placeable under every bond model:**
+Today the scene content and shot plans are already Rust: `engine-fracture` `towers.rs`,
+`plan.rs`, `samples.rs`, reached through `wasm.mjs`. But `main.mjs` (584 lines) still decides
+real behaviour:
+- which bond model a scene gets, and the scene presets;
+- when each shot of a volley or topple fires (`startShots`);
+- how the ball scales apply to each host;
+- which branches run per model;
+- the HUD's timing arithmetic.
+
+None of that can be reached from C or a native demo. It moves to Rust:
+
+- **A scenario API on `World`:** place a lab scene (GLB level and layout, cuboid layout,
+  pack, tower block with its city, glass tower) under a chosen bond model and settings, as one
+  call. Invalid combinations return a clear error.
+- **An action schedule on `World`:** queue an action plan (click shot, row shot, volley,
+  topple, meteor, authored shots), each with its launch step. `World` launches each one at its
+  step and registers the projectiles for strike prediction. The ball mass, speed, radius and
+  CCD settings apply in one place.
+- **Stats and timing from `World`:**
+  - the counters for every model (bodies, bonds broken, crushed, awake, contacts);
+  - GPU time per physics step (the bound markers);
+  - the derived figures: maximum steps per second, and the share of each second at real time.
+
+  The page's own draw timing and display refresh stay the page's, because drawing is the host's.
+- **Bindings:** the same calls in `engine-world-wasm` and the C ABI (`rubble.h`), with a C
+  example that places a scene, runs an action plan and reads the stats.
+
+### 3. The lab is a thin page over that API (engine-webgpu/fracture)
+
+- **One load path.** The page calls the scenario API for every bond model. `loadStress`,
+  `loadThreshold` and the `stressOn`/`thresholdOn`/`towersBlock` branches go, and so do
+  `#stress-view` and `stress-mode.mjs`.
+- **Scenes, each placeable under every bond model** (built by the scenario API, section 2):
   - GLB levels (every copy of a layout, not one);
   - the cuboid house and its layouts;
   - scene packs and the reference rigs;
   - the glass tower (a generated pack);
   - the 2×2 tower block: four pack copies plus the city's cars and pedestrians as plain rigid
     bodies, the bystander zones, and the meteor.
-- **Actions:**
-  - every action is a `World` launch: click, row shot, volley, topple, meteor, authored shots;
-  - one projectile path: mass, speed and radius scales, CCD as the checkbox says, and each
-    projectile registered for strike prediction (`World::body_set_projectile`) whenever the
-    bond model predicts.
-- **One renderer, camera and HUD:** `render.mjs`, `lab-sim.mjs`. The stress counters (bonds
-  broken, bodies, crushed) come from `World` stats.
+- **Actions:** each button queues its plan on `World`'s action schedule (section 2): click,
+  row shot, volley, topple, meteor, authored shots. The page holds no timing or projectile logic.
+- **One renderer, camera and HUD:** `render.mjs`, `lab-sim.mjs`. Every number comes from
+  `World`'s stats and timing; the page only formats them.
+- **Target size:** `main.mjs` shrinks to control wiring and display.
 - **No scene-driven presets.** Selecting a scene never changes the bond model or the settings.
   A scene's suggested settings, such as the tower block's fast CCD volley, become an explicit
   "use the scene's suggested settings" action.
 
-### 3. Settings are the same for every bond model
+### 4. Settings are the same for every bond model
 
 - **Physics rate:** one explicit value, shown in the panel. "Auto" goes; no bond model picks its
   own rate.
@@ -113,11 +163,14 @@ but with the simple threshold rule hard-coded (`Profile::Threshold` in
   same meaning in each.
 - **Crushing:** for every model that has chunk materials.
 - **Directed debris:** for every bond model.
+- **Settings live in Rust:** each one is a `World` option with the same name and meaning in
+  wasm and in the C ABI.
 - **GPU timing:** `World`'s `gpu_marks.rs` binds the buffers each segment writes, as
-  `FrameTimer` does, so that Chrome orders its marks. The HUD shows GPU physics per tick, GPU
-  draw, the display's refresh and the uncapped FPS for every model.
+  `FrameTimer` does, so that Chrome orders its marks. The HUD shows GPU physics per tick (from
+  `World`), GPU draw and the display's refresh (from the page), and the uncapped FPS, for every
+  model.
 
-### 4. Checks
+### 5. Checks
 
 - **Native:** for each stress model, a `World` destructible against `ThresholdWorld` on the
   same scene and strike. They must agree on:
@@ -127,6 +180,14 @@ but with the simple threshold rule hard-coded (`Profile::Threshold` in
 
   Native wgpu worlds are not bit-reproducible run to run, so these compare a
   documented tolerance or the same GPU state, not bitwise lockstep.
+- **Across hosts:** one scenario, the tower block under `blast_gpu` with a volley, run three
+  ways:
+  - a native Rust test;
+  - the C example through `rubble.h`;
+  - the web page.
+
+  All three must report the same bodies, bonds broken and crushed chunks, within the native
+  tolerance. This is the check that what works in one host works in the others.
 - **Headless Chrome matrix** (a new `lab-matrix-check.mjs`): every scene × bond model × action.
   Each cell asserts:
   - no WebGPU or page error;
@@ -145,11 +206,12 @@ but with the simple threshold rule hard-coded (`Profile::Threshold` in
 |---|---|---|---|
 | 1 | Shared profile set-up; `StrengthModel` stress models with options; C ABI values; pack import per profile | Native `World`-vs-`ThresholdWorld` checks pass for threshold, load path, local impact and `blast_gpu` on house-1story and the cuboid house; engine-world and engine-ffi suites pass | 1–2 days |
 | 2 | Several destructibles under every stress model (offsets in the load path, local impact and `blast_gpu` tables; authored packs copied) | The tower block (4 copies) stands at rest and breaks under each stress model, natively | 1 day |
-| 3 | The lab on `World` alone: every scene builder, every action, one renderer and HUD; the stress host removed from the lab | Every scene loads under every bond model in Chrome; volley, topple and meteor work under `blast_gpu` | 2–3 days |
-| 4 | One set of settings (physics rate, CCD, prediction, contact fracture, crush, directed debris); `gpu_marks` bound; scene presets made explicit | The HUD is the same for every model; the timing matches throughput in Chrome | 1 day |
-| 5 | The matrix check, a browser check on Vercel, docs (fracture README, `public-api.md`) | The matrix is green except for listed, explained errors | 1 day |
+| 3 | The scenario API and action schedule on `World` (scene placement, action plans, projectile settings, stats and timing) in Rust, wasm and the C ABI, with a C example | A native test and the C example place the tower block under each bond model, run the volley and report the same stats | 2 days |
+| 4 | The lab as a thin page over it: every scene and action under every bond model, one renderer and HUD; the stress host and the page's mode branches removed | Every scene loads under every bond model in Chrome; volley, topple and meteor work under `blast_gpu`; `main.mjs` holds no physics, scene or action logic | 2 days |
+| 5 | One set of settings (physics rate, CCD, prediction, contact fracture, crush, directed debris) as `World` options; `gpu_marks` bound; scene presets made explicit | The HUD is the same for every model; the timing matches throughput in Chrome | 1 day |
+| 6 | The matrix check, the cross-host check, a browser check on Vercel, docs (fracture README, `public-api.md`) | The matrix and the cross-host check pass except for listed, explained errors | 1 day |
 
-About a week in all. Each phase is committed and verified on its own.
+About a week and a half in all. Each phase is committed and verified on its own.
 
 ## Decisions needed
 
