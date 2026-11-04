@@ -77,7 +77,8 @@ const RUNS = [
   ['drop_15', 'scene=drop&height=15&freeze=3.5&cam=three'],
 ];
 let failed = 0;
-for (const [name, q] of RUNS) {
+const only = opt('--only', null);
+for (const [name, q] of RUNS.filter(([n]) => !only || only.split(',').includes(n))) {
   await send('Page.navigate', { url: `${base}/showcase-car.html?res=${RES}&${q}` });
   let st = null;
   for (let i = 0; i < 600; i++) {

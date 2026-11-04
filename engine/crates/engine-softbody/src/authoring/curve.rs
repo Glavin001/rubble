@@ -152,6 +152,29 @@ impl Outline {
         best
     }
 
+    /// The nearest point on the outline's edges to (x, y), and its distance.
+    pub fn nearest(&self, x: f32, y: f32) -> ([f32; 2], f32) {
+        let p = &self.0;
+        let mut best = ([x, y], f32::MAX);
+        for i in 0..p.len() {
+            let a = p[i];
+            let b = p[(i + 1) % p.len()];
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let l2 = dx * dx + dy * dy;
+            let t = if l2 > 0.0 {
+                (((x - a[0]) * dx + (y - a[1]) * dy) / l2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let q = [a[0] + t * dx, a[1] + t * dy];
+            let d = ((q[0] - x).powi(2) + (q[1] - y).powi(2)).sqrt();
+            if d < best.1 {
+                best = (q, d);
+            }
+        }
+        best
+    }
+
     /// Signed distance: negative inside.
     pub fn signed_distance(&self, x: f32, y: f32) -> f32 {
         let d = self.edge_distance(x, y);

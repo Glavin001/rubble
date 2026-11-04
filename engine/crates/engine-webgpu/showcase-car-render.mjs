@@ -31,7 +31,10 @@
 //   position = P0 + α e1 + β e2 + h N
 //   T = normalize(e1), B = N × T, normal = t T + b B + n N
 // A vertex whose triangle has stretched past 2.5 × a rest edge is torn: its triangles
-// are discarded (a tear, not a stretched sheet).
+// are discarded (a tear, not a stretched sheet). Body vertices (`visual.smooth`) shade
+// smoothly: their rest normal moved by the change of their nodes' skin normals,
+// weighted (1 − α − β, α, β); node normals are computed each frame from the skin
+// triangles (`normalTris`, per node `nodeTriStart`/`nodeTriList`, `nodeRestNormal`).
 //
 // Materials (ids, `visual.materials`): paint, glass, chrome, trim, headlight,
 // taillight, tyre, rim, gap (tail-light lens), underbody, plate, grille, seat,
@@ -42,36 +45,71 @@
 const WG = 64;
 
 const SKIN_WGSL = /* wgsl */ `
-struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r1: f32, nt: f32, nb: f32, nn: f32, r2: f32 };
-struct Params { count: u32, nodeOffset: u32, outOffset: u32, pad: u32 };
+struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r1: f32, nt: f32, nb: f32, nn: f32, r2: f32, rx: f32, ry: f32, rz: f32, smoothed: u32 };
+struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listAt: u32, trisAt: u32, pad0: u32, pad1: u32 };
 @group(0) @binding(0) var<storage, read> nodes: array<vec4f>;
 @group(0) @binding(1) var<storage, read> misc: array<vec4u>;
 @group(0) @binding(2) var<storage, read> binds: array<Bind>;
 @group(0) @binding(3) var<storage, read_write> outv: array<vec4f>;
 @group(0) @binding(4) var<uniform> params: Params;
+// Node normals: per node (start, end) into the triangle list, the skin triangles,
+// rest normals, and the normals now (written by nodeNormals).
+// topo: per node its triangle range (nodeCount + 1 starts), the triangle list (at
+// listAt), the triangles' nodes (4 words each, at trisAt).
+@group(0) @binding(5) var<storage, read> topo: array<u32>;
+@group(0) @binding(6) var<storage, read> restN: array<vec4f>;
+@group(0) @binding(7) var<storage, read_write> nodeN: array<vec4f>;
 
-fn nodePos(i: u32, origin: vec3f) -> vec3f { return nodes[(params.nodeOffset + i) * 3u].xyz + origin; }
+fn origin() -> vec3f {
+  let o = misc[params.vehicle];
+  return vec3f(bitcast<f32>(o.x), bitcast<f32>(o.y), bitcast<f32>(o.z));
+}
+fn nodePos(i: u32) -> vec3f { return nodes[(params.nodeOffset + i) * 3u].xyz; }
+
+@compute @workgroup_size(${WG})
+fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= params.nodeCount) { return; }
+  var acc = vec3f(0.0);
+  for (var k = topo[i]; k < topo[i + 1u]; k++) {
+    let t = params.trisAt + 4u * topo[params.listAt + k];
+    let a = nodePos(topo[t]);
+    acc += cross(nodePos(topo[t + 1u]) - a, nodePos(topo[t + 2u]) - a);
+  }
+  let l = length(acc);
+  nodeN[i] = vec4f(select(vec3f(0.0), acc / l, l > 1e-12), 0.0);
+}
 
 @compute @workgroup_size(${WG})
 fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= params.count) { return; }
   let bd = binds[i];
-  let o = misc[bd.vehicle];
-  let origin = vec3f(bitcast<f32>(o.x), bitcast<f32>(o.y), bitcast<f32>(o.z));
-  let p0 = nodePos(bd.n0, origin);
-  let e1 = nodePos(bd.n1, origin) - p0;
-  let e2 = nodePos(bd.n2, origin) - p0;
+  let org = origin();
+  let p0 = nodePos(bd.n0) + org;
+  let e1 = nodePos(bd.n1) - nodePos(bd.n0);
+  let e2 = nodePos(bd.n2) - nodePos(bd.n0);
   let c = cross(e1, e2);
   let cl = length(c);
   let n = select(vec3f(0.0, 1.0, 0.0), c / cl, cl > 1e-12);
   let l1 = length(e1);
   let torn = l1 > 2.5 * bd.r1 || length(e2) > 2.5 * bd.r2 || cl <= 1e-12;
   let pos = select(p0 + bd.a * e1 + bd.b * e2 + bd.h * n, p0, torn);
-  let t = e1 / max(l1, 1e-9);
-  let b = cross(n, t);
-  let nrm = normalize(bd.nt * t + bd.nb * b + bd.nn * n + vec3f(1e-9));
-  let k = (params.outOffset + i) * 2u;
+  var nrm: vec3f;
+  if (bd.smoothed == 1u) {
+    // Smooth: the rest normal moved by the binding nodes' normal changes.
+    let w0 = 1.0 - bd.a - bd.b;
+    nrm = vec3f(bd.rx, bd.ry, bd.rz)
+      + w0 * (nodeN[bd.n0].xyz - restN[bd.n0].xyz)
+      + bd.a * (nodeN[bd.n1].xyz - restN[bd.n1].xyz)
+      + bd.b * (nodeN[bd.n2].xyz - restN[bd.n2].xyz);
+  } else {
+    let t = e1 / max(l1, 1e-9);
+    let b = cross(n, t);
+    nrm = bd.nt * t + bd.nb * b + bd.nn * n;
+  }
+  nrm = normalize(nrm + vec3f(1e-9));
+  let k = i * 2u;
   outv[k] = vec4f(pos, select(0.0, 1.0, torn));
   outv[k + 1u] = vec4f(nrm, 0.0);
 }
@@ -177,7 +215,16 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   const { format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none' } = opts;
   const skinModule = device.createShaderModule({ label: 'showcase-skin', code: SKIN_WGSL });
   const drawModule = device.createShaderModule({ label: 'showcase-draw', code: DRAW_WGSL });
-  const skinPipe = device.createComputePipeline({ label: 'showcase-skin', layout: 'auto', compute: { module: skinModule, entryPoint: 'skin' } });
+  const skinLayout = device.createBindGroupLayout({
+    entries: [0, 1, 2, 3, 4, 5, 6, 7].map((binding) => ({
+      binding,
+      visibility: GPUShaderStage.COMPUTE,
+      buffer: { type: binding === 4 ? 'uniform' : binding === 3 || binding === 7 ? 'storage' : 'read-only-storage' },
+    })),
+  });
+  const pipeLayout = device.createPipelineLayout({ bindGroupLayouts: [skinLayout] });
+  const skinPipe = device.createComputePipeline({ label: 'showcase-skin', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'skin' } });
+  const normalPipe = device.createComputePipeline({ label: 'showcase-node-normals', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeNormals' } });
   const drawPipe = device.createRenderPipeline({
     label: 'showcase-draw',
     layout: 'auto',
@@ -220,15 +267,15 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   let miscBuf = null;
 
   const makeSkinBind = (car) => device.createBindGroup({
-    layout: skinPipe.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: nodesBuf } },
-      { binding: 1, resource: { buffer: miscBuf } },
-      { binding: 2, resource: { buffer: car.binds } },
-      { binding: 3, resource: { buffer: car.out } },
-      { binding: 4, resource: { buffer: car.params } },
-    ],
+    layout: skinLayout,
+    entries: [nodesBuf, miscBuf, car.binds, car.out, car.params, car.topo, car.restN, car.nodeN]
+      .map((buffer, binding) => ({ binding, resource: { buffer } })),
   });
+  const upload = (label, data, usage = GPUBufferUsage.STORAGE) => {
+    const b = device.createBuffer({ label, size: Math.max(16, Math.ceil(data.byteLength / 4) * 4), usage: usage | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(b, 0, data);
+    return b;
+  };
 
   return {
     /** The explicit solver's node and misc buffers (call again after a rebuild). */
@@ -244,11 +291,11 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      */
     addCar(visual, { nodeOffset = 0, vehicle = 0 } = {}) {
       const n = visual.vertexCount;
-      const bindData = new ArrayBuffer(n * 48);
+      const bindData = new ArrayBuffer(n * 64);
       const u = new Uint32Array(bindData);
       const f = new Float32Array(bindData);
       for (let i = 0; i < n; i++) {
-        const o = i * 12;
+        const o = i * 16;
         u[o] = visual.bindNodes[3 * i];
         u[o + 1] = visual.bindNodes[3 * i + 1];
         u[o + 2] = visual.bindNodes[3 * i + 2];
@@ -261,6 +308,10 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         f[o + 9] = visual.bindNormal[3 * i + 1];
         f[o + 10] = visual.bindNormal[3 * i + 2];
         f[o + 11] = visual.bindRest[2 * i + 1];
+        f[o + 12] = visual.normals[3 * i];
+        f[o + 13] = visual.normals[3 * i + 1];
+        f[o + 14] = visual.normals[3 * i + 2];
+        u[o + 15] = visual.smooth ? visual.smooth[i] : 0;
       }
       const binds = device.createBuffer({ label: 'showcase-binds', size: bindData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(binds, 0, bindData);
@@ -290,9 +341,24 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       device.queue.writeBuffer(attrs, 0, attr);
       const index = device.createBuffer({ label: 'showcase-index', size: ordered.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(index, 0, ordered);
-      const params = device.createBuffer({ label: 'showcase-params', size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      device.queue.writeBuffer(params, 0, new Uint32Array([n, nodeOffset, 0, 0]));
-      const car = { n, binds, out, attrs, index, params, opaqueCount: opaque.length, glassCount: glass.length, skinBind: null };
+      const params = device.createBuffer({ label: 'showcase-params', size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const nodeCount = visual.nodeCount;
+      const nt = visual.normalTris, start = visual.nodeTriStart, list = visual.nodeTriList;
+      const listAt = start.length, trisAt = listAt + list.length;
+      const topo = new Uint32Array(trisAt + (nt.length / 3) * 4);
+      topo.set(start, 0);
+      topo.set(list, listAt);
+      for (let t = 0; t < nt.length / 3; t++) topo.set(nt.subarray(3 * t, 3 * t + 3), trisAt + 4 * t);
+      device.queue.writeBuffer(params, 0, new Uint32Array([n, nodeOffset, nodeCount, vehicle, listAt, trisAt, 0, 0]));
+      const rn = new Float32Array(nodeCount * 4);
+      for (let i = 0; i < nodeCount; i++) rn.set(visual.nodeRestNormal.subarray(3 * i, 3 * i + 3), 4 * i);
+      const car = {
+        n, nodeCount, vehicle, binds, out, attrs, index, params, opaqueCount: opaque.length, glassCount: glass.length, skinBind: null,
+        listAt, trisAt,
+        topo: upload('showcase-topology', topo),
+        restN: upload('showcase-rest-normals', rn),
+        nodeN: device.createBuffer({ label: 'showcase-node-normals', size: nodeCount * 16, usage: GPUBufferUsage.STORAGE }),
+      };
       if (nodesBuf) car.skinBind = makeSkinBind(car);
       const id = nextId++;
       cars.set(id, car);
@@ -302,21 +368,23 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     /** Point a car at another first node (same vehicle index; re-add to change it). */
     setNodeOffset(id, nodeOffset) {
       const car = cars.get(id);
-      if (car) device.queue.writeBuffer(car.params, 0, new Uint32Array([car.n, nodeOffset, 0, 0]));
+      if (car) device.queue.writeBuffer(car.params, 0, new Uint32Array([car.n, nodeOffset, car.nodeCount, car.vehicle, car.listAt, car.trisAt, 0, 0]));
     },
     removeCar(id) {
       const car = cars.get(id);
       if (!car) return;
-      for (const b of [car.binds, car.out, car.attrs, car.index, car.params]) b.destroy();
+      for (const b of [car.binds, car.out, car.attrs, car.index, car.params, car.topo, car.restN, car.nodeN]) b.destroy();
       cars.delete(id);
     },
     /** Deform every car from the solver's current node positions. */
     update(encoder) {
       if (!nodesBuf) return;
       const pass = encoder.beginComputePass({ label: 'showcase-skin' });
-      pass.setPipeline(skinPipe);
       for (const car of cars.values()) {
         pass.setBindGroup(0, car.skinBind);
+        pass.setPipeline(normalPipe);
+        pass.dispatchWorkgroups(Math.ceil(car.nodeCount / WG));
+        pass.setPipeline(skinPipe);
         pass.dispatchWorkgroups(Math.ceil(car.n / WG));
       }
       pass.end();

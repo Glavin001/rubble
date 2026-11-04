@@ -567,7 +567,14 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     };
     let fmat = |sk: &Skeleton, a: u32, b: u32| -> Material {
         let z = 0.5 * (sk.pos(a).z + sk.pos(b).z);
-        frame_mat.scaled(def.crumple.eval(z))
+        let m = frame_mat.scaled(def.crumple.eval(z));
+        // Into a closed door: it carries load until torn (a fifth of the frame's
+        // thresholds), so a hard enough pull or hit takes the door off.
+        if sk.nodes[a as usize].part != sk.nodes[b as usize].part {
+            m.scaled(0.2)
+        } else {
+            m
+        }
     };
     for (fi, ring) in hard.iter().enumerate() {
         let n = ring.len();

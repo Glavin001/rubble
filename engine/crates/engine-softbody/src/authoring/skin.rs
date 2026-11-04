@@ -91,6 +91,18 @@ pub struct ShowcaseVisual {
     pub bind_rest: Vec<[f32; 2]>,
     /// 1 on a panel's edge at a seam (the renderer draws a thin groove there).
     pub seam: Vec<f32>,
+    /// 1 when the vertex's normal follows the skin's node normals (smooth
+    /// shading across the binding triangles): n = normalize(n_rest + Σ wᵢ (Nᵢ − Rᵢ))
+    /// with wᵢ the barycentric weights (1 − α − β, α, β) of nodes n₀ n₁ n₂, Nᵢ a
+    /// node's normal now (the normalised sum of its skin triangles' cross
+    /// products) and Rᵢ at rest.
+    pub smooth: Vec<u8>,
+    /// The skin triangles node normals come from, and per node (CSR over the
+    /// solver's nodes) the triangles it is in, and its rest normal.
+    pub normal_tris: Vec<[u32; 3]>,
+    pub node_tri_start: Vec<u32>,
+    pub node_tri_list: Vec<u32>,
+    pub node_rest_normal: Vec<[f32; 3]>,
     /// The solver's node count for this vehicle (tyre nodes included).
     pub node_count: u32,
 }
@@ -403,8 +415,8 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     let mut idx: Vec<u32> = Vec::new();
     // Body: rings of the profile section, sampled by arc length.
     let (z0, z1) = prof.loft_range();
-    let nz = ((z1 - z0) / 0.025).ceil() as usize;
-    let nv = 104; // segments per half section
+    let nz = ((z1 - z0) / 0.02).ceil() as usize;
+    let nv = 128; // segments per half section
     let section = |z: f32| -> Vec<(Vec3, Seg)> {
         let half = prof.half_section(z);
         let mut acc = vec![0.0f32];
@@ -432,7 +444,7 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         out
     };
     // Full rings: the right half, then the left mirrored back down.
-    let grid: Vec<Vec<(Vec3, Seg)>> = (0..=nz)
+    let mut grid: Vec<Vec<(Vec3, Seg)>> = (0..=nz)
         .map(|k| {
             let r = section(z0 + (z1 - z0) * k as f32 / nz as f32);
             let mut v = r.clone();
@@ -443,6 +455,66 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         })
         .collect();
     let cols = grid[0].len();
+    // Boundaries follow the definition's curves, not the sampling grid: grid
+    // points within half a cell of a panel or window outline (side view) or of a
+    // top-surface station move onto it.
+    {
+        use super::vehicle::Region;
+        let mut outlines: Vec<Outline> = look.side_glass.clone();
+        let mut zlines: Vec<f32> = vec![
+            look.windscreen[0],
+            look.windscreen[1],
+            look.backlight[0],
+            look.backlight[1],
+        ];
+        let mut collect = |r: &Region, outlines: &mut Vec<Outline>, zlines: &mut Vec<f32>| {
+            let mut stack = vec![r.clone()];
+            while let Some(r) = stack.pop() {
+                match r {
+                    Region::Side(o) => outlines.push(o),
+                    Region::Box { y, z, .. } => {
+                        outlines.push(Outline::rect(z[0], y[0], z[1], y[1]))
+                    }
+                    Region::Top { z0, z1 } => zlines.extend([z0, z1]),
+                    Region::Any(v) => stack.extend(v),
+                    _ => {}
+                }
+            }
+        };
+        for p in &def.panels {
+            collect(&p.region, &mut outlines, &mut zlines);
+        }
+        let cell = 0.6 * (z1 - z0) / nz as f32;
+        for ring in grid.iter_mut() {
+            for (p, seg) in ring.iter_mut() {
+                match seg {
+                    Seg::Lower | Seg::Side | Seg::Upper => {
+                        let best = outlines
+                            .iter()
+                            .map(|o| o.nearest(p.z, p.y))
+                            .min_by(|a, b| a.1.total_cmp(&b.1));
+                        if let Some((q, d)) = best {
+                            if d < cell {
+                                p.z = q[0];
+                                p.y = q[1];
+                            }
+                        }
+                    }
+                    Seg::Top => {
+                        if let Some(&zl) = zlines
+                            .iter()
+                            .min_by(|a, b| (*a - p.z).abs().total_cmp(&(*b - p.z).abs()))
+                        {
+                            if (zl - p.z).abs() < cell {
+                                p.z = zl;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
     let at = |k: usize, i: usize| grid[k][i % cols];
     let normal_at = |k: usize, i: usize| -> Vec3 {
         let kp = (k + 1).min(nz);
@@ -467,10 +539,17 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             *slot = part_id(c, at(k, i).1);
         }
     }
-    let mut vert_of: HashMap<(usize, usize, u16), u32> = HashMap::new();
+    let mut vert_of: HashMap<(usize, usize, u16, u8), u32> = HashMap::new();
     for k in 0..nz {
         for i in 0..cols {
             let part = quad_part[k][i];
+            // The quad's material from its centre: vertices are duplicated across
+            // material edges too, so windows, lights and trim have crisp edges.
+            let qm = {
+                let c = (at(k, i).0 + at(k + 1, i).0 + at(k, i + 1).0 + at(k + 1, i + 1).0) / 4.0;
+                let n = (normal_at(k, i) + normal_at(k + 1, (i + 1) % cols)).normalize_or_zero();
+                material_of(c, n, at(k, i).1)
+            };
             let corners = [
                 (k, i),
                 (k + 1, i),
@@ -479,7 +558,7 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             ];
             let mut ids = [0u32; 4];
             for (c, &(kk, ii)) in corners.iter().enumerate() {
-                ids[c] = *vert_of.entry((kk, ii, part)).or_insert_with(|| {
+                ids[c] = *vert_of.entry((kk, ii, part, qm)).or_insert_with(|| {
                     let (p, seg) = at(kk, ii);
                     let n = normal_at(kk, ii);
                     let around = [
@@ -492,7 +571,8 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                         .iter()
                         .filter(|(a, _)| *a < nz)
                         .any(|&(a, b)| quad_part[a][b] != part);
-                    let m = material_of(p, n, seg);
+                    let _ = seg;
+                    let m = qm;
                     let mut q = p;
                     if seam && m != mat::UNDERBODY {
                         q -= n * look.gap;
@@ -897,6 +977,7 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 out.material.push(v.mat);
                 out.colors.push(color(v.mat, paint));
                 out.seam.push(0.0);
+                out.smooth.push(0);
                 continue;
             }
         }
@@ -920,8 +1001,35 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         out.material.push(v.mat);
         out.colors.push(color(v.mat, paint));
         out.seam.push(v.seam);
+        out.smooth.push(1);
     }
     out.indices = idx;
+    // Node normals for smooth shading.
+    out.normal_tris = sk.skin.clone();
+    let nn = node_pos.len();
+    let mut count = vec![0u32; nn + 1];
+    for t in &out.normal_tris {
+        for &i in t {
+            count[i as usize + 1] += 1;
+        }
+    }
+    for i in 0..nn {
+        count[i + 1] += count[i];
+    }
+    let mut fill = count.clone();
+    let mut list = vec![0u32; *count.last().unwrap() as usize];
+    for (ti, t) in out.normal_tris.iter().enumerate() {
+        for &i in t {
+            list[fill[i as usize] as usize] = ti as u32;
+            fill[i as usize] += 1;
+        }
+    }
+    out.node_tri_start = count;
+    out.node_tri_list = list;
+    out.node_rest_normal = node_normals(&out, &node_pos)
+        .iter()
+        .map(|n| n.to_array())
+        .collect();
     // Wheels: tyre and rim, bound to the tyre's rings.
     for tyre in &sim.tyres {
         wheel(&mut out, tyre, &node_pos, built.shift);
@@ -1014,6 +1122,7 @@ fn wheel(out: &mut ShowcaseVisual, tyre: &Tyre, node_pos: &[Vec3], shift: Vec3) 
         out.material.push(m);
         out.colors.push(color(m, [0.0; 3]));
         out.seam.push(0.0);
+        out.smooth.push(0);
         (out.positions.len() - 1) as u32
     };
     let mut grid: Vec<Vec<u32>> = Vec::new();
@@ -1093,9 +1202,30 @@ fn wheel(out: &mut ShowcaseVisual, tyre: &Tyre, node_pos: &[Vec3], shift: Vec3) 
     }
 }
 
+/// Per solver node its skin normal (zero off the skin).
+pub fn node_normals(v: &ShowcaseVisual, nodes: &[Vec3]) -> Vec<Vec3> {
+    let mut out = vec![Vec3::ZERO; nodes.len()];
+    for i in 0..nodes.len().min(v.node_tri_start.len().saturating_sub(1)) {
+        let mut acc = Vec3::ZERO;
+        for &ti in &v.node_tri_list[v.node_tri_start[i] as usize..v.node_tri_start[i + 1] as usize]
+        {
+            let t = v.normal_tris[ti as usize];
+            let (a, b, c) = (
+                nodes[t[0] as usize],
+                nodes[t[1] as usize],
+                nodes[t[2] as usize],
+            );
+            acc += (b - a).cross(c - a);
+        }
+        out[i] = acc.normalize_or_zero();
+    }
+    out
+}
+
 /// Deform the rest mesh by node positions (the solver's order): the GPU
 /// shader's formula on the CPU, for tests and offline renders.
 pub fn deform(v: &ShowcaseVisual, nodes: &[Vec3]) -> (Vec<Vec3>, Vec<Vec3>) {
+    let nn = node_normals(v, nodes);
     let mut pos = Vec::with_capacity(v.positions.len());
     let mut nrm = Vec::with_capacity(v.positions.len());
     for i in 0..v.positions.len() {
@@ -1115,6 +1245,16 @@ pub fn deform(v: &ShowcaseVisual, nodes: &[Vec3]) -> (Vec<Vec3>, Vec<Vec3>) {
         pos.push(p0 + e1 * al + e2 * be + n * h);
         let t = e1.normalize_or_zero();
         let bb = n.cross(t);
+        if v.smooth[i] == 1 {
+            let w = [1.0 - al - be, al, be];
+            let mut d = Vec3::from_array(v.normals[i]);
+            for (k, &node) in [a, b, c].iter().enumerate() {
+                d += w[k]
+                    * (nn[node as usize] - Vec3::from_array(v.node_rest_normal[node as usize]));
+            }
+            nrm.push(d.normalize_or_zero());
+            continue;
+        }
         let [x, y, z] = v.bind_normal[i];
         nrm.push((t * x + bb * y + n * z).normalize_or_zero());
     }

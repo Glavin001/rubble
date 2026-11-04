@@ -70,7 +70,9 @@ pub fn showcase_car_truck(params: JsValue) -> Result<String, JsValue> {
 /// vertex, tyre nodes included), bindCoords (Float32Array, α β h per vertex),
 /// bindNormal (Float32Array, the rest normal in the triangle frame), bindRest
 /// (Float32Array, the triangle's rest |e₁| |e₂|), seam (Float32Array, 1 along
-/// panel gaps), nodeCount, vertexCount }`.
+/// panel gaps), smooth (Uint8Array), normalTris, nodeTriStart, nodeTriList
+/// (Uint32Array), nodeRestNormal (Float32Array) (smooth shading from node
+/// normals; see `ShowcaseVisual::smooth`), nodeCount, vertexCount }`.
 /// `showcase-car-render.mjs` documents the binding.
 #[wasm_bindgen(js_name = showcaseCar)]
 pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
@@ -142,6 +144,28 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
         &f32s(v.bind_rest.iter().flatten().copied()),
     );
     set(&vis, "seam", &f32s(v.seam.iter().copied()));
+    set(
+        &vis,
+        "smooth",
+        &Uint8Array::from(v.smooth.as_slice()).into(),
+    );
+    let nt: Vec<u32> = v.normal_tris.iter().flatten().copied().collect();
+    set(&vis, "normalTris", &Uint32Array::from(nt.as_slice()).into());
+    set(
+        &vis,
+        "nodeTriStart",
+        &Uint32Array::from(v.node_tri_start.as_slice()).into(),
+    );
+    set(
+        &vis,
+        "nodeTriList",
+        &Uint32Array::from(v.node_tri_list.as_slice()).into(),
+    );
+    set(
+        &vis,
+        "nodeRestNormal",
+        &f32s(v.node_rest_normal.iter().flatten().copied()),
+    );
     set(&vis, "nodeCount", &JsValue::from(v.node_count));
     set(
         &vis,

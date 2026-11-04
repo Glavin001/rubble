@@ -137,7 +137,8 @@ fn left_and_right_mirror() {
         .position(|p| p == "battery")
         .unwrap() as u16;
     for (i, &p) in pos.iter().enumerate() {
-        if b.skeleton.nodes[i].part == battery {
+        // The battery and the steering column are on the left, as in the real car.
+        if b.skeleton.nodes[i].part == battery || b.groups["column"].contains(&(i as u32)) {
             continue;
         }
         let m = Vec3::new(-p.x, p.y, p.z);
@@ -590,4 +591,89 @@ fn pole_sweep_never_passes_through() {
         fails.len()
     );
     assert!(fails.is_empty());
+}
+
+/// Extreme destruction: 120 km/h into a wall. The front is destroyed, panels
+/// tear, glass breaks; nothing explodes.
+#[test]
+fn f_wall_at_120_kmh_destroys_the_front_without_exploding() {
+    let b = built(Resolution::Low);
+    let v = 120.0 / 3.6;
+    let mut s = spawn(&b, Vec3::new(0.0, 0.0, v), 0.0);
+    let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+    s.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+        Vec3::new(3.0, 2.0, 1.0),
+    ));
+    let len0 = front - s.positions().iter().map(|p| p.z).fold(f32::MAX, f32::min);
+    run(&mut s, 1.0);
+    let p = s.positions();
+    let len1 = p.iter().map(|q| q.z).fold(f32::MIN, f32::max)
+        - p.iter().map(|q| q.z).fold(f32::MAX, f32::min);
+    let (broken, bent) = s.damage();
+    let vmax = s.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max);
+    eprintln!(
+        "(f) wall 120 km/h: span along the car {len0:.2} → {len1:.2} m, broken {broken}, bent {bent}, free nodes {}, max node speed {vmax:.1} m/s, span {:.2} m",
+        free_nodes(&s),
+        span(&s)
+    );
+    assert!(finite(&s));
+    assert!(
+        broken > 500,
+        "a 120 km/h crash should tear the car ({broken})"
+    );
+    // Torn-off parts may fly; nothing faster than the crash itself.
+    assert!(vmax < 40.0, "a node at {vmax} m/s");
+}
+
+/// A grab pull (a winch on the front left door, 60 kN outward) tears the door
+/// off its hinges and latch.
+#[test]
+fn g_pulling_a_door_tears_it_off() {
+    let b = built(Resolution::Low);
+    let mut s = spawn(&b, Vec3::ZERO, 0.0);
+    run(&mut s, 0.5);
+    let part = b
+        .skeleton
+        .parts
+        .iter()
+        .position(|p| p == "door_f_l")
+        .unwrap() as u16;
+    let door: Vec<usize> = (0..b.skeleton.nodes.len())
+        .filter(|&i| b.skeleton.nodes[i].part == part)
+        .collect();
+    let body = |s: &ExplicitBeams| group_mean(s, &b, &["pillar_b", "pillar_b_r", "sill", "sill_r"]);
+    let door_mean =
+        |s: &ExplicitBeams| door.iter().map(|&i| s.nodes[i].pos).sum::<Vec3>() / door.len() as f32;
+    let d0 = door_mean(&s) - body(&s);
+    let per = 60_000.0 / door.len() as f32;
+    for _ in 0..(1.5 * 2000.0) as usize {
+        for &i in &door {
+            s.nodes[i].force.x += per;
+        }
+        s.step();
+    }
+    // Let it go and settle.
+    run(&mut s, 0.5);
+    let d1 = door_mean(&s) - body(&s);
+    // Every beam from the door to the rest of the car.
+    let (mut joints, mut torn) = (0, 0);
+    for bm in &s.beams {
+        let (a, c) = (bm.a as usize, bm.b as usize);
+        if a < b.skeleton.nodes.len() && c < b.skeleton.nodes.len() {
+            let (pa, pc) = (b.skeleton.nodes[a].part, b.skeleton.nodes[c].part);
+            if (pa == part) != (pc == part) {
+                joints += 1;
+                torn += bm.broken as usize;
+            }
+        }
+    }
+    eprintln!(
+        "(g) door pull 60 kN: door moved {:.2} m from the body, {torn} of {joints} joint beams torn, broken {}",
+        (d1 - d0).length(),
+        s.damage().0
+    );
+    assert!(finite(&s));
+    assert!((d1 - d0).length() > 0.5, "the door stayed on");
+    let _ = (torn, joints);
 }

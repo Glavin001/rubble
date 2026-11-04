@@ -29,7 +29,8 @@ import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
 
 const qs = new URLSearchParams(location.search);
 const hud = document.getElementById('hud');
-const fail = (e) => { document.getElementById('err').textContent = String(e?.stack ?? e); window.__state = { error: String(e) }; };
+let failed = false;
+const fail = (e) => { if (failed) return; failed = true; document.getElementById('err').textContent = String(e?.stack ?? e); window.__state = { error: String(e) }; };
 window.__state = { ready: false };
 
 try {
@@ -71,7 +72,7 @@ try {
 
   // Ground and the scene's static shapes: flat-shaded boxes and cylinders.
   const SCENE_WGSL = `
-    struct F { vp: mat4x4f, eye: vec4f, light: vec4f };
+    struct F { vp: mat4x4f, eye: vec4f, light: vec4f, shadow: vec4f };
     @group(0) @binding(0) var<uniform> f: F;
     struct O { @builtin(position) p: vec4f, @location(0) w: vec3f, @location(1) n: vec3f, @location(2) c: vec3f };
     @vertex fn vs(@location(0) p: vec3f, @location(1) n: vec3f, @location(2) c: vec3f) -> O {
@@ -84,6 +85,11 @@ try {
         let line = select(1.0, 0.82, g.x > 0.49 || g.y > 0.49);
         let d = length(i.w.xz - f.eye.xz);
         c = mix(c * line, vec3f(0.55, 0.6, 0.66), clamp(d / 120.0, 0.0, 1.0));
+        // A soft contact shadow under the car (f.light.w: its heading).
+        let q = i.w.xz - f.shadow.xy;
+        let cs = cos(f.shadow.z); let sn = sin(f.shadow.z);
+        let lq = vec2f(cs * q.x - sn * q.y, sn * q.x + cs * q.y) / vec2f(1.05, 2.5);
+        c *= 1.0 - 0.6 * exp(-pow(length(lq), 4.0));
       }
       let l = max(dot(normalize(i.n), normalize(f.light.xyz)), 0.0);
       let col = c * (0.35 + 0.75 * l);
@@ -123,7 +129,7 @@ try {
   }
   const sceneBuf = device.createBuffer({ size: verts.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(sceneBuf, 0, new Float32Array(verts));
-  const frameBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const frameBuf = device.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const sceneBind = device.createBindGroup({ layout: scenePipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
 
   // Camera: orbits the first car's reference node.
@@ -169,7 +175,7 @@ try {
     const eye = [target[0] + dist * Math.sin(yaw) * Math.cos(pitch), target[1] + dist * Math.sin(pitch), target[2] + dist * Math.cos(yaw) * Math.cos(pitch)];
     const vp = mat.mul(mat.persp(0.75, aspect, 0.05, 500), mat.look(eye, target));
     const light = [0.45, 0.8, 0.4];
-    const fr = new Float32Array(24); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20);
+    const fr = new Float32Array(28); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20); fr.set([target[0], target[2], 0, 0], 24);
     device.queue.writeBuffer(frameBuf, 0, fr);
     const pass = enc.beginRenderPass({
       colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0.55, g: 0.63, b: 0.74, a: 1 } }],
