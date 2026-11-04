@@ -1499,6 +1499,18 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     groups.insert("suspension".into(), wheel_nodes);
     // Named masses.
     let mut named = 0.0;
+    // Each node's stability floor at the built stiffnesses (what its beams
+    // need, whatever it carries): a named mass fills the frame nodes' unmet
+    // floors first, so it steadies the stiffness that is there instead of
+    // weighing on nodes that already carry enough (mass the step budget
+    // would otherwise pay twice for).
+    let need: Vec<f32> = {
+        let mut z = sk.clone();
+        for n in &mut z.nodes {
+            n.fixed = 0.0;
+        }
+        z.floors(1.0)
+    };
     for m in &def.masses {
         let (lo, hi) = (Vec3::from_array(m.lo), Vec3::from_array(m.hi));
         let nodes: Vec<u32> = (0..sk.nodes.len() as u32)
@@ -1518,7 +1530,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .filter(|&i| sk.nodes[i as usize].primary)
             .collect();
         let nodes = if frame.is_empty() { nodes } else { frame };
-        sk.add_mass_by_stiffness(&nodes, m.kg);
+        sk.add_mass_by_need(&nodes, m.kg, &need);
         named += m.kg;
     }
     let blocks: f32 =

@@ -438,7 +438,7 @@ fn c_side_pole_at_32_kmh_intrudes_the_door_and_does_not_pass() {
     let lateral = Vec3::Y.cross(dir);
     let offset = zb * lateral.z;
     let s0 = spawn(&b, Vec3::ZERO, 0.0);
-    let door: Vec<u32> = b
+    let door: Vec<usize> = b
         .skeleton
         .nodes
         .iter()
@@ -447,7 +447,7 @@ fn c_side_pole_at_32_kmh_intrudes_the_door_and_does_not_pass() {
             let name = &b.skeleton.parts[n.part as usize];
             name.starts_with("door_") && name.ends_with("_l")
         })
-        .map(|(i, _)| i as u32)
+        .map(|(i, _)| i)
         .collect();
     // C_KMH: the speed (32 by default; nearby speeds for medians).
     let kmh: f32 = std::env::var("C_KMH")
@@ -455,31 +455,56 @@ fn c_side_pole_at_32_kmh_intrudes_the_door_and_does_not_pass() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(32.0);
     let (through, s, _) = pole_run(&b, kmh, dir, offset, false, 1.0);
-    // Intrusion: the door's deepest node relative to the cabin's centre line.
-    let centre0 = group_mean(&s0, &b, &["tunnel"]).x;
-    let centre1 = group_mean(&s, &b, &["tunnel"]).x;
+    // Intrusion: the deepest door node near the pole, across the car in the
+    // far side's frame (the right sill along the car, the tunnel beside it).
+    // The car spins 55-75° round the pole in the second after the hit, so
+    // world x would measure the spin, not the door.
+    let far = |st: &ExplicitBeams| {
+        let g = &b.groups["sill_r"];
+        let zs: Vec<f32> = g
+            .iter()
+            .map(|&i| b.skeleton.nodes[i as usize].p.z)
+            .collect();
+        let zm = zs.iter().sum::<f32>() / zs.len() as f32;
+        let half = |front: bool| {
+            let v: Vec<Vec3> = g
+                .iter()
+                .zip(&zs)
+                .filter(|(_, &z)| (z > zm) == front)
+                .map(|(&i, _)| st.nodes[i as usize].pos)
+                .collect();
+            v.iter().sum::<Vec3>() / v.len() as f32
+        };
+        let t = group_mean(st, &b, &["tunnel"]);
+        let (o, x) = (half(false), (half(true) - half(false)).normalize());
+        let up = x.cross(t - o).normalize();
+        (o, up.cross(x))
+    };
+    let (o0, a0) = far(&s0);
+    let (o1, a1) = far(&s);
+    let inward = |i: usize| (s0.nodes[i].pos - o0).dot(a0) - (s.nodes[i].pos - o1).dot(a1);
     let near = |q: Vec3| (q.z - zb).abs() < 0.4 && q.y > 0.3 && q.y < 1.1;
-    let x0 = door
+    let intrusion = door
         .iter()
-        .map(|&i| s0.nodes[i as usize].pos)
-        .filter(|&q| near(q))
-        .map(|q| q.x - centre0)
+        .copied()
+        .filter(|&i| near(s0.nodes[i].pos))
+        .map(inward)
         .fold(f32::MIN, f32::max);
-    let x1 = door
+    let pillar = [&b.groups["pillar_b"]]
         .iter()
-        .map(|&i| (s0.nodes[i as usize].pos, s.nodes[i as usize].pos))
-        .filter(|&(q0, _)| near(q0))
-        .map(|(_, q)| q.x - centre1)
+        .flat_map(|g| g.iter())
+        .map(|&i| inward(i as usize))
         .fold(f32::MIN, f32::max);
-    let intrusion = x0 - x1;
+    let spin = a0.with_y(0.0).angle_between(a1.with_y(0.0)).to_degrees();
     eprintln!(
-        "(c) side pole 32 km/h at the B-pillar: door intrusion {intrusion:.3} m, passed through {through}, broken {}, span {:.2} m",
+        "(c) side pole {kmh} km/h at the B-pillar: door intrusion {intrusion:.3} m (B-pillar {pillar:.3} m), the car turned {spin:.0}°, passed through {through}, broken {}, span {:.2} m",
         s.damage().0,
         span(&s)
     );
     assert!(finite(&s));
     assert!(!through, "the car passed through the pole");
-    assert!(intrusion > 0.08, "the door barely moved ({intrusion})");
+    assert!(intrusion > 0.05, "the door barely moved ({intrusion})");
+    assert!(intrusion < 0.3, "the door intruded {intrusion} m");
 }
 
 #[test]
@@ -1546,7 +1571,15 @@ fn m_wall_56_panels_stay_on() {
     for drag in [true, false] {
         let b = built(Resolution::Medium);
         let sk = &b.skeleton;
-        let mut s = spawn(&b, Vec3::new(0.0, 0.0, 56.0 / 3.6), 0.0);
+        let mut s = spawn(&b, Vec3::new(
+            0.0,
+            0.0,
+            std::env::var("M_KMH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(56.0f32)
+                / 3.6,
+        ), 0.0);
         s.settings.drag = drag;
         let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
         s.boxes.push(StaticBox::centered(
@@ -1569,7 +1602,39 @@ fn m_wall_56_panels_stay_on() {
             .iter()
             .fold((f32::MAX, f32::MIN), |(a, c), p| (a.min(p.y), c.max(p.y)));
         let mut worst = (0.0f32, 0usize);
-        for _ in 0..(1.5 * 60.0) as usize {
+        // The boot lid's edges: each lid node beside the body (a seam beam
+        // to the quarters, the parcel shelf or the rear panel) and those body
+        // nodes. How far the edge lifts off them (up in the cabin's frame).
+        let body = sk.parts.iter().position(|p| p == "body").unwrap() as u16;
+        let mut edge: Vec<(usize, Vec<usize>)> = Vec::new();
+        for &i in panels.iter().filter(|&&i| name(i) == "bootlid") {
+            let nb: Vec<usize> = s
+                .beams
+                .iter()
+                .filter_map(|bm| {
+                    let (a, c) = (bm.a as usize, bm.b as usize);
+                    let o = if a == i {
+                        c
+                    } else if c == i {
+                        a
+                    } else {
+                        return None;
+                    };
+                    (o < n && sk.nodes[o].part == body).then_some(o)
+                })
+                .collect();
+            if !nb.is_empty() {
+                edge.push((i, nb));
+            }
+        }
+        if std::env::var("M_EDGE").is_ok() {
+            for (i, nb) in &edge {
+                eprintln!("  lid {i} {:?} -> {:?}", sk.nodes[*i].p, nb.iter().map(|&j| (j, sk.nodes[j].p, sk.nodes[j].primary)).collect::<Vec<_>>());
+            }
+        }
+        let mut lift = (0.0f32, 0usize, 0usize);
+        let mut open = (0.0f32, 0usize, 0usize);
+        for f in 0..(1.5 * 60.0) as usize {
             s.frame();
             let l = cabin_local(&s, &b);
             for &i in &panels {
@@ -1578,7 +1643,34 @@ fn m_wall_56_panels_stay_on() {
                     worst = (out, i);
                 }
             }
+            for (i, nb) in &edge {
+                let rel =
+                    |l: &[Vec3]| l[*i] - nb.iter().map(|&j| l[j]).sum::<Vec3>() / nb.len() as f32;
+                // The frame's third axis is down.
+                let up = -(rel(&l) - rel(&l0)).z;
+                if up > lift.0 {
+                    lift = (up, *i, f);
+                }
+                let gap = rel(&l).length() - rel(&l0).length();
+                if gap > open.0 {
+                    open = (gap, *i, f);
+                }
+            }
         }
+        eprintln!(
+            "(m) drag {drag}: boot lid edge lifts {:.0} mm off the body (node {} at {:?}, frame {})",
+            lift.0 * 1e3,
+            lift.1,
+            sk.nodes[lift.1].p,
+            lift.2
+        );
+        eprintln!(
+            "(m) drag {drag}: boot lid seam opens {:.0} mm (node {} at {:?}, frame {})",
+            open.0 * 1e3,
+            open.1,
+            sk.nodes[open.1].p,
+            open.2
+        );
         let held = |i: u32| {
             let p = name(i as usize);
             p.starts_with("bonnet") || p.starts_with("fender")
@@ -1609,5 +1701,6 @@ fn m_wall_56_panels_stay_on() {
         assert!(finite(&s));
         assert!(worst.0 < 0.15, "a panel splayed {} m out", worst.0);
         assert_eq!(torn, 0, "bonnet or fender joints tore: {torn_by:?}");
+        assert!(lift.0 < 0.02, "the boot lid's edge lifted {} m", lift.0);
     }
 }

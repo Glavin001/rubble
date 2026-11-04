@@ -327,6 +327,26 @@ impl Skeleton {
         }
     }
 
+    /// Spread `kg` over `nodes` to fill their unmet stability floors first
+    /// (`need` per node, less what it already carries), the rest in
+    /// proportion to their beams' stiffness.
+    pub fn add_mass_by_need(&mut self, nodes: &[u32], kg: f32, need: &[f32]) {
+        let gap: Vec<f32> = nodes
+            .iter()
+            .map(|&i| (need[i as usize] - self.nodes[i as usize].fixed).max(0.0))
+            .collect();
+        let total: f32 = gap.iter().sum();
+        let fill = kg.min(total);
+        if total > 0.0 {
+            for (&i, &g) in nodes.iter().zip(&gap) {
+                self.nodes[i as usize].fixed += fill * g / total;
+            }
+        }
+        if kg > fill {
+            self.add_mass_by_stiffness(nodes, kg - fill);
+        }
+    }
+
     /// Per node the sum of its beams' stiffness and damping (with shocks and the
     /// tyre spokes on axle nodes).
     pub fn node_rates(&self) -> (Vec<f32>, Vec<f32>) {

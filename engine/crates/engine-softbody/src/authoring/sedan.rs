@@ -204,6 +204,16 @@ pub fn door_joint() -> Joint {
 /// (N): they fold with the crumple zone.
 pub const END_YIELD: f32 = 2.0e4;
 
+/// The front rails' threshold scale at their cabin end (under the floor at
+/// the B-pillar), graded to 0.5 at the bumper.
+pub const RAIL_CABIN: f32 = 1.0;
+
+/// The crush grade's thresholds against `Grades::default`'s: the rails' and
+/// aprons' plateau. What the front still carries when the car stops is what
+/// the cell holds elastically and gives back as rebound (≈ F²/2k), so the
+/// plateau is as low as the crush length allows (0.75 m at 56 km/h).
+pub const CRUSH_PLATEAU: f32 = 0.65;
+
 /// The main load paths' (rails, sills) section against their grade's k·L.
 pub const RAIL_STIFF: f32 = 1.4;
 
@@ -367,7 +377,7 @@ pub fn sedan() -> VehicleDef {
             ]),
             "plastic",
             Joint::Bolt {
-                scale: 0.8,
+                scale: 1.0,
                 group: false,
             },
             false,
@@ -538,7 +548,7 @@ pub fn sedan() -> VehicleDef {
                 0.24,
                 UP,
                 "crush",
-                [1.5, 0.5],
+                [RAIL_CABIN, 0.5],
                 3,
                 true,
                 1,
@@ -1005,10 +1015,13 @@ pub fn sedan() -> VehicleDef {
             mount_scale: 1.0,
             bear: 0.5,
         },
-        // Seat frames (the seats ride them).
-        seat_frame("seat_fl", [0.38, 0.40, 2.62], [0.24, 0.07, 0.24], 15.0),
-        seat_frame("seat_fr", [-0.38, 0.40, 2.62], [0.24, 0.07, 0.24], 15.0),
-        seat_frame("seat_rear", [0.0, 0.40, 1.74], [0.62, 0.07, 0.22], 25.0),
+        // Seat frames (the seats ride them): as heavy as their own lattice
+        // needs; the rest of the seats' mass is a named mass on the floor
+        // (`front_seats`, `rear_seat`), where it steadies the structure
+        // instead of springing on its mounts in a crash.
+        seat_frame("seat_fl", [0.38, 0.40, 2.62], [0.24, 0.07, 0.24], 7.5),
+        seat_frame("seat_fr", [-0.38, 0.40, 2.62], [0.24, 0.07, 0.24], 7.5),
+        seat_frame("seat_rear", [0.0, 0.40, 1.74], [0.62, 0.07, 0.22], 12.5),
         BlockSpec {
             name: "battery".into(),
             centre: [0.56, 0.62, 4.24],
@@ -1031,24 +1044,28 @@ pub fn sedan() -> VehicleDef {
         grade: "alu".into(),
         mount_scale: 0.4,
     }];
+    // Each fills the stability floors of the frame nodes in its box first
+    // (`Skeleton::add_mass_by_need`): the boxes span the structure that
+    // carries it (seats and occupants: the floor members, sills, tunnel and
+    // the pillars' feet, where the belts anchor; trim: the whole cabin).
     let masses = vec![
         NamedMass {
             name: "driver".into(),
             kg: 75.0,
-            lo: [0.10, 0.12, 2.35],
-            hi: [0.80, 0.45, 3.0],
+            lo: [0.12, 0.12, 2.24],
+            hi: [0.85, 1.0, 3.05],
         },
         NamedMass {
             name: "front_seats".into(),
-            kg: 20.0,
-            lo: [-0.8, 0.12, 2.35],
-            hi: [0.8, 0.45, 3.0],
+            kg: 35.0,
+            lo: [-0.85, 0.12, 2.24],
+            hi: [0.85, 1.0, 3.05],
         },
         NamedMass {
             name: "rear_seat".into(),
-            kg: 5.0,
-            lo: [-0.8, 0.12, 1.45],
-            hi: [0.8, 0.45, 2.0],
+            kg: 17.5,
+            lo: [-0.85, 0.12, 1.30],
+            hi: [0.85, 1.0, 2.05],
         },
         NamedMass {
             name: "dashboard".into(),
@@ -1065,8 +1082,8 @@ pub fn sedan() -> VehicleDef {
         NamedMass {
             name: "interior".into(),
             kg: 50.0,
-            lo: [-0.85, 0.12, 1.4],
-            hi: [0.85, 0.32, 3.3],
+            lo: [-0.9, 0.12, 1.30],
+            hi: [0.9, 1.45, 3.40],
         },
         NamedMass {
             name: "spare_wheel".into(),
@@ -1117,7 +1134,11 @@ pub fn sedan() -> VehicleDef {
     VehicleDef {
         name: "Rubble Showcase Sedan".into(),
         profile,
-        grades: Grades::default(),
+        grades: {
+            let mut g = Grades::default();
+            g.crush = g.crush.scaled(CRUSH_PLATEAU);
+            g
+        },
         // Door seams (each door's edge ring inside it, the pillar's between),
         // screens' ends, the bonnet's and boot lid's edges.
         stations: vec![

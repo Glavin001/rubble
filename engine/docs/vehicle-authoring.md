@@ -197,6 +197,23 @@ crushes in a roll-over). Lumped panels yield at their grade's strain
 unless `strength` caps them: the strut towers' braces (`END_YIELD`), the door
 rings (`CABIN_YIELD`), the roof (`ROOF_YIELD`), the screens (`GLASS_YIELD`).
 
+Named masses fill the stability floors of the frame nodes in their box first
+(`Skeleton::add_mass_by_need`), then spread by stiffness: mass a node already
+carries beyond what its beams need is budget spent twice. The sedan's boxes
+span the structure that carries each mass (occupants and seats: the floor
+members, sills, tunnel and the pillars' feet; trim: the whole cabin), and its
+seat frames weigh only what their own lattices need (7.5, 7.5, 12.5 kg; the
+rest of the seats is a named mass on the floor). That freed about 100 kg of
+the budget: the skin's scale went from ×0.19 to ×0.47. `showcase_probe --
+sedan medium info` with `SLACK=1` lists the mass beyond the floors per group.
+
+The crumple zone's plateau (`CRUSH_PLATEAU`, 0.65 × the crush grade) is as
+low as the crush length allows: what the front still pushes on the cell when
+the car stops comes back elastically as rebound (about F²/2k), so a lower
+plateau with a longer crush (0.75 m at 56 km/h) rebounds less (2.7 → 2.0
+m/s). The front rails are graded from 1.0 under the floor to 0.5 at the
+bumper (`RAIL_CABIN`).
+
 `VehicleDef::tiered` fits the step per tier (`Skeleton::fit_tiers`): the frame's
 beams at their grades (`Built::stiffness_scale` = 1), the skin's stiffness and
 damping scaled to what is left (`Built::skin_scale`). The frame keeps its yield

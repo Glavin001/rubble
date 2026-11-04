@@ -876,8 +876,10 @@ fn main() {
         // PULSE (spawn coordinates, the firewall at 3.36) by beam class: what
         // pushes the cell and when.
         let zp: f32 = plane.parse().unwrap_or(3.36);
+        // PULSE_AXIS=x: a plane across the car (a side impact).
+        let ax = if std::env::var("PULSE_AXIS").is_ok_and(|a| a == "x") { 0usize } else { 2 };
         let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
-        let mom = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>();
+        let mom = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.mass * n.vel[ax]).sum::<f32>();
         let mut p0 = mom(&s);
         let class = |i: u32| -> String {
             if (i as usize) >= sk.nodes.len() {
@@ -918,14 +920,14 @@ fn main() {
                     if (bm.a as usize) >= sk.nodes.len() || (bm.b as usize) >= sk.nodes.len() {
                         continue;
                     }
-                    let (za, zb) = (sk.nodes[bm.a as usize].p.z, sk.nodes[bm.b as usize].p.z);
+                    let (za, zb) = (sk.nodes[bm.a as usize].p[ax], sk.nodes[bm.b as usize].p[ax]);
                     if (za - zp) * (zb - zp) >= 0.0 {
                         continue;
                     }
                     let d = (s.nodes[bm.a as usize].pos - s.nodes[bm.b as usize].pos)
                         .normalize_or_zero();
                     // Compression positive pushes the rear node back.
-                    let fz = bm.force * d.z.abs();
+                    let fz = bm.force * d[ax].abs();
                     let (ca, cb) = (class(bm.a), class(bm.b));
                     let key = if za > zp { ca } else { cb };
                     *by.entry(key).or_default() += fz;
