@@ -752,7 +752,7 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         mat::TYRE => [0.025, 0.025, 0.025],
         mat::RIM => [0.36, 0.37, 0.39],
         // A shut line's wall: the paint, in shadow.
-        mat::GAP => [paint[0] * 0.3, paint[1] * 0.3, paint[2] * 0.3],
+        mat::GAP => [paint[0] * 0.55, paint[1] * 0.55, paint[2] * 0.55],
         mat::UNDERBODY => [0.04, 0.04, 0.04],
         mat::PLATE => [0.85, 0.85, 0.8],
         mat::GRILLE => [0.015, 0.015, 0.015],

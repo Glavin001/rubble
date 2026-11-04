@@ -256,18 +256,41 @@ binding, so the same mesh fits a coarse or a dense skeleton.
 
 The proportions come from the package (`BodyProfile`): 4.70 × 1.82 × 1.445 m, a
 2.70 m wheelbase, about 0.95 m of front overhang and 1.05 m at the rear. The
-greenhouse sits a little rearward: the cowl is at about 0.28 L, the roof peaks
-over the B-pillar, and a fast backlight runs into a short, high deck.
+greenhouse sits rearward: the windscreen's base is about 0.40 m behind the
+front axle (a long dash-to-axle), the roof peaks over the B-pillar, and a fast
+backlight runs into a short, high deck. The visual reads the package only;
+the cabin's fixed points (the dash beam, the column's top) come from the
+definition's members (`interior::Cabin`), so the dashboard and wheel follow
+the structure.
 
 The character lines are:
 
 * **Shoulder crease.** One crisp line, the body's widest point, runs from above
-  the headlamp at about 0.74 m, level through the handles at about 0.80 m, and
-  kicks up to the tail lamps at about 0.86 m (`BodyStyle::crease`). Above it the
-  side leans in to the belt; below it the door is gently concave down to a lower
-  line and a tucked-under sill.
-* **Arch flares.** Each wheel arch swells 3 cm over a 17 cm band, giving a
-  plateau at the rolled lip.
+  the headlamp at about 0.75 m, level through the handles at about 0.81 m, and
+  kicks up into the tail lamps at about 0.89 m (`BodyStyle::crease`; an 18–22°
+  change of slope). Above it the side leans in to the belt.
+* **Lower-door sculpture.** Under a feature line rising from 0.43 m behind the
+  front arch to 0.60 m ahead of the rear one, the side steps in 1.6 cm with a
+  crisp upper edge, easing out toward the sill (`BodyStyle::scoop`). A band row
+  lies on the line, so its highlight runs straight.
+* **Bonnet.** Two power-dome creases run from 0.17 m off the centre at the nose
+  to 0.38 m at the cowl, the dome 1.1 cm proud between them
+  (`hood_crease`); a lid column lies on each crease. The bonnet's leading edge
+  and the boot deck roll over in 6–7 cm (`nose_ramp`, `tail_ramp`) instead of
+  the sides' long tumblehome ramp, and the deck kicks up 1.4 cm into an
+  integrated lip (`deck_lip`). These details are added after the lid is
+  relaxed, so they stay crisp.
+* **Fascia.** Upright, its widest line high at the lamps' lower edge, the
+  lower bumper drawn back under it; a large trapezoid grille meets the slim
+  (5 cm) full-LED headlamps; fog lamps in the corners; a front plate over the
+  lower intake.
+* **Arch flares.** Each wheel arch swells 2.2 cm over a 17 cm band, giving a
+  plateau at the rolled lip. The arch is cut 1.8 cm outside the tyre, and the
+  wheels (a 19-inch look: the rim 0.76 of the tyre's radius) sit 3 cm outboard
+  of the physics tyres (`design::WHEEL_OUT`), nearly flush with the arch.
+* **Tail.** Slim tail lamps joined by a light bar across the boot lid, an
+  original badge (a split hexagon, `fixtures::emblem`) on the lid and the
+  grille, a rear plate in the bumper.
 * **Tumblehome.** The side glass leans in by about 22°, from the belt at a half
   width of about 0.86 m to the roof rail at about 0.66 m. The roof, bonnet and
   deck are crowned.
@@ -286,6 +309,11 @@ The shut lines are:
 * the rear bumper is cut under the lamps;
 * there is a black sill below the doors.
 
+Each side of a shut line is shaded darker over about 1.3 cm (baked AO), so the
+lines still read at the three-quarter distance where the 4.5 mm gap itself is
+under a pixel. A shut line's wall is the paint in shadow (`gap`); a window
+opening's edge, the doors' belt edges included, is black rubber.
+
 ### Part list and how each is built
 
 | Part | Construction |
@@ -293,11 +321,13 @@ The shut lines are:
 | Body surface (`parts/body.rs`) | A *band* is swept round the plan outline: a section per arc length θ, blended between side, nose and tail shapes. The crease and lower line fall on fixed rows, so their highlights run straight. A *lid* (height field over plan view) runs from the band's top edge over a ramp (tumblehome, fender tops) to the profile's top line and crown. The lid is relaxed by a Laplacian. The profile's curves are blurred (σ 8 cm) so the clearcoat shows no ripples at their control points. Grid: 2.2 cm across the sections, 3.5 cm along the car (twice that at the distant LOD). |
 | Panels (`parts/trim.rs`, `design.rs`) | Each panel is a region (an SDF made of smooth cut lines in side, plan or arc view), made metric on the surface and clipped by marching triangles, so edges follow the curve, not the grid. Every cut is rolled (2.8 mm radius) into a 12 mm wall and a return flange, set back 2.2 mm, giving a 4.5 mm shut line. Arch lips get an 8 mm roll. The inside of a panel renders dark. Panels: bonnet, cowl (black), lip and bumper front, fenders, doors, deck lid, valance and bumper rear, sills (black), body. |
 | Glass | The body surface over each opening, set 6 mm in, with a black frit band printed inside the windscreen and backlight. The side windows sit in black sash frames, with a black B-pillar applique and a chrome belt moulding. The windscreen is laminated (it cracks); the side glass is tempered (it shatters). |
-| Lamps (`fixtures::lamp`) | A lens continuing the body surface; a housing extruded along the lamp axis; a reflector back; projector cups with lens domes; light guides that follow the outline (the DRL; three tail bars). |
-| Grille (`fixtures::grille`) | Gloss-black surround, a dark throat recessed 7 cm, a back mesh, and slats cut from the opening at set heights (a chrome top bar) and given walls. There is also a lower intake. |
-| Wheels (`fixtures::wheel`, `caliper`) | Tyre lathe: four tread grooves, rounded shoulders, a rim protector and lettering band. Rim: lip and barrel, a dished double-spoke face cut on a polar grid with 4 cm spoke walls, centre cap, five lug nuts. Vented disc with its hat. The caliper rides the axle (it does not turn). |
-| Mirror, handles | An egg housing (paint above, black below) on an arm from the door's sail, with its glass; a chrome pull handle over a dark pocket. |
-| Underbody and others | Arch liners, underbody plate, exhausts with chrome tips, a plate in a black surround, a chrome tail garnish. |
+| Lamps (`fixtures::lamp`) | A lens continuing the body surface; a housing extruded along the lamp axis; a reflector back; small projector cups with lens domes; light guides that follow the outline (the DRL ring; two tail rings; the light bar; the fog lamps' LED line). |
+| Grille (`fixtures::grille`) | Gloss-black surround, a dark throat recessed 7 cm and a honeycomb back mesh (drawn by the shader). The lower intake has one slat. |
+| Wheels (`fixtures::wheel`, `caliper`) | Tyre lathe: four tread grooves, rounded shoulders, a rim protector and lettering band, proportioned to the sidewall's height. Texture coordinates on the tyre (u round it, v up the sidewall or across the tread) carry raised "RUBBLE SPORT 245/40 R19" lettering on the outer sidewall and tread blocks on the shoulders. Rim (graphite): lip and barrel, a dished double-spoke face cut on a polar grid with 4 cm spoke walls, centre cap, five lug nuts. Vented disc with its hat. The caliper rides the axle (it does not turn). |
+| Mirror, handles, wipers | An egg housing (paint above, black below) on an arm from the door's sail, with its glass; a chrome pull handle over a dark pocket; two wipers parked along the windscreen's base. |
+| Plates, badges | Plates are the body surface over their outline, set proud, with texture coordinates: the shader prints a border and "RBL 470" (a 5 × 7 pixel font), fading to grey when too small to read. The badge is extruded chrome facets on a black backing. |
+| Interior (`parts/interior.rs`, `design.rs`) | Superellipsoid shapes: front seats (cushion, back, side bolsters, headrest on chrome posts, pedestal), a rear bench with two shaped places and three headrests; a dashboard lofted from a side section across the cabin, with a binnacle, a lit instrument cluster and a floating centre screen (the `display` material draws dials and a map from texture coordinates), vents and a trim strip; a three-spoke steering wheel with its hub and column shroud; a console with armrest and selector. Door cards are each door's skin 10 cm in (dark above the armrest); the headliner and pillar trim the greenhouse's skin 1.8 cm in; carpet; a parcel shelf with the high-mounted stop lamp. |
+| Underbody and others | Arch liners, underbody plate, exhausts with chrome tips. |
 
 ### Binding, damage and cost
 
@@ -313,10 +343,26 @@ The shut lines are:
     triangle strains.
   * The laminated windscreen is the exception: it follows its frame and
     spider-cracks with strain (the `screen` material).
+  * Mounted parts (all of the above) also keep an anchor per vertex: the
+    nearest skin triangle and the vertex's place on it
+    (`ShowcaseVisual::anchor`). Where that mount has moved more than 4 cm from
+    where the rigid part holds the vertex (`ANCHOR_BREAK`: the bumper under a
+    lamp crushed), the part breaks there instead of floating free.
+* **Cabin.** Seats and the steering wheel ride one triangle of their frame
+  rigidly (`Bind::GroupRigid`), so a far binding triangle never swings them
+  out of the cabin; the dashboard and console ride their members' triangles.
 * **Tears.** The renderer keeps a per-node tear field: a skin triangle's
   perimeter against its rest perimeter (`node_rest`), interpolated over each
   vertex's binding nodes. Panels are cut where it crosses ½, a smooth line,
   with a bare-metal band at the edge.
+* **Shading.** A procedural studio: a bright horizon, softboxes, the sun, and
+  below the horizon the floor reflected from the shaded point (short rays land
+  in the car's own shadow: under the sills, in the arches), so the flanks
+  carry a crisp horizon line. The clearcoat has a mirror-sharp sun glint over
+  a broader sheen. Diffuse light is an analytic lobe fitted to the studio.
+  Ambient occlusion is baked from analytic occluders (downward faces low on
+  the car, faces inside the arches); the wheels, which turn, are darkened by
+  height instead. Cabin trim is lit without studio reflections.
 * **Normals.** Smooth normals follow the node normals. Where they disagree with
   the triangle's frame by more than about 15°, the faceted frame normal wins,
   so physics kinks read as creases.
@@ -326,8 +372,9 @@ The shut lines are:
   * The renderer picks a level per car on the GPU from the last frame's eye
     (indirect dispatch and draw), so only that level is skinned and drawn.
   * Measured with 10 cars on an M3 Max at 1080p with 4× MSAA
-    (`showcase-car.html?perf=1&n=10`): about 0.33 ms per car, and 0.2 ms at
-    the distant level.
+    (`showcase-car.html?perf=1&n=10`): about 0.46 ms per car with the
+    interior (about 275k triangles, 88k at the distant level), and 0.31 ms
+    at the distant level. Another GPU user moves these by ±10 %.
 
 To restyle, change `design::sedan_styling` (cut lines, outlines, section
 shapes) and the profile. The tools stay the same.
@@ -359,9 +406,12 @@ shapes) and the profile. The tools stay the same.
   and bent beams; `FASTEST=1 CONTACTS=1` the self-contact triangles under the
   fastest nodes).
 * `showcase-car.html?res=medium&scene=wall&speed=56`: the car on the GPU in a page
-  (`freeze=0` shows the rest pose, `perf=1` times the car's render pass);
-  `node showcase-car-check.mjs --size 1920x1080 [--only rest_three,...]` takes
-  headless screenshots.
+  (`freeze=0` shows the rest pose, `perf=1` times the car's render pass;
+  `cam=` a named view or a direction `x,y,z`, `look=x,y,z` offsets the target,
+  `fov=` radians); `node showcase-car-check.mjs --size 1920x1080 [--only
+  rest_three,...]` takes headless screenshots (close-ups: `rest_low`,
+  `rest_nose`, `rest_back`, `rest_head`, `rest_tail`, `rest_wheel`,
+  `rest_interior`, `rest_dash`, `rest_screen`, `rest_fplate`).
 
 ## What the visual binds to (`Built`)
 

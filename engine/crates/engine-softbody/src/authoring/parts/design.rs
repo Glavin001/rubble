@@ -531,7 +531,9 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
                 continue;
             }
             c.mesh.mat.iter_mut().for_each(|x| *x = *material);
-            trim::edge_ao(&mut c, level, 0.25, 0.008);
+            // A soft shadow either side of the shut line, wide enough to read from
+            // a few metres (the 4.5 mm gap alone vanishes at the 3/4 distance).
+            trim::edge_ao(&mut c, level, 0.38, 0.013);
             let loops = std::mem::take(&mut c.loops);
             for (l, closed) in &loops {
                 // Per vertex: arch lips get the big roll, the rest shut lines.
