@@ -68,7 +68,9 @@ pub mod mat {
     pub const CALIPER: u8 = 23;
     /// Tail-lamp housing back (dark red).
     pub const TAIL_BACK: u8 = 24;
-    pub const COUNT: usize = 25;
+    /// Laminated windscreen (cracks instead of shattering; drawn with the glass).
+    pub const SCREEN: u8 = 25;
+    pub const COUNT: usize = 26;
 }
 
 /// Material names, by id.
@@ -98,11 +100,12 @@ pub const MATERIAL_NAMES: [&str; mat::COUNT] = [
     "brake",
     "caliper",
     "tail_back",
+    "screen",
 ];
 
 /// Whether a material is drawn blended (after the opaque ones).
 pub fn transparent(m: u8) -> bool {
-    matches!(m, mat::GLASS | mat::LENS | mat::TAIL_LENS)
+    matches!(m, mat::GLASS | mat::LENS | mat::TAIL_LENS | mat::SCREEN)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -140,6 +143,10 @@ pub struct ShowcaseVisual {
     pub node_rest_normal: Vec<[f32; 3]>,
     /// The solver's node count for this vehicle (tyre nodes included).
     pub node_count: u32,
+    /// 1 for a rigid part's vertex (mirror, handle, lamp): (α, β, h) are its
+    /// rest offset in the triangle's orthonormal frame (T, B, N), so the part
+    /// moves rigidly with the triangle and never stretches.
+    pub rigid: Vec<u8>,
     /// The pieces (name, first vertex, vertex count), in order.
     pub pieces: Vec<(String, u32, u32)>,
 }
@@ -179,7 +186,7 @@ impl Binder {
         }
         let k = key(p, self.cell);
         let mut best: Option<(f32, usize)> = None;
-        for r in 1..8 {
+        for r in 1..10 {
             for dx in -r..=r {
                 for dy in -r..=r {
                     for dz in -r..=r {
@@ -200,7 +207,15 @@ impl Binder {
                     }
                 }
             }
-            if best.is_some_and(|b| b.0 < (r as f32 - 1.0) * self.cell) {
+            // Everything within the searched block's inner distance is found.
+            let lo = Vec3::new(
+                (k.0 - r) as f32,
+                (k.1 - r) as f32,
+                (k.2 - r) as f32,
+            ) * self.cell;
+            let hi = lo + Vec3::splat((2 * r + 1) as f32 * self.cell);
+            let reach = (p - lo).min(hi - p).min_element();
+            if best.is_some_and(|b| b.0 <= reach) {
                 break;
             }
         }
@@ -386,7 +401,8 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             _ => None,
         };
         // A vote for the part.
-        let part: Option<u16> = if piece.bind == Bind::Vote {
+        let rigid = piece.bind == Bind::Rigid;
+        let part: Option<u16> = if piece.bind == Bind::Vote || rigid {
             let mut votes: HashMap<u16, usize> = HashMap::new();
             let step = (m.len() / 600).max(1);
             for k in (0..m.len()).step_by(step) {
@@ -402,6 +418,44 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         } else {
             None
         };
+        if rigid {
+            // One triangle (the voted part's nearest to the centroid) carries
+            // the whole part rigidly.
+            let b = part
+                .and_then(|pt| {
+                    binders
+                        .entry(pt)
+                        .or_insert_with(|| Binder::new(by_part[&pt].clone(), &node_pos, 0.15))
+                        .bind(centroid, Vec3::Y)
+                })
+                .or_else(|| pure.bind(centroid, Vec3::Y));
+            let Some((t, _, _)) = b else {
+                return Err(format!("no skin triangle for the rigid part {}", piece.name));
+            };
+            let (p0, p1, p2) = (node_pos[t[0] as usize], node_pos[t[1] as usize], node_pos[t[2] as usize]);
+            let tt = (p1 - p0).normalize();
+            let nn = (p1 - p0).cross(p2 - p0).normalize();
+            let bb = nn.cross(tt);
+            for k in 0..m.len() {
+                let d = m.pos[k] - p0;
+                let n = m.nrm[k];
+                out.bind_nodes.push(t);
+                out.bind_coords.push([d.dot(tt), d.dot(bb), d.dot(nn)]);
+                out.bind_normal.push([n.dot(tt), n.dot(bb), n.dot(nn)]);
+                out.bind_rest.push(rest_edges(&node_pos, t));
+                out.positions.push((m.pos[k] + built.shift).to_array());
+                out.normals.push(n.to_array());
+                out.uvs.push([0.0, 0.0]);
+                out.material.push(m.mat[k]);
+                out.colors.push(color(m.mat[k], paint));
+                out.ao.push(m.ao[k].clamp(0.0, 1.0));
+                out.smooth.push(0);
+                out.rigid.push(1);
+            }
+            out.indices.extend(m.idx.iter().map(|i| i + first));
+            out.pieces.push((piece.name.clone(), first, m.len() as u32));
+            continue;
+        }
         // Per vertex: its binding and its part. A voted piece rides its part,
         // except where that part's skin is much farther than another's (the
         // piece reaches past the physics panel): those vertices ride the
@@ -494,6 +548,7 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             // Smooth shading from node normals only where the piece rides the
             // body's skin (not on wheels or frames).
             out.smooth.push(if own.is_none() { m.smooth[k] } else { 0 });
+            out.rigid.push(0);
         }
         let count = out.positions.len() as u32 - first;
         out.indices.extend(idx.iter().map(|i| i + first));
@@ -636,6 +691,7 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         mat::BRAKE => [0.32, 0.32, 0.33],
         mat::CALIPER => [0.5, 0.03, 0.02],
         mat::TAIL_BACK => [0.12, 0.01, 0.01],
+        mat::SCREEN => [0.02, 0.025, 0.03],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -674,27 +730,36 @@ pub fn deform(v: &ShowcaseVisual, nodes: &[Vec3]) -> (Vec<Vec3>, Vec<Vec3>) {
         let n = e1.cross(e2).normalize_or_zero();
         let [al, be, h] = v.bind_coords[i];
         let [r1, r2] = v.bind_rest[i];
+        let t = e1.normalize_or_zero();
+        let bb = n.cross(t);
+        let rigid = v.rigid.get(i).copied().unwrap_or(0) == 1;
         if e1.length() > TEAR_STRETCH * r1 || e2.length() > TEAR_STRETCH * r2 {
-            // Torn: collapse onto the triangle's first node (zero-area faces).
+            // Torn: the renderer cuts its triangles away (NaN here).
             pos.push(Vec3::splat(f32::NAN));
             nrm.push(Vec3::Y);
             continue;
         }
-        pos.push(p0 + e1 * al + e2 * be + n * h);
-        let t = e1.normalize_or_zero();
-        let bb = n.cross(t);
-        if v.smooth[i] == 1 {
+        if rigid {
+            pos.push(p0 + t * al + bb * be + n * h);
+        } else {
+            pos.push(p0 + e1 * al + e2 * be + n * h);
+        }
+        let [x, y, z] = v.bind_normal[i];
+        let nf = (t * x + bb * y + n * z).normalize_or_zero();
+        if v.smooth[i] == 1 && !rigid {
             let w = [1.0 - al - be, al, be];
             let mut d = Vec3::from_array(v.normals[i]);
             for (k, &node) in [a, b, c].iter().enumerate() {
                 d += w[k]
                     * (nn[node as usize] - Vec3::from_array(v.node_rest_normal[node as usize]));
             }
-            nrm.push(d.normalize_or_zero());
+            let ns = d.normalize_or_zero();
+            // A kink (smooth and frame normals > ~15° apart) keeps the facet.
+            let k = super::parts::smoothstep(0.97, 0.90, ns.dot(nf));
+            nrm.push(ns.lerp(nf, k).normalize_or_zero());
             continue;
         }
-        let [x, y, z] = v.bind_normal[i];
-        nrm.push((t * x + bb * y + n * z).normalize_or_zero());
+        nrm.push(nf);
     }
     (pos, nrm)
 }

@@ -49,7 +49,7 @@
 const WG = 64;
 
 const SKIN_WGSL = /* wgsl */ `
-struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r1: f32, nt: f32, nb: f32, nn: f32, r2: f32, rx: f32, ry: f32, rz: f32, smoothed: u32 };
+struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r1: f32, nt: f32, nb: f32, nn: f32, r2: f32, rx: f32, ry: f32, rz: f32, flags: u32 };
 struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listAt: u32, trisAt: u32, pad0: u32, pad1: u32 };
 @group(0) @binding(0) var<storage, read> nodes: array<vec4f>;
 @group(0) @binding(1) var<storage, read> misc: array<vec4u>;
@@ -97,25 +97,44 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let cl = length(c);
   let n = select(vec3f(0.0, 1.0, 0.0), c / cl, cl > 1e-12);
   let l1 = length(e1);
-  let torn = l1 > 2.5 * bd.r1 || length(e2) > 2.5 * bd.r2 || cl <= 1e-12;
-  let pos = select(p0 + bd.a * e1 + bd.b * e2 + bd.h * n, p0, torn);
-  var nrm: vec3f;
-  if (bd.smoothed == 1u) {
-    // Smooth: the rest normal moved by the binding nodes' normal changes.
+  let l2 = length(e2);
+  let t = e1 / max(l1, 1e-9);
+  let b = cross(n, t);
+  // Strain of the binding triangle (stretch or squash of either edge).
+  let s1 = l1 / max(bd.r1, 1e-6);
+  let s2 = l2 / max(bd.r2, 1e-6);
+  let strain = max(max(s1, 1.0 / max(s1, 1e-6)), max(s2, 1.0 / max(s2, 1e-6))) - 1.0;
+  let torn = s1 > 2.5 || s2 > 2.5 || cl <= 1e-12;
+  let rigid = (bd.flags & 2u) != 0u;
+  var pos: vec3f;
+  if (rigid) {
+    // Rigid parts (mirrors, handles, lamps): the rest shape in the triangle's
+    // orthonormal frame, never stretched.
+    pos = p0 + t * bd.a + b * bd.b + n * bd.h;
+  } else if (torn) {
+    // Torn: stay with the triangle's first node at rest scale (the fragment
+    // stage cuts the triangles through the middle, not along the grid).
+    pos = p0 + bd.a * (t * bd.r1) + bd.b * (normalize(e2 + vec3f(1e-9)) * bd.r2) + bd.h * n;
+  } else {
+    pos = p0 + bd.a * e1 + bd.b * e2 + bd.h * n;
+  }
+  // The rest normal carried by the triangle's frame (faceted: keeps kinks).
+  let nf = normalize(bd.nt * t + bd.nb * b + bd.nn * n + vec3f(1e-9));
+  var nrm = nf;
+  if ((bd.flags & 1u) != 0u && !rigid) {
+    // Smooth: the rest normal moved by the binding nodes' normal changes. Where
+    // it disagrees with the frame's by more than ~15°, the panel has kinked
+    // here: keep the faceted normal so the crease reads sharp.
     let w0 = 1.0 - bd.a - bd.b;
-    nrm = vec3f(bd.rx, bd.ry, bd.rz)
+    let ns = normalize(vec3f(bd.rx, bd.ry, bd.rz)
       + w0 * (nodeN[bd.n0].xyz - restN[bd.n0].xyz)
       + bd.a * (nodeN[bd.n1].xyz - restN[bd.n1].xyz)
-      + bd.b * (nodeN[bd.n2].xyz - restN[bd.n2].xyz);
-  } else {
-    let t = e1 / max(l1, 1e-9);
-    let b = cross(n, t);
-    nrm = bd.nt * t + bd.nb * b + bd.nn * n;
+      + bd.b * (nodeN[bd.n2].xyz - restN[bd.n2].xyz) + vec3f(1e-9));
+    nrm = normalize(mix(ns, nf, 1.0 - smoothstep(0.90, 0.97, dot(ns, nf))));
   }
-  nrm = normalize(nrm + vec3f(1e-9));
   let k = i * 2u;
   outv[k] = vec4f(pos, select(0.0, 1.0, torn));
-  outv[k + 1u] = vec4f(nrm, 0.0);
+  outv[k + 1u] = vec4f(nrm, strain);
 }
 `;
 
@@ -131,10 +150,12 @@ struct VOut {
   @location(3) @interpolate(flat) mat: u32,
   @location(4) torn: f32,
   @location(5) ao: f32,
+  @location(6) strain: f32,
+  @location(7) rest: vec3f,
 };
 
 @vertex
-fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f, @location(3) mat: u32, @location(4) ao: f32) -> VOut {
+fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f, @location(3) mat: u32, @location(4) ao: f32, @location(5) rest: vec3f) -> VOut {
   var o: VOut;
   o.clip = frame.viewProj * vec4f(pt.xyz, 1.0);
   o.world = pt.xyz;
@@ -143,6 +164,8 @@ fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f
   o.mat = mat;
   o.torn = pt.w;
   o.ao = ao;
+  o.strain = nrm.w;
+  o.rest = rest;
   return o;
 }
 
@@ -164,7 +187,7 @@ fn env(d: vec3f, rough: f32) -> vec3f {
   let up = d.y;
   // Cyclorama.
   var c = mix(vec3f(0.62, 0.64, 0.67), vec3f(0.30, 0.32, 0.36), smoothstep(0.0, 0.9, up));
-  c = mix(c, vec3f(0.16, 0.16, 0.17), smoothstep(0.0, -0.25 - rough * 0.3, up));
+  c = mix(c, vec3f(0.16, 0.16, 0.17), 1.0 - smoothstep(-0.25 - rough * 0.3, 0.0, up));
   c = c + vec3f(0.25) * exp(-abs(up) * (14.0 / (1.0 + rough * 6.0)));   // horizon glow
   // Overhead softbox.
   c += vec3f(3.2, 3.15, 3.0) * softbox(d, vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), vec3f(0.0, 0.0, 1.0), 0.55, 1.1, w);
@@ -222,9 +245,40 @@ fn tonemap(c: vec3f) -> vec3f {
   return pow(m, vec3f(1.0 / 2.2));
 }
 
+// Glass cracks: a Voronoi web in rest space (cells ~6 cm) plus rays from the
+// nearest impact-like centre; 1 on a crack line, 0 off it.
+fn hash2(p: vec2f) -> vec2f {
+  return fract(sin(vec2f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)))) * 43758.5453);
+}
+fn cracks(q: vec2f) -> f32 {
+  let g = floor(q);
+  let f = fract(q);
+  var d1 = 8.0; var d2 = 8.0;
+  for (var y = -1; y <= 1; y++) {
+    for (var x = -1; x <= 1; x++) {
+      let o = vec2f(f32(x), f32(y));
+      let r = o + hash2(g + o) - f;
+      let d = dot(r, r);
+      if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) { d2 = d; }
+    }
+  }
+  let edge = sqrt(d2) - sqrt(d1);
+  return 1.0 - smoothstep(0.015, 0.05, edge);
+}
+
 @fragment
 fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
-  if (i.torn > 0.001) { discard; }
+  // Tears: the far half of a torn triangle is cut away (through the triangle,
+  // not along the grid); a band at the cut shows the bare metal edge.
+  if (i.torn > 0.5) { discard; }
+  let glassy = i.mat == 1u || i.mat == 25u;
+  // Side and rear glass (tempered) shatters and drops once its frame strains.
+  if (i.mat == 1u && i.strain > 0.12) { discard; }
+  if (i.torn > 0.3 && !glassy) {
+    let nn = normalize(i.normal);
+    let lit = 0.35 + 0.65 * max(dot(nn, normalize(frame.light.xyz)), 0.0);
+    return vec4f(tonemap(vec3f(0.42, 0.42, 0.44) * lit), 1.0);
+  }
   var n = normalize(i.normal);
   let v = normalize(frame.eye.xyz - i.world);
   // The inside of a body panel (seen through a window or a tear): bare, dark.
@@ -250,11 +304,20 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   if (m == 21u) { return vec4f(tonemap(albedo * 3.5), 1.0); }
   if (m == 4u) { return vec4f(tonemap(vec3f(2.2, 2.25, 2.4) + env(r, 0.02) * 0.2), 1.0); }
   // Transparent: glass, clear lens, red lens (blended pass).
-  if (m == 1u || m == 17u || m == 20u) {
+  if (m == 1u || m == 17u || m == 20u || m == 25u) {
     let f = 0.04 + 0.96 * fres;
-    let refl = env(r, 0.0) * f;
+    if (m == 25u && i.strain > 0.02) {
+      // Laminated windscreen: spider cracks grow with the frame's strain.
+      let amt = smoothstep(0.02, 0.15, i.strain);
+      let q = i.rest.xy * 18.0 + i.rest.z * 7.0;
+      let c = max(cracks(q), cracks(q * 2.7) * step(0.5, amt)) * amt;
+      if (c > 0.02) {
+        return vec4f(tonemap(vec3f(0.55, 0.57, 0.6) * (0.4 + env(r, 0.3) * 0.25)), clamp(0.5 + c * 0.5, 0.0, 1.0));
+      }
+    }
+    let refl = env(r, 0.0) * (0.06 + 0.94 * fres);
     var tint = vec3f(0.01, 0.012, 0.014);
-    var a = 0.78;
+    var a = 0.86;
     if (m == 17u) { tint = vec3f(0.0); a = 0.08; }
     if (m == 20u) { tint = vec3f(0.30, 0.01, 0.01); a = 0.6; }
     let alpha = clamp(a + f * (1.0 - a), 0.0, 1.0);
@@ -321,7 +384,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       entryPoint: 'vs',
       buffers: [
         { arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x4' }] },
-        { arrayStride: 20, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }] },
+        { arrayStride: 32, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }, { shaderLocation: 5, offset: 20, format: 'float32x3' }] },
       ],
     },
     fragment: { module: drawModule, entryPoint: 'fs', targets: [{ format }] },
@@ -338,7 +401,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       entryPoint: 'vs',
       buffers: [
         { arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x4' }] },
-        { arrayStride: 20, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }] },
+        { arrayStride: 32, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }, { shaderLocation: 5, offset: 20, format: 'float32x3' }] },
       ],
     },
     fragment: { module: drawModule, entryPoint: 'fs', targets: [{ format, blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } }] },
@@ -399,7 +462,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         f[o + 12] = visual.normals[3 * i];
         f[o + 13] = visual.normals[3 * i + 1];
         f[o + 14] = visual.normals[3 * i + 2];
-        u[o + 15] = visual.smooth ? visual.smooth[i] : 0;
+        u[o + 15] = (visual.smooth ? visual.smooth[i] : 0) | (visual.rigid && visual.rigid[i] ? 2 : 0);
       }
       const binds = device.createBuffer({ label: 'showcase-binds', size: bindData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(binds, 0, bindData);
@@ -412,18 +475,21 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         rest.set(visual.normals.subarray(3 * i, 3 * i + 3), 8 * i + 4);
       }
       device.queue.writeBuffer(out, 0, rest);
-      const attr = new ArrayBuffer(n * 20);
+      // Per vertex: colour, AO, material, rest position (the glass's crack
+      // pattern is drawn in rest space so it rides the glass).
+      const attr = new ArrayBuffer(n * 32);
       const af = new Float32Array(attr);
       const au = new Uint32Array(attr);
       for (let i = 0; i < n; i++) {
-        af.set(visual.colors.subarray(3 * i, 3 * i + 3), 5 * i);
-        af[5 * i + 3] = visual.ao ? visual.ao[i] : 1;
-        au[5 * i + 4] = visual.material[i];
+        af.set(visual.colors.subarray(3 * i, 3 * i + 3), 8 * i);
+        af[8 * i + 3] = visual.ao ? visual.ao[i] : 1;
+        au[8 * i + 4] = visual.material[i];
+        af.set(visual.positions.subarray(3 * i, 3 * i + 3), 8 * i + 5);
       }
       // Opaque triangles first, glass (material 1) after.
       const tri = visual.indices;
       const opaque = [], glass = [];
-      const TRANSPARENT = new Set([1, 17, 20]);
+      const TRANSPARENT = new Set([1, 17, 20, 25]);
       for (let t = 0; t < tri.length; t += 3) (TRANSPARENT.has(visual.material[tri[t]]) ? glass : opaque).push(tri[t], tri[t + 1], tri[t + 2]);
       const ordered = new Uint32Array([...opaque, ...glass]);
       const attrs = device.createBuffer({ label: 'showcase-attrs', size: attr.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });

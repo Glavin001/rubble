@@ -39,6 +39,9 @@ pub enum Bind {
     Nearest,
     /// A named structure group (seats on their frames).
     Group(u16),
+    /// A rigid part (mirror, handle, lamp): voted part, then the whole piece
+    /// on one triangle's orthonormal frame (moves rigidly, never stretches).
+    Rigid,
     /// A wheel: the tyre's fan triangles (rotates with it), by tyre index.
     Wheel(u16),
     /// A wheel's non-rotating hardware (brake caliper): axle nodes and a knuckle node.
