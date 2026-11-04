@@ -136,14 +136,21 @@ impl DestructibleAssetDesc {
     pub fn from_glb(bytes: &[u8], level: u8) -> anyhow::Result<Self> {
         let asset = engine_fracture::parse_fracture_glb(bytes)?;
         let scene = engine_fracture::build_scene(&asset, level, None)?;
-        let mut desc = Self::from_scene(&scene)?;
+        Self::from_parsed(&asset, &scene, level)
+    }
+
+    /// [`Self::from_glb`] from a GLB already parsed (`engine_fracture::parse_fracture_glb`)
+    /// and its render scene at `level` (`engine_fracture::build_scene(asset, level, None)`):
+    /// a host that draws the scene parses the GLB once.
+    pub fn from_parsed(
+        asset: &engine_fracture::FractureAsset,
+        scene: &engine_fracture::Scene,
+        level: u8,
+    ) -> anyhow::Result<Self> {
+        let mut desc = Self::from_scene(scene)?;
         #[cfg(feature = "stress")]
         {
-            desc.stress = Some(crate::StressSource::from_glb(
-                &asset,
-                level,
-                scene.placement,
-            ));
+            desc.stress = Some(crate::StressSource::from_glb(asset, level, scene.placement));
         }
         let nodes: HashMap<u32, (u32, Option<u32>)> = scene
             .body_of

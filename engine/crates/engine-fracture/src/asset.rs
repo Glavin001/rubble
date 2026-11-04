@@ -9,7 +9,8 @@
 //! Every offset is checked; malformed input fails before any GPU allocation.
 
 use anyhow::{anyhow, bail, ensure, Result};
-use serde::Serialize;
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const EXTENSION: &str = "SHARDWRIGHT_fracture";
@@ -132,8 +133,122 @@ pub struct Physics {
     pub bond_children: Vec<u32>,
 }
 
+/// The glTF JSON this reader uses, typed: the parse skips everything else. (A large
+/// asset's JSON held as a `serde_json::Value` takes several times its text: the timber
+/// yard's 39 MB of it took 330 MB.)
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Gltf {
+    pub accessors: Vec<GltfAccessor>,
+    pub buffer_views: Vec<GltfBufferView>,
+    pub buffers: Vec<GltfBuffer>,
+    pub images: Vec<GltfImage>,
+    pub materials: Vec<GltfMaterial>,
+    pub meshes: Vec<GltfMesh>,
+    pub nodes: Vec<GltfNode>,
+    pub extensions_required: Vec<String>,
+    /// Small (the fracture extension's header and its material library).
+    pub extensions: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GltfAccessor {
+    pub buffer_view: Option<usize>,
+    pub byte_offset: usize,
+    pub component_type: u32,
+    pub count: Option<usize>,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub sparse: Option<IgnoredAny>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GltfBufferView {
+    pub buffer: Option<u64>,
+    pub byte_offset: Option<u64>,
+    pub byte_length: Option<u64>,
+    pub byte_stride: Option<usize>,
+    pub extensions: GltfViewExtensions,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct GltfViewExtensions {
+    #[serde(rename = "EXT_meshopt_compression")]
+    pub meshopt: Option<IgnoredAny>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GltfBuffer {
+    pub byte_length: Option<u64>,
+    pub uri: Option<IgnoredAny>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct GltfImage {
+    pub uri: Option<IgnoredAny>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GltfMaterial {
+    pub pbr_metallic_roughness: GltfPbr,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GltfPbr {
+    pub base_color_factor: Option<Vec<f64>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct GltfMesh {
+    pub primitives: Vec<GltfPrimitive>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GltfPrimitive {
+    #[serde(default)]
+    pub attributes: GltfAttributes,
+    pub indices: Option<usize>,
+    pub material: Option<usize>,
+    #[serde(default = "triangles")]
+    pub mode: u32,
+}
+
+fn triangles() -> u32 {
+    4
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct GltfAttributes {
+    #[serde(rename = "POSITION")]
+    pub position: Option<usize>,
+    #[serde(rename = "NORMAL")]
+    pub normal: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct GltfNode {
+    pub mesh: Option<usize>,
+    pub extras: GltfNodeExtras,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct GltfNodeExtras {
+    pub fragment_id: Option<i64>,
+}
+
 pub struct FractureAsset {
-    pub json: Value,
+    pub json: Gltf,
     pub physics: Physics,
     /// The embedded material library (`extensions.SHARDWRIGHT_fracture.materialLibrary`).
     pub library: Value,
@@ -460,7 +575,7 @@ pub fn parse_fracture_glb(buffer: &[u8]) -> Result<FractureAsset> {
             && u32_at(8) as usize == buffer.len(),
         "Invalid GLB header or length"
     );
-    let (mut json, mut bin): (Option<Value>, Option<&[u8]>) = (None, None);
+    let (mut json, mut bin): (Option<Gltf>, Option<&[u8]>) = (None, None);
     let mut p = 12;
     while p < buffer.len() {
         ensure!(p + 8 <= buffer.len(), "Truncated GLB chunk");
@@ -480,8 +595,8 @@ pub fn parse_fracture_glb(buffer: &[u8]) -> Result<FractureAsset> {
         }
         p += n;
     }
-    let json = json.unwrap_or(Value::Null);
-    let ext = &json["extensions"][EXTENSION];
+    let json = json.unwrap_or_default();
+    let ext = json.extensions.get(EXTENSION).unwrap_or(&Value::Null);
     let bin = match bin {
         Some(b)
             if ext["version"] == 1
@@ -498,26 +613,30 @@ pub fn parse_fracture_glb(buffer: &[u8]) -> Result<FractureAsset> {
         "Unsupported fracture coordinate convention"
     );
     ensure!(
-        !json["extensionsRequired"]
-            .as_array()
-            .is_some_and(|r| r.iter().any(|e| e == "EXT_meshopt_compression")),
+        !json
+            .extensions_required
+            .iter()
+            .any(|e| e == "EXT_meshopt_compression"),
         "Export with --uncompressed for this demo"
     );
     ensure!(
-        json["buffers"].as_array().is_some_and(|b| b.len() == 1
-            && b[0].get("uri").is_none()
-            && b[0]["byteLength"]
-                .as_u64()
-                .is_some_and(|n| n as usize <= bin.len()))
-            && !json["images"]
-                .as_array()
-                .is_some_and(|i| i.iter().any(|i| i.get("uri").is_some())),
+        json.buffers.len() == 1
+            && json.buffers[0].uri.is_none()
+            && json.buffers[0]
+                .byte_length
+                .is_some_and(|n| n as usize <= bin.len())
+            && !json.images.iter().any(|i| i.uri.is_some()),
         "Expected a self-contained GLB"
     );
     let view = ext["bufferView"]
         .as_u64()
         .ok_or_else(|| anyhow!("Invalid bufferView"))? as usize;
     let library = ext["materialLibrary"].clone();
+    let mut json = json;
+    // The library is kept on its own (`library`); the extension header is small.
+    if let Some(Value::Object(e)) = json.extensions.get_mut(EXTENSION) {
+        e.remove("materialLibrary");
+    }
     let mut asset = FractureAsset {
         bytes: buffer.len(),
         bin: bin.to_vec(),
@@ -536,7 +655,10 @@ pub fn parse_fracture_glb(buffer: &[u8]) -> Result<FractureAsset> {
     for f in &physics.fragments {
         if f.node >= 0 {
             ensure!(
-                json["nodes"][f.node as usize]["extras"]["fragment_id"] == f.id,
+                json.nodes
+                    .get(f.node as usize)
+                    .and_then(|n| n.extras.fragment_id)
+                    == Some(f.id as i64),
                 "Mismatched fragment node"
             );
         }
@@ -584,16 +706,24 @@ impl Physics {
 
 impl FractureAsset {
     fn slice(&self, index: usize) -> Result<&[u8]> {
-        let v = &self.json["bufferViews"][index];
-        let off = v.get("byteOffset").map_or(Some(0), Value::as_u64);
-        let len = v["byteLength"].as_u64();
-        let total = self.json["buffers"][0]["byteLength"].as_u64().unwrap_or(0) as usize;
-        let (Some(off), Some(len)) = (off, len) else {
+        let v = self
+            .json
+            .buffer_views
+            .get(index)
+            .ok_or_else(|| anyhow!("Invalid bufferView"))?;
+        let off = v.byte_offset.unwrap_or(0);
+        let total = self
+            .json
+            .buffers
+            .first()
+            .and_then(|b| b.byte_length)
+            .unwrap_or(0) as usize;
+        let Some(len) = v.byte_length else {
             bail!("Invalid bufferView")
         };
         let (off, len) = (off as usize, len as usize);
         ensure!(
-            v["buffer"] == 0
+            v.buffer == Some(0)
                 && off
                     .checked_add(len)
                     .is_some_and(|e| e <= total && e <= self.bin.len()),
@@ -621,41 +751,42 @@ impl FractureAsset {
 
     /// Decode an accessor into `count` rows of `width` components.
     pub fn accessor(&self, index: usize) -> Result<Vec<Vec<f64>>> {
-        let a = &self.json["accessors"][index];
+        let a = self
+            .json
+            .accessors
+            .get(index)
+            .filter(|a| a.sparse.is_none())
+            .ok_or_else(|| anyhow!("Missing or sparse accessor unsupported in this demo"))?;
+        let view_index = a
+            .buffer_view
+            .ok_or_else(|| anyhow!("Unsupported accessor"))?;
+        let v = self
+            .json
+            .buffer_views
+            .get(view_index)
+            .ok_or_else(|| anyhow!("Invalid bufferView"))?;
         ensure!(
-            a.is_object() && a.get("sparse").is_none(),
-            "Missing or sparse accessor unsupported in this demo"
-        );
-        let view_index = a["bufferView"]
-            .as_u64()
-            .ok_or_else(|| anyhow!("Unsupported accessor"))? as usize;
-        let v = &self.json["bufferViews"][view_index];
-        ensure!(
-            v["extensions"].get("EXT_meshopt_compression").is_none(),
+            v.extensions.meshopt.is_none(),
             "Export with --uncompressed for this demo"
         );
         let bytes = self.slice(view_index)?;
-        let width = match a["type"].as_str() {
-            Some("SCALAR") => 1,
-            Some("VEC2") => 2,
-            Some("VEC3") => 3,
-            Some("VEC4") => 4,
+        let width = match a.kind.as_str() {
+            "SCALAR" => 1,
+            "VEC2" => 2,
+            "VEC3" => 3,
+            "VEC4" => 4,
             _ => bail!("Unsupported accessor"),
         };
-        let kind = a["componentType"].as_u64().unwrap_or(0);
+        let kind = a.component_type;
         let size = match kind {
             5121 => 1,
             5123 => 2,
             5125 | 5126 => 4,
             _ => bail!("Unsupported accessor"),
         };
-        let count = a["count"]
-            .as_u64()
-            .ok_or_else(|| anyhow!("Unsupported accessor"))? as usize;
-        let stride = v["byteStride"]
-            .as_u64()
-            .map_or(width * size, |s| s as usize);
-        let off = a["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let count = a.count.ok_or_else(|| anyhow!("Unsupported accessor"))?;
+        let stride = v.byte_stride.unwrap_or(width * size);
+        let off = a.byte_offset;
         ensure!(
             stride >= width * size
                 && (count == 0 || off + (count - 1) * stride + width * size <= bytes.len()),

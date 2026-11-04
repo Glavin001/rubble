@@ -80,6 +80,7 @@ void fastAccept(uint i, Collider a, bool aDyn, Aabb aa, uint j)
 
 static const uint FAST_MAX_CELLS = 262144u;
 
+
 // Every cell of one grid level whose entries can overlap the swept box: the
 // box padded by the entries' largest reach from their centre (E), then only
 // cells within reach of the sweep segment (a tube, so a diagonal sweep does
@@ -109,18 +110,27 @@ void fastWalkLevel(uint i, Collider a, bool aDyn, Aabb aa, float3 s0, float3 s1,
         if (segmentPointDistance(s0, s1, cc) > tube) continue;
         if (!hier)
         {
-            uint tables = gridSplit() ? 2u : 1u;
+            // The uniform rest tables (world_step.slang restUniform): W then R, R without
+            // its tombstones, through the same accept.
+#if defined(ENGINE_WGSL)
+            bool restU = restUniform();
+#else
+            bool restU = false;
+#endif
+            uint tables = restU || gridSplit() ? 2u : 1u;
             for (uint t = 0u; t < tables; t++)
             {
-                uint link = ALOAD(gConstraintIds[t * gridHashSize() + gridHash(cell.x, cell.y, cell.z)]);
+                bool rest = restU && t == 1u;
+                uint heads = restU ? (rest ? restHeads() : awakeHeads()) : t * gridHashSize();
+                uint link = ALOAD(gConstraintIds[heads + gridHash(cell.x, cell.y, cell.z)]);
                 uint guard = 0u;
                 while (link != 0xFFFFFFFFu && guard < 4096u)
                 {
                     uint cur = link & GRID_COLLIDER_MASK;
                     Aabb ab = gAabbs[base + cur];
-                    link = gridSplit() ? asuint(ab._pad1) : gColorLists[cur];
+                    link = rest ? ALOAD(gConstraintIds[restLinks() + cur]) : (gridSplit() ? asuint(ab._pad1) : gColorLists[cur]);
                     guard++;
-                    if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell))
+                    if (all(int3(floor((0.5 * (ab.mn + ab.mx)) / cs)) == cell) && !(rest && restTombstone(cur)))
                         fastAccept(i, a, aDyn, aa, cur);
                 }
                 if (link != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
@@ -220,6 +230,17 @@ void fastQuery(uint i, uint lane)
 // One workgroup per fast collider: FAST_CAP groups (in rows of 32768), those
 // past the list's count return at once, so a flood of fast debris after big
 // impacts is walked in parallel, not a few groups striding the list.
+// write_fast_args sizes it from the list's count instead (work slot 82, one
+// workgroup per listed collider, the same group numbering), so a step with few
+// fast colliders launches few groups, not FAST_CAP.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void write_fast_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    writeDispatchArgs(82u, fastCount() * 64u);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void broadphase_fast(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -1286,6 +1307,128 @@ void ccd_unhold(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// ---- ccd_wake by collider (World's plan; WGSL hosts) ----
+// The same test as ccd_wake without a collider search per body: a
+// body lies within reach × r + own of a sweep (own its largest collider extent) iff
+// one of its colliders c lies within reach × r + extent(c) of it (adding to the
+// largest extent gives the largest bound), so a thread per collider tests its own
+// extent, and the sweeping body's r (the largest extent of its colliders) is taken
+// once per CCD slot (ccd_slot_reach, or ccd_slot_reach_listed over the listed movers).
+// Both scan colliders, so colliders need not be sorted by body (threshold splits
+// re-parent them), and both run only while some CCD body moves more than four contact
+// offsets a step (ccdUnholds; work slot 87 is empty otherwise, when ccd_wake could wake
+// nothing). A body without colliders is never woken here; hosts with such bodies keep
+// ccd_wake. ccd_unhold stays per body (it searches colliders only for the few bodies
+// whose wake is deferred).
+// The slot's r: carry word 28 (ccd_respond's partner dw, written only after the
+// solve; read here in ccd_wake's place).
+static const uint CCD_REACH_WORD = 28u;
+
+// Work slot 87 (a thread per collider) when a CCD body sweeps fast; slot r words zeroed.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_reach_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    uint n = ccdBodyCount();
+    bool any = false;
+    for (uint k = 0u; k < n; k++)
+    {
+        ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * k + CCD_REACH_WORD], 0u);
+        if (ccdUnholds(gBodies[ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k])])) any = true;
+    }
+    writeDispatchArgs(87u, sceneHasCcd() && any ? gCounters[0].colliderCount : 0u);
+}
+
+// Largest collider extent of each fast CCD body (non-negative floats order as their bits).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_slot_reach(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = dispatchIndex(tid);
+    if (c >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[c];
+    BodyState b = gBodies[col.body];
+    uint slot = ccdSlotOf(col.body, b);
+    if (slot == CCD_NO_PAIR || !ccdUnholds(b)) return;
+    AMAX2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + CCD_REACH_WORD], asuint(colliderExtent(col)));
+}
+
+// ccd_slot_reach over the moving colliders the awake-indexed broadphase listed (slot 81):
+// a CCD slot's body was moving when it registered, so all its colliders are listed.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_slot_reach_listed(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    uint c = awakeCollider(li);
+    Collider col = gColliders[c];
+    BodyState b = gBodies[col.body];
+    uint slot = ccdSlotOf(col.body, b);
+    if (slot == CCD_NO_PAIR || !ccdUnholds(b)) return;
+    AMAX2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + CCD_REACH_WORD], asuint(colliderExtent(col)));
+}
+
+// ccdNearFastSweepStart's test for one collider of `b` (extent `own`).
+bool ccdColliderNearFastSweep(BodyState b, float reach, float own)
+{
+    uint n = ccdBodyCount();
+    for (uint k = 0u; k < n; k++)
+    {
+        BodyState bf = gBodies[ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k])];
+        if (!ccdUnholds(bf)) continue;
+        float r = asfloat(ALOAD(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * k + CCD_REACH_WORD]));
+        float3 a = bf.position;
+        float3 d = bf.linearVel * PARAMS.dt;
+        float t = clamp(dot(b.position - a, d) / max(dot(d, d), 1e-20), 0.0, 1.0);
+        if (length(a + d * t - b.position) <= reach * r + own) return true;
+    }
+    return false;
+}
+
+// ccd_wake, a thread per collider (slot 87).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_wake_colliders(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = dispatchIndex(tid);
+    if (c >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[c];
+    uint i = col.body;
+    BodyState b = gBodies[i];
+    if (!bodyIsDynamic(b) || !bodyIsSleeping(b)) return;
+    if (!ccdColliderNearFastSweep(b, 1.25, colliderExtent(col))) return;
+    gBodies[i].flags = (b.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
+    gBodies[i].sleepTimer = 0.0;
+}
+
+// ccd_unhold reading a body's record only when its awake bit is set: it changes only
+// awake bodies (a deferred wake), and the slot part runs in the threads below the CCD
+// slot count whatever their bit.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_unhold_bits(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sceneHasCcd() || i >= gCounters[0].bodyCount) return;
+    if (awakeBit(i))
+    {
+        BodyState b = gBodies[i];
+        if (ccdReleasesHeld(i, b)) gBodies[i].flags = b.flags & ~BODY_WAKE_PENDING;
+    }
+    if (i < ccdBodyCount())
+    {
+        uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * i;
+        if ((ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * i + 3u]) & CCD_RESPOND) != 0u)
+        {
+            uint other = ALOAD(gScratchAtomics[r + 7u]);
+            BodyState bo = gBodies[other];
+            if (ccdReleasesHeld(other, bo) || (!bodyIsSleeping(bo) && !wakePending(bo))) ASTORE(gScratchAtomics[r + 15u], 0u);
+        }
+    }
+}
+
 // Trust region of the bodies a CCD body can strike (after predict_bodies,
 // before the solve). A free body struck by a fast one takes the impact through
 // the solve, a position correction of up to the closing speed times h, but the
@@ -1825,4 +1968,10 @@ void apply_impulses(uint3 tid : SV_DispatchThreadID)
     gBodies[body].angularVel = b.angularVel + dw;
     gBodies[body].flags = (b.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
     gBodies[body].sleepTimer = 0.0;
+#if defined(ENGINE_WGSL) && defined(ENGINE_SLEEP_ARCHIVE)
+    // A sleeper a projectile hit wakes after the broadphase: list it for the sleep
+    // archive's touch query (archive_touch), which forms its resting pairs this step.
+    if (PASS_U == 1u && bodyIsSleeping(b) && archiveTouchQuery())
+        archiveList(body);
+#endif
 }

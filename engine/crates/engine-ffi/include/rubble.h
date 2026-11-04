@@ -42,6 +42,25 @@ typedef enum RbContacts {
   RB_CONTACTS_CANONICAL = 2,
 } RbContacts;
 
+// What a world with sleep does with the contacts of pairs at rest
+// (`RbWorldDef::resting_contacts`, rubble's `RestingContacts`).
+typedef enum RbRestingContacts {
+  // The sleep archive (default): a sleeper a moving body touches forms all its resting
+  // contacts in that step, and woken contacts restart as the carry's do. A sleeping
+  // pair costs nothing per step. Canonical contacts (threshold destructibles) keep
+  // main's archive: warm wakes from archived rows, enabled by the first threshold
+  // destructible. Compact contacts keep the carry instead.
+  RB_RESTING_ARCHIVE = 0,
+  // The resting-pair carry (opt-out): every pair at rest is re-emitted and kept each
+  // step (the earlier default).
+  RB_RESTING_CARRY = 1,
+  // Neither (measurement): a woken pair restarts cold.
+  RB_RESTING_DROP = 2,
+  // Opt-in: the touch query and cold wakes in canonical worlds too (threshold
+  // destructibles then break differently from main).
+  RB_RESTING_TOUCH = 3,
+} RbRestingContacts;
+
 typedef enum RbResult {
   RB_OK = 0,
   RB_ERROR = 1,
@@ -219,6 +238,11 @@ typedef struct RbWorldDef {
   // (three-avbd's `reuseContacts`, `FLAG_REUSE_CONTACTS`; demo.html turns it on for its brick
   // and box scenes). Off by default.
   bool reuse_contacts;
+  // Resting contacts in a world with sleep (`RB_RESTING_ARCHIVE` by default).
+  enum RbRestingContacts resting_contacts;
+  // Room in the sleep archive, in contact rows (0: the contact capacity); more fails
+  // the step.
+  uint32_t sleep_archive_rows;
   // Begins at or above this approach speed are hits (world units/s).
   float hit_event_threshold;
   // Where the world ends (`WorldDef::kill_bounds`): a dynamic body whose origin

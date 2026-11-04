@@ -120,7 +120,9 @@ These remain:
    that woke.
 7. **No builders for the joint scenes** (ragdolls, chains, the motor field) and no crate
    preset.
-8. **Few engine features on `RbWorldDef`.** `reuse_contacts` is there now; `grid_levels` and the
+8. **Few engine features on `RbWorldDef`.** `reuse_contacts` and `resting_contacts` (the sleep
+   archive by default: sleeping pairs cost nothing per step; `RB_RESTING_CARRY` opts back into
+   the resting-pair carry) are there now; `grid_levels` and the
    page's other solver settings (sparse colour start, sleep thresholds, β/α) are not. At most
    1024 statics wider than half a grid cell are allowed (`OVERFLOW_LARGE_STATICS`).
 9. **Capacities are guesswork.** Brick walls need about 30 contacts per body. A helper that sizes

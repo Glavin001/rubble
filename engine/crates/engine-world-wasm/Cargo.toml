@@ -3,7 +3,7 @@ name = "engine-world-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Rubble's World in the browser (wasm-bindgen): the web pages' physics host on the browser's WebGPU, the same host native and Unreal run; also Broadside's scene (broadside.html), stepped in Rust"
+description = "Rubble's World in the browser (wasm-bindgen): the web pages' physics host on the browser's WebGPU, the same host native and Unreal run; also the range scenes, stepped in Rust: Broadside (broadside.html) and the timber yard (timber.html), which engine-viewer's world_viewer also draws natively"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

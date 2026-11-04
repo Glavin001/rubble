@@ -84,6 +84,68 @@ pub struct StepModes {
     /// Some body has motion locks: `lock_predict` after `predict_bodies` and
     /// `lock_project` after the solve.
     pub motion_locks: bool,
+    /// Awake-indexed broadphase (hierarchical grids only): static and sleeping
+    /// colliders stay in the persistent resting table, and only the colliders of
+    /// moving bodies are bounded, inserted and queried (`list_moving_colliders`,
+    /// world_step.slang's rest tables). The same candidate pairs as the full pass.
+    pub awake_broadphase: bool,
+    /// With `awake_broadphase`, on a uniform grid (no hierarchical levels): the split
+    /// grid's other table kept across steps as the resting table, its awake table filled
+    /// from the moving colliders (world_step.slang restUniform). Only with the split grid,
+    /// above the pairwise path's 512 colliders and without kinematic bodies (they sit in
+    /// the other table while they move); otherwise the full pass runs.
+    pub rest_uniform: bool,
+    /// With `awake_broadphase`: after the sleep commit, the colliders that came to rest
+    /// this step go into the resting table (rest_sleepers_mark .. rest_push) instead of
+    /// a rebuild the next step after every sleep event; a rebuild only when one cannot
+    /// be placed (world_step.slang restIncremental).
+    pub rest_incremental: bool,
+    /// `ccd_wake` a thread per collider (ccd_step.slang ccd_wake_colliders), only while
+    /// a CCD body sweeps fast (work slot 87); WGSL hosts. `ccd_unhold` stays per body.
+    pub ccd_by_collider: bool,
+    /// `predict_bodies` and `extract_velocity_sleep` a thread per entry of this step's
+    /// awake list (their PASS_U = 1 mode, work slot 67) instead of a thread per body
+    /// slot, where no body changes outside that list between `build_awake_list` and
+    /// them ([`awake_body_passes`]): the bodies they change are exactly the listed ones.
+    pub awake_body_passes: bool,
+    /// The primal's headroom colours (from last step's colour count to the sparse
+    /// tail's first) solved in the sparse tail's single workgroup with the colour
+    /// dispatches' lanes (`solve_primal_sparse_tail`): one dispatch an iteration instead
+    /// of one per headroom colour, with each body's update as its colour's dispatch
+    /// gives it. WGSL hosts.
+    pub primal_tail: bool,
+    /// Every solver iteration in one workgroup while few bodies are awake
+    /// (`solve_primal_sparse_loop`, [`solve_loop`]): one dispatch for what is otherwise a
+    /// dispatch per colour and a dual per iteration, with the same updates. WGSL hosts.
+    pub solve_loop: bool,
+    /// With `awake_broadphase`: rebuild the resting table this step (the host wrote
+    /// bodies or colliders, or the last step did not keep the table). Steps after
+    /// one where bodies fell asleep rebuild it on the GPU (host word 5).
+    pub rest_rebuild: bool,
+    /// With `awake_broadphase`: bound every collider this step (`build_aabbs`), not
+    /// only the moving ones (a host write may have moved a static).
+    pub full_bounds: bool,
+    /// Size `broadphase_fast` from the fast list's count (`write_fast_args`, work
+    /// slot 82) instead of dispatching all FAST_CAP workgroups (the same groups do
+    /// the work; the rest returned at once).
+    pub fast_indirect: bool,
+    /// Sleep archive: a woken pair starts cold instead of from its archived row (host
+    /// word 30 bit 6); with the touch query no rows are archived then
+    /// ([`archive_rows`]).
+    pub archive_cold: bool,
+    /// Measurement variant (sleep archive): `archive_spread` rounds before `archive_emit`,
+    /// each listing the sleepers resting on listed ones (0: off); with the touch query,
+    /// that many more `archive_touch_spread` hops than its one.
+    pub archive_spread_rounds: u32,
+    /// Sleep archive: a sleeper touched by a moving body forms all its resting pairs
+    /// before this step's narrowphase (`archive_touch`, host word 30 bit 8), and its
+    /// pairs at rest keep their archived rows; off: `archive_emit` emits the pairs
+    /// filed in the touched sleeper's own archive (the earlier path, for A/B runs).
+    pub archive_touch_query: bool,
+    /// Sleep archive laid out without rows (host word 30 bit 9, world_step.slang
+    /// archiveCompact): only the touch query's per-body records, for an archive that
+    /// never keeps rows (cold wakes with the touch query).
+    pub archive_compact: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -220,6 +282,63 @@ pub fn primal_colors_dispatched(m: &StepModes, i: &StepInputs, max_c: u32) -> u3
     estimate.min(m.sparse_start).min(max_c)
 }
 
+/// Colours `(p, q)` of the primal tail ([`StepModes::primal_tail`]): `p` last step's
+/// colour count, `q` the first colour today's plan leaves to the sparse tail (all
+/// colours from `q` are solved there with 8 lanes a body, as before), when the headroom
+/// between them is not empty and no wider than [`TAIL_HEADROOM_MAX`].
+pub fn primal_tail(m: &StepModes, i: &StepInputs, max_c: u32, sparse_start: u32) -> Option<(u32, u32)> {
+    if !m.primal_tail || m.color_headroom.is_none() || i.steps_done == 0 {
+        return None;
+    }
+    let q = max_c.min(sparse_start);
+    let p = i.last.color_count.min(q);
+    (q > p && q - p <= TAIL_HEADROOM_MAX).then_some((p, q))
+}
+
+/// Whether the step's solver iterations run in one workgroup ([`StepModes::solve_loop`]):
+/// while few bodies were awake last step (the loop is one workgroup), without soft bodies
+/// or vehicles (their passes run between the iterations) and for at most
+/// [`LOOP_ITERATIONS_MAX`] iterations.
+pub fn solve_loop(m: &StepModes, i: &StepInputs) -> bool {
+    m.solve_loop
+        && i.steps_done > 0
+        && i.soft.bodies == 0
+        && i.vehicle_count == 0
+        && (1..=LOOP_ITERATIONS_MAX).contains(&i.iterations)
+        && i.last.awake_count <= LOOP_AWAKE_MAX
+        && i.last.contact_count.max(i.joint_count) <= LOOP_CONTACTS_MAX
+}
+
+/// The solve loop's limits: awake bodies and contacts (or joints) last step, iterations.
+/// One workgroup runs every colour serially, so its cost grows with the contacts: on the
+/// 100k grid (M-series, 4 iterations) it beats the per-colour dispatches at 76 contacts
+/// (1.45 against 1.86 ms a step) and loses from 192 (2.95 against 2.51; 7.6 against 2.3
+/// at 800).
+pub const LOOP_AWAKE_MAX: u32 = 256;
+pub const LOOP_CONTACTS_MAX: u32 = 128;
+pub const LOOP_ITERATIONS_MAX: u32 = 32;
+/// First pass-table slot of the solve loop: `q * (LOOP_ITERATIONS_MAX + 1) + iterations`
+/// for q (the first sparse colour) in 0..=32.
+pub const LOOP_PASS: u32 = TAIL_PASS + 2 * TAIL_SLOTS;
+const LOOP_SLOTS: u32 = 33 * (LOOP_ITERATIONS_MAX + 1);
+
+/// Pass-table slot of the solve loop.
+pub fn loop_pass(q: u32, iterations: u32) -> u32 {
+    LOOP_PASS + q * (LOOP_ITERATIONS_MAX + 1) + iterations
+}
+
+/// Widest headroom the tail's pass table covers.
+pub const TAIL_HEADROOM_MAX: u32 = 8;
+/// First pass-table slot of the primal tail: `p * (TAIL_HEADROOM_MAX + 1) + (q - p)`
+/// for p in 0..=32, then the same again with the stabilization flag.
+pub const TAIL_PASS: u32 = 160;
+const TAIL_SLOTS: u32 = 33 * (TAIL_HEADROOM_MAX + 1);
+
+/// Pass-table slot of the tail over colours [p, q) (colour lanes), then sparse.
+pub fn tail_pass(p: u32, q: u32, stab: bool) -> u32 {
+    TAIL_PASS + u32::from(stab) * TAIL_SLOTS + p * (TAIL_HEADROOM_MAX + 1) + (q - p)
+}
+
 /// Canonical entry → the variant a persistent-contact host compiled.
 pub fn resolve_entry(name: &str, persistent: bool) -> &str {
     if !persistent {
@@ -238,6 +357,8 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "csr_scatter_contacts" => "csr_scatter_contacts_persistent",
         "solve_primal_color_compact" => "solve_primal_color_persistent",
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
+        "solve_primal_sparse_tail_compact" => "solve_primal_sparse_tail_persistent",
+        "solve_primal_sparse_loop_compact" => "solve_primal_sparse_loop_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
         "solve_dual_compact" => "solve_dual_persistent",
         "convex_classify" => "convex_classify_persistent",
@@ -247,6 +368,9 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "contact_events" => "contact_events_persistent",
         // The one vehicle kernel that reads contacts (vehicle_step_persistent.slang).
         "vehicle_loads" => "vehicle_loads_persistent",
+        // The sleep archive's passes over this step's contact rows.
+        "archive_count" => "archive_count_persistent",
+        "archive_scatter" => "archive_scatter_persistent",
         _ => name,
     }
 }
@@ -318,6 +442,17 @@ pub fn encode_step(
                     size: 4,
                 });
             }
+            if awake_broadphase(m, i) {
+                // Last step's sleep events: write_moved_args rebuilds the resting
+                // table after any (a new sleeper is missing from it).
+                e.0.push(Cmd::Copy {
+                    src: COUNTERS_BINDING,
+                    src_offset: 36,
+                    dst: HOST_UNIFORM_BINDING,
+                    dst_offset: host_word_offset(5),
+                    size: 4,
+                });
+            }
         }
         e.0.push(Cmd::Copy {
             src: COUNTER_UPLOAD,
@@ -350,7 +485,53 @@ pub fn encode_step(
         // A soft body sleeps and wakes as a whole.
         e.d("soft_wake", u64::from(i.soft.bodies) * 64);
     }
-    if !reuse_manifolds {
+    let rest = awake_broadphase(m, i);
+    if !reuse_manifolds && rest {
+        // Moving colliders (slot 81), their bounds (or every collider's after a host
+        // write), then the resting table: rebuilt after sleep events or host writes
+        // (slots 79/80 are empty otherwise), its lists published, CCD lists reset.
+        e.d("list_moving_colliders", n_cols);
+        e.d("write_awake_collider_args", 64);
+        if m.full_bounds {
+            e.d("build_aabbs", n_cols);
+        } else {
+            e.w("build_aabbs_listed", 81);
+        }
+        if i.joint_count > 0 {
+            e.d("joint_hash_clear", u64::from(i.joint_hash_slots));
+            e.d("joint_hash_insert", n_joints);
+        }
+        // The uniform table with incremental inserts is rebuilt only when the host asks
+        // (nothing on the GPU asks for it): otherwise these three would dispatch nothing.
+        if !(m.rest_uniform && m.rest_incremental && !m.rest_rebuild) {
+            e.d("write_moved_args", 64);
+            e.w("rest_clear", 79);
+            e.w(if m.rest_uniform { "rest_insert_uniform" } else { "rest_insert" }, 80);
+        }
+        if m.rest_uniform {
+            e.d("rest_publish_uniform", 64);
+            if mo.ccd {
+                e.d("ccd_register", n_bodies);
+            }
+            e.w("broadphase_insert_awake_uniform", 81);
+            e.w("broadphase_query_awake_uniform", 81);
+            // Sleepers' pairs with the large dynamics: a walk from each (slot 88), or a
+            // thread per collider for a very large one (slot 85); empty without any.
+            e.d("write_sleeper_large_args", 64);
+            e.w("broadphase_sleeper_large_walk", 88);
+            e.w("broadphase_sleeper_large", 85);
+        } else {
+            e.d("rest_publish", 64);
+            if mo.ccd {
+                e.d("ccd_register", n_bodies);
+            }
+            e.w("broadphase_insert_awake", 81);
+            e.w("broadphase_query_awake", 81);
+            // Resting colliders finer than a coarse mover: the mover scans their cells.
+            e.d("write_finer_args", 64);
+            e.w("broadphase_query_finer", 77);
+        }
+    } else if !reuse_manifolds {
         e.d("build_aabbs", n_cols);
         if i.joint_count > 0 {
             e.d("joint_hash_clear", u64::from(i.joint_hash_slots));
@@ -365,10 +546,18 @@ pub fn encode_step(
         }
         e.d("broadphase_insert", n_cols);
         e.d("broadphase_query", n_cols);
+    }
+    if !reuse_manifolds {
         if fast_list_scheduled(&mo) {
             // Sweeps longer than a cell query along their path (row 1).
             e.phase("broadphaseGrid");
-            e.d("broadphase_fast", FAST_GROUPS * 64);
+            if m.fast_indirect {
+                // One workgroup per listed fast collider (slot 82), not FAST_CAP.
+                e.d("write_fast_args", 64);
+                e.w("broadphase_fast", 82);
+            } else {
+                e.d("broadphase_fast", FAST_GROUPS * 64);
+            }
             e.phase("ccdFast");
         }
         if vehicles {
@@ -391,10 +580,38 @@ pub fn encode_step(
         if mo.characters > 0 {
             e.d("char_move", u64::from(mo.characters) * 64);
         }
+        if rest {
+            // Every walker of this step's tables is done: empty W's heads.
+            let clear = if m.rest_uniform {
+                "broadphase_clear_awake_uniform"
+            } else {
+                "broadphase_clear_awake"
+            };
+            e.w(clear, 81);
+        }
     }
     if m.sleep_archive_blocks > 0 && !reuse_manifolds {
-        // Touched sleepers' archived resting pairs (world_step.slang archive_emit).
-        e.d("archive_emit", 4096);
+        if archive_touch(m) {
+            // Touched sleepers' resting pairs, queried (world_step.slang archive_touch),
+            // after listing the sleepers those woken since the broadphase rest on.
+            // One hop, and `archive_spread_rounds` more (measurement variant).
+            // Work slots 83 (a thread a listed sleeper) and 84 (a thread a collider, or
+            // none when nothing is listed), written by archive_touch_snap / _args.
+            for _ in 0..=m.archive_spread_rounds {
+                e.d("archive_touch_snap", 64);
+                e.w("archive_touch_seed", 83);
+                e.w("archive_touch_spread", 84);
+            }
+            e.d("archive_touch_args", 64);
+            e.w("archive_touch", 84);
+        } else {
+            // Measurement variant: sleepers resting on touched ones, one archived hop a round.
+            for _ in 0..m.archive_spread_rounds {
+                e.d("archive_spread", 4096);
+            }
+            // Touched sleepers' archived resting pairs (world_step.slang archive_emit).
+            e.d("archive_emit", 4096);
+        }
     }
     e.d(work_args, 64);
     e.phase("broadphase");
@@ -411,7 +628,18 @@ pub fn encode_step(
         e.w("ccd_pick_key", 64);
         e.w("ccd_pick", 64);
         // Sleepers in a fast CCD body's path wake before the narrowphase.
-        e.d("ccd_wake", n_bodies);
+        if m.ccd_by_collider {
+            e.d("ccd_reach_args", 64);
+            // A CCD slot's colliders are among the listed movers on awake-indexed steps.
+            if rest {
+                e.w("ccd_slot_reach_listed", 81);
+            } else {
+                e.w("ccd_slot_reach", 87);
+            }
+            e.w("ccd_wake_colliders", 87);
+        } else {
+            e.d("ccd_wake", n_bodies);
+        }
         e.d("ccd_mark", u64::from(CCD_BODY_CAP));
         e.phase("ccdToi");
     }
@@ -512,7 +740,15 @@ pub fn encode_step(
         e.d("warmstart_joints", n_joints);
     }
     e.phase("warm");
-    e.d("build_awake_list", n_bodies);
+    // With the awake bitmap (awake-list body passes): the per-body passes below that act
+    // only on listed bodies read a bit per body before its record.
+    let bits = awake_body_passes(m, i).1;
+    if bits {
+        e.d("clear_awake_bits", n_bodies.div_ceil(32));
+        e.d("build_awake_list_bits", n_bodies);
+    } else {
+        e.d("build_awake_list", n_bodies);
+    }
     e.d(work_args, 64);
     e.d("csr_clear", n_bodies + 1);
     e.w("csr_degree_contacts", 66);
@@ -553,15 +789,18 @@ pub fn encode_step(
     }
     e.phase("coloring");
     let max_c = i.max_colors.min(32);
-    e.d("count_color_tiles", n_bodies);
+    e.d(if bits { "count_color_tiles_bits" } else { "count_color_tiles" }, n_bodies);
     e.d("prefix_color_tiles_parallel", u64::from(max_c) * 64);
-    e.d("scatter_color_tiles", n_bodies);
+    e.d(if bits { "scatter_color_tiles_bits" } else { "scatter_color_tiles" }, n_bodies);
     // Per-colour max CSR degree for degree-aware primal lanes (s[20]).
     e.w("record_color_degrees", 67);
     e.d("write_color_args", 64);
     if mo.ccd && !reuse_manifolds {
         // Bodies a fast CCD body woke this step are solved this step (ccd_step.slang).
-        e.d("ccd_unhold", n_bodies);
+        // Per body: it reads a body's flags and searches colliders only for the few whose
+        // wake is deferred: cheaper than a scan of every collider (one measured 0.1 ms
+        // more on gables506k while the ball flies).
+        e.d(if bits { "ccd_unhold_bits" } else { "ccd_unhold" }, n_bodies);
     }
     if i.guidance {
         // After the graph (free flight = no contacts or joints this step) and
@@ -576,7 +815,12 @@ pub fn encode_step(
         e.d("guide_commit", 64);
         e.phase("guide");
     }
-    e.d("predict_bodies", n_bodies);
+    let (predict_listed, extract_listed) = awake_body_passes(m, i);
+    if predict_listed {
+        e.wp("predict_bodies", 67, 1);
+    } else {
+        e.d("predict_bodies", n_bodies);
+    }
     if m.motion_locks {
         e.d("lock_predict", n_bodies);
     }
@@ -630,11 +874,36 @@ pub fn encode_step(
     } else {
         ("solve_primal_color", "solve_primal_sparse", "solve_dual")
     };
-    for iter in 0..i.iterations {
-        for color in 0..max_c.min(sparse_start) {
+    // The headroom colours (past last step's count) and the sparse tail in one
+    // workgroup (`solve_primal_sparse_tail`, the colour dispatches' lanes for the
+    // headroom): colours [0, solo) dispatched one by one, the rest in the tail.
+    let tail = primal_tail(m, i, max_c, sparse_start);
+    let solo = tail.map_or(max_c.min(sparse_start), |(p, _)| p);
+    let tail_kernel = if m.compact_contacts {
+        "solve_primal_sparse_tail_compact"
+    } else {
+        "solve_primal_sparse_tail"
+    };
+    let looped = solve_loop(m, i);
+    if looped {
+        // Every iteration in one workgroup (few bodies awake): the same colours, lanes,
+        // order and dual updates as the dispatches below.
+        let kernel = if m.compact_contacts {
+            "solve_primal_sparse_loop_compact"
+        } else {
+            "solve_primal_sparse_loop"
+        };
+        e.dp(kernel, 64, loop_pass(max_c.min(sparse_start), i.iterations));
+        // Timed as one primal phase (the duals run inside it).
+        e.phase("primal");
+    }
+    for iter in 0..if looped { 0 } else { i.iterations } {
+        for color in 0..solo {
             e.wp(primal, color, color);
         }
-        if sparse_start < max_c {
+        if let Some((p, q)) = tail {
+            e.dp(tail_kernel, 64, tail_pass(p, q, false));
+        } else if sparse_start < max_c {
             e.dp(sparse, 64, sparse_start);
         }
         if soft {
@@ -675,10 +944,12 @@ pub fn encode_step(
     }
     if i.post_stabilize {
         e.d("record_stab_velocity", n_bodies);
-        for color in 0..max_c.min(sparse_start) {
+        for color in 0..solo {
             e.wp(primal, color, STAB_PASS + color);
         }
-        if sparse_start < max_c {
+        if let Some((p, q)) = tail {
+            e.dp(tail_kernel, 64, tail_pass(p, q, true));
+        } else if sparse_start < max_c {
             e.dp(sparse, 64, STAB_PASS + sparse_start);
         }
         e.phase("stabilize");
@@ -703,7 +974,11 @@ pub fn encode_step(
     if m.motion_locks {
         e.d("lock_project", n_bodies);
     }
-    e.d("extract_velocity_sleep", n_bodies);
+    if extract_listed {
+        e.wp("extract_velocity_sleep", 67, 1);
+    } else {
+        e.d("extract_velocity_sleep", n_bodies);
+    }
     if vehicles {
         // Mount loads from the final λ and solved velocities; overloaded parts
         // and wheels are severed by the next step's vehicle_input.
@@ -742,7 +1017,7 @@ pub fn encode_step(
         }
     }
     e.w("sleep_island_commit", 67);
-    if m.sleep_archive_blocks > 0 {
+    if archive_rows(m) {
         // Archive what just fell asleep (awake list, then this step's rows).
         e.w("archive_free", 67);
         e.w("archive_count", 65);
@@ -757,6 +1032,14 @@ pub fn encode_step(
         e.d("ccd_respond_apply", u64::from(CCD_BODY_CAP));
         e.phase("ccdRespond");
     }
+    if rest && m.rest_incremental && !reuse_manifolds {
+        // This step's movers that came to rest join the resting table (slot 81 still
+        // lists them; slot 86 one thread per bucket they leave).
+        e.w("rest_sleepers_mark", 81);
+        e.d("write_rest_dirty_args", 64);
+        e.w("rest_unlink", 86);
+        e.w("rest_push", 81);
+    }
     e.phase("sleep");
     if m.pose_output {
         // Reads the final body state; writes only the pose buffers (34-36).
@@ -766,6 +1049,48 @@ pub fn encode_step(
     e.0
 }
 
+/// Whether the sleep archive keeps rows (`archive_free` .. `archive_seal` after the
+/// sleep pass): only when something reads them, a warm start (not
+/// [`StepModes::archive_cold`]) or the earlier `archive_emit` path (which emits nothing
+/// while the carry runs).
+pub fn archive_rows(m: &StepModes) -> bool {
+    m.sleep_archive_blocks > 0
+        && !m.archive_compact
+        && (!m.archive_cold || (!m.archive_touch_query && !m.carry_rest))
+}
+
+/// Whether the sleep archive's touch query runs ([`StepModes::archive_touch_query`]):
+/// not with the resting-pair carry, whose carried pairs already include a touched
+/// sleeper's.
+pub fn archive_touch(m: &StepModes) -> bool {
+    m.sleep_archive_blocks > 0 && m.archive_touch_query && !m.carry_rest
+}
+
+/// Whether `predict_bodies` / `extract_velocity_sleep` run over the awake list
+/// ([`StepModes::awake_body_passes`]): not with kinematic bodies (prediction moves them,
+/// and they are not listed) for prediction, and for both not with vehicles, characters,
+/// soft bodies or directed debris, whose passes may wake or move bodies after the list
+/// is built.
+pub fn awake_body_passes(m: &StepModes, i: &StepInputs) -> (bool, bool) {
+    let both = m.awake_body_passes
+        && i.vehicle_count == 0
+        && i.motion.characters == 0
+        && i.soft.bodies == 0
+        && !i.guidance;
+    (both && !i.motion.kinematic, both)
+}
+
+/// Whether this step runs the awake-indexed broadphase ([`StepModes::awake_broadphase`],
+/// which hosts set for hierarchical grids only): not with characters (they move
+/// kinematic bodies without a velocity, which the moving-collider list cannot see)
+/// or soft bodies.
+pub fn awake_broadphase(m: &StepModes, i: &StepInputs) -> bool {
+    m.awake_broadphase
+        && i.motion.characters == 0
+        && i.soft.bodies == 0
+        && (!m.rest_uniform || (m.grid_split && !i.motion.kinematic && i.collider_count > 512))
+}
+
 /// Entries a persistent-contact host replays (every name `encode_step` can
 /// emit, resolved with [`resolve_entry`]). Native hosts compile exactly these.
 pub const PERSISTENT_ENTRIES: &[&str] = &[
@@ -773,6 +1098,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "apply_impulses",
     "ccd_register",
     "broadphase_fast",
+    "write_fast_args",
     "ccd_toi",
     "ccd_pick_key",
     "ccd_pick",
@@ -782,6 +1108,11 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_respond_apply",
     "ccd_trust",
     "ccd_unhold",
+    "ccd_unhold_bits",
+    "ccd_reach_args",
+    "ccd_slot_reach",
+    "ccd_slot_reach_listed",
+    "ccd_wake_colliders",
     "ccd_late_mark",
     "ccd_late_sweep",
     "ccd_validate",
@@ -807,6 +1138,30 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "broadphase_clear",
     "broadphase_insert",
     "broadphase_query",
+    "list_moving_colliders",
+    "write_awake_collider_args",
+    "build_aabbs_listed",
+    "write_moved_args",
+    "rest_clear",
+    "rest_insert",
+    "rest_publish",
+    "broadphase_insert_awake",
+    "broadphase_query_awake",
+    "write_finer_args",
+    "broadphase_query_finer",
+    "broadphase_clear_awake",
+    "rest_insert_uniform",
+    "rest_publish_uniform",
+    "broadphase_insert_awake_uniform",
+    "broadphase_query_awake_uniform",
+    "write_sleeper_large_args",
+    "broadphase_sleeper_large",
+    "broadphase_sleeper_large_walk",
+    "broadphase_clear_awake_uniform",
+    "rest_sleepers_mark",
+    "write_rest_dirty_args",
+    "rest_unlink",
+    "rest_push",
     "write_work_args",
     "write_work_args_copy_persistent",
     "carry_rest_pairs",
@@ -833,6 +1188,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "contact_events_persistent",
     "warmstart_joints",
     "build_awake_list",
+    "clear_awake_bits",
+    "build_awake_list_bits",
     "csr_clear",
     "csr_degree_contacts_persistent",
     "csr_degree_joints",
@@ -848,6 +1205,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "color_bodies",
     "color_bodies_tail",
     "count_color_tiles",
+    "count_color_tiles_bits",
+    "scatter_color_tiles_bits",
     "prefix_color_tiles_parallel",
     "scatter_color_tiles",
     "record_color_degrees",
@@ -855,6 +1214,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "predict_bodies",
     "solve_primal_color_persistent",
     "solve_primal_sparse_persistent",
+    "solve_primal_sparse_tail_persistent",
+    "solve_primal_sparse_loop_persistent",
     "solve_dual_persistent",
     "record_stab_velocity",
     "extract_velocity_sleep",
@@ -1010,16 +1371,41 @@ pub const BIND_COUNT: usize = 34;
 /// Pass-uniform slot stride (binding 22, dynamic offsets).
 pub const PASS_ALIGN: u64 = 256;
 /// Pass-uniform slots (binding 22): see [`pass_table`].
-pub const PASS_SLOTS: u64 = 160;
+pub const PASS_SLOTS: u64 = 160 + 2 * 33 * 9 + 33 * 33;
 /// First post-stabilization slot: `STAB_PASS + c` holds `256 | c` (colour c at α = 0).
 pub const STAB_PASS: u32 = 96;
 
-/// `gConstraintIds` words before the CSR index (grid heads, warm hash, ids).
-pub fn constraint_id_words(c: &WorldCapacity) -> u32 {
+/// The bound the pre-CSR region's tables are sized within (grid heads, warm hash):
+/// the constraint ids rounded up to a power of two. The region itself
+/// ([`constraint_id_words`]) holds only what those tables and the ids can reach.
+pub fn constraint_id_cap(c: &WorldCapacity) -> u32 {
     let words = (2 * (c.max_contacts + c.max_joints))
         .max(32768)
         .next_power_of_two() as u64;
     words.max(131072) as u32
+}
+
+/// `gConstraintIds` words before the CSR index (grid heads, warm hash, ids): the most
+/// any of them can use. Their sizes are those within [`constraint_id_cap`], so the
+/// tables are the same; only the words none of them can reach are not allocated
+/// (the ids' rounding to a power of two: 2 x (2^21 contacts + 64 joints) took 2^23
+/// words, half of them unused).
+pub fn constraint_id_words(c: &WorldCapacity) -> u32 {
+    let cap = constraint_id_cap(c);
+    let ids = 2 * (c.max_contacts + c.max_joints);
+    // Split grids: two tables (the most a grid takes, split or not).
+    let grid = 2 * grid_hash_words(c, c.max_colliders, true, false);
+    let fixed = 2 * grid_hash_words(c, c.max_colliders, true, true);
+    // The warm hash at the most contacts and bodies its callers pass (both clamped
+    // to the capacity), heads or records.
+    let heads = warm_hash_slots(c, c.max_bodies, c.max_contacts.max(256), false);
+    let records = 4 * warm_hash_slots(c, c.max_bodies, c.max_contacts.max(256), true);
+    ids.max(grid)
+        .max(fixed)
+        .max(heads)
+        .max(records)
+        .max(131072)
+        .min(cap)
 }
 
 /// Broadphase grid heads: at least twice the colliders (three-avbd), so 506k
@@ -1029,15 +1415,17 @@ pub fn grid_hash_words(c: &WorldCapacity, colliders: u32, split: bool, fixed: bo
     if fixed {
         return 131072;
     }
-    let region = constraint_id_words(c) / if split { 2 } else { 1 };
+    let region = constraint_id_cap(c) / if split { 2 } else { 1 };
     let cap = 1u32 << (31 - region.leading_zeros());
     (2 * colliders).max(131072).next_power_of_two().min(cap)
 }
 
 /// Warm hash size in slots: one word per slot (heads), or four-word record
 /// slots at ~2x manifolds, never below 4x bodies, within the pre-CSR region.
+/// `bodies` and `prev_contacts` are at most the capacity's ([`constraint_id_words`]
+/// holds the largest table).
 pub fn warm_hash_slots(c: &WorldCapacity, bodies: u32, prev_contacts: u32, record: bool) -> u32 {
-    let ids_len = constraint_id_words(c);
+    let ids_len = constraint_id_cap(c);
     if record {
         (prev_contacts / 2)
             .max(4 * bodies)
@@ -1077,7 +1465,9 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[11] = b(c.max_bodies, 4);
     s[12] = b(c.max_bodies, 4);
     s[13] = b(c.max_bodies + 1, 4);
-    s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1) * 4;
+    // The constraint ids, the CSR index, the awake bitmap (the awake-indexed
+    // broadphase's tables are added once a step takes it).
+    s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1 + awake_bits_words(c)) * 4;
     s[15] = b(c.max_bodies * (c.max_colors + 2), 4);
     s[16] = b(c.max_colors * c.max_bodies.div_ceil(64).max(1), 4);
     s[17] = b(c.max_colors.max(128), 4);
@@ -1089,8 +1479,12 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[21] = u64::from(engine_schema::SCRATCH_WORDS) * 4;
     s[22] = PASS_SLOTS * PASS_ALIGN;
     // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
-    // contacts 73), convex 74..76.
-    s[23] = b(c.max_colors.max(77) * 3, 4);
+    // contacts 73), convex 74..76, the awake-indexed broadphase's 77..81 (finer
+    // scan, moved list, resting-table rebuild, moving colliders), the fast list's 82, the
+    // sleep archive's touch query 83 and 84, the uniform rest tables' sleeper scan 85,
+    // the incremental rest inserts' unlink 86, the CCD wake by collider 87, the
+    // sleepers' walk from the large dynamics 88.
+    s[23] = b(c.max_colors.max(90) * 3, 4);
     s[24] = b(c.max_colliders, 80);
     s[25] = b(c.max_candidates, 32);
     s[26] = b(c.max_bodies, 32);
@@ -1123,6 +1517,16 @@ pub fn pass_table() -> Vec<u8> {
         } else if i < 68 {
             let k = i - 48;
             (1u32 << k) | ((k & 1) << 31)
+        } else if i >= LOOP_PASS {
+            // The solve loop: first sparse colour, iterations.
+            let k = i - LOOP_PASS;
+            (k / (LOOP_ITERATIONS_MAX + 1)) | ((k % (LOOP_ITERATIONS_MAX + 1)) << 8)
+        } else if i >= TAIL_PASS {
+            // The primal tail: first colour, stabilization flag, first sparse colour.
+            let k = i - TAIL_PASS;
+            let (stab, r) = (k / TAIL_SLOTS, k % TAIL_SLOTS);
+            let (p, d) = (r / (TAIL_HEADROOM_MAX + 1), r % (TAIL_HEADROOM_MAX + 1));
+            p | (stab << 8) | ((p + d) << 16)
         } else if i >= STAB_PASS {
             256 | (i - STAB_PASS)
         } else {
@@ -1206,7 +1610,45 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
         | (u32::from(fast_list_scheduled(&mo)) << 4);
     // Bit 5: the sleep archive (world_step.slang sleepArchive).
     s[30] |= u32::from(m.sleep_archive_blocks > 0) << 5;
+    // Bit 6: the archive's cold-start variant (world_step.slang archiveCold).
+    s[30] |= u32::from(m.archive_cold) << 6;
+    // Bit 8: the archive's touch query (world_step.slang archiveTouchQuery).
+    s[30] |= u32::from(archive_touch(m)) << 8;
+    // Bit 9: the archive's compact layout (world_step.slang archiveCompact).
+    s[30] |= u32::from(m.sleep_archive_blocks > 0 && m.archive_compact) << 9;
+    if awake_broadphase(m, i) {
+        // Rest tables (bit 0); bit 1 rebuilds them this step. Word 5: last step's
+        // sleep events (a pipelined step copies them on the GPU), in the uniform
+        // only: the scratch block's word 5 is the finer-scan count, which hosts
+        // start at zero (the awake broadphase runs on WGSL hosts, whose HOST_S
+        // reads the uniform).
+        // Bit 4: the uniform grid's rest tables (world_step.slang restUniform).
+        // Bit 5: incremental inserts (world_step.slang restIncremental).
+        s[25] = 1
+            | (u32::from(m.rest_rebuild) << 1)
+            | (u32::from(m.rest_uniform) << 4)
+            | (u32::from(m.rest_incremental) << 5);
+        s[5] = i.last.sleep_events;
+    }
     s
+}
+
+/// Words of binding 14 past the CSR index every host allocates: the awake bitmap
+/// (world_step.slang awakeBitsBase, a word per 32 body slots).
+pub fn awake_bits_words(c: &WorldCapacity) -> u64 {
+    u64::from(c.max_bodies).div_ceil(32)
+}
+
+/// Words past the awake bitmap that the awake-indexed broadphase uses with up to
+/// `colliders` colliders on a grid of `split` / `fixed` layout (world_step.slang
+/// restBase): a 32-word header, the resting and awake heads, a resting link per
+/// collider, the awake-collider list, and per collider the uniform tables' awake stamp,
+/// the resting bucket and the incremental inserts' bucket list (restStampBase,
+/// restAtBase, restDirtyBase). Hosts grow binding 14 for them only once a step takes
+/// that broadphase (`WgpuSim::ensure_rest_tables`).
+pub fn rest_table_words(c: &WorldCapacity, colliders: u32, split: bool, fixed: bool) -> u64 {
+    let grid = u64::from(grid_hash_words(c, colliders, split, fixed));
+    32 + 2 * grid + 5 * u64::from(colliders)
 }
 
 /// The step's host uniform (params + the first 32 host words).
@@ -1288,6 +1730,189 @@ mod tests {
             pose_output: false,
             ..StepModes::default()
         }
+    }
+
+    /// The pre-CSR region holds every table its users can size (the grid, split or not,
+    /// fixed or not; the warm hash as heads or records at any contact and body count up
+    /// to the capacity; the ids), and those sizes are the ones within the power-of-two
+    /// cap, so a smaller region changes no table.
+    #[test]
+    fn constraint_id_region_holds_every_table() {
+        let caps = [
+            // ring110k, gables506k (demo-config.mjs sceneCap), small worlds, joints.
+            (131072, 262144, 2097152, 64),
+            (524288, 1048576, 6 * 1048576, 64),
+            (4096, 8192, 32768, 64),
+            (65536, 65536, 1048576, 10000),
+            (1024, 1024, 4096, 1),
+            (262144, 524288, 524288, 0),
+        ];
+        for (mb, mc, mcon, mj) in caps {
+            let c = WorldCapacity {
+                max_bodies: mb,
+                max_colliders: mc,
+                max_contacts: mcon,
+                max_joints: mj,
+                ..WorldCapacity::small()
+            };
+            let words = constraint_id_words(&c);
+            let cap = constraint_id_cap(&c);
+            assert!(words <= cap && words >= 2 * (mcon + mj), "{words} {cap}");
+            for colliders in [0, mc / 3, mc] {
+                for split in [false, true] {
+                    for fixed in [false, true] {
+                        let g = grid_hash_words(&c, colliders, split, fixed);
+                        assert!(g.is_power_of_two());
+                        let tables = if split { 2 } else { 1 };
+                        // The fixed control's split tables overlapped small regions before.
+                        if !(fixed && split && 2 * g > cap) {
+                            assert!(tables * g <= words, "grid {g} x{tables} > {words}");
+                        }
+                    }
+                }
+            }
+            for bodies in [0, mb / 2, mb] {
+                for prev in [256, mcon / 2, mcon.max(256)] {
+                    let h = warm_hash_slots(&c, bodies, prev, false);
+                    let r = warm_hash_slots(&c, bodies, prev, true);
+                    assert!(h.is_power_of_two() && r.is_power_of_two());
+                    assert!(h <= words && 4 * r <= words, "warm {h} / {r} records > {words}");
+                }
+            }
+        }
+        // The rounding no table reaches is not allocated: ring110k's region was 2^23 words.
+        let ring = WorldCapacity {
+            max_bodies: 131072,
+            max_colliders: 262144,
+            max_contacts: 2097152,
+            max_joints: 64,
+            ..WorldCapacity::small()
+        };
+        assert_eq!(constraint_id_cap(&ring), 1 << 23);
+        assert_eq!(constraint_id_words(&ring), 2 * (2097152 + 64));
+    }
+
+    #[test]
+    fn awake_broadphase_runs_over_moving_colliders_only() {
+        let names = |m: &StepModes, i: &StepInputs| -> Vec<&'static str> {
+            encode_step(m, i, false, true)
+                .iter()
+                .filter_map(|c| match *c {
+                    Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => Some(kernel),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut i = inputs(10, 0);
+        i.motion.queries = 1;
+        let m = StepModes {
+            awake_broadphase: true,
+            ..fast()
+        };
+        let k = names(&m, &i);
+        let at = |n: &str| {
+            k.iter()
+                .position(|x| *x == n)
+                .unwrap_or_else(|| panic!("{n} missing"))
+        };
+        // No pass over every collider but the cheap moving-collider scan.
+        for full in ["build_aabbs", "broadphase_clear", "broadphase_insert", "broadphase_query"] {
+            assert!(!k.contains(&full), "{full} still runs");
+        }
+        assert!(at("list_moving_colliders") < at("build_aabbs_listed"));
+        assert!(at("build_aabbs_listed") < at("rest_insert"));
+        assert!(at("rest_publish") < at("broadphase_insert_awake"));
+        assert!(at("broadphase_query_awake") < at("broadphase_query_finer"));
+        // W is emptied after every walker of the step's tables, before narrowphase.
+        assert!(at("query_batch") < at("broadphase_clear_awake"));
+        assert!(at("broadphase_clear_awake") < at("narrowphase_defer_copy_persistent"));
+        // A host write bounds every collider; characters keep the full broadphase.
+        let full_bounds = StepModes {
+            full_bounds: true,
+            ..m
+        };
+        assert!(names(&full_bounds, &i).contains(&"build_aabbs"));
+        i.motion.characters = 1;
+        assert!(names(&m, &i).contains(&"broadphase_query"));
+        // The pipelined step forwards last step's sleep events to host word 5.
+        i.motion.characters = 0;
+        assert!(encode_step(&m, &i, false, true).iter().any(|c| matches!(
+            c,
+            Cmd::Copy { src_offset: 36, dst_offset, .. } if *dst_offset == host_word_offset(5)
+        )));
+    }
+
+    #[test]
+    fn primal_tail_takes_the_headroom_colours_in_one_dispatch() {
+        let mut m = fast();
+        m.primal_tail = true;
+        let cmds = encode_step(&m, &inputs(10, 0), false, false);
+        let colors = cmds
+            .iter()
+            .filter(|c| matches!(c, Cmd::Indirect { kernel: "solve_primal_color_compact", .. }))
+            .count();
+        assert_eq!(colors, 4 * 10, "last step's colours one by one");
+        let tails: Vec<u32> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                Cmd::Dispatch { kernel: "solve_primal_sparse_tail_compact", pass, threads } => {
+                    assert_eq!(*threads, 64, "one workgroup");
+                    Some(*pass)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tails, vec![tail_pass(10, 14, false); 4], "one tail an iteration");
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::Dispatch { kernel: "solve_primal_sparse_compact", .. })));
+        // The table: first colour, stabilization flag, first sparse colour.
+        let table = pass_table();
+        let at = |slot: u32| {
+            let o = (slot as u64 * PASS_ALIGN) as usize;
+            u32::from_le_bytes(table[o..o + 4].try_into().unwrap())
+        };
+        assert_eq!(at(tail_pass(10, 14, false)), 10 | (14 << 16));
+        assert_eq!(at(tail_pass(32, 32 + TAIL_HEADROOM_MAX, true)), 32 | 256 | ((32 + TAIL_HEADROOM_MAX) << 16));
+        assert_eq!(at(STAB_PASS + 63), 256 | 63, "the stabilization slots below the tail's");
+        assert!(u64::from(tail_pass(32, 32 + TAIL_HEADROOM_MAX, true)) < PASS_SLOTS);
+        // The first step, and no headroom left: as before.
+        let mut i = inputs(10, 0);
+        i.steps_done = 0;
+        assert!(primal_tail(&m, &i, 32, primal_colors_dispatched(&m, &i, 32)).is_none());
+        assert!(primal_tail(&m, &inputs(32, 0), 32, 32).is_none());
+    }
+
+    #[test]
+    fn solve_loop_takes_every_iteration_in_one_dispatch() {
+        let mut m = fast();
+        m.solve_loop = true;
+        let mut i = inputs(10, 0);
+        i.last.awake_count = 40;
+        i.last.contact_count = 100;
+        let cmds = encode_step(&m, &i, false, false);
+        let count = |k: &str| cmds.iter().filter(|c| matches!(c, Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } if *kernel == k)).count();
+        assert_eq!(count("solve_primal_color_compact"), 0);
+        assert_eq!(count("solve_dual_compact"), 0);
+        assert_eq!(count("solve_primal_sparse_compact"), 0);
+        let pass = cmds.iter().find_map(|c| match c {
+            Cmd::Dispatch { kernel: "solve_primal_sparse_loop_compact", pass, threads } => {
+                assert_eq!(*threads, 64);
+                Some(*pass)
+            }
+            _ => None,
+        });
+        assert_eq!(pass, Some(loop_pass(14, 4)));
+        let table = pass_table();
+        let o = (loop_pass(14, 4) as u64 * PASS_ALIGN) as usize;
+        assert_eq!(u32::from_le_bytes(table[o..o + 4].try_into().unwrap()), 14 | (4 << 8));
+        assert!(u64::from(loop_pass(32, LOOP_ITERATIONS_MAX)) < PASS_SLOTS);
+        // Many awake, or more contacts than the loop beats the dispatches at: as before.
+        i.last.awake_count = 5000;
+        assert!(!solve_loop(&m, &i));
+        i.last.awake_count = 40;
+        i.last.contact_count = LOOP_CONTACTS_MAX + 1;
+        assert!(!solve_loop(&m, &i));
     }
 
     #[test]
@@ -1382,20 +2007,33 @@ mod tests {
         let mut m = fast();
         for split in [false, true] {
             for listed in [false, true] {
-                m.split_np = split;
-                m.listed_persist = listed;
-                let mut i = inputs(10, 0);
-                i.joint_count = 3;
-                i.has_convex = true;
-                m.contact_events = true;
-                for whole in [false, true] {
-                    for c in encode_step(&m, &i, whole, true) {
-                        let k = match c {
-                            Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => kernel,
-                            Cmd::Copy { .. } | Cmd::Phase { .. } => continue,
-                        };
-                        let e = resolve_entry(k, true);
-                        assert!(PERSISTENT_ENTRIES.contains(&e), "{k} -> {e} missing");
+                for awake in [false, true] {
+                    m.split_np = split;
+                    m.listed_persist = listed;
+                    // World's awake-indexed modes: rest tables (both grids, incremental),
+                    // CCD by collider, awake-list body passes.
+                    m.awake_broadphase = awake;
+                    m.rest_uniform = split;
+                    m.rest_incremental = listed;
+                    m.ccd_by_collider = awake;
+                    m.awake_body_passes = awake;
+                    m.primal_tail = awake;
+                    m.solve_loop = awake;
+                    let mut i = inputs(10, 0);
+                    i.joint_count = 3;
+                    i.has_convex = true;
+                    i.collider_count = 1024;
+                    i.motion.ccd = true;
+                    m.contact_events = true;
+                    for whole in [false, true] {
+                        for c in encode_step(&m, &i, whole, true) {
+                            let k = match c {
+                                Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => kernel,
+                                Cmd::Copy { .. } | Cmd::Phase { .. } => continue,
+                            };
+                            let e = resolve_entry(k, true);
+                            assert!(PERSISTENT_ENTRIES.contains(&e), "{k} -> {e} missing");
+                        }
                     }
                 }
             }
