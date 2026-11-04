@@ -203,7 +203,7 @@ pub const SILL_STIFF: f32 = 2.3;
 
 /// A lumped shear panel's axial rigidity (N): the cabin box's faces and the
 /// strut towers' braces into it, spread over the sections they bear on.
-pub const KL_PANEL: f32 = 8.0e6;
+pub const KL_PANEL: f32 = 6.5e6;
 
 /// A zigzag shear panel's diagonals between two members (N).
 pub const KL_SHEAR: f32 = 1.0e6;
@@ -583,7 +583,7 @@ pub fn sedan() -> VehicleDef {
             )),
             SILL_STIFF,
         )),
-        cell(ladder(member(
+        cell(member(
             "pillar_a",
             &[
                 (0.79, 0.31, 3.36),
@@ -599,13 +599,13 @@ pub fn sedan() -> VehicleDef {
             0,
             true,
             1,
-        ))),
+        )),
         catching(stations(
             roof(member(
                 "pillar_b",
                 &[(0.79, 0.31, 2.24), (0.79, 0.98, 2.24), (0.62, 1.39, 2.24)],
-                0.10,
-                0.12,
+                0.14,
+                0.14,
                 OUT,
                 "boron",
                 [1.0, 1.0],

@@ -350,6 +350,40 @@ fn main() {
             }
             *en.entry(key).or_default() += 0.5 * bm.k as f64 * ((l - bm.rest) as f64).powi(2);
         }
+        if std::env::var("BEHIND").is_ok() {
+            en.clear();
+            for bm in s.beams.iter().filter(|x| !x.broken) {
+                if (bm.a as usize) >= sk.nodes.len() || sk.nodes[bm.a as usize].p.z > 3.36 {
+                    continue;
+                }
+                let l = s.nodes[bm.a as usize]
+                    .pos
+                    .distance(s.nodes[bm.b as usize].pos);
+                if bm.kind == engine_softbody::explicit_beams::ExplicitKind::Support && l > bm.rest
+                {
+                    continue;
+                }
+                let (la, lb) = (label(bm.a), label(bm.b));
+                let key = if la <= lb {
+                    format!("{la}~{lb}")
+                } else {
+                    format!("{lb}~{la}")
+                };
+                let key = format!(
+                    "{key} {:?}{}",
+                    bm.kind,
+                    if sk.beams.iter().any(|x| (x.a == bm.a && x.b == bm.b
+                        || x.a == bm.b && x.b == bm.a)
+                        && x.tie)
+                    {
+                        " tie"
+                    } else {
+                        ""
+                    }
+                );
+                *en.entry(key).or_default() += 0.5 * bm.k as f64 * ((l - bm.rest) as f64).powi(2);
+            }
+        }
         let mut ev: Vec<_> = en.into_iter().collect();
         ev.sort_by(|a, b| b.1.total_cmp(&a.1));
         for (k, e) in ev.iter().take(15) {
@@ -735,7 +769,31 @@ fn main() {
         if std::env::var("TRACE_VZ").is_ok() && f < 40 {
             let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
             let vz = s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>() / m;
-            let mut line = format!("  f {f}: com vz {vz:+.2}");
+            let ke: f32 = s
+                .nodes
+                .iter()
+                .map(|n| 0.5 * n.mass * n.vel.length_squared())
+                .sum();
+            // Elastic: beams (not compression-only beams stretched, not
+            // springs past nothing) by zone: front of the firewall or behind.
+            let (mut ef, mut eb, mut es) = (0.0f32, 0.0f32, 0.0f32);
+            for bm in s.beams.iter().filter(|x| !x.broken) {
+                let (pa, pb) = (s.nodes[bm.a as usize].pos, s.nodes[bm.b as usize].pos);
+                let l = pa.distance(pb);
+                if bm.kind == engine_softbody::explicit_beams::ExplicitKind::Support && l > bm.rest
+                {
+                    continue;
+                }
+                let e = 0.5 * bm.k * (l - bm.rest).powi(2);
+                if bm.kind == engine_softbody::explicit_beams::ExplicitKind::LimitedSpring {
+                    es += e;
+                } else if (bm.a as usize) < sk.nodes.len() && sk.nodes[bm.a as usize].p.z > 3.36 {
+                    ef += e;
+                } else {
+                    eb += e;
+                }
+            }
+            let mut line = format!("  f {f}: KE {:.1} kJ elastic front {:.1} rest {:.1} springs {:.1} kJ; com vz {vz:+.2}", ke / 1e3, ef / 1e3, eb / 1e3, es / 1e3);
             for g in [
                 "powertrain",
                 "sill",

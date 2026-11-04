@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// The metals' plastic coefficient: a yielded beam keeps 30 % of its yield
 /// strain as spring-back.
-pub const PLASTIC: f32 = 0.95;
+pub const PLASTIC: f32 = 1.0;
 
 /// Reference length the stiffness is quoted at (m).
 pub const REF_LENGTH: f32 = 0.1;
@@ -216,7 +216,7 @@ impl Default for Grades {
             panel: Material::steel(2.7e4, SKIN_ZETA, 5.0e2, 0.3, 1.0).plastic(PLASTIC),
             floor: Material::steel(2.7e4, SKIN_ZETA, 7.0e2, 0.3, 1.5).plastic(PLASTIC),
             frame: Material::steel(2.0e4, ZETA, 1.9e2, 0.3, 1.5).plastic(PLASTIC),
-            crush: Material::steel(3.75e5, ZETA, 1.23e4, 0.25, 2.0).plastic(PLASTIC),
+            crush: Material::steel(3.75e5, ZETA, 1.35e4, 0.25, 2.0).plastic(PLASTIC),
             hsla: Material::steel(1.45e5, ZETA, 2.9e3, 0.2, 2.0).plastic(PLASTIC),
             uhss: Material::steel(2.2e5, ZETA, 3.5e3, 0.12, 3.0).plastic(PLASTIC),
             boron: Material::steel(2.65e5, ZETA, 3.9e3, 0.08, 3.5).plastic(PLASTIC),

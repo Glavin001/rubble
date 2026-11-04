@@ -153,10 +153,17 @@ The body is built the BeamNG way, in two tiers:
   and mid rails, 14 cm deep, hinged and latched to the pillars), fenders and
   bumper covers by the body's frame behind them.
 
-The passenger cell's members (A- and C-pillars, sills, floor cross members,
+A member's diagonals and bend beams yield at the same strain as its
+longitudinals (their thresholds scale with their stiffness): a rail folds
+plastically instead of bending back elastically, so the crash's energy goes into
+plastic shortening, not rebound. A block's bearing on the structure behind it
+yields at `BEAR_SCALE` × UHSS (the engine crushes into the firewall).
+
+The passenger cell's members (A-, B- and C-pillars, sills, floor cross members,
 tunnel, cowl, dash, parcel shelf) yield at `CELL` × their grade (4: the cell keeps
-its shape at 56 km/h); the roof's (roof rails, bows, headers, B-pillars) at `ROOF`
-× (1.2: it crushes in a roll-over). Lumped panels yield at their grade's strain
+its shape at 56 km/h; the A-pillars are boxes, the hinge pillar and screen
+pillar in one); the roof's (roof rails, bows, headers) at `ROOF` × (1.2: it
+crushes in a roll-over). Lumped panels yield at their grade's strain
 unless `strength` caps them: the strut towers' braces (`END_YIELD`), the door
 rings (`CABIN_YIELD`), the roof (`ROOF_YIELD`), the screens (`GLASS_YIELD`).
 

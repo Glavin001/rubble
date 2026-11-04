@@ -264,7 +264,7 @@ pub fn box_truss(
         if i + 2 < n {
             // Bend beams over two stations: stiffness against buckling.
             let q = truss.stations[i + 2];
-            let mm = mat(truss.t[i + 1]).stiffer(BEND);
+            let mm = mat(truss.t[i + 1]).stiffer(BEND).scaled(BEND);
             for e in 0..4 {
                 sk.beam(s[e], q[e], mm);
             }
@@ -275,7 +275,7 @@ pub fn box_truss(
             for e in 0..4 {
                 sk.beam(s[e], q[e], mm);
             }
-            let diag = mm.stiffer(DIAG);
+            let diag = mm.stiffer(DIAG).scaled(DIAG);
             for e in 0..4 {
                 sk.beam(s[e], q[(e + 1) % 4], diag);
                 sk.beam(s[(e + 1) % 4], q[e], diag);

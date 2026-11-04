@@ -219,6 +219,11 @@ pub struct Look {
 /// A door frame's hinge and latch beams to the pillars: yield force (N).
 pub const DOOR_HOLD: f32 = 3.0e3;
 
+/// A block's bearing beams' thresholds against the UHSS grade: an engine
+/// driven back crushes into the firewall rather than stopping the car
+/// against it.
+pub const BEAR_SCALE: f32 = 0.3;
+
 /// The shock top's ties to its tower against the link grade.
 pub const SHOCK_TOP: f32 = 4.0;
 
@@ -1397,7 +1402,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             let bear = Material {
                 k: grades.mount.k,
                 damp: grades.mount.damp,
-                ..grades.uhss
+                ..grades.uhss.scaled(BEAR_SCALE)
             };
             for face in [-Vec3::Z, Vec3::X, -Vec3::X] {
                 let lim = c.dot(face) + h.dot(face.abs());
