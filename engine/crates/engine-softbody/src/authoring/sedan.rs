@@ -7,7 +7,7 @@ use super::curve::{Curve, Outline};
 use super::material::Grades;
 use super::members::{Corner, MemberSpec};
 use super::vehicle::{
-    BlockSpec, Edge, Joint, Look, NamedMass, Panel, PlateSpec, Region, VehicleDef, Zone,
+    BlockSpec, BraceSpec, Edge, Joint, Look, NamedMass, Panel, PlateSpec, Region, VehicleDef, Zone,
 };
 
 /// A member (left side when `mirrored`).
@@ -61,6 +61,17 @@ pub fn boxed(mut m: MemberSpec, width: f32, height: f32) -> MemberSpec {
     m.width = width;
     m.height = height;
     m
+}
+
+/// A shear-panel diagonal (and its mirror).
+pub fn brace(name: &str, from: [f32; 3], to: [f32; 3], grade: &str, kl: f32) -> BraceSpec {
+    BraceSpec {
+        name: name.into(),
+        from,
+        to,
+        grade: grade.into(),
+        kl,
+    }
 }
 
 /// An impact member: pole catchers between its stations.
@@ -129,6 +140,9 @@ pub fn door_joint() -> Joint {
         latch_x: None,
     }
 }
+
+/// A lumped shear panel's axial rigidity (N).
+pub const KL_PANEL: f32 = 2.0e6;
 
 pub fn sedan() -> VehicleDef {
     let length = 4.70;
@@ -395,7 +409,7 @@ pub fn sedan() -> VehicleDef {
             true,
             1,
         )),
-        ladder(member(
+        member(
             "tower_f",
             &[(0.47, 0.44, 3.73), (0.62, 0.80, 3.73)],
             0.10,
@@ -406,8 +420,8 @@ pub fn sedan() -> VehicleDef {
             0,
             true,
             1,
-        )),
-        ladder(member(
+        ),
+        member(
             "tower_r",
             &[(0.47, 0.42, 1.03), (0.62, 0.80, 1.03)],
             0.10,
@@ -418,7 +432,7 @@ pub fn sedan() -> VehicleDef {
             0,
             true,
             1,
-        )),
+        ),
         catching(stations(
             member(
                 "sill",
@@ -552,6 +566,8 @@ pub fn sedan() -> VehicleDef {
         )),
         cross("header_f", 0.60, 1.37, 2.76, "uhss", 1.0),
         cross("bow_b", 0.62, 1.39, 2.24, "uhss", 1.0),
+        // A rear roof bow (the roof skin's span between bows sags otherwise).
+        cross("bow_r", 0.61, 1.39, 1.86, "uhss", 1.0),
         cross("header_r", 0.60, 1.36, 1.50, "uhss", 1.0),
         cross("floor_x1", 0.76, 0.25, 2.95, "uhss", 1.0),
         cross("floor_x2", 0.76, 0.25, 2.24, "boron", 1.0),
@@ -859,9 +875,86 @@ pub fn sedan() -> VehicleDef {
             ("apron".into(), "rail_f".into(), 0.6),
             ("quarter_inner".into(), "rail_r".into(), 0.6),
         ],
+        // The cabin's shear panels: floor pan, roof, firewall and the rear
+        // seat-back bulkhead, each an X between its corners.
+        braces: vec![
+            brace(
+                "floor_x",
+                [0.78, 0.30, 3.30],
+                [-0.78, 0.30, 1.40],
+                "floor",
+                KL_PANEL,
+            ),
+            brace(
+                "roof_x",
+                [0.62, 1.37, 2.74],
+                [-0.62, 1.37, 1.50],
+                "panel",
+                KL_PANEL,
+            ),
+            brace(
+                "firewall_x",
+                [0.75, 0.30, 3.36],
+                [-0.74, 0.92, 3.44],
+                "hsla",
+                KL_PANEL,
+            ),
+            brace(
+                "bulkhead_x",
+                [0.78, 0.30, 1.38],
+                [-0.72, 0.98, 1.30],
+                "hsla",
+                KL_PANEL,
+            ),
+            // The side frames (sill, pillars, roof rail and their joints) resist
+            // racking across each door ring.
+            brace(
+                "ring_f_x",
+                [0.80, 0.33, 3.34],
+                [0.63, 1.38, 2.24],
+                "uhss",
+                KL_PANEL,
+            ),
+            brace(
+                "ring_f_y",
+                [0.80, 0.33, 2.24],
+                [0.62, 1.36, 2.74],
+                "uhss",
+                KL_PANEL,
+            ),
+            brace(
+                "ring_r_x",
+                [0.80, 0.33, 2.24],
+                [0.62, 1.37, 1.50],
+                "uhss",
+                KL_PANEL,
+            ),
+            brace(
+                "ring_r_y",
+                [0.80, 0.33, 1.34],
+                [0.63, 1.38, 2.24],
+                "uhss",
+                KL_PANEL,
+            ),
+            // The bonded screens are shear panels too.
+            brace(
+                "windscreen_x",
+                [0.74, 0.95, 3.40],
+                [-0.60, 1.37, 2.76],
+                "glass",
+                KL_PANEL,
+            ),
+            brace(
+                "backlight_x",
+                [0.70, 0.98, 0.84],
+                [-0.60, 1.36, 1.48],
+                "glass",
+                KL_PANEL,
+            ),
+        ],
         frame_through: vec!["door".into()],
         shell_braces: false,
-        body_damping: 60.0,
+        body_damping: 110.0,
         body_damping_reach: 2.0,
         body_damping_strength: 5000.0,
     }

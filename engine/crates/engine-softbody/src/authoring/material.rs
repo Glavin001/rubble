@@ -182,16 +182,16 @@ pub const ZETA: f32 = 0.08;
 impl Default for Grades {
     fn default() -> Self {
         Self {
-            panel: Material::steel(1.2e5, ZETA, 1.6e3, 6.0, 1.0).plastic(PLASTIC),
-            floor: Material::steel(1.2e5, ZETA, 2.4e3, 6.0, 1.5).plastic(PLASTIC),
-            frame: Material::steel(8.0e4, ZETA, 3.2e2, 5.0, 1.5).plastic(PLASTIC),
-            crush: Material::steel(3.2e5, ZETA, 2.0e4, 5.0, 2.0).plastic(PLASTIC),
-            hsla: Material::steel(1.6e5, ZETA, 4.8e3, 5.0, 2.0).plastic(PLASTIC),
-            uhss: Material::steel(2.4e5, ZETA, 5.76e3, 4.0, 3.0).plastic(PLASTIC),
-            boron: Material::steel(2.8e5, ZETA, 6.48e3, 4.0, 3.5).plastic(PLASTIC),
-            alu: Material::steel(1.6e5, ZETA, 4.8e3, 5.0, 2.0).plastic(PLASTIC),
-            plastic: Material::steel(1.6e4, ZETA, 1.2e3, 4.0, 0.5),
-            glass: Material::steel(4.0e4, ZETA, 8.0e2, 3.0, 1.0),
+            panel: Material::steel(9.5e4, ZETA, 1.25e3, 6.0, 1.0).plastic(PLASTIC),
+            floor: Material::steel(9.5e4, ZETA, 1.9e3, 6.0, 1.5).plastic(PLASTIC),
+            frame: Material::steel(6.2e4, ZETA, 2.5e2, 5.0, 1.5).plastic(PLASTIC),
+            crush: Material::steel(2.6e5, ZETA, 1.6e4, 5.0, 2.0).plastic(PLASTIC),
+            hsla: Material::steel(1.25e5, ZETA, 3.8e3, 5.0, 2.0).plastic(PLASTIC),
+            uhss: Material::steel(1.9e5, ZETA, 4.6e3, 4.0, 3.0).plastic(PLASTIC),
+            boron: Material::steel(2.3e5, ZETA, 5.1e3, 4.0, 3.5).plastic(PLASTIC),
+            alu: Material::steel(1.25e5, ZETA, 3.8e3, 5.0, 2.0).plastic(PLASTIC),
+            plastic: Material::steel(1.25e4, ZETA, 9.5e2, 4.0, 0.5),
+            glass: Material::steel(3.1e4, ZETA, 6.2e2, 3.0, 1.0),
             rigid: Material::steel(1.5e5, 0.03, 1.0e9, 1.0, 6.0),
         }
     }

@@ -268,6 +268,81 @@ fn main() {
     if std::env::var("NOSELF").is_ok() {
         s.candidates.clear();
     }
+    if scene == "torsion" {
+        // Couples at the shock tops (front left up, rear left down), in the air;
+        // then the twist profile along the car: each shell ring's angle (its
+        // lower-corner and shoulder nodes, left against right).
+        for n in &mut s.nodes {
+            n.pos.y += 20.0;
+        }
+        s.settings.drag = false;
+        let tops: Vec<u32> = sk.shocks.iter().map(|x| x.b).collect();
+        let t = 2000.0f32;
+        let track = sk.pos(tops[0]).distance(sk.pos(tops[1]));
+        let rings: Vec<(f32, [u32; 2])> = b
+            .shell
+            .rings
+            .iter()
+            .filter_map(|r| {
+                let i = r
+                    .half
+                    .iter()
+                    .copied()
+                    .filter(|&i| sk.pos(i).x > 0.6)
+                    .min_by(|&a, &c| sk.pos(a).y.total_cmp(&sk.pos(c).y))?;
+                Some((r.z, [i, b.shell.mirror[&i]]))
+            })
+            .collect();
+        let ang = |s: &ExplicitBeams, p: [u32; 2]| {
+            let d = s.nodes[p[0] as usize].pos - s.nodes[p[1] as usize].pos;
+            d.y.atan2(d.x)
+        };
+        let a0: Vec<f32> = rings.iter().map(|r| ang(&s, r.1)).collect();
+        for st in 0..2000 {
+            let ramp = (st as f32 / 600.0).min(1.0);
+            let f = ramp * t / track;
+            // tops: [front l, front r, rear l, rear r] by the corner order.
+            s.nodes[tops[0] as usize].force.y += f;
+            s.nodes[tops[1] as usize].force.y -= f;
+            s.nodes[tops[2] as usize].force.y -= f;
+            s.nodes[tops[3] as usize].force.y += f;
+            s.step();
+        }
+        for (k, r) in rings.iter().enumerate() {
+            eprintln!(
+                "  ring z {:.2}: twist {:+.3}°",
+                r.0,
+                (ang(&s, r.1) - a0[k]).to_degrees()
+            );
+        }
+        // Each top's vertical travel against the body nodes it is tied to.
+        for (k, &tp) in tops.iter().enumerate() {
+            let tied: Vec<u32> = sk
+                .beams
+                .iter()
+                .filter(|x| x.fixed && (x.a == tp || x.b == tp))
+                .map(|x| if x.a == tp { x.b } else { x.a })
+                .filter(|&o| sk.parts[sk.nodes[o as usize].part as usize] != "suspension")
+                .collect();
+            let d0: Vec<f32> = tied.iter().map(|&o| sk.pos(tp).y - sk.pos(o).y).collect();
+            let d1: Vec<f32> = tied
+                .iter()
+                .map(|&o| s.nodes[tp as usize].pos.y - s.nodes[o as usize].pos.y)
+                .collect();
+            let dy = s.nodes[tp as usize].pos.y - 20.0 - sk.pos(tp).y;
+            eprintln!(
+                "  top {k}: moved {:+.1} mm; tied to {} body nodes, relative {:?} mm",
+                dy * 1e3,
+                tied.len(),
+                d1.iter()
+                    .zip(&d0)
+                    .map(|(a, b)| ((a - b) * 1e3).round())
+                    .collect::<Vec<_>>()
+            );
+        }
+        summary(&s);
+        return;
+    }
     if scene == "settle" {
         // As `h_settles_after_the_wall_crash`: into the wall, wait for the car to
         // stop, then 0.5 s: which nodes still move.
@@ -282,8 +357,28 @@ fn main() {
         for _ in 0..18 {
             s.frame();
         }
+        // Stopped: its rigid motion (v_com + ω × r) under 0.1 m/s everywhere.
+        let rigid = |s: &ExplicitBeams| -> f32 {
+            let com = s.nodes.iter().map(|n| n.mass * n.pos).sum::<Vec3>() / total;
+            let vc = s.nodes.iter().map(|n| n.mass * n.vel).sum::<Vec3>() / total;
+            let mut l = Vec3::ZERO;
+            let mut inertia = glam::Mat3::ZERO;
+            for n in &s.nodes {
+                let r = n.pos - com;
+                l += n.mass * r.cross(n.vel - vc);
+                inertia += n.mass
+                    * (glam::Mat3::from_diagonal(Vec3::splat(r.length_squared()))
+                        - glam::Mat3::from_cols(r * r.x, r * r.y, r * r.z));
+            }
+            let w = inertia.inverse() * l;
+            s.nodes
+                .iter()
+                .map(|n| (vc + w.cross(n.pos - com)).length())
+                .fold(0.0, f32::max)
+        };
+        let _ = com_speed;
         let mut t = 0.3;
-        while com_speed(&s) > 0.1 && t < 4.0 {
+        while rigid(&s) > 0.1 && t < 6.0 {
             s.frame();
             t += 1.0 / 60.0;
         }

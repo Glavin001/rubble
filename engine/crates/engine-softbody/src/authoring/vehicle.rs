@@ -126,6 +126,19 @@ pub struct BlockSpec {
     pub mount_scale: f32,
 }
 
+/// A long diagonal across a panel the body's torsion runs through (and its
+/// mirror): a shear panel lumped into an X.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BraceSpec {
+    pub name: String,
+    pub from: [f32; 3],
+    pub to: [f32; 3],
+    pub grade: String,
+    /// Axial rigidity k·L (N): a lumped panel is a long beam, so its k·L is the
+    /// panel's (a grade's is a strip's); the grade gives its yield and damping.
+    pub kl: f32,
+}
+
 /// A named mass spread over the nodes inside a box (seats, fuel, passengers).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NamedMass {
@@ -215,11 +228,11 @@ impl Resolution {
                 cap: 0.25,
             },
             Resolution::High => Spacing {
-                ring: 0.27,
-                side: 0.23,
-                top: 0.27,
-                floor: 0.32,
-                cap: 0.23,
+                ring: 0.28,
+                side: 0.24,
+                top: 0.28,
+                floor: 0.33,
+                cap: 0.24,
             },
         }
     }
@@ -229,7 +242,7 @@ impl Resolution {
         match self {
             Resolution::Low => 0.45,
             Resolution::Medium => 0.4,
-            Resolution::High => 0.38,
+            Resolution::High => 0.4,
         }
     }
 
@@ -277,6 +290,11 @@ pub struct VehicleDef {
     /// within reach (m), every pair of their nodes.
     #[serde(default)]
     pub webs: Vec<(String, String, f32)>,
+    /// Shear panels as long diagonals (floor pan, roof, firewall, rear
+    /// bulkhead): each between the body nodes nearest its two points, and its
+    /// mirror (an X).
+    #[serde(default)]
+    pub braces: Vec<BraceSpec>,
     /// Frame beams may cross into these panels (closed doors carry load, as a
     /// real door ring does).
     #[serde(default)]
@@ -899,6 +917,22 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 }
                 let _ = ia;
             }
+        }
+    }
+    // Shear panels (the members' and shell's body nodes).
+    for br in &def.braces {
+        let mat = grades.get(&br.grade)?;
+        let body: Vec<u32> = (0..sk.nodes.len() as u32)
+            .filter(|&i| sk.nodes[i as usize].part == 0)
+            .collect();
+        for side in [1.0f32, -1.0] {
+            let p = |q: [f32; 3]| Vec3::new(side * q[0], q[1], q[2]);
+            let a = sk.nearest(p(br.from), &body, 1)[0];
+            let b = sk.nearest(p(br.to), &body, 1)[0];
+            let m = mat
+                .stiffer(br.kl / mat.kl())
+                .scaled(def.crumple.eval(0.5 * (sk.pos(a).z + sk.pos(b).z)));
+            sk.beam(a, b, m);
         }
     }
     // Shear webs.
