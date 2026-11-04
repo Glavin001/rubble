@@ -1202,7 +1202,14 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
             .iter()
             .flat_map(|w| [w.a1 as usize, w.a2 as usize])
             .collect();
-        let hub = worst(&rear_axles);
+        // The wheel centres (the axle nodes' midpoints).
+        let hub = sk.wheels[2..]
+            .iter()
+            .map(|w| {
+                let (a, c) = (w.a1 as usize, w.a2 as usize);
+                (0.5 * (local1[a] + local1[c]) - 0.5 * (local0[a] + local0[c])).length()
+            })
+            .fold(0.0f32, f32::max);
         if std::env::var("HUB_TRACE").is_ok() {
             for &i in &rear_axles {
                 eprintln!("  rear axle node {i}: {:?} -> {:?}", local0[i], local1[i]);
@@ -1255,4 +1262,65 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
         assert!(hub < 0.03, "rear hub moved {hub} m");
         assert_eq!(rear_broken, 0);
     }
+}
+
+/// A quasi-static push on the middle of the front door (a knee, a bollard):
+/// a dent where it pushes, not a whole-panel bulge, and it stays when the push
+/// is gone. Reported: the dent at the load, the door 30 cm away, what stays.
+#[test]
+fn l_door_point_load_dents_locally() {
+    let b = built(Resolution::Medium);
+    let sk = &b.skeleton;
+    let mut s = spawn(&b, Vec3::ZERO, 0.0);
+    run(&mut s, 1.0);
+    let door: Vec<usize> = (0..sk.nodes.len())
+        .filter(|&i| sk.parts[sk.nodes[i].part as usize] == "door_f_l")
+        .collect();
+    let mid = door.iter().map(|&i| sk.nodes[i].p).sum::<Vec3>() / door.len() as f32;
+    let at = *door
+        .iter()
+        .filter(|&&i| b.shell.seg.contains_key(&(i as u32)))
+        .min_by(|&&a, &&c| {
+            sk.nodes[a]
+                .p
+                .distance(mid)
+                .total_cmp(&sk.nodes[c].p.distance(mid))
+        })
+        .unwrap();
+    let local0 = cabin_local(&s, &b);
+    let far: Vec<usize> = door
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let d = sk.nodes[i].p.distance(sk.nodes[at].p);
+            d > 0.3 && d < 0.5
+        })
+        .collect();
+    let push = 4000.0f32;
+    let inward = |l: &[Vec3], i: usize| l[i].distance(local0[i]);
+    let (mut dent, mut around) = (0.0f32, 0.0f32);
+    for st in 0..3000 {
+        let f = push * (st as f32 / 1000.0).min(1.0) * if st < 2000 { 1.0 } else { 0.0 };
+        s.nodes[at].force.x -= f;
+        s.step();
+        if st == 1999 {
+            let l = cabin_local(&s, &b);
+            dent = inward(&l, at);
+            around = far.iter().map(|&i| inward(&l, i)).sum::<f32>() / far.len().max(1) as f32;
+        }
+    }
+    run(&mut s, 0.5);
+    let l = cabin_local(&s, &b);
+    let kept = inward(&l, at);
+    eprintln!(
+        "(l) door push {:.1} kN: dent {:.1} mm, door 30–50 cm away {:.1} mm ({:.0} %), kept {:.1} mm after release",
+        push / 1000.0,
+        dent * 1e3,
+        around * 1e3,
+        100.0 * around / dent,
+        kept * 1e3
+    );
+    assert!(dent > 0.005, "no dent");
+    assert!(around < 0.4 * dent, "the whole door bulges");
+    assert!(kept > 0.3 * dent, "the dent sprang back");
 }

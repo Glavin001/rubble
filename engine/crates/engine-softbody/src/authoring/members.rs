@@ -482,7 +482,7 @@ pub fn corner(sk: &mut Skeleton, c: &Corner, side: f32, part: u16, rigid: Materi
         damp: c.damper,
         short: 0.3,
         long: 0.3,
-        stop: 2.0e6,
+        stop: 5.0e5,
         precomp: 1.0,
     });
     sk.wheels.push(SkWheel {
