@@ -3625,6 +3625,15 @@ void mpm_source(uint3 tid : SV_DispatchThreadID)
 
 // ---- wheel loads ----------------------------------------------------------------
 
+// isfinite on each component, by the exponent bits (all ones: infinity or NaN):
+// the same result, without the IsInf/IsNan relational ops naga's SPIR-V front end
+// lacks (and that fast-math may fold away).
+bool mpmFinite3(float3 v)
+{
+    uint3 e = asuint(v) & 0x7F800000u;
+    return all(e != uint3(0x7F800000u, 0x7F800000u, 0x7F800000u));
+}
+
 // Whether wheel record wr stood, in the rigid step before, on an open area's
 // live surface: in contact, enabled and attached, on a static heightfield
 // other than the area's bed (the area's surface patch), the contact one cell
@@ -3654,7 +3663,7 @@ bool mpmWheelOnSand(uint wr, MpmParams p, out float3 force, out float3 x, out ui
     float3 t = gVehicleData[wr + W_C3].xyz;
     float3 s = gVehicleData[wr + W_C4].xyz;
     force = -(nrm * f.x - t * f.y - s * f.z);
-    return all(isfinite(force)) && dot(force, force) > 0.0;
+    return mpmFinite3(force) && dot(force, force) > 0.0;
 }
 
 // Once per coupled frame, one thread: the wheels on open sand, in wheel order

@@ -142,7 +142,7 @@ struct Params
     uint vvOn;
     uint vehExtBase; // gStatic: per vehicle its slide slots (then the slot records)
     uint vvStatic; // gStatic: per vehicle (contact point offset in gLists, count, 0, 0)
-    uint vvTri; // gMisc: per triangle (cwait, cidle, had candidates, hit)
+    uint vvTri; // gMisc: per triangle (cwait, cidle, 0, 0); its marks in gNext (vvMarkAt)
     uint vvVeh; // gMisc: per vehicle VV_RECS records
     uint vvAcc; // gAcc: per vehicle 2 parities × 6 box keys; then VV_CTL counters
     uint vvLabel; // gAcc: per vehicle its group label, then 3 per vehicle group sums
@@ -4565,6 +4565,22 @@ bool vvInBand(VvTri t, float3 p, float r)
     return alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r;
 }
 
+// A tested triangle's marks (had candidates, hit; spec §8's throttle inputs): two
+// plain words per triangle in gNext after the tested list, set by the triangle's
+// sub-lanes and read and cleared by vvThrottleEnd. One word per mark, so lanes
+// only ever store the same value to a word: a store to one component of a uint4
+// record (the marks were .z and .w of the triangle's throttle record) may compile
+// to a read-modify-write of the whole record (Metal), and a lane marking only a
+// candidate then could undo another lane's hit mark (a rare nondeterministic
+// throttle).
+uint vvMarkAt(uint gt) { return gP.vvMembers + 5u * gP.vehicles + gP.totalTris + 2u * gt; }
+
+void vvMark(uint gt, bool cand, bool hit)
+{
+    if (cand) gNext[vvMarkAt(gt)] = 1u;
+    if (hit) gNext[vvMarkAt(gt) + 1u] = 1u;
+}
+
 // Hit list entry `i` of the group's list of this owner (q its counter parity).
 uint vvHitAt(uint runOff, uint i) { return gP.vvHits + 2u * (2u * runOff + i); }
 
@@ -4595,8 +4611,7 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
             vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity);
         }
     }
-    if (cand) gMisc[gP.vvTri + gt].z = 1u;
-    if (hit) gMisc[gP.vvTri + gt].w = 1u;
+    vvMark(gt, cand, hit);
 }
 
 // Owner va's n listed hits (triangle, node: two words each from `base`) in the
@@ -4652,9 +4667,14 @@ void vvApplyHits(uint va, uint runOff, uint points, uint hits, float r, uint par
 void vvThrottleEnd(uint gt)
 {
     uint4 c = gMisc[gP.vvTri + gt];
+    uint mark = vvMarkAt(gt);
+    bool had = gNext[mark] != 0u;
+    bool hit = gNext[mark + 1u] != 0u;
+    gNext[mark] = 0u;
+    gNext[mark + 1u] = 0u;
     int cwait = asint(c.x);
-    if (c.w != 0u) cwait = 0;
-    else if (c.z == 0u) cwait = cwait + 1;
+    if (hit) cwait = 0;
+    else if (!had) cwait = cwait + 1;
     gMisc[gP.vvTri + gt] = uint4(asuint(cwait), c.y, 0u, 0u);
 }
 
@@ -4911,8 +4931,7 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
             gNext[vvHitSmall(runOff, points, a, i) + 1u] = h;
         }
     }
-    if (cand) gMisc[gP.vvTri + gt].z = 1u;
-    if (hit) gMisc[gP.vvTri + gt].w = 1u;
+    vvMark(gt, cand, hit);
 }
 
 // The overflow path: owner a's triangle walk again, applying each hit at once.
