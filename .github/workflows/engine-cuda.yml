@@ -56,6 +56,7 @@ jobs:
     name: Build, then test on Modal
     # Ubuntu 22.04's glibc (2.35) runs on Modal's Debian bookworm image (2.36).
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Inputs fingerprint

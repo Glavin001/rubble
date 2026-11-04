@@ -82,8 +82,16 @@ case "$os" in
 esac
 
 if [[ "$RUN_EXAMPLE" == 1 ]]; then
-  echo "==> Run examples/hello"
-  "$PKG/examples/hello"
+  # A GPU that never answers would hang the run: HELLO_TIMEOUT seconds (default 180;
+  # lavapipe takes about a minute) and it fails. perl's alarm is on macOS, Linux and Git Bash.
+  echo "==> Run examples/hello (timeout ${HELLO_TIMEOUT:-180}s)"
+  status=0
+  perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "${HELLO_TIMEOUT:-180}" "$PKG/examples/hello" \
+    || status=$?
+  if [[ "$status" == 142 ]]; then
+    echo "examples/hello did not finish in ${HELLO_TIMEOUT:-180}s (GPU hang?)" >&2
+  fi
+  [[ "$status" == 0 ]] || exit "$status"
 fi
 ls -l "$PKG/lib"
 echo "==> $PKG"

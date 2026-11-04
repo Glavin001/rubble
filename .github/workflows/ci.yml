@@ -13,11 +13,21 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTUP_TOOLCHAIN: stable
+  # engine-webgpu's build script keeps its slangc outputs here, keyed by its inputs
+  # (build.rs `cache_key`). Compiling every kernel takes 3.5-6 min on a runner and the
+  # web build runs that build script three times, so the `shaders` job compiles them
+  # once per change and the other jobs restore it. The cache key's hashFiles covers what
+  # `cache_key` hashes plus the pinned slangc version (scripts/slangc.sh).
+  RUBBLE_SLANG_CACHE: ${{ github.workspace }}/.rubble-slang-cache
+
+# Every job has a 10 minute cap (timeout-minutes): a hung GPU example or test fails
+# the run instead of holding a runner for hours.
 
 jobs:
   large-files:
     name: Large files
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,12 +39,69 @@ jobs:
           case "$base" in 0000000000000000000000000000000000000000) base= ;; esac
           bash .github/scripts/check-large-files.sh "$base" HEAD
 
+  # Compiles engine-webgpu's Slang kernels into RUBBLE_SLANG_CACHE once per change to
+  # them, per OS (Windows checks out CRLF, which changes build.rs's key). When the cache
+  # already has this key, the job only looks it up.
+  shaders:
+    name: Shaders (${{ matrix.os }})
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Slang outputs already cached?
+        id: slang
+        uses: actions/cache/restore@v4
+        with:
+          path: .rubble-slang-cache
+          key: slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+          lookup-only: true
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.slang.outputs.cache-hit != 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.slang.outputs.cache-hit != 'true'
+        with:
+          workspaces: engine
+          key: shaders
+      - name: Cache slangc
+        if: steps.slang.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rubble-tools
+          key: rubble-slangc-${{ runner.os }}-${{ hashFiles('engine/scripts/slangc.sh') }}
+      # `cargo check` runs the build script (every slangc compile) without codegen.
+      - name: Compile the Slang kernels
+        if: steps.slang.outputs.cache-hit != 'true'
+        run: |
+          TOOLS="$HOME/.cache/rubble-tools"
+          . engine/scripts/slangc.sh
+          cd engine && cargo check --release -p engine-webgpu --no-default-features
+      - name: Save the Slang outputs
+        if: steps.slang.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .rubble-slang-cache
+          key: slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+
   web:
     name: Web demos (build + JS tests)
+    needs: shaders
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/lfs-pull
+      - name: Restore the Slang outputs (shaders job)
+        uses: actions/cache/restore@v4
+        with:
+          path: .rubble-slang-cache
+          key: slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -70,6 +137,7 @@ jobs:
   engine-host:
     name: Engine host tests (no GPU)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: engine
@@ -95,6 +163,8 @@ jobs:
   # there it is linked only. Each package is uploaded as `rubble-<os>`.
   c-abi:
     name: C library (${{ matrix.name }})
+    needs: shaders
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +185,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/lfs-pull
+      - name: Restore the Slang outputs (shaders job)
+        uses: actions/cache/restore@v4
+        with:
+          path: .rubble-slang-cache
+          key: slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
