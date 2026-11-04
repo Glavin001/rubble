@@ -317,6 +317,13 @@ pub struct VehicleDef {
     pub body_damping_reach: f32,
     #[serde(default = "five_kn")]
     pub body_damping_strength: f32,
+    /// Fit the step per tier: the primary structure (the frame: members'
+    /// stations) at its grades, the rest scaled to what is left
+    /// ([`Skeleton::fit_tiers`]); off: one scale for every beam. The frame's
+    /// nodes take the structure's mass ([`super::skeleton::PRIMARY_WEIGHT`])
+    /// and the named masses either way.
+    #[serde(default)]
+    pub tiered: bool,
 }
 
 fn one() -> f32 {
@@ -374,9 +381,11 @@ pub struct Built {
     /// Binding triangles over each group's nodes (for visual parts riding the
     /// structure: seats on their frames, the dashboard on its cross beam).
     pub bind_tris: HashMap<String, Vec<[u32; 3]>>,
-    /// Every beam's stiffness and damping were scaled by this so the explicit
-    /// step stays stable within the kerb mass (1: the materials as defined).
+    /// The primary structure's beams' stiffness, damping and thresholds were
+    /// scaled by this so the explicit step stays stable within the kerb mass (1:
+    /// the materials as defined), and every other beam's by `skin_scale`.
     pub stiffness_scale: f32,
+    pub skin_scale: f32,
 }
 
 /// Medians of the built skeleton's materials (the measures real node–beam cars
@@ -392,6 +401,11 @@ pub struct Stats {
     /// Damping ratio c / 2√(k μ), μ the node pair's reduced mass.
     pub zeta_structure: f32,
     pub zeta_all: f32,
+    /// The primary tier (the frame): its nodes, their median mass and its
+    /// beams' median k·L.
+    pub primary_nodes: usize,
+    pub primary_node_mass: f32,
+    pub kl_primary: f32,
 }
 
 fn median(mut v: Vec<f32>) -> f32 {
@@ -422,6 +436,21 @@ impl Built {
             kl_all: median(all.iter().map(|x| x.0).collect()),
             zeta_structure: median(st.iter().map(|x| x.1).collect()),
             zeta_all: median(all.iter().map(|x| x.1).collect()),
+            primary_nodes: sk.nodes.iter().filter(|n| n.primary).count(),
+            primary_node_mass: median(
+                sk.nodes
+                    .iter()
+                    .filter(|n| n.primary)
+                    .map(|n| n.mass)
+                    .collect(),
+            ),
+            kl_primary: median(
+                sk.beams
+                    .iter()
+                    .filter(|b| !b.fixed && !b.tie && !b.damper && sk.beam_primary(b))
+                    .map(|b| per(b).0)
+                    .collect(),
+            ),
         }
     }
 }
@@ -810,6 +839,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 &snap_pool,
             );
             snap_pool.extend(truss.stations.iter().flatten().copied());
+            // The frame: a body member's stations (not its catchers, not a
+            // panel's own frame).
+            if !m.ride {
+                for &i in truss.stations.iter().flatten() {
+                    sk.nodes[i as usize].primary = true;
+                }
+            }
             let nodes = truss.nodes();
             trusses.push(truss.clone());
             truss_names.push(if side > 0.0 || !m.mirrored {
@@ -851,6 +887,32 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         ..grades.panel
                     },
                 );
+            }
+            if m.ride {
+                // A door beam's ends overlap the pillars it closes against:
+                // pushed in, they bear on them (compression only, so the door
+                // still opens and tears off), carrying a side hit into the
+                // pillars and sill instead of the door skin.
+                let body: Vec<u32> = structure_nodes
+                    .iter()
+                    .copied()
+                    .filter(|&i| sk.nodes[i as usize].part == 0)
+                    .collect();
+                for st in [truss.first(), truss.last()] {
+                    let mut ends: Vec<u32> = st.to_vec();
+                    ends.sort();
+                    ends.dedup();
+                    for &a in &ends {
+                        for b in sk.nearest(sk.pos(a), &body, 2) {
+                            let l = sk.pos(a).distance(sk.pos(b));
+                            if l <= 0.3 {
+                                let sc = l.max(super::material::REF_LENGTH)
+                                    / super::skeleton::TIE_LENGTH.max(l);
+                                sk.beam_with(a, b, base.stiffer(sc), BeamType::Support(10.0), 0);
+                            }
+                        }
+                    }
+                }
             }
             let key = if side > 0.0 || !m.mirrored {
                 m.name.clone()
@@ -942,8 +1004,22 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .collect();
         for side in [1.0f32, -1.0] {
             let p = |q: [f32; 3]| Vec3::new(side * q[0], q[1], q[2]);
-            let a = sk.nearest(p(br.from), &body, 1)[0];
-            let b = sk.nearest(p(br.to), &body, 1)[0];
+            // Each point's node is found on the +x side and mirrored (ties in
+            // distance would otherwise pick different nodes on each side, and
+            // braces sharing a corner would miss each other).
+            let pick = |q: [f32; 3]| -> u32 {
+                let left = Vec3::new(q[0].abs(), q[1], q[2]);
+                let n = sk.nearest(left, &body, 1)[0];
+                let want = Vec3::new(
+                    sk.pos(n).x * (side * q[0].signum()),
+                    sk.pos(n).y,
+                    sk.pos(n).z,
+                );
+                sk.nearest(want, &body, 1)[0]
+            };
+            let _ = p;
+            let a = pick(br.from);
+            let b = pick(br.to);
             if std::env::var("SHOWCASE_BRACES").is_ok() {
                 let deg = |i: u32| sk.beams.iter().filter(|x| x.a == i || x.b == i).count();
                 eprintln!(
@@ -1118,6 +1194,14 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         if nodes.is_empty() {
             return Err(format!("mass `{}`: no body node in its box", m.name));
         }
+        // On the frame where it has nodes in the box (seats, fuel and trim bolt
+        // to the structure, which carries and steadies them).
+        let frame: Vec<u32> = nodes
+            .iter()
+            .copied()
+            .filter(|&i| sk.nodes[i as usize].primary)
+            .collect();
+        let nodes = if frame.is_empty() { nodes } else { frame };
         sk.add_mass_by_stiffness(&nodes, m.kg);
         named += m.kg;
     }
@@ -1307,7 +1391,12 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             );
         }
     }
-    let stiffness_scale = sk.fit_stiffness(structure, 0.95);
+    let (stiffness_scale, skin_scale) = if def.tiered {
+        sk.fit_tiers(structure, 0.95)
+    } else {
+        let s = sk.fit_stiffness(structure, 0.95);
+        (s, s)
+    };
     sk.solve_masses(structure)?;
     preload(&mut sk, def);
     // Collision skin: the shell's skin on a coarser lattice, its nodes contacters.
@@ -1352,6 +1441,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         bind_tris,
         groups,
         stiffness_scale,
+        skin_scale,
     })
 }
 

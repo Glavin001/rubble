@@ -883,86 +883,34 @@ pub fn sedan() -> VehicleDef {
             ("apron".into(), "rail_f".into(), 0.6),
             ("quarter_inner".into(), "rail_r".into(), 0.6),
         ],
-        // The cabin's shear panels: floor pan, roof, firewall and the rear
-        // seat-back bulkhead, each an X between its corners.
-        braces: vec![
-            brace(
-                "floor_x",
-                [0.78, 0.30, 3.30],
-                [-0.78, 0.30, 1.40],
-                "floor",
-                KL_PANEL,
-            ),
-            brace(
-                "roof_x",
-                [0.62, 1.37, 2.74],
-                [-0.62, 1.37, 1.50],
-                "panel",
-                KL_PANEL,
-            ),
-            brace(
-                "firewall_x",
-                [0.75, 0.30, 3.36],
-                [-0.74, 0.92, 3.44],
-                "hsla",
-                KL_PANEL,
-            ),
-            brace(
-                "bulkhead_x",
-                [0.78, 0.30, 1.38],
-                [-0.72, 0.98, 1.30],
-                "hsla",
-                KL_PANEL,
-            ),
-            // The side frames (sill, pillars, roof rail and their joints) resist
-            // racking across each door ring.
-            brace(
-                "ring_f_x",
-                [0.80, 0.33, 3.34],
-                [0.63, 1.38, 2.24],
-                "uhss",
-                KL_PANEL,
-            ),
-            brace(
-                "ring_f_y",
-                [0.80, 0.33, 2.24],
-                [0.62, 1.36, 2.74],
-                "uhss",
-                KL_PANEL,
-            ),
-            brace(
-                "ring_r_x",
-                [0.80, 0.33, 2.24],
-                [0.62, 1.37, 1.50],
-                "uhss",
-                KL_PANEL,
-            ),
-            brace(
-                "ring_r_y",
-                [0.80, 0.33, 1.34],
-                [0.63, 1.38, 2.24],
-                "uhss",
-                KL_PANEL,
-            ),
-            // The bonded screens are shear panels too.
-            brace(
-                "windscreen_x",
-                [0.74, 0.95, 3.40],
-                [-0.60, 1.37, 2.76],
-                "glass",
-                KL_PANEL,
-            ),
-            brace(
-                "backlight_x",
-                [0.70, 0.98, 0.84],
-                [-0.60, 1.36, 1.48],
-                "glass",
-                KL_PANEL,
-            ),
-        ],
+        // The cabin as a braced box: its shear panels (floor pan, roof,
+        // firewall and screen, rear bulkhead, each door ring's frame) lumped
+        // into X's that share the box's corners (sill and roof-rail ends at
+        // the A-, B- and C-pillars), so the box closes: a torsion load meets
+        // every face at once.
+        braces: {
+            let (fb, ft, cw) = ([0.78, 0.33, 3.34], [0.62, 1.37, 2.74], [0.74, 0.92, 3.44]);
+            let (bb, bt) = ([0.78, 0.33, 2.24], [0.62, 1.39, 2.24]);
+            let (rb, rt) = ([0.78, 0.33, 1.38], [0.62, 1.37, 1.50]);
+            let m = |p: [f32; 3]| [-p[0], p[1], p[2]];
+            vec![
+                brace("floor_f", fb, m(bb), "floor", KL_PANEL),
+                brace("floor_r", bb, m(rb), "floor", KL_PANEL),
+                brace("roof_f", ft, m(bt), "panel", KL_PANEL),
+                brace("roof_r", bt, m(rt), "panel", KL_PANEL),
+                brace("firewall_x", fb, m(cw), "hsla", KL_PANEL),
+                brace("windscreen_x", cw, m(ft), "glass", KL_PANEL),
+                brace("bulkhead_x", rb, m(rt), "hsla", KL_PANEL),
+                brace("ring_f_x", fb, bt, "uhss", KL_PANEL),
+                brace("ring_f_y", bb, ft, "uhss", KL_PANEL),
+                brace("ring_r_x", bb, rt, "uhss", KL_PANEL),
+                brace("ring_r_y", rb, bt, "uhss", KL_PANEL),
+            ]
+        },
         frame_through: vec!["door".into()],
         shell_braces: false,
         body_damping: 110.0,
+        tiered: false,
         body_damping_reach: 2.0,
         body_damping_strength: 5000.0,
     }

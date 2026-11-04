@@ -29,6 +29,10 @@ pub const C_RATIO: f32 = 1500.0;
 pub const TIE_LENGTH: f32 = 0.3;
 /// Damping of a shock's bump and rebound stops (N·s/m).
 pub const STOP_DAMP: f32 = 600.0;
+/// The structure's mass leans this many times harder on primary nodes (trim,
+/// sealer, wiring and the rest are lumped onto the frame, as real node–beam cars
+/// do).
+pub const PRIMARY_WEIGHT: f32 = 6.0;
 /// Lightest node (kg).
 pub const MIN_NODE_MASS: f32 = 0.05;
 /// A beam shorter than [`MIN_YIELD_LENGTH`] breaks at this many times its yield
@@ -58,6 +62,11 @@ pub struct SkNode {
     pub contacter: bool,
     /// Ground and static-shape contact (all nodes by default).
     pub ground: bool,
+    /// The primary structure (heavy frame nodes: rails, sills, pillars, roof
+    /// rails, cross members, towers, bumper beams): its beams are fitted to
+    /// the step on their own ([`Skeleton::fit_tiers`]) and the structure's mass
+    /// leans on it ([`PRIMARY_WEIGHT`]).
+    pub primary: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -156,6 +165,7 @@ impl Skeleton {
             mass: 0.0,
             contacter: false,
             ground: true,
+            primary: false,
         });
         (self.nodes.len() - 1) as u32
     }
@@ -343,12 +353,28 @@ impl Skeleton {
     /// masses (iterated to a fixed point from below), Σc/m within [`C_RATIO`],
     /// never under its named mass or [`MIN_NODE_MASS`].
     pub fn floors(&self, s: f32) -> Vec<f32> {
+        self.floors_tiers(s, s)
+    }
+
+    /// Whether a beam belongs to the primary tier (both ends primary).
+    pub fn beam_primary(&self, b: &SkBeam) -> bool {
+        self.nodes[b.a as usize].primary && self.nodes[b.b as usize].primary
+    }
+
+    /// [`Self::floors`] with the primary tier's beams × `sp`, the rest × `ss`.
+    pub fn floors_tiers(&self, sp: f32, ss: f32) -> Vec<f32> {
         let n = self.nodes.len();
         // Per node: (neighbour, stiffness, damping).
         let mut adj: Vec<Vec<(u32, f32, f32)>> = vec![Vec::new(); n];
         for b in &self.beams {
             let l = self.pos(b.a).distance(self.pos(b.b));
-            let f = if b.fixed { 1.0 } else { s };
+            let f = if b.fixed {
+                1.0
+            } else if self.beam_primary(b) {
+                sp
+            } else {
+                ss
+            };
             let kk = f * b.mat.k_at(l);
             let cc = f * b.mat.damp;
             adj[b.a as usize].push((b.b, kk, cc));
@@ -467,6 +493,51 @@ impl Skeleton {
         lo
     }
 
+    /// [`Self::fit_stiffness`] per tier: the primary structure kept as defined
+    /// while the rest (skin, panels, catchers, ties to them) is scaled down to
+    /// fit; only if that is not enough are both scaled together. Returns
+    /// (primary, rest).
+    pub fn fit_tiers(&mut self, structure: f32, share: f32) -> (f32, f32) {
+        let fixed: f32 = self.nodes.iter().map(|n| n.fixed).sum();
+        let want = share * (fixed + structure);
+        let total =
+            |sk: &Skeleton, sp: f32, ss: f32| -> f32 { sk.floors_tiers(sp, ss).iter().sum() };
+        let search = |f: &dyn Fn(f32) -> f32| -> f32 {
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                if f(mid) > want {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            lo
+        };
+        let (sp, ss) = if total(self, 1.0, 1.0) <= want {
+            (1.0, 1.0)
+        } else if total(self, 1.0, 0.05) <= want {
+            (1.0, search(&|x| total(self, 1.0, x)))
+        } else {
+            let x = search(&|x| total(self, x, 0.05 * x));
+            (x, 0.05 * x)
+        };
+        let prim: Vec<bool> = self.beams.iter().map(|b| self.beam_primary(b)).collect();
+        for (b, &p) in self.beams.iter_mut().zip(&prim) {
+            if b.fixed {
+                continue;
+            }
+            let f = if p { sp } else { ss };
+            b.mat.k *= f;
+            b.mat.damp *= f;
+            if b.mat.deform < 1.0e8 {
+                b.mat.deform *= f;
+                b.mat.strength *= f;
+            }
+        }
+        (sp, ss)
+    }
+
     /// Final node masses: named masses where they were put, `structure` kg spread
     /// by the structural weights, every node at least its stability floor. Returns
     /// an error when the floors alone outweigh the budget.
@@ -474,8 +545,14 @@ impl Skeleton {
         for b in self.beams.clone() {
             let l = self.pos(b.a).distance(self.pos(b.b));
             let w = 0.5 * l * b.mat.density;
-            self.nodes[b.a as usize].weight += w;
-            self.nodes[b.b as usize].weight += w;
+            for i in [b.a, b.b] {
+                let f = if self.nodes[i as usize].primary {
+                    PRIMARY_WEIGHT
+                } else {
+                    1.0
+                };
+                self.nodes[i as usize].weight += w * f;
+            }
         }
         let (k, _) = self.node_rates();
         let floor: Vec<f32> = self.floors(1.0);

@@ -40,9 +40,13 @@ fn main() {
             "  medians: node mass {:.2} kg; k·L structure {:.2e} N, all {:.2e} N; ζ structure {:.3}, all {:.3}",
             st.node_mass, st.kl_structure, st.kl_all, st.zeta_structure, st.zeta_all
         );
+        eprintln!(
+            "  frame: {} nodes, median {:.2} kg, k·L {:.2e} N, scale ×{:.2}; skin scale ×{:.2}",
+            st.primary_nodes, st.primary_node_mass, st.kl_primary, b.stiffness_scale, b.skin_scale
+        );
     }
     if std::env::var("WORST").is_ok() {
-        let fl = sk.floors(1.0 / b.stiffness_scale);
+        let fl = sk.floors_tiers(1.0 / b.stiffness_scale, 1.0 / b.skin_scale);
         let mut idx: Vec<usize> = (0..sk.nodes.len()).collect();
         idx.sort_by(|&a, &c| fl[c].total_cmp(&fl[a]));
         for &i in idx
@@ -305,7 +309,10 @@ fn main() {
         }
         s.settings.drag = false;
         let tops: Vec<u32> = sk.shocks.iter().map(|x| x.b).collect();
-        let t = 2000.0f32;
+        let t: f32 = std::env::var("TORQUE")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(2000.0);
         let track = sk.pos(tops[0]).distance(sk.pos(tops[1]));
         let rings: Vec<(f32, [u32; 2])> = b
             .shell
