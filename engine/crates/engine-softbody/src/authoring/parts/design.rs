@@ -136,7 +136,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         step_along: 0.035,
         nose_ramp: 0.045,
         tail_ramp: 0.04,
-        rear_deck: [0.80, 1.40, 0.045, 0.012],
+        rear_deck: [0.85, 1.25, 0.045, 0.012],
         hood_crease: [0.22, 0.60, 0.014, 0.004],
         hood_z: [3.36, 4.70],
         deck_lip: [0.026, 0.24, 0.60],
