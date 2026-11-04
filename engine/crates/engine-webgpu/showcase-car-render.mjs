@@ -63,6 +63,13 @@ struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listA
 @group(0) @binding(5) var<storage, read> topo: array<u32>;
 @group(0) @binding(6) var<storage, read> restN: array<vec4f>;
 @group(0) @binding(7) var<storage, read_write> nodeN: array<vec4f>;
+// Level of detail: per car its levels' sizes and switch distance (lod), the
+// eye (view, from the last draw), and the indirect args the pick writes: per
+// level a dispatch (3 words) and two indexed draws (opaque, glass; 5 words).
+struct Lod { n0: u32, n1: u32, opq0: u32, gl0: u32, opq1: u32, gl1: u32, levels: u32, dist: f32 };
+@group(1) @binding(0) var<uniform> lod: Lod;
+@group(1) @binding(1) var<storage, read_write> args: array<u32>;
+@group(1) @binding(2) var<uniform> view: vec4f;
 
 fn origin() -> vec3f {
   let o = misc[params.vehicle];
@@ -82,6 +89,24 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
   }
   let l = length(acc);
   nodeN[i] = vec4f(select(vec3f(0.0), acc / l, l > 1e-12), 0.0);
+}
+
+
+// Pick the car's level from its distance (its first node) to the eye.
+@compute @workgroup_size(1)
+fn pick() {
+  var sel = 0u;
+  if (lod.levels > 1u && view.w > 0.5 && distance(nodePos(0u) + origin(), view.xyz) > lod.dist) { sel = 1u; }
+  let ns = array<u32, 2>(lod.n0, lod.n1);
+  let opq = array<u32, 2>(lod.opq0, lod.opq1);
+  let gl = array<u32, 2>(lod.gl0, lod.gl1);
+  for (var k = 0u; k < 2u; k++) {
+    let on = select(0u, 1u, k == sel);
+    let b = k * 13u;
+    args[b] = on * ((ns[k] + ${WG - 1}u) / ${WG}u); args[b + 1u] = 1u; args[b + 2u] = 1u;
+    args[b + 3u] = opq[k]; args[b + 4u] = on; args[b + 5u] = 0u; args[b + 6u] = 0u; args[b + 7u] = 0u;
+    args[b + 8u] = gl[k]; args[b + 9u] = on; args[b + 10u] = opq[k]; args[b + 11u] = 0u; args[b + 12u] = 0u;
+  }
 }
 
 @compute @workgroup_size(${WG})
@@ -390,6 +415,15 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   const pipeLayout = device.createPipelineLayout({ bindGroupLayouts: [skinLayout] });
   const skinPipe = device.createComputePipeline({ label: 'showcase-skin', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'skin' } });
   const normalPipe = device.createComputePipeline({ label: 'showcase-node-normals', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeNormals' } });
+  // The pick also writes the indirect args (group 1), so the skin dispatches,
+  // which read them as indirect args, must not bind them.
+  const pickLayout = device.createBindGroupLayout({
+    entries: [0, 1, 2].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: binding === 1 ? 'storage' : 'uniform' } })),
+  });
+  const pickPipeLayout = device.createPipelineLayout({ bindGroupLayouts: [skinLayout, pickLayout] });
+  const pickPipe = device.createComputePipeline({ label: 'showcase-lod-pick', layout: pickPipeLayout, compute: { module: skinModule, entryPoint: 'pick' } });
+  // The eye of the last draw (w = 1 once set): picks levels of detail.
+  const viewBuf = device.createBuffer({ label: 'showcase-view', size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const drawPipe = device.createRenderPipeline({
     label: 'showcase-draw',
     layout: 'auto',
@@ -431,17 +465,13 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   let nodesBuf = null;
   let miscBuf = null;
   let posBuf = null, posPipes = null;
-  const makePosBind = (car) => posBuf && device.createBindGroup({
+  const bindFor = (car, lv, src0, src1) => device.createBindGroup({
     layout: skinLayout,
-    entries: [posBuf, posBuf, car.binds, car.out, car.params, car.topo, car.restN, car.nodeN]
+    entries: [src0, src1, lv.binds, lv.out, lv.params, car.topo, car.restN, car.nodeN]
       .map((buffer, binding) => ({ binding, resource: { buffer } })),
   });
-
-  const makeSkinBind = (car) => device.createBindGroup({
-    layout: skinLayout,
-    entries: [nodesBuf, miscBuf, car.binds, car.out, car.params, car.topo, car.restN, car.nodeN]
-      .map((buffer, binding) => ({ binding, resource: { buffer } })),
-  });
+  const makePosBind = (car) => posBuf && car.levels.map((lv) => bindFor(car, lv, posBuf, posBuf));
+  const makeSkinBind = (car) => car.levels.map((lv) => bindFor(car, lv, nodesBuf, miscBuf));
   const upload = (label, data, usage = GPUBufferUsage.STORAGE) => {
     const b = device.createBuffer({ label, size: Math.max(16, Math.ceil(data.byteLength / 4) * 4), usage: usage | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(b, 0, data);
@@ -459,6 +489,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       if (buf && !posPipes) {
         const m = device.createShaderModule({ label: 'showcase-skin-pos', code: SKIN_POS_WGSL });
         posPipes = {
+          pick: device.createComputePipeline({ label: 'showcase-lod-pick-pos', layout: pickPipeLayout, compute: { module: m, entryPoint: 'pick' } }),
           skin: device.createComputePipeline({ label: 'showcase-skin-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'skin' } }),
           normal: device.createComputePipeline({ label: 'showcase-node-normals-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'nodeNormals' } }),
         };
@@ -476,63 +507,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * vehicle's first node in the solver (`layout.vehicles[i].nodeOffset`), `vehicle`
      * its index (for its origin). Returns an id.
      */
-    addCar(visual, { nodeOffset = 0, vehicle = 0 } = {}) {
-      const n = visual.vertexCount;
-      const bindData = new ArrayBuffer(n * 64);
-      const u = new Uint32Array(bindData);
-      const f = new Float32Array(bindData);
-      for (let i = 0; i < n; i++) {
-        const o = i * 16;
-        u[o] = visual.bindNodes[3 * i];
-        u[o + 1] = visual.bindNodes[3 * i + 1];
-        u[o + 2] = visual.bindNodes[3 * i + 2];
-        u[o + 3] = vehicle;
-        f[o + 4] = visual.bindCoords[3 * i];
-        f[o + 5] = visual.bindCoords[3 * i + 1];
-        f[o + 6] = visual.bindCoords[3 * i + 2];
-        f[o + 7] = visual.bindRest[2 * i];
-        f[o + 8] = visual.bindNormal[3 * i];
-        f[o + 9] = visual.bindNormal[3 * i + 1];
-        f[o + 10] = visual.bindNormal[3 * i + 2];
-        f[o + 11] = visual.bindRest[2 * i + 1];
-        f[o + 12] = visual.normals[3 * i];
-        f[o + 13] = visual.normals[3 * i + 1];
-        f[o + 14] = visual.normals[3 * i + 2];
-        u[o + 15] = (visual.smooth ? visual.smooth[i] : 0) | (visual.rigid && visual.rigid[i] ? 2 : 0);
-      }
-      const binds = device.createBuffer({ label: 'showcase-binds', size: bindData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-      device.queue.writeBuffer(binds, 0, bindData);
-      // Deformed (position | torn, normal) per vertex: the compute pass writes it,
-      // the draw reads it as a vertex buffer. Starts at the rest pose.
-      const out = device.createBuffer({ label: 'showcase-out', size: n * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-      const rest = new Float32Array(n * 8);
-      for (let i = 0; i < n; i++) {
-        rest.set(visual.positions.subarray(3 * i, 3 * i + 3), 8 * i);
-        rest.set(visual.normals.subarray(3 * i, 3 * i + 3), 8 * i + 4);
-      }
-      device.queue.writeBuffer(out, 0, rest);
-      // Per vertex: colour, AO, material, rest position (the glass's crack
-      // pattern is drawn in rest space so it rides the glass).
-      const attr = new ArrayBuffer(n * 32);
-      const af = new Float32Array(attr);
-      const au = new Uint32Array(attr);
-      for (let i = 0; i < n; i++) {
-        af.set(visual.colors.subarray(3 * i, 3 * i + 3), 8 * i);
-        af[8 * i + 3] = visual.ao ? visual.ao[i] : 1;
-        au[8 * i + 4] = visual.material[i];
-        af.set(visual.positions.subarray(3 * i, 3 * i + 3), 8 * i + 5);
-      }
-      // Opaque triangles first, glass (material 1) after.
-      const tri = visual.indices;
-      const opaque = [], glass = [];
-      const TRANSPARENT = new Set([1, 17, 20, 25]);
-      for (let t = 0; t < tri.length; t += 3) (TRANSPARENT.has(visual.material[tri[t]]) ? glass : opaque).push(tri[t], tri[t + 1], tri[t + 2]);
-      const ordered = new Uint32Array([...opaque, ...glass]);
-      const attrs = device.createBuffer({ label: 'showcase-attrs', size: attr.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-      device.queue.writeBuffer(attrs, 0, attr);
-      const index = device.createBuffer({ label: 'showcase-index', size: ordered.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
-      device.queue.writeBuffer(index, 0, ordered);
-      const params = device.createBuffer({ label: 'showcase-params', size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    addCar(visual, { nodeOffset = 0, vehicle = 0, lod = null, lodDistance = 18 } = {}) {
       const nodeCount = visual.nodeCount;
       const nt = visual.normalTris, start = visual.nodeTriStart, list = visual.nodeTriList;
       const listAt = start.length, trisAt = listAt + list.length;
@@ -540,16 +515,95 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       topo.set(start, 0);
       topo.set(list, listAt);
       for (let t = 0; t < nt.length / 3; t++) topo.set(nt.subarray(3 * t, 3 * t + 3), trisAt + 4 * t);
-      device.queue.writeBuffer(params, 0, new Uint32Array([n, nodeOffset, nodeCount, vehicle, listAt, trisAt, 0, 0]));
       const rn = new Float32Array(nodeCount * 4);
       for (let i = 0; i < nodeCount; i++) rn.set(visual.nodeRestNormal.subarray(3 * i, 3 * i + 3), 4 * i);
+      const level = (v) => {
+        const n = v.vertexCount;
+        const bindData = new ArrayBuffer(n * 64);
+        const u = new Uint32Array(bindData);
+        const f = new Float32Array(bindData);
+        for (let i = 0; i < n; i++) {
+          const o = i * 16;
+          u[o] = v.bindNodes[3 * i];
+          u[o + 1] = v.bindNodes[3 * i + 1];
+          u[o + 2] = v.bindNodes[3 * i + 2];
+          u[o + 3] = vehicle;
+          f[o + 4] = v.bindCoords[3 * i];
+          f[o + 5] = v.bindCoords[3 * i + 1];
+          f[o + 6] = v.bindCoords[3 * i + 2];
+          f[o + 7] = v.bindRest[2 * i];
+          f[o + 8] = v.bindNormal[3 * i];
+          f[o + 9] = v.bindNormal[3 * i + 1];
+          f[o + 10] = v.bindNormal[3 * i + 2];
+          f[o + 11] = v.bindRest[2 * i + 1];
+          f[o + 12] = v.normals[3 * i];
+          f[o + 13] = v.normals[3 * i + 1];
+          f[o + 14] = v.normals[3 * i + 2];
+          u[o + 15] = (v.smooth ? v.smooth[i] : 0) | (v.rigid && v.rigid[i] ? 2 : 0);
+        }
+        const binds = upload('showcase-binds', bindData);
+        // Deformed (position | torn, normal | strain) per vertex: the compute pass
+        // writes it, the draw reads it as a vertex buffer. Starts at the rest pose.
+        const out = device.createBuffer({ label: 'showcase-out', size: n * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+        const rest = new Float32Array(n * 8);
+        for (let i = 0; i < n; i++) {
+          rest.set(v.positions.subarray(3 * i, 3 * i + 3), 8 * i);
+          rest.set(v.normals.subarray(3 * i, 3 * i + 3), 8 * i + 4);
+        }
+        device.queue.writeBuffer(out, 0, rest);
+        // Per vertex: colour, AO, material, rest position (the glass's crack
+        // pattern is drawn in rest space so it rides the glass).
+        const attr = new ArrayBuffer(n * 32);
+        const af = new Float32Array(attr);
+        const au = new Uint32Array(attr);
+        for (let i = 0; i < n; i++) {
+          af.set(v.colors.subarray(3 * i, 3 * i + 3), 8 * i);
+          af[8 * i + 3] = v.ao ? v.ao[i] : 1;
+          au[8 * i + 4] = v.material[i];
+          af.set(v.positions.subarray(3 * i, 3 * i + 3), 8 * i + 5);
+        }
+        // Opaque triangles first, the blended ones (glass, lenses) after.
+        const tri = v.indices;
+        const TRANSPARENT = new Set([1, 17, 20, 25]);
+        let no = 0;
+        for (let t = 0; t < tri.length; t += 3) if (!TRANSPARENT.has(v.material[tri[t]])) no += 3;
+        const ordered = new Uint32Array(tri.length);
+        let io = 0, ig = no;
+        for (let t = 0; t < tri.length; t += 3) {
+          if (TRANSPARENT.has(v.material[tri[t]])) { ordered[ig++] = tri[t]; ordered[ig++] = tri[t + 1]; ordered[ig++] = tri[t + 2]; }
+          else { ordered[io++] = tri[t]; ordered[io++] = tri[t + 1]; ordered[io++] = tri[t + 2]; }
+        }
+        const attrs = device.createBuffer({ label: 'showcase-attrs', size: attr.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(attrs, 0, attr);
+        const index = device.createBuffer({ label: 'showcase-index', size: ordered.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(index, 0, ordered);
+        const params = device.createBuffer({ label: 'showcase-params', size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(params, 0, new Uint32Array([n, nodeOffset, nodeCount, vehicle, listAt, trisAt, 0, 0]));
+        return { n, binds, out, attrs, index, params, opaqueCount: no, glassCount: tri.length - no };
+      };
+      const levels = [level(visual)];
+      if (lod) levels.push(level(lod));
+      const lodData = new ArrayBuffer(32);
+      const lu = new Uint32Array(lodData);
+      const l1 = levels[1] ?? levels[0];
+      lu.set([levels[0].n, l1.n, levels[0].opaqueCount, levels[0].glassCount, l1.opaqueCount, l1.glassCount, levels.length]);
+      new Float32Array(lodData)[7] = lodDistance;
       const car = {
-        n, nodeCount, vehicle, binds, out, attrs, index, params, opaqueCount: opaque.length, glassCount: glass.length, skinBind: null,
-        listAt, trisAt,
+        nodeCount, vehicle, nodeOffset, levels, listAt, trisAt, skinBind: null, posBind: null,
         topo: upload('showcase-topology', topo),
         restN: upload('showcase-rest-normals', rn),
         nodeN: device.createBuffer({ label: 'showcase-node-normals', size: nodeCount * 16, usage: GPUBufferUsage.STORAGE }),
+        lod: upload('showcase-lod', lodData, GPUBufferUsage.UNIFORM),
+        // Indirect args (2 levels × 13 words); level 0 drawn until the first pick.
+        args: upload('showcase-lod-args', new Uint32Array([
+          Math.ceil(levels[0].n / WG), 1, 1, levels[0].opaqueCount, 1, 0, 0, 0, levels[0].glassCount, 1, levels[0].opaqueCount, 0, 0,
+          0, 1, 1, l1.opaqueCount, 0, 0, 0, 0, l1.glassCount, 0, l1.opaqueCount, 0, 0,
+        ]), GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT),
       };
+      car.pickBind = device.createBindGroup({
+        layout: pickLayout,
+        entries: [car.lod, car.args, viewBuf].map((buffer, binding) => ({ binding, resource: { buffer } })),
+      });
       if (nodesBuf) car.skinBind = makeSkinBind(car);
       car.posBind = makePosBind(car);
       const id = nextId++;
@@ -560,36 +614,40 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     /** Point a car at another first node (same vehicle index; re-add to change it). */
     setNodeOffset(id, nodeOffset) {
       const car = cars.get(id);
-      if (car) device.queue.writeBuffer(car.params, 0, new Uint32Array([car.n, nodeOffset, car.nodeCount, car.vehicle, car.listAt, car.trisAt, 0, 0]));
+      if (!car) return;
+      car.nodeOffset = nodeOffset;
+      for (const lv of car.levels) device.queue.writeBuffer(lv.params, 0, new Uint32Array([lv.n, nodeOffset, car.nodeCount, car.vehicle, car.listAt, car.trisAt, 0, 0]));
     },
     removeCar(id) {
       const car = cars.get(id);
       if (!car) return;
-      for (const b of [car.binds, car.out, car.attrs, car.index, car.params, car.topo, car.restN, car.nodeN]) b.destroy();
+      for (const lv of car.levels) for (const b of [lv.binds, lv.out, lv.attrs, lv.index, lv.params]) b.destroy();
+      for (const b of [car.topo, car.restN, car.nodeN, car.lod, car.args]) b.destroy();
       cars.delete(id);
     },
-    /** Deform every car from the solver's current node positions. */
+    /**
+     * Deform every car from the solver's current node positions (or the positions
+     * buffer given to setPositions): node normals, the level-of-detail pick (by
+     * the last draw's eye), then the picked level's skin.
+     */
     update(encoder) {
-      if (posBuf) {
-        const pass = encoder.beginComputePass({ label: 'showcase-skin-pos' });
-        for (const car of cars.values()) {
-          pass.setBindGroup(0, car.posBind);
-          pass.setPipeline(posPipes.normal);
-          pass.dispatchWorkgroups(Math.ceil(car.nodeCount / WG));
-          pass.setPipeline(posPipes.skin);
-          pass.dispatchWorkgroups(Math.ceil(car.n / WG));
-        }
-        pass.end();
-        return;
-      }
-      if (!nodesBuf) return;
-      const pass = encoder.beginComputePass({ label: 'showcase-skin' });
+      const usePos = !!posBuf;
+      if (!usePos && !nodesBuf) return;
+      const pipes = usePos ? posPipes : { normal: normalPipe, skin: skinPipe, pick: pickPipe };
+      const pass = encoder.beginComputePass({ label: usePos ? 'showcase-skin-pos' : 'showcase-skin' });
       for (const car of cars.values()) {
-        pass.setBindGroup(0, car.skinBind);
-        pass.setPipeline(normalPipe);
+        const groups = usePos ? car.posBind : car.skinBind;
+        pass.setBindGroup(0, groups[0]);
+        pass.setPipeline(pipes.normal);
         pass.dispatchWorkgroups(Math.ceil(car.nodeCount / WG));
-        pass.setPipeline(skinPipe);
-        pass.dispatchWorkgroups(Math.ceil(car.n / WG));
+        pass.setPipeline(pipes.pick);
+        pass.setBindGroup(1, car.pickBind);
+        pass.dispatchWorkgroups(1);
+        pass.setPipeline(pipes.skin);
+        car.levels.forEach((lv, k) => {
+          pass.setBindGroup(0, groups[k]);
+          pass.dispatchWorkgroupsIndirect(car.args, k * 52);
+        });
       }
       pass.end();
     },
@@ -600,26 +658,24 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       fr.set([eye[0], eye[1], eye[2], 1], 16);
       fr.set([light[0], light[1], light[2], 0], 20);
       device.queue.writeBuffer(frameBuf, 0, fr);
-      pass.setPipeline(drawPipe);
-      pass.setBindGroup(0, drawBind);
-      for (const car of cars.values()) {
-        pass.setVertexBuffer(0, car.out);
-        pass.setVertexBuffer(1, car.attrs);
-        pass.setIndexBuffer(car.index, 'uint32');
-        pass.drawIndexed(car.opaqueCount);
-      }
-      pass.setPipeline(glassPipe);
-      pass.setBindGroup(0, glassBind);
-      for (const car of cars.values()) {
-        pass.setVertexBuffer(0, car.out);
-        pass.setVertexBuffer(1, car.attrs);
-        pass.setIndexBuffer(car.index, 'uint32');
-        pass.drawIndexed(car.glassCount, 1, car.opaqueCount);
+      device.queue.writeBuffer(viewBuf, 0, new Float32Array([eye[0], eye[1], eye[2], 1]));
+      for (const [pipe, bind, at] of [[drawPipe, drawBind, 12], [glassPipe, glassBind, 32]]) {
+        pass.setPipeline(pipe);
+        pass.setBindGroup(0, bind);
+        for (const car of cars.values()) {
+          car.levels.forEach((lv, k) => {
+            pass.setVertexBuffer(0, lv.out);
+            pass.setVertexBuffer(1, lv.attrs);
+            pass.setIndexBuffer(lv.index, 'uint32');
+            pass.drawIndexedIndirect(car.args, k * 52 + at);
+          });
+        }
       }
     },
     destroy() {
       for (const id of [...cars.keys()]) this.removeCar(id);
       frameBuf.destroy();
+      viewBuf.destroy();
     },
   };
 }

@@ -128,7 +128,7 @@ pub fn lamp(m: &Mesh, f: &[f32], spec: &LampSpec) -> Mesh {
             spec.axis,
             s0,
             &[(r * 1.25, 0.0), (r * 1.1, 0.008), (r * 0.9, 0.03), (r * 0.5, 0.05)],
-            32,
+            super::segs(32, 10),
             |_, _| mat::CHROME,
             |k| 0.9 - 0.15 * k as f32,
             false,
@@ -139,7 +139,7 @@ pub fn lamp(m: &Mesh, f: &[f32], spec: &LampSpec) -> Mesh {
             spec.axis,
             s0,
             &[(r * 0.86, 0.0), (r * 0.7, -0.008), (r * 0.4, -0.014), (0.0, -0.016)],
-            32,
+            super::segs(32, 10),
             |_, _| mat::HEADLIGHT,
             |_| 1.0,
             false,
@@ -277,7 +277,7 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
     };
     let s0 = (s0 - ax * s0.dot(ax)).normalize();
     let (r, hw, rr) = (w.radius, 0.5 * w.width, w.rim_radius);
-    let segs = 64;
+    let segs = super::segs(48, 20);
     // Tyre profile from the inner bead round the tread to the outer bead
     // (radius, axial offset).
     let side = |s: f32| -> Vec<(f32, f32)> {
@@ -301,7 +301,7 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
     // Tread with four circumferential grooves.
     let grooves = [-0.55f32, -0.2, 0.2, 0.55];
     let mut tread = Vec::new();
-    let n_t = 22;
+    let n_t = super::segs(14, 6);
     for i in 0..=n_t {
         let u = -0.78 + 1.56 * i as f32 / n_t as f32;
         let mut depth = 0.0;
@@ -336,8 +336,8 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
         let t = ((rad - 0.07) / (rr - 0.085)).clamp(0.0, 1.0);
         hw * 0.80 - 0.035 * (PI * t).sin() * (1.0 - 0.3 * t) + 0.004 * (1.0 - t)
     };
-    let nr = 22;
-    let na = 200;
+    let nr = super::segs(14, 6);
+    let na = super::segs(140, 60);
     let s1 = ax.cross(s0);
     let mut face = Mesh::default();
     let mut ids = vec![vec![0u32; na]; nr + 1];
@@ -428,7 +428,7 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
         (w.disc_radius, dw - 0.013),
         (w.disc_radius * 0.52, dw - 0.013),
     ];
-    m.lathe(w.centre, ax, s0, &disc, 64, |_, _| mat::BRAKE, |k| if k == 0 { 0.8 } else { 0.6 }, true);
+    m.lathe(w.centre, ax, s0, &disc, super::segs(48, 16), |_, _| mat::BRAKE, |k| if k == 0 { 0.8 } else { 0.6 }, true);
     m.lathe(
         w.centre,
         ax,

@@ -272,7 +272,16 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
     if n < 2 {
         return;
     }
-    let steps = 3usize;
+    let coarse = super::detail() < 0.75;
+    let steps = if coarse { 1usize } else { 2 };
+    let st = if coarse {
+        EdgeStyle {
+            flange: 0.0,
+            ..st
+        }
+    } else {
+        st
+    };
     let mut rings: Vec<Vec<u32>> = vec![l.to_vec()];
     let mut frames = Vec::with_capacity(n);
     for k in 0..n {
@@ -362,4 +371,37 @@ pub fn offset(m: &Mesh, d: f32, flip: bool, mat: Option<u8>, ao: f32) -> Mesh {
 /// Evaluate a region on every vertex of `m`.
 pub fn field(m: &Mesh, f: impl Fn(usize, Vec3) -> f32) -> Vec<f32> {
     m.pos.iter().enumerate().map(|(i, &p)| f(i, p)).collect()
+}
+
+/// A strip along a loop of `m` (interior on the left): from `w_in` inside the
+/// loop to `w_out` outside it, lifted `lift` along the normals. Narrow trim
+/// (window frames, frit bands) built this way follows the cut exactly instead
+/// of being clipped from the grid twice.
+pub fn loop_strip(m: &Mesh, l: &[u32], closed: bool, w_in: f32, w_out: f32, lift: f32, mat: u8, ao: f32) -> Mesh {
+    let mut out = Mesh::default();
+    let n = l.len();
+    if n < 2 {
+        return out;
+    }
+    let mut inner = Vec::with_capacity(n);
+    let mut outer = Vec::with_capacity(n);
+    for k in 0..n {
+        let (a, b) = if closed {
+            (l[(k + n - 1) % n], l[(k + 1) % n])
+        } else {
+            (l[k.saturating_sub(1)], l[(k + 1).min(n - 1)])
+        };
+        let t = (m.pos[b as usize] - m.pos[a as usize]).normalize_or_zero();
+        let nn = m.nrm[l[k] as usize];
+        let o = t.cross(nn).normalize_or_zero();
+        let p = m.pos[l[k] as usize] + nn * lift;
+        let i0 = out.vert(p - o * w_in, nn, mat, ao);
+        let i1 = out.vert(p + o * w_out, nn, mat, ao);
+        out.smooth[i0 as usize] = 1;
+        out.smooth[i1 as usize] = 1;
+        inner.push(i0);
+        outer.push(i1);
+    }
+    out.strips(&[inner, outer], closed);
+    out
 }

@@ -55,7 +55,7 @@ try {
   const context = canvas.getContext('webgpu');
   const format = navigator.gpu.getPreferredCanvasFormat();
   // 4× MSAA: panel gaps and trim are a few millimetres wide.
-  const SAMPLES = 4;
+  const SAMPLES = Number(qs.get('samples')) || 4;
   let depth = null, msaa = null;
   const configure = () => {
     const dpr = Math.min(devicePixelRatio || 1, 2);
@@ -82,7 +82,7 @@ try {
   const batchMs = [];
   const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES });
   r.setSolver(sim.nodesBuffer(), sim.miscBuffer());
-  layout.vehicles.forEach((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, vehicle: i }));
+  layout.vehicles.forEach((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, vehicle: i, lod: qs.get('lod') === '0' ? null : car.visualLod, lodDistance: Number(qs.get('lodDist')) || 18 }));
 
   // Ground and the scene's static shapes: flat-shaded boxes and cylinders.
   const SCENE_WGSL = `
@@ -189,7 +189,7 @@ try {
     carry -= steps;
     if (steps > 0) { sim.frame(steps); simTime += steps / rate; }
     const enc = device.createCommandEncoder();
-    r.update(enc);
+    if (!qs.has('noskin') || frames < 3) r.update(enc);
     const aspect = canvas.width / canvas.height;
     const eye = [target[0] + dist * Math.sin(yaw) * Math.cos(pitch), target[1] + dist * Math.sin(pitch), target[2] + dist * Math.cos(yaw) * Math.cos(pitch)];
     const vp = mat.mul(mat.persp(0.75, aspect, 0.05, 500), mat.look(eye, target));
@@ -210,7 +210,7 @@ try {
         depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
         timestampWrites: { querySet: tq.set, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 },
       });
-      r.draw(p1, { viewProj: vp, eye, light });
+      if (qs.get('perf') !== 'pass') r.draw(p1, { viewProj: vp, eye, light });
       p1.end();
       enc.resolveQuerySet(tq.set, 0, 2, tq.resolve, 0);
       if (!tq.pending) enc.copyBufferToBuffer(tq.resolve, 0, tq.read, 0, 16);
@@ -231,13 +231,17 @@ try {
       device.queue.onSubmittedWorkDone().then(() => {
         const t0 = performance.now();
         const e2 = device.createCommandEncoder();
+        // ?perf=skin: the compute pass only; ?perf=draw: the draw only; ?perf=pass:
+        // an empty pass (the load/store overhead to subtract).
+        const mode = qs.get('perf');
         for (let k = 0; k < 20; k++) {
-          r.update(e2);
+          if (mode !== 'draw' && mode !== 'pass') r.update(e2);
+          if (mode === 'skin') continue;
           const p = e2.beginRenderPass({
             colorAttachments: [{ view: msaa.createView(), loadOp: 'load', storeOp: 'store' }],
             depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
           });
-          r.draw(p, { viewProj: vp, eye, light });
+          if (mode !== 'pass') r.draw(p, { viewProj: vp, eye, light });
           p.end();
         }
         device.queue.submit([e2.finish()]);
@@ -262,13 +266,13 @@ try {
     poll();
     const c = car.counts;
     const gm = gpuMs.length ? gpuMs.reduce((a, b) => a + b, 0) / gpuMs.length : NaN;
-    hud.textContent = `${qs.get('style') ?? 'sedan'} ${res}: ${c.nodes} nodes, ${c.beams} beams, ${c.collisionTriangles} collision tris, ${car.visual.indices.length / 3} visual tris, ${c.mass.toFixed(0)} kg\n` +
+    hud.textContent = `${qs.get('style') ?? 'sedan'} ${res}: ${c.nodes} nodes, ${c.beams} beams, ${c.collisionTriangles} collision tris, ${car.visual.indices.length / 3} visual tris (${car.visualLod ? car.visualLod.indices.length / 3 : '–'} far), ${c.mass.toFixed(0)} kg\n` +
       `scene ${scene} ${kmh} km/h × ${n}   t ${simTime.toFixed(2)} s   GPU ${isNaN(gm) ? '–' : gm.toFixed(2)} ms/frame   build ${buildMs.toFixed(0)} ms` +
       (damage ? `\nbroken ${damage.broken}  bent ${damage.bent}` : '') +
       (tq?.ms.length ? `\ncar render ${(tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length).toFixed(3)} ms (GPU pass)` : '') +
       (batchMs.length ? `\ncar skin + render ${Math.min(...batchMs).toFixed(3)} ms (batch of 20, queue time) on ${adapterInfo}` : '');
-    const renderMs = tq?.ms.length ? tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length : batchMs.length ? Math.min(...batchMs) : undefined;
-    window.__state = { ready: frames > 3 && (!qs.has('perf') || renderMs !== undefined), time: simTime, frozen: simTime >= freeze, gpuMs: gm, renderMs, damage, counts: c };
+    const renderMs = tq?.ms.length >= 30 ? [...tq.ms].sort((a, b) => a - b)[Math.floor(tq.ms.length * 0.1)] : batchMs.length ? Math.min(...batchMs) : undefined;
+    window.__state = { ready: frames > 3 && (!qs.has('perf') || renderMs !== undefined), time: simTime, frozen: simTime >= freeze, gpuMs: gm, renderMs, damage, counts: c, features: [...device.features].join(',') + ' ' + adapterInfo };
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

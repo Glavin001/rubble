@@ -302,6 +302,16 @@ fn point_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
 
 /// Build the visual skin of a built vehicle.
 pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
+    showcase_visual_lod(built, 1.0)
+}
+
+/// The visual at a level of detail (1 full; 0.45 the distant LOD: the body
+/// sampled about 2× coarser, single-step edge rolls, fewer wheel segments).
+pub fn showcase_visual_lod(built: &Built, detail: f32) -> Result<ShowcaseVisual, String> {
+    super::parts::with_detail(detail, || build_visual(built))
+}
+
+fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     let def = &built.def;
     let sk = &built.skeleton;
     let paint = built.params.paint.unwrap_or(def.look.paint);

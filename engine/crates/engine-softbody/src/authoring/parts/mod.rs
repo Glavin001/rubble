@@ -28,6 +28,30 @@ pub mod fixtures;
 pub mod trim;
 
 use glam::Vec3;
+use std::cell::Cell;
+
+thread_local! {
+    static DETAIL: Cell<f32> = const { Cell::new(1.0) };
+}
+
+/// The level of detail being built (1 full; lower for the distant LOD): the
+/// tools scale their segment counts and edge rolls by it.
+pub fn detail() -> f32 {
+    DETAIL.with(|d| d.get())
+}
+
+/// Run `f` building at level of detail `d`.
+pub fn with_detail<T>(d: f32, f: impl FnOnce() -> T) -> T {
+    let old = DETAIL.with(|c| c.replace(d));
+    let r = f();
+    DETAIL.with(|c| c.set(old));
+    r
+}
+
+/// A segment count scaled by the level of detail (at least `min`).
+pub fn segs(n: usize, min: usize) -> usize {
+    ((n as f32 * detail()).round() as usize).max(min)
+}
 
 /// How a piece rides the skeleton.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

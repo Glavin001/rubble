@@ -8,7 +8,7 @@
 //! paint: [r, g, b] (linear) }`.
 
 use crate::err;
-use engine_softbody::authoring::skin::{showcase_visual, MATERIAL_NAMES};
+use engine_softbody::authoring::skin::{showcase_visual, showcase_visual_lod, ShowcaseVisual, MATERIAL_NAMES};
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array, Uint8Array};
 use wasm_bindgen::prelude::*;
@@ -73,7 +73,9 @@ pub fn showcase_car_truck(params: JsValue) -> Result<String, JsValue> {
 /// ambient occlusion, 1 open), smooth (Uint8Array), rigid (Uint8Array: 1 where
 /// (α, β, h) are an offset in the triangle's orthonormal frame), normalTris, nodeTriStart, nodeTriList
 /// (Uint32Array), nodeRestNormal (Float32Array) (smooth shading from node
-/// normals; see `ShowcaseVisual::smooth`), nodeCount, vertexCount }`.
+/// normals; see `ShowcaseVisual::smooth`), nodeCount, vertexCount }` and
+/// `visualLod`, the same at a distant level of detail (about a third of the
+/// triangles; `showcase-car-render.mjs` switches to it by distance).
 /// `showcase-car-render.mjs` documents the binding.
 #[wasm_bindgen(js_name = showcaseCar)]
 pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
@@ -99,6 +101,21 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     set(&counts, "stiffnessScale", &JsValue::from(b.stiffness_scale));
     set(&counts, "mass", &JsValue::from(sk.total_mass()));
     set(&out, "counts", &counts);
+    set(&out, "visual", &visual_js(&v).into());
+    // The distant level of detail (the renderer picks it by distance).
+    let lod = showcase_visual_lod(&b, 0.45).map_err(err)?;
+    set(&out, "visualLod", &visual_js(&lod).into());
+    Ok(out.into())
+}
+
+/// The visual alone (`showcaseCar(params).visual`).
+#[wasm_bindgen(js_name = showcaseCarVisual)]
+pub fn showcase_car_visual(params: JsValue) -> Result<JsValue, JsValue> {
+    let car = showcase_car(params)?;
+    Reflect::get(&car, &JsValue::from_str("visual"))
+}
+
+fn visual_js(v: &ShowcaseVisual) -> Object {
     let vis = Object::new();
     set(
         &vis,
@@ -174,13 +191,5 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
         "vertexCount",
         &JsValue::from(v.positions.len() as u32),
     );
-    set(&out, "visual", &vis);
-    Ok(out.into())
-}
-
-/// The visual alone (`showcaseCar(params).visual`).
-#[wasm_bindgen(js_name = showcaseCarVisual)]
-pub fn showcase_car_visual(params: JsValue) -> Result<JsValue, JsValue> {
-    let car = showcase_car(params)?;
-    Reflect::get(&car, &JsValue::from_str("visual"))
+    vis
 }

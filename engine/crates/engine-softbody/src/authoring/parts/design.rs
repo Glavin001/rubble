@@ -113,8 +113,8 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         flare: 0.03,
         flare_width: 0.17,
         lid_crown: 0.022,
-        step: 0.012,
-        step_along: 0.02,
+        step: 0.022,
+        step_along: 0.035,
     };
     let _ = def;
     Styling {
@@ -190,7 +190,11 @@ impl At<'_> {
 /// Build every visual piece of the car.
 pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     let prof = &def.profile;
-    let surf = BodySurface::build(prof, &st.body);
+    // The distant LOD samples the body coarser (cut lines stay exact).
+    let mut body_style = st.body.clone();
+    body_style.step /= super::detail().max(0.25);
+    body_style.step_along /= super::detail().max(0.25);
+    let surf = BodySurface::build(prof, &body_style);
     let at = At { s: &surf };
     let m = &surf.mesh;
     let half = surf.band.half;
@@ -290,12 +294,6 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         let z0 = st.side_windows[1][1];
         let z1 = st.side_windows[0][0];
         smax(fy, smax(z0 - p.z, p.z - z1, 0.01), 0.02)
-    };
-    // Window frames: a ring round the side glass, plus the B-pillar.
-    let frame = |i: usize, p: Vec3| -> f32 {
-        let g = glass_side(i, p);
-        let ring = (g - 0.5 * st.frame).abs() - 0.5 * st.frame - 0.003;
-        ring.min(b_pillar(i, p))
     };
     // Exhaust cut-outs in the rear valance (rear view circles).
     let exhaust_hole = |p: Vec3| -> f32 {
@@ -472,9 +470,11 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             g.smooth.iter_mut().for_each(|s| *s = 1);
             if frit > 0.0 {
                 // The black frit: printed on the inside of the glass's border.
-                let fr = trim::clip_between(&c.mesh, &c.field, -frit, 0.012);
-                let fm = trim::offset(&fr.mesh, -0.0075, false, Some(mat::TRIM), 0.6);
-                g.append(&fm);
+                let edge = trim::clip(m, &fs, 0.0);
+                for (l, closed) in &edge.loops {
+                    let fm = trim::loop_strip(&edge.mesh, l, *closed, frit, 0.012, -0.0075, mat::TRIM, 0.6);
+                    g.append(&fm);
+                }
             }
             let nm = if name == "glass_side" {
                 format!("{name}_{}", if sx > 0.0 { "l" } else { "r" })
@@ -488,17 +488,30 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             });
         }
     }
-    // Black window frames and B-pillar appliques.
-    let ff = metric(m, &trim::field(m, frame));
+    // Black window frames (strips along each side window's cut, so they follow
+    // it exactly) and the B-pillar appliques.
+    let gs = metric(m, &trim::field(m, glass_side));
+    let bp = metric(m, &trim::field(m, b_pillar));
     for sx in [1.0f32, -1.0] {
-        let fs: Vec<f32> = ff.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect();
-        let mut c = trim::clip(m, &fs, -0.001);
-        c.mesh.mat.iter_mut().for_each(|x| *x = mat::TRIM);
-        let mut mesh = trim::offset(&c.mesh, 0.0015, false, None, 1.0);
-        let loops = trim::boundary_loops(&mesh);
-        for (l, closed) in &loops {
-            trim::roll_loop(&mut mesh, l, *closed, EdgeStyle::TRIM);
+        let fs: Vec<f32> = gs.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect();
+        let c = trim::clip(m, &fs, 0.0);
+        let mut mesh = Mesh::default();
+        for (l, closed) in &c.loops {
+            let mut s = trim::loop_strip(&c.mesh, l, *closed, 0.004, st.frame, 0.0015, mat::TRIM, 1.0);
+            let loops = trim::boundary_loops(&s);
+            for (l2, c2) in &loops {
+                trim::roll_loop(&mut s, l2, *c2, EdgeStyle::TRIM);
+            }
+            mesh.append(&s);
         }
+        let bs: Vec<f32> = bp.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect();
+        let b = trim::clip(m, &bs, 0.0);
+        let mut bm = trim::offset(&b.mesh, 0.0015, false, Some(mat::TRIM), 1.0);
+        let loops = trim::boundary_loops(&bm);
+        for (l, closed) in &loops {
+            trim::roll_loop(&mut bm, l, *closed, EdgeStyle::TRIM);
+        }
+        mesh.append(&bm);
         pieces.push(Piece {
             name: format!("frame_{}", if sx > 0.0 { "l" } else { "r" }),
             mesh,
@@ -555,23 +568,40 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         false,
         &mut pieces,
     );
-    let garnish = metric(m, &trim::field(m, |i, p| {
-        if !on_band(i) {
-            return 1.0;
+    // Tail garnish and belt mouldings: chrome strips swept along the surface.
+    let mut garnish = Mesh::default();
+    let mut path = Vec::new();
+    for k in 0..=60 {
+        let a_r = -0.455 + 0.91 * k as f32 / 60.0;
+        let a = half - a_r.abs();
+        let y = surf.band_top_y(a) - 0.075;
+        let (p, n) = surf.band_at(a, y, if a_r < 0.0 { -1.0 } else { 1.0 });
+        path.push(p + n * 0.003);
+    }
+    garnish.tube(&path, -Vec3::Z, 0.008, 0.0022, 10, mat::CHROME, 1.0);
+    pieces.push(Piece {
+        name: "garnish".into(),
+        mesh: garnish,
+        bind: Bind::Vote,
+    });
+    for sx in [1.0f32, -1.0] {
+        let mut belt = Mesh::default();
+        let mut path = Vec::new();
+        let (z0, z1) = (st.door_rear[0] + 0.05, st.door_front[0] - 0.04);
+        for k in 0..=80 {
+            let z = z0 + (z1 - z0) * k as f32 / 80.0;
+            let a = surf.arc_at_z(z);
+            let y = surf.band_top_y(a) - 0.005;
+            let (p, n) = surf.band_at(a, y, sx);
+            path.push(p + n * 0.002);
         }
-        let (a, h) = rear_ah(i, p);
-        smax(a - 0.455, (h + 0.075).abs() - 0.008, 0.012)
-    }));
-    strip("garnish", &garnish, 0.0025, mat::CHROME, EdgeStyle::TRIM, false, &mut pieces);
-    let belt = metric(m, &trim::field(m, |i, p| {
-        if p.x.abs() < 0.5 {
-            return 1.0;
-        }
-        let h = p.y - surf.ytop[i];
-        let fz = smax(st.door_rear[0] + 0.04 - p.z, p.z - (st.door_front[0] - 0.035), 0.01);
-        smax(fz, (h + 0.004).abs() - 0.0065, 0.004)
-    }));
-    strip("belt", &belt, 0.002, mat::CHROME, EdgeStyle::TRIM, true, &mut pieces);
+        belt.tube(&path, Vec3::X * sx, 0.006, 0.0018, 10, mat::CHROME, 1.0);
+        pieces.push(Piece {
+            name: "belt".into(),
+            mesh: belt,
+            bind: Bind::Vote,
+        });
+    }
     // --- Fixtures ----------------------------------------------------------
     let avg_in = |f: &[f32]| -> Vec3 {
         let mut a = Vec3::ZERO;

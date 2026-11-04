@@ -87,6 +87,13 @@ const RUNS = [
   ['interior', 'scene=idle&freeze=1.0&cam=left&dist=3.2'],
   ['perf', 'scene=idle&freeze=0&cam=three&perf=1'],
   ['perf_far', 'scene=idle&freeze=0&cam=three&perf=1&dist=30'],
+  ['perf_skin', 'scene=idle&freeze=0&cam=three&perf=skin'],
+  ['perf_draw', 'scene=idle&freeze=0&cam=three&perf=draw'],
+  ['perf_noskin', 'scene=idle&freeze=0&cam=three&perf=1&noskin=1'],
+  ['perf_n10', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=16'],
+  ['perf_n10_far', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=80'],
+  ['perf_n10_lod0', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=16&lod=0'],
+  ['perf_pass', 'scene=idle&freeze=0&cam=three&perf=pass'],
 ];
 let failed = 0;
 const only = opt('--only', null);
@@ -104,6 +111,6 @@ for (const [name, q] of RUNS.filter(([n]) => !only || only.split(',').includes(n
   writeFileSync(png, Buffer.from(s.result.data, 'base64'));
   const err = st?.error || pageErrors.shift();
   if (err) failed++;
-  console.log(`${name}: ${err ? 'ERROR ' + err : 'ok'}  t ${st?.time?.toFixed?.(2)} s  GPU ${st?.gpuMs?.toFixed?.(2)} ms/frame${st?.renderMs ? ` car render ${st.renderMs.toFixed(3)} ms` : ''}  ${st?.damage ? `broken ${st.damage.broken} bent ${st.damage.bent}` : ''}  → ${png}`);
+  console.log(`${name}: ${err ? 'ERROR ' + err : 'ok'}  t ${st?.time?.toFixed?.(2)} s  GPU ${st?.gpuMs?.toFixed?.(2)} ms/frame${st?.renderMs ? ` car render ${st.renderMs.toFixed(3)} ms [${st.features}]` : ''}  ${st?.damage ? `broken ${st.damage.broken} bent ${st.damage.bent}` : ''}  → ${png}`);
 }
 process.exit(failed ? 1 : 0);
