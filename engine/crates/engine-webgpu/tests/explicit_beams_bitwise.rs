@@ -422,11 +422,30 @@ fn groups_of_three_and_four_bitwise() {
     }
 }
 
+/// One CPU step with the GPU's self-collision accumulator: the step's
+/// self-collision forces on each node (left in its force for the next step) rounded
+/// to 1/32 N per component, as the GPU's fixed-point gAcc holds them. The
+/// collision part is the step's force less the same step's without candidates.
+fn step_fixed_point(cpu: &mut ExplicitBeams) {
+    let mut bare = cpu.clone();
+    bare.candidates.clear();
+    cpu.step();
+    bare.step();
+    let q = |x: f32| (x * 32.0).round() / 32.0;
+    for (n, b) in cpu.nodes.iter_mut().zip(&bare.nodes) {
+        let c = n.force - b.force;
+        n.force = b.force + Vec3::new(q(c.x), q(c.y), q(c.z));
+    }
+}
+
 /// Per frame from the CPU reference's state: the GPU (current kernel, and the
 /// baseline for comparison) uploads the CPU's vehicle and runs one frame; the CPU
-/// runs it too. Returns per frame the node RMS (m) of (current, baseline) to the CPU.
-/// No air drag or turbulence (the GPU's turbulence draws are its own sequence).
-fn cpu_per_frame(text: &str, drive: bool, frames: u32) -> Option<Vec<(f32, f32)>> {
+/// runs it too, as it is and with the GPU's fixed-point self-collision forces
+/// ([`step_fixed_point`]). Returns per frame the node RMS (m) of the current
+/// kernel to the CPU, of the baseline to the CPU, and of the current kernel to the
+/// fixed-point CPU. No air drag or turbulence (the GPU's turbulence draws are its
+/// own sequence).
+fn cpu_per_frame(text: &str, drive: bool, frames: u32) -> Option<Vec<(f32, f32, f32)>> {
     let (device, queue) = device()?;
     let settings = ExplicitBeamsSettings::default();
     let o = Vec3::new(100.0, 0.0, 100.0);
@@ -459,22 +478,30 @@ fn cpu_per_frame(text: &str, drive: bool, frames: u32) -> Option<Vec<(f32, f32)>
         }
         cpu.check_wings();
         cpu.rebase_origin();
+        let mut fixed = cpu.clone();
         for _ in 0..STEPS {
             cpu.step();
+            step_fixed_point(&mut fixed);
         }
-        let c = cpu.positions();
-        let rms = |p: &[Vec3]| {
-            (p.iter().zip(&c).map(|(a, b)| (*a - *b).length_squared()).sum::<f32>() / c.len() as f32).sqrt()
+        let rms = |p: &[Vec3], c: &[Vec3]| {
+            (p.iter().zip(c).map(|(a, b)| (*a - *b).length_squared()).sum::<f32>() / c.len() as f32).sqrt()
         };
-        out.push((rms(&ends[0]), rms(&ends[1])));
+        let (c, f) = (cpu.positions(), fixed.positions());
+        out.push((rms(&ends[0], &c), rms(&ends[1], &c), rms(&ends[0], &f)));
     }
     Some(out)
 }
 
 /// The current kernel against the CPU reference, one frame at a time from the CPU's
 /// state: the self-collision order is the CPU's, so a frame lands within float noise
-/// of the CPU (the accumulators' 1/32 N fixed point and a few correctly rounded
-/// divisions apart), far closer than the baseline's lane-order hits.
+/// of the CPU with the GPU's one rule of its own modelled, the self-collision
+/// accumulators' 1/32 N fixed point ([`step_fixed_point`]); far closer than the
+/// baseline's lane-order hits. Against the plain CPU it is usually as close, but
+/// that rounding (up to 1/64 N a component) can tip a contact's discrete switch
+/// within a frame: the Viper's wall crash without its airfoil tables (no
+/// `RUBBLE_AIRFOIL_DIR`) does at frame 38, step 7 (nodes 107 and 100 jump 0.64 m/s
+/// apart in one step, 0.040 mm RMS by the frame's end), and the fixed-point CPU
+/// lands on the GPU's frame there (reported, not judged).
 #[test]
 fn cpu_reference_per_frame() {
     let mut cars = vec![("sedan".to_string(), repo_sedan())];
@@ -486,23 +513,27 @@ fn cpu_reference_per_frame() {
     for (name, text) in &cars {
         for drive in [false, true] {
             let Some(r) = cpu_per_frame(text, drive, 40) else { return };
+            let pick = |x: &(f32, f32, f32), k: usize| [x.0, x.1, x.2][k];
             let med = |k: usize| {
-                let mut v: Vec<f32> = r.iter().map(|x| if k == 0 { x.0 } else { x.1 }).collect();
+                let mut v: Vec<f32> = r.iter().map(|x| pick(x, k)).collect();
                 v.sort_by(f32::total_cmp);
                 v[v.len() / 2]
             };
-            let max = |k: usize| r.iter().map(|x| if k == 0 { x.0 } else { x.1 }).fold(0.0, f32::max);
+            let max = |k: usize| r.iter().map(|x| pick(x, k)).fold(0.0, f32::max);
             eprintln!(
-                "{name} {}: per-frame node RMS to the CPU, current kernel median {:.5} mm max {:.5} mm; baseline median {:.5} mm max {:.5} mm",
+                "{name} {}: per-frame node RMS to the CPU, current kernel median {:.5} mm max {:.5} mm; baseline median {:.5} mm max {:.5} mm; current kernel to the fixed-point CPU median {:.5} mm max {:.5} mm",
                 if drive { "into a wall" } else { "idle" },
                 med(0) * 1e3,
                 max(0) * 1e3,
                 med(1) * 1e3,
-                max(1) * 1e3
+                max(1) * 1e3,
+                med(2) * 1e3,
+                max(2) * 1e3
             );
-            // Float noise: at most 20 µm RMS in any frame (the baseline: up to 3.9 mm
-            // per frame in the E36's wall crash).
-            assert!(max(0) < 2e-5, "{name}: a frame {} mm RMS from the CPU", max(0) * 1e3);
+            // Float noise: at most 20 µm RMS in any frame from the fixed-point CPU
+            // (the baseline: up to 3.9 mm per frame from the CPU in the E36's wall
+            // crash).
+            assert!(max(2) < 2e-5, "{name}: a frame {} mm RMS from the fixed-point CPU", max(2) * 1e3);
         }
     }
 }

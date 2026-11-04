@@ -148,8 +148,10 @@ struct Contact {
     /// staging buffer and checked once mapped, a frame or two later (no waiting).
     acc: wgpu::Buffer,
     status_at: u64,
+    /// The loop-cap flag (gAcc's last word, byte offset): see `cap_explicit_loops`.
+    cap_at: u64,
     status: std::sync::Mutex<StatusRing>,
-    /// Frames submitted with contact active.
+    /// Frames submitted (every STATUS_EVERY-th reads the status).
     frames: u64,
     /// Steps the current plan still covers; a new plan is due when a frame needs
     /// more (or `replan` is set: velocities written by the host).
@@ -186,6 +188,13 @@ const FUSED_PAIRS_MAX: usize = 2048;
 /// Frames between status reads.
 const STATUS_EVERY: u64 = 16;
 
+/// The error a status read reports: the loop-cap flag (`w[4]`), then the contact
+/// counters (outside, overflow, unconverged, too big).
+fn status_error(w: &[i32]) -> Result<(), String> {
+    crate::explicit_loop_cap_hit(w[4]).map_err(|e| format!("explicit beams kernel: {e}"))?;
+    contact_error(&w[..4]).map_err(|e| format!("explicit beams vehicle contact: {e}"))
+}
+
 /// The contact error the status counters (outside, overflow, unconverged, too big)
 /// report.
 fn contact_error(w: &[i32]) -> Result<(), String> {
@@ -219,7 +228,7 @@ impl Contact {
         buffers: &[&wgpu::Buffer; 9],
         (contact_wgsl, solo_wgsl): (&str, &str),
         acc: &wgpu::Buffer,
-        status_at: u64,
+        (status_at, cap_at): (u64, u64),
         tri_base: u32,
     ) -> Self {
         let args_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -314,6 +323,7 @@ impl Contact {
             args: args_buffer,
             acc: acc.clone(),
             status_at,
+            cap_at,
             status: Default::default(),
             frames: 0,
             left: 0,
@@ -335,7 +345,7 @@ impl Contact {
                 ring.made += 1;
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("explicit-beams-vv-status"),
-                    size: 16,
+                    size: 20,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 })
@@ -343,6 +353,7 @@ impl Contact {
             None => return,
         };
         enc.copy_buffer_to_buffer(&self.acc, self.status_at + 16, &buffer, 0, 16);
+        enc.copy_buffer_to_buffer(&self.acc, self.cap_at, &buffer, 16, 4);
         ring.flight.push(StatusRead {
             buffer,
             state: Default::default(),
@@ -381,7 +392,7 @@ impl Contact {
                     {
                         let view = r.buffer.slice(..).get_mapped_range().expect("mapped");
                         let w: &[i32] = bytemuck::cast_slice(&view);
-                        if let Err(e) = contact_error(w) {
+                        if let Err(e) = status_error(w) {
                             error.get_or_insert(e);
                         }
                     }
@@ -1058,6 +1069,10 @@ impl ExplicitBeamsGpu {
         let next_len = hit_base + nv * SELF_HIT_WORDS;
         let hit_acc = acc_init.len();
         acc_init.extend(std::iter::repeat_n(0, 2 * nv));
+        // Last: the loop-cap flag (the WGSL post-process's `cap_explicit_loops`
+        // writes gAcc's last word).
+        let cap_at = acc_init.len();
+        acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
             rec[2] = (hit_base + k * SELF_HIT_WORDS) as u32;
             rec[3] = (hit_acc + 2 * k) as u32;
@@ -1302,7 +1317,7 @@ impl ExplicitBeamsGpu {
                 ),
             },
             &acc,
-            u64::from(vv_acc + 12 * nv as u32) * 4,
+            (u64::from(vv_acc + 12 * nv as u32) * 4, cap_at as u64 * 4),
             vv_tri_base,
         );
         let bufs = [
@@ -1389,7 +1404,19 @@ impl ExplicitBeamsGpu {
         let raw = self.read(&self.contact.acc);
         let w: &[i32] = bytemuck::cast_slice(&raw);
         let at = (self.contact.status_at / 4) as usize;
+        let cap = (self.contact.cap_at / 4) as usize;
+        crate::explicit_loop_cap_hit(w[cap])?;
         contact_error(&w[at + 4..at + 8])
+    }
+
+    /// The kernel status (blocking): `Err` when a kernel loop reached its cap
+    /// ([`crate::EXPLICIT_LOOP_CAP`]: a runaway loop, stopped; that frame's results
+    /// are invalid). Frames also check it on their own every few frames
+    /// ([`Self::frame`] and [`Self::wait`] fail on it).
+    pub fn kernel_status(&self) -> Result<(), String> {
+        let raw = self.read(&self.contact.acc);
+        let w: &[i32] = bytemuck::cast_slice(&raw);
+        crate::explicit_loop_cap_hit(w[(self.contact.cap_at / 4) as usize])
     }
 
     /// The contact groups of the current plan (blocking read; 0 when contact is
@@ -1851,8 +1878,9 @@ impl ExplicitBeamsGpu {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(self.spans.len() as u32, 1, 1);
         }
-        // The status every STATUS_EVERY frames (the counters keep an error).
-        let read = self.contact_active() && {
+        // The status every STATUS_EVERY frames (the counters and the loop-cap
+        // flag keep an error), with or without contact.
+        let read = {
             self.contact.frames += 1;
             self.contact.frames % STATUS_EVERY == 1
         };
@@ -2163,7 +2191,7 @@ impl ExplicitBeamsGpu {
     /// without waiting for frames in flight.
     fn check_contact_status(&mut self) {
         if let Some(e) = self.contact.poll_status(&self.device) {
-            panic!("explicit beams vehicle contact: {e}");
+            panic!("{e}");
         }
     }
 
@@ -2259,7 +2287,7 @@ impl ExplicitBeamsGpu {
     pub fn wait(&self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         if let Some(e) = self.contact.ready_error() {
-            panic!("explicit beams vehicle contact: {e}");
+            panic!("{e}");
         }
     }
 
