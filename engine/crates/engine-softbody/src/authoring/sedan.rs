@@ -128,6 +128,7 @@ pub fn seat_frame(name: &str, centre: [f32; 3], half: [f32; 3], kg: f32) -> Bloc
         reach: 0.3,
         mount_grade: "hsla".into(),
         mount_scale: 0.5,
+        bear: 0.0,
     }
 }
 
@@ -569,11 +570,11 @@ pub fn sedan() -> VehicleDef {
         // A rear roof bow (the roof skin's span between bows sags otherwise).
         cross("bow_r", 0.61, 1.39, 1.86, "uhss", 1.0),
         cross("header_r", 0.60, 1.36, 1.50, "uhss", 1.0),
-        cross("floor_x1", 0.76, 0.25, 2.95, "uhss", 1.0),
-        cross("floor_x2", 0.76, 0.25, 2.24, "boron", 1.0),
+        catching(cross("floor_x1", 0.76, 0.25, 2.95, "uhss", 1.0)),
+        catching(cross("floor_x2", 0.76, 0.25, 2.24, "boron", 1.0)),
         cross("floor_x3", 0.76, 0.25, 1.55, "uhss", 1.0),
         cross("kickup", 0.80, 0.27, 1.38, "uhss", 1.0),
-        stations(
+        catching(stations(
             member(
                 "tunnel",
                 &[(0.0, 0.32, 1.50), (0.0, 0.34, 3.30)],
@@ -587,8 +588,12 @@ pub fn sedan() -> VehicleDef {
                 1,
             ),
             0.4,
-        ),
-        cross("firewall", 0.78, 0.30, 3.36, "uhss", 1.0),
+        )),
+        catching(boxed(
+            cross("firewall", 0.78, 0.30, 3.36, "boron", 1.0),
+            0.16,
+            0.2,
+        )),
         boxed(cross("dash", 0.76, 0.80, 3.20, "uhss", 1.0), 0.16, 0.2),
         cross("cowl", 0.74, 0.92, 3.44, "uhss", 1.0),
         ladder(member(
@@ -616,14 +621,14 @@ pub fn sedan() -> VehicleDef {
             0.10,
             0.12,
             FWD,
-            "alu",
+            "uhss",
             [1.0, 1.0],
             0,
             false,
             1,
         ))),
-        cross("subframe_f1", 0.42, 0.24, 3.55, "hsla", 1.5),
-        cross("subframe_f2", 0.42, 0.25, 3.95, "hsla", 1.5),
+        catching(cross("subframe_f1", 0.42, 0.24, 3.55, "hsla", 1.5)),
+        catching(cross("subframe_f2", 0.42, 0.25, 3.95, "hsla", 1.5)),
         // The steering column, from the dash cross beam (a box: it is a
         // cantilever).
         member(
@@ -721,12 +726,14 @@ pub fn sedan() -> VehicleDef {
             name: "powertrain".into(),
             centre: [0.0, 0.56, 3.98],
             half: [0.33, 0.24, 0.23],
-            spacing: 0.35,
+            // Under a pole's width (static contact is per node).
+            spacing: 0.17,
             kg: 175.0,
             mounts: 2,
             reach: 0.25,
             mount_grade: "hsla".into(),
             mount_scale: 1.0,
+            bear: 0.5,
         },
         // Seat frames (the seats ride them).
         seat_frame("seat_fl", [0.38, 0.40, 2.62], [0.24, 0.07, 0.24], 15.0),
@@ -742,6 +749,7 @@ pub fn sedan() -> VehicleDef {
             reach: 0.25,
             mount_grade: "hsla".into(),
             mount_scale: 1.0,
+            bear: 0.0,
         },
     ];
     let plates = vec![PlateSpec {
