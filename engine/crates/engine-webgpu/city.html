@@ -98,7 +98,12 @@
     if (!probe) throw new Error('no WebGPU adapter');
     const limits = { maxBufferSize: probe.limits.maxBufferSize, maxStorageBufferBindingSize: probe.limits.maxStorageBufferBindingSize };
     const TIMING = qs.get('timing') ?? (probe.features.has('timestamp-query') ? 'step' : 'off');
-    const page = { gpuTiming: TIMING, ...(killBelow === null ? {} : { killBelow }) };
+    // ?rest=touch: the touch query and cold wakes instead of main's warm archive (opt-in).
+    const page = {
+      gpuTiming: TIMING,
+      ...(killBelow === null ? {} : { killBelow }),
+      ...(qs.get('rest') === 'touch' ? { features: { restingContacts: 'touch' } } : {}),
+    };
     const mb = (b) => `${(b / 2 ** 20).toFixed(0)} MiB`;
 
     // ---------------------------------------------------------------- world and city
@@ -108,6 +113,8 @@
     statusEl.textContent = `creating the world for ${K} houses…`;
     try {
       ({ city, world } = await createCity(cityOpts, page));
+      // ?rest=carry: the resting-pair carry instead of the sleep archive (World::set_carry_rest).
+      if (qs.get('rest') === 'carry') world.setCarryRest(true);
     } catch (e) {
       // World::new checks every buffer against the device: say which limit the city passes.
       throw new Error(`${K} houses do not fit this browser's WebGPU limits (maxBufferSize ${mb(limits.maxBufferSize)}, maxStorageBufferBindingSize ${mb(limits.maxStorageBufferBindingSize)}): ${e.message ?? e}`);
@@ -149,6 +156,7 @@
       if (world && run) {
         // A fresh world on the same device, as the native benchmark builds one per scenario.
         world.cityRebuild(city, page);
+        if (qs.get('rest') === 'carry') world.setCarryRest(true);
       }
       scenario = next;
       barrage = false; poolNote = '';

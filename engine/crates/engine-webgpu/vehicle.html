@@ -235,6 +235,8 @@
     }
     const sleepQ = qs.get('sleep');
     if (sleepQ === 'off') world.setSolver({ sleepTime: 1e6 });
+    // ?rest=carry: the resting-pair carry instead of the sleep archive (World::set_carry_rest).
+    if (qs.get('rest') === 'carry') world.setCarryRest(true);
     const DT = world.solver().dt, GRAVITY_Y = world.solver().gravityY;
     // The simulation's clock: steps since the scene started or was reset.
     const steps = () => world.simSteps();

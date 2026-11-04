@@ -28,6 +28,7 @@ pub unsafe fn shared_device(
         .ok_or_else(|| anyhow::anyhow!("null MTLCommandQueue"))?;
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::METAL;
+    desc.flags = crate::gpu::instance_flags();
     let instance = wgpu::Instance::new(desc);
     // The adapter for the same GPU (by Metal's registry id): its limits and features are the
     // device's.

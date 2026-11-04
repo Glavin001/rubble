@@ -561,15 +561,15 @@ steps. It covers the host's encode, submit and readback as well as the GPU work.
 | motion.html?scene=character | 1.04 | 1.08 |
 | vehicle.html (playground, idle) | 0.61 | 0.019 |
 | vehicle.html?scene=destruction (idle) | 0.90 | 0.018 |
-| vehicle.html?scene=traffic | 2.40 | 2.68 |
+| vehicle.html?scene=traffic | 2.40 | 2.68 (awake-only passes: 2.10) |
 | vehicle.html?scene=bridge | 1.94 | 2.46 |
 | vehicle.html?scene=buggies | 1.64 | 1.75 |
 | vehicle.html?scene=gauntlet (idle) | 0.63 | 0.020 |
 | vehicle.html?scene=run (idle) | 0.61 | 0.029 |
 | vehicle.html?scene=meteors | 1.12 | 0.94 |
-| vehicle.html, driving | 1.20 | 1.30 |
+| vehicle.html, driving | 1.20 | 1.30 (awake-only passes: 1.14) |
 | vehicle.html?scene=destruction, driving | 1.50 | 1.68 |
-| vehicle.html?scene=traffic, driving | 2.25 | 2.52 |
+| vehicle.html?scene=traffic, driving | 2.25 | 2.52 (awake-only passes: 2.34) |
 | vehicle.html?scene=bridge, driving | 2.65 | 3.00 |
 | vehicle.html?scene=buggies, driving | 1.73 | 1.65 |
 | vehicle.html?scene=buggies&build=hybrid, driving (240 Hz substeps) | 2.30 | 2.26 |
@@ -579,7 +579,7 @@ steps. It covers the host's encode, submit and readback as well as the GPU work.
 | softbody.html (yard: 3 cars, 3 crates) | 0.98 / 1.01 | 1.10 |
 | softbody.html?scene=wall | 1.64 / 1.66 | 1.69 |
 | softbody.html?scene=crates | 1.31 / 1.33 | 1.32 |
-| softbody.html?scene=traffic&cars=20 (AI) | 3.58 / 3.52 | 2.39 |
+| softbody.html?scene=traffic&cars=20 (AI) | 3.58 / 3.52 | 2.39 (awake-only passes: 2.45) |
 | softbody.html?scene=traffic&cars=100 (AI) | 3.95 / 3.96 | 3.32 |
 | softbody.html?car=buggy | 1.01 / 1.04 | 1.12 |
 | softbody.html, driving | 1.72 / 1.74 | 1.77 |
@@ -598,9 +598,9 @@ steps. It covers the host's encode, submit and readback as well as the GPU work.
 | demo.html?scene=pyramid (settled) | 3.38 | 0.020 |
 | demo.html?scene=pile (settled) | 1.40 | 0.048 |
 | demo.html?scene=columns (settled) | 2.03 | 0.38 |
-| demo.html?scene=ring110k | 9.98 | 10.28 |
+| demo.html?scene=ring110k | 9.98 | 10.28 (awake-only passes: 10.21) |
 | demo.html?scene=ring110k&sleep=on | 6.62 | 7.53 |
-| demo.html?scene=gables506k | 29.29 | 33.49 |
+| demo.html?scene=gables506k | 29.29 | 33.49 (awake-only passes: 28.87) |
 | demo.html?scene=joints | 1.73 | 1.99 |
 | demo.html?scene=ragdolls10k | 4.43 | 3.72 |
 | demo.html?scene=hingechains10k | 1.91 | 1.32 |
@@ -613,9 +613,20 @@ steps. It covers the host's encode, submit and readback as well as the GPU work.
 | fracture/?scene=house (None, idle) | 0.001 | 0.006 |
 | fracture/?scene=house (None, after the shot) | 2.76 | 2.61 |
 | fracture/?scene=house&bonds=d6 (after the shot) | 4.26 | 3.34 |
-| fracture/?scene=grid (None, ball in flight) | 1.38 | 2.57 |
+| fracture/?scene=grid (None, ball in flight) | 1.38 | 2.57 (awake-only passes: 2.62 pipelined, 1.71 GPU; `?broadphase=full` on the same build: 3.13, 1.93) |
 | fracture/?scene=vc-towers (D6, after the shot) | 5.88 | 4.66 |
 | fracture/?scene=vc:fracturedTower (None, after the shot) | 0.62 | 0.93 |
+
+"Awake-only passes" (2026-11-01, branch `claude/awake-only-passes`,
+[large-maps-progress.md](large-maps-progress.md)): the awake-indexed broadphase and the
+fast list sized from its count, rerun the same way. The busy scenes are unchanged within
+run-to-run noise (box scenes keep the uniform grid, so only the fast-list sizing applies
+to them). The grid row's GPU figure is World's step timestamps, the median of 10 waited
+steps right after the row shot (one CCD ball, 49 sleeping houses, 64 bodies awake, 515
+contacts); "pipelined" is 10 further steps as fast as readbacks allow. The lab plan's
+1.0 ms is not reached yet: what is left is fixed per-step work (eight iterations of
+colour dispatches plus the sparse tail, the stabilization pass, the per-body passes) and
+the resting-pair carry (large-maps-progress.md, "Decision: the resting-pair carry").
 
 demo.html's "before" is the old page with a frame-locked `__step(n)` added (each
 step with its counter readback, 3 in flight, as World's default ring). Settled

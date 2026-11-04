@@ -28,6 +28,10 @@ stress-gpu = { path = "../../stress-oracle/crates/stress-gpu", optional = true }
 stress-ref = { path = "../../stress-oracle/crates/stress-ref", optional = true }
 stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-features = false, features = ["gpu"], optional = true }
 
+[dev-dependencies]
+# Scene builders for the strike gates (host only, no Metal world).
+engine-scenes = { path = "../engine-scenes", default-features = false }
+
 [features]
 default = ["stress"]
 stress = ["dep:stress-gpu", "dep:stress-ref", "dep:stress-rubble", "dep:serde_json"]
