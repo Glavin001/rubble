@@ -1,0 +1,6 @@
+# Per-run scene files and RoR outputs from explicit_beams_scaling: regenerable from the
+# commands in each summary.md, and the end states are in results.json.
+ens_*_[0-9]*.txt
+ens_*_[0-9]*.ror.json
+scene_*_[0-9]*.txt
+scene_*_[0-9]*.ror.json
