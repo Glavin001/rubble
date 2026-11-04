@@ -147,6 +147,9 @@ pub struct ShowcaseVisual {
     /// rest offset in the triangle's orthonormal frame (T, B, N), so the part
     /// moves rigidly with the triangle and never stretches.
     pub rigid: Vec<u8>,
+    /// Every solver node's rest position (the `.truck`'s coordinates): the
+    /// renderer's tear field compares skin triangles against it.
+    pub node_rest: Vec<[f32; 3]>,
     /// The pieces (name, first vertex, vertex count), in order.
     pub pieces: Vec<(String, u32, u32)>,
 }
@@ -350,10 +353,77 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     let susp: Vec<u32> = built.groups.get("suspension").cloned().unwrap_or_default();
     let mut out = ShowcaseVisual {
         node_count: node_pos.len() as u32,
+        node_rest: sim.nodes.iter().map(|n| n.pos.to_array()).collect(),
         ..Default::default()
     };
     for piece in pieces.iter_mut() {
         piece.mesh.orient_by_normals();
+    }
+    // A voted piece that reaches well past its physics part (its part's skin
+    // 8 cm farther than another's) is cut there, along the smooth zero line of
+    // that distance difference (marching triangles), and the far side rides
+    // the other part: it parts along a clean line instead of stretching.
+    let vote = |m: &Mesh| -> Option<u16> {
+        let mut votes: HashMap<u16, usize> = HashMap::new();
+        let step = (m.len() / 600).max(1);
+        for k in (0..m.len()).step_by(step) {
+            if let Some((t, _, _)) = pure.bind(m.pos[k], m.nrm[k]) {
+                *votes.entry(sk.nodes[t[0] as usize].part).or_default() += 1;
+            }
+        }
+        votes
+            .into_iter()
+            .filter(|(p, _)| by_part.contains_key(p))
+            .max_by_key(|&(p, n)| (n, std::cmp::Reverse(p)))
+            .map(|(p, _)| p)
+    };
+    let mut queue: Vec<Piece> = pieces;
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut rounds = 0;
+    while let Some(piece) = queue.pop() {
+        rounds += 1;
+        let pt = match piece.bind {
+            Bind::Vote if rounds < 400 => vote(&piece.mesh),
+            _ => None,
+        };
+        let Some(pt) = pt else {
+            pieces.push(piece);
+            continue;
+        };
+        let own = Binder::new(by_part[&pt].clone(), &node_pos, 0.15);
+        let g: Vec<f32> = (0..piece.mesh.len())
+            .map(|k| {
+                let (p, n) = (piece.mesh.pos[k], piece.mesh.nrm[k]);
+                match (own.bind_d(p, n), pure.bind_d(p, n)) {
+                    (Some(a), Some(z)) if sk.nodes[z.0[0] as usize].part != pt => a.3 - z.3 - 0.08,
+                    _ => -1.0,
+                }
+            })
+            .collect();
+        if g.iter().all(|&v| v < 0.0) {
+            pieces.push(Piece {
+                bind: Bind::Part(pt),
+                ..piece
+            });
+            continue;
+        }
+        let main = super::parts::trim::clip(&piece.mesh, &g, 0.0).mesh;
+        let neg: Vec<f32> = g.iter().map(|v| -v).collect();
+        let rest = super::parts::trim::clip(&piece.mesh, &neg, 0.0).mesh;
+        if !main.is_empty() {
+            pieces.push(Piece {
+                name: piece.name.clone(),
+                mesh: main,
+                bind: Bind::Part(pt),
+            });
+        }
+        if !rest.is_empty() {
+            queue.push(Piece {
+                name: format!("{}+", piece.name),
+                mesh: rest,
+                bind: Bind::Vote,
+            });
+        }
     }
     for piece in &pieces {
         let m = &piece.mesh;
@@ -412,7 +482,9 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         };
         // A vote for the part.
         let rigid = piece.bind == Bind::Rigid;
-        let part: Option<u16> = if piece.bind == Bind::Vote || rigid {
+        let part: Option<u16> = if let Bind::Part(p) = piece.bind {
+            Some(p)
+        } else if piece.bind == Bind::Vote || rigid {
             let mut votes: HashMap<u16, usize> = HashMap::new();
             let step = (m.len() / 600).max(1);
             for k in (0..m.len()).step_by(step) {

@@ -71,7 +71,8 @@ pub fn showcase_car_truck(params: JsValue) -> Result<String, JsValue> {
 /// bindNormal (Float32Array, the rest normal in the triangle frame), bindRest
 /// (Float32Array, the triangle's rest |e₁| |e₂|), ao (Float32Array, baked
 /// ambient occlusion, 1 open), smooth (Uint8Array), rigid (Uint8Array: 1 where
-/// (α, β, h) are an offset in the triangle's orthonormal frame), normalTris, nodeTriStart, nodeTriList
+/// (α, β, h) are an offset in the triangle's orthonormal frame), nodeRest
+/// (Float32Array, every solver node's rest position: the renderer's tears), normalTris, nodeTriStart, nodeTriList
 /// (Uint32Array), nodeRestNormal (Float32Array) (smooth shading from node
 /// normals; see `ShowcaseVisual::smooth`), nodeCount, vertexCount }` and
 /// `visualLod`, the same at a distant level of detail (about a third of the
@@ -168,6 +169,7 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         &Uint8Array::from(v.smooth.as_slice()).into(),
     );
     set(&vis, "rigid", &Uint8Array::from(v.rigid.as_slice()).into());
+    set(&vis, "nodeRest", &f32s(v.node_rest.iter().flatten().copied()));
     let nt: Vec<u32> = v.normal_tris.iter().flatten().copied().collect();
     set(&vis, "normalTris", &Uint32Array::from(nt.as_slice()).into());
     set(

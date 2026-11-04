@@ -481,10 +481,13 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             } else {
                 name.to_string()
             };
+            // Tempered glass (side windows, backlight) is one rigid pane: it
+            // shatters whole when its frame strains; the laminated windscreen
+            // follows its frame and cracks.
             pieces.push(Piece {
                 name: nm,
                 mesh: g,
-                bind: Bind::Vote,
+                bind: if name == "windscreen" { Bind::Vote } else { Bind::Rigid },
             });
         }
     }

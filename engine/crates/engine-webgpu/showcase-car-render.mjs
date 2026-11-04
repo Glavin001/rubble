@@ -82,13 +82,21 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= params.nodeCount) { return; }
   var acc = vec3f(0.0);
+  var stretch = 0.0;
   for (var k = topo[i]; k < topo[i + 1u]; k++) {
     let t = params.trisAt + 4u * topo[params.listAt + k];
     let a = nodePos(topo[t]);
-    acc += cross(nodePos(topo[t + 1u]) - a, nodePos(topo[t + 2u]) - a);
+    let b = nodePos(topo[t + 1u]);
+    let c = nodePos(topo[t + 2u]);
+    acc += cross(b - a, c - a);
+    // Tear: the triangle's perimeter against its rest perimeter (word 3).
+    let rest = bitcast<f32>(topo[t + 3u]);
+    if (rest > 0.0) { stretch = max(stretch, (length(b - a) + length(c - b) + length(a - c)) / rest); }
   }
   let l = length(acc);
-  nodeN[i] = vec4f(select(vec3f(0.0), acc / l, l > 1e-12), 0.0);
+  // w: how torn the node's skin is (0 whole, 1 torn), smooth across nodes so a
+  // tear cuts the panel along a smooth line rather than the mesh's grid.
+  nodeN[i] = vec4f(select(vec3f(0.0), acc / l, l > 1e-12), smoothstep(1.35, 1.8, stretch));
 }
 
 
@@ -132,17 +140,20 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let torn = s1 > 2.5 || s2 > 2.5 || cl <= 1e-12;
   let rigid = (bd.flags & 2u) != 0u;
   var pos: vec3f;
+  let t0 = nodeN[bd.n0].w; let t1 = nodeN[bd.n1].w; let t2 = nodeN[bd.n2].w;
+  var tear: f32;
   if (rigid) {
     // Rigid parts (mirrors, handles, lamps): the rest shape in the triangle's
-    // orthonormal frame, never stretched.
+    // orthonormal frame, never stretched; they go whole.
     pos = p0 + t * bd.a + b * bd.b + n * bd.h;
-  } else if (torn) {
-    // Torn: stay with the triangle's first node at rest scale (the fragment
-    // stage cuts the triangles through the middle, not along the grid).
-    pos = p0 + bd.a * (t * bd.r1) + bd.b * (normalize(e2 + vec3f(1e-9)) * bd.r2) + bd.h * n;
+    tear = max(t0, max(t1, t2));
   } else {
     pos = p0 + bd.a * e1 + bd.b * e2 + bd.h * n;
+    // The tear field interpolated over the binding nodes: the fragment stage
+    // cuts where it crosses 0.5, a smooth line through the panel.
+    tear = (1.0 - bd.a - bd.b) * t0 + bd.a * t1 + bd.b * t2;
   }
+  tear = select(clamp(tear, 0.0, 1.0), 1.0, torn);
   // The rest normal carried by the triangle's frame (faceted: keeps kinks).
   let nf = normalize(bd.nt * t + bd.nb * b + bd.nn * n + vec3f(1e-9));
   var nrm = nf;
@@ -158,7 +169,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
     nrm = normalize(mix(ns, nf, 1.0 - smoothstep(0.90, 0.97, dot(ns, nf))));
   }
   let k = i * 2u;
-  outv[k] = vec4f(pos, select(0.0, 1.0, torn));
+  outv[k] = vec4f(pos, tear);
   outv[k + 1u] = vec4f(nrm, strain);
 }
 `;
@@ -514,7 +525,18 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const topo = new Uint32Array(trisAt + (nt.length / 3) * 4);
       topo.set(start, 0);
       topo.set(list, listAt);
-      for (let t = 0; t < nt.length / 3; t++) topo.set(nt.subarray(3 * t, 3 * t + 3), trisAt + 4 * t);
+      const nr = visual.nodeRest;
+      const tf = new Float32Array(topo.buffer);
+      for (let t = 0; t < nt.length / 3; t++) {
+        topo.set(nt.subarray(3 * t, 3 * t + 3), trisAt + 4 * t);
+        if (nr) {
+          // Word 3: the triangle's rest perimeter (tears).
+          const q = (k) => [nr[3 * nt[3 * t + k]], nr[3 * nt[3 * t + k] + 1], nr[3 * nt[3 * t + k] + 2]];
+          const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+          const [a, b, c] = [q(0), q(1), q(2)];
+          tf[trisAt + 4 * t + 3] = d(a, b) + d(b, c) + d(c, a);
+        }
+      }
       const rn = new Float32Array(nodeCount * 4);
       for (let i = 0; i < nodeCount; i++) rn.set(visual.nodeRestNormal.subarray(3 * i, 3 * i + 3), 4 * i);
       const level = (v) => {

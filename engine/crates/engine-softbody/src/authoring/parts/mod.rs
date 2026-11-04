@@ -61,6 +61,8 @@ pub enum Bind {
     Vote,
     /// Each vertex on the nearest skin triangle of any part.
     Nearest,
+    /// A given physics part (a voted piece after its cut along part seams).
+    Part(u16),
     /// A named structure group (seats on their frames).
     Group(u16),
     /// A rigid part (mirror, handle, lamp): voted part, then the whole piece
