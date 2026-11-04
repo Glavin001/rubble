@@ -136,11 +136,23 @@
     // The explicit solver's scenes; each soft scene maps to the nearest.
     const XSCENES = { idle: 'Explicit: at rest (L launches at 100 km/h)', coast: 'Explicit: coasting at 100 km/h', wall: 'Explicit: 100 km/h into a rigid wall', arena: 'Explicit: fleet arena (?n= vehicles, ?headOn= share)',
       headon: 'Explicit: head-on, two cars (overlap)', tbone: 'Explicit: T-bone into a standing car', pole: 'Explicit: into a 20 cm pole',
-      sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar' };
-    // Explicit crash scenes built from the scene's fields (speed in km/h; the solver's crash_scene).
-    const XCRASH = new Set(['headon', 'tbone', 'pole', 'sidepole', 'limbo']);
+      sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar', drop: 'Explicit: drop test' };
+    // Explicit scenes' fields (the solver's crash_scene and arena): [url key, label, default].
+    // km/h fields go to the solver in m/s; angles in degrees.
+    const XPARAMS = {
+      coast: [['xspeed', 'km/h', 100]],
+      wall: [['speed', 'km/h', 100], ['overlap', 'overlap 0–1', 1], ['angle', 'angle °', 0]],
+      headon: [['speed', 'car 1 km/h', 56], ['speed2', 'car 2 km/h', 56], ['overlap', 'overlap 0–1', 1], ['angle', 'car 2 angle °', 0]],
+      tbone: [['speed', 'striking km/h', 50], ['carSpeed', 'struck km/h', 0], ['at', 'hit at m', 0], ['angle', 'angle °', 90]],
+      pole: [['speed', 'km/h', 60], ['offset', 'offset m', 0], ['angle', 'angle °', 0]],
+      sidepole: [['speed', 'km/h', 32], ['at', 'hit at m', 0]],
+      limbo: [['speed', 'km/h', 60], ['bar', 'bar height m', 1]],
+      drop: [['height', 'height m', 8], ['speed', 'forward km/h', 0]],
+      arena: [['n', 'vehicles', 256], ['headOn', 'head-on share', 0], ['speedMin', 'min km/h', 90], ['speedMax', 'max km/h', 150]],
+    };
+    const XCRASH = new Set(['wall', 'headon', 'tbone', 'pole', 'sidepole', 'limbo', 'drop']);
     const XMAP = { yard: 'idle', crates: 'idle', traffic: 'idle', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
-      wall: 'wall', pole: 'pole', sidepole: 'sidepole', tbone: 'tbone', headon: 'headon', limbo: 'limbo', sandwich: 'wall', import: 'wall' };
+      wall: 'wall', pole: 'pole', sidepole: 'sidepole', tbone: 'tbone', headon: 'headon', limbo: 'limbo', sandwich: 'wall', import: 'wall', drop: 'drop' };
     const xscene = XSCENES[qs.get('xscene')] ? qs.get('xscene') : XMAP[scene];
     const ARENA = EXPLICIT && xscene === 'arena';
     if (EXPLICIT) {
@@ -212,7 +224,7 @@
       const row = document.getElementById('paramRow');
       // Explicit mode: the explicit scene's fields (its crash scenes share the soft ones').
       const pscene = EXPLICIT ? xscene : scene;
-      const fields = PARAMS[pscene] || [];
+      const fields = (EXPLICIT ? XPARAMS[pscene] : PARAMS[pscene]) || [];
       for (const [k, unit, d] of fields) {
         const l = document.createElement('label'); l.className = 'p'; l.textContent = unit + ' ';
         const inp = document.createElement('input'); inp.type = 'number'; inp.step = 'any'; inp.id = 'p_' + k;
@@ -422,10 +434,8 @@
         // arena: ?n= copies of the vehicle at 90–150 km/h into walls, poles and (?headOn=
         // share of lanes) each other, or (?layout=ring) all at the centre from concentric
         // rings (?ringRadius=); ?cols=, ?hitMax= s (the solver's defaults otherwise).
-        ...(XCRASH.has(xscene) ? (() => {
-          const d = (k) => (PARAMS[xscene] || []).find((f) => f[0] === k)?.[2] ?? 0;
-          return { speed: P('speed', d('speed')) / 3.6, overlap: P('overlap', d('overlap') || 1), at: P('at', d('at')), carSpeed: P('carSpeed', d('carSpeed')) / 3.6, offset: P('offset', d('offset')), bar: P('bar', d('bar') || 1) };
-        })() : {}),
+        // The scene's fields (XPARAMS), km/h to m/s.
+        ...Object.fromEntries((XPARAMS[xscene] || []).filter(([k]) => k !== 'n' && k !== 'xspeed').map(([k, label, d]) => [k, P(k, d) / (label.includes('km/h') ? 3.6 : 1)])),
         ...(xscene === 'arena' ? { count: P('n', 256), headOn: P('headOn', 0), ...(qs.has('cols') ? { cols: P('cols', 0) } : {}), ...(qs.has('hitMax') ? { hitMax: P('hitMax', 1.2) } : {}), layout: qs.get('layout') === 'ring' ? 'ring' : 'rows', ringRadius: P('ringRadius', 30) } : {}),
         // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
         drag: qs.get('drag') !== '0',

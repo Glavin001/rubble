@@ -255,6 +255,7 @@ fn ring(spec: &serde_json::Value, n: usize, width: f32, length: f32) -> Vec<Aren
                 speed: vmin + (vmax - vmin) * golden(k, 0.754_877_666_25),
                 boxes: Vec::new(),
                 vel: None,
+                lift: 0.0,
             });
         }
         r += length + 3.0;
@@ -271,36 +272,57 @@ struct ArenaSpot {
     boxes: Vec<(Vec3, Vec3)>,
     /// Spawn velocity when not along the vehicle's forward axis (a side impact).
     vel: Option<Vec3>,
+    /// Height of the lowest node above 2 cm (a drop test).
+    lift: f32,
 }
 
 /// The crash-test scenes, built from one vehicle (`width` across, `length` along at
-/// yaw 0, facing +Z) at `speed` m/s, the hit after about half a second (a run-up of
-/// 1 + 0.5 × speed metres):
-/// * `headon`: two copies nose to nose, each at `speed`; `overlap` (0 to 1, default
-///   1) of the width overlaps, the second shifted across by the rest.
-/// * `tbone`: the vehicle into the side of a second copy standing across its lane
-///   (turned a quarter), hit `at` metres along it from its centre; the struck copy
-///   moves forward at `carSpeed` m/s (default 0).
-/// * `pole`: into a 20 cm square pole `offset` metres across from its centre line.
-/// * `sidepole`: sliding sideways at `speed` into a 20 cm pole `at` metres along
-///   its side from its centre.
-/// * `limbo`: under a bar 30 cm deep whose underside is `bar` metres up (default
-///   1.0), spanning the lane.
+/// yaw 0, facing +Z). Speeds in m/s, angles in degrees; each moving vehicle starts
+/// 1 + 0.5 × its speed metres from what it hits, so the hit lands after about half a
+/// second:
+/// * `wall`: into a rigid wall at `speed`; `overlap` (0 to 1, default 1) of the
+///   width meets it (the rest passes beside it), the vehicle turned by `angle`.
+/// * `headon`: two copies nose to nose at `speed` and `speed2` (default `speed`);
+///   `overlap` of the width overlaps, the second car turned by `angle` from straight
+///   on.
+/// * `tbone`: into the side of a second copy standing (or moving forward at
+///   `carSpeed`) across its lane, turned `angle` (default 90) from its heading, hit
+///   `at` metres along it from its centre.
+/// * `pole`: into a 20 cm square pole `offset` metres across, turned by `angle`.
+/// * `sidepole`: sliding sideways at `speed` into a 20 cm pole `at` metres along its
+///   side from its centre.
+/// * `limbo`: under a bar 30 cm deep whose underside is `bar` metres up (default 1).
+/// * `drop`: dropped flat from `height` metres (default 8), moving forward at `speed`
+///   (default 0).
 /// Returns the spawns and every box once (for rendering); None for another scene.
 fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32) -> Option<(Vec<ArenaSpot>, Vec<(Vec3, Vec3)>)> {
-    use std::f32::consts::{FRAC_PI_2, PI};
+    use std::f32::consts::PI;
+    let deg = |k: &str, d: f64| (num(spec, k, d) as f32).to_radians();
     let v = num(spec, "speed", 27.78) as f32;
-    let gap = 1.0 + 0.5 * v;
-    let spot = |at: Vec3, yaw: f32, speed: f32, boxes: Vec<(Vec3, Vec3)>, vel: Option<Vec3>| ArenaSpot { at, yaw, speed, boxes, vel };
+    let run_up = |v: f32| 1.0 + 0.5 * v;
+    let gap = run_up(v);
+    let spot = |at: Vec3, yaw: f32, speed: f32, boxes: Vec<(Vec3, Vec3)>, vel: Option<Vec3>| ArenaSpot { at, yaw, speed, boxes, vel, lift: 0.0 };
     let pole = |x: f32, z: f32| (Vec3::new(x, 2.0, z), Vec3::new(0.1, 2.0, 0.1));
+    let overlap = (num(spec, "overlap", 1.0) as f32).clamp(0.05, 1.0);
     Some(match scene {
+        "wall" => {
+            // Full overlap: a 4 m high wall a metre wider than the car each side; less:
+            // the wall covers only that share of the car's width, on its +X side.
+            // Turned by `angle`, the car arrives `gap` along its heading: the wall's face
+            // and its overlap are placed there.
+            let a = deg("angle", 0.0);
+            let (hit_x, hit_z) = (gap * a.sin(), gap * a.cos());
+            let (half_x, cx) = if overlap >= 1.0 { (0.5 * width + 1.0, 0.0) } else { (0.5 * overlap * width, 0.5 * width * (1.0 - overlap)) };
+            let b = (Vec3::new(hit_x + cx, 2.0, hit_z + 0.5), Vec3::new(half_x, 2.0, 0.5));
+            (vec![spot(Vec3::ZERO, a, v, vec![b], None)], vec![b])
+        }
         "headon" => {
-            let overlap = (num(spec, "overlap", 1.0) as f32).clamp(0.05, 1.0);
+            let v2 = num(spec, "speed2", f64::from(v)) as f32;
             let dx = (1.0 - overlap) * width;
             (
                 vec![
-                    spot(Vec3::new(0.0, 0.0, -0.5 * gap), 0.0, v, Vec::new(), None),
-                    spot(Vec3::new(dx, 0.0, 0.5 * gap), PI, v, Vec::new(), None),
+                    spot(Vec3::new(0.0, 0.0, -run_up(v) * 0.5), 0.0, v, Vec::new(), None),
+                    spot(Vec3::new(dx, 0.0, run_up(v2) * 0.5), PI + deg("angle", 0.0), v2, Vec::new(), None),
                 ],
                 Vec::new(),
             )
@@ -308,28 +330,41 @@ fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32) -
         "tbone" => {
             let at = num(spec, "at", 0.0) as f32;
             let struck = num(spec, "carSpeed", 0.0) as f32;
+            let yaw = deg("angle", 90.0);
+            let fwd = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+            // A moving struck car starts back along its path so it is at the origin when
+            // the striking car arrives (gap / speed later).
+            let back = fwd * (struck * gap / v.max(0.1));
             (
                 vec![
                     spot(Vec3::new(at, 0.0, -(0.5 * width + gap)), 0.0, v, Vec::new(), None),
-                    // Turned a quarter (forward +X): its front face's middle at +X.
-                    spot(Vec3::new(0.5 * length, 0.0, 0.0), FRAC_PI_2, struck, Vec::new(), None),
+                    // Centred at the origin then: its front face's middle half a length ahead.
+                    spot(fwd * (0.5 * length) - back, yaw, struck, Vec::new(), None),
                 ],
                 Vec::new(),
             )
         }
         "pole" => {
-            let b = pole(num(spec, "offset", 0.0) as f32, gap + 0.1);
-            (vec![spot(Vec3::ZERO, 0.0, v, vec![b], None)], vec![b])
+            // On the car's path at `gap` along its heading (turned by `angle`), `offset` across.
+            let a = deg("angle", 0.0);
+            let off = num(spec, "offset", 0.0) as f32;
+            let b = pole((gap + 0.1) * a.sin() + off * a.cos(), (gap + 0.1) * a.cos() - off * a.sin());
+            (vec![spot(Vec3::ZERO, a, v, vec![b], None)], vec![b])
         }
         "sidepole" => {
             let b = pole(num(spec, "at", 0.0) as f32, 0.5 * width + gap + 0.1);
             // Forward +X, its centre at the origin, moving along +Z (sideways).
-            (vec![spot(Vec3::new(0.5 * length, 0.0, 0.0), FRAC_PI_2, v, vec![b], Some(Vec3::new(0.0, 0.0, v)))], vec![b])
+            (vec![spot(Vec3::new(0.5 * length, 0.0, 0.0), 0.5 * PI, v, vec![b], Some(Vec3::new(0.0, 0.0, v)))], vec![b])
         }
         "limbo" => {
             let bar = num(spec, "bar", 1.0) as f32;
             let b = (Vec3::new(0.0, bar + 0.15, gap + 0.15), Vec3::new(0.5 * width + 1.0, 0.15, 0.15));
             (vec![spot(Vec3::ZERO, 0.0, v, vec![b], None)], vec![b])
+        }
+        "drop" => {
+            let mut s = spot(Vec3::ZERO, 0.0, num(spec, "speed", 0.0) as f32, Vec::new(), None);
+            s.lift = num(spec, "height", 8.0) as f32;
+            (vec![s], Vec::new())
         }
         _ => return None,
     })
@@ -392,6 +427,7 @@ fn arena(spec: &serde_json::Value, width: f32, length: f32) -> (Vec<ArenaSpot>, 
                 speed,
                 boxes,
                 vel: None,
+                lift: 0.0,
             }
         })
         .collect();
@@ -428,7 +464,7 @@ impl ExplicitSim {
             turbulence: flag("turbulence") && flag("drag"),
         };
         let scene = spec.get("scene").and_then(|s| s.as_str()).unwrap_or("idle");
-        const SCENES: [&str; 9] = ["idle", "coast", "wall", "arena", "headon", "tbone", "pole", "sidepole", "limbo"];
+        const SCENES: [&str; 10] = ["idle", "coast", "wall", "arena", "headon", "tbone", "pole", "sidepole", "limbo", "drop"];
         if !SCENES.contains(&scene) {
             return Err(format!("unknown explicit scene {scene}: {}", SCENES.join(", ")));
         }
@@ -494,13 +530,17 @@ impl ExplicitSim {
                 .and_then(|x| x.as_f64())
                 .unwrap_or(0.0) as f32;
             // `front`: the spawn point is the middle of the front face (along the
-            // forward axis), else the node box's centre.
+            // forward axis), else the body's centre. The body is its collision-triangle
+            // nodes when it has any: a file's helper nodes (cameras and the like) can
+            // sit off to one side and would move the centre off the car's centreline.
             let at3 = Vec3::new(ax, 0.0, az);
             let lateral = Vec3::Y.cross(forward);
+            let skin: Vec<u32> = sim.triangles.iter().flat_map(|t| t.nodes).collect();
             let span = |axis: Vec3| {
-                sim.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| {
-                    (a.min(n.pos.dot(axis)), b.max(n.pos.dot(axis)))
-                })
+                let d = |i: u32| sim.nodes[i as usize].pos.dot(axis);
+                let all = || (0..sim.nodes.len() as u32).map(d);
+                let fold = |it: &mut dyn Iterator<Item = f32>| it.fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(x), b.max(x)));
+                if skin.is_empty() { fold(&mut all()) } else { fold(&mut skin.iter().map(|&i| d(i))) }
             };
             let (f0, f1) = span(forward);
             let (l0, l1) = span(lateral);
@@ -508,7 +548,8 @@ impl ExplicitSim {
             let front = v.get("front").and_then(|x| x.as_bool()).unwrap_or(false);
             let along = at3.dot(forward) - if front { f1 } else { 0.5 * (f0 + f1) };
             let across = at3.dot(lateral) - 0.5 * (l0 + l1);
-            let shift = forward * along + lateral * across + Vec3::Y * (0.02 - lowest);
+            let lift = spots.get(vi).map_or(0.0, |s| s.lift);
+            let shift = forward * along + lateral * across + Vec3::Y * (0.02 - lowest + lift);
             for n in &mut sim.nodes {
                 n.pos += shift;
             }
@@ -537,7 +578,7 @@ impl ExplicitSim {
                     sim.boxes.push(StaticBox::centered(c, h));
                 }
             }
-            if scene == "wall" {
+            if scene == "wall" && spots.is_empty() {
                 // A 4 m wall across the forward axis (snapped to x or z), `wallGap` ahead
                 // of the front, a metre wider than the vehicle each side.
                 let gap = num(spec, "wallGap", 1.0 + 0.5 * f64::from(speed)) as f32;
