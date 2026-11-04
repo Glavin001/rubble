@@ -42,7 +42,12 @@ pub mod mat {
     pub const UNDERBODY: u8 = 9;
     pub const PLATE: u8 = 10;
     pub const GRILLE: u8 = 11;
-    pub const COUNT: usize = 12;
+    pub const SEAT: u8 = 12;
+    pub const DASH: u8 = 13;
+    pub const DOORCARD: u8 = 14;
+    pub const HEADLINER: u8 = 15;
+    pub const CARPET: u8 = 16;
+    pub const COUNT: usize = 17;
 }
 
 /// Material names, by id.
@@ -59,6 +64,11 @@ pub const MATERIAL_NAMES: [&str; mat::COUNT] = [
     "underbody",
     "plate",
     "grille",
+    "seat",
+    "dash",
+    "doorcard",
+    "headliner",
+    "carpet",
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -79,6 +89,8 @@ pub struct ShowcaseVisual {
     /// The binding triangle's rest edge lengths |e₁|, |e₂|: a vertex whose
     /// triangle has stretched past [`TEAR_STRETCH`] × either is torn (dropped).
     pub bind_rest: Vec<[f32; 2]>,
+    /// 1 on a panel's edge at a seam (the renderer draws a thin groove there).
+    pub seam: Vec<f32>,
     /// The solver's node count for this vehicle (tyre nodes included).
     pub node_count: u32,
 }
@@ -227,6 +239,9 @@ struct V {
     uv: Vec2,
     mat: u8,
     part: u16,
+    seam: f32,
+    /// Binds to a structure group's triangles (index into `groups`), not a part.
+    grp: i32,
 }
 
 /// Build the visual skin of a built vehicle.
@@ -328,7 +343,24 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         let front = p.z > 0.5 * len && n.z > 0.3;
         let rear = p.z < 0.5 * len && n.z < -0.3;
         if (front || (p.z > len - 0.5 && n.z > -0.3)) && in_outline(&look.headlight, p.x, p.y) {
-            return mat::HEADLIGHT;
+            // A dark bezel, two chrome reflector bowls with bright projector lenses.
+            let d = -look.headlight.signed_distance(p.x.abs(), p.y);
+            if d < 0.012 {
+                return mat::TRIM;
+            }
+            let o = &look.headlight.0;
+            let cx = o.iter().map(|q| q[0]).sum::<f32>() / o.len() as f32;
+            let cy = o.iter().map(|q| q[1]).sum::<f32>() / o.len() as f32;
+            for dx in [-0.09f32, 0.09] {
+                let r = Vec2::new(p.x.abs() - (cx + dx), p.y - cy).length();
+                if r < 0.025 {
+                    return mat::HEADLIGHT;
+                }
+                if r < 0.042 {
+                    return mat::CHROME;
+                }
+            }
+            return if d < 0.02 { mat::CHROME } else { mat::GLASS };
         }
         if front {
             if in_outline(&look.grille, p.x, p.y) {
@@ -347,7 +379,16 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             }
         }
         if (rear || (p.z < 0.5 && n.z < 0.3)) && in_outline(&look.taillight, p.x, p.y) {
-            return mat::TAILLIGHT;
+            let d = -look.taillight.signed_distance(p.x.abs(), p.y);
+            if d < 0.01 {
+                return mat::TRIM;
+            }
+            // Light bars over a darker lens.
+            return if ((p.y * 45.0).floor() as i32) % 2 == 0 && d > 0.02 {
+                mat::TAILLIGHT
+            } else {
+                mat::GAP
+            };
         }
         if rear && p.x.abs() < 0.26 && (p.y - look.plate_y[1]).abs() < 0.06 {
             return mat::PLATE;
@@ -451,10 +492,9 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                         .iter()
                         .filter(|(a, _)| *a < nz)
                         .any(|&(a, b)| quad_part[a][b] != part);
-                    let mut m = material_of(p, n, seg);
+                    let m = material_of(p, n, seg);
                     let mut q = p;
                     if seam && m != mat::UNDERBODY {
-                        m = mat::GAP;
                         q -= n * look.gap;
                     }
                     verts.push(V {
@@ -463,6 +503,8 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                         uv: Vec2::new(kk as f32 / nz as f32, ii as f32 / cols as f32),
                         mat: m,
                         part,
+                        seam: if seam { 1.0 } else { 0.0 },
+                        grp: -1,
                     });
                     (verts.len() - 1) as u32
                 });
@@ -505,6 +547,8 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                     uv: Vec2::new(if front { 1.0 } else { 0.0 }, t),
                     mat: mat::PAINT,
                     part: part_id(p, seg),
+                    seam: 0.0,
+                    grp: -1,
                 });
                 ids.push((verts.len() - 1) as u32);
             }
@@ -569,6 +613,8 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                     uv: Vec2::ZERO,
                     mat: m,
                     part,
+                    seam: 0.0,
+                    grp: -1,
                 });
             }
         }
@@ -577,6 +623,242 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 let i0 = first + a * (n_lon + 1) + b;
                 let i2 = i0 + n_lon + 1;
                 idx.extend_from_slice(&[i0, i2, i0 + 1, i0 + 1, i2, i2 + 1]);
+            }
+        }
+    }
+    // Interior: door cards, headliner and carpet as inner offsets of their panels;
+    // seats, dashboard, console and steering wheel riding their frames.
+    let groups: Vec<String> = built.bind_tris.keys().cloned().collect();
+    let gi = |name: &str| {
+        groups
+            .iter()
+            .position(|g| g == name)
+            .map_or(-1, |i| i as i32)
+    };
+    {
+        let roof = (look.backlight[1], look.windscreen[0]);
+        for k in 0..nz {
+            for i in 0..cols {
+                let part = quad_part[k][i];
+                let pname = &sk.parts[part as usize];
+                let (p0, seg) = at(k, i);
+                let c = (at(k, i).0 + at(k + 1, i).0 + at(k, i + 1).0 + at(k + 1, i + 1).0) / 4.0;
+                let (m, off) = if pname.starts_with("door")
+                    && matches!(seg, Seg::Side | Seg::Lower)
+                    && c.y > 0.32
+                {
+                    (mat::DOORCARD, 0.07)
+                } else if seg == Seg::Top && c.z > roof.0 + 0.05 && c.z < roof.1 - 0.05 {
+                    (mat::HEADLINER, 0.05)
+                } else if seg == Seg::Floor && c.z > 1.4 && c.z < 3.35 {
+                    (mat::CARPET, 0.07)
+                } else {
+                    continue;
+                };
+                let _ = p0;
+                let corners = [
+                    (k, i),
+                    (k, (i + 1) % cols),
+                    (k + 1, (i + 1) % cols),
+                    (k + 1, i),
+                ];
+                let first = verts.len() as u32;
+                for &(kk, ii) in &corners {
+                    let n = normal_at(kk, ii);
+                    verts.push(V {
+                        p: at(kk, ii).0 - n * off,
+                        n: -n,
+                        uv: Vec2::ZERO,
+                        mat: m,
+                        part,
+                        seam: 0.0,
+                        grp: -1,
+                    });
+                }
+                idx.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+            }
+        }
+        let mut solid = |verts: &mut Vec<V>,
+                         idx: &mut Vec<u32>,
+                         c: Vec3,
+                         h: Vec3,
+                         tilt: f32,
+                         m: u8,
+                         grp: i32| {
+            let rot = glam::Quat::from_rotation_x(tilt);
+            let faces: [(Vec3, Vec3, Vec3); 6] = [
+                (Vec3::X, Vec3::Y, Vec3::Z),
+                (-Vec3::X, Vec3::Z, Vec3::Y),
+                (Vec3::Y, Vec3::Z, Vec3::X),
+                (-Vec3::Y, Vec3::X, Vec3::Z),
+                (Vec3::Z, Vec3::X, Vec3::Y),
+                (-Vec3::Z, Vec3::Y, Vec3::X),
+            ];
+            for (n, u, v) in faces {
+                let first = verts.len() as u32;
+                for (a, b) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                    // Slightly rounded: pull the corners in.
+                    let q = (n + u * a * 0.92 + v * b * 0.92) * h;
+                    verts.push(V {
+                        p: c + rot * q,
+                        n: rot * (n + (u * a + v * b) * 0.25).normalize(),
+                        uv: Vec2::ZERO,
+                        mat: m,
+                        part: 0,
+                        seam: 0.0,
+                        grp,
+                    });
+                }
+                let t = [first, first + 1, first + 2, first, first + 2, first + 3];
+                // Wind outward.
+                let (pa, pb, pc) = (
+                    verts[t[0] as usize].p,
+                    verts[t[1] as usize].p,
+                    verts[t[2] as usize].p,
+                );
+                if (pb - pa).cross(pc - pa).dot(rot * n) < 0.0 {
+                    idx.extend_from_slice(&[t[0], t[2], t[1], t[0], t[5], t[4]]);
+                } else {
+                    idx.extend_from_slice(&t);
+                }
+            }
+        };
+        for (name, x) in [("seat_fl", 0.38f32), ("seat_fr", -0.38)] {
+            let g = gi(name);
+            solid(
+                &mut verts,
+                &mut idx,
+                Vec3::new(x, 0.53, 2.62),
+                Vec3::new(0.24, 0.07, 0.25),
+                0.0,
+                mat::SEAT,
+                g,
+            );
+            solid(
+                &mut verts,
+                &mut idx,
+                Vec3::new(x, 0.86, 2.31),
+                Vec3::new(0.23, 0.30, 0.07),
+                -0.25,
+                mat::SEAT,
+                g,
+            );
+            solid(
+                &mut verts,
+                &mut idx,
+                Vec3::new(x, 1.23, 2.22),
+                Vec3::new(0.12, 0.08, 0.05),
+                -0.25,
+                mat::SEAT,
+                g,
+            );
+        }
+        let g = gi("seat_rear");
+        solid(
+            &mut verts,
+            &mut idx,
+            Vec3::new(0.0, 0.53, 1.80),
+            Vec3::new(0.64, 0.07, 0.24),
+            0.0,
+            mat::SEAT,
+            g,
+        );
+        solid(
+            &mut verts,
+            &mut idx,
+            Vec3::new(0.0, 0.86, 1.52),
+            Vec3::new(0.64, 0.30, 0.07),
+            -0.35,
+            mat::SEAT,
+            g,
+        );
+        let g = gi("dash");
+        solid(
+            &mut verts,
+            &mut idx,
+            Vec3::new(0.0, 0.86, 3.22),
+            Vec3::new(0.76, 0.11, 0.2),
+            0.15,
+            mat::DASH,
+            g,
+        );
+        solid(
+            &mut verts,
+            &mut idx,
+            Vec3::new(0.38, 0.98, 3.1),
+            Vec3::new(0.17, 0.04, 0.08),
+            0.0,
+            mat::DASH,
+            g,
+        );
+        let g = gi("tunnel");
+        solid(
+            &mut verts,
+            &mut idx,
+            Vec3::new(0.0, 0.45, 2.75),
+            Vec3::new(0.11, 0.12, 0.42),
+            0.0,
+            mat::DASH,
+            g,
+        );
+        // Steering wheel: a torus on the column, tilted toward the driver.
+        let g = gi("column");
+        let c = Vec3::new(0.38, 0.95, 2.97);
+        let axis = Vec3::new(0.0, 0.45, -0.89).normalize();
+        let s0 = Vec3::X;
+        let s1 = axis.cross(s0).normalize();
+        let first = verts.len() as u32;
+        let (nu, nv2) = (36u32, 8u32);
+        for a in 0..=nu {
+            let th = 2.0 * std::f32::consts::PI * a as f32 / nu as f32;
+            let dir = s0 * th.cos() + s1 * th.sin();
+            for b in 0..=nv2 {
+                let ph = 2.0 * std::f32::consts::PI * b as f32 / nv2 as f32;
+                let n = dir * ph.cos() + axis * ph.sin();
+                verts.push(V {
+                    p: c + dir * 0.185 + n * 0.017,
+                    n,
+                    uv: Vec2::ZERO,
+                    mat: mat::DASH,
+                    part: 0,
+                    seam: 0.0,
+                    grp: g,
+                });
+            }
+        }
+        for a in 0..nu {
+            for b in 0..nv2 {
+                let i0 = first + a * (nv2 + 1) + b;
+                let i1 = i0 + nv2 + 1;
+                idx.extend_from_slice(&[i0, i1, i0 + 1, i0 + 1, i1, i1 + 1]);
+            }
+        }
+        solid(
+            &mut verts,
+            &mut idx,
+            c - axis * 0.03,
+            Vec3::new(0.06, 0.05, 0.04),
+            -0.47,
+            mat::DASH,
+            g,
+        );
+        // Mirror stalks.
+        for side in [1.0f32, -1.0] {
+            let (z, y) = (look.mirror[0], look.mirror[1]);
+            let hw = prof.half_width.eval(z);
+            let part = part_id(Vec3::new(side * hw, y - 0.05, z - 0.08), Seg::Side);
+            let first = verts.len();
+            solid(
+                &mut verts,
+                &mut idx,
+                Vec3::new(side * (hw + 0.005), y + 0.01, z - 0.03),
+                Vec3::new(0.035, 0.016, 0.03),
+                0.0,
+                mat::PAINT,
+                -1,
+            );
+            for v in &mut verts[first..] {
+                v.part = part;
             }
         }
     }
@@ -594,7 +876,30 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     };
     let fallback = Binder::new(sk.skin.clone(), &node_pos, 0.15);
     let mut binders: HashMap<u16, Binder> = HashMap::new();
+    let mut group_binders: HashMap<i32, Binder> = HashMap::new();
     for v in &verts {
+        if v.grp >= 0 {
+            let gb = group_binders.entry(v.grp).or_insert_with(|| {
+                Binder::new(
+                    built.bind_tris[&groups[v.grp as usize]].clone(),
+                    &node_pos,
+                    0.25,
+                )
+            });
+            if let Some((t, c, nl)) = gb.bind(v.p, v.n) {
+                out.bind_nodes.push(t);
+                out.bind_coords.push(c);
+                out.bind_normal.push(nl);
+                out.bind_rest.push(rest_edges(&node_pos, t));
+                out.positions.push((v.p + built.shift).to_array());
+                out.normals.push(v.n.to_array());
+                out.uvs.push(v.uv.to_array());
+                out.material.push(v.mat);
+                out.colors.push(color(v.mat, paint));
+                out.seam.push(0.0);
+                continue;
+            }
+        }
         let b = binders.entry(v.part).or_insert_with(|| {
             Binder::new(
                 by_part.get(&v.part).cloned().unwrap_or_default(),
@@ -614,6 +919,7 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         out.uvs.push(v.uv.to_array());
         out.material.push(v.mat);
         out.colors.push(color(v.mat, paint));
+        out.seam.push(v.seam);
     }
     out.indices = idx;
     // Wheels: tyre and rim, bound to the tyre's rings.
@@ -642,10 +948,15 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         mat::TAILLIGHT => [0.5, 0.015, 0.015],
         mat::TYRE => [0.025, 0.025, 0.025],
         mat::RIM => [0.55, 0.57, 0.6],
-        mat::GAP => [0.005, 0.005, 0.005],
+        mat::GAP => [0.1, 0.004, 0.004],
         mat::UNDERBODY => [0.04, 0.04, 0.04],
         mat::PLATE => [0.85, 0.85, 0.8],
         mat::GRILLE => [0.015, 0.015, 0.015],
+        mat::SEAT => [0.05, 0.045, 0.04],
+        mat::DASH => [0.03, 0.03, 0.032],
+        mat::DOORCARD => [0.1, 0.095, 0.09],
+        mat::HEADLINER => [0.42, 0.4, 0.37],
+        mat::CARPET => [0.05, 0.05, 0.05],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -702,6 +1013,7 @@ fn wheel(out: &mut ShowcaseVisual, tyre: &Tyre, node_pos: &[Vec3], shift: Vec3) 
         out.uvs.push([0.0, 0.0]);
         out.material.push(m);
         out.colors.push(color(m, [0.0; 3]));
+        out.seam.push(0.0);
         (out.positions.len() - 1) as u32
     };
     let mut grid: Vec<Vec<u32>> = Vec::new();

@@ -89,6 +89,21 @@ pub fn panel(name: &str, region: Region, grade: &str, joint: Joint, sided: bool)
     }
 }
 
+/// A seat frame: a light rigid lattice on breakable floor mounts.
+pub fn seat_frame(name: &str, centre: [f32; 3], half: [f32; 3], kg: f32) -> BlockSpec {
+    BlockSpec {
+        name: name.into(),
+        centre,
+        half,
+        spacing: 0.25,
+        kg,
+        mounts: 2,
+        reach: 0.3,
+        mount_grade: "hsla".into(),
+        mount_scale: 0.5,
+    }
+}
+
 pub fn door_joint() -> Joint {
     Joint::Hinged {
         hinge: Edge::Front,
@@ -577,6 +592,19 @@ pub fn sedan() -> VehicleDef {
         )),
         cross("subframe_f1", 0.42, 0.24, 3.55, "hsla", 1.5),
         cross("subframe_f2", 0.42, 0.25, 3.95, "hsla", 1.5),
+        // The steering column, from the dash cross beam.
+        ladder(member(
+            "column",
+            &[(0.38, 0.80, 3.22), (0.38, 0.93, 2.98)],
+            0.10,
+            0.10,
+            UP,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            false,
+            0,
+        )),
         // Rear rails, graded the same way, to the rear bumper beam.
         member(
             "rail_r",
@@ -667,6 +695,10 @@ pub fn sedan() -> VehicleDef {
             mount_grade: "hsla".into(),
             mount_scale: 1.0,
         },
+        // Seat frames (the seats ride them).
+        seat_frame("seat_fl", [0.38, 0.40, 2.62], [0.24, 0.07, 0.24], 15.0),
+        seat_frame("seat_fr", [-0.38, 0.40, 2.62], [0.24, 0.07, 0.24], 15.0),
+        seat_frame("seat_rear", [0.0, 0.40, 1.74], [0.62, 0.07, 0.22], 25.0),
         BlockSpec {
             name: "battery".into(),
             centre: [0.56, 0.62, 4.24],
@@ -697,13 +729,13 @@ pub fn sedan() -> VehicleDef {
         },
         NamedMass {
             name: "front_seats".into(),
-            kg: 50.0,
+            kg: 20.0,
             lo: [-0.8, 0.12, 2.35],
             hi: [0.8, 0.45, 3.0],
         },
         NamedMass {
             name: "rear_seat".into(),
-            kg: 30.0,
+            kg: 5.0,
             lo: [-0.8, 0.12, 1.45],
             hi: [0.8, 0.45, 2.0],
         },

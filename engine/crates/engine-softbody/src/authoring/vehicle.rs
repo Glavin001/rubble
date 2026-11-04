@@ -316,6 +316,9 @@ pub struct Built {
     pub shift: Vec3,
     /// Node indices per named member, block and corner.
     pub groups: HashMap<String, Vec<u32>>,
+    /// Binding triangles over each group's nodes (for visual parts riding the
+    /// structure: seats on their frames, the dashboard on its cross beam).
+    pub bind_tris: HashMap<String, Vec<[u32; 3]>>,
     /// Every beam's stiffness and damping were scaled by this so the explicit
     /// step stays stable within the kerb mass (1: the materials as defined).
     pub stiffness_scale: f32,
@@ -980,6 +983,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         n.p += shift;
     }
     let truck = out.to_truck();
+    let bind_tris: HashMap<String, Vec<[u32; 3]>> = groups
+        .iter()
+        .map(|(k, nodes)| (k.clone(), cloud_tris(&sk, nodes)))
+        .collect();
     Ok(Built {
         def: def.clone(),
         params: params.clone(),
@@ -987,6 +994,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         shell,
         truck,
         shift,
+        bind_tris,
         groups,
         stiffness_scale,
     })
@@ -1085,4 +1093,32 @@ fn coarse_with(sk: &Skeleton, shell: &Shell, rs: usize, ns: usize) -> Vec<[u32; 
     // Caps at full resolution (the end rings are kept whole).
     tris.extend_from_slice(&shell.cap_tris);
     tris
+}
+
+/// Triangles over a cloud of nodes: each node with pairs of its nearest
+/// neighbours, skipping slivers (for binding visual parts to structure).
+pub fn cloud_tris(sk: &Skeleton, nodes: &[u32]) -> Vec<[u32; 3]> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for &a in nodes {
+        let pa = sk.pos(a);
+        let near = sk.nearest(pa, nodes, 6);
+        let near: Vec<u32> = near.into_iter().filter(|&b| b != a).collect();
+        for i in 0..near.len() {
+            for j in i + 1..near.len() {
+                let (b, c) = (near[i], near[j]);
+                let (u, w) = (sk.pos(b) - pa, sk.pos(c) - pa);
+                let s = u.cross(w).length() / (u.length() * w.length()).max(1e-9);
+                if s < 0.4 {
+                    continue;
+                }
+                let mut k = [a, b, c];
+                k.sort();
+                if seen.insert(k) {
+                    out.push([a, b, c]);
+                }
+            }
+        }
+    }
+    out
 }

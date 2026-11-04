@@ -32,6 +32,7 @@ mod lab;
 mod motion;
 mod read;
 mod scene;
+mod showcase;
 mod soft;
 mod terrain;
 mod vehicle;
