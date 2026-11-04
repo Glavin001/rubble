@@ -1342,6 +1342,35 @@ pub fn grid_cell_with(
     ((2.0 * max_r * 1.0001).max(0.5), 0)
 }
 
+/// Dynamics wider than a uniform-grid cell the uniform grid holds on its large list
+/// (`broadphase_insert` in world_step.slang); one more fails the step with
+/// `OVERFLOW_LARGE_DYNAMICS`.
+pub const UNIFORM_LARGE_DYNAMICS_CAP: usize = 16;
+
+/// Whether the uniform grid of cell `cell` has more dynamics wider than a cell than its
+/// large list holds (`broadphase_insert`'s test: a dynamic body's collider of bounding
+/// radius greater than the cell).
+pub fn uniform_large_dynamics_overflow(
+    cols: &[engine_schema::Collider],
+    bodies: &[engine_schema::BodyState],
+    cell: f32,
+) -> bool {
+    cols.iter()
+        .filter(|c| c.shape != engine_schema::ShapeType::Plane as u32)
+        .filter(|c| bodies.get(c.body as usize).is_some_and(|b| b.is_dynamic()))
+        .filter(|c| {
+            let r = if c.params[3] > 0.0 {
+                c.params[3]
+            } else {
+                (c.params[0] * c.params[0] + c.params[1] * c.params[1] + c.params[2] * c.params[2])
+                    .sqrt()
+            };
+            r > cell
+        })
+        .nth(UNIFORM_LARGE_DYNAMICS_CAP)
+        .is_some()
+}
+
 /// Warm-start pair key, bit-identical to `pairWarmKey` in world_step.slang
 /// (murmur3 fmix32 finalizer over both collider ids; never the empty sentinel).
 pub fn pair_warm_key(a: u32, b: u32) -> u32 {

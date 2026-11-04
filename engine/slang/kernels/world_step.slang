@@ -1269,6 +1269,8 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
         uint slot;
         AADD3(gScratchAtomics[42], 1, slot);
         if (slot < 8u) ASTORE(gScratchAtomics[43u + slot], i);
+        // The 9th plane is never queried: fail the step as hierInsert does.
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
         return;
     }
     // Insert sleeping too — awake movers must find them (island wake on impact).
@@ -2065,6 +2067,8 @@ void rest_publish(uint3 tid : SV_DispatchThreadID)
         ASTORE(gScratchAtomics[43u + k], ALOAD(gConstraintIds[hdr + 2u + k]));
     uint large = ALOAD(gConstraintIds[hdr + 10u]);
     ASTORE(gScratchAtomics[HIER_LARGE_COUNT_SLOT], large);
+    // The table's overflows, every step (its inserts flag only the step they ran).
+    if (planes > 8u || large > HIER_LARGE_MAX) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
     for (uint k = 0u; k < min(large, HIER_LARGE_MAX); k++)
         ASTORE(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + k], ALOAD(gConstraintIds[hdr + 11u + k]));
 }
@@ -2254,6 +2258,7 @@ void restInsertUniform(uint i, Collider col, BodyState b)
     {
         uint slot;
         AADD3(gConstraintIds[hdr + 1u], 1u, slot);
+        // Past 8: rest_publish_uniform fails each step with OVERFLOW_BP_CHAIN.
         if (slot < 8u) ASTORE(gConstraintIds[hdr + 2u + slot], i);
         ASTORE(gConstraintIds[restAtBase() + i], REST_AT_LISTED);
         return;
@@ -2319,6 +2324,7 @@ void rest_publish_uniform(uint3 tid : SV_DispatchThreadID)
         np++;
     }
     ASTORE(gScratchAtomics[42], planes > 8u ? planes : np);
+    if (planes > 8u) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
     uint large = ALOAD(gConstraintIds[hdr + 10u]), nl = 0u;
     for (uint k = 0u; k < min(large, REST_U_LARGE_MAX); k++)
     {
@@ -2360,6 +2366,7 @@ void broadphase_insert_awake_uniform(uint3 tid : SV_DispatchThreadID)
         uint slot;
         AADD3(gScratchAtomics[42], 1, slot);
         if (slot < 8u) ASTORE(gScratchAtomics[43u + slot], c);
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
         return;
     }
     uint base = HOST_S(1);

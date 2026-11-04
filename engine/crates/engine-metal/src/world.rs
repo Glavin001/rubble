@@ -868,25 +868,44 @@ impl MetalWorld {
                 self.body_count as usize,
             )
         };
-        let hier = match std::env::var("ENGINE_GRID_LEVELS").as_deref() {
-            Ok("off") => false,
-            Ok("on") => true,
-            _ => self.has_convex,
+        let forced = match std::env::var("ENGINE_GRID_LEVELS").as_deref() {
+            Ok("off") => Some(false),
+            Ok("on") => Some(true),
+            _ => None,
         };
-        if hier {
-            let (base, levels) = match self.grid_cache {
-                Some((n, base, levels)) if n == self.collider_count => (base, levels),
-                _ => {
-                    let (base, levels) = engine_schema::convex::hierarchical_grid(cols, bodies);
-                    self.grid_cache = Some((self.collider_count, base, levels));
-                    (base, levels)
-                }
-            };
-            self.params.grid_cell_size = base;
-            self.grid_levels = levels;
-            return;
+        // The cache holds a hierarchical choice (forced, convex, or a box scene the
+        // uniform grid could not hold) until the colliders change.
+        let cached = self
+            .grid_cache
+            .is_some_and(|(n, _, _)| n == self.collider_count);
+        let hier = forced.unwrap_or(self.has_convex || cached);
+        if !hier {
+            let cell = Self::uniform_cell(cols, bodies);
+            // Automatic grid: more dynamics wider than a uniform cell than its large
+            // list holds take the hierarchical grid (every pair at any size) instead of
+            // failing the step with OVERFLOW_LARGE_DYNAMICS (WgpuSim::refresh_cell).
+            if forced.is_some()
+                || !engine_exec::rigid_plan::uniform_large_dynamics_overflow(cols, bodies, cell)
+            {
+                self.grid_levels = 0;
+                self.params.grid_cell_size = cell;
+                return;
+            }
         }
-        self.grid_levels = 0;
+        let (base, levels) = match self.grid_cache {
+            Some((n, base, levels)) if n == self.collider_count => (base, levels),
+            _ => {
+                let (base, levels) = engine_schema::convex::hierarchical_grid(cols, bodies);
+                self.grid_cache = Some((self.collider_count, base, levels));
+                (base, levels)
+            }
+        };
+        self.params.grid_cell_size = base;
+        self.grid_levels = levels;
+    }
+
+    /// three-avbd cellSize ≈ 2·maxSmallRadius (the uniform grid).
+    fn uniform_cell(cols: &[Collider], bodies: &[BodyState]) -> f32 {
         let mut max_r = 0.25f32;
         for c in cols {
             if c.shape == ShapeType::Plane as u32 {
@@ -918,7 +937,7 @@ impl MetalWorld {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(2.0);
-        self.params.grid_cell_size = (mult * max_r * 1.0001).max(0.5);
+        (mult * max_r * 1.0001).max(0.5)
     }
 
     fn step_gpu_inner(&mut self, wait: bool) -> Result<StepCounters, ExecError> {
