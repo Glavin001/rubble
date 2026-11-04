@@ -1258,6 +1258,8 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
         uint slot;
         AADD3(gScratchAtomics[42], 1, slot);
         if (slot < 8u) ASTORE(gScratchAtomics[43u + slot], i);
+        // The 9th plane is never queried: fail the step as hierInsert does.
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
         return;
     }
     // Insert sleeping too — awake movers must find them (island wake on impact).
