@@ -87,6 +87,8 @@ static const uint TYPE_DEFORMABLE = 0u;
 static const uint FLAG_FAST_INV_SQRT = 1u;
 static const uint FLAG_DRAG = 2u;
 static const uint FLAG_TURBULENCE = 4u;
+// The vehicle has static shapes other than axis-aligned boxes (nodeUpdateShapes).
+static const uint FLAG_SHAPES = 64u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -465,9 +467,19 @@ static const uint NODE_SLOT_SHIFT = 8u;
 float3 slideTake(float3 f, uint slot1);
 #endif
 
+uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV,
+                      float ground, uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits,
+                      bool solo);
+
 void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
                 uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits)
 {
+    if ((flagsV & FLAG_SHAPES) != 0u)
+    {
+        nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
+                         groupCount, hits, false);
+        return;
+    }
 #ifdef EB_AERO
     if ((flagsV & FLAG_FUSEDRAG) != 0u)
     {
@@ -547,6 +559,11 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
 uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
                 uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits)
 {
+    if ((flagsV & FLAG_SHAPES) != 0u)
+    {
+        return nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
+                                groupOff, groupCount, hits, true);
+    }
 #ifdef EB_AERO
     if ((flagsV & FLAG_FUSEDRAG) != 0u)
     {
@@ -621,6 +638,174 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
     return 0u;
 }
 #endif
+
+// --- static shapes (Rubble only): oriented boxes, vertical cylinders, capsules,
+// spheres. A vehicle with any (FLAG_SHAPES) steps its nodes here instead of
+// nodeUpdate (whose code stays as it was for every other vehicle). Its box slots
+// are its axis-aligned boxes then its shapes: per slot (lo, kind) and (hi, at);
+// kind 0 an axis-aligned box (lo, hi), else lo, hi the shape's culling box and
+// `at` its parameter records (from gP.boxBase): an oriented box (centre, half.x),
+// (axis x, half.y), (axis y, half.z), (axis z, 0); a cylinder (centre, radius),
+// (half height, 0, 0, 0); a capsule (a, radius), (b, 0); a sphere (centre, radius).
+// Strict arithmetic in the CPU reference's order (`shape_face`).
+
+static const uint SHAPE_OBOX = 1u;
+static const uint SHAPE_CYLINDER = 2u;
+static const uint SHAPE_CAPSULE = 3u;
+
+// Pushed out along d (+y at the centre) when strictly inside the radius.
+float4 roundNormal(float3 d, float radius)
+{
+    float l = ssqrt(sdot(d, d));
+    if (!(l < radius)) return float4(0.0, 0.0, 0.0, 0.0);
+    if (l > 0.0) return float4(sdiv3(d, l), 1.0);
+    return float4(0.0, 1.0, 0.0, 1.0);
+}
+
+// The outward normal of the nearest surface of the shape at records `at` (kind
+// `kind`) for x strictly inside it (.w 1), else .w 0.
+float4 shapeNormal(uint kind, uint at, float3 x)
+{
+    float4 p0 = asfloat(gStatic[at]);
+    float4 p1 = asfloat(gStatic[at + 1u]);
+    if (kind == SHAPE_OBOX)
+    {
+        float4 p2 = asfloat(gStatic[at + 2u]);
+        float4 p3 = asfloat(gStatic[at + 3u]);
+        float3 h = float3(p0.w, p1.w, p2.w);
+        float3 d = ssub3(x, p0.xyz);
+        float3 l = float3(sdot(p1.xyz, d), sdot(p2.xyz, d), sdot(p3.xyz, d));
+        if (!(l.x > -h.x && l.x < h.x && l.y > -h.y && l.y < h.y && l.z > -h.z && l.z < h.z))
+            return float4(0.0, 0.0, 0.0, 0.0);
+        float3 n = -p3.xyz;
+        float dist = nf(l.z + h.z);
+        float t = nf(h.z - l.z);
+        if (t < dist) { dist = t; n = p3.xyz; }
+        t = nf(l.x + h.x);
+        if (t < dist) { dist = t; n = -p1.xyz; }
+        t = nf(h.x - l.x);
+        if (t < dist) { dist = t; n = p1.xyz; }
+        t = nf(l.y + h.y);
+        if (t < dist) { dist = t; n = -p2.xyz; }
+        t = nf(h.y - l.y);
+        if (t < dist) { dist = t; n = p2.xyz; }
+        return float4(n, 1.0);
+    }
+    if (kind == SHAPE_CYLINDER)
+    {
+        float radius = p0.w;
+        float hh = p1.x;
+        float3 d = ssub3(x, p0.xyz);
+        float r = ssqrt(nf(smul(d.x, d.x) + smul(d.z, d.z)));
+        if (!(r < radius && d.y > -hh && d.y < hh)) return float4(0.0, 0.0, 0.0, 0.0);
+        float3 n = float3(1.0, 0.0, 0.0);
+        if (r > 0.0) n = float3(sdiv(d.x, r), 0.0, sdiv(d.z, r));
+        float dist = nf(radius - r);
+        float t = nf(hh - d.y);
+        if (t < dist) { dist = t; n = float3(0.0, 1.0, 0.0); }
+        t = nf(d.y + hh);
+        if (t < dist) n = float3(0.0, -1.0, 0.0);
+        return float4(n, 1.0);
+    }
+    if (kind == SHAPE_CAPSULE)
+    {
+        float3 ab = ssub3(p1.xyz, p0.xyz);
+        float l2 = sdot(ab, ab);
+        float t = 0.0;
+        if (l2 > 0.0) t = min(max(sdiv(sdot(ssub3(x, p0.xyz), ab), l2), 0.0), 1.0);
+        return roundNormal(ssub3(x, sadd3(p0.xyz, sscale(ab, t))), p0.w);
+    }
+    return roundNormal(ssub3(x, p0.xyz), p0.w);
+}
+
+// nodeUpdate (and, `solo`, nodeUpdateSolo; with a fuselage drag, nodeUpdateFuse)
+// for a vehicle with static shapes: its box slots tested in order as above.
+uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV,
+                      float ground, uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits,
+                      bool solo)
+{
+    float4 P = gNodes[gi * 3u];
+#ifdef EB_VV_SOLO
+    if (solo && any(abs(P.xyz - gsVvBounds[0]) > gsVvBounds[1])) vvReportOutside(vehicle);
+#endif
+    float4 V = gNodes[gi * 3u + 1u];
+    float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
+    float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
+    if (hits)
+    {
+        f = f + accForce(gi);
+        gAcc[gi * 3u].store(0);
+        gAcc[gi * 3u + 1u].store(0);
+        gAcc[gi * 3u + 2u].store(0);
+    }
+#ifdef EB_AERO
+    if ((info.x >> NODE_SLOT_SHIFT) != 0u) f = slideTake(f, info.x >> NODE_SLOT_SHIFT);
+#endif
+    uint flags = info.x;
+    float3 pos = P.xyz;
+    float3 vel = V.xyz;
+    float mass = P.w;
+    if ((flags & NODE_NO_GROUND) == 0u)
+    {
+        float3 x = origin + pos;
+        if (ground > x.y)
+            f += contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+        for (uint b = 0u; b < boxCount; b++)
+        {
+            uint4 lo4 = gStatic[gP.boxBase + (boxOff + b) * 2u];
+            uint4 hi4 = gStatic[gP.boxBase + (boxOff + b) * 2u + 1u];
+            float3 lo = asfloat(lo4.xyz);
+            float3 hi = asfloat(hi4.xyz);
+            if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)
+            {
+                float4 n = float4(0.0, 0.0, -1.0, 1.0);
+                if (lo4.w == 0u)
+                {
+                    float d = x.z - lo.z;
+                    if (hi.z - x.z < d) { d = hi.z - x.z; n.xyz = float3(0.0, 0.0, 1.0); }
+                    if (x.x - lo.x < d) { d = x.x - lo.x; n.xyz = float3(-1.0, 0.0, 0.0); }
+                    if (hi.x - x.x < d) { d = hi.x - x.x; n.xyz = float3(1.0, 0.0, 0.0); }
+                    if (x.y - lo.y < d) { d = x.y - lo.y; n.xyz = float3(0.0, -1.0, 0.0); }
+                    if (hi.y - x.y < d) { d = hi.y - x.y; n.xyz = float3(0.0, 1.0, 0.0); }
+                }
+                else
+                    n = shapeNormal(lo4.w, gP.boxBase + hi4.w, x);
+                if (n.w != 0.0) f += contactForce(f, vel, mass, n.xyz, boxSurface(), 0.0, V.w);
+            }
+        }
+    }
+    if ((flags & NODE_IMMOVABLE) == 0u)
+    {
+        vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
+        pos = sadd3(pos, sscale(vel, STEP));
+    }
+#ifdef EB_AERO
+    if ((flagsV & FLAG_FUSEDRAG) != 0u)
+    {
+        f = sadd3(float3(0.0, smul(mass, GRAVITY), 0.0), gBeams[gP.aeroState + vehicle].xyz);
+        gNodes[gi * 3u] = float4(pos, mass);
+        gNodes[gi * 3u + 1u] = float4(vel, V.w);
+        gNodes[gi * 3u + 2u] = float4(f, selfGroup);
+        return 0u;
+    }
+#endif
+    f = float3(0.0, mass * GRAVITY, 0.0);
+    if ((flagsV & FLAG_DRAG) != 0u)
+    {
+        float s = approxSqrt(dot(vel, vel));
+        f += -DRAG * s * vel;
+        if ((flagsV & FLAG_TURBULENCE) != 0u)
+        {
+            float t = DRAG * s * s * TURBULENCE;
+            f += t * float3(noise(vehicle, step, local, 0u), noise(vehicle, step, local, 1u),
+                            noise(vehicle, step, local, 2u));
+        }
+    }
+    gNodes[gi * 3u] = float4(pos, mass);
+    gNodes[gi * 3u + 1u] = float4(vel, V.w);
+    gNodes[gi * 3u + 2u] = float4(f, selfGroup);
+    return 0u;
+}
 
 // Self-collision hits are found in parallel and applied in the specification's
 // order (triangles in file order, then candidates in node order): a hit's contact

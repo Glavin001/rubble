@@ -18,7 +18,7 @@ use crate::{
     EXPLICIT_BEAMS_SOLO_WGSL, EXPLICIT_BEAMS_SOLO_WIDE_WGSL, EXPLICIT_BEAMS_VV_PASSES, EXPLICIT_BEAMS_WGSL,
     EXPLICIT_BEAMS_WIDE_PASSES, EXPLICIT_BEAMS_WIDE_WGSL,
 };
-use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind};
+use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 
@@ -490,6 +490,8 @@ impl ExplicitBeamsGpu {
         let mut beam_recs: Vec<[u32; 4]> = Vec::with_capacity(total_beams * 3);
         let mut tri_recs: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
         let mut box_recs: Vec<[u32; 4]> = Vec::new();
+        let mut shape_recs: Vec<[u32; 4]> = Vec::new();
+        let mut shape_patches: Vec<usize> = Vec::new();
         let mut lists: Vec<u32> = Vec::new();
         let mut nodes: Vec<[f32; 4]> = Vec::with_capacity(total_nodes * 3);
         let mut beams: Vec<[f32; 4]> = Vec::with_capacity(total_beams * 2);
@@ -593,7 +595,8 @@ impl ExplicitBeamsGpu {
                 | (v.settings.turbulence as u32) << 2
                 | (v.fusedrag.is_some() as u32) << 3
                 | (!v.triggers.is_empty() as u32) << 4
-                | (!v.slides.is_empty() as u32) << 5;
+                | (!v.slides.is_empty() as u32) << 5
+                | (!v.shapes.is_empty() as u32) << 6;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -604,7 +607,7 @@ impl ExplicitBeamsGpu {
                 tri_off,
                 v.triangles.len() as u32,
                 box_off,
-                v.boxes.len() as u32,
+                (v.boxes.len() + v.shapes.len()) as u32,
             ]);
             vehicle_recs.push([cand_off, v.candidates.len() as u32, group_off, group_count]);
             vehicle_recs.push([
@@ -707,6 +710,25 @@ impl ExplicitBeamsGpu {
                 box_recs.push(bits(bx.lo));
                 box_recs.push(bits(bx.hi));
             }
+            // Static shapes (the kernel's nodeUpdateShapes): a slot each after the
+            // boxes, (lo, kind) and (hi, parameter record), the records placed after
+            // every slot (patched below). An identity-rotation box is a box slot.
+            for sh in &v.shapes {
+                if let Some(bx) = sh.as_aabb() {
+                    box_recs.push(bits(bx.lo));
+                    box_recs.push(bits(bx.hi));
+                    continue;
+                }
+                let bd = sh.bounds();
+                let mut lo = bits(bd.lo);
+                lo[3] = sh.kind();
+                let mut hi = bits(bd.hi);
+                hi[3] = shape_recs.len() as u32;
+                shape_patches.push(box_recs.len() + 1);
+                box_recs.push(lo);
+                box_recs.push(hi);
+                shape_recs.extend(shape_params(sh));
+            }
             let mut m = bits(v.origin);
             m[3] = v.steps as u32;
             misc.push(m);
@@ -726,6 +748,12 @@ impl ExplicitBeamsGpu {
             tri_off += v.triangles.len() as u32;
             box_off += v.boxes.len() as u32;
         }
+        // Shape parameter records after every box slot (offsets from the box base).
+        let shape_at = box_recs.len() as u32;
+        for at in shape_patches {
+            box_recs[at][3] += shape_at;
+        }
+        box_recs.extend(shape_recs);
         misc.extend(tri_misc);
         // Wings, the fuselage drag, self-centering commands and shocks2 (the EB_AERO
         // modules).
@@ -2619,6 +2647,31 @@ fn frame_lanes(vehicles: &[ExplicitBeams]) -> u32 {
 
 /// The self-collision grid's cell size for a vehicle (0: all pairs): the
 /// solver's own ([`ExplicitBeams::grid_cell`]), so CPU and GPU share it.
+/// A static shape's parameter records (the kernel's `shapeNormal`): an oriented box
+/// (centre, half.x), (axis x, half.y), (axis y, half.z), (axis z, 0); a cylinder
+/// (centre, radius), (half height, 0, 0, 0); a capsule (a, radius), (b, 0); a
+/// sphere (centre, radius), (0).
+fn shape_params(sh: &StaticShape) -> Vec<[u32; 4]> {
+    let rec = |v: Vec3, w: f32| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits(), w.to_bits()];
+    match *sh {
+        StaticShape::OrientedBox {
+            centre, half, axes, ..
+        } => vec![
+            rec(centre, half.x),
+            rec(axes[0], half.y),
+            rec(axes[1], half.z),
+            rec(axes[2], 0.0),
+        ],
+        StaticShape::Cylinder {
+            centre,
+            radius,
+            half_height,
+        } => vec![rec(centre, radius), rec(Vec3::new(half_height, 0.0, 0.0), 0.0)],
+        StaticShape::Capsule { a, b, radius } => vec![rec(a, radius), rec(b, 0.0)],
+        StaticShape::Sphere { centre, radius } => vec![rec(centre, radius), [0; 4]],
+    }
+}
+
 fn grid_cell(v: &ExplicitBeams) -> f32 {
     v.grid_cell
 }
