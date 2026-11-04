@@ -496,6 +496,15 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     // DeviceMemoryBarrierWithGroupSync with a texture barrier naga rejects (and an
     // empty statement Safari's parser rejects), so keep the storage and workgroup
     // barriers alone.
+    // Every explicit module is regenerated below: clear the previous build's, so a
+    // module that no longer exists does not linger in the output directory (the loop-cap
+    // test reads every `explicit_*.wgsl` there).
+    for entry in std::fs::read_dir(&wgsl_dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("explicit_") && name.ends_with(".wgsl") {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
     let beams = wgsl_dir.join("explicit_beams.wgsl");
     compile_with_defines(
         &explicit_beams_source(slang_root),
