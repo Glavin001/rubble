@@ -88,7 +88,10 @@
     const qs = new URLSearchParams(location.search);
     // Crash-lab presets (?preset=, crash-lab.mjs): the explicit solver's scene and
     // its fields (the query's own values win), labels and camera.
-    const LAB_PRESET = LAB_PRESETS[qs.get('preset')] ? qs.get('preset') : null;
+    // A ?xscene= other than the preset's own wins: the preset is dropped (it would
+    // otherwise force its scene back).
+    const LAB_PRESET = LAB_PRESETS[qs.get('preset')] && (!qs.has('xscene') || qs.get('xscene') === LAB_PRESETS[qs.get('preset')].xscene)
+      ? qs.get('preset') : null;
     if (LAB_PRESET) {
       const p = LAB_PRESETS[LAB_PRESET];
       qs.set('solver', 'explicit');
@@ -152,9 +155,11 @@
     solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz (RoR parity) ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
     solverBtn.onclick = () => { const u = new URL(location.href); if (EXPLICIT) u.searchParams.delete('solver'); else u.searchParams.set('solver', 'explicit'); location.href = u.href; };
     // The explicit solver's scenes; each soft scene maps to the nearest.
-    const XSCENES = { idle: 'Explicit: at rest (L launches at 100 km/h)', coast: 'Explicit: coasting at 100 km/h', wall: 'Explicit: 100 km/h into a rigid wall', arena: 'Explicit: fleet arena (?n= vehicles, ?headOn= share)',
-      headon: 'Explicit: head-on, two cars (overlap)', tbone: 'Explicit: T-bone into a standing car', pole: 'Explicit: into a 20 cm pole',
-      sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar', drop: 'Explicit: drop test' };
+    // Speeds, angles and the rest are each scene's knobs (XPARAMS), not part of its name.
+    const XSCENES = { idle: 'Explicit: at rest (L launches)', coast: 'Explicit: coasting', wall: 'Explicit: into a rigid wall',
+      headon: 'Explicit: head-on, two cars', tbone: 'Explicit: T-bone into a car', pole: 'Explicit: into a 20 cm pole',
+      sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar', drop: 'Explicit: drop test',
+      arena: 'Explicit: fleet arena (many vehicles)' };
     // Explicit scenes' knobs (the solver's crash_scene and arena): [url key, label,
     // default, [min, max, step]]. km/h knobs go to the solver in m/s; angles in degrees.
     const KMH = [0, 200, 1], OVERLAP = [0.05, 1, 0.05], ANGLE = [-90, 90, 1], ALONG = [-2.5, 2.5, 0.05];
@@ -174,6 +179,20 @@
       wall: 'wall', pole: 'pole', sidepole: 'sidepole', tbone: 'tbone', headon: 'headon', limbo: 'limbo', sandwich: 'wall', import: 'wall', drop: 'drop' };
     const xscene = XSCENES[qs.get('xscene')] ? qs.get('xscene') : XMAP[scene];
     const ARENA = EXPLICIT && xscene === 'arena';
+    // The page for an explicit scene with its default knobs: keeps the solver and the
+    // vehicle (and the lab's view options), drops any preset and the old scene's knobs.
+    const xsceneUrl = (id) => {
+      const u = new URL(location.href), s = new URLSearchParams();
+      s.set('solver', 'explicit'); s.set('xscene', id);
+      for (const k of ['car', 'truck', 'tyres', 'drag', 'res', 'style', 'lab']) if (qs.has(k)) s.set(k, qs.get(k));
+      u.search = s.toString();
+      return u.href;
+    };
+    // The lab's pills for a scene from its knobs (presets carry their own).
+    const XPILL = { idle: () => 'AT REST', coast: () => `COASTING · ${P('xspeed', 100)} KM/H`, wall: () => `WALL · ${P('speed', 100)} KM/H`,
+      headon: () => `HEAD-ON · ${P('speed', 56)} + ${P('speed2', 56)} KM/H`, tbone: () => `T-BONE · ${P('speed', 50)} KM/H`,
+      pole: () => `POLE · ${P('speed', 60)} KM/H`, sidepole: () => `SIDE POLE · ${P('speed', 32)} KM/H · ${P('angle', 90)}°`,
+      limbo: () => `LOW BAR · ${P('speed', 60)} KM/H`, drop: () => `DROPPED FROM ${P('height', 8)} M` };
     // The crash-test lab (crash-lab.mjs, crash-lab-render.mjs): the explicit solver's
     // view with tube beams, node spheres, a ghost body, time control, impact time and
     // node grabbing; ?lab=0 keeps the plain view (the arena always does).
@@ -182,7 +201,8 @@
       const xs = document.getElementById('xsceneSel');
       for (const [id, t] of Object.entries(XSCENES)) xs.add(new Option(t, id, false, id === xscene));
       xs.style.display = '';
-      xs.onchange = () => { const u = new URL(location.href); u.searchParams.set('xscene', xs.value); location.href = u.href; };
+      xs.onchange = () => { location.href = xsceneUrl(xs.value); };
+      if (LAB) xs.style.display = 'none';
       document.getElementById('xkeys').style.display = '';
       for (const id of ['softKeys', 'presetSel']) document.getElementById(id).style.display = 'none';
       document.getElementById('infoTitle').innerHTML = '<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, Rigs of Rods parity</span>';
@@ -269,7 +289,12 @@
         }
         row.appendChild(l);
       }
-      const run = () => { const u = new URLSearchParams(location.search); u.set(EXPLICIT ? 'xscene' : 'scene', pscene); for (const [k] of fields) u.set(k, document.getElementById('p_' + k).value); location.search = u.toString(); };
+      const run = () => {
+        const u = new URLSearchParams(location.search); u.set(EXPLICIT ? 'xscene' : 'scene', pscene);
+        for (const [k] of fields) u.set(k, document.getElementById('p_' + k).value);
+        if (LAB_PRESET) { const p = LAB_PRESETS[LAB_PRESET]; u.delete('preset'); for (const [k, v] of Object.entries(p.params)) if (!u.has(k)) u.set(k, String(v)); if (p.cam && !u.has('cam3')) u.set('cam3', p.cam); }
+        location.search = u.toString();
+      };
       if (fields.length) { const b = document.createElement('button'); b.textContent = EXPLICIT ? 'restart' : 'run'; b.onclick = run; row.appendChild(b); }
     }
 
@@ -1939,6 +1964,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     if (LAB) {
       lab = createCrashLab({
         sim: () => xsim, layout: () => xlayout, renderer: labR, canvas, qs, preset: LAB_PRESET, xscene, body: !!bodyR,
+        scenes: XSCENES, sceneUrl: xsceneUrl, pill: XPILL[xscene]?.() ?? xscene.toUpperCase(), crash: XCRASH.has(xscene),
         setOrbit: (o) => {
           if (o.chase) { camMode = 'chase'; window.__camSync?.(); return; }
           if (o.follow) { if (camMode === 'orbit') { orbit.target = o.follow; orbit.yaw += o.spin; } return; }

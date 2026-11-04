@@ -275,9 +275,9 @@ pub fn sedan() -> VehicleDef {
             (2.95, 1.22),
             (3.33, 1.00),
             (3.80, 0.945),
-            (4.20, 0.885),
-            (4.50, 0.845),
-            (4.70, 0.80),
+            (4.20, 0.875),
+            (4.50, 0.825),
+            (4.70, 0.765),
         ]),
         bottom: Curve::new(&[
             (0.00, 0.42),
@@ -287,8 +287,8 @@ pub fn sedan() -> VehicleDef {
             (1.20, 0.17),
             (3.60, 0.17),
             (4.15, 0.19),
-            (4.45, 0.24),
-            (4.70, 0.34),
+            (4.45, 0.23),
+            (4.70, 0.31),
         ]),
         shoulder: Curve::new(&[
             (0.00, 0.93),
@@ -299,8 +299,8 @@ pub fn sedan() -> VehicleDef {
             (3.00, 0.96),
             (3.50, 0.93),
             (3.90, 0.88),
-            (4.30, 0.82),
-            (4.70, 0.74),
+            (4.30, 0.80),
+            (4.70, 0.70),
         ]),
         half_width: Curve::new(&[
             (0.00, 0.80),
@@ -334,14 +334,14 @@ pub fn sedan() -> VehicleDef {
         wells: vec![
             Well {
                 z: 1.03,
-                y: 0.32,
-                radius: 0.37,
+                y: 0.335,
+                radius: 0.385,
                 inner_x: 0.58,
             },
             Well {
                 z: 3.73,
-                y: 0.32,
-                radius: 0.37,
+                y: 0.335,
+                radius: 0.385,
                 inner_x: 0.58,
             },
         ],
@@ -1077,9 +1077,9 @@ pub fn sedan() -> VehicleDef {
     ];
     let wheel = |z: f32, driven: bool, spring: f32, damper: f32, cross: f32| Corner {
         x: 0.78,
-        y: 0.32,
+        y: 0.335,
         z,
-        tyre_radius: 0.32,
+        tyre_radius: 0.335,
         tyre_width: 0.22,
         wheel_mass: 22.0,
         hub_mass: 14.0,
