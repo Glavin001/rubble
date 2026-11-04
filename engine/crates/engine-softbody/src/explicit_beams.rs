@@ -643,6 +643,31 @@ impl StaticShape {
     }
 }
 
+/// A node grab (Rubble only; BeamNG-style "node grabber"): an external
+/// spring–damper pulling one node toward a world point. The node pass, after its
+/// force restart, adds `k·(target − x) − c·v` (x the node's world position and v
+/// its velocity after integration) to the node's force, which the beam and
+/// self-collision passes then add to and the next node pass consumes, as every
+/// other force. Set per frame by an interactive host; `None` leaves every step
+/// unchanged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grab {
+    /// The grabbed node (vehicle-local index).
+    pub node: u32,
+    /// The point it is pulled toward (world, m).
+    pub target: Vec3,
+    /// Stiffness (N/m) and damping (N·s/m).
+    pub k: f32,
+    pub c: f32,
+}
+
+impl Grab {
+    /// The force on a node at world position `x` moving at `v`.
+    pub fn force(&self, x: Vec3, v: Vec3) -> Vec3 {
+        (self.target - x) * self.k - v * self.c
+    }
+}
+
 /// Steps per 60 fps frame with the remainder carried: 1/60 s is 100 units of
 /// 1/6000 s and a step is 3, so frames run 33, 33, 34, … steps.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -743,6 +768,8 @@ pub struct ExplicitBeams {
     /// in this one (state).
     pub groups_last: Vec<u32>,
     pub groups_now: Vec<u32>,
+    /// The node grab applied each step ([`Grab`]); `None` (the default) for none.
+    pub grab: Option<Grab>,
 }
 
 /// A JBeam beam's damping low-pass (`dampCutoffHz`, spec §6): the damping uses
@@ -939,6 +966,7 @@ impl ExplicitBeams {
             torsion_watch: Vec::new(),
             groups_last: Vec::new(),
             groups_now: Vec::new(),
+            grab: None,
         }
     }
 
@@ -2163,6 +2191,18 @@ impl ExplicitBeams {
                 }
             }
             self.nodes[i] = n;
+        }
+        if let Some(g) = self.grab {
+            self.grab_pass(g);
+        }
+    }
+
+    /// The node grab ([`Grab`]): its force added to the grabbed node's restarted
+    /// force (a node index past the vehicle's nodes is ignored).
+    fn grab_pass(&mut self, g: Grab) {
+        let origin = self.origin;
+        if let Some(n) = self.nodes.get_mut(g.node as usize) {
+            n.force += g.force(origin + n.pos, n.vel);
         }
     }
 

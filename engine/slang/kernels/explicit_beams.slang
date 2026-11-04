@@ -639,6 +639,30 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
 }
 #endif
 
+// --- Node grab (Rubble only; CPU reference ExplicitBeams::grab_pass): an external
+// spring–damper on one node, set by the host per frame (ExplicitBeamsGpu::set_grab).
+// gMisc at grabRec(): (on, global node, k bits, c bits), then (target world xyz
+// bits, 0). After a step's node phase (its barrier), one lane of the grabbed
+// node's vehicle adds k·(target − x) − c·v to the node's force slot (the restart),
+// before anything else adds to it or reads it; strict arithmetic in the CPU's
+// order. Off (on = 0) it returns at once and nothing changes.
+uint grabRec() { return gP.wideMisc + 1u + gP.vehicles; }
+void grabApply(uint nodeOff, uint nodeCount, float3 origin)
+{
+    uint4 g = gMisc[grabRec()];
+    if (g.x == 0u) return;
+    uint gi = g.y;
+    if (gi < nodeOff || gi - nodeOff >= nodeCount) return;
+    float3 target = asfloat(gMisc[grabRec() + 1u].xyz);
+    float k = asfloat(g.z);
+    float c = asfloat(g.w);
+    float3 x = sadd3(origin, gNodes[gi * 3u].xyz);
+    float3 vel = gNodes[gi * 3u + 1u].xyz;
+    float4 F = gNodes[gi * 3u + 2u];
+    float3 pull = ssub3(sscale(ssub3(target, x), k), sscale(vel, c));
+    gNodes[gi * 3u + 2u] = float4(sadd3(F.xyz, pull), F.w);
+}
+
 // --- static shapes (Rubble only): oriented boxes, vertical cylinders, capsules,
 // spheres. A vehicle with any (FLAG_SHAPES) steps its nodes here instead of
 // nodeUpdate (whose code stays as it was for every other vehicle). Its box slots
@@ -2962,6 +2986,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             gsUniformOpen = 0u;
         }
         sync();
+        if (lane == 0u) grabApply(nodeOff, nodeCount, origin);
         if (lane == 0u)
         {
             gsHit = 0u;
@@ -3311,6 +3336,8 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
 void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
+    // The node grab, after this step's wide_nodes (one thread).
+    if (i == 0u) grabApplyWide();
     if (i < gP.totalBeams)
     {
         uint v = gStatic[gP.beamBase + i * 3u].z >> 16;
@@ -3355,6 +3382,17 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
             gNext[gP.testedListBase + x.triOff + k] = i - x.triOff;
         }
     }
+}
+
+// The node grab (grabApply) in the wide passes: the grabbed node's vehicle from its
+// node record.
+void grabApplyWide()
+{
+    uint4 g = gMisc[grabRec()];
+    if (g.x == 0u || g.y >= gP.totalNodes) return;
+    uint v = gStatic[gP.nodeInfoBase + g.y].w;
+    Vehicle x = vehicleAt(v);
+    grabApply(x.nodeOff, x.nodeCount, vehicleOrigin(v));
 }
 
 // triangleGrid with the offsets in gAcc.
@@ -4029,6 +4067,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         gsUniformOpen = 0u;
     }
     sync();
+    if (lane == 0u) grabApply(nodeOff, nodeCount, origin);
     if (lane == 0u && s > 0u) gMisc[vvRec(v, VV_FLAGS)].w = 0u;
     if (lane == 0u)
     {
@@ -4381,6 +4420,7 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         for (uint b = pl; b < GRID_BUCKETS; b += P) gAcc[countBase + b].store(0);
     }
     sync();
+    if (on && pl == 0u) grabApply(nodeOff, nodeCount, origin);
     if (on && pl == 0u && s > 0u) gMisc[vvRec(v, VV_FLAGS)].w = 0u;
     // This step's self-collision per member: the grid or (few pairs) the early list.
     uint listed = on ? gsTestedM[2u * m + parity].load() : 0u;

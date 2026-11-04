@@ -1004,6 +1004,9 @@ impl ExplicitBeamsGpu {
         // The wide passes' step counter and per-vehicle rebase shift.
         let wide_misc = misc.len() as u32;
         misc.extend(std::iter::repeat_n([0u32; 4], 1 + nv));
+        // The node grab ([`ExplicitBeamsGpu::set_grab`]): 2 records right after them
+        // (the kernel's grabRec()), off until set.
+        misc.extend(std::iter::repeat_n([0u32; 4], 2));
         // Vehicle contact: per triangle its contact throttle; per vehicle its records;
         // per group its record.
         let vv_tri_base = misc.len() as u32;
@@ -2319,6 +2322,38 @@ impl ExplicitBeamsGpu {
         if let Some(e) = self.contact.ready_error() {
             panic!("{e}");
         }
+    }
+
+    /// Grab a node (Rubble only, [`engine_softbody::explicit_beams::Grab`]): from
+    /// the next frame on, every step adds `k·(target − x) − c·v` to node
+    /// `grab.node` of `vehicle` after its node phase, as the CPU reference's node
+    /// pass does; `None` releases it. One grab for the whole fleet; set it again
+    /// each frame to move the target.
+    pub fn set_grab(&mut self, grab: Option<(usize, engine_softbody::explicit_beams::Grab)>) {
+        let rec = match grab {
+            Some((vehicle, g)) if vehicle < self.spans.len() && g.node < self.spans[vehicle].nodes => [
+                1,
+                self.spans[vehicle].node_off + g.node,
+                g.k.to_bits(),
+                g.c.to_bits(),
+                g.target.x.to_bits(),
+                g.target.y.to_bits(),
+                g.target.z.to_bits(),
+                0,
+            ],
+            _ => [0u32; 8],
+        };
+        self.queue
+            .write_buffer(&self.misc, self.grab_rec() * 16, bytemuck::cast_slice(&rec));
+        // The contact plan's frame bounds assumed the forces without it.
+        self.contact
+            .replan
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// gMisc record of the grab (the kernel's grabRec()).
+    fn grab_rec(&self) -> u64 {
+        u64::from(self.words[16]) + 1 + self.spans.len() as u64
     }
 
     /// Set one node's velocity (vehicle index, node index within it).
