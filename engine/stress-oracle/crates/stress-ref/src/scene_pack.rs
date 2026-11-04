@@ -269,9 +269,15 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
     let mut notes = Vec::new();
     let crush = pack_crush(json, &mut notes)?;
     let classify = |asset: &str| if options.authored_strengths { map_material_authored(asset) } else { map_material(asset) };
+    // A pack without a materials list (the vibe-city presets) gives Blast one material, its
+    // solver `limits` (the stress solver's settings there), every bond material 0.
+    let blast_materials = match &json["defaults"]["solver"]["materials"] {
+        Value::Array(a) => Some(a.clone()),
+        _ => json["defaults"]["solver"].get("limits").map(|l| vec![l.clone()]),
+    };
     let mut blast = options.blast_authoring.then(|| crate::blast_bond::BlastAuthoring {
-        materials: json["defaults"]["solver"]["materials"]
-            .as_array()
+        materials: blast_materials
+            .as_ref()
             .map(|a| {
                 let f = |m: &Value, k: &str| m[k].as_f64().unwrap_or(0.0) * scale;
                 a.iter()

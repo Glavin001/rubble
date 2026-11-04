@@ -9,6 +9,43 @@ use stress_ref::math::Vec3;
 const G: f64 = 9.81;
 
 #[test]
+fn a_pack_with_one_set_of_solver_limits_gives_blast_one_material() {
+    // The vibe-city presets carry no materials list: the stress solver's `limits` (scaled by
+    // `materialScale`) and bonds without a material index. Blast gets that one material.
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/house-1story.json");
+    let mut pack: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let solver = &mut pack["defaults"]["solver"];
+    solver.as_object_mut().unwrap().remove("materials");
+    solver["materialScale"] = 1e8.into();
+    solver["limits"] = serde_json::json!({
+        "compressionElastic": 9e4, "compressionFatal": 2.7e5, "tensionElastic": 9e4,
+        "tensionFatal": 2.7e5, "shearElastic": 1.2e5, "shearFatal": 3.6e5
+    });
+    for b in pack["scenario"]["bonds"].as_array_mut().unwrap() {
+        b.as_object_mut().unwrap().remove("m");
+    }
+    let options = stress_ref::scene_pack::ImportOptions {
+        blast_authoring: true,
+        ..Default::default()
+    };
+    let (scene, _) =
+        stress_ref::scene_pack::import_value_with(&pack, "house", "house", "test", options)
+            .unwrap();
+    let authoring = scene.blast.as_ref().unwrap();
+    assert_eq!(authoring.materials.len(), 1);
+    let m = authoring.materials[0];
+    assert_eq!(
+        [m.tension_elastic, m.tension_fatal, m.shear_fatal],
+        [9e12, 2.7e13, 3.6e13]
+    );
+    assert!(authoring.bonds.iter().all(|b| b.material == 0));
+    // and Blast builds its graph from it
+    BlastAuthoring::graph(&scene, BlastSettings::default()).unwrap();
+}
+
+#[test]
 fn a_pack_imports_blasts_own_graph_and_stands_on_its_supports() {
     // house-1story: Blast's inputs kept beside the scene, every bond of positive area, one to
     // one; under gravity the supports take the whole load, as each node is balanced.
@@ -551,11 +588,17 @@ fn a_section_turns_moments_into_fibre_and_twist_stresses() {
     assert!((s.shear - 8.0 / (4e-3 * live)).abs() < 1e-6 * s.shear);
     assert!((s.normal - -100.0 / 0.05).abs() < 1e-9);
     // Fibres: tension and compression from the axial stress and the bending either side.
-    assert!((s.tension - (s.normal + s.bend).max(0.0)).abs() < 1e-9 && (s.compression - (s.bend - s.normal)).abs() < 1e-6);
+    assert!(
+        (s.tension - (s.normal + s.bend).max(0.0)).abs() < 1e-9
+            && (s.compression - (s.bend - s.normal)).abs() < 1e-6
+    );
     // No moduli: the square patch of the remaining area, a^3 / 6, and sqrt(2) a^3 / 6 in twist.
     let patch = bond_stress_section(wrench, n, 0.04, 0.04, &BondSection::default(), true);
     let cube = 0.04f64 * 0.04f64.sqrt();
-    assert!((patch.bend - 6.0 * (30.0f64.powi(2) + 10.0f64.powi(2)).sqrt() / cube).abs() < 1e-6 * patch.bend);
+    assert!(
+        (patch.bend - 6.0 * (30.0f64.powi(2) + 10.0f64.powi(2)).sqrt() / cube).abs()
+            < 1e-6 * patch.bend
+    );
     assert!((patch.shear - 8.0 * 6.0 / 2f64.sqrt() / cube).abs() < 1e-6 * patch.shear);
 }
 
