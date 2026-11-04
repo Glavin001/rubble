@@ -281,10 +281,20 @@ impl Mesh {
 
     /// A tube along a polyline `path` with a superellipse section (half sizes
     /// `hw` across `side`, `hh` along the path's up), `segs` round.
-    pub fn tube(&mut self, path: &[Vec3], up: Vec3, hw: f32, hh: f32, segs: usize, mat: u8, ao: f32) {
+    pub fn tube(
+        &mut self,
+        path: &[Vec3],
+        up: Vec3,
+        hw: f32,
+        hh: f32,
+        segs: usize,
+        mat: u8,
+        ao: f32,
+    ) {
         let mut rings = Vec::new();
         for (k, &p) in path.iter().enumerate() {
-            let t = (path[(k + 1).min(path.len() - 1)] - path[k.saturating_sub(1)]).normalize_or_zero();
+            let t =
+                (path[(k + 1).min(path.len() - 1)] - path[k.saturating_sub(1)]).normalize_or_zero();
             let side = t.cross(up).normalize_or_zero();
             let u2 = side.cross(t);
             let mut ring = Vec::new();
@@ -302,8 +312,12 @@ impl Mesh {
         }
         self.strips(&rings, true);
         // Caps.
-        for (k, ring) in [(0usize, rings[0].clone()), (path.len() - 1, rings[rings.len() - 1].clone())] {
-            let t = (path[(k + 1).min(path.len() - 1)] - path[k.saturating_sub(1)]).normalize_or_zero();
+        for (k, ring) in [
+            (0usize, rings[0].clone()),
+            (path.len() - 1, rings[rings.len() - 1].clone()),
+        ] {
+            let t =
+                (path[(k + 1).min(path.len() - 1)] - path[k.saturating_sub(1)]).normalize_or_zero();
             let s = if k == 0 { -1.0 } else { 1.0 };
             let c = self.vert(path[k], t * s, mat, ao);
             for i in 0..ring.len() {

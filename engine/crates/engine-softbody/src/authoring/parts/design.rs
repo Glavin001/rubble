@@ -300,7 +300,9 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         if p.z > 0.35 {
             return 1.0;
         }
-        glam::Vec2::new(p.x.abs() - st.exhaust[0], p.y - st.exhaust[1]).length() - st.exhaust[2] - 0.008
+        glam::Vec2::new(p.x.abs() - st.exhaust[0], p.y - st.exhaust[1]).length()
+            - st.exhaust[2]
+            - 0.008
     };
     // Openings in the body panels (negative inside the hole).
     let openings = |i: usize, p: Vec3| -> f32 {
@@ -352,7 +354,11 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             0.025,
         )
     });
-    let rear_arch = prof.wells.iter().min_by(|a, b| a.z.total_cmp(&b.z)).copied();
+    let rear_arch = prof
+        .wells
+        .iter()
+        .min_by(|a, b| a.z.total_cmp(&b.z))
+        .copied();
     let door_r: Region = Box::new(move |_, p| {
         let mut f = smax(
             smax(p.z - b_z(p.y), door_rear_z(p.y) - p.z, 0.025),
@@ -367,7 +373,11 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     });
     let deck: Region = Box::new(|_, p| {
         let xd = st.deck[2] + (st.deck[1] - st.deck[2]) * super::smoothstep(0.86, 0.95, p.y);
-        smax(smax(p.z - st.deck[0], p.x.abs() - xd, 0.05), st.deck[3] - p.y, 0.04)
+        smax(
+            smax(p.z - st.deck[0], p.x.abs() - xd, 0.05),
+            st.deck[3] - p.y,
+            0.04,
+        )
     });
     let bumper_r: Region = Box::new(|_, p| smax(p.z - bumper_rz(p.y), p.y - st.bumper_r[0], 0.04));
     // Black lower lip under the front bumper, black diffuser under the rear.
@@ -395,9 +405,41 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         ("body", Box::new(|_, _| -1.0), mat::PAINT, false),
     ];
     let mut taken: Vec<f32> = vec![f32::MAX; m.len()];
+    // Window openings: a lid point near a glass edge (their walls are black
+    // rubber seals).
+    let near_glass = |p: Vec3| -> bool {
+        let r = lidrow(p.z);
+        if p.y < r.y_t + 0.008 {
+            return false;
+        }
+        let i = usize::MAX;
+        let _ = i;
+        let ws = smax(
+            smax(st.windscreen[0] - p.z, p.z - st.windscreen[1], 0.08),
+            p.x.abs() - (r.x_r - st.pillar),
+            0.10,
+        );
+        let bl = smax(
+            smax(st.backlight[0] - p.z, p.z - st.backlight[1], 0.08),
+            p.x.abs() - (r.x_r - st.pillar - 0.01),
+            0.10,
+        );
+        let fy = smax(r.y_t + 0.018 - p.y, p.y - (r.y_e - st.rail), 0.05);
+        let side = st
+            .side_windows
+            .iter()
+            .map(|w| smax(fy, smax(w[0] - p.z - 0.06, p.z - w[1] - 0.06, 0.04), 0.05))
+            .fold(f32::MAX, f32::min);
+        ws.min(bl).min(side - st.frame) < 0.04
+    };
     let edge_style = |p: Vec3| -> EdgeStyle {
         if arch(p) < 0.012 {
             EdgeStyle::ARCH
+        } else if near_glass(p) {
+            EdgeStyle {
+                seal: true,
+                ..EdgeStyle::SHUT
+            }
         } else {
             EdgeStyle::SHUT
         }
@@ -417,7 +459,10 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             let fs: Vec<f32> = if sx == 0.0 {
                 f.clone()
             } else {
-                f.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect()
+                f.iter()
+                    .zip(&m.pos)
+                    .map(|(v, p)| v.max(-p.x * sx))
+                    .collect()
             };
             let level = -(EdgeStyle::SHUT.gap + EdgeStyle::SHUT.roll);
             let mut c = trim::clip(m, &fs, level);
@@ -458,21 +503,37 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         let f = metric(m, &trim::field(m, |i, p| region(i, p)));
         for sx in [1.0f32, -1.0] {
             let fs: Vec<f32> = if name == "glass_side" {
-                f.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect()
+                f.iter()
+                    .zip(&m.pos)
+                    .map(|(v, p)| v.max(-p.x * sx))
+                    .collect()
             } else if sx > 0.0 {
                 f.clone()
             } else {
                 continue;
             };
             let c = trim::clip(m, &fs, 0.012);
-            let gm = if name == "windscreen" { mat::SCREEN } else { mat::GLASS };
+            let gm = if name == "windscreen" {
+                mat::SCREEN
+            } else {
+                mat::GLASS
+            };
             let mut g = trim::offset(&c.mesh, -0.006, false, Some(gm), 1.0);
             g.smooth.iter_mut().for_each(|s| *s = 1);
             if frit > 0.0 {
                 // The black frit: printed on the inside of the glass's border.
                 let edge = trim::clip(m, &fs, 0.0);
                 for (l, closed) in &edge.loops {
-                    let fm = trim::loop_strip(&edge.mesh, l, *closed, frit, 0.012, -0.0075, mat::TRIM, 0.6);
+                    let fm = trim::loop_strip(
+                        &edge.mesh,
+                        l,
+                        *closed,
+                        frit,
+                        0.012,
+                        -0.0075,
+                        mat::TRIM,
+                        0.6,
+                    );
                     g.append(&fm);
                 }
             }
@@ -487,7 +548,11 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             pieces.push(Piece {
                 name: nm,
                 mesh: g,
-                bind: if name == "windscreen" { Bind::Vote } else { Bind::Rigid },
+                bind: if name == "windscreen" {
+                    Bind::Vote
+                } else {
+                    Bind::Rigid
+                },
             });
         }
     }
@@ -496,18 +561,27 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     let gs = metric(m, &trim::field(m, glass_side));
     let bp = metric(m, &trim::field(m, b_pillar));
     for sx in [1.0f32, -1.0] {
-        let fs: Vec<f32> = gs.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect();
+        let fs: Vec<f32> = gs
+            .iter()
+            .zip(&m.pos)
+            .map(|(v, p)| v.max(-p.x * sx))
+            .collect();
         let c = trim::clip(m, &fs, 0.0);
         let mut mesh = Mesh::default();
         for (l, closed) in &c.loops {
-            let mut s = trim::loop_strip(&c.mesh, l, *closed, 0.004, st.frame, 0.0015, mat::TRIM, 1.0);
+            let mut s =
+                trim::loop_strip(&c.mesh, l, *closed, 0.004, st.frame, 0.0015, mat::TRIM, 1.0);
             let loops = trim::boundary_loops(&s);
             for (l2, c2) in &loops {
                 trim::roll_loop(&mut s, l2, *c2, EdgeStyle::TRIM);
             }
             mesh.append(&s);
         }
-        let bs: Vec<f32> = bp.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect();
+        let bs: Vec<f32> = bp
+            .iter()
+            .zip(&m.pos)
+            .map(|(v, p)| v.max(-p.x * sx))
+            .collect();
         let b = trim::clip(m, &bs, 0.0);
         let mut bm = trim::offset(&b.mesh, 0.0015, false, Some(mat::TRIM), 1.0);
         let loops = trim::boundary_loops(&bm);
@@ -522,13 +596,22 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         });
     }
     // --- Trim on the body: plate, tail garnish, belt mouldings ---------------
-    let strip = |name: &str, f: &[f32], lift: f32, mtl: u8, roll: EdgeStyle, sided: bool, pieces: &mut Vec<Piece>| {
+    let strip = |name: &str,
+                 f: &[f32],
+                 lift: f32,
+                 mtl: u8,
+                 roll: EdgeStyle,
+                 sided: bool,
+                 pieces: &mut Vec<Piece>| {
         let sides: &[f32] = if sided { &[1.0, -1.0] } else { &[0.0] };
         for &sx in sides {
             let fs: Vec<f32> = if sx == 0.0 {
                 f.to_vec()
             } else {
-                f.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect()
+                f.iter()
+                    .zip(&m.pos)
+                    .map(|(v, p)| v.max(-p.x * sx))
+                    .collect()
             };
             let c = trim::clip(m, &fs, 0.0);
             if c.mesh.is_empty() {
@@ -547,15 +630,26 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             });
         }
     };
-    let plate_f = metric(m, &trim::field(m, |i, p| {
-        if !on_band(i) {
-            return 1.0;
-        }
-        let (a, _) = rear_ah(i, p);
-        smax(a - 0.265, (p.y - 0.565).abs() - 0.064, 0.025)
-    }));
+    let plate_f = metric(
+        m,
+        &trim::field(m, |i, p| {
+            if !on_band(i) {
+                return 1.0;
+            }
+            let (a, _) = rear_ah(i, p);
+            smax(a - 0.265, (p.y - 0.565).abs() - 0.064, 0.025)
+        }),
+    );
     let plate_back: Vec<f32> = plate_f.iter().map(|v| v - 0.008).collect();
-    strip("plate_surround", &plate_back, 0.001, mat::TRIM, EdgeStyle::TRIM, false, &mut pieces);
+    strip(
+        "plate_surround",
+        &plate_back,
+        0.001,
+        mat::TRIM,
+        EdgeStyle::TRIM,
+        false,
+        &mut pieces,
+    );
     strip(
         "plate",
         &plate_f,
@@ -567,6 +661,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             depth: 0.005,
             flange: 0.0,
             ao_floor: 0.4,
+            seal: false,
         },
         false,
         &mut pieces,
@@ -616,7 +711,10 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         a.normalize_or(-Vec3::Z)
     };
     let sided = |f: &[f32], sx: f32| -> Vec<f32> {
-        f.iter().zip(&m.pos).map(|(v, p)| v.max(-p.x * sx)).collect()
+        f.iter()
+            .zip(&m.pos)
+            .map(|(v, p)| v.max(-p.x * sx))
+            .collect()
     };
     // Headlights.
     let hf = metric(m, &trim::field(m, headlamp));
@@ -838,18 +936,48 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
 
 /// Roll a loop with a per-vertex style (arch lips vs shut lines): split it into
 /// runs of one style.
-fn roll_mixed(m: &mut Mesh, l: &[u32], closed: bool, style_at: &dyn Fn(Vec3) -> EdgeStyle, _d: EdgeStyle) {
+fn roll_mixed(
+    m: &mut Mesh,
+    l: &[u32],
+    closed: bool,
+    style_at: &dyn Fn(Vec3) -> EdgeStyle,
+    _d: EdgeStyle,
+) {
     let n = l.len();
-    let styles: Vec<bool> = l.iter().map(|&v| style_at(m.pos[v as usize]).roll > 0.005).collect();
+    // Style class per vertex: 0 shut line, 1 arch lip, 2 window seal.
+    let class = |s: EdgeStyle| -> u8 {
+        if s.roll > 0.005 {
+            1
+        } else if s.seal {
+            2
+        } else {
+            0
+        }
+    };
+    let style_of = |c: u8| -> EdgeStyle {
+        match c {
+            1 => EdgeStyle::ARCH,
+            2 => EdgeStyle {
+                seal: true,
+                ..EdgeStyle::SHUT
+            },
+            _ => EdgeStyle::SHUT,
+        }
+    };
+    let styles: Vec<u8> = l
+        .iter()
+        .map(|&v| class(style_at(m.pos[v as usize])))
+        .collect();
     if styles.iter().all(|&s| s == styles[0]) {
-        let s = if styles[0] { EdgeStyle::ARCH } else { EdgeStyle::SHUT };
-        trim::roll_loop(m, l, closed, s);
+        trim::roll_loop(m, l, closed, style_of(styles[0]));
         return;
     }
     // Rotate so a run starts at 0 (closed loops), then roll each run (sharing
     // its end vertex with the next, so the edge is continuous).
     let start = if closed {
-        (0..n).find(|&k| styles[k] != styles[(k + n - 1) % n]).unwrap_or(0)
+        (0..n)
+            .find(|&k| styles[k] != styles[(k + n - 1) % n])
+            .unwrap_or(0)
     } else {
         0
     };
@@ -859,8 +987,7 @@ fn roll_mixed(m: &mut Mesh, l: &[u32], closed: bool, style_at: &dyn Fn(Vec3) -> 
     for &k in ord.iter().skip(1) {
         run.push(l[k]);
         if styles[k] != cur {
-            let s = if cur { EdgeStyle::ARCH } else { EdgeStyle::SHUT };
-            trim::roll_loop(m, &run, false, s);
+            trim::roll_loop(m, &run, false, style_of(cur));
             run = vec![l[k]];
             cur = styles[k];
         }
@@ -868,8 +995,7 @@ fn roll_mixed(m: &mut Mesh, l: &[u32], closed: bool, style_at: &dyn Fn(Vec3) -> 
     if closed {
         run.push(l[ord[0]]);
     }
-    let s = if cur { EdgeStyle::ARCH } else { EdgeStyle::SHUT };
-    trim::roll_loop(m, &run, false, s);
+    trim::roll_loop(m, &run, false, style_of(cur));
 }
 
 /// Make a field metric on the surface: divide by its gradient's length (per

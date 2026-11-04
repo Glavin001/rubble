@@ -31,6 +31,8 @@ pub struct EdgeStyle {
     pub flange: f32,
     /// AO at the bottom of the wall.
     pub ao_floor: f32,
+    /// The wall and flange are a black rubber seal (window openings).
+    pub seal: bool,
 }
 
 impl EdgeStyle {
@@ -41,6 +43,7 @@ impl EdgeStyle {
         depth: 0.012,
         flange: 0.006,
         ao_floor: 0.12,
+        seal: false,
     };
     /// An opening the skin turns into (window, lamp): tight, deep.
     pub const OPENING: Self = Self {
@@ -49,6 +52,7 @@ impl EdgeStyle {
         depth: 0.02,
         flange: 0.006,
         ao_floor: 0.2,
+        seal: true,
     };
     /// A wheel arch lip: a big roll.
     pub const ARCH: Self = Self {
@@ -57,6 +61,7 @@ impl EdgeStyle {
         depth: 0.035,
         flange: 0.02,
         ao_floor: 0.15,
+        seal: false,
     };
     /// A trim strip's edge (a moulding).
     pub const TRIM: Self = Self {
@@ -65,6 +70,7 @@ impl EdgeStyle {
         depth: 0.004,
         flange: 0.0,
         ao_floor: 0.5,
+        seal: false,
     };
 }
 
@@ -102,7 +108,12 @@ pub fn clip(src: &Mesh, sdf: &[f32], level: f32) -> Clipped {
             let (ka, kb) = (a as usize, b as usize);
             let p = src.pos[ka].lerp(src.pos[kb], t);
             let n = src.nrm[ka].lerp(src.nrm[kb], t);
-            let id = out.vert(p, n, src.mat[ka], src.ao[ka] + (src.ao[kb] - src.ao[ka]) * t);
+            let id = out.vert(
+                p,
+                n,
+                src.mat[ka],
+                src.ao[ka] + (src.ao[kb] - src.ao[ka]) * t,
+            );
             out.smooth[id as usize] = src.smooth[ka];
             field.push(level);
             id
@@ -275,10 +286,7 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
     let coarse = super::detail() < 0.75;
     let steps = if coarse { 1usize } else { 2 };
     let st = if coarse {
-        EdgeStyle {
-            flange: 0.0,
-            ..st
-        }
+        EdgeStyle { flange: 0.0, ..st }
     } else {
         st
     };
@@ -295,7 +303,14 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
         // Interior on the left (seen from outside): outward = t × n.
         let o = t.cross(nn).normalize_or_zero();
         let nn = o.cross(t).normalize_or_zero();
-        frames.push((m.pos[l[k] as usize], nn, o, m.mat[l[k] as usize], m.ao[l[k] as usize], m.smooth[l[k] as usize]));
+        frames.push((
+            m.pos[l[k] as usize],
+            nn,
+            o,
+            m.mat[l[k] as usize],
+            m.ao[l[k] as usize],
+            m.smooth[l[k] as usize],
+        ));
     }
     let r = st.roll;
     let g = st.gap;
@@ -306,7 +321,12 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
             .iter()
             .map(|&(p, nn, o, mat, ao, sm)| {
                 let q = p + o * (r * phi.sin()) - nn * (r * (1.0 - phi.cos()));
-                let id = m.vert(q, nn * phi.cos() + o * phi.sin(), mat, ao * (1.0 - 0.35 * s as f32 / steps as f32));
+                let id = m.vert(
+                    q,
+                    nn * phi.cos() + o * phi.sin(),
+                    mat,
+                    ao * (1.0 - 0.35 * s as f32 / steps as f32),
+                );
                 m.smooth[id as usize] = sm;
                 id
             })
@@ -317,6 +337,11 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
     let wall = frames
         .iter()
         .map(|&(p, nn, o, mat, _, sm)| {
+            let mat = if st.seal {
+                super::super::skin::mat::TRIM
+            } else {
+                mat
+            };
             let id = m.vert(p + o * r - nn * (r + st.depth), o, mat, st.ao_floor);
             m.smooth[id as usize] = sm;
             id
@@ -327,7 +352,17 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
         let fl = frames
             .iter()
             .map(|&(p, nn, o, mat, _, sm)| {
-                let id = m.vert(p + o * (r - st.flange) - nn * (r + st.depth), -nn, mat, st.ao_floor * 0.6);
+                let mat = if st.seal {
+                    super::super::skin::mat::TRIM
+                } else {
+                    mat
+                };
+                let id = m.vert(
+                    p + o * (r - st.flange) - nn * (r + st.depth),
+                    -nn,
+                    mat,
+                    st.ao_floor * 0.6,
+                );
                 m.smooth[id as usize] = sm;
                 id
             })
@@ -377,7 +412,16 @@ pub fn field(m: &Mesh, f: impl Fn(usize, Vec3) -> f32) -> Vec<f32> {
 /// loop to `w_out` outside it, lifted `lift` along the normals. Narrow trim
 /// (window frames, frit bands) built this way follows the cut exactly instead
 /// of being clipped from the grid twice.
-pub fn loop_strip(m: &Mesh, l: &[u32], closed: bool, w_in: f32, w_out: f32, lift: f32, mat: u8, ao: f32) -> Mesh {
+pub fn loop_strip(
+    m: &Mesh,
+    l: &[u32],
+    closed: bool,
+    w_in: f32,
+    w_out: f32,
+    lift: f32,
+    mat: u8,
+    ao: f32,
+) -> Mesh {
     let mut out = Mesh::default();
     let n = l.len();
     if n < 2 {

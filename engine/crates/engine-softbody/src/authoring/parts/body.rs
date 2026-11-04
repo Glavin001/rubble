@@ -199,10 +199,20 @@ impl Band {
             let t = ((s - acc[*j]) / (acc[*j + 1] - acc[*j]).max(1e-9)).clamp(0.0, 1.0);
             pts[*j].lerp(pts[*j + 1], t)
         };
-        let samples: Vec<Vec2> = (0..=n).map(|i| at(half * i as f32 / n as f32, &mut j)).collect();
+        let samples: Vec<Vec2> = (0..=n)
+            .map(|i| at(half * i as f32 / n as f32, &mut j))
+            .collect();
         for i in 0..=n {
-            let a = if i == 0 { Vec2::new(-samples[1].x, samples[1].y) } else { samples[i - 1] };
-            let b = if i == n { Vec2::new(-samples[n - 1].x, samples[n - 1].y) } else { samples[i + 1] };
+            let a = if i == 0 {
+                Vec2::new(-samples[1].x, samples[1].y)
+            } else {
+                samples[i - 1]
+            };
+            let b = if i == n {
+                Vec2::new(-samples[n - 1].x, samples[n - 1].y)
+            } else {
+                samples[i + 1]
+            };
             let t = (b - a).normalize_or_zero();
             // Walking rear → front along +x: outward is (t.z, −t.x)·… pick the one
             // pointing away from the centre.
@@ -459,7 +469,9 @@ impl BodySurface {
                 (band.half * (ncol - c) as f32 / h as f32, -1.0)
             }
         };
-        let sections: Vec<Section> = (0..=h).map(|c| band.section(band.half * c as f32 / h as f32)).collect();
+        let sections: Vec<Section> = (0..=h)
+            .map(|c| band.section(band.half * c as f32 / h as f32))
+            .collect();
         let mut ids = vec![0u32; ncol * (nrows + 1)];
         for r in 0..=nrows {
             let v = r as f32 / nrows as f32;
@@ -499,7 +511,9 @@ impl BodySurface {
         }
         // Lid: rows i = 0..=h at the band's top-edge points.
         let edge: Vec<Vec3> = (0..=h).map(|c| mesh.pos[top[c] as usize]).collect();
-        let edge_arc: Vec<f32> = (0..=h).map(|c| band.half - band.half * c as f32 / h as f32).collect();
+        let edge_arc: Vec<f32> = (0..=h)
+            .map(|c| band.half - band.half * c as f32 / h as f32)
+            .collect();
         let tr = prof.top_radius;
         let mut rows = Vec::with_capacity(h + 1);
         for e in &edge {
@@ -541,7 +555,8 @@ impl BodySurface {
             let (d, yb, ar) = best;
             // Top line at z: the profile's top with its crown.
             let x_r = (prof.top_half_width.eval(z) - tr).max(0.05);
-            let cabin = smoothstep(0.55, 0.95, z) * (1.0 - smoothstep(prof.length - 1.35, prof.length - 0.95, z));
+            let cabin = smoothstep(0.55, 0.95, z)
+                * (1.0 - smoothstep(prof.length - 1.35, prof.length - 0.95, z));
             let crown_amt = style.lid_crown + (prof.crown - style.lid_crown) * cabin;
             let u = (x.abs() / x_r).min(1.0);
             let top = prof.top.eval(z) + crown_amt * (1.0 - u * u) * (1.0 - u * u);
@@ -629,7 +644,12 @@ impl BodySurface {
             for i in 2..h.saturating_sub(1) {
                 for k in 1..m {
                     let c = lid_ids[i][k];
-                    let nb = [lid_ids[i - 1][k], lid_ids[i + 1][k], lid_ids[i][k - 1], lid_ids[i][k + 1]];
+                    let nb = [
+                        lid_ids[i - 1][k],
+                        lid_ids[i + 1][k],
+                        lid_ids[i][k - 1],
+                        lid_ids[i][k + 1],
+                    ];
                     let avg = nb.iter().map(|&v| mesh.pos[v as usize].y).sum::<f32>() / 4.0;
                     ny.push((c, avg));
                 }

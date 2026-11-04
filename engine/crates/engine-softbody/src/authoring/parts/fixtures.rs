@@ -112,6 +112,7 @@ pub fn lamp(m: &Mesh, f: &[f32], spec: &LampSpec) -> Mesh {
                     depth: 0.006,
                     flange: 0.0,
                     ao_floor: 0.8,
+                    seal: false,
                 },
             );
         }
@@ -127,7 +128,12 @@ pub fn lamp(m: &Mesh, f: &[f32], spec: &LampSpec) -> Mesh {
             base,
             spec.axis,
             s0,
-            &[(r * 1.25, 0.0), (r * 1.1, 0.008), (r * 0.9, 0.03), (r * 0.5, 0.05)],
+            &[
+                (r * 1.25, 0.0),
+                (r * 1.1, 0.008),
+                (r * 0.9, 0.03),
+                (r * 0.5, 0.05),
+            ],
             super::segs(32, 10),
             |_, _| mat::CHROME,
             |k| 0.9 - 0.15 * k as f32,
@@ -138,7 +144,12 @@ pub fn lamp(m: &Mesh, f: &[f32], spec: &LampSpec) -> Mesh {
             base + spec.axis * 0.018,
             spec.axis,
             s0,
-            &[(r * 0.86, 0.0), (r * 0.7, -0.008), (r * 0.4, -0.014), (0.0, -0.016)],
+            &[
+                (r * 0.86, 0.0),
+                (r * 0.7, -0.008),
+                (r * 0.4, -0.014),
+                (0.0, -0.016),
+            ],
             super::segs(32, 10),
             |_, _| mat::HEADLIGHT,
             |_| 1.0,
@@ -245,6 +256,7 @@ pub fn grille(m: &Mesh, f: &[f32], h: &[f32], spec: &GrilleSpec) -> Mesh {
                     depth: 0.02,
                     flange: 0.0,
                     ao_floor: 0.3,
+                    seal: false,
                 },
             );
         }
@@ -316,7 +328,22 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
     let mut outer = side(1.0);
     outer.reverse();
     prof.extend(outer);
-    m.lathe(w.centre, ax, s0, &prof, segs, |_, _| mat::TYRE, |k| if k < 3 || k > prof.len() - 4 { 0.6 } else { 1.0 }, false);
+    m.lathe(
+        w.centre,
+        ax,
+        s0,
+        &prof,
+        segs,
+        |_, _| mat::TYRE,
+        |k| {
+            if k < 3 || k > prof.len() - 4 {
+                0.6
+            } else {
+                1.0
+            }
+        },
+        false,
+    );
     // Rim barrel and lips: outer lip, barrel inside (darker), inner lip.
     let rim_prof = [
         (rr + 0.008, hw * 0.80),
@@ -329,7 +356,16 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
         (rr - 0.004, -hw * 0.86),
         (rr + 0.006, -hw * 0.86),
     ];
-    m.lathe(w.centre, ax, s0, &rim_prof, segs, |k, _| if k < 4 { mat::RIM } else { mat::BRAKE }, |k| if k < 4 { 1.0 } else { 0.35 }, true);
+    m.lathe(
+        w.centre,
+        ax,
+        s0,
+        &rim_prof,
+        segs,
+        |k, _| if k < 4 { mat::RIM } else { mat::BRAKE },
+        |k| if k < 4 { 1.0 } else { 0.35 },
+        true,
+    );
     // Spoke face: a dished disc on a polar grid, clipped to the spokes.
     let face_w = |rad: f32| -> f32 {
         // Axial position: hub proud, dished between, rising to the lip.
@@ -362,7 +398,9 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
             let da = a - k * sector;
             let split = 0.11 * smoothstep(0.07, 0.17, rad);
             let arm = (da.abs() - split).abs() * rad;
-            let half = 0.011 + 0.006 * (1.0 - smoothstep(0.08, rr, rad)) + 0.008 * smoothstep(rr - 0.05, rr - 0.01, rad);
+            let half = 0.011
+                + 0.006 * (1.0 - smoothstep(0.08, rr, rad))
+                + 0.008 * smoothstep(rr - 0.05, rr - 0.01, rad);
             let spoke = arm - half;
             let hub = rad - 0.085;
             let lip = (rr - 0.022) - rad;
@@ -389,6 +427,7 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
                 depth: 0.04,
                 flange: 0.0,
                 ao_floor: 0.35,
+                seal: false,
             },
         );
     }
@@ -413,7 +452,12 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
             c,
             ax,
             s0,
-            &[(0.0105, 0.0), (0.0105, 0.009), (0.008, 0.013), (0.0, 0.0135)],
+            &[
+                (0.0105, 0.0),
+                (0.0105, 0.009),
+                (0.008, 0.013),
+                (0.0, 0.0135),
+            ],
             12,
             |_, _| mat::CHROME,
             |_| 0.85,
@@ -428,12 +472,25 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
         (w.disc_radius, dw - 0.013),
         (w.disc_radius * 0.52, dw - 0.013),
     ];
-    m.lathe(w.centre, ax, s0, &disc, super::segs(48, 16), |_, _| mat::BRAKE, |k| if k == 0 { 0.8 } else { 0.6 }, true);
     m.lathe(
         w.centre,
         ax,
         s0,
-        &[(w.disc_radius * 0.52, dw + 0.013), (0.07, hw * 0.55), (0.0, hw * 0.55)],
+        &disc,
+        super::segs(48, 16),
+        |_, _| mat::BRAKE,
+        |k| if k == 0 { 0.8 } else { 0.6 },
+        true,
+    );
+    m.lathe(
+        w.centre,
+        ax,
+        s0,
+        &[
+            (w.disc_radius * 0.52, dw + 0.013),
+            (0.07, hw * 0.55),
+            (0.0, hw * 0.55),
+        ],
         48,
         |_, _| mat::BRAKE,
         |_| 0.5,
@@ -477,7 +534,11 @@ pub fn mirror(base: Vec3, out: Vec3, back: Vec3, paint: u8) -> Mesh {
         // Fore-aft from the nose (−back) to the glass face (+back).
         let t = i as f32 / n_v as f32;
         let s = (PI * 0.5 * t.min(0.999)).sin().powf(0.5);
-        let s = if t > 0.92 { s * (1.0 - (t - 0.92) * 3.0) } else { s };
+        let s = if t > 0.92 {
+            s * (1.0 - (t - 0.92) * 3.0)
+        } else {
+            s
+        };
         let zz = -lz + 2.0 * lz * (1.0 - (1.0 - t).powf(1.6));
         let mut ring = Vec::new();
         for j in 0..n_u {
@@ -559,7 +620,12 @@ pub fn arch_liner(centre: Vec3, side: f32, radius: f32, x_out: f32, x_in: f32) -
             let a = -0.35 + (PI + 0.7) * i as f32 / 48.0;
             let d = Vec2::new(a.cos(), a.sin());
             let p = Vec3::new(x, centre.y + d.y * radius, centre.z + d.x * radius);
-            ring.push(m.vert(p, Vec3::new(0.0, -d.y, -d.x), mat::UNDERBODY, 0.35 - 0.1 * k as f32));
+            ring.push(m.vert(
+                p,
+                Vec3::new(0.0, -d.y, -d.x),
+                mat::UNDERBODY,
+                0.35 - 0.1 * k as f32,
+            ));
         }
         rings.push(ring);
     }

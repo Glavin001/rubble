@@ -352,7 +352,12 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   // Emissive lamps.
   if (m == 18u) { return vec4f(tonemap(albedo * 6.0 + env(r, 0.05) * 0.04), 1.0); }
   if (m == 21u) { return vec4f(tonemap(albedo * 3.5), 1.0); }
-  if (m == 4u) { return vec4f(tonemap(vec3f(2.2, 2.25, 2.4) + env(r, 0.02) * 0.2), 1.0); }
+  if (m == 4u) {
+    // Projector lens: dark polished glass with a cool inner glint.
+    let f = 0.04 + 0.96 * fres;
+    let glint = pow(max(dot(n, v), 0.0), 24.0) * vec3f(0.25, 0.3, 0.4);
+    return vec4f(tonemap(vec3f(0.01, 0.012, 0.016) + env(r, 0.02) * (0.08 + f) + glint), 1.0);
+  }
   // Transparent: glass, clear lens, red lens (blended pass).
   if (m == 1u || m == 17u || m == 20u || m == 25u) {
     let f = 0.04 + 0.96 * fres;
@@ -369,11 +374,26 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     var tint = vec3f(0.01, 0.012, 0.014);
     var a = 0.86;
     if (m == 17u) { tint = vec3f(0.0); a = 0.08; }
-    if (m == 20u) { tint = vec3f(0.30, 0.01, 0.01); a = 0.6; }
+    if (m == 20u) { tint = vec3f(0.32, 0.0, 0.005); a = 0.78; }
     let alpha = clamp(a + f * (1.0 - a), 0.0, 1.0);
     return vec4f(tonemap((tint * a + refl) / alpha), alpha);
   }
-  let pr = props(m);
+  var pr = props(m);
+  var albedo2 = albedo;
+  var ao2 = ao;
+  if (m == 11u) {
+    // Grille mesh: a honeycomb in rest space (2 cm cells): gloss-black rims
+    // round dark holes.
+    let q = vec2f(i.rest.x, i.rest.y) * 50.0;
+    let hx = vec2f(1.0, 1.7320508);
+    let a1 = q - hx * floor(q / hx + 0.5);
+    let b1 = q - hx * floor((q - hx * 0.5) / hx + 0.5) - hx * 0.5;
+    let d = min(dot(a1, a1), dot(b1, b1));
+    let hole = 1.0 - smoothstep(0.12, 0.2, d);
+    ao2 = ao * mix(1.0, 0.15, hole);
+    pr = vec3f(mix(0.18, 0.9, hole), 0.0, 0.0);
+    albedo2 = albedo * mix(1.0, 0.3, hole);
+  }
   let rough = pr.x; let metal = pr.y; let coat = pr.z;
   let a = max(rough * rough, 0.0015);
   let k = a * 0.5;
@@ -397,11 +417,11 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     c = f * (env(r, rough) * mix(0.35, 1.0, ao) + sun * ggx(ndh, a) * g / max(4.0 * ndv, 1e-3) * ndl);
   } else {
     let f = 0.04 + 0.96 * fres;
-    let spec = env(r, rough) * f * mix(0.3, 1.0, ao) + sun * ggx(ndh, a) * g * f / max(4.0 * ndv, 1e-3) * ndl;
-    c = albedo * (irradiance(n) * ao + sun * ndl / 3.14159 * mix(0.5, 1.0, ao)) * (1.0 - f) + spec;
+    let spec = (env(r, rough) * f * mix(0.3, 1.0, ao2) + sun * ggx(ndh, a) * g * f / max(4.0 * ndv, 1e-3) * ndl) * min(1.0, ao2 * 3.0);
+    c = albedo2 * (irradiance(n) * ao2 + sun * ndl / 3.14159 * mix(0.5, 1.0, ao2)) * (1.0 - f) + spec;
     if (coat > 0.0) {
       let cf = 0.04 + 0.96 * fres;
-      c = c * (1.0 - cf * coat) + env(r, 0.03) * cf * coat * ao;
+      c = c * (1.0 - cf * coat) + env(r, 0.03) * cf * coat * ao2;
     }
   }
   return vec4f(tonemap(c), 1.0);

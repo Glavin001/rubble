@@ -8,7 +8,9 @@
 //! paint: [r, g, b] (linear) }`.
 
 use crate::err;
-use engine_softbody::authoring::skin::{showcase_visual, showcase_visual_lod, ShowcaseVisual, MATERIAL_NAMES};
+use engine_softbody::authoring::skin::{
+    showcase_visual, showcase_visual_lod, ShowcaseVisual, MATERIAL_NAMES,
+};
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array, Uint8Array};
 use wasm_bindgen::prelude::*;
@@ -169,7 +171,11 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         &Uint8Array::from(v.smooth.as_slice()).into(),
     );
     set(&vis, "rigid", &Uint8Array::from(v.rigid.as_slice()).into());
-    set(&vis, "nodeRest", &f32s(v.node_rest.iter().flatten().copied()));
+    set(
+        &vis,
+        "nodeRest",
+        &f32s(v.node_rest.iter().flatten().copied()),
+    );
     let nt: Vec<u32> = v.normal_tris.iter().flatten().copied().collect();
     set(&vis, "normalTris", &Uint32Array::from(nt.as_slice()).into());
     set(

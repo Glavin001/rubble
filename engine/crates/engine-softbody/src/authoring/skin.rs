@@ -211,11 +211,7 @@ impl Binder {
                 }
             }
             // Everything within the searched block's inner distance is found.
-            let lo = Vec3::new(
-                (k.0 - r) as f32,
-                (k.1 - r) as f32,
-                (k.2 - r) as f32,
-            ) * self.cell;
+            let lo = Vec3::new((k.0 - r) as f32, (k.1 - r) as f32, (k.2 - r) as f32) * self.cell;
             let hi = lo + Vec3::splat((2 * r + 1) as f32 * self.cell);
             let reach = (p - lo).min(hi - p).min_element();
             if best.is_some_and(|b| b.0 <= reach) {
@@ -338,7 +334,11 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     }
     let fallback = Binder::new(sk.skin.clone(), &node_pos, 0.15);
     // Single-part skin triangles of every part (votes and reach checks).
-    let pure = Binder::new(by_part.values().flatten().copied().collect(), &node_pos, 0.15);
+    let pure = Binder::new(
+        by_part.values().flatten().copied().collect(),
+        &node_pos,
+        0.15,
+    );
     let mut binders: HashMap<u16, Binder> = HashMap::new();
     let groups: Vec<String> = {
         let mut g: Vec<String> = built.bind_tris.keys().cloned().collect();
@@ -446,7 +446,8 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             Bind::Wheel(_) => {
                 let t = &sim.tyres[nearest_tyre()];
                 let rays = (t.count / 2) as usize;
-                let ring = |i: usize, outer: bool| t.first + 2 * (i % rays) as u32 + u32::from(!outer);
+                let ring =
+                    |i: usize, outer: bool| t.first + 2 * (i % rays) as u32 + u32::from(!outer);
                 let mut tris = Vec::new();
                 for i in 0..rays {
                     tris.push([t.axle[0], ring(i, true), ring(i + 1, true)]);
@@ -512,9 +513,16 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 })
                 .or_else(|| pure.bind(centroid, Vec3::Y));
             let Some((t, _, _)) = b else {
-                return Err(format!("no skin triangle for the rigid part {}", piece.name));
+                return Err(format!(
+                    "no skin triangle for the rigid part {}",
+                    piece.name
+                ));
             };
-            let (p0, p1, p2) = (node_pos[t[0] as usize], node_pos[t[1] as usize], node_pos[t[2] as usize]);
+            let (p0, p1, p2) = (
+                node_pos[t[0] as usize],
+                node_pos[t[1] as usize],
+                node_pos[t[2] as usize],
+            );
             let tt = (p1 - p0).normalize();
             let nn = (p1 - p0).cross(p2 - p0).normalize();
             let bb = nn.cross(tt);
@@ -581,11 +589,19 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         if part.is_some() {
             let mut dup: HashMap<(u32, u16), u32> = HashMap::new();
             for t in idx.chunks_mut(3) {
-                let parts = [vb[t[0] as usize].1, vb[t[1] as usize].1, vb[t[2] as usize].1];
+                let parts = [
+                    vb[t[0] as usize].1,
+                    vb[t[1] as usize].1,
+                    vb[t[2] as usize].1,
+                ];
                 if parts[0] == parts[1] && parts[1] == parts[2] {
                     continue;
                 }
-                let tp = if parts[1] == parts[2] { parts[1] } else { parts[0] };
+                let tp = if parts[1] == parts[2] {
+                    parts[1]
+                } else {
+                    parts[0]
+                };
                 let Some(bp) = binders.get(&tp).map(|_| ()).or_else(|| {
                     by_part.get(&tp).map(|tris| {
                         binders.insert(tp, Binder::new(tris.clone(), &node_pos, 0.15));
@@ -688,29 +704,69 @@ fn interior(built: &Built) -> Vec<Piece> {
         solid(
             name,
             &[
-                (Vec3::new(x, 0.53, 2.62), Vec3::new(0.24, 0.07, 0.25), 0.0, mat::SEAT),
-                (Vec3::new(x, 0.86, 2.31), Vec3::new(0.23, 0.30, 0.07), -0.25, mat::SEAT),
-                (Vec3::new(x, 1.23, 2.22), Vec3::new(0.12, 0.08, 0.05), -0.25, mat::SEAT),
+                (
+                    Vec3::new(x, 0.53, 2.62),
+                    Vec3::new(0.24, 0.07, 0.25),
+                    0.0,
+                    mat::SEAT,
+                ),
+                (
+                    Vec3::new(x, 0.86, 2.31),
+                    Vec3::new(0.23, 0.30, 0.07),
+                    -0.25,
+                    mat::SEAT,
+                ),
+                (
+                    Vec3::new(x, 1.23, 2.22),
+                    Vec3::new(0.12, 0.08, 0.05),
+                    -0.25,
+                    mat::SEAT,
+                ),
             ],
         );
     }
     solid(
         "seat_rear",
         &[
-            (Vec3::new(0.0, 0.53, 1.80), Vec3::new(0.64, 0.07, 0.24), 0.0, mat::SEAT),
-            (Vec3::new(0.0, 0.86, 1.52), Vec3::new(0.64, 0.30, 0.07), -0.35, mat::SEAT),
+            (
+                Vec3::new(0.0, 0.53, 1.80),
+                Vec3::new(0.64, 0.07, 0.24),
+                0.0,
+                mat::SEAT,
+            ),
+            (
+                Vec3::new(0.0, 0.86, 1.52),
+                Vec3::new(0.64, 0.30, 0.07),
+                -0.35,
+                mat::SEAT,
+            ),
         ],
     );
     solid(
         "dash",
         &[
-            (Vec3::new(0.0, 0.86, 3.22), Vec3::new(0.76, 0.11, 0.2), 0.15, mat::DASH),
-            (Vec3::new(0.38, 0.98, 3.1), Vec3::new(0.17, 0.04, 0.08), 0.0, mat::DASH),
+            (
+                Vec3::new(0.0, 0.86, 3.22),
+                Vec3::new(0.76, 0.11, 0.2),
+                0.15,
+                mat::DASH,
+            ),
+            (
+                Vec3::new(0.38, 0.98, 3.1),
+                Vec3::new(0.17, 0.04, 0.08),
+                0.0,
+                mat::DASH,
+            ),
         ],
     );
     solid(
         "tunnel",
-        &[(Vec3::new(0.0, 0.45, 2.75), Vec3::new(0.11, 0.12, 0.42), 0.0, mat::DASH)],
+        &[(
+            Vec3::new(0.0, 0.45, 2.75),
+            Vec3::new(0.11, 0.12, 0.42),
+            0.0,
+            mat::DASH,
+        )],
     );
     // Steering wheel: a torus on the column, tilted toward the driver.
     if let Some(g) = gi("column") {
@@ -721,13 +777,27 @@ fn interior(built: &Built) -> Vec<Piece> {
             c,
             axis,
             Vec3::X,
-            &[(0.168, 0.0), (0.185, 0.017), (0.202, 0.0), (0.185, -0.017), (0.168, 0.0)],
+            &[
+                (0.168, 0.0),
+                (0.185, 0.017),
+                (0.202, 0.0),
+                (0.185, -0.017),
+                (0.168, 0.0),
+            ],
             36,
             |_, _| mat::DASH,
             |_| 0.35,
             false,
         );
-        m.block(c - axis * 0.03, Vec3::X, axis.cross(Vec3::X), axis, Vec3::new(0.06, 0.05, 0.04), mat::DASH, 0.8);
+        m.block(
+            c - axis * 0.03,
+            Vec3::X,
+            axis.cross(Vec3::X),
+            axis,
+            Vec3::new(0.06, 0.05, 0.04),
+            mat::DASH,
+            0.8,
+        );
         out.push(Piece {
             name: "steering".into(),
             mesh: m,
