@@ -910,6 +910,7 @@ pub fn sedan() -> VehicleDef {
         frame_through: vec!["door".into()],
         shell_braces: false,
         body_damping: 110.0,
+        tiered: false,
         body_damping_reach: 2.0,
         body_damping_strength: 5000.0,
     }
