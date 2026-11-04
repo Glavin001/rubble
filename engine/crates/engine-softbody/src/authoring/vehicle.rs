@@ -521,7 +521,15 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     }
     let mut group_ids: HashMap<u16, u32> = HashMap::new();
     for (a, b, kind) in shell.beams.clone() {
-        if kind == ShellBeam::Brace && !def.shell_braces {
+        // A brace spans a shared edge between the two triangles' opposite
+        // vertices: on a panel (doors, bonnet, boot lid, fenders) it is the
+        // panel's hinge beam, its out-of-plane stiffness (a single layer of
+        // triangles is a membrane), and it yields, so a crease stays.
+        let panel_brace = {
+            let (qa, qb) = (sk.nodes[a as usize].part, sk.nodes[b as usize].part);
+            qa == qb && qa != 0
+        };
+        if kind == ShellBeam::Brace && !def.shell_braces && !panel_brace {
             continue;
         }
         let (pa, pb) = (sk.pos(a), sk.pos(b));

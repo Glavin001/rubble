@@ -27,6 +27,8 @@ pub const G_LIMIT: f32 = 1.2 * 4.0 / (STEP * STEP);
 pub const C_RATIO: f32 = 1500.0;
 /// Length a tie's stiffness is set for (m): see [`Skeleton::tie`].
 pub const TIE_LENGTH: f32 = 0.3;
+/// Damping of a shock's bump and rebound stops (N·s/m).
+pub const STOP_DAMP: f32 = 600.0;
 /// Lightest node (kg).
 pub const MIN_NODE_MASS: f32 = 0.05;
 /// A beam shorter than [`MIN_YIELD_LENGTH`] breaks at this many times its yield
@@ -678,10 +680,15 @@ impl Skeleton {
             let _ = writeln!(s, "detacher_group end");
         }
         if !self.shocks.is_empty() {
+            // Past its bounds a shock moves to the beam defaults' spring and
+            // damping (the bump and rebound stops): kept within what its
+            // knuckle's light nodes allow for the step (a 12,000 N·s/m stop on
+            // a 1.4 kg node would kick the knuckle over when the suspension
+            // tops out).
             let stop = self.shocks.iter().map(|x| x.stop).fold(0.0, f32::max);
             let _ = writeln!(
                 s,
-                "\nset_beam_defaults 9000000, 12000, {stop}, 1000000, 0.05, tracks/beam, 0\nshocks"
+                "\nset_beam_defaults {stop}, {STOP_DAMP}, 2000000, 1000000, 0.05, tracks/beam, 0\nshocks"
             );
             for x in &self.shocks {
                 let _ = writeln!(

@@ -611,6 +611,26 @@ fn main() {
                     "  f {f}: arm strain % kl-plf {:.1} kl-plr {:.1} ku-puf {:.1} ku-pur {:.1} ks-pt {:.1} a1-ku {:.1} a2-kl {:.1}",
                     d(a + 3, a + 5), d(a + 3, a + 6), d(a + 2, a + 7), d(a + 2, a + 8), d(a + 4, a + 9), d(a, a + 2), d(a + 1, a + 3)
                 );
+                {
+                    // Tyre spokes past their bounds (the stiff stop).
+                    let hub = [wh.a1, wh.a2];
+                    let mut worst = 0.0f32;
+                    let mut past = 0;
+                    for bm in s.beams.iter().filter(|x| {
+                        x.kind == engine_softbody::explicit_beams::ExplicitKind::LimitedSpring
+                            && (hub.contains(&x.a) || hub.contains(&x.b))
+                    }) {
+                        let l = s.nodes[bm.a as usize]
+                            .pos
+                            .distance(s.nodes[bm.b as usize].pos);
+                        let e = (l - bm.rest) / bm.rest;
+                        worst = worst.max(e.abs());
+                        if e > bm.long_bound || e < -bm.short_bound {
+                            past += 1;
+                        }
+                    }
+                    eprintln!("  f {f}: spokes worst strain {worst:.2}, past bounds {past}");
+                }
                 if std::env::var("KNUCKLE").is_ok() {
                     let o = s.nodes[a + 2].pos;
                     eprintln!(
