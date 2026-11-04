@@ -137,8 +137,8 @@
     }
     const CARS = { sedan: 'Car: procedural sedan (soft body)', buggy: 'Car: dune buggy (soft frame + rigid parts)', hires: 'Car: hi-res JBeam test car (1,110 nodes)' };
     // Rubble's own authored sedan (engine_softbody::authoring; explicit solver only):
-    // ~4k nodes, ~28k beams, its textured body skinned to the nodes. ?res= low|medium|high.
-    if (EXPLICIT) CARS.showcase = 'Car: Rubble showcase sedan (authored, ~4k nodes)';
+    // its textured body skinned to the nodes. ?res= low|medium|high.
+    if (EXPLICIT) CARS.showcase = 'Car: Rubble showcase sedan (authored)';
     if (importSrc) CARS.import = `Car: ${importSrc.label} (imported)`;
     const carKind = importSrc ? 'import' : CARS[qs.get('car')] ? qs.get('car') : 'sedan';
     const buggy = carKind === 'buggy' && !EXPLICIT;
