@@ -38,6 +38,10 @@ pub struct LampSpec {
     /// Projector bores: centres (on the body surface) and radius.
     pub projectors: Vec<Vec3>,
     pub projector_r: f32,
+    /// When not empty, the guides are kept only above this line (points on
+    /// the body, ordered): a DRL blade along the lamp's upper edge and round
+    /// its tip rather than a ring.
+    pub guide_above: Vec<Vec3>,
 }
 
 /// Build a lamp from the body mesh `m` and the opening field `f` (metric,
@@ -94,7 +98,30 @@ pub fn lamp(m: &Mesh, f: &[f32], spec: &LampSpec) -> Mesh {
     out.append(&back);
     // Light guides following the outline.
     for &(lo, hi, gm) in &spec.guides {
-        let g = trim::clip_between(&lens_src.mesh, &lens_src.field, lo, hi);
+        let mut g = trim::clip_between(&lens_src.mesh, &lens_src.field, lo, hi);
+        if spec.guide_above.len() >= 2 {
+            // Height of the line at the nearest of its points (plan view).
+            let below: Vec<f32> = g
+                .mesh
+                .pos
+                .iter()
+                .map(|p| {
+                    let mut best = (f32::MAX, 0.0f32);
+                    for w in spec.guide_above.windows(2) {
+                        let (a, b) = (Vec2::new(w[0].x, w[0].z), Vec2::new(w[1].x, w[1].z));
+                        let q = Vec2::new(p.x, p.z);
+                        let ab = b - a;
+                        let t = ((q - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                        let d = (a + ab * t).distance(q);
+                        if d < best.0 {
+                            best = (d, w[0].y + (w[1].y - w[0].y) * t);
+                        }
+                    }
+                    best.1 - p.y
+                })
+                .collect();
+            g = trim::clip(&g.mesh, &below, 0.0);
+        }
         let mut gm_mesh = trim::offset(&g.mesh, 0.0, false, Some(gm), 1.0);
         for p in gm_mesh.pos.iter_mut() {
             *p += spec.axis * spec.guide_depth;
@@ -400,8 +427,8 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
         let t = ((rad - 0.07) / (rr - 0.085)).clamp(0.0, 1.0);
         hw * 0.80 - 0.035 * (PI * t).sin() * (1.0 - 0.3 * t) + 0.004 * (1.0 - t)
     };
-    let nr = super::segs(12, 6);
-    let na = super::segs(110, 50);
+    let nr = super::segs(14, 6);
+    let na = super::segs(170, 60);
     let s1 = ax.cross(s0);
     let mut face = Mesh::default();
     let mut ids = vec![vec![0u32; na]; nr + 1];
@@ -420,18 +447,19 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
             let dw = (face_w(rad + e) - face_w((rad - e).max(0.0))) / (2.0 * e);
             let n = (ax - d * dw).normalize();
             *slot = face.vert(p, n, mat::RIM, 1.0);
-            // Double spokes: two thin arms per spoke, merging at the hub.
+            // Split spokes: each spoke forks into two thin arms toward the
+            // lip (a Y), the arms' faces diamond cut.
             let sector = TAU / nsp as f32;
             let k = (a / sector).round();
             let da = a - k * sector;
-            let split = 0.11 * smoothstep(0.07, 0.17, rad);
+            let split = 0.062 * smoothstep(0.11, rr - 0.03, rad);
             let arm = (da.abs() - split).abs() * rad;
-            let half = 0.011
-                + 0.006 * (1.0 - smoothstep(0.08, rr, rad))
-                + 0.008 * smoothstep(rr - 0.05, rr - 0.01, rad);
+            let half = 0.0105
+                + 0.007 * (1.0 - smoothstep(0.07, 0.15, rad))
+                + 0.006 * smoothstep(rr - 0.05, rr - 0.012, rad);
             let spoke = arm - half;
-            let hub = rad - 0.085;
-            let lip = (rr - 0.022) - rad;
+            let hub = rad - 0.078;
+            let lip = (rr - 0.020) - rad;
             field.push(spoke.min(hub).min(lip));
         }
     }
@@ -443,6 +471,9 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
     }
     face.orient(|_| ax);
     let mut c = trim::clip(&face, &field, -0.0015);
+    // The faces are machined; the walls the roll adds stay gunmetal.
+    c.mesh.mat.iter_mut().for_each(|x| *x = mat::MACHINED);
+    let face_n = c.mesh.len();
     let loops = std::mem::take(&mut c.loops);
     for (l, closed) in &loops {
         trim::roll_loop(
@@ -458,6 +489,9 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
                 seal: false,
             },
         );
+    }
+    for k in face_n..c.mesh.len() {
+        c.mesh.mat[k] = mat::RIM;
     }
     m.append(&c.mesh);
     // Centre cap and lug nuts.

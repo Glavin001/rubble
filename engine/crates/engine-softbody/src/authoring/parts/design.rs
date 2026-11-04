@@ -22,7 +22,7 @@ use crate::authoring::vehicle::VehicleDef;
 use glam::Vec3;
 
 /// The visual wheels sit this far (m) outboard of the physics tyres.
-pub const WHEEL_OUT: f32 = 0.03;
+pub const WHEEL_OUT: f32 = 0.042;
 
 /// Visual design inputs.
 #[derive(Clone, Debug)]
@@ -58,7 +58,8 @@ pub struct Styling {
     pub grille: Vec<(f32, f32)>,
     pub intake: Vec<(f32, f32)>,
     pub taillight: Vec<(f32, f32)>,
-    /// The front plate's centre height (relative to the band's top).
+    /// The front plate's centre height (relative to the band's top); NaN for
+    /// none.
     pub plate_front_h: f32,
     /// Fog lamps (arc view, from the front centre).
     pub fog: Vec<(f32, f32)>,
@@ -86,14 +87,14 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
     // lower bumper drawn back under it (a shorter-looking overhang), and a
     // crisp turn into the bonnet.
     let nose = SectionShape {
-        lower: 0.06,
-        d_lower: -0.055,
-        crease: 0.60,
-        a_below: 0.10,
-        a_above: 0.14,
-        d_top: -0.05,
-        m_top: 0.40,
-        tuck: 0.05,
+        lower: 0.05,
+        d_lower: -0.04,
+        crease: 0.56,
+        a_below: 0.07,
+        a_above: 0.32,
+        d_top: -0.10,
+        m_top: 0.85,
+        tuck: 0.04,
     };
     let tail = SectionShape {
         lower: 0.08,
@@ -109,12 +110,14 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         // The shoulder: one line from above the headlamp, level through the
         // handles, kicking up into the tail lamps.
         crease: Curve::new(&[
-            (0.00, 0.84),
-            (0.35, 0.885),
-            (0.90, 0.875),
-            (1.70, 0.835),
-            (2.60, 0.81),
-            (3.40, 0.79),
+            (0.00, 0.86),
+            (0.30, 0.90),
+            (0.75, 0.905),
+            (1.20, 0.88),
+            (1.60, 0.835),
+            (2.20, 0.815),
+            (2.90, 0.805),
+            (3.50, 0.79),
             (4.10, 0.75),
             (4.70, 0.68),
         ]),
@@ -125,16 +128,17 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         tail_bow: 0.09,
         nose_corner: 0.47,
         tail_corner: 0.31,
-        flare: 0.022,
-        flare_width: 0.17,
+        flare: 0.03,
+        flare_width: 0.19,
+        rear_flare: 0.04,
         lid_crown: 0.022,
         step: 0.022,
         step_along: 0.035,
         nose_ramp: 0.07,
         tail_ramp: 0.06,
-        hood_crease: [0.17, 0.38, 0.011, 0.006],
+        hood_crease: [0.22, 0.60, 0.014, 0.004],
         hood_z: [3.36, 4.70],
-        deck_lip: [0.014, 0.30, 0.62],
+        deck_lip: [0.026, 0.24, 0.60],
         scoop: Curve::new(&[(1.30, 0.60), (2.20, 0.53), (3.00, 0.46), (3.45, 0.43)]),
         scoop_depth: 0.016,
         scoop_z: [1.42, 1.80, 3.10, 3.40],
@@ -157,58 +161,71 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         pillar: 0.035,
         rail: 0.045,
         frame: 0.022,
-        // Slim full-LED lamps: a 5 cm blade at the grille, tapering to 3 cm
-        // as it wraps the corner.
+        // Slim, sharp full-LED blades just under the bonnet's leading edge,
+        // rising outward and wrapping round the corner to a pointed tip.
         headlight: vec![
-            (0.335, -0.066),
-            (0.335, -0.016),
-            (0.55, -0.011),
-            (0.80, -0.011),
-            (0.97, -0.015),
-            (1.035, -0.030),
-            (0.95, -0.044),
-            (0.72, -0.053),
-            (0.50, -0.062),
+            (0.40, -0.056),
+            (0.40, -0.020),
+            (0.62, -0.013),
+            (0.88, -0.009),
+            (1.06, -0.008),
+            (1.125, -0.012),
+            (1.115, -0.019),
+            (1.04, -0.024),
+            (0.86, -0.033),
+            (0.62, -0.046),
         ],
-        // A large trapezoid grille meeting the lamps' inner ends.
+        // A wide, low grille between the lamps' inner ends and the bumper.
         grille: vec![
-            (-0.315, -0.02),
-            (0.315, -0.02),
-            (0.335, -0.075),
-            (0.29, -0.215),
-            (0.225, -0.252),
-            (-0.225, -0.252),
-            (-0.29, -0.215),
-            (-0.335, -0.075),
+            (-0.40, -0.080),
+            (0.40, -0.080),
+            (0.44, -0.084),
+            (0.462, -0.11),
+            (0.47, -0.17),
+            (0.445, -0.265),
+            (0.425, -0.29),
+            (0.38, -0.305),
+            (-0.38, -0.305),
+            (-0.425, -0.29),
+            (-0.445, -0.265),
+            (-0.47, -0.17),
+            (-0.462, -0.11),
+            (-0.44, -0.084),
         ],
+        // Side intakes in the bumper's corners (air curtains): sharp
+        // trapezoids, the inner edge raked.
         intake: vec![
-            (-0.50, -0.30),
-            (0.50, -0.30),
-            (0.57, -0.335),
-            (0.52, -0.395),
-            (-0.52, -0.395),
-            (-0.57, -0.335),
+            (0.585, -0.30),
+            (0.60, -0.185),
+            (0.62, -0.165),
+            (0.75, -0.135),
+            (0.85, -0.14),
+            (0.868, -0.158),
+            (0.90, -0.24),
+            (0.885, -0.325),
+            (0.865, -0.342),
+            (0.68, -0.345),
+            (0.605, -0.33),
         ],
+        // Wrapped LED tail lamps: deep at the outer end, a sharp tip round
+        // the corner, joined by the light bar across the boot lid.
         taillight: vec![
-            (0.47, -0.018),
-            (0.75, -0.015),
-            (1.00, -0.019),
-            (1.12, -0.040),
-            (0.98, -0.062),
-            (0.72, -0.074),
-            (0.47, -0.080),
+            (0.465, -0.014),
+            (0.75, -0.011),
+            (1.00, -0.016),
+            (1.14, -0.030),
+            (1.165, -0.042),
+            (1.13, -0.056),
+            (0.98, -0.078),
+            (0.72, -0.088),
+            (0.465, -0.088),
         ],
-        lightbar: [0.445, -0.034, 0.008],
-        plate_front_h: -0.348,
-        fog: vec![
-            (0.615, -0.322),
-            (0.75, -0.315),
-            (0.785, -0.328),
-            (0.76, -0.345),
-            (0.615, -0.352),
-        ],
+        lightbar: [0.445, -0.034, 0.011],
+        // No front plate: the grille is the face.
+        plate_front_h: f32::NAN,
+        fog: Vec::new(),
         arch_radius: 0.338,
-        exhaust: [0.47, 0.46, 0.042],
+        exhaust: [0.50, 0.44, 0.046],
         paint: def.look.paint,
     }
 }
@@ -271,7 +288,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         grille.sd(a, h)
     };
     let intake_f = |i: usize, p: Vec3| -> f32 {
-        if !on_band(i) || surf.arc[i] > 0.8 {
+        if !on_band(i) || surf.arc[i] > 1.1 {
             return 1.0;
         }
         let (a, h) = front_ah(i, p);
@@ -284,9 +301,13 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         let (a, h) = rear_ah(i, p);
         tail.sd(a, h)
     };
-    let fog = Shape::smooth(&st.fog);
+    let fog = Shape::smooth(if st.fog.is_empty() {
+        &[(9.0, 9.0), (9.1, 9.0), (9.0, 9.1)]
+    } else {
+        &st.fog
+    });
     let foglamp = |i: usize, p: Vec3| -> f32 {
-        if !on_band(i) || surf.arc[i] > 1.0 {
+        if st.fog.is_empty() || !on_band(i) || surf.arc[i] > 1.0 {
             return 1.0;
         }
         let (a, h) = front_ah(i, p);
@@ -576,12 +597,20 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
                 continue;
             };
             let c = trim::clip(m, &fs, 0.012);
-            let gm = if name == "windscreen" {
-                mat::SCREEN
-            } else {
-                mat::GLASS
+            let gm = match name {
+                "windscreen" => mat::SCREEN,
+                "backlight" => mat::PRIVACY,
+                _ => mat::GLASS,
             };
             let mut g = trim::offset(&c.mesh, -0.006, false, Some(gm), 1.0);
+            if name == "glass_side" {
+                // Rear doors' and quarter lights' glass: privacy tint.
+                for k in 0..g.len() {
+                    if g.pos[k].z < st.b_cut[0] {
+                        g.mat[k] = mat::PRIVACY;
+                    }
+                }
+            }
             g.smooth.iter_mut().for_each(|s| *s = 1);
             if frit > 0.0 {
                 // The black frit: printed on the inside of the glass's border.
@@ -729,43 +758,45 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         false,
         &mut pieces,
     );
-    // The front plate: on its bracket over the lower intake's centre.
-    let plate_front = metric(
-        m,
-        // Continuous everywhere (a jump in the field would be made metric into
-        // a sliver at the jump).
-        &trim::field(m, |i, p| {
-            let (a, h) = front_ah(i, p);
-            smax(a.abs() - 0.262, (h - st.plate_front_h).abs() - 0.058, 0.02)
-                + if p.z < prof.length - 0.6 { 1.0 } else { 0.0 }
-        }),
-    );
-    let plate_front_back: Vec<f32> = plate_front.iter().map(|v| v - 0.01).collect();
-    strip(
-        "plate_front_surround",
-        &plate_front_back,
-        0.016,
-        mat::TRIM,
-        EdgeStyle::TRIM,
-        false,
-        &mut pieces,
-    );
-    strip(
-        "plate_front",
-        &plate_front,
-        0.021,
-        mat::PLATE,
-        EdgeStyle {
-            gap: 0.0,
-            roll: 0.0015,
-            depth: 0.005,
-            flange: 0.0,
-            ao_floor: 0.4,
-            seal: false,
-        },
-        false,
-        &mut pieces,
-    );
+    // The front plate (optional: NaN height for none): on its bracket.
+    if st.plate_front_h.is_finite() {
+        let plate_front = metric(
+            m,
+            // Continuous everywhere (a jump in the field would be made metric into
+            // a sliver at the jump).
+            &trim::field(m, |i, p| {
+                let (a, h) = front_ah(i, p);
+                smax(a.abs() - 0.262, (h - st.plate_front_h).abs() - 0.058, 0.02)
+                    + if p.z < prof.length - 0.6 { 1.0 } else { 0.0 }
+            }),
+        );
+        let plate_front_back: Vec<f32> = plate_front.iter().map(|v| v - 0.01).collect();
+        strip(
+            "plate_front_surround",
+            &plate_front_back,
+            0.016,
+            mat::TRIM,
+            EdgeStyle::TRIM,
+            false,
+            &mut pieces,
+        );
+        strip(
+            "plate_front",
+            &plate_front,
+            0.021,
+            mat::PLATE,
+            EdgeStyle {
+                gap: 0.0,
+                roll: 0.0015,
+                depth: 0.005,
+                flange: 0.0,
+                ao_floor: 0.4,
+                seal: false,
+            },
+            false,
+            &mut pieces,
+        );
+    }
     // The plates' texture coordinates (their lettering): u across as seen
     // from outside the car, v up.
     for pc in pieces.iter_mut() {
@@ -840,10 +871,17 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             lens: mat::LENS,
             housing: mat::TRIM,
             reflector: mat::TRIM,
-            guides: vec![(-0.011, -0.0045, mat::DRL)],
+            guides: vec![(-0.0105, -0.0042, mat::DRL)],
             guide_depth: 0.006,
             projectors,
             projector_r: 0.019,
+            guide_above: (0..=24)
+                .map(|k| {
+                    let a = 0.36 + 0.80 * k as f32 / 24.0;
+                    let mid = -0.040 + 0.022 * ((a - 0.40) / 0.70).clamp(0.0, 1.0);
+                    surf.band_at(a, surf.band_top_y(a) + mid, sx).0
+                })
+                .collect(),
         };
         pieces.push(Piece {
             name: format!("headlight_{}", if sx > 0.0 { "l" } else { "r" }),
@@ -869,6 +907,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             guide_depth: 0.008,
             projectors: Vec::new(),
             projector_r: 0.0,
+            guide_above: Vec::new(),
         };
         pieces.push(Piece {
             name: format!("taillight_{}", if sx > 0.0 { "l" } else { "r" }),
@@ -887,6 +926,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         guide_depth: 0.005,
         projectors: Vec::new(),
         projector_r: 0.0,
+        guide_above: Vec::new(),
     };
     pieces.push(Piece {
         name: "lightbar".into(),
@@ -896,6 +936,9 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     // Fog lamps: a slim clear lens with an LED line, in the bumper's corners.
     let ff = metric(m, &trim::field(m, foglamp));
     for sx in [1.0f32, -1.0] {
+        if st.fog.is_empty() {
+            break;
+        }
         let f = sided(&ff, sx);
         let spec = fixtures::LampSpec {
             axis: (avg_in(&f) * 0.7 - Vec3::Z * 0.3).normalize(),
@@ -907,6 +950,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             guide_depth: 0.006,
             projectors: Vec::new(),
             projector_r: 0.0,
+            guide_above: Vec::new(),
         };
         pieces.push(Piece {
             name: format!("foglamp_{}", if sx > 0.0 { "l" } else { "r" }),
@@ -919,8 +963,8 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     let gf = metric(m, &trim::field(m, grille_f));
     let spec = fixtures::GrilleSpec {
         axis: -Vec3::Z,
-        depth: 0.07,
-        surround: 0.009,
+        depth: 0.08,
+        surround: 0.016,
         surround_mat: mat::TRIM,
         slats: Vec::new(),
         slat_half: 0.0075,
@@ -933,21 +977,45 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         bind: Bind::Vote,
     });
     let inf = metric(m, &trim::field(m, intake_f));
-    let spec = fixtures::GrilleSpec {
-        axis: -Vec3::Z,
-        depth: 0.06,
-        surround: 0.0,
-        surround_mat: mat::TRIM,
-        slats: vec![(-0.348, mat::TRIM)],
-        slat_half: 0.006,
-        slat_back: 0.02,
-        back_mat: mat::GRILLE,
-    };
-    pieces.push(Piece {
-        name: "intake".into(),
-        mesh: fixtures::grille(m, &inf, &hfield, &spec),
-        bind: Bind::Vote,
-    });
+    for sx in [1.0f32, -1.0] {
+        let f = sided(&inf, sx);
+        let spec = fixtures::GrilleSpec {
+            axis: (avg_in(&f) * 0.5 - Vec3::Z * 0.5).normalize(),
+            depth: 0.07,
+            surround: 0.01,
+            surround_mat: mat::TRIM,
+            slats: Vec::new(),
+            slat_half: 0.006,
+            slat_back: 0.02,
+            back_mat: mat::GRILLE,
+        };
+        pieces.push(Piece {
+            name: format!("intake_{}", if sx > 0.0 { "l" } else { "r" }),
+            mesh: fixtures::grille(m, &f, &hfield, &spec),
+            bind: Bind::Vote,
+        });
+    }
+    // Splitter: a gloss-black blade along the front bumper's lower edge,
+    // standing 3 cm proud, from one corner to the other.
+    {
+        let mut path = Vec::new();
+        let n_s = 60;
+        for k in 0..=n_s {
+            let a = -0.95 + 1.9 * k as f32 / n_s as f32;
+            let th = surf.band.theta_front(a.abs());
+            let sc = surf.band.section(th);
+            let (p, n) = surf.band_at(a.abs(), sc.yl - 0.005, if a < 0.0 { -1.0 } else { 1.0 });
+            let nh = Vec3::new(n.x, 0.0, n.z).normalize_or(Vec3::Z);
+            path.push(p + nh * 0.004);
+        }
+        let mut sp = Mesh::default();
+        sp.tube(&path, Vec3::Y, 0.03, 0.007, 12, mat::TRIM, 0.8);
+        pieces.push(Piece {
+            name: "splitter".into(),
+            mesh: sp,
+            bind: Bind::Vote,
+        });
+    }
     // Wheels, brakes, arch liners.
     for c in &def.corners {
         for sx in [1.0f32, -1.0] {
@@ -959,10 +1027,10 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
                 out: Vec3::X * sx,
                 radius: c.tyre_radius,
                 width: c.tyre_width,
-                // A 19-inch look: a large rim on a low sidewall.
-                rim_radius: c.tyre_radius * 0.76,
-                spokes: 5,
-                disc_radius: if front { 0.172 } else { 0.162 },
+                // A 20-inch look: a large rim on a low-profile sidewall.
+                rim_radius: c.tyre_radius * 0.80,
+                spokes: 10,
+                disc_radius: if front { 0.188 } else { 0.176 },
             };
             pieces.push(Piece {
                 name: "wheel".into(),
@@ -1067,6 +1135,25 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
                 -Vec3::Z,
                 st.exhaust[2],
             ),
+            bind: Bind::Vote,
+        });
+    }
+    // Diffuser: vertical fins under the rear valance, between the tips.
+    {
+        let mut d = Mesh::default();
+        for x in [-0.30f32, -0.15, 0.0, 0.15, 0.30] {
+            // Each fin follows the tail's underside, 3 cm deep.
+            let path: Vec<Vec3> = (0..=8)
+                .map(|k| {
+                    let z = 0.09 + 0.40 * k as f32 / 8.0;
+                    Vec3::new(x, prof.bottom.eval(z) - 0.012, z)
+                })
+                .collect();
+            d.tube(&path, Vec3::Y, 0.0035, 0.016, 8, mat::TRIM, 0.5);
+        }
+        pieces.push(Piece {
+            name: "diffuser".into(),
+            mesh: d,
             bind: Bind::Vote,
         });
     }
@@ -1183,29 +1270,42 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         mat::TRIM,
         0.5,
     );
-    let hz = st.backlight[0] + 0.07;
-    shelf.superellipsoid(
-        Vec3::new(0.0, shelf_y + 0.03, hz),
-        Vec3::X,
-        Vec3::Y,
-        Vec3::Z,
-        Vec3::new(0.17, 0.018, 0.035),
-        8.0,
-        super::segs(6, 3),
-        mat::TRIM,
-        0.7,
-    );
-    shelf.superellipsoid(
-        Vec3::new(0.0, shelf_y + 0.035, hz - 0.034),
-        Vec3::X,
-        Vec3::Y,
-        Vec3::Z,
-        Vec3::new(0.15, 0.007, 0.003),
-        8.0,
-        super::segs(6, 3),
-        mat::TAIL_LED,
-        1.0,
-    );
+    // The high-mounted stop lamp: a slim LED bar inside the backlight's top
+    // edge, just under the frit (it reads through the glass).
+    {
+        let zc = st.backlight[1] - 0.085;
+        let t = Vec3::new(
+            0.0,
+            prof.top.eval(zc + 0.01) - prof.top.eval(zc - 0.01),
+            0.02,
+        )
+        .normalize();
+        let n = Vec3::X.cross(t).normalize();
+        let n = if n.y < 0.0 { -n } else { n };
+        let c = Vec3::new(0.0, prof.top.eval(zc), zc) - n * 0.03;
+        shelf.superellipsoid(
+            c,
+            Vec3::X,
+            n,
+            t,
+            Vec3::new(0.17, 0.012, 0.018),
+            8.0,
+            super::segs(6, 3),
+            mat::TRIM,
+            0.7,
+        );
+        shelf.superellipsoid(
+            c + n * 0.011,
+            Vec3::X,
+            n,
+            t,
+            Vec3::new(0.155, 0.003, 0.006),
+            8.0,
+            super::segs(6, 3),
+            mat::TAIL_LED,
+            1.0,
+        );
+    }
     pieces.push(Piece {
         name: "parcel_shelf".into(),
         mesh: shelf,
@@ -1253,10 +1353,10 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     // --- Emblems (an original mark: a split hexagon) ---------------------------
     {
         let a = 0.0;
-        let (pf, nf) = surf.band_at(a, surf.band_top_y(a) - 0.115, 1.0);
+        let (pf, nf) = surf.band_at(a, surf.band_top_y(a) - 0.042, 1.0);
         pieces.push(Piece {
             name: "emblem_front".into(),
-            mesh: fixtures::emblem(pf + nf * 0.006, nf, Vec3::Y, 0.075),
+            mesh: fixtures::emblem(pf + nf * 0.004, nf, Vec3::Y, 0.055),
             bind: Bind::Vote,
         });
         let ar = half;

@@ -234,10 +234,11 @@ fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f
   return o;
 }
 
-// A procedural photo studio: a neutral cyclorama (bright horizon, darker
-// ceiling and floor), a large overhead softbox, two long strip lights at the
-// sides and a key box in front. rough widens every edge (a cheap prefilter), so
-// sharp clearcoat reflections show crisp softboxes and rough metal soft blobs.
+// A procedural showroom: a cyclorama with a bright horizon band fading to a
+// dark ceiling, three long softbox strips overhead (crisp lines along the
+// body), two low side strips (the flanks' horizon line), a key box in front
+// and the sun. rough widens every edge (a cheap prefilter), so sharp
+// clearcoat reflections show crisp strips and rough metal soft blobs.
 fn softbox(d: vec3f, c: vec3f, r: vec3f, u: vec3f, ha: f32, hb: f32, w: f32) -> f32 {
   let z = dot(d, c);
   if (z <= 0.05) { return 0.0; }
@@ -247,24 +248,32 @@ fn softbox(d: vec3f, c: vec3f, r: vec3f, u: vec3f, ha: f32, hb: f32, w: f32) -> 
   let my = 1.0 - smoothstep(hb - w, hb + w, abs(y));
   return mx * my * (ha * hb) / ((ha + w) * (hb + w));
 }
+// The studio's palette (shared with the page's backdrop).
+const HORIZON = vec3f(0.5, 0.52, 0.56);
+const CEILING = vec3f(0.045, 0.05, 0.06);
+const FLOOR_NEAR = vec3f(0.13, 0.135, 0.145);
 // The shaded point (world): env() reflects the ground plane (y = 0) from it.
 var<private> gP: vec3f;
 fn sky(d: vec3f, rough: f32) -> vec3f {
-  let w = 0.015 + rough * 1.1;
+  let w = 0.012 + rough * 1.1;
   let up = max(d.y, 0.0);
-  // Cyclorama: a bright horizon fading to a darker ceiling.
-  var c = mix(vec3f(0.78, 0.80, 0.83), vec3f(0.34, 0.36, 0.40), smoothstep(0.0, 0.85, up));
-  c = c + vec3f(0.35) * exp(-up * (16.0 / (1.0 + rough * 6.0)));   // horizon glow
-  // Overhead softbox.
-  c += vec3f(3.4, 3.35, 3.2) * softbox(d, vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), vec3f(0.0, 0.0, 1.0), 0.55, 1.1, w);
-  // Side strips (long, horizontal-ish, a little above the horizon).
-  let sA = normalize(vec3f(1.0, 0.35, 0.15));
-  let sB = normalize(vec3f(-1.0, 0.35, -0.2));
-  c += vec3f(2.6) * softbox(d, sA, normalize(cross(vec3f(0.0, 1.0, 0.0), sA)), normalize(cross(sA, cross(vec3f(0.0, 1.0, 0.0), sA))), 1.6, 0.07, w);
-  c += vec3f(2.2) * softbox(d, sB, normalize(cross(vec3f(0.0, 1.0, 0.0), sB)), normalize(cross(sB, cross(vec3f(0.0, 1.0, 0.0), sB))), 1.6, 0.07, w);
+  var c = mix(HORIZON, CEILING, smoothstep(0.0, 0.75, up));
+  c = c + vec3f(0.4) * exp(-up * (22.0 / (1.0 + rough * 6.0)));   // horizon glow
+  // Three long strips overhead, along the car.
+  for (var k = -1; k <= 1; k++) {
+    let xo = f32(k) * 0.55;
+    let cc = normalize(vec3f(xo, 1.0, 0.0));
+    let rr = normalize(vec3f(1.0, -xo, 0.0));
+    c += vec3f(3.6, 3.55, 3.4) * softbox(d, cc, rr, vec3f(0.0, 0.0, 1.0), 0.07, 1.4, w);
+  }
+  // Side strips (long, horizontal, a little above the horizon).
+  let sA = normalize(vec3f(1.0, 0.32, 0.15));
+  let sB = normalize(vec3f(-1.0, 0.32, -0.2));
+  c += vec3f(2.8) * softbox(d, sA, normalize(cross(vec3f(0.0, 1.0, 0.0), sA)), normalize(cross(sA, cross(vec3f(0.0, 1.0, 0.0), sA))), 1.7, 0.05, w);
+  c += vec3f(2.4) * softbox(d, sB, normalize(cross(vec3f(0.0, 1.0, 0.0), sB)), normalize(cross(sB, cross(vec3f(0.0, 1.0, 0.0), sB))), 1.7, 0.05, w);
   // Key box in front, high.
   let k = normalize(vec3f(0.35, 0.55, 1.0));
-  c += vec3f(2.6, 2.5, 2.35) * softbox(d, k, normalize(cross(vec3f(0.0, 1.0, 0.0), k)), normalize(cross(k, cross(vec3f(0.0, 1.0, 0.0), k))), 0.32, 0.22, w);
+  c += vec3f(2.6, 2.5, 2.35) * softbox(d, k, normalize(cross(vec3f(0.0, 1.0, 0.0), k)), normalize(cross(k, cross(vec3f(0.0, 1.0, 0.0), k))), 0.30, 0.20, w);
   // Sun (the scene's light) as a small hot disc.
   let s = max(dot(d, normalize(frame.light.xyz)), 0.0);
   c += vec3f(1.0, 0.95, 0.85) * pow(s, 400.0 / (1.0 + rough * 300.0)) * (6.0 / (1.0 + rough * 30.0));
@@ -273,15 +282,16 @@ fn sky(d: vec3f, rough: f32) -> vec3f {
 fn env(d: vec3f, rough: f32) -> vec3f {
   let up = sky(d, rough);
   // Below the horizon: the floor, reflected from the shaded point. Short rays
-  // land in the car's own shadow (under the sills, the bumpers, the arches).
+  // land in the car's own shadow (under the sills, the bumpers, the arches);
+  // far rays fade into the cyclorama's horizon.
   let dy = min(d.y, -1e-3);
   let t = max(gP.y, 0.0) / -dy;
-  let occ = 1.0 - 0.88 * exp(-t * 1.6);
+  let occ = 1.0 - 0.9 * exp(-t * 1.6);
   let g = gP.xz + d.xz * t;
   let grid = abs(fract(g) - 0.5);
   let line = 1.0 - 0.08 * smoothstep(0.47, 0.5, max(grid.x, grid.y)) * (1.0 - rough);
-  let far = clamp(t / 40.0, 0.0, 1.0);
-  let floor = mix(vec3f(0.27, 0.275, 0.285) * line * occ, vec3f(0.30, 0.31, 0.33), far);
+  let far = smoothstep(4.0, 30.0, t);
+  let floor = mix(FLOOR_NEAR * line * occ, HORIZON * 0.8, far);
   // A crisp horizon on a glossy panel, softer as it roughens.
   let hw = 0.006 + rough * 0.35;
   return mix(floor, up, smoothstep(-hw, hw * 0.5, d.y));
@@ -309,10 +319,10 @@ fn glyph(g: u32, p: vec2f) -> f32 {
 // bright cyclorama, the sun, and the floor in the car's shadow below.
 fn irradiance(n: vec3f) -> vec3f {
   let up = n.y;
-  let skyc = mix(vec3f(1.25, 1.27, 1.3), vec3f(0.95, 0.96, 1.0), smoothstep(0.0, 0.9, up))
+  let skyc = mix(vec3f(1.2, 1.22, 1.26), vec3f(1.0, 1.0, 1.02), smoothstep(0.0, 0.9, up))
     + vec3f(0.19, 0.18, 0.16) * max(dot(n, normalize(frame.light.xyz)), 0.0);
   let t = max(gP.y, 0.0) / max(-up, 0.05);
-  let floorc = vec3f(0.27, 0.275, 0.285) * (1.0 - 0.88 * exp(-t * 1.6));
+  let floorc = FLOOR_NEAR * (1.0 - 0.9 * exp(-t * 1.6)) * 1.3;
   return mix(floorc, skyc, smoothstep(-0.6, 0.25, up)) * 0.55;
 }
 
@@ -331,8 +341,9 @@ fn props(m: u32) -> vec3f {
     case 0u: { return vec3f(0.38, 0.0, 1.0); }   // paint (base under clearcoat)
     case 2u: { return vec3f(0.04, 1.0, 0.0); }   // chrome
     case 3u: { return vec3f(0.16, 0.0, 0.0); }   // trim: gloss black plastic
-    case 6u: { return vec3f(0.72, 0.0, 0.0); }   // tyre
-    case 7u: { return vec3f(0.22, 1.0, 0.0); }   // rim
+    case 6u: { return vec3f(0.62, 0.0, 0.0); }   // tyre (satin sidewall)
+    case 7u: { return vec3f(0.32, 1.0, 0.0); }   // rim (gunmetal)
+    case 28u: { return vec3f(0.1, 1.0, 0.0); }   // machined spoke faces
     case 8u: { return vec3f(0.5, 0.0, 0.0); }    // a shut line's wall
     case 9u: { return vec3f(0.95, 0.0, 0.0); }   // underbody
     case 10u: { return vec3f(0.45, 0.0, 0.0); }  // plate
@@ -381,9 +392,9 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   // not along the grid); a band at the cut shows the bare metal edge.
   if (i.torn > 0.5) { discard; }
   gP = i.world;
-  let glassy = i.mat == 1u || i.mat == 25u;
+  let glassy = i.mat == 1u || i.mat == 25u || i.mat == 27u;
   // Side and rear glass (tempered) shatters and drops once its frame strains.
-  if (i.mat == 1u && i.strain > 0.12) { discard; }
+  if ((i.mat == 1u || i.mat == 27u) && i.strain > 0.12) { discard; }
   if (i.torn > 0.3 && !glassy) {
     let nn = normalize(i.normal);
     let lit = 0.35 + 0.65 * max(dot(nn, normalize(frame.light.xyz)), 0.0);
@@ -402,7 +413,7 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   var ao = clamp(i.ao, 0.0, 1.0);
   // Wheels (they turn, so nothing is baked): the arch shades their tops and
   // the car's body their inner faces.
-  if (i.mat == 6u || i.mat == 7u || i.mat == 22u || i.mat == 23u) {
+  if (i.mat == 6u || i.mat == 7u || i.mat == 22u || i.mat == 23u || i.mat == 28u) {
     ao *= mix(1.0, 0.42, smoothstep(0.30, 0.66, i.world.y));
   }
   let ndl = max(dot(n, l), 0.0);
@@ -424,7 +435,7 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     return vec4f(tonemap(vec3f(0.01, 0.012, 0.016) + env(r, 0.02) * (0.08 + f) + glint), 1.0);
   }
   // Transparent: glass, clear lens, red lens (blended pass).
-  if (m == 1u || m == 17u || m == 20u || m == 25u) {
+  if (m == 1u || m == 17u || m == 20u || m == 25u || m == 27u) {
     let f = 0.04 + 0.96 * fres;
     if (m == 25u && i.strain > 0.02) {
       // Laminated windscreen: spider cracks grow with the frame's strain.
@@ -435,12 +446,14 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
         return vec4f(tonemap(vec3f(0.55, 0.57, 0.6) * (0.4 + env(r, 0.3) * 0.25)), clamp(0.5 + c * 0.5, 0.0, 1.0));
       }
     }
-    let refl = env(r, 0.0) * (0.06 + 0.94 * fres) * select(1.0, 0.3, m == 20u);
-    var tint = vec3f(0.01, 0.012, 0.014);
-    var a = 0.62;
+    let refl = env(r, 0.0) * (0.05 + 0.95 * fres) * select(1.0, 0.16, m == 20u);
+    var tint = vec3f(0.008, 0.01, 0.012);
+    var a = 0.6;
     if (m == 17u) { tint = vec3f(0.0); a = 0.08; }
+    // Privacy glass (rear doors, quarter lights, backlight): dark tint.
+    if (m == 27u) { tint = vec3f(0.002, 0.0025, 0.003); a = 0.88; }
     // Ruby lens: deep red, thin enough for the LEDs behind it to glow through.
-    if (m == 20u) { tint = vec3f(0.26, 0.0, 0.003); a = 0.42; }
+    if (m == 20u) { tint = vec3f(0.11, 0.0, 0.001); a = 0.6; }
     let alpha = clamp(a + f * (1.0 - a), 0.0, 1.0);
     return vec4f(tonemap((tint * a + refl) / alpha), alpha);
   }
@@ -550,7 +563,9 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   if (m == 0u) {
     // Car paint: a tinted metallic-flake base under a clearcoat.
     let cf = 0.04 + 0.96 * fres;
-    let diffuse = albedo * (irradiance(n) * ao + sun * ndl / 3.14159);
+    // Flop: the colour deepens toward grazing (the flakes face away).
+    let flop = mix(1.0, 0.45, pow(1.0 - ndv, 1.5));
+    let diffuse = albedo * flop * (irradiance(n) * ao + sun * ndl / 3.14159);
     let flakeF0 = albedo * 0.55 + vec3f(0.03);
     // The flakes' rough reflection: the blurred studio (the analytic lobe, not
     // a second environment lookup).
@@ -768,7 +783,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         }
         // Opaque triangles first, the blended ones (glass, lenses) after.
         const tri = v.indices;
-        const TRANSPARENT = new Set([1, 17, 20, 25]);
+        const TRANSPARENT = new Set([1, 17, 20, 25, 27]);
         let no = 0;
         for (let t = 0; t < tri.length; t += 3) if (!TRANSPARENT.has(v.material[tri[t]])) no += 3;
         const ordered = new Uint32Array(tri.length);

@@ -73,7 +73,12 @@ pub mod mat {
     /// A lit display (instrument cluster, centre screen): its content drawn
     /// from the texture coordinates.
     pub const DISPLAY: u8 = 26;
-    pub const COUNT: usize = 27;
+    /// Privacy glass (rear doors, quarter lights, backlight): tempered, dark
+    /// tint; drawn with the glass.
+    pub const PRIVACY: u8 = 27;
+    /// A rim's diamond-cut spoke faces (bright machined aluminium).
+    pub const MACHINED: u8 = 28;
+    pub const COUNT: usize = 29;
 }
 
 /// Material names, by id.
@@ -105,11 +110,16 @@ pub const MATERIAL_NAMES: [&str; mat::COUNT] = [
     "tail_back",
     "screen",
     "display",
+    "privacy",
+    "machined",
 ];
 
 /// Whether a material is drawn blended (after the opaque ones).
 pub fn transparent(m: u8) -> bool {
-    matches!(m, mat::GLASS | mat::LENS | mat::TAIL_LENS | mat::SCREEN)
+    matches!(
+        m,
+        mat::GLASS | mat::LENS | mat::TAIL_LENS | mat::SCREEN | mat::PRIVACY
+    )
 }
 
 #[derive(Clone, Debug, Default)]
@@ -750,7 +760,8 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         mat::HEADLIGHT => [0.85, 0.88, 0.9],
         mat::TAILLIGHT => [0.5, 0.015, 0.015],
         mat::TYRE => [0.025, 0.025, 0.025],
-        mat::RIM => [0.36, 0.37, 0.39],
+        // Gunmetal (the spokes' sides and the barrel's lip).
+        mat::RIM => [0.10, 0.105, 0.115],
         // A shut line's wall: the paint, in shadow.
         mat::GAP => [paint[0] * 0.55, paint[1] * 0.55, paint[2] * 0.55],
         mat::UNDERBODY => [0.04, 0.04, 0.04],
@@ -771,6 +782,8 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         mat::TAIL_BACK => [0.12, 0.01, 0.01],
         mat::SCREEN => [0.02, 0.025, 0.03],
         mat::DISPLAY => [0.02, 0.03, 0.05],
+        mat::PRIVACY => [0.01, 0.012, 0.014],
+        mat::MACHINED => [0.80, 0.81, 0.83],
         _ => [1.0, 0.0, 1.0],
     }
 }

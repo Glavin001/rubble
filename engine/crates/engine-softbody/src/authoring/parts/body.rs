@@ -84,6 +84,8 @@ pub struct BodyStyle {
     /// the arch radius.
     pub flare: f32,
     pub flare_width: f32,
+    /// The rear arches' flare (m): fuller haunches over the driven wheels.
+    pub rear_flare: f32,
     /// Roof crown outside the cabin (bonnet and deck), m.
     pub lid_crown: f32,
     /// Grid spacing (m) across the sections (band rows, lid columns) and
@@ -398,9 +400,15 @@ impl Band {
         let mut best = 0.0f32;
         for w in &self.prof.wells {
             let r = Vec2::new(z - w.z, y - w.y).length();
+            let rear = w.z < 0.5 * self.prof.length;
+            let (amt, width) = if rear {
+                (self.style.rear_flare, self.style.flare_width * 1.25)
+            } else {
+                (self.style.flare, self.style.flare_width)
+            };
             // A swell that rises over the flare width to a plateau at the lip.
-            let k = smoothstep(w.radius + self.style.flare_width, w.radius + 0.03, r);
-            best = best.max(self.style.flare * k);
+            let k = smoothstep(w.radius + width, w.radius + 0.03, r);
+            best = best.max(amt * k);
         }
         best
     }

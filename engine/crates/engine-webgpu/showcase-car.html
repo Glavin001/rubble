@@ -86,8 +86,17 @@ try {
 
   // Ground and the scene's static shapes: flat-shaded boxes and cylinders.
   const SCENE_WGSL = `
-    struct F { vp: mat4x4f, eye: vec4f, light: vec4f, shadow: vec4f };
+    struct F { vp: mat4x4f, eye: vec4f, light: vec4f, shadow: vec4f, right: vec4f, up: vec4f, fwd: vec4f };
     @group(0) @binding(0) var<uniform> f: F;
+    // The showroom's palette (showcase-car-render.mjs's studio).
+    const HORIZON = vec3f(0.5, 0.52, 0.56);
+    const CEILING = vec3f(0.045, 0.05, 0.06);
+    const FLOOR_NEAR = vec3f(0.13, 0.135, 0.145);
+    fn tonemap(c: vec3f) -> vec3f {
+      let x = c * 0.8;
+      let m = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+      return pow(m, vec3f(1.0 / 2.2));
+    }
     struct O { @builtin(position) p: vec4f, @location(0) w: vec3f, @location(1) n: vec3f, @location(2) c: vec3f };
     @vertex fn vs(@location(0) p: vec3f, @location(1) n: vec3f, @location(2) c: vec3f) -> O {
       var o: O; o.p = f.vp * vec4f(p, 1.0); o.w = p; o.n = n; o.c = c; return o;
@@ -95,23 +104,40 @@ try {
     @fragment fn fs(i: O) -> @location(0) vec4f {
       var c = i.c;
       let fw = fwidth(i.w.xz);
+      let l = max(dot(normalize(i.n), normalize(f.light.xyz)), 0.0);
       if (i.n.y > 0.99 && i.w.y < 0.001) {
+        // The studio floor: a faint metre grid, a pool of light round the
+        // car, fading into the cyclorama's horizon with distance.
         let g = abs(fract(i.w.xz) - 0.5);
         let gl = smoothstep(vec2f(0.5) - fw * 1.5, vec2f(0.5), g);
-        let line = 1.0 - 0.1 * max(gl.x, gl.y);
-        let d = length(i.w.xz - f.eye.xz);
-        c = mix(c * line, vec3f(0.135, 0.142, 0.158), clamp(d / 60.0, 0.0, 1.0));
+        let line = 1.0 - 0.08 * max(gl.x, gl.y);
+        let dc = length(i.w.xz - f.shadow.xy);
+        var fl = FLOOR_NEAR * line + vec3f(0.07) * exp(-dc * dc / 25.0);
         // A soft contact shadow under the car (f.shadow.z: its heading): a
         // rounded footprint, darkest at its core.
         let q = i.w.xz - f.shadow.xy;
         let cs = cos(f.shadow.z); let sn = sin(f.shadow.z);
         let lq = vec2f(cs * q.x - sn * q.y, sn * q.x + cs * q.y);
         let fp = length(max(abs(lq) - vec2f(0.72, 2.05), vec2f(0.0))) - 0.18;
-        c *= 1.0 - 0.55 * exp(-max(fp, 0.0) * 6.0) * (0.75 + 0.25 * (1.0 - smoothstep(-0.6, 0.0, fp)));
+        fl *= 1.0 - 0.6 * exp(-max(fp, 0.0) * 6.0) * (0.75 + 0.25 * (1.0 - smoothstep(-0.6, 0.0, fp)));
+        let far = smoothstep(6.0, 45.0, length(i.w.xz - f.eye.xz));
+        return vec4f(tonemap(mix(fl, HORIZON * 0.8, far)), 1.0);
       }
-      let l = max(dot(normalize(i.n), normalize(f.light.xyz)), 0.0);
-      let col = c * (0.35 + 0.75 * l);
-      return vec4f(pow(col, vec3f(1.0 / 2.2)), 1.0);
+      return vec4f(tonemap(c * (0.35 + 0.75 * l)), 1.0);
+    }
+    // The cyclorama behind everything: a bright horizon band fading to a dark
+    // ceiling (the car's reflections show the same studio).
+    struct B { @builtin(position) p: vec4f, @location(0) ndc: vec2f };
+    @vertex fn vsBg(@builtin(vertex_index) vi: u32) -> B {
+      let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+      var o: B; o.p = vec4f(p, 0.0, 1.0); o.ndc = p; return o;
+    }
+    @fragment fn fsBg(i: B) -> @location(0) vec4f {
+      let d = normalize(f.fwd.xyz + i.ndc.x * f.right.xyz + i.ndc.y * f.up.xyz);
+      let up = max(d.y, 0.0);
+      var c = mix(HORIZON, CEILING, smoothstep(0.0, 0.75, up)) + vec3f(0.3) * exp(-up * 22.0);
+      c = mix(HORIZON * 0.8, c, smoothstep(-0.01, 0.03, d.y));
+      return vec4f(tonemap(c), 1.0);
     }`;
   const sm = device.createShaderModule({ code: SCENE_WGSL });
   const scenePipe = device.createRenderPipeline({
@@ -120,6 +146,14 @@ try {
     fragment: { module: sm, entryPoint: 'fs', targets: [{ format }] },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: SAMPLES },
+  });
+  const bgPipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: sm, entryPoint: 'vsBg' },
+    fragment: { module: sm, entryPoint: 'fsBg', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
     multisample: { count: SAMPLES },
   });
   const verts = [];
@@ -148,8 +182,13 @@ try {
   }
   const sceneBuf = device.createBuffer({ size: verts.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(sceneBuf, 0, new Float32Array(verts));
-  const frameBuf = device.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const frameBuf = device.createBuffer({ size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const sceneBind = device.createBindGroup({ layout: scenePipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
+  const bgBind = device.createBindGroup({ layout: bgPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
+  const drawScene = (p) => {
+    p.setPipeline(bgPipe); p.setBindGroup(0, bgBind); p.draw(3);
+    p.setPipeline(scenePipe); p.setBindGroup(0, sceneBind); p.setVertexBuffer(0, sceneBuf); p.draw(verts.length / 9);
+  };
 
   // Camera: orbits the first car's reference node.
   const mat = {
@@ -199,7 +238,13 @@ try {
     const eye = [target[0] + dist * Math.sin(yaw) * Math.cos(pitch), target[1] + dist * Math.sin(pitch), target[2] + dist * Math.cos(yaw) * Math.cos(pitch)];
     const vp = mat.mul(mat.persp(fov, aspect, 0.05, 500), mat.look(eye, target));
     const light = [0.45, 0.8, 0.4];
-    const fr = new Float32Array(28); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20); fr.set([target[0], target[2], 0, 0], 24);
+    // The camera's basis for the backdrop's rays (scaled to the view).
+    const fw = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]].map((x) => x / dist);
+    const rt = [-fw[2], 0, fw[0]].map((x, _, a) => x / Math.hypot(a[0], a[2]));
+    const upv = [rt[1] * fw[2] - rt[2] * fw[1], rt[2] * fw[0] - rt[0] * fw[2], rt[0] * fw[1] - rt[1] * fw[0]];
+    const th = Math.tan(fov / 2);
+    const fr = new Float32Array(40); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20); fr.set([target[0], target[2], 0, 0], 24);
+    fr.set([...rt.map((x) => x * th * aspect), 0], 28); fr.set([...upv.map((x) => x * th), 0], 32); fr.set([...fw, 0], 36);
     device.queue.writeBuffer(frameBuf, 0, fr);
     const outView = context.getCurrentTexture().createView();
     if (tq) {
@@ -208,7 +253,7 @@ try {
         colorAttachments: [{ view: msaa.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0.40, g: 0.415, b: 0.44, a: 1 } }],
         depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'clear', depthClearValue: 1, depthStoreOp: 'store' },
       });
-      p0.setPipeline(scenePipe); p0.setBindGroup(0, sceneBind); p0.setVertexBuffer(0, sceneBuf); p0.draw(verts.length / 9);
+      drawScene(p0);
       p0.end();
       const p1 = enc.beginRenderPass({
         colorAttachments: [{ view: msaa.createView(), resolveTarget: outView, loadOp: 'load', storeOp: 'discard' }],
@@ -224,7 +269,7 @@ try {
         colorAttachments: [{ view: msaa.createView(), resolveTarget: outView, loadOp: 'clear', storeOp: 'discard', clearValue: { r: 0.40, g: 0.415, b: 0.44, a: 1 } }],
         depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'clear', depthClearValue: 1, depthStoreOp: 'store' },
       });
-      pass.setPipeline(scenePipe); pass.setBindGroup(0, sceneBind); pass.setVertexBuffer(0, sceneBuf); pass.draw(verts.length / 9);
+      drawScene(pass);
       r.draw(pass, { viewProj: vp, eye, light });
       pass.end();
     }
