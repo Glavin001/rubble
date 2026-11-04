@@ -89,6 +89,37 @@ pub fn stiff(mut m: MemberSpec, s: f32) -> MemberSpec {
     m
 }
 
+/// A passenger-cell member: its thresholds × [`CELL`] (the cell keeps its
+/// shape in a 56 km/h crash; the crumple zones fold).
+pub fn cell(mut m: MemberSpec) -> MemberSpec {
+    m.scale = [m.scale[0] * CELL, m.scale[1] * CELL];
+    m
+}
+
+/// A lumped screen's (glass shear panel's) yield force (N): it cracks.
+pub const GLASS_YIELD: f32 = 8.0e3;
+
+/// A roof member (roof rails, bows, headers, B-pillars): its
+/// thresholds × [`ROOF`] (the roof crushes in a roll-over; the A- and C-pillars,
+/// sills and floor are the cell's).
+pub fn roof(mut m: MemberSpec) -> MemberSpec {
+    m.scale = [m.scale[0] * ROOF, m.scale[1] * ROOF];
+    m
+}
+
+/// The roof members' threshold scale.
+pub const ROOF: f32 = 1.2;
+
+/// Yield force of the roof's lumped panels (N).
+pub const ROOF_YIELD: f32 = 1.2e4;
+
+/// Yield force of the cabin's door-ring panels (N): strong in a
+/// 56 km/h crash, crushed by a roll-over.
+pub const CABIN_YIELD: f32 = 6.0e4;
+
+/// The passenger cell's threshold scale.
+pub const CELL: f32 = 4.0;
+
 /// An impact member: pole catchers between its stations.
 pub fn catching(mut m: MemberSpec) -> MemberSpec {
     m.catch = true;
@@ -142,7 +173,7 @@ pub fn seat_frame(name: &str, centre: [f32; 3], half: [f32; 3], kg: f32) -> Bloc
         mounts: 3,
         reach: 0.45,
         mount_grade: "mount".into(),
-        mount_scale: 0.5,
+        mount_scale: 3.0,
         bear: 0.0,
     }
 }
@@ -193,15 +224,15 @@ fn cabin_x(
     vec![
         brace("floor_f", fb, m(bb), "floor", k),
         brace("floor_r", bb, m(rb), "floor", k),
-        brace("roof_f", ft, m(bt), "panel", k),
-        brace("roof_r", bt, m(rt), "panel", k),
+        yielding(brace("roof_f", ft, m(bt), "panel", k), ROOF_YIELD),
+        yielding(brace("roof_r", bt, m(rt), "panel", k), ROOF_YIELD),
         brace("firewall_x", fb, m(cw), "hsla", k),
-        brace("windscreen_x", cw, m(ft), "glass", k),
+        yielding(brace("windscreen_x", cw, m(ft), "glass", k), GLASS_YIELD),
         brace("bulkhead_x", rb, m(rt), "hsla", k),
-        brace("ring_f_x", fb, bt, "uhss", k),
-        brace("ring_f_y", bb, ft, "uhss", k),
-        brace("ring_r_x", bb, rt, "uhss", k),
-        brace("ring_r_y", rb, bt, "uhss", k),
+        yielding(brace("ring_f_x", fb, bt, "uhss", k), CABIN_YIELD),
+        yielding(brace("ring_f_y", bb, ft, "uhss", k), CABIN_YIELD),
+        yielding(brace("ring_r_x", bb, rt, "uhss", k), CABIN_YIELD),
+        yielding(brace("ring_r_y", rb, bt, "uhss", k), CABIN_YIELD),
     ]
 }
 
@@ -384,8 +415,10 @@ pub fn sedan() -> VehicleDef {
             "fender",
             Region::Side(Outline::rect(3.36, 0.2, 4.8, 1.2)),
             "panel",
+            // Bolted along its top and to the A-pillar: holds at 56 km/h
+            // (the fender crumples back), tears at about 80 and up.
             Joint::Bolt {
-                scale: 0.7,
+                scale: 2.0,
                 group: false,
             },
             true,
@@ -530,7 +563,7 @@ pub fn sedan() -> VehicleDef {
             1,
         )),
         catching(stiff(
-            member(
+            cell(member(
                 "sill",
                 &[
                     (0.79, 0.31, 1.36),
@@ -547,10 +580,10 @@ pub fn sedan() -> VehicleDef {
                 0,
                 true,
                 2,
-            ),
+            )),
             SILL_STIFF,
         )),
-        ladder(member(
+        cell(ladder(member(
             "pillar_a",
             &[
                 (0.79, 0.31, 3.36),
@@ -566,9 +599,9 @@ pub fn sedan() -> VehicleDef {
             0,
             true,
             1,
-        )),
+        ))),
         catching(stations(
-            member(
+            roof(member(
                 "pillar_b",
                 &[(0.79, 0.31, 2.24), (0.79, 0.98, 2.24), (0.62, 1.39, 2.24)],
                 0.10,
@@ -579,10 +612,10 @@ pub fn sedan() -> VehicleDef {
                 0,
                 true,
                 1,
-            ),
+            )),
             0.4,
         )),
-        ladder(member(
+        ladder(cell(member(
             "pillar_c",
             &[(0.79, 0.31, 1.36), (0.79, 0.98, 1.36), (0.62, 1.37, 1.50)],
             0.10,
@@ -593,8 +626,8 @@ pub fn sedan() -> VehicleDef {
             0,
             true,
             1,
-        )),
-        ladder(member(
+        ))),
+        ladder(roof(member(
             "roof_rail",
             &[
                 (0.62, 1.37, 2.74),
@@ -610,17 +643,17 @@ pub fn sedan() -> VehicleDef {
             0,
             true,
             1,
-        )),
-        cross("header_f", 0.62, 1.37, 2.74, "uhss", 1.0),
-        cross("bow_b", 0.62, 1.39, 2.24, "uhss", 1.0),
+        ))),
+        roof(cross("header_f", 0.62, 1.37, 2.74, "uhss", 1.0)),
+        roof(cross("bow_b", 0.62, 1.39, 2.24, "uhss", 1.0)),
         // A rear roof bow (the roof skin's span between bows sags otherwise).
-        cross("bow_r", 0.62, 1.39, 1.86, "uhss", 1.0),
-        cross("header_r", 0.62, 1.37, 1.50, "uhss", 1.0),
-        catching(floor_cross("floor_x1", 2.80, "uhss")),
-        catching(floor_cross("floor_x2", 2.24, "boron")),
-        floor_cross("floor_x3", 1.80, "uhss"),
-        floor_cross("kickup", 1.36, "uhss"),
-        catching(member(
+        roof(cross("bow_r", 0.62, 1.39, 1.86, "uhss", 1.0)),
+        roof(cross("header_r", 0.62, 1.37, 1.50, "uhss", 1.0)),
+        catching(cell(floor_cross("floor_x1", 2.80, "uhss"))),
+        catching(cell(floor_cross("floor_x2", 2.24, "boron"))),
+        cell(floor_cross("floor_x3", 1.80, "uhss")),
+        cell(floor_cross("kickup", 1.36, "uhss")),
+        catching(cell(member(
             "tunnel",
             &[
                 (0.0, 0.33, 1.36),
@@ -637,9 +670,9 @@ pub fn sedan() -> VehicleDef {
             0,
             false,
             1,
-        )),
+        ))),
         catching(floor_cross("firewall", 3.36, "boron")),
-        ladder(member(
+        ladder(cell(member(
             "dash",
             &[
                 (-0.79, 0.80, 3.30),
@@ -655,8 +688,8 @@ pub fn sedan() -> VehicleDef {
             0,
             false,
             2,
-        )),
-        ladder(member(
+        ))),
+        ladder(cell(member(
             "cowl",
             &[
                 (-0.79, 0.92, 3.38),
@@ -672,7 +705,7 @@ pub fn sedan() -> VehicleDef {
             0,
             false,
             2,
-        )),
+        ))),
         ladder(member(
             "rad_post",
             &[(0.44, 0.43, 4.40), (0.55, 0.74, 4.40)],
@@ -821,7 +854,7 @@ pub fn sedan() -> VehicleDef {
             false,
             2,
         )),
-        ladder(member(
+        ladder(cell(member(
             "parcel",
             &[
                 (-0.79, 0.98, 1.36),
@@ -837,7 +870,7 @@ pub fn sedan() -> VehicleDef {
             0,
             false,
             1,
-        )),
+        ))),
         // Door intrusion beams (they ride their door).
         catching(stations(
             riding(ladder(member(
@@ -1148,6 +1181,8 @@ pub fn sedan() -> VehicleDef {
                 axis,
                 grade: grade.into(),
                 kl: k,
+                // Screens crack.
+                strength: if grade == "glass" { GLASS_YIELD } else { 0.0 },
             };
             vec![
                 // The cabin box's faces.
@@ -1168,7 +1203,7 @@ pub fn sedan() -> VehicleDef {
             ]
         },
         frame_through: vec!["door".into()],
-        backed: vec!["door".into()],
+        backed: vec!["door".into(), "fender".into(), "bumper".into()],
         shell_braces: false,
         body_damping: 50.0,
         tiered: true,

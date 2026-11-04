@@ -546,6 +546,27 @@ fn e_upside_down_drop_from_15_m_crushes_the_roof_without_exploding() {
         span(&s)
     );
     assert!(finite(&s));
+    {
+        let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+        let com = s.nodes.iter().map(|n| n.mass * n.pos).sum::<Vec3>() / m;
+        let far = (0..s.nodes.len())
+            .max_by(|&a, &c| {
+                s.nodes[a]
+                    .pos
+                    .distance(com)
+                    .total_cmp(&s.nodes[c].pos.distance(com))
+            })
+            .unwrap();
+        let part = if far < b.skeleton.nodes.len() {
+            b.skeleton.parts[b.skeleton.nodes[far].part as usize].clone()
+        } else {
+            "tyre".into()
+        };
+        eprintln!(
+            "(e) farthest node {far} ({part}) {:.2} m from the centre of mass",
+            s.nodes[far].pos.distance(com)
+        );
+    }
     assert!(h0 - h1 > 0.03, "the roof should deform");
     assert!(span(&s) < 7.0);
     assert!(vmax < 20.0);
@@ -1194,6 +1215,25 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
             })
             .collect();
         let worst = |v: &[usize]| v.iter().map(|&i| disp(i)).fold(0.0f32, f32::max);
+        if std::env::var("K_GROUPS").is_ok() {
+            let mut v: Vec<(String, f32)> = b
+                .groups
+                .iter()
+                .map(|(k, g)| {
+                    (
+                        k.clone(),
+                        g.iter().map(|&i| disp(i as usize)).fold(0.0f32, f32::max),
+                    )
+                })
+                .collect();
+            v.sort_by(|a, c| c.1.total_cmp(&a.1));
+            eprintln!(
+                "  groups' worst cabin-frame displacement: {:?}",
+                v.iter()
+                    .map(|(k, d)| format!("{k} {:.0}", d * 1e3))
+                    .collect::<Vec<_>>()
+            );
+        }
         // The boot lid and the bonnet's rear edge (at the cowl): how far they
         // moved (and rose) against the cabin.
         let lid = part_nodes("bootlid");
@@ -1392,7 +1432,6 @@ fn l_door_point_load_dents_locally() {
 /// outside the body's width at any time, and no beam joining the bonnet or a
 /// fender to the rest of the car breaks. With drag on and off.
 #[test]
-#[ignore]
 fn m_wall_56_panels_stay_on() {
     for drag in [true, false] {
         let b = built(Resolution::Medium);
@@ -1413,16 +1452,18 @@ fn m_wall_56_panels_stay_on() {
                 .any(|k| p.starts_with(k))
         };
         let panels: Vec<usize> = (0..n).filter(|&i| panel(i)).collect();
-        let width = sk
-            .nodes
+        // Lateral in the cabin's own frame (the car may yaw as it stops):
+        // the frame's second axis is across the car (the third is up).
+        let l0 = cabin_local(&s, &b);
+        let (lo, hi) = l0[..n]
             .iter()
-            .map(|nd| nd.p.x.abs())
-            .fold(0.0f32, f32::max);
+            .fold((f32::MAX, f32::MIN), |(a, c), p| (a.min(p.y), c.max(p.y)));
         let mut worst = (0.0f32, 0usize);
         for _ in 0..(1.5 * 60.0) as usize {
             s.frame();
+            let l = cabin_local(&s, &b);
             for &i in &panels {
-                let out = s.nodes[i].pos.x.abs() - width;
+                let out = (l[i].y - hi).max(lo - l[i].y);
                 if out > worst.0 {
                     worst = (out, i);
                 }

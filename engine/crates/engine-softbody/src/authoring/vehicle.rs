@@ -143,7 +143,7 @@ pub struct BraceSpec {
     /// panel's (a grade's is a strip's); the grade gives its damping.
     pub kl: f32,
     /// Yield force (N) of the whole brace (0: at the grade's yield strain);
-    /// it breaks at twice that. Braces into a crumple zone (strut towers to
+    /// it breaks at four times that. Braces into a crumple zone (strut towers to
     /// the cowl) yield as the zone folds rather than carry the crash into the
     /// cabin.
     #[serde(default)]
@@ -163,6 +163,10 @@ pub struct ShearSpec {
     pub axis: usize,
     pub grade: String,
     pub kl: f32,
+    /// Yield force (N) of each diagonal (0: at the grade's yield strain; it
+    /// breaks at four times that): glass cracks.
+    #[serde(default)]
+    pub strength: f32,
 }
 
 /// A named mass spread over the nodes inside a box (seats, fuel, passengers).
@@ -225,7 +229,7 @@ pub const GUSSET: f32 = 1.0;
 
 /// The skin's spacing against the frame's era (25–40 cm): the light skin
 /// tier is denser than the frame, so dents and creases are local.
-pub const SKIN_DENSITY: f32 = 0.73;
+pub const SKIN_DENSITY: f32 = 1.0;
 
 /// Node spacing per resolution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,10 +348,11 @@ pub struct VehicleDef {
     /// mirror (an X).
     #[serde(default)]
     pub braces: Vec<BraceSpec>,
-    /// Panels backed by their own frame (doors: intrusion beam, belt, inner
-    /// rail): every skin node of a part named so (prefix) is tied to its two
-    /// nearest frame nodes of the part within 0.3 m, so a push on the skin
-    /// meets the door's structure a few centimetres behind it.
+    /// Panels backed by a frame (doors: their own intrusion beam, belt and
+    /// inner rail; fenders: the body's apron and towers): every skin node of
+    /// a part named so (prefix) is tied to its two nearest frame nodes of the
+    /// part (or of the body, for a part without a frame) within 0.3 m, so a
+    /// push on the skin meets structure a few centimetres behind it.
     #[serde(default)]
     pub backed: Vec<String>,
     /// Shear panels between members ([`ShearSpec`]).
@@ -1017,9 +1022,16 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .map(|(i, _)| i as u16)
             .collect();
         for &pt in &parts {
-            let frame: Vec<u32> = (0..sk.nodes.len() as u32)
+            let mut frame: Vec<u32> = (0..sk.nodes.len() as u32)
                 .filter(|&i| sk.nodes[i as usize].part == pt && sk.nodes[i as usize].primary)
                 .collect();
+            // A panel without a frame of its own (a fender) rides the body's
+            // behind it (apron, tower, radiator support).
+            if frame.is_empty() {
+                frame = (0..sk.nodes.len() as u32)
+                    .filter(|&i| sk.nodes[i as usize].part == 0 && sk.nodes[i as usize].primary)
+                    .collect();
+            }
             let skin: Vec<u32> = shell
                 .nodes
                 .iter()
@@ -1174,7 +1186,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         .scaled(def.crumple.eval(0.5 * (sk.pos(p).z + sk.pos(q).z)));
                     if br.strength > 0.0 {
                         m.deform = share * br.strength * grades_strength;
-                        m.strength = 2.0 * m.deform;
+                        m.strength = 4.0 * m.deform;
                     }
                     sk.beam(p, q, m);
                 }
@@ -1248,10 +1260,14 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     let p = facing(sk, &sa_, cb);
                     let q = facing(sk, &sb_, ca);
                     if p != q && sk.pos(p).distance(sk.pos(q)) > 0.15 {
-                        let m = mat
+                        let mut m = mat
                             .stiffer(sp.kl / mat.kl())
                             .scaled(sp.kl / mat.kl())
                             .scaled(def.crumple.eval(0.5 * (sk.pos(p).z + sk.pos(q).z)));
+                        if sp.strength > 0.0 {
+                            m.deform = sp.strength * params.strength;
+                            m.strength = 4.0 * m.deform;
+                        }
                         sk.beam(p, q, m);
                     }
                 };

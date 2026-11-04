@@ -147,9 +147,18 @@ The body is built the BeamNG way, in two tiers:
   masses sit on them), its grades at RoR-level k·L on the load paths. It carries
   torsion (the cabin box's lumped shear panels, the strut towers braced into it),
   crash load paths and the door rings.
-* **Skin**: the shell (panels, floor pan, roof skin; lofted at `SKIN_DENSITY` ×
-  the old spacing, 18–30 cm), catchers, ties: light nodes, where dents and creases
-  happen.
+* **Skin**: the shell (panels, floor pan, roof skin; 25–40 cm, `SKIN_DENSITY`
+  1), catchers, ties: light nodes (0.07–0.1 kg), where dents and creases happen.
+  Panels are backed (`backed`): doors by their own frame (intrusion beam, belt
+  and mid rails, 14 cm deep, hinged and latched to the pillars), fenders and
+  bumper covers by the body's frame behind them.
+
+The passenger cell's members (A- and C-pillars, sills, floor cross members,
+tunnel, cowl, dash, parcel shelf) yield at `CELL` × their grade (4: the cell keeps
+its shape at 56 km/h); the roof's (roof rails, bows, headers, B-pillars) at `ROOF`
+× (1.2: it crushes in a roll-over). Lumped panels yield at their grade's strain
+unless `strength` caps them: the strut towers' braces (`END_YIELD`), the door
+rings (`CABIN_YIELD`), the roof (`ROOF_YIELD`), the screens (`GLASS_YIELD`).
 
 `VehicleDef::tiered` fits the step per tier (`Skeleton::fit_tiers`): the frame's
 beams at their grades (`Built::stiffness_scale` = 1), the skin's stiffness and
@@ -313,8 +322,7 @@ shapes) and the profile. The tools stay the same.
 ## What the visual binds to (`Built`)
 
 * `shell`: rings, surface labels (`seg`), the mirror map, skin triangles. The
-  shell is the skin tier now (18–30 cm, about 600 nodes at medium); its meaning
-  is unchanged.
+  shell is the skin tier now; its spacing and meaning are unchanged.
 * `skeleton.parts` and each node's part: `body`, `bumper_f`, `bumper_r`, `bonnet`,
   `bootlid`, `fender_l/_r`, `door_f_l/_r`, `door_r_l/_r`, `radiator`, the blocks
   (`powertrain`, `seat_fl`, `seat_fr`, `seat_rear`, `battery`), `suspension`.

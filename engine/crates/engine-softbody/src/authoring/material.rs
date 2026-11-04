@@ -194,8 +194,13 @@ fn mount() -> Material {
 }
 
 fn link() -> Material {
-    Material::steel(1.5e5, 0.05, 1.0e9, 0.0, 6.0)
+    // Arms and brackets bend in a crash (a wheel driven back by a wall).
+    Material::steel(1.5e5, 0.05, 4.0e4, 0.1, 6.0).plastic(PLASTIC)
 }
+
+/// Damping ratio of the skin's grades (light panels ring after a crash
+/// otherwise).
+pub const SKIN_ZETA: f32 = 0.08;
 
 /// Damping ratio of the body's grades.
 pub const ZETA: f32 = 0.08;
@@ -208,16 +213,16 @@ impl Default for Grades {
     /// where the body gives in a crash.
     fn default() -> Self {
         Self {
-            panel: Material::steel(2.7e4, ZETA, 1.0e3, 0.3, 1.0).plastic(PLASTIC),
-            floor: Material::steel(2.7e4, ZETA, 1.4e3, 0.3, 1.5).plastic(PLASTIC),
+            panel: Material::steel(2.7e4, SKIN_ZETA, 5.0e2, 0.3, 1.0).plastic(PLASTIC),
+            floor: Material::steel(2.7e4, SKIN_ZETA, 7.0e2, 0.3, 1.5).plastic(PLASTIC),
             frame: Material::steel(2.0e4, ZETA, 1.9e2, 0.3, 1.5).plastic(PLASTIC),
             crush: Material::steel(3.75e5, ZETA, 1.23e4, 0.25, 2.0).plastic(PLASTIC),
             hsla: Material::steel(1.45e5, ZETA, 2.9e3, 0.2, 2.0).plastic(PLASTIC),
             uhss: Material::steel(2.2e5, ZETA, 3.5e3, 0.12, 3.0).plastic(PLASTIC),
             boron: Material::steel(2.65e5, ZETA, 3.9e3, 0.08, 3.5).plastic(PLASTIC),
             alu: Material::steel(1.45e5, ZETA, 2.9e3, 0.12, 2.0).plastic(PLASTIC),
-            plastic: Material::steel(4.0e3, ZETA, 5.0e2, 0.25, 0.5),
-            glass: Material::steel(9.0e3, ZETA, 4.0e2, 0.04, 1.0),
+            plastic: Material::steel(1.2e4, SKIN_ZETA, 9.0e2, 0.25, 0.5),
+            glass: Material::steel(9.0e3, SKIN_ZETA, 4.0e2, 0.04, 1.0),
             rigid: Material::steel(1.5e5, 0.03, 1.0e9, 0.0, 6.0),
             link: link(),
             mount: mount(),

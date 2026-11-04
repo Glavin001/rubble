@@ -127,6 +127,30 @@ fn main() {
             }
         }
     }
+    if let Ok(pair) = std::env::var("PAIR") {
+        // Beams between two groups: kind, length, k·L, yield, break.
+        let mut it = pair.split('~');
+        let (ga, gb) = (it.next().unwrap(), it.next().unwrap());
+        let (na, nb) = (&b.groups[ga], &b.groups[gb]);
+        for bm in &sk.beams {
+            if (na.contains(&bm.a) && nb.contains(&bm.b))
+                || (na.contains(&bm.b) && nb.contains(&bm.a))
+            {
+                let l = sk.pos(bm.a).distance(sk.pos(bm.b));
+                eprintln!(
+                    "  {}-{} L {l:.2} k·L {:.2e} yield {:.0} break {:.0} tie {} fixed {} {:?}",
+                    bm.a,
+                    bm.b,
+                    bm.mat.k_at(l) * l,
+                    bm.mat.deform,
+                    bm.mat.strength,
+                    bm.tie,
+                    bm.fixed,
+                    bm.ty
+                );
+            }
+        }
+    }
     if let Ok(n) = std::env::var("NODE") {
         let i: u32 = n.parse().unwrap();
         let fl = sk.floors(1.0);
@@ -311,9 +335,19 @@ fn main() {
             } else {
                 format!("{lb}~{la}")
             };
+            let key = match bm.kind {
+                engine_softbody::explicit_beams::ExplicitKind::LimitedSpring => {
+                    format!("{key} (spring)")
+                }
+                _ => key,
+            };
             let l = s.nodes[bm.a as usize]
                 .pos
                 .distance(s.nodes[bm.b as usize].pos);
+            // (Compression-only beams store nothing stretched.)
+            if bm.kind == engine_softbody::explicit_beams::ExplicitKind::Support && l > bm.rest {
+                continue;
+            }
             *en.entry(key).or_default() += 0.5 * bm.k as f64 * ((l - bm.rest) as f64).powi(2);
         }
         let mut ev: Vec<_> = en.into_iter().collect();
@@ -698,6 +732,29 @@ fn main() {
         .and_then(|w| w.parse::<usize>().ok());
     for f in 0..frames {
         s.frame();
+        if std::env::var("TRACE_VZ").is_ok() && f < 40 {
+            let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+            let vz = s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>() / m;
+            let mut line = format!("  f {f}: com vz {vz:+.2}");
+            for g in [
+                "powertrain",
+                "sill",
+                "rail_f",
+                "bumper_beam_f",
+                "suspension",
+                "roof_rail",
+            ] {
+                let v = &b.groups[g];
+                let gm: f32 = v.iter().map(|&i| s.nodes[i as usize].mass).sum();
+                let gv = v
+                    .iter()
+                    .map(|&i| s.nodes[i as usize].mass * s.nodes[i as usize].vel.z)
+                    .sum::<f32>()
+                    / gm;
+                line += &format!(" {g} {gv:+.2}");
+            }
+            eprintln!("{line}");
+        }
         if let Some(w) = wheel_trace {
             if f % 3 == 0 {
                 let wh = &sk.wheels[w];
@@ -751,7 +808,13 @@ fn main() {
                 );
             }
         }
-        if breaks && f + 1 == frames {
+        let at: Option<usize> = std::env::var("SUMMARY_AT")
+            .ok()
+            .and_then(|x| x.parse().ok());
+        if breaks && (f + 1 == frames || Some(f) == at) {
+            if Some(f) == at {
+                eprintln!("  -- at frame {f}:");
+            }
             summary(&s);
         }
         if scene == "pole" && f + 1 == frames {
@@ -765,6 +828,25 @@ fn main() {
                 }
             }
             eprintln!("  past the pole in its lane: {by:?}");
+        }
+        if std::env::var("FAR").is_ok() && f + 1 == frames {
+            let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+            let com = s.nodes.iter().map(|n| n.mass * n.pos).sum::<Vec3>() / m;
+            let mut idx: Vec<usize> = (0..s.nodes.len()).collect();
+            idx.sort_by(|&a, &c| {
+                s.nodes[c]
+                    .pos
+                    .distance(com)
+                    .total_cmp(&s.nodes[a].pos.distance(com))
+            });
+            for &i in idx.iter().take(6) {
+                eprintln!(
+                    "   far node {i} {} {:.2} m from the centre, mass {:.2}",
+                    label(i as u32),
+                    s.nodes[i].pos.distance(com),
+                    s.nodes[i].mass
+                );
+            }
         }
         if std::env::var("FASTEST").is_ok() && f + 1 == frames {
             let mut idx: Vec<usize> = (0..s.nodes.len()).collect();

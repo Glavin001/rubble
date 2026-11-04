@@ -22,6 +22,9 @@ pub struct Truss {
 /// always meets one.
 pub const CATCH: f32 = 0.11;
 
+/// A suspension upright's beams against the link grade.
+pub const KNUCKLE: f32 = 4.0;
+
 /// A section ring's stiffness against the member's grade (its ties are
 /// short: [`Skeleton::tie`]).
 pub const RING: f32 = 0.25;
@@ -516,9 +519,11 @@ pub fn corner(sk: &mut Skeleton, c: &Corner, side: f32, part: u16, rigid: Materi
     let kl = sk.node(p(x - 0.09, y - 0.13, z), part);
     let ks = sk.node(p(x - 0.12, y + 0.02, z - 0.13), part);
     let knuckle = vec![a1, a2, ku, kl, ks];
+    // The upright is a casting carrying the hub: far stiffer than the arms
+    // (its nodes are heavy: the hub's mass).
     for i in 0..knuckle.len() {
         for j in i + 1..knuckle.len() {
-            sk.fixed_beam(knuckle[i], knuckle[j], rigid);
+            sk.fixed_beam(knuckle[i], knuckle[j], rigid.stiffer(KNUCKLE));
         }
     }
     // The hub, bearing and brake ride the axle nodes (the tyre's spokes need the
