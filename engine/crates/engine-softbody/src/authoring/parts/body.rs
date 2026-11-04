@@ -98,10 +98,13 @@ pub struct BodyStyle {
     /// leading edge and a crisp boot deck.
     pub nose_ramp: f32,
     pub tail_ramp: f32,
-    /// The deck's side roll-over (m) behind z = `deck_ramp[0]` (blended in
-    /// over 0.3 m): a crisp edge between the quarters and the boot lid
-    /// instead of the greenhouse's long tumblehome ramp.
-    pub deck_ramp: [f32; 2],
+    /// The rear deck as its own surface: a flat, crowned lid at the profile's
+    /// top behind z = `rear_deck[0]`, its level carried forward (falling to
+    /// the shoulder by z = `rear_deck[1]`) as the quarters' shoulder, rolled
+    /// over its edges in `rear_deck[2]` m. The lid is the smooth max (radius
+    /// `rear_deck[3]` m) of it and the greenhouse surface, so the C-pillar
+    /// rises out of the deck along a defined crease. Zero length: none.
+    pub rear_deck: [f32; 4],
     /// Bonnet power dome: the creases' half spacing at the nose and at the
     /// cowl, the dome's rise between them and the creases' rounding (m); the
     /// bonnet's z span (cowl, nose).
@@ -339,7 +342,15 @@ impl Band {
         // lean in less (the glass continues them).
         let rise = (self.prof.top.eval(p.y) - self.prof.shoulder.eval(p.y)).max(0.0);
         let roll = 1.0 - smoothstep(0.08, 0.30, rise);
-        side.m_top += 1.1 * roll;
+        // Not behind the cabin when the rear deck is its own surface: there
+        // the quarter stays upright into the deck's tight roll (a hard
+        // shoulder).
+        let front = if st.rear_deck[2] > 0.0 {
+            smoothstep(st.rear_deck[1], st.rear_deck[1] + 0.6, p.y)
+        } else {
+            1.0
+        };
+        side.m_top += 1.1 * roll * front;
         let mut s = side;
         if wf > 0.0 {
             s = SectionShape::mix(&s, &st.nose, wf);
@@ -406,7 +417,7 @@ impl Band {
             let r = Vec2::new(z - w.z, y - w.y).length();
             let rear = w.z < 0.5 * self.prof.length;
             let (amt, width) = if rear {
-                (self.style.rear_flare, self.style.flare_width * 1.25)
+                (self.style.rear_flare, self.style.flare_width)
             } else {
                 (self.style.flare, self.style.flare_width)
             };
@@ -653,12 +664,8 @@ impl BodySurface {
         // Lid height at plan (x, z): the edge height at the nearest edge point,
         // ramped up to the top line by the plan distance from the edge.
         let ramp_of = |z: f32| -> f32 {
-            let r = (prof.half_width.eval(z) + prof.side_bulge
-                - (prof.top_half_width.eval(z) - tr))
-                .max(0.08);
-            let [zd, rd] = style.deck_ramp;
-            let w = 1.0 - smoothstep(zd, zd + 0.3, z);
-            r + (r.min(rd) - r) * w
+            (prof.half_width.eval(z) + prof.side_bulge - (prof.top_half_width.eval(z) - tr))
+                .max(0.08)
         };
         // Per edge point: how much it faces forward (nose) or back (tail): the
         // lid rolls over its leading and trailing edges in a short, crisp ramp.
@@ -712,7 +719,28 @@ impl BodySurface {
             } else {
                 1.0 - m * (1.0 - t) * (1.0 - t) / (2.0 * tau)
             };
-            (yb + rise * hh, ar)
+            let mut y = yb + rise * hh;
+            // The rear deck (a crisp lid and the quarters' shoulder), merged
+            // with the greenhouse by a smooth max: the C-pillar's crease.
+            let [zd0, zd1, dr, k] = style.rear_deck;
+            if dr > 0.0 && z < zd1 + 0.05 {
+                let s = smoothstep(zd0, zd1, z);
+                let deck0 = prof.top.eval(z.min(zd0));
+                let deck = deck0 + style.lid_crown * (1.0 - s) * (1.0 - u * u) * (1.0 - u * u);
+                let yd = deck + (yb - 0.01 - deck) * s;
+                let td = (d / ramp.min(dr)).clamp(0.0, 1.0);
+                // A short wall (the quarter's upper face) into a tight round.
+                let tau_d = 0.45;
+                let md = 1.0 / (1.0 - 0.5 * tau_d);
+                let hd = if td <= 1.0 - tau_d {
+                    md * td
+                } else {
+                    1.0 - md * (1.0 - td) * (1.0 - td) / (2.0 * tau_d)
+                };
+                let dy = yb + (yd - yb).max(0.0) * hd;
+                y = smax(y, dy, k);
+            }
+            (y, ar)
         };
         // Columns per row: uniform by arc length across.
         let fine = 240usize;
@@ -815,7 +843,15 @@ impl BodySurface {
                         lid_ids[i][k + 1],
                     ];
                     let avg = nb.iter().map(|&v| mesh.pos[v as usize].y).sum::<f32>() / 4.0;
-                    ny.push((c, avg));
+                    // Not on the rear deck: its edges and crease are designed.
+                    let [_, zd1, dr, _] = style.rear_deck;
+                    let w = if dr > 0.0 {
+                        smoothstep(zd1, zd1 + 0.3, mesh.pos[c as usize].z)
+                    } else {
+                        1.0
+                    };
+                    let y0 = mesh.pos[c as usize].y;
+                    ny.push((c, y0 + w * (avg - y0)));
                 }
             }
             for (c, y) in ny {

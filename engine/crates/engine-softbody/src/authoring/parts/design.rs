@@ -100,10 +100,10 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         lower: 0.08,
         d_lower: -0.05,
         crease: 0.70,
-        a_below: 0.16,
-        a_above: 0.12,
-        d_top: -0.035,
-        m_top: 0.40,
+        a_below: 0.26,
+        a_above: 0.34,
+        d_top: -0.03,
+        m_top: 0.2,
         tuck: 0.07,
     };
     let body = BodyStyle {
@@ -130,13 +130,13 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         tail_corner: 0.31,
         flare: 0.03,
         flare_width: 0.19,
-        rear_flare: 0.04,
+        rear_flare: 0.036,
         lid_crown: 0.022,
         step: 0.022,
         step_along: 0.035,
         nose_ramp: 0.045,
         tail_ramp: 0.04,
-        deck_ramp: [0.85, 0.10],
+        rear_deck: [0.80, 1.40, 0.045, 0.012],
         hood_crease: [0.22, 0.60, 0.014, 0.004],
         hood_z: [3.36, 4.70],
         deck_lip: [0.026, 0.24, 0.60],
@@ -211,15 +211,16 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         // Wrapped LED tail lamps: deep at the outer end, a sharp tip round
         // the corner, joined by the light bar across the boot lid.
         taillight: vec![
-            (0.465, -0.014),
-            (0.75, -0.011),
-            (1.00, -0.016),
-            (1.14, -0.030),
-            (1.165, -0.042),
-            (1.13, -0.056),
-            (0.98, -0.078),
-            (0.72, -0.088),
-            (0.465, -0.088),
+            (0.465, -0.012),
+            (0.75, -0.008),
+            (1.02, -0.012),
+            (1.20, -0.026),
+            (1.255, -0.045),
+            (1.24, -0.075),
+            (1.10, -0.112),
+            (0.98, -0.118),
+            (0.72, -0.100),
+            (0.465, -0.092),
         ],
         lightbar: [0.445, -0.034, 0.011],
         // No front plate: the grille is the face.
@@ -903,6 +904,9 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
                     surf.band_at(a, surf.band_top_y(a) + mid, sx).0
                 })
                 .collect(),
+            lens_bulge: 0.004,
+            bars: Vec::new(),
+            bar_half: 0.0,
         };
         pieces.push(Piece {
             name: format!("headlight_{}", if sx > 0.0 { "l" } else { "r" }),
@@ -917,18 +921,22 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         let axis = (avg_in(&f) * 0.6 + Vec3::Z * 0.4).normalize();
         let spec = fixtures::LampSpec {
             axis,
-            depth: 0.07,
+            depth: 0.09,
             lens: mat::TAIL_LENS,
             housing: mat::TRIM,
             reflector: mat::TAIL_BACK,
             guides: vec![
                 (-0.010, -0.0045, mat::TAIL_LED),
-                (-0.026, -0.0215, mat::TAIL_LED),
+                (-0.030, -0.0255, mat::TAIL_LED),
             ],
             guide_depth: 0.008,
             projectors: Vec::new(),
             projector_r: 0.0,
             guide_above: Vec::new(),
+            // A swelled ruby lens over stacked light blades.
+            lens_bulge: 0.008,
+            bars: vec![0.22, 0.4, 0.58],
+            bar_half: 0.0035,
         };
         pieces.push(Piece {
             name: format!("taillight_{}", if sx > 0.0 { "l" } else { "r" }),
@@ -948,6 +956,9 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         projectors: Vec::new(),
         projector_r: 0.0,
         guide_above: Vec::new(),
+        lens_bulge: 0.0,
+        bars: Vec::new(),
+        bar_half: 0.0,
     };
     pieces.push(Piece {
         name: "lightbar".into(),
@@ -972,6 +983,9 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             projectors: Vec::new(),
             projector_r: 0.0,
             guide_above: Vec::new(),
+            lens_bulge: 0.0,
+            bars: Vec::new(),
+            bar_half: 0.0,
         };
         pieces.push(Piece {
             name: format!("foglamp_{}", if sx > 0.0 { "l" } else { "r" }),

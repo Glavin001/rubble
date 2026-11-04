@@ -42,6 +42,14 @@ pub struct LampSpec {
     /// the body, ordered): a DRL blade along the lamp's upper edge and round
     /// its tip rather than a ring.
     pub guide_above: Vec<Vec3>,
+    /// The lens swells this far (m) proud of the body toward its middle (a
+    /// three-dimensional lens rather than a flush window).
+    pub lens_bulge: f32,
+    /// An inner graphic: horizontal light blades at these fractions of the
+    /// lens's height (world y), `bar_half` m half high, set back behind the
+    /// guides, kept 1 cm inside the outline.
+    pub bars: Vec<f32>,
+    pub bar_half: f32,
 }
 
 /// Build a lamp from the body mesh `m` and the opening field `f` (metric,
@@ -54,8 +62,69 @@ pub fn lamp(m: &Mesh, f: &[f32], spec: &LampSpec) -> Mesh {
     if lens_src.mesh.is_empty() {
         return out;
     }
-    let lens = trim::offset(&lens_src.mesh, -0.002, false, Some(spec.lens), 1.0);
+    let mut lens = trim::offset(&lens_src.mesh, -0.002, false, Some(spec.lens), 1.0);
+    if spec.lens_bulge > 0.0 {
+        for k in 0..lens.len() {
+            let w = smoothstep(0.0, -0.03, lens_src.field[k]);
+            lens.pos[k] += lens_src.mesh.nrm[k] * (spec.lens_bulge * w);
+        }
+        lens.face_normals();
+    }
     out.append(&lens);
+    // The inner graphic: light blades across the lamp.
+    if !spec.bars.is_empty() {
+        let (mut ylo, mut yhi) = (f32::MAX, f32::MIN);
+        for p in &lens_src.mesh.pos {
+            ylo = ylo.min(p.y);
+            yhi = yhi.max(p.y);
+        }
+        let inner = trim::clip(&lens_src.mesh, &lens_src.field, -0.010);
+        for &fb in &spec.bars {
+            let yc = ylo + fb * (yhi - ylo);
+            let f1: Vec<f32> = inner
+                .mesh
+                .pos
+                .iter()
+                .map(|p| p.y - (yc + spec.bar_half))
+                .collect();
+            let c1 = trim::clip(&inner.mesh, &f1, 0.0);
+            if c1.mesh.is_empty() {
+                continue;
+            }
+            let f2: Vec<f32> = c1
+                .mesh
+                .pos
+                .iter()
+                .map(|p| (yc - spec.bar_half) - p.y)
+                .collect();
+            let c2 = trim::clip(&c1.mesh, &f2, 0.0);
+            if c2.mesh.is_empty() {
+                continue;
+            }
+            let gm = spec.guides.first().map(|g| g.2).unwrap_or(spec.lens);
+            let mut b = trim::offset(&c2.mesh, -0.002, false, Some(gm), 1.0);
+            for p in b.pos.iter_mut() {
+                *p += spec.axis * (spec.guide_depth + 0.012);
+            }
+            let loops = trim::boundary_loops(&b);
+            for (l, closed) in &loops {
+                trim::roll_loop(
+                    &mut b,
+                    l,
+                    *closed,
+                    EdgeStyle {
+                        gap: 0.0,
+                        roll: 0.0015,
+                        depth: 0.01,
+                        flange: 0.0,
+                        ao_floor: 0.8,
+                        seal: false,
+                    },
+                );
+            }
+            out.append(&b);
+        }
+    }
     // Housing: the opening's outline swept back along the axis, narrowing.
     let inner = trim::clip(m, f, -0.0005);
     let loops = &inner.loops;
