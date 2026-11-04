@@ -343,6 +343,37 @@ fn main() {
         draw(&format!("{dir}/end.png"), &s.positions(), &lines);
         draw(&format!("{dir}/spawn.png"), &spawn_pos, &lines);
     }
+    if let Ok(dir) = std::env::var("VISUAL") {
+        let vis = engine_softbody::authoring::skin::showcase_visual(&b).unwrap();
+        eprintln!(
+            "visual: {} vertices, {} triangles",
+            vis.positions.len(),
+            vis.indices.len() / 3
+        );
+        let nodes = s.positions();
+        let spawn: Vec<Vec3> = spawn_pos.clone();
+        let c = nodes.iter().copied().sum::<Vec3>() / nodes.len() as f32;
+        let c0 = spawn.iter().copied().sum::<Vec3>() / spawn.len() as f32;
+        for (name, np, cc) in [("rest", &spawn, c0), ("after", &nodes, c)] {
+            let (p, n) = engine_softbody::authoring::skin::deform(&vis, np);
+            for (vi, eye) in [
+                (0, Vec3::new(3.6, 1.4, 3.4)),
+                (1, Vec3::new(-3.5, 1.2, -3.6)),
+                (2, Vec3::new(0.0, 1.0, 5.2)),
+            ] {
+                render(
+                    &format!("{dir}/{scene}_{name}_{vi}.png"),
+                    &p,
+                    &n,
+                    &vis.colors,
+                    &vis.material,
+                    &vis.indices,
+                    cc + eye,
+                    cc + Vec3::new(0.0, -0.05, 0.0),
+                );
+            }
+        }
+    }
     if std::env::var("CORNER").is_ok() {
         let g = &b.groups["suspension"];
         let p = s.positions();
@@ -413,6 +444,128 @@ pub fn draw(path: &str, pos: &[Vec3], beams: &[(u32, u32, [u8; 3])]) {
             }
         }
     }
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    out.extend_from_slice(&img);
+    let ppm = format!("{path}.ppm");
+    std::fs::write(&ppm, out).unwrap();
+    let _ = std::process::Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-i", &ppm, path])
+        .status();
+}
+
+/// A software render of the visual mesh (z-buffer, Lambert + a sky term).
+pub fn render(
+    path: &str,
+    pos: &[Vec3],
+    nrm: &[Vec3],
+    col: &[[f32; 3]],
+    mats: &[u8],
+    idx: &[u32],
+    eye: Vec3,
+    target: Vec3,
+) {
+    let (w, h) = (1280usize, 720usize);
+    let mut img = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let t = y as f32 / h as f32;
+            let c = [0.75 - 0.25 * t, 0.8 - 0.25 * t, 0.85 - 0.2 * t];
+            for k in 0..3 {
+                img[(y * w + x) * 3 + k] = (c[k] * 255.0) as u8;
+            }
+        }
+    }
+    let mut zb = vec![f32::MAX; w * h];
+    let fwd = (target - eye).normalize();
+    let right = fwd.cross(Vec3::Y).normalize();
+    let up = right.cross(fwd);
+    let f = 1.6 * h as f32 / 2.0;
+    let proj = |p: Vec3| -> (f32, f32, f32) {
+        let d = p - eye;
+        let z = d.dot(fwd);
+        (
+            w as f32 / 2.0 + d.dot(right) / z * f,
+            h as f32 / 2.0 - d.dot(up) / z * f,
+            z,
+        )
+    };
+    let light = Vec3::new(0.4, 0.8, 0.35).normalize();
+    for t in idx.chunks(3) {
+        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        if !(pos[a].is_finite() && pos[b].is_finite() && pos[c].is_finite()) {
+            continue;
+        }
+        let pa = proj(pos[a]);
+        let pb = proj(pos[b]);
+        let pc = proj(pos[c]);
+        if pa.2 < 0.1 || pb.2 < 0.1 || pc.2 < 0.1 {
+            continue;
+        }
+        let minx = pa.0.min(pb.0).min(pc.0).floor().max(0.0) as usize;
+        let maxx = pa.0.max(pb.0).max(pc.0).ceil().min(w as f32 - 1.0) as usize;
+        let miny = pa.1.min(pb.1).min(pc.1).floor().max(0.0) as usize;
+        let maxy = pa.1.max(pb.1).max(pc.1).ceil().min(h as f32 - 1.0) as usize;
+        if maxx < minx || maxy < miny || maxx - minx > 600 {
+            continue;
+        }
+        let area = (pb.0 - pa.0) * (pc.1 - pa.1) - (pc.0 - pa.0) * (pb.1 - pa.1);
+        if area.abs() < 1e-9 {
+            continue;
+        }
+        for y in miny..=maxy {
+            for x in minx..=maxx {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let w0 = ((pb.0 - px) * (pc.1 - py) - (pc.0 - px) * (pb.1 - py)) / area;
+                let w1 = ((pc.0 - px) * (pa.1 - py) - (pa.0 - px) * (pc.1 - py)) / area;
+                let w2 = 1.0 - w0 - w1;
+                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                    continue;
+                }
+                let z = w0 * pa.2 + w1 * pb.2 + w2 * pc.2;
+                let k = y * w + x;
+                if z >= zb[k] {
+                    continue;
+                }
+                zb[k] = z;
+                let mut n = (nrm[a] * w0 + nrm[b] * w1 + nrm[c] * w2).normalize_or_zero();
+                let p = pos[a] * w0 + pos[b] * w1 + pos[c] * w2;
+                let v = (eye - p).normalize();
+                if n.dot(v) < 0.0 {
+                    n = -n;
+                }
+                let base = Vec3::from_array(col[a]);
+                let m = mats[a];
+                let diff = n.dot(light).max(0.0);
+                let sky = 0.35 + 0.25 * n.y;
+                let r = (2.0 * n.dot(v) * n - v).normalize();
+                let spec_pow = match m {
+                    0 => 40.0,
+                    1 => 80.0,
+                    2 => 30.0,
+                    _ => 10.0,
+                };
+                let spec_k = match m {
+                    0 => 0.5,
+                    1 => 0.9,
+                    2 => 0.9,
+                    4 => 0.6,
+                    _ => 0.08,
+                };
+                let spec = r.dot(light).max(0.0).powf(spec_pow) * spec_k;
+                let env = if matches!(m, 0 | 1 | 2) {
+                    0.12 * (0.5 + 0.5 * r.y)
+                } else {
+                    0.0
+                };
+                let c = base * (diff * 0.75 + sky) + Vec3::splat(spec + env);
+                let c = c.powf(1.0 / 2.2);
+                for (i, ch) in c.to_array().iter().enumerate() {
+                    img[k * 3 + i] = (ch.clamp(0.0, 1.0) * 255.0) as u8;
+                }
+            }
+        }
+    }
+    // Ground line shade.
     let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
     out.extend_from_slice(&img);
     let ppm = format!("{path}.ppm");

@@ -699,7 +699,7 @@ pub fn sedan() -> VehicleDef {
         braked: true,
     };
     let look = Look {
-        paint: [0.55, 0.06, 0.08],
+        paint: [0.42, 0.015, 0.025],
         side_glass,
         windscreen: [2.70, 3.50],
         backlight: [0.78, 1.38],
@@ -717,7 +717,7 @@ pub fn sedan() -> VehicleDef {
         handles: vec![[2.42, 0.92], [1.56, 0.93]],
         gap: 0.005,
         plate_y: [0.40, 0.70],
-        mirror: [3.28, 1.02],
+        mirror: [3.22, 1.0],
     };
     VehicleDef {
         name: "Rubble Showcase Sedan".into(),

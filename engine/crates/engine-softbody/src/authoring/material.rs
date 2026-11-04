@@ -149,16 +149,16 @@ pub struct Grades {
 impl Default for Grades {
     fn default() -> Self {
         Self {
-            panel: Material::grade(1.5e4, 2.0, 0.05, 20.0, 1.0).plastic(PLASTIC),
-            floor: Material::grade(4.0e4, 3.0, 0.05, 15.0, 1.5).plastic(PLASTIC),
+            panel: Material::grade(3.0e4, 2.0, 0.25, 4.0, 1.0).plastic(PLASTIC),
+            floor: Material::grade(5.0e4, 3.0, 0.2, 4.0, 1.5).plastic(PLASTIC),
             frame: Material::grade(1.2e5, 6.0, 0.03, 5.0, 1.5).plastic(PLASTIC),
             crush: Material::grade(6.0e6, 60.0, 0.07, 5.0, 2.0).plastic(PLASTIC),
             hsla: Material::grade(1.5e6, 40.0, 0.036, 5.0, 2.0).plastic(PLASTIC),
             uhss: Material::grade(4.0e6, 50.0, 0.06, 4.0, 3.0).plastic(PLASTIC),
             boron: Material::grade(4.5e6, 60.0, 0.06, 4.0, 3.5).plastic(PLASTIC),
             alu: Material::grade(2.0e6, 45.0, 0.036, 5.0, 2.0).plastic(PLASTIC),
-            plastic: Material::grade(1.2e4, 1.0, 0.10, 15.0, 0.5),
-            glass: Material::grade(2.5e4, 2.0, 0.05, 6.0, 1.0),
+            plastic: Material::grade(1.5e4, 1.0, 0.3, 4.0, 0.5),
+            glass: Material::grade(3.0e4, 2.0, 0.2, 3.0, 1.0),
             rigid: Material::new(1.5e6, 30.0, 1.0e9, 1.0e9, 6.0),
         }
     }
