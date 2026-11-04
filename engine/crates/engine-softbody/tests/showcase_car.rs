@@ -677,3 +677,54 @@ fn g_pulling_a_door_tears_it_off() {
     assert!((d1 - d0).length() > 0.5, "the door stayed on");
     let _ = (torn, joints);
 }
+
+/// After a 56 km/h wall crash the stopped car goes still: once its centre of
+/// mass moves under 0.1 m/s, its fastest node is under 0.2 m/s within 0.5 s
+/// (no jelly). Fails today (p99 node speed ~1.4 m/s half a second after the car
+/// stops): the acceptance test for the soft-skin fix; run with `--ignored`.
+#[test]
+#[ignore]
+fn h_settles_after_the_wall_crash() {
+    let b = built(Resolution::Medium);
+    let mut s = spawn(&b, Vec3::new(0.0, 0.0, 56.0 / 3.6), 0.0);
+    let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+    s.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+        Vec3::new(3.0, 2.0, 1.0),
+    ));
+    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let com_speed =
+        |s: &ExplicitBeams| (s.nodes.iter().map(|n| n.mass * n.vel).sum::<Vec3>() / total).length();
+    // Skip the hit; wait (up to 4 s) for the car to stop.
+    run(&mut s, 0.3);
+    let mut t = 0.3;
+    while com_speed(&s) > 0.1 && t < 4.0 {
+        s.frame();
+        t += 1.0 / 60.0;
+    }
+    let stopped = t;
+    let mut settled = None;
+    let mut fastest = 0.0f32;
+    for f in 0..30 {
+        s.frame();
+        let v = s.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max);
+        // The 95th-percentile node: one tyre node chattering on the ground is not a jelly body.
+        let mut speeds: Vec<f32> = s.nodes.iter().map(|n| n.vel.length()).collect();
+        speeds.sort_by(f32::total_cmp);
+        let p99 = speeds[speeds.len() * 99 / 100];
+        fastest = p99;
+        if settled.is_none() && p99 < 0.2 {
+            settled = Some(f as f32 / 60.0);
+        }
+        let _ = v;
+    }
+    eprintln!(
+        "(h) after the wall: the car stopped at {stopped:.2} s; p99 node speed under 0.2 m/s after {:?} s (now {fastest:.3} m/s)",
+        settled
+    );
+    assert!(stopped < 4.0, "the car never stopped");
+    assert!(
+        settled.is_some(),
+        "still jelly: p99 node speed {fastest} m/s 0.5 s after stopping"
+    );
+}
