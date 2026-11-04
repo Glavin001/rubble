@@ -3031,16 +3031,38 @@ impl WgpuSim {
     }
 
     fn refresh_cell(&mut self) {
-        let hier = self.grid_levels_mode.unwrap_or(self.has_convex);
+        let mut hier = self.grid_levels_mode.unwrap_or(self.has_convex);
+        // The cache holds a hierarchical choice: forced, convex, or (automatic grid) a
+        // box scene the uniform grid could not hold, until the colliders change.
+        let auto = self.grid_levels_mode.is_none();
         let (cell, levels) = match self.grid_cache {
-            Some((n, cell, levels)) if hier && n == self.collider_count => (cell, levels),
+            Some((n, cell, levels)) if (hier || auto) && n == self.collider_count => (cell, levels),
             _ => {
-                let r = rigid_plan::grid_cell_with(
+                let mut r = rigid_plan::grid_cell_with(
                     &self.host_cols,
                     &self.host_bodies,
                     hier,
                     self.movable_radius,
                 );
+                // Automatic grid: more dynamics wider than a uniform cell than its large
+                // list holds (the fracture lab's cuboid suburb) take the hierarchical
+                // grid, which finds every pair at any size, instead of failing the step.
+                if !hier
+                    && auto
+                    && rigid_plan::uniform_large_dynamics_overflow(
+                        &self.host_cols,
+                        &self.host_bodies,
+                        r.0,
+                    )
+                {
+                    hier = true;
+                    r = rigid_plan::grid_cell_with(
+                        &self.host_cols,
+                        &self.host_bodies,
+                        true,
+                        self.movable_radius,
+                    );
+                }
                 if hier {
                     self.grid_cache = Some((self.collider_count, r.0, r.1));
                 }
