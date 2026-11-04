@@ -173,6 +173,16 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     set(&vis, "rigid", &Uint8Array::from(v.rigid.as_slice()).into());
     set(
         &vis,
+        "anchor",
+        &Uint32Array::from(v.anchor.as_slice()).into(),
+    );
+    set(
+        &vis,
+        "anchorCoords",
+        &f32s(v.anchor_coords.iter().flatten().copied()),
+    );
+    set(
+        &vis,
         "nodeRest",
         &f32s(v.node_rest.iter().flatten().copied()),
     );

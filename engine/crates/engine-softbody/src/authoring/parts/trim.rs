@@ -321,6 +321,12 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
             .iter()
             .map(|&(p, nn, o, mat, ao, sm)| {
                 let q = p + o * (r * phi.sin()) - nn * (r * (1.0 - phi.cos()));
+                // A window seal's rounded edge is the black rubber too.
+                let mat = if st.seal {
+                    super::super::skin::mat::TRIM
+                } else {
+                    mat
+                };
                 let id = m.vert(
                     q,
                     nn * phi.cos() + o * phi.sin(),

@@ -18,7 +18,7 @@ use glam::{Quat, Vec3};
 
 /// Superellipsoid quads per face edge (scaled by the level of detail).
 fn sn() -> usize {
-    super::segs(7, 3)
+    super::segs(5, 3)
 }
 
 /// A frame from a pitch about x (positive tips +y toward +z).

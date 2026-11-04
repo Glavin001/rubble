@@ -147,6 +147,19 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
     // orthonormal frame, never stretched; they go whole.
     pos = p0 + t * bd.a + b * bd.b + n * bd.h;
     tear = max(t0, max(t1, t2));
+    // Mounted: where its mount (a skin triangle) has moved more than 4 cm
+    // from where the part holds this vertex, the part breaks here.
+    let mount = bd.flags >> 2u;
+    if (mount != 0u) {
+      let mt = params.trisAt + 4u * (mount - 1u);
+      let q0 = nodePos(topo[mt]);
+      let q1 = nodePos(topo[mt + 1u]);
+      let q2 = nodePos(topo[mt + 2u]);
+      let qc = cross(q1 - q0, q2 - q0);
+      let qn = qc / max(length(qc), 1e-12);
+      let w = q0 + org + bd.rx * (q1 - q0) + bd.ry * (q2 - q0) + bd.rz * qn;
+      if (distance(w, pos) > 0.04) { tear = 1.0; }
+    }
   } else {
     pos = p0 + bd.a * e1 + bd.b * e2 + bd.h * n;
     // The tear field interpolated over the binding nodes: the fragment stage
@@ -292,10 +305,15 @@ fn glyph(g: u32, p: vec2f) -> f32 {
   return f32(bit) * mix(1.0, edge, 0.6);
 }
 // Diffuse irradiance (a few env taps round the normal).
+// Analytic (the studio blurred to a cosine lobe, fitted to env(n, 1)): the
+// bright cyclorama, the sun, and the floor in the car's shadow below.
 fn irradiance(n: vec3f) -> vec3f {
-  let a = env(n, 1.0);
-  let b = env(normalize(n + vec3f(0.0, 0.6, 0.0)), 1.0);
-  return (a * 0.6 + b * 0.4) * 0.55;
+  let up = n.y;
+  let skyc = mix(vec3f(1.25, 1.27, 1.3), vec3f(0.95, 0.96, 1.0), smoothstep(0.0, 0.9, up))
+    + vec3f(0.19, 0.18, 0.16) * max(dot(n, normalize(frame.light.xyz)), 0.0);
+  let t = max(gP.y, 0.0) / max(-up, 0.05);
+  let floorc = vec3f(0.27, 0.275, 0.285) * (1.0 - 0.88 * exp(-t * 1.6));
+  return mix(floorc, skyc, smoothstep(-0.6, 0.25, up)) * 0.55;
 }
 
 fn ggx(ndh: f32, a: f32) -> f32 {
@@ -356,6 +374,9 @@ fn cracks(q: vec2f) -> f32 {
 
 @fragment
 fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
+  // Texture-coordinate footprint (taken in uniform control flow): printed
+  // text fades to its average ink when too small to read.
+  let uvw = fwidth(i.uv);
   // Tears: the far half of a torn triangle is cut away (through the triangle,
   // not along the grid); a band at the cut shows the bare metal edge.
   if (i.torn > 0.5) { discard; }
@@ -458,6 +479,13 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     }
     return vec4f(tonemap(col * 2.2 + env(r, 0.02) * f * 0.5), 1.0);
   }
+  if (m >= 12u && m <= 16u) {
+    // Cabin trim (seats, dash, door cards, headliner, carpet): under the roof,
+    // lit by what comes through the glass; a soft sheen, no studio reflection.
+    let sheen = pow(1.0 - ndv, 3.0) * 0.08 + sun.x * ggx(ndh, 0.25) * ndl * 0.02;
+    let cab = albedo * (irradiance(n) * 0.55 * ao + sun * ndl / 3.14159 * 0.35 * ao) + vec3f(sheen) * ao;
+    return vec4f(tonemap(cab), 1.0);
+  }
   var pr = props(m);
   var albedo2 = albedo;
   var ao2 = ao;
@@ -475,6 +503,8 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
       let px = vec2f(fract(tx) * 6.0 - 0.5, (0.86 - uv.y) / 0.72 * 7.0);
       ink = max(ink, glyph(PLATE_TEXT[ci], px));
     }
+    // Too small to read: its average ink instead of aliased pixels.
+    ink = mix(ink, 0.3, smoothstep(0.08, 0.3, length(uvw) * 7.0));
     albedo2 = mix(albedo, vec3f(0.015, 0.02, 0.04), ink);
   }
   if (m == 6u) {
@@ -486,7 +516,7 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
       let tx = fract(uv.x) * nch;
       let ci = u32(floor(tx)) % 31u;
       let px = vec2f(fract(tx) * 6.0 - 0.5, (0.81 - uv.y) / 0.30 * 7.0);
-      let ink = glyph(TYRE_TEXT[ci], px);
+      let ink = mix(glyph(TYRE_TEXT[ci], px), 0.25, smoothstep(0.3, 1.0, uvw.x * nch));
       albedo2 = mix(albedo, vec3f(0.07), ink);
       pr = vec3f(mix(0.72, 0.45, ink), 0.0, 0.0);
     }
@@ -522,7 +552,9 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     let cf = 0.04 + 0.96 * fres;
     let diffuse = albedo * (irradiance(n) * ao + sun * ndl / 3.14159);
     let flakeF0 = albedo * 0.55 + vec3f(0.03);
-    let flake = flakeF0 * (env(r, 0.42) * ao * 0.9 + sun * ggx(ndh, 0.17) * g / max(4.0 * ndv, 1e-3));
+    // The flakes' rough reflection: the blurred studio (the analytic lobe, not
+    // a second environment lookup).
+    let flake = flakeF0 * (irradiance(r) * 1.7 * ao * 0.9 + sun * ggx(ndh, 0.17) * g / max(4.0 * ndv, 1e-3));
     // Sparkle: tiny flakes catching the sun.
     let cell = floor(i.world * 900.0);
     let sp = step(0.992, hash3(cell)) * pow(ndh, 40.0) * ndl * 2.5;
@@ -702,6 +734,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           f[o + 13] = v.normals[3 * i + 1];
           f[o + 14] = v.normals[3 * i + 2];
           u[o + 15] = (v.smooth ? v.smooth[i] : 0) | (v.rigid && v.rigid[i] ? 2 : 0);
+          // A mounted rigid part's mount: (skin triangle + 1) in the flags'
+          // upper bits, its (α, β, h) in the (unused) rest-normal words.
+          if (v.rigid && v.rigid[i] && v.anchor && v.anchor[i] !== 0xffffffff) {
+            u[o + 15] |= (v.anchor[i] + 1) << 2;
+            f[o + 12] = v.anchorCoords[3 * i];
+            f[o + 13] = v.anchorCoords[3 * i + 1];
+            f[o + 14] = v.anchorCoords[3 * i + 2];
+          }
         }
         const binds = upload('showcase-binds', bindData);
         // Deformed (position | torn, normal | strain) per vertex: the compute pass

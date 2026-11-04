@@ -91,8 +91,8 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         crease: 0.60,
         a_below: 0.10,
         a_above: 0.14,
-        d_top: -0.035,
-        m_top: 0.30,
+        d_top: -0.05,
+        m_top: 0.40,
         tuck: 0.05,
     };
     let tail = SectionShape {
@@ -121,9 +121,9 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         side,
         nose,
         tail,
-        nose_bow: 0.08,
+        nose_bow: 0.11,
         tail_bow: 0.09,
-        nose_corner: 0.36,
+        nose_corner: 0.47,
         tail_corner: 0.31,
         flare: 0.022,
         flare_width: 0.17,
@@ -207,7 +207,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
             (0.76, -0.345),
             (0.615, -0.352),
         ],
-        arch_radius: 0.348,
+        arch_radius: 0.338,
         exhaust: [0.47, 0.46, 0.042],
         paint: def.look.paint,
     }
@@ -468,7 +468,9 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     // rubber seals).
     let near_glass = |p: Vec3| -> bool {
         let r = lidrow(p.z);
-        if p.y < r.y_t + 0.008 {
+        // From just under the belt (the doors' top edges meet the glass's
+        // weatherstrip there).
+        if p.y < r.y_t - 0.006 {
             return false;
         }
         let i = usize::MAX;
@@ -728,12 +730,12 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     // The front plate: on its bracket over the lower intake's centre.
     let plate_front = metric(
         m,
+        // Continuous everywhere (a jump in the field would be made metric into
+        // a sliver at the jump).
         &trim::field(m, |i, p| {
-            if !on_band(i) || surf.arc[i] > 0.4 {
-                return 1.0;
-            }
             let (a, h) = front_ah(i, p);
             smax(a.abs() - 0.262, (h - st.plate_front_h).abs() - 0.058, 0.02)
+                + if p.z < prof.length - 0.6 { 1.0 } else { 0.0 }
         }),
     );
     let plate_front_back: Vec<f32> = plate_front.iter().map(|v| v - 0.01).collect();

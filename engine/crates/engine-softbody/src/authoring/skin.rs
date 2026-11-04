@@ -156,7 +156,18 @@ pub struct ShowcaseVisual {
     pub node_rest: Vec<[f32; 3]>,
     /// The pieces (name, first vertex, vertex count), in order.
     pub pieces: Vec<(String, u32, u32)>,
+    /// Per vertex of a mounted rigid part (lamps, mirrors, handles, tempered
+    /// glass): the skin triangle it is mounted on (an index into
+    /// `normal_tris`, `u32::MAX` for none) and its (α, β, h) on it. Where the
+    /// mount has moved more than [`ANCHOR_BREAK`] from where the rigid part
+    /// holds the vertex (the panel under it crushed or tore), the part breaks
+    /// there (a torn vertex) instead of floating free.
+    pub anchor: Vec<u32>,
+    pub anchor_coords: Vec<[f32; 3]>,
 }
+
+/// A mounted rigid part breaks where its mount has moved this far (m) from it.
+pub const ANCHOR_BREAK: f32 = 0.04;
 
 /// Candidate binding triangles of one part, with a coarse grid over their centroids.
 struct Binder {
@@ -343,6 +354,12 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     }
     let fallback = Binder::new(sk.skin.clone(), &node_pos, 0.15);
     // Single-part skin triangles of every part (votes and reach checks).
+    let skin_index: HashMap<[u32; 3], u32> = sk
+        .skin
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (*t, i as u32))
+        .collect();
     let pure = Binder::new(
         by_part.values().flatten().copied().collect(),
         &node_pos,
@@ -546,9 +563,18 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             let tt = (p1 - p0).normalize();
             let nn = (p1 - p0).cross(p2 - p0).normalize();
             let bb = nn.cross(tt);
+            let mounted = piece.bind == Bind::Rigid;
             for k in 0..m.len() {
                 let d = m.pos[k] - p0;
                 let n = m.nrm[k];
+                let a = if mounted {
+                    pure.bind(m.pos[k], n)
+                        .and_then(|(at, ac, _)| skin_index.get(&at).map(|&i| (i, ac)))
+                } else {
+                    None
+                };
+                out.anchor.push(a.map_or(u32::MAX, |x| x.0));
+                out.anchor_coords.push(a.map_or([0.0; 3], |x| x.1));
                 out.bind_nodes.push(t);
                 out.bind_coords.push([d.dot(tt), d.dot(bb), d.dot(nn)]);
                 out.bind_normal.push([n.dot(tt), n.dot(bb), n.dot(nn)]);
@@ -667,6 +693,8 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             // body's skin (not on wheels or frames).
             out.smooth.push(if own.is_none() { m.smooth[k] } else { 0 });
             out.rigid.push(0);
+            out.anchor.push(u32::MAX);
+            out.anchor_coords.push([0.0; 3]);
         }
         let count = out.positions.len() as u32 - first;
         out.indices.extend(idx.iter().map(|i| i + first));
@@ -788,7 +816,21 @@ pub fn deform(v: &ShowcaseVisual, nodes: &[Vec3]) -> (Vec<Vec3>, Vec<Vec3>) {
             continue;
         }
         if rigid {
-            pos.push(p0 + t * al + bb * be + n * h);
+            let q = p0 + t * al + bb * be + n * h;
+            let anchor = v.anchor.get(i).copied().unwrap_or(u32::MAX);
+            if anchor != u32::MAX {
+                let [a0, a1, a2] = v.normal_tris[anchor as usize];
+                let (q0, q1, q2) = (nodes[a0 as usize], nodes[a1 as usize], nodes[a2 as usize]);
+                let [aa, ab, ah] = v.anchor_coords[i];
+                let an = (q1 - q0).cross(q2 - q0).normalize_or_zero();
+                let w = q0 + (q1 - q0) * aa + (q2 - q0) * ab + an * ah;
+                if w.distance(q) > ANCHOR_BREAK {
+                    pos.push(Vec3::splat(f32::NAN));
+                    nrm.push(Vec3::Y);
+                    continue;
+                }
+            }
+            pos.push(q);
         } else {
             pos.push(p0 + e1 * al + e2 * be + n * h);
         }

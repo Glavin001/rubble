@@ -400,8 +400,8 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
         let t = ((rad - 0.07) / (rr - 0.085)).clamp(0.0, 1.0);
         hw * 0.80 - 0.035 * (PI * t).sin() * (1.0 - 0.3 * t) + 0.004 * (1.0 - t)
     };
-    let nr = super::segs(14, 6);
-    let na = super::segs(140, 60);
+    let nr = super::segs(12, 6);
+    let na = super::segs(110, 50);
     let s1 = ax.cross(s0);
     let mut face = Mesh::default();
     let mut ids = vec![vec![0u32; na]; nr + 1];
