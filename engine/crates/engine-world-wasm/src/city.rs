@@ -14,7 +14,8 @@ use rubble::*;
 use wasm_bindgen::prelude::*;
 
 /// Fields of a page's `WorldDef` the city takes; the rest are the city's own.
-const PAGE_FIELDS: [&str; 5] = [
+const PAGE_FIELDS: [&str; 6] = [
+    "features",
     "gpuTiming",
     "killBelow",
     "killBounds",
@@ -76,6 +77,9 @@ fn world_def(city: &WebCity, page: JsValue) -> Result<WorldDef, JsValue> {
     def.kill_bounds = p.kill_bounds;
     def.readback_frames = p.readback_frames;
     def.vehicles = p.vehicles;
+    if o.contains_key("features") {
+        def.features = p.features;
+    }
     Ok(def)
 }
 
@@ -151,7 +155,7 @@ impl WebCity {
 #[wasm_bindgen]
 impl WebWorld {
     /// The city's world on a new device: its own `WorldDef` (`CityDef::world_def`),
-    /// with the page's `{ gpuTiming, killBelow, killBounds, readbackFrames, vehicles }`.
+    /// with the page's `{ features, gpuTiming, killBelow, killBounds, readbackFrames, vehicles }`.
     /// Fails with the device's limits when the city does not fit them.
     #[wasm_bindgen(js_name = createCity)]
     pub async fn create_city(city: &WebCity, page: JsValue) -> Result<WebWorld, JsValue> {
@@ -165,6 +169,7 @@ impl WebWorld {
             },
             &def,
         ))?;
+        crate::creation_check(&world).await?;
         Ok(WebWorld { world })
     }
 
@@ -222,6 +227,28 @@ impl WebWorld {
         }
         let added = res(c.start(&mut self.world, s))?;
         Ok(added.into_iter().map(|b| handle(b.to_bits())).collect())
+    }
+
+    /// A steel ball of `radius` m at `origin` moving at `velocity` (m/s), a projectile
+    /// (`rubble::city::city_shell`): its handle.
+    #[wasm_bindgen(js_name = cityShell)]
+    pub fn city_shell(
+        &mut self,
+        origin: &[f32],
+        velocity: &[f32],
+        radius: f32,
+    ) -> Result<f64, JsValue> {
+        let v3 = |a: &[f32], what: &str| -> Result<[f32; 3], JsValue> {
+            a.try_into()
+                .map_err(|_| err(format!("cityShell: {what} needs 3 numbers")))
+        };
+        let b = res(city_shell(
+            &mut self.world,
+            v3(origin, "origin")?,
+            v3(velocity, "velocity")?,
+            radius,
+        ))?;
+        Ok(handle(b.to_bits()))
     }
 
     /// Houses' bonds intact, summed (as of the last polled frame).

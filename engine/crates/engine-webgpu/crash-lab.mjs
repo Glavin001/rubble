@@ -101,6 +101,8 @@ export function createCrashLab(ctx) {
   const countsEl = el('<div class="lab-ui" id="labCounts"></div>');
   const legendEl = el('<div class="lab-ui" id="labLegend"></div>');
   const preset = ctx.preset ? LAB_PRESETS[ctx.preset] : null;
+  // 'body' only when the page draws an authored body (ctx.body).
+  const skinModes = ctx.body ? SKIN_MODES : SKIN_MODES.filter((m) => m !== 'body');
 
   // ---------------------------------------------------------------- state
   const P = (k, d) => (qs.has(k) && qs.get(k) !== '' ? qs.get(k) : d);
@@ -128,9 +130,10 @@ export function createCrashLab(ctx) {
   };
   renderer.set({
     colorMode: COLOR_MODES.includes(qs.get('color')) ? qs.get('color') : 'strain',
-    skin: SKIN_MODES.includes(qs.get('skin3')) ? qs.get('skin3') : 'ghost',
-    skeleton: qs.get('skeleton') !== '0',
-    nodes: qs.get('nodes') !== '0',
+    skin: skinModes.includes(qs.get('skin3')) ? qs.get('skin3') : ctx.body ? 'body' : 'ghost',
+    // With an authored body the skeleton and nodes start hidden (K, N show them).
+    skeleton: qs.has('skeleton') ? qs.get('skeleton') !== '0' : !ctx.body,
+    nodes: qs.has('nodes') ? qs.get('nodes') !== '0' : !ctx.body,
     stubs: qs.get('stubs') !== '0',
     studio: qs.get('studio') !== '0',
     tubeR: Number(P('tube', 0.009)),
@@ -158,7 +161,7 @@ export function createCrashLab(ctx) {
       <button id="labNodes" title="N">nodes</button>
       <button id="labStubs" title="broken-beam stubs">stubs</button>
       <label>colour</label><select id="labColor">${COLOR_MODES.map((m) => `<option>${m}</option>`).join('')}</select>
-      <label>skin</label><select id="labSkin">${SKIN_MODES.map((m) => `<option>${m}</option>`).join('')}</select>
+      <label>skin</label><select id="labSkin">${skinModes.map((m) => `<option>${m}</option>`).join('')}</select>
       <button id="labStudio">studio</button>
       <span class="sep"></span>
       <label>camera</label>${['side', 'top', 'three', 'front'].map((c) => `<button data-cam="${c}">${c === 'three' ? '¾' : c}</button>`).join('')}<button id="labFollow">follow</button><button id="labSpin" title="O">orbit</button>
@@ -215,7 +218,7 @@ export function createCrashLab(ctx) {
     const list = custom ? custom.split(',').map((s) => s.trim()).filter(Boolean)
       : [...(preset?.pills ?? [ctx.xscene.toUpperCase()])];
     const o = renderer.opts;
-    const sub = custom ? [] : [o.skin === 'off' ? (o.nodes ? 'NODE + BEAM' : 'THE SKELETON') : o.skin === 'ghost' ? 'THE SKELETON · GHOST BODY' : 'COLLISION SKIN'];
+    const sub = custom ? [] : [o.skin === 'off' ? (o.nodes ? 'NODE + BEAM' : 'THE SKELETON') : o.skin === 'ghost' ? 'THE SKELETON · GHOST BODY' : o.skin === 'body' ? 'BODY SKINNED TO THE NODES' : 'COLLISION SKIN'];
     pillsEl.innerHTML = list.map((t) => `<div class="lab-pill">${t}</div>`).join('') + sub.map((t) => `<div class="lab-pill sub">${t}</div>`).join('');
   }
   function legend() {
@@ -448,7 +451,7 @@ export function createCrashLab(ctx) {
     else if (k === 'KeyK' || k === 'KeyV') { renderer.set({ skeleton: !renderer.opts.skeleton }); syncPanel(); e.stopImmediatePropagation(); }
     else if (k === 'KeyN') { renderer.set({ nodes: !renderer.opts.nodes }); syncPanel(); }
     else if (k === 'KeyB') { const i = COLOR_MODES.indexOf(renderer.opts.colorMode); renderer.set({ colorMode: COLOR_MODES[(i + 1) % COLOR_MODES.length] }); syncPanel(); }
-    else if (k === 'KeyM') { const i = SKIN_MODES.indexOf(renderer.opts.skin); renderer.set({ skin: SKIN_MODES[(i + 1) % SKIN_MODES.length] }); syncPanel(); e.stopImmediatePropagation(); }
+    else if (k === 'KeyM') { const i = skinModes.indexOf(renderer.opts.skin); renderer.set({ skin: skinModes[(i + 1) % skinModes.length] }); syncPanel(); e.stopImmediatePropagation(); }
     else if (k === 'KeyG') { st.grabTool = !st.grabTool; syncPanel(); }
     else if (k === 'KeyO') { st.spin = !st.spin; syncPanel(); }
     else if (k === 'KeyR') { restart(); e.stopImmediatePropagation(); }

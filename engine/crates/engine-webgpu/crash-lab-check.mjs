@@ -15,7 +15,8 @@
 //     --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
 //   node --experimental-websocket crash-lab-check.mjs [run ...] [--car sedan|e36|...] [--out DIR]
 //
-// Runs: wall56, pole29, headon50, drop15, grab, modes. --car e36 (and viper,
+// Runs: wall56, pole29, headon50, drop15, grab, modes. --car showcase: Rubble's authored
+// sedan with its skinned body. --car e36 (and viper,
 // mustang, agora) uses the local Rigs of Rods cars in engine/local-vehicles
 // (gitignored; skipped when absent). Needs Chrome (CHROME env to override).
 import { createServer } from 'node:http';
@@ -35,7 +36,7 @@ const only = args.filter((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWi
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 mkdirSync(OUT, { recursive: true });
-const CARS = { sedan: 'car=sedan', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
+const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
   mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck' };
 if (!CARS[CAR]) throw new Error(`--car: one of ${Object.keys(CARS).join(', ')}`);
 const carFile = CARS[CAR].startsWith('truck=') ? join(LOCAL, CARS[CAR].split('/__local/')[1]) : null;

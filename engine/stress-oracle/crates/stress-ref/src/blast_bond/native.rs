@@ -1,0 +1,737 @@
+//! The resident (native) solve of PhysX's GPU destruction stage, one island at a time
+//! (`stressgpu/detail/StressComponentIteration.cuh` `componentStressSolve`, without rotational
+//! or shear stiffness): projected preconditioned CG in node space on `L = B B^T`.
+//!
+//! Per solve, for each island (Blast's component):
+//! - `r = b - B x0` (warm) or `b`; `delta^2 = tol^2 |b|^2`;
+//! - a zero load retires at once with zero forces (`retireHomogeneousTreeComponent`);
+//! - each iteration, in the device's order:
+//!   1. `r` projected off the island's rigid modes (a free island; `prepareNativeResidualComponent`);
+//!   2. `num = |B^T r|^2`; the relative residual `|r|^2 <= delta^2` must also hold (`hold`);
+//!   3. passing, after an update or on a warm start: the true residual rebuilt from the
+//!      accumulated solution, the recurrence restarted, and both tests taken again (reliable
+//!      residual);
+//!   4. stagnation: no 1% gain on the best `num` in 512 iterations stops, unconverged;
+//!   5. `num <= delta^2` and no hold: converged;
+//!   6. the force test (`force_tolerance`): the last step moved the forces by at most that
+//!      fraction of them;
+//!   7. the direction source `g`: `r` on iteration 0 (projected steepest descent), else the
+//!      two-step Chebyshev block-Jacobi polynomial `P = (a+b-ab)M - ab M E M` (`M` the inverse
+//!      of each node's 6x6 block of `L`, `E` the rest of `L`); projected, scaled by its
+//!      largest component; `gamma = r.g` must be positive;
+//!   8. `beta = gamma / gamma_prev` from iteration 2 on (iteration 1 restarts: the
+//!      preconditioner changed); `p = g + beta p`;
+//!   9. `q = L p` explicitly, `den = |B^T p|^2`; a non-positive or non-finite `den` retires;
+//!   10. `alpha = gamma / den`, `u += alpha p`, `r -= alpha q`;
+//! - then `x = x0 + B^T u`.
+//!
+//! The rigid modes come from the live bond equations, not the authored positions: an exact
+//! spanning-tree frame with the rotations its cycle closures leave (`motion`, from
+//! `StressMotionForest.cuh`; the device builds it in float pairs, `StressMotionPair*.cuh`).
+
+use super::motion::{self, triangle, Frame};
+use super::*;
+
+/// The polynomial's weights: the reciprocals of the degree-2 Chebyshev roots on [0.1, 2.01]
+/// (`StressNativePolynomial.cuh`).
+pub(crate) const LOW_WEIGHT: f64 = 0.5779388123770052;
+pub(crate) const HIGH_WEIGHT: f64 = 2.6335678180143502;
+/// Iterations without a 1% gain on the best residual before a solve stops (`kStagnation`).
+pub(crate) const STAGNATION: u32 = 512;
+
+type Block<T> = [[T; 6]; 6];
+
+fn flat<T: Real>(p: Pair<T>) -> [T; 6] {
+    [p.a[0], p.a[1], p.a[2], p.l[0], p.l[1], p.l[2]]
+}
+fn pair<T: Real>(v: [T; 6]) -> Pair<T> {
+    Pair {
+        a: [v[0], v[1], v[2]],
+        l: [v[3], v[4], v[5]],
+    }
+}
+
+/// Solve `a x = b` (n <= 6) by Gaussian elimination with partial pivoting; `None` when singular.
+fn solve_dense<T: Real>(mut a: Block<T>, mut b: [T; 6], n: usize) -> Option<[T; 6]> {
+    let zero = T::default();
+    let abs = |x: T| if x < zero { -x } else { x };
+    for c in 0..n {
+        let p = (c..n).max_by(|&i, &j| {
+            abs(a[i][c])
+                .partial_cmp(&abs(a[j][c]))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        if !(abs(a[p][c]) > zero) {
+            return None;
+        }
+        a.swap(c, p);
+        b.swap(c, p);
+        for r in c + 1..n {
+            let f = a[r][c] / a[c][c];
+            for k in c..n {
+                a[r][k] = a[r][k] - f * a[c][k];
+            }
+            b[r] = b[r] - f * b[c];
+        }
+    }
+    let mut x = [zero; 6];
+    for r in (0..n).rev() {
+        let mut s = b[r];
+        for k in r + 1..n {
+            s = s - a[r][k] * x[k];
+        }
+        x[r] = s / a[r][r];
+    }
+    Some(x)
+}
+
+fn invert<T: Real>(a: &Block<T>) -> Option<Block<T>> {
+    let zero = T::default();
+    let mut inv = [[zero; 6]; 6];
+    for c in 0..6 {
+        let mut e = [zero; 6];
+        e[c] = T::of(1.0);
+        let col = solve_dense(*a, e, 6)?;
+        for r in 0..6 {
+            inv[r][c] = col[r];
+        }
+    }
+    Some(inv)
+}
+
+fn mul<T: Real>(m: &Block<T>, v: [T; 6]) -> [T; 6] {
+    let mut out = [T::default(); 6];
+    for r in 0..6 {
+        let mut s = T::default();
+        for c in 0..6 {
+            s = s + m[r][c] * v[c];
+        }
+        out[r] = s;
+    }
+    out
+}
+
+/// One island's operator in `T`: its nodes, its live bonds, and the graph's fixed data.
+struct Island<'a, T> {
+    nodes: Vec<usize>,
+    bonds: Vec<usize>,
+    /// Each island node's incident live bonds (bond, is second).
+    incident: Vec<Vec<(usize, bool)>>,
+    slot: &'a [usize],
+    w: &'a [(T, T)],
+    s: &'a [T],
+    o0: &'a [[T; 3]],
+    o1: &'a [[T; 3]],
+    ends: &'a [[usize; 2]],
+    /// Per bond `A` and `Al` (`s A`, `s Al` in `S`), or empty.
+    rot: &'a [[T; 6]],
+    shear: &'a [[T; 6]],
+}
+
+fn sym<T: Real>(m: &[T; 6], v: [T; 3]) -> [T; 3] {
+    [
+        m[0] * v[0] + m[3] * v[1] + m[4] * v[2],
+        m[3] * v[0] + m[1] * v[1] + m[5] * v[2],
+        m[4] * v[0] + m[5] * v[1] + m[2] * v[2],
+    ]
+}
+
+impl<T: Real> Island<'_, T> {
+    /// `t_j = S C^T D v` for bond `j` (v by island node slot; nodes outside the island are 0).
+    fn term(&self, j: usize, v: &[Pair<T>]) -> Pair<T> {
+        let [n0, n1] = self.ends[j];
+        let at = |n: usize| -> Pair<T> {
+            let k = self.slot[n];
+            if k == usize::MAX {
+                Pair::default()
+            } else {
+                Pair {
+                    a: scale(v[k].a, self.w[n].0),
+                    l: scale(v[k].l, self.w[n].1),
+                }
+            }
+        };
+        let (p0, p1) = (at(n0), at(n1));
+        let s = self.s[j];
+        let a = sub(p0.a, p1.a);
+        let l = add(sub(p0.l, p1.l), sub(cross(self.o0[j], p0.a), cross(self.o1[j], p1.a)));
+        Pair {
+            a: scale(self.rot.get(j).map_or(a, |m| sym(m, a)), s),
+            l: scale(self.shear.get(j).map_or(l, |m| sym(m, l)), s),
+        }
+    }
+
+    /// Bond `j`'s share (bond vector `y`, carrying `S` once more) at an endpoint, before `D`.
+    fn share(&self, j: usize, second: bool, y: Pair<T>) -> Pair<T> {
+        let ya = self.rot.get(j).map_or(y.a, |m| sym(m, y.a));
+        let yl = self.shear.get(j).map_or(y.l, |m| sym(m, y.l));
+        let (ya, yl) = (scale(ya, self.s[j]), scale(yl, self.s[j]));
+        if second {
+            Pair {
+                a: sub(cross(self.o1[j], yl), ya),
+                l: scale(yl, -T::of(1.0)),
+            }
+        } else {
+            Pair {
+                a: sub(ya, cross(self.o0[j], yl)),
+                l: yl,
+            }
+        }
+    }
+
+    /// `L v` and `|B^T v|^2`.
+    fn apply(&self, v: &[Pair<T>]) -> (Vec<Pair<T>>, T) {
+        let mut t = vec![Pair::<T>::default(); self.bonds.len()];
+        let mut norm = T::default();
+        for (k, &j) in self.bonds.iter().enumerate() {
+            t[k] = self.term(j, v);
+            norm = norm + t[k].norm2();
+        }
+        let mut out = vec![Pair::<T>::default(); self.nodes.len()];
+        let index: std::collections::HashMap<usize, usize> = self
+            .bonds
+            .iter()
+            .enumerate()
+            .map(|(k, &j)| (j, k))
+            .collect();
+        for (i, &n) in self.nodes.iter().enumerate() {
+            let mut acc = Pair::<T>::default();
+            for &(j, second) in &self.incident[i] {
+                let sh = self.share(j, second, t[index[&j]]);
+                acc = Pair {
+                    a: add(acc.a, sh.a),
+                    l: add(acc.l, sh.l),
+                };
+            }
+            out[i] = Pair {
+                a: scale(acc.a, self.w[n].0),
+                l: scale(acc.l, self.w[n].1),
+            };
+        }
+        (out, norm)
+    }
+
+    /// Node `i`'s 6x6 block of `L` (its own bonds' terms, the other ends held at zero).
+    fn block(&self, i: usize) -> Block<T> {
+        let n = self.nodes[i];
+        let mut b = [[T::default(); 6]; 6];
+        for c in 0..6 {
+            let mut e = [T::default(); 6];
+            e[c] = T::of(1.0);
+            let mut v = vec![Pair::<T>::default(); self.nodes.len()];
+            v[i] = pair(e);
+            let mut acc = Pair::<T>::default();
+            for &(j, second) in &self.incident[i] {
+                let sh = self.share(j, second, self.term(j, &v));
+                acc = Pair {
+                    a: add(acc.a, sh.a),
+                    l: add(acc.l, sh.l),
+                };
+            }
+            let col = flat(Pair {
+                a: scale(acc.a, self.w[n].0),
+                l: scale(acc.l, self.w[n].1),
+            });
+            for r in 0..6 {
+                b[r][c] = col[r];
+            }
+        }
+        b
+    }
+}
+
+/// The rigid modes of a free island and their projection (`projectMotionComponent`), from the
+/// frame [`motion::frame`] builds; the projection runs in `T`, the frame converted once, as the
+/// device stores it in solver precision.
+struct Modes<T> {
+    dimension: usize,
+    rotations: usize,
+    axis: [[T; 3]; 3],
+    relative: Vec<[T; 3]>,
+    scale: [T; 6],
+    factor: [T; 21],
+}
+
+impl<T: Real> Modes<T> {
+    fn new(f: &Frame) -> Modes<T> {
+        let t3 = |v: [f64; 3]| [T::of(v[0]), T::of(v[1]), T::of(v[2])];
+        Modes {
+            dimension: f.dimension(),
+            rotations: f.rotations,
+            axis: std::array::from_fn(|k| if k < f.rotations { t3(f.axis(k)) } else { [T::default(); 3] }),
+            relative: f.relative.iter().map(|&q| t3(q)).collect(),
+            scale: f.scale.map(T::of),
+            factor: f.factor.map(T::of),
+        }
+    }
+
+    /// `v` by island node slot; `w` the nodes' `(d_a, d_l)`.
+    fn project(&self, v: &mut [Pair<T>], w: &[(T, T)], nodes: &[usize]) {
+        let d = self.dimension;
+        if d == 0 {
+            return;
+        }
+        let one = T::of(1.0);
+        let mut sum = [T::default(); 6];
+        for (i, &n) in nodes.iter().enumerate() {
+            let linear = scale(v[i].l, one / w[n].1);
+            let rotation = sub(scale(v[i].a, one / w[n].0), cross(self.relative[i], linear));
+            for k in 0..self.rotations {
+                sum[k] = sum[k] + dot(self.axis[k], rotation);
+            }
+            for j in 0..3 {
+                sum[self.rotations + j] = sum[self.rotations + j] + linear[j];
+            }
+        }
+        let mut c = [T::default(); 6];
+        for row in 0..d {
+            let mut value = sum[row] * self.scale[row];
+            for j in 0..row {
+                value = value - self.factor[triangle(row, j)] * c[j];
+            }
+            c[row] = value / self.factor[triangle(row, row)];
+        }
+        for row in (0..d).rev() {
+            for j in row + 1..d {
+                c[row] = c[row] - self.factor[triangle(j, row)] * c[j];
+            }
+            c[row] = c[row] / self.factor[triangle(row, row)];
+        }
+        for k in 0..d {
+            c[k] = c[k] * self.scale[k];
+        }
+        let mut omega = [T::default(); 3];
+        for k in 0..self.rotations {
+            omega = add(omega, scale(self.axis[k], c[k]));
+        }
+        let translation = [c[self.rotations], c[self.rotations + 1], c[self.rotations + 2]];
+        for (i, &n) in nodes.iter().enumerate() {
+            v[i].a = sub(v[i].a, scale(omega, one / w[n].0));
+            v[i].l = sub(v[i].l, scale(add(translation, cross(self.relative[i], omega)), one / w[n].1));
+        }
+    }
+}
+
+fn dot_all<T: Real>(u: &[Pair<T>], v: &[Pair<T>]) -> T {
+    u.iter()
+        .zip(v)
+        .fold(T::default(), |s, (a, b)| s + dot(a.a, b.a) + dot(a.l, b.l))
+}
+
+fn largest<T: Real>(v: &[Pair<T>]) -> T {
+    let zero = T::default();
+    let abs = |x: T| if x < zero { -x } else { x };
+    v.iter()
+        .flat_map(|p| flat(*p))
+        .fold(zero, |m, x| if abs(x) > m { abs(x) } else { m })
+}
+
+/// Krylov carry (`BLAST_STRESS_CARRY_KRYLOV`): what an unconverged solve of an island leaves for
+/// the next solve of the same island (same islands, same node count): its last direction (by
+/// island node slot) and gamma, and the iterations its recurrence has run.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Carry {
+    pub count: usize,
+    pub iterations: u32,
+    pub previous: f64,
+    pub p: Vec<[f64; 6]>,
+}
+
+/// The carry's state across solves: whether it is on, each island's carry (cleared when the
+/// islands are rebuilt), and each node's last right-hand side `b`.
+#[derive(Clone, Debug, Default)]
+pub(super) struct CarryState {
+    pub on: bool,
+    pub islands: Vec<Option<Carry>>,
+    pub load: Vec<[f64; 6]>,
+}
+
+/// The resident solve of every island that enters (`live` bonds couple; a skipped island's are
+/// not live), in `T`. Fills each report's iterations, convergence and norms.
+pub(super) fn native_pcg<T: Real>(
+    g: &BlastGraph,
+    islands: &Islands,
+    accel: &[AngLin],
+    live: &[bool],
+    warm: bool,
+    x_out: &mut [AngLin],
+    reports: &mut [IslandReport],
+    carry: &mut CarryState,
+) {
+    if carry.islands.len() != islands.count {
+        carry.islands = vec![None; islands.count];
+    }
+    if carry.load.len() != g.node_count() {
+        carry.load = vec![[0.0; 6]; g.node_count()];
+    }
+    // `carryKrylov`: only a warm solve continues one.
+    let carry_on = carry.on && warm;
+    let (n, m) = (g.node_count(), g.bond_count());
+    let zero = T::default();
+    let one = T::of(1.0);
+    let w: Vec<(T, T)> = g
+        .weight
+        .iter()
+        .map(|w| (T::of(w.ang), T::of(w.lin)))
+        .collect();
+    let s: Vec<T> = g.col_scale.iter().map(|&v| T::of(v)).collect();
+    let o0: Vec<[T; 3]> = g.offset0.iter().map(|&o| of3(o)).collect();
+    let o1: Vec<[T; 3]> = g.offset1.iter().map(|&o| of3(o)).collect();
+    let ends: Vec<[usize; 2]> = g.bonds.iter().map(|b| b.nodes).collect();
+    let rot: Vec<[T; 6]> = g.rotation.iter().map(|r| r[0].map(T::of)).collect();
+    let shear: Vec<[T; 6]> = g.shear.iter().map(|r| r[0].map(T::of)).collect();
+    // The rigid-mode frame's inputs, as the device holds them.
+    let f32x3 = |v: Vec3| [v.x as f32, v.y as f32, v.z as f32];
+    let o0_f32: Vec<[f32; 3]> = g.offset0.iter().map(|&o| f32x3(o)).collect();
+    let o1_f32: Vec<[f32; 3]> = g.offset1.iter().map(|&o| f32x3(o)).collect();
+    let w64: Vec<(f64, f64)> = g.weight.iter().map(|w| (w.ang, w.lin)).collect();
+    let recip_length = T::of(1.0 / g.length_scale);
+    let force_tolerance = T::of(g.settings.force_tolerance);
+    let (a_w, b_w) = (T::of(LOW_WEIGHT), T::of(HIGH_WEIGHT));
+    let (diagonal, coupling) = (a_w + b_w - a_w * b_w, a_w * b_w);
+    let max_iterations = g.settings.max_iterations;
+    let first_polynomial = g.settings.first_preconditioner.polynomial_first(warm);
+
+    let mut members: Vec<(Vec<usize>, Vec<usize>)> = vec![(Vec::new(), Vec::new()); islands.count];
+    for i in 0..n {
+        if islands.node[i] != NO_ISLAND {
+            members[islands.node[i] as usize].0.push(i);
+        }
+    }
+    for j in 0..m {
+        if islands.bond[j] != NO_ISLAND && live[j] {
+            members[islands.bond[j] as usize].1.push(j);
+        }
+    }
+    let mut slot = vec![usize::MAX; n];
+    for (k, (nodes, bonds)) in members.into_iter().enumerate() {
+        if reports[k].skipped || bonds.is_empty() {
+            continue;
+        }
+        for (i, &v) in nodes.iter().enumerate() {
+            slot[v] = i;
+        }
+        let mut incident = vec![Vec::new(); nodes.len()];
+        for &j in &bonds {
+            for (side, &v) in ends[j].iter().enumerate() {
+                if slot[v] != usize::MAX {
+                    incident[slot[v]].push((j, side == 1));
+                }
+            }
+        }
+        let island_nodes = nodes.clone();
+        'solve: {
+            let isl = Island {
+                nodes,
+                bonds,
+                incident,
+                slot: &slot,
+                w: &w,
+                s: &s,
+                o0: &o0,
+                o1: &o1,
+                ends: &ends,
+                rot: &rot,
+                shear: &shear,
+            };
+            let count = isl.nodes.len();
+
+            // b = -D^-1 a (linear over L), the warm residual, the island's target.
+            let b: Vec<Pair<T>> = isl
+                .nodes
+                .iter()
+                .map(|&v| {
+                    let ia = if w[v].0 > zero { one / w[v].0 } else { one };
+                    let il = if w[v].1 > zero {
+                        recip_length / w[v].1
+                    } else {
+                        recip_length
+                    };
+                    Pair {
+                        a: scale(of3(accel[v].ang), -ia),
+                        l: scale(of3(accel[v].lin), -il),
+                    }
+                })
+                .collect();
+            let tol = T::of(g.settings.tolerance);
+            let delta2 = b.iter().fold(zero, |a, p| a + p.norm2()) * tol * tol;
+            let x0: Vec<Pair<T>> = isl
+                .bonds
+                .iter()
+                .map(|&j| Pair {
+                    a: of3(x_out[j].ang),
+                    l: of3(x_out[j].lin),
+                })
+                .collect();
+            // The true residual b - D C S (x0 + B^T u).
+            let residual = |u: Option<&[Pair<T>]>| -> Vec<Pair<T>> {
+                let mut out = b.clone();
+                for (k, &j) in isl.bonds.iter().enumerate() {
+                    let mut x = x0[k];
+                    if let Some(u) = u {
+                        let t = isl.term(j, u);
+                        x = x.plus(t, one);
+                    }
+                    for (side, &v) in ends[j].iter().enumerate() {
+                        let i = isl.slot[v];
+                        if i == usize::MAX {
+                            continue;
+                        }
+                        let sh = isl.share(j, side == 1, x);
+                        out[i] = Pair {
+                            a: sub(out[i].a, scale(sh.a, w[v].0)),
+                            l: sub(out[i].l, scale(sh.l, w[v].1)),
+                        };
+                    }
+                }
+                out
+            };
+            let report = &mut reports[k];
+            report.target2 = delta2.to();
+
+            // A zero load: zero forces at once (`retireHomogeneousTreeComponent`).
+            if !(delta2 > zero) {
+                for &j in &isl.bonds {
+                    x_out[j] = AngLin::ZERO;
+                }
+                report.converged = true;
+                break 'solve;
+            }
+
+            let mut r = if warm { residual(None) } else { b.clone() };
+            let mut inverse = Vec::with_capacity(count);
+            let mut failed = false;
+            for i in 0..count {
+                match invert(&isl.block(i)) {
+                    Some(m) => inverse.push(m),
+                    None => {
+                        failed = true;
+                        inverse.push([[zero; 6]; 6]);
+                    }
+                }
+            }
+            // A free island's rigid modes, from the live bond equations (`motion`).
+            let frame = motion::frame(&motion::Input {
+                nodes: &isl.nodes,
+                slot: &slot,
+                bonds: &isl.bonds,
+                ends: &ends,
+                o0: &o0_f32,
+                o1: &o1_f32,
+                w: &w64,
+            });
+            if frame.error != 0 {
+                failed = true;
+            }
+            let modes = Modes::<T>::new(&frame);
+            let project = |v: &mut Vec<Pair<T>>| modes.project(v, &w, &isl.nodes);
+            let blocks: Vec<Block<T>> = (0..count).map(|i| isl.block(i)).collect();
+            let precondition = |v: &[Pair<T>]| -> Vec<Pair<T>> {
+                let local: Vec<Pair<T>> = (0..count)
+                    .map(|i| pair(mul(&inverse[i], flat(v[i]))))
+                    .collect();
+                let (lv, _) = isl.apply(&local);
+                (0..count)
+                    .map(|i| {
+                        let self_part = mul(&blocks[i], flat(local[i]));
+                        let mut off = flat(lv[i]);
+                        for c in 0..6 {
+                            off[c] = off[c] - self_part[c];
+                        }
+                        let mo = mul(&inverse[i], off);
+                        let l = flat(local[i]);
+                        let mut out = [zero; 6];
+                        for c in 0..6 {
+                            out[c] = diagonal * l[c] - coupling * mo[c];
+                        }
+                        pair(out)
+                    })
+                    .collect()
+            };
+
+            let mut u = vec![Pair::<T>::default(); count];
+            let mut p = vec![Pair::<T>::default(); count];
+            let mut previous = zero;
+            // Krylov carry: continue the last solve's recurrence for the same operator and
+            // component, after an unconverged solve, while it has run fewer iterations than the
+            // island has unknowns, and while the load moved by at most the solve's tolerance.
+            let state = carry.islands[k].take();
+            let mut carried = carry_on
+                && state.as_ref().is_some_and(|c| {
+                    c.count == count && c.iterations < 6 * count as u32 && c.previous > 0.0 && c.previous.is_finite()
+                });
+            if carried {
+                let (mut change, mut load) = (zero, zero);
+                for (i, &v) in isl.nodes.iter().enumerate() {
+                    let last = carry.load[v];
+                    let bv = flat(b[i]);
+                    for c in 0..6 {
+                        let d = bv[c] - T::of(last[c]);
+                        change = change + d * d;
+                        load = load + bv[c] * bv[c];
+                    }
+                }
+                carried = change <= tol * tol * load;
+            }
+            let carried_iterations = if carried { state.as_ref().unwrap().iterations } else { 0 };
+            if carried {
+                let c = state.as_ref().unwrap();
+                previous = T::of(c.previous);
+                for i in 0..count {
+                    p[i] = pair(c.p[i].map(T::of));
+                }
+            }
+            let (mut best, mut best_iteration) = (T::of(f64::INFINITY), 0u32);
+            let mut converged = false;
+            let mut iteration = 0u32;
+            // The force test's measures: the starting forces and the steps travelled since.
+            let force_start = if force_tolerance > zero {
+                x0.iter().fold(zero, |a, x| a + x.norm2())
+            } else {
+                zero
+            };
+            let force_start = T::of(force_start.to().sqrt());
+            let (mut travel, mut step) = (zero, T::of(f64::INFINITY));
+            while !failed && iteration < max_iterations {
+                project(&mut r);
+                let norm = |r: &Vec<Pair<T>>| {
+                    let num = isl
+                        .bonds
+                        .iter()
+                        .fold(zero, |a, &j| a + isl.term(j, r).norm2());
+                    let hold =
+                        num <= delta2 && !(r.iter().fold(zero, |a, p| a + p.norm2()) <= delta2);
+                    (num, hold)
+                };
+                let (mut num, mut hold) = norm(&r);
+                if (iteration > 0 || warm) && num <= delta2 && !hold {
+                    r = residual(Some(&u));
+                    previous = zero;
+                    project(&mut r);
+                    (num, hold) = norm(&r);
+                }
+                report.residual2 = num.to();
+                if num < best * T::of(0.99) {
+                    best = num;
+                    best_iteration = iteration;
+                } else if iteration - best_iteration >= STAGNATION {
+                    break;
+                }
+                if num <= delta2 && !hold {
+                    converged = true;
+                    break;
+                }
+                if force_tolerance > zero
+                    && iteration > 0
+                    && step <= force_tolerance * (force_start + travel)
+                {
+                    let exact: T = isl.bonds.iter().enumerate().fold(zero, |a, (k, &j)| {
+                        a + x0[k].plus(isl.term(j, &u), one).norm2()
+                    });
+                    if step <= force_tolerance * T::of(exact.to().sqrt()) {
+                        converged = true;
+                        break;
+                    }
+                }
+                let mut gdir = if iteration == 0 && !first_polynomial && !carried {
+                    r.clone()
+                } else {
+                    precondition(&r)
+                };
+                project(&mut gdir);
+                let mag = largest(&gdir);
+                if !(mag > zero) || !mag.finite() {
+                    failed = true;
+                    break;
+                }
+                let inv = one / mag;
+                for v in gdir.iter_mut() {
+                    *v = Pair {
+                        a: scale(v.a, inv),
+                        l: scale(v.l, inv),
+                    };
+                }
+                let gamma = dot_all(&r, &gdir);
+                if !(gamma > zero) || !gamma.finite() {
+                    failed = true;
+                    break;
+                }
+                let mut beta = if (iteration > 1 || (first_polynomial && iteration > 0) || carried) && previous > zero {
+                    gamma / previous
+                } else {
+                    zero
+                };
+                // A carried first step whose gamma grew 16-fold (a new load) restarts.
+                if carried && iteration == 0 && !(beta <= T::of(16.0)) {
+                    beta = zero;
+                }
+                for i in 0..count {
+                    p[i] = if beta == zero {
+                        gdir[i]
+                    } else {
+                        gdir[i].plus(p[i], beta)
+                    };
+                }
+                let (q, den) = isl.apply(&p);
+                if force_tolerance > zero {
+                    step = if den > zero && gamma > zero {
+                        gamma / T::of(den.to().sqrt())
+                    } else {
+                        T::of(f64::INFINITY)
+                    };
+                    if step.finite() {
+                        travel = travel + step;
+                    }
+                    // Only a preconditioned step is judged: not the projected steepest-descent
+                    // step of iteration 0 (small exactly when the error sits in soft modes).
+                    if !(iteration > 0 || first_polynomial) {
+                        step = T::of(f64::INFINITY);
+                    }
+                }
+                previous = gamma;
+                iteration += 1;
+                if !(den > zero) || !den.finite() {
+                    break;
+                }
+                let alpha = gamma / den;
+                for i in 0..count {
+                    u[i] = u[i].plus(p[i], alpha);
+                    r[i] = r[i].plus(q[i], -alpha);
+                }
+            }
+            report.iterations = iteration;
+            report.converged = converged && !failed;
+            if carry.on {
+                for (i, &v) in isl.nodes.iter().enumerate() {
+                    carry.load[v] = flat(b[i]).map(|x| x.to());
+                }
+            }
+            // Leave an unconverged solve's recurrence for the next solve of the same island.
+            if carry_on && !failed && !converged {
+                carry.islands[k] = Some(Carry {
+                    count,
+                    iterations: carried_iterations + iteration,
+                    previous: previous.to(),
+                    p: p.iter().map(|v| flat(*v).map(|x| x.to())).collect(),
+                });
+            }
+
+            for (k2, &j) in isl.bonds.iter().enumerate() {
+                let x = x0[k2].plus(isl.term(j, &u), one);
+                x_out[j] = AngLin {
+                    ang: to3(x.a),
+                    lin: to3(x.l),
+                };
+            }
+        }
+        for v in island_nodes {
+            slot[v] = usize::MAX;
+        }
+    }
+    // Broken bonds carry nothing.
+    for j in 0..m {
+        if islands.bond[j] != NO_ISLAND && !live[j] && !reports[islands.bond[j] as usize].skipped {
+            x_out[j] = AngLin::ZERO;
+        }
+    }
+}

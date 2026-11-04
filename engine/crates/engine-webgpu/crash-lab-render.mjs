@@ -22,7 +22,9 @@
 export const STRAIN_STOPS = [[0.0, [0.46, 0.53, 0.63]], [0.12, [0.62, 0.66, 0.70]], [0.4, [1.0, 0.84, 0.18]], [0.7, [1.0, 0.48, 0.08]], [1.0, [0.93, 0.08, 0.07]]];
 export const PART_COLORS = [[0.15, 0.85, 0.95], [0.62, 0.42, 0.98], [1.0, 0.84, 0.2], [1.0, 0.36, 0.7], [0.32, 0.34, 0.38], [0.7, 0.74, 0.8]];
 export const COLOR_MODES = ['strain', 'damage', 'part'];
-export const SKIN_MODES = ['off', 'ghost', 'solid'];
+// 'body': the authored car's textured body skinned to the nodes (showcase-car-render.mjs,
+// drawn by the page); the lab draws no skin of its own then.
+export const SKIN_MODES = ['off', 'ghost', 'solid', 'body'];
 
 const css = (c) => `rgb(${c.map((x) => Math.round(x * 255)).join(',')})`;
 /** CSS linear-gradient of the strain ramp (the legend). */

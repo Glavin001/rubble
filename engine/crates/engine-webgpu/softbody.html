@@ -16,6 +16,9 @@
     .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
     .row input[type=number] { width: 58px; background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 2px 4px; font: inherit; }
     .row label.p { color: #9aa4b2; }
+    .row label.p:has(input[type=range]) { display: flex; align-items: center; gap: 6px; width: 100%; }
+    .row input[type=range] { flex: 1; min-width: 120px; accent-color: #5b9cff; }
+    .row .pv { min-width: 40px; text-align: right; color: #e6e9ef; font-variant-numeric: tabular-nums; }
     button, select, label.file { background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
     button:hover, label.file:hover { background: #26324a; }
     #status { bottom: 10px; left: 10px; font: 12px ui-monospace, monospace; }
@@ -68,13 +71,14 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck } from './rubble-world.mjs';
+    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
     import { createCarRenderer, LIGHTING_WGSL } from './car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
     import { createCrashLab, LAB_PRESETS } from './crash-lab.mjs';
+    import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const fail = (e) => { if (!errEl.textContent) errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String((e && e.message) || e); };
@@ -132,6 +136,9 @@
       try { importSrc = JSON.parse(sessionStorage.getItem(IMPORT_KEY) || 'null'); } catch { importSrc = null; }
     }
     const CARS = { sedan: 'Car: procedural sedan (soft body)', buggy: 'Car: dune buggy (soft frame + rigid parts)', hires: 'Car: hi-res JBeam test car (1,110 nodes)' };
+    // Rubble's own authored sedan (engine_softbody::authoring; explicit solver only):
+    // ~4k nodes, ~28k beams, its textured body skinned to the nodes. ?res= low|medium|high.
+    if (EXPLICIT) CARS.showcase = 'Car: Rubble showcase sedan (authored, ~4k nodes)';
     if (importSrc) CARS.import = `Car: ${importSrc.label} (imported)`;
     const carKind = importSrc ? 'import' : CARS[qs.get('car')] ? qs.get('car') : 'sedan';
     const buggy = carKind === 'buggy' && !EXPLICIT;
@@ -148,18 +155,19 @@
     const XSCENES = { idle: 'Explicit: at rest (L launches at 100 km/h)', coast: 'Explicit: coasting at 100 km/h', wall: 'Explicit: 100 km/h into a rigid wall', arena: 'Explicit: fleet arena (?n= vehicles, ?headOn= share)',
       headon: 'Explicit: head-on, two cars (overlap)', tbone: 'Explicit: T-bone into a standing car', pole: 'Explicit: into a 20 cm pole',
       sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar', drop: 'Explicit: drop test' };
-    // Explicit scenes' fields (the solver's crash_scene and arena): [url key, label, default].
-    // km/h fields go to the solver in m/s; angles in degrees.
+    // Explicit scenes' knobs (the solver's crash_scene and arena): [url key, label,
+    // default, [min, max, step]]. km/h knobs go to the solver in m/s; angles in degrees.
+    const KMH = [0, 200, 1], OVERLAP = [0.05, 1, 0.05], ANGLE = [-90, 90, 1], ALONG = [-2.5, 2.5, 0.05];
     const XPARAMS = {
-      coast: [['xspeed', 'km/h', 100]],
-      wall: [['speed', 'km/h', 100], ['overlap', 'overlap 0–1', 1], ['angle', 'angle °', 0]],
-      headon: [['speed', 'car 1 km/h', 56], ['speed2', 'car 2 km/h', 56], ['overlap', 'overlap 0–1', 1], ['angle', 'car 2 angle °', 0]],
-      tbone: [['speed', 'striking km/h', 50], ['carSpeed', 'struck km/h', 0], ['at', 'hit at m', 0], ['angle', 'angle °', 90]],
-      pole: [['speed', 'km/h', 60], ['offset', 'offset m', 0], ['angle', 'angle °', 0]],
-      sidepole: [['speed', 'km/h', 32], ['at', 'hit at m', 0], ['angle', 'angle °', 90]],
-      limbo: [['speed', 'km/h', 60], ['bar', 'bar height m', 1]],
-      drop: [['height', 'height m', 8], ['speed', 'forward km/h', 0]],
-      arena: [['n', 'vehicles', 256], ['headOn', 'head-on share', 0], ['speedMin', 'min km/h', 90], ['speedMax', 'max km/h', 150]],
+      coast: [['xspeed', 'km/h', 100, KMH]],
+      wall: [['speed', 'km/h', 100, KMH], ['overlap', 'overlap', 1, OVERLAP], ['angle', 'angle °', 0, ANGLE]],
+      headon: [['speed', 'car 1 km/h', 56, KMH], ['speed2', 'car 2 km/h', 56, KMH], ['overlap', 'overlap', 1, OVERLAP], ['angle', 'car 2 angle °', 0, ANGLE]],
+      tbone: [['speed', 'striking km/h', 50, KMH], ['carSpeed', 'struck km/h', 0, KMH], ['at', 'hit at m', 0, ALONG], ['angle', 'angle °', 90, [0, 180, 1]]],
+      pole: [['speed', 'km/h', 60, KMH], ['offset', 'offset m', 0, [-1.5, 1.5, 0.01]], ['angle', 'angle °', 0, ANGLE]],
+      sidepole: [['speed', 'km/h', 32, KMH], ['at', 'hit at m', 0, ALONG], ['angle', 'angle °', 90, [0, 180, 1]]],
+      limbo: [['speed', 'km/h', 60, KMH], ['bar', 'bar height m', 1, [0.3, 2, 0.05]]],
+      drop: [['height', 'height m', 8, [0.5, 40, 0.5]], ['speed', 'forward km/h', 0, KMH]],
+      arena: [['n', 'vehicles', 256, [1, 4096, 1]], ['headOn', 'head-on share', 0, [0, 1, 0.05]], ['speedMin', 'min km/h', 90, KMH], ['speedMax', 'max km/h', 150, KMH]],
     };
     const XCRASH = new Set(['wall', 'headon', 'tbone', 'pole', 'sidepole', 'limbo', 'drop']);
     const XMAP = { yard: 'idle', crates: 'idle', traffic: 'idle', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
@@ -176,9 +184,9 @@
       xs.style.display = '';
       xs.onchange = () => { const u = new URL(location.href); u.searchParams.set('xscene', xs.value); location.href = u.href; };
       document.getElementById('xkeys').style.display = '';
-      for (const id of ['softKeys', 'paramRow', 'presetSel']) document.getElementById(id).style.display = 'none';
+      for (const id of ['softKeys', 'presetSel']) document.getElementById(id).style.display = 'none';
       document.getElementById('infoTitle').innerHTML = '<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, Rigs of Rods parity</span>';
-      document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams, soft tyres and self-collision, every step of a frame in one GPU submit; rendered from its buffers. It has only these three scenes, static boxes and no drivetrain: the other scenes, driving and the dune buggy are on the soft solver (button above).';
+      document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams, soft tyres and self-collision, every step of a frame in one GPU submit; rendered from its buffers. Crash scenes with knobs (speeds, angles, overlap), static boxes, vehicle–vehicle contact and no drivetrain: driving, moving rigid bodies and the dune buggy are on the soft solver (button above).';
       // Only the explicit solver's own scenes and vehicles are offered: the soft
       // scenes (poles, moving barriers, ramps, drivers) need the World's rigid
       // bodies and drivetrains, which it does not couple to.
@@ -240,15 +248,29 @@
       // Explicit mode: the explicit scene's fields (its crash scenes share the soft ones').
       const pscene = EXPLICIT ? xscene : scene;
       const fields = (EXPLICIT ? XPARAMS[pscene] : PARAMS[pscene]) || [];
-      for (const [k, unit, d] of fields) {
+      for (const [k, unit, d, range] of fields) {
         const l = document.createElement('label'); l.className = 'p'; l.textContent = unit + ' ';
-        const inp = document.createElement('input'); inp.type = 'number'; inp.step = 'any'; inp.id = 'p_' + k;
-        inp.value = here.has(k) ? here.get(k) : d;
-        inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') run(); };
-        l.appendChild(inp); row.appendChild(l);
+        const inp = document.createElement('input'); inp.id = 'p_' + k;
+        // The query's value, or a lab preset's (merged into qs above), or the default.
+        const v = here.has(k) ? here.get(k) : qs.has(k) ? qs.get(k) : d;
+        if (range) {
+          // A slider with its value beside it; the scene rebuilds on release.
+          const [min, max, step] = range;
+          Object.assign(inp, { type: 'range', min, max, step, value: v });
+          const out = document.createElement('span'); out.className = 'pv'; out.textContent = v;
+          inp.oninput = () => { out.textContent = inp.value; };
+          inp.onchange = () => run();
+          inp.onkeydown = (e) => e.stopPropagation();
+          l.append(inp, out);
+        } else {
+          Object.assign(inp, { type: 'number', step: 'any', value: v });
+          inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') run(); };
+          l.appendChild(inp);
+        }
+        row.appendChild(l);
       }
       const run = () => { const u = new URLSearchParams(location.search); u.set(EXPLICIT ? 'xscene' : 'scene', pscene); for (const [k] of fields) u.set(k, document.getElementById('p_' + k).value); location.search = u.toString(); };
-      if (fields.length) { const b = document.createElement('button'); b.textContent = 'run'; b.onclick = run; row.appendChild(b); }
+      if (fields.length) { const b = document.createElement('button'); b.textContent = EXPLICIT ? 'restart' : 'run'; b.onclick = run; row.appendChild(b); }
     }
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
@@ -370,9 +392,12 @@
     // ?deform= rebuilds it from .truck text with another threshold (no parts).
     // The vehicle's source for either solver: `.truck` text, JBeam files, or (soft
     // only) a desc. The procedural sedan is the same `.truck` text on both.
+    let showcaseCache = null;
+    const showcaseBuilt = () => showcaseCache ??= showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: qs.get('res') ?? 'medium' });
     const hiresJbeam = carKind === 'hires' ? [['hires.jbeam', hiresCarJbeam()]] : null;
     const vehicleSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
       : carKind === 'import' ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc } : { truck: importSrc.text })
+      : carKind === 'showcase' ? { truck: showcaseBuilt().truck }
       // The sedan as the acceptance runs build it (?tyres=0: its bare body).
       : { truck: explicitSedanTruck(qs.get('tyres') !== '0') };
     const carDesc = EXPLICIT ? null : buggy ? duneBuggySoft(Math.max(0.01, Number(qs.get('strength')) || 1))
@@ -1075,6 +1100,21 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     };
     const labR = LAB ? createCrashLabRenderer({ device, format, sampleCount: SAMPLES, frameBuf, shadowView, shadowSampler }) : null;
     labR?.setSim(xsim, xlayout);
+    // The showcase sedan's body, skinned from the lab's node positions (live and replay).
+    const bodyR = LAB && carKind === 'showcase' ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
+    let bodyFor = { layout: null, pos: null }, bodyIds = [];
+    const syncBody = () => {
+      const pos = labR.positionsBuffer();
+      if (!pos) return false;
+      if (bodyFor.layout !== xlayout) {
+        for (const id of bodyIds) bodyR.removeCar(id);
+        bodyIds = xlayout.vehicles.map((v, i) => bodyR.addCar(showcaseBuilt().visual, { nodeOffset: v.nodeOffset, vehicle: i }));
+        bodyFor.layout = xlayout;
+      }
+      if (bodyFor.pos !== pos) { bodyR.setPositions(pos); bodyFor.pos = pos; }
+      return true;
+    };
+    const bodyOn = () => bodyR && labR.opts.skin === 'body';
     let lab = null, labDt = 0, labView = { vp: new Float32Array(16), eye: [0, 0, 0] };
     let flexShadowBind = null, skinBind = null;
     // The world's buffers can be replaced when they grow: rebind when one is a new object.
@@ -1603,6 +1643,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       // deformation reads clearly; ?fx=1 turns them on.
       if (flexMode) carR.compute(enc, FX ? fxDt : 0);
       if (lab) lab.beforeDraw(enc, labDt);
+      if (bodyOn() && syncBody()) bodyR.update(enc);
       // Sun shadow map.
       const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
       refreshColliders();
@@ -1640,6 +1681,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       // to the nodes (the showcase car renderer) draws here too, from
       // labR.positionsBuffer() (live and replayed positions alike).
       if (xsim && LAB) labR.drawOpaque(rp);
+      if (xsim && bodyOn() && bodyFor.pos) bodyR.draw(rp, { viewProj: labView.vp, eye: labView.eye, light: LIGHT });
       else if (xsim) {
         const xb = xBindings();
         rp.setPipeline(xSkinPipe); rp.setBindGroup(0, xb.skin); rp.draw(xlayout.triangles * 3);
@@ -1896,7 +1938,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     if (!EXPLICIT && scene === 'import' && carKind === 'import') window.__crashImported({ ...carDesc }, { label: importSrc.label });
     if (LAB) {
       lab = createCrashLab({
-        sim: () => xsim, layout: () => xlayout, renderer: labR, canvas, qs, preset: LAB_PRESET, xscene,
+        sim: () => xsim, layout: () => xlayout, renderer: labR, canvas, qs, preset: LAB_PRESET, xscene, body: !!bodyR,
         setOrbit: (o) => {
           if (o.chase) { camMode = 'chase'; window.__camSync?.(); return; }
           if (o.follow) { if (camMode === 'orbit') { orbit.target = o.follow; orbit.yaw += o.spin; } return; }

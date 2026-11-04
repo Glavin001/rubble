@@ -175,6 +175,7 @@ impl WgpuSim {
     /// is written back: the solver treats it as static (contacts against it are
     /// resolved for the others; it is neither predicted nor integrated).
     pub fn write_bodies(&mut self, first: u32, bodies: &[BodyState]) {
+        self.mark_rest_stale();
         let count = u32::try_from(bodies.len()).expect("body batch exceeds u32 index space");
         assert!(
             first <= self.body_count && count <= self.body_count - first,
@@ -276,6 +277,22 @@ impl WgpuSim {
             return;
         }
         let mut cmds = std::mem::take(&mut self.pending_commands);
+        // Commands that only change velocities, forces, locks or sleep leave every pose and
+        // collider where it was (the bodies they wake are moving, so the awake-indexed
+        // broadphase bounds them); the others may move a body that does not move after
+        // (a static, a sleeper, a stopped kinematic) or a collider.
+        use engine_schema::commands::CommandType as T;
+        let keeps_poses = [
+            T::WakeBody,
+            T::SetVelocity,
+            T::AttachForce,
+            T::ApplyImpulse,
+            T::AddForceAt,
+            T::AngularImpulse,
+            T::Damp,
+            T::SetLocks,
+        ];
+        self.commands_move_poses |= cmds.iter().any(|c| !keeps_poses.iter().any(|&k| k as u32 == c.op));
         cmds.sort_by_key(|c| c.a);
         let mut start = 0;
         while start < cmds.len() {
@@ -317,6 +334,40 @@ impl WgpuSim {
             u64::from(self.last_contact_offset) * std::mem::size_of::<Contact>() as u64,
             n as usize,
         ))
+    }
+
+    /// Diagnostic: the last step's candidate pairs ([a, b, key, pad]) and the split
+    /// narrowphase's deferred tail (binding 10; waits).
+    pub fn last_candidates(&self) -> (Vec<[u32; 4]>, Vec<[u32; 4]>) {
+        if self.steps_done == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let cap = u64::from(self.capacity.max_candidates);
+        let n = u64::from(self.last_counters.candidate_count).min(cap);
+        let d = u64::from(self.last_counters.narrowphase_deferred).min(cap - n);
+        let head: Vec<u32> = self.read_buffer_range(10, 0, (n * 4) as usize);
+        let tail: Vec<u32> = self.read_buffer_range(10, (cap - d) * 16, (d * 4) as usize);
+        let q = |v: &[u32]| v.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect::<Vec<_>>();
+        (q(&head), q(&tail))
+    }
+
+    /// Diagnostic: the last step's persistent contact rows, as (colliderA, colliderB,
+    /// featureId, pair tag, λ normal, penalty normal, c0N) (bindings 4 and 27; waits).
+    pub fn last_persistent_rows(&self) -> Vec<(u32, u32, u32, u32, f32, f32, f32)> {
+        if !self.persistent_contacts || self.steps_done == 0 {
+            return Vec::new();
+        }
+        let n = self.last_counters.contact_count.min(self.capacity.max_contacts) as usize;
+        let at = u64::from(self.last_contact_offset);
+        let meta: Vec<u32> = self.read_buffer_range(4, at * 32, n * 8);
+        let pts: Vec<u32> = self.read_buffer_range(27, at * 64, n * 16);
+        (0..n)
+            .map(|k| {
+                let m = &meta[k * 8..k * 8 + 8];
+                let p = &pts[k * 16..k * 16 + 16];
+                (m[0], m[1], m[2], p[15], f32::from_bits(p[8]), f32::from_bits(p[12]), f32::from_bits(p[3]))
+            })
+            .collect()
     }
 
     /// Copy every buffer and the host mirror (bodies, colliders, counters, contact
@@ -492,8 +543,9 @@ impl WgpuSim {
                 // The terrain pool is not saved (its buffers are the
                 // largest): a restore starts it over (`terrain_reset`). A compact
                 // snapshot copies a measured buffer up to its extent.
-                let measured = compact.and_then(|c| c[i]);
-                let size = if self.terrain.is_some() && is_terrain_binding(i) {
+                // The pass table (binding 22) is constant: written once at creation.
+                let measured = compact.and_then(|c| c[i]).filter(|_| i != 22);
+                let size = if (self.terrain.is_some() && is_terrain_binding(i)) || i == 22 {
                     0
                 } else if let Some(extent) = measured {
                     extent.min(b.size())
@@ -548,6 +600,7 @@ impl WgpuSim {
 
     /// Return to a snapshot of this simulation (`save_state`).
     pub fn restore_state(&mut self, s: &SimSnapshot) {
+        self.mark_rest_stale();
         assert_eq!(
             s.bufs.len(),
             self.bufs.len(),

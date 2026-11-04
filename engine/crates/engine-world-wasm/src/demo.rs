@@ -118,6 +118,24 @@ impl WebWorld {
         res(self.world.set_gpu_timing(defs::gpu_timing(mode)?))
     }
 
+    /// Keep sleeping bodies' resting contacts through sleep (`World::enable_sleep_archive`,
+    /// default room). Canonical contacts only; turns the resting-pair carry off.
+    #[wasm_bindgen(js_name = enableSleepArchive)]
+    pub fn enable_sleep_archive(&mut self) -> Result<(), JsValue> {
+        res(self.world.enable_sleep_archive(None))
+    }
+
+    /// The resting-pair carry from the next step on (`World::set_carry_rest`).
+    #[wasm_bindgen(js_name = setCarryRest)]
+    pub fn set_carry_rest(&mut self, on: bool) {
+        self.world.set_carry_rest(on);
+    }
+
+    #[wasm_bindgen(js_name = carryRest)]
+    pub fn carry_rest(&self) -> bool {
+        self.world.carry_rest()
+    }
+
     #[wasm_bindgen(js_name = destroyJoint)]
     pub fn destroy_joint(&mut self, joint: f64) -> Result<(), JsValue> {
         res(self.world.destroy_joint(JointId::from_bits(bits(joint))))

@@ -42,7 +42,8 @@ function updateTrails(){
 // alone, no solve), all three on rubble's World (lab-world.mjs: StrengthModel::Bonds and
 // StrengthModel::Threshold) and this page's renderer; 'stress' (GPU stress solver on its own
 // canvas), 'load_path' and 'impact_local' (the same GPU world with a load path, or with the
-// analytic local impact model for strikes: stress-web, which World has no equivalent of), or
+// analytic local impact model for strikes: stress-web, which World has no equivalent of),
+// 'blast' (the same GPU world, Blast's stress solver deciding the bonds: profile blast_gpu), or
 // 'learned' (lean MGN-T forward on this page's WebGPU — compute/timing only; rubble stays
 // unbonded).
 const bondMode=()=>$('bond-mode').value;
@@ -84,14 +85,14 @@ function updateNear(now){
 for(const id of ['guide','guide-strength'])$(id).onchange=()=>{applyGuide();$(id).blur()};
 // The stress solver's modes on stress-web, and the capability profile each runs. The simple
 // threshold runs on World (thresholdMode).
-const STRESS_PROFILES={stress:'blast_parity',load_path:'load_path',impact_local:'impact_local'};
+const STRESS_PROFILES={stress:'blast_parity',load_path:'load_path',impact_local:'impact_local',blast:'blast_gpu'};
 const thresholdMode=()=>bondMode()==='threshold';
-const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps'};
+const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps',blast_gpu:"Blast's stress solver (vibe-land's model, Slang)"};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
 // The stress-solver modes wait on the GPU from Rust: through WebAssembly JavaScript Promise
 // Integration where the browser has it, else (Safari) through the Asyncify build
 // (gpu-wait.mjs, stress-mode.mjs).
-let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
+let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0,gaps:[],cpuMs:0,last:0};
 // The simple threshold on World: a StrengthModel::Threshold destructible drawn by this page.
 let thresholdOn=false;
 let learned=null,learnedMs=0,learnedBusy=false;
@@ -250,9 +251,10 @@ async function loadStress(level){
  stress.viewMode=cameraMode();stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setCrush(profile==='threshold'?crushMode():0);stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else if(pack)await stress.loadPack(packBytes);else await stress.load(assetBytes,level);
  await stress.frame(0);applyBallMass();applyBallSpeed();showBallRadius();
- const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
+ const st=stress.stats;stressHud=stressHudReset(performance.now());
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
- $('release').textContent='Start simulation';$('fire').hidden=true;
+ // The towers block's volley, meteor and topple are World's (the stress world has one copy).
+ $('release').textContent='Start simulation';$('fire').hidden=true;$('volley').hidden=true;$('meteor').hidden=true;$('topple').hidden=true;
  $('strike-prediction').checked=stress.strikePrediction;$('strike-prediction').disabled=false;
  $('contact-fracture').checked=stress.contactFracture;$('contact-fracture').disabled=!stress.contactFractureAvailable;
  setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${PROFILE_NOTES[profile]??profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
@@ -385,8 +387,9 @@ const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
    packBytes=await response.arrayBuffer();
   }
   assetBytes=null;layout=null;procedural='pack';
-  // The towers block: breakable welds, CCD balls at 16× unless the panel says otherwise.
-  if(entry.towers&&(!towersBlock||towersMeteor!==!!entry.meteor)){$('bond-mode').value='d6';$('ball-speed').value=entry.meteor?'0':'4';$('ball-ccd').checked=true}
+  // The towers block: breakable welds, CCD balls at 16× unless the panel says otherwise. A
+  // stress mode chosen already (the panel or ?bonds=) stays, with the scene's own ball.
+  if(entry.towers&&(!towersBlock||towersMeteor!==!!entry.meteor)&&!STRESS_PROFILES[bondMode()]){$('bond-mode').value='d6';$('ball-speed').value=entry.meteor?'0':'4';$('ball-ccd').checked=true}
   towersBlock=!!entry.towers;towersMeteor=!!entry.meteor;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack?entry.pack.split('/').pop():'generated in Rust (glass_tower.rs)';
   $('level').replaceChildren(new Option(entry.nodes!=null?`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`:'Scene pack · generated',0));$('level').value='0';
   await loadLevel(0);return;
@@ -454,6 +457,8 @@ window.__FRACTURE_DEMO__={
    lockedBehind+=ms/1000;const n=Math.floor(lockedBehind*stepHz()+1e-9);lockedBehind-=n/stepHz();
    if(running&&n)await sim.step(n);firePendingShot(null);renderer.draw($('show-bonds').checked);setStatus(thresholdStatus());return thresholdStats()}
   await stress.frame(ms);const st=stress.stats;firePendingShot(st);setStatus(stressStatus(st));return st},
+ // Back to the page's own frame loop after stressAdvance (frame-locked capture) took it over.
+ stressRelease(){stressCapture=false;last=0},
  stressOrbit(dx,dy){if(thresholdOn)renderer?.orbit(dx,dy);else stress.orbit(dx,dy)},stressZoom(delta){if(thresholdOn)renderer?.zoom(delta);else stress.zoom(delta)},
  get status(){return $('status').textContent},
  // The page's own shot (a click's path: queued behind the frame, the loop keeps running).
@@ -502,16 +507,39 @@ const thresholdStats=()=>{const st=sim.stats();return {frames:sim.steps,shots:si
 const stressWarning=st=>st.warnings?.length?` · ⚠ ${st.warnings.join('; ')}`:'';
 // The running stress mode's status line (the frame loop's and the frame-locked capture's).
 const stressStatus=st=>`${st.shots} shots · ${st.frames} frames · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken${st.crush?` · ${st.crushed} crushed`:' · crush off'} · ${st.simSeconds.toFixed(2)} s${stressWarning(st)}`;
+// The stress HUD, from one second of display frames: physics frames and display frames per
+// second as they ran; the GPU time of a physics frame and of a draw (timestamps, a running
+// mean); the display's refresh (the shorter gaps between display frames); and what the
+// machine would allow uncapped: physics at real time takes frameHz × its GPU frame time of
+// each second, the draws the rest, and the page's own CPU time per display frame (stepping,
+// drawing, encoding; the GPU runs that work later, never waited for) bounds it too.
+function stressHudReset(now){return {t:now,frames:0,renders:0,gaps:[],cpuMs:0,last:now,stepMs:stressHud?.stepMs}}
+function stressHudShow(st,s){
+ const h=stressHud,tps=h.frames/s,fps=h.renders/s,hz=st.frameHz;
+ $('tps').textContent=tps.toFixed(0);$('fps').textContent=fps.toFixed(0);$('sim-speed').textContent=`${(tps/hz).toFixed(2)}×`;
+ // The refresh: the median of the gaps within 1.5× the shortest (one refresh each; longer
+ // gaps are frames that missed one).
+ const gaps=h.gaps.sort((a,b)=>a-b).filter((g,_,a)=>g<=1.5*a[0]),gap=gaps[gaps.length>>1];
+ const display=gap?Math.round(1000/gap):null,cpu=h.renders?h.cpuMs/h.renders:0;
+ const phys=st.gpuStepMs,draw=st.gpuDrawMs;
+ $('step-ms').textContent=phys?`${phys.toFixed(2)} ms GPU/tick · max ${Math.floor(1000/phys)} TPS`:
+  h.stepMs?`${h.stepMs.toFixed(2)} ms CPU/tick (no GPU timestamps)`:`target ${Math.round(hz)} TPS`;
+ $('frame-ms').textContent=draw?`${draw.toFixed(2)} ms GPU/draw${display?` · display ${display} Hz`:''}`:display?`display ${display} Hz`:'frames / second';
+ if(!phys||!draw){$('timing').textContent=`CPU ${cpu.toFixed(2)} ms per display frame (stepping, drawing, encoding). No GPU timestamps here: the GPU's time is not measured.`;return}
+ // GPU ms per wall second that physics at real time takes, and the draws the rest allows.
+ const physBusy=hz*phys,gpuFps=physBusy<1000?(1000-physBusy)/draw:0,cpuFps=cpu>0?1000/cpu:Infinity,uncapped=Math.min(gpuFps,cpuFps);
+ $('timing').textContent=physBusy>=1000?
+  `GPU-bound: real-time physics needs ${physBusy.toFixed(0)} ms of GPU each second (${Math.round(hz)} ticks × ${phys.toFixed(2)} ms), so it runs at most ${(1000/physBusy).toFixed(2)}× real time. Draw ${draw.toFixed(2)} ms GPU; CPU ${cpu.toFixed(2)} ms per display frame.`:
+  `Each second at real time: physics ${physBusy.toFixed(0)} ms GPU (${Math.round(hz)} ticks × ${phys.toFixed(2)} ms), draws ${draw.toFixed(2)} ms GPU each in the rest. Uncapped ≈ ${Math.floor(uncapped)} FPS (${gpuFps<=cpuFps?'GPU':'CPU'}-bound; CPU ${cpu.toFixed(2)} ms per display frame)${display?`; the display caps it at ${display} Hz`:''}.`;
+}
 function stressTick(now,elapsedMs){
  frame=(async()=>{try{
-  const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;firePendingShot(st);
-  stressHud.frames+=(st.frames??0)-before;stressHud.renders++;
-  if(now-stressHud.t>=1000){const s=(now-stressHud.t)/1000;$('tps').textContent=(stressHud.frames/s).toFixed(0);$('fps').textContent=(stressHud.renders/s).toFixed(0);$('sim-speed').textContent=`${(stressHud.frames/s/st.frameHz).toFixed(2)}×`;stressHud={t:now,frames:0,renders:0,stepMs:stressHud.stepMs}}
+  const before=stress.stats.frames??0,t0=performance.now();await stress.frame(elapsedMs);const cpuMs=performance.now()-t0;const st=stress.stats;firePendingShot(st);
+  const h=stressHud;h.frames+=(st.frames??0)-before;h.renders++;h.cpuMs+=cpuMs;if(now>h.last)h.gaps.push(now-h.last);h.last=now;
   // A display frame that stepped no physics frame (a 120 Hz display, a 60 Hz simulation)
-  // reports no step time: the last measured one stays, so the label does not flip.
-  if(st.stepMs)stressHud.stepMs=st.stepMs;
-  $('step-ms').textContent=stressHud.stepMs?`${stressHud.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
-  $('frame-ms').textContent='frames / second';
+  // reports no step time: the last measured one stays.
+  if(st.stepMs)h.stepMs=st.stepMs;
+  if(now-h.t>=1000){stressHudShow(st,(now-h.t)/1000);stressHud=stressHudReset(now)}
   $('awake').textContent=st.moving??st.awake??'—';
   if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(stressStatus(st))}
  }catch(e){fail(e)}})();

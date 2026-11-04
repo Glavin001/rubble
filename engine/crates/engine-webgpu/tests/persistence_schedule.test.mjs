@@ -39,7 +39,7 @@ for (const [query, mode] of [
 test('defaults are the shipped EngineFeatures', () => {
   assert.deepEqual(parse('?scene=ring110k').features, {
     sparseColors: 10, manifoldPersistence: 'contacts', warmHash: 'record', reuseCopy: true,
-    npSplit: true, persistList: true, carryRest: true, localRepair: true, grid: 'split',
+    npSplit: true, persistList: true, restingContacts: 'archive', carryRest: true, localRepair: true, grid: 'split',
   });
   const wall = parse('?scene=wall');
   assert.equal(wall.features.sparseColors, 32);
@@ -71,7 +71,7 @@ for (const [query, message] of [
   ['?scene=ring110k&reuse=pass&np=split', /np=split requires reuse=copy/],
   ['?scene=ring110k&reuse=pass&persist=list', /persist=list requires reuse=copy/],
   ['?scene=ring110k&contacts=canonical&reuse=copy', /reuse=copy requires persistent contacts/],
-  ['?scene=ring110k&rest=keep', /rest must be carry or drop/],
+  ['?scene=ring110k&rest=keep', /rest must be archive, carry, drop or touch/],
   ['?scene=ring110k&repair=x', /repair must be rounds or local/],
   ['?scene=ring110k&contacts=wide', /contacts must be persistent, compact or canonical/],
   ['?scene=ring110k&sleep=maybe', /sleep must be on or off/],
