@@ -25,6 +25,11 @@ pub trait VehicleBackend {
     fn joint_count(&self) -> u32;
     /// Append joints (vehicle tyre joints) after the existing ones.
     fn append_joints(&mut self, joints: &[engine_schema::Joint]);
+    /// The most bodies and colliders the backend holds, when it has fixed buffers
+    /// (spawns check against it and fail with an error instead of overflowing).
+    fn body_capacity(&self) -> Option<(u32, u32)> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

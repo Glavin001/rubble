@@ -252,6 +252,19 @@ impl SoftHost {
         if self.groups_used + group_map.len() as u32 + 1 > self.capacity.max_groups {
             return Err("break group capacity exhausted".into());
         }
+        if let Some((max_bodies, max_colliders)) = backend.body_capacity() {
+            let (nb, nc) = (packed.bodies.len() as u32, packed.colliders.len() as u32);
+            if first_body + nb > max_bodies {
+                return Err(format!(
+                    "rigid body capacity exhausted: {first_body} existing + {nb} new > {max_bodies}"
+                ));
+            }
+            if first_collider + nc > max_colliders {
+                return Err(format!(
+                    "collider capacity exhausted: {first_collider} existing + {nc} new > {max_colliders}"
+                ));
+            }
+        }
         self.groups_used += group_map.len() as u32;
         let mut cols: Vec<Collider> = packed.colliders.clone();
         for c in &mut cols {

@@ -234,12 +234,24 @@
     // Traffic scales the arenas with its car count (161 particles, 923 beams each).
     const NCARS = scene === 'traffic' ? Math.max(1, Math.min(128, Number(qs.get('cars')) || 20)) : 0;
     const big = Math.max(NCARS, 24);
+    // Per-car soft capacity from the car actually loaded (an imported or hi-res car can
+    // have several times the procedural sedan's beams), at least the sedan's.
+    const carSize = (() => {
+      if (EXPLICIT || (carKind !== 'import' && carKind !== 'hires')) return null;
+      const d = carKind === 'hires' ? loadJbeam([['hires.jbeam', hiresCarJbeam()]])
+        : importSrc.kind === 'jbeam' ? loadJbeam(importSrc.files, importSrc.pc) : loadTruck(importSrc.text);
+      const groups = new Set(d.beams.map((b) => b.break_group ?? b.breakGroup ?? 0).filter((g) => g)).size;
+      return { particles: d.nodes.length, beams: d.beams.length, triangles: (d.triangles ?? []).length, groups };
+    })();
+    const perCar = { beams: Math.max(1000, (carSize?.beams ?? 0) + 64), particles: Math.max(170, (carSize?.particles ?? 0) + 16), triangles: Math.max(400, (carSize?.triangles ?? 0) + 16), groups: carSize?.groups ?? 0 };
     const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
     // Sized as the JS host's sceneCapacity(200·big + 2000 bodies, 220·big + 4000 colliders).
-    const estBodies = 200 * big + 2000, maxBodies = nextPow2(Math.max(estBodies, 4096));
+    // Bodies per car: a soft car's node spheres and core (the procedural sedan's ~200, an
+    // imported car's its node count), plus the scene's own.
+    const estBodies = Math.max(200, (carSize?.particles ?? 0) + 32) * big + 2000, maxBodies = nextPow2(Math.max(estBodies, 4096));
     const capacity = {
       maxBodies,
-      maxColliders: nextPow2(Math.max(220 * big + 4000, maxBodies * 2, 8192)),
+      maxColliders: nextPow2(Math.max(Math.max(220, (carSize?.particles ?? 0) + 48) * big + 4000, maxBodies * 2, 8192)),
       maxContacts: Math.min(nextPow2(Math.max(estBodies * 16, 65536)), 1 << 21),
       // The buggy holds 8 core joints and 30 bolted-part joints.
       maxJoints: 512 + (buggy ? 48 : 16) * big,
@@ -260,7 +272,7 @@
       // (World's default 3 would cap 240 Hz at 3 steps a frame, 75 % real time).
       readbackFrames: 2 * STEPS_PER_FRAME + 2,
       vehicles: { maxVehicles: big + 8, maxWheels: 4 * big + 32, maxCurvePoints: 4096, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 16 },
-      soft: { maxBodies: big + 16, maxBeams: 1000 * big + 8192, maxParticles: 170 * big + 2048, maxColors: 64, maxGroups: 1024, maxTriangles: 400 * big + 4096, maxObstacles: 64 },
+      soft: { maxBodies: big + 16, maxBeams: perCar.beams * big + 8192, maxParticles: perCar.particles * big + 2048, maxColors: 64, maxGroups: Math.max(1024, perCar.groups * big + 64), maxTriangles: perCar.triangles * big + 4096, maxObstacles: 64 },
     });
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));

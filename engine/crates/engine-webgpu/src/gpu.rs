@@ -3828,6 +3828,10 @@ impl VehicleBackend for WgpuSim {
         self.body_count
     }
 
+    fn body_capacity(&self) -> Option<(u32, u32)> {
+        Some((self.capacity.max_bodies, self.capacity.max_colliders))
+    }
+
     fn joint_count(&self) -> u32 {
         self.joint_count
     }
