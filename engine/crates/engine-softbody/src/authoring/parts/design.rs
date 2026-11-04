@@ -21,6 +21,9 @@ use crate::authoring::skin::mat;
 use crate::authoring::vehicle::VehicleDef;
 use glam::Vec3;
 
+/// The visual wheels sit this far (m) outboard of the physics tyres.
+pub const WHEEL_OUT: f32 = 0.03;
+
 /// Visual design inputs.
 #[derive(Clone, Debug)]
 pub struct Styling {
@@ -55,6 +58,13 @@ pub struct Styling {
     pub grille: Vec<(f32, f32)>,
     pub intake: Vec<(f32, f32)>,
     pub taillight: Vec<(f32, f32)>,
+    /// The front plate's centre height (relative to the band's top).
+    pub plate_front_h: f32,
+    /// Fog lamps (arc view, from the front centre).
+    pub fog: Vec<(f32, f32)>,
+    /// The boot lid's light bar: half length (arc from the rear centre), centre
+    /// height and half height (relative to the band's top).
+    pub lightbar: [f32; 3],
     pub arch_radius: f32,
     /// Exhaust tips: |x|, y, radius (rear view).
     pub exhaust: [f32; 3],
@@ -66,55 +76,68 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         lower: 0.11,
         d_lower: -0.022,
         crease: f32::NAN,
-        a_below: 0.10,
-        a_above: 0.22,
+        a_below: 0.13,
+        a_above: 0.32,
         d_top: -0.05,
         m_top: 0.25,
         tuck: 0.06,
     };
+    // An upright fascia: its widest line high (at the lamps' lower edge), the
+    // lower bumper drawn back under it (a shorter-looking overhang), and a
+    // crisp turn into the bonnet.
     let nose = SectionShape {
         lower: 0.06,
-        d_lower: -0.03,
-        crease: 0.50,
-        a_below: 0.20,
-        a_above: 0.08,
-        d_top: -0.06,
-        m_top: 0.55,
-        tuck: 0.07,
+        d_lower: -0.055,
+        crease: 0.60,
+        a_below: 0.10,
+        a_above: 0.14,
+        d_top: -0.035,
+        m_top: 0.30,
+        tuck: 0.05,
     };
     let tail = SectionShape {
         lower: 0.08,
-        d_lower: -0.04,
-        crease: 0.66,
+        d_lower: -0.05,
+        crease: 0.70,
         a_below: 0.16,
-        a_above: 0.10,
-        d_top: -0.06,
-        m_top: 0.8,
+        a_above: 0.12,
+        d_top: -0.035,
+        m_top: 0.40,
         tuck: 0.07,
     };
     let body = BodyStyle {
+        // The shoulder: one line from above the headlamp, level through the
+        // handles, kicking up into the tail lamps.
         crease: Curve::new(&[
-            (0.00, 0.80),
-            (0.40, 0.86),
-            (1.00, 0.85),
-            (1.80, 0.82),
-            (2.60, 0.80),
-            (3.40, 0.78),
-            (4.10, 0.74),
-            (4.70, 0.66),
+            (0.00, 0.84),
+            (0.35, 0.885),
+            (0.90, 0.875),
+            (1.70, 0.835),
+            (2.60, 0.81),
+            (3.40, 0.79),
+            (4.10, 0.75),
+            (4.70, 0.68),
         ]),
         side,
         nose,
         tail,
-        nose_bow: 0.06,
+        nose_bow: 0.08,
         tail_bow: 0.09,
-        nose_corner: 0.42,
-        tail_corner: 0.38,
-        flare: 0.03,
+        nose_corner: 0.36,
+        tail_corner: 0.31,
+        flare: 0.022,
         flare_width: 0.17,
         lid_crown: 0.022,
         step: 0.022,
         step_along: 0.035,
+        nose_ramp: 0.07,
+        tail_ramp: 0.06,
+        hood_crease: [0.17, 0.38, 0.011, 0.006],
+        hood_z: [3.50, 4.70],
+        deck_lip: [0.014, 0.30, 0.62],
+        scoop: Curve::new(&[(1.30, 0.60), (2.20, 0.53), (3.00, 0.46), (3.45, 0.43)]),
+        scoop_depth: 0.016,
+        scoop_z: [1.42, 1.80, 3.10, 3.40],
     };
     let _ = def;
     Styling {
@@ -134,43 +157,57 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         pillar: 0.035,
         rail: 0.045,
         frame: 0.022,
+        // Slim full-LED lamps: a 5 cm blade at the grille, tapering to 3 cm
+        // as it wraps the corner.
         headlight: vec![
-            (0.31, -0.105),
-            (0.31, -0.018),
-            (0.55, -0.014),
-            (0.80, -0.014),
-            (0.98, -0.016),
-            (1.03, -0.036),
-            (0.92, -0.060),
-            (0.70, -0.082),
-            (0.48, -0.100),
+            (0.335, -0.066),
+            (0.335, -0.016),
+            (0.55, -0.011),
+            (0.80, -0.011),
+            (0.97, -0.015),
+            (1.035, -0.030),
+            (0.95, -0.044),
+            (0.72, -0.053),
+            (0.50, -0.062),
         ],
+        // A large trapezoid grille meeting the lamps' inner ends.
         grille: vec![
-            (-0.295, -0.022),
-            (0.295, -0.022),
-            (0.285, -0.17),
-            (0.24, -0.215),
-            (-0.24, -0.215),
-            (-0.285, -0.17),
+            (-0.315, -0.02),
+            (0.315, -0.02),
+            (0.335, -0.075),
+            (0.29, -0.215),
+            (0.225, -0.252),
+            (-0.225, -0.252),
+            (-0.29, -0.215),
+            (-0.335, -0.075),
         ],
         intake: vec![
-            (-0.50, -0.29),
-            (0.50, -0.29),
-            (0.56, -0.33),
-            (0.50, -0.42),
-            (-0.50, -0.42),
-            (-0.56, -0.33),
+            (-0.50, -0.30),
+            (0.50, -0.30),
+            (0.57, -0.335),
+            (0.52, -0.395),
+            (-0.52, -0.395),
+            (-0.57, -0.335),
         ],
         taillight: vec![
-            (0.49, -0.018),
-            (0.75, -0.016),
-            (1.00, -0.020),
-            (1.13, -0.050),
-            (0.98, -0.095),
-            (0.70, -0.130),
-            (0.49, -0.140),
+            (0.47, -0.018),
+            (0.75, -0.015),
+            (1.00, -0.019),
+            (1.12, -0.040),
+            (0.98, -0.062),
+            (0.72, -0.074),
+            (0.47, -0.080),
         ],
-        arch_radius: 0.362,
+        lightbar: [0.445, -0.034, 0.008],
+        plate_front_h: -0.348,
+        fog: vec![
+            (0.615, -0.322),
+            (0.75, -0.315),
+            (0.785, -0.328),
+            (0.76, -0.345),
+            (0.615, -0.352),
+        ],
+        arch_radius: 0.348,
         exhaust: [0.47, 0.46, 0.042],
         paint: def.look.paint,
     }
@@ -247,6 +284,26 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         let (a, h) = rear_ah(i, p);
         tail.sd(a, h)
     };
+    let fog = Shape::smooth(&st.fog);
+    let foglamp = |i: usize, p: Vec3| -> f32 {
+        if !on_band(i) || surf.arc[i] > 1.0 {
+            return 1.0;
+        }
+        let (a, h) = front_ah(i, p);
+        fog.sd(a, h)
+    };
+    // A full-width light bar across the boot lid between the tail lamps.
+    let lightbar = |i: usize, p: Vec3| -> f32 {
+        if !on_band(i) || p.z > 0.6 {
+            return 1.0;
+        }
+        let (a, h) = rear_ah(i, p);
+        smax(
+            a - st.lightbar[0],
+            (h - st.lightbar[1]).abs() - st.lightbar[2],
+            0.004,
+        )
+    };
     // Glass.
     let windscreen = |i: usize, p: Vec3| -> f32 {
         if !surf.lid[i] {
@@ -311,6 +368,8 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         o = o.min(grille_f(i, p));
         o = o.min(intake_f(i, p));
         o = o.min(taillamp(i, p));
+        o = o.min(lightbar(i, p));
+        o = o.min(foglamp(i, p));
         o = o.min(windscreen(i, p));
         o = o.min(backlight(i, p));
         o = o.min(glass_side(i, p) - st.frame);
@@ -666,22 +725,65 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         false,
         &mut pieces,
     );
-    // Tail garnish and belt mouldings: chrome strips swept along the surface.
-    let mut garnish = Mesh::default();
-    let mut path = Vec::new();
-    for k in 0..=60 {
-        let a_r = -0.455 + 0.91 * k as f32 / 60.0;
-        let a = half - a_r.abs();
-        let y = surf.band_top_y(a) - 0.075;
-        let (p, n) = surf.band_at(a, y, if a_r < 0.0 { -1.0 } else { 1.0 });
-        path.push(p + n * 0.003);
+    // The front plate: on its bracket over the lower intake's centre.
+    let plate_front = metric(
+        m,
+        &trim::field(m, |i, p| {
+            if !on_band(i) || surf.arc[i] > 0.4 {
+                return 1.0;
+            }
+            let (a, h) = front_ah(i, p);
+            smax(a.abs() - 0.262, (h - st.plate_front_h).abs() - 0.058, 0.02)
+        }),
+    );
+    let plate_front_back: Vec<f32> = plate_front.iter().map(|v| v - 0.01).collect();
+    strip(
+        "plate_front_surround",
+        &plate_front_back,
+        0.016,
+        mat::TRIM,
+        EdgeStyle::TRIM,
+        false,
+        &mut pieces,
+    );
+    strip(
+        "plate_front",
+        &plate_front,
+        0.021,
+        mat::PLATE,
+        EdgeStyle {
+            gap: 0.0,
+            roll: 0.0015,
+            depth: 0.005,
+            flange: 0.0,
+            ao_floor: 0.4,
+            seal: false,
+        },
+        false,
+        &mut pieces,
+    );
+    // The plates' texture coordinates (their lettering): u across as seen
+    // from outside the car, v up.
+    for pc in pieces.iter_mut() {
+        let front = match pc.name.as_str() {
+            "plate" => false,
+            "plate_front" => true,
+            _ => continue,
+        };
+        let m = &mut pc.mesh;
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for p in &m.pos {
+            lo = lo.min(*p);
+            hi = hi.max(*p);
+        }
+        for k in 0..m.len() {
+            let p = m.pos[k];
+            let u = (p.x - lo.x) / (hi.x - lo.x).max(1e-4);
+            let v = (p.y - lo.y) / (hi.y - lo.y).max(1e-4);
+            m.uv[k] = [if front { u } else { 1.0 - u }, v];
+        }
     }
-    garnish.tube(&path, -Vec3::Z, 0.008, 0.0022, 10, mat::CHROME, 1.0);
-    pieces.push(Piece {
-        name: "garnish".into(),
-        mesh: garnish,
-        bind: Bind::Vote,
-    });
+    // Belt mouldings: chrome strips swept along the surface.
     for sx in [1.0f32, -1.0] {
         let mut belt = Mesh::default();
         let mut path = Vec::new();
@@ -721,10 +823,10 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     for sx in [1.0f32, -1.0] {
         let f = sided(&hf, sx);
         let axis = (avg_in(&f) * 0.6 - Vec3::Z * 0.4).normalize();
-        let projectors = [0.48f32, 0.66]
+        let projectors = [0.50f32, 0.64]
             .iter()
             .map(|&a| {
-                let y = surf.band_top_y(a) - 0.042;
+                let y = surf.band_top_y(a) - 0.036;
                 surf.band_at(a, y, sx).0
             })
             .collect();
@@ -737,7 +839,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             guides: vec![(-0.011, -0.0045, mat::DRL)],
             guide_depth: 0.006,
             projectors,
-            projector_r: 0.03,
+            projector_r: 0.019,
         };
         pieces.push(Piece {
             name: format!("headlight_{}", if sx > 0.0 { "l" } else { "r" }),
@@ -757,9 +859,8 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             housing: mat::TRIM,
             reflector: mat::TAIL_BACK,
             guides: vec![
-                (-0.012, -0.0055, mat::TAIL_LED),
-                (-0.034, -0.0275, mat::TAIL_LED),
-                (-0.056, -0.0495, mat::TAIL_LED),
+                (-0.010, -0.0045, mat::TAIL_LED),
+                (-0.026, -0.0215, mat::TAIL_LED),
             ],
             guide_depth: 0.008,
             projectors: Vec::new(),
@@ -767,6 +868,44 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         };
         pieces.push(Piece {
             name: format!("taillight_{}", if sx > 0.0 { "l" } else { "r" }),
+            mesh: fixtures::lamp(m, &f, &spec),
+            bind: Bind::Rigid,
+        });
+    }
+    let lb = metric(m, &trim::field(m, lightbar));
+    let spec = fixtures::LampSpec {
+        axis: Vec3::Z,
+        depth: 0.03,
+        lens: mat::TAIL_LENS,
+        housing: mat::TRIM,
+        reflector: mat::TAIL_BACK,
+        guides: vec![(-0.02, -0.0022, mat::TAIL_LED)],
+        guide_depth: 0.005,
+        projectors: Vec::new(),
+        projector_r: 0.0,
+    };
+    pieces.push(Piece {
+        name: "lightbar".into(),
+        mesh: fixtures::lamp(m, &lb, &spec),
+        bind: Bind::Rigid,
+    });
+    // Fog lamps: a slim clear lens with an LED line, in the bumper's corners.
+    let ff = metric(m, &trim::field(m, foglamp));
+    for sx in [1.0f32, -1.0] {
+        let f = sided(&ff, sx);
+        let spec = fixtures::LampSpec {
+            axis: (avg_in(&f) * 0.7 - Vec3::Z * 0.3).normalize(),
+            depth: 0.04,
+            lens: mat::LENS,
+            housing: mat::TRIM,
+            reflector: mat::REFLECTOR,
+            guides: vec![(-0.009, -0.004, mat::DRL)],
+            guide_depth: 0.006,
+            projectors: Vec::new(),
+            projector_r: 0.0,
+        };
+        pieces.push(Piece {
+            name: format!("foglamp_{}", if sx > 0.0 { "l" } else { "r" }),
             mesh: fixtures::lamp(m, &f, &spec),
             bind: Bind::Rigid,
         });
@@ -779,13 +918,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         depth: 0.07,
         surround: 0.009,
         surround_mat: mat::TRIM,
-        slats: vec![
-            (-0.048, mat::CHROME),
-            (-0.085, mat::TRIM),
-            (-0.118, mat::TRIM),
-            (-0.151, mat::TRIM),
-            (-0.184, mat::TRIM),
-        ],
+        slats: Vec::new(),
         slat_half: 0.0075,
         slat_back: 0.018,
         back_mat: mat::GRILLE,
@@ -801,7 +934,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         depth: 0.06,
         surround: 0.0,
         surround_mat: mat::TRIM,
-        slats: vec![(-0.33, mat::TRIM), (-0.37, mat::TRIM)],
+        slats: vec![(-0.348, mat::TRIM)],
         slat_half: 0.006,
         slat_back: 0.02,
         back_mat: mat::GRILLE,
@@ -816,13 +949,16 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         for sx in [1.0f32, -1.0] {
             let front = c.z > 0.5 * prof.length;
             let w = fixtures::WheelSpec {
-                centre: Vec3::new(sx * c.x, c.y, c.z),
+                // Set 3 cm outboard of the physics tyre: the tyre's face
+                // sits nearly flush with the arch, as a modern car's does.
+                centre: Vec3::new(sx * (c.x + WHEEL_OUT), c.y, c.z),
                 out: Vec3::X * sx,
                 radius: c.tyre_radius,
                 width: c.tyre_width,
-                rim_radius: c.tyre_radius * 0.67,
+                // A 19-inch look: a large rim on a low sidewall.
+                rim_radius: c.tyre_radius * 0.76,
                 spokes: 5,
-                disc_radius: if front { 0.155 } else { 0.145 },
+                disc_radius: if front { 0.172 } else { 0.162 },
             };
             pieces.push(Piece {
                 name: "wheel".into(),
@@ -930,8 +1066,242 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             bind: Bind::Vote,
         });
     }
+    // --- Cabin trim that follows the panels -----------------------------------
+    // Door cards: each door's skin below the belt, 10 cm in, facing the cabin;
+    // dark above the armrest, lighter below, with an armrest along it.
+    for (name, region, _, _) in &panels {
+        if !name.starts_with("door") {
+            continue;
+        }
+        let f = metric(
+            m,
+            &trim::field(m, |i, p| {
+                smax(
+                    smax(region(i, p), p.y - (ytl(p) - 0.012), 0.01),
+                    st.sill + 0.03 - p.y,
+                    0.01,
+                )
+            }),
+        );
+        for sx in [1.0f32, -1.0] {
+            let fs: Vec<f32> = f
+                .iter()
+                .zip(&m.pos)
+                .map(|(v, p)| v.max(-p.x * sx))
+                .collect();
+            let c = trim::clip(m, &fs, -0.02);
+            if c.mesh.is_empty() {
+                continue;
+            }
+            let mut card = trim::offset(&c.mesh, -0.1, true, Some(mat::DOORCARD), 0.7);
+            for k in 0..card.len() {
+                if card.pos[k].y > 0.78 {
+                    card.mat[k] = mat::DASH;
+                }
+            }
+            let (mut z0, mut z1, mut xs) = (f32::MAX, f32::MIN, 0.0f32);
+            for p in &card.pos {
+                z0 = z0.min(p.z);
+                z1 = z1.max(p.z);
+                xs = xs.max(p.x.abs());
+            }
+            let arm: Vec<Vec3> = (0..=8)
+                .map(|k| {
+                    Vec3::new(
+                        sx * (xs - 0.035),
+                        0.66,
+                        z0 + 0.05 + (z1 - z0 - 0.1) * k as f32 / 8.0,
+                    )
+                })
+                .collect();
+            card.tube(&arm, Vec3::Y, 0.03, 0.022, 12, mat::DASH, 0.6);
+            pieces.push(Piece {
+                name: format!("{name}_card_{}", if sx > 0.0 { "l" } else { "r" }),
+                mesh: card,
+                bind: Bind::Vote,
+            });
+        }
+    }
+    // Headliner and pillar trim: the greenhouse's skin (outside the glass)
+    // 1.8 cm in, facing the cabin.
+    let glass_all =
+        |i: usize, p: Vec3| -> f32 { windscreen(i, p).min(backlight(i, p)).min(glass_side(i, p)) };
+    let hl = metric(
+        m,
+        &trim::field(m, |i, p| {
+            if !surf.lid[i] {
+                return 1.0;
+            }
+            let cab = smax(st.backlight[0] - p.z, p.z - st.windscreen[1], 0.02);
+            smax(
+                smax(cab, ytl(p) + 0.025 - p.y, 0.02),
+                -glass_all(i, p) - 0.004,
+                0.005,
+            )
+        }),
+    );
+    let c = trim::clip(m, &hl, 0.0);
+    if !c.mesh.is_empty() {
+        pieces.push(Piece {
+            name: "headliner".into(),
+            mesh: trim::offset(&c.mesh, -0.018, true, Some(mat::HEADLINER), 0.8),
+            bind: Bind::Vote,
+        });
+    }
+    // Floor carpet and the parcel shelf (with the high-mounted stop lamp).
+    let mut floor = Mesh::default();
+    floor.superellipsoid(
+        Vec3::new(0.0, 0.25, 2.35),
+        Vec3::X,
+        Vec3::Y,
+        Vec3::Z,
+        Vec3::new(0.78, 0.02, 1.0),
+        10.0,
+        super::segs(8, 3),
+        mat::CARPET,
+        0.45,
+    );
+    pieces.push(Piece {
+        name: "carpet".into(),
+        mesh: floor,
+        bind: Bind::Vote,
+    });
+    let mut shelf = Mesh::default();
+    let shelf_y = (prof.top.eval(st.backlight[0]) - 0.07).min(1.04);
+    shelf.superellipsoid(
+        Vec3::new(0.0, shelf_y, 0.5 * (st.backlight[0] + 1.34)),
+        Vec3::X,
+        Vec3::Y,
+        Vec3::Z,
+        Vec3::new(0.66, 0.012, 0.5 * (1.34 - st.backlight[0])),
+        10.0,
+        super::segs(6, 3),
+        mat::TRIM,
+        0.5,
+    );
+    let hz = st.backlight[0] + 0.07;
+    shelf.superellipsoid(
+        Vec3::new(0.0, shelf_y + 0.03, hz),
+        Vec3::X,
+        Vec3::Y,
+        Vec3::Z,
+        Vec3::new(0.17, 0.018, 0.035),
+        8.0,
+        super::segs(6, 3),
+        mat::TRIM,
+        0.7,
+    );
+    shelf.superellipsoid(
+        Vec3::new(0.0, shelf_y + 0.035, hz - 0.034),
+        Vec3::X,
+        Vec3::Y,
+        Vec3::Z,
+        Vec3::new(0.15, 0.007, 0.003),
+        8.0,
+        super::segs(6, 3),
+        mat::TAIL_LED,
+        1.0,
+    );
+    pieces.push(Piece {
+        name: "parcel_shelf".into(),
+        mesh: shelf,
+        bind: Bind::Vote,
+    });
+    // --- Wipers, parked along the windscreen's base ----------------------------
+    let glass_at = |x: f32, z: f32| -> (Vec3, Vec3) {
+        // The nearest lid vertex in plan.
+        let mut best = (f32::MAX, Vec3::ZERO, Vec3::Y);
+        for k in 0..m.len() {
+            if !surf.lid[k] {
+                continue;
+            }
+            let p = m.pos[k];
+            let d = (p.x - x).powi(2) + (p.z - z).powi(2);
+            if d < best.0 {
+                best = (d, p, m.nrm[k]);
+            }
+        }
+        (Vec3::new(x, best.1.y, z), best.2)
+    };
+    let zw = st.windscreen[1] - 0.075;
+    for (x0, x1, pivot_x) in [(-0.07f32, 0.57f32, 0.3f32), (-0.62, -0.06, -0.24)] {
+        let mut w = Mesh::default();
+        let n_b = 10;
+        let blade: Vec<Vec3> = (0..=n_b)
+            .map(|k| {
+                let x = x0 + (x1 - x0) * k as f32 / n_b as f32;
+                let z = zw + 0.05 * (x - x0) / (x1 - x0);
+                let (p, n) = glass_at(x, z);
+                p + n * 0.014
+            })
+            .collect();
+        let (_, nm) = glass_at(0.5 * (x0 + x1), zw);
+        w.tube(&blade, nm, 0.0045, 0.009, 8, mat::TRIM, 0.7);
+        let (pv, pn) = glass_at(pivot_x, st.windscreen[1] + 0.02);
+        let mid = blade[n_b / 2] + nm * 0.012;
+        w.tube(&[pv + pn * 0.02, mid], nm, 0.006, 0.004, 8, mat::TRIM, 0.7);
+        pieces.push(Piece {
+            name: "wiper".into(),
+            mesh: w,
+            bind: Bind::Vote,
+        });
+    }
+    // --- Emblems (an original mark: a split hexagon) ---------------------------
+    {
+        let a = 0.0;
+        let (pf, nf) = surf.band_at(a, surf.band_top_y(a) - 0.115, 1.0);
+        pieces.push(Piece {
+            name: "emblem_front".into(),
+            mesh: fixtures::emblem(pf + nf * 0.006, nf, Vec3::Y, 0.075),
+            bind: Bind::Vote,
+        });
+        let ar = half;
+        let (pr, nr) = surf.band_at(ar, surf.band_top_y(ar) - 0.072, 1.0);
+        pieces.push(Piece {
+            name: "emblem_rear".into(),
+            mesh: fixtures::emblem(pr + nr * 0.002, nr, Vec3::Y, 0.06),
+            bind: Bind::Vote,
+        });
+    }
     let _ = smin;
+    bake_ao(&mut pieces, def, st);
     pieces
+}
+
+/// Ambient occlusion the car casts on itself, from analytic occluders (cheap,
+/// baked into the vertices; the wheels turn, so the renderer shades theirs):
+/// the floor under the car (downward faces low down), and the wheel arches
+/// (faces inside the arch, round the tyre).
+fn bake_ao(pieces: &mut [Piece], def: &VehicleDef, st: &Styling) {
+    let prof = &def.profile;
+    for pc in pieces.iter_mut() {
+        if matches!(pc.bind, Bind::Wheel(_) | Bind::Hub(_)) {
+            continue;
+        }
+        let m = &mut pc.mesh;
+        for k in 0..m.len() {
+            let (p, n) = (m.pos[k], m.nrm[k]);
+            let mut occ = 1.0f32;
+            // Under the car: a face looking down sees the floor in the car's
+            // shadow; the lower it is, the darker.
+            if n.y < 0.0 {
+                let low = 1.0 - super::smoothstep(0.18, 0.62, p.y);
+                occ *= 1.0 - 0.6 * (-n.y).min(1.0) * low;
+            }
+            // Inside a wheel arch: faces within the arch circle that look
+            // inward or down (liners, the arch's return, the bumper's ends).
+            for w in &prof.wells {
+                let r = glam::Vec2::new(p.z - w.z, p.y - w.y).length();
+                if r > st.arch_radius + 0.12 || p.x.abs() < w.inner_x - 0.12 {
+                    continue;
+                }
+                let inward = (-n.x * p.x.signum()).max(0.0) + (-n.y).max(0.0) * 0.5;
+                let inside = super::smoothstep(st.arch_radius + 0.10, st.arch_radius - 0.02, r);
+                occ *= 1.0 - 0.55 * inside * inward.min(1.0);
+            }
+            m.ao[k] *= occ;
+        }
+    }
 }
 
 /// Roll a loop with a per-vertex style (arch lips vs shut lines): split it into

@@ -294,20 +294,26 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
     // (radius, axial offset).
     let side = |s: f32| -> Vec<(f32, f32)> {
         // One sidewall from the bead (rim) to the shoulder, at axial sign s.
-        vec![
-            (rr + 0.006, s * (hw * 0.86)),
-            (rr + 0.016, s * (hw * 0.93)),
-            (rr + 0.03, s * (hw * 0.99)),
-            (rr + 0.045, s * (hw * 1.02)),
-            (rr + 0.05, s * (hw * 1.04)),
-            (rr + 0.055, s * (hw * 1.02)),
-            (r - 0.05, s * (hw * 1.03)),
-            (r - 0.042, s * (hw * 1.045)),
-            (r - 0.034, s * (hw * 1.03)),
-            (r - 0.018, s * (hw * 0.99)),
-            (r - 0.006, s * (hw * 0.90)),
-            (r - 0.001, s * (hw * 0.80)),
+        // Proportional to the sidewall's height (a low-profile tyre on a big
+        // rim keeps its bead, rim protector, lettering band and shoulder).
+        let sh = r - rr;
+        [
+            (0.06, 0.86),
+            (0.16, 0.93),
+            (0.28, 0.99),
+            (0.36, 1.025),
+            (0.42, 1.035),
+            (0.49, 1.02),
+            (0.60, 1.03),
+            (0.70, 1.045),
+            (0.80, 1.035),
+            (0.89, 0.99),
+            (0.965, 0.90),
+            (0.995, 0.80),
         ]
+        .iter()
+        .map(|&(f, w)| (rr + f * sh, s * hw * w))
+        .collect()
     };
     let mut prof: Vec<(f32, f32)> = side(-1.0);
     // Tread with four circumferential grooves.
@@ -328,6 +334,7 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
     let mut outer = side(1.0);
     outer.reverse();
     prof.extend(outer);
+    let tyre_first = m.len();
     m.lathe(
         w.centre,
         ax,
@@ -344,6 +351,27 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
         },
         false,
     );
+    // The tyre's texture coordinates (lettering and tread blocks in the
+    // renderer): u round the wheel (0..1), v the sidewall's height fraction
+    // (0 at the bead, 1 at the shoulder; negative on the inner side) or, on
+    // the tread, 2 + its width fraction (0..2 across).
+    {
+        let s1 = ax.cross(s0);
+        for k in tyre_first..m.len() {
+            let d = m.pos[k] - w.centre;
+            let axial = d.dot(ax);
+            let radial = (d - ax * axial).length();
+            let ang = d.dot(s1).atan2(d.dot(s0));
+            let u = (ang / TAU).rem_euclid(1.0);
+            let on_tread = radial > r - 0.0095 && axial.abs() < hw * 0.81;
+            let v = if on_tread {
+                2.0 + (axial / hw + 1.0)
+            } else {
+                ((radial - rr) / (r - rr)).clamp(0.0, 1.0) * axial.signum()
+            };
+            m.uv[k] = [u, v];
+        }
+    }
     // Rim barrel and lips: outer lip, barrel inside (darker), inner lip.
     let rim_prof = [
         (rr + 0.008, hw * 0.80),
@@ -681,5 +709,91 @@ pub fn exhaust(from: Vec3, tip: Vec3, dir: Vec3, r: f32) -> Mesh {
         |k| if k >= 4 { 0.15 } else { 1.0 },
         false,
     );
+    m
+}
+
+/// A flat polygon (convex, counter-clockwise in (right, up)) extruded `depth`
+/// out of the surface along `n`, with walls: a badge's facet.
+fn facet(
+    m: &mut Mesh,
+    c: Vec3,
+    n: Vec3,
+    right: Vec3,
+    up: Vec3,
+    pts: &[[f32; 2]],
+    depth: f32,
+    mtl: u8,
+) {
+    let at = |p: [f32; 2], d: f32| c + right * p[0] + up * p[1] + n * d;
+    let top: Vec<u32> = pts
+        .iter()
+        .map(|&p| m.vert(at(p, depth), n, mtl, 1.0))
+        .collect();
+    for k in 1..pts.len() - 1 {
+        m.tri(top[0], top[k], top[k + 1]);
+    }
+    for k in 0..pts.len() {
+        let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+        let e = (at(b, 0.0) - at(a, 0.0)).normalize_or_zero();
+        let o = e.cross(n).normalize_or_zero();
+        let q = [
+            m.vert(at(a, 0.0), o, mtl, 0.7),
+            m.vert(at(b, 0.0), o, mtl, 0.7),
+            m.vert(at(b, depth), o, mtl, 1.0),
+            m.vert(at(a, depth), o, mtl, 1.0),
+        ];
+        m.quad(q[0], q[1], q[2], q[3]);
+    }
+}
+
+/// The car's badge, an original mark: a hexagonal ring split by a diagonal
+/// into two shards (rubble), in chrome on a black backing. `c` on the surface,
+/// facing `n`; `size` its width (m).
+pub fn emblem(c: Vec3, n: Vec3, up: Vec3, size: f32) -> Mesh {
+    let mut m = Mesh::default();
+    let n = n.normalize();
+    let right = up.cross(n).normalize();
+    let up = n.cross(right).normalize();
+    let r = 0.5 * size;
+    let hex = |rad: f32, k: usize| -> [f32; 2] {
+        let a = PI / 6.0 + TAU * k as f32 / 6.0;
+        [rad * a.cos(), rad * a.sin() * 0.82]
+    };
+    // Backing.
+    let back: Vec<[f32; 2]> = (0..6).map(|k| hex(r * 1.06, k)).collect();
+    facet(&mut m, c, n, right, up, &back, 0.002, mat::TRIM);
+    // The ring: six trapezoids.
+    for k in 0..6 {
+        let quad = [
+            hex(r * 0.8, k),
+            hex(r * 0.8, k + 1),
+            hex(r, k + 1),
+            hex(r, k),
+        ];
+        let ccw = [quad[0], quad[3], quad[2], quad[1]];
+        let pick = if (quad[1][0] - quad[0][0]) * (quad[2][1] - quad[0][1])
+            - (quad[1][1] - quad[0][1]) * (quad[2][0] - quad[0][0])
+            > 0.0
+        {
+            quad
+        } else {
+            ccw
+        };
+        facet(&mut m, c, n, right, up, &pick, 0.005, mat::CHROME);
+    }
+    // Two shards split by a diagonal gap.
+    let g = 0.06 * r;
+    let s1 = [
+        [-0.55 * r, -0.42 * r],
+        [0.42 * r - g, -0.42 * r],
+        [-0.55 * r, 0.4 * r - g],
+    ];
+    let s2 = [
+        [0.55 * r, 0.42 * r],
+        [-0.42 * r + g, 0.42 * r],
+        [0.55 * r, -0.4 * r + g],
+    ];
+    facet(&mut m, c, n, right, up, &s1, 0.006, mat::CHROME);
+    facet(&mut m, c, n, right, up, &s2, 0.006, mat::CHROME);
     m
 }

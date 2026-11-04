@@ -25,6 +25,7 @@
 pub mod body;
 pub mod design;
 pub mod fixtures;
+pub mod interior;
 pub mod trim;
 
 use glam::Vec3;
@@ -63,8 +64,11 @@ pub enum Bind {
     Nearest,
     /// A given physics part (a voted piece after its cut along part seams).
     Part(u16),
-    /// A named structure group (seats on their frames).
+    /// A named structure group (the dashboard and console on their members).
     Group(u16),
+    /// A named structure group, rigidly on one of its triangles (seats and the
+    /// steering wheel: they never stretch or swing out on a far triangle).
+    GroupRigid(u16),
     /// A rigid part (mirror, handle, lamp): voted part, then the whole piece
     /// on one triangle's orthonormal frame (moves rigidly, never stretches).
     Rigid,
@@ -86,6 +90,9 @@ pub struct Mesh {
     /// 1 where the normal follows the skin's node normals when deformed (smooth
     /// body surfaces); 0 rides its binding triangle's frame.
     pub smooth: Vec<u8>,
+    /// Texture coordinates of the parts that carry a printed pattern (tyre
+    /// lettering and tread, plates, displays); 0 elsewhere.
+    pub uv: Vec<[f32; 2]>,
 }
 
 impl Mesh {
@@ -95,6 +102,7 @@ impl Mesh {
         self.mat.push(mat);
         self.ao.push(ao);
         self.smooth.push(0);
+        self.uv.push([0.0, 0.0]);
         (self.pos.len() - 1) as u32
     }
 
@@ -125,6 +133,7 @@ impl Mesh {
         self.mat.extend_from_slice(&o.mat);
         self.ao.extend_from_slice(&o.ao);
         self.smooth.extend_from_slice(&o.smooth);
+        self.uv.extend_from_slice(&o.uv);
         self.idx.extend(o.idx.iter().map(|i| i + base));
     }
 
@@ -275,6 +284,137 @@ impl Mesh {
                 } else {
                     self.quad(ids[0], ids[1], ids[2], ids[3]);
                 }
+            }
+        }
+    }
+
+    /// A superellipsoid (a rounded box: exponent `e` 2 is an ellipsoid, 4 a
+    /// cushion, 8 a box with soft edges) at `c` with half sizes `h` along the
+    /// frame (u, v, w), sampled as a cube sphere with `n` × `n` quads a face.
+    /// Normals are the shape's own (smooth, no faceting). Returns the first
+    /// vertex id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn superellipsoid(
+        &mut self,
+        c: Vec3,
+        u: Vec3,
+        v: Vec3,
+        w: Vec3,
+        h: Vec3,
+        e: f32,
+        n: usize,
+        mat: u8,
+        ao: f32,
+    ) -> u32 {
+        let first = self.pos.len() as u32;
+        let first_idx = self.idx.len();
+        let n = n.max(2);
+        let faces = [
+            (Vec3::X, Vec3::Y, Vec3::Z),
+            (-Vec3::X, Vec3::Z, Vec3::Y),
+            (Vec3::Y, Vec3::Z, Vec3::X),
+            (-Vec3::Y, Vec3::X, Vec3::Z),
+            (Vec3::Z, Vec3::X, Vec3::Y),
+            (-Vec3::Z, Vec3::Y, Vec3::X),
+        ];
+        let q = std::f32::consts::FRAC_PI_4;
+        for (f, a, b) in faces {
+            let mut ids = Vec::with_capacity((n + 1) * (n + 1));
+            for i in 0..=n {
+                for j in 0..=n {
+                    let s = ((-1.0 + 2.0 * i as f32 / n as f32) * q).tan();
+                    let t = ((-1.0 + 2.0 * j as f32 / n as f32) * q).tan();
+                    let d = (f + a * s + b * t).normalize();
+                    // Unit superellipsoid along d, then scaled.
+                    let k =
+                        (d.x.abs().powf(e) + d.y.abs().powf(e) + d.z.abs().powf(e)).powf(-1.0 / e);
+                    let p = d * k;
+                    let g = Vec3::new(
+                        p.x.signum() * p.x.abs().powf(e - 1.0) / h.x.max(1e-5),
+                        p.y.signum() * p.y.abs().powf(e - 1.0) / h.y.max(1e-5),
+                        p.z.signum() * p.z.abs().powf(e - 1.0) / h.z.max(1e-5),
+                    );
+                    let wp = c + u * (p.x * h.x) + v * (p.y * h.y) + w * (p.z * h.z);
+                    let wn = u * g.x + v * g.y + w * g.z;
+                    ids.push(self.vert(wp, wn, mat, ao));
+                }
+            }
+            for i in 0..n {
+                for j in 0..n {
+                    let k = |i: usize, j: usize| ids[i * (n + 1) + j];
+                    self.quad(k(i, j), k(i + 1, j), k(i + 1, j + 1), k(i, j + 1));
+                }
+            }
+        }
+        // Face outward (the cube-sphere winding differs per face).
+        for t in self.idx[first_idx..].chunks_mut(3) {
+            let (pa, pb, pc) = (
+                self.pos[t[0] as usize],
+                self.pos[t[1] as usize],
+                self.pos[t[2] as usize],
+            );
+            let nn = self.nrm[t[0] as usize] + self.nrm[t[1] as usize] + self.nrm[t[2] as usize];
+            if (pb - pa).cross(pc - pa).dot(nn) < 0.0 {
+                t.swap(1, 2);
+            }
+        }
+        first
+    }
+
+    /// A loft through closed sections: `rings[k]` a loop of points (all the
+    /// same length), quads between neighbours, caps on both ends; smooth
+    /// normals from the faces. `mat` per ring.
+    pub fn loft(&mut self, rings: &[Vec<Vec3>], mat: impl Fn(usize) -> u8, ao: f32, caps: bool) {
+        let base = self.pos.len() as u32;
+        let first_idx = self.idx.len();
+        let n = rings[0].len();
+        let mut ids: Vec<Vec<u32>> = Vec::new();
+        for (k, r) in rings.iter().enumerate() {
+            ids.push(
+                r.iter()
+                    .map(|&p| self.vert(p, Vec3::Y, mat(k), ao))
+                    .collect(),
+            );
+        }
+        self.strips(&ids, true);
+        if caps {
+            for k in [0, rings.len() - 1] {
+                let c = rings[k].iter().copied().sum::<Vec3>() / n as f32;
+                let ci = self.vert(c, Vec3::Y, mat(k), ao);
+                let ring: Vec<u32> = ids[k]
+                    .iter()
+                    .map(|&i| {
+                        // Caps get their own vertices (a crisp edge).
+                        self.vert(self.pos[i as usize], Vec3::Y, mat(k), ao)
+                    })
+                    .collect();
+                for i in 0..n {
+                    self.tri(ci, ring[i], ring[(i + 1) % n]);
+                }
+            }
+        }
+        // Normals from this loft's faces only, wound outward from its centre.
+        let centre = self.pos[base as usize..].iter().copied().sum::<Vec3>()
+            / (self.pos.len() - base as usize) as f32;
+        let mut acc = vec![Vec3::ZERO; self.pos.len() - base as usize];
+        for t in self.idx[first_idx..].chunks_mut(3) {
+            let (a, b, c) = (
+                self.pos[t[0] as usize],
+                self.pos[t[1] as usize],
+                self.pos[t[2] as usize],
+            );
+            let mut fnn = (b - a).cross(c - a);
+            if fnn.dot((a + b + c) / 3.0 - centre) < 0.0 {
+                t.swap(1, 2);
+                fnn = -fnn;
+            }
+            for &i in t.iter() {
+                acc[(i - base) as usize] += fnn;
+            }
+        }
+        for (k, a) in acc.into_iter().enumerate() {
+            if a.length_squared() > 1e-20 {
+                self.nrm[base as usize + k] = a.normalize();
             }
         }
     }

@@ -91,6 +91,77 @@ pub struct BodyStyle {
     /// than along, and every cut line is exact whatever the grid.
     pub step: f32,
     pub step_along: f32,
+    /// The lid's roll-over length (m) from its edge at the nose and at the
+    /// tail (the sides keep the tumblehome ramp): short gives a crisp bonnet
+    /// leading edge and a crisp boot deck.
+    pub nose_ramp: f32,
+    pub tail_ramp: f32,
+    /// Bonnet power dome: the creases' half spacing at the nose and at the
+    /// cowl, the dome's rise between them and the creases' rounding (m); the
+    /// bonnet's z span (cowl, nose).
+    pub hood_crease: [f32; 4],
+    pub hood_z: [f32; 2],
+    /// Boot lip: the deck's rise (m) at its trailing edge, over this length
+    /// (m) forward of it, within this half width.
+    pub deck_lip: [f32; 3],
+    /// Lower-door sculpture: a feature line in side view (z → y) below which
+    /// the side steps in by `scoop_depth` (a crisp edge at the line, easing
+    /// out toward the sill), faded in over z ∈ [scoop_z[0], scoop_z[1]] and
+    /// out over [scoop_z[2], scoop_z[3]].
+    pub scoop: Curve,
+    pub scoop_depth: f32,
+    pub scoop_z: [f32; 4],
+}
+
+/// Smooth max(s, 0) with a rounding of w (m).
+fn soft_pos(s: f32, w: f32) -> f32 {
+    0.5 * (s + (s * s + w * w).sqrt())
+}
+
+impl BodyStyle {
+    /// The lower-door step-in (m, ≥ 0) at side-view (z, y), above the lower
+    /// line yl, under the feature line ys.
+    pub fn scoop_at(&self, z: f32, y: f32, yl: f32, ys: f32) -> f32 {
+        if self.scoop_depth <= 0.0 {
+            return 0.0;
+        }
+        let [a, b, c, d] = self.scoop_z;
+        let fz = smoothstep(a, b, z) * (1.0 - smoothstep(c, d, z));
+        if fz <= 0.0 {
+            return 0.0;
+        }
+        // A crisp upper edge (1.2 cm), the full step below it, easing back out
+        // toward the lower line.
+        let edge = smoothstep(ys + 0.004, ys - 0.012, y);
+        let ease = 0.35 + 0.65 * smoothstep(yl, ys - 0.02, y);
+        self.scoop_depth * fz * edge * ease
+    }
+
+    /// Detail heights (m) added to the lid at plan (x, z) after it is relaxed:
+    /// the bonnet's power dome and the boot lip. `z_tail` is the tail edge's
+    /// z at this x.
+    pub fn lid_detail(&self, x: f32, z: f32, z_tail: f32) -> f32 {
+        let mut d = 0.0;
+        let [xn, xc, rise, w] = self.hood_crease;
+        let [zc, zn] = self.hood_z;
+        if rise > 0.0 && z > zc - 0.05 {
+            let t = ((z - zc) / (zn - zc)).clamp(0.0, 1.0);
+            let xl = xc + (xn - xc) * t;
+            let fade =
+                smoothstep(zc - 0.03, zc + 0.10, z) * (1.0 - smoothstep(zn - 0.22, zn - 0.04, z));
+            // Flat between the creases, a crisp break at them, falling away
+            // outside.
+            let s = soft_pos(x.abs() - xl, w);
+            d += rise * fade * (1.0 - smoothstep(0.0, 0.17, s));
+        }
+        let [lip, len, hw] = self.deck_lip;
+        if lip > 0.0 && z < z_tail + len {
+            let along = smoothstep(z_tail + len, z_tail + 0.015, z);
+            let across = 1.0 - smoothstep(hw - 0.12, hw, x.abs());
+            d += lip * along * along * across;
+        }
+        d
+    }
 }
 
 /// One row of the lid's frame: at z, the edge (x_t ≥ 0, y_t), the top line's
@@ -136,6 +207,9 @@ pub struct Band {
     /// Row fractions of the crease and lower line.
     pub v_lower: f32,
     pub v_crease: f32,
+    /// Row fraction of the lower-door feature line (a row lies on it, so its
+    /// crisp edge runs straight along the grid).
+    pub v_scoop: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -145,6 +219,9 @@ pub struct Section {
     pub yb: f32,
     pub yl: f32,
     pub yc: f32,
+    /// The lower-door feature line's height here (kept between the lower line
+    /// and the crease).
+    pub ys: f32,
     pub yt: f32,
     pub s: SectionShape,
     /// Nose and tail weights.
@@ -229,6 +306,7 @@ impl Band {
             half,
             v_lower: 0.0,
             v_crease: 0.0,
+            v_scoop: 0.0,
         }
     }
 
@@ -267,12 +345,17 @@ impl Band {
         let yt = self.prof.shoulder.eval(p.y);
         let yl = (yb + s.lower).min(yt - 0.1);
         let yc = s.crease.clamp(yl + 0.04, yt - 0.04);
+        let ys = st
+            .scoop
+            .eval(p.y)
+            .clamp(yl + 0.3 * (yc - yl), yl + 0.75 * (yc - yl));
         Section {
             p,
             n,
             yb,
             yl,
             yc,
+            ys,
             yt,
             s,
             wf,
@@ -290,8 +373,15 @@ impl Band {
             return c + Vec2::new(s.tuck * phi.sin(), -(sc.yl - sc.yb) * phi.cos());
         }
         if v <= vc {
-            let t = (v - vl) / (vc - vl);
+            // Piecewise in v so that a row lies on the feature line ys.
             let dy = sc.yc - sc.yl;
+            let vs = self.v_scoop.clamp(vl + 1e-4, vc - 1e-4);
+            let ts = ((sc.ys - sc.yl) / dy).clamp(0.05, 0.95);
+            let t = if v <= vs {
+                ts * (v - vl) / (vs - vl)
+            } else {
+                ts + (1.0 - ts) * (v - vs) / (vc - vs)
+            };
             let y = sc.yl + dy * t;
             let d = hermite(t, s.d_lower, 0.0, 0.0, s.a_below * dy);
             return Vec2::new(d, y);
@@ -324,7 +414,9 @@ impl Band {
     pub fn point_in(&self, sc: &Section, v: f32) -> Vec3 {
         let q = self.section_point(sc, v);
         let side_w = 1.0 - sc.wf.max(sc.wr);
-        let d = q.x + side_w * self.flare(sc.p.y, q.y) * smoothstep(-0.2, 0.6, sc.n.x);
+        let sidish = smoothstep(-0.2, 0.6, sc.n.x);
+        let d = q.x + side_w * self.flare(sc.p.y, q.y) * sidish
+            - side_w * sidish * self.style.scoop_at(sc.p.y, q.y, sc.yl, sc.ys);
         Vec3::new(sc.p.x + sc.n.x * d, q.y, sc.p.y + sc.n.y * d)
     }
 
@@ -454,6 +546,7 @@ impl BodySurface {
         let nrows = r_curl + r_low + r_up;
         band.v_lower = r_curl as f32 / nrows as f32;
         band.v_crease = (r_curl + r_low) as f32 / nrows as f32;
+        band.v_scoop = (r_curl + (r_low as f32 * 0.45).round() as usize) as f32 / nrows as f32;
         let h = (band.half / style.step_along).ceil() as usize;
         let ncol = 2 * h;
         let mut mesh = Mesh::default();
@@ -534,12 +627,25 @@ impl BodySurface {
             (prof.half_width.eval(z) + prof.side_bulge - (prof.top_half_width.eval(z) - tr))
                 .max(0.08)
         };
+        // Per edge point: how much it faces forward (nose) or back (tail): the
+        // lid rolls over its leading and trailing edges in a short, crisp ramp.
+        let edge_ramp: Vec<f32> = edge
+            .iter()
+            .enumerate()
+            .map(|(c, e)| {
+                let (_, n) = band.plan(band.half * c as f32 / h as f32);
+                let wf = smoothstep(0.35, 0.92, n.y);
+                let wr = smoothstep(0.35, 0.92, -n.y);
+                let side = ramp_of(e.z);
+                side + (style.nose_ramp - side) * wf + (style.tail_ramp - side) * wr
+            })
+            .collect();
         let lid_y = |x: f32, z: f32, near: usize| -> (f32, f32) {
             // Nearest edge point (plan), searching near `near`.
             let lo = near.saturating_sub(90);
             let hi = (near + 90).min(h);
             let q = Vec2::new(x.abs(), z);
-            let mut best = (f32::MAX, edge[near].y, edge_arc[near]);
+            let mut best = (f32::MAX, edge[near].y, edge_arc[near], edge_ramp[near]);
             for k in lo..hi {
                 let a = Vec2::new(edge[k].x, edge[k].z);
                 let b = Vec2::new(edge[k + 1].x, edge[k + 1].z);
@@ -549,10 +655,11 @@ impl BodySurface {
                 if d < best.0 {
                     let y = edge[k].y + (edge[k + 1].y - edge[k].y) * t;
                     let ar = edge_arc[k] + (edge_arc[k + 1] - edge_arc[k]) * t;
-                    best = (d, y, ar);
+                    let rp = edge_ramp[k] + (edge_ramp[k + 1] - edge_ramp[k]) * t;
+                    best = (d, y, ar, rp);
                 }
             }
-            let (d, yb, ar) = best;
+            let (d, yb, ar, ramp) = best;
             // Top line at z: the profile's top with its crown.
             let x_r = (prof.top_half_width.eval(z) - tr).max(0.05);
             let cabin = smoothstep(0.55, 0.95, z)
@@ -562,7 +669,6 @@ impl BodySurface {
             let top = prof.top.eval(z) + crown_amt * (1.0 - u * u) * (1.0 - u * u);
             let top = top.max(yb + 0.004);
             let rise = top - yb;
-            let ramp = ramp_of(z);
             let t = (d / ramp).clamp(0.0, 1.0);
             // A straight-ish ramp (the glass) into a rounded rail; a long gentle
             // one when the rise is small (fender tops into the bonnet).
@@ -594,7 +700,13 @@ impl BodySurface {
             max_len = max_len.max(len);
             row_pts.push(line);
         }
-        let m = ((max_len / step).ceil() as usize).max(4);
+        let m = ((max_len / step).ceil() as usize).max(8);
+        let crease_x = |z: f32| -> f32 {
+            let [xn, xc, _, _] = style.hood_crease;
+            let [zc, zn] = style.hood_z;
+            let t = ((z - zc) / (zn - zc)).clamp(0.0, 1.0);
+            xc + (xn - xc) * t
+        };
         let mut lid_ids: Vec<Vec<u32>> = Vec::with_capacity(h + 1);
         for (i, line) in row_pts.iter().enumerate() {
             let right = top[i];
@@ -608,6 +720,19 @@ impl BodySurface {
                 acc.push(acc.last().unwrap() + w[0].0.distance(w[1].0));
             }
             let total = *acc.last().unwrap();
+            // Columns uniform by arc length in three spans, split where the
+            // bonnet's creases run (continued at the cowl's spacing behind
+            // it): a column lies on each crease, so it reads as a straight line.
+            let x_t = rows[i].x_t;
+            let xl = crease_x(rows[i].z).min(0.5 * x_t);
+            let s_at = |x: f32| -> f32 {
+                let kf = ((x + x_t) / (2.0 * x_t) * fine as f32).clamp(0.0, fine as f32);
+                let k0 = (kf.floor() as usize).min(fine - 1);
+                acc[k0] + (acc[k0 + 1] - acc[k0]) * (kf - k0 as f32)
+            };
+            let (s_a, s_b) = (s_at(-xl), s_at(xl));
+            let k1 = ((m as f32 * 0.34).round() as usize).clamp(1, m / 2 - 1);
+            let k2 = m - k1;
             let mut row = Vec::with_capacity(m + 1);
             let mut j = 0;
             for k in 0..=m {
@@ -619,7 +744,13 @@ impl BodySurface {
                     row.push(right);
                     continue;
                 }
-                let s = total * k as f32 / m as f32;
+                let s = if k <= k1 {
+                    s_a * k as f32 / k1 as f32
+                } else if k <= k2 {
+                    s_a + (s_b - s_a) * (k - k1) as f32 / (k2 - k1) as f32
+                } else {
+                    s_b + (total - s_b) * (k - k2) as f32 / (m - k2) as f32
+                };
                 while j + 2 < acc.len() && acc[j + 1] < s {
                     j += 1;
                 }
@@ -657,6 +788,25 @@ impl BodySurface {
             for (c, y) in ny {
                 let p = &mut mesh.pos[c as usize].y;
                 *p += 0.5 * (y - *p);
+            }
+        }
+        // Details on top of the relaxed lid (the relaxation would blur their
+        // creases): the bonnet's power dome and the boot lip.
+        let tail_z = |x: f32| -> f32 {
+            // The tail edge's z at this x (the band's outline, rear half).
+            let mut best = (f32::MAX, 0.0f32);
+            for e in edge.iter().take(h / 2 + 1) {
+                let dx = (e.x - x.abs()).abs();
+                if dx < best.0 {
+                    best = (dx, e.z);
+                }
+            }
+            best.1
+        };
+        for row in lid_ids.iter().take(h).skip(1) {
+            for &v in row.iter().take(m).skip(1) {
+                let p = mesh.pos[v as usize];
+                mesh.pos[v as usize].y += style.lid_detail(p.x, p.z, tail_z(p.x));
             }
         }
         for i in 0..h {

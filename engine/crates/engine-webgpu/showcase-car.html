@@ -163,7 +163,12 @@ try {
     mul(a, b) { const o = new Array(16).fill(0); for (let c = 0; c < 4; c++) for (let r2 = 0; r2 < 4; r2++) for (let k = 0; k < 4; k++) o[c * 4 + r2] += a[k * 4 + r2] * b[c * 4 + k]; return o; },
   };
   const cams = { three: [0.8, 0.32, 0.75], front: [0.1, 0.25, 1], rear: [-0.6, 0.35, -0.8], side: [1, 0.2, 0.05], top: [0.3, 1, 0.3], left: [-1, 0.25, 0.25] };
-  let camDir = cams[qs.get('cam') ?? 'three'] ?? cams.three;
+  // ?cam= a named view or a direction x,y,z; ?look=x,y,z offsets the target
+  // from the car's reference point; ?fov= radians.
+  const camQ = qs.get('cam') ?? 'three';
+  let camDir = cams[camQ] ?? (camQ.includes(',') ? camQ.split(',').map(Number) : cams.three);
+  const lookOff = qs.get('look')?.split(',').map(Number) ?? [0, 0, 0];
+  const fov = Number(qs.get('fov')) || 0.75;
   const dist = Number(qs.get('dist')) || 6.2;
   let target = [0, 0.6, 0];
   let yaw = Math.atan2(camDir[0], camDir[2]), pitch = Math.asin(camDir[1] / Math.hypot(...camDir));
@@ -175,7 +180,7 @@ try {
   const rate = sim.stepRate();
   let simTime = 0, carry = 0, last = performance.now(), frames = 0, gpuMs = [], damage = null, posePending = false, timesPending = false;
   const poll = () => {
-    if (!posePending) { posePending = true; sim.readPoses().then((p) => { target = [p[0], Math.max(0.5, p[1]), p[2]]; posePending = false; }); }
+    if (!posePending) { posePending = true; sim.readPoses().then((p) => { target = [p[0] + lookOff[0], Math.max(0.5, p[1]) + lookOff[1], p[2] + lookOff[2]]; posePending = false; }); }
     if (!timesPending && sim.timed()) { timesPending = true; sim.readFrameTimes().then((t) => { if (t.length) gpuMs = [...t].slice(-60); timesPending = false; }); }
     if (frames % 30 === 0) sim.readDamage(1).then((d) => { damage = d[0]; });
   };
@@ -192,7 +197,7 @@ try {
     if (!qs.has('noskin') || frames < 3) r.update(enc);
     const aspect = canvas.width / canvas.height;
     const eye = [target[0] + dist * Math.sin(yaw) * Math.cos(pitch), target[1] + dist * Math.sin(pitch), target[2] + dist * Math.cos(yaw) * Math.cos(pitch)];
-    const vp = mat.mul(mat.persp(0.75, aspect, 0.05, 500), mat.look(eye, target));
+    const vp = mat.mul(mat.persp(fov, aspect, 0.05, 500), mat.look(eye, target));
     const light = [0.45, 0.8, 0.4];
     const fr = new Float32Array(28); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20); fr.set([target[0], target[2], 0, 0], 24);
     device.queue.writeBuffer(frameBuf, 0, fr);

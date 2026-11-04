@@ -202,10 +202,11 @@ struct VOut {
   @location(5) ao: f32,
   @location(6) strain: f32,
   @location(7) rest: vec3f,
+  @location(8) uv: vec2f,
 };
 
 @vertex
-fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f, @location(3) mat: u32, @location(4) ao: f32, @location(5) rest: vec3f) -> VOut {
+fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f, @location(3) mat: u32, @location(4) ao: f32, @location(5) rest: vec3f, @location(6) uv: vec2f) -> VOut {
   var o: VOut;
   o.clip = frame.viewProj * vec4f(pt.xyz, 1.0);
   o.world = pt.xyz;
@@ -216,6 +217,7 @@ fn vs(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f
   o.ao = ao;
   o.strain = nrm.w;
   o.rest = rest;
+  o.uv = uv;
   return o;
 }
 
@@ -232,20 +234,21 @@ fn softbox(d: vec3f, c: vec3f, r: vec3f, u: vec3f, ha: f32, hb: f32, w: f32) -> 
   let my = 1.0 - smoothstep(hb - w, hb + w, abs(y));
   return mx * my * (ha * hb) / ((ha + w) * (hb + w));
 }
-fn env(d: vec3f, rough: f32) -> vec3f {
+// The shaded point (world): env() reflects the ground plane (y = 0) from it.
+var<private> gP: vec3f;
+fn sky(d: vec3f, rough: f32) -> vec3f {
   let w = 0.015 + rough * 1.1;
-  let up = d.y;
-  // Cyclorama.
-  var c = mix(vec3f(0.62, 0.64, 0.67), vec3f(0.30, 0.32, 0.36), smoothstep(0.0, 0.9, up));
-  c = mix(c, vec3f(0.16, 0.16, 0.17), 1.0 - smoothstep(-0.25 - rough * 0.3, 0.0, up));
-  c = c + vec3f(0.25) * exp(-abs(up) * (14.0 / (1.0 + rough * 6.0)));   // horizon glow
+  let up = max(d.y, 0.0);
+  // Cyclorama: a bright horizon fading to a darker ceiling.
+  var c = mix(vec3f(0.78, 0.80, 0.83), vec3f(0.34, 0.36, 0.40), smoothstep(0.0, 0.85, up));
+  c = c + vec3f(0.35) * exp(-up * (16.0 / (1.0 + rough * 6.0)));   // horizon glow
   // Overhead softbox.
-  c += vec3f(3.2, 3.15, 3.0) * softbox(d, vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), vec3f(0.0, 0.0, 1.0), 0.55, 1.1, w);
+  c += vec3f(3.4, 3.35, 3.2) * softbox(d, vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), vec3f(0.0, 0.0, 1.0), 0.55, 1.1, w);
   // Side strips (long, horizontal-ish, a little above the horizon).
   let sA = normalize(vec3f(1.0, 0.35, 0.15));
   let sB = normalize(vec3f(-1.0, 0.35, -0.2));
-  c += vec3f(2.4) * softbox(d, sA, normalize(cross(vec3f(0.0, 1.0, 0.0), sA)), normalize(cross(sA, cross(vec3f(0.0, 1.0, 0.0), sA))), 1.6, 0.07, w);
-  c += vec3f(2.0) * softbox(d, sB, normalize(cross(vec3f(0.0, 1.0, 0.0), sB)), normalize(cross(sB, cross(vec3f(0.0, 1.0, 0.0), sB))), 1.6, 0.07, w);
+  c += vec3f(2.6) * softbox(d, sA, normalize(cross(vec3f(0.0, 1.0, 0.0), sA)), normalize(cross(sA, cross(vec3f(0.0, 1.0, 0.0), sA))), 1.6, 0.07, w);
+  c += vec3f(2.2) * softbox(d, sB, normalize(cross(vec3f(0.0, 1.0, 0.0), sB)), normalize(cross(sB, cross(vec3f(0.0, 1.0, 0.0), sB))), 1.6, 0.07, w);
   // Key box in front, high.
   let k = normalize(vec3f(0.35, 0.55, 1.0));
   c += vec3f(2.6, 2.5, 2.35) * softbox(d, k, normalize(cross(vec3f(0.0, 1.0, 0.0), k)), normalize(cross(k, cross(vec3f(0.0, 1.0, 0.0), k))), 0.32, 0.22, w);
@@ -253,6 +256,40 @@ fn env(d: vec3f, rough: f32) -> vec3f {
   let s = max(dot(d, normalize(frame.light.xyz)), 0.0);
   c += vec3f(1.0, 0.95, 0.85) * pow(s, 400.0 / (1.0 + rough * 300.0)) * (6.0 / (1.0 + rough * 30.0));
   return c;
+}
+fn env(d: vec3f, rough: f32) -> vec3f {
+  let up = sky(d, rough);
+  // Below the horizon: the floor, reflected from the shaded point. Short rays
+  // land in the car's own shadow (under the sills, the bumpers, the arches).
+  let dy = min(d.y, -1e-3);
+  let t = max(gP.y, 0.0) / -dy;
+  let occ = 1.0 - 0.88 * exp(-t * 1.6);
+  let g = gP.xz + d.xz * t;
+  let grid = abs(fract(g) - 0.5);
+  let line = 1.0 - 0.08 * smoothstep(0.47, 0.5, max(grid.x, grid.y)) * (1.0 - rough);
+  let far = clamp(t / 40.0, 0.0, 1.0);
+  let floor = mix(vec3f(0.27, 0.275, 0.285) * line * occ, vec3f(0.30, 0.31, 0.33), far);
+  // A crisp horizon on a glossy panel, softer as it roughens.
+  let hw = 0.006 + rough * 0.35;
+  return mix(floor, up, smoothstep(-hw, hw * 0.5, d.y));
+}
+
+// A 5 × 7 pixel font for the printed parts (tyre sidewalls, plates): glyph
+// rows packed 5 bits each (rows 0-3 in x, 4-6 in y; bit 4 the leftmost pixel).
+const FONT = array<vec2u, 21>(vec2u(1001022u, 18004u), vec2u(575025u, 14897u), vec2u(1001022u, 31281u), vec2u(541200u, 32272u), vec2u(999967u, 32272u), vec2u(475663u, 30753u), vec2u(1001022u, 16912u), vec2u(575022u, 14897u), vec2u(135327u, 4228u), vec2u(708142u, 14905u), vec2u(135556u, 14468u), vec2u(67118u, 32004u), vec2u(459838u, 30753u), vec2u(600258u, 2143u), vec2u(64031u, 14881u), vec2u(999686u, 14897u), vec2u(133183u, 8456u), vec2u(476718u, 14897u), vec2u(509486u, 12353u), vec2u(133185u, 16648u), vec2u(0u, 0u));
+const TYRE_TEXT = array<u32, 31>(0u, 1u, 2u, 2u, 3u, 4u, 20u, 20u, 5u, 6u, 7u, 0u, 8u, 20u, 20u, 20u, 11u, 13u, 14u, 19u, 13u, 9u, 20u, 0u, 10u, 18u, 20u, 20u, 20u, 20u, 20u);
+const PLATE_TEXT = array<u32, 7>(0u, 2u, 3u, 20u, 13u, 16u, 9u);
+// Coverage of glyph g at p (pixels: x 0..5 right, y 0..7 down), soft edged.
+fn glyph(g: u32, p: vec2f) -> f32 {
+  if (p.x < 0.0 || p.x >= 5.0 || p.y < 0.0 || p.y >= 7.0) { return 0.0; }
+  let c = vec2u(floor(p));
+  let w = FONT[g];
+  let word = select(w.y, w.x, c.y < 4u);
+  let row = select(c.y - 4u, c.y, c.y < 4u);
+  let bit = (word >> (row * 5u + (4u - c.x))) & 1u;
+  let f = fract(p) - 0.5;
+  let edge = 1.0 - smoothstep(0.42, 0.56, max(abs(f.x), abs(f.y)));
+  return f32(bit) * mix(1.0, edge, 0.6);
 }
 // Diffuse irradiance (a few env taps round the normal).
 fn irradiance(n: vec3f) -> vec3f {
@@ -278,7 +315,8 @@ fn props(m: u32) -> vec3f {
     case 3u: { return vec3f(0.16, 0.0, 0.0); }   // trim: gloss black plastic
     case 6u: { return vec3f(0.72, 0.0, 0.0); }   // tyre
     case 7u: { return vec3f(0.22, 1.0, 0.0); }   // rim
-    case 9u: { return vec3f(0.7, 0.0, 0.0); }    // underbody
+    case 8u: { return vec3f(0.5, 0.0, 0.0); }    // a shut line's wall
+    case 9u: { return vec3f(0.95, 0.0, 0.0); }   // underbody
     case 10u: { return vec3f(0.45, 0.0, 0.0); }  // plate
     case 11u: { return vec3f(0.55, 0.0, 0.0); }  // grille back
     case 19u: { return vec3f(0.12, 1.0, 0.0); }  // reflector
@@ -321,6 +359,7 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   // Tears: the far half of a torn triangle is cut away (through the triangle,
   // not along the grid); a band at the cut shows the bare metal edge.
   if (i.torn > 0.5) { discard; }
+  gP = i.world;
   let glassy = i.mat == 1u || i.mat == 25u;
   // Side and rear glass (tempered) shatters and drops once its frame strains.
   if (i.mat == 1u && i.strain > 0.12) { discard; }
@@ -339,7 +378,12 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   // Two-sided: light the side facing the camera.
   if (dot(n, v) < 0.0) { n = -n; }
   let l = normalize(frame.light.xyz);
-  let ao = clamp(i.ao, 0.0, 1.0);
+  var ao = clamp(i.ao, 0.0, 1.0);
+  // Wheels (they turn, so nothing is baked): the arch shades their tops and
+  // the car's body their inner faces.
+  if (i.mat == 6u || i.mat == 7u || i.mat == 22u || i.mat == 23u) {
+    ao *= mix(1.0, 0.42, smoothstep(0.30, 0.66, i.world.y));
+  }
   let ndl = max(dot(n, l), 0.0);
   let ndv = max(dot(n, v), 1e-3);
   let h = normalize(v + l);
@@ -351,7 +395,7 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   let m = i.mat;
   // Emissive lamps.
   if (m == 18u) { return vec4f(tonemap(albedo * 6.0 + env(r, 0.05) * 0.04), 1.0); }
-  if (m == 21u) { return vec4f(tonemap(albedo * 3.5), 1.0); }
+  if (m == 21u) { return vec4f(tonemap(albedo * vec3f(2.6, 0.5, 0.5)), 1.0); }
   if (m == 4u) {
     // Projector lens: dark polished glass with a cool inner glint.
     let f = 0.04 + 0.96 * fres;
@@ -370,17 +414,91 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
         return vec4f(tonemap(vec3f(0.55, 0.57, 0.6) * (0.4 + env(r, 0.3) * 0.25)), clamp(0.5 + c * 0.5, 0.0, 1.0));
       }
     }
-    let refl = env(r, 0.0) * (0.06 + 0.94 * fres);
+    let refl = env(r, 0.0) * (0.06 + 0.94 * fres) * select(1.0, 0.3, m == 20u);
     var tint = vec3f(0.01, 0.012, 0.014);
-    var a = 0.86;
+    var a = 0.62;
     if (m == 17u) { tint = vec3f(0.0); a = 0.08; }
-    if (m == 20u) { tint = vec3f(0.32, 0.0, 0.005); a = 0.78; }
+    // Ruby lens: deep red, thin enough for the LEDs behind it to glow through.
+    if (m == 20u) { tint = vec3f(0.26, 0.0, 0.003); a = 0.42; }
     let alpha = clamp(a + f * (1.0 - a), 0.0, 1.0);
     return vec4f(tonemap((tint * a + refl) / alpha), alpha);
+  }
+  if (m == 26u) {
+    // A lit display: the instrument cluster (u 0..1: two dials and a centre
+    // readout) or the centre screen (u 1..2: a map with a route); under glass.
+    let f = 0.04 + 0.96 * fres;
+    var col = vec3f(0.004, 0.006, 0.012);
+    if (i.uv.x < 1.0) {
+      let q = vec2f(i.uv.x * 3.1, i.uv.y);
+      for (var k = 0; k < 2; k++) {
+        let c0 = vec2f(select(0.62, 2.48, k == 1), 0.5);
+        let d = q - c0;
+        let r = length(d);
+        let ang = atan2(d.y, d.x);
+        let ring = (1.0 - smoothstep(0.012, 0.03, abs(r - 0.4))) * select(1.0, 0.0, abs(ang + 1.5708) < 0.8);
+        let ticks = (1.0 - smoothstep(0.25, 0.45, abs(fract(ang * 4.0 / 3.1416 + 0.5) - 0.5) * 6.0)) * step(0.33, r) * step(r, 0.39) * select(1.0, 0.0, abs(ang + 1.5708) < 0.8);
+        let needle_a = select(0.6, 1.4, k == 1);
+        let nd = vec2f(cos(needle_a), sin(needle_a));
+        let along = dot(d, nd);
+        let needle = (1.0 - smoothstep(0.006, 0.016, abs(d.x * nd.y - d.y * nd.x))) * step(0.0, along) * step(along, 0.36);
+        col += vec3f(0.35, 0.6, 1.0) * ring * 0.9 + vec3f(0.8, 0.85, 0.9) * ticks * 0.7 + vec3f(1.0, 0.35, 0.08) * needle * 1.6;
+      }
+      // Centre readout: a few bars.
+      let cq = q - vec2f(1.55, 0.5);
+      let bars = step(abs(cq.x), 0.35) * (1.0 - smoothstep(0.015, 0.03, abs(fract(cq.y * 5.0) - 0.5) * 0.2)) * step(abs(cq.y), 0.3);
+      col += vec3f(0.5, 0.75, 1.0) * bars * 0.25;
+    } else {
+      let q = vec2f((i.uv.x - 1.0) * 1.75, i.uv.y);
+      let grid = abs(fract(q * vec2f(9.0, 5.0)) - 0.5);
+      col = vec3f(0.035, 0.04, 0.05) + vec3f(0.05) * (1.0 - smoothstep(0.44, 0.49, max(grid.x, grid.y)));
+      let route = 1.0 - smoothstep(0.012, 0.025, abs(q.y - 0.45 - 0.18 * sin(q.x * 3.5)));
+      col = mix(col, vec3f(0.2, 0.55, 1.0), route);
+      let bar = step(0.86, q.y);
+      col = mix(col, vec3f(0.08, 0.09, 0.11), bar);
+    }
+    return vec4f(tonemap(col * 2.2 + env(r, 0.02) * f * 0.5), 1.0);
   }
   var pr = props(m);
   var albedo2 = albedo;
   var ao2 = ao;
+  if (m == 10u) {
+    // Plate: white with a dark border and its registration.
+    let uv = i.uv;
+    let border = step(0.035, uv.x) * step(uv.x, 0.965) * step(0.07, uv.y) * step(uv.y, 0.93);
+    let inner = step(0.05, uv.x) * step(uv.x, 0.95) * step(0.1, uv.y) * step(uv.y, 0.9);
+    var ink = border * (1.0 - inner);
+    let nch = f32(7);
+    let tw = 0.84;
+    let tx = (uv.x - (1.0 - tw) * 0.5) / tw * nch;
+    if (tx >= 0.0 && tx < nch) {
+      let ci = u32(floor(tx));
+      let px = vec2f(fract(tx) * 6.0 - 0.5, (0.86 - uv.y) / 0.72 * 7.0);
+      ink = max(ink, glyph(PLATE_TEXT[ci], px));
+    }
+    albedo2 = mix(albedo, vec3f(0.015, 0.02, 0.04), ink);
+  }
+  if (m == 6u) {
+    // Tyre: raised lettering on the outer sidewall, tread blocks on the
+    // shoulders (sipes between them).
+    let uv = i.uv;
+    if (uv.y > 0.48 && uv.y < 0.84) {
+      let nch = f32(62);
+      let tx = fract(uv.x) * nch;
+      let ci = u32(floor(tx)) % 31u;
+      let px = vec2f(fract(tx) * 6.0 - 0.5, (0.81 - uv.y) / 0.30 * 7.0);
+      let ink = glyph(TYRE_TEXT[ci], px);
+      albedo2 = mix(albedo, vec3f(0.07), ink);
+      pr = vec3f(mix(0.72, 0.45, ink), 0.0, 0.0);
+    }
+    if (uv.y >= 2.0) {
+      let w = uv.y - 2.0;
+      let shoulder = step(w, 0.38) + step(1.62, w);
+      let blocks = abs(fract(uv.x * 72.0 + select(0.0, 0.5, w > 1.0)) - 0.5);
+      let groove = (1.0 - smoothstep(0.06, 0.1, blocks)) * shoulder;
+      let sipe = (1.0 - smoothstep(0.02, 0.05, abs(fract(uv.x * 144.0) - 0.5))) * (1.0 - shoulder) * 0.6;
+      ao2 = ao * (1.0 - 0.75 * max(groove, sipe));
+    }
+  }
   if (m == 11u) {
     // Grille mesh: a honeycomb in rest space (2 cm cells): gloss-black rims
     // round dark holes.
@@ -409,15 +527,17 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     let cell = floor(i.world * 900.0);
     let sp = step(0.992, hash3(cell)) * pow(ndh, 40.0) * ndl * 2.5;
     let base = diffuse * 0.75 + flake + albedo * sp;
-    let coatSpec = sun * ggx(ndh, 0.0016) * cf / max(4.0 * ndv, 1e-3) * ndl * 0.25;
-    c = base * (1.0 - cf) + env(r, 0.01) * cf * mix(0.6, 1.0, ao) + coatSpec;
+    // Clearcoat: a mirror-sharp sun glint over a broader sheen, and the
+    // studio reflected crisply (horizon, softboxes, the floor).
+    let coatSpec = sun * (ggx(ndh, 0.0016) * 0.22 + ggx(ndh, 0.02) * 0.06) * cf / max(4.0 * ndv, 1e-3) * ndl;
+    c = base * (1.0 - cf) + env(r, 0.005) * cf * mix(0.45, 1.0, ao) + coatSpec;
   } else if (metal > 0.5) {
     let f0 = albedo;
     let f = f0 + (vec3f(1.0) - f0) * fres;
     c = f * (env(r, rough) * mix(0.35, 1.0, ao) + sun * ggx(ndh, a) * g / max(4.0 * ndv, 1e-3) * ndl);
   } else {
     let f = 0.04 + 0.96 * fres;
-    let spec = (env(r, rough) * f * mix(0.3, 1.0, ao2) + sun * ggx(ndh, a) * g * f / max(4.0 * ndv, 1e-3) * ndl) * min(1.0, ao2 * 3.0);
+    let spec = (env(r, rough) * f * mix(0.3, 1.0, ao2) + sun * ggx(ndh, a) * g * f / max(4.0 * ndv, 1e-3) * ndl) * min(1.0, ao2 * 3.0) * select(1.0, ao2 * 0.5, m == 9u);
     c = albedo2 * (irradiance(n) * ao2 + sun * ndl / 3.14159 * mix(0.5, 1.0, ao2)) * (1.0 - f) + spec;
     if (coat > 0.0) {
       let cf = 0.04 + 0.96 * fres;
@@ -463,7 +583,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       entryPoint: 'vs',
       buffers: [
         { arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x4' }] },
-        { arrayStride: 32, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }, { shaderLocation: 5, offset: 20, format: 'float32x3' }] },
+        { arrayStride: 40, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }, { shaderLocation: 5, offset: 20, format: 'float32x3' }, { shaderLocation: 6, offset: 32, format: 'float32x2' }] },
       ],
     },
     fragment: { module: drawModule, entryPoint: 'fs', targets: [{ format }] },
@@ -480,7 +600,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       entryPoint: 'vs',
       buffers: [
         { arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x4' }] },
-        { arrayStride: 32, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }, { shaderLocation: 5, offset: 20, format: 'float32x3' }] },
+        { arrayStride: 40, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }, { shaderLocation: 5, offset: 20, format: 'float32x3' }, { shaderLocation: 6, offset: 32, format: 'float32x2' }] },
       ],
     },
     fragment: { module: drawModule, entryPoint: 'fs', targets: [{ format, blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } }] },
@@ -595,14 +715,16 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         device.queue.writeBuffer(out, 0, rest);
         // Per vertex: colour, AO, material, rest position (the glass's crack
         // pattern is drawn in rest space so it rides the glass).
-        const attr = new ArrayBuffer(n * 32);
+        // and texture coordinates (printed parts: tyres, plates, displays).
+        const attr = new ArrayBuffer(n * 40);
         const af = new Float32Array(attr);
         const au = new Uint32Array(attr);
         for (let i = 0; i < n; i++) {
-          af.set(v.colors.subarray(3 * i, 3 * i + 3), 8 * i);
-          af[8 * i + 3] = v.ao ? v.ao[i] : 1;
-          au[8 * i + 4] = v.material[i];
-          af.set(v.positions.subarray(3 * i, 3 * i + 3), 8 * i + 5);
+          af.set(v.colors.subarray(3 * i, 3 * i + 3), 10 * i);
+          af[10 * i + 3] = v.ao ? v.ao[i] : 1;
+          au[10 * i + 4] = v.material[i];
+          af.set(v.positions.subarray(3 * i, 3 * i + 3), 10 * i + 5);
+          if (v.uvs) af.set(v.uvs.subarray(2 * i, 2 * i + 2), 10 * i + 8);
         }
         // Opaque triangles first, the blended ones (glass, lenses) after.
         const tri = v.indices;

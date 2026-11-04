@@ -337,11 +337,7 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
     let wall = frames
         .iter()
         .map(|&(p, nn, o, mat, _, sm)| {
-            let mat = if st.seal {
-                super::super::skin::mat::TRIM
-            } else {
-                mat
-            };
+            let mat = wall_mat(st, mat);
             let id = m.vert(p + o * r - nn * (r + st.depth), o, mat, st.ao_floor);
             m.smooth[id as usize] = sm;
             id
@@ -352,11 +348,7 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
         let fl = frames
             .iter()
             .map(|&(p, nn, o, mat, _, sm)| {
-                let mat = if st.seal {
-                    super::super::skin::mat::TRIM
-                } else {
-                    mat
-                };
+                let mat = wall_mat(st, mat);
                 let id = m.vert(
                     p + o * (r - st.flange) - nn * (r + st.depth),
                     -nn,
@@ -378,6 +370,20 @@ pub fn roll_loop(m: &mut Mesh, l: &[u32], closed: bool, st: EdgeStyle) {
             // Loop direction t, ring direction toward −n: face normal ≈ o.
             m.quad(a[i], b[i], b[j], a[j]);
         }
+    }
+}
+
+/// A rolled edge's wall and flange: black rubber at a seal; a painted panel's
+/// wall in the shadowed paint of the gap (it faces into the gap, or into the
+/// cabin at a window opening, and must never read as a bright paint line).
+fn wall_mat(st: EdgeStyle, mat: u8) -> u8 {
+    use super::super::skin::mat as m;
+    if st.seal {
+        m::TRIM
+    } else if mat == m::PAINT {
+        m::GAP
+    } else {
+        mat
     }
 }
 

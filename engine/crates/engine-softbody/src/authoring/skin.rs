@@ -70,7 +70,10 @@ pub mod mat {
     pub const TAIL_BACK: u8 = 24;
     /// Laminated windscreen (cracks instead of shattering; drawn with the glass).
     pub const SCREEN: u8 = 25;
-    pub const COUNT: usize = 26;
+    /// A lit display (instrument cluster, centre screen): its content drawn
+    /// from the texture coordinates.
+    pub const DISPLAY: u8 = 26;
+    pub const COUNT: usize = 27;
 }
 
 /// Material names, by id.
@@ -101,6 +104,7 @@ pub const MATERIAL_NAMES: [&str; mat::COUNT] = [
     "caliper",
     "tail_back",
     "screen",
+    "display",
 ];
 
 /// Whether a material is drawn blended (after the opaque ones).
@@ -323,7 +327,12 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     )?;
     let node_pos: Vec<Vec3> = sim.nodes.iter().map(|n| n.pos - built.shift).collect();
     let mut pieces = assemble(def, &sedan_styling(def));
-    pieces.extend(interior(built));
+    {
+        let mut names: Vec<&String> = built.bind_tris.keys().collect();
+        names.sort();
+        let gi = |n: &str| names.iter().position(|g| *g == n).map(|i| i as u16);
+        pieces.extend(super::parts::interior::interior(&gi));
+    }
     // Binders: per part, all skin, per group, per tyre and hub.
     let mut by_part: HashMap<u16, Vec<[u32; 3]>> = HashMap::new();
     for t in &sk.skin {
@@ -482,7 +491,14 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             _ => None,
         };
         // A vote for the part.
-        let rigid = piece.bind == Bind::Rigid;
+        let group_rigid = match piece.bind {
+            Bind::GroupRigid(g) => groups
+                .get(g as usize)
+                .and_then(|n| built.bind_tris.get(n))
+                .map(|t| Binder::new(t.clone(), &node_pos, 0.25)),
+            _ => None,
+        };
+        let rigid = piece.bind == Bind::Rigid || group_rigid.is_some();
         let part: Option<u16> = if let Bind::Part(p) = piece.bind {
             Some(p)
         } else if piece.bind == Bind::Vote || rigid {
@@ -504,12 +520,16 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         if rigid {
             // One triangle (the voted part's nearest to the centroid) carries
             // the whole part rigidly.
-            let b = part
-                .and_then(|pt| {
-                    binders
-                        .entry(pt)
-                        .or_insert_with(|| Binder::new(by_part[&pt].clone(), &node_pos, 0.15))
-                        .bind(centroid, Vec3::Y)
+            let b = group_rigid
+                .as_ref()
+                .and_then(|g| g.bind(centroid, Vec3::Y))
+                .or_else(|| {
+                    part.and_then(|pt| {
+                        binders
+                            .entry(pt)
+                            .or_insert_with(|| Binder::new(by_part[&pt].clone(), &node_pos, 0.15))
+                            .bind(centroid, Vec3::Y)
+                    })
                 })
                 .or_else(|| pure.bind(centroid, Vec3::Y));
             let Some((t, _, _)) = b else {
@@ -535,7 +555,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 out.bind_rest.push(rest_edges(&node_pos, t));
                 out.positions.push((m.pos[k] + built.shift).to_array());
                 out.normals.push(n.to_array());
-                out.uvs.push([0.0, 0.0]);
+                out.uvs.push(m.uv[k]);
                 out.material.push(m.mat[k]);
                 out.colors.push(color(m.mat[k], paint));
                 out.ao.push(m.ao[k].clamp(0.0, 1.0));
@@ -639,7 +659,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             out.bind_rest.push(rest_edges(&node_pos, t));
             out.positions.push((m.pos[k] + built.shift).to_array());
             out.normals.push(m.nrm[k].to_array());
-            out.uvs.push([0.0, 0.0]);
+            out.uvs.push(m.uv[k]);
             out.material.push(m.mat[k]);
             out.colors.push(color(m.mat[k], paint));
             out.ao.push(m.ao[k].clamp(0.0, 1.0));
@@ -681,132 +701,6 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     Ok(out)
 }
 
-/// Seats, dashboard, console and steering wheel, riding their frames.
-fn interior(built: &Built) -> Vec<Piece> {
-    let mut groups: Vec<String> = built.bind_tris.keys().cloned().collect();
-    groups.sort();
-    let gi = |name: &str| groups.iter().position(|g| g == name);
-    let mut out = Vec::new();
-    let mut solid = |name: &str, parts: &[(Vec3, Vec3, f32, u8)]| {
-        let Some(g) = gi(name) else { return };
-        let mut m = Mesh::default();
-        for &(c, h, tilt, mt) in parts {
-            let rot = glam::Quat::from_rotation_x(tilt);
-            m.block(c, rot * Vec3::X, rot * Vec3::Y, rot * Vec3::Z, h, mt, 0.3);
-        }
-        out.push(Piece {
-            name: name.into(),
-            mesh: m,
-            bind: Bind::Group(g as u16),
-        });
-    };
-    for (name, x) in [("seat_fl", 0.38f32), ("seat_fr", -0.38)] {
-        solid(
-            name,
-            &[
-                (
-                    Vec3::new(x, 0.53, 2.62),
-                    Vec3::new(0.24, 0.07, 0.25),
-                    0.0,
-                    mat::SEAT,
-                ),
-                (
-                    Vec3::new(x, 0.86, 2.31),
-                    Vec3::new(0.23, 0.30, 0.07),
-                    -0.25,
-                    mat::SEAT,
-                ),
-                (
-                    Vec3::new(x, 1.23, 2.22),
-                    Vec3::new(0.12, 0.08, 0.05),
-                    -0.25,
-                    mat::SEAT,
-                ),
-            ],
-        );
-    }
-    solid(
-        "seat_rear",
-        &[
-            (
-                Vec3::new(0.0, 0.53, 1.80),
-                Vec3::new(0.64, 0.07, 0.24),
-                0.0,
-                mat::SEAT,
-            ),
-            (
-                Vec3::new(0.0, 0.86, 1.52),
-                Vec3::new(0.64, 0.30, 0.07),
-                -0.35,
-                mat::SEAT,
-            ),
-        ],
-    );
-    solid(
-        "dash",
-        &[
-            (
-                Vec3::new(0.0, 0.86, 3.22),
-                Vec3::new(0.76, 0.11, 0.2),
-                0.15,
-                mat::DASH,
-            ),
-            (
-                Vec3::new(0.38, 0.98, 3.1),
-                Vec3::new(0.17, 0.04, 0.08),
-                0.0,
-                mat::DASH,
-            ),
-        ],
-    );
-    solid(
-        "tunnel",
-        &[(
-            Vec3::new(0.0, 0.45, 2.75),
-            Vec3::new(0.11, 0.12, 0.42),
-            0.0,
-            mat::DASH,
-        )],
-    );
-    // Steering wheel: a torus on the column, tilted toward the driver.
-    if let Some(g) = gi("column") {
-        let mut m = Mesh::default();
-        let c = Vec3::new(0.38, 0.95, 2.97);
-        let axis = Vec3::new(0.0, 0.45, -0.89).normalize();
-        m.lathe(
-            c,
-            axis,
-            Vec3::X,
-            &[
-                (0.168, 0.0),
-                (0.185, 0.017),
-                (0.202, 0.0),
-                (0.185, -0.017),
-                (0.168, 0.0),
-            ],
-            36,
-            |_, _| mat::DASH,
-            |_| 0.35,
-            false,
-        );
-        m.block(
-            c - axis * 0.03,
-            Vec3::X,
-            axis.cross(Vec3::X),
-            axis,
-            Vec3::new(0.06, 0.05, 0.04),
-            mat::DASH,
-            0.8,
-        );
-        out.push(Piece {
-            name: "steering".into(),
-            mesh: m,
-            bind: Bind::Group(g as u16),
-        });
-    }
-    out
-}
-
 fn rest_edges(pos: &[Vec3], t: [u32; 3]) -> [f32; 2] {
     let p0 = pos[t[0] as usize];
     [
@@ -825,8 +719,9 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         mat::HEADLIGHT => [0.85, 0.88, 0.9],
         mat::TAILLIGHT => [0.5, 0.015, 0.015],
         mat::TYRE => [0.025, 0.025, 0.025],
-        mat::RIM => [0.55, 0.57, 0.6],
-        mat::GAP => [0.1, 0.004, 0.004],
+        mat::RIM => [0.36, 0.37, 0.39],
+        // A shut line's wall: the paint, in shadow.
+        mat::GAP => [paint[0] * 0.3, paint[1] * 0.3, paint[2] * 0.3],
         mat::UNDERBODY => [0.04, 0.04, 0.04],
         mat::PLATE => [0.85, 0.85, 0.8],
         mat::GRILLE => [0.015, 0.015, 0.015],
@@ -844,6 +739,7 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         mat::CALIPER => [0.5, 0.03, 0.02],
         mat::TAIL_BACK => [0.12, 0.01, 0.01],
         mat::SCREEN => [0.02, 0.025, 0.03],
+        mat::DISPLAY => [0.02, 0.03, 0.05],
         _ => [1.0, 0.0, 1.0],
     }
 }
