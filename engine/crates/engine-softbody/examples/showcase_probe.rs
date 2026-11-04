@@ -71,6 +71,48 @@ fn main() {
             eprintln!("  {k:>16}: {c:5} nodes {m:7.1} kg (named {f:6.1} kg)");
         }
     }
+    if std::env::var("SLACK").is_ok() {
+        // Per group: node mass beyond its stability floor at the built
+        // stiffnesses (named or block mass a node carries but its beams do
+        // not need: stiffness it could carry for free).
+        let mut z = sk.clone();
+        for n in &mut z.nodes {
+            n.fixed = 0.0;
+        }
+        let stab = z.floors_tiers(1.0, 1.0);
+        let mut by: std::collections::BTreeMap<String, (usize, f32, f32, f32)> = Default::default();
+        for (i, nd) in sk.nodes.iter().enumerate() {
+            let g = b
+                .groups
+                .iter()
+                .filter(|(k, _)| {
+                    k.as_str() != "suspension"
+                        || nd.part as usize
+                            == sk.parts.iter().position(|p| p == "suspension").unwrap()
+                })
+                .find(|(_, g)| g.contains(&(i as u32)))
+                .map(|(k, _)| k.clone())
+                .unwrap_or_else(|| {
+                    if nd.primary {
+                        "frame?".into()
+                    } else {
+                        format!("skin {}", sk.parts[nd.part as usize])
+                    }
+                });
+            let e = by.entry(g).or_default();
+            e.0 += 1;
+            e.1 += nd.mass;
+            e.2 += stab[i];
+            e.3 += (nd.mass - stab[i]).max(0.0);
+        }
+        let mut v: Vec<_> = by.into_iter().collect();
+        v.sort_by(|a, c| c.1 .3.total_cmp(&a.1 .3));
+        let tot: f32 = v.iter().map(|x| x.1 .3).sum();
+        eprintln!("  slack total {tot:.1} kg");
+        for (k, (n, m, f, sl)) in v.iter().take(40) {
+            eprintln!("  {k:>18}: {n:4} nodes mass {m:7.1} stability {f:7.1} slack {sl:6.1} kg");
+        }
+    }
     if std::env::var("WORST").is_ok() {
         let fl = sk.floors_tiers(1.0 / b.stiffness_scale, 1.0 / b.skin_scale);
         let mut idx: Vec<usize> = (0..sk.nodes.len()).collect();
@@ -828,6 +870,83 @@ fn main() {
         }
     };
     let mut rebound = 0.0f32;
+    if let Ok(plane) = std::env::var("PULSE") {
+        // Diagnostic: every 2 ms for the first 0.12 s, the wall force (the
+        // car's momentum change), and the force carried across the plane z =
+        // PULSE (spawn coordinates, the firewall at 3.36) by beam class: what
+        // pushes the cell and when.
+        let zp: f32 = plane.parse().unwrap_or(3.36);
+        let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+        let mom = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>();
+        let mut p0 = mom(&s);
+        let class = |i: u32| -> String {
+            if (i as usize) >= sk.nodes.len() {
+                return "tyre".into();
+            }
+            let l = label(i);
+            if [
+                "rail_f",
+                "apron",
+                "powertrain",
+                "tower_f",
+                "subframe_f1",
+                "subframe_f2",
+            ]
+            .contains(&l.as_str())
+            {
+                l
+            } else if l == "suspension" {
+                "susp".into()
+            } else if b.groups.contains_key(&l) || b.groups.contains_key(&format!("{l}_r")) {
+                if std::env::var("PULSE_ALL").is_ok() {
+                    l
+                } else {
+                    "member".into()
+                }
+            } else {
+                "skin".into()
+            }
+        };
+        for st in 0..240 {
+            s.step();
+            if st % 4 == 3 {
+                let p1 = mom(&s);
+                let fw = (p0 - p1) / (4.0 * 0.0005);
+                p0 = p1;
+                let mut by: std::collections::BTreeMap<String, f32> = Default::default();
+                for bm in s.beams.iter().filter(|x| !x.broken) {
+                    if (bm.a as usize) >= sk.nodes.len() || (bm.b as usize) >= sk.nodes.len() {
+                        continue;
+                    }
+                    let (za, zb) = (sk.nodes[bm.a as usize].p.z, sk.nodes[bm.b as usize].p.z);
+                    if (za - zp) * (zb - zp) >= 0.0 {
+                        continue;
+                    }
+                    let d = (s.nodes[bm.a as usize].pos - s.nodes[bm.b as usize].pos)
+                        .normalize_or_zero();
+                    // Compression positive pushes the rear node back.
+                    let fz = bm.force * d.z.abs();
+                    let (ca, cb) = (class(bm.a), class(bm.b));
+                    let key = if za > zp { ca } else { cb };
+                    *by.entry(key).or_default() += fz;
+                }
+                let tot: f32 = by.values().sum();
+                let vz = p1 / m;
+                eprintln!(
+                    "  t {:5.1} ms vz {vz:+6.2} wall {:6.0} kN plane {:6.0} kN: {}",
+                    (st + 1) as f32 * 0.5,
+                    fw / 1e3,
+                    tot / 1e3,
+                    by.iter()
+                        .filter(|x| x.1.abs() > 2e3)
+                        .map(|(k, v)| format!("{k} {:.0}", v / 1e3))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        return;
+    }
     for f in 0..frames {
         s.frame();
         if let Ok(zones) = std::env::var("RELAX") {

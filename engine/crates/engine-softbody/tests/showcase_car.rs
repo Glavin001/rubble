@@ -1228,6 +1228,50 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
             })
             .collect();
         let worst = |v: &[usize]| v.iter().map(|&i| disp(i)).fold(0.0f32, f32::max);
+        if std::env::var("K_VEC").is_ok() {
+            // Mean displacement (cabin frame: x along the car, y across, z
+            // down) of some groups, mm.
+            for g in [
+                "header_f",
+                "roof_rail",
+                "roof_rail_r",
+                "bow_b",
+                "header_r",
+                "pillar_a",
+                "pillar_b",
+                "pillar_c",
+                "cowl",
+                "firewall",
+                "parcel",
+            ] {
+                let v = &b.groups[g];
+                let d = v
+                    .iter()
+                    .map(|&i| local1[i as usize] - local0[i as usize])
+                    .sum::<Vec3>()
+                    / v.len() as f32;
+                eprint!("{g} {:.0} {:.0} {:.0}; ", d.x * 1e3, d.y * 1e3, d.z * 1e3);
+            }
+            eprintln!();
+            let mut rv: Vec<(f32, usize)> = roof.iter().map(|&i| (disp(i), i)).collect();
+            rv.sort_by(|a, c| c.0.total_cmp(&a.0));
+            for &(d, i) in rv.iter().take(6) {
+                let gs: Vec<&String> = b
+                    .groups
+                    .iter()
+                    .filter(|(_, g)| g.contains(&(i as u32)))
+                    .map(|(k, _)| k)
+                    .collect();
+                eprintln!(
+                    "  roof node {i} at {:?} part {} primary {} {gs:?}: {:.0} mm {:?}",
+                    sk.nodes[i].p,
+                    sk.parts[sk.nodes[i].part as usize],
+                    sk.nodes[i].primary,
+                    d * 1e3,
+                    (local1[i] - local0[i]) * 1e3
+                );
+            }
+        }
         if std::env::var("K_GROUPS").is_ok() {
             let mut v: Vec<(String, f32)> = b
                 .groups
@@ -1303,6 +1347,28 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
                     let d0 = local0[a].distance(local0[c]);
                     let d1 = local1[a].distance(local1[c]);
                     aperture = aperture.max((d1 - d0).abs());
+                    if std::env::var("K_APER").is_ok() {
+                        let gs = |i: usize| -> Vec<&String> {
+                            b.groups
+                                .iter()
+                                .filter(|(_, g)| g.contains(&(i as u32)))
+                                .map(|(k, _)| k)
+                                .collect()
+                        };
+                        eprintln!(
+                            "  {a}: primary {} groups {:?}; {c}: primary {} groups {:?}",
+                            sk.nodes[a].primary,
+                            gs(a),
+                            sk.nodes[c].primary,
+                            gs(c)
+                        );
+                        eprintln!(
+                            "  aperture x {side} z {z0}-{z1} y {y}: nodes {a} {:?} {c} {:?}: {:+.0} mm",
+                            sk.nodes[a].p,
+                            sk.nodes[c].p,
+                            (d1 - d0) * 1e3
+                        );
+                    }
                 }
             }
         }
