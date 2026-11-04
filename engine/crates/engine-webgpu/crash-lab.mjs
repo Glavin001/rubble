@@ -14,8 +14,9 @@ import { COLOR_MODES, SKIN_MODES, PART_COLORS, partCss, strainGradientCss } from
 /** One-click presets: the explicit scene, its fields (XPARAMS keys), pills, camera. */
 export const LAB_PRESETS = {
   wall56: { label: 'Wall · 56 km/h', xscene: 'wall', params: { speed: 56 }, pills: ['WALL · 56 KM/H'], cam: 'three' },
-  // An oblique side pole: sliding at 75° to the car's axis into a pole at the door.
-  pole29: { label: 'Pole · 29 km/h', xscene: 'sidepole', params: { speed: 29, angle: 75, at: 0.3 }, pills: ['POLE · 29 KM/H'], cam: 'threeFront' },
+  // An oblique side pole: sliding at 75° to the car's axis into a pole at the door,
+  // 0.8 m away (a car sliding on its tyres would stop short of the usual run-up).
+  pole29: { label: 'Pole · 29 km/h', xscene: 'sidepole', params: { speed: 29, angle: 75, at: 0.3, runUp: 0.8 }, pills: ['POLE · 29 KM/H'], cam: 'threeFront' },
   headon50: { label: 'Head-on · 2 x 50 km/h', xscene: 'headon', params: { speed: 50, speed2: 50 }, pills: ['HEAD-ON · 2 x 50 KM/H'], cam: 'side' },
   drop15: { label: 'Dropped from 15 m', xscene: 'drop', params: { height: 15 }, pills: ['DROPPED FROM 15 M'], cam: 'side' },
 };

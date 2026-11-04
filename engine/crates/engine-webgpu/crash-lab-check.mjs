@@ -138,7 +138,7 @@ const replayAt = async (ms) => lab(`(() => { const s = L.lab.st; const want = s.
 // A preset: [query, earliest plausible impact (s), camera, shots ms after impact].
 const PRESET_RUNS = {
   wall56: ['preset=wall56&slow=20', 0.3, 'three', [-5, 23, 127]],
-  pole29: ['preset=pole29&slow=20', 0.2, 'threeFront', [-5, 23, 127]],
+  pole29: ['preset=pole29&slow=20', 0.08, 'threeFront', [-5, 23, 127]],
   headon50: ['preset=headon50&slow=20', 0.2, 'side', [-5, 23, 127]],
   drop15: ['preset=drop15&slow=20', 1.4, 'side', [-5, 23, 127]],
 };

@@ -284,8 +284,8 @@ struct ArenaSpot {
 
 /// The crash-test scenes, built from one vehicle (`width` across, `length` along at
 /// yaw 0, facing +Z). Speeds in m/s, angles in degrees; each moving vehicle starts
-/// 1 + 0.5 × its speed metres from what it hits, so the hit lands after about half a
-/// second:
+/// 1 + 0.5 × its speed metres from what it hits (`runUp` metres when given), so the
+/// hit lands after about half a second:
 /// * `wall`: into a rigid wall at `speed`; `overlap` (0 to 1, default 1) of the
 ///   width meets it (the rest passes beside it), the vehicle turned by `angle`.
 /// * `headon`: two copies nose to nose at `speed` and `speed2` (default `speed`);
@@ -307,7 +307,8 @@ fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32) -
     let deg = |k: &str, d: f64| (num(spec, k, d) as f32).to_radians();
     let v = num(spec, "speed", 27.78) as f32;
     let run_up = |v: f32| 1.0 + 0.5 * v;
-    let gap = run_up(v);
+    // `runUp`: the gap (m) between the vehicle and what it hits, default 1 + v/2 s.
+    let gap = num(spec, "runUp", f64::from(run_up(v))) as f32;
     let spot = |at: Vec3, yaw: f32, speed: f32, boxes: Vec<(Vec3, Vec3)>, vel: Option<Vec3>| ArenaSpot { at, yaw, speed, boxes, vel, lift: 0.0 };
     let pole = |x: f32, z: f32| (Vec3::new(x, 2.0, z), Vec3::new(0.1, 2.0, 0.1));
     let overlap = (num(spec, "overlap", 1.0) as f32).clamp(0.05, 1.0);

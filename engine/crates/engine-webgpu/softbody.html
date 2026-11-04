@@ -452,6 +452,8 @@
         // The scene's fields (XPARAMS), km/h to m/s.
         ...Object.fromEntries((XPARAMS[xscene] || []).filter(([k]) => k !== 'n' && k !== 'xspeed').map(([k, label, d]) => [k, P(k, d) / (label.includes('km/h') ? 3.6 : 1)])),
         ...(xscene === 'arena' ? { count: P('n', 256), headOn: P('headOn', 0), ...(qs.has('cols') ? { cols: P('cols', 0) } : {}), ...(qs.has('hitMax') ? { hitMax: P('hitMax', 1.2) } : {}), layout: qs.get('layout') === 'ring' ? 'ring' : 'rows', ringRadius: P('ringRadius', 30) } : {}),
+        // ?runUp= m: the crash scenes' gap to what they hit (default 1 + v/2 s).
+        ...(qs.has('runUp') ? { runUp: P('runUp', 0) } : {}),
         // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
         drag: qs.get('drag') !== '0',
       });
