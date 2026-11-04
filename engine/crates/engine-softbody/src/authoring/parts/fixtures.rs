@@ -158,10 +158,9 @@ pub struct GrilleSpec {
     pub surround_mat: u8,
     /// Slats: heights (in the field `h` given per vertex) and half thickness;
     /// slat set-back and material.
-    pub slats: Vec<f32>,
+    pub slats: Vec<(f32, u8)>,
     pub slat_half: f32,
     pub slat_back: f32,
-    pub slat_mat: u8,
     pub back_mat: u8,
 }
 
@@ -173,7 +172,7 @@ pub fn grille(m: &Mesh, f: &[f32], h: &[f32], spec: &GrilleSpec) -> Mesh {
     }
     if spec.surround > 0.0 {
         let s = trim::clip_between(m, f, -0.0005, spec.surround);
-        let mut sm = trim::offset(&s.mesh, 0.002, false, Some(spec.surround_mat), 1.0);
+        let mut sm = trim::offset(&s.mesh, -0.001, false, Some(spec.surround_mat), 1.0);
         let loops = trim::boundary_loops(&sm);
         for (l, closed) in &loops {
             trim::roll_loop(&mut sm, l, *closed, EdgeStyle::TRIM);
@@ -220,7 +219,7 @@ pub fn grille(m: &Mesh, f: &[f32], h: &[f32], spec: &GrilleSpec) -> Mesh {
         Vec::new()
     };
     let _ = hi;
-    for &y in &spec.slats {
+    for &(y, slat_mat) in &spec.slats {
         let band: Vec<f32> = f
             .iter()
             .zip(h)
@@ -230,7 +229,7 @@ pub fn grille(m: &Mesh, f: &[f32], h: &[f32], spec: &GrilleSpec) -> Mesh {
         if c.mesh.is_empty() {
             continue;
         }
-        c.mesh.mat.iter_mut().for_each(|x| *x = spec.slat_mat);
+        c.mesh.mat.iter_mut().for_each(|x| *x = slat_mat);
         for p in c.mesh.pos.iter_mut() {
             *p += spec.axis * spec.slat_back;
         }
@@ -278,7 +277,7 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
     };
     let s0 = (s0 - ax * s0.dot(ax)).normalize();
     let (r, hw, rr) = (w.radius, 0.5 * w.width, w.rim_radius);
-    let segs = 96;
+    let segs = 64;
     // Tyre profile from the inner bead round the tread to the outer bead
     // (radius, axial offset).
     let side = |s: f32| -> Vec<(f32, f32)> {
@@ -302,7 +301,7 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
     // Tread with four circumferential grooves.
     let grooves = [-0.55f32, -0.2, 0.2, 0.55];
     let mut tread = Vec::new();
-    let n_t = 40;
+    let n_t = 22;
     for i in 0..=n_t {
         let u = -0.78 + 1.56 * i as f32 / n_t as f32;
         let mut depth = 0.0;
@@ -337,8 +336,8 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
         let t = ((rad - 0.07) / (rr - 0.085)).clamp(0.0, 1.0);
         hw * 0.80 - 0.035 * (PI * t).sin() * (1.0 - 0.3 * t) + 0.004 * (1.0 - t)
     };
-    let nr = 40;
-    let na = 360;
+    let nr = 22;
+    let na = 200;
     let s1 = ax.cross(s0);
     let mut face = Mesh::default();
     let mut ids = vec![vec![0u32; na]; nr + 1];
@@ -429,7 +428,7 @@ pub fn wheel(w: &WheelSpec) -> Mesh {
         (w.disc_radius, dw - 0.013),
         (w.disc_radius * 0.52, dw - 0.013),
     ];
-    m.lathe(w.centre, ax, s0, &disc, 96, |_, _| mat::BRAKE, |k| if k == 0 { 0.8 } else { 0.6 }, true);
+    m.lathe(w.centre, ax, s0, &disc, 64, |_, _| mat::BRAKE, |k| if k == 0 { 0.8 } else { 0.6 }, true);
     m.lathe(
         w.centre,
         ax,

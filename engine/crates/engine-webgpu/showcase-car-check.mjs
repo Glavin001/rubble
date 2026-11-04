@@ -85,6 +85,7 @@ const RUNS = [
   ['drop_15', 'scene=drop&height=15&freeze=3.5&cam=three'],
   ['wall_120', 'scene=wall&speed=120&runUp=0.6&freeze=1.0&cam=three&dist=7'],
   ['interior', 'scene=idle&freeze=1.0&cam=left&dist=3.2'],
+  ['perf', 'scene=idle&freeze=0&cam=three&perf=1'],
 ];
 let failed = 0;
 const only = opt('--only', null);
@@ -102,6 +103,6 @@ for (const [name, q] of RUNS.filter(([n]) => !only || only.split(',').includes(n
   writeFileSync(png, Buffer.from(s.result.data, 'base64'));
   const err = st?.error || pageErrors.shift();
   if (err) failed++;
-  console.log(`${name}: ${err ? 'ERROR ' + err : 'ok'}  t ${st?.time?.toFixed?.(2)} s  GPU ${st?.gpuMs?.toFixed?.(2)} ms/frame  ${st?.damage ? `broken ${st.damage.broken} bent ${st.damage.bent}` : ''}  → ${png}`);
+  console.log(`${name}: ${err ? 'ERROR ' + err : 'ok'}  t ${st?.time?.toFixed?.(2)} s  GPU ${st?.gpuMs?.toFixed?.(2)} ms/frame${st?.renderMs ? ` car render ${st.renderMs.toFixed(3)} ms` : ''}  ${st?.damage ? `broken ${st.damage.broken} bent ${st.damage.bent}` : ''}  → ${png}`);
 }
 process.exit(failed ? 1 : 0);

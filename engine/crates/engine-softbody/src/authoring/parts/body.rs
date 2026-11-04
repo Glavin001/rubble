@@ -127,7 +127,7 @@ pub struct BodySurface {
 /// The band: plan outline and sections.
 #[derive(Clone)]
 pub struct Band {
-    pub prof: BodyProfile,
+    pub prof: Pkg,
     pub style: BodyStyle,
     /// Plan outline (x ≥ 0 half), uniformly by arc length: (point (x, z), outward normal).
     outline: Vec<(Vec2, Vec2)>,
@@ -153,7 +153,7 @@ pub struct Section {
 }
 
 impl Band {
-    pub fn new(prof: &BodyProfile, style: &BodyStyle) -> Self {
+    pub fn new(prof: &Pkg, style: &BodyStyle) -> Self {
         let l = prof.length;
         let w = |z: f32| prof.half_width.eval(z) + prof.side_bulge;
         let xs = 0.9f32;
@@ -298,8 +298,9 @@ impl Band {
         let mut best = 0.0f32;
         for w in &self.prof.wells {
             let r = Vec2::new(z - w.z, y - w.y).length();
-            let k = smoothstep(w.radius + self.style.flare_width, w.radius + 0.015, r);
-            best = best.max(self.style.flare * k * k * (3.0 - 2.0 * k) / 1.0);
+            // A swell that rises over the flare width to a plateau at the lip.
+            let k = smoothstep(w.radius + self.style.flare_width, w.radius + 0.03, r);
+            best = best.max(self.style.flare * k);
         }
         best
     }
@@ -338,8 +339,100 @@ impl Band {
     }
 }
 
+/// A curve sampled every 1 cm (O(1) lookups, linear between samples).
+#[derive(Clone, Debug)]
+pub struct Lut {
+    z0: f32,
+    dz: f32,
+    v: Vec<f32>,
+}
+
+impl Lut {
+    pub fn eval(&self, z: f32) -> f32 {
+        let u = ((z - self.z0) / self.dz).clamp(0.0, (self.v.len() - 1) as f32);
+        let i = (u.floor() as usize).min(self.v.len() - 2);
+        let t = u - i as f32;
+        self.v[i] + (self.v[i + 1] - self.v[i]) * t
+    }
+}
+
+/// The body's package as the surface uses it: the profile's curves blurred
+/// along the car and tabulated.
+#[derive(Clone, Debug)]
+pub struct Pkg {
+    pub length: f32,
+    pub top: Lut,
+    pub bottom: Lut,
+    pub shoulder: Lut,
+    pub half_width: Lut,
+    pub top_half_width: Lut,
+    pub crown: f32,
+    pub side_bulge: f32,
+    pub top_radius: f32,
+    pub wells: Vec<crate::authoring::body::Well>,
+}
+
+/// The profile with its curves blurred along the car (Gaussian, σ m): the
+/// package curves are monotone cubics through a handful of points, smooth in
+/// value and slope but with curvature jumps at the points, which a clearcoat's
+/// reflections show as ripples.
+pub fn smooth_profile(p: &BodyProfile, sigma: f32) -> Pkg {
+    let l = p.length;
+    let dz = 0.01f32;
+    let n = (l / dz).ceil() as usize;
+    let blur = |c: &Curve| -> Lut {
+        let raw: Vec<f32> = (0..=n).map(|i| c.eval(l * i as f32 / n as f32)).collect();
+        let r = (3.0 * sigma / dz).ceil() as i32;
+        let g: Vec<f32> = (-r..=r)
+            .map(|k| (-(k as f32 * dz).powi(2) / (2.0 * sigma * sigma)).exp())
+            .collect();
+        let v = (0..=n as i32)
+            .map(|i| {
+                let (mut s, mut w) = (0.0f32, 0.0f32);
+                for k in -r..=r {
+                    // Odd reflection at the ends (keeps the end values and slopes).
+                    let j = i + k;
+                    let v = if j < 0 {
+                        2.0 * raw[0] - raw[(-j).min(n as i32) as usize]
+                    } else if j > n as i32 {
+                        2.0 * raw[n] - raw[(2 * n as i32 - j).max(0) as usize]
+                    } else {
+                        raw[j as usize]
+                    };
+                    let gk = g[(k + r) as usize];
+                    s += gk * v;
+                    w += gk;
+                }
+                s / w
+            })
+            .collect();
+        Lut {
+            z0: 0.0,
+            dz: l / n as f32,
+            v,
+        }
+    };
+    Pkg {
+        length: l,
+        top: blur(&p.top),
+        bottom: blur(&p.bottom),
+        shoulder: blur(&p.shoulder),
+        half_width: blur(&p.half_width),
+        top_half_width: blur(&p.top_half_width),
+        crown: p.crown,
+        side_bulge: p.side_bulge,
+        top_radius: p.top_radius,
+        wells: p.wells.clone(),
+    }
+}
+
 impl BodySurface {
     pub fn build(prof: &BodyProfile, style: &BodyStyle) -> Self {
+        // The package curves are monotone cubics through a handful of points:
+        // smooth in value and slope but with curvature jumps at the points,
+        // which a clearcoat's reflections show as ripples. The surface uses
+        // them blurred (Gaussian, σ = 8 cm along the car).
+        let prof = &smooth_profile(prof, 0.08);
         let mut band = Band::new(prof, style);
         let step = style.step;
         // Rows: curl, lower body, upper body (the crease and lower line on rows).
@@ -448,11 +541,8 @@ impl BodySurface {
             let (d, yb, ar) = best;
             // Top line at z: the profile's top with its crown.
             let x_r = (prof.top_half_width.eval(z) - tr).max(0.05);
-            let crown_amt = if z > 0.75 && z < prof.length - 1.1 {
-                prof.crown
-            } else {
-                style.lid_crown
-            };
+            let cabin = smoothstep(0.55, 0.95, z) * (1.0 - smoothstep(prof.length - 1.35, prof.length - 0.95, z));
+            let crown_amt = style.lid_crown + (prof.crown - style.lid_crown) * cabin;
             let u = (x.abs() / x_r).min(1.0);
             let top = prof.top.eval(z) + crown_amt * (1.0 - u * u) * (1.0 - u * u);
             let top = top.max(yb + 0.004);
@@ -530,6 +620,24 @@ impl BodySurface {
                 row.push(id);
             }
             lid_ids.push(row);
+        }
+        // Relax the lid's heights (a few Jacobi passes of a Laplacian, edges
+        // fixed): the distance ramp creases where two edges are equally near
+        // (the bonnet's and deck's corners); this irons that out.
+        for _ in 0..8 {
+            let mut ny: Vec<(u32, f32)> = Vec::new();
+            for i in 2..h.saturating_sub(1) {
+                for k in 1..m {
+                    let c = lid_ids[i][k];
+                    let nb = [lid_ids[i - 1][k], lid_ids[i + 1][k], lid_ids[i][k - 1], lid_ids[i][k + 1]];
+                    let avg = nb.iter().map(|&v| mesh.pos[v as usize].y).sum::<f32>() / 4.0;
+                    ny.push((c, avg));
+                }
+            }
+            for (c, y) in ny {
+                let p = &mut mesh.pos[c as usize].y;
+                *p += 0.5 * (y - *p);
+            }
         }
         for i in 0..h {
             for k in 0..m {
