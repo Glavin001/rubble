@@ -20,7 +20,7 @@ pub struct Truss {
 
 /// The longest gap between a member's nodes along its length (m): a 20 cm pole
 /// always meets one.
-pub const CATCH: f32 = 0.11;
+pub const CATCH: f32 = 0.15;
 
 /// A suspension upright's beams against the link grade.
 pub const KNUCKLE: f32 = 4.0;
@@ -329,6 +329,7 @@ pub fn box_truss(
                 let t = j as f32 / cuts as f32;
                 let p = sk.pos(s0[c]).lerp(sk.pos(s1[c]), t);
                 let q = sk.node(p, part);
+                sk.nodes[q as usize].catcher = true;
                 truss.catchers.push(q);
                 for e in [s0[c], s1[c], s0[c2], s1[c2]] {
                     sk.tie(q, e, m);

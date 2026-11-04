@@ -219,6 +219,13 @@ pub struct Look {
 /// A door frame's hinge and latch beams to the pillars: yield force (N).
 pub const DOOR_HOLD: f32 = 3.0e3;
 
+/// A catcher's body dashpot against `body_damping`.
+pub const CATCH_DAMPING: f32 = 3.0;
+
+/// Catchers in the frame tier (their ties at the member's grade × `CATCH_TIE`,
+/// not scaled with the skin).
+pub const CATCHERS_IN_FRAME: bool = false;
+
 /// A block's bearing beams' thresholds against the UHSS grade: an engine
 /// driven back crushes into the firewall rather than stopping the car
 /// against it.
@@ -464,8 +471,9 @@ pub struct Stats {
     /// Damping ratio c / 2√(k μ), μ the node pair's reduced mass.
     pub zeta_structure: f32,
     pub zeta_all: f32,
-    /// The primary tier (the frame): its nodes, their median mass and its
-    /// beams' median k·L.
+    /// The primary tier (the frame): its nodes (members' stations; catchers
+    /// are in the tier but not counted), their median mass and its beams'
+    /// median k·L.
     pub primary_nodes: usize,
     pub primary_node_mass: f32,
     pub kl_primary: f32,
@@ -499,11 +507,11 @@ impl Built {
             kl_all: median(all.iter().map(|x| x.0).collect()),
             zeta_structure: median(st.iter().map(|x| x.1).collect()),
             zeta_all: median(all.iter().map(|x| x.1).collect()),
-            primary_nodes: sk.nodes.iter().filter(|n| n.primary).count(),
+            primary_nodes: sk.nodes.iter().filter(|n| n.primary && !n.catcher).count(),
             primary_node_mass: median(
                 sk.nodes
                     .iter()
-                    .filter(|n| n.primary)
+                    .filter(|n| n.primary && !n.catcher)
                     .map(|n| n.mass)
                     .collect(),
             ),
@@ -916,6 +924,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             for &i in truss.stations.iter().flatten() {
                 sk.nodes[i as usize].primary = true;
             }
+            // Catchers too: a pole's whole load goes through their ties into
+            // the member (scaled with the light skin they would let it pass).
+            for &i in &truss.catchers {
+                sk.nodes[i as usize].primary = CATCHERS_IN_FRAME;
+            }
             let nodes = truss.nodes();
             trusses.push(truss.clone());
             truss_names.push(if side > 0.0 || !m.mirrored {
@@ -967,7 +980,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 let body: Vec<u32> = structure_nodes
                     .iter()
                     .copied()
-                    .filter(|&i| sk.nodes[i as usize].part == 0 && sk.nodes[i as usize].primary)
+                    .filter(|&i| {
+                        sk.nodes[i as usize].part == 0
+                            && sk.nodes[i as usize].primary
+                            && !sk.nodes[i as usize].catcher
+                    })
                     .collect();
                 for st in [truss.first(), truss.last()] {
                     let mut ends: Vec<u32> = st.to_vec();
@@ -1034,7 +1051,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             // behind it (apron, tower, radiator support).
             if frame.is_empty() {
                 frame = (0..sk.nodes.len() as u32)
-                    .filter(|&i| sk.nodes[i as usize].part == 0 && sk.nodes[i as usize].primary)
+                    .filter(|&i| {
+                        sk.nodes[i as usize].part == 0
+                            && sk.nodes[i as usize].primary
+                            && !sk.nodes[i as usize].catcher
+                    })
                     .collect();
             }
             let skin: Vec<u32> = shell
@@ -1139,7 +1160,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         let mat = grades.get(&br.grade)?;
         // The frame's nodes (a shear panel's corners are the frame's).
         let body: Vec<u32> = (0..sk.nodes.len() as u32)
-            .filter(|&i| sk.nodes[i as usize].part == 0 && sk.nodes[i as usize].primary)
+            .filter(|&i| {
+                sk.nodes[i as usize].part == 0
+                    && sk.nodes[i as usize].primary
+                    && !sk.nodes[i as usize].catcher
+            })
             .collect();
         for side in [1.0f32, -1.0] {
             let p = |q: [f32; 3]| Vec3::new(side * q[0], q[1], q[2]);
@@ -1324,7 +1349,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let mut chassis: Vec<u32> = structure_nodes
         .iter()
         .copied()
-        .filter(|&i| sk.nodes[i as usize].part == 0 && sk.nodes[i as usize].primary)
+        .filter(|&i| {
+            sk.nodes[i as usize].part == 0
+                && sk.nodes[i as usize].primary
+                && !sk.nodes[i as usize].catcher
+        })
         .collect();
     chassis.extend(
         frame_nodes
@@ -1532,7 +1561,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 })
                 .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
             if let Some((_, j)) = best {
-                sk.dashpot(i, j, def.body_damping, def.body_damping_strength);
+                // A catcher (a light node on four ties) gets a stronger one.
+                let c = if ni.catcher {
+                    CATCH_DAMPING * def.body_damping
+                } else {
+                    def.body_damping
+                };
+                sk.dashpot(i, j, c, def.body_damping_strength);
             }
         }
     }

@@ -116,8 +116,12 @@ it meets. A station node within 5 cm of an existing node of its part reuses it
 joints are shared nodes, not gusset ties (ties are where compliance and step cost
 collect). Ties break by position, so mirrored members pick mirrored nodes. Impact members (`catch`: bumper beams, door beams, sills,
 B-pillars, firewall, floor cross members, tunnel, front subframe) get catcher nodes
-along one line of each bay at most 11 cm apart: static contact is per node, so a
-20 cm pole always meets one.
+along one line of each bay at most 15 cm apart (`members::CATCH`): static contact
+is per node, so a 20 cm pole always meets one. Catchers are skin-tier nodes (light;
+`vehicle::CATCHERS_IN_FRAME` puts them in the frame tier: fewer side-pole
+pass-throughs, but they ring after a crash), each with a body dashpot
+`CATCH_DAMPING` × `body_damping` strong; joints, braces and mounts never pick
+them.
 
 Blocks (`BlockSpec`) are rigid lattices with their mass; `bear` (m) adds
 compression-only beams from the block's rear and side faces to the structure behind

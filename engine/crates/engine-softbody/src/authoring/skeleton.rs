@@ -67,6 +67,9 @@ pub struct SkNode {
     /// the step on their own ([`Skeleton::fit_tiers`]) and the structure's mass
     /// leans on it ([`PRIMARY_WEIGHT`]).
     pub primary: bool,
+    /// A pole catcher between a member's stations (frame tier, but never a
+    /// joint: braces, mounts and ties pick stations).
+    pub catcher: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -166,6 +169,7 @@ impl Skeleton {
             contacter: false,
             ground: true,
             primary: false,
+            catcher: false,
         });
         (self.nodes.len() - 1) as u32
     }

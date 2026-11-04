@@ -117,6 +117,10 @@ pub const ROOF_YIELD: f32 = 1.2e4;
 /// 56 km/h crash, crushed by a roll-over.
 pub const CABIN_YIELD: f32 = 6.0e4;
 
+/// The front subframe's cross members' threshold scale (a pole between the
+/// engine and a rail meets them).
+pub const SUBFRAME: f32 = 1.5;
+
 /// The passenger cell's threshold scale.
 pub const CELL: f32 = 4.0;
 
@@ -744,7 +748,7 @@ pub fn sedan() -> VehicleDef {
             0.18,
             UP,
             "hsla",
-            [1.5, 1.5],
+            [SUBFRAME, SUBFRAME],
             0,
             false,
             2,
@@ -756,7 +760,7 @@ pub fn sedan() -> VehicleDef {
             0.18,
             UP,
             "hsla",
-            [1.5, 1.5],
+            [SUBFRAME, SUBFRAME],
             0,
             false,
             2,
@@ -992,7 +996,7 @@ pub fn sedan() -> VehicleDef {
             mounts: 2,
             reach: 0.25,
             mount_grade: "mount".into(),
-            mount_scale: 1.0,
+            mount_scale: 3.0,
             bear: 0.0,
         },
     ];

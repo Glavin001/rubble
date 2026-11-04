@@ -554,7 +554,11 @@ fn main() {
         let com_speed = |s: &ExplicitBeams| {
             (s.nodes.iter().map(|n| n.mass * n.vel).sum::<Vec3>() / total).length()
         };
-        for _ in 0..18 {
+        for _ in 0..std::env::var("SETTLE_STEPS")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(18usize)
+        {
             s.frame();
         }
         // Stopped: its rigid motion (v_com + ω × r) under 0.1 m/s everywhere.
