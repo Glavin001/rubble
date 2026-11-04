@@ -123,9 +123,33 @@ pass-throughs, but they ring after a crash), each with a body dashpot
 `CATCH_DAMPING` × `body_damping` strong; joints, braces and mounts never pick
 them.
 
+`knee: Some([t, s])` puts a knee in the threshold gradient (scale `s` at arc
+fraction `t`): the rear rails are strong (`REAR_RAIL`, 4 × HSLA) from the kick-up
+to the rear subframe, where they carry the suspension, fuel and spare wheel
+(about 40 kN a side at 40 g in a frontal crash), and fold only behind it.
+
 Blocks (`BlockSpec`) are rigid lattices with their mass; `bear` (m) adds
 compression-only beams from the block's rear and side faces to the structure behind
 and beside it (an engine driven back meets the firewall and tunnel).
+
+## Suspension corners
+
+A corner (`members::corner`) is a five-node knuckle (the axle nodes, the upper
+and lower ball joints, the steering arm) on two wishbones and a toe link to a
+six-node pivot bracket (four arm pivots, the toe-link pivot, the strut top),
+each pivot tied to the body within 35 cm. Content that keeps the knuckle where
+it belongs in a crash:
+
+* the toe link is `TOE` (4) × the arms' stiffness: it alone holds the toe, on a
+  13 cm lever, against the wheel's inertia 10 cm outboard of the kingpin;
+* `Corner::cross` (k·L, the rear: `REAR_CROSS` 1.5e6 N) adds the subframe's
+  cross tubes, each arm pivot to its mirror: the wheel's inertia pushes one
+  pivot of each arm in and pulls the other out, and the tubes carry that
+  across the car instead of bending the rails;
+* articulation stops (`Skeleton::straps`, written as spring-less shocks after
+  the real ones): the upper ball joint stays within ±`STRAP` (20 %) of its
+  spawn distance to the lower arm's pivots (about ±13 % over ±9 cm of travel);
+  past that the knuckle would fold round the lower ball joint.
 
 ## Body damping
 
@@ -154,8 +178,10 @@ The body is built the BeamNG way, in two tiers:
 * **Skin**: the shell (panels, floor pan, roof skin; 25–40 cm, `SKIN_DENSITY`
   1), catchers, ties: light nodes (0.07–0.1 kg), where dents and creases happen.
   Panels are backed (`backed`): doors by their own frame (intrusion beam, belt
-  and mid rails, 14 cm deep, hinged and latched to the pillars), fenders and
-  bumper covers by the body's frame behind them.
+  and mid rails, 14 cm deep, hinged and latched to the pillars), fenders,
+  bumper covers and the bonnet by the body's frame behind them (the bonnet on
+  the aprons and towers: crushed, it folds over the engine bay instead of
+  sinking through the wheelhouses' skin, where it rattled in self-contact).
 
 A member's diagonals and bend beams yield at the same strain as its
 longitudinals (their thresholds scale with their stiffness): a rail folds
@@ -324,7 +350,14 @@ shapes) and the profile. The tools stay the same.
 * `cargo run --release -p engine-softbody --example showcase_probe -- sedan low wall 56`
   (`VISUAL=<dir>` renders the skin before and after, `DRAW=<dir>` the beams;
   scenes `wobble`, `settle`, `torsion`, `pole`; `BREAKS=1` sums broken, bent and
-  elastic energy per member pair, `WHEEL=<i>` traces a wheel's knuckle).
+  elastic energy per member pair, `WHEEL=<i>` traces a wheel's knuckle;
+  with `BRACKET=1` its pivot bracket's strain and rotation in the cabin's
+  frame, the knuckle's in the bracket's, and each body tie, `BRACKET=2` the
+  corner's nodes' displacements; `ESPLIT=4,8` the elastic energy by zone at
+  those frames; `RELAX=<zones>` removes a zone's stored energy at `RELAX_AT`
+  (which zone drives the rebound); `BROKEN_PAIR=a~b` lists a pair's broken
+  and bent beams; `FASTEST=1 CONTACTS=1` the self-contact triangles under the
+  fastest nodes).
 * `showcase-car.html?res=medium&scene=wall&speed=56`: the car on the GPU in a page
   (`freeze=0` shows the rest pose, `perf=1` times the car's render pass);
   `node showcase-car-check.mjs --size 1920x1080 [--only rest_three,...]` takes
@@ -337,6 +370,10 @@ shapes) and the profile. The tools stay the same.
 * `skeleton.parts` and each node's part: `body`, `bumper_f`, `bumper_r`, `bonnet`,
   `bootlid`, `fender_l/_r`, `door_f_l/_r`, `door_r_l/_r`, `radiator`, the blocks
   (`powertrain`, `seat_fl`, `seat_fr`, `seat_rear`, `battery`), `suspension`.
+* The windscreen's base sits at z 3.33 (it was 3.50) and its top at 2.55
+  (2.70): `profile.top`, `look.windscreen`, the glass zone, the screen pillars,
+  header, cowl, dash, column and the front side glass moved back 0.15 m (a
+  longer dash-to-axle); the hinge pillars stay at the doors' front edge.
 * `groups` and `bind_tris` keyed by member, block and corner name, as before
   (`seat_fl`, `seat_fr`, `seat_rear`, `dash`, `tunnel`, `column` kept). A member's
   group may now include nodes it shares with the shell or another member (snapped),

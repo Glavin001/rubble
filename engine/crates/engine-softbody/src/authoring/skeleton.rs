@@ -131,6 +131,10 @@ pub struct Skeleton {
     pub beams: Vec<SkBeam>,
     index: HashMap<(u32, u32), usize>,
     pub shocks: Vec<SkShock>,
+    /// Limit straps: shocks without a spring or damper, free within their
+    /// bounds and on their stops past them (a suspension's articulation
+    /// stops). Written after the shocks.
+    pub straps: Vec<SkShock>,
     pub wheels: Vec<SkWheel>,
     /// Fine skin triangles (wound outward): the visual binds to these.
     pub skin: Vec<[u32; 3]>,
@@ -774,7 +778,7 @@ impl Skeleton {
                 s,
                 "\nset_beam_defaults {stop}, {STOP_DAMP}, 2000000, 1000000, 0.05, tracks/beam, 0\nshocks"
             );
-            for x in &self.shocks {
+            for x in self.shocks.iter().chain(&self.straps) {
                 let _ = writeln!(
                     s,
                     "{}, {}, {}, {}, {}, {}, {:.4}, i",

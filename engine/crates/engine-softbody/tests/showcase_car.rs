@@ -449,7 +449,12 @@ fn c_side_pole_at_32_kmh_intrudes_the_door_and_does_not_pass() {
         })
         .map(|(i, _)| i as u32)
         .collect();
-    let (through, s, _) = pole_run(&b, 32.0, dir, offset, false, 1.0);
+    // C_KMH: the speed (32 by default; nearby speeds for medians).
+    let kmh: f32 = std::env::var("C_KMH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32.0);
+    let (through, s, _) = pole_run(&b, kmh, dir, offset, false, 1.0);
     // Intrusion: the door's deepest node relative to the cabin's centre line.
     let centre0 = group_mean(&s0, &b, &["tunnel"]).x;
     let centre1 = group_mean(&s, &b, &["tunnel"]).x;
@@ -1156,18 +1161,26 @@ fn cabin_local(s: &ExplicitBeams, b: &Built) -> Vec<Vec3> {
 /// rebound under 1.5 m/s); the cabin (roof, B- and C-pillars, rear doors) keeps
 /// its shape within 15 mm and its sills within 3 cm; the door openings within
 /// 2 cm (the doors would still open); the rear wheels stay where they were
-/// (3 cm) with no rear suspension or tyre beam broken. With drag on and off.
+/// along and across the car (3 cm; up and down they are on their springs,
+/// within 6 cm of their travel) with no rear suspension or tyre beam broken.
+/// With drag on and off; `K_KMH` sets the speed (nearby speeds for medians).
 ///
-/// Ignored: fails today (medium, drag on: permanent crush ~70 % of the peak,
-/// rebound ~2 m/s, roof/B-pillars ~22 mm, rear hubs ~0.26 m: the rear knuckles
-/// tumble in the crash). Run with `--ignored`.
+/// Ignored: fails today (medium, 55–57 km/h: rebound ~2.6 m/s, roof skin
+/// ~25 mm, B-pillars ~17 mm, rear doors ~22 mm, door openings ~35 mm; the rear
+/// hubs now stay within ~1 cm). Run with `--ignored`.
 #[test]
 #[ignore]
 fn k_wall_damage_stays_in_the_crumple_zone() {
+    let mut fails: Vec<String> = Vec::new();
     for drag in [true, false] {
         let b = built(Resolution::Medium);
         let sk = &b.skeleton;
-        let mut s = spawn(&b, Vec3::new(0.0, 0.0, 56.0 / 3.6), 0.0);
+        // K_KMH: the speed (56 by default; nearby speeds for medians).
+        let kmh: f32 = std::env::var("K_KMH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(56.0);
+        let mut s = spawn(&b, Vec3::new(0.0, 0.0, kmh / 3.6), 0.0);
         s.settings.drag = drag;
         let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
         s.boxes.push(StaticBox::centered(
@@ -1304,13 +1317,30 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
             .flat_map(|w| [w.a1 as usize, w.a2 as usize])
             .collect();
         // The wheel centres (the axle nodes' midpoints).
-        let hub = sk.wheels[2..]
+        let hub_v: Vec<Vec3> = sk.wheels[2..]
             .iter()
             .map(|w| {
                 let (a, c) = (w.a1 as usize, w.a2 as usize);
-                (0.5 * (local1[a] + local1[c]) - 0.5 * (local0[a] + local0[c])).length()
+                0.5 * (local1[a] + local1[c]) - 0.5 * (local0[a] + local0[c])
             })
+            .collect();
+        // In the cabin frame: x along the car, y across, z down (the
+        // suspension's travel). The car comes to rest nose down on its
+        // crushed front, a little rolled: its rear wheels sit a few
+        // centimetres up or down their travel; what must not move is where
+        // they are along and across the car (the mounts, the knuckles).
+        let hub = hub_v
+            .iter()
+            .map(|v| v.truncate().length())
             .fold(0.0f32, f32::max);
+        let travel = hub_v.iter().map(|v| v.z.abs()).fold(0.0f32, f32::max);
+        eprintln!(
+            "(k) drag {drag}: rear hubs moved (x along, y across, z down, mm) {:?}",
+            hub_v
+                .iter()
+                .map(|v| format!("{:.0} {:.0} {:.0}", v.x * 1e3, v.y * 1e3, v.z * 1e3))
+                .collect::<Vec<_>>()
+        );
         if std::env::var("HUB_TRACE").is_ok() {
             for &i in &rear_axles {
                 eprintln!("  rear axle node {i}: {:?} -> {:?}", local0[i], local1[i]);
@@ -1342,7 +1372,7 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
             })
             .count();
         eprintln!(
-            "(k) drag {drag}: front crush peak {peak:.3} m, permanent {perm:.3} m ({:.0} %), rebound {rebound:.2} m/s; cabin {}; sill {:.3} m; door openings {:.3} m; rear hubs {:.3} m, rear suspension/tyre beams broken {rear_broken}",
+            "(k) drag {drag}: front crush peak {peak:.3} m, permanent {perm:.3} m ({:.0} %), rebound {rebound:.2} m/s; cabin {}; sill {:.3} m; door openings {:.3} m; rear hubs {:.3} m (travel {travel:.3} m), rear suspension/tyre beams broken {rear_broken}",
             100.0 * perm / peak,
             cabin
                 .iter()
@@ -1353,16 +1383,30 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
             aperture,
             hub
         );
-        assert!(perm >= 0.7 * peak, "springs back: {perm} of {peak}");
-        assert!(rebound < 1.5, "rebound {rebound} m/s");
+        // Every failure of both runs is reported before the test fails.
+        let mut check = |ok: bool, what: String| {
+            if !ok {
+                fails.push(format!("drag {drag}: {what}"));
+            }
+        };
+        check(
+            perm >= 0.7 * peak,
+            format!("springs back: {perm} of {peak}"),
+        );
+        check(rebound < 1.5, format!("rebound {rebound} m/s"));
         for (n, v) in &cabin[..4] {
-            assert!(worst(v) < 0.015, "{n} moved {} m", worst(v));
+            check(worst(v) < 0.015, format!("{n} moved {} m", worst(v)));
         }
-        assert!(sill_change < 0.03);
-        assert!(aperture < 0.02, "door opening {aperture} m");
-        assert!(hub < 0.03, "rear hub moved {hub} m");
-        assert_eq!(rear_broken, 0);
+        check(sill_change < 0.03, format!("sill {sill_change} m"));
+        check(aperture < 0.02, format!("door opening {aperture} m"));
+        check(hub < 0.03, format!("rear hub moved {hub} m"));
+        check(
+            travel < 0.06,
+            format!("rear hub off its spring by {travel} m"),
+        );
+        check(rear_broken == 0, format!("{rear_broken} rear beams broken"));
     }
+    assert!(fails.is_empty(), "{fails:#?}");
 }
 
 /// A quasi-static push on the middle of the front door (a knee, a bollard):

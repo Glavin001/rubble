@@ -33,6 +33,7 @@ pub fn member(
         up,
         grade: grade.into(),
         scale,
+        knee: None,
         beads,
         mirrored,
         attach,
@@ -42,6 +43,13 @@ pub fn member(
         catch: false,
         stiff: 1.0,
     }
+}
+
+/// A knee in a member's threshold gradient ([`MemberSpec::knee`]): scale `s`
+/// at arc fraction `t`.
+pub fn knee(mut m: MemberSpec, t: f32, s: f32) -> MemberSpec {
+    m.knee = Some([t, s]);
+    m
 }
 
 /// A member with its own station spacing.
@@ -202,12 +210,22 @@ pub const RAIL_STIFF: f32 = 1.4;
 /// The rear rails' section against the HSLA grade's k·L.
 pub const REAR_RAIL_STIFF: f32 = 3.5;
 
+/// The rear rails' threshold scale from the kick-up to the rear subframe
+/// (they carry the suspension, the fuel and the spare wheel: in a frontal
+/// crash at 40 g that is ~40 kN a side), graded to 0.5 at the bumper behind
+/// [`REAR_KNEE`] (the arc fraction of the rear subframe's station, z 0.62).
+pub const REAR_RAIL: f32 = 4.0;
+pub const REAR_KNEE: f32 = 0.73;
+
+/// The rear subframe's cross tubes' k·L (N): see [`Corner::cross`].
+pub const REAR_CROSS: f32 = 1.5e6;
+
 /// The sills' section against the UHSS grade's k·L.
 pub const SILL_STIFF: f32 = 2.3;
 
 /// A lumped shear panel's axial rigidity (N): the cabin box's faces and the
 /// strut towers' braces into it, spread over the sections they bear on.
-pub const KL_PANEL: f32 = 6.5e6;
+pub const KL_PANEL: f32 = 7.0e6;
 
 /// A zigzag shear panel's diagonals between two members (N).
 pub const KL_SHEAR: f32 = 1.0e6;
@@ -253,10 +271,10 @@ pub fn sedan() -> VehicleDef {
             (1.38, 1.395),
             (1.70, 1.435),
             (2.20, 1.445),
-            (2.70, 1.415),
-            (3.10, 1.20),
-            (3.50, 0.985),
-            (3.80, 0.935),
+            (2.55, 1.425),
+            (2.95, 1.22),
+            (3.33, 1.00),
+            (3.80, 0.945),
             (4.20, 0.885),
             (4.50, 0.845),
             (4.70, 0.80),
@@ -301,8 +319,8 @@ pub fn sedan() -> VehicleDef {
             (0.78, 0.71),
             (1.38, 0.66),
             (2.00, 0.645),
-            (2.70, 0.66),
-            (3.50, 0.75),
+            (2.55, 0.66),
+            (3.35, 0.75),
             (4.00, 0.76),
             (4.50, 0.70),
             (4.70, 0.60),
@@ -329,7 +347,7 @@ pub fn sedan() -> VehicleDef {
         ],
     };
     let side_glass = vec![
-        Outline::new(&[(3.24, 1.01), (2.80, 1.355), (2.36, 1.375), (2.36, 1.01)]),
+        Outline::new(&[(3.09, 1.01), (2.65, 1.355), (2.36, 1.375), (2.36, 1.01)]),
         Outline::new(&[(2.12, 1.01), (2.12, 1.375), (1.64, 1.345), (1.47, 1.02)]),
     ];
     let panels = vec![
@@ -432,7 +450,7 @@ pub fn sedan() -> VehicleDef {
             Region::Side(Outline::new(&[
                 (3.27, 0.29),
                 (3.27, 0.99),
-                (2.76, 1.40),
+                (2.61, 1.40),
                 (2.30, 1.42),
                 (2.30, 0.29),
             ])),
@@ -456,7 +474,7 @@ pub fn sedan() -> VehicleDef {
     ];
     let mut zones = vec![
         Zone {
-            region: Region::Top { z0: 2.74, z1: 3.47 },
+            region: Region::Top { z0: 2.59, z1: 3.32 },
             grade: "glass".into(),
         },
         Zone {
@@ -592,8 +610,8 @@ pub fn sedan() -> VehicleDef {
             &[
                 (0.79, 0.31, 3.36),
                 (0.79, 0.92, 3.38),
-                (0.71, 1.10, 3.10),
-                (0.62, 1.37, 2.74),
+                (0.71, 1.10, 2.95),
+                (0.62, 1.37, 2.59),
             ],
             0.10,
             0.12,
@@ -634,7 +652,7 @@ pub fn sedan() -> VehicleDef {
         ladder(roof(member(
             "roof_rail",
             &[
-                (0.62, 1.37, 2.74),
+                (0.62, 1.37, 2.59),
                 (0.62, 1.39, 2.24),
                 (0.62, 1.39, 1.86),
                 (0.62, 1.37, 1.50),
@@ -648,7 +666,7 @@ pub fn sedan() -> VehicleDef {
             true,
             1,
         ))),
-        roof(cross("header_f", 0.62, 1.37, 2.74, "uhss", 1.0)),
+        roof(cross("header_f", 0.62, 1.37, 2.59, "uhss", 1.0)),
         roof(cross("bow_b", 0.62, 1.39, 2.24, "uhss", 1.0)),
         // A rear roof bow (the roof skin's span between bows sags otherwise).
         roof(cross("bow_r", 0.62, 1.39, 1.86, "uhss", 1.0)),
@@ -679,10 +697,10 @@ pub fn sedan() -> VehicleDef {
         ladder(cell(member(
             "dash",
             &[
-                (-0.79, 0.80, 3.30),
-                (-0.38, 0.80, 3.24),
-                (0.38, 0.80, 3.24),
-                (0.79, 0.80, 3.30),
+                (-0.79, 0.80, 3.15),
+                (-0.38, 0.80, 3.09),
+                (0.38, 0.80, 3.09),
+                (0.79, 0.80, 3.15),
             ],
             0.10,
             0.18,
@@ -697,8 +715,8 @@ pub fn sedan() -> VehicleDef {
             "cowl",
             &[
                 (-0.79, 0.92, 3.38),
-                (-0.40, 0.92, 3.44),
-                (0.40, 0.92, 3.44),
+                (-0.40, 0.92, 3.29),
+                (0.40, 0.92, 3.29),
                 (0.79, 0.92, 3.38),
             ],
             0.10,
@@ -769,7 +787,7 @@ pub fn sedan() -> VehicleDef {
         // cantilever).
         member(
             "column",
-            &[(0.38, 0.80, 3.24), (0.38, 0.93, 2.98)],
+            &[(0.38, 0.80, 3.09), (0.38, 0.93, 2.83)],
             0.10,
             0.10,
             UP,
@@ -781,26 +799,30 @@ pub fn sedan() -> VehicleDef {
         ),
         // Rear rails from the rear seat's cross member over the kick-up,
         // under the rear strut tower, to the rear bumper beam.
-        stiff(
-            member(
-                "rail_r",
-                &[
-                    (0.44, 0.22, 1.80),
-                    (0.44, 0.24, 1.36),
-                    (0.44, 0.40, 1.03),
-                    (0.44, 0.42, 0.62),
-                    (0.44, 0.45, 0.17),
-                ],
-                0.10,
-                0.13,
-                UP,
-                "hsla",
-                [2.0, 0.5],
-                3,
-                true,
-                1,
+        knee(
+            stiff(
+                member(
+                    "rail_r",
+                    &[
+                        (0.44, 0.22, 1.80),
+                        (0.44, 0.24, 1.36),
+                        (0.44, 0.40, 1.03),
+                        (0.44, 0.42, 0.62),
+                        (0.44, 0.45, 0.17),
+                    ],
+                    0.10,
+                    0.13,
+                    UP,
+                    "hsla",
+                    [REAR_RAIL, 0.5],
+                    3,
+                    true,
+                    1,
+                ),
+                REAR_RAIL_STIFF,
             ),
-            REAR_RAIL_STIFF,
+            REAR_KNEE,
+            REAR_RAIL,
         ),
         catching(ladder(member(
             "bumper_beam_r",
@@ -1053,7 +1075,7 @@ pub fn sedan() -> VehicleDef {
             hi: [0.5, 0.5, 0.8],
         },
     ];
-    let wheel = |z: f32, driven: bool, spring: f32, damper: f32| Corner {
+    let wheel = |z: f32, driven: bool, spring: f32, damper: f32, cross: f32| Corner {
         x: 0.78,
         y: 0.32,
         z,
@@ -1069,11 +1091,12 @@ pub fn sedan() -> VehicleDef {
         damper,
         driven,
         braked: true,
+        cross,
     };
     let look = Look {
         paint: [0.42, 0.015, 0.025],
         side_glass,
-        windscreen: [2.70, 3.50],
+        windscreen: [2.55, 3.33],
         backlight: [0.78, 1.38],
         frit: 0.05,
         headlight: Outline::new(&[
@@ -1098,7 +1121,7 @@ pub fn sedan() -> VehicleDef {
         // Door seams (each door's edge ring inside it, the pillar's between),
         // screens' ends, the bonnet's and boot lid's edges.
         stations: vec![
-            0.78, 1.30, 1.52, 2.06, 2.24, 2.42, 2.74, 3.16, 3.32, 3.48, 4.10,
+            0.78, 1.30, 1.52, 2.06, 2.24, 2.42, 2.59, 2.74, 3.16, 3.32, 3.48, 4.10,
         ],
         panels,
         shell_grade: "panel".into(),
@@ -1120,8 +1143,8 @@ pub fn sedan() -> VehicleDef {
         plates,
         masses,
         corners: vec![
-            wheel(3.73, true, 30_000.0, 2_200.0),
-            wheel(1.03, false, 26_000.0, 2_000.0),
+            wheel(3.73, true, 30_000.0, 2_200.0, 0.0),
+            wheel(1.03, false, 26_000.0, 2_000.0, REAR_CROSS),
         ],
         kerb_mass: 1450.0,
         look,
@@ -1138,7 +1161,7 @@ pub fn sedan() -> VehicleDef {
         // every face at once.
         braces: {
             let k = KL_PANEL;
-            let (fb, ft, cw) = ([0.79, 0.31, 3.36], [0.62, 1.37, 2.74], [0.79, 0.92, 3.38]);
+            let (fb, ft, cw) = ([0.79, 0.31, 3.36], [0.62, 1.37, 2.59], [0.79, 0.92, 3.38]);
             let (bb, bt) = ([0.79, 0.31, 2.24], [0.62, 1.39, 2.24]);
             let (rb, rt) = ([0.79, 0.31, 1.36], [0.62, 1.37, 1.50]);
             // Front end: strut-tower tops and bases, the rails at the firewall.
@@ -1207,7 +1230,16 @@ pub fn sedan() -> VehicleDef {
             ]
         },
         frame_through: vec!["door".into()],
-        backed: vec!["door".into(), "fender".into(), "bumper".into()],
+        // The bonnet too (its inner panel bears on the aprons and towers
+        // under its edges): crushed, it folds over the engine bay instead of
+        // sinking through the wheelhouses' skin (which then rattles in
+        // self-contact).
+        backed: vec![
+            "door".into(),
+            "fender".into(),
+            "bumper".into(),
+            "bonnet".into(),
+        ],
         shell_braces: false,
         body_damping: 50.0,
         tiered: true,

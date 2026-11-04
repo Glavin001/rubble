@@ -896,8 +896,8 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             } else {
                 0
             };
-            let (s0, s1) = (m.scale[0], m.scale[1]);
-            let mat = move |t: f32| base.scaled(s0 + (s1 - s0) * t);
+            let spec = m.clone();
+            let mat = move |t: f32| base.scaled(spec.scale_at(t));
             let truss: Truss = box_truss(
                 &mut sk,
                 &path,
@@ -1463,8 +1463,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let susp = sk.part("suspension");
     let mut wheel_nodes = Vec::new();
     for c in &def.corners {
+        let mut sides: Vec<Vec<u32>> = Vec::new();
         for side in [1.0f32, -1.0] {
             let cn = corner(&mut sk, c, side, susp, grades.link);
+            sides.push(cn.pivots.clone());
             // Pivots and the tower top into the body.
             let mut ties = cn.pivots.clone();
             ties.push(cn.shock_top);
@@ -1484,6 +1486,14 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             }
             wheel_nodes.extend(cn.knuckle.iter().copied());
             wheel_nodes.extend(cn.pivots.iter().copied());
+        }
+        if c.cross > 0.0 {
+            // The subframe's cross tubes: each arm pivot (not the strut top)
+            // to its mirror.
+            let tube = grades.link.stiffer(c.cross / grades.link.kl());
+            for i in 0..sides[0].len() - 1 {
+                sk.fixed_beam(sides[0][i], sides[1][i], tube);
+            }
         }
     }
     groups.insert("suspension".into(), wheel_nodes);
