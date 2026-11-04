@@ -1,0 +1,426 @@
+//! Structural members as node–beam trusses, so they bend and buckle the way the
+//! real parts do: box-section members along a path (rails, sills, pillars, roof
+//! rails, cross members, bumper beams, door intrusion beams), lattice blocks
+//! (engine and gearbox), plates (radiator), and a double-wishbone suspension corner.
+
+use super::material::Material;
+use super::skeleton::{BeamType, SkShock, SkWheel, Skeleton};
+use glam::Vec3;
+use serde::{Deserialize, Serialize};
+
+/// A box-section truss: four corner nodes per station.
+#[derive(Clone, Debug, Default)]
+pub struct Truss {
+    pub stations: Vec<[u32; 4]>,
+    /// Arc fraction of each station along the path (0 at its start).
+    pub t: Vec<f32>,
+}
+
+impl Truss {
+    pub fn nodes(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.stations.iter().flatten().copied().collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+    pub fn first(&self) -> [u32; 4] {
+        self.stations[0]
+    }
+    pub fn last(&self) -> [u32; 4] {
+        *self.stations.last().unwrap()
+    }
+}
+
+/// Points along `path` at most `spacing` apart, evenly by arc length, with
+/// their arc fractions.
+pub fn resample(path: &[Vec3], spacing: f32) -> Vec<(Vec3, f32)> {
+    let mut acc = vec![0.0f32];
+    for w in path.windows(2) {
+        acc.push(acc.last().unwrap() + w[0].distance(w[1]));
+    }
+    let total = *acc.last().unwrap();
+    let n = (total / spacing).ceil().max(1.0) as usize;
+    let mut out = Vec::new();
+    let mut j = 0;
+    for i in 0..=n {
+        let s = total * i as f32 / n as f32;
+        while j + 2 < acc.len() && acc[j + 1] < s {
+            j += 1;
+        }
+        let span = (acc[j + 1] - acc[j]).max(1e-9);
+        let t = ((s - acc[j]) / span).clamp(0.0, 1.0);
+        out.push((path[j].lerp(path[j + 1], t), s / total.max(1e-9)));
+    }
+    out
+}
+
+/// A member's description: path, section and material along it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MemberSpec {
+    pub name: String,
+    pub path: Vec<[f32; 3]>,
+    /// Section width (across, in the plane of `up`'s normal) and height (along `up`).
+    pub width: f32,
+    pub height: f32,
+    /// Direction the section's height points to (it is made square to the path).
+    pub up: [f32; 3],
+    /// Material grade name (`Grades` field) and its threshold scale at the path's
+    /// start and end (a crush gradient: weak at the bumper, strong at the cell).
+    pub grade: String,
+    pub scale: [f32; 2],
+    /// Every this many stations the section is weaker (crush beads: the member
+    /// folds there first, in an accordion). 0: none.
+    pub beads: usize,
+    /// Built on both sides (the path's x mirrored for the second).
+    pub mirrored: bool,
+    /// Join each station to this many of the nearest shell nodes (0: none).
+    pub attach: usize,
+    /// Rides the panel around its middle (door beams, lid frames): built in that
+    /// part and attached to it alone.
+    #[serde(default)]
+    pub ride: bool,
+    /// Nodes per station: 4 (a box, for members that buckle in 3-D: rails, sills,
+    /// pillars) or 2 (a ladder in the plane of `up`: cross members, bows, frames).
+    #[serde(default = "four")]
+    pub section: usize,
+    /// Station spacing (m); 0: the resolution's (crush members: its crush spacing).
+    /// Longer stations make a stiffer member for the same mass: a line's axial
+    /// rigidity grows with the square of its station spacing at a fixed mass and step.
+    #[serde(default)]
+    pub station: f32,
+}
+
+fn four() -> usize {
+    4
+}
+
+/// Build one box truss along `path`.
+pub fn box_truss(
+    sk: &mut Skeleton,
+    path: &[Vec3],
+    width: f32,
+    height: f32,
+    up: Vec3,
+    spacing: f32,
+    part: u16,
+    mat: &dyn Fn(f32) -> Material,
+    beads: usize,
+    section: usize,
+) -> Truss {
+    let pts = resample(path, spacing);
+    let mut truss = Truss::default();
+    for (i, &(p, t)) in pts.iter().enumerate() {
+        let tan = if i + 1 < pts.len() {
+            pts[i + 1].0 - p
+        } else {
+            p - pts[i - 1].0
+        }
+        .normalize_or_zero();
+        let mut side = tan.cross(up);
+        if side.length_squared() < 1e-6 {
+            side = tan.cross(Vec3::X);
+        }
+        let side = side.normalize();
+        let u = side.cross(tan).normalize();
+        let hw = 0.5 * width;
+        let hh = 0.5 * height;
+        let st = if section == 2 {
+            let a = sk.node(p - u * hh, part);
+            let b = sk.node(p + u * hh, part);
+            [a, b, a, b]
+        } else {
+            let c = [
+                p - side * hw - u * hh,
+                p + side * hw - u * hh,
+                p + side * hw + u * hh,
+                p - side * hw + u * hh,
+            ];
+            c.map(|q| sk.node(q, part))
+        };
+        truss.stations.push(st);
+        truss.t.push(t);
+    }
+    let n = truss.stations.len();
+    // Longitudinals carry the member's load at full stiffness; the section's
+    // ring, its diagonal and the bend beams keep its shape at half; the face
+    // diagonals only stop shear (a third), so the mass the step needs goes into
+    // axial rigidity.
+    for i in 0..n {
+        let s = truss.stations[i];
+        let m = mat(truss.t[i]);
+        let ring = if beads > 0 && i % beads == beads / 2 && i > 0 && i + 1 < n {
+            m.scaled(0.6)
+        } else {
+            m
+        }
+        .stiffer(0.5);
+        for e in 0..4 {
+            sk.beam(s[e], s[(e + 1) % 4], ring);
+        }
+        sk.beam(s[0], s[2], ring);
+        if i + 2 < n {
+            // Bend beams over two stations: stiffness against buckling.
+            let q = truss.stations[i + 2];
+            let mm = mat(truss.t[i + 1]).stiffer(0.5);
+            for e in 0..4 {
+                sk.beam(s[e], q[e], mm);
+            }
+        }
+        if i + 1 < n {
+            let q = truss.stations[i + 1];
+            let mm = mat(0.5 * (truss.t[i] + truss.t[i + 1]));
+            for e in 0..4 {
+                sk.beam(s[e], q[e], mm);
+            }
+            let diag = mm.stiffer(0.35);
+            for e in 0..4 {
+                sk.beam(s[e], q[(e + 1) % 4], diag);
+                sk.beam(s[(e + 1) % 4], q[e], diag);
+            }
+        }
+    }
+    truss
+}
+
+/// Join every node of `nodes` to its `count` nearest nodes of `pool` (within
+/// `reach` m).
+pub fn attach(
+    sk: &mut Skeleton,
+    nodes: &[u32],
+    pool: &[u32],
+    count: usize,
+    reach: f32,
+    mat: Material,
+) {
+    for &a in nodes {
+        let p = sk.pos(a);
+        for b in sk.nearest(p, pool, count) {
+            if b != a && sk.pos(b).distance(p) <= reach {
+                sk.beam(a, b, mat);
+            }
+        }
+    }
+}
+
+/// A rigid lattice block (engine, gearbox, battery): nodes on a grid at most
+/// `spacing` apart filling the box `centre ± half`, joined along every cell edge,
+/// face diagonal and body diagonal.
+pub fn block(
+    sk: &mut Skeleton,
+    centre: Vec3,
+    half: Vec3,
+    spacing: f32,
+    part: u16,
+    mat: Material,
+) -> Vec<u32> {
+    let cnt = |h: f32| ((2.0 * h / spacing).ceil() as usize).max(1) + 1;
+    let (nx, ny, nz) = (cnt(half.x), cnt(half.y), cnt(half.z));
+    let mut idx = vec![0u32; nx * ny * nz];
+    let at = |i: usize, j: usize, k: usize| (k * ny + j) * nx + i;
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let f = |n: usize, c: usize| {
+                    if n == 1 {
+                        0.0
+                    } else {
+                        c as f32 / (n - 1) as f32 * 2.0 - 1.0
+                    }
+                };
+                let p = centre + half * Vec3::new(f(nx, i), f(ny, j), f(nz, k));
+                idx[at(i, j, k)] = sk.node(p, part);
+            }
+        }
+    }
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let a = idx[at(i, j, k)];
+                for di in 0..2usize {
+                    for dj in 0..2usize {
+                        for dk in 0..2usize {
+                            if di + dj + dk == 0 {
+                                continue;
+                            }
+                            let (ii, jj, kk) = (i + di, j + dj, k + dk);
+                            if ii < nx && jj < ny && kk < nz {
+                                sk.fixed_beam(a, idx[at(ii, jj, kk)], mat);
+                            }
+                        }
+                    }
+                    // The cell's other diagonals (from the neighbour corners).
+                }
+                for (di, dj, dk) in [
+                    (1i32, -1i32, 0i32),
+                    (1, 0, -1),
+                    (0, 1, -1),
+                    (1, -1, -1),
+                    (1, 1, -1),
+                    (1, -1, 1),
+                    (-1, 1, 1),
+                ] {
+                    let (ii, jj, kk) = (i as i32 + di, j as i32 + dj, k as i32 + dk);
+                    if ii >= 0
+                        && jj >= 0
+                        && kk >= 0
+                        && (ii as usize) < nx
+                        && (jj as usize) < ny
+                        && (kk as usize) < nz
+                    {
+                        sk.fixed_beam(a, idx[at(ii as usize, jj as usize, kk as usize)], mat);
+                    }
+                }
+            }
+        }
+    }
+    idx
+}
+
+/// A flat braced grid in the plane through `corner` spanned by `u` and `v`.
+pub fn plate(
+    sk: &mut Skeleton,
+    corner: Vec3,
+    u: Vec3,
+    v: Vec3,
+    spacing: f32,
+    part: u16,
+    mat: Material,
+) -> Vec<Vec<u32>> {
+    let nu = (u.length() / spacing).ceil().max(1.0) as usize;
+    let nv = (v.length() / spacing).ceil().max(1.0) as usize;
+    let mut g = vec![vec![0u32; nu + 1]; nv + 1];
+    for (j, row) in g.iter_mut().enumerate() {
+        for (i, slot) in row.iter_mut().enumerate() {
+            *slot = sk.node(
+                corner + u * (i as f32 / nu as f32) + v * (j as f32 / nv as f32),
+                part,
+            );
+        }
+    }
+    for j in 0..=nv {
+        for i in 0..=nu {
+            if i < nu {
+                sk.beam(g[j][i], g[j][i + 1], mat);
+            }
+            if j < nv {
+                sk.beam(g[j][i], g[j + 1][i], mat);
+            }
+            if i < nu && j < nv {
+                sk.beam(g[j][i], g[j + 1][i + 1], mat);
+                sk.beam(g[j][i + 1], g[j + 1][i], mat);
+            }
+        }
+    }
+    g
+}
+
+/// A suspension corner's geometry (left side, x > 0; the right mirrors it).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Corner {
+    /// Wheel centre at spawn: half track, height, station along the car.
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub tyre_radius: f32,
+    pub tyre_width: f32,
+    /// Tyre (ring) mass and the hub/knuckle/brake mass (kg).
+    pub wheel_mass: f32,
+    pub hub_mass: f32,
+    /// Control arms and their brackets (kg, on the chassis pivots).
+    #[serde(default)]
+    pub arm_mass: f32,
+    pub rays: u32,
+    pub tyre_spring: f32,
+    pub tyre_damp: f32,
+    /// Spring (N/m at the wheel) and damper (N·s/m).
+    pub spring: f32,
+    pub damper: f32,
+    pub driven: bool,
+    pub braked: bool,
+}
+
+/// What a corner built: its nodes, and the chassis pivots to tie into the body.
+#[derive(Clone, Debug, Default)]
+pub struct CornerNodes {
+    pub axle: [u32; 2],
+    pub knuckle: Vec<u32>,
+    pub pivots: Vec<u32>,
+    pub shock_top: u32,
+}
+
+/// A double-wishbone corner: a rigid five-node knuckle carrying the tyre's axle
+/// nodes, lower and upper arms to four chassis pivots, a tie rod, and a
+/// spring–damper from the lower ball joint to the tower. `side` is +1 (left) or
+/// −1 (right).
+pub fn corner(sk: &mut Skeleton, c: &Corner, side: f32, part: u16, rigid: Material) -> CornerNodes {
+    let p = |x: f32, y: f32, z: f32| Vec3::new(side * x, y, z);
+    let (x, y, z) = (c.x, c.y, c.z);
+    let hw = 0.5 * c.tyre_width;
+    let a1 = sk.node(p(x - hw, y, z), part);
+    let a2 = sk.node(p(x + hw, y, z), part);
+    let ku = sk.node(p(x - 0.11, y + 0.17, z), part);
+    let kl = sk.node(p(x - 0.09, y - 0.13, z), part);
+    let ks = sk.node(p(x - 0.12, y + 0.02, z - 0.13), part);
+    let knuckle = vec![a1, a2, ku, kl, ks];
+    for i in 0..knuckle.len() {
+        for j in i + 1..knuckle.len() {
+            sk.fixed_beam(knuckle[i], knuckle[j], rigid);
+        }
+    }
+    // The hub, bearing and brake ride the axle nodes (the tyre's spokes need the
+    // mass there); the upright's the ball joints.
+    sk.add_mass(&[a1, a2], 0.7 * c.hub_mass);
+    sk.add_mass(&[ku, kl, ks], 0.3 * c.hub_mass);
+    let plf = sk.node(p(0.36, y - 0.12, z + 0.2), part);
+    let plr = sk.node(p(0.36, y - 0.12, z - 0.2), part);
+    let puf = sk.node(p(0.47, y + 0.2, z + 0.13), part);
+    let pur = sk.node(p(0.47, y + 0.2, z - 0.13), part);
+    let pt = sk.node(p(0.35, y + 0.02, z - 0.13), part);
+    let top = sk.node(p(x - 0.17, y + 0.47, z), part);
+    let arm = rigid;
+    sk.fixed_beam(kl, plf, arm);
+    sk.fixed_beam(kl, plr, arm);
+    sk.fixed_beam(ku, puf, arm);
+    sk.fixed_beam(ku, pur, arm);
+    sk.fixed_beam(ks, pt, arm);
+    // The pivots as one subframe bracket.
+    let pivots = vec![plf, plr, puf, pur, pt, top];
+    // The arms' and subframe brackets' own mass.
+    sk.add_mass(&pivots, c.arm_mass);
+    for i in 0..pivots.len() {
+        for j in i + 1..pivots.len() {
+            sk.fixed_beam(pivots[i], pivots[j], rigid);
+        }
+    }
+    let len = sk.pos(kl).distance(sk.pos(top));
+    let _ = len;
+    sk.shocks.push(SkShock {
+        a: kl,
+        b: top,
+        spring: c.spring,
+        damp: c.damper,
+        short: 0.3,
+        long: 0.3,
+        stop: 2.0e6,
+        precomp: 1.0,
+    });
+    sk.wheels.push(SkWheel {
+        a1,
+        a2,
+        radius: c.tyre_radius,
+        width: c.tyre_width,
+        rays: c.rays,
+        mass: c.wheel_mass,
+        spring: c.tyre_spring,
+        damp: c.tyre_damp,
+        propulsed: c.driven,
+        braked: c.braked,
+    });
+    let _ = BeamType::Normal;
+    CornerNodes {
+        axle: [a1, a2],
+        knuckle,
+        pivots,
+        shock_top: top,
+    }
+}

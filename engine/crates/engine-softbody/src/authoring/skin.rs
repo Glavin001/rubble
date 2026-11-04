@@ -1,0 +1,1 @@
+//! The visual skin (placeholder).
