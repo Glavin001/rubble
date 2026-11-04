@@ -106,7 +106,7 @@ export function createCrashLab(ctx) {
 
   // ---------------------------------------------------------------- state
   const P = (k, d) => (qs.has(k) && qs.get(k) !== '' ? qs.get(k) : d);
-  const slowParam = P('slow', preset ? 'auto' : '1');
+  const slowParam = P('slow', preset || ctx.crash ? 'auto' : '1');
   const st = {
     auto: slowParam === 'auto',
     slow: slowParam === 'auto' ? Number(P('autoSlow', 20)) : Math.max(1, Number(slowParam) || 1),
@@ -144,7 +144,7 @@ export function createCrashLab(ctx) {
   // ---------------------------------------------------------------- panel
   const panel = el(`<div id="labPanel">
     <div class="r">
-      <select id="labPreset" title="Crash-test presets"><option value="">preset…</option>${Object.entries(LAB_PRESETS).map(([k, p]) => `<option value="${k}"${k === ctx.preset ? ' selected' : ''}>${p.label}</option>`).join('')}</select>
+      <select id="labPreset" title="Scene: a crash-test preset or any explicit scene (its knobs are in the side panel)"><optgroup label="Crash-test presets">${Object.entries(LAB_PRESETS).map(([k, p]) => `<option value="p:${k}"${k === ctx.preset ? ' selected' : ''}>${p.label}</option>`).join('')}</optgroup><optgroup label="Scenes">${Object.entries(ctx.scenes ?? {}).map(([k, t]) => `<option value="s:${k}"${!ctx.preset && k === ctx.xscene ? ' selected' : ''}>${t.replace(/^Explicit: (.)/, (_, c) => c.toUpperCase())}</option>`).join('')}</optgroup></select>
       <span class="sep"></span>
       <button id="labPlay" title="Space">pause</button>
       <button id="labFrame" title="One displayed frame (.)">frame ▸</button>
@@ -191,7 +191,11 @@ export function createCrashLab(ctx) {
     legend();
   };
   const blur = (e) => e?.target?.blur?.();
-  $('labPreset').onchange = (e) => { const k = e.target.value; if (!k) return; const u = new URL(location.href); const keep = ['car', 'truck', 'tyres', 'drag']; const s = new URLSearchParams(); s.set('solver', 'explicit'); s.set('preset', k); for (const x of keep) if (qs.has(x)) s.set(x, qs.get(x)); u.search = s.toString(); location.href = u.href; };
+  $('labPreset').onchange = (e) => {
+    const [kind, k] = e.target.value.split(':');
+    if (kind === 's') { location.href = ctx.sceneUrl(k); return; }
+    const u = new URL(location.href); const keep = ['car', 'truck', 'tyres', 'drag']; const s = new URLSearchParams(); s.set('solver', 'explicit'); s.set('preset', k); for (const x of keep) if (qs.has(x)) s.set(x, qs.get(x)); u.search = s.toString(); location.href = u.href;
+  };
   $('labPlay').onclick = (e) => { playPause(); blur(e); };
   $('labFrame').onclick = (e) => { frameStep(); blur(e); };
   $('labStep').onclick = (e) => { physicsStep(); blur(e); };
@@ -216,7 +220,7 @@ export function createCrashLab(ctx) {
   function pills() {
     const custom = qs.get('pills');
     const list = custom ? custom.split(',').map((s) => s.trim()).filter(Boolean)
-      : [...(preset?.pills ?? [ctx.xscene.toUpperCase()])];
+      : [...(preset?.pills ?? [ctx.pill ?? ctx.xscene.toUpperCase()])];
     const o = renderer.opts;
     const sub = custom ? [] : [o.skin === 'off' ? (o.nodes ? 'NODE + BEAM' : 'THE SKELETON') : o.skin === 'ghost' ? 'THE SKELETON · GHOST BODY' : o.skin === 'body' ? 'BODY SKINNED TO THE NODES' : 'COLLISION SKIN'];
     pillsEl.innerHTML = list.map((t) => `<div class="lab-pill">${t}</div>`).join('') + sub.map((t) => `<div class="lab-pill sub">${t}</div>`).join('');
