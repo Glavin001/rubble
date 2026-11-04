@@ -382,9 +382,7 @@ fn fix_naga_loop_exits(src: &str) -> String {
     s
 }
 
-/// Hard cap on every WGSL loop. A non-terminating kernel on Apple Silicon can stall the
-/// window server and take the whole machine down, so no loop may run unbounded.
-pub const WGSL_LOOP_CAP: u32 = 1 << 16;
+include!("wgsl_loop_cap.rs");
 
 /// Chrome treats a storage/workgroup load as non-uniform, so a later barrier
 /// inside `if (lanes == 1)` is rejected. `workgroupUniformLoad` makes it uniform.
@@ -414,37 +412,6 @@ fn uniformize_workgroup_lanes(src: &str) -> String {
         }
         out = next;
     }
-    out
-}
-
-fn cap_loop_iterations(src: &str) -> String {
-    let b = src.as_bytes();
-    let mut out = String::with_capacity(src.len() + 8192);
-    let mut last = 0usize;
-    let mut i = 0usize;
-    let mut k = 0usize;
-    while let Some(rel) = src[i..].find("loop") {
-        let at = i + rel;
-        let after = at + 4;
-        let word = (at == 0 || !(b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_'))
-            && (after >= b.len() || !(b[after].is_ascii_alphanumeric() || b[after] == b'_'));
-        let mut j = after;
-        while j < b.len() && b[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        if word && j < b.len() && b[j] == b'{' {
-            out.push_str(&src[last..at]);
-            out.push_str(&format!(
-                "var loopGuard{k}: u32 = 0u;\nloop {{\n loopGuard{k} += 1u; if (loopGuard{k} > {WGSL_LOOP_CAP}u) {{ break; }}\n"
-            ));
-            k += 1;
-            last = j + 1;
-            i = j + 1;
-        } else {
-            i = after;
-        }
-    }
-    out.push_str(&src[last..]);
     out
 }
 

@@ -3,6 +3,8 @@ use engine_slang_build::{compile, compile_with_defines, find_slangc, par_map, Sl
 use std::env;
 use std::path::{Path, PathBuf};
 
+include!("src/wgsl_loop_cap.rs");
+
 /// Same world_step entries as `engine-metal`, minus `broadphase_grid` (thin wrapper;
 /// slangc SIGSEGV on SPIR-V — runtime aliases to `broadphase_query`).
 const WORLD_ENTRIES: &[&str] = &[
@@ -341,6 +343,8 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed=RUBBLE_SLANG_CACHE");
     println!("cargo:rerun-if-env-changed=RUBBLE_EB_REF");
     println!("cargo:rerun-if-env-changed=RUBBLE_EB_SRC");
+    println!("cargo:rerun-if-env-changed=RUBBLE_EB_REF_UNCAPPED");
+    println!("cargo:rerun-if-changed=src/wgsl_loop_cap.rs");
     if let Ok(f) = std::env::var("RUBBLE_EB_SRC") {
         println!("cargo:rerun-if-changed={f}");
     }
@@ -501,16 +505,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         &[],
         &[("ENGINE_WGSL", "1")],
     )?;
-    let text = std::fs::read_to_string(&beams)?
-        .replace(
-            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
-            "storageBarrier(); workgroupBarrier();",
-        )
-        .replace(
-            "storageBarrier(); textureBarrier(); workgroupBarrier();",
-            "storageBarrier(); workgroupBarrier();",
-        );
-    std::fs::write(&beams, text)?;
+    explicit_post(&beams)?;
     // The wide passes: one module per entry point.
     for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits"] {
         let entry = format!("explicit_beams_wide_{pass}");
@@ -523,16 +518,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             &[],
             &[("ENGINE_WGSL", "1")],
         )?;
-        let text = std::fs::read_to_string(&out)?
-            .replace(
-                "storageBarrier(); textureBarrier(); workgroupBarrier();;",
-                "storageBarrier(); workgroupBarrier();",
-            )
-            .replace(
-                "storageBarrier(); textureBarrier(); workgroupBarrier();",
-                "storageBarrier(); workgroupBarrier();",
-            );
-        std::fs::write(&out, text)?;
+        explicit_post(&out)?;
     }
     // The same module with 512 lanes per vehicle, for large vehicles.
     let wide = wgsl_dir.join("explicit_beams_wide.wgsl");
@@ -544,16 +530,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         &[],
         &[("ENGINE_WGSL", "1"), ("EB_LANES", "512")],
     )?;
-    let text = std::fs::read_to_string(&wide)?
-        .replace(
-            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
-            "storageBarrier(); workgroupBarrier();",
-        )
-        .replace(
-            "storageBarrier(); textureBarrier(); workgroupBarrier();",
-            "storageBarrier(); workgroupBarrier();",
-        );
-    std::fs::write(&wide, text)?;
+    explicit_post(&wide)?;
     // With wings, the fuselage drag and command beams (EB_AERO), at both lane
     // counts: the modules above stay those of vehicles without them.
     for (name, lanes) in [
@@ -610,16 +587,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             &[],
             defines,
         )?;
-        let text = std::fs::read_to_string(&out)?
-            .replace(
-                "storageBarrier(); textureBarrier(); workgroupBarrier();;",
-                "storageBarrier(); workgroupBarrier();",
-            )
-            .replace(
-                "storageBarrier(); textureBarrier(); workgroupBarrier();",
-                "storageBarrier(); workgroupBarrier();",
-            );
-        std::fs::write(&out, text)?;
+        explicit_post(&out)?;
     }
     // The frozen baseline of the explicit-beams kernel (a test oracle,
     // `explicit_beams_baseline.slang`): every frame-entry variant and the plan passes
@@ -668,7 +636,7 @@ fn cache_key(manifest: &Path, slang_root: &Path) -> Result<String> {
     for f in &files {
         (f.strip_prefix(slang_root)?, std::fs::read(f)?).hash(&mut h);
     }
-    for f in ["build.rs", "../engine-slang-build/src/lib.rs"] {
+    for f in ["build.rs", "src/wgsl_loop_cap.rs", "../engine-slang-build/src/lib.rs"] {
         std::fs::read(manifest.join(f))?.hash(&mut h);
     }
     Ok(format!("engine-webgpu-{:016x}", h.finish()))
@@ -736,9 +704,15 @@ fn store(dir: &Path, out_dir: &Path, compiled: &Compiled) -> Result<()> {
     Ok(())
 }
 
-/// Slang's storage barrier carries a texture barrier naga rejects (and an empty
-/// statement Safari's parser rejects): keep the storage and workgroup barriers.
-fn explicit_barriers(out: &Path) -> Result<()> {
+/// An explicit-beams module as slangc wrote it, made ready to ship. Slang's storage
+/// barrier carries a texture barrier naga rejects (and an empty statement Safari's
+/// parser rejects): keep the storage and workgroup barriers. Every loop is capped
+/// (`src/wgsl_loop_cap.rs`, `cap_explicit_loops`): a runaway loop stops, flagged,
+/// instead of holding the GPU. Measurement builds only (in their own target
+/// directory): `RUBBLE_EB_REF_UNCAPPED=1` leaves the frozen reference modules
+/// (`explicit_ref_*`) uncapped, so `tests/explicit_beams_bitwise.rs` compares the
+/// capped kernel with the uncapped one bit for bit.
+fn explicit_post(out: &Path) -> Result<()> {
     let text = std::fs::read_to_string(out)?
         .replace(
             "storageBarrier(); textureBarrier(); workgroupBarrier();;",
@@ -748,6 +722,14 @@ fn explicit_barriers(out: &Path) -> Result<()> {
             "storageBarrier(); textureBarrier(); workgroupBarrier();",
             "storageBarrier(); workgroupBarrier();",
         );
+    let name = out.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let uncapped = name.starts_with("explicit_ref_")
+        && std::env::var("RUBBLE_EB_REF_UNCAPPED").is_ok_and(|v| v == "1");
+    let text = if uncapped {
+        text
+    } else {
+        cap_explicit_loops(&text).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?
+    };
     std::fs::write(out, text)?;
     Ok(())
 }
@@ -807,7 +789,7 @@ fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
     let results = par_map(&jobs, |(src, name, entry, defines)| -> Result<()> {
         let out = dir.join(format!("{name}.wgsl"));
         compile_with_defines(src, entry, SlangTarget::Wgsl, &out, &[], defines)?;
-        explicit_barriers(&out)
+        explicit_post(&out)
     });
     for r in results {
         r?;
@@ -834,7 +816,7 @@ fn explicit_frame_module(slang_root: &Path, dir: &Path, name: &str, lanes: &str,
         &[],
         &d,
     )?;
-    explicit_barriers(&out)
+    explicit_post(&out)
 }
 
 /// The shipped explicit-beams modules' source: `explicit_beams.slang`; for
