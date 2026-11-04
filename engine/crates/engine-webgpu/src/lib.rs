@@ -145,6 +145,27 @@ fn entry_list() -> &'static [&'static str] {
     LIST.get_or_init(spirv_entry_names).as_slice()
 }
 
+/// Entries whose barriers Slang lowers to `storageBarrier(); textureBarrier();
+/// workgroupBarrier();;` though they access buffers only: the texture barrier is
+/// unavailable in the supported WGSL/Naga version and the empty statement (`;;`)
+/// that Tint accepts breaks Safari's WGSL parser, so both are dropped (storage and
+/// workgroup synchronization kept). Legal only while these entries bind no
+/// textures (`buffer_only_barrier_entries_bind_no_textures`).
+const BUFFER_ONLY_BARRIER_PREFIXES: &[&str] = &[
+    "solve_primal_sparse",
+    "soft_primal_fused",
+    "soft_primal_bodies",
+    "color_bodies_local",
+    "color_bodies_tail",
+    "char_move",
+];
+
+fn buffer_only_barriers(name: &str) -> bool {
+    BUFFER_ONLY_BARRIER_PREFIXES
+        .iter()
+        .any(|p| name.starts_with(p))
+}
+
 impl WebGpuWorld {
     pub fn spirv_bytes(name: &str) -> anyhow::Result<Vec<u8>> {
         let path = format!("{}/spirv/{name}.spv", env!("OUT_DIR"));
@@ -165,29 +186,25 @@ impl WebGpuWorld {
             .map(|(n, w)| {
                 (
                     (*n).to_string(),
-                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if n
-                        .starts_with("solve_primal_sparse")
-                        || n.starts_with("soft_primal_fused")
-                        || n.starts_with("soft_primal_bodies")
-                        || n.starts_with("color_bodies_local")
-                        || n.starts_with("color_bodies_tail")
-                    {
-                        // These entries access buffers only. Slang over-lowers
-                        // DeviceMemoryBarrierWithGroupSync to a texture barrier
-                        // unavailable in the supported WGSL/Naga version, and
-                        // ends it with an empty statement (`;;`) that Tint
-                        // accepts but Safari's WGSL parser rejects.
-                        w.replace(
-                            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
-                            "storageBarrier(); workgroupBarrier();",
-                        )
-                        .replace(
-                            "storageBarrier(); textureBarrier(); workgroupBarrier();",
-                            "storageBarrier(); workgroupBarrier();",
-                        )
-                    } else {
-                        w.to_string()
-                    }))),
+                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(
+                        &if buffer_only_barriers(n) {
+                            // These entries access buffers only. Slang over-lowers
+                            // DeviceMemoryBarrierWithGroupSync to a texture barrier
+                            // unavailable in the supported WGSL/Naga version, and
+                            // ends it with an empty statement (`;;`) that Tint
+                            // accepts but Safari's WGSL parser rejects.
+                            w.replace(
+                                "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+                                "storageBarrier(); workgroupBarrier();",
+                            )
+                            .replace(
+                                "storageBarrier(); textureBarrier(); workgroupBarrier();",
+                                "storageBarrier(); workgroupBarrier();",
+                            )
+                        } else {
+                            w.to_string()
+                        },
+                    ))),
                 )
             })
             .collect()
@@ -481,6 +498,31 @@ mod tests {
         }
     }
 
+    /// The `loop` statements of `src`: the keyword as a whole word followed by `{`
+    /// (identifiers such as `looped_0` are not loops), as `cap_loops_with` finds them.
+    fn wgsl_loop_keywords(src: &str) -> usize {
+        let b = src.as_bytes();
+        let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        src.match_indices("loop")
+            .filter(|&(at, _)| {
+                let after = at + 4;
+                let rest = src[after..].trim_start();
+                (at == 0 || !ident(b[at - 1]))
+                    && (after >= b.len() || !ident(b[after]))
+                    && rest.starts_with('{')
+            })
+            .count()
+    }
+
+    #[test]
+    fn wgsl_loop_keywords_skips_identifiers() {
+        assert_eq!(
+            wgsl_loop_keywords("fn f(looped_0: bool) { loop\n {} if (looped_0) { loop { } } }"),
+            2
+        );
+        assert_eq!(wgsl_loop_keywords("var noloop = 1; var loopy = 2;"), 0);
+    }
+
     #[test]
     fn direct_wgsl_covers_every_entry_and_validates() {
         let direct = WebGpuWorld::direct_shaders();
@@ -496,7 +538,7 @@ mod tests {
         for (name, res) in WebGpuWorld::compile_shaders_report() {
             let wgsl = &res.unwrap();
             let loops = direct.iter().find(|(n, _)| *n == name).unwrap().1;
-            let raw = loops.matches("loop").count();
+            let raw = wgsl_loop_keywords(loops);
             assert_eq!(
                 raw,
                 wgsl.matches("loopGuard").count() / 3,
@@ -736,6 +778,42 @@ mod tests {
                 "{name}: empty statement `;;` breaks Safari"
             );
         }
+    }
+
+    #[test]
+    fn buffer_only_barrier_entries_bind_no_textures() {
+        // Dropping Slang's texture barrier is legal only for entries without
+        // textures; every rewritten entry keeps storage + workgroup barriers.
+        let mut seen = 0;
+        for (name, result) in WebGpuWorld::compile_shaders_report() {
+            if !buffer_only_barriers(&name) {
+                continue;
+            }
+            seen += 1;
+            let source = result.unwrap();
+            let module = naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&source)));
+            assert!(
+                !module.types.iter().any(|(_, ty)| matches!(
+                    ty.inner,
+                    naga::TypeInner::Image { .. } | naga::TypeInner::Sampler { .. }
+                )),
+                "{name}: texture resources invalidate the buffer-only barrier lowering"
+            );
+            assert!(
+                !source.contains("textureBarrier"),
+                "{name}: texture barrier escaped lowering"
+            );
+            assert!(
+                !source.contains("storageBarrier()")
+                    || source.contains("storageBarrier(); workgroupBarrier();"),
+                "{name}: the lowering must keep storage visibility and workgroup synchronization"
+            );
+        }
+        assert!(
+            seen >= BUFFER_ONLY_BARRIER_PREFIXES.len(),
+            "a buffer-only barrier entry is missing"
+        );
     }
 
     #[test]
