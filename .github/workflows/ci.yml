@@ -81,7 +81,7 @@ jobs:
         run: |
           TOOLS="$HOME/.cache/rubble-tools"
           . engine/scripts/slangc.sh
-          cd engine && cargo check --release -p engine-webgpu --no-default-features
+          cd engine && cargo check --release -p engine-webgpu --lib --no-default-features
       - name: Save the Slang outputs
         if: steps.slang.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
