@@ -114,7 +114,9 @@ pub use engine_vehicle::{
     FunctionalState, GearRequest, MountLoad, VehicleCapacity, VehicleDesc, VehicleHandle,
     VehicleInput, VehicleState, WheelState,
 };
-pub use engine_webgpu::{ContactStorage, EngineFeatures, GpuTiming, RestingContacts, WgpuSim};
+pub use engine_webgpu::{
+    ContactStorage, EngineFeatures, GpuTiming, KernelGroups, Prewarm, RestingContacts, WgpuSim,
+};
 
 use engine_schema::convex::HullArena;
 use engine_schema::{BodyState, Collider, GpuCommand, ShapeType};
@@ -757,6 +759,20 @@ impl World {
 
     pub fn sim(&self) -> &WgpuSim {
         &self.sim
+    }
+
+    /// Compile `groups`' kernels now instead of on the first step that runs them
+    /// (a loading screen before the first character, vehicle, …). Blocks while
+    /// they compile; returns how many were built.
+    pub fn prewarm(&self, groups: KernelGroups) -> usize {
+        self.sim.prewarm(groups)
+    }
+
+    /// [`Self::prewarm`] on background threads: returns at once; poll the
+    /// [`Prewarm`]'s progress each frame for an animated loading screen. The world
+    /// can step meanwhile (a step needing a kernel still compiling waits for it).
+    pub fn prewarm_async(&self, groups: KernelGroups) -> Prewarm {
+        self.sim.prewarm_async(groups)
     }
 
     /// The simulation, mutably: for tests and probes that run its diagnostics

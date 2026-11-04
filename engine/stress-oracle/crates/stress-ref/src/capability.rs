@@ -45,6 +45,17 @@ pub enum Profile {
     /// Deliberately simple and fast: it exercises the breaking, splitting and re-parenting
     /// path, not the stress model.
     Threshold,
+    /// vibe-land's stress model on `Threshold`'s GPU-only world: NVIDIA Blast's bond-impulse
+    /// solver as the PhysX fork's GPU backend runs it (stress-gpu `blast`, Slang), deciding the
+    /// bonds in place of the contact threshold.
+    /// - Blast's inputs from the pack (`ImportOptions::blast_authoring`): its node centroids,
+    ///   masses and supports, bond areas and normals, both limit sets per material;
+    /// - per frame: gravity, contact forces and the centrifugal load in, 32 CGLS iterations at
+    ///   tolerance 1e-3, warm-started, settled islands skipped (vibe-land's `blast` backend);
+    ///   Blast's stress formula and damage law (section bending capped at 3, fibres, 2/s);
+    /// - strikes predicted as `Threshold` predicts them (forward only: vibe-land's re-simulation
+    ///   pass has no place here).
+    BlastGpu,
     /// `Threshold`'s fracture world (stress-gpu `GpuFracture`), its strikes predicted as
     /// `Threshold`'s, with the contact-force test replaced by a load path
     /// ([`LoadModel::LoadPath`], engine/docs/stress-threshold-gpu.md "Load path"): gravity
@@ -110,6 +121,7 @@ impl Profile {
             "blast_parity" | "blast-parity" => Some(Profile::BlastParity),
             "blast_parity_routed" | "blast-parity-routed" => Some(Profile::BlastParityRouted),
             "threshold" => Some(Profile::Threshold),
+            "blast_gpu" | "blast-gpu" => Some(Profile::BlastGpu),
             "load_path" | "load-path" => Some(Profile::LoadPath),
             "impact_local" | "impact-local" => Some(Profile::ImpactLocal),
             _ => None,
@@ -121,6 +133,7 @@ impl Profile {
             Profile::BlastParity => "blast_parity",
             Profile::BlastParityRouted => "blast_parity_routed",
             Profile::Threshold => "threshold",
+            Profile::BlastGpu => "blast_gpu",
             Profile::LoadPath => "load_path",
             Profile::ImpactLocal => "impact_local",
         }
@@ -129,14 +142,15 @@ impl Profile {
     /// How packs import under the profile.
     pub fn import_options(self) -> ImportOptions {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal => ImportOptions { authored_strengths: true, authored_fatal: true, pack_masses: true, pack_modulus: true },
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal => ImportOptions { authored_strengths: true, authored_fatal: true, pack_masses: true, pack_modulus: true, blast_authoring: false },
+            Profile::BlastGpu => ImportOptions { authored_strengths: true, authored_fatal: true, pack_masses: true, pack_modulus: true, blast_authoring: true },
         }
     }
 
     /// The scene's switches: solve mode, model features and methods.
     pub fn apply_scene(self, scene: &mut Scene) {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal => {
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu => {
                 scene.sim.solve_mode = SolveMode::QuasiStatic;
                 for f in BLAST_PARITY_FEATURES_OFF {
                     scene.sim.features.set(f, false).expect("a SimFeatures name");
@@ -156,7 +170,7 @@ impl Profile {
     /// Whether the profile runs impact islands (the coupling's routing).
     pub fn impact_islands(self) -> bool {
         match self {
-            Profile::BlastParity | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal => false,
+            Profile::BlastParity | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu => false,
             Profile::BlastParityRouted => true,
         }
     }
@@ -170,7 +184,7 @@ impl Profile {
         match self {
             Profile::BlastParity => true,
             // Threshold: a promoted structure's frames would leave the resident path.
-            Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal => false,
+            Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu => false,
         }
     }
 
@@ -178,13 +192,13 @@ impl Profile {
     /// submission, and split before the engine steps (the GPU world's `predict_strikes`:
     /// the routing check and punch.slang `threshold_predict`, every frame resident).
     pub fn predicts_strikes(self) -> bool {
-        matches!(self, Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal)
+        matches!(self, Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu)
     }
 
     /// Whether the profile runs on the fracture world alone (stress-rubble
     /// `ThresholdWorld`): its models exist only there.
     pub fn fracture_world_only(self) -> bool {
-        matches!(self, Profile::LoadPath | Profile::ImpactLocal)
+        matches!(self, Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu)
     }
 
     /// The fracture world's in-step contact fracture: its sweeps for a strike's load, 0
@@ -226,7 +240,7 @@ impl Profile {
     /// `STRESS_IMPACT_FRACTURE_WORK=0|1`.
     pub fn fracture_models(self) -> Result<(LoadModel, StrikeModel), String> {
         let (mut load, mut strike) = match self {
-            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold => (LoadModel::Threshold, StrikeModel::Hertz),
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::BlastGpu => (LoadModel::Threshold, StrikeModel::Hertz),
             Profile::LoadPath => (LoadModel::LoadPath { sweeps: LOAD_PATH_SWEEPS }, StrikeModel::Hertz),
             Profile::ImpactLocal => (LoadModel::Threshold, StrikeModel::Analytic { fracture_work: true }),
         };
@@ -271,7 +285,7 @@ impl Profile {
     /// Whether the profile runs the GPU-resident frame.
     pub fn resident(self) -> bool {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal => true,
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu => true,
         }
     }
 
@@ -281,7 +295,7 @@ impl Profile {
     /// tunnel).
     pub fn engine_policy(self) -> (Option<u32>, Option<u32>) {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal => (Some(4), Some(1)),
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu => (Some(4), Some(1)),
         }
     }
 
@@ -291,7 +305,7 @@ impl Profile {
     /// `eENABLE_CCD`), not whole-world substeps. Bodies not marked stay as they are.
     pub fn engine_ccd(self) -> bool {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal => true,
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu => true,
         }
     }
 
@@ -308,6 +322,12 @@ impl Profile {
                 config.static_unconverged = UnconvergedSolve::CommitIterate;
                 config.static_passes = Some(1);
                 config.contact_threshold = true;
+            }
+            // Its world (`ThresholdWorld`) runs no static solve of the reference's.
+            Profile::BlastGpu => {
+                config.static_budget = Some((1, 16));
+                config.static_unconverged = UnconvergedSolve::CommitIterate;
+                config.static_passes = Some(1);
             }
         }
     }

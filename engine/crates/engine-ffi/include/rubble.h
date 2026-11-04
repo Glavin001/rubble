@@ -14,6 +14,26 @@
 
 #define RB_VERSION_MINOR 1
 
+#define RB_KERNELS_CHARACTERS (1 << 0)
+
+#define RB_KERNELS_QUERIES (1 << 1)
+
+#define RB_KERNELS_PROJECTILES (1 << 2)
+
+#define RB_KERNELS_VEHICLES (1 << 3)
+
+#define RB_KERNELS_SOFT_BODIES (1 << 4)
+
+#define RB_KERNELS_TERRAIN (1 << 5)
+
+#define RB_KERNELS_GUIDANCE (1 << 6)
+
+#define RB_KERNELS_EXPLOSIONS (1 << 7)
+
+#define RB_KERNELS_CCD (1 << 8)
+
+#define RB_KERNELS_ALL 4294967295
+
 // Motion-lock bits (`RbBodyDef::motion_locks`, `rbBody_SetMotionLocks`).
 #define RB_LOCK_LINEAR_X 1
 
@@ -1319,6 +1339,25 @@ void rbDestroyWorld(struct RbWorld *world);
 
 // Advance one fixed step. Never waits on results (see `rbWorld_Poll`).
 enum RbResult rbWorld_Step(struct RbWorld *world);
+
+// Compile the kernels of `groups` (`RB_KERNELS_*`, combined with `|`) now.
+// A world builds each GPU kernel the first time a step runs it, so the first
+// step with a character, vehicle, soft body, ... pays that compile; call this
+// at load time to move it there. Blocks while they compile. `out_built`
+// (optional): how many kernels this call built.
+enum RbResult rbWorld_Prewarm(struct RbWorld *world, uint32_t groups, uint32_t *out_built);
+
+// `rbWorld_Prewarm` on background threads, several kernels at once: returns
+// at once, so a loading screen keeps animating. Poll
+// `rbWorld_GetPrewarmProgress` each frame; the world can step meanwhile (a step
+// that needs a kernel still compiling waits for that one).
+enum RbResult rbWorld_PrewarmAsync(struct RbWorld *world, uint32_t groups);
+
+// Progress of the world's background prewarms: kernels compiled so far and in
+// all (`done == total` when finished; both 0 when none was started).
+enum RbResult rbWorld_GetPrewarmProgress(struct RbWorld *world,
+                                         uint32_t *out_done,
+                                         uint32_t *out_total);
 
 // Results of finished steps. `coalesce`: fold every ready step into one
 // frame (latest poses, earliest previous poses, all events). Otherwise hand

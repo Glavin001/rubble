@@ -25,6 +25,8 @@ use engine_softbody::{
     SoftBackend, SoftCapacity, SoftHandle, SoftHost, SoftSettings, SoftVehicleDesc, SpawnOptions,
 };
 
+use std::sync::Arc;
+
 /// Bindings of the render-pose buffers, after the shared plan's `BIND_COUNT`.
 pub const POSES_BINDING: usize = BIND_COUNT;
 pub const POSE_HEADER_BINDING: usize = BIND_COUNT + 1;
@@ -33,13 +35,77 @@ pub const MOVED_BINDING: usize = BIND_COUNT + 2;
 pub const POSE_RECORD_BYTES: u64 = 32;
 
 struct Pipe {
-    pipeline: wgpu::ComputePipeline,
+    /// Built on the first dispatch ([`Pipe::pipeline`]) or by a prewarm: a world
+    /// compiles only the kernels it runs, not every character, vehicle, soft-body
+    /// and terrain kernel. Shared with prewarm threads.
+    kernel: Arc<LazyKernel>,
     bind: wgpu::BindGroup,
     dynamic_pass: bool,
     /// Kept so bind groups can be rebuilt when a buffer is replaced (hull growth).
     layout: wgpu::BindGroupLayout,
     bindings: Vec<u32>,
 }
+
+impl Pipe {
+    fn pipeline(&self, device: &wgpu::Device, name: &str) -> &wgpu::ComputePipeline {
+        self.kernel.build(device, name)
+    }
+}
+
+/// A kernel's pipeline, compiled once by whichever thread asks first (a step or a
+/// prewarm thread; another thread asking meanwhile waits for that compile).
+struct LazyKernel {
+    pipeline: std::sync::OnceLock<wgpu::ComputePipeline>,
+    wgsl: String,
+    layout: wgpu::BindGroupLayout,
+}
+
+impl LazyKernel {
+    fn build(&self, device: &wgpu::Device, name: &str) -> &wgpu::ComputePipeline {
+        self.pipeline.get_or_init(|| scoped(device, || format!("pipeline {name}"), || {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl(self.wgsl.as_str().into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(name),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some(name),
+                        bind_group_layouts: &[Some(&self.layout)],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &module,
+                entry_point: None,
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        }))
+    }
+}
+
+/// A prewarm running on background threads ([`WgpuSim::prewarm_async`]): poll
+/// [`Self::progress`] each frame to draw a loading screen. Dropping it does not
+/// stop the compile; the world can step meanwhile (a step that needs a kernel
+/// being compiled waits for that one).
+pub struct Prewarm {
+    done: Arc<std::sync::atomic::AtomicUsize>,
+    total: usize,
+}
+
+impl Prewarm {
+    /// Kernels compiled so far, and how many this prewarm compiles in all.
+    pub fn progress(&self) -> (usize, usize) {
+        (self.done.load(std::sync::atomic::Ordering::Acquire), self.total)
+    }
+
+    pub fn is_done(&self) -> bool {
+        let (done, total) = self.progress();
+        done == total
+    }
+}
+
 
 // ---- Creation error scopes (web) ----
 // A browser reports a failed buffer, layout, shader or pipeline creation only as an
@@ -99,7 +165,7 @@ pub async fn creation_errors() -> Vec<String> {
     }
 }
 
-/// One kernel's pipeline and bind group over `bufs`.
+/// One kernel over `bufs`: its bind group now, its pipeline on first use (`LazyKernel`).
 fn build_pipe(device: &wgpu::Device, name: &str, wgsl: String, bufs: &[wgpu::Buffer]) -> Pipe {
     let storage = wgsl.matches("var<storage").count();
     let workgroup = wgsl.matches("var<workgroup>").count();
@@ -138,28 +204,14 @@ fn build_pipe_inner(device: &wgpu::Device, name: &str, wgsl: String, bufs: &[wgp
         label: Some(name),
         entries: &entries,
     });
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(name),
-        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(name),
-        layout: Some(
-            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(name),
-                bind_group_layouts: &[Some(&layout)],
-                immediate_size: 0,
-            }),
-        ),
-        module: &module,
-        entry_point: None,
-        compilation_options: Default::default(),
-        cache: None,
-    });
     let bindings: Vec<u32> = binds.iter().map(|b| b.index).collect();
     let bind = make_bind_group(device, name, &layout, &bindings, bufs);
     Pipe {
-        pipeline,
+        kernel: Arc::new(LazyKernel {
+            pipeline: std::sync::OnceLock::new(),
+            wgsl,
+            layout: layout.clone(),
+        }),
         bind,
         dynamic_pass: binds.iter().any(|b| b.index == 22),
         layout,
@@ -342,8 +394,6 @@ pub struct WgpuSim {
     capacity: WorldCapacity,
     params: AvbdParams,
     pipes: HashMap<String, Pipe>,
-    /// Kernels compiled on first use: name -> WGSL (`ensure_motion_pipes`).
-    deferred_pipes: HashMap<String, String>,
     bufs: Vec<wgpu::Buffer>,
     body_count: u32,
     collider_count: u32,
@@ -928,7 +978,6 @@ impl WgpuSim {
 
         let shaders = crate::WebGpuWorld::compile_shaders_report();
         let mut pipes = HashMap::new();
-        let mut deferred_pipes = HashMap::new();
         for (name, canonical) in &shaders {
             // Persistent variants load under their canonical aliases; reuse-copy
             // entries keep their own names (they have no canonical twin).
@@ -960,12 +1009,8 @@ impl WgpuSim {
                 .as_ref()
                 .map_err(|e| anyhow::anyhow!("{entry}: {e}"))?
                 .clone();
-            // The motion kernels (characters, queries, projectiles) compile when a world
-            // first has any (`ensure_motion_pipes`): most worlds never run them.
-            if rigid_plan::CHARACTER_ENTRIES.contains(&name.as_str()) {
-                deferred_pipes.insert(name.clone(), wgsl);
-                continue;
-            }
+            // Each pipeline compiles on its first dispatch (`LazyKernel`): a world that never
+            // has characters, queries or projectiles never compiles their kernels.
             // The solve loop binds the primal's and the dual's buffers at once: past a
             // device's storage-buffer limit (Chrome allows 10 a stage) it is not built,
             // and the step keeps a dispatch per colour and dual.
@@ -1042,7 +1087,6 @@ impl WgpuSim {
             capacity,
             params: AvbdParams::default(),
             pipes,
-            deferred_pipes,
             bufs,
             body_count: 0,
             collider_count: 0,
@@ -3036,21 +3080,9 @@ impl WgpuSim {
         self.encode_dispatches_hooked(enc, cmds, None);
     }
 
-    /// Compile the motion kernels (characters, queries, projectiles), deferred at
-    /// creation, the first time a step needs them.
-    fn ensure_motion_pipes(&mut self) {
-        for (name, wgsl) in std::mem::take(&mut self.deferred_pipes) {
-            let pipe = build_pipe(&self.device, &name, wgsl, &self.bufs);
-            self.pipes.insert(name, pipe);
-        }
-    }
-
     /// [`Self::encode_dispatches`], with `hook` encoded into `enc` where the plan marks
     /// the end of phase `hook.0` (the step's pass ends before it and resumes after).
     fn encode_dispatches_hooked(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) {
-        if self.character_count() > 0 || self.query_count > 0 || self.projectile_count() > 0 {
-            self.ensure_motion_pipes();
-        }
         let segments = self.encode_passes(enc, cmds, hook);
         self.timed_segments = segments;
     }
@@ -3340,7 +3372,7 @@ impl WgpuSim {
             .pipes
             .get(name)
             .unwrap_or_else(|| panic!("missing {name}"));
-        pass.set_pipeline(&p.pipeline);
+        pass.set_pipeline(p.pipeline(&self.device, name));
         if p.dynamic_pass {
             let idx = pass_idx.unwrap_or(0);
             pass.set_bind_group(0, &p.bind, &[idx * PASS_ALIGN as u32]);
@@ -3359,7 +3391,7 @@ impl WgpuSim {
         pass_idx: Option<u32>,
     ) {
         let p = &self.pipes[name];
-        pass.set_pipeline(&p.pipeline);
+        pass.set_pipeline(p.pipeline(&self.device, name));
         if p.dynamic_pass {
             pass.set_bind_group(0, &p.bind, &[pass_idx.unwrap_or(0) * PASS_ALIGN as u32]);
         } else {
@@ -3372,12 +3404,13 @@ impl WgpuSim {
         if !self.wg_allows("solve_primal_color") {
             return;
         }
-        let p = &self.pipes[if self.compact_contacts {
+        let name = if self.compact_contacts {
             "solve_primal_color_compact"
         } else {
             "solve_primal_color"
-        }];
-        pass.set_pipeline(&p.pipeline);
+        };
+        let p = &self.pipes[name];
+        pass.set_pipeline(p.pipeline(&self.device, name));
         pass.set_bind_group(0, &p.bind, &[color * PASS_ALIGN as u32]);
         pass.dispatch_workgroups_indirect(&self.bufs[23], (color as u64) * 12);
     }
@@ -3656,17 +3689,41 @@ impl WgpuSim {
     }
 
     fn refresh_cell(&mut self) {
-        let hier = self.grid_levels_mode.unwrap_or(self.has_convex);
+        let mut hier = self.grid_levels_mode.unwrap_or(self.has_convex);
+        // The hierarchical cache also holds the automatic grid's choice for a box scene
+        // the uniform grid could not hold, until the colliders change.
+        let auto = self.grid_levels_mode.is_none();
         let (cell, levels) = match (self.grid_cache, self.uniform_cell) {
-            (Some((n, cell, levels)), _) if hier && n == self.collider_count => (cell, levels),
+            (Some((n, cell, levels)), _) if (hier || auto) && n == self.collider_count => {
+                (cell, levels)
+            }
             (_, Some(c)) if !hier => c,
             _ => {
-                let r = rigid_plan::grid_cell_with(
+                let mut r = rigid_plan::grid_cell_with(
                     &self.host_cols,
                     &self.host_bodies,
                     hier,
                     self.movable_radius,
                 );
+                // Automatic grid: more dynamics wider than a uniform cell than its large
+                // list holds (the fracture lab's cuboid suburb) take the hierarchical
+                // grid, which finds every pair at any size, instead of failing the step.
+                if !hier
+                    && auto
+                    && rigid_plan::uniform_large_dynamics_overflow(
+                        &self.host_cols,
+                        &self.host_bodies,
+                        r.0,
+                    )
+                {
+                    hier = true;
+                    r = rigid_plan::grid_cell_with(
+                        &self.host_cols,
+                        &self.host_bodies,
+                        true,
+                        self.movable_radius,
+                    );
+                }
                 if hier {
                     self.grid_cache = Some((self.collider_count, r.0, r.1));
                 } else {
@@ -3712,6 +3769,72 @@ impl WgpuSim {
 
     pub fn timings_ms(&self) -> f64 {
         self.last_timings.total_gpu
+    }
+
+    /// Compile now the kernels of `groups` this world has (a world builds each
+    /// kernel the first time a step runs it), so no later step pays for them.
+    /// Blocks while they compile; returns how many were built by this call.
+    pub fn prewarm(&self, groups: crate::KernelGroups) -> usize {
+        let todo = self.unbuilt(groups);
+        for (name, kernel) in &todo {
+            kernel.build(&self.device, name);
+        }
+        todo.len()
+    }
+
+    /// [`Self::prewarm`] on background threads, several kernels at once: returns
+    /// at once with a [`Prewarm`] whose progress a loading screen polls each frame.
+    /// The world can step meanwhile. On wasm (no threads) it compiles inline.
+    pub fn prewarm_async(&self, groups: crate::KernelGroups) -> Prewarm {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let todo = Arc::new(self.unbuilt(groups));
+        let done = Arc::new(AtomicUsize::new(0));
+        let total = todo.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // The platform compilers (Metal's compiler service, Vulkan and D3D drivers)
+            // build pipelines in parallel; leave the host some cores.
+            let threads = std::thread::available_parallelism()
+                .map_or(2, |n| (n.get() / 2).clamp(1, 4))
+                .min(total);
+            let next = Arc::new(AtomicUsize::new(0));
+            for _ in 0..threads {
+                let (todo, done, next) = (todo.clone(), done.clone(), next.clone());
+                let device = self.device.clone();
+                std::thread::spawn(move || loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((name, kernel)) = todo.get(i) else { break };
+                    kernel.build(&device, name);
+                    done.fetch_add(1, Ordering::Release);
+                });
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        for (name, kernel) in todo.iter() {
+            kernel.build(&self.device, name);
+            done.fetch_add(1, Ordering::Release);
+        }
+        Prewarm { done, total }
+    }
+
+    /// The kernels of `groups` not built yet, slowest first (the largest WGSL), so
+    /// parallel threads finish together.
+    fn unbuilt(&self, groups: crate::KernelGroups) -> Vec<(String, Arc<LazyKernel>)> {
+        let mut todo: Vec<(String, Arc<LazyKernel>)> = self
+            .pipes
+            .iter()
+            .filter(|(name, p)| groups.covers(name) && p.kernel.pipeline.get().is_none())
+            .map(|(name, p)| (name.clone(), p.kernel.clone()))
+            .collect();
+        todo.sort_by(|a, b| b.1.wgsl.len().cmp(&a.1.wgsl.len()).then(a.0.cmp(&b.0)));
+        todo
+    }
+
+    /// Whether `kernel`'s pipeline has been built (by a step or a prewarm).
+    pub fn kernel_is_built(&self, kernel: &str) -> bool {
+        self.pipes
+            .get(kernel)
+            .is_some_and(|p| p.kernel.pipeline.get().is_some())
     }
 
     /// Time the rigid step on the GPU with timestamp queries: `Step` brackets

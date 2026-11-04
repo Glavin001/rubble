@@ -39,6 +39,8 @@ struct Device {
     config: wgpu::SurfaceConfiguration,
     /// The canvas texture's sRGB view format (the renderer's).
     view_format: wgpu::TextureFormat,
+    /// Each displayed frame's draw GPU time (timestamps), where the device has them.
+    draw_timer: Option<stress_gpu::frame_timer::FrameTimer>,
 }
 
 struct Loaded {
@@ -183,7 +185,7 @@ pub async fn stress_init(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVal
     };
     surface.configure(&gpu.device, &config);
     SIZE.set((width, height));
-    DEVICE.with_borrow_mut(|d| *d = Some(Device { gpu, surface, config, view_format }));
+    DEVICE.with_borrow_mut(|d| *d = Some(Device { draw_timer: stress_gpu::frame_timer::FrameTimer::new(&gpu, "draw"), gpu, surface, config, view_format }));
     Ok(())
 }
 
@@ -633,7 +635,7 @@ fn load(level: u8) -> Result<(), String> {
     if crush != 0 && !(profile == Profile::Threshold && THRESHOLD_GPU.get()) {
         return Err("chunk crushing runs in the threshold profile on the GPU-resident world".into());
     }
-    // The load path and the analytic strike exist only on the GPU-resident fracture world.
+    // The load path, the analytic strike and Blast exist only on the GPU-resident fracture world.
     if (profile == Profile::Threshold && THRESHOLD_GPU.get()) || profile.fracture_world_only() {
         return DEVICE.with_borrow(|d| {
             let d = d.as_ref().ok_or("stress_init first")?;
@@ -840,6 +842,9 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
     let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(d.view_format), ..Default::default() });
     let t_draw = web_time::Instant::now();
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    if let Some(t) = &mut d.draw_timer {
+        t.begin_render();
+    }
     let (bonds, colors) = VIEW.get();
     let mode = match colors {
         ColorMode::Material => 0,
@@ -847,18 +852,33 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         ColorMode::Bodies => 2,
     };
     let lines = l.world.encode_view(gpu, &mut encoder, &l.renderer, mode, bonds);
-    l.renderer.draw_resident(gpu, &mut encoder, &view, view_proj, eye, lines);
+    // The draw's GPU time: timestamps on its render pass.
+    l.renderer.draw_resident(gpu, &mut encoder, &view, view_proj, eye, lines, d.draw_timer.as_ref().and_then(|t| t.render_writes()));
+    if let Some(t) = &mut d.draw_timer {
+        t.finish(&mut encoder);
+    }
     gpu.queue.submit([encoder.finish()]);
+    if let Some(t) = &mut d.draw_timer {
+        t.submitted();
+    }
     gpu.queue.present(texture);
     let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
     PHASES.set([step_ms, 0.0, draw_ms]);
     let st = l.world.poll(gpu);
+    let gpu_draw_ms = d.draw_timer.as_mut().and_then(|t| t.poll());
     update_dust(l.world.take_crush_events(), dt, l.world.frame as f64 * dt, view_proj, width, height);
     let s = SHOOTING.get();
     let stats = serde_json::json!({
         "gpuResident": true,
         "simSeconds": l.world.frame as f64 * dt,
+        // CPU time to encode and submit a frame (the GPU runs it later, never waited for).
         "stepMs": if stepped > 0 { step_ms / stepped as f64 } else { 0.0 },
+        // GPU time of a physics frame and of a displayed frame's draw (timestamps; null
+        // without them).
+        "gpuStepMs": l.world.gpu_frame_ms(),
+        "gpuDrawMs": gpu_draw_ms,
+        // The draw timer's spans begun and samples read (null: no timestamp queries).
+        "gpuTimer": d.draw_timer.as_ref().map(|t| [t.begun, t.samples]),
         "chunks": l.totals.0,
         "hulls": l.totals.1,
         "bonds": l.totals.2,
