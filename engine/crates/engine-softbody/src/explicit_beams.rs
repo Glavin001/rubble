@@ -23,7 +23,7 @@ use crate::explicit_aero::{
 };
 use crate::explicit_triggers::{segment_point, KeyCommand, RailSegment, SlideNode, Trigger, KEYS};
 use crate::truck::{load_truck_config, parse_truck_config};
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -470,6 +470,179 @@ impl StaticBox {
     }
 }
 
+/// A static collider other than an axis-aligned [`StaticBox`] (Rubble only: RoR's
+/// reference has flat ground and axis-aligned boxes). The contact rule is the box
+/// rule: a node strictly inside is pushed out along the normal of the nearest
+/// surface, with the box surface ("concrete") and no penetration term. Build it
+/// with the constructors (they normalise the rotation and fill `axes`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StaticShape {
+    /// A box: centre, half extents, rotation (unit quaternion) and the rotation's
+    /// matrix columns (the box's local x, y, z axes in world). An identity
+    /// rotation is the axis-aligned box `StaticBox::centered(centre, half)`,
+    /// bit for bit.
+    OrientedBox {
+        centre: Vec3,
+        half: Vec3,
+        rotation: Quat,
+        axes: [Vec3; 3],
+    },
+    /// A vertical (world Y) cylinder: centre, radius, half height. Pushed out
+    /// radially through its side or along ±Y through a cap.
+    Cylinder {
+        centre: Vec3,
+        radius: f32,
+        half_height: f32,
+    },
+    /// A capsule: segment ends a, b and radius (pushed out from the segment).
+    Capsule { a: Vec3, b: Vec3, radius: f32 },
+    /// A sphere: centre and radius.
+    Sphere { centre: Vec3, radius: f32 },
+}
+
+impl StaticShape {
+    /// A box with centre `c`, half extents `half` and rotation `rotation`.
+    pub fn oriented_box(c: Vec3, half: Vec3, rotation: Quat) -> Self {
+        let rotation = if rotation == Quat::IDENTITY {
+            rotation
+        } else {
+            rotation.normalize()
+        };
+        let m = glam::Mat3::from_quat(rotation);
+        Self::OrientedBox {
+            centre: c,
+            half,
+            rotation,
+            axes: [m.x_axis, m.y_axis, m.z_axis],
+        }
+    }
+
+    /// A vertical cylinder.
+    pub fn cylinder(c: Vec3, radius: f32, half_height: f32) -> Self {
+        Self::Cylinder {
+            centre: c,
+            radius,
+            half_height,
+        }
+    }
+
+    /// A capsule from `a` to `b`.
+    pub fn capsule(a: Vec3, b: Vec3, radius: f32) -> Self {
+        Self::Capsule { a, b, radius }
+    }
+
+    /// A sphere.
+    pub fn sphere(c: Vec3, radius: f32) -> Self {
+        Self::Sphere { centre: c, radius }
+    }
+
+    /// The kind code the GPU records and the page layout use: 1 oriented box,
+    /// 2 cylinder, 3 capsule, 4 sphere (0 is an axis-aligned box).
+    pub fn kind(&self) -> u32 {
+        match self {
+            Self::OrientedBox { .. } => 1,
+            Self::Cylinder { .. } => 2,
+            Self::Capsule { .. } => 3,
+            Self::Sphere { .. } => 4,
+        }
+    }
+
+    /// An oriented box with an identity rotation (it takes the axis-aligned path).
+    pub fn as_aabb(&self) -> Option<StaticBox> {
+        match *self {
+            Self::OrientedBox {
+                centre,
+                half,
+                rotation,
+                ..
+            } if rotation == Quat::IDENTITY => Some(StaticBox::centered(centre, half)),
+            _ => None,
+        }
+    }
+
+    /// A world box holding the shape with a margin (a cull before the exact
+    /// test, the same on the CPU and the GPU): 1 cm plus 1e-5 of the largest
+    /// coordinate, far above the rounding of the tests.
+    pub fn bounds(&self) -> StaticBox {
+        let (lo, hi) = match *self {
+            Self::OrientedBox {
+                centre, half, axes, ..
+            } => {
+                let ext = axes[0].abs() * half.x + axes[1].abs() * half.y + axes[2].abs() * half.z;
+                (centre - ext, centre + ext)
+            }
+            Self::Cylinder {
+                centre,
+                radius,
+                half_height,
+            } => {
+                let e = Vec3::new(radius, half_height, radius);
+                (centre - e, centre + e)
+            }
+            Self::Capsule { a, b, radius } => (
+                a.min(b) - Vec3::splat(radius),
+                a.max(b) + Vec3::splat(radius),
+            ),
+            Self::Sphere { centre, radius } => {
+                (centre - Vec3::splat(radius), centre + Vec3::splat(radius))
+            }
+        };
+        let pad = 0.01 + 1e-5 * lo.abs().max(hi.abs()).max_element();
+        StaticBox {
+            lo: lo - Vec3::splat(pad),
+            hi: hi + Vec3::splat(pad),
+        }
+    }
+
+    /// The centre, half extents, rotation and kind the page renders: a cylinder
+    /// is (radius, half height, radius), a capsule its midpoint with
+    /// (radius, half segment length, radius) and the rotation taking +Y along
+    /// a → b, a sphere (radius, radius, radius).
+    pub fn render_row(&self) -> [f32; 11] {
+        let (c, h, q) = match *self {
+            Self::OrientedBox {
+                centre,
+                half,
+                rotation,
+                ..
+            } => (centre, half, rotation),
+            Self::Cylinder {
+                centre,
+                radius,
+                half_height,
+            } => (
+                centre,
+                Vec3::new(radius, half_height, radius),
+                Quat::IDENTITY,
+            ),
+            Self::Capsule { a, b, radius } => {
+                let d = b - a;
+                let len = d.length();
+                let q = if len > 0.0 {
+                    Quat::from_rotation_arc(Vec3::Y, d / len)
+                } else {
+                    Quat::IDENTITY
+                };
+                (0.5 * (a + b), Vec3::new(radius, 0.5 * len, radius), q)
+            }
+            Self::Sphere { centre, radius } => (centre, Vec3::splat(radius), Quat::IDENTITY),
+        };
+        [
+            c.x,
+            c.y,
+            c.z,
+            h.x,
+            h.y,
+            h.z,
+            q.x,
+            q.y,
+            q.z,
+            q.w,
+            self.kind() as f32,
+        ]
+    }
+}
+
 /// Steps per 60 fps frame with the remainder carried: 1/60 s is 100 units of
 /// 1/6000 s and a step is 3, so frames run 33, 33, 34, … steps.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -493,6 +666,9 @@ pub struct ExplicitBeams {
     pub beams: Vec<Beam>,
     pub triangles: Vec<Triangle>,
     pub boxes: Vec<StaticBox>,
+    /// Oriented boxes, cylinders, capsules and spheres, tested after `boxes` in
+    /// order (Rubble only; see [`StaticShape`]).
+    pub shapes: Vec<StaticShape>,
     /// World position the node positions are relative to.
     pub origin: Vec3,
     /// Flat ground height (m).
@@ -728,6 +904,7 @@ impl ExplicitBeams {
             beams: Vec::new(),
             triangles: Vec::new(),
             boxes: Vec::new(),
+            shapes: Vec::new(),
             origin: Vec3::ZERO,
             ground: 0.0,
             collision_range: DEFAULT_COLLISION_RANGE,
@@ -1918,6 +2095,8 @@ impl ExplicitBeams {
         let origin = self.origin;
         let ground = self.ground;
         let settings = self.settings;
+        // The shapes' culling boxes (none allocated without shapes).
+        let shape_bounds: Vec<StaticBox> = self.shapes.iter().map(StaticShape::bounds).collect();
         for i in 0..self.nodes.len() {
             let mut n = self.nodes[i];
             if !n.has(NODE_NO_GROUND) {
@@ -1936,6 +2115,20 @@ impl ExplicitBeams {
                 }
                 for bx in &self.boxes {
                     if let Some(normal) = box_face(bx, x) {
+                        n.force += contact_force(
+                            n.force,
+                            n.vel,
+                            n.mass,
+                            normal,
+                            h,
+                            &ContactSurface::BOX,
+                            0.0,
+                            n.friction,
+                        );
+                    }
+                }
+                for (sh, bd) in self.shapes.iter().zip(&shape_bounds) {
+                    if let Some(normal) = shape_face(sh, bd, x) {
                         n.force += contact_force(
                             n.force,
                             n.vel,
@@ -2444,6 +2637,120 @@ pub fn box_face(b: &StaticBox, x: Vec3) -> Option<Vec3> {
         }
     }
     Some(normal)
+}
+
+/// `a · b` in the order the kernel's `sdot` takes ((x + y) + z, no fusing).
+fn dot3(a: Vec3, b: Vec3) -> f32 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+/// `d / l` component by component (the kernel's `sdiv3`).
+fn div3(d: Vec3, l: f32) -> Vec3 {
+    Vec3::new(d.x / l, d.y / l, d.z / l)
+}
+
+/// The outward normal of the surface of `s` nearest a point strictly inside it
+/// (the box rule of [`box_face`], in the shape's terms), or `None` when the point
+/// is not strictly inside. `bounds` is `s.bounds()`: a point outside it is not
+/// tested further. An oriented box with an identity rotation is [`box_face`] on
+/// `StaticBox::centered(centre, half)`.
+pub fn shape_face(s: &StaticShape, bounds: &StaticBox, x: Vec3) -> Option<Vec3> {
+    let near = x.x > bounds.lo.x
+        && x.x < bounds.hi.x
+        && x.y > bounds.lo.y
+        && x.y < bounds.hi.y
+        && x.z > bounds.lo.z
+        && x.z < bounds.hi.z;
+    if !near {
+        return None;
+    }
+    match *s {
+        StaticShape::OrientedBox {
+            centre,
+            half,
+            rotation,
+            axes,
+        } => {
+            if rotation == Quat::IDENTITY {
+                return box_face(&StaticBox::centered(centre, half), x);
+            }
+            let d = x - centre;
+            let l = Vec3::new(dot3(axes[0], d), dot3(axes[1], d), dot3(axes[2], d));
+            let inside = l.x > -half.x
+                && l.x < half.x
+                && l.y > -half.y
+                && l.y < half.y
+                && l.z > -half.z
+                && l.z < half.z;
+            if !inside {
+                return None;
+            }
+            // Faces in box_face's order (−z, +z, −x, +x, −y, +y), the first nearest.
+            let mut normal = -axes[2];
+            let mut dist = l.z + half.z;
+            for (dd, n) in [
+                (half.z - l.z, axes[2]),
+                (l.x + half.x, -axes[0]),
+                (half.x - l.x, axes[0]),
+                (l.y + half.y, -axes[1]),
+                (half.y - l.y, axes[1]),
+            ] {
+                if dd < dist {
+                    dist = dd;
+                    normal = n;
+                }
+            }
+            Some(normal)
+        }
+        StaticShape::Cylinder {
+            centre,
+            radius,
+            half_height,
+        } => {
+            let d = x - centre;
+            let r = (d.x * d.x + d.z * d.z).sqrt();
+            if !(r < radius && d.y > -half_height && d.y < half_height) {
+                return None;
+            }
+            // The side (radial; +x on the axis), then the top and bottom caps.
+            let mut normal = if r > 0.0 {
+                Vec3::new(d.x / r, 0.0, d.z / r)
+            } else {
+                Vec3::X
+            };
+            let mut dist = radius - r;
+            if half_height - d.y < dist {
+                dist = half_height - d.y;
+                normal = Vec3::Y;
+            }
+            if d.y + half_height < dist {
+                normal = Vec3::NEG_Y;
+            }
+            Some(normal)
+        }
+        StaticShape::Capsule { a, b, radius } => {
+            let ab = b - a;
+            let l2 = dot3(ab, ab);
+            let t = if l2 > 0.0 {
+                (dot3(x - a, ab) / l2).max(0.0).min(1.0)
+            } else {
+                0.0
+            };
+            let p = Vec3::new(a.x + ab.x * t, a.y + ab.y * t, a.z + ab.z * t);
+            round_face(x - p, radius)
+        }
+        StaticShape::Sphere { centre, radius } => round_face(x - centre, radius),
+    }
+}
+
+/// A point at `d` from a sphere's centre (or a capsule's nearest axis point):
+/// strictly inside radius `radius`, pushed out along `d` (+y at the centre).
+fn round_face(d: Vec3, radius: f32) -> Option<Vec3> {
+    let l = dot3(d, d).sqrt();
+    if !(l < radius) {
+        return None;
+    }
+    Some(if l > 0.0 { div3(d, l) } else { Vec3::Y })
 }
 
 /// What [`beam_force`] decided.

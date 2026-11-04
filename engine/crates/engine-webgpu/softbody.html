@@ -437,7 +437,11 @@
       buildExplicit();
       // The explicit solver collides with its own copies; these only render (not soft
       // obstacles: the arena has hundreds).
-      for (const [cx, cy, cz, hx, hy, hz] of xlayout.boxes) shapeOn(world.createBody({ position: [cx, cy, cz] }), { box: { half: [hx, hy, hz] } }, MAT_PROP);
+      // Rows [centre, half, rotation, kind]: 0/1 box, 2 vertical cylinder (a 16-sided
+      // hull: radius hx, half height hy), 3 capsule along its y, 4 sphere.
+      const xGeom = (k, hx, hy, hz) => k === 2 ? { hull: { points: Array.from({ length: 32 }, (_, i) => { const a = (i >> 1) * Math.PI / 8; return [hx * Math.cos(a), i & 1 ? hy : -hy, hx * Math.sin(a)]; }).flat() } }
+        : k === 3 ? { capsule: { radius: hx, halfLen: hy } } : k === 4 ? { sphere: { radius: hx } } : { box: { half: [hx, hy, hz] } };
+      for (const [cx, cy, cz, hx, hy, hz, qx = 0, qy = 0, qz = 0, qw = 1, k = 0] of xlayout.boxes) shapeOn(world.createBody({ position: [cx, cy, cz], rotation: [qx, qy, qz, qw] }), xGeom(k, hx, hy, hz), MAT_PROP);
       camMode = 'orbit'; orbit = ARENA ? { yaw: 0.7, pitch: 0.55, dist: 650, target: [0, 1, xlayout.boxes.length ? xlayout.boxes.reduce((a, b) => a + b[2], 0) / xlayout.boxes.length : 0] } : { yaw: 2.2, pitch: 0.3, dist: 11, target: null };
     } else if (scene === 'yard') {
       addSoft(carDesc, [0, 0.05, 0]);
