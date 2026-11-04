@@ -326,6 +326,35 @@ fn main() {
             d.y.atan2(d.x)
         };
         let a0: Vec<f32> = rings.iter().map(|r| ang(&s, r.1)).collect();
+        // The sills' ends (the cell's own twist): mean of each end's nodes.
+        let end = |name: &str, front: bool| -> Vec<u32> {
+            let g = &b.groups[name];
+            let z = |i: u32| sk.pos(i).z;
+            let lim = if front {
+                g.iter().map(|&i| z(i)).fold(f32::MIN, f32::max) - 0.05
+            } else {
+                g.iter().map(|&i| z(i)).fold(f32::MAX, f32::min) + 0.05
+            };
+            g.iter()
+                .copied()
+                .filter(|&i| if front { z(i) > lim } else { z(i) < lim })
+                .collect()
+        };
+        let (sfl, sfr, srl, srr) = (
+            end("sill", true),
+            end("sill_r", true),
+            end("sill", false),
+            end("sill_r", false),
+        );
+        let gm = |s: &ExplicitBeams, v: &[u32]| {
+            v.iter().map(|&i| s.nodes[i as usize].pos).sum::<Vec3>() / v.len() as f32
+        };
+        let sill_twist = |s: &ExplicitBeams| {
+            let f = gm(s, &sfl) - gm(s, &sfr);
+            let r = gm(s, &srl) - gm(s, &srr);
+            f.y.atan2(f.x) - r.y.atan2(r.x)
+        };
+        let st0 = sill_twist(&s);
         for st in 0..2000 {
             let ramp = (st as f32 / 600.0).min(1.0);
             let f = ramp * t / track;
@@ -335,6 +364,17 @@ fn main() {
             s.nodes[tops[2] as usize].force.y -= f;
             s.nodes[tops[3] as usize].force.y += f;
             s.step();
+            if st % 250 == 0 {
+                let k1 = rings.iter().position(|r| r.0 > 1.0).unwrap();
+                let k2 = rings.iter().position(|r| r.0 > 3.4).unwrap();
+                eprintln!(
+                    "  step {st}: sills' ends twist {:+.3}°; cabin twist {:+.3}° (rings {:.2} → {:.2})",
+                    (sill_twist(&s) - st0).to_degrees(),
+                    ((ang(&s, rings[k2].1) - a0[k2]) - (ang(&s, rings[k1].1) - a0[k1])).to_degrees(),
+                    rings[k1].0,
+                    rings[k2].0
+                );
+            }
         }
         for (k, r) in rings.iter().enumerate() {
             eprintln!(

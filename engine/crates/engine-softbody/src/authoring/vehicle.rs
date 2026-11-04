@@ -944,6 +944,17 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             let p = |q: [f32; 3]| Vec3::new(side * q[0], q[1], q[2]);
             let a = sk.nearest(p(br.from), &body, 1)[0];
             let b = sk.nearest(p(br.to), &body, 1)[0];
+            if std::env::var("SHOWCASE_BRACES").is_ok() {
+                let deg = |i: u32| sk.beams.iter().filter(|x| x.a == i || x.b == i).count();
+                eprintln!(
+                    "brace {} {side}: {a} at {:.2?} (degree {}) to {b} at {:.2?} (degree {})",
+                    br.name,
+                    sk.pos(a),
+                    deg(a),
+                    sk.pos(b),
+                    deg(b)
+                );
+            }
             let m = mat
                 .stiffer(br.kl / mat.kl())
                 .scaled(def.crumple.eval(0.5 * (sk.pos(a).z + sk.pos(b).z)));
