@@ -342,7 +342,10 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         let mut names: Vec<&String> = built.bind_tris.keys().collect();
         names.sort();
         let gi = |n: &str| names.iter().position(|g| *g == n).map(|i| i as u16);
-        pieces.extend(super::parts::interior::interior(&gi));
+        pieces.extend(super::parts::interior::interior(
+            &gi,
+            super::parts::interior::Cabin::of(def),
+        ));
     }
     // Binders: per part, all skin, per group, per tyre and hub.
     let mut by_part: HashMap<u16, Vec<[u32; 3]>> = HashMap::new();

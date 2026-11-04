@@ -428,9 +428,47 @@ fn console(m: &mut Mesh) {
     );
 }
 
+/// Where the cabin's fixed points are: the dash cross beam's z at the
+/// driver, and the steering column's top (the wheel's hub).
+#[derive(Clone, Copy, Debug)]
+pub struct Cabin {
+    pub dash_z: f32,
+    pub column_top: Vec3,
+}
+
+impl Cabin {
+    /// From the definition's `dash` and `column` members.
+    pub fn of(def: &crate::authoring::vehicle::VehicleDef) -> Self {
+        let mut c = Cabin {
+            dash_z: 3.24,
+            column_top: Vec3::new(0.38, 0.93, 2.98),
+        };
+        for m in &def.members {
+            if m.name == "dash" && m.path.len() > 1 {
+                c.dash_z = m.path[m.path.len() / 2][2];
+            }
+            if m.name == "column" {
+                if let Some(p) = m.path.last() {
+                    c.column_top = Vec3::from_array(*p);
+                }
+            }
+        }
+        c
+    }
+}
+
 /// The cabin's pieces. `group` maps a structure group's name to its index
-/// (`Bind::Group`); a missing group leaves its parts out.
-pub fn interior(group: &dyn Fn(&str) -> Option<u16>) -> Vec<Piece> {
+/// (`Bind::Group`); a missing group leaves its parts out. The dashboard is
+/// drawn for a beam at z 3.24 and moved with `cabin.dash_z`.
+pub fn interior(group: &dyn Fn(&str) -> Option<u16>, cabin: Cabin) -> Vec<Piece> {
+    let dz = cabin.dash_z - 3.24;
+    let shifted = move |f: &dyn Fn(&mut Mesh), m: &mut Mesh| {
+        let first = m.len();
+        f(m);
+        for p in m.pos[first..].iter_mut() {
+            p.z += dz;
+        }
+    };
     let mut out = Vec::new();
     let mut add = |name: &str, g: &str, rigid: bool, build: &dyn Fn(&mut Mesh)| {
         let Some(gi) = group(g) else { return };
@@ -449,14 +487,13 @@ pub fn interior(group: &dyn Fn(&str) -> Option<u16>) -> Vec<Piece> {
     add("seat_fl", "seat_fl", true, &|m| front_seat(m, 0.38, 2.62));
     add("seat_fr", "seat_fr", true, &|m| front_seat(m, -0.38, 2.62));
     add("seat_rear", "seat_rear", true, &|m| rear_bench(m, 1.80));
-    add("dash", "dash", false, &|m| dashboard(m, 0.38));
+    add("dash", "dash", false, &|m| {
+        shifted(&|m| dashboard(m, 0.38), m)
+    });
     add("console", "tunnel", false, &console);
+    let hub = cabin.column_top + Vec3::new(0.0, 0.02, -0.03);
     add("steering", "column", true, &|m| {
-        steering(
-            m,
-            Vec3::new(0.38, 0.95, 2.95),
-            Vec3::new(0.0, 0.42, -0.91).normalize(),
-        )
+        steering(m, hub, Vec3::new(0.0, 0.42, -0.91).normalize())
     });
     out
 }
