@@ -628,7 +628,7 @@ static const uint IMPULSE_COUNT = CCD_BASE + 2u;
 static const uint CCD_FALLBACKS = CCD_BASE + 3u;
 // Impulse records from the host (the late apply_impulses pass starts after them).
 static const uint IMPULSE_FIRST = CCD_BASE + 4u;
-static const uint CCD_BODY_CAP = 1024u;
+static const uint CCD_BODY_CAP = 16384u;
 static const uint CCD_BODY_BASE = CCD_BASE + 8u;
 static const uint FAST_CAP = 16384u;
 static const uint FAST_BASE = CCD_BODY_BASE + 4u * CCD_BODY_CAP;
@@ -640,6 +640,8 @@ static const uint CCD_CARRY_WORDS = 32u;
 static const uint CCD_PAIR_COUNT = CCD_BASE + 5u;
 // Largest |v|·h of this step's CCD bodies (asuint, ccd_register; ccd_trust).
 static const uint CCD_MAX_REACH = CCD_BASE + 6u;
+// Colliders listed by ccd_late_mark for ccd_late_sweep (at CCD_LATE_BASE).
+static const uint CCD_LATE_COUNT = CCD_BASE + 7u;
 static const uint CCD_PAIR_CAP = 131072u;
 static const uint CCD_PAIR_BASE = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
 static const uint CCD_NO_PAIR = 0xFFFFFFFFu;
@@ -934,6 +936,7 @@ void broadphase_clear(uint3 tid : SV_DispatchThreadID)
         ASTORE(gScratchAtomics[CCD_FALLBACKS], 0u);
         ASTORE(gScratchAtomics[CCD_PAIR_COUNT], 0u);
         ASTORE(gScratchAtomics[CCD_MAX_REACH], 0u);
+        ASTORE(gScratchAtomics[CCD_LATE_COUNT], 0u);
     }
 }
 
@@ -2060,6 +2063,7 @@ void rest_publish(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[CCD_FALLBACKS], 0u);
     ASTORE(gScratchAtomics[CCD_PAIR_COUNT], 0u);
     ASTORE(gScratchAtomics[CCD_MAX_REACH], 0u);
+    ASTORE(gScratchAtomics[CCD_LATE_COUNT], 0u);
     AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], ALOAD(gConstraintIds[hdr]));
     uint planes = ALOAD(gConstraintIds[hdr + 1u]);
     ASTORE(gScratchAtomics[42], planes);
@@ -8109,6 +8113,9 @@ static const uint QUERY_CAP = 32u;
 static const uint QUERY_RESULT_BASE = QUERY_BASE + 4u + 8u * QUERY_CAP;
 static const uint QUERY_RESULT_CAP = 8192u;
 static const uint EXPLODE_BASE = QUERY_RESULT_BASE + 2u * QUERY_RESULT_CAP;
+// The late sweep's colliders (engine-schema CCD_LATE_BASE), after the explosions.
+static const uint CCD_LATE_BASE = EXPLODE_BASE + 4u + 8u * 16u;
+static const uint CCD_LATE_CAP = 16384u;
 
 // A collider's filter: category bits in the low half, mask bits in the high
 // half of `generation`; 0 = everything.

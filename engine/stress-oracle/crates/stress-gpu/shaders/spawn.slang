@@ -31,7 +31,9 @@ struct SpawnParams
     // member (child slot, body, first part, parts).
     uint moments_base;
     uint info_base;
-    uint pad0;
+    // The body flag a free piece of a CCD structure takes (`load_range.w` of its chunks):
+    // the engine's continuous-collision flag (`BODY_CCD`), 0 with the engine's CCD off.
+    uint ccd_flag;
     uint pad1;
     uint pad2;
 };
@@ -331,7 +333,10 @@ void child_record(uint slot, uint p, bool anchored, float mass, float3 com, Quat
         inv_inertia = float3(moments.x > 0.0 ? 1.0 / moments.x : 0.0, moments.y > 0.0 ? 1.0 / moments.y : 0.0, moments.z > 0.0 ? 1.0 / moments.z : 0.0);
     float3 velocity = anchored ? float3(0.0) : to_rubble(children[CHILD_WORDS * slot + 5].xyz);
     float3 spin = anchored ? float3(0.0) : to_rubble(children[CHILD_WORDS * slot + 6].xyz);
-    uint flags = anchored ? 0u : (FLAG_DYNAMIC | FLAG_AWAKE);
+    // A free piece of a CCD structure (any of its chunks says: the parent island's first)
+    // is a continuous-collision body; an anchored one is static.
+    uint ccd = chunks[islands_of[p].x].load_range.w != 0u ? params.ccd_flag : 0u;
+    uint flags = anchored ? 0u : (FLAG_DYNAMIC | FLAG_AWAKE | ccd);
     float4 record[BODY_WORDS] = {
         float4(to_rubble(pose_pos + rotate(pose_rot, com)), inv_mass),
         quat_vec(orientation),

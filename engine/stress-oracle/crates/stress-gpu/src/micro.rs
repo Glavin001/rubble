@@ -295,7 +295,7 @@ fn point_force(body: &str, chunk: usize, direction: [f64; 3], magnitude: TimeFun
 }
 
 fn impactor(name: &str, shape: ImpactorShape, mass: f64, position: [f64; 3], velocity: [f64; 3]) -> ImpactorDesc {
-    ImpactorDesc { name: name.into(), shape, mass, position, orientation: [0.0, 0.0, 0.0, 1.0], velocity, angular_velocity: [0.0; 3], material: "concrete".into(), crush: None }
+    ImpactorDesc { name: name.into(), shape, mass, position, orientation: [0.0, 0.0, 0.0, 1.0], velocity, angular_velocity: [0.0; 3], material: "concrete".into(), crush: None, ccd: true }
 }
 
 fn disp(name: &str, body: &str, chunk: usize, axis: [f64; 3]) -> stress_ref::scene::ProbeDesc {

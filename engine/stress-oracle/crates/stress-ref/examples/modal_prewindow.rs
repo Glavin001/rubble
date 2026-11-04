@@ -45,6 +45,7 @@ fn ram_into_free_wall() -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = 0.5;
     s
@@ -69,6 +70,7 @@ fn debris(name: &str, material: &str, size: f64, speed: f64) -> Scene {
         angular_velocity: [0.0; 3],
         material: material.into(),
         crush: None,
+        ccd: true,
     };
     s.probes.clear();
     s.metrics.clear();

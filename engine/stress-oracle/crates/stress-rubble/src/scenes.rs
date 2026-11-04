@@ -45,6 +45,7 @@ pub fn wall_ram() -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s
 }
@@ -159,5 +160,6 @@ pub fn shot_at(radius: f64, mass: f64, position: [f64; 3], velocity: [f64; 3]) -
         angular_velocity: [0.0; 3],
         material: "projectile".into(),
         crush: None,
+        ccd: true,
     }
 }

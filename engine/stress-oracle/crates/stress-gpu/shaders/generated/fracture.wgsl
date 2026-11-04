@@ -4368,6 +4368,15 @@ fn fr_piece(@builtin(global_invocation_id) id_20 : vec3<u32>)
     {
         spin_0 = w_parent_0;
     }
+    var ccd_0 : u32;
+    if(((info_0[c_17] & (u32(2)))) != u32(0))
+    {
+        ccd_0 = u32(256);
+    }
+    else
+    {
+        ccd_0 = u32(0);
+    }
     var flags_0 : u32;
     if(anchored_0)
     {
@@ -4375,7 +4384,7 @@ fn fr_piece(@builtin(global_invocation_id) id_20 : vec3<u32>)
     }
     else
     {
-        flags_0 = u32(9);
+        flags_0 = (u32(9) | (ccd_0));
     }
     var st_2 : u32 = stage_0(c_17);
     frames_0[st_2] = vec4<f32>(pos_0, inv_mass_3);

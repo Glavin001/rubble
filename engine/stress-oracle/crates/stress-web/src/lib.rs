@@ -484,6 +484,7 @@ pub fn stress_shoot(u: f64, v: f64) -> bool {
             angular_velocity: [0.0; 3],
             material: "projectile".into(),
             crush: None,
+            ccd: true,
         })
     });
     RUNNING.set(true);
@@ -532,6 +533,7 @@ pub fn stress_fire_pack_shot(index: u32) -> bool {
             angular_velocity: zup(shot.angular_velocity),
             material: "projectile".into(),
             crush: None,
+            ccd: true,
         })
     });
     RUNNING.set(true);
@@ -662,8 +664,7 @@ fn load(level: u8) -> Result<(), String> {
         let d = d.as_ref().ok_or("stress_init first")?;
         let gpu = &d.gpu;
         let mut e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(&scene)).map_err(|e| format!("rubble: {e}"))?;
-        let (iterations, substeps) = profile.engine_policy();
-        e.set_policy(iterations, substeps);
+        e.apply_profile(profile);
         let mut world = GpuWorld::with_resident_engine(gpu, &scene, e)?;
         world.redo_fractured_frames = false;
         world.set_impact_islands(true);
@@ -1037,7 +1038,7 @@ fn shot_meshes(world: &GpuWorld) -> Vec<stress_ref::world::Impactor> {
     let s = SHOOTING.get().expect("a loaded scene");
     (0..SHOTS)
         .map(|k| {
-            let desc = ImpactorDesc { name: format!("shot{k}"), shape: ImpactorShape::Sphere { radius: s.radius }, mass: s.mass, position: [0.0; 3], orientation: [1.0, 0.0, 0.0, 0.0], velocity: [0.0; 3], angular_velocity: [0.0; 3], material: "projectile".into(), crush: None };
+            let desc = ImpactorDesc { name: format!("shot{k}"), shape: ImpactorShape::Sphere { radius: s.radius }, mass: s.mass, position: [0.0; 3], orientation: [1.0, 0.0, 0.0, 0.0], velocity: [0.0; 3], angular_velocity: [0.0; 3], material: "projectile".into(), crush: None, ccd: true };
             stress_ref::world::Impactor::from_desc(&desc, &world.scene)
         })
         .collect()

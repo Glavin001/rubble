@@ -110,19 +110,23 @@ struct Outcome {
 
 /// Place `asset` as a threshold destructible, fire the lab's shot, step `frames`.
 fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames: u32) -> Outcome {
-    run_world_among(asset, lab, frames, false, None).unwrap()
+    run_world_among(asset, lab, frames, false, None, false, &mut |_, _| {}).unwrap()
 }
 
 /// `run_world`, with `neighbours`: copies of the asset placed 80 m and 160 m along x in
 /// the same world (one more placed and destroyed before the shot's target, whose freed
 /// tables the target then takes), and the first neighbour destroyed at the end. The
-/// neighbours never break, and the target breaks as it does alone.
+/// neighbours never break, and the target breaks as it does alone. The target a bullet
+/// (`DestructibleDef::is_bullet`) as given, and `inspect` shown the world and the target
+/// after the last frame.
 fn run_world_among(
     asset: &DestructibleAssetDesc,
     lab: &engine_fracture::Scene,
     frames: u32,
     neighbours: bool,
     pool: Option<u32>,
+    is_bullet: bool,
+    inspect: &mut dyn FnMut(&mut World, DestructibleId),
 ) -> anyhow::Result<Outcome> {
     let placement = asset.stress.as_ref().unwrap().placement();
     // The lab's stress world is the asset frame less its placement.
@@ -184,6 +188,7 @@ fn run_world_among(
             model: StrengthModel::Threshold,
             transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
             asleep: std::env::var("THRESHOLD_START_ASLEEP").is_ok(),
+            is_bullet,
             ..DestructibleDef::new(a)
         })
         .unwrap();
@@ -217,9 +222,11 @@ fn run_world_among(
     let v = v.map(|x| x * speed);
     let origin = [origin[0] + nudge, origin[1] + dy, origin[2]];
     let at = [0, 1, 2].map(|k| (origin[k] + offset[k] as f64) as f32);
+    // A bullet, as the lab's shot is a CCD impactor (`ImpactorDesc::ccd`).
     let ball = w
         .create_body(&BodyDef {
             linear_velocity: v.map(|x| x as f32),
+            is_bullet: true,
             ..BodyDef::dynamic(at)
         })
         .unwrap();
@@ -470,6 +477,7 @@ fn run_world_among(
             assert!(w.body_is_valid(w.destructible_chunk_body(id, c).unwrap()));
         }
     }
+    inspect(&mut w, id);
     w.destroy_destructible(id).unwrap();
     Ok(Outcome {
         broken,
@@ -502,9 +510,11 @@ fn shoot(
     assert!(stats.chunks > 10 && stats.bonds > 10, "{stats:?}");
     let (origin, v, r, m) = lab_shot(lab, target(asset));
     let at = [0, 1, 2].map(|k| (origin[k] + offset[k] as f64) as f32);
+    // A bullet, as the lab's shot is a CCD impactor (`ImpactorDesc::ccd`).
     let ball = w
         .create_body(&BodyDef {
             linear_velocity: v.map(|x| x as f32),
+            is_bullet: true,
             ..BodyDef::dynamic(at)
         })
         .unwrap();
@@ -561,6 +571,7 @@ fn run_lab(
             angular_velocity: [0.0; 3],
             material: "projectile".into(),
             crush: None,
+            ccd: true,
         },
     );
     let mut timeline = Vec::new();
@@ -659,7 +670,7 @@ fn a_piece_pool_serves_every_destructible() {
     let (asset, lab) = house();
     let frames = 120;
     let alone = run_world(&asset, &lab, frames);
-    let pooled = run_world_among(&asset, &lab, frames, true, Some(256)).unwrap();
+    let pooled = run_world_among(&asset, &lab, frames, true, Some(256), false, &mut |_, _| {}).unwrap();
     eprintln!(
         "alone {} bonds into {} bodies; pooled {} into {}",
         alone.broken, alone.bodies, pooled.broken, pooled.bodies
@@ -676,7 +687,7 @@ fn a_piece_pool_serves_every_destructible() {
         pooled.bodies,
         alone.bodies
     );
-    let e = run_world_among(&asset, &lab, frames, true, Some(4))
+    let e = run_world_among(&asset, &lab, frames, true, Some(4), false, &mut |_, _| {})
         .err()
         .expect("4 slots cannot hold the pieces");
     assert!(e.to_string().contains("no free body slot"), "{e}");
@@ -689,7 +700,7 @@ fn a_house_among_neighbours_breaks_as_alone() {
     let (asset, lab) = house();
     let frames = 120;
     let alone = run_world(&asset, &lab, frames);
-    let among = run_world_among(&asset, &lab, frames, true, None).unwrap();
+    let among = run_world_among(&asset, &lab, frames, true, None, false, &mut |_, _| {}).unwrap();
     eprintln!(
         "alone {} bonds into {} bodies; among neighbours {} into {}",
         alone.broken, alone.bodies, among.broken, among.bodies
@@ -1008,6 +1019,34 @@ fn sleep_policy_ensemble() {
             stats(&broken),
             stats(&bodies)
         );
+    }
+}
+
+/// A bullet destructible (`DestructibleDef::is_bullet`): after the shot splits it, every
+/// dynamic piece's body is a continuous-collision body (`BODY_CCD`, from its chunks'
+/// `INFO_CCD` on the GPU, also off an anchored parent); an anchored piece is static, and a
+/// destructible not marked has none.
+#[test]
+fn every_dynamic_piece_of_a_bullet_destructible_is_a_bullet() {
+    let (asset, lab) = arch();
+    for is_bullet in [true, false] {
+        let mut seen = 0;
+        let outcome = run_world_among(&asset, &lab, 60, false, None, is_bullet, &mut |w, id| {
+            let stats = w.destructible_stats(id).unwrap();
+            let mut bodies: Vec<BodyId> = (0..stats.chunks).map(|c| w.destructible_chunk_body(id, c).unwrap()).collect();
+            bodies.sort_by_key(|b| b.index());
+            bodies.dedup();
+            let records = w.sim().download_bodies();
+            for &b in &bodies {
+                let ccd = records[b.index() as usize].flags & engine_schema::BODY_CCD != 0;
+                let dynamic = w.body_type(b).unwrap() == BodyType::Dynamic;
+                assert_eq!(ccd, is_bullet && dynamic, "piece {b:?} (dynamic {dynamic}): BODY_CCD {ccd}, the destructible a bullet {is_bullet}");
+                seen += dynamic as usize;
+            }
+        })
+        .unwrap();
+        eprintln!("bullet {is_bullet}: {} splits, {seen} dynamic pieces checked", outcome.splits);
+        assert!(outcome.splits > 0 && seen > 1, "the shot splits the arch into dynamic pieces");
     }
 }
 

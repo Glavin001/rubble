@@ -157,6 +157,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "ccd_slot_reach",
     "ccd_slot_reach_listed",
     "ccd_wake_colliders",
+    "ccd_late_mark",
+    "ccd_late_sweep",
     "ccd_validate",
     "ccd_clamp",
     "ccd_emit",

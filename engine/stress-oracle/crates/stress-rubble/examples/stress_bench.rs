@@ -257,6 +257,7 @@ fn suite_shots(meta: &serde_json::Value, events: &[(usize, &str, &str, f64)], g:
                     angular_velocity: [0.0; 3],
                     material: "projectile".into(),
                     crush: None,
+                    ccd: true,
                 },
             )
         })
@@ -302,6 +303,7 @@ fn bombard_shots(scene: &Scene) -> Vec<(usize, stress_ref::scene::ImpactorDesc)>
                 angular_velocity: [0.0; 3],
                 material: "projectile".into(),
                 crush: None,
+                ccd: true,
             },
         ));
     }
@@ -655,8 +657,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         drop(engine);
         let mut e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine");
         if let Some(p) = profile {
-            let (iterations, substeps) = p.engine_policy();
-            e.set_policy(iterations, substeps);
+            e.apply_profile(p);
         }
         stress_gpu::world::GpuWorld::with_resident_engine(gpu, scene, e).expect("GPU coupled world")
     } else {

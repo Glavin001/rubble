@@ -47,6 +47,7 @@ fn sliver_wall(speed: f64, fracture: bool) -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = 0.03;
     s.sim.frame_dt = 1e-3;

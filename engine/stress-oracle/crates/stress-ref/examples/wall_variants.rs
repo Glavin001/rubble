@@ -39,6 +39,7 @@ fn main() {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = if speed >= 20.0 { 0.04 } else if speed >= 8.0 { 0.1 } else { 0.3 };
     std::fs::write(out, serde_json::to_string(&s).expect("json")).expect("write");

@@ -1350,6 +1350,15 @@ impl WgpuSim {
         self.read_buffer_range::<u32>(21, u64::from(CCD_FALLBACKS) * 4, 1)[0]
     }
 
+    /// Colliders of CCD bodies the last step's solve carried past their bounds
+    /// (`ccd_late_mark`), and the CCD pairs the post-solve check had: a
+    /// diagnostic read of the scratch words.
+    pub fn ccd_late_counts(&self) -> (u32, u32) {
+        let late = self.read_buffer_range::<u32>(21, u64::from(engine_schema::CCD_LATE_COUNT) * 4, 1)[0];
+        let pairs = self.read_buffer_range::<u32>(21, u64::from(engine_schema::CCD_PAIR_COUNT) * 4, 1)[0];
+        (late, pairs)
+    }
+
     pub fn add_collider(&mut self, col: Collider) -> u32 {
         self.add_colliders(std::slice::from_ref(&col)).start
     }

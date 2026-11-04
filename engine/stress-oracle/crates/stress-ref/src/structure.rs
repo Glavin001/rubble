@@ -145,6 +145,9 @@ pub struct Structure {
     /// Model switches the bonds were derived with (kept for re-derivation on refinement).
     pub features: Features,
     pub methods: crate::scene::Methods,
+    /// Its bodies and every piece it breaks into are continuous-collision bodies in an
+    /// engine-coupled world (`BodyDesc::ccd`).
+    pub ccd: bool,
 }
 
 /// The face of a box whose outward normal is closest to `dir` (body frame).
@@ -321,6 +324,7 @@ impl Structure {
             stiffness_scale: scale,
             features,
             methods,
+            ccd: body.ccd,
         }
     }
 

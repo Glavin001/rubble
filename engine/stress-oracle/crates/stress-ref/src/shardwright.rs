@@ -434,6 +434,7 @@ pub fn destruction_case(base: &Scene, case: &str, remove: &str) -> Result<Scene,
                 angular_velocity: [0.0; 3],
                 material,
                 crush: None,
+                ccd: true,
             });
         }
         // frac-sim's defaults (tools/sim/src/main.rs): a steel ball, r 0.4 m, density
@@ -452,6 +453,7 @@ pub fn destruction_case(base: &Scene, case: &str, remove: &str) -> Result<Scene,
                 angular_velocity: [0.0; 3],
                 material: "steel".into(),
                 crush: None,
+                ccd: true,
             });
         }
         // Sudden removal (GSA alternate path) of one authored component, selected by the

@@ -490,17 +490,20 @@ fn pieces_on_the_ground_stay_at_rest_after_the_split() {
 }
 
 /// The lab's cuboid house and ball at the lab's 18 m/s under the load path: through the
-/// wall with the in-step pass, not without it; a house a thousand times stronger holds it.
+/// wall with the in-step pass, at speed; without it the wall breaks a frame late, behind
+/// the ball's contact, and the ball only shoves on into the loose pieces (CCD pushes them,
+/// `ccdIsPush`), at a fraction of the speed (0.4 m/s at the end, against 3.2 with the
+/// pass); a house a thousand times stronger holds it.
 #[test]
 fn the_lab_ball_goes_through_the_house_only_with_the_pass() {
     let gpu = Gpu::new().expect("GPU");
     let home = prepared(house(), Profile::LoadPath);
     let on = run(&gpu, &home, &lab_ball(&home, 18.0), 0, Profile::LoadPath, true, 90);
     let off = run(&gpu, &home, &lab_ball(&home, 18.0), 0, Profile::LoadPath, false, 90);
-    println!("on: {:?}, strikes {}, contact breaks {}; off: {:?}", on.path, on.strikes, on.contact_breaks, off.path);
+    println!("on: {:?}, strikes {}, contact breaks {}; off: {:?}, broken {}", on.path, on.strikes, on.contact_breaks, off.path, off.broken);
     assert!(on.strikes > 0 && on.contact_breaks > 0 && on.path.through(), "with the pass: struck, broken, through");
     assert_eq!(off.strikes, 0);
-    assert!(!off.path.through(), "without it the ball does not get through");
+    assert!(off.path.speed < 0.25 * on.path.speed, "without it the ball loses most of its speed in the wall");
     let strong = prepared(stronger(house(), 1000.0), Profile::LoadPath);
     let held = run(&gpu, &strong, &lab_ball(&strong, 18.0), 0, Profile::LoadPath, true, 90);
     println!("strong house: {:?}, broken {}, strikes {}", held.path, held.broken, held.strikes);

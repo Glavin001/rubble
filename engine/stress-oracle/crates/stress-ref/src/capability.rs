@@ -299,6 +299,16 @@ impl Profile {
         }
     }
 
+    /// Whether bodies a scene marks as fast movers (`BodyDesc::ccd`, `ImpactorDesc::ccd`,
+    /// impactors by default) get continuous collision within the profile's one step a
+    /// frame: the engine's time-of-impact contacts (rubble's `BODY_CCD`, PhysX's per-body
+    /// `eENABLE_CCD`), not whole-world substeps. Bodies not marked stay as they are.
+    pub fn engine_ccd(self) -> bool {
+        match self {
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu => true,
+        }
+    }
+
     /// The solver's per-tick behaviour.
     pub fn apply_config(self, config: &mut SolverConfig) {
         match self {

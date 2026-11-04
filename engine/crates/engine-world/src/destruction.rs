@@ -608,6 +608,11 @@ pub struct DestructibleDef {
     pub anchors: Anchors,
     /// Start asleep (woken by contact), as the lab does.
     pub asleep: bool,
+    /// A fast mover that must never pass through geometry between steps: its dynamic
+    /// bodies, and every free piece they break into, are bullets (`BodyDef::is_bullet`,
+    /// the kernels' `BODY_CCD`). Off by default: each costs a time-of-impact cast per
+    /// candidate pair a step.
+    pub is_bullet: bool,
     pub shape: ShapeDef,
     pub user_data: u64,
     /// Blasts (`World::detonate`) load its exposed chunk faces with the stress oracle's
@@ -643,6 +648,7 @@ impl DestructibleDef {
             strength_scale: 1.0,
             anchors: Anchors::AssetWorldBonds,
             asleep: true,
+            is_bullet: false,
             shape: ShapeDef {
                 update_body_mass: false,
                 ..ShapeDef::default()
@@ -963,6 +969,7 @@ impl World {
                 position: start.position,
                 rotation: start.rotation,
                 is_awake: !def.asleep && asset.preload.is_none(),
+                is_bullet: def.is_bullet && c.mass > 0.0,
                 user_data: def.user_data,
                 ..BodyDef::default()
             })

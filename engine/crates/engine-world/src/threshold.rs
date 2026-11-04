@@ -128,7 +128,7 @@ mod imp {
     use glam::{DMat3, DQuat, DVec3, Vec3};
     use std::sync::Arc;
     use stress_gpu::fracture::{
-        self, CrushEvent, CrushTables, FractureTables, GpuFracture, INFO_SUPPORT,
+        self, CrushEvent, CrushTables, FractureTables, GpuFracture, INFO_CCD, INFO_SUPPORT,
     };
     use stress_gpu::gpu::Gpu;
     use stress_gpu::ingest::{
@@ -431,6 +431,8 @@ mod imp {
         chunk_body: Vec<u32>,
         intact: Vec<bool>,
         pub nodes: Vec<Option<u32>>,
+        /// `DestructibleDef::is_bullet`: every free piece is a bullet.
+        bullet: bool,
         /// Blast loading's state (`DestructibleDef::blast_loading`).
         blast: Option<blast::BlastSlot>,
         /// `DestructibleDef::support_loss`: what the pass reads.
@@ -1265,6 +1267,7 @@ mod imp {
                     position: instance.position,
                     rotation: instance.rotation,
                     is_awake: !def.asleep,
+                    is_bullet: def.is_bullet && dynamic,
                     user_data: def.user_data,
                     ..BodyDef::default()
                 })?;
@@ -1432,11 +1435,13 @@ mod imp {
                     [f(h.x), f(h.y), f(h.z), f(e_plane)],
                     [f(bq.x), f(bq.y), f(bq.z), f(bq.w)],
                 ]);
-                t.info.push(if ch.support != Support::None {
-                    INFO_SUPPORT
-                } else {
-                    0
-                });
+                t.info.push(
+                    if ch.support != Support::None {
+                        INFO_SUPPORT
+                    } else {
+                        0
+                    } | if def.is_bullet { INFO_CCD } else { 0 },
+                );
                 t.chunk_body.push(chunk_body[k]);
             }
             // Per GPU bond: its structure and bond (blast loading's mirror).
@@ -1843,6 +1848,7 @@ mod imp {
                 chunk_shapes,
                 intact: vec![true; bond_count],
                 nodes: source.nodes.clone(),
+                bullet: def.is_bullet,
                 blast,
                 support: None,
                 crush: crush_slot,
@@ -2815,6 +2821,19 @@ mod imp {
             }
             for &b in &changed {
                 self.reframe_piece(k, b, from_step, frames)?;
+            }
+            // Every free piece of a bullet destructible is one (`is_bullet`): its GPU record
+            // took BODY_CCD from its chunks' INFO_CCD (stress-gpu fracture.slang
+            // `fr_piece`), and every later write of the body from its slot keeps it.
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            if t.bullet {
+                let pieces: Vec<u32> = moved.iter().map(|&c| t.chunk_body[c as usize]).collect();
+                for b in pieces {
+                    let slot = &mut self.bodies[b as usize];
+                    if slot.body_type == BodyType::Dynamic {
+                        slot.bullet = true;
+                    }
+                }
             }
             // Splits: each parent's chunks before, grouped by where they are now.
             let t = self.fracture.slots[k].as_ref().expect("live slot");

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use engine_schema::BodyState;
-use stress_gpu::fracture::{self, FractureTables, GpuFracture, INFO_SUPPORT};
+use stress_gpu::fracture::{self, FractureTables, GpuFracture, INFO_CCD, INFO_SUPPORT};
 use stress_gpu::gpu::Gpu;
 use stress_gpu::ingest::{ColliderInfo, EngineIngest, KIND_BODY, KIND_STATIC, NONE};
 use stress_ref::capability::{LoadModel, Profile, StrikeModel};
@@ -31,9 +31,10 @@ pub struct FractureOptions {
     /// The in-step contact fracture on or off (`None`: the profile's own,
     /// `Profile::contact_fracture`).
     pub contact: Option<bool>,
-    /// The shots as rubble TOI CCD bodies (`RubbleEngine::set_toi_ccd`; `None`: when the
-    /// in-step contact fracture is on). Off, a shot faster than a wall's thickness per step
-    /// can pass through it with no contact.
+    /// The shots and CCD structures' pieces as rubble TOI CCD bodies
+    /// (`RubbleEngine::set_toi_ccd`; `None`: the profile's, `Profile::engine_ccd`, on
+    /// when the in-step contact fracture is). Off, a shot faster than a wall's thickness
+    /// per step can pass through it with no contact.
     pub toi_ccd: Option<bool>,
     /// Chunk crushing ([`ThresholdWorld::new_with_crush`]).
     pub crush: bool,
@@ -385,9 +386,11 @@ impl ThresholdWorld {
         capacity.max_contacts = contact_capacity(chunk_count, capacity.max_contacts, gpu.device.limits().max_storage_buffer_binding_size as u64);
         capacity.max_candidates = capacity.max_candidates.max(capacity.max_contacts);
         let mut engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), capacity.clone()).map_err(|e| format!("rubble: {e}"))?;
-        let (iterations, substeps) = profile.engine_policy();
-        engine.set_policy(iterations, substeps);
-        if options.toi_ccd.unwrap_or(contact_sweeps > 0) {
+        // The profile's policy, and TOI CCD for its CCD bodies (`Profile::engine_ccd`).
+        engine.apply_profile(profile);
+        if let Some(on) = options.toi_ccd {
+            engine.set_toi_ccd(on);
+        } else if contact_sweeps > 0 {
             // The shots meet what they strike at its time of impact: a contact in the step
             // they reach it (no tunnelling past a wall within a step).
             engine.set_toi_ccd(true);
@@ -505,7 +508,8 @@ impl ThresholdWorld {
             let e_plane = mat.youngs_modulus * scene.sim.stiffness_scale / (1.0 - mat.poisson_ratio * mat.poisson_ratio);
             let (bc, h, bq) = (ch.center, ch.half_extents, rotation_quat(&ch.rotation));
             t.geometry.push([[f(bc.x), f(bc.y), f(bc.z), f(h.norm())], [f(h.x), f(h.y), f(h.z), f(e_plane)], [f(bq.x), f(bq.y), f(bq.z), f(bq.w)]]);
-            t.info.push(if ch.support != Support::None { INFO_SUPPORT } else { 0 });
+            let ccd = if m.structures[s].ccd && engine.toi_ccd() { INFO_CCD } else { 0 };
+            t.info.push(if ch.support != Support::None { INFO_SUPPORT } else { 0 } | ccd);
             t.chunk_body.push(collider_body[cols[0] as usize]);
         }
         // Each cluster's body frame (its structure's frame: a cluster's shapes are its
@@ -608,7 +612,7 @@ impl ThresholdWorld {
         let p = to_rubble(Vec3::from_array(desc.position));
         let v = to_rubble(Vec3::from_array(desc.velocity));
         let w = to_rubble(Vec3::from_array(desc.angular_velocity));
-        let ccd = if self.engine.toi_ccd() { engine_schema::BODY_CCD } else { 0 };
+        let ccd = if self.engine.toi_ccd() && desc.ccd { engine_schema::BODY_CCD } else { 0 };
         let flags = engine_schema::BodyFlags::Dynamic as u32 | engine_schema::BodyFlags::Awake as u32 | ccd;
         let record = BodyState {
             position: p,
@@ -872,6 +876,7 @@ impl ThresholdWorld {
                     angular_velocity: [0.0; 3],
                     material: "projectile".into(),
                     crush: None,
+                    ccd: true,
                 };
                 stress_ref::world::Impactor::from_desc(&desc, &self.scene)
             })

@@ -141,6 +141,7 @@ pub fn ram_at(mut scene: Scene, name: &str, lo: Vec3, hi: Vec3) -> Scene {
         angular_velocity: [0.0; 3],
         material,
         crush: None,
+        ccd: true,
     });
     scene
 }

@@ -71,6 +71,7 @@ fn wall_ram() -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s
 }
