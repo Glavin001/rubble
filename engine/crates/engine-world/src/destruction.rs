@@ -223,14 +223,14 @@ impl DestructibleAssetDesc {
     /// The solver settings the source was tuned with for `model`: the lab's for
     /// `Bonds` ([`Self::solver`]); for `Threshold`, the lab's threshold mode's
     /// (never asleep, zero-gap contact, world inertia, 4 iterations, the stress
-    /// scene's 60 Hz frame).
+    /// scene's 60 Hz frame); every stress model takes the same.
     pub fn solver_for(&self, model: StrengthModel) -> Option<engine_schema::AvbdParams> {
         match model {
             StrengthModel::Bonds => self.solver,
             #[cfg(feature = "stress")]
-            StrengthModel::Threshold => self.stress.as_ref().and_then(|s| s.threshold_solver()),
+            _ => self.stress.as_ref().and_then(|s| s.threshold_solver()),
             #[cfg(not(feature = "stress"))]
-            StrengthModel::Threshold => None,
+            _ => None,
         }
     }
 
@@ -250,7 +250,7 @@ impl DestructibleAssetDesc {
         p.sleep_lin = d.sleep_lin;
         p.sleep_ang = d.sleep_ang;
         p.sleep_time = d.sleep_time;
-        if model == StrengthModel::Threshold {
+        if model.is_stress() {
             p.flags |= engine_schema::FLAG_WAKE_ON_TOUCH;
         }
         Some(p)
@@ -437,6 +437,73 @@ pub enum StrengthModel {
     /// into slots reserved at placement. Needs the asset's stress source and
     /// the `stress` feature.
     Threshold,
+    /// The load path (stress-ref `Profile::LoadPath`): `Threshold`'s GPU fracture with its
+    /// contact-force test replaced by gravity and the contact loads carried through the
+    /// bond graph to the supports (a warm-started relaxation of its quasi-static
+    /// equilibrium, a fixed number of sweeps a step), each bond checked against its
+    /// tension, shear, compression and bending capacities. The bonds' geometric sections
+    /// and stiffnesses. By default its in-step contact fracture is on and strikes are not
+    /// also predicted ([`FractureOptions`]).
+    LoadPath,
+    /// The analytic local impact (stress-ref `Profile::ImpactLocal`): `Threshold`'s model
+    /// with a predicted strike decided by Hertz contact, an energy ballistic limit with a
+    /// plug cone, the wave's back-face spall and strain-rate strength.
+    ImpactLocal,
+    /// vibe-land's GPU stress solver (stress-ref `Profile::BlastGpu`): Blast's bond-impulse
+    /// solve decides the bonds each step (gravity, the contact forces and the centrifugal
+    /// load in) in place of the contact-force test; strikes predicted as `Threshold`'s. A
+    /// pack's Blast authoring is its input; other assets derive it from their bonds.
+    BlastGpu,
+}
+
+impl StrengthModel {
+    /// Every model, in the order of the C ABI's values.
+    pub const ALL: [StrengthModel; 5] = [
+        StrengthModel::Bonds,
+        StrengthModel::Threshold,
+        StrengthModel::LoadPath,
+        StrengthModel::ImpactLocal,
+        StrengthModel::BlastGpu,
+    ];
+
+    /// Whether the model runs on the GPU fracture (`GpuFracture`): every model but
+    /// `Bonds`. These need the asset's stress source and the `stress` feature.
+    pub fn is_stress(self) -> bool {
+        self != StrengthModel::Bonds
+    }
+
+    /// The model's name, as the fracture lab and the stress oracle's profiles call it.
+    pub fn name(self) -> &'static str {
+        match self {
+            StrengthModel::Bonds => "bonds",
+            StrengthModel::Threshold => "threshold",
+            StrengthModel::LoadPath => "load_path",
+            StrengthModel::ImpactLocal => "impact_local",
+            StrengthModel::BlastGpu => "blast_gpu",
+        }
+    }
+
+    /// The model named `name` ([`Self::name`]).
+    pub fn parse(name: &str) -> Option<StrengthModel> {
+        Self::ALL.into_iter().find(|m| m.name() == name)
+    }
+}
+
+/// How a stress model's fracture runs (`DestructibleDef::fracture`): the same switches,
+/// with the same meaning, for every stress model. `None` takes the model's own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FractureOptions {
+    /// The in-step contact fracture: within each step, after its contacts are made and
+    /// before it solves them, a contact closing on a structure faster than the strike
+    /// speed has its load solved by the model, its bonds break by that verdict and the
+    /// structure splits, so the step solves the striker's contact with the pieces. `None`:
+    /// on for `LoadPath`, off for the others.
+    pub contact_fracture: Option<bool>,
+    /// Strike prediction: a projectile's strike (`World::body_set_projectile`) is
+    /// predicted at the end of the step before it and its breaks made before the next
+    /// step, so the step meets the pieces. `None`: on, unless the in-step contact fracture
+    /// is (it then takes the strikes).
+    pub strike_prediction: Option<bool>,
 }
 
 /// How a destructible is anchored to the world.
@@ -560,9 +627,11 @@ pub struct DestructibleDef {
     /// the gravity load over a removed column). 1 (the default) is the quasi-static flow;
     /// the range is 1 to 2, anything else is an error.
     pub support_loss_dynamic_factor: f32,
-    /// Chunk crushing (threshold model only); `None`, the default: off, and nothing
+    /// Chunk crushing (stress models only); `None`, the default: off, and nothing
     /// differs from a world without it.
     pub crush: Option<Crush>,
+    /// The stress model's fracture switches (stress models only).
+    pub fracture: FractureOptions,
 }
 
 impl DestructibleDef {
@@ -583,6 +652,7 @@ impl DestructibleDef {
             support_loss: false,
             support_loss_dynamic_factor: 1.0,
             crush: None,
+            fracture: FractureOptions::default(),
         }
     }
 }
@@ -838,8 +908,8 @@ impl World {
     pub fn create_destructible(&mut self, def: &DestructibleDef) -> anyhow::Result<DestructibleId> {
         def.shape.validate()?;
         anyhow::ensure!(
-            !def.support_loss || def.model == StrengthModel::Threshold,
-            "support_loss is a capability of the Threshold strength model (the Bonds model carries weight in its joints)"
+            !def.support_loss || def.model.is_stress(),
+            "support_loss is a capability of the stress models (the Threshold strength model and LoadPath, ImpactLocal, BlastGpu); the Bonds model carries weight in its joints"
         );
         let k = def.support_loss_dynamic_factor;
         anyhow::ensure!(
@@ -851,20 +921,25 @@ impl World {
             "support_loss_dynamic_factor {k} needs support_loss (it scales the support-loss flow)"
         );
         anyhow::ensure!(
-            def.crush.is_none() || def.model == StrengthModel::Threshold,
-            "DestructibleDef::crush needs StrengthModel::Threshold"
+            def.crush.is_none() || def.model.is_stress(),
+            "DestructibleDef::crush needs a stress model (StrengthModel::Threshold, LoadPath, ImpactLocal or BlastGpu)"
         );
         let asset = self
             .assets
             .get(def.asset.0 as usize)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown destructible asset {}", def.asset.0))?;
-        if def.model == StrengthModel::Threshold {
+        if def.model.is_stress() {
             return self.create_threshold_destructible(def, asset);
         }
         anyhow::ensure!(
             !def.blast_loading,
-            "blast_loading needs StrengthModel::Threshold (the {:?} model has no blast loads)",
+            "blast_loading needs a stress model (Threshold, LoadPath, ImpactLocal or BlastGpu); the {:?} model has no blast loads",
+            def.model
+        );
+        anyhow::ensure!(
+            def.fracture == FractureOptions::default(),
+            "DestructibleDef::fracture sets a stress model's fracture; the {:?} model has none",
             def.model
         );
         let instance = def.transform;
@@ -1058,7 +1133,7 @@ impl World {
         _def: &DestructibleDef,
         _asset: Arc<DestructibleAssetDesc>,
     ) -> anyhow::Result<DestructibleId> {
-        unsupported("StrengthModel::Threshold without the engine-world `stress` feature")
+        unsupported("the stress strength models without the engine-world `stress` feature")
     }
 
     /// Remove a destructible: its bodies, shapes and bonds.

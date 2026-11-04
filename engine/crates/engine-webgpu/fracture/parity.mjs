@@ -5,7 +5,7 @@
 // lab plan's and World has no equivalent).
 //   (await import('./parity.mjs')).parityShot(null,{scene:'arch',level:0,ticks:240})
 import {parseFractureGlb,buildScene,buildCuboidHouse,layoutScene,withoutJoints,withCapacity,SAMPLES} from './wasm.mjs';
-import {createLabWorld,bondAsset} from './lab-world.mjs';
+import {createLabFromScene} from './lab-world.mjs';
 
 export async function parityShot(device,{scene:key='arch',level,ticks=240}={}){
  const entry=SAMPLES.find(s=>s.key===key);if(!entry)throw new Error(`Unknown scene ${key}`);
@@ -16,7 +16,7 @@ export async function parityShot(device,{scene:key='arch',level,ticks=240}={}){
  }else{level??=0;one=buildCuboidHouse()}
  // Deterministic budget: no SAT-cache early-out, exact sleep gate.
  const scene=withCapacity(layoutScene(withoutJoints(one),entry.layout,!entry.file),{deterministic:true});
- const sim=await createLabWorld(scene,bondAsset(scene)),lines=[];
+ const sim=await createLabFromScene(scene,{bonds:'none'}),lines=[];
  try{
   // The row shot, else a ball at the highest piece from in front.
   const top=scene.bodies.slice(1,scene.projectileStart).reduce((a,b)=>b.p[1]>a.p[1]?b:a).p;

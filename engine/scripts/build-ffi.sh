@@ -5,7 +5,7 @@
 #     include/rubble.h
 #     lib/        librubble_ffi.{a,dylib,so} or rubble_ffi.{lib,dll,dll.lib}
 #                 static-link-libs.txt (what the static library needs)
-#     examples/hello.c
+#     examples/hello.c, lab.c (the fracture lab: `lab <pack.json> [bonds] [steps]`)
 #     README.md   (engine/crates/engine-ffi/README.md)
 #
 # Then it compiles examples/hello.c against the package and, with RUN_EXAMPLE=1
@@ -53,7 +53,7 @@ PKG="$ENGINE/ffi-dist/rubble-$os-$arch"
 rm -rf "$PKG"
 mkdir -p "$PKG/include" "$PKG/lib" "$PKG/examples"
 cp crates/engine-ffi/include/rubble.h "$PKG/include/"
-cp crates/engine-ffi/examples/hello.c "$PKG/examples/"
+cp crates/engine-ffi/examples/hello.c crates/engine-ffi/examples/lab.c "$PKG/examples/"
 cp crates/engine-ffi/README.md "$PKG/README.md"
 printf 'Link the static library with these system libraries:\n%s\n' "$NATIVE_LIBS" \
   > "$PKG/lib/static-link-libs.txt"
@@ -64,20 +64,26 @@ case "$os" in
     cp "$TARGET/librubble_ffi.a" "$TARGET/librubble_ffi.dylib" "$PKG/lib/"
     # Load the dylib from next to the executable that links it.
     install_name_tool -id @rpath/librubble_ffi.dylib "$PKG/lib/librubble_ffi.dylib"
-    cc -std=c11 -Wall -Wextra -Werror -I "$PKG/include" "$PKG/examples/hello.c" \
-      -L "$PKG/lib" -lrubble_ffi -Wl,-rpath,"$PKG/lib" -o "$PKG/examples/hello"
+    for example in hello lab; do
+      cc -std=c11 -Wall -Wextra -Werror -I "$PKG/include" "$PKG/examples/$example.c" \
+        -L "$PKG/lib" -lrubble_ffi -Wl,-rpath,"$PKG/lib" -o "$PKG/examples/$example"
+    done
     ;;
   linux)
     cp "$TARGET/librubble_ffi.a" "$TARGET/librubble_ffi.so" "$PKG/lib/"
-    cc -std=c11 -Wall -Wextra -Werror -I "$PKG/include" "$PKG/examples/hello.c" \
-      -L "$PKG/lib" -lrubble_ffi -lm -Wl,-rpath,"$PKG/lib" -o "$PKG/examples/hello"
+    for example in hello lab; do
+      cc -std=c11 -Wall -Wextra -Werror -I "$PKG/include" "$PKG/examples/$example.c" \
+        -L "$PKG/lib" -lrubble_ffi -lm -Wl,-rpath,"$PKG/lib" -o "$PKG/examples/$example"
+    done
     ;;
   windows)
     cp "$TARGET/rubble_ffi.lib" "$TARGET/rubble_ffi.dll" "$TARGET/rubble_ffi.dll.lib" "$PKG/lib/"
     # Link the import library; the DLL sits next to the executable.
     cp "$PKG/lib/rubble_ffi.dll" "$PKG/examples/"
-    (cd "$PKG/examples" && cl -nologo -W3 -WX -std:c11 -I ../include hello.c \
-      ../lib/rubble_ffi.dll.lib -Fe:hello.exe)
+    for example in hello lab; do
+      (cd "$PKG/examples" && cl -nologo -W3 -WX -std:c11 -I ../include $example.c \
+        ../lib/rubble_ffi.dll.lib -Fe:$example.exe)
+    done
     ;;
 esac
 

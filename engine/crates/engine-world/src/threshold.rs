@@ -41,6 +41,10 @@ pub struct StressSource {
     pub(crate) placement: [f64; 3],
     /// Per stress chunk (structure by structure, chunks in order): its glTF node.
     pub(crate) nodes: Vec<Option<u32>>,
+    /// A scene pack's source, for the profiles that import it differently
+    /// (`blast_gpu` keeps its Blast authoring).
+    #[cfg(feature = "stress")]
+    pub(crate) pack: Option<Arc<imp::PackSource>>,
 }
 
 impl std::fmt::Debug for StressSource {
@@ -58,6 +62,13 @@ impl PartialEq for StressSource {
         let same = Arc::ptr_eq(&self.scene, &other.scene);
         #[cfg(not(feature = "stress"))]
         let same = Arc::ptr_eq(&self._scene, &other._scene);
+        #[cfg(feature = "stress")]
+        let same = same
+            && match (&self.pack, &other.pack) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            };
         same && self.placement == other.placement && self.nodes == other.nodes
     }
 }
@@ -126,6 +137,57 @@ mod imp {
     use stress_ref::capability::Profile;
     use stress_ref::engine::{BodyGeometry, BodyKey};
     use stress_ref::scene::{Scene, Support};
+    use stress_rubble::threshold::{BlastInputs, ProfileSetup};
+
+    /// The stress oracle's profile a stress model runs.
+    pub(crate) fn profile_of(model: StrengthModel) -> anyhow::Result<Profile> {
+        Ok(match model {
+            StrengthModel::Threshold => Profile::Threshold,
+            StrengthModel::LoadPath => Profile::LoadPath,
+            StrengthModel::ImpactLocal => Profile::ImpactLocal,
+            StrengthModel::BlastGpu => Profile::BlastGpu,
+            StrengthModel::Bonds => anyhow::bail!("the Bonds model has no stress profile"),
+        })
+    }
+
+    /// A destructible's fracture set-up: its model's profile with its options
+    /// (stress-rubble `ProfileSetup`, the one place both the lab and the world decide it).
+    pub(crate) fn setup_of(def: &DestructibleDef) -> anyhow::Result<ProfileSetup> {
+        let options = stress_rubble::threshold::FractureOptions {
+            contact: def.fracture.contact_fracture,
+            strike_prediction: def.fracture.strike_prediction,
+            ..Default::default()
+        };
+        ProfileSetup::new(profile_of(def.model)?, &options).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// A scene pack's JSON, kept to import it again under a profile whose import options
+    /// differ from the threshold's (`blast_gpu`: its Blast authoring), once.
+    pub(crate) struct PackSource {
+        json: serde_json::Value,
+        key: String,
+        blast: std::sync::OnceLock<Result<Scene, String>>,
+    }
+
+    /// What a fracture's error bits mean (`fracture.slang` `C_ERROR`).
+    pub(crate) fn fracture_error_text(bits: u32) -> String {
+        const BITS: [(u32, &str); 8] = [
+            (1, "no free body slot"),
+            (2, "a mass sum out of range"),
+            (4, "a union did not settle"),
+            (8, "an impact pulse found no room in the pool"),
+            (16, "a crush found the fragment pool spent"),
+            (32, "more crushes than the crush events' room"),
+            (64, "a load-path block was not positive definite"),
+            (128, "an event list was full"),
+        ];
+        let named: Vec<&str> = BITS.iter().filter(|b| bits & b.0 != 0).map(|b| b.1).collect();
+        if named.is_empty() {
+            "unknown".into()
+        } else {
+            named.join("; ")
+        }
+    }
 
     /// The words of a fracture counters block (`fracture.slang` `C_*`).
     const COUNTER_WORDS: u64 = fracture::COUNTER_WORDS as u64;
@@ -176,6 +238,7 @@ mod imp {
                 scene: Arc::new(scene),
                 placement,
                 nodes,
+                pack: None,
             }
         }
 
@@ -191,6 +254,7 @@ mod imp {
                 scene: Arc::new(scene),
                 placement,
                 nodes: Vec::new(),
+                pack: None,
             }
         }
 
@@ -198,17 +262,24 @@ mod imp {
         /// options).
         pub(crate) fn from_pack(bytes: &[u8], key: &str, placement: [f64; 3]) -> Self {
             let mut node_count = 0;
+            let mut pack = None;
             let scene = serde_json::from_slice::<serde_json::Value>(bytes)
                 .map_err(|e| format!("scene pack: {e}"))
                 .and_then(|json| {
                     node_count = json["scenario"]["nodes"].as_array().map_or(0, |n| n.len());
-                    stress_ref::scene_pack::import_value_with(
+                    let scene = stress_ref::scene_pack::import_value_with(
                         &json,
                         key,
                         "structure",
                         key,
                         Profile::Threshold.import_options(),
-                    )
+                    );
+                    pack = Some(Arc::new(PackSource {
+                        json,
+                        key: key.to_string(),
+                        blast: std::sync::OnceLock::new(),
+                    }));
+                    scene
                 })
                 .map(|(scene, _notes)| scene);
             // The importer makes one chunk per pack node, in order; the ground anchors it
@@ -217,6 +288,30 @@ mod imp {
                 scene: Arc::new(scene),
                 placement,
                 nodes: (0..node_count as u32).map(Some).collect(),
+                pack,
+            }
+        }
+
+        /// The stress scene as `profile` imports it: a pack's under `blast_gpu` keeps its
+        /// Blast authoring (imported once, when first asked); every other import is the
+        /// threshold's.
+        pub fn scene_for(&self, profile: Profile) -> anyhow::Result<&Scene> {
+            match (&self.pack, profile.import_options().blast_authoring) {
+                (Some(p), true) => p
+                    .blast
+                    .get_or_init(|| {
+                        stress_ref::scene_pack::import_value_with(
+                            &p.json,
+                            &p.key,
+                            "structure",
+                            &p.key,
+                            profile.import_options(),
+                        )
+                        .map(|(scene, _notes)| scene)
+                    })
+                    .as_ref()
+                    .map_err(|e| anyhow::anyhow!("the asset's {} import failed: {e}", profile.name())),
+                _ => self.scene(),
             }
         }
 
@@ -247,7 +342,19 @@ mod imp {
         /// The stress scene as the threshold mode runs it (the lab's `stress_load`): bond
         /// strengths scaled, `dt` as its frame, the profile applied.
         pub fn threshold_scene(&self, strength_scale: f32, dt: f32) -> anyhow::Result<Scene> {
-            let mut scene = self.scene()?.clone();
+            self.stress_scene(StrengthModel::Threshold, strength_scale, dt)
+        }
+
+        /// The stress scene as `model` runs it (the lab's `stress_load`): its profile's
+        /// import, bond strengths scaled, `dt` as its frame, the profile applied.
+        pub fn stress_scene(
+            &self,
+            model: StrengthModel,
+            strength_scale: f32,
+            dt: f32,
+        ) -> anyhow::Result<Scene> {
+            let profile = profile_of(model)?;
+            let mut scene = self.scene_for(profile)?.clone();
             let k = strength_scale as f64;
             if k != 1.0 {
                 let used: std::collections::BTreeSet<String> = scene
@@ -271,7 +378,7 @@ mod imp {
                 .map_err(|e| anyhow::anyhow!("stress scene: {e}"))?;
             let mut scene = scene.with_derived();
             scene.sim.methods = stress_ref::scene::Methods::established();
-            Profile::Threshold.apply_scene(&mut scene);
+            profile.apply_scene(&mut scene);
             scene
                 .materials
                 .entry("projectile".into())
@@ -333,6 +440,13 @@ mod imp {
         /// Its own ingest and fracture (crushing, blast loading), else `None`: it is in the
         /// world's shared fracture at `base`.
         own: Option<Own>,
+        /// Kept while its fracture is laid out anew at each placement (a shared fracture
+        /// whose model's records cannot be appended, [`Shared::rebuild`]): its clusters'
+        /// body frames, its colliders' contact sides (its own chunk numbering) and Blast's
+        /// graph of it (`blast_gpu`).
+        cluster_frames: Vec<(u32, fracture::FrameRecord)>,
+        sides: Vec<(u32, ColliderInfo)>,
+        blast_inputs: Option<BlastInputs>,
     }
 
     impl ThresholdSlot {
@@ -367,6 +481,8 @@ mod imp {
         static_info: ColliderInfo,
         /// Colliders the ingest now sees as projectiles.
         projectile_colliders: Vec<u32>,
+        /// Its model's set-up.
+        setup: ProfileSetup,
     }
 
     /// A frame's body frame records: an own fracture's every slot, or the shared
@@ -640,6 +756,14 @@ mod imp {
         dt: f32,
         /// Colliders the ingest now sees as projectiles.
         projectile_colliders: Vec<u32>,
+        /// The stress model every destructible in it runs, with its options.
+        setup: ProfileSetup,
+        /// Laid out anew at each placement ([`ProfileSetup::appendable`] false: the load
+        /// path's and the analytic strike's records, the contact fracture's, Blast's graph),
+        /// which only a fracture that has not stepped yet can be.
+        rebuild: bool,
+        /// It has run a step.
+        stepped: bool,
     }
 
     /// The world's threshold destructibles.
@@ -655,8 +779,11 @@ mod imp {
         /// event's destructible.
         chunk_ranges: Vec<(u32, u32, usize)>,
         bond_ranges: Vec<(u32, u32, usize)>,
-        /// Registered projectiles: body slot and generation, material.
-        projectiles: Vec<(u32, u32, Projectile)>,
+        /// Registered projectiles: body slot and generation, material, launch mark (the
+        /// analytic strike's: a projectile does not strike its own debris again).
+        projectiles: Vec<(u32, u32, Projectile, u32)>,
+        /// Launch marks handed out.
+        launches: u32,
         projectiles_dirty: bool,
         /// The plan hints the lab fixes (`set_plan_hints`): the contact capacity, every
         /// colour its own dispatch.
@@ -676,6 +803,7 @@ mod imp {
     pub(crate) struct ThresholdTemplate {
         /// The asset it was built from (assets are replaced, never mutated: identity).
         asset: Arc<DestructibleAssetDesc>,
+        model: StrengthModel,
         strength_scale: u32,
         dt: u32,
         scene: Scene,
@@ -689,6 +817,21 @@ mod imp {
     }
 
     impl Fracture {
+        /// The buffers a step's fracture writes last (its atomics and work), for a GPU span
+        /// that must end after them.
+        pub(crate) fn state_buffers(&self) -> Vec<&wgpu::Buffer> {
+            let mut out = Vec::new();
+            if let Some(sh) = &self.shared {
+                out.push(&sh.fracture.atom);
+                out.push(&sh.fracture.work);
+            }
+            for o in self.slots.iter().flatten().filter_map(|t| t.own.as_ref()) {
+                out.push(&o.fracture.atom);
+                out.push(&o.fracture.work);
+            }
+            out
+        }
+
         pub fn active(&self) -> bool {
             self.slots.iter().any(|s| s.is_some())
         }
@@ -752,7 +895,7 @@ mod imp {
             let b = self.live_body(body)?;
             if let Some(p) = &projectile {
                 // Its mass and shape are checked now (they are read again each sync).
-                self.projectile_shot(b as u32, p, 1.0)?;
+                self.projectile_shot(b as u32, p, 1.0, 0)?;
             }
             let f = &mut self.fracture;
             f.projectiles.retain(|p| p.0 != b as u32);
@@ -762,7 +905,9 @@ mod imp {
                     "at most {} projectiles (strike prediction's shot table)",
                     fracture::MAX_SHOTS
                 );
-                f.projectiles.push((b as u32, body.generation(), p));
+                // Each registration is a launch (the lab's `fired`): marks from 1.
+                f.launches = f.launches.wrapping_add(1).max(1);
+                f.projectiles.push((b as u32, body.generation(), p, f.launches));
             }
             f.projectiles_dirty = true;
             if self.fracture.active() {
@@ -777,6 +922,7 @@ mod imp {
             b: u32,
             p: &Projectile,
             stiffness_scale: f64,
+            launch: u32,
         ) -> anyhow::Result<(fracture::Shot, u32, ColliderInfo)> {
             let slot = &self.bodies[b as usize];
             anyhow::ensure!(
@@ -808,12 +954,13 @@ mod imp {
                 face,
                 mass,
                 modulus: e_plane as f32,
-                // No launch marks: the analytic strike's (`impact_local`) only.
-                launch: 0,
+                // The analytic strike's (`impact_local`) mark: its own debris is not struck
+                // again (the other models write no marks).
+                launch,
             };
             let info = ColliderInfo {
                 a: [NONE, b, KIND_BODY, 0],
-                b: [mass, p.youngs_modulus, face, 0.0],
+                b: [mass, p.youngs_modulus, face, f32::from_bits(launch)],
             };
             Ok((shot, shape.collider, info))
         }
@@ -822,7 +969,7 @@ mod imp {
         /// the shared fracture's and each own fracture's.
         pub(crate) fn sync_projectiles(&mut self) -> anyhow::Result<()> {
             self.fracture.projectiles_dirty = false;
-            let live: Vec<(u32, Projectile)> = self
+            let live: Vec<(u32, Projectile, u32)> = self
                 .fracture
                 .projectiles
                 .iter()
@@ -831,29 +978,30 @@ mod imp {
                         .get(p.0 as usize)
                         .is_some_and(|s| s.alive && s.generation == p.1)
                 })
-                .map(|p| (p.0, p.2))
+                .map(|p| (p.0, p.2, p.3))
                 .collect();
             let gpu = self
                 .fracture
                 .gpu
                 .clone()
                 .expect("a threshold destructible's GPU");
-            // The fractures' stiffness scales: the shared one's (`None` slot), each own's.
-            let mut targets: Vec<(Option<usize>, f64)> = Vec::new();
+            // The fractures' stiffness scales and whether they predict strikes: the shared
+            // one's (`None` slot), each own's.
+            let mut targets: Vec<(Option<usize>, f64, bool)> = Vec::new();
             if let Some(sh) = &self.fracture.shared {
-                targets.push((None, sh.stiffness_scale));
+                targets.push((None, sh.stiffness_scale, sh.setup.predict_strikes));
             }
             for (k, t) in self.fracture.slots.iter().enumerate() {
                 if let Some(o) = t.as_ref().and_then(|t| t.own.as_ref()) {
-                    targets.push((Some(k), o.stiffness_scale));
+                    targets.push((Some(k), o.stiffness_scale, o.setup.predict_strikes));
                 }
             }
             let stride = std::mem::size_of::<ColliderInfo>() as u64;
-            for (k, scale) in targets {
+            for (k, scale, predict) in targets {
                 let mut shots = Vec::with_capacity(live.len());
                 let mut sides = Vec::with_capacity(live.len());
-                for (b, p) in &live {
-                    let (shot, collider, info) = self.projectile_shot(*b, p, scale)?;
+                for (b, p, launch) in &live {
+                    let (shot, collider, info) = self.projectile_shot(*b, p, scale, *launch)?;
                     shots.push(shot);
                     sides.push((collider, info));
                 }
@@ -899,8 +1047,10 @@ mod imp {
                     );
                 }
                 *colliders = sides.iter().map(|s| s.0).collect();
+                // Without strike prediction the projectiles still load what they touch
+                // (their contact sides), but no strike is predicted.
                 fracture
-                    .set_shots(&gpu, &shots)
+                    .set_shots(&gpu, if predict { &shots } else { &[] })
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             Ok(())
@@ -922,13 +1072,14 @@ mod imp {
             if def.crush.is_none() {
                 if let Some(t) = self.fracture.templates.iter().find(|t| {
                     Arc::ptr_eq(&t.asset, asset)
+                        && t.model == def.model
                         && t.strength_scale == scale_bits
                         && t.dt == dt_bits
                 }) {
                     return Ok(t.clone());
                 }
             }
-            let mut scene = source.threshold_scene(def.strength_scale, dt)?;
+            let mut scene = source.stress_scene(def.model, def.strength_scale, dt)?;
             if let Some(c) = &def.crush {
                 apply_crush_materials(&mut scene, c)?;
             }
@@ -1004,6 +1155,7 @@ mod imp {
             }
             let template = Arc::new(ThresholdTemplate {
                 asset: asset.clone(),
+                model: def.model,
                 strength_scale: scale_bits,
                 dt: dt_bits,
                 scene,
@@ -1025,13 +1177,15 @@ mod imp {
             asset: Arc<DestructibleAssetDesc>,
             index: usize,
         ) -> anyhow::Result<()> {
-            let source = asset.stress.as_ref().ok_or_else(|| anyhow::anyhow!("StrengthModel::Threshold needs an asset with the stress oracle's input (from_glb, cuboid_house or from_pack)"))?;
+            let source = asset.stress.as_ref().ok_or_else(|| anyhow::anyhow!("StrengthModel::{:?} needs an asset with the stress oracle's input (from_glb, cuboid_house or from_pack)", def.model))?;
             // The ingest reads rubble's canonical contact rows, as the lab's engine keeps them.
             anyhow::ensure!(
                 self.contact_storage == crate::ContactStorage::Canonical,
-                "StrengthModel::Threshold reads rubble's canonical contact rows: create the world with ContactStorage::Canonical (it uses {:?})",
+                "StrengthModel::{:?} reads rubble's canonical contact rows: create the world with ContactStorage::Canonical (it uses {:?})",
+                def.model,
                 self.contact_storage
             );
+            let setup = setup_of(def)?;
             let template = self.threshold_template(def, &asset, source)?;
             let ThresholdTemplate {
                 scene,
@@ -1325,67 +1479,43 @@ mod imp {
                     ]);
                 }
             }
+            // The model's records (the load path's and analytic strike's tables, its warm
+            // start, the contact fracture's sweeps, Blast's graph): stress-rubble's
+            // `apply_profile`, as the lab's fracture world makes them.
+            let blast_inputs = stress_rubble::threshold::apply_profile(
+                &mut t,
+                &setup,
+                scene,
+                m,
+                &chunk_of,
+                &bond_source,
+                capacity.max_contacts,
+            )
+            .map_err(|e| anyhow::anyhow!("{}: {e}", def.model.name()))?;
             // Chunk crushing: each chunk's material law, the bonds' centroids, the fragment
             // pool (reserved bodies, one box collider each, parked as the spares are).
             let mut crush_slot = None;
             if let Some(c) = &def.crush {
-                let mut rows = Vec::with_capacity(chunk_count);
-                let mut counts = Vec::with_capacity(chunk_count);
-                let mut lacking = std::collections::BTreeSet::new();
                 // Particles: about volume / size³ a chunk, within its bounds.
-                let particle_count = |volume: f64| -> anyhow::Result<u32> {
+                let particle_count = |volume: f64| -> Result<u32, String> {
                     match c.mass {
                         CrushMass::Particles {
                             size,
                             max_per_chunk,
                             ..
                         } => {
-                            anyhow::ensure!(
-                                size > 0.0 && (1..=4096).contains(&max_per_chunk),
-                                "CrushMass::Particles: size {size} m must be positive and max_per_chunk {max_per_chunk} from 1 to 4096"
-                            );
+                            if !(size > 0.0 && (1..=4096).contains(&max_per_chunk)) {
+                                return Err(format!("CrushMass::Particles: size {size} m must be positive and max_per_chunk {max_per_chunk} from 1 to 4096"));
+                            }
                             let n = (volume / (size as f64).powi(3)).round();
                             Ok((n as u32).clamp(1, max_per_chunk))
                         }
                         _ => Ok(0),
                     }
                 };
-                let mut crushable = 0usize;
-                for (k, &(s, cc)) in chunk_of.iter().enumerate() {
-                    let ch = &m.structures[s].chunks[cc];
-                    let mat = scene.material(&ch.material);
-                    let can = ch.support == Support::None && t.chunks[k][0][3] > 0.0;
-                    match (&mat.crush, can) {
-                        (Some(p), true) => {
-                            crushable += 1;
-                            let n = particle_count(ch.volume())?;
-                            counts.push(n);
-                            rows.push([
-                                [
-                                    p.cap_pressure as f32,
-                                    p.cohesion as f32,
-                                    p.friction_slope as f32,
-                                    p.crush_energy as f32,
-                                ],
-                                [
-                                    p.crush_viscosity as f32,
-                                    ch.volume() as f32,
-                                    f32::from_bits(1),
-                                    n as f32,
-                                ],
-                            ]);
-                        }
-                        (None, true) => {
-                            lacking.insert(ch.material.clone());
-                            counts.push(0);
-                            rows.push([[0.0; 4]; 2]);
-                        }
-                        _ => {
-                            counts.push(0);
-                            rows.push([[0.0; 4]; 2]);
-                        }
-                    }
-                }
+                let (rows, counts, crushable, lacking) =
+                    stress_rubble::threshold::crush_rows(&t, scene, m, &chunk_of, particle_count)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                 anyhow::ensure!(
                     crushable > 0,
                     "DestructibleDef::crush: no chunk can crush: its materials {lacking:?} have no crush parameters (give them in Crush::materials, e.g. from stress_ref::crush::presets, or import a ScenePack v3 with materials[].crush)"
@@ -1541,12 +1671,13 @@ mod imp {
                 }
             }
             let bond_count = t.bonds.len();
+            let local_sides = sides.clone();
             let blast = def.blast_loading.then(|| {
                 blast::BlastSlot::new(
                     &gpu.device,
                     m.clone(),
                     &scene,
-                    bond_source,
+                    bond_source.clone(),
                     chunk_of.clone(),
                 )
             });
@@ -1578,8 +1709,12 @@ mod imp {
                     chunk_count as u32,
                     &table,
                 );
-                let fracture = GpuFracture::new(&gpu, &t, &buffers(&self.sim), &ingest)
+                let mut fracture = GpuFracture::new(&gpu, &t, &buffers(&self.sim), &ingest)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+                if let Some(b) = &blast_inputs {
+                    let frame = b.frame(&gpu, scene.gravity).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    fracture.set_blast(&gpu, frame).map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
                 let own = Own {
                     ingest,
                     fracture,
@@ -1588,13 +1723,19 @@ mod imp {
                     stiffness_scale: scene.sim.stiffness_scale,
                     static_info,
                     projectile_colliders: Vec::new(),
+                    setup,
                 };
                 (fracture::Base::default(), Some(own))
             } else {
                 let band = t.band;
                 let dt = t.dt;
                 let stiffness_scale = scene.sim.stiffness_scale;
-                self.threshold_shared(&gpu, static_info, stiffness_scale, band, dt)?;
+                self.threshold_shared(&gpu, static_info, stiffness_scale, band, dt, setup)?;
+                if self.fracture.shared.as_ref().is_some_and(|sh| sh.rebuild) {
+                    // Laid out with the others once the slot is in (`rebuild_shared`).
+                    self.fracture.spare.extend(spare.iter().copied());
+                    (fracture::Base::default(), None)
+                } else {
                 let sh = self.fracture.shared.as_mut().expect("shared fracture");
                 let (n, e, p) = (chunk_count as u32, bond_count as u32, t.parts.len() as u32);
                 let chunk_at = sh.chunks.take(n)?;
@@ -1670,6 +1811,17 @@ mod imp {
                 }
                 self.fracture.spare.extend(spare.iter().copied());
                 (base, None)
+                }
+            };
+            let rebuild = own.is_none()
+                && self.fracture.shared.as_ref().is_some_and(|sh| sh.rebuild);
+            let cluster_frames: Vec<(u32, fracture::FrameRecord)> = if rebuild {
+                cluster_bodies
+                    .iter()
+                    .map(|c| (c.0, t.frames[c.0 as usize]))
+                    .collect()
+            } else {
+                Vec::new()
             };
             if own.is_none() {
                 // Its body frames and free marks went to the shared fracture with it (and
@@ -1695,6 +1847,9 @@ mod imp {
                 support: None,
                 crush: crush_slot,
                 own,
+                cluster_frames,
+                sides: if rebuild { local_sides } else { Vec::new() },
+                blast_inputs: if rebuild { blast_inputs } else { None },
             };
             let mut slot = slot;
             if def.support_loss {
@@ -1752,7 +1907,7 @@ mod imp {
                 (&mut self.fracture.chunk_ranges, base.chunk, n),
                 (&mut self.fracture.bond_ranges, base.bond, e),
             ] {
-                if shared {
+                if shared && !rebuild {
                     let at = ranges.partition_point(|r| r.0 < start);
                     ranges.insert(at, (start, start + len, k));
                 }
@@ -1764,7 +1919,7 @@ mod imp {
             self.fracture.fixed_plan = Some(plan);
             self.sim.set_plan_hints(plan.0, plan.1);
             let d = &mut self.destructibles[index];
-            d.model = StrengthModel::Threshold;
+            d.model = def.model;
             d.threshold = Some(k as u32);
             d.chunk_bodies = self.fracture.slots[k]
                 .as_ref()
@@ -1776,6 +1931,9 @@ mod imp {
             d.bond_joints = vec![None; bond_count];
             d.bond_intact = vec![true; bond_count];
             d.crushed = vec![false; chunk_count];
+            if rebuild {
+                self.rebuild_shared(&gpu)?;
+            }
             self.sync_projectiles()?;
             // Hand this destructible's uploads to the GPU and wait for them: staging memory
             // is reclaimed only once its copies finish, so placing a map's worth without
@@ -1804,8 +1962,25 @@ mod imp {
             stiffness_scale: f64,
             band: f32,
             dt: f32,
+            setup: ProfileSetup,
         ) -> anyhow::Result<()> {
             if let Some(sh) = &self.fracture.shared {
+                anyhow::ensure!(
+                    sh.setup == setup,
+                    "stress destructibles in one world share one fracture, which runs one model: this one's {} (contact fracture sweeps {}, strike prediction {}) is not the world's {} ({}, {}); give it crushing or blast loading for its own fracture, or place it in another world",
+                    setup.profile.name(),
+                    setup.contact_sweeps,
+                    setup.predict_strikes,
+                    sh.setup.profile.name(),
+                    sh.setup.contact_sweeps,
+                    sh.setup.predict_strikes
+                );
+                anyhow::ensure!(
+                    !(sh.rebuild && sh.stepped),
+                    "a {} world lays out its fracture once, before its first step (the model's per-bond tables and graph are not appended to a running fracture): place every {} destructible before stepping",
+                    setup.profile.name(),
+                    setup.profile.name()
+                );
                 anyhow::ensure!(
                     sh.static_info.b == static_info.b
                         && sh.stiffness_scale == stiffness_scale
@@ -1853,6 +2028,18 @@ mod imp {
                 room.chunks,
                 &table,
             );
+            let rebuild = !setup.appendable();
+            // Laid out anew at each placement: a placeholder until the first.
+            let made = if rebuild {
+                fracture::Capacity {
+                    chunks: 1,
+                    bonds: 1,
+                    parts: 1,
+                    events: EVENT_ROOM,
+                }
+            } else {
+                room
+            };
             let empty = FractureTables {
                 max_bodies: capacity.max_bodies,
                 pool_cap: stress_rubble::threshold::pool_cap(capacity.max_contacts),
@@ -1865,7 +2052,7 @@ mod imp {
                 ..Default::default()
             };
             let fracture =
-                GpuFracture::with_capacity(gpu, &empty, room, &buffers(&self.sim), &ingest)
+                GpuFracture::with_capacity(gpu, &empty, made, &buffers(&self.sim), &ingest)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             self.fracture.shared = Some(Shared {
                 ingest,
@@ -1878,11 +2065,158 @@ mod imp {
                 band,
                 dt,
                 projectile_colliders: Vec::new(),
+                setup,
+                rebuild,
+                stepped: false,
             });
             if let Some(n) = self.fracture_pieces {
                 // The world's piece pool: parked static slots any split may take.
                 self.add_to_pool(gpu, n)?;
             }
+            Ok(())
+        }
+
+        /// Lay the shared fracture out anew over every destructible in it (a model whose
+        /// records cannot be appended: [`ProfileSetup::appendable`]): their tables one after
+        /// another (each chunk's first part, each bond's chunks, each per-bond record's
+        /// material and each chunk's adjacency at its offset), the load path's warm starts,
+        /// Blast's graphs joined, the colliders' contact sides renumbered. Only before the
+        /// fracture's first step (`threshold_shared` says so otherwise): nothing has broken,
+        /// split or loaded yet, so nothing is lost.
+        fn rebuild_shared(&mut self, gpu: &Gpu) -> anyhow::Result<()> {
+            let capacity = self.sim.capacity();
+            let sh = self.fracture.shared.as_mut().expect("shared fracture");
+            anyhow::ensure!(sh.rebuild && !sh.stepped, "rebuild_shared: a fracture that steps");
+            let mut chunks = Ranges::new("chunks", sh.chunks.room);
+            let mut bonds = Ranges::new("bonds", sh.bonds.room);
+            let mut parts = Ranges::new("chunk parts", sh.parts.room);
+            let mut t = FractureTables {
+                max_bodies: capacity.max_bodies,
+                pool_cap: stress_rubble::threshold::pool_cap(capacity.max_contacts),
+                band: sh.band,
+                dt: sh.dt,
+                strike_speed: stress_ref::world::tiered_impact_speed() as f32,
+                frames: vec![[[0.0; 4], [0.0, 0.0, 0.0, 1.0]]; capacity.max_bodies as usize],
+                free: vec![0; capacity.max_bodies as usize],
+                ..Default::default()
+            };
+            let mut blast: Option<BlastInputs> = None;
+            let mut sides: Vec<(u32, ColliderInfo)> = Vec::new();
+            let (mut chunk_ranges, mut bond_ranges) = (Vec::new(), Vec::new());
+            let mut first = true;
+            for (k, slot) in self.fracture.slots.iter_mut().enumerate() {
+                let Some(slot) = slot.as_mut().filter(|s| s.own.is_none()) else {
+                    continue;
+                };
+                let l = &slot.tables;
+                if first {
+                    // Every member runs the same model (`threshold_shared`).
+                    t.load_model = l.load_model;
+                    t.strike_model = l.strike_model;
+                    t.contact_sweeps = l.contact_sweeps;
+                    t.max_contacts = l.max_contacts;
+                    t.impact_peak = l.impact_peak;
+                    t.gravity = l.gravity;
+                    first = false;
+                }
+                let (n, e, p) = (l.chunks.len() as u32, l.bonds.len() as u32, l.parts.len() as u32);
+                let base = fracture::Base {
+                    chunk: chunks.take(n)?,
+                    bond: bonds.take(e)?,
+                    part: parts.take(p)?,
+                };
+                // One after another from 0: the tables' lengths are the offsets.
+                debug_assert_eq!(base.chunk as usize, t.chunks.len());
+                debug_assert_eq!(base.bond as usize, t.bonds.len());
+                t.chunks.extend(l.chunks.iter().map(|c| {
+                    let mut c = *c;
+                    c[2][2] = f32::from_bits(c[2][2].to_bits() + base.part);
+                    c
+                }));
+                t.info.extend(&l.info);
+                t.bonds.extend(l.bonds.iter().map(|b| [b[0] + base.chunk, b[1] + base.chunk, b[2], b[3]]));
+                t.parts.extend(&l.parts);
+                t.chunk_body.extend(&l.chunk_body);
+                t.geometry.extend(&l.geometry);
+                let (adj, mats) = (t.ext.adjacency.len() as u32, t.ext.materials.len() as u32);
+                t.ext.bonds.extend(l.ext.bonds.iter().map(|b| {
+                    let mut b = *b;
+                    b[9][0] = f32::from_bits(b[9][0].to_bits() + mats);
+                    b
+                }));
+                t.ext.chunks.extend(l.ext.chunks.iter().map(|c| {
+                    let mut c = *c;
+                    c[0][0] = f32::from_bits(c[0][0].to_bits() + adj);
+                    c
+                }));
+                t.ext.adjacency.extend(l.ext.adjacency.iter().map(|&b| b + base.bond));
+                t.ext.materials.extend(&l.ext.materials);
+                t.lp_init.extend(&l.lp_init);
+                for &(body, frame) in &slot.cluster_frames {
+                    t.frames[body as usize] = frame;
+                }
+                if let Some(b) = &slot.blast_inputs {
+                    blast.get_or_insert_with(BlastInputs::default).append(b);
+                }
+                sides.extend(slot.sides.iter().map(|&(col, mut info)| {
+                    info.a[0] += base.chunk;
+                    (col, info)
+                }));
+                chunk_ranges.push((base.chunk, base.chunk + n, k));
+                bond_ranges.push((base.bond, base.bond + e, k));
+                slot.base = base;
+            }
+            for &s in &self.fracture.spare {
+                t.free[s as usize] = 1;
+            }
+            let room = fracture::Capacity {
+                chunks: (t.chunks.len() as u32).max(1),
+                bonds: (t.bonds.len() as u32).max(1),
+                parts: (t.parts.len() as u32).max(1),
+                events: EVENT_ROOM,
+            };
+            anyhow::ensure!(
+                t.chunks.len() as u32 == room.chunks && t.bonds.len() as u32 == room.bonds,
+                "a {} fracture needs at least one chunk and one bond",
+                sh.setup.profile.name()
+            );
+            let engine = EngineBuffers {
+                bodies: self.sim.body_buffer(),
+                colliders: self.sim.collider_buffer(),
+                contacts: self.sim.contact_buffer(),
+                counters: self.sim.counters_buffer(),
+            };
+            // The ingest's per-chunk records are laid out for its chunk count, which the
+            // fracture reads at its own: a new ingest for the fracture's (every collider the
+            // static side but the members', whose sides follow; the projectiles' are synced).
+            let mut table = vec![sh.static_info; capacity.max_colliders as usize];
+            for &(col, info) in &sides {
+                table[col as usize] = info;
+            }
+            sh.ingest = EngineIngest::new(
+                gpu,
+                capacity.max_contacts,
+                1,
+                capacity.max_bodies,
+                room.chunks,
+                &table,
+            );
+            let mut f = GpuFracture::with_capacity(gpu, &t, room, &engine, &sh.ingest)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", sh.setup.profile.name()))?;
+            if let Some(b) = &blast {
+                let g = [t.gravity[0] as f64, t.gravity[1] as f64, t.gravity[2] as f64];
+                let frame = b.frame(gpu, g).map_err(|e| anyhow::anyhow!("{e}"))?;
+                f.set_blast(gpu, frame).map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
+            sh.fracture = f;
+            sh.chunks = chunks;
+            sh.bonds = bonds;
+            sh.parts = parts;
+            // The projectiles' sides and shots go to the new fracture (`sync_projectiles`).
+            sh.projectile_colliders.clear();
+            self.fracture.chunk_ranges = chunk_ranges;
+            self.fracture.bond_ranges = bond_ranges;
+            self.fracture.projectiles_dirty = true;
             Ok(())
         }
 
@@ -1941,6 +2275,106 @@ mod imp {
             }
         }
 
+        /// Directed debris on what the stress models' splits make: every reserved body slot a
+        /// split may move a piece onto (the shared pool and each own fracture's spares) armed
+        /// with `tag_mask` (0: off), so a piece that breaks off is guided as a chunk body is.
+        /// A parked slot is static and out of every pair; the record waits for its free flight.
+        pub(crate) fn guide_fracture_spares(&mut self, tag_mask: u32) -> anyhow::Result<()> {
+            let mut slots: Vec<u32> = self.fracture.spare.iter().copied().collect();
+            for o in self.fracture.slots.iter().flatten().filter_map(|t| t.own.as_ref()) {
+                slots.extend(&o.spare);
+            }
+            slots.sort_unstable();
+            slots.dedup();
+            let records: Vec<(u32, engine_schema::guidance::GuideBodyGpu)> = slots
+                .into_iter()
+                .map(|b| {
+                    let r = if tag_mask == 0 {
+                        engine_schema::guidance::GuideBodyGpu::default()
+                    } else {
+                        engine_schema::guidance::GuideBodyGpu::armed(self.bodies[b as usize].generation, tag_mask)
+                    };
+                    (b, r)
+                })
+                .collect();
+            for (first, run) in runs(records) {
+                self.sim.write_guide_bodies(first, &run)?;
+            }
+            Ok(())
+        }
+
+        /// Diagnostic (`blast_gpu`): the shared fracture's Blast graph, for a reference
+        /// solve of it (stress-ref `BlastSolver`).
+        #[doc(hidden)]
+        pub fn stress_blast_graph(&self) -> Option<stress_ref::blast_bond::BlastGraph> {
+            let sh = self.fracture.shared.as_ref()?;
+            Some(sh.fracture.blast()?.solver.graph.clone())
+        }
+
+        /// Diagnostic (`blast_gpu`, waits on the GPU): the shared fracture's Blast bond
+        /// impulses as its last solve left them, in the graph's bond order.
+        #[doc(hidden)]
+        pub fn stress_blast_impulses(&self) -> Option<Vec<stress_ref::blast_bond::AngLin>> {
+            let sh = self.fracture.shared.as_ref()?;
+            Some(sh.fracture.blast()?.solver.impulses())
+        }
+
+        /// Whether a fracture runs the in-step contact fracture
+        /// (`FractureOptions::contact_fracture`): the rigid step is then encoded with it
+        /// ([`Self::step_encode_contact`]).
+        pub(crate) fn fracture_in_step(&self) -> bool {
+            self.fracture
+                .shared
+                .as_ref()
+                .is_some_and(|sh| sh.setup.contact_sweeps > 0)
+                || self
+                    .fracture
+                    .slots
+                    .iter()
+                    .flatten()
+                    .filter_map(|t| t.own.as_ref())
+                    .any(|o| o.setup.contact_sweeps > 0)
+        }
+
+        /// The rigid step with the in-step contact fracture where its contacts are made and
+        /// kept, before its solve (stress-rubble `CONTACT_PHASE`), as the lab's fracture
+        /// world steps.
+        pub(crate) fn step_encode_contact(
+            &mut self,
+            enc: &mut wgpu::CommandEncoder,
+        ) -> anyhow::Result<()> {
+            let gpu = self.fracture.gpu.clone().expect("a fracture's GPU");
+            let rows = self.sim.next_contact_offset();
+            let mut fractures: Vec<&mut GpuFracture> = Vec::new();
+            if let Some(sh) = self.fracture.shared.as_mut() {
+                if sh.setup.contact_sweeps > 0 {
+                    fractures.push(&mut sh.fracture);
+                }
+            }
+            for o in self
+                .fracture
+                .slots
+                .iter_mut()
+                .flatten()
+                .filter_map(|t| t.own.as_mut())
+            {
+                if o.setup.contact_sweeps > 0 {
+                    fractures.push(&mut o.fracture);
+                }
+            }
+            for f in fractures.iter_mut() {
+                f.set_contact_rows(&gpu, rows);
+            }
+            self.sim
+                .step_encode_with(enc, stress_rubble::threshold::CONTACT_PHASE, &mut |e| {
+                    for f in fractures.iter_mut() {
+                        f.encode_contact_fracture(e);
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
+            Ok(())
+        }
+
         pub(crate) fn encode_fracture(&mut self, enc: &mut wgpu::CommandEncoder) {
             let Some(gpu) = self.fracture.gpu.clone() else {
                 return;
@@ -1953,6 +2387,7 @@ mod imp {
                 sh.ingest.substep(&gpu, enc, &e, offset, 0, dt);
                 sh.ingest.merge(&gpu, enc, &e, 1);
                 sh.fracture.encode_frame(&gpu, enc, step);
+                sh.stepped = true;
             }
             for o in self
                 .fracture
@@ -2096,7 +2531,7 @@ mod imp {
                 EVENT_ROOM.moved,
                 EVENT_ROOM.frames
             );
-            anyhow::ensure!(counters[3] == 0, "step {step}: threshold fracture error {:#x} (1: no free body slot, 2: mass sum out of range, 4: union did not settle, 8: impact pulse pool full)", counters[3]);
+            anyhow::ensure!(counters[3] == 0, "step {step}: fracture error {:#x} ({})", counters[3], fracture_error_text(counters[3]));
             let words = |r: FractureRead, n: usize| -> &[u32] {
                 find(r)
                     .map(|b| &bytemuck::cast_slice::<u8, u32>(b)[..n])
@@ -2197,7 +2632,7 @@ mod imp {
                     counters[3] & fracture::CRUSH_ERROR_EVENTS == 0,
                     "step {step}: more chunks crushed in one step than Crush::max_per_step"
                 );
-                anyhow::ensure!(counters[3] == 0, "step {step}: threshold fracture error {:#x} (1: no free body slot, 2: mass sum out of range, 4: union did not settle, 8: impact pulse pool full)", counters[3]);
+                anyhow::ensure!(counters[3] == 0, "step {step}: fracture error {:#x} ({})", counters[3], fracture_error_text(counters[3]));
                 let crushes: Vec<CrushEvent> = find(FractureRead::Crush)
                     .map(|b| {
                         CrushEvent::decode(
@@ -2511,11 +2946,23 @@ mod imp {
         /// Whether a destructible's flow keeps a chunk's crush damage growing
         /// (`SupportLoss::overstressed`): its steps must run with nothing awake.
         pub(crate) fn fracture_flow_needs_step(&self) -> bool {
-            self.fracture
-                .slots
-                .iter()
-                .flatten()
-                .any(|t| t.support.as_ref().is_some_and(|s| s.overstressed))
+            // The load path and Blast's solve iterate a warm-started equilibrium a fixed
+            // budget a step, converging over steps: a world at rest still steps them, as
+            // the lab's fracture world does (skipping would leave the first, unconverged
+            // answer in place).
+            let iterates = |s: &ProfileSetup| {
+                s.profile == Profile::BlastGpu || s.load_model != stress_ref::capability::LoadModel::Threshold
+            };
+            self.fracture.shared.as_ref().is_some_and(|sh| iterates(&sh.setup))
+                || self
+                    .fracture
+                    .slots
+                    .iter()
+                    .flatten()
+                    .any(|t| {
+                        t.support.as_ref().is_some_and(|s| s.overstressed)
+                            || t.own.as_ref().is_some_and(|o| iterates(&o.setup))
+                    })
         }
 
         /// A step's crushes: each chunk's body (parked on the GPU) retired, its fragments

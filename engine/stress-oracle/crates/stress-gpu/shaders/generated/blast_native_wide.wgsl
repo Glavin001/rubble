@@ -37,6 +37,8 @@ struct BlastParams_std140_0
     @align(4) section_bending_0 : u32,
     @align(16) chunk_loads_0 : u32,
     @align(4) r_virial_0 : u32,
+    @align(8) a_events_0 : u32,
+    @align(4) ev_broken_cap_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;

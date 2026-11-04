@@ -897,6 +897,9 @@ pub const MODEL_ENTRIES: [&str; 44] = [
 ];
 
 /// Every fracture entry point (`fracture.slang`), crush ones included.
+/// `fr_il_run`'s groups per row (`fracture.slang` `IL_RUN_ROW`).
+const IL_RUN_ROW: u32 = 65_535;
+
 pub fn entries() -> &'static [&'static str] {
     &ENTRIES
 }
@@ -1083,6 +1086,9 @@ pub struct GpuFracture {
     /// Per engine contact row the in-step contact fracture's saved anchors (2 float4).
     /// `STRESS_CS_TIMING=1`: its stages' timestamps.
     cs_timing: Option<CsTiming>,
+    /// This step's event lists were opened by the in-step contact fracture (which records
+    /// its breaks and splits into them before the frame's own): the frame keeps them.
+    events_opened: bool,
     engine_counters: Option<wgpu::Buffer>,
     /// Chunk crushing's tables, state and params (placeholders without it).
     pub crush_tab: wgpu::Buffer,
@@ -1392,6 +1398,7 @@ impl GpuFracture {
             ext,
             lp,
             cs_timing: CsTiming::new(gpu),
+            events_opened: false,
             engine_counters: None,
             binds: Vec::new(),
             scan_binds: Vec::new(),
@@ -1758,6 +1765,8 @@ impl GpuFracture {
             w_alive: l.w_alive(),
             a_dirty: l.a_dirty(),
             a_counters: l.a_counters(),
+            a_events: l.a_events(),
+            ev_broken_cap: l.events.broken,
             crush: (self.crush.enabled != 0).then_some((&self.crush_rw, self.crush.r_virial)),
         };
         blast.bind(gpu, &f);
@@ -1777,7 +1786,8 @@ impl GpuFracture {
         let (n, e, b) = (self.params.chunk_used as usize, self.params.bond_used as usize, self.layout.b as usize);
         let crush = self.crush.enabled != 0;
         let host_breaks = self.upload_host_breaks(gpu);
-        let events = self.layout.events != Events::default();
+        // Opened before the step's in-step contact fracture, which recorded into them.
+        let events = self.layout.events != Events::default() && !std::mem::take(&mut self.events_opened);
         if events || host_breaks > 0 {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             if events {
@@ -1877,8 +1887,9 @@ impl GpuFracture {
                     self.direct(&mut pass, "fr_il_tube_count", n);
                     self.direct(&mut pass, "fr_il_tube_base", b);
                     self.direct(&mut pass, "fr_il_tube_collect", n);
-                    // A group per body slot.
-                    self.direct(&mut pass, "fr_il_run", 64 * b);
+                    // A group per body slot, in rows of `IL_RUN_ROW` groups (WebGPU's
+                    // largest dispatch dimension).
+                    self.direct_rows(&mut pass, "fr_il_run", b, IL_RUN_ROW);
                     self.direct(&mut pass, "fr_il_strike", b);
                     self.direct(&mut pass, "fr_il_mark", n);
                     self.direct(&mut pass, "fr_il_breaks", e);
@@ -2041,6 +2052,13 @@ impl GpuFracture {
     pub fn encode_contact_fracture(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if self.params.cs_sweeps == 0 {
             return;
+        }
+        if self.layout.events != Events::default() {
+            // The step's event lists start here: the contact fracture's breaks and splits are
+            // the step's first (`encode_frame` then keeps them).
+            let mut p = encoder.begin_compute_pass(&Default::default());
+            self.direct(&mut p, "fr_events_reset", 1);
+            self.events_opened = true;
         }
         // The step's contact rows' count (`StepCounters` word 2) where the kernels read it.
         let counters = self.engine_counters.as_ref().expect("engine bound");
@@ -2236,6 +2254,16 @@ impl GpuFracture {
             gpu.write_buffer(&self.work, 4 * self.layout.w_frame() as u64, bytemuck::cast_slice(&words));
         }
         self.frame = Some(want);
+    }
+
+    /// `groups` workgroups of kernel `name` in rows of `row` (x), as many rows as they take
+    /// (y): the kernel numbers its group `y * row + x` and leaves past `groups`.
+    fn direct_rows(&self, pass: &mut wgpu::ComputePass<'_>, name: &str, groups: usize, row: u32) {
+        let (i, k) = self.kernel(name);
+        let groups = groups.max(1) as u32;
+        pass.set_pipeline(&k.pipeline);
+        pass.set_bind_group(0, self.binds[i].as_ref().expect("bound kernel"), &[]);
+        pass.dispatch_workgroups(groups.min(row), groups.div_ceil(row), 1);
     }
 
     fn direct(&self, pass: &mut wgpu::ComputePass<'_>, name: &str, n: usize) {

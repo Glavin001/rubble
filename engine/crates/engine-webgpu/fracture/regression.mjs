@@ -42,14 +42,14 @@ export async function runCcdShotRegression(demo=window.__FRACTURE_DEMO__,{speed=
  const runs={};
  for(const ccd of [false,true]){
   await demo.reset();await demo.stepFrames(10);const before=await demo.snapshot();
-  sim().setProjectileCcd(ccd);sim().setProjectileSpeedScale(speed/sim().shotSpeed);
+  sim().setBall(1,speed/sim().shotSpeed,ccd);
   const id=await demo.shootRay(add(crown,[0,0,3]),[0,0,-1]);let minZ=Infinity;
   for(let t=0;t<ticks;t++){const c=await demo.stepFrames(1);require(c.overflow===0,'GPU capacity overflow');minZ=Math.min(minZ,(await demo.snapshot())[id*28+2])}
   const after=await demo.snapshot();let moved=0;
   for(let i=1;i<start;i++)moved=Math.max(moved,Math.hypot(...sub(Array.from(after.slice(i*28,i*28+3)),Array.from(before.slice(i*28,i*28+3)))));
   runs[ccd?'ccd':'control']={minZ,moved,finite:after.slice(id*28,id*28+28).every(Number.isFinite)};
  }
- sim().setProjectileSpeedScale(1);
+ sim().setBall(1,1,true);
  require(runs.control.minZ<back-2,`the plain ball should pass the arch (z ${runs.control.minZ})`);
  require(runs.ccd.finite,'the CCD ball has a non-finite state');
  require(runs.ccd.moved>5&&runs.ccd.moved>20*runs.control.moved,`the CCD ball should knock the crown out (${runs.ccd.moved} vs ${runs.control.moved})`);
@@ -123,7 +123,7 @@ export async function runPhaseThroughRegression(demo=window.__FRACTURE_DEMO__,{s
  const results=[];
  for(const scale of scales)for(const shot of shots.slice(0,limit)){
   await demo.reset();await demo.stepFrames(2);
-  sim().setProjectileCcd(ccd);sim().setProjectileSpeedScale(scale);
+  sim().setBall(1,scale,ccd);
   const speed=sim().shotSpeed*scale,ticks=Math.min(maxTicks,Math.max(30,Math.ceil((Math.max(hi[0]-lo[0],hi[1]-lo[1])+20)/(speed*dt))));
   const id=await demo.shootRay(shot.origin,shot.dir);
   let prev=await demo.snapshot(),phase=0,first=null,hit=false;
@@ -146,7 +146,7 @@ export async function runPhaseThroughRegression(demo=window.__FRACTURE_DEMO__,{s
   const r={scale,speed,label:shot.label,phase,first,hit};results.push(r);
   log(`×${scale} (${speed.toFixed(0)} m/s) ${shot.label}: ${phase} phase-throughs${first?` — ${first}`:''}`);
  }
- sim().setProjectileSpeedScale(1);sim().setProjectileCcd(true);
+ sim().setBall(1,1,true);
  const failed=results.filter(r=>r.phase>0||!r.hit);
  return {passed:failed.length===0,shots:results.length,failed,phaseThroughs:results.reduce((s,r)=>s+r.phase,0)};
 }
@@ -179,7 +179,7 @@ export async function runLiveShotRegression(demo=window.__FRACTURE_DEMO__,{shots
  await demo.reset();
  const scene=demo.scene,sim=demo.simulation,start=scene.projectileStart;
  const pieces=scene.colliders.map((c,i)=>({c,i})).filter(({c})=>(c.shape===3||c.shape===2)&&c.body>=1&&c.body<start);
- sim.setProjectileCcd(ccd);sim.setProjectileSpeedScale(scale);
+ sim.setBall(1,scale,ccd);
  const canvas=document.getElementById('view'),rect=canvas.getBoundingClientRect();
  sim.captureSteps(true);demo.setRunning(true);
  let k=0x5eed;const rnd=()=>{k=(k*1103515245+12345)>>>0;return k/4294967296};
@@ -204,7 +204,7 @@ export async function runLiveShotRegression(demo=window.__FRACTURE_DEMO__,{shots
   if(prev)for(const id of flying)if(!fresh.has(id))for(const f of stepCrossings(scene,pieces,prev,e.bodies,id))failures.push(`step ${steps}: ${f}`);
   fresh.clear();prev=e.bodies;steps++;
  }
- sim.setProjectileSpeedScale(1);sim.setProjectileCcd(true);
+ sim.setBall(1,1,true);
  const r={passed:failures.length===0,shots,steps,launchedMidSlicedStep:sliced,phaseThroughs:failures.length,first:failures.slice(0,5)};
  log(JSON.stringify(r));return r;
 }

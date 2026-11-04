@@ -110,7 +110,7 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
   const dpr=Math.min(devicePixelRatio,2),w=Math.max(1,Math.round(canvas.clientWidth*dpr)),h=Math.max(1,Math.round(canvas.clientHeight*dpr));
   if(w!==width||h!==height){width=canvas.width=w;height=canvas.height=h;depth?.destroy();depth=device.createTexture({size:[w,h],format:'depth24plus',usage:GPUTextureUsage.RENDER_ATTACHMENT});}
   input.update();
-  device.queue.writeBuffer(uniform,0,orbit.viewProj(w/h));device.queue.writeBuffer(uniform,64,new Uint32Array([scene.instanceStride||0,colorMode,jointsPerCopy,0]));
+  device.queue.writeBuffer(uniform,0,orbit.viewProj(w/h));device.queue.writeBuffer(uniform,64,new Uint32Array([scene.instanceStride||0,colorMode,jointsPerCopy,simulation.poseDraw?1:0]));
   const timed=!stamps&&frameTimer&&!frameTimer.busy&&performance.now()-frameTimer.last>250;
   const writes=stamps??(timed?{querySet:frameTimer.query,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1}:null);
   const enc=device.createCommandEncoder(),pass=enc.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:[.035,.055,.075,1],loadOp:'clear',storeOp:'store'}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'},...(writes?{timestampWrites:writes}:{})});

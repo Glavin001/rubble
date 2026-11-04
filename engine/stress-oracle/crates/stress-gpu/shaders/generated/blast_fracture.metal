@@ -122,6 +122,8 @@ struct BlastParams_0
     uint section_bending_0;
     uint chunk_loads_0;
     uint r_virial_0;
+    uint a_events_0;
+    uint ev_broken_cap_0;
 };
 
 struct BlastBond_natural_0
@@ -331,6 +333,18 @@ uint topo_dirty_0(uint node_count_2)
     uint _S39 = atomic_fetch_or_explicit((&kernelContext_2)->atom_0+((&kernelContext_2)->params_0->a_dirty_0 + *((&kernelContext_2)->work_0+bond_0.n0_0)), 1U, memory_order_relaxed);
     uint _S40 = atomic_fetch_add_explicit((&kernelContext_2)->atom_0+(&kernelContext_2)->params_0->a_counters_0, 1U, memory_order_relaxed);
     uint _S41 = atomic_fetch_add_explicit((&kernelContext_2)->atom_0+((&kernelContext_2)->params_0->a_counters_0 + 1U), 1U, memory_order_relaxed);
+    if(((&kernelContext_2)->params_0->ev_broken_cap_0) != 0U)
+    {
+        uint i_0 = atomic_fetch_add_explicit((&kernelContext_2)->atom_0+((&kernelContext_2)->params_0->a_counters_0 + 20U), 1U, memory_order_relaxed);
+        if(i_0 < ((&kernelContext_2)->params_0->ev_broken_cap_0))
+        {
+            atomic_store_explicit((&kernelContext_2)->atom_0+((&kernelContext_2)->params_0->a_events_0 + i_0), j_1, memory_order_relaxed);
+        }
+        else
+        {
+            uint _S42 = atomic_fetch_or_explicit((&kernelContext_2)->atom_0+((&kernelContext_2)->params_0->a_counters_0 + 3U), 128U, memory_order_relaxed);
+        }
+    }
     return;
 }
 
