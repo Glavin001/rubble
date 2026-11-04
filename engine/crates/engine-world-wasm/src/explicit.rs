@@ -20,6 +20,10 @@ use engine_webgpu::ExplicitBeamsGpu;
 use glam::{Quat, Vec3};
 use wasm_bindgen::prelude::*;
 
+// The crash-test lab: the node grab, per-beam strain constants, frame-state reads.
+#[path = "explicit_lab.rs"]
+mod crash_lab;
+
 /// Steps per second.
 const RATE: f64 = 2000.0;
 /// The most steps one frame may take (the GPU host's parameter copies).
@@ -59,6 +63,8 @@ pub struct ExplicitSim {
     /// per beam (ends, vehicle | tyre << 16, spawn rest bits).
     tris: wgpu::Buffer,
     beam_recs: wgpu::Buffer,
+    /// The crash lab's per-beam constants (`crash_lab::lab_beam_words`).
+    lab_beams: wgpu::Buffer,
     tri_count: u32,
     steps: u64,
     timed: bool,
@@ -290,7 +296,8 @@ struct ArenaSpot {
 ///   `at` metres along it from its centre.
 /// * `pole`: into a 20 cm square pole `offset` metres across, turned by `angle`.
 /// * `sidepole`: sliding sideways at `speed` into a 20 cm pole `at` metres along its
-///   side from its centre.
+///   side from its centre; `angle` (default 90) the travel's angle from its forward
+///   axis (75: the oblique pole test).
 /// * `limbo`: under a bar 30 cm deep whose underside is `bar` metres up (default 1).
 /// * `drop`: dropped flat from `height` metres (default 8), moving forward at `speed`
 ///   (default 0).
@@ -352,9 +359,19 @@ fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32) -
             (vec![spot(Vec3::ZERO, a, v, vec![b], None)], vec![b])
         }
         "sidepole" => {
-            let b = pole(num(spec, "at", 0.0) as f32, 0.5 * width + gap + 0.1);
-            // Forward +X, its centre at the origin, moving along +Z (sideways).
-            (vec![spot(Vec3::new(0.5 * length, 0.0, 0.0), 0.5 * PI, v, vec![b], Some(Vec3::new(0.0, 0.0, v)))], vec![b])
+            let at = num(spec, "at", 0.0) as f32;
+            // Forward +X, its centre at the origin, moving along +Z (sideways), or
+            // with `angle` (degrees from its forward axis, default 90) obliquely, as an
+            // oblique pole test at 75°: the pole on the path of the side's point `at`.
+            let angle = num(spec, "angle", 90.0) as f32;
+            let (b, vel) = if angle == 90.0 {
+                (pole(at, 0.5 * width + gap + 0.1), Vec3::new(0.0, 0.0, v))
+            } else {
+                let d = Vec3::new(angle.to_radians().cos(), 0.0, angle.to_radians().sin());
+                let p = Vec3::new(at, 0.0, 0.5 * width) + d * (gap + 0.1);
+                (pole(p.x, p.z), d * v)
+            };
+            (vec![spot(Vec3::new(0.5 * length, 0.0, 0.0), 0.5 * PI, v, vec![b], Some(vel))], vec![b])
         }
         "limbo" => {
             let bar = num(spec, "bar", 1.0) as f32;
@@ -661,6 +678,8 @@ impl ExplicitSim {
         };
         let tris_buf = init("explicit-render-tris", &tris);
         let recs_buf = init("explicit-render-beams", &recs);
+        let lab: Vec<(&ExplicitBeams, Vec3)> = vehicles.iter().map(|v| (&v.sim, v.forward)).collect();
+        let lab_beams = init("explicit-lab-beams", &crash_lab::lab_beam_words(&lab));
         Ok(Self {
             gpu,
             device: device.clone(),
@@ -671,6 +690,7 @@ impl ExplicitSim {
             shapes,
             tris: tris_buf,
             beam_recs: recs_buf,
+            lab_beams,
             steps: 0,
             timed,
         })

@@ -73,6 +73,8 @@
     import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
     import { createCarRenderer, LIGHTING_WGSL } from './car-render.mjs';
+    import { createCrashLabRenderer } from './crash-lab-render.mjs';
+    import { createCrashLab, LAB_PRESETS } from './crash-lab.mjs';
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const fail = (e) => { if (!errEl.textContent) errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String((e && e.message) || e); };
@@ -80,6 +82,15 @@
     addEventListener('error', (e) => fail(e.error || e.message));
 
     const qs = new URLSearchParams(location.search);
+    // Crash-lab presets (?preset=, crash-lab.mjs): the explicit solver's scene and
+    // its fields (the query's own values win), labels and camera.
+    const LAB_PRESET = LAB_PRESETS[qs.get('preset')] ? qs.get('preset') : null;
+    if (LAB_PRESET) {
+      const p = LAB_PRESETS[LAB_PRESET];
+      qs.set('solver', 'explicit');
+      qs.set('xscene', p.xscene);
+      for (const [k, v] of Object.entries(p.params)) if (!qs.has(k)) qs.set(k, String(v));
+    }
     const SCENES = {
       yard: 'Crash yard (drive)',
       wall: 'Crash test: rigid wall, 54 km/h',
@@ -145,7 +156,7 @@
       headon: [['speed', 'car 1 km/h', 56], ['speed2', 'car 2 km/h', 56], ['overlap', 'overlap 0–1', 1], ['angle', 'car 2 angle °', 0]],
       tbone: [['speed', 'striking km/h', 50], ['carSpeed', 'struck km/h', 0], ['at', 'hit at m', 0], ['angle', 'angle °', 90]],
       pole: [['speed', 'km/h', 60], ['offset', 'offset m', 0], ['angle', 'angle °', 0]],
-      sidepole: [['speed', 'km/h', 32], ['at', 'hit at m', 0]],
+      sidepole: [['speed', 'km/h', 32], ['at', 'hit at m', 0], ['angle', 'angle °', 90]],
       limbo: [['speed', 'km/h', 60], ['bar', 'bar height m', 1]],
       drop: [['height', 'height m', 8], ['speed', 'forward km/h', 0]],
       arena: [['n', 'vehicles', 256], ['headOn', 'head-on share', 0], ['speedMin', 'min km/h', 90], ['speedMax', 'max km/h', 150]],
@@ -155,6 +166,10 @@
       wall: 'wall', pole: 'pole', sidepole: 'sidepole', tbone: 'tbone', headon: 'headon', limbo: 'limbo', sandwich: 'wall', import: 'wall', drop: 'drop' };
     const xscene = XSCENES[qs.get('xscene')] ? qs.get('xscene') : XMAP[scene];
     const ARENA = EXPLICIT && xscene === 'arena';
+    // The crash-test lab (crash-lab.mjs, crash-lab-render.mjs): the explicit solver's
+    // view with tube beams, node spheres, a ghost body, time control, impact time and
+    // node grabbing; ?lab=0 keeps the plain view (the arena always does).
+    const LAB = EXPLICIT && !ARENA && qs.get('lab') !== '0';
     if (EXPLICIT) {
       const xs = document.getElementById('xsceneSel');
       for (const [id, t] of Object.entries(XSCENES)) xs.add(new Option(t, id, false, id === xscene));
@@ -698,6 +713,8 @@ const HIDE = vec4f(0.0, 0.0, 2.0, 1.0);
   let dyn = b.invMass > 0.0 && (b.flags & 1u) != 0u;
   if (!dyn) {
     o.c = select(vec3f(0.55, 0.56, 0.6), vec3f(0.85, 0.75, 0.2), col.shape == 1u);
+    // The crash lab's studio (opts.y): dark slate obstacles.
+    if (frame.opts.y > 0.5) { o.c = vec3f(0.2, 0.24, 0.32); }
   } else if (col.shape == 0u) {
     o.c = vec3f(0.2, 0.22, 0.25);
   } else {
@@ -1054,6 +1071,9 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       };
       return xBinds;
     };
+    const labR = LAB ? createCrashLabRenderer({ device, format, sampleCount: SAMPLES, frameBuf, shadowView, shadowSampler }) : null;
+    labR?.setSim(xsim, xlayout);
+    let lab = null, labDt = 0, labView = { vp: new Float32Array(16), eye: [0, 0, 0] };
     let flexShadowBind = null, skinBind = null;
     // The world's buffers can be replaced when they grow: rebind when one is a new object.
     let bound = [], wheelBind = null, wheelShadowBind = null, groundBind = null, beamBind = null;
@@ -1080,7 +1100,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     let depth = null, msaa = null;
     let beamView = qs.get('beams') === '1';
     document.getElementById('beamsBtn').onclick = (e) => { beamView = !beamView; e.target.blur(); };
-    document.getElementById('resetBtn').onclick = (e) => { resetScene(); e.target.blur(); };
+    document.getElementById('resetBtn').onclick = (e) => { if (lab) lab.restart(); else resetScene(); e.target.blur(); };
 
     // ---------------------------------------------------------------- camera / input
     let camEye = [0, 6, -14], camTarget = [0, 1, 0];
@@ -1284,7 +1304,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     }
     function resetScene() {
       resetGen++;
-      if (EXPLICIT) { buildExplicit(); xAcc = 0; xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; return; }
+      if (EXPLICIT) { buildExplicit(); xAcc = 0; xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; if (lab) { lab.rebuilt(); lab.read(); } return; }
       if (crusher) { crusher.start = null; crusher.reading = false; crusher.heavy = false; }
       world.restoreState(initial);
       while (softs.length > initialSoftCount) softs.pop();
@@ -1559,10 +1579,11 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         msaa = device.createTexture({ size: [canvas.width, canvas.height], format, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
       }
       const vp = viewProj(camEye, camTarget, canvas.width / canvas.height);
+      labView = { vp, eye: camEye.slice() };
       frameF.set(vp, 0);
       frameF.set([...camEye, 0], 16);
       frameF.set([...LIGHT, 0], 20);
-      frameF.set([beamView ? 1 : 0, 0, 0, 0], 24);
+      frameF.set([beamView ? 1 : 0, LAB && labR.opts.studio ? 1 : 0, 0, 0], 24);
       frameF.set(lightViewProj(camTarget), 28);
       frameF.set(mat4Inv(vp), 44);
       device.queue.writeBuffer(frameBuf, 0, frameF);
@@ -1579,12 +1600,14 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       // Particle effects (sparks, shards, chips, dust) are off by default so the
       // deformation reads clearly; ?fx=1 turns them on.
       if (flexMode) carR.compute(enc, FX ? fxDt : 0);
+      if (lab) lab.beforeDraw(enc, labDt);
       // Sun shadow map.
       const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
       refreshColliders();
       if (colIdxN) { sp.setPipeline(colShadow); sp.setBindGroup(0, colShadowBind); sp.setVertexBuffer(0, cubeVbo); sp.draw(36, colIdxN); }
       if (world.wheelCount()) { sp.setPipeline(wheelShadow); sp.setBindGroup(0, wheelShadowBind); sp.setVertexBuffer(0, cylVbo); sp.draw(cyl.length / 6, world.wheelCount()); }
-      if (xsim) { sp.setPipeline(xSkinShadow); sp.setBindGroup(0, xBindings().shadow); sp.draw(xlayout.triangles * 3); }
+      if (xsim && LAB) labR.drawShadow(sp);
+      else if (xsim) { sp.setPipeline(xSkinShadow); sp.setBindGroup(0, xBindings().shadow); sp.draw(xlayout.triangles * 3); }
       if (flexMode) {
         carR.drawShadow(sp);
         if (flexCount) {
@@ -1597,8 +1620,11 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         colorAttachments: [{ view: msaa.createView(), resolveTarget: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'discard' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
-      rp.setPipeline(skyPipe); rp.setBindGroup(0, skyBind); rp.draw(3);
-      rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
+      if (LAB && labR.opts.studio) labR.drawBackground(rp);
+      else {
+        rp.setPipeline(skyPipe); rp.setBindGroup(0, skyBind); rp.draw(3);
+        rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
+      }
       if (colIdxN) { rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, colIdxN); }
       if (flexMode) {
         carR.drawOpaque(rp);
@@ -1608,7 +1634,11 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         }
       } else if (triCount) { rp.setPipeline(skinPipe); rp.setBindGroup(0, skinBind); rp.draw(triCount * 3); }
       if (beamView && beamTotal) { rp.setPipeline(beamPipe); rp.setBindGroup(0, beamBind); rp.draw(2, beamTotal); }
-      if (xsim) {
+      // The lab's skeleton, nodes, solid skin and grab line. A textured body skinned
+      // to the nodes (the showcase car renderer) draws here too, from
+      // labR.positionsBuffer() (live and replayed positions alike).
+      if (xsim && LAB) labR.drawOpaque(rp);
+      else if (xsim) {
         const xb = xBindings();
         rp.setPipeline(xSkinPipe); rp.setBindGroup(0, xb.skin); rp.draw(xlayout.triangles * 3);
         rp.setPipeline(xBeamPipe); rp.setBindGroup(0, xb.beam); rp.draw(4 * xlayout.beams);
@@ -1616,6 +1646,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (world.wheelCount()) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.wheelCount()); }
       buggyR?.draw(rp);
       if (flexMode) { carR.drawGlass(rp); if (FX) carR.drawFx(rp); }
+      if (LAB) labR.drawTransparent(rp);
       rp.end();
     }
     // Steps run right before each one is taken: the tbone scene's ram launch.
@@ -1644,11 +1675,19 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     const XRATE = 2000, XSTEPS = Math.round(XRATE / 60);
     let xAcc = 0, xFrameN = 0, xGpuMs = null, xGpuApprox = false, xTimesRead = null, xLastSteps = 0;
     function explicitFrame(dt) {
-      xAcc += Math.max(0, dt) * XRATE;
-      const steps = Math.max(0, Math.min(Math.floor(xAcc), 2 * XSTEPS, xsim.maxFrameSteps()));
-      xAcc = Math.min(xAcc - steps, XSTEPS);
+      let steps;
       const t0 = performance.now();
-      xsim.frame(steps);
+      if (lab) {
+        // The lab's clock (slow motion, pause, stepping); the steps of a frame in
+        // chunks, each followed by a frame-state read (impact, recording, picking).
+        steps = lab.stepsFor(dt, xsim.maxFrameSteps());
+        for (const k of lab.chunks(steps)) if (k) { xsim.frame(k); lab.read(); }
+      } else {
+        xAcc += Math.max(0, dt) * XRATE;
+        steps = Math.max(0, Math.min(Math.floor(xAcc), 2 * XSTEPS, xsim.maxFrameSteps()));
+        xAcc = Math.min(xAcc - steps, XSTEPS);
+        xsim.frame(steps);
+      }
       xLastSteps = steps;
       if (++xFrameN % 30 === 0 && !xTimesRead) {
         const sim = xsim;
@@ -1679,6 +1718,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         return;
       }
       if (EXPLICIT) {
+        labDt = dt;
         const steps = explicitFrame(dt);
         simAcc += steps / XRATE; wallAcc += dt;
         if (wallAcc > 0.5) { realTime = simAcc / wallAcc; simAcc = 0; wallAcc = 0; }
@@ -1747,7 +1787,9 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         for (let i = 0; i < n;) {
           const k = Math.min(XSTEPS, n - i);
           xsim.frame(k); xLastSteps = k; i += k;
+          const r = lab?.read();
           await device.queue.onSubmittedWorkDone();
+          if (r) await r;
         }
         const times = await xsim.readFrameTimes();
         if (times.length) xGpuMs = times.reduce((a, b) => a + b, 0) / times.length;
@@ -1850,6 +1892,46 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // the GPU time per frame (timestamps, or ≈ submit-to-done).
     // The import scene crashes an imported vehicle (?car=import, ?truck=) into its target.
     if (!EXPLICIT && scene === 'import' && carKind === 'import') window.__crashImported({ ...carDesc }, { label: importSrc.label });
+    if (LAB) {
+      lab = createCrashLab({
+        sim: () => xsim, layout: () => xlayout, renderer: labR, canvas, qs, preset: LAB_PRESET, xscene,
+        setOrbit: (o) => {
+          if (o.chase) { camMode = 'chase'; window.__camSync?.(); return; }
+          if (o.follow) { if (camMode === 'orbit') { orbit.target = o.follow; orbit.yaw += o.spin; } return; }
+          camMode = 'orbit'; orbit = { ...orbit, yaw: o.yaw, pitch: o.pitch, dist: o.dist, target: orbit.target }; window.__camSync?.();
+        },
+        view: () => labView, inverse: mat4Inv, restart: () => resetScene(), fail,
+      });
+      lab.read();
+      // Automation: n steps in frames of `chunk` (each read: impact to that chunk),
+      // then a drawn frame; the lab's state.
+      const labState = () => {
+        const s = lab.st, step = s.replay >= 0 ? s.ring[s.replay].step : xsim.steps();
+        return { step, impactStep: s.impactStep, time: lab.timeText(step).text, reads: s.reads, recorded: s.ring.length, replay: s.replay,
+          bent: s.lastState?.bent ?? null, broken: s.lastState?.broken ?? null, grab: s.grab && { node: s.grab.global, target: s.grab.target },
+          opts: { ...labR.opts, grab: undefined }, slow: s.auto ? 'auto' : s.slow, paused: s.paused, counts: document.getElementById('labCounts').textContent,
+          readout: document.getElementById('labTime').innerText.replace(/\n/g, ' | '), pills: document.getElementById('labPills').innerText.replace(/\n/g, ' | ') };
+      };
+      const drawNow = async () => {
+        updateCamera(0.1, false);
+        const enc = device.createCommandEncoder();
+        drawScene(enc);
+        device.queue.submit([enc.finish()]);
+        await device.queue.onSubmittedWorkDone();
+      };
+      window.__lab = {
+        lab, state: labState, draw: drawNow,
+        async advance(n, chunk = 17) {
+          manual = true;
+          const reads = [];
+          for (let i = 0; i < n;) { const k = Math.min(chunk, n - i); xsim.frame(k); i += k; const r = lab.read(); if (r) reads.push(r); await device.queue.onSubmittedWorkDone(); }
+          await Promise.all(reads);
+          await drawNow();
+          return labState();
+        },
+        async frames(n) { manual = false; for (let i = 0; i < n; i++) await new Promise((r) => requestAnimationFrame(r)); manual = true; await device.queue.onSubmittedWorkDone(); return labState(); },
+      };
+    }
     window.__solver = EXPLICIT ? 'explicit' : 'soft';
     window.__explicit = EXPLICIT ? { sim: () => xsim, layout: () => xlayout, launch: () => xsim.launch(XSPEED), gpuMs: () => xGpuMs } : null;
     window.__ready = true;
