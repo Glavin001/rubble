@@ -465,7 +465,14 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     let bumper_r: Region = Box::new(|_, p| smax(p.z - bumper_rz(p.y), p.y - st.bumper_r[0], 0.04));
     // Black lower lip under the front bumper, black diffuser under the rear.
     let lip_f: Region = Box::new(|_, p| smax(bumper_fz(p.y) - p.z, p.y - 0.285, 0.02));
-    let valance_r: Region = Box::new(|_, p| smax(p.z - bumper_rz(p.y), p.y - 0.505, 0.03));
+    // The black diffuser insert, rising round the exhaust tips into pockets.
+    let valance_r: Region = Box::new(|_, p| {
+        let x = p.x.abs();
+        let pocket = 0.075
+            * super::smoothstep(st.exhaust[0] - 0.16, st.exhaust[0] - 0.09, x)
+            * (1.0 - super::smoothstep(st.exhaust[0] + 0.09, st.exhaust[0] + 0.16, x));
+        smax(p.z - bumper_rz(p.y), p.y - 0.505 - pocket, 0.03)
+    });
     let rocker: Region = Box::new(|_, p| {
         if p.x.abs() < 0.4 {
             return 1.0;
