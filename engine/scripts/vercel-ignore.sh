@@ -5,7 +5,9 @@
 # 1. Skip a commit that is no longer the head of its branch. Vercel builds one deployment
 #    at a time, so building superseded commits only delays the newest. If the head cannot
 #    be read, build.
-# 2. Skip when nothing the site is built from changed since the previous deployment.
+# 2. Skip when nothing the site is built from changed since the previous deployment. The
+#    site builds stress-oracle's stress-web (and the crates and shaders it uses), so only
+#    stress-oracle's findings, reference data, tests and examples are left out.
 
 ref="${VERCEL_GIT_COMMIT_REF:-}"
 sha="${VERCEL_GIT_COMMIT_SHA:-}"
@@ -19,4 +21,6 @@ fi
 
 prev="${VERCEL_GIT_PREVIOUS_SHA:-HEAD^}"
 git cat-file -e "$prev^{commit}" 2>/dev/null || exit 1
-git diff --quiet "$prev" HEAD -- engine vercel.json ':(exclude)engine/docs' ':(exclude)engine/stress-oracle' ':(exclude)engine/*.md'
+git diff --quiet "$prev" HEAD -- engine vercel.json ':(exclude)engine/docs' ':(exclude)engine/*.md' \
+  ':(exclude)engine/stress-oracle/findings' ':(exclude)engine/stress-oracle/reference' \
+  ':(exclude,glob)engine/stress-oracle/crates/*/tests/**' ':(exclude,glob)engine/stress-oracle/crates/*/examples/**'

@@ -19,14 +19,14 @@ pub mod metal_interop;
 mod soft_skin;
 #[cfg(feature = "gpu")]
 pub use features::{
-    ContactStorage, EngineFeatures, GpuTiming, GridLayout, ManifoldPersistence, RestingContacts,
-    SimOptions, WarmHash,
+    ContactStorage, EngineFeatures, GpuTiming, GridLayout, KernelGroups, ManifoldPersistence,
+    RestingContacts, SimOptions, WarmHash,
 };
 #[cfg(feature = "gpu")]
 pub use gpu::creation_errors;
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    default_device, default_device_with, instance_flags, CharacterHandle, MotionEvent, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
+    default_device, default_device_with, instance_flags, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
     POSES_BINDING, POSE_HEADER_BINDING, POSE_RECORD_BYTES,
 };
 #[cfg(feature = "gpu")]
