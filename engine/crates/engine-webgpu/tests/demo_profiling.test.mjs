@@ -93,10 +93,13 @@ test('phase profile sums repeated phases, keeps every sample and restores live t
   assert.match(summary, /primal 4\.00 · dual 1\.00/);
   assert.match(summary, /profiled GPU span 10\.00 \/ completion 20\.00 ms/);
 });
-test('a profiled step without phase timestamps is rejected, and live timing comes back', async () => {
+test('a profiled step that dispatched nothing reads zero for every phase, and live timing comes back', async () => {
   const { context, modes } = profileFixture({ invalid: true });
-  await assert.rejects(runInNewContext(`${profileSource}\nprofilePhases()`, context), /no phase timestamps/);
+  const { summary, report } = await runInNewContext(`${profileSource}\n(async () => ({ summary: await profilePhases(), report: phaseSamples }))()`, context);
   assert.deepEqual(modes, ['phases', 'step']);
+  assert.equal(report.samples.length, 10);
+  assert.ok(report.samples.every((s) => s.skipped && s.gpuSpanMs === 0));
+  assert.match(summary, /profiled GPU span 0\.00 \/ completion 20\.00 ms/);
 });
 
 // Live HUD step cost. Playback steps once per rAF, so completion intervals are

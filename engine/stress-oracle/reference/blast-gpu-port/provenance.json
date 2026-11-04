@@ -1,0 +1,26 @@
+{
+  "what": "rubble's blast_gpu profile ports the GPU stress solver of the native destruction stage of the PhysX fork (vibe-land's `native` backend). Read to understand, never built or tested against.",
+  "target": {
+    "repository": "Glavin001/PhysX",
+    "branch": "integration/oracle-stress-gpu",
+    "commit": "ec8118341",
+    "date": "2026-10-16"
+  },
+  "vibe_land_configuration": {
+    "source": "vibe-land sim-native/src/city.rs apply_app_defaults, scripts/perf/garage-vehicle-server.sh, destruction/src/native_runtime.rs",
+    "max_iterations": 16,
+    "tolerance": 1e-3,
+    "force_tolerance": 1e-3,
+    "warm_start": true,
+    "damage_rate": 2.0,
+    "bend_gain_max": 3.0,
+    "fibre_bending": true,
+    "on": ["BLAST_STRESS_INCREMENTAL_MOTION", "PX_DESTRUCTION_INCREMENTAL_TOPOLOGY", "BLAST_STRESS_BALANCED_OPERATOR", "PX_DESTRUCTION_ALLOW_UNCONVERGED", "motion expansion (always on CuMetal)"],
+    "off": ["BLAST_STRESS_CARRY_KRYLOV (default: on only with section rotational stiffness)", "sectionBending", "sectionRotationalStiffness", "PX_DESTRUCTION_SHEAR_STIFFNESS", "PX_DESTRUCTION_MOHR_COULOMB_SHEAR", "PX_DESTRUCTION_REBEARING", "bearing joints"]
+  },
+  "ported": [
+    {"target": "blast/source/sdk/extensions/stressgpu/detail/StressComponentIteration.cuh componentStressSolve", "rubble": "stress-gpu/shaders/blast_native.slang, blast_native_wide.slang; stress-ref blast_bond/native.rs"},
+    {"target": "StressNativePolynomial.cuh, StressNativeRigidInverse.cuh", "rubble": "stress-gpu/shaders/blast_native_ops.slangh"},
+    {"target": "StressMotionPair.cuh, StressMotionPairForest.cuh, StressMotionPairModes.cuh (StressMotionForest.cuh, StressMotionModes.cuh for the reference)", "rubble": "stress-gpu/shaders/blast_motion.slang; stress-ref blast_bond/motion.rs"}
+  ]
+}

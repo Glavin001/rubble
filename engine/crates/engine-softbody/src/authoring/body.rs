@@ -239,13 +239,13 @@ pub fn place(poly: &[SectionPoint], spacing: &Spacing) -> Vec<SectionPoint> {
     out
 }
 
-/// The ring stations: `keys` kept (merged when closer than 0.6 × spacing), the
+/// The ring stations: `keys` kept (merged when closer than [`KEY_MERGE`]), the
 /// gaps between split evenly at most `spacing` × 1.1 apart.
 pub fn stations(z0: f32, z1: f32, keys: &[f32], spacing: f32) -> Vec<f32> {
     let mut k: Vec<f32> = keys
         .iter()
         .copied()
-        .filter(|&z| z > z0 + 0.6 * spacing && z < z1 - 0.6 * spacing)
+        .filter(|&z| z > z0 + KEY_MERGE && z < z1 - KEY_MERGE)
         .collect();
     k.push(z0);
     k.push(z1);
@@ -253,7 +253,7 @@ pub fn stations(z0: f32, z1: f32, keys: &[f32], spacing: f32) -> Vec<f32> {
     let mut merged: Vec<f32> = Vec::new();
     for z in k {
         if let Some(&last) = merged.last() {
-            if z - last < 0.6 * spacing {
+            if z - last < KEY_MERGE {
                 continue;
             }
         }
@@ -271,6 +271,10 @@ pub fn stations(z0: f32, z1: f32, keys: &[f32], spacing: f32) -> Vec<f32> {
     }
     out
 }
+
+/// Ring stations closer than this (m) are one: keys are deliberate (door
+/// seams, pillars), so they are kept however sparse the rings between them.
+pub const KEY_MERGE: f32 = 0.05;
 
 /// A ring of the shell: its station and its right half's nodes from the bottom
 /// centre (first) to the top centre (last), with their weighted arc fraction.

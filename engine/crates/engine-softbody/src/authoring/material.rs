@@ -72,10 +72,11 @@ impl Material {
         }
     }
 
-    /// Stiffness scaled by `s`.
+    /// Stiffness scaled by `s`, damping by √s (the same damping ratio).
     pub fn stiffer(self, s: f32) -> Self {
         Self {
             k: self.k * s,
+            damp: self.damp * s.sqrt(),
             ..self
         }
     }
@@ -113,17 +114,50 @@ impl Material {
     }
 }
 
+/// Bay length the damping of [`Material::steel`] is set for (m): a typical
+/// beam of the sparse body.
+pub const REF_SPAN: f32 = 0.3;
+/// Reduced mass of a typical beam's node pair (kg) for the same: the body's
+/// nodes weigh 0.5–2 kg.
+pub const REF_MU: f32 = 0.4;
+
+impl Material {
+    /// A grade from its axial rigidity `kl` (k × length, N: the same at every
+    /// length), its damping ratio `zeta` at a [`REF_SPAN`] beam between
+    /// [`REF_MU`] nodes, its yield force (N), its elongation at break and its
+    /// density. A yielded beam in tension loses strength as it stretches (the
+    /// solver takes k × the plastic stretch off it), so the break force is the
+    /// yield plus `elong` × k·L: the beam tears after stretching `elong` of its
+    /// length, as the metal does (mild steel ~0.3, boron ~0.08; glass ~0).
+    pub fn steel(kl: f32, zeta: f32, yield_force: f32, elong: f32, density: f32) -> Self {
+        let k = kl / REF_LENGTH;
+        let damp = 2.0 * zeta * (kl / REF_SPAN * REF_MU).sqrt();
+        Self {
+            k,
+            damp,
+            deform: yield_force,
+            strength: yield_force + elong * kl,
+            plastic: 0.0,
+            density,
+        }
+    }
+
+    /// Axial rigidity k × length (N).
+    pub fn kl(&self) -> f32 {
+        self.k * REF_LENGTH
+    }
+}
+
 /// The grades a car body is built from. Values are this generator's own,
-/// chosen for a 0.5 ms explicit step with 0.3–3 kg nodes (see
-/// `engine/docs/vehicle-authoring.md`); every vehicle definition may override them.
+/// chosen for a 0.5 ms explicit step with 0.5–2 kg nodes (see
+/// `engine/docs/vehicle-authoring.md`); every vehicle definition may override
+/// them. Rigidities are as high as the step allows at the body's mass; the
+/// yield forces set where the body gives in a crash.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Grades {
     /// Outer skin panels (doors' skins, fenders, bonnet, boot lid, roof skin).
-    /// Soft: the skin's 10 cm beams cannot yield in compression (the solver keeps
-    /// every rest length ≥ 0.1 m), so what they store springs back; the trusses
-    /// carry the loads and absorb the crash.
     pub panel: Material,
-    /// The floor pan's skin.
+    /// The floor pan.
     pub floor: Material,
     /// Light inner frames (bonnet and boot-lid frames).
     pub frame: Material,
@@ -144,22 +178,34 @@ pub struct Grades {
     pub glass: Material,
     /// Cast blocks (engine, gearbox, knuckles): never yield.
     pub rigid: Material,
+    /// Suspension links, knuckles and their brackets: stiff and well damped
+    /// (a knuckle on soft links whips round in a crash), never yield.
+    #[serde(default = "link")]
+    pub link: Material,
 }
+
+fn link() -> Material {
+    Material::steel(1.5e5, 0.05, 1.0e9, 0.0, 6.0)
+}
+
+/// Damping ratio of the body's grades.
+pub const ZETA: f32 = 0.08;
 
 impl Default for Grades {
     fn default() -> Self {
         Self {
-            panel: Material::grade(3.0e4, 2.0, 0.25, 4.0, 1.0).plastic(PLASTIC),
-            floor: Material::grade(5.0e4, 3.0, 0.2, 4.0, 1.5).plastic(PLASTIC),
-            frame: Material::grade(1.2e5, 6.0, 0.03, 5.0, 1.5).plastic(PLASTIC),
-            crush: Material::grade(6.0e6, 60.0, 0.07, 5.0, 2.0).plastic(PLASTIC),
-            hsla: Material::grade(1.5e6, 40.0, 0.036, 5.0, 2.0).plastic(PLASTIC),
-            uhss: Material::grade(4.0e6, 50.0, 0.06, 4.0, 3.0).plastic(PLASTIC),
-            boron: Material::grade(4.5e6, 60.0, 0.06, 4.0, 3.5).plastic(PLASTIC),
-            alu: Material::grade(2.0e6, 45.0, 0.036, 5.0, 2.0).plastic(PLASTIC),
-            plastic: Material::grade(1.5e4, 1.0, 0.3, 4.0, 0.5),
-            glass: Material::grade(3.0e4, 2.0, 0.2, 3.0, 1.0),
-            rigid: Material::new(1.5e6, 30.0, 1.0e9, 1.0e9, 6.0),
+            panel: Material::steel(9.5e4, ZETA, 1.25e3, 0.3, 1.0).plastic(PLASTIC),
+            floor: Material::steel(9.5e4, ZETA, 1.9e3, 0.3, 1.5).plastic(PLASTIC),
+            frame: Material::steel(6.2e4, ZETA, 2.5e2, 0.3, 1.5).plastic(PLASTIC),
+            crush: Material::steel(2.6e5, ZETA, 1.6e4, 0.25, 2.0).plastic(PLASTIC),
+            hsla: Material::steel(1.25e5, ZETA, 3.8e3, 0.2, 2.0).plastic(PLASTIC),
+            uhss: Material::steel(1.9e5, ZETA, 4.6e3, 0.12, 3.0).plastic(PLASTIC),
+            boron: Material::steel(2.3e5, ZETA, 5.1e3, 0.08, 3.5).plastic(PLASTIC),
+            alu: Material::steel(1.25e5, ZETA, 3.8e3, 0.12, 2.0).plastic(PLASTIC),
+            plastic: Material::steel(1.25e4, ZETA, 9.5e2, 0.25, 0.5),
+            glass: Material::steel(3.1e4, ZETA, 6.2e2, 0.04, 1.0),
+            rigid: Material::steel(1.5e5, 0.03, 1.0e9, 0.0, 6.0),
+            link: link(),
         }
     }
 }

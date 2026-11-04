@@ -47,6 +47,20 @@ fn world_for(asset: &DestructibleAssetDesc, offset: [f32; 3]) -> World {
         contacts: ContactStorage::Canonical,
         ..WorldDef::default()
     };
+    // THRESHOLD_CARRY=on|off (probe): force the resting-pair carry (`EngineFeatures::carry_rest`).
+    let mut def = def;
+    // THRESHOLD_FEATURES_ENV=1: the `ENGINE_*` feature controls (A/B runs).
+    if std::env::var("THRESHOLD_FEATURES_ENV").is_ok() {
+        def.features = engine_webgpu::EngineFeatures::from_env();
+    }
+    match std::env::var("THRESHOLD_CARRY").as_deref() {
+        Ok("on") => {
+            def.features.carry_rest = true;
+            def.features.carry_with_archive = true;
+        }
+        Ok("off") => def.features.carry_rest = false,
+        _ => {}
+    }
     let mut w = World::new(GpuContext::Default, &def).unwrap();
     let stress = asset.stress.as_ref().expect("stress source");
     if let Some(h) = stress.ground_height() {
@@ -192,7 +206,16 @@ fn run_world_among(
     let nudge: f64 = std::env::var("THRESHOLD_NUDGE")
         .map(|v| v.parse().unwrap())
         .unwrap_or(0.0);
-    let origin = [origin[0] + nudge, origin[1], origin[2]];
+    // THRESHOLD_SHOT_DY=dy (probe): the shot's origin moved dy metres up.
+    let dy: f64 = std::env::var("THRESHOLD_SHOT_DY")
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(0.0);
+    // THRESHOLD_SHOT_SPEED=s (probe): the shot's velocity scaled by s.
+    let speed: f64 = std::env::var("THRESHOLD_SHOT_SPEED")
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(1.0);
+    let v = v.map(|x| x * speed);
+    let origin = [origin[0] + nudge, origin[1] + dy, origin[2]];
     let at = [0, 1, 2].map(|k| (origin[k] + offset[k] as f64) as f32);
     let ball = w
         .create_body(&BodyDef {
@@ -243,6 +266,80 @@ fn run_world_among(
             }
         }
         w.step().unwrap();
+        // THRESHOLD_TRACE=path (probe): every body's GPU record after each step, one line
+        // a body (`frame body flags position orientation linear angular`, f32 bits), to
+        // find where two policies' runs of one shot first differ.
+        if let Ok(path) = std::env::var("THRESHOLD_TRACE") {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            let bits = |v: &[f32]| {
+                v.iter()
+                    .map(|x| format!("{:08x}", x.to_bits()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let mut touched = w.sim().sleep_archive_touched();
+            touched.sort();
+            writeln!(f, "{n} touched {touched:?}").unwrap();
+            // THRESHOLD_TRACE_CONTACTS=a..b: the contact rows of those frames
+            // (`frame contact bodyA bodyB lambdaN`).
+            if let Some((a, b)) = std::env::var("THRESHOLD_TRACE_CONTACTS")
+                .ok()
+                .and_then(|v| v.split_once("..").map(|(a, b)| (a.parse::<u32>().unwrap(), b.parse::<u32>().unwrap())))
+            {
+                if (a..=b).contains(&n) {
+                    let cols = w.sim().download_colliders();
+                    // THRESHOLD_TRACE_ARCHIVE=b1,b2: those bodies' archived rows.
+                    for body in std::env::var("THRESHOLD_TRACE_ARCHIVE")
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter_map(|x| x.parse::<u32>().ok())
+                    {
+                        for c in w.sim().sleep_archive_rows(body) {
+                            writeln!(
+                                f,
+                                "{n} archive {body} {} {} {:.4}",
+                                cols[c.collider_a as usize].body,
+                                cols[c.collider_b as usize].body,
+                                c.lambda_n
+                            )
+                            .unwrap();
+                        }
+                    }
+                    for c in w.sim().last_contacts().unwrap().iter().filter(|c| c.alive != 0) {
+                        writeln!(
+                            f,
+                            "{n} contact {} {} {:.4} k {:.0} c0 {:.4} cols {} {} f {:x}",
+                            cols[c.collider_a as usize].body,
+                            cols[c.collider_b as usize].body,
+                            c.lambda_n,
+                            c.k_n,
+                            c.c0_n,
+                            c.collider_a,
+                            c.collider_b,
+                            c.feature_id
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+            for (i, b) in w.sim().download_bodies().iter().enumerate() {
+                writeln!(
+                    f,
+                    "{n} {i} {:x} {} {} {} {}",
+                    b.flags,
+                    bits(&b.position),
+                    bits(&b.orientation),
+                    bits(&b.linear_vel),
+                    bits(&b.angular_vel)
+                )
+                .unwrap();
+            }
+        }
         // A piece starts with its parent's rigid motion: right after the split its
         // origin (the instance frame carried along) is where its parent's was.
         for (at, parent, pose, children) in fresh.iter().filter(|s| s.0 + 1 == n) {
@@ -802,7 +899,7 @@ fn sleep_policy_ensemble() {
     let (asset, lab) = house();
     let delay = std::env::var("ENSEMBLE_DELAY").unwrap_or_else(|_| "0".into());
     let only = std::env::var("ENSEMBLE_ONLY").ok();
-    let policies: [(&str, &[(&str, &str)]); 5] = [
+    let policies: [(&str, &[(&str, &str)]); 10] = [
         ("never asleep", &[]),
         (
             "start asleep, never re-sleep (Unreal's town)",
@@ -821,6 +918,55 @@ fn sleep_policy_ensemble() {
             &[("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1")],
         ),
         ("sleep, archive", &[("THRESHOLD_SLEEP", "1")]),
+        (
+            "carry on: sleep, archive, wake on touch",
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "on"),
+            ],
+        ),
+        (
+            "carry off: sleep, archive, wake on touch",
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "off"),
+            ],
+        ),
+        // Why carry-off breaks more: the archive's warm start, and wakes chaining through
+        // resting pairs within a step (measurement variants, EngineFeatures).
+        (
+            "carry off, cold wake: sleep, archive, wake on touch",
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "off"),
+                ("THRESHOLD_FEATURES_ENV", "1"),
+                ("ENGINE_ARCHIVE", "cold"),
+            ],
+        ),
+        (
+            "carry off, spread wake: sleep, archive, wake on touch",
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "off"),
+                ("THRESHOLD_FEATURES_ENV", "1"),
+                ("ENGINE_ARCHIVE_SPREAD", "8"),
+            ],
+        ),
+        (
+            "carry off, cold and spread wake: sleep, archive, wake on touch",
+            &[
+                ("THRESHOLD_SLEEP", "1"),
+                ("THRESHOLD_WAKE_ON_TOUCH", "1"),
+                ("THRESHOLD_CARRY", "off"),
+                ("THRESHOLD_FEATURES_ENV", "1"),
+                ("ENGINE_ARCHIVE", "cold"),
+                ("ENGINE_ARCHIVE_SPREAD", "8"),
+            ],
+        ),
     ];
     let stats = |v: &[f64]| {
         let n = v.len() as f64;
@@ -839,6 +985,10 @@ fn sleep_policy_ensemble() {
             "THRESHOLD_SLEEP",
             "THRESHOLD_WAKE_ON_TOUCH",
             "THRESHOLD_START_ASLEEP",
+            "THRESHOLD_CARRY",
+            "THRESHOLD_FEATURES_ENV",
+            "ENGINE_ARCHIVE",
+            "ENGINE_ARCHIVE_SPREAD",
         ] {
             std::env::remove_var(k);
         }
@@ -858,5 +1008,79 @@ fn sleep_policy_ensemble() {
             stats(&broken),
             stats(&bodies)
         );
+    }
+}
+
+/// Statistical power of the sleep-policy comparison (probe, ignored): one policy
+/// (`POWER_POLICY` = never | carry_on | carry_off), one asset (`POWER_ASSET` = house |
+/// arch), shots over `POWER_NUDGES` nudges (mm, comma list or `a..b`), `POWER_DY` vertical
+/// offsets (m, comma list) and `POWER_SPEEDS` speed scales (comma list). Prints one line
+/// per shot: `shot <policy> <asset> <nudge_mm> <dy> <speed> <broken> <bodies>`.
+#[test]
+#[ignore]
+fn sleep_policy_power() {
+    let asset_name = std::env::var("POWER_ASSET").unwrap_or_else(|_| "house".into());
+    let (asset, lab) = match asset_name.as_str() {
+        "arch" => arch(),
+        _ => house(),
+    };
+    let policy = std::env::var("POWER_POLICY").unwrap_or_else(|_| "never".into());
+    for k in [
+        "THRESHOLD_SLEEP",
+        "THRESHOLD_WAKE_ON_TOUCH",
+        "THRESHOLD_START_ASLEEP",
+        "THRESHOLD_CARRY",
+    ] {
+        std::env::remove_var(k);
+    }
+    match policy.as_str() {
+        "never" => {}
+        "carry_on" | "carry_off" => {
+            std::env::set_var("THRESHOLD_SLEEP", "1");
+            std::env::set_var("THRESHOLD_WAKE_ON_TOUCH", "1");
+            std::env::set_var(
+                "THRESHOLD_CARRY",
+                if policy == "carry_on" { "on" } else { "off" },
+            );
+        }
+        p => panic!("unknown POWER_POLICY {p}"),
+    }
+    let list = |key: &str, default: &str| -> Vec<f64> {
+        let v = std::env::var(key).unwrap_or_else(|_| default.into());
+        if let Some((a, b)) = v.split_once("..") {
+            let (a, b): (i64, i64) = (a.parse().unwrap(), b.parse().unwrap());
+            (a..=b).map(|x| x as f64).collect()
+        } else {
+            v.split(',').map(|x| x.parse().unwrap()).collect()
+        }
+    };
+    let nudges = list("POWER_NUDGES", "-10..10");
+    let dys = list("POWER_DY", "0");
+    let speeds = list("POWER_SPEEDS", "1");
+    std::env::set_var("ENSEMBLE_LENIENT", "1");
+    for &speed in &speeds {
+        for &dy in &dys {
+            for &n in &nudges {
+                std::env::set_var("THRESHOLD_NUDGE", format!("{}", n * 1e-3));
+                std::env::set_var("THRESHOLD_SHOT_DY", format!("{dy}"));
+                std::env::set_var("THRESHOLD_SHOT_SPEED", format!("{speed}"));
+                let o = run_world(&asset, &lab, 120);
+                println!(
+                    "shot {policy} {asset_name} {n} {dy} {speed} {} {}",
+                    o.broken, o.bodies
+                );
+                // POWER_TIMELINE=1: the frames that broke bonds (`frame:count`).
+                if std::env::var("POWER_TIMELINE").is_ok() {
+                    let t: Vec<String> = o
+                        .timeline
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &b)| b > 0)
+                        .map(|(f, b)| format!("{f}:{b}"))
+                        .collect();
+                    println!("timeline {}", t.join(" "));
+                }
+            }
+        }
     }
 }

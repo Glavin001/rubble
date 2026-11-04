@@ -51,6 +51,9 @@
       <label id="sleepLabel" for="sleepToggle" title="Let resting bodies fall asleep (URL: sleep=on|off)">
         <input type="checkbox" id="sleepToggle"> Sleep
       </label>
+      <label for="carryRest" title="Re-emit the contacts of every pair at rest each step instead of keeping them in the sleep archive (URL: rest=carry; the archive is the default, rest=archive)">
+        <input type="checkbox" id="carryRest"> Carry resting pairs
+      </label>
       <button id="resetBtn" type="button" title="Restart this scene from its first step (R)" disabled>Reset</button>
       <a href="./" style="color:#b8d7ff;margin-left:10px">All demos</a>
       <a href="./vehicle.html" style="color:#b8d7ff;margin-left:10px">Drive a vehicle →</a>
@@ -86,7 +89,19 @@
     const errEl = document.getElementById('err');
     const warnEl = document.getElementById('warn');
     const canvas = document.getElementById('c');
-    const fail = (e) => { errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
+    // The first failure stays on the page with what was running when it came (the status
+    // line) and the device's limits; later ones (a GPU error is often followed by a
+    // failed readback map) are appended, so the cause is not overwritten by its effects.
+    let diagLimits = '';
+    const fail = (e) => {
+      const text = `${errorText(e)}\n  [while: ${statusEl.textContent}]`;
+      errEl.textContent = errEl.textContent ? `${errEl.textContent}\n${text}` : `${text}${diagLimits ? `\n  [device: ${diagLimits}]` : ''}`;
+      statusEl.textContent = 'stopped';
+      window.__failed = window.__failed ? `${window.__failed}\n${String(e)}` : String(e);
+    };
+    // A GPUError's whole text: its type and message (WebKit's message can be terse; the
+    // type and the status line say more), and a device loss's reason and message.
+    const gpuErrorText = (err) => err ? `${err.constructor?.name ?? 'GPUError'}: ${err.message || String(err)}` : 'unknown GPU error';
     // Setup runs at module top level (scene snapshots, world, pipelines); show
     // its failures on the page instead of only in the console.
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
@@ -253,8 +268,10 @@
       ...(killBelow === null ? {} : { killBelow }),
     });
     const device = world.device();
-    device.lost.then((i) => fail('device lost: ' + i.message));
-    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + (e.error && e.error.message || e.error)));
+    diagLimits = world.deviceLimits?.() ?? '';
+    console.info(`rubble device limits: ${diagLimits}`);
+    device.lost.then((i) => fail(`device lost (${i.reason ?? 'unknown'}): ${i.message}`));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + gpuErrorText(e.error)));
 
     // Bodies: slot k draws with collider k (body 0 and collider 0: the ground).
     let handles, sceneBodies = null, order = null;
@@ -328,6 +345,21 @@
       setSleepEnabled(sleepToggle.checked);
       const next = new URL(location.href);
       next.searchParams.set('sleep', sleepToggle.checked ? 'on' : 'off');
+      history.replaceState(null, '', next.href);
+    });
+
+    // Resting contacts (?rest=archive|carry|drop): the sleep archive by default (a world
+    // created with sleep on has it already; one created without gets it here, for the
+    // sleep toggle), and the resting-pair carry switched live (World::set_carry_rest),
+    // which takes over from the archive while it is on.
+    const carryRest = document.getElementById('carryRest');
+    const rest = Q.qs.get('rest') || 'archive';
+    if (rest === 'archive' && Q.contacts !== 'compact') world.enableSleepArchive();
+    carryRest.checked = world.carryRest();
+    carryRest.addEventListener('change', () => {
+      world.setCarryRest(carryRest.checked);
+      const next = new URL(location.href);
+      next.searchParams.set('rest', carryRest.checked ? 'carry' : 'archive');
       history.replaceState(null, '', next.href);
     });
 
@@ -541,6 +573,8 @@ struct VsOut {
 
     function restoreScene() {
       world.restoreState(initialState);
+      // The saved state carries the solver as the page loaded; keep the sleep toggle's.
+      world.setSolver({ sleepTime });
       leftWorld = 0;
       if (jointControls) jointControls.reset();
       last = { ...last, awake: bodyCount - 1 };
@@ -630,8 +664,10 @@ struct VsOut {
           await stepOne();
           await drainAll();
           const t = frameTimes.find((x) => x.segments.length > 1);
-          if (!t) throw new Error('World returned no phase timestamps for a profiled step; GPU timing sample is invalid.');
-          samples.push(phaseSample(t, performance.now() - t0));
+          // A step that dispatched nothing (World skips the GPU step once nothing is awake
+          // or written) has no phases: every phase reads zero.
+          if (!t) samples.push({ step: null, phasesMs: {}, gpuPhasesMs: 0, gpuSpanMs: 0, completionMs: performance.now() - t0, skipped: true });
+          else samples.push(phaseSample(t, performance.now() - t0));
         }
       } finally {
         world.setGpuTiming(liveTiming);
@@ -912,6 +948,36 @@ struct VsOut {
     // Every body's raw record (scene order), for investigations.
     window.__bodyStates = async () => ({ step: simStep(), bytes: await readSceneBodies() });
     window.__last = () => ({ ...last, steps: simStep() });
+    // Wall ms per step over `n` steps taken as fast as readbacks allow (pipelined, as the
+    // live loop steps when it is not pinned to the display), with GPU timing `timing`
+    // ('off', or the live 'step' timestamps): the throughput the profile's GPU span is
+    // compared against. Pauses the live loop meanwhile.
+    window.__wallNow = async (n = 60, timing = 'off') => {
+      measuring = true;
+      try {
+        world.setGpuTiming(timing);
+        await drainAll();
+        const s0 = simStep(), t0 = performance.now();
+        // CPU time in World's step() (encode and submit) and poll() (readback), and time
+        // spent waiting for a free readback slot.
+        let stepCpu = 0, pollCpu = 0, slotWait = 0;
+        const poll = () => { const t = performance.now(); pollFrame(world, onFrame); pollCpu += performance.now() - t; };
+        for (let i = 0; i < n; i++) {
+          const w0 = performance.now();
+          while (!world.canStep()) { await macrotask(); poll(); }
+          slotWait += performance.now() - w0;
+          if (jointControls) jointControls.beforeStep(simStep() * dt);
+          const t = performance.now();
+          world.step();
+          stepCpu += performance.now() - t;
+          poll();
+        }
+        await drainAll();
+        const steps = Math.max(1, simStep() - s0);
+        const wallMs = (performance.now() - t0) / steps;
+        return { wallMs, steps, awake: last.awake, stepCpuMs: stepCpu / steps, pollCpuMs: pollCpu / steps, slotWaitMs: slotWait / steps };
+      } finally { world.setGpuTiming(liveTiming); measuring = false; }
+    };
     // The per-phase GPU split of 10 steps now (pauses the live loop meanwhile).
     window.__profileNow = async () => {
       measuring = true;

@@ -137,6 +137,7 @@ cd engine
 cargo test -p engine-metal --release -- --test-threads=1
 cargo run -p engine-scenes --release --bin demo_viewer -- "Wall Smash (2k)"
 cargo run -p engine-viewer --release --bin fracture_viewer -- grid --shoot
+cargo run -p engine-viewer --release --bin world_viewer   # the timber yard: click to fire
 ```
 
 The stress solver's viewer, from `engine/stress-oracle`:

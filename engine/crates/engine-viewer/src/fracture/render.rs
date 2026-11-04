@@ -48,6 +48,10 @@ pub struct Renderer {
     trail: RenderPipelineState,
     trail_buf: Option<Buffer>,
     trail_verts: u64,
+    /// A mesh over bodies past the scene's (the world viewer's balls and debris), drawn
+    /// like the scene's: 10 floats a vertex, its body id last.
+    dynamic: Option<Buffer>,
+    dynamic_verts: u64,
     last_draw: Option<CommandBuffer>,
 }
 
@@ -145,6 +149,8 @@ impl Renderer {
             trail,
             trail_buf: None,
             trail_verts: 0,
+            dynamic: None,
+            dynamic_verts: 0,
             last_draw: None,
             solid: pipeline("fs")?,
             ground: pipeline("ground")?,
@@ -195,6 +201,40 @@ impl Renderer {
         unsafe {
             std::ptr::copy_nonoverlapping(verts.as_ptr(), buf.contents() as *mut f32, verts.len())
         };
+    }
+
+    /// Write `verts` (10 floats each) into the dynamic mesh from vertex `at` on, growing it
+    /// as needed; the mesh drawn is everything up to the last vertex written.
+    pub fn write_dynamic(&mut self, device: &Device, at: u64, verts: &[f32]) {
+        const FLOATS: u64 = 10;
+        let end = at + verts.len() as u64 / FLOATS;
+        let bytes = end * FLOATS * 4;
+        if self.dynamic.as_ref().is_none_or(|b| b.length() < bytes) {
+            let grown = device.new_buffer(
+                bytes.max(1 << 20).next_power_of_two(),
+                MTLResourceOptions::StorageModeShared,
+            );
+            if let Some(old) = &self.dynamic {
+                let keep = (at * FLOATS * 4).min(old.length());
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        old.contents() as *const u8,
+                        grown.contents() as *mut u8,
+                        keep as usize,
+                    )
+                };
+            }
+            self.dynamic = Some(grown);
+        }
+        let buf = self.dynamic.as_ref().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                verts.as_ptr(),
+                (buf.contents() as *mut f32).add((at * FLOATS) as usize),
+                verts.len(),
+            )
+        };
+        self.dynamic_verts = end;
     }
 
     /// Draw into the window's next drawable and present it.
@@ -316,6 +356,10 @@ impl Renderer {
             0,
             self.copies,
         );
+        if let (Some(dynamic), true) = (&self.dynamic, self.dynamic_verts > 0) {
+            bind(&self.solid, &self.depth_less, dynamic);
+            e.draw_primitives(MTLPrimitiveType::Triangle, 0, self.dynamic_verts);
+        }
         if shots > 0 {
             bind(&self.solid, &self.depth_less, &self.projectiles);
             e.draw_primitives(

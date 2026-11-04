@@ -37,6 +37,30 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub const RB_VERSION_MAJOR: u32 = 0;
 pub const RB_VERSION_MINOR: u32 = 1;
+
+// Kernel groups for `rbWorld_Prewarm` (combine with `|`).
+pub const RB_KERNELS_CHARACTERS: u32 = 1 << 0;
+pub const RB_KERNELS_QUERIES: u32 = 1 << 1;
+pub const RB_KERNELS_PROJECTILES: u32 = 1 << 2;
+pub const RB_KERNELS_VEHICLES: u32 = 1 << 3;
+pub const RB_KERNELS_SOFT_BODIES: u32 = 1 << 4;
+pub const RB_KERNELS_TERRAIN: u32 = 1 << 5;
+pub const RB_KERNELS_GUIDANCE: u32 = 1 << 6;
+pub const RB_KERNELS_EXPLOSIONS: u32 = 1 << 7;
+pub const RB_KERNELS_CCD: u32 = 1 << 8;
+pub const RB_KERNELS_ALL: u32 = 0xFFFF_FFFF;
+const _: () = {
+    assert!(RB_KERNELS_CHARACTERS == KernelGroups::CHARACTERS.0);
+    assert!(RB_KERNELS_QUERIES == KernelGroups::QUERIES.0);
+    assert!(RB_KERNELS_PROJECTILES == KernelGroups::PROJECTILES.0);
+    assert!(RB_KERNELS_VEHICLES == KernelGroups::VEHICLES.0);
+    assert!(RB_KERNELS_SOFT_BODIES == KernelGroups::SOFT_BODIES.0);
+    assert!(RB_KERNELS_TERRAIN == KernelGroups::TERRAIN.0);
+    assert!(RB_KERNELS_GUIDANCE == KernelGroups::GUIDANCE.0);
+    assert!(RB_KERNELS_EXPLOSIONS == KernelGroups::EXPLOSIONS.0);
+    assert!(RB_KERNELS_CCD == KernelGroups::CCD.0);
+    assert!(RB_KERNELS_ALL == KernelGroups::ALL.0);
+};
 const COOKIE: u32 = 0x5242_4C45; // "RBLE"
 
 /// A body handle (Box3D `b3BodyId`, packed). 0 is null.
@@ -163,6 +187,27 @@ pub enum RbContacts {
     RB_CONTACTS_CANONICAL = 2,
 }
 
+/// What a world with sleep does with the contacts of pairs at rest
+/// (`RbWorldDef::resting_contacts`, rubble's `RestingContacts`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbRestingContacts {
+    /// The sleep archive (default): a sleeper a moving body touches forms all its resting
+    /// contacts in that step, and woken contacts restart as the carry's do. A sleeping
+    /// pair costs nothing per step. Canonical contacts (threshold destructibles) keep
+    /// main's archive: warm wakes from archived rows, enabled by the first threshold
+    /// destructible. Compact contacts keep the carry instead.
+    RB_RESTING_ARCHIVE = 0,
+    /// The resting-pair carry (opt-out): every pair at rest is re-emitted and kept each
+    /// step (the earlier default).
+    RB_RESTING_CARRY = 1,
+    /// Neither (measurement): a woken pair restarts cold.
+    RB_RESTING_DROP = 2,
+    /// Opt-in: the touch query and cold wakes in canonical worlds too (threshold
+    /// destructibles then break differently from main).
+    RB_RESTING_TOUCH = 3,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RbBodyType {
@@ -203,6 +248,11 @@ pub struct RbWorldDef {
     /// (three-avbd's `reuseContacts`, `FLAG_REUSE_CONTACTS`; demo.html turns it on for its brick
     /// and box scenes). Off by default.
     pub reuse_contacts: bool,
+    /// Resting contacts in a world with sleep (`RB_RESTING_ARCHIVE` by default).
+    pub resting_contacts: RbRestingContacts,
+    /// Room in the sleep archive, in contact rows (0: the contact capacity); more fails
+    /// the step.
+    pub sleep_archive_rows: u32,
     /// Begins at or above this approach speed are hits (world units/s).
     pub hit_event_threshold: f32,
     /// Where the world ends (`WorldDef::kill_bounds`): a dynamic body whose origin
@@ -885,6 +935,8 @@ pub struct RbWorld {
     /// Joints whose drive is a length (prismatic, distance); the rest drive
     /// angles (`rbJoint_SetDrive`).
     linear_joints: std::collections::HashSet<u64>,
+    /// Background prewarms (`rbWorld_PrewarmAsync`), their progress summed.
+    prewarms: Vec<Prewarm>,
     /// Host GPU buffers imported for pose exports, by native handle (each imported once and
     /// retained while the world lives).
     #[cfg(target_vendor = "apple")]
@@ -1573,6 +1625,8 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
         readback_frames: 3,
         drop_frames: false,
         reuse_contacts: false,
+        resting_contacts: RbRestingContacts::RB_RESTING_ARCHIVE,
+        sleep_archive_rows: 0,
         hit_event_threshold: 1.0,
         enable_kill_bounds: false,
         kill_min: RbVec3 {
@@ -1630,6 +1684,16 @@ fn world_def_of(d: &RbWorldDef) -> anyhow::Result<(WorldDef, Coords)> {
         } else {
             Backpressure::Block
         },
+        features: EngineFeatures {
+            resting_contacts: match d.resting_contacts {
+                RbRestingContacts::RB_RESTING_ARCHIVE => RestingContacts::Archive,
+                RbRestingContacts::RB_RESTING_CARRY => RestingContacts::Carry,
+                RbRestingContacts::RB_RESTING_DROP => RestingContacts::Drop,
+                RbRestingContacts::RB_RESTING_TOUCH => RestingContacts::Touch,
+            },
+            ..EngineFeatures::default()
+        },
+        sleep_archive_rows: (d.sleep_archive_rows > 0).then_some(d.sleep_archive_rows),
         kill_bounds: d.enable_kill_bounds.then(|| {
             // The corners in rubble's frame; an axis swap can flip their order.
             let (a, b) = (coords.position_in(d.kill_min.a()), coords.position_in(d.kill_max.a()));
@@ -1653,6 +1717,7 @@ unsafe fn create_world(def: *const RbWorldDef, gpu: GpuContext, out: *mut *mut R
         store: FrameStore::default(),
         pending: VecDeque::new(),
         linear_joints: Default::default(),
+        prewarms: Vec::new(),
         #[cfg(target_vendor = "apple")]
         imported: Default::default(),
     });
@@ -1795,6 +1860,63 @@ pub unsafe extern "C" fn rbDestroyWorld(world: *mut RbWorld) {
 #[no_mangle]
 pub unsafe extern "C" fn rbWorld_Step(world: *mut RbWorld) -> RbResult {
     guard_args(|| world_mut(world)?.world.step())
+}
+
+/// Compile the kernels of `groups` (`RB_KERNELS_*`, combined with `|`) now.
+/// A world builds each GPU kernel the first time a step runs it, so the first
+/// step with a character, vehicle, soft body, ... pays that compile; call this
+/// at load time to move it there. Blocks while they compile. `out_built`
+/// (optional): how many kernels this call built.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_Prewarm(
+    world: *mut RbWorld,
+    groups: u32,
+    out_built: *mut u32,
+) -> RbResult {
+    guard_args(|| {
+        let built = world_mut(world)?
+            .world
+            .prewarm(KernelGroups(groups));
+        if !out_built.is_null() {
+            *out_built = built as u32;
+        }
+        Ok(())
+    })
+}
+
+/// `rbWorld_Prewarm` on background threads, several kernels at once: returns
+/// at once, so a loading screen keeps animating. Poll
+/// `rbWorld_GetPrewarmProgress` each frame; the world can step meanwhile (a step
+/// that needs a kernel still compiling waits for that one).
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_PrewarmAsync(world: *mut RbWorld, groups: u32) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let p = w.world.prewarm_async(KernelGroups(groups));
+        w.prewarms.retain(|p| !p.is_done());
+        w.prewarms.push(p);
+        Ok(())
+    })
+}
+
+/// Progress of the world's background prewarms: kernels compiled so far and in
+/// all (`done == total` when finished; both 0 when none was started).
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_GetPrewarmProgress(
+    world: *mut RbWorld,
+    out_done: *mut u32,
+    out_total: *mut u32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let (done, total) = w
+            .prewarms
+            .iter()
+            .map(Prewarm::progress)
+            .fold((0, 0), |(d, t), (a, b)| (d + a, t + b));
+        write(out_done, done as u32)?;
+        write(out_total, total as u32)
+    })
 }
 
 /// Results of finished steps. `coalesce`: fold every ready step into one

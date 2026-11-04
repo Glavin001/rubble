@@ -1,0 +1,467 @@
+// The resident (native) Blast solve's shared part (blast_native.slang one group per island,
+// blast_native_wide.slang many groups per large island): the bindings, the scratch layout, the
+// operator's bond and node terms, and each node's block and its inverse. Included, not imported:
+// its bindings are each including file's.
+
+import common;
+import blast_common;
+
+[[vk::binding(0, 0)]] ConstantBuffer<BlastParams> params;
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint4> islands;
+[[vk::binding(2, 0)]] StructuredBuffer<BlastNode> nodes;
+[[vk::binding(3, 0)]] StructuredBuffer<uint> refs;
+[[vk::binding(4, 0)]] RWStructuredBuffer<BlastBond> bonds;
+[[vk::binding(5, 0)]] StructuredBuffer<float4> accel;
+[[vk::binding(6, 0)]] RWStructuredBuffer<float4> x;
+[[vk::binding(7, 0)]] RWStructuredBuffer<float4> scratch;
+[[vk::binding(8, 0)]] RWStructuredBuffer<uint4> report;
+[[vk::binding(9, 0)]] StructuredBuffer<uint> lists;
+// Per bond STIFFNESS_WORDS float4 (blast_common.slang `rotation`): A, W = A^2, Al, Wl = Al^2,
+// each a packed symmetric 3x3 (xx yy zz xy xz yz).
+[[vk::binding(10, 0)]] StructuredBuffer<float4> stiffness;
+
+// Scratch per node (float4s, params.node_vectors): vectors, angular then linear.
+static const uint N_R = 0;     // residual
+static const uint N_P = 2;     // direction
+static const uint N_Q = 4;     // L p
+static const uint N_U = 6;     // solution in node space
+static const uint N_G = 8;     // preconditioned residual
+static const uint N_LOC = 10;  // polynomial scratch: M r
+static const uint N_OFF = 12;  // polynomial scratch: E M r
+static const uint N_B = 14;    // right-hand side
+static const uint N_LAST = 16; // the input, for the settled certificate
+static const uint N_BLK = 18;  // the block: (A xx, yy, zz, xy), (A xz, yz, c, 0), (k, 0)
+static const uint N_INV = 21;  // its inverse: (S^-1 xx, yy, zz, xy), (S^-1 xz, yz, 1/c, 0), (k / c, 0)
+// With the shear stiffness the block is a general symmetric 6x6: it (21 floats, packed lower
+// triangle) at N_BLK, its inverse at N_FULL_INV.
+static const uint N_FULL_INV = 24;
+static const uint STIFFNESS_WORDS = 6;
+uint ns(uint n, uint v) { return n * params.node_vectors + v; }
+uint bs(uint j) { return params.node_count * params.node_vectors + 2 * j; }
+
+// Packed symmetric 3x3 `which` (0 A, 1 W, 2 Al, 3 Wl) of bond j times v.
+float3 stiff(uint j, uint which, float3 v)
+{
+    uint at = 6 * which;
+    float m[6];
+    for (uint k = 0; k < 6; k++)
+    {
+        float4 q = stiffness[j * STIFFNESS_WORDS + (at + k) / 4];
+        m[k] = q[(at + k) % 4];
+    }
+    return float3(m[0] * v.x + m[3] * v.y + m[4] * v.z, m[3] * v.x + m[1] * v.y + m[5] * v.z, m[4] * v.x + m[5] * v.y + m[2] * v.z);
+}
+// S's angular and linear blocks over s: A (rotational stiffness) or I; Al (shear) or I.
+float3 rot_a(uint j, float3 v) { return params.rotation != 0 ? stiff(j, 0, v) : v; }
+float3 rot_l(uint j, float3 v) { return params.rotation == 2 ? stiff(j, 2, v) : v; }
+
+// Island k's rigid-mode frame (blast_motion.slang; blast_common.slang FRAME_WORDS).
+uint frame_word(uint k, uint w)
+{
+    return islands[blast_frame(params.node_count, k) + w / 4][w % 4];
+}
+// Island k's Krylov carry: (node count, iterations, gamma bits), and setting it.
+uint3 carry_of(uint k)
+{
+    return uint3(frame_word(k, F_CARRY_COUNT), frame_word(k, F_CARRY_ITERATIONS), frame_word(k, F_CARRY_GAMMA));
+}
+void set_carry(uint k, uint count, uint iterations, float gamma)
+{
+    uint at = blast_frame(params.node_count, k) + F_CARRY_COUNT / 4;
+    uint4 v = islands[at];
+    v.x = count;
+    v.y = iterations;
+    v.z = asuint(gamma);
+    islands[at] = v;
+}
+// Whether a carry may continue (before the load check): same node count, fewer recurrence
+// iterations than the island has unknowns, a positive last gamma.
+bool carry_kept(uint3 c, uint count)
+{
+    float gamma = asfloat(c.z);
+    return params.carry != 0 && c.x == count && c.y < 6 * count && gamma > 0.0 && isfinite(gamma);
+}
+float frame_float(uint k, uint w)
+{
+    return asfloat(frame_word(k, w));
+}
+// The basis axis of rotation kk: the frame's axis for a single rotation, else e_kk.
+float3 frame_axis(uint k, uint rotations, uint kk)
+{
+    if (rotations == 1)
+        return float3(frame_float(k, F_AXIS), frame_float(k, F_AXIS + 1), frame_float(k, F_AXIS + 2));
+    return float3(kk == 0 ? 1.0 : 0.0, kk == 1 ? 1.0 : 0.0, kk == 2 ? 1.0 : 0.0);
+}
+// Node i's terms of the projection's right-hand side for node vector v
+// (projectMotionComponent): axis_kk . (a / d_a - q x l / d_l) per rotation, then l / d_l.
+void frame_terms(uint k, uint rotations, uint i, uint v, inout float s[6])
+{
+    BlastNode n = nodes[i];
+    float3 lin = vl(i, v) / n.w_lin;
+    float3 rot = va(i, v) / n.w_ang - cross(n.position.xyz, lin);
+    for (uint kk = 0; kk < rotations; kk++)
+        s[kk] += dot(frame_axis(k, rotations, kk), rot);
+    for (uint j = 0; j < 3; j++)
+        s[rotations + j] += lin[j];
+}
+// The projection's coefficients from the summed terms: the scaled Cholesky factor's forward
+// and back substitution, then the rotation omega and translation t.
+void frame_solve(uint k, uint rotations, float sum[6], out float3 omega, out float3 t)
+{
+    uint d = rotations + 3;
+    float c[6];
+    for (uint z = 0; z < 6; z++)
+        c[z] = 0.0;
+    for (uint row = 0; row < d; row++)
+    {
+        float value = sum[row] * frame_float(k, F_SCALE + row);
+        for (uint j = 0; j < row; j++)
+            value -= frame_float(k, F_FACTOR + row * (row + 1) / 2 + j) * c[j];
+        c[row] = value / frame_float(k, F_FACTOR + row * (row + 1) / 2 + row);
+    }
+    for (int row = int(d) - 1; row >= 0; row--)
+    {
+        uint r = uint(row);
+        for (uint j = r + 1; j < d; j++)
+            c[r] -= frame_float(k, F_FACTOR + j * (j + 1) / 2 + r) * c[j];
+        c[r] /= frame_float(k, F_FACTOR + r * (r + 1) / 2 + r);
+    }
+    for (uint z = 0; z < d; z++)
+        c[z] *= frame_float(k, F_SCALE + z);
+    omega = float3(0.0);
+    for (uint kk = 0; kk < rotations; kk++)
+        omega += frame_axis(k, rotations, kk) * c[kk];
+    t = float3(c[rotations], c[rotations + 1], c[rotations + 2]);
+}
+// v -= the rigid motion (omega, t) at node i.
+void frame_apply(uint i, uint v, float3 omega, float3 t)
+{
+    BlastNode n = nodes[i];
+    set_v(i, v, va(i, v) - omega / n.w_ang, vl(i, v) - (t + cross(n.position.xyz, omega)) / n.w_lin);
+}
+
+static const float LOW_WEIGHT = 0.5779388123770052;
+static const float HIGH_WEIGHT = 2.6335678180143502;
+static const uint STAGNATION = 512;
+
+float3 va(uint n, uint v) { return scratch[ns(n, v)].xyz; }
+float3 vl(uint n, uint v) { return scratch[ns(n, v) + 1].xyz; }
+void set_v(uint n, uint v, float3 a, float3 l)
+{
+    scratch[ns(n, v)] = float4(a, 0.0);
+    scratch[ns(n, v) + 1] = float4(l, 0.0);
+}
+
+// t_j = S C^T D v for node vector `v` (a support's weights are 0; its scratch stays 0).
+void bond_term(BlastBond b, uint j, uint v, out float3 ta, out float3 tl)
+{
+    BlastNode m0 = nodes[b.n0];
+    BlastNode m1 = nodes[b.n1];
+    float3 a0 = va(b.n0, v) * m0.w_ang;
+    float3 l0 = vl(b.n0, v) * m0.w_lin;
+    float3 a1 = va(b.n1, v) * m1.w_ang;
+    float3 l1 = vl(b.n1, v) * m1.w_lin;
+    if (params.rotation == 0)
+    {
+        ta = (a0 - a1) * b.s;
+        tl = ((l0 - l1) + (cross(b.o0.xyz, a0) - cross(b.o1.xyz, a1))) * b.s;
+        return;
+    }
+    ta = rot_a(j, a0 - a1) * b.s;
+    tl = rot_l(j, (l0 - l1) + (cross(b.o0.xyz, a0) - cross(b.o1.xyz, a1))) * b.s;
+}
+
+// (D C S y)_node over live bonds: y the bond scratch (from_t) or x0 + (from_u ? B^T u : 0).
+void gather(uint node, bool from_t, bool with_u, out float3 ang, out float3 lin)
+{
+    BlastNode n = nodes[node];
+    float3 acc_a = float3(0.0);
+    float3 acc_l = float3(0.0);
+    for (uint r = n.ref_begin; r < n.ref_end; r++)
+    {
+        uint ref = refs[r];
+        uint j = ref & ~REF_SECOND;
+        BlastBond b = bonds[j];
+        if (!(b.health > 0.0))
+            continue;
+        float3 ya;
+        float3 yl;
+        if (from_t)
+        {
+            ya = scratch[bs(j)].xyz;
+            yl = scratch[bs(j) + 1].xyz;
+        }
+        else
+        {
+            ya = x[j * 2].xyz;
+            yl = x[j * 2 + 1].xyz;
+            if (with_u)
+            {
+                float3 ta;
+                float3 tl;
+                bond_term(b, j, N_U, ta, tl);
+                ya += ta;
+                yl += tl;
+            }
+        }
+        if (params.rotation == 0)
+        {
+            ya *= b.s;
+            yl *= b.s;
+        }
+        else
+        {
+            ya = rot_a(j, ya) * b.s;
+            yl = rot_l(j, yl) * b.s;
+        }
+        if ((ref & REF_SECOND) != 0)
+        {
+            acc_a += cross(b.o1.xyz, yl) - ya;
+            acc_l -= yl;
+        }
+        else
+        {
+            acc_a += ya - cross(b.o0.xyz, yl);
+            acc_l += yl;
+        }
+    }
+    ang = acc_a * n.w_ang;
+    lin = acc_l * n.w_lin;
+}
+
+float3 sym_mul(float4 s0, float4 s1, float3 v)
+{
+    // (xx, yy, zz, xy), (xz, yz, ...)
+    return float3(s0.x * v.x + s0.w * v.y + s1.x * v.z, s0.w * v.x + s0.y * v.y + s1.y * v.z, s1.x * v.x + s1.y * v.y + s0.z * v.z);
+}
+
+// A packed symmetric 6x6 at node n's scratch slot `at` times (a, l).
+void full_apply(uint n, uint at, float3 a, float3 l, out float3 oa, out float3 ol)
+{
+    float m[24];
+    for (uint q = 0; q < 6; q++)
+    {
+        float4 w = scratch[ns(n, at + q)];
+        m[4 * q] = w.x;
+        m[4 * q + 1] = w.y;
+        m[4 * q + 2] = w.z;
+        m[4 * q + 3] = w.w;
+    }
+    float v[6] = { a.x, a.y, a.z, l.x, l.y, l.z };
+    float o[6];
+    for (uint r = 0; r < 6; r++)
+    {
+        float s = 0.0;
+        for (uint c = 0; c < 6; c++)
+            s += m[r >= c ? r * (r + 1) / 2 + c : c * (c + 1) / 2 + r] * v[c];
+        o[r] = s;
+    }
+    oa = float3(o[0], o[1], o[2]);
+    ol = float3(o[3], o[4], o[5]);
+}
+
+// The node's block applied to (a, l): (A a - k x l, k x a + c l).
+void block_apply(uint n, float3 a, float3 l, out float3 oa, out float3 ol)
+{
+    if (params.rotation == 2)
+    {
+        full_apply(n, N_BLK, a, l, oa, ol);
+        return;
+    }
+    float4 b0 = scratch[ns(n, N_BLK)];
+    float4 b1 = scratch[ns(n, N_BLK) + 1];
+    float3 k = scratch[ns(n, N_BLK) + 2].xyz;
+    oa = sym_mul(b0, b1, a) - cross(k, l);
+    ol = cross(k, a) + b1.z * l;
+}
+
+// The block's inverse applied: x = S^-1 (a + k' x l), y = l / c - k' x x.
+void inverse_apply(uint n, float3 a, float3 l, out float3 oa, out float3 ol)
+{
+    if (params.rotation == 2)
+    {
+        full_apply(n, N_FULL_INV, a, l, oa, ol);
+        return;
+    }
+    float4 s0 = scratch[ns(n, N_INV)];
+    float4 s1 = scratch[ns(n, N_INV) + 1];
+    float3 kc = scratch[ns(n, N_INV) + 2].xyz;
+    oa = sym_mul(s0, s1, a + cross(kc, l));
+    ol = l * s1.z - cross(kc, oa);
+}
+
+// Build node n's block and its inverse; false when the block is singular.
+// [o]x M [o]x^T for a packed symmetric M (the shear stiffness's angular term).
+float3x3 skew(float3 o)
+{
+    return float3x3(0.0, -o.z, o.y, o.z, 0.0, -o.x, -o.y, o.x, 0.0);
+}
+float3x3 sym3(uint j, uint which)
+{
+    float3 c0 = stiff(j, which, float3(1, 0, 0));
+    float3 c1 = stiff(j, which, float3(0, 1, 0));
+    float3 c2 = stiff(j, which, float3(0, 0, 1));
+    return float3x3(c0.x, c1.x, c2.x, c0.y, c1.y, c2.y, c0.z, c1.z, c2.z);
+}
+
+// The shear stiffness's node block (B B^T for the node's own bonds, B = D C S with S's blocks
+// s A, s Al): aa = da^2 sum s^2 (W + [o]x Wl [o]x^T), al = -da dl sum s^2 [o]x Wl, ll = dl^2
+// sum s^2 Wl; and its whole inverse (Cholesky), as the target's fine inverse.
+bool build_full_block(uint node)
+{
+    BlastNode n = nodes[node];
+    float3x3 aa = float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    float3x3 al = aa;
+    float3x3 ll = aa;
+    for (uint r = n.ref_begin; r < n.ref_end; r++)
+    {
+        uint ref = refs[r];
+        uint j = ref & ~REF_SECOND;
+        BlastBond b = bonds[j];
+        if (!(b.health > 0.0))
+            continue;
+        float3 o = (ref & REF_SECOND) != 0 ? b.o1.xyz : b.o0.xyz;
+        float s2 = b.s * b.s;
+        float3x3 wl = sym3(j, 3);
+        float3x3 k = skew(o);
+        aa += s2 * (sym3(j, 1) + mul(mul(k, wl), transpose(k)));
+        al += -s2 * mul(k, wl);
+        ll += s2 * wl;
+    }
+    float m[6][6];
+    for (uint r = 0; r < 3; r++)
+        for (uint c = 0; c < 3; c++)
+        {
+            m[r][c] = aa[r][c] * n.w_ang * n.w_ang;
+            m[r][c + 3] = al[r][c] * n.w_ang * n.w_lin;
+            m[c + 3][r] = m[r][c + 3];
+            m[r + 3][c + 3] = ll[r][c] * n.w_lin * n.w_lin;
+        }
+    float packed[24];
+    for (uint z = 0; z < 24; z++)
+        packed[z] = 0.0;
+    for (uint r = 0; r < 6; r++)
+        for (uint c = 0; c <= r; c++)
+            packed[r * (r + 1) / 2 + c] = m[r][c];
+    for (uint q = 0; q < 6; q++)
+        scratch[ns(node, N_BLK + q)] = float4(packed[4 * q], packed[4 * q + 1], packed[4 * q + 2], packed[4 * q + 3]);
+    // Cholesky m = L L^T, then the inverse's columns.
+    float l[6][6];
+    for (uint r = 0; r < 6; r++)
+        for (uint c = 0; c < 6; c++)
+            l[r][c] = 0.0;
+    for (uint r = 0; r < 6; r++)
+        for (uint c = 0; c <= r; c++)
+        {
+            float s = m[r][c];
+            for (uint k = 0; k < c; k++)
+                s -= l[r][k] * l[c][k];
+            if (r == c)
+            {
+                if (!(s > 0.0) || !isfinite(s))
+                    return false;
+                l[r][c] = sqrt(s);
+            }
+            else
+                l[r][c] = s / l[c][c];
+        }
+    float inv[6][6];
+    for (uint c = 0; c < 6; c++)
+    {
+        float y[6];
+        for (uint r = 0; r < 6; r++)
+        {
+            float s = r == c ? 1.0 : 0.0;
+            for (uint k = 0; k < r; k++)
+                s -= l[r][k] * y[k];
+            y[r] = s / l[r][r];
+        }
+        for (int r = 5; r >= 0; r--)
+        {
+            float s = y[r];
+            for (uint k = uint(r) + 1; k < 6; k++)
+                s -= l[k][r] * inv[k][c];
+            inv[r][c] = s / l[r][r];
+        }
+    }
+    for (uint r = 0; r < 6; r++)
+        for (uint c = 0; c <= r; c++)
+            packed[r * (r + 1) / 2 + c] = inv[r][c];
+    for (uint q = 0; q < 6; q++)
+        scratch[ns(node, N_FULL_INV + q)] = float4(packed[4 * q], packed[4 * q + 1], packed[4 * q + 2], packed[4 * q + 3]);
+    return true;
+}
+
+bool build_block(uint node)
+{
+    if (params.rotation == 2)
+        return build_full_block(node);
+    BlastNode n = nodes[node];
+    float3 diag = float3(0.0);
+    float3 offd = float3(0.0); // xy, xz, yz of sum s^2 ((1+|o|^2) I - o o^T)
+    float3 ks = float3(0.0);
+    float cs = 0.0;
+    for (uint r = n.ref_begin; r < n.ref_end; r++)
+    {
+        uint ref = refs[r];
+        uint j = ref & ~REF_SECOND;
+        BlastBond b = bonds[j];
+        if (!(b.health > 0.0))
+            continue;
+        float3 o = (ref & REF_SECOND) != 0 ? b.o1.xyz : b.o0.xyz;
+        float s2 = b.s * b.s;
+        // The angular spring (I, or W with the rotational stiffness) plus [o]x [o]x^T.
+        if (params.rotation != 0)
+        {
+            float3 c0 = stiff(j, 1, float3(1, 0, 0));
+            float3 c1 = stiff(j, 1, float3(0, 1, 0));
+            float3 c2 = stiff(j, 1, float3(0, 0, 1));
+            diag += s2 * (float3(c0.x, c1.y, c2.z) + float3(dot(o, o)) - o * o);
+            offd += s2 * (float3(c1.x, c2.x, c2.y) - float3(o.x * o.y, o.x * o.z, o.y * o.z));
+        }
+        else
+        {
+            float oo = 1.0 + dot(o, o);
+            diag += s2 * (float3(oo) - o * o);
+            offd += s2 * -float3(o.x * o.y, o.x * o.z, o.y * o.z);
+        }
+        ks += s2 * o;
+        cs += s2;
+    }
+    float da = n.w_ang * n.w_ang;
+    float dad = n.w_ang * n.w_lin;
+    float c = n.w_lin * n.w_lin * cs;
+    float3 k = ks * dad;
+    float4 a0 = float4(diag * da, offd.x * da);
+    float4 a1 = float4(offd.y * da, offd.z * da, c, 0.0);
+    scratch[ns(node, N_BLK)] = a0;
+    scratch[ns(node, N_BLK) + 1] = a1;
+    scratch[ns(node, N_BLK) + 2] = float4(k, 0.0);
+    if (!(c > 0.0))
+        return false;
+    // S = A + [k]x^2 / c = A + (k k^T - |k|^2 I) / c.
+    float ic = 1.0 / c;
+    float kk = dot(k, k);
+    float sxx = a0.x + (k.x * k.x - kk) * ic;
+    float syy = a0.y + (k.y * k.y - kk) * ic;
+    float szz = a0.z + (k.z * k.z - kk) * ic;
+    float sxy = a0.w + k.x * k.y * ic;
+    float sxz = a1.x + k.x * k.z * ic;
+    float syz = a1.y + k.y * k.z * ic;
+    // Symmetric 3x3 inverse by its adjugate.
+    float cxx = syy * szz - syz * syz;
+    float cxy = sxz * syz - sxy * szz;
+    float cxz = sxy * syz - sxz * syy;
+    float det = sxx * cxx + sxy * cxy + sxz * cxz;
+    if (!(det > 0.0) || !isfinite(det))
+        return false;
+    float id = 1.0 / det;
+    float cyy = sxx * szz - sxz * sxz;
+    float cyz = sxy * sxz - sxx * syz;
+    float czz = sxx * syy - sxy * sxy;
+    scratch[ns(node, N_INV)] = float4(cxx * id, cyy * id, czz * id, cxy * id);
+    scratch[ns(node, N_INV) + 1] = float4(cxz * id, cyz * id, ic, 0.0);
+    scratch[ns(node, N_INV) + 2] = float4(k * ic, 0.0);
+    return true;
+}
+

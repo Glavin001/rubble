@@ -48,6 +48,10 @@ pub struct Gpu {
     /// Metal), or a lower `STRESS_GPU_STORAGE_LIMIT` to run the browser's per-entry
     /// layouts natively.
     pub storage_limit: u32,
+    /// Bytes this crate has sent the device since it was opened: `write_buffer` and the
+    /// contents of the buffers it created (shared by every clone). The destruction stage's
+    /// steady-state traffic is measured with it.
+    pub uploads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// What a binding of a kernel's group 0 holds (bindings are numbered in order).
@@ -112,7 +116,7 @@ impl Gpu {
                 _ => return Err(format!("STRESS_GPU_STORAGE_LIMIT={v}: expected a count up to the device's {device_limit}")),
             },
         };
-        Ok(Gpu { adapter: Some(adapter), device, queue, adapter_info, shader_path, passthrough, fast_math, storage_limit })
+        Ok(Gpu { adapter: Some(adapter), device, queue, adapter_info, shader_path, passthrough, fast_math, storage_limit, uploads: Default::default() })
     }
 
     /// A device the host already opened (rubble's `World`: the fracture runs on the
@@ -134,7 +138,7 @@ impl Gpu {
                 _ => panic!("STRESS_GPU_STORAGE_LIMIT={v}: expected a count up to the device's {device_limit}"),
             },
         };
-        Gpu { adapter: None, device, queue, adapter_info, shader_path, passthrough, fast_math: false, storage_limit }
+        Gpu { adapter: None, device, queue, adapter_info, shader_path, passthrough, fast_math: false, storage_limit, uploads: Default::default() }
     }
 
     /// The adapter, for surfaces (a device from [`Gpu::from_device`] has none).
@@ -293,11 +297,26 @@ impl Gpu {
     /// A storage buffer initialised with `data` (copyable both ways).
     /// `storage`, rewriting `old` in place when it has the same size (queue order puts the
     /// write before any later submission, so the GPU sees the same contents).
+    /// `queue.write_buffer`, counted in [`Gpu::uploads`].
+    pub fn write_buffer(&self, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
+        self.count(data.len());
+        self.queue.write_buffer(buffer, offset, data);
+    }
+
+    /// Bytes sent so far ([`Gpu::uploads`]).
+    pub fn upload_bytes(&self) -> u64 {
+        self.uploads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn count(&self, bytes: usize) {
+        self.uploads.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn storage_into<T: bytemuck::Pod>(&self, label: &str, data: &[T], old: Option<&wgpu::Buffer>) -> wgpu::Buffer {
         let bytes: &[u8] = bytemuck::cast_slice(data);
         match old {
             Some(old) if bytes.len() >= 16 && old.size() == bytes.len() as u64 => {
-                self.queue.write_buffer(old, 0, bytes);
+                self.write_buffer(old, 0, bytes);
                 old.clone()
             }
             _ => self.storage(label, data),
@@ -314,6 +333,7 @@ impl Gpu {
         } else {
             bytes
         };
+        self.count(contents.len());
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
             contents,
@@ -327,6 +347,7 @@ impl Gpu {
         // length against it).
         let bytes = bytemuck::bytes_of(value);
         let padded = [bytes, &[0u8; 16][..bytes.len().next_multiple_of(16) - bytes.len()]].concat();
+        self.count(padded.len());
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
             contents: &padded,
@@ -336,6 +357,7 @@ impl Gpu {
 
     /// A uniform buffer holding an array.
     pub fn uniform_slice<T: bytemuck::Pod>(&self, label: &str, values: &[T]) -> wgpu::Buffer {
+        self.count(std::mem::size_of_val(values));
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
             contents: bytemuck::cast_slice(values),

@@ -17,7 +17,9 @@ import {LabAsset,sceneObject} from './wasm.mjs';
 let holder=null;
 const TINY={capacity:{maxBodies:64,maxColliders:64,maxContacts:4096,maxCandidates:4096,maxJoints:1,maxColors:8,maxCommands:16,maxHullVertices:1024}};
 export async function labDevice(){holder??=await createWorld(TINY);return holder.device()}
-const worldFor=async def=>{await labDevice();const w=WebWorld.createOnDeviceOf(def,holder);w.flags=holder.flags;return w};
+// ?broadphase=full: the full broadphase instead of the awake-indexed one (A/B, same pairs).
+const FULL_BROADPHASE=typeof location!=='undefined'&&new URLSearchParams(location.search).get('broadphase')==='full';
+const worldFor=async def=>{await labDevice();if(FULL_BROADPHASE)def={...def,features:{...(def.features??{}),awakeBroadphase:false}};const w=WebWorld.createOnDeviceOf(def,holder);w.flags=holder.flags;return w};
 
 // A World for `scene`: `asset` (a LabAsset) and the load options (copies, physicsHz, crush,
 // strengthScale, gpuTiming).
