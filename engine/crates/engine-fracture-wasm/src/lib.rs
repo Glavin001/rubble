@@ -472,6 +472,12 @@ impl Orbit {
     pub fn look_at(&mut self, ex: f64, ey: f64, ez: f64, tx: f64, ty: f64, tz: f64) {
         self.0.frame_shot([ex, ey, ez], [tx, ty, tz])
     }
+    /// An orbit view from (ex, ey, ez) about (tx, ty, tz): orbit mode (drag orbits, a click
+    /// shoots at the pointer).
+    #[wasm_bindgen(js_name = orbitFrom)]
+    pub fn orbit_from(&mut self, ex: f64, ey: f64, ez: f64, tx: f64, ty: f64, tz: f64) {
+        self.0.orbit_shot([ex, ey, ez], [tx, ty, tz])
+    }
     /// Column-major view-projection for the draw shader.
     #[wasm_bindgen(js_name = viewProj)]
     pub fn view_proj(&self, aspect: f64) -> Vec<f32> {

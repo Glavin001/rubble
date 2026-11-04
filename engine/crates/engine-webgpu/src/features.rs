@@ -95,6 +95,34 @@ pub enum GridLayout {
     Fixed,
 }
 
+/// What a world with sleep does with the contacts of pairs at rest ([`EngineFeatures::resting_contacts`];
+/// `World` applies it when sleep is on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RestingContacts {
+    /// The sleep archive (the shipped default). Persistent contacts: a sleeper a moving
+    /// body touches forms all its resting pairs in that step, and woken pairs restart
+    /// cold as the carry's do (`EngineFeatures::archive_cold`, `archive_touch_query`).
+    /// Canonical contacts (threshold destructibles): as on main, the first threshold
+    /// destructible enables the archive, woken pairs warm-start from their archived rows
+    /// and `archive_emit` files them; until then (and in canonical worlds without one)
+    /// the carry runs. A sleeping pair costs nothing per step. Compact contacts keep the
+    /// carry.
+    #[default]
+    Archive,
+    /// Opt-in (`ENGINE_REST=touch`, the demo's `rest=touch`): the persistent worlds'
+    /// archive in canonical worlds too: the touch query and cold wakes (as the carry's),
+    /// enabled when the world is made. Threshold destructibles break differently from
+    /// main (house: 54.3 bonds a shot against 60.6).
+    Touch,
+    /// The resting-pair carry (opt-out, `ENGINE_REST=carry`): every pair at rest is
+    /// re-emitted and kept each step (the earlier default; costs a row per resting
+    /// contact every step).
+    Carry,
+    /// Neither (measurement, `ENGINE_REST=drop`): a sleeping pair keeps no rows and a
+    /// woken one restarts cold.
+    Drop,
+}
+
 /// The engine's internal path switches. Every variant computes the same physics
 /// within its documented tolerance; the defaults are the measured fastest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +141,58 @@ pub struct EngineFeatures {
     pub local_repair: bool,
     /// Carry resting pairs across sleep (`ENGINE_REST=drop` turns it off).
     pub carry_rest: bool,
+    /// Awake-indexed broadphase on hierarchical grids: a persistent resting table for
+    /// static and sleeping colliders, and only moving colliders bounded, inserted and
+    /// queried each step (`ENGINE_BROADPHASE=full` turns it off; same pairs).
+    pub awake_broadphase: bool,
+    /// With `awake_broadphase`: the uniform split grid's other table kept across steps as
+    /// the resting table too, and only moving colliders inserted and queried
+    /// (`ENGINE_BROADPHASE=hier` keeps the full pass on uniform grids; same pairs).
+    pub awake_uniform: bool,
+    /// With `awake_broadphase`: colliders that come to rest join the resting table at the
+    /// end of their step instead of a rebuild of the whole table after every step with
+    /// sleep events (`ENGINE_REST_TABLE=rebuild` turns it off; same pairs).
+    pub rest_incremental: bool,
+    /// `ccd_wake` as a pass a thread per collider, dispatched only while a CCD body sweeps
+    /// fast (`ENGINE_CCD_WAKE=body` keeps the per-body pass, whose collider search assumes
+    /// colliders sorted by body; same results otherwise).
+    pub ccd_by_collider: bool,
+    /// `predict_bodies` and `extract_velocity_sleep` over this step's awake list where
+    /// nothing else changes a body between the list and them (`ENGINE_BODY_PASSES=all`
+    /// runs them over every body slot; same results).
+    pub awake_body_passes: bool,
+    /// The primal's headroom colours (past last step's colour count) solved with their
+    /// colour dispatches' lanes in the sparse tail's single workgroup, one dispatch an
+    /// iteration (`ENGINE_PRIMAL=tail`; same results). Off by default: in Chrome the
+    /// empty headroom dispatches it saves cost next to nothing, and a step whose colours
+    /// grew solves the new ones in one workgroup.
+    pub primal_tail: bool,
+    /// Every solver iteration in one workgroup while at most 256 bodies were awake and
+    /// 128 contacts formed last step (`ENGINE_SOLVE=dispatch` keeps a dispatch per colour
+    /// and dual; same results).
+    pub solve_loop: bool,
+    /// Woken pairs start cold (λ = 0, stiffness at its floor), as the resting-pair carry
+    /// restarts them (its carried rows are re-detected at rest each step), not from the
+    /// sleep archive's rows (default; `ENGINE_ARCHIVE=warm` warm-starts them from the
+    /// archive, the earlier default). A struck sleeping grid: warm-started, a woken box is
+    /// gripped by its neighbours' full resting load from its first step and a ball barely
+    /// dents the stack; cold, it collapses as with the carry. With the touch query, cold
+    /// keeps no archived rows at all.
+    pub archive_cold: bool,
+    /// Measurement variant: rounds of `archive_spread` (sleepers resting on touched ones
+    /// get their archived pairs too; `ENGINE_ARCHIVE_SPREAD=n`; default 0). With the touch
+    /// query: that many more hops of its spread than the one it always runs.
+    pub archive_spread_rounds: u32,
+    /// Sleep archive: a sleeper a moving body touches forms all its resting pairs in the
+    /// step it is touched (`archive_touch`), and its resting rows keep their archived warm
+    /// start (`ENGINE_ARCHIVE_WAKE=emit` turns it off: only the pairs filed in its own
+    /// archive are emitted, the earlier path).
+    pub archive_touch_query: bool,
+    /// Keep the resting-pair carry when a world enables the sleep archive (which turns it
+    /// off by default; `ENGINE_REST=keep`): the behaviour before that change.
+    pub carry_with_archive: bool,
+    /// Resting contacts in worlds with sleep (`World`; [`RestingContacts::Archive`] by default).
+    pub resting_contacts: RestingContacts,
     pub grid: GridLayout,
     /// Hierarchical grid override (`ENGINE_GRID_LEVELS=on|off`; `None`: convex scenes).
     pub grid_levels: Option<bool>,
@@ -138,6 +218,18 @@ impl Default for EngineFeatures {
             persist_list: true,
             local_repair: true,
             carry_rest: true,
+            awake_broadphase: true,
+            awake_uniform: true,
+            rest_incremental: true,
+            ccd_by_collider: true,
+            awake_body_passes: true,
+            primal_tail: false,
+            solve_loop: true,
+            archive_cold: true,
+            archive_spread_rounds: 0,
+            archive_touch_query: true,
+            carry_with_archive: false,
+            resting_contacts: RestingContacts::Archive,
             grid: GridLayout::Split,
             grid_levels: None,
             color_headroom: Some(4),
@@ -175,6 +267,25 @@ impl EngineFeatures {
                 && env_default_on("ENGINE_PERSIST", &["scan"]),
             local_repair: env_default_on("ENGINE_REPAIR", &["rounds"]),
             carry_rest: env_default_on("ENGINE_REST", &["drop"]),
+            awake_broadphase: env_default_on("ENGINE_BROADPHASE", &["full"]),
+            awake_uniform: env_default_on("ENGINE_BROADPHASE", &["full", "hier"]),
+            rest_incremental: env_default_on("ENGINE_REST_TABLE", &["rebuild"]),
+            ccd_by_collider: env_default_on("ENGINE_CCD_WAKE", &["body"]),
+            awake_body_passes: env_default_on("ENGINE_BODY_PASSES", &["all"]),
+            primal_tail: env_str("ENGINE_PRIMAL").as_deref() == Some("tail"),
+            solve_loop: env_default_on("ENGINE_SOLVE", &["dispatch"]),
+            archive_cold: env_str("ENGINE_ARCHIVE").as_deref() != Some("warm"),
+            archive_spread_rounds: env_str("ENGINE_ARCHIVE_SPREAD")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0),
+            archive_touch_query: env_str("ENGINE_ARCHIVE_WAKE").as_deref() != Some("emit"),
+            carry_with_archive: env_str("ENGINE_REST").as_deref() == Some("keep"),
+            resting_contacts: match env_str("ENGINE_REST").as_deref() {
+                Some("carry") => RestingContacts::Carry,
+                Some("drop") => RestingContacts::Drop,
+                Some("touch") => RestingContacts::Touch,
+                _ => d.resting_contacts,
+            },
             grid: match env_str("ENGINE_GRID").as_deref() {
                 Some("scaled") => GridLayout::Scaled,
                 Some("fixed") => GridLayout::Fixed,
@@ -222,6 +333,78 @@ impl SimOptions {
             features: EngineFeatures::from_env(),
             ..Self::default()
         }
+    }
+}
+
+/// Features whose kernels a host can compile before it uses them
+/// ([`crate::WgpuSim::prewarm`]). A world builds each kernel the first time it
+/// runs, so the first step with a character, vehicle, soft body, … pays that
+/// feature's compile; prewarming moves it to when the host chooses (a loading
+/// screen). Combine with `|`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct KernelGroups(pub u32);
+
+impl KernelGroups {
+    pub const NONE: Self = Self(0);
+    /// Character controllers (`char_move`, `char_post`).
+    pub const CHARACTERS: Self = Self(1 << 0);
+    /// Batched ray casts and overlap queries.
+    pub const QUERIES: Self = Self(1 << 1);
+    /// Projectiles (`projectile_step`).
+    pub const PROJECTILES: Self = Self(1 << 2);
+    /// Vehicles and their wheels.
+    pub const VEHICLES: Self = Self(1 << 3);
+    /// Soft bodies.
+    pub const SOFT_BODIES: Self = Self(1 << 4);
+    /// Deformable terrain (MPM soil and its surface).
+    pub const TERRAIN: Self = Self(1 << 5);
+    /// Directed debris.
+    pub const GUIDANCE: Self = Self(1 << 6);
+    /// Explosions.
+    pub const EXPLOSIONS: Self = Self(1 << 7);
+    /// Continuous collision (time-of-impact) for fast bodies.
+    pub const CCD: Self = Self(1 << 8);
+    /// Every kernel the world has: no step ever compiles one.
+    pub const ALL: Self = Self(u32::MAX);
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether `kernel` (a pipeline's name) belongs to one of these groups.
+    pub fn covers(self, kernel: &str) -> bool {
+        use engine_exec::rigid_plan::VEHICLE_ENTRIES;
+        if self == Self::ALL {
+            return true;
+        }
+        let groups: [(Self, bool); 9] = [
+            (Self::CHARACTERS, kernel.starts_with("char_")),
+            (
+                Self::QUERIES,
+                matches!(kernel, "query_batch" | "raycast_batch" | "overlap_query"),
+            ),
+            (Self::PROJECTILES, kernel == "projectile_step"),
+            (
+                Self::VEHICLES,
+                kernel.starts_with("vehicle_") || kernel.starts_with("wheel_") || VEHICLE_ENTRIES.contains(&kernel),
+            ),
+            (Self::SOFT_BODIES, kernel.starts_with("soft_")),
+            (
+                Self::TERRAIN,
+                kernel.starts_with("mpm_") || kernel.starts_with("terrain_"),
+            ),
+            (Self::GUIDANCE, kernel.starts_with("guide_")),
+            (Self::EXPLOSIONS, kernel == "explode"),
+            (Self::CCD, kernel.starts_with("ccd_")),
+        ];
+        groups.iter().any(|&(g, hit)| hit && self.contains(g))
+    }
+}
+
+impl std::ops::BitOr for KernelGroups {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 
@@ -279,6 +462,19 @@ mod tests {
     use super::*;
     use engine_exec::rigid_plan;
     use engine_schema::WorldCapacity;
+
+    #[test]
+    fn kernel_groups_cover_their_feature_kernels() {
+        use crate::KernelGroups as K;
+        assert!(K::CHARACTERS.covers("char_move") && K::CHARACTERS.covers("char_post"));
+        assert!(K::VEHICLES.covers("vehicle_iterate") && K::VEHICLES.covers("wheel_soil"));
+        assert!(K::VEHICLES.covers("raycast_batch") && K::QUERIES.covers("raycast_batch"));
+        assert!(K::TERRAIN.covers("mpm_grid") && K::TERRAIN.covers("terrain_surface_resolve"));
+        assert!((K::SOFT_BODIES | K::CCD).covers("ccd_emit"));
+        assert!(!K::CHARACTERS.covers("projectile_step"));
+        assert!(!(K::CHARACTERS | K::VEHICLES | K::TERRAIN).covers("narrowphase"));
+        assert!(K::ALL.covers("narrowphase") && !K::NONE.covers("char_move"));
+    }
 
     #[test]
     fn capacity_past_a_small_device_fails_with_a_clear_error() {

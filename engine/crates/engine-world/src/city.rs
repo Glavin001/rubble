@@ -309,10 +309,21 @@ impl City {
 /// A shot at the house on lot `at`: a 0.6 m steel ball (a projectile) dropped from 30 m
 /// above the ground at 40 m/s.
 pub fn city_shot(world: &mut World, at: [f32; 2], ground: f32) -> anyhow::Result<BodyId> {
+    city_shell(world, [at[0], ground + 30.0, at[1]], [0.0, -40.0, 0.0], 0.6)
+}
+
+/// A steel ball of `radius` m (a projectile, swept as a bullet) at `origin` moving at
+/// `velocity` (m/s): a city shot, or one the page fires.
+pub fn city_shell(
+    world: &mut World,
+    origin: [f32; 3],
+    velocity: [f32; 3],
+    radius: f32,
+) -> anyhow::Result<BodyId> {
     let b = world.create_body(&BodyDef {
-        linear_velocity: [0.0, -40.0, 0.0],
+        linear_velocity: velocity,
         is_bullet: true,
-        ..BodyDef::dynamic([at[0], ground + 30.0, at[1]])
+        ..BodyDef::dynamic(origin)
     })?;
     world.create_sphere_shape(
         b,
@@ -321,7 +332,7 @@ pub fn city_shot(world: &mut World, at: [f32; 2], ground: f32) -> anyhow::Result
             ..ShapeDef::default()
         },
         [0.0; 3],
-        0.6,
+        radius,
     )?;
     world.body_set_projectile(b, Some(Projectile::default()))?;
     Ok(b)

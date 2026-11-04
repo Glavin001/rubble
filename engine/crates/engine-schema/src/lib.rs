@@ -546,6 +546,8 @@ pub const OVERFLOW_COLORS: u32 = 8;
 pub const CCD_BUDGET_EXHAUSTED: u32 = 16;
 pub const CCD_CANDIDATE_MISS: u32 = 32;
 pub const OVERFLOW_MANIFOLDS: u32 = 64;
+/// A broadphase list ran out of room: more than 8 planes (either grid), or more
+/// large colliders than the hierarchical grid's large list holds.
 pub const OVERFLOW_BP_CHAIN: u32 = 128;
 pub const OVERFLOW_WARM_HASH: u32 = 256;
 /// More oversized statics than `LARGE_STATIC_CAP`: some are found only by the

@@ -10,7 +10,7 @@ use crate::asset::FractureAsset;
 
 /// The material ids of the asset's embedded library, by index.
 pub fn material_names(asset: &FractureAsset) -> Vec<String> {
-    asset.json["extensions"][crate::asset::EXTENSION]["materialLibrary"]["material"]
+    asset.library["material"]
         .as_array()
         .map(|m| m.iter().map(|m| m["id"].as_str().unwrap_or("").to_string()).collect())
         .unwrap_or_default()

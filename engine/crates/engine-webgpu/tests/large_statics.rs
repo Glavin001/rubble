@@ -161,3 +161,42 @@ fn more_large_statics_than_the_list_holds_is_reported() {
         other => panic!("expected the large-static overflow flag, got {other:?}"),
     }
 }
+
+/// The uniform grid lists 8 planes; a 9th was never queried and nothing said so.
+/// It fails the step now (as the hierarchical grid already did).
+#[test]
+fn more_planes_than_the_list_holds_is_reported() {
+    let mut sim = world();
+    sim.set_grid_levels(Some(false));
+    for k in 0..9 {
+        let a = k as f32 * 0.3;
+        let n = glam::Vec3::new(a.sin() * 0.2, 1.0, a.cos() * 0.2).normalize();
+        let ground = sim.add_body(BodyState::static_plane_support());
+        sim.add_collider(Collider {
+            body: ground,
+            shape: ShapeType::Plane as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [n.x, n.y, n.z, -1.0 - k as f32],
+        });
+    }
+    sim.add_body(BodyState::dynamic(
+        glam::Vec3::new(0.0, 0.5, 0.0),
+        glam::Quat::IDENTITY,
+        1.0,
+        glam::Vec3::splat(0.1),
+    ));
+    match sim.step() {
+        Err(ExecError::Overflow(flags)) => {
+            assert_ne!(
+                flags & engine_schema::OVERFLOW_BP_CHAIN,
+                0,
+                "flags {flags:#x}"
+            )
+        }
+        other => panic!("expected the plane-list overflow flag, got {other:?}"),
+    }
+}

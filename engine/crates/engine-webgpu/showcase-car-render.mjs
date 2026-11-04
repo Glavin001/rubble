@@ -77,6 +77,43 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
 }
 `;
 
+// The same skinning from world-space node positions (xyz f32 per node, every
+// vehicle's nodes in order): the crash lab's gathered buffer, live or replayed
+// (crash-lab-render.mjs positionsBuffer). Its own entry point and pipeline; the
+// solver-buffer path above is unchanged.
+const SKIN_POS_WGSL = /* wgsl */ `
+struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r1: f32, nt: f32, nb: f32, nn: f32, r2: f32 };
+struct Params { count: u32, nodeOffset: u32, outOffset: u32, pad: u32 };
+@group(0) @binding(0) var<storage, read> pos: array<f32>;
+@group(0) @binding(2) var<storage, read> binds: array<Bind>;
+@group(0) @binding(3) var<storage, read_write> outv: array<vec4f>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+fn nodePos(i: u32) -> vec3f { let k = (params.nodeOffset + i) * 3u; return vec3f(pos[k], pos[k + 1u], pos[k + 2u]); }
+
+@compute @workgroup_size(${WG})
+fn skinPos(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= params.count) { return; }
+  let bd = binds[i];
+  let p0 = nodePos(bd.n0);
+  let e1 = nodePos(bd.n1) - p0;
+  let e2 = nodePos(bd.n2) - p0;
+  let c = cross(e1, e2);
+  let cl = length(c);
+  let n = select(vec3f(0.0, 1.0, 0.0), c / cl, cl > 1e-12);
+  let l1 = length(e1);
+  let torn = l1 > 2.5 * bd.r1 || length(e2) > 2.5 * bd.r2 || cl <= 1e-12;
+  let p = select(p0 + bd.a * e1 + bd.b * e2 + bd.h * n, p0, torn);
+  let t = e1 / max(l1, 1e-9);
+  let b = cross(n, t);
+  let nrm = normalize(bd.nt * t + bd.nb * b + bd.nn * n + vec3f(1e-9));
+  let k = (params.outOffset + i) * 2u;
+  outv[k] = vec4f(p, select(0.0, 1.0, torn));
+  outv[k + 1u] = vec4f(nrm, 0.0);
+}
+`;
+
 const DRAW_WGSL = /* wgsl */ `
 struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -178,6 +215,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   const skinModule = device.createShaderModule({ label: 'showcase-skin', code: SKIN_WGSL });
   const drawModule = device.createShaderModule({ label: 'showcase-draw', code: DRAW_WGSL });
   const skinPipe = device.createComputePipeline({ label: 'showcase-skin', layout: 'auto', compute: { module: skinModule, entryPoint: 'skin' } });
+  let skinPosPipe = null; // made on first setPositions
   const drawPipe = device.createRenderPipeline({
     label: 'showcase-draw',
     layout: 'auto',
@@ -218,6 +256,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   let nextId = 1;
   let nodesBuf = null;
   let miscBuf = null;
+  let posBuf = null;
 
   const makeSkinBind = (car) => device.createBindGroup({
     layout: skinPipe.getBindGroupLayout(0),
@@ -230,7 +269,27 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     ],
   });
 
+  const makePosBind = (car) => posBuf && device.createBindGroup({
+    layout: skinPosPipe.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: posBuf } },
+      { binding: 2, resource: { buffer: car.binds } },
+      { binding: 3, resource: { buffer: car.out } },
+      { binding: 4, resource: { buffer: car.params } },
+    ],
+  });
+
   return {
+    /**
+     * Skin from world-space node positions instead (xyz f32 per node, all vehicles in
+     * order; e.g. the crash lab's positionsBuffer(), so replays deform the body too).
+     * Call again when that buffer is replaced; null returns to the solver buffers.
+     */
+    setPositions(buf) {
+      posBuf = buf;
+      if (buf && !skinPosPipe) skinPosPipe = device.createComputePipeline({ label: 'showcase-skin-pos', layout: 'auto', compute: { module: device.createShaderModule({ label: 'showcase-skin-pos', code: SKIN_POS_WGSL }), entryPoint: 'skinPos' } });
+      for (const car of cars.values()) car.posBind = makePosBind(car);
+    },
     /** The explicit solver's node and misc buffers (call again after a rebuild). */
     setSolver(nodes, misc) {
       nodesBuf = nodes;
@@ -294,6 +353,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       device.queue.writeBuffer(params, 0, new Uint32Array([n, nodeOffset, 0, 0]));
       const car = { n, binds, out, attrs, index, params, opaqueCount: opaque.length, glassCount: glass.length, skinBind: null };
       if (nodesBuf) car.skinBind = makeSkinBind(car);
+      car.posBind = makePosBind(car);
       const id = nextId++;
       cars.set(id, car);
       return id;
@@ -312,6 +372,16 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     },
     /** Deform every car from the solver's current node positions. */
     update(encoder) {
+      if (posBuf) {
+        const pass = encoder.beginComputePass({ label: 'showcase-skin-pos' });
+        pass.setPipeline(skinPosPipe);
+        for (const car of cars.values()) {
+          pass.setBindGroup(0, car.posBind);
+          pass.dispatchWorkgroups(Math.ceil(car.n / WG));
+        }
+        pass.end();
+        return;
+      }
       if (!nodesBuf) return;
       const pass = encoder.beginComputePass({ label: 'showcase-skin' });
       pass.setPipeline(skinPipe);
