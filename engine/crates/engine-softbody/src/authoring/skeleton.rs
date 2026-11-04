@@ -25,6 +25,8 @@ pub const K_RATIO: f32 = 1.0e7;
 pub const G_LIMIT: f32 = 1.2 * 4.0 / (STEP * STEP);
 /// Largest Σc/m a node may carry (1/s): h·Σc/m ≤ 0.75.
 pub const C_RATIO: f32 = 1500.0;
+/// Length a tie's stiffness is set for (m): see [`Skeleton::tie`].
+pub const TIE_LENGTH: f32 = 0.3;
 /// Lightest node (kg).
 pub const MIN_NODE_MASS: f32 = 0.05;
 /// Shortest beam a yield threshold may act on: the solver keeps every yielded
@@ -64,6 +66,15 @@ pub struct SkBeam {
     /// Kept at its material's stiffness by [`Skeleton::fit_stiffness`] (parts
     /// whose own mass steadies them: suspension, engine).
     pub fixed: bool,
+    /// A tie ([`Skeleton::tie`]): a joint (weld, gusset, mount, catcher brace,
+    /// a member section's ring), not a span of the structure.
+    pub tie: bool,
+    /// A dashpot (no spring): see [`Skeleton::dashpot`].
+    pub damper: bool,
+    /// Part of the body's load-carrying structure: the body-in-white's shell and
+    /// members' spans (not glass, panels, ties, mounts or the rigid blocks). Set
+    /// by the build.
+    pub structure: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -177,8 +188,45 @@ impl Skeleton {
             ty,
             group,
             fixed: false,
+            tie: false,
+            damper: false,
+            structure: false,
         });
         true
+    }
+
+    /// A tie (spot weld, bolt, mount, gusset, catcher brace): as stiff as a
+    /// [`TIE_LENGTH`] beam of `mat` however short it is. What a tie joins sits
+    /// close by, and a short beam's stiffness would cost its nodes mass for no
+    /// gain (the step's limit is on k/m). Its yield and break forces are `mat`'s.
+    pub fn tie(&mut self, a: u32, b: u32, mat: Material) -> bool {
+        let l = self.pos(a).distance(self.pos(b));
+        let s = l.max(super::material::REF_LENGTH) / TIE_LENGTH.max(l);
+        let added = self.beam(a, b, mat.stiffer(s));
+        if added {
+            self.beams.last_mut().unwrap().tie = true;
+        }
+        added
+    }
+
+    /// A dashpot between `a` and `b`: damping `c` (N·s/m) and no spring, torn
+    /// off past `strength` N. Kept as is by [`Self::fit_stiffness`].
+    pub fn dashpot(&mut self, a: u32, b: u32, c: f32, strength: f32) -> bool {
+        let mat = Material {
+            k: 0.0,
+            damp: c,
+            deform: strength,
+            strength,
+            plastic: 0.0,
+            density: 0.0,
+        };
+        let added = self.beam(a, b, mat);
+        if added {
+            let bm = self.beams.last_mut().unwrap();
+            bm.damper = true;
+            bm.fixed = true;
+        }
+        added
     }
 
     /// Replace the material (and type and group) of the beam between `a` and `b`,

@@ -191,28 +191,35 @@ impl Resolution {
         }
     }
 
+    /// Shell spacing. The shell is the body-in-white's outer surface, and its
+    /// nodes carry the body's mass (trim, glass, interior lumped onto them), so
+    /// it is sparse: 25–40 cm, as real node–beam cars are. The 0.5 ms step allows
+    /// a beam's stiffness in proportion to its nodes' mass, and a line's axial
+    /// rigidity at a fixed mass grows with the square of its node spacing: a
+    /// sparse body is a stiff one. Impact faces get their 11 cm node lanes from
+    /// the structure (bumper beams, door beams, sills and B-pillars' catchers).
     pub fn spacing(self) -> Spacing {
         match self {
             Resolution::Low => Spacing {
-                ring: 0.11,
-                side: 0.11,
-                top: 0.16,
-                floor: 0.26,
-                cap: 0.11,
+                ring: 0.36,
+                side: 0.30,
+                top: 0.36,
+                floor: 0.42,
+                cap: 0.30,
             },
             Resolution::Medium => Spacing {
-                ring: 0.10,
-                side: 0.10,
-                top: 0.12,
-                floor: 0.2,
-                cap: 0.10,
+                ring: 0.30,
+                side: 0.25,
+                top: 0.30,
+                floor: 0.35,
+                cap: 0.25,
             },
             Resolution::High => Spacing {
-                ring: 0.09,
-                side: 0.09,
-                top: 0.1,
-                floor: 0.14,
-                cap: 0.09,
+                ring: 0.27,
+                side: 0.23,
+                top: 0.27,
+                floor: 0.32,
+                cap: 0.23,
             },
         }
     }
@@ -220,9 +227,9 @@ impl Resolution {
     /// Station spacing of the structural trusses.
     pub fn truss(self) -> f32 {
         match self {
-            Resolution::Low => 0.25,
-            Resolution::Medium => 0.25,
-            Resolution::High => 0.22,
+            Resolution::Low => 0.45,
+            Resolution::Medium => 0.4,
+            Resolution::High => 0.38,
         }
     }
 
@@ -274,6 +281,31 @@ pub struct VehicleDef {
     /// real door ring does).
     #[serde(default)]
     pub frame_through: Vec<String>,
+    /// X-brace the shell's quads (their second diagonal). A sparse shell's
+    /// triangles hold their shape without it.
+    #[serde(default = "yes")]
+    pub shell_braces: bool,
+    /// Body damping: a dashpot of this many N·s/m from each node to one about
+    /// `body_damping_reach` m away in its part (0: none), torn off past
+    /// `body_damping_strength` N.
+    #[serde(default)]
+    pub body_damping: f32,
+    #[serde(default = "one")]
+    pub body_damping_reach: f32,
+    #[serde(default = "five_kn")]
+    pub body_damping_strength: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn five_kn() -> f32 {
+    5000.0
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn three() -> usize {
@@ -322,6 +354,53 @@ pub struct Built {
     /// Every beam's stiffness and damping were scaled by this so the explicit
     /// step stays stable within the kerb mass (1: the materials as defined).
     pub stiffness_scale: f32,
+}
+
+/// Medians of the built skeleton's materials (the measures real node–beam cars
+/// are compared by: `tests/showcase_rest_wobble.rs`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Stats {
+    pub nodes: usize,
+    pub beams: usize,
+    pub node_mass: f32,
+    /// k × rest length (N) over the structure's beams and over every beam.
+    pub kl_structure: f32,
+    pub kl_all: f32,
+    /// Damping ratio c / 2√(k μ), μ the node pair's reduced mass.
+    pub zeta_structure: f32,
+    pub zeta_all: f32,
+}
+
+fn median(mut v: Vec<f32>) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(f32::total_cmp);
+    v[v.len() / 2]
+}
+
+impl Built {
+    pub fn stats(&self) -> Stats {
+        let sk = &self.skeleton;
+        let m = |i: u32| sk.nodes[i as usize].mass;
+        let per = |b: &super::skeleton::SkBeam| -> (f32, f32) {
+            let l = sk.pos(b.a).distance(sk.pos(b.b));
+            let k = b.mat.k_at(l);
+            let mu = m(b.a) * m(b.b) / (m(b.a) + m(b.b));
+            (k * l, b.mat.damp / (2.0 * (k * mu).sqrt()))
+        };
+        let all: Vec<(f32, f32)> = sk.beams.iter().filter(|b| !b.damper).map(per).collect();
+        let st: Vec<(f32, f32)> = sk.beams.iter().filter(|b| b.structure).map(per).collect();
+        Stats {
+            nodes: sk.nodes.len(),
+            beams: sk.beams.len(),
+            node_mass: median(sk.nodes.iter().map(|n| n.mass).collect()),
+            kl_structure: median(st.iter().map(|x| x.0).collect()),
+            kl_all: median(all.iter().map(|x| x.0).collect()),
+            zeta_structure: median(st.iter().map(|x| x.1).collect()),
+            zeta_all: median(all.iter().map(|x| x.1).collect()),
+        }
+    }
 }
 
 impl Grades {
@@ -417,18 +496,26 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     }
     let mut group_ids: HashMap<u16, u32> = HashMap::new();
     for (a, b, kind) in shell.beams.clone() {
+        if kind == ShellBeam::Brace && !def.shell_braces {
+            continue;
+        }
         let (pa, pb) = (sk.pos(a), sk.pos(b));
         let zmid = 0.5 * (pa.z + pb.z);
         let crumple = def.crumple.eval(zmid);
         let mut m = grade_of[&a].weaker(grade_of[&b]);
         if kind == ShellBeam::Bend {
-            // Bend beams carry the panel's bending, not its membrane: softer.
-            m = m.stiffer(0.35);
+            // Bend beams carry the panel's bending, not its membrane: softer. They
+            // are long (two bays), so cheap for the step.
+            m = m.stiffer(0.7);
         }
         m = m.scaled(crumple);
         let (qa, qb) = (sk.nodes[a as usize].part, sk.nodes[b as usize].part);
         if qa == qb {
             sk.beam(a, b, m);
+            continue;
+        }
+        if kind == ShellBeam::Bend {
+            // A bend beam across a panel gap is not a seam.
             continue;
         }
         // A seam: the joint of the panel side (the non-body side, or the first).
@@ -498,10 +585,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .any(|z| z.grade == "glass" && z.region.contains(p, seg, len))
     };
     let frame_mat = grades.get(&def.frame_grade)?;
-    let mut frame_rings: Vec<usize> = (0..shell.rings.len())
-        .step_by(def.frame_every.max(1))
-        .collect();
-    if *frame_rings.last().unwrap() != shell.rings.len() - 1 {
+    // `frame_every` 0: no frame (a sparse shell is its own frame).
+    let mut frame_rings: Vec<usize> = if def.frame_every == 0 {
+        Vec::new()
+    } else {
+        (0..shell.rings.len()).step_by(def.frame_every).collect()
+    };
+    if !frame_rings.is_empty() && *frame_rings.last().unwrap() != shell.rings.len() - 1 {
         frame_rings.push(shell.rings.len() - 1);
     }
     let mut hard: Vec<Vec<u32>> = Vec::new();
@@ -616,7 +706,12 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     }
     // Bulkheads where the frame closes: both ends and the firewall ring get
     // braces across the section.
-    for fi in [0, hard.len() - 1] {
+    let ends: Vec<usize> = if hard.is_empty() {
+        Vec::new()
+    } else {
+        vec![0, hard.len() - 1]
+    };
+    for fi in ends {
         let ring = &hard[fi];
         let n = ring.len();
         for i in 0..n {
@@ -640,6 +735,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let mut structure_nodes: Vec<u32> = Vec::new();
     let mut trusses: Vec<Truss> = Vec::new();
     let mut truss_names: Vec<String> = Vec::new();
+    let mut snap_pool: Vec<u32> = shell.nodes.clone();
     for m in &def.members {
         let base = grades.get(&m.grade)?;
         let sides: &[f32] = if m.mirrored { &[1.0, -1.0] } else { &[1.0] };
@@ -677,7 +773,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 &mat,
                 m.beads,
                 m.section,
+                m.catch,
+                &snap_pool,
             );
+            snap_pool.extend(truss.stations.iter().flatten().copied());
             let nodes = truss.nodes();
             trusses.push(truss.clone());
             truss_names.push(if side > 0.0 || !m.mirrored {
@@ -686,6 +785,17 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 format!("{}_r", m.name)
             });
             if m.attach > 0 {
+                // The stations (catchers ride their bays), but those snapped onto
+                // the shell (already part of it).
+                let on_shell: std::collections::HashSet<u32> =
+                    shell.nodes.iter().copied().collect();
+                let nodes: Vec<u32> = truss
+                    .stations
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|i| !on_shell.contains(i))
+                    .collect();
                 let pool: Vec<u32> = shell
                     .nodes
                     .iter()
@@ -697,8 +807,16 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     &nodes,
                     &pool,
                     m.attach,
-                    0.2,
-                    Material::weld(grades.panel, base),
+                    0.35,
+                    // Welded along its flanges: the panel's stiffness, half the
+                    // member's strength (the load path holds while the member
+                    // folds).
+                    Material {
+                        deform: 0.5 * base.deform,
+                        strength: 0.5 * base.strength,
+                        plastic: base.plastic,
+                        ..grades.panel
+                    },
                 );
             }
             let key = if side > 0.0 || !m.mirrored {
@@ -734,6 +852,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 (mi, nodes, c, end)
             })
             .collect();
+        let member_nodes: Vec<std::collections::HashSet<u32>> = trusses
+            .iter()
+            .map(|t| t.stations.iter().flatten().copied().collect())
+            .collect();
         let mat = grades.uhss.stiffer(0.3);
         for (ia, a) in stations.iter().enumerate() {
             // A member's end butts into another: join its end stations.
@@ -756,12 +878,23 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 if !seen.insert(b.0) {
                     continue;
                 }
+                // Already joined: the member snapped onto the other's nodes.
+                if member_nodes[a.0]
+                    .iter()
+                    .any(|i| member_nodes[b.0].contains(i))
+                {
+                    continue;
+                }
                 if sk.nodes[a.1[0] as usize].part != sk.nodes[b.1[0] as usize].part {
                     continue;
                 }
+                // Each node to its two nearest of the other station (a gusset
+                // without the full 16-beam web).
+                // (A two-node end gets two each, so it is not a hinge.)
+                let per = if a.1.len() <= 2 { 2 } else { 1 };
                 for &p in &a.1 {
-                    for &q in &b.1 {
-                        sk.beam(p, q, mat);
+                    for q in sk.nearest(sk.pos(p), &b.1, per) {
+                        sk.tie(p, q, mat);
                     }
                 }
                 let _ = ia;
@@ -792,8 +925,8 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 if let Some((cb, sb)) = best {
                     if cb.distance(ca) <= *reach {
                         for &p in sa {
-                            for &q in sb {
-                                sk.beam(p, q, web);
+                            for q in sk.nearest(sk.pos(p), sb, 2) {
+                                sk.tie(p, q, web);
                             }
                         }
                     }
@@ -831,14 +964,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         let nodes: Vec<u32> = g.iter().flatten().copied().collect();
         sk.add_mass(&nodes, pl.kg);
         let edge: Vec<u32> = nodes.clone();
-        attach(
-            &mut sk,
-            &edge,
-            &chassis,
-            1,
-            0.15,
-            mat.scaled(pl.mount_scale),
-        );
+        attach(&mut sk, &edge, &chassis, 2, 0.4, mat.scaled(pl.mount_scale));
         groups.insert(pl.name.clone(), nodes);
     }
     // Blocks.
@@ -919,6 +1045,62 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             def.kerb_mass
         ));
     }
+    // Body damping: dashpots across about a metre of each part. The beams' own
+    // dampers damp each beam's mode (hundreds of hertz) but barely the body's
+    // (10–30 Hz: bending, torsion, panels), which would ring for seconds after
+    // a crash; real bodies' joints, sealer and trim damp those. Each node gets
+    // one, to the node of its part nearest `reach` m away along an axis (x, y,
+    // z in turn).
+    if def.body_damping > 0.0 {
+        let n = sk.nodes.len() as u32;
+        let susp_part = sk
+            .parts
+            .iter()
+            .position(|p| p == "suspension")
+            .map(|x| x as u16);
+        let reach = def.body_damping_reach;
+        for i in 0..n {
+            let ni = &sk.nodes[i as usize];
+            if Some(ni.part) == susp_part {
+                continue;
+            }
+            let axis = [Vec3::X, Vec3::Y, Vec3::Z][(i % 3) as usize];
+            let pi = ni.p;
+            let best = (0..n)
+                .filter(|&j| j != i && sk.nodes[j as usize].part == ni.part)
+                .filter_map(|j| {
+                    let d = sk.pos(j) - pi;
+                    let l = d.length();
+                    // (Small parts, a door: their farthest nodes.)
+                    if l < 0.3 || l > 1.6 * reach {
+                        return None;
+                    }
+                    // Along the axis, near `reach`.
+                    let along = (d.dot(axis) / l).abs();
+                    Some(((l - reach).abs() / reach + (1.0 - along), j))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            if let Some((_, j)) = best {
+                sk.dashpot(i, j, def.body_damping, def.body_damping_strength);
+            }
+        }
+    }
+    // The structure: beams within the body part (shell and members), but glass.
+    let glass_grade = grades.glass;
+    let glassy: std::collections::HashSet<u32> = grade_of
+        .iter()
+        .filter(|(_, m)| **m == glass_grade)
+        .map(|(i, _)| *i)
+        .collect();
+    for bm in &mut sk.beams {
+        bm.structure = !bm.fixed
+            && !bm.tie
+            && !bm.damper
+            && sk.nodes[bm.a as usize].part == 0
+            && sk.nodes[bm.b as usize].part == 0
+            && !glassy.contains(&bm.a)
+            && !glassy.contains(&bm.b);
+    }
     if std::env::var("SHOWCASE_FLOORS").is_ok() {
         let fl = sk.floors(1.0);
         let floor = |i: u32| fl[i as usize];
@@ -958,8 +1140,84 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             fl.iter().sum::<f32>(),
             structure + sk.nodes.iter().map(|n| n.fixed).sum::<f32>()
         );
+        // What the floors pay for: Σ (h²k + 2hc) at both ends by beam kind, with
+        // the beam counts and median k·L.
+        let shell_set: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
+        let mut of_group: HashMap<u32, &str> = HashMap::new();
+        for (k, g) in &groups {
+            for &i in g {
+                of_group.insert(i, k.as_str());
+            }
+        }
+        let h = super::skeleton::STEP;
+        let mut cats: std::collections::BTreeMap<String, (f32, usize, Vec<f32>)> =
+            Default::default();
+        for bm in &sk.beams {
+            let l = sk.pos(bm.a).distance(sk.pos(bm.b));
+            let q = 2.0 * (h * h * bm.mat.k_at(l) + 2.0 * h * bm.mat.damp);
+            let (ga, gb) = (of_group.get(&bm.a), of_group.get(&bm.b));
+            let (sa, sb) = (shell_set.contains(&bm.a), shell_set.contains(&bm.b));
+            let cat = match (ga, gb) {
+                _ if bm.fixed => "fixed".to_string(),
+                (None, None) if sa && sb => {
+                    if sk.nodes[bm.a as usize].part == sk.nodes[bm.b as usize].part {
+                        "shell".into()
+                    } else {
+                        "shell seam".into()
+                    }
+                }
+                (Some(a), Some(b)) if a == b => "member".into(),
+                (Some(_), Some(_)) => "member-member".into(),
+                (Some(_), None) | (None, Some(_)) => "member-shell tie".into(),
+                _ => "other".into(),
+            };
+            let cat = if bm.structure {
+                cat
+            } else {
+                format!("{cat} (non-str)")
+            };
+            let e = cats.entry(cat).or_default();
+            e.0 += q;
+            e.1 += 1;
+            e.2.push(bm.mat.k_at(l) * l);
+        }
+        // Per group: Σq at its nodes' ends, and its internal beams.
+        let mut per: std::collections::BTreeMap<&str, (f32, usize)> = Default::default();
+        for bm in &sk.beams {
+            let l = sk.pos(bm.a).distance(sk.pos(bm.b));
+            let q = h * h * bm.mat.k_at(l) + 2.0 * h * bm.mat.damp;
+            for i in [bm.a, bm.b] {
+                let g = of_group
+                    .get(&i)
+                    .copied()
+                    .unwrap_or(if shell_set.contains(&i) {
+                        "shell"
+                    } else {
+                        "other"
+                    });
+                let e = per.entry(g).or_default();
+                e.0 += q;
+                e.1 += 1;
+            }
+        }
+        let mut per: Vec<_> = per.into_iter().collect();
+        per.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
+        for (g, (q, n)) in per.iter().take(24) {
+            eprintln!(
+                "  {g:>16}: Σq {q:6.1} (≈{:.0} kg) over {n} beam ends",
+                q / 2.4
+            );
+        }
+        for (c, (q, n, kl)) in cats {
+            let below = kl.iter().filter(|&&x| x < 1.25e5).count();
+            eprintln!(
+                "  {c:>28}: {n:5} beams, Σq {q:7.1} (≈{:.0} kg of floor), median k·L {:.2e}, {below} under 1.25e5",
+                q / 2.4,
+                median(kl)
+            );
+        }
     }
-    let stiffness_scale = sk.fit_stiffness(structure, 0.9);
+    let stiffness_scale = sk.fit_stiffness(structure, 0.95);
     sk.solve_masses(structure)?;
     preload(&mut sk, def);
     // Collision skin: the shell's skin on a coarser lattice, its nodes contacters.

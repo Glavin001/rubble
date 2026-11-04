@@ -40,8 +40,9 @@ fn counts_per_resolution() {
             sk.wheels.len(),
             b.stiffness_scale
         );
-        assert!(sk.nodes.len() > 1500 && sk.nodes.len() < 5000);
-        assert!(sk.beams.len() > 10_000 && sk.beams.len() < 35_000);
+        // A sparse body of heavy nodes, as real node–beam cars are (1–2 kg).
+        assert!(sk.nodes.len() > 1000 && sk.nodes.len() < 1700);
+        assert!(sk.beams.len() > 4_000 && sk.beams.len() < 12_000);
         assert!(sk.collision.len() <= MAX_COLLISION_TRIANGLES);
         assert_eq!(sk.wheels.len(), 4);
         assert!(
@@ -618,9 +619,11 @@ fn f_wall_at_120_kmh_destroys_the_front_without_exploding() {
         span(&s)
     );
     assert!(finite(&s));
+    // A twentieth of the car's beams (the sparse body has ~7,000).
     assert!(
-        broken > 500,
-        "a 120 km/h crash should tear the car ({broken})"
+        broken * 20 > s.beams.len(),
+        "a 120 km/h crash should tear the car ({broken} of {})",
+        s.beams.len()
     );
     // Torn-off parts may fly; nothing faster than the crash itself.
     assert!(vmax < 40.0, "a node at {vmax} m/s");

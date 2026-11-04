@@ -28,7 +28,7 @@ pub use curve::{Curve, Outline};
 pub use material::{Grades, Material};
 pub use members::{Corner, MemberSpec};
 pub use skeleton::Skeleton;
-pub use vehicle::{build, BuildParams, Built, Resolution, VehicleDef};
+pub use vehicle::{build, BuildParams, Built, Resolution, Stats, VehicleDef};
 
 /// A definition by body style name (`sedan`, `hatchback`).
 pub fn style(name: &str) -> Option<VehicleDef> {
