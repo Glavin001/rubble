@@ -85,8 +85,8 @@ Per collision triangle: its three nodes in file order (n₀, n₁, n₂) and a t
 (two integers: *wait*, *idle*, both 0 at spawn).
 
 Per vehicle: origin (world position the node positions are relative to), static boxes
-(axis-aligned, lo and hi), ground height (flat), collision range r (from the file,
-default 0.02 m).
+(axis-aligned, lo and hi), static shapes (Rubble only, below), ground height (flat),
+collision range r (from the file, default 0.02 m).
 
 ## Spawning from a `.truck` file
 
@@ -194,6 +194,9 @@ passes produced. At spawn every node's force is zero.
      low-y (−y), high-y (+y). Add the contact force with that normal, penetration 0,
      the box surface. Each contact sees the node's force including contacts added
      before it in this pass.
+   * then for every static shape, in order (Rubble only, see *Static shapes*): if x
+     is strictly inside the shape's culling box and strictly inside the shape, add
+     the contact force with the shape's normal at x, penetration 0, the box surface.
 2. Unless immovable: v ← v + F/m·h, then rel ← rel + v·h.
 3. Restart the force: F ← (0, m·gravity, 0). With drag on: s = approximate √(v·v),
    F += −0.05·s·v; with turbulence on also F += (0.05·s)·s·0.005·(three noise draws).
@@ -295,6 +298,39 @@ yaw_degrees, velocity, settings)` turns every node offset by the yaw about +y
 the file's axes and turned with the rest (Rigs of Rods' convention, checked against
 its spawned positions). The velocity is in world axes.
 
+### Static shapes (Rubble only)
+
+RoR's reference (and the RoR harness the accuracy runs compare against) has only flat
+ground and axis-aligned boxes; these shapes are Rubble's, for ramps, angled walls,
+poles and bollards. Contact stays node-only, as RoR's and BeamNG's static collision
+is (BeamNG's collision triangles collide with nodes only, not with static world
+objects). Shapes (`StaticShape`, in `ExplicitBeams::shapes`) are tested after the
+axis-aligned boxes, in order, with the box rule's terms: a node strictly inside is
+pushed out along the outward normal of the nearest surface.
+
+* **Oriented box** (centre c, half extents e, unit rotation q; built by
+  `StaticShape::oriented_box`, which stores q's matrix columns a₀, a₁, a₂, the box's
+  local axes in world). With d = x − c, the local point l = (a₀·d, a₁·d, a₂·d) (each
+  dot (x + y) + z). Strictly inside: −eᵢ < lᵢ < eᵢ on every axis. The face is the
+  axis-aligned rule's in local terms (distances l_z + e_z for −a₂, then e_z − l_z for
+  +a₂, l_x + e_x for −a₀, e_x − l_x for +a₀, l_y + e_y for −a₁, e_y − l_y for +a₁,
+  replaced only when strictly nearer); the normal is that ±aᵢ. A box whose rotation
+  is exactly the identity quaternion is the axis-aligned box lo = c − e, hi = c + e
+  (the same test, bit for bit; the GPU host gives it an axis-aligned slot).
+* **Vertical cylinder** (centre c, radius R, half height H): d = x − c,
+  ρ = √(d.x·d.x + d.z·d.z). Strictly inside: ρ < R and −H < d.y < H. The side's
+  normal (d.x/ρ, 0, d.z/ρ) (+x when ρ = 0) at distance R − ρ, replaced only when
+  strictly nearer by the top cap (+y, H − d.y), then the bottom cap (−y, d.y + H).
+* **Capsule** (ends a, b, radius R): t = clamp((x − a)·(b − a) / |b − a|², 0, 1)
+  (0 when a = b), p = a + (b − a)·t component by component; the round rule on
+  d = x − p.
+* **Sphere** (centre c, radius R): the round rule on d = x − c.
+* Round rule: ℓ = √(d·d); strictly inside when ℓ < R, normal d/ℓ component by
+  component (+y when ℓ = 0).
+* Culling box (`StaticShape::bounds`, the same on CPU and GPU): the shape's world
+  box grown by 0.01 m + 10⁻⁵·(the largest coordinate of its corners), far beyond
+  the tests' rounding, so the cull never changes a result.
+
 ## GPU design (`ExplicitBeamsGpu`)
 
 * One 256-lane workgroup per vehicle; one dispatch per frame runs the origin rebase
@@ -308,6 +344,15 @@ its spawned positions). The velocity is in world axes.
   so the node pass sums a contiguous run of independent loads, in list order. The
   self-collision pass accumulates into per-node integer atomics in fixed point
   (1/32 N); a triangle's throttle is finished in the next node pass.
+* Static shapes: a vehicle's box slots are its boxes then its shapes, two records
+  each: (lo, kind) and (hi, parameter record); kind 0 is an axis-aligned box, else
+  lo, hi are the shape's culling box and the parameter records (after every slot)
+  hold an oriented box's centre, axes and half extents, a cylinder's centre, radius
+  and half height, a capsule's ends and radius, a sphere's centre and radius. A
+  vehicle with shapes (vehicle flag 64) steps its nodes in `nodeUpdateShapes`
+  behind an early return at the top of `nodeUpdate`/`nodeUpdateSolo`, so their code
+  (and the frozen kernels' results for every other vehicle) is unchanged; the shape
+  tests use the strict arithmetic in the CPU's order.
 * Self-collision in the specification's order. The lanes find the hits in parallel
   ((triangle, contacter) pairs spread over the lanes, the grid or the grid skip
   below) and record each in the vehicle's hit list: its key, triangle (file order)
@@ -643,7 +688,8 @@ whole fleet into one workgroup); the CPU follows the rule.
 `engine_softbody::explicit_beams`:
 `ExplicitBeamsSettings { fast_inv_sqrt, drag, turbulence }` (all true by default =
 RoR-compatible), `ContactSurface { va, ms, mc, t2, vs, alpha, strength }` with
-`GROUND` and `BOX`, `ExplicitBeams` with public node, beam, triangle and box state,
+`GROUND` and `BOX`, `ExplicitBeams` with public node, beam, triangle, box and shape
+state (`StaticShape::{oriented_box, cylinder, capsule, sphere}`, `shape_face`),
 `from_truck(text, position, velocity, settings)`, `new(desc, position, velocity,
 settings)` (no tyres), `step()`, `rebase_origin()`, `run(seconds)` (rebase every
 frame), `positions()` (world), `STEP` = 0.0005.
@@ -666,6 +712,12 @@ yield and hardening, the halfway force and breaking above strength, the break
 exception, detacher groups, tension weakening, supports and ropes, limited-spring
 bounds, the contact force stopping a node against a box without bounce, tyre
 geometry (2n nodes on circles of radius R around each axle node, 8–9 beams per ray),
-spawn order; and GPU against CPU on the procedural sedan (`car_truck_bare` with
+spawn order; static shapes (`engine-softbody/tests/explicit_shapes.rs`: a node on a
+20° oriented ramp holds with friction 1.0 and slides with 0.2, a frictionless node
+driven into a cylinder exits radially, faces and caps picked nearest first, an
+identity-rotation box equal to the axis-aligned box bit for bit;
+`engine-webgpu/tests/explicit_shapes_gpu.rs`: the Viper at 100 km/h up a 10° ramp
+into a pole within float noise of the fixed-point CPU per frame, and the identity
+box equal to the plain box on the GPU bit for bit); and GPU against CPU on the procedural sedan (`car_truck_bare` with
 `minimass` 10): rest within millimetres, a 56 km/h wall crash with matching broken
 and bent counts.

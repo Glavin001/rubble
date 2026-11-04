@@ -13,7 +13,7 @@
 
 use crate::{err, gpu_buffer, WebWorld};
 use engine_softbody::explicit_beams::{
-    ExplicitBeams, ExplicitBeamsSettings, StaticBox, NODE_IMMOVABLE, NODE_TYRE,
+    ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape, NODE_IMMOVABLE, NODE_TYRE,
 };
 use engine_softbody::SoftVehicleDesc;
 use engine_webgpu::ExplicitBeamsGpu;
@@ -52,6 +52,9 @@ pub struct ExplicitSim {
     queue: wgpu::Queue,
     vehicles: Vec<Spawned>,
     boxes: Vec<(Vec3, Vec3)>,
+    /// `spec.shapes`: oriented boxes, cylinders, capsules and spheres every vehicle
+    /// collides with (after its boxes).
+    shapes: Vec<StaticShape>,
     /// Render records: per collision triangle (nodes, vehicle) and its rest edges;
     /// per beam (ends, vehicle | tyre << 16, spawn rest bits).
     tris: wgpu::Buffer,
@@ -144,6 +147,69 @@ fn set_moving(sim: &mut ExplicitBeams, velocity: Vec3) {
     if velocity != Vec3::ZERO {
         sim.roll_tyres(velocity);
     }
+}
+
+/// Three numbers at `key` (`default` when absent).
+fn vec3(v: &serde_json::Value, key: &str, default: Vec3) -> Result<Vec3, String> {
+    let Some(a) = v.get(key) else {
+        return Ok(default);
+    };
+    let f: Vec<f32> =
+        serde_json::from_value(a.clone()).map_err(|e| format!("shapes.{key}: {e}"))?;
+    match f[..] {
+        [x, y, z] => Ok(Vec3::new(x, y, z)),
+        _ => Err(format!("shapes.{key}: expected [x, y, z]")),
+    }
+}
+
+/// `spec.shapes`: `[{ kind: 'box', centre, half, rotation: [x, y, z, w] } | { kind:
+/// 'cylinder', centre, radius, halfHeight } (vertical) | { kind: 'capsule', a, b,
+/// radius } | { kind: 'sphere', centre, radius }]` (world metres).
+fn shapes(spec: &serde_json::Value) -> Result<Vec<StaticShape>, String> {
+    let Some(list) = spec.get("shapes") else {
+        return Ok(Vec::new());
+    };
+    let list = list.as_array().ok_or("spec.shapes: an array")?;
+    list.iter()
+        .map(|s| {
+            let centre = vec3(s, "centre", Vec3::ZERO)?;
+            let radius = num(s, "radius", 0.5) as f32;
+            match s.get("kind").and_then(|k| k.as_str()).unwrap_or("box") {
+                "box" => {
+                    let q = match s.get("rotation") {
+                        Some(r) => {
+                            let q: Vec<f32> = serde_json::from_value(r.clone())
+                                .map_err(|e| format!("shapes.rotation: {e}"))?;
+                            match q[..] {
+                                [x, y, z, w] => Quat::from_xyzw(x, y, z, w),
+                                _ => return Err("shapes.rotation: expected [x, y, z, w]".into()),
+                            }
+                        }
+                        None => Quat::IDENTITY,
+                    };
+                    Ok(StaticShape::oriented_box(
+                        centre,
+                        vec3(s, "half", Vec3::splat(0.5))?,
+                        q,
+                    ))
+                }
+                "cylinder" => Ok(StaticShape::cylinder(
+                    centre,
+                    radius,
+                    num(s, "halfHeight", 1.0) as f32,
+                )),
+                "capsule" => Ok(StaticShape::capsule(
+                    vec3(s, "a", Vec3::ZERO)?,
+                    vec3(s, "b", Vec3::Y)?,
+                    radius,
+                )),
+                "sphere" => Ok(StaticShape::sphere(centre, radius)),
+                k => Err(format!(
+                    "shapes: unknown kind {k}: box, cylinder, capsule or sphere"
+                )),
+            }
+        })
+        .collect()
 }
 
 fn num(v: &serde_json::Value, key: &str, default: f64) -> f64 {
@@ -260,7 +326,8 @@ impl WebWorld {
     /// truck | jbeam: [[name, text], …] (+ pc) | desc, at: [x, z], yaw, front }], scene:
     /// 'idle' | 'coast' | 'wall' | 'arena', speed (m/s, coast and wall), wallGap (m,
     /// default 1 + 0.5·speed); arena (see `arena`): count, cols, speedMin, speedMax,
-    /// hitMin, hitMax, headOn, layout ('rows' | 'ring', see `ring`), ringRadius, the
+    /// hitMin, hitMax, headOn, layout ('rows' | 'ring', see `ring`), ringRadius;
+    /// shapes (static colliders for every vehicle, see `shapes`); the
     /// first vehicle copied to every spawn, drag, turbulence, fastInvSqrt (default true), timing
     /// (default true: GPU timestamps when the device has them) }`.
     #[wasm_bindgen(js_name = explicitSim)]
@@ -302,6 +369,7 @@ impl ExplicitSim {
         }
         let mut vehicles = Vec::new();
         let mut boxes = Vec::new();
+        let shapes = shapes(spec)?;
         // `arena`: the first vehicle, built once, copied to every spawn.
         let mut spots = Vec::new();
         let template = if scene == "arena" {
@@ -421,6 +489,7 @@ impl ExplicitSim {
                 sim.boxes.push(StaticBox::centered(c, half));
                 boxes.push((c, half));
             }
+            sim.shapes.extend_from_slice(&shapes);
             vehicles.push(Spawned {
                 name: desc.name.clone(),
                 sim,
@@ -478,6 +547,7 @@ impl ExplicitSim {
             tri_count: (tris.len() / 2) as u32,
             vehicles,
             boxes,
+            shapes,
             tris: tris_buf,
             beam_recs: recs_buf,
             steps: 0,
@@ -561,7 +631,11 @@ impl ExplicitSim {
 
     /// `{ nodes, beams, triangles, timed, vehicles: [{ name, nodes, beams,
     /// triangles, tyres, mass, nodeOffset, beamOffset, warnings }], boxes: [[cx,
-    /// cy, cz, hx, hy, hz]] }` (boxes: the static boxes, for the scene's colliders).
+    /// cy, cz, hx, hy, hz, qx, qy, qz, qw, kind]] }` (boxes: the static colliders,
+    /// for rendering: the axis-aligned boxes (identity rotation, kind 0) then
+    /// `spec.shapes` (`StaticShape::render_row`: kind 1 a box, 2 a vertical
+    /// cylinder with (hx, hy) its radius and half height, 3 a capsule along its
+    /// rotated y with radius hx and half segment hy, 4 a sphere of radius hx)).
     pub fn layout(&self) -> JsValue {
         let vehicles: Vec<serde_json::Value> = self
             .vehicles
@@ -577,10 +651,11 @@ impl ExplicitSim {
                 })
             })
             .collect();
-        let boxes: Vec<[f32; 6]> = self
+        let boxes: Vec<[f32; 11]> = self
             .boxes
             .iter()
-            .map(|(c, h)| [c.x, c.y, c.z, h.x, h.y, h.z])
+            .map(|(c, h)| [c.x, c.y, c.z, h.x, h.y, h.z, 0.0, 0.0, 0.0, 1.0, 0.0])
+            .chain(self.shapes.iter().map(StaticShape::render_row))
             .collect();
         js(serde_json::json!({
             "nodes": self.vehicles.iter().map(|v| v.sim.nodes.len()).sum::<usize>(),
