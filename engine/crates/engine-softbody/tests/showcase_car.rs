@@ -7,7 +7,8 @@ use engine_softbody::authoring::body::check_closed;
 use engine_softbody::authoring::skin::{deform, showcase_visual};
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use engine_softbody::explicit_beams::{
-    ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape, MAX_COLLISION_TRIANGLES,
+    ExplicitBeams, ExplicitBeamsSettings, ExplicitKind, ExplicitType, StaticBox, StaticShape,
+    MAX_COLLISION_TRIANGLES,
 };
 use glam::{Quat, Vec3};
 use std::collections::HashSet;
@@ -40,8 +41,9 @@ fn counts_per_resolution() {
             sk.wheels.len(),
             b.stiffness_scale
         );
-        assert!(sk.nodes.len() > 1500 && sk.nodes.len() < 5000);
-        assert!(sk.beams.len() > 10_000 && sk.beams.len() < 35_000);
+        // A sparse body of heavy nodes, as real node–beam cars are (1–2 kg).
+        assert!(sk.nodes.len() > 1000 && sk.nodes.len() < 1700);
+        assert!(sk.beams.len() > 4_000 && sk.beams.len() < 12_000);
         assert!(sk.collision.len() <= MAX_COLLISION_TRIANGLES);
         assert_eq!(sk.wheels.len(), 4);
         assert!(
@@ -567,7 +569,8 @@ fn pole_sweep_never_passes_through() {
             }
         }
     }
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    // At most six threads (keep the machine responsive).
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(6));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let fails = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|sc| {
@@ -618,9 +621,11 @@ fn f_wall_at_120_kmh_destroys_the_front_without_exploding() {
         span(&s)
     );
     assert!(finite(&s));
+    // A twentieth of the car's beams (the sparse body has ~7,000).
     assert!(
-        broken > 500,
-        "a 120 km/h crash should tear the car ({broken})"
+        broken * 20 > s.beams.len(),
+        "a 120 km/h crash should tear the car ({broken} of {})",
+        s.beams.len()
     );
     // Torn-off parts may fly; nothing faster than the crash itself.
     assert!(vmax < 40.0, "a node at {vmax} m/s");
@@ -678,53 +683,301 @@ fn g_pulling_a_door_tears_it_off() {
     let _ = (torn, joints);
 }
 
-/// After a 56 km/h wall crash the stopped car goes still: once its centre of
-/// mass moves under 0.1 m/s, its fastest node is under 0.2 m/s within 0.5 s
-/// (no jelly). Fails today (p99 node speed ~1.4 m/s half a second after the car
-/// stops): the acceptance test for the soft-skin fix; run with `--ignored`.
+/// After a 56 km/h wall crash the stopped car goes still: once it has stopped
+/// (its rigid motion, v_com + ω × r, under 0.1 m/s at every node: rocking on
+/// its springs is motion too), its body's p99 node speed is under 0.2 m/s within
+/// 0.5 s (no jelly). With the solver's air drag on and off.
 #[test]
-#[ignore]
 fn h_settles_after_the_wall_crash() {
-    let b = built(Resolution::Medium);
-    let mut s = spawn(&b, Vec3::new(0.0, 0.0, 56.0 / 3.6), 0.0);
-    let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
-    s.boxes.push(StaticBox::centered(
-        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
-        Vec3::new(3.0, 2.0, 1.0),
-    ));
-    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
-    let com_speed =
-        |s: &ExplicitBeams| (s.nodes.iter().map(|n| n.mass * n.vel).sum::<Vec3>() / total).length();
-    // Skip the hit; wait (up to 4 s) for the car to stop.
-    run(&mut s, 0.3);
-    let mut t = 0.3;
-    while com_speed(&s) > 0.1 && t < 4.0 {
-        s.frame();
-        t += 1.0 / 60.0;
-    }
-    let stopped = t;
-    let mut settled = None;
-    let mut fastest = 0.0f32;
-    for f in 0..30 {
-        s.frame();
-        let v = s.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max);
-        // The 95th-percentile node: one tyre node chattering on the ground is not a jelly body.
-        let mut speeds: Vec<f32> = s.nodes.iter().map(|n| n.vel.length()).collect();
-        speeds.sort_by(f32::total_cmp);
-        let p99 = speeds[speeds.len() * 99 / 100];
-        fastest = p99;
-        if settled.is_none() && p99 < 0.2 {
-            settled = Some(f as f32 / 60.0);
+    for drag in [true, false] {
+        let b = built(Resolution::Medium);
+        let mut s = spawn(&b, Vec3::new(0.0, 0.0, 56.0 / 3.6), 0.0);
+        s.settings.drag = drag;
+        let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+        s.boxes.push(StaticBox::centered(
+            Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+            Vec3::new(3.0, 2.0, 1.0),
+        ));
+        // Skip the hit; wait (up to 6 s) for the car to stop.
+        run(&mut s, 0.3);
+        let mut t = 0.3;
+        while rigid_speed(&s) > 0.1 && t < 6.0 {
+            s.frame();
+            t += 1.0 / 60.0;
         }
-        let _ = v;
+        let stopped = t;
+        let mut settled = None;
+        let mut p99 = 0.0f32;
+        for f in 0..30 {
+            s.frame();
+            // The body's nodes (the tyres' ground contact chatters on its own,
+            // the reason for p99 rather than the max).
+            let mut speeds: Vec<f32> = s.nodes[..b.skeleton.nodes.len()]
+                .iter()
+                .map(|n| n.vel.length())
+                .collect();
+            speeds.sort_by(f32::total_cmp);
+            p99 = speeds[speeds.len() * 99 / 100];
+            if settled.is_none() && p99 < 0.2 {
+                settled = Some(f as f32 / 60.0);
+            }
+        }
+        eprintln!(
+            "(h) drag {drag}: after the wall the car stopped at {stopped:.2} s; p99 node speed under 0.2 m/s after {settled:?} s (at 0.5 s: {p99:.3} m/s)"
+        );
+        assert!(stopped < 6.0, "the car never stopped");
+        assert!(
+            settled.is_some(),
+            "still jelly: p99 node speed {p99} m/s 0.5 s after stopping"
+        );
     }
-    eprintln!(
-        "(h) after the wall: the car stopped at {stopped:.2} s; p99 node speed under 0.2 m/s after {:?} s (now {fastest:.3} m/s)",
-        settled
+}
+
+/// The fastest point of the car's rigid motion (v_com + ω × r, ω from the
+/// angular momentum and inertia about the centre of mass).
+fn rigid_speed(s: &ExplicitBeams) -> f32 {
+    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let com = s.nodes.iter().map(|n| n.mass * n.pos).sum::<Vec3>() / total;
+    let vc = s.nodes.iter().map(|n| n.mass * n.vel).sum::<Vec3>() / total;
+    let mut l = Vec3::ZERO;
+    let mut inertia = glam::Mat3::ZERO;
+    for n in &s.nodes {
+        let r = n.pos - com;
+        l += n.mass * r.cross(n.vel - vc);
+        inertia += n.mass
+            * (glam::Mat3::from_diagonal(Vec3::splat(r.length_squared()))
+                - glam::Mat3::from_cols(r * r.x, r * r.y, r * r.z));
+    }
+    let w = inertia.inverse() * l;
+    s.nodes
+        .iter()
+        .map(|n| (vc + w.cross(n.pos - com)).length())
+        .fold(0.0, f32::max)
+}
+
+/// Standing still: after 3 s, over 1 s, every body node within 10 mm of its own
+/// mean and under 0.5 m/s (the tyres' ground contact chatters on its own:
+/// reported). The "cloth" look was 56 mm and 1.3 m/s.
+#[test]
+fn j_rest_is_still() {
+    for res in [Resolution::Low, Resolution::Medium] {
+        let b = built(res);
+        let mut s = spawn(&b, Vec3::ZERO, 0.0);
+        run(&mut s, 3.0);
+        let n = b.skeleton.nodes.len();
+        let mut samples: Vec<Vec<Vec3>> = Vec::new();
+        let (mut vbody, mut vtyre) = (0.0f32, 0.0f32);
+        for _ in 0..60 {
+            s.frame();
+            samples.push(s.positions());
+            for (i, nd) in s.nodes.iter().enumerate() {
+                let v = nd.vel.length();
+                if i < n {
+                    vbody = vbody.max(v);
+                } else {
+                    vtyre = vtyre.max(v);
+                }
+            }
+        }
+        let mut worst = 0.0f32;
+        for i in 0..s.nodes.len() {
+            let mean = samples.iter().map(|p| p[i]).sum::<Vec3>() / samples.len() as f32;
+            for p in &samples {
+                worst = worst.max(p[i].distance(mean));
+            }
+        }
+        eprintln!(
+            "(j) {res:?} at rest: max wobble {:.1} mm; max speed body {vbody:.2} m/s, tyres {vtyre:.2} m/s",
+            worst * 1e3
+        );
+        assert!(worst < 0.010, "{res:?}: wobble {worst} m");
+        assert!(vbody < 0.5, "{res:?}: body node at {vbody} m/s");
+    }
+}
+
+/// The materials are what the step allows at the kerb mass, not scaled down to
+/// fit it (stiffness scale ≥ 0.8 at low and medium, the scenes'); the structure's median
+/// axial rigidity k·L ≥ 1e5 N (the body-in-white's shell and members' spans:
+/// not ties, glass, panels or blocks) and its damping ratio 0.05–0.15. Real
+/// node–beam cars for scale: E36 median k·L 8.8e5 N, Mustang 1.8e5 N.
+#[test]
+fn materials_are_stiff_and_damped() {
+    for res in RESOLUTIONS {
+        let b = built(res);
+        let st = b.stats();
+        eprintln!(
+            "{res:?}: {} nodes, median node {:.2} kg; stiffness ×{:.2}; median k·L structure {:.2e} N (all {:.2e}); ζ structure {:.3} (all {:.3})",
+            st.nodes, st.node_mass, b.stiffness_scale, st.kl_structure, st.kl_all, st.zeta_structure, st.zeta_all
+        );
+        // High (more, lighter nodes) is reported: the scenes run at low and
+        // medium.
+        if res == Resolution::High {
+            continue;
+        }
+        assert!(b.stiffness_scale >= 0.8, "{res:?}: ×{}", b.stiffness_scale);
+        assert!(st.kl_structure >= 1.0e5, "{res:?}: k·L {}", st.kl_structure);
+        assert!(
+            (0.05..=0.15).contains(&st.zeta_structure),
+            "{res:?}: ζ {}",
+            st.zeta_structure
+        );
+        assert!(
+            (0.05..=0.15).contains(&st.zeta_all),
+            "{res:?}: ζ (all) {}",
+            st.zeta_all
+        );
+        assert!(
+            st.node_mass > 0.5,
+            "{res:?}: median node {} kg",
+            st.node_mass
+        );
+    }
+}
+
+/// Body torsion: opposed vertical forces at the front and rear suspension
+/// mounts (the shocks' body ends) of a car floating in the air (no ground, no
+/// drag); the twist between the axles, averaged once settled. Returns kN·m/deg
+/// and the torque (kN·m).
+fn torsion(truck: &str, torque: f32) -> Option<(f32, f32)> {
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        drag: false,
+        ..Default::default()
+    };
+    let mut s =
+        ExplicitBeams::from_truck(truck, Vec3::new(0.0, 20.0, 0.0), Vec3::ZERO, settings).ok()?;
+    // Shock body ends: the upper node of each shock.
+    let mut mounts: Vec<u32> = s
+        .beams
+        .iter()
+        // (Tyre spokes are limited springs too, but deformable.)
+        .filter(|b| b.kind == ExplicitKind::LimitedSpring && b.ty != ExplicitType::Deformable)
+        .map(|b| {
+            if s.nodes[b.a as usize].pos.y > s.nodes[b.b as usize].pos.y {
+                b.a
+            } else {
+                b.b
+            }
+        })
+        .collect();
+    mounts.sort();
+    mounts.dedup();
+    if mounts.len() < 4 {
+        return None;
+    }
+    let zmid = mounts
+        .iter()
+        .map(|&i| s.nodes[i as usize].pos.z)
+        .sum::<f32>()
+        / mounts.len() as f32;
+    let xmid = mounts
+        .iter()
+        .map(|&i| s.nodes[i as usize].pos.x)
+        .sum::<f32>()
+        / mounts.len() as f32;
+    let corner = |front: bool, left: bool| -> Vec<u32> {
+        mounts
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let p = s.nodes[i as usize].pos;
+                (p.z > zmid) == front && (p.x > xmid) == left
+            })
+            .collect()
+    };
+    let (fl, fr, rl, rr) = (
+        corner(true, true),
+        corner(true, false),
+        corner(false, true),
+        corner(false, false),
     );
-    assert!(stopped < 4.0, "the car never stopped");
-    assert!(
-        settled.is_some(),
-        "still jelly: p99 node speed {fastest} m/s 0.5 s after stopping"
+    if [&fl, &fr, &rl, &rr].iter().any(|c| c.is_empty()) {
+        return None;
+    }
+    let mean = |s: &ExplicitBeams, c: &[u32]| {
+        c.iter().map(|&i| s.nodes[i as usize].pos).sum::<Vec3>() / c.len() as f32
+    };
+    let angle = |s: &ExplicitBeams, l: &[u32], r: &[u32]| {
+        let d = mean(s, l) - mean(s, r);
+        d.y.atan2(d.x)
+    };
+    let twist = |s: &ExplicitBeams| angle(s, &fl, &fr) - angle(s, &rl, &rr);
+    // The same at the body nodes nearest the mounts (but not the suspension's).
+    let near_body = |c: &[u32]| -> Vec<u32> {
+        let p = c.iter().map(|&i| s.nodes[i as usize].pos).sum::<Vec3>() / c.len() as f32;
+        let susp: HashSet<u32> = s
+            .beams
+            .iter()
+            .filter(|b| b.kind == ExplicitKind::LimitedSpring)
+            .flat_map(|b| [b.a, b.b])
+            .collect();
+        let mut v: Vec<(f32, u32)> = (0..s.nodes.len() as u32)
+            .filter(|i| !susp.contains(i) && !c.contains(i))
+            .map(|i| (s.nodes[i as usize].pos.distance(p), i))
+            .filter(|x| x.0 > 0.25)
+            .collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v.into_iter().take(3).map(|x| x.1).collect()
+    };
+    let (bfl, bfr, brl, brr) = (
+        near_body(&fl),
+        near_body(&fr),
+        near_body(&rl),
+        near_body(&rr),
     );
+    let body_twist = |s: &ExplicitBeams| angle(s, &bfl, &bfr) - angle(s, &brl, &brr);
+    let b0 = body_twist(&s);
+    let t0 = twist(&s);
+    let track_f = (mean(&s, &fl) - mean(&s, &fr)).length();
+    let track_r = (mean(&s, &rl) - mean(&s, &rr)).length();
+    // Couples of `torque` at each axle, opposite: left front up, right down.
+    let ff = torque / track_f;
+    let fr_ = torque / track_r;
+    let steps = 2000;
+    let mut sum = 0.0f64;
+    let mut n = 0;
+    for st in 0..steps {
+        let ramp = (st as f32 / 600.0).min(1.0);
+        let push = |s: &mut ExplicitBeams, c: &[u32], f: f32| {
+            for &i in c {
+                s.nodes[i as usize].force.y += f / c.len() as f32;
+            }
+        };
+        push(&mut s, &fl, ramp * ff);
+        push(&mut s, &fr, -ramp * ff);
+        push(&mut s, &rl, -ramp * fr_);
+        push(&mut s, &rr, ramp * fr_);
+        s.step();
+        if std::env::var("TORSION_TRACE").is_ok() && st % 200 == 0 {
+            eprintln!(
+                "  step {st}: twist {:.3}° (body {:.3}°)",
+                (twist(&s) - t0).to_degrees(),
+                (body_twist(&s) - b0).to_degrees()
+            );
+        }
+        if st >= 1400 {
+            sum += (twist(&s) - t0) as f64;
+            n += 1;
+        }
+    }
+    let deg = (sum / n as f64).to_degrees() as f32;
+    Some((torque / 1000.0 / deg.abs(), torque / 1000.0))
+}
+
+/// The body's torsional stiffness, beside a real Rigs of Rods car's when one is
+/// in engine/local-vehicles (gitignored). A real body-in-white is 15–25 kN·m/deg.
+#[test]
+fn i_body_torsion() {
+    for res in [Resolution::Low, Resolution::Medium] {
+        let b = built(res);
+        let (k, t) = torsion(&b.truck, 2000.0).unwrap();
+        eprintln!("(i) {res:?} body torsion: {k:.1} kN·m/deg (at {t:.1} kN·m)");
+        assert!(k.is_finite() && k > 0.5, "{res:?}: {k} kN·m/deg");
+    }
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../local-vehicles");
+    if let Ok(t) = std::fs::read_to_string(format!("{dir}/E36Sedan.truck")) {
+        if let Some((k, tq)) = torsion(&t, 2000.0) {
+            eprintln!("(i) E36 (Rigs of Rods) torsion: {k:.1} kN·m/deg (at {tq:.1} kN·m)");
+        }
+    }
 }

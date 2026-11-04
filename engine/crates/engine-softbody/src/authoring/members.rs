@@ -22,6 +22,9 @@ pub struct Truss {
 /// always meets one.
 pub const CATCH: f32 = 0.11;
 
+/// A member's station node this close to an existing node (m) reuses it.
+pub const SNAP: f32 = 0.05;
+
 impl Truss {
     pub fn nodes(&self) -> Vec<u32> {
         let mut v: Vec<u32> = self.stations.iter().flatten().copied().collect();
@@ -95,6 +98,10 @@ pub struct MemberSpec {
     /// rigidity grows with the square of its station spacing at a fixed mass and step.
     #[serde(default)]
     pub station: f32,
+    /// Pole catchers between stations (impact members only: bumper beams, door
+    /// beams, sills, B-pillars). See [`CATCH`].
+    #[serde(default)]
+    pub catch: bool,
 }
 
 fn four() -> usize {
@@ -113,9 +120,30 @@ pub fn box_truss(
     mat: &dyn Fn(f32) -> Material,
     beads: usize,
     section: usize,
+    catch: bool,
+    snap: &[u32],
 ) -> Truss {
     let pts = resample(path, spacing);
     let mut truss = Truss::default();
+    // A station node within `SNAP` of an existing node of its part (the shell,
+    // a member built before) is that node: a member is welded where it meets
+    // the body, and two coincident nodes joined by a tie would be a pin.
+    let mut mk = |sk: &mut Skeleton, q: Vec3| -> u32 {
+        let near = snap
+            .iter()
+            .copied()
+            .filter(|&j| sk.nodes[j as usize].part == part)
+            .min_by(|&a, &b| {
+                sk.pos(a)
+                    .distance_squared(q)
+                    .total_cmp(&sk.pos(b).distance_squared(q))
+                    .then(a.cmp(&b))
+            });
+        match near {
+            Some(j) if sk.pos(j).distance(q) < SNAP => j,
+            _ => sk.node(q, part),
+        }
+    };
     for (i, &(p, t)) in pts.iter().enumerate() {
         // Central differences (symmetric paths give mirrored sections).
         let prev = if i > 0 { pts[i - 1].0 } else { p };
@@ -130,8 +158,8 @@ pub fn box_truss(
         let hw = 0.5 * width;
         let hh = 0.5 * height;
         let st = if section == 2 {
-            let a = sk.node(p - u * hh, part);
-            let b = sk.node(p + u * hh, part);
+            let a = mk(sk, p - u * hh);
+            let b = mk(sk, p + u * hh);
             [a, b, a, b]
         } else {
             let c = [
@@ -140,7 +168,7 @@ pub fn box_truss(
                 p + side * hw + u * hh,
                 p - side * hw + u * hh,
             ];
-            c.map(|q| sk.node(q, part))
+            c.map(|q| mk(sk, q))
         };
         truss.stations.push(st);
         truss.t.push(t);
@@ -159,14 +187,17 @@ pub fn box_truss(
             m
         }
         .stiffer(0.5);
+        // The section's ring and diagonal are short: ties (their stiffness that of
+        // a `TIE_LENGTH` beam), so the mass the step needs goes into the member's
+        // length.
         for e in 0..4 {
-            sk.beam(s[e], s[(e + 1) % 4], ring);
+            sk.tie(s[e], s[(e + 1) % 4], ring);
         }
-        sk.beam(s[0], s[2], ring);
+        sk.tie(s[0], s[2], ring);
         if i + 2 < n {
             // Bend beams over two stations: stiffness against buckling.
             let q = truss.stations[i + 2];
-            let mm = mat(truss.t[i + 1]).stiffer(0.5);
+            let mm = mat(truss.t[i + 1]).stiffer(0.7);
             for e in 0..4 {
                 sk.beam(s[e], q[e], mm);
             }
@@ -177,7 +208,7 @@ pub fn box_truss(
             for e in 0..4 {
                 sk.beam(s[e], q[e], mm);
             }
-            let diag = mm.stiffer(0.35);
+            let diag = mm.stiffer(0.7);
             for e in 0..4 {
                 sk.beam(s[e], q[(e + 1) % 4], diag);
                 sk.beam(s[(e + 1) % 4], q[e], diag);
@@ -188,24 +219,21 @@ pub fn box_truss(
     // nodes along two of its lines at most `CATCH` apart, each braced to both
     // stations of its line and of the next line (a pole between two stations
     // still meets nodes that carry its load into the member).
-    for i in 0..n.saturating_sub(1) {
+    for i in 0..if catch { n.saturating_sub(1) } else { 0 } {
         let (s0, s1) = (truss.stations[i], truss.stations[i + 1]);
-        let l = sk.pos(s0[0]).distance(sk.pos(s1[0]));
-        let cuts = (l / CATCH - 1e-3).ceil() as usize;
-        if cuts < 2 {
-            continue;
-        }
-        let m = mat(0.5 * (truss.t[i] + truss.t[i + 1])).stiffer(0.2);
-        let lines: [usize; 2] = [0, 1];
-        for &c in &lines {
+        let m = mat(0.5 * (truss.t[i] + truss.t[i + 1])).stiffer(0.4);
+        for c in [0usize, 1] {
+            // Each line by its own length (snapped stations bend them).
+            let l = sk.pos(s0[c]).distance(sk.pos(s1[c]));
+            let cuts = (l / CATCH - 1e-3).ceil() as usize;
             let c2 = if section == 2 { 1 - c } else { 3 - c };
-            for j in 1..cuts {
+            for j in 1..cuts.max(1) {
                 let t = j as f32 / cuts as f32;
                 let p = sk.pos(s0[c]).lerp(sk.pos(s1[c]), t);
                 let q = sk.node(p, part);
                 truss.catchers.push(q);
                 for e in [s0[c], s1[c], s0[c2], s1[c2]] {
-                    sk.beam(q, e, m);
+                    sk.tie(q, e, m);
                 }
             }
         }
@@ -214,7 +242,7 @@ pub fn box_truss(
 }
 
 /// Join every node of `nodes` to its `count` nearest nodes of `pool` (within
-/// `reach` m).
+/// `reach` m) with ties ([`Skeleton::tie`]).
 pub fn attach(
     sk: &mut Skeleton,
     nodes: &[u32],
@@ -227,7 +255,7 @@ pub fn attach(
         let p = sk.pos(a);
         for b in sk.nearest(p, pool, count) {
             if b != a && sk.pos(b).distance(p) <= reach {
-                sk.beam(a, b, mat);
+                sk.tie(a, b, mat);
             }
         }
     }
