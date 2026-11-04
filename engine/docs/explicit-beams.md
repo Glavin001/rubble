@@ -609,6 +609,15 @@ spread over them (box test, hit test), each hit appended to a list whose forces
 (the side vote over the node's neighbour far ends, kept as a flat list at upload,
 and the contact force) are applied one lane per hit in the next phase (S of the
 next owner, or after the last). The throttle update: a hit → 0, no candidate → +1.
+A tested triangle's two marks for it (had a candidate, hit) are one plain word each
+in `gNext` (`vvMarkAt`, after the tested list), set by the triangle's lanes in (T)
+and read and cleared by the update. They were the `.z` and `.w` of the triangle's
+throttle record in `gMisc`; a store to one component of a `uint4` can compile to a
+read-modify-write of the whole record (Metal), so a lane marking only a candidate
+could undo another lane's hit mark: a rare nondeterministic throttle (the sedan
+head-on in `explicit_beams_bitwise`, about 1 run in 10). With one word per mark every
+lane stores the same value, so the marks no longer race; the frozen baseline and
+reference kernels keep the record marks (and the race).
 
 What the GPU does differently from the specification's exact order (§8.3):
 

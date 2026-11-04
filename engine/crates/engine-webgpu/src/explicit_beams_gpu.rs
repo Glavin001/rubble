@@ -1048,10 +1048,12 @@ impl ExplicitBeamsGpu {
         let next_len = key_base as usize + if any_keys { nv * 2 * KEYS } else { 0 };
         // Vehicle contact: the solo list, members (5 words per vehicle: lists,
         // sorted, run prefixes, partner and reset flags) and the tested triangles,
-        // the pairs, the vehicle grid's slots, the big list, the run ranks.
+        // the tested triangles' marks (two words per triangle: the kernel's
+        // vvMarkAt), the pairs, the vehicle grid's slots, the big list, the run
+        // ranks.
         let vv_solo = next_len as u32;
         let vv_members = vv_solo + nv as u32;
-        let vv_pairs = vv_members + 5 * nv as u32 + total_tris as u32;
+        let vv_pairs = vv_members + 5 * nv as u32 + 3 * total_tris as u32;
         let vv_pair_cap = (16 * nv).max(1024) as u32;
         let vv_grid = vv_pairs + 2 * vv_pair_cap;
         let vv_big = vv_grid + (vv_buckets * VV_SLOTS) as u32;

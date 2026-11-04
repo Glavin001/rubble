@@ -186,7 +186,6 @@ fn compare_steps(
     let mut break_races = 0;
     let mut det = 0;
     let mut retried = 0;
-    let mut group_retries = 0;
     let mut groups = 0;
     let mut same_as_ref = 0;
     let mut ref_retries = 0;
@@ -212,20 +211,14 @@ fn compare_steps(
                 panic!("{label}: frame {f}: the probe build differs from the baseline at {d}");
             }
         }
-        // The current kernel is deterministic: the same frame twice is the same. A
-        // frame with a contact group may rarely not be (the group path has a rare
-        // race of its own, outside the hit order: the baseline with fixed-order hits
-        // shows it against itself too); it must match on a retry.
+        // The current kernel is deterministic: the same frame twice is the same,
+        // contact groups included, with no retry (the group path's rare race, a
+        // contact triangle's marks stored as components of one record, is fixed; the
+        // frozen kernels below keep it, so their comparisons retry a group frame).
         let b = run(&mut gpu, &snap, KernelVariant::Current, steps);
         let grouped = gpu.contact_groups();
         groups = groups.max(grouped);
-        let mut nondet = first_diff(&b, &run(&mut gpu, &snap, KernelVariant::Current, steps));
-        if nondet.is_some() && grouped > 0 {
-            group_retries += 1;
-            nondet = first_diff(&b, &run(&mut gpu, &snap, KernelVariant::Current, steps))
-                .and(first_diff(&b, &run(&mut gpu, &snap, KernelVariant::Current, steps)));
-        }
-        if let Some(d) = nondet {
+        if let Some(d) = first_diff(&b, &run(&mut gpu, &snap, KernelVariant::Current, steps)) {
             panic!("{label}: frame {f}: the current kernel is not deterministic: {d}");
         }
         // The frozen reference (the kernel before the latency work): the same state,
@@ -281,7 +274,7 @@ fn compare_steps(
         gpu.wait();
     }
     eprintln!(
-        "{label}: {frames} frames deterministic ({group_retries} group frames retried), {same_as_ref} = the \
+        "{label}: {frames} frames deterministic, {same_as_ref} = the \
          frozen reference ({ref_retries} retries); ordered hits = \
          the baseline's one-lane order in {det} ({retried} retries); {break_races} frames with a \
          break-exception race (not compared), {contact_races} with a contact race in the plain \
