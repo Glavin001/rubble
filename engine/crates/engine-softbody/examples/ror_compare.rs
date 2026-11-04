@@ -302,6 +302,18 @@ fn free(truck: &str, nodes_csv: &str, args: &[String]) {
     let ms = t.elapsed().as_secs_f64() * 1e3;
     let ror = csv(nodes_csv);
     let x = sim.positions();
+    // `out=<file.csv>`: Rubble's end positions in the harness's column layout
+    // (rest and mass copied from Rigs of Rods' rows), for ensemble statistics.
+    if let Some(path) = kv(args, "out") {
+        let mut text = String::from("node,mass,rest_x,rest_y,rest_z,x,y,z\n");
+        for (i, (p, r)) in x.iter().zip(&ror).enumerate() {
+            text += &format!(
+                "{i},{},{},{},{},{},{},{}\n",
+                r[1], r[2], r[3], r[4], p.x, p.y, p.z
+            );
+        }
+        std::fs::write(path, text).unwrap();
+    }
     let d: Vec<f32> = x
         .iter()
         .zip(&ror)
@@ -326,8 +338,15 @@ fn free(truck: &str, nodes_csv: &str, args: &[String]) {
         }
     }
     let (broken, bent) = sim.damage();
+    // Mean node x of each engine: tells a stop from a pass-through at a glance.
+    let mean_x = |v: &mut dyn Iterator<Item = f64>| {
+        let (s, n) = v.fold((0.0, 0.0), |(s, n), x| (s + x, n + 1.0));
+        s / n
+    };
+    let rubble_x = mean_x(&mut x.iter().map(|p| f64::from(p.x)));
+    let ror_x = mean_x(&mut ror.iter().map(|r| r[5]));
     println!(
-        "explicit_beams vs Rigs of Rods after {secs} s: nodes {} / {}, node distance RMS {:.3} mm, max {:.3} mm; rubble: broken {broken}, bent {bent}; {ms:.1} ms CPU",
+        "explicit_beams vs Rigs of Rods after {secs} s: nodes {} / {}, node distance RMS {:.3} mm, max {:.3} mm; rubble: broken {broken}, bent {bent}; mean node x rubble {rubble_x:.2} ror {ror_x:.2}; {ms:.1} ms CPU",
         x.len(),
         ror.len(),
         rms * 1e3,
