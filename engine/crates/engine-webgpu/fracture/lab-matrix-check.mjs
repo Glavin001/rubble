@@ -34,6 +34,8 @@ const list = (name, fallback) => opt(name, fallback).split(',').filter(Boolean);
 const SCENES = list('--scenes', 'cuboid,arch,house,cuboidGrid,crush-wall,glass-tower,vc-towers');
 const BONDS = list('--bonds', 'none,d6,threshold,load_path,impact_local,blast');
 const ACTIONS = list('--actions', 'click,row,volley,topple,meteor,pack');
+// --hz 120: the physics rate every cell runs at (default: the page's, 60 Hz).
+const HZ = opt('--hz', '');
 const BREAKABLE = new Set(['d6', 'threshold', 'load_path', 'impact_local', 'blast']);
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
@@ -96,6 +98,7 @@ const load = (scene, bonds) => evaluate(`(async () => {
   const d = window.__FRACTURE_DEMO__, status = document.getElementById('status');
   if (!document.getElementById('scene').querySelector('option[value="${scene}"]')) return { missing: true };
   status.classList.remove('error');
+  if (${JSON.stringify(HZ)} && document.getElementById('physics-hz').value !== ${JSON.stringify(HZ)}) { set('physics-hz', ${JSON.stringify(HZ)}); await new Promise((r) => setTimeout(r, 300)); }
   if (document.getElementById('scene').value !== ${JSON.stringify(scene)}) { set('scene', ${JSON.stringify(scene)}); await new Promise((r) => setTimeout(r, 300)); }
   if (document.getElementById('bond-mode').value !== ${JSON.stringify(bonds)}) set('bond-mode', ${JSON.stringify(bonds)});
   await new Promise((r) => setTimeout(r, 300));
@@ -179,7 +182,8 @@ for (const scene of SCENES) {
       console.log(`${problems.length ? 'FAIL' : 'ok  '}  ${line}`);
       for (const p of problems) console.log(`        ${p}`);
       if (problems.length && process.env.VERBOSE) for (const m of messages) console.log(`          | ${m.slice(0, 900)}`);
-      rows.push({ scene, bonds, action, ok: !problems.length, ...st, problems });
+      // The stats first: their own `bonds` (a count) must not replace the bond model's name.
+      rows.push({ ...st, bondCount: st.bonds, scene, bonds, action, ok: !problems.length, problems });
       if (problems.length) failed++;
     }
     if (BREAKABLE.has(bonds) && rows.some((r) => r.scene === scene && r.bonds === bonds && r.frames !== undefined) && !brokeAny) {

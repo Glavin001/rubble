@@ -1342,31 +1342,33 @@ impl Lab {
     pub fn poses(&self, world: &World) -> anyhow::Result<Vec<f32>> {
         let n = self.drawn.len();
         let mut out = vec![0.0f32; RECORD_FLOATS * n];
-        let mut put = |i: usize, t: Transform, flags: u32| {
+        // Word 3: the record's rigid body slot + 1 (0: none), for the renderer's Bodies view.
+        let mut put = |i: usize, t: Transform, flags: u32, body: Option<BodyId>| {
             let o = RECORD_FLOATS * i;
             out[o..o + 3].copy_from_slice(&t.position);
+            out[o + 3] = f32::from_bits(body.map_or(0, |b| b.index() + 1));
             out[o + 4..o + 8].copy_from_slice(&t.rotation);
             out[o + 11] = f32::from_bits(flags);
         };
         let parked = Transform::new(PARKED, [0.0, 0.0, 0.0, 1.0]);
         for (i, d) in self.drawn.iter().enumerate() {
             match *d {
-                Drawn::Ground => put(i, Transform::IDENTITY, 0),
-                Drawn::None => put(i, parked, 0),
+                Drawn::Ground => put(i, Transform::IDENTITY, 0, None),
+                Drawn::None => put(i, parked, 0, None),
                 Drawn::Body(b) => match world.body_transform(b).ok().flatten() {
-                    Some(t) => put(i, t, body_flags(world, b)),
-                    None => put(i, parked, 0),
+                    Some(t) => put(i, t, body_flags(world, b), Some(b)),
+                    None => put(i, parked, 0, None),
                 },
                 Drawn::Chunk { copy, chunk, rest } => {
                     let dest = self.destructibles[copy as usize];
                     let body = world.destructible_chunk_body(dest, chunk)?;
                     if !world.body_is_valid(body) {
                         // Crushed: its body is gone.
-                        put(i, parked, 0);
+                        put(i, parked, 0, None);
                         continue;
                     }
                     let t = world.body_transform(body)?.unwrap_or(world.body_initial_transform(body)?);
-                    put(i, compose(&t, &rest), body_flags(world, body));
+                    put(i, compose(&t, &rest), body_flags(world, body), Some(body));
                 }
             }
         }
@@ -1376,7 +1378,7 @@ impl Lab {
             let slot = self.scene.projectile_start as usize + (first + k) % count;
             if let Some(t) = world.body_transform(b).ok().flatten() {
                 if slot < n {
-                    put(slot, t, body_flags(world, b));
+                    put(slot, t, body_flags(world, b), Some(b));
                 }
             }
         }

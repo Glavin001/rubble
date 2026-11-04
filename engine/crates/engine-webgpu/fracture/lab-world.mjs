@@ -15,6 +15,8 @@ import {LabRun,sceneObject} from './wasm.mjs';
 let holder=null,holding=null;
 const TINY={capacity:{maxBodies:64,maxColliders:64,maxContacts:4096,maxCandidates:4096,maxJoints:1,maxColors:8,maxCommands:16,maxHullVertices:1024}};
 export async function labDevice(){holding??=createWorld(TINY).then(w=>holder=w);await holding;return holder.device()}
+// ?broadphase=full: the full broadphase instead of the awake-indexed one (A/B, same pairs).
+const FULL_BROADPHASE=typeof location!=='undefined'&&new URLSearchParams(location.search).get('broadphase')==='full';
 
 // A lab run placed in its own World: `def` the page's choices (engine-world-wasm lab.rs
 // `DefJs`: source, level, arrangement, layout, bonds, physicsHz, strengthScale, ball scales,
@@ -53,7 +55,7 @@ async function settle(run,onProgress){
 async function placeRun(run,onProgress=()=>{}){
  try{
   await settle(run,onProgress);
-  const scene=sceneObject(run.scene()),world=WebWorld.createForLab(run,holder);
+  const scene=sceneObject(run.scene()),world=WebWorld.createForLab(run,holder,FULL_BROADPHASE);
   world.flags=holder.flags;
   try{
    const sim=labSimulation(world,world.labPlace(run),scene);

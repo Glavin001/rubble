@@ -76,27 +76,38 @@ volley, 480 steps:
 | C (`lab.c`) | 11 | 14,844 | 43,280 | 9 | 112 |
 | web | 11 | 14,844 | 43,280 | 10 | 121 |
 
-## Open
+## Regressions this change introduced, fixed
+
+- The lab's `?broadphase=full` (an A/B check) was dropped by the new load path; restored
+  (`WebWorld.createForLab`'s `full_broadphase`).
+- The View menu's **Bodies** coloured each chunk under the stress models now drawn from World's
+  poses (they coloured by rigid body on the old stress host); the pose records carry each
+  chunk's body slot (`Lab::poses` word 3, `fracture_draw.slang` `mode.w`).
+- `fr_il_run` dispatched past WebGPU's limit on World's larger shared fractures; dispatched in
+  rows.
+
+Every suite that runs locally passes but for the failures below, each of which fails the same
+way on main (4c7d54cf): engine-world, engine-ffi, engine-world-wasm, stress-gpu, stress-rubble,
+the JS tests, `build-ffi.sh` (with `lab.c`).
+
+## Pre-existing on main (out of this change's scope)
 
 - **The load path on the fractured tower** (vibe-city `fracturedTower`, alone, in the block and
   in the page's volley): "a load-path block was not positive definite" (fracture.slang
   `fr_lp_block`, error bit 64) once a chunk is left hanging by one of two of its 10,820 bonds:
   each of those bonds' single-bond block factors in f64 and not in f32 (stress-rubble example
-  `load_path_blocks`). The lever arm's coupling (|r|² × axial stiffness) swamps the rotational
-  stiffness, and the Cholesky's Schur complement cancels in f32. The lab's world on the same
-  shot does not leave such a chunk; World's run does. World fails the step with the reason
-  (the lab's world holds the chunk still and reports it). The lossless fix: factor each block
-  about its bonds' stiffness-weighted centre (the elastic centre, where the coupling vanishes
-  for one bond), the sweeps transforming back; it changes the load path's kernels and their
-  host-twin parity, so it is its own change.
-- **D6 on the punch-through wall** (`crush-wall` pack): the settle overflows the warm-start
-  hash (`Overflow(256)`, `OVERFLOW_WARM_HASH`) at step 107. The settle's world is sized as the
-  old page sized it; not yet checked on main.
-- **The cuboid house settling**: the lab's world breaks 2 bonds at frame 2, `World` none (the two
-  rigid engines differ in contact count from step 1). Present on main before this work; the
-  strike's breaks agree.
-- **The default ball on strong scenes**: the glass tower under D6 and threshold breaks nothing to
-  one click at its top (its other models do); the tower block under D6 at the pack's strength
-  breaks little (its suggested settings: 0.2×, 16× balls).
+  `load_path_blocks`). The lever arm's coupling swamps the rotational stiffness and the
+  Cholesky's Schur complement cancels in f32. The kernel is unchanged here (the plan named it as
+  a known failure); World fails the step with the reason where the lab's world held the chunk
+  still. The lossless fix: factor each block about its bonds' elastic centre.
+- **D6 on the punch-through wall** (`crush-wall` pack): the settle overflows the warm-start hash
+  (`OVERFLOW_WARM_HASH`) at step 88–107, at 60 and at 120 Hz; `preload_destructible_asset` on main
+  does the same.
+- **`engine-world` tests/threshold.rs `cuboid_house_breaks_and_splits_as_in_the_lab`**: the lab's
+  world breaks 2 bonds settling at frame 2, `World` none; same numbers on main.
+- **`engine-ffi` tests/soft_car_visual.rs `a_wall_crash_reports_strain_tears_and_break_points`**
+  and **`engine-world-wasm` tests/broadside.rs `the_raze`** (step 991, `Overflow(8)`): fail on main.
+- **The glass tower under D6 and threshold** breaks nothing to one click of the default ball, at
+  60 and at 120 Hz (those models' code paths are the old ones); the matrix reports it.
 - **Non-convex hulls**: stress-rubble's cooker replaces nine of the fractured tower's hulls with
-  their boxes (with a warning); pre-existing, a candidate for re-export from Shardwright.
+  their boxes (with a warning).

@@ -375,10 +375,14 @@ fn action_of(v: JsValue) -> anyhow::Result<LabAction> {
 #[wasm_bindgen]
 impl WebWorld {
     /// The world a run needs, on `other`'s device (the page keeps one device for its
-    /// renderers across loads).
+    /// renderers across loads). `full_broadphase` (the page's `?broadphase=full`, an A/B
+    /// check): the full broadphase instead of the awake-indexed one (the same pairs).
     #[wasm_bindgen(js_name = createForLab)]
-    pub fn create_for_lab(run: &LabRun, other: &WebWorld) -> Result<WebWorld, JsValue> {
-        let def = res(run.plan.world_def())?;
+    pub fn create_for_lab(run: &LabRun, other: &WebWorld, full_broadphase: Option<bool>) -> Result<WebWorld, JsValue> {
+        let mut def = res(run.plan.world_def())?;
+        if full_broadphase == Some(true) {
+            def.features.awake_broadphase = false;
+        }
         Ok(WebWorld {
             world: res(World::new(other.world.gpu_context(), &def))?,
         })

@@ -230,3 +230,4 @@ fn cross_host_tower_block_reference() {
     );
     assert!(s.bonds_intact < s.bonds, "the volley breaks the block");
 }
+
