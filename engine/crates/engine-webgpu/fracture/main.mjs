@@ -253,7 +253,8 @@ async function loadStress(level){
  await stress.frame(0);applyBallMass();applyBallSpeed();showBallRadius();
  const st=stress.stats;stressHud=stressHudReset(performance.now());
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
- $('release').textContent='Start simulation';$('fire').hidden=true;
+ // The towers block's volley, meteor and topple are World's (the stress world has one copy).
+ $('release').textContent='Start simulation';$('fire').hidden=true;$('volley').hidden=true;$('meteor').hidden=true;$('topple').hidden=true;
  $('strike-prediction').checked=stress.strikePrediction;$('strike-prediction').disabled=false;
  $('contact-fracture').checked=stress.contactFracture;$('contact-fracture').disabled=!stress.contactFractureAvailable;
  setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${PROFILE_NOTES[profile]??profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
@@ -386,8 +387,9 @@ const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
    packBytes=await response.arrayBuffer();
   }
   assetBytes=null;layout=null;procedural='pack';
-  // The towers block: breakable welds, CCD balls at 16× unless the panel says otherwise.
-  if(entry.towers&&(!towersBlock||towersMeteor!==!!entry.meteor)){$('bond-mode').value='d6';$('ball-speed').value=entry.meteor?'0':'4';$('ball-ccd').checked=true}
+  // The towers block: breakable welds, CCD balls at 16× unless the panel says otherwise. A
+  // stress mode chosen already (the panel or ?bonds=) stays, with the scene's own ball.
+  if(entry.towers&&(!towersBlock||towersMeteor!==!!entry.meteor)&&!STRESS_PROFILES[bondMode()]){$('bond-mode').value='d6';$('ball-speed').value=entry.meteor?'0':'4';$('ball-ccd').checked=true}
   towersBlock=!!entry.towers;towersMeteor=!!entry.meteor;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack?entry.pack.split('/').pop():'generated in Rust (glass_tower.rs)';
   $('level').replaceChildren(new Option(entry.nodes!=null?`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`:'Scene pack · generated',0));$('level').value='0';
   await loadLevel(0);return;
