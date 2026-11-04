@@ -28,7 +28,7 @@ front (`profile.length`). The `.truck` is centred on the length; its forward is 
 | field | what it is |
 |---|---|
 | `profile: BodyProfile` | the shape (below) |
-| `grades: Grades` | materials: `panel`, `floor`, `frame`, `crush`, `hsla`, `uhss`, `boron`, `alu`, `plastic`, `glass`, `rigid` |
+| `grades: Grades` | materials: the frame's `crush`, `hsla`, `uhss`, `boron`, `alu`; the skin's `panel`, `floor`, `frame` (lid frames), `plastic`, `glass`; `rigid`, `link`, `mount` |
 | `stations` | ring stations kept exactly (door seams, pillars, screens) |
 | `panels: Vec<Panel>` | parts cut from the shell: bumpers, bonnet, boot lid, fenders, doors, each a `Region`, a grade and a `Joint` |
 | `zones` | grades of shell regions inside a part (glass, the floor pan) |
@@ -41,7 +41,10 @@ front (`profile.length`). The `.truck` is centred on the length; its forward is 
 | `kerb_mass` | everything, wheels included (kg); the structure takes what the named masses leave |
 | `frame_every`, `frame_grade`, `frame_through` | the shell's braced frame (below; the sedan has none: `frame_every: 0`) |
 | `shell_braces` | X-brace the shell's quads (off on the sedan: its triangles hold their shape; panels keep theirs as hinge beams) |
-| `braces: Vec<BraceSpec>` | lumped shear panels: long diagonals (and mirrors) across the floor, roof, firewall, rear bulkhead, door rings and screens |
+| `braces: Vec<BraceSpec>` | lumped shear panels: long diagonals (and mirrors) across the cabin box's faces (floor, roof, firewall, screens, rear bulkhead, door rings) and from the strut towers into it, each spread over the member sections it bears on; `strength` caps a brace's yield (the front towers' fold with the crumple zone) |
+| `shear: Vec<ShearSpec>` | zigzag shear panels between two members (an X across each bay): inner fenders, rear floor, wheelhouses, subframes, the cabin's faces |
+| `backed` | panels backed by their own frame (doors): every skin node tied to the part's frame behind it |
+| `tiered` | fit the step per tier (below; on for the sedan) |
 | `body_damping`, `body_damping_reach`, `body_damping_strength` | body dashpots (below) |
 | `look: Look` | paint, side glass outlines, screens, lights, grille, intake, handles, plates, mirrors, panel gap |
 
@@ -82,8 +85,9 @@ same at every length: a beam's stiffness is k·L / length), the damping ratio at
 30 cm beam between 0.4 kg nodes (damping `c = 2ζ√(k μ)`; `stiffer(s)` keeps ζ), the
 yield force (N), the elongation at break (the break force is yield + elong × k·L:
 a yielded beam loses strength as it stretches, so it tears after stretching that
-share of its length, as the metal does) and the density. The sedan's grades are
-what the 0.5 ms step allows at its kerb mass (`Built::stiffness_scale` ≈ 0.8–0.9).
+share of its length, as the metal does) and the density. The grades come in two
+tiers (below): the frame's are what heavy frame nodes allow at the 0.5 ms step, the
+skin's what light skin nodes do.
 The explicit solver keeps every yielded rest length ≥ 0.1 m, so a beam under 10 cm
 cannot yield: it is elastic up to 2× its yield force and then breaks
 (`skeleton::SHORT_BREAK`).
@@ -99,13 +103,18 @@ or blocks) and over every beam.
 ### Members
 
 `MemberSpec { path, width, height, up, grade, scale: [start, end], beads, mirrored,
-attach, ride, section, station, catch }`: a box (4 nodes a station) or ladder (2)
-truss along a path at 35–45 cm stations (crush members 30 cm), its grade's
+attach, ride, section, station, catch, stiff }`: a box (4 nodes a station) or ladder
+(2) truss along a path; every path vertex is a station (members meet at their
+paths' vertices) and each segment is split at most 60 cm apart (crush members 45
+cm; `station` overrides). `stiff` is the section's k·L against its grade's (rails
+×1.4, rear rails ×3.5, sills ×2.3: k·L ≥ 5e5 N). Its grade's
 thresholds graded from `scale[0]` to `scale[1]` (a crush rail: weak at the bumper,
 strong at the firewall), weaker rings every `beads` stations (it folds there
 first), tied to the nearest skin nodes (`attach`) and, at its ends, to the members
 it meets. A station node within 5 cm of an existing node of its part reuses it
-(`members::SNAP`). Impact members (`catch`: bumper beams, door beams, sills,
+(`members::SNAP`), and within 15 cm of another member's frame node (`SNAP_FRAME`):
+joints are shared nodes, not gusset ties (ties are where compliance and step cost
+collect). Ties break by position, so mirrored members pick mirrored nodes. Impact members (`catch`: bumper beams, door beams, sills,
 B-pillars, firewall, floor cross members, tunnel, front subframe) get catcher nodes
 along one line of each bay at most 11 cm apart: static contact is per node, so a
 20 cm pole always meets one.
@@ -122,18 +131,40 @@ crash. A real body's joints, sealer and trim damp those; here each node gets one
 dashpot (k = 0, `body_damping` N·s/m) to a node of its part about
 `body_damping_reach` m away along an axis, torn off past `body_damping_strength` N.
 
-## Mass and the explicit step
+## Mass and the explicit step: two tiers
 
 Nodes carry their own mass (`l, kg` in the `.truck`): named masses where they were
 put, the rest of the kerb mass spread by beam length × density. No node is lighter
 than its beams need for a stable 0.5 ms step: a Gershgorin bound on h²ω² + 2hγ per
-node (`Skeleton::floors`). When the floors outweigh 95 % of the kerb mass, every
-beam's stiffness, damping and thresholds are scaled down to fit
-(`Built::stiffness_scale`). At a fixed mass and step, more nodes mean softer beams,
-and a line's axial rigidity grows with the square of its node spacing: so the body
-is sparse (1,250–1,450 nodes of 0.5–2 kg), with node lanes of 11 cm only on the
-impact faces. `SHOWCASE_FLOORS=1 … showcase_probe -- sedan medium info` prints the
-floors per group and what each kind of beam costs.
+node (`Skeleton::floors`). At a fixed kerb mass and step, the sum of all beams'
+stiffness (and damping) is fixed; the design question is where to spend it.
+
+The body is built the BeamNG way, in two tiers:
+
+* **Frame** (primary): every member's stations: rails, aprons, towers, sills,
+  pillars, roof rails and bows, cross members, tunnel, firewall, cowl, bumper
+  beams, subframes, the doors' own beams. About 350–480 nodes of 1–2 kg (the named
+  masses sit on them), its grades at RoR-level k·L on the load paths. It carries
+  torsion (the cabin box's lumped shear panels, the strut towers braced into it),
+  crash load paths and the door rings.
+* **Skin**: the shell (panels, floor pan, roof skin; lofted at `SKIN_DENSITY` ×
+  the old spacing, 18–30 cm), catchers, ties: light nodes, where dents and creases
+  happen.
+
+`VehicleDef::tiered` fits the step per tier (`Skeleton::fit_tiers`): the frame's
+beams at their grades (`Built::stiffness_scale` = 1), the skin's stiffness and
+damping scaled to what is left (`Built::skin_scale`). The frame keeps its yield
+strains; the skin keeps its yield and break forces (what holds a panel on and where
+it dents are forces). Blocks' and plates' mounts and the suspension are kept as
+built (`fixed`).
+
+`showcase_probe -- sedan medium static` solves the body-in-white's torsion as a
+linear static problem (block-Jacobi conjugate gradients on the built stiffnesses):
+kN·m/deg at the body-side shock-tower mounts, the twist along z, and where the
+strain energy sits (`COST=1`: each group's share of the step's cost beside its
+share of the energy: what to stiffen and what is spent for nothing; `DOOR=1`: a 4
+kN push on the door instead). `MASSES=1` lists node mass by class;
+`SHOWCASE_FLOORS=1 … info` the floors by group, tier and beam kind.
 
 ## Example: tweak a parameter
 
@@ -258,12 +289,15 @@ shapes) and the profile. The tools stay the same.
 ## Tests and tools
 
 * `cargo test --release -p engine-softbody --test showcase_car -- --nocapture`:
-  counts, closed skins, mass, symmetry, the visual binding, materials (stiffness
-  scale, k·L and ζ medians), stillness at rest, torsion (beside the E36 when
-  `engine/local-vehicles` has it), a door point load, and the scenes (rest, wall,
-  side pole, centre pole, roll-over drop, 120 km/h wall, door pull, settling after
-  the wall); `--ignored` adds the pole sweep (`SWEEP=front|side`, `SWEEP_KMH=60`
-  for a subset) and the crumple-zone damage report.
+  counts, closed skins, mass, symmetry, the visual binding, materials (the
+  tiers' scales, the rails' and sills' k·L, ζ), stillness at rest, torsion three
+  ways (the body-in-white at the shock-tower mounts with the suspension cut off;
+  at the shock tops; at the hubs with the springs on their stops; beside the
+  E36's when `engine/local-vehicles` has it), a door point load, and the scenes
+  (rest, wall, side pole, centre pole, roll-over drop, 120 km/h wall, door pull,
+  settling after the wall); `--ignored` adds the pole sweep (`SWEEP=front|side`,
+  `SWEEP_KMH=60` for a subset), the crumple-zone damage report and the
+  panels-stay-on check at 56 km/h.
 * `cargo test --release -p engine-softbody --test showcase_rest_wobble -- --ignored --nocapture`:
   the materials and rest wobble beside real Rigs of Rods cars.
 * `cargo test --release -p engine-webgpu --test showcase_car_gpu`: GPU against CPU.
@@ -279,11 +313,14 @@ shapes) and the profile. The tools stay the same.
 ## What the visual binds to (`Built`)
 
 * `shell`: rings, surface labels (`seg`), the mirror map, skin triangles. The
-  shell is sparse now (25–40 cm); its meaning is unchanged.
+  shell is the skin tier now (18–30 cm, about 600 nodes at medium); its meaning
+  is unchanged.
 * `skeleton.parts` and each node's part: `body`, `bumper_f`, `bumper_r`, `bonnet`,
   `bootlid`, `fender_l/_r`, `door_f_l/_r`, `door_r_l/_r`, `radiator`, the blocks
   (`powertrain`, `seat_fl`, `seat_fr`, `seat_rear`, `battery`), `suspension`.
 * `groups` and `bind_tris` keyed by member, block and corner name, as before
   (`seat_fl`, `seat_fr`, `seat_rear`, `dash`, `tunnel`, `column` kept). A member's
   group may now include nodes it shares with the shell or another member (snapped),
-  and its catchers lie on one line of each bay. New groups: `bow_r` (a rear roof bow).
+  and its catchers lie on one line of each bay. New groups: `bow_r` (a rear roof
+  bow), `door_belt_f/_r`, `door_mid_f/_r` (the doors' belt and inner rails, with
+  `_r` mirrors); `floor_brace1`–`4` are gone (lumped shear panels instead).

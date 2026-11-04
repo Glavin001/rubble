@@ -182,6 +182,15 @@ pub struct Grades {
     /// (a knuckle on soft links whips round in a crash), never yield.
     #[serde(default = "link")]
     pub link: Material,
+    /// Mounts and bearing pads of blocks and light parts (engine mounts, seat
+    /// mounts, door beams' bearing): sized to the lighter node they hold.
+    #[serde(default = "mount")]
+    pub mount: Material,
+}
+
+fn mount() -> Material {
+    // Rubber and bushings: well damped (what they hold is heavy).
+    Material::steel(1.2e5, 0.15, 3.65e3, 0.2, 2.0).plastic(PLASTIC)
 }
 
 fn link() -> Material {
@@ -192,20 +201,26 @@ fn link() -> Material {
 pub const ZETA: f32 = 0.08;
 
 impl Default for Grades {
+    /// Two tiers. The frame's grades (crush, HSLA, UHSS, boron, aluminium)
+    /// on heavy frame nodes, 1.5–2 kg; the skin's (panel, floor pan, lid
+    /// frames, plastic, glass) on light ones, 0.3–0.5 kg: a grade's rigidity
+    /// is what its tier's nodes allow at the 0.5 ms step. Yield forces set
+    /// where the body gives in a crash.
     fn default() -> Self {
         Self {
-            panel: Material::steel(9.12e4, ZETA, 1.2e3, 0.3, 1.0).plastic(PLASTIC),
-            floor: Material::steel(9.12e4, ZETA, 1.82e3, 0.3, 1.5).plastic(PLASTIC),
-            frame: Material::steel(5.95e4, ZETA, 2.4e2, 0.3, 1.5).plastic(PLASTIC),
-            crush: Material::steel(2.5e5, ZETA, 1.54e4, 0.25, 2.0).plastic(PLASTIC),
-            hsla: Material::steel(1.2e5, ZETA, 3.65e3, 0.2, 2.0).plastic(PLASTIC),
-            uhss: Material::steel(1.82e5, ZETA, 4.42e3, 0.12, 3.0).plastic(PLASTIC),
-            boron: Material::steel(2.21e5, ZETA, 4.9e3, 0.08, 3.5).plastic(PLASTIC),
-            alu: Material::steel(1.2e5, ZETA, 3.65e3, 0.12, 2.0).plastic(PLASTIC),
-            plastic: Material::steel(1.2e4, ZETA, 9.12e2, 0.25, 0.5),
-            glass: Material::steel(2.98e4, ZETA, 5.95e2, 0.04, 1.0),
+            panel: Material::steel(2.7e4, ZETA, 1.0e3, 0.3, 1.0).plastic(PLASTIC),
+            floor: Material::steel(2.7e4, ZETA, 1.4e3, 0.3, 1.5).plastic(PLASTIC),
+            frame: Material::steel(2.0e4, ZETA, 1.9e2, 0.3, 1.5).plastic(PLASTIC),
+            crush: Material::steel(3.75e5, ZETA, 1.23e4, 0.25, 2.0).plastic(PLASTIC),
+            hsla: Material::steel(1.45e5, ZETA, 2.9e3, 0.2, 2.0).plastic(PLASTIC),
+            uhss: Material::steel(2.2e5, ZETA, 3.5e3, 0.12, 3.0).plastic(PLASTIC),
+            boron: Material::steel(2.65e5, ZETA, 3.9e3, 0.08, 3.5).plastic(PLASTIC),
+            alu: Material::steel(1.45e5, ZETA, 2.9e3, 0.12, 2.0).plastic(PLASTIC),
+            plastic: Material::steel(4.0e3, ZETA, 5.0e2, 0.25, 0.5),
+            glass: Material::steel(9.0e3, ZETA, 4.0e2, 0.04, 1.0),
             rigid: Material::steel(1.5e5, 0.03, 1.0e9, 0.0, 6.0),
             link: link(),
+            mount: mount(),
         }
     }
 }

@@ -522,6 +522,9 @@ impl Skeleton {
             let x = search(&|x| total(self, x, 0.05 * x));
             (x, 0.05 * x)
         };
+        // The frame keeps its grades' yield strains (thresholds with the
+        // stiffness); the skin keeps its yield and break forces (what holds a
+        // panel on and where it dents are forces, not strains).
         let prim: Vec<bool> = self.beams.iter().map(|b| self.beam_primary(b)).collect();
         for (b, &p) in self.beams.iter_mut().zip(&prim) {
             if b.fixed {
@@ -530,7 +533,7 @@ impl Skeleton {
             let f = if p { sp } else { ss };
             b.mat.k *= f;
             b.mat.damp *= f;
-            if b.mat.deform < 1.0e8 {
+            if p && b.mat.deform < 1.0e8 {
                 b.mat.deform *= f;
                 b.mat.strength *= f;
             }

@@ -22,8 +22,22 @@ pub struct Truss {
 /// always meets one.
 pub const CATCH: f32 = 0.11;
 
+/// A section ring's stiffness against the member's grade (its ties are
+/// short: [`Skeleton::tie`]).
+pub const RING: f32 = 0.25;
+/// Bend beams (over two stations) against the member's grade.
+pub const BEND: f32 = 0.5;
+/// Face diagonals against the member's grade.
+pub const DIAG: f32 = 0.5;
+/// A catcher's ties against the member's grade.
+pub const CATCH_TIE: f32 = 0.25;
+
 /// A member's station node this close to an existing node (m) reuses it.
 pub const SNAP: f32 = 0.05;
+
+/// A station node this close to another member's frame node (m) is that
+/// node: members meet at shared joints, not through gusset ties.
+pub const SNAP_FRAME: f32 = 0.15;
 
 impl Truss {
     pub fn nodes(&self) -> Vec<u32> {
@@ -41,25 +55,23 @@ impl Truss {
     }
 }
 
-/// Points along `path` at most `spacing` apart, evenly by arc length, with
-/// their arc fractions.
+/// Points along `path` at most `spacing` apart with their arc fractions: every
+/// path vertex is a station (members meet at their paths' vertices: a joint
+/// node shared with the member crossing there), each segment split evenly.
 pub fn resample(path: &[Vec3], spacing: f32) -> Vec<(Vec3, f32)> {
     let mut acc = vec![0.0f32];
     for w in path.windows(2) {
         acc.push(acc.last().unwrap() + w[0].distance(w[1]));
     }
-    let total = *acc.last().unwrap();
-    let n = (total / spacing).ceil().max(1.0) as usize;
-    let mut out = Vec::new();
-    let mut j = 0;
-    for i in 0..=n {
-        let s = total * i as f32 / n as f32;
-        while j + 2 < acc.len() && acc[j + 1] < s {
-            j += 1;
+    let total = acc.last().unwrap().max(1e-9);
+    let mut out = vec![(path[0], 0.0)];
+    for (j, w) in path.windows(2).enumerate() {
+        let l = w[0].distance(w[1]);
+        let n = (l / spacing - 1e-3).ceil().max(1.0) as usize;
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            out.push((w[0].lerp(w[1], t), (acc[j] + l * t) / total));
         }
-        let span = (acc[j + 1] - acc[j]).max(1e-9);
-        let t = ((s - acc[j]) / span).clamp(0.0, 1.0);
-        out.push((path[j].lerp(path[j + 1], t), s / total.max(1e-9)));
     }
     out
 }
@@ -102,6 +114,14 @@ pub struct MemberSpec {
     /// beams, sills, B-pillars). See [`CATCH`].
     #[serde(default)]
     pub catch: bool,
+    /// Stiffness against the grade's (k·L, damping at the grade's ratio):
+    /// the main load paths (rails, sills) are heavier sections of their steel.
+    #[serde(default = "unit")]
+    pub stiff: f32,
+}
+
+fn unit() -> f32 {
+    1.0
 }
 
 fn four() -> usize {
@@ -128,19 +148,45 @@ pub fn box_truss(
     // A station node within `SNAP` of an existing node of its part (the shell,
     // a member built before) is that node: a member is welded where it meets
     // the body, and two coincident nodes joined by a tie would be a pin.
-    let mut mk = |sk: &mut Skeleton, q: Vec3| -> u32 {
+    let frame_snap = SNAP_FRAME;
+    let mk = |sk: &mut Skeleton, q: Vec3, used: &[u32]| -> u32 {
         let near = snap
             .iter()
             .copied()
-            .filter(|&j| sk.nodes[j as usize].part == part)
+            .filter(|&j| sk.nodes[j as usize].part == part && !used.contains(&j))
+            // Never across or onto the centre line from off it (the mirror
+            // twin would want the same node).
+            .filter(|&j| {
+                let x = sk.pos(j).x;
+                if q.x.abs() < 1e-3 {
+                    x.abs() < 1e-3
+                } else {
+                    x * q.x > 0.0 && x.abs() > 1e-3
+                }
+            })
             .min_by(|&a, &b| {
-                sk.pos(a)
-                    .distance_squared(q)
-                    .total_cmp(&sk.pos(b).distance_squared(q))
-                    .then(a.cmp(&b))
+                // Ties broken by position, so mirrored members pick mirrored
+                // nodes.
+                let key = |i: u32| {
+                    let p = sk.pos(i);
+                    (
+                        (p.distance(q) * 1e4).round() as i64,
+                        (p.x.abs() * 1e4).round() as i64,
+                        (p.y * 1e4).round() as i64,
+                        (p.z * 1e4).round() as i64,
+                    )
+                };
+                key(a).cmp(&key(b))
             });
         match near {
-            Some(j) if sk.pos(j).distance(q) < SNAP => j,
+            // Onto another member's frame node from farther (a shared joint
+            // instead of a gusset).
+            Some(j)
+                if sk.pos(j).distance(q) < SNAP
+                    || (sk.nodes[j as usize].primary && sk.pos(j).distance(q) < frame_snap) =>
+            {
+                j
+            }
             _ => sk.node(q, part),
         }
     };
@@ -158,8 +204,8 @@ pub fn box_truss(
         let hw = 0.5 * width;
         let hh = 0.5 * height;
         let st = if section == 2 {
-            let a = mk(sk, p - u * hh);
-            let b = mk(sk, p + u * hh);
+            let a = mk(sk, p - u * hh, &[]);
+            let b = mk(sk, p + u * hh, &[a]);
             [a, b, a, b]
         } else {
             let c = [
@@ -168,7 +214,25 @@ pub fn box_truss(
                 p + side * hw + u * hh,
                 p - side * hw + u * hh,
             ];
-            c.map(|q| mk(sk, q))
+            // Snapped in an order by position (mirror-invariant), so mirrored
+            // members claim mirrored nodes.
+            let mut order = [0usize, 1, 2, 3];
+            let key = |q: Vec3| {
+                (
+                    (q.x.abs() * 1e4).round() as i64,
+                    (q.y * 1e4).round() as i64,
+                    (q.z * 1e4).round() as i64,
+                )
+            };
+            order.sort_by_key(|&e| key(c[e]));
+            let mut used: Vec<u32> = Vec::new();
+            let mut out = [0u32; 4];
+            for e in order {
+                let i = mk(sk, c[e], &used);
+                used.push(i);
+                out[e] = i;
+            }
+            out
         };
         truss.stations.push(st);
         truss.t.push(t);
@@ -186,7 +250,7 @@ pub fn box_truss(
         } else {
             m
         }
-        .stiffer(0.5);
+        .stiffer(RING);
         // The section's ring and diagonal are short: ties (their stiffness that of
         // a `TIE_LENGTH` beam), so the mass the step needs goes into the member's
         // length.
@@ -197,7 +261,7 @@ pub fn box_truss(
         if i + 2 < n {
             // Bend beams over two stations: stiffness against buckling.
             let q = truss.stations[i + 2];
-            let mm = mat(truss.t[i + 1]).stiffer(0.7);
+            let mm = mat(truss.t[i + 1]).stiffer(BEND);
             for e in 0..4 {
                 sk.beam(s[e], q[e], mm);
             }
@@ -208,7 +272,7 @@ pub fn box_truss(
             for e in 0..4 {
                 sk.beam(s[e], q[e], mm);
             }
-            let diag = mm.stiffer(0.7);
+            let diag = mm.stiffer(DIAG);
             for e in 0..4 {
                 sk.beam(s[e], q[(e + 1) % 4], diag);
                 sk.beam(s[(e + 1) % 4], q[e], diag);
@@ -221,20 +285,29 @@ pub fn box_truss(
     // stations still meets nodes that carry its load into the member).
     for i in 0..if catch { n.saturating_sub(1) } else { 0 } {
         let (s0, s1) = (truss.stations[i], truss.stations[i + 1]);
-        let m = mat(0.5 * (truss.t[i] + truss.t[i + 1])).stiffer(0.4);
+        let m = mat(0.5 * (truss.t[i] + truss.t[i + 1])).stiffer(CATCH_TIE);
         // One line: a vertical pole meets every line of a bay at once (the
         // section's lines are at the same place in plan view, or beside each
         // other along the pole's path).
         // The outer line (mirrored members get mirrored lanes), else the lower.
+        let lines_n = if section == 2 { 2 } else { 4 };
         let pick = {
-            let (a, b) = (sk.pos(s0[0]) + sk.pos(s1[0]), sk.pos(s0[1]) + sk.pos(s1[1]));
-            if (a.x.abs() - b.x.abs()).abs() > 2e-2 {
-                usize::from(b.x.abs() > a.x.abs())
-            } else if (a.y - b.y).abs() > 2e-2 {
-                usize::from(b.y < a.y)
-            } else {
-                usize::from(b.z > a.z)
-            }
+            // By position alone (mirrored members get mirrored lanes): the
+            // outermost line, else the lowest, else the frontmost.
+            let mid = |e: usize| sk.pos(s0[e]) + sk.pos(s1[e]);
+            (0..lines_n)
+                .max_by(|&a, &b| {
+                    let (pa, pb) = (mid(a), mid(b));
+                    let k = |p: Vec3| {
+                        (
+                            (p.x.abs() * 50.0).round() as i64,
+                            (-p.y * 50.0).round() as i64,
+                            (p.z * 50.0).round() as i64,
+                        )
+                    };
+                    k(pa).cmp(&k(pb))
+                })
+                .unwrap()
         };
         // A member on the centre line with its lines either side (the tunnel):
         // both, so it stays symmetric.

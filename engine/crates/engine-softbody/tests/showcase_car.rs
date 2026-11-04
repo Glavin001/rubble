@@ -846,27 +846,61 @@ fn j_rest_is_still() {
     }
 }
 
-/// The materials are what the step allows at the kerb mass, not scaled down to
-/// fit it (stiffness scale ≥ 0.8 at low and medium, the scenes'); the structure's median
-/// axial rigidity k·L ≥ 1e5 N (the body-in-white's shell and members' spans:
-/// not ties, glass, panels or blocks) and its damping ratio 0.05–0.15. Real
-/// node–beam cars for scale: E36 median k·L 8.8e5 N, Mustang 1.8e5 N.
+/// Two tiers, each at what the step allows at its nodes' mass (not scaled
+/// down to fit): the frame (members' stations: rails, sills, pillars, cross
+/// members, towers) on heavy nodes at its grades (scale ≥ 0.95), the rails'
+/// and sills' longitudinals' k·L ≥ 5e5 N (Rigs of Rods' E36: median 8.8e5 N); the skin
+/// (panels, floor pan, catchers) on light nodes. Damping ratio 0.05–0.15 over
+/// the body-in-white's beams and over every beam.
 #[test]
 fn materials_are_stiff_and_damped() {
     for res in RESOLUTIONS {
         let b = built(res);
         let st = b.stats();
+        let sk = &b.skeleton;
+        let kl_of = |names: &[&str]| -> f32 {
+            let mut v: Vec<f32> = sk
+                .beams
+                .iter()
+                .filter(|bm| !bm.tie && !bm.fixed && !bm.damper)
+                .filter(|bm| {
+                    names
+                        .iter()
+                        .any(|n| b.groups[*n].contains(&bm.a) && b.groups[*n].contains(&bm.b))
+                })
+                .map(|bm| bm.mat.k * engine_softbody::authoring::material::REF_LENGTH)
+                .collect();
+            v.sort_by(f32::total_cmp);
+            // The longitudinals (the stiffest: diagonals, bend beams and
+            // rings are fractions of the grade).
+            v[v.len() * 9 / 10]
+        };
+        let rails = kl_of(&["rail_f", "rail_f_r", "rail_r", "rail_r_r"]);
+        let sills = kl_of(&["sill", "sill_r"]);
+        let skin: Vec<f32> = sk
+            .nodes
+            .iter()
+            .filter(|n| !n.primary && n.fixed == 0.0)
+            .map(|n| n.mass)
+            .collect();
+        let mut skin = skin;
+        skin.sort_by(f32::total_cmp);
         eprintln!(
-            "{res:?}: {} nodes, median node {:.2} kg; stiffness ×{:.2}; median k·L structure {:.2e} N (all {:.2e}); ζ structure {:.3} (all {:.3})",
-            st.nodes, st.node_mass, b.stiffness_scale, st.kl_structure, st.kl_all, st.zeta_structure, st.zeta_all
+            "{res:?}: {} nodes; frame {} nodes median {:.2} kg, scale ×{:.2}, median k·L {:.2e} N (rails {rails:.2e}, sills {sills:.2e}); skin median node {:.2} kg, scale ×{:.2}; ζ structure {:.3} (all {:.3})",
+            st.nodes, st.primary_nodes, st.primary_node_mass, b.stiffness_scale, st.kl_primary, skin[skin.len() / 2], b.skin_scale, st.zeta_structure, st.zeta_all
         );
-        // High (more, lighter nodes) is reported: the scenes run at low and
-        // medium.
-        if res == Resolution::High {
-            continue;
-        }
-        assert!(b.stiffness_scale >= 0.8, "{res:?}: ×{}", b.stiffness_scale);
-        assert!(st.kl_structure >= 1.0e5, "{res:?}: k·L {}", st.kl_structure);
+        assert!(
+            b.stiffness_scale >= 0.95,
+            "{res:?}: frame ×{}",
+            b.stiffness_scale
+        );
+        assert!(rails >= 5.0e5, "{res:?}: rails k·L {rails}");
+        assert!(sills >= 5.0e5, "{res:?}: sills k·L {sills}");
+        assert!(
+            st.primary_node_mass > 1.0,
+            "{res:?}: frame node {}",
+            st.primary_node_mass
+        );
         assert!(
             (0.05..=0.15).contains(&st.zeta_structure),
             "{res:?}: ζ {}",
@@ -877,74 +911,26 @@ fn materials_are_stiff_and_damped() {
             "{res:?}: ζ (all) {}",
             st.zeta_all
         );
-        assert!(
-            st.node_mass > 0.5,
-            "{res:?}: median node {} kg",
-            st.node_mass
-        );
     }
 }
 
-/// Body torsion: opposed vertical forces at the front and rear suspension
-/// mounts (the shocks' body ends) of a car floating in the air (no ground, no
-/// drag); the twist between the axles, averaged once settled. Returns kN·m/deg
-/// and the torque (kN·m).
-fn torsion(truck: &str, torque: f32) -> Option<(f32, f32)> {
+/// A car floating in the air (no ground, no drag) for a torsion test.
+fn floating(truck: &str) -> Option<ExplicitBeams> {
     let settings = ExplicitBeamsSettings {
         turbulence: false,
         drag: false,
         ..Default::default()
     };
-    let mut s =
-        ExplicitBeams::from_truck(truck, Vec3::new(0.0, 20.0, 0.0), Vec3::ZERO, settings).ok()?;
-    // Shock body ends: the upper node of each shock.
-    let mut mounts: Vec<u32> = s
-        .beams
-        .iter()
-        // (Tyre spokes are limited springs too, but deformable.)
-        .filter(|b| b.kind == ExplicitKind::LimitedSpring && b.ty != ExplicitType::Deformable)
-        .map(|b| {
-            if s.nodes[b.a as usize].pos.y > s.nodes[b.b as usize].pos.y {
-                b.a
-            } else {
-                b.b
-            }
-        })
-        .collect();
-    mounts.sort();
-    mounts.dedup();
-    if mounts.len() < 4 {
-        return None;
-    }
-    let zmid = mounts
-        .iter()
-        .map(|&i| s.nodes[i as usize].pos.z)
-        .sum::<f32>()
-        / mounts.len() as f32;
-    let xmid = mounts
-        .iter()
-        .map(|&i| s.nodes[i as usize].pos.x)
-        .sum::<f32>()
-        / mounts.len() as f32;
-    let corner = |front: bool, left: bool| -> Vec<u32> {
-        mounts
-            .iter()
-            .copied()
-            .filter(|&i| {
-                let p = s.nodes[i as usize].pos;
-                (p.z > zmid) == front && (p.x > xmid) == left
-            })
-            .collect()
-    };
-    let (fl, fr, rl, rr) = (
-        corner(true, true),
-        corner(true, false),
-        corner(false, true),
-        corner(false, false),
-    );
-    if [&fl, &fr, &rl, &rr].iter().any(|c| c.is_empty()) {
-        return None;
-    }
+    ExplicitBeams::from_truck(truck, Vec3::new(0.0, 20.0, 0.0), Vec3::ZERO, settings).ok()
+}
+
+/// Opposed vertical couples of `torque` (N·m) at the front and rear corners
+/// (each corner's force spread over its nodes: front left up, front right
+/// down, rear the other way), ramped in over 0.3 s; the twist between the
+/// axles, from the same nodes, averaged over 0.3 s once settled. Returns
+/// kN·m/deg.
+fn twist(s: &mut ExplicitBeams, corners: [&[u32]; 4], torque: f32) -> f32 {
+    let [fl, fr, rl, rr] = corners;
     let mean = |s: &ExplicitBeams, c: &[u32]| {
         c.iter().map(|&i| s.nodes[i as usize].pos).sum::<Vec3>() / c.len() as f32
     };
@@ -952,84 +938,159 @@ fn torsion(truck: &str, torque: f32) -> Option<(f32, f32)> {
         let d = mean(s, l) - mean(s, r);
         d.y.atan2(d.x)
     };
-    let twist = |s: &ExplicitBeams| angle(s, &fl, &fr) - angle(s, &rl, &rr);
-    // The same at the body nodes nearest the mounts (but not the suspension's).
-    let near_body = |c: &[u32]| -> Vec<u32> {
-        let p = c.iter().map(|&i| s.nodes[i as usize].pos).sum::<Vec3>() / c.len() as f32;
-        let susp: HashSet<u32> = s
-            .beams
-            .iter()
-            .filter(|b| b.kind == ExplicitKind::LimitedSpring)
-            .flat_map(|b| [b.a, b.b])
-            .collect();
-        let mut v: Vec<(f32, u32)> = (0..s.nodes.len() as u32)
-            .filter(|i| !susp.contains(i) && !c.contains(i))
-            .map(|i| (s.nodes[i as usize].pos.distance(p), i))
-            .filter(|x| x.0 > 0.25)
-            .collect();
-        v.sort_by(|a, b| a.0.total_cmp(&b.0));
-        v.into_iter().take(3).map(|x| x.1).collect()
-    };
-    let (bfl, bfr, brl, brr) = (
-        near_body(&fl),
-        near_body(&fr),
-        near_body(&rl),
-        near_body(&rr),
-    );
-    let body_twist = |s: &ExplicitBeams| angle(s, &bfl, &bfr) - angle(s, &brl, &brr);
-    let b0 = body_twist(&s);
-    let t0 = twist(&s);
-    let track_f = (mean(&s, &fl) - mean(&s, &fr)).length();
-    let track_r = (mean(&s, &rl) - mean(&s, &rr)).length();
-    // Couples of `torque` at each axle, opposite: left front up, right down.
-    let ff = torque / track_f;
-    let fr_ = torque / track_r;
-    let steps = 2000;
-    let mut sum = 0.0f64;
-    let mut n = 0;
-    for st in 0..steps {
+    let tw = |s: &ExplicitBeams| angle(s, fl, fr) - angle(s, rl, rr);
+    let t0 = tw(s);
+    let track_f = (mean(s, fl) - mean(s, fr)).length();
+    let track_r = (mean(s, rl) - mean(s, rr)).length();
+    let (ff, fr_) = (torque / track_f, torque / track_r);
+    let (mut sum, mut n) = (0.0f64, 0);
+    for st in 0..2000 {
         let ramp = (st as f32 / 600.0).min(1.0);
         let push = |s: &mut ExplicitBeams, c: &[u32], f: f32| {
             for &i in c {
                 s.nodes[i as usize].force.y += f / c.len() as f32;
             }
         };
-        push(&mut s, &fl, ramp * ff);
-        push(&mut s, &fr, -ramp * ff);
-        push(&mut s, &rl, -ramp * fr_);
-        push(&mut s, &rr, ramp * fr_);
+        push(s, fl, ramp * ff);
+        push(s, fr, -ramp * ff);
+        push(s, rl, -ramp * fr_);
+        push(s, rr, ramp * fr_);
         s.step();
         if std::env::var("TORSION_TRACE").is_ok() && st % 200 == 0 {
-            eprintln!(
-                "  step {st}: twist {:.3}° (body {:.3}°)",
-                (twist(&s) - t0).to_degrees(),
-                (body_twist(&s) - b0).to_degrees()
-            );
+            eprintln!("  step {st}: twist {:.3}°", (tw(s) - t0).to_degrees());
         }
         if st >= 1400 {
-            sum += (twist(&s) - t0) as f64;
+            sum += (tw(s) - t0) as f64;
             n += 1;
         }
     }
     let deg = (sum / n as f64).to_degrees() as f32;
-    Some((torque / 1000.0 / deg.abs(), torque / 1000.0))
+    torque / 1000.0 / deg.abs()
 }
 
-/// The body's torsional stiffness, beside a real Rigs of Rods car's when one is
-/// in engine/local-vehicles (gitignored). A real body-in-white is 15–25 kN·m/deg.
+/// Nodes sorted into the four corners (front left, front right, rear left,
+/// rear right) by their spawn positions about the set's middle.
+fn four_corners(s: &ExplicitBeams, sets: &[Vec<u32>]) -> Option<[Vec<u32>; 4]> {
+    let c = |v: &[u32]| v.iter().map(|&i| s.nodes[i as usize].pos).sum::<Vec3>() / v.len() as f32;
+    let mid = sets.iter().map(|v| c(v)).sum::<Vec3>() / sets.len() as f32;
+    let mut out: [Vec<u32>; 4] = Default::default();
+    for v in sets {
+        let p = c(v);
+        let k = match (p.z > mid.z, p.x > mid.x) {
+            (true, true) => 0,
+            (true, false) => 1,
+            (false, true) => 2,
+            (false, false) => 3,
+        };
+        out[k].extend_from_slice(v);
+    }
+    out.iter().all(|v| !v.is_empty()).then_some(out)
+}
+
+/// The suspension's shocks (limited springs that are not tyre spokes, with a
+/// real spring: the E36's 1 N/m "anti shopping cart" stops are not): their
+/// beam indices.
+fn shock_beams(s: &ExplicitBeams) -> Vec<usize> {
+    (0..s.beams.len())
+        .filter(|&i| {
+            let b = &s.beams[i];
+            b.kind == ExplicitKind::LimitedSpring
+                && b.ty != ExplicitType::Deformable
+                && b.k >= 1000.0
+        })
+        .collect()
+}
+
+/// Torsion at the shocks' upper nodes, the suspension in place (a real Rigs of
+/// Rods car's shock tops are body nodes; the showcase car's are its
+/// suspension brackets' tops, tied to the body). kN·m/deg.
+fn torsion_tops(truck: &str, torque: f32) -> Option<f32> {
+    let mut s = floating(truck)?;
+    let tops: Vec<Vec<u32>> = shock_beams(&s)
+        .into_iter()
+        .map(|i| {
+            let b = s.beams[i];
+            vec![
+                if s.nodes[b.a as usize].pos.y > s.nodes[b.b as usize].pos.y {
+                    b.a
+                } else {
+                    b.b
+                },
+            ]
+        })
+        .collect();
+    let c = four_corners(&s, &tops)?;
+    Some(twist(&mut s, [&c[0], &c[1], &c[2], &c[3]], torque))
+}
+
+/// Torsion at the hubs (each tyre's axle nodes) with the springs locked (each
+/// shock held at its spawn length by its bump/rebound stop). kN·m/deg.
+fn torsion_hubs(truck: &str, torque: f32) -> Option<f32> {
+    let mut s = floating(truck)?;
+    for i in shock_beams(&s) {
+        s.beams[i].short_bound = 0.0;
+        s.beams[i].long_bound = 0.0;
+    }
+    let hubs: Vec<Vec<u32>> = s.tyres.iter().map(|t| t.axle.to_vec()).collect();
+    let c = four_corners(&s, &hubs)?;
+    Some(twist(&mut s, [&c[0], &c[1], &c[2], &c[3]], torque))
+}
+
+/// The showcase car's body-in-white torsion: the suspension, wheels and tyres
+/// removed (every beam to a suspension or tyre node broken), the couples at
+/// the body-side shock-tower mounts (the body nodes each shock's top bracket
+/// is tied to). kN·m/deg.
+fn torsion_biw(b: &Built, torque: f32) -> f32 {
+    let sk = &b.skeleton;
+    let mut s = floating(&b.truck).unwrap();
+    let susp = sk.parts.iter().position(|p| p == "suspension").unwrap() as u16;
+    let n = sk.nodes.len();
+    let off = |i: u32| (i as usize) >= n || sk.nodes[i as usize].part == susp;
+    for bm in &mut s.beams {
+        if off(bm.a) || off(bm.b) {
+            bm.broken = true;
+        }
+    }
+    let mounts: Vec<Vec<u32>> = sk
+        .shocks
+        .iter()
+        .map(|sh| {
+            sk.beams
+                .iter()
+                .filter(|x| x.fixed && (x.a == sh.b || x.b == sh.b))
+                .map(|x| if x.a == sh.b { x.b } else { x.a })
+                .filter(|&o| !off(o))
+                .collect()
+        })
+        .collect();
+    let c = four_corners(&s, &mounts).unwrap();
+    twist(&mut s, [&c[0], &c[1], &c[2], &c[3]], torque)
+}
+
+/// The body's torsional stiffness three ways: the body-in-white (couples at
+/// the body-side shock-tower mounts, no suspension), at the shock tops and at
+/// the hubs (springs locked), beside a real Rigs of Rods car's when one is in
+/// engine/local-vehicles (gitignored; its shock tops are body nodes, so its
+/// "tops" figure is its body's). A real body-in-white is 15–25 kN·m/deg.
 #[test]
 fn i_body_torsion() {
     for res in [Resolution::Low, Resolution::Medium] {
         let b = built(res);
-        let (k, t) = torsion(&b.truck, 2000.0).unwrap();
-        eprintln!("(i) {res:?} body torsion: {k:.1} kN·m/deg (at {t:.1} kN·m)");
-        assert!(k.is_finite() && k > 0.5, "{res:?}: {k} kN·m/deg");
+        let biw = torsion_biw(&b, 2000.0);
+        let tops = torsion_tops(&b.truck, 2000.0).unwrap();
+        let hubs = torsion_hubs(&b.truck, 2000.0).unwrap();
+        eprintln!(
+            "(i) {res:?} torsion: body-in-white {biw:.1} kN·m/deg, at the shock tops {tops:.1}, at the hubs (springs locked) {hubs:.1}"
+        );
+        assert!(biw.is_finite() && biw > 0.5, "{res:?}: {biw} kN·m/deg");
     }
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../local-vehicles");
     if let Ok(t) = std::fs::read_to_string(format!("{dir}/E36Sedan.truck")) {
-        if let Some((k, tq)) = torsion(&t, 2000.0) {
-            eprintln!("(i) E36 (Rigs of Rods) torsion: {k:.1} kN·m/deg (at {tq:.1} kN·m)");
-        }
+        eprintln!(
+            "(i) E36 (Rigs of Rods) torsion: at the shock tops {:.1} kN·m/deg, at the hubs (springs locked) {:.1}",
+            torsion_tops(&t, 2000.0).unwrap_or(f32::NAN),
+            torsion_hubs(&t, 2000.0).unwrap_or(f32::NAN)
+        );
     }
 }
 
@@ -1323,4 +1384,79 @@ fn l_door_point_load_dents_locally() {
     assert!(dent > 0.005, "no dent");
     assert!(around < 0.4 * dent, "the whole door bulges");
     assert!(kept > 0.3 * dent, "the dent sprang back");
+}
+
+/// At 56 km/h into a wall the panels stay on (tearing is for about 80 km/h
+/// and up): the fenders crumple back against the A-pillars, the bonnet buckles
+/// but stays latched and hinged. No panel node ends up more than 15 cm
+/// outside the body's width at any time, and no beam joining the bonnet or a
+/// fender to the rest of the car breaks. With drag on and off.
+#[test]
+#[ignore]
+fn m_wall_56_panels_stay_on() {
+    for drag in [true, false] {
+        let b = built(Resolution::Medium);
+        let sk = &b.skeleton;
+        let mut s = spawn(&b, Vec3::new(0.0, 0.0, 56.0 / 3.6), 0.0);
+        s.settings.drag = drag;
+        let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+        s.boxes.push(StaticBox::centered(
+            Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+            Vec3::new(3.0, 2.0, 1.0),
+        ));
+        let n = sk.nodes.len();
+        let name = |i: usize| sk.parts[sk.nodes[i].part as usize].as_str();
+        let panel = |i: usize| {
+            let p = name(i);
+            ["bumper", "bonnet", "bootlid", "fender", "door"]
+                .iter()
+                .any(|k| p.starts_with(k))
+        };
+        let panels: Vec<usize> = (0..n).filter(|&i| panel(i)).collect();
+        let width = sk
+            .nodes
+            .iter()
+            .map(|nd| nd.p.x.abs())
+            .fold(0.0f32, f32::max);
+        let mut worst = (0.0f32, 0usize);
+        for _ in 0..(1.5 * 60.0) as usize {
+            s.frame();
+            for &i in &panels {
+                let out = s.nodes[i].pos.x.abs() - width;
+                if out > worst.0 {
+                    worst = (out, i);
+                }
+            }
+        }
+        let held = |i: u32| {
+            let p = name(i as usize);
+            p.starts_with("bonnet") || p.starts_with("fender")
+        };
+        let (mut joints, mut torn) = (0, 0);
+        let mut torn_by: std::collections::BTreeMap<String, usize> = Default::default();
+        for bm in &s.beams {
+            let (a, c) = (bm.a as usize, bm.b as usize);
+            if a >= n || c >= n || sk.nodes[a].part == sk.nodes[c].part {
+                continue;
+            }
+            if held(bm.a) || held(bm.b) {
+                joints += 1;
+                if bm.broken {
+                    torn += 1;
+                    *torn_by
+                        .entry(format!("{}~{}", name(a), name(c)))
+                        .or_default() += 1;
+                }
+            }
+        }
+        eprintln!(
+            "(m) drag {drag}: worst panel node {:.0} mm outside the body's width (node {} of {}); bonnet and fender joint beams torn {torn} of {joints} {torn_by:?}",
+            worst.0.max(0.0) * 1e3,
+            worst.1,
+            name(worst.1)
+        );
+        assert!(finite(&s));
+        assert!(worst.0 < 0.15, "a panel splayed {} m out", worst.0);
+        assert_eq!(torn, 0, "bonnet or fender joints tore: {torn_by:?}");
+    }
 }

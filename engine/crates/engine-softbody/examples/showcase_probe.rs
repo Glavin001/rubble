@@ -45,6 +45,32 @@ fn main() {
             st.primary_nodes, st.primary_node_mass, st.kl_primary, b.stiffness_scale, b.skin_scale
         );
     }
+    if std::env::var("MASSES").is_ok() {
+        // Final node mass by class (and the named masses on it).
+        let shell: std::collections::HashSet<u32> = b.shell.nodes.iter().copied().collect();
+        let mut by: std::collections::BTreeMap<String, (usize, f32, f32)> = Default::default();
+        for (i, nd) in sk.nodes.iter().enumerate() {
+            let part = &sk.parts[nd.part as usize];
+            let class = if nd.primary {
+                "frame".to_string()
+            } else if part != "body" && !shell.contains(&(i as u32)) {
+                part.trim_end_matches("_l")
+                    .trim_end_matches("_r")
+                    .to_string()
+            } else if shell.contains(&(i as u32)) {
+                format!("skin {}", if part == "body" { "body" } else { "panel" })
+            } else {
+                "catcher/other".into()
+            };
+            let e = by.entry(class).or_default();
+            e.0 += 1;
+            e.1 += nd.mass;
+            e.2 += nd.fixed;
+        }
+        for (k, (c, m, f)) in by {
+            eprintln!("  {k:>16}: {c:5} nodes {m:7.1} kg (named {f:6.1} kg)");
+        }
+    }
     if std::env::var("WORST").is_ok() {
         let fl = sk.floors_tiers(1.0 / b.stiffness_scale, 1.0 / b.skin_scale);
         let mut idx: Vec<usize> = (0..sk.nodes.len()).collect();
@@ -125,6 +151,10 @@ fn main() {
     }
     if let Ok(p) = std::env::var("TRUCK_OUT") {
         std::fs::write(&p, &b.truck).unwrap();
+    }
+    if scene == "static" {
+        static_torsion(&b);
+        return;
     }
     if scene == "info" {
         return;
@@ -309,6 +339,32 @@ fn main() {
         }
         s.settings.drag = false;
         let tops: Vec<u32> = sk.shocks.iter().map(|x| x.b).collect();
+        // BIW=1: the body-in-white (suspension, wheels and tyres cut off), the
+        // couples at the body nodes each shock top is tied to.
+        let biw = std::env::var("BIW").is_ok();
+        let susp = sk.parts.iter().position(|p| p == "suspension").unwrap() as u16;
+        let off = |i: u32| (i as usize) >= sk.nodes.len() || sk.nodes[i as usize].part == susp;
+        let mounts: Vec<Vec<u32>> = tops
+            .iter()
+            .map(|&tp| {
+                if !biw {
+                    return vec![tp];
+                }
+                sk.beams
+                    .iter()
+                    .filter(|x| x.fixed && (x.a == tp || x.b == tp))
+                    .map(|x| if x.a == tp { x.b } else { x.a })
+                    .filter(|&o| !off(o))
+                    .collect()
+            })
+            .collect();
+        if biw {
+            for bm in &mut s.beams {
+                if off(bm.a) || off(bm.b) {
+                    bm.broken = true;
+                }
+            }
+        }
         let t: f32 = std::env::var("TORQUE")
             .ok()
             .and_then(|x| x.parse().ok())
@@ -366,10 +422,11 @@ fn main() {
             let ramp = (st as f32 / 600.0).min(1.0);
             let f = ramp * t / track;
             // tops: [front l, front r, rear l, rear r] by the corner order.
-            s.nodes[tops[0] as usize].force.y += f;
-            s.nodes[tops[1] as usize].force.y -= f;
-            s.nodes[tops[2] as usize].force.y -= f;
-            s.nodes[tops[3] as usize].force.y += f;
+            for (k, sign) in [(0, 1.0f32), (1, -1.0), (2, -1.0), (3, 1.0)] {
+                for &i in &mounts[k] {
+                    s.nodes[i as usize].force.y += sign * f / mounts[k].len() as f32;
+                }
+            }
             s.step();
             if st % 250 == 0 {
                 let k1 = rings.iter().position(|r| r.0 > 1.0).unwrap();
@@ -1124,4 +1181,362 @@ pub fn render(
     let _ = std::process::Command::new("ffmpeg")
         .args(["-y", "-loglevel", "error", "-i", &ppm, path])
         .status();
+}
+
+/// A linear static torsion test of the body-in-white on the skeleton itself
+/// (no dynamics): every beam an axial spring at its built stiffness (dashpots,
+/// suspension and tyres left out), the couples at the body-side shock-tower
+/// mounts, solved by conjugate gradients. Prints the stiffness (kN·m/deg) and
+/// where the strain energy sits (by member pair and beam kind): the body's
+/// compliance, beam by beam.
+fn static_torsion(b: &engine_softbody::authoring::Built) {
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let susp = sk.parts.iter().position(|p| p == "suspension").unwrap() as u16;
+    let off = |i: u32| sk.nodes[i as usize].part == susp;
+    struct Spring {
+        a: usize,
+        b: usize,
+        k: f32,
+        n: Vec3,
+    }
+    let springs: Vec<Spring> = sk
+        .beams
+        .iter()
+        .filter(|x| !x.damper && !off(x.a) && !off(x.b))
+        .filter(|x| x.ty == engine_softbody::authoring::skeleton::BeamType::Normal)
+        .map(|x| {
+            let d = sk.pos(x.b) - sk.pos(x.a);
+            Spring {
+                a: x.a as usize,
+                b: x.b as usize,
+                k: x.mat.k_at(d.length()),
+                n: d.normalize(),
+            }
+        })
+        .collect();
+    let mounts: Vec<Vec<u32>> = sk
+        .shocks
+        .iter()
+        .map(|sh| {
+            sk.beams
+                .iter()
+                .filter(|x| x.fixed && (x.a == sh.b || x.b == sh.b))
+                .map(|x| if x.a == sh.b { x.b } else { x.a })
+                .filter(|&o| !off(o))
+                .collect()
+        })
+        .collect();
+    let mounts: Vec<Vec<u32>> = if std::env::var("MOUNT1").is_ok() {
+        mounts
+            .iter()
+            .map(|m| {
+                vec![m
+                    .iter()
+                    .copied()
+                    .min_by(|&a, &c| sk.pos(a).y.total_cmp(&sk.pos(c).y))
+                    .unwrap()]
+            })
+            .collect()
+    } else {
+        mounts
+    };
+    if std::env::var("MOUNTS").is_ok() {
+        for (k, m) in mounts.iter().enumerate() {
+            let desc: Vec<String> = m
+                .iter()
+                .map(|&i| {
+                    let g = b
+                        .groups
+                        .iter()
+                        .filter(|(_, g)| g.contains(&i))
+                        .map(|(k, _)| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join("+");
+                    format!("{i} {g} {:.2?}", sk.pos(i))
+                })
+                .collect();
+            eprintln!("  mount {k}: {desc:?}");
+        }
+    }
+    let torque = 2000.0f32;
+    let mean = |v: &[u32], d: &[Vec3]| {
+        v.iter().map(|&i| sk.pos(i) + d[i as usize]).sum::<Vec3>() / v.len() as f32
+    };
+    let zero = vec![Vec3::ZERO; n];
+    let track = (mean(&mounts[0], &zero) - mean(&mounts[1], &zero)).length();
+    let trackr = (mean(&mounts[2], &zero) - mean(&mounts[3], &zero)).length();
+    let mut f = vec![Vec3::ZERO; n];
+    for (k, sign, tr) in [
+        (0, 1.0f32, track),
+        (1, -1.0, track),
+        (2, -1.0, trackr),
+        (3, 1.0, trackr),
+    ] {
+        for &i in &mounts[k] {
+            f[i as usize].y += sign * torque / tr / mounts[k].len() as f32;
+        }
+    }
+    // DOOR=1: 4 kN inward on the front left door's middle skin node instead
+    // (as `l_door_point_load_dents_locally`), reacted by every frame node in
+    // proportion to its mass.
+    let door_at: Option<usize> = std::env::var("DOOR").ok().map(|_| {
+        let door: Vec<usize> = (0..n)
+            .filter(|&i| sk.parts[sk.nodes[i].part as usize] == "door_f_l")
+            .collect();
+        let mid = door.iter().map(|&i| sk.nodes[i].p).sum::<Vec3>() / door.len() as f32;
+        *door
+            .iter()
+            .filter(|&&i| b.shell.seg.contains_key(&(i as u32)))
+            .min_by(|&&a, &&c| {
+                sk.nodes[a]
+                    .p
+                    .distance(mid)
+                    .total_cmp(&sk.nodes[c].p.distance(mid))
+            })
+            .unwrap()
+    });
+    if let Some(at) = door_at {
+        f = vec![Vec3::ZERO; n];
+        f[at].x -= 4000.0;
+        let fm: f32 = (0..n)
+            .filter(|&i| sk.nodes[i].primary && !off(i as u32))
+            .map(|i| sk.nodes[i].mass)
+            .sum();
+        for i in 0..n {
+            if sk.nodes[i].primary && !off(i as u32) {
+                f[i].x += 4000.0 * sk.nodes[i].mass / fm;
+            }
+        }
+    }
+    // A weak spring to the ground on every node fixes the rigid modes (the
+    // loads balance, so it carries next to nothing).
+    let eps = 1.0f32;
+    let apply = |x: &[Vec3]| -> Vec<Vec3> {
+        let mut y: Vec<Vec3> = x.iter().map(|&v| v * eps).collect();
+        for s in &springs {
+            let t = s.k * s.n.dot(x[s.b] - x[s.a]);
+            y[s.a] -= s.n * t;
+            y[s.b] += s.n * t;
+        }
+        y
+    };
+    let dot = |a: &[Vec3], b: &[Vec3]| a.iter().zip(b).map(|(p, q)| p.dot(*q) as f64).sum::<f64>();
+    // Block-Jacobi preconditioned conjugate gradients.
+    let mut diag = vec![glam::Mat3::from_diagonal(Vec3::splat(eps)); n];
+    for s in &springs {
+        let m = glam::Mat3::from_cols(s.n * s.n.x, s.n * s.n.y, s.n * s.n.z) * s.k;
+        diag[s.a] += m;
+        diag[s.b] += m;
+    }
+    let inv: Vec<glam::Mat3> = diag.iter().map(|m| m.inverse()).collect();
+    let pre = |r: &[Vec3]| -> Vec<Vec3> { r.iter().zip(&inv).map(|(v, m)| *m * *v).collect() };
+    let mut x = vec![Vec3::ZERO; n];
+    let mut r = f.clone();
+    let mut z = pre(&r);
+    let mut p = z.clone();
+    let mut rz = dot(&r, &z);
+    let r0 = dot(&r, &r);
+    let mut rr = r0;
+    let mut it = 0;
+    while it < 20000 && rr > 1e-16 * r0 {
+        let ap = apply(&p);
+        let alpha = (rz / dot(&p, &ap)) as f32;
+        for i in 0..n {
+            x[i] += p[i] * alpha;
+            r[i] -= ap[i] * alpha;
+        }
+        z = pre(&r);
+        let rz2 = dot(&r, &z);
+        let beta = (rz2 / rz) as f32;
+        for i in 0..n {
+            p[i] = z[i] + p[i] * beta;
+        }
+        rz = rz2;
+        rr = dot(&r, &r);
+        it += 1;
+    }
+    if let Some(at) = door_at {
+        let door: Vec<usize> = (0..n)
+            .filter(|&i| sk.parts[sk.nodes[i].part as usize] == "door_f_l")
+            .collect();
+        let around: Vec<usize> = door
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let d = sk.nodes[i].p.distance(sk.nodes[at].p);
+                d > 0.3 && d < 0.5
+            })
+            .collect();
+        let sill = &b.groups["sill"];
+        let base = sill.iter().map(|&i| x[i as usize].x).sum::<f32>() / sill.len() as f32;
+        eprintln!(
+            "static door push 4 kN at node {at} {:.2?}: dent {:.1} mm, door 30–50 cm away {:.1} mm (CG {it})",
+            sk.nodes[at].p,
+            -(x[at].x - base) * 1e3,
+            -(around.iter().map(|&i| x[i].x).sum::<f32>() / around.len() as f32 - base) * 1e3
+        );
+    }
+    let ang = |l: &[u32], r: &[u32], d: &[Vec3]| {
+        let v = mean(l, d) - mean(r, d);
+        v.y.atan2(v.x)
+    };
+    let tw = |d: &[Vec3]| ang(&mounts[0], &mounts[1], d) - ang(&mounts[2], &mounts[3], d);
+    let deg = (tw(&x) - tw(&zero)).to_degrees();
+    eprintln!(
+        "static BIW torsion: {:.1} kN·m/deg ({deg:.3}° at {:.1} kN·m; CG {it} iterations, residual {:.1e})",
+        torque / 1000.0 / deg.abs(),
+        torque / 1000.0,
+        (rr / r0).sqrt()
+    );
+    // The twist profile along the car: each 25 cm slice of frame nodes'
+    // rotation about z (least squares about the slice's centroid).
+    {
+        let mut line = String::new();
+        let mut z = 0.0f32;
+        while z < 4.75 {
+            let v: Vec<usize> = (0..n)
+                .filter(|&i| {
+                    sk.nodes[i].primary
+                        && !off(i as u32)
+                        && (sk.pos(i as u32).z - z - 0.125).abs() <= 0.125
+                })
+                .collect();
+            if v.len() >= 4 {
+                let c = v.iter().map(|&i| sk.pos(i as u32)).sum::<Vec3>() / v.len() as f32;
+                let (mut num, mut den) = (0.0f32, 0.0f32);
+                for &i in &v {
+                    let r = sk.pos(i as u32) - c;
+                    num += r.x * x[i].y - r.y * x[i].x;
+                    den += r.x * r.x + r.y * r.y;
+                }
+                line += &format!(" {:.2}:{:+.3}", z + 0.125, (num / den).to_degrees());
+            }
+            z += 0.25;
+        }
+        eprintln!("  twist by z (°):{line}");
+    }
+    // Strain energy by the pair of groups the beam joins and by kind.
+    let label = |i: usize| -> String {
+        let mut names: Vec<&String> = b
+            .groups
+            .iter()
+            .filter(|(k, g)| k.as_str() != "suspension" && g.contains(&(i as u32)))
+            .map(|(k, _)| k)
+            .collect();
+        names.sort();
+        names
+            .first()
+            .map(|k| k.trim_end_matches("_r").to_string())
+            .unwrap_or_else(|| {
+                if sk.nodes[i].primary {
+                    "frame".into()
+                } else {
+                    sk.parts[sk.nodes[i].part as usize].clone()
+                }
+            })
+    };
+    let total: f64 = springs
+        .iter()
+        .map(|s| 0.5 * s.k as f64 * (s.n.dot(x[s.b] - x[s.a]) as f64).powi(2))
+        .sum();
+    let mut by: std::collections::BTreeMap<String, f64> = Default::default();
+    let mut kinds: std::collections::BTreeMap<String, f64> = Default::default();
+    for (s, bm) in springs.iter().zip(sk.beams.iter().filter(|x| {
+        !x.damper
+            && !off(x.a)
+            && !off(x.b)
+            && x.ty == engine_softbody::authoring::skeleton::BeamType::Normal
+    })) {
+        let e = 0.5 * s.k as f64 * (s.n.dot(x[s.b] - x[s.a]) as f64).powi(2);
+        let (la, lb) = (label(s.a), label(s.b));
+        let key = if la <= lb {
+            format!("{la}~{lb}")
+        } else {
+            format!("{lb}~{la}")
+        };
+        *by.entry(key).or_default() += e;
+        let tier = match (sk.nodes[s.a].primary, sk.nodes[s.b].primary) {
+            (true, true) => "frame",
+            (false, false) => "skin",
+            _ => "frame-skin",
+        };
+        let same = label(s.a) == label(s.b);
+        let kind = if bm.fixed {
+            "fixed"
+        } else if bm.tie && same {
+            "tie (in a member)"
+        } else if bm.tie {
+            "tie (joint)"
+        } else if same {
+            "span"
+        } else {
+            "span (brace)"
+        };
+        *kinds.entry(format!("{tier} {kind}")).or_default() += e;
+    }
+    // Cost (the step's Σ h²k + 2hc at both ends) against energy, per group.
+    if std::env::var("COST").is_ok() {
+        let h = 0.0005f64;
+        let mut cost: std::collections::BTreeMap<String, (f64, f64, usize)> = Default::default();
+        let mut ctot = 0.0f64;
+        for bm in sk.beams.iter() {
+            let l = sk.pos(bm.a).distance(sk.pos(bm.b));
+            let q = 2.0 * (h * h * bm.mat.k_at(l) as f64 + 2.0 * h * bm.mat.damp as f64);
+            let (la, lb) = (label(bm.a as usize), label(bm.b as usize));
+            let key = if la == lb {
+                la
+            } else if la <= lb {
+                format!("{la}~{lb}")
+            } else {
+                format!("{lb}~{la}")
+            };
+            let key = if bm.damper {
+                "dashpots".to_string()
+            } else {
+                key
+            };
+            let e = cost.entry(key).or_default();
+            e.0 += q;
+            e.2 += 1;
+            ctot += q;
+        }
+        for (s, bm) in springs.iter().zip(sk.beams.iter().filter(|x| {
+            !x.damper
+                && !off(x.a)
+                && !off(x.b)
+                && x.ty == engine_softbody::authoring::skeleton::BeamType::Normal
+        })) {
+            let _ = bm;
+            let e = 0.5 * s.k as f64 * (s.n.dot(x[s.b] - x[s.a]) as f64).powi(2);
+            let (la, lb) = (label(s.a), label(s.b));
+            let key = if la == lb {
+                la
+            } else if la <= lb {
+                format!("{la}~{lb}")
+            } else {
+                format!("{lb}~{la}")
+            };
+            cost.entry(key).or_default().1 += e;
+        }
+        let mut cv: Vec<_> = cost.into_iter().collect();
+        cv.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
+        eprintln!("  cost vs energy (group: beams, cost %, energy %):");
+        for (k, (c, e, nb)) in cv.iter().take(45) {
+            eprintln!(
+                "    {k:>36}: {nb:5} {:5.1} % {:5.1} %",
+                100.0 * c / ctot,
+                100.0 * e / total
+            );
+        }
+    }
+    let mut v: Vec<_> = by.into_iter().collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1));
+    eprintln!("  strain energy {total:.2} J; by kind:");
+    for (k, e) in &kinds {
+        eprintln!("    {k:>20}: {:5.1} %", 100.0 * e / total);
+    }
+    for (k, e) in v.iter().take(25) {
+        eprintln!("    {k:>36}: {:5.1} %", 100.0 * e / total);
+    }
 }

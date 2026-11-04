@@ -7,7 +7,8 @@ use super::curve::{Curve, Outline};
 use super::material::Grades;
 use super::members::{Corner, MemberSpec};
 use super::vehicle::{
-    BlockSpec, BraceSpec, Edge, Joint, Look, NamedMass, Panel, PlateSpec, Region, VehicleDef, Zone,
+    BlockSpec, BraceSpec, Edge, Joint, Look, NamedMass, Panel, PlateSpec, Region, ShearSpec,
+    VehicleDef, Zone,
 };
 
 /// A member (left side when `mirrored`).
@@ -39,6 +40,7 @@ pub fn member(
         section: 4,
         station: 0.0,
         catch: false,
+        stiff: 1.0,
     }
 }
 
@@ -71,7 +73,20 @@ pub fn brace(name: &str, from: [f32; 3], to: [f32; 3], grade: &str, kl: f32) -> 
         to,
         grade: grade.into(),
         kl,
+        strength: 0.0,
     }
+}
+
+/// A brace that yields at `strength` N (into a crumple zone).
+pub fn yielding(mut b: BraceSpec, strength: f32) -> BraceSpec {
+    b.strength = strength;
+    b
+}
+
+/// A heavier section (k·L × `s`).
+pub fn stiff(mut m: MemberSpec, s: f32) -> MemberSpec {
+    m.stiff = s;
+    m
 }
 
 /// An impact member: pole catchers between its stations.
@@ -124,9 +139,9 @@ pub fn seat_frame(name: &str, centre: [f32; 3], half: [f32; 3], kg: f32) -> Bloc
         half,
         spacing: 0.5,
         kg,
-        mounts: 2,
-        reach: 0.3,
-        mount_grade: "hsla".into(),
+        mounts: 3,
+        reach: 0.45,
+        mount_grade: "mount".into(),
         mount_scale: 0.5,
         bear: 0.0,
     }
@@ -142,8 +157,53 @@ pub fn door_joint() -> Joint {
     }
 }
 
-/// A lumped shear panel's axial rigidity (N).
-pub const KL_PANEL: f32 = 2.0e6;
+/// Yield force of the braces from the front strut towers into the cabin
+/// (N): they fold with the crumple zone.
+pub const END_YIELD: f32 = 2.0e4;
+
+/// The main load paths' (rails, sills) section against their grade's k·L.
+pub const RAIL_STIFF: f32 = 1.4;
+
+/// The rear rails' section against the HSLA grade's k·L.
+pub const REAR_RAIL_STIFF: f32 = 3.5;
+
+/// The sills' section against the UHSS grade's k·L.
+pub const SILL_STIFF: f32 = 2.3;
+
+/// A lumped shear panel's axial rigidity (N): the cabin box's faces and the
+/// strut towers' braces into it, spread over the sections they bear on.
+pub const KL_PANEL: f32 = 8.0e6;
+
+/// A zigzag shear panel's diagonals between two members (N).
+pub const KL_SHEAR: f32 = 1.0e6;
+
+/// The cabin box's lumped X braces (the shear panels' first form).
+#[allow(clippy::too_many_arguments)]
+fn cabin_x(
+    fb: [f32; 3],
+    ft: [f32; 3],
+    cw: [f32; 3],
+    bb: [f32; 3],
+    bt: [f32; 3],
+    rb: [f32; 3],
+    rt: [f32; 3],
+    k: f32,
+) -> Vec<BraceSpec> {
+    let m = |p: [f32; 3]| [-p[0], p[1], p[2]];
+    vec![
+        brace("floor_f", fb, m(bb), "floor", k),
+        brace("floor_r", bb, m(rb), "floor", k),
+        brace("roof_f", ft, m(bt), "panel", k),
+        brace("roof_r", bt, m(rt), "panel", k),
+        brace("firewall_x", fb, m(cw), "hsla", k),
+        brace("windscreen_x", cw, m(ft), "glass", k),
+        brace("bulkhead_x", rb, m(rt), "hsla", k),
+        brace("ring_f_x", fb, bt, "uhss", k),
+        brace("ring_f_y", bb, ft, "uhss", k),
+        brace("ring_r_x", bb, rt, "uhss", k),
+        brace("ring_r_y", rb, bt, "uhss", k),
+    ]
+}
 
 pub fn sedan() -> VehicleDef {
     let length = 4.70;
@@ -377,30 +437,64 @@ pub fn sedan() -> VehicleDef {
         region: Region::Floor { z0: -1.0, z1: 6.0 },
         grade: "floor".into(),
     }]);
-    let members = vec![
-        // Front crash rails: under the floor from the cabin, up the firewall, to the
-        // bumper beam; graded strong (cabin) to weak (crash boxes), beaded.
-        member(
-            "rail_f",
+    // The frame: a space frame of members that meet at shared joint nodes
+    // (every path vertex is a station; a station within `members::SNAP` of
+    // another member's frame node is that node). The cabin's corners: the A-,
+    // B- and C-pillar bases on the sills, their tops on the roof rails; the
+    // floor's cross members meet the sills, the rails (x 0.44) and the tunnel.
+    let rs = RAIL_STIFF;
+    let floor_cross = |name: &str, z: f32, grade: &str| -> MemberSpec {
+        ladder(member(
+            name,
             &[
-                (0.44, 0.23, 2.24),
-                (0.44, 0.25, 3.20),
-                (0.44, 0.40, 3.55),
-                (0.44, 0.43, 4.56),
+                (-0.79, 0.27, z),
+                (-0.44, 0.26, z),
+                (0.0, 0.30, z),
+                (0.44, 0.26, z),
+                (0.79, 0.27, z),
             ],
-            0.14,
-            0.24,
+            0.10,
+            0.16,
             UP,
-            "crush",
-            [1.5, 0.5],
-            3,
-            true,
-            1,
+            grade,
+            [1.0, 1.0],
+            0,
+            false,
+            2,
+        ))
+    };
+    let members = vec![
+        // Front crash rails: under the floor from the B-pillar's cross member,
+        // up the firewall, under the strut tower, to the bumper beam; graded
+        // strong (cabin) to weak (crash boxes), beaded.
+        stiff(
+            member(
+                "rail_f",
+                &[
+                    (0.44, 0.23, 2.24),
+                    (0.44, 0.24, 2.80),
+                    (0.44, 0.31, 3.36),
+                    (0.44, 0.41, 3.73),
+                    (0.44, 0.42, 4.10),
+                    (0.44, 0.43, 4.40),
+                    (0.44, 0.43, 4.57),
+                ],
+                0.14,
+                0.24,
+                UP,
+                "crush",
+                [1.5, 0.5],
+                3,
+                true,
+                1,
+            ),
+            rs,
         ),
-        // Upper rails (aprons) along the inner fender tops.
+        // Upper rails (aprons) from the A-pillar at the cowl over the strut
+        // tower to the radiator support.
         ladder(member(
             "apron",
-            &[(0.70, 0.84, 3.40), (0.70, 0.78, 3.90), (0.64, 0.68, 4.42)],
+            &[(0.79, 0.92, 3.38), (0.66, 0.82, 3.73), (0.55, 0.74, 4.40)],
             0.14,
             0.14,
             UP,
@@ -410,9 +504,10 @@ pub fn sedan() -> VehicleDef {
             true,
             1,
         )),
-        member(
+        // Strut towers: the rail to the apron.
+        ladder(member(
             "tower_f",
-            &[(0.47, 0.44, 3.73), (0.62, 0.80, 3.73)],
+            &[(0.44, 0.41, 3.73), (0.66, 0.82, 3.73)],
             0.10,
             0.10,
             FWD,
@@ -421,10 +516,10 @@ pub fn sedan() -> VehicleDef {
             0,
             true,
             1,
-        ),
-        member(
+        )),
+        ladder(member(
             "tower_r",
-            &[(0.47, 0.42, 1.03), (0.62, 0.80, 1.03)],
+            &[(0.45, 0.40, 1.03), (0.68, 0.86, 1.03)],
             0.10,
             0.10,
             FWD,
@@ -433,11 +528,17 @@ pub fn sedan() -> VehicleDef {
             0,
             true,
             1,
-        ),
-        catching(stations(
+        )),
+        catching(stiff(
             member(
                 "sill",
-                &[(0.78, 0.30, 1.34), (0.78, 0.30, 3.38)],
+                &[
+                    (0.79, 0.31, 1.36),
+                    (0.79, 0.31, 1.80),
+                    (0.79, 0.31, 2.24),
+                    (0.79, 0.31, 2.80),
+                    (0.79, 0.31, 3.36),
+                ],
                 0.18,
                 0.24,
                 UP,
@@ -447,83 +548,29 @@ pub fn sedan() -> VehicleDef {
                 true,
                 2,
             ),
-            0.4,
+            SILL_STIFF,
         )),
-        // The floor as a plan-view truss: diagonals from each sill station to the
-        // tunnel at the next cross member (side impacts load the sill between
-        // cross members; the floor's whole width carries it).
         ladder(member(
-            "floor_brace1",
-            &[(0.70, 0.27, 1.40), (0.08, 0.30, 1.90)],
+            "pillar_a",
+            &[
+                (0.79, 0.31, 3.36),
+                (0.79, 0.92, 3.38),
+                (0.71, 1.10, 3.10),
+                (0.62, 1.37, 2.74),
+            ],
             0.10,
-            0.10,
-            UP,
+            0.12,
+            FWD,
             "uhss",
-            [1.0, 1.0],
+            [1.2, 1.2],
             0,
             true,
             1,
         )),
-        ladder(member(
-            "floor_brace2",
-            &[(0.70, 0.27, 2.24), (0.08, 0.30, 1.80)],
-            0.10,
-            0.10,
-            UP,
-            "uhss",
-            [1.0, 1.0],
-            0,
-            true,
-            1,
-        )),
-        ladder(member(
-            "floor_brace3",
-            &[(0.70, 0.27, 2.30), (0.08, 0.30, 2.80)],
-            0.10,
-            0.10,
-            UP,
-            "uhss",
-            [1.0, 1.0],
-            0,
-            true,
-            1,
-        )),
-        ladder(member(
-            "floor_brace4",
-            &[(0.70, 0.27, 3.30), (0.08, 0.30, 2.85)],
-            0.10,
-            0.10,
-            UP,
-            "uhss",
-            [1.0, 1.0],
-            0,
-            true,
-            1,
-        )),
-        stations(
-            member(
-                "pillar_a",
-                &[
-                    (0.80, 0.33, 3.34),
-                    (0.80, 0.92, 3.38),
-                    (0.71, 1.10, 3.10),
-                    (0.62, 1.36, 2.74),
-                ],
-                0.10,
-                0.10,
-                OUT,
-                "uhss",
-                [1.2, 1.2],
-                0,
-                true,
-                1,
-            ),
-            0.3,
-        ),
         catching(stations(
             member(
                 "pillar_b",
-                &[(0.80, 0.33, 2.24), (0.79, 0.98, 2.24), (0.63, 1.38, 2.24)],
+                &[(0.79, 0.31, 2.24), (0.79, 0.98, 2.24), (0.62, 1.39, 2.24)],
                 0.10,
                 0.12,
                 OUT,
@@ -533,72 +580,102 @@ pub fn sedan() -> VehicleDef {
                 true,
                 1,
             ),
-            0.3,
-        )),
-        stations(
-            member(
-                "pillar_c",
-                &[(0.80, 0.33, 1.34), (0.80, 0.98, 1.34), (0.62, 1.37, 1.50)],
-                0.10,
-                0.10,
-                OUT,
-                "uhss",
-                [1.0, 1.0],
-                0,
-                true,
-                1,
-            ),
-            0.3,
-        ),
-        ladder(stations(
-            member(
-                "roof_rail",
-                &[(0.62, 1.37, 2.74), (0.62, 1.40, 2.24), (0.62, 1.38, 1.50)],
-                0.10,
-                0.10,
-                UP,
-                "uhss",
-                [1.0, 1.0],
-                0,
-                true,
-                1,
-            ),
             0.4,
         )),
-        cross("header_f", 0.60, 1.37, 2.76, "uhss", 1.0),
+        ladder(member(
+            "pillar_c",
+            &[(0.79, 0.31, 1.36), (0.79, 0.98, 1.36), (0.62, 1.37, 1.50)],
+            0.10,
+            0.12,
+            FWD,
+            "uhss",
+            [1.0, 1.0],
+            0,
+            true,
+            1,
+        )),
+        ladder(member(
+            "roof_rail",
+            &[
+                (0.62, 1.37, 2.74),
+                (0.62, 1.39, 2.24),
+                (0.62, 1.39, 1.86),
+                (0.62, 1.37, 1.50),
+            ],
+            0.10,
+            0.10,
+            UP,
+            "uhss",
+            [1.0, 1.0],
+            0,
+            true,
+            1,
+        )),
+        cross("header_f", 0.62, 1.37, 2.74, "uhss", 1.0),
         cross("bow_b", 0.62, 1.39, 2.24, "uhss", 1.0),
         // A rear roof bow (the roof skin's span between bows sags otherwise).
-        cross("bow_r", 0.61, 1.39, 1.86, "uhss", 1.0),
-        cross("header_r", 0.60, 1.36, 1.50, "uhss", 1.0),
-        catching(cross("floor_x1", 0.76, 0.25, 2.95, "uhss", 1.0)),
-        catching(cross("floor_x2", 0.76, 0.25, 2.24, "boron", 1.0)),
-        cross("floor_x3", 0.76, 0.25, 1.55, "uhss", 1.0),
-        cross("kickup", 0.80, 0.27, 1.38, "uhss", 1.0),
-        catching(stations(
-            member(
-                "tunnel",
-                &[(0.0, 0.32, 1.50), (0.0, 0.34, 3.30)],
-                0.16,
-                0.20,
-                UP,
-                "boron",
-                [1.0, 1.0],
-                0,
-                false,
-                1,
-            ),
-            0.4,
-        )),
-        catching(boxed(
-            cross("firewall", 0.78, 0.30, 3.36, "boron", 1.0),
+        cross("bow_r", 0.62, 1.39, 1.86, "uhss", 1.0),
+        cross("header_r", 0.62, 1.37, 1.50, "uhss", 1.0),
+        catching(floor_cross("floor_x1", 2.80, "uhss")),
+        catching(floor_cross("floor_x2", 2.24, "boron")),
+        floor_cross("floor_x3", 1.80, "uhss"),
+        floor_cross("kickup", 1.36, "uhss"),
+        catching(member(
+            "tunnel",
+            &[
+                (0.0, 0.33, 1.36),
+                (0.0, 0.33, 1.80),
+                (0.0, 0.33, 2.24),
+                (0.0, 0.33, 2.80),
+                (0.0, 0.33, 3.36),
+            ],
             0.16,
-            0.2,
+            0.20,
+            UP,
+            "boron",
+            [1.0, 1.0],
+            0,
+            false,
+            1,
         )),
-        boxed(cross("dash", 0.76, 0.80, 3.20, "uhss", 1.0), 0.16, 0.2),
-        cross("cowl", 0.74, 0.92, 3.44, "uhss", 1.0),
+        catching(floor_cross("firewall", 3.36, "boron")),
+        ladder(member(
+            "dash",
+            &[
+                (-0.79, 0.80, 3.30),
+                (-0.38, 0.80, 3.24),
+                (0.38, 0.80, 3.24),
+                (0.79, 0.80, 3.30),
+            ],
+            0.10,
+            0.18,
+            UP,
+            "uhss",
+            [1.0, 1.0],
+            0,
+            false,
+            2,
+        )),
+        ladder(member(
+            "cowl",
+            &[
+                (-0.79, 0.92, 3.38),
+                (-0.40, 0.92, 3.44),
+                (0.40, 0.92, 3.44),
+                (0.79, 0.92, 3.38),
+            ],
+            0.10,
+            0.18,
+            UP,
+            "uhss",
+            [1.0, 1.0],
+            0,
+            false,
+            2,
+        )),
         ladder(member(
             "rad_post",
-            &[(0.45, 0.34, 4.40), (0.45, 0.72, 4.40)],
+            &[(0.44, 0.43, 4.40), (0.55, 0.74, 4.40)],
             0.10,
             0.10,
             FWD,
@@ -608,14 +685,14 @@ pub fn sedan() -> VehicleDef {
             true,
             1,
         )),
-        boxed(cross("rad_top", 0.55, 0.74, 4.40, "hsla", 0.6), 0.12, 0.16),
+        cross("rad_top", 0.55, 0.74, 4.40, "hsla", 0.6),
         catching(ladder(member(
             "bumper_beam_f",
             &[
                 (-0.72, 0.45, 4.49),
-                (-0.40, 0.45, 4.585),
+                (-0.44, 0.45, 4.57),
                 (0.0, 0.45, 4.63),
-                (0.40, 0.45, 4.585),
+                (0.44, 0.45, 4.57),
                 (0.72, 0.45, 4.49),
             ],
             0.10,
@@ -627,13 +704,35 @@ pub fn sedan() -> VehicleDef {
             false,
             1,
         ))),
-        catching(cross("subframe_f1", 0.42, 0.24, 3.55, "hsla", 1.5)),
-        catching(cross("subframe_f2", 0.42, 0.25, 3.95, "hsla", 1.5)),
+        catching(ladder(member(
+            "subframe_f1",
+            &[(-0.44, 0.29, 3.73), (0.0, 0.27, 3.73), (0.44, 0.29, 3.73)],
+            0.10,
+            0.18,
+            UP,
+            "hsla",
+            [1.5, 1.5],
+            0,
+            false,
+            2,
+        ))),
+        catching(ladder(member(
+            "subframe_f2",
+            &[(-0.44, 0.30, 4.10), (0.0, 0.28, 4.10), (0.44, 0.30, 4.10)],
+            0.10,
+            0.18,
+            UP,
+            "hsla",
+            [1.5, 1.5],
+            0,
+            false,
+            2,
+        ))),
         // The steering column, from the dash cross beam (a box: it is a
         // cantilever).
         member(
             "column",
-            &[(0.38, 0.80, 3.22), (0.38, 0.93, 2.98)],
+            &[(0.38, 0.80, 3.24), (0.38, 0.93, 2.98)],
             0.10,
             0.10,
             UP,
@@ -643,31 +742,36 @@ pub fn sedan() -> VehicleDef {
             false,
             0,
         ),
-        // Rear rails, graded the same way, to the rear bumper beam.
-        member(
-            "rail_r",
-            &[
-                (0.45, 0.21, 1.80),
-                (0.45, 0.22, 1.40),
-                (0.45, 0.40, 0.95),
-                (0.45, 0.45, 0.17),
-            ],
-            0.10,
-            0.13,
-            UP,
-            "hsla",
-            [2.0, 0.5],
-            3,
-            true,
-            1,
+        // Rear rails from the rear seat's cross member over the kick-up,
+        // under the rear strut tower, to the rear bumper beam.
+        stiff(
+            member(
+                "rail_r",
+                &[
+                    (0.44, 0.22, 1.80),
+                    (0.44, 0.24, 1.36),
+                    (0.44, 0.40, 1.03),
+                    (0.44, 0.42, 0.62),
+                    (0.44, 0.45, 0.17),
+                ],
+                0.10,
+                0.13,
+                UP,
+                "hsla",
+                [2.0, 0.5],
+                3,
+                true,
+                1,
+            ),
+            REAR_RAIL_STIFF,
         ),
         catching(ladder(member(
             "bumper_beam_r",
             &[
                 (-0.70, 0.48, 0.21),
-                (-0.40, 0.48, 0.14),
+                (-0.44, 0.48, 0.15),
                 (0.0, 0.48, 0.11),
-                (0.40, 0.48, 0.14),
+                (0.44, 0.48, 0.15),
                 (0.70, 0.48, 0.21),
             ],
             0.10,
@@ -679,10 +783,11 @@ pub fn sedan() -> VehicleDef {
             false,
             1,
         ))),
-        // Rear aprons (inner quarter panels) over the rear rails.
+        // Rear aprons (inner quarter panels) from the C-pillar over the rear
+        // strut tower.
         ladder(member(
             "quarter_inner",
-            &[(0.70, 0.98, 1.36), (0.70, 0.95, 0.80), (0.66, 0.90, 0.24)],
+            &[(0.79, 0.98, 1.36), (0.68, 0.86, 1.03), (0.66, 0.88, 0.24)],
             0.12,
             0.12,
             UP,
@@ -692,34 +797,140 @@ pub fn sedan() -> VehicleDef {
             true,
             1,
         )),
-        cross("subframe_r1", 0.45, 0.25, 0.80, "hsla", 1.5),
-        cross("subframe_r2", 0.45, 0.25, 1.26, "hsla", 1.5),
-        cross("parcel", 0.72, 0.98, 1.30, "hsla", 1.0),
+        ladder(member(
+            "subframe_r1",
+            &[(-0.44, 0.31, 1.03), (0.0, 0.29, 1.03), (0.44, 0.31, 1.03)],
+            0.10,
+            0.18,
+            UP,
+            "hsla",
+            [1.5, 1.5],
+            0,
+            false,
+            2,
+        )),
+        ladder(member(
+            "subframe_r2",
+            &[(-0.44, 0.33, 0.62), (0.0, 0.31, 0.62), (0.44, 0.33, 0.62)],
+            0.10,
+            0.18,
+            UP,
+            "hsla",
+            [1.5, 1.5],
+            0,
+            false,
+            2,
+        )),
+        ladder(member(
+            "parcel",
+            &[
+                (-0.79, 0.98, 1.36),
+                (-0.44, 1.00, 1.36),
+                (0.44, 1.00, 1.36),
+                (0.79, 0.98, 1.36),
+            ],
+            0.10,
+            0.18,
+            UP,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            false,
+            1,
+        )),
         // Door intrusion beams (they ride their door).
-        catching(riding(ladder(member(
-            "door_beam_f",
-            &[(0.83, 0.42, 3.18), (0.83, 0.62, 2.40)],
-            0.10,
-            0.10,
-            OUT,
-            "boron",
-            [1.0, 1.0],
-            0,
-            true,
-            3,
-        )))),
-        catching(riding(ladder(member(
-            "door_beam_r",
-            &[(0.83, 0.42, 2.10), (0.83, 0.58, 1.52)],
-            0.10,
-            0.10,
-            OUT,
-            "boron",
-            [1.0, 1.0],
-            0,
-            true,
-            3,
-        )))),
+        catching(stations(
+            riding(ladder(member(
+                "door_beam_f",
+                &[(0.83, 0.42, 3.18), (0.83, 0.62, 2.40)],
+                0.10,
+                0.14,
+                OUT,
+                "boron",
+                [1.0, 1.0],
+                0,
+                true,
+                3,
+            ))),
+            0.28,
+        )),
+        // Belt reinforcements under the windows (they ride their door).
+        stations(
+            riding(ladder(member(
+                "door_belt_f",
+                &[(0.84, 0.92, 3.20), (0.84, 0.94, 2.36)],
+                0.10,
+                0.14,
+                OUT,
+                "boron",
+                [1.0, 1.0],
+                0,
+                true,
+                3,
+            ))),
+            0.28,
+        ),
+        stations(
+            riding(ladder(member(
+                "door_belt_r",
+                &[(0.84, 0.94, 2.12), (0.84, 0.94, 1.48)],
+                0.10,
+                0.14,
+                OUT,
+                "boron",
+                [1.0, 1.0],
+                0,
+                true,
+                3,
+            ))),
+            0.28,
+        ),
+        // Inner rails at mid height (they ride their door).
+        stations(
+            riding(ladder(member(
+                "door_mid_f",
+                &[(0.83, 0.74, 3.22), (0.83, 0.76, 2.36)],
+                0.10,
+                0.14,
+                OUT,
+                "boron",
+                [1.0, 1.0],
+                0,
+                true,
+                3,
+            ))),
+            0.28,
+        ),
+        stations(
+            riding(ladder(member(
+                "door_mid_r",
+                &[(0.83, 0.76, 2.12), (0.83, 0.74, 1.50)],
+                0.10,
+                0.14,
+                OUT,
+                "boron",
+                [1.0, 1.0],
+                0,
+                true,
+                3,
+            ))),
+            0.28,
+        ),
+        catching(stations(
+            riding(ladder(member(
+                "door_beam_r",
+                &[(0.83, 0.42, 2.10), (0.83, 0.58, 1.52)],
+                0.10,
+                0.14,
+                OUT,
+                "boron",
+                [1.0, 1.0],
+                0,
+                true,
+                3,
+            ))),
+            0.28,
+        )),
     ];
     let blocks = vec![
         BlockSpec {
@@ -731,7 +942,7 @@ pub fn sedan() -> VehicleDef {
             kg: 175.0,
             mounts: 2,
             reach: 0.25,
-            mount_grade: "hsla".into(),
+            mount_grade: "mount".into(),
             mount_scale: 1.0,
             bear: 0.5,
         },
@@ -747,7 +958,7 @@ pub fn sedan() -> VehicleDef {
             kg: 18.0,
             mounts: 2,
             reach: 0.25,
-            mount_grade: "hsla".into(),
+            mount_grade: "mount".into(),
             mount_scale: 1.0,
             bear: 0.0,
         },
@@ -889,28 +1100,78 @@ pub fn sedan() -> VehicleDef {
         // the A-, B- and C-pillars), so the box closes: a torsion load meets
         // every face at once.
         braces: {
-            let (fb, ft, cw) = ([0.78, 0.33, 3.34], [0.62, 1.37, 2.74], [0.74, 0.92, 3.44]);
-            let (bb, bt) = ([0.78, 0.33, 2.24], [0.62, 1.39, 2.24]);
-            let (rb, rt) = ([0.78, 0.33, 1.38], [0.62, 1.37, 1.50]);
+            let k = KL_PANEL;
+            let (fb, ft, cw) = ([0.79, 0.31, 3.36], [0.62, 1.37, 2.74], [0.79, 0.92, 3.38]);
+            let (bb, bt) = ([0.79, 0.31, 2.24], [0.62, 1.39, 2.24]);
+            let (rb, rt) = ([0.79, 0.31, 1.36], [0.62, 1.37, 1.50]);
+            // Front end: strut-tower tops and bases, the rails at the firewall.
+            let (tf, tfb) = ([0.66, 0.82, 3.73], [0.44, 0.41, 3.73]);
+            let rail_fw = [0.44, 0.31, 3.36];
+            // Rear end: strut-tower tops and bases, the parcel shelf, the rear
+            // rails.
+            let (tr, trb) = ([0.68, 0.86, 1.03], [0.44, 0.40, 1.03]);
+            let parcel = [0.79, 0.98, 1.36];
+            let (rr1, rr2) = ([0.44, 0.24, 1.36], [0.44, 0.42, 0.62]);
+            // The tunnel's ends.
+            let (tun_r, tun_f) = ([0.0, 0.33, 1.36], [0.0, 0.33, 3.36]);
             let m = |p: [f32; 3]| [-p[0], p[1], p[2]];
+            let _ = (bb, bt, ft, rt, tun_r, tun_f);
+            cabin_x(fb, ft, cw, bb, bt, rb, rt, k)
+                .into_iter()
+                .chain({
+                    [
+                        // Front end: the cowl and strut towers as one box (strut
+                        // brace, towers to the cowl and firewall, the bay's floor).
+                        yielding(brace("strut_x", tf, m(cw), "uhss", k), END_YIELD),
+                        brace("strut_bar", tf, m(tf), "uhss", k),
+                        yielding(brace("strut_cowl", tf, cw, "uhss", k), END_YIELD),
+                        yielding(brace("strut_fw", tf, fb, "uhss", k), END_YIELD),
+                        yielding(brace("tower_cowl", tfb, cw, "uhss", k), END_YIELD),
+                        yielding(brace("bay_floor", tfb, m(rail_fw), "uhss", k), END_YIELD),
+                        // Rear end: towers, parcel shelf, C-pillars, rear floor.
+                        brace("rtower_x", tr, m(parcel), "uhss", k),
+                        brace("rtower_bar", tr, m(tr), "uhss", k),
+                        brace("rtower_parcel", tr, parcel, "uhss", k),
+                        brace("rtower_c", tr, rb, "uhss", k),
+                        brace("rtower_base", trb, parcel, "uhss", k),
+                        brace("rfloor_x", rr1, m(rr2), "floor", k),
+                        brace("rbase_x", trb, m(rr1), "floor", k),
+                    ]
+                })
+                .collect()
+        },
+        shear: {
+            let k = KL_SHEAR;
+            let sh = |a: &str, b: &str, axis: usize, grade: &str| ShearSpec {
+                a: a.into(),
+                b: b.into(),
+                axis,
+                grade: grade.into(),
+                kl: k,
+            };
             vec![
-                brace("floor_f", fb, m(bb), "floor", KL_PANEL),
-                brace("floor_r", bb, m(rb), "floor", KL_PANEL),
-                brace("roof_f", ft, m(bt), "panel", KL_PANEL),
-                brace("roof_r", bt, m(rt), "panel", KL_PANEL),
-                brace("firewall_x", fb, m(cw), "hsla", KL_PANEL),
-                brace("windscreen_x", cw, m(ft), "glass", KL_PANEL),
-                brace("bulkhead_x", rb, m(rt), "hsla", KL_PANEL),
-                brace("ring_f_x", fb, bt, "uhss", KL_PANEL),
-                brace("ring_f_y", bb, ft, "uhss", KL_PANEL),
-                brace("ring_r_x", bb, rt, "uhss", KL_PANEL),
-                brace("ring_r_y", rb, bt, "uhss", KL_PANEL),
+                // The cabin box's faces.
+                sh("roof_rail", "roof_rail_r", 2, "panel"),
+                sh("sill", "tunnel", 2, "floor"),
+                sh("sill", "roof_rail", 2, "uhss"),
+                sh("firewall", "cowl", 0, "hsla"),
+                sh("cowl", "header_f", 0, "glass"),
+                sh("kickup", "parcel", 0, "hsla"),
+                sh("parcel", "header_r", 0, "glass"),
+                // Front end: inner fenders, the bay's floor.
+                sh("rail_f", "apron", 2, "hsla"),
+                sh("subframe_f1", "subframe_f2", 0, "hsla"),
+                // Rear end: rear floor, inner quarters, subframe.
+                sh("rail_r", "rail_r_r", 2, "floor"),
+                sh("rail_r", "quarter_inner", 2, "hsla"),
+                sh("subframe_r1", "subframe_r2", 0, "hsla"),
             ]
         },
         frame_through: vec!["door".into()],
+        backed: vec!["door".into()],
         shell_braces: false,
-        body_damping: 110.0,
-        tiered: false,
+        body_damping: 50.0,
+        tiered: true,
         body_damping_reach: 2.0,
         body_damping_strength: 5000.0,
     }
