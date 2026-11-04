@@ -167,6 +167,41 @@ fn a_frame_at_rest_sends_the_gpu_nothing() {
 }
 
 #[test]
+fn a_frames_gpu_time_is_measured_without_waiting() {
+    let Ok(gpu) = Gpu::new() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    if !gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        eprintln!("no timestamp queries; skipping");
+        return;
+    }
+    // Timestamps around each frame's encoder, read back as they land. Thirty frames queued
+    // back to back: a frame's GPU time (a median) is a real part of its share of the wall
+    // time (the GPU can idle while the CPU encodes) and not more than it (overlapping frames
+    // are not counted twice).
+    let scene = house();
+    let mut w = world(&gpu, &scene);
+    for _ in 0..10 {
+        w.step_frame(&gpu).expect("warm-up frame");
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    w.poll(&gpu);
+    let start = std::time::Instant::now();
+    for _ in 0..30 {
+        // As a host does: a frame, then whatever has landed (never waiting).
+        w.step_frame(&gpu).expect("frame");
+        w.poll(&gpu);
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let wall_ms = start.elapsed().as_secs_f64() * 1e3 / 30.0;
+    w.poll(&gpu);
+    let ms = w.gpu_frame_ms().expect("a frame's GPU time");
+    println!("GPU {ms:.3} ms per frame, wall {wall_ms:.3} ms per frame");
+    assert!(ms > 0.2 * wall_ms && ms <= 1.25 * wall_ms, "GPU {ms} ms, wall {wall_ms} ms");
+}
+
+#[test]
 fn a_chunk_load_loads_the_solve_for_one_frame() {
     let Ok(gpu) = Gpu::new() else {
         eprintln!("no GPU; skipping");

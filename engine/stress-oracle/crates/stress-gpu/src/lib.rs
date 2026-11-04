@@ -39,6 +39,7 @@ pub fn gpu_frame() -> bool {
 }
 pub mod blast;
 pub mod fracture_log;
+pub mod frame_timer;
 pub mod gpu;
 pub mod gpu_plan;
 pub mod gpu_pass;

@@ -130,6 +130,9 @@ pub struct ThresholdWorld {
     initial_bodies: u32,
     /// `STRESS_THRESHOLD_PHASES=1`: each part's summed wall time (ms).
     pub phases: Vec<(&'static str, f64)>,
+    /// Each frame's GPU time (timestamps around its one encoder), where the device has them.
+    frame_timer: Option<stress_gpu::frame_timer::FrameTimer>,
+    gpu_frame_ms: Option<f64>,
     /// The ground's Young's modulus (the ingest's static side).
     ground_modulus: f64,
     /// The shots' material's (the scene's "projectile").
@@ -466,7 +469,7 @@ impl ThresholdWorld {
             })
             .collect();
         let mirror = world.solver.clone();
-        Ok(ThresholdWorld { profile, mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes, bond_source, predict_strikes, contact_sweeps, crush_events: Vec::new() })
+        Ok(ThresholdWorld { profile, mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), frame_timer: stress_gpu::frame_timer::FrameTimer::new(gpu, "threshold frame"), gpu_frame_ms: None, ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes, bond_source, predict_strikes, contact_sweeps, crush_events: Vec::new() })
     }
 
     /// Launch a shot (`desc`: the stress frame, its pose and velocity): its record written
@@ -560,6 +563,10 @@ impl ThresholdWorld {
         };
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         mark("(before)", &mut enc, &mut self.phases);
+        if let Some(t) = &mut self.frame_timer {
+            let e = self.engine.engine_buffers_now();
+            t.begin(gpu, &mut enc, &[e.bodies, e.counters, &self.fracture.atom]);
+        }
         let e = self.engine.engine_buffers_now();
         self.ingest.begin_frame(&mut enc, &e);
         let mut params = self.engine.sim.params();
@@ -600,7 +607,7 @@ impl ThresholdWorld {
             }
             self.ring[slot].1 = self.frame;
             self.ring_next = (slot + 1) % RING;
-            gpu.queue.submit([enc.finish()]);
+            self.submit_frame(gpu, enc);
             let flag = self.ring[slot].2.clone();
             flag.store(PENDING, std::sync::atomic::Ordering::Release);
             self.ring[slot].0.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -609,15 +616,36 @@ impl ThresholdWorld {
                 }
             });
         } else {
-            gpu.queue.submit([enc.finish()]);
+            self.submit_frame(gpu, enc);
         }
         Ok(())
+    }
+
+    /// The frame's encoder submitted, its GPU time span closed around it.
+    fn submit_frame(&mut self, gpu: &Gpu, mut enc: wgpu::CommandEncoder) {
+        if let Some(t) = &mut self.frame_timer {
+            // What the frame writes last: the bodies (the solve, the splits' frames), the
+            // engine's and the fracture's counters.
+            let e = self.engine.engine_buffers_now();
+            t.end(gpu, &mut enc, &[e.bodies, e.counters, &self.fracture.atom]);
+        }
+        gpu.queue.submit([enc.finish()]);
+        if let Some(t) = &mut self.frame_timer {
+            t.submitted();
+        }
+    }
+
+    /// The GPU time of a frame (ms, a running mean of the frames the GPU has finished), where
+    /// the device has timestamp queries. Read after [`Self::poll`].
+    pub fn gpu_frame_ms(&self) -> Option<f64> {
+        self.gpu_frame_ms
     }
 
     /// The newest counters the GPU has finished, without waiting (`device.poll` without
     /// blocking); `last` keeps them.
     pub fn poll(&mut self, gpu: &Gpu) -> ThresholdStats {
         let _ = gpu.device.poll(wgpu::PollType::Poll);
+        self.gpu_frame_ms = self.frame_timer.as_mut().and_then(|t| t.poll());
         for (buf, frame, flag) in &self.ring {
             if flag.load(std::sync::atomic::Ordering::Acquire) != READY {
                 continue;

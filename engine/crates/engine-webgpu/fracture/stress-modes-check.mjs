@@ -125,6 +125,15 @@ for (const mode of modes) {
     const shotPng = await send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(join(OUT, `${SCENE}-${mode}.png`), Buffer.from(shotPng.result.data, 'base64'));
     console.log(`${problems.length ? 'FAIL' : 'ok  '}  ${mode}: at rest ${rest.brokenBonds} broken; after the shot ${shot.brokenBonds} of ${shot.bonds} bonds broken, ${shot.bodies} bodies, ${shot.frames} frames`);
+    // Throughput: frames requested back to back (no display wait), wall time per frame that
+    // ran; at most a few frames queue ahead of the GPU, so this is the GPU's time per frame
+    // when it is the bottleneck. Beside it, the timestamps' figure.
+    const through = await evaluate(`(async () => { const d = window.__FRACTURE_DEMO__; const f0 = (await d.stressAdvance(0)).frames; const t0 = performance.now(); let st; for (let i = 0; i < 120; i++) { st = await d.stressAdvance(1000 / 60); await new Promise((r) => setTimeout(r, 0)); } return { ms: (performance.now() - t0) / Math.max(1, st.frames - f0), frames: st.frames - f0, gpu: st.gpuStepMs, draw: st.gpuDrawMs } })()`);
+    console.log(`        throughput: ${through.ms.toFixed(2)} ms wall per frame over ${through.frames} frames; timestamps: ${through.gpu?.toFixed(3)} ms physics, ${through.draw?.toFixed(3)} ms draw`);
+    // The HUD's timing readout (GPU physics and draw time, display rate), after the page's
+    // own display loop has run a few seconds (the HUD counts that loop's frames).
+    const hud = await evaluate(`(async () => { window.__FRACTURE_DEMO__.stressRelease(); await new Promise((r) => setTimeout(r, 3500)); return ['tps','step-ms','fps','frame-ms','sim-speed','timing'].map((id) => document.getElementById(id).textContent).join(' | ') })()`);
+    console.log(`        HUD: ${hud}`);
   } else {
     console.log(`FAIL  ${mode}`);
   }
