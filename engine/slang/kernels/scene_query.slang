@@ -657,7 +657,11 @@ struct QueryFilter
 
 bool queryAccepts(Collider col, QueryFilter f)
 {
-    if (col.body == f.excludeBody) return false;
+    // The caster's body, and its negative group when the query set one (a
+    // soft vehicle's wheels: every node, part and torn-off piece of its own
+    // bodywork; gRayExcludeGroup is 0 for every other query). The full scan
+    // (rayLaneScan) applies the same rayIgnores.
+    if (rayIgnores(col, f.excludeBody)) return false;
     if (f.mask == 0u || (HOST_S(30) & 1u) == 0u) return true;
     uint cat = col.generation == 0u ? 0xFFFFu : (col.generation & 0xFFFFu);
     return (cat & f.mask) != 0u;

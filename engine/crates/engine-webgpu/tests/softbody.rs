@@ -367,6 +367,78 @@ fn soft_car_drives_and_steers_without_deforming() {
     );
 }
 
+/// After a crash a soft car's bodywork can sit in its own wheels' suspension
+/// rays (a crushed wheel arch, the nose pitched down). The rays must pass
+/// through every node of their own vehicle, in both query modes (the
+/// broadphase grid walk the pages use, and the full scan): a self-hit made
+/// the wheels snap between the ground and their own nodes each frame.
+#[test]
+fn wheel_rays_ignore_their_own_bodywork() {
+    for full_scan in [false, true] {
+        let mut sim = world(120.0, 12);
+        sim.set_vehicle_full_scan(full_scan);
+        let h = spawn_car(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
+        run(&mut sim, 240);
+        let entry = sim.soft_host().entry(h);
+        let core = entry.core.expect("rigid core").0;
+        let own = entry.first_body..entry.first_body + entry.particles;
+        let node_collider = entry.node_collider.clone();
+        let first_body = entry.first_body;
+        let st = sim.vehicle_state(core);
+        assert_eq!(st.contacts, 4, "stands on four wheels");
+        let ground = st.wheels[0].ground_body.expect("wheel 0 on the ground");
+        assert!(!own.contains(&ground), "settled on the ground, not a node");
+        let ground_y = st.wheels[0].contact_point[1];
+        // Rolling slowly (a resting car falls asleep and stops querying), the
+        // colliding node nearest wheel 0's contact is put on its suspension ray
+        // 8 cm above the last contact each step, moving with the car.
+        sim.set_vehicle_input(
+            core,
+            VehicleInput {
+                forward: 0.3,
+                ..Default::default()
+            },
+        );
+        run(&mut sim, 30);
+        let cp = Vec3::from_array(sim.vehicle_state(core).wheels[0].contact_point);
+        let p = positions(&sim, h);
+        let node = (0..p.len())
+            .filter(|&i| node_collider[i] != u32::MAX)
+            .min_by(|&a, &b| (p[a] - cp).length().total_cmp(&(p[b] - cp).length()))
+            .expect("a colliding node") as u32;
+        let body = first_body + node;
+        let chassis = sim.soft_host().entry(h).core.expect("rigid core").1;
+        for step in 0..24 {
+            let st = sim.vehicle_state(core);
+            let below = Vec3::from_array(st.wheels[0].contact_point);
+            let mut held = sim.read_soft_particles(h)[node as usize];
+            held.position = (below + Vec3::Y * 0.08).to_array();
+            held.linear_vel = sim.read_body(chassis).linear_vel;
+            held.angular_vel = [0.0; 3];
+            sim.write_bodies(body, &[held]);
+            sim.step().expect("step");
+            let st = sim.vehicle_state(core);
+            for (k, w) in st.wheels.iter().enumerate() {
+                assert!(
+                    w.ground_body.map_or(true, |g| !own.contains(&g)),
+                    "full_scan {full_scan} step {step}: wheel {k} hit its own node {:?} (node {node} under wheel 0)",
+                    w.ground_body
+                );
+            }
+            let w0 = &st.wheels[0];
+            assert!(
+                w0.in_contact,
+                "wheel 0 still finds the ground under the node"
+            );
+            assert!(
+                (w0.contact_point[1] - ground_y).abs() < 0.03,
+                "full_scan {full_scan} step {step}: wheel 0 contact at y {} (ground {ground_y})",
+                w0.contact_point[1]
+            );
+        }
+    }
+}
+
 /// Residual deformation: positions in the car's rigid best-fit frame minus rest.
 fn residual(rest: &[Vec3], now: &[Vec3]) -> Vec<Vec3> {
     // Kabsch-free approximation: the rear ring (6 nodes, far from every impact

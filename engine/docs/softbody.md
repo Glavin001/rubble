@@ -65,7 +65,12 @@ traction control. It is attached by D6 ball joints to the wheels' axle nodes onl
 all the bodywork stays free to crumple. The core takes a share of every node's mass
 (25%), so its inertia follows the vehicle's mass distribution. The wheel queries
 ignore the vehicle's own node spheres: the core and its nodes share a negative
-collision group.
+collision group, and both query modes (the broadphase grid walk and the full scan)
+skip it. A crushed wheel arch or a pitched-down nose would otherwise sit in the
+suspension rays, and the wheels would snap between the ground and their own nodes.
+Pieces that tore off keep the group, so a car's wheels also roll through its own
+debris (as the debris already passes through the rest of the car); other vehicles'
+debris is driven over. Test: `wheel_rays_ignore_their_own_bodywork`.
 
 **Authored cores and bolted rigid parts.** A `SoftVehicleDesc` may bring its own core
 (`SoftCore`). This is a complete `VehicleDesc` (wheels, drivetrain, and parts with their
