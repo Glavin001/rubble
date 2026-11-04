@@ -852,6 +852,32 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     },
                 );
             }
+            if m.ride {
+                // A door beam's ends overlap the pillars it closes against:
+                // pushed in, they bear on them (compression only, so the door
+                // still opens and tears off), carrying a side hit into the
+                // pillars and sill instead of the door skin.
+                let body: Vec<u32> = structure_nodes
+                    .iter()
+                    .copied()
+                    .filter(|&i| sk.nodes[i as usize].part == 0)
+                    .collect();
+                for st in [truss.first(), truss.last()] {
+                    let mut ends: Vec<u32> = st.to_vec();
+                    ends.sort();
+                    ends.dedup();
+                    for &a in &ends {
+                        for b in sk.nearest(sk.pos(a), &body, 2) {
+                            let l = sk.pos(a).distance(sk.pos(b));
+                            if l <= 0.3 {
+                                let sc = l.max(super::material::REF_LENGTH)
+                                    / super::skeleton::TIE_LENGTH.max(l);
+                                sk.beam_with(a, b, base.stiffer(sc), BeamType::Support(10.0), 0);
+                            }
+                        }
+                    }
+                }
+            }
             let key = if side > 0.0 || !m.mirrored {
                 m.name.clone()
             } else {
@@ -942,8 +968,22 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .collect();
         for side in [1.0f32, -1.0] {
             let p = |q: [f32; 3]| Vec3::new(side * q[0], q[1], q[2]);
-            let a = sk.nearest(p(br.from), &body, 1)[0];
-            let b = sk.nearest(p(br.to), &body, 1)[0];
+            // Each point's node is found on the +x side and mirrored (ties in
+            // distance would otherwise pick different nodes on each side, and
+            // braces sharing a corner would miss each other).
+            let pick = |q: [f32; 3]| -> u32 {
+                let left = Vec3::new(q[0].abs(), q[1], q[2]);
+                let n = sk.nearest(left, &body, 1)[0];
+                let want = Vec3::new(
+                    sk.pos(n).x * (side * q[0].signum()),
+                    sk.pos(n).y,
+                    sk.pos(n).z,
+                );
+                sk.nearest(want, &body, 1)[0]
+            };
+            let _ = p;
+            let a = pick(br.from);
+            let b = pick(br.to);
             if std::env::var("SHOWCASE_BRACES").is_ok() {
                 let deg = |i: u32| sk.beams.iter().filter(|x| x.a == i || x.b == i).count();
                 eprintln!(
