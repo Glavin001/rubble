@@ -476,7 +476,7 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 match (mine, near) {
                     (Some(a), Some(z)) => {
                         let zp = sk.nodes[z.0[0] as usize].part;
-                        if a.3 > z.3 + 0.02 && zp != pt {
+                        if a.3 > z.3 + 0.08 && zp != pt {
                             Some(((z.0, z.1, z.2), zp))
                         } else {
                             Some(((a.0, a.1, a.2), pt))
