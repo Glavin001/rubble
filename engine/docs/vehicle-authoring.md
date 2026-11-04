@@ -213,7 +213,7 @@ The shut lines are:
 
 | Part | Construction |
 |---|---|
-| Body surface (`parts/body.rs`) | A *band* is swept round the plan outline: a section per arc length θ, blended between side, nose and tail shapes. The crease and lower line fall on fixed rows, so their highlights run straight. A *lid* (height field over plan view) runs from the band's top edge over a ramp (tumblehome, fender tops) to the profile's top line and crown. The lid is relaxed by a Laplacian. The profile's curves are blurred (σ 8 cm) so the clearcoat shows no ripples at their control points. Grid: 1.2 cm across the sections, 2 cm along the car. |
+| Body surface (`parts/body.rs`) | A *band* is swept round the plan outline: a section per arc length θ, blended between side, nose and tail shapes. The crease and lower line fall on fixed rows, so their highlights run straight. A *lid* (height field over plan view) runs from the band's top edge over a ramp (tumblehome, fender tops) to the profile's top line and crown. The lid is relaxed by a Laplacian. The profile's curves are blurred (σ 8 cm) so the clearcoat shows no ripples at their control points. Grid: 2.2 cm across the sections, 3.5 cm along the car (twice that at the distant LOD). |
 | Panels (`parts/trim.rs`, `design.rs`) | Each panel is a region (an SDF made of smooth cut lines in side, plan or arc view), made metric on the surface and clipped by marching triangles, so edges follow the curve, not the grid. Every cut is rolled (2.8 mm radius) into a 12 mm wall and a return flange, set back 2.2 mm, giving a 4.5 mm shut line. Arch lips get an 8 mm roll. The inside of a panel renders dark. Panels: bonnet, cowl (black), lip and bumper front, fenders, doors, deck lid, valance and bumper rear, sills (black), body. |
 | Glass | The body surface over each opening, set 6 mm in, with a black frit band printed inside the windscreen and backlight. The side windows sit in black sash frames, with a black B-pillar applique and a chrome belt moulding. The windscreen is laminated (it cracks); the side glass is tempered (it shatters). |
 | Lamps (`fixtures::lamp`) | A lens continuing the body surface; a housing extruded along the lamp axis; a reflector back; projector cups with lens domes; light guides that follow the outline (the DRL; three tail bars). |
@@ -222,20 +222,35 @@ The shut lines are:
 | Mirror, handles | An egg housing (paint above, black below) on an arm from the door's sail, with its glass; a chrome pull handle over a dark pocket. |
 | Underbody and others | Arch liners, underbody plate, exhausts with chrome tips, a plate in a black surround, a chrome tail garnish. |
 
-### Binding and damage
+### Binding, damage and cost
 
 * **Voted pieces.** A piece binds to the physics part most of it lies on (a vote
-  of the nearest single-part skin triangles). Where it reaches more than 2 cm
-  past that part, those vertices ride the nearer part, and the piece's
-  triangles are split there (duplicated vertices). So it parts along the
-  physics seam instead of stretching.
-* **Rigid pieces.** Lamps, mirrors and handles ride one triangle's orthonormal
-  frame (`ShowcaseVisual::rigid`). They move rigidly and never stretch.
-* **Tears.** A torn binding triangle (stretched 2.5×) is cut through the middle
-  of each visual triangle, with a band of bare metal at the cut.
+  of the nearest single-part skin triangles). Where it reaches more than 8 cm
+  past that part, it is cut along the smooth zero line of the distance
+  difference (marching triangles), and the far side rides the other part
+  (`Bind::Part`). So it parts along a clean line instead of stretching.
+* **Rigid pieces.** These ride one triangle's orthonormal frame
+  (`ShowcaseVisual::rigid`): they move rigidly and never stretch.
+  * Lamps, mirrors and handles.
+  * The tempered side glass and backlight, which shatter whole when that
+    triangle strains.
+  * The laminated windscreen is the exception: it follows its frame and
+    spider-cracks with strain (the `screen` material).
+* **Tears.** The renderer keeps a per-node tear field: a skin triangle's
+  perimeter against its rest perimeter (`node_rest`), interpolated over each
+  vertex's binding nodes. Panels are cut where it crosses ½, a smooth line,
+  with a bare-metal band at the edge.
 * **Normals.** Smooth normals follow the node normals. Where they disagree with
   the triangle's frame by more than about 15°, the faceted frame normal wins,
   so physics kinks read as creases.
+* **Level of detail.** `showcase_visual_lod(built, 0.45)` (wasm `visualLod`) is
+  the same car with a coarser body, single-step rolls and fewer segments:
+  about 75k triangles against about 240k.
+  * The renderer picks a level per car on the GPU from the last frame's eye
+    (indirect dispatch and draw), so only that level is skinned and drawn.
+  * Measured with 10 cars on an M3 Max at 1080p with 4× MSAA
+    (`showcase-car.html?perf=1&n=10`): about 0.33 ms per car, and 0.2 ms at
+    the distant level.
 
 To restyle, change `design::sedan_styling` (cut lines, outlines, section
 shapes) and the profile. The tools stay the same.
