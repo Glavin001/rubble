@@ -193,7 +193,14 @@ passes produced. At spawn every node's force is zero.
      only when strictly nearer, by the high-z face (+z), then low-x (−x), high-x (+x),
      low-y (−y), high-y (+y). Add the contact force with that normal, penetration 0,
      the box surface. Each contact sees the node's force including contacts added
-     before it in this pass.
+     before it in this pass. Boxes act on nodes only, at the current position:
+     there is no beam, triangle or swept test, no previous position and no
+     per-node contact memory. RoR's x is the node's stored world position from its
+     last integration, which is not recomputed after a rebase. This rule is
+     complete: RoR also lets a car slice past a pole that lies between node lanes.
+     See `explicit-beams-static-box-spec.md` for the evidence, the capture/slip-out
+     analysis and RoR's spatial-hash quirk (no box contact at x or z ≤ −2 m, not
+     reproduced).
    * then for every static shape, in order (Rubble only, see *Static shapes*): if x
      is strictly inside the shape's culling box and strictly inside the shape, add
      the contact force with the shape's normal at x, penetration 0, the box surface.
