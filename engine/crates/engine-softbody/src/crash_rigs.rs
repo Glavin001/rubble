@@ -39,6 +39,17 @@ const BUMPER_ROWS: usize = 3;
 const FACE_NODE_MASS: f32 = 0.8;
 /// **Choice**: elastic strain at the crush stress (bumper, main).
 const ELASTIC_STRAIN: [f32; 2] = [0.20, 0.10];
+/// Plate shear strength of the main block's honeycomb (Pa): HexWeb CR III
+/// 5052 1/4-2.3 (Hexcel data sheet, Table I), the grade whose crush strength is the
+/// barrier's 45 psi: L direction 140 psi, W direction 85 psi (typical). **Choice**:
+/// the barrier's ribbon direction is not openly documented (DSL drawings), so both
+/// directions take the weaker W value, 85 psi = 586 kPa.
+pub const MDB_SHEAR: f32 = 85.0 * 6894.76;
+/// **Choice**: shear strain at the shear strength, 10 % (as the columns' elastic
+/// strain, [`ELASTIC_STRAIN`]): the measured shear modulus (W: 16.2 ksi, 112 MPa)
+/// would put 2.9 MN/m on a 0.8 kg face node, past what the 2 kHz step integrates
+/// beside its column.
+const SHEAR_YIELD_STRAIN: f32 = 0.10;
 /// Densification: crush stops at 80 % of the depth (**Choice**, aluminium
 /// honeycomb's usual range is 70–80 %).
 const DENSIFY: f32 = 0.8;
@@ -187,31 +198,11 @@ pub fn mdb214_jbeam() -> String {
     }
     // Honeycomb columns: SUPPORT beams yielding at the crush force (no hardening),
     // densified at 80 %; a tension past 10 × their length (never) would break them.
-    // Shear (**Choice**): honeycomb resists its cells tilting. Diagonals from each
-    // face node to the neighbouring back-plate nodes (NORMAL beams yielding at a
-    // tenth of the column's crush force, no hardening) hold the face square; the
-    // column carries the rest, so a node's crush force is still σ·A (all yielding:
-    // the column's plus the diagonals' along the barrier's axis).
-    let diag_share = 0.1f32;
     for i in 0..COLS {
         for j in 0..ROWS {
             let a = trib(i, COLS, dx) * trib(j, ROWS, dz);
-            let total = MDB_CRUSH[0] * a;
-            let mut nb: Vec<(usize, usize, f32)> = Vec::new();
-            for (di, dj, d) in [(1i32, 0i32, dx), (-1, 0, dx), (0, 1, dz), (0, -1, dz)] {
-                let (ni, nj) = (i as i32 + di, j as i32 + dj);
-                if ni >= 0 && nj >= 0 && (ni as usize) < COLS && (nj as usize) < ROWS {
-                    nb.push((ni as usize, nj as usize, depth / (depth * depth + d * d).sqrt()));
-                }
-            }
-            let fd = diag_share * total;
-            let fm = total - nb.iter().map(|&(_, _, cos)| fd * cos).sum::<f32>();
+            let fm = MDB_CRUSH[0] * a;
             let km = fm / (ELASTIC_STRAIN[1] * depth);
-            beams.push(json!({"beamType": "|NORMAL", "beamSpring": km, "beamDamp": 0.05 * (km * FACE_NODE_MASS).sqrt(),
-                "beamDeform": fd, "deformLimitStress": fd, "deformLimit": DENSIFY, "beamStrength": "FLT_MAX", "beamLongBound": 10}));
-            for &(ni, nj, _) in &nb {
-                beams.push(json!([name("f", i, j), name("p", ni, nj)]));
-            }
             beams.push(json!({"beamType": "|SUPPORT", "beamSpring": km, "beamDamp": 0.05 * (km * FACE_NODE_MASS).sqrt(),
                 "beamDeform": fm, "deformLimitStress": fm, "deformLimit": DENSIFY, "beamStrength": "FLT_MAX", "beamLongBound": 10}));
             beams.push(json!([name("f", i, j), name("p", i, j)]));
@@ -236,6 +227,35 @@ pub fn mdb214_jbeam() -> String {
     for i in 0..COLS {
         for j in 0..BUMPER_ROWS {
             beams.push(json!([name("b", i, j), name("p", i, j)]));
+        }
+    }
+    // Shear: the honeycomb resists its cells tilting (plate shear, the T–L and T–W
+    // planes) and not its crush. One LBEAM per face node and direction (spec §24;
+    // vertex its back-plate node, ends the face node and the neighbouring back-plate
+    // node) resists the angle between column and plate and not the column's length,
+    // so the crush force stays the columns' σ·A. It yields at the plate shear
+    // strength times the column's area (perfectly plastic), as a lateral force on the
+    // face node: an LBEAM at a right angle moves its face end sideways by Δℓ·L/b for
+    // a length change Δℓ (L its length, b the plate's cell), so its own stiffness and
+    // deform force are the lateral ones times (L/b)² and L/b.
+    beams.push(json!({"beamType": "|LBEAM", "beamPrecompression": 1, "beamLongBound": 1, "deformLimitStress": "", "deformLimit": ""}));
+    for i in 0..COLS {
+        for j in 0..ROWS {
+            let a = trib(i, COLS, dx) * trib(j, ROWS, dz);
+            for (ni, nj, b) in [
+                (if i + 1 < COLS { i + 1 } else { i - 1 }, j, dx),
+                (i, if j + 1 < ROWS { j + 1 } else { j - 1 }, dz),
+            ] {
+                let l = (depth * depth + b * b).sqrt();
+                let fy = MDB_SHEAR * a;
+                let ks = fy / (SHEAR_YIELD_STRAIN * depth);
+                let (k, fd) = (ks * (l / b) * (l / b), fy * (l / b));
+                // No damper (**Choice**): an LBEAM's damper acts on id1–id2's
+                // length, which the column's crush changes, and aluminium honeycomb's
+                // crush is rate-insensitive (the columns carry its damping).
+                beams.push(json!({"beamSpring": k, "beamDamp": 0, "beamDeform": fd, "beamStrength": "FLT_MAX"}));
+                beams.push(json!([name("f", i, j), name("p", ni, nj), name("p", i, j)]));
+            }
         }
     }
     beams.push(json!({"beamType": "|NORMAL"}));

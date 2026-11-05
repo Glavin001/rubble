@@ -93,6 +93,7 @@ static const uint KIND_JPTRI2 = 17u;
 static const uint TRI_EXCL_CAP = 16u; // explicit_jbeam_ext.rs TRI_EXCL_CAP
 static const uint KIND_JATRI = 18u; // a triangle's aerodynamics (spec §31), nodes x0-x1
 static const uint KIND_JATRI2 = 19u; // its x2-x2 record
+static const uint KIND_JLBEAM2 = 20u; // an LBEAM's x3-x3 record (the vertex's force)
 static const uint TYPE_EXT = 4u;
 static const uint EXT_GROUPS = 1u;
 static const uint EXT_DEFORM = 2u;
@@ -108,6 +109,9 @@ static const uint FLAG_DRAG = 2u;
 static const uint FLAG_TURBULENCE = 4u;
 // The vehicle has static shapes other than axis-aligned boxes (nodeUpdateShapes).
 static const uint FLAG_SHAPES = 64u;
+// Vehicle contact's two-body rule (jbeam-semantics-spec.md §10.3): a hit where this
+// vehicle is the owner or the partner splits masses and cancels a share.
+static const uint FLAG_TWO_BODY = 128u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -195,6 +199,7 @@ struct Params
     uint deformBase;
     uint triExcl; // gStatic: per triangle (start in gLists, count) of self-collision nodes it skips (0: none)
     uint loopCapWord; // gAcc: the loop-cap flag (see EB_LOOP_CAP)
+    uint vvSplit; // gAcc: two-body mass splitting counts, per node: its triangle hits, then VV_PART slots of its point hits (0: no two-body vehicle)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -1354,7 +1359,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     float4 e1 = asfloat(gStatic[gP.extBase + x * 4u + 1u]);
     float4 e2 = asfloat(gStatic[gP.extBase + x * 4u + 2u]);
     uint4 e3 = gStatic[gP.extBase + x * 4u + 3u];
-    if (kind == KIND_JPTRI2 || kind == KIND_JATRI2) return; // the first record writes the forces
+    if (kind == KIND_JPTRI2 || kind == KIND_JATRI2 || kind == KIND_JLBEAM2) return; // the first record writes the forces
     if (kind == KIND_JATRI)
     {
         // A triangle's drag and lift in still air (explicit_jbeam_ext.rs
@@ -1483,6 +1488,8 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     bool broken = false;
     bool lengthBreak = false;
     bool done = false;
+    float3 armA = float3(0.0, 0.0, 0.0);
+    float3 armB = float3(0.0, 0.0, 0.0);
     if (kind == KIND_JLBEAM)
     {
         // The arms' law-of-cosines length at the rest angle (rest holds cos θ0).
@@ -1503,6 +1510,18 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
             float l = nf(len - m);
             rest = clamp(sdiv(nf(nf(a2 + b2) - smul(l, l)), smul(2.0, ab)), -1.0, 1.0);
             f = nf((e < 0.0 ? tc : -tc) - smul(c, u));
+            spring = e < 0.0 ? -tc : tc;
+        }
+        // The spring's arm terms (the gradient of ½k·e² on the arms; lbeam_force):
+        // spring·∂L/∂a·â on id1, spring·∂L/∂b·b̂ on id2, their negative sum on id3.
+        float la = ssqrt(a2);
+        float lb = ssqrt(b2);
+        float lnow = ssqrt(max(nf(nf(a2 + b2) - smul(smul(2.0, ab), rest)), 0.0));
+        if (lnow > 1e-9 && la > 1e-12 && lb > 1e-12)
+        {
+            float g = sdiv(1.0, lnow);
+            armA = sscale(sscale(ra, smul(g, nf(1.0 - smul(sdiv(lb, la), rest)))), spring);
+            armB = sscale(sscale(rb, smul(g, nf(1.0 - smul(sdiv(la, lb), rest)))), spring);
         }
         last = f;
         if (abs(f) > strength) broken = true;
@@ -1651,6 +1670,19 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     else if (s1.w != 0.0)
         gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
     float3 push = sscale(d, smul(f, inv));
+    if (kind == KIND_JLBEAM)
+    {
+        if (broken)
+        {
+            armA = float3(0.0, 0.0, 0.0);
+            armB = float3(0.0, 0.0, 0.0);
+        }
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sadd3(push, armA), 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(sadd3(-push, armB), 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(-sadd3(armA, armB), 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
 }
@@ -1668,6 +1700,9 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
         }
         gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(0.0, 0.0, 0.0, 0.0);
         gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
+        // A broken LBEAM's vertex record (it has no update of its own).
+        if ((gStatic[gP.beamBase + gj * 3u].z & 0xFFu) == KIND_JLBEAM)
+            gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
@@ -5252,7 +5287,58 @@ VvTri vvTriangle(uint gt, float3 origin, float r)
 // Candidate h (global node, world position p, of vehicle vh) against triangle gt of
 // the owner: the hit test, the side vote, the contact force into the accumulators
 // (h, and the triangle's nodes by their weights). Returns whether it hit.
-bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity)
+// Two-body contact (spec §10.3): the pair (owner va, partner vh) opts in.
+bool vvTwoBody(uint va, uint vh)
+{
+    return gP.vvSplit != 0u && ((gStatic[va * 4u + 3u].x | gStatic[vh * 4u + 3u].x) & FLAG_TWO_BODY) != 0u;
+}
+uint vvSplitTri(uint n) { return gP.vvSplit + n; }
+uint vvSplitPoint(uint slot, uint n) { return gP.vvSplit + (1u + slot) * gP.totalNodes + n; }
+// A two-body hit found by a walk: its nodes' hit counts of this owner's turn.
+void vvSplitCount(VvTri t, uint h, uint slot)
+{
+    uint va = gStatic[gP.nodeInfoBase + t.tn.x].w;
+    uint vh = gStatic[gP.nodeInfoBase + h].w;
+    if (!vvTwoBody(va, vh)) return;
+    gAcc[vvSplitTri(t.tn.x)].add(1);
+    gAcc[vvSplitTri(t.tn.y)].add(1);
+    gAcc[vvSplitTri(t.tn.z)].add(1);
+    gAcc[vvSplitPoint(slot, h)].add(1);
+}
+float vvSplitK(uint at) { return float(max(gAcc[at].load(), 1)); }
+// Zeroes the two-body counts of the group's members' nodes (triangle counts and
+// point slots 0..slots − 1), after a turn's hits are applied.
+void vvSplitClear(uint off, uint k, uint slots, uint lane)
+{
+    if (gP.vvSplit == 0u) return;
+    for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+    {
+        uint4 r0 = gStatic[vvMember(off, m) * 4u];
+        for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+        {
+            gAcc[vvSplitTri(r0.x + i)].store(0);
+            for (uint sl = 0u; sl < VV_PART; sl++)
+            {
+                if (sl < slots) gAcc[vvSplitPoint(sl, r0.x + i)].store(0);
+            }
+        }
+    }
+}
+// The contact point's force now (beams, accumulator, slide).
+float3 vvPointForce(uint h, uint vh, uint parity)
+{
+    uint4 info = gStatic[gP.nodeInfoBase + h];
+    uint4 rb0 = gStatic[vh * 4u];
+    uint4 rb2 = gStatic[vh * 4u + 2u];
+    float3 fh = sadd3(beamSum(gNodes[h * 3u + 2u].xyz, info, rb0.z, rb2.z, rb2.w, parity, false), accForce(h));
+#ifdef EB_AERO
+    uint slot1 = info.x >> NODE_SLOT_SHIFT;
+    if (slot1 != 0u) fh = sadd3(fh, gBeams[gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u)].xyz);
+#endif
+    return fh;
+}
+
+bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, uint slot, bool useStart, float3 fStart)
 {
     float3 q = ssub3(p, t.p0);
     float alpha = 0.0;
@@ -5309,13 +5395,22 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity)
     float3 v = ssub3(V.xyz, vt);
     float mt = nf(nf(smul(P1.w, alpha) + smul(P2.w, beta)) + smul(P0.w, gamma));
     float m = sdiv(smul(P.w, mt), nf(P.w + mt));
-    uint4 rb0 = gStatic[vh * 4u];
-    uint4 rb2 = gStatic[vh * 4u + 2u];
-    float3 fh = sadd3(beamSum(gNodes[h * 3u + 2u].xyz, info, rb0.z, rb2.z, rb2.w, parity, false), accForce(h));
-#ifdef EB_AERO
-    uint slot1 = info.x >> NODE_SLOT_SHIFT;
-    if (slot1 != 0u) fh = sadd3(fh, gBeams[gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u)].xyz);
-#endif
+    float3 fh = vvPointForce(h, vh, parity);
+    if (vvTwoBody(gStatic[gP.nodeInfoBase + t.tn.x].w, vh))
+    {
+        // Each node one of its k sub-bodies of this turn (mass m/k, force F/k); the
+        // triangle point's mass 1/Σ w²/m; only the share m_t/(m_h + m_t) of the
+        // contacter's force (at its first hit of the turn) is cancelled.
+        float kh = vvSplitK(vvSplitPoint(slot, h));
+        float mh = sdiv(P.w, kh);
+        float i1 = alpha > 0.0 ? sdiv(smul(alpha, alpha), sdiv(P1.w, vvSplitK(vvSplitTri(t.tn.y)))) : 0.0;
+        float i2 = beta > 0.0 ? sdiv(smul(beta, beta), sdiv(P2.w, vvSplitK(vvSplitTri(t.tn.z)))) : 0.0;
+        float i0 = gamma > 0.0 ? sdiv(smul(gamma, gamma), sdiv(P0.w, vvSplitK(vvSplitTri(t.tn.x)))) : 0.0;
+        mt = sdiv(1.0, nf(nf(i1 + i2) + i0));
+        m = sdiv(smul(mh, mt), nf(mh + mt));
+        float3 f0 = useStart ? fStart : fh;
+        fh = sscale(float3(sdiv(f0.x, kh), sdiv(f0.y, kh), sdiv(f0.z, kh)), sdiv(mt, nf(mh + mt)));
+    }
     float3 f = contactForce(fh, v, m, nn, boxSurface(), pen, V.w);
     accAdd(h, f);
     accAdd(t.tn.y, -sscale(f, alpha));
@@ -5378,6 +5473,7 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
         cand = true;
         if (!vvInBand(t, E.xyz, r)) continue;
         hit = true;
+        vvSplitCount(t, h, 0u);
         // The force later, one lane per hit (the vote and the force read many
         // nodes); a full list applies it here.
         uint i = gsVvHits[q].add(1u);
@@ -5388,7 +5484,7 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
         }
         else
         {
-            vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity);
+            vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity, 0u, false, float3(0.0, 0.0, 0.0));
         }
     }
     vvMark(gt, cand, hit);
@@ -5401,7 +5497,7 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
 // only the hits on one contact point depend on each other: one lane per contact
 // point runs its hits in triangle order (each reads the ones before), the points
 // side by side.
-void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes)
+void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes, uint slot)
 {
     float3 oa = asfloat(gMisc[va].xyz);
     for (uint i = lane, iStop = EB_END(i, n, lanes); i < iStop; i += lanes)
@@ -5419,10 +5515,12 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
         }
         if (!first) continue;
         uint vh = gStatic[gP.nodeInfoBase + h].w;
+        // The point's force before its first hit of this turn (two-body hits).
+        float3 fStart = vvPointForce(h, vh, parity);
         for (uint it = 0u, itStop = EB_END(it, n, 1u); it < itStop; it++)
         {
             VvTri t = vvTriangle(gt, oa, r);
-            vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity);
+            vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity, slot, true, fStart);
             // The point's next hit: the smallest later triangle.
             uint next = 0xFFFFFFFFu;
             for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++)
@@ -5439,7 +5537,7 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
 // The listed hits of owner va, in order (vvApplyOrdered).
 void vvApplyHits(uint va, uint runOff, uint points, uint hits, float r, uint parity, uint lane)
 {
-    vvApplyOrdered(va, vvHitAt(runOff, 0u), min(hits, 2u * points), r, parity, lane, LANES);
+    vvApplyOrdered(va, vvHitAt(runOff, 0u), min(hits, 2u * points), r, parity, lane, LANES, 0u);
 }
 
 
@@ -5512,7 +5610,8 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 #ifdef EB_ABLATE
         if ((gP.ablate & 1024u) == 0u)
 #endif
-        if (a > 0u) vvApplyHits(prevVa, runOff, points, gsVvHits[q ^ 1u].load(), prevRange, parity, lane);
+        uint prevHits = a > 0u ? gsVvHits[q ^ 1u].load() : 0u;
+        if (a > 0u) vvApplyHits(prevVa, runOff, points, prevHits, prevRange, parity, lane);
         for (uint b = lane, bStop = EB_END(b, k, LANES); b < bStop; b += LANES)
         {
             uint vb = vvMember(off, b);
@@ -5554,6 +5653,8 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             uint4 r1 = gStatic[vvMember(off, m) * 4u + 1u];
             for (uint t = lane, tStop = EB_END(t, r1.y, LANES); t < tStop; t += LANES) gMisc[gP.vvTri + r1.x + t].x = 0u;
         }
+        // The previous owner's two-body counts (its hits were applied in phase S).
+        if (prevHits > 0u) vvSplitClear(off, k, 1u, lane);
         uint4 ra1 = gStatic[va * 4u + 1u];
         float range = asfloat(gStatic[va * 4u + 3u].z);
         // The partners' boxes' union (their contact points all lie in it).
@@ -5637,7 +5738,13 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         prevRange = range;
     }
     for (uint i = lane, iStop = EB_END(i, prevListed, LANES); i < iStop; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
-    if (k > 0u) vvApplyHits(prevVa, runOff, points, gsVvHits[(k - 1u) & 1u].load(), prevRange, parity, lane);
+    uint lastHits = k > 0u ? gsVvHits[(k - 1u) & 1u].load() : 0u;
+    if (k > 0u) vvApplyHits(prevVa, runOff, points, lastHits, prevRange, parity, lane);
+    if (gP.vvSplit != 0u)
+    {
+        sync();
+        if (lastHits > 0u) vvSplitClear(off, k, 1u, lane);
+    }
     // (The counters are cleared by the next step's first member step, before its
     // first barrier.)
 }
@@ -5704,6 +5811,7 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
         cand = true;
         if (!vvInBand(t, E.xyz, r)) continue;
         hit = true;
+        vvSplitCount(t, h, a);
         uint i = gsVvHit4[a].add(1u);
         if (i < 2u * points)
         {
@@ -5715,7 +5823,7 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
 }
 
 // The overflow path: owner a's triangle walk again, applying each hit at once.
-void vvTriangleCandsApply(uint va, uint gt, uint sub, uint subs, uint run, uint cands, float r, uint parity)
+void vvTriangleCandsApply(uint va, uint gt, uint sub, uint subs, uint run, uint cands, float r, uint parity, uint slot)
 {
     VvTri t = vvTriangle(gt, asfloat(gMisc[va].xyz), r);
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
@@ -5724,7 +5832,7 @@ void vvTriangleCandsApply(uint va, uint gt, uint sub, uint subs, uint run, uint 
         if (any(E.xyz < t.lo) || any(E.xyz > t.hi)) continue;
         uint h = asuint(E.w);
         if (!vvInBand(t, E.xyz, r)) continue;
-        vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity);
+        vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity, slot, false, float3(0.0, 0.0, 0.0));
     }
 }
 
@@ -5931,7 +6039,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             float range = asfloat(gStatic[va * 4u + 3u].z);
             uint hits = gsVvHit4[a].load();
             if (hits <= 2u * points)
-                vvApplyOrdered(va, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, LANES);
+                vvApplyOrdered(va, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, LANES, a);
             else
             {
                 uint4 ra1 = gStatic[va * 4u + 1u];
@@ -5941,12 +6049,16 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                 {
                     uint t = gNext[vvTestedAt(ra1.x + p / subs)];
                     vvTriangleCandsApply(va, ra1.x + t, p % subs, subs, vvRunSmall(runOff, points, a),
-                                         gsVvCand4[a].load(), range, parity);
+                                         gsVvCand4[a].load(), range, parity, a);
                 }
             }
         }
         sync();
     }
+    // The two-body counts of every owner's turn, once all levels are applied.
+    uint anyHits = 0u;
+    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) anyHits += gsVvHit4[a].load();
+    if (anyHits > 0u) vvSplitClear(off, k, k, lane);
 }
 
 [shader("compute")]

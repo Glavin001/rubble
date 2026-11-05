@@ -156,6 +156,8 @@ pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
 pub const PARAM_WORDS: usize = 80;
+/// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
+pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer.
 pub const ARGS_BYTES: u64 = 32;
 /// Params word: the phases a measurement build skips (`EB_ABLATE`).
@@ -622,7 +624,8 @@ impl ExplicitUpload {
                 | (v.fusedrag.is_some() as u32) << 3
                 | (!v.triggers.is_empty() as u32) << 4
                 | (!v.slides.is_empty() as u32) << 5
-                | (!v.shapes.is_empty() as u32) << 6;
+                | (!v.shapes.is_empty() as u32) << 6
+                | (v.two_body_contact as u32) << 7;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1205,6 +1208,15 @@ impl ExplicitUpload {
             misc[couple_rec + 1] = [layout.acc_base, 0, 0, 0];
             layout
         });
+        // Vehicle contact's two-body mass splitting (jbeam-semantics-spec.md §10.3):
+        // per node its triangle-hit count, then VV_SPLIT_SLOTS − 1 point-hit slots.
+        let vv_split = if vehicles.iter().any(|v| v.two_body_contact) {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, VV_SPLIT_SLOTS * total_nodes));
+            at
+        } else {
+            0
+        };
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -1349,6 +1361,7 @@ impl ExplicitUpload {
             deform_base,
             tri_excl_base,
             cap_at as u32,
+            vv_split,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
