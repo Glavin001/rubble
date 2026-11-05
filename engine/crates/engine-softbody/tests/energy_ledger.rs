@@ -262,3 +262,46 @@ fn coasting_pressure_tyres_energy_split() {
         }
     }
 }
+
+/// `rubble_exact_lengths` (Rubble's `.truck` extension) turns RoR's fast inverse
+/// square root off for that vehicle; files without it keep it (RoR's rule).
+#[test]
+fn rubble_exact_lengths_turns_the_fast_inverse_square_root_off() {
+    let text = car_truck_bare(&CarParams {
+        minimass: 10.0,
+        ..CarParams::sedan()
+    });
+    let ror = ExplicitBeams::from_truck(
+        &text,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        ExplicitBeamsSettings::default(),
+    )
+    .unwrap();
+    assert!(ror.settings.fast_inv_sqrt);
+    // (After the title line.)
+    let (title, rest) = text.split_once('\n').unwrap();
+    let with = format!("{title}\nrubble_exact_lengths\n{rest}");
+    let exact = ExplicitBeams::from_truck(
+        &with,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        ExplicitBeamsSettings::default(),
+    )
+    .unwrap();
+    assert!(!exact.settings.fast_inv_sqrt);
+    // The fast inverse square root's length error over a sweep of lengths.
+    let worst = (1..2000)
+        .map(|i| {
+            let l = 0.01 * i as f32;
+            let q = l * l;
+            let fast = q * engine_softbody::explicit_beams::fast_inv_sqrt(q);
+            ((fast - l) / l).abs()
+        })
+        .fold(0.0f32, f32::max);
+    eprintln!(
+        "fast inverse square root: worst relative length error {:.3} %",
+        100.0 * worst
+    );
+    assert!(worst < 2.0e-3);
+}

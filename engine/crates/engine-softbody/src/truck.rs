@@ -310,6 +310,10 @@ pub struct TruckFile {
     /// `rubble_full_contact` (Rubble's extension, spec §10.2): every node with
     /// collision is a contacter against other vehicles' triangles.
     pub full_contact: bool,
+    /// `rubble_exact_lengths` (Rubble's extension): beam lengths through an exact
+    /// square root, not RoR's fast inverse square root (its error, up to 0.18 % of a
+    /// length, is comparable to metal's yield strain and far above glass's).
+    pub exact_lengths: bool,
     pub wheels: Vec<TruckWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
@@ -745,6 +749,7 @@ impl Parser {
             "set_default_minimass" => self.out.minimass = fd(t, 1, DEFAULT_MINIMASS),
             "enable_advanced_deformation" => self.out.advanced_deformation = true,
             "rubble_full_contact" => self.out.full_contact = true,
+            "rubble_exact_lengths" => self.out.exact_lengths = true,
             "detacher_group" => {
                 self.detacher_group = if t.get(1) == Some(&"end") {
                     0

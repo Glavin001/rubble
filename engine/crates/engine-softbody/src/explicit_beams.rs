@@ -1349,6 +1349,10 @@ impl ExplicitBeams {
         if file.full_contact {
             s.opt_in_full_contact();
         }
+        // `rubble_exact_lengths` (Rubble's extension): exact beam lengths.
+        if file.exact_lengths {
+            s.settings.fast_inv_sqrt = false;
+        }
         Ok(s)
     }
 
