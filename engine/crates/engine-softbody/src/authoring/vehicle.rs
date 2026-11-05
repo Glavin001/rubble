@@ -3713,6 +3713,11 @@ fn one_tier_crush(
 /// do at σ_y/E: the least elastic strain at yield the topology allows.
 /// Crush members keep their cut's mean crush force ([`one_tier_crush`]) and
 /// are only redistributed. Break forces keep each beam's elongation.
+/// A beam within this cosine of a member's axis carries its section's axial
+/// yield in [`one_tier_section_cuts`] (60°: the face diagonals, 45°, do; the
+/// rings and webs across the section do not). A Choice.
+const SECTION_AXIAL_COS: f32 = 0.5;
+
 fn one_tier_section_cuts(
     sk: &mut Skeleton,
     def: &VehicleDef,
@@ -3777,6 +3782,25 @@ fn one_tier_section_cuts(
             }
             let cap: f32 = cut.iter().map(|&(j, cs)| sk.beams[j].mat.deform * cs).sum();
             let f = if crush { cap } else { chords * chord };
+            // Only the cut's axial carriers (within 60° of the member's axis)
+            // share the section's yield; a beam across it (a ring, a web, a
+            // skin edge running round the section) keeps its own, and its
+            // small axial part counts against the section's. (Spread over
+            // them too, a beam at 85° got k·L·|cos| of the share: yields and
+            // break forces of 0–0.2 kN, which tore in g's door pull.)
+            let across: f32 = cut
+                .iter()
+                .filter(|&&(_, cs)| cs < SECTION_AXIAL_COS)
+                .map(|&(j, cs)| sk.beams[j].mat.deform * cs)
+                .sum();
+            let cut: Vec<(usize, f32)> = cut
+                .into_iter()
+                .filter(|&(_, cs)| cs >= SECTION_AXIAL_COS)
+                .collect();
+            if cut.is_empty() {
+                continue;
+            }
+            let f = (f - across).max(0.5 * f);
             cuts.push((cut, f));
         }
         if cuts.is_empty() {
@@ -3802,24 +3826,48 @@ fn one_tier_section_cuts(
                 .iter()
                 .flat_map(|(c, _)| c.iter().map(|x| x.0))
                 .collect();
-            for &j in &touched {
+            // Each cut's yield per unit of axial rigidity, λ = F / Σ k·L·cos²;
+            // a beam in two cuts (a bend over two bays) takes the lesser, so no
+            // cut carries more than its section. (An iterated rescaling drove
+            // the beams two cuts share toward zero where one cut was 6× over.)
+            let kl = |sk: &Skeleton, j: usize| {
                 let l = len(sk, j);
-                sk.beams[j].mat.deform = sk.beams[j].mat.k_at(l) * l;
+                sk.beams[j].mat.k_at(l) * l
+            };
+            let mut lambda: HashMap<usize, f32> = HashMap::new();
+            for (cut, f) in &cuts {
+                let rig: f32 = cut.iter().map(|&(j, cs)| kl(sk, j) * cs * cs).sum();
+                let l = f / rig.max(1e-3);
+                for &(j, cs) in cut {
+                    let e = lambda.entry(j).or_insert(f32::MAX);
+                    *e = e.min(l * cs);
+                }
+            }
+            for &j in &touched {
+                sk.beams[j].mat.deform = kl(sk, j) * lambda[&j];
                 // (A section yields alike both ways: a lane's shell edge in
                 // it is the section's chord, not a sheet in tension.)
                 sk.beams[j].tension_yield = 0.0;
             }
-            for _ in 0..60 {
-                let mut worst = 0.0f32;
-                for (cut, f) in &cuts {
-                    let r = f / cap(sk, cut).max(1e-3);
-                    worst = worst.max((r - 1.0).abs());
-                    for &(j, _) in cut {
-                        sk.beams[j].mat.deform *= r.sqrt();
-                    }
+            // Then up to its section where a cut is under it: each beam rises by
+            // the least of its cuts' F / cap, so a cut its beams share with a
+            // full one rises on its own beams only (none passes its section).
+            let mut of: HashMap<usize, Vec<usize>> = HashMap::new();
+            for (ci, (cut, _)) in cuts.iter().enumerate() {
+                for &(j, _) in cut {
+                    of.entry(j).or_default().push(ci);
                 }
-                if worst < 0.01 {
+            }
+            for _ in 0..30 {
+                let r: Vec<f32> = cuts.iter().map(|(c, f)| f / cap(sk, c).max(1e-3)).collect();
+                if r.iter().all(|&x| x < 1.01) {
                     break;
+                }
+                for &j in &touched {
+                    let g = of[&j].iter().map(|&ci| r[ci]).fold(f32::MAX, f32::min);
+                    if g > 1.0 {
+                        sk.beams[j].mat.deform *= g;
+                    }
                 }
             }
             for &j in &touched {
