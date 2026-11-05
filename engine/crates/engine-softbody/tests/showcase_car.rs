@@ -3799,6 +3799,16 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         &w.vehicles[0].positions(),
     );
     let mut worst_leak = (0usize, 0.0f32, 0.0f32, 0usize);
+    // Each striker node's last crossing of a live triangle: (step, triangle, ±1).
+    let mut last_cross: std::collections::HashMap<u32, (u64, u32, i8)> = Default::default();
+    let mut cross_class = [0usize; 3];
+    // Hit crossings: [behind the plane, pushed in; behind, pushed out; in front,
+    // pushed in; in front, pushed out] (by the skin's outward orientation).
+    let mut hit_class = [0usize; 4];
+    // Each node's last inward crossing's class (as `cross_class`).
+    let mut last_in: std::collections::HashMap<u32, usize> = Default::default();
+    let mut worst_class = [0usize; 4];
+    let mut prev_world = (w.vehicles[0].positions(), w.vehicles[1].positions());
     let ke = |s: &ExplicitBeams| -> f64 {
         s.nodes
             .iter()
@@ -3833,6 +3843,52 @@ fn t_car_to_car_t_bone_at_80_kmh() {
                 &w.vehicles[0].tri_dead,
                 &skin_topo,
             );
+            for &(k, t, e) in &leak.events {
+                if e != 0 {
+                    last_cross.insert(k, (w.steps, t, e));
+                }
+                if e > 0 {
+                    // The inward crossing by where the node was against the triangle
+                    // at the last contact pass (before this step): in its prism and
+                    // in band (a hit), in its prism beyond the band, or outside its
+                    // prism (an edge or vertex region).
+                    use engine_softbody::explicit_contact::ContactFrame;
+                    let [i0, i1, i2] = tris[t as usize].map(|i| prev_world.0[i as usize]);
+                    let (a, b, g, d) =
+                        ContactFrame::new(i0, i1, i2).local(prev_world.1[k as usize]);
+                    let c = if !(a >= 0.0 && b >= 0.0 && g >= 0.0) {
+                        2
+                    } else if d.abs() <= r {
+                        0
+                    } else {
+                        1
+                    };
+                    cross_class[c] += 1;
+                    if c == 0 {
+                        // The hit's side: δ's sign (by the triangle's own winding)
+                        // against the skin's outward orientation, and the vote.
+                        let f = ContactFrame::new(i0, i1, i2);
+                        let vb = &w.vehicles[1];
+                        let (s0, e0) = (
+                            vb.neighbour_start[k as usize] as usize,
+                            vb.neighbour_start[k as usize + 1] as usize,
+                        );
+                        let behind = engine_softbody::explicit_contact::vote_behind(
+                            d,
+                            f.n,
+                            i0,
+                            vb.neighbours[s0..e0]
+                                .iter()
+                                .map(|&j| prev_world.1[j as usize]),
+                        );
+                        let front = d * skin_topo.orient[t as usize] >= 0.0;
+                        let pushed_out = behind != (skin_topo.orient[t as usize] > 0.0);
+                        hit_class[(front as usize) * 2 + pushed_out as usize] += 1;
+                    }
+                    last_in.insert(k, c);
+                }
+            }
+            prev_world = (w.vehicles[0].positions(), w.vehicles[1].positions());
             if let Ok(list) = std::env::var("TB_XTRACE") {
                 // Each listed striker node's crossings of the struck skin.
                 let ids: Vec<u32> = list.split(',').filter_map(|x| x.parse().ok()).collect();
@@ -4001,6 +4057,33 @@ fn t_car_to_car_t_bone_at_80_kmh() {
                 let deep = d.iter().filter(|&&x| x > r).count();
                 let most = d.iter().copied().fold(0.0f32, f32::max);
                 worst_leak = (ids.len(), (f + 1) as f32 / 60.0, most, deep);
+                worst_class = [0; 4];
+                for &i in &ids {
+                    worst_class[last_in.get(&(i as u32)).copied().unwrap_or(3)] += 1;
+                }
+            }
+            if std::env::var("TB_LEAKS").as_deref() == Ok("deep") {
+                // The leaked nodes past the contact band, by their last crossing.
+                let pos = w.vehicles[0].positions();
+                let pb = w.vehicles[1].positions();
+                let mut by_tri: std::collections::BTreeMap<u32, Vec<String>> = Default::default();
+                for &i in &ids {
+                    let d = engine_softbody::explicit_skin::LeakTracker::depth(
+                        pb[i],
+                        &tris,
+                        &pos,
+                        &w.vehicles[0].tri_dead,
+                    );
+                    if d > r {
+                        let (st, t, e) = last_cross.get(&(i as u32)).copied().unwrap_or_default();
+                        by_tri.entry(t).or_default().push(format!(
+                            "{i}@{st}{}{:.3}",
+                            if e > 0 { "+" } else { "-" },
+                            d
+                        ));
+                    }
+                }
+                eprintln!("    deep by last-crossed triangle: {by_tri:?}");
             }
             if std::env::var("TB_LEAKS").as_deref() == Ok("miss") {
                 // Nodes the winding number holds inside that the crossings do not.
@@ -4179,7 +4262,7 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         (ke(&w.vehicles[0]) + ke(&w.vehicles[1])) / 1e3
     );
     eprintln!(
-        "(t) leaked striker nodes (net crossings of the live struck skin not 0): at most {} of {total} (at {:.2} s; deepest {:.3} m, {} past the {r} m band); crossings in {} out {}, through dead triangles {} (not counted); the winding number's count (old metric) {}",
+        "(t) leaked striker nodes (net crossings of the live struck skin not 0): at most {} of {total} (at {:.2} s; deepest {:.3} m, {} past the {r} m band); crossings in {} out {}, through dead triangles {} (not counted), untracked (non-finite or wild) {}; the winding number's count (old metric) {}",
         worst_leak.0,
         worst_leak.1,
         worst_leak.2,
@@ -4187,7 +4270,12 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         leak.inward,
         leak.outward,
         leak.through_dead,
+        leak.skipped,
         worst_inside.0
+    );
+    eprintln!(
+        "(t) inward crossings of live triangles by the node's place at the contact pass before: in the prism and in band (a hit) {}, in the prism beyond the band {}, outside the prism {}; the most leaked nodes by their last inward crossing: hit {}, beyond the band {}, outside the prism {}, none (out through the skin) {}; the hits' sides (behind & pushed in, behind & out, in front & in, in front & out) {:?}",
+        cross_class[0], cross_class[1], cross_class[2], worst_class[0], worst_class[1], worst_class[2], worst_class[3], hit_class
     );
     assert!(w.vehicles.iter().all(finite));
     assert!(
