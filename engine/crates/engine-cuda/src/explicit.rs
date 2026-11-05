@@ -11,7 +11,9 @@
 //! host reads the 32-byte indirect arguments back (one wait per plan, every ~34
 //! steps) and launches the counted grids. The wide passes' per-step parameter
 //! copies are a pointer rewrite in the bank, stream-ordered between launches.
-//! The WGSL loop cap is a WGSL post-process: CUDA kernels run uncapped.
+//! Loop caps: the kernel caps its loops in its Slang source (`EB_LOOP_CAP`), so the
+//! CUDA modules have them too; [`CudaExplicitBeams::wait`] fails on the loop-cap
+//! flag as on a contact error.
 
 use crate::backend;
 use cudarc::driver::{result, sys};
@@ -42,7 +44,7 @@ pub mod table {
     }
     include!(concat!(env!("OUT_DIR"), "/cuda_explicit_kernels.rs"));
 }
-pub use table::{ExplicitCudaKernel, CUDA_EXPLICIT_KERNELS};
+pub use table::{ExplicitCudaKernel, CUDA_EXPLICIT_KERNELS, CUDA_LOOP_CAP_TEST};
 
 struct Kernel_ {
     module: sys::CUmodule,
@@ -363,13 +365,14 @@ impl CudaExplicitBeams {
         Ok(())
     }
 
-    /// Block until queued frames have run; `Err` on a contact error a frame reported.
+    /// Block until queued frames have run; `Err` on a contact error or a loop held
+    /// to its cap a frame reported.
     pub fn wait(&mut self) -> Result<(), ExecError> {
         self.bind_ctx()?;
         unsafe { result::stream::synchronize(self.stream) }.map_err(backend)?;
         if std::mem::take(&mut self.status_due) {
             let acc = self.download::<i32>(plan::BIND_ACC)?;
-            self.layout.contact_status(&acc).map_err(ExecError::Backend)?;
+            self.layout.kernel_status(&acc).map_err(ExecError::Backend)?;
         }
         Ok(())
     }

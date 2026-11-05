@@ -119,7 +119,7 @@ float4 cplFace(uint v, uint k, float3 x)
     uint count = h.w >> 16;
     float best = -3.0e38;
     float3 n = float3(0.0, 1.0, 0.0);
-    for (uint i = 0u; i < count; i++)
+    for (uint i = 0u, iStop = EB_END(i, count, 1u); i < iStop; i++)
     {
         float4 pl = asfloat(gMisc[cplPlane(v, off + i)]);
         float s = dot(pl.xyz, l) - pl.w;
@@ -137,7 +137,7 @@ float3 cplContacts(uint v, float3 x, float3 f, float3 vel, float mass, float fri
     uint4 hdr = gMisc[cplBase(v)];
     uint acc = cplAcc(v);
     uint nb = cplB();
-    for (uint k = 0u; k < hdr.y; k++)
+    for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
     {
         float4 n4 = cplFace(v, k, x);
         if (n4.w == 0.0) continue;
@@ -201,7 +201,7 @@ void cplIntegrate(uint v, uint lane)
     float4 c4 = asfloat(gMisc[b + 4u]);
     float3 force = float3(0.0, 0.0, 0.0);
     float3 torque = float3(0.0, 0.0, 0.0);
-    for (uint k = 0u; k < hdr.y; k++)
+    for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
     {
         uint at = cplShape(v, k);
         if (gMisc[at].y != j) continue;
@@ -246,12 +246,12 @@ void cplCount(uint v, uint lane)
     uint4 r0 = gStatic[v * 4u];
     float3 origin = asfloat(gMisc[v].xyz);
     uint acc = cplAcc(v);
-    for (uint i = lane; i < r0.y; i += LANES)
+    for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
     {
         uint gi = r0.x + i;
         if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) != 0u) continue;
         float3 x = origin + gNodes[gi * 3u].xyz;
-        for (uint k = 0u; k < hdr.y; k++)
+        for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
         {
             if (cplFace(v, k, x).w != 0.0) gAcc[acc + gMisc[cplShape(v, k)].y].add(1);
         }
@@ -281,10 +281,10 @@ void coupleStepMembers(uint off, uint k, uint lane, uint s, uint on)
     if (on == 0u) return;
     if (s > 0u)
     {
-        for (uint m = 0u; m < k; m++) cplIntegrate(vvMember(off, m), lane);
+        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
     }
     sync();
-    for (uint m = 0u; m < k; m++) cplCount(vvMember(off, m), lane);
+    for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplCount(vvMember(off, m), lane);
     sync();
 }
 
@@ -294,7 +294,7 @@ void coupleEndMembers(uint off, uint k, uint lane, uint on)
     sync();
     if (gP.steps > 0u)
     {
-        for (uint m = 0u; m < k; m++) cplIntegrate(vvMember(off, m), lane);
+        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
     }
     sync();
 }
@@ -331,7 +331,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
         float3 x = origin + pos;
         if (ground > x.y)
             f += contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
-        for (uint b = 0u; b < boxCount; b++)
+        for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
         {
             uint4 lo4 = gStatic[gP.boxBase + (boxOff + b) * 2u];
             uint4 hi4 = gStatic[gP.boxBase + (boxOff + b) * 2u + 1u];

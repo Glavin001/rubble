@@ -9,8 +9,9 @@
 //!
 //! Math mode: as wgpu's Metal backend compiles the WGSL (MTLCompileOptions
 //! defaults, fast math on); `ENGINE_FAST_MATH=off` compiles strict IEEE.
-//! The WGSL loop cap (`cap_explicit_loops`) is a WGSL post-process: MSL kernels run
-//! uncapped, so the status's loop-cap flag stays 0 here.
+//! Loop caps: the kernel caps its loops in its Slang source (`EB_LOOP_CAP`), so the
+//! MSL modules have them too; a loop held to its cap raises the status's loop-cap
+//! flag, and frames fail (panic) on it as on a contact error ([`Self::kernel_status`]).
 
 use crate::sim::{gpu_ms, shared, write};
 use engine_exec::explicit_plan::{
@@ -35,7 +36,7 @@ mod table {
     }
     include!(concat!(env!("OUT_DIR"), "/explicit_kernels.rs"));
 }
-pub use table::EXPLICIT_KERNELS;
+pub use table::{ExplicitKernel, EXPLICIT_KERNELS, LOOP_CAP_TEST};
 
 /// Parameter buffers in flight (frames queued before the host waits).
 const PARAM_RING: usize = 3;
@@ -298,22 +299,35 @@ impl MetalExplicitBeams {
             }
         }
         if f.status {
-            if let Err(e) = self.layout.contact_status(&self.acc()) {
-                panic!("explicit beams (Metal) vehicle contact: {e}");
+            if let Err(e) = self.layout.kernel_status(&self.acc()) {
+                panic!("explicit beams (Metal): {e}");
             }
         }
     }
 
     /// Block until submitted frames have run. Fails (panics) when one reported a
-    /// vehicle-contact error.
+    /// vehicle-contact error or a loop held to its cap.
     pub fn wait(&mut self) {
         self.retire(true);
     }
 
-    /// The contact status (blocking).
+    /// The contact status (blocking), after the loop-cap flag.
     pub fn contact_status(&mut self) -> Result<(), String> {
-        self.wait();
-        self.layout.contact_status(&self.acc())
+        self.kernel_status()
+    }
+
+    /// The kernel status (blocking, without the frames' own check): `Err` when a
+    /// kernel loop was held to its cap (`engine_exec::explicit_plan::EXPLICIT_LOOP_CAP`:
+    /// a runaway loop, stopped; that frame's results are invalid) or on a contact
+    /// error.
+    pub fn kernel_status(&mut self) -> Result<(), String> {
+        // The frames in flight: retired without their own check (read here).
+        while let Some(mut f) = self.in_flight.pop_front() {
+            f.cb.wait_until_completed();
+            f.status = false;
+            self.finished(f);
+        }
+        self.layout.kernel_status(&self.acc())
     }
 
     /// The rigid coupling's layout, when built [`Self::with_coupling`].

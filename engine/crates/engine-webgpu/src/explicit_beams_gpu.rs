@@ -119,7 +119,8 @@ struct Contact {
     /// staging buffer and checked once mapped, a frame or two later (no waiting).
     acc: wgpu::Buffer,
     status_at: u64,
-    /// The loop-cap flag (gAcc's last word, byte offset): see `cap_explicit_loops`.
+    /// The loop-cap flag (gAcc's last word, byte offset): see
+    /// `engine_exec::explicit_plan::EXPLICIT_LOOP_CAP`.
     cap_at: u64,
     status: std::sync::Mutex<StatusRing>,
 }
