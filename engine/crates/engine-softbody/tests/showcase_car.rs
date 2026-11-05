@@ -2254,10 +2254,8 @@ fn p_fmvss_214_static_door_crush() {
 /// down), its forward edge 254 mm ahead of the roof's front, its centre line
 /// over the driver's side roof rail, pushed along its normal while the floor
 /// is held. The force within 127 mm of platen travel must reach 3.0 × the
-/// unloaded weight (IIHS "good": 4.0×). Medium, 0.1 m/s. Ignored: run with
-/// `--ignored`.
+/// unloaded weight (IIHS "good": 4.0×). Medium, 0.1 m/s.
 #[test]
-#[ignore]
 fn q_fmvss_216a_roof_crush() {
     let b = built(Resolution::Medium);
     let sk = &b.skeleton;
@@ -2277,9 +2275,10 @@ fn q_fmvss_216a_roof_crush() {
     let centre_z = front - 0.5 * 1.829;
     // Start: the platen's plane through the highest node under it.
     let under = |p: Vec3| {
-        let c = Vec3::new(rail.x, 0.0, centre_z);
-        let q = p - c;
-        (q.dot(across).abs() < 0.381) && ((p.z - centre_z).abs() < 0.9145)
+        // In the platen's plane: across it and along it from its centre
+        // (over the rail at roof height).
+        let q = p - Vec3::new(rail.x, rail.y, centre_z);
+        (q.dot(across).abs() < 0.381) && (q.dot(along).abs() < 0.9145)
     };
     let start = s
         .nodes
@@ -2297,8 +2296,30 @@ fn q_fmvss_216a_roof_crush() {
         let depth = start + d - p.dot(push);
         (depth > 0.0).then_some(depth)
     };
+    let before = s.positions();
     let curve = ram_rig(&mut s, &held, push, 0.127, 0.1, &inside);
     let peak = curve.iter().map(|c| c.1).fold(0.0f32, f32::max);
+    if std::env::var("Q_DIAG").is_ok() {
+        let mut v: Vec<(String, f32)> = b
+            .groups
+            .iter()
+            .map(|(k, g)| {
+                let d = g
+                    .iter()
+                    .map(|&i| (s.nodes[i as usize].pos - before[i as usize]).dot(push))
+                    .fold(0.0f32, f32::max);
+                (k.clone(), d)
+            })
+            .collect();
+        v.sort_by(|a, c| c.1.total_cmp(&a.1));
+        eprintln!(
+            "(q) groups moved along the push (mm): {:?}",
+            v.iter()
+                .take(14)
+                .map(|(k, d)| format!("{k} {:.0}", d * 1e3))
+                .collect::<Vec<_>>()
+        );
+    }
     let uvw: f32 = s.nodes.iter().map(|n| n.mass).sum::<f32>() * 9.81;
     eprintln!(
         "(q) FMVSS 216a roof: peak {:.1} kN within 127 mm = {:.2} × unloaded weight (≥ 3.0; IIHS good ≥ 4.0); curve every 25 mm: {:?} kN",
