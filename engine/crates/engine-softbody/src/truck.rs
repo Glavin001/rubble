@@ -306,6 +306,9 @@ pub struct TruckFile {
     pub minimass_skip_loaded: bool,
     pub advanced_deformation: bool,
     pub collision_range: f32,
+    /// The file sets `set_collision_range` (the BeamNG profile's band then yields
+    /// to it).
+    pub collision_range_set: bool,
     pub nodes: Vec<SoftNode>,
     /// Per node: loaded flag and optional load-weight override.
     pub loaded: Vec<(bool, Option<f32>)>,
@@ -810,7 +813,10 @@ impl Parser {
                     f(t, 1, 0.0).abs() as u32
                 };
             }
-            "set_collision_range" => self.out.collision_range = fd(t, 1, DEFAULT_COLLISION_RANGE),
+            "set_collision_range" => {
+                self.out.collision_range = fd(t, 1, DEFAULT_COLLISION_RANGE);
+                self.out.collision_range_set = true;
+            }
             "submesh_groundmodel" => {
                 self.out.submesh_groundmodel = t.get(1).map(|g| g.to_string());
             }

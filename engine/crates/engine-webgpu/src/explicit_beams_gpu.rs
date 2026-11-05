@@ -1326,6 +1326,15 @@ impl ExplicitBeamsGpu {
             ("nodes", nodes),
             ("beams", beam_words),
             ("acc", acc[..3 * self.layout.total[0] as usize].to_vec()),
+            // Anti-clip's side memory (order free; jbeam-semantics-spec.md §36).
+            ("clip", {
+                let at = w[78] as usize;
+                if at == 0 {
+                    Vec::new()
+                } else {
+                    acc[at..at + 4 * self.layout.total[0] as usize].to_vec()
+                }
+            }),
             ("groups", groups),
             ("misc", misc[..vv_groups * 4].to_vec()),
             // The trigger inputs: from keyBase to the contact lists (vvMembers −
@@ -1520,6 +1529,30 @@ impl ExplicitBeamsGpu {
     pub fn deform_triggered(&self) -> Vec<Vec<u32>> {
         let raw = self.read(&self.bufs[6]);
         self.layout.deform_triggered(bytemuck::cast_slice(&raw))
+    }
+
+    /// Per vehicle, each node's anti-clip side memory (held, recorded; as
+    /// [`ExplicitBeams::clip_sides`], jbeam-semantics-spec.md §36); empty for an
+    /// upload without anti-clip.
+    pub fn clip_sides(&self) -> Vec<Vec<[u32; 4]>> {
+        let at = self.planner.words[78] as usize;
+        let nv = self.layout.spans.len();
+        if at == 0 {
+            return vec![Vec::new(); nv];
+        }
+        let raw = self.read(&self.acc);
+        let acc: &[u32] = bytemuck::cast_slice(&raw);
+        (0..nv)
+            .map(|v| {
+                let sp = &self.layout.spans[v];
+                (0..sp.nodes as usize)
+                    .map(|i| {
+                        let k = at + 4 * (sp.node_off as usize + i);
+                        [acc[k], acc[k + 1], acc[k + 2], acc[k + 3]]
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// Per vehicle, every beam's broken flag and rest length.
