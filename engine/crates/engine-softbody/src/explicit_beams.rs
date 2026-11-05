@@ -953,6 +953,9 @@ pub struct ExplicitBeams {
     /// The energy ledger's per-node force split of the last step (None: not
     /// traced; [`crate::explicit_contact::EnergyLedger`]).
     pub trace: Option<Box<ForceTrace>>,
+    /// Raycast wheels, drive and driver input ([`crate::explicit_drive`]); `None`
+    /// (the default) for none, every step unchanged.
+    pub drive: Option<Box<crate::explicit_drive::Drive>>,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -962,6 +965,8 @@ pub enum JbeamWheels {
     Soft(crate::truck_export::TyreDefaults),
     /// JBeam pressure wheels (spec §25).
     Pressure,
+    /// No wheel nodes: raycast wheels on the axle nodes ([`crate::explicit_drive`]).
+    Raycast,
 }
 
 /// A JBeam beam's damping low-pass (`dampCutoffHz`, spec §6): the damping uses
@@ -1300,6 +1305,7 @@ impl ExplicitBeams {
             deform_names: Vec::new(),
             rigid: None,
             trace: None,
+            drive: None,
         }
     }
 
@@ -1394,6 +1400,32 @@ impl ExplicitBeams {
         settings: ExplicitBeamsSettings,
         airfoil: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
+        Self::from_truck_yawed_tyres(
+            text,
+            config,
+            position,
+            yaw_degrees,
+            velocity,
+            settings,
+            airfoil,
+            true,
+        )
+    }
+
+    /// [`Self::from_truck_yawed`], building the `wheels` sections' soft tyres
+    /// (`tyres`) or not: without them each wheel's mass goes to its two axle nodes
+    /// (half each), for raycast wheels ([`crate::explicit_drive`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_truck_yawed_tyres(
+        text: &str,
+        config: Option<&str>,
+        position: Vec3,
+        yaw_degrees: f32,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+        airfoil: &dyn Fn(&str) -> Option<String>,
+        tyres: bool,
+    ) -> Result<Self, String> {
         let file = parse_truck_config(text, config);
         if !file.errors.is_empty() {
             return Err(file.errors.join("; "));
@@ -1484,7 +1516,12 @@ impl ExplicitBeams {
                     }
                 }
             }
-            s.add_tyre(w, position, yaw_degrees, velocity, &local, posed);
+            if tyres {
+                s.add_tyre(w, position, yaw_degrees, velocity, &local, posed);
+            } else {
+                s.nodes[w.node1 as usize].mass += 0.5 * w.mass;
+                s.nodes[w.node2 as usize].mass += 0.5 * w.mass;
+            }
             if rest.is_some() {
                 s.nodes[w.node1 as usize].pos = saved[0];
                 s.nodes[w.node2 as usize].pos = saved[1];
@@ -2226,6 +2263,15 @@ impl ExplicitBeams {
                 warnings.append(&mut w);
                 None
             }
+            JbeamWheels::Raycast => {
+                // Raycast wheels (crate::explicit_drive): no wheel nodes; each
+                // wheel's mass goes to its axle nodes.
+                for w in &desc.wheels {
+                    s.nodes[w.node1 as usize].mass += 0.5 * w.mass;
+                    s.nodes[w.node2 as usize].mass += 0.5 * w.mass;
+                }
+                None
+            }
         };
         if let (Some(tyres), false) = (tyres, desc.wheels.is_empty()) {
             // The `.truck` path's tyres, from the same text it writes.
@@ -2806,6 +2852,9 @@ impl ExplicitBeams {
     /// One fixed step: nodes, wings, fuselage drag, commands, beams,
     /// self-collision.
     pub fn step(&mut self) {
+        if self.drive.is_some() {
+            crate::explicit_drive::drive_pass(self);
+        }
         self.node_pass();
         if !self.wings.is_empty() {
             self.wing_pass();
