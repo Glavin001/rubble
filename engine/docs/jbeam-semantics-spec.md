@@ -1538,11 +1538,46 @@ the lumped tread's patch-entry landings).
   supercar's spawn sag (about 1 kJ: it spawns with its springs unloaded) now bounces
   on its file's shock absorbers (`beamDamp` 600–1,100 N·s/m; its kinetic energy decays as a damping
   ratio of about 0.03) for about 5 s, where the inelastic ground absorbed it in 2 s; the
-  community rest-creep test therefore settles 6 s before its 8 s window (was 2 s;
-  at 2 s the supercar still has 800 J and is not at rest). Then: supercar drift
-  2.1 mm, sway 53 mm; Astral R 2.4 mm, 13 mm.
+  community rest-creep test settles longer before its 8 s window (was 2 s; at 2 s
+  the supercar still has 800 J and is not at rest). With 6 s it passed (supercar
+  drift 2.1 mm, sway 53 mm) until §35's last-bit changes, after which the bounce
+  leaves the supercar rolling at 0.22 m/s at 4 s (energy ledger: its mechanical
+  energy only falls; the ground's horizontal work is −25 J over 10 s), and the
+  tyres' low-speed rolling loss (about C_rr 0.003 at 0.2 m/s: the patch-entry
+  landings that dominate at speed scale as v²) stops it only at about 12 s. The
+  test settles 12 s: supercar drift 4.4 mm, sway 39 mm; Astral R 0.7 mm, 2.0 mm.
+  **Open:** the low-speed rolling loss is about a fifth of a real tyre's, whose
+  C_rr is nearly constant with speed.
 * **GPU.** The same law in the kernel (strict arithmetic in the CPU's order; the
   constants as bit patterns); a vehicle with tread nodes (vehicle flag 512,
   `FLAG_TREAD`) takes the shapes path of the node phase, and the coupled path has
   the branch too. The fixture car at rest steps bit for bit with the CPU until the
-  JBeam beam path's own last-bit difference (§33, step 2,688); see §35 for that.
+  JBeam beam path's own last-bit difference (§33, step 2,688); §35 removes it.
+
+## 35. JBeam mode at CPU↔GPU bit parity: exact lengths, atan2, slide sums (2026-11-05)
+
+§33's follow-up. JBeam mode's beam lengths took 1/√q (CPU `1.0 / q.sqrt()`, kernel
+`sdiv(1, ssqrt(q))`), which differ in the last bit now and then; at rest the
+contacts amplify it (the fixture car parted at step 2,688).
+* **Lengths.** `jbeam_force_filtered`, `jbeam_ext_force` and `lbeam_force` (kernel
+  `jbeamUpdate`, `jbeamExtUpdate`) take §33's `exact_length` / `sExactLength`: the
+  length √q correctly rounded and the inverse length within 1.65 ulp, one specified
+  sequence on both. The `.truck` (RoR) profile is unchanged.
+* **atan2.** The torsion elements' dihedral angle used the library atan2 (Rust's
+  libm, the GPU's hardware one), not the same function: the Astral R parted at
+  step 1. Both now run `exact_atan2` / `sAtan2`: a = min/max of |x|, |y|; past
+  tan(π/8), π/4 + atan((a − 1)/(a + 1)); the series of atan to t²³ (truncation below
+  4·10⁻⁹), Horner in t²; then the octant. Within 1.1 ulp of the exact angle
+  (`exact_atan2_is_the_angle`). **Choice** (a specified sequence over a correctly
+  rounded atan2, as §33's).
+* **Slide forces.** The kernel sums each node's slide forces from zero in slide
+  order and adds the sum to its force; the CPU added them one by one, which rounds
+  differently where a rail end takes several. The CPU now sums them as the kernel
+  does (`slide_pass`).
+* **Checked** (`explicit_jbeam_ext_gpu.rs` `jbeam_mode_steps_bit_for_bit`, every
+  node's position and velocity after each step, wgpu on Metal): the fixture car at
+  rest 4,000 steps and at 10 m/s 2,000 steps; the supercar at rest 2,000 steps; the
+  Astral R 426 steps. **Open:** at step 427 an Astral R node's first self-collision
+  contact differs in its last bit (the triangle contact pass, common to every mode:
+  its force reaches the node through the 1/32 N accumulator, and the beam forces
+  were checked equal bit for bit). Not JBeam mode's; a follow-up.

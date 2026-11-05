@@ -133,7 +133,8 @@ fn runs_within_webgpu_uniform_binding_limit() {
         return;
     };
     let mut limits = adapter.limits();
-    limits.max_uniform_buffer_binding_size = wgpu::Limits::default().max_uniform_buffer_binding_size;
+    limits.max_uniform_buffer_binding_size =
+        wgpu::Limits::default().max_uniform_buffer_binding_size;
     assert_eq!(limits.max_uniform_buffer_binding_size, 65536);
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("webgpu-uniform-limit"),
@@ -170,7 +171,11 @@ fn runs_within_webgpu_uniform_binding_limit() {
 #[test]
 fn triangle_aero_matches() {
     let d = load_jbeam(&[("t.jbeam", PART2_PANEL)], None).unwrap();
-    let settings = ExplicitBeamsSettings { turbulence: false, drag: true, ..Default::default() };
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        drag: true,
+        ..Default::default()
+    };
     let v = Vec3::new(3.0, 25.0, 10.0);
     let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(
         &d,
@@ -180,10 +185,100 @@ fn triangle_aero_matches() {
         settings,
     )
     .unwrap();
-    assert!(s.beams.iter().any(|b| b.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamAeroTri));
+    assert!(s
+        .beams
+        .iter()
+        .any(|b| b.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamAeroTri));
     let Some((worst, cb, gb, ..)) = compare("aero panel", &mut s, 40) else {
         return;
     };
     assert_eq!(cb, gb);
     assert!(worst < 1e-4, "aero: {worst}");
+}
+
+/// JBeam mode's exact lengths and atan2 (jbeam-semantics-spec.md §35) and the tread
+/// contact (§34) step bit for bit with the CPU: every node's position and velocity
+/// after each step, the pressure-wheel fixture car at rest (2 s) and rolling at
+/// 10 m/s (1 s); opt-in (`RUBBLE_BEAMNG_MODS`), the supercar at rest 1 s and the
+/// Astral R 400 steps: at step 427 its first self-collision contact differs by a
+/// last bit (the triangle contact path, not JBeam mode's; §35, open).
+#[test]
+fn jbeam_mode_steps_bit_for_bit() {
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let check = |label: &str, mut cpu: ExplicitBeams, steps: u32| {
+        let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+        for step in 0..steps {
+            cpu.step();
+            gpu.frame(1);
+            let (gp, gv) = (&gpu.positions()[0], &gpu.velocities()[0]);
+            let cp = cpu.positions();
+            for i in 0..cpu.nodes.len() {
+                let same = cp[i].to_array().map(f32::to_bits) == gp[i].to_array().map(f32::to_bits)
+                    && cpu.nodes[i].vel.to_array().map(f32::to_bits)
+                        == gv[i].to_array().map(f32::to_bits);
+                assert!(
+                    same,
+                    "{label}: step {step} node {i}: CPU {:?} {:?} GPU {:?} {:?}",
+                    cp[i], cpu.nodes[i].vel, gp[i], gv[i]
+                );
+            }
+        }
+        eprintln!("{label}: {steps} steps bit for bit");
+    };
+    check(
+        "fixture car at rest",
+        spawn(PART2_CAR, Some(JbeamWheels::Pressure), Vec3::ZERO),
+        4000,
+    );
+    let v = Vec3::new(0.0, 0.0, 10.0);
+    check(
+        "fixture car at 10 m/s",
+        spawn(PART2_CAR, Some(JbeamWheels::Pressure), v),
+        2000,
+    );
+    let Ok(mods) = std::env::var("RUBBLE_BEAMNG_MODS") else {
+        return;
+    };
+    let m = std::path::Path::new(&mods);
+    for (dir, name, pc, steps) in [
+        ("monster_supercar/vehicles", "supercar", "config.pc", 2000),
+        (
+            "qlourie_astral_r/vehicles",
+            "qlourie_astral_r",
+            "wrc17_tarmac_balanced.pc",
+            400,
+        ),
+    ] {
+        let dir = m.join(dir);
+        let Ok(files) = engine_softbody::jbeam::read_vehicle_dir(&dir, name) else {
+            continue;
+        };
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let pcs = std::fs::read_to_string(dir.join(name).join(pc)).unwrap();
+        let d = load_jbeam(&refs, Some(&pcs)).unwrap();
+        let settings = ExplicitBeamsSettings {
+            turbulence: false,
+            drag: false,
+            ..Default::default()
+        };
+        let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(
+            &d,
+            JbeamWheels::Pressure,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            settings,
+        )
+        .unwrap();
+        let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+        for n in &mut s.nodes {
+            n.pos.y += 0.02 - low;
+        }
+        check(name, s, steps);
+    }
 }

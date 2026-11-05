@@ -133,8 +133,9 @@ pub fn jbeam_ext_force(
     }
     let d = na.pos - nb.pos;
     let q = d.dot(d);
-    let inv = 1.0 / q.sqrt();
-    let len = q * inv;
+    // The exact path's length and inverse length (spec §35; the kernel's
+    // `sExactLength`).
+    let (len, inv) = crate::explicit_beams::exact_length(q);
     let e = len - beam.rest;
     let u = (na.vel - nb.vel).dot(d) * inv;
     let u = match filter {
@@ -263,8 +264,7 @@ pub fn lbeam_force(
 ) -> LbeamOut {
     let d = na.pos - nb.pos;
     let q = d.dot(d);
-    let inv = 1.0 / q.sqrt();
-    let len = q * inv;
+    let (len, inv) = crate::explicit_beams::exact_length(q);
     let ra = na.pos - nc.pos;
     let rb = nb.pos - nc.pos;
     let a2 = ra.dot(ra);

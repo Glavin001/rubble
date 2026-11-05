@@ -700,11 +700,13 @@ fn community_vehicles_do_not_creep_at_rest() {
         for n in &mut s.nodes {
             n.pos.y -= drop;
         }
-        // Settled 6 s: with the compliant tread contact (spec §34) the supercar's
+        // Settled 12 s (spec §34): with the compliant tread contact the supercar's
         // spawn sag (about 1 kJ) bounces on its file's own shock absorbers
-        // (`beamDamp` 600-1,100 N·s/m) for about 5 s before it is at rest; the
-        // inelastic ground rule of before absorbed it in 2 s.
-        let (drift, sway) = creep(&mut s, 6.0, 8.0);
+        // (`beamDamp` 600-1,100 N·s/m) and leaves it rolling at about 0.2 m/s at
+        // 4 s, which the tyres' low-speed rolling loss stops by about 12 s (energy
+        // ledger: mechanical energy only falls). The inelastic ground rule of
+        // before absorbed the bounce in 2 s.
+        let (drift, sway) = creep(&mut s, 12.0, 8.0);
         println!("{name}: drift {drift} m over 8 s, sway {sway} m");
         assert!(
             drift <= sway + 1e-3,
@@ -885,4 +887,28 @@ fn community_cars_coast_down_by_aero_and_rolling_resistance() {
             "{name}: {f_on} N below its triangles' drag {aero_mean} N"
         );
     }
+}
+
+/// The torsion elements' atan2 (spec §35, one sequence on both solvers) is within
+/// two units in the last place (of the result's size, f32::EPSILON·|θ|, or of
+/// 10⁻⁷ rad near zero) of the exact angle over every direction and scale, and
+/// keeps the quadrants' signs.
+#[test]
+fn exact_atan2_is_the_angle() {
+    use engine_softbody::explicit_beams::exact_atan2;
+    let mut worst = 0.0f64;
+    for i in 0..100_000 {
+        let th = -std::f64::consts::PI + std::f64::consts::TAU * (i as f64 + 0.5) / 100_000.0;
+        for scale in [1e-6f64, 1.0, 3e4] {
+            let (y, x) = ((scale * th.sin()) as f32, (scale * th.cos()) as f32);
+            let exact = f64::from(y).atan2(f64::from(x));
+            let ulp = f64::from(f32::EPSILON) * exact.abs().max(1.0);
+            worst = worst.max((f64::from(exact_atan2(y, x)) - exact).abs() / ulp);
+        }
+    }
+    println!("exact_atan2: worst error {worst:.2} ulp");
+    assert!(worst < 2.0, "{worst}");
+    assert_eq!(exact_atan2(0.0, 0.0), 0.0);
+    assert_eq!(exact_atan2(0.0, -1.0), std::f32::consts::PI);
+    assert_eq!(exact_atan2(1.0, 0.0), std::f32::consts::FRAC_PI_2);
 }
