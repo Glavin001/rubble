@@ -308,8 +308,14 @@ impl Range {
     /// A cannonball from `from` at `v` (the shared ball pool: the oldest goes past
     /// [`MAX_BALLS`], a full shot table's oldest striker leaves it).
     pub fn spawn_ball(&mut self, from: [f32; 3], v: [f32; 3]) -> anyhow::Result<()> {
-        self.balls
-            .fire(&mut self.world, &cannonball(), from, v, [0.0; 3], self.frame as u64)?;
+        self.balls.fire(
+            &mut self.world,
+            &cannonball(),
+            from,
+            v,
+            [0.0; 3],
+            self.frame as u64,
+        )?;
         self.log.push((self.frame, from, v));
         self.total.shots += 1;
         Ok(())

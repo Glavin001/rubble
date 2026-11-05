@@ -78,8 +78,7 @@
     // body and collider buffers in place, and keeps the camera, input, HUD,
     // benchmark protocol and checks.
     import { createWorld, pollFrame, stepFrames, drain, macrotask, saveState, errorText } from './rubble-world.mjs';
-    import { parseDemoQuery, demoSolver, sceneCap, SLEEP_OFF_TIME } from './demo-config.mjs';
-    import { buildDemoScene, packDemoBodies } from './demo-scene.mjs';
+    import { parseDemoQuery, demoSolver, SLEEP_OFF_TIME } from './demo-config.mjs';
     import { restoreSceneOrder } from './spatial-order.mjs';
     import { runRingRegression } from './ring-regression.mjs';
     import { runGablesRegression } from './gables-regression.mjs';
@@ -177,7 +176,7 @@
     const snap = cfg.snapshot ? await loadSnapshot(cfg.snapshot) : null;
     if (snap) {
       cfg.iterations = cfg.iterations ?? snap.meta.iterations;
-      cfg.cap = sceneCap(snap.counts.bodies, { maxJoints: Math.max(64, snap.counts.joints + 1) });
+      cfg.cap = snap.meta.cap;
       cfg.title = `${cfg.title}, ${cfg.iterations} iterations`;
     }
     const lead = cfg.lead;
@@ -282,13 +281,18 @@
         camera: { eye: cameraEye, target: () => target, fovY: Math.PI / 5 },
       });
     } else {
-      sceneBodies = buildDemoScene(scene, cfg, { ccd: Q.ccd });
+      // Built in Rust (engine-scenes `web`, engine-world `play::rigid::place`): the ground
+      // slab, the scene's pieces, uploaded in Morton order with ?order=morton.
+      const placed = world.createDemoScene(scene, {
+        levels: cfg.levels ?? 0, ccd: Q.ccd, spatialOrder: Q.spatialOrder,
+        shape: { material: { friction: cfg.friction } },
+      });
+      // Each scene body's starting position (scene order): the checks' reference.
+      sceneBodies = Array.from({ length: placed.initial.length / 3 }, (_, i) => ({ p: Array.from(placed.initial.subarray(3 * i, 3 * i + 3)) }));
       if (scene === 'pyramid')
         document.querySelector('h1').textContent = `Slang → WGSL · settled pyramid ${cfg.levels} levels (~${sceneBodies.length - 1}), 10 iterations`;
-      if (sceneBodies.length > cfg.cap.maxBodies) throw new Error(`${sceneBodies.length} bodies exceed capacity ${cfg.cap.maxBodies}`);
-      const packed = packDemoBodies(sceneBodies, { spatialOrder: Q.spatialOrder });
-      order = Q.spatialOrder ? packed : null;
-      handles = { bodies: Float64Array.from(world.createBodies(packed.records, { material: { friction: cfg.friction } })) };
+      order = Q.spatialOrder ? { gpuToScene: placed.gpuToScene } : null;
+      handles = { bodies: placed.bodies };
     }
     const bodyCount = world.bodyCount();
     const drawCount = world.colliderCount() - 1;

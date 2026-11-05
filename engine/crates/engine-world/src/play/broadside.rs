@@ -470,7 +470,9 @@ impl Broadside {
             // Decks are struck from above; everything else from the near battery, one ball
             // in four from the far one (raking through the hull).
             let deck = target[2].abs() < HALF_BEAM - 0.3
-                && [MAIN_DECK, QUARTER_DECK].iter().any(|&y| (target[1] - y).abs() < 0.35);
+                && [MAIN_DECK, QUARTER_DECK]
+                    .iter()
+                    .any(|&y| (target[1] - y).abs() < 0.35);
             let near_side = if target[2] >= 0.0 { 1.0 } else { -1.0 };
             let side = if h(c) % 4 == 0 { -near_side } else { near_side };
             let from = if deck {

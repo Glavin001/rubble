@@ -1,5 +1,5 @@
-// demo.html's scenes and URL switches, as the World it runs on takes them
-// (engine-world-wasm `WorldDef`: `contacts`, `features`, `solver`, `capacity`).
+// demo.html's URL switches, as the World it runs on takes them (engine-world-wasm
+// `WorldDef`: `contacts`, `features`, `solver`), over the scene table Rust writes.
 // Pure: tests/persistence_schedule.test.mjs checks the defaults and the errors.
 //
 // The step itself is Rust's (`World::step`, engine-exec `rigid_plan`). The URL's
@@ -8,181 +8,16 @@
 // experiments with no Rust path are refused with the reason
 // (`DROPPED_SWITCHES`).
 
-// Allocate enough contacts for the benchmark; the 2M default bounds memory for
-// smaller scenes.
-const DEFAULT_CONTACT_CAP = 1 << 21;
-const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
-export function sceneCap(bodies, extras = {}) {
-  const b = nextPow2(Math.max(bodies, 4096));
-  return {
-    maxBodies: b,
-    maxColliders: nextPow2(Math.max(bodies * 2, 8192)),
-    maxContacts: Math.min(nextPow2(Math.max(bodies * 16, 32768)), DEFAULT_CONTACT_CAP),
-    maxJoints: extras.maxJoints ?? 64,
-    maxCandidates: Math.min(nextPow2(Math.max(bodies * 32, 65536)), DEFAULT_CONTACT_CAP),
-    maxColors: 32,
-    // Teleports, velocity sets and drives are World commands (the drag joint,
-    // the projectile); capacity only.
-    maxCommands: 2048,
-  };
-}
+// The scene table (engine-scenes `web::scenes`, written by scene_export): titles,
+// cameras, solver constants and capacities, in menu order. The built scenes are made
+// in Rust when placed (`WebWorld.createDemoScene`); the rest are snapshots.
+import table from './generated/scenes/demo.json' with { type: 'json' };
 
-// Capacities mirror three-avbd bench-cases tiers (small / paper / large / steady).
 export function demoScenes(qs = new URLSearchParams()) {
-  return {
-    wall: {
-      title: 'wall smash 2k, 10 iterations',
-      lead: 30, iterations: 10, settled: false, sleepRounds: 8, friction: 0.5,
-      eye: [0, 16, -42], look: [0, 8, 0], far: 400, ground: 48,
-      cap: sceneCap(4096),
-    },
-    ring: {
-      title: 'brick ring 9k, 4 iterations',
-      lead: 60, iterations: 4, settled: false, sleepRounds: 8, friction: 0.5,
-      eye: [32, 22, 14], look: [0, 5, 0], far: 400, ground: 22, flags: 1, sleepTime: 1e6,
-      cap: sceneCap(16384), // contacts 262144 — was 131072 (overflow mid-smash)
-    },
-    gables: {
-      title: 'brick gables 6.7k, 3 iterations',
-      lead: 60, iterations: 3, settled: false, sleepRounds: 8, friction: 0.5,
-      eye: [0, 28, -40], look: [0, 6, 0], far: 400, ground: 44, flags: 1,
-      cap: sceneCap(16384),
-    },
-    pyramid: {
-      // levels via ?levels=N (default 30). Match three-avbd: reuseContacts + full 4-pt faces.
-      title: 'settled pyramid',
-      lead: 180, iterations: 10, settled: true, sleepRounds: 8, friction: 0.5,
-      eye: [28, 22, 28], look: [0, 6, 0], far: 400, ground: 64,
-      levels: Math.max(2, Math.min(50, Number(qs.get('levels') || 30) || 30)),
-      flags: 1, // FLAG_REUSE_CONTACTS — three-avbd default
-      cap: sceneCap(16384),
-    },
-    pile: {
-      title: 'settled pile 32k, 4 iterations',
-      lead: 180, iterations: 4, settled: true, sleepRounds: 1, friction: 0.7,
-      eye: [48, 36, 48], look: [0, 8, 0], far: 800, ground: 96,
-      // Box Pile scene defaults (DECISIONS 8af–8av)
-      flags: 1, alpha: 0.95, betaLin: 2000, sleepLin: 0.5, sleepAng: 0.5, sleepTime: 0.25,
-      cap: sceneCap(65536),
-    },
-    columns: {
-      title: 'box columns 100k, 4 iterations',
-      lead: 180, iterations: 4, settled: true, sleepRounds: 8, friction: 0.5,
-      eye: [90, 40, 90], look: [0, 6, 0], far: 1200, ground: 200,
-      flags: 1, // three-avbd reuseContacts default
-      cap: sceneCap(131072),
-    },
-    ring110k: {
-      title: 'brick ring 110k, 4 iterations',
-      lead: 60, iterations: 4, settled: false, sleepRounds: 8, friction: 0.5,
-      eye: [140, 60, 40], look: [0, 12, 0], far: 2000, ground: 90, flags: 1, sleepTime: 1e6,
-      cap: sceneCap(131072),
-    },
-    gables506k: {
-      title: 'brick gables 506k, 3 iterations',
-      lead: 60, iterations: 3, settled: false, sleepRounds: 8, friction: 0.5,
-      eye: [0, 80, -120], look: [0, 10, 0], far: 4000, ground: 256, flags: 1, sleepTime: 1e6,
-      cap: { ...sceneCap(524288), maxContacts: 6 * 1048576, maxCandidates: 4 * 1048576 },
-    },
-    // Joint scenes: built by engine-scenes in Rust, exported as RUBSNAP1 records
-    // (cargo run -p engine-scenes --release --bin scene_export), imported by World.
-    joints: {
-      title: 'joints showcase', snapshot: 'joints',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
-      eye: [0, 12, -22], look: [0, 2.5, 1], far: 400, ground: 60,
-    },
-    ragdolls: {
-      title: 'ragdolls 40', snapshot: 'ragdolls',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.6,
-      eye: [6, 6, -11], look: [0, 1.5, 0], far: 400, ground: 40,
-    },
-    ragdolls10k: {
-      title: 'ragdoll pile 11k bodies, 10k joints', snapshot: 'ragdolls10k',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.6,
-      eye: [16, 14, -22], look: [0, 1, 0], far: 600, ground: 60,
-    },
-    hingechains10k: {
-      title: 'hinge chains 10k bodies, 10k joints', snapshot: 'hingechains10k',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
-      eye: [40, 30, -90], look: [0, 8, 0], far: 800, ground: 120,
-    },
-    motorfield10k: {
-      title: 'motor field 10k bodies, 2.5k motors', snapshot: 'motorfield10k',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
-      eye: [30, 30, -70], look: [0, 2, 0], far: 800, ground: 80,
-    },
-    // Legacy rubble web demo scenes (engine-scenes `legacy`): the same bodies, masses,
-    // velocities and per-body friction as crates/rubble-scenes, for side-by-side
-    // comparison. Each brings its own ground; gravity comes from the snapshot (−9.81).
-    // Static friction draws no floor: legacy placed its boxes on the part of the ramp
-    // below the floor slab (y ≈ −5), and the port keeps that geometry.
-    legacyEmpty: {
-      title: 'legacy · empty', snapshot: 'legacy-empty',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
-      eye: [0, 6, -20], look: [0, 0, 0], far: 600, ground: 50,
-    },
-    legacyGround: {
-      title: 'legacy · ground', snapshot: 'legacy-ground',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
-      eye: [0, 6, -16], look: [0, 1, 0], far: 600, ground: 50,
-    },
-    legacyDynamicFriction: {
-      title: 'legacy · dynamic friction (μ 5 → 0)', snapshot: 'legacy-dynamic-friction',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
-      eye: [10, 18, -58], look: [10, 0, -20], far: 800, ground: 120,
-    },
-    legacyStaticFriction: {
-      title: 'legacy · static friction ramp (μ 0.25 → 0.5)', snapshot: 'legacy-static-friction',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
-      eye: [-34, 8, -34], look: [-8, -3, 0], far: 600, ground: 0,
-    },
-    legacyPyramid: {
-      title: 'legacy · pyramid 136', snapshot: 'legacy-pyramid',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
-      eye: [0, 8, -26], look: [0, 6, 0], far: 600, ground: 50,
-    },
-    legacyStack: {
-      title: 'legacy · stack 10', snapshot: 'legacy-stack',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
-      eye: [0, 8, -22], look: [0, 7, 0], far: 600, ground: 50,
-    },
-    legacyStackRatio: {
-      title: 'legacy · stack ratio 1:8', snapshot: 'legacy-stack-ratio',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
-      eye: [0, 12, -36], look: [0, 8, 0], far: 600, ground: 50,
-    },
-    legacyScatter: {
-      title: 'legacy · scatter 3k (spheres, boxes, capsules)', snapshot: 'legacy-scatter',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
-      eye: [24, 18, 32], look: [0, 3, 0], far: 1200, ground: 300,
-    },
-    legacyScatterBoxes: {
-      title: 'legacy · scatter boxes 4k', snapshot: 'legacy-scatter-boxes',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
-      eye: [26, 20, 34], look: [0, 3, 0], far: 1200, ground: 300,
-    },
-    legacyGridBoxes: {
-      title: 'legacy · grid boxes 1.5k', snapshot: 'legacy-grid-boxes',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
-      eye: [10, 10, 14], look: [0, 5, 0], far: 1200, ground: 300,
-    },
-    legacySlantedGrid: {
-      title: 'legacy · slanted grid 3.2k', snapshot: 'legacy-slanted-grid',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
-      eye: [14, 10, 18], look: [0, 5, 0], far: 1200, ground: 300,
-    },
-    legacyGrid10k: {
-      title: 'legacy · grid 10k', snapshot: 'legacy-grid10k',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
-      eye: [22, 16, 28], look: [0, 5, 0], far: 1200, ground: 300,
-    },
-    // Not in the legacy demo: its 10k grid scaled to 100k (50 × 40 × 50).
-    legacyGrid100k: {
-      title: 'grid 100k (legacy grid ×10)', snapshot: 'legacy-grid100k',
-      lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
-      eye: [46, 30, 58], look: [0, 9, 0], far: 2000, ground: 300,
-    },
-  };
+  const scenes = Object.fromEntries(structuredClone(table));
+  // ?levels=N (2..50) for the pyramid.
+  scenes.pyramid.levels = Math.max(2, Math.min(50, Number(qs.get('levels') || scenes.pyramid.levels) || scenes.pyramid.levels));
+  return scenes;
 }
 
 // The JS host's kernel experiments with no path in Rust's plan: their values
