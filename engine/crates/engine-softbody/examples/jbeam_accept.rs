@@ -38,6 +38,7 @@ fn main() {
     let opt = |k: &str| a.iter().find_map(|x| x.strip_prefix(k)).map(str::to_string);
     let f = |k: &str, d: f32| opt(k).map_or(d, |s| s.parse().unwrap());
     let (rest, kmh, crash) = (f("rest=", 3.0), f("kmh=", 56.0), f("crash=", 1.5));
+    let lift = f("lift=", 0.02);
     let dir = std::path::Path::new(dir);
     let texts = engine_softbody::jbeam::read_vehicle_dir(dir, name).unwrap();
     let files: Vec<(&str, &str)> = texts
@@ -70,7 +71,7 @@ fn main() {
             .map(|n| n.pos.y)
             .fold(f32::INFINITY, f32::min);
         for n in &mut s.nodes {
-            n.pos.y -= low - 0.02;
+            n.pos.y -= low - lift;
         }
         s.roll_tyres(v);
         (s, w)
@@ -81,6 +82,12 @@ fn main() {
             if matches!(b.kind, engine_softbody::explicit_beams::ExplicitKind::JbeamPlain | engine_softbody::explicit_beams::ExplicitKind::JbeamBounded | engine_softbody::explicit_beams::ExplicitKind::JbeamSupport) {
                 b.shock = 0;
             }
+        }
+    }
+    if let Some(mu) = opt("wheelfric=") {
+        let n0 = desc.nodes.len();
+        for n in &mut s.nodes[n0..] {
+            n.friction = mu.parse().unwrap();
         }
     }
     if let Some(list) = opt("nocand=") {
@@ -143,14 +150,44 @@ fn main() {
     }
     if let Some(w) = opt("watch=") {
         // Follow one node: position and velocity every 5 steps for 0.4 s.
-        let i = desc.nodes.iter().position(|n| n.name == w).unwrap();
-        for step in 0..800 {
+        let i = match w.strip_prefix('#') {
+            Some(k) => k.parse().unwrap(),
+            None => desc.nodes.iter().position(|n| n.name == w).unwrap(),
+        };
+        let every: usize = opt("every=").map_or(5, |e| e.parse().unwrap());
+        let from: usize = opt("from=").map_or(0, |e| e.parse().unwrap());
+        for step in 0..from + 800 {
             s.step();
-            if step % 5 == 0 {
+            if step >= from && step % every == 0 {
                 let n = s.nodes[i];
-                println!("step {step}: {w} pos {:.4?} vel {:.3?} contacts {}", n.pos, n.vel, s.last_contacts);
+                println!("step {step}: {w} pos {:.4?} vel {:.3?} force {:.1?} contacts {}", n.pos, n.vel, n.force, s.last_contacts);
             }
         }
+        return;
+    }
+    if opt("breakwatch=").is_some() {
+        // The first step in which a beam breaks: its records just before.
+        for step in 0..4000 {
+            let before = s.beams.clone();
+            s.step();
+            let now: Vec<usize> = (0..s.beams.len()).filter(|&j| s.beams[j].broken && !before[j].broken).collect();
+            if !now.is_empty() {
+                println!("step {step}: {} beams break", now.len());
+                for (j, b) in s.beams.iter().enumerate().filter(|(_, b)| b.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamPressureGroup) {
+                    let e = s.beam_ext[s.ext_of[j] as usize - 1];
+                    println!("  pressure group {j}: V0 {} p_abs0 {} ceiling {} gauge now {:?}", e.e1[2], e.e1[3], e.e2[0], e.pressure);
+                    let _ = b;
+                }
+                for &j in now.iter().take(6) {
+                    let b = before[j];
+                    let (pa, pb) = (s.nodes[b.a as usize].pos, s.nodes[b.b as usize].pos);
+                    println!("  beam {j} {:?} before {:?} len now {:.4} ext {:?}", b.kind, b, pa.distance(pb),
+                        s.ext_of.get(j).filter(|&&x| x != 0).map(|&x| s.beam_ext[x as usize - 1]));
+                }
+                return;
+            }
+        }
+        println!("no break in 2 s");
         return;
     }
     if opt("modes=").is_some() {
@@ -177,6 +214,11 @@ fn main() {
         }
         let (imax, _) = x.iter().enumerate().max_by(|a, b| a.1.length().total_cmp(&b.1.length())).unwrap();
         println!("omega_max*h = {:.3} (node {} {})", lam.sqrt() * 0.0005, imax, desc.nodes.get(imax).map_or("wheel", |n| n.name.as_str()));
+        println!("  node {imax} mass {}", s.nodes[imax].mass);
+        for b in s.beams.iter().filter(|b| !b.broken && (b.a as usize == imax || b.b as usize == imax)) {
+            let o = if b.a as usize == imax { b.b } else { b.a } as usize;
+            println!("  {:?} k {} c {} to node {o} m {} len {:.3}", b.kind, b.k, b.c, s.nodes[o].mass, s.nodes[imax].pos.distance(s.nodes[o].pos));
+        }
         return;
     }
     if opt("trace=").is_some() {
@@ -241,11 +283,43 @@ fn main() {
         return;
     }
     let t0 = std::time::Instant::now();
+    report("rest 0 s", &s, 0.0);
     for k in 1..=(rest.ceil() as usize) {
+        if opt("restwatch=").is_some() {
+            for q in 0..10 {
+                s.run(0.1);
+                let (i, n) = s
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.vel.length().total_cmp(&b.1.vel.length()))
+                    .unwrap();
+                let lat: f32 = s.nodes[desc.nodes.len()..].iter().map(|n| n.vel.x * n.mass).sum::<f32>()
+                    / s.nodes[desc.nodes.len()..].iter().map(|n| n.mass).sum::<f32>();
+                println!(
+                    "  {:.1} s fastest node {} {} m {} v {:.2?} pos {:.3?}; wheel nodes' mean x velocity {:.4}",
+                    (k - 1) as f32 + 0.1 * (q + 1) as f32,
+                    i,
+                    desc.nodes.get(i).map_or("wheel", |n| n.name.as_str()),
+                    n.mass,
+                    n.vel,
+                    n.pos,
+                    lat
+                );
+            }
+            report(&format!("rest {k} s"), &s, 0.0);
+            continue;
+        }
         s.run(1.0);
         report(&format!("rest {k} s"), &s, 0.0);
     }
     println!("rest: {:.1} s wall", t0.elapsed().as_secs_f32());
+    if opt("brokenlist=").is_some() {
+        let name = |i: u32| desc.nodes.get(i as usize).map_or("wheel".to_string(), |n| n.name.clone());
+        for b in s.beams.iter().filter(|b| b.broken) {
+            println!("  broken {:?} {}-{} k {} strength {} group {}", b.kind, name(b.a), name(b.b), b.k, b.strength, b.group);
+        }
+    }
     let v = Vec3::new(0.0, 0.0, kmh / 3.6);
     let (mut s, _) = spawn(v);
     let front = s

@@ -101,10 +101,14 @@ pub(crate) struct ExplicitVehicles {
     /// cpl_bounds, cpl_plan, cpl_share, cpl_loads, cpl_loads_end, cpl_emit, cpl_emit_end.
     pipes: Vec<wgpu::ComputePipeline>,
     params: wgpu::Buffer,
-    veh: wgpu::Buffer,
     work: wgpu::Buffer,
+    /// Bytes of `work` cleared each window (the vehicle table follows).
+    cleared: u64,
     /// Stand-ins for the threshold ingest's records, row counts and collider table.
     dummy: [wgpu::Buffer; 3],
+    /// For renderers: per collision triangle (global nodes a, b, c, vehicle).
+    pub tris: wgpu::Buffer,
+    pub tri_count: u32,
     /// Explicit steps owed to World time (the remainder carried).
     carry: f64,
     /// A frame ran: its impulses are emitted at the next step's start.
@@ -129,7 +133,11 @@ fn storage(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
 impl ExplicitVehicles {
     pub fn new(world: &World, vehicles: &[ExplicitBeams], def: &ExplicitVehiclesDef) -> anyhow::Result<Self> {
         anyhow::ensure!(!vehicles.is_empty(), "explicit vehicles: none given");
-        anyhow::ensure!(def.capacity.shapes <= 255, "explicit vehicles: at most 255 shapes per vehicle");
+        let c = def.capacity;
+        anyhow::ensure!(
+            c.bodies <= c.shapes && c.shapes <= 1024 && c.planes < 1 << 16,
+            "explicit vehicles: at most 1024 shapes (and no more bodies) and 65535 hull planes per vehicle, not {c:?}"
+        );
         let device = world.sim.device();
         let queue = world.sim.queue();
         let mut gpu = ExplicitBeamsGpu::with_coupling(device, queue, vehicles, Some(def.capacity));
@@ -155,7 +163,6 @@ impl ExplicitVehicles {
             entry(3, ro),
             entry(4, ro),
             entry(5, rw),
-            entry(6, ro),
             entry(8, rw),
             entry(9, rw),
             entry(10, ro),
@@ -197,13 +204,24 @@ impl ExplicitVehicles {
                 [gpu.node_offset(i), v.nodes.len() as u32, mass.to_bits(), 0]
             })
             .collect();
-        let veh = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vehicle-coupling-vehicles"),
-            contents: bytemuck::cast_slice(&veh),
+
+        let mut tris: Vec<[u32; 4]> = Vec::new();
+        for (i, v) in vehicles.iter().enumerate() {
+            let off = gpu.node_offset(i);
+            tris.extend(v.triangles.iter().map(|t| [off + t.nodes[0], off + t.nodes[1], off + t.nodes[2], i as u32]));
+        }
+        let tri_count = tris.len() as u32;
+        tris.push([0; 4]);
+        let tris = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("explicit-vehicle-triangles"),
+            contents: bytemuck::cast_slice(&tris),
             usage: wgpu::BufferUsages::STORAGE,
         });
         let max_bodies = world.sim.capacity().max_bodies;
-        let work = storage(device, "vehicle-coupling-work", 4 * (2 + u64::from(max_bodies) + 8 * vehicles.len() as u64));
+        // Cleared each window: rows, status, share counts, bounds; then the vehicle table.
+        let cleared = 4 * (2 + u64::from(max_bodies) + 8 * vehicles.len() as u64);
+        let work = storage(device, "vehicle-coupling-work", cleared + 16 * vehicles.len() as u64);
+        queue.write_buffer(&work, cleared, bytemuck::cast_slice(&veh));
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vehicle-coupling-params"),
             size: std::mem::size_of::<Params>() as u64,
@@ -224,9 +242,11 @@ impl ExplicitVehicles {
             bgl,
             pipes,
             params,
-            veh,
             work,
+            cleared,
             dummy: [0, 1, 2].map(|_| storage(device, "vehicle-coupling-dummy", 160)),
+            tris,
+            tri_count,
             carry: 0.0,
             emit_pending: false,
             windows: 0,
@@ -247,14 +267,13 @@ impl ExplicitVehicles {
             Some((r, c, i, _)) => (r, c, i),
             None => (&self.dummy[0], &self.dummy[1], &self.dummy[2]),
         };
-        let bufs: [(u32, &wgpu::Buffer); 12] = [
+        let bufs: [(u32, &wgpu::Buffer); 11] = [
             (0, &self.params),
             (1, sim.body_buffer()),
             (2, sim.collider_buffer()),
             (3, sim.hull_arena_buffer()),
             (4, self.gpu.nodes_buffer()),
             (5, self.gpu.misc_buffer()),
-            (6, &self.veh),
             (8, sim.scratch_buffer()),
             (9, &self.work),
             (10, info),
@@ -351,14 +370,15 @@ impl ExplicitVehicles {
                 self.layout.cap
             );
         }
-        self.gpu.contact_status().map_err(|e| anyhow::anyhow!(e))?;
+        // The explicit solver's own status (loop cap, vehicle-contact limits) is read
+        // without waiting inside its frame (it fails the frame that finds an error).
         self.carry += f64::from(dt) / STEP;
         let steps = (self.carry + 1e-6).floor().max(0.0);
         self.carry -= steps;
         let steps = steps as u32;
         let rows = ingest.map_or(0, |i| i.3);
         self.write_params(sim, steps, rows);
-        enc.clear_buffer(&self.work, 0, None);
+        enc.clear_buffer(&self.work, 0, Some(self.cleared));
         let group = self.bind(sim, ingest);
         let nv = self.sims.len() as u32;
         {
@@ -374,6 +394,9 @@ impl ExplicitVehicles {
             pass.set_pipeline(&self.pipes[2]);
             pass.dispatch_workgroups(nv, 1, 1);
         }
+        // The rigid bodies push the vehicles: vehicle contact's frame bounds are planned
+        // from this window's speeds.
+        self.gpu.request_contact_replan();
         let read = self.gpu.frame_encode(enc, steps);
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -438,6 +461,14 @@ impl World {
     /// The explicit vehicles' GPU state (nodes, beams, the coupling's records), once added.
     pub fn explicit_vehicles(&self) -> Option<&ExplicitBeamsGpu> {
         self.explicit.as_ref().map(|x| &x.gpu)
+    }
+
+    /// For renderers: the explicit vehicles' collision triangles, (global nodes a, b, c,
+    /// vehicle) as `u32` per triangle (node positions: [`ExplicitBeamsGpu::nodes_buffer`]
+    /// relative to each vehicle's origin in [`ExplicitBeamsGpu::misc_buffer`]), and their
+    /// count.
+    pub fn explicit_triangles(&self) -> Option<(&wgpu::Buffer, u32)> {
+        self.explicit.as_ref().map(|x| (&x.tris, x.tri_count))
     }
 
     /// Mutable access (velocity writes, the grab, vehicle contact settings).

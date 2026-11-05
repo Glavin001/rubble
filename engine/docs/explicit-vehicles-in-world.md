@@ -191,18 +191,29 @@ breaks bonds whose capacity a chunk load beats and splits bodies in place).
 The vehicle frame for window N+1 runs before the rigid step of that window (§2, step 4),
 so **its strike is predicted at the end of the frame before it and split before the
 engine steps**: the routing design of AGENTS.md, with the explicit frame itself as the
-predictor (it is the exact soft-body response over the window, not an estimate). The
-impulses of window N+1 are emitted after the split, to each chunk's new body: a piece that
-breaks free receives the vehicle's push on its chunks, so momentum closes across the
-fracture. Nothing is re-simulated: the frame is computed once, its loads applied once.
+predictor (it is the exact soft-body response over the window, not an estimate). Nothing
+is re-simulated: the frame is computed once, its loads applied once.
 
-Latency, stated: inside window N+1 the *vehicle* meets the structure as it stood at the
-window's start (unbroken, or anchored). A piece that breaks off in that window takes the
-impulse the vehicle exchanged with the unbroken structure. Over one window (≤ 8.3 ms at
-120 Hz) a car's crush force is still rising, so this is a fraction of the strike; the
-test reports the energy of the freed pieces against the vehicle's loss. The exact
-alternative, releasing a chunk proxy inside the frame the substep its load passes the
-capacity, is a follow-up (it puts the threshold rule into the explicit kernel).
+The impulses of window N+1 are emitted after the split, consistently with what the vehicle
+met in the window (`vehicle_coupling.slang` `emitPair`):
+- a proxy body of infinite mass in the window (anchored, static): nothing; the vehicle met an
+  immovable body and its reaction went into the ground, as for a wall;
+- a proxy body still whole: its impulse and angular impulse;
+- a proxy body that split (or whose shapes now belong to other bodies): each piece takes the
+  change of motion the whole body's impulse gives at the piece's centre of mass,
+  `m (Δv + Δω × r)` and `I Δω`, as split pieces move with their parent's motion. Momentum
+  closes and no piece moves faster than the whole body would have.
+
+The first version gave each freed chunk its own share of the impulse the vehicle exchanged
+with the *unbroken* structure: a 1 kg chunk took 1,888 m/s in the house test. That is the
+energy error of the one-window latency, and the rule above removes it.
+
+Latency, stated: inside window N+1 the vehicle meets the structure as it stood at the
+window's start (unbroken, or anchored). A piece that breaks free in that window starts at
+its parent's motion and meets the vehicle as a free body from the next window on. Over one
+window (≤ 16.7 ms at 60 Hz) a car's crush force is still rising. The exact alternative,
+releasing a chunk proxy inside the frame at the substep its load passes the capacity, is a
+follow-up: it puts the threshold rule into the explicit kernel.
 
 ## 5. GPU data flow (every backend)
 
@@ -261,6 +272,55 @@ Measured numbers (1, 16, 64 vehicles) are in §8 when the implementation lands.
   (momentum through the World's impulse path); a vehicle into a prefractured threshold
   wall breaks bonds, forward-only, and the freed pieces carry the vehicle's impulse.
 
-## 8. Results
+## 8. Results (2026-11-05, M3 Max, other agents on the GPU)
 
-(filled in as the work lands)
+Code: `engine_softbody::explicit_rigid` (CPU reference), `slang/kernels/explicit_beams_rigid.slang`
+(included by the explicit kernel), `slang/kernels/vehicle_coupling.slang` and
+`engine-world/src/explicit_vehicles.rs` (World), `engine-world/src/explicit_scene.rs` (the crash
+town), `engine-webgpu/explicit-world.html` (the page). The coupling's records also run on Metal
+and CUDA through `engine_exec::explicit_plan` (`engine-metal/tests/explicit_parity.rs`).
+
+Tests:
+
+| Test | Result |
+|---|---|
+| CPU: a static proxy is the static shape (`engine-softbody/tests/explicit_rigid.rs`) | bit for bit through a 15 m/s crash |
+| CPU: momentum across the coupling (free flight into a free box) | horizontal ΔP 1e-6 of P |
+| CPU: energy | rises no more than the vehicle's own free-flight oscillation |
+| CPU: box of known mass (300, 1200, 4000 kg) | between the plastic and elastic speeds, exact momentum balance, restitution 0.07 |
+| GPU vs CPU (`engine-webgpu/tests/explicit_rigid_gpu.rs`) | first contact frames 2.5e-7 m, outcome 1e-5, momentum 7e-8; coupling built but off: bit for bit |
+| World: vehicle into a free 1200 kg box (`engine-world/tests/explicit_vehicles.rs`) | ΔP 1.4e-6 of P through the World's impulse path; box 13.1 m/s in [11.37, 22.75]; kinetic energy lost |
+| World: vehicle at 20 m/s into the prefractured cuboid house (826 chunks, threshold) | bonds break in the step of first contact, the house splits, freed pieces move, none faster than 2 × 20 m/s (fastest 0.72 m/s) |
+
+Frame times (`engine-world/examples/explicit_vehicles_bench.rs`): the crash town, repo sedans at
+15–18 m/s, one house per four vehicles, World steps of 1/60 s (33–34 explicit steps each), GPU ms
+per World step from the step's own timestamps (median / p95):
+
+| Vehicles | Houses | With vehicles | Houses alone | Explicit frame alone |
+|---|---|---|---|---|
+| 1 | 1 | 4.20 / 5.30 | 4.31 / 5.20 | 0.46 |
+| 16 | 4 | 7.61 / 15.5 | 2.61 / 3.07 | 0.53 |
+| 64 | 16 | 13.44 / 18.0 | 2.53 / 4.25 | 1.14 |
+
+(After the emit rule, the 1024-shape room and the per-window contact replan; measured with
+the load average back up to 20 from other agents, so the 1-vehicle pair is noise-limited.
+An earlier run on a quieter machine, before those changes: 3.08, 6.35 and 11.75 ms.)
+
+At 64 with the coupling filtered out (vehicles meet only each other, four at each house's centre)
+the step is 7.6 ms: the fleet with its vehicle–vehicle contact groups is about 4.8 ms, and the
+strikes (proxies, and the fracture's breaks and splits of 1700 bonds in 2 s) about 4 ms. The
+coupling's own barriers cost 3–5 % of the explicit frame. The wide passes are not used with the
+coupling on; for the repo sedan the per-vehicle frame is faster anyway (0.44 against 0.63 ms
+alone), and with vehicle contact on (any fleet) the wide passes are off already.
+
+## 9. Remaining
+
+- In-frame release: a chunk proxy freed the substep its load passes its capacity (today the
+  vehicle meets the unbroken structure for one window, §4).
+- The proxy plan is brute force (vehicles × colliders); a collider grid when collider counts grow.
+- Per node, every proxy shape is tested (bounding-sphere culled); a vehicle inside a broken house
+  meets hundreds of pieces: a per-vehicle shape grid would cut that.
+- Threshold destructibles with their own fracture (crushing, blast loading) are refused
+  loudly; the shared fracture's are supported.
+- Wide passes with the coupling (single very large vehicles without vehicle contact).
+- Rigid bodies resting *on* vehicles are held by staggered impulses (§2), a few mm of sink.

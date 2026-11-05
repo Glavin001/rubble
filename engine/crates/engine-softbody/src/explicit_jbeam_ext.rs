@@ -301,10 +301,23 @@ pub fn pressure_tri_force(x0: Vec3, x1: Vec3, x2: Vec3, p: f32) -> Vec3 {
 }
 
 /// A ground contact force `c` on a node (force `f` before it, velocity `v`, mass
-/// `m`, normal `n`) with its tangential part limited so it at most stops the
-/// node's slip in one step `h` (spec §28): an explicit friction force on a light,
-/// heavily loaded node otherwise reverses the slip every step and grows.
-pub fn friction_limit(c: Vec3, f: Vec3, v: Vec3, m: f32, n: Vec3, h: f32) -> Vec3 {
+/// `m`, normal `n`, depth `p`) with its normal part limited so the node rises at
+/// most half its depth in one step `h`, and its tangential part so it at most
+/// stops the node's slip in one step (spec §28): on a light, heavily loaded node
+/// the explicit laws otherwise overshoot every step.
+pub fn friction_limit(c: Vec3, f: Vec3, v: Vec3, m: f32, n: Vec3, h: f32, p: f32) -> Vec3 {
+    // The node leaves at most half its depth `p` in one step: the solver's pop-out
+    // (0.2 of the depth per step, as a velocity the node keeps) otherwise throws a
+    // heavily loaded light node clear of the ground, and its load drives it back
+    // in at metres per second the next step. Half keeps it in contact.
+    let mut c = c;
+    let cn = c.dot(n);
+    let out = v.dot(n) + (f.dot(n) + cn) * (h / m);
+    let most = 0.5 * p / h;
+    if cn > 0.0 && out > most {
+        let capped = ((most - v.dot(n)) * (m / h) - f.dot(n)).max(0.0);
+        c += n * (capped - cn);
+    }
     let total = f + c;
     let t = total - total.dot(n) * n;
     let vt = v - v.dot(n) * n;
@@ -635,8 +648,18 @@ impl ExplicitBeams {
         self.beams.push(group);
         let first = self.beams.len() as u32;
         let cpos = self.nodes[c as usize].pos;
+        // Outward winding whatever order the surface came in (a wheel's follows its
+        // axle nodes' order): a surface enclosing negative volume is turned over.
+        let signed: f32 = tris
+            .iter()
+            .map(|t| {
+                let x = t.map(|n| self.nodes[n as usize].pos - cpos);
+                x[0].dot(x[1].cross(x[2]))
+            })
+            .sum();
         let mut v0 = 0.0f32;
         for t in tris {
+            let t = if signed < 0.0 { &[t[0], t[2], t[1]] } else { t };
             let x = t.map(|n| self.nodes[n as usize].pos - cpos);
             v0 += x[0].dot(x[1].cross(x[2]));
             let mut r1 = Beam::new(
@@ -932,10 +955,22 @@ impl ExplicitBeams {
             } else {
                 (4_300_000.0, 580.0)
             };
+            // A reinforcement set the file gives no Spring or Damp takes its base
+            // set's (spec §25), as the L-beams take the side beam's.
+            let base = match name {
+                "wheelTreadReinfBeam" => Some("wheelTreadBeam"),
+                "wheelPeripheryReinfBeam" => Some("wheelPeripheryBeam"),
+                "wheelSideReinfBeam" | "wheelReinfBeam" => Some("wheelSideBeam"),
+                _ => None,
+            };
             let g = |k: &str, d: f32| {
                 let d = match k {
                     "Spring" => dk,
                     "Damp" => dc,
+                    _ => d,
+                };
+                let d = match (base, k) {
+                    (Some(b), "Spring" | "Damp") => v(&format!("{b}{k}"), d),
                     _ => d,
                 };
                 v(&format!("{name}{k}"), d)
@@ -1050,14 +1085,20 @@ impl ExplicitBeams {
             }
         }
         if lbeams {
+            // [WH]: "the wheelReinfBeam setting covers these diagonal beams or
+            // L-beams"; a file without it falls back to its side beams' values.
             let g = |k: &str, d: f32| {
                 v(
                     &format!("wheelLbeam{k}"),
-                    v(&format!("wheelSideBeam{k}"), d),
+                    v(
+                        &format!("wheelReinfBeam{k}"),
+                        v(&format!("wheelSideBeam{k}"), d),
+                    ),
                 )
             };
             let (k, c) = (g("Spring", 4_300_000.0), g("Damp", 580.0));
             let (deform, strength) = (g("Deform", f32::INFINITY), g("Strength", f32::INFINITY));
+            let cutoff = g("DampCutoffHz", 0.0).max(0.0);
             for s in 0..2 {
                 for i in 0..n {
                     let t = tire[s][i];
@@ -1069,7 +1110,7 @@ impl ExplicitBeams {
                         c,
                         deform,
                         strength,
-                        0.0,
+                        cutoff,
                         1.0,
                     );
                     self.push_lbeam(
@@ -1080,7 +1121,7 @@ impl ExplicitBeams {
                         c,
                         deform,
                         strength,
-                        0.0,
+                        cutoff,
                         1.0,
                     );
                     self.push_lbeam(
@@ -1091,7 +1132,7 @@ impl ExplicitBeams {
                         c,
                         deform,
                         strength,
-                        0.0,
+                        cutoff,
                         1.0,
                     );
                 }

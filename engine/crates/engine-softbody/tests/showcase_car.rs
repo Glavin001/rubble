@@ -13,6 +13,7 @@
 
 use engine_softbody::authoring::body::check_closed;
 use engine_softbody::authoring::skin::{deform, showcase_visual};
+use engine_softbody::authoring::vehicle::coarse_skin;
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use engine_softbody::explicit_beams::{
     approx_sqrt, box_face, contact_force, fast_inv_sqrt, shape_face, Beam, ContactSurface,
@@ -89,7 +90,33 @@ fn skins_are_closed_and_the_truck_loads() {
     for res in RESOLUTIONS {
         let b = built(res);
         check_closed(&b.skeleton.skin).unwrap();
-        check_closed(&b.skeleton.collision).unwrap();
+        // Each part its own collision skin (A1): the lattice's closed skin
+        // less exactly the triangles that span a shut line.
+        let sk = &b.skeleton;
+        let part = |i: u32| sk.nodes[i as usize].part;
+        let key = |t: &[u32; 3]| {
+            let mut k = *t;
+            k.sort();
+            k
+        };
+        let lattice = coarse_skin(sk, &b.shell).unwrap();
+        check_closed(&lattice).unwrap();
+        let kept: HashSet<[u32; 3]> = sk.collision.iter().map(key).collect();
+        assert_eq!(kept.len(), sk.collision.len());
+        for t in &lattice {
+            let pure = t.iter().all(|&i| part(i) == part(t[0]));
+            assert_eq!(kept.contains(&key(t)), pure, "{res:?}: triangle {t:?}");
+        }
+        assert!(sk.collision.iter().all(|t| lattice.iter().any(|u| key(u) == key(t))));
+        // Each part's patch is a manifold: no edge on more than two.
+        let mut edges: std::collections::HashMap<(u32, u32), u32> = Default::default();
+        for t in &sk.collision {
+            for k in 0..3 {
+                let (a, c) = (t[k], t[(k + 1) % 3]);
+                *edges.entry((a.min(c), a.max(c))).or_default() += 1;
+            }
+        }
+        assert!(edges.values().all(|&n| n <= 2));
         let sim = ExplicitBeams::from_truck(
             &b.truck,
             Vec3::ZERO,
@@ -99,10 +126,26 @@ fn skins_are_closed_and_the_truck_loads() {
         .unwrap();
         assert_eq!(sim.triangles.len(), b.skeleton.collision.len());
         assert_eq!(sim.tyres.len(), 4);
-        // Contacters: the collision skin's nodes.
-        let on_skin: HashSet<u32> = b.skeleton.collision.iter().flatten().copied().collect();
-        let contacters = b.skeleton.nodes.iter().filter(|n| n.contacter).count();
-        assert_eq!(contacters, on_skin.len());
+        // Contacters: the collision lattice's nodes, and every shell node of a
+        // part that can come off (it meets the car it left and the ground).
+        let detachable: HashSet<u16> = b.hardware.iter().map(|h| h.part).collect();
+        // (The lattice's nodes stay contacters on the triangles they lost.)
+        let mut expect: HashSet<u32> = lattice.iter().flatten().copied().collect();
+        expect.extend(b.shell.nodes.iter().copied().filter(|&i| detachable.contains(&part(i))));
+        let contacters: HashSet<u32> = (0..sk.nodes.len() as u32)
+            .filter(|&i| sk.nodes[i as usize].contacter)
+            .collect();
+        assert_eq!(contacters, expect);
+        for &p in &detachable {
+            let on: Vec<u32> = b.shell.nodes.iter().copied().filter(|&i| part(i) == p).collect();
+            assert!(!on.is_empty() && on.iter().all(|i| contacters.contains(i)), "{}", sk.parts[p as usize]);
+        }
+        eprintln!(
+            "{res:?}: collision {} of the lattice's {} triangles (the rest span a shut line), {} contacters",
+            sk.collision.len(),
+            lattice.len(),
+            contacters.len()
+        );
     }
 }
 
@@ -1265,10 +1308,10 @@ fn f_wall_at_120_kmh_follows_campbell_and_keeps_its_ledgers() {
 /// (each its mass's share, so the door itself is not torn) ramped at 10
 /// kN/s, the car free on its wheels. It holds FMVSS 206's transverse
 /// minima together (S4.1.1.2 latch 9,000 N and S4.1.2.1 hinge system
-/// 9,000 N: no group lets go below 18 kN) and then comes off (every hinge
-/// and latch group broken); the load it comes off at is reported against
-/// the sum of the parts' measured transverse strengths (hinge pair 29.8
-/// kN, latch 20.5 kN).
+/// 9,000 N: no group lets go below 18 kN) and comes off (every hinge and
+/// latch group broken) at the sum of its parts' transverse strengths: each
+/// hinge at the pair's floor, 29.8 kN, and the latch inside its measured
+/// interquartile range, 18.8–23.8 kN (`crash-reference-targets.md` §9).
 #[test]
 fn g_pulling_a_door_tears_it_off() {
     let b = built(Resolution::Medium);
@@ -1291,7 +1334,7 @@ fn g_pulling_a_door_tears_it_off() {
     let rate = 10_000.0f32;
     let (mut first, mut off) = (None, None);
     let mut t = 0.0f32;
-    while t < 8.0 && off.is_none() {
+    while t < 16.0 && off.is_none() {
         let f = rate * t;
         for &i in &door {
             let mi = s.nodes[i].mass;
@@ -1306,6 +1349,36 @@ fn g_pulling_a_door_tears_it_off() {
             .collect();
         if first.is_none() && !broken.is_empty() {
             first = Some((f, broken.join(", ")));
+        }
+        if first.is_none() && std::env::var("G_SPLIT").is_ok() && (f as i32) % 10_000 == 0 {
+            // Where the pull goes: every beam joining the door to the car,
+            // by kind, as force along the pull.
+            let n = sk.nodes.len();
+            let mut by: std::collections::BTreeMap<String, f32> = Default::default();
+            for bm in &s.beams {
+                let (a, c) = (bm.a as usize, bm.b as usize);
+                if bm.broken
+                    || a >= n
+                    || c >= n
+                    || (sk.nodes[a].part == part) == (sk.nodes[c].part == part)
+                {
+                    continue;
+                }
+                let (d, o) = if sk.nodes[a].part == part {
+                    (a, c)
+                } else {
+                    (c, a)
+                };
+                let u = (s.nodes[o].pos - s.nodes[d].pos).normalize();
+                *by.entry(format!("{:?}", bm.kind)).or_default() += -bm.force * u.dot(-out);
+            }
+            eprintln!(
+                "(g) at {:.0} kN: {:?}",
+                f / 1e3,
+                by.iter()
+                    .map(|(k, v)| format!("{k} {:.1} kN", v / 1e3))
+                    .collect::<Vec<_>>()
+            );
         }
         if broken.len() == groups.len() {
             off = Some(f);
@@ -1325,10 +1398,14 @@ fn g_pulling_a_door_tears_it_off() {
     let first = first.expect("no hardware let go").0;
     let off = off.expect("the door stayed on");
     assert!(first >= 18_000.0, "hardware let go at {first} N");
-    // (Reported against the parts' measured sum, 50.3 kN: the door turns
-    // as it is pulled, so more of each part's beams share the pull than in
-    // the fixtures.)
-    let _ = off;
+    // The parts' transverse strengths summed: each hinge at the pair's
+    // floor (29.8 kN), the latch at its measured interquartile range
+    // (18.8–23.8 kN).
+    let (lo, hi) = (2.0 * 29_813.0 + 18_800.0, 2.0 * 29_813.0 + 23_800.0);
+    assert!(
+        (lo..=hi).contains(&off),
+        "the door came off at {off} N, not {lo}–{hi}"
+    );
 }
 
 /// After a 56 km/h wall crash the body's ringing dies out (no "jelly"): its
@@ -2998,7 +3075,7 @@ fn rig_pull(b: &Built, groups: &[usize], d: Vec3) -> (f32, bool) {
     let mut peak = 0.0f32;
     let mut x = 0.0f32;
     let mut steps = 0usize;
-    while x < 0.15 {
+    while x < 0.4 {
         x += v * dt;
         for (k, &i) in pins.iter().enumerate() {
             s.nodes[i].pos = start[k] + d * x;
@@ -3195,9 +3272,24 @@ fn t_car_to_car_t_bone_at_80_kmh() {
     let hw = sk0.nodes.iter().map(|nd| nd.p.x).fold(f32::MIN, f32::max);
     // The striker turned 90° (its front toward −x), 5 cm off the door.
     let mut sk = sk0.clone();
+    let env = |k: &str, d: f32| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let (kmh, dz, heavy) = (env("TB_KMH", 80.0), env("TB_DZ", 0.0), env("TB_MASS", 1.0));
+    // (TB_ANG: the striker's path turned rearward from square, degrees.)
+    let ang = env("TB_ANG", 0.0).to_radians();
+    let zs = zd + dz;
     sk.append(sk0, "striker_", &|p: Vec3| {
-        Vec3::new(hw + 0.05 + (len - p.z), p.y, zd + p.x)
+        Vec3::new(hw + 0.05 + (len - p.z), p.y, zs + p.x)
     });
+    if heavy != 1.0 {
+        for nd in sk.nodes[n..].iter_mut() {
+            nd.mass *= heavy;
+        }
+    }
     for nd in &mut sk.nodes {
         nd.p.z -= 0.5 * len;
     }
@@ -3215,7 +3307,7 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         settings(),
     )
     .unwrap();
-    let v = Vec3::new(-80.0 / 3.6, 0.0, 0.0);
+    let v = Vec3::new(-ang.cos(), 0.0, -ang.sin()) * (kmh / 3.6);
     let plane = hw + 0.025;
     // The striker's tyres rolling at v, the struck car's still; the rest of
     // the striker at v.
@@ -3262,8 +3354,20 @@ fn t_car_to_car_t_bone_at_80_kmh() {
     let mut lowest = f32::MAX;
     let mut off_at = None;
     let mut order: Vec<(f32, &str)> = Vec::new();
+    let mut peak = vec![0.0f32; groups.len()];
     for f in 0..(2.0 * 60.0) as usize {
-        s.frame();
+        for _ in 0..s.clock.next() {
+            s.step();
+            for (k, (_, beams)) in groups.iter().enumerate() {
+                // The group's pull: its ropes' tensions summed.
+                let t: f32 = beams
+                    .iter()
+                    .filter(|&&j| !s.beams[j].broken)
+                    .map(|&j| (-s.beams[j].force).max(0.0))
+                    .sum();
+                peak[k] = peak[k].max(t);
+            }
+        }
         let t = (f + 1) as f32 / 60.0;
         for (name, beams) in &groups {
             if !order.iter().any(|o| o.1 == *name) && beams.iter().any(|&j| s.beams[j].broken) {
@@ -3279,12 +3383,20 @@ fn t_car_to_car_t_bone_at_80_kmh() {
     }
     let dv: Vec3 = door.iter().map(|&i| s.nodes[i].vel).sum::<Vec3>() / door.len() as f32;
     eprintln!(
-        "(t) car-to-car T-bone 80 km/h: the struck door's hardware let go {:?}; door off: {}; its lowest node {:.3} m above the ground; its mean speed at 2 s {:.2} m/s; broken {}",
+        "(t) car-to-car T-bone {kmh} km/h (striker ×{heavy} mass, {dz:+.2} m along): the struck door's hardware let go {:?}; door off: {}; its lowest node {:.3} m above the ground; its mean speed at 2 s {:.2} m/s; broken {}",
         order.iter().map(|o| format!("{} at {:.2} s", o.1, o.0)).collect::<Vec<_>>(),
         off_at.map_or("no".to_string(), |t| format!("yes, at {t:.2} s")),
         lowest,
         dv.length(),
         s.damage().0
+    );
+    eprintln!(
+        "(t) peak pull of each group (its ropes' tensions summed) against the most its rope set can carry (Σ strengths): {:?}",
+        groups
+            .iter()
+            .zip(&peak)
+            .map(|((n, beams), p)| format!("{n} {:.1} of {:.1} kN", p / 1e3, beams.iter().map(|&j| s.beams[j].strength.max(0.0)).sum::<f32>() / 1e3))
+            .collect::<Vec<_>>()
     );
     assert!(finite(&s));
     if off_at.is_some() {

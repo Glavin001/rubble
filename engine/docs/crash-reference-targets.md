@@ -457,3 +457,48 @@ What the recommendation implies:
   - 206-2360623 and 206-2360621 `https://static.nhtsa.gov/odi/ctr/2023/<no>.pdf`
   - 206-2360631 and 206-2360637 `https://static.nhtsa.gov/odi/ctr/2024/<no>.pdf`
 - Test procedures: TP-206-08 `https://www.nhtsa.gov/sites/nhtsa.gov/files/tp-206-08_19_feb_2010.pdf`; 49 CFR 571.206.
+
+## 10. Crash-lab rigs: the FMVSS 214 barrier and the door pull (2026-11-05)
+
+`engine_softbody::crash_rigs`, scenes `mdb214` and `doorpull` in
+`engine-world-wasm/src/explicit.rs`, lab presets `mdb214` and `doorpull`.
+
+**The moving deformable barrier** (a JBeam vehicle Rubble generates, run in JBeam mode):
+
+| quantity | value | source |
+|---|---|---|
+| mass | 1,367.6 kg (3,015 lb, configuration 2) | 49 CFR 587.6(c) |
+| wheelbase, track | 2.591 m (102 in), 1.880 m (74 in) | 587.6(c) |
+| centre of mass | 1.123 m (44.2 in) behind the front axle, 0.500 m (19.7 in) up | 587.6(d) |
+| face | 1,676 mm wide, 559 mm high, 279 mm ground clearance | NHTSA TP-214D (via a search summary of TP-214D-09; the PDF returned 403) and the AFL FMVSS 214 barrier data sheet |
+| depth | 381 mm main block, 483 mm at the bumper (bumper protrudes 102 mm) | AFL and AXAC data sheets |
+| crush strength | main block 310 kPa (45 psi ± 2.5), bumper element 1,689 kPa (245 psi ± 15) | TP-214D; AFL data sheet; 49 CFR 587.15 gives the sampling |
+| test | 53 ± 1 km/h (33.5 mph), wheels crabbed 27° ± 1°, its forward edge's plane on the impact reference line (940 mm ahead of the wheelbase's centre up to a 2,896 mm wheelbase, else 508 mm behind the front axle) | 49 CFR 571.214 S7, S8.10, S8.11.1 |
+
+Choices (the drawings DSL-1278 … DSL-1290 that 587.6 incorporates are not openly
+available): the bumper element covers the face's lowest third; the face is 17 × 7
+nodes of 0.8 kg (and 17 × 3 bumper nodes) with tributary areas summing to the face
+(a coarser 9 × 4 face of 1.6 kg nodes put 33 kN on each bumper node and punched
+through the sedan's door skin: the barrier passed through the car); the honeycomb is columns of
+SUPPORT beams that yield at the crush stress times their area with no hardening
+(`deformLimitStress` = the crush force) and densify at 80 % crush; elastic strain at
+the crush stress 10 % (main) and 20 % (bumper), set so the columns integrate at the
+2 kHz step on 0.8 kg nodes; the front axle 0.6 m behind the face; frictionless skids
+for the crabbed, free-rolling wheels.
+
+Check (`engine-softbody/tests/crash_rigs.rs`): mass and centre of mass to the
+standard's; the face's crush force is bounded by σ·A = 310 kPa × 1.676 × 0.559 m =
+290 kN (+5 %); with its front skin held and the carriage at 8 m/s, the mean over the
+crush is 72 % of σ·A (the carriage is not rigid at the step: its back-plate nodes ring
+against the frame and some columns unload). Into the procedural sedan's left side
+(`engine-world-wasm/tests/explicit_scenes.rs`, GPU): the barrier strikes at about
+0.6 s, the car leaves at 2.9 m/s, the barrier at 1.5 m/s across (rebounding), with
+0.26 m of crush and intrusion between their centres of mass; no pass-through.
+
+**Door pull** (`doorpull`): the struck-side (left) front door's latch edge, the skin
+nodes nearest a point at 60 % of the body's height and 0.2 m ahead of the wheelbase's
+middle (**Choice**), pulled outward by one rig node (5 kg) on 200 kN/m cables, its
+grab target moving at `pullSpeed` (default 0.5 m/s) on a `pullStiffness` spring
+(default 100 kN/m). It loads the door's hinges and latch together as FMVSS 206's
+pull does; it is not the 206 rig (that pulls the hinge and latch separately, with
+specified loads).

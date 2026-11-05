@@ -15,9 +15,9 @@
 //                  a stress chunk as a contact record of the threshold ingest's slot 1;
 //   cpl_loads_end  one thread: that slot's row count;
 //   cpl_emit       one group per vehicle, at the next step's start (after the fracture's
-//                  split): each shape's impulse and angular impulse on the body its
-//                  collider belongs to now, merged per body, as impulse records after the
-//                  host's;
+//                  split): per proxy body its window impulse, on the bodies its shapes
+//                  belong to now (emitPair: whole, or split among its pieces as the
+//                  whole body's change of motion), as impulse records after the host's;
 //   cpl_emit_end   one thread: IMPULSE_FIRST (the records are applied once).
 //
 // Limits are loud: a vehicle with more shapes, bodies or planes than its room, more
@@ -37,7 +37,7 @@ struct Params
     uint miscBase;       // gMisc record of vehicle 0's region
     float window;        // the window's length (s)
     float margin;        // extra reach (m)
-    uint keyBase;        // impulse record keys: keyBase + vehicle * 256 + shape
+    uint keyBase;        // impulse record keys: keyBase + vehicle * 1024 + shape (< 2^24)
     uint impulseBase;    // engine-schema IMPULSE_BASE, IMPULSE_COUNT, IMPULSE_FIRST, IMPULSE_CAP
     uint impulseCount;
     uint impulseFirst;
@@ -62,9 +62,15 @@ static const uint ST_PLANES = 4u;
 static const uint ST_IMPULSES = 8u;
 static const uint ST_ROWS = 16u;
 // work: [0] chunk rows used, [1] status, [2..2+maxBodies) share counts, then per vehicle
-// 8 words of bounds (ordered bits: lo xyz, hi xyz, speed, 0).
+// 8 words of bounds (ordered bits: lo xyz, hi xyz, speed, 0) (all cleared each window),
+// then per vehicle 4 words written once by the host: node offset, nodes, mass bits, 0.
 uint wShare() { return 2u; }
 uint wBounds(uint v) { return 2u + gP.maxBodies + 8u * v; }
+uint4 vehicleAt(uint v)
+{
+    uint w = 2u + gP.maxBodies + 8u * gP.vehicles + 4u * v;
+    return uint4(gWork[w].load(), gWork[w + 1u].load(), gWork[w + 2u].load(), 0u);
+}
 
 [[vk::binding(0, 0)]] ConstantBuffer<Params> gP;
 [[vk::binding(1, 0)]] StructuredBuffer<float4> gBodies;     // engine-schema BodyState, 7 each
@@ -72,7 +78,6 @@ uint wBounds(uint v) { return 2u + gP.maxBodies + 8u * v; }
 [[vk::binding(3, 0)]] StructuredBuffer<uint> gHulls;        // the hull arena's words
 [[vk::binding(4, 0)]] StructuredBuffer<float4> gNodes;      // explicit nodes, 3 each
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint4> gMisc;      // explicit gMisc
-[[vk::binding(6, 0)]] StructuredBuffer<uint4> gVeh;         // per vehicle (node offset, nodes, mass bits, 0)
 [[vk::binding(8, 0)]] RWStructuredBuffer<Atomic<uint>> gScratch; // the World's scratch atomics
 [[vk::binding(9, 0)]] RWStructuredBuffer<Atomic<uint>> gWork;
 [[vk::binding(10, 0)]] StructuredBuffer<uint4> gChunkInfo;  // the ingest's collider table, 2 each
@@ -102,7 +107,8 @@ uint prec(uint v, uint i) { return vrec(v) + 1u + gP.B * BODY_RECS + gP.S * SHAP
 
 groupshared Atomic<uint> gsBox[7];
 groupshared Atomic<uint> gsCount;
-groupshared uint gsList[256];
+static const uint LIST_CAP = 1024u;
+groupshared uint gsList[LIST_CAP];
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -113,7 +119,7 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (lane < 3u) gsBox[lane].store(0xFFFFFFFFu);
     else if (lane < 7u) gsBox[lane].store(0u);
     GroupMemoryBarrierWithGroupSync();
-    uint4 vt = gVeh[v];
+    uint4 vt = vehicleAt(v);
     float3 origin = asfloat(gMisc[v].xyz);
     for (uint i = lane; i < vt.y; i += 256u)
     {
@@ -182,15 +188,15 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         float3 d = s.xyz - q;
         if (dot(d, d) > r * r) continue;
         uint at = gsCount.add(1u);
-        if (at < 256u) gsList[at] = c;
+        if (at < LIST_CAP) gsList[at] = c;
     }
     GroupMemoryBarrierWithGroupSync();
     if (lane != 0u) return;
     uint n = gsCount.load();
-    if (n > gP.S || n > 256u)
+    if (n > gP.S || n > LIST_CAP)
     {
         gWork[1].or(ST_SHAPES);
-        n = min(n, min(gP.S, 256u));
+        n = min(n, min(gP.S, LIST_CAP));
     }
     // Collider order: an insertion sort (the lists are short).
     for (uint a = 1u; a < n; a++)
@@ -282,12 +288,13 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 void cpl_share(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.x;
-    uint j = lid.x;
-    if (j >= gMisc[vrec(v)].x) return;
-    uint b = brec(v, j);
-    uint body = gMisc[b + 3u].w;
-    float4 r2 = asfloat(gMisc[b + 2u]);
-    gMisc[b + 2u] = asuint(float4(r2.xyz, float(max(gWork[wShare() + body].load(), 1u))));
+    for (uint j = lid.x; j < gMisc[vrec(v)].x; j += 64u)
+    {
+        uint b = brec(v, j);
+        uint body = gMisc[b + 3u].w;
+        float4 r2 = asfloat(gMisc[b + 2u]);
+        gMisc[b + 2u] = asuint(float4(r2.xyz, float(max(gWork[wShare() + body].load(), 1u))));
+    }
 }
 
 float3 to_zup(float3 v) { return float3(v.x, -v.z, v.y); }
@@ -299,13 +306,9 @@ float3 actionPoint(float3 ref, float3 j, float3 m)
     return jj > 0.0 ? ref + cross(j, m) / jj : ref;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void cpl_loads(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+// cpl_loads for shape k of vehicle v.
+void shapeLoad(uint v, uint k)
 {
-    uint v = gid.x;
-    uint k = lid.x;
-    if (gP.ingestRows == 0u || k >= gMisc[vrec(v)].y) return;
     uint at = srec(v, k);
     uint c = gMisc[at].z;
     uint4 info = gChunkInfo[2u * c];
@@ -321,13 +324,22 @@ void cpl_loads(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     // coupling.slang Record: ids (chunk, other body: none, slot, valid), point (|J|),
     // impulse (closing speed 0: a sustained load, J / dt), other (mass, modulus, radius),
     // key (substep, this collider, other: the vehicle, feature).
-    float mass = asfloat(gVeh[v].z);
+    float mass = asfloat(vehicleAt(v).z);
     gRecords[5u * base] = uint4(info.x, NONE, base, 1u);
     gRecords[5u * base + 1u] = asuint(float4(p, length(jz)));
     gRecords[5u * base + 2u] = asuint(float4(jz, 0.0));
     gRecords[5u * base + 3u] = asuint(float4(mass, 2.0e11, 1.0, 0.0));
     gRecords[5u * base + 4u] = uint4(gP.ingestSlot, c, 0x80000000u | v, 2u * k);
     gRecords[5u * (base + 1u)] = uint4(NONE, NONE, base + 1u, 0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cpl_loads(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint v = gid.x;
+    if (gP.ingestRows == 0u) return;
+    for (uint k = lid.x; k < gMisc[vrec(v)].y; k += 64u) shapeLoad(v, k);
 }
 
 [shader("compute")]
@@ -338,50 +350,92 @@ void cpl_loads_end(uint3 tid : SV_DispatchThreadID)
     gRowCounts[gP.ingestSlot] = min(gWork[0].load(), gP.rowCap);
 }
 
+// A proxy body's window impulse and its angular impulse about point c.
+void proxyImpulse(uint v, uint j, float3 c, out float3 J, out float3 L)
+{
+    J = float3(0.0);
+    L = float3(0.0);
+    uint ns = gMisc[vrec(v)].y;
+    for (uint q = 0u; q < ns; q++)
+    {
+        uint aq = srec(v, q);
+        if (gMisc[aq].y != j) continue;
+        float3 i = asfloat(gMisc[aq + 4u].xyz);
+        J += i;
+        L += asfloat(gMisc[aq + 5u].xyz) + cross(asfloat(gMisc[aq + 6u].xyz) - c, i);
+    }
+}
+
+// The impulse records of vehicle v's window, one per (proxy body, body its shapes belong
+// to now). A proxy body of infinite mass in the window (static, anchored or kinematic: the
+// vehicle met an immovable body) sends nothing: its reaction went into the ground, as the
+// vehicle felt it. A proxy body still whole sends its impulse. One that split (or whose
+// shapes moved to other bodies) after the frame: each piece takes the change of motion
+// the whole body's impulse gives at the piece's centre of mass, m (dv + dw x r) and I dw,
+// as the pieces of a split move with their parent's motion. Momentum closes; no piece
+// moves faster than the whole body would have.
+void emitPair(uint v, uint j, uint body, uint key)
+{
+    uint b = brec(v, j);
+    float4 c0 = asfloat(gMisc[b]);
+    if (!(c0.w > 0.0)) return;
+    float4 cur = gBodies[7u * body];
+    if (!(cur.w > 0.0)) return;
+    float3 J;
+    float3 L;
+    bool whole = gMisc[b + 3u].w == body && asuint(cur.w) == asuint(c0.w);
+    if (whole)
+    {
+        proxyImpulse(v, j, cur.xyz, J, L);
+    }
+    else
+    {
+        float3 Jp;
+        float3 Lp;
+        proxyImpulse(v, j, c0.xyz, Jp, Lp);
+        float4 q = asfloat(gMisc[b + 1u]);
+        float3 ii = asfloat(gMisc[b + 4u].xyz);
+        float3 dv = Jp * c0.w;
+        float3 dw = qrot(q, ii * qrot(float4(-q.xyz, q.w), Lp));
+        J = (dv + cross(dw, cur.xyz - c0.xyz)) / cur.w;
+        float4 rot = gBodies[7u * body + 1u];
+        float3 ci = gBodies[7u * body + 2u].xyz;
+        float3 lw = qrot(float4(-rot.xyz, rot.w), dw);
+        float3 li = float3(ci.x > 0.0 ? lw.x / ci.x : 0.0, ci.y > 0.0 ? lw.y / ci.y : 0.0, ci.z > 0.0 ? lw.z / ci.z : 0.0);
+        L = qrot(rot, li);
+    }
+    if (all(J == float3(0.0)) && all(L == float3(0.0))) return;
+    uint r = gScratch[gP.impulseCount].add(1u);
+    if (r >= gP.impulseCap) { gWork[1].or(ST_IMPULSES); return; }
+    uint w = gP.impulseBase + 8u * r;
+    gScratch[w].store(body);
+    gScratch[w + 1u].store(((gP.keyBase + v * 1024u + key) << 8) | IMPULSE_LINEAR_ANGULAR);
+    gScratch[w + 2u].store(asuint(J.x));
+    gScratch[w + 3u].store(asuint(J.y));
+    gScratch[w + 4u].store(asuint(J.z));
+    gScratch[w + 5u].store(asuint(L.x));
+    gScratch[w + 6u].store(asuint(L.y));
+    gScratch[w + 7u].store(asuint(L.z));
+}
+
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void cpl_emit(uint3 gid : SV_GroupID)
 {
     uint v = gid.x;
     uint ns = gMisc[vrec(v)].y;
-    // Per shape, merged into the first shape of the same body now.
     for (uint k = 0u; k < ns; k++)
     {
         uint at = srec(v, k);
+        uint j = gMisc[at].y;
         uint body = gColliders[4u * gMisc[at].z].x;
-        float4 p0 = gBodies[7u * body];
-        if (!(p0.w > 0.0)) continue;
         bool first = true;
         for (uint q = 0u; q < k; q++)
         {
-            float4 qp = gBodies[7u * gColliders[4u * gMisc[srec(v, q)].z].x];
-            if (gColliders[4u * gMisc[srec(v, q)].z].x == body && qp.w > 0.0) { first = false; break; }
-        }
-        if (!first) continue;
-        float3 J = float3(0.0);
-        float3 L = float3(0.0);
-        for (uint q = k; q < ns; q++)
-        {
             uint aq = srec(v, q);
-            if (gColliders[4u * gMisc[aq].z].x != body) continue;
-            float3 j = asfloat(gMisc[aq + 4u].xyz);
-            float3 m = asfloat(gMisc[aq + 5u].xyz);
-            float3 ref = asfloat(gMisc[aq + 6u].xyz);
-            J += j;
-            L += m + cross(ref - p0.xyz, j);
+            if (gMisc[aq].y == j && gColliders[4u * gMisc[aq].z].x == body) { first = false; break; }
         }
-        if (all(J == float3(0.0)) && all(L == float3(0.0))) continue;
-        uint r = gScratch[gP.impulseCount].add(1u);
-        if (r >= gP.impulseCap) { gWork[1].or(ST_IMPULSES); continue; }
-        uint w = gP.impulseBase + 8u * r;
-        gScratch[w].store(body);
-        gScratch[w + 1u].store(((gP.keyBase + v * 256u + k) << 8) | IMPULSE_LINEAR_ANGULAR);
-        gScratch[w + 2u].store(asuint(J.x));
-        gScratch[w + 3u].store(asuint(J.y));
-        gScratch[w + 4u].store(asuint(J.z));
-        gScratch[w + 5u].store(asuint(L.x));
-        gScratch[w + 6u].store(asuint(L.y));
-        gScratch[w + 7u].store(asuint(L.z));
+        if (first) emitPair(v, j, body, k);
     }
 }
 

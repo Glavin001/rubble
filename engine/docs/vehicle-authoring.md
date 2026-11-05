@@ -335,6 +335,79 @@ share of the energy: what to stiffen and what is spent for nothing; `DOOR=1`: a 
 kN push on the door instead). `MASSES=1` lists node mass by class;
 `SHOWCASE_FLOORS=1 … info` the floors by group, tier and beam kind.
 
+## Hardware, bearing and sheet masses (2026-11-05)
+
+Parts hang on hardware, not on their seams.
+
+- **Doors.** Each door has an upper hinge, a lower hinge, a latch and a
+  secondary latch. Each is one detacher group of tension-only ropes from one
+  pin node, the outer node of a member end, to the pillar.
+  - Using one pin lets the door turn about its hinge line.
+  - Each pin's ropes run toward the pillar, inboard and up, so every pull
+    meets a rope sized for it.
+- **Strengths.** They come from a static FMVSS 206 rig solve
+  (`rig_tensions`, `size_hardware`). The fixture moves the pins along the
+  pull. A rope at cosine c carries k·c/Σk·c² per newton.
+  - Each rope's strength is the largest load × share over a fan of pulls.
+    The fan runs from longitudinal (away from the pillar) to transverse
+    (outward) on the ellipse through the two measured loads, and, for doors,
+    from both of those to the door's weight (down) at the longitudinal load.
+  - Group strengths, front door, Medium:
+    - latch: 28.0 kN longitudinal, 20.5 kN transverse;
+    - secondary latch: 19.0 / 17.8 kN;
+    - hinge pair: 73.8 / 46.9 kN. Each hinge on its own holds the 36.2 /
+      29.8 kN pair floor (2005 Camry, report 637726). No report separated a
+      pair, so neither hinge failed. At half that floor, the intrusion beam's
+      pull tore the lower hinge off in every side pole run.
+  - The source is `crash-reference-targets.md` §9. The secondary engages
+    softer, so the assembly fails with its primary.
+- **Bearing.**
+  - The member ends of each door edge bear inboard on one flange node of
+    the pillar. Each end gets one 50 mm strip, with capacity σ_y·t·w: A-pillar
+    DP980 1.8 mm 53 kN, B-pillar PHS 1.8 mm 99 kN, C-pillar DP780 1.4 mm
+    31 kN.
+  - The door's inner end faces (`door_face_*`, HSLA 0.8 mm × 150 mm, 41 kN)
+    carry the members' pull to the hardware.
+  - The skin edge is compression-only. The shut faces bear through the hem;
+    the rest is seal.
+- **Lids.** The bonnet and boot lid have a hinge on each side and a latch at
+  the centre of the far edge, sized with the door values. FMVSS 206 covers
+  side doors only, so this is an assumption.
+  - Their seals are compression-only.
+  - An inner-frame ladder (`lid_inner_*`, `bonnet_inner_*`) gives them depth.
+    It is in the skin tier; each chord's strength is M_p / lever of a
+    100 × 60 × 0.75 mm hat at 210 MPa.
+- **Collision skin per part (A1).** The coarse lattice skin loses every
+  triangle that spans a shut line (Medium: 499 of 740 kept), so a part that
+  comes off drags no ghost sheet. Every shell node of a part with hardware
+  is a contacter. The lattice's nodes stay contacters too. Static contact
+  (ground, wall, pole) is per node, so the gaps along the shut lines (edges
+  up to 0.52 m) matter only for car-to-car contact (`COLL_DEBUG=1` prints
+  the split).
+- **Backed panels** (fenders, bumpers, bonnet, boot lid) bear on the body
+  frame through supports. Only their hardware carries tension.
+- **Sheet masses** (`SheetSpec`). A panel's mass is its skin area (a third
+  of each triangle to each node's part) × Σ gauge × share × density:
+  - bonnet 14.3 kg, boot lid 7.7 kg: 0.75 mm outer plus an inner of the same
+    gauge over half the area;
+  - fenders 2.7 kg: 0.75 mm;
+  - bumper fascias 2.5 / 1.3 kg: 3 mm at 1,000 kg/m³.
+
+  These parts take no share of the structure's mass. The kerb mass stays
+  1,450 kg.
+- **Tests.**
+  - `r`: the FMVSS 206 rigs, static and in the solver.
+  - `s`: 30 g inertial load.
+  - `g`: door pull. The door comes off at 82 kN, the sum of its parts'
+    transverse strengths (2 × 29.8 + 20.5 kN).
+  - Bearing: a door end bears on the pillar beside it along the car, and
+    inboard on a flange strip (one flange node behind each member end, both
+    chords bearing on it). It never bears mostly outward on a node outboard
+    of it, because that would hold the door shut.
+  - `o`: FMVSS 214 S9.2.3 door retention in the side pole.
+  - `t`: car-to-car T-bone, reported. `TB_KMH`, `TB_MASS`, `TB_DZ` and
+    `TB_ANG` vary it.
+
 ## Example: tweak a parameter
 
 A longer, lower roof and stronger front rails:

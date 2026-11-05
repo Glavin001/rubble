@@ -32,6 +32,12 @@ export const LAB_PRESETS = {
   // A post glancing down the side at 50 km/h: the front corner, door and
   // mirror take it (12 cm of the width overlaps the post).
   swipe50: { label: 'Post sideswipe · 50 km/h', xscene: 'pole', params: { speed: 50, offset: 0.82 }, pills: ['POST SIDESWIPE · 50 KM/H'], cam: 'threeFront' },
+  // FMVSS 214 S7 with the standard's barrier: 1,367.6 kg, its honeycomb face
+  // (310 kPa main block, 1,689 kPa bumper), crabbed 27°, 33.5 mph into the driver's
+  // side, its forward edge on the impact reference line (crash_rigs.rs).
+  mdb214: { label: 'Side · FMVSS 214 MDB · 54 km/h', xscene: 'mdb214', params: { speed: 53.9, crab: 27 }, pills: ['FMVSS 214 · MDB · 54 KM/H', '1,368 KG · 27° CRAB'], cam: 'three' },
+  // The front door's latch edge pulled out through six skin nodes by one rig.
+  doorpull: { label: 'Door pull · 0.5 m/s', xscene: 'doorpull', params: { pullSpeed: 0.5, doorNodes: 6 }, pills: ['DOOR PULL · 0.5 M/S'], cam: 'threeFront' },
 };
 
 /** Slow-motion factors (displayed time per simulated time). */
