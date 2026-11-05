@@ -311,6 +311,8 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
 #endif
     float4 V = gNodes[gi * 3u + 1u];
     cfRoll(gi, groupOff, flagsV);
+    clipRoll(gi, flagsV);
+    if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
     float selfGroup = gNodes[gi * 3u + 2u].w;
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -382,6 +384,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
         vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
         pos = sadd3(pos, sscale(vel, STEP));
     }
+    clipSpeed(vehicle, step, flagsV, vel);
 #ifdef EB_AERO
     if ((flagsV & FLAG_FUSEDRAG) != 0u)
     {

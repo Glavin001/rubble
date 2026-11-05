@@ -2041,6 +2041,7 @@ pub fn sedan() -> VehicleDef {
         part_masses: Vec::new(),
         damping: None,
         crush: Vec::new(),
+        interior: None,
     })
 }
 
@@ -2209,6 +2210,26 @@ pub fn sedan_one_tier() -> VehicleDef {
                 m.kg_per_m = section_kg_per_m(&sec);
             }
         }
+    }
+    // The floor and the roof, which no pole reaches, at the BX's interior
+    // spacing (`bx_body_coupe`, measured: its floor's stations 0.38–0.75 m
+    // apart along the car and 0.25–0.7 m across, its roof's 0.33–0.37 m
+    // along and about 0.55 m across): every other ring carries only the
+    // pole lanes' band, so the interior's rings are two lanes, 0.48 m,
+    // apart (a Choice in the BX's range). Across, the floor keeps the
+    // resolution's (Medium 0.35 m, in the BX's range): a ring's nodes are
+    // placed over its whole section at once, so a coarser floor would move
+    // the sides' nodes and the door hardware with them. The
+    // roof is the top between the screens' zones (backlight to 1.35 m,
+    // windscreen from 2.59 m). Measured, not adopted (`vehicle-authoring.md`
+    // "Pole lanes only where needed"): `INTERIOR=1` builds it (a
+    // measurement switch); by default the pole lanes run everywhere.
+    if std::env::var("INTERIOR").is_ok_and(|v| v == "1") {
+        d.interior = Some(super::body::Interior {
+            ring: 2.0 * super::vehicle::POLE_LANE,
+            floor: 0.0,
+            roof: [1.36, 2.58],
+        });
     }
     d.biw_mass = ACCORD_BIW;
     d.part_masses = vec![

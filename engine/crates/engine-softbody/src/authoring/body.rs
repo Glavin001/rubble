@@ -185,6 +185,38 @@ impl BodyProfile {
     }
 }
 
+/// The shell's interior surfaces, which no pole can reach (the underbody,
+/// the roof between its screens), at a coarser spacing along the car than
+/// the pole lanes: every other ring is a *minor* ring that carries only the
+/// band a pole can meet (the sides, the wells, the top outside `roof`), so
+/// the floor's and the roof's nodes sit on the major rings about `ring`
+/// apart, as the BX's body's do: fewer, heavier nodes and longer beams, so
+/// the explicit step's bound leaves each beam stiffer.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Interior {
+    /// The interior's spacing along the car (m): major rings at most this
+    /// apart (× the stations' 1.1 slack).
+    pub ring: f32,
+    /// The floor's spacing across the car (m); 0: the resolution's.
+    /// (Every ring's nodes are placed over its whole section at once, so
+    /// this moves the sides' nodes too.)
+    pub floor: f32,
+    /// The roof's extent along the car (z from, z to): its top surface
+    /// there is interior.
+    pub roof: [f32; 2],
+}
+
+impl Interior {
+    /// Whether a minor ring at `z` leaves out a node of surface `seg`.
+    pub fn drops(&self, z: f32, seg: Seg) -> bool {
+        match seg {
+            Seg::Floor => true,
+            Seg::Top => z >= self.roof[0] && z <= self.roof[1],
+            _ => false,
+        }
+    }
+}
+
 /// Node spacing (m) per surface.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spacing {
@@ -301,6 +333,9 @@ pub struct ShellRing {
     pub z: f32,
     pub half: Vec<u32>,
     pub v: Vec<f32>,
+    /// A minor ring ([`Interior`]): only the pole-reachable band, so its
+    /// half need not start or end on the centre line.
+    pub minor: bool,
 }
 
 /// The shell's output (nodes are added to the builder by the caller's closure).
@@ -360,10 +395,24 @@ pub fn build_shell(
     profile: &BodyProfile,
     spacing: &Spacing,
     keys: &[f32],
+    interior: Option<&Interior>,
     sk: &mut Skeleton,
 ) -> Shell {
     let (z0, z1) = profile.loft_range();
     let zs = stations(z0, z1, keys, spacing.ring);
+    // Minor rings: never the ends, never two in a row, and only where the
+    // major rings either side stay within the interior's spacing.
+    let mut minor = vec![false; zs.len()];
+    if let Some(it) = interior {
+        let mut last_major = zs[0];
+        for k in 1..zs.len().saturating_sub(1) {
+            if !minor[k - 1] && zs[k + 1] - last_major <= it.ring * 1.1 {
+                minor[k] = true;
+            } else {
+                last_major = zs[k];
+            }
+        }
+    }
     let mut shell = Shell::default();
     let add = |sk: &mut Skeleton, shell: &mut Shell, p: Vec3, seg: Seg| -> u32 {
         let i = sk.node(p, 0);
@@ -372,12 +421,15 @@ pub fn build_shell(
         i
     };
     // Rings: right half placed, the left half mirrored (centre-line nodes shared).
-    for &z in &zs {
+    for (k, &z) in zs.iter().enumerate() {
         let pts = place(&profile.half_section(z), spacing);
         let n = pts.len() - 1;
         let mut half = Vec::with_capacity(n + 1);
         let mut v = Vec::with_capacity(n + 1);
         for (i, sp) in pts.iter().enumerate() {
+            if minor[k] && interior.is_some_and(|it| it.drops(z, sp.seg)) {
+                continue;
+            }
             let x = if i == 0 || i == n { 0.0 } else { sp.p.x };
             let r = add(sk, &mut shell, Vec3::new(x, sp.p.y, z), sp.seg);
             if i == 0 || i == n {
@@ -390,12 +442,92 @@ pub fn build_shell(
             half.push(r);
             v.push(i as f32 / n as f32);
         }
-        shell.rings.push(ShellRing { z, half, v });
+        shell.rings.push(ShellRing {
+            z,
+            half,
+            v,
+            minor: minor[k],
+        });
     }
     let mut loft: Vec<[u32; 3]> = Vec::new();
-    for k in 0..shell.rings.len() - 1 {
+    let mut k = 0;
+    while k + 1 < shell.rings.len() {
         let (a, b) = (&shell.rings[k], &shell.rings[k + 1]);
-        zipper(&a.half, &a.v, &b.half, &b.v, &mut loft);
+        if !b.minor {
+            zipper(&a.half, &a.v, &b.half, &b.v, &mut loft);
+            k += 1;
+            continue;
+        }
+        // A major ring, a minor ring, a major ring: the band through the
+        // minor ring, the floor and the top (where the minor ring left
+        // them out) straight from major to major, and a triangle at each
+        // band edge closing the two.
+        let (m, c) = (b, &shell.rings[k + 2]);
+        let it = interior.unwrap();
+        let drop_floor = it.drops(m.z, Seg::Floor);
+        let drop_top = it.drops(m.z, Seg::Top);
+        let band = |r: &ShellRing| -> (usize, usize) {
+            let s = &shell.seg;
+            let lo = if drop_floor {
+                r.half.iter().position(|i| s[i] != Seg::Floor).unwrap()
+            } else {
+                0
+            };
+            let hi = if drop_top {
+                r.half.iter().rposition(|i| s[i] != Seg::Top).unwrap()
+            } else {
+                r.half.len() - 1
+            };
+            (lo, hi)
+        };
+        let ((la, ha), (lc, hc)) = (band(a), band(c));
+        zipper(&a.half[la..=ha], &a.v[la..=ha], &m.half, &m.v, &mut loft);
+        zipper(&m.half, &m.v, &c.half[lc..=hc], &c.v[lc..=hc], &mut loft);
+        // The floor's (the top's) strip from major to major meets the band
+        // at the minor ring's edge node, which lies on the strip's edge
+        // between the two majors' band nodes: the strip's triangle on that
+        // edge is split at it, so the node is a vertex of the floor and the
+        // skin has no T-junction (a node lying on another triangle's edge,
+        // in self-contact range of it at rest, and a sliver closing it).
+        let split = |strip: &mut Vec<[u32; 3]>, p: u32, q: u32, at: u32| {
+            let k = strip
+                .iter()
+                .position(|t| t.contains(&p) && t.contains(&q))
+                .expect("the strip's edge between the majors");
+            let t = strip[k];
+            // (u, v) the edge in the triangle's own order, w the third.
+            let (u, v, w) = (0..3)
+                .map(|r| (t[r], t[(r + 1) % 3], t[(r + 2) % 3]))
+                .find(|&(u, v, _)| (u == p && v == q) || (u == q && v == p))
+                .unwrap();
+            strip[k] = [u, at, w];
+            strip.push([at, v, w]);
+        };
+        if la > 0 {
+            let mut strip = Vec::new();
+            zipper(
+                &a.half[..=la],
+                &a.v[..=la],
+                &c.half[..=lc],
+                &c.v[..=lc],
+                &mut strip,
+            );
+            split(&mut strip, a.half[la], c.half[lc], m.half[0]);
+            loft.extend(strip);
+        }
+        if ha + 1 < a.half.len() {
+            let mut strip = Vec::new();
+            zipper(
+                &a.half[ha..],
+                &a.v[ha..],
+                &c.half[hc..],
+                &c.v[hc..],
+                &mut strip,
+            );
+            split(&mut strip, a.half[ha], c.half[hc], *m.half.last().unwrap());
+            loft.extend(strip);
+        }
+        k += 2;
     }
     let mut all: Vec<[u32; 3]> = Vec::new();
     for t in &loft {
@@ -577,18 +709,50 @@ pub fn build_shell(
     // rings on); along cap rows and across them likewise.
     for k in 0..shell.rings.len() {
         let r = &shell.rings[k];
-        let mut f = r.half.clone();
-        for &i in r.half[1..r.half.len() - 1].iter().rev() {
-            f.push(shell.mirror[&i]);
+        let centre = |i: u32| shell.mirror[&i] == i;
+        let (c0, c1) = (centre(r.half[0]), centre(*r.half.last().unwrap()));
+        if c0 && c1 {
+            let mut f = r.half.clone();
+            for &i in r.half[1..r.half.len() - 1].iter().rev() {
+                f.push(shell.mirror[&i]);
+            }
+            for i in 0..f.len() {
+                shell
+                    .beams
+                    .push((f[i], f[(i + 2) % f.len()], ShellBeam::Bend));
+            }
+        } else {
+            // A minor ring's open band: one arc over the centre node it
+            // keeps, else each half on its own.
+            let mirrored = |v: &[u32]| -> Vec<u32> { v.iter().map(|i| shell.mirror[i]).collect() };
+            let h = &r.half;
+            let arcs: Vec<Vec<u32>> = if c1 {
+                let mut f = mirrored(&h[..h.len() - 1]);
+                f.extend(h.iter().rev());
+                vec![f]
+            } else if c0 {
+                let mut f: Vec<u32> = mirrored(&h[1..]).into_iter().rev().collect();
+                f.extend(h.iter());
+                vec![f]
+            } else {
+                vec![h.clone(), mirrored(h)]
+            };
+            for f in arcs {
+                for i in 0..f.len().saturating_sub(2) {
+                    shell.beams.push((f[i], f[i + 2], ShellBeam::Bend));
+                }
+            }
         }
-        for i in 0..f.len() {
-            shell
-                .beams
-                .push((f[i], f[(i + 2) % f.len()], ShellBeam::Bend));
-        }
-        if k + 2 < shell.rings.len() {
-            let (a, b) = (&shell.rings[k], &shell.rings[k + 2]);
-            for (i, &n) in a.half.iter().enumerate() {
+        // Across: to the second ring on that has this node's parameter
+        // (minor rings carry only their band).
+        for (i, &n) in r.half.iter().enumerate() {
+            let vi = r.v[i];
+            let has = |q: &ShellRing| q.v[0] <= vi + 1e-6 && vi <= *q.v.last().unwrap() + 1e-6;
+            let Some(b) = shell.rings[k + 1..].iter().filter(|q| has(q)).nth(1) else {
+                continue;
+            };
+            let a = r;
+            {
                 let j =
                     b.v.iter()
                         .enumerate()

@@ -1049,7 +1049,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     let vars = collect_vars(&db, &parts, &config);
     let mut desc = SoftVehicleDesc {
         name: parts[0].name.clone(),
-        collision_range: 0.03,
+        // BeamNG's documented band (2.5 cm; spec §36).
+        collision_range: crate::explicit_beams::BEAMNG_COLLISION_RANGE,
         ..Default::default()
     };
     desc.warnings.append(&mut db.warnings);

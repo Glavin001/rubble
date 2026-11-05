@@ -49,6 +49,8 @@ fn check(label: &str, mut w: ExplicitBeamsWorld, frames: usize) -> EnergyLedger 
     let ke0 = w.ledger.as_ref().unwrap().kinetic;
     let e0 = w.ledger.as_ref().unwrap().start;
     let mut most = e0;
+    let mut most_self = 0.0f64;
+    let two_body = w.vehicles.iter().all(|v| v.two_body_contact);
     for f in 0..frames {
         w.frame(33);
         let l = w.ledger.as_ref().unwrap();
@@ -58,12 +60,23 @@ fn check(label: &str, mut w: ExplicitBeamsWorld, frames: usize) -> EnergyLedger 
             "{label} frame {f}: ledger off by {closure} J"
         );
         most = most.max(l.mechanical());
+        most_self = most_self.max(l.w_self_contact);
         // (A contact's work alone may be positive: its projection cancels the
         // contacter's beam force, so it passes beam energy on; the sum is what
         // must not grow.)
     }
     let l = w.ledger.clone().unwrap();
     report(label, &l);
+    eprintln!("{label}: self-contact work at most {most_self:.3} J (cumulative, at a frame's end)");
+    // Self-contact under the two-body rule (jbeam-semantics-spec.md §36) never adds
+    // energy over the run so far: its cumulative work stays at or below zero (to the
+    // ledger's rounding).
+    if two_body {
+        assert!(
+            most_self <= 1e-5 * e0,
+            "{label}: self-contact added {most_self} J"
+        );
+    }
     assert!(
         most <= e0 * 1.005,
         "{label}: mechanical energy rose from {e0} J to {most} J"
@@ -100,6 +113,15 @@ fn ledger_closes_in_a_sedan_rear_end() {
     .unwrap();
     check(
         "sedan rear-end 15 m/s",
+        ExplicitBeamsWorld::new(vec![front.clone(), rear.clone()]),
+        60,
+    );
+    // The same crash with the two-body rule for vehicle and self contact (§36).
+    let (mut front, mut rear) = (front, rear);
+    front.two_body_contact = true;
+    rear.two_body_contact = true;
+    check(
+        "sedan rear-end 15 m/s, two-body",
         ExplicitBeamsWorld::new(vec![front, rear]),
         60,
     );
@@ -541,4 +563,50 @@ fn exact_length_is_the_square_root() {
     }
     eprintln!("exact length: {off} of {n} not √q correctly rounded, worst {worst} ulp");
     assert!(worst <= 1 && off * 1000 < n, "{off} of {n}, {worst} ulp");
+}
+
+/// The one-tier showcase car (`sedan1`) into a rigid wall at 120 km/h (the
+/// showcase's `f_wall` scene), self-collision on. RoR's static-surface rule cancels
+/// the contacter's whole force onto the struck triangle's nodes and injects energy
+/// (reported); the two-body rule (jbeam-semantics-spec.md §36) never adds any: its
+/// cumulative self-contact work stays at or below zero and the mechanical energy
+/// never rises.
+#[test]
+fn self_contact_never_adds_energy_in_the_120_kmh_wall() {
+    use engine_softbody::explicit_beams::StaticBox;
+    let Some(st) = style("sedan1") else {
+        eprintln!("skip: no sedan1 style");
+        return;
+    };
+    let b = build(
+        &st,
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+    let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let v = Vec3::new(0.0, 0.0, 120.0 / 3.6);
+    let mut s =
+        ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, 0.02 - low, 0.0), v, settings()).unwrap();
+    s.settings.drag = false;
+    s.roll_tyres(v);
+    let front = s.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+    s.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+        Vec3::new(3.0, 2.0, 1.0),
+    ));
+    let mut ror = ExplicitBeamsWorld::new(vec![s.clone()]);
+    ror.enable_ledger();
+    let mut most = 0.0f64;
+    for _ in 0..30 {
+        ror.frame(33);
+        most = most.max(ror.ledger.as_ref().unwrap().w_self_contact);
+    }
+    eprintln!("RoR's rule (reported): self-contact work at most {most:.1} J over 1 s");
+    report("OPEN, RoR's self-contact rule", ror.ledger.as_ref().unwrap());
+    s.two_body_contact = true;
+    check("sedan1 120 km/h wall, two-body", ExplicitBeamsWorld::new(vec![s]), 30);
 }

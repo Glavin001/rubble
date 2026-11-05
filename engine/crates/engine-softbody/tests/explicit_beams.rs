@@ -11,6 +11,7 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     fast_inv_sqrt: false,
     drag: false,
     turbulence: false,
+    triangle_throttle: true,
 };
 
 /// Unit-mass nodes at `points`, no ground contact, no drag.
@@ -133,6 +134,7 @@ fn frames_carry_the_remainder() {
             fast_inv_sqrt: true,
             drag: true,
             turbulence: true,
+            triangle_throttle: true,
         }
     );
 }
@@ -677,7 +679,7 @@ fn self_collision_pushes_a_contacter_out_of_a_triangle() {
         n.flags |= NODE_IMMOVABLE | NODE_ON_TRIANGLE;
     }
     s.nodes[3].flags |= NODE_CONTACTER;
-    s.nodes[3].vel = Vec3::new(0.0, -1.0, 0.0);
+    s.nodes[3].vel = Vec3::new(0.0, -10.0, 0.0);
     s.triangles.push(Triangle {
         nodes: [0, 1, 2],
         wait: 0,
@@ -817,4 +819,75 @@ end
     assert_eq!(s.tyres[0].axle, [1, 0]);
     assert!(s.nodes[first].pos.distance(Vec3::new(0.0, 0.6, 0.0)) < 1e-6);
     assert!((s.nodes[first + 1].pos.z - 1.0).abs() < 1e-6);
+}
+
+/// The BeamNG profile tests every triangle every step (jbeam-semantics-spec.md §36):
+/// an unhit triangle never backs off.
+#[test]
+fn without_the_throttle_a_triangle_is_tested_every_step() {
+    let mut s = world(&[
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(5.0, 5.0, 5.0),
+    ]);
+    s.settings.triangle_throttle = false;
+    for n in &mut s.nodes {
+        n.flags |= NODE_IMMOVABLE;
+    }
+    s.nodes[3].flags |= NODE_CONTACTER;
+    s.triangles.push(Triangle {
+        nodes: [0, 1, 2],
+        wait: 0,
+        idle: 0,
+    });
+    s.finish();
+    for _ in 0..40 {
+        s.step();
+        assert_eq!((s.triangles[0].wait, s.triangles[0].idle), (0, 0));
+    }
+}
+
+/// What the throttle can cost (§36): a contacter arriving at 10 m/s (5 mm a step) at
+/// a triangle that has been idle for a second. With the throttle the triangle is
+/// waiting while the node crosses its band (it falls through: y −1.40 m after
+/// 0.2 s); without it the node is caught (y 0.020 m, the band's edge).
+/// Returns the node's height after it arrives.
+fn fast_arrival(throttle: bool) -> f32 {
+    let mut s = world(&[
+        Vec3::new(-1.0, 0.0, -1.0),
+        Vec3::new(1.0, 0.0, -1.0),
+        Vec3::new(0.0, 0.0, 2.0),
+        Vec3::new(0.0, 0.8, 0.0),
+    ]);
+    s.settings.triangle_throttle = throttle;
+    for n in &mut s.nodes[..3] {
+        n.flags |= NODE_IMMOVABLE | NODE_ON_TRIANGLE;
+    }
+    s.nodes[3].flags |= NODE_CONTACTER | NODE_NO_GROUND;
+    s.triangles.push(Triangle {
+        nodes: [0, 1, 2],
+        wait: 0,
+        idle: 0,
+    });
+    s.finish();
+    // Idle for a second: the node held still far above.
+    for _ in 0..2000 {
+        s.nodes[3].vel = Vec3::ZERO;
+        s.nodes[3].force = Vec3::ZERO;
+        s.step();
+    }
+    s.nodes[3].vel = Vec3::new(0.0, -10.0, 0.0);
+    for _ in 0..400 {
+        s.step();
+    }
+    s.nodes[3].pos.y
+}
+
+#[test]
+fn the_throttle_lets_a_fast_node_through_and_the_beamng_profile_does_not() {
+    let (ror, beamng) = (fast_arrival(true), fast_arrival(false));
+    println!("node after arrival: with the throttle y = {ror}, without y = {beamng}");
+    assert!(beamng > 0.0, "caught without the throttle: {beamng}");
+    assert!(ror < 0.0, "the RoR profile's throttle misses it: {ror}");
 }

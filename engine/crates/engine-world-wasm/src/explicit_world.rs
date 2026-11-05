@@ -44,6 +44,7 @@ impl WebWorld {
             fast_inv_sqrt: true,
             drag,
             turbulence: drag,
+            ..Default::default()
         };
         let template = ExplicitBeams::from_truck(truck, glam::Vec3::ZERO, glam::Vec3::ZERO, settings).map_err(err)?;
         let (info, device, queue) = crate::web_device().await?;

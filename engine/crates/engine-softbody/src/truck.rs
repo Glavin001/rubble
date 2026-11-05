@@ -306,6 +306,9 @@ pub struct TruckFile {
     pub minimass_skip_loaded: bool,
     pub advanced_deformation: bool,
     pub collision_range: f32,
+    /// The file sets `set_collision_range` (the BeamNG profile's band then yields
+    /// to it).
+    pub collision_range_set: bool,
     pub nodes: Vec<SoftNode>,
     /// Per node: loaded flag and optional load-weight override.
     pub loaded: Vec<(bool, Option<f32>)>,
@@ -319,6 +322,11 @@ pub struct TruckFile {
     /// square root, not RoR's fast inverse square root (its error, up to 0.18 % of a
     /// length, is comparable to metal's yield strain and far above glass's).
     pub exact_lengths: bool,
+    /// `rubble_beamng_profile` (Rubble's extension, jbeam-semantics-spec.md §36):
+    /// the vehicle runs the BeamNG profile's switches
+    /// ([`crate::explicit_beams::ExplicitBeamsSettings::beamng`]) and two-body
+    /// vehicle contact, as JBeam content does.
+    pub beamng_profile: bool,
     /// `rubble_rest_pose <y>` (Rubble's extension): the file's node positions are
     /// the vehicle at rest on flat ground at height `y` (its beams' rest lengths
     /// carry the unloaded geometry).
@@ -796,6 +804,7 @@ impl Parser {
             "enable_advanced_deformation" => self.out.advanced_deformation = true,
             "rubble_full_contact" => self.out.full_contact = true,
             "rubble_exact_lengths" => self.out.exact_lengths = true,
+            "rubble_beamng_profile" => self.out.beamng_profile = true,
             "rubble_rest_pose" => self.out.rest_ground = Some(f(t, 1, 0.0)),
             "detacher_group" => {
                 self.detacher_group = if t.get(1) == Some(&"end") {
@@ -804,7 +813,10 @@ impl Parser {
                     f(t, 1, 0.0).abs() as u32
                 };
             }
-            "set_collision_range" => self.out.collision_range = fd(t, 1, DEFAULT_COLLISION_RANGE),
+            "set_collision_range" => {
+                self.out.collision_range = fd(t, 1, DEFAULT_COLLISION_RANGE);
+                self.out.collision_range_set = true;
+            }
             "submesh_groundmodel" => {
                 self.out.submesh_groundmodel = t.get(1).map(|g| g.to_string());
             }

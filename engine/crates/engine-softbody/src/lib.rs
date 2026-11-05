@@ -37,6 +37,7 @@ pub mod metrics;
 pub mod model;
 pub mod pack;
 pub mod procedural;
+pub mod reference_cars;
 pub mod truck;
 pub mod truck_export;
 pub mod visual;

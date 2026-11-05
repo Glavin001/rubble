@@ -117,6 +117,17 @@ static const uint FLAG_CFORCE = 256u; // the contact-force log (jbeam-semantics-
 // The vehicle has tread nodes (NODE_TREAD): its nodes take the shapes path, whose
 // ground contact runs treadGround for them (jbeam-semantics-spec.md §34).
 static const uint FLAG_TREAD = 512u;
+// The BeamNG profile without Rigs of Rods' idle-triangle throttle
+// (jbeam-semantics-spec.md §36): the vehicle's triangles never wait.
+static const uint FLAG_NO_THROTTLE = 1024u;
+// Anti-clip (jbeam-semantics-spec.md §36): the vehicle's self-collision and its
+// vehicle contact (as owner or partner) keep each node on the side it came from.
+static const uint FLAG_ANTI_CLIP = 2048u;
+// Some vehicle of the upload has anti-clip: every vehicle's node phase rolls its
+// nodes' side memory and takes its fastest node's speed (the shapes path).
+static const uint FLAG_CLIP_MEM = 4096u;
+// A collision triangle that is anti-clip only (BeamNG NONCOLLIDABLE; gMisc .z).
+static const uint TRI_ANTI_ONLY = 0x40000000u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -210,6 +221,9 @@ struct Params
     uint cfNode; // gLists: per node its contact break (break group, 0 none; force N's bits)
     uint cfPend; // gAcc: per group slot its contact-break state (0 idle, 1 set off, 2 done)
     uint treadState; // gBeams: per node its tread contact's (z, depth the step before, 0, 0) (0: no tread nodes)
+    uint selfSplit; // gAcc: per node its self-collision two-body hit count this step (0: no two-body vehicle)
+    uint clipMem; // gAcc: anti-clip's side memory, per node 4 words (held m0 m1, recorded p0 p1) (0: no anti-clip vehicle)
+    uint clipVmax; // gAcc: per vehicle 2 parities its fastest node's speed (float bits) this step
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -556,6 +570,79 @@ uint groupSlot(uint parity, uint groupOff, uint g)
     return parity * gP.groupTotal + groupOff + g;
 }
 
+// --- Anti-clip (jbeam-semantics-spec.md §36; explicit_contact.rs clip_*) ---
+// Per node: the sides held this step (last step's contacts) and those recorded for
+// the next, each a word owner << 21 | triangle << 1 | (side > 0), CLIP_EMPTY none.
+// A contact records its word into the two smallest (order free: atomic min, the
+// displaced word carried to the second slot); the node phase rolls them.
+static const float CLIP_DEPTH = 0.1;
+static const uint CLIP_EMPTY = 0x7FFFFFFFu;
+static const uint CLIP_SELF = 1023u;
+uint clipAt(uint n) { return gP.clipMem + n * 4u; }
+// The held side of node n for triangle t of `owner`: ±1, or 0 none.
+float clipHeld(uint n, uint owner, uint t)
+{
+    uint key = (owner << 20) | t;
+    for (uint k = 0u; k < 2u; k++)
+    {
+        uint w = uint(gAcc[clipAt(n) + k].load());
+        if (w != CLIP_EMPTY && (w >> 1) == key) return (w & 1u) != 0u ? 1.0 : -1.0;
+    }
+    return 0.0;
+}
+uint clipWord(uint owner, uint t, float side) { return (owner << 21) | (t << 1) | (side > 0.0 ? 1u : 0u); }
+void clipRecord(uint n, uint word)
+{
+    int x = int(word);
+    int prev = gAcc[clipAt(n) + 2u].min(x);
+    gAcc[clipAt(n) + 3u].min(max(prev, x));
+}
+// The node phase: last step's recorded words become the held ones.
+void clipRoll(uint gi, uint flagsV)
+{
+    if (gP.clipMem == 0u || (flagsV & FLAG_CLIP_MEM) == 0u) return;
+    uint at = clipAt(gi);
+    gAcc[at].store(gAcc[at + 2u].load());
+    gAcc[at + 1u].store(gAcc[at + 3u].load());
+    gAcc[at + 2u].store(int(CLIP_EMPTY));
+    gAcc[at + 3u].store(int(CLIP_EMPTY));
+}
+uint clipVmaxAt(uint v, uint parity) { return gP.clipVmax + v * 2u + parity; }
+// The node phase: the vehicle's fastest node this step (|v| as the CPU's
+// Vec3::length; NaN and 0 leave it).
+void clipSpeed(uint vehicle, uint step, uint flagsV, float3 vel)
+{
+    if (gP.clipMem == 0u || (flagsV & FLAG_CLIP_MEM) == 0u) return;
+    float sp = ssqrt(sdot(vel, vel));
+    if (sp > 0.0) gAcc[clipVmaxAt(vehicle, step & 1u)].max(asint(sp));
+}
+// Clears the next step's slot (after this step's node phase, before the next's).
+void clipVmaxClear(uint vehicle, uint parity)
+{
+    if (gP.clipMem != 0u) gAcc[clipVmaxAt(vehicle, parity ^ 1u)].store(0);
+}
+float clipVmax(uint vehicle, uint parity) { return asfloat(gAcc[clipVmaxAt(vehicle, parity)].load()); }
+// The largest of a triangle's nodes' speeds, as the CPU folds it from 0.
+float clipTriSpeed(uint4 tn)
+{
+    float a = ssqrt(sdot(gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.x * 3u + 1u].xyz));
+    float b = ssqrt(sdot(gNodes[tn.y * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz));
+    float c = ssqrt(sdot(gNodes[tn.z * 3u + 1u].xyz, gNodes[tn.z * 3u + 1u].xyz));
+    float m = 0.0;
+    if (a > m) m = a;
+    if (b > m) m = b;
+    if (c > m) m = c;
+    return m;
+}
+// Self-collision's box reach (explicit_beams.rs collision_pass): r, or with
+// anti-clip r + (triangle speed + vehicle's fastest) · h + CLIP_DEPTH.
+float triReach(uint4 tn, float r, uint parity)
+{
+    if ((gStatic[tn.w * 4u + 3u].x & FLAG_ANTI_CLIP) == 0u) return r;
+    float tv = clipTriSpeed(tn);
+    return nf(nf(r + smul(nf(tv + clipVmax(tn.w, parity)), STEP)) + CLIP_DEPTH);
+}
+
 // --- The contact-force log (jbeam-semantics-spec.md §32; explicit_beams.rs's
 // ContactForceLog): per node the sum of its contacts' force magnitudes in a step,
 // fixed point; the node phase moves a complete step's sum to `last` (and the
@@ -734,7 +821,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
                           groupCount, hits, false);
         return;
     }
-    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD)) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY | FLAG_CLIP_MEM)) != 0u)
     {
         nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                          groupCount, hits, false);
@@ -828,7 +915,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
         return nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                  groupOff, groupCount, hits, true);
     }
-    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD)) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY | FLAG_CLIP_MEM)) != 0u)
     {
         return nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                 groupOff, groupCount, hits, true);
@@ -1027,6 +1114,8 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
 #endif
     float4 V = gNodes[gi * 3u + 1u];
     cfRoll(gi, groupOff, flagsV);
+    clipRoll(gi, flagsV);
+    if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
     float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -1096,6 +1185,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
         vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
         pos = sadd3(pos, sscale(vel, STEP));
     }
+    clipSpeed(vehicle, step, flagsV, vel);
 #ifdef EB_AERO
     if ((flagsV & FLAG_FUSEDRAG) != 0u)
     {
@@ -2076,6 +2166,14 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
 // steps up); one that was tested restarts its wait from its hit (gMisc .w, set by
 // any of its lanes) or counts it up. A triangle that comes off idle waits at most
 // 12 steps and is tested that same step (triangleTest reads it as not waiting).
+// The largest wait triangle gt's throttle may hold: 0 when its vehicle runs without
+// the throttle (FLAG_NO_THROTTLE), else unbounded.
+int throttleCap(uint gt)
+{
+    uint v = gStatic[gP.triBase + gt].w;
+    return (gStatic[v * 4u + 3u].x & FLAG_NO_THROTTLE) != 0u ? 0 : 0x7FFFFFFF;
+}
+
 int triangleFinish(uint gt)
 {
     uint mi = gP.vehicles + gt;
@@ -2094,7 +2192,7 @@ int triangleFinish(uint gt)
             wait = min(idle, 12);
             idle = 0;
         }
-        wait = th.w != 0u ? -20000 : wait + 1;
+        wait = th.w != 0u ? -20000 : min(wait + 1, throttleCap(gt));
     }
     gMisc[mi] = uint4(asuint(wait), asuint(idle), th.z, 0u);
     return wait;
@@ -2113,6 +2211,8 @@ struct TriGeo
     bool solvable;
     float3 lo;
     float3 hi;
+    // Anti-clip (§36): 1 the vehicle has it, 2 the triangle is anti-clip only.
+    uint clip;
 };
 
 // The hit test of contacter node h against triangle t: (alpha, beta, delta) when
@@ -2136,6 +2236,124 @@ bool triangleHit(TriGeo t, float3 p, float r, out float alpha, out float beta, o
 void hitForce(uint v, uint at, uint key, int3 sum, uint round, float3 origin, float r, uint beamOff, uint groupOff,
               uint groupCount, uint parity);
 
+// Self-collision's two-body rule (jbeam-semantics-spec.md §36; the CPU's
+// apply_two_body_self_hits): vehicle v has it (FLAG_TWO_BODY) and its counts room.
+bool selfTwoBody(uint v)
+{
+    return gP.selfSplit != 0u && (gStatic[v * 4u + 3u].x & FLAG_TWO_BODY) != 0u;
+}
+
+// Node x as k = its hits this step sub-bodies: inverse mass k/m (0 immovable).
+float selfInvMass(uint x)
+{
+    if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return 0.0;
+    return sdiv(float(uint(gAcc[gP.selfSplit + x].load())), gNodes[x * 3u].w);
+}
+
+// Node x's acceleration from its force at the pass's start (0 immovable).
+float3 selfAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return float3(0.0, 0.0, 0.0);
+    float3 f = beamSum(gNodes[x * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + x], beamOff, groupOff, groupCount, parity,
+                       false);
+    return sdiv3(f, gNodes[x * 3u].w);
+}
+
+float selfTerm(float w, float im) { return w > 0.0 ? smul(smul(w, w), im) : 0.0; }
+
+// The two-body force of the hit at record `at` (contacter h): reduced mass from the
+// counts, the cancelled force (F_h/m_h − Σ w·F_k/m_k)·m, then the contact rule with
+// the geometry the finding lane stored. Strict, in the CPU's order.
+float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn,
+                       float pen, float3 vv, float friction, uint beamOff, uint groupOff, uint groupCount,
+                       uint parity)
+{
+    float imt = nf(nf(selfTerm(alpha, selfInvMass(t1)) + selfTerm(beta, selfInvMass(t2)))
+                   + selfTerm(gamma, selfInvMass(t0)));
+    float inv = nf(selfInvMass(h) + imt);
+    float m = inv > 0.0 ? sdiv(1.0, inv) : 0.0;
+    float3 a3 = sadd3(sadd3(sscale(selfAcc(t1, beamOff, groupOff, groupCount, parity), alpha),
+                            sscale(selfAcc(t2, beamOff, groupOff, groupCount, parity), beta)),
+                      sscale(selfAcc(t0, beamOff, groupOff, groupCount, parity), gamma));
+    float3 fh = sscale(ssub3(selfAcc(h, beamOff, groupOff, groupCount, parity), a3), m);
+    return contactForce(fh, vv, m, nn, boxSurface(), pen, friction);
+}
+
+float3 selfTwoBodyForce(uint at, uint h, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    float alpha = asfloat(gNext[at + 1u]);
+    float beta = asfloat(gNext[at + 2u]);
+    return selfTwoBodyCore(h, gNext[at + 8u], gNext[at + 9u], gNext[at + 10u], alpha, beta,
+                           nf(nf(1.0 - alpha) - beta), asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u])),
+                           asfloat(gNext[at + 15u]), asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u])),
+                           asfloat(gNext[at + 20u]), beamOff, groupOff, groupCount, parity);
+}
+
+// Self-collision's anti-clip test (§36; explicit_beams.rs clip_hit, the order-free
+// rule of explicit_contact.rs clip_test): contacter h at p against triangle t. The
+// side h is kept on: held from last step, or the one it came from when it crossed
+// the plane over the step inside the triangle (both a step back), or, new and in
+// the band over the triangle, the one it is on. 0: no contact; 1: a hit (weights,
+// depth into the contact, normal to h's side); 2: a contact without force (an
+// anti-clip-only triangle, h in front of its plane). `word` the side to record.
+uint selfClip(TriGeo t, uint h, float3 p, float3 origin, float r, out float alpha, out float beta,
+              out float gamma, out float pen, out float3 nn, out uint word)
+{
+    float delta;
+    triangleHit(t, p, r, alpha, beta, gamma, delta);
+    pen = 0.0;
+    nn = t.n;
+    word = 0u;
+    uint tl = t.mi - gP.vehicles - gStatic[t.tn.w * 4u + 1u].x;
+    float side = clipHeld(h, CLIP_SELF, tl);
+    bool over = alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0;
+    bool have = over;
+    if (side == 0.0)
+    {
+        bool crossed = false;
+        TriGeo pf;
+        pf.p0 = ssub3(t.p0, sscale(gNodes[t.tn.x * 3u + 1u].xyz, STEP));
+        float3 b1 = ssub3(nf3(origin + gNodes[t.tn.y * 3u].xyz), sscale(gNodes[t.tn.y * 3u + 1u].xyz, STEP));
+        float3 b2 = ssub3(nf3(origin + gNodes[t.tn.z * 3u].xyz), sscale(gNodes[t.tn.z * 3u + 1u].xyz, STEP));
+        triangleFrame(pf, b1, b2);
+        float3 pp = ssub3(p, sscale(gNodes[h * 3u + 1u].xyz, STEP));
+        float a0;
+        float bb0;
+        float g0;
+        float d0;
+        triangleHit(pf, pp, r, a0, bb0, g0, d0);
+        if ((d0 > 0.0 && delta < 0.0) || (d0 < 0.0 && delta > 0.0))
+        {
+            float sc = sdiv(d0, nf(d0 - delta));
+            float a = nf(a0 + smul(nf(alpha - a0), sc));
+            float b = nf(bb0 + smul(nf(beta - bb0), sc));
+            float g = nf(nf(1.0 - a) - b);
+            if (a >= 0.0 && b >= 0.0 && g >= 0.0)
+            {
+                crossed = true;
+                side = d0 > 0.0 ? 1.0 : -1.0;
+                alpha = a;
+                beta = b;
+                gamma = g;
+                have = true;
+            }
+        }
+        if (!crossed)
+        {
+            if (!(over && abs(delta) <= r)) return 0u;
+            side = delta < 0.0 ? -1.0 : 1.0;
+        }
+    }
+    float d = side * delta;
+    if (!have || !(d <= r && d >= -CLIP_DEPTH)) return 0u;
+    word = clipWord(CLIP_SELF, tl, side);
+    nn = side > 0.0 ? t.n : -t.n;
+    bool only = (t.clip & 2u) != 0u;
+    if (only && d >= 0.0) return 2u;
+    pen = only ? -d : nf(r - d);
+    return 1u;
+}
+
 // Contacter node h against triangle t: when h is within r of the face, the hit is
 // recorded (the throttle's hit flag, and the vehicle's hit list for selfApply).
 void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount,
@@ -2144,7 +2362,7 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
     uint4 tn = t.tn;
     if (h == tn.x || h == tn.y || h == tn.z) return;
     // JBeam mode: a node skips the triangles of its own self-collision group.
-    uint tg = gMisc[t.mi].z & ~TRI_BREAKABLE;
+    uint tg = gMisc[t.mi].z & ~(TRI_BREAKABLE | TRI_ANTI_ONLY);
     if (tg != 0u && uint(gNodes[h * 3u + 2u].w) == tg) return;
     // Spawn exclusions (spec §10.1): the nodes that started inside its range.
     if (gP.triExcl != 0u)
@@ -2163,11 +2381,42 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
     float beta;
     float gamma;
     float delta;
-    if (!triangleHit(t, p, r, alpha, beta, gamma, delta)) return;
+    float3 nn;
+    float pen;
+    if ((t.clip & 1u) != 0u)
+    {
+        // Anti-clip (§36): its contact recorded whether or not it takes a force.
+        uint word;
+        uint c = selfClip(t, h, p, origin, r, alpha, beta, gamma, pen, nn, word);
+        if (c == 0u) return;
+        clipRecord(h, word);
+        if (c == 2u) return;
+    }
+    else
+    {
+        if (!triangleHit(t, p, r, alpha, beta, gamma, delta)) return;
+        nn = t.n;
+        if (delta < 0.0)
+        {
+            nn = -t.n;
+            delta = -delta;
+        }
+        pen = nf(r - delta);
+    }
     gMisc[t.mi].w = 1u;
     gsHit = 1u;
     gsUniformHits = 1u;
     uint v = tn.w;
+    // The two-body rule (spec §36): every hit's nodes count it (all of them, even
+    // past the hit list's room, for selfSerial).
+    bool twoBody = selfTwoBody(v);
+    if (twoBody)
+    {
+        gAcc[gP.selfSplit + h].add(1);
+        gAcc[gP.selfSplit + tn.x].add(1);
+        gAcc[gP.selfSplit + tn.y].add(1);
+        gAcc[gP.selfSplit + tn.z].add(1);
+    }
     uint i = uint(gAcc[hitAcc(v)].add(1));
     if (i < HIT_CAP)
     {
@@ -2179,12 +2428,6 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
         gNext[at + 10u] = tn.z;
         // The contact's geometry (positions and velocities do not change in this
         // phase): selfApply then needs only the node's force.
-        float3 nn = t.n;
-        if (delta < 0.0)
-        {
-            nn = -t.n;
-            delta = -delta;
-        }
         float4 V = gNodes[h * 3u + 1u];
         float4 P0 = gNodes[tn.x * 3u];
         float4 P1 = gNodes[tn.y * 3u];
@@ -2195,7 +2438,6 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
                              + gamma * gNodes[tn.x * 3u + 1u].xyz);
         float mt = alpha * P1.w + beta * P2.w + gamma * P0.w;
         float m = P.w * mt / (P.w + mt);
-        float pen = r - delta;
 #else
         // Strict, in the CPU reference's order.
         float3 vv = ssub3(V.xyz, sadd3(sadd3(sscale(gNodes[tn.y * 3u + 1u].xyz, alpha),
@@ -2203,7 +2445,6 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
                                        sscale(gNodes[tn.x * 3u + 1u].xyz, gamma)));
         float mt = nf(nf(smul(alpha, P1.w) + smul(beta, P2.w)) + smul(gamma, P0.w));
         float m = sdiv(smul(P.w, mt), nf(P.w + mt));
-        float pen = nf(r - delta);
 #endif
         gNext[at + 1u] = asuint(alpha);
         gNext[at + 2u] = asuint(beta);
@@ -2221,7 +2462,7 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
         // earlier hit on its node. Not while beams of this step are pending (their
         // incidence forces are being rewritten).
         uint prov = 0u;
-        if (gAcc[hitAcc(v) + 1u].load() == 0)
+        if (!twoBody && gAcc[hitAcc(v) + 1u].load() == 0)
         {
             hitForce(v, at, gNext[at], int3(0, 0, 0), 0u, origin, r, beamOff, groupOff, groupCount, parity);
             prov = 1u;
@@ -2258,14 +2499,9 @@ bool triangleDead(uint gt)
     return false;
 }
 
-TriGeo triangleGeo(uint gt, float3 origin, float r)
+// A triangle's frame from its three world positions (TriFrame::new).
+void triangleFrame(inout TriGeo t, float3 p1, float3 p2)
 {
-    TriGeo t;
-    t.mi = gP.vehicles + gt;
-    t.tn = gStatic[gP.triBase + gt];
-    t.p0 = nf3(origin + gNodes[t.tn.x * 3u].xyz);
-    float3 p1 = nf3(origin + gNodes[t.tn.y * 3u].xyz);
-    float3 p2 = nf3(origin + gNodes[t.tn.z * 3u].xyz);
     float3 u = nf3(p1 - t.p0);
     float3 w = nf3(p2 - t.p0);
     float3 cr = scross(u, w);
@@ -2277,9 +2513,24 @@ TriGeo triangleGeo(uint gt, float3 origin, float r)
     t.ra = sscale(scross(w, t.n), rd);
     t.rb = sscale(scross(t.n, u), rd);
     t.rn = sscale(scross(u, w), rd);
-    t.lo = min(min(t.p0, p1), p2) - float3(r, r, r);
-    t.hi = max(max(t.p0, p1), p2) + float3(r, r, r);
-    if ((gMisc[t.mi].z & TRI_BREAKABLE) != 0u && triangleDead(gt))
+}
+
+TriGeo triangleGeo(uint gt, float3 origin, float r, uint parity)
+{
+    TriGeo t;
+    t.mi = gP.vehicles + gt;
+    t.tn = gStatic[gP.triBase + gt];
+    t.p0 = nf3(origin + gNodes[t.tn.x * 3u].xyz);
+    float3 p1 = nf3(origin + gNodes[t.tn.y * 3u].xyz);
+    float3 p2 = nf3(origin + gNodes[t.tn.z * 3u].xyz);
+    triangleFrame(t, p1, p2);
+    uint z = gMisc[t.mi].z;
+    t.clip = ((gStatic[t.tn.w * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u ? 1u : 0u) | ((z & TRI_ANTI_ONLY) != 0u ? 2u : 0u);
+    float reach = (t.clip & 1u) != 0u ? triReach(t.tn, r, parity) : r;
+    t.lo = min(min(t.p0, p1), p2) - float3(reach, reach, reach);
+    t.hi = max(max(t.p0, p1), p2) + float3(reach, reach, reach);
+    // A broken triangle (spec §18), or an anti-clip-only one without anti-clip: none.
+    if (((z & TRI_BREAKABLE) != 0u && triangleDead(gt)) || t.clip == 2u)
     {
         t.lo = float3(3.0e38, 3.0e38, 3.0e38);
         t.hi = -t.lo;
@@ -2293,7 +2544,7 @@ void triangleTest(uint gt, uint sub, uint lanes, float3 origin, float r, uint ca
                   uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
-    TriGeo t = triangleGeo(gt, origin, r);
+    TriGeo t = triangleGeo(gt, origin, r, parity);
     for (uint k = sub, kStop = EB_END(k, candCount, lanes); k < kStop; k += lanes)
         tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
 }
@@ -2324,7 +2575,7 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
                   uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
-    TriGeo t = triangleGeo(gt, origin, r);
+    TriGeo t = triangleGeo(gt, origin, r, parity);
     // The box's cells, counted in float: a stretched or non-finite triangle (a
     // flung node) must take the every-candidate path, not overflow an integer
     // product into an unbounded cell loop (a GPU hang).
@@ -2373,7 +2624,7 @@ void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, flo
                        uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
-    TriGeo t = triangleGeo(gt, origin, r);
+    TriGeo t = triangleGeo(gt, origin, r, parity);
     float3 f0 = floor((t.lo - origin) / cell);
     float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
     if (!(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS)))
@@ -2419,15 +2670,17 @@ groupshared uint gsPairs[PAIR_LIST];
 groupshared Atomic<uint> gsPairCount;
 
 void trianglePairs(uint t, uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
-                   uint candCount)
+                   uint candCount, uint parity)
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
     uint4 tn = gStatic[gP.triBase + gt];
     float3 p0 = nf3(origin + gNodes[tn.x * 3u].xyz);
     float3 p1 = nf3(origin + gNodes[tn.y * 3u].xyz);
     float3 p2 = nf3(origin + gNodes[tn.z * 3u].xyz);
-    float3 lo = min(min(p0, p1), p2) - float3(r, r, r);
-    float3 hi = max(max(p0, p1), p2) + float3(r, r, r);
+    // The box tryContact tests (triangleGeo's: with anti-clip, its reach).
+    float reach = triReach(tn, r, parity);
+    float3 lo = min(min(p0, p1), p2) - float3(reach, reach, reach);
+    float3 hi = max(max(p0, p1), p2) + float3(reach, reach, reach);
     bool every = true;
     int3 c0 = int3(0, 0, 0);
     int3 span = int3(0, 0, 0);
@@ -3370,12 +3623,12 @@ int3 hitShareFixed(uint at, uint roles)
 // Strict, in the CPU reference's order (the test-only EB_DET_HITS build of hitForce
 // keeps the frozen baseline's expressions instead).
 float3 hitContact(float4 V, float4 P, float4 P0, float4 P1, float4 P2, float3 v0, float3 v1, float3 v2, float alpha,
-                  float beta, float gamma, float delta, float3 nn, float3 fb, float3 a3, float r)
+                  float beta, float gamma, float pen, float3 nn, float3 fb, float3 a3)
 {
     float3 vv = ssub3(V.xyz, sadd3(sadd3(sscale(v1, alpha), sscale(v2, beta)), sscale(v0, gamma)));
     float mt = nf(nf(smul(alpha, P1.w) + smul(beta, P2.w)) + smul(gamma, P0.w));
     float m = sdiv(smul(P.w, mt), nf(P.w + mt));
-    return contactForce(sadd3(fb, a3), vv, m, nn, boxSurface(), nf(r - delta), V.w);
+    return contactForce(sadd3(fb, a3), vv, m, nn, boxSurface(), pen, V.w);
 }
 
 // The force of the hit at record `at` (key `key`) of vehicle v: its node's force,
@@ -3444,6 +3697,17 @@ uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r,
         if (gNext[at + 6u] != 0u) continue;
         uint key = gNext[at];
         uint h = nodeOff + (key & 0xFFFFu);
+        if (selfTwoBody(v))
+        {
+            // Two-body (spec §36): no hit reads another's force.
+            float3 f2 = selfTwoBodyForce(at, h, beamOff, groupOff, groupCount, parity);
+            gNext[at + 3u] = asuint(f2.x);
+            gNext[at + 4u] = asuint(f2.y);
+            gNext[at + 5u] = asuint(f2.z);
+            gNext[at + 6u] = round != 0u ? round : SELF_ROUNDS + 1u;
+            selfAddOne(at, key, nodeOff);
+            continue;
+        }
         int3 sum = int3(0, 0, 0);
         bool ready = true;
         for (uint j = 0u, jStop = EB_END(j, count, 1u); j < jStop; j++)
@@ -3537,7 +3801,7 @@ void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uin
     {
         uint gt = r1.x + t;
         if (asint(gMisc[gP.vehicles + gt].x) > 0) continue;
-        TriGeo T = triangleGeo(gt, origin, r);
+        TriGeo T = triangleGeo(gt, origin, r, parity);
         uint4 tn = T.tn;
         for (uint k = 0u, kStop = EB_END(k, r2.y, 1u); k < kStop; k++)
         {
@@ -3550,22 +3814,46 @@ void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uin
             float beta;
             float gamma;
             float delta;
-            if (!triangleHit(T, p, r, alpha, beta, gamma, delta)) continue;
-            gMisc[T.mi].w = 1u;
-            float3 nn = T.n;
-            if (delta < 0.0)
+            float3 nn;
+            float pen;
+            if ((T.clip & 1u) != 0u)
             {
-                nn = -T.n;
-                delta = -delta;
+                // Anti-clip: the test alone (tryContact recorded the sides).
+                uint word;
+                if (selfClip(T, h, p, origin, r, alpha, beta, gamma, pen, nn, word) != 1u) continue;
             }
+            else
+            {
+                if (!triangleHit(T, p, r, alpha, beta, gamma, delta)) continue;
+                nn = T.n;
+                if (delta < 0.0)
+                {
+                    nn = -T.n;
+                    delta = -delta;
+                }
+                pen = nf(r - delta);
+            }
+            gMisc[T.mi].w = 1u;
             float4 V = gNodes[h * 3u + 1u];
             float4 P0 = gNodes[tn.x * 3u];
             float4 P1 = gNodes[tn.y * 3u];
             float4 P2 = gNodes[tn.z * 3u];
-            float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount,
-                                parity, false);
-            float3 f = hitContact(V, P, P0, P1, P2, gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz,
-                                  gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, delta, nn, fb, accForce(h), r);
+            float3 f;
+            if (selfTwoBody(v))
+            {
+                float3 vv = ssub3(V.xyz, sadd3(sadd3(sscale(gNodes[tn.y * 3u + 1u].xyz, alpha),
+                                                     sscale(gNodes[tn.z * 3u + 1u].xyz, beta)),
+                                               sscale(gNodes[tn.x * 3u + 1u].xyz, gamma)));
+                f = selfTwoBodyCore(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, pen, vv, V.w, beamOff,
+                                    groupOff, groupCount, parity);
+            }
+            else
+            {
+                float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff,
+                                    groupCount, parity, false);
+                f = hitContact(V, P, P0, P1, P2, gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz,
+                               gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, pen, nn, fb, accForce(h));
+            }
             accAdd(h, f);
             accAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
             accAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
@@ -3767,6 +4055,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             gsPairCount.store(0u);
             gAcc[hitAcc(v)].store(0);
             gAcc[hitAcc(v) + 1u].store(0);
+            clipVmaxClear(v, parity);
             gsUniformHits = 0u;
             gsUniformOpen = 0u;
         }
@@ -3842,7 +4131,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             for (uint p = rl, pStop = EB_END(p, listedB * lanes, stride); p < pStop && rl < stride; p += stride)
             {
                 uint t = triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
-                trianglePairs(t, triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount);
+                trianglePairs(t, triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, parity);
             }
         }
         sync();
@@ -3915,7 +4204,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             for (uint i = lane, iStop = EB_END(i, pairs, LANES); i < iStop; i += LANES)
             {
                 uint e = gsPairs[i];
-                tryContact(triangleGeo(triOff + (e >> 16), origin, range), gLists[candOff + (e & 0xFFFFu)], origin,
+                tryContact(triangleGeo(triOff + (e >> 16), origin, range, parity), gLists[candOff + (e & 0xFFFFu)], origin,
                            range, beamOff, groupOff, groupCount, parity);
             }
         }
@@ -4113,6 +4402,7 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
             gAcc[gP.testedBase + i * 2u + (vehicleStep(i) & 1u)].store(0);
             gAcc[hitAcc(i)].store(0);
             gAcc[hitAcc(i) + 1u].store(0);
+            clipVmaxClear(i, vehicleStep(i) & 1u);
         }
     }
     ebLoopCapFlush();
@@ -4188,7 +4478,7 @@ void grabApplyWide()
 void triangleGridWide(uint gt, uint sub, uint v, float3 origin, float r, float cell, uint candOff, uint candCount,
                       uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    TriGeo t = triangleGeo(gt, origin, r);
+    TriGeo t = triangleGeo(gt, origin, r, parity);
     // The box's cells, counted in float: a stretched or non-finite triangle (a
     // flung node) must take the every-candidate path, not overflow an integer
     // product into an unbounded cell loop (a GPU hang).
@@ -4865,6 +5155,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     {
         gAcc[hitAcc(v)].store(0);
         gAcc[hitAcc(v) + 1u].store(0);
+        clipVmaxClear(v, parity);
         gsUniformHits = 0u;
         gsUniformOpen = 0u;
     }
@@ -5035,7 +5326,7 @@ void triangleGridAt(uint gt, uint sub, float3 origin, float r, float cell, uint 
                     uint beamOff, uint groupOff, uint groupCount, uint parity, uint offBase)
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
-    TriGeo t = triangleGeo(gt, origin, r);
+    TriGeo t = triangleGeo(gt, origin, r, parity);
     float3 f0 = floor((t.lo - origin) / cell);
     float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
     if (!(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS)))
@@ -5068,15 +5359,17 @@ void triangleGridAt(uint gt, uint sub, float3 origin, float r, float cell, uint 
 
 // trianglePairs into member m's slice of the pair list.
 void trianglePairsM(uint m, uint t, uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
-                    uint candCount)
+                    uint candCount, uint parity)
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
     uint4 tn = gStatic[gP.triBase + gt];
     float3 p0 = nf3(origin + gNodes[tn.x * 3u].xyz);
     float3 p1 = nf3(origin + gNodes[tn.y * 3u].xyz);
     float3 p2 = nf3(origin + gNodes[tn.z * 3u].xyz);
-    float3 lo = min(min(p0, p1), p2) - float3(r, r, r);
-    float3 hi = max(max(p0, p1), p2) + float3(r, r, r);
+    // The box tryContact tests (triangleGeo's: with anti-clip, its reach).
+    float reach = triReach(tn, r, parity);
+    float3 lo = min(min(p0, p1), p2) - float3(reach, reach, reach);
+    float3 hi = max(max(p0, p1), p2) + float3(reach, reach, reach);
     bool every = true;
     int3 c0 = int3(0, 0, 0);
     int3 span = int3(0, 0, 0);
@@ -5180,6 +5473,7 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         gsPairCountM[m].store(0u);
         gAcc[hitAcc(v)].store(0);
         gAcc[hitAcc(v) + 1u].store(0);
+        clipVmaxClear(v, parity);
     }
     sync();
     {
@@ -5290,7 +5584,7 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         for (uint q = rl, qStop = EB_END(q, listed * lanes, stride); q < qStop && rl < stride; q += stride)
         {
             uint t = gNext[listBase + q / lanes];
-            trianglePairsM(m, t, triOff + t, q % lanes, lanes, origin, range, cell, candOff, candCount);
+            trianglePairsM(m, t, triOff + t, q % lanes, lanes, origin, range, cell, candOff, candCount, parity);
         }
     }
     sync();
@@ -5360,7 +5654,7 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         for (uint i = pl, iStop = EB_END(i, pairs, P); i < iStop; i += P)
         {
             uint e = gsPairs[m * PAIR_PART + i];
-            tryContact(triangleGeo(triOff + (e >> 16), origin, range), gLists[candOff + (e & 0xFFFFu)], origin, range,
+            tryContact(triangleGeo(triOff + (e >> 16), origin, range, parity), gLists[candOff + (e & 0xFFFFu)], origin, range,
                        beamOff, groupOff, groupCount, parity);
         }
     }
@@ -5478,15 +5772,15 @@ struct VvTri
     bool solvable;
     float3 lo;
     float3 hi;
+    // Anti-clip (§36): bit 0 the owner has it, bit 1 the triangle is anti-clip
+    // only; `travel` its fastest node's travel over the step (with any anti-clip).
+    uint clip;
+    float travel;
 };
 
-VvTri vvTriangle(uint gt, float3 origin, float r)
+// A contact triangle's frame from its world positions (ContactFrame::new).
+void vvFrame(inout VvTri t, float3 p1, float3 p2)
 {
-    VvTri t;
-    t.tn = gStatic[gP.triBase + gt];
-    t.p0 = nf3(origin + gNodes[t.tn.x * 3u].xyz);
-    float3 p1 = nf3(origin + gNodes[t.tn.y * 3u].xyz);
-    float3 p2 = nf3(origin + gNodes[t.tn.z * 3u].xyz);
     float3 u = ssub3(p1, t.p0);
     float3 w = ssub3(p2, t.p0);
     float3 cr = scross(u, w);
@@ -5498,10 +5792,23 @@ VvTri vvTriangle(uint gt, float3 origin, float r)
     t.ra = sscale(scross(w, t.n), rd);
     t.rb = sscale(scross(t.n, u), rd);
     t.rn = sscale(scross(u, w), rd);
+}
+
+VvTri vvTriangle(uint gt, float3 origin, float r)
+{
+    VvTri t;
+    t.tn = gStatic[gP.triBase + gt];
+    t.p0 = nf3(origin + gNodes[t.tn.x * 3u].xyz);
+    float3 p1 = nf3(origin + gNodes[t.tn.y * 3u].xyz);
+    float3 p2 = nf3(origin + gNodes[t.tn.z * 3u].xyz);
+    vvFrame(t, p1, p2);
     float3 r3 = float3(r, r, r);
     t.lo = ssub3(min(min(t.p0, p1), p2), r3);
     t.hi = sadd3(max(max(t.p0, p1), p2), r3);
-    if ((gMisc[gP.vehicles + gt].z & TRI_BREAKABLE) != 0u && triangleDead(gt))
+    uint z = gMisc[gP.vehicles + gt].z;
+    t.clip = ((gStatic[t.tn.w * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u ? 1u : 0u) | ((z & TRI_ANTI_ONLY) != 0u ? 2u : 0u);
+    t.travel = gP.clipMem != 0u ? smul(clipTriSpeed(t.tn), STEP) : 0.0;
+    if (((z & TRI_BREAKABLE) != 0u && triangleDead(gt)) || t.clip == 2u)
     {
         t.lo = float3(3.0e38, 3.0e38, 3.0e38);
         t.hi = -t.lo;
@@ -5585,22 +5892,26 @@ float3 vvPointForce(uint h, uint vh, uint parity)
     return fh;
 }
 
-bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, uint slot)
+// The pair has anti-clip (§36): the owner or the partner vehicle vh.
+bool vvAnti(VvTri t, uint vh) { return (t.clip & 1u) != 0u || (gStatic[vh * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u; }
+
+// The candidate box test (explicit_contact.rs triangle_loop): x in the triangle's
+// box grown by the range; with anti-clip also by the triangle's and the point's
+// travel over the step and CLIP_DEPTH.
+bool vvInBox(VvTri t, float3 x, uint h, bool anti)
 {
-    float3 q = ssub3(p, t.p0);
-    float alpha = 0.0;
-    float beta = 0.0;
-    float delta = 0.0;
-    if (t.solvable)
-    {
-        alpha = sdot(t.ra, q);
-        beta = sdot(t.rb, q);
-        delta = sdot(t.rn, q);
-    }
-    float gamma = nf(nf(1.0 - alpha) - beta);
-    if (!(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r)) return false;
-    // The side: a vote of h and its spawn-time beam neighbours (its incidence
-    // entries' far ends, in beam order).
+    if (!anti) return !(any(x < t.lo) || any(x > t.hi));
+    float3 v = gNodes[h * 3u + 1u].xyz;
+    float pad = nf(nf(t.travel + smul(ssqrt(sdot(v, v)), STEP)) + CLIP_DEPTH);
+    float3 p3 = float3(pad, pad, pad);
+    return all(x >= ssub3(t.lo, p3)) && all(x <= sadd3(t.hi, p3));
+}
+
+// The side vote (spec §5.3) of h (of vehicle vh) at distance delta: true behind.
+bool vvVote(VvTri t, uint h, uint vh, float delta)
+{
+    // A vote of h and its spawn-time beam neighbours (its incidence entries' far
+    // ends, in beam order).
     uint4 info = gStatic[gP.nodeInfoBase + h];
     int score = delta >= 0.0 ? 3 : -3;
     if (info.z > 3u)
@@ -5625,13 +5936,126 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
         for (; k < kStop; k++)
             score += sdot(t.n, ssub3(nf3(ob + gNodes[gLists[base + k] * 3u].xyz), t.p0)) >= 0.0 ? 1 : -1;
     }
-    float3 nn = t.n;
-    if (score < 0)
+    return score < 0;
+}
+
+// Vehicle contact's anti-clip test (§36; explicit_contact.rs triangle_loop with
+// clip_test): partner point h (vehicle vh) at p against owner triangle gt. As
+// selfClip, the band's side by the vote. 0: no contact; 1: a hit; 2: a contact
+// without force (anti-clip only, in front). `word` the side to record.
+uint vvClip(VvTri t, uint gt, uint h, float3 p, uint vh, float r, out float alpha, out float beta, out float gamma,
+            out float pen, out float3 nn, out uint word)
+{
+    float3 q = ssub3(p, t.p0);
+    alpha = 0.0;
+    beta = 0.0;
+    float delta = 0.0;
+    if (t.solvable)
     {
-        nn = -t.n;
-        delta = -delta;
+        alpha = sdot(t.ra, q);
+        beta = sdot(t.rb, q);
+        delta = sdot(t.rn, q);
     }
-    float pen = nf(r - delta);
+    gamma = nf(nf(1.0 - alpha) - beta);
+    pen = 0.0;
+    nn = t.n;
+    word = 0u;
+    uint va = t.tn.w;
+    uint tl = gt - gStatic[va * 4u + 1u].x;
+    float side = clipHeld(h, va, tl);
+    bool over = alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0;
+    bool have = over;
+    if (side == 0.0)
+    {
+        bool crossed = false;
+        float3 oa = asfloat(gMisc[va].xyz);
+        VvTri pf;
+        pf.p0 = ssub3(t.p0, sscale(gNodes[t.tn.x * 3u + 1u].xyz, STEP));
+        float3 b1 = ssub3(nf3(oa + gNodes[t.tn.y * 3u].xyz), sscale(gNodes[t.tn.y * 3u + 1u].xyz, STEP));
+        float3 b2 = ssub3(nf3(oa + gNodes[t.tn.z * 3u].xyz), sscale(gNodes[t.tn.z * 3u + 1u].xyz, STEP));
+        vvFrame(pf, b1, b2);
+        float3 q0 = ssub3(ssub3(p, sscale(gNodes[h * 3u + 1u].xyz, STEP)), pf.p0);
+        float a0 = 0.0;
+        float b0 = 0.0;
+        float d0 = 0.0;
+        if (pf.solvable)
+        {
+            a0 = sdot(pf.ra, q0);
+            b0 = sdot(pf.rb, q0);
+            d0 = sdot(pf.rn, q0);
+        }
+        if ((d0 > 0.0 && delta < 0.0) || (d0 < 0.0 && delta > 0.0))
+        {
+            float sc = sdiv(d0, nf(d0 - delta));
+            float a = nf(a0 + smul(nf(alpha - a0), sc));
+            float b = nf(b0 + smul(nf(beta - b0), sc));
+            float g = nf(nf(1.0 - a) - b);
+            if (a >= 0.0 && b >= 0.0 && g >= 0.0)
+            {
+                crossed = true;
+                side = d0 > 0.0 ? 1.0 : -1.0;
+                alpha = a;
+                beta = b;
+                gamma = g;
+                have = true;
+            }
+        }
+        if (!crossed)
+        {
+            if (!(over && abs(delta) <= r)) return 0u;
+            side = vvVote(t, h, vh, delta) ? -1.0 : 1.0;
+        }
+    }
+    float d = side * delta;
+    if (!have || !(d <= r && d >= -CLIP_DEPTH)) return 0u;
+    word = clipWord(va, tl, side);
+    nn = side > 0.0 ? t.n : -t.n;
+    bool only = (t.clip & 2u) != 0u;
+    if (only && d >= 0.0) return 2u;
+    pen = only ? -d : nf(r - d);
+    return 1u;
+}
+
+// The find phase's hit test (once per tested pair): with anti-clip the contact's
+// side is recorded, hit or not.
+bool vvFind(VvTri t, uint gt, uint h, float3 p, uint vh, float r, bool anti);
+// The hit test alone (a re-walk).
+bool vvHitTest(VvTri t, uint gt, uint h, float3 p, uint vh, float r, bool anti);
+
+bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, uint slot)
+{
+    float alpha;
+    float beta;
+    float gamma;
+    float pen;
+    float3 nn;
+    if (vvAnti(t, vh))
+    {
+        uint word;
+        if (vvClip(t, gt, h, p, vh, r, alpha, beta, gamma, pen, nn, word) != 1u) return false;
+    }
+    else
+    {
+        float3 q = ssub3(p, t.p0);
+        alpha = 0.0;
+        beta = 0.0;
+        float delta = 0.0;
+        if (t.solvable)
+        {
+            alpha = sdot(t.ra, q);
+            beta = sdot(t.rb, q);
+            delta = sdot(t.rn, q);
+        }
+        gamma = nf(nf(1.0 - alpha) - beta);
+        if (!(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r)) return false;
+        nn = t.n;
+        if (vvVote(t, h, vh, delta))
+        {
+            nn = -t.n;
+            delta = -delta;
+        }
+        pen = nf(r - delta);
+    }
     float4 P = gNodes[h * 3u];
     float4 V = gNodes[h * 3u + 1u];
     float4 P0 = gNodes[t.tn.x * 3u];
@@ -5695,6 +6119,32 @@ bool vvInBand(VvTri t, float3 p, float r)
     return alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r;
 }
 
+bool vvFind(VvTri t, uint gt, uint h, float3 p, uint vh, float r, bool anti)
+{
+    if (!anti) return vvInBand(t, p, r);
+    float a;
+    float b;
+    float g;
+    float pen;
+    float3 nn;
+    uint word;
+    uint c = vvClip(t, gt, h, p, vh, r, a, b, g, pen, nn, word);
+    if (c != 0u) clipRecord(h, word);
+    return c == 1u;
+}
+
+bool vvHitTest(VvTri t, uint gt, uint h, float3 p, uint vh, float r, bool anti)
+{
+    if (!anti) return vvInBand(t, p, r);
+    float a;
+    float b;
+    float g;
+    float pen;
+    float3 nn;
+    uint word;
+    return vvClip(t, gt, h, p, vh, r, a, b, g, pen, nn, word) == 1u;
+}
+
 // A tested triangle's marks (had candidates, hit; spec §8's throttle inputs): two
 // plain words per triangle in gNext after the tested list, set by the triangle's
 // sub-lanes and read and cleared by vvThrottleEnd. One word per mark, so lanes
@@ -5723,10 +6173,12 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[gP.vvRun + runOff + e];
-        if (any(E.xyz < t.lo) || any(E.xyz > t.hi)) continue;
         uint h = asuint(E.w);
+        uint vh = gStatic[gP.nodeInfoBase + h].w;
+        bool anti = vvAnti(t, vh);
+        if (!vvInBox(t, E.xyz, h, anti)) continue;
         cand = true;
-        if (!vvInBand(t, E.xyz, r)) continue;
+        if (!vvFind(t, gt, h, E.xyz, vh, r, anti)) continue;
         hit = true;
         vvSplitCount(t, h, 0u);
         // The force later, one lane per hit (the vote and the force read many
@@ -5739,7 +6191,7 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
         }
         else
         {
-            vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity, 0u);
+            vvTry(t, gt, h, E.xyz, vh, r, parity, 0u);
         }
     }
     vvMark(gt, cand, hit);
@@ -5805,21 +6257,32 @@ void vvThrottleEnd(uint gt)
     gNext[mark + 1u] = 0u;
     int cwait = asint(c.x);
     if (hit) cwait = 0;
-    else if (!had) cwait = cwait + 1;
+    else if (!had) cwait = min(cwait + 1, throttleCap(gt));
     gMisc[gP.vvTri + gt] = uint4(asuint(cwait), c.y, 0u, 0u);
 }
 
 // Triangle gt of owner va: its box grown by the range overlaps the box `lo..hi`
 // (the partners' boxes' union), so it may have candidates.
-bool vvNearBox(uint gt, uint va, float r, float3 blo, float3 bhi)
+// `extra`: anti-clip's reach past the range (a bound: CLIP_DEPTH, the owner's and
+// the partners' fastest travel, and a millimetre for rounding).
+bool vvNearBox(uint gt, uint va, float r, float3 blo, float3 bhi, float extra)
 {
     uint4 tn = gStatic[gP.triBase + gt];
     float3 o = asfloat(gMisc[va].xyz);
     float3 p0 = nf3(o + gNodes[tn.x * 3u].xyz);
     float3 p1 = nf3(o + gNodes[tn.y * 3u].xyz);
     float3 p2 = nf3(o + gNodes[tn.z * 3u].xyz);
-    float3 r3 = float3(r, r, r);
+    float3 r3 = float3(r, r, r) + float3(extra, extra, extra);
     return vvOverlap(ssub3(min(min(p0, p1), p2), r3), sadd3(max(max(p0, p1), p2), r3), blo, bhi);
+}
+
+// Anti-clip's prefilter reach past the range (vvNearBox, the candidate runs): a
+// bound on CLIP_DEPTH plus the travel of the triangle (the owner's fastest node)
+// and of the point (`vmaxB` the partners' fastest), plus a millimetre.
+float vvClipExtra(uint va, float vmaxB, uint parity)
+{
+    if (gP.clipMem == 0u) return 0.0;
+    return CLIP_DEPTH + (clipVmax(va, parity) + vmaxB) * STEP + 0.001;
 }
 
 void vvClearCounters()
@@ -5918,13 +6381,16 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         // The partners' boxes' union (their contact points all lie in it).
         float3 plo = float3(3.0e38, 3.0e38, 3.0e38);
         float3 phi = -plo;
+        float vmaxB = 0.0;
         for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
         {
             if (m == a || gNext[vvPartnerAt(off, m)] == 0u) continue;
             uint kb = vvBoxKey(vvMember(off, m), parity);
             plo = min(plo, float3(vvUnkey(gAcc[kb].load()), vvUnkey(gAcc[kb + 1u].load()), vvUnkey(gAcc[kb + 2u].load())));
             phi = max(phi, float3(vvUnkey(gAcc[kb + 3u].load()), vvUnkey(gAcc[kb + 4u].load()), vvUnkey(gAcc[kb + 5u].load())));
+            if (gP.clipMem != 0u) vmaxB = max(vmaxB, clipVmax(vvMember(off, m), parity));
         }
+        float extra = vvClipExtra(va, vmaxB, parity);
         for (uint t = lane, tStop = EB_END(t, ra1.y, LANES); t < tStop; t += LANES)
         {
             uint4 c = gMisc[gP.vvTri + ra1.x + t];
@@ -5943,9 +6409,9 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             cwait = VV_MAX_WAIT < cidle ? VV_MAX_WAIT : cidle;
             // A triangle whose box (grown by the range) meets no partner's box has
             // no candidate: its throttle update at once, no tests.
-            if (!vvNearBox(ra1.x + t, va, range, plo, phi))
+            if (!vvNearBox(ra1.x + t, va, range, plo, phi, extra))
             {
-                gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(cwait + 1), 0u, 0u, 0u);
+                gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(min(cwait + 1, throttleCap(ra1.x + t))), 0u, 0u, 0u);
                 continue;
             }
             gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(cwait), 0u, 0u, 0u);
@@ -5960,6 +6426,8 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             float3 r3 = float3(range, range, range);
             float3 clo = ssub3(blo, r3);
             float3 chi = sadd3(bhi, r3);
+            // Anti-clip: the point's own travel (per point) on top of the bound.
+            float ownerReach = gP.clipMem != 0u ? CLIP_DEPTH + clipVmax(va, parity) * STEP + 0.001 : 0.0;
             for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
             {
                 if (m == a || gNext[vvPartnerAt(off, m)] == 0u) continue;
@@ -5970,7 +6438,14 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
                 {
                     uint h = gLists[cp.x + i];
                     float3 x = nf3(o + gNodes[h * 3u].xyz);
-                    if (any(x < clo) || any(x > chi)) continue;
+                    float ex = 0.0;
+                    if (gP.clipMem != 0u)
+                    {
+                        float3 vh3 = gNodes[h * 3u + 1u].xyz;
+                        ex = ownerReach + sqrt(dot(vh3, vh3)) * STEP;
+                    }
+                    float3 e3 = float3(ex, ex, ex);
+                    if (any(x < clo - e3) || any(x > chi + e3)) continue;
                     gBeams[gP.vvRun + runOff + gsVvCands[q].add(1u)] = float4(x, asfloat(h));
                 }
             }
@@ -6064,10 +6539,12 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[run + e];
-        if (any(E.xyz < t.lo) || any(E.xyz > t.hi)) continue;
         uint h = asuint(E.w);
+        uint vh = gStatic[gP.nodeInfoBase + h].w;
+        bool anti = vvAnti(t, vh);
+        if (!vvInBox(t, E.xyz, h, anti)) continue;
         cand = true;
-        if (!vvInBand(t, E.xyz, r)) continue;
+        if (!vvFind(t, gt, h, E.xyz, vh, r, anti)) continue;
         hit = true;
         vvSplitCount(t, h, a);
         uint i = gsVvHit4[a].add(1u);
@@ -6087,10 +6564,12 @@ void vvTriangleCandsApply(uint va, uint gt, uint sub, uint subs, uint run, uint 
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[run + e];
-        if (any(E.xyz < t.lo) || any(E.xyz > t.hi)) continue;
         uint h = asuint(E.w);
-        if (!vvInBand(t, E.xyz, r)) continue;
-        vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity, slot);
+        uint vh = gStatic[gP.nodeInfoBase + h].w;
+        bool anti = vvAnti(t, vh);
+        if (!vvInBox(t, E.xyz, h, anti)) continue;
+        if (!vvHitTest(t, gt, h, E.xyz, vh, r, anti)) continue;
+        vvTry(t, gt, h, E.xyz, vh, r, parity, slot);
     }
 }
 
@@ -6199,16 +6678,18 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             float range = asfloat(gStatic[va * 4u + 3u].z);
             float3 plo = float3(3.0e38, 3.0e38, 3.0e38);
             float3 phi = -plo;
+            float vmaxB = 0.0;
             for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
             {
                 if ((gsVvPair[a * VV_PART + m] & 1u) == 0u) continue;
                 uint kb = vvBoxKey(vvMember(off, m), parity);
                 plo = min(plo, float3(vvUnkey(gAcc[kb].load()), vvUnkey(gAcc[kb + 1u].load()), vvUnkey(gAcc[kb + 2u].load())));
                 phi = max(phi, float3(vvUnkey(gAcc[kb + 3u].load()), vvUnkey(gAcc[kb + 4u].load()), vvUnkey(gAcc[kb + 5u].load())));
+                if (gP.clipMem != 0u) vmaxB = max(vmaxB, clipVmax(vvMember(off, m), parity));
             }
-            if (!vvNearBox(gt, va, range, plo, phi))
+            if (!vvNearBox(gt, va, range, plo, phi, vvClipExtra(va, vmaxB, parity)))
             {
-                gMisc[gP.vvTri + gt] = uint4(fix ? 0u : asuint(cwait + 1), 0u, 0u, 0u);
+                gMisc[gP.vvTri + gt] = uint4(fix ? 0u : asuint(min(cwait + 1, throttleCap(gt))), 0u, 0u, 0u);
                 continue;
             }
             gMisc[gP.vvTri + gt] = uint4(asuint(cwait), 0u, 0u, 0u);
@@ -6225,6 +6706,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             float3 r3 = float3(range, range, range);
             float3 clo = ssub3(float3(vvUnkey(gAcc[key].load()), vvUnkey(gAcc[key + 1u].load()), vvUnkey(gAcc[key + 2u].load())), r3);
             float3 chi = sadd3(float3(vvUnkey(gAcc[key + 3u].load()), vvUnkey(gAcc[key + 4u].load()), vvUnkey(gAcc[key + 5u].load())), r3);
+            float ownerReach = gP.clipMem != 0u ? CLIP_DEPTH + clipVmax(va, parity) * STEP + 0.001 : 0.0;
             uint run = vvRunSmall(runOff, points, a);
             for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
             {
@@ -6236,7 +6718,14 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                 {
                     uint h = gLists[cp.x + i];
                     float3 x = nf3(o + gNodes[h * 3u].xyz);
-                    if (any(x < clo) || any(x > chi)) continue;
+                    float ex = 0.0;
+                    if (gP.clipMem != 0u)
+                    {
+                        float3 vh3 = gNodes[h * 3u + 1u].xyz;
+                        ex = ownerReach + sqrt(dot(vh3, vh3)) * STEP;
+                    }
+                    float3 e3 = float3(ex, ex, ex);
+                    if (any(x < clo - e3) || any(x > chi + e3)) continue;
                     gBeams[run + gsVvCand4[a].add(1u)] = float4(x, asfloat(h));
                 }
             }

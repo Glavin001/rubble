@@ -60,6 +60,140 @@ pub struct ContactFrame {
     pub inv: Option<[Vec3; 3]>,
 }
 
+/// The swept crossing (anti-clip, spec §36): point x_prev → x against the triangle
+/// whose frame was `prev` and is `now` over the step. When the point went from one
+/// side of the plane to the other and the crossing (linear in the step) is inside
+/// the triangle: the weights (α, β, γ) at the crossing and the side it came from
+/// (+1: the normal's side). α and β are interpolated, γ = (1 − α) − β (the weights
+/// sum to one, and the GPU keeps α and β only).
+pub fn swept_crossing(
+    prev: &ContactFrame,
+    now: &ContactFrame,
+    x_prev: Vec3,
+    x: Vec3,
+) -> Option<([f32; 3], f32)> {
+    let (a0, b0, _, d0) = prev.local(x_prev);
+    let (a1, b1, _, d1) = now.local(x);
+    crossing_weights(a0, b0, d0, a1, b1, d1)
+}
+
+/// The crossing of a point between two frames' local coordinates (α, β, δ before
+/// and after): the weights at the plane, if inside, and the side it came from.
+pub fn crossing_weights(
+    a0: f32,
+    b0: f32,
+    d0: f32,
+    a1: f32,
+    b1: f32,
+    d1: f32,
+) -> Option<([f32; 3], f32)> {
+    if !((d0 > 0.0 && d1 < 0.0) || (d0 < 0.0 && d1 > 0.0)) {
+        return None;
+    }
+    let s = d0 / (d0 - d1);
+    let a = a0 + (a1 - a0) * s;
+    let b = b0 + (b1 - b0) * s;
+    let w = [a, b, (1.0 - a) - b];
+    if w.iter().all(|&c| c >= 0.0) {
+        Some((w, if d0 > 0.0 { 1.0 } else { -1.0 }))
+    } else {
+        None
+    }
+}
+
+/// Anti-clip's side memory depth (§36): a remembered node is pushed back to its side
+/// while it is at most this far behind the triangle (m). **Choice** (the soft-body
+/// solver's anti-clip keeps 30 cm; a node 10 cm through a panel is a failure; BeamNG
+/// documents that a triangle with no node within 10 cm goes inactive).
+pub const CLIP_DEPTH: f32 = 0.1;
+
+/// Anti-clip's side memory (§36), per node four words: the sides it holds this
+/// step (m0, m1: last step's contacts) and those it records this step (p0, p1),
+/// each a [`clip_word`] or [`CLIP_EMPTY`]. Memory is the node's contacts of the
+/// step before: a contact (a hit, or an anti-clip-only triangle's side check)
+/// records its triangle and side; the node phase makes the recorded words the
+/// held ones. Two slots, the two smallest words recorded (an order-free rule, as
+/// the GPU's lanes record in any order: a node in contact with three triangles at
+/// once keeps the two of smallest key).
+pub const CLIP_EMPTY: u32 = 0x7FFF_FFFF;
+/// The owner of self-collision keys (vehicle contact keys: the owner vehicle).
+pub const CLIP_SELF: u32 = 1023;
+/// Triangles per vehicle anti-clip keys can name (the last key is CLIP_EMPTY's).
+pub const CLIP_MAX_TRIANGLES: u32 = (1 << 20) - 1;
+
+/// The memory word of triangle `t` of owner `owner` (a vehicle below 1023, or
+/// [`CLIP_SELF`]) on side `side` (±1): owner << 21 | t << 1 | (side > 0).
+pub fn clip_word(owner: u32, t: u32, side: f32) -> u32 {
+    owner << 21 | t << 1 | (side > 0.0) as u32
+}
+
+/// The held side (±1) of node memory `c` for triangle `t` of `owner`, if any.
+pub fn clip_side(c: &[u32; 4], owner: u32, t: u32) -> Option<f32> {
+    let key = owner << 20 | t;
+    for &w in &c[..2] {
+        if w != CLIP_EMPTY && w >> 1 == key {
+            return Some(if w & 1 != 0 { 1.0 } else { -1.0 });
+        }
+    }
+    None
+}
+
+/// Records `word` for the next step (the two smallest of the step's words).
+pub fn clip_record(c: &mut [u32; 4], word: u32) {
+    if word < c[2] {
+        c[3] = c[2];
+        c[2] = word;
+    } else if word < c[3] {
+        c[3] = word;
+    }
+}
+
+/// The node phase: the recorded words become the held ones.
+pub fn clip_roll(c: &mut [u32; 4]) {
+    c[0] = c[2];
+    c[1] = c[3];
+    c[2] = CLIP_EMPTY;
+    c[3] = CLIP_EMPTY;
+}
+
+/// The anti-clip test (§36) of a point against a triangle, from the point's local
+/// coordinates now (α, β, γ, δ) and, when it holds no side for the triangle, its
+/// crossing of the plane over the step: the side it is kept on (held, or the one
+/// it came from, or, new and in the band over the triangle, the one it is on),
+/// the weights (the crossing's when it crossed) and its distance in front of that
+/// side, d = side·δ. A contact when the weights are inside and −CLIP_DEPTH ≤ d ≤ r.
+pub struct ClipTest {
+    pub side: f32,
+    pub w: [f32; 3],
+    pub d: f32,
+}
+
+/// [`ClipTest`]: `held` the remembered side, `crossing` the swept crossing (only
+/// asked for when nothing is held); `None` when the point is not in contact.
+pub fn clip_test(
+    local: (f32, f32, f32, f32),
+    held: Option<f32>,
+    crossing: impl FnOnce() -> Option<([f32; 3], f32)>,
+    r: f32,
+    band_side: impl FnOnce() -> f32,
+) -> Option<ClipTest> {
+    let (alpha, beta, gamma, delta) = local;
+    let over = alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0;
+    let (side, w) = match held {
+        Some(s) => (s, over.then_some([alpha, beta, gamma])),
+        None => match crossing() {
+            Some((w, s)) => (s, Some(w)),
+            None if over && delta.abs() <= r => (band_side(), Some([alpha, beta, gamma])),
+            None => return None,
+        },
+    };
+    let d = side * delta;
+    match w {
+        Some(w) if d <= r && d >= -CLIP_DEPTH => Some(ClipTest { side, w, d }),
+        _ => None,
+    }
+}
+
 impl ContactFrame {
     pub fn new(p0: Vec3, p1: Vec3, p2: Vec3) -> Self {
         let u = p1 - p0;
@@ -361,6 +495,12 @@ impl ExplicitBeamsWorld {
         let rr = Vec3::splat(r);
         let mut cands: Vec<(usize, u32)> = Vec::new();
         let mut hits: Vec<Hit> = Vec::new();
+        // The owner's profile without the throttle (§36): a triangle never waits.
+        let cap = if self.vehicles[a].settings.triangle_throttle {
+            i32::MAX
+        } else {
+            0
+        };
         for t in 0..self.vehicles[a].triangles.len() {
             let [mut cwait, mut cidle] = self.vehicles[a].contact_throttle[t];
             if self.throttle {
@@ -377,18 +517,45 @@ impl ExplicitBeamsWorld {
             let [i0, i1, i2] = self.vehicles[a].triangles[t].nodes;
             let wa = &self.world[a];
             let (p0, p1, p2) = (wa[i0 as usize], wa[i1 as usize], wa[i2 as usize]);
-            let (lo, hi) = if self.vehicles[a].tri_dead.get(t).copied().unwrap_or(false) {
+            // A broken triangle, or an anti-clip-only one while its vehicle's
+            // anti-clip is off: no candidates.
+            let dead = self.vehicles[a].tri_dead.get(t).copied().unwrap_or(false)
+                || (self.vehicles[a].tri_anti_only(t) && !self.vehicles[a].anti_clip);
+            let (lo, hi) = if dead {
                 // A broken JBeam triangle (jbeam-semantics-spec.md §18): no candidates.
                 (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY))
             } else {
                 (p0.min(p1).min(p2) - rr, p0.max(p1).max(p2) + rr)
             };
             cands.clear();
+            // Anti-clip (§36): the box also reaches what crossed it over the step
+            // (with anti-clip on the owner or the partner).
+            let anti_a = self.vehicles[a].anti_clip && !dead;
+            let tri_travel = if !dead {
+                let va = &self.vehicles[a];
+                [i0, i1, i2]
+                    .iter()
+                    .map(|&i| va.nodes[i as usize].vel.length())
+                    .fold(0.0f32, f32::max)
+                    * STEP
+            } else {
+                0.0
+            };
             for &b in partners {
                 let wb = &self.world[b];
+                let anti = anti_a || (self.vehicles[b].anti_clip && !dead);
                 for &h in &self.vehicles[b].contact_points {
                     let x = wb[h as usize];
-                    if x.cmpge(lo).all() && x.cmple(hi).all() {
+                    let pad = if anti {
+                        Vec3::splat(
+                            tri_travel
+                                + self.vehicles[b].nodes[h as usize].vel.length() * STEP
+                                + CLIP_DEPTH,
+                        )
+                    } else {
+                        Vec3::ZERO
+                    };
+                    if x.cmpge(lo - pad).all() && x.cmple(hi + pad).all() {
                         cands.push((b, h));
                     }
                 }
@@ -401,6 +568,74 @@ impl ExplicitBeamsWorld {
                     stats.candidates += 1;
                     let x = self.world[b][h as usize];
                     let (alpha, beta, gamma, delta) = frame.local(x);
+                    // Anti-clip (§36): the side a point is kept on is the one it
+                    // held for this triangle last step (it was in contact), or the
+                    // one it came from when it crossed the plane over the step
+                    // inside the triangle, or (new, in the band) the side vote's;
+                    // it is pushed back to that side from up to CLIP_DEPTH behind.
+                    // Each contact records its side for the next step.
+                    let anti = self.vehicles[a].anti_clip || self.vehicles[b].anti_clip;
+                    if anti {
+                        if self.vehicles[b].clip_sides.len() != self.vehicles[b].nodes.len() {
+                            let n = self.vehicles[b].nodes.len();
+                            self.vehicles[b].clip_sides = vec![[CLIP_EMPTY; 4]; n];
+                        }
+                        let held =
+                            clip_side(&self.vehicles[b].clip_sides[h as usize], a as u32, t as u32);
+                        let va = &self.vehicles[a];
+                        let vb = &self.vehicles[b];
+                        let wb = &self.world[b];
+                        let crossing = || {
+                            let back = |i: u32, p: Vec3| p - va.nodes[i as usize].vel * STEP;
+                            let pf = ContactFrame::new(back(i0, p0), back(i1, p1), back(i2, p2));
+                            let x_prev = x - vb.nodes[h as usize].vel * STEP;
+                            swept_crossing(&pf, &frame, x_prev, x)
+                        };
+                        let vote = || {
+                            let (s, e) = (
+                                vb.neighbour_start[h as usize] as usize,
+                                vb.neighbour_start[h as usize + 1] as usize,
+                            );
+                            let behind = vote_behind(
+                                delta,
+                                frame.n,
+                                p0,
+                                vb.neighbours[s..e].iter().map(|&j| wb[j as usize]),
+                            );
+                            if behind {
+                                -1.0
+                            } else {
+                                1.0
+                            }
+                        };
+                        let only = va.tri_anti_only(t);
+                        let Some(c) =
+                            clip_test((alpha, beta, gamma, delta), held, crossing, r, vote)
+                        else {
+                            continue;
+                        };
+                        clip_record(
+                            &mut self.vehicles[b].clip_sides[h as usize],
+                            clip_word(a as u32, t as u32, c.side),
+                        );
+                        // An anti-clip-only triangle (BeamNG NONCOLLIDABLE): no force
+                        // in front of its plane; behind it, pushed back to the plane.
+                        let p = if only { -c.d } else { r - c.d };
+                        if only && c.d >= 0.0 {
+                            continue;
+                        }
+                        stats.hits += 1;
+                        cwait = 0;
+                        hits.push(Hit {
+                            tri: [i0, i1, i2],
+                            w: c.w,
+                            b,
+                            h,
+                            n: frame.n * c.side,
+                            p,
+                        });
+                        continue;
+                    }
                     if !(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && delta.abs() <= r) {
                         continue;
                     }
@@ -433,7 +668,7 @@ impl ExplicitBeamsWorld {
                     });
                 }
             }
-            self.vehicles[a].contact_throttle[t] = [cwait, cidle];
+            self.vehicles[a].contact_throttle[t] = [cwait.min(cap), cidle];
         }
         if hits.is_empty() {
             return;

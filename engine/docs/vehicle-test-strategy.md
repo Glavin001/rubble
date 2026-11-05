@@ -127,7 +127,7 @@ The ledger (`ExplicitBeamsWorld::enable_ledger`) runs in every scene. The checke
 | Visual drift | ≤ the contact band, 2 cm | contact band |
 | Lid vs rear body; rear-body RMS | 5 mm | **Choice**: millimetres. The lid's inertia at 47 g on about 12 kg is ≤ 5.5 kN, well inside FMVSS 206's 8.9–11 kN. |
 | Ripple visible | 1 mm | **Choice**: about half a pixel at 2 m |
-| Panel lowest mode | ≥ 48 Hz | exact: deflection a/ω² ≤ 5 mm at a = 47 g, the top of the NHTSA peak range |
+| Panel lowest mode | ≥ 48 Hz | exact: deflection a/ω² ≤ 5 mm at a = 47 g, the top of the NHTSA peak range. **Not met by real hoods**: measured first modes are 17.7–41.5 Hz, and design targets are 25–40 Hz (`vehicle-authoring.md`, "Lids: measured modal data"); the measured band is the lids' target |
 
 ### Results
 
@@ -142,7 +142,7 @@ The ledger (`ExplicitBeamsWorld::enable_ledger`) runs in every scene. The checke
 | Lid / rear body (head-on) | 172/18 mm; 9.9/70 mm | 253/126 mm; 29.6/173 mm | FAIL, ignored |
 | Ripple from 0.5 s, worst part | bootlid 17.9 mm, bonnet 14.7, body 7.4 | bumper_r 15.0, bonnet 7.4, bootlid 6.4 | FAIL, ignored |
 | Head-on contacts faster than r/h | 15 of 300,040 (59.9 m/s) | 15 of 197,234 (59.6 m/s) | FAIL, ignored |
-| Visual drift from the collision skin (wall / pole), sampled every 0.1 s | 10.7 / 19.2 mm | 13.2 / 10.3 mm | **pass** (live) |
+| Visual drift from the collision skin (wall / pole), sampled every 0.1 s | 10.7 / 19.2 mm | 15.1 / 10.0 mm | **pass** (live) |
 | Pole: far side elastic, far doors closed | 40 past, 22 broken; hardware holds | 89 past, 10 broken; door_f_r.latch_secondary and door_r_r.hinge_upper break | FAIL, ignored |
 | Panels' lowest mode ≥ 48 Hz | bootlid 5.4, bonnet 6.7, doors 31–37, fender 31 Hz | bootlid 2.5, bonnet 4.8, doors 17–27, fender 91 Hz | FAIL, ignored |
 | Body sheet edges yield in tension at ≥ (√3/4)σ_y·t·L | 1029 of 1267 below (median 0.06) | 1132 of 1651 below (median 0.155) | FAIL, ignored. Fixed upstream at 1444ea75 (`rubble_tension_yield`); un-ignore after merging. |

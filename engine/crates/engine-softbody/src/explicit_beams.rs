@@ -43,6 +43,9 @@ pub const REBASE_RADIUS: f32 = 100.0;
 pub const TURBULENCE: f32 = 0.005;
 /// Collision range when the file gives none (m).
 pub const DEFAULT_COLLISION_RANGE: f32 = 0.02;
+/// The BeamNG profile's contact band (spec §36): BeamNG documents a triangle
+/// thickness of 2.5 cm ("a node starts feeling a triangle at around 2.5cm").
+pub const BEAMNG_COLLISION_RANGE: f32 = 0.025;
 /// Collision triangles a vehicle may have (a file with more fails to spawn).
 pub const MAX_COLLISION_TRIANGLES: usize = 3000;
 
@@ -86,6 +89,12 @@ pub struct ExplicitBeamsSettings {
     pub drag: bool,
     /// Pseudo-random turbulence on top of the drag (needs `drag`).
     pub turbulence: bool,
+    /// Rigs of Rods' idle-triangle throttle: a collision triangle with no
+    /// candidate is skipped for up to 12 steps, in self-collision and vehicle
+    /// contact (`explicit-beams.md` §3). Off in the BeamNG profile
+    /// ([`Self::beamng`], jbeam-semantics-spec.md §36): every triangle is tested
+    /// every step.
+    pub triangle_throttle: bool,
 }
 
 impl Default for ExplicitBeamsSettings {
@@ -94,6 +103,20 @@ impl Default for ExplicitBeamsSettings {
             fast_inv_sqrt: true,
             drag: true,
             turbulence: true,
+            triangle_throttle: true,
+        }
+    }
+}
+
+impl ExplicitBeamsSettings {
+    /// The BeamNG profile (jbeam-semantics-spec.md §36): JBeam content and a
+    /// `.truck` with a `rubble_beamng_profile` line. Each switch can be turned
+    /// back alone; the default (Rigs of Rods) profile is unchanged.
+    pub fn beamng(self) -> Self {
+        Self {
+            fast_inv_sqrt: false,
+            triangle_throttle: false,
+            ..self
         }
     }
 }
@@ -857,6 +880,20 @@ pub struct ExplicitBeams {
     /// rule, the contacter's whole force as against a static surface (bit for bit
     /// as before; the `.truck` default until the T-bone leak is fixed).
     pub two_body_contact: bool,
+    /// Anti-clip (BeamNG profile, jbeam-semantics-spec.md §36): a contacter that
+    /// crossed a collision triangle's plane over the last step, inside the
+    /// triangle, is caught from the side it came from (a swept test, whatever its
+    /// speed), in self-collision and vehicle contact. Off: RoR's band test alone.
+    pub anti_clip: bool,
+    /// Anti-clip's side memory (§36; `explicit_contact::clip_word`): per node the
+    /// sides held this step and those recorded for the next. Sized when anti-clip
+    /// first runs; rolled by the node pass.
+    pub clip_sides: Vec<[u32; 4]>,
+    /// Per collision triangle: anti-clip only (BeamNG `NONCOLLIDABLE`, §36): no
+    /// force in front of its plane, a node behind it pushed back to the plane. Such
+    /// triangles follow the collision ones in [`Self::triangles`] and take part only
+    /// while [`Self::anti_clip`] is on. Empty: none.
+    pub anti_only_tris: Vec<bool>,
     /// The contact-force log (jbeam-semantics-spec.md §32): per node the sum of
     /// its contacts' force magnitudes per step, and the contact breaks it drives
     /// (`None`: off, the default; [`Self::enable_contact_force`]).
@@ -1222,6 +1259,9 @@ impl ExplicitBeams {
             contact_every_node: false,
             rest_pose: None,
             two_body_contact: false,
+            anti_clip: false,
+            clip_sides: Vec::new(),
+            anti_only_tris: Vec::new(),
             contact_force: None,
             tread: Vec::new(),
             damp_filters: Vec::new(),
@@ -1585,7 +1625,12 @@ impl ExplicitBeams {
             s.rest_pose = Some((position.y + g - low).max(0.0));
         }
         s.add_slidenodes(&file);
-        s.collision_range = desc.collision_range;
+        // The BeamNG profile's band (§36) unless the file sets its own.
+        s.collision_range = if file.beamng_profile && !file.collision_range_set {
+            BEAMNG_COLLISION_RANGE
+        } else {
+            desc.collision_range
+        };
         s.add_triangles(&desc);
         s.add_aero(&file, airfoil);
         s.finish();
@@ -1598,6 +1643,13 @@ impl ExplicitBeams {
         // `rubble_exact_lengths` (Rubble's extension): exact beam lengths.
         if file.exact_lengths {
             s.settings.fast_inv_sqrt = false;
+        }
+        // `rubble_beamng_profile` (Rubble's extension, spec §36): the BeamNG
+        // profile's switches and two-body vehicle contact.
+        if file.beamng_profile {
+            s.settings = s.settings.beamng();
+            s.two_body_contact = true;
+            s.anti_clip = true;
         }
         // `rubble_contact_breaks` (Rubble's extension, spec §32).
         if !file.contact_breaks.is_empty() {
@@ -2036,10 +2088,10 @@ impl ExplicitBeams {
         let mut warnings = desc.warnings.clone();
         // Exact beam lengths: the fast inverse square root is a Rigs of Rods
         // compatibility rule (its 0.2 % error strains stiff beams at rest).
-        let settings = ExplicitBeamsSettings {
-            fast_inv_sqrt: false,
-            ..settings
-        };
+        // JBeam content runs the BeamNG profile (§36; exact beam lengths among
+        // its switches: the fast inverse square root is a Rigs of Rods rule whose
+        // 0.2 % error strains stiff beams at rest).
+        let settings = settings.beamng();
         let mut s = Self::spawn_nodes(desc, position, 0.0, velocity, settings);
         for b in &desc.beams {
             s.push_jbeam_beam(b);
@@ -2188,6 +2240,8 @@ impl ExplicitBeams {
             DEFAULT_COLLISION_RANGE
         };
         s.add_triangles(desc);
+        // NONCOLLIDABLE triangles: anti-clip only (§36), after the collision ones.
+        s.add_anti_only_triangles(desc);
         s.add_triangle_breaks(desc, &mut warnings);
         if s.settings.drag {
             // JBeam mode's air drag is the triangles' (spec §31), not the nodes'.
@@ -2215,6 +2269,7 @@ impl ExplicitBeams {
                 .collect();
         }
         s.two_body_contact = true;
+        s.anti_clip = true;
         let pairs = s.spawn_exclusions();
         if pairs > 0 {
             warnings.push(format!(
@@ -2392,6 +2447,24 @@ impl ExplicitBeams {
                 wait: 0,
                 idle: 0,
             });
+        }
+    }
+
+    /// The desc's NONCOLLIDABLE triangles as anti-clip-only collision triangles
+    /// (BeamNG: "NONCOLLIDABLE triangles still have anti-clip"; spec §36), after
+    /// the collision ones.
+    pub(crate) fn add_anti_only_triangles(&mut self, desc: &SoftVehicleDesc) {
+        let before = self.triangles.len();
+        for t in desc.triangles.iter().filter(|t| !t.collision) {
+            self.triangles.push(Triangle {
+                nodes: t.nodes,
+                wait: 0,
+                idle: 0,
+            });
+        }
+        if self.triangles.len() > before {
+            self.anti_only_tris = vec![false; before];
+            self.anti_only_tris.resize(self.triangles.len(), true);
         }
     }
 
@@ -2745,6 +2818,10 @@ impl ExplicitBeams {
     }
 
     fn node_pass(&mut self) {
+        // Anti-clip's side memory (§36): last step's contacts are held now.
+        for c in &mut self.clip_sides {
+            crate::explicit_contact::clip_roll(c);
+        }
         let h = STEP;
         let origin = self.origin;
         let ground = self.ground;
@@ -3178,6 +3255,15 @@ impl ExplicitBeams {
         }
         let r = self.collision_range;
         let h = STEP;
+        // Without the throttle (§36) a triangle never waits: its count stays ≤ 0.
+        let cap = if self.settings.triangle_throttle { i32::MAX } else { 0 };
+        // The two-body rule (spec §36, as vehicle contact's §10.3): the step's hits
+        // are found first (positions only), then applied in the same order with
+        // mass splitting and the pair's relative acceleration from the forces at
+        // the pass's start. Without it RoR's rule applies each hit as it is found.
+        let two_body = self.two_body_contact;
+        let vmax = if self.anti_clip { self.max_speed() } else { 0.0 };
+        let mut found: Vec<(u32, [u32; 3], [f32; 3], f32, Vec3)> = Vec::new();
         for t in 0..self.triangles.len() {
             let tri = &mut self.triangles[t];
             if tri.wait > 0 {
@@ -3189,17 +3275,31 @@ impl ExplicitBeams {
                 tri.idle = 0;
             }
             let [i0, i1, i2] = tri.nodes;
-            if !self.tri_dead.is_empty() && self.tri_dead[t] {
-                // A broken triangle (spec §18): no candidates.
-                self.triangles[t].wait += 1;
+            if (!self.tri_dead.is_empty() && self.tri_dead[t]) || (self.tri_anti_only(t) && !self.anti_clip) {
+                // A broken triangle (spec §18), or an anti-clip-only one with
+                // anti-clip off: no candidates.
+                self.triangles[t].wait = (self.triangles[t].wait + 1).min(cap);
                 continue;
             }
             let tri_group = self.triangle_self_group(t);
             let world = |i: u32| self.origin + self.nodes[i as usize].pos;
             let (p0, p1, p2) = (world(i0), world(i1), world(i2));
             let frame = TriFrame::new(p0, p1, p2);
-            let lo = p0.min(p1).min(p2) - Vec3::splat(r);
-            let hi = p0.max(p1).max(p2) + Vec3::splat(r);
+            // Anti-clip (§36): the box also reaches what crossed it over the step
+            // or is remembered up to CLIP_DEPTH behind it.
+            let anti = self.anti_clip;
+            let reach = if anti {
+                let tv = [i0, i1, i2]
+                    .iter()
+                    .map(|&i| self.nodes[i as usize].vel.length())
+                    .fold(0.0f32, f32::max);
+                r + (tv + vmax) * STEP + crate::explicit_contact::CLIP_DEPTH
+            } else {
+                r
+            };
+            let lo = p0.min(p1).min(p2) - Vec3::splat(reach);
+            let hi = p0.max(p1).max(p2) + Vec3::splat(reach);
+            let only = self.tri_anti_only(t);
             let mut hit = false;
             // The candidates to test, in candidate order: all of them, or those in
             // the grid buckets the padded box covers.
@@ -3238,11 +3338,21 @@ impl ExplicitBeams {
                 if p.cmplt(lo).any() || p.cmpgt(hi).any() {
                     continue;
                 }
-                let Some((alpha, beta, gamma, delta, n)) = frame.hit(p, r) else {
+                // (α, β, γ, depth into the contact, normal).
+                let found_hit = if anti {
+                    self.clip_hit(t, hn, p, &frame, [i0, i1, i2], r, only)
+                } else {
+                    frame.hit(p, r).map(|(a, b, g, d, n)| (a, b, g, r - d, n))
+                };
+                let Some((alpha, beta, gamma, pen, n)) = found_hit else {
                     continue;
                 };
                 hit = true;
                 self.last_contacts += 1;
+                if two_body {
+                    found.push((hn, [i0, i1, i2], [alpha, beta, gamma], pen, n));
+                    continue;
+                }
                 let node = self.nodes[hn as usize];
                 let (n0, n1, n2) = (
                     self.nodes[i0 as usize],
@@ -3259,7 +3369,7 @@ impl ExplicitBeams {
                     n,
                     h,
                     &ContactSurface::BOX,
-                    r - delta,
+                    pen,
                     node.friction,
                 );
                 self.nodes[hn as usize].force += f;
@@ -3278,7 +3388,138 @@ impl ExplicitBeams {
             if hit {
                 tri.wait = -20000;
             } else {
-                tri.wait += 1;
+                tri.wait = (tri.wait + 1).min(cap);
+            }
+        }
+        if !found.is_empty() {
+            self.apply_two_body_self_hits(&found);
+        }
+    }
+
+    /// The fastest node's speed (m/s).
+    pub fn max_speed(&self) -> f32 {
+        self.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max)
+    }
+
+    /// Whether collision triangle `t` is anti-clip only (BeamNG `NONCOLLIDABLE`).
+    pub fn tri_anti_only(&self, t: usize) -> bool {
+        self.anti_only_tris.get(t).copied().unwrap_or(false)
+    }
+
+    /// Self-collision's anti-clip hit test (§36; vehicle contact's rule in
+    /// `explicit_contact.rs`): node `hn` at `p` against triangle `t`
+    /// (`explicit_contact::clip_test`), recording its side when in contact; the hit
+    /// (α, β, γ, depth, normal) when it takes a force: an anti-clip-only triangle
+    /// (`only`) none in front of its plane and the depth behind it to the plane.
+    #[allow(clippy::too_many_arguments)]
+    fn clip_hit(
+        &mut self,
+        t: usize,
+        hn: u32,
+        p: Vec3,
+        frame: &TriFrame,
+        tri: [u32; 3],
+        r: f32,
+        only: bool,
+    ) -> Option<(f32, f32, f32, f32, Vec3)> {
+        use crate::explicit_contact::{
+            clip_record, clip_side, clip_test, clip_word, crossing_weights, CLIP_EMPTY, CLIP_SELF,
+        };
+        if self.clip_sides.len() != self.nodes.len() {
+            self.clip_sides = vec![[CLIP_EMPTY; 4]; self.nodes.len()];
+        }
+        let local = frame.local(p);
+        let held = clip_side(&self.clip_sides[hn as usize], CLIP_SELF, t as u32);
+        let crossing = || {
+            let back = |i: u32| self.origin + self.nodes[i as usize].pos - self.nodes[i as usize].vel * STEP;
+            let pf = TriFrame::new(back(tri[0]), back(tri[1]), back(tri[2]));
+            let p_prev = p - self.nodes[hn as usize].vel * STEP;
+            let (a0, b0, _, d0) = pf.local(p_prev);
+            crossing_weights(a0, b0, d0, local.0, local.1, local.3)
+        };
+        let delta = local.3;
+        let c = clip_test(local, held, crossing, r, || if delta < 0.0 { -1.0 } else { 1.0 })?;
+        clip_record(&mut self.clip_sides[hn as usize], clip_word(CLIP_SELF, t as u32, c.side));
+        if only && c.d >= 0.0 {
+            return None;
+        }
+        let pen = if only { -c.d } else { r - c.d };
+        Some((c.w[0], c.w[1], c.w[2], pen, frame.n * c.side))
+    }
+
+    /// Self-collision's two-body rule (spec §36; vehicle contact's §10.3 within
+    /// one vehicle): every node of the step's hits (as the contacter, or a vertex
+    /// of the hit's triangle) is k sub-bodies of mass m/k (an immovable node has no
+    /// inverse mass); the triangle point's inverse mass Σ w²·k/m; the reduced mass
+    /// m = 1/(k_h/m_h + Σ w²·k/m); the cancelled force (F_h/m_h − Σ w·F_k/m_k)·m
+    /// from the forces at the pass's start, in place of RoR's whole F_h (which
+    /// moves the contacter's own load onto the triangle's nodes). Hits in the
+    /// order they were found (triangles in order, then candidates).
+    fn apply_two_body_self_hits(&mut self, found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)]) {
+        let mut split = vec![0u32; self.nodes.len()];
+        for (hn, tri, _, _, _) in found {
+            split[*hn as usize] += 1;
+            for &i in tri {
+                split[i as usize] += 1;
+            }
+        }
+        let pass: Vec<Vec3> = self.nodes.iter().map(|n| n.force).collect();
+        let im = |n: &Node, k: u32| {
+            if n.has(NODE_IMMOVABLE) {
+                0.0
+            } else {
+                k as f32 / n.mass
+            }
+        };
+        let acc = |f: Vec3, n: &Node| {
+            if n.has(NODE_IMMOVABLE) {
+                Vec3::ZERO
+            } else {
+                f / n.mass
+            }
+        };
+        for &(hn, [i0, i1, i2], [alpha, beta, gamma], depth, n) in found {
+            let node = self.nodes[hn as usize];
+            let (n0, n1, n2) = (
+                self.nodes[i0 as usize],
+                self.nodes[i1 as usize],
+                self.nodes[i2 as usize],
+            );
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let imh = im(&node, split[hn as usize]);
+            let imt = crate::explicit_contact::two_body_inverse_mass(
+                [
+                    im(&n1, split[i1 as usize]),
+                    im(&n2, split[i2 as usize]),
+                    im(&n0, split[i0 as usize]),
+                ],
+                [alpha, beta, gamma],
+            );
+            let inv = imh + imt;
+            let m = if inv > 0.0 { 1.0 / inv } else { 0.0 };
+            let at = acc(pass[i1 as usize], &n1) * alpha
+                + acc(pass[i2 as usize], &n2) * beta
+                + acc(pass[i0 as usize], &n0) * gamma;
+            let fh = (acc(pass[hn as usize], &node) - at) * m;
+            let f = contact_force(
+                fh,
+                v,
+                m,
+                n,
+                STEP,
+                &ContactSurface::BOX,
+                depth,
+                node.friction,
+            );
+            self.nodes[hn as usize].force += f;
+            self.nodes[i1 as usize].force -= f * alpha;
+            self.nodes[i2 as usize].force -= f * beta;
+            self.nodes[i0 as usize].force -= f * gamma;
+            if let Some(l) = self.contact_force.as_mut() {
+                l.add(hn as usize, f);
+                l.add(i1 as usize, f * alpha);
+                l.add(i2 as usize, f * beta);
+                l.add(i0 as usize, f * gamma);
             }
         }
     }
@@ -4039,6 +4280,16 @@ impl TriFrame {
             [w.cross(n) * r, n.cross(u) * r, u.cross(w) * r]
         });
         Self { p0, n, inv }
+    }
+
+    /// (α, β, γ, δ) of `p`, δ signed along the normal.
+    pub fn local(&self, p: Vec3) -> (f32, f32, f32, f32) {
+        let q = p - self.p0;
+        let (alpha, beta, delta) = match self.inv {
+            Some([ra, rb, rd]) => (ra.dot(q), rb.dot(q), rd.dot(q)),
+            None => (0.0, 0.0, 0.0),
+        };
+        (alpha, beta, 1.0 - alpha - beta, delta)
     }
 
     /// (α, β, γ, δ, normal) when `p` is over the triangle within `r` of its plane;
