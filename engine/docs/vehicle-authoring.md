@@ -1508,6 +1508,40 @@ measures without).
   - the boot lid's mode;
   - the skin's tension field (q).
 
+### q's load path (2026-11-05, latest)
+
+`Q_CUT=<y>` gives the platen's load across a horizontal plane at the end of
+the 127 mm push: the vertical force of every beam crossing the plane, summed
+by member, with the body's own beams binned by side and position
+(`Q_CUT_WHO=1` lists them). sedan1 at the belt plane (y 1.05) carries
+110 kN:
+
+| Member | kN |
+|---|---|
+| B-pillars | 26 + 12 |
+| A-pillars | 19 + 0 |
+| C-pillars | about 0 |
+| The body's beams in no member | about 50 |
+
+- **The body's beams.** The largest are long beams, 1.1–1.6 m, from the
+  B-pillar's top joint (node 536) down to the sill at floor_x1 and floor_x3,
+  and to the A- and C-pillar bases. They carry up to 12 kN each.
+  - Some of these are the cabin's lumped shear panels (`cabin_x`, the door
+    rings' X, `hinge_x`).
+  - The 536 → sill beams at ±0.5 m are not braces: they stay with
+    `BRACES=0`. Their origin is not yet traced.
+- **Measured without the lumped panels** (`BRACES=0`; `RING_BRACES=0` drops
+  the door rings only):
+  - q falls from 8.37× to 6.45×, and p is unchanged (23.5 kN);
+  - but the body-in-white's torsion falls from 10.3 to 4.0 kN·m/deg,
+    against the measured 12.3.
+
+  The panels stand in for shear stiffness that the bound-capped skin does not
+  have, so they stay for now.
+- **Next.** Trace the 536 → sill beams. Then give the lumped panels the
+  section-cut treatment: their yield as the aperture's racking mechanism
+  load, not a strut's. A real roof's strength is the pillars' bending.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
