@@ -112,6 +112,7 @@ static const uint FLAG_SHAPES = 64u;
 // Vehicle contact's two-body rule (jbeam-semantics-spec.md §10.3): a hit where this
 // vehicle is the owner or the partner splits masses and cancels a share.
 static const uint FLAG_TWO_BODY = 128u;
+static const uint FLAG_CFORCE = 256u; // the contact-force log (jbeam-semantics-spec.md §32)
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -201,6 +202,9 @@ struct Params
     uint loopCapWord; // gAcc: the loop-cap flag (see EB_LOOP_CAP)
     uint vvSplit; // gAcc: two-body mass splitting counts, per node: its triangle hits, then VV_PART slots of its point hits (0: no two-body vehicle)
     uint vvSnap; // gBeams: per node its force at the contact pass's start (two-body contact)
+    uint cfAcc; // gAcc: the contact-force log, per node (this step's sum, last step's, peak), fixed point (0: off)
+    uint cfNode; // gLists: per node its contact break (break group, 0 none; force N's bits)
+    uint cfPend; // gAcc: per group slot its contact-break state (0 idle, 1 set off, 2 done)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -452,6 +456,49 @@ uint groupSlot(uint parity, uint groupOff, uint g)
     return parity * gP.groupTotal + groupOff + g;
 }
 
+// --- The contact-force log (jbeam-semantics-spec.md §32; explicit_beams.rs's
+// ContactForceLog): per node the sum of its contacts' force magnitudes in a step,
+// fixed point; the node phase moves a complete step's sum to `last` (and the
+// peak) and tests the node's contact break, which the next beam phase sets off
+// once as if by its first beam. Separate functions, each behind an early return.
+void cfAddMagnitude(uint gi, float m)
+{
+    if (gP.cfAcc == 0u) return;
+    uint v = gStatic[gP.nodeInfoBase + gi].w;
+    if ((gStatic[v * 4u + 3u].x & FLAG_CFORCE) == 0u) return;
+    gAcc[gP.cfAcc + 3u * gi].add(toFixed(m));
+}
+void cfAdd(uint gi, float3 f)
+{
+    if (gP.cfAcc == 0u) return;
+    cfAddMagnitude(gi, ssqrt(sdot(f, f)));
+}
+void cfRoll(uint gi, uint groupOff, uint flagsV)
+{
+    if (gP.cfAcc == 0u || (flagsV & FLAG_CFORCE) == 0u) return;
+    uint at = gP.cfAcc + 3u * gi;
+    int s = gAcc[at].load();
+    gAcc[at + 1u].store(s);
+    if (s > gAcc[at + 2u].load()) gAcc[at + 2u].store(s);
+    gAcc[at].store(0);
+    uint g = gLists[gP.cfNode + 2u * gi];
+    if (g != 0u && float(s) * (1.0 / FIXED) > asfloat(gLists[gP.cfNode + 2u * gi + 1u]))
+        gAcc[gP.cfPend + groupOff + g].max(1);
+}
+// Beam gj's group (its own) set off by the last step's contact force: the first
+// lane to take the state from 1 to 2 sets the group off as master 0.
+void cfFire(uint gj, uint groupOff, uint parity)
+{
+    if (gP.cfPend == 0u) return;
+    int g = abs(asint(gStatic[gP.beamBase + gj * 3u].w));
+    if (g == 0) return;
+    uint at = gP.cfPend + groupOff + uint(g);
+    if (gAcc[at].load() != 1) return;
+    if (gAcc[at].exchange(2) != 1) return;
+    gGroups[groupSlot(parity, groupOff, uint(g))].min(0u);
+    gGroups[groupSlot(parity, groupOff, 0u)].min(0u);
+}
+
 // Beam j's group break as a node phase sees it: true for a beam after the first
 // master that broke its group (step parity `parity`), which then drops the force it
 // computed; when `mark`, any beam of such a group is marked broken.
@@ -587,7 +634,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
                           groupCount, hits, false);
         return;
     }
-    if ((flagsV & FLAG_SHAPES) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE)) != 0u)
     {
         nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                          groupCount, hits, false);
@@ -681,7 +728,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
         return nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                  groupOff, groupCount, hits, true);
     }
-    if ((flagsV & FLAG_SHAPES) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE)) != 0u)
     {
         return nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                 groupOff, groupCount, hits, true);
@@ -879,6 +926,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     if (solo && any(abs(P.xyz - gsVvBounds[0]) > gsVvBounds[1])) vvReportOutside(vehicle);
 #endif
     float4 V = gNodes[gi * 3u + 1u];
+    cfRoll(gi, groupOff, flagsV);
     float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -902,6 +950,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
         {
             float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
+            cfAdd(gi, c);
             f += c;
         }
         for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
@@ -924,7 +973,12 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
                 }
                 else
                     n = shapeNormal(lo4.w, gP.boxBase + hi4.w, x);
-                if (n.w != 0.0) f += contactForce(f, vel, mass, n.xyz, boxSurface(), 0.0, V.w);
+                if (n.w != 0.0)
+                {
+                    float3 c = contactForce(f, vel, mass, n.xyz, boxSurface(), 0.0, V.w);
+                    cfAdd(gi, c);
+                    f += c;
+                }
             }
         }
     }
@@ -1690,6 +1744,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
 
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
 {
+    cfFire(gj, groupOff, parity);
     float4 s1 = gBeams[gj * 2u + 1u];
     if (s1.z != 0.0)
     {
@@ -3204,6 +3259,10 @@ void selfAddOne(uint at, uint key, uint nodeOff)
     accAdd(gNext[at + 9u], hitShare(f, 2u, alpha, beta, gamma));
     accAdd(gNext[at + 10u], hitShare(f, 3u, alpha, beta, gamma));
     accAdd(gNext[at + 8u], hitShare(f, 4u, alpha, beta, gamma));
+    cfAdd(nodeOff + (key & 0xFFFFu), f);
+    cfAdd(gNext[at + 9u], hitShare(f, 2u, alpha, beta, gamma));
+    cfAdd(gNext[at + 10u], hitShare(f, 3u, alpha, beta, gamma));
+    cfAdd(gNext[at + 8u], hitShare(f, 4u, alpha, beta, gamma));
 }
 
 // One round over vehicle v's hits (lane `sub` of `lanes`): every open hit whose
@@ -3350,6 +3409,10 @@ void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uin
             accAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
             accAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
             accAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
+            cfAdd(h, f);
+            cfAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
+            cfAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
+            cfAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
         }
     }
 }
@@ -5443,6 +5506,10 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
     accAdd(t.tn.y, -sscale(f, alpha));
     accAdd(t.tn.z, -sscale(f, beta));
     accAdd(t.tn.x, -sscale(f, gamma));
+    cfAdd(h, f);
+    cfAdd(t.tn.y, sscale(f, alpha));
+    cfAdd(t.tn.z, sscale(f, beta));
+    cfAdd(t.tn.x, sscale(f, gamma));
     return true;
 }
 

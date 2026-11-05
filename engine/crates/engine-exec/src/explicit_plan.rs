@@ -86,7 +86,12 @@ impl CouplingLayout {
             cap.bodies <= cap.shapes && cap.shapes <= 1024 && cap.planes < 1 << 16,
             "explicit coupling: at most 1024 shapes (and no more bodies) and 65535 planes per vehicle"
         );
-        Self { cap, vehicles, misc_base, acc_base }
+        Self {
+            cap,
+            vehicles,
+            misc_base,
+            acc_base,
+        }
     }
     /// Records per vehicle.
     pub fn recs(&self) -> u32 {
@@ -112,7 +117,11 @@ impl CouplingLayout {
         self.vehicle(v) + 1 + self.cap.bodies * Self::BODY_RECS + k * Self::SHAPE_RECS
     }
     pub fn plane(&self, v: u32, i: u32) -> u32 {
-        self.vehicle(v) + 1 + self.cap.bodies * Self::BODY_RECS + self.cap.shapes * Self::SHAPE_RECS + i
+        self.vehicle(v)
+            + 1
+            + self.cap.bodies * Self::BODY_RECS
+            + self.cap.shapes * Self::SHAPE_RECS
+            + i
     }
     pub fn acc(&self, v: u32) -> u32 {
         self.acc_base + v * self.acc_per_vehicle()
@@ -251,10 +260,18 @@ const SOLO: (&str, &str) = ("EB_VV_SOLO", "1");
 const GROUPS: (&str, &str) = ("EB_VV_GROUPS", "1");
 
 const fn frame(name: &'static str, defines: &'static [(&'static str, &'static str)]) -> Module {
-    Module { name, entry: FRAME_ENTRY, defines }
+    Module {
+        name,
+        entry: FRAME_ENTRY,
+        defines,
+    }
 }
 const fn pass(name: &'static str) -> Module {
-    Module { name, entry: name, defines: &[W] }
+    Module {
+        name,
+        entry: name,
+        defines: &[W],
+    }
 }
 
 /// Every shipped explicit-beams module (the defines are those engine-webgpu's
@@ -270,8 +287,14 @@ pub const MODULES: &[Module] = &[
     frame("explicit_beams_solo_aero_wide", &[W, L512, AERO, SOLO]),
     frame("explicit_beams_contact", &[W, L256, SOLO, GROUPS]),
     frame("explicit_beams_contact_wide", &[W, L512, SOLO, GROUPS]),
-    frame("explicit_beams_contact_aero", &[W, L256, AERO, SOLO, GROUPS]),
-    frame("explicit_beams_contact_aero_wide", &[W, L512, AERO, SOLO, GROUPS]),
+    frame(
+        "explicit_beams_contact_aero",
+        &[W, L256, AERO, SOLO, GROUPS],
+    ),
+    frame(
+        "explicit_beams_contact_aero_wide",
+        &[W, L512, AERO, SOLO, GROUPS],
+    ),
     pass(VV_PASSES[0]),
     pass(VV_PASSES[1]),
     pass(VV_PASSES[2]),
@@ -312,7 +335,12 @@ impl Kernel {
             (true, _) => plain[2],
         };
         match self {
-            Kernel::Frame => pick(["explicit_beams", "explicit_beams_wide", "explicit_beams_aero", "explicit_beams_aero_wide"]),
+            Kernel::Frame => pick([
+                "explicit_beams",
+                "explicit_beams_wide",
+                "explicit_beams_aero",
+                "explicit_beams_aero_wide",
+            ]),
             Kernel::Solo => pick([
                 "explicit_beams_solo",
                 "explicit_beams_solo_wide",
@@ -374,12 +402,22 @@ pub enum Cmd {
     /// `groups` workgroups of `kernel` with the parameters at copy `param_copy`
     /// (byte `param_copy * PARAM_STRIDE` of binding 0; 0 for the frame kernels,
     /// which bind the whole buffer).
-    Dispatch { kernel: Kernel, groups: u32, param_copy: u32 },
+    Dispatch {
+        kernel: Kernel,
+        groups: u32,
+        param_copy: u32,
+    },
     /// `kernel` with the workgroup count at byte `offset` of the indirect arguments
     /// ([`BIND_ARGS`]: x, y, z words).
     Indirect { kernel: Kernel, offset: u64 },
     /// Copy `size` bytes between bindings.
-    Copy { src: u32, src_offset: u64, dst: u32, dst_offset: u64, size: u64 },
+    Copy {
+        src: u32,
+        src_offset: u64,
+        dst: u32,
+        dst_offset: u64,
+        size: u64,
+    },
 }
 
 /// The status a host reads every [`STATUS_EVERY`] frames: 4 contact counters
@@ -442,6 +480,13 @@ pub struct ExplicitUpload {
 /// Where everything lives, and the fleet's module choice.
 #[derive(Clone, Debug)]
 pub struct ExplicitLayout {
+    /// The contact-force log in gAcc (word index; 0: no vehicle has it): per
+    /// node (sum, last, peak), then per group slot its contact-break state.
+    pub contact_force: u32,
+    /// Per vehicle its break groups' (offset, count) in the group slots.
+    pub group_spans: Vec<(u32, u32)>,
+    /// Per vehicle whether it has the contact-force log.
+    pub contact_force_on: Vec<bool>,
     pub spans: Vec<Span>,
     /// Spawn rest lengths of every beam, in buffer order.
     pub rest0: Vec<f32>,
@@ -483,7 +528,10 @@ impl ExplicitUpload {
     pub fn new(vehicles: &[ExplicitBeams], coupling: Option<CouplingCapacity>) -> Self {
         let nv = vehicles.len();
         // Beam records carry the vehicle index in 16 bits.
-        assert!(nv <= 1 << 16, "explicit beams GPU: at most 65536 vehicles, got {nv}");
+        assert!(
+            nv <= 1 << 16,
+            "explicit beams GPU: at most 65536 vehicles, got {nv}"
+        );
         let total_nodes: usize = vehicles.iter().map(|v| v.nodes.len()).sum();
         let total_beams: usize = vehicles.iter().map(|v| v.beams.len()).sum();
         let total_tris: usize = vehicles.iter().map(|v| v.triangles.len()).sum();
@@ -523,6 +571,8 @@ impl ExplicitUpload {
             total_nodes < (1 << (32 - NODE_SLOT_SHIFT)),
             "explicit beams GPU: too many nodes for the slide slots"
         );
+        // Per vehicle its break groups' (offset, count) in the group slots.
+        let mut group_spans: Vec<(u32, u32)> = Vec::with_capacity(nv);
         let mut vv_static: Vec<[u32; 4]> = Vec::with_capacity(nv);
         // Per lists position (incidence entries) the entry's far end.
         let mut nbr: Vec<u32> = Vec::new();
@@ -566,6 +616,7 @@ impl ExplicitUpload {
                 .unwrap_or(0);
             let group_off = groups.len() as u32;
             groups.extend(std::iter::repeat_n(u32::MAX, group_count as usize));
+            group_spans.push((group_off, group_count));
             // Slide targets (slide nodes and their rails' beam ends): a slot each,
             // in the node info flags above NODE_SLOT_SHIFT (1-based).
             let mut slot_of = vec![0u32; v.nodes.len()];
@@ -625,7 +676,8 @@ impl ExplicitUpload {
                 | (!v.triggers.is_empty() as u32) << 4
                 | (!v.slides.is_empty() as u32) << 5
                 | (!v.shapes.is_empty() as u32) << 6
-                | (v.two_body_contact as u32) << 7;
+                | (v.two_body_contact as u32) << 7
+                | (v.contact_force.is_some() as u32) << 8;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -687,7 +739,12 @@ impl ExplicitUpload {
                     _ => {}
                 }
                 let dg = |g: u32| if g == 0 { 0 } else { deform_first + g };
-                ext_recs.push([x.mask, dg(x.deform[0]), dg(x.deform[1]), x.trigger.to_bits()]);
+                ext_recs.push([
+                    x.mask,
+                    dg(x.deform[0]),
+                    dg(x.deform[1]),
+                    x.trigger.to_bits(),
+                ]);
                 ext_recs.push(e1);
                 ext_recs.push(x.e2.map(f32::to_bits));
                 ext_recs.push([
@@ -950,7 +1007,11 @@ impl ExplicitUpload {
                 let (side, span, area) = match w.induced {
                     None => (0, 0.0f32, 0.0f32),
                     Some(i) => (
-                        if i.side == engine_softbody::explicit_aero::WingSide::Left { 1 } else { 2 },
+                        if i.side == engine_softbody::explicit_aero::WingSide::Left {
+                            1
+                        } else {
+                            2
+                        },
                         i.span,
                         i.area,
                     ),
@@ -1052,7 +1113,9 @@ impl ExplicitUpload {
                     let n = |slot: usize| node_off + w.nodes[slot];
                     let mut order: Vec<(u32, u32)> = Vec::new();
                     match w.induced.map(|i| i.side) {
-                        Some(engine_softbody::explicit_aero::WingSide::Left) => order.extend([(n(6), 0), (n(4), 0)]),
+                        Some(engine_softbody::explicit_aero::WingSide::Left) => {
+                            order.extend([(n(6), 0), (n(4), 0)])
+                        }
                         Some(_) => order.extend([(n(7), 0), (n(5), 0)]),
                         None => {}
                     }
@@ -1125,7 +1188,8 @@ impl ExplicitUpload {
         let mut acc_init = vec![0i32; slot_cnt_base as usize + slot_count as usize];
         for v in 0..nv {
             for k in 0..12 {
-                acc_init[vv_acc as usize + 12 * v + k] = if k % 6 < 3 { i32::MAX } else { i32::MIN };
+                acc_init[vv_acc as usize + 12 * v + k] =
+                    if k % 6 < 3 { i32::MAX } else { i32::MIN };
             }
         }
         // gBeams: the wide grid's bucket slots, for vehicles on the wide passes.
@@ -1161,6 +1225,25 @@ impl ExplicitUpload {
         let vv_snap = if two_body {
             let at = beams.len() as u32;
             beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
+            at
+        } else {
+            0
+        };
+        // The contact-force log (jbeam-semantics-spec.md §32): in gLists per node
+        // its contact break (break group, 0 none; force N's bits).
+        let any_cf = vehicles.iter().any(|v| v.contact_force.is_some());
+        let cf_node = if any_cf {
+            let at = lists.len() as u32;
+            for v in vehicles {
+                match v.contact_force.as_ref() {
+                    Some(l) => {
+                        for &(g, f) in &l.node_break {
+                            lists.extend([g, f.to_bits()]);
+                        }
+                    }
+                    None => lists.extend(std::iter::repeat_n(0, 2 * v.nodes.len())),
+                }
+            }
             at
         } else {
             0
@@ -1211,10 +1294,16 @@ impl ExplicitUpload {
         // `loopCapWord`; the frozen WGSL test modules' post-process writes gAcc's
         // last word, the same word).
         let coupling = coupling.map(|cap| {
-            let layout = CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
+            let layout =
+                CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
             acc_init.extend(std::iter::repeat_n(0, layout.acc_words() as usize));
-            misc[couple_rec] = [0, layout.misc_base, cap.bodies, cap.shapes | cap.planes << 16];
+            misc[couple_rec] = [
+                0,
+                layout.misc_base,
+                cap.bodies,
+                cap.shapes | cap.planes << 16,
+            ];
             misc[couple_rec + 1] = [layout.acc_base, 0, 0, 0];
             layout
         });
@@ -1226,6 +1315,36 @@ impl ExplicitUpload {
             at
         } else {
             0
+        };
+        // The contact-force log's state in gAcc: per node (this step's sum, the last
+        // step's, the peak), fixed point; then per group slot its contact-break
+        // state (0 idle, 1 set off, 2 done).
+        let (cf_acc, cf_pend) = if any_cf {
+            let at = acc_init.len() as u32;
+            for v in vehicles {
+                match v.contact_force.as_ref() {
+                    Some(l) => {
+                        for i in 0..v.nodes.len() {
+                            acc_init.extend([l.sum[i], l.last[i], l.peak[i]]);
+                        }
+                    }
+                    None => acc_init.extend(std::iter::repeat_n(0, 3 * v.nodes.len())),
+                }
+            }
+            let pend = acc_init.len() as u32;
+            for (v, &(_, count)) in vehicles.iter().zip(&group_spans) {
+                for g in 0..count as usize {
+                    let p = v
+                        .contact_force
+                        .as_ref()
+                        .and_then(|l| l.pending.get(g))
+                        .copied();
+                    acc_init.push(i32::from(p.unwrap_or(0)));
+                }
+            }
+            (at, pend)
+        } else {
+            (0, 0)
         };
         let cap_at = acc_init.len();
         acc_init.push(0);
@@ -1373,6 +1492,9 @@ impl ExplicitUpload {
             cap_at as u32,
             vv_split,
             vv_snap,
+            cf_acc,
+            cf_node,
+            cf_pend,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -1410,6 +1532,9 @@ impl ExplicitUpload {
             lanes,
             wide_ok,
             wide_default,
+            contact_force: cf_acc,
+            group_spans: group_spans.clone(),
+            contact_force_on: vehicles.iter().map(|v| v.contact_force.is_some()).collect(),
             status: StatusWords {
                 base: u64::from(vv_acc + 12 * nv as u32) * 4,
                 cap: cap_at as u64 * 4,
@@ -1556,7 +1681,10 @@ impl FramePlanner {
 
     /// The frame bounds margin (m, default [`DEFAULT_CONTACT_MARGIN`]).
     pub fn set_contact_margin(&mut self, metres: f32) {
-        assert!(metres >= 0.0 && metres.is_finite(), "contact margin {metres}");
+        assert!(
+            metres >= 0.0 && metres.is_finite(),
+            "contact margin {metres}"
+        );
         self.words[W_VV_MARGIN] = metres.to_bits();
         self.contact.left = 0;
     }
@@ -1646,7 +1774,11 @@ impl FramePlanner {
     /// `wide_allowed` false keeps the per-vehicle frame (test kernel variants).
     pub fn commands(&self, steps: u32, wide_allowed: bool) -> Vec<Cmd> {
         let nv = self.nv;
-        let d = |kernel, groups, param_copy| Cmd::Dispatch { kernel, groups, param_copy };
+        let d = |kernel, groups, param_copy| Cmd::Dispatch {
+            kernel,
+            groups,
+            param_copy,
+        };
         if self.contact_active() {
             let mut out = Vec::with_capacity(5);
             if self.contact.planning {
@@ -1658,12 +1790,21 @@ impl FramePlanner {
             }
             // The vehicles (grouped ones return at once) and, past them, the
             // contact groups, side by side. The plan wrote one of the two non-empty.
-            out.push(Cmd::Indirect { kernel: Kernel::Solo, offset: 0 });
-            out.push(Cmd::Indirect { kernel: Kernel::Contact, offset: 16 });
+            out.push(Cmd::Indirect {
+                kernel: Kernel::Solo,
+                offset: 0,
+            });
+            out.push(Cmd::Indirect {
+                kernel: Kernel::Contact,
+                offset: 16,
+            });
             out
         } else if self.is_wide() && wide_allowed {
             let plan = self.wide_plan(steps);
-            let mut out: Vec<Cmd> = plan.iter().map(|&(k, kind, x)| d(Kernel::Wide(kind), x, k)).collect();
+            let mut out: Vec<Cmd> = plan
+                .iter()
+                .map(|&(k, kind, x)| d(Kernel::Wide(kind), x, k))
+                .collect();
             // Begin and rebase, then the vehicles' origins and steps into the
             // table, then the steps.
             out.insert(
@@ -1748,18 +1889,25 @@ impl ExplicitLayout {
     }
 
     /// The grab's two gMisc records ([`Self::grab_rec`]); `None` releases it.
-    pub fn grab_records(&self, grab: Option<(usize, engine_softbody::explicit_beams::Grab)>) -> [u32; 8] {
+    pub fn grab_records(
+        &self,
+        grab: Option<(usize, engine_softbody::explicit_beams::Grab)>,
+    ) -> [u32; 8] {
         match grab {
-            Some((vehicle, g)) if vehicle < self.spans.len() && g.node < self.spans[vehicle].nodes => [
-                1,
-                self.spans[vehicle].node_off + g.node,
-                g.k.to_bits(),
-                g.c.to_bits(),
-                g.target.x.to_bits(),
-                g.target.y.to_bits(),
-                g.target.z.to_bits(),
-                0,
-            ],
+            Some((vehicle, g))
+                if vehicle < self.spans.len() && g.node < self.spans[vehicle].nodes =>
+            {
+                [
+                    1,
+                    self.spans[vehicle].node_off + g.node,
+                    g.k.to_bits(),
+                    g.c.to_bits(),
+                    g.target.x.to_bits(),
+                    g.target.y.to_bits(),
+                    g.target.z.to_bits(),
+                    0,
+                ]
+            }
             _ => [0u32; 8],
         }
     }
@@ -1889,7 +2037,9 @@ impl ExplicitLayout {
             .iter()
             .map(|&(first, n)| {
                 let at = (self.deform_base + first) as usize;
-                groups.get(at..at + n as usize).map_or_else(|| vec![0; n as usize], <[u32]>::to_vec)
+                groups
+                    .get(at..at + n as usize)
+                    .map_or_else(|| vec![0; n as usize], <[u32]>::to_vec)
             })
             .collect()
     }
@@ -1909,13 +2059,57 @@ impl ExplicitLayout {
         let mut t0 = first;
         for s in &self.spans {
             let n = s.tris as usize;
-            out.push(misc[t0..t0 + n].iter().map(|r| [r[0] as i32, r[1] as i32]).collect());
+            out.push(
+                misc[t0..t0 + n]
+                    .iter()
+                    .map(|r| [r[0] as i32, r[1] as i32])
+                    .collect(),
+            );
             t0 += n;
         }
         out
     }
 
     /// The contact status counters' error (from gAcc).
+    /// The gAcc words of the contact-force peaks (word index, count) of every node,
+    /// three words apart (to clear them), or `None` when no vehicle has the log.
+    pub fn contact_force_peaks(&self) -> Option<(u32, u32)> {
+        let total: u32 = self.spans.iter().map(|s| s.nodes).sum();
+        (self.contact_force != 0).then_some((self.contact_force + 2, total))
+    }
+
+    /// Per vehicle with the contact-force log (spec §32), from gAcc: its nodes'
+    /// last complete step's contact force and the peak (N), and its contact-break
+    /// states by group; `None` for the others.
+    #[allow(clippy::type_complexity)]
+    pub fn contact_forces(&self, acc: &[i32]) -> Vec<Option<(Vec<f32>, Vec<f32>, Vec<u8>)>> {
+        let has = &self.contact_force_on;
+        if self.contact_force == 0 {
+            return vec![None; self.spans.len()];
+        }
+        let base = self.contact_force as usize;
+        let total: usize = self.spans.iter().map(|s| s.nodes as usize).sum();
+        let pend = base + 3 * total;
+        self.spans
+            .iter()
+            .zip(&self.group_spans)
+            .zip(has)
+            .map(|((s, &(goff, gcount)), &on)| {
+                on.then(|| {
+                    let at = |i: usize, k: usize| acc[base + 3 * (s.node_off as usize + i) + k];
+                    let f = |q: i32| q as f32 / 32.0;
+                    (
+                        (0..s.nodes as usize).map(|i| f(at(i, 1))).collect(),
+                        (0..s.nodes as usize).map(|i| f(at(i, 2))).collect(),
+                        (0..gcount as usize)
+                            .map(|g| acc[pend + goff as usize + g] as u8)
+                            .collect(),
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub fn contact_status(&self, acc: &[i32]) -> Result<(), String> {
         let at = (self.status.base / 4) as usize;
         contact_error(&acc[at + 4..at + 8])
@@ -1930,7 +2124,8 @@ impl ExplicitLayout {
     /// The kernel status (from gAcc): the loop-cap flag, then the contact
     /// counters ([`Self::contact_status`]).
     pub fn kernel_status(&self, acc: &[i32]) -> Result<(), String> {
-        explicit_loop_cap_hit(self.loop_cap_flag(acc)).map_err(|e| format!("explicit beams kernel: {e}"))?;
+        explicit_loop_cap_hit(self.loop_cap_flag(acc))
+            .map_err(|e| format!("explicit beams kernel: {e}"))?;
         self.contact_status(acc)
     }
 }
@@ -1981,8 +2176,15 @@ const SMALL_FLEET: usize = 32;
 /// 512; measurement) overrides the choice.
 pub fn frame_lanes(vehicles: &[ExplicitBeams]) -> u32 {
     let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
-    let default = if vehicles.len() <= SMALL_FLEET || big { 512 } else { 256 };
-    match std::env::var("RUBBLE_EXPLICIT_LANES").ok().and_then(|v| v.parse().ok()) {
+    let default = if vehicles.len() <= SMALL_FLEET || big {
+        512
+    } else {
+        256
+    };
+    match std::env::var("RUBBLE_EXPLICIT_LANES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         Some(n @ (256 | 512)) => n,
         _ => default,
     }
@@ -2007,7 +2209,10 @@ fn shape_params(sh: &StaticShape) -> Vec<[u32; 4]> {
             centre,
             radius,
             half_height,
-        } => vec![rec(centre, radius), rec(Vec3::new(half_height, 0.0, 0.0), 0.0)],
+        } => vec![
+            rec(centre, radius),
+            rec(Vec3::new(half_height, 0.0, 0.0), 0.0),
+        ],
         StaticShape::Capsule { a, b, radius } => vec![rec(a, radius), rec(b, 0.0)],
         StaticShape::Sphere { centre, radius } => vec![rec(centre, radius), [0; 4]],
     }
@@ -2025,7 +2230,9 @@ fn vv_cell(vehicles: &[ExplicitBeams]) -> f32 {
     let extent = vehicles
         .iter()
         .map(|v| {
-            let (lo, hi) = v.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));
+            let (lo, hi) = v.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| {
+                (a.min(n.pos), b.max(n.pos))
+            });
             (hi - lo).max_element()
         })
         .filter(|e| e.is_finite())

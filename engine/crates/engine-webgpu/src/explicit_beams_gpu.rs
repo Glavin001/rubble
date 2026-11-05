@@ -585,6 +585,31 @@ impl ExplicitBeamsGpu {
         bytemuck::cast_slice::<u8, u32>(&raw)[4]
     }
 
+    /// Per vehicle with the contact-force log (jbeam-semantics-spec.md §32;
+    /// blocking read): per node its last complete step's contact force and the
+    /// largest since [`Self::clear_contact_force_peaks`] (N), and per break group
+    /// its contact-break state (0 idle, 1 set off, 2 done); `None` for the others.
+    #[allow(clippy::type_complexity)]
+    pub fn contact_forces(&self) -> Vec<Option<(Vec<f32>, Vec<f32>, Vec<u8>)>> {
+        let raw = self.read(&self.contact.acc);
+        self.layout.contact_forces(bytemuck::cast_slice(&raw))
+    }
+
+    /// Restarts every node's contact-force peak (queued, before the next frame).
+    pub fn clear_contact_force_peaks(&self) {
+        let Some((at, n)) = self.layout.contact_force_peaks() else {
+            return;
+        };
+        let acc = self.read(&self.contact.acc);
+        let mut w: Vec<i32> = bytemuck::cast_slice(&acc).to_vec();
+        for i in 0..n as usize {
+            w[at as usize + 3 * i] = 0;
+        }
+        let lo = at as usize;
+        let hi = lo + 3 * n as usize;
+        self.queue.write_buffer(&self.contact.acc, lo as u64 * 4, bytemuck::cast_slice(&w[lo..hi]));
+    }
+
     /// Per vehicle, its triangles' contact throttles (cwait, cidle).
     pub fn contact_throttles(&self) -> Vec<Vec<[i32; 2]>> {
         let raw = self.read(&self.misc);

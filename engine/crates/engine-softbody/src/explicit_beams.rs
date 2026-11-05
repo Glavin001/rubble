@@ -836,6 +836,10 @@ pub struct ExplicitBeams {
     /// rule, the contacter's whole force as against a static surface (bit for bit
     /// as before; the `.truck` default until the T-bone leak is fixed).
     pub two_body_contact: bool,
+    /// The contact-force log (jbeam-semantics-spec.md §32): per node the sum of
+    /// its contacts' force magnitudes per step, and the contact breaks it drives
+    /// (`None`: off, the default; [`Self::enable_contact_force`]).
+    pub contact_force: Option<Box<ContactForceLog>>,
     /// JBeam mode's damping filters (`dampCutoffHz`), by [`Beam::shock`] − 1.
     pub damp_filters: Vec<DampFilter>,
     /// JBeam torsion elements' watched break groups (0 = none), by [`Beam::shock`]
@@ -1005,6 +1009,59 @@ pub fn contact_force(
     }
 }
 
+/// The contact-force log (jbeam-semantics-spec.md §32). A node's contact force in
+/// a step is the sum of the magnitudes of every contact force on it that step:
+/// the node pass's (ground, boxes, static shapes, rigid bodies), self-collision's
+/// and vehicle contact's, as the contacter and as a triangle's node (its share
+/// w·|F|). Sums are fixed point, 1/[`crate::explicit_rigid::FIXED`] N, as the
+/// kernel's accumulators. A step's sum is complete at the next node pass, which
+/// moves it to `last` (and the running peak) and tests the contact breaks.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ContactForceLog {
+    /// This step's sums so far.
+    pub sum: Vec<i32>,
+    /// The last complete step's sums.
+    pub last: Vec<i32>,
+    /// The largest complete step's sum since [`ExplicitBeams::take_contact_force_peak`].
+    pub peak: Vec<i32>,
+    /// Per node its contact break (break group, force N; group 0: none).
+    pub node_break: Vec<(u32, f32)>,
+    /// Per break group (by |group|): 0 idle, 1 set off by the last step's contact
+    /// force (it breaks in this beam pass, as if by its first beam), 2 done.
+    pub pending: Vec<u8>,
+}
+
+impl ContactForceLog {
+    /// Adds contact force `f` (its magnitude) to node `i`'s sum.
+    #[inline]
+    pub fn add(&mut self, i: usize, f: Vec3) {
+        let m = ((f.x * f.x + f.y * f.y) + f.z * f.z).sqrt();
+        self.add_magnitude(i, m);
+    }
+
+    /// Adds a magnitude `m` (N) to node `i`'s sum.
+    #[inline]
+    pub fn add_magnitude(&mut self, i: usize, m: f32) {
+        let q = (m * crate::explicit_rigid::FIXED).clamp(-2.0e9, 2.0e9).round() as i32;
+        self.sum[i] = self.sum[i].wrapping_add(q);
+    }
+
+    /// Node `i` at the node pass: its last step's sum becomes `last` (and the
+    /// peak), its contact break is tested, and its sum restarts.
+    #[inline]
+    fn roll(&mut self, i: usize) {
+        let s = self.sum[i];
+        self.last[i] = s;
+        self.peak[i] = self.peak[i].max(s);
+        self.sum[i] = 0;
+        let (g, limit) = self.node_break[i];
+        if g != 0 && s as f32 * (1.0 / crate::explicit_rigid::FIXED) > limit {
+            let p = &mut self.pending[g as usize];
+            *p = (*p).max(1);
+        }
+    }
+}
+
 /// Beam type and kind for a desc beam.
 fn classify(kind: BeamKind) -> (ExplicitKind, ExplicitType) {
     match kind {
@@ -1068,6 +1125,7 @@ impl ExplicitBeams {
             contact_every_node: false,
             rest_pose: None,
             two_body_contact: false,
+            contact_force: None,
             damp_filters: Vec::new(),
             torsion_watch: Vec::new(),
             groups_last: Vec::new(),
@@ -1439,6 +1497,14 @@ impl ExplicitBeams {
         if file.full_contact {
             s.opt_in_full_contact();
         }
+        // `rubble_exact_lengths` (Rubble's extension): exact beam lengths.
+        if file.exact_lengths {
+            s.settings.fast_inv_sqrt = false;
+        }
+        // `rubble_contact_breaks` (Rubble's extension, spec §32).
+        if !file.contact_breaks.is_empty() {
+            s.set_contact_breaks(&file.contact_breaks)?;
+        }
         if !file.spawn_contacts.is_empty() {
             let sorted = |t: [u32; 3]| {
                 let mut t = t;
@@ -1458,10 +1524,6 @@ impl ExplicitBeams {
                 .collect();
             s.tri_excl.clear();
             s.spawn_exclusions_except(&keep);
-        }
-        // `rubble_exact_lengths` (Rubble's extension): exact beam lengths.
-        if file.exact_lengths {
-            s.settings.fast_inv_sqrt = false;
         }
         Ok(s)
     }
@@ -2261,6 +2323,87 @@ impl ExplicitBeams {
     /// against other vehicles' triangles, and self-collision pairs that start inside
     /// the contact range never collide. Call after spawn, before the GPU upload.
     /// Returns the excluded self-collision pairs.
+    /// Turns the contact-force log on (spec §32; no contact breaks unless set).
+    pub fn enable_contact_force(&mut self) {
+        if self.contact_force.is_some() {
+            return;
+        }
+        let n = self.nodes.len();
+        let groups = self.beams.iter().map(|b| b.group.unsigned_abs()).max().unwrap_or(0) as usize;
+        self.contact_force = Some(Box::new(ContactForceLog {
+            sum: vec![0; n],
+            last: vec![0; n],
+            peak: vec![0; n],
+            node_break: vec![(0, 0.0); n],
+            pending: vec![0; groups + 1],
+        }));
+    }
+
+    /// Contact breaks (`rubble_contact_breaks`, spec §32): per line (break group,
+    /// force N, nodes), the group goes off when the contact force on any of the
+    /// nodes exceeds the force in a step. A group must be some beam's own break
+    /// group, and a node in one line at most.
+    pub fn set_contact_breaks(&mut self, lines: &[(u32, f32, Vec<u32>)]) -> Result<(), String> {
+        self.enable_contact_force();
+        let n = self.nodes.len();
+        let log = self.contact_force.as_mut().unwrap();
+        for (g, force, nodes) in lines {
+            if !self.beams.iter().any(|b| b.group.unsigned_abs() == *g) {
+                return Err(format!("rubble_contact_breaks: group {g} breaks no beam"));
+            }
+            for &i in nodes {
+                if i as usize >= n {
+                    return Err(format!("rubble_contact_breaks: group {g}: no node {i}"));
+                }
+                let slot = &mut log.node_break[i as usize];
+                if slot.0 != 0 {
+                    return Err(format!(
+                        "rubble_contact_breaks: node {i} is in groups {} and {g} (one line per node)",
+                        slot.0
+                    ));
+                }
+                *slot = (*g, *force);
+            }
+        }
+        Ok(())
+    }
+
+    /// Per node the last complete step's contact force (N; spec §32), or `None`
+    /// when the log is off.
+    pub fn contact_forces(&self) -> Option<Vec<f32>> {
+        let l = self.contact_force.as_ref()?;
+        Some(l.last.iter().map(|&q| q as f32 / crate::explicit_rigid::FIXED).collect())
+    }
+
+    /// Per node the largest step's contact force since the last call (N), reset.
+    pub fn take_contact_force_peak(&mut self) -> Option<Vec<f32>> {
+        let l = self.contact_force.as_mut()?;
+        let out = l.peak.iter().map(|&q| q as f32 / crate::explicit_rigid::FIXED).collect();
+        l.peak.iter_mut().for_each(|q| *q = 0);
+        Some(out)
+    }
+
+    /// The contact breaks set off by the last step's contact force (spec §32):
+    /// each group breaks once, as if by the beam pass's first beam.
+    fn fire_contact_breaks(&mut self) {
+        let Some(log) = self.contact_force.as_mut() else {
+            return;
+        };
+        let fire: Vec<i32> = log
+            .pending
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, p)| **p == 1)
+            .map(|(g, p)| {
+                *p = 2;
+                g as i32
+            })
+            .collect();
+        for g in fire {
+            self.cascade(g);
+        }
+    }
+
     pub fn opt_in_full_contact(&mut self) -> usize {
         self.contact_every_node = true;
         self.finish_contact();
@@ -2444,8 +2587,12 @@ impl ExplicitBeams {
         if let Some(r) = rigid.as_mut() {
             r.begin_step(origin, &self.nodes);
         }
+        let mut cf = self.contact_force.take();
         for i in 0..self.nodes.len() {
             let mut n = self.nodes[i];
+            if let Some(l) = cf.as_mut() {
+                l.roll(i);
+            }
             if !n.has(NODE_NO_GROUND) {
                 let x = origin + n.pos;
                 if ground > x.y {
@@ -2459,7 +2606,7 @@ impl ExplicitBeams {
                         ground - x.y,
                         n.friction,
                     );
-                    n.force += if n.has(NODE_FRICTION_LIMIT) {
+                    let c = if n.has(NODE_FRICTION_LIMIT) {
                         crate::explicit_jbeam_ext::friction_limit(
                             c,
                             n.force,
@@ -2472,10 +2619,14 @@ impl ExplicitBeams {
                     } else {
                         c
                     };
+                    if let Some(l) = cf.as_mut() {
+                        l.add(i, c);
+                    }
+                    n.force += c;
                 }
                 for bx in &self.boxes {
                     if let Some(normal) = box_face(bx, x) {
-                        n.force += contact_force(
+                        let c = contact_force(
                             n.force,
                             n.vel,
                             n.mass,
@@ -2485,11 +2636,15 @@ impl ExplicitBeams {
                             0.0,
                             n.friction,
                         );
+                        if let Some(l) = cf.as_mut() {
+                            l.add(i, c);
+                        }
+                        n.force += c;
                     }
                 }
                 for (sh, bd) in self.shapes.iter().zip(&shape_bounds) {
                     if let Some(normal) = shape_face(sh, bd, x) {
-                        n.force += contact_force(
+                        let c = contact_force(
                             n.force,
                             n.vel,
                             n.mass,
@@ -2499,10 +2654,18 @@ impl ExplicitBeams {
                             0.0,
                             n.friction,
                         );
+                        if let Some(l) = cf.as_mut() {
+                            l.add(i, c);
+                        }
+                        n.force += c;
                     }
                 }
                 if let Some(r) = rigid.as_mut() {
-                    n.force += r.node_contact(x, &n);
+                    let c = r.node_contact(x, &n);
+                    if let Some(l) = cf.as_mut() {
+                        l.add(i, c);
+                    }
+                    n.force += c;
                 }
             }
             if !n.has(NODE_IMMOVABLE) {
@@ -2527,6 +2690,7 @@ impl ExplicitBeams {
             }
             self.nodes[i] = n;
         }
+        self.contact_force = cf;
         if let Some(mut r) = rigid {
             r.end_step();
             self.rigid = Some(r);
@@ -2670,7 +2834,14 @@ impl ExplicitBeams {
         if !self.tri_breaks.is_empty() {
             self.triangle_breaks();
         }
+        let fire = self
+            .contact_force
+            .as_ref()
+            .is_some_and(|l| l.pending.contains(&1));
         for j in 0..self.beams.len() {
+            if fire && j == 1 {
+                self.fire_contact_breaks();
+            }
             if self.beams[j].broken {
                 if !self.ext_of.is_empty() && self.ext_of[j] != 0 {
                     self.ext_broken(j);
@@ -2765,6 +2936,9 @@ impl ExplicitBeams {
             let push = out.d * (f * out.inv);
             self.nodes[beam.a as usize].force += push;
             self.nodes[beam.b as usize].force -= push;
+        }
+        if fire && self.beams.len() == 1 {
+            self.fire_contact_breaks();
         }
     }
 
@@ -2879,6 +3053,12 @@ impl ExplicitBeams {
                 self.nodes[i1 as usize].force -= alpha * f;
                 self.nodes[i2 as usize].force -= beta * f;
                 self.nodes[i0 as usize].force -= gamma * f;
+                if let Some(l) = self.contact_force.as_mut() {
+                    l.add(hn as usize, f);
+                    l.add(i1 as usize, alpha * f);
+                    l.add(i2 as usize, beta * f);
+                    l.add(i0 as usize, gamma * f);
+                }
             }
             self.grid.list = list;
             let tri = &mut self.triangles[t];

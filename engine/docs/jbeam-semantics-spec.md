@@ -400,6 +400,34 @@ changes nothing); one traced node entered a triangle's prism sideways, in front 
 it, and the side vote (its neighbours behind the plane) pushed it through. Open
 (task 3): a side kept per contacter–triangle pair cut it to 57 only.
 
+**Leak, second pass (2026-11-05, showcase car, CPU, TB_DZ 0 / 0.43 / 0.7 m, most
+striker nodes inside of 1,141).** Today's car: RoR's rule 9 / 78 / 28, this rule 91 /
+144 / 88. Tried, all reverted (`explicit_skin.rs` keeps the side test as a
+measurement; `TB_SIDECHECK`, `TB_TRACE`, `TB_RULE` in `showcase_car.rs`):
+
+* *Exact side* (closest feature of the closed skin by angle-weighted pseudo-normals,
+  Bærentzen and Aanæs 2005; the lattice is one closed, oriented component): it
+  agrees with the winding number for 80–90 % of striker nodes within 2 cm of the
+  skin (the rest sit at folds of the crushed, self-intersecting skin). As the side
+  of RoR's prism hits (an inside point pushed out through its nearest hit, along
+  the outward normal): this rule 52 / 104 / 72; RoR's rule diverges (NaN).
+* *Closest-feature contact* (one contact per point at its closest feature, face,
+  edge or vertex, pushed out the way it came in; no prism gaps): this rule 33 / 99 /
+  77; RoR's rule diverges (an edge or vertex hit puts the contacter's whole force on
+  one or two light skin nodes, §10.3's failure).
+* The throttle off: unchanged (the fast-approach reset tests every triangle while
+  it matters). Holes: winding over the live triangles only counts as many.
+
+**Mechanism (traced, this rule):** the nodes are not misplaced by the side; they
+grind through. A striker node in contact approaches at 2–6 m/s every step with a
+1.5–2.5 kN contact force on it at a reduced mass of 0.03–0.06 kg: the struck
+lattice's triangles are coarse beside the striker's nodes, so each struck node
+takes part in many hits, and the mass splitting (one Jacobi pass) leaves each hit
+a small share; without the splitting the pass diverges, and a naive iterated
+Jacobi (4 passes) gives 13 / 78 / 34 but diverges at 16. Open: a converged contact
+solve (a Gauss–Seidel or accumulated-impulse iteration per turn) is what the leak
+asks for; the side test alone does not fix it.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,
@@ -1080,3 +1108,34 @@ wings and aero devices (`dragCoef` 100–160), 0.5 m² its body panels (6–12):
 car with its aero kit at C_d·A ≈ 1.0–1.2 m², so ours is about 1.5× (both faces of
 each triangle drag, as [T] says, "Triangles are not affected by other triangles").
 No triangle takes the default 100 in either car except where the author left it.
+## 32. The contact-force log and `rubble_contact_breaks` (2026-11-05)
+
+**Contact force (Rubble, both solvers).** A node's contact force in a step is the
+sum of the magnitudes of every contact force on it that step: the node pass's
+(ground, boxes, static shapes, rigid bodies: the latter's sum per node),
+self-collision's and vehicle contact's, as the contacter and as a struck
+triangle's node (its share w·|F|). **Choice:** magnitudes summed (a pinched node
+counts both pushes); fixed point at 1/32 N, as the kernel's accumulators. Off by
+default (`ExplicitBeams::contact_force`, `enable_contact_force`): nothing changes for
+a vehicle without it. A step's sum is complete after the vehicle-contact pass; the
+next node pass moves it to `last` (and a running peak) and restarts it.
+Readback: CPU `contact_forces()` (last step, N) and `take_contact_force_peak()`;
+GPU `ExplicitBeamsGpu::contact_forces()` (per vehicle: last, peak, contact-break
+states) and `clear_contact_force_peaks()`. GPU: per-vehicle flag bit 8
+(`FLAG_CFORCE`, its nodes take the shapes path of the node phase); params words
+`cfAcc` (gAcc, per node sum/last/peak), `cfNode` (gLists, per node break group and
+force), `cfPend` (gAcc, per group slot its state).
+
+**`rubble_contact_breaks`** (a `.truck` section, **Rubble extension, not RoR**): lines
+`group, force_N, nodes…`. Break group `group` goes off when the contact force on any
+listed node exceeds `force_N` in a step. Forward only: the step's force is tested at
+the next node pass and the group breaks in that step's beam pass, as if set off by
+its first beam (beam 0 keeps that step's force; its other beams do not), once. A
+group must be some beam's own break group and a node may be in one line only; the
+loader fails with a clear error otherwise. Use: windscreen and glass direct-impact
+breaking (a pane's nodes and its break group), and the visual layer's paint-wear
+pressure (the log alone). Tests: `contact_breaks.rs` (CPU: a resting node's mean
+contact force is its weight to 0.05 N; a 0.5 m drop breaks the group the step after
+its force passes 50 N, never at 10 MN; the lines are read and checked),
+`explicit_contact_gpu.rs` `contact_breaks_step_like_the_cpu` (the same step on the
+GPU, logs within 0.05 N + 0.1 %).
