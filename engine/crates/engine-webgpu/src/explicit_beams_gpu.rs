@@ -1361,6 +1361,12 @@ impl ExplicitBeamsGpu {
         self.planner.request_replan();
     }
 
+    /// The next frame re-plans vehicle contact (a host's external forces, such as the
+    /// World's rigid coupling, change the speeds the plan's frame bounds assumed).
+    pub fn request_contact_replan(&self) {
+        self.planner.request_replan();
+    }
+
     /// Set one node's velocity (vehicle index, node index within it).
     pub fn set_velocity(&self, vehicle: usize, node: u32, v: Vec3) {
         let offset = self.layout.velocity_offset(vehicle, node);

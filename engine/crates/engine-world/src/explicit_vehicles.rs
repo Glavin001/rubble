@@ -394,6 +394,9 @@ impl ExplicitVehicles {
             pass.set_pipeline(&self.pipes[2]);
             pass.dispatch_workgroups(nv, 1, 1);
         }
+        // The rigid bodies push the vehicles: vehicle contact's frame bounds are planned
+        // from this window's speeds.
+        self.gpu.request_contact_replan();
         let read = self.gpu.frame_encode(enc, steps);
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {

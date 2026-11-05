@@ -263,6 +263,14 @@ fn a_vehicle_breaks_a_prefractured_house() {
             first_contact = Some(k);
         }
     }
+    let fastest = children
+        .iter()
+        .filter(|&&b| w.body_is_valid(b))
+        .map(|&b| Vec3::from(w.read_body_state(b).unwrap().linear_velocity).length())
+        .fold(0.0f32, f32::max);
+    println!("fastest piece {fastest:.2} m/s");
+    // No piece leaves faster than an elastic bounce off the 20 m/s vehicle allows.
+    assert!(fastest <= 2.0 * 20.0, "a freed piece at {fastest} m/s");
     let moving = children
         .iter()
         .filter(|&&b| w.body_is_valid(b) && Vec3::from(w.read_body_state(b).unwrap().linear_velocity).length() > 0.5)
