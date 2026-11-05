@@ -43,6 +43,7 @@ pub fn member(
         catch: false,
         stiff: 1.0,
         skin: false,
+        hardware_ends: true,
     }
 }
 
@@ -168,6 +169,12 @@ pub const FIREWALL: f32 = 0.3;
 /// An impact member: pole catchers between its stations.
 pub fn catching(mut m: MemberSpec) -> MemberSpec {
     m.catch = true;
+    m
+}
+
+/// A window frame (a door's sash): its ends carry no hardware.
+pub fn window_frame(mut m: MemberSpec) -> MemberSpec {
+    m.hardware_ends = false;
     m
 }
 

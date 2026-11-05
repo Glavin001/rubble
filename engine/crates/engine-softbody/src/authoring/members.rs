@@ -139,6 +139,11 @@ pub struct MemberSpec {
     /// In the skin's tier (a panel's light inner frame), not the frame's.
     #[serde(default)]
     pub skin: bool,
+    /// Its ends carry the door's hardware and bear on the pillars (a door's
+    /// beams and rails); off for a window frame, which ends on its door's
+    /// belt.
+    #[serde(default = "yes")]
+    pub hardware_ends: bool,
 }
 
 impl MemberSpec {
@@ -155,6 +160,10 @@ impl MemberSpec {
 
 fn unit() -> f32 {
     1.0
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn four() -> usize {

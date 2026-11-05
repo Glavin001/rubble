@@ -479,8 +479,8 @@ fn mech_energy(s: &ExplicitBeams) -> f64 {
 }
 
 /// How finely [`mech_energy`] resolves the state (J): each beam's elastic
-/// energy moves by k·|x|·δL when its f32 length moves by one ulp δL, each
-/// node's height energy by m·g·δy. A car standing still rises and falls by
+/// energy moves by k·|x|·δL when its f32 length moves by δL (two ulps of
+/// its nodes' positions), each node's height energy by m·g·δy. A car standing still rises and falls by
 /// about this from rounding alone.
 fn energy_rounding(s: &ExplicitBeams) -> f64 {
     let eps = f32::EPSILON as f64;
@@ -489,8 +489,14 @@ fn energy_rounding(s: &ExplicitBeams) -> f64 {
         .iter()
         .filter(|b| !b.broken)
         .map(|b| {
+            // (Its length is a difference of f32 positions: each is off by
+            // up to an ulp of its own magnitude.)
             let len = solver_len(s, b) as f64;
-            b.k as f64 * (len - b.rest as f64).abs() * len * eps
+            let p = (s.origin + s.nodes[b.a as usize].pos)
+                .abs()
+                .max((s.origin + s.nodes[b.b as usize].pos).abs())
+                .max_element() as f64;
+            b.k as f64 * (len - b.rest as f64).abs() * 2.0 * p.max(len) * eps
         })
         .sum();
     let nodes: f64 = s
@@ -808,6 +814,54 @@ fn rest_noise(b: &Built) -> f64 {
     l.rise.max(energy_rounding(&s))
 }
 
+/// The glass panes' state (A9): each pane's damage unit, broken (a
+/// tempered pane's group went) or cracked (a laminated pane's gauges broke
+/// alone). With `GLASS_REPORT` set it is printed after `scene`.
+fn glass_state(s: &ExplicitBeams, b: &Built) -> Vec<(String, bool)> {
+    let map = solver_beams(s, b);
+    b.damage_units
+        .iter()
+        .filter(|u| u.name.starts_with("glass_"))
+        .map(|u| {
+            let broken = u.beams.iter().any(|&j| s.beams[map[j as usize]].broken);
+            (u.name.clone(), broken)
+        })
+        .collect()
+}
+
+fn glass_report(s: &ExplicitBeams, b: &Built, scene: &str) {
+    if std::env::var("GLASS_REPORT").is_err() {
+        return;
+    }
+    let broken: Vec<String> = glass_state(s, b)
+        .into_iter()
+        .filter(|g| g.1)
+        .map(|g| g.0)
+        .collect();
+    eprintln!("(glass) {scene}: broken or cracked {broken:?}");
+}
+
+/// A pane's gauges' largest strain against their installed (rest) length
+/// so far is not kept by the solver; this reports the present one.
+fn gauge_strains(s: &ExplicitBeams, b: &Built) -> Vec<(String, f32)> {
+    let map = solver_beams(s, b);
+    b.damage_units
+        .iter()
+        .filter(|u| u.name.starts_with("glass_"))
+        .map(|u| {
+            let worst = u
+                .beams
+                .iter()
+                .map(|&j| &b.skeleton.beams[j as usize])
+                .zip(u.beams.iter().map(|&j| &s.beams[map[j as usize]]))
+                .filter(|(sb, _)| sb.fixed && sb.mat.density == 0.0)
+                .map(|(_, x)| (solver_len(s, x) / x.rest - 1.0).abs())
+                .fold(0.0f32, f32::max);
+            (u.name.clone(), worst)
+        })
+        .collect()
+}
+
 /// Standing on its tyres for ten seconds. Gravity alone yields and breaks
 /// nothing; the body stands on its tyres (no body node on the ground); the
 /// momentum ledger closes (the ground carries the weight); and the car gains
@@ -860,6 +914,7 @@ fn a_stands_at_rest_for_ten_seconds() {
             .iter()
             .map(|nd| s.origin.y + nd.pos.y)
             .fold(f32::MAX, f32::min);
+        glass_report(&s, &b, &format!("{res:?} at rest 10 s"));
         eprintln!(
             "(a) {res:?} rest 10 s: broken {broken}, bent {bent}; energy: highest frame of the second second {:.3} kJ, mean of the last second {:.3} kJ (rises between frames up to {noise:.2} J); sill height {ride1:.3} → {ride10:.3} m; lowest body node {:.3} m above the ground; last second: wobble {:.1} mm, body nodes under {vbody:.2} m/s",
             e2 / 1e3,
@@ -2440,6 +2495,7 @@ fn reference_wall(b: &Built, kmh: f32, drag: bool, noise: f64) -> Vec<(&'static 
     let e = rebound / v0;
     let springback = d_dyn - max_s;
     let mean_g = v0 / tm / 9.81;
+    glass_report(&s, &b, &format!("wall {kmh} km/h drag {drag}"));
     eprintln!(
         "(n) wall {kmh} km/h drag {drag}: residual crush at bumper height exterior C1..C6 {:?} mm, max {:.0} avg {:.0} mm; structure {:?} mm, max {:.0} avg {:.0} mm",
         cx.map(|c| (c * 1e3).round()),
@@ -2920,6 +2976,7 @@ fn side_pole_crush(b: &Built, kmh: f32) -> f32 {
         "a door the pole did not strike opened: {others:?}"
     );
     let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    glass_report(&s, &b, &format!("side pole {kmh} km/h at 75°"));
     eprintln!(
         "(o) side pole {kmh} km/h at 75°: residual crush at the pole {:.0} mm (node {at} {} at y {:.2}); KE left {:.2} kJ of {:.1}",
         crush * 1e3,
@@ -3159,6 +3216,7 @@ fn q_fmvss_216a_roof_crush() {
         );
     }
     let uvw: f32 = s.nodes.iter().map(|n| n.mass).sum::<f32>() * 9.81;
+    glass_report(&s, &b, "FMVSS 216a roof");
     eprintln!(
         "(q) FMVSS 216a roof: peak {:.1} kN within 127 mm = {:.2} × unloaded weight (≥ 3.0; IIHS good ≥ 4.0); curve every 25 mm: {:?} kN",
         peak / 1e3,
@@ -3597,6 +3655,32 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         if f % 6 == 5 {
             let k = inside(&w);
             if std::env::var("TB_INSIDE").is_ok() {
+                // The struck car's broken beams by the parts they join.
+                let mut pairs: std::collections::BTreeMap<String, usize> = Default::default();
+                for bm in w.vehicles[0].beams.iter().filter(|x| x.broken) {
+                    let (a, c) = (bm.a as usize, bm.b as usize);
+                    if a < n && c < n {
+                        let (pa, pc) = (
+                            &sk0.parts[sk0.nodes[a].part as usize],
+                            &sk0.parts[sk0.nodes[c].part as usize],
+                        );
+                        *pairs.entry(format!("{pa}~{pc} {:?}", bm.kind)).or_default() += 1;
+                    }
+                }
+                eprintln!("  struck broken: {pairs:?}");
+                for h in b.hardware.iter().filter(|h| h.part == door_part) {
+                    eprintln!(
+                        "  {}: ropes {:?}",
+                        h.name,
+                        h.beams
+                            .iter()
+                            .map(|&j| {
+                                let bm = &sk0.beams[j];
+                                (bm.a, bm.b, (bm.mat.strength / 100.0).round() / 10.0)
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
                 let pos = w.vehicles[0].positions();
                 let skin: Vec<[Vec3; 3]> =
                     tris.iter().map(|t| t.map(|i| pos[i as usize])).collect();
@@ -3644,6 +3728,7 @@ fn t_car_to_car_t_bone_at_80_kmh() {
             .map(|((n, beams), p)| format!("{n} {:.1} of {:.1} kN", p / 1e3, beams.iter().map(|&j| s.beams[j].strength.max(0.0)).sum::<f32>() / 1e3))
             .collect::<Vec<_>>()
     );
+    glass_report(&w.vehicles[0], &b, "T-bone (struck car)");
     eprintln!(
         "(t) striker nodes inside the struck car's skin: at most {} of {total} (at {:.2} s); yield and fracture: struck car {:.1} kJ, striker {:.1} kJ, of the striker's {:.1} kJ; KE left {:.1} kJ",
         worst_inside.0,
@@ -3966,4 +4051,95 @@ fn u_hardware_where_loads_reach_strength() {
         assert!(finite(&s));
         tr.report("on its side from 1 m", 1000.0);
     }
+}
+
+/// A9: glass breaks only on physics events. Driving straight at 50 km/h on
+/// flat ground for 3 s (after standing 1 s) breaks no pane; the panes'
+/// aperture gauges' strains are reported against tempered glass's 0.17 %
+/// and laminated's 0.064 % (`BRITTLE_GLASS=1` builds them while glass is
+/// off by default).
+#[test]
+fn v_glass_holds_while_driving() {
+    let b = built(Resolution::Medium);
+    let v = Vec3::new(0.0, 0.0, 50.0 / 3.6);
+    let mut s = spawn(&b, v, 0.0);
+    let mut worst: Vec<(String, f32)> = Vec::new();
+    let map = solver_beams(&s, &b);
+    if std::env::var("GLASS_REPORT").is_ok() {
+        let mut t = s.clone();
+        eprintln!("  (v) gauges at spawn: {:?}", gauge_strains(&t, &b));
+        let gl: Vec<usize> = b
+            .damage_units
+            .iter()
+            .filter(|u| u.name == "glass_backlight")
+            .flat_map(|u| u.beams.iter().map(|&j| j as usize))
+            .filter(|&j| b.skeleton.beams[j].fixed && b.skeleton.beams[j].mat.density == 0.0)
+            .collect();
+        for k in 0..2 {
+            for &j in &gl {
+                let x = &t.beams[map[j]];
+                eprintln!("  (v) step {k} gauge {}-{}: rest {:.5} rest0 {:.5} len {:.5} force {:.3} deform {:.3} strength {:.3} broken {}", x.a, x.b, x.rest, x.rest0, solver_len(&t, x), x.force, x.tt, x.strength, x.broken);
+            }
+            t.step();
+        }
+        for k in 0..6 {
+            t.step();
+            eprintln!(
+                "  (v) after step {k}: {:?}",
+                gauge_strains(&t, &b)
+                    .iter()
+                    .map(|g| format!("{} {:.5}", g.0, g.1 * 100.0))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for f in 0..(3.0 * 60.0) as usize {
+        s.frame();
+        if std::env::var("GLASS_REPORT").is_ok() {
+            for u in b
+                .damage_units
+                .iter()
+                .filter(|u| u.name.starts_with("glass_"))
+            {
+                for &j in &u.beams {
+                    let x = &s.beams[map[j as usize]];
+                    let sb = &b.skeleton.beams[j as usize];
+                    if x.broken && seen.insert(j) && seen.len() < 12 {
+                        let kind = if sb.fixed && sb.mat.density == 0.0 {
+                            "gauge"
+                        } else {
+                            "beam"
+                        };
+                        eprintln!(
+                            "  (v) frame {f}: {} {kind} {}-{} broke (group {}, strength {:.1} N, k {:.0}, rest {:.4}, len {:.4})",
+                            u.name, x.a, x.b, x.group, x.strength, x.k, x.rest, solver_len(&s, x)
+                        );
+                    }
+                }
+            }
+        }
+        let g = gauge_strains(&s, &b);
+        if worst.is_empty() {
+            worst = g;
+        } else {
+            for (w, x) in worst.iter_mut().zip(&g) {
+                w.1 = w.1.max(x.1);
+            }
+        }
+    }
+    eprintln!(
+        "(v) driving 50 km/h 3 s: gauge strain up to {:?} %",
+        worst
+            .iter()
+            .map(|(n, x)| format!("{n} {:.4}", x * 100.0))
+            .collect::<Vec<_>>()
+    );
+    glass_report(&s, &b, "driving 50 km/h");
+    let broken: Vec<String> = glass_state(&s, &b)
+        .into_iter()
+        .filter(|g| g.1)
+        .map(|g| g.0)
+        .collect();
+    assert!(broken.is_empty(), "glass broke while driving: {broken:?}");
 }

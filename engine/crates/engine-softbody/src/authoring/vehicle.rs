@@ -1147,6 +1147,17 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             } else {
                 0
             };
+            // A member riding a panel meets only its own part's frame (it
+            // must not weld the panel to the body across a shut line).
+            let pool: Vec<u32> = if m.ride {
+                snap_pool
+                    .iter()
+                    .copied()
+                    .filter(|&i| sk.nodes[i as usize].part == part)
+                    .collect()
+            } else {
+                snap_pool.clone()
+            };
             let spec = m.clone();
             let mat = move |t: f32| base.scaled(spec.scale_at(t));
             let truss: Truss = box_truss(
@@ -1167,7 +1178,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 m.beads,
                 m.section,
                 m.catch,
-                &snap_pool,
+                &pool,
             );
             snap_pool.extend(truss.stations.iter().flatten().copied());
             // The frame: every member's stations (not its catchers); a door's
@@ -1243,6 +1254,9 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     ends.dedup();
                     // Hinges and latch are placed once every door member is
                     // built (which end carries which is the door's).
+                    if !m.hardware_ends {
+                        continue;
+                    }
                     if through.contains(&part) {
                         door_ends.push((part, ends.clone()));
                     }
@@ -2493,7 +2507,14 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     };
     sk.solve_masses(structure)?;
     size_hardware(&mut sk, &hardware, params.strength)?;
-    let panes = brittle_glass(def, &mut sk, &shell, &mut groups_made, params.strength);
+    let panes = brittle_glass(
+        def,
+        &mut sk,
+        &shell,
+        &groups,
+        &mut groups_made,
+        params.strength,
+    );
     preload(&mut sk, def);
     // Collision skin: the shell's skin on a coarser lattice, its nodes contacters.
     sk.collision = coarse_skin(&sk, &shell)?;
@@ -2652,15 +2673,45 @@ fn shut_line_breaks(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]
 /// (Compression shortens one diagonal as it stretches the other.)
 pub const GAUGE_K: f32 = 1.0e4;
 
+/// The frame members round each pane's opening (`frame` for
+/// [`aperture_gauges`]): the screen pillars, header and cowl round the
+/// windscreen; the C-pillars, rear header and parcel shelf round the
+/// backlight; each door's sash and belt round its glass.
+pub fn aperture_members(pane: &str) -> Vec<String> {
+    let names = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    match pane {
+        "glass_windscreen" => names(&["pillar_a", "pillar_a_r", "header_f", "cowl"]),
+        "glass_backlight" => names(&["pillar_c", "pillar_c_r", "header_r", "parcel"]),
+        _ => {
+            let rest = pane.strip_prefix("glass_side_").unwrap_or("");
+            let mut it = rest.split('_');
+            match (it.next(), it.next()) {
+                (Some(door), Some(s)) => {
+                    let r = if s == "r" { "_r" } else { "" };
+                    vec![
+                        format!("door_sash_{door}{r}"),
+                        format!("door_belt_{door}{r}"),
+                    ]
+                }
+                _ => Vec::new(),
+            }
+        }
+    }
+}
+
 fn aperture_gauges(
     sk: &mut Skeleton,
     pane: &[u32],
     mounts: &[usize],
     strain: f32,
     group: u32,
+    frame: &[u32],
+    thickness: f32,
 ) -> Vec<usize> {
     let set: std::collections::HashSet<u32> = pane.iter().copied().collect();
-    let rim: Vec<u32> = mounts
+    // The opening's outline: the pane and the shell round it (its mounts'
+    // outer ends).
+    let mut rim: Vec<u32> = mounts
         .iter()
         .map(|&j| {
             let b = &sk.beams[j];
@@ -2671,6 +2722,7 @@ fn aperture_gauges(
             }
         })
         .collect();
+    rim.extend_from_slice(pane);
     if rim.is_empty() {
         return Vec::new();
     }
@@ -2681,37 +2733,63 @@ fn aperture_gauges(
     let ext = hi - lo;
     let mut axes = [(ext.x, Vec3::X), (ext.y, Vec3::Y), (ext.z, Vec3::Z)];
     axes.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let (u, v) = (axes[0].1, axes[1].1);
-    let frame: Vec<u32> = (0..sk.nodes.len() as u32)
-        .filter(|&i| sk.nodes[i as usize].primary && !sk.nodes[i as usize].catcher)
+    // (Each axis over the opening's extent along it: the diagonals of the
+    // opening, not of a square.)
+    let (u, v) = (
+        axes[0].1 / axes[0].0.max(1e-3),
+        axes[1].1 / axes[1].0.max(1e-3),
+    );
+    if frame.is_empty() {
+        return Vec::new();
+    }
+    // The opening's corners: the frame's own (its members' nodes about the
+    // opening, within 30 cm of its outline), farthest along each diagonal of
+    // the opening's plane.
+    let near: Vec<u32> = frame
+        .iter()
+        .copied()
+        .filter(|&i| rim.iter().any(|&r| sk.pos(r).distance(sk.pos(i)) < 0.3))
         .collect();
     let mut corners: Vec<u32> = Vec::new();
     for (su, sv) in [(1.0f32, 1.0f32), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)] {
-        let far = *rim
-            .iter()
-            .max_by(|&&a, &&b| {
-                let f = |i: u32| (sk.pos(i) - c).dot(u * su + v * sv);
-                f(a).total_cmp(&f(b))
-            })
-            .unwrap();
-        let q = sk.nearest(sk.pos(far), &frame, 1)[0];
-        if !corners.contains(&q) {
-            corners.push(q);
+        let f = |i: u32| (sk.pos(i) - c).dot(u * su + v * sv);
+        if let Some(&q) = near.iter().max_by(|&&a, &&b| f(a).total_cmp(&f(b))) {
+            if !corners.contains(&q) {
+                corners.push(q);
+            }
         }
     }
     let mut out = Vec::new();
+    if std::env::var("GLASS_STRAIN").is_ok() {
+        eprintln!(
+            "  corners {corners:?} at {:?}",
+            corners.iter().map(|&i| sk.pos(i)).collect::<Vec<_>>()
+        );
+    }
     for i in 0..corners.len() {
         for k in i + 1..corners.len() {
             let (a, b) = (corners[i], corners[k]);
             if sk.has_beam(a, b) {
+                if std::env::var("GLASS_STRAIN").is_ok() {
+                    eprintln!("  corner pair {a}-{b} already joined: no gauge");
+                }
                 continue;
             }
             // (A plain beam, so a break sets off its group: k·strain·L of
             // pull, elastic all the way; k a thousandth of a frame span's.)
             let l = sk.pos(a).distance(sk.pos(b));
+            // The glass sits in a compliant mount (the bead, or the run
+            // channel) on both edges, in series with the pane: across a span
+            // L the opening racks ε = ε_g (1 + 2 E t t_b / (G w L)) for a
+            // strain ε_g in the glass (exact for two shear layers in series
+            // with an elastic strip). The pane breaks at ε_g = σ/E.
+            let series =
+                1.0 + 2.0 * GLASS_E * thickness * BEAD_THICKNESS / (URETHANE_G * BEAD_WIDTH * l);
             let k = GAUGE_K;
-            let f =
-                k * super::material::REF_LENGTH / l.max(super::material::REF_LENGTH) * strain * l;
+            let f = k * super::material::REF_LENGTH / l.max(super::material::REF_LENGTH)
+                * strain
+                * series
+                * l;
             let m = Material {
                 k,
                 damp: 0.0,
@@ -2785,7 +2863,12 @@ fn rest_pose(sk: &mut Skeleton, glass: &[usize]) -> Result<(), String> {
     for (j, b) in sk.beams.iter_mut().enumerate() {
         let (a, c) = (b.a as usize, b.b as usize);
         b.rest_scale = if gauges.contains(&j) {
-            1.0
+            // A gauge's rest is its length here as the solver measures it:
+            // the default (RoR-compatible) profile's fast inverse square
+            // root is off by up to 0.18 % from the exact length the loader
+            // gives a rest, more than the glass's break strain.
+            let q = p1[a].distance_squared(p1[c]);
+            q * crate::explicit_beams::fast_inv_sqrt(q) / q.sqrt()
         } else {
             rest(b.a, b.b) / p1[a].distance(p1[c])
         };
@@ -2938,10 +3021,20 @@ fn settle(sk: &Skeleton, glass: &[usize]) -> Result<Settled, String> {
 /// Tempered glass's break strain: characteristic bending strength ≈ 120 MPa
 /// over E ≈ 70 GPa (`beamng-realism-plan.md` P6 [GLASS-TUE, GLASS-MIF]):
 /// 0.17 %, with no plastic range.
-pub const TEMPERED_STRAIN: f32 = 120.0e6 / 70.0e9;
+pub const TEMPERED_STRAIN: f32 = TEMPERED_STRENGTH / GLASS_E;
+/// Tempered glass's characteristic strength (Pa) [GLASS-TUE].
+pub const TEMPERED_STRENGTH: f32 = 120.0e6;
+/// Annealed glass's (a laminated pane's plies) (Pa) [GLASS-TUE].
+pub const ANNEALED_STRENGTH: f32 = 45.0e6;
+/// Glass's Young's modulus (Pa) [GLASS-MIF].
+pub const GLASS_E: f32 = 70.0e9;
+/// Tempered side, quarter and backlight glazing (m): NHTSA DOT 88988 table 2.
+pub const TEMPERED_THICKNESS: f32 = 0.0035;
+/// A laminated windscreen's glass (m): two 2.1 mm plies on PVB, ibid.
+pub const LAMINATED_GLASS: f32 = 0.0042;
 /// Annealed glass (a laminated windscreen's plies): ≈ 45 MPa over 70 GPa,
 /// 0.064 %: its plies crack there and its interlayer holds them.
-pub const ANNEALED_STRAIN: f32 = 45.0e6 / 70.0e9;
+pub const ANNEALED_STRAIN: f32 = ANNEALED_STRENGTH / GLASS_E;
 
 /// Glass from its material constants. Each pane's beams (those on its nodes
 /// to the shell around it) break at the glass's strain: tempered panes
@@ -2956,6 +3049,7 @@ fn brittle_glass(
     def: &VehicleDef,
     sk: &mut Skeleton,
     shell: &Shell,
+    groups: &HashMap<String, Vec<u32>>,
     groups_made: &mut u32,
     scale: f32,
 ) -> Vec<DamageUnit> {
@@ -3027,7 +3121,7 @@ fn brittle_glass(
         // panes are skin-tier beams, far softer than glass, and rack with
         // the settling body: at 0.17 % they break at rest (158 beams in
         // `a`). The units name each pane's beams either way.
-        if !BRITTLE_GLASS {
+        if !brittle_glass_on() {
             let part = sk.nodes[nodes[0] as usize].part;
             out.push(DamageUnit {
                 name,
@@ -3040,9 +3134,23 @@ fn brittle_glass(
         // The pane's own beams are skin-tier, ~10⁵ × softer than glass:
         // they carry its weight and break with its group, never on their
         // own strain (that would be a ~0.3 N break force).
-        if !laminated {
-            for &j in &pane {
-                sk.beams[j].group = g;
+        // As a strip of the real pane (a Choice: the strip's width is the
+        // beam's length) a beam holds σ·t·L in its plane: tempered 120 MPa
+        // over 3.5 mm (NHTSA DOT 88988, table 2: side, quarter and backlight
+        // glazing 3.5 mm), about 0.1 MN at 0.25 m, far above anything the
+        // step-softened beam carries. So it breaks only with its pane's group
+        // (tempered) or, laminated (two 2.1 mm plies on PVB), yields where
+        // its plies crack (45 MPa over 4.2 mm) and holds on its interlayer.
+        for &j in &pane {
+            let l = sk.pos(sk.beams[j].a).distance(sk.pos(sk.beams[j].b));
+            let b = &mut sk.beams[j];
+            if laminated {
+                b.mat.deform = scale * ANNEALED_STRENGTH * LAMINATED_GLASS * l;
+                b.mat.strength = f32::MAX;
+            } else {
+                b.mat.deform = scale * TEMPERED_STRENGTH * TEMPERED_THICKNESS * l;
+                b.mat.strength = b.mat.deform;
+                b.group = g;
             }
         }
         // Its mounts: each carries the bead (or the channel) along its share
@@ -3090,6 +3198,26 @@ fn brittle_glass(
         // extension against the installed pose: the strain the frame
         // imposes on the glass reaching its strength (tempered 120 MPa,
         // laminated 45 MPa: it cracks, in no group, and holds).
+        // The aperture's frame: the members round the opening.
+        let frame: Vec<u32> = aperture_members(&name)
+            .iter()
+            .filter_map(|m| groups.get(m.as_str()))
+            .flatten()
+            .copied()
+            .filter(|&i| sk.nodes[i as usize].primary && !sk.nodes[i as usize].catcher)
+            .collect();
+        if std::env::var("GLASS_STRAIN").is_ok() {
+            eprintln!(
+                "glass {name}: {} pane nodes, {} mounts, aperture frame {} nodes ({:?})",
+                nodes.len(),
+                mounts.len(),
+                frame.len(),
+                aperture_members(&name)
+                    .iter()
+                    .map(|m| (m.clone(), groups.get(m.as_str()).map_or(0, |g| g.len())))
+                    .collect::<Vec<_>>()
+            );
+        }
         let gauges = aperture_gauges(
             sk,
             &nodes,
@@ -3100,6 +3228,12 @@ fn brittle_glass(
                 TEMPERED_STRAIN
             },
             if laminated { 0 } else { g },
+            &frame,
+            if laminated {
+                LAMINATED_GLASS
+            } else {
+                TEMPERED_THICKNESS
+            },
         );
         let part = sk.nodes[nodes[0] as usize].part;
         let beams: Vec<u32> = pane
@@ -3121,6 +3255,12 @@ fn brittle_glass(
 /// Brittle panes and sized mounts (A9): off until the panes stop racking
 /// with the body at rest (`vehicle-authoring.md`, glass).
 pub const BRITTLE_GLASS: bool = false;
+
+/// [`BRITTLE_GLASS`], or `BRITTLE_GLASS=1` in the environment (to measure it
+/// while it is off).
+pub fn brittle_glass_on() -> bool {
+    BRITTLE_GLASS || std::env::var("BRITTLE_GLASS").is_ok_and(|v| v == "1")
+}
 
 /// The windscreen and backlight's urethane bead: TEROSON PU 9096 PL (Henkel
 /// technical data sheet, October 2016): shear modulus about 1.2 MPa (DIN
