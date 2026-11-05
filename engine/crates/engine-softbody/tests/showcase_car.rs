@@ -5861,10 +5861,20 @@ fn topology_census() {
     // other end's groups, length, k, kind), to see what fills its row.
     if let Ok(p) = std::env::var("TOPO_NODE") {
         let v: Vec<f32> = p.split(',').filter_map(|x| x.parse().ok()).collect();
-        let q = if v.len() == 3 { Vec3::new(v[0], v[1], v[2]) } else { Vec3::ZERO };
+        let q = if v.len() == 3 {
+            Vec3::new(v[0], v[1], v[2])
+        } else {
+            Vec3::ZERO
+        };
         let all: Vec<u32> = (0..sk.nodes.len() as u32).collect();
         // (A single number: that node.)
-        let n = if v.len() == 1 { v[0] as u32 } else { sk.nearest(q, &all, 1)[0] };
+        let n = if let Some(g) = p.strip_prefix("g:") {
+            b.groups[g][0]
+        } else if v.len() == 1 {
+            v[0] as u32
+        } else {
+            sk.nearest(q, &all, 1)[0]
+        };
         let gname = |i: u32| -> String {
             let g: Vec<&str> = b
                 .groups

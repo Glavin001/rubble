@@ -303,9 +303,15 @@ pub struct Loads {
 /// kN (2005 Camry, report 637726), the best-supported floor, and each hinge
 /// holds it on its own (`hardware_rigs`), so the door opens at its latch
 /// before a hinge lets go, as every report found.
-/// The depth of a lid's rigidifier node under its centroid (m): the inner
-/// frame's 100 mm hat (a Choice).
-pub const RIGIDIFIER_DEPTH: f32 = 0.10;
+/// The depth of a lid's rigidifier node under its centroid (m), as BeamNG's
+/// BX has them (measured from `bx_hood_popup`: its rigidifier `h6` 0.228 m
+/// under the hood's middle row; `bx_trunk_coupe`: `t5` 0.160 m under its
+/// middle row). (Before: 0.10 m, the inner frame's hat, a Choice.)
+pub const RIGIDIFIER_DEPTH_BONNET: f32 = 0.228;
+pub const RIGIDIFIER_DEPTH_LID: f32 = 0.160;
+/// The depth between a lid's outer panel and its inner (m): the inner
+/// stamping's hat, 60 mm deep (`sedan.rs`'s lid frame section), a Choice.
+pub const LID_DEPTH: f32 = 0.06;
 
 pub const PRIMARY_LATCH: Loads = Loads {
     longitudinal: 28_000.0,
@@ -2126,10 +2132,161 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     // shell, outer and inner frame, whose depth gives it bending stiffness;
     // the lattice's single sheet has none but its curvature's, so in the
     // 56 km/h wall the boot lid's free corners flapped up 160–280 mm. The
-    // node sits `RIGIDIFIER_DEPTH` under the lid's centroid (a Choice: the
-    // inner frame's 100 mm hat), joined to every skin node of the lid by
-    // beams of the lid's own sheet material. `RIGIDIFIER=0`: none.
-    if one && std::env::var("RIGIDIFIER").map_or(true, |v| v != "0") {
+    // node sits `RIGIDIFIER_DEPTH_BONNET` or `_LID` under the lid's centroid
+    // (the BX's measured depths), joined to every skin node of the lid by
+    // beams of the inner stamping ([`lid_inner_material`]: before, the lid's
+    // built sheet material, which yielded at 0.3 kN and was far under the
+    // bound). `RIGIDIFIER=0`: none; `RIGIDIFIER_DEPTH=<m>` overrides the depth.
+    // One tier, measured and not adopted (`DOUBLE_SKIN=1`): each lid a double
+    // skin. At the step's bound its 60 mm sandwich's faces carry about 1/1500
+    // of steel's axial rigidity, so its first mode stays 6–9 Hz
+    // (`vehicle-authoring.md`, "The lids"); the rigidifier below lands it. A real bonnet or decklid is an outer
+    // panel hemmed at its perimeter onto an inner stamping whose hat-section
+    // walls stand off it and carry shear between the two: a sandwich whose
+    // depth gives the lid its bending stiffness (measured first modes
+    // 17.7–41.5 Hz, `crash_invariants.rs` `LID_MODE_HZ`). Built: under every
+    // outer node not on the lid's perimeter, an inner node `LID_DEPTH` in
+    // along the skin's normal (an existing node of the lid within half that
+    // reuses it: the inner frame's chord nodes); the perimeter is the hem
+    // (the inner meets the outer's own perimeter nodes). Between them, the
+    // outer's edges, braces and bends repeated on the inner, a post at each
+    // node and the two diagonals of each outer edge (the inner's walls). The
+    // inner's beams are the lid's own sheet (its median) at half the
+    // stiffness and yield: the inner stamping is the same gauge over half the
+    // area (`panel_sheets`), a Choice for the walls too. The lid's measured
+    // total mass is spread over its new nodes as over the rest (by steel).
+    let double_skin = one && std::env::var("DOUBLE_SKIN").is_ok_and(|v| v == "1");
+    if double_skin {
+        let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
+        for name in ["bonnet", "bootlid"] {
+            let Some(pt) = sk.parts.iter().position(|p| p == name) else {
+                continue;
+            };
+            let pt = pt as u16;
+            let skin: Vec<u32> = (0..sk.nodes.len() as u32)
+                .filter(|&i| sk.nodes[i as usize].part == pt && on_shell.contains(&i))
+                .collect();
+            let in_lid: std::collections::HashSet<u32> = skin.iter().copied().collect();
+            let tris: Vec<[u32; 3]> = shell
+                .tris
+                .iter()
+                .copied()
+                .filter(|t| t.iter().all(|i| in_lid.contains(i)))
+                .collect();
+            if tris.len() < 4 {
+                continue;
+            }
+            // The perimeter: nodes on an edge only one of the lid's triangles has.
+            let mut edge_use: HashMap<(u32, u32), usize> = HashMap::new();
+            for t in &tris {
+                for k in 0..3 {
+                    let (a, b) = (t[k], t[(k + 1) % 3]);
+                    *edge_use.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+            let perimeter: std::collections::HashSet<u32> = edge_use
+                .iter()
+                .filter(|(_, &n)| n == 1)
+                .flat_map(|(e, _)| [e.0, e.1])
+                .collect();
+            // Each node's outward normal (area-weighted over its triangles).
+            let mut normal: HashMap<u32, Vec3> = HashMap::new();
+            for t in &tris {
+                let (a, b, c) = (sk.pos(t[0]), sk.pos(t[1]), sk.pos(t[2]));
+                let n = (b - a).cross(c - a);
+                for &i in t {
+                    *normal.entry(i).or_insert(Vec3::ZERO) += n;
+                }
+            }
+            let mut mats: Vec<Material> = sk
+                .beams
+                .iter()
+                .filter(|b| {
+                    b.ty == BeamType::Normal
+                        && b.group == 0
+                        && !b.damper
+                        && in_lid.contains(&b.a)
+                        && in_lid.contains(&b.b)
+                })
+                .map(|b| b.mat)
+                .collect();
+            if mats.is_empty() {
+                continue;
+            }
+            mats.sort_by(|a, b| a.k.total_cmp(&b.k));
+            let mat = mats[mats.len() / 2];
+            let inner_beam = |sk: &mut Skeleton, x: u32, y: u32| {
+                let l = sk.pos(x).distance(sk.pos(y));
+                let (m, ty) = lid_inner_material(mat, l);
+                if sk.beam(x, y, m) {
+                    sk.beams.last_mut().unwrap().tension_yield = ty;
+                }
+            };
+            let own: Vec<u32> = (0..sk.nodes.len() as u32)
+                .filter(|&i| sk.nodes[i as usize].part == pt && !on_shell.contains(&i))
+                .collect();
+            let mut inner: HashMap<u32, u32> = HashMap::new();
+            // (`LID_HEM=1`: the perimeter's inner is the outer node itself,
+            // a measurement switch. By default the inner's frame stands off
+            // under the perimeter too: on these lids, 2–4 nodes across, the
+            // hem's flange and the frame's first hat inside it are within one
+            // node spacing, so the perimeter node's inner is the hat's.)
+            let hem = std::env::var("LID_HEM").is_ok_and(|v| v == "1");
+            for &i in &skin {
+                if hem && perimeter.contains(&i) {
+                    inner.insert(i, i);
+                    continue;
+                }
+                let n = normal
+                    .get(&i)
+                    .copied()
+                    .unwrap_or(Vec3::Y)
+                    .normalize_or_zero();
+                let n = if n.length_squared() > 0.5 { n } else { Vec3::Y };
+                let q = sk.pos(i) - n * LID_DEPTH;
+                let near = own
+                    .iter()
+                    .copied()
+                    .filter(|&j| sk.pos(j).distance(q) < 0.5 * LID_DEPTH)
+                    .min_by(|&a, &b| sk.pos(a).distance(q).total_cmp(&sk.pos(b).distance(q)));
+                let j = near.unwrap_or_else(|| sk.node(q, pt));
+                inner.insert(i, j);
+            }
+            let outer_beams: Vec<(u32, u32)> = shell
+                .beams
+                .iter()
+                .filter(|b| in_lid.contains(&b.0) && in_lid.contains(&b.1))
+                .map(|b| (b.0, b.1))
+                .collect();
+            let mut inner_nodes: Vec<u32> = Vec::new();
+            for &i in &skin {
+                let j = inner[&i];
+                if j != i {
+                    // The post (the inner's wall at the node).
+                    inner_beam(&mut sk, i, j);
+                    inner_nodes.push(j);
+                }
+            }
+            for &(a, b) in &outer_beams {
+                let (ia, ib) = (inner[&a], inner[&b]);
+                // The inner sheet.
+                if ia != a || ib != b {
+                    inner_beam(&mut sk, ia, ib);
+                }
+                // Its walls' shear: the edge's two diagonals.
+                if ia != a {
+                    inner_beam(&mut sk, ia, b);
+                }
+                if ib != b {
+                    inner_beam(&mut sk, a, ib);
+                }
+            }
+            inner_nodes.sort();
+            inner_nodes.dedup();
+            groups.insert(format!("{name}_inner_panel"), inner_nodes);
+        }
+    }
+    if one && !double_skin && std::env::var("RIGIDIFIER").map_or(true, |v| v != "0") {
         let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
         for name in ["bonnet", "bootlid"] {
             let Some(pt) = sk.parts.iter().position(|p| p == name) else {
@@ -2161,9 +2318,21 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             mats.sort_by(|a, b| a.k.total_cmp(&b.k));
             let mat = mats[mats.len() / 2];
             let c = skin.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / skin.len() as f32;
-            let r = sk.node(c - Vec3::Y * RIGIDIFIER_DEPTH, pt);
+            let depth: f32 = std::env::var("RIGIDIFIER_DEPTH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(if name == "bonnet" {
+                    RIGIDIFIER_DEPTH_BONNET
+                } else {
+                    RIGIDIFIER_DEPTH_LID
+                });
+            let r = sk.node(c - Vec3::Y * depth, pt);
             for &i in &skin {
-                sk.beam(r, i, mat);
+                let l = sk.pos(r).distance(sk.pos(i));
+                let (m, ty) = lid_inner_material(mat, l);
+                if sk.beam(r, i, m) {
+                    sk.beams.last_mut().unwrap().tension_yield = ty;
+                }
             }
             groups.insert(format!("{name}_rigidifier"), vec![r]);
         }
@@ -3290,6 +3459,36 @@ pub const SHEET_BUCKLING_K: f32 = 4.0;
 /// (1947) 527–554; AISI S100 §B2.1) at its yield, so σ_u = σ_y·b_e/b,
 /// never above σ_y. `b` is the bay's width: the lattice edge's length.
 /// 0.8 mm steel on 0.2 m bays: σ_cr 12 MPa, σ_u 48 MPa (σ_y 210).
+/// A lid's inner stamping as beams (the double skin's inner sheet, posts and
+/// walls, or the rigidifier's spokes standing in for it): the inner is the
+/// panels' gauge over half the lid's area (`panel_sheets`), so each beam's
+/// stiffness target is half a sheet edge's, (√3/4)·E·t/2, and its yields half
+/// a sheet edge's of its length (the buckled bay's in compression, σ_y's in
+/// tension; [`sheet_ultimate_stress`]). The step's bound then cuts the
+/// stiffness where it must ([`Skeleton::cap_to_bound`]). Damping keeps the
+/// lid material's ratio. Returns the material and the tension yield.
+pub fn lid_inner_material(lid: Material, l: f32) -> (Material, f32) {
+    use super::material::REF_LENGTH;
+    let lattice = 3f32.sqrt() / 4.0;
+    let t = PANEL_GAUGE;
+    let k = 0.5 * lattice * E_STEEL * t;
+    let now = lid.k_at(l);
+    let f = k / now.max(1e-3);
+    let deform = 0.5 * lattice * sheet_ultimate_stress(E_STEEL, SHEET_YIELD, t, l) * t * l;
+    let tension = 0.5 * lattice * SHEET_YIELD * t * l;
+    let _ = REF_LENGTH;
+    (
+        Material {
+            k: lid.k * f,
+            damp: lid.damp * f.sqrt(),
+            deform,
+            strength: deform.max(tension),
+            ..lid
+        },
+        tension,
+    )
+}
+
 pub fn sheet_ultimate_stress(e: f32, sigma_y: f32, t: f32, b: f32) -> f32 {
     if sigma_y <= 0.0 {
         return 0.0;

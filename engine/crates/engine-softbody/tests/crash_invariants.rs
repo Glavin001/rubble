@@ -234,6 +234,10 @@ impl SceneCar {
                 "body".into()
             } else if p.starts_with("bx_trunk") {
                 "bootlid".into()
+            } else if p.starts_with("bx_hood") {
+                "bonnet".into()
+            } else if p.starts_with("bx_fender_L") {
+                "fender_l".into()
             } else if p == "bx_door_L" || p == "bx_doorpanel_L" {
                 "door_f_l".into()
             } else if p == "bx_door_R" || p == "bx_doorpanel_R" {
@@ -1398,15 +1402,20 @@ fn panel_modes() -> Vec<(&'static str, &'static str, f64, f64)> {
     use engine_softbody::authoring::vehicle::PANEL_GAUGE;
     let mut out = Vec::new();
     use engine_softbody::explicit_beams::{Node, NODE_IMMOVABLE, NODE_NO_GROUND};
-    for car in cars() {
-        let b = built(car);
-        let sk = &b.skeleton;
-        let s = spawn_truck(&b.truck, Vec3::ZERO, Vec3::ZERO);
-        let n = sk.nodes.len();
+    // (`CI_REF=1`: BeamNG's BX too, opt-in as `beamng_reference_invariants_report`.)
+    let mut list: Vec<&str> = cars();
+    if std::env::var("CI_REF").is_ok() && std::env::var("RUBBLE_JBEAM_BX").is_ok() {
+        list.push("bx");
+    }
+    for car in list {
+        let sc = scene_car(car);
+        let s = sc.spawn(Vec3::ZERO, Vec3::ZERO, false);
+        let n = sc.n;
         for part in ["bootlid", "bonnet", "door_f_l", "door_r_l", "fender_l"] {
-            let ids: Vec<usize> = (0..n)
-                .filter(|&i| sk.parts[sk.nodes[i].part as usize] == part)
-                .collect();
+            let ids: Vec<usize> = (0..n).filter(|&i| sc.part[i] == part).collect();
+            if ids.len() < 3 {
+                continue;
+            }
             let inside: std::collections::HashSet<usize> = ids.iter().copied().collect();
             let mut map: HashMap<usize, u32> = HashMap::new();
             let mut nodes: Vec<Node> = Vec::new();
@@ -1450,10 +1459,7 @@ fn panel_modes() -> Vec<(&'static str, &'static str, f64, f64)> {
                     if inside.contains(&a) != inside.contains(&c) && a < n && c < n {
                         let other = if inside.contains(&a) { c } else { a };
                         let e = by
-                            .entry(format!(
-                                "{:?}->{}",
-                                bm.kind, sk.parts[sk.nodes[other].part as usize]
-                            ))
+                            .entry(format!("{:?}->{}", bm.kind, sc.part[other]))
                             .or_default();
                         e.0 += 1;
                         e.1 += bm.k;
