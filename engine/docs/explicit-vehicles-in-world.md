@@ -191,18 +191,29 @@ breaks bonds whose capacity a chunk load beats and splits bodies in place).
 The vehicle frame for window N+1 runs before the rigid step of that window (§2, step 4),
 so **its strike is predicted at the end of the frame before it and split before the
 engine steps**: the routing design of AGENTS.md, with the explicit frame itself as the
-predictor (it is the exact soft-body response over the window, not an estimate). The
-impulses of window N+1 are emitted after the split, to each chunk's new body: a piece that
-breaks free receives the vehicle's push on its chunks, so momentum closes across the
-fracture. Nothing is re-simulated: the frame is computed once, its loads applied once.
+predictor (it is the exact soft-body response over the window, not an estimate). Nothing
+is re-simulated: the frame is computed once, its loads applied once.
 
-Latency, stated: inside window N+1 the *vehicle* meets the structure as it stood at the
-window's start (unbroken, or anchored). A piece that breaks off in that window takes the
-impulse the vehicle exchanged with the unbroken structure. Over one window (≤ 8.3 ms at
-120 Hz) a car's crush force is still rising, so this is a fraction of the strike; the
-test reports the energy of the freed pieces against the vehicle's loss. The exact
-alternative, releasing a chunk proxy inside the frame the substep its load passes the
-capacity, is a follow-up (it puts the threshold rule into the explicit kernel).
+The impulses of window N+1 are emitted after the split, consistently with what the vehicle
+met in the window (`vehicle_coupling.slang` `emitPair`):
+- a proxy body of infinite mass in the window (anchored, static): nothing; the vehicle met an
+  immovable body and its reaction went into the ground, as for a wall;
+- a proxy body still whole: its impulse and angular impulse;
+- a proxy body that split (or whose shapes now belong to other bodies): each piece takes the
+  change of motion the whole body's impulse gives at the piece's centre of mass,
+  `m (Δv + Δω × r)` and `I Δω`, as split pieces move with their parent's motion. Momentum
+  closes and no piece moves faster than the whole body would have.
+
+The first version gave each freed chunk its own share of the impulse the vehicle exchanged
+with the *unbroken* structure: a 1 kg chunk took 1,888 m/s in the house test. That is the
+energy error of the one-window latency, and the rule above removes it.
+
+Latency, stated: inside window N+1 the vehicle meets the structure as it stood at the
+window's start (unbroken, or anchored). A piece that breaks free in that window starts at
+its parent's motion and meets the vehicle as a free body from the next window on. Over one
+window (≤ 16.7 ms at 60 Hz) a car's crush force is still rising. The exact alternative,
+releasing a chunk proxy inside the frame at the substep its load passes the capacity, is a
+follow-up: it puts the threshold rule into the explicit kernel.
 
 ## 5. GPU data flow (every backend)
 
@@ -279,7 +290,7 @@ Tests:
 | CPU: box of known mass (300, 1200, 4000 kg) | between the plastic and elastic speeds, exact momentum balance, restitution 0.07 |
 | GPU vs CPU (`engine-webgpu/tests/explicit_rigid_gpu.rs`) | first contact frames 2.5e-7 m, outcome 1e-5, momentum 7e-8; coupling built but off: bit for bit |
 | World: vehicle into a free 1200 kg box (`engine-world/tests/explicit_vehicles.rs`) | ΔP 1.4e-6 of P through the World's impulse path; box 13.1 m/s in [11.37, 22.75]; kinetic energy lost |
-| World: vehicle at 20 m/s into the prefractured cuboid house (826 chunks, threshold) | bonds break in the step of first contact, the house splits, freed pieces move |
+| World: vehicle at 20 m/s into the prefractured cuboid house (826 chunks, threshold) | bonds break in the step of first contact, the house splits, freed pieces move, none faster than 2 × 20 m/s (fastest 0.72 m/s) |
 
 Frame times (`engine-world/examples/explicit_vehicles_bench.rs`): the crash town, repo sedans at
 15–18 m/s, one house per four vehicles, World steps of 1/60 s (33–34 explicit steps each), GPU ms

@@ -214,9 +214,9 @@ pub fn crash_town(
 pub fn town_coupling() -> ExplicitVehiclesDef {
     ExplicitVehiclesDef {
         capacity: engine_webgpu::CouplingCapacity {
-            bodies: 512,
-            shapes: 512,
-            planes: 8192,
+            bodies: 1024,
+            shapes: 1024,
+            planes: 16384,
         },
         ..ExplicitVehiclesDef::default()
     }

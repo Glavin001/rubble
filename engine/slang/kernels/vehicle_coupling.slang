@@ -15,9 +15,9 @@
 //                  a stress chunk as a contact record of the threshold ingest's slot 1;
 //   cpl_loads_end  one thread: that slot's row count;
 //   cpl_emit       one group per vehicle, at the next step's start (after the fracture's
-//                  split): each shape's impulse and angular impulse on the body its
-//                  collider belongs to now, merged per body, as impulse records after the
-//                  host's;
+//                  split): per proxy body its window impulse, on the bodies its shapes
+//                  belong to now (emitPair: whole, or split among its pieces as the
+//                  whole body's change of motion), as impulse records after the host's;
 //   cpl_emit_end   one thread: IMPULSE_FIRST (the records are applied once).
 //
 // Limits are loud: a vehicle with more shapes, bodies or planes than its room, more
@@ -350,50 +350,92 @@ void cpl_loads_end(uint3 tid : SV_DispatchThreadID)
     gRowCounts[gP.ingestSlot] = min(gWork[0].load(), gP.rowCap);
 }
 
+// A proxy body's window impulse and its angular impulse about point c.
+void proxyImpulse(uint v, uint j, float3 c, out float3 J, out float3 L)
+{
+    J = float3(0.0);
+    L = float3(0.0);
+    uint ns = gMisc[vrec(v)].y;
+    for (uint q = 0u; q < ns; q++)
+    {
+        uint aq = srec(v, q);
+        if (gMisc[aq].y != j) continue;
+        float3 i = asfloat(gMisc[aq + 4u].xyz);
+        J += i;
+        L += asfloat(gMisc[aq + 5u].xyz) + cross(asfloat(gMisc[aq + 6u].xyz) - c, i);
+    }
+}
+
+// The impulse records of vehicle v's window, one per (proxy body, body its shapes belong
+// to now). A proxy body of infinite mass in the window (static, anchored or kinematic: the
+// vehicle met an immovable body) sends nothing: its reaction went into the ground, as the
+// vehicle felt it. A proxy body still whole sends its impulse. One that split (or whose
+// shapes moved to other bodies) after the frame: each piece takes the change of motion
+// the whole body's impulse gives at the piece's centre of mass, m (dv + dw x r) and I dw,
+// as the pieces of a split move with their parent's motion. Momentum closes; no piece
+// moves faster than the whole body would have.
+void emitPair(uint v, uint j, uint body, uint key)
+{
+    uint b = brec(v, j);
+    float4 c0 = asfloat(gMisc[b]);
+    if (!(c0.w > 0.0)) return;
+    float4 cur = gBodies[7u * body];
+    if (!(cur.w > 0.0)) return;
+    float3 J;
+    float3 L;
+    bool whole = gMisc[b + 3u].w == body && asuint(cur.w) == asuint(c0.w);
+    if (whole)
+    {
+        proxyImpulse(v, j, cur.xyz, J, L);
+    }
+    else
+    {
+        float3 Jp;
+        float3 Lp;
+        proxyImpulse(v, j, c0.xyz, Jp, Lp);
+        float4 q = asfloat(gMisc[b + 1u]);
+        float3 ii = asfloat(gMisc[b + 4u].xyz);
+        float3 dv = Jp * c0.w;
+        float3 dw = qrot(q, ii * qrot(float4(-q.xyz, q.w), Lp));
+        J = (dv + cross(dw, cur.xyz - c0.xyz)) / cur.w;
+        float4 rot = gBodies[7u * body + 1u];
+        float3 ci = gBodies[7u * body + 2u].xyz;
+        float3 lw = qrot(float4(-rot.xyz, rot.w), dw);
+        float3 li = float3(ci.x > 0.0 ? lw.x / ci.x : 0.0, ci.y > 0.0 ? lw.y / ci.y : 0.0, ci.z > 0.0 ? lw.z / ci.z : 0.0);
+        L = qrot(rot, li);
+    }
+    if (all(J == float3(0.0)) && all(L == float3(0.0))) return;
+    uint r = gScratch[gP.impulseCount].add(1u);
+    if (r >= gP.impulseCap) { gWork[1].or(ST_IMPULSES); return; }
+    uint w = gP.impulseBase + 8u * r;
+    gScratch[w].store(body);
+    gScratch[w + 1u].store(((gP.keyBase + v * 1024u + key) << 8) | IMPULSE_LINEAR_ANGULAR);
+    gScratch[w + 2u].store(asuint(J.x));
+    gScratch[w + 3u].store(asuint(J.y));
+    gScratch[w + 4u].store(asuint(J.z));
+    gScratch[w + 5u].store(asuint(L.x));
+    gScratch[w + 6u].store(asuint(L.y));
+    gScratch[w + 7u].store(asuint(L.z));
+}
+
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void cpl_emit(uint3 gid : SV_GroupID)
 {
     uint v = gid.x;
     uint ns = gMisc[vrec(v)].y;
-    // Per shape, merged into the first shape of the same body now.
     for (uint k = 0u; k < ns; k++)
     {
         uint at = srec(v, k);
+        uint j = gMisc[at].y;
         uint body = gColliders[4u * gMisc[at].z].x;
-        float4 p0 = gBodies[7u * body];
-        if (!(p0.w > 0.0)) continue;
         bool first = true;
         for (uint q = 0u; q < k; q++)
         {
-            float4 qp = gBodies[7u * gColliders[4u * gMisc[srec(v, q)].z].x];
-            if (gColliders[4u * gMisc[srec(v, q)].z].x == body && qp.w > 0.0) { first = false; break; }
-        }
-        if (!first) continue;
-        float3 J = float3(0.0);
-        float3 L = float3(0.0);
-        for (uint q = k; q < ns; q++)
-        {
             uint aq = srec(v, q);
-            if (gColliders[4u * gMisc[aq].z].x != body) continue;
-            float3 j = asfloat(gMisc[aq + 4u].xyz);
-            float3 m = asfloat(gMisc[aq + 5u].xyz);
-            float3 ref = asfloat(gMisc[aq + 6u].xyz);
-            J += j;
-            L += m + cross(ref - p0.xyz, j);
+            if (gMisc[aq].y == j && gColliders[4u * gMisc[aq].z].x == body) { first = false; break; }
         }
-        if (all(J == float3(0.0)) && all(L == float3(0.0))) continue;
-        uint r = gScratch[gP.impulseCount].add(1u);
-        if (r >= gP.impulseCap) { gWork[1].or(ST_IMPULSES); continue; }
-        uint w = gP.impulseBase + 8u * r;
-        gScratch[w].store(body);
-        gScratch[w + 1u].store(((gP.keyBase + v * 1024u + k) << 8) | IMPULSE_LINEAR_ANGULAR);
-        gScratch[w + 2u].store(asuint(J.x));
-        gScratch[w + 3u].store(asuint(J.y));
-        gScratch[w + 4u].store(asuint(J.z));
-        gScratch[w + 5u].store(asuint(L.x));
-        gScratch[w + 6u].store(asuint(L.y));
-        gScratch[w + 7u].store(asuint(L.z));
+        if (first) emitPair(v, j, body, k);
     }
 }
 
