@@ -1459,6 +1459,10 @@ impl ExplicitBeams {
             s.tri_excl.clear();
             s.spawn_exclusions_except(&keep);
         }
+        // `rubble_exact_lengths` (Rubble's extension): exact beam lengths.
+        if file.exact_lengths {
+            s.settings.fast_inv_sqrt = false;
+        }
         Ok(s)
     }
 

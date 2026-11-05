@@ -330,6 +330,10 @@ pub struct TruckFile {
     /// node starts in its range: in a file that is its vehicle at rest, they
     /// rest in contact (spec §10.1's spawn exclusions are the design's).
     pub spawn_contacts: Vec<([u32; 3], u32)>,
+    /// `rubble_exact_lengths` (Rubble's extension): beam lengths through an exact
+    /// square root, not RoR's fast inverse square root (its error, up to 0.18 % of a
+    /// length, is comparable to metal's yield strain and far above glass's).
+    pub exact_lengths: bool,
     pub wheels: Vec<TruckWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
@@ -768,6 +772,7 @@ impl Parser {
             "enable_advanced_deformation" => self.out.advanced_deformation = true,
             "rubble_full_contact" => self.out.full_contact = true,
             "rubble_rest_pose" => self.out.rest_ground = Some(f(t, 1, 0.0)),
+            "rubble_exact_lengths" => self.out.exact_lengths = true,
             "detacher_group" => {
                 self.detacher_group = if t.get(1) == Some(&"end") {
                     0
