@@ -955,6 +955,40 @@ fn main() {
     }
     for f in 0..frames {
         s.frame();
+        // POLE_TRACE=1: every 2 frames, what bears on the pole (nodes within 2
+        // cm of its surface) by group, and where the pole is in the car's
+        // spawn frame (how deep it is).
+        if (scene == "pole" || scene == "side") && std::env::var("POLE_TRACE").is_ok() && f % 2 == 1
+        {
+            let (axis, pc) = if scene == "pole" {
+                (Vec3::new(offset, 0.0, front + 0.05 + 0.125), true)
+            } else {
+                (Vec3::new(side + 0.05 + 0.125, 0.0, offset), false)
+            };
+            let mut by: std::collections::BTreeMap<String, (usize, f32)> = Default::default();
+            for (i, n) in s.nodes.iter().enumerate() {
+                let d = Vec3::new(n.pos.x - axis.x, 0.0, n.pos.z - axis.z).length();
+                if d < 0.125 + 0.02 && n.pos.y < 2.0 {
+                    let e = by.entry(label(i as u32)).or_default();
+                    e.0 += 1;
+                    e.1 += if pc {
+                        n.pos.x - axis.x
+                    } else {
+                        n.pos.z - axis.z
+                    };
+                }
+            }
+            let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+            let com = s.nodes.iter().map(|n| n.mass * n.pos).sum::<Vec3>() / total;
+            eprintln!(
+                "  pole f{f}: com {:.2?}; on the pole {}",
+                com,
+                by.iter()
+                    .map(|(k, (n, o))| format!("{k} {n} ({:+.2})", o / *n as f32))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         if let Ok(zones) = std::env::var("RELAX") {
             // Diagnostic: at frame RELAX_AT, every beam within (or between)
             // the listed zones takes its current length as its rest length

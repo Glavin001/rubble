@@ -610,14 +610,24 @@ fn e_upside_down_drop_from_15_m_crushes_the_roof_without_exploding() {
 fn pole_sweep_never_passes_through() {
     let b = built(Resolution::Low);
     let mut jobs = Vec::new();
+    // `SWEEP_SPEEDS=28,32` other speeds, `SWEEP_SHIFT=0.025` offsets moved by
+    // that much (how robust a clean sweep is).
+    let speeds: Vec<f32> = std::env::var("SWEEP_SPEEDS")
+        .ok()
+        .map(|v| v.split(',').filter_map(|t| t.parse().ok()).collect())
+        .unwrap_or_else(|| vec![30.0, 45.0, 60.0]);
+    let shift: f32 = std::env::var("SWEEP_SHIFT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
     for square in [true, false] {
-        for kmh in [30.0f32, 45.0, 60.0] {
+        for &kmh in &speeds {
             for i in -16..=16 {
-                jobs.push((Vec3::Z, i as f32 * 0.05, square, kmh));
+                jobs.push((Vec3::Z, i as f32 * 0.05 + shift, square, kmh));
             }
             for i in -44..=44 {
                 // Sideways: offsets along the car (lateral of +x is −z).
-                jobs.push((Vec3::X, i as f32 * 0.05, square, kmh));
+                jobs.push((Vec3::X, i as f32 * 0.05 + shift, square, kmh));
             }
         }
     }
@@ -1416,13 +1426,44 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
                             gs(c)
                         );
                         eprintln!(
-                            "  aperture x {side} z {z0}-{z1} y {y}: nodes {a} {:?} {c} {:?}: {:+.0} mm",
+                            "  aperture x {side} z {z0}-{z1} y {y}: nodes {a} {:?} {c} {:?}: {:+.0} mm (moved {:.0?} and {:.0?} mm)",
                             sk.nodes[a].p,
                             sk.nodes[c].p,
-                            (d1 - d0) * 1e3
+                            (d1 - d0) * 1e3,
+                            (local1[a] - local0[a]) * 1e3,
+                            (local1[c] - local0[c]) * 1e3
                         );
                     }
                 }
+            }
+        }
+        // K_NEAR=x,y,z: the nodes round a point, their groups and how far they
+        // moved in the cabin's frame (x along, y across, z down; mm).
+        if let Ok(v) = std::env::var("K_NEAR") {
+            let c: Vec<f32> = v.split(',').filter_map(|t| t.parse().ok()).collect();
+            let p = Vec3::new(c[0], c[1], c[2]);
+            let mut ns: Vec<usize> = (0..sk.nodes.len()).collect();
+            ns.sort_by(|&a, &c| {
+                sk.nodes[a]
+                    .p
+                    .distance(p)
+                    .total_cmp(&sk.nodes[c].p.distance(p))
+            });
+            for &i in ns.iter().take(12) {
+                let gs: Vec<&String> = b
+                    .groups
+                    .iter()
+                    .filter(|(_, g)| g.contains(&(i as u32)))
+                    .map(|(k, _)| k)
+                    .collect();
+                eprintln!(
+                    "  near {i} {:?} {} primary {} mass {:.2} {gs:?}: moved {:.0?} mm",
+                    sk.nodes[i].p,
+                    sk.parts[sk.nodes[i].part as usize],
+                    sk.nodes[i].primary,
+                    s.nodes[i].mass,
+                    (local1[i] - local0[i]) * 1e3
+                );
             }
         }
         let sill = |l: &[Vec3]| {
@@ -1567,10 +1608,34 @@ fn l_door_point_load_dents_locally() {
         let f = push * (st as f32 / 1000.0).min(1.0) * if st < 2000 { 1.0 } else { 0.0 };
         s.nodes[at].force.x -= f;
         s.step();
+        if st % 100 == 99 && std::env::var("L_TRACE").is_ok() {
+            let l = cabin_local(&s, &b);
+            let ties: Vec<String> = s
+                .beams
+                .iter()
+                .filter(|bm| (bm.a as usize == at || bm.b as usize == at) && bm.k > 1.0e5)
+                .map(|bm| {
+                    let o = if bm.a as usize == at { bm.b } else { bm.a } as usize;
+                    format!(
+                        "{o}:{:.0}/{:.0}r{:.0}m{:.0}",
+                        bm.force,
+                        bm.tc,
+                        bm.rest * 1e3,
+                        inward(&l, o) * 1e3
+                    )
+                })
+                .collect();
+            eprintln!(
+                "    (l) step {st} force {f:.0}: dent {:.1} mm; ties {}",
+                inward(&l, at) * 1e3,
+                ties.join(" ")
+            );
+        }
         if st == 1999 {
             let l = cabin_local(&s, &b);
             dent = inward(&l, at);
             if std::env::var("L_DIAG").is_ok() {
+                eprintln!("    (l) pushed node {at} at {:?}", sk.nodes[at].p);
                 for bm in s
                     .beams
                     .iter()
@@ -1587,12 +1652,16 @@ fn l_door_point_load_dents_locally() {
                         .map(|(k, _)| k)
                         .collect();
                     eprintln!(
-                        "    (l) beam to {o} {:?} {} primary {} {gs:?}: k {:.0} force {:.0} N, node moved {:.1} mm",
+                        "    (l) beam to {o} {:?} {} primary {} {gs:?}: k {:.0} force {:.0} N (yield {:.0}/{:.0}, rest {:.3} of {:.3}), node moved {:.1} mm",
                         sk.nodes[o].p,
                         sk.parts[sk.nodes[o].part as usize],
                         sk.nodes[o].primary,
                         bm.k,
                         bm.force,
+                        bm.tc,
+                        bm.tt,
+                        bm.rest,
+                        bm.rest0,
                         inward(&l, o) * 1e3
                     );
                 }
@@ -1768,4 +1837,160 @@ fn m_wall_56_panels_stay_on() {
         assert_eq!(torn, 0, "bonnet or fender joints tore: {torn_by:?}");
         assert!(lift.0 < 0.02, "the boot lid's edge lifted {} m", lift.0);
     }
+}
+
+/// The residual crush profile at bumper height, measured as NHTSA does
+/// (`engine/docs/crash-reference-targets.md` §1, §4): in the cabin's frame,
+/// six points C1..C6 equally spaced across the front's width, each the
+/// rearward move of the frontmost node in a 10 cm strip between 0.30 and 0.65
+/// m above the ground (at spawn). `structure`: frame nodes only (no bumper
+/// cover or skin). Returns (C1..C6, max, NHTSA average (C1/2 + C2..C5 +
+/// C6/2)/5).
+fn front_profile(
+    b: &Built,
+    l0: &[Vec3],
+    l1: &[Vec3],
+    y0: &[f32],
+    structure: bool,
+) -> ([f32; 6], f32, f32) {
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let pick = |i: usize| (!structure || sk.nodes[i].primary) && y0[i] > 0.30 && y0[i] < 0.65;
+    // Width: the band's extent across the car at spawn.
+    let (lo, hi) = (0..n)
+        .filter(|&i| pick(i))
+        .fold((f32::MAX, f32::MIN), |(a, c), i| {
+            (a.min(l0[i].y), c.max(l0[i].y))
+        });
+    let mut c = [0.0f32; 6];
+    for (k, ck) in c.iter_mut().enumerate() {
+        let y = lo + 0.05 + (hi - lo - 0.10) * k as f32 / 5.0;
+        let front = |l: &[Vec3]| {
+            (0..n)
+                .filter(|&i| pick(i) && (l[i].y - y).abs() < 0.05)
+                .map(|i| l[i].x)
+                .fold(f32::MIN, f32::max)
+        };
+        *ck = (front(l0) - front(l1)).max(0.0);
+    }
+    let max = c.iter().copied().fold(0.0f32, f32::max);
+    let avg = (0.5 * c[0] + c[1] + c[2] + c[3] + c[4] + 0.5 * c[5]) / 5.0;
+    (c, max, avg)
+}
+
+/// A rigid wall at `kmh` measured against the NHTSA sedan population
+/// (`crash-reference-targets.md`): residual crush at bumper height (exterior
+/// and structure), Campbell b1, the dynamic crush and when it peaks, the
+/// springback, restitution and where the energy went. Returns (exterior
+/// average crush, failures).
+fn reference_wall(b: &Built, kmh: f32, drag: bool) -> (f32, Vec<String>) {
+    let sk = &b.skeleton;
+    let v0 = kmh / 3.6;
+    let mut s = spawn(b, Vec3::new(0.0, 0.0, v0), 0.0);
+    s.settings.drag = drag;
+    let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+    s.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+        Vec3::new(3.0, 2.0, 1.0),
+    ));
+    let l0 = cabin_local(&s, b);
+    let ground = s.nodes[..sk.nodes.len()]
+        .iter()
+        .map(|n| n.pos.y)
+        .fold(f32::MAX, f32::min)
+        - 0.02;
+    let y0: Vec<f32> = s.nodes.iter().map(|n| n.pos.y - ground).collect();
+    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let ke0 = 0.5 * total * v0 * v0;
+    let vcg = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>() / total;
+    // Fixed steps (0.5 ms) for the pulse: the cabin's travel past contact.
+    let sill0 = group_mean(&s, b, &["sill", "sill_r"]).z;
+    let (mut t, mut t_contact, mut t_m, mut d_dyn) = (0.0f32, None, None, 0.0f32);
+    let mut rebound = 0.0f32;
+    let dt = engine_softbody::authoring::skeleton::STEP;
+    for _ in 0..(2.0 / dt) as usize {
+        s.step();
+        t += dt;
+        let v = vcg(&s);
+        if t_contact.is_none() && v < v0 - 0.05 {
+            t_contact = Some(t);
+        }
+        if t_m.is_none() && v <= 0.0 {
+            t_m = Some(t);
+            d_dyn = group_mean(&s, b, &["sill", "sill_r"]).z - sill0 - 0.05;
+        }
+        rebound = rebound.max(-v);
+    }
+    let l1 = cabin_local(&s, b);
+    let (cx, max_x, avg_x) = front_profile(b, &l0, &l1, &y0, false);
+    let (cs, max_s, avg_s) = front_profile(b, &l0, &l1, &y0, true);
+    let ke1 = ke(&s);
+    let tm = t_m.unwrap_or(f32::NAN) - t_contact.unwrap_or(0.0);
+    let b1 = (v0 - 8.0 / 3.6) / avg_x;
+    let e = rebound / v0;
+    let springback = d_dyn - max_s;
+    eprintln!(
+        "(n) wall {kmh} km/h drag {drag}: residual crush at bumper height exterior C1..C6 {:?} mm, max {:.0} avg {:.0} mm; structure {:?} mm, max {:.0} avg {:.0} mm",
+        cx.map(|c| (c * 1e3).round()),
+        max_x * 1e3,
+        avg_x * 1e3,
+        cs.map(|c| (c * 1e3).round()),
+        max_s * 1e3,
+        avg_s * 1e3
+    );
+    eprintln!(
+        "(n) wall {kmh} km/h drag {drag}: Campbell b1 {b1:.1} 1/s; dynamic crush (cabin travel) {:.0} mm at t_m {:.0} ms (v0·t_m/2 {:.0} mm), springback {:.0} mm (dynamic - structure max), rebound {rebound:.2} m/s (e {e:.3}); KE {:.1} kJ -> {:.2} kJ, rebound KE {:.2} kJ",
+        d_dyn * 1e3,
+        tm * 1e3,
+        0.5 * v0 * tm * 1e3,
+        springback * 1e3,
+        ke0 / 1e3,
+        ke1 / 1e3,
+        0.5 * total * rebound * rebound / 1e3
+    );
+    let mut fails = Vec::new();
+    let mut check = |ok: bool, what: String| {
+        if !ok {
+            fails.push(format!("{kmh} km/h drag {drag}: {what}"));
+        }
+    };
+    if (kmh - 56.0).abs() < 0.5 {
+        // §4.5: p10–p90 380–580 mm (hard 217–738); §4.6: b1 22.9–39.2 1/s;
+        // §4.7: e 0.03–0.20; §4.8: springback ≤ 0.1 × the residual crush.
+        check(
+            (0.380..=0.580).contains(&max_x),
+            format!("max crush {max_x} m"),
+        );
+        check((22.9..=39.2).contains(&b1), format!("b1 {b1}"));
+        check((0.03..=0.20).contains(&e), format!("restitution {e}"));
+        check(
+            springback <= 0.1 * max_s,
+            format!("springback {springback} m of {max_s} m"),
+        );
+    }
+    (avg_x, fails)
+}
+
+/// NHTSA-referenced frontal measures (`engine/docs/crash-reference-targets.md`
+/// §4.5–4.8, 4.10): residual crush at bumper height (max and the 6-point
+/// average), Campbell b1, restitution, springback, and Campbell's speed
+/// scaling C̄(50)/C̄(56) ≈ 0.875. Medium, drag on and off. Ignored: run with
+/// `--ignored` (reports every failure).
+#[test]
+#[ignore]
+fn n_wall_matches_the_nhtsa_sedans() {
+    let b = built(Resolution::Medium);
+    let mut fails = Vec::new();
+    for drag in [true, false] {
+        let (c56, f) = reference_wall(&b, 56.0, drag);
+        fails.extend(f);
+        let (c50, f) = reference_wall(&b, 50.0, drag);
+        fails.extend(f);
+        let ratio = c50 / c56;
+        eprintln!("(n) drag {drag}: average crush 50/56 km/h {ratio:.3} (Campbell 0.875)");
+        if (ratio - 0.875).abs() > 0.1 {
+            fails.push(format!("drag {drag}: crush ratio 50/56 {ratio}"));
+        }
+    }
+    assert!(fails.is_empty(), "{fails:#?}");
 }
