@@ -7,8 +7,8 @@ use super::curve::{Curve, Outline};
 use super::material::Grades;
 use super::members::{Corner, MemberSpec};
 use super::vehicle::{
-    BlockSpec, BraceSpec, Edge, Joint, Look, NamedMass, Panel, PlateSpec, Region, ShearSpec,
-    VehicleDef, Zone,
+    BlockSpec, BraceSpec, Edge, FlangeSpec, Joint, Look, NamedMass, Panel, PlateSpec, Region,
+    ShearSpec, SheetSpec, VehicleDef, Zone,
 };
 
 /// A member (left side when `mirrored`).
@@ -42,6 +42,7 @@ pub fn member(
         station: 0.0,
         catch: false,
         stiff: 1.0,
+        skin: false,
     }
 }
 
@@ -1321,6 +1322,79 @@ pub fn sedan() -> VehicleDef {
         )),
     ];
     let mut members = members;
+    // The doors' inner panels' end faces (hinge face and lock face): each
+    // joins its door's member ends, so the members' pull reaches the hinges
+    // and latch as a real door's inner panel carries it. Its two chords
+    // share the face's yield in tension: an HSLA inner panel (σ_y 340 MPa)
+    // 0.8 mm thick over its 150 mm deep face, 41 kN (above the hinges' and
+    // latch's: the hardware lets go first).
+    let face = 0.5 * 340e6 * 0.0008 * 0.15 / Grades::default().hsla.stiffer(FRAME_STIFF).deform;
+    // (Each from its door's intrusion beam's end up to its belt's.)
+    for (name, lo, z) in [
+        ("door_face_hf", 0.42, [3.18, 3.22, 3.20]),
+        ("door_face_lf", 0.62, [2.40, 2.36, 2.36]),
+        ("door_face_hr", 0.42, [2.10, 2.12, 2.12]),
+        ("door_face_lr", 0.58, [1.52, 1.50, 1.48]),
+    ] {
+        members.push(stations(
+            riding(ladder(member(
+                name,
+                &[(0.83, lo, z[0]), (0.83, 0.75, z[1]), (0.83, 0.93, z[2])],
+                0.10,
+                0.14,
+                OUT,
+                "hsla",
+                [face, face],
+                0,
+                true,
+                3,
+            ))),
+            DOOR_STATION,
+        ));
+    }
+    // The boot lid's and bonnet's inner frames: a ladder across under each
+    // row of the skin (its upper chord the skin's nodes, its lower 6 cm
+    // below), the panel's grade in the skin's tier: the single sheet gets
+    // depth, as the panel's inner stamping gives it.
+    // Each chord yields at the frame's plastic moment over its lever: a hat
+    // 100 wide × 60 deep of the 0.75 mm sheet at σ_y 210 MPa (a
+    // bake-hardening closure grade), M_p = σ_y·Z_p = 1.2 kN·m, 20 kN a chord.
+    let lid_sec = Section {
+        depth: 0.06,
+        width: 0.10,
+        t: 0.00075,
+        sigma_y: 210e6,
+    };
+    let lid_chord = lid_sec.m_p() / 0.06 / Grades::default().panel.deform;
+    let inner = |name: &str, z: f32, x: f32, y: [f32; 2]| {
+        let mut m = stations(
+            riding(ladder(member(
+                name,
+                &[
+                    (-x, y[0] - 0.03, z),
+                    (0.0, y[1] - 0.03, z),
+                    (x, y[0] - 0.03, z),
+                ],
+                0.10,
+                0.06,
+                UP,
+                "panel",
+                [lid_chord, lid_chord],
+                0,
+                false,
+                3,
+            ))),
+            x,
+        );
+        m.skin = true;
+        m
+    };
+    members.extend([
+        inner("lid_inner_r", 0.14, 0.58, [1.00, 1.04]),
+        inner("lid_inner_f", 0.46, 0.57, [1.03, 1.07]),
+        inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
+        inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
+    ]);
     // The rear rails' knee at the rear subframe's station (z 0.62).
     for m in members.iter_mut().filter(|m| m.name == "rail_r") {
         let p: Vec<glam::Vec3> = m.path.iter().map(|&q| glam::Vec3::from_array(q)).collect();
@@ -1630,11 +1704,57 @@ pub fn sedan() -> VehicleDef {
             "fender".into(),
             "bumper".into(),
             "bonnet".into(),
+            // The boot lid's edges rest on the deck opening's gutter.
+            "bootlid".into(),
         ],
         shell_braces: false,
         body_damping: 50.0,
         tiered: true,
         body_damping_reach: 2.0,
         body_damping_strength: 5000.0,
+        flanges: door_flanges(),
+        sheets: panel_sheets(),
     })
+}
+
+/// The bolted and hinged panels' sheets: steel outers 0.75 mm (outer panel
+/// gauge 0.7–0.9 mm, `beamng-realism-plan.md` [GAUGE]); the bonnet's and
+/// boot lid's inner frames a stamping of the same gauge over half the area
+/// (its cut-outs the rest); bumper fascias 3 mm of polypropylene compound
+/// (1,000 kg/m³). Steel 7,850 kg/m³.
+pub fn panel_sheets() -> Vec<SheetSpec> {
+    let steel = 7850.0;
+    let outer = [0.00075, 1.0, steel];
+    let inner = [0.00075, 0.5, steel];
+    let fascia = [0.003, 1.0, 1000.0];
+    let s = |part: &str, layers: &[[f32; 3]]| SheetSpec {
+        part: part.into(),
+        layers: layers.to_vec(),
+    };
+    vec![
+        s("bonnet", &[outer, inner]),
+        s("bootlid", &[outer, inner]),
+        s("fender", &[outer]),
+        s("bumper", &[fascia]),
+    ]
+}
+
+/// The pillars' door flanges a door member's end bears on (each over
+/// 50 mm, the end's bracket): the hinge pillar's DP980 and the B-pillar's
+/// hot-stamped reinforcement at 1.8 mm (the gauges and grades of
+/// [`side_sections`]' sill and B-pillar), the C-pillar's DP780 at 1.4 mm.
+/// Capacities σ_y·t·w: 53, 99 and 31 kN.
+pub fn door_flanges() -> Vec<FlangeSpec> {
+    let (dp980, phs, dp780) = (590e6, 1100e6, 440e6);
+    let f = |member: &str, t: f32, sigma_y: f32| FlangeSpec {
+        member: member.into(),
+        t,
+        width: 0.05,
+        sigma_y,
+    };
+    vec![
+        f("pillar_a", 0.0018, dp980),
+        f("pillar_b", 0.0018, phs),
+        f("pillar_c", 0.0014, dp780),
+    ]
 }

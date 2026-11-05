@@ -136,6 +136,9 @@ pub struct MemberSpec {
     /// the main load paths (rails, sills) are heavier sections of their steel.
     #[serde(default = "unit")]
     pub stiff: f32,
+    /// In the skin's tier (a panel's light inner frame), not the frame's.
+    #[serde(default)]
+    pub skin: bool,
 }
 
 impl MemberSpec {

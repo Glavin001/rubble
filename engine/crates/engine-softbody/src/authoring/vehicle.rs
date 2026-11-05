@@ -224,12 +224,184 @@ pub struct Look {
     pub mirror: [f32; 2],
 }
 
-/// A door frame's hinge and latch beams to the pillars: yield force (N) of
-/// each (two to four a door end), above FMVSS 206's 11.1 kN for a hinge or
-/// latch system. With them the door ring carries a side pole into the
-/// pillars: the NCAP side pole's residual crush lands in the measured
-/// sedans' band (the `o` test). A 60 kN pull still tears the door off (`g`).
-pub const DOOR_HOLD: f32 = 1.5e4;
+/// A hinged or bolted part's hardware: each one detacher group (when any of
+/// its beams breaks, all do), as BeamNG authors a hinge, latch or bolt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Hardware {
+    HingeUpper,
+    HingeLower,
+    /// The latch fully latched (its primary position).
+    Latch,
+    /// The latch's secondary position: it holds the door once the primary
+    /// has let go.
+    LatchSecondary,
+}
+
+/// A hardware group as built: its beams (indices into `skeleton.beams`).
+#[derive(Clone, Debug)]
+pub struct HardwareGroup {
+    /// `<part>.hinge_upper` and so on.
+    pub name: String,
+    pub part: u16,
+    pub kind: Hardware,
+    /// The solver's detacher group.
+    pub group: u32,
+    pub beams: Vec<usize>,
+    /// Its rig's pulls: along the car away from the body edge it holds to,
+    /// and outward (a door pulled open, a lid lifted).
+    pub along: Vec3,
+    pub outward: Vec3,
+    /// It also carries the part's weight (a door's; a lid rests on its
+    /// seals).
+    pub weight: bool,
+}
+
+/// What a damage unit is (the renderer's damage events follow it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DamageKind {
+    Glass,
+    Lamp,
+    Mirror,
+    Hinge,
+    Latch,
+    Mount,
+    Part,
+}
+
+/// A unit of damage the renderer follows: broken when any of its beams
+/// (indices into `skeleton.beams`) is broken.
+#[derive(Clone, Debug)]
+pub struct DamageUnit {
+    pub name: String,
+    pub kind: DamageKind,
+    pub part: u16,
+    pub beams: Vec<u32>,
+}
+
+/// A FMVSS 206 test's ultimate loads (N): Load Test One (longitudinal, along
+/// the car) and Load Test Two (transverse, the door pulled outward).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Loads {
+    pub longitudinal: f32,
+    pub transverse: f32,
+}
+
+/// Measured door hardware strengths: the medians of the FMVSS 206
+/// compliance reports loaded to failure (`crash-reference-targets.md` §9.3
+/// and §9.4, 2005–2012 hardware). The latch fully latched (primary) fails at
+/// 28.0 / 20.4 kN, in its secondary position at 18.9 / 10.3 kN. No hinge
+/// system separated in any report: every hinge value is a floor. §9.4 takes
+/// the pair at or above the latch's (median floor 28 / 21 kN); the pair is
+/// taken at the highest load any pair held without separating, 36.2 / 29.8
+/// kN (2005 Camry, report 637726), the best-supported floor, so the door
+/// opens at its latch before a hinge lets go, as every report found. (At
+/// the median floor each hinge's half, 14 / 10.5 kN, is below what the
+/// struck door's hinges carry in the NCAP side pole, 12–13 kN resultants
+/// mostly across the car, and the struck door came off its hinges.)
+pub const PRIMARY_LATCH: Loads = Loads {
+    longitudinal: 28_000.0,
+    transverse: 20_500.0,
+};
+pub const SECONDARY_LATCH: Loads = Loads {
+    longitudinal: 19_000.0,
+    transverse: 10_300.0,
+};
+pub const HINGE_SYSTEM: Loads = Loads {
+    longitudinal: 36_179.0,
+    transverse: 29_813.0,
+};
+
+/// FMVSS 206 (49 CFR 571.206) minimums the hardware must hold: S4.1.1.1–2
+/// (latch fully latched 11,000 N longitudinal, 9,000 N transverse), S4.1.1.3
+/// (secondary 4,500 N both), S4.1.2.1 (hinge system 11,000 / 9,000 N).
+pub const FMVSS_206_LATCH: Loads = Loads {
+    longitudinal: 11_000.0,
+    transverse: 9_000.0,
+};
+pub const FMVSS_206_SECONDARY: Loads = Loads {
+    longitudinal: 4_500.0,
+    transverse: 4_500.0,
+};
+pub const FMVSS_206_HINGES: Loads = Loads {
+    longitudinal: 11_000.0,
+    transverse: 9_000.0,
+};
+
+/// The secondary latch's engagement stiffness against the primary's (halved
+/// at build until, fully latched, it no longer goes first: the assembly
+/// fails with its primary).
+pub const SECONDARY_STIFF: f32 = 0.5;
+
+/// Directions in a hardware rig's fan, from longitudinal to transverse.
+pub const RIG_FAN: usize = 6;
+
+/// A seal's (compression-only) break on stretch, against its rest length.
+pub const SEAL_BREAK: f32 = 10.0;
+
+/// A pillar's door flange: the strip of sheet a door end bears on, pushed in
+/// (`t` gauge, `width` the strip a door member's end bears on, `sigma_y`
+/// its yield stress, Pa). Its in-plane capacity is σ_y·t·width: 1.8 mm
+/// press-hardened steel (σ_y 1,100 MPa) over 50 mm carries 99 kN.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FlangeSpec {
+    /// The member (pillar) it is part of.
+    pub member: String,
+    pub t: f32,
+    pub width: f32,
+    pub sigma_y: f32,
+}
+
+impl FlangeSpec {
+    /// Its crushing load (N).
+    pub fn capacity(&self) -> f32 {
+        self.sigma_y * self.t * self.width
+    }
+}
+
+/// A panel's sheet layers: `(gauge m, share of the panel's area, density
+/// kg/m³)` (an outer skin is its whole area, an inner frame's stamping the
+/// share its cut-outs leave).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SheetSpec {
+    /// Part name prefix (`fender` takes both).
+    pub part: String,
+    pub layers: Vec<[f32; 3]>,
+}
+
+impl SheetSpec {
+    /// Mass per square metre of the panel (kg/m²).
+    pub fn areal(&self) -> f32 {
+        self.layers.iter().map(|l| l[0] * l[1] * l[2]).sum()
+    }
+}
+
+/// Each part's skin area (m²): every skin triangle's area, a third to each
+/// of its nodes' parts.
+pub fn part_areas(sk: &Skeleton, tris: &[[u32; 3]]) -> Vec<f32> {
+    let mut area = vec![0.0f32; sk.parts.len()];
+    for t in tris {
+        let (p0, p1, p2) = (sk.pos(t[0]), sk.pos(t[1]), sk.pos(t[2]));
+        let a = 0.5 * (p1 - p0).cross(p2 - p0).length();
+        for &i in t {
+            area[sk.nodes[i as usize].part as usize] += a / 3.0;
+        }
+    }
+    area
+}
+
+/// A part's sheet mass (kg), if it has a sheet spec.
+pub fn sheet_mass(def: &VehicleDef, sk: &Skeleton, tris: &[[u32; 3]], part: u16) -> Option<f32> {
+    let name = &sk.parts[part as usize];
+    let spec = def
+        .sheets
+        .iter()
+        .find(|s| name.starts_with(s.part.as_str()))?;
+    Some(part_areas(sk, tris)[part as usize] * spec.areal())
+}
+
+/// The flange's offset inboard of a door member end's inner node (m): the
+/// door seal's section between them.
+pub const FLANGE_GAP: f32 = 0.03;
 
 /// A door frame's ends bearing on the pillars (compression only): thresholds
 /// × this against the door frame's own (a side load goes into the pillars
@@ -421,6 +593,15 @@ pub struct VehicleDef {
     /// and the named masses either way.
     #[serde(default)]
     pub tiered: bool,
+    /// The pillars' door flanges: a door member's ends bear on them inboard
+    /// (compression only), as a pushed-in door bears on the A- and
+    /// B-pillars' flanges.
+    #[serde(default)]
+    pub flanges: Vec<FlangeSpec>,
+    /// Panels whose mass is their sheet's: area (their skin's, each
+    /// triangle's third to each node's part) × Σ gauge × share × density.
+    #[serde(default)]
+    pub sheets: Vec<SheetSpec>,
 }
 
 fn one() -> f32 {
@@ -483,6 +664,10 @@ pub struct Built {
     /// the materials as defined), and every other beam's by `skin_scale`.
     pub stiffness_scale: f32,
     pub skin_scale: f32,
+    /// Every hinge, latch and mount group.
+    pub hardware: Vec<HardwareGroup>,
+    /// Hardware, glass panes, lamps and mirrors as damage units.
+    pub damage_units: Vec<DamageUnit>,
 }
 
 /// Medians of the built skeleton's materials (the measures real node–beam cars
@@ -649,6 +834,8 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         }
     }
     let mut group_ids: HashMap<u16, u32> = HashMap::new();
+    // Detacher groups made so far.
+    let mut groups_made = 0u32;
     for (a, b, kind) in shell.beams.clone() {
         // A brace spans a shared edge between the two triangles' opposite
         // vertices: on a panel (doors, bonnet, boot lid, fenders) it is the
@@ -698,8 +885,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             }
             Joint::Bolt { scale, group } => {
                 let g = if *group {
-                    let n = group_ids.len() as u32 + 1;
-                    *group_ids.entry(part).or_insert(n)
+                    *group_ids.entry(part).or_insert_with(|| {
+                        groups_made += 1;
+                        groups_made
+                    })
                 } else {
                     0
                 };
@@ -726,14 +915,39 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 let in_latch = at_latch_edge
                     && latch_y.is_none_or(|r| q.y >= r[0] && q.y <= r[1])
                     && latch_x.is_none_or(|x| q.x.abs() <= x);
-                if at_hinge && (latch_y.is_none_or(|r| q.y <= r[1] + 0.05)) {
-                    sk.beam(a, b, Material::weld(m, grades.hsla).scaled(*hinge_scale));
-                } else if in_latch {
-                    sk.beam(a, b, Material::weld(m, grades.hsla).scaled(*latch_scale));
+                // A panel with its own frame (doors) hangs on its frame's
+                // hardware; its skin's edge is all seal: it bears (the shut
+                // line keeps its gap under a push) and carries no tension.
+                let framed = def
+                    .frame_through
+                    .iter()
+                    .any(|t| sk.parts[part as usize].starts_with(t.as_str()));
+                if framed {
+                    // The shut faces (hinge and lock faces) bear on their
+                    // pillars through the hemmed edge (the outer skin folded
+                    // over the inner panel: two sheets); the rest is seal.
+                    let face = at_hinge || at_latch_edge;
+                    if face {
+                        sk.beam_with(
+                            a,
+                            b,
+                            Material::weld(m, grades.hsla),
+                            BeamType::Support(SEAL_BREAK),
+                            0,
+                        );
+                    } else {
+                        sk.beam_with(a, b, m.scaled(0.5), BeamType::Support(SEAL_BREAK), 0);
+                    }
                 } else {
-                    // The closed panel's flange and seal along the rest of its edge:
-                    // holds it in its frame until a crash tears it.
-                    sk.beam(a, b, m.scaled(0.5));
+                    // A lid (bonnet, boot lid): it hangs on its hinges and
+                    // latch (placed below); its edge bears on its seals.
+                    let _ = (hinge_scale, latch_scale, in_latch);
+                    let mm = if at_hinge || at_latch_edge {
+                        Material::weld(m, grades.hsla)
+                    } else {
+                        m.scaled(0.5)
+                    };
+                    sk.beam_with(a, b, mm, BeamType::Support(SEAL_BREAK), 0);
                 }
             }
         }
@@ -902,6 +1116,8 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         .plastic(super::material::PLASTIC);
     // Members.
     let mut structure_nodes: Vec<u32> = Vec::new();
+    // Door members' end stations (part, nodes).
+    let mut door_ends: Vec<(u16, Vec<u32>)> = Vec::new();
     let mut trusses: Vec<Truss> = Vec::new();
     let mut truss_names: Vec<String> = Vec::new();
     let mut snap_pool: Vec<u32> = shell.nodes.clone();
@@ -917,9 +1133,16 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 .collect();
             // Part: the panel the member's middle lies in (door beams ride the door).
             let mid = path[path.len() / 2];
-            let host = sk.nearest(mid, &shell.nodes, 1)[0];
+            // (A riding member's panel: the nearest panel node, a member at a
+            // shut line rides the panel, not the body beside it.)
+            let panels: Vec<u32> = shell
+                .nodes
+                .iter()
+                .copied()
+                .filter(|&i| sk.nodes[i as usize].part != 0)
+                .collect();
             let part = if m.ride {
-                sk.nodes[host as usize].part
+                sk.nodes[sk.nearest(mid, &panels, 1)[0] as usize].part
             } else {
                 0
             };
@@ -949,7 +1172,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             // The frame: every member's stations (not its catchers); a door's
             // beams are its own heavy frame.
             for &i in truss.stations.iter().flatten() {
-                sk.nodes[i as usize].primary = true;
+                sk.nodes[i as usize].primary = !m.skin;
             }
             // Catchers too: a pole's whole load goes through their ties into
             // the member (scaled with the light skin they would let it pass).
@@ -1017,23 +1240,12 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     let mut ends: Vec<u32> = st.to_vec();
                     ends.sort();
                     ends.dedup();
+                    // Hinges and latch are placed once every door member is
+                    // built (which end carries which is the door's).
+                    if through.contains(&part) {
+                        door_ends.push((part, ends.clone()));
+                    }
                     for &a in &ends {
-                        // Hinges and latch: the door frame held to the
-                        // pillars both ways (the next nearest pillar nodes),
-                        // torn off past a few kN each.
-                        for b in sk.nearest(sk.pos(a), &body, 4).into_iter().skip(2) {
-                            let l = sk.pos(a).distance(sk.pos(b));
-                            if l <= 0.35 {
-                                let sc = l.max(super::material::REF_LENGTH)
-                                    / super::skeleton::TIE_LENGTH.max(l);
-                                let m = Material {
-                                    deform: DOOR_HOLD,
-                                    strength: 1.5 * DOOR_HOLD,
-                                    ..grades.mount
-                                };
-                                sk.beam(a, b, m.stiffer(sc));
-                            }
-                        }
                         for b in sk.nearest(sk.pos(a), &body, 2) {
                             let l = sk.pos(a).distance(sk.pos(b));
                             if l <= 0.3 {
@@ -1066,6 +1278,447 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             structure_nodes.extend(nodes);
         }
     }
+    // Door hardware and bearing. At each door's hinge edge the highest
+    // member end carries the upper hinge and the lowest the lower hinge; at
+    // its latch edge the end nearest the latch zone's middle carries the
+    // latch. Each is one detacher group of ropes (tension only) to the
+    // pillar nodes beside it; their strengths are set from the FMVSS 206
+    // rigs once the stiffnesses are final. Every member end also bears on
+    // its pillar's flange, inboard (compression only).
+    let mut hardware: Vec<HardwareGroup> = Vec::new();
+    {
+        let body: Vec<u32> = structure_nodes
+            .iter()
+            .copied()
+            .filter(|&i| {
+                sk.nodes[i as usize].part == 0
+                    && sk.nodes[i as usize].primary
+                    && !sk.nodes[i as usize].catcher
+            })
+            .collect();
+        let mut parts: Vec<u16> = door_ends.iter().map(|e| e.0).collect();
+        parts.sort();
+        parts.dedup();
+        let centre =
+            |sk: &Skeleton, v: &[u32]| v.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / v.len() as f32;
+        // The flanged members' frame nodes, and each one's flange.
+        let mut flange_of: HashMap<u32, FlangeSpec> = HashMap::new();
+        for f in &def.flanges {
+            let m = def
+                .members
+                .iter()
+                .find(|m| m.name == f.member)
+                .ok_or_else(|| format!("flange on `{}`: no such member", f.member))?;
+            for key in [m.name.clone(), format!("{}_r", m.name)] {
+                for &i in groups.get(&key).into_iter().flatten() {
+                    if body.contains(&i) {
+                        flange_of.entry(i).or_insert_with(|| f.clone());
+                    }
+                }
+            }
+        }
+        let flanged: Vec<u32> = {
+            let mut v: Vec<u32> = flange_of.keys().copied().collect();
+            v.sort();
+            v
+        };
+        let mut flange_nodes: Vec<(String, u32)> = Vec::new();
+        for part in parts {
+            let name = sk.parts[part as usize].clone();
+            let Some(Joint::Hinged { hinge, latch_y, .. }) = def
+                .panels
+                .iter()
+                .find(|p| name.starts_with(p.name.as_str()))
+                .map(|p| p.joint.clone())
+            else {
+                return Err(format!("door part {name}: its frame needs a hinged joint"));
+            };
+            // (Members whose ends meet share their nodes: one end.)
+            let mut ends: Vec<(Vec<u32>, Vec3)> = Vec::new();
+            for e in door_ends.iter().filter(|e| e.0 == part) {
+                if !ends.iter().any(|x| x.0 == e.1) {
+                    ends.push((e.1.clone(), centre(&sk, &e.1)));
+                }
+            }
+            let zmid = ends.iter().map(|e| e.1.z).sum::<f32>() / ends.len() as f32;
+            let at_hinge = |c: Vec3| (c.z > zmid) == (hinge == Edge::Front);
+            // Away from the pillar beyond the door's edge the end is at.
+            let dl_of = |sk: &Skeleton, v: &[u32]| {
+                if centre(sk, v).z > zmid {
+                    -Vec3::Z
+                } else {
+                    Vec3::Z
+                }
+            };
+            let hinge_ends: Vec<&(Vec<u32>, Vec3)> =
+                ends.iter().filter(|e| at_hinge(e.1)).collect();
+            let latch_ends: Vec<&(Vec<u32>, Vec3)> =
+                ends.iter().filter(|e| !at_hinge(e.1)).collect();
+            let by_y = |v: &[&(Vec<u32>, Vec3)], high: bool| -> Option<Vec<u32>> {
+                v.iter()
+                    .max_by(|a, b| {
+                        let o = a.1.y.total_cmp(&b.1.y);
+                        if high {
+                            o
+                        } else {
+                            o.reverse()
+                        }
+                    })
+                    .map(|e| e.0.clone())
+            };
+            let latch_mid = latch_y.map_or(0.75, |r| 0.5 * (r[0] + r[1]));
+            let latch = latch_ends
+                .iter()
+                .min_by(|a, b| {
+                    (a.1.y - latch_mid)
+                        .abs()
+                        .total_cmp(&(b.1.y - latch_mid).abs())
+                })
+                .map(|e| e.0.clone());
+            let mut kinds: Vec<(Hardware, Vec<u32>)> = Vec::new();
+            if let Some(v) = by_y(&hinge_ends, true) {
+                kinds.push((Hardware::HingeUpper, v));
+            }
+            if let Some(v) = by_y(&hinge_ends, false) {
+                kinds.push((Hardware::HingeLower, v));
+            }
+            if let Some(v) = latch {
+                kinds.push((Hardware::Latch, v.clone()));
+                kinds.push((Hardware::LatchSecondary, v));
+            }
+            for (kind, nodes) in kinds {
+                groups_made += 1;
+                let g = groups_made;
+                let mut beams = Vec::new();
+                // A hinge's pin (and the latch's striker) is one point: the
+                // end's outer node, so the door turns about its hinge line
+                // instead of the hardware holding its end square.
+                let pin = *nodes
+                    .iter()
+                    .max_by(|&&a, &&b| sk.pos(a).x.abs().total_cmp(&sk.pos(b).x.abs()))
+                    .unwrap();
+                for &a in &[pin] {
+                    // The pillar nodes past the two the end bears on: the
+                    // primary's the next two, the secondary's the one after.
+                    // The pillar nodes (not the two it bears on) that hold
+                    // it both ways: inboard (the door pulled open) and
+                    // toward the pillar (pulled along the car), the best
+                    // two by the lesser of the two cosines; the secondary's
+                    // the next.
+                    let pa = sk.pos(a);
+                    // (The pillar is beyond the door's edge.)
+                    let toward = if centre(&sk, &nodes).z > zmid {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    let (dl, dt) = (Vec3::Z * -toward, Vec3::X * pa.x.signum());
+                    let near = sk.nearest(pa, &body, 12);
+                    // (The secondary's catch reaches a little farther.)
+                    let reach = if kind == Hardware::LatchSecondary {
+                        0.45
+                    } else {
+                        0.35
+                    };
+                    let bears: Vec<u32> = near.iter().copied().take(2).collect();
+                    let pool: Vec<u32> = near
+                        .into_iter()
+                        .filter(|&b| {
+                            !bears.contains(&b)
+                                && !sk.has_beam(a, b)
+                                && sk.pos(b).distance(pa) <= reach
+                        })
+                        .collect();
+                    // Three load paths, each along one pull: toward the
+                    // pillar (pulled along the car), inboard (pulled open)
+                    // and up (the door's weight), so a pull meets the beam
+                    // it was sized for whatever the end does across it.
+                    let best = |dir: Vec3, skip: &[u32]| -> Option<u32> {
+                        pool.iter()
+                            .copied()
+                            .filter(|b| !skip.contains(b))
+                            .map(|b| ((sk.pos(b) - pa).normalize().dot(dir), b))
+                            .filter(|c| c.0 > 0.3)
+                            .max_by(|x, y| x.0.total_cmp(&y.0))
+                            .map(|c| c.1)
+                    };
+                    let mut pick: Vec<u32> = Vec::new();
+                    let order = if kind == Hardware::LatchSecondary {
+                        vec![-dl, -dt]
+                    } else {
+                        vec![-dl, -dt, Vec3::Y]
+                    };
+                    for d in order {
+                        if let Some(b) = best(d, &pick) {
+                            pick.push(b);
+                        }
+                    }
+                    for b in pick {
+                        let l = sk.pos(a).distance(sk.pos(b));
+                        let sc =
+                            l.max(super::material::REF_LENGTH) / super::skeleton::TIE_LENGTH.max(l);
+                        let sc = if kind == Hardware::LatchSecondary {
+                            sc * SECONDARY_STIFF
+                        } else {
+                            sc
+                        };
+                        if sk.beam_with(a, b, grades.mount.stiffer(sc), BeamType::Rope, g) {
+                            beams.push(sk.beams.len() - 1);
+                        }
+                    }
+                }
+                if beams.is_empty() {
+                    return Err(format!("{name}: no pillar node near its {kind:?}"));
+                }
+                let suffix = match kind {
+                    Hardware::HingeUpper => "hinge_upper",
+                    Hardware::HingeLower => "hinge_lower",
+                    Hardware::Latch => "latch",
+                    Hardware::LatchSecondary => "latch_secondary",
+                };
+                hardware.push(HardwareGroup {
+                    name: format!("{name}.{suffix}"),
+                    part,
+                    kind,
+                    group: g,
+                    beams,
+                    along: dl_of(&sk, &nodes),
+                    outward: Vec3::X * sk.pos(pin).x.signum(),
+                    weight: true,
+                });
+            }
+            // Bearing: at each of the door's edges one flange node of the
+            // nearest pillar, `FLANGE_GAP` inboard of the ends' inner nodes;
+            // each member end's outer node bears on it (one flange strip a
+            // member end).
+            for hinge_edge in [true, false] {
+                let edge: Vec<&(Vec<u32>, Vec3)> = ends
+                    .iter()
+                    .filter(|e| at_hinge(e.1) == hinge_edge)
+                    .collect();
+                if edge.is_empty() || flanged.is_empty() {
+                    continue;
+                }
+                let abs_x = |sk: &Skeleton, i: u32| sk.pos(i).x.abs();
+                let side = edge[0].1.x.signum();
+                let xin = edge
+                    .iter()
+                    .flat_map(|e| e.0.iter().copied())
+                    .map(|i| abs_x(&sk, i))
+                    .fold(f32::MAX, f32::min);
+                let mean = edge.iter().map(|e| e.1).sum::<Vec3>() / edge.len() as f32;
+                let pf = Vec3::new(side * (xin - FLANGE_GAP), mean.y, mean.z);
+                let flange = flange_of[&sk.nearest(pf, &flanged, 1)[0]].clone();
+                // Its root: the body's frame nodes beside it (three or more
+                // not in one plane with it, or the edge has no flange).
+                let root: Vec<u32> = sk
+                    .nearest(pf, &body, 4)
+                    .into_iter()
+                    .filter(|&r| sk.pos(r).distance(pf) <= 0.35)
+                    .collect();
+                let solid = root.len() >= 3 && {
+                    let q: Vec<Vec3> = root.iter().map(|&r| sk.pos(r) - pf).collect();
+                    (0..q.len()).any(|i| {
+                        (i + 1..q.len()).any(|j| {
+                            (j + 1..q.len()).any(|k| q[i].cross(q[j]).dot(q[k]).abs() > 1e-4)
+                        })
+                    })
+                };
+                if !solid {
+                    continue;
+                }
+                let grade = &def
+                    .members
+                    .iter()
+                    .find(|m| m.name == flange.member)
+                    .unwrap()
+                    .grade;
+                let base = grades.get(grade)?;
+                let cap = flange.capacity() * params.strength;
+                let f = sk.node(pf, 0);
+                sk.nodes[f as usize].primary = true;
+                // Welded to the pillar along its root (every strip's), at
+                // the bearing's stiffness (in series with it).
+                let n = edge.len() as f32;
+                let weld = Material {
+                    k: grades.mount.k,
+                    damp: grades.mount.damp,
+                    deform: n * cap,
+                    strength: n * cap + (base.strength - base.deform),
+                    ..base
+                };
+                for r in root {
+                    sk.tie(f, r, weld);
+                }
+                for (nodes, _) in &edge {
+                    let outer = *nodes
+                        .iter()
+                        .max_by(|&&a, &&b| abs_x(&sk, a).total_cmp(&abs_x(&sk, b)))
+                        .unwrap();
+                    let l = sk.pos(outer).distance(pf);
+                    let sc =
+                        l.max(super::material::REF_LENGTH) / super::skeleton::TIE_LENGTH.max(l);
+                    let bear = Material {
+                        k: grades.mount.k,
+                        damp: grades.mount.damp,
+                        deform: cap,
+                        strength: cap + (base.strength - base.deform),
+                        ..base
+                    };
+                    sk.beam_with(outer, f, bear.stiffer(sc), BeamType::Support(SEAL_BREAK), 0);
+                }
+                flange_nodes.push((format!("{name}_flanges"), f));
+            }
+        }
+        for (k, f) in flange_nodes {
+            groups.entry(k).or_default().push(f);
+        }
+        // Lids (bonnet, boot lid): a hinge each side of the hinge edge and a
+        // latch at the middle of the other, each one pin (a lid node) on
+        // ropes to the body beside it: toward the body edge (pulled along
+        // the car) and down (lifted).
+        let pool: Vec<u32> = (0..sk.nodes.len() as u32)
+            .filter(|&i| sk.nodes[i as usize].part == 0 && !sk.nodes[i as usize].catcher)
+            .collect();
+        for part in 1..sk.parts.len() as u16 {
+            let name = sk.parts[part as usize].clone();
+            let Some(Joint::Hinged { hinge, .. }) = def
+                .panels
+                .iter()
+                .find(|p| name.starts_with(p.name.as_str()))
+                .map(|p| p.joint.clone())
+            else {
+                continue;
+            };
+            if through.contains(&part) {
+                continue;
+            }
+            let lid: Vec<u32> = shell
+                .nodes
+                .iter()
+                .copied()
+                .filter(|&i| sk.nodes[i as usize].part == part)
+                .collect();
+            let (z0, z1) = extent[&part];
+            let zone = 0.14;
+            let hinge_edge = |z: f32| match hinge {
+                Edge::Front => z > z1 - zone,
+                Edge::Rear => z < z0 + zone,
+            };
+            let hinge_side: Vec<u32> = lid
+                .iter()
+                .copied()
+                .filter(|&i| hinge_edge(sk.pos(i).z))
+                .collect();
+            let latch_side: Vec<u32> = lid
+                .iter()
+                .copied()
+                .filter(|&i| !hinge_edge(sk.pos(i).z))
+                .collect();
+            // Away from the body at each edge: the hinge edge's body lies
+            // beyond the hinge edge, the latch's beyond the other.
+            let toward_hinge = if hinge == Edge::Front {
+                Vec3::Z
+            } else {
+                -Vec3::Z
+            };
+            let farthest = |v: &[u32], sign: f32| -> Option<u32> {
+                v.iter()
+                    .copied()
+                    .filter(|&i| sk.pos(i).x * sign > 0.0)
+                    .max_by(|&a, &b| (sign * sk.pos(a).x).total_cmp(&(sign * sk.pos(b).x)))
+            };
+            let latch_pin = latch_side
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let z = sk.pos(i).z;
+                    if hinge == Edge::Front {
+                        z < z0 + zone
+                    } else {
+                        z > z1 - zone
+                    }
+                })
+                // (The latch sits low on the lid's edge, on the centre line.)
+                .min_by(|&a, &b| {
+                    let k = |i: u32| (sk.pos(i).x.abs() > 0.15, sk.pos(i).y);
+                    let (ka, kb) = (k(a), k(b));
+                    ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
+                });
+            let pins = [
+                (
+                    Hardware::HingeUpper,
+                    "hinge_l",
+                    farthest(&hinge_side, 1.0),
+                    -toward_hinge,
+                ),
+                (
+                    Hardware::HingeLower,
+                    "hinge_r",
+                    farthest(&hinge_side, -1.0),
+                    -toward_hinge,
+                ),
+                (Hardware::Latch, "latch", latch_pin, toward_hinge),
+            ];
+            for (kind, suffix, pin, along) in pins {
+                let Some(a) = pin else {
+                    return Err(format!("{name}: no node for its {suffix}"));
+                };
+                let pa = sk.pos(a);
+                let near: Vec<u32> = sk
+                    .nearest(pa, &pool, 16)
+                    .into_iter()
+                    .filter(|&b| sk.pos(b).distance(pa) <= 0.45)
+                    .collect();
+                let best = |dir: Vec3, skip: &[u32]| -> Option<u32> {
+                    near.iter()
+                        .copied()
+                        .filter(|b| !skip.contains(b))
+                        .map(|b| ((sk.pos(b) - pa).normalize().dot(dir), b))
+                        .filter(|c| c.0 > 0.3)
+                        .max_by(|x, y| x.0.total_cmp(&y.0))
+                        .map(|c| c.1)
+                };
+                let mut pick: Vec<u32> = Vec::new();
+                for d in [-along, -Vec3::Y] {
+                    if let Some(b) = best(d, &pick) {
+                        pick.push(b);
+                    }
+                }
+                groups_made += 1;
+                let g = groups_made;
+                let mut beams = Vec::new();
+                for b in pick {
+                    let l = pa.distance(sk.pos(b));
+                    let sc =
+                        l.max(super::material::REF_LENGTH) / super::skeleton::TIE_LENGTH.max(l);
+                    // (A seal already there becomes the hardware.)
+                    sk.set_beam(a, b, grades.mount.stiffer(sc), BeamType::Rope, g);
+                    beams.push(sk.beam_index(a, b).unwrap());
+                }
+                if beams.is_empty() {
+                    let near: Vec<String> = sk
+                        .nearest(pa, &pool, 8)
+                        .iter()
+                        .map(|&b| format!("{b} {:.2?} {}", sk.pos(b), sk.has_beam(a, b)))
+                        .collect();
+                    return Err(format!(
+                        "{name}: no body node to hold its {suffix} (pin {a} at {pa:.2?}; {near:?})"
+                    ));
+                }
+                hardware.push(HardwareGroup {
+                    name: format!("{name}.{suffix}"),
+                    part,
+                    kind,
+                    group: g,
+                    beams,
+                    along,
+                    outward: Vec3::Y,
+                    weight: false,
+                });
+            }
+        }
+    }
     // Backed panels: each skin node tied to the part's frame behind it.
     {
         let parts: Vec<u16> = sk
@@ -1075,28 +1728,50 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .filter(|(_, n)| def.backed.iter().any(|t| n.starts_with(t.as_str())))
             .map(|(i, _)| i as u16)
             .collect();
+        let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
+        let body_frame: Vec<u32> = (0..sk.nodes.len() as u32)
+            .filter(|&i| {
+                sk.nodes[i as usize].part == 0
+                    && sk.nodes[i as usize].primary
+                    && !sk.nodes[i as usize].catcher
+            })
+            .collect();
         for &pt in &parts {
-            let mut frame: Vec<u32> = (0..sk.nodes.len() as u32)
-                .filter(|&i| sk.nodes[i as usize].part == pt && sk.nodes[i as usize].primary)
+            // Its own frame (a door's beams and rails, a lid's inner frame):
+            // the skin is tied to it, within the part.
+            let own: Vec<u32> = (0..sk.nodes.len() as u32)
+                .filter(|&i| sk.nodes[i as usize].part == pt && !on_shell.contains(&i))
                 .collect();
-            // A panel without a frame of its own (a fender) rides the body's
-            // behind it (apron, tower, radiator support).
-            if frame.is_empty() {
-                frame = (0..sk.nodes.len() as u32)
-                    .filter(|&i| {
-                        sk.nodes[i as usize].part == 0
-                            && sk.nodes[i as usize].primary
-                            && !sk.nodes[i as usize].catcher
-                    })
-                    .collect();
-            }
             let skin: Vec<u32> = shell
                 .nodes
                 .iter()
                 .copied()
                 .filter(|&i| sk.nodes[i as usize].part == pt && !sk.nodes[i as usize].primary)
                 .collect();
-            attach(&mut sk, &skin, &frame, 2, 0.3, backing);
+            if !own.is_empty() {
+                attach(&mut sk, &skin, &own, 2, 0.3, backing);
+            }
+            // The body's structure behind it (apron, tower, radiator support,
+            // bumper beam) it bears on: compression only, so it holds the
+            // panel's push but none of its pull (only its hardware does).
+            if !through.contains(&pt) {
+                for &a in &skin {
+                    for b in sk.nearest(sk.pos(a), &body_frame, 2) {
+                        if sk.pos(b).distance(sk.pos(a)) <= 0.3 {
+                            let l = sk.pos(a).distance(sk.pos(b));
+                            let sc = l.max(super::material::REF_LENGTH)
+                                / super::skeleton::TIE_LENGTH.max(l);
+                            sk.beam_with(
+                                a,
+                                b,
+                                backing.stiffer(sc),
+                                BeamType::Support(SEAL_BREAK),
+                                0,
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     // Members meet where they touch: a station within reach of another member's
@@ -1576,7 +2251,23 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         .iter()
         .map(|c| 2.0 * (c.wheel_mass + c.hub_mass + c.arm_mass))
         .sum();
-    let structure = def.kerb_mass - named - blocks - wheels;
+    // Panels' sheet masses: on their own nodes (their stability floors
+    // first), no share of the structure's.
+    let mut sheets = 0.0;
+    for part in 1..sk.parts.len() as u16 {
+        let Some(kg) = sheet_mass(def, &sk, &shell.tris, part) else {
+            continue;
+        };
+        let nodes: Vec<u32> = (0..sk.nodes.len() as u32)
+            .filter(|&i| sk.nodes[i as usize].part == part)
+            .collect();
+        for &i in &nodes {
+            sk.nodes[i as usize].sheet = true;
+        }
+        sk.add_mass_by_need(&nodes, kg, &need);
+        sheets += kg;
+    }
+    let structure = def.kerb_mass - named - blocks - wheels - sheets;
     if structure <= 0.0 {
         return Err(format!(
             "kerb mass {} is under the named masses",
@@ -1788,6 +2479,8 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         (s, s)
     };
     sk.solve_masses(structure)?;
+    size_hardware(&mut sk, &hardware, params.strength)?;
+    let panes: Vec<DamageUnit> = Vec::new();
     preload(&mut sk, def);
     // Collision skin: the shell's skin on a coarser lattice, its nodes contacters.
     sk.collision = coarse_skin(&sk, &shell)?;
@@ -1832,7 +2525,363 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         groups,
         stiffness_scale,
         skin_scale,
+        damage_units: {
+            let mut u = damage_units(&hardware);
+            u.extend(panes);
+            u
+        },
+        hardware,
     })
+}
+
+/// Tempered glass's break strain: characteristic bending strength ≈ 120 MPa
+/// over E ≈ 70 GPa (`beamng-realism-plan.md` P6 [GLASS-TUE, GLASS-MIF]):
+/// 0.17 %, with no plastic range.
+pub const TEMPERED_STRAIN: f32 = 120.0e6 / 70.0e9;
+/// Annealed glass (a laminated windscreen's plies): ≈ 45 MPa over 70 GPa,
+/// 0.064 %: its plies crack there and its interlayer holds them.
+pub const ANNEALED_STRAIN: f32 = 45.0e6 / 70.0e9;
+
+/// Glass from its material constants. Each pane's beams (those on its nodes
+/// to the shell around it) break at the glass's strain: tempered panes
+/// (side windows, backlight) are brittle (they break, never yield, at
+/// 0.17 %) and fail whole (one detacher group a pane); the laminated
+/// windscreen cracks (yields) at its plies' 0.064 % and its interlayer keeps
+/// it in place (its beams keep their tear strength). The beams are as stiff
+/// as the step allows, far softer than real glass, so the break is set as a
+/// strain: the pane breaks when its frame racks it 0.17 %, whatever force
+/// that takes. Returns the panes as damage units.
+fn brittle_glass(
+    def: &VehicleDef,
+    sk: &mut Skeleton,
+    shell: &Shell,
+    groups_made: &mut u32,
+    scale: f32,
+) -> Vec<DamageUnit> {
+    let len = def.profile.length;
+    let mut panes: Vec<(String, bool, Vec<u32>)> = Vec::new();
+    let mut side = 0usize;
+    for z in def.zones.iter().filter(|z| z.grade == "glass") {
+        let nodes: Vec<u32> = shell
+            .nodes
+            .iter()
+            .copied()
+            .filter(|&i| z.region.contains(sk.pos(i), shell.seg[&i], len))
+            .collect();
+        if nodes.is_empty() {
+            continue;
+        }
+        match &z.region {
+            Region::Side(_) => {
+                let which = ["f", "r", "q"].get(side).copied().unwrap_or("q");
+                side += 1;
+                for (s, sign) in [("l", 1.0f32), ("r", -1.0)] {
+                    let v: Vec<u32> = nodes
+                        .iter()
+                        .copied()
+                        .filter(|&i| sk.pos(i).x * sign > 0.0)
+                        .collect();
+                    panes.push((format!("glass_side_{which}_{s}"), false, v));
+                }
+            }
+            _ => {
+                let front = nodes.iter().map(|&i| sk.pos(i).z).sum::<f32>() / nodes.len() as f32
+                    > 0.5 * len;
+                if front {
+                    panes.push(("glass_windscreen".into(), true, nodes));
+                } else {
+                    panes.push(("glass_backlight".into(), false, nodes));
+                }
+            }
+        }
+    }
+    let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
+    let mut out = Vec::new();
+    for (name, laminated, nodes) in panes {
+        let set: std::collections::HashSet<u32> = nodes.iter().copied().collect();
+        let g = if laminated {
+            0
+        } else {
+            *groups_made += 1;
+            *groups_made
+        };
+        let mut beams = Vec::new();
+        for (j, b) in sk.beams.iter_mut().enumerate() {
+            if b.tie || b.damper || b.ty != BeamType::Normal || b.group != 0 {
+                continue;
+            }
+            if !(set.contains(&b.a) || set.contains(&b.b))
+                || !on_shell.contains(&b.a)
+                || !on_shell.contains(&b.b)
+            {
+                continue;
+            }
+            beams.push(j as u32);
+        }
+        for &j in &beams {
+            let b = &mut sk.beams[j as usize];
+            let l = sk.nodes[b.a as usize].p.distance(sk.nodes[b.b as usize].p);
+            let kl = b.mat.k_at(l) * l;
+            if laminated {
+                b.mat.deform = scale * ANNEALED_STRAIN * kl;
+                b.mat.strength = b.mat.strength.max(b.mat.deform);
+            } else {
+                b.mat.deform = scale * TEMPERED_STRAIN * kl;
+                b.mat.strength = b.mat.deform;
+                b.group = g;
+            }
+        }
+        let part = sk.nodes[nodes[0] as usize].part;
+        out.push(DamageUnit {
+            name,
+            kind: DamageKind::Glass,
+            part,
+            beams,
+        });
+    }
+    out
+}
+
+/// The damage units: each hinge and latch group (its secondary latch is its
+/// latch's unit too: the latch is broken when either position let go).
+fn damage_units(hw: &[HardwareGroup]) -> Vec<DamageUnit> {
+    let mut out: Vec<DamageUnit> = Vec::new();
+    for h in hw {
+        let name = h.name.replace(".latch_secondary", ".latch");
+        let kind = match h.kind {
+            Hardware::HingeUpper | Hardware::HingeLower => DamageKind::Hinge,
+            Hardware::Latch | Hardware::LatchSecondary => DamageKind::Latch,
+        };
+        let beams = h.beams.iter().map(|&j| j as u32);
+        if let Some(u) = out.iter_mut().find(|u| u.name == name) {
+            u.beams.extend(beams);
+        } else {
+            out.push(DamageUnit {
+                name,
+                kind,
+                part: h.part,
+                beams: beams.collect(),
+            });
+        }
+    }
+    out
+}
+
+/// A rig's beams' tensions per newton of load along `d` on the part: its
+/// hardware nodes moved as one along `d` (FMVSS 206's fixture guides the
+/// load), the body held. A rope at cosine c = −u·d to the pull (u from the
+/// part's node to the body's) stretches c·δ, so it carries k·c·δ and
+/// resists k·c²·δ; slack ones (c ≤ 0) carry nothing.
+pub fn rig_tensions(sk: &Skeleton, beams: &[usize], part: u16, d: Vec3) -> Vec<f32> {
+    let kc: Vec<(f32, f32)> = beams
+        .iter()
+        .map(|&j| {
+            let b = &sk.beams[j];
+            let (p, q) = if sk.nodes[b.a as usize].part == part {
+                (b.a, b.b)
+            } else {
+                (b.b, b.a)
+            };
+            let v = sk.pos(q) - sk.pos(p);
+            (b.mat.k_at(v.length()), (-v.normalize().dot(d)).max(0.0))
+        })
+        .collect();
+    let stiff: f32 = kc.iter().map(|&(k, c)| k * c * c).sum();
+    kc.iter()
+        .map(|&(k, c)| if stiff > 0.0 { k * c / stiff } else { 0.0 })
+        .collect()
+}
+
+/// Cosine of a hardware beam to a pull `d` on its part (−u·d, u from the
+/// part's node to the body's).
+pub fn rig_cos(sk: &Skeleton, j: usize, part: u16, d: Vec3) -> f32 {
+    let b = &sk.beams[j];
+    let (p, q) = if sk.nodes[b.a as usize].part == part {
+        (b.a, b.b)
+    } else {
+        (b.b, b.a)
+    };
+    -(sk.pos(q) - sk.pos(p)).normalize().dot(d)
+}
+
+/// The load (N) at which a rig's hardware separates when pulled along `d`
+/// (its first beam reaching its strength takes its group): the static
+/// prediction the FMVSS 206 rig test measures.
+pub fn rig_strength(sk: &Skeleton, hw: &[HardwareGroup], groups: &[usize], d: Vec3) -> f32 {
+    let beams: Vec<usize> = groups.iter().flat_map(|&g| hw[g].beams.clone()).collect();
+    let t = rig_tensions(sk, &beams, hw[groups[0]].part, d);
+    beams
+        .iter()
+        .zip(&t)
+        .filter(|(_, &x)| x > 0.0)
+        .map(|(&j, &x)| sk.beams[j].mat.strength / x)
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// The rigs a part's hardware is tested in (FMVSS 206 S4.1.1, S4.1.2, as
+/// TP-206 runs them): the hinge system (both hinges), the latch fully latched
+/// (primary and secondary together) and the latch in its secondary position
+/// (alone), each with its measured loads. Returns (rig, groups in it, loads).
+pub fn hardware_rigs(hw: &[HardwareGroup]) -> Vec<(String, Vec<usize>, Loads)> {
+    let mut parts: Vec<u16> = hw.iter().map(|h| h.part).collect();
+    parts.sort();
+    parts.dedup();
+    let mut out = Vec::new();
+    for p in parts {
+        let of = |k: &[Hardware]| -> Vec<usize> {
+            (0..hw.len())
+                .filter(|&i| hw[i].part == p && k.contains(&hw[i].kind))
+                .collect()
+        };
+        let name = |i: &[usize]| hw[i[0]].name.split('.').next().unwrap().to_string();
+        let hinges = of(&[Hardware::HingeUpper, Hardware::HingeLower]);
+        if !hinges.is_empty() {
+            out.push((
+                format!("{}.hinges", name(&hinges)),
+                hinges.clone(),
+                HINGE_SYSTEM,
+            ));
+            // Each hinge on its own carries its share of the pair's.
+            let share = 1.0 / hinges.len() as f32;
+            for &h in &hinges {
+                out.push((
+                    hw[h].name.clone(),
+                    vec![h],
+                    Loads {
+                        longitudinal: share * HINGE_SYSTEM.longitudinal,
+                        transverse: share * HINGE_SYSTEM.transverse,
+                    },
+                ));
+            }
+        }
+        let latch = of(&[Hardware::Latch, Hardware::LatchSecondary]);
+        if !latch.is_empty() {
+            out.push((format!("{}.latch", name(&latch)), latch, PRIMARY_LATCH));
+        }
+        let sec = of(&[Hardware::LatchSecondary]);
+        if !sec.is_empty() {
+            out.push((
+                format!("{}.latch_secondary", name(&sec)),
+                sec,
+                SECONDARY_LATCH,
+            ));
+        }
+    }
+    out
+}
+
+/// The rig directions: longitudinal along the car away from the pillar the
+/// hardware holds to (toward it the part bears on its supports), transverse
+/// outward (the door pulled open). (direction, longitudinal)
+pub fn rig_directions(_sk: &Skeleton, h: &HardwareGroup) -> [(Vec3, bool); 2] {
+    [(h.along, true), (h.outward, false)]
+}
+
+/// Each hardware beam's strength from its rigs: a beam carrying `t` per
+/// newton of the rig's load breaks at `load × t`, the largest over the rig's
+/// directions; so in each direction the group separates at the measured load
+/// (its most loaded beams together), never through one beam's uneven share.
+/// Elastic to the break: hardware does not yield. The secondary latch is
+/// sized alone and must not be the first to go fully latched.
+fn size_hardware(sk: &mut Skeleton, hw: &[HardwareGroup], scale: f32) -> Result<(), String> {
+    // The secondary engages softer until it no longer goes first (real ones
+    // carry nothing until the primary lets go).
+    let mut last = String::new();
+    for _ in 0..10 {
+        match size_hardware_once(sk, hw, scale) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.contains("secondary latch would go first") => {
+                last = e;
+                for h in hw.iter().filter(|h| h.kind == Hardware::LatchSecondary) {
+                    for &j in &h.beams {
+                        sk.beams[j].mat = sk.beams[j].mat.stiffer(0.5);
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
+}
+
+fn size_hardware_once(sk: &mut Skeleton, hw: &[HardwareGroup], scale: f32) -> Result<(), String> {
+    let mut strength: HashMap<usize, f32> = HashMap::new();
+    let rigs = hardware_rigs(hw);
+    // Secondary alone first, then the assemblies (the primary's beams take
+    // their size from the fully latched rig, the secondary keeps its own).
+    let mut order: Vec<&(String, Vec<usize>, Loads)> = rigs.iter().collect();
+    order.sort_by_key(|r| !r.0.ends_with("latch_secondary"));
+    for (name, groups, loads) in order {
+        let beams: Vec<usize> = groups.iter().flat_map(|&g| hw[g].beams.clone()).collect();
+        let part = hw[groups[0]].part;
+        // The hinge pair's rig is the test's; each hinge is sized alone.
+        if name.ends_with(".hinges") {
+            continue;
+        }
+        // A fan of pulls between the two tested directions, the load on the
+        // ellipse through the two measured ones (so no direction between
+        // them finds a weaker beam).
+        // Pushed down (the door's weight, across the striker's bolt or the
+        // hinge pin as Load Test One loads them along the car) the
+        // longitudinal load.
+        let [(dl, _), (dt, _)] = rig_directions(sk, &hw[groups[0]]);
+        let mut fan: Vec<(Vec3, f32)> = Vec::new();
+        let mut arcs = vec![(dl, loads.longitudinal, dt, loads.transverse)];
+        if hw[groups[0]].weight {
+            arcs.push((-Vec3::Y, loads.longitudinal, dt, loads.transverse));
+            arcs.push((-Vec3::Y, loads.longitudinal, dl, loads.longitudinal));
+        }
+        for (a, fa, b, fb) in arcs {
+            for k in 0..=RIG_FAN {
+                let th = std::f32::consts::FRAC_PI_2 * k as f32 / RIG_FAN as f32;
+                let (c, sn) = (th.cos(), th.sin());
+                fan.push((
+                    (a * c + b * sn).normalize(),
+                    1.0 / ((c / fa).powi(2) + (sn / fb).powi(2)).sqrt(),
+                ));
+            }
+        }
+        // (The secondary position is tested along and across only.)
+        if name.ends_with("latch_secondary") {
+            fan.truncate(RIG_FAN + 1);
+        }
+        for (d, f) in fan {
+            // A pull no beam lies within 60° of is not this hardware's to
+            // hold (the part's other hardware and its bearing take it).
+            if !beams.iter().any(|&j| rig_cos(sk, j, part, d) >= 0.5) {
+                continue;
+            }
+            let load = scale * f;
+            let t = rig_tensions(sk, &beams, part, d);
+            for (&j, &tj) in beams.iter().zip(&t) {
+                let sec = hw
+                    .iter()
+                    .any(|h| h.kind == Hardware::LatchSecondary && h.beams.contains(&j));
+                if sec && !name.ends_with("latch_secondary") {
+                    // Fully latched: the secondary only shares.
+                    if let Some(&s) = strength.get(&j) {
+                        if load * tj >= s {
+                            return Err(format!(
+                                "{name}: the secondary latch would go first ({:.0} N of its {s:.0})",
+                                load * tj
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                let e = strength.entry(j).or_insert(0.0);
+                *e = e.max(load * tj);
+            }
+        }
+    }
+    for (j, s) in strength {
+        if s <= 0.0 {
+            return Err(format!("hardware beam {j} carries nothing in its rigs"));
+        }
+        sk.beams[j].mat.deform = s;
+        sk.beams[j].mat.strength = s;
+    }
+    Ok(())
 }
 
 /// Preload each spring so it carries its corner's share of the sprung mass at
