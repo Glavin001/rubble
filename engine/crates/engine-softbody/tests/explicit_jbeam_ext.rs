@@ -522,6 +522,120 @@ fn pressure_wheel_car_does_not_creep_at_rest() {
     assert!(drift <= sway + 1e-3, "creeps {drift} m (sway {sway} m)");
 }
 
+/// The tread contact's law (spec §34): steady cycles of any amplitude about any
+/// depth lose the compound's tan δ (loss over π·secant stiffness·amplitude², the
+/// linear viscoelastic loop's), centred on its elastic line; the constants follow
+/// from tan δ and r = 4/π − 1; it never pulls.
+#[test]
+fn tread_contact_loses_tan_delta_per_cycle_at_any_amplitude() {
+    use engine_softbody::explicit_beams::{
+        tread_hysteresis, TREAD_GROW, TREAD_INV_REVERSE, TREAD_K, TREAD_REVERSE, TREAD_TAN_DELTA,
+    };
+    let td = f64::from(TREAD_TAN_DELTA);
+    let pi = std::f64::consts::PI;
+    let r = 4.0 / pi - 1.0;
+    let lam = pi * td * (1.0 + r).powi(2) / (4.0 * r * (1.0 - r) - 2.0 * pi * r * td * (1.0 + r));
+    assert!((f64::from(TREAD_REVERSE) - lam).abs() < 1e-6 * lam);
+    assert!((f64::from(TREAD_GROW) - r * lam).abs() < 1e-6 * lam);
+    assert!((f64::from(TREAD_INV_REVERSE) - 1.0 / lam).abs() < 1e-6 / lam);
+    let h = f64::from(STEP);
+    assert!((f64::from(TREAD_K) * h * h * (1.0 + lam) - 1.0).abs() < 1e-6);
+    let m = 0.2f32;
+    for (mean, a) in [(2e-3f32, 2e-5f32), (2e-3, 2e-4), (2e-3, 1e-3), (5e-4, 1e-4)] {
+        let (mut z, mut prev) = (0.0f32, 0.0f32);
+        let n = 4000;
+        // Shakedown: the loop centres within (z₀ / (λ − μ)·2a) cycles.
+        let cycles = (2.0 * f64::from(TREAD_GROW) * f64::from(mean)
+            / (f64::from(TREAD_REVERSE - TREAD_GROW) * 2.0 * f64::from(a)))
+        .ceil() as usize
+            + 3;
+        let (mut work, mut fmax, mut fmin) = (0.0f64, f32::MIN, f32::MAX);
+        let mut last_f = 0.0f32;
+        for c in 0..cycles {
+            for i in 0..=n {
+                let p = mean + a * (std::f32::consts::TAU * i as f32 / n as f32).sin();
+                let (f, z1) = tread_hysteresis(z, p, prev, m);
+                assert!(f >= 0.0, "pulls: {f}");
+                if c == cycles - 1 {
+                    if i > 0 {
+                        work += 0.5 * f64::from(f + last_f) * f64::from(p - prev);
+                    }
+                    fmax = fmax.max(f);
+                    fmin = fmin.min(f);
+                }
+                last_f = f;
+                z = z1;
+                prev = p;
+            }
+        }
+        let k_sec = f64::from(fmax - fmin) / (2.0 * f64::from(a));
+        let loss = work.abs() / (pi * k_sec * f64::from(a).powi(2));
+        println!(
+            "mean {mean} amplitude {a}: tan delta {loss:.4} (secant {:.3} k)",
+            k_sec / f64::from(m * TREAD_K)
+        );
+        assert!(
+            (loss - td).abs() < 0.03 * td,
+            "tan delta {loss} against {td}"
+        );
+        // Centred on the elastic line: the mean force is k·mean.
+        let mid = 0.5 * f64::from(fmax + fmin) / f64::from(m * TREAD_K);
+        assert!(
+            (mid - f64::from(mean)).abs() < 0.02 * f64::from(a) + 1e-9,
+            "mean force at depth {mid}, not {mean}"
+        );
+    }
+}
+
+/// The tread contact is passive (spec §34): a 50 kg mass on a stiff spring over
+/// a tread node, dropped, bounces lower every time.
+#[test]
+fn tread_contact_bounces_lower_each_time() {
+    use engine_softbody::explicit_beams::{Beam, ExplicitType, NODE_TREAD};
+    let mut s = ExplicitBeams::new(
+        &SoftVehicleDesc::default(),
+        Vec3::ZERO,
+        Vec3::ZERO,
+        settings(),
+    );
+    for (y, m, f) in [(0.01f32, 0.16f32, NODE_TREAD), (0.31, 50.0, 1)] {
+        s.nodes.push(Node {
+            pos: Vec3::new(0.0, y, 0.0),
+            vel: Vec3::ZERO,
+            force: Vec3::new(0.0, -9.807 * m, 0.0),
+            mass: m,
+            friction: 1.0,
+            flags: f,
+        });
+    }
+    s.beams.push(Beam::new(
+        0,
+        1,
+        ExplicitKind::Plain,
+        ExplicitType::Deformable,
+        2e5,
+        0.0,
+        0.3,
+        f32::INFINITY,
+        f32::INFINITY,
+        0.0,
+    ));
+    s.tread = vec![[0.0; 2]; 2];
+    s.ground = 0.0;
+    let (mut up, mut apexes) = (false, Vec::new());
+    for _ in 0..8000 {
+        s.step();
+        let v = s.nodes[1].vel.y;
+        if up && v <= 0.0 {
+            apexes.push(s.nodes[1].pos.y);
+        }
+        up = v > 0.0;
+    }
+    println!("apexes {apexes:?}");
+    assert!(apexes.len() > 5);
+    assert!(apexes.windows(2).all(|w| w[1] < w[0]), "{apexes:?}");
+}
+
 /// The normal part of the pressure-wheel ground rule (spec §28): a light node
 /// under a heavy load, 9 mm deep, rises at most half its depth in a step.
 #[test]
@@ -586,7 +700,11 @@ fn community_vehicles_do_not_creep_at_rest() {
         for n in &mut s.nodes {
             n.pos.y -= drop;
         }
-        let (drift, sway) = creep(&mut s, 2.0, 8.0);
+        // Settled 6 s: with the compliant tread contact (spec §34) the supercar's
+        // spawn sag (about 1 kJ) bounces on its file's own shock absorbers
+        // (`beamDamp` 600-1,100 N·s/m) for about 5 s before it is at rest; the
+        // inelastic ground rule of before absorbed it in 2 s.
+        let (drift, sway) = creep(&mut s, 6.0, 8.0);
         println!("{name}: drift {drift} m over 8 s, sway {sway} m");
         assert!(
             drift <= sway + 1e-3,

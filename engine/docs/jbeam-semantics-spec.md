@@ -1493,3 +1493,56 @@ direction) is y. Checked:
   (`jbeam_force_filtered`, `jbeam_ext_force`; the kernel's `jbeamUpdate` and
   `jbeamExtUpdate`, which keep 1/√q and `sdiv(1, ssqrt(q))`, not bit for bit:
   a follow-up can move them to `exact_length`).
+
+## 34. The tread contact: hysteretic, with per-node reversal state (2026-11-05)
+
+Pressure-wheel tread nodes (`NODE_TREAD`, both tyre rings; hubs and every other
+node keep §28's rule, bit for bit) touch the ground through a compliant contact
+whose only loss is the tread compound's measured hysteresis. It replaces §28's
+inelastic rule for them, which removed 80 % of a landing node's normal speed (§31:
+the lumped tread's patch-entry landings).
+
+* **Source of tan δ.** Um, Kwon, Lee, Kim, Kim, Kim and Lee, "The Influence of
+  Styrene Content in Solution Styrene Butadiene Rubber on Silica-Filled Tire Tread
+  Compounds", *Polymers* 15(21) 4288 (2023), doi:10.3390/polym15214288, Table 9:
+  tan δ at 60 °C (DMA, ARES-G2, 10 Hz, 0.2 % strain) 0.0823, 0.0818 and 0.0805 for
+  three silica-filled S-SBR passenger tread compounds (60 phr silica, 6 phr TESPT).
+  **TREAD_TAN_DELTA = 0.0815**, their mean. (A natural-rubber truck tread is higher:
+  0.123–0.158 in Chu et al., *Polymers* 17(6) 714 (2025), Table 8, same conditions.)
+  The 0.12 of §31's experiment is replaced: it was never retrieved at its source.
+* **Law** (`explicit_beams::tread_hysteresis`, kernel `treadGround`): at depth p > 0
+  the normal force is k·(p + z), k = m·`TREAD_K`. The hysteretic deflection z (per
+  node, with the depth the step before: `ExplicitBeams::tread`, gBeams at
+  `treadState`) follows the depth with slope μ while |z| grows and λ after a
+  reversal until z passes zero (the rest of that step's travel at μ, so the law
+  does not depend on the step); z ≥ −p (no pull); off the ground z and the depth
+  reset to 0. Every steady cycle closes on itself centred on the elastic line k·p,
+  and its loop is a parallelogram whose loss is tan δ of its secant stiffness for
+  any amplitude and mean depth (`tread_contact_loses_tan_delta_per_cycle_at_any_amplitude`:
+  0.0815 at 20 µm to 1 mm). Friction: the solver's law on that normal force, and
+  §28's slip limit.
+* **Choices.** The loop's shape: r = μ/λ = 4/π − 1, which gives the parallelogram
+  the area and the mid-depth width of the linear viscoelastic ellipse of the same
+  tan δ; λ = 0.6736 then follows from tan δ (μ = 0.1841). The stiffness: the
+  stiffest tangent, k·(1 + λ), is m/h² (ω·h = 1, the stiffest the step integrates
+  with margin; real tread rubber is about 15 times stiffer and cannot be integrated
+  at 2 kHz). The loss per landing scales as F²/k, so C_rr depends on this Choice.
+* **Results** (CPU; `community_cars_coast_down_by_aero_and_rolling_resistance`,
+  25 m/s, 0.5–1.5 s): **C_rr 0.016 supercar** (was 0.024; passenger tyres
+  0.010–0.015), **0.050 Astral R** (was 0.063). The Astral R's remainder is its
+  file's own tyre dampers (`energy_ledger.rs` coasting at 25 m/s: sidewall beams
+  16.1 kJ/s and periphery 4.1 of 24.5; the tread contact 2.75): content, not the
+  solver. Supercar: tread contact 2.5 of 8.1 kJ/s, sidewalls 3.4.
+* **Rest.** The fixture car stands (peak kinetic energy 1–4 s 40.0 J, 27.2 J at
+  4 s; was 37.3 and 17.7) and does not creep (drift 11.7 mm, sway 53 mm). The
+  supercar's spawn sag (about 1 kJ: it spawns with its springs unloaded) now bounces
+  on its file's shock absorbers (`beamDamp` 600–1,100 N·s/m; its kinetic energy decays as a damping
+  ratio of about 0.03) for about 5 s, where the inelastic ground absorbed it in 2 s; the
+  community rest-creep test therefore settles 6 s before its 8 s window (was 2 s;
+  at 2 s the supercar still has 800 J and is not at rest). Then: supercar drift
+  2.1 mm, sway 53 mm; Astral R 2.4 mm, 13 mm.
+* **GPU.** The same law in the kernel (strict arithmetic in the CPU's order; the
+  constants as bit patterns); a vehicle with tread nodes (vehicle flag 512,
+  `FLAG_TREAD`) takes the shapes path of the node phase, and the coupled path has
+  the branch too. The fixture car at rest steps bit for bit with the CPU until the
+  JBeam beam path's own last-bit difference (§33, step 2,688); see §35 for that.

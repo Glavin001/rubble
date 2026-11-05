@@ -330,7 +330,16 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     if ((flags & NODE_NO_GROUND) == 0u)
     {
         float3 x = origin + pos;
-        if (ground > x.y)
+        if ((flags & NODE_TREAD) != 0u)
+        {
+            float3 c = treadGround(gi, f, vel, mass, V.w, ground - x.y, ground > x.y);
+            if (ground > x.y && any(c != float3(0.0, 0.0, 0.0)))
+            {
+                cfAdd(gi, c);
+                f += c;
+            }
+        }
+        else if (ground > x.y)
         {
             float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
             cfAdd(gi, c);

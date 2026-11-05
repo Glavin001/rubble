@@ -55,6 +55,27 @@ pub const NODE_TYRE: u32 = 16;
 /// JBeam pressure-wheel nodes: ground friction never reverses the slip in a step
 /// (`engine/docs/jbeam-semantics-spec.md` §28).
 pub const NODE_FRICTION_LIMIT: u32 = 32;
+/// A pressure wheel's tread node (JBeam mode): its ground contact is the tread
+/// rubber's compliant, hysteretic one ([`tread_hysteresis`],
+/// `engine/docs/jbeam-semantics-spec.md` §34) in place of the inelastic rule.
+pub const NODE_TREAD: u32 = 64;
+/// The tread compound's loss factor tan δ at 60 °C and 10 Hz: the mean of the three
+/// silica-filled S-SBR tread compounds of Um et al., "The Influence of Styrene
+/// Content in Solution Styrene Butadiene Rubber on Silica-Filled Tire Tread
+/// Compounds", Polymers 15(21) 4288 (2023), doi:10.3390/polym15214288, Table 9
+/// (0.0823, 0.0818, 0.0805; DMA, 10 Hz, 0.2 % strain). Spec §34.
+pub const TREAD_TAN_DELTA: f32 = 0.0815;
+/// The tread contact's hysteretic slope while its hysteretic deflection grows
+/// (μ = r·λ, r = 4/π − 1; spec §34).
+pub const TREAD_GROW: f32 = 0.184_065_8;
+/// Its slope after a reversal, until its hysteretic deflection passes zero
+/// (λ, from [`TREAD_TAN_DELTA`]; spec §34).
+pub const TREAD_REVERSE: f32 = 0.673_642_6;
+/// 1/[`TREAD_REVERSE`] (a product on both solvers, no division).
+pub const TREAD_INV_REVERSE: f32 = 1.484_466_7;
+/// The tread contact's elastic stiffness per kilogram of node, 1/(h²·(1 + λ)) (s⁻²):
+/// its stiffest tangent, k·(1 + λ), is m/h² (ω·h = 1). **Choice** (spec §34).
+pub const TREAD_K: f32 = 2_389_996.5;
 
 /// Optional parts of the compatible profile. All on by default.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -840,6 +861,10 @@ pub struct ExplicitBeams {
     /// its contacts' force magnitudes per step, and the contact breaks it drives
     /// (`None`: off, the default; [`Self::enable_contact_force`]).
     pub contact_force: Option<Box<ContactForceLog>>,
+    /// Per node its tread contact's state ([`NODE_TREAD`] nodes, spec §34): its
+    /// hysteretic deflection z and its depth the step before, both 0 off the
+    /// ground. Empty when no node is a tread node (the pressure wheels' builder sizes it).
+    pub tread: Vec<[f32; 2]>,
     /// JBeam mode's damping filters (`dampCutoffHz`), by [`Beam::shock`] − 1.
     pub damp_filters: Vec<DampFilter>,
     /// JBeam torsion elements' watched break groups (0 = none), by [`Beam::shock`]
@@ -1020,6 +1045,21 @@ pub fn contact_force(
     if r <= 0.0 {
         return Vec3::ZERO;
     }
+    contact_friction(r, f, v, n, surface, friction)
+}
+
+/// The contact force of normal force `r` > 0 along `n` with its friction
+/// ([`contact_force`]'s friction law), on a node of force `f` and velocity `v`.
+pub fn contact_friction(
+    r: f32,
+    f: Vec3,
+    v: Vec3,
+    n: Vec3,
+    surface: &ContactSurface,
+    friction: f32,
+) -> Vec3 {
+    let vn = v.dot(n);
+    let fn_ = f.dot(n);
     let sf = f - fn_ * n;
     let mut s = v - vn * n;
     let sigma = s.length();
@@ -1036,6 +1076,34 @@ pub fn contact_force(
                 * approx_exp(-approx_pow(sigma / surface.vs, surface.alpha));
         r * n - (g + (surface.t2 * sigma).min(5.0)) * gr * s
     }
+}
+
+/// The tread contact's normal force law (spec §34, rate independent): at depth
+/// `p` (> 0), its depth the step before `p_prev` (0 when it was off the ground) and
+/// hysteretic deflection `z`, a node of mass `m` is pushed out with
+/// k·(p + z′), k = m·[`TREAD_K`], and z′ is the new deflection. z follows the
+/// depth with slope μ ([`TREAD_GROW`]) while |z| grows and λ ([`TREAD_REVERSE`])
+/// after a reversal until it passes zero (the rest of that step's travel again at
+/// μ): a closed loop for every cycle, centred on z = 0, of loss factor
+/// [`TREAD_TAN_DELTA`] whatever its amplitude. z′ ≥ −p (no pull). Returns (force,
+/// z′). Strict IEEE single arithmetic in this order (the kernel's `treadHysteresis`).
+#[inline]
+pub fn tread_hysteresis(z: f32, p: f32, p_prev: f32, m: f32) -> (f32, f32) {
+    let dp = p - p_prev;
+    let mut z1 = if z * dp >= 0.0 {
+        z + TREAD_GROW * dp
+    } else {
+        let t = z + TREAD_REVERSE * dp;
+        if (t > 0.0) != (z > 0.0) {
+            TREAD_GROW * (dp + z * TREAD_INV_REVERSE)
+        } else {
+            t
+        }
+    };
+    if z1 < -p {
+        z1 = -p;
+    }
+    ((m * TREAD_K) * (p + z1), z1)
 }
 
 /// The contact-force log (jbeam-semantics-spec.md §32). A node's contact force in
@@ -1155,6 +1223,7 @@ impl ExplicitBeams {
             rest_pose: None,
             two_body_contact: false,
             contact_force: None,
+            tread: Vec::new(),
             damp_filters: Vec::new(),
             torsion_watch: Vec::new(),
             groups_last: Vec::new(),
@@ -2653,6 +2722,8 @@ impl ExplicitBeams {
             r.begin_step(origin, &self.nodes);
         }
         let mut cf = self.contact_force.take();
+        // (Sized by the pressure wheels' builder: every tread node has a slot.)
+        let mut tread = std::mem::take(&mut self.tread);
         for i in 0..self.nodes.len() {
             let mut n = self.nodes[i];
             if let Some(l) = cf.as_mut() {
@@ -2660,7 +2731,38 @@ impl ExplicitBeams {
             }
             if !n.has(NODE_NO_GROUND) {
                 let x = origin + n.pos;
-                if ground > x.y {
+                if n.has(NODE_TREAD) {
+                    let s = &mut tread[i];
+                    if ground > x.y {
+                        let p = ground - x.y;
+                        let (r, z) = tread_hysteresis(s[0], p, s[1], n.mass);
+                        *s = [z, p];
+                        if r > 0.0 {
+                            let c = contact_friction(
+                                r,
+                                n.force,
+                                n.vel,
+                                Vec3::Y,
+                                &ContactSurface::GROUND,
+                                n.friction,
+                            );
+                            let c = crate::explicit_jbeam_ext::slip_limit(
+                                c,
+                                n.force,
+                                n.vel,
+                                n.mass,
+                                Vec3::Y,
+                                h,
+                            );
+                            if let Some(l) = cf.as_mut() {
+                                l.add(i, c);
+                            }
+                            n.force += c;
+                        }
+                    } else {
+                        *s = [0.0; 2];
+                    }
+                } else if ground > x.y {
                     let c = contact_force(
                         n.force,
                         n.vel,
@@ -2756,6 +2858,7 @@ impl ExplicitBeams {
             self.nodes[i] = n;
         }
         self.contact_force = cf;
+        self.tread = tread;
         if let Some(mut r) = rigid {
             r.end_step();
             self.rigid = Some(r);
