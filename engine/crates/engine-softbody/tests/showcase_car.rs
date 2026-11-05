@@ -4256,7 +4256,10 @@ fn i_windscreen_share_of_torsion() {
             .iter()
             .filter(|z| {
                 z.grade == "glass"
-                    && !matches!(z.region, engine_softbody::authoring::vehicle::Region::Side(_))
+                    && !matches!(
+                        z.region,
+                        engine_softbody::authoring::vehicle::Region::Side(_)
+                    )
             })
             .flat_map(|z| {
                 b.shell.seg.iter().filter_map(move |(&i, &sg)| {
@@ -4290,4 +4293,16 @@ fn i_windscreen_share_of_torsion() {
         share(no_brace),
         share(neither)
     );
+}
+
+/// `TRUCK_OUT=<dir>`: writes each resolution's `.truck` there (to compare
+/// two builds' cars beam for beam). `--ignored`.
+#[test]
+#[ignore]
+fn write_trucks() {
+    let dir = std::env::var("TRUCK_OUT").unwrap_or_else(|_| ".".into());
+    for res in RESOLUTIONS {
+        let b = built(res);
+        std::fs::write(format!("{dir}/showcase_{res:?}.truck"), &b.truck).unwrap();
+    }
 }

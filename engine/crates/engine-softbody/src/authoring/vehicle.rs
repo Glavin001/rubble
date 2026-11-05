@@ -156,6 +156,13 @@ pub struct BraceSpec {
     /// cabin.
     #[serde(default)]
     pub strength: f32,
+    /// The members `from` and `to` lie on (their left-side names): each end
+    /// is the station of that member nearest its point, on whichever side
+    /// the point falls. Explicit ends, so a member added elsewhere never
+    /// moves a brace. Empty: the frame node nearest the point and its
+    /// station (the first member's through it).
+    #[serde(default)]
+    pub on: [String; 2],
 }
 
 /// A shear panel between two members (a face of the body's box: roof between
@@ -1876,68 +1883,110 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     }
     // A frame node's member station (its section's nodes): a lumped panel
     // bears on the whole section, not one corner of it.
-    let mut station_of: HashMap<u32, Vec<u32>> = HashMap::new();
-    for t in &trusses {
+    let mut station_of: HashMap<u32, (usize, Vec<u32>)> = HashMap::new();
+    for (ti, t) in trusses.iter().enumerate() {
         for st in &t.stations {
             let mut v: Vec<u32> = st.to_vec();
             v.sort();
             v.dedup();
             for &i in &v {
-                station_of.entry(i).or_insert_with(|| v.clone());
+                station_of.entry(i).or_insert_with(|| (ti, v.clone()));
             }
         }
     }
     let grades_strength = params.strength;
-    let spread = true;
     // Shear panels (the members' and shell's body nodes).
     for br in &def.braces {
         let mat = grades.get(&br.grade)?;
         // The frame's nodes (a shear panel's corners are the frame's).
-        let body: Vec<u32> = (0..sk.nodes.len() as u32)
-            .filter(|&i| {
-                sk.nodes[i as usize].part == 0
-                    && sk.nodes[i as usize].primary
-                    && !sk.nodes[i as usize].catcher
-            })
+        let is_frame: Vec<bool> = sk
+            .nodes
+            .iter()
+            .map(|n| n.part == 0 && n.primary && !n.catcher)
             .collect();
+        let frame = |i: u32| is_frame[i as usize];
+        let body: Vec<u32> = (0..sk.nodes.len() as u32).filter(|&i| frame(i)).collect();
+        // A named member's trusses: (its left or centre one, its right one).
+        let member = |name: &str| -> Result<(usize, usize), String> {
+            let find = |n: &str| truss_names.iter().position(|x| x == n);
+            let l = find(name).ok_or_else(|| format!("brace {}: no member {name}", br.name))?;
+            Ok((l, find(&format!("{name}_r")).unwrap_or(l)))
+        };
+        let on = [&br.on[0], &br.on[1]].map(|n| (!n.is_empty()).then(|| member(n)).transpose());
+        let on = [on[0].clone()?, on[1].clone()?];
         for side in [1.0f32, -1.0] {
-            let p = |q: [f32; 3]| Vec3::new(side * q[0], q[1], q[2]);
             // Each point's node is found on the +x side and mirrored (ties in
             // distance would otherwise pick different nodes on each side, and
-            // braces sharing a corner would miss each other).
-            let pick = |q: [f32; 3]| -> u32 {
+            // braces sharing a corner would miss each other). With its member
+            // named, among that member's nodes, and its end is that member's
+            // station through it: nothing built elsewhere moves it.
+            let pick = |q: [f32; 3], on: Option<(usize, usize)>| -> (u32, Vec<u32>) {
+                let pool = |ti: usize| -> Vec<u32> {
+                    let mut v: Vec<u32> = trusses[ti]
+                        .stations
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .filter(|&i| frame(i))
+                        .collect();
+                    v.sort();
+                    v.dedup();
+                    v
+                };
+                let right = side * q[0].signum() < 0.0;
+                let (left_pool, side_pool) = match on {
+                    Some((l, r)) => (pool(l), pool(if right { r } else { l })),
+                    None => (body.clone(), body.clone()),
+                };
                 let left = Vec3::new(q[0].abs(), q[1], q[2]);
-                let n = sk.nearest(left, &body, 1)[0];
+                let n = sk.nearest(left, &left_pool, 1)[0];
                 let want = Vec3::new(
                     sk.pos(n).x * (side * q[0].signum()),
                     sk.pos(n).y,
                     sk.pos(n).z,
                 );
-                sk.nearest(want, &body, 1)[0]
+                let i = sk.nearest(want, &side_pool, 1)[0];
+                let station = match on {
+                    Some((l, r)) => {
+                        let ti = if right { r } else { l };
+                        let st = trusses[ti]
+                            .stations
+                            .iter()
+                            .find(|st| st.contains(&i))
+                            .unwrap();
+                        let mut v = st.to_vec();
+                        v.sort();
+                        v.dedup();
+                        v
+                    }
+                    None => station_of
+                        .get(&i)
+                        .map(|x| x.1.clone())
+                        .unwrap_or_else(|| vec![i]),
+                };
+                (i, station)
             };
-            let _ = p;
-            let a = pick(br.from);
-            let b = pick(br.to);
+            let (a, ea) = pick(br.from, on[0]);
+            let (b, eb) = pick(br.to, on[1]);
             if std::env::var("SHOWCASE_BRACES").is_ok() {
                 let deg = |i: u32| sk.beams.iter().filter(|x| x.a == i || x.b == i).count();
+                let owner = |i: u32| {
+                    station_of
+                        .get(&i)
+                        .map(|x| truss_names[x.0].clone())
+                        .unwrap_or_default()
+                };
                 eprintln!(
-                    "brace {} {side}: {a} at {:.2?} (degree {}) to {b} at {:.2?} (degree {})",
+                    "brace {} {side}: {a} at {:.2?} (degree {}, {}) to {b} at {:.2?} (degree {}, {}); ends {ea:?} {eb:?}",
                     br.name,
                     sk.pos(a),
                     deg(a),
+                    owner(a),
                     sk.pos(b),
-                    deg(b)
+                    deg(b),
+                    owner(b)
                 );
             }
-            // The panel's yield and break at the grade's strains: its forces
-            // scale with its rigidity (a lumped panel is many strips).
-            let ends = |i: u32| -> Vec<u32> {
-                match station_of.get(&i) {
-                    Some(v) if spread => v.clone(),
-                    _ => vec![i],
-                }
-            };
-            let (ea, eb) = (ends(a), ends(b));
             let share = 1.0 / (ea.len() * eb.len()) as f32;
             for &p in &ea {
                 for &q in &eb {

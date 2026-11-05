@@ -84,7 +84,15 @@ pub fn brace(name: &str, from: [f32; 3], to: [f32; 3], grade: &str, kl: f32) -> 
         grade: grade.into(),
         kl,
         strength: 0.0,
+        on: Default::default(),
     }
+}
+
+/// A brace whose ends lie on the members `from` and `to` (their left-side
+/// names): explicit ends ([`BraceSpec::on`]).
+pub fn on(mut b: BraceSpec, from: &str, to: &str) -> BraceSpec {
+    b.on = [from.into(), to.into()];
+    b
 }
 
 /// A brace that yields at `strength` N (into a crumple zone).
@@ -1658,6 +1666,36 @@ pub fn sedan() -> VehicleDef {
                         brace("rfloor_x", rr1, m(rr2), "floor", k),
                         brace("rbase_x", trb, m(rr1), "floor", k),
                     ]
+                })
+                // Each end on the member its corner lies on (explicit ends:
+                // a member added elsewhere never moves a brace).
+                .map(|b| {
+                    let hosts = [
+                        (fb, "pillar_a"),
+                        (ft, "roof_rail"),
+                        (cw, "apron"),
+                        (bb, "pillar_b"),
+                        (bt, "roof_rail"),
+                        (rb, "pillar_c"),
+                        (rt, "pillar_c"),
+                        (tf, "apron"),
+                        (tfb, "rail_f"),
+                        (rail_fw, "rail_f"),
+                        (tr, "tower_r"),
+                        (trb, "tower_r"),
+                        (parcel, "pillar_c"),
+                        (rr1, "kickup"),
+                        (rr2, "rail_r"),
+                    ];
+                    let host = |p: [f32; 3]| {
+                        hosts
+                            .iter()
+                            .find(|(q, _)| q[0] == p[0].abs() && q[1] == p[1] && q[2] == p[2])
+                            .map(|x| x.1)
+                            .expect("a brace corner on a member")
+                    };
+                    let (a, c) = (host(b.from), host(b.to));
+                    on(b, a, c)
                 })
                 .collect()
         },
