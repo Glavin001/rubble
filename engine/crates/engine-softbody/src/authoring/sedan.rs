@@ -237,7 +237,7 @@ pub const RAIL_BUMPER: f32 = 1.0;
 /// (`engine/docs/crash-reference-targets.md` §2, §8): at 56 km/h a 1,450 kg
 /// sedan crushes 0.62–0.75 m dynamically (t_m 63–76 ms) and 0.38–0.58 m
 /// residually (Campbell b1 22.9–39.2). The `n` test measures it.
-pub const CRUSH_PLATEAU: f32 = 1.25;
+pub const CRUSH_PLATEAU: f32 = 1.1;
 
 /// The main load paths' (rails, sills) section against their grade's k·L.
 pub const RAIL_STIFF: f32 = 1.4;
@@ -1041,7 +1041,11 @@ pub fn sedan() -> VehicleDef {
             mounts: 2,
             reach: 0.25,
             mount_grade: "mount".into(),
-            mount_scale: 1.0,
+            // Mounts that hold the engine in its bay (≈ 15 kN each, about a
+            // real mount bracket's strength): an off-centre pole drives it
+            // back into the firewall instead of sliding it aside (which let
+            // the pole through between it and a rail).
+            mount_scale: 4.0,
             bear: 0.5,
         },
         // Seat frames (the seats ride them): as heavy as their own lattice
