@@ -27,6 +27,10 @@ Sources (all retrieved 2026-11-03):
 * [TH] Torsion hydros: https://documentation.beamng.com/modding/vehicle/sections/torsionhydros/
 * [I] Introduction to JBeam: https://documentation.beamng.com/modding/vehicle/intro_jbeam/
 * [CI] Common JBeam issues: https://documentation.beamng.com/modding/vehicle/intro_jbeam/common_issues/
+* [GM] Ground models: https://documentation.beamng.com/modding/levels/level_formats/groundmodels/
+  (retrieved 2026-11-05).
+* [PN] BeamNG.drive alpha 0.11 patch notes ("The coast is clear"):
+  https://beamng.com/game/news/patch/the-coast-is-clear/ (retrieved 2026-11-05).
 * [W] the former wiki page "Beams" (https://wiki.beamng.com/Beams, now a redirect to
   documentation.beamng.com; its text as quoted by search results: deformLimit "limits
   by how much of original length the beam can deform in compression",
@@ -161,16 +165,74 @@ With the BX door detent (k = 800, bounds ±0.1, zone 0.01 m, limit spring and da
 
 ## 6. Damping cut-off (`dampCutoffHz`) [B]
 
-"Frequency in Hz above which damping is not applied" (NORMAL, BOUNDED and LBEAM). The
-BX and the legocar put it on damper beams and engine mounts (250–1000 Hz) and on the
-legocar's steering dampers (1000 Hz); without it the legocar's front axle oscillated at
-the step's Nyquist rate and blew up. **Choice:** the damping uses y, the extension rate
-through a first-order low-pass at the cut-off f_c discretised with the bilinear
-transform: K = tan(π·f_c·h), a = K/(1 + K), b = (K − 1)/(K + 1),
-y_n = a·(u_n + u_{n−1}) − b·y_{n−1}. It has no gain at the Nyquist rate, so a
-period-two oscillation is never damped. f_c·h is capped at 0.45 (the pole reaches the
-unit circle at 0.5): cut-offs from 900 Hz up act as 900 Hz. The filter state starts at
-zero.
+What BeamNG documents (retrieved 2026-11-05; no developer forum post gives the law):
+
+* [B]: "Limits the vibration frequency (Hz) above which damping applies. Only applies
+  to normal, bounded, and l-beams"; it is used "mostly with suspension components and
+  other critical parts of the jbeam to help run higher damping before instability";
+  "Expensive to run, should only be used where needed".
+* [PN] the patch notes of alpha 0.11, which added it (to normal and bounded beams):
+  "This option simulates band limited damping, increasing the amount of damping that
+  can be stably used".
+
+So the cut-off is a low-pass on the damping, and its one stated purpose is
+**stability: more damping than the plain law can run**. The BX and the legocar put
+it on damper beams and engine mounts (250–1000 Hz) and the legocar's steering dampers
+(1000 Hz); the Astral R on its stiff rear control arms (500 Hz); pressure wheels on
+their tread and periphery beams (500 Hz).
+
+**Rule:** the damping uses y, the extension rate u through the discrete RC low-pass
+at the cut-off f_c: a = 1 − exp(−2π·f_c·h), y_n = a·u_n + (1 − a)·y_{n−1} (the CPU and
+GPU record (u, y, a, b) with b = a − 1, y = a·u − b·y₋₁). The state starts at zero.
+
+**Why this law (analysis, 2026-11-05).** One beam mode of angular frequency ω, mass
+m, damping c, on the solver's step (symplectic Euler: v_{n+1} = v_n + h·(−ω²x_n −
+(c/m)·y_n), x_{n+1} = x_n + h·v_{n+1}, y = H(z)·v). Write Ω = ω·h and γ = c·h/m.
+Undamped, the mode turns by θ per step with 2 − 2 cos θ = Ω² (θ = 2 arcsin(Ω/2); the
+step's limit Ω = 2 is θ = π, the Nyquist rate). The damping reads v_n = (x_n −
+x_{n−1})/h, a backward difference: in the mode it lags the centred rate by θ/2. A
+damping force removes energy only while its total lag stays under 90°:
+θ/2 + φ_H(θ) < π/2. So any filter's lag adds to one the step already has, and the
+margin at a fast mode is small (at Ω = 1.77, θ/2 = 62°).
+
+* The §6 law of 2026-11-03 was the bilinear-transform low-pass,
+  H(z) = a·(1 + z⁻¹)/(1 + b·z⁻¹). Its zero at the Nyquist rate is a factor
+  (1 + z⁻¹), which lags θ/2 by itself; at f_c = 500 Hz on the 2 kHz step b = 0 and
+  H is exactly (1 + z⁻¹)/2. The total lag is then θ, past 90° for θ > π/2: every mode
+  with Ω > √2 is **anti-damped**, however small c is. Below 500 Hz the denominator
+  lags more (anti-damped from Ω = 1.08 at 250 Hz), above it less (1.86 at 900 Hz).
+* The RC low-pass lags little near the Nyquist rate (−arg(1 − (1 − a)e^{−iθ}), 9° at
+  Ω = 1.77 and 500 Hz, falling to 0 at θ = π) and never adds anti-damping.
+
+Eigenvalues of the one-mode map (spectral radius ≤ 1 for every Ω up to a bound;
+the largest γ = c·h/m that stays stable):
+
+| modes up to | cut-off | plain damping | RC low-pass | bilinear (before) |
+|---|---|---|---|---|
+| Ω ≤ 0.5 | 250 / 500 / 1000 Hz | 1.87 | 5.01 / 2.85 / 2.04 | 1.57 / 1.75 / 1.85 |
+| Ω ≤ 1.0 | 250 / 500 / 1000 Hz | 1.50 | 4.01 / 2.28 / 1.63 | 0.29 / 1.00 / 1.42 |
+| Ω ≤ 1.5 | 250 / 500 / 1000 Hz | 0.87 | 2.34 / 1.33 / 0.95 | 0 / 0 / 0.69 |
+
+The RC law does what [PN] says the option is for, more stable damping than the
+plain law at every cut-off; the bilinear filter allowed less. (Script: the session
+scratchpad's `law.py`, a 4×4 linear map per (Ω, γ); not in the repository.) The
+bilinear filter's one advantage, no damping at all at the Nyquist rate, is covered
+since 2026-11-05 by §28's backward-Euler rule for dampers with c·h/μ > 1.
+
+**Effect on the vehicles** (`examples/jbeam_accept.rs`, CPU, 4 s at rest then a rigid
+wall at 56 km/h for 1.5 s; bilinear → RC):
+
+| vehicle | rest: KE at 4 s, max node speed | rest: centre of mass 1 → 4 s | wall: broken / bent at 1.5 s |
+|---|---|---|---|
+| BX body | 2.8 → 2.2 J, 3.1 → 1.8 m/s | 9.1 → 8.2 cm (both: still settling) | 72 / 346 → 76 / 355 |
+| legocar | 79 → 59 J, 5.2 → 3.8 m/s | 11.2 → 9.0 cm | 540 / 11 → 482 / 10 |
+| Monster supercar | 315 → 163 J | 57 → 43 cm sideways (it rolls; before and after) | 0 / 37 → 0 / 35 |
+| Astral R | 87 broken, 141 m/s → 0 broken, 3.3 m/s | — → 3.3 cm | (diverged) → 213 / 267 |
+
+The legocar's wall run has one contact event of its loose bricks at 1.5 s (a 1.3 kg
+brick node at 50 m/s for one sample; 13 kJ at 1.5 s, 681 J at 2.0 s); the bilinear
+run has its own at other times (22 m/s at 1.0 s). The break count of a car that comes
+apart into bricks is chaotic.
 
 ## 7. Couplers (kind `JbeamCoupler`) [C]
 
@@ -241,6 +303,23 @@ solver already uses). Without it a panel's middle node lies in the plane of its 
 neighbouring triangles: the BX boot lid's centre node sat 3 cm from its own panel and
 was kicked by the self-collision throttle every eighth step. Collision triangles,
 range (0.03 m) and contact rules are otherwise the solver's.
+
+### 10.1 Nodes lying on a triangle at spawn
+
+[N]: a node starts feeling a triangle "at around 2.5cm"; [CI]: "nodes that spawn within
+triangles, and get pushed out on spawn" (a cause of spawn loads and instability).
+Rubble keeps that push for a node near a triangle (the solver's 3 cm range): it is
+pushed to the side it starts on. A node that lies **on** a triangle (inside it, within
+`SURFACE_TOLERANCE` = 1 mm of its plane: JBeam positions are written to the
+millimetre) has no side; the solver's contact picks the side by the sign of the
+distance, which flips with rounding, and pushes it through the plane each way.
+**Choice:** such a triangle takes the node's self-collision group when it has none of
+its own (`ExplicitBeams::tri_groups`, set at spawn; the GPU reads it through the
+triangle's group word as before), so the node, and the other nodes of its group, skip
+it. A warning counts them. Only the Astral R has one: its rear bumper's centre node
+`rb5` lies on the edge `rb5l`–`rb5r` of the diffuser's triangle `df2l rb5l rb5r`
+(2 of its 3 nodes in the bumper's group), and chattered at 8 m/s at rest. Pairs at 2–3 cm
+(17 at the Astral R's spawn) keep [CI]'s push.
 
 ## 11. What the BX and the legocar use, and what is left
 
@@ -556,8 +635,12 @@ the layout below, Rubble's own.
 * **Beams** (each set's `Spring`, `Damp`, `Deform`, `Strength`, `DampCutoffHz`,
   `Precompression`; **Choice** for missing values: no deform, no break, and for the
   hub sets the stiffest spring the step integrates with margin on the hub nodes,
-  k = 0.04·m/h² (ω·h = 0.2 per beam) with damping 0.2·√(k·m); other sets
-  4.3 MN/m and 580 N·s/m):
+  k = 0.04·m/h² (ω·h = 0.2 per beam) with damping 0.2·√(k·m); a reinforcement set
+  without Spring or Damp takes its base set's (`wheelTreadReinfBeam` the tread beam's,
+  `wheelPeripheryReinfBeam` the periphery beam's, `wheelSideReinfBeam` and
+  `wheelReinfBeam` the side beam's; 2026-11-05: before, the 4.3 MN/m default, which
+  put the forklift's 1.1 kg tread nodes at ω·h = 2.12); other sets 4.3 MN/m and
+  580 N·s/m):
   * `hubBeam`: hub(k, i) to the other side's axle node; `hubSideBeam`: to its own
     side's axle node (radial spokes);
   * `hubTreadBeam`: hub(0, i)–hub(1, i) and hub(0, i)–hub(1, i + 1);
@@ -567,7 +650,11 @@ the layout below, Rubble's own.
   * `wheelSideReinfBeam` (`enableTireSideReinfBeams`, anisotropic likewise):
     tyre(k, i)–hub(k, i ± 1);
   * `wheelReinfBeam` (`enableTireReinfBeams`, unless L-beams): tyre(k, i)–hub(1 − k, i);
-  * L-beams (`enableTireLbeams`; `wheelLbeamSpring`… else the side beam's values):
+  * L-beams (`enableTireLbeams`; `wheelLbeamSpring`… else `wheelReinfBeam`'s values,
+    [WH]: "the wheelReinfBeam setting covers these diagonal beams or L-beams", else the
+    side beam's; its `DampCutoffHz` too) (2026-11-05: before, the side beam's: on the
+    forklift's tyres, three L-beams per tread node with the side beam's 1,150 N·s/m
+    gave c·h/m = 2.6 on 1.1 kg tread nodes and the tyres diverged at the Nyquist rate):
     vertex tyre(k, i) with ends hub(k, i) and tyre(1 − k, i) (lateral), and hub(k, i)
     with tyre(k, i ± 1) (shear: torque between hub and tread, both senses);
   * `wheelTreadBeam`: tyre(0, i)–tyre(1, i); `wheelTreadReinfBeam`
@@ -643,11 +730,46 @@ the step's limits, apply in JBeam mode only, and the spawn warns with their coun
   tangential force at most stops the node's slip in one step: the solver's friction
   law's viscous branch, on light tread nodes carrying a tyre's pressure load, would
   otherwise reverse the slip every step and grow.
+* **Tyre ground push** (2026-11-05). **Choice** (BeamNG documents no node–ground
+  collision response: its ground models [GM] give friction, roughness, depth and
+  fluid parameters, nothing on how a node is pushed out; [N] gives only the
+  self-collision distance). On a pressure-wheel node the ground's normal
+  push lets the node rise at most half its depth p in one step (velocity out of the
+  ground ≤ 0.5·p/h). The solver's contact restores 0.2 of the depth per step as a
+  velocity the node keeps; a 0.12 kg tread node under the 5 kN of its wheel's load
+  then left the ground every 8 steps, fell back 9 mm in one step at 17 m/s, and the
+  friction of those landings walked the Monster supercar sideways 0.15 m/s at rest
+  (0.5 m in 4 s, with either damping law). At most half keeps the node in contact.
+  Rest creep, `tests/explicit_jbeam_ext.rs` `creep` (exact physics: no net
+  horizontal force on a car at rest, so a straight-line fit of its centre of mass
+  over 8 s after 2 s may move no more than the sway around it, plus 1 mm):
+
+  | | drift / sway before | after |
+  |---|---|---|
+  | Monster supercar | 214 / 156 mm (**creeps**) | 1.5 / 45 mm |
+  | Astral R | — | 1.6 / 24 mm |
+  | fixture car (`PART2_CAR`, 4 s) | 1.5 / 9.5 mm | 23 / 60 mm |
+
+  Factors measured (supercar drift over 8 s, Astral R drift, fixture-car KE at
+  4 s): none (before) 214 mm (creeps), —, 0.25 J; 0.2 (the solver's own
+  fraction) 34 mm, 0.7 mm, 11.5 J; 0.3: 7.7, 2.2 mm, 16.9 J; 0.4: 1.4, 15 mm,
+  0.92 J; **0.5: 1.5, 1.6 mm, 1.0 J**; 0.6: 14, 8.3 mm, 2.0 J; 0.7: 1.1, 6.7 mm,
+  5.7 J; 0.8: 68, 15 mm, 10.8 J; 0.9: 13, 1.0 mm, 4.3 J; 1.0 (back to the
+  surface, where the node then loses its support) 53, 12 mm, 9.9 J. Every factor
+  stops the creep test failing on the supercar except 0.8 (marginal); none keeps
+  the fixture car's 0.25 J. The fixture car's residual is rocking on its 12-ray
+  tyres' flats, ±3 cm fore and aft at about 1 Hz on free-rolling wheels (no brakes
+  are simulated); before, the bouncing tread nodes damped it (and walked the
+  supercar). Its KE at 4 s swings between 0.9 and 17 J with the factor (the
+  rocking's phase), its sway is 4–7 cm for every factor. **Open** (a regression
+  from 0.25 J): a rolling-resistance or brake model would damp it; neither is in
+  scope (no powertrain).
 
 ## 29. Acceptance vehicles (CPU reference, 2026-11-05)
 
 `examples/jbeam_accept.rs` (JBeam mode, pressure wheels, drag off, lowest node 2 cm up;
-then a rigid wall at 56 km/h):
+then a rigid wall at 56 km/h). This first table is with the first §6 law (bilinear);
+§6 gives every vehicle's numbers with the RC law:
 
 | vehicle | nodes / beams | at rest, 4 s | 56 km/h wall, 1.5 s |
 |---|---|---|---|
@@ -655,17 +777,54 @@ then a rigid wall at 56 km/h):
 | AgentY legocar | 1,013 / 7,940 | 0 broken, 6 bent, KE 79 J | 540 broken (its bricks part), KE 179 → 4.5 kJ, peak 22 m/s, no NaN |
 | Astral R (CC BY-NC-SA 4.0) | 820 / 6,342 | **unstable**: its rear subframe node `rx1r` diverges at 50 ms | not run |
 
-**The Astral R.** Its highest spring mode is ω·h = 1.77 (the BX's 1.75, the
-supercar's 1.72: inside the explicit step's limit of 2), but the stiff rear control
-arms (12–15 MN/m, 1.2–1.5 kN·s/m) carry `dampCutoffHz` 500, and §6's bilinear low-pass
-lags the damping by about 48° at that mode's 560 Hz. A lagged damper is part spring:
-c·ω·|H|·sin φ ≈ 2.6 MN/m on top, and the mode passes 2. With the filters off the arms
-stay stable (the car then fails elsewhere: its rear bumper's self-collision pairs that
-start inside the 3 cm range). So the mismatch is §6's reading of `dampCutoffHz`: BeamNG
-documents only "vibration frequencies above this value are not damped, which helps run
-higher damping before instability occurs", which a phase-lagging filter does not do at
-these stiffnesses. Open: a cut-off law without that lag (a single-pole filter has 11°
-there, and is still unstable at 100 ms).
+**The Astral R** (found 2026-11-05, fixed the same day). Its highest spring mode is
+ω·h = 1.77 (the BX's 1.75, the supercar's 1.72: inside the explicit step's limit of 2),
+and its stiff rear control arms (12–15 MN/m, 1.2–1.5 kN·s/m) carry `dampCutoffHz` 500.
+The first §6 law, a bilinear low-pass, anti-damps every mode above ω·h = √2 at that
+cut-off (§6's analysis), so the arms' mode grew from rest. With §6's RC law, and
+§10.1 for its rear bumper's centre node lying on a diffuser triangle, it rests and
+crashes (wrc17_tarmac_balanced.pc, CPU):
+
+| at rest, 4 s | 56 km/h wall, 1.5 s |
+|---|---|
+| 0 broken, 0 bent, KE 15 J (12 J at 10 s; tread nodes of its pressure wheels at ≤ 4 m/s), centre of mass 3.3 cm from 1 s to 4 s | 213 broken, 267 bent, 3 of 14 deform groups, 32 of 362 triangles dead; KE 252 kJ → 24.7 kJ, no NaN |
+
+Its JBeam has no meshes (the author's repository leaves the `.dae` files out), so it
+does not count for B3's "with flexbodies".
+
+**On the GPU** (`engine-webgpu/tests/explicit_jbeam_community_gpu.rs`, opt-in
+`RUBBLE_BEAMNG_MODS`, `RUBBLE_JBEAM_DIR`; RC damping law and §28's ground push;
+M3 Max, 2026-11-05). Rest 4 s, then a rigid wall at 56 km/h for 1.5 s; CPU / GPU:
+
+| vehicle | rest: broken, KE | rest: GPU − CPU positions | wall: broken / bent | wall: KE left (of the impact's) |
+|---|---|---|---|---|
+| Monster supercar | 0 / 0, 34.3 / 34.3 J | 0.00 mm (bit for bit) | 0 / 34, 0 / 34 | 13.8 / 13.8 kJ (237 kJ) |
+| Astral R | 0 / 0, 8.3 / 11.1 J | rms 10 mm, max 19 mm | 251 / 266, 218 / 273 | 22.8 / 19.4 kJ (245 kJ) |
+| AgentY legocar | 0 / 0, 85 / 58 J | rms 64 mm, max 153 mm | 486 / 11, 527 / 11 | 1.9 / 1.5 kJ (172 kJ) |
+
+The supercar has no self-collision nodes and matches bit for bit; the GPU's
+self-collision forces are fixed point (§14), so the other two part ways at rest
+(their parked chatter) and in the crash (chaotic: counts within 25 %, the test's
+rule). The supercar is a stiff space frame: it bends 34 beams, breaks none, and
+rebounds off the wall (its centre of mass rises 0.6 m as it pitches).
+
+**TPU Medium Forklift** (RLS Career Overhaul, AGPL-3.0; self-contained, own
+pressure wheels and `.dae` flexbodies; `FL45D Triplex.pc`, 693 nodes, 7.9 t; CPU,
+2026-11-05). It first diverged in two ways, both §25 layout choices that differed from
+the docs, now fixed (§25): its tyres' reinforcement sets give no Spring, and took
+4.3 MN/m (ω·h = 2.12 on 1.1 kg tread nodes; now their base sets', ω·h = 1.75 for the
+whole vehicle); and its L-beams took the side beam's 1,150 N·s/m instead of
+`wheelReinfBeam`'s 600 (c·h/m = 2.6 on a tread node: a Nyquist-rate divergence in
+8 steps). Now: at rest 4 s KE 3.9 J; but its beacon light's break group (12 beams of
+about 3.3 kN) breaks at 52 ms, as it lands from the 2 cm spawn drop on its 200 psi
+semi-pneumatic tyres (open: not checked against BeamNG). Into the wall at 56 km/h
+it breaks nothing more and bends 5 beams: its forks and mast (85 MN/m between 50 kg
+nodes) are nearly elastic, so it pitches up over its front axle (centre of mass
++1.65 m at 0.5 s) and rebounds at about 7 m/s. Energy ledger (KE + m·g·Δy of the
+centre of mass): 965 kJ at impact, 420 kJ at 0.5 s, 374 kJ at 1.0 s, 367 kJ at
+1.5 s: falling monotonically, so no energy appears; the rebound is the content's
+stiffness, with no plastic forks. Whether that is plausible for a forklift is
+open.
 
 ## 30. GPU layout of Part II and verification
 

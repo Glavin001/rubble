@@ -22,9 +22,11 @@ fn report(tag: &str, s: &ExplicitBeams, ke0: f32) {
     let (broken, bent) = s.damage();
     let deform = s.deform_triggered().iter().filter(|&&d| d != 0).count();
     let dead = s.tri_dead.iter().filter(|&&d| d).count();
+    let mass: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let com = s.nodes.iter().map(|n| n.pos * n.mass).sum::<Vec3>() / mass;
     println!(
         "{tag}: broken {broken} bent {bent} KE {ke:.1} J (spawn {ke0:.1}) max node speed {vmax:.2} m/s \
-         NaN {nan} deform groups {deform}/{} dead triangles {dead}/{}",
+         NaN {nan} deform groups {deform}/{} dead triangles {dead}/{} centre of mass {com:.4}",
         s.deform_state.len(),
         s.tri_dead.len()
     );
@@ -81,6 +83,18 @@ fn main() {
             }
         }
     }
+    if let Some(mu) = opt("wheelfric=") {
+        let n0 = desc.nodes.len();
+        for n in &mut s.nodes[n0..] {
+            n.friction = mu.parse().unwrap();
+        }
+    }
+    if let Some(list) = opt("nocand=") {
+        for w in list.split(',') {
+            let i = desc.nodes.iter().position(|n| n.name == w).unwrap() as u32;
+            s.candidates.retain(|&c| c != i);
+        }
+    }
     if opt("noself=").is_some() {
         s.candidates.clear();
     }
@@ -98,6 +112,83 @@ fn main() {
         mass,
         desc.pressure_wheels.len()
     );
+    if opt("spawnpairs=").is_some() {
+        // Self-collision node-triangle pairs inside the contact range at spawn.
+        let name = |i: u32| desc.nodes.get(i as usize).map_or("wheel".to_string(), |n| n.name.clone());
+        for (t, tri) in s.triangles.iter().enumerate() {
+            let g = s.triangle_self_group(t);
+            let [i0, i1, i2] = tri.nodes;
+            let (p0, p1, p2) = (s.nodes[i0 as usize].pos, s.nodes[i1 as usize].pos, s.nodes[i2 as usize].pos);
+            let (e1, e2) = (p1 - p0, p2 - p0);
+            let n = e1.cross(e2).normalize_or_zero();
+            for &c in &s.candidates {
+                if c == i0 || c == i1 || c == i2 || (g != 0 && s.self_groups[c as usize] == g) {
+                    continue;
+                }
+                let q = s.nodes[c as usize].pos - p0;
+                let delta = n.dot(q);
+                if delta.abs() > s.collision_range {
+                    continue;
+                }
+                // Barycentric coordinates of the projection.
+                let qp = q - n * delta;
+                let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+                let (q1, q2) = (qp.dot(e1), qp.dot(e2));
+                let det = d11 * d22 - d12 * d12;
+                let a = (d22 * q1 - d12 * q2) / det;
+                let b = (d11 * q2 - d12 * q1) / det;
+                if a >= 0.0 && b >= 0.0 && a + b <= 1.0 {
+                    println!(
+                        "pair: node {} triangle {} {} {} delta {:.4} m",
+                        name(c), name(i0), name(i1), name(i2), delta
+                    );
+                }
+            }
+        }
+        return;
+    }
+    if let Some(w) = opt("watch=") {
+        // Follow one node: position and velocity every 5 steps for 0.4 s.
+        let i = match w.strip_prefix('#') {
+            Some(k) => k.parse().unwrap(),
+            None => desc.nodes.iter().position(|n| n.name == w).unwrap(),
+        };
+        let every: usize = opt("every=").map_or(5, |e| e.parse().unwrap());
+        let from: usize = opt("from=").map_or(0, |e| e.parse().unwrap());
+        for step in 0..from + 800 {
+            s.step();
+            if step >= from && step % every == 0 {
+                let n = s.nodes[i];
+                println!("step {step}: {w} pos {:.4?} vel {:.3?} force {:.1?} contacts {}", n.pos, n.vel, n.force, s.last_contacts);
+            }
+        }
+        return;
+    }
+    if opt("breakwatch=").is_some() {
+        // The first step in which a beam breaks: its records just before.
+        for step in 0..4000 {
+            let before = s.beams.clone();
+            s.step();
+            let now: Vec<usize> = (0..s.beams.len()).filter(|&j| s.beams[j].broken && !before[j].broken).collect();
+            if !now.is_empty() {
+                println!("step {step}: {} beams break", now.len());
+                for (j, b) in s.beams.iter().enumerate().filter(|(_, b)| b.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamPressureGroup) {
+                    let e = s.beam_ext[s.ext_of[j] as usize - 1];
+                    println!("  pressure group {j}: V0 {} p_abs0 {} ceiling {} gauge now {:?}", e.e1[2], e.e1[3], e.e2[0], e.pressure);
+                    let _ = b;
+                }
+                for &j in now.iter().take(6) {
+                    let b = before[j];
+                    let (pa, pb) = (s.nodes[b.a as usize].pos, s.nodes[b.b as usize].pos);
+                    println!("  beam {j} {:?} before {:?} len now {:.4} ext {:?}", b.kind, b, pa.distance(pb),
+                        s.ext_of.get(j).filter(|&&x| x != 0).map(|&x| s.beam_ext[x as usize - 1]));
+                }
+                return;
+            }
+        }
+        println!("no break in 2 s");
+        return;
+    }
     if opt("modes=").is_some() {
         // The highest beam-spring mode ω_max·h (power iteration on M⁻¹K, springs only):
         // explicit integration diverges past 2.
@@ -122,6 +213,11 @@ fn main() {
         }
         let (imax, _) = x.iter().enumerate().max_by(|a, b| a.1.length().total_cmp(&b.1.length())).unwrap();
         println!("omega_max*h = {:.3} (node {} {})", lam.sqrt() * 0.0005, imax, desc.nodes.get(imax).map_or("wheel", |n| n.name.as_str()));
+        println!("  node {imax} mass {}", s.nodes[imax].mass);
+        for b in s.beams.iter().filter(|b| !b.broken && (b.a as usize == imax || b.b as usize == imax)) {
+            let o = if b.a as usize == imax { b.b } else { b.a } as usize;
+            println!("  {:?} k {} c {} to node {o} m {} len {:.3}", b.kind, b.k, b.c, s.nodes[o].mass, s.nodes[imax].pos.distance(s.nodes[o].pos));
+        }
         return;
     }
     if opt("trace=").is_some() {
@@ -186,11 +282,43 @@ fn main() {
         return;
     }
     let t0 = std::time::Instant::now();
+    report("rest 0 s", &s, 0.0);
     for k in 1..=(rest.ceil() as usize) {
+        if opt("restwatch=").is_some() {
+            for q in 0..10 {
+                s.run(0.1);
+                let (i, n) = s
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.vel.length().total_cmp(&b.1.vel.length()))
+                    .unwrap();
+                let lat: f32 = s.nodes[desc.nodes.len()..].iter().map(|n| n.vel.x * n.mass).sum::<f32>()
+                    / s.nodes[desc.nodes.len()..].iter().map(|n| n.mass).sum::<f32>();
+                println!(
+                    "  {:.1} s fastest node {} {} m {} v {:.2?} pos {:.3?}; wheel nodes' mean x velocity {:.4}",
+                    (k - 1) as f32 + 0.1 * (q + 1) as f32,
+                    i,
+                    desc.nodes.get(i).map_or("wheel", |n| n.name.as_str()),
+                    n.mass,
+                    n.vel,
+                    n.pos,
+                    lat
+                );
+            }
+            report(&format!("rest {k} s"), &s, 0.0);
+            continue;
+        }
         s.run(1.0);
         report(&format!("rest {k} s"), &s, 0.0);
     }
     println!("rest: {:.1} s wall", t0.elapsed().as_secs_f32());
+    if opt("brokenlist=").is_some() {
+        let name = |i: u32| desc.nodes.get(i as usize).map_or("wheel".to_string(), |n| n.name.clone());
+        for b in s.beams.iter().filter(|b| b.broken) {
+            println!("  broken {:?} {}-{} k {} strength {} group {}", b.kind, name(b.a), name(b.b), b.k, b.strength, b.group);
+        }
+    }
     let v = Vec3::new(0.0, 0.0, kmh / 3.6);
     let (mut s, _) = spawn(v);
     let front = s
@@ -210,6 +338,22 @@ fn main() {
     let steps = (crash / 0.1).ceil() as usize;
     for k in 1..=steps {
         s.run(0.1);
+        if opt("crashwatch=").is_some() {
+            let (i, n) = s
+                .nodes
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.vel.length().total_cmp(&b.1.vel.length()))
+                .unwrap();
+            println!(
+                "  {:.1} s fastest node {} {} m {} v {:.2} m/s",
+                0.1 * k as f32,
+                i,
+                desc.nodes.get(i).map_or("wheel", |n| n.name.as_str()),
+                n.mass,
+                n.vel.length()
+            );
+        }
         if k % 5 == 0 || k == steps {
             report(&format!("crash {:.1} s", 0.1 * k as f32), &s, ke0);
         }

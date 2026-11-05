@@ -392,10 +392,19 @@ float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, f
 }
 
 // A pressure-wheel node's ground contact (NODE_FRICTION_LIMIT, spec §28): the
-// tangential part at most stops the slip in one step (explicit_jbeam_ext.rs
-// friction_limit).
-float3 frictionLimit(float3 c, float3 f, float3 v, float m, float3 n)
+// node rises at most half its depth p in one step, and the tangential part at
+// most stops the slip in one step
+// (explicit_jbeam_ext.rs friction_limit).
+float3 frictionLimit(float3 c, float3 f, float3 v, float m, float3 n, float p)
 {
+    float cn = sdot(c, n);
+    float out = nf(sdot(v, n) + smul(nf(sdot(f, n) + cn), sdiv(STEP, m)));
+    float most = sdiv(smul(0.5, p), STEP);
+    if (cn > 0.0 && out > most)
+    {
+        float capped = max(nf(smul(nf(most - sdot(v, n)), sdiv(m, STEP)) - sdot(f, n)), 0.0);
+        c = sadd3(c, sscale(n, nf(capped - cn)));
+    }
     float3 total = sadd3(f, c);
     float3 t = ssub3(total, sscale(n, sdot(total, n)));
     float3 vt = ssub3(v, sscale(n, sdot(v, n)));
@@ -599,7 +608,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
         if (ground > x.y)
         {
             float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
-            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             f += c;
         }
         for (uint b = 0u; b < boxCount; b++)
@@ -694,7 +703,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
         if (ground > x.y)
         {
             float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
-            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             f += c;
         }
         for (uint b = 0u; b < boxCount; b++)
@@ -874,7 +883,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
         if (ground > x.y)
         {
             float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
-            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             f += c;
         }
         for (uint b = 0u; b < boxCount; b++)
@@ -1166,10 +1175,10 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     float u = smul(sdot(ssub3(va, vb), d), inv);
     if (r2.w != 0u)
     {
-        // dampCutoffHz: the bilinear low-pass of the rate.
+        // dampCutoffHz: the RC low-pass of the rate (spec §6).
         uint fi = r2.w - 1u;
         float4 flt = gBeams[fi];
-        float y = nf(smul(flt.z, nf(u + flt.x)) - smul(flt.w, flt.y));
+        float y = nf(smul(flt.z, u) - smul(flt.w, flt.y));
         gBeams[fi] = float4(u, y, flt.z, flt.w);
         u = y;
     }
@@ -1408,7 +1417,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     {
         uint fi = r2.w - 1u;
         float4 flt = gBeams[fi];
-        float y = nf(smul(flt.z, nf(u + flt.x)) - smul(flt.w, flt.y));
+        float y = nf(smul(flt.z, u) - smul(flt.w, flt.y));
         gBeams[fi] = float4(u, y, flt.z, flt.w);
         u = y;
     }
@@ -2879,7 +2888,7 @@ void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float grou
         if (ground > x.y)
         {
             float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
-            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             f += c;
         }
         for (uint b = 0u; b < boxCount; b++)
@@ -2938,7 +2947,7 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
         if (ground > x.y)
         {
             float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
-            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             f += c;
         }
         for (uint b = 0u; b < boxCount; b++)

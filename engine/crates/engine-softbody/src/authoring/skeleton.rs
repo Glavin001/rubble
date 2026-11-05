@@ -47,6 +47,9 @@ pub enum BeamType {
     Normal,
     /// Compression only; breaks past `factor` × its rest length of stretch.
     Support(f32),
+    /// Tension only (a rope): hardware that holds a part on (a hinge, latch
+    /// or bolt) but does not carry its push (the part bears on supports).
+    Rope,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +73,9 @@ pub struct SkNode {
     /// A pole catcher between a member's stations (frame tier, but never a
     /// joint: braces, mounts and ties pick stations).
     pub catcher: bool,
+    /// Its mass is its part's own (a panel's sheet mass, set as `fixed`):
+    /// no share of the structure's.
+    pub sheet: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,12 +180,18 @@ impl Skeleton {
             ground: true,
             primary: false,
             catcher: false,
+            sheet: false,
         });
         (self.nodes.len() - 1) as u32
     }
 
     pub fn pos(&self, i: u32) -> Vec3 {
         self.nodes[i as usize].p
+    }
+
+    /// The index of the beam between `a` and `b`, if any.
+    pub fn beam_index(&self, a: u32, b: u32) -> Option<usize> {
+        self.index.get(&(a.min(b), a.max(b))).copied()
     }
 
     pub fn has_beam(&self, a: u32, b: u32) -> bool {
@@ -271,6 +283,53 @@ impl Skeleton {
         if self.beam(a, b, mat) {
             self.beams.last_mut().unwrap().fixed = true;
         }
+    }
+
+    /// Append `other` (another vehicle) with its nodes moved by `at`: one
+    /// skeleton of both, so the solver runs them together and their
+    /// contacters meet each other's collision triangles. Its parts are
+    /// renamed `<prefix><part>`.
+    pub fn append(&mut self, other: &Skeleton, prefix: &str, at: &dyn Fn(Vec3) -> Vec3) {
+        let base = self.nodes.len() as u32;
+        let part_of: Vec<u16> = other
+            .parts
+            .iter()
+            .map(|p| self.part(&format!("{prefix}{p}")))
+            .collect();
+        for n in &other.nodes {
+            let mut m = n.clone();
+            m.p = at(n.p);
+            m.part = part_of[n.part as usize];
+            self.nodes.push(m);
+        }
+        for b in &other.beams {
+            let mut c = *b;
+            c.a += base;
+            c.b += base;
+            // (Its detacher groups numbered past ours.)
+            if c.group != 0 {
+                c.group += 10_000;
+            }
+            self.index
+                .insert((c.a.min(c.b), c.a.max(c.b)), self.beams.len());
+            self.beams.push(c);
+        }
+        let shift = |mut x: SkShock| {
+            x.a += base;
+            x.b += base;
+            x
+        };
+        self.shocks.extend(other.shocks.iter().copied().map(shift));
+        self.straps.extend(other.straps.iter().copied().map(shift));
+        for w in &other.wheels {
+            let mut v = *w;
+            v.a1 += base;
+            v.a2 += base;
+            self.wheels.push(v);
+        }
+        let tri = |t: &[u32; 3]| [t[0] + base, t[1] + base, t[2] + base];
+        self.skin.extend(other.skin.iter().map(tri));
+        self.collision.extend(other.collision.iter().map(tri));
     }
 
     /// Remove the beam between `a` and `b` (if any).
@@ -577,6 +636,9 @@ impl Skeleton {
             let l = self.pos(b.a).distance(self.pos(b.b));
             let w = 0.5 * l * b.mat.density;
             for i in [b.a, b.b] {
+                if self.nodes[i as usize].sheet {
+                    continue;
+                }
                 let f = if self.nodes[i as usize].primary {
                     PRIMARY_WEIGHT
                 } else {
@@ -709,6 +771,7 @@ impl Skeleton {
             p: f32,
             group: u32,
             support: Option<f32>,
+            rope: bool,
             a: u32,
             b: u32,
         }
@@ -737,8 +800,9 @@ impl Skeleton {
                     group: b.group,
                     support: match b.ty {
                         BeamType::Support(f) => Some(f),
-                        BeamType::Normal => None,
+                        _ => None,
                     },
+                    rope: b.ty == BeamType::Rope,
                     a: b.a,
                     b: b.b,
                 }
@@ -778,6 +842,9 @@ impl Skeleton {
             match l.support {
                 Some(f) => {
                     let _ = writeln!(s, "{}, {}, is, {f}", l.a, l.b);
+                }
+                None if l.rope => {
+                    let _ = writeln!(s, "{}, {}, ir", l.a, l.b);
                 }
                 None => {
                     let _ = writeln!(s, "{}, {}, i", l.a, l.b);

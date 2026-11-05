@@ -17,6 +17,9 @@ use crate::explicit_beams::{
 use glam::Vec3;
 use std::collections::HashMap;
 
+/// How near a collision triangle's plane a self-collision node lies "on" it at
+/// spawn (spec §10.1): 1 mm, the precision JBeam positions are written to.
+pub const SURFACE_TOLERANCE: f32 = 0.001;
 /// Ambient pressure (Pa): PRESSURED beams and pressure groups take gauge pressures
 /// over it (spec §21, §26).
 pub const ATMOSPHERE: f32 = 101_325.0;
@@ -298,10 +301,23 @@ pub fn pressure_tri_force(x0: Vec3, x1: Vec3, x2: Vec3, p: f32) -> Vec3 {
 }
 
 /// A ground contact force `c` on a node (force `f` before it, velocity `v`, mass
-/// `m`, normal `n`) with its tangential part limited so it at most stops the
-/// node's slip in one step `h` (spec §28): an explicit friction force on a light,
-/// heavily loaded node otherwise reverses the slip every step and grows.
-pub fn friction_limit(c: Vec3, f: Vec3, v: Vec3, m: f32, n: Vec3, h: f32) -> Vec3 {
+/// `m`, normal `n`, depth `p`) with its normal part limited so the node rises at
+/// most half its depth in one step `h`, and its tangential part so it at most
+/// stops the node's slip in one step (spec §28): on a light, heavily loaded node
+/// the explicit laws otherwise overshoot every step.
+pub fn friction_limit(c: Vec3, f: Vec3, v: Vec3, m: f32, n: Vec3, h: f32, p: f32) -> Vec3 {
+    // The node leaves at most half its depth `p` in one step: the solver's pop-out
+    // (0.2 of the depth per step, as a velocity the node keeps) otherwise throws a
+    // heavily loaded light node clear of the ground, and its load drives it back
+    // in at metres per second the next step. Half keeps it in contact.
+    let mut c = c;
+    let cn = c.dot(n);
+    let out = v.dot(n) + (f.dot(n) + cn) * (h / m);
+    let most = 0.5 * p / h;
+    if cn > 0.0 && out > most {
+        let capped = ((most - v.dot(n)) * (m / h) - f.dot(n)).max(0.0);
+        c += n * (capped - cn);
+    }
     let total = f + c;
     let t = total - total.dot(n) * n;
     let vt = v - v.dot(n) * n;
@@ -632,8 +648,18 @@ impl ExplicitBeams {
         self.beams.push(group);
         let first = self.beams.len() as u32;
         let cpos = self.nodes[c as usize].pos;
+        // Outward winding whatever order the surface came in (a wheel's follows its
+        // axle nodes' order): a surface enclosing negative volume is turned over.
+        let signed: f32 = tris
+            .iter()
+            .map(|t| {
+                let x = t.map(|n| self.nodes[n as usize].pos - cpos);
+                x[0].dot(x[1].cross(x[2]))
+            })
+            .sum();
         let mut v0 = 0.0f32;
         for t in tris {
+            let t = if signed < 0.0 { &[t[0], t[2], t[1]] } else { t };
             let x = t.map(|n| self.nodes[n as usize].pos - cpos);
             v0 += x[0].dot(x[1].cross(x[2]));
             let mut r1 = Beam::new(
@@ -737,6 +763,68 @@ impl ExplicitBeams {
         if any {
             self.tri_dead = vec![false; lists.len()];
             self.tri_breaks = lists;
+        }
+    }
+
+    /// Self-collision nodes lying on a collision triangle at spawn (spec §10.1):
+    /// inside it and within [`SURFACE_TOLERANCE`] of its plane. Such a node has
+    /// no side to be pushed out to; the triangle takes the node's self-collision
+    /// group (when the triangle has none), so the node skips it.
+    pub(crate) fn surface_nodes(&mut self, warnings: &mut Vec<String>) {
+        let mut groups = vec![0u32; self.triangles.len()];
+        let (mut taken, mut left) = (0, 0);
+        for t in 0..self.triangles.len() {
+            if self.triangle_self_group(t) != 0 {
+                continue;
+            }
+            let [i0, i1, i2] = self.triangles[t].nodes;
+            let p0 = self.nodes[i0 as usize].pos;
+            let (e1, e2) = (
+                self.nodes[i1 as usize].pos - p0,
+                self.nodes[i2 as usize].pos - p0,
+            );
+            let n = e1.cross(e2).normalize_or_zero();
+            let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+            let det = d11 * d22 - d12 * d12;
+            if n == Vec3::ZERO || det <= 0.0 {
+                continue;
+            }
+            for &c in &self.candidates {
+                if c == i0 || c == i1 || c == i2 {
+                    continue;
+                }
+                let q = self.nodes[c as usize].pos - p0;
+                let delta = n.dot(q);
+                if delta.abs() > SURFACE_TOLERANCE {
+                    continue;
+                }
+                let (q1, q2) = (q.dot(e1), q.dot(e2));
+                let a = (d22 * q1 - d12 * q2) / det;
+                let b = (d11 * q2 - d12 * q1) / det;
+                if a < 0.0 || b < 0.0 || a + b > 1.0 {
+                    continue;
+                }
+                let g = self.self_groups[c as usize];
+                if g != 0 && (groups[t] == 0 || groups[t] == g) {
+                    groups[t] = g;
+                    taken += 1;
+                } else {
+                    left += 1;
+                }
+            }
+        }
+        if taken > 0 {
+            self.tri_groups = groups;
+            warnings.push(format!(
+                "{taken} self-collision nodes lie on a collision triangle at spawn: \
+                 those triangles take the node's group (spec §10.1)"
+            ));
+        }
+        if left > 0 {
+            warnings.push(format!(
+                "{left} self-collision nodes lie on a collision triangle at spawn \
+                 with no group to give it: they still collide with it"
+            ));
         }
     }
 
@@ -867,10 +955,22 @@ impl ExplicitBeams {
             } else {
                 (4_300_000.0, 580.0)
             };
+            // A reinforcement set the file gives no Spring or Damp takes its base
+            // set's (spec §25), as the L-beams take the side beam's.
+            let base = match name {
+                "wheelTreadReinfBeam" => Some("wheelTreadBeam"),
+                "wheelPeripheryReinfBeam" => Some("wheelPeripheryBeam"),
+                "wheelSideReinfBeam" | "wheelReinfBeam" => Some("wheelSideBeam"),
+                _ => None,
+            };
             let g = |k: &str, d: f32| {
                 let d = match k {
                     "Spring" => dk,
                     "Damp" => dc,
+                    _ => d,
+                };
+                let d = match (base, k) {
+                    (Some(b), "Spring" | "Damp") => v(&format!("{b}{k}"), d),
                     _ => d,
                 };
                 v(&format!("{name}{k}"), d)
@@ -985,14 +1085,20 @@ impl ExplicitBeams {
             }
         }
         if lbeams {
+            // [WH]: "the wheelReinfBeam setting covers these diagonal beams or
+            // L-beams"; a file without it falls back to its side beams' values.
             let g = |k: &str, d: f32| {
                 v(
                     &format!("wheelLbeam{k}"),
-                    v(&format!("wheelSideBeam{k}"), d),
+                    v(
+                        &format!("wheelReinfBeam{k}"),
+                        v(&format!("wheelSideBeam{k}"), d),
+                    ),
                 )
             };
             let (k, c) = (g("Spring", 4_300_000.0), g("Damp", 580.0));
             let (deform, strength) = (g("Deform", f32::INFINITY), g("Strength", f32::INFINITY));
+            let cutoff = g("DampCutoffHz", 0.0).max(0.0);
             for s in 0..2 {
                 for i in 0..n {
                     let t = tire[s][i];
@@ -1004,7 +1110,7 @@ impl ExplicitBeams {
                         c,
                         deform,
                         strength,
-                        0.0,
+                        cutoff,
                         1.0,
                     );
                     self.push_lbeam(
@@ -1015,7 +1121,7 @@ impl ExplicitBeams {
                         c,
                         deform,
                         strength,
-                        0.0,
+                        cutoff,
                         1.0,
                     );
                     self.push_lbeam(
@@ -1026,7 +1132,7 @@ impl ExplicitBeams {
                         c,
                         deform,
                         strength,
-                        0.0,
+                        cutoff,
                         1.0,
                     );
                 }

@@ -789,6 +789,9 @@ pub struct ExplicitBeams {
     /// §8): per node its group (0 = none); a node skips the collision triangles
     /// whose three nodes are all in its group. Empty: no exclusion.
     pub self_groups: Vec<u32>,
+    /// JBeam mode: per collision triangle the self-collision group a node lying on
+    /// it at spawn gave it (0 = its nodes' own, spec §10.1). Empty: none.
+    pub tri_groups: Vec<u32>,
     /// JBeam mode's damping filters (`dampCutoffHz`), by [`Beam::shock`] − 1.
     pub damp_filters: Vec<DampFilter>,
     /// JBeam torsion elements' watched break groups (0 = none), by [`Beam::shock`]
@@ -829,8 +832,10 @@ pub enum JbeamWheels {
 }
 
 /// A JBeam beam's damping low-pass (`dampCutoffHz`, spec §6): the damping uses
-/// y = a·(u + u₋₁) − b·y₋₁ of the extension rate u, the bilinear-transform
-/// first-order low-pass at the cutoff (no gain at the step's Nyquist rate).
+/// y = a·u − b·y₋₁ of the extension rate u, the discrete RC low-pass at the cutoff
+/// (a = 1 − exp(−2π·f_c·h), b = a − 1). Its phase lag stays small up to the step's
+/// Nyquist rate, so it never turns damping into anti-damping on a fast mode (a
+/// filter with no gain at the Nyquist rate does, past ω·h = √2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DampFilter {
     pub a: f32,
@@ -840,19 +845,13 @@ pub struct DampFilter {
     pub y: f32,
 }
 
-/// Highest cutoff a damping filter takes, as a fraction of the step rate: the
-/// bilinear filter's pole reaches the unit circle at the Nyquist rate (0.5).
-pub const DAMP_CUTOFF_MAX: f32 = 0.45;
-
 impl DampFilter {
-    /// The filter for a cutoff of `hz` at the fixed step (at most
-    /// [`DAMP_CUTOFF_MAX`] of the step rate).
+    /// The filter for a cutoff of `hz` at the fixed step.
     pub fn new(hz: f32) -> Self {
-        let fc = (hz * STEP).min(DAMP_CUTOFF_MAX);
-        let k = (std::f32::consts::PI * fc).tan();
+        let a = 1.0 - (-2.0 * std::f32::consts::PI * hz * STEP).exp();
         Self {
-            a: k / (1.0 + k),
-            b: (k - 1.0) / (k + 1.0),
+            a,
+            b: a - 1.0,
             u: 0.0,
             y: 0.0,
         }
@@ -860,7 +859,7 @@ impl DampFilter {
 
     /// Filter this step's rate.
     pub fn step(&mut self, u: f32) -> f32 {
-        let y = self.a * (u + self.u) - self.b * self.y;
+        let y = self.a * u - self.b * self.y;
         self.u = u;
         self.y = y;
         y
@@ -1018,6 +1017,7 @@ impl ExplicitBeams {
             neighbours: Vec::new(),
             contact_throttle: Vec::new(),
             self_groups: Vec::new(),
+            tri_groups: Vec::new(),
             damp_filters: Vec::new(),
             torsion_watch: Vec::new(),
             groups_last: Vec::new(),
@@ -1872,6 +1872,7 @@ impl ExplicitBeams {
             s.self_groups = (0..s.nodes.len())
                 .map(|i| desc.nodes.get(i).map_or(0, |n| n.self_group))
                 .collect();
+            s.surface_nodes(&mut warnings);
         }
         Ok((s, warnings))
     }
@@ -2119,6 +2120,9 @@ impl ExplicitBeams {
         if self.self_groups.is_empty() {
             return 0;
         }
+        if let Some(&g) = self.tri_groups.get(t).filter(|&&g| g != 0) {
+            return g;
+        }
         let [a, b, c] = self.triangles[t]
             .nodes
             .map(|n| self.self_groups[n as usize]);
@@ -2239,7 +2243,9 @@ impl ExplicitBeams {
                         n.friction,
                     );
                     n.force += if n.has(NODE_FRICTION_LIMIT) {
-                        crate::explicit_jbeam_ext::friction_limit(c, n.force, n.vel, n.mass, Vec3::Y, h)
+                        crate::explicit_jbeam_ext::friction_limit(
+                            c, n.force, n.vel, n.mass, Vec3::Y, h, ground - x.y,
+                        )
                     } else {
                         c
                     };
