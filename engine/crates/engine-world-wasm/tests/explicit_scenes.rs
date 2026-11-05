@@ -343,7 +343,9 @@ fn mdb_into_the_sedan_conserves_energy_and_crushes_in_the_fmvss_214_spread() {
 #[ignore = "open: the showcase car's residual side crush is 364 mm (spread 98-219 mm)"]
 fn mdb_into_the_showcase_car_conserves_energy_and_crushes_in_the_fmvss_214_spread() {
     use engine_softbody::authoring::{build, style, BuildParams, Resolution};
-    let truck = build(&style("sedan").unwrap(), &BuildParams { resolution: Resolution::parse("medium").unwrap(), strength: 1.0, paint: None })
+    // (SHOWCASE_STYLE picks the car, `sedan` by default.)
+    let st = std::env::var("SHOWCASE_STYLE").unwrap_or_else(|_| "sedan".into());
+    let truck = build(&style(&st).unwrap(), &BuildParams { resolution: Resolution::parse("medium").unwrap(), strength: 1.0, paint: None })
         .unwrap()
         .truck;
     mdb_side_impact("showcase", truck);

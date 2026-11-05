@@ -199,15 +199,19 @@ pub struct Spacing {
 
 impl Spacing {
     /// The one-tier shell (BeamNG's density, the BX's 0.19–0.25 m): every
-    /// spacing at most [`super::vehicle::POLE_LANE`], so a 254 mm pole
-    /// always meets a node of the shell.
+    /// spacing a pole can meet (along the car, the sides and the ends) at
+    /// most [`super::vehicle::POLE_LANE`], so a 254 mm pole always meets a
+    /// node of the shell. The roof and the floor, which no pole meets,
+    /// keep the resolution's coarser spacing across the car (Medium 0.30
+    /// and 0.35 m): fewer, heavier nodes (the BX body's median node is
+    /// 1.7 kg).
     pub fn pole_lanes(self) -> Self {
         let p = super::vehicle::POLE_LANE;
         Self {
             ring: self.ring.min(p),
             side: self.side.min(p),
-            top: self.top.min(p),
-            floor: self.floor.min(p),
+            top: self.top,
+            floor: self.floor,
             cap: self.cap.min(p),
         }
     }

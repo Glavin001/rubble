@@ -812,6 +812,287 @@ elastic energy, about 50 ms):
 The crush zone is not where the spring is. The passenger cell and the door
 ring hold up to 52 kJ elastically and give it back.
 
+### Real crush, damping and heavier nodes (2026-11-05, later)
+
+The user's decision on the rebound above: real crush mechanics, BeamNG's
+damping, and fewer, heavier nodes, with strengths kept real. All Medium,
+8-run ensembles where a reference has one.
+
+**Damping (measured, not tuned).** `examples/jbeam_damping.rs` measures each
+beam's damping ratio on its own two-mass mode,
+ζ = beamDamp / (2√(beamSpring·m₁m₂/(m₁+m₂))), on the BX's default
+configuration:
+
+| Part (BX) | ζ median (p10–p90) | sedan1 before |
+|---|---|---|
+| body (`bx_body`) | 0.0275 (0.018–0.052) | 0.069 |
+| front rails (body, `f*` frame nodes) | 0.0177 (0.015–0.018) | |
+| bumper bar | 0.0158 | |
+| doors | 0.0334 (0.025–0.040) | 0.081–0.091 |
+| bonnet | 0.0593 (0.045–0.080) | 0.112 |
+| boot lid (tailgate) | 0.0567 (0.038–0.065) | 0.125 |
+| fenders | 0.0422 (0.039–0.053) | 0.084 |
+| bumpers (fascias) | 0.089 | 0.125–0.138 |
+| windscreen | 0.0200 (0.017–0.026) | |
+| door glass | 0.0545 (0.046–0.057) | |
+
+- `DampingRatios` sets every part beam (not the fixed mounts or the
+  suspension) to its part's median, c = 2ζ√(k·μ) at its target k, before
+  `cap_to_bound` (which keeps ζ).
+- The body's dashpots take the BX's damping-only beams' rate: 12 beams of
+  500 N·s/m over 328.9 kg, 18.2 /s per kilogram of the node each is from.
+- **The damping bound.** sedan1's worst h·Σc/m was 1.29, past `C_RATIO`'s
+  0.75, at a light node that 16 nodes' dashpots chose as their partner. With
+  a fan-in of 2 and the BX ratios it is 0.65. The one-tier test asserts it.
+
+**Crush members.**
+- A Rubble `.truck` extension, `rubble_jbeam_plastic`
+  (`jbeam-semantics-spec.md` §18.3), gives beams JBeam's deformLimitStress
+  and deformLimit. The loader makes them JBeam NORMAL beams, which the CPU
+  and GPU dispatch per beam.
+- `CrushSpec` (`one_tier_crush`): every bay's cut (the member's beams
+  crossing the plane between two stations, Σ yield × |cos|) yields at
+  Abramowicz and Jones's mean progressive crush force,
+  P_m = 13.06·σ₀·t^(5/3)·C^(1/3).
+  - `rail_f`: 80 × 120 × 1.6 mm DP600, 61.7 kN (the section is a Choice).
+  - `rail_r_tail`: 100 × 130 × 1.6 mm, 64.6 kN.
+  - No hardening: deformLimitStress = the yield. Stroke: deformLimit 0.73
+    (the effective crushing distance).
+  - The bumper beams keep their bending yields and fold without hardening.
+- The front bumper beam is the Accord's: roll-formed steel, 590 MPa tensile,
+  assembly 7.96 kg (NHTSA DOT HS 811 666 §5.10.7.1), as a 60 × 100 × 1.6 mm
+  box (a Choice). Its yields come from its M_p. It shares `rail_f`'s
+  end-station nodes.
+
+**Sheet buckling.** A thin bay in compression buckles long before it
+yields. A sheet edge's yield is its bay's ultimate stress
+(`sheet_ultimate_stress`):
+- σ_cr = 4π²E/(12(1 − ν²))·(t/b)² (k = 4, a Choice), then Winter's
+  effective width, σ_u = σ_y·√(σ_cr/σ_y)·(1 − 0.22√(σ_cr/σ_y)), with b the
+  edge's length;
+- 0.8 mm on 0.2 m bays: 48 MPa against σ_y 210;
+- in compression only. Our body skin beams now yield at about 7 kN in
+  compression; the BX's median (one beamDeform both ways) is 8 kN.
+- **In tension (2026-11-05, later)** a sheet does not buckle: it carries a
+  tension field at its own yield, (√3/4)·σ_y·t·L (about 14.5 kN on a
+  0.2 m edge of 0.8 mm). JBeam's documentation has no expansion-side deform
+  force (beamDeform is one value; deformLimitExpansion limits the plastic
+  change, anisotropic and bounded beams split stiffness and damping, not
+  yield), so this is Rubble's `.truck` extension `rubble_tension_yield`
+  (`jbeam-semantics-spec.md` §18.4: the solver's Tt, which it already kept
+  apart from Tc; no kernel change; GPU parity bit for bit in
+  `tension_yield_gpu`). A sheet edge's break force is then its tension yield
+  plus its elongation × its built k·L. `TENSION_YIELD=0` builds the old way
+  (a measurement switch).
+  - Effect, sedan1 Medium, ensembles (before → after): `g` the door's skin
+    no longer tears before its hardware (4 edges did, at 0.4–1.1 kN); the
+    latch lets go at 36.2 kN (was 46.3), the door is off at 51.9 kN (47.0);
+    `n` max crush 644 → 633 mm, peak 31.8 → 32.8 g, b1 22.83 → 22.86,
+    t_m 75.4 → 74.4 ms, e 0.175 → 0.174; MDB 177 → 186 mm (in band);
+    `p` peak 18.9 → 22.5 kN; `q` 6.99 → 8.59×; `o` 270 → 206 mm; `h` the
+    fifth second's ringing peak 11.6 J against the fourth's 10.9 J (fails;
+    it passed); `t` 14 leaked either way.
+  - **Why `o` fell: springback.** The side pole's dynamic crush (deepest
+    exterior node, `O_DYN=1`) is 332–388 mm in both builds, inside the
+    measured residual band (297–445), but about half of it springs back:
+    residual 176–310 mm (was 229–299). A beam that yields keeps an elastic
+    stretch of its yield force over its k (`explicit-beams.md` §2, plastic
+    coefficient 0), and the step's bound puts k at 0.1–4 % of real, so it
+    springs back 25–1,000× as far as steel's σ_y/E. The tension yield doubles
+    the skin's yield force in tension, so its elastic stretch and springback
+    double too (about 14 % strain on a 0.2 m body edge before it yields).
+    The plastic coefficient is not a fix: at p → 1 a yielding beam's rest
+    length follows it and it stops carrying its yield force while it flows.
+
+**Yield strain: BeamNG's against ours (2026-11-05, measured).**
+`examples/jbeam_yield_strain.rs` takes each beam's yield strain
+ε_y = beamDeform / (beamSpring·L) and the springback it implies after a
+plastic strain ε_p, ε_y/(ε_y + ε_p), per part, for the BX's default
+configuration and for sedan1 (`SEDAN1=medium`; tension and compression):
+
+| Part | BX ε_y p50 (p90) | BX k p50, L p50 | sedan1 ε_y p50 (p90) | sedan1 k p50, L p50 |
+|---|---|---|---|---|
+| body (BX: its rails too) | 1.0 % (4.9) | 1.7e6 N/m, 0.56 m | 4.3 % compr., 6.6 % tens. (33) | 6.4e5 N/m, 0.38 m |
+| doors | 1.25 % (4.8) | 1.1e6, 0.58 | 2.8 / 6.4 % (18 / 27) | 6.3e5, 0.31 |
+| bonnet | 5.5 % (24) | 5.2e5, 0.44 | 4.0 / 23.6 % | 2.9e5, 0.36 |
+| boot lid / tailgate | 3.0 % (12) | 5.0e5, 0.43 | 6.8 / 11.3 % | 5.0e5, 0.30 |
+| fenders | 4.6 % (12) | 4.0e5, 0.37 | 2.2 / 14.7 % | 4.7e5, 0.26 |
+| bumpers | 15 % (100) | 1.0e5, 0.34 | 3.2 / 25 % | 1.3e5, 0.26 |
+
+Springback after 20 % plastic strain: BX body 5 %, doors 6 %; sedan1
+body 18–25 %, doors 12–24 %. The BX holds its yield forces (body median
+8 kN) on beams whose axial rigidity k·L is about 4× ours (9.5e5 N against
+2.4e5 N). Its parts have fewer beam ends per node (body 11.0 against
+sedan1's 15.1 with members; doors 4.1 against 11.4; bonnet 5.8 against
+10.7), and longer beams, so the step's bound leaves each beam stiffer.
+
+Measured on the crash references (sedan1 Medium ensembles,
+`BX_YIELD=1`: each part's beams yield no later than the BX's median strain
+for that part at their built k; `BX_YIELD_SHEETS=1` the sheets' edges
+only; both measurement switches):
+
+| | Real forces (now) | BX strain, all parts | BX strain, sheets only | Band |
+|---|---|---|---|---|
+| o dynamic crush | 332–388 mm | 490–521 | 345–404 | |
+| o residual (springback) | 206 (≈ 45 %) | 448 (≈ 10 %) | 252 (≈ 35 %) | 297–445 |
+| n max crush | 633 mm | 964 | 675 | 380–580 |
+| n peak g | 32.8 | 20.1 | 31.8 | 34–47 |
+| n t_m | 74.4 ms | 127 | 75.4 | 63–76 |
+| n b1 | 22.9 | 14.5 | 21.8 | 22.9–39.2 |
+| p peak | 22.5 kN | 8.9 | 20.0 | ≥ 28.4 |
+| q | 8.59× | 3.93× | 7.37× | 4.48–5.32 |
+| h | fails (narrowly) | passes | passes | |
+
+**Decision.** Real forces stay. BeamNG's yield strains at our k·L give the
+right springback (10 %) but a car far too weak in every measured test; on
+the sheets alone they change little, because the members hold most of the
+springback. In the BX the low strains come with 4× the k·L, from its
+topology. So the springback is to be fixed the way the BX gets its strain:
+fewer beam ends per node and longer beams, so that the bound leaves each
+beam stiffer, with the forces kept real.
+
+**q's mechanism.** The roof crush's load, by member (`Q_SPLIT=1`, the
+change in each member's summed |force| from rest to the platen's 127 mm):
+the body's shell beams that are in no member carry 2,025 kN summed with the
+tension yield, against 730 kN without it. The members change little (the
+sills 369 against 293, the B-pillar 214 against 162). The roof, pillar and
+quarter skins work as a tension field (Wagner): in shear the compression
+diagonal buckles, and the tension diagonal now carries σ_y. At about 14 %
+elastic strain before it yields (k at the bound), the field engages over
+the whole 127 mm of platen travel. A real panel's field does the same at
+0.1 % strain, but a real roof sheet is bonded to its bows through mastic
+and does not reach its yield over the rails' span in this test.
+
+**h's regression.** The tension yield doubles the skin's elastic range,
+so the crashed body keeps more ringing energy. The fifth second's peak is
+11.6 J against the fourth's 10.9 J; both are about 10⁻³ of the first
+second's. With the sheets' strain at the BX's it passes (0.87 J).
+
+At z 4.0 the shell carried about 100 kN, more than the rails. It now
+carries 10–50 kN.
+
+**Heavier, fewer nodes.**
+- `Spacing::pole_lanes` keeps every spacing a pole can meet (along the car,
+  the sides, the ends) at most 0.24 m. The roof and floor take the
+  resolution's 0.30 and 0.35 m.
+- `pillar_c` has pole-width stations (A8), so the rear doors' latches meet
+  the pillar's own nodes.
+- Door hardware picks its pillar nodes from members' nodes only.
+- Counts: 940 to 872 nodes. Body skin 350 to 282 nodes, median 1.31 to
+  1.53 kg (BX 145 at 1.7 kg). Bonnet 25 skin nodes (BX 26). Front door 19
+  skin nodes, median 0.88 kg (BX 11 at 1.0). Rear door 16.
+- Skin beam k: body 8.7e5 N/m, doors 4.8–5.4e5 N/m (BX door skin
+  1.1 MN/m on 1 kg nodes).
+- **Side glass as its own part** (`GLASS_PART`) is built and gives 15-node
+  doors at 1.3 kg. sedan1 does not use it (open): with it, the 52 and
+  120 km/h walls' energy rose 2–38 J between tenths of a second. That held
+  with the pane welded in instead of bolted, so the cause is the extra shut
+  line, not the break group.
+
+**Results (sedan1, Medium):**
+
+| Reference | Before (71fb8075) | Now | Band |
+|---|---|---|---|
+| n max residual crush | 356 mm | 643 mm | 380–580 |
+| n dynamic crush | 0.51 m | 0.698 m | 0.62–0.75 |
+| n t_m | 57 ms | 75.4 ms | 63–76 |
+| n restitution | 0.27 | 0.175 | 0.13–0.20 |
+| n peak g | 60 | 31.8 | 34–47 |
+| n b1 | 67 | 22.8 | 22.9–39.2 |
+| n apertures, A-pillar, firewall | p90 18 mm out | all in | |
+| f 120 km/h (b1, ledgers) | fails | passes | |
+| h settle | fails | passes | |
+| o side pole residual | 245 mm (sd 15) | 270 mm (sd 26) | 297–445 |
+| p FMVSS 214 peak | 21.3 kN | 18.9 kN | ≥ 28.4 |
+| q FMVSS 216a | 5.55× | 6.99× | 4.48–5.32 |
+| g latch lets go (door pulled at its centre of mass) | 104 kN | 46.3 kN | 25.7–55.3 (statics × the 14 latches' 13.6–29.2 kN) |
+| t T-bone leak, ensemble mean at 0 / 0.43 / 0.7 m | | 1.40 / 0.84 / 0.71 % | ≤ 1 % |
+| MDB residual | | 177 mm | 126–206 |
+| A8 sweep at 30 km/h | | 0 of 244 | 0 |
+| torsion (BIW) | 7.4 kN·m/deg | 10.3, glazing 2.4 % | 12.3, about 12 % |
+
+Notes on the table:
+- **n crush profile.** NHTSA measures C1–C6 against each point's own
+  position. The swept bumper centre starts 14 cm ahead of its ends and ends
+  on the same flat front, so its extra 14 cm is real crush. That makes the
+  maximum.
+- **n before.** Test `n`'s strips were ±5 cm, and the one-tier bumper
+  beam's nodes are 0.44 m apart, so C3/C4 measured the engine block or the
+  rear bumper. Each strip is now half the points' spacing either side. The
+  "before" column was measured with the old strips.
+- **o scatter.** The side pole's ensemble sd is 26 mm. NHTSA's repeat tests
+  scatter 24 mm (pole) and 14 mm (MDB).
+- **u (A6).** The side pole at the latch line lets the front door's primary
+  latch go at 27.2 kN; the secondary holds.
+- `sedan` stays the default: sedan1 does not pass o, p, q, g or t yet.
+
+### The deck lid opening and the lids (2026-11-05, later)
+
+**Measured first** (`m`, `M_TRACE=1`, Medium, 56 km/h wall). The boot lid
+did not lift because its latch let go: its hinges and latch peaked at
+2–4 kN and nothing broke. The deck opening itself collapsed. Its length
+(the body's hinge-line nodes to its latch-line nodes, in the world) went
+721 → 446 mm at 100 ms and stayed about 480 mm. Its edges were shell nodes
+in no member: the rear panel's top moved 350–500 mm forward against the
+cabin, under the rear body's own inertia, at low plastic work (the skin's
+buckled yield).
+
+**The opening's frame.** A real sedan's deck opening is ringed by closed
+sections. sedan1 now has them (`sedan_one_tier`, `DECK_FRAME=0` leaves them
+out to measure):
+- `deck_x`, the rear package tray's upper reinforcement, across the
+  opening's front edge (the lid's hinge line);
+- `deck_gutter`, the quarters' gutters (drip channel and quarter inner
+  upper), from the C-pillar's base to the rear panel, both sides;
+- `rear_panel`, the rear end panel's upper reinforcement, across its back.
+
+Sections are typical HSLA (CR340LA) hats closed by their panels, 0.8 mm
+(a Choice): 60 × 80, 50 × 60 and 60 × 100 mm. Their yields come from M_p.
+The opening now shortens at most 132 mm while the car stops and about
+20–30 mm after it (747 mm long).
+
+**A rigidifier under each lid** (BeamNG's documented practice for flat
+panels: "add a rigidifier node offset from the surface and connected to
+every panel node"). A real lid is a bonded double shell whose depth gives it
+bending stiffness. The lattice's single sheet has only its curvature's, so
+with the opening fixed the boot lid's free rear corners flapped up 280 mm
+at about 80 ms, while the latch at the centre held. The node sits
+`RIGIDIFIER_DEPTH` (0.10 m, the inner frame's hat, a Choice) under each lid's
+centroid, joined to every skin node by the lid's own sheet beam
+(`RIGIDIFIER=0`: none). Damping-only beams across the panels' spans (the
+other documented practice) were already there: the body dashpots at the
+BX's rate.
+
+| Boot lid, 56 km/h wall (drag on / off) | Before | Deck frame | Deck frame and rigidifiers |
+|---|---|---|---|
+| Edge lifts off the body | 136 / 140 mm | 284 / 293 mm | 174 / 171 mm |
+| Seam opens | 371 / 396 mm | 330 / 340 mm | 238 / 247 mm |
+| Deck opening, shortest | 446 mm of 721 | 615 mm of 747 | |
+| Hinges and latch, peak | 2.2–4.3 kN | 2.4–5.6 kN | 1.5–2.9 kN |
+
+The remaining lift is the lid's bending under the step's bound (k at
+0.1–4 % of real, the same root as the side pole's springback). The
+topology work (fewer beam ends per node, longer beams) is the fix.
+
+**The BX's latches, for the latch itself.** The BX holds its closures with
+couplers (`advancedCouplerControl`, `autoCoupling`): trunk 40 kN, bonnet
+latch and catch 30 kN each, doors 35 kN, each in its own breakGroup. sedan1's
+lid latches are still tension ropes sized at the door's FMVSS 206 values.
+They did not let go in any wall, so the coupler would not change the lift
+measured here. A `.truck` coupler needs a Rubble extension and a striker
+node on the body at the latch pin; not done yet.
+
+**Energy (open, solver).** With either addition the 120 km/h wall's energy
+rises between tenths of a second (`f`): 113.6 J with both, 9.8 J with the
+rigidifiers only, 1.9 J with the deck frame only, none without. With
+self-collision off (`NO_SELF=1`, a measurement) it rises by 0.00 J with
+both, so the contact injects it. Sent to the solver agent as a repro.
+
+Other references with both (Medium ensembles): `n` max crush 651 mm, b1
+22.2, e 0.181, peak 32.1 g, t_m 75.0 ms; `o` 225 mm (sd 91); `p` 20.4 kN;
+`q` 8.62×; `g` latch 46.9 kN, door off 47.4 kN (passes); `t` 12 leaked;
+`h` passes.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
@@ -883,8 +1164,28 @@ Parts hang on hardware, not on their seams.
 - **Tests.**
   - `r`: the FMVSS 206 rigs, static and in the solver.
   - `s`: 30 g inertial load.
-  - `g`: door pull. The door comes off at 82 kN, the sum of its parts'
-    transverse strengths (2 × 29.8 + 20.5 kN).
+  - `g`: door pull. The door is pulled outward at its centre of mass, so
+    statics shares the pull by levers, not by strength: the latch takes
+    the moment about the hinge line (53 % on sedan1's front door), then the
+    hinges take the whole pull at once (the more loaded 59 %). The door
+    therefore lets go group by group, and "off at the sum of the strengths"
+    (the old band, 78–83 kN) would need each group loaded in proportion to
+    its strength. The test asserts that the latch goes first, at a pull
+    whose latch share is inside the 14 measured latch failures (13.6–29.2
+    kN transverse), and that the door is off by the summed strengths.
+    - sedan1 (2026-11-05): the latch at 46.3 kN (24.5 kN its share), the
+      door off at 47.0 kN. Nothing on the load path broke first: only four
+      skin edges (0.4–1.1 kN strength: the buckling-based yield, which
+      JBeam's one beamDeform applies in tension too).
+    - The two-tier `sedan` now fails it: its latch holds to 81 kN (36.5 kN
+      share), past the measured maximum.
+    - In situ (`G_SPLIT=1`), against the ellipse through each unit's
+      measured loads: the latch assembly carried 1.58× its median before
+      letting go, the upper hinge let go at 0.78× its floor and the lower
+      at 2.49×, the hinges loaded dynamically by the latch's release. Rope
+      groups sized in a rigid rig share differently on the softened
+      pillars; the FMVSS 206 rigs in the solver (`r`) run 15–40 % over the
+      static solve (latch transverse 23.5 kN, hinge pair 77 kN). Open.
   - Bearing: a door end bears on the pillar beside it along the car, and
     inboard on a flange strip (one flange node behind each member end, both
     chords bearing on it). It never bears mostly outward on a node outboard

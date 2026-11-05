@@ -1541,7 +1541,98 @@ fn g_pulling_a_door_tears_it_off() {
     let m: f32 = door.iter().map(|&i| s.nodes[i].mass).sum();
     let out = Vec3::X * s.nodes[door[0]].pos.x.signum();
     let rate = 10_000.0f32;
+    // Statics of the door pulled outward at its centre of mass (the pull
+    // below is each node's share of it): the latch (with its secondary)
+    // takes the moment about the hinge line, the two hinges then share the
+    // whole pull by the centre of mass's height between them. Pins are the
+    // door ends of each group's ropes.
+    use engine_softbody::authoring::vehicle::{Hardware, HINGE_SYSTEM};
+    let pin = |kind: Hardware| -> Vec3 {
+        let h = b
+            .hardware
+            .iter()
+            .find(|h| h.part == part && h.kind == kind)
+            .unwrap();
+        let bm = &sk.beams[h.beams[0]];
+        let d = if sk.nodes[bm.a as usize].part == part {
+            bm.a
+        } else {
+            bm.b
+        };
+        s.nodes[d as usize].pos
+    };
+    let (pu, pl, pk) = (
+        pin(Hardware::HingeUpper),
+        pin(Hardware::HingeLower),
+        pin(Hardware::Latch),
+    );
+    let cg: Vec3 = door
+        .iter()
+        .map(|&i| s.nodes[i].pos * s.nodes[i].mass)
+        .sum::<Vec3>()
+        / m;
+    let out0 = Vec3::X * s.nodes[door[0]].pos.x.signum();
+    let axis = (pu - pl).normalize();
+    let arm = |p: Vec3| (p - pl).cross(out0).dot(axis);
+    let latch_share = arm(cg) / arm(pk);
+    let up_share = ((cg - pl).dot(axis) / (pu - pl).length()).clamp(0.0, 1.0);
+    let hinge_share = up_share.max(1.0 - up_share);
+    eprintln!(
+        "(g) statics: the latch takes {:.0} % of the pull, then the more loaded hinge {:.0} %",
+        latch_share * 100.0,
+        hinge_share * 100.0
+    );
+    if std::env::var("G_SPLIT").is_ok() {
+        let cg: Vec3 = door
+            .iter()
+            .map(|&i| s.nodes[i].pos * s.nodes[i].mass)
+            .sum::<Vec3>()
+            / m;
+        eprintln!("(g) door {m:.1} kg, CG {cg:.3?}");
+        for (name, js) in &groups {
+            for &j in js {
+                let bm = &s.beams[j];
+                let (a, c) = (bm.a as usize, bm.b as usize);
+                let (d, o) = if sk.nodes[a].part == part {
+                    (a, c)
+                } else {
+                    (c, a)
+                };
+                eprintln!(
+                    "(g)   {name}: rope {d} {:.3?} -> {o} {:.3?} ({}), k {:.3e}, strength {:.1} kN",
+                    s.nodes[d].pos,
+                    s.nodes[o].pos,
+                    sk.parts[sk.nodes[o].part as usize],
+                    bm.k,
+                    bm.strength / 1e3
+                );
+            }
+        }
+    }
+    use engine_softbody::authoring::vehicle::PRIMARY_LATCH;
+    let unit_name = |k: Hardware| {
+        b.hardware
+            .iter()
+            .find(|h| h.part == part && h.kind == k)
+            .unwrap()
+            .name
+            .as_str()
+    };
+    let units = [
+        (
+            vec![
+                unit_name(Hardware::Latch),
+                unit_name(Hardware::LatchSecondary),
+            ],
+            PRIMARY_LATCH,
+        ),
+        (vec![unit_name(Hardware::HingeUpper)], HINGE_SYSTEM),
+        (vec![unit_name(Hardware::HingeLower)], HINGE_SYSTEM),
+    ];
+    let mut peak = [0.0f32; 3];
+    let mut last = [(0.0f32, 0.0f32, 0.0f32); 3];
     let (mut first, mut off) = (None, None);
+    let was: Vec<bool> = s.beams.iter().map(|bm| bm.broken).collect();
     let mut t = 0.0f32;
     while t < 16.0 && off.is_none() {
         let f = rate * t;
@@ -1551,6 +1642,39 @@ fn g_pulling_a_door_tears_it_off() {
         }
         s.step();
         t += STEP;
+        // Each unit's load on the door against its measured strength: the
+        // latch assembly (primary and secondary, fully latched) and each
+        // hinge, as the ellipse through their longitudinal and transverse
+        // loads (`size_hardware`'s fan).
+        for (u, (names, loads)) in units.iter().enumerate() {
+            let mut r = Vec3::ZERO;
+            let mut live = true;
+            let mut h0 = None;
+            for g in groups.iter().filter(|g| names.contains(&g.0)) {
+                let h = b.hardware.iter().find(|h| h.name == g.0).unwrap();
+                h0.get_or_insert(h);
+                for &j in &g.1 {
+                    let bm = &s.beams[j];
+                    live &= !bm.broken;
+                    let (a, c) = (bm.a as usize, bm.b as usize);
+                    let (d, o) = if sk.nodes[a].part == part {
+                        (a, c)
+                    } else {
+                        (c, a)
+                    };
+                    let u = (s.nodes[o].pos - s.nodes[d].pos).normalize();
+                    r += u * -bm.force;
+                }
+            }
+            let h = h0.unwrap();
+            let (al, ou) = ((-r.dot(h.along)).max(0.0), (-r.dot(h.outward)).max(0.0));
+            let ratio =
+                ((al / loads.longitudinal).powi(2) + (ou / loads.transverse).powi(2)).sqrt();
+            if live {
+                peak[u] = peak[u].max(ratio);
+                last[u] = (al, ou, -r.y);
+            }
+        }
         let broken: Vec<&str> = groups
             .iter()
             .filter(|g| g.1.iter().any(|&j| s.beams[j].broken))
@@ -1558,10 +1682,58 @@ fn g_pulling_a_door_tears_it_off() {
             .collect();
         if first.is_none() && !broken.is_empty() {
             first = Some((f, broken.join(", ")));
+            // Nothing but hardware may have let go first (a pillar node, a
+            // member chord or the door's own structure): count broken beams
+            // joining the door to the car that are not hardware.
+            let hw: HashSet<usize> = groups.iter().flat_map(|g| g.1.iter().copied()).collect();
+            let n = sk.nodes.len();
+            let other: Vec<String> = s
+                .beams
+                .iter()
+                .enumerate()
+                .filter(|(j, bm)| {
+                    bm.broken
+                        && !was[*j]
+                        && !hw.contains(j)
+                        && (bm.a as usize) < n
+                        && (bm.b as usize) < n
+                })
+                .map(|(_, bm)| {
+                    let named = |i: u32| -> Vec<&str> {
+                        let mut v: Vec<&str> = b
+                            .groups
+                            .iter()
+                            .filter(|(_, g)| g.contains(&i))
+                            .map(|(k, _)| k.as_str())
+                            .collect();
+                        v.sort();
+                        v
+                    };
+                    format!(
+                        "{}~{} {:?} {}{:?}-{}{:?} k {:.2e} strength {:.1} kN",
+                        sk.parts[sk.nodes[bm.a as usize].part as usize],
+                        sk.parts[sk.nodes[bm.b as usize].part as usize],
+                        bm.kind,
+                        bm.a,
+                        named(bm.a),
+                        bm.b,
+                        named(bm.b),
+                        bm.k,
+                        bm.strength / 1e3
+                    )
+                })
+                .collect();
+            // (Reported: skin edges tear at their buckling-based yield,
+            // which JBeam's one beamDeform applies in tension too.)
+            eprintln!(
+                "(g) broken before the first hardware: {} beams, first {:?}",
+                other.len(),
+                &other[..other.len().min(6)]
+            );
         }
         if first.is_none()
             && std::env::var("G_SPLIT").is_ok()
-            && ((f as i32) % 10_000 == 0 || (f > 70_000.0 && (f as i32) % 1_000 == 0))
+            && ((t / STEP).round() as i64) % 1_000 == 0
         {
             // Where the pull goes: every beam joining the door to the car,
             // by kind, as force along the pull.
@@ -1587,10 +1759,28 @@ fn g_pulling_a_door_tears_it_off() {
             let per: Vec<String> = groups
                 .iter()
                 .map(|g| {
+                    // The group's resultant on the door, along the car
+                    // (its rig's longitudinal), outward and up (kN).
+                    let h = b.hardware.iter().find(|h| h.name == g.0).unwrap();
+                    let mut r = Vec3::ZERO;
+                    for &j in &g.1 {
+                        let bm = &s.beams[j];
+                        let (a, c) = (bm.a as usize, bm.b as usize);
+                        let (d, o) = if sk.nodes[a].part == part {
+                            (a, c)
+                        } else {
+                            (c, a)
+                        };
+                        let u = (s.nodes[o].pos - s.nodes[d].pos).normalize();
+                        r += u * -bm.force;
+                    }
                     format!(
-                        "{} {:.1} (ropes at {:?} of strength)",
+                        "{} {:.1} [along {:.1} out {:.1} up {:.1}] (ropes at {:?} of strength)",
                         g.0,
                         g.1.iter().map(|&j| -s.beams[j].force).sum::<f32>() / 1e3,
+                        -r.dot(h.along) / 1e3,
+                        -r.dot(h.outward) / 1e3,
+                        -r.y / 1e3,
                         g.1.iter()
                             .map(|&j| (-s.beams[j].force / s.beams[j].strength * 100.0).round())
                             .collect::<Vec<_>>()
@@ -1639,16 +1829,39 @@ fn g_pulling_a_door_tears_it_off() {
         (p1 - p0).length()
     );
     assert!(finite(&s));
-    let first = first.expect("no hardware let go").0;
     let off = off.expect("the door stayed on");
-    assert!(first >= 18_000.0, "hardware let go at {first} N");
-    // The parts' transverse strengths summed: each hinge at the pair's
-    // floor (29.8 kN), the latch at its measured interquartile range
-    // (18.8–23.8 kN).
-    let (lo, hi) = (2.0 * 29_813.0 + 18_800.0, 2.0 * 29_813.0 + 23_800.0);
+    // A door pulled at its centre of mass loads its hardware by the levers
+    // above, not in proportion to the strengths, so it lets go group by
+    // group: the latch first, then the hinges take the whole pull at once
+    // (force-controlled, as an inertial load: the latch's release loads them
+    // dynamically). The sum of the strengths would need the pull to load
+    // each in proportion to its strength. So the latch lets go when its
+    // share reaches the measured spread of 14 latches loaded to failure
+    // (transverse 13.6–29.2 kN, `crash-reference-targets.md` §9.4), and the
+    // door comes off after it and by the parts' transverse strengths summed
+    // (the hinges have no measured failure, only floors).
+    let latch_lo = 13_600.0 / latch_share;
+    let latch_hi = 29_200.0 / latch_share;
+    let off_hi = 2.0 * HINGE_SYSTEM.transverse + 23_800.0;
+    eprintln!(
+        "(g) statics: the latch lets go at {:.1}–{:.1} kN; the hinges' floors alone hold {:.1} kN",
+        latch_lo / 1e3,
+        latch_hi / 1e3,
+        HINGE_SYSTEM.transverse / hinge_share / 1e3,
+    );
+    let first_name = first.as_ref().map_or("", |x| x.1.as_str()).to_string();
+    let first = first.expect("no hardware let go").0;
     assert!(
-        (lo..=hi).contains(&off),
-        "the door came off at {off} N, not {lo}–{hi}"
+        first_name.contains("latch"),
+        "the first hardware to let go was {first_name}, not the latch"
+    );
+    assert!(
+        (latch_lo..=latch_hi).contains(&first),
+        "the latch let go at {first} N, not {latch_lo}–{latch_hi}"
+    );
+    assert!(
+        (first..=off_hi).contains(&off),
+        "the door came off at {off} N, not {first}–{off_hi}"
     );
 }
 
@@ -2279,6 +2492,52 @@ fn m_wall_56_boot_lid_stays_latched_and_hinged() {
                 };
                 let hinge: Vec<usize> = [systems[0].clone(), systems[1].clone()].concat();
                 let (hb, lb) = (mean(&hinge, true), mean(&systems[2], true));
+                {
+                    // (The same in the world: the deck opening's length.)
+                    let ends = |v: &[usize], p: &dyn Fn(usize) -> Vec3| -> Vec3 {
+                        let ids: Vec<usize> = v
+                            .iter()
+                            .map(|&bi| {
+                                let bm = &s.beams[bi];
+                                if name(bm.a as usize) == "bootlid" {
+                                    bm.b as usize
+                                } else {
+                                    bm.a as usize
+                                }
+                            })
+                            .collect();
+                        ids.iter().map(|&i| p(i)).sum::<Vec3>() / ids.len() as f32
+                    };
+                    let now = |i: usize| s.nodes[i].pos;
+                    let then = |i: usize| sk.nodes[i].p;
+                    let d1 = ends(&hinge, &now).distance(ends(&systems[2], &now));
+                    let d0 = ends(&hinge, &then).distance(ends(&systems[2], &then));
+                    eprintln!(
+                        "  (m) f{f}: deck opening (world) {:.0} mm, design {:.0} mm",
+                        d1 * 1e3,
+                        d0 * 1e3
+                    );
+                    if f == 6 {
+                        for (k, v) in systems.iter().enumerate() {
+                            for &bi in v {
+                                let bm = &s.beams[bi];
+                                let o = if name(bm.a as usize) == "bootlid" {
+                                    bm.b
+                                } else {
+                                    bm.a
+                                };
+                                let mut gs: Vec<&str> = b
+                                    .groups
+                                    .iter()
+                                    .filter(|(_, g)| g.contains(&o))
+                                    .map(|(k, _)| k.as_str())
+                                    .collect();
+                                gs.sort();
+                                eprintln!("    system {k} body node {o} at {:.2?} {gs:?} moved {:.0?} mm (cabin frame)", sk.nodes[o as usize].p, (l[o as usize] - l0[o as usize]) * 1e3);
+                            }
+                        }
+                    }
+                }
                 let up_mid = lid
                     .iter()
                     .map(|&i| -(l[i] - l0[i]).z)
@@ -2328,6 +2587,31 @@ fn m_wall_56_boot_lid_stays_latched_and_hinged() {
                     open = (gap, *i, f);
                 }
             }
+        }
+        if std::env::var("M_WHO").is_ok() {
+            plastic_census(&s, &b, "m");
+            // Plastic work by station along the car (design z, 0.25 m bins;
+            // z 0 the rear).
+            let mut bins = [0.0f64; 24];
+            for bm in &s.beams {
+                let (a, c) = (bm.a as usize, bm.b as usize);
+                if a >= n || c >= n {
+                    continue;
+                }
+                let w =
+                    0.5 * (bm.tc.abs() + bm.tt.abs()) as f64 * (bm.rest - bm.rest0).abs() as f64;
+                let z = 0.5 * (sk.nodes[a].p.z + sk.nodes[c].p.z);
+                let k = ((z / 0.25).floor().max(0.0) as usize).min(23);
+                if w.is_finite() {
+                    bins[k] += w;
+                }
+            }
+            eprintln!(
+                "(m) plastic work by z (0.25 m bins from the rear, kJ): {:?}",
+                bins.iter()
+                    .map(|w| (w / 1e2).round() / 10.0)
+                    .collect::<Vec<_>>()
+            );
         }
         eprintln!(
             "(m) drag {drag}: boot lid edge lifts {:.0} mm off the body (node {} at {:?}, frame {})",
@@ -2550,6 +2834,12 @@ fn reference_wall_p(
         0.0,
     );
     s.settings.drag = drag;
+    // (`NO_SELF=1`, a measurement: no self-collision, to tell an energy
+    // rise of the contact from one of the beams.)
+    if std::env::var("NO_SELF").is_ok() {
+        s.triangles.clear();
+        s.finish();
+    }
     let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
     s.boxes.push(StaticBox::centered(
         Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
@@ -2874,6 +3164,44 @@ fn o_side_pole_matches_the_nhtsa_sedans() {
 
 /// One NCAP side pole run (see [`o_side_pole_matches_the_nhtsa_sedans`]):
 /// the residual crush at the pole (m).
+/// The side pole's crush now: the deepest struck-side exterior node near the
+/// pole's line, in the far side's frame (as [`side_pole_crush_p`] measures it).
+fn pole_inward(b: &Built, s0: &ExplicitBeams, s: &ExplicitBeams, centre: Vec3) -> f32 {
+    let far = |st: &ExplicitBeams| {
+        let g = &b.groups["sill_r"];
+        let zs: Vec<f32> = g
+            .iter()
+            .map(|&i| b.skeleton.nodes[i as usize].p.z)
+            .collect();
+        let zm = zs.iter().sum::<f32>() / zs.len() as f32;
+        let half = |front: bool| {
+            let v: Vec<Vec3> = g
+                .iter()
+                .zip(&zs)
+                .filter(|(_, &z)| (z > zm) == front)
+                .map(|(&i, _)| st.nodes[i as usize].pos)
+                .collect();
+            v.iter().sum::<Vec3>() / v.len() as f32
+        };
+        let tu = group_mean(st, b, &["tunnel"]);
+        let (o, x) = (half(false), (half(true) - half(false)).normalize());
+        let up = x.cross(tu - o).normalize();
+        (o, x, up.cross(x))
+    };
+    let (o0, x0, a0) = far(s0);
+    let (o1, _, a1) = far(s);
+    let zc = (centre - o0).dot(x0);
+    let mut best = 0.0f32;
+    for &i in &b.shell.nodes {
+        let i = i as usize;
+        let p = s0.nodes[i].pos;
+        if p.x > 0.3 && ((p - o0).dot(x0) - zc).abs() < 0.15 && p.y > 0.3 && p.y < 1.2 {
+            best = best.max((p - o0).dot(a0) - (s.nodes[i].pos - o1).dot(a1));
+        }
+    }
+    best
+}
+
 fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
     let kmh = kmh * (1.0 + p.speed);
     let a = 75.0f32.to_radians() + p.yaw;
@@ -3031,6 +3359,24 @@ fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
                 .map(|(h, p)| format!("{} {:.1}", h.name, p / 1e3))
                 .collect::<Vec<_>>()
         );
+    } else if std::env::var("O_DYN").is_ok() {
+        // The deepest exterior node's crush every 10 ms (the dynamic crush,
+        // and what springs back of it).
+        let mut deepest = (0.0f32, 0.0f32);
+        for k in 0..150 {
+            for _ in 0..20 {
+                s.step();
+            }
+            let d = pole_inward(b, &s0, &s, centre);
+            if d > deepest.0 {
+                deepest = (d, (k + 1) as f32 * 0.01);
+            }
+        }
+        eprintln!(
+            "(o) dynamic crush at the pole {:.0} mm at {:.2} s",
+            deepest.0 * 1e3,
+            deepest.1
+        );
     } else {
         run(&mut s, 1.5);
     }
@@ -3180,8 +3526,51 @@ fn plastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
     eprintln!(
         "({tag}) plastic work by member (kJ, broken): {:?}",
         v.iter()
-            .take(14)
+            .take(30)
             .map(|(k, (w, br))| format!("{k} {:.2} {br}", w / 1e3))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Each member's (or part pair's) beams' summed |force| (kN) and how many of
+/// them are past their yield now: where a load goes (`P_SPLIT`).
+fn force_census(s: &ExplicitBeams, b: &Built, tag: &str, base: Option<&[f32]>) {
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let mut names: Vec<&String> = b.groups.keys().collect();
+    names.sort();
+    let sets: Vec<(&String, HashSet<u32>)> = names
+        .iter()
+        .map(|k| (*k, b.groups[*k].iter().copied().collect()))
+        .collect();
+    let mut sum: std::collections::BTreeMap<String, (f64, usize, usize)> = Default::default();
+    for (j, bm) in s.beams.iter().enumerate() {
+        let (a, c) = (bm.a, bm.b);
+        if a as usize >= n || c as usize >= n || bm.broken {
+            continue;
+        }
+        let f = bm.force - base.map_or(0.0, |v| v[j]);
+        let key = sets
+            .iter()
+            .find(|(_, g)| g.contains(&a) && g.contains(&c))
+            .map(|(k, _)| k.to_string())
+            .unwrap_or_else(|| {
+                let pa = &sk.parts[sk.nodes[a as usize].part as usize];
+                let pc = &sk.parts[sk.nodes[c as usize].part as usize];
+                format!("~{pa}/{pc} {:?}", bm.kind)
+            });
+        let e = sum.entry(key).or_default();
+        e.0 += f.abs() as f64;
+        e.1 += 1;
+        e.2 += usize::from(bm.force > 0.95 * bm.tc || -bm.force > 0.95 * bm.tt);
+    }
+    let mut v: Vec<(String, (f64, usize, usize))> = sum.into_iter().collect();
+    v.sort_by(|x, y| y.1 .0.total_cmp(&x.1 .0));
+    eprintln!(
+        "({tag}) |force| by member (kN, beams, at yield): {:?}",
+        v.iter()
+            .take(18)
+            .map(|(k, (f, n, y))| format!("{k} {:.1} {n} {y}", f / 1e3))
             .collect::<Vec<_>>()
     );
 }
@@ -3284,7 +3673,15 @@ fn p_fmvss_214_static_door_crush() {
         let face = cx - (r * r - dz * dz).sqrt();
         (p.x > face).then(|| p.x - face)
     };
-    let curve = ram_rig(&mut s, &held, -Vec3::X, 0.457 + 0.05, 0.1, &inside);
+    let travel = std::env::var("P_STOP")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.457 + 0.05);
+    let curve = ram_rig(&mut s, &held, -Vec3::X, travel, 0.1, &inside);
+    if std::env::var("P_SPLIT").is_ok() {
+        force_census(&s, &b, "p", None);
+        plastic_census(&s, &b, "p");
+    }
     // Crush is counted from the ram's first contact with the door (the
     // first 5 mm step carrying more than 200 N).
     let d_c = curve
@@ -3389,7 +3786,11 @@ fn q_fmvss_216a_roof_crush() {
         (depth > 0.0).then_some(depth)
     };
     let before = s.positions();
+    let f0: Vec<f32> = s.beams.iter().map(|bm| bm.force).collect();
     let curve = ram_rig(&mut s, &held, push, 0.127, 0.1, &inside);
+    if std::env::var("Q_SPLIT").is_ok() {
+        force_census(&s, &b, "q", Some(&f0));
+    }
     let peak = curve.iter().map(|c| c.1).fold(0.0f32, f32::max);
     if std::env::var("Q_DIAG").is_ok() {
         let mut v: Vec<(String, f32)> = b

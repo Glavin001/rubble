@@ -788,7 +788,16 @@ pub fn side_sections() -> Vec<(&'static str, Section, f32, f32)> {
 /// plastic moment (a member with a knee keeps its gradient's shape, its
 /// strongest point at the section's).
 fn sectioned(members: &mut [MemberSpec], grades: &Grades) {
-    for (name, sec, lever, sides) in side_sections() {
+    sectioned_by(members, grades, &side_sections());
+}
+
+/// [`sectioned`] for a list of (member, section, lever, sides).
+fn sectioned_by(
+    members: &mut [MemberSpec],
+    grades: &Grades,
+    list: &[(&'static str, Section, f32, f32)],
+) {
+    for &(name, sec, lever, sides) in list {
         for m in members.iter_mut().filter(|m| m.name == name) {
             let chord = sec.m_p() / (sides * lever);
             let s = chord / grades.get(&m.grade).unwrap().deform;
@@ -2072,6 +2081,40 @@ pub fn sedan_one_tier() -> VehicleDef {
     d.one_tier = true;
     d.tiered = false;
     d.damping = Some(super::vehicle::DampingRatios::default());
+    // The C-pillar (the rear doors' striker pillar) at pole-width stations
+    // (A8: an outer member's stations at most a 254 mm pole apart), so its
+    // latch meets the pillar's own nodes.
+    for m in d.members.iter_mut().filter(|m| m.name == "pillar_c") {
+        m.station = super::vehicle::POLE_LANE;
+    }
+    // (Each door's side glass as its own part, `GLASS_PART`, is supported
+    // by the build but not used: with it the 52 and 120 km/h walls' energy
+    // rose 2–38 J between tenths of a second, past the ledger's bound;
+    // open, `vehicle-authoring.md`.)
+    // The front bumper beam: the 2011 Accord's is roll-formed steel of
+    // 590 MPa tensile strength, its assembly with crush cans, centre plate
+    // and brackets 7.96 kg (NHTSA DOT HS 811 666 §5.10.7.1). Its section: a
+    // closed 60 deep × 100 tall roll-formed box, 1.6 mm (a Choice: about
+    // 4.0 kg/m, so some 5 kg of the assembly over its 1.2 m), at a 590
+    // grade's yield (DP600's 330 MPa). Its bending yields from the
+    // section's plastic moment, as the rear's.
+    {
+        let beam = Section {
+            depth: 0.06,
+            width: 0.10,
+            t: 0.0016,
+            sigma_y: DP600,
+            round: false,
+        };
+        sectioned_by(
+            &mut d.members,
+            &Grades::default(),
+            &[("bumper_beam_f", beam, 0.12, 1.0)],
+        );
+        for m in d.members.iter_mut().filter(|m| m.name == "bumper_beam_f") {
+            m.kg_per_m = section_kg_per_m(&beam);
+        }
+    }
     // Crush members: the front rails (an 80 × 120 × 1.6 mm DP600 box, a
     // Choice of a typical rail's section; σ_u 600 MPa, EN 10338) and the
     // rear rails' tail behind the rear subframe ([`side_sections`]' rear
@@ -2096,6 +2139,76 @@ pub fn sedan_one_tier() -> VehicleDef {
     for m in d.members.iter_mut().filter(|m| m.name == "rail_f") {
         // (The bays' cuts set the strength: no tuned grading.)
         m.scale = [1.0, 1.0];
+    }
+    // The deck lid opening's frame (A7): a real sedan's opening is ringed by
+    // closed sections, the rear package tray's upper reinforcement across
+    // its front edge, the quarters' gutters (drip channel and quarter inner
+    // upper) down both sides, and the rear end panel's upper reinforcement
+    // across its back. Without them the opening's edges were skin only, and
+    // in the 56 km/h wall the opening shortened 721 → 446 mm under the rear
+    // body's own inertia (`m`, `M_TRACE=1`), lifting the lid. Sections are
+    // typical stampings, not one car's (a Choice): HSLA (CR340LA) hats
+    // closed by their panels, 0.8 mm.
+    if std::env::var("DECK_FRAME").map_or(true, |v| v != "0") {
+        let hat = |depth: f32, width: f32| Section {
+            depth,
+            width,
+            t: 0.0008,
+            sigma_y: HSLA340,
+            round: false,
+        };
+        d.members.push(ladder(member(
+            "deck_x",
+            &[(-0.80, 1.03, 0.78), (0.0, 1.05, 0.79), (0.80, 1.03, 0.78)],
+            0.10,
+            0.08,
+            UP,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            false,
+            1,
+        )));
+        d.members.push(ladder(member(
+            "deck_gutter",
+            &[
+                (0.80, 0.98, 1.36),
+                (0.82, 0.96, 0.78),
+                (0.82, 0.94, 0.35),
+                (0.78, 0.72, 0.02),
+            ],
+            0.06,
+            0.06,
+            OUT,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            true,
+            1,
+        )));
+        d.members.push(ladder(member(
+            "rear_panel",
+            &[(-0.78, 0.72, 0.02), (0.0, 0.70, -0.01), (0.78, 0.72, 0.02)],
+            0.10,
+            0.10,
+            FWD,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            false,
+            1,
+        )));
+        let list = [
+            ("deck_x", hat(0.06, 0.08), 0.08, 1.0),
+            ("deck_gutter", hat(0.05, 0.06), 0.06, 1.0),
+            ("rear_panel", hat(0.06, 0.10), 0.10, 1.0),
+        ];
+        sectioned_by(&mut d.members, &Grades::default(), &list);
+        for (name, sec, _, _) in list {
+            for m in d.members.iter_mut().filter(|m| m.name == name) {
+                m.kg_per_m = section_kg_per_m(&sec);
+            }
+        }
     }
     d.biw_mass = ACCORD_BIW;
     d.part_masses = vec![

@@ -303,6 +303,10 @@ pub struct Loads {
 /// kN (2005 Camry, report 637726), the best-supported floor, and each hinge
 /// holds it on its own (`hardware_rigs`), so the door opens at its latch
 /// before a hinge lets go, as every report found.
+/// The depth of a lid's rigidifier node under its centroid (m): the inner
+/// frame's 100 mm hat (a Choice).
+pub const RIGIDIFIER_DEPTH: f32 = 0.10;
+
 pub const PRIMARY_LATCH: Loads = Loads {
     longitudinal: 28_000.0,
     transverse: 20_500.0,
@@ -1322,7 +1326,12 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 .nodes
                 .iter()
                 .copied()
-                .filter(|&i| sk.nodes[i as usize].part != 0)
+                .filter(|&i| {
+                    let q = sk.nodes[i as usize].part;
+                    // (A pane is its own part: members ride the panel
+                    // round it, not the glass.)
+                    q != 0 && !sk.parts[q as usize].starts_with(GLASS_PART)
+                })
                 .collect();
             let part = if m.ride {
                 sk.nodes[sk.nearest(mid, &panels, 1)[0] as usize].part
@@ -1584,6 +1593,16 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     && !sk.nodes[i as usize].catcher
             })
             .collect();
+        let member_body: Vec<u32> = {
+            let mut on: std::collections::HashSet<u32> = Default::default();
+            for g in groups.values() {
+                on.extend(g.iter().copied());
+            }
+            let mut v: Vec<u32> = body.iter().copied().filter(|i| on.contains(i)).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
         let mut parts: Vec<u16> = door_ends.iter().map(|e| e.0).collect();
         parts.sort();
         parts.dedup();
@@ -1701,7 +1720,15 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         -1.0
                     };
                     let (dl, dt) = (Vec3::Z * -toward, Vec3::X * pa.x.signum());
-                    let near = sk.nearest(pa, &body, 12);
+                    // One tier: on the members' nodes only (pillar, sill,
+                    // roof rail, cross members), not the shell's plain
+                    // nodes, so the hardware lands on structure wherever
+                    // the shell's lattice puts its nodes.
+                    let near = if one {
+                        sk.nearest(pa, &member_body, 12)
+                    } else {
+                        sk.nearest(pa, &body, 12)
+                    };
                     // (The secondary's catch reaches a little farther.)
                     let reach = if kind == Hardware::LatchSecondary {
                         0.45
@@ -1756,7 +1783,21 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     }
                 }
                 if beams.is_empty() {
-                    return Err(format!("{name}: no pillar node near its {kind:?}"));
+                    let pa = sk.pos(pin);
+                    let near: Vec<String> = sk
+                        .nearest(pa, if one { &member_body } else { &body }, 4)
+                        .iter()
+                        .map(|&b| {
+                            let g = groups
+                                .iter()
+                                .find(|g| g.1.contains(&b))
+                                .map_or("-", |g| g.0.as_str());
+                            format!("{b} {g} {:.2} m", sk.pos(b).distance(pa))
+                        })
+                        .collect();
+                    return Err(format!(
+                        "{name}: no pillar node near its {kind:?} (pin at {pa:?}; nearest {near:?})"
+                    ));
                 }
                 let suffix = match kind {
                     Hardware::HingeUpper => "hinge_upper",
@@ -2010,6 +2051,54 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     weight: false,
                 });
             }
+        }
+    }
+    // One tier: a rigidifier node under each lid (BeamNG's documented
+    // practice for flat panels, "a rigidifier node offset from the surface
+    // and connected to every panel node"). A real lid is a bonded double
+    // shell, outer and inner frame, whose depth gives it bending stiffness;
+    // the lattice's single sheet has none but its curvature's, so in the
+    // 56 km/h wall the boot lid's free corners flapped up 160–280 mm. The
+    // node sits `RIGIDIFIER_DEPTH` under the lid's centroid (a Choice: the
+    // inner frame's 100 mm hat), joined to every skin node of the lid by
+    // beams of the lid's own sheet material. `RIGIDIFIER=0`: none.
+    if one && std::env::var("RIGIDIFIER").map_or(true, |v| v != "0") {
+        let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
+        for name in ["bonnet", "bootlid"] {
+            let Some(pt) = sk.parts.iter().position(|p| p == name) else {
+                continue;
+            };
+            let pt = pt as u16;
+            let skin: Vec<u32> = (0..sk.nodes.len() as u32)
+                .filter(|&i| sk.nodes[i as usize].part == pt && on_shell.contains(&i))
+                .collect();
+            if skin.len() < 4 {
+                continue;
+            }
+            // The lid's own sheet beam (its median stiffness) as the material.
+            let mut mats: Vec<Material> = sk
+                .beams
+                .iter()
+                .filter(|b| {
+                    b.ty == BeamType::Normal
+                        && b.group == 0
+                        && !b.damper
+                        && skin.contains(&b.a)
+                        && skin.contains(&b.b)
+                })
+                .map(|b| b.mat)
+                .collect();
+            if mats.is_empty() {
+                continue;
+            }
+            mats.sort_by(|a, b| a.k.total_cmp(&b.k));
+            let mat = mats[mats.len() / 2];
+            let c = skin.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / skin.len() as f32;
+            let r = sk.node(c - Vec3::Y * RIGIDIFIER_DEPTH, pt);
+            for &i in &skin {
+                sk.beam(r, i, mat);
+            }
+            groups.insert(format!("{name}_rigidifier"), vec![r]);
         }
     }
     // Backed panels: each skin node tied to the part's frame behind it.
@@ -2886,7 +2975,53 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 // (A sheet edge given its real yield: the strength it had
                 // was the yield's.)
                 let kl = b.mat.k * super::material::REF_LENGTH;
-                b.mat.strength = b.mat.deform + e * kl;
+                b.mat.strength = b.mat.deform.max(b.tension_yield) + e * kl;
+            }
+        }
+        // (`BX_YIELD=1`, a measurement: each part's beams yield no later
+        // than the Ibishu BX's median yield strain for that part type,
+        // beamDeform / (beamSpring·L), at their built k: BeamNG's practice of
+        // setting deform forces for the achievable k.)
+        if std::env::var("BX_YIELD").map_or(false, |v| v != "0") {
+            let scale: f32 = std::env::var("BX_YIELD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0);
+            let nodes = sk.nodes.clone();
+            let parts = sk.parts.clone();
+            for (b, &e) in sk.beams.iter_mut().zip(&elong) {
+                let (pa, pb) = (nodes[b.a as usize].part, nodes[b.b as usize].part);
+                if pa != pb || b.ty != BeamType::Normal || b.group != 0 || b.mat.deform >= 1.0e8 {
+                    continue;
+                }
+                // (`BX_YIELD_SHEETS=1`: only the sheets' edges, the members
+                // keeping their sections' forces.)
+                if std::env::var("BX_YIELD_SHEETS").is_ok() && b.tension_yield <= 0.0 {
+                    continue;
+                }
+                let name = parts[pa as usize].as_str();
+                let eps = match name {
+                    "body" => 0.0100,
+                    n if n.starts_with("door") => 0.0125,
+                    "bonnet" => 0.0553,
+                    "bootlid" => 0.0298,
+                    n if n.starts_with("fender") => 0.0455,
+                    n if n.starts_with("bumper") => 0.1553,
+                    _ => continue,
+                } * scale;
+                let l = nodes[b.a as usize].p.distance(nodes[b.b as usize].p);
+                if l < super::skeleton::MIN_YIELD_LENGTH {
+                    continue;
+                }
+                let y = eps * b.mat.k_at(l) * l;
+                if y < b.mat.deform.max(b.tension_yield) {
+                    b.mat.deform = b.mat.deform.min(y);
+                    b.tension_yield = b.tension_yield.min(y);
+                    if e >= 0.0 {
+                        let kl = b.mat.k * super::material::REF_LENGTH;
+                        b.mat.strength = b.mat.deform.max(b.tension_yield) + e * kl;
+                    }
+                }
             }
         }
         (1.0, 1.0)
@@ -3009,6 +3144,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         masses,
     })
 }
+
+/// A pane that is its own part is named this followed by the panel it sits
+/// in (`glass_door_f_l`).
+pub const GLASS_PART: &str = "glass_";
 
 /// One tier: the body dashpots' damping per kilogram of the node each is
 /// from (1/s): the BX body's damping-only beams (`bx_body_hatch`, "main
@@ -3133,6 +3272,7 @@ fn one_tier_real_stiffness(
             }
         }
         let mut sheet_yield = 0.0f32;
+        let mut tension_yield = 0.0f32;
         if on_shell.contains(&b.a)
             && on_shell.contains(&b.b)
             && sk.nodes[a].part == sk.nodes[c].part
@@ -3152,16 +3292,23 @@ fn one_tier_real_stiffness(
             let lattice = 3f32.sqrt() / 4.0;
             if !lane && lattice * e * t > real {
                 real = lattice * e * t;
-                // Its yield force: the bay's ultimate stress in compression
+                // Its yield force: in compression the bay's ultimate stress
                 // (a thin plate buckles, then carries Winter's effective
-                // width, [`sheet_ultimate_stress`]), (√3/4)·σ_u·t·L, the
-                // same both ways (JBeam's one beamDeform).
+                // width, [`sheet_ultimate_stress`]), (√3/4)·σ_u·t·L; in
+                // tension the sheet's own yield, (√3/4)·σ_y·t·L (a tension
+                // field does not buckle; `rubble_tension_yield`).
                 sheet_yield = lattice * sheet_ultimate_stress(e, sy, t, l) * t * l;
+                tension_yield = lattice * sy * t * l;
             }
         }
         if sheet_yield > 0.0 && real > 0.0 {
             b.mat.deform = sheet_yield;
             b.mat.strength = sheet_yield;
+            // (`TENSION_YIELD=0`: the buckled yield both ways, as before
+            // `rubble_tension_yield`, to measure what it changes.)
+            if std::env::var("TENSION_YIELD").map_or(true, |v| v != "0") {
+                b.tension_yield = tension_yield;
+            }
         }
         if real == 0.0 {
             continue;
@@ -3411,6 +3558,22 @@ fn one_tier_masses(
     }
     let mut ledger: Vec<(String, f32)> = Vec::new();
     let mut parts_kg = 0.0f32;
+    // A pane that is its own part (`glass_<panel>`) weighs its glass; the
+    // panel it sits in has its measured assembly mass less that.
+    let panes: HashMap<String, f32> = sk
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.starts_with(GLASS_PART))
+        .map(|(q, p)| {
+            let kg = (0..n)
+                .filter(|&i| sk.nodes[i].part as usize == q)
+                .map(|i| w[i])
+                .sum();
+            (p[GLASS_PART.len()..].to_string(), kg)
+        })
+        .collect();
+    let pane_kg = |name: &str| -> f32 { panes.get(name).copied().unwrap_or(0.0) };
     for part in 0..sk.parts.len() as u16 {
         let name = sk.parts[part as usize].clone();
         let nodes: Vec<usize> = (0..n).filter(|&i| sk.nodes[i].part == part).collect();
@@ -3425,7 +3588,7 @@ fn one_tier_masses(
             .iter()
             .find(|(p, _)| name.starts_with(p.as_str()))
         {
-            Some(*kg)
+            Some(*kg - pane_kg(&name))
         } else {
             sheet_mass(def, sk, &shell.tris, part)
         };

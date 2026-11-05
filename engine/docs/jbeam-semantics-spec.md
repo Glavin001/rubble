@@ -828,6 +828,25 @@ per beam on the CPU and the GPU, so such a beam in a `.truck` vehicle runs §3's
 rule in both (`showcase_car_gpu` wall and side-pole counts match). Files without
 the section load as before, bit for bit.
 
+### 18.4 Rubble's `.truck` extension: a tension-side yield force (2026-11-05)
+
+**Rubble extension, not RoR or JBeam** (`truck.rs`, `ExplicitBeams::set_tension_yield`).
+JBeam has one `beamDeform` for both directions; its documentation has no expansion-side
+deform force (only `deformLimit` / `deformLimitExpansion`, which limit the plastic
+change, and the anisotropic and bounded types, which split stiffness and damping, not
+yield). A thin sheet buckles in compression (its edge's yield is Winter's effective
+width, `vehicle-authoring.md`), but in tension it carries its material's yield. A
+section `rubble_tension_yield` of lines `a, b, Tt` sets the deformable plain beam a–b's
+(`Plain` or `JbeamPlain`) tension threshold to Tt newtons; its compression threshold
+stays the file's deform threshold, and the gate is min(Tc, Tt, S). Nothing else
+changes: the yield rule (§3, `explicit-beams.md` §2) already keeps Tc and Tt apart and
+hardens each on its own side; spawn set them equal. No kernel change. A line naming no
+deformable plain beam, or Tt ≤ 0, fails the load. Files without the section load as
+before, bit for bit. Tests: `tension_yield.rs` (one line sets only its beam's Tt and
+gate; a missing beam fails), engine-webgpu `tension_yield_gpu.rs` (beams with Tt ≠ Tc
+stretched and squeezed past both, in the `.truck` and the JBeam rule: every node and
+beam the same float as the CPU's for 400 steps). The showcase car's sheet edges use it.
+
 ## 19. Deform groups [B]
 
 `deformGroup` (string or table) names the groups a beam triggers; they drive visual
