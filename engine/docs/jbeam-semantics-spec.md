@@ -816,8 +816,16 @@ the docs, now fixed (§25): its tyres' reinforcement sets give no Spring, and to
 whole vehicle); and its L-beams took the side beam's 1,150 N·s/m instead of
 `wheelReinfBeam`'s 600 (c·h/m = 2.6 on a tread node: a Nyquist-rate divergence in
 8 steps). Now: at rest 4 s KE 3.9 J; but its beacon light's break group (12 beams of
-about 3.3 kN) breaks at 52 ms, as it lands from the 2 cm spawn drop on its 200 psi
-semi-pneumatic tyres (open: not checked against BeamNG). Into the wall at 56 km/h
+about 3.3 kN deform, 3.8 kN strength) breaks at 52 ms. Not the spawn drop (it breaks
+spawned touching the ground too), and BeamNG documents no spawn settling beyond
+`beamPrecompressionTime`: its four base nodes start 1.0 cm above the roll hoop's top
+triangles (other node groups, so §10's exclusion does not apply, nor §10.1's, as the
+hoop's triangles have a group), inside the 3 cm self-collision range. [CI]'s
+push-out happens, and the solver's contact (a projection that cancels the node's
+force and removes 20 % of the depth per step, not a spring) pushes them out through
+their mounts, which yield and break. With self-collision off it rests with nothing
+broken (KE 30 J at 2 s). BeamNG documents only that its forces "start applying at
+around 2.5cm"; a softer push would be a contact-model change, so **open**. Into the wall at 56 km/h
 it breaks nothing more and bends 5 beams: its forks and mast (85 MN/m between 50 kg
 nodes) are nearly elastic, so it pitches up over its front axle (centre of mass
 +1.65 m at 0.5 s) and rebounds at about 7 m/s. Energy ledger (KE + m·g·Δy of the
