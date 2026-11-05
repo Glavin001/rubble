@@ -2358,7 +2358,8 @@ uint selfClip(TriGeo t, uint h, float3 p, float3 origin, float r, out float alph
     nn = side > 0.0 ? t.n : -t.n;
     bool only = (t.clip & 2u) != 0u;
     if (only && d >= 0.0) return 2u;
-    pen = only ? -d : nf(r - d);
+    // At most r (explicit_contact.rs clip_depth): held behind, pushed as at the plane.
+    pen = min(only ? -d : nf(r - d), r);
     return 1u;
 }
 
@@ -6020,7 +6021,8 @@ uint vvClip(VvTri t, uint gt, uint h, float3 p, uint vh, float r, out float alph
     nn = side > 0.0 ? t.n : -t.n;
     bool only = (t.clip & 2u) != 0u;
     if (only && d >= 0.0) return 2u;
-    pen = only ? -d : nf(r - d);
+    // At most r (explicit_contact.rs clip_depth): held behind, pushed as at the plane.
+    pen = min(only ? -d : nf(r - d), r);
     return 1u;
 }
 
