@@ -113,6 +113,11 @@ pub struct SkBeam {
     /// at [`super::material::REF_LENGTH`]) before [`Skeleton::cap_to_bound`]
     /// (0: not capped).
     pub target_k: f32,
+    /// JBeam plastic limits (`rubble_jbeam_plastic`): its deformLimitStress
+    /// as a multiple of its yield force (1: it never hardens) and its
+    /// deformLimit (its rest length never shortens past 1 − this of its
+    /// spawn rest length). None: the `.truck` yield rule.
+    pub plastic_limits: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -285,6 +290,7 @@ impl Skeleton {
             structure: false,
             rest_scale: 1.0,
             target_k: 0.0,
+            plastic_limits: None,
         });
         true
     }
@@ -1248,6 +1254,27 @@ impl Skeleton {
         }
         if group != 0 {
             let _ = writeln!(s, "detacher_group end");
+        }
+        // (Rubble's extension: JBeam's plastic limits on those beams.)
+        let limited: Vec<&SkBeam> = self
+            .beams
+            .iter()
+            .filter(|b| {
+                b.plastic_limits.is_some()
+                    && b.ty == BeamType::Normal
+                    && self.pos(b.a).distance(self.pos(b.b)) * b.rest_scale >= MIN_YIELD_LENGTH
+            })
+            .collect();
+        if !limited.is_empty() {
+            let _ = writeln!(
+                s,
+                "\nrubble_jbeam_plastic\n; a, b, deformLimitStress (N), deformLimit, deformLimitExpansion"
+            );
+            for b in limited {
+                let (cap, d) = b.plastic_limits.unwrap();
+                let stress = round2(cap * round2(b.mat.deform));
+                let _ = writeln!(s, "{}, {}, {stress}, {d}, -1", b.a, b.b);
+            }
         }
         if !self.shocks.is_empty() {
             // Past its bounds a shock moves to the beam defaults' spring and

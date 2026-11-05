@@ -1534,6 +1534,10 @@ impl ExplicitBeams {
         if !file.contact_breaks.is_empty() {
             s.set_contact_breaks(&file.contact_breaks)?;
         }
+        // `rubble_jbeam_plastic` (Rubble's extension, spec §3).
+        if !file.jbeam_plastic.is_empty() {
+            s.set_jbeam_plastic(&file.jbeam_plastic)?;
+        }
         if !file.spawn_contacts.is_empty() {
             let sorted = |t: [u32; 3]| {
                 let mut t = t;
@@ -2366,6 +2370,41 @@ impl ExplicitBeams {
             node_break: vec![(0, 0.0); n],
             pending: vec![0; groups + 1],
         }));
+    }
+
+    /// JBeam plastic limits on `.truck` beams (`rubble_jbeam_plastic`, spec
+    /// §3): per line (a, b, deformLimitStress N, deformLimit, deformLimitExpansion)
+    /// the plain beam between nodes a and b becomes a JBeam NORMAL beam
+    /// ([`ExplicitKind::JbeamPlain`]) with its spring, damping, thresholds,
+    /// strength and plastic coefficient, its hardening capped at the stress
+    /// and its rest length held within (1 − d)·L and (1 + dₑ)·L of its rest
+    /// length L now (a negative limit: none), exactly as JBeam mode loads
+    /// them. Errors name a pair with no plain beam.
+    pub fn set_jbeam_plastic(
+        &mut self,
+        lines: &[(u32, u32, f32, f32, f32)],
+    ) -> Result<(), String> {
+        let mut at: HashMap<(u32, u32), usize> = HashMap::new();
+        for (j, b) in self.beams.iter().enumerate() {
+            if b.kind == ExplicitKind::Plain && b.ty == ExplicitType::Deformable {
+                at.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(j);
+            }
+        }
+        for &(a, b, stress, d, de) in lines {
+            let Some(&j) = at.get(&(a.min(b), a.max(b))) else {
+                return Err(format!("rubble_jbeam_plastic: no plain beam {a}–{b}"));
+            };
+            let beam = &mut self.beams[j];
+            beam.kind = ExplicitKind::JbeamPlain;
+            beam.limit_k = if stress >= 0.0 { stress } else { f32::INFINITY };
+            beam.short_bound = if d >= 0.0 { (1.0 - d) * beam.rest } else { 0.0 };
+            beam.long_bound = if de >= 0.0 {
+                (1.0 + de) * beam.rest
+            } else {
+                f32::INFINITY
+            };
+        }
+        Ok(())
     }
 
     /// Contact breaks (`rubble_contact_breaks`, spec §32): per line (break group,
