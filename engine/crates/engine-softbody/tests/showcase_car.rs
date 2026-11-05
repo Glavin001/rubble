@@ -4634,7 +4634,9 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
         if k < 0.99 * bm.target_k {
             soft += 1;
             let sat = rows[bm.a as usize].max(rows[bm.b as usize]);
-            if sat < 0.98 {
+            // (The rest pose moves nodes up to a few cm, which changes beams'
+            // lengths and so their rows by a few per cent.)
+            if sat < 0.95 {
                 if soft_free.len() < 6 {
                     eprintln!(
                         "  soft beam {j}: {:?} {:?} parts {} {} k {k:.3e} target {:.3e} l {l:.3} rows {:.3} {:.3} masses {:.3} {:.3} fixed {} tie {} group {}",
@@ -4655,6 +4657,45 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
         "beams softer than the bound requires (beam, ratio, row): {:?}",
         &soft_free[..soft_free.len().min(20)]
     );
+    // Per part: its skin's beams' k (the BX's door skin: 1.1 MN/m on 1 kg
+    // nodes, `beamng-realism-plan.md` §1.3), node count and median mass.
+    let shell: HashSet<u32> = b.shell.nodes.iter().copied().collect();
+    for (pi, name) in sk.parts.iter().enumerate() {
+        let nodes: Vec<f32> = sk
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| n.part as usize == pi && shell.contains(&(*i as u32)))
+            .map(|(_, n)| n.mass)
+            .collect();
+        let all = sk.nodes.iter().filter(|n| n.part as usize == pi).count();
+        let mut ks: Vec<f32> = sk
+            .beams
+            .iter()
+            .filter(|bm| {
+                shell.contains(&bm.a)
+                    && shell.contains(&bm.b)
+                    && sk.nodes[bm.a as usize].part as usize == pi
+                    && sk.nodes[bm.b as usize].part as usize == pi
+                    && bm.target_k > 0.0
+            })
+            .map(|bm| bm.mat.k_at(sk.pos(bm.a).distance(sk.pos(bm.b))))
+            .collect();
+        if ks.is_empty() {
+            continue;
+        }
+        ks.sort_by(f32::total_cmp);
+        let mut ms = nodes.clone();
+        ms.sort_by(f32::total_cmp);
+        eprintln!(
+            "part {name:>10}: {all:4} nodes ({} skin, median {:.2} kg); skin beam k median {:.2e} N/m (p10 {:.2e}, p90 {:.2e})",
+            nodes.len(),
+            ms[ms.len() / 2],
+            ks[ks.len() / 2],
+            ks[ks.len() / 10],
+            ks[ks.len() * 9 / 10]
+        );
+    }
     // Per member: its chords' real k against the built.
     const E: f32 = 210e9;
     eprintln!(
