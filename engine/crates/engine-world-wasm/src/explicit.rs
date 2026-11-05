@@ -93,6 +93,18 @@ fn build(
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
         let pc = v.get("pc").and_then(|t| t.as_str());
+        if v.get("native").and_then(|n| n.as_bool()).unwrap_or(false) {
+            // JBeam mode (jbeam-semantics-spec.md): BeamNG's rules, pressure wheels.
+            let desc = engine_softbody::jbeam::load_jbeam(&refs, pc)?;
+            let (sim, warnings) = ExplicitBeams::from_desc_jbeam_with(
+                &desc,
+                engine_softbody::explicit_beams::JbeamWheels::Pressure,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                settings,
+            )?;
+            return Ok((sim, desc, warnings));
+        }
         let (sim, text, warnings) =
             ExplicitBeams::from_jbeam(&refs, pc, Vec3::ZERO, Vec3::ZERO, settings)?;
         return Ok((sim, engine_softbody::truck::load_truck(&text), warnings));
@@ -455,7 +467,8 @@ fn arena(spec: &serde_json::Value, width: f32, length: f32) -> (Vec<ArenaSpot>, 
 #[wasm_bindgen]
 impl WebWorld {
     /// Explicit-beams vehicles on this world's device. `spec`: `{ vehicles: [{
-    /// truck | jbeam: [[name, text], …] (+ pc) | desc, at: [x, z], yaw, front }], scene:
+    /// truck | jbeam: [[name, text], …] (+ pc, + native: true for JBeam mode with pressure
+    /// wheels) | desc, at: [x, z], yaw, front }], scene:
     /// 'idle' | 'coast' | 'wall' | 'arena', speed (m/s, coast and wall), wallGap (m,
     /// default 1 + 0.5·speed); arena (see `arena`): count, cols, speedMin, speedMax,
     /// hitMin, hitMax, headOn, layout ('rows' | 'ring', see `ring`), ringRadius;
