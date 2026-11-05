@@ -206,6 +206,7 @@ pub fn box_truss(
     section: usize,
     catch: bool,
     snap: &[u32],
+    outer: &std::collections::HashSet<u32>,
 ) -> Truss {
     let pts = resample(path, spacing);
     let mut truss = Truss::default();
@@ -333,13 +334,22 @@ pub fn box_truss(
         if i + 1 < n {
             let q = truss.stations[i + 1];
             let mm = mat(0.5 * (truss.t[i] + truss.t[i + 1]));
+            // (Not between two of `outer`'s nodes: the shell there is this
+            // chord and this face already.)
+            let both = |a: u32, b: u32| outer.contains(&a) && outer.contains(&b);
             for e in 0..4 {
-                sk.beam(s[e], q[e], mm);
+                if !both(s[e], q[e]) {
+                    sk.beam(s[e], q[e], mm);
+                }
             }
             let diag = mm.stiffer(DIAG).scaled(DIAG);
             for e in 0..4 {
-                sk.beam(s[e], q[(e + 1) % 4], diag);
-                sk.beam(s[(e + 1) % 4], q[e], diag);
+                if !both(s[e], q[(e + 1) % 4]) {
+                    sk.beam(s[e], q[(e + 1) % 4], diag);
+                }
+                if !both(s[(e + 1) % 4], q[e]) {
+                    sk.beam(s[(e + 1) % 4], q[e], diag);
+                }
             }
         }
     }

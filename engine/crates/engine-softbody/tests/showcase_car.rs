@@ -5664,6 +5664,62 @@ fn topology_census() {
             e.3.push(bm.mat.deform / kl);
         }
     }
+    {
+        let mut in_tri: HashSet<u32> = HashSet::new();
+        for t in &b.shell.tris {
+            in_tri.extend(t.iter().copied());
+        }
+        let lone: Vec<(u32, Vec3, f32)> = b
+            .shell
+            .nodes
+            .iter()
+            .filter(|i| !in_tri.contains(i))
+            .map(|&i| (i, sk.pos(i), sk.nodes[i as usize].mass))
+            .collect();
+        eprintln!("shell nodes in no skin triangle: {lone:?}");
+    }
+    // `TOPO_NODE=x,y,z`: every beam at the node nearest that point (its
+    // other end's groups, length, k, kind), to see what fills its row.
+    if let Ok(p) = std::env::var("TOPO_NODE") {
+        let v: Vec<f32> = p.split(',').filter_map(|x| x.parse().ok()).collect();
+        let q = Vec3::new(v[0], v[1], v[2]);
+        let all: Vec<u32> = (0..sk.nodes.len() as u32).collect();
+        let n = sk.nearest(q, &all, 1)[0];
+        let gname = |i: u32| -> String {
+            let g: Vec<&str> = b
+                .groups
+                .iter()
+                .filter(|(_, g)| g.contains(&i))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            let sh = if shell.contains(&i) { "shell " } else { "" };
+            format!("{sh}{}", g.join("+"))
+        };
+        eprintln!(
+            "node {n} at {:.3?} mass {:.2} kg row {:.2}: {}",
+            sk.pos(n),
+            sk.nodes[n as usize].mass,
+            rows[n as usize],
+            gname(n)
+        );
+        for bm in sk.beams.iter().filter(|bm| bm.a == n || bm.b == n) {
+            let o = if bm.a == n { bm.b } else { bm.a };
+            let l = sk.pos(n).distance(sk.pos(o));
+            eprintln!(
+                "   to {o:>5} {:.3?} L {:.3} k {:.2e} kL {:.2e} deform {:.2e} c {:.1} {}{}{:?}: {}",
+                sk.pos(o) - sk.pos(n),
+                l,
+                bm.mat.k_at(l),
+                bm.mat.k_at(l) * l,
+                bm.mat.deform,
+                bm.mat.damp,
+                if bm.tie { "tie " } else { "" },
+                if bm.damper { "damper " } else { "" },
+                bm.ty,
+                gname(o)
+            );
+        }
+    }
     let med = |v: &mut Vec<f32>| {
         if v.is_empty() {
             return f32::NAN;
