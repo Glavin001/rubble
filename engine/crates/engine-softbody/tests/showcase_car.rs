@@ -638,7 +638,25 @@ impl Ledger {
         // (The force the node pass will take: its beams' plus the step's
         // fixed-point contact sum and held slide forces, `force_now`.)
         let now = s.forces_now();
-        for (n, &f_now) in s.nodes.iter().zip(&now) {
+        // (The BeamNG profile's air drag is its triangles' aerodynamics,
+        // applied in the beam pass: an external force, the drag term.)
+        let mut aero = vec![Vec3::ZERO; s.nodes.len()];
+        for (j, bm) in s.beams.iter().enumerate() {
+            if bm.kind != engine_softbody::explicit_beams::ExplicitKind::JbeamAeroTri || bm.broken {
+                continue;
+            }
+            let ext = &s.beam_ext[s.ext_of[j] as usize - 1];
+            let ids = [bm.a as usize, bm.b as usize, ext.index(0) as usize];
+            let f = engine_softbody::explicit_jbeam_ext::aero_tri_force(
+                ids.map(|i| s.nodes[i].pos),
+                ids.map(|i| s.nodes[i].vel),
+                ext,
+            );
+            for i in ids {
+                aero[i] += f;
+            }
+        }
+        for ((n, &f_now), &fa) in s.nodes.iter().zip(&now).zip(&aero) {
             let mut f = f_now;
             let g = if fresh {
                 Vec3::ZERO
@@ -649,7 +667,7 @@ impl Ledger {
                 -DRAG * approx_sqrt(n.vel.dot(n.vel)) * n.vel
             } else {
                 Vec3::ZERO
-            };
+            } + fa;
             self.gravity += (g * h).as_dvec3();
             self.drag += (d * h).as_dvec3();
             self.internal += ((f - g - d) * h).as_dvec3();
@@ -4269,6 +4287,25 @@ fn rig_pull(b: &Built, groups: &[usize], d: Vec3) -> (f32, bool) {
             break;
         }
     }
+    // (`RIG_TRACE=1`: the rig's beams that held, their kind, force and
+    // stretch.)
+    if std::env::var("RIG_TRACE").is_ok() {
+        for &j in rig.iter().filter(|&&j| !s.beams[j].broken) {
+            let bm = &s.beams[j];
+            let l = s.nodes[bm.a as usize]
+                .pos
+                .distance(s.nodes[bm.b as usize].pos);
+            eprintln!(
+                "  (rig) held {j}: {:?} force {:.1} kN strength {:.1} kN rest {:.3} len {:.3} tt {:.1} kN",
+                bm.kind,
+                bm.force / 1e3,
+                bm.strength / 1e3,
+                bm.rest,
+                l,
+                bm.tt / 1e3
+            );
+        }
+    }
     (peak, rig.iter().all(|&j| s.beams[j].broken))
 }
 
@@ -5515,6 +5552,31 @@ fn member_chord_yields() {
 #[ignore]
 fn which_nodes() {
     let b = built(Resolution::Medium);
+    // (`AERO_REPORT=1`: the exposed collision triangles by part, and their
+    // area projected on the car's front.)
+    if std::env::var("AERO_REPORT").is_ok() {
+        let sk = &b.skeleton;
+        let ex = sk.exposed_triangles();
+        let mut by: std::collections::BTreeMap<String, (usize, f32)> = Default::default();
+        let mut front = 0.0;
+        for &k in &ex {
+            let t = sk.collision[k].map(|i| sk.pos(i));
+            let c = (t[1] - t[0]).cross(t[2] - t[0]) * 0.5;
+            if c.z > 0.0 {
+                front += c.z;
+            }
+            let e = by
+                .entry(sk.parts[sk.nodes[sk.collision[k][0] as usize].part as usize].clone())
+                .or_default();
+            e.0 += 1;
+            e.1 += c.length();
+        }
+        eprintln!(
+            "aero: {} of {} collision triangles exposed; frontal area {front:.2} m²; {by:?}",
+            ex.len(),
+            sk.collision.len()
+        );
+    }
     // (`RUPTURE_REPORT=1`: the ductile beams' rupture, by part.)
     if std::env::var("RUPTURE_REPORT").is_ok() {
         let sk = &b.skeleton;
@@ -5552,7 +5614,12 @@ fn which_nodes() {
         );
         // (`NODES_BEAMS=1`: its beams, the other end's part, length, k and yield.)
         if std::env::var("NODES_BEAMS").is_ok() {
-            for bm in b.skeleton.beams.iter().filter(|x| x.a as usize == i || x.b as usize == i) {
+            for bm in b
+                .skeleton
+                .beams
+                .iter()
+                .filter(|x| x.a as usize == i || x.b as usize == i)
+            {
                 let o = if bm.a as usize == i { bm.b } else { bm.a } as usize;
                 let on = &b.skeleton.nodes[o];
                 eprintln!(

@@ -3288,8 +3288,18 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         // line out (a measurement switch: the RoR profile's contact rule).
         sk.beamng_profile = std::env::var("BEAMNG_PROFILE").map_or(true, |v| v != "0");
         // Steel tears at its elongation at break (`Skeleton::rupture`;
-        // `RUPTURE=0` leaves it out, a measurement switch).
-        sk.ductile = std::env::var("RUPTURE").map_or(true, |v| v != "0");
+        // `RUPTURE=1` builds it, a measurement switch until the solver can
+        // tear a beam at its expansion limit: one strength for both
+        // directions tears crushed beams in compression, `vehicle-authoring.md`).
+        sk.ductile = std::env::var("RUPTURE").is_ok_and(|v| v == "1");
+        // The car's air drag: every aero triangle at one coefficient that
+        // gives the measured Cd·A ([`AERO_DRAG_COEF`]; `AERO_COEF=<d>` sets
+        // another, a measurement switch).
+        let d = std::env::var("AERO_COEF")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(AERO_DRAG_COEF);
+        sk.drag_coef = Some((d, d));
         sk.cap_to_bound()?;
         for (b, &e) in sk.beams.iter_mut().zip(&elong) {
             if e >= 0.0 {
@@ -4427,6 +4437,16 @@ fn aperture_gauges(
     }
     out
 }
+
+/// The aero triangles' dragCoef (BeamNG's units: 100 a flat plate's) for
+/// one tier: the 2011 Accord sedan's Cd 0.31 on 2.31 m² (Cd·A 0.716 m²,
+/// fichacompleta.com.br's 2011 Accord EX 3.5 V6 sheet; Motor Matchup lists
+/// Cd 0.32 for the 2.4 EX), measured on sedan1 coasting at 100 km/h
+/// (`crash_invariants::profile_drag_is_the_triangles`: dragCoef 9 gives
+/// 310 N; ½ρ·Cd·A·v² is 338 N). liftCoef the same (BeamNG's default
+/// convention; no measured lift data). A Choice until the triangles take
+/// their own coefficients (covered and inner ones 0).
+pub const AERO_DRAG_COEF: f32 = 9.0 * 338.4 / 310.0;
 
 /// Seconds the car settles on its tyres before it is written ([`rest_pose`]).
 pub const INSTALL_SETTLE: f32 = 2.0;
