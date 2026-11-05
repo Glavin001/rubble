@@ -569,6 +569,20 @@ rule sizes each hit as if it were alone). Two-body's splitting under-corrects, a
 converged solve injects energy (third pass). This is a contact-response question, not a
 candidate-generation one.
 
+**Leak, seventh pass: the one-tier car (`SHOWCASE_STYLE=sedan1`, 2026-11-05, 1,052
+striker nodes, limit 10; CPU, live-skin metric; most leaked, the winding count in
+brackets).** RoR's rule 23 (42) / 7 (38) / 4 (5) at 0 / 0.43 / 0.7 m; two-body 13 (57) /
+11 (37) / 11 (31). With 1.3 kg body nodes, the hit crossings that leak are a handful,
+not hundreds. The count is chaotic at this level. Near the door middle, RoR's rule
+gives 9 / 23 / 13 at −0.03 / 0 / +0.03 m; near 0.43 m it gives 12 / 7 / 4 at 0.40 /
+0.43 / 0.46 m. Every case is within about twice the limit, and some are inside it.
+
+*Each hit's triangle mass split among the turn's hits on that triangle* (RoR's rule:
+m_t / n_t in the reduced mass, n_t the triangle's hits in the owner's turn; measured,
+reverted). sedan1: 17 / 10 / 18 at −0.03 / 0 / +0.03 m, 4 / 19 / 5 at 0.40 / 0.43 /
+0.46 m, 7 at 0.7 m. The two-tier car: 15 / 72 / 95 (was 13 / 43 / 85). No systematic
+gain on either car, so not adopted.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,
