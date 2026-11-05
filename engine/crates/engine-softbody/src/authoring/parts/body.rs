@@ -48,6 +48,11 @@ pub struct SectionShape {
     pub m_top: f32,
     /// How far the bottom curls under (m).
     pub tuck: f32,
+    /// The lower body's bow: its slope at the lower line as a multiple of the
+    /// mean slope up to the crease (0: upright there). Above 1 the side is
+    /// convex from the sill to the crease (it tucks under progressively, so
+    /// the flank turns away from the light instead of reading as a slab).
+    pub bow: f32,
 }
 
 impl SectionShape {
@@ -62,6 +67,7 @@ impl SectionShape {
             d_top: l(a.d_top, b.d_top),
             m_top: l(a.m_top, b.m_top),
             tuck: l(a.tuck, b.tuck),
+            bow: l(a.bow, b.bow),
         }
     }
 }
@@ -120,6 +126,21 @@ pub struct BodyStyle {
     pub scoop: Curve,
     pub scoop_depth: f32,
     pub scoop_z: [f32; 4],
+}
+
+/// The lid's ramp profile at t ∈ [0, 1] (0 at the edge, 1 at the top line):
+/// straight (the glass, the fender tops) for t ≤ 1 − tau, then a quartic
+/// round into the top. Curvature is continuous at both ends of the round
+/// (zero at each), so the clearcoat shows no line of light where the straight
+/// meets the round or where the round meets the crown.
+pub fn rail(t: f32, tau: f32) -> f32 {
+    let m = 1.0 / (1.0 - 0.5 * tau);
+    let t0 = 1.0 - tau;
+    if t <= t0 {
+        return m * t;
+    }
+    let s = t - t0;
+    m * t0 + m * s - m / (tau * tau) * s * s * s + m / (2.0 * tau * tau * tau) * s * s * s * s
 }
 
 /// Smooth max(s, 0) with a rounding of w (m).
@@ -400,7 +421,7 @@ impl Band {
                 ts + (1.0 - ts) * (v - vs) / (vc - vs)
             };
             let y = sc.yl + dy * t;
-            let d = hermite(t, s.d_lower, 0.0, 0.0, s.a_below * dy);
+            let d = hermite(t, s.d_lower, 0.0, -s.d_lower * s.bow, s.a_below * dy);
             return Vec2::new(d, y);
         }
         let t = (v - vc) / (1.0 - vc);
@@ -706,19 +727,14 @@ impl BodySurface {
                 * (1.0 - smoothstep(prof.length - 1.35, prof.length - 0.95, z));
             let crown_amt = style.lid_crown + (prof.crown - style.lid_crown) * cabin;
             let u = (x.abs() / x_r).min(1.0);
-            let top = prof.top.eval(z) + crown_amt * (1.0 - u * u) * (1.0 - u * u);
+            let top = prof.top.eval(z) + crown_amt * (1.0 - u * u).powi(3);
             let top = top.max(yb + 0.004);
             let rise = top - yb;
             let t = (d / ramp).clamp(0.0, 1.0);
             // A straight-ish ramp (the glass) into a rounded rail; a long gentle
             // one when the rise is small (fender tops into the bonnet).
             let tau = (0.7 - (rise - 0.05) * 1.6).clamp(0.22, 0.7);
-            let m = 1.0 / (1.0 - 0.5 * tau);
-            let hh = if t <= 1.0 - tau {
-                m * t
-            } else {
-                1.0 - m * (1.0 - t) * (1.0 - t) / (2.0 * tau)
-            };
+            let hh = rail(t, tau);
             let mut y = yb + rise * hh;
             // The rear deck (a crisp lid and the quarters' shoulder), merged
             // with the greenhouse by a smooth max: the C-pillar's crease.

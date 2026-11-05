@@ -667,16 +667,78 @@ pub fn caliper(w: &WheelSpec, angle_from_up: f32, toward: Vec3) -> Mesh {
     let ax = w.out;
     let up = (Vec3::Y - ax * Vec3::Y.dot(ax)).normalize();
     let fwd = toward.normalize();
-    let r = w.disc_radius - 0.022;
-    let hw = 0.5 * w.width;
-    let path: Vec<Vec3> = (0..=10)
-        .map(|k| {
-            let a = angle_from_up + (k as f32 / 10.0 - 0.5) * 0.75;
-            w.centre + (up * a.cos() + fwd * a.sin()) * r + ax * (hw * 0.15 + 0.012)
-        })
-        .collect();
-    m.tube(&path, ax, 0.032, 0.026, 16, mat::CALIPER, 0.8);
+    let dw = 0.5 * w.width * 0.15; // the disc's mid plane (as in `wheel`)
+    let rd = w.disc_radius;
+    // A monoblock caliper: an outboard piston housing with a flat, crowned
+    // face, a bridge over the disc's rim, and a slimmer inboard half. Each is
+    // a convex rounded section (axial a, radial ρ) swept round the disc's
+    // edge; the ends are rounded off in plan.
+    let half = 0.40; // half the arc (rad): about 15 cm long at the front
+    let n = 14;
+    let block = |m: &mut Mesh, a0: f32, a1: f32, r0: f32, r1: f32, rc: f32, sweep: f32| {
+        let sec = rounded_rect(a0, a1, r0, r1, rc, 4);
+        let rings: Vec<Vec<Vec3>> = (0..=n)
+            .map(|k| {
+                let t = k as f32 / n as f32 * 2.0 - 1.0;
+                // Rounded ends: the section shrinks toward its centre.
+                let s = (1.0 - t.abs().powi(6)).max(0.0).powf(0.35).max(0.55);
+                let ang = angle_from_up + t * sweep;
+                let (ca, sa) = (ang.cos(), ang.sin());
+                let rad = up * ca + fwd * sa;
+                let (am, rm) = (0.5 * (a0 + a1), 0.5 * (r0 + r1));
+                sec.iter()
+                    .map(|&[a, r]| {
+                        let a = am + (a - am) * s;
+                        let r = rm + (r - rm) * s;
+                        w.centre + rad * r + ax * (dw + a)
+                    })
+                    .collect()
+            })
+            .collect();
+        m.loft(&rings, |_| mat::CALIPER, 0.85, true);
+    };
+    // Outboard housing: the face toward the spokes.
+    block(&mut m, 0.016, 0.042, rd - 0.058, rd + 0.016, 0.009, half);
+    // Bridge over the disc's edge.
+    block(
+        &mut m,
+        -0.036,
+        0.036,
+        rd + 0.004,
+        rd + 0.026,
+        0.008,
+        half * 0.82,
+    );
+    // Inboard half.
+    block(
+        &mut m,
+        -0.040,
+        -0.016,
+        rd - 0.046,
+        rd + 0.016,
+        0.008,
+        half * 0.9,
+    );
     m
+}
+
+/// A rounded rectangle [a0, a1] × [r0, r1] (corner radius `rc`, `k` segments a
+/// corner), counter-clockwise.
+fn rounded_rect(a0: f32, a1: f32, r0: f32, r1: f32, rc: f32, k: usize) -> Vec<[f32; 2]> {
+    let corners = [
+        (a1 - rc, r0 + rc, -0.5 * PI),
+        (a1 - rc, r1 - rc, 0.0),
+        (a0 + rc, r1 - rc, 0.5 * PI),
+        (a0 + rc, r0 + rc, PI),
+    ];
+    let mut out = Vec::new();
+    for (cx, cy, start) in corners {
+        for i in 0..=k {
+            let t = start + 0.5 * PI * i as f32 / k as f32;
+            out.push([cx + rc * t.cos(), cy + rc * t.sin()]);
+        }
+    }
+    out
 }
 
 /// A mirror: housing (an egg, cut flat at the back for the glass) on an arm

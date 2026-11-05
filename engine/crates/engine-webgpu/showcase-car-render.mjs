@@ -300,7 +300,7 @@ fn env(d: vec3f, rough: f32) -> vec3f {
 // A 5 × 7 pixel font for the printed parts (tyre sidewalls, plates): glyph
 // rows packed 5 bits each (rows 0-3 in x, 4-6 in y; bit 4 the leftmost pixel).
 const FONT = array<vec2u, 21>(vec2u(1001022u, 18004u), vec2u(575025u, 14897u), vec2u(1001022u, 31281u), vec2u(541200u, 32272u), vec2u(999967u, 32272u), vec2u(475663u, 30753u), vec2u(1001022u, 16912u), vec2u(575022u, 14897u), vec2u(135327u, 4228u), vec2u(708142u, 14905u), vec2u(135556u, 14468u), vec2u(67118u, 32004u), vec2u(459838u, 30753u), vec2u(600258u, 2143u), vec2u(64031u, 14881u), vec2u(999686u, 14897u), vec2u(133183u, 8456u), vec2u(476718u, 14897u), vec2u(509486u, 12353u), vec2u(133185u, 16648u), vec2u(0u, 0u));
-const TYRE_TEXT = array<u32, 31>(0u, 1u, 2u, 2u, 3u, 4u, 20u, 20u, 5u, 6u, 7u, 0u, 8u, 20u, 20u, 20u, 11u, 13u, 14u, 19u, 13u, 9u, 20u, 0u, 10u, 18u, 20u, 20u, 20u, 20u, 20u);
+const TYRE_TEXT = array<u32, 31>(0u, 1u, 2u, 2u, 3u, 4u, 20u, 20u, 5u, 6u, 7u, 0u, 8u, 20u, 20u, 20u, 11u, 13u, 14u, 19u, 12u, 14u, 20u, 0u, 11u, 9u, 20u, 20u, 20u, 20u, 20u);
 const PLATE_TEXT = array<u32, 7>(0u, 2u, 3u, 20u, 13u, 16u, 9u);
 // Coverage of glyph g at p (pixels: x 0..5 right, y 0..7 down), soft edged.
 fn glyph(g: u32, p: vec2f) -> f32 {

@@ -287,6 +287,11 @@ The character lines are:
   kicks up over the rear wheel into the tail lamps at about 0.90 m
   (`BodyStyle::crease`; a 25–30° change of slope). Above it the side leans in
   to the belt.
+* **Flanks.** The side is not a slab: below the crease it bows, tucking
+  in 6.5 cm toward the sill with its steepest turn low (`SectionShape::bow`,
+  the lower line's slope as a multiple of the mean), so the lower doors face
+  the floor and read darker; above the crease the shoulder leans in hard
+  (`a_above` 0.85) and catches the sky, a bright band over the handles.
 * **Lower-door sculpture.** Under a feature line rising from 0.43 m behind the
   front arch to 0.60 m ahead of the rear one, the side steps in 2.4 cm with a
   crisp upper edge, easing out toward the sill (`BodyStyle::scoop`). A band row
@@ -316,11 +321,12 @@ The character lines are:
   wheels (a 20-inch look: the rim 0.80 of the tyre's radius, a low-profile
   sidewall) sit 4.2 cm outboard of the physics tyres (`design::WHEEL_OUT`),
   flush with the arch.
-* **Tail.** Wrapped tail lamps, deep at the outer end, joined by a 2.2 cm
-  light bar across the boot lid; a high-mounted stop lamp inside the
+* **Tail.** Wrapped tail lamps, deep at the outer end, joined by a 7 cm
+  smoked light band across the boot lid (an LED outline and one LED blade
+  through it, the badge on its centre); a high-mounted stop lamp inside the
   backlight's top edge; a black diffuser insert rising into pockets round
   the exhaust tips, with five fins under it; an original badge (a split
-  hexagon, `fixtures::emblem`) on the lid and the nose; a rear plate in the
+  hexagon, `fixtures::emblem`) on the light band and the nose; a rear plate in the
   bumper.
 * **Tumblehome.** The side glass leans in by about 22°, from the belt at a half
   width of about 0.86 m to the roof rail at about 0.66 m. The roof, bonnet and
@@ -349,12 +355,12 @@ opening's edge, the doors' belt edges included, is black rubber.
 
 | Part | Construction |
 |---|---|
-| Body surface (`parts/body.rs`) | A *band* is swept round the plan outline: a section per arc length θ, blended between side, nose and tail shapes. The crease and lower line fall on fixed rows, so their highlights run straight. A *lid* (height field over plan view) runs from the band's top edge over a ramp (tumblehome, fender tops) to the profile's top line and crown. The lid is relaxed by a Laplacian. The profile's curves are blurred (σ 8 cm) so the clearcoat shows no ripples at their control points. Grid: 2.2 cm across the sections, 3.5 cm along the car (twice that at the distant LOD). |
+| Body surface (`parts/body.rs`) | A *band* is swept round the plan outline: a section per arc length θ, blended between side, nose and tail shapes. The crease and lower line fall on fixed rows, so their highlights run straight. A *lid* (height field over plan view) runs from the band's top edge over a ramp (tumblehome, fender tops) to the profile's top line and crown. The ramp's round into the top is a quartic with zero curvature at both ends (`body::rail`) and the crown fades as (1 − u²)³, so no line of light runs along the roof rail or the fender tops. The rear deck meets the greenhouse in a 3.5 cm smooth max (the C-pillar's fillet into the quarter). The lid is relaxed by a Laplacian. The profile's curves are blurred (σ 8 cm) so the clearcoat shows no ripples at their control points. Grid: 2.2 cm across the sections, 3.5 cm along the car (twice that at the distant LOD). |
 | Panels (`parts/trim.rs`, `design.rs`) | Each panel is a region (an SDF made of smooth cut lines in side, plan or arc view), made metric on the surface and clipped by marching triangles, so edges follow the curve, not the grid. Every cut is rolled (2.8 mm radius) into a 12 mm wall and a return flange, set back 2.2 mm, giving a 4.5 mm shut line. Arch lips get an 8 mm roll. The inside of a panel renders dark. Panels: bonnet, cowl (black), lip and bumper front, fenders, doors, deck lid, valance and bumper rear, sills (black), body. |
 | Glass | The body surface over each opening, set 6 mm in, with a black frit band printed inside the windscreen and backlight. The side windows sit in black sash frames, with a black B-pillar applique (one half on each door) and a chrome belt moulding. The windscreen is laminated (it cracks); the side glass is tempered (it shatters). The rear doors', quarter lights' and backlight's glass is privacy-tinted (`mat::PRIVACY`). |
 | Lamps (`fixtures::lamp`) | A lens continuing the body surface; a housing extruded along the lamp axis; a reflector back; small projector cups with lens domes; light guides that follow the outline (the DRL ring; two tail rings; the light bar; the fog lamps' LED line). |
 | Grille (`fixtures::grille`) | Gloss-black surround, a dark throat recessed 8 cm and a honeycomb back mesh (drawn by the shader). The side intakes are grilles too, their throats along the lamp axis. |
-| Wheels (`fixtures::wheel`, `caliper`) | Tyre lathe: four tread grooves, rounded shoulders, a rim protector and lettering band, proportioned to the sidewall's height. Texture coordinates on the tyre (u round it, v up the sidewall or across the tread) carry raised "RUBBLE SPORT 245/40 R19" lettering on the outer sidewall and tread blocks on the shoulders. Rim: lip and barrel, a dished face of ten split spokes (each forks toward the lip) cut on a polar grid, the faces diamond cut (`mat::MACHINED`), the 4 cm spoke walls gunmetal (`mat::RIM`); centre cap, five lug nuts. Vented disc (38 cm front, 35 cm rear) with its hat. The lettering's u seam has its own vertices (no text run backwards). The caliper rides the axle (it does not turn). |
+| Wheels (`fixtures::wheel`, `caliper`) | Tyre lathe: four tread grooves, rounded shoulders, a rim protector and lettering band, proportioned to the sidewall's height. Texture coordinates on the tyre (u round it, v up the sidewall or across the tread) carry raised "RUBBLE SPORT 245/35 R20" (matching the 20-inch rim) lettering on the outer sidewall and tread blocks on the shoulders. Rim: lip and barrel, a dished face of ten split spokes (each forks toward the lip) cut on a polar grid, the faces diamond cut (`mat::MACHINED`), the 4 cm spoke walls gunmetal (`mat::RIM`); centre cap, five lug nuts. Vented disc (38 cm front, 35 cm rear) with its hat. The lettering's u seam has its own vertices (no text run backwards). The caliper is a monoblock: a flat-faced outboard piston housing, a bridge over the disc's rim and a slimmer inboard half, each a rounded section swept round the disc's edge with rounded ends; it rides the axle (it does not turn). |
 | Mirror, handles, wipers | An egg housing (paint above, black below) on an arm from the door's sail, with its glass; a chrome pull handle over a dark pocket; two wipers parked along the windscreen's base. |
 | Plates, badges | Plates are the body surface over their outline, set proud, with texture coordinates: the shader prints a border and "RBL 470" (a 5 × 7 pixel font), fading to grey when too small to read. The badge is extruded chrome facets on a black backing. |
 | Interior (`parts/interior.rs`, `design.rs`) | Superellipsoid shapes: front seats (cushion, back, side bolsters, headrest on chrome posts, pedestal), a rear bench with two shaped places and three headrests; a dashboard lofted from a side section across the cabin, with a binnacle, a lit instrument cluster and a floating centre screen (the `display` material draws dials and a map from texture coordinates), vents and a trim strip; a three-spoke steering wheel with its hub and column shroud; a console with armrest and selector. Door cards are each door's skin 10 cm in (dark above the armrest); the headliner and pillar trim the greenhouse's skin 1.8 cm in; carpet; a parcel shelf with the high-mounted stop lamp. |

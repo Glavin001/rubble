@@ -75,13 +75,14 @@ pub struct Styling {
 pub fn sedan_styling(def: &VehicleDef) -> Styling {
     let side = SectionShape {
         lower: 0.11,
-        d_lower: -0.03,
+        d_lower: -0.065,
         crease: f32::NAN,
-        a_below: 0.17,
-        a_above: 0.45,
-        d_top: -0.05,
+        a_below: 0.04,
+        a_above: 0.85,
+        d_top: -0.06,
         m_top: 0.25,
         tuck: 0.07,
+        bow: 2.4,
     };
     // An upright fascia: its widest line high (at the lamps' lower edge), the
     // lower bumper drawn back under it (a shorter-looking overhang), and a
@@ -95,6 +96,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         d_top: -0.10,
         m_top: 0.55,
         tuck: 0.04,
+        bow: 0.0,
     };
     let tail = SectionShape {
         lower: 0.08,
@@ -105,6 +107,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         d_top: -0.03,
         m_top: 0.2,
         tuck: 0.07,
+        bow: 0.0,
     };
     let body = BodyStyle {
         // The shoulder: one line from above the headlamp, level through the
@@ -136,7 +139,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         step_along: 0.035,
         nose_ramp: 0.045,
         tail_ramp: 0.04,
-        rear_deck: [0.85, 1.25, 0.045, 0.012],
+        rear_deck: [0.85, 1.25, 0.045, 0.035],
         hood_crease: [0.22, 0.60, 0.014, 0.004],
         hood_z: [3.36, 4.70],
         deck_lip: [0.026, 0.24, 0.60],
@@ -222,7 +225,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
             (0.72, -0.100),
             (0.465, -0.092),
         ],
-        lightbar: [0.445, -0.034, 0.011],
+        lightbar: [0.445, -0.051, 0.036],
         // No front plate: the grille is the face.
         plate_front_h: f32::NAN,
         fog: Vec::new(),
@@ -950,15 +953,16 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         depth: 0.03,
         lens: mat::TAIL_LENS,
         housing: mat::TRIM,
-        reflector: mat::TAIL_BACK,
-        guides: vec![(-0.02, -0.0022, mat::TAIL_LED)],
-        guide_depth: 0.005,
+        reflector: mat::TRIM,
+        // A smoked full-width band: an LED outline and one blade through it.
+        guides: vec![(-0.0065, -0.0035, mat::TAIL_LED)],
+        guide_depth: 0.006,
         projectors: Vec::new(),
         projector_r: 0.0,
         guide_above: Vec::new(),
-        lens_bulge: 0.0,
-        bars: Vec::new(),
-        bar_half: 0.0,
+        lens_bulge: 0.003,
+        bars: vec![0.5],
+        bar_half: 0.0025,
     };
     pieces.push(Piece {
         name: "lightbar".into(),
@@ -1395,10 +1399,11 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             bind: Bind::Vote,
         });
         let ar = half;
-        let (pr, nr) = surf.band_at(ar, surf.band_top_y(ar) - 0.072, 1.0);
+        // On the light band's centre, proud of its lens.
+        let (pr, nr) = surf.band_at(ar, surf.band_top_y(ar) + st.lightbar[1], 1.0);
         pieces.push(Piece {
             name: "emblem_rear".into(),
-            mesh: fixtures::emblem(pr + nr * 0.002, nr, Vec3::Y, 0.06),
+            mesh: fixtures::emblem(pr + nr * 0.005, nr, Vec3::Y, 0.058),
             bind: Bind::Vote,
         });
     }
