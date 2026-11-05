@@ -186,12 +186,30 @@ fn residual_side_crush(spawn: &[Vec3], now: &[Vec3], skin: &[usize]) -> f32 {
     let yaw = axis(now) - axis(spawn);
     let turn = glam::Quat::from_rotation_y(-yaw);
     let (c0, c1) = (mean(spawn, &far), mean(now, &far));
-    skin.iter()
+    let crush: Vec<(usize, f32)> = skin
+        .iter()
         .map(|&i| {
             let back = c0 + turn * (now[i] - c1);
-            spawn[i].x - back.x
+            (i, spawn[i].x - back.x)
         })
-        .fold(0.0, f32::max)
+        .collect();
+    // MDB_WHO=1: the crush profile along the car (max per 0.25 m of z) and
+    // the deepest nodes.
+    if std::env::var("MDB_WHO").is_ok() {
+        let mut bins: std::collections::BTreeMap<i32, f32> = Default::default();
+        for &(i, c) in &crush {
+            let e = bins.entry((spawn[i].z / 0.25).floor() as i32).or_insert(f32::MIN);
+            *e = e.max(c);
+        }
+        let prof: Vec<String> = bins.iter().map(|(k, c)| format!("z {:+.2}: {:.0}", *k as f32 * 0.25, c * 1e3)).collect();
+        eprintln!("  crush profile (mm): {prof:?}");
+        let mut v = crush.clone();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for &(i, c) in v.iter().take(6) {
+            eprintln!("  node {i} at {:.2?}: {:.0} mm", spawn[i], c * 1e3);
+        }
+    }
+    crush.iter().map(|c| c.1).fold(0.0, f32::max)
 }
 
 /// The FMVSS 214 dynamic test (moving deformable barrier, 53.9 km/h, crabbed 27°)
@@ -232,6 +250,42 @@ fn mdb_side_impact(label: &str, truck: String) {
     let all = s.gpu_solver().positions();
     assert!(all.iter().flatten().all(|p| p.is_finite()), "{label}: non-finite nodes");
     let crush = residual_side_crush(&spawn, &now, &skin);
+    // MDB_WHO=1: the struck car's yielded and broken beams on its struck
+    // half, by part pair (the showcase car's skeleton names the parts).
+    if std::env::var("MDB_WHO").is_ok() && label == "showcase" {
+        use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+        let b = build(&style("sedan").unwrap(), &BuildParams { resolution: Resolution::parse("medium").unwrap(), strength: 1.0, paint: None }).unwrap();
+        let sk = &b.skeleton;
+        let name = |i: u32| -> String {
+            let i = i as usize;
+            let g = b.groups.iter().filter(|(_, g)| g.contains(&(i as u32))).map(|(k, _)| k.as_str()).min_by_key(|k| k.len());
+            match (g, sk.nodes.get(i)) {
+                (Some(g), _) => g.to_string(),
+                (None, Some(n)) => sk.parts[n.part as usize].clone(),
+                _ => "wheel".into(),
+            }
+        };
+        let gb = s.gpu_solver().beams().remove(0);
+        let mut tally: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        for (j, bm) in s.spawned(0).beams.iter().enumerate() {
+            let (pa, pb) = (spawn[bm.a as usize], spawn[bm.b as usize]);
+            if pa.x.min(pb.x) < reach - 0.45 {
+                continue;
+            }
+            let (mut x, mut y) = (name(bm.a), name(bm.b));
+            if x > y {
+                std::mem::swap(&mut x, &mut y);
+            }
+            let e = tally.entry(format!("{x}-{y}")).or_default();
+            if gb[j].broken {
+                e.1 += 1;
+            } else if gb[j].bent() {
+                e.0 += 1;
+            }
+        }
+        tally.retain(|_, v| v.0 + v.1 > 0);
+        eprintln!("  struck half, (yielded, broken) by part pair: {tally:?}");
+    }
     eprintln!(
         "MDB into the {label}: energy {:.1} kJ at the start, at most {:.1} kJ; residual side crush {:.0} mm ({} skin nodes)",
         e0 * 1e-3,

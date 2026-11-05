@@ -2988,7 +2988,22 @@ fn settle(sk: &Skeleton, glass: &[usize]) -> Result<Settled, String> {
         }
     }
     if s.beams.iter().any(|b| b.broken) {
-        return Err("the car broke a beam settling on its tyres".into());
+        let which: Vec<String> = s
+            .beams
+            .iter()
+            .filter(|b| b.broken)
+            .take(6)
+            .map(|b| {
+                let name = |i: u32| match sk.nodes.get(i as usize) {
+                    Some(nd) => format!("{i} {} {:.2?}", sk.parts[nd.part as usize], nd.p),
+                    None => format!("{i} wheel"),
+                };
+                format!("{}-{}", name(b.a), name(b.b))
+            })
+            .collect();
+        return Err(format!(
+            "the car broke a beam settling on its tyres: {which:?}"
+        ));
     }
     let um = |x: f32| ((x as f64 * 1.0e6).round() / 1.0e6) as f32;
     let file = |p: Vec3| {

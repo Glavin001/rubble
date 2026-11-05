@@ -187,6 +187,58 @@ Neither the front and rear subframe cross members at real sections
 cross member changed the 30 km/h count. Node-only contact lets the pole pass
 between stations 0.4–0.6 m apart once the catchers' ties fail.
 
+### A8 and FMVSS 214 diagnosis (2026-11-05, not fixed)
+
+At 30 km/h the side sweep fails 14 of 178 (cylinder 10, square 4): +1.60,
++1.90–2.05 (z 0.30–0.75), −1.15 to −1.25 (z 3.50–3.60), −0.60 and −0.05
+(z 2.95, 2.40). `POLE_TOUCH=1` lists the nodes at the pole's surface each
+frame:
+
+* −0.05 (16 cm ahead of the B-pillar): the B-pillar's nodes leave the pole
+  at 0.08–0.10 s; the front door (beam, belt, skin, its flange nodes) is
+  carried into the cabin; the force falls from 80 to 20 kN at 0.6 m and the
+  pole reaches 1.24 m. At −0.10 the force holds 80–90 kN and the pole stops
+  at 0.54 m.
+* +1.95 (rear overhang): only the bumper cover, boot lid, quarter skin and
+  (with catchers) the rear rail touch it; 15–28 kN to 1.45 m.
+* −1.20 (behind the front wheel): the wheel, apron, rail and suspension at
+  10–45 kN; nothing transverse in the lane until the powertrain at 1.55 m.
+
+Tried, none adopted (counts of the 178): catchers every 12 cm (16);
+catchers on `rail_f`, `apron`, `rail_r`, `quarter_inner`, `roof_rail` (12);
+those in the frame tier, with and without 12 cm (15, 12); a front subframe
+rear cross member at z 3.52 or a boot floor cross member at z 0.40 (each
+breaks a lumped brace while settling: braces pick the nearest frame node
+and spread over its station, so a new member's node moves their ends;
+`settle` now names the broken beams). The door flanges' bearing ×5
+(`BEAR_X`, a measurement) changed nothing.
+
+The MDB (`explicit_scenes`, `MDB_WHO=1`): residual crush 356 mm, deepest at
+the rear door's lower rear corner (z 1.52; its beam node 265 mm); the front
+door 74–99 mm. Its census on the struck half: the rear door's beam bearing
+on its flange broke, the sill yielded (15) and broke (2). Sectioning the
+C-pillar (70 × 100 × 1.4 mm DP780: chords 14 → 58 kN), its flange at
+2.8 mm, the door frames ×2 or the bearings ×5 each left the crush at
+356 mm to the millimetre; the door frames ×0.2 moved the maximum to the
+front door (250 mm).
+
+`member_chord_yields` (`--ignored`) lists each member's chord yield. Besides
+the sectioned members (sill 56, B-pillar 77, tunnel 62, floor cross members
+45–70 kN) the side's load paths are far below a real section: roof rails and
+headers 4.2 kN (a ladder: 0.42 kN·m; a 70 × 90 × 1.4 mm DP780 rail is about
+5.4 kN·m), C-pillar 14, rear rails 11.6, subframe cross members 4.3.
+
+**Glazing in torsion** (`i_windscreen_share_of_torsion`, `--ignored`,
+Medium): body-in-white 12.61 kN·m/deg; the windscreen pane's own beams and
+bead carry 0.2 % (with `BRITTLE_GLASS=1` too); the lumped windscreen panel
+(`windscreen_x`) 22 %; with the backlight's glass shear panel (parcel to
+rear header) out as well, 3.07 kN·m/deg: the glazing carries 76 %. The
+Ford P2000 measured 24.29 against 16.44 kN·m/deg with and without its
+windscreen and backlight (32 %; via SAE 2000, Khaleel et al., "Effect of
+Glazing System Parameters on Glazing System Contribution to a Lightweight
+Vehicle's Torsional Stiffness and Weight"). So the body without glass is
+too soft by about 3× and its lumped glass panels make up the difference.
+
 ## Node counts (BeamNG's)
 
 The structure is noded as BeamNG's cars are: a frame of a few hundred heavy
