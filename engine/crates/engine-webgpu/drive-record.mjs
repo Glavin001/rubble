@@ -1,6 +1,6 @@
 // Records driving on the explicit solver (softbody.html ?solver=explicit&xscene=yard:
 // raycast wheels on the soft-body car) as a video: the car pulls away, weaves left and
-// right, then drives into one of the yard's poles at speed; real time while driving,
+// right, then drives into the side of a parked car at speed; real time while driving,
 // 10x slow motion through the crash, then real time again. The driver is scripted
 // here (steering toward waypoints from the page's own drive read-back) and its input
 // goes through the page's input path (window.__explicit.drive). Frames are captured
@@ -136,8 +136,9 @@ await lab('(L.lab.setClean(true), true)');
 await X('(X.drive({ forward: 0 }), true)');
 await lab('L.advance(2000, 40)');  // settle on the wheels (not recorded)
 for (let i = 0; i < 30; i++) await lab('L.draw()');
-// Pull away weaving between waypoints, then at the pole at x = 0, z = 34.
-const route = [[-3, 8], [3, 16], [0, 34]];
+// Pull away weaving between waypoints, then into the side of the car parked
+// across x = 14, z = 20.
+const route = [[-3, 6], [2, 12], [14, 20]];
 let leg = 0;
 const driver = (p) => {
   while (leg < route.length - 1 && p.c[2] > route[leg][1] - 2) leg++;
@@ -152,6 +153,8 @@ for (let n = 0; n < 60 * 12 && impact == null; n++) {
 }
 if (impact == null) throw new Error('no impact');
 console.log(`impact at ${(simT).toFixed(2)} s`);
+// The three-quarter view for the crash (both cars in frame).
+await lab('(L.lab.camera(\'three\', 0.9), true)');
 await play(0.4, 10, () => ({ forward: 0 }));   // 10x slow motion through the crash
 await play(1.5, 1, () => ({ forward: 0 }));    // real time after
 const hold = async (seconds) => { for (let f = 0; f < seconds * FPS; f++) { await lab('L.draw()'); await grab(); } };

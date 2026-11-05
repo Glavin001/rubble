@@ -243,6 +243,22 @@ RUNS.drive = async () => {
   return { ok, msg: `${a.contacts}/${a.wheels} wheels down; throttle 2 s: ${(b.speed * 3.6).toFixed(1)} km/h → ${png}` };
 };
 
+RUNS.traffic = async () => {
+  // The traffic derby: the cars drive themselves (ExplicitSim.autopilot); the plain
+  // view (no lab). Live (real time) for 8 s.
+  await send('Page.navigate', { url: `${base}/softbody.html?solver=explicit&xscene=traffic&cars=6&${CARS[CAR]}` });
+  await ready('explicit');
+  const read = () => evaluate('window.__explicit.readDrive().then((d) => d.vehicles.map((v) => ({ speed: v.speed, c: v.centre, down: v.wheels.filter((w) => w.contact).length })))');
+  const a = await read();
+  await evaluate('window.__live(8000)');
+  const b = await read();
+  const moved = b.map((v, i) => Math.hypot(v.c[0] - a[i].c[0], v.c[2] - a[i].c[2]));
+  const png = await shot(`${CAR}_traffic`);
+  const driving = moved.filter((m) => m > 5).length;
+  const ok = b.length === 6 && driving >= 4;
+  return { ok, msg: `${b.length} cars; moved ${moved.map((m) => m.toFixed(0)).join(', ')} m in 8 s; speeds ${b.map((v) => (v.speed * 3.6).toFixed(0)).join(', ')} km/h → ${png}` };
+};
+
 const names = only.length ? only : Object.keys(RUNS);
 let failed = 0;
 const report = [];

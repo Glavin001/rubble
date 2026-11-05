@@ -234,6 +234,10 @@
       for (const id of ['softKeys', 'presetSel']) document.getElementById(id).style.display = 'none';
       document.getElementById('infoTitle').innerHTML = '<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, Rigs of Rods parity</span>';
       document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams, soft tyres and self-collision, every step of a frame in one GPU submit; rendered from its buffers. Crash scenes with knobs (speeds, angles, overlap), static boxes, vehicle–vehicle contact and no drivetrain: driving, moving rigid bodies and the dune buggy are on the soft solver (button above).';
+      if (DRIVE) {
+        document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams and self-collision, on raycast wheels (the soft solver\'s raycast vehicle as forces on the hubs, so the body bends and stays bent), every step of a frame in one GPU submit.';
+        document.getElementById('xkeys').innerHTML = '<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>R</kbd> restart · <kbd>V</kbd> beams · <kbd>C</kbd> camera · drag to orbit, wheel to zoom';
+      }
       // Only the explicit solver's own scenes and vehicles are offered: the soft
       // scenes (poles, moving barriers, ramps, drivers) need the World's rigid
       // bodies and drivetrains, which it does not couple to.
