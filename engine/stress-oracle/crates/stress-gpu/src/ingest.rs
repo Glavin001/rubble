@@ -191,6 +191,12 @@ impl EngineIngest {
         self.chunk_count
     }
 
+    /// The per-substep row counts (`ingest_rows` writes slot k's; a host writing its own
+    /// records into a slot writes that slot's count).
+    pub fn row_counts_buffer(&self) -> &wgpu::Buffer {
+        &self.row_counts
+    }
+
     /// The rows and bodies it was made for (`new`).
     pub fn capacity(&self) -> (u32, u32) {
         (self.max_rows, self.max_bodies)

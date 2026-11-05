@@ -97,6 +97,10 @@ impl Fracture {
         false
     }
     pub fn body_destroyed(&mut self, _body: u32) {}
+    #[allow(clippy::type_complexity)]
+    pub fn vehicle_ingest(&self) -> anyhow::Result<Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u32)>> {
+        Ok(None)
+    }
 }
 
 #[cfg(feature = "stress")]
@@ -1845,10 +1849,12 @@ mod imp {
                 events: EVENT_ROOM,
             };
             let table = vec![static_info; capacity.max_colliders as usize];
+            // Two substep slots: the engine's contacts, then the explicit vehicles'
+            // chunk loads (`explicit_vehicles.rs`; merged only while vehicles are coupled).
             let ingest = EngineIngest::new(
                 gpu,
                 capacity.max_contacts,
-                1,
+                2,
                 capacity.max_bodies,
                 room.chunks,
                 &table,
@@ -1949,9 +1955,10 @@ mod imp {
             let offset = self.sim.last_contact_offset();
             let dt = self.sim.params().dt as f64;
             let step = self.sim.steps_done();
+            let slots = if self.explicit.is_some() { 2 } else { 1 };
             if let Some(sh) = self.fracture.shared.as_mut() {
                 sh.ingest.substep(&gpu, enc, &e, offset, 0, dt);
-                sh.ingest.merge(&gpu, enc, &e, 1);
+                sh.ingest.merge(&gpu, enc, &e, slots);
                 sh.fracture.encode_frame(&gpu, enc, step);
             }
             for o in self
@@ -1969,6 +1976,24 @@ mod imp {
     }
 
     impl Fracture {
+        /// The shared threshold ingest the explicit vehicles' chunk loads go into (slot
+        /// 1): its records, per-slot row counts, collider table and rows per slot. Err
+        /// when a destructible has its own fracture (crushing, blast loading): vehicle
+        /// strikes do not reach those (an explicit limit).
+        pub(crate) fn vehicle_ingest(
+            &self,
+        ) -> anyhow::Result<Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u32)>> {
+            if self.slots.iter().flatten().any(|t| t.own.is_some()) {
+                anyhow::bail!(
+                    "explicit vehicles: a threshold destructible with its own fracture (crushing or blast loading) cannot take vehicle strikes"
+                );
+            }
+            Ok(self.shared.as_ref().map(|sh| {
+                let (rows, _) = sh.ingest.capacity();
+                (&sh.ingest.records, sh.ingest.row_counts_buffer(), &sh.ingest.collider_info, rows)
+            }))
+        }
+
         /// The readback copies of every threshold destructible's state after a step: the
         /// shared fracture's counters and event lists (nothing that scales with the
         /// destructibles placed), and each own fracture's counters, chunk owners, bond

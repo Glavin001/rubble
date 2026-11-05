@@ -1288,6 +1288,19 @@ impl WgpuSim {
         self.queue_impulses(&[ImpulseRecord::set_velocity(body, linear, angular)]);
     }
 
+    /// A host's GPU pass appends impulse records for the next step after the host's
+    /// (as the terrain coupling does, `IMPULSE_COUNT` atomics, then `IMPULSE_FIRST` set
+    /// to the count): the step schedules `apply_impulses` and wakes.
+    pub fn mark_gpu_impulses(&mut self) {
+        self.terrain_impulses_pending = true;
+        self.wake_pending = true;
+    }
+
+    /// The scratch atomics buffer (binding 21: the impulse records at `IMPULSE_BASE`).
+    pub fn scratch_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[21]
+    }
+
     /// Queue impulse records for the next step. Panics past `IMPULSE_CAP` records
     /// in one step (an explicit limit, never a silent drop).
     pub fn queue_impulses(&mut self, records: &[ImpulseRecord]) {

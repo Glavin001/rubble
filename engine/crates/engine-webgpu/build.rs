@@ -517,6 +517,20 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             }
         }
     }
+    // Explicit vehicles in the World (engine-world `explicit_vehicles.rs`): one
+    // standalone module.
+    let coupling = wgsl_dir.join("vehicle_coupling.wgsl");
+    let mut cmd = std::process::Command::new(find_slangc()?);
+    cmd.args(["-target", "wgsl"]);
+    for e in ["cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end"] {
+        cmd.args(["-entry", e, "-stage", "compute"]);
+    }
+    let status = cmd
+        .arg("-o")
+        .arg(&coupling)
+        .arg(slang_root.join("kernels/vehicle_coupling.slang"))
+        .status()?;
+    anyhow::ensure!(status.success(), "slangc failed for vehicle_coupling.slang");
     // Soft-body skinning: one standalone WGSL module, three entries.
     let skin = wgsl_dir.join("soft_skin.wgsl");
     let status = std::process::Command::new(find_slangc()?)
