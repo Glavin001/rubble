@@ -277,3 +277,48 @@ All of these live under `https://nrd-static.nhtsa.dot.gov/tsv/vehdb`. The barrie
 - Wiacek et al., ESV 2015, "Evaluation of frontal crash stiffness measures from the U.S. NCAP": https://www-nrd.nhtsa.dot.gov/departments/esv/24th/files/24ESV-000257.PDF. It covers dynamic crush and pulse statistics for MY2002–2014.
 - JH Scientific, "Crush Analysis with Under-rides and the Coefficient of Restitution": https://www.jhscientific.com/downloads/CrushAndRestitution.pdf. It has a table of mean and SD of barrier e at 30/35 mph, after Prasad.
 - FMVSS 214 static door-crush compliance reports, for measured door forces. These are found through NHTSA's compliance test-report search; no specific file was identified.
+
+## 8. Measured pulses (NHTSA time histories, computed 2026-11-04)
+
+Rear-seat crossmember X accelerometers (channels 093 and 094, G's, global X, averaged
+per test) of the eight 56 km/h NCAP sedan tests in section 7, integrated from 56.3 km/h
+by `engine/scripts/nhtsa_pulse.py` (velocity and displacement from the raw signal;
+peak through a 100 Hz two-pole Butterworth run both ways, close to CFC 60). The files
+were downloaded with the user's permission into the gitignored
+`inspiration/nhtsa-pulses/` and are not committed.
+
+| Test | Car | Dynamic crush (m) | t_m (ms) | Rebound (m/s) | e | Peak (g) | Mean to t_m (g) |
+|---|---|---|---|---|---|---|---|
+| 8407 | 2014 Corolla | 0.723 | 69 | 2.52 | 0.161 | 45.3 | 23.0 |
+| 9065 | 2015 Corolla | 0.753 | 73 | 2.65 | 0.169 | 46.9 | 22.0 |
+| 9079 | 2015 Sentra | (1.105) | (91) | (7.47) | (0.48) | 56.6 | (17.6) |
+| 9593 | 2016 Civic | 0.680 | 76 | 3.10 | 0.198 | 34.3 | 21.0 |
+| 9764 | 2016 Cruze | 0.630 | 68 | 1.98 | 0.127 | 39.4 | 23.3 |
+| 9793 | 2017 Elantra | 0.647 | 65 | 2.40 | 0.154 | 43.9 | 24.6 |
+| 10688 | 2019 Forte | 0.617 | 63 | 2.88 | 0.184 | 44.0 | 25.5 |
+| 11574 | 2021 Elantra | 0.632 | 69 | 2.30 | 0.147 | 39.6 | 23.1 |
+
+9079 is excluded: its integral drifts (7.5 m/s rebound and 1.1 m crush are not
+physical for that car's measured residual crush), likely an accelerometer offset or
+saturation.
+
+Over the other seven:
+- **dynamic crush** 0.617–0.753 m (median 0.647 m);
+- **time of maximum crush** 63–76 ms (median 69 ms);
+- **rebound** 1.98–3.10 m/s (median 2.52 m/s);
+- **restitution** 0.127–0.198 (median 0.161);
+- **peak** 34–47 g (median 43.9 g);
+- **mean deceleration to t_m** 21–25.5 g.
+
+What this corrects:
+- **Restitution.** The measured e is 0.13–0.20. Section 3's "about 0.11" was low, and a rebound target below 1.5 m/s would be wrong.
+- **Springback.** Dynamic crush (median 0.65 m) minus residual crush (section 2, median 0.49 m) is about 0.16 m, roughly 25 % of the dynamic crush. Springback of 0.15–0.2 m is therefore normal for these cars, and a "≤ 10 %" bound would be wrong.
+- **What the simulation should match** at 56 km/h, 1,450 kg:
+  - dynamic crush 0.62–0.75 m;
+  - t_m 63–76 ms;
+  - rebound 2.0–3.1 m/s (e 0.13–0.20);
+  - peak 34–47 g at the rear seat crossmember (filtered as above);
+  - residual crush 380–580 mm (section 2).
+
+Caveat: these are 7 small and compact sedans of 1,250–1,400 kg. Mid-size sedans of
+about 1,450–1,550 kg sit in the same NCAP band (section 2's statistics cover them).
