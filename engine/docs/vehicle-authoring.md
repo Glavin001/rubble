@@ -544,7 +544,7 @@ opening's edge, the doors' belt edges included, is black rubber.
 * **Substance** (plan P7). Behind every door's outer skin sits its inner
   skin at the door's section (`DOOR_SECTION` 8.5 cm, just outboard of the
   door card), with shut faces round its edge; under the bonnet and boot lid
-  an inner frame (`LID_SECTION` 3.2 cm: a 9 cm band round the edge and two
+  an inner frame (`LID_SECTION` 3.2 cm: a 7 cm band round the edge and two
   ribs along it, the rest cut away as lightening holes, every hole flanged).
   These stampings (`mat::INNER`, the body colour, satin) bind where the outer
   skin over them binds (`Bind::Inset`: each vertex picks its triangle at the

@@ -118,6 +118,7 @@ const RUNS = [
   // Damage close-ups: the bay behind a crushed bonnet, the struck door's
   // inner skin through its tear, the roof's scrapes after the drop.
   ['wall_56_bay', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=0.55,0.55,1&dist=3.0&look=0,-0.1,1.3'],
+  ['zebra_wall_56_bay', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=0.55,0.55,1&dist=3.0&look=0,-0.1,1.3&zebra=1'],
   ['wall_120_bay', 'scene=wall&speed=120&runUp=0.6&freeze=1.0&cam=0.7,0.5,0.8&dist=3.4&look=0,-0.1,1.0'],
   ['sidepole_door', 'scene=sidepole&speed=32&runUp=0.3&freeze=1.2&cam=0.25,0.3,1&dist=3.0&look=0.4,-0.1,0.6'],
   ['drop_15_roof', 'scene=drop&height=15&freeze=3.5&cam=0.6,0.25,0.5&dist=4.2&look=0,-0.3,0'],

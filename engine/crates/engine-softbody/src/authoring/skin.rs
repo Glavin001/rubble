@@ -1257,8 +1257,8 @@ pub fn deform_with(
                     * (nn[node as usize] - Vec3::from_array(v.node_rest_normal[node as usize]));
             }
             let ns = d.normalize_or_zero();
-            // A kink (smooth and frame normals > ~15° apart) keeps the facet.
-            let k = super::parts::smoothstep(0.97, 0.90, ns.dot(nf));
+            // A fold (smooth and frame normals > ~45° apart) keeps the facet.
+            let k = super::parts::smoothstep(0.75, 0.55, ns.dot(nf));
             nrm.push(ns.lerp(nf, k).normalize_or_zero());
             continue;
         }
