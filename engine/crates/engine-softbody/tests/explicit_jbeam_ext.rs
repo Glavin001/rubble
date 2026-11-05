@@ -422,9 +422,14 @@ fn pressure_wheel_car_stands_on_its_tyres() {
         ke_max < drop_energy,
         "kinetic {ke_max} J above the drop's {drop_energy} J"
     );
+    // **Since §36's exact friction (2026-11-05):** RoR's bit-trick eˣ made the
+    // adhesion term ms·(1 − e^(−σ/va)) 4.2 % of ms at a slip of 1 mm/s (the exact
+    // law: 0.03 %), a stickiness that held the car on one flat; with the exact law it
+    // rolls 0.196 m, onto the next flat and back (the open low-speed rolling loss,
+    // §34). Bound: two flats.
     assert!(
-        hi - lo < 2.0 * std::f32::consts::PI * 0.32 / 12.0,
-        "the car rolls off its tyres' flats: {}",
+        hi - lo < 2.0 * 2.0 * std::f32::consts::PI * 0.32 / 12.0,
+        "the car rolls past two of its tyres' flats: {}",
         hi - lo
     );
     assert_eq!(s.damage().0, 0, "nothing broke");

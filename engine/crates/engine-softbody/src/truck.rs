@@ -115,6 +115,8 @@ enum Section {
     ContactBreaks,
     JbeamPlastic,
     TensionYield,
+    DampCutoff,
+    AeroTri,
     Skipped,
 }
 
@@ -368,6 +370,14 @@ pub struct TruckFile {
     /// deform threshold): a sheet buckles in compression but carries its
     /// material's yield in tension.
     pub tension_yield: Vec<(u32, u32, f32)>,
+    /// `rubble_damp_cutoff` lines `a, b, dampCutoffHz` (Rubble's extension,
+    /// jbeam-semantics-spec.md §36): the BeamNG profile's beam a–b damps only
+    /// its extension rate filtered at that cutoff (JBeam's `dampCutoffHz`, §2).
+    pub damp_cutoff: Vec<(u32, u32, f32)>,
+    /// `rubble_aero_tri` lines `a, b, c, dragCoef, liftCoef` (Rubble's extension,
+    /// §36): the BeamNG profile's triangle aerodynamics per cab triangle (nodes in
+    /// any order); with the section, an unlisted cab triangle has none.
+    pub aero_tri: Vec<([u32; 3], f32, f32)>,
     pub wheels: Vec<TruckWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
@@ -653,6 +663,8 @@ impl Parser {
             "rubble_contact_breaks" => Section::ContactBreaks,
             "rubble_jbeam_plastic" => Section::JbeamPlastic,
             "rubble_tension_yield" => Section::TensionYield,
+            "rubble_damp_cutoff" => Section::DampCutoff,
+            "rubble_aero_tri" => Section::AeroTri,
             // Known sections this importer does not simulate (phase 3 / cosmetic).
             "engoption"
             | "engturbo"
@@ -1152,6 +1164,24 @@ impl Parser {
                         "rubble_jbeam_plastic needs a, b, deformLimitStress, deformLimit, deformLimitExpansion: ignored"
                             .into(),
                     );
+                }
+            }
+            Section::DampCutoff => {
+                let n: Vec<f32> = t.iter().filter_map(|x| x.parse::<f32>().ok()).collect();
+                if n.len() >= 3 && n[0] >= 0.0 && n[1] >= 0.0 && n[2] > 0.0 {
+                    self.out.damp_cutoff.push((n[0] as u32, n[1] as u32, n[2]));
+                } else {
+                    self.warn("rubble_damp_cutoff needs a, b, dampCutoffHz (> 0): ignored".into());
+                }
+            }
+            Section::AeroTri => {
+                let n: Vec<f32> = t.iter().filter_map(|x| x.parse::<f32>().ok()).collect();
+                if n.len() >= 5 && n[..3].iter().all(|&x| x >= 0.0) {
+                    self.out
+                        .aero_tri
+                        .push(([n[0] as u32, n[1] as u32, n[2] as u32], n[3], n[4]));
+                } else {
+                    self.warn("rubble_aero_tri needs a, b, c, dragCoef, liftCoef: ignored".into());
                 }
             }
             Section::TensionYield => {
