@@ -114,3 +114,52 @@ fn pressure_wheel_car_matches_at_rest_and_into_a_wall() {
     assert!(s.nodes.iter().all(|n| n.pos.is_finite()));
     eprintln!("wall run: max difference {worst} m (a crash is chaotic: reported, not judged)");
 }
+
+/// The solver on a device with WebGPU's 64 KiB uniform binding limit (Chrome's):
+/// the parameter buffer holds 129 copies of 512 bytes (66 KiB), so every pass binds
+/// one copy, never the whole buffer. Its frames match the full-limit device's.
+#[test]
+fn runs_within_webgpu_uniform_binding_limit() {
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL;
+    desc.flags = engine_webgpu::instance_flags();
+    let instance = wgpu::Instance::new(desc);
+    let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        ..Default::default()
+    })) else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut limits = adapter.limits();
+    limits.max_uniform_buffer_binding_size = wgpu::Limits::default().max_uniform_buffer_binding_size;
+    assert_eq!(limits.max_uniform_buffer_binding_size, 65536);
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("webgpu-uniform-limit"),
+        required_limits: limits,
+        ..Default::default()
+    }))
+    .unwrap();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    // The narrow (multi-car) and wide (one car) paths, and the frame of 128 steps
+    // that writes every copy.
+    let mut cpu = spawn(PART2_CAR, Some(JbeamWheels::Pressure), Vec3::ZERO);
+    let mut one = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    let mut many = ExplicitBeamsGpu::new(&device, &queue, &vec![cpu.clone(); 3]);
+    let mut clock = FrameClock::default();
+    for _ in 0..10 {
+        let steps = clock.next();
+        cpu.frame();
+        one.frame(steps);
+        many.frame(steps);
+    }
+    one.frame(128);
+    many.frame(128);
+    one.wait();
+    many.wait();
+    let err = pollster::block_on(scope.pop());
+    assert!(err.is_none(), "validation error: {err:?}");
+    assert!(one.positions()[0].iter().all(|p| p.is_finite()));
+    assert_eq!(many.positions()[0], many.positions()[2]);
+}
