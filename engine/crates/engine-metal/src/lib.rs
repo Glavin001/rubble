@@ -8,7 +8,7 @@ pub mod terrain;
 mod world;
 
 pub use device::MetalDevice;
-pub use explicit::{MetalExplicitBeams, EXPLICIT_KERNELS};
+pub use explicit::{ExplicitKernel, MetalExplicitBeams, EXPLICIT_KERNELS, LOOP_CAP_TEST};
 pub use sim::MetalSim;
 pub use terrain::{TerrainCaps, TerrainTiming};
 pub use engine_schema::scene::SceneBuilder;

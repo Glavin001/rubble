@@ -2490,7 +2490,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     };
     sk.solve_masses(structure)?;
     size_hardware(&mut sk, &hardware, params.strength)?;
-    let panes: Vec<DamageUnit> = Vec::new();
+    let panes = brittle_glass(def, &mut sk, &shell, &mut groups_made, params.strength);
     preload(&mut sk, def);
     // Collision skin: the shell's skin on a coarser lattice, its nodes contacters.
     sk.collision = coarse_skin(&sk, &shell)?;
@@ -2499,7 +2499,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             sk.nodes[i as usize].contacter = true;
         }
     }
-    per_part_collision(&mut sk, &shell, &hardware);
+    shut_line_breaks(&mut sk, &shell, &hardware);
     sk.skin = shell.tris.clone();
     // Reference nodes: floor centre, a metre back, and left.
     let floor: Vec<u32> = shell
@@ -2519,6 +2519,17 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let mut out = sk.clone();
     for n in &mut out.nodes {
         n.p += shift;
+    }
+    if BRITTLE_GLASS {
+        let glass: Vec<usize> = panes
+            .iter()
+            .flat_map(|u| u.beams.iter().map(|&j| j as usize))
+            .collect();
+        let scale = installation_pose(&out, &glass)?;
+        for (&j, &f) in glass.iter().zip(&scale) {
+            sk.beams[j].rest_scale = f;
+            out.beams[j].rest_scale = f;
+        }
     }
     let truck = out.to_truck();
     let bind_tris: HashMap<String, Vec<[u32; 3]>> = groups
@@ -2545,35 +2556,189 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     })
 }
 
-/// Each part its own collision skin: no collision triangle spans a shut
-/// line (a part that comes off would drag it along as a ghost sheet), and
-/// every shell node of a part that can come off is a contacter (it meets
-/// the car it left and the other car wherever it lands).
-fn per_part_collision(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]) {
-    let before = sk.collision.len();
-    let nodes = &sk.nodes;
-    let dropped: Vec<[u32; 3]> = sk
-        .collision
+/// The collision skin across the shut lines (A1: no collision triangle
+/// outlives the joint it spans). The skin stays the closed lattice, so
+/// nothing passes between two parts while they are joined; each triangle
+/// with nodes in two parts breaks (spec §18) when a beam along its edges
+/// across the shut line breaks (the seam's seal, bolt or bearing beams) or
+/// when the nearest hinge
+/// or latch group of its parts lets go. Triangles inside a part stay plain:
+/// a part that comes off keeps its own skin and collides as a part. Every
+/// shell node of a part that can come off is a contacter, and the car's file
+/// asks for contact from every node (spec §10.2).
+fn shut_line_breaks(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]) {
+    let pins: Vec<(u16, Vec3, u32)> = hardware
         .iter()
-        .copied()
-        .filter(|t| t.iter().any(|&i| nodes[i as usize].part != nodes[t[0] as usize].part))
+        .map(|h| {
+            let b = &sk.beams[h.beams[0]];
+            let pin = if sk.nodes[b.a as usize].part == h.part { b.a } else { b.b };
+            (h.part, sk.pos(pin), h.group)
+        })
         .collect();
-    sk.collision.retain(|t| t.iter().all(|&i| nodes[i as usize].part == nodes[t[0] as usize].part));
-    if std::env::var("COLL_DEBUG").is_ok() {
-        let mut longest = 0.0f32;
-        for t in &dropped {
-            for k in 0..3 {
-                longest = longest.max(sk.pos(t[k]).distance(sk.pos(t[(k + 1) % 3])));
-            }
+    let mut breaks = Vec::with_capacity(sk.collision.len());
+    for t in &sk.collision {
+        let parts: Vec<u16> = t.iter().map(|&i| sk.nodes[i as usize].part).collect();
+        if parts.iter().all(|&p| p == parts[0]) {
+            breaks.push(None);
+            continue;
         }
-        eprintln!("collision: {before} -> {} triangles ({} span a shut line, longest edge {longest:.3} m)", sk.collision.len(), dropped.len());
+        let c = (sk.pos(t[0]) + sk.pos(t[1]) + sk.pos(t[2])) / 3.0;
+        let g = pins
+            .iter()
+            .filter(|p| parts.contains(&p.0))
+            .min_by(|a, b| a.1.distance(c).total_cmp(&b.1.distance(c)))
+            .map_or(0, |p| p.2);
+        // Its edges across the shut line (a torn skin beam inside a part
+        // leaves the part's own surface there).
+        let mask = (0..3)
+            .filter(|&k| parts[k] != parts[(k + 1) % 3])
+            .fold(0u8, |m, k| m | 1 << k);
+        breaks.push(Some((g, mask)));
     }
+    sk.collision_breaks = breaks;
+    sk.full_contact = true;
     let detachable: std::collections::HashSet<u16> = hardware.iter().map(|h| h.part).collect();
     for &i in &shell.nodes {
         if detachable.contains(&sk.nodes[i as usize].part) {
             sk.nodes[i as usize].contacter = true;
         }
     }
+}
+
+/// A pane's aperture gauges: the frame (primary) nodes nearest the opening's
+/// four corners (the extremes of its mounts' outer ends in the pane's two
+/// longest directions), joined by its edges and both diagonals. Each is a
+/// beam of negligible stiffness ([`GAUGE_K`], density 0, kept by the step
+/// fit) that breaks at `strain` of its length, in `group`. Returns them.
+/// (Compression shortens one diagonal as it stretches the other.)
+pub const GAUGE_K: f32 = 1.0e4;
+
+fn aperture_gauges(sk: &mut Skeleton, pane: &[u32], mounts: &[usize], strain: f32, group: u32) -> Vec<usize> {
+    let set: std::collections::HashSet<u32> = pane.iter().copied().collect();
+    let rim: Vec<u32> = mounts
+        .iter()
+        .map(|&j| {
+            let b = &sk.beams[j];
+            if set.contains(&b.a) { b.b } else { b.a }
+        })
+        .collect();
+    if rim.is_empty() {
+        return Vec::new();
+    }
+    let c = rim.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / rim.len() as f32;
+    let (lo, hi) = rim.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), &i| (a.min(sk.pos(i)), b.max(sk.pos(i))));
+    let ext = hi - lo;
+    let mut axes = [(ext.x, Vec3::X), (ext.y, Vec3::Y), (ext.z, Vec3::Z)];
+    axes.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let (u, v) = (axes[0].1, axes[1].1);
+    let frame: Vec<u32> = (0..sk.nodes.len() as u32)
+        .filter(|&i| sk.nodes[i as usize].primary && !sk.nodes[i as usize].catcher)
+        .collect();
+    let mut corners: Vec<u32> = Vec::new();
+    for (su, sv) in [(1.0f32, 1.0f32), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)] {
+        let far = *rim
+            .iter()
+            .max_by(|&&a, &&b| {
+                let f = |i: u32| (sk.pos(i) - c).dot(u * su + v * sv);
+                f(a).total_cmp(&f(b))
+            })
+            .unwrap();
+        let q = sk.nearest(sk.pos(far), &frame, 1)[0];
+        if !corners.contains(&q) {
+            corners.push(q);
+        }
+    }
+    let mut out = Vec::new();
+    for i in 0..corners.len() {
+        for k in i + 1..corners.len() {
+            let (a, b) = (corners[i], corners[k]);
+            if sk.has_beam(a, b) {
+                continue;
+            }
+            // (A plain beam, so a break sets off its group: k·strain·L of
+            // pull, elastic all the way; k a thousandth of a frame span's.)
+            let l = sk.pos(a).distance(sk.pos(b));
+            let k = GAUGE_K;
+            let f = k * super::material::REF_LENGTH / l.max(super::material::REF_LENGTH) * strain * l;
+            let m = Material {
+                k,
+                damp: 0.0,
+                deform: f,
+                strength: f,
+                plastic: 0.0,
+                density: 0.0,
+            };
+            if sk.beam_with(a, b, m, BeamType::Normal, group) {
+                let j = sk.beams.len() - 1;
+                sk.beams[j].fixed = true;
+                out.push(j);
+            }
+        }
+    }
+    out
+}
+
+/// Seconds the car settles before its glass is installed.
+pub const INSTALL_SETTLE: f32 = 2.0;
+
+/// The glass's installation pose (a Choice, `vehicle-authoring.md`): a pane
+/// is bonded into a body already standing under its own weight, so it
+/// carries no stress there. The car spawns on the ground at rest on the
+/// CPU reference, settles [`INSTALL_SETTLE`] s, and each of `beams` (the
+/// panes' and their mounts') takes its settled length over its spawn length
+/// as its rest scale. Deterministic: the same skeleton gives the same pose,
+/// and the `.truck` carries the scales, so every consumer loads the same
+/// panes.
+fn installation_pose(sk: &Skeleton, beams: &[usize]) -> Result<Vec<f32>, String> {
+    use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
+    // (The panes are not in yet: nothing of theirs yields or breaks.)
+    let mut sk = sk.clone();
+    for &j in beams {
+        sk.beams[j].mat.deform = 1.0e9;
+        sk.beams[j].mat.strength = 1.0e9;
+        sk.beams[j].group = 0;
+    }
+    let sk = &sk;
+    let truck = sk.to_truck();
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        ..Default::default()
+    };
+    let probe = ExplicitBeams::from_truck(&truck, Vec3::ZERO, Vec3::ZERO, settings.clone())?;
+    let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let mut s = ExplicitBeams::from_truck(&truck, Vec3::new(0.0, 0.02 - low, 0.0), Vec3::ZERO, settings)?;
+    let p0 = s.positions();
+    for _ in 0..(INSTALL_SETTLE * 60.0) as usize {
+        s.frame();
+    }
+    let p1 = s.positions();
+    if std::env::var("GLASS_STRAIN").is_ok() {
+        // How much the settled panes still move at rest (strain against the
+        // settled lengths), over another two seconds, and during the settle.
+        let len = |p: &[Vec3], j: usize| p[sk.beams[j].a as usize].distance(p[sk.beams[j].b as usize]);
+        let mut worst = 0.0f32;
+        for _ in 0..120 {
+            s.frame();
+            let p = s.positions();
+            for &j in beams {
+                worst = worst.max((len(&p, j) / len(&p1, j) - 1.0).abs());
+            }
+        }
+        let settle = beams.iter().map(|&j| (len(&p1, j) / len(&p0, j) - 1.0).abs()).fold(0.0f32, f32::max);
+        for &j in beams.iter().filter(|&&j| sk.beams[j].fixed && sk.beams[j].mat.density == 0.0) {
+            let b = &sk.beams[j];
+            eprintln!("  gauge {}-{} ({} {:?} / {} {:?}): settle {:.4} %", b.a, b.b, sk.parts[sk.nodes[b.a as usize].part as usize], sk.nodes[b.a as usize].p, sk.parts[sk.nodes[b.b as usize].part as usize], sk.nodes[b.b as usize].p, (len(&p1, j) / len(&p0, j) - 1.0) * 100.0);
+        }
+        eprintln!("glass: settle strain up to {:.4} %, then at rest up to {:.4} % (tempered breaks at {:.3} %)", settle * 100.0, worst * 100.0, TEMPERED_STRAIN * 100.0);
+    }
+    Ok(beams
+        .iter()
+        .map(|&j| {
+            let b = &sk.beams[j];
+            let (a, c) = (b.a as usize, b.b as usize);
+            p1[a].distance(p1[c]) / p0[a].distance(p0[c])
+        })
+        .collect())
 }
 
 /// Tempered glass's break strain: characteristic bending strength ≈ 120 MPa
@@ -2641,39 +2806,96 @@ fn brittle_glass(
     let mut out = Vec::new();
     for (name, laminated, nodes) in panes {
         let set: std::collections::HashSet<u32> = nodes.iter().copied().collect();
+        let bonded = !name.starts_with("glass_side");
         let g = if laminated {
             0
         } else {
             *groups_made += 1;
             *groups_made
         };
-        let mut beams = Vec::new();
-        for (j, b) in sk.beams.iter_mut().enumerate() {
+        let mut pane = Vec::new();
+        let mut mounts = Vec::new();
+        for (j, b) in sk.beams.iter().enumerate() {
             if b.tie || b.damper || b.ty != BeamType::Normal || b.group != 0 {
                 continue;
             }
-            if !(set.contains(&b.a) || set.contains(&b.b))
-                || !on_shell.contains(&b.a)
-                || !on_shell.contains(&b.b)
-            {
+            if !on_shell.contains(&b.a) || !on_shell.contains(&b.b) {
                 continue;
             }
-            beams.push(j as u32);
+            match (set.contains(&b.a), set.contains(&b.b)) {
+                (true, true) => pane.push(j),
+                (true, false) | (false, true) => mounts.push(j),
+                _ => {}
+            }
         }
-        for &j in &beams {
-            let b = &mut sk.beams[j as usize];
+        // The pane: brittle at its strain (tempered), or cracking there and
+        // held by its interlayer (laminated). Off ([`BRITTLE_GLASS`]): the
+        // panes are skin-tier beams, far softer than glass, and rack with
+        // the settling body: at 0.17 % they break at rest (158 beams in
+        // `a`). The units name each pane's beams either way.
+        if !BRITTLE_GLASS {
+            let part = sk.nodes[nodes[0] as usize].part;
+            out.push(DamageUnit {
+                name,
+                kind: DamageKind::Glass,
+                part,
+                beams: pane.iter().chain(&mounts).map(|&j| j as u32).collect(),
+            });
+            continue;
+        }
+        // The pane's own beams are skin-tier, ~10⁵ × softer than glass:
+        // they carry its weight and break with its group, never on their
+        // own strain (that would be a ~0.3 N break force).
+        if !laminated {
+            for &j in &pane {
+                sk.beams[j].group = g;
+            }
+        }
+        // Its mounts: each carries the bead (or the channel) along its share
+        // of the pane's edge, L (its spacing along the edge, about its own
+        // length). A bead holds τ·w·L before it lets go (no yield). Its
+        // stiffness G·w·L/t is far above what the step allows the pane's
+        // light nodes, so a mount keeps the stiffness the step fit gave it
+        // (min of the two).
+        let edge = mounts
+            .iter()
+            .map(|&j| sk.pos(sk.beams[j].a).distance(sk.pos(sk.beams[j].b)))
+            .sum::<f32>()
+            / mounts.len().max(1) as f32;
+        for &j in &mounts {
+            let b = &mut sk.beams[j];
             let l = sk.nodes[b.a as usize].p.distance(sk.nodes[b.b as usize].p);
-            let kl = b.mat.k_at(l) * l;
-            if laminated {
-                b.mat.deform = scale * ANNEALED_STRAIN * kl;
-                b.mat.strength = b.mat.strength.max(b.mat.deform);
-            } else {
-                b.mat.deform = scale * TEMPERED_STRAIN * kl;
+            if bonded {
+                let real = URETHANE_G * BEAD_WIDTH / BEAD_THICKNESS * edge;
+                if b.mat.k_at(l) > real {
+                    b.mat = b.mat.stiffer(real / b.mat.k_at(l));
+                }
+                b.mat.deform = scale * URETHANE_TAU * BEAD_WIDTH * edge;
                 b.mat.strength = b.mat.deform;
+                b.group = g;
+            } else {
+                // Side glass sits in its door's run channel: it bears there
+                // (compression only), held by its regulator along the bottom
+                // (those beams keep their tension), and breaks with the pane.
+                let low = nodes.iter().map(|&i| sk.nodes[i as usize].p.y).fold(f32::MAX, f32::min);
+                let inner = if set.contains(&b.a) { b.a } else { b.b };
+                if sk.nodes[inner as usize].p.y > low + 0.05 {
+                    b.ty = BeamType::Support(SEAL_BREAK);
+                }
+                let _ = l;
                 b.group = g;
             }
         }
+        // The aperture's racking (a Choice, `vehicle-authoring.md`): the
+        // frame nodes at the opening's four corners carry near-real
+        // stiffness. Gauges across them (its edges and diagonals) are
+        // supports of negligible stiffness that break past σ/E of
+        // extension against the installed pose: the strain the frame
+        // imposes on the glass reaching its strength (tempered 120 MPa,
+        // laminated 45 MPa: it cracks, in no group, and holds).
+        let gauges = aperture_gauges(sk, &nodes, &mounts, if laminated { ANNEALED_STRAIN } else { TEMPERED_STRAIN }, if laminated { 0 } else { g });
         let part = sk.nodes[nodes[0] as usize].part;
+        let beams: Vec<u32> = pane.iter().chain(&mounts).chain(&gauges).map(|&j| j as u32).collect();
         out.push(DamageUnit {
             name,
             kind: DamageKind::Glass,
@@ -2683,6 +2905,20 @@ fn brittle_glass(
     }
     out
 }
+
+/// Brittle panes and sized mounts (A9): off until the panes stop racking
+/// with the body at rest (`vehicle-authoring.md`, glass).
+pub const BRITTLE_GLASS: bool = false;
+
+/// The windscreen and backlight's urethane bead: TEROSON PU 9096 PL (Henkel
+/// technical data sheet, October 2016): shear modulus about 1.2 MPa (DIN
+/// 54451, 5 mm layer), shear strength 5–6 MPa fully cured (5.5 taken).
+/// The bead is 5 mm thick (the datasheet's layer; 5–10 mm in cars) and 10
+/// mm wide (a stated geometry).
+pub const URETHANE_G: f32 = 1.2e6;
+pub const URETHANE_TAU: f32 = 5.5e6;
+pub const BEAD_THICKNESS: f32 = 0.005;
+pub const BEAD_WIDTH: f32 = 0.010;
 
 /// The damage units: each hinge and latch group (its secondary latch is its
 /// latch's unit too: the latch is broken when either position let go).

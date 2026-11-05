@@ -377,13 +377,21 @@ Parts hang on hardware, not on their seams.
   - An inner-frame ladder (`lid_inner_*`, `bonnet_inner_*`) gives them depth.
     It is in the skin tier; each chord's strength is M_p / lever of a
     100 × 60 × 0.75 mm hat at 210 MPa.
-- **Collision skin per part (A1).** The coarse lattice skin loses every
-  triangle that spans a shut line (Medium: 499 of 740 kept), so a part that
-  comes off drags no ghost sheet. Every shell node of a part with hardware
-  is a contacter. The lattice's nodes stay contacters too. Static contact
-  (ground, wall, pole) is per node, so the gaps along the shut lines (edges
-  up to 0.52 m) matter only for car-to-car contact (`COLL_DEBUG=1` prints
-  the split).
+- **Collision skin (A1): no triangle outlives the joint it spans.** The
+  collision skin is the closed lattice. Each triangle across a shut line
+  (Medium: 241 of 740) breaks (spec §18) when a beam of its edges across the
+  line breaks (seal, bolt or bearing) or when its parts' nearest hinge or
+  latch group lets go; triangles inside a part stay plain, so a part that
+  comes off keeps its own skin (`g` checks the door: its 23 triangles live,
+  none joining it to the car). The `.truck` carries it as Rubble's extension
+  of a `cab` line, a fifth field (the break group, 0 none) and a sixth (the
+  edges, bit k for nodes k to k+1), and asks for contact from every node
+  (spec §10.2) with `rubble_full_contact`; the shared loader
+  (`ExplicitBeams::from_truck`) applies both, so the page, the World, Metal
+  and CUDA get them by loading the file. Rigs of Rods files carry neither
+  and load as before. Every shell node of a part with hardware is a
+  contacter. The render stays per part. The 80 km/h T-bone (two vehicles)
+  holds the striker's nodes outside the struck skin to 0.5 %.
 - **Backed panels** (fenders, bumpers, bonnet, boot lid) bear on the body
   frame through supports. Only their hardware carries tension.
 - **Sheet masses** (`SheetSpec`). A panel's mass is its skin area (a third
@@ -783,6 +791,97 @@ vehicle the same visual format as the authored car, so
   single car costs about 1.5–2 ms in this timed pass at any distance once
   any of it is on screen (0.24 ms off screen), for the authored car too, so
   the per-car figures carry a share of that constant.
+
+### Glass (A9, open)
+
+- `Built.damage_units` names each pane by the agreed names:
+  `glass_windscreen`, `glass_backlight`, `glass_side_{f,r}_{l,r}`. The sedan
+  has no quarter glass. Each unit is the pane's beams plus its mounts (the
+  beams from the pane to the shell around it).
+- `brittle_glass` holds the A9 model, behind `BRITTLE_GLASS`, which is off:
+  - tempered panes break at σ/E = 120 MPa / 70 GPa, with one detacher group
+    a pane;
+  - the laminated windscreen cracks (yields) at its plies' 45 MPa / 70 GPa
+    and holds;
+  - the windscreen and backlight hang on a urethane bead (TEROSON PU 9096
+    PL datasheet: G ≈ 1.2 MPa by DIN 54451 over a 5 mm layer; shear
+    strength 5–6 MPa fully cured). Each mount holds τ·w·L, taking a 5 mm by
+    10 mm bead with L its share of the edge;
+  - side glass bears in its run channel (compression only) and is held by
+    its regulator along the bottom.
+- **Installation pose (a Choice).** A pane is bonded into a body already
+  standing under its own weight, so it carries no stress there.
+  `installation_pose` settles the car at rest on the CPU reference for
+  `INSTALL_SETTLE` = 2 s, with the panes unbreakable. Each pane and mount
+  beam then takes its settled length over its spawn length as its rest
+  scale. The `.truck` carries the scale as Rubble's fifth `beams` field, and
+  the shared loader applies it to any beam. `skins_are_closed` checks that
+  the solver's rest lengths match it.
+  - Medium: 335 beams. Settle strain is up to 0.54 %; at rest afterwards,
+    up to 0.05 %.
+- **Brittle glass is still off.** With the installation pose, every pane
+  still breaks at rest. A pane beam's break force is its strain times the
+  model's k·L: 0.17 % of about 180 N, roughly 0.3 N. The pane nodes' own
+  weight, about 0.7 N each, exceeds it. The step-softened beams are about
+  10⁵ × softer than glass, so a strain criterion becomes a force too small
+  to carry the pane. A real pane's strip would hold σ·t·L, about 144 kN at
+  4 mm × 0.3 m, which these beams never reach.
+- **Aperture racking (a Choice; written, off).** `aperture_gauges` joins
+  the frame nodes at the opening's four corners by its edges and diagonals.
+  - Each gauge is a beam of negligible stiffness (`GAUGE_K`) that breaks at
+    σ/E of its length (tempered 120 MPa, laminated 45 MPa) against the
+    installed pose.
+  - The beams are plain, so a tempered pane's break sets off its group; RoR
+    supports do not cascade groups.
+  - A pane beam no longer breaks on its own strain.
+  - Turned on, every pane breaks at rest in `a`:
+    - The corners are wrong: the windscreen's reach door nodes, and the side
+      windows' reach the door's belt-line frame. The windows' upper frames
+      are not frame tier.
+    - The 2 cm spawn landing strains the gauges 0.10–0.20 % (`GLASS_STRAIN=1`
+      prints them), above tempered glass's 0.17 % and laminated's 0.064 %. A
+      real car's frame strains far less.
+- **What is open:** per-pane aperture corners on frame-tier nodes (window
+  frames in the frame tier); a spawn without the landing transient;
+  direct-impact breaks against UN R43 / ANSI Z26.1 data (needs a contact
+  force readback in the solver). This needs a decision.
+
+### A6: where the hardware's loads reach its strength (2026-11-05)
+
+`u_hardware_where_loads_reach_strength` (`--ignored`; `U_ONLY=overlap,pole,open,side`,
+`U_KMH`, `U_TRACE=<group>` for a group's pull every millisecond) reports each
+hinge and latch group's peak pull against the FMVSS 206 values it is sized to
+(hinge 29.8–36.2 kN each, latch 20.5–28.0, secondary 10.3–19.0;
+transverse–longitudinal). Medium, front left door unless noted:
+
+| Scene | Peak pulls (kN) | Let go |
+|---|---|---|
+| IIHS small overlap 64 km/h (25 % left, rigid box) | latch 4.6, hinges ≤ 6.3 (rear door) | none |
+| small overlap 80 km/h | latch 12.0, rear door lower hinge 12.5 | none |
+| side pole 254 mm, 32 km/h, at the hinge line | upper hinge 52.6, lower 25.6, latch 13.5 | both hinges (0.05, 0.08 s) |
+| side pole at the hinge line, 40 / 50 / 64 km/h | upper 52.0 / 51.2 / 55.9, lower 26.8 / 23.7 / 24.7 | both hinges; latch held (20.3 at 64) |
+| side pole, 32 km/h, at the latch line | latch 20.9, secondary 18.7 | latch |
+| side pole at the latch line, 50 / 64 km/h | latch 19.1 / 21.3, secondary 27.0 / 24.0 | latch and secondary; hinges held |
+| door open 60°, reversing into a pole, 10 km/h | hinges ≤ 2.5 | none: the door swings freely (the car has no check link or opening stop) |
+| on its side from 1 m | ≤ 5.8 (secondary, right front) | none |
+| car-to-car T-bone 80 km/h, door middle (`t`) | latch 23.8, lower hinge 19.5 | none (inside the measured latch spread) |
+| T-bone, striker 0.7 m forward (`TB_DZ`) | latch 29.2, secondary 24.0 | latch, secondary |
+
+- The hinge pull rises over about 20 ms to 40–49 kN before it lets go (no
+  one-step contact spike).
+- The latch lets go at 19–21 kN, its transverse strength.
+- The lower hinge lets go at 24–27 kN, under the 29.8 kN floor. This is a
+  consequence of the model, not a measurement. The load points outside
+  FMVSS 206's two pulls (the pole drives the door's front end in and back),
+  and the rope decomposition puts most of it on one rope. No open combined-
+  or oblique-load hinge data was found to check it against.
+- Open gap: the car has no door check link or over-travel stop. No open
+  measured strength was found for either: SAE 2011-01-0790 (check-load
+  durability) and SAE 2003-01-0871 (closing effort; the check link as a
+  hinge torque) give no failure loads. Without a stop, an open door swings
+  free when struck, so the door-open scene cannot load its hinges.
+- No scene takes every group of a door. The hinge line takes the hinges; the
+  latch line, the latch.
 
 ## Tests and tools
 

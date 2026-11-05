@@ -382,7 +382,7 @@ pub enum Cmd {
 
 /// The status a host reads every [`STATUS_EVERY`] frames: 4 contact counters
 /// (outside, overflow, unconverged, too big) at byte `base + 16` of gAcc, and the
-/// loop-cap flag at byte `cap` (set by the WGSL loop cap; 0 on the other targets).
+/// loop-cap flag at byte `cap` (the kernel's `EB_LOOP_CAP`, every target).
 #[derive(Clone, Copy, Debug)]
 pub struct StatusWords {
     pub base: u64,
@@ -1194,8 +1194,9 @@ impl ExplicitUpload {
         let next_len = hit_base + nv * SELF_HIT_WORDS;
         let hit_acc = acc_init.len();
         acc_init.extend(std::iter::repeat_n(0, 2 * nv));
-        // Last: the loop-cap flag (the WGSL post-process's `cap_explicit_loops`
-        // writes gAcc's last word).
+        // Last: the loop-cap flag (the kernel's `EB_LOOP_CAP`, at the parameter
+        // `loopCapWord`; the frozen WGSL test modules' post-process writes gAcc's
+        // last word, the same word).
         let coupling = coupling.map(|cap| {
             let layout = CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
@@ -1347,6 +1348,7 @@ impl ExplicitUpload {
             tri_break_base,
             deform_base,
             tri_excl_base,
+            cap_at as u32,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -1533,6 +1535,11 @@ impl FramePlanner {
         assert!(metres >= 0.0 && metres.is_finite(), "contact margin {metres}");
         self.words[W_VV_MARGIN] = metres.to_bits();
         self.contact.left = 0;
+    }
+
+    /// The frame bounds margin (m).
+    pub fn contact_margin(&self) -> f32 {
+        f32::from_bits(self.words[W_VV_MARGIN])
     }
 
     /// A new contact plan is due next frame (the host wrote velocities or forces the
@@ -1890,10 +1897,52 @@ impl ExplicitLayout {
         contact_error(&acc[at + 4..at + 8])
     }
 
-    /// The loop-cap flag (from gAcc; WGSL builds only, 0 elsewhere).
+    /// The loop-cap flag (from gAcc): nonzero when a kernel loop was held to its
+    /// cap ([`explicit_loop_cap_hit`]). Every target (WGSL, MSL, CUDA) writes it.
     pub fn loop_cap_flag(&self, acc: &[i32]) -> i32 {
         acc[(self.status.cap / 4) as usize]
     }
+
+    /// The kernel status (from gAcc): the loop-cap flag, then the contact
+    /// counters ([`Self::contact_status`]).
+    pub fn kernel_status(&self, acc: &[i32]) -> Result<(), String> {
+        explicit_loop_cap_hit(self.loop_cap_flag(acc)).map_err(|e| format!("explicit beams kernel: {e}"))?;
+        self.contact_status(acc)
+    }
+}
+
+/// The explicit kernels' loop cap (`EB_LOOP_CAP` in `explicit_beams.slang`, every
+/// target): a loop whose bound is not a constant runs at most this many passes.
+/// Far above any legitimate count (a few loops run on one lane over a whole
+/// vehicle's beams: tens of thousands for a large vehicle), so a capped loop
+/// computes what an uncapped one does.
+pub const EXPLICIT_LOOP_CAP: u32 = 1 << 20;
+
+/// The kernel's tag on a loop-cap flag (`EB_LOOP_CAP_TAG`): the flag is the tag
+/// | the stopped loop's source line. Untagged, the flag is the loop's number in
+/// its WGSL module (counting from 1): the frozen test modules
+/// (`explicit_beams_baseline.slang`, `explicit_beams_ref.slang`), capped by
+/// engine-webgpu's WGSL post-process.
+pub const EXPLICIT_LOOP_CAP_TAG: i32 = 1 << 24;
+
+/// The error for a loop-cap flag read back from gAcc ([`ExplicitLayout::loop_cap_flag`];
+/// 0: none).
+pub fn explicit_loop_cap_hit(flag: i32) -> Result<(), String> {
+    if flag == 0 {
+        return Ok(());
+    }
+    let place = if flag & EXPLICIT_LOOP_CAP_TAG != 0 {
+        format!(
+            "the loop at line {} of explicit_beams.slang (or of an explicit_beams_*.slang file it includes)",
+            flag & !EXPLICIT_LOOP_CAP_TAG
+        )
+    } else {
+        format!("a kernel loop (number {flag} in its WGSL module, counting from 1)")
+    };
+    Err(format!(
+        "{place} ran {EXPLICIT_LOOP_CAP} passes, its cap, and was stopped: that frame's results \
+         are invalid (a runaway loop: a corrupt count or bound)"
+    ))
 }
 
 /// Fleets of at most this many vehicles run 512 lanes per vehicle (about one

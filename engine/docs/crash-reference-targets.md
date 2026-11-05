@@ -484,13 +484,25 @@ SUPPORT beams that yield at the crush stress times their area with no hardening
 (`deformLimitStress` = the crush force) and densify at 80 % crush; elastic strain at
 the crush stress 10 % (main) and 20 % (bumper), set so the columns integrate at the
 2 kHz step on 0.8 kg nodes; the front axle 0.6 m behind the face; frictionless skids
-for the crabbed, free-rolling wheels.
+for the crabbed, free-rolling wheels. Structure (2026-11-05, after the barrier
+collapsed to a sheet in the lab): the carriage's beams each as stiff as the 2 kHz
+step allows their two nodes (k = 0.25·min(m/n)/h², n a node's carriage beams; the
+first version took one stiffness from the lightest node, 0.8 MN/m on 90 kg frame
+nodes, and the carriage was soft), its mass 45 / 10 / 45 % at the back plate, mid and
+rear frames; shear diagonals from each face node to the neighbouring back-plate
+nodes yielding at a tenth of the column's crush force (the column carries the rest,
+so a node still crushes at σ·A; without them the columns tilted and the face folded
+flat); a densification stop behind the bumper at 20 % of the full depth.
 
 Check (`engine-softbody/tests/crash_rigs.rs`): mass and centre of mass to the
 standard's; the face's crush force is bounded by σ·A = 310 kPa × 1.676 × 0.559 m =
 290 kN (+5 %); with its front skin held and the carriage at 8 m/s, the mean over the
-crush is 72 % of σ·A (the carriage is not rigid at the step: its back-plate nodes ring
-against the frame and some columns unload). Into the procedural sedan's left side
+crush is 101 % of σ·A, the carriage's length within 1.3 % and its back plate within
+2.3 cm of flat. Into the procedural sedan (GPU): the carriage within 0.9 %, the face
+crushed at most 48 %. Into the showcase car (with and without full contact) the
+car diverges about 5 frames after the barrier meets it (its nodes reach 82 m/s, then
+921 m/s; the barrier follows through contact): **open**, reported by
+`explicit_scenes.rs`. Into the procedural sedan's left side
 (`engine-world-wasm/tests/explicit_scenes.rs`, GPU): the barrier strikes at about
 0.6 s, the car leaves at 2.9 m/s, the barrier at 1.5 m/s across (rebounding), with
 0.26 m of crush and intrusion between their centres of mass; no pass-through.

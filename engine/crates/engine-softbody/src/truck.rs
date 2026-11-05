@@ -307,6 +307,9 @@ pub struct TruckFile {
     pub beams: Vec<SoftBeam>,
     pub triangles: Vec<SoftTriangle>,
     pub contacters: Vec<u32>,
+    /// `rubble_full_contact` (Rubble's extension, spec §10.2): every node with
+    /// collision is a contacter against other vehicles' triangles.
+    pub full_contact: bool,
     pub wheels: Vec<TruckWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
@@ -741,6 +744,7 @@ impl Parser {
             }
             "set_default_minimass" => self.out.minimass = fd(t, 1, DEFAULT_MINIMASS),
             "enable_advanced_deformation" => self.out.advanced_deformation = true,
+            "rubble_full_contact" => self.out.full_contact = true,
             "detacher_group" => {
                 self.detacher_group = if t.get(1) == Some(&"end") {
                     0
@@ -844,6 +848,11 @@ impl Parser {
                 };
                 let mut beam = self.beam(a, b);
                 Self::beam_options(&mut beam, t);
+                // (Rubble's extension: a fifth field, its rest length over
+                // its spawn length.)
+                if let Some(p) = t.get(4).and_then(|p| p.parse::<f32>().ok()).filter(|&p| p > 0.0) {
+                    beam.precompression = p;
+                }
                 self.out.beams.push(beam);
             }
             Section::Shocks | Section::Shocks2 | Section::Shocks3 => self.parse_shock(t),
@@ -1009,9 +1018,16 @@ impl Parser {
                 let opts = t.get(3).copied().unwrap_or("");
                 let solid = opts.chars().any(|c| matches!(c, 'c' | 'p' | 'u'));
                 let buoyant = opts.chars().any(|c| matches!(c, 'D' | 'F' | 'S'));
+                // (Rubble's extension, spec §18: a fifth field is its break
+                // group, a sixth the edges it breaks with, bit k for nodes k
+                // to k+1, all three if absent.)
+                let group = t.get(4).and_then(|g| g.parse::<u32>().ok());
+                let sides = t.get(5).and_then(|m| m.parse::<u8>().ok()).unwrap_or(7) & 7;
                 let tri = SoftTriangle {
                     nodes: [a, b, c],
                     collision: solid || buoyant,
+                    break_group: group.unwrap_or(0),
+                    break_sides: if group.is_some() { sides } else { 0 },
                     ..Default::default()
                 };
                 // A line with a letter of each group is two collision triangles in

@@ -52,6 +52,10 @@ pub struct ExplicitBeamsGpu {
     timing: Option<FrameTiming>,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
+    /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
+    /// `wait` saw, not yet handled.
+    contact_errors: std::sync::Mutex<Vec<String>>,
+    contact_errors_seen: std::sync::Mutex<Vec<String>>,
     /// The bound buffers (bindings 0..8) and the module choice (aero, 512 lanes),
     /// for the test-only kernel variants ([`Self::set_kernel_variant`]).
     bufs: [wgpu::Buffer; 9],
@@ -119,7 +123,8 @@ struct Contact {
     /// staging buffer and checked once mapped, a frame or two later (no waiting).
     acc: wgpu::Buffer,
     status_at: u64,
-    /// The loop-cap flag (gAcc's last word, byte offset): see `cap_explicit_loops`.
+    /// The loop-cap flag (gAcc's last word, byte offset): see
+    /// `engine_exec::explicit_plan::EXPLICIT_LOOP_CAP`.
     cap_at: u64,
     status: std::sync::Mutex<StatusRing>,
 }
@@ -183,6 +188,9 @@ fn module_wgsl(name: &str) -> &'static str {
             .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
     }
 }
+
+/// The most a frame-bounds error widens the contact margin to (m).
+pub const MAX_AUTO_CONTACT_MARGIN: f32 = 16.0;
 
 impl Contact {
     #[allow(clippy::too_many_arguments)]
@@ -500,6 +508,8 @@ impl ExplicitBeamsGpu {
             timing: None,
             wide,
             contact,
+            contact_errors: Default::default(),
+            contact_errors_seen: Default::default(),
             bufs,
             module_kind: (aero, big, lanes),
             variant: KernelVariant::Current,
@@ -1299,12 +1309,42 @@ impl ExplicitBeamsGpu {
         ]
     }
 
-    /// Fail on a contact error a finished frame reported ([`Self::contact_status`]),
-    /// without waiting for frames in flight.
+    /// Take in a contact error a finished frame reported ([`Self::contact_status`]),
+    /// without waiting for frames in flight; the sim keeps running
+    /// ([`Self::take_contact_errors`]).
     fn check_contact_status(&mut self) {
         if let Some(e) = self.contact.poll_status(&self.device) {
-            panic!("{e}");
+            self.contact_error(e);
         }
+        let pending = std::mem::take(&mut *self.contact_errors_seen.lock().unwrap());
+        for e in pending {
+            self.contact_error(e);
+        }
+    }
+
+    /// A contact error: recorded for the host, the status counters cleared, and for a
+    /// vehicle that left its frame bounds the margin doubled (at most
+    /// [`MAX_AUTO_CONTACT_MARGIN`] m) and a new plan made, so later frames cover it.
+    /// The frame that reported it may have missed a contact; the error says so.
+    fn contact_error(&mut self, e: String) {
+        self.queue
+            .write_buffer(&self.contact.acc, self.contact.status_at + 16, &[0u8; 16]);
+        if e.contains("left its frame bounds") {
+            let m = (2.0 * self.planner.contact_margin()).clamp(0.5, MAX_AUTO_CONTACT_MARGIN);
+            self.planner.set_contact_margin(m);
+            self.planner.request_replan();
+        }
+        let mut errors = self.contact_errors.lock().unwrap();
+        if errors.last() != Some(&e) {
+            errors.push(e);
+        }
+    }
+
+    /// The contact errors since the last call (empty: none). A running sim never
+    /// panics on one; the host surfaces them.
+    pub fn take_contact_errors(&mut self) -> Vec<String> {
+        self.check_contact_status();
+        std::mem::take(&mut *self.contact_errors.lock().unwrap())
     }
 
     /// The parameters for a frame of `steps` steps (the plan's copies, one per step).
@@ -1344,7 +1384,8 @@ impl ExplicitBeamsGpu {
     pub fn wait(&self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         if let Some(e) = self.contact.ready_error() {
-            panic!("{e}");
+            // Handled at the next frame ([`Self::take_contact_errors`]).
+            self.contact_errors_seen.lock().unwrap().push(e);
         }
     }
 
