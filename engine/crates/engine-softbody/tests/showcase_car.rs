@@ -364,6 +364,8 @@ fn visual_binds_and_reproduces_its_rest_mesh() {
 fn settings() -> ExplicitBeamsSettings {
     ExplicitBeamsSettings {
         turbulence: false,
+        // (SC_EXACT=1: exact beam lengths, as `rubble_exact_lengths`.)
+        fast_inv_sqrt: std::env::var("SC_EXACT").is_err(),
         ..Default::default()
     }
 }

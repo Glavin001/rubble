@@ -1162,3 +1162,25 @@ contact force is its weight to 0.05 N; a 0.5 m drop breaks the group the step af
 its force passes 50 N, never at 10 MN; the lines are read and checked),
 `explicit_contact_gpu.rs` `contact_breaks_step_like_the_cpu` (the same step on the
 GPU, logs within 0.05 N + 0.1 %).
+
+## 33. `rubble_exact_lengths`: cost, parity, effect (2026-11-05)
+
+`rubble_exact_lengths` (a `.truck` line, **Rubble extension**) computes beam lengths
+through an exact square root in place of RoR's fast inverse square root (worst
+length error 0.175 %, `energy_ledger.rs`). Measured on the showcase sedan:
+* **Cost:** none. 32 low-resolution sedans at rest on the GPU (M3 Max), 1.816 ms a
+  frame fast, 1.814 ms exact (`showcase_car_gpu.rs` `exact_lengths_cost`, ignored).
+* **CPU–GPU parity: not bit for bit.** At rest for 2 s the fast path's GPU matches
+  the CPU to 0.000 mm; the exact path differs by 1.4 mm rms (7.8 mm at most, a
+  tyre node chattering on the ground). The kernel's `sdiv(1, ssqrt(q))` (an
+  approximate root and reciprocal, each with one Newton correction) is not always
+  the CPU's correctly rounded 1/√q, and the rest contact amplifies the last bit.
+  Both stay within the showcase GPU tests' tolerances (`SC_EXACT=1`).
+* **References** (`showcase_car.rs`, `SC_EXACT=1`, CPU): all 26 tests pass. Changes
+  are within crash-to-crash scatter: 55 km/h wall residual crush max 497 → 503 mm,
+  Campbell b1 29.4 → 29.9 s⁻¹ (120 km/h 27.0 → 28.3); FMVSS 214 peak 210 → 217 kN;
+  FMVSS 216a 4.78 → 4.77 × weight; side pole intrusion 0.024 → 0.024 m; T-bone
+  inside 9 → 5 of 1,141; rest energy 8.30 → 8.20 kJ.
+* **Recommendation:** adopt it for the showcase car only once the kernel's exact
+  inverse length is correctly rounded (bit parity with the CPU, as the fast path);
+  the physics gain at today's references is small.
