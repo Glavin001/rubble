@@ -74,6 +74,16 @@ fn main() {
         (s, w)
     };
     let (mut s, warnings) = spawn(Vec3::ZERO);
+    if opt("nofilter=").is_some() {
+        for b in &mut s.beams {
+            if matches!(b.kind, engine_softbody::explicit_beams::ExplicitKind::JbeamPlain | engine_softbody::explicit_beams::ExplicitKind::JbeamBounded | engine_softbody::explicit_beams::ExplicitKind::JbeamSupport) {
+                b.shock = 0;
+            }
+        }
+    }
+    if opt("noself=").is_some() {
+        s.candidates.clear();
+    }
     for w in &warnings {
         println!("warning: {w}");
     }
@@ -88,6 +98,32 @@ fn main() {
         mass,
         desc.pressure_wheels.len()
     );
+    if opt("modes=").is_some() {
+        // The highest beam-spring mode ω_max·h (power iteration on M⁻¹K, springs only):
+        // explicit integration diverges past 2.
+        let n = s.nodes.len();
+        let mut x: Vec<Vec3> = (0..n).map(|i| Vec3::new((i % 7) as f32 - 3.0, (i % 5) as f32 - 2.0, (i % 3) as f32 - 1.0)).collect();
+        let mut lam = 0.0f32;
+        for _ in 0..400 {
+            let mut y = vec![Vec3::ZERO; n];
+            for b in s.beams.iter().filter(|b| !b.broken && b.a != b.b && b.k > 0.0 && b.k.is_finite()) {
+                let d = (s.nodes[b.a as usize].pos - s.nodes[b.b as usize].pos).normalize_or_zero();
+                let f = d * (b.k * d.dot(x[b.a as usize] - x[b.b as usize]));
+                y[b.a as usize] += f;
+                y[b.b as usize] -= f;
+            }
+            for i in 0..n {
+                y[i] /= s.nodes[i].mass.max(1e-6);
+            }
+            let norm = y.iter().map(|v| v.length_squared()).sum::<f32>().sqrt();
+            let xn = x.iter().map(|v| v.length_squared()).sum::<f32>().sqrt();
+            lam = norm / xn;
+            x = y.iter().map(|v| *v / norm).collect();
+        }
+        let (imax, _) = x.iter().enumerate().max_by(|a, b| a.1.length().total_cmp(&b.1.length())).unwrap();
+        println!("omega_max*h = {:.3} (node {} {})", lam.sqrt() * 0.0005, imax, desc.nodes.get(imax).map_or("wheel", |n| n.name.as_str()));
+        return;
+    }
     if opt("trace=").is_some() {
         for pw in &desc.pressure_wheels {
             println!(
@@ -98,10 +134,13 @@ fn main() {
         let n0 = desc.nodes.len();
         for step in 0..4000 {
             s.step();
+            if s.last_contacts > 0 && step < 40 {
+                println!("step {step}: {} self-collision contacts", s.last_contacts);
+            }
             let bad = s
                 .nodes
                 .iter()
-                .position(|n| !n.pos.is_finite() || n.vel.length() > 30.0);
+                .position(|n| !n.pos.is_finite() || n.vel.length() > opt("vmax=").map_or(30.0, |v| v.parse().unwrap()));
             if let Some(i) = bad {
                 println!(
                     "step {step}: node {i} (wheel node {}) {:?} {}",

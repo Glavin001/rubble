@@ -624,9 +624,10 @@ its nearest point on its current segment once past the tolerance, the opposite f
 on the segment's ends by their weights, one segment hop per step, `strength` its break
 force). The rail's ends always hold the node (the solver's segment clamp): `capped`
 and `capStrength` are not distinguished and an uncapped end does not let the node run
-off (warning when a rail is uncapped or sets `capStrength`). `fixToRail` is not
-simulated: the node keeps its spawn position (warning when false is asked for; the
-files place slide nodes on their rails).
+off (warning when a rail is uncapped or sets `capStrength`). `fixToRail` (default true)
+moves the node onto its rail at spawn (to within its tolerance) [R]. (The Astral R's
+strut masses sit off their rails in the file: without it they were thrown off at
+2.7 m/s in the first step.)
 
 ## 28. Two limits of the fixed explicit step
 
@@ -642,3 +643,52 @@ the step's limits, apply in JBeam mode only, and the spawn warns with their coun
   tangential force at most stops the node's slip in one step: the solver's friction
   law's viscous branch, on light tread nodes carrying a tyre's pressure load, would
   otherwise reverse the slip every step and grow.
+
+## 29. Acceptance vehicles (CPU reference, 2026-11-05)
+
+`examples/jbeam_accept.rs` (JBeam mode, pressure wheels, drag off, lowest node 2 cm up;
+then a rigid wall at 56 km/h):
+
+| vehicle | nodes / beams | at rest, 4 s | 56 km/h wall, 1.5 s |
+|---|---|---|---|
+| Monster supercar (GPL-3.0) | 423 / 1,838 | 0 broken, KE 315 J falling to 56 J at 10 s (its spoiler and body flex) | 0 broken, 37 bent, KE 237 → 7.5 kJ, no NaN |
+| AgentY legocar | 1,013 / 7,940 | 0 broken, 6 bent, KE 79 J | 540 broken (its bricks part), KE 179 → 4.5 kJ, peak 22 m/s, no NaN |
+| Astral R (CC BY-NC-SA 4.0) | 820 / 6,342 | **unstable**: its rear subframe node `rx1r` diverges at 50 ms | not run |
+
+**The Astral R.** Its highest spring mode is ω·h = 1.77 (the BX's 1.75, the
+supercar's 1.72: inside the explicit step's limit of 2), but the stiff rear control
+arms (12–15 MN/m, 1.2–1.5 kN·s/m) carry `dampCutoffHz` 500, and §6's bilinear low-pass
+lags the damping by about 48° at that mode's 560 Hz. A lagged damper is part spring:
+c·ω·|H|·sin φ ≈ 2.6 MN/m on top, and the mode passes 2. With the filters off the arms
+stay stable (the car then fails elsewhere: its rear bumper's self-collision pairs that
+start inside the 3 cm range). So the mismatch is §6's reading of `dampCutoffHz`: BeamNG
+documents only "vibration frequencies above this value are not damped, which helps run
+higher damping before instability occurs", which a phase-lagging filter does not do at
+these stiffnesses. Open: a cut-off law without that lag (a single-pole filter has 11°
+there, and is still unstable at 100 ms).
+
+## 30. GPU layout of Part II and verification
+
+* Params words 64–68: `extIndex` (gLists, per beam its extension + 1), `extBase`
+  (gStatic, 4 records per extension, index fields globalised by the host),
+  `extState` (gBeams, per extension (ramp steps left, pressure even, pressure odd,
+  0)), `triBreak` (gStatic, per triangle its 4 beams), `deformBase` (gGroups after
+  the two parities of group slots: the deform group words). The parameter stride is
+  512 bytes (80 words).
+* A beam with an extension has `TYPE_EXT` in its type byte; `beamUpdate` sends it
+  to `jbeamExtUpdate` before `jbeamUpdate` (whose code is unchanged), `groupDrops` to
+  `groupDropsExt` (only when a master broke this step), and its first beam phase
+  after an own break calls `extPending` (several groups, §17). Breakable triangles
+  carry bit 31 of their self-group word; `triangleGeo` and `vvTriangle` give a dead
+  one an empty box; `tryContact` masks the bit. Pressure-wheel nodes carry
+  `NODE_FRICTION_LIMIT` (32) for the ground contact (§28).
+* Verification (2026-11-05, M3 Max): `explicit_beams_bitwise` (11 tests) bit for
+  bit against the frozen reference after the change; `tests/explicit_jbeam_ext_gpu.rs`:
+  the break-group ladders, the breaking panel (triangles and deform groups), the
+  precompression ramp and the rail bit for bit against the CPU (0.0000 mm, equal
+  broken counts and deform states); the pressure-wheel car within 2.2 mm over 2 s
+  at rest (ground friction's float-level differences) and identical into a wall at
+  56 km/h over 1 s. The same Slang compiles for the CUDA and Metal targets
+  (`slangc -target cuda|metal`, with and without `EB_AERO`), and the Metal output
+  compiles to AIR with `xcrun metal`; no CUDA toolchain or NVIDIA GPU here, so the
+  CUDA build is a Slang type-check only.

@@ -1161,6 +1161,18 @@ impl ExplicitBeams {
                     }
                 }
                 slide.segment = Some(best.0);
+                if sn.fix_to_rail {
+                    // `fixToRail` [R]: onto the rail at spawn (or to within its
+                    // tolerance).
+                    let b = &self.beams[self.segments[best.0 as usize].beam as usize];
+                    let p1 = self.origin + self.nodes[b.a as usize].pos;
+                    let p2 = self.origin + self.nodes[b.b as usize].pos;
+                    let (q, d, _) = crate::explicit_triggers::segment_point(p1, p2, x);
+                    if d > sn.tolerance && d > 0.0 {
+                        let to = q + (x - q) * (sn.tolerance / d);
+                        self.nodes[sn.node as usize].pos = to - self.origin;
+                    }
+                }
             }
             self.slides.push(slide);
         }

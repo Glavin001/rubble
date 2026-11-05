@@ -1827,6 +1827,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             damp: g("damp", 0.0),
             strength: g("strength", f32::INFINITY),
             cap_strength: g("capStrength", f32::INFINITY),
+            fix_to_rail: b("fixToRail"),
         });
     }
 

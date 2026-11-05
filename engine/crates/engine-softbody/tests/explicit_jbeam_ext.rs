@@ -7,6 +7,9 @@ use engine_softbody::explicit_jbeam_ext::{
     jbeam_ext_force, lbeam_force, pressure_tri_force, BeamExt, ATMOSPHERE, PSI,
 };
 use engine_softbody::jbeam::load_jbeam;
+use engine_softbody::jbeam_fixture::{
+    PART2_CAR, PART2_GROUPS, PART2_PANEL, PART2_RAIL, PART2_RAMP,
+};
 use engine_softbody::SoftVehicleDesc;
 use glam::Vec3;
 
@@ -59,23 +62,9 @@ fn node_at(pos: Vec3, vel: Vec3) -> Node {
     }
 }
 
-/// A ladder of nodes held up by fixed nodes (no gravity effects on the tests that
-/// pull it apart by hand).
-const GROUPS: &str = r#"
-{ "t": {
-  "information": {"name": "groups"}, "slotType": "main",
-  "nodes": [["id", "posX", "posY", "posZ"], {"nodeWeight": 1, "collision": false},
-            ["a0", 0, 0, 0], ["a1", 1, 0, 0], ["b0", 0, 1, 0], ["b1", 1, 1, 0], ["c0", 0, 2, 0], ["c1", 1, 2, 0]],
-  "beams": [["id1:", "id2:"], {"beamSpring": 100000, "beamDamp": 0, "beamDeform": "FLT_MAX", "beamStrength": 1000},
-            {"breakGroup": "g1"}, ["a0", "a1"],
-            {"breakGroup": ["g1", "g2"]}, ["b0", "b1"],
-            {"breakGroup": "g2"}, ["c0", "c1"],
-            {"breakGroup": ""}, ["a0", "b0"], ["b0", "c0"], ["a1", "b1"], ["b1", "c1"]]
-}}"#;
-
 #[test]
 fn several_groups_broken_by_any_without_propagation() {
-    let (mut s, d, _) = spawn_text(GROUPS, soft(), Vec3::ZERO);
+    let (mut s, d, _) = spawn_text(PART2_GROUPS, soft(), Vec3::ZERO);
     let (a, b, c) = (
         beam(&s, &d, "a0", "a1"),
         beam(&s, &d, "b0", "b1"),
@@ -102,7 +91,7 @@ fn several_groups_broken_by_any_without_propagation() {
 
 #[test]
 fn a_beam_in_several_groups_sets_them_all_off_the_next_step() {
-    let (mut s, d, _) = spawn_text(GROUPS, soft(), Vec3::ZERO);
+    let (mut s, d, _) = spawn_text(PART2_GROUPS, soft(), Vec3::ZERO);
     let (a, b, c) = (
         beam(&s, &d, "a0", "a1"),
         beam(&s, &d, "b0", "b1"),
@@ -119,22 +108,9 @@ fn a_beam_in_several_groups_sets_them_all_off_the_next_step() {
     assert!(s.beams[a].broken && s.beams[c].broken, "both of its groups");
 }
 
-const PANEL: &str = r#"
-{ "t": {
-  "information": {"name": "panel"}, "slotType": "main",
-  "nodes": [["id", "posX", "posY", "posZ"], {"nodeWeight": 1, "collision": false},
-            ["p0", 0, 0, 0], ["p1", 1, 0, 0], ["p2", 0, 1, 0], ["q0", 2, 0, 0], ["q1", 3, 0, 0], ["q2", 2, 1, 0]],
-  "beams": [["id1:", "id2:"], {"beamSpring": 100000, "beamDamp": 0, "beamDeform": 500, "beamStrength": 1000,
-             "deformGroup": "glass", "deformationTriggerRatio": 0.002},
-            ["p0", "p1"], ["p1", "p2"], ["p2", "p0"],
-            {"deformGroup": "", "disableTriangleBreaking": true},
-            ["q0", "q1"], ["q1", "q2"], ["q2", "q0"]],
-  "triangles": [["id1:", "id2:", "id3:"], ["p0", "p1", "p2"], ["q0", "q1", "q2"]]
-}}"#;
-
 #[test]
 fn triangles_break_with_their_sides_unless_disabled() {
-    let (mut s, d, _) = spawn_text(PANEL, soft(), Vec3::ZERO);
+    let (mut s, d, _) = spawn_text(PART2_PANEL, soft(), Vec3::ZERO);
     assert_eq!(s.tri_breaks.len(), 2);
     assert!(
         s.tri_breaks[1].iter().all(|&j| j == u32::MAX),
@@ -151,7 +127,7 @@ fn triangles_break_with_their_sides_unless_disabled() {
 
 #[test]
 fn deform_groups_trigger_on_yield_past_the_ratio_or_on_break() {
-    let (mut s, d, _) = spawn_text(PANEL, soft(), Vec3::ZERO);
+    let (mut s, d, _) = spawn_text(PART2_PANEL, soft(), Vec3::ZERO);
     assert_eq!(s.deform_names, vec!["glass".to_string()]);
     assert_eq!(s.deform_triggered(), &[0]);
     // A small elastic stretch: below the yield, no trigger.
@@ -277,18 +253,9 @@ fn rebound_damping_takes_the_expansion_values() {
     );
 }
 
-const RAMP: &str = r#"
-{ "t": {
-  "information": {"name": "ramp"}, "slotType": "main",
-  "nodes": [["id", "posX", "posY", "posZ"], {"nodeWeight": 1, "collision": false, "fixed": true},
-            ["a", 0, 0, 0], ["b", 1, 0, 0]],
-  "beams": [["id1:", "id2:"], {"beamSpring": 1000, "beamDamp": 0, "beamDeform": "FLT_MAX", "beamStrength": "FLT_MAX",
-             "beamPrecompression": 0.8, "beamPrecompressionTime": 0.01}, ["a", "b"]]
-}}"#;
-
 #[test]
 fn precompression_ramps_in_over_its_time() {
-    let (mut s, _, _) = spawn_text(RAMP, soft(), Vec3::ZERO);
+    let (mut s, _, _) = spawn_text(PART2_RAMP, soft(), Vec3::ZERO);
     assert!((s.beams[0].rest - 1.0).abs() < 1e-6);
     assert!((s.beams[0].rest0 - 0.8).abs() < 1e-6);
     let n = (0.01 / STEP).round() as usize;
@@ -345,41 +312,6 @@ fn pressure_on_a_closed_surface_sums_to_zero() {
     assert!(sum.length() < 1e-3, "{sum}");
 }
 
-/// A box chassis on four pressure wheels (original Rubble content).
-const CAR: &str = r#"
-{ "t": {
-  "information": {"name": "pw car"}, "slotType": "main",
-  "nodes": [["id", "posX", "posY", "posZ"], {"nodeWeight": 40, "frictionCoef": 1.0},
-            ["fl", 0.7, -1.2, 0.45], ["fr", -0.7, -1.2, 0.45], ["rl", 0.7, 1.2, 0.45], ["rr", -0.7, 1.2, 0.45],
-            ["flt", 0.5, -1.2, 0.9], ["frt", -0.5, -1.2, 0.9], ["rlt", 0.5, 1.2, 0.9], ["rrt", -0.5, 1.2, 0.9],
-            {"nodeWeight": 8},
-            ["fli", 0.55, -1.2, 0.45], ["fri", -0.55, -1.2, 0.45], ["rli", 0.55, 1.2, 0.45], ["rri", -0.55, 1.2, 0.45],
-            ["flo", 0.85, -1.2, 0.45], ["fro", -0.85, -1.2, 0.45], ["rlo", 0.85, 1.2, 0.45], ["rro", -0.85, 1.2, 0.45]],
-  "beams": [["id1:", "id2:"], {"beamSpring": 2000000, "beamDamp": 200, "beamDeform": "FLT_MAX", "beamStrength": "FLT_MAX"},
-            ["fl", "fr"], ["rl", "rr"], ["fl", "rl"], ["fr", "rr"], ["fl", "rr"], ["fr", "rl"],
-            ["flt", "frt"], ["rlt", "rrt"], ["flt", "rlt"], ["frt", "rrt"], ["flt", "rrt"],
-            ["fl", "flt"], ["fr", "frt"], ["rl", "rlt"], ["rr", "rrt"], ["fl", "frt"], ["rl", "rrt"], ["fl", "rlt"], ["fr", "rrt"],
-            ["fli", "flo"], ["fri", "fro"], ["rli", "rlo"], ["rri", "rro"],
-            ["fli", "fl"], ["flo", "fl"], ["fli", "flt"], ["flo", "flt"], ["fli", "rl"], ["flo", "rl"],
-            ["fri", "fr"], ["fro", "fr"], ["fri", "frt"], ["fro", "frt"], ["fri", "rr"], ["fro", "rr"],
-            ["rli", "rl"], ["rlo", "rl"], ["rli", "rlt"], ["rlo", "rlt"], ["rli", "fl"], ["rlo", "fl"],
-            ["rri", "rr"], ["rro", "rr"], ["rri", "rrt"], ["rro", "rrt"], ["rri", "fr"], ["rro", "fr"]],
-  "pressureWheels": [["name", "hubGroup", "group", "node1:", "node2:", "nodeS", "nodeArm:", "wheelDir"],
-        {"numRays": 12, "radius": 0.32, "hubRadius": 0.2, "tireWidth": 0.2, "hubWidth": 0.22,
-         "hubNodeWeight": 1.0, "nodeWeight": 0.25, "pressurePSI": 30, "frictionCoef": 1.0,
-         "hubBeamSpring": 800000, "hubBeamDamp": 60, "hubSideBeamSpring": 800000, "hubSideBeamDamp": 60,
-         "hubTreadBeamSpring": 800000, "hubTreadBeamDamp": 60, "hubPeripheryBeamSpring": 800000, "hubPeripheryBeamDamp": 60,
-         "wheelSideBeamSpring": 20000, "wheelSideBeamDamp": 150, "wheelSideBeamSpringExpansion": 200000,
-         "wheelSideBeamDampExpansion": 150, "wheelSideTransitionZone": 0.05,
-         "wheelTreadBeamSpring": 200000, "wheelTreadBeamDamp": 30, "wheelPeripheryBeamSpring": 200000,
-         "wheelPeripheryBeamDamp": 30, "enableTireLbeams": true, "wheelLbeamSpring": 5000, "wheelLbeamDamp": 5,
-         "enableTreadReinfBeams": true, "wheelTreadReinfBeamSpring": 100000, "wheelTreadReinfBeamDamp": 20},
-        ["FL", "wheel_FL", "tire_FL", "fli", "flo", 9999, "flt", 1],
-        ["FR", "wheel_FR", "tire_FR", "fri", "fro", 9999, "frt", -1],
-        ["RL", "wheel_RL", "tire_RL", "rli", "rlo", 9999, "rlt", 1],
-        ["RR", "wheel_RR", "tire_RR", "rri", "rro", 9999, "rrt", -1]]
-}}"#;
-
 fn lowest(s: &ExplicitBeams) -> f32 {
     s.nodes
         .iter()
@@ -396,7 +328,7 @@ fn kinetic(s: &ExplicitBeams) -> f32 {
 
 #[test]
 fn pressure_wheel_car_stands_on_its_tyres() {
-    let (mut s, d, w) = spawn_text(CAR, JbeamWheels::Pressure, Vec3::ZERO);
+    let (mut s, d, w) = spawn_text(PART2_CAR, JbeamWheels::Pressure, Vec3::ZERO);
     assert_eq!(d.pressure_wheels.len(), 4);
     assert!(w.iter().any(|w| w.contains("pressure wheels")), "{w:?}");
     let wheel_nodes = s.nodes.len() - d.nodes.len();
@@ -429,7 +361,7 @@ fn pressure_wheel_car_stands_on_its_tyres() {
 #[test]
 fn pressure_wheel_car_rolls_straight() {
     let v = Vec3::new(0.0, 0.0, 5.0);
-    let (mut s, _, _) = spawn_text(CAR, JbeamWheels::Pressure, v);
+    let (mut s, _, _) = spawn_text(PART2_CAR, JbeamWheels::Pressure, v);
     let drop = lowest(&s) - 0.005;
     for n in &mut s.nodes {
         n.pos.y -= drop;
@@ -445,20 +377,9 @@ fn pressure_wheel_car_rolls_straight() {
     assert_eq!(s.damage().0, 0);
 }
 
-const RAIL: &str = r#"
-{ "t": {
-  "information": {"name": "rail"}, "slotType": "main",
-  "nodes": [["id", "posX", "posY", "posZ"], {"nodeWeight": 1, "collision": false},
-            ["r0", -1, 0, 0, {"fixed": true}], ["r1", 1, 0, 0, {"fixed": true}], ["s", 0, 0, 0]],
-  "beams": [["id1:", "id2:"], {"beamSpring": 1000, "beamDamp": 0}, ["r0", "r1"]],
-  "rails": {"guide": {"links:": ["r0", "r1"], "looped": false, "capped": true}},
-  "slidenodes": [["id:", "railName", "attached", "fixToRail", "tolerance", "spring", "strength", "capStrength"],
-                 ["s", "guide", true, true, 0, 100000, "FLT_MAX", "FLT_MAX"]]
-}}"#;
-
 #[test]
 fn slide_node_hangs_on_its_rail() {
-    let (mut s, d, _) = spawn_text(RAIL, soft(), Vec3::new(0.0, 0.0, 0.0));
+    let (mut s, d, _) = spawn_text(PART2_RAIL, soft(), Vec3::new(0.0, 0.0, 0.0));
     assert_eq!(s.slides.len(), 1);
     let i = node(&d, "s") as usize;
     s.nodes[i].vel = Vec3::new(0.5, 0.0, 0.0);
