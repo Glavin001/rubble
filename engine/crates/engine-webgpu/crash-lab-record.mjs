@@ -9,7 +9,8 @@
 //     --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
 //   node --experimental-websocket crash-lab-record.mjs [--car showcase] [--size 1920x1080] [--out file.mp4] [preset ...]
 //
-// Presets: wall56, pole29, headon50, drop15 (all by default). Needs Chrome and ffmpeg.
+// Presets: wall56, pole29, headon50, drop15 (by default), tbone214, tbone80,
+// overlap64, swipe50, mdb214, doorpull; name:strain for the beam-strain view. Needs Chrome and ffmpeg.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
@@ -124,6 +125,7 @@ const hold = async (seconds) => { for (let f = 0; f < seconds * FPS; f++) { awai
 const PRESETS = {
   wall56: { cam: 'three' }, pole29: { cam: 'threeFront' }, headon50: { cam: 'side' }, drop15: { cam: 'side' },
   tbone214: { cam: 'three' }, tbone80: { cam: 'three' }, overlap64: { cam: 'threeFront' }, swipe50: { cam: 'threeFront' },
+  mdb214: { cam: 'three' }, doorpull: { cam: 'threeFront', slow: 2.0 },
 };
 const runs = only.length ? only : ['wall56', 'pole29', 'headon50', 'drop15', 'wall56:strain'];
 for (const run of runs) {
@@ -147,8 +149,12 @@ for (const run of runs) {
   for (let i = 0; i < 30; i++) await lab('L.draw()'); // the camera settles
   acc = 0;
   await play(lead, 1);          // real time up to 30 ms before the impact
-  await play(0.33, 20);         // 20x slow motion through the crash (6.6 s of video)
-  await play(1.2, 1);           // real time after
+  if (p.slow) {
+    await play(p.slow, 1);      // a slow event (the door pull): real time throughout
+  } else {
+    await play(0.33, 20);       // 20x slow motion through the crash (6.6 s of video)
+    await play(1.2, 1);         // real time after
+  }
   await hold(0.8);
   console.log(`${run}: impact at ${(impact / HZ * 1000).toFixed(0)} ms, ${frameNo} frames so far`);
 }

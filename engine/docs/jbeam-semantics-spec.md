@@ -899,8 +899,9 @@ panels"), `liftCoef` (default `dragCoef`), `stallAngle` (default 0.58 rad),
   α its angle of attack (sin α = |n̂·û|). Drag ½ρ·C·(dragCoef/100)·A·|u|²·sin α along
   û (the projected area); lift ½ρ·C·(liftCoef/100)·A·|u|²·C_L across û in the plane
   of û and n̂, toward the side the flow pushes the plate, C_L = sin α cos α up to the
-  stall, sin α_s cos α past it (continuous, falling to zero at 90°). Each node takes a
-  third. **Choices:** ρ = 1.225 kg/m³ (ISA sea level); C = 1.28, a flat plate normal
+  stall, sin α_s cos α past it (continuous, falling to zero at 90°); a negative
+  `liftCoef` reverses the lift (the Monster supercar's spoilers use −1.8 and −2).
+  Each node takes a third. **Choices:** ρ = 1.225 kg/m³ (ISA sea level); C = 1.28, a flat plate normal
   to the flow (Hoerner), for `dragCoef` 100; the flat plate's normal-force law for
   the angle dependence; the stalled law above.
 * **Records:** two per triangle with a drag or lift coefficient, after the beams
@@ -928,8 +929,31 @@ BeamNG documents nowhere: its bounded beams' rebound limit is `beamLimitDampRebo
 §22; unknown keys are ignored). For the B3 vehicles (the Monster supercar, the
 Astral R, the legocar) `unsupported_features` is empty.
 
-**Open (found 2026-11-05):** the Monster supercar does not coast: from 36 and 108 km/h
-it slows at about 37 m/s² with either wheel model and no drag (its body's lowest
-collidable nodes are above its tyres, so not a scraping body; a wheel held from
-turning is the likely cause). The wall runs start 0.3 m from the wall and are not
-affected.
+**The Monster supercar's coasting (found and fixed 2026-11-05).** It slowed at
+37 m/s² and reversed because the acceptance harnesses drove it sideways: the file
+models the car facing −X (`pack::forward_axis`), and `examples/jbeam_accept.rs` and
+`explicit_jbeam_community_gpu.rs` spawned every car moving along +Z, so its wheels
+were not spun (their axles lay along the motion) and it slid on its tyres. Both now
+turn the car to face +Z first (the crash lab always did). Every supercar "56 km/h
+wall" figure above dated before this note was a side impact; facing the wall it
+breaks nothing, bends 52 beams and leaves at about 5 m/s (KE 24 kJ at 1.5 s of
+237 kJ).
+
+**Coast-down** (`tests/explicit_jbeam_ext.rs`, opt-in; 25 m/s, 0.5–1.5 s): the
+momentum never grows, and with drag on the deceleration is at least the triangles'
+own drag summed along the run (it is: supercar 11.4 kN against 10.9 kN, Astral R
+2.29 kN against 0.66 kN plus rolling). Rolling resistance alone: C_rr = 0.053
+(supercar) and 0.079 (Astral R), 4–6 times the documented 0.010–0.015 of passenger
+tyres: the pressure tyres' tread and sidewall losses (12–16-ray polygons, the §28
+ground rule) are too high. **Open.** **Drag area check** (`jbeam_accept … aero=`: Σ 1.28·(dragCoef/100)·A·|n̂·f̂|
+over the desc's triangles, f̂ the forward axis; one-sided areas, each triangle once,
+SI units, the default 100 only where a row sets none). The reading is the docs':
+the values are the files'. The supercar's 61.6 m² is 96 % two groups whose
+`dragCoef` comes from its own variables, `$dragCoeffc` (front body, default 1000,
+range 0–10,000, "Front Drag coeficient") and `$dragCoef` on the spoiler (10,000;
+its comment says 120); its 68 body triangles at `dragCoef` 10 give 0.45 m², a real
+supercar's order (C_d·A ≈ 0.6–0.8 m²). The Astral R: 1.76 m², of which 0.98 m² its
+wings and aero devices (`dragCoef` 100–160), 0.5 m² its body panels (6–12): a rally
+car with its aero kit at C_d·A ≈ 1.0–1.2 m², so ours is about 1.5× (both faces of
+each triangle drag, as [T] says, "Triangles are not affected by other triangles").
+No triangle takes the default 100 in either car except where the author left it.

@@ -851,7 +851,8 @@ fn tri_aero(f: &Map<String, Value>) -> [f32; 4] {
     let drag = g("dragCoef").unwrap_or(100.0).max(0.0);
     [
         drag,
-        g("liftCoef").unwrap_or(drag).max(0.0),
+        // Negative: the lift reversed (spoilers' downforce).
+        g("liftCoef").unwrap_or(drag),
         g("stallAngle").unwrap_or(0.58).clamp(0.0, std::f32::consts::FRAC_PI_2),
         g("skinDragCoef").unwrap_or(0.0).max(0.0),
     ]

@@ -1535,6 +1535,11 @@ impl FramePlanner {
         self.contact.left = 0;
     }
 
+    /// The frame bounds margin (m).
+    pub fn contact_margin(&self) -> f32 {
+        f32::from_bits(self.words[W_VV_MARGIN])
+    }
+
     /// A new contact plan is due next frame (the host wrote velocities or forces the
     /// current plan's frame bounds did not assume).
     pub fn request_replan(&self) {

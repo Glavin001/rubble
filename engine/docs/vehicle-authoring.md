@@ -689,9 +689,27 @@ opening's edge, the doors' belt edges included, is black rubber.
   Ambient occlusion is baked from analytic occluders (downward faces low on
   the car, faces inside the arches); the wheels, which turn, are darkened by
   height instead. Cabin trim is lit without studio reflections.
-* **Normals.** Smooth normals follow the node normals. Where they disagree with
-  the triangle's frame by more than about 15°, the faceted frame normal wins,
-  so physics kinks read as creases.
+* **Creases** (`skin.rs` `crease_envelope`, the renderer's `envelope()`).
+  Each skin node has a tangent plane through it (its skin normal), or two
+  where a fold runs through the node (its skin triangles fall in two groups,
+  the most deviant more than 20° from the mean: `node_planes`), so a node on
+  a fold line carries both panels' planes rather than a bevel between them.
+  A body vertex's point on its binding triangle moves, along the planes'
+  barycentric mean normal, onto the plane nearest it, the planes weighted
+  wᵢ·exp(−(|t| − min|t|)/(0.08 L)) (t the distance to the plane, L the
+  binding triangle's size), and its rest normal turns with the weighted
+  planes' normal. At a fold the two sides' planes cross along a straight
+  line, so the crease is straight and sharp across (a 60° fold of a 10 cm
+  triangle switches over about 1 cm) and smooth along it, wherever the
+  binding triangles' edges run; a mild bend keeps barycentric (Phong-like)
+  weights and stays smooth. Only the change from the rest envelope is
+  applied, so the rest pose and rigid motion are exact. Where the result
+  disagrees with the binding triangle's frame by more than about 45° (a
+  panel crushed past its binding) the faceted frame normal wins.
+  `showcase-car.html?crease=0.04&splitDeg=12` tries other constants (sharper
+  than 0.08 shows the visual mesh's own triangles as a sawtooth);
+  `showcase-car-check.mjs wall_56_bonnet,zebra_wall_56_bonnet` is the
+  close-up.
 * **Level of detail.** `showcase_visual_lod(built, 0.45)` (wasm `visualLod`) is
   the same car with a coarser body, single-step rolls and fewer segments:
   about 75k triangles against about 240k.

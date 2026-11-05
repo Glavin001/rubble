@@ -69,6 +69,13 @@ fn main() {
     let spawn = |v: Vec3| {
         let (mut s, w) =
             ExplicitBeams::from_desc_jbeam_with(&desc, wheels, Vec3::ZERO, v, settings).unwrap();
+        // Facing +Z (a file can model its car along another axis: the Monster
+        // supercar faces −X), so `v` and the wall are along its forward axis.
+        let f = engine_softbody::pack::forward_axis(&desc);
+        let turn = glam::Quat::from_rotation_y(-f.x.atan2(f.z));
+        for n in &mut s.nodes {
+            n.pos = turn * n.pos;
+        }
         let low = s
             .nodes
             .iter()
@@ -78,6 +85,12 @@ fn main() {
             n.pos.y -= low - lift;
         }
         s.roll_tyres(v);
+        if let Some(cap) = opt("dampcap=") {
+            let cap: f32 = cap.parse().unwrap();
+            for b in &mut s.beams {
+                b.c = b.c.min(cap);
+            }
+        }
         (s, w)
     };
     let (mut s, warnings) = spawn(Vec3::ZERO);
@@ -107,6 +120,7 @@ fn main() {
         println!("warning: {w}");
     }
     let mass: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    println!("forward axis {:?}; first axle {:?}", engine_softbody::pack::forward_axis(&desc), s.tyres.first().map(|t| (s.nodes[t.axle[1] as usize].pos - s.nodes[t.axle[0] as usize].pos).normalize()));
     println!(
         "{name} {pc}: {} nodes ({} desc), {} beams ({} with extensions), {} collision triangles, {} kg, {} wheels",
         s.nodes.len(),
@@ -192,6 +206,27 @@ fn main() {
             }
         }
         println!("no break in 2 s");
+        return;
+    }
+    if opt("aero=").is_some() {
+        // Drag area per dragCoef: Σ C·(dragCoef/100)·A·|n·ẑ| facing the car's forward axis.
+        let f = engine_softbody::pack::forward_axis(&desc);
+        let mut by: std::collections::BTreeMap<String, (usize, f32, f32)> = Default::default();
+        for t in &desc.triangles {
+            let p = t.nodes.map(|i| glam::Vec3::from_array(desc.nodes[i as usize].position));
+            let cr = (p[1] - p[0]).cross(p[2] - p[0]);
+            let a = 0.5 * cr.length();
+            let proj = 0.5 * cr.dot(f).abs();
+            let e = by.entry(format!("{:.2}/{:.2}", t.aero[0], t.aero[1])).or_default();
+            e.0 += 1;
+            e.1 += a;
+            e.2 += 1.28 * t.aero[0] / 100.0 * proj;
+        }
+        let total: f32 = by.values().map(|e| e.2).sum();
+        for (k, (n, a, cda)) in &by {
+            println!("dragCoef/liftCoef {k}: {n} triangles, area {a:.2} m², drag area {cda:.3} m²");
+        }
+        println!("total drag area C·A {total:.2} m² ({} triangles)", desc.triangles.len());
         return;
     }
     if opt("modes=").is_some() {
@@ -330,12 +365,76 @@ fn main() {
         // Coasting for 1 s: the mean deceleration's force (air drag, rolling).
         let vz = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>();
         let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
-        let mut low: Vec<(f32, usize)> = s.nodes.iter().enumerate().map(|(i, n)| (n.pos.y, i)).collect();
+        {
+            let mut l: Vec<(f32, usize)> = s.nodes.iter().enumerate().filter(|(i, n)| *i < desc.nodes.len() && n.flags & engine_softbody::explicit_beams::NODE_NO_GROUND == 0).map(|(i, n)| (n.pos.y, i)).collect();
+            l.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let tyre_low = s.nodes[desc.nodes.len()..].iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+            println!("  tyres' lowest {tyre_low:.3}; lowest collidable body nodes {:?}", l.iter().take(6).map(|(y, i)| format!("{} {y:.3}", desc.nodes[*i].name)).collect::<Vec<_>>());
+        }
+        for (k, t) in s.tyres.iter().enumerate() {
+            let inside = |i: u32| i >= t.first && i < t.first + t.count;
+            let mut partners: Vec<String> = s
+                .beams
+                .iter()
+                .filter(|b| inside(b.a) != inside(b.b))
+                .map(|b| {
+                    let o = if inside(b.a) { b.b } else { b.a };
+                    format!("{}:{:?}", desc.nodes.get(o as usize).map_or("wheel".to_string(), |n| n.name.clone()), b.kind)
+                })
+                .collect();
+            partners.sort();
+            partners.dedup();
+            println!("  tyre {k} axle {:?}: outside partners {partners:?}", t.axle.map(|i| desc.nodes.get(i as usize).map_or("?", |n| n.name.as_str())));
+        }
+        if opt("coasttrace=").is_some() {
+            let n0 = desc.nodes.len();
+            for k in 0..30 {
+                s.run(0.01);
+                let body: f32 = s.nodes[..n0].iter().map(|n| n.mass * n.vel.z).sum::<f32>() / s.nodes[..n0].iter().map(|n| n.mass).sum::<f32>();
+                let wheels: f32 = s.nodes[n0..].iter().map(|n| n.mass * n.vel.z).sum::<f32>() / s.nodes[n0..].iter().map(|n| n.mass).sum::<f32>().max(1e-6);
+                let (i, fast) = s.nodes.iter().enumerate().max_by(|a, b| a.1.vel.length().total_cmp(&b.1.vel.length())).unwrap();
+                println!("  {:.2} s: body vz {body:.2}, wheel nodes vz {wheels:.2}; fastest {} {:.1?}", 0.01 * (k + 1) as f32, desc.nodes.get(i).map_or("wheel", |n| n.name.as_str()), fast.vel);
+            }
+            return;
+        }
+        let mut low: Vec<(f32, usize)> = s.nodes.iter().enumerate().filter(|(_, n)| n.flags & engine_softbody::explicit_beams::NODE_NO_GROUND == 0).map(|(i, n)| (n.pos.y, i)).collect();
         low.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let body_low: Vec<String> = low.iter().filter(|(_, i)| *i < desc.nodes.len()).take(6).map(|(y, i)| format!("{} {y:.3}", desc.nodes[*i].name)).collect();
+        println!("  lowest collidable body nodes: {body_low:?}");
         for &(y, i) in low.iter().take(4) {
             println!("  low node {i} {} y {y:.3} m {}", desc.nodes.get(i).map_or("wheel", |n| n.name.as_str()), s.nodes[i].mass);
         }
         s.run(0.5);
+        // Non-tyre nodes on the ground (they scrape).
+        let touching: Vec<String> = s
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.flags & engine_softbody::explicit_beams::NODE_TYRE == 0 && n.flags & engine_softbody::explicit_beams::NODE_NO_GROUND == 0 && n.pos.y < 0.003)
+            .map(|(i, n)| format!("{} {:.3} v {:.2}", desc.nodes.get(i).map_or("?", |d| d.name.as_str()), n.pos.y, n.vel.z))
+            .collect();
+        println!("  non-tyre nodes on the ground at 0.5 s: {touching:?}");
+        for t in &s.tyres {
+            let half = t.count / 2;
+            let hub = s.nodes[t.first as usize..(t.first + half) as usize].iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+            let tread = s.nodes[(t.first + half) as usize..(t.first + t.count) as usize].iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+            println!("  wheel span {}: lowest of first half {hub:.3}, of second half {tread:.3}", t.first);
+        }
+        for (k, t) in s.tyres.iter().enumerate() {
+            let [a1, a2] = t.axle.map(|i| s.nodes[i as usize]);
+            let c = 0.5 * (a1.pos + a2.pos);
+            let vc = 0.5 * (a1.vel + a2.vel);
+            let ax = (a2.pos - a1.pos).normalize();
+            let mut w = 0.0;
+            for i in t.first..t.first + t.count {
+                let n = s.nodes[i as usize];
+                let r = n.pos - c;
+                let r = r - ax * r.dot(ax);
+                w += r.cross(n.vel - vc).dot(ax) / r.length_squared().max(1e-6);
+            }
+            w /= t.count as f32;
+            println!("  tyre {k}: spin {w:.2} rad/s about its axle; centre speed {:.2} m/s, as rolling {:.2} rad/s (radius {:.3})", vc.z, vc.z / t.radius, t.radius);
+        }
         let p0 = vz(&s);
         s.run(1.0);
         let f = (p0 - vz(&s)) / 1.0;

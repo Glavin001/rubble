@@ -1155,7 +1155,21 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (!pos) return false;
       if (bodyFor.layout !== xlayout) {
         for (const id of bodyIds) bodyR.removeCar(id);
-        bodyIds = xlayout.vehicles.map((v, i) => { const vis = bodyVisual(); return bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: vis.lod ?? null, lodDistance: vis.lodDistance ?? 18 }); });
+        // The body goes on the vehicles it was built for (vehicle 0's kind): a
+        // scene's other bodies (the FMVSS 214 barrier) are drawn solid, and
+        // beams a rig added past the body's own (the door pull's cables) as cables.
+        const vis = bodyVisual();
+        const own = (v) => v.name === xlayout.vehicles[0].name && v.nodes >= vis.nodeCount;
+        bodyIds = xlayout.vehicles.filter(own).map((v) => bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: xlayout.vehicles.indexOf(v), lod: vis.lod ?? null, lodDistance: vis.lodDistance ?? 18 }));
+        let tri = 0;
+        const solidTris = [];
+        let cables = [0, 0];
+        for (const v of xlayout.vehicles) {
+          if (!own(v)) solidTris.push([tri, v.triangles]);
+          else if (v.beams > vis.beamRest0.length && cables[1] === 0) cables = [v.beamOffset + vis.beamRest0.length, v.beamOffset + v.beams];
+          tri += v.triangles;
+        }
+        labR.set({ solidTris, cables });
         bodyFor.step = null;
         bodyFor.layout = xlayout;
       }
