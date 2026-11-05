@@ -18,7 +18,7 @@ use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use engine_softbody::explicit_beams::{
     approx_sqrt, box_face, contact_force, fast_inv_sqrt, shape_face, Beam, ContactSurface,
     ExplicitBeams, ExplicitBeamsSettings, ExplicitKind, ExplicitType, StaticBox, StaticShape, DRAG,
-    GRAVITY, MAX_COLLISION_TRIANGLES, NODE_CONTACTER, NODE_NO_GROUND, STEP,
+    GRAVITY, MAX_COLLISION_TRIANGLES, NODE_NO_GROUND, STEP,
 };
 use glam::{DVec3, Quat, Vec3};
 use std::collections::HashSet;
@@ -140,6 +140,15 @@ fn skins_are_closed_and_the_truck_loads() {
             .filter(|&i| sk.nodes[i as usize].contacter)
             .collect();
         assert_eq!(contacters, expect);
+        // The damage units (the visual follows them): the glass panes by
+        // the agreed names, each with beams.
+        let names: Vec<&str> = b.damage_units.iter().map(|u| u.name.as_str()).collect();
+        for want in ["glass_windscreen", "glass_backlight", "glass_side_f_l", "glass_side_f_r", "glass_side_r_l", "glass_side_r_r"] {
+            let u = b.damage_units.iter().find(|u| u.name == want).unwrap_or_else(|| panic!("{res:?}: no {want} in {names:?}"));
+            assert!(!u.beams.is_empty());
+        }
+        let support = sk.beams.iter().filter(|bm| matches!(bm.ty, engine_softbody::authoring::skeleton::BeamType::Support(_))).count();
+        eprintln!("{res:?}: SUPPORT beams {support} of {} ({:.1} %)", sk.beams.len(), 100.0 * support as f32 / sk.beams.len() as f32);
         eprintln!(
             "{res:?}: collision {} triangles, {spanning} across shut lines (breakable), {} contacters",
             sk.collision.len(),

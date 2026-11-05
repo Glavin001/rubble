@@ -780,6 +780,32 @@ vehicle the same visual format as the authored car, so
   (275k triangles). Both are over the 0.5 ms budget; the supercar's own mesh
   is the outlier, and a third, coarser level is the next step.
 
+### Glass (A9, open)
+
+- `Built.damage_units` names each pane by the agreed names:
+  `glass_windscreen`, `glass_backlight`, `glass_side_{f,r}_{l,r}`. The sedan
+  has no quarter glass. Each unit is the pane's beams plus its mounts (the
+  beams from the pane to the shell around it).
+- `brittle_glass` holds the A9 model, behind `BRITTLE_GLASS`, which is off:
+  - tempered panes break at σ/E = 120 MPa / 70 GPa, with one detacher group
+    a pane;
+  - the laminated windscreen cracks (yields) at its plies' 45 MPa / 70 GPa
+    and holds;
+  - the windscreen and backlight hang on a urethane bead (TEROSON PU 9096
+    PL datasheet: G ≈ 1.2 MPa by DIN 54451 over a 5 mm layer; shear
+    strength 5–6 MPa fully cured). Each mount holds τ·w·L, taking a 5 mm by
+    10 mm bead with L its share of the edge;
+  - side glass bears in its run channel (compression only) and is held by
+    its regulator along the bottom.
+- With it on, 158 beams break at rest in `a`. The panes are skin-tier beams,
+  about 10⁵ × softer than glass, and they rack with the settling body. The
+  real bead's stiffness (G·w·L/t) is far above what the step allows the
+  pane's nodes, so the model cannot put the body's racking into the bead
+  the way a car does.
+- What is open: a pane model whose strain is the glass's own (for example
+  rest lengths taken at the settled pose, or the pane as a heavier
+  frame-tier plate). This needs a decision.
+
 ### A6: where the hardware's loads reach its strength (2026-11-05)
 
 `u_hardware_where_loads_reach_strength` (`--ignored`; `U_ONLY=overlap,pole,open,side`,
@@ -804,9 +830,16 @@ transverse–longitudinal). Medium, front left door unless noted:
 - The hinge pull rises over about 20 ms to 40–49 kN before it lets go (no
   one-step contact spike).
 - The latch lets go at 19–21 kN, its transverse strength.
-- The lower hinge lets go at 24–27 kN, under the 29.8 kN floor. That load
-  points outside FMVSS 206's two pulls (the pole drives the door's front end
-  in and back), so one rope takes most of it.
+- The lower hinge lets go at 24–27 kN, under the 29.8 kN floor. This is a
+  consequence of the model, not a measurement. The load points outside
+  FMVSS 206's two pulls (the pole drives the door's front end in and back),
+  and the rope decomposition puts most of it on one rope. No open combined-
+  or oblique-load hinge data was found to check it against.
+- Open gap: the car has no door check link or over-travel stop. No open
+  measured strength was found for either: SAE 2011-01-0790 (check-load
+  durability) and SAE 2003-01-0871 (closing effort; the check link as a
+  hinge torque) give no failure loads. Without a stop, an open door swings
+  free when struck, so the door-open scene cannot load its hinges.
 - No scene takes every group of a door. The hinge line takes the hinges; the
   latch line, the latch.
 

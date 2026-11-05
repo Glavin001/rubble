@@ -2490,7 +2490,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     };
     sk.solve_masses(structure)?;
     size_hardware(&mut sk, &hardware, params.strength)?;
-    let panes: Vec<DamageUnit> = Vec::new();
+    let panes = brittle_glass(def, &mut sk, &shell, &mut groups_made, params.strength);
     preload(&mut sk, def);
     // Collision skin: the shell's skin on a coarser lattice, its nodes contacters.
     sk.collision = coarse_skin(&sk, &shell)?;
@@ -2659,27 +2659,45 @@ fn brittle_glass(
     let mut out = Vec::new();
     for (name, laminated, nodes) in panes {
         let set: std::collections::HashSet<u32> = nodes.iter().copied().collect();
+        let bonded = !name.starts_with("glass_side");
         let g = if laminated {
             0
         } else {
             *groups_made += 1;
             *groups_made
         };
-        let mut beams = Vec::new();
-        for (j, b) in sk.beams.iter_mut().enumerate() {
+        let mut pane = Vec::new();
+        let mut mounts = Vec::new();
+        for (j, b) in sk.beams.iter().enumerate() {
             if b.tie || b.damper || b.ty != BeamType::Normal || b.group != 0 {
                 continue;
             }
-            if !(set.contains(&b.a) || set.contains(&b.b))
-                || !on_shell.contains(&b.a)
-                || !on_shell.contains(&b.b)
-            {
+            if !on_shell.contains(&b.a) || !on_shell.contains(&b.b) {
                 continue;
             }
-            beams.push(j as u32);
+            match (set.contains(&b.a), set.contains(&b.b)) {
+                (true, true) => pane.push(j),
+                (true, false) | (false, true) => mounts.push(j),
+                _ => {}
+            }
         }
-        for &j in &beams {
-            let b = &mut sk.beams[j as usize];
+        // The pane: brittle at its strain (tempered), or cracking there and
+        // held by its interlayer (laminated). Off ([`BRITTLE_GLASS`]): the
+        // panes are skin-tier beams, far softer than glass, and rack with
+        // the settling body: at 0.17 % they break at rest (158 beams in
+        // `a`). The units name each pane's beams either way.
+        if !BRITTLE_GLASS {
+            let part = sk.nodes[nodes[0] as usize].part;
+            out.push(DamageUnit {
+                name,
+                kind: DamageKind::Glass,
+                part,
+                beams: pane.iter().chain(&mounts).map(|&j| j as u32).collect(),
+            });
+            continue;
+        }
+        for &j in &pane {
+            let b = &mut sk.beams[j];
             let l = sk.nodes[b.a as usize].p.distance(sk.nodes[b.b as usize].p);
             let kl = b.mat.k_at(l) * l;
             if laminated {
@@ -2691,7 +2709,45 @@ fn brittle_glass(
                 b.group = g;
             }
         }
+        // Its mounts: each carries the bead (or the channel) along its share
+        // of the pane's edge, L (its spacing along the edge, about its own
+        // length). A bead holds τ·w·L before it lets go (no yield). Its
+        // stiffness G·w·L/t is far above what the step allows the pane's
+        // light nodes, so a mount keeps the stiffness the step fit gave it
+        // (min of the two).
+        let edge = mounts
+            .iter()
+            .map(|&j| sk.pos(sk.beams[j].a).distance(sk.pos(sk.beams[j].b)))
+            .sum::<f32>()
+            / mounts.len().max(1) as f32;
+        for &j in &mounts {
+            let b = &mut sk.beams[j];
+            let l = sk.nodes[b.a as usize].p.distance(sk.nodes[b.b as usize].p);
+            if bonded {
+                let real = URETHANE_G * BEAD_WIDTH / BEAD_THICKNESS * edge;
+                if b.mat.k_at(l) > real {
+                    b.mat = b.mat.stiffer(real / b.mat.k_at(l));
+                }
+                b.mat.deform = scale * URETHANE_TAU * BEAD_WIDTH * edge;
+                b.mat.strength = b.mat.deform;
+                b.group = g;
+            } else {
+                // Side glass sits in its door's run channel: it bears there
+                // (compression only), held by its regulator along the bottom
+                // (those beams keep their tension), and breaks with the pane.
+                let low = nodes.iter().map(|&i| sk.nodes[i as usize].p.y).fold(f32::MAX, f32::min);
+                let inner = if set.contains(&b.a) { b.a } else { b.b };
+                if sk.nodes[inner as usize].p.y > low + 0.05 {
+                    b.ty = BeamType::Support(SEAL_BREAK);
+                }
+                let kl = b.mat.k_at(l) * l;
+                b.mat.deform = scale * TEMPERED_STRAIN * kl;
+                b.mat.strength = b.mat.deform;
+                b.group = g;
+            }
+        }
         let part = sk.nodes[nodes[0] as usize].part;
+        let beams: Vec<u32> = pane.iter().chain(&mounts).map(|&j| j as u32).collect();
         out.push(DamageUnit {
             name,
             kind: DamageKind::Glass,
@@ -2701,6 +2757,20 @@ fn brittle_glass(
     }
     out
 }
+
+/// Brittle panes and sized mounts (A9): off until the panes stop racking
+/// with the body at rest (`vehicle-authoring.md`, glass).
+pub const BRITTLE_GLASS: bool = false;
+
+/// The windscreen and backlight's urethane bead: TEROSON PU 9096 PL (Henkel
+/// technical data sheet, October 2016): shear modulus about 1.2 MPa (DIN
+/// 54451, 5 mm layer), shear strength 5–6 MPa fully cured (5.5 taken).
+/// The bead is 5 mm thick (the datasheet's layer; 5–10 mm in cars) and 10
+/// mm wide (a stated geometry).
+pub const URETHANE_G: f32 = 1.2e6;
+pub const URETHANE_TAU: f32 = 5.5e6;
+pub const BEAD_THICKNESS: f32 = 0.005;
+pub const BEAD_WIDTH: f32 = 0.010;
 
 /// The damage units: each hinge and latch group (its secondary latch is its
 /// latch's unit too: the latch is broken when either position let go).
