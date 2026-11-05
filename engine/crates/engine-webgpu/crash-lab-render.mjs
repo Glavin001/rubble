@@ -42,6 +42,8 @@ struct Lab {
   // reflect > 0.5: the floor leaves no depth (a car's reflection is drawn
   // over it, below the floor plane).
   floorY: f32, focusX: f32, focusZ: f32, reflect: f32,
+  // Rig cables (beams [x, y): the door pull's), drawn as cables in every view.
+  cables: vec4u,
 };
 @group(0) @binding(1) var<uniform> frame: Frame;
 @group(0) @binding(2) var<uniform> lab: Lab;
@@ -147,7 +149,8 @@ fn tubeVertex(a: vec3f, b: vec3f, r: f32, k: u32, o: ptr<function, TubeOut>) {
   var o: TubeOut;
   o.gloss = 0.55;
   o.clip = HIDE; o.n = vec3f(0.0, 1.0, 0.0); o.c = vec3f(0.0); o.w = vec3f(0.0);
-  if ((lab.flags & F_SKELETON) == 0u) { return o; }
+  let cable = beam >= lab.cables.x && beam < lab.cables.y;
+  if ((lab.flags & F_SKELETON) == 0u && !cable) { return o; }
   let rec = recs[beam];
   let inf = info[beam];
   let tyre = (rec.z >> 16u) != 0u;
@@ -168,6 +171,7 @@ fn tubeVertex(a: vec3f, b: vec3f, r: f32, k: u32, o: ptr<function, TubeOut>) {
     b = a + normalize(b - a + vec3f(1e-7, 0.0, 0.0)) * stub;
   }
   var radius = lab.tubeR * select(1.0, 0.55, tyre);
+  if (cable) { radius = 0.006; }
   tubeVertex(a, b, radius, k, &o);
   // Colour.
   let k_ = bitcast<f32>(inf.x);
@@ -190,6 +194,8 @@ fn tubeVertex(a: vec3f, b: vec3f, r: f32, k: u32, o: ptr<function, TubeOut>) {
     if (broken) { c = c * 0.45; }
   }
   o.c = toLinear(c);
+  // A cable: braided steel, gloss.
+  if (cable) { o.c = toLinear(vec3f(0.78, 0.8, 0.84)); o.gloss = 0.85; }
   return o;
 }
 @fragment fn fsTube(i: TubeOut) -> @location(0) vec4f {
@@ -384,9 +390,13 @@ struct BgFrag { @location(0) c: vec4f, @builtin(frag_depth) depth: f32 };
  */
 export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, shadowView, shadowSampler }) {
   let sim = null, layout = null, mod = null, pipes = null, bufs = null, groups = null, sides = 0;
-  const labBuf = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const labBuf = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const countsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const opts = { colorMode: 'strain', skin: 'ghost', skeleton: true, nodes: true, stubs: true, tyres: true, studio: true, tubeR: 0.009, nodeR: 0.017, grab: null, floorY: 0, focus: [0, 0], reflect: false };
+  const opts = { colorMode: 'strain', skin: 'ghost', skeleton: true, nodes: true, stubs: true, tyres: true, studio: true, tubeR: 0.009, nodeR: 0.017, grab: null, floorY: 0, focus: [0, 0], reflect: false,
+    // cables: a beam range drawn as cables in every view; solidTris: triangle
+    // ranges [first, count] drawn solid in the 'body' view (vehicles without a
+    // body of their own, such as the FMVSS 214 barrier).
+    cables: [0, 0], solidTris: [] };
   const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
 
   const build = (n) => {
@@ -452,13 +462,14 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
   }
 
   function writeOpts() {
-    const u = new ArrayBuffer(64), w = new Uint32Array(u), f = new Float32Array(u);
+    const u = new ArrayBuffer(80), w = new Uint32Array(u), f = new Float32Array(u);
     const flags = (opts.skeleton ? 1 : 0) | (opts.nodes ? 2 : 0) | (opts.stubs ? 4 : 0) | (opts.studio ? 8 : 0) | (opts.tyres ? 16 : 0);
     w[0] = Math.max(0, COLOR_MODES.indexOf(opts.colorMode)); w[1] = Math.max(0, SKIN_MODES.indexOf(opts.skin)); w[2] = flags;
     w[3] = opts.grab ? opts.grab.node : 0xffffffff;
     f[4] = opts.tubeR; f[5] = opts.nodeR; w[6] = layout?.beams ?? 0; w[7] = layout?.nodes ?? 0;
     if (opts.grab) f.set([...opts.grab.target, 1], 8);
     f[12] = opts.floorY; f[13] = opts.focus[0]; f[14] = opts.focus[1]; f[15] = opts.reflect ? 1 : 0;
+    w[16] = opts.cables[0]; w[17] = opts.cables[1];
     device.queue.writeBuffer(labBuf, 0, u);
   }
 
@@ -499,7 +510,14 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
     drawOpaque(rp) {
       if (!sim) return;
       if (opts.skin === 'solid' && layout.triangles) { rp.setPipeline(pipes.solid); rp.setBindGroup(0, groups.skin); rp.draw(layout.triangles * 3); }
+      if (opts.skin === 'body') {
+        for (const [first, count] of opts.solidTris) { rp.setPipeline(pipes.solid); rp.setBindGroup(0, groups.skin); rp.draw(count * 3, 1, first * 3); }
+      }
       if (opts.skeleton) { rp.setPipeline(pipes.tube); rp.setBindGroup(0, groups.tube); rp.draw(layout.beams * 2 * sides * 6); }
+      else if (opts.cables[1] > opts.cables[0]) {
+        rp.setPipeline(pipes.tube); rp.setBindGroup(0, groups.tube);
+        rp.draw((opts.cables[1] - opts.cables[0]) * 2 * sides * 6, 1, opts.cables[0] * 2 * sides * 6);
+      }
       if (opts.nodes) { rp.setPipeline(pipes.node); rp.setBindGroup(0, groups.node); rp.draw(layout.nodes * 6); }
       if (opts.grab) {
         rp.setPipeline(pipes.grab); rp.setBindGroup(0, groups.grab); rp.draw(sides * 6);

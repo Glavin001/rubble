@@ -867,6 +867,47 @@ impl ExplicitBeams {
         }
     }
 
+    /// Break lists for a `.truck` vehicle's collision triangles that break
+    /// (Rubble's extension of cab lines; spec §18): the beams of the edges
+    /// they name (by node pair, in this solver's beam order) and their
+    /// group's first beam. None when no triangle breaks.
+    pub(crate) fn add_truck_triangle_breaks(&mut self, desc: &SoftVehicleDesc) {
+        if !desc.triangles.iter().any(|t| t.collision && (t.break_sides != 0 || t.break_group != 0)) {
+            return;
+        }
+        let mut side: HashMap<(u32, u32), u32> = HashMap::new();
+        for (i, b) in self.beams.iter().enumerate() {
+            side.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(i as u32);
+        }
+        let mut rep: HashMap<u32, u32> = HashMap::new();
+        for (i, b) in self.beams.iter().enumerate() {
+            if b.group > 0 {
+                rep.entry(b.group as u32).or_insert(i as u32);
+            }
+        }
+        let mut lists = Vec::new();
+        for t in desc.triangles.iter().filter(|t| t.collision) {
+            let mut l = [NO_BEAM; 4];
+            let [a, b, c] = t.nodes;
+            for (k, (p, q)) in [(a, b), (b, c), (c, a)].into_iter().enumerate() {
+                if t.break_sides & (1 << k) == 0 {
+                    continue;
+                }
+                if let Some(&j) = side.get(&(p.min(q), p.max(q))) {
+                    l[k] = j;
+                }
+            }
+            if t.break_group != 0 {
+                if let Some(&j) = rep.get(&t.break_group) {
+                    l[3] = j;
+                }
+            }
+            lists.push(l);
+        }
+        self.tri_dead = vec![false; lists.len()];
+        self.tri_breaks = lists;
+    }
+
     /// Spawn exclusions (spec §10.1, **Choice**): every self-collision candidate that
     /// starts inside a collision triangle's contact range (inside it, within the
     /// range of its plane) never collides with that triangle. Returns how many pairs.

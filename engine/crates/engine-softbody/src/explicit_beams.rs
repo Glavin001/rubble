@@ -1326,6 +1326,12 @@ impl ExplicitBeams {
         s.add_triangles(&desc);
         s.add_aero(&file, airfoil);
         s.finish();
+        // Rubble's extensions (none in Rigs of Rods files: unchanged): cab
+        // lines that break (spec §18) and contact from every node (§10.2).
+        s.add_truck_triangle_breaks(&desc);
+        if file.full_contact {
+            s.opt_in_full_contact();
+        }
         Ok(s)
     }
 

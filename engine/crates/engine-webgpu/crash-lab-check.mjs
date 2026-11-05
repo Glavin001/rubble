@@ -19,6 +19,7 @@
 // sedan with its skinned body. --car e36 (and viper,
 // mustang, agora) uses the local Rigs of Rods cars in engine/local-vehicles
 // (gitignored; skipped when absent). Needs Chrome (CHROME env to override).
+import { frameContent } from './frame-content.mjs';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
@@ -116,10 +117,18 @@ const evaluate = async (expression) => {
 await send('Runtime.enable');
 await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 
+// A screenshot; an empty frame (the studio without the car and scenery: under
+// EMPTY of it differs from the backdrop, frame-content.mjs) is recorded in
+// `empty` and fails its run.
+const EMPTY = 0.03;
+const empty = [];
 const shot = async (name) => {
   const s = await send('Page.captureScreenshot', { format: 'png' });
   const png = join(OUT, `${name}.png`);
-  writeFileSync(png, Buffer.from(s.result.data, 'base64'));
+  const buf = Buffer.from(s.result.data, 'base64');
+  writeFileSync(png, buf);
+  const c = frameContent(buf);
+  if (c < EMPTY) empty.push(`${name} (${(c * 100).toFixed(1)} % content)`);
   return png;
 };
 // Wait for the page (after a navigation) to be ready on `solver`; throws on a page error.
@@ -170,6 +179,10 @@ const PRESET_RUNS = {
   tbone80: ['preset=tbone80&slow=20', 0.2, 'three', [-5, 23, 127]],
   overlap64: ['preset=overlap64&slow=20', 0.2, 'threeFront', [-5, 23, 127]],
   swipe50: ['preset=swipe50&slow=20', 0.1, 'threeFront', [-5, 23, 127]],
+  // FMVSS 214's moving barrier (vehicle 1, drawn by the triangle path) and the
+  // door pull (the rig node is the car's last node, its cables beams).
+  mdb214: ['preset=mdb214&slow=20', 0.05, 'three', [-5, 23, 127]],
+  doorpull: ['preset=doorpull&slow=20', 0.0, 'threeFront', [-5, 250, 700]],
 };
 const RUNS = Object.fromEntries(Object.entries(PRESET_RUNS).map(([name, [query, earliest, cam, shots]]) => [name, async () => {
   await open(query);
@@ -266,11 +279,14 @@ const report = [];
 for (const name of names) {
   if (!RUNS[name]) throw new Error(`unknown run ${name}; have ${Object.keys(RUNS).join(', ')}`);
   pageErrors.length = 0;
+  empty.length = 0;
   const t0 = performance.now();
   let res;
   try { res = await RUNS[name](); } catch (e) { res = { ok: false, msg: String(e.message || e) }; }
   const err = await pageError().catch(() => '');
   if (err) res = { ok: false, msg: `${res.msg} · page error: ${err}` };
+  if (empty.length) res = { ok: false, msg: `${res.msg} · empty frames: ${empty.join(', ')}` };
+  if (!res.ok && pageErrors.length) res.msg += ` · console: ${pageErrors.slice(0, 3).map((e) => String(e).split('\n')[0]).join(' | ')}`;
   const secs = ((performance.now() - t0) / 1000).toFixed(1);
   console.log(`${res.ok ? '✓' : '✗'} ${CAR} ${name}: ${res.msg} (${secs} s)`);
   report.push({ car: CAR, name, ...res, seconds: Number(secs) });

@@ -2499,7 +2499,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             sk.nodes[i as usize].contacter = true;
         }
     }
-    per_part_collision(&mut sk, &shell, &hardware);
+    shut_line_breaks(&mut sk, &shell, &hardware);
     sk.skin = shell.tris.clone();
     // Reference nodes: floor centre, a metre back, and left.
     let floor: Vec<u32> = shell
@@ -2545,29 +2545,47 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     })
 }
 
-/// Each part its own collision skin: no collision triangle spans a shut
-/// line (a part that comes off would drag it along as a ghost sheet), and
-/// every shell node of a part that can come off is a contacter (it meets
-/// the car it left and the other car wherever it lands).
-fn per_part_collision(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]) {
-    let before = sk.collision.len();
-    let nodes = &sk.nodes;
-    let dropped: Vec<[u32; 3]> = sk
-        .collision
+/// The collision skin across the shut lines (A1: no collision triangle
+/// outlives the joint it spans). The skin stays the closed lattice, so
+/// nothing passes between two parts while they are joined; each triangle
+/// with nodes in two parts breaks (spec §18) when a beam along its edges
+/// across the shut line breaks (the seam's seal, bolt or bearing beams) or
+/// when the nearest hinge
+/// or latch group of its parts lets go. Triangles inside a part stay plain:
+/// a part that comes off keeps its own skin and collides as a part. Every
+/// shell node of a part that can come off is a contacter, and the car's file
+/// asks for contact from every node (spec §10.2).
+fn shut_line_breaks(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]) {
+    let pins: Vec<(u16, Vec3, u32)> = hardware
         .iter()
-        .copied()
-        .filter(|t| t.iter().any(|&i| nodes[i as usize].part != nodes[t[0] as usize].part))
+        .map(|h| {
+            let b = &sk.beams[h.beams[0]];
+            let pin = if sk.nodes[b.a as usize].part == h.part { b.a } else { b.b };
+            (h.part, sk.pos(pin), h.group)
+        })
         .collect();
-    sk.collision.retain(|t| t.iter().all(|&i| nodes[i as usize].part == nodes[t[0] as usize].part));
-    if std::env::var("COLL_DEBUG").is_ok() {
-        let mut longest = 0.0f32;
-        for t in &dropped {
-            for k in 0..3 {
-                longest = longest.max(sk.pos(t[k]).distance(sk.pos(t[(k + 1) % 3])));
-            }
+    let mut breaks = Vec::with_capacity(sk.collision.len());
+    for t in &sk.collision {
+        let parts: Vec<u16> = t.iter().map(|&i| sk.nodes[i as usize].part).collect();
+        if parts.iter().all(|&p| p == parts[0]) {
+            breaks.push(None);
+            continue;
         }
-        eprintln!("collision: {before} -> {} triangles ({} span a shut line, longest edge {longest:.3} m)", sk.collision.len(), dropped.len());
+        let c = (sk.pos(t[0]) + sk.pos(t[1]) + sk.pos(t[2])) / 3.0;
+        let g = pins
+            .iter()
+            .filter(|p| parts.contains(&p.0))
+            .min_by(|a, b| a.1.distance(c).total_cmp(&b.1.distance(c)))
+            .map_or(0, |p| p.2);
+        // Its edges across the shut line (a torn skin beam inside a part
+        // leaves the part's own surface there).
+        let mask = (0..3)
+            .filter(|&k| parts[k] != parts[(k + 1) % 3])
+            .fold(0u8, |m, k| m | 1 << k);
+        breaks.push(Some((g, mask)));
     }
+    sk.collision_breaks = breaks;
+    sk.full_contact = true;
     let detachable: std::collections::HashSet<u16> = hardware.iter().map(|h| h.part).collect();
     for &i in &shell.nodes {
         if detachable.contains(&sk.nodes[i as usize].part) {
