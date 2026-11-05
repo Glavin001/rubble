@@ -471,6 +471,10 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
      * order; live or replayed): what a textured body skinned to the nodes reads
      * (the showcase car renderer's input), so it follows replays too. */
     positionsBuffer() { return bufs?.pos ?? null; },
+    /** The compact beam rest lengths (`array<f32>` per beam, global order,
+     * negative when broken; live or replayed): the showcase body's damage
+     * units read their beams' state from it. */
+    restBuffer() { return bufs?.rest ?? null; },
     /** Live frame: copy the solver's state into the compact buffers. */
     gather(enc) {
       if (!sim) return;

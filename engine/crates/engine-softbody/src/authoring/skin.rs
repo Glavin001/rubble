@@ -81,7 +81,14 @@ pub mod mat {
     /// The B-pillar applique: satin black (no mirror-bright sky at grazing
     /// angles once the doors move).
     pub const PILLAR: u8 = 29;
-    pub const COUNT: usize = 30;
+    /// A panel's inner stamping (door inner skin and shut faces, bonnet and
+    /// boot-lid inner frames, aprons): grey e-coat, seen through a tear or
+    /// once the outer skin is gone.
+    pub const INNER: u8 = 30;
+    /// The engine and its bay's hardware (block, cam cover, radiator, strut
+    /// towers): cast and painted metal.
+    pub const ENGINE: u8 = 31;
+    pub const COUNT: usize = 32;
 }
 
 /// Material names, by id.
@@ -116,6 +123,8 @@ pub const MATERIAL_NAMES: [&str; mat::COUNT] = [
     "privacy",
     "machined",
     "pillar",
+    "inner",
+    "engine",
 ];
 
 /// Whether a material is drawn blended (after the opaque ones).
@@ -170,18 +179,115 @@ pub struct ShowcaseVisual {
     pub node_rest: Vec<[f32; 3]>,
     /// The pieces (name, first vertex, vertex count), in order.
     pub pieces: Vec<(String, u32, u32)>,
-    /// Per vertex of a mounted rigid part (lamps, mirrors, handles, tempered
-    /// glass): the skin triangle it is mounted on (an index into
-    /// `normal_tris`, `u32::MAX` for none) and its (α, β, h) on it. Where the
-    /// mount has moved more than [`ANCHOR_BREAK`] from where the rigid part
-    /// holds the vertex (the panel under it crushed or tore), the part breaks
-    /// there (a torn vertex) instead of floating free.
-    pub anchor: Vec<u32>,
-    pub anchor_coords: Vec<[f32; 3]>,
+    /// The damage units (glass panes, lamps, mirrors): each a set of the
+    /// solver's beams whose state decides the unit's ([`unit_states`]).
+    pub units: Vec<DamageUnit>,
+    /// Per vertex its damage unit (an index into `units`, `u32::MAX` none).
+    pub unit: Vec<u32>,
+    /// Per vertex 1 where it throws a glass or lens shard as its unit breaks
+    /// (area × [`SHARD_DENSITY`] per unit).
+    pub shard: Vec<u8>,
+    /// Every solver beam's spawn rest length, in the solver's order (this
+    /// vehicle's beams: its first is the vehicle's `beamOffset`).
+    pub beam_rest0: Vec<f32>,
+    /// Per solver node (CSR) the solver beams on it, tyre beams excluded: the
+    /// renderer's per-node plastic strain (paint gloss, windscreen cracks).
+    pub node_beam_start: Vec<u32>,
+    pub node_beam_list: Vec<u32>,
+    /// Per solver node its surface material ([`node_mat`]): which nodes throw
+    /// sparks when they scrape (metal), chips (plastic), nothing (rubber).
+    pub node_material: Vec<u8>,
 }
 
-/// A mounted rigid part breaks where its mount has moved this far (m) from it.
-pub const ANCHOR_BREAK: f32 = 0.04;
+/// Surface material of a solver node (`ShowcaseVisual::node_material`).
+pub mod node_mat {
+    pub const METAL: u8 = 0;
+    pub const PLASTIC: u8 = 1;
+    pub const GLASS: u8 = 2;
+    pub const RUBBER: u8 = 3;
+}
+
+/// Damage unit kinds (`DamageUnit::kind`).
+pub mod unit_kind {
+    /// Tempered glass (side windows, backlight): shatters whole. Its pane is
+    /// dropped and throws its shards.
+    pub const TEMPERED: u8 = 0;
+    /// The laminated windscreen: cracks where its beams yield or break and
+    /// stays in its frame (the interlayer holds it).
+    pub const LAMINATED: u8 = 1;
+    /// A lamp: its lens shatters and its light goes dark.
+    pub const LAMP: u8 = 2;
+    /// A mirror: its glass shatters.
+    pub const MIRROR: u8 = 3;
+}
+
+/// Tempered glass's break strain: characteristic bending strength ≈ 120 MPa
+/// over E ≈ 70 GPa (engine/docs/beamng-realism-plan.md P6). Glass has no
+/// plastic range, so a pane whose beams have yielded past this has broken: a
+/// deformation trigger, as BeamNG's deform groups switch glass.
+pub const TEMPERED_BREAK_STRAIN: f32 = 120.0e6 / 70.0e9;
+/// Annealed glass (the windscreen's plies): ≈ 45 MPa over 70 GPa. Its cracks
+/// start where its beams yield past this.
+pub const LAMINATED_CRACK_STRAIN: f32 = 45.0e6 / 70.0e9;
+/// A lamp lens (PMMA, the usual tail lamp and outer lens material) breaks at
+/// about 3 % elongation (PMMA's elongation at break is 2–10 %): a lamp whose
+/// mount has yielded past this has a broken lens.
+pub const LENS_BREAK_STRAIN: f32 = 0.03;
+/// Shards thrown per square metre of broken glass or lens (each a few
+/// centimetres of granules; tempered glass's real ~1 cm cubes would be ~10⁴
+/// a square metre, too many particles). Visual only.
+pub const SHARD_DENSITY: f32 = 400.0;
+
+/// A damage unit: a pane, lamp or mirror whose state follows its beams.
+#[derive(Clone, Debug, Default)]
+pub struct DamageUnit {
+    pub name: String,
+    pub kind: u8,
+    /// This vehicle's solver beams (indices in the solver's order).
+    pub beams: Vec<u32>,
+    /// Deformation trigger: the unit is broken once one of its live beams'
+    /// |rest − rest₀| / rest₀ passes this (`f32::INFINITY`: only by breaking).
+    pub strain: f32,
+    /// Its shard seeds (vertices with `shard` 1).
+    pub shards: u32,
+}
+
+/// One solver beam's state (the GPU buffer's broken flag and rest length).
+#[derive(Clone, Copy, Debug)]
+pub struct BeamState {
+    pub broken: bool,
+    pub rest: f32,
+}
+
+/// A damage unit's state: broken (any of its beams broken, or its live
+/// beams' largest plastic strain past the unit's trigger) and that strain.
+/// The renderer's `units` pass computes exactly this on the GPU.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UnitState {
+    pub broken: bool,
+    pub strain: f32,
+}
+
+/// Every unit's state from the solver's beams (this vehicle's, in order).
+pub fn unit_states(v: &ShowcaseVisual, beams: &[BeamState]) -> Vec<UnitState> {
+    v.units
+        .iter()
+        .map(|u| {
+            let mut s = UnitState::default();
+            for &j in &u.beams {
+                let b = beams[j as usize];
+                if b.broken {
+                    s.broken = true;
+                } else {
+                    let r0 = v.beam_rest0[j as usize];
+                    s.strain = s.strain.max((b.rest - r0).abs() / r0.abs().max(1e-6));
+                }
+            }
+            s.broken |= s.strain > u.strain;
+            s
+        })
+        .collect()
+}
 
 /// Candidate binding triangles of one part, with a coarse grid over their centroids.
 struct Binder {
@@ -360,6 +466,10 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             &gi,
             super::parts::interior::Cabin::of(def),
         ));
+        let nodes = |n: &str| -> Option<Vec<Vec3>> {
+            Some(built.groups.get(n)?.iter().map(|&i| sk.pos(i)).collect())
+        };
+        pieces.extend(super::parts::bay::engine_bay(&gi, &nodes));
     }
     // Binders: per part, all skin, per group, per tyre and hub.
     let mut by_part: HashMap<u16, Vec<[u32; 3]>> = HashMap::new();
@@ -371,12 +481,6 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     }
     let fallback = Binder::new(sk.skin.clone(), &node_pos, 0.15);
     // Single-part skin triangles of every part (votes and reach checks).
-    let skin_index: HashMap<[u32; 3], u32> = sk
-        .skin
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (*t, i as u32))
-        .collect();
     let pure = Binder::new(
         by_part.values().flatten().copied().collect(),
         &node_pos,
@@ -425,6 +529,21 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     let mut rounds = 0;
     while let Some(piece) = queue.pop() {
         rounds += 1;
+        if let Bind::Inset(mm) = piece.bind {
+            // Vote at the outer skin (the inner panel's normals face in).
+            let mut probe = piece.mesh.clone();
+            for k in 0..probe.len() {
+                probe.pos[k] -= probe.nrm[k] * (mm as f32 * 1e-3);
+                probe.nrm[k] = -probe.nrm[k];
+            }
+            if let Some(pt) = vote(&probe) {
+                pieces.push(Piece {
+                    bind: Bind::PartInset(pt, mm),
+                    ..piece
+                });
+                continue;
+            }
+        }
         let pt = match piece.bind {
             Bind::Vote if rounds < 400 => vote(&piece.mesh),
             _ => None,
@@ -533,7 +652,11 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             _ => None,
         };
         let rigid = piece.bind == Bind::Rigid || group_rigid.is_some();
-        let part: Option<u16> = if let Bind::Part(p) = piece.bind {
+        // An inner stamping binds where the outer panel over it binds: each
+        // vertex picks its triangle at the outer skin (moved back out by its
+        // depth), then is placed on that triangle at its own depth.
+        let inset = if let Bind::PartInset(_, mm) = piece.bind { mm as f32 * 1e-3 } else { 0.0 };
+        let part: Option<u16> = if let Bind::Part(p) | Bind::PartInset(p, _) = piece.bind {
             Some(p)
         } else if piece.bind == Bind::Vote || rigid {
             let mut votes: HashMap<u16, usize> = HashMap::new();
@@ -580,18 +703,9 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             let tt = (p1 - p0).normalize();
             let nn = (p1 - p0).cross(p2 - p0).normalize();
             let bb = nn.cross(tt);
-            let mounted = piece.bind == Bind::Rigid;
             for k in 0..m.len() {
                 let d = m.pos[k] - p0;
                 let n = m.nrm[k];
-                let a = if mounted {
-                    pure.bind(m.pos[k], n)
-                        .and_then(|(at, ac, _)| skin_index.get(&at).map(|&i| (i, ac)))
-                } else {
-                    None
-                };
-                out.anchor.push(a.map_or(u32::MAX, |x| x.0));
-                out.anchor_coords.push(a.map_or([0.0; 3], |x| x.1));
                 out.bind_nodes.push(t);
                 out.bind_coords.push([d.dot(tt), d.dot(bb), d.dot(nn)]);
                 out.bind_normal.push([n.dot(tt), n.dot(bb), n.dot(nn)]);
@@ -621,11 +735,22 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             let r: Option<(B, u16)> = if let Some(o) = &own {
                 o.bind(p, n).map(|b| (b, u16::MAX))
             } else if let Some(pt) = part {
-                let near = pure.bind_d(p, n);
+                let (pp, np) = if inset > 0.0 { (p - n * inset, -n) } else { (p, n) };
+                let at = |r: Option<([u32; 3], [f32; 3], [f32; 3], f32)>| {
+                    r.map(|(t, c, nl, d)| {
+                        if inset > 0.0 {
+                            let (c, nl) = frame_coords(&node_pos, t, p, n);
+                            (t, c, nl, d)
+                        } else {
+                            (t, c, nl, d)
+                        }
+                    })
+                };
+                let near = at(pure.bind_d(pp, np));
                 let b = binders
                     .entry(pt)
                     .or_insert_with(|| Binder::new(by_part[&pt].clone(), &node_pos, 0.15));
-                let mine = b.bind_d(p, n);
+                let mine = at(b.bind_d(pp, np));
                 match (mine, near) {
                     (Some(a), Some(z)) => {
                         let zp = sk.nodes[z.0[0] as usize].part;
@@ -714,8 +839,6 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             // body's skin (not on wheels or frames).
             out.smooth.push(if own.is_none() { m.smooth[k] } else { 0 });
             out.rigid.push(0);
-            out.anchor.push(u32::MAX);
-            out.anchor_coords.push([0.0; 3]);
         }
         let count = out.positions.len() as u32 - first;
         out.indices.extend(idx.iter().map(|i| i + first));
@@ -747,7 +870,256 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         .iter()
         .map(|n| n.to_array())
         .collect();
+    damage_units(built, &sim, &node_pos, &pure, &mut out);
     Ok(out)
+}
+
+/// The damage units, the per-node beam table and node materials.
+///
+/// Interim derivation (until the physics' own break groups land in `Built`:
+/// engine/docs/beamng-realism-plan.md P1, P5, P6): a glass pane's unit is its
+/// glass zone's beams (both nodes in the zone, on the pane's side); a lamp's,
+/// a mirror's and a pane without a glass zone (the quarter light) is its
+/// mount: the solver beams along the skin triangles under it.
+fn damage_units(
+    built: &Built,
+    sim: &ExplicitBeams,
+    node_pos: &[Vec3],
+    pure: &Binder,
+    out: &mut ShowcaseVisual,
+) {
+    use super::vehicle::Region;
+    let sk = &built.skeleton;
+    let def = &built.def;
+    let nn = node_pos.len();
+    let mut tyre_node = vec![false; nn];
+    for t in &sim.tyres {
+        for i in t.first..t.first + t.count {
+            tyre_node[i as usize] = true;
+        }
+        for &a in &t.axle {
+            tyre_node[a as usize] = true;
+        }
+    }
+    // Beams by node pair, and per node (CSR, no tyre beams).
+    let mut by_pair: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+    let mut count = vec![0u32; nn + 1];
+    for (j, b) in sim.beams.iter().enumerate() {
+        by_pair
+            .entry((b.a.min(b.b), b.a.max(b.b)))
+            .or_default()
+            .push(j as u32);
+        if !tyre_node[b.a as usize] && !tyre_node[b.b as usize] {
+            count[b.a as usize + 1] += 1;
+            count[b.b as usize + 1] += 1;
+        }
+    }
+    for i in 0..nn {
+        count[i + 1] += count[i];
+    }
+    let mut fill = count.clone();
+    let mut list = vec![0u32; count[nn] as usize];
+    for (j, b) in sim.beams.iter().enumerate() {
+        if !tyre_node[b.a as usize] && !tyre_node[b.b as usize] {
+            for n in [b.a, b.b] {
+                list[fill[n as usize] as usize] = j as u32;
+                fill[n as usize] += 1;
+            }
+        }
+    }
+    out.node_beam_start = count;
+    out.node_beam_list = list;
+    out.beam_rest0 = sim.beams.iter().map(|b| b.rest0).collect();
+    // Glass zones: per shell node its (zone, side) (side 0 for a zone across
+    // the car, ±1 for a side zone).
+    let len = def.profile.length;
+    let glass: Vec<(usize, bool)> = def
+        .zones
+        .iter()
+        .enumerate()
+        .filter(|(_, z)| z.grade == "glass")
+        .map(|(k, z)| (k, matches!(z.region, Region::Side(_))))
+        .collect();
+    let mut zone_of: HashMap<u32, (usize, i8)> = HashMap::new();
+    for &i in &built.shell.nodes {
+        let p = sk.pos(i);
+        let Some(seg) = built.shell.seg.get(&i) else {
+            continue;
+        };
+        if let Some(&(k, sided)) = glass
+            .iter()
+            .find(|(k, _)| def.zones[*k].region.contains(p, *seg, len))
+        {
+            let side = if sided { if p.x >= 0.0 { 1 } else { -1 } } else { 0 };
+            zone_of.insert(i, (k, side));
+        }
+    }
+    let mut zone_beams: HashMap<(usize, i8), Vec<u32>> = HashMap::new();
+    for (j, b) in sim.beams.iter().enumerate() {
+        if let (Some(za), Some(zb)) = (zone_of.get(&b.a), zone_of.get(&b.b)) {
+            if za == zb {
+                zone_beams.entry(*za).or_default().push(j as u32);
+            }
+        }
+    }
+    let zone_centre = |key: &(usize, i8)| -> Vec3 {
+        let ns: Vec<Vec3> = zone_of
+            .iter()
+            .filter(|(_, z)| *z == key)
+            .map(|(&i, _)| node_pos[i as usize])
+            .collect();
+        ns.iter().copied().sum::<Vec3>() / ns.len().max(1) as f32
+    };
+    let centres: Vec<((usize, i8), Vec3)> = zone_beams
+        .keys()
+        .map(|k| (*k, zone_centre(k)))
+        .collect();
+    // Node materials.
+    out.node_material = (0..nn)
+        .map(|i| {
+            if tyre_node[i] {
+                node_mat::RUBBER
+            } else if zone_of.contains_key(&(i as u32)) {
+                node_mat::GLASS
+            } else if i < sk.nodes.len()
+                && sk.parts[sk.nodes[i].part as usize].starts_with("bumper")
+            {
+                node_mat::PLASTIC
+            } else {
+                node_mat::METAL
+            }
+        })
+        .collect();
+    // Units from the pieces.
+    out.unit = vec![u32::MAX; out.positions.len()];
+    out.shard = vec![0; out.positions.len()];
+    let mut by_name: HashMap<String, u32> = HashMap::new();
+    let pieces = out.pieces.clone();
+    for (name, first, cnt) in &pieces {
+        let base = name.trim_end_matches('+');
+        let kind = if base == "windscreen" {
+            unit_kind::LAMINATED
+        } else if base == "backlight" || base.starts_with("glass_side") {
+            unit_kind::TEMPERED
+        } else if base.starts_with("headlight")
+            || base.starts_with("taillight")
+            || base.starts_with("foglamp")
+            || base == "lightbar"
+        {
+            unit_kind::LAMP
+        } else if base.starts_with("mirror") {
+            unit_kind::MIRROR
+        } else {
+            continue;
+        };
+        let (first, cnt) = (*first as usize, *cnt as usize);
+        let centroid = (first..first + cnt)
+            .map(|k| Vec3::from_array(out.positions[k]) - built.shift)
+            .sum::<Vec3>()
+            / cnt.max(1) as f32;
+        let uid = *by_name.entry(base.to_string()).or_insert_with(|| {
+            let glassy = matches!(kind, unit_kind::TEMPERED | unit_kind::LAMINATED);
+            // A pane on its glass zone; otherwise (and every lamp and mirror)
+            // its mount.
+            let zone = glassy
+                .then(|| {
+                    centres
+                        .iter()
+                        .map(|(k, c)| (*k, c.distance(centroid)))
+                        .filter(|(_, d)| *d < 0.4)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(k, _)| k)
+                })
+                .flatten();
+            let beams = if let Some(z) = zone {
+                zone_beams[&z].clone()
+            } else {
+                let mut set = std::collections::BTreeSet::new();
+                let step = (cnt / 300).max(1);
+                for k in (first..first + cnt).step_by(step) {
+                    let p = Vec3::from_array(out.positions[k]) - built.shift;
+                    if let Some((t, _, _)) = pure.bind(p, Vec3::Y) {
+                        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                            if let Some(js) = by_pair.get(&(a.min(b), a.max(b))) {
+                                set.extend(js.iter().copied());
+                            }
+                        }
+                    }
+                }
+                set.into_iter().collect()
+            };
+            // A pane on its own glass beams breaks at glass's strain; a pane
+            // without them (the quarter light) only when its mount tears
+            // (the body panel's beams' strain is not the glass's).
+            let strain = match kind {
+                unit_kind::TEMPERED if zone.is_some() => TEMPERED_BREAK_STRAIN,
+                unit_kind::LAMP => LENS_BREAK_STRAIN,
+                _ => f32::INFINITY,
+            };
+            out.units.push(DamageUnit {
+                name: base.to_string(),
+                kind,
+                beams,
+                strain,
+                shards: 0,
+            });
+            (out.units.len() - 1) as u32
+        });
+        for k in first..first + cnt {
+            out.unit[k] = uid;
+        }
+    }
+    // Shard seeds: over each breaking unit's glass, lens and mirror faces,
+    // area × SHARD_DENSITY of them (area weighted, one per marked vertex).
+    let mut acc = vec![0.0f32; out.units.len()];
+    for t in out.indices.chunks(3) {
+        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        let u = out.unit[a];
+        if u == u32::MAX || out.units[u as usize].kind == unit_kind::LAMINATED {
+            continue;
+        }
+        if !matches!(
+            out.material[a],
+            mat::GLASS | mat::PRIVACY | mat::LENS | mat::TAIL_LENS | mat::CHROME
+        ) {
+            continue;
+        }
+        let (pa, pb, pc) = (
+            Vec3::from_array(out.positions[a]),
+            Vec3::from_array(out.positions[b]),
+            Vec3::from_array(out.positions[c]),
+        );
+        acc[u as usize] += 0.5 * (pb - pa).cross(pc - pa).length() * SHARD_DENSITY;
+        while acc[u as usize] >= 1.0 {
+            let Some(&v) = [a, b, c].iter().find(|&&v| out.shard[v] == 0) else {
+                break;
+            };
+            out.shard[v] = 1;
+            out.units[u as usize].shards += 1;
+            acc[u as usize] -= 1.0;
+        }
+    }
+}
+
+/// A point's binding coordinates (α, β, h) and its normal's (in the frame)
+/// on triangle `t`.
+pub fn frame_coords(pos: &[Vec3], t: [u32; 3], p: Vec3, normal: Vec3) -> ([f32; 3], [f32; 3]) {
+    let (p0, p1, p2) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+    let e1 = p1 - p0;
+    let e2 = p2 - p0;
+    let n = e1.cross(e2).normalize_or_zero();
+    let d = p - p0;
+    let h = d.dot(n);
+    let q = d - n * h;
+    let (a11, a12, a22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+    let (b1, b2) = (q.dot(e1), q.dot(e2));
+    let det = (a11 * a22 - a12 * a12).max(1e-12);
+    let tt = e1.normalize_or_zero();
+    let bb = n.cross(tt);
+    (
+        [(b1 * a22 - b2 * a12) / det, (a11 * b2 - a12 * b1) / det, h],
+        [normal.dot(tt), normal.dot(bb), normal.dot(n)],
+    )
 }
 
 fn rest_edges(pos: &[Vec3], t: [u32; 3]) -> [f32; 2] {
@@ -793,6 +1165,10 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         mat::PRIVACY => [0.01, 0.012, 0.014],
         mat::MACHINED => [0.80, 0.81, 0.83],
         mat::PILLAR => [0.018, 0.018, 0.02],
+        // Inner stampings are painted in the body colour (jambs, the bay,
+        // under the lids), satin and a shade darker.
+        mat::INNER => [paint[0] * 0.8, paint[1] * 0.8, paint[2] * 0.8],
+        mat::ENGINE => [0.16, 0.165, 0.17],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -820,6 +1196,26 @@ pub fn node_normals(v: &ShowcaseVisual, nodes: &[Vec3]) -> Vec<Vec3> {
 /// Deform the rest mesh by node positions (the solver's order): the GPU
 /// shader's formula on the CPU, for tests and offline renders.
 pub fn deform(v: &ShowcaseVisual, nodes: &[Vec3]) -> (Vec<Vec3>, Vec<Vec3>) {
+    deform_with(v, nodes, None)
+}
+
+/// Whether a vertex of material `m` on a broken unit of `kind` is gone (a
+/// shattered pane, lens or mirror glass; the laminated windscreen stays).
+pub fn shatters(kind: u8, m: u8) -> bool {
+    kind != unit_kind::LAMINATED
+        && matches!(
+            m,
+            mat::GLASS | mat::PRIVACY | mat::LENS | mat::TAIL_LENS | mat::CHROME
+        )
+}
+
+/// [`deform`] with the damage units' states ([`unit_states`]): a shattered
+/// vertex ([`shatters`]) is dropped (NaN), as the renderer drops it.
+pub fn deform_with(
+    v: &ShowcaseVisual,
+    nodes: &[Vec3],
+    units: Option<&[UnitState]>,
+) -> (Vec<Vec3>, Vec<Vec3>) {
     let nn = node_normals(v, nodes);
     let mut pos = Vec::with_capacity(v.positions.len());
     let mut nrm = Vec::with_capacity(v.positions.len());
@@ -834,28 +1230,20 @@ pub fn deform(v: &ShowcaseVisual, nodes: &[Vec3]) -> (Vec<Vec3>, Vec<Vec3>) {
         let t = e1.normalize_or_zero();
         let bb = n.cross(t);
         let rigid = v.rigid.get(i).copied().unwrap_or(0) == 1;
-        if e1.length() > TEAR_STRETCH * r1 || e2.length() > TEAR_STRETCH * r2 {
+        let gone = units.is_some_and(|st| {
+            let u = v.unit.get(i).copied().unwrap_or(u32::MAX);
+            u != u32::MAX
+                && st[u as usize].broken
+                && shatters(v.units[u as usize].kind, v.material[i])
+        });
+        if gone || e1.length() > TEAR_STRETCH * r1 || e2.length() > TEAR_STRETCH * r2 {
             // Torn: the renderer cuts its triangles away (NaN here).
             pos.push(Vec3::splat(f32::NAN));
             nrm.push(Vec3::Y);
             continue;
         }
         if rigid {
-            let q = p0 + t * al + bb * be + n * h;
-            let anchor = v.anchor.get(i).copied().unwrap_or(u32::MAX);
-            if anchor != u32::MAX {
-                let [a0, a1, a2] = v.normal_tris[anchor as usize];
-                let (q0, q1, q2) = (nodes[a0 as usize], nodes[a1 as usize], nodes[a2 as usize]);
-                let [aa, ab, ah] = v.anchor_coords[i];
-                let an = (q1 - q0).cross(q2 - q0).normalize_or_zero();
-                let w = q0 + (q1 - q0) * aa + (q2 - q0) * ab + an * ah;
-                if w.distance(q) > ANCHOR_BREAK {
-                    pos.push(Vec3::splat(f32::NAN));
-                    nrm.push(Vec3::Y);
-                    continue;
-                }
-            }
-            pos.push(q);
+            pos.push(p0 + t * al + bb * be + n * h);
         } else {
             pos.push(p0 + e1 * al + e2 * be + n * h);
         }
@@ -877,4 +1265,175 @@ pub fn deform(v: &ShowcaseVisual, nodes: &[Vec3]) -> (Vec<Vec3>, Vec<Vec3>) {
         nrm.push(nf);
     }
     (pos, nrm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authoring::{build, sedan, BuildParams, Resolution};
+    use crate::explicit_beams::StaticBox;
+
+    fn states(sim: &ExplicitBeams) -> Vec<BeamState> {
+        sim.beams
+            .iter()
+            .map(|b| BeamState {
+                broken: b.broken,
+                rest: b.rest,
+            })
+            .collect()
+    }
+
+    fn spawn(b: &Built, vel: Vec3) -> ExplicitBeams {
+        let st = ExplicitBeamsSettings {
+            turbulence: false,
+            ..Default::default()
+        };
+        let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, st.clone()).unwrap();
+        let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+        let mut s =
+            ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, 0.02 - low, 0.0), vel, st).unwrap();
+        s.roll_tyres(vel);
+        s
+    }
+
+    /// Every pane, lamp and mirror is a unit with beams; none breaks at rest
+    /// (exact), and a unit's shatter is the CPU deform's dropped vertices.
+    #[test]
+    fn damage_units_follow_the_beams() {
+        let b = build(
+            &sedan::sedan(),
+            &BuildParams {
+                resolution: Resolution::Low,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let v = showcase_visual(&b).unwrap();
+        let mut g: Vec<&String> = b.bind_tris.keys().collect();
+        g.sort();
+        eprintln!("groups: {g:?}");
+        for u in &v.units {
+            eprintln!(
+                "unit {:>16} kind {} beams {:4} strain {:.4} shards {}",
+                u.name,
+                u.kind,
+                u.beams.len(),
+                u.strain,
+                u.shards
+            );
+            assert!(!u.beams.is_empty(), "{} has no beams", u.name);
+        }
+        for want in [
+            "windscreen",
+            "backlight",
+            "glass_side_f_l",
+            "glass_side_r_r",
+            "glass_side_q_l",
+            "headlight_l",
+            "taillight_r",
+            "mirror_l",
+        ] {
+            assert!(v.units.iter().any(|u| u.name == want), "no unit {want}");
+        }
+        let mut s = spawn(&b, Vec3::ZERO);
+        s.run(1.5);
+        let st = unit_states(&v, &states(&s));
+        for (u, x) in v.units.iter().zip(&st) {
+            eprintln!("rest: {:>16} strain {:.5} broken {}", u.name, x.strain, x.broken);
+        }
+        assert!(st.iter().all(|x| !x.broken), "a unit broke at rest");
+        // A 56 km/h rigid wall.
+        let vel = Vec3::new(0.0, 0.0, 56.0 / 3.6);
+        let mut s = spawn(&b, vel);
+        let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+        s.boxes.push(StaticBox::centered(
+            Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+            Vec3::new(3.0, 2.0, 1.0),
+        ));
+        s.run(1.0);
+        let st = unit_states(&v, &states(&s));
+        for (u, x) in v.units.iter().zip(&st) {
+            eprintln!("wall 56: {:>16} strain {:.5} broken {}", u.name, x.strain, x.broken);
+        }
+        let (p, _) = deform_with(&v, &s.positions(), Some(&st));
+        for (k, q) in p.iter().enumerate() {
+            let u = v.unit[k];
+            if u != u32::MAX && st[u as usize].broken && shatters(v.units[u as usize].kind, v.material[k]) {
+                assert!(q.x.is_nan());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+    use crate::authoring::parts::design::{DOOR_SECTION, LID_SECTION};
+    use crate::authoring::{build, sedan, BuildParams, Resolution};
+
+    /// P7: each door's and lid's inner stamping sits at its authored section
+    /// under the outer skin (the median distance from an inner vertex to the
+    /// outer panel's nearest vertex, ±5 mm), rides the outer panel's part,
+    /// and the engine bay is there.
+    #[test]
+    fn inner_panels_sit_at_their_section() {
+        let b = build(
+            &sedan::sedan(),
+            &BuildParams {
+                resolution: Resolution::Low,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let v = showcase_visual(&b).unwrap();
+        let piece = |n: &str| v.pieces.iter().find(|p| p.0 == n).cloned();
+        for (outer, depth) in [
+            ("door_f_l", DOOR_SECTION),
+            ("door_r_r", DOOR_SECTION),
+            ("bonnet", LID_SECTION),
+            ("deck", LID_SECTION),
+        ] {
+            let o = piece(outer).unwrap_or_else(|| panic!("no {outer}"));
+            let i = piece(&format!("{outer}_inner")).unwrap_or_else(|| panic!("no {outer}_inner"));
+            // The inner skin's vertices (normals facing in, against the outer
+            // skin's): their depth along the nearest outer vertex's normal.
+            let op: Vec<(Vec3, Vec3)> = (o.1..o.1 + o.2)
+                .map(|k| (Vec3::from_array(v.positions[k as usize]), Vec3::from_array(v.normals[k as usize])))
+                .collect();
+            let mut d: Vec<f32> = (i.1..i.1 + i.2)
+                .step_by(5)
+                .filter_map(|k| {
+                    let p = Vec3::from_array(v.positions[k as usize]);
+                    let n = Vec3::from_array(v.normals[k as usize]);
+                    let (q, qn) = op.iter().min_by(|a, b| a.0.distance(p).total_cmp(&b.0.distance(p)))?;
+                    (n.dot(*qn) < -0.9).then(|| (*q - p).dot(*qn))
+                })
+                .collect();
+            d.sort_by(f32::total_cmp);
+            let med = d[d.len() / 2];
+            eprintln!("{outer}: inner {} vertices, median section {med:.4} m (authored {depth})", i.2);
+            assert!((med - depth).abs() < 0.005, "{outer}: section {med} against {depth}");
+            // It rides the outer panel's part (the inner stamping binds
+            // where the outer skin over it does; at a shut line a few
+            // vertices ride the neighbour, as the outer's edge does).
+            let part = |k: u32| b.skeleton.nodes[v.bind_nodes[k as usize][0] as usize].part;
+            // (The outer with its pieces cut off along the part seams, `+`.)
+            let mut votes: HashMap<u16, usize> = HashMap::new();
+            let mut total = 0;
+            for pc in v.pieces.iter().filter(|p| p.0.trim_end_matches('+') == outer) {
+                for k in pc.1..pc.1 + pc.2 {
+                    *votes.entry(part(k)).or_default() += 1;
+                    total += 1;
+                }
+            }
+            let (main, n_main) = votes.into_iter().max_by_key(|x| x.1).unwrap();
+            let outer_on = n_main as f32 / total as f32;
+            let on = (i.1..i.1 + i.2).filter(|&k| part(k) == main).count() as f32 / i.2 as f32;
+            eprintln!("  {:.1} % on {} (the outer {:.1} %)", 100.0 * on, b.skeleton.parts[main as usize], 100.0 * outer_on);
+            assert!(on > outer_on - 0.05, "{outer}_inner: {on} on the outer's part, the outer {outer_on}");
+        }
+        for n in ["engine", "radiator", "apron_wall", "bulkhead"] {
+            assert!(piece(n).is_some(), "no {n}");
+        }
+    }
 }

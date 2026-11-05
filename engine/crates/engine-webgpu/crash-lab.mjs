@@ -19,6 +19,19 @@ export const LAB_PRESETS = {
   pole29: { label: 'Pole · 29 km/h', xscene: 'sidepole', params: { speed: 29, angle: 75, at: 0.3, runUp: 0.8 }, pills: ['POLE · 29 KM/H'], cam: 'threeFront' },
   headon50: { label: 'Head-on · 2 x 50 km/h', xscene: 'headon', params: { speed: 50, speed2: 50 }, pills: ['HEAD-ON · 2 x 50 KM/H'], cam: 'side' },
   drop15: { label: 'Dropped from 15 m', xscene: 'drop', params: { height: 15 }, pills: ['DROPPED FROM 15 M'], cam: 'side' },
+  // engine/docs/beamng-realism-plan.md P10. FMVSS 214's moving barrier is
+  // 1,368 kg crabbed 27° at 54 km/h into the driver's side; until the scenes
+  // have a barrier, the striker is a second car (1,450 kg: within 6 %) driven
+  // at 54 km/h, its heading 27° off square, into the front door.
+  tbone214: { label: 'Side · FMVSS 214-like · 54 km/h', xscene: 'tbone', params: { speed: 54, at: 0.55, angle: 63 }, pills: ['SIDE · 54 KM/H · 27° CRAB', 'FMVSS 214-LIKE (CAR STRIKER)'], cam: 'three' },
+  // Car to car at 80 km/h, 90°, at the B-pillar: the severe T-bone in which a
+  // door may come off (when its hinges and latch pass their strength).
+  tbone80: { label: 'T-bone · car to car · 80 km/h', xscene: 'tbone', params: { speed: 80, at: 0.15 }, pills: ['T-BONE · 80 KM/H'], cam: 'three' },
+  // IIHS small overlap: 64 km/h, 25 % of the width into a rigid barrier.
+  overlap64: { label: 'Small overlap · 25 % · 64 km/h', xscene: 'wall', params: { speed: 64, overlap: 0.25 }, pills: ['SMALL OVERLAP · 25 % · 64 KM/H'], cam: 'threeFront' },
+  // A post glancing down the side at 50 km/h: the front corner, door and
+  // mirror take it (12 cm of the width overlaps the post).
+  swipe50: { label: 'Post sideswipe · 50 km/h', xscene: 'pole', params: { speed: 50, offset: 0.82 }, pills: ['POST SIDESWIPE · 50 KM/H'], cam: 'threeFront' },
 };
 
 /** Slow-motion factors (displayed time per simulated time). */
@@ -486,6 +499,8 @@ export function createCrashLab(ctx) {
     /** The scene was rebuilt (restart): rebind and recount. */
     rebuilt() { renderer.setSim(ctx.sim(), ctx.layout()); counts(); legend(); },
     timeText,
+    /** The solver step on display (the replayed frame's, else the live one). */
+    shownStep: () => (st.replay >= 0 && st.ring[st.replay] ? st.ring[st.replay].step : ctx.sim().steps()),
     impactStep: () => st.impactStep,
     grabAt(global, target) { if (!st.lastState) return false; grabNode(global); st.grab.target = target; applyGrab(); return true; },
     release: releaseGrab,

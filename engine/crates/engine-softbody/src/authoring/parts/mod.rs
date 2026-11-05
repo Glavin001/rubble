@@ -23,6 +23,7 @@
 //!
 //! Guide: `engine/docs/vehicle-authoring.md` ("The visual car").
 
+pub mod bay;
 pub mod body;
 pub mod design;
 pub mod fixtures;
@@ -77,6 +78,15 @@ pub enum Bind {
     Wheel(u16),
     /// A wheel's non-rotating hardware (brake caliper): axle nodes and a knuckle node.
     Hub(u16),
+    /// A panel's inner stamping (inner skin, shut faces, inner frames), this
+    /// many millimetres inside the outer skin along its (inward) normals: it
+    /// votes for its physics part at the outer skin (each vertex moved back
+    /// out by that depth), then rides that part like the panel does.
+    Inset(u16),
+    /// A given physics part, with an inner stamping's depth (mm): an
+    /// [`Bind::Inset`] piece after its vote, each vertex bound where the
+    /// outer skin over it binds.
+    PartInset(u16, u16),
 }
 
 /// A triangle mesh with per-vertex material and ambient occlusion.

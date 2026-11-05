@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Screenshots of the showcase car page (showcase-car.html) in headless Chrome WebGPU:
 // at rest from three sides, and frozen after a wall, a centre pole, a side pole and
-// a roll-over drop. Fails on a page or GPU error.
+// a roll-over drop. Fails on a page or GPU error. The damage_* runs
+// (?check=damage) compare, every simulated frame, the renderer's damage units
+// (glass panes, lamps, mirrors) against the solver's beams read back in the
+// same submission: they fail on any mismatch, or if no unit broke.
 //
 //   cargo run -p engine-webgpu --release --no-default-features --bin wgsl_export
 //   wasm-pack build crates/engine-world-wasm --release --target web \
@@ -112,6 +115,12 @@ const RUNS = [
   ['drop_15', 'scene=drop&height=15&freeze=3.5&cam=three'],
   ['drop_15_seam', 'scene=drop&height=15&freeze=3.5&cam=1,0.25,0.1&dist=2.4&look=0.5,-0.1,-0.3'],
   ['wall_120', 'scene=wall&speed=120&runUp=0.6&freeze=1.0&cam=three&dist=7'],
+  // Damage close-ups: the bay behind a crushed bonnet, the struck door's
+  // inner skin through its tear, the roof's scrapes after the drop.
+  ['wall_56_bay', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=0.55,0.55,1&dist=3.0&look=0,-0.1,1.3'],
+  ['wall_120_bay', 'scene=wall&speed=120&runUp=0.6&freeze=1.0&cam=0.7,0.5,0.8&dist=3.4&look=0,-0.1,1.0'],
+  ['sidepole_door', 'scene=sidepole&speed=32&runUp=0.3&freeze=1.2&cam=0.25,0.3,1&dist=3.0&look=0.4,-0.1,0.6'],
+  ['drop_15_roof', 'scene=drop&height=15&freeze=3.5&cam=0.6,0.25,0.5&dist=4.2&look=0,-0.3,0'],
   ['interior', 'scene=idle&freeze=1.0&cam=left&dist=3.2'],
   ['perf', 'scene=idle&freeze=0&cam=three&perf=1'],
   ['perf_far', 'scene=idle&freeze=0&cam=three&perf=1&dist=30'],
@@ -124,6 +133,11 @@ const RUNS = [
   ['perf_n10_far', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=80'],
   ['perf_n10_lod0', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=16&lod=0'],
   ['perf_pass', 'scene=idle&freeze=0&cam=three&perf=pass'],
+  // Visual damage = physics damage, every frame.
+  ['damage_rest', 'scene=idle&freeze=1.5&cam=three&check=damage'],
+  ['damage_wall_56', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=three&check=damage'],
+  ['damage_sidepole_32', 'scene=sidepole&speed=32&runUp=0.3&freeze=1.2&cam=front&dist=6&check=damage'],
+  ['damage_drop_15', 'scene=drop&height=15&freeze=3.5&cam=three&check=damage'],
 ];
 let failed = 0;
 const only = opt('--only', null);
@@ -139,7 +153,15 @@ for (const [name, q] of RUNS.filter(([n]) => !only || only.split(',').includes(n
   const s = await send('Page.captureScreenshot', { format: 'png' });
   const png = join(OUT, `${RES}_${name}.png`);
   writeFileSync(png, Buffer.from(s.result.data, 'base64'));
-  const err = st?.error || pageErrors.shift();
+  let err = st?.error || pageErrors.shift();
+  const dc = st?.damageCheck;
+  if (!err && name.startsWith('damage_')) {
+    if (!dc || dc.frames < 10) err = `damage check ran ${dc?.frames ?? 0} frames`;
+    else if (dc.mismatches) err = `${dc.mismatches} damage mismatches (first: ${dc.first})`;
+    else if (name === 'damage_rest' && dc.broken.length) err = `units broke at rest: ${dc.broken.join(', ')}`;
+    else if (name !== 'damage_rest' && !dc.broken.length) err = 'no damage unit broke';
+  }
+  if (dc) console.log(`  damage check: ${dc.frames} frames, ${dc.mismatches} mismatches, broken [${dc.broken.join(', ')}]`);
   if (err) failed++;
   console.log(`${name}: ${err ? 'ERROR ' + err : 'ok'}  t ${st?.time?.toFixed?.(2)} s  GPU ${st?.gpuMs?.toFixed?.(2)} ms/frame${st?.renderMs ? ` car render ${st.renderMs.toFixed(3)} ms [${st.features}]` : ''}  ${st?.damage ? `broken ${st.damage.broken} bent ${st.damage.bent}` : ''}  → ${png}`);
 }

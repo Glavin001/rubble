@@ -81,8 +81,28 @@ try {
   const adapterInfo = await navigator.gpu.requestAdapter().then((a) => a?.info ? `${a.info.vendor} ${a.info.architecture} ${a.info.description}` : '?');
   const batchMs = [];
   const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES, zebra: Number(qs.get('zebra')) || 0 });
-  r.setSolver(sim.nodesBuffer(), sim.miscBuffer());
-  layout.vehicles.forEach((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, vehicle: i, lod: qs.get('lod') === '0' ? null : car.visualLod, lodDistance: Number(qs.get('lodDist')) || 18 }));
+  r.setSolver(sim.nodesBuffer(), sim.miscBuffer(), sim.beamsBuffer());
+  const carIds = layout.vehicles.map((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: qs.get('lod') === '0' ? null : car.visualLod, lodDistance: Number(qs.get('lodDist')) || 18 }));
+  // ?check=damage: every frame, the renderer's damage units against the
+  // solver's beams read back in the same submission (the units' rule:
+  // skin.rs unit_states()): any difference is a mismatch.
+  const visual = car.visual;
+  const damageCheck = qs.get('check') === 'damage' ? { frames: 0, mismatches: 0, broken: new Set(), pending: false, first: null } : null;
+  const expectUnits = (beams, beamOffset) => {
+    const out = [];
+    for (let u = 0; u < visual.unitKind.length; u++) {
+      let broken = false, strain = 0;
+      for (let k = visual.unitStart[u]; k < visual.unitStart[u + 1]; k++) {
+        const j = visual.unitBeams[k];
+        const g = (beamOffset + j) * 8;
+        if (beams[g + 6] !== 0) { broken = true; continue; }
+        const r0 = Math.fround(visual.beamRest0[j]);
+        strain = Math.max(strain, Math.fround(Math.abs(Math.fround(beams[g] - r0)) / Math.max(Math.abs(r0), 1e-6)));
+      }
+      out.push(broken || strain > visual.unitStrain[u]);
+    }
+    return out;
+  };
 
   // Ground and the scene's static shapes: flat-shaded boxes and cylinders.
   const SCENE_WGSL = `
@@ -256,9 +276,19 @@ try {
     carry += dt * rate;
     let steps = Math.min(sim.maxFrameSteps(), Math.floor(carry));
     carry -= steps;
+    // ?check=damage checks every simulated frame: no steps while one is read.
+    if (damageCheck?.pending) { carry += steps; steps = 0; }
     if (steps > 0) { sim.frame(steps); simTime += steps / rate; }
     const enc = device.createCommandEncoder();
-    if (!qs.has('noskin') || frames < 3) r.update(enc);
+    if (!qs.has('noskin') || frames < 3) r.update(enc, { dt: steps / rate, floorY: 0, boxes: layout.boxes });
+    let checkRead = null;
+    if (damageCheck && !damageCheck.pending) {
+      // The beams as the units pass saw them (no steps between).
+      const bytes = layout.beams * 32;
+      const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      enc.copyBufferToBuffer(sim.beamsBuffer(), 0, rb, 0, bytes);
+      checkRead = { rb, units: r.readUnits(enc) };
+    }
     const aspect = canvas.width / canvas.height;
     const eye = [target[0] + dist * Math.sin(yaw) * Math.cos(pitch), target[1] + dist * Math.sin(pitch), target[2] + dist * Math.cos(yaw) * Math.cos(pitch)];
     const vp = mat.mul(mat.persp(fov, aspect, 0.05, 500), mat.look(eye, target));
@@ -304,6 +334,23 @@ try {
       pass.end();
     }
     device.queue.submit([enc.finish()]);
+    if (checkRead) {
+      damageCheck.pending = true;
+      Promise.all([checkRead.rb.mapAsync(GPUMapMode.READ), checkRead.units()]).then(([, units]) => {
+        const beams = new Float32Array(checkRead.rb.getMappedRange().slice(0));
+        checkRead.rb.destroy();
+        layout.vehicles.forEach((v, i) => {
+          const want = expectUnits(beams, v.beamOffset);
+          const got = units.get(carIds[i]).state;
+          want.forEach((w, u) => {
+            if (w !== (got[4 * u] > 0.5)) { damageCheck.mismatches++; damageCheck.first ??= `car ${i} ${visual.unitNames[u]}: physics ${w} visual ${got[4 * u] > 0.5}`; }
+            if (w) damageCheck.broken.add(visual.unitNames[u]);
+          });
+        });
+        damageCheck.frames++;
+        damageCheck.pending = false;
+      });
+    }
     // ?perf without timestamp queries: time a batch of 20 car-only passes
     // (skin + draw) by the queue's completion, now and then.
     if (qs.has('perf') && !tq && !batchPending && frames % 20 === 10) {
@@ -355,7 +402,8 @@ try {
       (tq?.ms.length ? `\ncar render ${(tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length).toFixed(3)} ms (GPU pass)` : '') +
       (batchMs.length ? `\ncar skin + render ${Math.min(...batchMs).toFixed(3)} ms (batch of 20, queue time) on ${adapterInfo}` : '');
     const renderMs = tq?.ms.length >= 30 ? [...tq.ms].sort((a, b) => a - b)[Math.floor(tq.ms.length * 0.1)] : batchMs.length ? Math.min(...batchMs) : undefined;
-    window.__state = { ready: frames > 3 && (!qs.has('perf') || renderMs !== undefined), time: simTime, frozen: simTime >= freeze, gpuMs: gm, renderMs, damage, counts: c, features: [...device.features].join(',') + ' ' + adapterInfo };
+    window.__state = { ready: frames > 3 && (!qs.has('perf') || renderMs !== undefined), time: simTime, frozen: simTime >= freeze, gpuMs: gm, renderMs, damage, counts: c, features: [...device.features].join(',') + ' ' + adapterInfo,
+      ...(damageCheck ? { damageCheck: { frames: damageCheck.frames, mismatches: damageCheck.mismatches, first: damageCheck.first, broken: [...damageCheck.broken] } } : {}) };
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

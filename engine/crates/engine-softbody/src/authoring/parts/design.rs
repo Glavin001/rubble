@@ -23,6 +23,16 @@ use glam::Vec3;
 
 /// The visual wheels sit this far (m) outboard of the physics tyres.
 pub const WHEEL_OUT: f32 = 0.042;
+/// A door's section: its inner skin this far (m) inside the outer skin (a
+/// front door's inner panel sits 8-12 cm in at the belt and mid; the door
+/// card, 10 cm in, covers it from the cabin).
+pub const DOOR_SECTION: f32 = 0.085;
+/// The bonnet's and boot lid's inner frame: this far (m) under the outer
+/// skin (the inner stamping's hat section, hemmed to the outer at the edge).
+pub const LID_SECTION: f32 = 0.032;
+/// The inner stamping's edge: this far (m) inside the outer panel's cut,
+/// under its hem.
+pub const INNER_INSET: f32 = 0.011;
 
 /// Visual design inputs.
 #[derive(Clone, Debug)]
@@ -619,6 +629,23 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             } else {
                 name.to_string()
             };
+            // The panel's inner stamping (P7): what a tear or an open shut
+            // line shows behind the outer skin.
+            let inner = match *name {
+                "door_f" | "door_r" => Some((DOOR_SECTION, false)),
+                "bonnet" | "deck" => Some((LID_SECTION, true)),
+                _ => None,
+            };
+            if let Some((depth, lattice)) = inner {
+                let mesh = inner_panel(m, &fs, level, depth, lattice);
+                if !mesh.is_empty() {
+                    pieces.push(Piece {
+                        name: format!("{nm}_inner"),
+                        mesh,
+                        bind: Bind::Inset((depth * 1000.0).round() as u16),
+                    });
+                }
+            }
             pieces.push(Piece {
                 name: nm,
                 mesh: c.mesh,
@@ -627,15 +654,21 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         }
     }
     // --- Glass and frames -----------------------------------------------------
+    // Each pane is its own piece (and its own damage unit): the front door's,
+    // the rear door's and the quarter light, so a pane rides (and breaks with)
+    // its own door.
     let glass_regions: Vec<(&str, Box<dyn Fn(usize, Vec3) -> f32 + '_>, f32)> = vec![
         ("windscreen", Box::new(windscreen), 0.06),
         ("backlight", Box::new(backlight), 0.05),
-        ("glass_side", Box::new(glass_side), 0.0),
+        ("glass_side_f", Box::new(|i, p| side_window(0, i, p)), 0.0),
+        ("glass_side_r", Box::new(|i, p| side_window(1, i, p)), 0.0),
+        ("glass_side_q", Box::new(|i, p| side_window(2, i, p)), 0.0),
     ];
     for (name, region, frit) in glass_regions {
+        let side = name.starts_with("glass_side");
         let f = metric(m, &trim::field(m, |i, p| region(i, p)));
         for sx in [1.0f32, -1.0] {
-            let fs: Vec<f32> = if name == "glass_side" {
+            let fs: Vec<f32> = if side {
                 f.iter()
                     .zip(&m.pos)
                     .map(|(v, p)| v.max(-p.x * sx))
@@ -646,6 +679,9 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
                 continue;
             };
             let c = trim::clip(m, &fs, 0.012);
+            if c.mesh.is_empty() {
+                continue;
+            }
             let gm = match name {
                 "windscreen" => mat::SCREEN,
                 "backlight" => mat::PRIVACY,
@@ -653,7 +689,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             };
             // Nearly flush (3 mm in): the frame and seal hide the step.
             let mut g = trim::offset(&c.mesh, -0.003, false, Some(gm), 1.0);
-            if name == "glass_side" {
+            if side {
                 // Rear doors' and quarter lights' glass: privacy tint.
                 for k in 0..g.len() {
                     if g.pos[k].z < st.b_cut[0] {
@@ -679,14 +715,14 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
                     g.append(&fm);
                 }
             }
-            let nm = if name == "glass_side" {
+            let nm = if side {
                 format!("{name}_{}", if sx > 0.0 { "l" } else { "r" })
             } else {
                 name.to_string()
             };
             // Tempered glass (side windows, backlight) is one rigid pane: it
-            // shatters whole when its frame strains; the laminated windscreen
-            // follows its frame and cracks.
+            // shatters whole when its physics pane breaks (skin.rs's damage
+            // units); the laminated windscreen follows its frame and cracks.
             pieces.push(Piece {
                 name: nm,
                 mesh: g,
@@ -1142,7 +1178,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         let r = lidrow(z);
         let base = Vec3::new(sx * (r.x_t - 0.012), r.y_t + 0.03, z);
         pieces.push(Piece {
-            name: "mirror".into(),
+            name: format!("mirror_{}", if sx > 0.0 { "l" } else { "r" }),
             mesh: fixtures::mirror(base, Vec3::X * sx, -Vec3::Z, mat::PAINT),
             bind: Bind::Rigid,
         });
@@ -1551,6 +1587,69 @@ fn roll_mixed(
 
 /// Make a field metric on the surface: divide by its gradient's length (per
 /// vertex, from the triangles' linear gradients), so cut levels are distances.
+/// A panel's inner stamping: the outer panel (field `fs` below `level`)
+/// `INNER_INSET` inside its cut, `depth` under it (normals and winding facing
+/// in), with its shut faces (walls from just under the outer panel's hem
+/// down to the inner skin, facing out of the panel) round every edge. A
+/// `lattice` (bonnet, boot lid) keeps a 9 cm frame round the edge and two
+/// ribs along it, the rest cut away (the lightening holes).
+pub fn inner_panel(m: &Mesh, fs: &[f32], level: f32, depth: f32, lattice: bool) -> Mesh {
+    let lv = level - INNER_INSET;
+    let g: Vec<f32> = if lattice {
+        fs.iter()
+            .zip(&m.pos)
+            .map(|(&f, p)| {
+                let inside = f - lv;
+                let band = inside.max(-(f - (lv - 0.09)));
+                let x = p.x.abs();
+                let rib = (x - 0.33).abs().min(x) - 0.03;
+                band.min(inside.max(rib))
+            })
+            .collect()
+    } else {
+        fs.iter().map(|&f| f - lv).collect()
+    };
+    let c = trim::clip(m, &g, 0.0);
+    if c.mesh.is_empty() {
+        return Mesh::default();
+    }
+    let mut out = trim::offset(&c.mesh, -depth, true, Some(mat::INNER), 0.55);
+    // Shut faces: from 9 mm under the outer skin (the hem's flange) to the
+    // inner skin; a lattice's holes get a shallower lip (a pressed flange).
+    for (l, closed) in &c.loops {
+        let n = l.len();
+        if n < 2 {
+            continue;
+        }
+        let d1 = if lattice { (depth - 0.012).max(0.009) } else { 0.009 };
+        let mut top = Vec::with_capacity(n);
+        let mut bot = Vec::with_capacity(n);
+        for k in 0..n {
+            let (a, b) = if *closed {
+                (l[(k + n - 1) % n], l[(k + 1) % n])
+            } else {
+                (l[k.saturating_sub(1)], l[(k + 1).min(n - 1)])
+            };
+            let t = (c.mesh.pos[b as usize] - c.mesh.pos[a as usize]).normalize_or_zero();
+            let nn = c.mesh.nrm[l[k] as usize];
+            let o = t.cross(nn).normalize_or_zero();
+            let p = c.mesh.pos[l[k] as usize];
+            let i0 = out.vert(p - nn * d1, o, mat::INNER, 0.5);
+            let i1 = out.vert(p - nn * depth, o, mat::INNER, 0.3);
+            out.smooth[i0 as usize] = 1;
+            out.smooth[i1 as usize] = 1;
+            top.push(i0);
+            bot.push(i1);
+        }
+        let segs = if *closed { n } else { n - 1 };
+        for i in 0..segs {
+            let j = (i + 1) % n;
+            out.quad(top[i], bot[i], bot[j], top[j]);
+        }
+    }
+    out
+}
+
 pub fn metric(m: &Mesh, f: &[f32]) -> Vec<f32> {
     let mut g = vec![0.0f32; m.len()];
     let mut w = vec![0.0f32; m.len()];

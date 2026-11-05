@@ -1133,10 +1133,11 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (!pos) return false;
       if (bodyFor.layout !== xlayout) {
         for (const id of bodyIds) bodyR.removeCar(id);
-        bodyIds = xlayout.vehicles.map((v, i) => bodyR.addCar(showcaseBuilt().visual, { nodeOffset: v.nodeOffset, vehicle: i }));
+        bodyIds = xlayout.vehicles.map((v, i) => bodyR.addCar(showcaseBuilt().visual, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i }));
+        bodyFor.step = null;
         bodyFor.layout = xlayout;
       }
-      if (bodyFor.pos !== pos) { bodyR.setPositions(pos); bodyFor.pos = pos; }
+      if (bodyFor.pos !== pos) { bodyR.setPositions(pos, labR.restBuffer()); bodyFor.pos = pos; }
       return true;
     };
     const bodyOn = () => bodyR && labR.opts.skin === 'body';
@@ -1669,7 +1670,14 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       // deformation reads clearly; ?fx=1 turns them on.
       if (flexMode) carR.compute(enc, FX ? fxDt : 0);
       if (lab) lab.beforeDraw(enc, labDt);
-      if (bodyOn() && syncBody()) bodyR.update(enc);
+      if (bodyOn() && syncBody()) {
+        // The simulated time shown since the last frame (live or replayed;
+        // 0 when paused or scrubbed back: no debris, no wear).
+        const step = lab?.shownStep() ?? 0;
+        const dt = bodyFor.step === null ? 0 : (step - bodyFor.step) / 2000;
+        bodyFor.step = step;
+        bodyR.update(enc, { dt, floorY: labR.opts.floorY, boxes: xlayout.boxes });
+      }
       // Sun shadow map.
       const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
       refreshColliders();
