@@ -43,6 +43,8 @@ pub use poses::PoseRecord;
 #[cfg(feature = "gpu")]
 pub use soft_skin::SoftSkinner;
 
+/// The explicit vehicles' World coupling (`slang/kernels/vehicle_coupling.slang`).
+pub const VEHICLE_COUPLING_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/vehicle_coupling.wgsl"));
 /// The skinning kernels as one WGSL module (entries `soft_skin_vertices`,
 /// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
 pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));

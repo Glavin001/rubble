@@ -2018,11 +2018,36 @@ impl ExplicitBeamsGpu {
         if self.spans.is_empty() {
             return;
         }
-        self.check_contact_status();
-        self.write_params(steps);
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let read = self.encode(&mut enc, steps);
+        self.queue.submit([enc.finish()]);
+        if read {
+            self.contact.map_status();
+        }
+    }
+
+    /// [`Self::frame`] encoded into `enc` (a host's own submission, such as the World's
+    /// step). Submit it, then call [`Self::frame_submitted`] with the result.
+    pub fn frame_encode(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32) -> bool {
+        if self.spans.is_empty() || steps == 0 {
+            return false;
+        }
+        self.encode(enc, steps)
+    }
+
+    /// After the submission holding a [`Self::frame_encode`]: its status read mapped.
+    pub fn frame_submitted(&self, read: bool) {
+        if read {
+            self.contact.map_status();
+        }
+    }
+
+    /// The frame's passes; whether they copy the status for a read.
+    fn encode(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32) -> bool {
+        self.check_contact_status();
+        self.write_params(steps);
         // Timestamps at the start of the frame's first pass and the end of its last.
         let slot = self.timing.as_mut().and_then(|t| {
             (t.used < t.capacity).then(|| {
@@ -2121,13 +2146,9 @@ impl ExplicitBeamsGpu {
             self.contact.frames % STATUS_EVERY == 1
         };
         if read {
-            self.contact.read_status(&self.device, &mut enc);
+            self.contact.read_status(&self.device, enc);
         }
-        self.queue.submit([enc.finish()]);
-        if read {
-            self.contact.map_status();
-        }
-
+        read
     }
 
     fn alt_pipes(&self) -> Option<&AltPipes> {

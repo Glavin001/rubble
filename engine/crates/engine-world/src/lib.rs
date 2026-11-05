@@ -29,6 +29,7 @@ mod defs;
 mod destruction;
 mod error;
 mod events;
+mod explicit_vehicles;
 mod guidance;
 mod handles;
 mod host_state;
@@ -69,6 +70,7 @@ pub use engine_terrain::{
 };
 pub use engine_webgpu::TerrainStepReport;
 pub use error::{StaleHandle, Unsupported};
+pub use explicit_vehicles::ExplicitVehiclesDef;
 pub use events::{
     coalesce, BodyEvents, BodyLeftWorld, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
     ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,
@@ -529,6 +531,8 @@ pub struct World {
     motion: motion::MotionState,
     /// Deformable terrain, once enabled.
     terrain: Option<terrain::TerrainHost>,
+    /// Explicit soft-body vehicles ([`World::add_explicit_vehicles`]).
+    explicit: Option<Box<explicit_vehicles::ExplicitVehicles>>,
     /// Steps before this were taken before a `restore_state`: their frames
     /// still deliver poses, but their counters and events describe a state
     /// the simulation no longer has.
@@ -655,6 +659,7 @@ impl World {
             fracture: Default::default(),
             blasts: Default::default(),
             terrain: None,
+            explicit: None,
             restored_at: 0,
         })
     }
@@ -2221,10 +2226,15 @@ impl World {
             }
             self.encode_fracture_begin(&mut enc);
         }
+        // Explicit vehicles: the last window's impulses, applied by the rigid step.
+        self.explicit_before_step(&mut enc)?;
         self.sim
             .step_encode(&mut enc)
             .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
         let ran = self.sim.last_step_ran();
+        // Explicit vehicles: the next window's frame and chunk loads, before the
+        // fracture takes them (forward-only).
+        let explicit_read = if ran { self.explicit_after_step(&mut enc)? } else { None };
         lap("rigid encoded");
         if let Some(m) = &marks {
             m.mark(&mut enc, "rigid tail");
@@ -2350,6 +2360,7 @@ impl World {
             (m, staging)
         });
         self.sim.queue().submit([enc.finish()]);
+        self.explicit_after_submit(explicit_read);
         if let Some((m, staging)) = timing {
             let parts = m.report(self.sim.device(), self.sim.queue(), &staging);
             let total: f64 = parts.iter().map(|p| p.1).sum();
