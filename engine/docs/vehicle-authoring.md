@@ -308,7 +308,8 @@ The character lines are:
   integrated lip spoiler (`deck_lip`). These details are added after the lid
   is relaxed, so they stay crisp.
 * **Fascia.** Raked: the widest line low (0.56 m), the upper fascia leaning
-  10 cm back into the bonnet. A wide, low grille (0.94 m × 0.22 m) with a
+  14 cm back into the bonnet. A low trapezoid grille (0.66 m wide at the
+  top, 0.89 m at the bottom, 0.20 m tall: the face's dark mass sits low) with a
   1.6 cm gloss-black surround and a honeycomb; slim full-LED headlamps (3.5 cm
   at the grille, 1.5 cm at the tip) just under the bonnet's edge, wrapping the
   corners to a pointed tip, with a DRL blade along their upper edge
