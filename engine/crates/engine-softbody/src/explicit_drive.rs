@@ -94,6 +94,10 @@ pub struct DriveWheel {
     pub tan_peak_alpha: f32,
     /// +1 left of the centre line, −1 right (Ackermann's inner wheel).
     pub side: f32,
+    /// The axle's direction (node1 → node2, turned to the left) at spawn in the
+    /// vehicle frame (forward, up, left components): the build's own toe and camber,
+    /// taken out each step so only deformation since spawn turns the wheel.
+    pub axle_rest: [f32; 3],
 }
 
 /// A vehicle's raycast wheels and drive.
@@ -126,6 +130,14 @@ pub struct DriveConfig {
     pub surface: f32,
     /// Anti-roll bars: (left wheel, right wheel, N/m).
     pub anti_roll: Vec<(u32, u32, f32)>,
+    /// Wheel planes from each wheel's axle nodes (less their spawn toe and camber):
+    /// a bent hub turns its wheel. Off (the default): every wheel's axle is the
+    /// vehicle frame's left (its body, from the reference nodes), as the raycast
+    /// model's chassis; the hubs' positions still carry the rays. Soft hubs on beam
+    /// suspensions twist under drive and static loads (the showcase sedan's front
+    /// hubs turned 25° under throttle), which the tyres' rings and rigidity beams
+    /// held on beam tyres.
+    pub hub_axles: bool,
 }
 
 /// The driver's input (per vehicle, set per frame by the host).
@@ -638,7 +650,8 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
     let mut load = [0.0f32; MAX_WHEELS];
     for (k, w) in c.wheels.iter().enumerate() {
         let (_, xh, vh) = hubs[k];
-        let mut a = if w.node1 == w.node2 {
+        // The axle: the vehicle frame's left, or (`hub_axles`) the axle nodes' own line.
+        let mut a = if w.node1 == w.node2 || !d.config.hub_axles {
             left
         } else {
             nrm(x(w.node2) - x(w.node1))
@@ -646,6 +659,14 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
         if dot(a, left) < 0.0 {
             a = -a;
         }
+        // Less the spawn's toe and camber (in the vehicle frame).
+        let [r0, r1, r2] = if d.config.hub_axles {
+            w.axle_rest
+        } else {
+            [0.0, 0.0, 1.0]
+        };
+        let a =
+            nrm(fw * (dot(a, fw) - r0) + up * (dot(a, up) - r1) + left * (dot(a, left) - r2 + 1.0));
         axle[k] = a;
         let hp = xh + up * w.rest_len;
         let hit = ray_cast(s, hp, -up, w.susp_max + w.radius);
@@ -970,6 +991,7 @@ impl DriveConfig {
                 peak_alpha,
                 tan_peak_alpha: peak_alpha.max(1.5).to_radians().tan(),
                 side: sgn(hub.dot(left_v) - 0.0),
+                axle_rest: [0.0, 0.0, 1.0],
             });
         }
         any_driven = wheels.iter().any(|w| w.driven);
@@ -1068,6 +1090,7 @@ impl DriveConfig {
                 max_slope_cos: v.max_slope_deg.to_radians().cos(),
                 surface: 1.0,
                 anti_roll,
+                hub_axles: false,
             },
             notes,
         ))
@@ -1149,8 +1172,28 @@ impl ExplicitBeams {
                 }
             }
         }
-        let mut drive = Drive::new(config);
+        let mut config = config;
         let o = self.origin;
+        // Each axle's spawn direction in the vehicle frame (drive_pass's correction).
+        {
+            let p = |i: u32| self.nodes[i as usize].pos + o;
+            let [c, b, l] = config.refs;
+            let fw = nrm(p(c) - p(b));
+            let up = nrm(fw.cross(p(l) - p(c)));
+            let left = up.cross(fw);
+            for w in &mut config.wheels {
+                let mut a = if w.node1 == w.node2 {
+                    left
+                } else {
+                    nrm(p(w.node2) - p(w.node1))
+                };
+                if dot(a, left) < 0.0 {
+                    a = -a;
+                }
+                w.axle_rest = [dot(a, fw), dot(a, up), dot(a, left)];
+            }
+        }
+        let mut drive = Drive::new(config);
         let [c, b, _] = drive.config.refs;
         let fw = nrm(self.nodes[c as usize].pos + o - (self.nodes[b as usize].pos + o));
         drive.roll(dot(velocity, fw));

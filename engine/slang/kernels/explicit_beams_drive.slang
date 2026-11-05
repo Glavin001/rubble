@@ -11,7 +11,7 @@
 groupshared uint gsUniformDrive;
 
 static const uint DRV_VEH = 20u;
-static const uint DRV_WHEEL = 20u;
+static const uint DRV_WHEEL = 21u;
 static const uint DRV_MAX_WHEELS = 16u;
 static const float DRV_PARALLEL = 1e-12;
 static const float DRV_FLT_MAX = 3.40282347e38;
@@ -373,10 +373,15 @@ void driveVehicle(uint v, uint step)
         float4 w1 = DF(wr + 1u);
         float4 w2 = DF(wr + 2u);
         float4 w3 = DF(wr + 3u);
+        bool hubAxles = (c5u.y & 4u) != 0u;
         float3 a = left;
-        if (w0.x != w0.y)
+        if (w0.x != w0.y && hubAxles)
             a = drvNrm(ssub3(sadd3(o, gNodes[(nodeOff + w0.y) * 3u].xyz), sadd3(o, gNodes[(nodeOff + w0.x) * 3u].xyz)));
         if (sdot(a, left) < 0.0) a = -a;
+        // Less the spawn's toe and camber (in the vehicle frame).
+        float3 ar = hubAxles ? DF(wr + 20u).xyz : float3(0.0, 0.0, 1.0);
+        a = drvNrm(sadd3(sadd3(sscale(fw, nf(sdot(a, fw) - ar.x)), sscale(up, nf(sdot(a, up) - ar.y))),
+                         sscale(left, nf(nf(sdot(a, left) - ar.z) + 1.0))));
         axle[k] = a;
         float3 hp = sadd3(hubX[k], sscale(up, w2.z));
         float4 ht = drvRay(hp, -up, nf(w2.y + w1.x), ground, boxOff, boxCount);
