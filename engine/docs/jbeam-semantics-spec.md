@@ -945,6 +945,15 @@ own drag summed along the run (it is: supercar 11.4 kN against 10.9 kN, Astral R
 2.29 kN against 0.66 kN plus rolling). Rolling resistance alone: C_rr = 0.053
 (supercar) and 0.079 (Astral R), 4–6 times the documented 0.010–0.015 of passenger
 tyres: the pressure tyres' tread and sidewall losses (12–16-ray polygons, the §28
-ground rule) are too high. **Open.** The supercar's triangles add C·A ≈ 49 m²: most
-of its triangles keep the default `dragCoef` 100 (a flat plate each), with "triangles
-not affected by other triangles" [T]; that is the content.
+ground rule) are too high. **Open.** **Drag area check** (`jbeam_accept … aero=`: Σ 1.28·(dragCoef/100)·A·|n̂·f̂|
+over the desc's triangles, f̂ the forward axis; one-sided areas, each triangle once,
+SI units, the default 100 only where a row sets none). The reading is the docs':
+the values are the files'. The supercar's 61.6 m² is 96 % two groups whose
+`dragCoef` comes from its own variables, `$dragCoeffc` (front body, default 1000,
+range 0–10,000, "Front Drag coeficient") and `$dragCoef` on the spoiler (10,000;
+its comment says 120); its 68 body triangles at `dragCoef` 10 give 0.45 m², a real
+supercar's order (C_d·A ≈ 0.6–0.8 m²). The Astral R: 1.76 m², of which 0.98 m² its
+wings and aero devices (`dragCoef` 100–160), 0.5 m² its body panels (6–12): a rally
+car with its aero kit at C_d·A ≈ 1.0–1.2 m², so ours is about 1.5× (both faces of
+each triangle drag, as [T] says, "Triangles are not affected by other triangles").
+No triangle takes the default 100 in either car except where the author left it.

@@ -208,6 +208,27 @@ fn main() {
         println!("no break in 2 s");
         return;
     }
+    if opt("aero=").is_some() {
+        // Drag area per dragCoef: Σ C·(dragCoef/100)·A·|n·ẑ| facing the car's forward axis.
+        let f = engine_softbody::pack::forward_axis(&desc);
+        let mut by: std::collections::BTreeMap<String, (usize, f32, f32)> = Default::default();
+        for t in &desc.triangles {
+            let p = t.nodes.map(|i| glam::Vec3::from_array(desc.nodes[i as usize].position));
+            let cr = (p[1] - p[0]).cross(p[2] - p[0]);
+            let a = 0.5 * cr.length();
+            let proj = 0.5 * cr.dot(f).abs();
+            let e = by.entry(format!("{:.2}/{:.2}", t.aero[0], t.aero[1])).or_default();
+            e.0 += 1;
+            e.1 += a;
+            e.2 += 1.28 * t.aero[0] / 100.0 * proj;
+        }
+        let total: f32 = by.values().map(|e| e.2).sum();
+        for (k, (n, a, cda)) in &by {
+            println!("dragCoef/liftCoef {k}: {n} triangles, area {a:.2} m², drag area {cda:.3} m²");
+        }
+        println!("total drag area C·A {total:.2} m² ({} triangles)", desc.triangles.len());
+        return;
+    }
     if opt("modes=").is_some() {
         // The highest beam-spring mode ω_max·h (power iteration on M⁻¹K, springs only):
         // explicit integration diverges past 2.
