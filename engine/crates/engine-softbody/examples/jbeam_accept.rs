@@ -38,6 +38,7 @@ fn main() {
     let opt = |k: &str| a.iter().find_map(|x| x.strip_prefix(k)).map(str::to_string);
     let f = |k: &str, d: f32| opt(k).map_or(d, |s| s.parse().unwrap());
     let (rest, kmh, crash) = (f("rest=", 3.0), f("kmh=", 56.0), f("crash=", 1.5));
+    let lift = f("lift=", 0.02);
     let dir = std::path::Path::new(dir);
     let texts = engine_softbody::jbeam::read_vehicle_dir(dir, name).unwrap();
     let files: Vec<(&str, &str)> = texts
@@ -70,7 +71,7 @@ fn main() {
             .map(|n| n.pos.y)
             .fold(f32::INFINITY, f32::min);
         for n in &mut s.nodes {
-            n.pos.y -= low - 0.02;
+            n.pos.y -= low - lift;
         }
         s.roll_tyres(v);
         (s, w)
