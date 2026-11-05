@@ -338,6 +338,16 @@ fn coasting_pressure_tyres_energy_split() {
                 .collect();
             let rest0: Vec<f32> = w.vehicles[0].beams.iter().map(|b| b.rest).collect();
             let mut diss = [0.0f64; 6];
+            // Touchdowns (a node below the ground that was above it the step
+            // before): count, and the normal kinetic energy they arrive with,
+            // ½·m·v_y² (what an inelastic landing removes).
+            let ground_y = w.vehicles[0].ground;
+            let below = |v: &ExplicitBeams, i: usize| v.origin.y + v.nodes[i].pos.y < ground_y;
+            let (mut landings, mut land_ke) = (0usize, 0.0f64);
+            let mut was: Vec<bool> = (0..w.vehicles[0].nodes.len())
+                .map(|i| below(&w.vehicles[0], i))
+                .collect();
+            let mut prev_vel: Vec<Vec3> = w.vehicles[0].nodes.iter().map(|n| n.vel).collect();
             for _ in 0..60 * 33 {
                 let v = &w.vehicles[0];
                 let before: Vec<(f32, f32)> = (0..v.beams.len())
@@ -345,6 +355,16 @@ fn coasting_pressure_tyres_energy_split() {
                     .collect();
                 w.step();
                 let v = &w.vehicles[0];
+                for i in 0..v.nodes.len() {
+                    let now = below(v, i);
+                    if now && !was[i] {
+                        landings += 1;
+                        let vy = f64::from(prev_vel[i].y.min(0.0));
+                        land_ke += 0.5 * f64::from(v.nodes[i].mass) * vy * vy;
+                    }
+                    was[i] = now;
+                    prev_vel[i] = v.nodes[i].vel;
+                }
                 for (j, &(f, l0)) in before.iter().enumerate() {
                     // Trapezoid over the step (exact for a linear spring).
                     if !v.beams[j].broken {
@@ -354,6 +374,19 @@ fn coasting_pressure_tyres_energy_split() {
                 }
             }
             let v = &w.vehicles[0];
+            let nt = v.tyres.len().max(1) as f64;
+            let revs: f64 = v
+                .tyres
+                .iter()
+                .map(|t| f64::from(v0) / (2.0 * std::f64::consts::PI * f64::from(t.radius)))
+                .sum::<f64>();
+            eprintln!(
+                "{name} {v0} m/s: touchdowns {landings} in 1 s ({:.1} per tyre revolution), their normal KE {:.2} kJ/s ({:.3} J each), tyres {}",
+                landings as f64 / revs.max(1e-9),
+                land_ke * 1e-3,
+                land_ke / landings.max(1) as f64,
+                nt
+            );
             for j in 0..v.beams.len() {
                 diss[part[j]] -= u(v, j) - u0[j];
             }
