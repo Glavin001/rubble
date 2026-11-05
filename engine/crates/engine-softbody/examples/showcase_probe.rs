@@ -45,6 +45,14 @@ fn main() {
             st.primary_nodes, st.primary_node_mass, st.kl_primary, b.stiffness_scale, b.skin_scale
         );
     }
+    if std::env::var("PARTS").is_ok() {
+        // Each part's nodes and mass.
+        for (k, name) in sk.parts.iter().enumerate() {
+            let v: Vec<&_> = sk.nodes.iter().filter(|n| n.part as usize == k).collect();
+            let kg: f32 = v.iter().map(|n| n.mass).sum();
+            eprintln!("  part {name:>12}: {:4} nodes {kg:7.1} kg", v.len());
+        }
+    }
     if std::env::var("FRAMES").is_ok() {
         // Frame nodes per member (a shared joint node counted once, by the
         // member built first), with their mass.
