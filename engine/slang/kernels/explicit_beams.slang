@@ -553,9 +553,17 @@ float3 accForce(uint node)
                   float(gAcc[node * 3u + 2u].load())) * (1.0 / FIXED);
 }
 
+// x in 1/FIXED N units, clamped to ±2·10⁹, rounded to nearest with ties to even
+// (explicit_beams.rs to_fixed): spelt out, as the targets' round differ at ties
+// (WGSL's ties to even, Metal's away from zero). Every step is exact: y − floor(y)
+// for |y| < 2²⁴ (above, y is whole), f·0.5, f + 1.
 int toFixed(float x)
 {
-    return int(round(clamp(x * FIXED, -2.0e9, 2.0e9)));
+    float y = clamp(nf(x * FIXED), -2.0e9, 2.0e9);
+    float f = floor(y);
+    float d = nf(y - f);
+    if (d > 0.5 || (d == 0.5 && floor(f * 0.5) * 2.0 != f)) f = f + 1.0;
+    return int(f);
 }
 
 void accAdd(uint node, float3 f)

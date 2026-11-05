@@ -366,7 +366,8 @@ impl ExplicitBeamsWorld {
             let before: Vec<(Vec3, Vec3, Vec3)> = v
                 .nodes
                 .iter()
-                .map(|n| (v.origin + n.pos, n.vel, n.force))
+                .enumerate()
+                .map(|(i, n)| (v.origin + n.pos, n.vel, v.force_now(i)))
                 .collect();
             v.step();
             ledger.account(k, v, &before);
@@ -415,7 +416,7 @@ impl ExplicitBeamsWorld {
             self.pass_force.resize(nv, Vec::new());
             for (pf, v) in self.pass_force.iter_mut().zip(&self.vehicles) {
                 pf.clear();
-                pf.extend(v.nodes.iter().map(|n| n.force));
+                pf.extend(v.forces_now());
             }
         }
         self.world.resize(nv, Vec::new());
@@ -739,7 +740,10 @@ impl ExplicitBeamsWorld {
                 (m, (acc(self.pass_force[b][h as usize], &node) - at) * m)
             } else {
                 let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
-                ((node.mass * mt) / (node.mass + mt), node.force)
+                (
+                    (node.mass * mt) / (node.mass + mt),
+                    self.vehicles[b].force_now(h as usize),
+                )
             };
             let f = contact_force(
                 fh,
@@ -764,11 +768,11 @@ impl ExplicitBeamsWorld {
                     l.vc[v][1][i as usize] -= ft * w;
                 }
             }
-            self.vehicles[b].nodes[h as usize].force += f;
+            self.vehicles[b].add_contact(h as usize, f);
             let va = &mut self.vehicles[a];
-            va.nodes[i1 as usize].force -= f * alpha;
-            va.nodes[i2 as usize].force -= f * beta;
-            va.nodes[i0 as usize].force -= f * gamma;
+            va.add_contact(i1 as usize, -(f * alpha));
+            va.add_contact(i2 as usize, -(f * beta));
+            va.add_contact(i0 as usize, -(f * gamma));
             if let Some(l) = self.vehicles[a].contact_force.as_mut() {
                 l.add(i1 as usize, f * alpha);
                 l.add(i2 as usize, f * beta);

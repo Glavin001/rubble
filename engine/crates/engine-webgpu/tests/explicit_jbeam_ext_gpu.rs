@@ -200,9 +200,9 @@ fn triangle_aero_matches() {
 /// contact (§34) step bit for bit with the CPU: every node's position and velocity
 /// after each step, the pressure-wheel fixture car at rest (2 s) and rolling at
 /// 10 m/s (1 s); opt-in (`RUBBLE_BEAMNG_MODS`), the supercar at rest 1 s and the
-/// Astral R 350 steps: at step 354 (in the BeamNG profile's 2.5 cm band, §36; 427
-/// in the old 3 cm one) its first self-collision contact differs by a last bit (the
-/// contact force reaches the node through the GPU's 1/32 N accumulator; §35, open).
+/// Astral R 1,200 steps, past its first self-collision contact (step 354): the CPU
+/// sums contact forces in the GPU's fixed point (the BeamNG profile's
+/// `fixed_contact`, §36).
 #[test]
 fn jbeam_mode_steps_bit_for_bit() {
     let Ok((_, device, queue)) = default_device() else {
@@ -250,7 +250,7 @@ fn jbeam_mode_steps_bit_for_bit() {
             "qlourie_astral_r/vehicles",
             "qlourie_astral_r",
             "wrc17_tarmac_balanced.pc",
-            350,
+            1200,
         ),
     ] {
         let dir = m.join(dir);
