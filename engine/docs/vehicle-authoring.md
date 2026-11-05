@@ -865,25 +865,75 @@ vehicle the same visual format as the authored car, so
   10⁵ × softer than glass, so a strain criterion becomes a force too small
   to carry the pane. A real pane's strip would hold σ·t·L, about 144 kN at
   4 mm × 0.3 m, which these beams never reach.
-- **Aperture racking (a Choice; written, off).** `aperture_gauges` joins
-  the frame nodes at the opening's four corners by its edges and diagonals.
-  - Each gauge is a beam of negligible stiffness (`GAUGE_K`) that breaks at
-    σ/E of its length (tempered 120 MPa, laminated 45 MPa) against the
-    installed pose.
-  - The beams are plain, so a tempered pane's break sets off its group; RoR
-    supports do not cascade groups.
-  - A pane beam no longer breaks on its own strain.
-  - Turned on, every pane breaks at rest in `a`:
-    - The corners are wrong: the windscreen's reach door nodes, and the side
-      windows' reach the door's belt-line frame. The windows' upper frames
-      are not frame tier.
-    - The 2 cm spawn landing strains the gauges 0.10–0.20 % (`GLASS_STRAIN=1`
-      prints them), above tempered glass's 0.17 % and laminated's 0.064 %. A
-      real car's frame strains far less.
-- **What is open:** per-pane aperture corners on frame-tier nodes (window
-  frames in the frame tier); a spawn without the landing transient;
-  direct-impact breaks against UN R43 / ANSI Z26.1 data (needs a contact
-  force readback in the solver). This needs a decision.
+- **Aperture racking (a Choice; written, off; 2026-11-05).**
+  `aperture_gauges` joins the opening's corners by its edges and diagonals
+  with gauges. A gauge is a beam of negligible stiffness (`GAUGE_K`) that
+  breaks at the racking that brings the glass to σ/E.
+  - **Corners are frame nodes of the opening's own members**
+    (`aperture_members`):
+    - windscreen: the screen pillars, front header and cowl;
+    - backlight: the C-pillars, rear header and parcel shelf;
+    - side glass: the door's sash and belt.
+
+    Each corner is the frame node farthest along each diagonal of the
+    opening (its axes scaled to its extent), within 30 cm of the opening's
+    outline.
+  - **The gauge's rest is its length as the solver measures it.** The default
+    (RoR-compatible) profile's fast inverse square root is off by up to
+    0.18 % from the exact length the loader takes as a rest. That error is
+    larger than glass's break strain. It is what made every pane "break at
+    rest", more than the old 2 cm spawn drop did.
+  - **The mount is in series with the pane (exact for two shear layers in
+    series with an elastic strip).** Across a span L the opening racks
+    ε = ε_g (1 + 2 E t t_b / (G w L)) for a strain ε_g in the glass, with the
+    urethane bead's G, w and t_b (TEROSON PU 9096 PL) and the pane's t (NHTSA
+    DOT 88988 table 2: tempered 3.5 mm; laminated 2 × 2.1 mm on PVB).
+    - Over 1.5 m the factor is about 140: tempered glass breaks at about 24 %
+      racking, laminated cracks at about 9 %.
+    - A bonded pane barely feels its frame. Its bead tears (τ·w·L, as
+      sized) or the glass is hit first.
+    - **Choice:** side glass in its run channel takes the same compliance;
+      no measured channel data was found.
+  - **A pane's own beams are strips of the real pane.** Each holds σ·t·L,
+    which the step-softened beam never reaches. A tempered pane's beams go
+    only with its group; the laminated windscreen's yield at its plies'
+    crack force and hold.
+  - **Measured with `BRITTLE_GLASS=1 GLASS_REPORT=1`, Medium,** with door
+    sashes as frame-tier members (`window_frame`):
+    - no pane breaks at rest (10 s, Low and Medium) or driving at 50 km/h
+      (gauges up to 0.09 % racking);
+    - no pane breaks in any NCAP frontal at 47–59 km/h, so the backlight
+      survives;
+    - the struck front side glass shatters in the 75° side pole at 31, 32
+      and 34 km/h (not at 30 or 33);
+    - both struck side panes shatter in the 80 km/h T-bone;
+    - the windscreen does **not** crack in the frontal or in the FMVSS 216a
+      roof crush. Its racking never nears 9 %, and a laminated screen cracks
+      from being hit or bent, which needs the direct-impact trigger.
+  - **Glass stays off:** the windscreen check fails.
+- **Door sashes (window frames) are written but not in the car.** As
+  frame-tier ladders round each window (`window_frame`, corner stations
+  only), they moved three checks out of band:
+  - `g`: the door came off at 78.3 kN, against 78.4–83.4;
+  - `n`: restitution 0.2002, against at most 0.20;
+  - `t`: the latch let go at 0.05 s, and 46–57 striker nodes ended up inside
+    the struck skin (1 % allowed). The shut-line triangles next to the latch
+    die with it while the hinged door is still pressed in, which opens a
+    hole.
+
+  The sashes tried were `window_frame(riding(ladder(member("door_sash_f",
+  [(0.80, 1.10, 2.98), (0.70, 1.33, 2.64), (0.69, 1.36, 2.36), (0.79, 1.10,
+  2.36)], 0.05, 0.05, OUT, "hsla", [1, 1], 0, true, 1))))`, and `door_sash_r`
+  through (0.79, 1.10, 2.12), (0.69, 1.36, 2.12), (0.69, 1.33, 1.64) and
+  (0.79, 1.10, 1.58). Without them, the side-glass gauges have only belt
+  corners.
+- **What is open:**
+  - Direct impact against measured data, on the solver's contact-force
+    break trigger. The solver owner is adding `rubble_contact_breaks`; it
+    is not here yet. The data is NHTSA DOT 88988: 227 g ball break heights
+    for production tempered glass, mostly 35–85 ft at the centre, 2 ft at a
+    painted edge.
+  - The sashes together with the T-bone's skin.
 
 ### A6: where the hardware's loads reach its strength (2026-11-05)
 
