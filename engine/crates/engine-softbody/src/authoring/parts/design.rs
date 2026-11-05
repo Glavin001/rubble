@@ -186,10 +186,13 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         // A wide, low grille between the lamps' inner ends and the bumper.
         // A trapezoid, narrow at the top and widening toward the bumper's
         // lower edge, so the face's dark mass sits low.
+        // Its top edge just under the lamps' inner ends (no blank band of
+        // paint between lamp and grille).
         grille: vec![
-            (-0.33, -0.100),
-            (0.33, -0.100),
-            (0.365, -0.106),
+            (-0.33, -0.084),
+            (0.33, -0.084),
+            (0.372, -0.090),
+            (0.392, -0.112),
             (0.385, -0.13),
             (0.43, -0.235),
             (0.445, -0.272),
@@ -200,7 +203,8 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
             (-0.445, -0.272),
             (-0.43, -0.235),
             (-0.385, -0.13),
-            (-0.365, -0.106),
+            (-0.392, -0.112),
+            (-0.372, -0.090),
         ],
         // Side intakes in the bumper's corners (air curtains): sharp
         // trapezoids, the inner edge raked.
