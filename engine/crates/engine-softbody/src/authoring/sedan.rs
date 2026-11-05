@@ -123,7 +123,7 @@ pub const ROOF: f32 = 1.2;
 /// carries 5.1 × the unloaded weight within 127 mm of an FMVSS 216a platen
 /// (compact sedans measure 4.48–5.32 ×; `crash-reference-targets.md`). At
 /// 20 kN it carried 5.38 ×.
-pub const ROOF_YIELD: f32 = 1.7e4;
+pub const ROOF_YIELD: f32 = 1.4e4;
 
 /// Yield force of the cabin's door-ring panels (N): strong in a
 /// 56 km/h crash, crushed by a roll-over.
@@ -162,7 +162,7 @@ pub const CELL: f32 = 4.0;
 /// median 20; right −15–85): medians over 55–57 km/h 16 mm left, 0 right
 /// (at 1.0 it stayed put, −1 mm). Weaker (0.2) and the front's weight on
 /// the rail junctions yields it standing still.
-pub const FIREWALL: f32 = 0.25;
+pub const FIREWALL: f32 = 0.3;
 
 /// An impact member: pole catchers between its stations.
 pub fn catching(mut m: MemberSpec) -> MemberSpec {
@@ -213,6 +213,8 @@ pub fn seat_frame(name: &str, centre: [f32; 3], half: [f32; 3], kg: f32) -> Bloc
         centre,
         half,
         spacing: 0.5,
+        depth: 0.0,
+        stiff: 1.0,
         kg,
         mounts: 3,
         reach: 0.45,
@@ -245,7 +247,7 @@ pub const END_YIELD: f32 = 2.0e4;
 /// 0.877 against Campbell's 0.875). Uniform, b1 fell with speed (31.5 to
 /// 31.0: 0.861); at 0.9 it rose (0.882), at 0.8 more (0.896).
 pub const RAIL_CABIN: f32 = 1.0;
-pub const RAIL_BUMPER: f32 = 0.95;
+pub const RAIL_BUMPER: f32 = 0.7;
 
 /// The crush grade's thresholds against `Grades::default`'s: the rails' and
 /// aprons' plateau, set from NCAP measurements
@@ -253,7 +255,47 @@ pub const RAIL_BUMPER: f32 = 0.95;
 /// sedan crushes 0.62–0.75 m dynamically (t_m 63–76 ms) and 0.38–0.58 m
 /// residually (Campbell b1 22.9–39.2). The `n` test measures it (1.0 since
 /// the front axle moved 5 cm forward: its wheel meets the crush sooner).
-pub const CRUSH_PLATEAU: f32 = 1.0;
+pub const CRUSH_PLATEAU: f32 = 0.9;
+
+/// The frame grades' (HSLA, UHSS, boron, aluminium, crush) rigidity against
+/// `Grades::default`'s: the re-noded frame (about 330 nodes of 1–4 kg besides
+/// the doors' frames, 2026-11-05) pays for half again as much at the 0.5 ms
+/// step.
+pub const FRAME_STIFF: f32 = 1.5;
+
+/// The crush grade's rigidity against the frame's: a crushed front springs
+/// back as NCAP measures. The seven 56 km/h sedans of
+/// `crash-reference-targets.md` §8 spring back 0.10–0.24 m from their dynamic
+/// crush (0.62–0.75 m) to their residual (§1: 0.42–0.57 m). The 56 km/h wall
+/// gives dynamic 0.648 m, residual 0.520 m (medians over 55–57 km/h); at the
+/// frame's rigidity the front sprang back 0.04 m and the dynamic crush fell
+/// to 0.51–0.55 m.
+pub const CRUSH_RIGIDITY: f32 = 0.15;
+
+/// The powertrain lattice's stiffness against the rigid grade's: an engine
+/// block is rigid, and its 175 kg pays for a lattice 3 × as stiff at the
+/// step (it used 38 of its 72 kg of mass beyond its beams' need).
+pub const POWERTRAIN_STIFF: f32 = 3.0;
+
+/// The B-pillar's station spacing (m): two bays below the belt, so a side
+/// pole at mid-span meets a station (the centre hinge of its 4·M_p/L
+/// collapse); at 1 m the side pole's crush was 500 mm against 356.
+pub const PILLAR_B_STATION: f32 = 0.6;
+
+/// The doors' rails' station spacing (m): two bays along each (0.8 m), so a
+/// pole meets a station mid-span (at 1 m the side pole's crush was 620 mm).
+pub const DOOR_STATION: f32 = 0.42;
+
+/// The rear body's upper chord: the quarter inner's and the C-pillar's
+/// sections against their grades' k·L (the quarter inner and C-pillar carry
+/// the rear's pitch into the roof and sill; with the rear rails into the
+/// sills these cut the rear frame's motion in the cabin's frame under the
+/// 56 km/h pulse from 107 mm to 23 mm, peak RMS).
+pub const QUARTER_STIFF: f32 = 6.0;
+pub const C_PILLAR_STIFF: f32 = 6.0;
+/// The rear quarter's web (rear rail to quarter inner) against
+/// [`KL_SHEAR`].
+pub const QUARTER_WEB: f32 = 3.0;
 
 /// The main load paths' (rails, sills) section against their grade's k·L.
 pub const RAIL_STIFF: f32 = 1.4;
@@ -880,12 +922,7 @@ pub fn sedan() -> VehicleDef {
         )),
         cell(member(
             "pillar_a",
-            &[
-                (0.79, 0.31, 3.36),
-                (0.79, 0.92, 3.38),
-                (0.71, 1.10, 2.95),
-                (0.62, 1.37, 2.59),
-            ],
+            &[(0.79, 0.31, 3.36), (0.79, 0.92, 3.38), (0.62, 1.37, 2.59)],
             0.10,
             0.12,
             FWD,
@@ -908,20 +945,23 @@ pub fn sedan() -> VehicleDef {
                 true,
                 1,
             )),
-            0.4,
+            PILLAR_B_STATION,
         )),
-        ladder(cell(member(
-            "pillar_c",
-            &[(0.79, 0.31, 1.36), (0.79, 0.98, 1.36), (0.62, 1.37, 1.50)],
-            0.10,
-            0.12,
-            FWD,
-            "uhss",
-            [1.0, 1.0],
-            0,
-            true,
-            1,
-        ))),
+        stiff(
+            ladder(cell(member(
+                "pillar_c",
+                &[(0.79, 0.31, 1.36), (0.79, 0.98, 1.36), (0.62, 1.37, 1.50)],
+                0.10,
+                0.12,
+                FWD,
+                "uhss",
+                [1.0, 1.0],
+                0,
+                true,
+                1,
+            ))),
+            C_PILLAR_STIFF,
+        ),
         ladder(roof(member(
             "roof_rail",
             &[
@@ -1089,6 +1129,7 @@ pub fn sedan() -> VehicleDef {
                 member(
                     "rail_r",
                     &[
+                        (0.70, 0.26, 2.24),
                         (0.44, 0.22, 1.80),
                         (0.44, 0.24, 1.36),
                         (0.44, 0.40, 1.03),
@@ -1129,18 +1170,21 @@ pub fn sedan() -> VehicleDef {
         ))),
         // Rear aprons (inner quarter panels) from the C-pillar over the rear
         // strut tower.
-        ladder(member(
-            "quarter_inner",
-            &[(0.79, 0.98, 1.36), (0.68, 0.86, 1.03), (0.66, 0.88, 0.24)],
-            0.12,
-            0.12,
-            UP,
-            "hsla",
-            [1.4, 0.6],
-            0,
-            true,
-            1,
-        )),
+        stiff(
+            ladder(member(
+                "quarter_inner",
+                &[(0.79, 0.98, 1.36), (0.68, 0.86, 1.03), (0.66, 0.88, 0.24)],
+                0.12,
+                0.12,
+                UP,
+                "hsla",
+                [1.4, 0.6],
+                0,
+                true,
+                1,
+            )),
+            QUARTER_STIFF,
+        ),
         ladder(member(
             "subframe_r1",
             &[(-0.44, 0.31, 1.03), (0.0, 0.29, 1.03), (0.44, 0.31, 1.03)],
@@ -1196,7 +1240,7 @@ pub fn sedan() -> VehicleDef {
                 true,
                 3,
             ))),
-            0.28,
+            DOOR_STATION,
         )),
         // Belt reinforcements under the windows (they ride their door).
         stations(
@@ -1212,7 +1256,7 @@ pub fn sedan() -> VehicleDef {
                 true,
                 3,
             ))),
-            0.28,
+            DOOR_STATION,
         ),
         stations(
             riding(ladder(member(
@@ -1227,7 +1271,7 @@ pub fn sedan() -> VehicleDef {
                 true,
                 3,
             ))),
-            0.28,
+            DOOR_STATION,
         ),
         // Inner rails at mid height (they ride their door).
         stations(
@@ -1243,7 +1287,7 @@ pub fn sedan() -> VehicleDef {
                 true,
                 3,
             ))),
-            0.28,
+            DOOR_STATION,
         ),
         stations(
             riding(ladder(member(
@@ -1258,7 +1302,7 @@ pub fn sedan() -> VehicleDef {
                 true,
                 3,
             ))),
-            0.28,
+            DOOR_STATION,
         ),
         catching(stations(
             riding(ladder(member(
@@ -1273,11 +1317,18 @@ pub fn sedan() -> VehicleDef {
                 true,
                 3,
             ))),
-            0.28,
+            DOOR_STATION,
         )),
     ];
-    // The side's load path at its sections' strength.
     let mut members = members;
+    // The rear rails' knee at the rear subframe's station (z 0.62).
+    for m in members.iter_mut().filter(|m| m.name == "rail_r") {
+        let p: Vec<glam::Vec3> = m.path.iter().map(|&q| glam::Vec3::from_array(q)).collect();
+        let len = |a: usize, b: usize| (a..b).map(|i| p[i].distance(p[i + 1])).sum::<f32>();
+        let k = p.iter().position(|q| (q.z - 0.62).abs() < 1e-3).unwrap();
+        m.knee = Some([len(0, k) / len(0, p.len() - 1), REAR_RAIL]);
+    }
+    // The side's load path at its sections' strength.
     sectioned(&mut members, &Grades::default());
     let blocks = vec![
         BlockSpec {
@@ -1286,6 +1337,10 @@ pub fn sedan() -> VehicleDef {
             half: [0.33, 0.24, 0.23],
             // Under a pole's width (static contact is per node).
             spacing: 0.17,
+            // Two layers deep: its front face meets the wall and its rear
+            // face the firewall, both at 0.17 m; nothing loads its middle.
+            depth: 0.46,
+            stiff: POWERTRAIN_STIFF,
             kg: 175.0,
             mounts: 2,
             reach: 0.25,
@@ -1309,6 +1364,8 @@ pub fn sedan() -> VehicleDef {
             centre: [0.56, 0.62, 4.24],
             half: [0.09, 0.08, 0.11],
             spacing: 0.3,
+            depth: 0.0,
+            stiff: 1.0,
             kg: 18.0,
             mounts: 2,
             reach: 0.25,
@@ -1426,7 +1483,15 @@ pub fn sedan() -> VehicleDef {
         profile,
         grades: {
             let mut g = Grades::default();
-            g.crush = g.crush.scaled(CRUSH_PLATEAU);
+            // The frame's grades at the rigidity its heavier nodes pay
+            // for, the crush grade's at what its measured springback needs.
+            for m in [&mut g.hsla, &mut g.uhss, &mut g.boron, &mut g.alu] {
+                *m = m.stiffer(FRAME_STIFF);
+            }
+            g.crush = g
+                .crush
+                .scaled(CRUSH_PLATEAU)
+                .stiffer(FRAME_STIFF * CRUSH_RIGIDITY);
             g
         },
         // Door seams (each door's edge ring inside it, the pillar's between),
@@ -1540,7 +1605,18 @@ pub fn sedan() -> VehicleDef {
                 sh("subframe_f1", "subframe_f2", 0, "hsla"),
                 // Rear end: rear floor, inner quarters, subframe.
                 sh("rail_r", "rail_r_r", 2, "floor"),
-                sh("rail_r", "quarter_inner", 2, "hsla"),
+                // The rear quarter (wheelhouse and quarter inner) between
+                // the rear rail and the quarter inner: the rear body's deep
+                // beam's web.
+                {
+                    let mut x = sh("rail_r", "quarter_inner", 2, "hsla");
+                    x.kl *= QUARTER_WEB;
+                    x
+                },
+                // The floor pan in shear between the rails and the sills:
+                // the rails' crash load into the sills.
+                sh("rail_f", "sill", 2, "floor"),
+                sh("rail_r", "sill", 2, "floor"),
                 sh("subframe_r1", "subframe_r2", 0, "hsla"),
             ]
         },

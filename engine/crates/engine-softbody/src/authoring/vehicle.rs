@@ -8,7 +8,7 @@
 use super::body::{build_shell, check_closed, BodyProfile, Seg, Shell, ShellBeam, Spacing};
 use super::curve::{Curve, Outline};
 use super::material::{Grades, Material};
-use super::members::{attach, block, box_truss, corner, plate, Corner, MemberSpec, Truss};
+use super::members::{attach, block_spaced, box_truss, corner, plate, Corner, MemberSpec, Truss};
 use super::skeleton::{BeamType, Skeleton};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -118,6 +118,14 @@ pub struct BlockSpec {
     pub centre: [f32; 3],
     pub half: [f32; 3],
     pub spacing: f32,
+    /// Spacing along z (m; 0: `spacing`): a block's front and rear faces
+    /// keep `spacing` across, its depth needs fewer layers.
+    #[serde(default)]
+    pub depth: f32,
+    /// The lattice's stiffness against the rigid grade's (a heavy block's
+    /// own mass pays for a stiffer lattice: an engine block is rigid).
+    #[serde(default = "one")]
+    pub stiff: f32,
     pub kg: f32,
     /// Mounts: each outer node to this many nearest body nodes within `reach`.
     pub mounts: usize,
@@ -237,8 +245,15 @@ pub const CATCHERS_IN_FRAME: bool = false;
 
 /// A block's bearing beams' thresholds against the UHSS grade: an engine
 /// driven back crushes into the firewall rather than stopping the car
-/// against it.
-pub const BEAR_SCALE: f32 = 0.3;
+/// against it. 0.6 since the re-node (heavier frame nodes, 2026-11-05): the
+/// engine meeting the firewall gives the 56 km/h pulse its peak (median 35.5 g
+/// against NCAP's 34–47; 0.3 gave 34).
+pub const BEAR_SCALE: f32 = 0.6;
+
+/// A plate's node spacing (m): the radiator's six nodes, each corner and
+/// mid-edge on its mounts (a four-node plate on the 1 m frame rattled on
+/// its mounts at rest).
+pub const PLATE_SPACING: f32 = 0.6;
 
 /// The shock top's ties to its tower against the link grade.
 pub const SHOCK_TOP: f32 = 4.0;
@@ -311,19 +326,22 @@ impl Resolution {
         }
     }
 
-    /// Station spacing of the structural trusses.
+    /// Station spacing of the structural trusses (at most; every path vertex
+    /// is a station). 1 m: a frame of about 330 heavy nodes (1–4 kg) besides
+    /// the doors' frames, as BeamNG's cars are built. At a fixed mass and
+    /// step a line's axial rigidity grows with the square of its station
+    /// spacing, so long stations make a stiff frame; the impact members that
+    /// a pole loads mid-span set their own (`MemberSpec::station`: half their
+    /// span, so the centre hinge has its node). The same at every
+    /// resolution: the resolution sets the skin.
     pub fn truss(self) -> f32 {
-        match self {
-            Resolution::Low => 0.65,
-            Resolution::Medium => 0.6,
-            Resolution::High => 0.6,
-        }
+        1.0
     }
 
     /// Station spacing of crush members (beaded rails): long enough beams to
     /// yield in compression (the solver keeps every rest length ≥ 0.1 m).
     pub fn crush(self) -> f32 {
-        0.45
+        0.6
     }
 }
 
@@ -1385,7 +1403,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             Vec3::from_array(pl.corner),
             Vec3::from_array(pl.u),
             Vec3::from_array(pl.v),
-            res.truss(),
+            PLATE_SPACING,
             part,
             mat,
         );
@@ -1409,13 +1427,17 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     // Blocks.
     for bl in &def.blocks {
         let part = sk.part(&bl.name);
-        let nodes = block(
+        let nodes = block_spaced(
             &mut sk,
             Vec3::from_array(bl.centre),
             Vec3::from_array(bl.half),
-            bl.spacing,
+            Vec3::new(
+                bl.spacing,
+                bl.spacing,
+                if bl.depth > 0.0 { bl.depth } else { bl.spacing },
+            ),
             part,
-            grades.rigid,
+            grades.rigid.stiffer(bl.stiff),
         );
         sk.add_mass(&nodes, bl.kg);
         let mount = grades.get(&bl.mount_grade)?.scaled(bl.mount_scale);

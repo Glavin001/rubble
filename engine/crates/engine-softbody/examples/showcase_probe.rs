@@ -45,6 +45,36 @@ fn main() {
             st.primary_nodes, st.primary_node_mass, st.kl_primary, b.stiffness_scale, b.skin_scale
         );
     }
+    if std::env::var("FRAMES").is_ok() {
+        // Frame nodes per member (a shared joint node counted once, by the
+        // member built first), with their mass.
+        let mut seen = std::collections::HashSet::new();
+        let mut rows = Vec::new();
+        for m in &def.members {
+            for name in [m.name.clone(), format!("{}_r", m.name)] {
+                let Some(g) = b.groups.get(&name) else {
+                    continue;
+                };
+                let own: Vec<u32> = g
+                    .iter()
+                    .copied()
+                    .filter(|&i| sk.nodes[i as usize].primary && seen.insert(i))
+                    .collect();
+                let kg: f32 = own.iter().map(|&i| sk.nodes[i as usize].mass).sum();
+                rows.push((name, own.len(), kg));
+            }
+        }
+        let rest = sk
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| n.primary && !seen.contains(&(*i as u32)))
+            .count();
+        for (n, c, kg) in &rows {
+            eprintln!("  {n:>16}: {c:4} frame nodes {kg:7.1} kg");
+        }
+        eprintln!("  {:>16}: {rest:4}", "other frame");
+    }
     if std::env::var("MASSES").is_ok() {
         // Final node mass by class (and the named masses on it).
         let shell: std::collections::HashSet<u32> = b.shell.nodes.iter().copied().collect();
@@ -951,6 +981,209 @@ fn main() {
                 );
             }
         }
+        return;
+    }
+    if std::env::var("REAR").is_ok() {
+        // The rear body's motion in the cabin's frame: each millisecond the
+        // cabin's frame nodes (z 1.5–3.3) give a best-fit rotation (the
+        // polar part of their covariance) and centre; the rear's frame nodes
+        // (z < 1.2) are taken back into the rest frame and their RMS
+        // displacement from rest is the rear body's deformation (rigid
+        // motion removed). Reported every 5 ms to 150 ms: RMS, mean y and z.
+        let body = sk.parts.iter().position(|p| p == "body").unwrap() as u16;
+        let sel = |lo: f32, hi: f32| -> Vec<usize> {
+            (0..sk.nodes.len())
+                .filter(|&i| {
+                    let n = &sk.nodes[i];
+                    n.primary && !n.catcher && n.part == body && n.p.z >= lo && n.p.z < hi
+                })
+                .collect()
+        };
+        let rng = |k: &str, d: [f32; 2]| -> [f32; 2] {
+            std::env::var(k)
+                .ok()
+                .map(|v| {
+                    let x: Vec<f32> = v.split(',').filter_map(|t| t.parse().ok()).collect();
+                    [x[0], x[1]]
+                })
+                .unwrap_or(d)
+        };
+        let [c0, c1] = rng("REAR_CAB", [1.5, 3.3]);
+        let [r0, r1] = rng("REAR_SET", [-1.0, 1.2]);
+        // The cell's own members (not the rails under the floor, the dash
+        // or column: they deform with the crush).
+        let cell_groups: Vec<String> = std::env::var("REAR_CELL")
+            .unwrap_or("sill,sill_r,pillar_a,pillar_a_r,pillar_b,pillar_b_r,roof_rail,roof_rail_r,tunnel,floor_x2,bow_b".into())
+            .split(',')
+            .map(String::from)
+            .collect();
+        let in_cell = |i: usize| {
+            cell_groups
+                .iter()
+                .any(|g| b.groups.get(g).is_some_and(|v| v.contains(&(i as u32))))
+        };
+        let cab: Vec<usize> = sel(c0, c1)
+            .into_iter()
+            .filter(|&i| std::env::var("REAR_ALLCAB").is_ok() || in_cell(i))
+            .collect();
+        let rear = sel(r0, r1);
+        let p0: Vec<Vec3> = s.positions();
+        let pc0 = cab.iter().map(|&i| p0[i]).sum::<Vec3>() / cab.len() as f32;
+        let mut worst = (0.0f32, 0.0f32);
+        let mut acc2 = 0.0f64;
+        let mut cnt = 0usize;
+        let steps = (0.15 / engine_softbody::explicit_beams::STEP).round() as usize;
+        for st in 1..=steps {
+            s.step();
+            if st % 2 != 0 {
+                continue;
+            }
+            let q: Vec<Vec3> = s.positions();
+            let qc = cab.iter().map(|&i| q[i]).sum::<Vec3>() / cab.len() as f32;
+            // H = Σ (q − qc)(p − pc)ᵀ; R = polar(H) maps rest to now.
+            let mut h = glam::Mat3::ZERO;
+            for &i in &cab {
+                let a = q[i] - qc;
+                let c = p0[i] - pc0;
+                h += glam::Mat3::from_cols(a * c.x, a * c.y, a * c.z);
+            }
+            let mut r = h * (1.0 / h.determinant().abs().cbrt().max(1e-9));
+            for _ in 0..30 {
+                r = (r + r.inverse().transpose()) * 0.5;
+            }
+            let back = |x: Vec3| r.transpose() * (x - qc) + pc0;
+            let (mut s2, mut my, mut mz) = (0.0f32, 0.0f32, 0.0f32);
+            for &i in &rear {
+                let d = back(q[i]) - p0[i];
+                s2 += d.length_squared();
+                my += d.y;
+                mz += d.z;
+            }
+            let n = rear.len() as f32;
+            let rms = (s2 / n).sqrt();
+            acc2 += (s2 / n) as f64;
+            cnt += 1;
+            if rms > worst.0 {
+                worst = (rms, st as f32 * engine_softbody::explicit_beams::STEP);
+            }
+            let at: Vec<usize> = std::env::var("REAR")
+                .unwrap()
+                .split(',')
+                .filter_map(|x| x.parse().ok())
+                .collect();
+            if at.contains(&st) {
+                // Each group's mean displacement in the cabin's frame (mm).
+                let mut gs: Vec<_> = b
+                    .groups
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "suspension")
+                    .collect();
+                gs.sort_by(|a, c| a.0.cmp(c.0));
+                let mut line = String::new();
+                for (k, g) in gs {
+                    let v: Vec<u32> = g
+                        .iter()
+                        .copied()
+                        .filter(|&i| (i as usize) < sk.nodes.len() && sk.nodes[i as usize].primary)
+                        .collect();
+                    if v.is_empty() {
+                        continue;
+                    }
+                    let d = v
+                        .iter()
+                        .map(|&i| back(q[i as usize]) - p0[i as usize])
+                        .sum::<Vec3>()
+                        / v.len() as f32;
+                    line += &format!(" {k} ({:.0},{:.0},{:.0})", d.x * 1e3, d.y * 1e3, d.z * 1e3);
+                }
+                eprintln!("  groups in the cabin frame (x,y,z mm):{line}");
+                // Elastic energy by member pair (beams with a node behind
+                // the rear seat, z < 1.9), J.
+                let mut en: std::collections::BTreeMap<String, f64> = Default::default();
+                for bm in s.beams.iter().filter(|x| !x.broken) {
+                    let behind =
+                        |i: u32| (i as usize) < sk.nodes.len() && sk.nodes[i as usize].p.z < 1.9;
+                    if !behind(bm.a) && !behind(bm.b) {
+                        continue;
+                    }
+                    let l = q[bm.a as usize].distance(q[bm.b as usize]);
+                    if bm.kind == engine_softbody::explicit_beams::ExplicitKind::Support
+                        && l > bm.rest
+                    {
+                        continue;
+                    }
+                    let (la, lb) = (label(bm.a), label(bm.b));
+                    let key = if la <= lb {
+                        format!("{la}~{lb}")
+                    } else {
+                        format!("{lb}~{la}")
+                    };
+                    *en.entry(key).or_default() +=
+                        0.5 * bm.k as f64 * ((l - bm.rest) as f64).powi(2);
+                }
+                let mut ev: Vec<_> = en.into_iter().filter(|x| x.1 > 5.0).collect();
+                ev.sort_by(|a, c| c.1.total_cmp(&a.1));
+                eprintln!(
+                    "  rear elastic at {:.1} ms (J): {}",
+                    st as f32 * engine_softbody::explicit_beams::STEP * 1e3,
+                    ev.iter()
+                        .take(25)
+                        .map(|(k, e)| format!("{k} {e:.0}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if st % 10 == 0 && std::env::var("REAR_FIT").is_ok() {
+                // The rear's own best fit in the cabin's frame: its rotation
+                // (deg about x: pitch) and the residual (its own deformation).
+                let ps: Vec<Vec3> = rear.iter().map(|&i| p0[i]).collect();
+                let qs: Vec<Vec3> = rear.iter().map(|&i| back(q[i])).collect();
+                let pc = ps.iter().copied().sum::<Vec3>() / ps.len() as f32;
+                let qc2 = qs.iter().copied().sum::<Vec3>() / qs.len() as f32;
+                let mut h2 = glam::Mat3::ZERO;
+                for (a, c) in qs.iter().zip(&ps) {
+                    let a = *a - qc2;
+                    let c = *c - pc;
+                    h2 += glam::Mat3::from_cols(a * c.x, a * c.y, a * c.z);
+                }
+                let mut r2 = h2 * (1.0 / h2.determinant().abs().cbrt().max(1e-9));
+                for _ in 0..30 {
+                    r2 = (r2 + r2.inverse().transpose()) * 0.5;
+                }
+                let res = (qs
+                    .iter()
+                    .zip(&ps)
+                    .map(|(a, c)| (r2.transpose() * (*a - qc2) + pc - *c).length_squared())
+                    .sum::<f32>()
+                    / ps.len() as f32)
+                    .sqrt();
+                let pitch = r2.y_axis.z.atan2(r2.z_axis.z).to_degrees();
+                eprintln!(
+                    "    rear fit: pitch {pitch:.2} deg, centre moved ({:.0},{:.0},{:.0}) mm, own deformation rms {:.1} mm",
+                    (qc2 - pc).x * 1e3,
+                    (qc2 - pc).y * 1e3,
+                    (qc2 - pc).z * 1e3,
+                    res * 1e3
+                );
+            }
+            if st % 10 == 0 {
+                eprintln!(
+                    "  rear t {:5.1} ms: rms {:6.1} mm, mean y {:6.1} z {:6.1} mm",
+                    st as f32 * engine_softbody::explicit_beams::STEP * 1e3,
+                    rms * 1e3,
+                    my / n * 1e3,
+                    mz / n * 1e3
+                );
+            }
+        }
+        eprintln!(
+            "rear body ({} nodes; cabin {}): peak rms {:.1} mm at {:.1} ms, rms over 0-150 ms {:.1} mm",
+            rear.len(),
+            cab.len(),
+            worst.0 * 1e3,
+            worst.1 * 1e3,
+            (acc2 / cnt as f64).sqrt() * 1e3
+        );
         return;
     }
     for f in 0..frames {
@@ -1959,11 +2192,60 @@ fn static_torsion(b: &engine_softbody::authoring::Built) {
             }
         }
     }
+    // BEND=z|y: the rear body (every node behind z 1.2, suspension
+    // included as mass) under 30 g along that axis, reacted by the cabin's
+    // nodes (z 1.5–3.3) in proportion to their mass: the rear's inertial
+    // load in a frontal pulse (z) or its pitch (y).
+    let bend: Option<Vec3> = std::env::var("BEND").ok().map(|a| match a.as_str() {
+        "y" => Vec3::Y,
+        _ => Vec3::Z,
+    });
+    let susp_mass_rear: f32 = (0..n)
+        .filter(|&i| off(i as u32) && sk.nodes[i].p.z < 1.9)
+        .map(|i| sk.nodes[i].mass)
+        .sum();
+    if let Some(dir) = bend {
+        f = vec![Vec3::ZERO; n];
+        let a = 30.0 * 9.81;
+        let rear: Vec<usize> = (0..n)
+            .filter(|&i| !off(i as u32) && sk.nodes[i].p.z < 1.2)
+            .collect();
+        let cab: Vec<usize> = (0..n)
+            .filter(|&i| !off(i as u32) && sk.nodes[i].p.z > 1.5 && sk.nodes[i].p.z < 3.3)
+            .collect();
+        let mr: f32 = rear.iter().map(|&i| sk.nodes[i].mass).sum();
+        // The rear suspension's mass hangs on the rear body's nodes that
+        // carry it (its mounts), spread by their mass here.
+        let total = mr + susp_mass_rear;
+        for &i in &rear {
+            f[i] += dir * a * sk.nodes[i].mass * total / mr;
+        }
+        let mc: f32 = cab.iter().map(|&i| sk.nodes[i].mass).sum();
+        for &i in &cab {
+            f[i] -= dir * a * total * sk.nodes[i].mass / mc;
+        }
+        eprintln!(
+            "bend: rear {:.0} kg (+ rear suspension {:.0} kg) at 30 g along {dir:?}: {:.1} kN",
+            mr,
+            susp_mass_rear,
+            a * total / 1e3
+        );
+    }
     // A weak spring to the ground on every node fixes the rigid modes (the
     // loads balance, so it carries next to nothing).
     let eps = 1.0f32;
+    // BEND: the cabin (z 1.5–3.3) clamped.
+    let clamp: Vec<f32> = (0..n)
+        .map(|i| {
+            if bend.is_some() && !off(i as u32) && sk.nodes[i].p.z > 1.5 && sk.nodes[i].p.z < 3.3 {
+                1e9
+            } else {
+                eps
+            }
+        })
+        .collect();
     let apply = |x: &[Vec3]| -> Vec<Vec3> {
-        let mut y: Vec<Vec3> = x.iter().map(|&v| v * eps).collect();
+        let mut y: Vec<Vec3> = x.iter().zip(&clamp).map(|(&v, &c)| v * c).collect();
         for s in &springs {
             let t = s.k * s.n.dot(x[s.b] - x[s.a]);
             y[s.a] -= s.n * t;
@@ -1973,7 +2255,10 @@ fn static_torsion(b: &engine_softbody::authoring::Built) {
     };
     let dot = |a: &[Vec3], b: &[Vec3]| a.iter().zip(b).map(|(p, q)| p.dot(*q) as f64).sum::<f64>();
     // Block-Jacobi preconditioned conjugate gradients.
-    let mut diag = vec![glam::Mat3::from_diagonal(Vec3::splat(eps)); n];
+    let mut diag: Vec<glam::Mat3> = clamp
+        .iter()
+        .map(|&c| glam::Mat3::from_diagonal(Vec3::splat(c)))
+        .collect();
     for s in &springs {
         let m = glam::Mat3::from_cols(s.n * s.n.x, s.n * s.n.y, s.n * s.n.z) * s.k;
         diag[s.a] += m;
@@ -2025,6 +2310,49 @@ fn static_torsion(b: &engine_softbody::authoring::Built) {
             sk.nodes[at].p,
             -(x[at].x - base) * 1e3,
             -(around.iter().map(|&i| x[i].x).sum::<f32>() / around.len() as f32 - base) * 1e3
+        );
+    }
+    if bend.is_some() {
+        let pick = |lo: f32, hi: f32| -> Vec<usize> {
+            (0..n)
+                .filter(|&i| {
+                    !off(i as u32)
+                        && sk.nodes[i].primary
+                        && sk.nodes[i].p.z >= lo
+                        && sk.nodes[i].p.z < hi
+                })
+                .collect()
+        };
+        let cab = pick(1.5, 3.3);
+        let rear = pick(-1.0, 1.2);
+        let mc = cab.iter().map(|&i| x[i]).sum::<Vec3>() / cab.len() as f32;
+        let mr = rear.iter().map(|&i| x[i]).sum::<Vec3>() / rear.len() as f32;
+        let rms = (rear
+            .iter()
+            .map(|&i| (x[i] - mc).length_squared())
+            .sum::<f32>()
+            / rear.len() as f32)
+            .sqrt();
+        // Pitch of the cabin and the rear (rad, least squares of y against z).
+        let pitch = |v: &[usize]| {
+            let zm = v.iter().map(|&i| sk.nodes[i].p.z).sum::<f32>() / v.len() as f32;
+            let ym = v.iter().map(|&i| x[i].y).sum::<f32>() / v.len() as f32;
+            let (mut sxy, mut sxx) = (0.0f32, 0.0f32);
+            for &i in v {
+                let dz = sk.nodes[i].p.z - zm;
+                sxy += dz * (x[i].y - ym);
+                sxx += dz * dz;
+            }
+            sxy / sxx
+        };
+        eprintln!(
+            "static bend: rear frame moved ({:.2},{:.2},{:.2}) mm against the cabin, rms {:.2} mm; pitch rear − cabin {:.3}° (CG {it}, residual {:.1e})",
+            (mr - mc).x * 1e3,
+            (mr - mc).y * 1e3,
+            (mr - mc).z * 1e3,
+            rms * 1e3,
+            (pitch(&rear) - pitch(&cab)).to_degrees(),
+            (rr / r0).sqrt()
         );
     }
     let ang = |l: &[u32], r: &[u32], d: &[Vec3]| {
@@ -2177,6 +2505,32 @@ fn static_torsion(b: &engine_softbody::authoring::Built) {
                 "    {k:>36}: {nb:5} {:5.1} % {:5.1} %",
                 100.0 * c / ctot,
                 100.0 * e / total
+            );
+        }
+    }
+    if std::env::var("TOPBEAMS").is_ok() {
+        let mut eb: Vec<(f64, usize)> = springs
+            .iter()
+            .enumerate()
+            .map(|(k, s)| {
+                (
+                    0.5 * s.k as f64 * (s.n.dot(x[s.b] - x[s.a]) as f64).powi(2),
+                    k,
+                )
+            })
+            .collect();
+        eb.sort_by(|a, c| c.0.total_cmp(&a.0));
+        for (e, k) in eb.iter().take(30) {
+            let s = &springs[*k];
+            eprintln!(
+                "    {:6.1} J {:>14} {:.2?} — {:>14} {:.2?} k {:.2e} len {:.2}",
+                e,
+                label(s.a),
+                sk.pos(s.a as u32),
+                label(s.b),
+                sk.pos(s.b as u32),
+                s.k,
+                sk.pos(s.a as u32).distance(sk.pos(s.b as u32))
             );
         }
     }

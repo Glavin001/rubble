@@ -398,8 +398,25 @@ pub fn block(
     part: u16,
     mat: Material,
 ) -> Vec<u32> {
-    let cnt = |h: f32| ((2.0 * h / spacing).ceil() as usize).max(1) + 1;
-    let (nx, ny, nz) = (cnt(half.x), cnt(half.y), cnt(half.z));
+    block_spaced(sk, centre, half, Vec3::splat(spacing), part, mat)
+}
+
+/// [`block`] with its own spacing along each axis (a block's faces that
+/// meet a wall or a pole dense, its depth sparse).
+pub fn block_spaced(
+    sk: &mut Skeleton,
+    centre: Vec3,
+    half: Vec3,
+    spacing: Vec3,
+    part: u16,
+    mat: Material,
+) -> Vec<u32> {
+    let cnt = |h: f32, s: f32| ((2.0 * h / s).ceil() as usize).max(1) + 1;
+    let (nx, ny, nz) = (
+        cnt(half.x, spacing.x),
+        cnt(half.y, spacing.y),
+        cnt(half.z, spacing.z),
+    );
     let mut idx = vec![0u32; nx * ny * nz];
     let at = |i: usize, j: usize, k: usize| (k * ny + j) * nx + i;
     for k in 0..nz {

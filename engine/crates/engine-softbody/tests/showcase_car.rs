@@ -50,10 +50,29 @@ fn counts_per_resolution() {
             sk.wheels.len(),
             b.stiffness_scale
         );
-        // At least 1,000 nodes (the showcase's requirement); the collision
-        // skin within the solver's limit.
-        assert!(sk.nodes.len() >= 1000);
+        // The collision skin within the solver's limit.
         assert!(sk.collision.len() <= MAX_COLLISION_TRIANGLES);
+        if res == Resolution::Medium {
+            // BeamNG's node counts and masses (the user's target, 2026-11-05):
+            // about 800–1,000 nodes, several thousand beams, a frame of about
+            // 300–350 heavy nodes (1–4 kg) besides the doors' own frames;
+            // dense node lanes only on the impact faces (catchers, doors).
+            let door = |i: usize| sk.parts[sk.nodes[i].part as usize].starts_with("door");
+            let frame: Vec<usize> = (0..sk.nodes.len())
+                .filter(|&i| sk.nodes[i].primary && !sk.nodes[i].catcher && !door(i))
+                .collect();
+            let st = b.stats();
+            eprintln!(
+                "Medium: frame {} nodes besides the doors' (all {}), median {:.2} kg",
+                frame.len(),
+                st.primary_nodes,
+                st.primary_node_mass
+            );
+            assert!((800..=1000).contains(&sk.nodes.len()));
+            assert!(sk.beams.len() >= 3000);
+            assert!((300..=350).contains(&frame.len()));
+            assert!((1.0..=4.0).contains(&st.primary_node_mass));
+        }
         assert_eq!(sk.wheels.len(), 4);
         assert!(
             sk.nodes.len() > last,
