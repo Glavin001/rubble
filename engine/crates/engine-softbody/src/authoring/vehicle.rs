@@ -312,6 +312,9 @@ pub const RIGIDIFIER_DEPTH_LID: f32 = 0.160;
 /// The depth between a lid's outer panel and its inner (m): the inner
 /// stamping's hat, 60 mm deep (`sedan.rs`'s lid frame section), a Choice.
 pub const LID_DEPTH: f32 = 0.06;
+/// A door's depth between its outer and its inner panel (m): a sedan door's
+/// 100–150 mm at the belt, its least, a Choice.
+pub const DOOR_DEPTH: f32 = 0.10;
 
 pub const PRIMARY_LATCH: Loads = Loads {
     longitudinal: 28_000.0,
@@ -2156,9 +2159,26 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     // area (`panel_sheets`), a Choice for the walls too. The lid's measured
     // total mass is spread over its new nodes as over the rest (by steel).
     let double_skin = one && std::env::var("DOUBLE_SKIN").is_ok_and(|v| v == "1");
+    // The doors' inner panels, measured and not adopted (`DOOR_INNER=1`: at
+    // the step's bound the inner's beams take their rows' share from the
+    // door's members, and p fell 24.5 -> 17.9 kN):
+    // a door is an outer hemmed onto a full-area inner stamping (0.7 mm mild
+    // steel, the panels' gauge here) whose walls stand off it by the door's
+    // depth; its belt and intrusion members ride between them. The same
+    // construction as the lids' double skin, the inner over the whole door
+    // (`DOOR_DEPTH`).
+    let door_inner = one && std::env::var("DOOR_INNER").is_ok_and(|v| v == "1");
+    let mut skins: Vec<(&str, f32, f32)> = Vec::new();
     if double_skin {
+        skins.extend([("bonnet", LID_DEPTH, 0.5), ("bootlid", LID_DEPTH, 0.5)]);
+    }
+    if door_inner {
+        skins
+            .extend(["door_f_l", "door_f_r", "door_r_l", "door_r_r"].map(|d| (d, DOOR_DEPTH, 1.0)));
+    }
+    if !skins.is_empty() {
         let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
-        for name in ["bonnet", "bootlid"] {
+        for (name, depth_in, share) in skins.clone() {
             let Some(pt) = sk.parts.iter().position(|p| p == name) else {
                 continue;
             };
@@ -2217,7 +2237,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             let mat = mats[mats.len() / 2];
             let inner_beam = |sk: &mut Skeleton, x: u32, y: u32| {
                 let l = sk.pos(x).distance(sk.pos(y));
-                let (m, ty) = lid_inner_material(mat, l);
+                let (m, ty) = inner_sheet_material(mat, l, share);
                 if sk.beam(x, y, m) {
                     sk.beams.last_mut().unwrap().tension_yield = ty;
                 }
@@ -2243,11 +2263,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     .unwrap_or(Vec3::Y)
                     .normalize_or_zero();
                 let n = if n.length_squared() > 0.5 { n } else { Vec3::Y };
-                let q = sk.pos(i) - n * LID_DEPTH;
+                let q = sk.pos(i) - n * depth_in;
                 let near = own
                     .iter()
                     .copied()
-                    .filter(|&j| sk.pos(j).distance(q) < 0.5 * LID_DEPTH)
+                    .filter(|&j| sk.pos(j).distance(q) < 0.5 * depth_in)
                     .min_by(|&a, &b| sk.pos(a).distance(q).total_cmp(&sk.pos(b).distance(q)));
                 let j = near.unwrap_or_else(|| sk.node(q, pt));
                 inner.insert(i, j);
@@ -3468,14 +3488,20 @@ pub const SHEET_BUCKLING_K: f32 = 4.0;
 /// stiffness where it must ([`Skeleton::cap_to_bound`]). Damping keeps the
 /// lid material's ratio. Returns the material and the tension yield.
 pub fn lid_inner_material(lid: Material, l: f32) -> (Material, f32) {
+    inner_sheet_material(lid, l, 0.5)
+}
+
+/// [`lid_inner_material`] for an inner of `share` of the panel's area at the
+/// panels' gauge (a door's inner is the whole door's, 1.0).
+pub fn inner_sheet_material(lid: Material, l: f32, share: f32) -> (Material, f32) {
     use super::material::REF_LENGTH;
     let lattice = 3f32.sqrt() / 4.0;
     let t = PANEL_GAUGE;
-    let k = 0.5 * lattice * E_STEEL * t;
+    let k = share * lattice * E_STEEL * t;
     let now = lid.k_at(l);
     let f = k / now.max(1e-3);
-    let deform = 0.5 * lattice * sheet_ultimate_stress(E_STEEL, SHEET_YIELD, t, l) * t * l;
-    let tension = 0.5 * lattice * SHEET_YIELD * t * l;
+    let deform = share * lattice * sheet_ultimate_stress(E_STEEL, SHEET_YIELD, t, l) * t * l;
+    let tension = share * lattice * SHEET_YIELD * t * l;
     let _ = REF_LENGTH;
     (
         Material {

@@ -1731,7 +1731,7 @@ fn g_pulling_a_door_tears_it_off() {
                 &other[..other.len().min(6)]
             );
         }
-        if first.is_none()
+        if (first.is_none() || (off.is_none() && std::env::var("G_AFTER").is_ok()))
             && std::env::var("G_SPLIT").is_ok()
             && ((t / STEP).round() as i64) % 1_000 == 0
         {
