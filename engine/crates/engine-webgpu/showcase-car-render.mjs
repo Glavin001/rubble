@@ -323,14 +323,16 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let nf = normalize(bd.nt * t + bd.nb * b + bd.nn * n + vec3f(1e-9));
   var nrm = nf;
   if ((bd.flags & 1u) != 0u && !rigid) {
-    // Smooth: the rest normal moved by the binding nodes' normal changes. Where
-    // it disagrees with the frame's by more than ~15°, the panel has kinked
-    // here: keep the faceted normal so the crease reads sharp.
+    // Smooth: the rest normal moved by the binding nodes' normal changes
+    // (continuous across binding triangles). Only where it disagrees with the
+    // triangle frame's by more than ~45° (a real fold, a panel bent double)
+    // does the faceted normal take over: at milder creases the frame's
+    // facets would show the binding triangles' edges as a sawtooth.
     let ns = normalize(vec3f(bd.rx, bd.ry, bd.rz)
       + w.x * (nodeN[3u * bd.n0].xyz - restN(bd.n0))
       + w.y * (nodeN[3u * bd.n1].xyz - restN(bd.n1))
       + w.z * (nodeN[3u * bd.n2].xyz - restN(bd.n2)) + vec3f(1e-9));
-    nrm = normalize(mix(ns, nf, 1.0 - smoothstep(0.90, 0.97, dot(ns, nf))));
+    nrm = normalize(mix(ns, nf, 1.0 - smoothstep(0.55, 0.75, dot(ns, nf))));
   }
   // The binding nodes' plastic strain, broken beams and scrape.
   let q0 = nodeN[3u * bd.n0 + 2u]; let q1 = nodeN[3u * bd.n1 + 2u]; let q2 = nodeN[3u * bd.n2 + 2u];
@@ -732,7 +734,7 @@ fn shade(i: VOut, front: bool) -> vec4f {
   // has broken (skin.rs damage units).
   if (shattered(i.mat, i.strain)) { discard; }
   // A thin lip (the field's last 6 %: a few millimetres), not a dark band.
-  if (i.torn > 0.47 && !glassy && i.mat != 6u) {
+  if (i.torn > 0.47 && !glassy && i.mat != 6u && i.wear.x > 0.02) {
     // Torn sheet steel: a bright, rough-polished lip (paint and e-coat
     // ripped off) catching the studio from every side.
     var nn = normalize(i.normal);
@@ -791,7 +793,7 @@ fn shade(i: VOut, front: bool) -> vec4f {
   }
   // Round a tear, the paint has cracked off the stretched steel (grey
   // primer) inside the bare lip: the tear reads as pressed steel, not paper.
-  if (m == 0u && i.torn > 0.40) { m = 254u; albedo = vec3f(0.28, 0.28, 0.27); }
+  if (m == 0u && i.torn > 0.44 && plastic > 0.04) { m = 254u; albedo = vec3f(0.16, 0.16, 0.155); }
 
   // Emissive lamps (dark once their lamp has broken: its lens gone, the
   // reflector and light guides behind it unlit).
@@ -1311,10 +1313,20 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         const floorList = new Uint32Array(Math.max(nm, 3));
         let io = 0, ig = no;
         const fat = [0, nl];
+        // The hidden layers last among the opaque (the cabin, inner stampings
+        // and the bay, behind intact panels and glass): the depth test rejects
+        // them before shading.
+        const HIDDEN = new Set([12, 13, 14, 15, 16, 26, 30, 31]);
+        for (const late of [false, true]) {
+          for (let t = 0; t < tri.length; t += 3) {
+            const k = cl[t / 3];
+            if (k === 3 || HIDDEN.has(v.material[tri[t]]) !== late) continue;
+            ordered.set(tri.subarray(t, t + 3), io); io += 3;
+          }
+        }
         for (let t = 0; t < tri.length; t += 3) {
           const k = cl[t / 3];
           if (k === 3) { ordered.set(tri.subarray(t, t + 3), ig); ig += 3; }
-          else { ordered.set(tri.subarray(t, t + 3), io); io += 3; }
           if (k < 2) { floorList.set(tri.subarray(t, t + 3), fat[k]); fat[k] += 3; }
         }
         const attrs = device.createBuffer({ label: 'showcase-attrs', size: attr.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });

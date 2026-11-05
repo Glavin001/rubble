@@ -636,6 +636,10 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
                 "bonnet" | "deck" => Some((LID_SECTION, true)),
                 _ => None,
             };
+            // The distant level keeps the doors' inner skins (a missing
+            // door shows them) but not the lids' frames (under an intact
+            // bonnet or boot lid; a few pixels at that distance).
+            let inner = inner.filter(|&(_, lattice)| !lattice || super::detail() >= 0.75);
             if let Some((depth, lattice)) = inner {
                 let mesh = inner_panel(m, &fs, level, depth, lattice);
                 if !mesh.is_empty() {
@@ -1591,7 +1595,7 @@ fn roll_mixed(
 /// `INNER_INSET` inside its cut, `depth` under it (normals and winding facing
 /// in), with its shut faces (walls from just under the outer panel's hem
 /// down to the inner skin, facing out of the panel) round every edge. A
-/// `lattice` (bonnet, boot lid) keeps a 9 cm frame round the edge and two
+/// `lattice` (bonnet, boot lid) keeps a 7 cm frame round the edge and two
 /// ribs along it, the rest cut away (the lightening holes).
 pub fn inner_panel(m: &Mesh, fs: &[f32], level: f32, depth: f32, lattice: bool) -> Mesh {
     let lv = level - INNER_INSET;
@@ -1600,9 +1604,9 @@ pub fn inner_panel(m: &Mesh, fs: &[f32], level: f32, depth: f32, lattice: bool) 
             .zip(&m.pos)
             .map(|(&f, p)| {
                 let inside = f - lv;
-                let band = inside.max(-(f - (lv - 0.09)));
+                let band = inside.max(-(f - (lv - 0.07)));
                 let x = p.x.abs();
-                let rib = (x - 0.33).abs().min(x) - 0.03;
+                let rib = (x - 0.33).abs() - 0.025;
                 band.min(inside.max(rib))
             })
             .collect()

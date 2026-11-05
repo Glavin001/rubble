@@ -123,6 +123,7 @@ const play = async (seconds, slow) => {
 const hold = async (seconds) => { for (let f = 0; f < seconds * FPS; f++) { await lab('L.draw()'); await grab(); } };
 const PRESETS = {
   wall56: { cam: 'three' }, pole29: { cam: 'threeFront' }, headon50: { cam: 'side' }, drop15: { cam: 'side' },
+  tbone214: { cam: 'three' }, tbone80: { cam: 'three' }, overlap64: { cam: 'threeFront' }, swipe50: { cam: 'threeFront' },
 };
 const runs = only.length ? only : ['wall56', 'pole29', 'headon50', 'drop15', 'wall56:strain'];
 for (const run of runs) {
