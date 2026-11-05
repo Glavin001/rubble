@@ -1994,3 +1994,322 @@ fn n_wall_matches_the_nhtsa_sedans() {
     }
     assert!(fails.is_empty(), "{fails:#?}");
 }
+
+/// The FMVSS 214 / NCAP side pole (`crash-reference-targets.md` §1, §4.11): a
+/// 254 mm pole, 32 km/h, the car moving at 75° to its axis (driver's side
+/// first, the front leading), the pole's line through the driver's head
+/// (centre of gravity about z 2.55 m, 0.38 m off the centre line). Measured as
+/// NHTSA does: the residual crush of the struck side's exterior at the pole,
+/// against its pre-test line (in the far side's frame), once the car is at
+/// rest. Medium. Ignored: run with `--ignored`.
+#[test]
+#[ignore]
+fn o_side_pole_matches_the_nhtsa_sedans() {
+    let b = built(Resolution::Medium);
+    let kmh: f32 = std::env::var("O_KMH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32.0);
+    let a = 75.0f32.to_radians();
+    let dir = Vec3::new(a.sin(), 0.0, a.cos());
+    let s0 = spawn(&b, Vec3::ZERO, 0.0);
+    let mut s = spawn(&b, dir * kmh / 3.6, 0.0);
+    let r = 0.127;
+    // The head's point in plan view, then along the line of travel until the
+    // pole stands 3 cm off the nearest node.
+    // The B-pillar is at z 2.24 in the definition; the head 0.31 m ahead.
+    let head = Vec3::new(
+        0.38,
+        0.0,
+        group_mean(&s0, &b, &["pillar_b", "pillar_b_r"]).z + (2.55 - 2.24),
+    );
+    let gap = |c: Vec3| {
+        s.nodes
+            .iter()
+            .map(|n| Vec3::new(n.pos.x - c.x, 0.0, n.pos.z - c.z).length())
+            .fold(f32::MAX, f32::min)
+    };
+    let mut t = 0.0f32;
+    while gap(head + dir * t) < r + 0.03 {
+        t += 0.005;
+    }
+    let centre = head + dir * t + Vec3::Y * 2.0;
+    s.shapes.push(StaticShape::cylinder(centre, r, 2.0));
+    run(&mut s, 1.5);
+    // The far side's frame (as the c test).
+    let far = |st: &ExplicitBeams| {
+        let g = &b.groups["sill_r"];
+        let zs: Vec<f32> = g
+            .iter()
+            .map(|&i| b.skeleton.nodes[i as usize].p.z)
+            .collect();
+        let zm = zs.iter().sum::<f32>() / zs.len() as f32;
+        let half = |front: bool| {
+            let v: Vec<Vec3> = g
+                .iter()
+                .zip(&zs)
+                .filter(|(_, &z)| (z > zm) == front)
+                .map(|(&i, _)| st.nodes[i as usize].pos)
+                .collect();
+            v.iter().sum::<Vec3>() / v.len() as f32
+        };
+        let tu = group_mean(st, &b, &["tunnel"]);
+        let (o, x) = (half(false), (half(true) - half(false)).normalize());
+        let up = x.cross(tu - o).normalize();
+        (o, x, up.cross(x))
+    };
+    let (o0, x0, a0) = far(&s0);
+    let (o1, x1, a1) = far(&s);
+    // Struck-side exterior (shell nodes on the left half) near the pole's
+    // line along the car (±0.15 m at spawn), between sill and belt.
+    let zc = (centre - o0).dot(x0);
+    let inward = |i: usize| (s0.nodes[i].pos - o0).dot(a0) - (s.nodes[i].pos - o1).dot(a1);
+    let mut best = (0.0f32, 0usize);
+    for &i in &b.shell.nodes {
+        let i = i as usize;
+        let p = s0.nodes[i].pos;
+        let along = (p - o0).dot(x0);
+        if p.x > 0.3 && (along - zc).abs() < 0.15 && p.y > 0.3 && p.y < 1.2 {
+            let d = inward(i);
+            if d > best.0 {
+                best = (d, i);
+            }
+        }
+    }
+    let _ = x1;
+    let (crush, at) = best;
+    // The structure there too (door beams, sill, B-pillar: frame nodes).
+    let frame = (0..b.skeleton.nodes.len())
+        .filter(|&i| {
+            let p = s0.nodes[i].pos;
+            b.skeleton.nodes[i].primary
+                && p.x > 0.3
+                && ((p - o0).dot(x0) - zc).abs() < 0.15
+                && p.y > 0.25
+                && p.y < 1.2
+        })
+        .map(inward)
+        .fold(0.0f32, f32::max);
+    eprintln!(
+        "(o) side pole: the structure at the pole moved in {:.0} mm",
+        frame * 1e3
+    );
+    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    eprintln!(
+        "(o) side pole {kmh} km/h at 75°: residual crush at the pole {:.0} mm (node {at} {} at y {:.2}); KE left {:.2} kJ of {:.1}",
+        crush * 1e3,
+        b.skeleton.parts[b.skeleton.nodes[at].part as usize],
+        s0.nodes[at].pos.y,
+        ke(&s) / 1e3,
+        0.5 * total * (kmh / 3.6).powi(2) / 1e3
+    );
+    assert!(finite(&s));
+    // §4.11: p10–p90 297–445 mm (hard 169–537).
+    assert!(
+        (0.297..=0.445).contains(&crush),
+        "residual crush at the pole {crush} m"
+    );
+}
+
+/// A quasi-static rig: `held` nodes kept where they are (the rig's
+/// restraint); a rigid ram moved `travel` m along `dir` at `speed` m/s, each
+/// step putting nodes inside it back on its surface (`inside(p, offset)`:
+/// the depth along `dir`, if inside, with the ram moved `offset`). The force
+/// is the momentum it takes out each step. Returns (ram travel, force) every
+/// 5 mm.
+fn ram_rig(
+    s: &mut ExplicitBeams,
+    held: &[usize],
+    dir: Vec3,
+    travel: f32,
+    speed: f32,
+    inside: &dyn Fn(Vec3, f32) -> Option<f32>,
+) -> Vec<(f32, f32)> {
+    let dt = engine_softbody::authoring::skeleton::STEP;
+    let fixed: Vec<Vec3> = held.iter().map(|&i| s.nodes[i].pos).collect();
+    let mut out = Vec::new();
+    let (mut d, mut acc, mut n, mut next) = (0.0f32, 0.0f32, 0usize, 0.005f32);
+    while d < travel {
+        d += speed * dt;
+        s.step();
+        for (k, &i) in held.iter().enumerate() {
+            s.nodes[i].pos = fixed[k];
+            s.nodes[i].vel = Vec3::ZERO;
+        }
+        let mut f = 0.0f32;
+        for nd in s.nodes.iter_mut() {
+            if let Some(depth) = inside(nd.pos, d) {
+                nd.pos += dir * depth;
+                let vn = nd.vel.dot(dir);
+                if vn < speed {
+                    f += nd.mass * (speed - vn) / dt;
+                    nd.vel += dir * (speed - vn);
+                }
+            }
+        }
+        acc += f;
+        n += 1;
+        if d >= next {
+            out.push((d, acc / n as f32));
+            acc = 0.0;
+            n = 0;
+            next += 0.005;
+        }
+    }
+    out
+}
+
+/// FMVSS 214 S6.1 static door crush (`crash-reference-targets.md` §1, §4.12):
+/// a rigid 305 mm cylinder, axis vertical, its bottom 127 mm above the door's
+/// lowest point and its top above the window sill, centred on the front door,
+/// pushed in across the car while the far side is held. The average force
+/// must reach 10,000 N over the first 152 mm, 15,569 N over 305 mm, and a
+/// peak of min(2 × curb weight, 31,138 N) within 457 mm. Medium; the ram moves
+/// at 0.1 m/s (the rule's 12.7 mm/s would take 36 s; the force at 0.1 m/s
+/// is still quasi-static: the door's own inertia is negligible). Ignored:
+/// run with `--ignored`.
+#[test]
+#[ignore]
+fn p_fmvss_214_static_door_crush() {
+    let b = built(Resolution::Medium);
+    let sk = &b.skeleton;
+    let mut s = spawn(&b, Vec3::ZERO, 0.0);
+    run(&mut s, 1.0);
+    let door: Vec<usize> = (0..sk.nodes.len())
+        .filter(|&i| sk.parts[sk.nodes[i].part as usize] == "door_f_l")
+        .collect();
+    let lo = door
+        .iter()
+        .map(|&i| s.nodes[i].pos.y)
+        .fold(f32::MAX, f32::min);
+    let (z0, z1) = door.iter().fold((f32::MAX, f32::MIN), |(a, c), &i| {
+        (a.min(s.nodes[i].pos.z), c.max(s.nodes[i].pos.z))
+    });
+    let zc = 0.5 * (z0 + z1);
+    let outer = door
+        .iter()
+        .map(|&i| s.nodes[i].pos.x)
+        .fold(f32::MIN, f32::max);
+    let r = 0.1525;
+    let (y0, y1) = (lo + 0.127, lo + 0.80);
+    // The far half of the car held (the rig's restraint).
+    let held: Vec<usize> = (0..sk.nodes.len())
+        .filter(|&i| sk.nodes[i].primary && s.nodes[i].pos.x < -0.2)
+        .collect();
+    let cx0 = outer + r + 0.01;
+    let inside = move |p: Vec3, d: f32| -> Option<f32> {
+        if p.y < y0 || p.y > y1 {
+            return None;
+        }
+        let cx = cx0 - d;
+        let dz = p.z - zc;
+        if dz.abs() >= r {
+            return None;
+        }
+        // The ram's leading surface at this z (a circle in plan view).
+        let face = cx - (r * r - dz * dz).sqrt();
+        (p.x > face).then(|| p.x - face)
+    };
+    let curve = ram_rig(&mut s, &held, -Vec3::X, 0.457 + 0.01, 0.1, &inside);
+    let mean_to = |x: f32| {
+        let v: Vec<f32> = curve
+            .iter()
+            .filter(|c| c.0 - 0.01 <= x)
+            .map(|c| c.1)
+            .collect();
+        v.iter().sum::<f32>() / v.len().max(1) as f32
+    };
+    let (f152, f305) = (mean_to(0.152), mean_to(0.305));
+    let peak = curve.iter().map(|c| c.1).fold(0.0f32, f32::max);
+    let curb: f32 = s.nodes.iter().map(|n| n.mass).sum::<f32>() * 9.81;
+    let need = (2.0 * curb).min(31_138.0);
+    eprintln!(
+        "(p) FMVSS 214 door crush: mean {:.1} kN over 152 mm (≥ 10.0), {:.1} kN over 305 mm (≥ 15.6), peak {:.1} kN over 457 mm (≥ {:.1}); curve every 5 cm: {:?} kN",
+        f152 / 1e3,
+        f305 / 1e3,
+        peak / 1e3,
+        need / 1e3,
+        curve
+            .iter()
+            .step_by(10)
+            .map(|c| (c.1 / 1e2).round() / 10.0)
+            .collect::<Vec<_>>()
+    );
+    assert!(finite(&s));
+    let mut fails = Vec::new();
+    if f152 < 10_000.0 {
+        fails.push(format!("initial {f152} N"));
+    }
+    if f305 < 15_569.0 {
+        fails.push(format!("intermediate {f305} N"));
+    }
+    if peak < need {
+        fails.push(format!("peak {peak} N < {need}"));
+    }
+    assert!(fails.is_empty(), "{fails:?}");
+}
+
+/// FMVSS 216a roof crush (`crash-reference-targets.md` §1, §4.13): a rigid
+/// 762 × 1,829 mm platen pitched 5° (front down) and rolled 25° (outboard
+/// down), its forward edge 254 mm ahead of the roof's front, its centre line
+/// over the driver's side roof rail, pushed along its normal while the floor
+/// is held. The force within 127 mm of platen travel must reach 3.0 × the
+/// unloaded weight (IIHS "good": 4.0×). Medium, 0.1 m/s. Ignored: run with
+/// `--ignored`.
+#[test]
+#[ignore]
+fn q_fmvss_216a_roof_crush() {
+    let b = built(Resolution::Medium);
+    let sk = &b.skeleton;
+    let mut s = spawn(&b, Vec3::ZERO, 0.0);
+    run(&mut s, 1.0);
+    let g = |n: &str| group_mean(&s, &b, &[n]);
+    // The roof's front: the windscreen header; its side: the left roof rail.
+    let header = g("header_f");
+    let rail = g("roof_rail");
+    let (pitch, roll) = (5.0f32.to_radians(), 25.0f32.to_radians());
+    // Push direction: down, tipped forward-down by the pitch and outboard-down
+    // by the roll; the platen's axes across and along it.
+    let push = Quat::from_rotation_x(-pitch) * Quat::from_rotation_z(-roll) * -Vec3::Y;
+    let along = (Quat::from_rotation_x(-pitch) * Vec3::Z).normalize();
+    let across = push.cross(along).normalize();
+    let front = header.z + 0.254;
+    let centre_z = front - 0.5 * 1.829;
+    // Start: the platen's plane through the highest node under it.
+    let under = |p: Vec3| {
+        let c = Vec3::new(rail.x, 0.0, centre_z);
+        let q = p - c;
+        (q.dot(across).abs() < 0.381) && ((p.z - centre_z).abs() < 0.9145)
+    };
+    let start = s
+        .nodes
+        .iter()
+        .filter(|n| under(n.pos))
+        .map(|n| n.pos.dot(push))
+        .fold(f32::MAX, f32::min);
+    let held: Vec<usize> = (0..sk.nodes.len())
+        .filter(|&i| sk.nodes[i].primary && s.nodes[i].pos.y < 0.45)
+        .collect();
+    let inside = move |p: Vec3, d: f32| -> Option<f32> {
+        if !under(p) {
+            return None;
+        }
+        let depth = start + d - p.dot(push);
+        (depth > 0.0).then_some(depth)
+    };
+    let curve = ram_rig(&mut s, &held, push, 0.127, 0.1, &inside);
+    let peak = curve.iter().map(|c| c.1).fold(0.0f32, f32::max);
+    let uvw: f32 = s.nodes.iter().map(|n| n.mass).sum::<f32>() * 9.81;
+    eprintln!(
+        "(q) FMVSS 216a roof: peak {:.1} kN within 127 mm = {:.2} × unloaded weight (≥ 3.0; IIHS good ≥ 4.0); curve every 25 mm: {:?} kN",
+        peak / 1e3,
+        peak / uvw,
+        curve
+            .iter()
+            .step_by(5)
+            .map(|c| (c.1 / 1e2).round() / 10.0)
+            .collect::<Vec<_>>()
+    );
+    assert!(finite(&s));
+    assert!(peak >= 3.0 * uvw, "roof {} × weight", peak / uvw);
+}
