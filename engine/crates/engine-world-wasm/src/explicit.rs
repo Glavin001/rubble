@@ -624,6 +624,7 @@ impl ExplicitSim {
             fast_inv_sqrt: flag("fastInvSqrt"),
             drag: flag("drag"),
             turbulence: flag("turbulence") && flag("drag"),
+            ..Default::default()
         };
         let scene = spec.get("scene").and_then(|s| s.as_str()).unwrap_or("idle");
         const SCENES: [&str; 12] = ["idle", "coast", "wall", "arena", "headon", "tbone", "pole", "sidepole", "limbo", "drop", "mdb214", "doorpull"];

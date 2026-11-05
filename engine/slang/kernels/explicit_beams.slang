@@ -117,6 +117,9 @@ static const uint FLAG_CFORCE = 256u; // the contact-force log (jbeam-semantics-
 // The vehicle has tread nodes (NODE_TREAD): its nodes take the shapes path, whose
 // ground contact runs treadGround for them (jbeam-semantics-spec.md §34).
 static const uint FLAG_TREAD = 512u;
+// The BeamNG profile without Rigs of Rods' idle-triangle throttle
+// (jbeam-semantics-spec.md §36): the vehicle's triangles never wait.
+static const uint FLAG_NO_THROTTLE = 1024u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -210,6 +213,7 @@ struct Params
     uint cfNode; // gLists: per node its contact break (break group, 0 none; force N's bits)
     uint cfPend; // gAcc: per group slot its contact-break state (0 idle, 1 set off, 2 done)
     uint treadState; // gBeams: per node its tread contact's (z, depth the step before, 0, 0) (0: no tread nodes)
+    uint selfSplit; // gAcc: per node its self-collision two-body hit count this step (0: no two-body vehicle)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -734,7 +738,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
                           groupCount, hits, false);
         return;
     }
-    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD)) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY)) != 0u)
     {
         nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                          groupCount, hits, false);
@@ -828,7 +832,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
         return nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                  groupOff, groupCount, hits, true);
     }
-    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD)) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY)) != 0u)
     {
         return nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                 groupOff, groupCount, hits, true);
@@ -1027,6 +1031,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
 #endif
     float4 V = gNodes[gi * 3u + 1u];
     cfRoll(gi, groupOff, flagsV);
+    if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
     float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -2076,6 +2081,14 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
 // steps up); one that was tested restarts its wait from its hit (gMisc .w, set by
 // any of its lanes) or counts it up. A triangle that comes off idle waits at most
 // 12 steps and is tested that same step (triangleTest reads it as not waiting).
+// The largest wait triangle gt's throttle may hold: 0 when its vehicle runs without
+// the throttle (FLAG_NO_THROTTLE), else unbounded.
+int throttleCap(uint gt)
+{
+    uint v = gStatic[gP.triBase + gt].w;
+    return (gStatic[v * 4u + 3u].x & FLAG_NO_THROTTLE) != 0u ? 0 : 0x7FFFFFFF;
+}
+
 int triangleFinish(uint gt)
 {
     uint mi = gP.vehicles + gt;
@@ -2094,7 +2107,7 @@ int triangleFinish(uint gt)
             wait = min(idle, 12);
             idle = 0;
         }
-        wait = th.w != 0u ? -20000 : wait + 1;
+        wait = th.w != 0u ? -20000 : min(wait + 1, throttleCap(gt));
     }
     gMisc[mi] = uint4(asuint(wait), asuint(idle), th.z, 0u);
     return wait;
@@ -2136,6 +2149,59 @@ bool triangleHit(TriGeo t, float3 p, float r, out float alpha, out float beta, o
 void hitForce(uint v, uint at, uint key, int3 sum, uint round, float3 origin, float r, uint beamOff, uint groupOff,
               uint groupCount, uint parity);
 
+// Self-collision's two-body rule (jbeam-semantics-spec.md §36; the CPU's
+// apply_two_body_self_hits): vehicle v has it (FLAG_TWO_BODY) and its counts room.
+bool selfTwoBody(uint v)
+{
+    return gP.selfSplit != 0u && (gStatic[v * 4u + 3u].x & FLAG_TWO_BODY) != 0u;
+}
+
+// Node x as k = its hits this step sub-bodies: inverse mass k/m (0 immovable).
+float selfInvMass(uint x)
+{
+    if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return 0.0;
+    return sdiv(float(uint(gAcc[gP.selfSplit + x].load())), gNodes[x * 3u].w);
+}
+
+// Node x's acceleration from its force at the pass's start (0 immovable).
+float3 selfAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return float3(0.0, 0.0, 0.0);
+    float3 f = beamSum(gNodes[x * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + x], beamOff, groupOff, groupCount, parity,
+                       false);
+    return sdiv3(f, gNodes[x * 3u].w);
+}
+
+float selfTerm(float w, float im) { return w > 0.0 ? smul(smul(w, w), im) : 0.0; }
+
+// The two-body force of the hit at record `at` (contacter h): reduced mass from the
+// counts, the cancelled force (F_h/m_h − Σ w·F_k/m_k)·m, then the contact rule with
+// the geometry the finding lane stored. Strict, in the CPU's order.
+float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn,
+                       float pen, float3 vv, float friction, uint beamOff, uint groupOff, uint groupCount,
+                       uint parity)
+{
+    float imt = nf(nf(selfTerm(alpha, selfInvMass(t1)) + selfTerm(beta, selfInvMass(t2)))
+                   + selfTerm(gamma, selfInvMass(t0)));
+    float inv = nf(selfInvMass(h) + imt);
+    float m = inv > 0.0 ? sdiv(1.0, inv) : 0.0;
+    float3 a3 = sadd3(sadd3(sscale(selfAcc(t1, beamOff, groupOff, groupCount, parity), alpha),
+                            sscale(selfAcc(t2, beamOff, groupOff, groupCount, parity), beta)),
+                      sscale(selfAcc(t0, beamOff, groupOff, groupCount, parity), gamma));
+    float3 fh = sscale(ssub3(selfAcc(h, beamOff, groupOff, groupCount, parity), a3), m);
+    return contactForce(fh, vv, m, nn, boxSurface(), pen, friction);
+}
+
+float3 selfTwoBodyForce(uint at, uint h, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    float alpha = asfloat(gNext[at + 1u]);
+    float beta = asfloat(gNext[at + 2u]);
+    return selfTwoBodyCore(h, gNext[at + 8u], gNext[at + 9u], gNext[at + 10u], alpha, beta,
+                           nf(nf(1.0 - alpha) - beta), asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u])),
+                           asfloat(gNext[at + 15u]), asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u])),
+                           asfloat(gNext[at + 20u]), beamOff, groupOff, groupCount, parity);
+}
+
 // Contacter node h against triangle t: when h is within r of the face, the hit is
 // recorded (the throttle's hit flag, and the vehicle's hit list for selfApply).
 void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount,
@@ -2168,6 +2234,16 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
     gsHit = 1u;
     gsUniformHits = 1u;
     uint v = tn.w;
+    // The two-body rule (spec §36): every hit's nodes count it (all of them, even
+    // past the hit list's room, for selfSerial).
+    bool twoBody = selfTwoBody(v);
+    if (twoBody)
+    {
+        gAcc[gP.selfSplit + h].add(1);
+        gAcc[gP.selfSplit + tn.x].add(1);
+        gAcc[gP.selfSplit + tn.y].add(1);
+        gAcc[gP.selfSplit + tn.z].add(1);
+    }
     uint i = uint(gAcc[hitAcc(v)].add(1));
     if (i < HIT_CAP)
     {
@@ -2221,7 +2297,7 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
         // earlier hit on its node. Not while beams of this step are pending (their
         // incidence forces are being rewritten).
         uint prov = 0u;
-        if (gAcc[hitAcc(v) + 1u].load() == 0)
+        if (!twoBody && gAcc[hitAcc(v) + 1u].load() == 0)
         {
             hitForce(v, at, gNext[at], int3(0, 0, 0), 0u, origin, r, beamOff, groupOff, groupCount, parity);
             prov = 1u;
@@ -3444,6 +3520,17 @@ uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r,
         if (gNext[at + 6u] != 0u) continue;
         uint key = gNext[at];
         uint h = nodeOff + (key & 0xFFFFu);
+        if (selfTwoBody(v))
+        {
+            // Two-body (spec §36): no hit reads another's force.
+            float3 f2 = selfTwoBodyForce(at, h, beamOff, groupOff, groupCount, parity);
+            gNext[at + 3u] = asuint(f2.x);
+            gNext[at + 4u] = asuint(f2.y);
+            gNext[at + 5u] = asuint(f2.z);
+            gNext[at + 6u] = round != 0u ? round : SELF_ROUNDS + 1u;
+            selfAddOne(at, key, nodeOff);
+            continue;
+        }
         int3 sum = int3(0, 0, 0);
         bool ready = true;
         for (uint j = 0u, jStop = EB_END(j, count, 1u); j < jStop; j++)
@@ -3562,10 +3649,22 @@ void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uin
             float4 P0 = gNodes[tn.x * 3u];
             float4 P1 = gNodes[tn.y * 3u];
             float4 P2 = gNodes[tn.z * 3u];
-            float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff, groupCount,
-                                parity, false);
-            float3 f = hitContact(V, P, P0, P1, P2, gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz,
-                                  gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, delta, nn, fb, accForce(h), r);
+            float3 f;
+            if (selfTwoBody(v))
+            {
+                float3 vv = ssub3(V.xyz, sadd3(sadd3(sscale(gNodes[tn.y * 3u + 1u].xyz, alpha),
+                                                     sscale(gNodes[tn.z * 3u + 1u].xyz, beta)),
+                                               sscale(gNodes[tn.x * 3u + 1u].xyz, gamma)));
+                f = selfTwoBodyCore(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, nf(r - delta), vv, V.w, beamOff,
+                                    groupOff, groupCount, parity);
+            }
+            else
+            {
+                float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff,
+                                    groupCount, parity, false);
+                f = hitContact(V, P, P0, P1, P2, gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz,
+                               gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, delta, nn, fb, accForce(h), r);
+            }
             accAdd(h, f);
             accAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
             accAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
@@ -5805,7 +5904,7 @@ void vvThrottleEnd(uint gt)
     gNext[mark + 1u] = 0u;
     int cwait = asint(c.x);
     if (hit) cwait = 0;
-    else if (!had) cwait = cwait + 1;
+    else if (!had) cwait = min(cwait + 1, throttleCap(gt));
     gMisc[gP.vvTri + gt] = uint4(asuint(cwait), c.y, 0u, 0u);
 }
 
@@ -5945,7 +6044,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             // no candidate: its throttle update at once, no tests.
             if (!vvNearBox(ra1.x + t, va, range, plo, phi))
             {
-                gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(cwait + 1), 0u, 0u, 0u);
+                gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(min(cwait + 1, throttleCap(ra1.x + t))), 0u, 0u, 0u);
                 continue;
             }
             gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(cwait), 0u, 0u, 0u);
@@ -6208,7 +6307,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             }
             if (!vvNearBox(gt, va, range, plo, phi))
             {
-                gMisc[gP.vvTri + gt] = uint4(fix ? 0u : asuint(cwait + 1), 0u, 0u, 0u);
+                gMisc[gP.vvTri + gt] = uint4(fix ? 0u : asuint(min(cwait + 1, throttleCap(gt))), 0u, 0u, 0u);
                 continue;
             }
             gMisc[gP.vvTri + gt] = uint4(asuint(cwait), 0u, 0u, 0u);

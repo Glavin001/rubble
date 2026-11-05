@@ -28,7 +28,10 @@ impl Sim for Gpu {
         self.g.velocities().remove(0)
     }
     fn beams(&self) -> Vec<(bool, f32)> {
-        self.g.beams()[0].iter().map(|b| (b.broken, b.rest)).collect()
+        self.g.beams()[0]
+            .iter()
+            .map(|b| (b.broken, b.rest))
+            .collect()
     }
     fn set_vel(&mut self, node: u32, v: Vec3) {
         self.g.set_velocity(0, node, v);
@@ -63,8 +66,8 @@ fn beam_frequency_and_damping_gpu() {
     for zeta in [0.0, BX_ZETA_BODY, BX_ZETA_LID] {
         let o = oscillator(&gpu, SKIN_K, zeta, SKIN_M).unwrap();
         let shift = (o.omega_discrete / o.omega_continuous - 1.0).abs();
-        let mut pass =
-            rel(o.omega, o.omega_discrete) < 1e-3 && rel(o.omega, o.omega_continuous) < shift + 1e-3;
+        let mut pass = rel(o.omega, o.omega_discrete) < 1e-3
+            && rel(o.omega, o.omega_continuous) < shift + 1e-3;
         if zeta > 0.0 {
             pass &= rel(o.sigma, o.sigma_discrete) < 0.01;
         }
@@ -92,7 +95,12 @@ fn beam_yield_and_break_gpu() {
         row(
             &format!("yield/set/unload {}", if jbeam { "JBeam" } else { "RoR" }),
             "GPU",
-            format!("Fy {:.1} N, set {:.3} mm, slope {:.0}", y.yield_force, y.set * 1e3, y.unload_slope),
+            format!(
+                "Fy {:.1} N, set {:.3} mm, slope {:.0}",
+                y.yield_force,
+                y.set * 1e3,
+                y.unload_slope
+            ),
             format!("1000 N, {:.3} mm, 1e5", y.set_closed * 1e3),
             pass,
         );
@@ -102,7 +110,14 @@ fn beam_yield_and_break_gpu() {
         let (x, f, xc, fc) = break_force(&gpu, ductile).unwrap();
         let pass = rel(x, xc) < 0.01 && rel(f, fc) < 0.01;
         row(
-            &format!("break {}", if ductile { "ductile RoR" } else { "brittle JBeam" }),
+            &format!(
+                "break {}",
+                if ductile {
+                    "ductile RoR"
+                } else {
+                    "brittle JBeam"
+                }
+            ),
             "GPU",
             format!("x {:.3} mm, F {:.0} N", x * 1e3, f),
             format!("x {:.3} mm, F {:.0} N", xc * 1e3, fc),
@@ -136,7 +151,13 @@ fn bar_wave_and_ripple_gpu() {
     }
     let (c, c0) = wave_speed(&gpu, SKIN_K, SKIN_M, 0.21).unwrap();
     let pass = rel(c, c0) < 0.02;
-    row("bar wave speed", "GPU", format!("{c:.1} m/s"), format!("{c0:.1} m/s"), pass);
+    row(
+        "bar wave speed",
+        "GPU",
+        format!("{c:.1} m/s"),
+        format!("{c0:.1} m/s"),
+        pass,
+    );
     assert!(pass);
     let [w, wd, s, sd, _, _] = chain_mode(&gpu, 4, SKIN_K, BX_ZETA_BODY, SKIN_M, 0.21).unwrap();
     let pass = rel(w, wd) < 5e-3 && rel(s, sd) < 0.03;
@@ -165,7 +186,13 @@ fn ground_contact_gpu() {
         }
     }
     let pass = wd <= 1.0 && we <= 0.2 + 1e-4;
-    row("ground: depth / v·h, rebound / v", "GPU", format!("{wd:.3}, {we:.4}"), "≤ 1, ≤ 0.2".into(), pass);
+    row(
+        "ground: depth / v·h, rebound / v",
+        "GPU",
+        format!("{wd:.3}, {we:.4}"),
+        "≤ 1, ≤ 0.2".into(),
+        pass,
+    );
     assert!(pass);
 }
 
