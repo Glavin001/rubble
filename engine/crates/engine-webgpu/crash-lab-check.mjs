@@ -179,6 +179,10 @@ const PRESET_RUNS = {
   tbone80: ['preset=tbone80&slow=20', 0.2, 'three', [-5, 23, 127]],
   overlap64: ['preset=overlap64&slow=20', 0.2, 'threeFront', [-5, 23, 127]],
   swipe50: ['preset=swipe50&slow=20', 0.1, 'threeFront', [-5, 23, 127]],
+  // FMVSS 214's moving barrier (vehicle 1, drawn by the triangle path) and the
+  // door pull (the rig node is the car's last node, its cables beams).
+  mdb214: ['preset=mdb214&slow=20', 0.05, 'three', [-5, 23, 127]],
+  doorpull: ['preset=doorpull&slow=20', 0.0, 'threeFront', [-5, 250, 700]],
 };
 const RUNS = Object.fromEntries(Object.entries(PRESET_RUNS).map(([name, [query, earliest, cam, shots]]) => [name, async () => {
   await open(query);
@@ -282,6 +286,7 @@ for (const name of names) {
   const err = await pageError().catch(() => '');
   if (err) res = { ok: false, msg: `${res.msg} · page error: ${err}` };
   if (empty.length) res = { ok: false, msg: `${res.msg} · empty frames: ${empty.join(', ')}` };
+  if (!res.ok && pageErrors.length) res.msg += ` · console: ${pageErrors.slice(0, 3).map((e) => String(e).split('\n')[0]).join(' | ')}`;
   const secs = ((performance.now() - t0) / 1000).toFixed(1);
   console.log(`${res.ok ? '✓' : '✗'} ${CAR} ${name}: ${res.msg} (${secs} s)`);
   report.push({ car: CAR, name, ...res, seconds: Number(secs) });
