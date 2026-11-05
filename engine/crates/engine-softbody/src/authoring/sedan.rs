@@ -118,10 +118,12 @@ pub fn roof(mut m: MemberSpec) -> MemberSpec {
 /// The roof members' threshold scale.
 pub const ROOF: f32 = 1.2;
 
-/// Yield force of the roof's lumped panels (N): with the roof members, the
-/// roof carries 4.8 × the unloaded weight within 127 mm of an FMVSS 216a
-/// platen (compact sedans measure 4.5–5.3 ×; `crash-reference-targets.md`).
-pub const ROOF_YIELD: f32 = 2.0e4;
+/// Yield force of the roof's lumped panels (N): with the roof members and
+/// the B-pillars at their section's strength ([`side_sections`]), the roof
+/// carries 5.1 × the unloaded weight within 127 mm of an FMVSS 216a platen
+/// (compact sedans measure 4.48–5.32 ×; `crash-reference-targets.md`). At
+/// 20 kN it carried 5.38 ×.
+pub const ROOF_YIELD: f32 = 1.7e4;
 
 /// Yield force of the cabin's door-ring panels (N): strong in a
 /// 56 km/h crash, crushed by a roll-over.
@@ -448,6 +450,77 @@ fn restyle(mut d: VehicleDef) -> VehicleDef {
     l.mirror = restyle_side(l.mirror, &pr);
     l.plate_y[0] -= STANCE;
     d
+}
+
+/// A thin-walled closed section (a box, or a hat closed by its panel) of a
+/// member, for its lateral plastic collapse: `depth` along the load (the
+/// lever), `width` across it, wall `t` (m), the steel's yield stress
+/// `sigma_y` (Pa).
+#[derive(Clone, Copy, Debug)]
+pub struct Section {
+    pub depth: f32,
+    pub width: f32,
+    pub t: f32,
+    pub sigma_y: f32,
+}
+
+impl Section {
+    /// Plastic section modulus (m³): the two flanges (t·width at ±depth/2)
+    /// and the two webs (t·depth²/4 each).
+    pub fn z_p(&self) -> f32 {
+        self.t * (self.width * self.depth + 0.5 * self.depth * self.depth)
+    }
+
+    /// Plastic moment M_p = σ_y·Z_p (N·m).
+    pub fn m_p(&self) -> f32 {
+        self.sigma_y * self.z_p()
+    }
+}
+
+/// The members that carry a side impact in bending (or end-on), their real
+/// sections and the truss's lever for that bending: `(name, section, lever
+/// (m), chords a side)`. A box truss carries M = 2·T·lever, a ladder
+/// M = T·lever, so each member's chords yield at T = M_p / (chords · lever)
+/// and the truss's plastic moment is the section's. (End-on, a floor cross
+/// member's two chords then carry 2·M_p/depth, within a third of its
+/// section's squash load A·σ_y.) `vehicle-authoring.md` (Lateral strength)
+/// tabulates them.
+pub fn side_sections() -> Vec<(&'static str, Section, f32, f32)> {
+    // Grades' minimum yield stresses (Pa).
+    let (dp980, phs, dp780, dp600, hsla340) = (590e6, 1100e6, 440e6, 330e6, 340e6);
+    let sec = |depth: f32, width: f32, t: f32, sigma_y: f32| Section {
+        depth,
+        width,
+        t,
+        sigma_y,
+    };
+    vec![
+        // Rocker: inner, outer and reinforcement, 100 wide × 140 tall, 1.8 mm.
+        ("sill", sec(0.10, 0.14, 0.0018, dp980), 0.18, 2.0),
+        // B-pillar: hot-stamped hat closed by its outer, 70 deep × 120 wide.
+        ("pillar_b", sec(0.07, 0.12, 0.0018, phs), 0.14, 2.0),
+        // Tunnel: hat 200 wide × 150 tall closed by the floor, 1.2 mm.
+        ("tunnel", sec(0.20, 0.15, 0.0012, dp600), 0.16, 2.0),
+        // Front seat cross members: hats 80 × 60 closed by the floor.
+        ("floor_x1", sec(0.08, 0.06, 0.0014, dp780), 0.08, 1.0),
+        ("floor_x2", sec(0.08, 0.06, 0.0016, dp780), 0.08, 1.0),
+        // Rear seat and kick-up cross members: hats 100 × 60, 1.2 mm.
+        ("floor_x3", sec(0.10, 0.06, 0.0012, hsla340), 0.10, 1.0),
+        ("kickup", sec(0.10, 0.06, 0.0012, hsla340), 0.10, 1.0),
+    ]
+}
+
+/// Sets each [`side_sections`] member's thresholds from its section's
+/// plastic moment.
+fn sectioned(members: &mut [MemberSpec], grades: &Grades) {
+    for (name, sec, lever, sides) in side_sections() {
+        for m in members.iter_mut().filter(|m| m.name == name) {
+            let chord = sec.m_p() / (sides * lever);
+            let s = chord / grades.get(&m.grade).unwrap().deform;
+            m.scale = [s, s];
+            m.knee = None;
+        }
+    }
 }
 
 pub fn sedan() -> VehicleDef {
@@ -1203,6 +1276,9 @@ pub fn sedan() -> VehicleDef {
             0.28,
         )),
     ];
+    // The side's load path at its sections' strength.
+    let mut members = members;
+    sectioned(&mut members, &Grades::default());
     let blocks = vec![
         BlockSpec {
             name: "powertrain".into(),

@@ -132,6 +132,48 @@ Blocks (`BlockSpec`) are rigid lattices with their mass; `bear` (m) adds
 compression-only beams from the block's rear and side faces to the structure behind
 and beside it (an engine driven back meets the firewall and tunnel).
 
+## Lateral strength (sections)
+
+The members that carry a side impact take their thresholds from a real section
+(`sedan::side_sections`), not a tuned scale. For a thin-walled closed section
+(a box, or a hat closed by its panel) of depth d along the load, width w and
+wall t, the plastic section modulus is Z_p = t·(w·d + d²/2), and M_p = σ_y·Z_p.
+The truss carries a moment through its chords: a box truss M = 2·T·lever (two
+chords a side), a ladder M = T·lever. Each member's chords therefore yield at
+T = M_p / (chords · lever), so the truss's plastic moment is the section's. A
+centre load on a span L collapses at 4·M_p/L when its supports are simply
+supported, or 8·M_p/L with fixed ends; both are given below. The yield stresses
+are the grades' minimum Rp0.2: EN 10338 for the dual-phase steels, EN 10268 for
+CR340LA, and about 1,100 MPa for hot-stamped 22MnB5. The sections are typical
+of compact-sedan bodies, not one car's drawings.
+
+| Member | d × w × t (mm) | Grade, σ_y (MPa) | Z_p (cm³) | M_p (kN·m) | Span L (m) | 4M_p/L (kN) | 8M_p/L (kN) | Chord yield T (kN) |
+|---|---|---|---|---|---|---|---|---|
+| `sill` (rocker: inner, outer, reinforcement) | 100 × 140 × 1.8 | DP980 (CR590Y980T-DP), 590 | 34.2 | 20.2 | 0.56 | 144 | 288 | 56.1 |
+| `pillar_b` (hat closed by its outer) | 70 × 120 × 1.8 | PHS1500 (22MnB5, hot-stamped), 1,100 | 19.5 | 21.5 | 1.05 | 82 | 164 | 76.7 |
+| `tunnel` (hat closed by the floor) | 200 × 150 × 1.2 | DP600 (CR330Y590T-DP), 330 | 60.0 | 19.8 | 0.56 | 141 | 283 | 61.9 |
+| `floor_x1` (front seat cross member) | 80 × 60 × 1.4 | DP780 (CR440Y780T-DP), 440 | 11.2 | 4.9 | 0.79 | 25 | 50 | 61.6 |
+| `floor_x2` (B-pillar cross member) | 80 × 60 × 1.6 | DP780 (CR440Y780T-DP), 440 | 12.8 | 5.6 | 0.79 | 29 | 57 | 70.4 |
+| `floor_x3` (rear seat cross member) | 100 × 60 × 1.2 | HSLA (CR340LA), 340 | 13.2 | 4.5 | 0.79 | 23 | 45 | 44.9 |
+| `kickup` | 100 × 60 × 1.2 | HSLA (CR340LA), 340 | 13.2 | 4.5 | 0.79 | 23 | 45 | 44.9 |
+
+The span is between the member's supports along the pole's line: for the sill
+and tunnel the floor cross members, for the B-pillar the sill and roof rail,
+for a floor cross member the sill and tunnel. The floor cross members are hit
+end-on by a side pole; their two chords then carry 2·M_p/d, within a third
+of the section's squash load A·σ_y. The firewall's cross member stays at its
+NCAP-measured strength (`FIREWALL`), and the roof's lumped panels came down
+from 20 to 17 kN (`ROOF_YIELD`), because the PHS B-pillar now carries more of
+the FMVSS 216a platen.
+
+With these sections, the NCAP side pole's residual crush at the pole fell from
+a median of 444 mm to 375–396 mm (two builds; single runs 362–417), against
+the measured median 356 (p10–p90 297–445). The 45 and
+60 km/h side pole sweeps did not change. There the pole's force holds about
+110–120 kN with or without the sections: a sparse body's nodes slide round
+the pole (node-only contact), so the force is not limited by the members'
+plastic collapse loads above.
+
 ## Suspension corners
 
 A corner (`members::corner`) is a five-node knuckle (the axle nodes, the upper
