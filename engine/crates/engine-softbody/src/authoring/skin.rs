@@ -206,6 +206,25 @@ pub struct ShowcaseVisual {
     /// vertex's (sampled at its `uvs`, v up).
     pub textures: Vec<String>,
     pub tex: Vec<u16>,
+    /// Per vertex riding a shut line's skin triangle (nodes of two parts):
+    /// its index + 1 into the `alt_*` bindings (0 or absent: none), its own
+    /// part's frame, computed at build time. It switches to it, for good, the
+    /// moment that triangle dies (a beam in [`Self::skin_death`] breaks) or
+    /// tears: a detached door or bonnet takes its edge with it instead of
+    /// drawing a ribbon of the body's skin.
+    pub alt: Vec<u32>,
+    pub alt_nodes: Vec<[u32; 3]>,
+    pub alt_coords: Vec<[f32; 3]>,
+    pub alt_normal: Vec<[f32; 3]>,
+    pub alt_rest: Vec<[f32; 2]>,
+    /// Per alt binding the frame it replaces (an index into `skin_death`).
+    pub alt_tri: Vec<u32>,
+    /// Per frame across a part border (the skeleton's skin triangles, in
+    /// order, then the node frames with a node across one) the solver beams
+    /// whose break kills it (`u32::MAX` none): its collision triangle's
+    /// break list (spec §18: its sides' and its break group's beams), else
+    /// its sides' beams across the part border.
+    pub skin_death: Vec<[u32; 4]>,
 }
 
 /// Surface material of a solver node (`ShowcaseVisual::node_material`).
@@ -608,6 +627,35 @@ impl PartBinders {
     /// The frame score of triangle `t` for `p` (lower is better), and its
     /// distance from `p`; `None` for a sliver or a frame with fewer than two
     /// of the part's own nodes.
+    /// [`Self::bind`] on the part's own nodes only (all three): the frame a
+    /// shut line's vertex falls back to when the parts separate.
+    fn bind_own(&self, part: u16, p: Vec3, normal: Vec3) -> Option<Bound> {
+        let mut cands: Vec<[u32; 3]> = Vec::new();
+        if let Some(b) = self.tris.get(&part).and_then(|b| b.bind_d(p, normal)) {
+            cands.push(b.0);
+        }
+        if let Some(g) = self.frames.get(&part) {
+            let near: Vec<u32> = g
+                .nearest(&self.pos, p)
+                .into_iter()
+                .filter(|&i| self.part_of[i as usize] == part)
+                .collect();
+            triples(&near, &mut cands);
+        }
+        best_frame(
+            &self.pos,
+            &cands,
+            p,
+            normal,
+            |t| {
+                (t.iter().all(|&i| self.part_of[i as usize] == part))
+                    .then(|| self.score(part, t, p, normal))
+                    .flatten()
+            },
+            |t| self.is_skin(t),
+        )
+    }
+
     fn score(&self, part: u16, t: [u32; 3], p: Vec3, normal: Vec3) -> Option<(f32, f32)> {
         let own = t
             .iter()
@@ -652,6 +700,15 @@ impl PartBinders {
         let mut s = t;
         s.sort_unstable();
         self.skin_set.contains(&s)
+    }
+
+    /// Of triangle `t`'s nodes' parts, the one with the most barycentric
+    /// weight at coordinates `c`.
+    fn major(&self, t: [u32; 3], c: [f32; 3]) -> u16 {
+        self.by_weight(t, c)
+            .into_iter()
+            .find(|e| e.0 != u16::MAX)
+            .map_or(u16::MAX, |e| e.0)
     }
 
     fn by_weight(&self, t: [u32; 3], c: [f32; 3]) -> Vec<(u16, f32)> {
@@ -888,6 +945,82 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         0.15,
     );
     let pb = PartBinders::new(sk, &by_part, &node_pos);
+    // Per skin triangle the beams whose break kills it (`skin_death`).
+    let mut skin_index: HashMap<[u32; 3], u32> = sk
+        .skin
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut u = *t;
+            u.sort_unstable();
+            (u, i as u32)
+        })
+        .collect();
+    let mut coll: HashMap<[u32; 3], usize> = HashMap::new();
+    for (i, t) in sim.triangles.iter().enumerate() {
+        let mut u = t.nodes;
+        u.sort_unstable();
+        coll.insert(u, i);
+    }
+    let mut side: HashMap<(u32, u32), u32> = HashMap::new();
+    for (i, b) in sim.beams.iter().enumerate() {
+        side.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(i as u32);
+    }
+    // Per part, one solver beam of each of its hinge and latch groups (up
+    // to four): its joint to the car.
+    let mut joint: HashMap<u16, Vec<u32>> = HashMap::new();
+    for h in &built.hardware {
+        if let Some(bm) = h.beams.first().and_then(|&j| sk.beams.get(j)) {
+            if let Some(&j) = side.get(&(bm.a.min(bm.b), bm.a.max(bm.b))) {
+                let e = joint.entry(h.part).or_default();
+                if e.len() < 4 {
+                    e.push(j);
+                }
+            }
+        }
+    }
+    // A frame's death list: its collision triangle's break list (spec §18),
+    // else its sides' beams across the part border, else (a node frame
+    // across a shut line with no beam along it) its parts' joint: the first
+    // hinge or latch to break.
+    let side_death = |t: [u32; 3]| -> [u32; 4] {
+        let part_of = |i: u32| sk.nodes.get(i as usize).map(|n| n.part);
+        let mut u = t;
+        u.sort_unstable();
+        if let Some(l) = coll.get(&u).and_then(|&ci| sim.tri_breaks.get(ci)) {
+            if l.iter().any(|&j| j != u32::MAX) {
+                return *l;
+            }
+        }
+        let mut l = [u32::MAX; 4];
+        for (k, (a, b)) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]
+            .into_iter()
+            .enumerate()
+        {
+            if part_of(a) != part_of(b) {
+                if let Some(&j) = side.get(&(a.min(b), a.max(b))) {
+                    l[k] = j;
+                }
+            }
+        }
+        if l.iter().all(|&j| j == u32::MAX) {
+            if let Some(js) = t
+                .iter()
+                .filter_map(|&i| part_of(i))
+                .find_map(|p| joint.get(&p))
+            {
+                for (k, &j) in js.iter().enumerate() {
+                    l[k] = j;
+                }
+            }
+        }
+        l
+    };
+    let mut death: Vec<[u32; 4]> = sk.skin.iter().map(|&t| side_death(t)).collect();
+    let is_shut = |t: [u32; 3]| {
+        let ps = t.map(|i| sk.nodes.get(i as usize).map(|n| n.part));
+        ps[0] != ps[1] || ps[1] != ps[2]
+    };
     // The exterior: a vertex within the contact band of the skin rides the
     // skin triangle under it, whatever its parts: that is the physics
     // surface there (a shut line's triangles included, which the physics
@@ -1190,6 +1323,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 out.ao.push(m.ao[k].clamp(0.0, 1.0));
                 out.smooth.push(0);
                 out.rigid.push(1);
+                out.alt.push(0);
             }
             out.indices.extend(m.idx.iter().map(|i| i + first));
             out.pieces.push((piece.name.clone(), first, m.len() as u32));
@@ -1216,7 +1350,14 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             } else if let Some((pt, b)) = part.and_then(|pt| {
                 // On the collision skin: ride the skin triangle under it (an
                 // inner stamping: under its outer point).
-                on_skin_of(inset, p, n).map(|b| (pt, b))
+                // Labelled with its part when the triangle has one of the
+                // part's nodes (a shut line's: its own-part frame is its
+                // fallback, `alt`), else with the triangle's part: the
+                // piece is cut there and parts with it.
+                on_skin_of(inset, p, n).map(|b| {
+                    let has = b.0.iter().any(|&i| pb.part_of[i as usize] == pt);
+                    (if has { pt } else { pb.major(b.0, b.1) }, b)
+                })
             }) {
                 far = far_of(far, b.3, p, pt);
                 let (c, nl) = frame_coords(&node_pos, b.0, p, n);
@@ -1323,7 +1464,9 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                         (m.pos[k], m.nrm[k])
                     };
                     // On the skin it keeps the skin triangle under it.
-                    let r = if on_skin_of(inset, m.pos[k], m.nrm[k]).is_some() {
+                    let r = if on_skin_of(inset, m.pos[k], m.nrm[k]).is_some()
+                        && vb[k].0 .0.iter().any(|&i| pb.part_of[i as usize] == tp)
+                    {
                         Some((vb[k].0, 0.0))
                     } else {
                         pb.bind(tp, pp, np).map(|(t, _, _, d)| {
@@ -1367,9 +1510,39 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             }
         }
         let all = (0..m.len())
-            .map(|k| (k, vb[k].0))
-            .chain(extra.iter().map(|&(k, b, _)| (k, b)));
-        for (k, (t, c, nl)) in all {
+            .map(|k| (k, vb[k].0, vb[k].1))
+            .chain(extra.iter().map(|&(k, b, tp)| (k, b, tp)));
+        for (k, (t, c, nl), tp) in all {
+            // On a shut line's skin triangle: its own part's frame too.
+            let mut alt = 0;
+            let mut u = t;
+            u.sort_unstable();
+            // A frame across a part border (a shut line's skin triangle, or
+            // a node frame with a node across it): its death list's index.
+            let si = is_shut(t).then(|| {
+                *skin_index.entry(u).or_insert_with(|| {
+                    death.push(side_death(t));
+                    death.len() as u32 - 1
+                })
+            });
+            if let Some(si) = si {
+                let pt = if tp != u16::MAX { Some(tp) } else { part };
+                // Within BIND_MAX only: a one-row part (a bumper's face) has
+                // no frame of its own there, and its shut line tears instead.
+                if let Some((at, _, _, _)) = pt
+                    .and_then(|pt| pb.bind_own(pt, m.pos[k], m.nrm[k]))
+                    .filter(|b| b.3 <= BIND_MAX)
+                {
+                    let (ac2, an2) = frame_coords(&node_pos, at, m.pos[k], m.nrm[k]);
+                    out.alt_nodes.push(at);
+                    out.alt_coords.push(ac2);
+                    out.alt_normal.push(an2);
+                    out.alt_rest.push(rest_edges(&node_pos, at));
+                    out.alt_tri.push(si);
+                    alt = out.alt_nodes.len() as u32;
+                }
+            }
+            out.alt.push(alt);
             out.bind_nodes.push(t);
             out.bind_coords.push(c);
             out.bind_normal.push(nl);
@@ -1415,6 +1588,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             unbound.join(", ")
         ));
     }
+    out.skin_death = death;
     // Node normals for smooth shading.
     out.normal_tris = sk.skin.clone();
     let nn = node_pos.len();
@@ -1994,19 +2168,67 @@ pub fn deform_with(
     nodes: &[Vec3],
     units: Option<&[UnitState]>,
 ) -> (Vec<Vec3>, Vec<Vec3>) {
+    deform_beams(v, nodes, units, None)
+}
+
+/// Whether vertex `i` rides its own part's frame instead of its shut line's
+/// skin triangle: that triangle has died (a beam of its [`ShowcaseVisual::skin_death`]
+/// broke) or torn. The renderer's `skin()` is the same.
+pub fn on_alt(
+    v: &ShowcaseVisual,
+    i: usize,
+    nodes: &[Vec3],
+    beams: Option<&[BeamState]>,
+) -> Option<usize> {
+    let a = *v.alt.get(i)?;
+    if a == 0 {
+        return None;
+    }
+    let a = a as usize - 1;
+    let dead = beams.is_some_and(|bs| {
+        v.skin_death[v.alt_tri[a] as usize]
+            .iter()
+            .any(|&j| j != u32::MAX && bs.get(j as usize).is_some_and(|b| b.broken))
+    });
+    let [n0, n1, n2] = v.bind_nodes[i].map(|k| nodes[k as usize]);
+    let [r1, r2] = v.bind_rest[i];
+    let torn = (n1 - n0).length() > TEAR_STRETCH * r1 || (n2 - n0).length() > TEAR_STRETCH * r2;
+    (dead || torn).then_some(a)
+}
+
+/// [`deform_with`], with the solver's beams (shut-line vertices switch to
+/// their own part's frame once their triangle dies: [`on_alt`]).
+pub fn deform_beams(
+    v: &ShowcaseVisual,
+    nodes: &[Vec3],
+    units: Option<&[UnitState]>,
+    beams: Option<&[BeamState]>,
+) -> (Vec<Vec3>, Vec<Vec3>) {
     let now_pl = node_planes(v, nodes);
     let rest: Vec<Vec3> = v.node_rest.iter().map(|q| Vec3::from_array(*q)).collect();
     let rest_pl = node_planes(v, &rest);
     let mut pos = Vec::with_capacity(v.positions.len());
     let mut nrm = Vec::with_capacity(v.positions.len());
     for i in 0..v.positions.len() {
-        let [a, b, c] = v.bind_nodes[i];
+        let alt = on_alt(v, i, nodes, beams);
+        let ([a, b, c], [al, be, h], [r1, r2], bn) = match alt {
+            Some(k) => (
+                v.alt_nodes[k],
+                v.alt_coords[k],
+                v.alt_rest[k],
+                v.alt_normal[k],
+            ),
+            None => (
+                v.bind_nodes[i],
+                v.bind_coords[i],
+                v.bind_rest[i],
+                v.bind_normal[i],
+            ),
+        };
         let (p0, p1, p2) = (nodes[a as usize], nodes[b as usize], nodes[c as usize]);
         let e1 = p1 - p0;
         let e2 = p2 - p0;
         let n = e1.cross(e2).normalize_or_zero();
-        let [al, be, h] = v.bind_coords[i];
-        let [r1, r2] = v.bind_rest[i];
         let t = e1.normalize_or_zero();
         let bb = n.cross(t);
         let rigid = v.rigid.get(i).copied().unwrap_or(0) == 1;
@@ -2027,7 +2249,7 @@ pub fn deform_with(
         } else {
             pos.push(p0 + e1 * al + e2 * be + n * h);
         }
-        let [x, y, z] = v.bind_normal[i];
+        let [x, y, z] = bn;
         let nf = (t * x + bb * y + n * z).normalize_or_zero();
         let ids = [a as usize, b as usize, c as usize];
         if v.smooth[i] == 1 && !rigid {
