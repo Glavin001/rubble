@@ -460,6 +460,35 @@ body-in-white merge, 1,157 striker nodes, so the limit is 11; CPU; TB_DZ 0 / 0.4
   **Open:** where the 0.43 m nodes get in (they are no longer hits: about 70 hits a
   step at the peak); two-body stays JBeam mode's default only.
 
+**Leak, fourth pass: candidate generation traced (2026-11-05, same car, RoR's rule,
+CPU; `showcase_car.rs` test t with `TB_LEAKED=1` (each leaked node classed by the
+nearest struck triangle whose prism holds it) and `TB_HTRACE=<node>` (per step every
+struck triangle whose prism holds the node: δ, in band, its contact throttle, dead)).**
+* Not the throttle (every traced triangle had wait 0), not a hit cap (the CPU has
+  none; 40–90 hits a step is the contact patch), not spawn exclusions (vehicle
+  contact has none), not the range, not contact-point lists (every leaked node is a
+  contact point).
+* **Half are over broken triangles.** At 0.43 m the latch lets go at 0.05 s and 36–39
+  struck triangles die (§18: the body–door shut-line triangles, nodes on `body` and
+  `door_f_l`); a dead triangle has no contact (as specified), but the leak metric's
+  winding number counts it as skin. Leaked nodes by their nearest prism's triangle:
+  0.43 m 47 live / 39 dead at 0.1 s, 66 / 63 at 0.2 s, 40 / 44 at 2 s; 0.7 m 37 / 22
+  at 0.2 s; at the door middle (0 m, nothing broken) all 7–11 live. Node 318 (0.43 m)
+  sat in the band of triangles 352, 354, 312 (all body–door, all dead from 0.055 s)
+  and crossed with no hit.
+* **The live half cross at an edge.** Node 394 (0.43 m) was in contact with triangle
+  572 for 25 steps, its δ between +2 cm and −0.5 cm; at step 170 it left 572's prism
+  across an edge that no neighbouring prism covers (a convex fold of the crushed
+  skin) and had no hit for two steps; it re-entered 572's prism at δ = −1.6 cm, was a
+  hit once more, and the next step was at −2.1 cm, out of the band (the response
+  pushed it inward: with δ < 0 the side vote reads its neighbours behind the plane),
+  then −8 cm. Edge and vertex regions between prisms are the gap (§10.3's
+  closest-feature attempt closed them but put RoR's whole force on one or two light
+  nodes).
+* **Open:** (1) whether a node over a dead shut-line triangle is a leak at all (the
+  door has opened there) or the metric should take the live skin plus the opening;
+  (2) the prism gap at folds, with a side kept per contacter from its last hit.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,

@@ -3728,6 +3728,50 @@ fn t_car_to_car_t_bone_at_80_kmh() {
                 .map(|s| s.beams.iter().map(|b| (b.rest, b.broken)).collect())
                 .collect();
             w.step();
+            if let Ok(list) = std::env::var("TB_HTRACE") {
+                // Candidate generation for striker node `id` (jbeam-semantics-spec.md
+                // §10.3 leak notes): every struck triangle whose prism holds it
+                // (α, β, γ ≥ 0), its δ, whether |δ| ≤ r (a hit if tested), its
+                // contact throttle wait, dead; whether the node is a contact point.
+                use engine_softbody::explicit_contact::ContactFrame;
+                let s0 = &w.vehicles[0];
+                let s1 = &w.vehicles[1];
+                let pos: Vec<Vec3> = s0.nodes.iter().map(|nd| s0.origin + nd.pos).collect();
+                let skin: Vec<[Vec3; 3]> = tris
+                    .iter()
+                    .map(|t| t.map(|i| s0.positions()[i as usize]))
+                    .collect();
+                for id in list.split(',').filter_map(|x| x.parse::<usize>().ok()) {
+                    let x = s1.origin + s1.nodes[id].pos;
+                    let mut prisms = Vec::new();
+                    for (t, tri) in tris.iter().enumerate() {
+                        let [i0, i1, i2] = tri.map(|i| i as usize);
+                        let f = ContactFrame::new(pos[i0], pos[i1], pos[i2]);
+                        let (a, b, g, d) = f.local(x);
+                        if a >= 0.0 && b >= 0.0 && g >= 0.0 && d.abs() < 0.15 {
+                            prisms.push(format!(
+                                "t{t} d{:+.4}{} w{}{}",
+                                d,
+                                if d.abs() <= r { "*" } else { "" },
+                                s0.contact_throttle[t][0],
+                                if s0.tri_dead.get(t).copied().unwrap_or(false) {
+                                    " dead"
+                                } else {
+                                    ""
+                                }
+                            ));
+                        }
+                    }
+                    eprintln!(
+                        "  htrace step {} node {id} cp {} winding {:.2} hits(pass) {}: {}",
+                        w.steps,
+                        s1.contact_points.contains(&(id as u32)),
+                        winding(s1.positions()[id], &skin),
+                        w.last.hits,
+                        prisms.join(", ")
+                    );
+                }
+            }
             if let Ok(list) = std::env::var("TB_TRACE") {
                 // Per step, each listed striker node: the struck skin's closest
                 // feature (side, distance) and the winding number.
@@ -3819,6 +3863,50 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         }
         if f % 6 == 5 {
             let k = inside(&w);
+            if std::env::var("TB_LEAKED").is_ok() && k > 0 {
+                let pos = w.vehicles[0].positions();
+                let skin: Vec<[Vec3; 3]> =
+                    tris.iter().map(|t| t.map(|i| pos[i as usize])).collect();
+                let ids: Vec<usize> = w.vehicles[1]
+                    .positions()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &p)| winding(p, &skin).abs() > 0.5)
+                    .map(|(i, _)| i)
+                    .collect();
+                // Each by its nearest struck triangle whose prism holds it: live,
+                // dead (broken, §18: no contact), or none.
+                use engine_softbody::explicit_contact::ContactFrame;
+                let s0 = &w.vehicles[0];
+                let wp: Vec<Vec3> = s0.nodes.iter().map(|nd| s0.origin + nd.pos).collect();
+                let (mut live, mut dead, mut none) = (0, 0, 0);
+                let mut live_ids: Vec<usize> = Vec::new();
+                for &id in &ids {
+                    let x = w.vehicles[1].origin + w.vehicles[1].nodes[id].pos;
+                    let near = (0..tris.len())
+                        .filter_map(|t| {
+                            let [i0, i1, i2] = tris[t].map(|i| i as usize);
+                            let (a, b, g, d) = ContactFrame::new(wp[i0], wp[i1], wp[i2]).local(x);
+                            (a >= 0.0 && b >= 0.0 && g >= 0.0).then_some((d.abs(), t))
+                        })
+                        .min_by(|a, b| a.0.total_cmp(&b.0));
+                    match near {
+                        Some((_, t)) if s0.tri_dead.get(t).copied().unwrap_or(false) => dead += 1,
+                        Some(_) => {
+                            live += 1;
+                            live_ids.push(id);
+                        }
+                        None => none += 1,
+                    }
+                }
+                eprintln!(
+                    "  leaked at step {}: {} (nearest prism live {live}, dead {dead}, none {none}; struck dead {}); live ones {:?}",
+                    w.steps,
+                    ids.len(),
+                    s0.tri_dead.iter().filter(|&&d| d).count(),
+                    &live_ids[..live_ids.len().min(12)]
+                );
+            }
             if std::env::var("TB_INSIDE").is_ok() {
                 // The struck car's broken beams by the parts they join.
                 let mut pairs: std::collections::BTreeMap<String, usize> = Default::default();
