@@ -844,6 +844,20 @@ pub fn to_rubble(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], -p[1]]
 }
 
+/// A triangle row's aerodynamic fields [T]: `dragCoef` (default 100), `liftCoef`
+/// (default `dragCoef`), `stallAngle` (default 0.58 rad), `skinDragCoef` (default 0).
+fn tri_aero(f: &Map<String, Value>) -> [f32; 4] {
+    let g = |k: &str| f.get(k).and_then(as_f32);
+    let drag = g("dragCoef").unwrap_or(100.0).max(0.0);
+    [
+        drag,
+        // Negative: the lift reversed (spoilers' downforce).
+        g("liftCoef").unwrap_or(drag),
+        g("stallAngle").unwrap_or(0.58).clamp(0.0, std::f32::consts::FRAC_PI_2),
+        g("skinDragCoef").unwrap_or(0.0).max(0.0),
+    ]
+}
+
 /// A triangle's `externalCollisionBias` (m, ≥ 0).
 fn tri_bias(f: &Map<String, Value>) -> f32 {
     f.get("externalCollisionBias")
@@ -966,10 +980,9 @@ pub fn feature_census(
 }
 
 /// The physics features a [`feature_census`] lists that the explicit solver's JBeam
-/// mode does not simulate (`engine/docs/jbeam-semantics-spec.md` §11 and Part II),
-/// with their counts. Visual, sound, camera, electrics and controller sections are
-/// not physics and are not listed; powertrain and inputs are listed (the solver has
-/// none).
+/// mode does not simulate (`engine/docs/jbeam-semantics-spec.md` §11, Part II and
+/// §31), with their counts. Visual, sound, camera, electrics and controller sections
+/// are not physics and are not listed, nor is what [`out_of_scope_features`] lists.
 pub fn unsupported_features(census: &BTreeMap<String, usize>) -> Vec<(String, usize)> {
     const KEYS: &[&str] = &[
         "beams.beamShortExtent",
@@ -977,12 +990,8 @@ pub fn unsupported_features(census: &BTreeMap<String, usize>) -> Vec<(String, us
         "beams.beamShortBoundFunction",
         "beams.beamLimitSpringFunction",
         "beams.beamLimitDampFunction",
-        "beams.beamLimitRebound",
         "beams.breakGroup=table>3",
-        "triangles.dragCoef",
-        "triangles.liftCoef",
         "triangles.skinDragCoef",
-        "triangles.stallAngle",
         "nodes.couplerTag",
         "nodes.couplerStrength",
         "nodes.slidingFrictionCoef",
@@ -991,12 +1000,7 @@ pub fn unsupported_features(census: &BTreeMap<String, usize>) -> Vec<(String, us
         "nodes.noLoadCoef",
         "nodes.fullLoadCoef",
         "nodes.loadSensitivitySlope",
-        "hydros.inputSource",
-        "section thrusters",
         "section rotators",
-        "section powertrain",
-        "section torsionReactorF",
-        "section torsionReactorR",
         "section rigidifier",
         "section cargoGroups",
     ];
@@ -1004,6 +1008,27 @@ pub fn unsupported_features(census: &BTreeMap<String, usize>) -> Vec<(String, us
         .iter()
         .filter(|(k, _)| KEYS.contains(&k.as_str()))
         .map(|(k, &n)| (k.clone(), n))
+        .collect()
+}
+
+/// What a [`feature_census`] lists that is out of the explicit solver's scope (spec
+/// §31), with why: the powertrain and its reactors, and the inputs controllers drive
+/// (hydros' `inputSource`, thrusters: with no driver their input is zero, so a
+/// hydro holds its spawn length and a thruster pushes nothing, which is what the
+/// solver does), and `beamLimitRebound`, a key BeamNG documents nowhere (its bounded
+/// beams' rebound limit is `beamLimitDampRebound`, simulated; unknown keys are
+/// ignored, as BeamNG's loader does).
+pub fn out_of_scope_features(census: &BTreeMap<String, usize>) -> Vec<(String, usize, &'static str)> {
+    const KEYS: &[(&str, &str)] = &[
+        ("section powertrain", "powertrain (out of scope)"),
+        ("section torsionReactorF", "powertrain reactor (out of scope)"),
+        ("section torsionReactorR", "powertrain reactor (out of scope)"),
+        ("hydros.inputSource", "controller input (zero: the hydro holds its length)"),
+        ("section thrusters", "controller input (zero: no thrust)"),
+        ("beams.beamLimitRebound", "undocumented key (ignored)"),
+    ];
+    KEYS.iter()
+        .filter_map(|&(k, why)| census.get(k).map(|&n| (k.to_string(), n, why)))
         .collect()
 }
 
@@ -1548,6 +1573,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             collision,
             bias: tri_bias(&f),
             break_group: tri_group(&f, &groups),
+            aero: tri_aero(&f),
         });
     }
     for (_, f) in expand(&db, &parts, "quads", &vars) {
@@ -1570,6 +1596,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 collision,
                 bias,
                 break_group,
+                aero: tri_aero(&f),
             });
         }
     }

@@ -304,22 +304,38 @@ neighbouring triangles: the BX boot lid's centre node sat 3 cm from its own pane
 was kicked by the self-collision throttle every eighth step. Collision triangles,
 range (0.03 m) and contact rules are otherwise the solver's.
 
-### 10.1 Nodes lying on a triangle at spawn
+### 10.1 Self-collision pairs that start inside the contact range (2026-11-05)
 
 [N]: a node starts feeling a triangle "at around 2.5cm"; [CI]: "nodes that spawn within
-triangles, and get pushed out on spawn" (a cause of spawn loads and instability).
-Rubble keeps that push for a node near a triangle (the solver's 3 cm range): it is
-pushed to the side it starts on. A node that lies **on** a triangle (inside it, within
-`SURFACE_TOLERANCE` = 1 mm of its plane: JBeam positions are written to the
-millimetre) has no side; the solver's contact picks the side by the sign of the
-distance, which flips with rounding, and pushes it through the plane each way.
-**Choice:** such a triangle takes the node's self-collision group when it has none of
-its own (`ExplicitBeams::tri_groups`, set at spawn; the GPU reads it through the
-triangle's group word as before), so the node, and the other nodes of its group, skip
-it. A warning counts them. Only the Astral R has one: its rear bumper's centre node
-`rb5` lies on the edge `rb5l`–`rb5r` of the diffuser's triangle `df2l rb5l rb5r`
-(2 of its 3 nodes in the bumper's group), and chattered at 8 m/s at rest. Pairs at 2–3 cm
-(17 at the Astral R's spawn) keep [CI]'s push.
+triangles, and get pushed out on spawn" (named as a cause of spawn loads and
+instability); BeamNG documents no rule for them otherwise. The solver's contact is a
+projection (it cancels the node's force and removes a fifth of the depth per step),
+not a spring, so a push-out at spawn is as strong as whatever holds the node: the
+Astral R's rear bumper centre node `rb5` (lying on the diffuser's triangle edge)
+chattered at 8 m/s, and the forklift's beacon, whose base nodes start 1 cm above the
+roll hoop's triangles, broke its 3.8 kN mounts at 52 ms.
+
+**Choice:** a self-collision node that starts inside a collision triangle's contact
+range (inside it, within the 3 cm range of its plane, and not excluded by §10's
+group rule) never collides with that triangle (`ExplicitBeams::spawn_exclusions`,
+`tri_excl`; at most `TRI_EXCL_CAP` = 16 per triangle). JBeam mode always; the
+`.truck` path only through `opt_in_full_contact` (§10.2). GPU: per triangle (start,
+count) at `triExcl` (params word 69; 0 when no vehicle has any), the nodes in
+`gLists`; `tryContact` skips them. Effect: the Astral R excludes 17 pairs (rest KE
+3.5 J at 4 s, was 18.7 J); the forklift 12 (it rests with nothing broken); the legocar
+rests at 18 J (was 82 J).
+
+### 10.2 Vehicle contact from every node (2026-11-05)
+
+[N]: "The `collision` argument affects all types of collision". In JBeam mode every
+node with `collision` is a contacter against other vehicles' triangles (as before).
+The `.truck` path's contacters are RoR's (its contacter flag, or a node on a
+triangle): a car's frame nodes are not, so once its skin crumples they pass into the
+other car. `ExplicitBeams::opt_in_full_contact` (JSON `fullContact: true` on a
+vehicle of `explicitSim`) makes every node without `collision: false`
+(`NODE_NO_GROUND`) a contacter, and computes §10.1's exclusions; RoR content that does
+not opt in is unchanged (bit for bit). The vehicle-contact kernels take the contact
+point lists as data, so every backend runs it.
 
 ## 11. What the BX and the legocar use, and what is left
 
@@ -824,8 +840,8 @@ hoop's triangles have a group), inside the 3 cm self-collision range. [CI]'s
 push-out happens, and the solver's contact (a projection that cancels the node's
 force and removes 20 % of the depth per step, not a spring) pushes them out through
 their mounts, which yield and break. With self-collision off it rests with nothing
-broken (KE 30 J at 2 s). BeamNG documents only that its forces "start applying at
-around 2.5cm"; a softer push would be a contact-model change, so **open**. Into the wall at 56 km/h
+broken (KE 30 J at 2 s). Fixed by §10.1's spawn exclusions (12 pairs): it rests
+4 s with nothing broken, KE 4.8 J. Into the wall at 56 km/h
 it breaks nothing more and bends 5 beams: its forks and mast (85 MN/m between 50 kg
 nodes) are nearly elastic, so it pitches up over its front axle (centre of mass
 +1.65 m at 0.5 s) and rebounds at about 7 m/s. Energy ledger (KE + m·g·Δy of the
@@ -865,3 +881,70 @@ open.
   cost with the features in use. GPU ms per frame, before → after: idle 1.06 → 1.02
   (1 car), 0.94 → 1.11 (16), 2.26 → 2.45 (64); impact at 56 km/h 1.39 → 1.59,
   2.22 → 2.34, 5.23 → 5.61 (+7 % at 64 cars).
+
+## 31. Triangle aerodynamics, and what the census leaves out (2026-11-05)
+
+[T]: "The aero system in beamNG works by calculating drag on all triangles based
+purely on the speed of the airflow, the surface area and the drag properties of the
+triangles. The drag and lift forces are then applied on the adjacent nodes.
+Triangles are not affected by other triangles"; lift follows "the angle of attack of
+the triangle compared to the airflow" up to `stallAngle`, "at which point the lift
+will start going down with added angle". Fields: `dragCoef` (default 100, "a
+percentage of a flat plate of the same size"; "around 10 for most exposed body
+panels"), `liftCoef` (default `dragCoef`), `stallAngle` (default 0.58 rad),
+`skinDragCoef` (default 0; mud-tyre paddles).
+
+* **Rule** (`explicit_jbeam_ext::aero_tri_force`, Slang `KIND_JATRI`): still air,
+  the flow u = −(mean of the triangle's node velocities), A its area, n̂ its normal,
+  α its angle of attack (sin α = |n̂·û|). Drag ½ρ·C·(dragCoef/100)·A·|u|²·sin α along
+  û (the projected area); lift ½ρ·C·(liftCoef/100)·A·|u|²·C_L across û in the plane
+  of û and n̂, toward the side the flow pushes the plate, C_L = sin α cos α up to the
+  stall, sin α_s cos α past it (continuous, falling to zero at 90°); a negative
+  `liftCoef` reverses the lift (the Monster supercar's spoilers use −1.8 and −2).
+  Each node takes a third. **Choices:** ρ = 1.225 kg/m³ (ISA sea level); C = 1.28, a flat plate normal
+  to the flow (Hoerner), for `dragCoef` 100; the flat plate's normal-force law for
+  the angle dependence; the stalled law above.
+* **Records:** two per triangle with a drag or lift coefficient, after the beams
+  (kinds `JbeamAeroTri`, `JbeamAeroTri2`, extension records as §26's pressure
+  triangles: E1 = (x₂, ½ρC·dragCoef/100, ½ρC·liftCoef/100, sin α_s)). Every desc
+  triangle (collision or not: BeamNG's NONCOLLIDABLE triangles keep their aero)
+  except pressure-wheel triangles (their `dragCoef` is not simulated).
+* **On when the solver's drag is on** (`ExplicitBeamsSettings::drag`); in JBeam mode
+  it then replaces the per-node air drag and turbulence (the `.truck` path's rule):
+  BeamNG's air drag is the triangles'. Drag off, nothing changes (bit for bit).
+* Broken triangles keep their aero (**Choice**; [T]'s "non-aero state" of a broken
+  triangle would need §18's break lists on every triangle).
+* `skinDragCoef` is not simulated (the census lists it when used).
+* Checks: `tests/explicit_jbeam_ext.rs` (one plate: drag normal to the flow, drag and
+  lift at 30°, the stalled lift at 60°, to 0.1 %); GPU against CPU in
+  `tests/explicit_jbeam_ext_gpu.rs`. Coasting at 100 km/h the Astral R's triangles
+  add 1.04 kN (C·A ≈ 2.2 m², its diffuser and wings' `dragCoef` 40–46 included).
+
+**Census.** `jbeam::unsupported_features` lists only the physics JBeam mode does not
+simulate. `jbeam::out_of_scope_features` lists the rest with why: the powertrain and
+its torsion reactors (out of scope); hydros' `inputSource` and thrusters (controller
+inputs; with no driver the input is zero, so a hydro holds its spawn length and a
+thruster pushes nothing, which is what the solver does); `beamLimitRebound` (a key
+BeamNG documents nowhere: its bounded beams' rebound limit is `beamLimitDampRebound`,
+§22; unknown keys are ignored). For the B3 vehicles (the Monster supercar, the
+Astral R, the legocar) `unsupported_features` is empty.
+
+**The Monster supercar's coasting (found and fixed 2026-11-05).** It slowed at
+37 m/s² and reversed because the acceptance harnesses drove it sideways: the file
+models the car facing −X (`pack::forward_axis`), and `examples/jbeam_accept.rs` and
+`explicit_jbeam_community_gpu.rs` spawned every car moving along +Z, so its wheels
+were not spun (their axles lay along the motion) and it slid on its tyres. Both now
+turn the car to face +Z first (the crash lab always did). Every supercar "56 km/h
+wall" figure above dated before this note was a side impact; facing the wall it
+breaks nothing, bends 52 beams and leaves at about 5 m/s (KE 24 kJ at 1.5 s of
+237 kJ).
+
+**Coast-down** (`tests/explicit_jbeam_ext.rs`, opt-in; 25 m/s, 0.5–1.5 s): the
+momentum never grows, and with drag on the deceleration is at least the triangles'
+own drag summed along the run (it is: supercar 11.4 kN against 10.9 kN, Astral R
+2.29 kN against 0.66 kN plus rolling). Rolling resistance alone: C_rr = 0.053
+(supercar) and 0.079 (Astral R), 4–6 times the documented 0.010–0.015 of passenger
+tyres: the pressure tyres' tread and sidewall losses (12–16-ray polygons, the §28
+ground rule) are too high. **Open.** The supercar's triangles add C·A ≈ 49 m²: most
+of its triangles keep the default `dragCoef` 100 (a flat plate each), with "triangles
+not affected by other triangles" [T]; that is the content.

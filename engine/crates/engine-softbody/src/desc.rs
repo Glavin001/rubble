@@ -408,6 +408,10 @@ pub struct SoftTriangle {
     /// colliding once that group breaks, as it does once a beam along an edge
     /// breaks.
     pub break_group: u32,
+    /// JBeam aerodynamics (`engine/docs/jbeam-semantics-spec.md` §31): `dragCoef`,
+    /// `liftCoef`, `stallAngle` (rad), `skinDragCoef` (BeamNG defaults 100,
+    /// `dragCoef`, 0.58, 0).
+    pub aero: [f32; 4],
 }
 
 impl Default for SoftTriangle {
@@ -417,6 +421,7 @@ impl Default for SoftTriangle {
             collision: true,
             bias: 0.0,
             break_group: 0,
+            aero: [100.0, 100.0, 0.58, 0.0],
         }
     }
 }

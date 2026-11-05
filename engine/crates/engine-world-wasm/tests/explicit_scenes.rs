@@ -96,3 +96,58 @@ fn door_pull_moves_the_door_out() {
     assert!(drift.abs() < 0.05, "the body is held: {drift}");
 }
 
+
+/// Generalized winding number of point `p` about a triangle surface (Van Oosterom
+/// and Strackee's solid angle per triangle, summed over 4π): ±1 inside a closed,
+/// consistently wound surface, 0 outside.
+fn winding(p: Vec3, pos: &[Vec3], tris: &[[u32; 3]]) -> f32 {
+    let mut w = 0.0f64;
+    for t in tris {
+        let [a, b, c] = t.map(|i| (pos[i as usize] - p).as_dvec3());
+        let (la, lb, lc) = (a.length(), b.length(), c.length());
+        let num = a.dot(b.cross(c));
+        let den = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
+        w += 2.0 * num.atan2(den);
+    }
+    (w / (4.0 * std::f64::consts::PI)) as f32
+}
+
+/// Striking-car nodes inside the struck car's skin (|winding| > 0.5) through an
+/// 80 km/h T-bone at the B-pillar: (most at any sampled frame, at the end).
+fn tbone_inside(full: bool) -> Option<(usize, usize, usize)> {
+    let mut spec = serde_json::json!({ "speed": 80.0 / 3.6, "at": 0.15 });
+    spec["vehicles"] = serde_json::json!([{ "truck": explicit_sedan_truck(true), "fullContact": full }]);
+    let (_, device, queue) = engine_webgpu::default_device().ok()?;
+    spec["scene"] = "tbone".into();
+    spec["timing"] = false.into();
+    let mut s = ExplicitSim::new_native(&device, &queue, &spec).unwrap();
+    let tris: Vec<[u32; 3]> = s.spawned(1).triangles.iter().map(|t| t.nodes).collect();
+    let n = s.spawned(0).nodes.len();
+    let (mut most, mut last) = (0, 0);
+    for k in 0..60 {
+        s.frame(33).unwrap();
+        if k % 4 == 3 {
+            s.gpu_solver().wait();
+            let all = s.gpu_solver().positions();
+            last = all[0].iter().filter(|p| winding(**p, &all[1], &tris).abs() > 0.5).count();
+            most = most.max(last);
+        }
+    }
+    Some((most, last, n))
+}
+
+/// Cars do not pass into each other (spec §10.2): with every node a contacter, at
+/// most 1 % of the striking car's nodes end up inside the struck car's (deformed)
+/// skin in an 80 km/h T-bone; the skin's own crush is not inside it (it is the
+/// skin), so this is the interpenetration alone.
+#[test]
+fn tbone_striker_stays_outside_the_struck_skin() {
+    let Some((most_off, last_off, n)) = tbone_inside(false) else {
+        return;
+    };
+    let (most, last, _) = tbone_inside(true).unwrap();
+    eprintln!(
+        "striker nodes inside the struck skin, of {n}: file's contacters most {most_off} end {last_off}; every node most {most} end {last}"
+    );
+    assert!(most * 100 <= n, "{most} of {n} inside");
+}

@@ -22,6 +22,12 @@ fn spawn(desc: &engine_softbody::desc::SoftVehicleDesc, v: Vec3) -> ExplicitBeam
     let (mut s, _) =
         ExplicitBeams::from_desc_jbeam_with(desc, JbeamWheels::Pressure, Vec3::ZERO, v, settings)
             .unwrap();
+    // Facing +Z (the Monster supercar is modelled facing −X).
+    let f = engine_softbody::pack::forward_axis(desc);
+    let turn = glam::Quat::from_rotation_y(-f.x.atan2(f.z));
+    for n in &mut s.nodes {
+        n.pos = turn * n.pos;
+    }
     let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
     for n in &mut s.nodes {
         n.pos.y -= low - 0.02;
