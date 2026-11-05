@@ -678,7 +678,8 @@ impl ExplicitUpload {
                 | (!v.shapes.is_empty() as u32) << 6
                 | (v.two_body_contact as u32) << 7
                 | (v.contact_force.is_some() as u32) << 8
-                | (!v.tread.is_empty() as u32) << 9;
+                | (!v.tread.is_empty() as u32) << 9
+                | (!v.settings.triangle_throttle as u32) << 10;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1361,6 +1362,15 @@ impl ExplicitUpload {
         } else {
             (0, 0)
         };
+        // Self-collision's two-body rule (jbeam-semantics-spec.md §36): per node its
+        // hit count this step (cleared by its node phase).
+        let self_split = if vehicles.iter().any(|v| v.two_body_contact) {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, total_nodes));
+            at
+        } else {
+            0
+        };
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -1511,6 +1521,7 @@ impl ExplicitUpload {
             cf_node,
             cf_pend,
             tread_state,
+            self_split,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [

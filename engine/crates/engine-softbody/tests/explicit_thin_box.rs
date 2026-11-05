@@ -28,6 +28,7 @@ fn free(text: &str, pos: Vec3, vel: Vec3, pole: Option<(Vec3, Vec3)>, secs: f32)
         drag: false,
         turbulence: false,
         fast_inv_sqrt: true,
+        triangle_throttle: true,
     };
     let mut sim = ExplicitBeams::from_truck(text, pos, vel, settings).expect("truck");
     sim.roll_tyres(vel);
@@ -84,6 +85,7 @@ fn a_node_line_inside_the_box_is_held_on_the_entry_face_and_stops_the_body() {
             drag: false,
             turbulence: false,
             fast_inv_sqrt: true,
+            triangle_throttle: true,
         };
         let mut s = ExplicitBeams::from_truck(PLATE, PLATE_POS, PLATE_VEL, settings).unwrap();
         s.roll_tyres(PLATE_VEL);

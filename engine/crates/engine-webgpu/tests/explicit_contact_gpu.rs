@@ -15,6 +15,7 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     fast_inv_sqrt: false,
     drag: false,
     turbulence: false,
+    triangle_throttle: true,
 };
 
 fn gpu(fleet: &[ExplicitBeams]) -> Option<ExplicitBeamsGpu> {
@@ -560,4 +561,67 @@ fn contact_breaks_step_like_the_cpu() {
     }
     let cpu_peak = w.vehicles[0].take_contact_force_peak().unwrap();
     assert!((cpu_peak[0] - peak[0]).abs() <= 0.05 + 1e-3 * cpu_peak[0], "peak CPU {} GPU {}", cpu_peak[0], peak[0]);
+}
+
+/// Self-collision's two-body rule (jbeam-semantics-spec.md §36) on the GPU against the
+/// CPU: the authored sedan (low resolution) at 15 m/s into a wall, two-body contact on (self and
+/// vehicle), the BeamNG profile's no-throttle switch on. Through the frame its
+/// self-contacts start the two agree to a fraction of a millimetre; after 0.6 s
+/// (chaotic, GPU sums order-free in fixed point) broken and bent counts close.
+#[test]
+fn self_collision_two_body_steps_like_the_cpu() {
+    use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+    let b = build(
+        &style("sedan").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let text = b.truck;
+    let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, EXACT).unwrap();
+    let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let v = Vec3::new(0.0, 0.0, 15.0);
+    let mut s = ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - low, 0.0), v, EXACT).unwrap();
+    s.roll_tyres(v);
+    s.two_body_contact = true;
+    s.settings.triangle_throttle = false;
+    let front = s.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+    s.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+        Vec3::new(3.0, 2.0, 1.0),
+    ));
+    s.finish();
+    let Some(mut g) = gpu(std::slice::from_ref(&s)) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut first = None;
+    let mut contacts = 0u32;
+    for f in 0..36 {
+        let mut hit = false;
+        for _ in 0..17 {
+            s.step();
+            hit |= s.last_contacts > 0;
+            contacts += s.last_contacts;
+        }
+        g.frame(17);
+        if hit && first.is_none() {
+            first = Some(f);
+            g.wait();
+            let d = rms(&g.positions()[0], &s.positions());
+            eprintln!("frame {f} (self-contacts start): GPU–CPU {:.4} mm", d * 1e3);
+            assert!(d < 5e-4, "{d} m when self-contact starts");
+        }
+    }
+    g.wait();
+    assert!(first.is_some() && contacts > 100, "self-contacts: {contacts}");
+    let (cb, cn) = s.damage();
+    let gb = g.beams()[0].iter().filter(|b| b.broken).count();
+    let gn = g.beams()[0].iter().filter(|b| b.bent()).count();
+    let d = rms(&g.positions()[0], &s.positions());
+    eprintln!("after 0.6 s ({contacts} CPU self-contacts): CPU broken {cb} bent {cn}; GPU broken {gb} bent {gn}; rms {:.1} mm", d * 1e3);
+    let close = |a: usize, b: usize| (a as f32 - b as f32).abs() <= 0.1 * a.max(b) as f32 + 2.0;
+    assert!(close(cb, gb) && close(cn, gn));
 }
