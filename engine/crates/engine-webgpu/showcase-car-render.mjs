@@ -102,8 +102,11 @@ struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r
 // list, nodeBeamAt), every beam's spawn rest length (rest0At), the damage
 // units (4 words each: beam list start and end in topo, kind, strain trigger;
 // then the lists, unitAt) and per node its surface material (nodeMatAt).
+// Shut-line fallbacks: a Bind's word 3 (\`vehicle\`, unused here) is 0 or
+// the index in binds of its own-part binding (after the count vertices),
+// whose word 3 is its frame's death record (4 beam ids at deathAt).
 struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listAt: u32, trisAt: u32, beamOffset: u32, level: u32,
-  restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32 };
+  restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32, deathAt: u32 };
 // The frame's effects: simulated seconds since the last update (0: nothing
 // moves, spawns or accumulates), a seed, the floor and the static boxes
 // (centre, kind; half extents) the sparks and scrapes test.
@@ -443,7 +446,20 @@ fn pick() {
 fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= params.count) { return; }
-  let bd = binds[i];
+  var bd = binds[i];
+  if (bd.vehicle != 0u) {
+    // On a shut line's frame: its own part's frame for good once the frame
+    // has died (a beam of its death record broke) or torn (skin.rs on_alt).
+    let al = binds[bd.vehicle];
+    let q0 = nodePos(bd.n0);
+    var dead = length(nodePos(bd.n1) - q0) > 2.5 * bd.r1 || length(nodePos(bd.n2) - q0) > 2.5 * bd.r2;
+    let d = params.deathAt + 4u * al.vehicle;
+    for (var k = 0u; k < 4u; k++) {
+      let j = topo[d + k];
+      dead = dead || (j != 0xffffffffu && beamBroken(j));
+    }
+    if (dead) { bd = al; }
+  }
   let org = origin();
   let p0 = nodePos(bd.n0) + org;
   let e1 = nodePos(bd.n1) - nodePos(bd.n0);
@@ -1431,7 +1447,10 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const unitAt = rest0At + r0.length;
       const unitListAt = unitAt + units * 4;
       const nodeMatAt = unitListAt + (units ? visual.unitBeams.length : 0);
-      const topo = new Uint32Array(nodeMatAt + nodeCount);
+      const deathAt = nodeMatAt + nodeCount;
+      const death = visual.skinDeath ?? new Uint32Array(0);
+      const topo = new Uint32Array(deathAt + death.length);
+      topo.set(death, deathAt);
       const tf = new Float32Array(topo.buffer);
       topo.set(start, 0);
       topo.set(list, listAt);
@@ -1473,7 +1492,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const stateAt = nodeCount * 6;
       const level = (v, lvIndex) => {
         const n = v.vertexCount;
-        const bindData = new ArrayBuffer(n * 64);
+        // Shut-line fallbacks after the n bindings (word 3 links them).
+        const na = v.alt && v.alt.length === n ? v.altTri.length : 0;
+        const bindData = new ArrayBuffer((n + na) * 64);
         const u = new Uint32Array(bindData);
         const f = new Float32Array(bindData);
         for (let i = 0; i < n; i++) {
@@ -1498,6 +1519,19 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           const un = v.unit ? v.unit[i] : 0xffffffff;
           u[o + 15] = (v.smooth ? v.smooth[i] : 0) | (v.rigid && v.rigid[i] ? 2 : 0)
             | (un === 0xffffffff ? 0 : ((un + 1) & 0x3fff) << 2) | (v.shard && v.shard[i] ? 1 << 16 : 0) | (v.material[i] << 17);
+          const a = na ? v.alt[i] : 0;
+          u[o + 3] = a ? n + a - 1 : 0;
+          if (a) {
+            // The fallback: its own-part frame, the same vertex otherwise.
+            const q = (n + a - 1) * 16, k = a - 1;
+            u.set(u.subarray(o, o + 16), q);
+            u[q] = v.altNodes[3 * k]; u[q + 1] = v.altNodes[3 * k + 1]; u[q + 2] = v.altNodes[3 * k + 2];
+            u[q + 3] = v.altTri[k];
+            f[q + 4] = v.altCoords[3 * k]; f[q + 5] = v.altCoords[3 * k + 1]; f[q + 6] = v.altCoords[3 * k + 2];
+            f[q + 7] = v.altRest[2 * k];
+            f[q + 8] = v.altNormal[3 * k]; f[q + 9] = v.altNormal[3 * k + 1]; f[q + 10] = v.altNormal[3 * k + 2];
+            f[q + 11] = v.altRest[2 * k + 1];
+          }
         }
         const binds = upload('showcase-binds', bindData);
         // Deformed (position | torn, normal | damage, plastic | scrape) per
@@ -1571,8 +1605,8 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         device.queue.writeBuffer(index, 0, ordered);
         const floorIndex = device.createBuffer({ label: 'showcase-floor-index', size: floorList.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(floorIndex, 0, floorList);
-        const params = device.createBuffer({ label: 'showcase-params', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt]);
+        const params = device.createBuffer({ label: 'showcase-params', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, 0, 0, 0]);
         return { n, binds, out, attrs, index, floorIndex, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const car = { nodeOffset, beamOffset };

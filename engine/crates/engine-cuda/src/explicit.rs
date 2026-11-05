@@ -355,6 +355,25 @@ impl CudaExplicitBeams {
         self.upload(plan::BIND_ACC, u64::from(layout.acc(v as u32)) * 4, bytemuck::cast_slice(&zeros))
     }
 
+    /// Set vehicle `v`'s driver input for its raycast wheels (a fleet without raycast
+    /// wheels ignores it).
+    pub fn set_drive_input(&mut self, v: usize, input: engine_softbody::explicit_drive::DriveInput) -> Result<(), ExecError> {
+        let Some(d) = self.layout.drive else { return Ok(()) };
+        self.upload(plan::BIND_MISC, d.input_offset(v), bytemuck::cast_slice(&plan::drive::input_words(input)))?;
+        self.planner.request_replan();
+        Ok(())
+    }
+
+    /// Read vehicle `v`'s raycast wheels' state back into `drive` (waits).
+    pub fn read_drive(&mut self, v: usize, drive: &mut engine_softbody::explicit_drive::Drive) -> Result<(), ExecError> {
+        let Some(l) = self.layout.drive else { return Ok(()) };
+        self.wait()?;
+        let misc: Vec<u32> = self.download(plan::BIND_MISC)?;
+        let at = l.vehicle(v) as usize * 4;
+        plan::drive::decode(&misc[at..at + l.stride as usize * 4], drive);
+        Ok(())
+    }
+
     /// Read vehicle `v`'s proxies back into `set` (waits).
     pub fn read_proxies(&mut self, v: usize, set: &mut ProxySet) -> Result<(), ExecError> {
         let layout = self.layout.coupling.expect("coupling room");

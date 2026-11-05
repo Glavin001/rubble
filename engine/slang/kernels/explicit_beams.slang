@@ -128,6 +128,9 @@ static const uint FLAG_ANTI_CLIP = 2048u;
 static const uint FLAG_CLIP_MEM = 4096u;
 // A collision triangle that is anti-clip only (BeamNG NONCOLLIDABLE; gMisc .z).
 static const uint TRI_ANTI_ONLY = 0x40000000u;
+// The BeamNG profile's plasticity (jbeam-semantics-spec.md §36): a beam's strength
+// does not fall with its plastic stretch (RoR's rule; `plastic_strength_drop` off).
+static const uint FLAG_KEEP_STRENGTH = 8192u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -1432,6 +1435,9 @@ void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(sscale(g4, t), 0.0);
 }
 
+// Beam bn's vehicle keeps strength under plastic stretch (FLAG_KEEP_STRENGTH).
+bool keepStrength(uint4 bn) { return (gStatic[(bn.z >> 16) * 4u + 3u].x & FLAG_KEEP_STRENGTH) != 0u; }
+
 // A JBeam-mode beam (kinds KIND_JPLAIN..KIND_JCOUPLER; the CPU reference's
 // jbeam_force_filtered, coupler_force and beam_pass; engine/docs/jbeam-semantics-spec.md).
 // Exact lengths (JBeam mode spawns without the fast inverse square root); no break
@@ -1594,7 +1600,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
                 {
                     tt = min(sdiv(smul(tt, rest), old), max(c1.z, tt));
                     gate = min(min(tc, tt), strength);
-                    strength = nf(strength - smul(nf(rest - old), k));
+                    if (!keepStrength(bn)) strength = nf(strength - smul(nf(rest - old), k));
                 }
             }
         }
@@ -1955,7 +1961,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
                 {
                     tt = min(sdiv(smul(tt, rest), old), max(c1.z, tt));
                     gate = min(min(tc, tt), strength);
-                    strength = nf(strength - smul(nf(rest - old), k));
+                    if (!keepStrength(bn)) strength = nf(strength - smul(nf(rest - old), k));
                 }
             }
         }
@@ -3929,6 +3935,9 @@ void vvReportOutside(uint v)
 void contactGroup(uint g, uint lane);
 #endif
 
+// Raycast wheels (engine_softbody::explicit_drive).
+#include "explicit_beams_drive.slang"
+
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -4010,6 +4019,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         // Self-collision hits or pending beams possible (selfApply's barriers).
         gsUniformLanes = triCount > 0u ? 1u : 0u;
         coupleBegin();
+        driveBegin();
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
@@ -4027,10 +4037,12 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     sync();
     uint selfOn = gsUniformLanes;
     uint coupleOn = gsUniformCouple;
+    uint driveOn = gsUniformDrive;
 
     for (uint s = 0u, sStop = EB_END(s, gP.steps, 1u); s < sStop; s++)
     {
         coupleStep(v, lane, s, coupleOn);
+        driveStep(v, lane, s, driveOn);
         uint step = stepBase + s;
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
@@ -6842,10 +6854,12 @@ void contactGroup(uint g, uint lane)
     {
         gsUniformLanes = G.y;
         coupleBegin();
+        driveBegin();
     }
     sync();
     uint k = gsUniformLanes;
     uint coupleOn = gsUniformCouple;
+    uint driveOn = gsUniformDrive;
     sync();
     // Members in vehicle order (a rank sort), their run prefixes and member
     // indices.
@@ -6874,6 +6888,7 @@ void contactGroup(uint g, uint lane)
     for (uint s = 0u, sStop = EB_END(s, gP.steps, 1u); s < sStop; s++)
     {
         coupleStepMembers(off, k, lane, s, coupleOn);
+        driveStepMembers(off, k, lane, s, driveOn);
         if (k <= VV_PART)
         {
             contactMembersStep(off, k, lane, s);

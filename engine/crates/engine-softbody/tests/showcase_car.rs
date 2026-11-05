@@ -5882,7 +5882,13 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
             file.jbeam_plastic.len()
         );
         assert!(!file.jbeam_plastic.is_empty());
-        assert_eq!(jb, file.jbeam_plastic.len());
+        // (The BeamNG profile gives every deformable plain beam JBeam's rule,
+        // jbeam-semantics-spec.md §36; the crush lines at least.)
+        if file.beamng_profile {
+            assert!(jb >= file.jbeam_plastic.len());
+        } else {
+            assert_eq!(jb, file.jbeam_plastic.len());
+        }
         for c in &b.def.crush {
             eprintln!(
                 "crush member {:>14}: mean force {:.1} kN, deformLimit {}",

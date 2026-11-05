@@ -1629,6 +1629,8 @@ The research behind the list is `ror-vs-beamng-research.md` §5.
 | Contact band | 2 cm (`set_collision_range`) | 2.5 cm, unless the file sets one | `collision_range` |
 | `NONCOLLIDABLE` triangles (JBeam) | not collision triangles | anti-clip only | `anti_only_tris` |
 | Contact force sums (CPU) | floats into the node's force | the GPU's fixed point (1/32 N, ties to even) | `fixed_contact` |
+| `.truck` deformable plain beams | RoR's rule (`Plain`) | JBeam's NORMAL rule (§3, `JbeamPlain`) | `use_jbeam_plasticity` |
+| Strength falls with plastic stretch | yes (k × the stretch) | no | `plastic_strength_drop` |
 
 **No throttle.** RoR's throttle skips work whose result can differ (AGENTS.md: not
 outside the RoR profile). A contacter arriving at 10 m/s at a triangle idle for a
@@ -1737,6 +1739,43 @@ ties). The RoR profile keeps float sums. Checked: `jbeam_mode_steps_bit_for_bit`
 the Astral R 1,200 steps bit for bit (its first self-contact at step 354);
 `anti_clip_steps_like_the_cpu`, positions equal after 162 steps of crossings.
 
+**Plasticity.** [B]: a beam deforms past `beamDeform` and "will no longer return back
+to its original shape"; `deformLimit` / `deformLimitExpansion` cap the plastic change
+and `deformLimitStress` the hardening; nothing documents a strength that falls as the
+beam stretches (RoR's rule: S ← S − k·ΔL in tension). The profile's `.truck` content
+now runs JBeam's NORMAL rule on every deformable plain beam (no limits, no cap: JBeam's
+defaults; a `rubble_jbeam_plastic` line sets them), and no profile beam (`.truck` or
+JBeam) loses strength with stretch. GPU: vehicle flag 8192 (`FLAG_KEEP_STRENGTH`).
+* **Spring-back stays.** RoR's "spring-back" with plastic coefficient 0 is the
+  elastic recovery of an elastic–plastic spring: the yield rule moves the rest length
+  so the elastic stretch stays T/k and the force stays at the threshold while the
+  beam yields; unloading then recovers T/k. That is the physics of any such spring.
+  Coefficient 1 (the rest length jumps to the current length) drops the force to about
+  zero on the next step, so a yielding beam carries no load between yield events.
+  **Decision:** keep the file's coefficient (sedan1's: 0). The recovery is large only
+  where a part's yield strain T/(k·L) is far above its material's (0.1–0.2 % for
+  steel); that is content (`vehicle-authoring.md`, springback), not this rule.
+* **Rupture.** Without the strength drop, a beam's only failures are its strength and
+  its deform limits, as in BeamNG. A `.truck` file that wants steel to tear at its
+  elongation at break sets `deformLimitExpansion` (`rubble_jbeam_plastic`).
+* **Measured** (`crash_invariants.rs`, sedan1's 56 km/h wall, CPU; `CI_DROP=1` puts
+  the drop back, `CI_PSET=1` sets coefficient 1, measurement only), lid vs rear body
+  peak/end; rear body RMS; rear third plastic/broken; ripple body/bootlid/bonnet/door;
+  whole car broken/plastic:
+
+| Rule | Lid (mm) | Rear RMS (mm) | Rear third | Ripple (mm) | Car |
+|---|---|---|---|---|---|
+| RoR (before) | 425.5 / 167.5 | 42.5 | 79 / 9 | 4.0 / 12.9 / 7.6 / 4.0 | 114 / 947 |
+| JBeam rule, with the drop | 443.8 / 156.6 | 45.0 | 85 / 8 | 4.1 / 7.8 / 6.7 / 3.5 | 104 / 979 |
+| JBeam rule, no drop (**adopted**) | 442.1 / 221.6 | 45.4 | 90 / 0 | 2.9 / 8.9 / 8.1 / 4.5 | 4 / 1,078 |
+| Coefficient 1, no drop (reference) | 423.3 / 236.2 | 45.4 | 102 / 0 | 2.9 / 6.8 / 7.4 / 4.8 | 4 / 1,135 |
+
+  The drop is what broke beams (114 → 4; the rear third's 9 → 0); the rule change
+  alone moves little. The lid's travel and the rear third's plastic beams do not
+  improve: the rear damage is not plasticity's. The ripple falls at the boot lid
+  (12.9 → 8.9 mm) and the body (4.0 → 2.9), not to 1 mm. The authored `sedan` (no
+  profile) is bit for bit unchanged.
+
 **Effect on the showcase car (sedan1, CPU, the profile's 2.5 cm band, anti-clip off
 and on).** T-bone at 80 km/h (`showcase_car.rs` `t_car_to_car_t_bone_at_80_kmh`,
 live-skin leak metric, limit 10 of 993), striker offset −0.03 / 0 / +0.03 / 0.40 /
@@ -1750,5 +1789,4 @@ then passes CLIP_DEPTH and is forgotten. Not anti-clip's to fix. The frontal wal
 are band hits on the side of δ (held sides 3,394), none crossed.
 
 **Still to come in this profile:** exact `exp`/`pow` in the friction law;
-`externalCollisionBias`; plasticity without RoR's spring-back for `.truck` content;
-damping-only beams and `dampCutoffHz` for `.truck` content; flexbody 4-node binding.
+`externalCollisionBias`; damping-only beams and `dampCutoffHz` for `.truck` content; flexbody 4-node binding.

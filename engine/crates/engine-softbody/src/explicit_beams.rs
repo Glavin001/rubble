@@ -909,6 +909,11 @@ pub struct ExplicitBeams {
     /// order). The CPU then computes the same values as the GPU. Off: added to the
     /// node's force as floats (the RoR profile).
     pub fixed_contact: bool,
+    /// RoR's rule that a beam's strength falls by k × its plastic stretch (true,
+    /// the RoR profile and the solver's JBeam rule until §36). The BeamNG profile:
+    /// false (BeamNG documents no such rule; its `deformLimitStress` and deform
+    /// limits are the documented plastic caps).
+    pub plastic_strength_drop: bool,
     /// [`Self::fixed_contact`]'s per-node sums this step (empty until used).
     pub contact_acc: Vec<[i32; 3]>,
     /// [`Self::fixed_contact`]: this step's slide-force sums, added by the next
@@ -953,6 +958,9 @@ pub struct ExplicitBeams {
     /// The energy ledger's per-node force split of the last step (None: not
     /// traced; [`crate::explicit_contact::EnergyLedger`]).
     pub trace: Option<Box<ForceTrace>>,
+    /// Raycast wheels, drive and driver input ([`crate::explicit_drive`]); `None`
+    /// (the default) for none, every step unchanged.
+    pub drive: Option<Box<crate::explicit_drive::Drive>>,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -962,6 +970,8 @@ pub enum JbeamWheels {
     Soft(crate::truck_export::TyreDefaults),
     /// JBeam pressure wheels (spec §25).
     Pressure,
+    /// No wheel nodes: raycast wheels on the axle nodes ([`crate::explicit_drive`]).
+    Raycast,
 }
 
 /// A JBeam beam's damping low-pass (`dampCutoffHz`, spec §6): the damping uses
@@ -1283,6 +1293,7 @@ impl ExplicitBeams {
             clip_sides: Vec::new(),
             anti_only_tris: Vec::new(),
             fixed_contact: false,
+            plastic_strength_drop: true,
             contact_acc: Vec::new(),
             slide_hold: Vec::new(),
             contact_force: None,
@@ -1300,6 +1311,7 @@ impl ExplicitBeams {
             deform_names: Vec::new(),
             rigid: None,
             trace: None,
+            drive: None,
         }
     }
 
@@ -1394,6 +1406,32 @@ impl ExplicitBeams {
         settings: ExplicitBeamsSettings,
         airfoil: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
+        Self::from_truck_yawed_tyres(
+            text,
+            config,
+            position,
+            yaw_degrees,
+            velocity,
+            settings,
+            airfoil,
+            true,
+        )
+    }
+
+    /// [`Self::from_truck_yawed`], building the `wheels` sections' soft tyres
+    /// (`tyres`) or not: without them each wheel's mass goes to its two axle nodes
+    /// (half each), for raycast wheels ([`crate::explicit_drive`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_truck_yawed_tyres(
+        text: &str,
+        config: Option<&str>,
+        position: Vec3,
+        yaw_degrees: f32,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+        airfoil: &dyn Fn(&str) -> Option<String>,
+        tyres: bool,
+    ) -> Result<Self, String> {
         let file = parse_truck_config(text, config);
         if !file.errors.is_empty() {
             return Err(file.errors.join("; "));
@@ -1484,7 +1522,12 @@ impl ExplicitBeams {
                     }
                 }
             }
-            s.add_tyre(w, position, yaw_degrees, velocity, &local, posed);
+            if tyres {
+                s.add_tyre(w, position, yaw_degrees, velocity, &local, posed);
+            } else {
+                s.nodes[w.node1 as usize].mass += 0.5 * w.mass;
+                s.nodes[w.node2 as usize].mass += 0.5 * w.mass;
+            }
             if rest.is_some() {
                 s.nodes[w.node1 as usize].pos = saved[0];
                 s.nodes[w.node2 as usize].pos = saved[1];
@@ -1707,7 +1750,29 @@ impl ExplicitBeams {
             s.tri_excl.clear();
             s.spawn_exclusions_except(&keep);
         }
+        // The BeamNG profile's plasticity (§36): JBeam's NORMAL rule (§3) on every
+        // deformable plain beam, without RoR's strength drop.
+        if file.beamng_profile {
+            s.use_jbeam_plasticity();
+        }
         Ok(s)
+    }
+
+    /// The BeamNG profile's plasticity for `.truck` content (jbeam-semantics-spec.md
+    /// §36): every deformable plain (RoR) beam takes JBeam's NORMAL rule (§3,
+    /// `JbeamPlain`) with no deform limits and no `deformLimitStress` cap (JBeam's
+    /// defaults: none), keeping the file's plastic coefficient; and no beam's
+    /// strength falls with its plastic stretch (`plastic_strength_drop` off).
+    pub fn use_jbeam_plasticity(&mut self) {
+        for b in &mut self.beams {
+            if b.kind == ExplicitKind::Plain && b.ty == ExplicitType::Deformable {
+                b.kind = ExplicitKind::JbeamPlain;
+                b.limit_k = f32::INFINITY;
+                b.short_bound = 0.0;
+                b.long_bound = f32::INFINITY;
+            }
+        }
+        self.plastic_strength_drop = false;
     }
 
     /// One `wheels` / `meshwheels` / `meshwheels2` tyre (its nodes after the
@@ -2226,6 +2291,15 @@ impl ExplicitBeams {
                 warnings.append(&mut w);
                 None
             }
+            JbeamWheels::Raycast => {
+                // Raycast wheels (crate::explicit_drive): no wheel nodes; each
+                // wheel's mass goes to its axle nodes.
+                for w in &desc.wheels {
+                    s.nodes[w.node1 as usize].mass += 0.5 * w.mass;
+                    s.nodes[w.node2 as usize].mass += 0.5 * w.mass;
+                }
+                None
+            }
         };
         if let (Some(tyres), false) = (tyres, desc.wheels.is_empty()) {
             // The `.truck` path's tyres, from the same text it writes.
@@ -2295,6 +2369,7 @@ impl ExplicitBeams {
         s.two_body_contact = true;
         s.anti_clip = true;
         s.fixed_contact = true;
+        s.plastic_strength_drop = false;
         let pairs = s.spawn_exclusions();
         if pairs > 0 {
             warnings.push(format!(
@@ -2806,6 +2881,9 @@ impl ExplicitBeams {
     /// One fixed step: nodes, wings, fuselage drag, commands, beams,
     /// self-collision.
     pub fn step(&mut self) {
+        if self.drive.is_some() {
+            crate::explicit_drive::drive_pass(self);
+        }
         self.node_pass();
         if !self.wings.is_empty() {
             self.wing_pass();
@@ -3231,7 +3309,14 @@ impl ExplicitBeams {
                     0 => None,
                     i => Some(&mut self.damp_filters[i as usize - 1]),
                 };
-                jbeam_force_filtered(&mut beam, &na, &nb, self.settings.fast_inv_sqrt, filter)
+                jbeam_force_filtered(
+                    &mut beam,
+                    &na,
+                    &nb,
+                    self.settings.fast_inv_sqrt,
+                    filter,
+                    !self.plastic_strength_drop,
+                )
             } else {
                 beam_force(&mut beam, &na, &nb, self.settings.fast_inv_sqrt)
             };
@@ -4057,7 +4142,7 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
 /// group); the break test past the strength is left to the caller (`check_break`),
 /// which has no exception for these kinds.
 pub fn jbeam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut {
-    jbeam_force_filtered(beam, na, nb, fast, None)
+    jbeam_force_filtered(beam, na, nb, fast, None, false)
 }
 
 /// [`jbeam_force`] with the beam's damping filter (`dampCutoffHz`): the damping
@@ -4068,6 +4153,7 @@ pub fn jbeam_force_filtered(
     nb: &Node,
     fast: bool,
     filter: Option<&mut DampFilter>,
+    keep: bool,
 ) -> BeamOut {
     let d = na.pos - nb.pos;
     let q = d.dot(d);
@@ -4171,7 +4257,9 @@ pub fn jbeam_force_filtered(
             if beam.rest > old {
                 beam.tt = (beam.tt * beam.rest / old).min(beam.limit_k.max(beam.tt));
                 beam.gate = beam.tc.min(beam.tt).min(beam.strength);
-                beam.strength -= (beam.rest - old) * k;
+                if !keep {
+                    beam.strength -= (beam.rest - old) * k;
+                }
             }
         }
     }

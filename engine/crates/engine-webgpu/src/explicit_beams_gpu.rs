@@ -1436,6 +1436,46 @@ impl ExplicitBeamsGpu {
         self.planner.request_replan();
     }
 
+    /// Set vehicle `vehicle`'s driver input for its raycast wheels
+    /// (`engine_softbody::explicit_drive`) from the next frame on; a vehicle without
+    /// them (or a fleet without any) ignores it.
+    pub fn set_drive_input(&mut self, vehicle: usize, input: engine_softbody::explicit_drive::DriveInput) {
+        let Some(d) = self.layout.drive else {
+            return;
+        };
+        if vehicle >= self.layout.vehicles() {
+            return;
+        }
+        let words = plan::drive::input_words(input);
+        self.queue
+            .write_buffer(&self.misc, d.input_offset(vehicle), bytemuck::cast_slice(&words));
+        // Drive forces change the speeds the contact plan's frame bounds assumed.
+        self.planner.request_replan();
+    }
+
+    /// Per vehicle its raycast wheels' state read back into a copy of `drive`
+    /// (`None` where the vehicle has none).
+    pub fn drive_states(
+        &self,
+        vehicles: &[Option<engine_softbody::explicit_drive::Drive>],
+    ) -> Vec<Option<engine_softbody::explicit_drive::Drive>> {
+        let Some(l) = self.layout.drive else {
+            return vec![None; vehicles.len()];
+        };
+        let misc = self.read_u4(&self.misc);
+        vehicles
+            .iter()
+            .enumerate()
+            .map(|(v, d)| {
+                let mut d = d.clone()?;
+                let at = l.vehicle(v) as usize;
+                let words: Vec<u32> = misc[at..at + l.stride as usize].iter().flatten().copied().collect();
+                plan::drive::decode(&words, &mut d);
+                Some(d)
+            })
+            .collect()
+    }
+
     /// The next frame re-plans vehicle contact (a host's external forces, such as the
     /// World's rigid coupling, change the speeds the plan's frame bounds assumed).
     pub fn request_contact_replan(&self) {
