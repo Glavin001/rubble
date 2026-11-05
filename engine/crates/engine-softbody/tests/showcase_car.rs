@@ -1082,6 +1082,29 @@ fn pole_run(
             );
             p_prev = p1;
         }
+        // POLE_TOUCH=1: the nodes at the pole's surface (plan view), by
+        // member, every frame.
+        if std::env::var("POLE_TOUCH").is_ok() {
+            let mut by: std::collections::BTreeMap<String, usize> = Default::default();
+            for i in 0..s.nodes.len() {
+                let d = s.nodes[i].pos - centre;
+                if (d.x * d.x + d.z * d.z).sqrt() < r + 0.03 {
+                    let g = b
+                        .groups
+                        .iter()
+                        .filter(|(_, g)| g.contains(&(i as u32)))
+                        .map(|(k, _)| k.as_str())
+                        .min_by_key(|k| k.len())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| match b.skeleton.nodes.get(i) {
+                            Some(n) => b.skeleton.parts[n.part as usize].clone(),
+                            None => "wheel".into(),
+                        });
+                    *by.entry(g).or_default() += 1;
+                }
+            }
+            eprintln!("  t {:.3} touching {by:?}", s.steps as f32 * STEP);
+        }
         let past: Vec<usize> = far
             .iter()
             .copied()
@@ -1939,13 +1962,20 @@ fn torsion_hubs(truck: &str, torque: f32) -> Option<f32> {
 /// the body-side shock-tower mounts (the body nodes each shock's top bracket
 /// is tied to). kN·m/deg.
 fn torsion_biw(b: &Built, torque: f32) -> f32 {
+    torsion_biw_without(b, torque, &[])
+}
+
+/// [`torsion_biw`] with every beam on the nodes `gone` broken too (a pane
+/// taken out).
+fn torsion_biw_without(b: &Built, torque: f32, gone: &[u32]) -> f32 {
     let sk = &b.skeleton;
     let mut s = floating(&b.truck).unwrap();
     let susp = sk.parts.iter().position(|p| p == "suspension").unwrap() as u16;
     let n = sk.nodes.len();
     let off = |i: u32| (i as usize) >= n || sk.nodes[i as usize].part == susp;
+    let gone: std::collections::HashSet<u32> = gone.iter().copied().collect();
     for bm in &mut s.beams {
-        if off(bm.a) || off(bm.b) {
+        if off(bm.a) || off(bm.b) || gone.contains(&bm.a) || gone.contains(&bm.b) {
             bm.broken = true;
         }
     }
@@ -4147,4 +4177,117 @@ fn v_glass_holds_while_driving() {
         .map(|g| g.0)
         .collect();
     assert!(broken.is_empty(), "glass broke while driving: {broken:?}");
+}
+
+/// Member chord yields (the longest-run beams within each group): a
+/// diagnostic, `--ignored`.
+#[test]
+#[ignore]
+fn member_chord_yields() {
+    let b = built(Resolution::Medium);
+    let sk = &b.skeleton;
+    let mut names: Vec<&String> = b.groups.keys().collect();
+    names.sort();
+    for n in names {
+        let g: std::collections::HashSet<u32> = b.groups[n].iter().copied().collect();
+        let mut d: Vec<f32> = sk
+            .beams
+            .iter()
+            .filter(|x| !x.tie && !x.damper && g.contains(&x.a) && g.contains(&x.b))
+            .map(|x| x.mat.deform)
+            .filter(|&f| f < 1e8)
+            .collect();
+        if d.is_empty() {
+            continue;
+        }
+        d.sort_by(|a, b| a.total_cmp(b));
+        eprintln!(
+            "{n:>18}: {} beams, deform median {:.1} kN, max {:.1} kN",
+            d.len(),
+            d[d.len() / 2] / 1e3,
+            d[d.len() - 1] / 1e3
+        );
+    }
+}
+
+/// `NODES=95,115`: those nodes' parts, groups and spawn positions (Medium).
+#[test]
+#[ignore]
+fn which_nodes() {
+    let b = built(Resolution::Medium);
+    for t in std::env::var("NODES").unwrap_or_default().split(',') {
+        let Ok(i) = t.parse::<usize>() else { continue };
+        let n = &b.skeleton.nodes[i];
+        let gs: Vec<&String> = b
+            .groups
+            .iter()
+            .filter(|(_, g)| g.contains(&(i as u32)))
+            .map(|(k, _)| k)
+            .collect();
+        eprintln!(
+            "node {i}: part {} at {:.2?} primary {} catcher {} groups {gs:?}",
+            b.skeleton.parts[n.part as usize], n.p, n.primary, n.catcher
+        );
+    }
+}
+
+/// The windscreen's share of the body-in-white's torsional stiffness: the
+/// body as built, without its pane (every beam on the pane's nodes broken:
+/// the bead, the glass), without the lumped screen panel (`windscreen_x`)
+/// and without both. Medium. `--ignored` (a measurement); set
+/// `BRITTLE_GLASS=1` for the bonded pane.
+#[test]
+#[ignore]
+fn i_windscreen_share_of_torsion() {
+    let def = style("sedan").unwrap();
+    let params = BuildParams {
+        resolution: Resolution::Medium,
+        ..Default::default()
+    };
+    let b = build(&def, &params).unwrap();
+    let mut bare = def.clone();
+    bare.braces.retain(|br| br.name != "windscreen_x");
+    let nb = build(&bare, &params).unwrap();
+    // The pane: the shell's nodes in the front glass zone (not a side one).
+    let pane = |b: &Built| -> Vec<u32> {
+        let len = b.def.profile.length;
+        b.def
+            .zones
+            .iter()
+            .filter(|z| {
+                z.grade == "glass"
+                    && !matches!(z.region, engine_softbody::authoring::vehicle::Region::Side(_))
+            })
+            .flat_map(|z| {
+                b.shell.seg.iter().filter_map(move |(&i, &sg)| {
+                    let p = b.skeleton.nodes[i as usize].p;
+                    (z.region.contains(p, sg, len) && p.z > 0.5 * len).then_some(i)
+                })
+            })
+            .collect()
+    };
+    eprintln!("(i) windscreen pane nodes {}", pane(&b).len());
+    let t = 2000.0;
+    let all = torsion_biw(&b, t);
+    let no_pane = torsion_biw_without(&b, t, &pane(&b));
+    let no_brace = torsion_biw(&nb, t);
+    let neither = torsion_biw_without(&nb, t, &pane(&nb));
+    // Both screens' lumped panels out (the backlight's is the glass shear
+    // panel between the parcel shelf and the rear header): the glazing's
+    // share, as the Ford P2000 measured it (24.29 against 16.44 kN·m/deg
+    // with and without its windscreen and backlight, 32 %).
+    let mut no_glazing = bare.clone();
+    no_glazing.shear.retain(|sh| sh.grade != "glass");
+    let glazing = torsion_biw(&build(&no_glazing, &params).unwrap(), t);
+    let share = |x: f32| 100.0 * (all - x) / all;
+    eprintln!(
+        "(i) glazing torsion: no screen panels {glazing:.2} kN·m/deg ({:.1} %)",
+        share(glazing)
+    );
+    eprintln!(
+        "(i) windscreen torsion (kN·m/deg): built {all:.2}; no pane {no_pane:.2} ({:.1} %); no screen panel {no_brace:.2} ({:.1} %); neither {neither:.2} ({:.1} %)",
+        share(no_pane),
+        share(no_brace),
+        share(neither)
+    );
 }
