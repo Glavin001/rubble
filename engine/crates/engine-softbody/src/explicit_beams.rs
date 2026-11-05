@@ -46,6 +46,14 @@ pub const DEFAULT_COLLISION_RANGE: f32 = 0.02;
 /// The BeamNG profile's contact band (spec §36): BeamNG documents a triangle
 /// thickness of 2.5 cm ("a node starts feeling a triangle at around 2.5cm").
 pub const BEAMNG_COLLISION_RANGE: f32 = 0.025;
+/// The GPU's contact-force fixed point: units per newton (the kernel's `FIXED`).
+pub const CONTACT_FIXED: f32 = 32.0;
+
+/// A force component in [`CONTACT_FIXED`] units, as the kernel's `toFixed`:
+/// clamped to ±2·10⁹, rounded to nearest with ties to even.
+pub fn to_fixed(x: f32) -> i32 {
+    (x * CONTACT_FIXED).clamp(-2.0e9, 2.0e9).round_ties_even() as i32
+}
 /// Collision triangles a vehicle may have (a file with more fails to spawn).
 pub const MAX_COLLISION_TRIANGLES: usize = 3000;
 
@@ -894,6 +902,18 @@ pub struct ExplicitBeams {
     /// triangles follow the collision ones in [`Self::triangles`] and take part only
     /// while [`Self::anti_clip`] is on. Empty: none.
     pub anti_only_tris: Vec<bool>,
+    /// Contact forces through the GPU's fixed-point sum (BeamNG profile, spec §36):
+    /// self-collision and vehicle-contact forces are added per node as integers of
+    /// 1/[`CONTACT_FIXED`] N (rounded to nearest, ties to even), and the node pass
+    /// adds their sum to the node's force, then the slide forces (the kernel's
+    /// order). The CPU then computes the same values as the GPU. Off: added to the
+    /// node's force as floats (the RoR profile).
+    pub fixed_contact: bool,
+    /// [`Self::fixed_contact`]'s per-node sums this step (empty until used).
+    pub contact_acc: Vec<[i32; 3]>,
+    /// [`Self::fixed_contact`]: this step's slide-force sums, added by the next
+    /// node pass after the contact sums.
+    pub slide_hold: Vec<(u32, Vec3)>,
     /// The contact-force log (jbeam-semantics-spec.md §32): per node the sum of
     /// its contacts' force magnitudes per step, and the contact breaks it drives
     /// (`None`: off, the default; [`Self::enable_contact_force`]).
@@ -1262,6 +1282,9 @@ impl ExplicitBeams {
             anti_clip: false,
             clip_sides: Vec::new(),
             anti_only_tris: Vec::new(),
+            fixed_contact: false,
+            contact_acc: Vec::new(),
+            slide_hold: Vec::new(),
             contact_force: None,
             tread: Vec::new(),
             damp_filters: Vec::new(),
@@ -1650,6 +1673,7 @@ impl ExplicitBeams {
             s.settings = s.settings.beamng();
             s.two_body_contact = true;
             s.anti_clip = true;
+            s.fixed_contact = true;
         }
         // `rubble_contact_breaks` (Rubble's extension, spec §32).
         if !file.contact_breaks.is_empty() {
@@ -2270,6 +2294,7 @@ impl ExplicitBeams {
         }
         s.two_body_contact = true;
         s.anti_clip = true;
+        s.fixed_contact = true;
         let pairs = s.spawn_exclusions();
         if pairs > 0 {
             warnings.push(format!(
@@ -2795,23 +2820,23 @@ impl ExplicitBeams {
         }
         let mut trace = self.trace.take();
         if let Some(t) = trace.as_mut() {
-            t.capture(&self.nodes, 0);
+            t.capture(&forces_now_of(&self), 0);
         }
         self.beam_pass();
         if let Some(t) = trace.as_mut() {
-            t.capture(&self.nodes, 1);
+            t.capture(&forces_now_of(&self), 1);
         }
         if !self.triangles.is_empty() && !self.candidates.is_empty() {
             self.collision_pass();
         }
         if let Some(t) = trace.as_mut() {
-            t.capture(&self.nodes, 2);
+            t.capture(&forces_now_of(&self), 2);
         }
         if !self.slides.is_empty() {
             self.slide_pass();
         }
         if let Some(t) = trace.as_mut() {
-            t.capture(&self.nodes, 3);
+            t.capture(&forces_now_of(&self), 3);
         }
         self.trace = trace;
         self.steps += 1;
@@ -2821,6 +2846,15 @@ impl ExplicitBeams {
         // Anti-clip's side memory (§36): last step's contacts are held now.
         for c in &mut self.clip_sides {
             crate::explicit_contact::clip_roll(c);
+        }
+        // Fixed-point contact (§36): last step's contact sums, then its slide forces.
+        if self.fixed_contact {
+            for i in 0..self.nodes.len() {
+                let f = self.force_now(i);
+                self.nodes[i].force = f;
+            }
+            self.contact_acc.clear();
+            self.slide_hold.clear();
         }
         let h = STEP;
         let origin = self.origin;
@@ -3113,6 +3147,11 @@ impl ExplicitBeams {
             add(b.a, f.a);
             add(b.b, f.b);
         }
+        if self.fixed_contact {
+            // Added by the next node pass after the contact sums (the kernel's order).
+            self.slide_hold = sums;
+            return;
+        }
         for (n, f) in sums {
             self.nodes[n as usize].force += f;
         }
@@ -3363,7 +3402,7 @@ impl ExplicitBeams {
                 let mt = alpha * n1.mass + beta * n2.mass + gamma * n0.mass;
                 let m = node.mass * mt / (node.mass + mt);
                 let f = contact_force(
-                    node.force,
+                    self.force_now(hn as usize),
                     v,
                     m,
                     n,
@@ -3372,10 +3411,10 @@ impl ExplicitBeams {
                     pen,
                     node.friction,
                 );
-                self.nodes[hn as usize].force += f;
-                self.nodes[i1 as usize].force -= alpha * f;
-                self.nodes[i2 as usize].force -= beta * f;
-                self.nodes[i0 as usize].force -= gamma * f;
+                self.add_contact(hn as usize, f);
+                self.add_contact(i1 as usize, -(alpha * f));
+                self.add_contact(i2 as usize, -(beta * f));
+                self.add_contact(i0 as usize, -(gamma * f));
                 if let Some(l) = self.contact_force.as_mut() {
                     l.add(hn as usize, f);
                     l.add(i1 as usize, alpha * f);
@@ -3399,6 +3438,50 @@ impl ExplicitBeams {
     /// The fastest node's speed (m/s).
     pub fn max_speed(&self) -> f32 {
         self.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max)
+    }
+
+    /// Adds contact force `f` to node `i`: to its fixed-point sum
+    /// ([`Self::fixed_contact`]) or to its force.
+    pub fn add_contact(&mut self, i: usize, f: Vec3) {
+        if !self.fixed_contact {
+            self.nodes[i].force += f;
+            return;
+        }
+        if self.contact_acc.len() != self.nodes.len() {
+            self.contact_acc = vec![[0; 3]; self.nodes.len()];
+        }
+        let a = &mut self.contact_acc[i];
+        for (k, x) in f.to_array().into_iter().enumerate() {
+            a[k] = a[k].wrapping_add(to_fixed(x));
+        }
+    }
+
+    /// Node `i`'s fixed-point contact sum in newtons (zero when none).
+    pub fn contact_sum(&self, i: usize) -> Vec3 {
+        match self.contact_acc.get(i) {
+            Some(a) => Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32) * (1.0 / CONTACT_FIXED),
+            None => Vec3::ZERO,
+        }
+    }
+
+    /// Node `i`'s force as the next node pass will take it: with
+    /// [`Self::fixed_contact`] its force, plus its contact sum, plus this step's
+    /// slide forces (the kernel's order); else its force.
+    pub fn force_now(&self, i: usize) -> Vec3 {
+        let n = &self.nodes[i];
+        if !self.fixed_contact {
+            return n.force;
+        }
+        let f = n.force + self.contact_sum(i);
+        match self.slide_hold.iter().find(|s| s.0 == i as u32) {
+            Some(s) => f + s.1,
+            None => f,
+        }
+    }
+
+    /// Every node's [`Self::force_now`].
+    pub fn forces_now(&self) -> Vec<Vec3> {
+        (0..self.nodes.len()).map(|i| self.force_now(i)).collect()
     }
 
     /// Whether collision triangle `t` is anti-clip only (BeamNG `NONCOLLIDABLE`).
@@ -3463,7 +3546,7 @@ impl ExplicitBeams {
                 split[i as usize] += 1;
             }
         }
-        let pass: Vec<Vec3> = self.nodes.iter().map(|n| n.force).collect();
+        let pass: Vec<Vec3> = self.forces_now();
         let im = |n: &Node, k: u32| {
             if n.has(NODE_IMMOVABLE) {
                 0.0
@@ -3511,10 +3594,10 @@ impl ExplicitBeams {
                 depth,
                 node.friction,
             );
-            self.nodes[hn as usize].force += f;
-            self.nodes[i1 as usize].force -= f * alpha;
-            self.nodes[i2 as usize].force -= f * beta;
-            self.nodes[i0 as usize].force -= f * gamma;
+            self.add_contact(hn as usize, f);
+            self.add_contact(i1 as usize, -(f * alpha));
+            self.add_contact(i2 as usize, -(f * beta));
+            self.add_contact(i0 as usize, -(f * gamma));
             if let Some(l) = self.contact_force.as_mut() {
                 l.add(hn as usize, f);
                 l.add(i1 as usize, f * alpha);
@@ -3812,16 +3895,21 @@ pub struct ForceTrace {
     last: Vec<Vec3>,
 }
 
+/// The forces a trace records (`ExplicitBeams::forces_now`).
+fn forces_now_of(s: &ExplicitBeams) -> Vec<Vec3> {
+    s.forces_now()
+}
+
 impl ForceTrace {
     /// Record stage `k`: the accumulator's growth since the last stage (stage 0:
     /// the accumulator itself).
-    fn capture(&mut self, nodes: &[Node], k: usize) {
-        let n = nodes.len();
+    fn capture(&mut self, forces: &[Vec3], k: usize) {
+        let n = forces.len();
         self.parts[k].resize(n, Vec3::ZERO);
         self.last.resize(n, Vec3::ZERO);
-        for (i, nd) in nodes.iter().enumerate() {
-            self.parts[k][i] = if k == 0 { nd.force } else { nd.force - self.last[i] };
-            self.last[i] = nd.force;
+        for (i, &f) in forces.iter().enumerate() {
+            self.parts[k][i] = if k == 0 { f } else { f - self.last[i] };
+            self.last[i] = f;
         }
     }
 }

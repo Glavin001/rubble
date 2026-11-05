@@ -631,7 +631,8 @@ fn self_collision_two_body_steps_like_the_cpu() {
 /// vehicle's floor (the swept test catches those faster than the band per step),
 /// a self-collision node through its own vehicle's triangle, and an anti-clip-only
 /// (NONCOLLIDABLE) triangle. The side memories are equal word for word after every
-/// frame (the contact decisions), the positions to the accumulator's rounding.
+/// frame (the contact decisions), and with the profile's fixed-point contact sums
+/// the positions bit for bit.
 #[test]
 fn anti_clip_steps_like_the_cpu() {
     // Three vehicles (a small contact group), then six (the owner-by-owner pass).
@@ -689,6 +690,11 @@ fn anti_clip_scene(extra: usize) {
     own.anti_clip = true;
     own.two_body_contact = true;
     own.finish();
+    // The BeamNG profile's fixed-point contact sums (§36): the CPU computes the
+    // GPU's values.
+    for v in [&mut fl, &mut pts, &mut own] {
+        v.fixed_contact = true;
+    }
     let mut fleet = vec![fl, pts, own];
     for k in 0..extra {
         let mut p = point(
@@ -697,6 +703,7 @@ fn anti_clip_scene(extra: usize) {
             false,
         );
         p.nodes[0].flags |= NODE_NO_GROUND;
+        p.fixed_contact = true;
         fleet.push(p);
     }
     let Some(mut g) = gpu(&fleet) else {
@@ -737,7 +744,7 @@ fn anti_clip_scene(extra: usize) {
     for k in 0..w.vehicles.len() {
         let d = rms(&pos[k], &w.vehicles[k].positions());
         eprintln!("vehicle {k}: GPU–CPU {d:.2e} m after {} steps", w.steps);
-        assert!(d < 1e-4, "vehicle {k}: GPU–CPU {d} m");
+        assert_eq!(d, 0.0, "vehicle {k}: GPU–CPU {d} m");
     }
     // Every fast point is above the floor (caught on its side), the self-collision
     // node above its triangle, the other held at the anti-clip-only plane.

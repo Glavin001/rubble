@@ -584,6 +584,14 @@ reverted). sedan1: 17 / 10 / 18 at −0.03 / 0 / +0.03 m, 4 / 19 / 5 at 0.40 / 0
 0.46 m, 7 at 0.7 m. The two-tier car: 15 / 72 / 95 (was 13 / 43 / 85). No systematic
 gain on either car, so not adopted.
 
+**Leak, after anti-clip (2026-11-05, §36).** With anti-clip on, sedan1's T-bone leak
+is unchanged within noise (12.0 vs 13.6 mean leaked nodes over five offsets). The
+leaked nodes' crossings start at hits in front of the skin, with the side held: the
+contact force per step is too weak against the closing skin's momentum, and a node
+driven past CLIP_DEPTH (10 cm) is forgotten. Next: the contact force against the
+closing skin (with the showcase car's heavier-node build), after the profile's
+plasticity.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,
@@ -1600,7 +1608,8 @@ contacts amplify it (the fixture car parted at step 2,688).
   Astral R 426 steps. **Open:** at step 427 an Astral R node's first self-collision
   contact differs in its last bit (the triangle contact pass, common to every mode:
   its force reaches the node through the 1/32 N accumulator, and the beam forces
-  were checked equal bit for bit). Not JBeam mode's; a follow-up.
+  were checked equal bit for bit). Not JBeam mode's; a follow-up. **Resolved in
+  §36** (`fixed_contact`).
 
 ## 36. The BeamNG profile (2026-11-05)
 
@@ -1619,6 +1628,7 @@ The research behind the list is `ror-vs-beamng-research.md` §5.
 | Anti-clip (vehicle and self) | the band test only | side memory and a swept crossing test | `anti_clip` |
 | Contact band | 2 cm (`set_collision_range`) | 2.5 cm, unless the file sets one | `collision_range` |
 | `NONCOLLIDABLE` triangles (JBeam) | not collision triangles | anti-clip only | `anti_only_tris` |
+| Contact force sums (CPU) | floats into the node's force | the GPU's fixed point (1/32 N, ties to even) | `fixed_contact` |
 
 **No throttle.** RoR's throttle skips work whose result can differ (AGENTS.md: not
 outside the RoR profile). A contacter arriving at 10 m/s at a triangle idle for a
@@ -1707,6 +1717,21 @@ self-collision node at 90 m/s and an anti-clip-only triangle, 3 and 6 vehicles (
 small group and the owner-by-owner pass), one-step then 17-step frames: the side
 memories equal word for word after every frame, positions within 1.1 µm (the
 accumulator's rounding, §35).
+
+**Fixed-point contact sums (CPU ↔ GPU bit parity).** The GPU adds contact forces
+per node in a fixed-point atomic sum (units of 1/32 N), order free; the CPU added
+floats, so the first contact step differed in a last bit (§35's open point). With
+`fixed_contact` the CPU sums every self-collision and vehicle-contact force (each
+hit's share to each node) the same way: each component ×32, clamped to ±2·10⁹,
+rounded to nearest with ties to even (`to_fixed`), summed as integers; a hit reads
+its node's force as force + sum/32 (+ the step's slide forces for vehicle contact);
+the node pass takes force + sum/32, then the slide forces (`force_now`). This is the
+GPU's arithmetic exactly, so no information is lost against the GPU result. The
+kernel's `toFixed` now spells out ties to even (WGSL's `round` is ties to even,
+Metal's `round` away from zero, so the native Metal host differed from wgpu at
+ties). The RoR profile keeps float sums. Checked: `jbeam_mode_steps_bit_for_bit`,
+the Astral R 1,200 steps bit for bit (its first self-contact at step 354);
+`anti_clip_steps_like_the_cpu`, positions equal after 162 steps of crossings.
 
 **Effect on the showcase car (sedan1, CPU, the profile's 2.5 cm band, anti-clip off
 and on).** T-bone at 80 km/h (`showcase_car.rs` `t_car_to_car_t_bone_at_80_kmh`,
