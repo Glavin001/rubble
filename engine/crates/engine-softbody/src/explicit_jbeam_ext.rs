@@ -434,8 +434,17 @@ impl ExplicitBeams {
         }
         self.beams[j] = beam;
         let ext = self.beam_ext[x];
+        // Yield moves only plain, support and anisotropic rest lengths (E2 .x holds
+        // the spawn rest length of those); not while the precompression ramps in.
+        let yields = matches!(
+            beam.kind,
+            ExplicitKind::JbeamPlain | ExplicitKind::JbeamSupport | ExplicitKind::JbeamAniso
+        );
         if ext.mask & EXT_DEFORM != 0
-            && (broke_now || (beam.rest - beam.rest0).abs() > ext.trigger * beam.rest0)
+            && (broke_now
+                || (yields
+                    && ext.ramp_left == 0
+                    && (beam.rest - ext.e2[0]).abs() > ext.trigger * ext.e2[0]))
         {
             self.trigger_deform(x);
         }
@@ -518,6 +527,12 @@ impl ExplicitBeams {
             ext.ramp_left = n;
             ext.ramp_delta = (beam.rest - spawn) / n as f32;
             beam.rest = spawn;
+        }
+        if matches!(
+            beam.kind,
+            ExplicitKind::JbeamPlain | ExplicitKind::JbeamSupport | ExplicitKind::JbeamAniso
+        ) {
+            ext.e2[0] = beam.rest0;
         }
         self.push_ext(j, ext);
     }
