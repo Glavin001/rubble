@@ -71,7 +71,7 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual } from './rubble-world.mjs';
+    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, decodeTexture } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
@@ -147,7 +147,7 @@
       const pc = pcName && list.includes(pcName) ? (await text(pcName))[1] : undefined;
       const meshes = await Promise.all(list.filter((f) => f.endsWith('.dae')).map(async (f) => [f, new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer())]));
       const materials = await Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text));
-      importSrc = { kind: 'jbeam', files, pc, meshes, materials, label: base.split('/').pop() };
+      importSrc = { kind: 'jbeam', files, pc, meshes, materials, base, list, label: base.split('/').pop() };
     } else if (qs.get('car') === 'import') {
       try { importSrc = JSON.parse(sessionStorage.getItem(IMPORT_KEY) || 'null'); } catch { importSrc = null; }
     }
@@ -1146,8 +1146,18 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // The showcase sedan's body, skinned from the lab's node positions (live and replay).
     // Or an imported JBeam vehicle's flexbodies and props (?mod=).
     let importVis = null;
-    const bodyVisual = () => carKind === 'showcase' ? showcaseBuilt().visual
-      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native', materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = r.visualLod; r.visual.lodDistance = r.lodDistance; return r.visual; })());
+    const bodyVisual = () => carKind === 'showcase' ? (() => { const b = showcaseBuilt(); b.visual.lod ??= [b.visualLod, b.visualFar]; return b.visual; })()
+      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native', materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = [r.visualLod, r.visualFar]; loadBodyTextures(r.visual); return r.visual; })());
+    // An imported body's colour maps (decoded in the wasm), uploaded once
+    // they arrive; until then it shades untextured.
+    const loadBodyTextures = (vis) => {
+      if (!importSrc.base || !vis.textures?.length || qs.get('tex') === '0') return;
+      Promise.all(vis.textures.map(async (t) => {
+        const f = importSrc.list.find((x) => x.split('/').pop().toLowerCase() === t.toLowerCase());
+        if (!f) return null;
+        try { return decodeTexture(new Uint8Array(await (await fetch(`${importSrc.base}/${f}`)).arrayBuffer()), 1024); } catch { return null; }
+      })).then((layers) => bodyR.setTextures(layers, 1024));
+    };
     const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
     let bodyFor = { layout: null, pos: null }, bodyIds = [];
     const syncBody = () => {
@@ -1160,7 +1170,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         // beams a rig added past the body's own (the door pull's cables) as cables.
         const vis = bodyVisual();
         const own = (v) => v.name === xlayout.vehicles[0].name && v.nodes >= vis.nodeCount;
-        bodyIds = xlayout.vehicles.filter(own).map((v) => bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: xlayout.vehicles.indexOf(v), lod: vis.lod ?? null, lodDistance: vis.lodDistance ?? 18 }));
+        bodyIds = xlayout.vehicles.filter(own).map((v) => bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: xlayout.vehicles.indexOf(v), lod: vis.lod ?? null }));
         let tri = 0;
         const solidTris = [];
         let cables = [0, 0];
@@ -1758,7 +1768,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       // to the nodes (the showcase car renderer) draws here too, from
       // labR.positionsBuffer() (live and replayed positions alike).
       if (xsim && LAB) labR.drawOpaque(rp);
-      if (xsim && bodyOn() && bodyFor.pos) bodyR.draw(rp, { viewProj: labView.vp, eye: labView.eye, light: LIGHT });
+      if (xsim && bodyOn() && bodyFor.pos) bodyR.draw(rp, { viewProj: labView.vp, eye: labView.eye, light: LIGHT, height: canvas.height });
       else if (xsim) {
         const xb = xBindings();
         rp.setPipeline(xSkinPipe); rp.setBindGroup(0, xb.skin); rp.draw(xlayout.triangles * 3);

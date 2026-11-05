@@ -82,6 +82,10 @@ const LAMINATED_CRACK_STRAIN = 45e6 / 70e9;
 // the binding triangle's size. A fold whose planes differ by θ switches
 // planes over about CREASE_SHARP · L / sin θ.
 const CREASE_SHARP = 0.08;
+// Level of detail: the finest level whose median edge spans this many pixels
+// (3: at 1080p the 10-car row at 16 m and 30 m looks the same on the second
+// level as on the full mesh; finer triangles only add quad overshading).
+const LOD_PX = 3.0;
 // A node's skin splits into two planes (a fold through it) where its most
 // deviant triangle is more than 20° from its mean normal (skin.rs SPLIT_COS).
 const SPLIT_COS = Math.cos(20 * Math.PI / 180);
@@ -111,7 +115,7 @@ struct Fx { dt: f32, seed: u32, floorY: f32, boxes: u32, box: array<vec4f, ${2 *
 @group(0) @binding(5) var<storage, read> topo: array<u32>;
 @group(0) @binding(6) var<storage, read> beams: array<vec4f>;
 // Per node NS (6) vec4: (plane a, tear), (last world position, valid), (plastic
-// strain, broken beams, scrape (m slid in contact), 0); then per damage unit
+// strain, broken beams, paint worn (µm), 0); then per damage unit
 // (broken, strain, shards due, broken as of the last moving update) at
 // stateAt; then the level of detail state (picked, picked last update) at
 // stateAt + unitCount.
@@ -125,7 +129,9 @@ ${FX_COMPUTE_WGSL(FX_N, 'fxu.seed')}
 // level a dispatch (3 words) and four indexed draws (opaque, glass, the
 // opaque triangles near the floor for the contact shadows, and those under
 // 0.95 m for the floor reflection, which has faded to 3 % there; 5 words each).
-struct Lod { n0: u32, n1: u32, opq0: u32, gl0: u32, opq1: u32, gl1: u32, levels: u32, dist: f32, low0: u32, low1: u32, mid0: u32, mid1: u32 };
+// Per level (up to 3): vertices, opaque and glass index counts, the floor
+// passes' counts, the median edge (m); then the level count.
+struct Lod { n: vec4u, opq: vec4u, gl: vec4u, low: vec4u, mid: vec4u, edge: vec4f, levels: vec4u };
 @group(1) @binding(0) var<uniform> lod: Lod;
 @group(1) @binding(1) var<storage, read_write> args: array<u32>;
 @group(1) @binding(2) var<uniform> view: vec4f;
@@ -140,6 +146,22 @@ const NS = 6u;
 const ANNEALED_CRACK = ${LAMINATED_CRACK_STRAIN};
 // A node within this of a surface (its collision range) is in contact.
 const CONTACT = 0.03;
+// Paint wear (Archard: worn depth = K · p · s / H, s the distance slid in
+// contact). K = 0.05: two-body abrasive wear against a rough counterface
+// (concrete, a road) is K ≈ 10⁻² … 10⁻¹ (Rabinowicz, Friction and Wear of
+// Materials, 2nd ed., 1995); the middle of that range is a Choice. H = 0.2
+// GPa: a crosslinked automotive clearcoat's indentation hardness, a Choice
+// (published nanoindentation studies measure these coats; we found no value
+// to cite). p = 1 MPa: a Choice, because the solver does not expose its
+// contact forces (a 10 kN contact on 1 cm² of real contact). Depth per metre
+// slid: K p / H = 250 µm. Layers (typical OEM build-up, Streitberger &
+// Dössel, Automotive Paints and Coatings, 2nd ed., 2008): clearcoat 45 µm,
+// basecoat 20 µm, primer 25 µm, e-coat 20 µm: primer shows past 65 µm worn,
+// bare steel past 110 µm.
+const WEAR_K = 0.05;
+const WEAR_P = 1.0e6;
+const WEAR_H = 0.2e9;
+const WEAR_UM_PER_M = ${1e6} * WEAR_K * WEAR_P / WEAR_H;
 
 fn origin() -> vec3f {
   let o = misc[params.vehicle];
@@ -354,9 +376,12 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
       let vt = length(v - sf.xyz * vn);
       let seed = i * 7919u + params.vehicle * 104729u;
       if (sf.w < CONTACT && mat != 3u) {
-        // Sliding contact: the paint wears (metres slid), metal throws
-        // sparks (about 4 a second per node and m/s), a hard landing dust.
-        scrape += vt * fxu.dt;
+        // Sliding contact: metal throws sparks (about 4 a second per node
+        // and m/s), a hard landing dust. The paint wears (µm, WEAR_*) only
+        // where the solver's own contact rule holds: the node at or inside
+        // the surface (it pushes a node out of the ground and boxes only
+        // there), not merely near it.
+        if (sf.w <= 0.0) { scrape += vt * fxu.dt * WEAR_UM_PER_M; }
         if (mat == 0u && vt > 2.0 && fxRnd(seed, 1u) < min(vt * 4.0 * fxu.dt, 0.5)) {
           let dir = normalize(v - sf.xyz * vn + vec3f(1e-5));
           fxSpawn(p + sf.xyz * 0.01, v * 0.7 + dir * 2.0 + fxRndDir(seed, 2u) * 1.8 + sf.xyz * 1.5, 0.2 + 0.4 * fxRnd(seed, 3u), 0u);
@@ -379,28 +404,34 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 
-// Pick the car's level from its distance (its first node) to the eye.
+// Pick the car's level: the finest whose median edge is at least LOD_PX
+// pixels at the car's distance (its first node) from the last frame's eye
+// (view.w: pixels per unit of tan, i.e. viewport height / 2 / tan(fov / 2)).
+// Finer triangles than a pixel change nothing on screen but cost overshading.
+const LOD_PX = ${LOD_PX};
 @compute @workgroup_size(1)
 fn pick() {
+  let nl = lod.levels.x;
   var sel = 0u;
-  if (lod.levels > 1u && view.w > 0.5 && distance(nodePos(0u) + origin(), view.xyz) > lod.dist) { sel = 1u; }
+  if (nl > 1u && view.w > 0.0) {
+    let d = max(distance(nodePos(0u) + origin(), view.xyz), 1e-3);
+    sel = nl - 1u;
+    for (var k = 0u; k < nl; k++) {
+      if (lod.edge[k] * view.w / d >= LOD_PX) { sel = k; break; }
+    }
+  }
   let ls = params.stateAt + params.unitCount;
   // (picked, picked last update): a level just switched to has stale
   // vertices, so it spawns nothing this update.
   nodeN[ls] = vec4f(f32(sel), nodeN[ls].x, 0.0, 0.0);
-  let ns = array<u32, 2>(lod.n0, lod.n1);
-  let opq = array<u32, 2>(lod.opq0, lod.opq1);
-  let gl = array<u32, 2>(lod.gl0, lod.gl1);
-  let low = array<u32, 2>(lod.low0, lod.low1);
-  let mid = array<u32, 2>(lod.mid0, lod.mid1);
-  for (var k = 0u; k < 2u; k++) {
+  for (var k = 0u; k < nl; k++) {
     let on = select(0u, 1u, k == sel);
     let b = k * 23u;
-    args[b] = on * ((ns[k] + ${WG - 1}u) / ${WG}u); args[b + 1u] = 1u; args[b + 2u] = 1u;
-    args[b + 3u] = opq[k]; args[b + 4u] = on; args[b + 5u] = 0u; args[b + 6u] = 0u; args[b + 7u] = 0u;
-    args[b + 8u] = gl[k]; args[b + 9u] = on; args[b + 10u] = opq[k]; args[b + 11u] = 0u; args[b + 12u] = 0u;
-    args[b + 13u] = low[k]; args[b + 14u] = on; args[b + 15u] = 0u; args[b + 16u] = 0u; args[b + 17u] = 0u;
-    args[b + 18u] = mid[k]; args[b + 19u] = on; args[b + 20u] = 0u; args[b + 21u] = 0u; args[b + 22u] = 0u;
+    args[b] = on * ((lod.n[k] + ${WG - 1}u) / ${WG}u); args[b + 1u] = 1u; args[b + 2u] = 1u;
+    args[b + 3u] = lod.opq[k]; args[b + 4u] = on; args[b + 5u] = 0u; args[b + 6u] = 0u; args[b + 7u] = 0u;
+    args[b + 8u] = lod.gl[k]; args[b + 9u] = on; args[b + 10u] = lod.opq[k]; args[b + 11u] = 0u; args[b + 12u] = 0u;
+    args[b + 13u] = lod.low[k]; args[b + 14u] = on; args[b + 15u] = 0u; args[b + 16u] = 0u; args[b + 17u] = 0u;
+    args[b + 18u] = lod.mid[k]; args[b + 19u] = on; args[b + 20u] = 0u; args[b + 21u] = 0u; args[b + 22u] = 0u;
   }
 }
 
@@ -449,9 +480,8 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
     // vertex moves by the change of its offset (the rest pose and any rigid
     // motion are exact), and its rest normal turns with its planes' normals,
     // weighted as they are: smooth over a mild bend, switching sharply along
-    // a fold's straight line. Only where that disagrees with the triangle
-    // frame's by more than ~45° (a panel crushed past its binding) does the
-    // faceted normal take over.
+    // a fold's straight line. (No faceted fallback: the binding triangle's
+    // frame normal drew its edges as a sawtooth along crushed lips.)
     let ids = array<u32, 3>(bd.n0, bd.n1, bd.n2);
     var pn: array<vec3f, 3>; var an: array<vec3f, 3>; var bn: array<vec4f, 3>;
     var pr: array<vec3f, 3>; var ar: array<vec3f, 3>; var br: array<vec4f, 3>;
@@ -467,8 +497,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
       let now = envelope(pn, an, bn, w, l);
       let rest = envelope(pr, ar, br, w, l);
       pos += clamp(now.e - rest.e, -0.5 * l, 0.5 * l) * now.u;
-      let ns = rotTo(rest.n, now.n, vec3f(bd.rx, bd.ry, bd.rz));
-      nrm = normalize(mix(ns, nf, 1.0 - smoothstep(0.55, 0.75, dot(ns, nf))));
+      nrm = normalize(rotTo(rest.n, now.n, vec3f(bd.rx, bd.ry, bd.rz)));
     }
   }
   // The binding nodes' plastic strain, broken beams and scrape.
@@ -514,7 +543,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
   outv[k] = vec4f(pos, bitcast<f32>(pack2x16float(vec2f(tear, dmg))));
-  outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(plastic, min(scrape, 1000.0)))));
+  outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(plastic, min(scrape, 60000.0)))));
 }
 
 // The particles' step (once per update, after every car's spawns).
@@ -571,6 +600,9 @@ fn fxChip(kind: u32, h: f32) -> vec3f {
 const DRAW_WGSL = /* wgsl */ `
 struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
 @group(0) @binding(0) var<uniform> frame: Frame;
+// Imported vehicles' colour maps (setTextures): one array, a layer each.
+@group(0) @binding(1) var texArr: texture_2d_array<f32>;
+@group(0) @binding(2) var texSamp: sampler;
 
 struct VOut {
   @builtin(position) @invariant clip: vec4f,
@@ -583,8 +615,10 @@ struct VOut {
   @location(6) strain: f32,
   @location(7) rest: vec3f,
   @location(8) uv: vec2f,
-  // (plastic strain, scrape: metres slid in contact).
+  // (plastic strain, paint worn through: µm).
   @location(9) wear: vec2f,
+  // Texture layer + 1 (0 none): an imported vehicle's colour map.
+  @location(10) @interpolate(flat) tex: u32,
 };
 
 @vertex
@@ -598,7 +632,9 @@ fn vs(@location(0) p3: vec3f, @location(8) tw: u32, @location(1) n3: vec3f, @loc
   o.world = pt.xyz;
   o.normal = nrm.xyz;
   o.color = color;
-  o.mat = mat;
+  // The attribute's low byte is the material, its high half the texture.
+  o.mat = mat & 0xffu;
+  o.tex = mat >> 16u;
   o.torn = pt.w;
   o.ao = ao;
   o.strain = nrm.w;
@@ -810,7 +846,8 @@ fn vsContact(@location(0) p3: vec3f, @location(8) tw: u32, @location(1) n3: vec3
   let sp = nh / max(length(nh), 1e-3) * min(length(nh), 1.0) * (0.02 + 0.2 * max(hgt, 0.0));
   o.clip = frame.viewProj * vec4f(pt.x + sp.x, frame.eye.w + 0.002, pt.z + sp.y, 1.0);
   // Glass, lenses and torn skin cast none.
-  let skip = pt.w > 0.5 || mat == 1u || mat == 17u || mat == 20u || mat == 25u || mat == 27u;
+  let m = mat & 0xffu;
+  let skip = pt.w > 0.5 || m == 1u || m == 17u || m == 20u || m == 25u || m == 27u;
   let fall = 1.0 - smoothstep(0.0, 0.15, hgt);
   o.a = select(frame.light.w * fall, 0.0, skip || hgt < -0.05);
   // Far above the floor: collapsed to one point outside the view, so the
@@ -856,6 +893,10 @@ fn shade(i: VOut, front: bool) -> vec4f {
   // Texture-coordinate footprint (taken in uniform control flow): printed
   // text fades to its average ink when too small to read.
   let uvw = fwidth(i.uv);
+  // The colour map's sampling footprint (v flipped: images are stored top
+  // row first, Collada's t points up).
+  let tdx = dpdx(i.uv) * vec2f(1.0, -1.0);
+  let tdy = dpdy(i.uv) * vec2f(1.0, -1.0);
   var zc = 0.0;
   var zw = 1.0;
   if (ZEBRA > 0.0) {
@@ -921,11 +962,17 @@ fn shade(i: VOut, front: bool) -> vec4f {
   let scr = i.wear.y;
   var m = i.mat;
   var albedo = i.color;
-  if ((m == 0u || m == 3u || m == 9u) && scr > 0.005) {
+  if (i.tex > 0u) {
+    albedo *= textureSampleGrad(texArr, texSamp, vec2f(i.uv.x, 1.0 - i.uv.y), i.tex - 1u, tdx, tdy).rgb;
+  }
+  // Worn depth (µm, WEAR_*): through clear and base to primer past 65 µm,
+  // through primer and e-coat to bare steel past 110 µm; in streaks (the
+  // contact is a few asperities wide), wider as it deepens.
+  if ((m == 0u || m == 3u || m == 9u) && scr > 65.0) {
     let q = i.rest * vec3f(60.0, 60.0, 4.0);
     let streak = noise3(q) * 0.65 + noise3(q * 3.1) * 0.35;
-    let amount = smoothstep(0.005, 0.6, scr);
-    if (streak > 0.815 - 0.3 * amount && scr > 0.05) { m = 7u; albedo = vec3f(0.56, 0.56, 0.58); }
+    let amount = smoothstep(65.0, 400.0, scr);
+    if (streak > 0.815 - 0.3 * amount && scr > 110.0) { m = 7u; albedo = vec3f(0.56, 0.56, 0.58); }
     else if (m == 0u && streak > 0.74 - 0.35 * amount) { m = 254u; albedo = vec3f(0.30, 0.30, 0.29); }
   }
   // Round a tear, the paint has cracked off the stretched steel (grey
@@ -1135,13 +1182,17 @@ fn shade(i: VOut, front: bool) -> vec4f {
 export function createShowcaseCarRenderer(device, opts = {}) {
   const { format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none', zebra = 0 } = opts;
   // ?crease= / ?splitDeg= (showcase-car.html): other crease constants, for comparison.
-  const crease = (code) => code.replace(`const CREASE_SHARP = ${CREASE_SHARP};`, `const CREASE_SHARP = ${opts.creaseSharp || CREASE_SHARP};`)
+  const crease = (code) => code.replace(`const LOD_PX = ${LOD_PX};`, `const LOD_PX = ${opts.lodPx || LOD_PX};`).replace(`const CREASE_SHARP = ${CREASE_SHARP};`, `const CREASE_SHARP = ${opts.creaseSharp || CREASE_SHARP};`)
     .replace(`const SPLIT_COS = ${SPLIT_COS};`, `const SPLIT_COS = ${opts.splitDeg ? Math.cos(opts.splitDeg * Math.PI / 180) : SPLIT_COS};`);
   const skinModule = device.createShaderModule({ label: 'showcase-skin', code: crease(SKIN_WGSL) });
   let drawCode = zebra ? DRAW_WGSL.replace('const ZEBRA: f32 = 0.0;', `const ZEBRA: f32 = ${Number(zebra).toFixed(1)};`) : DRAW_WGSL;
   // Profiling (showcase-car.html ?perfFlat=1, ?perfSkip=opaque,glass,reflect,contact):
   // a flat fragment shader (vertex and raster cost alone), or parts left out.
   if (opts.perfFlat) drawCode = drawCode.replace('  return shade(i, front);\n}', '  return vec4f(i.color, 1.0);\n}');
+  // ?debugWear=1: red the tear field, green plastic strain (×10), blue metres slid (×10).
+  if (opts.debugWear) drawCode = drawCode.replace('  return shade(i, front);\n}', '  return vec4f(i.torn, min(i.wear.x * 10.0, 1.0), min(i.wear.y * 10.0, 1.0), 1.0);\n}');
+  // ?perfNoDiscard=1: the fragment discards (tears, shattered glass) left out (measures HSR).
+  if (opts.perfNoDiscard) drawCode = drawCode.replace('if (i.torn > 0.5) { discard; }', '').replace('if (shattered(i.mat, i.strain)) { discard; }', '');
   const skip = new Set(opts.perfSkip ?? []);
   const drawModule = device.createShaderModule({ label: 'showcase-draw', code: drawCode });
   // 0 nodes, 1 misc, 2 binds, 3 out (rw), 4 params, 5 topo, 6 beams, 7 node
@@ -1180,7 +1231,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   });
   const pickPipeLayout = device.createPipelineLayout({ bindGroupLayouts: [skinLayout, pickLayout] });
   const pickPipe = device.createComputePipeline({ label: 'showcase-lod-pick', layout: pickPipeLayout, compute: { module: skinModule, entryPoint: 'pick' } });
-  // The eye of the last draw (w = 1 once set): picks levels of detail.
+  // The eye of the last draw and its pixel scale (w, 0 before the first draw): picks levels of detail.
   const viewBuf = device.createBuffer({ label: 'showcase-view', size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const drawPipe = device.createRenderPipeline({
     label: 'showcase-draw',
@@ -1273,8 +1324,15 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   const mirrorBind = device.createBindGroup({ layout: mirrorPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: mirrorBuf } }] });
   const mirrorDepthBind = device.createBindGroup({ layout: mirrorDepthPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: mirrorBuf } }] });
   const frameBuf = device.createBuffer({ label: 'showcase-frame', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const drawBind = device.createBindGroup({ layout: drawPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
-  const glassBind = device.createBindGroup({ layout: glassPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
+  // Colour maps: one texture array shared by every car (setTextures), a
+  // white layer until then.
+  const texSamp = device.createSampler({ magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat', maxAnisotropy: 8 });
+  let texArr = device.createTexture({ size: [1, 1, 1], format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  device.queue.writeTexture({ texture: texArr }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, [1, 1, 1]);
+  let texLayers = 0;
+  const texEntries = () => [{ binding: 1, resource: texArr.createView({ dimension: '2d-array' }) }, { binding: 2, resource: texSamp }];
+  const makeDrawBinds = () => [drawPipe, glassPipe].map((p) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }, ...texEntries()] }));
+  let [drawBind, glassBind] = makeDrawBinds();
   const fxBind = device.createBindGroup({ layout: fxPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }, { binding: 1, resource: { buffer: fxBuf } }] });
   const cars = new Map();
   let nextId = 1;
@@ -1296,6 +1354,31 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   };
 
   return {
+    /**
+     * The colour maps (wasm `decodeTexture(bytes, size)` per file of a
+     * visual's `textures`, null for a missing one: white), `size` × `size`
+     * with mips. Returns the first layer's index: pass it as addCar's
+     * `texBase`. Replaces any earlier set (cars added before keep theirs only
+     * if this set starts with the same layers).
+     */
+    setTextures(layers, size) {
+      const mips = Math.log2(size) + 1;
+      if (!Number.isInteger(mips)) throw new Error('showcase setTextures: size must be a power of two');
+      texArr.destroy();
+      texArr = device.createTexture({ size: [size, size, Math.max(1, layers.length)], mipLevelCount: mips, format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      layers.forEach((data, z) => {
+        let off = 0;
+        for (let l = 0, s = size; l < mips; l++, s = Math.max(1, s >> 1)) {
+          const n = s * s * 4;
+          const px = data ? data.subarray(off, off + n) : new Uint8Array(n).fill(255);
+          device.queue.writeTexture({ texture: texArr, mipLevel: l, origin: [0, 0, z] }, px, { bytesPerRow: s * 4, rowsPerImage: s }, [s, s, 1]);
+          off += n;
+        }
+      });
+      texLayers = layers.length;
+      [drawBind, glassBind] = makeDrawBinds();
+      return 0;
+    },
     /**
      * Skin from world-space node positions instead (xyz f32 per node, all vehicles in
      * order; e.g. the crash lab's positionsBuffer(), so replays deform the body too),
@@ -1330,7 +1413,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * vehicle's first node in the solver (`layout.vehicles[i].nodeOffset`), `vehicle`
      * its index (for its origin). Returns an id.
      */
-    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, lodDistance = 18 } = {}) {
+    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0 } = {}) {
       const nodeCount = visual.nodeCount;
       const nt = visual.normalTris, start = visual.nodeTriStart, list = visual.nodeTriList;
       const units = visual.unitKind?.length ?? 0;
@@ -1432,7 +1515,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         for (let i = 0; i < n; i++) {
           af.set(v.colors.subarray(3 * i, 3 * i + 3), 10 * i);
           af[10 * i + 3] = v.ao ? v.ao[i] : 1;
-          au[10 * i + 4] = v.material[i];
+          // Material (low byte), texture layer + 1 (high half; 0 none).
+          const t = v.tex ? v.tex[i] : 0;
+          au[10 * i + 4] = v.material[i] | (t ? (t + texBase) << 16 : 0);
           af.set(v.positions.subarray(3 * i, 3 * i + 3), 10 * i + 5);
           if (v.uvs) af.set(v.uvs.subarray(2 * i, 2 * i + 2), 10 * i + 8);
         }
@@ -1487,26 +1572,30 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         return { n, binds, out, attrs, index, floorIndex, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const car = { nodeOffset, beamOffset };
-      const levels = [level(visual, 0)];
-      if (lod) levels.push(level(lod, 1));
+      const extra = (Array.isArray(lod) ? lod : [lod]).filter(Boolean).slice(0, 2);
+      const levels = [visual, ...extra].map((v, k) => level(v, k));
       for (const lv of levels) device.queue.writeBuffer(lv.params, 0, lv.pw());
-      const lodData = new ArrayBuffer(48);
-      const lu = new Uint32Array(lodData);
-      const l1 = levels[1] ?? levels[0];
-      lu.set([levels[0].n, l1.n, levels[0].opaqueCount, levels[0].glassCount, l1.opaqueCount, l1.glassCount, levels.length]);
-      new Float32Array(lodData)[7] = lodDistance;
-      lu.set([levels[0].lowCount, l1.lowCount, levels[0].midCount, l1.midCount], 8);
+      // SKIN_WGSL's Lod: per level n, opaque, glass, low, mid counts, edge.
+      const lodData = new ArrayBuffer(112);
+      const lu = new Uint32Array(lodData), lf = new Float32Array(lodData);
+      levels.forEach((lv, k) => {
+        lu[k] = lv.n; lu[4 + k] = lv.opaqueCount; lu[8 + k] = lv.glassCount; lu[12 + k] = lv.lowCount; lu[16 + k] = lv.midCount;
+        lf[20 + k] = [visual, ...extra][k].edgeLength ?? 0;
+      });
+      lu[24] = levels.length;
+      const argWords = new Uint32Array(levels.length * 23);
+      levels.forEach((lv, k) => {
+        const on = k === 0 ? 1 : 0;
+        argWords.set([on * Math.ceil(lv.n / WG), 1, 1, lv.opaqueCount, on, 0, 0, 0, lv.glassCount, on, lv.opaqueCount, 0, 0, lv.lowCount, on, 0, 0, 0, lv.midCount, on, 0, 0, 0], k * 23);
+      });
       Object.assign(car, {
         nodeCount, vehicle, levels, units, stateAt, unitNames: visual.unitNames ?? [], skinBind: null, posBind: null,
         topo: upload('showcase-topology', topo),
         // Per node 6 vec4, per unit 1, the level state 1 (zeros: nothing yet).
         nodeN: device.createBuffer({ label: 'showcase-node-state', size: (stateAt + units + 1) * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
         lod: upload('showcase-lod', lodData, GPUBufferUsage.UNIFORM),
-        // Indirect args (2 levels × 23 words); level 0 drawn until the first pick.
-        args: upload('showcase-lod-args', new Uint32Array([
-          Math.ceil(levels[0].n / WG), 1, 1, levels[0].opaqueCount, 1, 0, 0, 0, levels[0].glassCount, 1, levels[0].opaqueCount, 0, 0, levels[0].lowCount, 1, 0, 0, 0, levels[0].midCount, 1, 0, 0, 0,
-          0, 1, 1, l1.opaqueCount, 0, 0, 0, 0, l1.glassCount, 0, l1.opaqueCount, 0, 0, l1.lowCount, 0, 0, 0, 0, l1.midCount, 0, 0, 0, 0,
-        ]), GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT),
+        // Indirect args (23 words a level); level 0 drawn until the first pick.
+        args: upload('showcase-lod-args', argWords, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT),
       });
       car.pickBind = device.createBindGroup({
         layout: pickLayout,
@@ -1654,13 +1743,16 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       }
     },
     /** Draw every car into `pass` (a render pass with a colour target of `format` and depth). */
-    draw(pass, { viewProj, eye, light = [0.4, 0.8, 0.35] }) {
+    draw(pass, { viewProj, eye, light = [0.4, 0.8, 0.35], height = 1080 }) {
       const fr = new Float32Array(24);
       fr.set(viewProj, 0);
       fr.set([eye[0], eye[1], eye[2], 1], 16);
       fr.set([light[0], light[1], light[2], 0], 20);
       device.queue.writeBuffer(frameBuf, 0, fr);
-      device.queue.writeBuffer(viewBuf, 0, new Float32Array([eye[0], eye[1], eye[2], 1]));
+      // The pick's pixel scale: viewport height / 2 × the projection's y scale
+      // (the length of viewProj's second row; a rotation keeps it).
+      const py = Math.hypot(viewProj[1], viewProj[5], viewProj[9]);
+      device.queue.writeBuffer(viewBuf, 0, new Float32Array([eye[0], eye[1], eye[2], 0.5 * height * py]));
       for (const [pipe, bind, at] of [[drawPipe, drawBind, 12, 'opaque'], [glassPipe, glassBind, 32, 'glass']].filter((d) => !skip.has(d[3]))) {
         pass.setPipeline(pipe);
         pass.setBindGroup(0, bind);
@@ -1674,7 +1766,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         }
       }
       // Debris (6 vertices a particle; dead ones collapse outside the view).
-      if (fxLive) {
+      if (fxLive && !skip.has('fx')) {
         pass.setPipeline(fxPipe);
         pass.setBindGroup(0, fxBind);
         pass.draw(6, FX_N);

@@ -9,7 +9,7 @@
 //     --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
 //   node --experimental-websocket crash-lab-record.mjs [--car showcase] [--size 1920x1080] [--out file.mp4] [preset ...]
 //
-// Presets: wall56, pole29, headon50, drop15 (by default), tbone214, tbone80,
+// Presets: wall56, pole29, tbone80, drop15 (by default), headon50, tbone214,
 // overlap64, swipe50, mdb214, doorpull; name:strain for the beam-strain view. Needs Chrome and ffmpeg.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -123,11 +123,13 @@ const play = async (seconds, slow) => {
 };
 const hold = async (seconds) => { for (let f = 0; f < seconds * FPS; f++) { await lab('L.draw()'); await grab(); } };
 const PRESETS = {
-  wall56: { cam: 'three' }, pole29: { cam: 'threeFront' }, headon50: { cam: 'side' }, drop15: { cam: 'side' },
-  tbone214: { cam: 'three' }, tbone80: { cam: 'three' }, overlap64: { cam: 'threeFront' }, swipe50: { cam: 'threeFront' },
+  // zoom: the camera's distance against the lab preset's (closer, so the
+  // damage reads).
+  wall56: { cam: 'three', zoom: 0.55, yaw: 1.2 }, pole29: { cam: 'threeFront', zoom: 0.6 }, headon50: { cam: 'side', zoom: 0.8 }, drop15: { cam: 'side', zoom: 0.7 },
+  tbone214: { cam: 'three', zoom: 0.7 }, tbone80: { cam: 'three', zoom: 0.4 }, overlap64: { cam: 'threeFront', zoom: 0.7 }, swipe50: { cam: 'threeFront', zoom: 0.7 },
   mdb214: { cam: 'three' }, doorpull: { cam: 'threeFront', slow: 2.0 },
 };
-const runs = only.length ? only : ['wall56', 'pole29', 'headon50', 'drop15', 'wall56:strain'];
+const runs = only.length ? only : ['wall56', 'pole29', 'tbone80', 'drop15', 'wall56:strain'];
 for (const run of runs) {
   const [name, view] = run.split(':');
   const p = PRESETS[name];
@@ -141,7 +143,7 @@ for (const run of runs) {
   // Pass 2: the recording.
   // The strain pass: the beam skeleton and nodes coloured by strain over a ghost body.
   await open(`preset=${name}&paused=1${view === 'strain' ? '&skin3=ghost&skeleton=1&nodes=1&color=strain' : ''}`);
-  await lab(`(L.lab.camera('${p.cam}'), true)`);
+  await lab(`(L.lab.camera('${p.cam}', ${p.zoom ?? 1}, ${p.yaw ?? null}), true)`);
   await lab('(L.lab.setClean(true), true)');
   const pre = impact / HZ;
   const lead = Math.min(1.0, pre - 0.03);

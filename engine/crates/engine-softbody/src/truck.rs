@@ -110,6 +110,8 @@ enum Section {
     Triggers,
     Animators,
     SlideNodes,
+    TyrePose,
+    SpawnContacts,
     Skipped,
 }
 
@@ -314,6 +316,24 @@ pub struct TruckFile {
     /// square root, not RoR's fast inverse square root (its error, up to 0.18 % of a
     /// length, is comparable to metal's yield strain and far above glass's).
     pub exact_lengths: bool,
+    /// `rubble_rest_pose <y>` (Rubble's extension): the file's node positions are
+    /// the vehicle at rest on flat ground at height `y` (its beams' rest lengths
+    /// carry the unloaded geometry).
+    pub rest_ground: Option<f32>,
+    /// `rubble_tyre_pose` lines `wheel, node, x, y, z` (Rubble's extension): a
+    /// generated tyre node's spawn position (the tyre at rest, deflected; its
+    /// beams' rest lengths stay the undeflected tyre's). `wheel` is the file's
+    /// wheel index, `node` the tyre's node (0 .. 2 × rays).
+    pub tyre_pose: Vec<(u32, u32, [f32; 3])>,
+    /// `rubble_tyre_pose` lines `wheel, x1, y1, z1, x2, y2, z2`: the tyre's
+    /// axle nodes' rest positions (the unloaded design's), which its beams'
+    /// rest lengths are built round.
+    pub tyre_rest_axle: Vec<(u32, [f32; 3], [f32; 3])>,
+    /// `rubble_spawn_contacts` lines `a, b, c, node` (Rubble's extension): a
+    /// node and a collision triangle (by its nodes) that collide although the
+    /// node starts in its range: in a file that is its vehicle at rest, they
+    /// rest in contact (spec §10.1's spawn exclusions are the design's).
+    pub spawn_contacts: Vec<([u32; 3], u32)>,
     pub wheels: Vec<TruckWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
@@ -594,6 +614,8 @@ impl Parser {
             "triggers" => Section::Triggers,
             "animators" => Section::Animators,
             "slidenodes" => Section::SlideNodes,
+            "rubble_tyre_pose" => Section::TyrePose,
+            "rubble_spawn_contacts" => Section::SpawnContacts,
             // Known sections this importer does not simulate (phase 3 / cosmetic).
             "engoption"
             | "engturbo"
@@ -750,6 +772,7 @@ impl Parser {
             "enable_advanced_deformation" => self.out.advanced_deformation = true,
             "rubble_full_contact" => self.out.full_contact = true,
             "rubble_exact_lengths" => self.out.exact_lengths = true,
+            "rubble_rest_pose" => self.out.rest_ground = Some(f(t, 1, 0.0)),
             "detacher_group" => {
                 self.detacher_group = if t.get(1) == Some(&"end") {
                     0
@@ -855,7 +878,11 @@ impl Parser {
                 Self::beam_options(&mut beam, t);
                 // (Rubble's extension: a fifth field, its rest length over
                 // its spawn length.)
-                if let Some(p) = t.get(4).and_then(|p| p.parse::<f32>().ok()).filter(|&p| p > 0.0) {
+                if let Some(p) = t
+                    .get(4)
+                    .and_then(|p| p.parse::<f32>().ok())
+                    .filter(|&p| p > 0.0)
+                {
                     beam.precompression = p;
                 }
                 self.out.beams.push(beam);
@@ -1041,6 +1068,31 @@ impl Parser {
                     self.out.triangles.push(tri.clone());
                 }
                 self.out.triangles.push(tri);
+            }
+            Section::SpawnContacts => {
+                let n: Vec<u32> = t.iter().filter_map(|x| x.parse::<u32>().ok()).collect();
+                if n.len() >= 4 {
+                    self.out.spawn_contacts.push(([n[0], n[1], n[2]], n[3]));
+                } else {
+                    self.warn("rubble_spawn_contacts needs a, b, c, node: ignored".into());
+                }
+            }
+            Section::TyrePose => {
+                if t.len() >= 7 {
+                    self.out.tyre_rest_axle.push((
+                        f(t, 0, 0.0) as u32,
+                        [f(t, 1, 0.0), f(t, 2, 0.0), f(t, 3, 0.0)],
+                        [f(t, 4, 0.0), f(t, 5, 0.0), f(t, 6, 0.0)],
+                    ));
+                } else if t.len() >= 5 {
+                    self.out.tyre_pose.push((
+                        f(t, 0, 0.0) as u32,
+                        f(t, 1, 0.0) as u32,
+                        [f(t, 2, 0.0), f(t, 3, 0.0), f(t, 4, 0.0)],
+                    ));
+                } else {
+                    self.warn("rubble_tyre_pose needs wheel, node, x, y, z: ignored".into());
+                }
             }
             Section::Contacters => {
                 for tok in t {

@@ -40,7 +40,7 @@ fn settle_and_measure(label: &str, truck: &str) {
     let probe = ExplicitBeams::from_truck(truck, Vec3::ZERO, Vec3::ZERO, settings.clone()).unwrap();
     materials(label, &probe);
     let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
-    let mut s = ExplicitBeams::from_truck(truck, Vec3::new(0.0, 0.02 - low, 0.0), Vec3::ZERO, settings).unwrap();
+    let mut s = ExplicitBeams::from_truck(truck, Vec3::new(0.0, probe.spawn_clearance() - low, 0.0), Vec3::ZERO, settings).unwrap();
     for _ in 0..180 { s.frame(); }
     let n = s.nodes.len();
     let frames = 60;

@@ -197,6 +197,12 @@ pub struct ShowcaseVisual {
     /// Per solver node its surface material ([`node_mat`]): which nodes throw
     /// sparks when they scrape (metal), chips (plastic), nothing (rubber).
     pub node_material: Vec<u8>,
+    /// Texture files (an imported vehicle's colour maps, by file name in its
+    /// folder; `flextex` decodes them) and per vertex its texture's index
+    /// (`u16::MAX` or absent: untextured). Its colour multiplies the
+    /// vertex's (sampled at its `uvs`, v up).
+    pub textures: Vec<String>,
+    pub tex: Vec<u16>,
 }
 
 /// Surface material of a solver node (`ShowcaseVisual::node_material`).
@@ -1017,7 +1023,40 @@ fn damage_units(
             .map(|k| Vec3::from_array(out.positions[k]) - built.shift)
             .sum::<Vec3>()
             / cnt.max(1) as f32;
+        // The physics' own pane units (Built.damage_units: glass_windscreen,
+        // glass_backlight, glass_side_{f,r,q}_{l,r}, each the pane's beams
+        // and its mounts, broken when one of them breaks), mapped to the
+        // solver's beams by node pair.
+        let physics_unit = matches!(kind, unit_kind::TEMPERED | unit_kind::LAMINATED)
+            .then(|| {
+                let want = if base.starts_with("glass_") { base.to_string() } else { format!("glass_{base}") };
+                built.damage_units.iter().find(|u| u.name == want)
+            })
+            .flatten()
+            .map(|u| {
+                let mut js: Vec<u32> = u
+                    .beams
+                    .iter()
+                    .filter_map(|&j| sk.beams.get(j as usize))
+                    .filter_map(|b| by_pair.get(&(b.a.min(b.b), b.a.max(b.b))))
+                    .flatten()
+                    .copied()
+                    .collect();
+                js.sort_unstable();
+                js.dedup();
+                js
+            });
         let uid = *by_name.entry(base.to_string()).or_insert_with(|| {
+            if let Some(beams) = physics_unit.clone() {
+                out.units.push(DamageUnit {
+                    name: base.to_string(),
+                    kind,
+                    beams,
+                    strain: f32::INFINITY,
+                    shards: 0,
+                });
+                return (out.units.len() - 1) as u32;
+            }
             let glassy = matches!(kind, unit_kind::TEMPERED | unit_kind::LAMINATED);
             // A pane on its glass zone; otherwise (and every lamp and mirror)
             // its mount.
@@ -1301,6 +1340,28 @@ fn rot_to(a: Vec3, b: Vec3, v: Vec3) -> Vec3 {
     v * c + k.cross(v) + k * (k.dot(v) / (1.0 + c))
 }
 
+/// The visual's median rest triangle edge (m), over its opaque triangles:
+/// the renderer picks, per car, the finest level of detail whose edges are
+/// at least a pixel on screen (finer triangles only add overshading, the
+/// image is the same).
+pub fn median_edge(v: &ShowcaseVisual) -> f32 {
+    let mut e: Vec<f32> = Vec::with_capacity(v.indices.len());
+    for t in v.indices.chunks_exact(3) {
+        if transparent(v.material[t[0] as usize]) {
+            continue;
+        }
+        let p = |k: usize| Vec3::from_array(v.positions[t[k] as usize]);
+        e.push(p(0).distance(p(1)));
+        e.push(p(1).distance(p(2)));
+        e.push(p(2).distance(p(0)));
+    }
+    if e.is_empty() {
+        return 0.0;
+    }
+    let mid = e.len() / 2;
+    *e.select_nth_unstable_by(mid, f32::total_cmp).1
+}
+
 /// Per solver node its skin normal (zero off the skin).
 pub fn node_normals(v: &ShowcaseVisual, nodes: &[Vec3]) -> Vec<Vec3> {
     let mut out = vec![Vec3::ZERO; nodes.len()];
@@ -1391,11 +1452,7 @@ pub fn deform_with(
                 let (nh0, _, e0) = crease_envelope(rest_p, pr, w, l);
                 let last = pos.len() - 1;
                 pos[last] += (e - e0).clamp(-0.5 * l, 0.5 * l) * u;
-                let ns = rot_to(nh0, nh, Vec3::from_array(v.normals[i])).normalize_or_zero();
-                // A panel crushed past its binding (envelope and frame
-                // normals > ~45° apart) keeps the facet.
-                let k = super::parts::smoothstep(0.75, 0.55, ns.dot(nf));
-                nrm.push(ns.lerp(nf, k).normalize_or_zero());
+                nrm.push(rot_to(nh0, nh, Vec3::from_array(v.normals[i])).normalize_or_zero());
                 continue;
             }
         }
@@ -1428,7 +1485,7 @@ mod tests {
         let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, st.clone()).unwrap();
         let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
         let mut s =
-            ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, 0.02 - low, 0.0), vel, st).unwrap();
+            ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, probe.spawn_clearance() - low, 0.0), vel, st).unwrap();
         s.roll_tyres(vel);
         s
     }

@@ -376,11 +376,15 @@ export function createCrashLab(ctx) {
   }
 
   // ---------------------------------------------------------------- camera
-  function camera(name) {
+  // `zoom` scales the preset's distance, `yaw` overrides its yaw (the
+  // recorder's close-ups).
+  function camera(name, zoom = 1, yaw = null) {
     st.cam = name;
+    st.camZoom = zoom;
+    st.camYaw = yaw;
     if (name === 'follow') { ctx.setOrbit({ chase: true }); syncPanel(); return; }
     const c = CAMS[name];
-    ctx.setOrbit({ yaw: c.yaw, pitch: c.pitch, dist: c.dist * st.size, target: null });
+    ctx.setOrbit({ yaw: yaw ?? c.yaw, pitch: c.pitch, dist: c.dist * st.size * zoom, target: null });
     syncPanel();
   }
 
@@ -496,7 +500,7 @@ export function createCrashLab(ctx) {
       else renderer.gather(enc);
       if (st.focus) {
         renderer.set({ focus: [st.focus[0], st.focus[2]] });
-        if (!camSet) { camSet = true; camera(st.cam); }
+        if (!camSet) { camSet = true; camera(st.cam, st.camZoom ?? 1, st.camYaw ?? null); }
         if (st.cam !== 'follow') ctx.setOrbit({ follow: st.focus, spin: st.spin ? dt * 0.12 : 0 });
       }
       if (st.grab) applyGrab();

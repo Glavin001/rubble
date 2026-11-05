@@ -39,7 +39,7 @@ pub fn place_vehicle(template: &ExplicitBeams, front: Vec3, turns: u32, speed: f
     let (lo, hi) = b(&sim);
     let lateral = Vec3::Y.cross(dir).abs();
     let ahead = sim.nodes.iter().map(|n| n.pos.dot(dir)).fold(f32::MIN, f32::max);
-    let shift = Vec3::new(0.0, front.y + 0.02 - lo.y, 0.0)
+    let shift = Vec3::new(0.0, front.y + sim.spawn_clearance() - lo.y, 0.0)
         + dir * (front.dot(dir) - ahead)
         + lateral * (front.dot(lateral) - 0.5 * (lo + hi).dot(lateral));
     for n in &mut sim.nodes {

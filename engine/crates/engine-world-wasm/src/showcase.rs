@@ -83,6 +83,17 @@ pub fn showcase_car_truck(params: JsValue) -> Result<String, JsValue> {
 /// `visualLod`, the same at a distant level of detail (about a third of the
 /// triangles; `showcase-car-render.mjs` switches to it by distance).
 /// `showcase-car-render.mjs` documents the binding.
+/// A texture file (PNG or DDS) as one renderer layer: `size` × `size` RGBA8
+/// with its mips, concatenated (`engine_softbody::flextex`).
+#[wasm_bindgen(js_name = decodeTexture)]
+pub fn decode_texture(bytes: &[u8], size: u32) -> Result<Vec<u8>, JsValue> {
+    let img = engine_softbody::flextex::decode(bytes).map_err(err)?;
+    Ok(engine_softbody::flextex::layer(&img, size))
+}
+
+/// The showcase car's third level of detail (`showcase_visual_lod`'s detail).
+const FAR_DETAIL: f32 = 0.2;
+
 #[wasm_bindgen(js_name = showcaseCar)]
 pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     let b = built(&params)?;
@@ -111,6 +122,9 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     // The distant level of detail (the renderer picks it by distance).
     let lod = showcase_visual_lod(&b, 0.45).map_err(err)?;
     set(&out, "visualLod", &visual_js(&lod).into());
+    // A third, coarser level (a car a few hundred pixels long and less).
+    let far = showcase_visual_lod(&b, FAR_DETAIL).map_err(err)?;
+    set(&out, "visualFar", &visual_js(&far).into());
     Ok(out.into())
 }
 
@@ -123,6 +137,18 @@ pub fn showcase_car_visual(params: JsValue) -> Result<JsValue, JsValue> {
 
 fn visual_js(v: &ShowcaseVisual) -> Object {
     let vis = Object::new();
+    // Textures (imported vehicles' colour maps): file names, and per vertex
+    // its texture + 1 (0 untextured).
+    let tex = Array::new();
+    for t in &v.textures {
+        tex.push(&JsValue::from_str(t));
+    }
+    set(&vis, "textures", &tex.into());
+    if !v.tex.is_empty() {
+        let t: Vec<u16> = v.tex.iter().map(|&x| if x == u16::MAX { 0 } else { x + 1 }).collect();
+        set(&vis, "tex", &js_sys::Uint16Array::from(t.as_slice()).into());
+    }
+    set(&vis, "edgeLength", &JsValue::from(engine_softbody::authoring::skin::median_edge(v)));
     set(
         &vis,
         "positions",
@@ -318,9 +344,14 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
     // The distant level: the meshes clustered (flexmesh::cluster).
     let far: Vec<flexmesh::DaeMesh> = all.iter().map(|m| flexmesh::cluster(m, flexmesh::LOD_CELL)).collect();
     let (lod, lrep) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &far, &mats, paint).map_err(err)?;
+    // A third, coarser level: clustered on FAR_CELL.
+    let far_cell = v.get("farCell").and_then(|x| x.as_f64()).map_or(flexmesh::FAR_CELL, |x| x as f32);
+    let farther: Vec<flexmesh::DaeMesh> = all.iter().map(|m| flexmesh::cluster(m, far_cell)).collect();
+    let (far_vis, _) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &farther, &mats, paint).map_err(err)?;
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
     set(&out, "visualLod", &visual_js(&lod).into());
+    set(&out, "visualFar", &visual_js(&far_vis).into());
     set(&out, "lodDistance", &JsValue::from(flexmesh::lod_distance(flexmesh::LOD_CELL)));
     set(&out, "lodTriangles", &JsValue::from(lrep.triangles as u32));
     let r = Object::new();

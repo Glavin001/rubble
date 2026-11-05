@@ -618,10 +618,13 @@ opening's edge, the doors' belt edges included, is black rubber.
   * `showcase-car-check.mjs` runs `damage_*` (`?check=damage`): every
     simulated frame it reads back the solver's beams and the renderer's unit
     states in the same submission and fails on any difference.
-  * When the physics' own break groups land in `Built` (`DamageUnit`s by
-    name: `glass_*`, `headlight_*`, `mirror_*`, hinges, latches), they
-    replace this derivation; mirrors and lamps that become their own small
-    parts then ride (and fall with) those parts.
+  * The glass panes now use the physics' own units (`Built.damage_units`:
+    `glass_windscreen`, `glass_backlight`, `glass_side_{f,r,q}_{l,r}`, each
+    the pane's beams and its mounts, mapped to the solver's beams by node
+    pair). A pane breaks when one of them breaks, with no strain trigger of
+    the renderer's own (`BRITTLE_GLASS` decides how the physics breaks
+    them). Lamps and mirrors keep the mount derivation until their units and
+    parts land; then they ride, and fall with, those parts.
 * **Substance** (plan P7). Behind every door's outer skin sits its inner
   skin at the door's section (`DOOR_SECTION` 8.5 cm, just outboard of the
   door card), with shut faces round its edge; under the bonnet and boot lid
@@ -644,11 +647,22 @@ opening's edge, the doors' belt edges included, is black rubber.
   landings. A ring of 8,192 particles shared by every car. Only with
   `update`'s `dt` > 0 (the simulated time since the last update).
 * **Wear** (plan P11). Per node the renderer keeps its plastic strain and
-  the metres it slid in contact with the floor or a static box. The
-  clearcoat dulls with plastic strain (from 0.4 % to 6 %); scraped paint is
-  scratched to primer, then bare steel, in streaks, more with every metre
-  slid. Scrapes accumulate forward in time (a replay scrubbed back keeps
-  them).
+  the paint worn through (µm). The clearcoat dulls with plastic strain (from
+  0.4 % to 6 %). Paint wears by Archard's law, depth = K·p·s / H over the
+  distance s a node slides while in contact by the solver's own rule (at or
+  inside the floor or a static box, where the solver pushes it out; a node
+  merely near a wall wears nothing). K = 0.05: two-body abrasive wear is
+  K ≈ 10⁻² to 10⁻¹ (Rabinowicz, *Friction and Wear of Materials*, 2nd ed.,
+  1995); the middle of the range is a Choice. H = 0.2 GPa, a clearcoat's
+  indentation hardness: a Choice (we found no published value to cite).
+  p = 1 MPa: a Choice, because the solver does not expose its contact
+  forces. That wears 250 µm a metre. The layers are a typical OEM build-up
+  (Streitberger & Dössel, *Automotive Paints and Coatings*, 2nd ed., 2008):
+  clearcoat 45 µm, basecoat 20, primer 25, e-coat 20. So primer shows in
+  streaks past 65 µm worn (26 cm slid), and bare steel past 110 µm (44 cm).
+  Wear accumulates forward in time (a replay scrubbed back keeps it).
+  `showcase-car.html?debugWear=1` shows the tear field, plastic strain and
+  paint worn as red, green and blue.
 * **Cabin.** Seats and the steering wheel ride one triangle of their frame
   rigidly (`Bind::GroupRigid`), so a far binding triangle never swings them
   out of the cabin; the dashboard and console ride their members' triangles.
@@ -703,31 +717,34 @@ opening's edge, the doors' belt edges included, is black rubber.
   triangle switches over about 1 cm) and smooth along it, wherever the
   binding triangles' edges run; a mild bend keeps barycentric (Phong-like)
   weights and stays smooth. Only the change from the rest envelope is
-  applied, so the rest pose and rigid motion are exact. Where the result
-  disagrees with the binding triangle's frame by more than about 45° (a
-  panel crushed past its binding) the faceted frame normal wins.
+  applied, so the rest pose and rigid motion are exact. There is no
+  faceted fallback (the binding triangle's frame normal drew its edges as a
+  sawtooth along crushed lips).
   `showcase-car.html?crease=0.04&splitDeg=12` tries other constants (sharper
   than 0.08 shows the visual mesh's own triangles as a sawtooth);
   `showcase-car-check.mjs wall_56_bonnet,zebra_wall_56_bonnet` is the
   close-up.
-* **Level of detail.** `showcase_visual_lod(built, 0.45)` (wasm `visualLod`) is
-  the same car with a coarser body, single-step rolls and fewer segments:
-  about 75k triangles against about 240k.
+* **Level of detail.** Three levels: the full car, `showcase_visual_lod(built,
+  0.45)` (wasm `visualLod`: a coarser body, single-step rolls, fewer
+  segments) and `showcase_visual_lod(built, 0.2)` (`visualFar`).
   * The renderer picks a level per car on the GPU from the last frame's eye
-    (indirect dispatch and draw), so only that level is skinned and drawn.
+    (indirect dispatch and draw), so only that level is skinned and drawn:
+    the finest level whose median rest edge (`skin::median_edge`, wasm
+    `edgeLength`) spans at least 3 pixels at the car's distance
+    (`LOD_PX`; `draw`'s `height` is the viewport's). Finer triangles than
+    that change nothing visible (the 10-car row at 16 m and 30 m renders
+    the same on the second level as on the full mesh) but cost quad
+    overshading: profiling (`?perfFlat=1`, a flat fragment shader; `?perfSkip=`
+    `opaque,glass,reflect,contact,fx`) showed the near level at 16 m spent
+    5.3 of its 7.0 ms (10 cars) in fragment shading of sub-pixel triangles,
+    0.7 ms in vertex and raster work, 1.1 ms in the floor reflection.
   * Measured with 10 cars on an M3 Max at 1080p with 4× MSAA
-    (`showcase-car.html?perf=1&n=10`): about 0.50 ms per car with the
-    interior, the floor reflection and the contact shadows (about 300k
-    triangles, 99k at the distant level; 0.41 ms without the reflection),
-    0.31 ms at the distant level. Another GPU user moves these by ±10 %.
-  * With the damage units, wear, debris and the inner stampings and bay
-    (348k triangles, 121k at the distant level; 2026-11-05): about 0.62 ms
-    per car (the previous renderer on the same mesh: 0.55; the stampings
-    and bay add 0.03), 0.37 ms at the distant level. The skinned vertex is
-    32 bytes (tear and damage, plastic strain and scrape packed as f16
-    pairs); worn paint and the primer band shade through the generic metal
-    and matt paths rather than code of their own, because the paint path is
-    occupancy bound (a second inlined `env()` costs it).
+    (`showcase-car.html?perf=1&n=10`, 2026-11-05): 0.39 ms per car at 16 m,
+    0.38 ms at 30 m, 0.31 ms at 80 m (was 0.70 at 16 m: the full mesh). A
+    single car filling the frame costs 3.9 ms, of which 0.6 ms is vertex and
+    raster work (the paint's shading). The fragment discards (tears,
+    shattered glass) cost 6–13 % (`?perfNoDiscard=1`). Another GPU user
+    moves these by ±10 %.
 
 To restyle, change `design::sedan_styling` (cut lines, outlines, section
 shapes) and the profile. The tools stay the same.
@@ -763,11 +780,21 @@ vehicle the same visual format as the authored car, so
   (glass, lamp lens, chrome, tyre, rim, trim, interior, engine, else paint);
   the vehicle's `*.materials.json` makes it glass when translucent, emissive
   when it glows, and gives untextured materials their diffuse colour.
-  Textures are not read (a textured material shades flat grey; paint takes
-  the paint).
-* **Level of detail.** The distant level clusters each mesh on a 3 cm grid
-  per material and normal direction (`cluster`, `LOD_CELL`), switching where
-  a cell is 2.6 pixels at 1080p (16 m). The near level is the full mesh.
+* **Textures.** A material's colour map (`colorMap` or `baseColorMap` in
+  Stages[0]) is the file of that name in the vehicle's folder.
+  `engine_softbody::flextex` decodes PNG (8- or 16-bit, any colour type) and
+  DDS (BC1–BC3 by the block formats' definitions, 32-bit RGBA/BGRA) into a
+  1024² sRGB layer with its mips (wasm `decodeTexture`). The renderer keeps
+  one texture array (`setTextures`), and each vertex carries its layer in
+  its material word's high half. The map multiplies the material's colour,
+  sampled with explicit gradients (v flipped: images are stored top row
+  first). A colour-mapped material shades satin (`mat::DASH`), not as
+  paint. The supercar's 15 maps (carbon fibre, fabric, wood, the dials and
+  buttons) all load; normal, roughness and AO maps are not read yet.
+* **Level of detail.** Three levels: the full mesh, each mesh clustered on a
+  3 cm grid per material and normal direction (`cluster`, `LOD_CELL`), and
+  on a 9 cm grid (`FAR_CELL`; wasm `visualFar`). The renderer picks them as
+  for the authored car (the finest whose median edge spans 3 pixels).
 * **Pages.** wasm `jbeamVisual(spec, meshes)`; `showcase-car.html?mod=<folder>`
   renders a mod's visual at rest (no solver; `?n=` copies); the crash lab
   loads `softbody.html?...&mod=<folder>&jbeamMode=native` (a folder served
@@ -776,9 +803,13 @@ vehicle the same visual format as the authored car, so
   `inspiration/beamng-mods` (`RUBBLE_MODS`), skipped when absent.
 * **Measured** (M3 Max, 1080p, 4× MSAA, 10 copies): the Monster supercar
   (95 flexbodies, 1.52M triangles: about 40 times a typical BeamNG car's
-  30–40k) costs 1.57 ms a car near and 0.91 ms a car at the distant level
-  (275k triangles). Both are over the 0.5 ms budget; the supercar's own mesh
-  is the outlier, and a third, coarser level is the next step.
+  30–40k; levels 268k and 84k) costs 0.95 ms a car at 16 m (was 1.57) and
+  0.61 ms at 30 m (was 0.91), still over 0.5 ms. It is fragment bound, not
+  triangle bound: a 25 cm third level (33k triangles) costs the same, and
+  a flat fragment shader brings the 10 at 30 m from 6.1 to 1.2 ms. A
+  single car costs about 1.5–2 ms in this timed pass at any distance once
+  any of it is on screen (0.24 ms off screen), for the authored car too, so
+  the per-car figures carry a share of that constant.
 
 ### Glass (A9, open)
 
@@ -797,16 +828,36 @@ vehicle the same visual format as the authored car, so
     10 mm bead with L its share of the edge;
   - side glass bears in its run channel (compression only) and is held by
     its regulator along the bottom.
-- **Installation pose (a Choice).** A pane is bonded into a body already
-  standing under its own weight, so it carries no stress there.
-  `installation_pose` settles the car at rest on the CPU reference for
-  `INSTALL_SETTLE` = 2 s, with the panes unbreakable. Each pane and mount
-  beam then takes its settled length over its spawn length as its rest
-  scale. The `.truck` carries the scale as Rubble's fifth `beams` field, and
-  the shared loader applies it to any beam. `skins_are_closed` checks that
-  the solver's rest lengths match it.
-  - Medium: 335 beams. Settle strain is up to 0.54 %; at rest afterwards,
-    up to 0.05 %.
+- **Rest pose = installation pose (a Choice, 2026-11-05).** A pane is
+  bonded into a body already standing under its own weight. The car is
+  therefore written standing at rest, and it spawns that way: nothing moves
+  at spawn, so the installation pose is the spawn pose. There is no "skip the
+  first N ms" rule.
+  - `rest_pose` stands the car on flat ground on the CPU reference (tyres
+    touching, no drop), with its glass unbreakable, for `INSTALL_SETTLE` =
+    2 s.
+  - The nodes then take their settled positions. Every beam and shock keeps
+    the solver's rest length through `rest_scale` (beams' fifth field) and
+    precompression.
+  - The tyres keep their deflected shape (`rubble_tyre_pose`, built round
+    their axles' design positions).
+  - Pairs that came into contact while settling keep colliding
+    (`rubble_spawn_contacts`).
+  - The hardware ropes are sized again on the standing car.
+  - The spec is `jbeam-semantics-spec.md` §18.2. Consumers spawn with
+    `ExplicitBeams::spawn_clearance()`: the patch depth for a rest pose, 2 cm
+    otherwise.
+  - `Built.design` keeps the design positions, which are mirror-symmetric;
+    the rest pose leans 1–2 mm toward the driver.
+  - Medium: nodes sit up to 45 mm from the design (mostly the suspension's
+    sag); no beam yields while settling.
+  - In `a` the car stands with 0.3 mm wobble, body nodes under 0.01 m/s, and
+    energy rises between frames of at most 0.04 J. That rise is the energy
+    sum's f32 rounding (`energy_rounding`).
+  - Every reference test stays in band (n, o, p, q, g, t).
+  - The settle used to start with a 2 cm drop. That landing yielded the
+    roof's lumped panel beams by up to 0.9 mm, which the rest pose would
+    have carried.
 - **Brittle glass is still off.** With the installation pose, every pane
   still breaks at rest. A pane beam's break force is its strain times the
   model's k·L: 0.17 % of about 180 N, roughly 0.3 N. The pane nodes' own
@@ -814,25 +865,75 @@ vehicle the same visual format as the authored car, so
   10⁵ × softer than glass, so a strain criterion becomes a force too small
   to carry the pane. A real pane's strip would hold σ·t·L, about 144 kN at
   4 mm × 0.3 m, which these beams never reach.
-- **Aperture racking (a Choice; written, off).** `aperture_gauges` joins
-  the frame nodes at the opening's four corners by its edges and diagonals.
-  - Each gauge is a beam of negligible stiffness (`GAUGE_K`) that breaks at
-    σ/E of its length (tempered 120 MPa, laminated 45 MPa) against the
-    installed pose.
-  - The beams are plain, so a tempered pane's break sets off its group; RoR
-    supports do not cascade groups.
-  - A pane beam no longer breaks on its own strain.
-  - Turned on, every pane breaks at rest in `a`:
-    - The corners are wrong: the windscreen's reach door nodes, and the side
-      windows' reach the door's belt-line frame. The windows' upper frames
-      are not frame tier.
-    - The 2 cm spawn landing strains the gauges 0.10–0.20 % (`GLASS_STRAIN=1`
-      prints them), above tempered glass's 0.17 % and laminated's 0.064 %. A
-      real car's frame strains far less.
-- **What is open:** per-pane aperture corners on frame-tier nodes (window
-  frames in the frame tier); a spawn without the landing transient;
-  direct-impact breaks against UN R43 / ANSI Z26.1 data (needs a contact
-  force readback in the solver). This needs a decision.
+- **Aperture racking (a Choice; written, off; 2026-11-05).**
+  `aperture_gauges` joins the opening's corners by its edges and diagonals
+  with gauges. A gauge is a beam of negligible stiffness (`GAUGE_K`) that
+  breaks at the racking that brings the glass to σ/E.
+  - **Corners are frame nodes of the opening's own members**
+    (`aperture_members`):
+    - windscreen: the screen pillars, front header and cowl;
+    - backlight: the C-pillars, rear header and parcel shelf;
+    - side glass: the door's sash and belt.
+
+    Each corner is the frame node farthest along each diagonal of the
+    opening (its axes scaled to its extent), within 30 cm of the opening's
+    outline.
+  - **The gauge's rest is its length as the solver measures it.** The default
+    (RoR-compatible) profile's fast inverse square root is off by up to
+    0.18 % from the exact length the loader takes as a rest. That error is
+    larger than glass's break strain. It is what made every pane "break at
+    rest", more than the old 2 cm spawn drop did.
+  - **The mount is in series with the pane (exact for two shear layers in
+    series with an elastic strip).** Across a span L the opening racks
+    ε = ε_g (1 + 2 E t t_b / (G w L)) for a strain ε_g in the glass, with the
+    urethane bead's G, w and t_b (TEROSON PU 9096 PL) and the pane's t (NHTSA
+    DOT 88988 table 2: tempered 3.5 mm; laminated 2 × 2.1 mm on PVB).
+    - Over 1.5 m the factor is about 140: tempered glass breaks at about 24 %
+      racking, laminated cracks at about 9 %.
+    - A bonded pane barely feels its frame. Its bead tears (τ·w·L, as
+      sized) or the glass is hit first.
+    - **Choice:** side glass in its run channel takes the same compliance;
+      no measured channel data was found.
+  - **A pane's own beams are strips of the real pane.** Each holds σ·t·L,
+    which the step-softened beam never reaches. A tempered pane's beams go
+    only with its group; the laminated windscreen's yield at its plies'
+    crack force and hold.
+  - **Measured with `BRITTLE_GLASS=1 GLASS_REPORT=1`, Medium,** with door
+    sashes as frame-tier members (`window_frame`):
+    - no pane breaks at rest (10 s, Low and Medium) or driving at 50 km/h
+      (gauges up to 0.09 % racking);
+    - no pane breaks in any NCAP frontal at 47–59 km/h, so the backlight
+      survives;
+    - the struck front side glass shatters in the 75° side pole at 31, 32
+      and 34 km/h (not at 30 or 33);
+    - both struck side panes shatter in the 80 km/h T-bone;
+    - the windscreen does **not** crack in the frontal or in the FMVSS 216a
+      roof crush. Its racking never nears 9 %, and a laminated screen cracks
+      from being hit or bent, which needs the direct-impact trigger.
+  - **Glass stays off:** the windscreen check fails.
+- **Door sashes (window frames) are written but not in the car.** As
+  frame-tier ladders round each window (`window_frame`, corner stations
+  only), they moved three checks out of band:
+  - `g`: the door came off at 78.3 kN, against 78.4–83.4;
+  - `n`: restitution 0.2002, against at most 0.20;
+  - `t`: the latch let go at 0.05 s, and 46–57 striker nodes ended up inside
+    the struck skin (1 % allowed). The shut-line triangles next to the latch
+    die with it while the hinged door is still pressed in, which opens a
+    hole.
+
+  The sashes tried were `window_frame(riding(ladder(member("door_sash_f",
+  [(0.80, 1.10, 2.98), (0.70, 1.33, 2.64), (0.69, 1.36, 2.36), (0.79, 1.10,
+  2.36)], 0.05, 0.05, OUT, "hsla", [1, 1], 0, true, 1))))`, and `door_sash_r`
+  through (0.79, 1.10, 2.12), (0.69, 1.36, 2.12), (0.69, 1.33, 1.64) and
+  (0.79, 1.10, 1.58). Without them, the side-glass gauges have only belt
+  corners.
+- **What is open:**
+  - Direct impact against measured data, on the solver's contact-force
+    break trigger. The solver owner is adding `rubble_contact_breaks`; it
+    is not here yet. The data is NHTSA DOT 88988: 227 g ball break heights
+    for production tempered glass, mostly 35–85 ft at the centre, 2 ft at a
+    painted edge.
+  - The sashes together with the T-bone's skin.
 
 ### A6: where the hardware's loads reach its strength (2026-11-05)
 
