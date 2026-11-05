@@ -291,8 +291,12 @@ impl ExplicitBeamsWorld {
             let [i0, i1, i2] = self.vehicles[a].triangles[t].nodes;
             let wa = &self.world[a];
             let (p0, p1, p2) = (wa[i0 as usize], wa[i1 as usize], wa[i2 as usize]);
-            let lo = p0.min(p1).min(p2) - rr;
-            let hi = p0.max(p1).max(p2) + rr;
+            let (lo, hi) = if self.vehicles[a].tri_dead.get(t).copied().unwrap_or(false) {
+                // A broken JBeam triangle (jbeam-semantics-spec.md §18): no candidates.
+                (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY))
+            } else {
+                (p0.min(p1).min(p2) - rr, p0.max(p1).max(p2) + rr)
+            };
             cands.clear();
             for &b in partners {
                 let wb = &self.world[b];

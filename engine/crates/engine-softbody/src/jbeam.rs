@@ -561,6 +561,8 @@ struct Placed {
     name: String,
     offset: [Value; 3],
     moved: [Value; 3],
+    /// Depth in the slot tree (the main part 0; parts are in depth-first order).
+    depth: u32,
 }
 
 impl JbeamDb {
@@ -611,14 +613,16 @@ impl JbeamDb {
                 name: main,
                 offset: zero(),
                 moved: zero(),
+                depth: 0,
             },
             0u32,
         )];
         let mut seen = HashSet::new();
-        while let Some((placed, depth)) = stack.pop() {
+        while let Some((mut placed, depth)) = stack.pop() {
             if depth > 50 || !seen.insert(placed.name.clone()) {
                 continue;
             }
+            placed.depth = depth;
             let part = self.parts[&placed.name].clone();
             let mut children = Vec::new();
             for (key, v2) in [("slots", false), ("slots2", true)] {
@@ -688,6 +692,7 @@ impl JbeamDb {
                         name: chosen,
                         offset,
                         moved,
+                        depth: 0,
                     });
                 }
             }
@@ -960,6 +965,48 @@ pub fn feature_census(
     Ok(out)
 }
 
+/// The physics features a [`feature_census`] lists that the explicit solver's JBeam
+/// mode does not simulate (`engine/docs/jbeam-semantics-spec.md` §11 and Part II),
+/// with their counts. Visual, sound, camera, electrics and controller sections are
+/// not physics and are not listed; powertrain and inputs are listed (the solver has
+/// none).
+pub fn unsupported_features(census: &BTreeMap<String, usize>) -> Vec<(String, usize)> {
+    const KEYS: &[&str] = &[
+        "beams.beamShortExtent",
+        "beams.beamLongBoundFunction",
+        "beams.beamShortBoundFunction",
+        "beams.beamLimitSpringFunction",
+        "beams.beamLimitDampFunction",
+        "beams.beamLimitRebound",
+        "beams.breakGroup=table>3",
+        "triangles.dragCoef",
+        "triangles.liftCoef",
+        "triangles.skinDragCoef",
+        "triangles.stallAngle",
+        "nodes.couplerTag",
+        "nodes.couplerStrength",
+        "nodes.slidingFrictionCoef",
+        "nodes.stribeckExponent",
+        "nodes.stribeckVelMult",
+        "nodes.noLoadCoef",
+        "nodes.fullLoadCoef",
+        "nodes.loadSensitivitySlope",
+        "hydros.inputSource",
+        "section thrusters",
+        "section rotators",
+        "section powertrain",
+        "section torsionReactorF",
+        "section torsionReactorR",
+        "section rigidifier",
+        "section cargoGroups",
+    ];
+    census
+        .iter()
+        .filter(|(k, _)| KEYS.contains(&k.as_str()))
+        .map(|(k, &n)| (k.clone(), n))
+        .collect()
+}
+
 /// Load a vehicle from its `.jbeam` files (`(file name, source)`) and an
 /// optional `.pc` configuration.
 pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVehicleDesc, String> {
@@ -1081,6 +1128,10 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             _ => {}
         }
     }
+    desc.node_group_nodes = group_nodes.clone();
+    for g in &mut desc.node_group_nodes {
+        g.1.sort_unstable();
+    }
     for (name, nodes) in part_nodes.into_iter().chain(group_nodes) {
         if !desc.parts.iter().any(|p| p.name == name) {
             desc.parts.push(crate::desc::SoftPart { name, nodes });
@@ -1153,11 +1204,6 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 continue;
             }
         };
-        if ty == "PRESSURED" {
-            *skipped
-                .entry(format!("beam type {ty} (simulated as NORMAL)"))
-                .or_default() += 1;
-        }
         let group = match f.get("breakGroup") {
             Some(Value::String(s)) if !s.is_empty() => {
                 let n = groups.len() as u32 + 1;
@@ -1246,24 +1292,107 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 damp_cutoff_hz: g("dampCutoffHz", 0.0).max(0.0),
                 deform_limit,
                 deform_limit_expansion,
+                ..Default::default()
             });
-            for key in [
-                "beamDampRebound",
-                "beamDampReboundFast",
-                "beamDampVelocitySplitRebound",
-                "beamLimitDampRebound",
-                "beamPrecompressionTime",
-                "beamLongExtent",
-                "transitionZone",
-            ] {
-                if f.get(key).is_some_and(|v| v.as_str() != Some("")) {
-                    *jbeam_unsupported.entry(key).or_default() += 1;
+            let jb = beam.jbeam.as_mut().unwrap();
+            // Part II (spec §17–§23).
+            let opt = |k: &str| f.get(k).and_then(as_f32).filter(|x| x.is_finite());
+            if let Some(Value::Array(a)) = f.get("breakGroup") {
+                let names: Vec<&str> = a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                for (k, name) in names.iter().skip(1).take(2).enumerate() {
+                    let n = groups.len() as u32 + 1;
+                    let gi = *groups.entry(name.to_string()).or_insert(n);
+                    if gi != beam.break_group {
+                        jb.extra_break_groups[k] = gi;
+                    }
+                }
+                if names.len() > 3 {
+                    *jbeam_unsupported
+                        .entry("breakGroup with more than three groups (first three used)")
+                        .or_default() += 1;
                 }
             }
-            if matches!(f.get("breakGroup"), Some(Value::Array(a)) if a.len() > 1) {
+            jb.disable_triangle_breaking = f
+                .get("disableTriangleBreaking")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let deform_names: Vec<String> = match f.get("deformGroup") {
+                Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if deform_names.len() > 2 {
                 *jbeam_unsupported
-                    .entry("breakGroup with several groups (first used)")
+                    .entry("deformGroup with more than two groups (first two used)")
                     .or_default() += 1;
+            }
+            for (k, name) in deform_names.iter().take(2).enumerate() {
+                jb.deform_groups[k] = match desc.deform_groups.iter().position(|x| x == name) {
+                    Some(i) => i as u32 + 1,
+                    None => {
+                        desc.deform_groups.push(name.clone());
+                        desc.deform_groups.len() as u32
+                    }
+                };
+            }
+            if jb.deform_groups[0] != 0 {
+                if let Some(r) = opt("deformationTriggerRatio").filter(|r| *r >= 0.0) {
+                    jb.deformation_trigger_ratio = r;
+                }
+            }
+            if ty == "ANISOTROPIC" {
+                jb.anisotropic = true;
+                jb.spring_expansion = opt("springExpansion");
+                jb.damp_expansion = opt("dampExpansion");
+                jb.transition_zone = opt("transitionZone").unwrap_or(0.0).max(0.0);
+                // beamLongBound: FLT_MAX by default for anisotropic beams [A].
+                jb.long_bound = g("beamLongBound", f32::INFINITY);
+            }
+            if matches!(ty.as_str(), "SUPPORT" | "ANISOTROPIC") {
+                jb.long_extent = opt("beamLongExtent").filter(|x| *x >= 0.0);
+            }
+            if ty == "PRESSURED" {
+                const PSI: f32 = 6894.757;
+                let pa = |k: &str, kp: &str| opt(k).or_else(|| opt(kp).map(|x| x * PSI));
+                jb.pressured = true;
+                jb.pressure = pa("pressure", "pressurePSI").unwrap_or(0.0);
+                jb.surface = opt("surface").unwrap_or(1.0).max(0.0);
+                jb.volume_coef = opt("volumeCoef").unwrap_or(1.0).max(0.0);
+                jb.pressure_limit = pa("pressureLimit", "pressureLimitPSI").unwrap_or(f32::INFINITY);
+                jb.max_pressure = pa("maxPressure", "maxPressurePSI").unwrap_or(f32::INFINITY);
+            }
+            if ty == "BOUNDED" {
+                jb.damp_rebound = opt("beamDampRebound");
+                jb.damp_rebound_fast = opt("beamDampReboundFast");
+                jb.damp_velocity_split_rebound = opt("beamDampVelocitySplitRebound");
+                jb.limit_damp_rebound = opt("beamLimitDampRebound");
+            } else {
+                for key in [
+                    "beamDampRebound",
+                    "beamDampReboundFast",
+                    "beamDampVelocitySplitRebound",
+                    "beamLimitDampRebound",
+                ] {
+                    if opt(key).is_some() {
+                        *jbeam_unsupported
+                            .entry("rebound damping on a beam that is not BOUNDED (ignored)")
+                            .or_default() += 1;
+                    }
+                }
+            }
+            if let Some(t) = opt("beamPrecompressionTime").filter(|t| *t > 0.0) {
+                if (jb.precompression - 1.0).abs() > 1e-6 {
+                    jb.precompression_time = t;
+                }
             }
         }
         match kind {
@@ -1401,9 +1530,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         ));
     }
     for (key, n) in jbeam_unsupported {
-        desc.warnings.push(format!(
-            "{n} beams set `{key}`, which no Rubble solver simulates yet"
-        ));
+        desc.warnings.push(format!("{n} beams: {key}"));
     }
 
     // Triangles and quads.
@@ -1486,8 +1613,43 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             })
     };
 
-    // Wheels.
-    for (_, f) in expand(&db, &parts, "pressureWheels", &vars) {
+    // Wheels. BeamNG's wheel parts split a wheel's settings over parts (a part with
+    // the rows, tyre and rim parts with modifiers only). A row takes the
+    // pressureWheels modifiers of the other parts of each slot subtree around its own
+    // part, from the whole vehicle down to its own part (nearer subtrees override;
+    // in a subtree, assembly order, later wins), then its own part's and its own
+    // options (jbeam-semantics-spec.md §25).
+    let mods_of = |i: usize| -> Map<String, Value> {
+        let mut m = Map::new();
+        if let Some(rows) = db.parts[&parts[i].name].get("pressureWheels").and_then(Value::as_array) {
+            for o in rows.iter().skip(1).filter_map(Value::as_object) {
+                for (k, v) in o {
+                    if let Some(r) = resolve(v, &vars) {
+                        m.insert(k.clone(), r);
+                    }
+                }
+            }
+        }
+        m
+    };
+    let subtree_end = |i: usize| {
+        (i + 1..parts.len())
+            .find(|&j| parts[j].depth <= parts[i].depth)
+            .unwrap_or(parts.len())
+    };
+    let parent = |i: usize| (0..i).rev().find(|&k| parts[k].depth < parts[i].depth);
+    for (pi, own) in expand(&db, &parts, "pressureWheels", &vars) {
+        let mut chain = vec![pi];
+        while let Some(a) = parent(*chain.last().unwrap()) {
+            chain.push(a);
+        }
+        let mut f = Map::new();
+        for &a in chain.iter().rev() {
+            for j in (a..subtree_end(a)).filter(|&j| j != pi) {
+                f.extend(mods_of(j));
+            }
+        }
+        f.extend(own);
         let (Some(n1), Some(n2)) = (node(&f, "node1"), node(&f, "node2")) else {
             continue;
         };
@@ -1507,6 +1669,25 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             .or_else(|| f.get("hubWidth").and_then(as_f32))
             .unwrap_or(0.2);
         let brake = f.get("brakeTorque").and_then(as_f32).unwrap_or(0.0);
+        // The row's own fields, for JBeam mode's pressure wheels (spec §25).
+        {
+            let mut pw = JbeamPressureWheel {
+                wheel: desc.wheels.len() as u32,
+                name: name.clone(),
+                node1: n1,
+                node2: n2,
+                arm: node(&f, "nodeArm"),
+                ..Default::default()
+            };
+            for (k, v) in &f {
+                if let Some(b) = v.as_bool() {
+                    pw.flags.insert(k.clone(), b);
+                } else if let Some(x) = as_f32(v) {
+                    pw.values.insert(k.clone(), x);
+                }
+            }
+            desc.pressure_wheels.push(pw);
+        }
         desc.wheels.push(SoftWheel {
             node1: n1,
             node2: n2,
@@ -1662,8 +1843,63 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     for (what, n) in skipped {
         desc.warnings.push(format!("{what}: {n} skipped"));
     }
+    let mut names: Vec<(u32, String)> = groups.into_iter().map(|(n, g)| (g, n)).collect();
+    names.sort();
+    desc.break_groups = names.into_iter().map(|(_, n)| n).collect();
     desc.repair(0.1);
     Ok(desc)
+}
+
+/// One section's rows from the assembled parts of a vehicle (`files` and an optional
+/// `.pc`), header tables expanded and variables and `$=` expressions resolved as the
+/// loader does for nodes and beams, each with the name of the part it came from (in
+/// assembly order). For the visual layer's `flexbodies` and `props`.
+pub fn assembled_rows(
+    files: &[(&str, &str)],
+    config: Option<&str>,
+    section: &str,
+) -> Result<Vec<(String, Map<String, Value>)>, String> {
+    let mut db = JbeamDb::default();
+    for (name, src) in files {
+        if let Err(e) = db.add_file(name, src) {
+            db.warnings.push(e);
+        }
+    }
+    let config = match config {
+        Some(c) => PcConfig::parse(c)?,
+        None => PcConfig::default(),
+    };
+    let parts = db.assemble(&config)?;
+    let vars = collect_vars(&db, &parts, &config);
+    Ok(expand(&db, &parts, section, &vars)
+        .into_iter()
+        .map(|(pi, f)| (parts[pi].name.clone(), f))
+        .collect())
+}
+
+/// The assembled parts of a vehicle in assembly order: (part name, its `slotType`).
+pub fn assembled_parts(
+    files: &[(&str, &str)],
+    config: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut db = JbeamDb::default();
+    for (name, src) in files {
+        if let Err(e) = db.add_file(name, src) {
+            db.warnings.push(e);
+        }
+    }
+    let config = match config {
+        Some(c) => PcConfig::parse(c)?,
+        None => PcConfig::default(),
+    };
+    let parts = db.assemble(&config)?;
+    Ok(parts
+        .iter()
+        .map(|p| {
+            let ty = db.slot_type(&p.name).unwrap_or("").to_string();
+            (p.name.clone(), ty)
+        })
+        .collect())
 }
 
 #[cfg(test)]
