@@ -4370,6 +4370,12 @@ fn t_car_to_car_t_bone_at_80_kmh() {
             v.two_body_contact = rule == "two_body";
         }
     }
+    // (TB_ANTI: `0` turns anti-clip off for both cars, `1` on; spec §36.)
+    if let Ok(a) = std::env::var("TB_ANTI") {
+        for v in [&mut struck, &mut striker] {
+            v.anti_clip = a == "1";
+        }
+    }
     // The struck skin's topology for the diagnostics' closest-feature side test
     // (jbeam-semantics-spec.md §10.3's leak notes).
     let skin_topo = engine_softbody::explicit_skin::SkinTopology::build(

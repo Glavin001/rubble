@@ -940,7 +940,15 @@ impl ExplicitBeams {
         let mut lists = Vec::new();
         let mut any = false;
         let mut no_rep = 0;
-        for t in desc.triangles.iter().filter(|t| t.collision) {
+        // In collision-triangle order: the collision ones, then the anti-clip-only
+        // ones (NONCOLLIDABLE, §36) when added.
+        let anti_only = !self.anti_only_tris.is_empty();
+        let order = desc.triangles.iter().filter(|t| t.collision).chain(
+            desc.triangles
+                .iter()
+                .filter(move |t| anti_only && !t.collision),
+        );
+        for t in order {
             let [a, b, c] = t.nodes;
             let mut l = [NO_BEAM; 4];
             for (k, (p, q)) in [(a, b), (b, c), (c, a)].into_iter().enumerate() {
@@ -1060,7 +1068,10 @@ impl ExplicitBeams {
                 let (q1, q2) = (q.dot(e1), q.dot(e2));
                 let a = (d22 * q1 - d12 * q2) / det;
                 let b = (d11 * q2 - d12 * q1) / det;
-                if a < 0.0 || b < 0.0 || a + b > 1.0 {
+                // On an edge to rounding counts as inside (SPAWN_EDGE): a node at
+                // a T-junction on the triangle's edge, in its plane, would else be
+                // caught by anti-clip's crossing as the car settles (§36).
+                if a < -SPAWN_EDGE || b < -SPAWN_EDGE || a + b > 1.0 + SPAWN_EDGE {
                     continue;
                 }
                 if keep.contains(&(t as u32, c)) {
@@ -1594,3 +1605,8 @@ impl ExplicitBeams {
         n
     }
 }
+
+/// Spawn exclusions' edge tolerance in barycentric weight (spec §10.1, §36):
+/// **Choice**, 10⁻⁴ (10 µm on a 10 cm triangle), far above the rounding of the
+/// weights (about 10⁻⁷) and far below any real offset from an edge.
+pub const SPAWN_EDGE: f32 = 1e-4;
