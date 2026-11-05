@@ -4904,6 +4904,73 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
             ks[ks.len() * 9 / 10]
         );
     }
+    // Per part: the damping ratio of its beams on their own two-mass mode,
+    // ζ = c / (2√(k·μ)), against the BX's measured medians
+    // (`examples/jbeam_damping.rs`), and the step's damping bound
+    // (h·Σc/m ≤ 0.75 per node, `C_RATIO`).
+    {
+        let mut by: std::collections::BTreeMap<String, Vec<f32>> = Default::default();
+        let mut cm = vec![0.0f32; sk.nodes.len()];
+        for bm in &sk.beams {
+            cm[bm.a as usize] += bm.mat.damp;
+            cm[bm.b as usize] += bm.mat.damp;
+            if bm.target_k == 0.0 || bm.mat.k <= 0.0 {
+                continue;
+            }
+            let (ma, mb) = (sk.nodes[bm.a as usize].mass, sk.nodes[bm.b as usize].mass);
+            let mu = ma * mb / (ma + mb);
+            let k = bm.mat.k_at(sk.pos(bm.a).distance(sk.pos(bm.b)));
+            let part = &sk.parts[sk.nodes[bm.a as usize]
+                .part
+                .max(sk.nodes[bm.b as usize].part) as usize];
+            let key = part
+                .strip_suffix("_l")
+                .or_else(|| part.strip_suffix("_r"))
+                .unwrap_or(part)
+                .to_string();
+            by.entry(key)
+                .or_default()
+                .push(bm.mat.damp / (2.0 * (k * mu).sqrt()));
+        }
+        for (part, mut z) in by {
+            z.sort_by(f32::total_cmp);
+            eprintln!(
+                "damping {part:>10}: ζ median {:.4} (p10 {:.4}, p90 {:.4}) over {} beams",
+                z[z.len() / 2],
+                z[z.len() / 10],
+                z[z.len() * 9 / 10],
+                z.len()
+            );
+        }
+        let h = engine_softbody::authoring::skeleton::STEP;
+        let (wi, worst) = (0..sk.nodes.len())
+            .map(|i| (i, h * cm[i] / sk.nodes[i].mass))
+            .fold((0, 0.0f32), |a, b| if b.1 > a.1 { b } else { a });
+        let n = &sk.nodes[wi];
+        eprintln!(
+            "damping bound: worst h·Σc/m {worst:.3} (C_RATIO's 0.75) at node {wi} ({}, {:.3} kg, at {:?})",
+            sk.parts[n.part as usize], n.mass, n.p
+        );
+        for bm in sk
+            .beams
+            .iter()
+            .filter(|bm| bm.a as usize == wi || bm.b as usize == wi)
+        {
+            if h * bm.mat.damp / n.mass > 0.05 {
+                eprintln!(
+                    "  c {:.0} N·s/m k {:.3e} {:?} damper {} fixed {} group {} other {:.3} kg",
+                    bm.mat.damp,
+                    bm.mat.k,
+                    bm.ty,
+                    bm.damper,
+                    bm.fixed,
+                    bm.group,
+                    sk.nodes[(bm.a + bm.b) as usize - wi].mass
+                );
+            }
+        }
+        assert!(worst <= 0.75, "a node past the damping bound: {worst}");
+    }
     // Per member: its chords' real k against the built.
     const E: f32 = 210e9;
     eprintln!(

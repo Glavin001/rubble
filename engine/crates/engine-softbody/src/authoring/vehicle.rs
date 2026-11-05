@@ -635,6 +635,94 @@ pub struct VehicleDef {
     /// its sheet and members.
     #[serde(default)]
     pub part_masses: Vec<(String, f32)>,
+    /// One tier: beam damping as a damping ratio on the beam's own node
+    /// masses ([`DampingRatios`]); `None` keeps the grades' damping.
+    #[serde(default)]
+    pub damping: Option<DampingRatios>,
+}
+
+/// One tier: each beam's damping as a ratio ζ = c / (2·√(k·m₁m₂/(m₁+m₂)))
+/// of its own two-mass mode, per kind of part, so the ratio BeamNG's content
+/// uses carries over to this car's real masses. Defaults: the medians
+/// measured on the BX's default configuration (`examples/jbeam_damping.rs`,
+/// `vehicle-authoring.md` "Where we differ"): never tuned to a reference.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DampingRatios {
+    /// The body's shell and members (`bx_body`: median 0.0275, p10–p90
+    /// 0.018–0.052).
+    pub body: f32,
+    /// Crush members ([`Self::crush_members`]): the BX's front frame rails
+    /// (0.0177, 0.015–0.018) and its bumper bar (0.0158).
+    pub crush: f32,
+    /// Members whose beams count as crush structure.
+    pub crush_members: Vec<String>,
+    /// Doors (`bx_door`: 0.0334, 0.025–0.040).
+    pub door: f32,
+    /// Bonnet (`bx_hood`: 0.0593, 0.045–0.080).
+    pub bonnet: f32,
+    /// Boot lid (`bx_tailgate`: 0.0567, 0.038–0.065).
+    pub bootlid: f32,
+    /// Fenders (`bx_fender`: 0.0422, 0.039–0.053).
+    pub fender: f32,
+    /// Bumper fascias (`bx_bumper_F`/`_R`: 0.089–0.091).
+    pub bumper: f32,
+    /// The body's glass (`bx_windshield`: 0.0200, 0.017–0.026).
+    pub glass_body: f32,
+    /// A door's glass (`bx_doorglass`: 0.0545, 0.046–0.057).
+    pub glass_side: f32,
+}
+
+impl Default for DampingRatios {
+    fn default() -> Self {
+        Self {
+            body: 0.0275,
+            crush: 0.0177,
+            crush_members: [
+                "rail_f",
+                "rail_r",
+                "rail_r_tail",
+                "bumper_beam_f",
+                "bumper_beam_r",
+            ]
+            .map(String::from)
+            .to_vec(),
+            door: 0.0334,
+            bonnet: 0.0593,
+            bootlid: 0.0567,
+            fender: 0.0422,
+            bumper: 0.0893,
+            glass_body: 0.0200,
+            glass_side: 0.0545,
+        }
+    }
+}
+
+impl DampingRatios {
+    /// The ratio for a beam in part `part` (its name), glass or not, crush
+    /// structure or not.
+    pub fn of(&self, part: &str, glass: bool, crush: bool) -> f32 {
+        let body = part == "body" || part.is_empty();
+        if glass {
+            return if body {
+                self.glass_body
+            } else {
+                self.glass_side
+            };
+        }
+        if crush {
+            return self.crush;
+        }
+        let pick = [
+            ("door", self.door),
+            ("bonnet", self.bonnet),
+            ("bootlid", self.bootlid),
+            ("fender", self.fender),
+            ("bumper", self.bumper),
+        ];
+        pick.iter()
+            .find(|(n, _)| part.starts_with(n))
+            .map_or(self.body, |x| x.1)
+    }
 }
 
 fn one() -> f32 {
@@ -2511,6 +2599,8 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     // a crash; real bodies' joints, sealer and trim damp those. Each node gets
     // one, to the node of its part nearest `reach` m away along an axis (x, y,
     // z in turn).
+    // (Each body dashpot and the node it is from.)
+    let mut body_dash: Vec<(usize, u32)> = Vec::new();
     if def.body_damping > 0.0 {
         let n = sk.nodes.len() as u32;
         let susp_part = sk
@@ -2519,6 +2609,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .position(|p| p == "suspension")
             .map(|x| x as u16);
         let reach = def.body_damping_reach;
+        // One tier: a node takes at most `BODY_DAMPING_FAN_IN` dashpots from
+        // others (otherwise a light node that is many nodes' best partner
+        // carried 16 of them, h·Σc/m 1.29 past `C_RATIO`'s 0.75).
+        let mut fan_in = vec![0usize; n as usize];
+        body_dash.clear();
         for i in 0..n {
             let ni = &sk.nodes[i as usize];
             if Some(ni.part) == susp_part {
@@ -2528,6 +2623,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             let pi = ni.p;
             let best = (0..n)
                 .filter(|&j| j != i && sk.nodes[j as usize].part == ni.part)
+                .filter(|&j| !one || fan_in[j as usize] < BODY_DAMPING_FAN_IN)
                 .filter_map(|j| {
                     let d = sk.pos(j) - pi;
                     let l = d.length();
@@ -2547,7 +2643,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 } else {
                     def.body_damping
                 };
-                sk.dashpot(i, j, c, def.body_damping_strength);
+                fan_in[j as usize] += 1;
+                if sk.dashpot(i, j, c, def.body_damping_strength) {
+                    body_dash.push((sk.beams.len() - 1, i));
+                }
             }
         }
     }
@@ -2731,6 +2830,15 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             &grade_of,
             &grades,
         );
+        if let Some(z) = &def.damping {
+            one_tier_damping(&mut sk, z, &groups, &grade_of, &grades);
+            // The body dashpots at the BX body's damping-only beams' rate per
+            // kilogram of body ([`BX_BODY_DASHPOT_RATE`]), each on the mass
+            // of the node it is from.
+            for &(j, i) in &body_dash {
+                sk.beams[j].mat.damp = BX_BODY_DASHPOT_RATE * sk.nodes[i as usize].mass;
+            }
+        }
         sk.exact_lengths = true;
         sk.cap_to_bound()?;
         for (b, &e) in sk.beams.iter_mut().zip(&elong) {
@@ -2862,6 +2970,16 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     })
 }
 
+/// One tier: the body dashpots' damping per kilogram of the node each is
+/// from (1/s): the BX body's damping-only beams (`bx_body_hatch`, "main
+/// frame damping": 12 beams of 500 N·s/m, k 0) over its 328.9 kg, Σc/Σm
+/// = 6,000 / 328.9 = 18.2 /s. Measured, not tuned.
+pub const BX_BODY_DASHPOT_RATE: f32 = 6000.0 / 328.9;
+
+/// One tier: the most body dashpots a node takes from other nodes (a Choice
+/// that keeps every node within `C_RATIO`).
+pub const BODY_DAMPING_FAN_IN: usize = 2;
+
 /// One tier: the body shell's sheet (m), a Choice typical of a body side
 /// and floor (the body's sum is set by its measured mass, so only the shell's
 /// share against the members' rests on it).
@@ -2983,6 +3101,65 @@ fn one_tier_real_stiffness(
             b.mat.damp *= f.sqrt();
         }
         let _ = REF_LENGTH;
+    }
+}
+
+/// One tier: every steel, glass and fascia beam's damping set to its part's
+/// ratio ([`DampingRatios`]) on its own two-mass mode at its target
+/// stiffness: c = 2ζ·√(k·μ), μ = m₁m₂/(m₁+m₂) of its nodes' real masses.
+/// [`Skeleton::cap_to_bound`] then keeps the ratio (c ∝ √k). Every beam of
+/// a part but the fixed ones (blocks' and plates' mounts, the suspension)
+/// and the dashpots: the part's seals, supports and hardware ropes too (the
+/// BX's door file's supports and latch beams sit in its door ratio's range).
+/// A beam across two parts takes the non-body part's.
+fn one_tier_damping(
+    sk: &mut Skeleton,
+    z: &DampingRatios,
+    groups: &HashMap<String, Vec<u32>>,
+    grade_of: &HashMap<u32, Material>,
+    grades: &Grades,
+) {
+    let mut crush: std::collections::HashSet<(u32, u32)> = Default::default();
+    {
+        let mut of: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut k = 0usize;
+        for m in &z.crush_members {
+            for key in [m.clone(), format!("{m}_r")] {
+                if let Some(g) = groups.get(&key) {
+                    for &i in g {
+                        of.entry(i).or_default().push(k);
+                    }
+                    k += 1;
+                }
+            }
+        }
+        for b in &sk.beams {
+            if let (Some(x), Some(y)) = (of.get(&b.a), of.get(&b.b)) {
+                if x.iter().any(|t| y.contains(t)) {
+                    crush.insert((b.a, b.b));
+                }
+            }
+        }
+    }
+    let names = sk.parts.clone();
+    for i in 0..sk.beams.len() {
+        let b = &sk.beams[i];
+        if b.damper || b.fixed || b.mat.k <= 0.0 {
+            continue;
+        }
+        let (a, c) = (b.a as usize, b.b as usize);
+        let l = sk.nodes[a].p.distance(sk.nodes[c].p).max(1e-3);
+        let (ma, mc) = (sk.nodes[a].mass, sk.nodes[c].mass);
+        if !(ma > 0.0 && mc > 0.0) {
+            continue;
+        }
+        let glass =
+            grade_of.get(&b.a) == Some(&grades.glass) || grade_of.get(&b.b) == Some(&grades.glass);
+        let part = &names[sk.nodes[a].part.max(sk.nodes[c].part) as usize];
+        let zeta = z.of(part, glass, crush.contains(&(b.a, b.b)));
+        let mu = ma * mc / (ma + mc);
+        let k = b.mat.k_at(l);
+        sk.beams[i].mat.damp = 2.0 * zeta * (k * mu).sqrt();
     }
 }
 

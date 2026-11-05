@@ -2028,6 +2028,7 @@ pub fn sedan() -> VehicleDef {
         one_tier: false,
         biw_mass: 0.0,
         part_masses: Vec::new(),
+        damping: None,
     })
 }
 
@@ -2067,6 +2068,7 @@ pub fn sedan_one_tier() -> VehicleDef {
     d.name = "sedan1".into();
     d.one_tier = true;
     d.tiered = false;
+    d.damping = Some(super::vehicle::DampingRatios::default());
     d.biw_mass = ACCORD_BIW;
     d.part_masses = vec![
         ("door_f".into(), ACCORD_DOOR_F),
