@@ -1346,6 +1346,38 @@ removing it needs a modelling Choice with nothing measured behind it: a ground
 restitution, or tread bending ahead of the patch the file does not author. This is the
 user's decision (AGENTS.md: no lossy or invented model on our own initiative).
 
+**A compliant, hysteretic tread contact, measured (2026-11-05; CPU, reverted, the
+patch is in the session scratchpad).** The coordinator's decision: replace §28's
+inelastic ground rule on pressure-wheel tread nodes only with a compliant contact whose
+loss comes from measured tread-rubber hysteresis.
+* *Source of tan δ.* Mogi, Hase, Mizone and Nishitani, "Research on Optimization of
+  Viscoelastic Properties of Tire Tread Rubber to Reduce Rolling Resistance and
+  Decrease Braking Distance", Honda R&D Technical Review 19(1), April 2007: tan δ at
+  60 °C and about 10 Hz is the index of rolling resistance, and the tread is about
+  50 % of it. That paper gives no number. The value used, **tan δ = 0.12**, is a
+  representative tread compound's (0.117 for a TDAE-oil reference compound, an ACS
+  Rubber Division meeting abstract seen in a search index but not retrieved).
+  **Unverified at the source:** a cited table (Clark, *Mechanics of Pneumatic
+  Tires*; NRC Special Report 286) is still owed.
+* *Hysteretic, rate-independent* (**Choice**: k = m/h², ω·h = 1, the stiffest the step
+  integrates with margin; real tread rubber is about 15 times stiffer, about 10 MN/m
+  per node, and cannot be integrated at 2 kHz; loading k·p, unloading k·p·(1 − ψ)
+  below the episode's peak, ψ = (π/2)·tan δ, so a 0 → p₀ → 0 cycle loses a
+  sinusoidal cycle's π·tan δ·k·a²): C_rr **0.016** (supercar, was 0.024) and
+  **0.051** (Astral R, was 0.063). The landing energy now mostly comes back (ground
+  vertical work −2.2 kJ/s), but the sidewall and L-beam dampers still take 17 kJ/s
+  of the Astral R's 25. Fails the rest creep: the supercar drifts 105 mm against a
+  sway of 103 mm. Below the peak the loop is elastic, so small oscillations are not
+  damped and the tread walks.
+* *Kelvin–Voigt* (c = k·tan δ/(2π·10 Hz), implicit, c·h/m = 3.8; stateless): C_rr
+  0.035 and 0.069, worse. The viscous law over-damps the tread's fast modes,
+  which are far above 10 Hz. Fails `pressure_wheel_car_stands_on_its_tyres` (the
+  fixture car rolls 0.195 m, off its flats).
+* **Not adopted.** Neither passes the rest tests. A hysteresis that damps small
+  cycles too (reversal-point, Masing-type) needs per-node state on both solvers. The
+  one that reaches the band at all, the supercar's, leaves the Astral R at 0.051,
+  because its remaining sink is its own sidewall dampers. **Open, for the coordinator.**
+
 **Drag area check** (`jbeam_accept … aero=`: Σ 1.28·(dragCoef/100)·A·|n̂·f̂|
 over the desc's triangles, f̂ the forward axis; one-sided areas, each triangle once,
 SI units, the default 100 only where a row sets none). The reading is the docs':
