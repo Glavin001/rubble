@@ -172,6 +172,28 @@ fn mechanical_energy(s: &ExplicitSim) -> f64 {
 /// skin's nodes within 15 cm of the struck side (+X) at spawn, in the barrier
 /// face's height band (279 to 838 mm above the car's lowest node).
 fn residual_side_crush(spawn: &[Vec3], now: &[Vec3], skin: &[usize]) -> f32 {
+    let crush = side_crush_of(spawn, now, skin);
+    // MDB_WHO=1: the crush profile along the car (max per 0.25 m of z) and
+    // the deepest nodes.
+    if std::env::var("MDB_WHO").is_ok() {
+        let mut bins: std::collections::BTreeMap<i32, f32> = Default::default();
+        for &(i, c) in &crush {
+            let e = bins.entry((spawn[i].z / 0.25).floor() as i32).or_insert(f32::MIN);
+            *e = e.max(c);
+        }
+        let prof: Vec<String> = bins.iter().map(|(k, c)| format!("z {:+.2}: {:.0}", *k as f32 * 0.25, c * 1e3)).collect();
+        eprintln!("  crush profile (mm): {prof:?}");
+        let mut v = crush.clone();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for &(i, c) in v.iter().take(6) {
+            eprintln!("  node {i} at {:.2?}: {:.0} mm", spawn[i], c * 1e3);
+        }
+    }
+    crush.iter().map(|c| c.1).fold(0.0, f32::max)
+}
+
+/// Each of `skin`'s nodes' residual inward crush (m), as [`residual_side_crush`].
+fn side_crush_of(spawn: &[Vec3], now: &[Vec3], skin: &[usize]) -> Vec<(usize, f32)> {
     let mid = spawn.iter().map(|p| p.x).sum::<f32>() / spawn.len() as f32;
     let far: Vec<usize> = (0..spawn.len()).filter(|&i| spawn[i].x < mid).collect();
     let mean = |p: &[Vec3], ids: &[usize]| ids.iter().map(|&i| p[i]).sum::<Vec3>() / ids.len() as f32;
@@ -193,23 +215,7 @@ fn residual_side_crush(spawn: &[Vec3], now: &[Vec3], skin: &[usize]) -> f32 {
             (i, spawn[i].x - back.x)
         })
         .collect();
-    // MDB_WHO=1: the crush profile along the car (max per 0.25 m of z) and
-    // the deepest nodes.
-    if std::env::var("MDB_WHO").is_ok() {
-        let mut bins: std::collections::BTreeMap<i32, f32> = Default::default();
-        for &(i, c) in &crush {
-            let e = bins.entry((spawn[i].z / 0.25).floor() as i32).or_insert(f32::MIN);
-            *e = e.max(c);
-        }
-        let prof: Vec<String> = bins.iter().map(|(k, c)| format!("z {:+.2}: {:.0}", *k as f32 * 0.25, c * 1e3)).collect();
-        eprintln!("  crush profile (mm): {prof:?}");
-        let mut v = crush.clone();
-        v.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for &(i, c) in v.iter().take(6) {
-            eprintln!("  node {i} at {:.2?}: {:.0} mm", spawn[i], c * 1e3);
-        }
-    }
-    crush.iter().map(|c| c.1).fold(0.0, f32::max)
+    crush
 }
 
 /// The FMVSS 214 dynamic test (moving deformable barrier, 53.9 km/h, crabbed 27°)
@@ -232,6 +238,7 @@ fn mdb_side_impact(label: &str, truck: String) {
     let mut skin: Vec<usize> = car.triangles.iter().flat_map(|t| t.nodes.map(|n| n as usize)).collect();
     skin.sort_unstable();
     skin.dedup();
+    let tri_nodes = skin.clone();
     skin.retain(|&i| spawn[i].x > reach - 0.15 && (0.279..=0.838).contains(&(spawn[i].y - low)));
     assert!(!skin.is_empty());
     let e0 = mechanical_energy(&s);
@@ -250,6 +257,31 @@ fn mdb_side_impact(label: &str, truck: String) {
     let all = s.gpu_solver().positions();
     assert!(all.iter().flatten().all(|p| p.is_finite()), "{label}: non-finite nodes");
     let crush = residual_side_crush(&spawn, &now, &skin);
+    // MDB_LEVELS=1: the crush along the car at NCAP's sill-top and mid-door
+    // levels (NCAP side MDB reports' medians: 242 and 621 mm above the
+    // ground), against the wheelbase fraction aft of the front axle (the
+    // car's front less its 0.92 m overhang; wheelbase 2.75 m).
+    if std::env::var("MDB_LEVELS").is_ok() {
+        let all = &tri_nodes;
+        let front = spawn.iter().map(|p| p.z).fold(f32::MIN, f32::max);
+        let axle = front - 0.92;
+        for (name, h) in [("sill top", 0.242f32), ("mid-door", 0.621)] {
+            let ids: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| spawn[i].x > reach - 0.15 && (spawn[i].y - low - h).abs() < 0.08)
+                .collect();
+            let c = side_crush_of(&spawn, &now, &ids);
+            let mut bins: std::collections::BTreeMap<i32, f32> = Default::default();
+            for &(i, d) in &c {
+                let f = (axle - spawn[i].z) / 2.75;
+                let e = bins.entry((f * 10.0).floor() as i32).or_insert(f32::MIN);
+                *e = e.max(d);
+            }
+            let prof: Vec<String> = bins.iter().map(|(k, d)| format!("{:.1}: {:.0}", *k as f32 / 10.0, d * 1e3)).collect();
+            eprintln!("  {label} {name} ({} nodes) crush by wheelbase fraction aft of the front axle (mm): {prof:?}", ids.len());
+        }
+    }
     // MDB_WHO=1: the struck car's yielded and broken beams on its struck
     // half, by part pair (the showcase car's skeleton names the parts).
     if std::env::var("MDB_WHO").is_ok() && label == "showcase" {

@@ -239,6 +239,121 @@ Glazing System Parameters on Glazing System Contribution to a Lightweight
 Vehicle's Torsional Stiffness and Weight"). So the body without glass is
 too soft by about 3× and its lumped glass panels make up the difference.
 
+### The body-in-white from real sections (2026-11-05, later)
+
+**Brace ends.** Each lumped brace names the member its corners lie on
+(`BraceSpec::on`, `sedan::on`); its end is that member's station nearest
+the point. A member added elsewhere no longer moves a brace (Medium's
+`.truck` was byte-identical after the change).
+
+**Sections.** `side_sections` now also covers these members. Grades are the
+classes in the 2011 Honda Accord teardown's material table (NHTSA DOT HS
+811 666, fig. 113). Sections are typical, not one car's drawings (a Choice).
+
+| Member | d × w × t (mm), grade | Chord yield (kN, was) |
+|---|---|---|
+| `roof_rail` | 70 × 90 × 1.4 DP780 | 54 (4.2) |
+| `header_f`, `header_r`, `bow_b` | 60 × 100 × 1.2 HSLA | 17.7 (4.2) |
+| `bow_r` | 40 × 80 × 0.8 HSLA | 6.0 (4.2) |
+| `pillar_a` | 100 × 120 × 1.4 DP780 | 52 (23) |
+| `pillar_c` | 70 × 100 × 1.4 DP780 | 48.5 (14) |
+| `rail_r` (knee kept) | 100 × 130 × 1.6 DP600 | 47.5 (11.6) |
+| `subframe_f0`–`f2`, `r1`, `r2` | 90 × 60 × 2.0 S420 | 44 (4.3) |
+| `seat_x` (new, z 1.58) | 80 × 60 × 1.2 DP600 | 39.6 |
+| `bumper_beam_r` | 50 × 100 × 2.5 AW-6082-T6 | 32.6 (2.9) |
+| `dash` (IP beam) | tube Ø 60 × 1.6 S420 | 12.7 (14) |
+| `door_beam_f`, `_r` | tube Ø 31.8 × 1.9, 1,200 MPa | 14.6 (19.5) |
+
+`subframe_f0` is the front subframe's rear cross member (z 3.55). A boot
+floor cross member at z 0.40 was tried and left out. It moved the
+frontal's restitution to 0.202 and did not stop the rear-overhang
+pass-through.
+
+**Aperture frames.** `aperture_racking` gives a closed rectangular frame's
+racking stiffness, V·h²/(24E)·[h/I_p + b/2·(1/I_t + 1/I_b)], and its
+yield shear 4·M_p/h at its weakest corner member. Rigid corners are a
+Choice. These openings now take their k·L and yield from it, in place of
+the tuned `CABIN_YIELD` (60 kN) door rings:
+- the windscreen opening (`screen_ring`, on the A-pillars' stations):
+  k·L 2.76 MN, yield 11.5 kN;
+- the front door ring (`ring_f_*`): k·L 5.5 MN, yield 19.6 kN;
+- the rear door ring (`ring_r_*`): k·L 3.6 MN, yield 16.9 kN.
+
+**Torsion and glazing.** Body-in-white torsion is 12.37 kN·m/deg with
+glass and 10.99 without, so glazing carries 11.2 %:
+- `windscreen_x` × `GLAZING` (2) contributes 5.9 %;
+- the backlight shear panel contributes the rest.
+
+Measured references:
+- the 2011 Accord's body with windscreen, backlight and IP beam: 12.33
+  kN·m/deg (DOT HS 811 666 §4.7.2);
+- SAE 2000-01-2719 (Khaleel et al.), the primary source: glazing makes
+  the body 12.4 % stiffer in torsion than without. The previous note's
+  24.29 against 16.44 (32 %) is not in that abstract.
+
+Published body-in-white figures run 8.5–16.4 kN·m/deg.
+
+**Ensembles.** One explicit crash run is chaotic, so `n` and `o` are now
+judged on eight runs: ±1 cm impact offset, ±0.3 % speed and ±0.2° yaw
+(the cube's corners). The test asserts the mean and reports the spread.
+At 1a87d4cd:
+- `o` 292 ± 62 mm (range 197–403; band 297–445): fails;
+- `n` restitution 0.2056 ± 0.007 (band ≤ 0.20): fails;
+- `n` peak g 35.6 ± 2.0 and max crush 527 ± 19 mm.
+
+NHTSA repeat tests of one make, model and year (vehicle database) scatter
+much less:
+- NCAP side pole: pooled SD 24 mm (CV 5 %);
+- NCAP side MDB, sedans: SD 14 mm (CV 5 %);
+- the 1982 Citation 56 km/h repeatability program (14 cars, SAE 840201):
+  crush CV 3.7 %.
+
+The model's pole spread is about 2.5 × a real car's.
+
+**Step budget.** The two new members' frame nodes need 24 kg of stability
+floor: `seat_x` 14 kg, `subframe_f0` 10 kg. Real parts weigh about 4 kg
+each. The kerb mass is fixed, so the skin tier pays: Medium's skin scale
+fell from ×0.44 to ×0.29. The skin keeps its yield forces, so its panels
+are about a third softer for the same dent force. Wobble at rest went
+from 0.3 to 0.7 mm.
+
+**MDB against NHTSA's profiles** (`MDB_LEVELS=1`). The NCAP side MDB
+reports of 19 sedans (exterior crush every 150 mm at 5 levels) give:
+- level 1 (sill top, 242 mm): median 45 mm;
+- level 3 (mid-door, 621 mm): median 204 mm;
+- two peaks, on the front door at about 0.45 WB and on the rear door /
+  C-pillar at about 0.73 WB aft of the front axle, falling to half at
+  0.85 WB.
+
+Ours is deepest low and far aft: 380 mm at 0.82 WB about 0.33 m above
+the ground (the rear door's lower rear corner, z 1.52). That corner is
+behind the sill's end (z 1.36), above the wheelhouse, and below the rear
+door beam's end (y 0.58), so nothing bears on it.
+
+**A8 (30 km/h side), force against depth** (`POLE_CURVE=1`). The car's
+kinetic energy is 50 kJ. Every failing case is deep crush at low force,
+not a pole passing between nodes with no force:
+- rear overhang (+1.95): about 15 kN mean to 1.8 m, 27 kJ. The rear
+  rails' stations are 0.45 m apart (z 0.17, 0.62), so the pole meets no
+  rail node in its lane;
+- behind the front wheel (−1.15): 26 kN mean, 94 kN where it meets the
+  powertrain at 0.8 m;
+- at the B-pillar (0.0): 280 kN at 0.4 m, then about 20 kN to 1.23 m;
+- −0.05: 28 kN mean.
+
+A 100 kN structure would stop the car's 50 kJ within about 0.5 m.
+
+No measured pole impacts at the front wheel or rear overhang with crush
+depths were found. SAE 2006-01-0062 (Taurus into a pole) reports the front
+axle region as much stiffer than the B-pillar, qualitatively.
+
+**Glass** (`BRITTLE_GLASS=1`):
+- the windscreen cracks in every side pole run but not in `q` or `n`;
+- with it on, `f` (energy rose 21 J at 120 km/h), `o` and `t` (15 nodes)
+  fail.
+
+Brittle glass stays off.
+
 ## Node counts (BeamNG's)
 
 The structure is noded as BeamNG's cars are: a frame of a few hundred heavy
