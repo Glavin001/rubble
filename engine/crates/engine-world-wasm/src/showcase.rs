@@ -251,8 +251,10 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
 /// `showcase-car-render.mjs` draws it. `spec`: `{ jbeam: [[name, text]], pc,
 /// paint: [r, g, b], native (the JBeam-mode spawn: `explicitSim`'s),
 /// materials: [[name, text]] (the `*.materials.json` files) }`; `meshes`: `[[name, Uint8Array]]`, the vehicle's `.dae`
-/// files. Returns `{ visual, report: { flexbodies, props, vertices,
-/// triangles, unbound, missing } }`.
+/// files. Returns `{ visual, visualLod (the distant level: the meshes
+/// clustered on a 3 cm grid), lodDistance (m: where a cluster is about 2.6
+/// pixels), lodTriangles, report: { flexbodies, props, vertices, triangles,
+/// unbound, missing } }`.
 #[wasm_bindgen(js_name = jbeamVisual)]
 pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
     use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
@@ -313,8 +315,14 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
         mats.extend(flexmesh::read_materials(m.get(1).and_then(|x| x.as_str()).unwrap_or("")));
     }
     let (vis, rep) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &all, &mats, paint).map_err(err)?;
+    // The distant level: the meshes clustered (flexmesh::cluster).
+    let far: Vec<flexmesh::DaeMesh> = all.iter().map(|m| flexmesh::cluster(m, flexmesh::LOD_CELL)).collect();
+    let (lod, lrep) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &far, &mats, paint).map_err(err)?;
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
+    set(&out, "visualLod", &visual_js(&lod).into());
+    set(&out, "lodDistance", &JsValue::from(flexmesh::lod_distance(flexmesh::LOD_CELL)));
+    set(&out, "lodTriangles", &JsValue::from(lrep.triangles as u32));
     let r = Object::new();
     set(&r, "flexbodies", &JsValue::from(rep.flexbodies as u32));
     set(&r, "props", &JsValue::from(rep.props as u32));

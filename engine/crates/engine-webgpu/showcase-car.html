@@ -48,7 +48,9 @@ try {
   device.addEventListener('uncapturederror', (e) => fail('gpu: ' + (e.error?.message ?? e.error)));
   const spec = { vehicles: Array.from({ length: n }, (_, i) => ({ truck: car.truck, at: [(i - (n - 1) / 2) * 3, 0], yaw: 0 })), scene, speed: kmh / 3.6, drag: qs.get('drag') !== '0' };
   for (const k of ['offset', 'at', 'height', 'angle', 'runUp']) if (qs.has(k)) spec[k] = Number(qs.get(k));
-  const sim = world.explicitSim(spec);
+  // ?mod=: the imported vehicle's visual alone (no solver: a stand-in).
+  const sim = qs.has('mod') ? { layout: () => ({ vehicles: [], boxes: [], beams: 0 }), stepRate: () => 2000, maxFrameSteps: () => 0, frame() {}, timed: () => false, readDamage: async () => [null], readPoses: async () => [0, 0, 0] }
+    : world.explicitSim(spec);
   const layout = sim.layout();
 
   const canvas = document.getElementById('c');
@@ -81,7 +83,7 @@ try {
   const adapterInfo = await navigator.gpu.requestAdapter().then((a) => a?.info ? `${a.info.vendor} ${a.info.architecture} ${a.info.description}` : '?');
   const batchMs = [];
   const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES, zebra: Number(qs.get('zebra')) || 0 });
-  r.setSolver(sim.nodesBuffer(), sim.miscBuffer(), sim.beamsBuffer());
+  if (!qs.has('mod')) r.setSolver(sim.nodesBuffer(), sim.miscBuffer(), sim.beamsBuffer());
   // ?mod=<folder>: an imported BeamNG vehicle's flexbodies and props at rest
   // (its files.json lists the folder: .jbeam, .pc (?pc=), .dae,
   // .materials.json), skinned from its JBeam-mode rest nodes: the visual
@@ -97,17 +99,22 @@ try {
     const meshes = await Promise.all(list.filter((f) => f.endsWith('.dae')).map(async (f) => [f, new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer())]));
     const materials = await Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text));
     const out = jbeamVisual({ jbeam: jb, pc, native: true, materials, ...(paint ? { paint } : {}) }, meshes);
-    modVis = out.visual;
+    modVis = out.visual; modVis.lod = out.visualLod; modVis.lodDistance = out.lodDistance;
     window.__flexReport = out.report;
-    const nr = modVis.nodeRest;
+    // ?n= copies in a row, 3 m apart (the cost check).
+    const nr0 = modVis.nodeRest, r00 = modVis.beamRest0;
+    const nr = new Float32Array(nr0.length * n), r0 = new Float32Array(r00.length * n);
+    for (let i = 0; i < n; i++) {
+      for (let k = 0; k < nr0.length; k++) nr[i * nr0.length + k] = nr0[k] + (k % 3 === 0 ? (i - (n - 1) / 2) * 3 : 0);
+      r0.set(r00, i * r00.length);
+    }
     const posBuf = device.createBuffer({ size: Math.max(16, nr.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(posBuf, 0, nr);
-    const r0 = modVis.beamRest0;
     const restBuf = device.createBuffer({ size: Math.max(16, r0.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(restBuf, 0, r0);
     r.setPositions(posBuf, restBuf);
   }
-  const carIds = modVis ? [r.addCar(modVis, { nodeOffset: 0, beamOffset: 0, vehicle: 0 })] : layout.vehicles.map((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: qs.get('lod') === '0' ? null : car.visualLod, lodDistance: Number(qs.get('lodDist')) || 18 }));
+  const carIds = modVis ? Array.from({ length: n }, (_, i) => r.addCar(modVis, { nodeOffset: i * modVis.nodeCount, beamOffset: i * modVis.beamRest0.length, vehicle: i, lod: qs.get('lod') === '0' ? null : modVis.lod, lodDistance: Number(qs.get('lodDist')) || modVis.lodDistance })) : layout.vehicles.map((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: qs.get('lod') === '0' ? null : car.visualLod, lodDistance: Number(qs.get('lodDist')) || 18 }));
   // ?check=damage: every frame, the renderer's damage units against the
   // solver's beams read back in the same submission (the units' rule:
   // skin.rs unit_states()): any difference is a mismatch.

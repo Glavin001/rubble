@@ -43,6 +43,9 @@ pub mod table {
 }
 pub use table::{CudaKernel, CUDA_KERNELS, CUDA_TERRAIN_KERNELS, PTX_ARCH, SASS_ARCHS};
 
+pub mod explicit;
+pub use explicit::{CudaExplicitBeams, CUDA_EXPLICIT_KERNELS};
+
 /// Binding 23: colour slots, work slots and convex slots, three words each.
 const INDIRECT_BINDING: u32 = 23;
 const PASS_BINDING: u32 = 22;

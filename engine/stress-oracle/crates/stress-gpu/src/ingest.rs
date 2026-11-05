@@ -279,30 +279,40 @@ impl EngineIngest {
         pass.dispatch_workgroups(groups(self.max_rows as usize, 64), 1, 1);
     }
 
+    /// [`Self::merge`] of substep 0 and the first `rows` rows of substep 1 (a host's own
+    /// records there, at most `rows`): the dispatches cover only those records.
+    pub fn merge_with_rows(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, rows: u32) {
+        assert!(self.max_substeps >= 2, "ingest: no second substep slot");
+        self.merge_records(gpu, encoder, e, 2 * self.max_rows + 2 * rows.min(self.max_rows), 2 + rows);
+    }
+
     /// The frame's manifolds, from the records of `substeps` substeps (the rest of the
     /// slots cleared).
     pub fn merge(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32) {
+        let records = if substeps == 0 { 0 } else { 2 * self.max_rows * substeps };
+        self.merge_records(gpu, encoder, e, records, substeps);
+    }
+
+    fn merge_records(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, record_count: u32, key: u32) {
+        let substeps = key;
         // Only the substeps run are merged, and in each only its rows (`record_live`): the
         // rest of the records is never read, so nothing is cleared.
-        let mut params = IngestParams {
+        let params = IngestParams {
             row_offset: 0,
             max_rows: self.max_rows,
             substep: 0,
             chunk_count: self.chunk_count,
-            record_count: 2 * self.max_rows * substeps.max(1),
+            record_count,
             max_bodies: self.max_bodies,
             h: 0.0,
             pad: 0,
         };
-        if substeps == 0 {
-            params.record_count = 0;
-        }
-        let records = (2 * self.max_rows * substeps.max(1)) as usize;
+        let records = (record_count as usize).max(1);
         let n = self.chunk_count as usize;
         let kernels = [&self.clear, &self.count, &self.scan, &self.scan_top, &self.scan_add, &self.scatter, &self.merge];
         let sizes = [groups(2 * n, 64), groups(records, 64), groups(n, 1024), 1, groups(n, 64), groups(records, 64), groups(n, 64)];
         let labels = ["ingest clear", "ingest count", "ingest scan", "ingest scan blocks", "ingest scan add", "ingest scatter", "ingest merge"];
-        let binds = self.binds(gpu, &kernels, [1, 0, 0, 0, substeps], e, || params);
+        let binds = self.binds(gpu, &kernels, [1, 0, record_count, 0, substeps], e, || params);
         for (((k, size), label), bind) in kernels.into_iter().zip(sizes).zip(labels).zip(binds) {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
             pass.set_pipeline(&k.pipeline);

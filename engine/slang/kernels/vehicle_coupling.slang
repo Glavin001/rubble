@@ -46,6 +46,8 @@ struct Params
     uint ingestSlot;     // its slot for the vehicles' records (1)
     uint step;
     uint filter;         // the vehicles' collision filter: categories | mask << 16
+    uint rowCap;         // chunk records at most (the ingest merges this many of slot 1)
+    uint pad0, pad1, pad2;
 };
 
 static const uint BODY_RECS = 5u;
@@ -312,7 +314,7 @@ void cpl_loads(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float3 m = asfloat(gMisc[at + 5u].xyz);
     float3 ref = asfloat(gMisc[at + 6u].xyz);
     uint row = gWork[0].add(1u);
-    if (row >= gP.ingestRows) { gWork[1].or(ST_ROWS); return; }
+    if (row >= gP.rowCap) { gWork[1].or(ST_ROWS); return; }
     uint base = 2u * (gP.ingestSlot * gP.ingestRows + row);
     float3 jz = to_zup(j);
     float3 p = to_zup(actionPoint(ref, j, m));
@@ -333,7 +335,7 @@ void cpl_loads(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 void cpl_loads_end(uint3 tid : SV_DispatchThreadID)
 {
     if (gP.ingestRows == 0u) return;
-    gRowCounts[gP.ingestSlot] = min(gWork[0].load(), gP.ingestRows);
+    gRowCounts[gP.ingestSlot] = min(gWork[0].load(), gP.rowCap);
 }
 
 [shader("compute")]

@@ -30,6 +30,9 @@ mod destruction;
 mod error;
 mod events;
 mod explicit_vehicles;
+/// The explicit vehicles' crash scene (soft vehicles into prefractured houses).
+#[cfg(feature = "stress")]
+pub mod explicit_scene;
 mod guidance;
 mod handles;
 mod host_state;
@@ -2235,6 +2238,9 @@ impl World {
         // Explicit vehicles: the next window's frame and chunk loads, before the
         // fracture takes them (forward-only).
         let explicit_read = if ran { self.explicit_after_step(&mut enc)? } else { None };
+        if let (Some(m), Some(_)) = (&marks, explicit_read) {
+            m.mark(&mut enc, "explicit vehicles");
+        }
         lap("rigid encoded");
         if let Some(m) = &marks {
             m.mark(&mut enc, "rigid tail");
