@@ -8,9 +8,7 @@
 //! paint: [r, g, b] (linear) }`.
 
 use crate::err;
-use engine_softbody::authoring::skin::{
-    showcase_visual, showcase_visual_lod, ShowcaseVisual, MATERIAL_NAMES,
-};
+use engine_softbody::authoring::skin::{showcase_visual_lod, ShowcaseVisual, MATERIAL_NAMES};
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array, Uint8Array};
 use wasm_bindgen::prelude::*;
@@ -97,7 +95,27 @@ const FAR_DETAIL: f32 = 0.2;
 #[wasm_bindgen(js_name = showcaseCar)]
 pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     let b = built(&params)?;
-    let v = showcase_visual(&b).map_err(err)?;
+    // Measurement switches (a visual A/B on identical physics): `bind:
+    // 'legacy'` the binding before the flexbody rebinding; `alt: false` no
+    // shut-line fallbacks.
+    let p: serde_json::Value = serde_wasm_bindgen::from_value(params.clone()).unwrap_or_default();
+    let legacy = p.get("bind").and_then(|s| s.as_str()) == Some("legacy");
+    let no_alt = p.get("alt").and_then(|s| s.as_bool()) == Some(false);
+    let make = |detail: f32| {
+        let v = if legacy {
+            engine_softbody::authoring::skin::showcase_visual_legacy_lod(&b, detail)
+        } else {
+            showcase_visual_lod(&b, detail)
+        };
+        v.map(|mut v| {
+            if no_alt {
+                v.alt.clear();
+            }
+            v
+        })
+        .map_err(err)
+    };
+    let v = make(1.0)?;
     let out = Object::new();
     set(&out, "truck", &JsValue::from_str(&b.truck));
     let counts = Object::new();
@@ -120,10 +138,10 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     set(&out, "counts", &counts);
     set(&out, "visual", &visual_js(&v).into());
     // The distant level of detail (the renderer picks it by distance).
-    let lod = showcase_visual_lod(&b, 0.45).map_err(err)?;
+    let lod = make(0.45)?;
     set(&out, "visualLod", &visual_js(&lod).into());
     // A third, coarser level (a car a few hundred pixels long and less).
-    let far = showcase_visual_lod(&b, FAR_DETAIL).map_err(err)?;
+    let far = make(FAR_DETAIL)?;
     set(&out, "visualFar", &visual_js(&far).into());
     Ok(out.into())
 }

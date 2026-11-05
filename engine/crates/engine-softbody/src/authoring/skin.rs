@@ -903,6 +903,16 @@ pub fn showcase_visual_lod(built: &Built, detail: f32) -> Result<ShowcaseVisual,
     super::parts::with_detail(detail, || build_visual(built))
 }
 
+#[path = "skin_legacy.rs"]
+mod legacy;
+
+/// **Measurement only**: [`showcase_visual_lod`] with the binding as it was
+/// before the flexbody rebinding (`skin_legacy.rs`), for a visual A/B on
+/// identical physics.
+pub fn showcase_visual_legacy_lod(built: &Built, detail: f32) -> Result<ShowcaseVisual, String> {
+    super::parts::with_detail(detail, || legacy::build_visual_legacy(built))
+}
+
 fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     let def = &built.def;
     let sk = &built.skeleton;
@@ -1028,15 +1038,20 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     // nodes do not reach there: a panel's drawn edge lies up to 0.15 m past
     // its last node row, and riding them leaves it 0.1 m off the collision
     // skin in a crash (measured, wall and pole).
-    let on_skin = |p: Vec3, n: Vec3| pb.skin.bind_d(p, n).filter(|b| b.3 <= SKIN_BAND);
-    // An inner stamping rides what the outer skin over it rides: the skin
-    // triangle under its outer point (its hem joins the outer's edge); else,
-    // where it lies on the skin itself (a return at the shut line), that.
-    let on_skin_of = |inset: f32, p: Vec3, n: Vec3| {
+    // A vertex within the contact band of its part's own skin (single-part
+    // triangles) rides the triangle under it; an inner stamping, the one
+    // under its outer point, else under itself (a return at the shut line).
+    let on_skin = |pt: u16, p: Vec3, n: Vec3| {
+        pb.tris
+            .get(&pt)
+            .and_then(|b| b.bind_d(p, n))
+            .filter(|b| b.3 <= SKIN_BAND)
+    };
+    let on_skin_of = |pt: u16, inset: f32, p: Vec3, n: Vec3| {
         if inset > 0.0 {
-            on_skin(p - n * inset, -n).or_else(|| on_skin(p, n))
+            on_skin(pt, p - n * inset, -n).or_else(|| on_skin(pt, p, n))
         } else {
-            on_skin(p, n)
+            on_skin(pt, p, n)
         }
     };
     // The farthest vertex of a piece from its binding: (distance, where, part).
@@ -1348,16 +1363,8 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                     ((b.0, b.1, b.2), u16::MAX)
                 })
             } else if let Some((pt, b)) = part.and_then(|pt| {
-                // On the collision skin: ride the skin triangle under it (an
-                // inner stamping: under its outer point).
-                // Labelled with its part when the triangle has one of the
-                // part's nodes (a shut line's: its own-part frame is its
-                // fallback, `alt`), else with the triangle's part: the
-                // piece is cut there and parts with it.
-                on_skin_of(inset, p, n).map(|b| {
-                    let has = b.0.iter().any(|&i| pb.part_of[i as usize] == pt);
-                    (if has { pt } else { pb.major(b.0, b.1) }, b)
-                })
+                // On its part's own skin: ride the triangle under it.
+                on_skin_of(pt, inset, p, n).map(|b| (pt, b))
             }) {
                 far = far_of(far, b.3, p, pt);
                 let (c, nl) = frame_coords(&node_pos, b.0, p, n);
@@ -1464,16 +1471,12 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                         (m.pos[k], m.nrm[k])
                     };
                     // On the skin it keeps the skin triangle under it.
-                    let r = if on_skin_of(inset, m.pos[k], m.nrm[k]).is_some()
-                        && vb[k].0 .0.iter().any(|&i| pb.part_of[i as usize] == tp)
-                    {
-                        Some((vb[k].0, 0.0))
-                    } else {
-                        pb.bind(tp, pp, np).map(|(t, _, _, d)| {
+                    let r = on_skin_of(tp, inset, m.pos[k], m.nrm[k])
+                        .or_else(|| pb.bind(tp, pp, np))
+                        .map(|(t, _, _, d)| {
                             let (c, nl) = frame_coords(&node_pos, t, m.pos[k], m.nrm[k]);
                             ((t, c, nl), d)
-                        })
-                    };
+                        });
                     if let Some(r) = r {
                         cache.insert((k, tp), r);
                     }

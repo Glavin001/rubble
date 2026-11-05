@@ -327,6 +327,11 @@ pub struct TruckFile {
     /// ([`crate::explicit_beams::ExplicitBeamsSettings::beamng`]) and two-body
     /// vehicle contact, as JBeam content does.
     pub beamng_profile: bool,
+    /// `rubble_drag_coef <dragCoef> [<liftCoef>]` (Rubble's extension,
+    /// jbeam-semantics-spec.md §36): the BeamNG profile's triangle aerodynamics
+    /// with these coefficients on every cab triangle (BeamNG's defaults 100 and
+    /// dragCoef otherwise; "around 10 for most exposed body panels").
+    pub drag_coef: Option<(f32, f32)>,
     /// `rubble_rest_pose <y>` (Rubble's extension): the file's node positions are
     /// the vehicle at rest on flat ground at height `y` (its beams' rest lengths
     /// carry the unloaded geometry).
@@ -805,6 +810,10 @@ impl Parser {
             "rubble_full_contact" => self.out.full_contact = true,
             "rubble_exact_lengths" => self.out.exact_lengths = true,
             "rubble_beamng_profile" => self.out.beamng_profile = true,
+            "rubble_drag_coef" => {
+                let d = f(t, 1, 100.0);
+                self.out.drag_coef = Some((d, f(t, 2, d)));
+            }
             "rubble_rest_pose" => self.out.rest_ground = Some(f(t, 1, 0.0)),
             "detacher_group" => {
                 self.detacher_group = if t.get(1) == Some(&"end") {

@@ -1273,18 +1273,16 @@ fn head_on_contact_speeds_within_the_band() {
 /// asked is the contact band (a **Choice**: beyond it what is drawn is not
 /// where contact happens).
 ///
-/// FAILS (2026-11-05): 204.7 / 39.8 mm (sedan wall / pole), 168.4 / 132.2 mm
-/// (sedan1). The worst are a lid's or a door's drawn edge once its shut
-/// line's skin triangle has died (the lid popped, a latch broke): it then
-/// rides its own part's nodes (`ShowcaseVisual::alt`, so it never draws a
-/// ribbon of the body's skin: [`detached_door_takes_its_edge`]), but the
-/// panels' drawn edges lie up to 0.15 m past their last node row, and no
-/// physics surface is there any more. Content: node rows at the panels'
-/// real edges (requested from the showcase car, 2026-11-05).
-/// With the shut-line triangles kept for good (no fallback) it measured
-/// 10.7 / 19.2 and 15.1 / 10.0 mm, but drew those ribbons (272 triangles in
-/// the door pull). It was 200 / 206 and 271 / 153 mm with vertices bound to
-/// triangles 0.22–0.37 m away along their normal.
+/// FAILS (2026-11-05): 151.3 / 102.9 mm (sedan wall / pole), 172.1 / 150.0 mm
+/// (sedan1). A vertex on its part's skin rides its part's own triangle
+/// (BeamNG's flexbody binding; a shut line's triangles across two parts
+/// drew ribbons and a sawtooth along the bonnet's rear edge once torn), but
+/// the panels' drawn edges lie up to 0.15 m past their last node row, so
+/// those edges ride nodes that far inboard. Content: node rows at the
+/// panels' real edges (requested from the showcase car, 2026-11-05).
+/// Riding the shut line's triangles measured 10.7 / 19.2 and 15.1 / 10.0 mm,
+/// at the cost of those ribbons. It was 200 / 206 and 271 / 153 mm with
+/// vertices bound to triangles 0.22–0.37 m away along their normal.
 #[test]
 #[ignore]
 fn visual_skin_follows_the_collision_skin() {
@@ -1306,12 +1304,11 @@ fn visual_skin_follows_the_collision_skin() {
     assert!(ok);
 }
 
-/// A detached door takes its edge with it: the door is pulled off (every
-/// hinge and latch rope broken) and 0.3 s further; then no drawn visual
-/// triangle on the door's shut line is stretched past twice its rest edges
-/// (a ribbon of skin between the door and the body). The shut line's
-/// vertices ride its skin triangles (nodes of both parts) until those die,
-/// then their own part's frame (`ShowcaseVisual::alt`).
+/// A detached door takes its edge with it: from the moment the door comes
+/// off (every hinge and latch rope broken), for 0.3 s, no drawn visual
+/// triangle joins it to the car (a ribbon of skin). A vertex on a frame
+/// with a node across a part border (a one-row part's) switches to its own
+/// part's frame once that frame dies (`ShowcaseVisual::alt`).
 #[test]
 fn detached_door_takes_its_edge() {
     let b = built("sedan1");
@@ -2274,4 +2271,49 @@ fn energy_terms_probe() {
             car.part[i], s.nodes[i].mass, s.nodes[i].pos
         );
     }
+}
+
+/// The BeamNG profile's air drag (jbeam-semantics-spec.md §31, §36): sedan1 takes
+/// the triangles' drag at BeamNG's default dragCoef (100) in place of the per-node
+/// drag. Coasting at 100 km/h clear of the ground (0.05 s): the drag force against
+/// the per-node rule's (DRAG·|v|² per node, independent of mass) and a real
+/// sedan's (½ρ·Cd·A, Cd·A ≈ 0.65 m²).
+#[test]
+fn profile_drag_is_the_triangles() {
+    let b = built("sedan1");
+    let v = 100.0 / 3.6;
+    let mut s = spawn_truck(&b.truck, Vec3::new(0.0, 50.0, 0.0), Vec3::Z * v);
+    assert!(!s.settings.drag && !s.settings.turbulence);
+    let tris = s
+        .beams
+        .iter()
+        .filter(|bm| bm.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamAeroTri)
+        .count();
+    assert!(tris > 0);
+    let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let p0: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
+    let steps = 100;
+    for _ in 0..steps {
+        s.step();
+    }
+    let p1: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
+    let f = -(p1 - p0) / (steps as f32 * STEP);
+    let per_node = engine_softbody::explicit_beams::DRAG * s.nodes.len() as f32 * v * v;
+    let real = 0.5 * 1.225 * 0.65 * v * v;
+    eprintln!(
+        "sedan1 at 100 km/h, {m:.0} kg: triangle drag {f:.0} N ({tris} triangles); per-node rule {per_node:.0} N; a real sedan {real:.0} N"
+    );
+    assert!(f > 0.0);
+    // `rubble_drag_coef 9` (Rubble's extension): the triangles at 9 % of a flat
+    // plate, about a real sedan's drag.
+    let text = b.truck.replace("rubble_beamng_profile", "rubble_beamng_profile\nrubble_drag_coef 9");
+    let mut s = spawn_truck(&text, Vec3::new(0.0, 50.0, 0.0), Vec3::Z * v);
+    let p0: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
+    for _ in 0..steps {
+        s.step();
+    }
+    let p1: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
+    let f9 = -(p1 - p0) / (steps as f32 * STEP);
+    eprintln!("with rubble_drag_coef 9: {f9:.0} N");
+    assert!((f9 / f - 0.09).abs() < 0.02, "{f9} against {f}");
 }
