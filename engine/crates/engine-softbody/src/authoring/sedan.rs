@@ -118,8 +118,10 @@ pub fn roof(mut m: MemberSpec) -> MemberSpec {
 /// The roof members' threshold scale.
 pub const ROOF: f32 = 1.2;
 
-/// Yield force of the roof's lumped panels (N).
-pub const ROOF_YIELD: f32 = 1.2e4;
+/// Yield force of the roof's lumped panels (N): with the roof members, the
+/// roof carries 4.8 × the unloaded weight within 127 mm of an FMVSS 216a
+/// platen (compact sedans measure 4.5–5.3 ×; `crash-reference-targets.md`).
+pub const ROOF_YIELD: f32 = 2.0e4;
 
 /// Yield force of the cabin's door-ring panels (N): strong in a
 /// 56 km/h crash, crushed by a roll-over.

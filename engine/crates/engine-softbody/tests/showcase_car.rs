@@ -2401,9 +2401,10 @@ fn p_fmvss_214_static_door_crush() {
 /// FMVSS 216a roof crush (`crash-reference-targets.md` §1, §4.13): a rigid
 /// 762 × 1,829 mm platen pitched 5° (front down) and rolled 25° (outboard
 /// down), its forward edge 254 mm ahead of the roof's front, its centre line
-/// over the driver's side roof rail, pushed along its normal while the floor
-/// is held. The force within 127 mm of platen travel must reach 3.0 × the
-/// unloaded weight (IIHS "good": 4.0×). Medium, 0.1 m/s.
+/// over the driver's side roof rail, pushed along its normal while the sills
+/// are held. The peak force within 127 mm of platen travel, against the
+/// unloaded weight: 4.0–5.5 × (measured compact sedans 4.5–5.3 ×; FMVSS
+/// minimum 3.0, IIHS "good" 4.0). Medium, 0.1 m/s.
 #[test]
 fn q_fmvss_216a_roof_crush() {
     let b = built(Resolution::Medium);
@@ -2417,8 +2418,10 @@ fn q_fmvss_216a_roof_crush() {
     let (pitch, roll) = (5.0f32.to_radians(), 25.0f32.to_radians());
     // Push direction: down, tipped forward-down by the pitch and outboard-down
     // by the roll; the platen's axes across and along it.
-    let push = Quat::from_rotation_x(-pitch) * Quat::from_rotation_z(-roll) * -Vec3::Y;
-    let along = (Quat::from_rotation_x(-pitch) * Vec3::Z).normalize();
+    // (Rotating −y about +x by +pitch tips it rearward, so the platen's plane
+    // is lower at its front edge: the front meets the roof first.)
+    let push = Quat::from_rotation_x(pitch) * Quat::from_rotation_z(-roll) * -Vec3::Y;
+    let along = (Quat::from_rotation_x(pitch) * Vec3::Z).normalize();
     let across = push.cross(along).normalize();
     let front = header.z + 0.254;
     let centre_z = front - 0.5 * 1.829;
@@ -2435,9 +2438,13 @@ fn q_fmvss_216a_roof_crush() {
         .filter(|n| under(n.pos))
         .map(|n| n.pos.dot(push))
         .fold(f32::MAX, f32::min);
-    let held: Vec<usize> = (0..sk.nodes.len())
-        .filter(|&i| sk.nodes[i].primary && s.nodes[i].pos.y < 0.45)
+    // FMVSS 216a S7.1: the vehicle is supported on its sills (rigidly), not
+    // its floor: the sills' nodes held.
+    let held: Vec<usize> = ["sill", "sill_r"]
+        .iter()
+        .flat_map(|g| b.groups[*g].iter().map(|&i| i as usize))
         .collect();
+    let _ = sk;
     let inside = move |p: Vec3, d: f32| -> Option<f32> {
         if !under(p) {
             return None;
@@ -2481,5 +2488,12 @@ fn q_fmvss_216a_roof_crush() {
             .collect::<Vec<_>>()
     );
     assert!(finite(&s));
-    assert!(peak >= 3.0 * uvw, "roof {} × weight", peak / uvw);
+    // FMVSS 216a needs 3.0 ×; IIHS "good" (≥ 4.0 ×) is what virtually all
+    // vehicles reach, and the compact sedans measured are 4.5–5.3 ×: the
+    // roof lands in 4.0–5.5 ×.
+    assert!(
+        (4.0..=5.5).contains(&(peak / uvw)),
+        "roof {} × weight",
+        peak / uvw
+    );
 }
