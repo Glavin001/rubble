@@ -1096,7 +1096,30 @@ own drag summed along the run (it is: supercar 11.4 kN against 10.9 kN, Astral R
 2.29 kN against 0.66 kN plus rolling). Rolling resistance alone: C_rr = 0.053
 (supercar) and 0.079 (Astral R), 4–6 times the documented 0.010–0.015 of passenger
 tyres: the pressure tyres' tread and sidewall losses (12–16-ray polygons, the §28
-ground rule) are too high. **Open.** **Drag area check** (`jbeam_accept … aero=`: Σ 1.28·(dragCoef/100)·A·|n̂·f̂|
+ground rule) are too high. **Open.**
+
+**Where the loss is (2026-11-05, `energy_ledger.rs` coasting, CPU, no air, 0.5–1.5 s;
+per beam −Σ f·Δℓ − ΔU with the trapezoid of f over each step).** Supercar at 9 / 25
+m/s: beams dissipate 6.0 / 28.7 kJ/s (ledger), of which sidewalls (tread to hub,
+704 beams) 5.1 / 25.5, periphery 0.4 / 1.9, tread 0.05 / 0.2, hub 0.2 / 0.5, the
+rest of the car 0.2 / 0.3 (the parts sum to the ledger within 1 %). Astral R:
+sidewalls 6.7 / 33.9 of 7.5 / 38.0 (its "car" part does not close: its torsion and
+pressure records' scalar force is not their work). Measured causes, each a
+diagnostic (`COAST_DIAG`, not a model change):
+* the sidewalls' dampers (`wheelSideBeamDamp`, `…DampExpansion` set to 0): the
+  loss falls by 12–15 % only (supercar 25.3 kJ/s at 25 m/s);
+* yield: no rest length moves over the window;
+* the polygon (`numRays` doubled, 24/32 rays): the loss is unchanged (33.0 kJ/s);
+* the sidewalls' stiff expansion branch (expansion rates set to the compression
+  ones): the loss doubles (61.2 kJ/s), so it follows the sidewalls' deformation.
+So the rolling loss is neither the damping law, nor yield, nor the flats: with
+their dampers off, the conservative sidewall springs still lose energy each
+revolution in proportion to their deflection. **Open (next):** the tread nodes'
+landing through the §28 ground rule (it removes 80 % of a landing node's normal
+speed, an inelastic impact whose energy the sidewalls' rebound then carries), and
+§20's switch point (the docs switch to the expansion rates "when the beam is
+stretched past its spawned length", ℓ₀; Rubble switches at its precompressed rest
+length L = p·ℓ₀, so a precompressed sidewall rests on its expansion branch). **Drag area check** (`jbeam_accept … aero=`: Σ 1.28·(dragCoef/100)·A·|n̂·f̂|
 over the desc's triangles, f̂ the forward axis; one-sided areas, each triangle once,
 SI units, the default 100 only where a row sets none). The reading is the docs':
 the values are the files'. The supercar's 61.6 m² is 96 % two groups whose

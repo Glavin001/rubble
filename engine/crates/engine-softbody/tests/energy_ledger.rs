@@ -221,7 +221,39 @@ fn coasting_pressure_tyres_energy_split() {
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
         let pcs = std::fs::read_to_string(dir.join(name).join(pc)).unwrap();
-        let desc = load_jbeam(&refs, Some(&pcs)).unwrap();
+        let mut desc = load_jbeam(&refs, Some(&pcs)).unwrap();
+        // Diagnostics only (COAST_DIAG, measurements of what the loss depends on,
+        // never a model change): `rays=K` multiplies every tyre's numRays, `nodamp=`
+        // a comma list of beam-set prefixes (e.g. wheelSideBeam) whose Damp and
+        // DampExpansion are zeroed, `soft_side` the sidewalls' expansion rates set
+        // to their compression ones.
+        if let Ok(d) = std::env::var("COAST_DIAG") {
+            for pw in &mut desc.pressure_wheels {
+                for item in d.split(';') {
+                    if let Some(k) = item.strip_prefix("rays=") {
+                        let k: f32 = k.parse().unwrap();
+                        let n = pw.values.get("numRays").copied().unwrap_or(10.0);
+                        pw.values.insert("numRays".into(), n * k);
+                    }
+                    if item == "soft_side" {
+                        // The sidewall's expansion rates set to its compression ones.
+                        for k in ["Spring", "Damp"] {
+                            if let Some(&x) = pw.values.get(&format!("wheelSideBeam{k}")) {
+                                pw.values.insert(format!("wheelSideBeam{k}Expansion"), x);
+                            }
+                        }
+                    }
+                    if let Some(list) = item.strip_prefix("nodamp=") {
+                        for set in list.split(',') {
+                            for suffix in ["Damp", "DampExpansion"] {
+                                pw.values.insert(format!("{set}{suffix}"), 0.0);
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!("COAST_DIAG {d}");
+        }
         for v0 in [9.0f32, 25.0] {
             let settings = ExplicitBeamsSettings {
                 drag: false,
@@ -252,9 +284,109 @@ fn coasting_pressure_tyres_energy_split() {
                 w.frame(33);
             }
             w.enable_ledger();
-            for _ in 0..60 {
-                w.frame(33);
+            // Per beam its dissipation over the window, −Σ f·Δℓ − ΔU (f the force
+            // over the step, compression positive, the trapezoid of its values at
+            // the step's ends), by part: the tyres'
+            // tread (tread ring to tread ring across), periphery (round a ring),
+            // sidewall (tread to hub), hub (hub, axle), support (axle to tread),
+            // and the rest of the car.
+            let part = {
+                let v = &w.vehicles[0];
+                let mut role = vec![0u8; v.nodes.len()]; // 0 body, 1 hub, 2 tread, 3 axle
+                let mut ring = vec![u32::MAX; v.nodes.len()];
+                for t in &v.tyres {
+                    let n = t.count as usize / 4;
+                    for i in 0..t.count as usize {
+                        let id = t.first as usize + i;
+                        role[id] = if i < 2 * n { 1 } else { 2 };
+                        ring[id] = (i / n) as u32 + 4 * t.first;
+                    }
+                    for &a in &t.axle {
+                        role[a as usize] = 3;
+                    }
+                }
+                v.beams
+                    .iter()
+                    .map(|b| {
+                        let (ra, rb) = (role[b.a as usize], role[b.b as usize]);
+                        let (lo, hi) = (ra.min(rb), ra.max(rb));
+                        match (lo, hi) {
+                            (2, 2) if ring[b.a as usize] == ring[b.b as usize] => 1,
+                            (2, 2) => 0,
+                            (1, 2) => 2,
+                            (2, 3) => 4,
+                            (1, 1) | (1, 3) | (3, 3) => 3,
+                            _ => 5,
+                        }
+                    })
+                    .collect::<Vec<usize>>()
+            };
+            let names = ["tread", "periphery", "sidewall", "hub", "support", "car"];
+            let len = |v: &ExplicitBeams, j: usize| {
+                let b = &v.beams[j];
+                v.nodes[b.a as usize]
+                    .pos
+                    .distance(v.nodes[b.b as usize].pos)
+            };
+            let u = |v: &ExplicitBeams, j: usize| {
+                let b = &v.beams[j];
+                let e = len(v, j) - b.rest;
+                0.5 * f64::from(b.k) * f64::from(e) * f64::from(e)
+            };
+            let u0: Vec<f64> = (0..w.vehicles[0].beams.len())
+                .map(|j| u(&w.vehicles[0], j))
+                .collect();
+            let rest0: Vec<f32> = w.vehicles[0].beams.iter().map(|b| b.rest).collect();
+            let mut diss = [0.0f64; 6];
+            for _ in 0..60 * 33 {
+                let v = &w.vehicles[0];
+                let before: Vec<(f32, f32)> = (0..v.beams.len())
+                    .map(|j| (v.beams[j].force, len(v, j)))
+                    .collect();
+                w.step();
+                let v = &w.vehicles[0];
+                for (j, &(f, l0)) in before.iter().enumerate() {
+                    // Trapezoid over the step (exact for a linear spring).
+                    if !v.beams[j].broken {
+                        let fm = 0.5 * (f64::from(f) + f64::from(v.beams[j].force));
+                        diss[part[j]] -= fm * f64::from(len(v, j) - l0);
+                    }
+                }
             }
+            let v = &w.vehicles[0];
+            for j in 0..v.beams.len() {
+                diss[part[j]] -= u(v, j) - u0[j];
+            }
+            let counts: Vec<usize> = (0..6)
+                .map(|k| part.iter().filter(|&&p| p == k).count())
+                .collect();
+            let mut yielded = [0usize; 6];
+            let mut drift = [0.0f64; 6];
+            for (j, b) in v.beams.iter().enumerate() {
+                let d = f64::from((b.rest - rest0[j]).abs());
+                if d > 1e-7 {
+                    yielded[part[j]] += 1;
+                    drift[part[j]] += d;
+                }
+            }
+            eprintln!(
+                "{name} {v0} m/s: rest lengths moved over the window (beams, Σ|Δ| mm): {}",
+                names
+                    .iter()
+                    .zip(yielded.iter().zip(&drift))
+                    .map(|(n, (y, d))| format!("{n} {y} {:.2}", d * 1e3))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            eprintln!(
+                "{name} {v0} m/s: beam dissipation by part (kJ/s, beams): {}",
+                names
+                    .iter()
+                    .zip(diss.iter().zip(&counts))
+                    .map(|(n, (d, c))| format!("{n} {:.2} ({c})", d * 1e-3))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             report(
                 &format!("{name} coasting from {v0} m/s, 0.5-1.5 s"),
                 w.ledger.as_ref().unwrap(),
