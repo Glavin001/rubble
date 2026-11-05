@@ -2926,6 +2926,52 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 b.mat.strength = b.mat.deform.max(b.tension_yield) + e * kl;
             }
         }
+        // (`BX_YIELD=1`, a measurement: each part's beams yield no later
+        // than the Ibishu BX's median yield strain for that part type,
+        // beamDeform / (beamSpring·L), at their built k: BeamNG's practice of
+        // setting deform forces for the achievable k.)
+        if std::env::var("BX_YIELD").map_or(false, |v| v != "0") {
+            let scale: f32 = std::env::var("BX_YIELD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0);
+            let nodes = sk.nodes.clone();
+            let parts = sk.parts.clone();
+            for (b, &e) in sk.beams.iter_mut().zip(&elong) {
+                let (pa, pb) = (nodes[b.a as usize].part, nodes[b.b as usize].part);
+                if pa != pb || b.ty != BeamType::Normal || b.group != 0 || b.mat.deform >= 1.0e8 {
+                    continue;
+                }
+                // (`BX_YIELD_SHEETS=1`: only the sheets' edges, the members
+                // keeping their sections' forces.)
+                if std::env::var("BX_YIELD_SHEETS").is_ok() && b.tension_yield <= 0.0 {
+                    continue;
+                }
+                let name = parts[pa as usize].as_str();
+                let eps = match name {
+                    "body" => 0.0100,
+                    n if n.starts_with("door") => 0.0125,
+                    "bonnet" => 0.0553,
+                    "bootlid" => 0.0298,
+                    n if n.starts_with("fender") => 0.0455,
+                    n if n.starts_with("bumper") => 0.1553,
+                    _ => continue,
+                } * scale;
+                let l = nodes[b.a as usize].p.distance(nodes[b.b as usize].p);
+                if l < super::skeleton::MIN_YIELD_LENGTH {
+                    continue;
+                }
+                let y = eps * b.mat.k_at(l) * l;
+                if y < b.mat.deform.max(b.tension_yield) {
+                    b.mat.deform = b.mat.deform.min(y);
+                    b.tension_yield = b.tension_yield.min(y);
+                    if e >= 0.0 {
+                        let kl = b.mat.k * super::material::REF_LENGTH;
+                        b.mat.strength = b.mat.deform.max(b.tension_yield) + e * kl;
+                    }
+                }
+            }
+        }
         (1.0, 1.0)
     } else if def.tiered {
         sk.fit_tiers(structure, 0.95)
