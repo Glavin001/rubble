@@ -76,6 +76,12 @@ pub struct SkNode {
     /// Its mass is its part's own (a panel's sheet mass, set as `fixed`):
     /// no share of the structure's.
     pub sheet: bool,
+    /// One tier ([`super::vehicle::VehicleDef::one_tier`]): the node's real
+    /// local mass (kg), what its sheet, member sections, equipment and named
+    /// masses weigh there. Its final mass is exactly this: nothing is moved
+    /// to meet the step's bound ([`Skeleton::cap_to_bound`] softens beams
+    /// instead). 0 in the two-tier build.
+    pub local: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -103,6 +109,10 @@ pub struct SkBeam {
     /// settled under its own weight (`.truck` beams' fifth field, Rubble's
     /// extension).
     pub rest_scale: f32,
+    /// One tier: the stiffness the beam was built for ([`Material::k`]: N/m
+    /// at [`super::material::REF_LENGTH`]) before [`Skeleton::cap_to_bound`]
+    /// (0: not capped).
+    pub target_k: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -158,6 +168,8 @@ pub struct Skeleton {
     pub collision_breaks: Vec<Option<(u32, u8)>>,
     /// Contact from every node (spec §10.2): `rubble_full_contact`.
     pub full_contact: bool,
+    /// Exact beam lengths (spec §33): `rubble_exact_lengths`.
+    pub exact_lengths: bool,
     /// The nodes are the vehicle at rest on flat ground at this height
     /// (`rubble_rest_pose`): it spawns standing, its beams' rest lengths
     /// (`rest_scale`) the unloaded design's.
@@ -225,6 +237,7 @@ impl Skeleton {
             primary: false,
             catcher: false,
             sheet: false,
+            local: 0.0,
         });
         (self.nodes.len() - 1) as u32
     }
@@ -271,6 +284,7 @@ impl Skeleton {
             damper: false,
             structure: false,
             rest_scale: 1.0,
+            target_k: 0.0,
         });
         true
     }
@@ -679,6 +693,297 @@ impl Skeleton {
         (sp, ss)
     }
 
+    /// Gershgorin rows of every node at the current masses and stiffnesses,
+    /// as a fraction of the step's bound (stable while every row is ≤ 1):
+    /// Σⱼ qᵢⱼ (1/mᵢ + 1/√(mᵢmⱼ)) / (h²·G_LIMIT), qᵢⱼ = h²kᵢⱼ + 2h·cᵢⱼ, with
+    /// the shocks, dashpots and tyre spokes.
+    pub fn bound_rows(&self) -> Vec<f32> {
+        let h = STEP;
+        let limit = G_LIMIT * h * h;
+        let n = self.nodes.len();
+        let m = |i: u32| self.nodes[i as usize].mass.max(1e-6);
+        let mut r = vec![0.0f32; n];
+        let mut add = |a: u32, b: u32, k: f32, c: f32| {
+            let q = h * h * k + 2.0 * h * c;
+            let cross = 1.0 / (m(a) * m(b)).sqrt();
+            r[a as usize] += q * (1.0 / m(a) + cross);
+            r[b as usize] += q * (1.0 / m(b) + cross);
+        };
+        for b in &self.beams {
+            let l = self.pos(b.a).distance(self.pos(b.b));
+            add(b.a, b.b, b.mat.k_at(l), b.mat.damp);
+        }
+        for s in &self.shocks {
+            add(s.a, s.b, s.spring, s.damp);
+        }
+        for w in &self.wheels {
+            let mt = w.mass / (2.0 * w.rays as f32);
+            for i in [w.a1, w.a2] {
+                let k = 2.0 * w.rays as f32 * w.spring;
+                let c = 2.0 * w.rays as f32 * w.damp;
+                let q = h * h * k + 2.0 * h * c;
+                r[i as usize] += q * (1.0 / m(i) + 1.0 / (m(i) * mt).sqrt());
+            }
+        }
+        r.iter().map(|x| x / limit).collect()
+    }
+
+    /// One tier: the node masses are fixed (each node's real local mass,
+    /// [`SkNode::local`]) and every beam keeps the stiffness it was built
+    /// for unless the explicit step's bound at one of its nodes requires
+    /// less. The bound is the Gershgorin row of [`Self::floors`]
+    /// (h²ω² + 2hγ within [`G_LIMIT`]): numerics BeamNG's content obeys
+    /// too (about 1.1 MN/m on 1 kg nodes). The cut is max-min fair: at a
+    /// node that would exceed its bound, its stiffest beams come down to a
+    /// common level, beams already under that level keep theirs, and a beam
+    /// is softened only where one of its nodes is saturated. Damping keeps
+    /// its ratio (c ∝ √k). Yield and break forces are unchanged: strengths
+    /// stay what they were built as. Shocks and tyres are kept (their real
+    /// rates); dashpots too. Records each beam's target in
+    /// [`SkBeam::target_k`]. Returns an error naming a node whose kept
+    /// springs alone exceed its bound.
+    pub fn cap_to_bound(&mut self) -> Result<(), String> {
+        let h = STEP;
+        let limit = G_LIMIT * h * h;
+        let n = self.nodes.len();
+        let m: Vec<f32> = self.nodes.iter().map(|x| x.mass).collect();
+        if let Some(i) = m.iter().position(|&x| !(x > 0.0)) {
+            return Err(format!("node {i} at {:?} has no mass", self.nodes[i].p));
+        }
+        // Per beam: target k at its length, damping at the target.
+        let nb = self.beams.len();
+        let mut kt = vec![0.0f32; nb];
+        let mut ct = vec![0.0f32; nb];
+        let mut capped = vec![false; nb];
+        for (j, b) in self.beams.iter().enumerate() {
+            let l = self.pos(b.a).distance(self.pos(b.b));
+            kt[j] = b.mat.k_at(l);
+            ct[j] = b.mat.damp;
+            capped[j] = !b.damper && kt[j] > 0.0;
+        }
+        // Kept contributions (shocks, tyres, dashpots) per node.
+        let w = |a: usize, b: usize| 1.0 / m[a] + 1.0 / (m[a] * m[b]).sqrt();
+        let mut kept = vec![0.0f32; n];
+        for (j, b) in self.beams.iter().enumerate() {
+            if !capped[j] {
+                let q = h * h * kt[j] + 2.0 * h * ct[j];
+                kept[b.a as usize] += q * w(b.a as usize, b.b as usize);
+                kept[b.b as usize] += q * w(b.b as usize, b.a as usize);
+            }
+        }
+        for s in &self.shocks {
+            let q = h * h * s.spring + 2.0 * h * s.damp;
+            kept[s.a as usize] += q * w(s.a as usize, s.b as usize);
+            kept[s.b as usize] += q * w(s.b as usize, s.a as usize);
+        }
+        // Tyres: each axle node's spokes as one spring to a ring node of the
+        // tyre's mass share, capped like a beam (the spoke rate is the tyre
+        // model's, not a measured rate).
+        let mut tyres: Vec<Vec<(usize, f32, f32, f32)>> = vec![Vec::new(); n];
+        for (t, wh) in self.wheels.iter().enumerate() {
+            let mt = wh.mass / (2.0 * wh.rays as f32);
+            for i in [wh.a1, wh.a2] {
+                let iu = i as usize;
+                let k = 2.0 * wh.rays as f32 * wh.spring;
+                let c = 2.0 * wh.rays as f32 * wh.damp;
+                tyres[iu].push((t, k, c, 1.0 / m[iu] + 1.0 / (m[iu] * mt).sqrt()));
+            }
+        }
+        if let Some(i) = (0..n).find(|&i| kept[i] > limit) {
+            return Err(format!(
+                "node {i} at {:?} ({:.3} kg): its shocks, tyres and dashpots alone exceed the step's bound ({:.2}×)",
+                self.nodes[i].p,
+                m[i],
+                kept[i] / limit
+            ));
+        }
+        let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+        for (j, b) in self.beams.iter().enumerate() {
+            if capped[j] {
+                adj[b.a as usize].push((j, b.b as usize));
+                adj[b.b as usize].push((j, b.a as usize));
+            }
+        }
+        let q = |j: usize, k: f32| h * h * k + 2.0 * h * ct[j] * (k / kt[j]).sqrt();
+        // Each node's level: the common k its beams may take (beams under it
+        // keep their own), given each beam's cap from its other end.
+        let mut level = vec![f32::INFINITY; n];
+        let qt = |k: f32, c: f32, kk: f32| h * h * kk + 2.0 * h * c * (kk / k).sqrt();
+        let tyre_row = |i: usize, lam: f32| -> f32 {
+            tyres[i]
+                .iter()
+                .map(|&(_, k, c, wf)| qt(k, c, k.min(lam)) * wf)
+                .sum::<f32>()
+        };
+        let row = |i: usize, lam: f32, cap: &dyn Fn(usize) -> f32| -> f32 {
+            kept[i]
+                + tyre_row(i, lam)
+                + adj[i]
+                    .iter()
+                    .map(|&(j, o)| q(j, kt[j].min(lam).min(cap(j))) * w(i, o))
+                    .sum::<f32>()
+        };
+        for _ in 0..60 {
+            let prev = level.clone();
+            let mut moved = 0.0f32;
+            for i in 0..n {
+                if adj[i].is_empty() && tyres[i].is_empty() {
+                    continue;
+                }
+                let cap = |j: usize| {
+                    let b = &self.beams[j];
+                    let o = if b.a as usize == i { b.b } else { b.a } as usize;
+                    prev[o]
+                };
+                let lam = if row(i, f32::INFINITY, &cap) <= limit {
+                    f32::INFINITY
+                } else {
+                    let (mut lo, mut hi) = (
+                        0.0f32,
+                        adj[i]
+                            .iter()
+                            .map(|x| kt[x.0])
+                            .chain(tyres[i].iter().map(|x| x.1))
+                            .fold(0.0, f32::max),
+                    );
+                    for _ in 0..50 {
+                        let mid = 0.5 * (lo + hi);
+                        if row(i, mid, &cap) > limit {
+                            hi = mid;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                    lo
+                };
+                if lam.is_finite() != prev[i].is_finite()
+                    || (lam.is_finite() && (lam - prev[i]).abs() > 1e-4 * lam)
+                {
+                    moved += 1.0;
+                }
+                level[i] = lam;
+            }
+            if moved == 0.0 {
+                break;
+            }
+        }
+        let mut k: Vec<f32> = (0..nb)
+            .map(|j| {
+                if !capped[j] {
+                    return kt[j];
+                }
+                let b = &self.beams[j];
+                kt[j].min(level[b.a as usize]).min(level[b.b as usize])
+            })
+            .collect();
+        // Each tyre at the lower of its axle nodes' levels.
+        let mut tyre_f = vec![1.0f32; self.wheels.len()];
+        for i in 0..n {
+            for &(t, k, _, _) in &tyres[i] {
+                tyre_f[t] = tyre_f[t].min(k.min(level[i]) / k);
+            }
+        }
+        let tyre_now = |i: usize| -> f32 {
+            tyres[i]
+                .iter()
+                .map(|&(t, k, c, wf)| qt(k, c, k * tyre_f[t]) * wf)
+                .sum::<f32>()
+        };
+        let kept: Vec<f32> = (0..n).map(|i| kept[i] + tyre_now(i)).collect();
+        // Feasibility: any node still over its bound (the levels' fixed point
+        // not reached exactly) takes its beams down by a common factor.
+        for _ in 0..50 {
+            let mut over = false;
+            for i in 0..n {
+                let r = kept[i]
+                    + adj[i]
+                        .iter()
+                        .map(|&(j, o)| q(j, k[j]) * w(i, o))
+                        .sum::<f32>();
+                if r > limit * 1.000_01 {
+                    over = true;
+                    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+                    for _ in 0..40 {
+                        let mid = 0.5 * (lo + hi);
+                        let r = kept[i]
+                            + adj[i]
+                                .iter()
+                                .map(|&(j, o)| q(j, k[j] * mid) * w(i, o))
+                                .sum::<f32>();
+                        if r > limit {
+                            hi = mid;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                    for &(j, _) in &adj[i] {
+                        k[j] *= lo;
+                    }
+                }
+            }
+            if !over {
+                break;
+            }
+        }
+        // Raise: a beam still under its target with room at both ends (the
+        // levels' iteration is not exact) takes what its ends allow, so every
+        // softened beam has a node at the bound.
+        let mut rows: Vec<f32> = (0..n)
+            .map(|i| {
+                kept[i]
+                    + adj[i]
+                        .iter()
+                        .map(|&(j, o)| q(j, k[j]) * w(i, o))
+                        .sum::<f32>()
+            })
+            .collect();
+        for _ in 0..3 {
+            for j in 0..nb {
+                if !capped[j] || k[j] >= kt[j] {
+                    continue;
+                }
+                let (a, b) = (self.beams[j].a as usize, self.beams[j].b as usize);
+                let room = |kk: f32| {
+                    let d = q(j, kk) - q(j, k[j]);
+                    rows[a] + d * w(a, b) <= limit && rows[b] + d * w(b, a) <= limit
+                };
+                let new = if room(kt[j]) {
+                    kt[j]
+                } else {
+                    let (mut lo, mut hi) = (k[j], kt[j]);
+                    for _ in 0..40 {
+                        let mid = 0.5 * (lo + hi);
+                        if room(mid) {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    lo
+                };
+                let d = q(j, new) - q(j, k[j]);
+                rows[a] += d * w(a, b);
+                rows[b] += d * w(b, a);
+                k[j] = new;
+            }
+        }
+        for (wh, &f) in self.wheels.iter_mut().zip(&tyre_f) {
+            wh.spring *= f;
+            wh.damp *= f.sqrt();
+        }
+        for (j, b) in self.beams.iter_mut().enumerate() {
+            if b.target_k == 0.0 {
+                b.target_k = b.mat.k;
+            }
+            if capped[j] && k[j] < kt[j] {
+                let f = k[j] / kt[j];
+                b.mat.k *= f;
+                b.mat.damp *= f.sqrt();
+            }
+        }
+        Ok(())
+    }
+
     /// Final node masses: named masses where they were put, `structure` kg spread
     /// by the structural weights, every node at least its stability floor. Returns
     /// an error when the floors alone outweigh the budget.
@@ -803,6 +1108,9 @@ impl Skeleton {
         let _ = writeln!(s, "globals\n0.0, 0.0, tracks/semi\n");
         let _ = writeln!(s, "minimass\n0.05\n");
         let _ = writeln!(s, "enable_advanced_deformation\n");
+        if self.exact_lengths {
+            let _ = writeln!(s, "rubble_exact_lengths\n");
+        }
         if self.full_contact {
             let _ = writeln!(s, "rubble_full_contact\n");
         }
