@@ -377,13 +377,21 @@ Parts hang on hardware, not on their seams.
   - An inner-frame ladder (`lid_inner_*`, `bonnet_inner_*`) gives them depth.
     It is in the skin tier; each chord's strength is M_p / lever of a
     100 × 60 × 0.75 mm hat at 210 MPa.
-- **Collision skin per part (A1).** The coarse lattice skin loses every
-  triangle that spans a shut line (Medium: 499 of 740 kept), so a part that
-  comes off drags no ghost sheet. Every shell node of a part with hardware
-  is a contacter. The lattice's nodes stay contacters too. Static contact
-  (ground, wall, pole) is per node, so the gaps along the shut lines (edges
-  up to 0.52 m) matter only for car-to-car contact (`COLL_DEBUG=1` prints
-  the split).
+- **Collision skin (A1): no triangle outlives the joint it spans.** The
+  collision skin is the closed lattice. Each triangle across a shut line
+  (Medium: 241 of 740) breaks (spec §18) when a beam of its edges across the
+  line breaks (seal, bolt or bearing) or when its parts' nearest hinge or
+  latch group lets go; triangles inside a part stay plain, so a part that
+  comes off keeps its own skin (`g` checks the door: its 23 triangles live,
+  none joining it to the car). The `.truck` carries it as Rubble's extension
+  of a `cab` line, a fifth field (the break group, 0 none) and a sixth (the
+  edges, bit k for nodes k to k+1), and asks for contact from every node
+  (spec §10.2) with `rubble_full_contact`; the shared loader
+  (`ExplicitBeams::from_truck`) applies both, so the page, the World, Metal
+  and CUDA get them by loading the file. Rigs of Rods files carry neither
+  and load as before. Every shell node of a part with hardware is a
+  contacter. The render stays per part. The 80 km/h T-bone (two vehicles)
+  holds the striker's nodes outside the struck skin to 0.5 %.
 - **Backed panels** (fenders, bumpers, bonnet, boot lid) bear on the body
   frame through supports. Only their hardware carries tension.
 - **Sheet masses** (`SheetSpec`). A panel's mass is its skin area (a third

@@ -146,6 +146,13 @@ pub struct Skeleton {
     pub skin: Vec<[u32; 3]>,
     /// Collision triangles (wound outward): a coarser closed skin.
     pub collision: Vec<[u32; 3]>,
+    /// Per collision triangle (or none: all plain) whether it breaks (spec
+    /// §18): with the detacher group given (0 none) and the beams of the
+    /// edges in the mask (bit k: nodes k to k+1): the triangles across the
+    /// shut lines.
+    pub collision_breaks: Vec<Option<(u32, u8)>>,
+    /// Contact from every node (spec §10.2): `rubble_full_contact`.
+    pub full_contact: bool,
     pub parts: Vec<String>,
     /// Reference nodes: centre, back, left (`cameras`).
     pub cameras: [u32; 3],
@@ -329,6 +336,12 @@ impl Skeleton {
         }
         let tri = |t: &[u32; 3]| [t[0] + base, t[1] + base, t[2] + base];
         self.skin.extend(other.skin.iter().map(tri));
+        if !(self.collision_breaks.is_empty() && other.collision_breaks.is_empty()) {
+            self.collision_breaks.resize(self.collision.len(), None);
+            let mut o = other.collision_breaks.clone();
+            o.resize(other.collision.len(), None);
+            self.collision_breaks.extend(o);
+        }
         self.collision.extend(other.collision.iter().map(tri));
     }
 
@@ -752,6 +765,9 @@ impl Skeleton {
         let _ = writeln!(s, "globals\n0.0, 0.0, tracks/semi\n");
         let _ = writeln!(s, "minimass\n0.05\n");
         let _ = writeln!(s, "enable_advanced_deformation\n");
+        if self.full_contact {
+            let _ = writeln!(s, "rubble_full_contact\n");
+        }
         let _ = writeln!(s, "nodes");
         for (i, n) in self.nodes.iter().enumerate() {
             let opt = if n.ground { "l" } else { "lc" };
@@ -883,8 +899,16 @@ impl Skeleton {
             }
         }
         let _ = writeln!(s, "\nsubmesh\ncab");
-        for t in &self.collision {
-            let _ = writeln!(s, "{}, {}, {}, c", t[0], t[1], t[2]);
+        for (k, t) in self.collision.iter().enumerate() {
+            match self.collision_breaks.get(k).copied().flatten() {
+                // (Rubble's extension: a fifth field, its break group.)
+                Some((g, m)) => {
+                    let _ = writeln!(s, "{}, {}, {}, c, {g}, {m}", t[0], t[1], t[2]);
+                }
+                None => {
+                    let _ = writeln!(s, "{}, {}, {}, c", t[0], t[1], t[2]);
+                }
+            }
         }
         let [c, b, l] = self.cameras;
         let _ = writeln!(s, "\ncameras\n{c}, {b}, {l}");

@@ -28,7 +28,15 @@ The goal (user, 2026-11-05): BeamNG-quality destructible vehicles in Rubble, aut
   - Seals are damping-only or compression-only.
   - At least 10% of beams are compression-only SUPPORT beams.
   - Part masses are within ±10% of sheet area × gauge × density.
-  - Each part has its own collision skin: no collision triangle spans a shut line.
+  - Each part has its own collision skin: no collision triangle outlives the joint it spans. The skin is the closed lattice. Each triangle across a shut line breaks (spec §18) when the beams of its edges across the line break, or when its parts' nearest hinge or latch group lets go. A detached part keeps its own triangles. Reason, from the 80 km/h two-vehicle T-bone with contact from every node (striker nodes inside the struck skin, of 1,647; 2026-11-05):
+
+    | Collision skin | Striker nodes inside |
+    |---|---|
+    | Spanning triangles dropped (gaps up to 0.52 m) | 600+ (single-sim run, file contacters only) |
+    | Per-part pieces, 4.5 mm hems, seal strips (closed) | 98–123 |
+    | Closed lattice, spanning triangles breakable | at most 6 of 1,141 (no tyre nodes), 0 dead triangles |
+
+    Cutting the skin at every shut line leaves hem pieces and slivers whose neighbours pass each other. The lattice's spanning triangles do not.
   - Several thousand beams in total.
 - **A2. Stable.**
   - The rest and post-crash settle tests pass.

@@ -18,7 +18,7 @@ use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use engine_softbody::explicit_beams::{
     approx_sqrt, box_face, contact_force, fast_inv_sqrt, shape_face, Beam, ContactSurface,
     ExplicitBeams, ExplicitBeamsSettings, ExplicitKind, ExplicitType, StaticBox, StaticShape, DRAG,
-    GRAVITY, MAX_COLLISION_TRIANGLES, NODE_NO_GROUND, STEP,
+    GRAVITY, MAX_COLLISION_TRIANGLES, NODE_CONTACTER, NODE_NO_GROUND, STEP,
 };
 use glam::{DVec3, Quat, Vec3};
 use std::collections::HashSet;
@@ -90,33 +90,31 @@ fn skins_are_closed_and_the_truck_loads() {
     for res in RESOLUTIONS {
         let b = built(res);
         check_closed(&b.skeleton.skin).unwrap();
-        // Each part its own collision skin (A1): the lattice's closed skin
-        // less exactly the triangles that span a shut line.
+        // The collision skin is the closed lattice (A1: no collision
+        // triangle outlives the joint it spans): every triangle across a
+        // shut line breaks (spec §18) with its edges' beams and its parts'
+        // nearest hinge or latch group; the rest are plain.
         let sk = &b.skeleton;
         let part = |i: u32| sk.nodes[i as usize].part;
-        let key = |t: &[u32; 3]| {
-            let mut k = *t;
-            k.sort();
-            k
-        };
         let lattice = coarse_skin(sk, &b.shell).unwrap();
-        check_closed(&lattice).unwrap();
-        let kept: HashSet<[u32; 3]> = sk.collision.iter().map(key).collect();
-        assert_eq!(kept.len(), sk.collision.len());
-        for t in &lattice {
-            let pure = t.iter().all(|&i| part(i) == part(t[0]));
-            assert_eq!(kept.contains(&key(t)), pure, "{res:?}: triangle {t:?}");
-        }
-        assert!(sk.collision.iter().all(|t| lattice.iter().any(|u| key(u) == key(t))));
-        // Each part's patch is a manifold: no edge on more than two.
-        let mut edges: std::collections::HashMap<(u32, u32), u32> = Default::default();
-        for t in &sk.collision {
-            for k in 0..3 {
-                let (a, c) = (t[k], t[(k + 1) % 3]);
-                *edges.entry((a.min(c), a.max(c))).or_default() += 1;
+        check_closed(&sk.collision).unwrap();
+        assert_eq!(sk.collision, lattice);
+        assert!(sk.full_contact);
+        assert_eq!(sk.collision_breaks.len(), sk.collision.len());
+        let groups: HashSet<u32> = b.hardware.iter().map(|h| h.group).collect();
+        let mut spanning = 0;
+        for (t, br) in sk.collision.iter().zip(&sk.collision_breaks) {
+            let spans = t.iter().any(|&i| part(i) != part(t[0]));
+            assert_eq!(br.is_some(), spans, "{res:?}: triangle {t:?}");
+            if let Some((g, mask)) = br {
+                spanning += 1;
+                assert!(*g == 0 || groups.contains(g));
+                for k in 0..3 {
+                    let across = part(t[k]) != part(t[(k + 1) % 3]);
+                    assert_eq!(mask & (1 << k) != 0, across);
+                }
             }
         }
-        assert!(edges.values().all(|&n| n <= 2));
         let sim = ExplicitBeams::from_truck(
             &b.truck,
             Vec3::ZERO,
@@ -126,24 +124,25 @@ fn skins_are_closed_and_the_truck_loads() {
         .unwrap();
         assert_eq!(sim.triangles.len(), b.skeleton.collision.len());
         assert_eq!(sim.tyres.len(), 4);
-        // Contacters: the collision lattice's nodes, and every shell node of a
-        // part that can come off (it meets the car it left and the ground).
+        // The loader takes the breaks and the contact from every node.
+        assert!(sim.contact_every_node);
+        assert_eq!(sim.tri_breaks.len(), sim.triangles.len());
+        assert_eq!(
+            sim.tri_breaks.iter().filter(|l| l.iter().any(|&j| j != u32::MAX)).count(),
+            spanning
+        );
+        // Contacters: the collision lattice's nodes, and every shell node of
+        // a part that can come off (it meets the car it left and the ground).
         let detachable: HashSet<u16> = b.hardware.iter().map(|h| h.part).collect();
-        // (The lattice's nodes stay contacters on the triangles they lost.)
         let mut expect: HashSet<u32> = lattice.iter().flatten().copied().collect();
         expect.extend(b.shell.nodes.iter().copied().filter(|&i| detachable.contains(&part(i))));
         let contacters: HashSet<u32> = (0..sk.nodes.len() as u32)
             .filter(|&i| sk.nodes[i as usize].contacter)
             .collect();
         assert_eq!(contacters, expect);
-        for &p in &detachable {
-            let on: Vec<u32> = b.shell.nodes.iter().copied().filter(|&i| part(i) == p).collect();
-            assert!(!on.is_empty() && on.iter().all(|i| contacters.contains(i)), "{}", sk.parts[p as usize]);
-        }
         eprintln!(
-            "{res:?}: collision {} of the lattice's {} triangles (the rest span a shut line), {} contacters",
+            "{res:?}: collision {} triangles, {spanning} across shut lines (breakable), {} contacters",
             sk.collision.len(),
-            lattice.len(),
             contacters.len()
         );
     }
@@ -319,6 +318,8 @@ fn spawn(b: &Built, vel: Vec3, lift: f32) -> ExplicitBeams {
         settings(),
     )
     .unwrap();
+    // (The car's file asks for contact from every node, spec §10.2.)
+    assert!(s.contact_every_node);
     s.roll_tyres(vel);
     s
 }
@@ -1386,6 +1387,25 @@ fn g_pulling_a_door_tears_it_off() {
     }
     let p0: Vec3 = door.iter().map(|&i| s.nodes[i].pos).sum::<Vec3>() / door.len() as f32;
     run(&mut s, 0.5);
+    // The detached door keeps its own collision triangles (it collides as a
+    // part), and no live triangle joins it to the car (A1: none outlives
+    // the joint it spans).
+    let sk = &b.skeleton;
+    let on_door = |i: u32| (i as usize) < sk.nodes.len() && sk.nodes[i as usize].part == part;
+    let (mut own, mut own_live, mut joined) = (0, 0, 0);
+    for (t, tri) in s.triangles.iter().enumerate() {
+        let n_door = tri.nodes.iter().filter(|&&i| on_door(i)).count();
+        let live = !s.tri_dead.get(t).copied().unwrap_or(false);
+        if n_door == 3 {
+            own += 1;
+            own_live += usize::from(live);
+        } else if n_door > 0 && live {
+            joined += 1;
+        }
+    }
+    eprintln!("(g) after the door came off: its own triangles live {own_live} of {own}; live triangles joining it to the car {joined}");
+    assert!(own > 0 && own_live == own);
+    assert_eq!(joined, 0);
     let p1: Vec3 = door.iter().map(|&i| s.nodes[i].pos).sum::<Vec3>() / door.len() as f32;
     eprintln!(
         "(g) door pull outward: first hardware let go at {:.1} kN ({}), the door off at {:.1} kN; it then moved {:.2} m",
@@ -3070,6 +3090,10 @@ fn rig_pull(b: &Built, groups: &[usize], d: Vec3) -> (f32, bool) {
     for &(i, _) in &held {
         s.nodes[i].mass = 1.0e7;
     }
+    // (The fixture's nodes are not contacters: their 10⁷ kg weight would
+    // load whatever triangle they touch.)
+    let fixed: HashSet<u32> = held.iter().map(|&(i, _)| i as u32).collect();
+    s.candidates.retain(|c| !fixed.contains(c));
     let start: Vec<Vec3> = pins.iter().map(|&i| s.nodes[i].pos).collect();
     let (v, dt) = (0.2f32, STEP);
     let mut peak = 0.0f32;
@@ -3224,6 +3248,9 @@ fn s_latch_holds_a_30_g_pulse() {
         for &(i, _) in &held {
             s.nodes[i].mass = 1.0e7;
         }
+        // (The fixture's nodes are not contacters, as in `rig_pull`.)
+        let fixed: HashSet<u32> = held.iter().map(|&(i, _)| i as u32).collect();
+        s.candidates.retain(|c| !fixed.contains(c));
         let steps = (0.25 / STEP) as usize;
         for k in 0..steps {
             let ramp = (k as f32 * STEP / 0.05).min(1.0);
@@ -3254,24 +3281,53 @@ fn s_latch_holds_a_30_g_pulse() {
     assert!(fails.is_empty(), "{fails:?}");
 }
 
+/// The generalised winding number of `p` about a closed triangle surface
+/// (each triangle's solid angle over 4π, Van Oosterom and Strackee): ±1
+/// inside, 0 outside; the shut lines' 4.5 mm gaps change it by their solid
+/// angle only.
+fn winding(p: Vec3, tris: &[[Vec3; 3]]) -> f32 {
+    let mut w = 0.0f64;
+    for t in tris {
+        let (a, b, c) = ((t[0] - p).as_dvec3(), (t[1] - p).as_dvec3(), (t[2] - p).as_dvec3());
+        let (la, lb, lc) = (a.length(), b.length(), c.length());
+        let num = a.dot(b.cross(c));
+        let den = la * lb * lc + a.dot(b) * lc + a.dot(c) * lb + b.dot(c) * la;
+        w += 2.0 * num.atan2(den);
+    }
+    (w / (4.0 * std::f64::consts::PI)) as f32
+}
+
+/// Yield and fracture energy of one step (J), as the ledgers count it.
+fn step_plastic(s: &ExplicitBeams, before: &[(f32, bool)]) -> f64 {
+    let mut e = 0.0;
+    for (bm, &(rest, broken)) in s.beams.iter().zip(before) {
+        if broken || (bm.rest == rest && !bm.broken) {
+            continue;
+        }
+        let len = solver_len(s, bm);
+        e += beam_energy(bm, len, rest) - if bm.broken { 0.0 } else { beam_energy(bm, len, bm.rest) };
+    }
+    e
+}
+
 /// Car-to-car T-bone at 80 km/h, 90° (the plan's `tbone_car_80`): an
 /// identical sedan, front first, into the struck car's front door at its
-/// middle. Reported: which of the struck door's hinge and latch groups let
-/// go, and whether the door came off. Asserted: exact physics only. The run
-/// stays finite, and if the door comes off it stays physical: none of its
-/// nodes ever goes below the ground by more than the collision range.
+/// middle, the two cars two vehicles of one world (vehicle contact from
+/// every node, spec §10.2). Reported: which of the struck door's hinge and
+/// latch groups let go, whether the door came off, and the yield and
+/// fracture energy each car takes. Asserted: the run stays finite; at most
+/// 1 % of the striker's nodes are ever inside the struck car's (deformed)
+/// skin; and if the door comes off it stays physical: none of its nodes
+/// ever goes below the ground by more than the collision range.
 #[test]
 fn t_car_to_car_t_bone_at_80_kmh() {
+    use engine_softbody::explicit_contact::ExplicitBeamsWorld;
     let b = built(Resolution::Medium);
     let sk0 = &b.skeleton;
     let len = b.def.profile.length;
     let n = sk0.nodes.len();
     let door_part = sk0.parts.iter().position(|p| p == "door_f_l").unwrap() as u16;
     let door: Vec<usize> = (0..n).filter(|&i| sk0.nodes[i].part == door_part).collect();
-    let zd = door.iter().map(|&i| sk0.nodes[i].p.z).sum::<f32>() / door.len() as f32;
-    let hw = sk0.nodes.iter().map(|nd| nd.p.x).fold(f32::MIN, f32::max);
-    // The striker turned 90° (its front toward −x), 5 cm off the door.
-    let mut sk = sk0.clone();
     let env = |k: &str, d: f32| {
         std::env::var(k)
             .ok()
@@ -3281,83 +3337,84 @@ fn t_car_to_car_t_bone_at_80_kmh() {
     let (kmh, dz, heavy) = (env("TB_KMH", 80.0), env("TB_DZ", 0.0), env("TB_MASS", 1.0));
     // (TB_ANG: the striker's path turned rearward from square, degrees.)
     let ang = env("TB_ANG", 0.0).to_radians();
-    let zs = zd + dz;
-    sk.append(sk0, "striker_", &|p: Vec3| {
-        Vec3::new(hw + 0.05 + (len - p.z), p.y, zs + p.x)
-    });
-    if heavy != 1.0 {
-        for nd in sk.nodes[n..].iter_mut() {
+    let v = Vec3::new(-ang.cos(), 0.0, -ang.sin()) * (kmh / 3.6);
+    let mut struck = spawn(&b, Vec3::ZERO, 0.0);
+    let p0 = struck.positions();
+    let zd = door.iter().map(|&i| p0[i].z).sum::<f32>() / door.len() as f32;
+    let hw = p0.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+    // The striker: the same car turned 90° (its front toward −x), 5 cm off
+    // the door, its middle at the door's.
+    let mut sk = sk0.clone();
+    for nd in &mut sk.nodes {
+        let q = nd.p - Vec3::new(0.0, 0.0, 0.5 * len);
+        nd.p = Vec3::new(-q.z, q.y, q.x);
+        if heavy != 1.0 {
             nd.mass *= heavy;
         }
     }
-    for nd in &mut sk.nodes {
-        nd.p.z -= 0.5 * len;
-    }
     let truck = sk.to_truck();
     let probe = ExplicitBeams::from_truck(&truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
-    let low = probe
-        .nodes
+    let pp = probe.positions();
+    let (low, near) = pp
         .iter()
-        .map(|nd| nd.pos.y)
-        .fold(f32::MAX, f32::min);
-    let mut s = ExplicitBeams::from_truck(
+        .fold((f32::MAX, f32::MAX), |(l, x), p| (l.min(p.y), x.min(p.x)));
+    let low0 = p0.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+    let mut striker = ExplicitBeams::from_truck(
         &truck,
-        Vec3::new(0.0, 0.02 - low, 0.0),
-        Vec3::ZERO,
+        Vec3::new(hw + 0.05 - near, low0 - low, zd + dz),
+        v,
         settings(),
     )
     .unwrap();
-    let v = Vec3::new(-ang.cos(), 0.0, -ang.sin()) * (kmh / 3.6);
-    let plane = hw + 0.025;
-    // The striker's tyres rolling at v, the struck car's still; the rest of
-    // the striker at v.
-    s.roll_tyres(v);
-    for nd in &mut s.nodes {
-        if nd.pos.x <= plane {
-            nd.vel = Vec3::ZERO;
-        }
-    }
-    let tyre_nodes: std::collections::HashSet<usize> = s
-        .tyres
-        .iter()
-        .flat_map(|t| (t.first..t.first + t.count).map(|i| i as usize))
-        .collect();
-    for (i, nd) in s.nodes.iter_mut().enumerate() {
-        if nd.pos.x > plane && !tyre_nodes.contains(&i) {
-            nd.vel = v;
-        }
-    }
-    let map: std::collections::HashMap<(u32, u32), usize> = s
-        .beams
-        .iter()
-        .enumerate()
-        .map(|(j, bm)| ((bm.a.min(bm.b), bm.a.max(bm.b)), j))
-        .collect();
+    striker.roll_tyres(v);
+    let map = solver_beams(&struck, &b);
     let groups: Vec<(&str, Vec<usize>)> = b
         .hardware
         .iter()
         .filter(|h| h.part == door_part)
-        .map(|h| {
-            (
-                h.name.as_str(),
-                h.beams
-                    .iter()
-                    .map(|&j| {
-                        let bm = &sk0.beams[j];
-                        map[&(bm.a.min(bm.b), bm.a.max(bm.b))]
-                    })
-                    .collect(),
-            )
-        })
+        .map(|h| (h.name.as_str(), h.beams.iter().map(|&j| map[j]).collect()))
         .collect();
-    let r = s.collision_range;
+    let r = struck.collision_range;
+    let tris: Vec<[u32; 3]> = struck.triangles.iter().map(|t| t.nodes).collect();
+    let mut w = ExplicitBeamsWorld::new(vec![struck, striker]);
+    let inside = |w: &ExplicitBeamsWorld| -> usize {
+        let pos = w.vehicles[0].positions();
+        let skin: Vec<[Vec3; 3]> = tris.iter().map(|t| t.map(|i| pos[i as usize])).collect();
+        w.vehicles[1]
+            .positions()
+            .iter()
+            .filter(|&&p| winding(p, &skin).abs() > 0.5)
+            .count()
+    };
+    assert_eq!(inside(&w), 0);
+    let ke = |s: &ExplicitBeams| -> f64 {
+        s.nodes.iter().map(|nd| 0.5 * nd.mass as f64 * nd.vel.length_squared() as f64).sum()
+    };
+    let ke0 = [ke(&w.vehicles[0]), ke(&w.vehicles[1])];
+    let mut plastic = [0.0f64; 2];
     let mut lowest = f32::MAX;
     let mut off_at = None;
     let mut order: Vec<(f32, &str)> = Vec::new();
     let mut peak = vec![0.0f32; groups.len()];
+    let mut worst_inside = (0usize, 0.0f32);
     for f in 0..(2.0 * 60.0) as usize {
-        for _ in 0..s.clock.next() {
-            s.step();
+        let steps = w.vehicles[0].clock.next();
+        let _ = w.vehicles[1].clock.next();
+        for v in &mut w.vehicles {
+            v.check_wings();
+            v.rebase_origin();
+        }
+        for _ in 0..steps {
+            let before: Vec<Vec<(f32, bool)>> = w
+                .vehicles
+                .iter()
+                .map(|s| s.beams.iter().map(|b| (b.rest, b.broken)).collect())
+                .collect();
+            w.step();
+            for k in 0..2 {
+                plastic[k] += step_plastic(&w.vehicles[k], &before[k]);
+            }
+            let s = &w.vehicles[0];
             for (k, (_, beams)) in groups.iter().enumerate() {
                 // The group's pull: its ropes' tensions summed.
                 let t: f32 = beams
@@ -3369,6 +3426,7 @@ fn t_car_to_car_t_bone_at_80_kmh() {
             }
         }
         let t = (f + 1) as f32 / 60.0;
+        let s = &w.vehicles[0];
         for (name, beams) in &groups {
             if !order.iter().any(|o| o.1 == *name) && beams.iter().any(|&j| s.beams[j].broken) {
                 order.push((t, name));
@@ -3380,15 +3438,42 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         for &i in &door {
             lowest = lowest.min(s.origin.y + s.nodes[i].pos.y - s.ground);
         }
+        if f % 6 == 5 {
+            let k = inside(&w);
+            if std::env::var("TB_INSIDE").is_ok() {
+                let pos = w.vehicles[0].positions();
+                let skin: Vec<[Vec3; 3]> = tris.iter().map(|t| t.map(|i| pos[i as usize])).collect();
+                let mut by: std::collections::BTreeMap<String, usize> = Default::default();
+                for (i, p) in w.vehicles[1].positions().iter().enumerate() {
+                    if winding(*p, &skin).abs() > 0.5 {
+                        let name = if i < n {
+                            let nd = &sk0.nodes[i];
+                            format!("{}{}", sk0.parts[nd.part as usize], if nd.primary { "*" } else { "" })
+                        } else {
+                            "tyre".into()
+                        };
+                        *by.entry(name).or_default() += 1;
+                    }
+                }
+                let dead = w.vehicles[0].tri_dead.iter().filter(|&&d| d).count();
+                eprintln!("  t {t:.2}: {k} striker nodes inside {by:?}; struck triangles dead {dead} of {}", w.vehicles[0].tri_dead.len());
+            }
+            if k > worst_inside.0 {
+                worst_inside = (k, t);
+            }
+        }
     }
+    let s = &w.vehicles[0];
+    let total = w.vehicles[1].nodes.len();
     let dv: Vec3 = door.iter().map(|&i| s.nodes[i].vel).sum::<Vec3>() / door.len() as f32;
     eprintln!(
-        "(t) car-to-car T-bone {kmh} km/h (striker ×{heavy} mass, {dz:+.2} m along): the struck door's hardware let go {:?}; door off: {}; its lowest node {:.3} m above the ground; its mean speed at 2 s {:.2} m/s; broken {}",
+        "(t) car-to-car T-bone {kmh} km/h (striker ×{heavy} mass, {dz:+.2} m along): the struck door's hardware let go {:?}; door off: {}; its lowest node {:.3} m above the ground; its mean speed at 2 s {:.2} m/s; broken {} (striker {})",
         order.iter().map(|o| format!("{} at {:.2} s", o.1, o.0)).collect::<Vec<_>>(),
         off_at.map_or("no".to_string(), |t| format!("yes, at {t:.2} s")),
         lowest,
         dv.length(),
-        s.damage().0
+        s.damage().0,
+        w.vehicles[1].damage().0
     );
     eprintln!(
         "(t) peak pull of each group (its ropes' tensions summed) against the most its rope set can carry (Σ strengths): {:?}",
@@ -3398,7 +3483,21 @@ fn t_car_to_car_t_bone_at_80_kmh() {
             .map(|((n, beams), p)| format!("{n} {:.1} of {:.1} kN", p / 1e3, beams.iter().map(|&j| s.beams[j].strength.max(0.0)).sum::<f32>() / 1e3))
             .collect::<Vec<_>>()
     );
-    assert!(finite(&s));
+    eprintln!(
+        "(t) striker nodes inside the struck car's skin: at most {} of {total} (at {:.2} s); yield and fracture: struck car {:.1} kJ, striker {:.1} kJ, of the striker's {:.1} kJ; KE left {:.1} kJ",
+        worst_inside.0,
+        worst_inside.1,
+        plastic[0] / 1e3,
+        plastic[1] / 1e3,
+        ke0[1] / 1e3,
+        (ke(&w.vehicles[0]) + ke(&w.vehicles[1])) / 1e3
+    );
+    assert!(w.vehicles.iter().all(finite));
+    assert!(
+        worst_inside.0 * 100 <= total,
+        "{} of the striker's {total} nodes got inside the struck car's skin",
+        worst_inside.0
+    );
     if off_at.is_some() {
         assert!(
             lowest > -r,

@@ -1572,6 +1572,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             collision,
             bias: tri_bias(&f),
             break_group: tri_group(&f, &groups),
+            break_sides: 7,
             aero: tri_aero(&f),
         });
     }
@@ -1595,6 +1596,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 collision,
                 bias,
                 break_group,
+                break_sides: 7,
                 aero: tri_aero(&f),
             });
         }

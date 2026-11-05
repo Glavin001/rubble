@@ -408,6 +408,11 @@ pub struct SoftTriangle {
     /// colliding once that group breaks, as it does once a beam along an edge
     /// breaks.
     pub break_group: u32,
+    /// Which of its edges (bit k: nodes k to k+1) stop it colliding once
+    /// their beam breaks (spec §18). JBeam triangles: all three (7); a
+    /// `.truck` cab line: none, or with Rubble's extension (a fifth field, its
+    /// break group, and a sixth, this mask, 7 if absent) the ones given.
+    pub break_sides: u8,
     /// JBeam aerodynamics (`engine/docs/jbeam-semantics-spec.md` §31): `dragCoef`,
     /// `liftCoef`, `stallAngle` (rad), `skinDragCoef` (BeamNG defaults 100,
     /// `dragCoef`, 0.58, 0).
@@ -421,6 +426,7 @@ impl Default for SoftTriangle {
             collision: true,
             bias: 0.0,
             break_group: 0,
+            break_sides: 0,
             aero: [100.0, 100.0, 0.58, 0.0],
         }
     }
