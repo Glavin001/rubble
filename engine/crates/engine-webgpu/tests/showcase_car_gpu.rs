@@ -133,11 +133,14 @@ fn showcase_sedan_side_pole_matches_cpu_counts() {
         0.125,
         2.0,
     ));
-    // 0.3 s: the hit is over (the damage is done), and the car has not yet
-    // spun far round the pole. Its spin (55-75° in the next 0.7 s) amplifies
-    // any difference: a ±0.4 % change of the body damping alone moves the
-    // CPU's mean x at 0.6 s by ±5 cm.
-    let Some(gpu) = run_both(&mut cpu, 18) else {
+    // 0.1 s: the car has stopped against the pole (its mean x at its
+    // furthest) and the hit has done most of its damage. After that the
+    // crash bifurcates: nine CPU runs whose nodes start 1e-6 m apart agree
+    // to 4 mm in mean x at 0.1 s but spread 3 cm at 0.15 s and 4-10 cm at
+    // 0.3 s (78-97 broken beams), since the restyled sedan of 8ae71777
+    // (before the firewall and rail changes too). The GPU, not bit-exact,
+    // lands on one of those branches; at 0.3 s it was 4 cm outside the nine.
+    let Some(gpu) = run_both(&mut cpu, 6) else {
         eprintln!("no GPU: skipped");
         return;
     };
@@ -148,7 +151,7 @@ fn showcase_sedan_side_pole_matches_cpu_counts() {
     let mean = |p: &[Vec3]| p.iter().copied().sum::<Vec3>() / p.len() as f32;
     let (cm, gm) = (mean(&cpu.positions()), mean(&gpu.positions()[0]));
     eprintln!(
-        "(c) side pole 32 km/h, 0.3 s: CPU broken {c_broken} bent {c_bent}; GPU broken {g_broken} bent {g_bent}; mean x CPU {:.3} GPU {:.3} m",
+        "(c) side pole 32 km/h, 0.1 s: CPU broken {c_broken} bent {c_bent}; GPU broken {g_broken} bent {g_bent}; mean x CPU {:.3} GPU {:.3} m",
         cm.x, gm.x
     );
     assert!(c_bent > 50);
