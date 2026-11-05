@@ -80,7 +80,7 @@ try {
   let batchPending = false;
   const adapterInfo = await navigator.gpu.requestAdapter().then((a) => a?.info ? `${a.info.vendor} ${a.info.architecture} ${a.info.description}` : '?');
   const batchMs = [];
-  const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES });
+  const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES, zebra: Number(qs.get('zebra')) || 0 });
   r.setSolver(sim.nodesBuffer(), sim.miscBuffer());
   layout.vehicles.forEach((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, vehicle: i, lod: qs.get('lod') === '0' ? null : car.visualLod, lodDistance: Number(qs.get('lodDist')) || 18 }));
 

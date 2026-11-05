@@ -139,7 +139,10 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         step_along: 0.035,
         nose_ramp: 0.045,
         tail_ramp: 0.04,
-        rear_deck: [0.85, 1.50, 0.045, 0.035],
+        // The deck's level carried forward as the quarters' ledge, falling
+        // to the belt under the quarter light; the C-pillar's sail rises off
+        // it in a 3.5 cm fillet.
+        rear_deck: [0.85, 1.50, 0.0, 0.035],
         hood_crease: [0.22, 0.60, 0.014, 0.004],
         hood_z: [3.36, 4.70],
         deck_lip: [0.026, 0.24, 0.60],
@@ -148,6 +151,19 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         scoop: Curve::new(&[(1.30, 0.495), (3.45, 0.46)]),
         scoop_depth: 0.024,
         scoop_z: [1.42, 1.80, 3.10, 3.40],
+        // The glass leaves the belt almost at once; a soft shoulder over the
+        // front fenders; a crisp bonnet edge.
+        shoulder: [0.12, 0.45],
+        bonnet_edge: 0.30,
+        // Filled in by `assemble` from the grille's outline.
+        grille: Vec::new(),
+        // A body-colour collar round the grille: 1 cm proud, its crest 2.2 cm
+        // outside the opening, easing out over 6 cm.
+        collar: [0.010, 0.022, 0.06],
+        // A chin 1.4 cm proud under a crisp crease at 0.405 m (just under the
+        // grille), and a rear bumper 1 cm proud under one at 0.53 m (over
+        // the diffuser).
+        lip: [0.405, 0.014, 0.53, 0.010],
     };
     let _ = def;
     Styling {
@@ -265,6 +281,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     let prof = &def.profile;
     // The distant LOD samples the body coarser (cut lines stay exact).
     let mut body_style = st.body.clone();
+    body_style.grille = st.grille.clone();
     body_style.step /= super::detail().max(0.25);
     body_style.step_along /= super::detail().max(0.25);
     let surf = BodySurface::build(prof, &body_style);

@@ -90,6 +90,18 @@ const RUNS = [
   // highlights from low and level.
   ['rest_cpillar', 'scene=idle&freeze=0&cam=0.75,0.55,-0.35&dist=2.3&look=0.6,0.45,-1.0'],
   ['rest_flank', 'scene=idle&freeze=0&cam=1,0.02,0.35&dist=4.2&look=0.4,-0.1,0'],
+  // Highlight quality (zebra: the paint as reflected light stripes; smooth,
+  // continuous lines mean a smooth surface): bonnet, A-pillar base, sides,
+  // C-pillar, deck and nose.
+  ['zebra_three', 'scene=idle&freeze=0&cam=three&dist=5.6&zebra=1'],
+  ['zebra_bonnet', 'scene=idle&freeze=0&cam=0.25,0.95,1&dist=2.9&look=0,0.2,1.35&zebra=1'],
+  ['zebra_apillar', 'scene=idle&freeze=0&cam=0.95,0.55,0.65&dist=2.4&look=0.55,0.3,0.85&zebra=1'],
+  ['zebra_side', 'scene=idle&freeze=0&cam=1,0.12,0.05&dist=5.6&look=0,-0.15,0&zebra=1'],
+  ['zebra_side_bands', 'scene=idle&freeze=0&cam=1,0.12,0.05&dist=5.6&look=0,-0.15,0&zebra=3'],
+  ['zebra_cpillar', 'scene=idle&freeze=0&cam=0.75,0.55,-0.35&dist=2.3&look=0.6,0.45,-1.0&zebra=1'],
+  ['zebra_deck', 'scene=idle&freeze=0&cam=-0.3,0.95,-1&dist=2.7&look=0,0.25,-1.6&zebra=2'],
+  ['zebra_nose', 'scene=idle&freeze=0&cam=0.35,0.12,1&dist=3.0&look=0,-0.1,1.6&zebra=3'],
+  ['zebra_tail', 'scene=idle&freeze=0&cam=-0.35,0.15,-1&dist=3.0&look=0,-0.05,-1.6&zebra=3'],
   ['intact_three', 'scene=idle&freeze=1.5&cam=three'],
   ['intact_front', 'scene=idle&freeze=1.5&cam=front'],
   ['intact_rear', 'scene=idle&freeze=1.5&cam=rear'],
