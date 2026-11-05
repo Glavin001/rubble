@@ -877,6 +877,15 @@ pub struct ExplicitBeams {
     /// rule, the contacter's whole force as against a static surface (bit for bit
     /// as before; the `.truck` default until the T-bone leak is fixed).
     pub two_body_contact: bool,
+    /// Anti-clip (BeamNG profile, jbeam-semantics-spec.md §36): a contacter that
+    /// crossed a collision triangle's plane over the last step, inside the
+    /// triangle, is caught from the side it came from (a swept test, whatever its
+    /// speed), in self-collision and vehicle contact. Off: RoR's band test alone.
+    pub anti_clip: bool,
+    /// Anti-clip's side memory (§36), per node two slots (key, side): key the
+    /// triangle's owner vehicle << 20 | triangle, plus 1 (0: empty); side ±1 as bits.
+    /// Sized when anti-clip first runs.
+    pub clip_sides: Vec<[u32; 4]>,
     /// The contact-force log (jbeam-semantics-spec.md §32): per node the sum of
     /// its contacts' force magnitudes per step, and the contact breaks it drives
     /// (`None`: off, the default; [`Self::enable_contact_force`]).
@@ -1242,6 +1251,8 @@ impl ExplicitBeams {
             contact_every_node: false,
             rest_pose: None,
             two_body_contact: false,
+            anti_clip: false,
+            clip_sides: Vec::new(),
             contact_force: None,
             tread: Vec::new(),
             damp_filters: Vec::new(),
@@ -3211,6 +3222,7 @@ impl ExplicitBeams {
         // mass splitting and the pair's relative acceleration from the forces at
         // the pass's start. Without it RoR's rule applies each hit as it is found.
         let two_body = self.two_body_contact;
+        let vmax = if self.anti_clip { self.max_speed() } else { 0.0 };
         let mut found: Vec<(u32, [u32; 3], [f32; 3], f32, Vec3)> = Vec::new();
         for t in 0..self.triangles.len() {
             let tri = &mut self.triangles[t];
@@ -3232,8 +3244,22 @@ impl ExplicitBeams {
             let world = |i: u32| self.origin + self.nodes[i as usize].pos;
             let (p0, p1, p2) = (world(i0), world(i1), world(i2));
             let frame = TriFrame::new(p0, p1, p2);
-            let lo = p0.min(p1).min(p2) - Vec3::splat(r);
-            let hi = p0.max(p1).max(p2) + Vec3::splat(r);
+            // Anti-clip (§36): the box also reaches what crossed it over the step
+            // or is remembered up to CLIP_DEPTH behind it.
+            let anti = self.anti_clip;
+            let reach = if anti {
+                let tv = [i0, i1, i2]
+                    .iter()
+                    .map(|&i| self.nodes[i as usize].vel.length())
+                    .fold(0.0f32, f32::max);
+                r + (tv + vmax) * STEP + crate::explicit_contact::CLIP_DEPTH
+            } else {
+                r
+            };
+            let lo = p0.min(p1).min(p2) - Vec3::splat(reach);
+            let hi = p0.max(p1).max(p2) + Vec3::splat(reach);
+            let mut prev_frame: Option<TriFrame> = None;
+            let key = (0xFFF << 20 | t as u32) + 1;
             let mut hit = false;
             // The candidates to test, in candidate order: all of them, or those in
             // the grid buckets the padded box covers.
@@ -3272,7 +3298,12 @@ impl ExplicitBeams {
                 if p.cmplt(lo).any() || p.cmpgt(hi).any() {
                     continue;
                 }
-                let Some((alpha, beta, gamma, delta, n)) = frame.hit(p, r) else {
+                let found_hit = if anti {
+                    self.clip_hit(t, key, hn, p, &frame, &mut prev_frame, [i0, i1, i2], r)
+                } else {
+                    frame.hit(p, r)
+                };
+                let Some((alpha, beta, gamma, delta, n)) = found_hit else {
                     continue;
                 };
                 hit = true;
@@ -3321,6 +3352,76 @@ impl ExplicitBeams {
         }
         if !found.is_empty() {
             self.apply_two_body_self_hits(&found);
+        }
+    }
+
+    /// The fastest node's speed (m/s).
+    pub fn max_speed(&self) -> f32 {
+        self.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max)
+    }
+
+    /// Self-collision's anti-clip hit test (§36; vehicle contact's rule in
+    /// `explicit_contact.rs`): node `hn` at `p` against triangle `t` (key `key`)
+    /// on its remembered side, or the side it crossed from over the step, or (new
+    /// and in the band) the side it is on; (α, β, γ, δ on that side, normal).
+    #[allow(clippy::too_many_arguments)]
+    fn clip_hit(
+        &mut self,
+        t: usize,
+        key: u32,
+        hn: u32,
+        p: Vec3,
+        frame: &TriFrame,
+        prev: &mut Option<TriFrame>,
+        tri: [u32; 3],
+        r: f32,
+    ) -> Option<(f32, f32, f32, f32, Vec3)> {
+        use crate::explicit_contact::{clip_forget, clip_remember, clip_side, CLIP_DEPTH};
+        let _ = t;
+        if self.clip_sides.len() != self.nodes.len() {
+            self.clip_sides = vec![[0; 4]; self.nodes.len()];
+        }
+        let (alpha, beta, gamma, delta) = frame.local(p);
+        let over = alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0;
+        let mem = clip_side(&self.clip_sides[hn as usize], key);
+        let mut w = over.then_some([alpha, beta, gamma]);
+        let side = match mem {
+            Some(s) => Some(s),
+            None => {
+                let pf = prev.get_or_insert_with(|| {
+                    let back = |i: u32| self.origin + self.nodes[i as usize].pos - self.nodes[i as usize].vel * STEP;
+                    TriFrame::new(back(tri[0]), back(tri[1]), back(tri[2]))
+                });
+                let p_prev = p - self.nodes[hn as usize].vel * STEP;
+                let (a0, b0, g0, d0) = pf.local(p_prev);
+                if (d0 > 0.0 && delta < 0.0) || (d0 < 0.0 && delta > 0.0) {
+                    let s = d0 / (d0 - delta);
+                    let wc = [a0 + (alpha - a0) * s, b0 + (beta - b0) * s, g0 + (gamma - g0) * s];
+                    if wc.iter().all(|&c| c >= 0.0) {
+                        w = Some(wc);
+                        Some(if d0 > 0.0 { 1.0 } else { -1.0 })
+                    } else {
+                        None
+                    }
+                } else if over && delta.abs() <= r {
+                    Some(if delta < 0.0 { -1.0 } else { 1.0 })
+                } else {
+                    None
+                }
+            }
+        };
+        let sd = side?;
+        let d = sd * delta;
+        let cs = &mut self.clip_sides[hn as usize];
+        match w {
+            Some(w) if d <= r && d >= -CLIP_DEPTH => {
+                clip_remember(cs, key, sd);
+                Some((w[0], w[1], w[2], d, frame.n * sd))
+            }
+            _ => {
+                clip_forget(cs, key);
+                None
+            }
         }
     }
 
@@ -4157,6 +4258,16 @@ impl TriFrame {
             [w.cross(n) * r, n.cross(u) * r, u.cross(w) * r]
         });
         Self { p0, n, inv }
+    }
+
+    /// (α, β, γ, δ) of `p`, δ signed along the normal.
+    pub fn local(&self, p: Vec3) -> (f32, f32, f32, f32) {
+        let q = p - self.p0;
+        let (alpha, beta, delta) = match self.inv {
+            Some([ra, rb, rd]) => (ra.dot(q), rb.dot(q), rd.dot(q)),
+            None => (0.0, 0.0, 0.0),
+        };
+        (alpha, beta, 1.0 - alpha - beta, delta)
     }
 
     /// (α, β, γ, δ, normal) when `p` is over the triangle within `r` of its plane;
