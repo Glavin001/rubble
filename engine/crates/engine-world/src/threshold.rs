@@ -1955,10 +1955,14 @@ mod imp {
             let offset = self.sim.last_contact_offset();
             let dt = self.sim.params().dt as f64;
             let step = self.sim.steps_done();
-            let slots = if self.explicit.is_some() { 2 } else { 1 };
+            // Explicit vehicles: their chunk records in slot 1, at most this many rows.
+            let vehicle_rows = self.explicit.as_ref().map(|x| x.ingest_rows());
             if let Some(sh) = self.fracture.shared.as_mut() {
                 sh.ingest.substep(&gpu, enc, &e, offset, 0, dt);
-                sh.ingest.merge(&gpu, enc, &e, slots);
+                match vehicle_rows {
+                    Some(rows) => sh.ingest.merge_with_rows(&gpu, enc, &e, rows),
+                    None => sh.ingest.merge(&gpu, enc, &e, 1),
+                }
                 sh.fracture.encode_frame(&gpu, enc, step);
             }
             for o in self
