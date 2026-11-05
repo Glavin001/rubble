@@ -788,7 +788,16 @@ pub fn side_sections() -> Vec<(&'static str, Section, f32, f32)> {
 /// plastic moment (a member with a knee keeps its gradient's shape, its
 /// strongest point at the section's).
 fn sectioned(members: &mut [MemberSpec], grades: &Grades) {
-    for (name, sec, lever, sides) in side_sections() {
+    sectioned_by(members, grades, &side_sections());
+}
+
+/// [`sectioned`] for a list of (member, section, lever, sides).
+fn sectioned_by(
+    members: &mut [MemberSpec],
+    grades: &Grades,
+    list: &[(&'static str, Section, f32, f32)],
+) {
+    for &(name, sec, lever, sides) in list {
         for m in members.iter_mut().filter(|m| m.name == name) {
             let chord = sec.m_p() / (sides * lever);
             let s = chord / grades.get(&m.grade).unwrap().deform;
@@ -2072,6 +2081,30 @@ pub fn sedan_one_tier() -> VehicleDef {
     d.one_tier = true;
     d.tiered = false;
     d.damping = Some(super::vehicle::DampingRatios::default());
+    // The front bumper beam: the 2011 Accord's is roll-formed steel of
+    // 590 MPa tensile strength, its assembly with crush cans, centre plate
+    // and brackets 7.96 kg (NHTSA DOT HS 811 666 §5.10.7.1). Its section: a
+    // closed 60 deep × 100 tall roll-formed box, 1.6 mm (a Choice: about
+    // 4.0 kg/m, so some 5 kg of the assembly over its 1.2 m), at a 590
+    // grade's yield (DP600's 330 MPa). Its bending yields from the
+    // section's plastic moment, as the rear's.
+    {
+        let beam = Section {
+            depth: 0.06,
+            width: 0.10,
+            t: 0.0016,
+            sigma_y: DP600,
+            round: false,
+        };
+        sectioned_by(
+            &mut d.members,
+            &Grades::default(),
+            &[("bumper_beam_f", beam, 0.12, 1.0)],
+        );
+        for m in d.members.iter_mut().filter(|m| m.name == "bumper_beam_f") {
+            m.kg_per_m = section_kg_per_m(&beam);
+        }
+    }
     // Crush members: the front rails (an 80 × 120 × 1.6 mm DP600 box, a
     // Choice of a typical rail's section; σ_u 600 MPa, EN 10338) and the
     // rear rails' tail behind the rear subframe ([`side_sections`]' rear

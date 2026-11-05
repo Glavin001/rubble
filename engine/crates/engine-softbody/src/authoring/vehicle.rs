@@ -1584,6 +1584,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     && !sk.nodes[i as usize].catcher
             })
             .collect();
+        let member_body: Vec<u32> = {
+            let mut on: std::collections::HashSet<u32> = Default::default();
+            for g in groups.values() {
+                on.extend(g.iter().copied());
+            }
+            body.iter().copied().filter(|i| on.contains(i)).collect()
+        };
         let mut parts: Vec<u16> = door_ends.iter().map(|e| e.0).collect();
         parts.sort();
         parts.dedup();
@@ -1701,7 +1708,15 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         -1.0
                     };
                     let (dl, dt) = (Vec3::Z * -toward, Vec3::X * pa.x.signum());
-                    let near = sk.nearest(pa, &body, 12);
+                    // One tier: on the members' nodes only (pillar, sill,
+                    // roof rail, cross members), not the shell's plain
+                    // nodes, so the hardware lands on structure wherever
+                    // the shell's lattice puts its nodes.
+                    let near = if one {
+                        sk.nearest(pa, &member_body, 12)
+                    } else {
+                        sk.nearest(pa, &body, 12)
+                    };
                     // (The secondary's catch reaches a little farther.)
                     let reach = if kind == Hardware::LatchSecondary {
                         0.45
