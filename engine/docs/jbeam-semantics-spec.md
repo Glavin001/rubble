@@ -1631,6 +1631,7 @@ The research behind the list is `ror-vs-beamng-research.md` §5.
 | Contact force sums (CPU) | floats into the node's force | the GPU's fixed point (1/32 N, ties to even) | `fixed_contact` |
 | `.truck` deformable plain beams | RoR's rule (`Plain`) | JBeam's NORMAL rule (§3, `JbeamPlain`) | `use_jbeam_plasticity` |
 | Strength falls with plastic stretch | yes (k × the stretch) | no | `plastic_strength_drop` |
+| Friction law's exp and pow | bit tricks (Schraudolph) | `exact_exp` / `exact_pow` | `exact_friction` |
 | Air drag (`.truck`) | per node, DRAG·|v|·v (mass-independent), turbulence | the triangles' (§31), dragCoef 100 or `rubble_drag_coef` | `settings.drag` → aero triangles |
 
 **No throttle.** RoR's throttle skips work whose result can differ (AGENTS.md: not
@@ -1790,6 +1791,30 @@ clear of the ground): 3,417 N with the default 100; the per-node rule would give
 GPU runs the same aero records (`showcase_car_gpu`, sedan1: at rest, the side pole and
 the wall equal to the CPU's).
 
+**Exact exp and pow.** The friction law (ground, static shapes, the tread, self-
+and vehicle contact) took RoR's bit-trick eˣ (Schraudolph: up to 4 % off) and xʸ
+(off by tens of percent between powers of two). The profile takes `exact_exp` (k =
+⌊x·log₂e + ½⌋, Cody–Waite reduction, Taylor to r⁷, 2ᵏ by bits; within 0.8 ulp over
+[−87, 88]) and `exact_pow` = exact_exp(y·`exact_ln` x) (ln by the atanh series to s¹⁰;
+within 1.4 ulp; pow within 10⁻⁶ on the friction law's range): one specified
+sequence on the CPU and in the kernel (`sExactExp`, `sExactLn`, `sExactPow`), so the
+two agree bit for bit (`explicit_beams.rs` `exact_exp_is_the_exponential`;
+`jbeam_mode_steps_bit_for_bit` with the profile's friction). Vehicle flag 16384
+(`FLAG_EXACT_FRICTION`); the kernel's `Surface` carries it (`surfaceV`). The rigid
+coupling's contacts keep RoR's law (its CPU reference has no vehicle). JBeam's
+`dampCutoffHz` filter coefficient 1 − e^(−2π·f·h) also takes `exact_exp` (the host's
+libm differed between machines).
+
+**Damping-only beams and `dampCutoffHz` for `.truck`.** A profile `.truck` beam with
+spring 0 (`set_beam_defaults 0, c, …`) is a damper: force −c·u, no yield (BeamNG's
+damping-only beams). `rubble_damp_cutoff` (**Rubble extension**), lines `a, b, hz`:
+the profile's JBeam beam a–b damps its extension rate filtered at hz (§2's
+`dampCutoffHz`); a line naming no such beam fails the load. `rubble_aero_tri`
+(**Rubble extension**), lines `a, b, c, dragCoef, liftCoef`: per cab triangle (nodes
+in any order) its aerodynamics; with the section, unlisted cab triangles have none;
+a line naming no cab triangle fails the load. Tests: `explicit_beams.rs`
+`profile_truck_damping_only_beams_and_damp_cutoff`, `profile_truck_aero_triangles`.
+
 **Effect on the showcase car (sedan1, CPU, the profile's 2.5 cm band, anti-clip off
 and on).** T-bone at 80 km/h (`showcase_car.rs` `t_car_to_car_t_bone_at_80_kmh`,
 live-skin leak metric, limit 10 of 993), striker offset −0.03 / 0 / +0.03 / 0.40 /
@@ -1802,5 +1827,4 @@ then passes CLIP_DEPTH and is forgotten. Not anti-clip's to fix. The frontal wal
 (`crash_invariants.rs`, `CI_ANTI=0|1`): every row identical; its 3,408 self-contacts
 are band hits on the side of δ (held sides 3,394), none crossed.
 
-**Still to come in this profile:** exact `exp`/`pow` in the friction law;
-`externalCollisionBias`; damping-only beams and `dampCutoffHz` for `.truck` content; flexbody 4-node binding.
+**Still to come in this profile:** `externalCollisionBias`; flexbody 4-node binding.

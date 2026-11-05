@@ -141,9 +141,16 @@ pub struct ContactSurface {
     pub vs: f32,
     pub alpha: f32,
     pub strength: f32,
+    /// The friction law's exponentials by [`exact_exp`] / [`exact_pow`] (the BeamNG
+    /// profile, jbeam-semantics-spec.md §36); false: RoR's bit tricks.
+    pub exact: bool,
 }
 
 impl ContactSurface {
+    /// This surface with the exact exponentials when `on`.
+    pub const fn exact_if(self, on: bool) -> Self {
+        Self { exact: on, ..self }
+    }
     /// The ground ("gravel").
     pub const GROUND: Self = Self {
         va: 3.0,
@@ -153,6 +160,7 @@ impl ContactSurface {
         vs: 3.0,
         alpha: 2.0,
         strength: 1.0,
+        exact: false,
     };
     /// Static boxes and self-collision ("concrete").
     pub const BOX: Self = Self {
@@ -163,6 +171,7 @@ impl ContactSurface {
         vs: 6.0,
         alpha: 2.0,
         strength: 1.0,
+        exact: false,
     };
 }
 
@@ -914,6 +923,9 @@ pub struct ExplicitBeams {
     /// false (BeamNG documents no such rule; its `deformLimitStress` and deform
     /// limits are the documented plastic caps).
     pub plastic_strength_drop: bool,
+    /// The friction law's exponentials exact ([`exact_exp`], [`exact_pow`]) in
+    /// ground, static-shape, self- and vehicle contact (the BeamNG profile, §36).
+    pub exact_friction: bool,
     /// [`Self::fixed_contact`]'s per-node sums this step (empty until used).
     pub contact_acc: Vec<[i32; 3]>,
     /// [`Self::fixed_contact`]: this step's slide-force sums, added by the next
@@ -991,7 +1003,7 @@ pub struct DampFilter {
 impl DampFilter {
     /// The filter for a cutoff of `hz` at the fixed step.
     pub fn new(hz: f32) -> Self {
-        let a = 1.0 - (-2.0 * std::f32::consts::PI * hz * STEP).exp();
+        let a = 1.0 - exact_exp(-2.0 * std::f32::consts::PI * hz * STEP);
         Self {
             a,
             b: a - 1.0,
@@ -1065,6 +1077,81 @@ pub fn approx_exp(x: f32) -> f32 {
     f32::from_bits(i as u32)
 }
 
+/// eˣ by one specified sequence the CPU and the kernel (`sExactExp`) run identically
+/// (jbeam-semantics-spec.md §36): k = ⌊x·log₂e + ½⌋, r = (x − k·ln2_hi) − k·ln2_lo
+/// (|r| ≤ 0.35), eʳ by its Taylor series to r⁷ (truncation below 6·10⁻⁹), Horner,
+/// times 2ᵏ by its bits. 0 below −87, 3.4·10³⁸ above 88 (no subnormals: GPUs flush
+/// them). Within 2 ulp of the exact value (`exact_exp_is_the_exponential`).
+pub fn exact_exp(x: f32) -> f32 {
+    if x < -87.0 {
+        return 0.0;
+    }
+    if x > 88.0 {
+        return 3.4e38;
+    }
+    let k = (x * std::f32::consts::LOG2_E + 0.5).floor();
+    let r = (x - k * LN2_HI) - k * LN2_LO;
+    let mut p = EXP_C[7];
+    for i in (0..7).rev() {
+        p = p * r + EXP_C[i];
+    }
+    p * f32::from_bits(((k as i32 + 127) as u32) << 23)
+}
+
+/// ln 2 split for [`exact_exp`] and [`exact_ln`]: 0.693359375 (exact in 10 bits)
+/// plus the rest.
+const LN2_HI: f32 = 0.693_359_4;
+const LN2_LO: f32 = -2.121_944_4e-4;
+/// 1/k!, k = 0..7.
+const EXP_C: [f32; 8] = [
+    1.0,
+    1.0,
+    0.5,
+    0.166_666_67,
+    0.041_666_668,
+    0.008_333_334,
+    0.001_388_888_9,
+    0.000_198_412_7,
+];
+
+/// ln x by one specified sequence (the kernel's `sExactLn`): x = m·2ᵉ with
+/// m ∈ [√½, √2), s = (m − 1)/(m + 1), ln m = 2s·Σ s²ⁱ/(2i + 1) to s¹⁰ (truncation
+/// below 2·10⁻¹⁰), then e·ln2_hi + (ln m + e·ln2_lo). x below the smallest normal
+/// (zero, negative or not a number): −1000 (no NaN or infinity literals, which WGSL
+/// rejects; exp of it is 0).
+pub fn exact_ln(x: f32) -> f32 {
+    if !(x >= f32::MIN_POSITIVE) {
+        return -1000.0;
+    }
+    let b = x.to_bits();
+    let mut e = ((b >> 23) as i32 - 127) as f32;
+    let mut m = f32::from_bits((b & 0x007F_FFFF) | 0x3F80_0000);
+    if m > std::f32::consts::SQRT_2 {
+        m *= 0.5;
+        e += 1.0;
+    }
+    let s = (m - 1.0) / (m + 1.0);
+    let s2 = s * s;
+    let mut q = 1.0 / 11.0f32;
+    for c in [1.0 / 9.0f32, 1.0 / 7.0, 1.0 / 5.0, 1.0 / 3.0, 1.0] {
+        q = q * s2 + c;
+    }
+    let lnm = (s + s) * q;
+    e * LN2_HI + (lnm + e * LN2_LO)
+}
+
+/// xʸ (x ≥ 0) as exp(y·ln x) by [`exact_exp`] and [`exact_ln`]: 0 for x = 0 and
+/// y > 0, 1 for y = 0.
+pub fn exact_pow(x: f32, y: f32) -> f32 {
+    if y == 0.0 {
+        return 1.0;
+    }
+    if x == 0.0 && y > 0.0 {
+        return 0.0;
+    }
+    exact_exp(y * exact_ln(x))
+}
+
 /// Bit-trick power xʸ.
 pub fn approx_pow(x: f32, y: f32) -> f32 {
     let e = (x.to_bits() as i32).wrapping_sub(1_065_353_216) as f32;
@@ -1136,11 +1223,19 @@ pub fn contact_friction(
     let gr = r * surface.strength * friction;
     let ms = surface.ms * gr;
     if sigma < surface.va && gr > 0.0 && sf.length_squared() <= ms * ms {
-        r * n - ms * (1.0 - approx_exp(-sigma / surface.va)) * s - sf
+        let e = if surface.exact {
+            exact_exp(-sigma / surface.va)
+        } else {
+            approx_exp(-sigma / surface.va)
+        };
+        r * n - ms * (1.0 - e) * s - sf
     } else {
-        let g = surface.mc
-            + (surface.ms - surface.mc)
-                * approx_exp(-approx_pow(sigma / surface.vs, surface.alpha));
+        let e = if surface.exact {
+            exact_exp(-exact_pow(sigma / surface.vs, surface.alpha))
+        } else {
+            approx_exp(-approx_pow(sigma / surface.vs, surface.alpha))
+        };
+        let g = surface.mc + (surface.ms - surface.mc) * e;
         r * n - (g + (surface.t2 * sigma).min(5.0)) * gr * s
     }
 }
@@ -1294,6 +1389,7 @@ impl ExplicitBeams {
             anti_only_tris: Vec::new(),
             fixed_contact: false,
             plastic_strength_drop: true,
+            exact_friction: false,
             contact_acc: Vec::new(),
             slide_hold: Vec::new(),
             contact_force: None,
@@ -1719,6 +1815,29 @@ impl ExplicitBeams {
                     t.aero[1] = l;
                 }
             }
+            // `rubble_aero_tri` (Rubble's extension, §36): per triangle; unlisted
+            // ones none.
+            if !file.aero_tri.is_empty() {
+                let key = |mut k: [u32; 3]| {
+                    k.sort_unstable();
+                    k
+                };
+                let mut at: HashMap<[u32; 3], usize> = HashMap::new();
+                for (i, t) in aero.triangles.iter().enumerate() {
+                    at.insert(key(t.nodes), i);
+                }
+                for t in &mut aero.triangles {
+                    t.aero[0] = 0.0;
+                    t.aero[1] = 0.0;
+                }
+                for &(n, d, l) in &file.aero_tri {
+                    let Some(&i) = at.get(&key(n)) else {
+                        return Err(format!("rubble_aero_tri: {n:?} is not a cab triangle"));
+                    };
+                    aero.triangles[i].aero[0] = d;
+                    aero.triangles[i].aero[1] = l;
+                }
+            }
             s.add_triangle_aero(&aero);
             if !s.beam_ext.is_empty() {
                 s.ext_of.resize(s.beams.len(), 0);
@@ -1744,6 +1863,7 @@ impl ExplicitBeams {
             s.two_body_contact = true;
             s.anti_clip = true;
             s.fixed_contact = true;
+            s.exact_friction = true;
         }
         // `rubble_contact_breaks` (Rubble's extension, spec §32).
         if !file.contact_breaks.is_empty() {
@@ -1782,7 +1902,37 @@ impl ExplicitBeams {
         if file.beamng_profile {
             s.use_jbeam_plasticity();
         }
+        // `rubble_damp_cutoff` (Rubble's extension, §36): JBeam's dampCutoffHz on
+        // the profile's JBeam beams.
+        if !file.damp_cutoff.is_empty() {
+            s.set_damp_cutoff(&file.damp_cutoff)?;
+        }
         Ok(s)
+    }
+
+    /// JBeam's `dampCutoffHz` on beams of a `.truck` (`rubble_damp_cutoff`, spec
+    /// §36): per line (a, b, hz) the JBeam beam a–b (a BeamNG-profile file's plain
+    /// beams are) damps its extension rate filtered at hz.
+    pub fn set_damp_cutoff(&mut self, lines: &[(u32, u32, f32)]) -> Result<(), String> {
+        let mut at: HashMap<(u32, u32), usize> = HashMap::new();
+        for (j, b) in self.beams.iter().enumerate() {
+            if b.kind == ExplicitKind::JbeamPlain {
+                at.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(j);
+            }
+        }
+        for &(a, b, hz) in lines {
+            let Some(&j) = at.get(&(a.min(b), a.max(b))) else {
+                return Err(format!(
+                    "rubble_damp_cutoff: no JBeam beam {a}–{b} (the BeamNG profile's plain beams)"
+                ));
+            };
+            if self.beams[j].shock != 0 {
+                return Err(format!("rubble_damp_cutoff: beam {a}–{b} listed twice"));
+            }
+            self.damp_filters.push(DampFilter::new(hz));
+            self.beams[j].shock = self.damp_filters.len() as u32;
+        }
+        Ok(())
     }
 
     /// The BeamNG profile's plasticity for `.truck` content (jbeam-semantics-spec.md
@@ -2429,6 +2579,7 @@ impl ExplicitBeams {
         s.anti_clip = true;
         s.fixed_contact = true;
         s.plastic_strength_drop = false;
+        s.exact_friction = true;
         let pairs = s.spawn_exclusions();
         if pairs > 0 {
             warnings.push(format!(
@@ -2980,6 +3131,7 @@ impl ExplicitBeams {
     }
 
     fn node_pass(&mut self) {
+        let exact = self.exact_friction;
         // Anti-clip's side memory (§36): last step's contacts are held now.
         for c in &mut self.clip_sides {
             crate::explicit_contact::clip_roll(c);
@@ -3025,7 +3177,7 @@ impl ExplicitBeams {
                                 n.force,
                                 n.vel,
                                 Vec3::Y,
-                                &ContactSurface::GROUND,
+                                &ContactSurface::GROUND.exact_if(exact),
                                 n.friction,
                             );
                             let c = crate::explicit_jbeam_ext::slip_limit(
@@ -3051,7 +3203,7 @@ impl ExplicitBeams {
                         n.mass,
                         Vec3::Y,
                         h,
-                        &ContactSurface::GROUND,
+                        &ContactSurface::GROUND.exact_if(exact),
                         ground - x.y,
                         n.friction,
                     );
@@ -3081,7 +3233,7 @@ impl ExplicitBeams {
                             n.mass,
                             normal,
                             h,
-                            &ContactSurface::BOX,
+                            &ContactSurface::BOX.exact_if(exact),
                             0.0,
                             n.friction,
                         );
@@ -3099,7 +3251,7 @@ impl ExplicitBeams {
                             n.mass,
                             normal,
                             h,
-                            &ContactSurface::BOX,
+                            &ContactSurface::BOX.exact_if(exact),
                             0.0,
                             n.friction,
                         );
@@ -3429,6 +3581,7 @@ impl ExplicitBeams {
     }
 
     fn collision_pass(&mut self) {
+        let exact = self.exact_friction;
         self.last_contacts = 0;
         if self.grid_cell > 0.0 {
             let cell = self.grid_cell;
@@ -3551,7 +3704,7 @@ impl ExplicitBeams {
                     m,
                     n,
                     h,
-                    &ContactSurface::BOX,
+                    &ContactSurface::BOX.exact_if(exact),
                     pen,
                     node.friction,
                 );
@@ -3683,6 +3836,7 @@ impl ExplicitBeams {
     /// moves the contacter's own load onto the triangle's nodes). Hits in the
     /// order they were found (triangles in order, then candidates).
     fn apply_two_body_self_hits(&mut self, found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)]) {
+        let exact = self.exact_friction;
         let mut split = vec![0u32; self.nodes.len()];
         for (hn, tri, _, _, _) in found {
             split[*hn as usize] += 1;
@@ -3734,7 +3888,7 @@ impl ExplicitBeams {
                 m,
                 n,
                 STEP,
-                &ContactSurface::BOX,
+                &ContactSurface::BOX.exact_if(exact),
                 depth,
                 node.friction,
             );

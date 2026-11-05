@@ -762,7 +762,7 @@ impl ExplicitBeamsWorld {
                 m,
                 x.n,
                 STEP,
-                &ContactSurface::BOX,
+                &ContactSurface::BOX.exact_if(self.vehicles[b].exact_friction),
                 x.p,
                 node.friction,
             );

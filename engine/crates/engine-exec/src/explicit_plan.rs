@@ -703,7 +703,8 @@ impl ExplicitUpload {
                 | (!v.settings.triangle_throttle as u32) << 10
                 | (v.anti_clip as u32) << 11
                 | (any_anti as u32) << 12
-                | (!v.plastic_strength_drop as u32) << 13;
+                | (!v.plastic_strength_drop as u32) << 13
+                | (v.exact_friction as u32) << 14;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
