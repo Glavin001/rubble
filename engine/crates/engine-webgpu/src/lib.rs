@@ -390,7 +390,7 @@ include!("wgsl_loop_cap.rs");
 /// Chrome treats a storage/workgroup load as non-uniform, so a later barrier
 /// inside `if (lanes == 1)` is rejected. `workgroupUniformLoad` makes it uniform.
 fn uniformize_workgroup_lanes(src: &str) -> String {
-    const NAMES: [&str; 4] = ["gsUniformLanes_0", "gsUniformHits_0", "gsUniformOpen_0", "gsUniformCouple_0"];
+    const NAMES: [&str; 5] = ["gsUniformLanes_0", "gsUniformHits_0", "gsUniformOpen_0", "gsUniformCouple_0", "gsUniformDrive_0"];
     let mut out = src.to_string();
     for name in NAMES {
         if !out.contains(name) {

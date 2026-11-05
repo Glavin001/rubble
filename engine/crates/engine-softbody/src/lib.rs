@@ -20,6 +20,7 @@ pub mod elements;
 pub mod explicit_aero;
 pub mod explicit_beams;
 pub mod explicit_contact;
+pub mod explicit_drive;
 pub mod explicit_jbeam_ext;
 pub mod explicit_ref;
 pub mod explicit_rigid;
