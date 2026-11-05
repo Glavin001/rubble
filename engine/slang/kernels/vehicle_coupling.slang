@@ -62,9 +62,15 @@ static const uint ST_PLANES = 4u;
 static const uint ST_IMPULSES = 8u;
 static const uint ST_ROWS = 16u;
 // work: [0] chunk rows used, [1] status, [2..2+maxBodies) share counts, then per vehicle
-// 8 words of bounds (ordered bits: lo xyz, hi xyz, speed, 0).
+// 8 words of bounds (ordered bits: lo xyz, hi xyz, speed, 0) (all cleared each window),
+// then per vehicle 4 words written once by the host: node offset, nodes, mass bits, 0.
 uint wShare() { return 2u; }
 uint wBounds(uint v) { return 2u + gP.maxBodies + 8u * v; }
+uint4 vehicleAt(uint v)
+{
+    uint w = 2u + gP.maxBodies + 8u * gP.vehicles + 4u * v;
+    return uint4(gWork[w].load(), gWork[w + 1u].load(), gWork[w + 2u].load(), 0u);
+}
 
 [[vk::binding(0, 0)]] ConstantBuffer<Params> gP;
 [[vk::binding(1, 0)]] StructuredBuffer<float4> gBodies;     // engine-schema BodyState, 7 each
@@ -72,7 +78,6 @@ uint wBounds(uint v) { return 2u + gP.maxBodies + 8u * v; }
 [[vk::binding(3, 0)]] StructuredBuffer<uint> gHulls;        // the hull arena's words
 [[vk::binding(4, 0)]] StructuredBuffer<float4> gNodes;      // explicit nodes, 3 each
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint4> gMisc;      // explicit gMisc
-[[vk::binding(6, 0)]] StructuredBuffer<uint4> gVeh;         // per vehicle (node offset, nodes, mass bits, 0)
 [[vk::binding(8, 0)]] RWStructuredBuffer<Atomic<uint>> gScratch; // the World's scratch atomics
 [[vk::binding(9, 0)]] RWStructuredBuffer<Atomic<uint>> gWork;
 [[vk::binding(10, 0)]] StructuredBuffer<uint4> gChunkInfo;  // the ingest's collider table, 2 each
@@ -113,7 +118,7 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (lane < 3u) gsBox[lane].store(0xFFFFFFFFu);
     else if (lane < 7u) gsBox[lane].store(0u);
     GroupMemoryBarrierWithGroupSync();
-    uint4 vt = gVeh[v];
+    uint4 vt = vehicleAt(v);
     float3 origin = asfloat(gMisc[v].xyz);
     for (uint i = lane; i < vt.y; i += 256u)
     {
@@ -321,7 +326,7 @@ void cpl_loads(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     // coupling.slang Record: ids (chunk, other body: none, slot, valid), point (|J|),
     // impulse (closing speed 0: a sustained load, J / dt), other (mass, modulus, radius),
     // key (substep, this collider, other: the vehicle, feature).
-    float mass = asfloat(gVeh[v].z);
+    float mass = asfloat(vehicleAt(v).z);
     gRecords[5u * base] = uint4(info.x, NONE, base, 1u);
     gRecords[5u * base + 1u] = asuint(float4(p, length(jz)));
     gRecords[5u * base + 2u] = asuint(float4(jz, 0.0));
