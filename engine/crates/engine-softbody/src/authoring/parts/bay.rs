@@ -109,7 +109,10 @@ pub fn engine_bay(group: &dyn Fn(&str) -> Option<u16>, nodes: Nodes) -> Vec<Piec
     // Aprons: the bay's side walls, from 3 cm under the apron rail (its
     // nodes' height along it, so the wall stays under the bonnet) down to the
     // frame rail's height, with the strut tower's dome on them.
-    for (ap, tw, rail) in [("apron", "tower_f", "rail_f"), ("apron_r", "tower_f_r", "rail_f_r")] {
+    for (ap, tw, rail) in [
+        ("apron", "tower_f", "rail_f"),
+        ("apron_r", "tower_f_r", "rail_f_r"),
+    ] {
         let (Some(g), Some((lo, hi))) = (group(ap), bounds(ap)) else {
             continue;
         };
@@ -118,9 +121,15 @@ pub fn engine_bay(group: &dyn Fn(&str) -> Option<u16>, nodes: Nodes) -> Vec<Piec
         let mut along = nodes(ap).unwrap_or_default();
         along.sort_by(|a, b| a.z.total_cmp(&b.z));
         let top_at = |z: f32| -> f32 {
-            let k = along.partition_point(|p| p.z < z).clamp(1, along.len().max(2) - 1);
+            let k = along
+                .partition_point(|p| p.z < z)
+                .clamp(1, along.len().max(2) - 1);
             let (a, b) = (along[k - 1], along[k.min(along.len() - 1)]);
-            let t = if (b.z - a.z).abs() > 1e-4 { ((z - a.z) / (b.z - a.z)).clamp(0.0, 1.0) } else { 0.0 };
+            let t = if (b.z - a.z).abs() > 1e-4 {
+                ((z - a.z) / (b.z - a.z)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             a.y + (b.y - a.y) * t - 0.03
         };
         let y_bot = bounds(rail).map_or(lo.y - 0.3, |(l, h)| 0.5 * (l.y + h.y));
@@ -134,7 +143,12 @@ pub fn engine_bay(group: &dyn Fn(&str) -> Option<u16>, nodes: Nodes) -> Vec<Piec
                 let z = z0 + (z1 - z0) * i as f32 / nz as f32;
                 let yt = top_at(z).max(y_bot + 0.02);
                 let y = y_bot + (yt - y_bot) * j as f32 / ny as f32;
-                row.push(m.vert(Vec3::new(x, y, z), Vec3::new(-sx, 0.0, 0.0), mat::INNER, 0.4));
+                row.push(m.vert(
+                    Vec3::new(x, y, z),
+                    Vec3::new(-sx, 0.0, 0.0),
+                    mat::INNER,
+                    0.4,
+                ));
             }
             rows.push(row);
         }
@@ -142,7 +156,13 @@ pub fn engine_bay(group: &dyn Fn(&str) -> Option<u16>, nodes: Nodes) -> Vec<Piec
         let mut pieces = vec![Piece {
             name: format!("{ap}_wall"),
             mesh: m,
-            bind: Bind::Group(g),
+            // Its apron's nodes are along its top; the frame rail's along
+            // its foot.
+            bind: Bind::Groups([
+                g,
+                group(rail).unwrap_or(u16::MAX),
+                group(tw).unwrap_or(u16::MAX),
+            ]),
         }];
         if let (Some(gt), Some((tl, th))) = (group(tw), bounds(tw)) {
             let tc = 0.5 * (tl + th);

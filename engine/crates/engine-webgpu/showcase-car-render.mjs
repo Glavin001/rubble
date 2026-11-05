@@ -82,6 +82,9 @@ const LAMINATED_CRACK_STRAIN = 45e6 / 70e9;
 // the binding triangle's size. A fold whose planes differ by θ switches
 // planes over about CREASE_SHARP · L / sin θ.
 const CREASE_SHARP = 0.08;
+// The most the envelope moves a vertex off its triangle beyond its rest
+// offset (skin.rs ENVELOPE_MAX): half the 2 cm contact band.
+const ENVELOPE_MAX = 0.01;
 // Level of detail: the finest level whose median edge spans this many pixels
 // (3: at 1080p the 10-car row at 16 m and 30 m looks the same on the second
 // level as on the full mesh; finer triangles only add quad overshading).
@@ -138,6 +141,7 @@ struct Lod { n: vec4u, opq: vec4u, gl: vec4u, low: vec4u, mid: vec4u, edge: vec4
 
 const LAMINATED = 1u;
 const CREASE_SHARP = ${CREASE_SHARP};
+const ENVELOPE_MAX = ${ENVELOPE_MAX};
 const SPLIT_COS = ${SPLIT_COS};
 // Per node: (plane a now, tear), (last world position, valid), (plastic
 // strain, broken beams, scrape, 0), (plane b now, two planes), plane a at
@@ -496,7 +500,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
       let l = 0.5 * (bd.r1 + bd.r2);
       let now = envelope(pn, an, bn, w, l);
       let rest = envelope(pr, ar, br, w, l);
-      pos += clamp(now.e - rest.e, -0.5 * l, 0.5 * l) * now.u;
+      pos += clamp(now.e - rest.e, -ENVELOPE_MAX, ENVELOPE_MAX) * now.u;
       nrm = normalize(rotTo(rest.n, now.n, vec3f(bd.rx, bd.ry, bd.rz)));
     }
   }

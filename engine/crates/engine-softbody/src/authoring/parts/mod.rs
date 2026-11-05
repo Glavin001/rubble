@@ -68,6 +68,11 @@ pub enum Bind {
     Part(u16),
     /// A named structure group (the dashboard and console on their members).
     Group(u16),
+    /// A named structure group and up to two it spans to (`u16::MAX`: none),
+    /// framed by all their nodes, as a BeamNG flexbody lists several node
+    /// groups: an apron wall from its apron rail down to the frame rail, the
+    /// dashboard from its beam up to the cowl.
+    Groups([u16; 3]),
     /// A named structure group, rigidly on one of its triangles (seats and the
     /// steering wheel: they never stretch or swing out on a far triangle).
     GroupRigid(u16),

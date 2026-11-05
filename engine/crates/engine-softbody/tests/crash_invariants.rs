@@ -7,7 +7,9 @@
 //! Run: `cargo test --release -p engine-softbody --test crash_invariants -- --nocapture --include-ignored`
 //! (the `#[ignore]`d ones are real failures, their measured values in comments).
 
-use engine_softbody::authoring::skin::{deform, showcase_visual};
+use engine_softbody::authoring::skin::{
+    deform, deform_with, showcase_visual, unit_states, BeamState, ShowcaseVisual,
+};
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use engine_softbody::explicit_beams::{
     ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape, STEP,
@@ -290,12 +292,26 @@ fn dpos(s: &ExplicitBeams) -> Vec<DVec3> {
 
 /// The visual skin's offset from the collision skin, sampled (every 37th visual
 /// vertex on the exterior): (offset at rest, offset now) per live sample.
-fn visual_offsets(b: &Built, s: &ExplicitBeams, rest: &[Vec3]) -> Vec<(f64, f64)> {
-    let v = showcase_visual(b).unwrap();
+fn visual_offsets(
+    v: &ShowcaseVisual,
+    b: &Built,
+    s: &ExplicitBeams,
+    rest: &[Vec3],
+) -> Vec<(f64, f64)> {
     let tris: Vec<[u32; 3]> = s.triangles.iter().map(|t| t.nodes).collect();
     let now = s.positions();
-    let (p_rest, _) = deform(&v, rest);
-    let (p_now, _) = deform(&v, &now);
+    // As drawn: a shattered pane or lens is gone (the renderer drops it).
+    let beams: Vec<BeamState> = s
+        .beams
+        .iter()
+        .map(|b| BeamState {
+            broken: b.broken,
+            rest: b.rest,
+        })
+        .collect();
+    let units = unit_states(v, &beams);
+    let (p_rest, _) = deform(v, rest);
+    let (p_now, _) = deform_with(v, &now, Some(&units));
     let dist = |p: Vec3, pos: &[Vec3]| {
         tris.iter()
             .map(|t| {
@@ -309,15 +325,68 @@ fn visual_offsets(b: &Built, s: &ExplicitBeams, rest: &[Vec3]) -> Vec<(f64, f64)
             })
             .fold(f32::MAX, f32::min) as f64
     };
+    // Wheels ride their tyres (which turn and steer), not the body's skin.
+    let sk_nodes = b.skeleton.nodes.len() as u32;
+    let on_body = |i: usize| v.bind_nodes[i].iter().all(|&k| k < sk_nodes);
     if std::env::var("CI_DEBUG").is_ok() {
         let on_tri: std::collections::HashSet<u32> = tris.iter().flatten().copied().collect();
         let mut w: Vec<(f64, usize)> = (0..p_now.len())
             .step_by(37)
-            .filter(|&i| p_now[i].is_finite() && p_rest[i].is_finite())
+            .filter(|&i| p_now[i].is_finite() && p_rest[i].is_finite() && on_body(i))
             .map(|i| (dist(p_now[i], &now) - dist(p_rest[i], rest), i))
             .filter(|&(_, i)| dist(p_rest[i], rest) <= VISUAL_BAND)
             .collect();
         w.sort_by(|a, c| c.0.total_cmp(&a.0));
+        // Shut-line frames (nodes of two parts) stretched now: drawn as a
+        // sheet across an opening gap until the renderer's tear (2.5×).
+        let stretch = |t: [u32; 3]| {
+            let e = |a: u32, c: u32, p: &[Vec3]| p[a as usize].distance(p[c as usize]);
+            [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]
+                .iter()
+                .map(|&(a, c)| e(a, c, &now) / e(a, c, rest).max(1e-6))
+                .fold(0.0f32, f32::max)
+        };
+        let parts_of = |t: [u32; 3]| t.map(|k| b.skeleton.nodes.get(k as usize).map(|n| n.part));
+        let (mut mixed, mut s15, mut s25) = (0, 0, 0);
+        for i in (0..p_now.len())
+            .step_by(37)
+            .filter(|&i| on_body(i) && p_now[i].is_finite())
+        {
+            let t = v.bind_nodes[i];
+            let ps = parts_of(t);
+            if ps[0] != ps[1] || ps[1] != ps[2] {
+                mixed += 1;
+                let x = stretch(t);
+                s15 += usize::from(x > 1.5);
+                s25 += usize::from(x > 2.5);
+            }
+        }
+        eprintln!(
+            "  shut-line frames: {mixed} samples, stretched > 1.5x {s15}, > 2.5x (torn) {s25}"
+        );
+        // The fine skin's own offset growth from the collision skin (the
+        // floor of any binding to it): its triangles' centroids.
+        let cen = |t: &[u32; 3], p: &[Vec3]| {
+            (p[t[0] as usize] + p[t[1] as usize] + p[t[2] as usize]) / 3.0
+        };
+        let mut nd: Vec<(f64, usize)> = b
+            .skeleton
+            .skin
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| cen(t, &now).is_finite())
+            .map(|(k, t)| (dist(cen(t, &now), &now) - dist(cen(t, rest), rest), k))
+            .collect();
+        nd.sort_by(|a, c| c.0.total_cmp(&a.0));
+        for &(d, k) in nd.iter().take(3) {
+            let t = b.skeleton.skin[k];
+            let k = t[0];
+            eprintln!(
+                "  skin tri {t:?} centroid +{:.0} mm part {}",
+                d * 1e3,
+                b.skeleton.parts[b.skeleton.nodes[k as usize].part as usize]
+            );
+        }
         for &(d, i) in w.iter().take(5) {
             let bn = v.bind_nodes[i];
             eprintln!(
@@ -329,13 +398,33 @@ fn visual_offsets(b: &Built, s: &ExplicitBeams, rest: &[Vec3]) -> Vec<(f64, f64)
                 bn.map(|k| on_tri.contains(&k)),
                 v.bind_coords[i][2]
             );
+            let mut st = bn;
+            st.sort_unstable();
+            let is_skin = b.skeleton.skin.iter().any(|t| {
+                let mut u = *t;
+                u.sort_unstable();
+                u == st
+            });
+            let (q, _, _) = closest_on_triangle(
+                p_rest[i],
+                rest[bn[0] as usize],
+                rest[bn[1] as usize],
+                rest[bn[2] as usize],
+            );
+            eprintln!(
+                "    coords {:?} rest distance to frame {:.0} mm, skin triangle {is_skin}, rigid {}, piece {:?}",
+                v.bind_coords[i],
+                p_rest[i].distance(q) * 1e3,
+                v.rigid[i],
+                v.pieces.iter().find(|(_, f, c)| (i as u32) >= *f && (i as u32) < f + c).map(|p| p.0.clone())
+            );
         }
     }
     // The exterior skin's vertices: those within the band of the collision skin at
     // rest (interior trim, seats and the like are not on it).
     (0..p_now.len())
         .step_by(37)
-        .filter(|&i| p_now[i].is_finite() && p_rest[i].is_finite())
+        .filter(|&i| p_now[i].is_finite() && p_rest[i].is_finite() && on_body(i))
         .map(|i| (dist(p_rest[i], rest), dist(p_now[i], &now)))
         .filter(|&(d0, _)| d0 <= VISUAL_BAND)
         .collect()
@@ -526,8 +615,17 @@ fn run_scene(name: &str, sc: Scene) -> Run {
     let steps = (seconds / STEP).round() as usize;
     let window = (0.1 / STEP).round() as usize;
     let mut com_track: Vec<DVec3> = Vec::new();
+    // Visual drift: sampled every 0.1 s through the crash (its worst).
+    let visual = matches!(sc, Scene::Wall | Scene::WallNoDrag | Scene::Pole)
+        .then(|| showcase_visual(&b).unwrap());
     for step in 1..=steps {
         w.step();
+        if let Some(v) = &visual {
+            if step % window == 0 || step == steps {
+                let off = visual_offsets(v, &b, &w.vehicles[0], &rest_pos);
+                r.visual = off.iter().map(|(a, c)| c - a).fold(r.visual, f64::max);
+            }
+        }
         let l = w.ledger.as_ref().unwrap();
         r.energy_rise = r.energy_rise.max(l.mechanical() - start);
         r.closure = r
@@ -674,10 +772,6 @@ fn run_scene(name: &str, sc: Scene) -> Run {
             r.creep = r.creep.max((slope * (t.last().unwrap() - t[0])).abs());
             r.sway = r.sway.max(resid);
         }
-    }
-    if matches!(sc, Scene::Wall | Scene::WallNoDrag | Scene::Pole) {
-        let off = visual_offsets(&b, s, &rest_pos);
-        r.visual = off.iter().map(|(a, c)| c - a).fold(0.0, f64::max);
     }
     r
 }
@@ -924,17 +1018,21 @@ fn head_on_contact_speeds_within_the_band() {
     assert!(ok);
 }
 
-/// Visuals follow physics: after the wall and the pole, no visual vertex's
-/// distance to the collision skin grew by more than [`VISUAL_BAND`].
+/// Visuals follow physics: sampled every 0.1 s through the wall and the pole,
+/// no exterior visual vertex's distance to the collision skin grows by more
+/// than [`VISUAL_BAND`] (wheels, which ride their tyres, aside; a shattered
+/// pane or lens is dropped as the renderer drops it).
 ///
-/// FAILS (2026-11-05): exterior visual vertices end up 200 mm (sedan wall), 206 mm
-/// (sedan pole), 271 mm (sedan1 wall), 153 mm (sedan1 pole) further from the
-/// collision skin than at rest. The worst are bound to a triangle 0.22–0.37 m away
-/// along its normal (bind coordinate h): a 30° rotation of that triangle swings the
-/// vertex 15–18 cm. Bonnet, deck, lid and rear body vertices. Content (the visual's
-/// binding, `authoring::skin`): bind to the nearest skin triangle (|h| within the band).
+/// The bind geometry bounds it: an exterior vertex rides the skin triangle
+/// under it at |h| ≤ `SKIN_BAND` (2 cm), and the crease envelope adds at most
+/// `ENVELOPE_MAX` (1 cm), so 3 cm for a vertex over its triangle; the 2 cm
+/// asked is the contact band (a **Choice**: beyond it what is drawn is not
+/// where contact happens).
+///
+/// Passes (2026-11-05, flexbody rebinding): 10.7 / 19.2 mm (sedan wall /
+/// pole), 13.2 / 10.3 mm (sedan1). It was 200 / 206 and 271 / 153 mm with
+/// vertices bound to triangles 0.22–0.37 m away along their normal.
 #[test]
-#[ignore]
 fn visual_skin_follows_the_collision_skin() {
     let mut ok = true;
     for car in CARS {

@@ -470,29 +470,36 @@ pub fn interior(group: &dyn Fn(&str) -> Option<u16>, cabin: Cabin) -> Vec<Piece>
         }
     };
     let mut out = Vec::new();
-    let mut add = |name: &str, g: &str, rigid: bool, build: &dyn Fn(&mut Mesh)| {
-        let Some(gi) = group(g) else { return };
+    // `g`: the piece's group, then the groups it spans to (not for rigid
+    // pieces).
+    let mut add = |name: &str, g: &[&str], rigid: bool, build: &dyn Fn(&mut Mesh)| {
+        let Some(gi) = group(g[0]) else { return };
         let mut m = Mesh::default();
         build(&mut m);
+        let more = |k: usize| g.get(k).and_then(|n| group(n)).unwrap_or(u16::MAX);
         out.push(Piece {
             name: name.into(),
             mesh: m,
             bind: if rigid {
                 Bind::GroupRigid(gi)
             } else {
-                Bind::Group(gi)
+                Bind::Groups([gi, more(1), more(2)])
             },
         });
     };
-    add("seat_fl", "seat_fl", true, &|m| front_seat(m, 0.38, 2.62));
-    add("seat_fr", "seat_fr", true, &|m| front_seat(m, -0.38, 2.62));
-    add("seat_rear", "seat_rear", true, &|m| rear_bench(m, 1.80));
-    add("dash", "dash", false, &|m| {
+    add("seat_fl", &["seat_fl"], true, &|m| {
+        front_seat(m, 0.38, 2.62)
+    });
+    add("seat_fr", &["seat_fr"], true, &|m| {
+        front_seat(m, -0.38, 2.62)
+    });
+    add("seat_rear", &["seat_rear"], true, &|m| rear_bench(m, 1.80));
+    add("dash", &["dash", "cowl"], false, &|m| {
         shifted(&|m| dashboard(m, 0.38), m)
     });
-    add("console", "tunnel", false, &console);
+    add("console", &["tunnel", "dash", "floor_x1"], false, &console);
     let hub = cabin.column_top + Vec3::new(0.0, 0.02, -0.03);
-    add("steering", "column", true, &|m| {
+    add("steering", &["column"], true, &|m| {
         steering(m, hub, Vec3::new(0.0, 0.42, -0.91).normalize())
     });
     out

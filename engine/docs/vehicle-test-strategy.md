@@ -142,7 +142,7 @@ The ledger (`ExplicitBeamsWorld::enable_ledger`) runs in every scene. The checke
 | Lid / rear body (head-on) | 172/18 mm; 9.9/70 mm | 253/126 mm; 29.6/173 mm | FAIL, ignored |
 | Ripple from 0.5 s, worst part | bootlid 17.9 mm, bonnet 14.7, body 7.4 | bumper_r 15.0, bonnet 7.4, bootlid 6.4 | FAIL, ignored |
 | Head-on contacts faster than r/h | 15 of 300,040 (59.9 m/s) | 15 of 197,234 (59.6 m/s) | FAIL, ignored |
-| Visual drift from the collision skin (wall / pole) | 200 / 206 mm | 271 / 153 mm | FAIL, ignored |
+| Visual drift from the collision skin (wall / pole), sampled every 0.1 s | 10.7 / 19.2 mm | 13.2 / 10.3 mm | **pass** (live) |
 | Pole: far side elastic, far doors closed | 40 past, 22 broken; hardware holds | 89 past, 10 broken; door_f_r.latch_secondary and door_r_r.hinge_upper break | FAIL, ignored |
 | Panels' lowest mode ≥ 48 Hz | bootlid 5.4, bonnet 6.7, doors 31–37, fender 31 Hz | bootlid 2.5, bonnet 4.8, doors 17–27, fender 91 Hz | FAIL, ignored |
 | Body sheet edges yield in tension at ≥ (√3/4)σ_y·t·L | 1029 of 1267 below (median 0.06) | 1132 of 1651 below (median 0.155) | FAIL, ignored. Fixed upstream at 1444ea75 (`rubble_tension_yield`); un-ignore after merging. |
@@ -181,10 +181,16 @@ So the floppy rear panels yield where they stretch.
 - In a 56 km/h head-on, 5–8 per 100,000 node samples near the other car exceed that, up to 60 m/s.
 - The lossless fix is a swept crossing test for fast nodes (solver).
 
-**5. Visual drift.**
-- The worst exterior visual vertices are bound to skin triangles 0.22–0.37 m away along the normal.
+**5. Visual drift.** Fixed (feat/showcase-car-visual).
+- The worst exterior visual vertices were bound to skin triangles 0.22–0.37 m away along the normal.
 - When such a triangle rotates, the vertex swings 15–18 cm off the collision skin.
-- Fix: bind each vertex to its nearest skin triangle.
+- Root cause: each vertex could bind only to its voted part's single-part skin triangles. Every triangle across a shut line, and every one-row part (no single-part triangle), was excluded. A vertex there took the part's nearest remaining triangle, often another sheet of the same part.
+- Fix (`authoring::skin`):
+  - A vertex within the contact band of the skin rides the skin triangle under it.
+  - Off the skin, a vertex rides a frame of three of its own part's nodes, as a BeamNG flexbody does. The frame is the part's nearest well-shaped, compact one, with at most one node across the part's border.
+  - Structure-group pieces (dash, console, aprons) ride their groups' nodes.
+  - The build fails if a vertex lies beyond `BIND_MAX` (0.3 m), or `GROUP_BIND_MAX` (0.45 m) on structure groups.
+- Riding only the part's own nodes at shut lines was measured at 98–119 mm of drift. The panels' drawn edges lie up to 0.15 m past their last node row. About 31 % of body vertices ride a shut-line triangle. In the crashes, up to 215 of about 1700 such samples stretch past 1.5×, and the renderer tears them at 2.5×. The physics' own collision triangles stretch the same way.
 
 **6. Per-node air drag.**
 - The drag is 0.05·|v|·v on every node, whatever its mass: 112 m/s² on a 0.1 kg node at 15 m/s.

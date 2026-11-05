@@ -724,17 +724,15 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             } else {
                 name.to_string()
             };
-            // Tempered glass (side windows, backlight) is one rigid pane: it
-            // shatters whole when its physics pane breaks (skin.rs's damage
-            // units); the laminated windscreen follows its frame and cracks.
+            // Glass rides its frame's nodes like the body (a BeamNG
+            // flexbody): tempered panes shatter whole when their physics pane
+            // breaks (skin.rs's damage units, at 0.17 % strain, so they never
+            // visibly bend); the laminated windscreen cracks. A rigid pane on
+            // one triangle swung off its frame when that triangle turned.
             pieces.push(Piece {
                 name: nm,
                 mesh: g,
-                bind: if name == "windscreen" {
-                    Bind::Vote
-                } else {
-                    Bind::Rigid
-                },
+                bind: Bind::Vote,
             });
         }
     }
@@ -990,7 +988,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         pieces.push(Piece {
             name: format!("headlight_{}", if sx > 0.0 { "l" } else { "r" }),
             mesh: fixtures::lamp(m, &f, &spec),
-            bind: Bind::Rigid,
+            bind: Bind::Vote,
         });
     }
     // Tail lights.
@@ -1020,7 +1018,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         pieces.push(Piece {
             name: format!("taillight_{}", if sx > 0.0 { "l" } else { "r" }),
             mesh: fixtures::lamp(m, &f, &spec),
-            bind: Bind::Rigid,
+            bind: Bind::Vote,
         });
     }
     let lb = metric(m, &trim::field(m, lightbar));
@@ -1043,7 +1041,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
     pieces.push(Piece {
         name: "lightbar".into(),
         mesh: fixtures::lamp(m, &lb, &spec),
-        bind: Bind::Rigid,
+        bind: Bind::Vote,
     });
     // Fog lamps: a slim clear lens with an LED line, in the bumper's corners.
     let ff = metric(m, &trim::field(m, foglamp));
@@ -1070,7 +1068,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         pieces.push(Piece {
             name: format!("foglamp_{}", if sx > 0.0 { "l" } else { "r" }),
             mesh: fixtures::lamp(m, &f, &spec),
-            bind: Bind::Rigid,
+            bind: Bind::Vote,
         });
     }
     // Grille and lower intake.
@@ -1200,7 +1198,9 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             pieces.push(Piece {
                 name: "handle".into(),
                 mesh: fixtures::handle(&path, &nrm, mat::CHROME),
-                bind: Bind::Rigid,
+                // On its door's nodes like the skin (a BeamNG flexbody): a
+                // rigid handle on one triangle stood off the crushed door.
+                bind: Bind::Vote,
             });
         }
     }
@@ -1625,7 +1625,11 @@ pub fn inner_panel(m: &Mesh, fs: &[f32], level: f32, depth: f32, lattice: bool) 
         if n < 2 {
             continue;
         }
-        let d1 = if lattice { (depth - 0.012).max(0.009) } else { 0.009 };
+        let d1 = if lattice {
+            (depth - 0.012).max(0.009)
+        } else {
+            0.009
+        };
         let mut top = Vec::with_capacity(n);
         let mut bot = Vec::with_capacity(n);
         for k in 0..n {

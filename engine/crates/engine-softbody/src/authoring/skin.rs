@@ -12,11 +12,14 @@
 //! ```
 //!
 //! with (α, β, h) and (nₜ, n_b, n_n) fixed at rest. A piece binds to one
-//! physics part: the part its vertices lie on (a majority vote of the nearest
-//! skin triangles), then each vertex to that part's nearest triangle. So a
-//! door's skin, its rolled edges and its handle ride the door's nodes and leave
-//! with it; nothing stretches across a shut line. Nothing here depends on the
-//! skeleton's node spacing: the same mesh rides a coarse or a dense skeleton.
+//! physics part: the part its vertices lie on (an area-weighted vote of the
+//! skin under them). A vertex within the contact band of the skin rides the
+//! skin triangle under it (the physics surface, a shut line's triangles
+//! included: [`SKIN_BAND`]); off it, a frame of three of its part's nodes,
+//! BeamNG's flexbody binding ([`BIND_MAX`] bounds its distance, or the build
+//! fails). So a door's skin, its rolled edges and its handle ride the door's
+//! nodes and leave with it. Nothing here depends on the skeleton's node
+//! spacing: the same mesh rides a coarse or a dense skeleton.
 //! Wheels ride their tyre's fan triangles (they turn); calipers the axle and a
 //! knuckle node (they do not); seats and the dashboard their frames.
 //! `showcase-car-render.mjs` evaluates this on the GPU from the explicit
@@ -388,6 +391,398 @@ impl Binder {
     }
 }
 
+/// A visual vertex within this of the skin (m) is on the physics surface:
+/// it rides the skin triangle under it, whatever its parts, so it stays on
+/// the collision skin however the panels move (the fine skin triangles span
+/// the collision skin's nodes). The contact band: what is drawn there is
+/// where contact happens. Off the skin (shut faces, returns, inner
+/// stampings, trim) a vertex rides its own part's nodes, BeamNG's flexbody
+/// binding: three nodes (centre, VX, VY) and an offset along their normal.
+/// BeamNG's optional fourth (VZ) node is not used: on the skin the offset is
+/// within the band, and off it the frame is the part's own nodes.
+pub const SKIN_BAND: f32 = crate::explicit_beams::DEFAULT_COLLISION_RANGE;
+/// Score penalty (m) of a node frame that is not one of the skin triangles.
+/// A skin triangle is the physics surface itself: a vertex on it stays on
+/// it however the panel buckles, and neighbouring vertices stay continuous
+/// across its edges. Any other frame of skin nodes is a chord across the
+/// surface, off it as soon as the panel folds. So a node frame is used only
+/// where the part has no skin triangle within this (a one-row part, a
+/// return past the part's last skin triangle). **Choice**: 3 cm.
+pub const NODE_FRAME: f32 = 0.03;
+/// Score penalty (m) per frame node of another part. A part's frame may take
+/// one node across its border (a node sharing a skin triangle with the
+/// part: BeamNG flexbodies likewise list their mount's group) only where its
+/// own nodes cannot frame the vertex: a one-row part (a bumper's face, a strip
+/// between the boot and the bumper) has no triangle of its own. Such a
+/// frame stretches when the parts separate, so it must be much nearer.
+/// **Choice**: 5 cm.
+const FOREIGN: f32 = 0.05;
+/// The farthest any visual vertex of the body (wheels and hubs, which ride
+/// their rigid tyre and hub, aside) may lie from its binding frame (m): the
+/// build fails on any farther, naming the piece, instead of binding it
+/// somewhere arbitrary (Rigs of Rods' silent fallback to node 0). A rigid
+/// piece's centroid is held to it.
+/// A vertex at distance d from its frame moves up to d·θ when the frame
+/// turns by θ relative to the panel around the vertex. On the skin d ≤
+/// [`SKIN_BAND`]; off it, the deepest inner structure the car's pieces carry
+/// over their own part's nodes. **Choice**: 0.3 m, the depth of a door card
+/// or a boot floor inside its panel's nodes.
+pub const BIND_MAX: f32 = 0.3;
+/// [`BIND_MAX`] for the cabin's and bay's pieces on structure groups (dash,
+/// console, seats, aprons): their nodes are the structure's members, and
+/// trim stands farther off them than a panel's stampings off the panel.
+/// **Choice**: 0.45 m, over the dash-top screen 0.40 m above the dash beam's
+/// nodes and the rear bench's centroid 0.36 m from its seat frame (both
+/// wait on nodes there in the skeleton).
+pub const GROUP_BIND_MAX: f32 = 0.45;
+/// Node frames are built from a part's this many nearest nodes.
+const FRAME_NODES: usize = 10;
+/// ... within this radius (m): a frame never spans further.
+const FRAME_REACH: f32 = 0.8;
+/// A node frame's least shape quality, 2·area / (longest edge)² (a right
+/// isosceles triangle 0.5, equilateral 0.87): no slivers, whose normal is
+/// ill-defined. BeamNG's flexbody documentation likewise picks VX and VY
+/// near right angles to the centre node.
+const FRAME_QUALITY: f32 = 0.2;
+/// Score penalty (m) for a frame whose plane is perpendicular to the
+/// vertex's surface (scaled by 1 − |cos|): of two frames equally near, the
+/// one lying along the surface. **Choice**: 1 cm.
+const FRAME_TILT: f32 = 0.01;
+/// Score per metre of a frame's farthest node from the vertex: of two frames
+/// equally near, the more compact (its affine motion is the local one).
+/// **Choice**: 0.05 (a frame whose nodes are 20 cm farther must be 1 cm
+/// nearer).
+const FRAME_SPREAD: f32 = 0.05;
+
+/// Nodes on a coarse grid, for k-nearest queries.
+struct NodeGrid {
+    ids: Vec<u32>,
+    cell: f32,
+    grid: HashMap<(i32, i32, i32), Vec<u32>>,
+}
+
+impl NodeGrid {
+    fn new(ids: Vec<u32>, pos: &[Vec3]) -> Self {
+        let cell = 0.15;
+        let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+        for &i in &ids {
+            grid.entry(key(pos[i as usize], cell)).or_default().push(i);
+        }
+        Self { ids, cell, grid }
+    }
+
+    /// The nearest [`FRAME_NODES`] nodes within [`FRAME_REACH`], nearest first.
+    fn nearest(&self, pos: &[Vec3], p: Vec3) -> Vec<u32> {
+        let k = key(p, self.cell);
+        let mut found: Vec<(f32, u32)> = Vec::new();
+        let rmax = (FRAME_REACH / self.cell).ceil() as i32 + 1;
+        for r in 0..=rmax {
+            // The shell at Chebyshev radius r.
+            for dx in -r..=r {
+                for dy in -r..=r {
+                    for dz in -r..=r {
+                        if dx.abs().max(dy.abs()).max(dz.abs()) != r {
+                            continue;
+                        }
+                        if let Some(list) = self.grid.get(&(k.0 + dx, k.1 + dy, k.2 + dz)) {
+                            for &i in list {
+                                let d = pos[i as usize].distance(p);
+                                if d <= FRAME_REACH {
+                                    found.push((d, i));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Every node within the shell's inner distance is found.
+            let lo = Vec3::new((k.0 - r) as f32, (k.1 - r) as f32, (k.2 - r) as f32) * self.cell;
+            let hi = lo + Vec3::splat((2 * r + 1) as f32 * self.cell);
+            let reach = (p - lo).min(hi - p).min_element();
+            if found.len() >= FRAME_NODES {
+                found.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if found[FRAME_NODES - 1].0 <= reach {
+                    break;
+                }
+            }
+        }
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found.truncate(FRAME_NODES);
+        found.into_iter().map(|(_, i)| i).collect()
+    }
+}
+
+/// Binding of one vertex: triangle, (α, β, h), its normal in the frame, and
+/// its distance from the triangle.
+type Bound = ([u32; 3], [f32; 3], [f32; 3], f32);
+
+/// BeamNG-style flexbody binding, per physics part: a vertex rides three of
+/// its own part's nodes (at most one across the part's border), the frame
+/// nearest it: the part's skin triangle under it where there is one, else
+/// the nearest well-shaped, compact frame of its nodes.
+struct PartBinders {
+    /// Per part, its nodes and the nodes across its border.
+    frames: HashMap<u16, NodeGrid>,
+    /// Per part, its single-part skin triangles, and those with two of its
+    /// nodes (the skin frame candidates).
+    tris: HashMap<u16, Binder>,
+    border: HashMap<u16, Binder>,
+    /// Every skin triangle (sorted node ids), and a binder over them, to
+    /// find the part whose skin is under a point.
+    skin_set: std::collections::HashSet<[u32; 3]>,
+    skin: Binder,
+    part_of: Vec<u16>,
+    pos: Vec<Vec3>,
+}
+
+impl PartBinders {
+    fn new(
+        sk: &super::skeleton::Skeleton,
+        by_part: &HashMap<u16, Vec<[u32; 3]>>,
+        pos: &[Vec3],
+    ) -> Self {
+        let part_of: Vec<u16> = (0..pos.len())
+            .map(|i| sk.nodes.get(i).map(|n| n.part).unwrap_or(u16::MAX))
+            .collect();
+        let mut ids: HashMap<u16, std::collections::BTreeSet<u32>> = HashMap::new();
+        for (i, nd) in sk.nodes.iter().enumerate() {
+            ids.entry(nd.part).or_default().insert(i as u32);
+        }
+        // Across the border: nodes sharing a skin triangle with the part.
+        for t in &sk.skin {
+            for &a in t {
+                let pa = part_of[a as usize];
+                for &b in t {
+                    if part_of[b as usize] != pa && pa != u16::MAX {
+                        ids.entry(pa).or_default().insert(b);
+                    }
+                }
+            }
+        }
+        let sorted = |t: [u32; 3]| {
+            let mut s = t;
+            s.sort_unstable();
+            s
+        };
+        Self {
+            frames: ids
+                .into_iter()
+                .map(|(p, v)| (p, NodeGrid::new(v.into_iter().collect(), pos)))
+                .collect(),
+            tris: by_part
+                .iter()
+                .map(|(&p, t)| (p, Binder::new(t.clone(), pos, 0.15)))
+                .collect(),
+            border: {
+                let mut m: HashMap<u16, Vec<[u32; 3]>> = HashMap::new();
+                for t in &sk.skin {
+                    let ps = t.map(|i| part_of[i as usize]);
+                    for (k, &p) in ps.iter().enumerate() {
+                        let own = ps.iter().filter(|&&q| q == p).count();
+                        if own == 2 && ps[..k].iter().all(|&q| q != p) && p != u16::MAX {
+                            m.entry(p).or_default().push(*t);
+                        }
+                    }
+                }
+                m.into_iter()
+                    .map(|(p, t)| (p, Binder::new(t, pos, 0.15)))
+                    .collect()
+            },
+            skin_set: sk.skin.iter().map(|&t| sorted(t)).collect(),
+            skin: Binder::new(sk.skin.clone(), pos, 0.15),
+            part_of,
+            pos: pos.to_vec(),
+        }
+    }
+
+    fn has(&self, part: u16) -> bool {
+        self.frames.get(&part).is_some_and(|g| {
+            g.ids
+                .iter()
+                .filter(|&&i| self.part_of[i as usize] == part)
+                .count()
+                >= 2
+        })
+    }
+
+    /// The frame score of triangle `t` for `p` (lower is better), and its
+    /// distance from `p`; `None` for a sliver or a frame with fewer than two
+    /// of the part's own nodes.
+    fn score(&self, part: u16, t: [u32; 3], p: Vec3, normal: Vec3) -> Option<(f32, f32)> {
+        let own = t
+            .iter()
+            .filter(|&&i| self.part_of[i as usize] == part)
+            .count();
+        if own < 2 {
+            return None;
+        }
+        let (score, d) = frame_score(&self.pos, t, p, normal)?;
+        let chord = if self.is_skin(t) { 0.0 } else { NODE_FRAME };
+        Some((score + FOREIGN * (3 - own) as f32 + chord, d))
+    }
+
+    /// `p` on part `part`: the best-scoring frame of the part's nearest nodes
+    /// and its nearest skin triangle.
+    fn bind(&self, part: u16, p: Vec3, normal: Vec3) -> Option<Bound> {
+        let mut cands: Vec<[u32; 3]> = Vec::new();
+        for set in [&self.tris, &self.border] {
+            if let Some(b) = set.get(&part).and_then(|b| b.bind_d(p, normal)) {
+                cands.push(b.0);
+            }
+        }
+        if let Some(b) = self.skin.bind_d(p, normal) {
+            cands.push(b.0);
+        }
+        if let Some(g) = self.frames.get(&part) {
+            triples(&g.nearest(&self.pos, p), &mut cands);
+        }
+        // Skin triangles keep their (outward) winding; other frames are
+        // wound so their normal faces the vertex's.
+        best_frame(
+            &self.pos,
+            &cands,
+            p,
+            normal,
+            |t| self.score(part, t, p, normal),
+            |t| self.is_skin(t),
+        )
+    }
+
+    fn is_skin(&self, t: [u32; 3]) -> bool {
+        let mut s = t;
+        s.sort_unstable();
+        self.skin_set.contains(&s)
+    }
+
+    fn by_weight(&self, t: [u32; 3], c: [f32; 3]) -> Vec<(u16, f32)> {
+        let w = barycentric_clamped(c[0], c[1]);
+        let mut by: Vec<(u16, f32)> = Vec::new();
+        for k in 0..3 {
+            let pt = self.part_of[t[k] as usize];
+            match by.iter_mut().find(|e| e.0 == pt) {
+                Some(e) => e.1 += w[k],
+                None => by.push((pt, w[k])),
+            }
+        }
+        by.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        by
+    }
+
+    /// The part whose skin `p` lies on, with its binding: the nearest skin
+    /// triangle (the physics surface, a shut line's mixed triangles
+    /// included), and of its nodes' parts the one with the most barycentric
+    /// weight at the point nearest `p` (ties: the lower part id).
+    fn nearest(&self, p: Vec3, normal: Vec3) -> Option<(u16, Bound)> {
+        let (t, c, _, _) = self.skin.bind_d(p, normal)?;
+        let by = self.by_weight(t, c);
+        by.into_iter()
+            .filter(|e| e.0 != u16::MAX)
+            .find_map(|(pt, _)| self.bind(pt, p, normal).map(|b| (pt, b)))
+    }
+}
+
+/// A frame's base score for `p` (lower is better: its distance, then its
+/// tilt and spread) and its distance from `p`; `None` for a sliver, whose
+/// normal is ill-defined.
+fn frame_score(pos: &[Vec3], t: [u32; 3], p: Vec3, normal: Vec3) -> Option<(f32, f32)> {
+    let (p0, p1, p2) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+    let cr = (p1 - p0).cross(p2 - p0);
+    let longest = (p1 - p0)
+        .length_squared()
+        .max((p2 - p0).length_squared())
+        .max((p2 - p1).length_squared());
+    if longest <= 0.0 || cr.length() / longest < FRAME_QUALITY {
+        return None;
+    }
+    let d = point_triangle(p, p0, p1, p2);
+    let tilt = 1.0 - cr.normalize().dot(normal).abs();
+    let spread = p.distance(p0).max(p.distance(p1)).max(p.distance(p2));
+    Some((d + FRAME_TILT * tilt + FRAME_SPREAD * spread, d))
+}
+
+/// Every triple of `near`, as candidate frames.
+fn triples(near: &[u32], out: &mut Vec<[u32; 3]>) {
+    for a in 0..near.len() {
+        for b in a + 1..near.len() {
+            for c in b + 1..near.len() {
+                out.push([near[a], near[b], near[c]]);
+            }
+        }
+    }
+}
+
+/// The best-scoring of `cands` for `p`, wound so its normal faces `normal`
+/// unless `keep` (an outward-wound skin triangle), with its coordinates and
+/// distance.
+fn best_frame(
+    pos: &[Vec3],
+    cands: &[[u32; 3]],
+    p: Vec3,
+    normal: Vec3,
+    score: impl Fn([u32; 3]) -> Option<(f32, f32)>,
+    keep: impl Fn([u32; 3]) -> bool,
+) -> Option<Bound> {
+    let mut best: Option<(f32, [u32; 3], f32)> = None;
+    for &t in cands {
+        if let Some((s, d)) = score(t) {
+            if best.is_none_or(|b| s < b.0) {
+                best = Some((s, t, d));
+            }
+        }
+    }
+    let (_, t, d) = best?;
+    let (p0, p1, p2) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+    let t = if (p1 - p0).cross(p2 - p0).dot(normal) < 0.0 && !keep(t) {
+        [t[0], t[2], t[1]]
+    } else {
+        t
+    };
+    let (c, nl) = frame_coords(pos, t, p, normal);
+    Some((t, c, nl, d))
+}
+
+/// BeamNG-style flexbody binding on a structure group (the bay's aprons and
+/// bulkhead, the dash and console): a vertex rides the best frame of the
+/// group's nearest nodes or of its member triangles. The group's member
+/// triangles alone (the old binding) can lie 0.3–0.5 m from a wall built
+/// beside them, which then swings when they turn.
+struct GroupFrames {
+    nodes: NodeGrid,
+    tris: Binder,
+}
+
+impl GroupFrames {
+    fn new(nodes: Vec<u32>, tris: Vec<[u32; 3]>, pos: &[Vec3]) -> Self {
+        Self {
+            nodes: NodeGrid::new(nodes, pos),
+            tris: Binder::new(tris, pos, 0.25),
+        }
+    }
+
+    fn bind(&self, pos: &[Vec3], p: Vec3, normal: Vec3) -> Option<Bound> {
+        let mut cands: Vec<[u32; 3]> = Vec::new();
+        if let Some(b) = self.tris.bind_d(p, normal) {
+            cands.push(b.0);
+        }
+        triples(&self.nodes.nearest(pos, p), &mut cands);
+        best_frame(
+            pos,
+            &cands,
+            p,
+            normal,
+            |t| frame_score(pos, t, p, normal),
+            |_| false,
+        )
+    }
+}
+
+/// Barycentric weights (1 − α − β, α, β), clamped into the triangle.
+fn barycentric_clamped(a: f32, b: f32) -> [f32; 3] {
+    let w = [(1.0 - a - b).max(0.0), a.max(0.0), b.max(0.0)];
+    let s = (w[0] + w[1] + w[2]).max(1e-9);
+    [w[0] / s, w[1] / s, w[2] / s]
+}
+
 fn key(p: Vec3, cell: f32) -> (i32, i32, i32) {
     (
         (p.x / cell).floor() as i32,
@@ -492,7 +887,28 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         &node_pos,
         0.15,
     );
-    let mut binders: HashMap<u16, Binder> = HashMap::new();
+    let pb = PartBinders::new(sk, &by_part, &node_pos);
+    // The exterior: a vertex within the contact band of the skin rides the
+    // skin triangle under it, whatever its parts: that is the physics
+    // surface there (a shut line's triangles included, which the physics
+    // breaks and the renderer tears past `TEAR_STRETCH`). The part's own
+    // nodes do not reach there: a panel's drawn edge lies up to 0.15 m past
+    // its last node row, and riding them leaves it 0.1 m off the collision
+    // skin in a crash (measured, wall and pole).
+    let on_skin = |p: Vec3, n: Vec3| pb.skin.bind_d(p, n).filter(|b| b.3 <= SKIN_BAND);
+    // An inner stamping rides what the outer skin over it rides: the skin
+    // triangle under its outer point (its hem joins the outer's edge); else,
+    // where it lies on the skin itself (a return at the shut line), that.
+    let on_skin_of = |inset: f32, p: Vec3, n: Vec3| {
+        if inset > 0.0 {
+            on_skin(p - n * inset, -n).or_else(|| on_skin(p, n))
+        } else {
+            on_skin(p, n)
+        }
+    };
+    // The farthest vertex of a piece from its binding: (distance, where, part).
+    let far_of =
+        |f: (f32, Vec3, u16), d: f32, p: Vec3, pt: u16| if d > f.0 { (d, p, pt) } else { f };
     let groups: Vec<String> = {
         let mut g: Vec<String> = built.bind_tris.keys().cloned().collect();
         g.sort();
@@ -516,20 +932,35 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     // 8 cm farther than another's) is cut there, along the smooth zero line of
     // that distance difference (marching triangles), and the far side rides
     // the other part: it parts along a clean line instead of stretching.
+    // The part a piece lies on: an area-weighted vote over its triangles (a
+    // dense edge roll or shut face must not outvote the panel), each
+    // triangle's centroid on the part whose skin is under it.
     let vote = |m: &Mesh| -> Option<u16> {
-        let mut votes: HashMap<u16, usize> = HashMap::new();
-        let step = (m.len() / 600).max(1);
-        for k in (0..m.len()).step_by(step) {
-            if let Some((t, _, _)) = pure.bind(m.pos[k], m.nrm[k]) {
-                *votes.entry(sk.nodes[t[0] as usize].part).or_default() += 1;
+        let mut votes: HashMap<u16, f32> = HashMap::new();
+        let tris = m.idx.len() / 3;
+        let step = (tris / 1500).max(1);
+        for t in (0..tris).step_by(step) {
+            let [a, b, c] = [0, 1, 2].map(|k| m.idx[3 * t + k] as usize);
+            let (pa, pb_, pc) = (m.pos[a], m.pos[b], m.pos[c]);
+            let area = 0.5 * (pb_ - pa).cross(pc - pa).length();
+            let n = (m.nrm[a] + m.nrm[b] + m.nrm[c]).normalize_or_zero();
+            if let Some((pt, _)) = pb.nearest((pa + pb_ + pc) / 3.0, n) {
+                *votes.entry(pt).or_default() += area;
             }
         }
         votes
             .into_iter()
-            .filter(|(p, _)| by_part.contains_key(p))
-            .max_by_key(|&(p, n)| (n, std::cmp::Reverse(p)))
+            .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
             .map(|(p, _)| p)
     };
+    // An inner stamping `X_inner` is its panel `X`'s (one flexbody group):
+    // it takes the panel's part. A vote of its own runs along the panel's
+    // edges, over the shut line, and at low resolution elects the body.
+    let panel_part: HashMap<String, u16> = pieces
+        .iter()
+        .filter(|p| pieces.iter().any(|q| q.name == format!("{}_inner", p.name)))
+        .filter_map(|p| Some((format!("{}_inner", p.name), vote(&p.mesh)?)))
+        .collect();
     let mut queue: Vec<Piece> = pieces;
     let mut pieces: Vec<Piece> = Vec::new();
     let mut rounds = 0;
@@ -542,7 +973,11 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 probe.pos[k] -= probe.nrm[k] * (mm as f32 * 1e-3);
                 probe.nrm[k] = -probe.nrm[k];
             }
-            if let Some(pt) = vote(&probe) {
+            if let Some(pt) = panel_part
+                .get(&piece.name)
+                .copied()
+                .or_else(|| vote(&probe))
+            {
                 pieces.push(Piece {
                     bind: Bind::PartInset(pt, mm),
                     ..piece
@@ -558,12 +993,11 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             pieces.push(piece);
             continue;
         };
-        let own = Binder::new(by_part[&pt].clone(), &node_pos, 0.15);
         let g: Vec<f32> = (0..piece.mesh.len())
             .map(|k| {
                 let (p, n) = (piece.mesh.pos[k], piece.mesh.nrm[k]);
-                match (own.bind_d(p, n), pure.bind_d(p, n)) {
-                    (Some(a), Some(z)) if sk.nodes[z.0[0] as usize].part != pt => a.3 - z.3 - 0.08,
+                match (pb.bind(pt, p, n), pb.nearest(p, n)) {
+                    (Some(a), Some((zp, z))) if zp != pt => a.3 - z.3 - 0.08,
                     _ => -1.0,
                 }
             })
@@ -593,6 +1027,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             });
         }
     }
+    let mut unbound: Vec<String> = Vec::new();
     for piece in &pieces {
         let m = &piece.mesh;
         if m.is_empty() {
@@ -643,56 +1078,73 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                     });
                 k.map(|k| Binder::new(vec![[a0, a1, k]], &node_pos, 0.5))
             }
-            Bind::Group(g) => groups
-                .get(g as usize)
-                .and_then(|n| built.bind_tris.get(n))
-                .map(|t| Binder::new(t.clone(), &node_pos, 0.25)),
+            _ => None,
+        };
+        // A structure group's piece rides its group's nodes.
+        let group_frames: Option<GroupFrames> = match piece.bind {
+            Bind::Group(g) | Bind::Groups([g, ..]) => {
+                let gs = match piece.bind {
+                    Bind::Groups(gs) => gs,
+                    _ => [g, u16::MAX, u16::MAX],
+                };
+                let mut tris: Vec<[u32; 3]> = Vec::new();
+                let mut nodes: Vec<u32> = Vec::new();
+                for g in gs.into_iter().filter(|&g| g != u16::MAX) {
+                    let Some(n) = groups.get(g as usize) else {
+                        continue;
+                    };
+                    tris.extend(built.bind_tris.get(n).into_iter().flatten().copied());
+                    nodes.extend(built.groups.get(n).into_iter().flatten().copied());
+                }
+                nodes.extend(tris.iter().flatten().copied());
+                nodes.sort_unstable();
+                nodes.dedup();
+                (!nodes.is_empty()).then(|| GroupFrames::new(nodes, tris, &node_pos))
+            }
             _ => None,
         };
         // A vote for the part.
         let group_rigid = match piece.bind {
-            Bind::GroupRigid(g) => groups
-                .get(g as usize)
-                .and_then(|n| built.bind_tris.get(n))
-                .map(|t| Binder::new(t.clone(), &node_pos, 0.25)),
+            Bind::GroupRigid(g) => groups.get(g as usize).and_then(|n| {
+                let tris = built.bind_tris.get(n)?.clone();
+                let mut nodes: Vec<u32> = built.groups.get(n).cloned().unwrap_or_default();
+                nodes.extend(tris.iter().flatten().copied());
+                nodes.sort_unstable();
+                nodes.dedup();
+                Some(GroupFrames::new(nodes, tris, &node_pos))
+            }),
             _ => None,
         };
         let rigid = piece.bind == Bind::Rigid || group_rigid.is_some();
         // An inner stamping binds where the outer panel over it binds: each
         // vertex picks its triangle at the outer skin (moved back out by its
         // depth), then is placed on that triangle at its own depth.
-        let inset = if let Bind::PartInset(_, mm) = piece.bind { mm as f32 * 1e-3 } else { 0.0 };
+        let inset = if let Bind::PartInset(_, mm) = piece.bind {
+            mm as f32 * 1e-3
+        } else {
+            0.0
+        };
         let part: Option<u16> = if let Bind::Part(p) | Bind::PartInset(p, _) = piece.bind {
             Some(p)
         } else if piece.bind == Bind::Vote || rigid {
-            let mut votes: HashMap<u16, usize> = HashMap::new();
-            let step = (m.len() / 600).max(1);
-            for k in (0..m.len()).step_by(step) {
-                if let Some((t, _, _)) = pure.bind(m.pos[k], m.nrm[k]) {
-                    *votes.entry(sk.nodes[t[0] as usize].part).or_default() += 1;
-                }
-            }
-            votes
-                .into_iter()
-                .filter(|(p, _)| by_part.contains_key(p))
-                .max_by_key(|&(p, n)| (n, std::cmp::Reverse(p)))
-                .map(|(p, _)| p)
+            vote(m)
         } else {
             None
         };
         if rigid {
             // One triangle (the voted part's nearest to the centroid) carries
             // the whole part rigidly.
+            // The group's best frame at the piece's centroid.
             let b = group_rigid
                 .as_ref()
-                .and_then(|g| g.bind(centroid, Vec3::Y))
+                .and_then(|g| g.bind(&node_pos, centroid, Vec3::Y))
+                .map(|b| (b.0, b.1, b.2))
                 .or_else(|| {
-                    part.and_then(|pt| {
-                        binders
-                            .entry(pt)
-                            .or_insert_with(|| Binder::new(by_part[&pt].clone(), &node_pos, 0.15))
-                            .bind(centroid, Vec3::Y)
-                    })
+                    // The part's best frame at the piece's centroid (compact,
+                    // nearest: a small part's mount).
+                    let n = m.nrm.iter().copied().sum::<Vec3>().normalize_or_zero();
+                    part.and_then(|pt| pb.bind(pt, centroid, n))
+                        .map(|b| (b.0, b.1, b.2))
                 })
                 .or_else(|| pure.bind(centroid, Vec3::Y));
             let Some((t, _, _)) = b else {
@@ -706,6 +1158,20 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 node_pos[t[1] as usize],
                 node_pos[t[2] as usize],
             );
+            // A rigid piece moves with its frame: its centroid must be
+            // within reach of it.
+            let d = point_triangle(centroid, p0, p1, p2);
+            if d > if group_rigid.is_some() {
+                GROUP_BIND_MAX
+            } else {
+                BIND_MAX
+            } {
+                unbound.push(format!(
+                    "{} (rigid, centroid {:.0} mm from its frame)",
+                    piece.name,
+                    d * 1e3
+                ));
+            }
             let tt = (p1 - p0).normalize();
             let nn = (p1 - p0).cross(p2 - p0).normalize();
             let bb = nn.cross(tt);
@@ -736,12 +1202,31 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         // duplicated), so the piece parts there instead of stretching.
         type B = ([u32; 3], [f32; 3], [f32; 3]);
         let mut vb: Vec<(B, u16)> = Vec::with_capacity(m.len());
+        // The piece's farthest vertex from its binding (skin-riding pieces).
+        let mut far = (0.0f32, Vec3::ZERO, u16::MAX);
         for k in 0..m.len() {
             let (p, n) = (m.pos[k], m.nrm[k]);
             let r: Option<(B, u16)> = if let Some(o) = &own {
                 o.bind(p, n).map(|b| (b, u16::MAX))
+            } else if let Some(g) = &group_frames {
+                g.bind(&node_pos, p, n).map(|b| {
+                    far = far_of(far, b.3, p, u16::MAX);
+                    ((b.0, b.1, b.2), u16::MAX)
+                })
+            } else if let Some((pt, b)) = part.and_then(|pt| {
+                // On the collision skin: ride the skin triangle under it (an
+                // inner stamping: under its outer point).
+                on_skin_of(inset, p, n).map(|b| (pt, b))
+            }) {
+                far = far_of(far, b.3, p, pt);
+                let (c, nl) = frame_coords(&node_pos, b.0, p, n);
+                Some(((b.0, c, nl), pt))
             } else if let Some(pt) = part {
-                let (pp, np) = if inset > 0.0 { (p - n * inset, -n) } else { (p, n) };
+                let (pp, np) = if inset > 0.0 {
+                    (p - n * inset, -n)
+                } else {
+                    (p, n)
+                };
                 let at = |r: Option<([u32; 3], [f32; 3], [f32; 3], f32)>| {
                     r.map(|(t, c, nl, d)| {
                         if inset > 0.0 {
@@ -752,32 +1237,52 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                         }
                     })
                 };
-                let near = at(pure.bind_d(pp, np));
-                let b = binders
-                    .entry(pt)
-                    .or_insert_with(|| Binder::new(by_part[&pt].clone(), &node_pos, 0.15));
-                let mine = at(b.bind_d(pp, np));
+                // An inner stamping off the skin rides its panel's part
+                // (its flexbody group): only an outer surface reaching past
+                // its physics part is cut to the neighbour.
+                let near = if inset > 0.0 {
+                    None
+                } else {
+                    pb.nearest(pp, np)
+                };
+                let zpart = near.map(|z| z.0);
+                let near = at(near.map(|z| z.1));
+                let mine = at(pb.bind(pt, pp, np));
                 match (mine, near) {
                     (Some(a), Some(z)) => {
-                        let zp = sk.nodes[z.0[0] as usize].part;
+                        let zp = zpart.unwrap_or(u16::MAX);
                         // 1.5 cm more than the vote's cut (8 cm): a piece cut
                         // there has vertices on the cut line itself, which
                         // must stay on their side, or the line opens as a
                         // sawtooth of triangles riding alternate parts.
                         if a.3 > z.3 + 0.095 && zp != pt {
+                            far = far_of(far, z.3, p, zp);
                             Some(((z.0, z.1, z.2), zp))
                         } else {
+                            far = far_of(far, a.3, p, pt);
                             Some(((a.0, a.1, a.2), pt))
                         }
                     }
-                    (Some(a), None) => Some(((a.0, a.1, a.2), pt)),
-                    (None, Some(z)) => Some(((z.0, z.1, z.2), u16::MAX)),
+                    (Some(a), None) => {
+                        far = far_of(far, a.3, p, pt);
+                        Some(((a.0, a.1, a.2), pt))
+                    }
+                    (None, Some(z)) => {
+                        far = far_of(far, z.3, p, zpart.unwrap_or(u16::MAX));
+                        Some(((z.0, z.1, z.2), zpart.unwrap_or(u16::MAX)))
+                    }
                     _ => None,
                 }
             } else {
                 None
             };
-            let Some(r) = r.or_else(|| fallback.bind(p, n).map(|b| (b, u16::MAX))) else {
+            let r = r.or_else(|| {
+                fallback.bind_d(p, n).map(|b| {
+                    far = far_of(far, b.3, p, u16::MAX);
+                    ((b.0, b.1, b.2), u16::MAX)
+                })
+            });
+            let Some(r) = r else {
                 return Err(format!("no skin triangle for a vertex at {p:?}"));
             };
             vb.push(r);
@@ -786,6 +1291,8 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         let mut extra: Vec<(usize, B, u16)> = Vec::new();
         if part.is_some() {
             let mut dup: HashMap<(u32, u16), u32> = HashMap::new();
+            // Each vertex's binding on a part, and its distance.
+            let mut cache: HashMap<(usize, u16), (B, f32)> = HashMap::new();
             for t in idx.chunks_mut(3) {
                 let parts = [
                     vb[t[0] as usize].1,
@@ -795,19 +1302,50 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 if parts[0] == parts[1] && parts[1] == parts[2] {
                     continue;
                 }
-                let tp = if parts[1] == parts[2] {
+                // The triangle rides one part: the majority's, else (its
+                // nodes beyond [`BIND_MAX`] of a vertex: a one-row part at
+                // low resolution) another of its parts.
+                let major = if parts[1] == parts[2] {
                     parts[1]
                 } else {
                     parts[0]
                 };
-                let Some(bp) = binders.get(&tp).map(|_| ()).or_else(|| {
-                    by_part.get(&tp).map(|tris| {
-                        binders.insert(tp, Binder::new(tris.clone(), &node_pos, 0.15));
-                    })
-                }) else {
+                let mut order: Vec<u16> = vec![major];
+                order.extend(parts.iter().copied().filter(|&q| q != major));
+                order.dedup();
+                let mut rebind = |k: usize, tp: u16| -> Option<(B, f32)> {
+                    if let Some(&(b, d)) = cache.get(&(k, tp)) {
+                        return Some((b, d));
+                    }
+                    let (pp, np) = if inset > 0.0 {
+                        (m.pos[k] - m.nrm[k] * inset, -m.nrm[k])
+                    } else {
+                        (m.pos[k], m.nrm[k])
+                    };
+                    // On the skin it keeps the skin triangle under it.
+                    let r = if on_skin_of(inset, m.pos[k], m.nrm[k]).is_some() {
+                        Some((vb[k].0, 0.0))
+                    } else {
+                        pb.bind(tp, pp, np).map(|(t, _, _, d)| {
+                            let (c, nl) = frame_coords(&node_pos, t, m.pos[k], m.nrm[k]);
+                            ((t, c, nl), d)
+                        })
+                    };
+                    if let Some(r) = r {
+                        cache.insert((k, tp), r);
+                    }
+                    r
+                };
+                let fits = |tp: u16, rebind: &mut dyn FnMut(usize, u16) -> Option<(B, f32)>| {
+                    pb.has(tp)
+                        && t.iter().all(|&v| {
+                            vb[v as usize].1 == tp
+                                || rebind(v as usize, tp).is_some_and(|(_, d)| d <= BIND_MAX)
+                        })
+                };
+                let Some(tp) = order.into_iter().find(|&tp| fits(tp, &mut rebind)) else {
                     continue;
                 };
-                let _ = bp;
                 for v in t.iter_mut() {
                     if vb[*v as usize].1 == tp {
                         continue;
@@ -817,7 +1355,8 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                         nv
                     } else {
                         let k = *v as usize;
-                        let b = binders[&tp].bind(m.pos[k], m.nrm[k]).unwrap_or(vb[k].0);
+                        let (b, d) = rebind(k, tp).expect("fits");
+                        far = far_of(far, d, m.pos[k], tp);
                         let nv = (m.len() + extra.len()) as u32;
                         extra.push((k, b, tp));
                         dup.insert(key, nv);
@@ -843,12 +1382,38 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             out.ao.push(m.ao[k].clamp(0.0, 1.0));
             // Smooth shading from node normals only where the piece rides the
             // body's skin (not on wheels or frames).
-            out.smooth.push(if own.is_none() { m.smooth[k] } else { 0 });
+            out.smooth.push(if own.is_none() && group_frames.is_none() {
+                m.smooth[k]
+            } else {
+                0
+            });
             out.rigid.push(0);
+        }
+        let limit = if group_frames.is_some() {
+            GROUP_BIND_MAX
+        } else {
+            BIND_MAX
+        };
+        if far.0 > limit {
+            unbound.push(format!(
+                "{} ({:.0} mm at {:.2?} on {})",
+                piece.name,
+                far.0 * 1e3,
+                far.1,
+                sk.parts.get(far.2 as usize).map_or("-", |s| s.as_str())
+            ));
         }
         let count = out.positions.len() as u32 - first;
         out.indices.extend(idx.iter().map(|i| i + first));
         out.pieces.push((piece.name.clone(), first, count));
+    }
+    if !unbound.is_empty() {
+        return Err(format!(
+            "visual vertices farther from their nodes than BIND_MAX ({} mm) or, on structure groups, GROUP_BIND_MAX ({} mm): {}",
+            BIND_MAX * 1e3,
+            GROUP_BIND_MAX * 1e3,
+            unbound.join(", ")
+        ));
     }
     // Node normals for smooth shading.
     out.normal_tris = sk.skin.clone();
@@ -956,7 +1521,15 @@ fn damage_units(
             .iter()
             .find(|(k, _)| def.zones[*k].region.contains(p, *seg, len))
         {
-            let side = if sided { if p.x >= 0.0 { 1 } else { -1 } } else { 0 };
+            let side = if sided {
+                if p.x >= 0.0 {
+                    1
+                } else {
+                    -1
+                }
+            } else {
+                0
+            };
             zone_of.insert(i, (k, side));
         }
     }
@@ -976,10 +1549,8 @@ fn damage_units(
             .collect();
         ns.iter().copied().sum::<Vec3>() / ns.len().max(1) as f32
     };
-    let centres: Vec<((usize, i8), Vec3)> = zone_beams
-        .keys()
-        .map(|k| (*k, zone_centre(k)))
-        .collect();
+    let centres: Vec<((usize, i8), Vec3)> =
+        zone_beams.keys().map(|k| (*k, zone_centre(k))).collect();
     // Node materials.
     out.node_material = (0..nn)
         .map(|i| {
@@ -1029,7 +1600,11 @@ fn damage_units(
         // solver's beams by node pair.
         let physics_unit = matches!(kind, unit_kind::TEMPERED | unit_kind::LAMINATED)
             .then(|| {
-                let want = if base.starts_with("glass_") { base.to_string() } else { format!("glass_{base}") };
+                let want = if base.starts_with("glass_") {
+                    base.to_string()
+                } else {
+                    format!("glass_{base}")
+                };
                 built.damage_units.iter().find(|u| u.name == want)
             })
             .flatten()
@@ -1212,6 +1787,15 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// The most the crease envelope may move a vertex off its binding triangle
+/// beyond its rest offset (m): the physics surface is the flat skin
+/// triangles, and beyond the contact band what is drawn is not where contact
+/// happens. **Choice**: half the contact band ([`SKIN_BAND`]), the other
+/// half left to a skin vertex's own rest offset (|h| ≤ the band) as its
+/// triangle turns. It was half the triangle (5–10 cm), which drew crushed
+/// panels up to that far off the collision skin. The renderer's
+/// `ENVELOPE_MAX` is the same.
+pub const ENVELOPE_MAX: f32 = 0.5 * SKIN_BAND;
 /// Crease sharpness: the envelope's temperature over the binding triangle's
 /// size L. A fold whose two sides' planes differ by θ switches from one to the
 /// other over about `CREASE_SHARP · L / sin θ` (a 60° fold of a 10 cm
@@ -1301,7 +1885,12 @@ pub fn node_planes(v: &ShowcaseVisual, nodes: &[Vec3]) -> Vec<NodePlanes> {
 /// barycentric ones (Phong-like). Every term is invariant under rigid motion
 /// and continuous across a shared edge (the opposite node's weight is zero
 /// there). Returns the weighted normal, u and the offset along u.
-pub fn crease_envelope(p: [Vec3; 3], planes: [NodePlanes; 3], w: Vec3, l: f32) -> (Vec3, Vec3, f32) {
+pub fn crease_envelope(
+    p: [Vec3; 3],
+    planes: [NodePlanes; 3],
+    w: Vec3,
+    l: f32,
+) -> (Vec3, Vec3, f32) {
     let pl = w.x * p[0] + w.y * p[1] + w.z * p[2];
     let k = 1.0 / (CREASE_SHARP * l.max(1e-4));
     let ww = w.max(Vec3::ZERO);
@@ -1443,7 +2032,11 @@ pub fn deform_with(
         let ids = [a as usize, b as usize, c as usize];
         if v.smooth[i] == 1 && !rigid {
             let (pn, pr) = (ids.map(|k| now_pl[k]), ids.map(|k| rest_pl[k]));
-            if pn.iter().chain(pr.iter()).all(|q| q.a.length_squared() > 0.5) {
+            if pn
+                .iter()
+                .chain(pr.iter())
+                .all(|q| q.a.length_squared() > 0.5)
+            {
                 // The crease envelope now and at rest (see [`crease_envelope`]).
                 let w = Vec3::new(1.0 - al - be, al, be);
                 let l = 0.5 * (r1 + r2);
@@ -1451,7 +2044,7 @@ pub fn deform_with(
                 let (nh, u, e) = crease_envelope([p0, p1, p2], pn, w, l);
                 let (nh0, _, e0) = crease_envelope(rest_p, pr, w, l);
                 let last = pos.len() - 1;
-                pos[last] += (e - e0).clamp(-0.5 * l, 0.5 * l) * u;
+                pos[last] += (e - e0).clamp(-ENVELOPE_MAX, ENVELOPE_MAX) * u;
                 nrm.push(rot_to(nh0, nh, Vec3::from_array(v.normals[i])).normalize_or_zero());
                 continue;
             }
@@ -1482,10 +2075,16 @@ mod tests {
             turbulence: false,
             ..Default::default()
         };
-        let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, st.clone()).unwrap();
+        let probe =
+            ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, st.clone()).unwrap();
         let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
-        let mut s =
-            ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, probe.spawn_clearance() - low, 0.0), vel, st).unwrap();
+        let mut s = ExplicitBeams::from_truck(
+            &b.truck,
+            Vec3::new(0.0, probe.spawn_clearance() - low, 0.0),
+            vel,
+            st,
+        )
+        .unwrap();
         s.roll_tyres(vel);
         s
     }
@@ -1498,7 +2097,11 @@ mod tests {
     fn crease_envelope_is_the_planes_crossing() {
         let na = Vec3::new(1.0, 1.0, 0.0).normalize();
         let nb = Vec3::new(-1.0, 1.0, 0.0).normalize();
-        let p = [Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 1.0)];
+        let p = [
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 1.0),
+        ];
         let pl = [
             NodePlanes { a: na, b: Some(nb) },
             NodePlanes { a: na, b: None },
@@ -1526,8 +2129,16 @@ mod tests {
         let (q, _) = surface(Vec3::new(0.2, 0.4, 0.4));
         assert!(q.x.abs() < 1e-4 && (q.y - 1.0).abs() < 1e-3, "{q:?}");
         // On a flat triangle nothing moves.
-        let up = NodePlanes { a: Vec3::Y, b: None };
-        let (_, _, e) = crease_envelope(p.map(|q| q * Vec3::new(1.0, 0.0, 1.0)), [up; 3], Vec3::splat(1.0 / 3.0), 1.4);
+        let up = NodePlanes {
+            a: Vec3::Y,
+            b: None,
+        };
+        let (_, _, e) = crease_envelope(
+            p.map(|q| q * Vec3::new(1.0, 0.0, 1.0)),
+            [up; 3],
+            Vec3::splat(1.0 / 3.0),
+            1.4,
+        );
         assert!(e.abs() < 1e-6);
     }
 
@@ -1574,7 +2185,10 @@ mod tests {
         s.run(1.5);
         let st = unit_states(&v, &states(&s));
         for (u, x) in v.units.iter().zip(&st) {
-            eprintln!("rest: {:>16} strain {:.5} broken {}", u.name, x.strain, x.broken);
+            eprintln!(
+                "rest: {:>16} strain {:.5} broken {}",
+                u.name, x.strain, x.broken
+            );
         }
         assert!(st.iter().all(|x| !x.broken), "a unit broke at rest");
         // A 56 km/h rigid wall.
@@ -1588,12 +2202,18 @@ mod tests {
         s.run(1.0);
         let st = unit_states(&v, &states(&s));
         for (u, x) in v.units.iter().zip(&st) {
-            eprintln!("wall 56: {:>16} strain {:.5} broken {}", u.name, x.strain, x.broken);
+            eprintln!(
+                "wall 56: {:>16} strain {:.5} broken {}",
+                u.name, x.strain, x.broken
+            );
         }
         let (p, _) = deform_with(&v, &s.positions(), Some(&st));
         for (k, q) in p.iter().enumerate() {
             let u = v.unit[k];
-            if u != u32::MAX && st[u as usize].broken && shatters(v.units[u as usize].kind, v.material[k]) {
+            if u != u32::MAX
+                && st[u as usize].broken
+                && shatters(v.units[u as usize].kind, v.material[k])
+            {
                 assert!(q.x.is_nan());
             }
         }
@@ -1622,6 +2242,13 @@ mod inner_tests {
         .unwrap();
         let v = showcase_visual(&b).unwrap();
         let piece = |n: &str| v.pieces.iter().find(|p| p.0 == n).cloned();
+        // **Choice**: 99 % (all four measure 100 %).
+        const ON_OWN_PART: f32 = 0.99;
+        // **Choice**: half on two of the panel's own nodes (the rest on the
+        // shut line's skin triangles, as the outer edge over them; the
+        // deck's inner frame runs along the lid's edge: 57 % at low
+        // resolution, 68 % at medium).
+        const ON_PART_AT_LEAST: f32 = 0.5;
         for (outer, depth) in [
             ("door_f_l", DOOR_SECTION),
             ("door_r_r", DOOR_SECTION),
@@ -1633,39 +2260,82 @@ mod inner_tests {
             // The inner skin's vertices (normals facing in, against the outer
             // skin's): their depth along the nearest outer vertex's normal.
             let op: Vec<(Vec3, Vec3)> = (o.1..o.1 + o.2)
-                .map(|k| (Vec3::from_array(v.positions[k as usize]), Vec3::from_array(v.normals[k as usize])))
+                .map(|k| {
+                    (
+                        Vec3::from_array(v.positions[k as usize]),
+                        Vec3::from_array(v.normals[k as usize]),
+                    )
+                })
                 .collect();
             let mut d: Vec<f32> = (i.1..i.1 + i.2)
                 .step_by(5)
                 .filter_map(|k| {
                     let p = Vec3::from_array(v.positions[k as usize]);
                     let n = Vec3::from_array(v.normals[k as usize]);
-                    let (q, qn) = op.iter().min_by(|a, b| a.0.distance(p).total_cmp(&b.0.distance(p)))?;
+                    let (q, qn) = op
+                        .iter()
+                        .min_by(|a, b| a.0.distance(p).total_cmp(&b.0.distance(p)))?;
                     (n.dot(*qn) < -0.9).then(|| (*q - p).dot(*qn))
                 })
                 .collect();
             d.sort_by(f32::total_cmp);
             let med = d[d.len() / 2];
-            eprintln!("{outer}: inner {} vertices, median section {med:.4} m (authored {depth})", i.2);
-            assert!((med - depth).abs() < 0.005, "{outer}: section {med} against {depth}");
-            // It rides the outer panel's part (the inner stamping binds
-            // where the outer skin over it does; at a shut line a few
-            // vertices ride the neighbour, as the outer's edge does).
-            let part = |k: u32| b.skeleton.nodes[v.bind_nodes[k as usize][0] as usize].part;
-            // (The outer with its pieces cut off along the part seams, `+`.)
-            let mut votes: HashMap<u16, usize> = HashMap::new();
-            let mut total = 0;
-            for pc in v.pieces.iter().filter(|p| p.0.trim_end_matches('+') == outer) {
-                for k in pc.1..pc.1 + pc.2 {
-                    *votes.entry(part(k)).or_default() += 1;
-                    total += 1;
-                }
-            }
-            let (main, n_main) = votes.into_iter().max_by_key(|x| x.1).unwrap();
-            let outer_on = n_main as f32 / total as f32;
-            let on = (i.1..i.1 + i.2).filter(|&k| part(k) == main).count() as f32 / i.2 as f32;
-            eprintln!("  {:.1} % on {} (the outer {:.1} %)", 100.0 * on, b.skeleton.parts[main as usize], 100.0 * outer_on);
-            assert!(on > outer_on - 0.05, "{outer}_inner: {on} on the outer's part, the outer {outer_on}");
+            eprintln!(
+                "{outer}: inner {} vertices, median section {med:.4} m (authored {depth})",
+                i.2
+            );
+            assert!(
+                (med - depth).abs() < 0.005,
+                "{outer}: section {med} against {depth}"
+            );
+            // It rides its panel's physics part, its flexbody group: two of
+            // its frame's three nodes on it (at a shut line the third may be
+            // across the border).
+            let pname = if outer == "deck" { "bootlid" } else { outer };
+            let main = b.skeleton.parts.iter().position(|p| p == pname).unwrap() as u16;
+            let own = |k: usize| {
+                v.bind_nodes[k]
+                    .iter()
+                    .filter(|&&i| {
+                        b.skeleton
+                            .nodes
+                            .get(i as usize)
+                            .is_some_and(|n| n.part == main)
+                    })
+                    .count()
+                    >= 2
+            };
+            let on = (i.1..i.1 + i.2).filter(|&k| own(k as usize)).count() as f32 / i.2 as f32;
+            // Or, at the panel's edge, the shut line's skin triangle under it,
+            // as the outer skin over it.
+            let skin: std::collections::HashSet<[u32; 3]> = b
+                .skeleton
+                .skin
+                .iter()
+                .map(|t| {
+                    let mut u = *t;
+                    u.sort_unstable();
+                    u
+                })
+                .collect();
+            let on_skin = (i.1..i.1 + i.2)
+                .filter(|&k| {
+                    let mut u = v.bind_nodes[k as usize];
+                    u.sort_unstable();
+                    own(k as usize) || skin.contains(&u)
+                })
+                .count() as f32
+                / i.2 as f32;
+            eprintln!(
+                "  {:.1} % on {pname} or on the skin triangle under it",
+                100.0 * on_skin
+            );
+            assert!(
+                on_skin >= ON_OWN_PART,
+                "{outer}_inner: {on_skin} on {pname} or the skin"
+            );
+            eprintln!("  {:.1} % on {pname}", 100.0 * on);
+            assert!(on >= ON_PART_AT_LEAST, "{outer}_inner: {on} on {pname}");
         }
         for n in ["engine", "radiator", "apron_wall", "bulkhead"] {
             assert!(piece(n).is_some(), "no {n}");
