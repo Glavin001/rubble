@@ -283,6 +283,12 @@ fn main() {
         report(&format!("rest {k} s"), &s, 0.0);
     }
     println!("rest: {:.1} s wall", t0.elapsed().as_secs_f32());
+    if opt("brokenlist=").is_some() {
+        let name = |i: u32| desc.nodes.get(i as usize).map_or("wheel".to_string(), |n| n.name.clone());
+        for b in s.beams.iter().filter(|b| b.broken) {
+            println!("  broken {:?} {}-{} k {} strength {} group {}", b.kind, name(b.a), name(b.b), b.k, b.strength, b.group);
+        }
+    }
     let v = Vec3::new(0.0, 0.0, kmh / 3.6);
     let (mut s, _) = spawn(v);
     let front = s
