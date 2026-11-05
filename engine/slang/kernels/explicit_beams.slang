@@ -545,10 +545,21 @@ float3 slideTake(float3 f, uint slot1);
 uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV,
                       float ground, uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits,
                       bool solo);
+// Explicit vehicles against rigid bodies (explicit_beams_rigid.slang).
+bool cplHas(uint v);
+uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV,
+                       float ground, uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits,
+                       bool solo);
 
 void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
                 uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits)
 {
+    if (cplHas(vehicle))
+    {
+        nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
+                          groupCount, hits, false);
+        return;
+    }
     if ((flagsV & FLAG_SHAPES) != 0u)
     {
         nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
@@ -638,6 +649,11 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
 uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
                 uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits)
 {
+    if (cplHas(vehicle))
+    {
+        return nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
+                                 groupOff, groupCount, hits, true);
+    }
     if ((flagsV & FLAG_SHAPES) != 0u)
     {
         return nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
@@ -917,6 +933,8 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     gNodes[gi * 3u + 2u] = float4(f, selfGroup);
     return 0u;
 }
+
+#include "explicit_beams_rigid.slang"
 
 // Self-collision hits are found in parallel and applied in the specification's
 // order (triangles in file order, then candidates in node order): a hit's contact
@@ -3356,6 +3374,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsTestedCount[1].store(0u);
         // Self-collision hits or pending beams possible (selfApply's barriers).
         gsUniformLanes = triCount > 0u ? 1u : 0u;
+        coupleBegin();
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
@@ -3372,9 +3391,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
     sync();
     uint selfOn = gsUniformLanes;
+    uint coupleOn = gsUniformCouple;
 
     for (uint s = 0u; s < gP.steps; s++)
     {
+        coupleStep(v, lane, s, coupleOn);
         uint step = stepBase + s;
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
@@ -3607,6 +3628,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         sync();
     }
+    coupleEnd(v, lane, coupleOn);
     if (gP.steps > 0u && candCount > 0u)
     {
         for (uint t = lane; t < triCount; t += LANES) triangleFinish(triOff + t);
@@ -5838,9 +5860,11 @@ void contactGroup(uint g, uint lane)
     if (lane == 0u)
     {
         gsUniformLanes = G.y;
+        coupleBegin();
     }
     sync();
     uint k = gsUniformLanes;
+    uint coupleOn = gsUniformCouple;
     sync();
     // Members in vehicle order (a rank sort), their run prefixes and member
     // indices.
@@ -5868,6 +5892,7 @@ void contactGroup(uint g, uint lane)
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     for (uint s = 0u; s < gP.steps; s++)
     {
+        coupleStepMembers(off, k, lane, s, coupleOn);
         if (k <= VV_PART)
         {
             contactMembersStep(off, k, lane, s);
@@ -5888,5 +5913,6 @@ void contactGroup(uint g, uint lane)
             vvPass(k, off, runOff, points, stepBase + s, lane);
         }
     }
+    coupleEndMembers(off, k, lane, coupleOn);
     for (uint m = 0u; m < k; m++) contactMemberEnd(vvMember(off, m), lane);
 }

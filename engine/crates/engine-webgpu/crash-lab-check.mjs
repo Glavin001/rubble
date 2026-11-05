@@ -15,7 +15,7 @@
 //     --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
 //   node --experimental-websocket crash-lab-check.mjs [run ...] [--car sedan|e36|...] [--out DIR]
 //
-// Runs: wall56, pole29, headon50, drop15, grab, modes. --car showcase: Rubble's authored
+// Runs: wall56, pole29, headon50, drop15, tbone214, tbone80, overlap64, swipe50, grab, modes. --car showcase: Rubble's authored
 // sedan with its skinned body. --car e36 (and viper,
 // mustang, agora) uses the local Rigs of Rods cars in engine/local-vehicles
 // (gitignored; skipped when absent). Needs Chrome (CHROME env to override).
@@ -144,6 +144,10 @@ const PRESET_RUNS = {
   pole29: ['preset=pole29&slow=20', 0.08, 'threeFront', [-5, 23, 127]],
   headon50: ['preset=headon50&slow=20', 0.2, 'side', [-5, 23, 127]],
   drop15: ['preset=drop15&slow=20', 1.4, 'side', [-5, 23, 127]],
+  tbone214: ['preset=tbone214&slow=20', 0.2, 'three', [-5, 23, 127]],
+  tbone80: ['preset=tbone80&slow=20', 0.2, 'three', [-5, 23, 127]],
+  overlap64: ['preset=overlap64&slow=20', 0.2, 'threeFront', [-5, 23, 127]],
+  swipe50: ['preset=swipe50&slow=20', 0.1, 'threeFront', [-5, 23, 127]],
 };
 const RUNS = Object.fromEntries(Object.entries(PRESET_RUNS).map(([name, [query, earliest, cam, shots]]) => [name, async () => {
   await open(query);

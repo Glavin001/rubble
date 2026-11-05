@@ -73,7 +73,10 @@ pub fn showcase_car_truck(params: JsValue) -> Result<String, JsValue> {
 /// bindNormal (Float32Array, the rest normal in the triangle frame), bindRest
 /// (Float32Array, the triangle's rest |e₁| |e₂|), ao (Float32Array, baked
 /// ambient occlusion, 1 open), smooth (Uint8Array), rigid (Uint8Array: 1 where
-/// (α, β, h) are an offset in the triangle's orthonormal frame), nodeRest
+/// (α, β, h) are an offset in the triangle's orthonormal frame), the damage
+/// units (unitNames, unitStart, unitBeams, unitKind, unitStrain, unitShards,
+/// unit and shard per vertex, beamRest0, nodeBeamStart, nodeBeamList,
+/// nodeMaterial: `visual_js`), nodeRest
 /// (Float32Array, every solver node's rest position: the renderer's tears), normalTris, nodeTriStart, nodeTriList
 /// (Uint32Array), nodeRestNormal (Float32Array) (smooth shading from node
 /// normals; see `ShowcaseVisual::smooth`), nodeCount, vertexCount }` and
@@ -171,15 +174,44 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         &Uint8Array::from(v.smooth.as_slice()).into(),
     );
     set(&vis, "rigid", &Uint8Array::from(v.rigid.as_slice()).into());
+    // Damage units (skin.rs `DamageUnit`): per unit its name, kind, beams
+    // (CSR: unitStart, unitBeams, this vehicle's solver beam indices), strain
+    // trigger and shard count; per vertex its unit (u32 max: none) and shard
+    // seed; the solver beams' spawn rest lengths; per node its beams (CSR,
+    // tyre beams excluded) and surface material.
+    let names = Array::new();
+    let mut start = vec![0u32];
+    let mut ubeams = Vec::new();
+    for u in &v.units {
+        names.push(&JsValue::from_str(&u.name));
+        ubeams.extend_from_slice(&u.beams);
+        start.push(ubeams.len() as u32);
+    }
+    set(&vis, "unitNames", &names.into());
+    set(&vis, "unitStart", &Uint32Array::from(start.as_slice()).into());
+    set(&vis, "unitBeams", &Uint32Array::from(ubeams.as_slice()).into());
+    let kinds: Vec<u8> = v.units.iter().map(|u| u.kind).collect();
+    set(&vis, "unitKind", &Uint8Array::from(kinds.as_slice()).into());
+    set(&vis, "unitStrain", &f32s(v.units.iter().map(|u| u.strain.min(f32::MAX))));
+    let shards: Vec<u32> = v.units.iter().map(|u| u.shards).collect();
+    set(&vis, "unitShards", &Uint32Array::from(shards.as_slice()).into());
+    set(&vis, "unit", &Uint32Array::from(v.unit.as_slice()).into());
+    set(&vis, "shard", &Uint8Array::from(v.shard.as_slice()).into());
+    set(&vis, "beamRest0", &f32s(v.beam_rest0.iter().copied()));
     set(
         &vis,
-        "anchor",
-        &Uint32Array::from(v.anchor.as_slice()).into(),
+        "nodeBeamStart",
+        &Uint32Array::from(v.node_beam_start.as_slice()).into(),
     );
     set(
         &vis,
-        "anchorCoords",
-        &f32s(v.anchor_coords.iter().flatten().copied()),
+        "nodeBeamList",
+        &Uint32Array::from(v.node_beam_list.as_slice()).into(),
+    );
+    set(
+        &vis,
+        "nodeMaterial",
+        &Uint8Array::from(v.node_material.as_slice()).into(),
     );
     set(
         &vis,

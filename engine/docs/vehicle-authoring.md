@@ -513,17 +513,61 @@ opening's edge, the doors' belt edges included, is black rubber.
   the vertices on the cut line itself stay on their side and the line opens
   as one clean crack, not a sawtooth of triangles riding alternate parts.
 * **Rigid pieces.** These ride one triangle's orthonormal frame
-  (`ShowcaseVisual::rigid`): they move rigidly and never stretch.
-  * Lamps, mirrors and handles.
-  * The tempered side glass and backlight, which shatter whole when that
-    triangle strains.
-  * The laminated windscreen is the exception: it follows its frame and
-    spider-cracks with strain (the `screen` material).
-  * Mounted parts (all of the above) also keep an anchor per vertex: the
-    nearest skin triangle and the vertex's place on it
-    (`ShowcaseVisual::anchor`). Where that mount has moved more than 4 cm from
-    where the rigid part holds the vertex (`ANCHOR_BREAK`: the bumper under a
-    lamp crushed), the part breaks there instead of floating free.
+  (`ShowcaseVisual::rigid`): they move rigidly and never stretch. They are
+  the lamps, mirrors, handles, and the tempered side glass (each pane its own
+  piece: `glass_side_{f,r,q}_{l,r}`, riding its own door) and backlight.
+* **Damage follows the physics** (`skin.rs` damage units; plan P5). Each
+  glass pane, lamp and mirror is a `DamageUnit`: a set of the solver's beams.
+  * A pane with a glass zone owns its zone's beams (both nodes in the zone,
+    on its side). Every other unit owns its mount: the solver beams along the
+    skin triangles under it.
+  * A unit is broken when one of its beams is broken, or when its live
+    beams' largest plastic strain |rest − rest₀| / rest₀ passes its trigger:
+    tempered glass's break strain σ/E = 120 MPa / 70 GPa (0.17 %; glass has
+    no plastic range, so a glass beam that has yielded that far is a broken
+    pane, as BeamNG's deform groups switch glass), a lamp lens's 3 % (PMMA's
+    elongation at break is 2–10 %). A pane without its own glass beams (the
+    quarter light) and a mirror break only when a mount beam breaks.
+  * The renderer computes this on the GPU every update from the solver's beam
+    buffer (or the crash lab's compact rest buffer, live or replayed): a
+    broken unit's glass, lenses and mirror glass are dropped and throw their
+    shards, its lamps go dark. `unit_states` and `deform_with` are the same
+    on the CPU. The laminated windscreen never drops: it cracks where its
+    nodes' beams yielded past annealed glass's 0.064 % or broke.
+  * `showcase-car-check.mjs` runs `damage_*` (`?check=damage`): every
+    simulated frame it reads back the solver's beams and the renderer's unit
+    states in the same submission and fails on any difference.
+  * When the physics' own break groups land in `Built` (`DamageUnit`s by
+    name: `glass_*`, `headlight_*`, `mirror_*`, hinges, latches), they
+    replace this derivation; mirrors and lamps that become their own small
+    parts then ride (and fall with) those parts.
+* **Substance** (plan P7). Behind every door's outer skin sits its inner
+  skin at the door's section (`DOOR_SECTION` 8.5 cm, just outboard of the
+  door card), with shut faces round its edge; under the bonnet and boot lid
+  an inner frame (`LID_SECTION` 3.2 cm: a 9 cm band round the edge and two
+  ribs along it, the rest cut away as lightening holes, every hole flanged).
+  These stampings (`mat::INNER`, the body colour, satin) bind where the outer
+  skin over them binds (`Bind::Inset`: each vertex picks its triangle at the
+  outer skin, then sits at its own depth), so a tear shows sheet with depth
+  behind it and a detached door carries its inner skin. The engine bay
+  (`parts/bay.rs`): the engine on the `powertrain` block, the radiator on its
+  plate, apron walls under the apron rails with the strut towers' domes, and
+  the bulkhead on the firewall, so a crushed or missing bonnet shows a bay.
+  Round a tear the paint has cracked off the stretched steel (a grey primer
+  band inside the bare lip).
+* **Debris** (plan P9; `fx-particles.mjs`, shared with `car-render.mjs`).
+  Sparks from metal nodes sliding on the floor or a static box faster than
+  2 m/s; glass and lens shards from a breaking unit (area × `SHARD_DENSITY`,
+  400 a square metre: each a few centimetres of granules); paint and plastic
+  flecks where the skin tears or a panel yields suddenly; dust on hard
+  landings. A ring of 8,192 particles shared by every car. Only with
+  `update`'s `dt` > 0 (the simulated time since the last update).
+* **Wear** (plan P11). Per node the renderer keeps its plastic strain and
+  the metres it slid in contact with the floor or a static box. The
+  clearcoat dulls with plastic strain (from 0.4 % to 6 %); scraped paint is
+  scratched to primer, then bare steel, in streaks, more with every metre
+  slid. Scrapes accumulate forward in time (a replay scrubbed back keeps
+  them).
 * **Cabin.** Seats and the steering wheel ride one triangle of their frame
   rigidly (`Bind::GroupRigid`), so a far binding triangle never swings them
   out of the cabin; the dashboard and console ride their members' triangles.
@@ -533,7 +577,8 @@ opening's edge, the doors' belt edges included, is black rubber.
   perimeter against its rest perimeter (`node_rest`), interpolated over each
   vertex's binding nodes. Panels are cut where it crosses ½, a smooth line,
   with a thin bright lip of bare steel at the edge (the field's last 6 %: a
-  few millimetres, lit by the studio). A panel's inside is dark e-coat grey.
+  few millimetres, lit by the studio) inside a band of grey primer. A
+  panel's inside is dark e-coat grey.
 * **Shading.** A procedural showroom: a cyclorama with a bright horizon band
   fading to a dark ceiling, three long softbox strips overhead (crisp lines
   along the roof, bonnet and deck), two low side strips, a key box and the
@@ -576,6 +621,14 @@ opening's edge, the doors' belt edges included, is black rubber.
     interior, the floor reflection and the contact shadows (about 300k
     triangles, 99k at the distant level; 0.41 ms without the reflection),
     0.31 ms at the distant level. Another GPU user moves these by ±10 %.
+  * With the damage units, wear, debris and the inner stampings and bay
+    (348k triangles, 121k at the distant level; 2026-11-05): about 0.62 ms
+    per car (the previous renderer on the same mesh: 0.55; the stampings
+    and bay add 0.03), 0.37 ms at the distant level. The skinned vertex is
+    32 bytes (tear and damage, plastic strain and scrape packed as f16
+    pairs); worn paint and the primer band shade through the generic metal
+    and matt paths rather than code of their own, because the paint path is
+    occupancy bound (a second inlined `env()` costs it).
 
 To restyle, change `design::sedan_styling` (cut lines, outlines, section
 shapes) and the profile. The tools stay the same.
