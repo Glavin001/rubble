@@ -1148,6 +1148,7 @@ fn panel_modes() -> Vec<(&'static str, &'static str, f64, f64)> {
                 fast_inv_sqrt: s.settings.fast_inv_sqrt,
                 drag: false,
                 turbulence: false,
+                ..s.settings
             });
             iso.ground = -1.0e3;
             iso.nodes = nodes;

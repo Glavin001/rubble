@@ -1128,6 +1128,82 @@ So beam count alone does not raise k·L. The lever is the station spacing
 a fixed mass and step, `MemberSpec::station`), which the pole lanes cap at
 0.24 m (A8). Open.
 
+### Pole lanes only where needed; each chord once (2026-11-05, later)
+
+All on the BeamNG profile (`rubble_beamng_profile`, `jbeam-semantics-spec.md`
+§36), which sedan1's `.truck` now carries (`BEAMNG_PROFILE=0` leaves it out,
+a measurement switch). Medium, 8-run ensembles.
+
+**The bound sets a floor under ε_y on the lanes (exact arithmetic).** At a
+saturated node every beam comes down to about k = G·m/(h²·n). A sill lane
+node (1.25 kg, 13–15 beam ends) caps at 0.95–1.4 MN/m, so a 0.2 m lane beam
+has k·L ≤ 3e5 N. The sill's chord yields at 56 kN (`side_sections`), so its
+ε_y is 20–28 %. For 1 % at that yield, k·L must be 5.6e6 N: a 14 kg node at
+10 ends, or 1 m beams. Pole lanes at 0.24 m with real chord yields cannot
+reach the BX's strain by topology alone. The BX's 1 % comes from yields of
+about 8 kN (its body median), not from stiffer beams.
+
+**A member's chord was counted twice or three times (fixed).** In a lane,
+the shell's edges take the member's chord material. So did:
+- the shell's bend beams (two bays) along the lane;
+- the truss's own longitudinals and face diagonals between station nodes
+  snapped onto the lane.
+
+Each carried the full chord yield in parallel, so a lane held 2–3× its
+section's yield. Now each chord is built once:
+- the shell's bends in a lane stay the sheet's bending;
+- the truss leaves out its longitudinals and face diagonals between two
+  lane nodes (`box_truss`'s `outer`).
+
+Measurement switches: `LANE_BENDS=1`, `LANE_TRUSS=1`. With both,
+`sedan1`'s `.truck` is byte-identical to before. `sedan`'s is unchanged at
+every resolution.
+
+**The interior at the BX's spacing (built, not adopted).** `INTERIOR=1`
+(`body::Interior`): every other ring is a minor ring carrying only the band a
+pole can meet (sides, wells, the top outside the roof). The floor and the roof
+(z 1.36–2.58) then sit on major rings 0.48 m apart. The BX's `bx_body_coupe`
+was measured for this: floor stations 0.38–0.75 m along and 0.25–0.7 m across;
+roof stations 0.33–0.37 m along and about 0.55 m across. The floor keeps
+0.35 m across: a ring's nodes are placed over the whole section at once, so a
+coarser floor moves the sides' nodes, and with them the rear doors' latches.
+Body nodes 549 → 503; k·L p50 2.75e5 → 2.81e5.
+
+Not adopted:
+- the 56 km/h wall's energy rises 24–98 J between tenths of a second
+  (`b`, `n`), with self-contact off as well (`NO_SELF=1`), so the cause is
+  not contact;
+- a `rail_f` node that loses its floor node to snap to (0.10 kg) carries a
+  6.9 kg node's body dashpot, h·Σc/m 0.79, past 0.75.
+
+Rating that dashpot on the lighter node's mass removes the damping-bound
+failure. The energy then rises at rest as well (`a`), so that change was
+reverted. Open.
+
+| Reference (band) | Before (profile) | Each chord once (now) | + interior (`INTERIOR=1`) |
+|---|---|---|---|
+| n max crush (380–580 mm) | 631 | 592 | **523** |
+| n dynamic crush (620–750 mm) | 694 | 691 | 638 |
+| n t_m (63–76 ms) | 74.1 | 74.1 | 69.6 |
+| n peak g (34–47) | 33.7 | 33.2 | 33.4 |
+| n b1 (22.9–39.2) | 24.0 | 25.1 | 27.3 |
+| n restitution (0.13–0.20) | 0.191 | 0.192 | 0.169 |
+| o residual (297–445 mm) | 225, sd 96 | **307**, sd 121 | **377**, sd 72 |
+| p peak (≥ 28.4 kN) | 23.7 | 19.8 | 24.1 |
+| q (4.48–5.32×) | 8.42 | 8.49 | 8.72 |
+| g latch / door off (25.7–55.3 kN) | 36.7 / 51.5 | 46.0 / 46.5 | 45.6 / 46.2 |
+| f 120 km/h | passes | passes | fails (energy) |
+| h settle | passes | fails narrowly (fifth second's peak 4.51 J against the fourth's 4.45) | fails |
+| t leaked (≤ about 10) | 18 | 19 | 18 |
+| crash invariants | 7 of 16 pass | the same 7 | |
+| invariants_small | 19 of 19 | 19 of 19 | |
+
+- **o is bimodal.** It depends on whether the front door's primary latch
+  lets go: runs where it holds give about 170–210 mm, runs where it goes give
+  370–440 mm. The mean moves with how many runs lose the latch.
+- **f.** The profile's two-body self-contact fixes the 120 km/h energy rise
+  in every build here.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
