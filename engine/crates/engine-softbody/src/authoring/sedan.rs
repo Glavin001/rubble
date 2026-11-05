@@ -154,6 +154,14 @@ pub const SUBFRAME: f32 = 1.5;
 /// The passenger cell's threshold scale.
 pub const CELL: f32 = 4.0;
 
+/// The firewall's lower cross member (the dash panel at the toe board)
+/// against the boron grade. The rails and the engine push it back at 56 km/h
+/// as NCAP measures (`crash-reference-targets.md` §1: left p10–p90 1–67 mm,
+/// median 20; right −15–85): medians over 55–57 km/h 16 mm left, 0 right
+/// (at 1.0 it stayed put, −1 mm). Weaker (0.2) and the front's weight on
+/// the rail junctions yields it standing still.
+pub const FIREWALL: f32 = 0.25;
+
 /// An impact member: pole catchers between its stations.
 pub fn catching(mut m: MemberSpec) -> MemberSpec {
     m.catch = true;
@@ -884,7 +892,11 @@ pub fn sedan() -> VehicleDef {
             false,
             1,
         ))),
-        catching(floor_cross("firewall", 3.36, "boron")),
+        catching({
+            let mut m = floor_cross("firewall", 3.36, "boron");
+            m.scale = [FIREWALL, FIREWALL];
+            m
+        }),
         ladder(cell(member(
             "dash",
             &[

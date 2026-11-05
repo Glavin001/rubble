@@ -2266,7 +2266,7 @@ fn n_wall_matches_the_nhtsa_sedans() {
     band("aperture median", -0.002, 0.003);
     band("A-pillar base rearward left", -0.007, 0.017);
     band("A-pillar base rearward right", -0.011, 0.015);
-    band("firewall rearward left", -0.085, 0.085); // TASK2
+    band("firewall rearward left", 0.001, 0.067);
     band("firewall rearward right", -0.015, 0.085);
     // §4.10 Campbell's speed scaling: C̄(50)/C̄(56) ≈ 0.875 (no measured
     // spread; the sim's own spread decides the tolerance).
