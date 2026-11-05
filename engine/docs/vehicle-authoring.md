@@ -347,6 +347,40 @@ No measured pole impacts at the front wheel or rear overhang with crush
 depths were found. SAE 2006-01-0062 (Taurus into a pole) reports the front
 axle region as much stiffer than the B-pillar, qualitatively.
 
+**Rail stations at a pole's width** (2026-11-05). A real rail is continuous.
+Static contact is per node, so a rail meets a pole only if its stations are at
+most the NCAP pole's 254 mm apart in the pole's lane.
+
+The rear rails' tail behind the rear subframe is now its own member,
+`rail_r_tail`, with stations at z 0.62, 0.40 and 0.17. It keeps the knee's
+thresholds, graded to 0.5 at the bumper, at the HSLA grade's k·L (a Choice).
+Tried and not adopted:
+- the same stations at ×3.5: skin scale ×0.05, the step budget gone;
+- the tail at ×1.7, the old segment's per-beam k: skin scale ×0.23, and `o`
+  (260 mm) and `p` fail.
+
+30 km/h side sweep (Low) at each stage:
+
+| Stage | Passed through, of 178 |
+|---|---|
+| Before | 14 |
+| Tail stations | 8 |
+| Tail stations and a `rail_f` station at z 3.55, which `subframe_f0` shares | 8 |
+
+With the tail stations, the rear overhang (+1.90 to +2.05) no longer passes.
+With the `rail_f` station as well, the front-wheel lane (−1.15) holds, but `n`
+fails on t_m (77.5 ms) and peak g (32 g), so that station is left out.
+
+Still passing through:
+- +1.60 and +1.65 (z 0.75, between the rear rail's 0.62 and 1.03 stations,
+  the rear wheel). A station at 0.82 at ×3.5 runs the step budget out
+  (frame scale ×0.98).
+- −0.55 to −0.60 (front door).
+- −0.05 (B-pillar).
+- −1.15, cylinder only (front wheel).
+
+Medium after the tail: skin scale ×0.25 (was ×0.29), 1,053 nodes.
+
 **Glass** (`BRITTLE_GLASS=1`):
 - the windscreen cracks in every side pole run but not in `q` or `n`;
 - with it on, `f` (energy rose 21 J at 120 km/h), `o` and `t` (15 nodes)
@@ -501,6 +535,106 @@ strain energy sits (`COST=1`: each group's share of the step's cost beside its
 share of the energy: what to stiffen and what is spent for nothing; `DOOR=1`: a 4
 kN push on the door instead). `MASSES=1` lists node mass by class;
 `SHOWCASE_FLOORS=1 … info` the floors by group, tier and beam kind.
+`NN=1 … info` lists each part's skin nodes, mass and nearest-neighbour
+spacing; `GROUP_NEAR=<member> … info` lists a member's frame nodes and the
+nearest frame node of another member (a station it could share).
+
+### The skin is already at BeamNG's density (2026-11-05)
+
+Medium's skin against the BX (`beamng-realism-plan.md` §1.3), median
+nearest-neighbour spacing:
+
+| Part | Ours: nodes, spacing | BX: nodes, spacing |
+|---|---|---|
+| body skin | 248, 0.21 m (0.16–0.26) | 145, 0.19 m (the BX's body is its frame) |
+| front door | 19, 0.16 m | 11, 0.25 m |
+| rear door | 11, 0.24 m | 11, 0.25 m |
+| bonnet | 20, 0.21 m | 26, 0.24 m |
+| fender | 8, 0.20 m | 13, 0.19 m |
+| front bumper | 12, 0.24 m | 33, 0.12 m |
+| boot lid | 10, 0.29 m | 18, 0.23 m |
+
+The extra nodes are in the frame (430 nodes, 863 kg) and the catchers (108).
+Coarsening the skin (`SKIN_DENSITY`) frees little:
+
+| `SKIN_DENSITY` | Nodes | Skin scale |
+|---|---|---|
+| 1.0 | 1,045 | ×0.29 |
+| 1.2 (Low's spacing) | 979 | ×0.34 |
+| 1.4 (front bumper 2 nodes) | 924 | ×0.43 |
+| 1.6 | does not build | |
+
+At skin scale 1, the shell's own beams need about 48 kg of stability floor.
+The skin tier's floor sits mostly in the skin-to-frame ties (about 69 kg) and
+in the catchers' and members' skin-tier beams. Coarsening was not adopted.
+
+Panel stiffness: a front door skin beam is 2.7e4 × 0.29 / 0.16 m = 4.9e4 N/m
+on 0.18 kg nodes. The BX door skin is 1.1 MN/m on 1 kg nodes, 22× stiffer.
+Real 0.75 mm sheet as a membrane (k·L ≈ (√3/2)·E·t·a, about 4e7 N) is beyond
+any node–beam car.
+
+**Sharing stations is not cheaper here.** `seat_x` costs the skin scale
+×0.29 → ×0.38 when left out, and `subframe_f0` costs ×0.29 → ×0.36. Their
+frame nodes weigh 1.0–2.2 kg, as every frame node does.
+
+Putting a station on the members `seat_x` crosses, so that it shares their
+nodes, costs more than it saves:
+- a sill station at z 1.58 takes the skin scale to ×0.18;
+- a `rail_r` station at z 1.58 takes it to ×0.17.
+
+A `rail_f` station at z 3.55, which `subframe_f0` shares (4 of its 6 nodes),
+costs ×0.02 and was adopted (A8 below).
+
+### Proposed: one tier, as BeamNG's cars are (design only, not built)
+
+The BX's body shell is its frame: 145 nodes, 329 kg, median 1.7 kg, at
+0.19 m. Ours splits it into a 430-node frame and a 248-node skin of
+0.1–0.2 kg nodes, joined by about 840 ties. The ties and the catchers eat
+the step budget that the panels need.
+
+**Design.**
+- **Shell nodes are the frame's outer chords.** A member drawn on the body
+  (sill, rail, pillar, roof rail, cross member) is a ladder, not a box: its
+  outer chord is the shell's own nodes along its path, and its inner chord is
+  a row of frame nodes 70–140 mm inboard, its section's depth.
+  - Members' stations are the shell's ring stations, every 0.20–0.25 m.
+  - No ties between skin and frame. No catchers: every shell node is heavy
+    and within a pole's width (254 mm) of the next.
+- **Inner-only members** (tunnel, cross members, subframes, aprons) stay as
+  they are.
+- **Doors** follow the BX: an 11-node skin, about 10 inner nodes (beam,
+  belt, mid rail, which carry the door trim's mass), and the existing
+  hardware groups.
+- **Mass** is the kerb mass spread by stiffness need, with one fit for every
+  beam (`fit_stiffness`, not `fit_tiers`).
+
+**Expected numbers** (estimates from the Gershgorin bound,
+k ≤ 4.8·m / (2·n·h²) ≈ 1.6 MN/m per kg at 6 neighbours):
+
+| | Now (Medium) | One tier |
+|---|---|---|
+| nodes | 1,045 | about 740 (body about 450, doors 4 × 21, panels about 70, powertrain, suspension, seats) |
+| body node median | skin 0.10 kg, frame 1.41 kg | 1.5–2 kg |
+| panel beam k | 4.9e4 N/m | 1.0–1.5 MN/m (BX parity) |
+| ties, catchers | about 840, 108 | 0 |
+
+**What it changes.**
+- **References.** Every reference is re-measured (a–v, n and o ensembles,
+  MDB, sweep, torsion). Members keep their sections' chord yields (the
+  thresholds are forces), so the side and roof strengths carry over. The
+  frontal's crush zone, restitution and the rest-wobble figures will move.
+- **Hardware and parts.** Hinge, latch and bolt groups, the rig sizing
+  (`size_hardware`), the shut-line breaks and the collision lattice are
+  unchanged, because they work on nodes and parts. Parts keep their own
+  nodes. Door and lid frames lose their skin-tier ties to their skins.
+- **A8.** Pole lanes meet a heavy shell node every 0.20–0.25 m. The rear
+  overhang and wheel lanes no longer depend on members' stations.
+
+**Effort.** Large: 3–5 agent sessions.
+- `members.rs`: ladders on shell paths, snapping to ring stations.
+- `vehicle.rs`: one tier, no ties or catchers.
+- `sedan.rs`: member paths redrawn on ring stations.
+- All tests re-baselined.
 
 ## Hardware, bearing and sheet masses (2026-11-05)
 

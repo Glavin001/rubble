@@ -761,6 +761,7 @@ pub fn side_sections() -> Vec<(&'static str, Section, f32, f32)> {
         ("pillar_c", sec(0.07, 0.10, 0.0014, DP780), 0.12, 1.0),
         // Rear rails: 100 across × 130 tall, 1.6 mm.
         ("rail_r", sec(0.10, 0.13, 0.0016, DP600), 0.10, 2.0),
+        ("rail_r_tail", sec(0.10, 0.13, 0.0016, DP600), 0.10, 2.0),
         // Front and rear subframe cross members (and the front subframe's
         // rear one): 90 × 60 boxes, 2.0 mm.
         ("subframe_f0", sec(0.09, 0.06, 0.0020, S420), 0.18, 1.0),
@@ -1359,31 +1360,50 @@ pub fn sedan() -> VehicleDef {
             0,
         ),
         // Rear rails from the rear seat's cross member over the kick-up,
-        // under the rear strut tower, to the rear bumper beam.
-        knee(
-            stiff(
-                member(
-                    "rail_r",
-                    &[
-                        (0.70, 0.26, 2.24),
-                        (0.44, 0.22, 1.80),
-                        (0.44, 0.24, 1.36),
-                        (0.44, 0.40, 1.03),
-                        (0.44, 0.42, 0.62),
-                        (0.44, 0.45, 0.17),
-                    ],
-                    0.10,
-                    0.13,
-                    UP,
-                    "hsla",
-                    [REAR_RAIL, 0.5],
-                    3,
-                    true,
-                    1,
-                ),
-                REAR_RAIL_STIFF,
+        // under the rear strut tower, to the rear subframe (z 0.62); their
+        // tail on to the rear bumper beam is `rail_r_tail`.
+        stiff(
+            member(
+                "rail_r",
+                &[
+                    (0.70, 0.26, 2.24),
+                    (0.44, 0.22, 1.80),
+                    (0.44, 0.24, 1.36),
+                    (0.44, 0.40, 1.03),
+                    (0.44, 0.42, 0.62),
+                ],
+                0.10,
+                0.13,
+                UP,
+                "hsla",
+                [REAR_RAIL, REAR_RAIL],
+                3,
+                true,
+                1,
             ),
-            REAR_KNEE,
+            REAR_RAIL_STIFF,
+        ),
+        // The rear rails' tail behind the rear subframe (the rear crush
+        // zone), graded from the knee's strength to 0.5 at the bumper. A
+        // real rail is continuous; static contact is per node, so its
+        // stations are at most a 254 mm NCAP pole's width apart (z 0.62,
+        // 0.40, 0.17): a pole in any lane meets one. Its k·L is the HSLA
+        // grade's (a Choice: at ×3.5 its two extra stations cost the step
+        // budget 32 kg of stability floor).
+        knee(
+            member(
+                "rail_r_tail",
+                &[(0.44, 0.42, 0.62), (0.44, 0.435, 0.40), (0.44, 0.45, 0.17)],
+                0.10,
+                0.13,
+                UP,
+                "hsla",
+                [REAR_RAIL, 0.5],
+                0,
+                true,
+                1,
+            ),
+            0.0,
             REAR_RAIL,
         ),
         catching(ladder(member(
@@ -1631,13 +1651,6 @@ pub fn sedan() -> VehicleDef {
         inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
         inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
     ]);
-    // The rear rails' knee at the rear subframe's station (z 0.62).
-    for m in members.iter_mut().filter(|m| m.name == "rail_r") {
-        let p: Vec<glam::Vec3> = m.path.iter().map(|&q| glam::Vec3::from_array(q)).collect();
-        let len = |a: usize, b: usize| (a..b).map(|i| p[i].distance(p[i + 1])).sum::<f32>();
-        let k = p.iter().position(|q| (q.z - 0.62).abs() < 1e-3).unwrap();
-        m.knee = Some([len(0, k) / len(0, p.len() - 1), REAR_RAIL]);
-    }
     // The transverse members a sedan has besides those above (their
     // sections in [`side_sections`]): the front subframe's rear cross
     // member and the rear seat cushion's cross member. (A boot floor cross
@@ -1860,6 +1873,7 @@ pub fn sedan() -> VehicleDef {
         webs: vec![
             ("apron".into(), "rail_f".into(), 0.6),
             ("quarter_inner".into(), "rail_r".into(), 0.6),
+            ("quarter_inner".into(), "rail_r_tail".into(), 0.6),
         ],
         // The cabin as a braced box: its shear panels (floor pan, roof,
         // firewall and screen, rear bulkhead, each door ring's frame) lumped
@@ -1969,11 +1983,17 @@ pub fn sedan() -> VehicleDef {
                 sh("subframe_f1", "subframe_f2", 0, "hsla"),
                 // Rear end: rear floor, inner quarters, subframe.
                 sh("rail_r", "rail_r_r", 2, "floor"),
+                sh("rail_r_tail", "rail_r_tail_r", 2, "floor"),
                 // The rear quarter (wheelhouse and quarter inner) between
                 // the rear rail and the quarter inner: the rear body's deep
                 // beam's web.
                 {
                     let mut x = sh("rail_r", "quarter_inner", 2, "hsla");
+                    x.kl *= QUARTER_WEB;
+                    x
+                },
+                {
+                    let mut x = sh("rail_r_tail", "quarter_inner", 2, "hsla");
                     x.kl *= QUARTER_WEB;
                     x
                 },
