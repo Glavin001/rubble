@@ -3592,7 +3592,22 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         .collect();
     let r = struck.collision_range;
     let tris: Vec<[u32; 3]> = struck.triangles.iter().map(|t| t.nodes).collect();
+    // (TB_RULE: `ror` or `two_body` for both cars.)
+    if let Ok(rule) = std::env::var("TB_RULE") {
+        for v in [&mut struck, &mut striker] {
+            v.two_body_contact = rule == "two_body";
+        }
+    }
+    // The struck skin's topology for the diagnostics' closest-feature side test
+    // (jbeam-semantics-spec.md §10.3's leak notes).
+    let skin_topo = engine_softbody::explicit_skin::SkinTopology::build(
+        &struck.triangles.iter().map(|t| t.nodes).collect::<Vec<_>>(),
+        &struck.positions(),
+    );
     let mut w = ExplicitBeamsWorld::new(vec![struck, striker]);
+    if std::env::var("TB_THROTTLE").as_deref() == Ok("0") {
+        w.throttle = false;
+    }
     let inside = |w: &ExplicitBeamsWorld| -> usize {
         let pos = w.vehicles[0].positions();
         let skin: Vec<[Vec3; 3]> = tris.iter().map(|t| t.map(|i| pos[i as usize])).collect();
@@ -3630,6 +3645,37 @@ fn t_car_to_car_t_bone_at_80_kmh() {
                 .map(|s| s.beams.iter().map(|b| (b.rest, b.broken)).collect())
                 .collect();
             w.step();
+            if let Ok(list) = std::env::var("TB_TRACE") {
+                // Per step, each listed striker node: the struck skin's closest
+                // feature (side, distance) and the winding number.
+                use engine_softbody::explicit_skin::side_key;
+                let s0 = &w.vehicles[0];
+                let pos = s0.positions();
+                let skin: Vec<[Vec3; 3]> =
+                    tris.iter().map(|t| t.map(|i| pos[i as usize])).collect();
+                let pb = w.vehicles[1].positions();
+                for id in list.split(',').filter_map(|x| x.parse::<usize>().ok()) {
+                    let p = pb[id];
+                    let (k, t) = (0..tris.len())
+                        .filter(|&t| !s0.tri_dead[t])
+                        .map(|t| (side_key(p, t, &tris, &pos, &s0.tri_dead, &skin_topo), t))
+                        .min()
+                        .unwrap();
+                    let d = engine_softbody::explicit_skin::side_d2(k).sqrt();
+                    if d < 0.06 {
+                        eprintln!(
+                            "  trace step {} node {id} cp {}: side {} d {:.4} tri {t} winding {:.2} vel {:?} force {:?}",
+                            w.steps,
+                            w.vehicles[1].contact_points.contains(&(id as u32)),
+                            k & 3,
+                            d,
+                            winding(p, &skin),
+                            w.vehicles[1].nodes[id].vel - s0.nodes[tris[t][0] as usize].vel,
+                            w.vehicles[1].nodes[id].force
+                        );
+                    }
+                }
+            }
             for k in 0..2 {
                 plastic[k] += step_plastic(&w.vehicles[k], &before[k]);
             }
@@ -3656,6 +3702,37 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         }
         for &i in &door {
             lowest = lowest.min(s.origin.y + s.nodes[i].pos.y - s.ground);
+        }
+        if f % 6 == 5 && std::env::var("TB_SIDECHECK").is_ok() {
+            // The closed-skin side test (spec §10.4) against the winding number,
+            // for striker nodes within 3 cm of the struck skin.
+            use engine_softbody::explicit_skin::side_key;
+            let s0 = &w.vehicles[0];
+            let pos = s0.positions();
+            let skin: Vec<[Vec3; 3]> = tris.iter().map(|t| t.map(|i| pos[i as usize])).collect();
+            let (mut agree, mut wrong_in, mut wrong_out, mut unknown) = (0, 0, 0, 0);
+            for p in w.vehicles[1].positions() {
+                let k = (0..tris.len())
+                    .filter(|&t| !s0.tri_dead[t])
+                    .map(|t| side_key(p, t, &tris, &pos, &s0.tri_dead, &skin_topo))
+                    .min()
+                    .unwrap();
+                if engine_softbody::explicit_skin::side_d2(k) > r * r {
+                    continue;
+                }
+                let inside_w = winding(p, &skin).abs() > 0.5;
+                match (k & 3, inside_w) {
+                    (2, _) => unknown += 1,
+                    (1, true) | (0, false) => agree += 1,
+                    (1, false) => wrong_in += 1,
+                    _ => wrong_out += 1,
+                }
+            }
+            eprintln!(
+                "  side check t {:.2}: agree {agree}, inside but outside by winding {wrong_in}, outside but inside {wrong_out}, open {unknown}; closed components {}",
+                (f + 1) as f32 / 60.0,
+                skin_topo.closed_components
+            );
         }
         if f % 6 == 5 {
             let k = inside(&w);
@@ -3692,6 +3769,9 @@ fn t_car_to_car_t_bone_at_80_kmh() {
                 let mut by: std::collections::BTreeMap<String, usize> = Default::default();
                 for (i, p) in w.vehicles[1].positions().iter().enumerate() {
                     if winding(*p, &skin).abs() > 0.5 {
+                        if std::env::var("TB_INSIDE").as_deref() == Ok("ids") {
+                            eprint!("{i},");
+                        }
                         let name = if i < n {
                             let nd = &sk0.nodes[i];
                             format!(
@@ -3705,6 +3785,18 @@ fn t_car_to_car_t_bone_at_80_kmh() {
                         *by.entry(name).or_default() += 1;
                     }
                 }
+                let live: Vec<[Vec3; 3]> = skin
+                    .iter()
+                    .zip(&w.vehicles[0].tri_dead)
+                    .filter(|(_, &d)| !d)
+                    .map(|(t, _)| *t)
+                    .collect();
+                let in_live = w.vehicles[1]
+                    .positions()
+                    .iter()
+                    .filter(|&&p| winding(p, &live).abs() > 0.5)
+                    .count();
+                eprintln!("  inside by the live triangles only: {in_live}");
                 let dead = w.vehicles[0].tri_dead.iter().filter(|&&d| d).count();
                 eprintln!("  t {t:.2}: {k} striker nodes inside {by:?}; struck triangles dead {dead} of {}", w.vehicles[0].tri_dead.len());
             }

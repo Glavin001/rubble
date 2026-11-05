@@ -400,6 +400,34 @@ changes nothing); one traced node entered a triangle's prism sideways, in front 
 it, and the side vote (its neighbours behind the plane) pushed it through. Open
 (task 3): a side kept per contacter–triangle pair cut it to 57 only.
 
+**Leak, second pass (2026-11-05, showcase car, CPU, TB_DZ 0 / 0.43 / 0.7 m, most
+striker nodes inside of 1,141).** Today's car: RoR's rule 9 / 78 / 28, this rule 91 /
+144 / 88. Tried, all reverted (`explicit_skin.rs` keeps the side test as a
+measurement; `TB_SIDECHECK`, `TB_TRACE`, `TB_RULE` in `showcase_car.rs`):
+
+* *Exact side* (closest feature of the closed skin by angle-weighted pseudo-normals,
+  Bærentzen and Aanæs 2005; the lattice is one closed, oriented component): it
+  agrees with the winding number for 80–90 % of striker nodes within 2 cm of the
+  skin (the rest sit at folds of the crushed, self-intersecting skin). As the side
+  of RoR's prism hits (an inside point pushed out through its nearest hit, along
+  the outward normal): this rule 52 / 104 / 72; RoR's rule diverges (NaN).
+* *Closest-feature contact* (one contact per point at its closest feature, face,
+  edge or vertex, pushed out the way it came in; no prism gaps): this rule 33 / 99 /
+  77; RoR's rule diverges (an edge or vertex hit puts the contacter's whole force on
+  one or two light skin nodes, §10.3's failure).
+* The throttle off: unchanged (the fast-approach reset tests every triangle while
+  it matters). Holes: winding over the live triangles only counts as many.
+
+**Mechanism (traced, this rule):** the nodes are not misplaced by the side; they
+grind through. A striker node in contact approaches at 2–6 m/s every step with a
+1.5–2.5 kN contact force on it at a reduced mass of 0.03–0.06 kg: the struck
+lattice's triangles are coarse beside the striker's nodes, so each struck node
+takes part in many hits, and the mass splitting (one Jacobi pass) leaves each hit
+a small share; without the splitting the pass diverges, and a naive iterated
+Jacobi (4 passes) gives 13 / 78 / 34 but diverges at 16. Open: a converged contact
+solve (a Gauss–Seidel or accumulated-impulse iteration per turn) is what the leak
+asks for; the side test alone does not fix it.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,
