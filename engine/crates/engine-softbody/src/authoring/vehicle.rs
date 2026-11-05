@@ -2505,8 +2505,17 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         }
     }
     let grades_strength = params.strength;
-    // Shear panels (the members' and shell's body nodes).
+    // Shear panels (the members' and shell's body nodes). (`RING_BRACES=0`,
+    // a measurement: one tier without the door rings' lumped X.)
+    let skip_rings = one && std::env::var("RING_BRACES").is_ok_and(|v| v == "0");
     for br in &def.braces {
+        if skip_rings && br.name.starts_with("ring_") {
+            continue;
+        }
+        // (`BRACES=0`, a measurement: one tier without any lumped shear panel.)
+        if one && std::env::var("BRACES").is_ok_and(|v| v == "0") {
+            continue;
+        }
         let mat = grades.get(&br.grade)?;
         // The frame's nodes (a shear panel's corners are the frame's).
         let is_frame: Vec<bool> = sk

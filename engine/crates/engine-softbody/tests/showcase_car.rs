@@ -3976,6 +3976,84 @@ fn q_roof_crush(car: &Car) -> f32 {
         force_census(&s, b, "q", Some(&f0));
     }
     let peak = curve.iter().map(|c| c.1).fold(0.0f32, f32::max);
+    // `Q_CUT=<y>`: the roof's load path at the end, the vertical force each
+    // beam carries across the horizontal plane at height `y` (m, e.g. the
+    // belt), summed by member or part pair: what holds the platen up.
+    if let (Ok(v), Some(b)) = (std::env::var("Q_CUT"), car.built) {
+        let yc: f32 = v.parse().unwrap_or(0.95);
+        let sk = &b.skeleton;
+        let n = sk.nodes.len();
+        let mut keys: Vec<&String> = b.groups.keys().collect();
+        keys.sort();
+        let label = |a: u32, c: u32| -> String {
+            for k in &keys {
+                let g = &b.groups[*k];
+                if g.contains(&a) && g.contains(&c) {
+                    return (*k).clone();
+                }
+            }
+            let (pa, pc) = (
+                &sk.parts[sk.nodes[a as usize].part as usize],
+                &sk.parts[sk.nodes[c as usize].part as usize],
+            );
+            if pa == pc {
+                format!("~{pa}")
+            } else {
+                format!("~{pa}/{pc}")
+            }
+        };
+        let mut by: std::collections::BTreeMap<String, f32> = Default::default();
+        let mut total = 0.0;
+        for bm in s.beams.iter().filter(|b| !b.broken) {
+            let (a, c) = (bm.a as usize, bm.b as usize);
+            if a >= n || c >= n {
+                continue;
+            }
+            let (pa, pc) = (s.nodes[a].pos, s.nodes[c].pos);
+            if (pa.y - yc) * (pc.y - yc) >= 0.0 {
+                continue;
+            }
+            // The upper node's pull down on the lower part: the beam's
+            // force (positive in tension) along it, its vertical share.
+            let (up, lo) = if pa.y > pc.y { (pa, pc) } else { (pc, pa) };
+            let d = (up - lo).normalize();
+            // Compression (force < 0) holds the roof up: + upward on it.
+            let fy = -bm.force * d.y;
+            let mut key = label(bm.a, bm.b);
+            if key == "~body" {
+                // (The skin's by where it is: side, along the car in 0.4 m.)
+                let m = 0.5 * (pa + pc);
+                key = format!(
+                    "~body {} z{:.1}",
+                    if m.x > 0.0 { "L" } else { "R" },
+                    (m.z / 0.4).floor() * 0.4
+                );
+            }
+            if std::env::var("Q_CUT_WHO").is_ok() && fy.abs() > 1500.0 {
+                eprintln!(
+                    "(q)   {key}: {:.1} kN, {} {} at {:.2?} to {:.2?} (spawn {:.2?})",
+                    fy / 1e3,
+                    bm.a,
+                    bm.b,
+                    pa,
+                    pc,
+                    sk.nodes[a].p
+                );
+            }
+            *by.entry(key).or_default() += fy;
+            total += fy;
+        }
+        let mut v: Vec<(String, f32)> = by.into_iter().filter(|x| x.1.abs() > 200.0).collect();
+        v.sort_by(|x, y| y.1.abs().total_cmp(&x.1.abs()));
+        eprintln!(
+            "(q) across y {yc:.2}: {:.1} kN up in all; by member {:?}",
+            total / 1e3,
+            v.iter()
+                .take(18)
+                .map(|(k, f)| format!("{k} {:.1}", f / 1e3))
+                .collect::<Vec<_>>()
+        );
+    }
     if let (Ok(_), Some(b)) = (std::env::var("Q_DIAG"), car.built) {
         let mut v: Vec<(String, f32)> = b
             .groups
