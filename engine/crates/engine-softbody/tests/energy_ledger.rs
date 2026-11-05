@@ -107,9 +107,8 @@ fn ledger_closes_in_a_sedan_rear_end() {
 
 /// The showcase car into another's front door, 80 km/h, 0.7 m forward of the
 /// door's middle (`showcase_car.rs` test u, `TB_DZ=0.7`), with two-body contact
-/// (jbeam-semantics-spec.md §10.3) on both cars. With RoR's rule (the `.truck`
-/// default) the same crash's contacts inject energy: reported, not asserted (open:
-/// the rules are to be unified once the T-bone leak is fixed).
+/// (jbeam-semantics-spec.md §10.3, the default). With RoR's rule (the RoR-compatible
+/// profile) the same crash's contacts inject energy: reported, not asserted.
 #[test]
 fn ledger_closes_in_the_showcase_t_bone_off_the_door_middle() {
     let b = build(
@@ -169,7 +168,10 @@ fn ledger_closes_in_the_showcase_t_bone_off_the_door_middle() {
         ke_striker * 1e-3
     );
     // RoR's rule: reported.
-    let mut w = ExplicitBeamsWorld::new(vec![struck.clone(), striker.clone()]);
+    let (mut ror_a, mut ror_b) = (struck.clone(), striker.clone());
+    ror_a.two_body_contact = false;
+    ror_b.two_body_contact = false;
+    let mut w = ExplicitBeamsWorld::new(vec![ror_a, ror_b]);
     w.enable_ledger();
     for _ in 0..60 {
         w.frame(33);
@@ -190,4 +192,73 @@ fn ledger_closes_in_the_showcase_t_bone_off_the_door_middle() {
         l.beam_dissipation(),
         l.start - l.mechanical()
     );
+}
+
+/// Where a coasting pressure-tyre car's energy goes (opt-in, `RUBBLE_BEAMNG_MODS`):
+/// reported (spec §31's rolling-resistance question).
+#[test]
+fn coasting_pressure_tyres_energy_split() {
+    use engine_softbody::explicit_beams::JbeamWheels;
+    use engine_softbody::jbeam::load_jbeam;
+    let Ok(mods) = std::env::var("RUBBLE_BEAMNG_MODS") else {
+        return;
+    };
+    let m = std::path::Path::new(&mods);
+    for (dir, name, pc) in [
+        ("monster_supercar/vehicles", "supercar", "config.pc"),
+        (
+            "qlourie_astral_r/vehicles",
+            "qlourie_astral_r",
+            "wrc17_tarmac_balanced.pc",
+        ),
+    ] {
+        let dir = m.join(dir);
+        let Ok(files) = engine_softbody::jbeam::read_vehicle_dir(&dir, name) else {
+            continue;
+        };
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let pcs = std::fs::read_to_string(dir.join(name).join(pc)).unwrap();
+        let desc = load_jbeam(&refs, Some(&pcs)).unwrap();
+        for v0 in [9.0f32, 25.0] {
+            let settings = ExplicitBeamsSettings {
+                drag: false,
+                turbulence: false,
+                ..Default::default()
+            };
+            let v = Vec3::new(0.0, 0.0, v0);
+            let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(
+                &desc,
+                JbeamWheels::Pressure,
+                Vec3::ZERO,
+                v,
+                settings,
+            )
+            .unwrap();
+            let f = engine_softbody::pack::forward_axis(&desc);
+            let turn = glam::Quat::from_rotation_y(-f.x.atan2(f.z));
+            for n in &mut s.nodes {
+                n.pos = turn * n.pos;
+            }
+            let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+            for n in &mut s.nodes {
+                n.pos.y -= low - 0.02;
+            }
+            s.roll_tyres(v);
+            let mut w = ExplicitBeamsWorld::new(vec![s]);
+            for _ in 0..30 {
+                w.frame(33);
+            }
+            w.enable_ledger();
+            for _ in 0..60 {
+                w.frame(33);
+            }
+            report(
+                &format!("{name} coasting from {v0} m/s, 0.5-1.5 s"),
+                w.ledger.as_ref().unwrap(),
+            );
+        }
+    }
 }

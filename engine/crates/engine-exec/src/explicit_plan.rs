@@ -1155,6 +1155,16 @@ impl ExplicitUpload {
         // kernel's vvPassSmall.)
         let vv_run = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * total_cp));
+        // Two-body contact (jbeam-semantics-spec.md §10.3): per node its force at
+        // the contact pass's start.
+        let two_body = nv > 1 && vehicles.iter().any(|v| v.two_body_contact);
+        let vv_snap = if two_body {
+            let at = beams.len() as u32;
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
+            at
+        } else {
+            0
+        };
         // JBeam damping filters: (last rate, last output, a, b) each.
         let filter_base = beams.len();
         beams.extend(filters.iter().map(|f| [f.u, f.y, f.a, f.b]));
@@ -1210,7 +1220,7 @@ impl ExplicitUpload {
         });
         // Vehicle contact's two-body mass splitting (jbeam-semantics-spec.md §10.3):
         // per node its triangle-hit count, then VV_SPLIT_SLOTS − 1 point-hit slots.
-        let vv_split = if vehicles.iter().any(|v| v.two_body_contact) {
+        let vv_split = if two_body {
             let at = acc_init.len() as u32;
             acc_init.extend(std::iter::repeat_n(0, VV_SPLIT_SLOTS * total_nodes));
             at
@@ -1362,6 +1372,7 @@ impl ExplicitUpload {
             tri_excl_base,
             cap_at as u32,
             vv_split,
+            vv_snap,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [

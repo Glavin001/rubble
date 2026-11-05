@@ -830,12 +830,11 @@ pub struct ExplicitBeams {
     /// lowest node (a tyre's contact patch) under the ground it stands on
     /// ([`Self::spawn_clearance`]).
     pub rest_pose: Option<f32>,
-    /// Vehicle contact's two-body share (spec §10.3): a hit where this vehicle is
-    /// the owner or the partner cancels only the share m_t/(m_h + m_t) of the
-    /// contacter's force, the share that makes the relative normal acceleration
-    /// zero. Off (RoR's `.truck` content that does not opt in): the whole force,
-    /// as against a static surface (bit for bit as before). On in JBeam mode (so
-    /// any pair with a JBeam vehicle, e.g. the FMVSS 214 barrier, uses it).
+    /// Vehicle contact's two-body rule (jbeam-semantics-spec.md §10.3): a hit where
+    /// this vehicle is the owner or the partner splits masses per turn and cancels
+    /// the pair's relative acceleration. On in JBeam mode; off (both vehicles): RoR's
+    /// rule, the contacter's whole force as against a static surface (bit for bit
+    /// as before; the `.truck` default until the T-bone leak is fixed).
     pub two_body_contact: bool,
     /// JBeam mode's damping filters (`dampCutoffHz`), by [`Beam::shock`] − 1.
     pub damp_filters: Vec<DampFilter>,
