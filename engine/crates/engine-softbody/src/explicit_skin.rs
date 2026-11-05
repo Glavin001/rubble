@@ -419,6 +419,208 @@ pub fn side_key(
     (d2.to_bits() & !KEY_LOW) | ((t as u32 & 0xFFF) << 2) | code
 }
 
+// --- The leak metric: crossings of the live skin --------------------------------
+
+/// The T-bone leak metric (jbeam-semantics-spec.md §10.3, fifth pass;
+/// `vehicle-acceptance-criteria.md` A1): a tracked point (a striking car's
+/// node) has *leaked* when it has penetrated a struck car's live skin: when its
+/// net count of crossings of the skin's live triangles, inward (front to back by
+/// the closed component's outward orientation) less outward, is not zero (−1: it
+/// went in through an opening and out through the skin, or through a triangle the
+/// crush has turned over). Followed step by step from a spawn where every point is
+/// outside. A step's crossings are the integer jump of the point's winding
+/// number: the change of each nearby triangle's solid angle seen from the point
+/// (about 4π when the point passes through it, small otherwise), summed and
+/// rounded (the sum of a shared edge's two triangles counts a pass at the edge
+/// once), and put to the dead or the live triangles by their larger share. A crossing of a dead (broken, §18)
+/// triangle is not counted: a point that passes through the opening a door leaves
+/// when its shut-line triangles die is in a real opening, not through the skin.
+/// With nothing dead the net count is the winding number itself, so it agrees with
+/// the old metric (|winding| > 0.5).
+///
+/// A measurement for the tests (f64 throughout), not in the solver.
+#[derive(Clone, Debug)]
+pub struct LeakTracker {
+    /// Per point: inward minus outward crossings of live triangles.
+    pub net: Vec<i32>,
+    /// Crossings of live triangles counted, inward and outward.
+    pub inward: u64,
+    pub outward: u64,
+    /// Crossings of dead triangles seen (not counted).
+    pub through_dead: u64,
+    /// The last update's crossings: (point, triangle, +1 inward / −1 outward / 0
+    /// through a dead triangle).
+    pub events: Vec<(u32, u32, i8)>,
+    prev_pts: Vec<Vec3>,
+    prev_skin: Vec<Vec3>,
+    grid: std::collections::HashMap<(i32, i32, i32), Vec<u32>>,
+    stamp: Vec<u32>,
+    epoch: u32,
+}
+
+/// The broad phase's cell (m).
+const LEAK_CELL: f32 = 0.25;
+/// Each triangle's box is grown by this much (m) so that a point passing close by
+/// an edge sees both triangles' solid angles change (their sum is the crossing).
+const LEAK_MARGIN: f32 = 0.05;
+
+fn leak_cell(p: Vec3) -> (i32, i32, i32) {
+    let q = p / LEAK_CELL;
+    (q.x.floor() as i32, q.y.floor() as i32, q.z.floor() as i32)
+}
+
+impl LeakTracker {
+    /// A tracker of points `pts` against a skin at `skin_pos` (both world positions,
+    /// every point outside).
+    pub fn new(pts: &[Vec3], skin_pos: &[Vec3]) -> Self {
+        Self {
+            net: vec![0; pts.len()],
+            inward: 0,
+            outward: 0,
+            through_dead: 0,
+            events: Vec::new(),
+            prev_pts: pts.to_vec(),
+            prev_skin: skin_pos.to_vec(),
+            grid: Default::default(),
+            stamp: Vec::new(),
+            epoch: 0,
+        }
+    }
+
+    /// One step: the crossings between the last positions and these. `tris` and
+    /// `topo` are the skin's triangles and topology (its orientation; triangles of
+    /// open components are not tracked), `dead` their dead flags now.
+    pub fn update(
+        &mut self,
+        pts: &[Vec3],
+        skin_pos: &[Vec3],
+        tris: &[[u32; 3]],
+        dead: &[bool],
+        topo: &SkinTopology,
+    ) {
+        self.grid.clear();
+        self.events.clear();
+        self.stamp.resize(tris.len(), 0);
+        for (t, tri) in tris.iter().enumerate() {
+            if topo.orient[t] == 0.0 {
+                continue;
+            }
+            let mut lo = Vec3::splat(f32::INFINITY);
+            let mut hi = Vec3::splat(f32::NEG_INFINITY);
+            for &i in tri {
+                for p in [self.prev_skin[i as usize], skin_pos[i as usize]] {
+                    lo = lo.min(p);
+                    hi = hi.max(p);
+                }
+            }
+            let (a, b) = (
+                leak_cell(lo - Vec3::splat(LEAK_MARGIN)),
+                leak_cell(hi + Vec3::splat(LEAK_MARGIN)),
+            );
+            for x in a.0..=b.0 {
+                for y in a.1..=b.1 {
+                    for z in a.2..=b.2 {
+                        self.grid.entry((x, y, z)).or_default().push(t as u32);
+                    }
+                }
+            }
+        }
+        for (k, &p1) in pts.iter().enumerate() {
+            let p0 = self.prev_pts[k];
+            let (a, b) = (leak_cell(p0.min(p1)), leak_cell(p0.max(p1)));
+            self.epoch = self.epoch.wrapping_add(1);
+            // The change of the point's winding number over the nearby triangles,
+            // live and dead apart, and the triangle that changed most.
+            let (mut live, mut gone) = (0.0f64, 0.0f64);
+            let mut top = (0.0f64, 0u32);
+            for x in a.0..=b.0 {
+                for y in a.1..=b.1 {
+                    for z in a.2..=b.2 {
+                        let Some(list) = self.grid.get(&(x, y, z)) else {
+                            continue;
+                        };
+                        for &t in list {
+                            let t = t as usize;
+                            if self.stamp[t] == self.epoch {
+                                continue;
+                            }
+                            self.stamp[t] = self.epoch;
+                            let tri = tris[t];
+                            let v0 = tri.map(|i| self.prev_skin[i as usize].as_dvec3());
+                            let v1 = tri.map(|i| skin_pos[i as usize].as_dvec3());
+                            let dw = (solid_angle(p1.as_dvec3(), v1)
+                                - solid_angle(p0.as_dvec3(), v0))
+                                * topo.orient[t] as f64
+                                / (4.0 * std::f64::consts::PI);
+                            if dw.abs() > top.0.abs() {
+                                top = (dw, t as u32);
+                            }
+                            if dead.get(t).copied().unwrap_or(false) {
+                                gone += dw;
+                            } else {
+                                live += dw;
+                            }
+                        }
+                    }
+                }
+            }
+            // A step's crossing goes to the larger share (a pass at the rim of an
+            // opening splits it between a dead and a live triangle).
+            let total = (live + gone).round() as i32;
+            let n = if gone.abs() > live.abs() { 0 } else { total };
+            if total != 0 && n == 0 {
+                self.through_dead += total.unsigned_abs() as u64;
+                self.events.push((k as u32, top.1, 0));
+            }
+            if n != 0 {
+                self.net[k] += n;
+                if n > 0 {
+                    self.inward += n as u64;
+                } else {
+                    self.outward += (-n) as u64;
+                }
+                self.events.push((k as u32, top.1, n.signum() as i8));
+            }
+        }
+        self.prev_pts.clear();
+        self.prev_pts.extend_from_slice(pts);
+        self.prev_skin.clear();
+        self.prev_skin.extend_from_slice(skin_pos);
+    }
+
+    /// The leaked points (net crossings not zero).
+    pub fn leaked(&self) -> Vec<usize> {
+        (0..self.net.len()).filter(|&k| self.net[k] != 0).collect()
+    }
+
+    /// Point `p`'s distance to the nearest live triangle (its penetration depth
+    /// when it has leaked).
+    pub fn depth(p: Vec3, tris: &[[u32; 3]], pos: &[Vec3], dead: &[bool]) -> f32 {
+        let mut best = f32::INFINITY;
+        for (t, tri) in tris.iter().enumerate() {
+            if dead.get(t).copied().unwrap_or(false) {
+                continue;
+            }
+            let [a, b, c] = tri.map(|i| pos[i as usize]);
+            let (q, _, _) = closest_on_triangle(p, a, b, c);
+            best = best.min((p - q).length());
+        }
+        best
+    }
+}
+
+/// The solid angle of triangle `v` seen from `p` (Van Oosterom and Strackee),
+/// in (−2π, 2π]: negative in front of its normal (v₁ − v₀) × (v₂ − v₀), positive
+/// behind; it jumps by about 4π when the point passes through the triangle and
+/// changes continuously otherwise.
+fn solid_angle(p: glam::DVec3, v: [glam::DVec3; 3]) -> f64 {
+    let (a, b, c) = (v[0] - p, v[1] - p, v[2] - p);
+    let (la, lb, lc) = (a.length(), b.length(), c.length());
+    let num = a.dot(b.cross(c));
+    let den = la * lb * lc + a.dot(b) * lc + a.dot(c) * lb + b.dot(c) * la;
+    2.0 * num.atan2(den)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,5 +736,39 @@ mod tests {
             let a = angle_atan2(y * 3.0, x * 3.0);
             assert!((a - y.atan2(x)).abs() < 2e-5, "{th}: {a}");
         }
+    }
+
+    #[test]
+    fn the_leak_tracker_counts_crossings_of_live_triangles_only() {
+        let (tris, pos) = cube();
+        let skin = SkinTopology::build(&tris, &pos);
+        let mut dead = vec![false; tris.len()];
+        // Two points: one through the bottom face (z = 0), one through the top.
+        let path = |z: f32| [Vec3::new(0.3, 0.6, z), Vec3::new(0.6, 0.3, 1.0 - z)];
+        let mut lt = LeakTracker::new(&path(-0.2), &pos);
+        // The top face's triangles (4 → 5 → 7, 4 → 7 → 6) dead before anything moves.
+        dead[2] = true;
+        dead[3] = true;
+        for k in 1..=10 {
+            lt.update(&path(-0.2 + 0.05 * k as f32), &pos, &tris, &dead, &skin);
+        }
+        assert_eq!(
+            lt.net,
+            vec![1, 0],
+            "in through the live bottom, the dead top"
+        );
+        assert_eq!((lt.inward, lt.outward, lt.through_dead), (1, 0, 1));
+        // Back out the way each came.
+        for k in (0..10).rev() {
+            lt.update(&path(-0.2 + 0.05 * k as f32), &pos, &tris, &dead, &skin);
+        }
+        assert_eq!(lt.net, vec![0, 0]);
+        assert_eq!(lt.leaked(), Vec::<usize>::new());
+        // The skin moving through a resting point counts too.
+        let p = [Vec3::new(0.5, 0.5, 1.1)];
+        let mut lt = LeakTracker::new(&p, &pos);
+        let lifted: Vec<Vec3> = pos.iter().map(|&q| q + Vec3::Z * 0.2).collect();
+        lt.update(&p, &lifted, &tris, &vec![false; tris.len()], &skin);
+        assert_eq!(lt.leaked(), vec![0]);
     }
 }

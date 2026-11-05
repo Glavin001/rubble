@@ -3756,6 +3756,34 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         &struck.triangles.iter().map(|t| t.nodes).collect::<Vec<_>>(),
         &struck.positions(),
     );
+    if std::env::var("TB_LEAKS").as_deref() == Ok("topo") {
+        let o = &skin_topo.orient;
+        let mut bad = Vec::new();
+        for (t, tri) in tris.iter().enumerate() {
+            for k in 0..3 {
+                let u = skin_topo.across[t][k];
+                if u == engine_softbody::explicit_skin::OPEN {
+                    continue;
+                }
+                let (a, c) = (tri[k], tri[(k + 1) % 3]);
+                let tu = tris[u as usize];
+                let same = (0..3).any(|j| tu[j] == a && tu[(j + 1) % 3] == c);
+                // Consistent: the shared edge runs opposite ways after orientation.
+                if same == (o[t] * o[u as usize] > 0.0) {
+                    bad.push((t, u));
+                }
+            }
+        }
+        eprintln!(
+            "  topo: closed components {}, open triangles {}, inconsistent edges {} {:?}; 352 orient {} nodes {:?}",
+            skin_topo.closed_components,
+            o.iter().filter(|&&x| x == 0.0).count(),
+            bad.len(),
+            &bad[..bad.len().min(10)],
+            o[352],
+            tris[352]
+        );
+    }
     let mut w = ExplicitBeamsWorld::new(vec![struck, striker]);
     if std::env::var("TB_THROTTLE").as_deref() == Ok("0") {
         w.throttle = false;
@@ -3770,6 +3798,13 @@ fn t_car_to_car_t_bone_at_80_kmh() {
             .count()
     };
     assert_eq!(inside(&w), 0);
+    // The leak metric (spec §10.3, fifth pass): striker nodes whose net crossings
+    // of the struck car's live skin, inward less outward, are not zero.
+    let mut leak = engine_softbody::explicit_skin::LeakTracker::new(
+        &w.vehicles[1].positions(),
+        &w.vehicles[0].positions(),
+    );
+    let mut worst_leak = (0usize, 0.0f32, 0.0f32, 0usize);
     let ke = |s: &ExplicitBeams| -> f64 {
         s.nodes
             .iter()
@@ -3797,6 +3832,28 @@ fn t_car_to_car_t_bone_at_80_kmh() {
                 .map(|s| s.beams.iter().map(|b| (b.rest, b.broken)).collect())
                 .collect();
             w.step();
+            leak.update(
+                &w.vehicles[1].positions(),
+                &w.vehicles[0].positions(),
+                &tris,
+                &w.vehicles[0].tri_dead,
+                &skin_topo,
+            );
+            if let Ok(list) = std::env::var("TB_XTRACE") {
+                // Each listed striker node's crossings of the struck skin.
+                let ids: Vec<u32> = list.split(',').filter_map(|x| x.parse().ok()).collect();
+                for &(k, t, e) in &leak.events {
+                    if ids.contains(&k) {
+                        eprintln!(
+                            "  xtrace step {} node {k} tri {t} {} (net {})",
+                            w.steps,
+                            ["through dead", "inward", "outward"]
+                                [(e as i32).rem_euclid(3) as usize],
+                            leak.net[k as usize]
+                        );
+                    }
+                }
+            }
             if let Ok(list) = std::env::var("TB_HTRACE") {
                 // Candidate generation for striker node `id` (jbeam-semantics-spec.md
                 // §10.3 leak notes): every struck triangle whose prism holds it
@@ -3932,6 +3989,58 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         }
         if f % 6 == 5 {
             let k = inside(&w);
+            let ids = leak.leaked();
+            if ids.len() > worst_leak.0 {
+                let pos = w.vehicles[0].positions();
+                let pb = w.vehicles[1].positions();
+                let d: Vec<f32> = ids
+                    .iter()
+                    .map(|&i| {
+                        engine_softbody::explicit_skin::LeakTracker::depth(
+                            pb[i],
+                            &tris,
+                            &pos,
+                            &w.vehicles[0].tri_dead,
+                        )
+                    })
+                    .collect();
+                let deep = d.iter().filter(|&&x| x > r).count();
+                let most = d.iter().copied().fold(0.0f32, f32::max);
+                worst_leak = (ids.len(), (f + 1) as f32 / 60.0, most, deep);
+            }
+            if std::env::var("TB_LEAKS").as_deref() == Ok("miss") {
+                // Nodes the winding number holds inside that the crossings do not.
+                let pos = w.vehicles[0].positions();
+                let skin: Vec<[Vec3; 3]> =
+                    tris.iter().map(|t| t.map(|i| pos[i as usize])).collect();
+                for (i, &p) in w.vehicles[1].positions().iter().enumerate() {
+                    let wn = winding(p, &skin);
+                    if wn.abs() > 0.5 && leak.net[i] == 0 {
+                        let d = engine_softbody::explicit_skin::LeakTracker::depth(
+                            p,
+                            &tris,
+                            &pos,
+                            &w.vehicles[0].tri_dead,
+                        );
+                        eprintln!(
+                            "    miss node {i}: winding {wn:.2} net {} depth {d:.3}; open triangles {}",
+                            leak.net[i],
+                            skin_topo.orient.iter().filter(|&&o| o == 0.0).count()
+                        );
+                    }
+                }
+            }
+            if std::env::var("TB_LEAKS").is_ok() {
+                eprintln!(
+                    "  t {:.2}: leaked (live-skin crossings) {} [{:?}], winding inside {k}; crossings in {} out {} through dead {}",
+                    (f + 1) as f32 / 60.0,
+                    ids.len(),
+                    &ids[..ids.len().min(12)],
+                    leak.inward,
+                    leak.outward,
+                    leak.through_dead
+                );
+            }
             if std::env::var("TB_LEAKED").is_ok() && k > 0 {
                 let pos = w.vehicles[0].positions();
                 let skin: Vec<[Vec3; 3]> =
@@ -4075,11 +4184,22 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         ke0[1] / 1e3,
         (ke(&w.vehicles[0]) + ke(&w.vehicles[1])) / 1e3
     );
+    eprintln!(
+        "(t) leaked striker nodes (net crossings of the live struck skin not 0): at most {} of {total} (at {:.2} s; deepest {:.3} m, {} past the {r} m band); crossings in {} out {}, through dead triangles {} (not counted); the winding number's count (old metric) {}",
+        worst_leak.0,
+        worst_leak.1,
+        worst_leak.2,
+        worst_leak.3,
+        leak.inward,
+        leak.outward,
+        leak.through_dead,
+        worst_inside.0
+    );
     assert!(w.vehicles.iter().all(finite));
     assert!(
-        worst_inside.0 * 100 <= total,
-        "{} of the striker's {total} nodes got inside the struck car's skin",
-        worst_inside.0
+        worst_leak.0 * 100 <= total,
+        "{} of the striker's {total} nodes penetrated the struck car's live skin",
+        worst_leak.0
     );
     if off_at.is_some() {
         assert!(

@@ -489,6 +489,41 @@ struck triangle whose prism holds the node: δ, in band, its contact throttle, d
   door has opened there) or the metric should take the live skin plus the opening;
   (2) the prism gap at folds, with a side kept per contacter from its last hit.
 
+**Leak, fifth pass: the metric corrected (2026-11-05; a refinement of the acceptance
+criterion, `vehicle-acceptance-criteria.md` A1).** The old metric counted a striker
+node as leaked when the generalised winding number of the struck car's whole skin,
+dead triangles included, held it inside (|w| > 0.5). Once the latch lets go at
+0.43 m and 0.7 m, the body–door shut-line triangles die (§18) and stop contacting, as
+specified, so the door has opened there; a striker node in that gap is in a real
+opening, but the winding number still counted it. **The criterion now:** a node has
+leaked when it has penetrated the live skin, that is, when its net crossings of the
+struck skin's live triangles since spawn, inward less outward (by the closed
+lattice's outward orientation), are not zero. `explicit_skin::LeakTracker` follows
+it step by step: a step's crossings are the integer jump of the node's winding
+number over the nearby triangles (each triangle's solid angle changes by about 4π
+when the node passes through it), put to the live or the dead triangles by their
+larger share; a crossing of a dead triangle is not counted. With nothing dead it is
+the winding number's own count (door middle, RoR's rule: 13 and 13 at the peak). A
+node with net −1 went in through an opening and out through the skin, or through a
+triangle the crush turned over; both are penetrations and count. The test also
+reports the deepest leaked node's distance to the live skin, how many are past the
+contact band, the crossings through dead triangles, and the old winding count.
+
+Today's showcase car (1,165 striker nodes, limit 11; `showcase_car.rs` test `t`, CPU;
+TB_DZ 0 / 0.43 / 0.7 m; most striker nodes leaked at a sampled frame, the old
+winding count in brackets):
+
+| Rule | 0 m | 0.43 m | 0.7 m |
+|---|---|---|---|
+| RoR's | 13 (13) | 43 (149) | 85 (96) |
+| Two-body (§10.3) | 101 (118) | 134 (211) | 135 (135) |
+
+Through dead triangles: 0 / 960 / 1,085 crossings with RoR's rule (nodes moving in
+and out of the opening). Traced leaked nodes at 0.7 m (`TB_XTRACE=<nodes>`) cross
+live triangles around the fold of the crushed door (572, 564, 566, 568, 606) in and
+out every few steps: they sit on the plane inside the contact band, where the hit's
+side vote decides.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,

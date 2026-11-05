@@ -37,6 +37,7 @@ The goal (user, 2026-11-05): BeamNG-quality destructible vehicles in Rubble, aut
     | Closed lattice, spanning triangles breakable | at most 6 of 1,141 (no tyre nodes), 0 dead triangles |
 
     Cutting the skin at every shut line leaves hem pieces and slivers whose neighbours pass each other. The lattice's spanning triangles do not.
+  - **The T-bone leak criterion (test `t`, refined 2026-11-05).** At most 1 % of the striker's nodes have penetrated the struck car's *live* skin: a node counts when its net crossings of live collision triangles since spawn, inward less outward, are not zero (`explicit_skin::LeakTracker`, `jbeam-semantics-spec.md` §10.3, fifth pass). A node that passes through the opening left by dead shut-line triangles (§18: the door has come away there) is in a real opening and does not count. This replaces "inside the struck skin by its winding number, dead triangles included", which counted those openings; the test still reports that number beside the new one. With nothing dead the two agree.
   - Several thousand beams in total.
 - **A2. Stable.**
   - The rest and post-crash settle tests pass.
