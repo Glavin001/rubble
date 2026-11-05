@@ -419,20 +419,29 @@ shapes) and the profile. The tools stay the same.
 
 * The side pole's intrusion is the deepest door node near the pole across
   the car in the far side's frame (the right sill and the tunnel): the car
-  spins 55–75° round the pole, so world x would measure the spin. The k test
-  takes `K_APER` (door-opening pairs) and `K_VEC` (group means, the worst
-  roof node and its beams); the sweep `SWEEP_LIST=1` lists the offsets that
-  passed through; the panels-stay-on test `M_KMH`.
+  spins 55–75° round the pole, so world x would measure the spin. The sweep
+  `SWEEP_LIST=1` lists the offsets that passed through; the boot-lid test
+  `M_KMH`.
 * `cargo test --release -p engine-softbody --test showcase_car -- --nocapture`:
-  counts, closed skins, mass, symmetry, the visual binding, materials (the
-  tiers' scales, the rails' and sills' k·L, ζ), stillness at rest, torsion three
-  ways (the body-in-white at the shock-tower mounts with the suspension cut off;
-  at the shock tops; at the hubs with the springs on their stops; beside the
-  E36's when `engine/local-vehicles` has it), a door point load, and the scenes
-  (rest, wall, side pole, centre pole, roll-over drop, 120 km/h wall, door pull,
-  settling after the wall); `--ignored` adds the pole sweep (`SWEEP=front|side`,
-  `SWEEP_KMH=60` for a subset), the crumple-zone damage report and the
-  panels-stay-on check at 56 km/h.
+  every physical assertion comes from `crash-reference-targets.md` (measured
+  NHTSA data, Campbell's model, FMVSS) or is exact physics. Structure: counts
+  (≥ 1,000 nodes), closed skins, the kerb mass, symmetry, the visual binding,
+  the tiers (the frame unscaled, every beam under-damped), torsion
+  (reported). Ledgers (§4.1–4.2): every scene's nodes' momentum change is its
+  external impulses (the contacts recomputed as the solver's node pass
+  applies them, gravity, drag) to f32 rounding, the internal forces sum to
+  zero, the mechanical energy (a tenth of a second's mean) never rises by
+  more than the car's standing-still chatter, and it loses at least what the
+  beams lost to yield and fracture: at rest (`a`, no yield either), the
+  56 km/h wall (`b`, Low and Medium), the poles (`c`, `d`), the 15 m drop
+  (`e`), the 120 km/h wall (`f`: Campbell's b1 inside the measured spread)
+  and every NCAP wall of `n`. A door pull as large as its joints' summed
+  break strengths tears it off (`g`); the crashed car comes as still as it
+  stands (`h`); the rear suspension keeps its geometry in the 56 km/h wall
+  (`k`); the boot lid holds within FMVSS 206 (`m`). Reference tests: `n`
+  (frontal NCAP), `o` (side pole), `p` (FMVSS 214 door), `q` (FMVSS 216a
+  roof). `--ignored` adds the pole sweep (`SWEEP=front|side`,
+  `SWEEP_KMH=60` for a subset).
 * `cargo test --release -p engine-softbody --test showcase_rest_wobble -- --ignored --nocapture`:
   the materials and rest wobble beside real Rigs of Rods cars.
 * `cargo test --release -p engine-webgpu --test showcase_car_gpu`: GPU against CPU.
