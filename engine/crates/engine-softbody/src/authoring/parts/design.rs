@@ -75,13 +75,14 @@ pub struct Styling {
 pub fn sedan_styling(def: &VehicleDef) -> Styling {
     let side = SectionShape {
         lower: 0.11,
-        d_lower: -0.03,
+        d_lower: -0.065,
         crease: f32::NAN,
-        a_below: 0.17,
-        a_above: 0.45,
-        d_top: -0.05,
+        a_below: 0.04,
+        a_above: 0.85,
+        d_top: -0.06,
         m_top: 0.25,
         tuck: 0.07,
+        bow: 2.4,
     };
     // An upright fascia: its widest line high (at the lamps' lower edge), the
     // lower bumper drawn back under it (a shorter-looking overhang), and a
@@ -95,6 +96,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         d_top: -0.10,
         m_top: 0.55,
         tuck: 0.04,
+        bow: 0.0,
     };
     let tail = SectionShape {
         lower: 0.08,
@@ -105,6 +107,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         d_top: -0.03,
         m_top: 0.2,
         tuck: 0.07,
+        bow: 0.0,
     };
     let body = BodyStyle {
         // The shoulder: one line from above the headlamp, level through the
@@ -136,7 +139,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         step_along: 0.035,
         nose_ramp: 0.045,
         tail_ramp: 0.04,
-        rear_deck: [0.85, 1.25, 0.045, 0.012],
+        rear_deck: [0.85, 1.25, 0.045, 0.035],
         hood_crease: [0.22, 0.60, 0.014, 0.004],
         hood_z: [3.36, 4.70],
         deck_lip: [0.026, 0.24, 0.60],

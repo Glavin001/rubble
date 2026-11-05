@@ -287,6 +287,11 @@ The character lines are:
   kicks up over the rear wheel into the tail lamps at about 0.90 m
   (`BodyStyle::crease`; a 25–30° change of slope). Above it the side leans in
   to the belt.
+* **Flanks.** The side is not a slab: below the crease it bows, tucking
+  in 6.5 cm toward the sill with its steepest turn low (`SectionShape::bow`,
+  the lower line's slope as a multiple of the mean), so the lower doors face
+  the floor and read darker; above the crease the shoulder leans in hard
+  (`a_above` 0.85) and catches the sky, a bright band over the handles.
 * **Lower-door sculpture.** Under a feature line rising from 0.43 m behind the
   front arch to 0.60 m ahead of the rear one, the side steps in 2.4 cm with a
   crisp upper edge, easing out toward the sill (`BodyStyle::scoop`). A band row
@@ -350,7 +355,7 @@ opening's edge, the doors' belt edges included, is black rubber.
 
 | Part | Construction |
 |---|---|
-| Body surface (`parts/body.rs`) | A *band* is swept round the plan outline: a section per arc length θ, blended between side, nose and tail shapes. The crease and lower line fall on fixed rows, so their highlights run straight. A *lid* (height field over plan view) runs from the band's top edge over a ramp (tumblehome, fender tops) to the profile's top line and crown. The lid is relaxed by a Laplacian. The profile's curves are blurred (σ 8 cm) so the clearcoat shows no ripples at their control points. Grid: 2.2 cm across the sections, 3.5 cm along the car (twice that at the distant LOD). |
+| Body surface (`parts/body.rs`) | A *band* is swept round the plan outline: a section per arc length θ, blended between side, nose and tail shapes. The crease and lower line fall on fixed rows, so their highlights run straight. A *lid* (height field over plan view) runs from the band's top edge over a ramp (tumblehome, fender tops) to the profile's top line and crown. The ramp's round into the top is a quartic with zero curvature at both ends (`body::rail`) and the crown fades as (1 − u²)³, so no line of light runs along the roof rail or the fender tops. The rear deck meets the greenhouse in a 3.5 cm smooth max (the C-pillar's fillet into the quarter). The lid is relaxed by a Laplacian. The profile's curves are blurred (σ 8 cm) so the clearcoat shows no ripples at their control points. Grid: 2.2 cm across the sections, 3.5 cm along the car (twice that at the distant LOD). |
 | Panels (`parts/trim.rs`, `design.rs`) | Each panel is a region (an SDF made of smooth cut lines in side, plan or arc view), made metric on the surface and clipped by marching triangles, so edges follow the curve, not the grid. Every cut is rolled (2.8 mm radius) into a 12 mm wall and a return flange, set back 2.2 mm, giving a 4.5 mm shut line. Arch lips get an 8 mm roll. The inside of a panel renders dark. Panels: bonnet, cowl (black), lip and bumper front, fenders, doors, deck lid, valance and bumper rear, sills (black), body. |
 | Glass | The body surface over each opening, set 6 mm in, with a black frit band printed inside the windscreen and backlight. The side windows sit in black sash frames, with a black B-pillar applique (one half on each door) and a chrome belt moulding. The windscreen is laminated (it cracks); the side glass is tempered (it shatters). The rear doors', quarter lights' and backlight's glass is privacy-tinted (`mat::PRIVACY`). |
 | Lamps (`fixtures::lamp`) | A lens continuing the body surface; a housing extruded along the lamp axis; a reflector back; small projector cups with lens domes; light guides that follow the outline (the DRL ring; two tail rings; the light bar; the fog lamps' LED line). |

@@ -86,6 +86,10 @@ const RUNS = [
   ['rest_interior', 'scene=idle&freeze=0&cam=1,0.3,0.1&dist=3.6&look=0,0.25,-0.1'],
   ['rest_dash', 'scene=idle&freeze=0&cam=0.95,0.3,-0.35&dist=1.5&look=0.25,0.3,0.6'],
   ['rest_wheel', 'scene=idle&freeze=0&cam=1,0.1,0.25&dist=1.9&look=0.3,-0.25,1.3'],
+  // Surfacing close-ups: the C-pillar into the deck and shoulder, the flank's
+  // highlights from low and level.
+  ['rest_cpillar', 'scene=idle&freeze=0&cam=0.75,0.55,-0.35&dist=2.3&look=0.6,0.45,-1.0'],
+  ['rest_flank', 'scene=idle&freeze=0&cam=1,0.02,0.35&dist=4.2&look=0.4,-0.1,0'],
   ['intact_three', 'scene=idle&freeze=1.5&cam=three'],
   ['intact_front', 'scene=idle&freeze=1.5&cam=front'],
   ['intact_rear', 'scene=idle&freeze=1.5&cam=rear'],
