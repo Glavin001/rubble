@@ -87,6 +87,8 @@ struct Params {
     ingest_slot: u32,
     step: u32,
     filter: u32,
+    row_cap: u32,
+    pad: [u32; 3],
 }
 
 pub(crate) struct ExplicitVehicles {
@@ -296,8 +298,15 @@ impl ExplicitVehicles {
             ingest_slot: 1,
             step: self.windows as u32,
             filter: u32::from(self.def.categories) | u32::from(self.def.mask) << 16,
+            row_cap: self.ingest_rows().min(ingest_rows),
+            pad: [0; 3],
         };
         sim.queue().write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
+    }
+
+    /// Chunk records a window can make at most: a record per proxy shape.
+    pub fn ingest_rows(&self) -> u32 {
+        self.sims.len() as u32 * self.layout.cap.shapes
     }
 
     /// Step 1, before the rigid step: the last window's impulses as impulse records.
