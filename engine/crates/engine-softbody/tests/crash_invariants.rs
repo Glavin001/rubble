@@ -1247,18 +1247,16 @@ fn head_on_contact_speeds_within_the_band() {
 /// asked is the contact band (a **Choice**: beyond it what is drawn is not
 /// where contact happens).
 ///
-/// FAILS (2026-11-05): 204.7 / 39.8 mm (sedan wall / pole), 168.4 / 132.2 mm
-/// (sedan1). The worst are a lid's or a door's drawn edge once its shut
-/// line's skin triangle has died (the lid popped, a latch broke): it then
-/// rides its own part's nodes (`ShowcaseVisual::alt`, so it never draws a
-/// ribbon of the body's skin: [`detached_door_takes_its_edge`]), but the
-/// panels' drawn edges lie up to 0.15 m past their last node row, and no
-/// physics surface is there any more. Content: node rows at the panels'
-/// real edges (requested from the showcase car, 2026-11-05).
-/// With the shut-line triangles kept for good (no fallback) it measured
-/// 10.7 / 19.2 and 15.1 / 10.0 mm, but drew those ribbons (272 triangles in
-/// the door pull). It was 200 / 206 and 271 / 153 mm with vertices bound to
-/// triangles 0.22–0.37 m away along their normal.
+/// FAILS (2026-11-05): 151.3 / 102.9 mm (sedan wall / pole), 172.1 / 150.0 mm
+/// (sedan1). A vertex on its part's skin rides its part's own triangle
+/// (BeamNG's flexbody binding; a shut line's triangles across two parts
+/// drew ribbons and a sawtooth along the bonnet's rear edge once torn), but
+/// the panels' drawn edges lie up to 0.15 m past their last node row, so
+/// those edges ride nodes that far inboard. Content: node rows at the
+/// panels' real edges (requested from the showcase car, 2026-11-05).
+/// Riding the shut line's triangles measured 10.7 / 19.2 and 15.1 / 10.0 mm,
+/// at the cost of those ribbons. It was 200 / 206 and 271 / 153 mm with
+/// vertices bound to triangles 0.22–0.37 m away along their normal.
 #[test]
 #[ignore]
 fn visual_skin_follows_the_collision_skin() {
@@ -1280,12 +1278,11 @@ fn visual_skin_follows_the_collision_skin() {
     assert!(ok);
 }
 
-/// A detached door takes its edge with it: the door is pulled off (every
-/// hinge and latch rope broken) and 0.3 s further; then no drawn visual
-/// triangle on the door's shut line is stretched past twice its rest edges
-/// (a ribbon of skin between the door and the body). The shut line's
-/// vertices ride its skin triangles (nodes of both parts) until those die,
-/// then their own part's frame (`ShowcaseVisual::alt`).
+/// A detached door takes its edge with it: from the moment the door comes
+/// off (every hinge and latch rope broken), for 0.3 s, no drawn visual
+/// triangle joins it to the car (a ribbon of skin). A vertex on a frame
+/// with a node across a part border (a one-row part's) switches to its own
+/// part's frame once that frame dies (`ShowcaseVisual::alt`).
 #[test]
 fn detached_door_takes_its_edge() {
     let b = built("sedan1");
