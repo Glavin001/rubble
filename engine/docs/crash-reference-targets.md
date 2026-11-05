@@ -322,3 +322,138 @@ What this corrects:
 
 Caveat: these are 7 small and compact sedans of 1,250–1,400 kg. Mid-size sedans of
 about 1,450–1,550 kg sit in the same NCAP band (section 2's statistics cover them).
+
+## 9. Door hardware strength (FMVSS 206 compliance reports)
+
+Added 2026-11-05. These are measured door latch and hinge loads from NHTSA's FMVSS 206 compliance test reports. They replace the "1.5 × FMVSS 206 minimum" estimate.
+
+**Where the reports come from.** NHTSA's compliance report search (nhtsa.gov/compliance, under "Other" equipment, FMVSS 206) is backed by a public JSON API, `https://ovsc.api.nhtsa.dot.gov/other?fmvss_code=206`. It returns 427 FMVSS 206 reports, each with a PDF at `static.nhtsa.gov/odi/ctr/...`.
+- 41 reports were downloaded: 40 passenger cars from model years 2005–2023, and one compact SUV (the Bronco Sport, not used here).
+- They were downloaded with the user's permission into the gitignored `inspiration/fmvss206/` and are not committed.
+
+**What the test is.** It is a quasi-static bench pull on a production latch and striker, or on the hinge pair, mounted in a fixture (TP-206). One test per position, left front door.
+- Latch "Load Test One" (formerly called "longitudinal"): required 11,000 N fully latched and 4,450 N (4,500 N from 2007) secondary.
+- Latch "Load Test Two" (formerly "transverse"): required 8,900 N (9,000 N from 2007) fully latched and 4,450/4,500 N secondary.
+- Hinge system (upper and lower hinge together): required 11,000 N longitudinal and 8,900/9,000 N transverse.
+
+**Vehicle mass is not reported.** The reports test parts on a bench, not whole vehicles, so no mass is given. The cars span compact sedans (Civic, Corolla, Forte, Mazda3, Verano, Jetta) and mid-size or upper mid-size sedans (Camry, Accord, Altima, Passat, Maxima, LaCrosse, ES 350, C300). That brackets the 1,450 kg showcase sedan.
+
+**Most reports only prove the minimum.** Whether a test went to failure depends on the laboratory and the year. The end state of each test was checked against its remarks and, where noted, its force curve.
+- **KARCO Engineering, 2005–2012.** These tests load the latch until it separates: the force peaks and then drops, and the remarks say "teeth bent open", "hardware broke" or "striker broke in half". Curves were checked for six of the 11 reports (Jetta, Forte, Mazda3, 2008 Altima, C300, ES 350), and they show the peak and drop. The hinges, by contrast, were stopped at about 12–13 kN longitudinal and 10–11 kN transverse with "no damage".
+- **MGA Research, 2005–2006.** Each test was pushed well past the requirement. Some latches failed: the Camry and Corolla curves peak and drop, and the Civic and Accord remarks record a broken striker bolt or latch and striker pulled apart. Other tests were stopped while the force was still rising. The hinges reached up to 36 kN, with no separation.
+- **MGA Research, 2007–2024.** These are proof tests only, stopped while the force is still rising. Curves were checked for the 2011 Cruze and the 2022 Bronco Sport. Since about 2016 MGA has stopped at fixed loads: about 13.9 / 7.1 / 11.7 / 7.1 kN for the latch and 13.9 / 11.7 kN for the hinges. These are lower bounds only.
+
+**Inertial test and striker.**
+- **Inertial (30 g) test.** None of the reports contain one. The TP-206I sled test is a separate procedure and is not part of these reports. Manufacturers usually certify the inertial requirement by calculation.
+- **Striker.** It is not tested on its own. Its failures show up as the end state of the fully latched Load Test One: in 9 of the 13 failures, the striker or its mounting fasteners broke.
+
+### 9.1 Latches loaded to failure (maximum load at separation, N)
+
+"≥" means that test stopped without separating, so the value is a lower bound. Hinge values are the maximum applied. No hinge system separated in any report.
+
+| NHTSA no. | Lab no. | Vehicle (MY) | Primary, Load Test One | Secondary, Load Test One | Primary, Load Test Two | Secondary, Load Test Two | Hinge longitudinal | Hinge transverse | Latch end state |
+|---|---|---|---|---|---|---|---|---|---|
+| 638716 | 206-KAR-07-002 | 2007 Nissan Altima | 23,555 | 19,608 | 18,879 | 10,968 | ≥12,059 | ≥10,705 | striker bolts pulled out; latch released |
+| 639635 | 206-KAR-08-009 | 2008 Nissan Altima | 37,936 | 20,834 | 16,547 | 9,507 | ≥12,217 | ≥10,737 | striker hardware broke; peak then drop |
+| 639290 | 206-KAR-08-013 | 2008 Mercedes C300 | 27,967 | 19,968 | 22,408 | 16,051 | ≥12,126 | ≥10,542 | striker broke in half; peak then drop |
+| 640327 | 206-KAR-09-014 | 2009 VW Jetta | 24,245 | 8,700 | 19,648 | 9,986 | ≥12,642 | ≥10,683 | teeth bent open; peak then drop |
+| 640328 | 206-KAR-09-015 | 2009 VW Passat | 30,650 | 13,960 | 23,214 | 11,530 | ≥12,262 | ≥10,842 | teeth bent open (all four) |
+| 640262 | 206-KAR-09-001 | 2009 Nissan Maxima | 35,165 | 15,486 | 25,752 | 10,609 | ≥12,462 | ≥10,517 | striker hardware broke; teeth bent open |
+| 641195 | 206-KAR-10-009 | 2010 Kia Forte | ≥39,918 | 18,180 | 20,278 | 9,670 | ≥12,226 | ≥10,123 | primary Load Test One plateaued at the rig's about 40 kN without breaking |
+| 641049 | 206-KAR-10-005 | 2010 Mazda3 (5-door) | 36,803 | 22,753 | 27,651 | 11,634 | ≥12,644 | ≥10,410 | striker hardware broke; teeth bent open |
+| 641050 | 206-KAR-10-006 | 2010 Buick LaCrosse | 28,035 | 23,793 | 21,001 | 13,344 | ≥12,670 | ≥10,672 | striker hardware broke; teeth bent open |
+| 642464 | 206-KAR-83-003 | 2012 Buick Verano | 33,506 | 23,920 | 20,621 | 13,336 | ≥12,523 | ≥10,432 | striker broke in half; teeth bent open |
+| 642316 | 206-KAR-83-002 | 2012 Lexus ES 350 | 32,320 | 14,230 | 29,169 | 8,241 | ≥12,873 | ≥10,641 | hardware broke; teeth bent open |
+| 637726 | 206-MGA-05-012 | 2005 Toyota Camry | 22,953 | 16,351 | ≥15,913 | 7,554 | ≥36,179 | ≥29,813 | three of four latch curves peak then drop; hinges slightly distorted |
+| 637782 | 206-MGA-05-015 | 2005 Toyota Corolla | 20,168 | 13,762 | 18,576 | 7,469 | ≥28,956 | ≥25,203 | all four latch curves peak then drop; hinges distorted |
+| 637586 | 206-MGA-05-001 | 2005 Honda Civic | 26,784 | 28,278 | 19,650 | 5,351 | ≥28,682 | ≥28,548 | striker bolt broke ×3; latch and striker pulled apart |
+| 637593 | 206-MGA-05-004 | 2005 Honda Accord | ≥27,397 | ≥10,560 | 13,614 | ≥10,034 | ≥27,817 | ≥20,846 | only primary Load Test Two failed (striker bolt sheared) |
+
+### 9.2 Proof-only reports (test stopped above the requirement, N)
+
+All of these are lower bounds. Order of values: primary Load Test One / secondary Load Test One / primary Load Test Two / secondary Load Test Two; hinge longitudinal / hinge transverse.
+
+| NHTSA no. | Vehicle (MY) | Latch | Hinge |
+|---|---|---|---|
+| 637594 | 2005 Ford Focus | 20,098 / 10,652 / 17,799 / 8,901 | 22,131 / 19,736 |
+| 638044 | 2006 Ford Taurus | 18,372 / 12,328 / 18,502 / 12,929 | 21,302 / 18,170 |
+| 638125 | 2006 Chevrolet Impala | 15,127 / 12,238 / 15,119 / 12,831 | 16,501 / 18,384 |
+| 638676 | 2007 Ford Fusion | 16,747 / 15,045 / 12,956 / 11,935 | 16,518 / 15,858 |
+| 638693 | 2007 Saturn Aura | 17,635 / 15,341 / 16,611 / 12,589 | 18,109 / 11,776 |
+| 639279 | 2008 Ford Focus | 14,147 / 11,399 / 12,276 / 7,496 | 14,601 / 10,689 |
+| 640326 | 2009 Mazda6 | 14,436 / 6,854 / 12,470 / 6,830 | 14,288 / 10,422 |
+| 640325 | 2009 Acura TSX | 14,512 / 8,570 / 9,379 / 6,284 | 14,905 / 12,252 |
+| 641797 | 2011 Honda Civic | 14,313 / 9,211 / 12,507 / 8,445 | 14,528 / 12,419 |
+| 641767 | 2011 Chevrolet Cruze | 15,658 / 10,774 / 14,653 / 10,666 | 16,667 / 13,643 |
+| 641809 | 2011 Hyundai Sonata | 15,532 / 8,578 / 13,602 / 8,266 | 15,554 / 14,652 |
+| 641810 | 2011 Kia Optima | 15,345 / 9,124 / 14,303 / 8,636 | 15,271 / 15,129 |
+| 645328, 645332, 647066, 647368, 647371, 647375, 647376, 647754, 206-2360623, 206-2360631, 206-2360621, 206-2360637 | 2016 Fusion, 2016 Civic, 2020 Mazda6, 2021 Malibu, 2021 Sonata, 2021 Legacy, 2021 Corolla, 2022 Sentra, 2022 Camry, 2023 Accord, 2023 Altima, 2023 Model 3 | 13.8–13.9 k / 7.03–7.19 k / 11.65–11.83 k / 7.07–7.38 k | 13.8–14.2 k / 11.6–11.9 k |
+
+The 2005 Chevrolet Malibu report (637911, KARCO) was also downloaded. Its result cells are too degraded to read, so it is not used.
+
+### 9.3 Medians and ranges (failures only, 2005–2012 hardware)
+
+| Quantity | n | Median | IQR | Range | Median ÷ requirement |
+|---|---|---|---|---|---|
+| Primary latch, Load Test One (longitudinal) | 13 (+1 ≥39.9 kN) | **28.0 kN** | 23.9–34.3 kN | 20.2–37.9 kN | 2.5 |
+| Secondary latch, Load Test One | 14 | **18.9 kN** | 14.2–23.0 kN | 8.7–28.3 kN | 4.2 |
+| Primary latch, Load Test Two (transverse) | 14 | **20.4 kN** | 18.8–23.8 kN | 13.6–29.2 kN | 2.3 |
+| Secondary latch, Load Test Two | 14 | **10.3 kN** | 8.1–12.1 kN | 5.4–16.1 kN | 2.3 |
+| Hinge system, longitudinal | 0 failures | — | — | maximum without separation 36.2 kN; median of the seven 2005–06 tests ≥ 27.8 kN | ≥ 2.5 |
+| Hinge system, transverse | 0 failures | — | — | maximum without separation 29.8 kN; median of the seven 2005–06 tests ≥ 20.8 kN | ≥ 2.3 |
+
+Notes on the medians:
+- **Primary longitudinal is slightly understated.** The Forte's ≥39.9 kN is left out of that median, so the true median is a little higher.
+- **Later hardware is consistent.** The 2016–2023 proof loads (13.9 / 7.1 / 11.7 / 7.1 kN) sit below every failure value except one, the weakest secondary Load Test Two latch (2005 Civic, 5.4 kN). So the later cars contradict nothing above. They only show that MGA stopped at about 126–158 % of the requirement.
+- **Displacement at the latch peak** in the KARCO curves is 16–40 mm (mostly 19–29 mm), which includes fixture compliance. The tests run at about 0.15 in/min. That is quasi-static, so there are no strain-rate effects.
+
+### 9.4 Recommended ultimate strengths for the 1,450 kg showcase sedan
+
+These are per door. Each value is the median from §9.3, with the IQR as the spread.
+
+| Component | Recommended ultimate | Spread (IQR) | Replaces (1.5 × minimum) |
+|---|---|---|---|
+| Primary latch, longitudinal (Load Test One) | **28 kN** | 24–34 kN (range 20–38 kN) | 16.5 kN |
+| Primary latch, transverse (Load Test Two) | **20.5 kN** | 19–24 kN (range 14–29 kN) | 13.5 kN |
+| Secondary latch, longitudinal | **19 kN** | 14–23 kN (range 9–28 kN) | 6.7 kN |
+| Secondary latch, transverse | **10.3 kN** | 8–12 kN (range 5–16 kN) | 6.7 kN |
+| Hinge system, longitudinal (both hinges) | **≥ 28 kN** (lower bound; use 28 kN, or about 14 kN per hinge if they share equally) | no separation seen up to 36 kN | 16.5 kN |
+| Hinge system, transverse (both hinges) | **≥ 21 kN** (lower bound; use 21 kN, or about 10.5 kN per hinge) | no separation seen up to 30 kN | 13.5 kN |
+
+What the recommendation implies:
+- **The old estimate was too weak.** The 1.5 × factor made the hardware 1.5–2.8 × weaker than measured. Measured primary latches fail at a median of 2.3–2.5 × the requirement, and secondary latches at 2.3–4.2 ×.
+- **Hinges should not break first.** No hinge pair separated in any report, including seven pairs loaded to 16.5–36 kN, while latches separated at 5–38 kN. So a simulated door under these loads should open at the latch, usually at the striker or its fasteners, before a hinge separates.
+- **Hinge strength is not measured.** The hinge values are floors, not strengths: no report loaded a hinge system to separation. If a hinge break value is needed, take it at or above the latch value for the same direction. That is about 28 kN longitudinal and 21 kN transverse, which matches the medians of the 2005–06 hinge floors.
+
+**Sources.** NHTSA OVSC compliance test reports, FMVSS 206. The index is at `https://ovsc.api.nhtsa.dot.gov/other?fmvss_code=206`. PDFs:
+- KARCO latch-failure reports:
+  - 638716 `https://static.nhtsa.gov/odi/ctr/2007/TRTR-638716-2007.PDF`
+  - 639635 `https://static.nhtsa.gov/odi/ctr/2008/TRTR-639635-2008.pdf`
+  - 639290 `https://static.nhtsa.gov/odi/ctr/2008/TRTR-639290-2008.pdf`
+  - 640327 `https://static.nhtsa.gov/odi/ctr/2009/TRTR-640327-2009-001.pdf`
+  - 640328 `https://static.nhtsa.gov/odi/ctr/2009/TRTR-640328-2009-001.pdf`
+  - 640262 `https://static.nhtsa.gov/odi/ctr/2009/TRTR-640262-2009-001.pdf`
+  - 641195 `https://static.nhtsa.gov/odi/ctr/2010/TRTR-641195-2010-001.pdf`
+  - 641049 `https://static.nhtsa.gov/odi/ctr/2010/TRTR-641049-2010-001.pdf`
+  - 641050 `https://static.nhtsa.gov/odi/ctr/2010/TRTR-641050-2010-001.pdf`
+  - 642464 `https://static.nhtsa.gov/odi/ctr/2012/TRTR-642464-2012-001.pdf`
+  - 642316 `https://static.nhtsa.gov/odi/ctr/2012/TRTR-642316-2012-001.pdf`
+- MGA 2005–06 reports:
+  - 637726 `https://static.nhtsa.gov/odi/ctr/9999/TRTR-637726-20605.pdf`
+  - 637782 `https://static.nhtsa.gov/odi/ctr/9999/TRTR-637782-20605.pdf`
+  - 637586 `https://static.nhtsa.gov/odi/ctr/9999/TRTR-637586-20605.pdf`
+  - 637593 `https://static.nhtsa.gov/odi/ctr/2005/TRTR-637593-2005.PDF`
+  - 637594 `https://static.nhtsa.gov/odi/ctr/2005/TRTR-637594-2005.PDF`
+  - 638044 `https://static.nhtsa.gov/odi/ctr/2005/TRTR-638044-2005.PDF`
+  - 638125 `https://static.nhtsa.gov/odi/ctr/2006/TRTR-638125-2006.PDF`
+- MGA proof reports:
+  - 638676 `https://static.nhtsa.gov/odi/ctr/2007/TRTR-638676-2007.PDF`
+  - 638693 `https://static.nhtsa.gov/odi/ctr/2007/TRTR-638693-2007.PDF`
+  - 639279 `https://static.nhtsa.gov/odi/ctr/2008/TRTR-639279-2008.pdf`
+  - 640326 `https://static.nhtsa.gov/odi/ctr/2009/TRTR-640326-2009-001.pdf`
+  - 640325 `https://static.nhtsa.gov/odi/ctr/2009/TRTR-640325-2009-001.pdf`
+  - 641797, 641767, 641809, 641810 `https://static.nhtsa.gov/odi/ctr/2011/TRTR-<no>-2011-001.pdf`
+  - 645328, 645332, 647066, 647368, 647371, 647375, 647376, 647754 `https://static.nhtsa.gov/odi/ctr/9999/TRTR-<no>-<year>-001.pdf`
+  - 206-2360623 and 206-2360621 `https://static.nhtsa.gov/odi/ctr/2023/<no>.pdf`
+  - 206-2360631 and 206-2360637 `https://static.nhtsa.gov/odi/ctr/2024/<no>.pdf`
+- Test procedures: TP-206-08 `https://www.nhtsa.gov/sites/nhtsa.gov/files/tp-206-08_19_feb_2010.pdf`; 49 CFR 571.206.
