@@ -330,6 +330,35 @@ the ground (the rear door's lower rear corner, z 1.52). That corner is
 behind the sill's end (z 1.36), above the wheelhouse, and below the rear
 door beam's end (y 0.58), so nothing bears on it.
 
+**The corner's load path (2026-11-05, measured, not adopted).** After the
+rear rails' tail (e34680b5) the MDB crushes 403 mm. The deepest node is the
+rear door's skin at (0.94, 0.50, 1.52), 6 cm below the door beam's end.
+
+The C-pillar is a ladder with one 0.67 m bay from the sill (y 0.31) to the
+parcel shelf (y 0.98). Its door flange node at y 0.56 is held only by ties to
+those two stations, so it gives like a string.
+
+With a C-pillar station at y 0.56, the door-bearing height:
+- residual crush 197 mm (band 98–219, target 126–206); the corner 30 mm;
+- profile peaks at 0.70 WB (197 mm, rear door) and 0.34–0.52 WB (116 mm,
+  front door), against NCAP's 0.73 and 0.45 WB;
+- by level: sill top up to 216 mm at 0.6 WB (NCAP median 45), mid-door at
+  most 56 mm (NCAP median 204, only 8 nodes at that level). The crush is
+  still too low on the car.
+
+But at `C_PILLAR_STIFF` ×6 the station costs the skin scale ×0.25 → ×0.16:
+- Low or High no longer builds;
+- `left_and_right_mirror`, `p` and `o` fail (`o` mean 219 mm, sd 101);
+- `t` has 65 striker nodes inside.
+
+At ×3.8, so that the per-beam k matches the old bay: skin scale ×0.23, MDB
+327 mm, `o` 231 mm, `t` 72 inside, and `n`'s max crush (583 mm) and
+restitution (0.207) fail.
+
+The rear door's lower corner needs a C-pillar station, and the step budget
+cannot pay for it at the frame's current k·L. The one-tier design (below)
+frees that budget.
+
 **A8 (30 km/h side), force against depth** (`POLE_CURVE=1`). The car's
 kinetic energy is 50 kJ. Every failing case is deep crush at low force,
 not a pole passing between nodes with no force:
