@@ -3206,6 +3206,12 @@ impl ExplicitBeams {
         let h = STEP;
         // Without the throttle (§36) a triangle never waits: its count stays ≤ 0.
         let cap = if self.settings.triangle_throttle { i32::MAX } else { 0 };
+        // The two-body rule (spec §36, as vehicle contact's §10.3): the step's hits
+        // are found first (positions only), then applied in the same order with
+        // mass splitting and the pair's relative acceleration from the forces at
+        // the pass's start. Without it RoR's rule applies each hit as it is found.
+        let two_body = self.two_body_contact;
+        let mut found: Vec<(u32, [u32; 3], [f32; 3], f32, Vec3)> = Vec::new();
         for t in 0..self.triangles.len() {
             let tri = &mut self.triangles[t];
             if tri.wait > 0 {
@@ -3271,6 +3277,10 @@ impl ExplicitBeams {
                 };
                 hit = true;
                 self.last_contacts += 1;
+                if two_body {
+                    found.push((hn, [i0, i1, i2], [alpha, beta, gamma], r - delta, n));
+                    continue;
+                }
                 let node = self.nodes[hn as usize];
                 let (n0, n1, n2) = (
                     self.nodes[i0 as usize],
@@ -3307,6 +3317,86 @@ impl ExplicitBeams {
                 tri.wait = -20000;
             } else {
                 tri.wait = (tri.wait + 1).min(cap);
+            }
+        }
+        if !found.is_empty() {
+            self.apply_two_body_self_hits(&found);
+        }
+    }
+
+    /// Self-collision's two-body rule (spec §36; vehicle contact's §10.3 within
+    /// one vehicle): every node of the step's hits (as the contacter, or a vertex
+    /// of the hit's triangle) is k sub-bodies of mass m/k (an immovable node has no
+    /// inverse mass); the triangle point's inverse mass Σ w²·k/m; the reduced mass
+    /// m = 1/(k_h/m_h + Σ w²·k/m); the cancelled force (F_h/m_h − Σ w·F_k/m_k)·m
+    /// from the forces at the pass's start, in place of RoR's whole F_h (which
+    /// moves the contacter's own load onto the triangle's nodes). Hits in the
+    /// order they were found (triangles in order, then candidates).
+    fn apply_two_body_self_hits(&mut self, found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)]) {
+        let mut split = vec![0u32; self.nodes.len()];
+        for (hn, tri, _, _, _) in found {
+            split[*hn as usize] += 1;
+            for &i in tri {
+                split[i as usize] += 1;
+            }
+        }
+        let pass: Vec<Vec3> = self.nodes.iter().map(|n| n.force).collect();
+        let im = |n: &Node, k: u32| {
+            if n.has(NODE_IMMOVABLE) {
+                0.0
+            } else {
+                k as f32 / n.mass
+            }
+        };
+        let acc = |f: Vec3, n: &Node| {
+            if n.has(NODE_IMMOVABLE) {
+                Vec3::ZERO
+            } else {
+                f / n.mass
+            }
+        };
+        for &(hn, [i0, i1, i2], [alpha, beta, gamma], depth, n) in found {
+            let node = self.nodes[hn as usize];
+            let (n0, n1, n2) = (
+                self.nodes[i0 as usize],
+                self.nodes[i1 as usize],
+                self.nodes[i2 as usize],
+            );
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let imh = im(&node, split[hn as usize]);
+            let imt = crate::explicit_contact::two_body_inverse_mass(
+                [
+                    im(&n1, split[i1 as usize]),
+                    im(&n2, split[i2 as usize]),
+                    im(&n0, split[i0 as usize]),
+                ],
+                [alpha, beta, gamma],
+            );
+            let inv = imh + imt;
+            let m = if inv > 0.0 { 1.0 / inv } else { 0.0 };
+            let at = acc(pass[i1 as usize], &n1) * alpha
+                + acc(pass[i2 as usize], &n2) * beta
+                + acc(pass[i0 as usize], &n0) * gamma;
+            let fh = (acc(pass[hn as usize], &node) - at) * m;
+            let f = contact_force(
+                fh,
+                v,
+                m,
+                n,
+                STEP,
+                &ContactSurface::BOX,
+                depth,
+                node.friction,
+            );
+            self.nodes[hn as usize].force += f;
+            self.nodes[i1 as usize].force -= f * alpha;
+            self.nodes[i2 as usize].force -= f * beta;
+            self.nodes[i0 as usize].force -= f * gamma;
+            if let Some(l) = self.contact_force.as_mut() {
+                l.add(hn as usize, f);
+                l.add(i1 as usize, f * alpha);
+                l.add(i2 as usize, f * beta);
+                l.add(i0 as usize, f * gamma);
             }
         }
     }

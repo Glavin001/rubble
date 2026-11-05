@@ -1600,3 +1600,55 @@ contacts amplify it (the fixture car parted at step 2,688).
   contact differs in its last bit (the triangle contact pass, common to every mode:
   its force reaches the node through the 1/32 N accumulator, and the beam forces
   were checked equal bit for bit). Not JBeam mode's; a follow-up.
+
+## 36. The BeamNG profile (2026-11-05)
+
+`ExplicitBeamsSettings::beamng()` and `ExplicitBeams::two_body_contact`: switches
+that JBeam content runs (`from_desc_jbeam_with`) and a `.truck` runs when it has a
+`rubble_beamng_profile` line (**Rubble extension**). The default `.truck` (Rigs of
+Rods) profile is unchanged, bit for bit, for RoR comparison runs. Each switch is a
+field and can be turned back alone (`s.settings.<switch> = …`, `s.two_body_contact`).
+The research behind the list is `ror-vs-beamng-research.md` §5.
+
+| Switch | RoR profile | BeamNG profile | Field |
+|---|---|---|---|
+| Beam lengths | fast inverse square root | exact (§33, §35) | `settings.fast_inv_sqrt` |
+| Idle-triangle throttle | skip an unhit triangle up to 12 steps | every triangle every step | `settings.triangle_throttle` |
+| Contact rule (vehicle and self) | static surface: cancel the contacter's whole force | two-body (§10.3) with mass splitting | `two_body_contact` |
+
+**No throttle.** RoR's throttle skips work whose result can differ (AGENTS.md: not
+outside the RoR profile). A contacter arriving at 10 m/s at a triangle idle for a
+second falls through with it (y −1.40 m after 0.2 s) and is caught without it
+(0.020 m, the band's edge): `explicit_beams.rs`
+`the_throttle_lets_a_fast_node_through_and_the_beamng_profile_does_not`. GPU:
+vehicle flag 1024 (`FLAG_NO_THROTTLE`), the throttles capped at 0
+(`throttleCap`).
+
+**Two-body self-collision.** Self-collision used RoR's static-surface rule: it
+cancels the contacter's whole force (its beams' load) and moves it onto the struck
+triangle's nodes, with the weighted mean mass and every hit sized as if alone. In
+the one-tier showcase car's 120 km/h wall that injects energy: the self-contact
+work rises to +131 J over the first second (cumulative), the largest rise of
+mechanical energy between frames is 119 J, and its size follows topology with no
+physical link (a lid's rigidifier node wired to every lid skin node sits in the
+contact band of the lid's own triangles). With `two_body_contact` the self hits
+take vehicle contact's two-body rule (§10.3) within one vehicle: the step's hits are
+found first (positions only), every node of a hit counts it (k sub-bodies), the
+reduced mass is 1/(k_h/m_h + Σ w²·k/m), the cancelled force is the pair's relative
+acceleration from the forces at the pass's start times that mass; then the hits
+apply in the order found. Measured (CPU, `energy_ledger.rs`
+`self_contact_never_adds_energy_in_the_120_kmh_wall`): cumulative self-contact work
+never above 0 (−6.9 kJ over 1 s), mechanical energy never rises; the largest rise
+between frames 6.2 J (showcase `f_wall`, sedan1), 0.00 J between tenths. The ledger
+tests assert it for every two-body crash (`check`). GPU: the counts per node in gAcc
+at `selfSplit` (cleared by its node phase; a two-body vehicle, flag 128, takes the
+shapes path), every hit computed in the first round (no hit reads another's force),
+the overflow path (`selfSerial`) likewise; `explicit_contact_gpu.rs`
+`self_collision_two_body_steps_like_the_cpu` (the authored sedan into a wall: 0.0000
+mm when self-contact starts; broken 127 / 134, bent 529 / 523 after 0.6 s). JBeam
+mode's bit-for-bit runs (§35) are unchanged.
+
+**Still to come in this profile:** exact `exp`/`pow` in the friction law; anti-clip
+(side memory, NONCOLLIDABLE triangles, the 2.5 cm band, and a swept test for nodes
+faster than r/h); plasticity without RoR's spring-back for `.truck` content;
+damping-only beams and `dampCutoffHz` for `.truck` content; flexbody 4-node binding.
