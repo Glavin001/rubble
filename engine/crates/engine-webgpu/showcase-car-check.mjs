@@ -75,6 +75,9 @@ ws.addEventListener('message', (e) => {
   const m = JSON.parse(e.data);
   if (m.id && waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); }
   if (m.method === 'Runtime.exceptionThrown') pageErrors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
+  // WebGPU validation errors Chrome logs (a pass skipped by validation draws nothing).
+  if (m.method === 'Log.entryAdded' && /webgpu|wgsl|validat/i.test(m.params.entry.text) && m.params.entry.level !== 'verbose') pageErrors.push(m.params.entry.text);
+  if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') pageErrors.push(m.params.args.map((a) => a.value ?? a.description).join(' '));
 });
 const send = (method, params = {}) => new Promise((r) => { const id = ++nextId; waiting.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
 const evaluate = async (expression) => {
@@ -82,6 +85,7 @@ const evaluate = async (expression) => {
   return r.result?.result?.value;
 };
 await send('Runtime.enable');
+await send('Log.enable');
 await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 
 const RUNS = [
@@ -182,7 +186,10 @@ for (const [name, q] of RUNS.filter(([n]) => !picked || picked.includes(n))) {
   const s = await send('Page.captureScreenshot', { format: 'png' });
   const png = join(OUT, `${RES}_${name}.png`);
   writeFileSync(png, Buffer.from(s.result.data, 'base64'));
-  let err = st?.error || pageErrors.shift();
+  // The page's error overlay (#err: a thrown error or a WebGPU uncaptured error).
+  const overlay = await evaluate('document.getElementById("err")?.textContent || ""');
+  let err = st?.error || overlay || pageErrors.shift();
+  pageErrors.length = 0;
   const dc = st?.damageCheck;
   if (!err && name.startsWith('damage_')) {
     if (!dc || dc.frames < 10) err = `damage check ran ${dc?.frames ?? 0} frames`;

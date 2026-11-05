@@ -82,7 +82,7 @@ try {
   let batchPending = false;
   const adapterInfo = await navigator.gpu.requestAdapter().then((a) => a?.info ? `${a.info.vendor} ${a.info.architecture} ${a.info.description}` : '?');
   const batchMs = [];
-  const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES, zebra: Number(qs.get('zebra')) || 0, creaseSharp: Number(qs.get('crease')) || 0, splitDeg: Number(qs.get('splitDeg')) || 0, perfFlat: qs.has('perfFlat'), perfSkip: qs.get('perfSkip')?.split(',') });
+  const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES, zebra: Number(qs.get('zebra')) || 0, creaseSharp: Number(qs.get('crease')) || 0, splitDeg: Number(qs.get('splitDeg')) || 0, perfFlat: qs.has('perfFlat'), perfNoDiscard: qs.has('perfNoDiscard'), lodPx: Number(qs.get('lodPx')) || 0, debugWear: qs.has('debugWear'), perfSkip: qs.get('perfSkip')?.split(',') });
   if (!qs.has('mod')) r.setSolver(sim.nodesBuffer(), sim.miscBuffer(), sim.beamsBuffer());
   // ?mod=<folder>: an imported BeamNG vehicle's flexbodies and props at rest
   // (its files.json lists the folder: .jbeam, .pc (?pc=), .dae,
@@ -98,8 +98,8 @@ try {
     const pc = pcName && list.includes(pcName) ? (await text(pcName))[1] : undefined;
     const meshes = await Promise.all(list.filter((f) => f.endsWith('.dae')).map(async (f) => [f, new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer())]));
     const materials = await Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text));
-    const out = jbeamVisual({ jbeam: jb, pc, native: true, materials, ...(paint ? { paint } : {}) }, meshes);
-    modVis = out.visual; modVis.lod = out.visualLod; modVis.lodDistance = out.lodDistance;
+    const out = jbeamVisual({ jbeam: jb, pc, native: true, materials, ...(paint ? { paint } : {}), ...(qs.has('farCell') ? { farCell: Number(qs.get('farCell')) } : {}) }, meshes);
+    modVis = out.visual; modVis.lod = [out.visualLod, out.visualFar];
     window.__flexReport = out.report;
     // ?n= copies in a row, 3 m apart (the cost check).
     const nr0 = modVis.nodeRest, r00 = modVis.beamRest0;
@@ -114,7 +114,9 @@ try {
     device.queue.writeBuffer(restBuf, 0, r0);
     r.setPositions(posBuf, restBuf);
   }
-  const carIds = modVis ? Array.from({ length: n }, (_, i) => r.addCar(modVis, { nodeOffset: i * modVis.nodeCount, beamOffset: i * modVis.beamRest0.length, vehicle: i, lod: qs.get('lod') === '0' ? null : modVis.lod, lodDistance: Number(qs.get('lodDist')) || modVis.lodDistance })) : layout.vehicles.map((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: qs.get('lod') === '0' ? null : car.visualLod, lodDistance: Number(qs.get('lodDist')) || 18 }));
+  // ?lod=0 the full mesh only, ?lod=1 the first two levels; ?lodPx= the switch (pixels a median edge spans).
+  const levels = (l) => qs.get('lod') === '0' ? null : qs.get('lod') === '1' ? l.slice(0, 1) : l;
+  const carIds = modVis ? Array.from({ length: n }, (_, i) => r.addCar(modVis, { nodeOffset: i * modVis.nodeCount, beamOffset: i * modVis.beamRest0.length, vehicle: i, lod: levels(modVis.lod) })) : layout.vehicles.map((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: levels([car.visualLod, car.visualFar]) }));
   // ?check=damage: every frame, the renderer's damage units against the
   // solver's beams read back in the same submission (the units' rule:
   // skin.rs unit_states()): any difference is a mismatch.
@@ -357,7 +359,7 @@ try {
       });
       if (qs.get('perf') !== 'pass') {
         if (reflect > 0) r.drawReflection(p1, { viewProj: vp, eye, light, strength: reflect });
-        r.draw(p1, { viewProj: vp, eye, light });
+        r.draw(p1, { viewProj: vp, eye, light, height: canvas.height });
       }
       p1.end();
       enc.resolveQuerySet(tq.set, 0, 2, tq.resolve, 0);
@@ -370,7 +372,7 @@ try {
       drawFloor(pass);
       if (reflect > 0) r.drawReflection(pass, { viewProj: vp, eye, light, strength: reflect });
       drawShapes(pass);
-      r.draw(pass, { viewProj: vp, eye, light });
+      r.draw(pass, { viewProj: vp, eye, light, height: canvas.height });
       pass.end();
     }
     device.queue.submit([enc.finish()]);
@@ -410,7 +412,7 @@ try {
           });
           if (mode !== 'pass') {
             if (reflect > 0) r.drawReflection(p, { viewProj: vp, eye, light, strength: reflect });
-            r.draw(p, { viewProj: vp, eye, light });
+            r.draw(p, { viewProj: vp, eye, light, height: canvas.height });
           }
           p.end();
         }
@@ -436,7 +438,7 @@ try {
     poll();
     const c = car.counts;
     const gm = gpuMs.length ? gpuMs.reduce((a, b) => a + b, 0) / gpuMs.length : NaN;
-    hud.textContent = `${qs.get('style') ?? 'sedan'} ${res}: ${c.nodes} nodes, ${c.beams} beams, ${c.collisionTriangles} collision tris, ${car.visual.indices.length / 3} visual tris (${car.visualLod ? car.visualLod.indices.length / 3 : '–'} far), ${c.mass.toFixed(0)} kg\n` +
+    hud.textContent = (modVis ? `mod: ${[modVis, ...modVis.lod].map((l) => `${l.indices.length / 3} tris (edge ${(l.edgeLength * 100).toFixed(1)} cm)`).join(' · ')}\n` : '') + `${qs.get('style') ?? 'sedan'} ${res}: ${c.nodes} nodes, ${c.beams} beams, ${c.collisionTriangles} collision tris, ${car.visual.indices.length / 3} visual tris (levels ${[car.visualLod, car.visualFar].map((l) => l ? l.indices.length / 3 : '–').join(', ')}), ${c.mass.toFixed(0)} kg\n` +
       `scene ${scene} ${kmh} km/h × ${n}   t ${simTime.toFixed(2)} s   GPU ${isNaN(gm) ? '–' : gm.toFixed(2)} ms/frame   build ${buildMs.toFixed(0)} ms` +
       (damage ? `\nbroken ${damage.broken}  bent ${damage.bent}` : '') +
       (tq?.ms.length ? `\ncar render ${(tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length).toFixed(3)} ms (GPU pass)` : '') +
