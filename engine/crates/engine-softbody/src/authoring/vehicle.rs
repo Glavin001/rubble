@@ -216,8 +216,15 @@ pub struct Look {
     pub mirror: [f32; 2],
 }
 
-/// A door frame's hinge and latch beams to the pillars: yield force (N).
-pub const DOOR_HOLD: f32 = 3.0e3;
+/// A door frame's hinge and latch beams to the pillars: yield force (N) of
+/// each (two to four a door end: FMVSS 206 asks 8.9–11.1 kN of a hinge or
+/// latch system).
+pub const DOOR_HOLD: f32 = 4.5e3;
+
+/// A door frame's ends bearing on the pillars (compression only): thresholds
+/// × this against the door frame's own (a side load goes into the pillars
+/// and sill, as FMVSS 214's crush does).
+pub const DOOR_BEAR: f32 = 3.0;
 
 /// A catcher's body dashpot against `body_damping`.
 pub const CATCH_DAMPING: f32 = 3.0;
@@ -1018,6 +1025,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                                     k: grades.mount.k,
                                     damp: grades.mount.damp,
                                     ..base
+                                };
+                                let m = Material {
+                                    deform: DOOR_BEAR * m.deform,
+                                    strength: DOOR_BEAR * m.strength,
+                                    ..m
                                 };
                                 sk.beam_with(a, b, m.stiffer(sc), BeamType::Support(10.0), 0);
                             }

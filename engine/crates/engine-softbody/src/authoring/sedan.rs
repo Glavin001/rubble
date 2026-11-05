@@ -136,6 +136,17 @@ pub const CABIN_YIELD: f32 = 6.0e4;
 pub const HINGE_PANEL: f32 = 1.5;
 pub const HINGE_YIELD: f32 = 2.0e5;
 
+/// The doors' own frame (intrusion beam, belt and mid rails): thresholds ×
+/// this against the boron grade. A ladder chord then yields at about 20 kN,
+/// about 2 kN·m over its 0.1 m depth (a tubular intrusion beam's plastic
+/// moment is a few kN·m): the door passes FMVSS 214's static crush (the `p`
+/// test: ≥ 10 kN over 152 mm, ≥ 15.6 kN over 305 mm).
+pub const DOOR_FRAME: f32 = 5.0;
+
+/// The B-pillar's thresholds (× [`ROOF`]): it carries a side pole and the
+/// door's latch end.
+pub const PILLAR_B: f32 = 3.0;
+
 /// The front subframe's cross members' threshold scale (a pole between the
 /// engine and a rail meets them).
 pub const SUBFRAME: f32 = 1.5;
@@ -654,7 +665,7 @@ pub fn sedan() -> VehicleDef {
                 0.14,
                 OUT,
                 "boron",
-                [1.0, 1.0],
+                [PILLAR_B, PILLAR_B],
                 0,
                 true,
                 1,
@@ -934,7 +945,7 @@ pub fn sedan() -> VehicleDef {
                 0.14,
                 OUT,
                 "boron",
-                [1.0, 1.0],
+                [DOOR_FRAME, DOOR_FRAME],
                 0,
                 true,
                 3,
@@ -950,7 +961,7 @@ pub fn sedan() -> VehicleDef {
                 0.14,
                 OUT,
                 "boron",
-                [1.0, 1.0],
+                [DOOR_FRAME, DOOR_FRAME],
                 0,
                 true,
                 3,
@@ -965,7 +976,7 @@ pub fn sedan() -> VehicleDef {
                 0.14,
                 OUT,
                 "boron",
-                [1.0, 1.0],
+                [DOOR_FRAME, DOOR_FRAME],
                 0,
                 true,
                 3,
@@ -981,7 +992,7 @@ pub fn sedan() -> VehicleDef {
                 0.14,
                 OUT,
                 "boron",
-                [1.0, 1.0],
+                [DOOR_FRAME, DOOR_FRAME],
                 0,
                 true,
                 3,
@@ -996,7 +1007,7 @@ pub fn sedan() -> VehicleDef {
                 0.14,
                 OUT,
                 "boron",
-                [1.0, 1.0],
+                [DOOR_FRAME, DOOR_FRAME],
                 0,
                 true,
                 3,
@@ -1011,7 +1022,7 @@ pub fn sedan() -> VehicleDef {
                 0.14,
                 OUT,
                 "boron",
-                [1.0, 1.0],
+                [DOOR_FRAME, DOOR_FRAME],
                 0,
                 true,
                 3,

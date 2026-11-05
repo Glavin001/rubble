@@ -1788,6 +1788,20 @@ fn m_wall_56_panels_stay_on() {
                 let up = -(rel(&l) - rel(&l0)).z;
                 if up > lift.0 {
                     lift = (up, *i, f);
+                    if std::env::var("M_DIAG").is_ok() && up > 0.02 {
+                        eprintln!(
+                            "  (m) frame {f}: lid node {i} up {:.0} mm; body neighbours {:?}",
+                            -(l[*i] - l0[*i]).z * 1e3,
+                            nb.iter()
+                                .map(|&j| format!(
+                                    "{j} {} {:?} up {:.0}",
+                                    sk.parts[sk.nodes[j].part as usize],
+                                    sk.nodes[j].p,
+                                    -(l[j] - l0[j]).z * 1e3
+                                ))
+                                .collect::<Vec<_>>()
+                        );
+                    }
                 }
                 let gap = rel(&l).length() - rel(&l0).length();
                 if gap > open.0 {
@@ -2315,10 +2329,9 @@ fn ram_rig(
 /// must reach 10,000 N over the first 152 mm, 15,569 N over 305 mm, and a
 /// peak of min(2 × curb weight, 31,138 N) within 457 mm. Medium; the ram moves
 /// at 0.1 m/s (the rule's 12.7 mm/s would take 36 s; the force at 0.1 m/s
-/// is still quasi-static: the door's own inertia is negligible). Ignored:
-/// run with `--ignored`.
+/// is still quasi-static: the door's own inertia is negligible). Crush is
+/// counted from the ram's first contact.
 #[test]
-#[ignore]
 fn p_fmvss_214_static_door_crush() {
     let b = built(Resolution::Medium);
     let sk = &b.skeleton;
@@ -2359,21 +2372,32 @@ fn p_fmvss_214_static_door_crush() {
         let face = cx - (r * r - dz * dz).sqrt();
         (p.x > face).then(|| p.x - face)
     };
-    let curve = ram_rig(&mut s, &held, -Vec3::X, 0.457 + 0.01, 0.1, &inside);
+    let curve = ram_rig(&mut s, &held, -Vec3::X, 0.457 + 0.05, 0.1, &inside);
+    // Crush is counted from the ram's first contact with the door (the
+    // first 5 mm step carrying more than 200 N).
+    let d_c = curve
+        .iter()
+        .find(|c| c.1 > 200.0)
+        .map_or(0.0, |c| c.0 - 0.005);
     let mean_to = |x: f32| {
         let v: Vec<f32> = curve
             .iter()
-            .filter(|c| c.0 - 0.01 <= x)
+            .filter(|c| c.0 > d_c && c.0 - d_c <= x + 1e-4)
             .map(|c| c.1)
             .collect();
         v.iter().sum::<f32>() / v.len().max(1) as f32
     };
     let (f152, f305) = (mean_to(0.152), mean_to(0.305));
-    let peak = curve.iter().map(|c| c.1).fold(0.0f32, f32::max);
+    let peak = curve
+        .iter()
+        .filter(|c| c.0 > d_c && c.0 - d_c <= 0.457 + 1e-4)
+        .map(|c| c.1)
+        .fold(0.0f32, f32::max);
     let curb: f32 = s.nodes.iter().map(|n| n.mass).sum::<f32>() * 9.81;
     let need = (2.0 * curb).min(31_138.0);
     eprintln!(
-        "(p) FMVSS 214 door crush: mean {:.1} kN over 152 mm (≥ 10.0), {:.1} kN over 305 mm (≥ 15.6), peak {:.1} kN over 457 mm (≥ {:.1}); curve every 5 cm: {:?} kN",
+        "(p) FMVSS 214 door crush (contact at {:.0} mm of ram travel): mean {:.1} kN over 152 mm (≥ 10.0), {:.1} kN over 305 mm (≥ 15.6), peak {:.1} kN over 457 mm (≥ {:.1}); curve every 5 cm: {:?} kN",
+        d_c * 1e3,
         f152 / 1e3,
         f305 / 1e3,
         peak / 1e3,
