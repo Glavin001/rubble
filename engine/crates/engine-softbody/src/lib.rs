@@ -21,6 +21,7 @@ pub mod explicit_beams;
 pub mod explicit_contact;
 pub mod explicit_jbeam_ext;
 pub mod explicit_ref;
+pub mod explicit_rigid;
 pub mod explicit_triggers;
 pub mod flexbody;
 pub mod hires;

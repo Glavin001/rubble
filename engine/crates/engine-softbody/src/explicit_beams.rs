@@ -814,6 +814,9 @@ pub struct ExplicitBeams {
     /// Per deform group whether it has triggered (§19), and the groups' names.
     pub deform_state: Vec<u32>,
     pub deform_names: Vec<String>,
+    /// Rigid bodies this vehicle meets ([`crate::explicit_rigid`]); `None` (the
+    /// default) for none, every step unchanged.
+    pub rigid: Option<Box<crate::explicit_rigid::ProxySet>>,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -1026,6 +1029,7 @@ impl ExplicitBeams {
             tri_dead: Vec::new(),
             deform_state: Vec::new(),
             deform_names: Vec::new(),
+            rigid: None,
         }
     }
 
@@ -2215,6 +2219,10 @@ impl ExplicitBeams {
         let settings = self.settings;
         // The shapes' culling boxes (none allocated without shapes).
         let shape_bounds: Vec<StaticBox> = self.shapes.iter().map(StaticShape::bounds).collect();
+        let mut rigid = self.rigid.take();
+        if let Some(r) = rigid.as_mut() {
+            r.begin_step(origin, &self.nodes);
+        }
         for i in 0..self.nodes.len() {
             let mut n = self.nodes[i];
             if !n.has(NODE_NO_GROUND) {
@@ -2264,6 +2272,9 @@ impl ExplicitBeams {
                         );
                     }
                 }
+                if let Some(r) = rigid.as_mut() {
+                    n.force += r.node_contact(x, &n);
+                }
             }
             if !n.has(NODE_IMMOVABLE) {
                 n.vel += n.force / n.mass * h;
@@ -2286,6 +2297,10 @@ impl ExplicitBeams {
                 }
             }
             self.nodes[i] = n;
+        }
+        if let Some(mut r) = rigid {
+            r.end_step();
+            self.rigid = Some(r);
         }
         if let Some(g) = self.grab {
             self.grab_pass(g);
