@@ -380,12 +380,14 @@ impl BodyStyle {
         if rise > 0.0 && z > zc - 0.05 {
             let t = ((z - zc) / (zn - zc)).clamp(0.0, 1.0);
             let xl = xc + (xn - xc) * t;
-            let fade =
-                smoothstep(zc - 0.03, zc + 0.10, z) * (1.0 - smoothstep(zn - 0.22, zn - 0.04, z));
+            // Faded in and out over long C2 ramps (a short fade reads as a
+            // blot in the reflections at the cowl and over the nose).
+            let fade = smootherstep(zc - 0.05, zc + 0.30, z)
+                * (1.0 - smootherstep(zn - 0.38, zn - 0.05, z));
             // Flat between the creases, a crisp break at them, falling away
-            // outside.
+            // outside (curvature continuous where the fall ends).
             let s = soft_pos(x.abs() - xl, w);
-            d += rise * fade * (1.0 - smoothstep(0.0, 0.17, s));
+            d += rise * fade * (1.0 - smootherstep(0.0, 0.17, s));
         }
         let [lip, len, hw] = self.deck_lip;
         if lip > 0.0 && z < z_tail + len {
@@ -1225,9 +1227,11 @@ impl BodySurface {
         let mut band = Band::new(prof, style);
         let step = style.step;
         // Rows: curl, lower body, upper body (the crease and lower line on rows).
+        // The lower body is gently curved (its crisp lines lie on rows and
+        // its normals are its own): coarser rows there than above the crease.
         let (r_curl, r_low, r_up) = (
-            (0.16 / step).ceil() as usize,
-            (0.55 / step).ceil() as usize,
+            (0.16 / (1.3 * step)).ceil() as usize,
+            (0.55 / (1.45 * step)).ceil() as usize,
             (0.28 / step).ceil() as usize,
         );
         let nr0 = r_curl + r_low + r_up;
@@ -1250,7 +1254,7 @@ impl BodySurface {
         vrows.sort_by(|a, b| a.total_cmp(b));
         vrows.dedup_by(|a, b| (*a - *b).abs() < 1e-5);
         let nrows = vrows.len() - 1;
-        let thetas = band.column_thetas(style.step_along, 0.3);
+        let thetas = band.column_thetas(style.step_along, 0.0);
         let h = thetas.len() - 1;
         let ncol = 2 * h;
         let l = prof.length;
@@ -1341,7 +1345,7 @@ impl BodySurface {
         // Rows per span (shoulder, ledge, fillet ×2, sail, rail round): enough
         // round the car for the span's length (the normals are the
         // surface's own, so a flat span can be coarse) and for its turn (a
-        // row every 12° of slope).
+        // row every 15° of slope).
         let span_need = |c: &Col, a: f32, b: f32| -> f32 {
             let mut len = 0.0;
             let mut q = c.at(a);
@@ -1353,7 +1357,7 @@ impl BodySurface {
             let e = 0.0005;
             let slope = |s: f32| (c.h(s + e) - c.h(s - e)) / (2.0 * e);
             let turn = (slope(b - e).atan() - slope(a + e).atan()).abs();
-            (len / (1.6 * step)).max(turn / (12f32 / super::detail().max(0.25)).to_radians())
+            (len / (2.0 * step)).max(turn / (15f32 / super::detail().max(0.25)).to_radians())
         };
         let mut nspan = [1usize; 6];
         for (cc, c3) in cols.iter().enumerate() {
@@ -1456,13 +1460,13 @@ impl BodySurface {
             let x = l1[i].x.max(1e-3);
             style.crease_x(l1[i].z).min(0.5 * x)
         };
-        // The top is gently curved and its normals are its own: half again
+        // The top is gently curved and its normals are its own: 1.4 times
         // the grid spacing across.
         let (mut n1, mut n2) = (1usize, 1usize);
         for i in 1..h {
             let xc = crease_of(i);
-            n1 = n1.max(((xc - wd).max(0.0) / (1.5 * step)).ceil() as usize);
-            n2 = n2.max(((l1[i].x - xc - wd).max(0.0) / (1.5 * step)).ceil() as usize);
+            n1 = n1.max(((xc - wd).max(0.0) / (1.4 * step)).ceil() as usize);
+            n2 = n2.max(((l1[i].x - xc - wd).max(0.0) / (1.4 * step)).ceil() as usize);
         }
         let xs_of = |i: usize| -> Vec<f32> {
             let x = l1[i].x.max(1e-3);
@@ -1485,7 +1489,7 @@ impl BodySurface {
         // Rows on every top-line vertex, with rows between them where those
         // are far apart along the car (their ends fan into the next
         // top-line vertex, so the mesh stays closed and manifold).
-        let row_step = 0.75 * style.step_along;
+        let row_step = 0.9 * style.step_along;
         let mut tid: Vec<Vec<u32>> = Vec::with_capacity(2 * h + 1);
         let mut prev: Option<(Vec<f32>, f32)> = None;
         for i in 0..=h {
