@@ -164,6 +164,31 @@ fn main() {
         }
         return;
     }
+    if opt("breakwatch=").is_some() {
+        // The first step in which a beam breaks: its records just before.
+        for step in 0..4000 {
+            let before = s.beams.clone();
+            s.step();
+            let now: Vec<usize> = (0..s.beams.len()).filter(|&j| s.beams[j].broken && !before[j].broken).collect();
+            if !now.is_empty() {
+                println!("step {step}: {} beams break", now.len());
+                for (j, b) in s.beams.iter().enumerate().filter(|(_, b)| b.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamPressureGroup) {
+                    let e = s.beam_ext[s.ext_of[j] as usize - 1];
+                    println!("  pressure group {j}: V0 {} p_abs0 {} ceiling {} gauge now {:?}", e.e1[2], e.e1[3], e.e2[0], e.pressure);
+                    let _ = b;
+                }
+                for &j in now.iter().take(6) {
+                    let b = before[j];
+                    let (pa, pb) = (s.nodes[b.a as usize].pos, s.nodes[b.b as usize].pos);
+                    println!("  beam {j} {:?} before {:?} len now {:.4} ext {:?}", b.kind, b, pa.distance(pb),
+                        s.ext_of.get(j).filter(|&&x| x != 0).map(|&x| s.beam_ext[x as usize - 1]));
+                }
+                return;
+            }
+        }
+        println!("no break in 2 s");
+        return;
+    }
     if opt("modes=").is_some() {
         // The highest beam-spring mode ω_max·h (power iteration on M⁻¹K, springs only):
         // explicit integration diverges past 2.
@@ -188,6 +213,11 @@ fn main() {
         }
         let (imax, _) = x.iter().enumerate().max_by(|a, b| a.1.length().total_cmp(&b.1.length())).unwrap();
         println!("omega_max*h = {:.3} (node {} {})", lam.sqrt() * 0.0005, imax, desc.nodes.get(imax).map_or("wheel", |n| n.name.as_str()));
+        println!("  node {imax} mass {}", s.nodes[imax].mass);
+        for b in s.beams.iter().filter(|b| !b.broken && (b.a as usize == imax || b.b as usize == imax)) {
+            let o = if b.a as usize == imax { b.b } else { b.a } as usize;
+            println!("  {:?} k {} c {} to node {o} m {} len {:.3}", b.kind, b.k, b.c, s.nodes[o].mass, s.nodes[imax].pos.distance(s.nodes[o].pos));
+        }
         return;
     }
     if opt("trace=").is_some() {

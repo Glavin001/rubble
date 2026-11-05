@@ -648,8 +648,18 @@ impl ExplicitBeams {
         self.beams.push(group);
         let first = self.beams.len() as u32;
         let cpos = self.nodes[c as usize].pos;
+        // Outward winding whatever order the surface came in (a wheel's follows its
+        // axle nodes' order): a surface enclosing negative volume is turned over.
+        let signed: f32 = tris
+            .iter()
+            .map(|t| {
+                let x = t.map(|n| self.nodes[n as usize].pos - cpos);
+                x[0].dot(x[1].cross(x[2]))
+            })
+            .sum();
         let mut v0 = 0.0f32;
         for t in tris {
+            let t = if signed < 0.0 { &[t[0], t[2], t[1]] } else { t };
             let x = t.map(|n| self.nodes[n as usize].pos - cpos);
             v0 += x[0].dot(x[1].cross(x[2]));
             let mut r1 = Beam::new(
@@ -945,10 +955,22 @@ impl ExplicitBeams {
             } else {
                 (4_300_000.0, 580.0)
             };
+            // A reinforcement set the file gives no Spring or Damp takes its base
+            // set's (spec §25), as the L-beams take the side beam's.
+            let base = match name {
+                "wheelTreadReinfBeam" => Some("wheelTreadBeam"),
+                "wheelPeripheryReinfBeam" => Some("wheelPeripheryBeam"),
+                "wheelSideReinfBeam" | "wheelReinfBeam" => Some("wheelSideBeam"),
+                _ => None,
+            };
             let g = |k: &str, d: f32| {
                 let d = match k {
                     "Spring" => dk,
                     "Damp" => dc,
+                    _ => d,
+                };
+                let d = match (base, k) {
+                    (Some(b), "Spring" | "Damp") => v(&format!("{b}{k}"), d),
                     _ => d,
                 };
                 v(&format!("{name}{k}"), d)
@@ -1063,14 +1085,20 @@ impl ExplicitBeams {
             }
         }
         if lbeams {
+            // [WH]: "the wheelReinfBeam setting covers these diagonal beams or
+            // L-beams"; a file without it falls back to its side beams' values.
             let g = |k: &str, d: f32| {
                 v(
                     &format!("wheelLbeam{k}"),
-                    v(&format!("wheelSideBeam{k}"), d),
+                    v(
+                        &format!("wheelReinfBeam{k}"),
+                        v(&format!("wheelSideBeam{k}"), d),
+                    ),
                 )
             };
             let (k, c) = (g("Spring", 4_300_000.0), g("Damp", 580.0));
             let (deform, strength) = (g("Deform", f32::INFINITY), g("Strength", f32::INFINITY));
+            let cutoff = g("DampCutoffHz", 0.0).max(0.0);
             for s in 0..2 {
                 for i in 0..n {
                     let t = tire[s][i];
@@ -1082,7 +1110,7 @@ impl ExplicitBeams {
                         c,
                         deform,
                         strength,
-                        0.0,
+                        cutoff,
                         1.0,
                     );
                     self.push_lbeam(
@@ -1093,7 +1121,7 @@ impl ExplicitBeams {
                         c,
                         deform,
                         strength,
-                        0.0,
+                        cutoff,
                         1.0,
                     );
                     self.push_lbeam(
@@ -1104,7 +1132,7 @@ impl ExplicitBeams {
                         c,
                         deform,
                         strength,
-                        0.0,
+                        cutoff,
                         1.0,
                     );
                 }

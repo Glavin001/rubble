@@ -472,6 +472,7 @@ fn community_vehicles_do_not_creep_at_rest() {
     for (dir, name, pc) in [
         ("monster_supercar/vehicles", "supercar", "config.pc"),
         ("qlourie_astral_r/vehicles", "qlourie_astral_r", "wrc17_tarmac_balanced.pc"),
+        ("rls_forklift/vehicles", "TPUMedForklift", "FL45D Triplex.pc"),
     ] {
         let dir = m.join(dir);
         let Ok(files) = engine_softbody::jbeam::read_vehicle_dir(&dir, name) else {

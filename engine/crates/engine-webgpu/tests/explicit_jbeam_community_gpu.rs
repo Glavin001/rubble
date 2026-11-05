@@ -158,6 +158,8 @@ fn community_vehicles_rest_and_crash_on_the_gpu() {
             "qlourie_astral_r",
             "wrc17_tarmac_balanced.pc",
         );
+        // The TPU forklift is not here: its beacon light's break group breaks in the
+        // spawn drop (jbeam-semantics-spec.md §29, open).
     } else {
         eprintln!("skip: RUBBLE_BEAMNG_MODS not set");
     }

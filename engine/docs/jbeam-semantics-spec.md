@@ -635,8 +635,12 @@ the layout below, Rubble's own.
 * **Beams** (each set's `Spring`, `Damp`, `Deform`, `Strength`, `DampCutoffHz`,
   `Precompression`; **Choice** for missing values: no deform, no break, and for the
   hub sets the stiffest spring the step integrates with margin on the hub nodes,
-  k = 0.04·m/h² (ω·h = 0.2 per beam) with damping 0.2·√(k·m); other sets
-  4.3 MN/m and 580 N·s/m):
+  k = 0.04·m/h² (ω·h = 0.2 per beam) with damping 0.2·√(k·m); a reinforcement set
+  without Spring or Damp takes its base set's (`wheelTreadReinfBeam` the tread beam's,
+  `wheelPeripheryReinfBeam` the periphery beam's, `wheelSideReinfBeam` and
+  `wheelReinfBeam` the side beam's; 2026-11-05: before, the 4.3 MN/m default, which
+  put the forklift's 1.1 kg tread nodes at ω·h = 2.12); other sets 4.3 MN/m and
+  580 N·s/m):
   * `hubBeam`: hub(k, i) to the other side's axle node; `hubSideBeam`: to its own
     side's axle node (radial spokes);
   * `hubTreadBeam`: hub(0, i)–hub(1, i) and hub(0, i)–hub(1, i + 1);
@@ -646,7 +650,11 @@ the layout below, Rubble's own.
   * `wheelSideReinfBeam` (`enableTireSideReinfBeams`, anisotropic likewise):
     tyre(k, i)–hub(k, i ± 1);
   * `wheelReinfBeam` (`enableTireReinfBeams`, unless L-beams): tyre(k, i)–hub(1 − k, i);
-  * L-beams (`enableTireLbeams`; `wheelLbeamSpring`… else the side beam's values):
+  * L-beams (`enableTireLbeams`; `wheelLbeamSpring`… else `wheelReinfBeam`'s values,
+    [WH]: "the wheelReinfBeam setting covers these diagonal beams or L-beams", else the
+    side beam's; its `DampCutoffHz` too) (2026-11-05: before, the side beam's: on the
+    forklift's tyres, three L-beams per tread node with the side beam's 1,150 N·s/m
+    gave c·h/m = 2.6 on 1.1 kg tread nodes and the tyres diverged at the Nyquist rate):
     vertex tyre(k, i) with ends hub(k, i) and tyre(1 − k, i) (lateral), and hub(k, i)
     with tyre(k, i ± 1) (shear: torque between hub and tread, both senses);
   * `wheelTreadBeam`: tyre(0, i)–tyre(1, i); `wheelTreadReinfBeam`
@@ -802,18 +810,21 @@ rebounds off the wall (its centre of mass rises 0.6 m as it pitches).
 
 **TPU Medium Forklift** (RLS Career Overhaul, AGPL-3.0; self-contained, own
 pressure wheels and `.dae` flexbodies; `FL45D Triplex.pc`, 693 nodes, 7.9 t; CPU,
-2026-11-05). Not passing:
-
-* With pressure wheels its highest spring mode is ω·h = 2.12, past the explicit
-  step's limit of 2: the drive hubs have 30 rays at a 0.19 m radius (4 cm periphery
-  beams) of 4.25 MN/m on 2 kg hub nodes, and §25's layout puts periphery, two tread
-  and a side beam on each hub node. It diverges. Whether BeamNG's own layout puts
-  fewer beams on a hub node is not documented; §25 is our choice.
-* With the `.truck` path's soft tyres (ω·h = 1.78) it rests (KE 10.6 J at 4 s), but
-  its beacon light's break group (12 beams, strengths about 3.3 kN) breaks in the
-  spawn drop, and into the wall at 56 km/h its forks and mast, the first and stiffest
-  parts to touch, throw it up and back: its centre of mass rises 1.8 m and it leaves
-  the wall with 277 kJ of its 965 kJ. Not plausible; open.
+2026-11-05). It first diverged in two ways, both §25 layout choices that differed from
+the docs, now fixed (§25): its tyres' reinforcement sets give no Spring, and took
+4.3 MN/m (ω·h = 2.12 on 1.1 kg tread nodes; now their base sets', ω·h = 1.75 for the
+whole vehicle); and its L-beams took the side beam's 1,150 N·s/m instead of
+`wheelReinfBeam`'s 600 (c·h/m = 2.6 on a tread node: a Nyquist-rate divergence in
+8 steps). Now: at rest 4 s KE 3.9 J; but its beacon light's break group (12 beams of
+about 3.3 kN) breaks at 52 ms, as it lands from the 2 cm spawn drop on its 200 psi
+semi-pneumatic tyres (open: not checked against BeamNG). Into the wall at 56 km/h
+it breaks nothing more and bends 5 beams: its forks and mast (85 MN/m between 50 kg
+nodes) are nearly elastic, so it pitches up over its front axle (centre of mass
++1.65 m at 0.5 s) and rebounds at about 7 m/s. Energy ledger (KE + m·g·Δy of the
+centre of mass): 965 kJ at impact, 420 kJ at 0.5 s, 374 kJ at 1.0 s, 367 kJ at
+1.5 s: falling monotonically, so no energy appears; the rebound is the content's
+stiffness, with no plastic forks. Whether that is plausible for a forklift is
+open.
 
 ## 30. GPU layout of Part II and verification
 
