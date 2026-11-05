@@ -818,8 +818,13 @@ fn pole_run(
     // The approach direction and lane in the car's frame at spawn.
     let (_, r0) = car_frame(&s, b);
     let (d_l, lat_l) = (r0.transpose() * dir, r0.transpose() * lateral);
+    let inv0_pole = {
+        let (o0, r0) = car_frame(&s, b);
+        r0.transpose() * (centre - o0)
+    };
     let mut through = false;
     let mut ledger = tally.then(|| Ledger::new(&s, dir));
+    let mut p_prev = momentum(&s).as_vec3().dot(dir);
     for _ in 0..(seconds * 60.0) as usize {
         match ledger.as_mut() {
             Some(l) => l.frame(&mut s),
@@ -830,6 +835,18 @@ fn pole_run(
         let (o, rot) = car_frame(&s, b);
         let inv = rot.transpose();
         let pole = inv * (centre - o);
+        // POLE_CURVE=1: the pole's force (the car's momentum change along
+        // the approach) against its depth in the car, every frame.
+        if std::env::var("POLE_CURVE").is_ok() {
+            let p1 = momentum(&s).as_vec3().dot(dir);
+            eprintln!(
+                "  t {:.3} depth {:.2} force {:.0} kN",
+                s.steps as f32 * STEP,
+                -(pole - inv0_pole).dot(d_l),
+                -(p1 - p_prev) / (1.0 / 60.0) / 1e3
+            );
+            p_prev = p1;
+        }
         let past: Vec<usize> = far
             .iter()
             .copied()
@@ -844,6 +861,7 @@ fn pole_run(
             .collect();
         if !past.is_empty() {
             through = true;
+            // POLE_WHO=1: which members' nodes got past.
             if std::env::var("POLE_WHO").is_ok() {
                 let mut by: std::collections::BTreeMap<String, usize> = Default::default();
                 for &i in &past {
@@ -858,6 +876,28 @@ fn pole_run(
                     *by.entry(g).or_default() += 1;
                 }
                 eprintln!("  past the pole in the car's frame: {by:?}");
+                // Each node's place and its beams' far ends, against the pole
+                // (along the approach, across it; b: yielded, X: broken), and
+                // how deep the pole is in the car.
+                for &i in past.iter().take(3) {
+                    let q = inv * (s.nodes[i].pos - o) - pole;
+                    let beams: Vec<String> = s.incidence[i]
+                        .iter()
+                        .map(|&bm| {
+                            let x = &s.beams[bm as usize];
+                            let o2 = if x.a as usize == i { x.b } else { x.a } as usize;
+                            let q2 = inv * (s.nodes[o2].pos - o) - pole;
+                            format!(
+                                "{}{} to ({:.2},{:.2})",
+                                if x.broken { "X" } else { "" },
+                                if x.bent() { "b" } else { "" },
+                                q2.dot(d_l),
+                                q2.dot(lat_l)
+                            )
+                        })
+                        .collect();
+                    eprintln!("    node {i} spawn {:?}: rel to pole along {:.2} across {:.2}; pole depth {:.2}; beams {beams:?}", b.skeleton.nodes[i].p, q.dot(d_l), q.dot(lat_l), (pole - inv0_pole).dot(d_l));
+                }
             }
             break;
         }
@@ -1052,8 +1092,17 @@ fn e_upside_down_drop_from_15_m_keeps_its_ledgers() {
 }
 
 /// Poles every 5 cm across the front and along the side at 30, 45 and 60 km/h,
-/// a 20 cm square and a 25 cm cylinder: none may pass through the front, nor
-/// the side at 30 km/h (the side at 45 and 60 is reported).
+/// a 20 cm square and a 25 cm cylinder: none may pass through (judged in the
+/// car's own frame, [`pole_run`]). Ignored: the side still lets the pole
+/// through (Low, at 4ea11bf2 and after: front 0/66 at every speed; side
+/// 8/178 at 30 km/h, 29/178 at 45, 81/178 at 60). In every case the pole has
+/// reached the car's centre line, 1.2–1.4 m deep, and nodes of the members
+/// there (tunnel, floor and subframe cross members, roof bows) slip round it
+/// while their beams cross it (node-only contact). The side's force holds a
+/// plateau of about 110–130 kN at 60 km/h where stopping 201 kJ short of the
+/// centre needs about 220 kN; at 30 km/h the cases are the bay behind the
+/// front wheel and the rear overhang (15–45 kN). `POLE_WHO=1`,
+/// `POLE_CURVE=1`, `SWEEP_LIST=1` diagnose.
 #[test]
 #[ignore]
 fn pole_sweep_never_passes_through() {
@@ -1146,12 +1195,7 @@ fn pole_sweep_never_passes_through() {
     for ((dir, pole, kmh), (n, of)) in &table {
         eprintln!("pole sweep {dir:>5} {pole:>14} {kmh:2} km/h: {n:2} of {of} passed through");
     }
-    // No frontal pass-through at any speed, no side one at 30 km/h (45 and 60
-    // are reported).
-    let bad: Vec<_> = fails
-        .iter()
-        .filter(|f| f.0.z > 0.5 || f.3 <= 30.0)
-        .collect();
+    let bad: Vec<_> = fails.iter().collect();
     assert!(bad.is_empty(), "passed through: {bad:?}");
 }
 
