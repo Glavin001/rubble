@@ -1662,6 +1662,32 @@ impl ExplicitBeams {
         };
         s.add_triangles(&desc);
         s.add_aero(&file, airfoil);
+        // The BeamNG profile's air drag (§31, §36): the triangles' (every cab
+        // triangle at BeamNG's defaults: dragCoef 100, liftCoef 100, stall
+        // 0.58 rad), replacing the per-node drag and turbulence.
+        if file.beamng_profile && s.settings.drag {
+            // (A cab line of both triangle groups is two collision triangles on
+            // the same nodes: one aero triangle.)
+            let mut aero = desc.clone();
+            let mut seen = std::collections::HashSet::new();
+            aero.triangles.retain(|t| {
+                let mut k = t.nodes;
+                k.sort_unstable();
+                seen.insert(k)
+            });
+            if let Some((d, l)) = file.drag_coef {
+                for t in &mut aero.triangles {
+                    t.aero[0] = d;
+                    t.aero[1] = l;
+                }
+            }
+            s.add_triangle_aero(&aero);
+            if !s.beam_ext.is_empty() {
+                s.ext_of.resize(s.beams.len(), 0);
+            }
+            s.settings.drag = false;
+            s.settings.turbulence = false;
+        }
         s.finish();
         // Rubble's extensions (none in Rigs of Rods files: unchanged): cab
         // lines that break (spec §18) and contact from every node (§10.2).
