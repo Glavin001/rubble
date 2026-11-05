@@ -1309,6 +1309,29 @@ start − end mechanical energy over the 1 s window, kJ/s, supercar / Astral R a
   peak kinetic energy 1–4 s 37.3 J (was 44 J), 17.7 J at 4 s; the polygon flats'
   well and free-rolling wheels, damped only by the tyres' rolling loss.
 
+**The tread's landing, measured against geometry (2026-11-05, `energy_ledger.rs`
+coasting, which now also reports each tyre's loaded deflection and tread mass).**
+Astral R: 2,028 kg, tread 5.09 kg per tyre (32 nodes of 0.159 kg), loaded deflection
+δ = 8–11 mm at 9 m/s and 10–12 mm at 25 m/s, R = 0.325 m. A point-mass tread node
+rotating at radius R reaches the flattened patch at angle θ, cos θ = 1 − δ/R
+(13.5° at 9 m/s, 14.9° at 25 m/s), moving towards the ground at v·sin θ (2.1 and
+6.4 m/s). It lands with ½m(v·sin θ)² = 0.35 J and 3.3 J; measured 0.40 J and 5.6 J
+(1,444 landings a second at 25 m/s, 29.5 per tyre revolution: almost every tread node,
+every revolution). Per tyre that is a force of about M_tread·v²·sin²θ / (4πR): 205 N
+for the car at 25 m/s (5.1 kJ/s of the 8.1 measured; the rest is the node's radial
+ringing as it leaves the patch, at 196 g centripetal). It does not depend on the
+polygon (the rays set the node mass, not the total tread mass or θ), as `rays=2`
+showed. The landing's impulse is what the sidewall and L-beam dampers then take
+(13 and 3 kJ/s). The loss scales with the total tread mass and the deflection, and
+roughly with v² (C_rr 0.025 at 9 m/s, 0.063 at 25 m/s; a real tyre's is close to
+constant). **So the remaining sink is the lumped tread's inelastic landing at its
+patch-entry angle** (§28's node–ground rule on a belt with no bending stiffness ahead
+of the patch, unlike a real tyre's belt), not a mis-set beam. Every input is the
+file's own (node weights, deflection from its pressure and springs). **Not fixed:**
+removing it needs a modelling Choice with nothing measured behind it: a ground
+restitution, or tread bending ahead of the patch the file does not author. This is the
+user's decision (AGENTS.md: no lossy or invented model on our own initiative).
+
 **Drag area check** (`jbeam_accept … aero=`: Σ 1.28·(dragCoef/100)·A·|n̂·f̂|
 over the desc's triangles, f̂ the forward axis; one-sided areas, each triangle once,
 SI units, the default 100 only where a row sets none). The reading is the docs':
