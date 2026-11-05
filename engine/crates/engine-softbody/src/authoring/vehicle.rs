@@ -1322,7 +1322,12 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 .nodes
                 .iter()
                 .copied()
-                .filter(|&i| sk.nodes[i as usize].part != 0)
+                .filter(|&i| {
+                    let q = sk.nodes[i as usize].part;
+                    // (A pane is its own part: members ride the panel
+                    // round it, not the glass.)
+                    q != 0 && !sk.parts[q as usize].starts_with(GLASS_PART)
+                })
                 .collect();
             let part = if m.ride {
                 sk.nodes[sk.nearest(mid, &panels, 1)[0] as usize].part
@@ -1589,7 +1594,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             for g in groups.values() {
                 on.extend(g.iter().copied());
             }
-            body.iter().copied().filter(|i| on.contains(i)).collect()
+            let mut v: Vec<u32> = body.iter().copied().filter(|i| on.contains(i)).collect();
+            v.sort();
+            v.dedup();
+            v
         };
         let mut parts: Vec<u16> = door_ends.iter().map(|e| e.0).collect();
         parts.sort();
@@ -1771,7 +1779,21 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     }
                 }
                 if beams.is_empty() {
-                    return Err(format!("{name}: no pillar node near its {kind:?}"));
+                    let pa = sk.pos(pin);
+                    let near: Vec<String> = sk
+                        .nearest(pa, if one { &member_body } else { &body }, 4)
+                        .iter()
+                        .map(|&b| {
+                            let g = groups
+                                .iter()
+                                .find(|g| g.1.contains(&b))
+                                .map_or("-", |g| g.0.as_str());
+                            format!("{b} {g} {:.2} m", sk.pos(b).distance(pa))
+                        })
+                        .collect();
+                    return Err(format!(
+                        "{name}: no pillar node near its {kind:?} (pin at {pa:?}; nearest {near:?})"
+                    ));
                 }
                 let suffix = match kind {
                     Hardware::HingeUpper => "hinge_upper",
@@ -3025,6 +3047,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     })
 }
 
+/// A pane that is its own part is named this followed by the panel it sits
+/// in (`glass_door_f_l`).
+pub const GLASS_PART: &str = "glass_";
+
 /// One tier: the body dashpots' damping per kilogram of the node each is
 /// from (1/s): the BX body's damping-only beams (`bx_body_hatch`, "main
 /// frame damping": 12 beams of 500 N·s/m, k 0) over its 328.9 kg, Σc/Σm
@@ -3426,6 +3452,22 @@ fn one_tier_masses(
     }
     let mut ledger: Vec<(String, f32)> = Vec::new();
     let mut parts_kg = 0.0f32;
+    // A pane that is its own part (`glass_<panel>`) weighs its glass; the
+    // panel it sits in has its measured assembly mass less that.
+    let panes: HashMap<String, f32> = sk
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.starts_with(GLASS_PART))
+        .map(|(q, p)| {
+            let kg = (0..n)
+                .filter(|&i| sk.nodes[i].part as usize == q)
+                .map(|i| w[i])
+                .sum();
+            (p[GLASS_PART.len()..].to_string(), kg)
+        })
+        .collect();
+    let pane_kg = |name: &str| -> f32 { panes.get(name).copied().unwrap_or(0.0) };
     for part in 0..sk.parts.len() as u16 {
         let name = sk.parts[part as usize].clone();
         let nodes: Vec<usize> = (0..n).filter(|&i| sk.nodes[i].part == part).collect();
@@ -3440,7 +3482,7 @@ fn one_tier_masses(
             .iter()
             .find(|(p, _)| name.starts_with(p.as_str()))
         {
-            Some(*kg)
+            Some(*kg - pane_kg(&name))
         } else {
             sheet_mass(def, sk, &shell.tris, part)
         };

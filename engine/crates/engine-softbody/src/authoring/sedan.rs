@@ -2081,6 +2081,36 @@ pub fn sedan_one_tier() -> VehicleDef {
     d.one_tier = true;
     d.tiered = false;
     d.damping = Some(super::vehicle::DampingRatios::default());
+    // The C-pillar (the rear doors' striker pillar) at pole-width stations
+    // (A8: an outer member's stations at most a 254 mm pole apart), so its
+    // latch meets the pillar's own nodes.
+    for m in d.members.iter_mut().filter(|m| m.name == "pillar_c") {
+        m.station = super::vehicle::POLE_LANE;
+    }
+    // Each door's side glass is its own part (A1: every pane a part), so the
+    // door's skin is the door's: bonded into it (one break group).
+    {
+        let at = d.panels.iter().position(|p| p.name == "door_f").unwrap();
+        let panes: Vec<Panel> = ["door_f", "door_r"]
+            .iter()
+            .zip(&d.look.side_glass)
+            .map(|(door, o)| {
+                panel(
+                    &format!("{}{door}", super::vehicle::GLASS_PART),
+                    Region::Side(o.clone()),
+                    "glass",
+                    Joint::Bolt {
+                        scale: 1.0,
+                        group: true,
+                    },
+                    true,
+                )
+            })
+            .collect();
+        for (k, p) in panes.into_iter().enumerate() {
+            d.panels.insert(at + k, p);
+        }
+    }
     // The front bumper beam: the 2011 Accord's is roll-formed steel of
     // 590 MPa tensile strength, its assembly with crush cans, centre plate
     // and brackets 7.96 kg (NHTSA DOT HS 811 666 §5.10.7.1). Its section: a
