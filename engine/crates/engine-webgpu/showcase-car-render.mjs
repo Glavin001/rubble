@@ -115,7 +115,7 @@ struct Fx { dt: f32, seed: u32, floorY: f32, boxes: u32, box: array<vec4f, ${2 *
 @group(0) @binding(5) var<storage, read> topo: array<u32>;
 @group(0) @binding(6) var<storage, read> beams: array<vec4f>;
 // Per node NS (6) vec4: (plane a, tear), (last world position, valid), (plastic
-// strain, broken beams, scrape (m slid in contact), 0); then per damage unit
+// strain, broken beams, paint worn (µm), 0); then per damage unit
 // (broken, strain, shards due, broken as of the last moving update) at
 // stateAt; then the level of detail state (picked, picked last update) at
 // stateAt + unitCount.
@@ -146,7 +146,22 @@ const NS = 6u;
 const ANNEALED_CRACK = ${LAMINATED_CRACK_STRAIN};
 // A node within this of a surface (its collision range) is in contact.
 const CONTACT = 0.03;
-const SCRAPE_CONTACT = 0.012;
+// Paint wear (Archard: worn depth = K · p · s / H, s the distance slid in
+// contact). K = 0.05: two-body abrasive wear against a rough counterface
+// (concrete, a road) is K ≈ 10⁻² … 10⁻¹ (Rabinowicz, Friction and Wear of
+// Materials, 2nd ed., 1995); the middle of that range is a Choice. H = 0.2
+// GPa: a crosslinked automotive clearcoat's indentation hardness, a Choice
+// (published nanoindentation studies measure these coats; we found no value
+// to cite). p = 1 MPa: a Choice, because the solver does not expose its
+// contact forces (a 10 kN contact on 1 cm² of real contact). Depth per metre
+// slid: K p / H = 250 µm. Layers (typical OEM build-up, Streitberger &
+// Dössel, Automotive Paints and Coatings, 2nd ed., 2008): clearcoat 45 µm,
+// basecoat 20 µm, primer 25 µm, e-coat 20 µm: primer shows past 65 µm worn,
+// bare steel past 110 µm.
+const WEAR_K = 0.05;
+const WEAR_P = 1.0e6;
+const WEAR_H = 0.2e9;
+const WEAR_UM_PER_M = ${1e6} * WEAR_K * WEAR_P / WEAR_H;
 
 fn origin() -> vec3f {
   let o = misc[params.vehicle];
@@ -361,12 +376,12 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
       let vt = length(v - sf.xyz * vn);
       let seed = i * 7919u + params.vehicle * 104729u;
       if (sf.w < CONTACT && mat != 3u) {
-        // Sliding contact: the paint wears (metres slid), metal throws
-        // sparks (about 4 a second per node and m/s), a hard landing dust.
-        // Paint wears only in pressed sliding contact (within a node's
-        // contact skin of the surface, not leaving it): a node that merely
-        // passes near a wall in a crush scratches nothing.
-        if (sf.w < SCRAPE_CONTACT && vn < 0.5) { scrape += vt * fxu.dt; }
+        // Sliding contact: metal throws sparks (about 4 a second per node
+        // and m/s), a hard landing dust. The paint wears (µm, WEAR_*) only
+        // where the solver's own contact rule holds: the node at or inside
+        // the surface (it pushes a node out of the ground and boxes only
+        // there), not merely near it.
+        if (sf.w <= 0.0) { scrape += vt * fxu.dt * WEAR_UM_PER_M; }
         if (mat == 0u && vt > 2.0 && fxRnd(seed, 1u) < min(vt * 4.0 * fxu.dt, 0.5)) {
           let dir = normalize(v - sf.xyz * vn + vec3f(1e-5));
           fxSpawn(p + sf.xyz * 0.01, v * 0.7 + dir * 2.0 + fxRndDir(seed, 2u) * 1.8 + sf.xyz * 1.5, 0.2 + 0.4 * fxRnd(seed, 3u), 0u);
@@ -528,7 +543,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
   outv[k] = vec4f(pos, bitcast<f32>(pack2x16float(vec2f(tear, dmg))));
-  outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(plastic, min(scrape, 1000.0)))));
+  outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(plastic, min(scrape, 60000.0)))));
 }
 
 // The particles' step (once per update, after every car's spawns).
@@ -585,6 +600,9 @@ fn fxChip(kind: u32, h: f32) -> vec3f {
 const DRAW_WGSL = /* wgsl */ `
 struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
 @group(0) @binding(0) var<uniform> frame: Frame;
+// Imported vehicles' colour maps (setTextures): one array, a layer each.
+@group(0) @binding(1) var texArr: texture_2d_array<f32>;
+@group(0) @binding(2) var texSamp: sampler;
 
 struct VOut {
   @builtin(position) @invariant clip: vec4f,
@@ -597,8 +615,10 @@ struct VOut {
   @location(6) strain: f32,
   @location(7) rest: vec3f,
   @location(8) uv: vec2f,
-  // (plastic strain, scrape: metres slid in contact).
+  // (plastic strain, paint worn through: µm).
   @location(9) wear: vec2f,
+  // Texture layer + 1 (0 none): an imported vehicle's colour map.
+  @location(10) @interpolate(flat) tex: u32,
 };
 
 @vertex
@@ -612,7 +632,9 @@ fn vs(@location(0) p3: vec3f, @location(8) tw: u32, @location(1) n3: vec3f, @loc
   o.world = pt.xyz;
   o.normal = nrm.xyz;
   o.color = color;
-  o.mat = mat;
+  // The attribute's low byte is the material, its high half the texture.
+  o.mat = mat & 0xffu;
+  o.tex = mat >> 16u;
   o.torn = pt.w;
   o.ao = ao;
   o.strain = nrm.w;
@@ -824,7 +846,8 @@ fn vsContact(@location(0) p3: vec3f, @location(8) tw: u32, @location(1) n3: vec3
   let sp = nh / max(length(nh), 1e-3) * min(length(nh), 1.0) * (0.02 + 0.2 * max(hgt, 0.0));
   o.clip = frame.viewProj * vec4f(pt.x + sp.x, frame.eye.w + 0.002, pt.z + sp.y, 1.0);
   // Glass, lenses and torn skin cast none.
-  let skip = pt.w > 0.5 || mat == 1u || mat == 17u || mat == 20u || mat == 25u || mat == 27u;
+  let m = mat & 0xffu;
+  let skip = pt.w > 0.5 || m == 1u || m == 17u || m == 20u || m == 25u || m == 27u;
   let fall = 1.0 - smoothstep(0.0, 0.15, hgt);
   o.a = select(frame.light.w * fall, 0.0, skip || hgt < -0.05);
   // Far above the floor: collapsed to one point outside the view, so the
@@ -870,6 +893,10 @@ fn shade(i: VOut, front: bool) -> vec4f {
   // Texture-coordinate footprint (taken in uniform control flow): printed
   // text fades to its average ink when too small to read.
   let uvw = fwidth(i.uv);
+  // The colour map's sampling footprint (v flipped: images are stored top
+  // row first, Collada's t points up).
+  let tdx = dpdx(i.uv) * vec2f(1.0, -1.0);
+  let tdy = dpdy(i.uv) * vec2f(1.0, -1.0);
   var zc = 0.0;
   var zw = 1.0;
   if (ZEBRA > 0.0) {
@@ -935,13 +962,17 @@ fn shade(i: VOut, front: bool) -> vec4f {
   let scr = i.wear.y;
   var m = i.mat;
   var albedo = i.color;
-  // Through the clearcoat and paint to primer after about 3 cm slid, to
-  // bare steel after 15 cm.
-  if ((m == 0u || m == 3u || m == 9u) && scr > 0.03) {
+  if (i.tex > 0u) {
+    albedo *= textureSampleGrad(texArr, texSamp, vec2f(i.uv.x, 1.0 - i.uv.y), i.tex - 1u, tdx, tdy).rgb;
+  }
+  // Worn depth (µm, WEAR_*): through clear and base to primer past 65 µm,
+  // through primer and e-coat to bare steel past 110 µm; in streaks (the
+  // contact is a few asperities wide), wider as it deepens.
+  if ((m == 0u || m == 3u || m == 9u) && scr > 65.0) {
     let q = i.rest * vec3f(60.0, 60.0, 4.0);
     let streak = noise3(q) * 0.65 + noise3(q * 3.1) * 0.35;
-    let amount = smoothstep(0.03, 0.6, scr);
-    if (streak > 0.815 - 0.3 * amount && scr > 0.15) { m = 7u; albedo = vec3f(0.56, 0.56, 0.58); }
+    let amount = smoothstep(65.0, 400.0, scr);
+    if (streak > 0.815 - 0.3 * amount && scr > 110.0) { m = 7u; albedo = vec3f(0.56, 0.56, 0.58); }
     else if (m == 0u && streak > 0.74 - 0.35 * amount) { m = 254u; albedo = vec3f(0.30, 0.30, 0.29); }
   }
   // Round a tear, the paint has cracked off the stretched steel (grey
@@ -1293,8 +1324,15 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   const mirrorBind = device.createBindGroup({ layout: mirrorPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: mirrorBuf } }] });
   const mirrorDepthBind = device.createBindGroup({ layout: mirrorDepthPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: mirrorBuf } }] });
   const frameBuf = device.createBuffer({ label: 'showcase-frame', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const drawBind = device.createBindGroup({ layout: drawPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
-  const glassBind = device.createBindGroup({ layout: glassPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
+  // Colour maps: one texture array shared by every car (setTextures), a
+  // white layer until then.
+  const texSamp = device.createSampler({ magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat', maxAnisotropy: 8 });
+  let texArr = device.createTexture({ size: [1, 1, 1], format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  device.queue.writeTexture({ texture: texArr }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, [1, 1, 1]);
+  let texLayers = 0;
+  const texEntries = () => [{ binding: 1, resource: texArr.createView({ dimension: '2d-array' }) }, { binding: 2, resource: texSamp }];
+  const makeDrawBinds = () => [drawPipe, glassPipe].map((p) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }, ...texEntries()] }));
+  let [drawBind, glassBind] = makeDrawBinds();
   const fxBind = device.createBindGroup({ layout: fxPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }, { binding: 1, resource: { buffer: fxBuf } }] });
   const cars = new Map();
   let nextId = 1;
@@ -1316,6 +1354,31 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   };
 
   return {
+    /**
+     * The colour maps (wasm `decodeTexture(bytes, size)` per file of a
+     * visual's `textures`, null for a missing one: white), `size` × `size`
+     * with mips. Returns the first layer's index: pass it as addCar's
+     * `texBase`. Replaces any earlier set (cars added before keep theirs only
+     * if this set starts with the same layers).
+     */
+    setTextures(layers, size) {
+      const mips = Math.log2(size) + 1;
+      if (!Number.isInteger(mips)) throw new Error('showcase setTextures: size must be a power of two');
+      texArr.destroy();
+      texArr = device.createTexture({ size: [size, size, Math.max(1, layers.length)], mipLevelCount: mips, format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      layers.forEach((data, z) => {
+        let off = 0;
+        for (let l = 0, s = size; l < mips; l++, s = Math.max(1, s >> 1)) {
+          const n = s * s * 4;
+          const px = data ? data.subarray(off, off + n) : new Uint8Array(n).fill(255);
+          device.queue.writeTexture({ texture: texArr, mipLevel: l, origin: [0, 0, z] }, px, { bytesPerRow: s * 4, rowsPerImage: s }, [s, s, 1]);
+          off += n;
+        }
+      });
+      texLayers = layers.length;
+      [drawBind, glassBind] = makeDrawBinds();
+      return 0;
+    },
     /**
      * Skin from world-space node positions instead (xyz f32 per node, all vehicles in
      * order; e.g. the crash lab's positionsBuffer(), so replays deform the body too),
@@ -1350,7 +1413,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * vehicle's first node in the solver (`layout.vehicles[i].nodeOffset`), `vehicle`
      * its index (for its origin). Returns an id.
      */
-    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null } = {}) {
+    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0 } = {}) {
       const nodeCount = visual.nodeCount;
       const nt = visual.normalTris, start = visual.nodeTriStart, list = visual.nodeTriList;
       const units = visual.unitKind?.length ?? 0;
@@ -1452,7 +1515,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         for (let i = 0; i < n; i++) {
           af.set(v.colors.subarray(3 * i, 3 * i + 3), 10 * i);
           af[10 * i + 3] = v.ao ? v.ao[i] : 1;
-          au[10 * i + 4] = v.material[i];
+          // Material (low byte), texture layer + 1 (high half; 0 none).
+          const t = v.tex ? v.tex[i] : 0;
+          au[10 * i + 4] = v.material[i] | (t ? (t + texBase) << 16 : 0);
           af.set(v.positions.subarray(3 * i, 3 * i + 3), 10 * i + 5);
           if (v.uvs) af.set(v.uvs.subarray(2 * i, 2 * i + 2), 10 * i + 8);
         }

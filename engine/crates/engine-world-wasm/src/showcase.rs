@@ -83,6 +83,14 @@ pub fn showcase_car_truck(params: JsValue) -> Result<String, JsValue> {
 /// `visualLod`, the same at a distant level of detail (about a third of the
 /// triangles; `showcase-car-render.mjs` switches to it by distance).
 /// `showcase-car-render.mjs` documents the binding.
+/// A texture file (PNG or DDS) as one renderer layer: `size` × `size` RGBA8
+/// with its mips, concatenated (`engine_softbody::flextex`).
+#[wasm_bindgen(js_name = decodeTexture)]
+pub fn decode_texture(bytes: &[u8], size: u32) -> Result<Vec<u8>, JsValue> {
+    let img = engine_softbody::flextex::decode(bytes).map_err(err)?;
+    Ok(engine_softbody::flextex::layer(&img, size))
+}
+
 /// The showcase car's third level of detail (`showcase_visual_lod`'s detail).
 const FAR_DETAIL: f32 = 0.2;
 
@@ -129,6 +137,17 @@ pub fn showcase_car_visual(params: JsValue) -> Result<JsValue, JsValue> {
 
 fn visual_js(v: &ShowcaseVisual) -> Object {
     let vis = Object::new();
+    // Textures (imported vehicles' colour maps): file names, and per vertex
+    // its texture + 1 (0 untextured).
+    let tex = Array::new();
+    for t in &v.textures {
+        tex.push(&JsValue::from_str(t));
+    }
+    set(&vis, "textures", &tex.into());
+    if !v.tex.is_empty() {
+        let t: Vec<u16> = v.tex.iter().map(|&x| if x == u16::MAX { 0 } else { x + 1 }).collect();
+        set(&vis, "tex", &js_sys::Uint16Array::from(t.as_slice()).into());
+    }
     set(&vis, "edgeLength", &JsValue::from(engine_softbody::authoring::skin::median_edge(v)));
     set(
         &vis,

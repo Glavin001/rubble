@@ -618,10 +618,13 @@ opening's edge, the doors' belt edges included, is black rubber.
   * `showcase-car-check.mjs` runs `damage_*` (`?check=damage`): every
     simulated frame it reads back the solver's beams and the renderer's unit
     states in the same submission and fails on any difference.
-  * When the physics' own break groups land in `Built` (`DamageUnit`s by
-    name: `glass_*`, `headlight_*`, `mirror_*`, hinges, latches), they
-    replace this derivation; mirrors and lamps that become their own small
-    parts then ride (and fall with) those parts.
+  * The glass panes now use the physics' own units (`Built.damage_units`:
+    `glass_windscreen`, `glass_backlight`, `glass_side_{f,r,q}_{l,r}`, each
+    the pane's beams and its mounts, mapped to the solver's beams by node
+    pair). A pane breaks when one of them breaks, with no strain trigger of
+    the renderer's own (`BRITTLE_GLASS` decides how the physics breaks
+    them). Lamps and mirrors keep the mount derivation until their units and
+    parts land; then they ride, and fall with, those parts.
 * **Substance** (plan P7). Behind every door's outer skin sits its inner
   skin at the door's section (`DOOR_SECTION` 8.5 cm, just outboard of the
   door card), with shut faces round its edge; under the bonnet and boot lid
@@ -644,15 +647,22 @@ opening's edge, the doors' belt edges included, is black rubber.
   landings. A ring of 8,192 particles shared by every car. Only with
   `update`'s `dt` > 0 (the simulated time since the last update).
 * **Wear** (plan P11). Per node the renderer keeps its plastic strain and
-  the metres it slid in pressed contact with the floor or a static box
-  (within 1.2 cm of it and not leaving it: a node passing near a wall in a
-  crush scratches nothing). The clearcoat dulls with plastic strain (from
-  0.4 % to 6 %); scraped paint is scratched to primer after 3 cm slid, to
-  bare steel after 15 cm, in streaks, more with every metre slid. (The grey
-  flecks near a crushed bonnet's front edge are these: its nodes slid along
-  the wall; `showcase-car.html?debugWear=1` shows the tear field, plastic
-  strain and metres slid as red, green and blue.) Scrapes accumulate forward in time (a replay scrubbed back keeps
-  them).
+  the paint worn through (µm). The clearcoat dulls with plastic strain (from
+  0.4 % to 6 %). Paint wears by Archard's law, depth = K·p·s / H over the
+  distance s a node slides while in contact by the solver's own rule (at or
+  inside the floor or a static box, where the solver pushes it out; a node
+  merely near a wall wears nothing). K = 0.05: two-body abrasive wear is
+  K ≈ 10⁻² to 10⁻¹ (Rabinowicz, *Friction and Wear of Materials*, 2nd ed.,
+  1995); the middle of the range is a Choice. H = 0.2 GPa, a clearcoat's
+  indentation hardness: a Choice (we found no published value to cite).
+  p = 1 MPa: a Choice, because the solver does not expose its contact
+  forces. That wears 250 µm a metre. The layers are a typical OEM build-up
+  (Streitberger & Dössel, *Automotive Paints and Coatings*, 2nd ed., 2008):
+  clearcoat 45 µm, basecoat 20, primer 25, e-coat 20. So primer shows in
+  streaks past 65 µm worn (26 cm slid), and bare steel past 110 µm (44 cm).
+  Wear accumulates forward in time (a replay scrubbed back keeps it).
+  `showcase-car.html?debugWear=1` shows the tear field, plastic strain and
+  paint worn as red, green and blue.
 * **Cabin.** Seats and the steering wheel ride one triangle of their frame
   rigidly (`Bind::GroupRigid`), so a far binding triangle never swings them
   out of the cabin; the dashboard and console ride their members' triangles.
@@ -770,8 +780,17 @@ vehicle the same visual format as the authored car, so
   (glass, lamp lens, chrome, tyre, rim, trim, interior, engine, else paint);
   the vehicle's `*.materials.json` makes it glass when translucent, emissive
   when it glows, and gives untextured materials their diffuse colour.
-  Textures are not read (a textured material shades flat grey; paint takes
-  the paint).
+* **Textures.** A material's colour map (`colorMap` or `baseColorMap` in
+  Stages[0]) is the file of that name in the vehicle's folder.
+  `engine_softbody::flextex` decodes PNG (8- or 16-bit, any colour type) and
+  DDS (BC1–BC3 by the block formats' definitions, 32-bit RGBA/BGRA) into a
+  1024² sRGB layer with its mips (wasm `decodeTexture`). The renderer keeps
+  one texture array (`setTextures`), and each vertex carries its layer in
+  its material word's high half. The map multiplies the material's colour,
+  sampled with explicit gradients (v flipped: images are stored top row
+  first). A colour-mapped material shades satin (`mat::DASH`), not as
+  paint. The supercar's 15 maps (carbon fibre, fabric, wood, the dials and
+  buttons) all load; normal, roughness and AO maps are not read yet.
 * **Level of detail.** Three levels: the full mesh, each mesh clustered on a
   3 cm grid per material and normal direction (`cluster`, `LOD_CELL`), and
   on a 9 cm grid (`FAR_CELL`; wasm `visualFar`). The renderer picks them as

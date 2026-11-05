@@ -24,7 +24,7 @@
 // ?height= m (drop), ?style=sedan|hatchback, ?paint=r,g,b, ?freeze= s (stop the
 // simulation there), ?cam=front|side|rear|top|three, ?dist= m, ?drag=0, ?n= cars (idle row).
 import { createWorld } from './rubble-world.mjs';
-import { showcaseCar, jbeamVisual } from './generated/world-wasm/engine_world_wasm.js';
+import { showcaseCar, jbeamVisual, decodeTexture } from './generated/world-wasm/engine_world_wasm.js';
 import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
 
 const qs = new URLSearchParams(location.search);
@@ -89,6 +89,14 @@ try {
   // .materials.json), skinned from its JBeam-mode rest nodes: the visual
   // layer on its own, no simulation.
   let modVis = null;
+  // A texture layer's size (?texSize=), and the folder's file for each
+  // texture name (case-insensitive, by file name): null where missing.
+  const TEX_SIZE = Number(qs.get('texSize')) || 1024;
+  const loadTextures = (names, list, base) => Promise.all(names.map(async (t) => {
+    const f = list.find((x) => x.split('/').pop().toLowerCase() === t.toLowerCase());
+    if (!f) return null;
+    try { return decodeTexture(new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer()), TEX_SIZE); } catch (e) { console.warn('texture', f, e); return null; }
+  }));
   if (qs.has('mod')) {
     const base = qs.get('mod').replace(/\/$/, '');
     const list = await (await fetch(`${base}/files.json`)).json();
@@ -100,6 +108,12 @@ try {
     const materials = await Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text));
     const out = jbeamVisual({ jbeam: jb, pc, native: true, materials, ...(paint ? { paint } : {}), ...(qs.has('farCell') ? { farCell: Number(qs.get('farCell')) } : {}) }, meshes);
     modVis = out.visual; modVis.lod = [out.visualLod, out.visualFar];
+    // Its colour maps (?tex=0 without), decoded in the wasm, one layer each.
+    if (qs.get('tex') !== '0' && modVis.textures.length) {
+      const layers = await loadTextures(modVis.textures, list, base);
+      r.setTextures(layers, TEX_SIZE);
+      modVis.texLoaded = layers.filter(Boolean).length;
+    }
     window.__flexReport = out.report;
     // ?n= copies in a row, 3 m apart (the cost check).
     const nr0 = modVis.nodeRest, r00 = modVis.beamRest0;
@@ -438,7 +452,7 @@ try {
     poll();
     const c = car.counts;
     const gm = gpuMs.length ? gpuMs.reduce((a, b) => a + b, 0) / gpuMs.length : NaN;
-    hud.textContent = (modVis ? `mod: ${[modVis, ...modVis.lod].map((l) => `${l.indices.length / 3} tris (edge ${(l.edgeLength * 100).toFixed(1)} cm)`).join(' · ')}\n` : '') + `${qs.get('style') ?? 'sedan'} ${res}: ${c.nodes} nodes, ${c.beams} beams, ${c.collisionTriangles} collision tris, ${car.visual.indices.length / 3} visual tris (levels ${[car.visualLod, car.visualFar].map((l) => l ? l.indices.length / 3 : '–').join(', ')}), ${c.mass.toFixed(0)} kg\n` +
+    hud.textContent = (modVis ? `mod: textures ${modVis.texLoaded ?? 0}/${modVis.textures.length} · ${[modVis, ...modVis.lod].map((l) => `${l.indices.length / 3} tris (edge ${(l.edgeLength * 100).toFixed(1)} cm)`).join(' · ')}\n` : '') + `${qs.get('style') ?? 'sedan'} ${res}: ${c.nodes} nodes, ${c.beams} beams, ${c.collisionTriangles} collision tris, ${car.visual.indices.length / 3} visual tris (levels ${[car.visualLod, car.visualFar].map((l) => l ? l.indices.length / 3 : '–').join(', ')}), ${c.mass.toFixed(0)} kg\n` +
       `scene ${scene} ${kmh} km/h × ${n}   t ${simTime.toFixed(2)} s   GPU ${isNaN(gm) ? '–' : gm.toFixed(2)} ms/frame   build ${buildMs.toFixed(0)} ms` +
       (damage ? `\nbroken ${damage.broken}  bent ${damage.bent}` : '') +
       (tq?.ms.length ? `\ncar render ${(tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length).toFixed(3)} ms (GPU pass)` : '') +
