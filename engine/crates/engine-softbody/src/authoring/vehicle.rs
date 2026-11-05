@@ -3572,9 +3572,39 @@ fn size_hardware_once(sk: &mut Skeleton, hw: &[HardwareGroup], scale: f32) -> Re
             }
         }
     }
-    for (j, s) in strength {
+    // A rope no rig pull loads (it lies across every tested direction: in
+    // the standing car's pose a rope square to the pulls may tilt just past
+    // square) holds nothing the rigs measure; it takes its group's weakest
+    // rope's strength, so no rig's result changes.
+    let weakest: HashMap<usize, f32> = hw
+        .iter()
+        .enumerate()
+        .filter_map(|(g, h)| {
+            h.beams
+                .iter()
+                .filter_map(|j| strength.get(j).copied())
+                .filter(|&s| s > 0.0)
+                .min_by(|a, b| a.total_cmp(b))
+                .map(|s| (g, s))
+        })
+        .collect();
+    for (j, mut s) in strength {
         if s <= 0.0 {
-            return Err(format!("hardware beam {j} carries nothing in its rigs"));
+            match hw
+                .iter()
+                .position(|h| h.beams.contains(&j))
+                .and_then(|g| weakest.get(&g))
+            {
+                Some(&w) => s = w,
+                None => {
+                    let (a, b) = (sk.beams[j].a, sk.beams[j].b);
+                    return Err(format!(
+                        "hardware beam {j} ({a} at {:.2?} to {b} at {:.2?}) carries nothing in its rigs",
+                        sk.pos(a),
+                        sk.pos(b)
+                    ));
+                }
+            }
         }
         sk.beams[j].mat.deform = s;
         sk.beams[j].mat.strength = s;
