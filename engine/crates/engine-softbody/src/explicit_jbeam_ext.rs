@@ -17,9 +17,9 @@ use crate::explicit_beams::{
 use glam::Vec3;
 use std::collections::HashMap;
 
-/// How near a collision triangle's plane a self-collision node lies "on" it at
-/// spawn (spec §10.1): 1 mm, the precision JBeam positions are written to.
-pub const SURFACE_TOLERANCE: f32 = 0.001;
+/// The most self-collision nodes one triangle excludes at spawn (spec §10.1; the
+/// GPU's loop cap).
+pub const TRI_EXCL_CAP: usize = 16;
 /// Ambient pressure (Pa): PRESSURED beams and pressure groups take gauge pressures
 /// over it (spec §21, §26).
 pub const ATMOSPHERE: f32 = 101_325.0;
@@ -295,6 +295,44 @@ pub fn pressure_group_gauge(beams: &[Beam], nodes: &[Node], ext: &BeamExt, c: Ve
     (ext.e1[3] * (ext.e1[2] / v) - ATMOSPHERE).min(ext.e2[0])
 }
 
+/// Air density (kg/m³) of JBeam mode's triangle aerodynamics (spec §31): the ISA
+/// sea-level value.
+pub const AIR_DENSITY: f32 = 1.225;
+/// The drag coefficient of a flat plate normal to the flow, which `dragCoef` 100
+/// means (spec §31; Hoerner's 1.28 for a flat plate).
+pub const FLAT_PLATE_CD: f32 = 1.28;
+
+/// A triangle's aerodynamic force on each of its three nodes (spec §31), still air:
+/// the flow u = −(mean node velocity); drag ½ρ·C·(dragCoef/100)·A·|u|²·sin α along
+/// u, lift ½ρ·C·(liftCoef/100)·A·|u|²·sin α cos α (sin α_s cos α past the stall)
+/// across it, toward the side the flow pushes the plate; α the angle of attack.
+pub fn aero_tri_force(x: [Vec3; 3], v: [Vec3; 3], ext: &BeamExt) -> Vec3 {
+    let [kd, kl, stall] = [ext.e1[1], ext.e1[2], ext.e1[3]];
+    let vm = (v[0] + v[1] + v[2]) * (1.0 / 3.0);
+    let s2 = vm.dot(vm);
+    let cr = (x[1] - x[0]).cross(x[2] - x[0]);
+    let cl = cr.dot(cr).sqrt();
+    if s2 <= 1e-12 || cl <= 0.0 {
+        return Vec3::ZERO;
+    }
+    let s = s2.sqrt();
+    let u = vm * (-1.0 / s);
+    let n = cr * (1.0 / cl);
+    let c = n.dot(u);
+    let sa = c.abs();
+    let ca = (1.0 - c * c).max(0.0).sqrt();
+    let q = 0.5 * cl * s2;
+    let mut f = u * (kd * q * sa);
+    let l = n - u * c;
+    let ll = l.dot(l).sqrt();
+    if ll > 0.0 {
+        let cl_alpha = if sa <= stall { sa * ca } else { stall * ca };
+        let m = kl * q * cl_alpha;
+        f += l * ((if c < 0.0 { -m } else { m }) / ll);
+    }
+    f * (1.0 / 3.0)
+}
+
 /// A pressure triangle's push on each of its three nodes at gauge pressure `p`.
 pub fn pressure_tri_force(x0: Vec3, x1: Vec3, x2: Vec3, p: f32) -> Vec3 {
     (x1 - x0).cross(x2 - x0) * (p / 6.0)
@@ -403,7 +441,21 @@ impl ExplicitBeams {
         let x = self.ext_index(j);
         let mut beam = self.beams[j];
         match beam.kind {
-            ExplicitKind::JbeamPressureTri2 => return,
+            ExplicitKind::JbeamPressureTri2 | ExplicitKind::JbeamAeroTri2 => return,
+            ExplicitKind::JbeamAeroTri => {
+                let ext = self.beam_ext[x];
+                let n2 = ext.index(0);
+                let [a, b] = [beam.a as usize, beam.b as usize];
+                let f = aero_tri_force(
+                    [self.nodes[a].pos, self.nodes[b].pos, self.nodes[n2 as usize].pos],
+                    [self.nodes[a].vel, self.nodes[b].vel, self.nodes[n2 as usize].vel],
+                    &ext,
+                );
+                self.nodes[a].force += f;
+                self.nodes[b].force += f;
+                self.nodes[n2 as usize].force += f;
+                return;
+            }
             ExplicitKind::JbeamPressureGroup => {
                 let c = self.nodes[beam.a as usize].pos;
                 let p = pressure_group_gauge(&self.beams, &self.nodes, &self.beam_ext[x], c);
@@ -627,6 +679,55 @@ impl ExplicitBeams {
         self.push_ext(j, ext);
     }
 
+    /// The desc's triangles' aerodynamics (spec §31): two records per triangle with a
+    /// drag or lift coefficient, after the beams (not in its collision list).
+    pub(crate) fn add_triangle_aero(&mut self, desc: &SoftVehicleDesc) {
+        let k = 0.5 * AIR_DENSITY * FLAT_PLATE_CD * 0.01;
+        for t in &desc.triangles {
+            let [drag, lift, stall, _skin] = t.aero;
+            if drag <= 0.0 && lift <= 0.0 {
+                continue;
+            }
+            let [a, b, c] = t.nodes;
+            let mut r1 = Beam::new(
+                a,
+                b,
+                ExplicitKind::JbeamAeroTri,
+                ExplicitType::Actuator,
+                0.0,
+                0.0,
+                0.0,
+                f32::INFINITY,
+                f32::INFINITY,
+                0.0,
+            );
+            r1.rest0 = 0.0;
+            let mut r2 = r1;
+            r2.kind = ExplicitKind::JbeamAeroTri2;
+            r2.a = c;
+            r2.b = c;
+            self.beams.push(r1);
+            let j = self.beams.len() - 1;
+            self.push_ext(
+                j,
+                BeamExt {
+                    beam: j as u32,
+                    e1: [bits(c), k * drag, k * lift, stall.sin()],
+                    ..Default::default()
+                },
+            );
+            self.beams.push(r2);
+            let j = self.beams.len() - 1;
+            self.push_ext(
+                j,
+                BeamExt {
+                    beam: j as u32,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     /// A pressure group over `tris` (outward-wound node triples) at gauge `p0`
     /// (Pa), the gauge never above `ceiling` (spec §26).
     pub(crate) fn push_pressure_group(&mut self, tris: &[[u32; 3]], p0: f32, ceiling: f32) {
@@ -766,17 +867,15 @@ impl ExplicitBeams {
         }
     }
 
-    /// Self-collision nodes lying on a collision triangle at spawn (spec §10.1):
-    /// inside it and within [`SURFACE_TOLERANCE`] of its plane. Such a node has
-    /// no side to be pushed out to; the triangle takes the node's self-collision
-    /// group (when the triangle has none), so the node skips it.
-    pub(crate) fn surface_nodes(&mut self, warnings: &mut Vec<String>) {
-        let mut groups = vec![0u32; self.triangles.len()];
-        let (mut taken, mut left) = (0, 0);
+    /// Spawn exclusions (spec §10.1, **Choice**): every self-collision candidate that
+    /// starts inside a collision triangle's contact range (inside it, within the
+    /// range of its plane) never collides with that triangle. Returns how many pairs.
+    pub fn spawn_exclusions(&mut self) -> usize {
+        let r = self.collision_range;
+        let mut excl: Vec<Vec<u32>> = vec![Vec::new(); self.triangles.len()];
+        let mut pairs = 0;
         for t in 0..self.triangles.len() {
-            if self.triangle_self_group(t) != 0 {
-                continue;
-            }
+            let g = self.triangle_self_group(t);
             let [i0, i1, i2] = self.triangles[t].nodes;
             let p0 = self.nodes[i0 as usize].pos;
             let (e1, e2) = (
@@ -793,9 +892,12 @@ impl ExplicitBeams {
                 if c == i0 || c == i1 || c == i2 {
                     continue;
                 }
+                if g != 0 && self.self_groups.get(c as usize) == Some(&g) {
+                    continue;
+                }
                 let q = self.nodes[c as usize].pos - p0;
                 let delta = n.dot(q);
-                if delta.abs() > SURFACE_TOLERANCE {
+                if delta.abs() > r {
                     continue;
                 }
                 let (q1, q2) = (q.dot(e1), q.dot(e2));
@@ -804,28 +906,17 @@ impl ExplicitBeams {
                 if a < 0.0 || b < 0.0 || a + b > 1.0 {
                     continue;
                 }
-                let g = self.self_groups[c as usize];
-                if g != 0 && (groups[t] == 0 || groups[t] == g) {
-                    groups[t] = g;
-                    taken += 1;
-                } else {
-                    left += 1;
-                }
+                excl[t].push(c);
+                pairs += 1;
             }
         }
-        if taken > 0 {
-            self.tri_groups = groups;
-            warnings.push(format!(
-                "{taken} self-collision nodes lie on a collision triangle at spawn: \
-                 those triangles take the node's group (spec §10.1)"
-            ));
+        if pairs > 0 {
+            for l in &mut excl {
+                l.truncate(TRI_EXCL_CAP);
+            }
+            self.tri_excl = excl;
         }
-        if left > 0 {
-            warnings.push(format!(
-                "{left} self-collision nodes lie on a collision triangle at spawn \
-                 with no group to give it: they still collide with it"
-            ));
-        }
+        pairs
     }
 
     /// The desc's pressure wheels (spec §25), after its nodes and beams; returns the

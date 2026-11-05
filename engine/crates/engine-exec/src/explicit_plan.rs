@@ -529,6 +529,11 @@ impl ExplicitUpload {
         // the extension states, the triangle break lists, the deform group words.
         let any_ext = vehicles.iter().any(|v| !v.beam_ext.is_empty());
         let any_tri_break = vehicles.iter().any(|v| !v.tri_breaks.is_empty());
+        // Self-collision spawn exclusions (spec §10.1): per triangle (start, count) in
+        // the lists, the excluded nodes global.
+        let any_tri_excl = vehicles.iter().any(|v| !v.tri_excl.is_empty());
+        let mut tri_excl_recs: Vec<[u32; 4]> = Vec::new();
+        let mut tri_excl_list: Vec<u32> = Vec::new();
         let mut ext_recs: Vec<[u32; 4]> = Vec::new();
         let mut ext_state: Vec<[f32; 4]> = Vec::new();
         let mut ext_index: Vec<u32> = Vec::new();
@@ -675,6 +680,7 @@ impl ExplicitUpload {
                         e1[1] += beam_off;
                     }
                     K::JbeamPressureGroup => e1[0] += beam_off,
+                    K::JbeamAeroTri => e1[0] += node_off,
                     _ => {}
                 }
                 let dg = |g: u32| if g == 0 { 0 } else { deform_first + g };
@@ -777,6 +783,13 @@ impl ExplicitUpload {
                         tri_misc[first_tri + t][2] |= 0x8000_0000;
                     }
                     tri_break_recs.push(g);
+                }
+            }
+            if any_tri_excl {
+                for t in 0..v.triangles.len() {
+                    let l = v.tri_excl.get(t).map_or(&[][..], |l| &l[..]);
+                    tri_excl_recs.push([tri_excl_list.len() as u32, l.len() as u32, 0, 0]);
+                    tri_excl_list.extend(l.iter().map(|&n| node_off + n));
                 }
             }
             for bx in &v.boxes {
@@ -1245,6 +1258,15 @@ impl ExplicitUpload {
         statics.extend(tri_break_recs);
         let ext_index_base = lists.len() as u32;
         lists.extend(ext_index);
+        let tri_excl_base = if any_tri_excl {
+            let at = lists.len() as u32;
+            lists.extend(tri_excl_list);
+            let base = statics.len() as u32;
+            statics.extend(tri_excl_recs.iter().map(|r| [r[0] + at, r[1], 0, 0]));
+            base
+        } else {
+            0
+        };
 
         let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
         let lanes = frame_lanes(vehicles);
@@ -1324,6 +1346,7 @@ impl ExplicitUpload {
             ext_state_base,
             tri_break_base,
             deform_base,
+            tri_excl_base,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [

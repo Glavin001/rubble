@@ -90,6 +90,9 @@ static const uint KIND_JLBEAM = 14u;
 static const uint KIND_JPGROUP = 15u;
 static const uint KIND_JPTRI = 16u;
 static const uint KIND_JPTRI2 = 17u;
+static const uint TRI_EXCL_CAP = 16u; // explicit_jbeam_ext.rs TRI_EXCL_CAP
+static const uint KIND_JATRI = 18u; // a triangle's aerodynamics (spec §31), nodes x0-x1
+static const uint KIND_JATRI2 = 19u; // its x2-x2 record
 static const uint TYPE_EXT = 4u;
 static const uint EXT_GROUPS = 1u;
 static const uint EXT_DEFORM = 2u;
@@ -190,6 +193,7 @@ struct Params
     uint extState;
     uint triBreak;
     uint deformBase;
+    uint triExcl; // gStatic: per triangle (start in gLists, count) of self-collision nodes it skips (0: none)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -1342,7 +1346,49 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     float4 e1 = asfloat(gStatic[gP.extBase + x * 4u + 1u]);
     float4 e2 = asfloat(gStatic[gP.extBase + x * 4u + 2u]);
     uint4 e3 = gStatic[gP.extBase + x * 4u + 3u];
-    if (kind == KIND_JPTRI2) return; // its triangle's first record writes its forces
+    if (kind == KIND_JPTRI2 || kind == KIND_JATRI2) return; // the first record writes the forces
+    if (kind == KIND_JATRI)
+    {
+        // A triangle's drag and lift in still air (explicit_jbeam_ext.rs
+        // aero_tri_force): E1 = (x2, drag factor, lift factor, sin stall).
+        uint n2 = asuint(e1.x);
+        float3 x0 = gNodes[bn.x * 3u].xyz;
+        float3 x1 = gNodes[bn.y * 3u].xyz;
+        float3 x2 = gNodes[n2 * 3u].xyz;
+        float3 v0 = gNodes[bn.x * 3u + 1u].xyz;
+        float3 v1 = gNodes[bn.y * 3u + 1u].xyz;
+        float3 v2 = gNodes[n2 * 3u + 1u].xyz;
+        float3 vm = sscale(sadd3(sadd3(v0, v1), v2), 1.0 / 3.0);
+        float s2 = sdot(vm, vm);
+        float3 cr = scross(ssub3(x1, x0), ssub3(x2, x0));
+        float cl = ssqrt(sdot(cr, cr));
+        float3 f = float3(0.0, 0.0, 0.0);
+        if (s2 > 1e-12 && cl > 0.0)
+        {
+            float sp = ssqrt(s2);
+            float3 u = sscale(vm, sdiv(-1.0, sp));
+            float3 n = sscale(cr, sdiv(1.0, cl));
+            float c = sdot(n, u);
+            float sa = abs(c);
+            float ca = ssqrt(max(nf(1.0 - smul(c, c)), 0.0));
+            float q = smul(smul(0.5, cl), s2);
+            f = sscale(u, smul(smul(e1.y, q), sa));
+            float3 l = ssub3(n, sscale(u, c));
+            float ll = ssqrt(sdot(l, l));
+            if (ll > 0.0)
+            {
+                float cla = sa <= e1.w ? smul(sa, ca) : smul(e1.w, ca);
+                float m = smul(smul(e1.z, q), cla);
+                f = sadd3(f, sscale(l, sdiv(c < 0.0 ? -m : m, ll)));
+            }
+            f = sscale(f, 1.0 / 3.0);
+        }
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(f, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(f, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(f, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
     if (kind == KIND_JPGROUP)
     {
         // The enclosed volume about node a, isothermal gauge pressure, capped.
@@ -1844,6 +1890,16 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
     // JBeam mode: a node skips the triangles of its own self-collision group.
     uint tg = gMisc[t.mi].z & ~TRI_BREAKABLE;
     if (tg != 0u && uint(gNodes[h * 3u + 2u].w) == tg) return;
+    // Spawn exclusions (spec §10.1): the nodes that started inside its range.
+    if (gP.triExcl != 0u)
+    {
+        uint4 ex = gStatic[gP.triExcl + (t.mi - gP.vehicles)];
+        for (uint k = 0u; k < TRI_EXCL_CAP; k++)
+        {
+            if (k >= ex.y) break;
+            if (gLists[ex.x + k] == h) return;
+        }
+    }
     float4 P = gNodes[h * 3u];
     float3 p = nf3(origin + P.xyz);
     if (any(p < t.lo) || any(p > t.hi)) return;

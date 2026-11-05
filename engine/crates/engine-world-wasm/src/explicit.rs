@@ -134,7 +134,12 @@ fn build(
     settings: ExplicitBeamsSettings,
 ) -> Result<(ExplicitBeams, SoftVehicleDesc, Vec<String>), String> {
     if let Some(text) = v.get("truck").and_then(|t| t.as_str()) {
-        let sim = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings)?;
+        let mut sim = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings)?;
+        // `fullContact`: JBeam's contact semantics for this `.truck` vehicle (every
+        // node a contacter, spawn self-collision exclusions; spec §10.1–10.2).
+        if v.get("fullContact").and_then(|f| f.as_bool()).unwrap_or(false) {
+            sim.opt_in_full_contact();
+        }
         return Ok((sim, engine_softbody::truck::load_truck(text), Vec::new()));
     }
     if let Some(files) = v.get("jbeam").and_then(|t| t.as_array()) {
@@ -575,7 +580,7 @@ fn arena(spec: &serde_json::Value, width: f32, length: f32) -> (Vec<ArenaSpot>, 
 #[wasm_bindgen]
 impl WebWorld {
     /// Explicit-beams vehicles on this world's device. `spec`: `{ vehicles: [{
-    /// truck | jbeam: [[name, text], …] (+ pc, + native: true for JBeam mode with pressure
+    /// truck (+ fullContact: true for JBeam contact semantics) | jbeam: [[name, text], …] (+ pc, + native: true for JBeam mode with pressure
     /// wheels) | desc, at: [x, z], yaw, front }], scene:
     /// 'idle' | 'coast' | 'wall' | 'arena', speed (m/s, coast and wall), wallGap (m,
     /// default 1 + 0.5·speed); arena (see `arena`): count, cols, speedMin, speedMax,

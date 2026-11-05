@@ -499,3 +499,38 @@ fn community_vehicles_do_not_creep_at_rest() {
     }
 }
 
+
+/// Triangle aerodynamics (spec §31), exact for one plate in still air: normal to
+/// its motion, drag ½ρ·1.28·(dragCoef/100)·A·v² against the motion and no lift; at
+/// 30° to it, drag with sin α and lift with sin α cos α across the motion, toward
+/// the side the flow pushes; past the stall the lift falls as sin α_s cos α.
+#[test]
+fn triangle_drag_and_lift_follow_the_flat_plate_law() {
+    use engine_softbody::explicit_jbeam_ext::{aero_tri_force, AIR_DENSITY, FLAT_PLATE_CD};
+    let k = 0.5 * AIR_DENSITY * FLAT_PLATE_CD * 0.01;
+    let ext = BeamExt { e1: [0.0, k * 100.0, k * 80.0, 0.58f32.sin()], ..Default::default() };
+    // A 1 m × 1 m right triangle in the x–y plane (normal +z), area 0.5 m².
+    let x = [Vec3::ZERO, Vec3::X, Vec3::Y];
+    let v = 20.0;
+    let f = 3.0 * aero_tri_force(x, [Vec3::Z * v; 3], &ext);
+    let drag = 0.5 * AIR_DENSITY * FLAT_PLATE_CD * 0.5 * v * v;
+    assert!((f.z + drag).abs() < 1e-3 * drag && f.x.abs() < 1e-3 && f.y.abs() < 1e-3, "{f:?} vs {drag}");
+    // At 30°: moving along (0, −cos 30°, −sin 30°)·v: the flow comes from below-ahead.
+    let a = 30f32.to_radians();
+    let dir = Vec3::new(0.0, -a.cos(), -a.sin());
+    let f = 3.0 * aero_tri_force(x, [dir * v; 3], &ext);
+    let q = 0.5 * AIR_DENSITY * FLAT_PLATE_CD * 0.5 * v * v;
+    let along = f.dot(-dir);
+    let across = (f - (-dir) * along).length();
+    assert!((along - q * a.sin()).abs() < 1e-3 * q, "drag {along} vs {}", q * a.sin());
+    assert!((across - 0.8 * q * a.sin() * a.cos()).abs() < 1e-3 * q, "lift {across}");
+    // The flow (along −dir: +y, +z) pushes the plate toward +z.
+    assert!(f.z > 0.0);
+    // Past the stall (0.58 rad), at 60°: lift 0.8·q·sin 0.58·cos 60°.
+    let a = 60f32.to_radians();
+    let dir = Vec3::new(0.0, -a.cos(), -a.sin());
+    let f = 3.0 * aero_tri_force(x, [dir * v; 3], &ext);
+    let along = f.dot(-dir);
+    let across = (f - (-dir) * along).length();
+    assert!((across - 0.8 * q * 0.58f32.sin() * a.cos()).abs() < 1e-3 * q, "stalled lift {across}");
+}

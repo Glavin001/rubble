@@ -49,6 +49,10 @@ fn main() {
     let census = engine_softbody::jbeam::feature_census(&files, Some(&pcs)).unwrap();
     let unsupported = engine_softbody::jbeam::unsupported_features(&census);
     println!("unsupported physics features: {unsupported:?}");
+    println!(
+        "out of scope: {:?}",
+        engine_softbody::jbeam::out_of_scope_features(&census)
+    );
     let desc = engine_softbody::jbeam::load_jbeam(&files, Some(&pcs)).unwrap();
     let wheels = if opt("wheels=").as_deref() == Some("soft") {
         JbeamWheels::Soft(engine_softbody::truck_export::TyreDefaults::for_vehicle(
@@ -58,7 +62,7 @@ fn main() {
         JbeamWheels::Pressure
     };
     let settings = ExplicitBeamsSettings {
-        drag: false,
+        drag: opt("drag=").is_some(),
         turbulence: false,
         ..Default::default()
     };
@@ -322,6 +326,27 @@ fn main() {
     }
     let v = Vec3::new(0.0, 0.0, kmh / 3.6);
     let (mut s, _) = spawn(v);
+    if opt("coast=").is_some() {
+        // Coasting for 1 s: the mean deceleration's force (air drag, rolling).
+        let vz = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>();
+        let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+        let mut low: Vec<(f32, usize)> = s.nodes.iter().enumerate().map(|(i, n)| (n.pos.y, i)).collect();
+        low.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for &(y, i) in low.iter().take(4) {
+            println!("  low node {i} {} y {y:.3} m {}", desc.nodes.get(i).map_or("wheel", |n| n.name.as_str()), s.nodes[i].mass);
+        }
+        s.run(0.5);
+        let p0 = vz(&s);
+        s.run(1.0);
+        let f = (p0 - vz(&s)) / 1.0;
+        let v1 = vz(&s) / m;
+        println!(
+            "coast at {:.1} m/s: decelerating force {f:.0} N; as 0.5*rho*CdA*v^2, CdA = {:.2} m^2",
+            v1,
+            f / (0.5 * engine_softbody::explicit_jbeam_ext::AIR_DENSITY * v1 * v1)
+        );
+        return;
+    }
     let front = s
         .nodes
         .iter()
