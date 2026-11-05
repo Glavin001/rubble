@@ -17,7 +17,10 @@
 //! Vehicles whose boxes never overlap are not touched: their results are
 //! bit-identical to stepping each alone.
 
-use crate::explicit_beams::{contact_force, ContactSurface, ExplicitBeams, STEP};
+use crate::explicit_beams::{
+    contact_force, ContactSurface, ExplicitBeams, ExplicitKind, ForceTrace, GRAVITY,
+    NODE_IMMOVABLE, STEP,
+};
 use glam::Vec3;
 
 /// Each face of a vehicle's box is moved out by this much (m).
@@ -154,6 +157,8 @@ pub struct ExplicitBeamsWorld {
     pub first_hit_step: Option<u64>,
     /// Scratch: world positions per vehicle and padded boxes.
     world: Vec<Vec<Vec3>>,
+    /// The energy ledger (None: off; [`Self::enable_ledger`]).
+    pub ledger: Option<EnergyLedger>,
     boxes: Vec<(Vec3, Vec3)>,
 }
 
@@ -177,6 +182,7 @@ impl ExplicitBeamsWorld {
             total: ContactStats::default(),
             first_hit_step: None,
             world: Vec::new(),
+            ledger: None,
             boxes: Vec::new(),
         }
     }
@@ -209,13 +215,60 @@ impl ExplicitBeamsWorld {
 
     /// One step: every vehicle's own step in vehicle order, then the contact pass.
     pub fn step(&mut self) {
-        for v in &mut self.vehicles {
+        let Some(mut ledger) = self.ledger.take() else {
+            for v in &mut self.vehicles {
+                v.step();
+            }
+            self.steps += 1;
+            if self.contact && self.vehicles.len() > 1 {
+                self.contact_pass();
+            }
+            return;
+        };
+        for (k, v) in self.vehicles.iter_mut().enumerate() {
+            let before: Vec<(Vec3, Vec3, Vec3)> = v
+                .nodes
+                .iter()
+                .map(|n| (v.origin + n.pos, n.vel, n.force))
+                .collect();
             v.step();
+            ledger.account(k, v, &before);
         }
         self.steps += 1;
+        ledger.vc_reset(&self.vehicles);
+        self.ledger = Some(ledger);
         if self.contact && self.vehicles.len() > 1 {
             self.contact_pass();
         }
+        if let Some(l) = self.ledger.as_mut() {
+            l.refresh(&self.vehicles);
+        }
+    }
+
+    /// Turns the energy ledger on from the current state (its start energy).
+    pub fn enable_ledger(&mut self) {
+        for v in &mut self.vehicles {
+            v.trace = Some(Box::default());
+        }
+        let mut l = EnergyLedger::default();
+        l.prev = self
+            .vehicles
+            .iter()
+            .map(|v| ForceSplit::new(v.nodes.len()))
+            .collect();
+        l.vc = self
+            .vehicles
+            .iter()
+            .map(|v| {
+                [
+                    vec![Vec3::ZERO; v.nodes.len()],
+                    vec![Vec3::ZERO; v.nodes.len()],
+                ]
+            })
+            .collect();
+        l.refresh(&self.vehicles);
+        l.start = l.mechanical();
+        self.ledger = Some(l);
     }
 
     /// The bounding boxes (spec §4.1) and the vehicle-contact pass (§3.1 3).
@@ -436,6 +489,19 @@ impl ExplicitBeamsWorld {
                 x.p,
                 node.friction,
             );
+            if let Some(l) = self.ledger.as_mut() {
+                let fnorm = x.n * f.dot(x.n);
+                let ft = f - fnorm;
+                for (v, i, w) in [
+                    (b, h, -1.0f32),
+                    (a, i1, alpha),
+                    (a, i2, beta),
+                    (a, i0, gamma),
+                ] {
+                    l.vc[v][0][i as usize] -= fnorm * w;
+                    l.vc[v][1][i as usize] -= ft * w;
+                }
+            }
             self.vehicles[b].nodes[h as usize].force += f;
             let va = &mut self.vehicles[a];
             va.nodes[i1 as usize].force -= f * alpha;
@@ -443,6 +509,179 @@ impl ExplicitBeamsWorld {
             va.nodes[i0 as usize].force -= f * gamma;
         }
     }
+}
+
+/// A vehicle's per-node forces of the last step by source, for the ledger.
+#[derive(Clone, Debug, Default)]
+struct ForceSplit {
+    trace: ForceTrace,
+}
+
+impl ForceSplit {
+    fn new(n: usize) -> Self {
+        let mut trace = ForceTrace::default();
+        for p in &mut trace.parts {
+            p.resize(n, Vec3::ZERO);
+        }
+        Self { trace }
+    }
+}
+
+/// The energy ledger of an [`ExplicitBeamsWorld`] (CPU, opt-in): the state's
+/// kinetic, gravitational and elastic energy, and the work every force source
+/// has done on the nodes since it was enabled (J). The node pass integrates
+/// v' = v + h·F/m, x' = x + h·v'; a force's work is F·(v + v')/2·h per step, so the
+/// sources' work sums to the kinetic energy's change exactly (`discretisation`
+/// stays 0; the positions' step differs from it by ½m|v' − v|², the symplectic
+/// step's term, which the elastic energy's change carries). Sources: gravity; the air
+/// (drag, turbulence, wings; gravity taken out); beams (every beam record); self-
+/// collision; slide nodes; vehicle contact (normal along each hit's normal, and
+/// tangential: friction); and the node pass's own contacts (ground, boxes, static
+/// shapes, rigid partners: m·(v' − v)/h less the accumulated force), split into
+/// vertical and horizontal. Elastic energy is the state's ½k·e² of the linear
+/// beam kinds (plain, support in compression, rope in tension, couplers, bounded
+/// and anisotropic at their base rate, LBEAMs at their arm-following rest);
+/// pressure, torsion, aerodynamic and trigger records store none here, so their
+/// changes count in the beams' dissipation, −(W_beams + ΔU): damping, yield,
+/// fracture.
+#[derive(Clone, Debug, Default)]
+pub struct EnergyLedger {
+    pub kinetic: f64,
+    pub gravity_pe: f64,
+    pub elastic: f64,
+    /// Kinetic + gravitational + elastic when enabled.
+    pub start: f64,
+    pub elastic_start: f64,
+    pub w_gravity: f64,
+    pub w_air: f64,
+    pub w_beams: f64,
+    pub w_self_contact: f64,
+    pub w_slides: f64,
+    pub w_contact_normal: f64,
+    pub w_contact_friction: f64,
+    pub w_ground_vertical: f64,
+    pub w_ground_horizontal: f64,
+    pub discretisation: f64,
+    prev: Vec<ForceSplit>,
+    vc: Vec<[Vec<Vec3>; 2]>,
+    started: bool,
+}
+
+impl EnergyLedger {
+    /// Kinetic + gravitational + elastic now.
+    pub fn mechanical(&self) -> f64 {
+        self.kinetic + self.gravity_pe + self.elastic
+    }
+
+    /// The beams' dissipation so far (damping, yield, fracture, and the
+    /// non-linear records' storage): −(W_beams + ΔU).
+    pub fn beam_dissipation(&self) -> f64 {
+        -(self.w_beams + self.elastic - self.elastic_start)
+    }
+
+    /// The work of every source so far, less the discretisation term: the kinetic
+    /// energy's change, to rounding.
+    pub fn kinetic_change(&self) -> f64 {
+        self.w_gravity
+            + self.w_air
+            + self.w_beams
+            + self.w_self_contact
+            + self.w_slides
+            + self.w_contact_normal
+            + self.w_contact_friction
+            + self.w_ground_vertical
+            + self.w_ground_horizontal
+            - self.discretisation
+    }
+
+    fn account(&mut self, k: usize, v: &ExplicitBeams, before: &[(Vec3, Vec3, Vec3)]) {
+        let prev = &self.prev[k].trace.parts;
+        let vc = &self.vc[k];
+        for (i, (n, &(x0, v0, f_acc))) in v.nodes.iter().zip(before).enumerate() {
+            if n.has(NODE_IMMOVABLE) || i >= prev[0].len() {
+                continue;
+            }
+            // The work over the step at its mean velocity, (v + v')/2·h: the
+            // kinetic energy's change exactly (the position step v'·h would add
+            // ½m|v' − v|², large for the stiff modes of a crash).
+            let _ = x0;
+            let dx = ((n.vel + v0) * (0.5 * STEP)).as_dvec3();
+            let w = |f: Vec3| f.as_dvec3().dot(dx);
+            let g = Vec3::new(0.0, n.mass * GRAVITY, 0.0);
+            let dv = n.vel - v0;
+            let f_tot = dv * (n.mass / STEP);
+            let ground = f_tot - f_acc;
+            self.w_gravity += w(g);
+            self.w_air += w(prev[0][i] - g);
+            self.w_beams += w(prev[1][i]);
+            self.w_self_contact += w(prev[2][i]);
+            self.w_slides += w(prev[3][i]);
+            self.w_contact_normal += w(vc[0][i]);
+            self.w_contact_friction += w(vc[1][i]);
+            self.w_ground_vertical += w(Vec3::new(0.0, ground.y, 0.0));
+            self.w_ground_horizontal += w(Vec3::new(ground.x, 0.0, ground.z));
+        }
+        if let Some(t) = v.trace.as_ref() {
+            self.prev[k].trace = (**t).clone();
+        }
+    }
+
+    fn vc_reset(&mut self, vehicles: &[ExplicitBeams]) {
+        for (vc, v) in self.vc.iter_mut().zip(vehicles) {
+            for a in vc.iter_mut() {
+                a.clear();
+                a.resize(v.nodes.len(), Vec3::ZERO);
+            }
+        }
+    }
+
+    fn refresh(&mut self, vehicles: &[ExplicitBeams]) {
+        let (mut ke, mut pe, mut u) = (0.0f64, 0.0f64, 0.0f64);
+        for v in vehicles {
+            for n in &v.nodes {
+                let m = f64::from(n.mass);
+                ke += 0.5 * m * f64::from(n.vel.length_squared());
+                pe -= m * f64::from(GRAVITY) * f64::from(v.origin.y + n.pos.y);
+            }
+            u += elastic_energy(v);
+        }
+        (self.kinetic, self.gravity_pe, self.elastic) = (ke, pe, u);
+        if !self.started {
+            self.elastic_start = u;
+            self.started = true;
+        }
+    }
+}
+
+/// The elastic energy (J) of `v`'s linear beam kinds (see [`EnergyLedger`]).
+pub fn elastic_energy(v: &ExplicitBeams) -> f64 {
+    let mut u = 0.0f64;
+    for (j, b) in v.beams.iter().enumerate() {
+        if b.broken {
+            continue;
+        }
+        let (pa, pb) = (v.nodes[b.a as usize].pos, v.nodes[b.b as usize].pos);
+        let len = pa.distance(pb);
+        let e = match b.kind {
+            ExplicitKind::Plain
+            | ExplicitKind::LimitedSpring
+            | ExplicitKind::Shock2
+            | ExplicitKind::JbeamPlain
+            | ExplicitKind::JbeamBounded
+            | ExplicitKind::JbeamCoupler
+            | ExplicitKind::JbeamAniso => len - b.rest,
+            ExplicitKind::Support | ExplicitKind::JbeamSupport => (len - b.rest).min(0.0),
+            ExplicitKind::Rope => (len - b.rest).max(0.0),
+            ExplicitKind::JbeamLbeam => {
+                let c = v.beam_ext[v.ext_of[j] as usize - 1].index(0) as usize;
+                let (a, bb) = (pa.distance(v.nodes[c].pos), pb.distance(v.nodes[c].pos));
+                len - (a * a + bb * bb - 2.0 * a * bb * b.rest).max(0.0).sqrt()
+            }
+            _ => 0.0,
+        };
+        u += 0.5 * f64::from(b.k) * f64::from(e) * f64::from(e);
+    }
+    u
 }
 
 /// One hit of an owner's walk: the triangle's nodes (n₀, n₁, n₂) and weights
