@@ -664,7 +664,7 @@ pub fn sedan() -> VehicleDef {
             &[
                 (0.62, 1.37, 2.59),
                 (0.62, 1.39, 2.24),
-                (0.62, 1.39, 1.86),
+                (0.62, 1.39, 1.79),
                 (0.62, 1.37, 1.50),
             ],
             0.10,
@@ -678,8 +678,12 @@ pub fn sedan() -> VehicleDef {
         ))),
         roof(cross("header_f", 0.62, 1.37, 2.59, "uhss", 1.0)),
         roof(cross("bow_b", 0.62, 1.39, 2.24, "uhss", 1.0)),
-        // A rear roof bow (the roof skin's span between bows sags otherwise).
-        roof(cross("bow_r", 0.62, 1.39, 1.86, "uhss", 1.0)),
+        // A rear roof bow (the roof skin's span between bows sags otherwise)
+        // under a ring of the roof skin, with a station under each of its
+        // nodes (x 0, ±0.31): the skin's flat centre otherwise snaps through
+        // (it inverts without straining a beam) and stays 2 cm down after a
+        // frontal crash.
+        stations(roof(cross("bow_r", 0.62, 1.39, 1.79, "uhss", 1.0)), 0.31),
         roof(cross("header_r", 0.62, 1.37, 1.50, "uhss", 1.0)),
         catching(cell(floor_cross("floor_x1", 2.80, "uhss"))),
         catching(cell(floor_cross("floor_x2", 2.24, "boron"))),

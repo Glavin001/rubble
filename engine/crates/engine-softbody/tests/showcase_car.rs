@@ -1280,6 +1280,25 @@ fn k_wall_damage_stays_in_the_crumple_zone() {
             eprintln!();
             let mut rv: Vec<(f32, usize)> = roof.iter().map(|&i| (disp(i), i)).collect();
             rv.sort_by(|a, c| c.0.total_cmp(&a.0));
+            if let Some(&(_, w)) = rv.first() {
+                for bm in s
+                    .beams
+                    .iter()
+                    .filter(|bm| bm.a as usize == w || bm.b as usize == w)
+                {
+                    let o = if bm.a as usize == w { bm.b } else { bm.a } as usize;
+                    let l = s.nodes[bm.a as usize]
+                        .pos
+                        .distance(s.nodes[bm.b as usize].pos);
+                    eprintln!(
+                        "    beam to {o} {:?} part {} primary {}: rest0 {:.3} rest {:.3} len {:.3} k {:.0} tc {:.0} broken {}",
+                        sk.nodes.get(o).map(|n| n.p),
+                        sk.nodes.get(o).map(|n| sk.parts[n.part as usize].as_str()).unwrap_or("-"),
+                        sk.nodes.get(o).is_some_and(|n| n.primary),
+                        bm.rest0, bm.rest, l, bm.k, bm.tc, bm.broken
+                    );
+                }
+            }
             for &(d, i) in rv.iter().take(6) {
                 let gs: Vec<&String> = b
                     .groups
@@ -1542,6 +1561,33 @@ fn l_door_point_load_dents_locally() {
         if st == 1999 {
             let l = cabin_local(&s, &b);
             dent = inward(&l, at);
+            if std::env::var("L_DIAG").is_ok() {
+                for bm in s
+                    .beams
+                    .iter()
+                    .filter(|bm| bm.a as usize == at || bm.b as usize == at)
+                {
+                    let o = if bm.a as usize == at { bm.b } else { bm.a } as usize;
+                    if o >= sk.nodes.len() {
+                        continue;
+                    }
+                    let gs: Vec<&String> = b
+                        .groups
+                        .iter()
+                        .filter(|(_, g)| g.contains(&(o as u32)))
+                        .map(|(k, _)| k)
+                        .collect();
+                    eprintln!(
+                        "    (l) beam to {o} {:?} {} primary {} {gs:?}: k {:.0} force {:.0} N, node moved {:.1} mm",
+                        sk.nodes[o].p,
+                        sk.parts[sk.nodes[o].part as usize],
+                        sk.nodes[o].primary,
+                        bm.k,
+                        bm.force,
+                        inward(&l, o) * 1e3
+                    );
+                }
+            }
             around = far.iter().map(|&i| inward(&l, i)).sum::<f32>() / far.len().max(1) as f32;
         }
     }
@@ -1571,15 +1617,19 @@ fn m_wall_56_panels_stay_on() {
     for drag in [true, false] {
         let b = built(Resolution::Medium);
         let sk = &b.skeleton;
-        let mut s = spawn(&b, Vec3::new(
+        let mut s = spawn(
+            &b,
+            Vec3::new(
+                0.0,
+                0.0,
+                std::env::var("M_KMH")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(56.0f32)
+                    / 3.6,
+            ),
             0.0,
-            0.0,
-            std::env::var("M_KMH")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(56.0f32)
-                / 3.6,
-        ), 0.0);
+        );
         s.settings.drag = drag;
         let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
         s.boxes.push(StaticBox::centered(
@@ -1629,7 +1679,13 @@ fn m_wall_56_panels_stay_on() {
         }
         if std::env::var("M_EDGE").is_ok() {
             for (i, nb) in &edge {
-                eprintln!("  lid {i} {:?} -> {:?}", sk.nodes[*i].p, nb.iter().map(|&j| (j, sk.nodes[j].p, sk.nodes[j].primary)).collect::<Vec<_>>());
+                eprintln!(
+                    "  lid {i} {:?} -> {:?}",
+                    sk.nodes[*i].p,
+                    nb.iter()
+                        .map(|&j| (j, sk.nodes[j].p, sk.nodes[j].primary))
+                        .collect::<Vec<_>>()
+                );
             }
         }
         let mut lift = (0.0f32, 0usize, 0usize);
