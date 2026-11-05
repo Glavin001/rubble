@@ -1291,6 +1291,14 @@ pub fn sedan() -> VehicleDef {
             lo: [-0.9, 0.12, 1.30],
             hi: [0.9, 1.45, 3.40],
         },
+        // Muffler and pipes (about 15 kg) along the tunnel and under the
+        // rear floor.
+        NamedMass {
+            name: "exhaust".into(),
+            kg: 15.0,
+            lo: [-0.5, 0.12, 0.2],
+            hi: [0.5, 0.40, 3.3],
+        },
         NamedMass {
             name: "spare_wheel".into(),
             kg: 15.0,
