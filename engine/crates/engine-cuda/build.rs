@@ -160,6 +160,80 @@ fn main() -> Result<()> {
     table.push_str("];\n");
     std::fs::write(out_dir.join("cuda_kernels.rs"), table)?;
     terrain_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
+    explicit_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
+    Ok(())
+}
+
+/// The explicit-beams solver's modules (`engine_exec::explicit_plan::MODULES`:
+/// name, entry, defines), Slang → CUDA from `explicit_beams.slang` with the same
+/// hazard check as the rigid kernels and fatbins when nvcc is present; each
+/// `SLANG_globalParams` field mapped to the plan's binding (its
+/// `[[vk::binding]]`). Emits `cuda_explicit_kernels.rs`
+/// (`CUDA_EXPLICIT_KERNELS`, `CudaExplicitBeams`).
+fn explicit_kernels(
+    slangc: &std::path::Path,
+    nvcc: Option<&std::path::Path>,
+    arch: &str,
+    sass: &[&str],
+    root: &std::path::Path,
+    out_dir: &std::path::Path,
+) -> Result<()> {
+    use engine_exec::explicit_plan::MODULES;
+    use engine_slang_build::cuda_layout::compile_kernel_with_defines;
+    use engine_slang_build::msl_layout::vk_binding_slots;
+    let dir = out_dir.join("cuda_explicit");
+    std::fs::create_dir_all(&dir)?;
+    let source = root.join("kernels/explicit_beams.slang");
+    let slots = vk_binding_slots(std::slice::from_ref(&source))?;
+    let compiled = engine_slang_build::par_map(MODULES, |m| -> Compiled {
+        let cu = dir.join(format!("{}.cu", m.name));
+        let kernel = compile_kernel_with_defines(slangc, root, &source, m.entry, &cu, m.defines)?;
+        let text = std::fs::read_to_string(&cu)?;
+        let hazards = deferred_load_hazards(&text);
+        if !hazards.is_empty() {
+            anyhow::bail!(
+                "{}: Slang's CUDA output reads a buffer element after storing to it \
+                 (use the value before the store in the .slang source):\n  {}",
+                m.name,
+                hazards.join("\n  ")
+            );
+        }
+        if let Some(nvcc) = nvcc {
+            fatbin(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass)?;
+        }
+        Ok((kernel, text.len() as u64, nvcc.is_some(), false))
+    });
+    let mut table = String::from(
+        "/// Explicit-beams modules: plan module, entry, CUDA source bytes, fatbin, threads, globals.\n\
+         pub static CUDA_EXPLICIT_KERNELS: &[ExplicitCudaKernel] = &[\n",
+    );
+    for (m, r) in MODULES.iter().zip(compiled) {
+        let (kernel, cu_bytes, has_image, _) = r?;
+        let mut binds = String::new();
+        let mut params_bytes = 0;
+        for f in &kernel.fields {
+            let slot = slots
+                .get(&f.name)
+                .ok_or_else(|| anyhow!("{}: global {} has no vk::binding", m.name, f.name))?;
+            write!(binds, "({}, {}, {slot}), ", f.offset, f.size)?;
+            params_bytes = params_bytes.max(f.offset + f.size);
+        }
+        let image = if has_image {
+            format!(
+                "include_bytes!({:?})",
+                dir.join(format!("{}.fatbin", m.name)).display().to_string()
+            )
+        } else {
+            "&[]".into()
+        };
+        writeln!(
+            table,
+            "    ExplicitCudaKernel {{ name: {:?}, entry: {:?}, cu_bytes: {cu_bytes}, image: {image}, threads: {:?}, params_bytes: {params_bytes}, binds: &[{binds}] }},",
+            m.name, m.entry, kernel.threads
+        )?;
+    }
+    table.push_str("];\n");
+    std::fs::write(out_dir.join("cuda_explicit_kernels.rs"), table)?;
     Ok(())
 }
 
