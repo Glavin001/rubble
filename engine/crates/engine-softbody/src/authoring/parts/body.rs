@@ -444,7 +444,9 @@ impl Band {
             let r = Vec2::new(z - w.z, y - w.y).length();
             let rear = w.z < 0.5 * self.prof.length;
             let (amt, width) = if rear {
-                (self.style.rear_flare, self.style.flare_width)
+                // The haunch over a tighter band: a firmer shoulder above
+                // the rear wheel.
+                (self.style.rear_flare, self.style.flare_width * 0.8)
             } else {
                 (self.style.flare, self.style.flare_width)
             };

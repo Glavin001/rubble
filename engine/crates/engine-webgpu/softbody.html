@@ -1140,6 +1140,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       return true;
     };
     const bodyOn = () => bodyR && labR.opts.skin === 'body';
+    const LAB_REFLECT = qs.has('labReflect') ? Number(qs.get('labReflect')) || 0 : 0.16;
     let lab = null, labDt = 0, labView = { vp: new Float32Array(16), eye: [0, 0, 0] };
     let flexShadowBind = null, skinBind = null;
     // The world's buffers can be replaced when they grow: rebind when one is a new object.
@@ -1688,7 +1689,14 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         colorAttachments: [{ view: msaa.createView(), resolveTarget: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'discard' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
-      if (LAB && labR.opts.studio) labR.drawBackground(rp);
+      if (LAB && labR.opts.studio) {
+        // The showcase body reflected in the lab's floor (?labReflect=0 off,
+        // =0.2 its reflectance): the floor then leaves no depth behind.
+        const refl = xsim && bodyOn() && bodyFor.pos ? LAB_REFLECT : 0;
+        if (labR.opts.reflect !== refl > 0) labR.set({ reflect: refl > 0 });
+        labR.drawBackground(rp);
+        if (refl > 0) bodyR.drawReflection(rp, { viewProj: labView.vp, eye: labView.eye, light: LIGHT, strength: refl, floorY: labR.opts.floorY });
+      }
       else {
         rp.setPipeline(skyPipe); rp.setBindGroup(0, skyBind); rp.draw(3);
         rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);

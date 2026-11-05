@@ -232,6 +232,9 @@ try {
   const fov = Number(qs.get('fov')) || 0.75;
   const dist = Number(qs.get('dist')) || 6.2;
   let target = [0, 0.6, 0];
+  // The car's reference point on the floor (the contact shadow's centre:
+  // not moved by ?look).
+  let carXZ = [0, 0];
   let yaw = Math.atan2(camDir[0], camDir[2]), pitch = Math.asin(camDir[1] / Math.hypot(...camDir));
   let drag = null;
   canvas.addEventListener('pointerdown', (e) => { drag = [e.clientX, e.clientY]; });
@@ -241,7 +244,7 @@ try {
   const rate = sim.stepRate();
   let simTime = 0, carry = 0, last = performance.now(), frames = 0, gpuMs = [], damage = null, posePending = false, timesPending = false;
   const poll = () => {
-    if (!posePending) { posePending = true; sim.readPoses().then((p) => { target = [p[0] + lookOff[0], Math.max(0.5, p[1]) + lookOff[1], p[2] + lookOff[2]]; posePending = false; }); }
+    if (!posePending) { posePending = true; sim.readPoses().then((p) => { target = [p[0] + lookOff[0], Math.max(0.5, p[1]) + lookOff[1], p[2] + lookOff[2]]; carXZ = [p[0], p[2]]; posePending = false; }); }
     if (!timesPending && sim.timed()) { timesPending = true; sim.readFrameTimes().then((t) => { if (t.length) gpuMs = [...t].slice(-60); timesPending = false; }); }
     if (frames % 30 === 0) sim.readDamage(1).then((d) => { damage = d[0]; });
   };
@@ -265,7 +268,7 @@ try {
     const rt = [-fw[2], 0, fw[0]].map((x, _, a) => x / Math.hypot(a[0], a[2]));
     const upv = [rt[1] * fw[2] - rt[2] * fw[1], rt[2] * fw[0] - rt[0] * fw[2], rt[0] * fw[1] - rt[1] * fw[0]];
     const th = Math.tan(fov / 2);
-    const fr = new Float32Array(40); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20); fr.set([target[0], target[2], 0, 0], 24);
+    const fr = new Float32Array(40); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20); fr.set([carXZ[0], carXZ[1], 0, 0], 24);
     fr.set([...rt.map((x) => x * th * aspect), 0], 28); fr.set([...upv.map((x) => x * th), 0], 32); fr.set([...fw, 0], 36);
     device.queue.writeBuffer(frameBuf, 0, fr);
     const outView = context.getCurrentTexture().createView();

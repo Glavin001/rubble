@@ -78,7 +78,10 @@ pub mod mat {
     pub const PRIVACY: u8 = 27;
     /// A rim's diamond-cut spoke faces (bright machined aluminium).
     pub const MACHINED: u8 = 28;
-    pub const COUNT: usize = 29;
+    /// The B-pillar applique: satin black (no mirror-bright sky at grazing
+    /// angles once the doors move).
+    pub const PILLAR: u8 = 29;
+    pub const COUNT: usize = 30;
 }
 
 /// Material names, by id.
@@ -112,6 +115,7 @@ pub const MATERIAL_NAMES: [&str; mat::COUNT] = [
     "display",
     "privacy",
     "machined",
+    "pillar",
 ];
 
 /// Whether a material is drawn blended (after the opaque ones).
@@ -788,6 +792,7 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         mat::DISPLAY => [0.02, 0.03, 0.05],
         mat::PRIVACY => [0.01, 0.012, 0.014],
         mat::MACHINED => [0.80, 0.81, 0.83],
+        mat::PILLAR => [0.018, 0.018, 0.02],
         _ => [1.0, 0.0, 1.0],
     }
 }

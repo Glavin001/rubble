@@ -66,8 +66,10 @@ struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listA
 @group(0) @binding(7) var<storage, read_write> nodeN: array<vec4f>;
 // Level of detail: per car its levels' sizes and switch distance (lod), the
 // eye (view, from the last draw), and the indirect args the pick writes: per
-// level a dispatch (3 words) and two indexed draws (opaque, glass; 5 words).
-struct Lod { n0: u32, n1: u32, opq0: u32, gl0: u32, opq1: u32, gl1: u32, levels: u32, dist: f32 };
+// level a dispatch (3 words) and four indexed draws (opaque, glass, the
+// opaque triangles near the floor for the contact shadows, and those under
+// 0.95 m for the floor reflection, which has faded to 3 % there; 5 words each).
+struct Lod { n0: u32, n1: u32, opq0: u32, gl0: u32, opq1: u32, gl1: u32, levels: u32, dist: f32, low0: u32, low1: u32, mid0: u32, mid1: u32 };
 @group(1) @binding(0) var<uniform> lod: Lod;
 @group(1) @binding(1) var<storage, read_write> args: array<u32>;
 @group(1) @binding(2) var<uniform> view: vec4f;
@@ -109,12 +111,16 @@ fn pick() {
   let ns = array<u32, 2>(lod.n0, lod.n1);
   let opq = array<u32, 2>(lod.opq0, lod.opq1);
   let gl = array<u32, 2>(lod.gl0, lod.gl1);
+  let low = array<u32, 2>(lod.low0, lod.low1);
+  let mid = array<u32, 2>(lod.mid0, lod.mid1);
   for (var k = 0u; k < 2u; k++) {
     let on = select(0u, 1u, k == sel);
-    let b = k * 13u;
+    let b = k * 23u;
     args[b] = on * ((ns[k] + ${WG - 1}u) / ${WG}u); args[b + 1u] = 1u; args[b + 2u] = 1u;
     args[b + 3u] = opq[k]; args[b + 4u] = on; args[b + 5u] = 0u; args[b + 6u] = 0u; args[b + 7u] = 0u;
     args[b + 8u] = gl[k]; args[b + 9u] = on; args[b + 10u] = opq[k]; args[b + 11u] = 0u; args[b + 12u] = 0u;
+    args[b + 13u] = low[k]; args[b + 14u] = on; args[b + 15u] = 0u; args[b + 16u] = 0u; args[b + 17u] = 0u;
+    args[b + 18u] = mid[k]; args[b + 19u] = on; args[b + 20u] = 0u; args[b + 21u] = 0u; args[b + 22u] = 0u;
   }
 }
 
@@ -253,6 +259,22 @@ fn softbox(d: vec3f, c: vec3f, r: vec3f, u: vec3f, ha: f32, hb: f32, w: f32) -> 
 const HORIZON = vec3f(0.5, 0.52, 0.56);
 const CEILING = vec3f(0.045, 0.05, 0.06);
 const FLOOR_NEAR = vec3f(0.13, 0.135, 0.145);
+// The studio's light frames (centre, right, up).
+const SC0 = vec3f(-0.4819187, 0.8762159, 0.0000000);
+const SR0 = vec3f(0.8762159, 0.4819187, 0.0000000);
+const SC1 = vec3f(0.0000000, 1.0000000, 0.0000000);
+const SR1 = vec3f(1.0000000, 0.0000000, 0.0000000);
+const SC2 = vec3f(0.4819187, 0.8762159, 0.0000000);
+const SR2 = vec3f(0.8762159, -0.4819187, 0.0000000);
+const SA = vec3f(0.9428509, 0.3017123, 0.1414276);
+const SA_R = vec3f(0.1483405, 0.0000000, -0.9889364);
+const SA_U = vec3f(-0.2983743, 0.9533990, -0.0447561);
+const SB = vec3f(-0.9356015, 0.2993925, -0.1871203);
+const SB_R = vec3f(-0.1961161, 0.0000000, 0.9805807);
+const SB_U = vec3f(0.2935785, 0.9541300, 0.0587157);
+const KB = vec3f(0.2931977, 0.4607393, 0.8377078);
+const KB_R = vec3f(0.9438584, 0.0000000, -0.3303504);
+const KB_U = vec3f(-0.1522054, 0.8875355, -0.4348726);
 // The shaded point (world): env() reflects the ground plane (y = 0) from it.
 var<private> gP: vec3f;
 fn sky(d: vec3f, rough: f32) -> vec3f {
@@ -260,21 +282,17 @@ fn sky(d: vec3f, rough: f32) -> vec3f {
   let up = max(d.y, 0.0);
   var c = mix(HORIZON, CEILING, smoothstep(0.0, 0.75, up));
   c = c + vec3f(0.4) * exp(-up * (22.0 / (1.0 + rough * 6.0)));   // horizon glow
-  // Three long strips overhead, along the car.
-  for (var k = -1; k <= 1; k++) {
-    let xo = f32(k) * 0.55;
-    let cc = normalize(vec3f(xo, 1.0, 0.0));
-    let rr = normalize(vec3f(1.0, -xo, 0.0));
-    c += vec3f(3.6, 3.55, 3.4) * softbox(d, cc, rr, vec3f(0.0, 0.0, 1.0), 0.07, 1.4, w);
-  }
+  // Three long strips overhead, along the car (frames are module constants:
+  // the same lights, no per-pixel normalising).
+  let strip = vec3f(3.6, 3.55, 3.4);
+  c += strip * softbox(d, SC0, SR0, vec3f(0.0, 0.0, 1.0), 0.07, 1.4, w);
+  c += strip * softbox(d, SC1, SR1, vec3f(0.0, 0.0, 1.0), 0.07, 1.4, w);
+  c += strip * softbox(d, SC2, SR2, vec3f(0.0, 0.0, 1.0), 0.07, 1.4, w);
   // Side strips (long, horizontal, a little above the horizon).
-  let sA = normalize(vec3f(1.0, 0.32, 0.15));
-  let sB = normalize(vec3f(-1.0, 0.32, -0.2));
-  c += vec3f(2.8) * softbox(d, sA, normalize(cross(vec3f(0.0, 1.0, 0.0), sA)), normalize(cross(sA, cross(vec3f(0.0, 1.0, 0.0), sA))), 1.7, 0.05, w);
-  c += vec3f(2.4) * softbox(d, sB, normalize(cross(vec3f(0.0, 1.0, 0.0), sB)), normalize(cross(sB, cross(vec3f(0.0, 1.0, 0.0), sB))), 1.7, 0.05, w);
+  c += vec3f(2.8) * softbox(d, SA, SA_R, SA_U, 1.7, 0.05, w);
+  c += vec3f(2.4) * softbox(d, SB, SB_R, SB_U, 1.7, 0.05, w);
   // Key box in front, high.
-  let k = normalize(vec3f(0.35, 0.55, 1.0));
-  c += vec3f(2.6, 2.5, 2.35) * softbox(d, k, normalize(cross(vec3f(0.0, 1.0, 0.0), k)), normalize(cross(k, cross(vec3f(0.0, 1.0, 0.0), k))), 0.30, 0.20, w);
+  c += vec3f(2.6, 2.5, 2.35) * softbox(d, KB, KB_R, KB_U, 0.30, 0.20, w);
   // Sun (the scene's light) as a small hot disc.
   let s = max(dot(d, normalize(frame.light.xyz)), 0.0);
   c += vec3f(1.0, 0.95, 0.85) * pow(s, 400.0 / (1.0 + rough * 300.0)) * (6.0 / (1.0 + rough * 30.0));
@@ -342,6 +360,7 @@ fn props(m: u32) -> vec3f {
     case 0u: { return vec3f(0.38, 0.0, 1.0); }   // paint (base under clearcoat)
     case 2u: { return vec3f(0.04, 1.0, 0.0); }   // chrome
     case 3u: { return vec3f(0.16, 0.0, 0.0); }   // trim: gloss black plastic
+    case 29u: { return vec3f(0.42, 0.0, 0.0); }  // pillar applique: satin black
     case 6u: { return vec3f(0.62, 0.0, 0.0); }   // tyre (satin sidewall)
     case 7u: { return vec3f(0.32, 1.0, 0.0); }   // rim (gunmetal)
     case 28u: { return vec3f(0.26, 1.0, 0.0); }  // machined spoke faces (satin bright)
@@ -396,15 +415,46 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
 @fragment
 fn fsDepth() -> @location(0) vec4f { return vec4f(0.0); }
 
+// Contact shadows: whatever is within 7 cm of the floor (the tyres' contact
+// patches, a scraping sill) flattened onto it and darkened by its height, so
+// the car sits on the floor wherever it is and however it has turned.
+// frame.eye.w: the floor's height; frame.light.w: the opacity per layer.
+struct COut { @builtin(position) clip: vec4f, @location(0) a: f32 };
+@vertex
+fn vsContact(@location(0) pt: vec4f, @location(1) nrm: vec4f, @location(2) color: vec3f, @location(3) mat: u32) -> COut {
+  var o: COut;
+  let hgt = pt.y - frame.eye.w;
+  // Spread along the surface's horizontal normal (an occluder darkens the
+  // floor it faces), wider the higher it is: the shadow shows past the
+  // tyre's own silhouette, a tight core under a soft skirt.
+  let nh = vec2f(nrm.x, nrm.z);
+  let sp = nh / max(length(nh), 1e-3) * min(length(nh), 1.0) * (0.02 + 0.2 * max(hgt, 0.0));
+  o.clip = frame.viewProj * vec4f(pt.x + sp.x, frame.eye.w + 0.002, pt.z + sp.y, 1.0);
+  // Glass, lenses and torn skin cast none.
+  let skip = pt.w > 0.5 || mat == 1u || mat == 17u || mat == 20u || mat == 25u || mat == 27u;
+  let fall = 1.0 - smoothstep(0.0, 0.15, hgt);
+  o.a = select(frame.light.w * fall, 0.0, skip || hgt < -0.05);
+  // Far above the floor: collapsed to one point outside the view, so the
+  // flattened car costs no fragments (only what is near the floor draws).
+  if (hgt > 0.25) { o.clip = vec4f(2.0, 2.0, 2.0, 1.0); }
+  return o;
+}
+@fragment
+fn fsContact(i: COut) -> @location(0) vec4f {
+  if (i.a < 0.01) { discard; }
+  return vec4f(0.0, 0.0, 0.0, i.a);
+}
+
 @fragment
 fn fsMirror(i: VOut) -> @location(0) vec4f {
   // Cheap: where the reflection has faded, nothing; elsewhere the base colour
   // under the studio's diffuse light, the paint with a hint of its sheen (a
   // blurred floor reflection shows no more), tears and shattered glass cut.
-  let a = frame.light.w * exp(-max(i.world.y, 0.0) * 2.2);
+  // frame.eye.w: the floor's height (the mirror plane).
+  let a = frame.light.w * exp(-max(i.world.y - frame.eye.w, 0.0) * 2.2);
   if (a < 0.015 || i.torn > 0.5) { discard; }
   if ((i.mat == 1u || i.mat == 27u) && i.strain > 0.12) { discard; }
-  gP = i.world;
+  gP = i.world - vec3f(0.0, frame.eye.w, 0.0);
   let n = normalize(i.normal);
   var c = i.color * irradiance(n) * (0.35 + 0.65 * clamp(i.ao, 0.0, 1.0));
   if (i.mat == 18u || i.mat == 21u) { c = i.color * 3.0; }
@@ -423,10 +473,20 @@ fn shade(i: VOut, front: bool) -> vec4f {
   let glassy = i.mat == 1u || i.mat == 25u || i.mat == 27u;
   // Side and rear glass (tempered) shatters and drops once its frame strains.
   if ((i.mat == 1u || i.mat == 27u) && i.strain > 0.12) { discard; }
-  if (i.torn > 0.3 && !glassy) {
-    let nn = normalize(i.normal);
-    let lit = 0.35 + 0.65 * max(dot(nn, normalize(frame.light.xyz)), 0.0);
-    return vec4f(tonemap(vec3f(0.42, 0.42, 0.44) * lit), 1.0);
+  // A thin lip (the field's last 6 %: a few millimetres), not a dark band.
+  if (i.torn > 0.47 && !glassy && i.mat != 6u) {
+    // Torn sheet steel: a bright, rough-polished lip (paint and e-coat
+    // ripped off) catching the studio from every side.
+    var nn = normalize(i.normal);
+    let vv = normalize(frame.eye.xyz - i.world);
+    if (dot(nn, vv) < 0.0) { nn = -nn; }
+    let lit = 0.45 + 0.55 * max(dot(nn, normalize(frame.light.xyz)), 0.0);
+    let steel = vec3f(0.62, 0.62, 0.64);
+    // (The analytic diffuse lobe, not env(): a second inlined environment
+    // lookup costs the whole shader occupancy.)
+    let rr = reflect(-vv, nn);
+    let sky = mix(0.3, 1.3, smoothstep(-0.3, 0.6, rr.y));
+    return vec4f(tonemap(steel * (sky + 0.35 * lit)), 1.0);
   }
   var n = normalize(i.normal);
   let v = normalize(frame.eye.xyz - i.world);
@@ -435,7 +495,7 @@ fn shade(i: VOut, front: bool) -> vec4f {
   // a sliver folded over in a crush (a rolled edge, a crease): paint, so a
   // buckled seam reads as a sharp fold rather than a dark sawtooth.
   if (!front && i.mat == 0u && dot(n, v) < 0.0) {
-    let d = vec3f(0.035, 0.035, 0.038) * (0.4 + 0.6 * clamp(i.ao, 0.0, 1.0));
+    let d = vec3f(0.055, 0.056, 0.06) * (0.4 + 0.6 * clamp(i.ao, 0.0, 1.0));
     return vec4f(tonemap(d * (irradiance(-n) + vec3f(0.2))), 1.0);
   }
   // Two-sided: light the side facing the camera.
@@ -601,14 +661,20 @@ fn shade(i: VOut, front: bool) -> vec4f {
     // The flakes' rough reflection: the blurred studio (the analytic lobe, not
     // a second environment lookup).
     let flake = flakeF0 * (irradiance(r) * 1.7 * ao * 0.9 + sun * ggx(ndh, 0.17) * g / max(4.0 * ndv, 1e-3));
-    // Sparkle: tiny flakes catching the sun.
-    let cell = floor(i.world * 900.0);
-    let sp = step(0.992, hash3(cell)) * pow(ndh, 40.0) * ndl * 2.5;
-    let base = diffuse * 0.75 + flake + albedo * sp;
+    // Sparkle: flakes fixed in the paint (rest space, so they never swim as
+    // the body moves or deforms), glinting near the sun's highlight; faded
+    // to nothing where a flake is under a pixel (no shimmer at a distance).
+    let fpx = distance(frame.eye.xyz, i.world) * 6.3e-1;
+    let hx = hash3(floor(i.rest * 900.0));
+    let sp = step(0.988, hx) * pow(ndh, 60.0) * ndl * 1.6 * (1.0 - smoothstep(0.6, 2.0, fpx));
+    let base = diffuse * 0.75 + flake + (albedo * 0.6 + vec3f(0.4)) * sp;
     // Clearcoat: a mirror-sharp sun glint over a broader sheen, and the
     // studio reflected crisply (horizon, softboxes, the floor).
     let coatSpec = sun * (ggx(ndh, 0.0016) * 0.22 + ggx(ndh, 0.02) * 0.06) * cf / max(4.0 * ndv, 1e-3) * ndl;
-    c = base * (1.0 - cf) + env(r, 0.005) * cf * mix(0.45, 1.0, ao) + coatSpec;
+    // The coat's sky term eased at grazing (cf rises to 1 there; a real
+    // coat with a rough base reads milky long before that).
+    let cfe = cf * mix(1.0, 0.8, smoothstep(0.5, 0.95, 1.0 - ndv));
+    c = base * (1.0 - cfe) + env(r, 0.003) * cfe * mix(0.45, 1.0, ao) + coatSpec;
   } else if (metal > 0.5) {
     let f0 = albedo;
     let f = f0 + (vec3f(1.0) - f0) * fres;
@@ -721,6 +787,25 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less' },
     multisample: { count: sampleCount },
   });
+  const contactPipe = device.createRenderPipeline({
+    label: 'showcase-contact',
+    layout: 'auto',
+    vertex: {
+      module: drawModule,
+      entryPoint: 'vsContact',
+      buffers: [
+        { arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x4' }] },
+        { arrayStride: 40, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 3, offset: 16, format: 'uint32' }] },
+      ],
+    },
+    // Multiplies what is under it (the floor and its reflection) by 1 − a.
+    fragment: { module: drawModule, entryPoint: 'fsContact', targets: [{ format, blend: { color: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'zero', dstFactor: 'one' } } }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: sampleCount },
+  });
+  const contactBuf = device.createBuffer({ label: 'showcase-contact-frame', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const contactBind = device.createBindGroup({ layout: contactPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: contactBuf } }] });
   const mirrorBuf = device.createBuffer({ label: 'showcase-mirror-frame', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const mirrorBind = device.createBindGroup({ layout: mirrorPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: mirrorBuf } }] });
   const mirrorDepthBind = device.createBindGroup({ layout: mirrorDepthPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: mirrorBuf } }] });
@@ -850,42 +935,64 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           af.set(v.positions.subarray(3 * i, 3 * i + 3), 10 * i + 5);
           if (v.uvs) af.set(v.uvs.subarray(2 * i, 2 * i + 2), 10 * i + 8);
         }
-        // Opaque triangles first, the blended ones (glass, lenses) after.
+        // Opaque triangles first, the blended ones (glass, lenses) after, in
+        // the mesh's order (the exterior before the cabin: early depth
+        // rejection). A second index list for the floor passes: the opaque
+        // triangles within 25 cm of the ground at rest (tyres, sill and bumper
+        // edges: what can touch the floor; not the underbody plate or the
+        // cabin) for the contact shadows, then the rest under 0.95 m for the
+        // floor reflection (faded to under 3 % above that).
         const tri = v.indices;
         const TRANSPARENT = new Set([1, 17, 20, 25, 27]);
-        let no = 0;
-        for (let t = 0; t < tri.length; t += 3) if (!TRANSPARENT.has(v.material[tri[t]])) no += 3;
+        const LOW = 0.25, MID = 0.95;
+        const NO_CONTACT = new Set([9, 12, 13, 14, 15, 16, 26]);
+        let yMin = Infinity;
+        for (let i = 0; i < n; i++) if (v.positions[3 * i + 1] < yMin) yMin = v.positions[3 * i + 1];
+        const minY = (t) => Math.min(v.positions[3 * tri[t] + 1], v.positions[3 * tri[t + 1] + 1], v.positions[3 * tri[t + 2] + 1]) - yMin;
+        // Class: 0 low, 1 mid, 2 high (opaque), 3 blended.
+        const cls = (t) => TRANSPARENT.has(v.material[tri[t]]) ? 3 : minY(t) < LOW && !NO_CONTACT.has(v.material[tri[t]]) ? 0 : minY(t) < MID ? 1 : 2;
+        const count = [0, 0, 0, 0];
+        const cl = new Uint8Array(tri.length / 3);
+        for (let t = 0; t < tri.length; t += 3) { cl[t / 3] = cls(t); count[cl[t / 3]] += 3; }
+        const nl = count[0], nm = count[0] + count[1], no = nm + count[2];
         const ordered = new Uint32Array(tri.length);
+        const floorList = new Uint32Array(Math.max(nm, 3));
         let io = 0, ig = no;
+        const fat = [0, nl];
         for (let t = 0; t < tri.length; t += 3) {
-          if (TRANSPARENT.has(v.material[tri[t]])) { ordered[ig++] = tri[t]; ordered[ig++] = tri[t + 1]; ordered[ig++] = tri[t + 2]; }
-          else { ordered[io++] = tri[t]; ordered[io++] = tri[t + 1]; ordered[io++] = tri[t + 2]; }
+          const k = cl[t / 3];
+          if (k === 3) { ordered.set(tri.subarray(t, t + 3), ig); ig += 3; }
+          else { ordered.set(tri.subarray(t, t + 3), io); io += 3; }
+          if (k < 2) { floorList.set(tri.subarray(t, t + 3), fat[k]); fat[k] += 3; }
         }
         const attrs = device.createBuffer({ label: 'showcase-attrs', size: attr.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(attrs, 0, attr);
         const index = device.createBuffer({ label: 'showcase-index', size: ordered.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(index, 0, ordered);
+        const floorIndex = device.createBuffer({ label: 'showcase-floor-index', size: floorList.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(floorIndex, 0, floorList);
         const params = device.createBuffer({ label: 'showcase-params', size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(params, 0, new Uint32Array([n, nodeOffset, nodeCount, vehicle, listAt, trisAt, 0, 0]));
-        return { n, binds, out, attrs, index, params, opaqueCount: no, glassCount: tri.length - no };
+        return { n, binds, out, attrs, index, floorIndex, params, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const levels = [level(visual)];
       if (lod) levels.push(level(lod));
-      const lodData = new ArrayBuffer(32);
+      const lodData = new ArrayBuffer(48);
       const lu = new Uint32Array(lodData);
       const l1 = levels[1] ?? levels[0];
       lu.set([levels[0].n, l1.n, levels[0].opaqueCount, levels[0].glassCount, l1.opaqueCount, l1.glassCount, levels.length]);
       new Float32Array(lodData)[7] = lodDistance;
+      lu.set([levels[0].lowCount, l1.lowCount, levels[0].midCount, l1.midCount], 8);
       const car = {
         nodeCount, vehicle, nodeOffset, levels, listAt, trisAt, skinBind: null, posBind: null,
         topo: upload('showcase-topology', topo),
         restN: upload('showcase-rest-normals', rn),
         nodeN: device.createBuffer({ label: 'showcase-node-normals', size: nodeCount * 16, usage: GPUBufferUsage.STORAGE }),
         lod: upload('showcase-lod', lodData, GPUBufferUsage.UNIFORM),
-        // Indirect args (2 levels × 13 words); level 0 drawn until the first pick.
+        // Indirect args (2 levels × 23 words); level 0 drawn until the first pick.
         args: upload('showcase-lod-args', new Uint32Array([
-          Math.ceil(levels[0].n / WG), 1, 1, levels[0].opaqueCount, 1, 0, 0, 0, levels[0].glassCount, 1, levels[0].opaqueCount, 0, 0,
-          0, 1, 1, l1.opaqueCount, 0, 0, 0, 0, l1.glassCount, 0, l1.opaqueCount, 0, 0,
+          Math.ceil(levels[0].n / WG), 1, 1, levels[0].opaqueCount, 1, 0, 0, 0, levels[0].glassCount, 1, levels[0].opaqueCount, 0, 0, levels[0].lowCount, 1, 0, 0, 0, levels[0].midCount, 1, 0, 0, 0,
+          0, 1, 1, l1.opaqueCount, 0, 0, 0, 0, l1.glassCount, 0, l1.opaqueCount, 0, 0, l1.lowCount, 0, 0, 0, 0, l1.midCount, 0, 0, 0, 0,
         ]), GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT),
       };
       car.pickBind = device.createBindGroup({
@@ -909,7 +1016,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     removeCar(id) {
       const car = cars.get(id);
       if (!car) return;
-      for (const lv of car.levels) for (const b of [lv.binds, lv.out, lv.attrs, lv.index, lv.params]) b.destroy();
+      for (const lv of car.levels) for (const b of [lv.binds, lv.out, lv.attrs, lv.index, lv.floorIndex, lv.params]) b.destroy();
       for (const b of [car.topo, car.restN, car.nodeN, car.lod, car.args]) b.destroy();
       cars.delete(id);
     },
@@ -934,23 +1041,25 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         pass.setPipeline(pipes.skin);
         car.levels.forEach((lv, k) => {
           pass.setBindGroup(0, groups[k]);
-          pass.dispatchWorkgroupsIndirect(car.args, k * 52);
+          pass.dispatchWorkgroupsIndirect(car.args, k * 92);
         });
       }
       pass.end();
     },
     /**
-     * The cars' reflection in a floor at y = 0 (reflectance `strength` at the
-     * contact, fading with height): draw it after the floor (which must not
-     * write depth) and before the cars. Uses its own uniforms, so it can share
-     * a command encoder with `draw`.
+     * The cars' reflection in a floor at y = `floorY` (reflectance `strength`
+     * at the contact, fading with height), then the contact shadows (each
+     * layer within 7 cm of the floor darkens it by up to `contact`): draw it
+     * after the floor (which must not write depth) and before the cars. Uses
+     * its own uniforms, so it can share a command encoder with `draw`.
      */
-    drawReflection(pass, { viewProj, eye, light = [0.4, 0.8, 0.35], strength = 0.22 }) {
+    drawReflection(pass, { viewProj, eye, light = [0.4, 0.8, 0.35], strength = 0.22, floorY = 0, contact = 0.3 }) {
+      // viewProj · M, M the mirror in y = floorY: y → 2·floorY − y.
       const vp = Float32Array.from(viewProj);
-      for (let k = 4; k < 8; k++) vp[k] = -vp[k];   // viewProj · diag(1, −1, 1, 1)
+      for (let k = 0; k < 4; k++) { vp[12 + k] += 2 * floorY * vp[4 + k]; vp[4 + k] = -vp[4 + k]; }
       const fr = new Float32Array(24);
       fr.set(vp, 0);
-      fr.set([eye[0], -eye[1], eye[2], 1], 16);
+      fr.set([eye[0], 2 * floorY - eye[1], eye[2], floorY], 16);
       fr.set([light[0], light[1], light[2], strength], 20);
       device.queue.writeBuffer(mirrorBuf, 0, fr);
       for (const [pipe, bind] of [[mirrorDepthPipe, mirrorDepthBind], [mirrorPipe, mirrorBind]]) {
@@ -960,8 +1069,25 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           car.levels.forEach((lv, k) => {
             pass.setVertexBuffer(0, lv.out);
             pass.setVertexBuffer(1, lv.attrs);
-            pass.setIndexBuffer(lv.index, 'uint32');
-            pass.drawIndexedIndirect(car.args, k * 52 + 12);
+            pass.setIndexBuffer(lv.floorIndex, 'uint32');
+            pass.drawIndexedIndirect(car.args, k * 92 + 72);
+          });
+        }
+      }
+      if (contact > 0) {
+        const cf = new Float32Array(24);
+        cf.set(viewProj, 0);
+        cf.set([eye[0], eye[1], eye[2], floorY], 16);
+        cf.set([light[0], light[1], light[2], contact], 20);
+        device.queue.writeBuffer(contactBuf, 0, cf);
+        pass.setPipeline(contactPipe);
+        pass.setBindGroup(0, contactBind);
+        for (const car of cars.values()) {
+          car.levels.forEach((lv, k) => {
+            pass.setVertexBuffer(0, lv.out);
+            pass.setVertexBuffer(1, lv.attrs);
+            pass.setIndexBuffer(lv.floorIndex, 'uint32');
+            pass.drawIndexedIndirect(car.args, k * 92 + 52);
           });
         }
       }
@@ -982,7 +1108,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
             pass.setVertexBuffer(0, lv.out);
             pass.setVertexBuffer(1, lv.attrs);
             pass.setIndexBuffer(lv.index, 'uint32');
-            pass.drawIndexedIndirect(car.args, k * 52 + at);
+            pass.drawIndexedIndirect(car.args, k * 92 + at);
           });
         }
       }

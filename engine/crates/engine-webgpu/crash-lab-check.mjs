@@ -32,6 +32,8 @@ const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const OUT = opt('--out', join(ROOT, 'recordings', 'crash-lab'));
 const CAR = opt('--car', 'sedan');
+// --size WxH: the window (screenshots) size; 1280x720 by default.
+const [W, H] = opt('--size', '1280x720').split('x').map(Number);
 const only = args.filter((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWith('--'));
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
@@ -61,7 +63,7 @@ const profile = mkdtempSync(join(tmpdir(), 'crash-lab-chrome-'));
 const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
-  '--enable-unsafe-webgpu', '--window-size=1280,720', '--no-first-run', '--no-default-browser-check',
+  '--enable-unsafe-webgpu', `--window-size=${W},${H}`, '--no-first-run', '--no-default-browser-check',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank',
 ], { stdio: 'ignore' });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
@@ -90,7 +92,7 @@ const evaluate = async (expression) => {
   return r.result?.result?.value;
 };
 await send('Runtime.enable');
-await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
+await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 
 const shot = async (name) => {
   const s = await send('Page.captureScreenshot', { format: 'png' });
