@@ -814,10 +814,25 @@ vehicle the same visual format as the authored car, so
   10⁵ × softer than glass, so a strain criterion becomes a force too small
   to carry the pane. A real pane's strip would hold σ·t·L, about 144 kN at
   4 mm × 0.3 m, which these beams never reach.
-- **What is open:** a fracture criterion that matches how real panes
-  break: from bending under contact, against measured impact data (for
-  example UN R43's 227 g ball and headform tests), not from membrane
-  strain. This needs a decision.
+- **Aperture racking (a Choice; written, off).** `aperture_gauges` joins
+  the frame nodes at the opening's four corners by its edges and diagonals.
+  - Each gauge is a beam of negligible stiffness (`GAUGE_K`) that breaks at
+    σ/E of its length (tempered 120 MPa, laminated 45 MPa) against the
+    installed pose.
+  - The beams are plain, so a tempered pane's break sets off its group; RoR
+    supports do not cascade groups.
+  - A pane beam no longer breaks on its own strain.
+  - Turned on, every pane breaks at rest in `a`:
+    - The corners are wrong: the windscreen's reach door nodes, and the side
+      windows' reach the door's belt-line frame. The windows' upper frames
+      are not frame tier.
+    - The 2 cm spawn landing strains the gauges 0.10–0.20 % (`GLASS_STRAIN=1`
+      prints them), above tempered glass's 0.17 % and laminated's 0.064 %. A
+      real car's frame strains far less.
+- **What is open:** per-pane aperture corners on frame-tier nodes (window
+  frames in the frame tier); a spawn without the landing transient;
+  direct-impact breaks against UN R43 / ANSI Z26.1 data (needs a contact
+  force readback in the solver). This needs a decision.
 
 ### A6: where the hardware's loads reach its strength (2026-11-05)
 

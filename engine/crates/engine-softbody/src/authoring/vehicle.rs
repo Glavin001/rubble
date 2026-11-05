@@ -2605,6 +2605,79 @@ fn shut_line_breaks(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]
     }
 }
 
+/// A pane's aperture gauges: the frame (primary) nodes nearest the opening's
+/// four corners (the extremes of its mounts' outer ends in the pane's two
+/// longest directions), joined by its edges and both diagonals. Each is a
+/// beam of negligible stiffness ([`GAUGE_K`], density 0, kept by the step
+/// fit) that breaks at `strain` of its length, in `group`. Returns them.
+/// (Compression shortens one diagonal as it stretches the other.)
+pub const GAUGE_K: f32 = 1.0e4;
+
+fn aperture_gauges(sk: &mut Skeleton, pane: &[u32], mounts: &[usize], strain: f32, group: u32) -> Vec<usize> {
+    let set: std::collections::HashSet<u32> = pane.iter().copied().collect();
+    let rim: Vec<u32> = mounts
+        .iter()
+        .map(|&j| {
+            let b = &sk.beams[j];
+            if set.contains(&b.a) { b.b } else { b.a }
+        })
+        .collect();
+    if rim.is_empty() {
+        return Vec::new();
+    }
+    let c = rim.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / rim.len() as f32;
+    let (lo, hi) = rim.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), &i| (a.min(sk.pos(i)), b.max(sk.pos(i))));
+    let ext = hi - lo;
+    let mut axes = [(ext.x, Vec3::X), (ext.y, Vec3::Y), (ext.z, Vec3::Z)];
+    axes.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let (u, v) = (axes[0].1, axes[1].1);
+    let frame: Vec<u32> = (0..sk.nodes.len() as u32)
+        .filter(|&i| sk.nodes[i as usize].primary && !sk.nodes[i as usize].catcher)
+        .collect();
+    let mut corners: Vec<u32> = Vec::new();
+    for (su, sv) in [(1.0f32, 1.0f32), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)] {
+        let far = *rim
+            .iter()
+            .max_by(|&&a, &&b| {
+                let f = |i: u32| (sk.pos(i) - c).dot(u * su + v * sv);
+                f(a).total_cmp(&f(b))
+            })
+            .unwrap();
+        let q = sk.nearest(sk.pos(far), &frame, 1)[0];
+        if !corners.contains(&q) {
+            corners.push(q);
+        }
+    }
+    let mut out = Vec::new();
+    for i in 0..corners.len() {
+        for k in i + 1..corners.len() {
+            let (a, b) = (corners[i], corners[k]);
+            if sk.has_beam(a, b) {
+                continue;
+            }
+            // (A plain beam, so a break sets off its group: k·strain·L of
+            // pull, elastic all the way; k a thousandth of a frame span's.)
+            let l = sk.pos(a).distance(sk.pos(b));
+            let k = GAUGE_K;
+            let f = k * super::material::REF_LENGTH / l.max(super::material::REF_LENGTH) * strain * l;
+            let m = Material {
+                k,
+                damp: 0.0,
+                deform: f,
+                strength: f,
+                plastic: 0.0,
+                density: 0.0,
+            };
+            if sk.beam_with(a, b, m, BeamType::Normal, group) {
+                let j = sk.beams.len() - 1;
+                sk.beams[j].fixed = true;
+                out.push(j);
+            }
+        }
+    }
+    out
+}
+
 /// Seconds the car settles before its glass is installed.
 pub const INSTALL_SETTLE: f32 = 2.0;
 
@@ -2652,6 +2725,10 @@ fn installation_pose(sk: &Skeleton, beams: &[usize]) -> Result<Vec<f32>, String>
             }
         }
         let settle = beams.iter().map(|&j| (len(&p1, j) / len(&p0, j) - 1.0).abs()).fold(0.0f32, f32::max);
+        for &j in beams.iter().filter(|&&j| sk.beams[j].fixed && sk.beams[j].mat.density == 0.0) {
+            let b = &sk.beams[j];
+            eprintln!("  gauge {}-{} ({} {:?} / {} {:?}): settle {:.4} %", b.a, b.b, sk.parts[sk.nodes[b.a as usize].part as usize], sk.nodes[b.a as usize].p, sk.parts[sk.nodes[b.b as usize].part as usize], sk.nodes[b.b as usize].p, (len(&p1, j) / len(&p0, j) - 1.0) * 100.0);
+        }
         eprintln!("glass: settle strain up to {:.4} %, then at rest up to {:.4} % (tempered breaks at {:.3} %)", settle * 100.0, worst * 100.0, TEMPERED_STRAIN * 100.0);
     }
     Ok(beams
@@ -2766,17 +2843,12 @@ fn brittle_glass(
             });
             continue;
         }
-        for &j in &pane {
-            let b = &mut sk.beams[j];
-            let l = sk.nodes[b.a as usize].p.distance(sk.nodes[b.b as usize].p);
-            let kl = b.mat.k_at(l) * l;
-            if laminated {
-                b.mat.deform = scale * ANNEALED_STRAIN * kl;
-                b.mat.strength = b.mat.strength.max(b.mat.deform);
-            } else {
-                b.mat.deform = scale * TEMPERED_STRAIN * kl;
-                b.mat.strength = b.mat.deform;
-                b.group = g;
+        // The pane's own beams are skin-tier, ~10⁵ × softer than glass:
+        // they carry its weight and break with its group, never on their
+        // own strain (that would be a ~0.3 N break force).
+        if !laminated {
+            for &j in &pane {
+                sk.beams[j].group = g;
             }
         }
         // Its mounts: each carries the bead (or the channel) along its share
@@ -2810,14 +2882,20 @@ fn brittle_glass(
                 if sk.nodes[inner as usize].p.y > low + 0.05 {
                     b.ty = BeamType::Support(SEAL_BREAK);
                 }
-                let kl = b.mat.k_at(l) * l;
-                b.mat.deform = scale * TEMPERED_STRAIN * kl;
-                b.mat.strength = b.mat.deform;
+                let _ = l;
                 b.group = g;
             }
         }
+        // The aperture's racking (a Choice, `vehicle-authoring.md`): the
+        // frame nodes at the opening's four corners carry near-real
+        // stiffness. Gauges across them (its edges and diagonals) are
+        // supports of negligible stiffness that break past σ/E of
+        // extension against the installed pose: the strain the frame
+        // imposes on the glass reaching its strength (tempered 120 MPa,
+        // laminated 45 MPa: it cracks, in no group, and holds).
+        let gauges = aperture_gauges(sk, &nodes, &mounts, if laminated { ANNEALED_STRAIN } else { TEMPERED_STRAIN }, if laminated { 0 } else { g });
         let part = sk.nodes[nodes[0] as usize].part;
-        let beams: Vec<u32> = pane.iter().chain(&mounts).map(|&j| j as u32).collect();
+        let beams: Vec<u32> = pane.iter().chain(&mounts).chain(&gauges).map(|&j| j as u32).collect();
         out.push(DamageUnit {
             name,
             kind: DamageKind::Glass,
