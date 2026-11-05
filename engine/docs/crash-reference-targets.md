@@ -1,0 +1,279 @@
+# Crash reference targets for the showcase sedan
+
+Status: research note, 2026-11-04. Each number below comes from a public measurement, a regulation, or an
+equation. Where nothing open was available, the gap is stated rather than filled.
+
+Subject: the procedurally authored sedan, 1,450 kg, about 4.7 m long and 1.8 m wide.
+
+## 0. Where the numbers come from
+
+**Primary data: the NHTSA Vehicle Crash Test Database API.** This is public-domain JSON, read directly.
+- OpenAPI spec: `https://nrd.api.nhtsa.dot.gov/nhtsa/vehicle/v3/api-docs`
+- Search endpoint: `.../api/v1/vehicle-database-test-results/by-search`
+- Per-vehicle measurements: `.../get-vehicle-detail-info/1/{testNo}`
+
+**Frontal population.** The frontal statistics use this population:
+- test type "NEW CAR ASSESSMENT TEST" (all NCAP variants);
+- configuration `VEHICLE INTO BARRIER` (rigid);
+- impact angle 0 and offset 0;
+- closing speed 55.5–57.5 km/h;
+- model years 2010–2025;
+- test mass 1,300–1,700 kg;
+- body type `FOUR DOOR SEDAN`.
+
+That gives **n = 82 tests**: median mass 1,511 kg, median length 4,622 mm, median speed 56.3 km/h.
+
+**Side pole population.** Configuration `VEHICLE INTO POLE`, NCAP, 31–33 km/h, 1,300–1,750 kg, four-door sedans. That gives **n = 116 tests**: median mass 1,566 kg, crab angle 285° (that is, 75°).
+
+**How the statistics are reported.** As median, IQR and p10–p90, because the database contains obvious transcription errors. One example is a door-opening change of 1,860 mm. Means and standard deviations are distorted by these errors, so robust statistics are used throughout.
+
+**What the API does not give: dynamic crush, rebound and pulse.** These need the accelerometer time histories, which are separate data files. Those count as downloads, so they were not fetched (see section 7).
+
+## 1. Reference table
+
+| Quantity | Measured range | Central value for a 1,450 kg sedan | Source / derivation |
+|---|---|---|---|
+| **Frontal 56 km/h: residual (static) max crush** at bumper level | p10–p90 **380–580 mm**; IQR 431–543; min–max 217–738 | **491 mm** (median) | NHTSA DB, n=82 sedans, field `maximumCrushDistance` (largest of the 6-zone profile C1..C6) |
+| Frontal: residual average crush (NHTSA 6-point trapezoid) | p10–p90 261–512 mm; IQR 365–487 | 428 mm | Same 82 tests: C̄ = (C1/2 + C2..C5 + C6/2)/5 |
+| Frontal: overall length loss | p10–p90 311–602 mm | 470 mm | Pre-test minus post-test overall length |
+| Frontal: crush (damage) width ÷ vehicle width | p10–p90 0.63–0.96 | 0.775 | `totalLengthofIndentation` / `vehicleWidth` |
+| Frontal: Campbell **b1** = (v − b0)/C̄, with b0 = 8 km/h | p10–p90 **22.9–39.2 s⁻¹**; IQR 27.2–35.5 | 30.4 s⁻¹ | Derived per test (§2.2). Normalised for mass and width, so it transfers to our car |
+| Frontal: Campbell **A**, per unit crush width (b0 = 8 km/h) | p10–p90 48.9–105 kN/m; IQR 69.5–91.2 | 79.4 kN/m | Derived per test: A = m·b0·b1/L |
+| Frontal: Campbell **B**, per unit crush width | p10–p90 813–2,049 kN/m²; IQR 961–1,563 | 1,126 kN/m² | Derived per test: B = m·b1²/L |
+| Frontal: v ÷ C_max | p10–p90 27.0–41.2 s⁻¹ | 31.9 s⁻¹ | Derived per test |
+| Frontal: **coefficient of restitution** e = v_rebound/v_impact | about 0.03–0.2 for barrier tests; falls as speed rises | about 0.11 at 56 km/h | Secondary sources only, from search snippets of papers not opened (see §6). One gives about 0.03–0.2 and a working value of 0.1. An ASME lift-truck paper (page returned 403) states NCAP cars see Δv ≈ 39 mph from a 35 mph impact, which implies rebound ≈ 4 mph ≈ 1.8 m/s and e ≈ 0.11. Monson & Germane, SAE 1999-01-0097 (abstract read): restitution generally decreases with impact speed |
+| Frontal: **rebound velocity** | about 0.5–3.1 m/s (e = 0.03–0.2) | about 1.8 m/s | e × 15.56 m/s; same caveat as the row above |
+| Frontal: pulse duration | about 90–115 ms | — | Secondary, ASME snippet (unverified). Locey et al. 2012 (AAAM, abstract read): durations are shortening by 0.74 ms per model year for mid-size cars; across the fleet, the 2009–10 durations span only 13.4 ms. Absolute values are not in the abstract |
+| Frontal: peak deceleration, occupant-compartment accelerometer | about 36–46 g (fleet average range) | — | Secondary, ASME snippet (unverified). Locey et al.: peak deceleration is rising by 0.40 g per model year for mid-size cars; across the fleet, the 2009–10 peaks span 10.7 g |
+| Frontal: mean deceleration over the whole pulse | 15.5–19.7 g | about 17.5 g | Derived: Δv / duration = 17.4 m/s ÷ (0.115…0.090 s). Inherits the secondary-source caveat |
+| Frontal: **maximum dynamic crush** | **not openly available** | — | Needs time histories (§7). Physics bound in §2.4 |
+| Frontal: time of maximum dynamic crush | about 77 ms (one test) | — | Secondary: snippet of an NHTSA ESV paper on frontal stiffness accuracy (PDF not opened) |
+| **Cabin, frontal 56 km/h: door-aperture length change** (leading to trailing edge, upper and lower, left and right) | median **0–1 mm**; IQR about −2…+3 mm; p10–p90 about **−9…+9 mm** | about 0 mm | NHTSA DB pre/post door-edge measurements, n=82. In real cars the aperture is essentially unchanged |
+| Cabin: A-pillar base rearward movement | left: median 2, p10–p90 −7…17 mm; right: median 1, p10–p90 −11…15 mm | about 2 mm | NHTSA DB, `RearSurfaceofVehicletoBottomofApost` pre minus post |
+| Cabin: firewall rearward movement | left: median 20, p10–p90 1…67 mm; right: median 15, p10–p90 −15…85 mm | about 15–20 mm | NHTSA DB |
+| Cabin: steering-column position change | median −40 mm (column moves *forward* when it strokes); p10–p90 −85…+11 | — | NHTSA DB. Not structural; do not assert against it |
+| **Side pole, 32 km/h, 75°, 254 mm: residual max crush at the pole** | p10–p90 **297–445 mm**; IQR 336–399; min–max 169–537 | **356 mm** | NHTSA DB, n=116 sedans, `maximumCrushDistance` on the struck side |
+| Comparable 1,400–1,500 kg sedans at the pole | 264–388 mm | — | Examples: 2012 Impreza 1,450 kg 388; 2016 Cruze 1,417 kg 320; 2018 Accord 1,508 kg 337; 2020 Sentra 1,475 kg 297; 2025 Corolla Hybrid 1,443 kg 320 |
+| **FMVSS 214 static door crush**: required | initial ≥ **10,000 N** (average over 0–152 mm); intermediate ≥ **15,569 N** (average over 0–305 mm); peak ≥ **min(2 × curb weight, 31,138 N)** over 457 mm | For 1,450 kg: peak ≥ 28,449 N | 49 CFR 571.214 S6.1 (seats removed). The alternative S6.2 (seats installed) requires 10,000 N / 19,460 N / min(3.5 × CW, 53,378 N). Ram: rigid 305 mm cylinder, vertical axis, centred 127 mm above the lowest point of the door, ≤ 12.7 mm/s |
+| FMVSS 214 static door crush: typical measured | **not openly available** | — | Values exist only in compliance-report PDFs (§7) |
+| **FMVSS 216a roof**: required | ≥ **3.0 × unloaded vehicle weight** (GVWR ≤ 6,000 lb) before 127 mm of platen travel, each side; head-form load ≤ 222 N | For 1,450 kg: ≥ 42.7 kN | 49 CFR 571.216a S5. Platen 762 × 1,829 mm, pitched 5° and rolled 25° |
+| IIHS roof (rating discontinued) | Good ≥ 4.0; Acceptable 3.25; Marginal 2.5; peak before 5 in (127 mm) | Good for 1,450 kg: ≥ 56.9 kN | iihs.org roof-strength page: "virtually all vehicles earned good ratings" |
+| Roof: typical compact sedans | strength-to-weight ratio about 4.5–5.3 | about 5 | Secondary press reports of IIHS results: 2011 Mazda3 sedan 5.32; 2010 Corolla 5.1; 2006–11 Civic 4.48 |
+
+**Comparable frontal tests (NHTSA DB, 1,400–1,520 kg, 4.55–4.90 m sedans).** Values are test number, model, mass, and maximum residual crush:
+- 8407, 2014 Corolla, 1,480 kg: 521 mm
+- 9065, 2015 Corolla, 1,475 kg: 567 mm
+- 9593, 2016 Civic, 1,432 kg: 445 mm
+- 9764, 2016 Cruze, 1,506 kg: 488 mm
+- 9793, 2017 Elantra, 1,480 kg: 451 mm
+- 10688, 2019 Forte, 1,455 kg: 421 mm
+- 11574, 2021 Elantra, 1,452 kg: 530 mm
+- 8294, 2014 Forte, 1,455 kg: 548 mm
+- 9984, 2017 Corolla, 1,488 kg: 738 mm (the population maximum)
+
+## 2. Physics relations, worked for m = 1,450 kg at 56 km/h
+
+v₀ = 56/3.6 = **15.556 m/s**; KE₀ = ½mv₀² = **175.4 kJ**.
+
+### 2.1 Energy balance and restitution
+
+```
+½ m v₀² = W_crush(loading) − W_returned(unloading) + ½ m v_r²
+                                                    (+ friction, rotation and vibration KE, damping)
+e = v_r / v₀                       (rigid, immovable wall)
+fraction of KE₀ returned as rebound KE = e²
+```
+
+Worked values:
+
+| e | v_r | Rebound KE | Share of KE₀ |
+|---|---|---|---|
+| 0.03 | 0.47 m/s | 0.16 kJ | — |
+| 0.10 | 1.56 m/s | 1.75 kJ | 1.0% |
+| 0.20 | 3.11 m/s | 7.0 kJ | 4.0% |
+| 0.122 (our sim) | 1.9 m/s | 2.62 kJ | 1.5% |
+
+So 96–99.9% of KE₀ must be dissipated: plastic work, damping and friction.
+
+### 2.2 Campbell linear crush model (CRASH3 form)
+
+Force per unit crush width is linear in residual crush C:
+
+```
+F/L = A + B·C
+```
+
+Integrating, the crush energy for a uniform profile is:
+
+```
+E = L · (A·C + B·C²/2 + G),   with G = A²/(2B)
+```
+
+Here G is the energy absorbed with no residual crush. In a rigid-barrier test, E is set equal to ½mv₀², using the impact speed rather than Δv, by CRASH3 convention.
+
+Equivalently, the impact speed is linear in crush above a no-damage speed b0:
+
+```
+v = b0 + b1·C
+A = m·b0·b1 / L
+B = m·b1² / L
+```
+
+The b0 = 8 km/h used here is the reconstruction-practice value quoted alongside e ≈ 0.1 in the J.S. Held stiffness-trends paper (seen via a search snippet).
+
+Per-test derivation from the 82 sedans (§1):
+- **b1 median 30.4 s⁻¹** (p10–p90 22.9–39.2);
+- **A median 79 kN/m**;
+- **B median 1,126 kN/m²**;
+- **G = A²/2B ≈ 2.8 kJ/m**.
+
+Worked for our car:
+- L = 0.775 × 1.8 m = 1.39 m;
+- b1 = √(B·L/m) = 32.8 s⁻¹;
+- C̄ = (v₀ − b0)/b1 = (15.556 − 2.222)/32.8 = **0.41 m** average residual crush;
+- energy check: L(A·C + B·C²/2 + G) = 177 kJ ≈ KE₀ (✓ consistent to 1%).
+
+**Speed scaling.** Residual crush is linear in v above b0, so C(v₂)/C(v₁) = (v₂ − b0)/(v₁ − b0). For example, 50 vs 56 km/h gives C₅₀/C₅₆ = 41.9/47.8 = **0.875**. Energy scales as v², so (50/56)² = 0.797.
+
+### 2.3 Momentum and impulse versus the pulse
+
+```
+∫ F_wall dt = m(v₀ + v_r)  = 1,450 × (15.556 + 1.9) = 25.3 kN·s   (sim's v_r)
+mean deceleration          = (v₀ + v_r) / T_pulse
+deceleration to max crush  = v₀² / (2·D_dyn)
+```
+
+Mean deceleration over the pulse: 17.4 m/s ÷ 90–115 ms gives 15.5–19.7 g. The deceleration to maximum crush is an average over displacement.
+
+For any pulse that is symmetric in time, whether constant or half-sine, **D_dyn = v₀·t_m/2**. Here t_m is the time of maximum crush, when the velocity reaches 0. For example, t_m = 77 ms gives D_dyn ≈ 0.60 m, and D_dyn = 0.76 m implies t_m ≈ 98 ms. A front-loaded pulse gives a smaller D for the same t_m.
+
+### 2.4 Elastic fraction (springback)
+
+Springback is D_dyn − C_static. The rebound KE cannot exceed the elastic energy released on unloading. With unloading treated as linear from the wall force at maximum crush, F_D:
+
+```
+½ m v_r² ≤ ½ F_D (D_dyn − C_static)
+```
+
+From the data, e² ≈ 1–4%, so the elastic part of the energy is small.
+
+**What the open data does not settle.** The openly available data does not give D_dyn − C_static directly. It needs the time histories in §7: double-integrate the rear-crossmember acceleration and subtract the measured static crush.
+
+**Rough estimate (an illustration, not a target).** Assume e = 0.1–0.2 and F_D at about 25 g, which is 356 kN; the 25 g is not sourced. Linear unloading then gives springback δ = e²·m·v₀²/F_D ≈ **10–40 mm**.
+
+### 2.5 Other configurations
+
+- **2 × 50 km/h head-on, identical cars.** By symmetry the contact plane is stationary, so each car behaves as in a **50 km/h rigid-barrier test**. Expect the crush of each car ≈ the barrier crush at 50 km/h ≈ 0.875 × the crush at 56 km/h. Total momentum is 0 before and after. KE per car is 139.9 kJ.
+- **Side pole at 32 km/h.** KE = 57.3 kJ. Mean force over a 0.356 m crush is 161 kN, about 11 g.
+- **15 m drop.** v = √(2gh) = 17.16 m/s (61.8 km/h); E = mgh = 213.4 kJ. No open test reference exists. Use it only as an energy-balance and stability test.
+
+## 3. Current simulated results versus the references
+
+| Sim result | Reference | Verdict | Reasoning |
+|---|---|---|---|
+| Permanent crush about 0.60 m (56 km/h) | 380–580 mm p10–p90, median 491; max of 82 tests 738 | ✓ (soft end) | Inside the observed range, but only 6 of 82 sedans reach 600 mm or more (about the 93rd percentile). Measure it the NHTSA way before tuning: residual crush at bumper height, 6 zones over the damage width, maximum and trapezoid average |
+| Peak dynamic crush 0.76 m | No open measurement; kinematics gives D = v₀·t_m/2 = 0.60 m at t_m = 77 ms (one secondary data point) | ? (probably soft) | 0.76 m needs t_m ≈ 98 ms and a mean deceleration to maximum crush of 16.2 g. That is at or below the low end of the 15.5–19.7 g whole-pulse mean, and the pulse-to-maximum-crush mean should be higher than the whole-pulse mean. Not decidable until the §7 time histories are analysed |
+| Springback 0.76 − 0.60 = 0.16 m, with rebound 1.9 m/s | Physics: ½mv_r² ≤ ½F_D·δ. Illustrative springback for real cars is 10–40 mm | ✗ (suspicious) | The rebound KE of 2.6 kJ over 160 mm of springback implies an average unloading force of only about 33 kN (2.3 g). A real structure unloads from a wall force of hundreds of kN over a few centimetres. The 160 mm is more likely low-stiffness recovery, such as panels or the measuring node bouncing, than structural springback. Check which node defines "crush" |
+| Rebound 1.9 m/s (e = 0.122) | e about 0.03–0.2; about 0.11 implied by "Δv ≈ 39 mph" | ✓ | Mid-range. Both sources are secondary |
+| Door aperture change about 20 mm | Median 0–1 mm, p10–p90 about ±9 mm | ✗ | More than 2× the p90 of real sedans. Real cabins are effectively rigid in this test |
+| Cabin pillar deformation 9–12 mm | A-pillar base rearward: median 1–2 mm, p90 15–17 mm | ✓ (marginal) | Within p90, if "pillar deformation" means A-pillar base displacement. If it means pillar *bending*, there is no direct NHTSA measure |
+| Side pole intrusion about 0.13 m, relative to the cabin's far side | Residual exterior crush at the pole: p10–p90 297–445 mm, median 356; the minimum of all 116 is 169 mm | ✗ (or the metric doesn't match) | Below the smallest of 116 real sedans. Mean wall force would be 441 kN (31 g), against about 161 kN (11 g) at the median. Measure as NHTSA does (residual crush of the struck-side exterior relative to its pre-test line, at the pole centreline) before concluding |
+
+## 4. Recommended test assertions
+
+Bands are p10–p90 of the NHTSA sedan population unless noted. Hard-fail bounds are the observed min–max. Exact-physics assertions use numerical tolerances, and those tolerances should be set from the sim's own drift, not from crash data.
+
+**Exact physics (any crash):**
+
+1. **Energy ledger.** KE₀ = KE_final + E_plastic + E_damping + E_friction + E_elastic_stored, closed to within the solver's measured energy drift. At 56 km/h, KE₀ = 175.4 kJ.
+2. **Impulse.** ∫F_wall dt = m·(v₀ + v_r), using the wall contact force sum and the CG velocity after separation.
+3. **Momentum in the head-on.** Total momentum is ≈ 0 throughout. Each car's CG Δv is ≈ 13.9 m/s plus its rebound.
+4. **Kinematic consistency.** D_dyn equals ∫v_CG dt up to t(v = 0). The sim then reports t_m and checks D_dyn ≈ v₀·t_m/2 for a near-symmetric pulse (a soft check; record the ratio).
+
+**Frontal, 56 km/h, rigid wall:**
+
+5. Residual max crush at bumper height: **380–580 mm**; hard fail outside 217–738 mm.
+6. Campbell b1 = (v₀ − 2.22 m/s)/C̄ (NHTSA 6-zone trapezoid C̄): **22.9–39.2 s⁻¹**. Normalised for mass and width, so it stays valid if the car's mass changes.
+7. Restitution e = v_r/v₀: **0.03–0.20**. Secondary sources; tighten once the §7 data is analysed.
+8. Springback bound: ½m·v_r² ≤ ½·F_wall(t_m)·(D_dyn − C_static), and springback ≤ 0.1·C_static. The 10% figure is from the §2.4 estimate, about 40 mm ÷ 491 mm; treat it as provisional.
+9. Door-aperture length change: **|Δ| ≤ 9 mm** (p90). A-pillar base rearward ≤ 17 mm. Firewall rearward ≤ 85 mm.
+
+**Speed scaling (Campbell linearity):**
+
+10. C̄(50)/C̄(56) ≈ (50 − 8)/(56 − 8) = 0.875. Also, each car in the 2 × 50 km/h head-on ≈ the 50 km/h barrier crush. The tolerance is not set by data: open sources give no scatter for this ratio, so use the sim's run-to-run spread and report the value.
+
+**Side pole, 32 km/h, 75°, 254 mm:**
+
+11. Residual struck-side exterior crush at the pole: **297–445 mm**; hard fail outside 169–537 mm.
+
+**Component tests (regulatory minimums, pass/fail):**
+
+12. Door crush (FMVSS 214 S6.1 rig): the mean force must be:
+    - at least 10,000 N over 0–152 mm;
+    - at least 15,569 N over 0–305 mm;
+    - with a peak of at least 28,449 N over 457 mm (2 × curb weight for 1,450 kg; use the actual curb mass).
+13. Roof (FMVSS 216a rig): force at ≤ 127 mm platen travel ≥ 3.0 × UVW = 42.7 kN on each side. IIHS "good" (≥ 4.0 × UVW, 56.9 kN) is a stretch target. Typical compact sedans reach about 4.5–5.3 × UVW.
+
+## 5. Limitations
+
+**Data not openly available.**
+- Dynamic crush, rebound velocity, pulse duration and peak deceleration for specific tests exist only as time-history files (§7).
+- The pulse and restitution values above come from search-engine snippets of papers that could not be opened (403, or a PDF). They are labelled as secondary.
+- Measured FMVSS 214 static door-crush forces exist only in compliance-report PDFs.
+
+**Mismatched metrics.**
+- NHTSA "crush" is a residual exterior measurement against the pre-test profile, at bumper height, in 6 zones.
+- "Pole intrusion relative to the far side" and "pillar deformation" are not NHTSA quantities. The sim needs probes that reproduce the NHTSA definitions before ✓ and ✗ are final.
+
+**Database noise.** Hand-measured fields carry about ±2–5 mm resolution, plus transcription errors. That is why medians and percentiles are used. Door-aperture "changes" under about 5 mm are measurement noise in the reference too.
+
+**Population.** These are 2010–2025 US-market sedans, mostly compacts. The sim is a generic sedan, so it should land inside the spread, not on a particular car.
+
+**What a node–beam model can't match.**
+- A node–beam car at roughly 10 cm node spacing cannot reproduce local sheet-metal folding. Its crush is a homogenised beam-plasticity response.
+- Compare global quantities, such as energy, b1, crush depth, restitution and pulse, rather than local deformation shapes.
+- Accelerometer pulses in the sim will carry beam-vibration noise. Filter them with SAE J211 CFC 60 before comparing peaks, as NHTSA practice does for vehicle-structure channels.
+
+**Campbell model assumptions.** It assumes a uniform vertical profile, ignores rebound in the energy (CRASH3 convention), and depends on b0. The 8 km/h b0 value is a convention, not a measurement. Changing b0 shifts A and B but not b1's role in assertion 6.
+
+## 6. Sources
+
+**Read directly**
+- NHTSA Vehicle Crash Test Database API (OpenAPI): `https://nrd.api.nhtsa.dot.gov/nhtsa/vehicle/v3/api-docs`. Endpoints used: `by-search`, `get-vehicle-detail-info`, `get-instrumentation-info`, `get-instrumentation-detail-info`.
+- 49 CFR 571.214 (side impact, door crush S6, pole S9/S10): https://www.law.cornell.edu/cfr/text/49/571.214
+- 49 CFR 571.216a (roof crush): https://www.law.cornell.edu/cfr/text/49/571.216a
+- IIHS roof-strength test description: https://www.iihs.org/ratings/about-our-tests/roof-strength
+- Monson & Germane, "Determination and Mechanisms of Motor Vehicle Structural Restitution from Crash Test Data", SAE 1999-01-0097 (abstract): https://saemobilus.sae.org/papers/determination-mechanisms-motor-vehicle-structural-restitution-crash-test-data-1999-01-0097
+- Locey et al., "Homogenization of vehicle fleet frontal crash pulses from 2000–2010", AAAM 2012, PMC3503406 (abstract via Europe PMC).
+
+**Secondary (search snippets only, not opened)**
+- J.S. Held, "Vehicle Frontal Crush Stiffness Coefficients Trends" (e ≈ 0.03–0.2, b0 = 8 km/h): https://jsheld.com/uploads/Vehicle-Frontal-Crush-Stiffness-Coefficients-Trends.pdf
+- "Frontal Crash Testing of a Class V Lift Truck", ASME Open Engineering (NCAP Δv ≈ 39 mph, 90–115 ms, peak 36–46 g): https://asmedigitalcollection.asme.org/openengineering/article/doi/10.1115/1.4065105/1199076/Frontal-Crash-Testing-of-a-Class-V-Lift-Truck
+- NHTSA ESV, "Accuracy of Vehicle Frontal Stiffness Estimates…" (maximum dynamic crush at about 77 ms): https://www-nrd.nhtsa.dot.gov/pdf/ESV/Proceedings/20/07-0513-O.pdf
+- IIHS roof results for the 2011 Mazda3, 2010 Corolla and 2006–11 Civic: press coverage (autoblog.com, pressroom.toyota.com, autosafetymsi.blogspot.com)
+
+## 7. Files that would close the gaps (each needs the user's permission to download)
+
+**Time histories.** The rear-seat crossmember X accelerations (channels 093 and 094) of the comparable sedans:
+- from these we can compute dynamic crush (by double integration), rebound velocity, peak and mean deceleration (CFC 60), pulse duration and t_m;
+- format: ASCII TSV, a few thousand rows each, roughly 100 KB;
+- URL pattern: `https://nrd-static.nhtsa.dot.gov/tsv/vehdb/v0XX00/v0XXX0/v0NNNN/v0NNNNtsv.093` (and `.094`).
+
+| Test | Car | Files |
+|---|---|---|
+| 8407 | 2014 Corolla | `.../v00000/v08400/v08407/v08407tsv.093`, `.094` |
+| 9065 | 2015 Corolla | `.../v00000/v09000/v09065/v09065tsv.093`, `.094` |
+| 9079 | 2015 Sentra | `.../v00000/v09000/v09079/v09079tsv.093`, `.094` |
+| 9593 | 2016 Civic | `.../v00000/v09500/v09593/v09593tsv.093`, `.094` |
+| 9764 | 2016 Cruze | `.../v00000/v09700/v09764/v09764tsv.093`, `.094` |
+| 9793 | 2017 Elantra | `.../v00000/v09700/v09793/v09793tsv.093`, `.094` |
+| 10688 | 2019 Forte | `.../v10000/v10600/v10688/v10688tsv.093`, `.094` |
+| 11574 | 2021 Elantra | `.../v10000/v11500/v11574/v11574tsv.093`, `.094` |
+
+All of these live under `https://nrd-static.nhtsa.dot.gov/tsv/vehdb`. The barrier load-cell channels (about 104 onwards) in the same tests would also give the wall force–deflection curve. That allows a direct comparison against F/L = A + B·C.
+
+**Papers (PDFs).**
+- J.S. Held trends paper (above): tabulated A, B and e by class.
+- Wiacek et al., ESV 2015, "Evaluation of frontal crash stiffness measures from the U.S. NCAP": https://www-nrd.nhtsa.dot.gov/departments/esv/24th/files/24ESV-000257.PDF. It covers dynamic crush and pulse statistics for MY2002–2014.
+- JH Scientific, "Crush Analysis with Under-rides and the Coefficient of Restitution": https://www.jhscientific.com/downloads/CrushAndRestitution.pdf. It has a table of mean and SD of barrier e at 30/35 mph, after Prasad.
+- FMVSS 214 static door-crush compliance reports, for measured door forces. These are found through NHTSA's compliance test-report search; no specific file was identified.
