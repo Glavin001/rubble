@@ -3455,6 +3455,49 @@ fn plastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
     );
 }
 
+/// Each member's (or part pair's) beams' summed |force| (kN) and how many of
+/// them are past their yield now: where a load goes (`P_SPLIT`).
+fn force_census(s: &ExplicitBeams, b: &Built, tag: &str, base: Option<&[f32]>) {
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let mut names: Vec<&String> = b.groups.keys().collect();
+    names.sort();
+    let sets: Vec<(&String, HashSet<u32>)> = names
+        .iter()
+        .map(|k| (*k, b.groups[*k].iter().copied().collect()))
+        .collect();
+    let mut sum: std::collections::BTreeMap<String, (f64, usize, usize)> = Default::default();
+    for (j, bm) in s.beams.iter().enumerate() {
+        let (a, c) = (bm.a, bm.b);
+        if a as usize >= n || c as usize >= n || bm.broken {
+            continue;
+        }
+        let f = bm.force - base.map_or(0.0, |v| v[j]);
+        let key = sets
+            .iter()
+            .find(|(_, g)| g.contains(&a) && g.contains(&c))
+            .map(|(k, _)| k.to_string())
+            .unwrap_or_else(|| {
+                let pa = &sk.parts[sk.nodes[a as usize].part as usize];
+                let pc = &sk.parts[sk.nodes[c as usize].part as usize];
+                format!("~{pa}/{pc} {:?}", bm.kind)
+            });
+        let e = sum.entry(key).or_default();
+        e.0 += f.abs() as f64;
+        e.1 += 1;
+        e.2 += usize::from(bm.force > 0.95 * bm.tc || -bm.force > 0.95 * bm.tt);
+    }
+    let mut v: Vec<(String, (f64, usize, usize))> = sum.into_iter().collect();
+    v.sort_by(|x, y| y.1 .0.total_cmp(&x.1 .0));
+    eprintln!(
+        "({tag}) |force| by member (kN, beams, at yield): {:?}",
+        v.iter()
+            .take(18)
+            .map(|(k, (f, n, y))| format!("{k} {:.1} {n} {y}", f / 1e3))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// A quasi-static rig: `held` nodes kept where they are (the rig's
 /// restraint); a rigid ram moved `travel` m along `dir` at `speed` m/s, each
 /// step putting nodes inside it back on its surface (`inside(p, offset)`:
@@ -3553,7 +3596,15 @@ fn p_fmvss_214_static_door_crush() {
         let face = cx - (r * r - dz * dz).sqrt();
         (p.x > face).then(|| p.x - face)
     };
-    let curve = ram_rig(&mut s, &held, -Vec3::X, 0.457 + 0.05, 0.1, &inside);
+    let travel = std::env::var("P_STOP")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.457 + 0.05);
+    let curve = ram_rig(&mut s, &held, -Vec3::X, travel, 0.1, &inside);
+    if std::env::var("P_SPLIT").is_ok() {
+        force_census(&s, &b, "p", None);
+        plastic_census(&s, &b, "p");
+    }
     // Crush is counted from the ram's first contact with the door (the
     // first 5 mm step carrying more than 200 N).
     let d_c = curve
@@ -3658,7 +3709,11 @@ fn q_fmvss_216a_roof_crush() {
         (depth > 0.0).then_some(depth)
     };
     let before = s.positions();
+    let f0: Vec<f32> = s.beams.iter().map(|bm| bm.force).collect();
     let curve = ram_rig(&mut s, &held, push, 0.127, 0.1, &inside);
+    if std::env::var("Q_SPLIT").is_ok() {
+        force_census(&s, &b, "q", Some(&f0));
+    }
     let peak = curve.iter().map(|c| c.1).fold(0.0f32, f32::max);
     if std::env::var("Q_DIAG").is_ok() {
         let mut v: Vec<(String, f32)> = b

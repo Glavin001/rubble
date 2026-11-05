@@ -904,6 +904,70 @@ yields. A sheet edge's yield is its bay's ultimate stress
     The plastic coefficient is not a fix: at p → 1 a yielding beam's rest
     length follows it and it stops carrying its yield force while it flows.
 
+**Yield strain: BeamNG's against ours (2026-11-05, measured).**
+`examples/jbeam_yield_strain.rs` takes each beam's yield strain
+ε_y = beamDeform / (beamSpring·L) and the springback it implies after a
+plastic strain ε_p, ε_y/(ε_y + ε_p), per part, for the BX's default
+configuration and for sedan1 (`SEDAN1=medium`; tension and compression):
+
+| Part | BX ε_y p50 (p90) | BX k p50, L p50 | sedan1 ε_y p50 (p90) | sedan1 k p50, L p50 |
+|---|---|---|---|---|
+| body (BX: its rails too) | 1.0 % (4.9) | 1.7e6 N/m, 0.56 m | 4.3 % compr., 6.6 % tens. (33) | 6.4e5 N/m, 0.38 m |
+| doors | 1.25 % (4.8) | 1.1e6, 0.58 | 2.8 / 6.4 % (18 / 27) | 6.3e5, 0.31 |
+| bonnet | 5.5 % (24) | 5.2e5, 0.44 | 4.0 / 23.6 % | 2.9e5, 0.36 |
+| boot lid / tailgate | 3.0 % (12) | 5.0e5, 0.43 | 6.8 / 11.3 % | 5.0e5, 0.30 |
+| fenders | 4.6 % (12) | 4.0e5, 0.37 | 2.2 / 14.7 % | 4.7e5, 0.26 |
+| bumpers | 15 % (100) | 1.0e5, 0.34 | 3.2 / 25 % | 1.3e5, 0.26 |
+
+Springback after 20 % plastic strain: BX body 5 %, doors 6 %; sedan1
+body 18–25 %, doors 12–24 %. The BX holds its yield forces (body median
+8 kN) on beams whose axial rigidity k·L is about 4× ours (9.5e5 N against
+2.4e5 N). Its parts have fewer beam ends per node (body 11.0 against
+sedan1's 15.1 with members; doors 4.1 against 11.4; bonnet 5.8 against
+10.7), and longer beams, so the step's bound leaves each beam stiffer.
+
+Measured on the crash references (sedan1 Medium ensembles,
+`BX_YIELD=1`: each part's beams yield no later than the BX's median strain
+for that part at their built k; `BX_YIELD_SHEETS=1` the sheets' edges
+only; both measurement switches):
+
+| | Real forces (now) | BX strain, all parts | BX strain, sheets only | Band |
+|---|---|---|---|---|
+| o dynamic crush | 332–388 mm | 490–521 | 345–404 | |
+| o residual (springback) | 206 (≈ 45 %) | 448 (≈ 10 %) | 252 (≈ 35 %) | 297–445 |
+| n max crush | 633 mm | 964 | 675 | 380–580 |
+| n peak g | 32.8 | 20.1 | 31.8 | 34–47 |
+| n t_m | 74.4 ms | 127 | 75.4 | 63–76 |
+| n b1 | 22.9 | 14.5 | 21.8 | 22.9–39.2 |
+| p peak | 22.5 kN | 8.9 | 20.0 | ≥ 28.4 |
+| q | 8.59× | 3.93× | 7.37× | 4.48–5.32 |
+| h | fails (narrowly) | passes | passes | |
+
+**Decision.** Real forces stay. BeamNG's yield strains at our k·L give the
+right springback (10 %) but a car far too weak in every measured test; on
+the sheets alone they change little, because the members hold most of the
+springback. In the BX the low strains come with 4× the k·L, from its
+topology. So the springback is to be fixed the way the BX gets its strain:
+fewer beam ends per node and longer beams, so that the bound leaves each
+beam stiffer, with the forces kept real.
+
+**q's mechanism.** The roof crush's load, by member (`Q_SPLIT=1`, the
+change in each member's summed |force| from rest to the platen's 127 mm):
+the body's shell beams that are in no member carry 2,025 kN summed with the
+tension yield, against 730 kN without it. The members change little (the
+sills 369 against 293, the B-pillar 214 against 162). The roof, pillar and
+quarter skins work as a tension field (Wagner): in shear the compression
+diagonal buckles, and the tension diagonal now carries σ_y. At about 14 %
+elastic strain before it yields (k at the bound), the field engages over
+the whole 127 mm of platen travel. A real panel's field does the same at
+0.1 % strain, but a real roof sheet is bonded to its bows through mastic
+and does not reach its yield over the rails' span in this test.
+
+**h's regression.** The tension yield doubles the skin's elastic range,
+so the crashed body keeps more ringing energy. The fifth second's peak is
+11.6 J against the fourth's 10.9 J; both are about 10⁻³ of the first
+second's. With the sheets' strain at the BX's it passes (0.87 J).
+
 At z 4.0 the shell carried about 100 kN, more than the rails. It now
 carries 10–50 kN.
 
