@@ -524,6 +524,51 @@ live triangles around the fold of the crushed door (572, 564, 566, 568, 606) in 
 out every few steps: they sit on the plane inside the contact band, where the hit's
 side vote decides.
 
+**Leak, sixth pass: where the crossings start; the prism-gap fixes measured
+(2026-11-05, same car, CPU, corrected metric).** `showcase_car.rs` test `t` now classes
+every inward crossing of a live triangle by where the node was against that triangle at
+the contact pass before (positions after the last step, whose hits set this step's
+forces). It also classes each hit's side (by the skin's outward orientation) and the
+leaked nodes at the worst frame by their last inward crossing.
+
+| Rule, offset | Inward crossings: hit / beyond band / outside the prism | Leaked by last crossing: hit / beyond / outside / out only | Hit crossings: vote pushed in / pushed out |
+|---|---|---|---|
+| RoR's, 0 m | 121 / 4 / 11 | 9 / 2 / 2 / 0 | 14 / 107 |
+| RoR's, 0.43 m | 295 / 30 / 21 | 26 / 2 / 5 / 10 | 116 / 179 |
+| RoR's, 0.7 m | 532 / 35 / 13 | 74 / 6 / 5 / 0 | 217 / 315 |
+| Two-body, 0 m | 314 / 0 / 23 | 97 / 0 / 4 / 0 | 15 / 299 |
+| Two-body, 0.43 m | 575 / 1 / 6 | 128 / 1 / 4 / 1 | 239 / 336 |
+| Two-body, 0.7 m | 517 / 3 / 17 | 124 / 1 / 10 / 0 | 260 / 257 |
+
+**So the prism gaps are not the leak.** 2–10 leaked nodes per case last crossed from
+outside the prism; 80–95 % were hits of the triangle they crossed, and every hit
+crossing came from in front. Of those, 30–50 % at the offsets were pushed in by the side
+vote (the node in front, its neighbours behind the plane). The rest were pushed out and
+crossed anyway. In a trace (node 397 against triangle 606, 0.7 m), the hit swings by
+±1.5 cm a step for ten steps before the node goes through: a contact that rings rather
+than holds.
+
+Measured, all reverted (patches in the session scratchpad, not in the repository; most
+leaked / 1,165; "div." = the run went non-finite):
+
+| Variant | RoR's rule 0 / 0.43 / 0.7 m | Two-body 0 / 0.43 / 0.7 m |
+|---|---|---|
+| Today | 13 / 43 / 85 | 101 / 134 / 135 |
+| Side memory: last hit's push normal for 20 steps, else the vote | 30 / div. / div. | 111 / 101 / 116 |
+| Side memory, else the side of δ | 23 / div. / 48 | 114 / 120 / 108 |
+| The side of δ, no vote | 27 / 91 / div. | 154 / 171 / 176 |
+| Prisms extended across live edges to the dihedral's bisector plane (weights clamped, renormalised; 6–11 % of hits are new) | 13 / div. / div. | 82 / 118 / 161 |
+
+The vote is also what recovers a penetrated node: without it, outward crossings fall
+from 133 to 16 (RoR's rule, 0 m). Extended prisms under RoR's rule put the whole force
+of an edge hit on one or two light nodes, the closest-feature attempt's failure, and
+diverge. **Not adopted;** two-body stays JBeam mode's default only, because it leaks
+more than RoR's rule at every offset. **Open:** the ringing hit. The response
+over-corrects the light struck triangle when many striker nodes hit it at once (RoR's
+rule sizes each hit as if it were alone). Two-body's splitting under-corrects, and a
+converged solve injects energy (third pass). This is a contact-response question, not a
+candidate-generation one.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,

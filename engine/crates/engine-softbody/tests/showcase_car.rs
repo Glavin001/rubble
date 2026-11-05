@@ -4274,8 +4274,8 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         worst_inside.0
     );
     eprintln!(
-        "(t) inward crossings of live triangles by the node's place at the contact pass before: in the prism and in band (a hit) {}, in the prism beyond the band {}, outside the prism {}; the most leaked nodes by their last inward crossing: hit {}, beyond the band {}, outside the prism {}, none (out through the skin) {}; the hits' sides (behind & pushed in, behind & out, in front & in, in front & out) {:?}",
-        cross_class[0], cross_class[1], cross_class[2], worst_class[0], worst_class[1], worst_class[2], worst_class[3], hit_class
+        "(t) contact hits {}\n(t) inward crossings of live triangles by the node's place at the contact pass before: in the prism and in band (a hit) {}, in the prism beyond the band {}, outside the prism {}; the most leaked nodes by their last inward crossing: hit {}, beyond the band {}, outside the prism {}, none (out through the skin) {}; the hits' sides (behind & pushed in, behind & out, in front & in, in front & out) {:?}",
+        w.total.hits, cross_class[0], cross_class[1], cross_class[2], worst_class[0], worst_class[1], worst_class[2], worst_class[3], hit_class
     );
     assert!(w.vehicles.iter().all(finite));
     assert!(
