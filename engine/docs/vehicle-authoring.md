@@ -271,9 +271,12 @@ binding, so the same mesh fits a coarse or a dense skeleton.
 
 ### Design: an original mid-size sedan
 
-The proportions come from the package (`BodyProfile`): 4.70 × 1.82 × 1.445 m, a
-2.70 m wheelbase, about 0.95 m of front overhang and 1.05 m at the rear. The
-greenhouse sits rearward: the windscreen's base is about 0.40 m behind the
+The proportions come from the package (`BodyProfile`): 4.70 × 1.85 × 1.40 m, a
+2.75 m wheelbase, 0.92 m of front overhang and 1.03 m at the rear (a low
+greenhouse, the body 1.5 cm down on its wheels: `sedan::STANCE`; the
+structure's points were drawn on the earlier, taller package and
+`sedan::restyle` carries them to this one). The
+greenhouse sits rearward: the windscreen's base is about 0.45 m behind the
 front axle (a long dash-to-axle), the roof peaks over the B-pillar, and a fast
 backlight runs into a short, high deck. The visual reads the package only;
 the cabin's fixed points (the dash beam, the column's top) come from the

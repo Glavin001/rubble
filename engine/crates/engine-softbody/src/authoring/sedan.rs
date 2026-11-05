@@ -236,8 +236,9 @@ pub const RAIL_BUMPER: f32 = 1.0;
 /// aprons' plateau, set from NCAP measurements
 /// (`engine/docs/crash-reference-targets.md` §2, §8): at 56 km/h a 1,450 kg
 /// sedan crushes 0.62–0.75 m dynamically (t_m 63–76 ms) and 0.38–0.58 m
-/// residually (Campbell b1 22.9–39.2). The `n` test measures it.
-pub const CRUSH_PLATEAU: f32 = 1.1;
+/// residually (Campbell b1 22.9–39.2). The `n` test measures it (1.0 since
+/// the front axle moved 5 cm forward: its wheel meets the crush sooner).
+pub const CRUSH_PLATEAU: f32 = 1.0;
 
 /// The main load paths' (rails, sills) section against their grade's k·L.
 pub const RAIL_STIFF: f32 = 1.4;
@@ -293,11 +294,19 @@ fn cabin_x(
     ]
 }
 
-pub fn sedan() -> VehicleDef {
-    let length = 4.70;
-    let profile = BodyProfile {
-        length,
-        top: Curve::new(&[
+/// The front axle (z, m): 2.75 m of wheelbase, 0.92 m of front overhang.
+pub const FRONT_AXLE: f32 = 3.78;
+/// The body's drop on its wheels (m): the wheels' centres stay at their
+/// radius above the ground, everything else is this much lower.
+pub const STANCE: f32 = 0.015;
+
+/// The package the structure's points were drawn on (before the 2026-11-04
+/// restyle: a roof 3 cm higher, the body 1.5 cm higher on its wheels, the
+/// sides 1.5 cm narrower amidships): its top line and shoulder.
+/// [`restyle_point`] carries a point drawn on it to the current body.
+fn drawn_package() -> (Curve, Curve) {
+    (
+        Curve::new(&[
             (0.00, 0.99),
             (0.20, 1.02),
             (0.55, 1.045),
@@ -314,18 +323,7 @@ pub fn sedan() -> VehicleDef {
             (4.50, 0.825),
             (4.70, 0.765),
         ]),
-        bottom: Curve::new(&[
-            (0.00, 0.42),
-            (0.25, 0.30),
-            (0.55, 0.22),
-            (0.90, 0.18),
-            (1.20, 0.17),
-            (3.60, 0.17),
-            (4.15, 0.19),
-            (4.45, 0.23),
-            (4.70, 0.31),
-        ]),
-        shoulder: Curve::new(&[
+        Curve::new(&[
             (0.00, 0.93),
             (0.40, 0.97),
             (0.78, 1.00),
@@ -337,13 +335,163 @@ pub fn sedan() -> VehicleDef {
             (4.30, 0.80),
             (4.70, 0.70),
         ]),
+    )
+}
+
+/// A point of the structure drawn on [`drawn_package`], on the current body:
+/// above the shoulder (the belt) it comes down with the roof in proportion
+/// to its height between belt and roof; everything comes down by [`STANCE`].
+/// Across it stays: the sides' extra 1.5 cm amidships is skin (widening the
+/// members with it moved frame nodes off the skin nodes they shared, and the
+/// short beams between them cost the skin a quarter of its stiffness).
+fn restyle_point(p: [f32; 3], profile: &BodyProfile) -> [f32; 3] {
+    let (top0, shoulder0) = drawn_package();
+    let [x, y, z] = p;
+    let (belt, roof0) = (shoulder0.eval(z), top0.eval(z));
+    let drop = roof0 - (profile.top.eval(z) + STANCE);
+    let share = if roof0 > belt {
+        ((y - belt) / (roof0 - belt)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    [x, y - drop * share - STANCE, z]
+}
+
+/// A side-view point (z, y) drawn on [`drawn_package`], on the current body.
+fn restyle_side(q: [f32; 2], profile: &BodyProfile) -> [f32; 2] {
+    let p = restyle_point([0.0, q[1], q[0]], profile);
+    [q[0], p[1]]
+}
+
+fn restyle_region(r: &mut Region, profile: &BodyProfile) {
+    match r {
+        Region::Side(o) => {
+            for q in &mut o.0 {
+                *q = restyle_side(*q, profile);
+            }
+        }
+        Region::Cap { y0, y1, .. } => {
+            *y0 -= STANCE;
+            *y1 -= STANCE;
+        }
+        Region::Box { x, y, z } => {
+            let a = restyle_point([x[0], y[0], z[0]], profile);
+            let b = restyle_point([x[1], y[1], z[1]], profile);
+            (*x, *y) = ([a[0], b[0]], [a[1], b[1]]);
+        }
+        Region::Any(v) => {
+            for r in v {
+                restyle_region(r, profile);
+            }
+        }
+        Region::Top { .. } | Region::Floor { .. } => {}
+    }
+}
+
+/// Carries every point drawn on [`drawn_package`] (members, braces, blocks,
+/// plates, named masses, panel and zone regions, lamps, handles, mirror and
+/// plates) to the current body. The side glass, wheels and wells are drawn
+/// on the current body already.
+fn restyle(mut d: VehicleDef) -> VehicleDef {
+    let pr = d.profile.clone();
+    let pt = |p: &mut [f32; 3]| *p = restyle_point(*p, &pr);
+    for m in &mut d.members {
+        m.path.iter_mut().for_each(pt);
+    }
+    for b in &mut d.braces {
+        pt(&mut b.from);
+        pt(&mut b.to);
+    }
+    for b in &mut d.blocks {
+        pt(&mut b.centre);
+    }
+    for p in &mut d.plates {
+        pt(&mut p.corner);
+    }
+    for m in &mut d.masses {
+        pt(&mut m.lo);
+        pt(&mut m.hi);
+    }
+    for p in &mut d.panels {
+        restyle_region(&mut p.region, &pr);
+    }
+    for z in &mut d.zones {
+        restyle_region(&mut z.region, &pr);
+    }
+    let l = &mut d.look;
+    for o in [
+        &mut l.headlight,
+        &mut l.grille,
+        &mut l.intake,
+        &mut l.taillight,
+    ] {
+        for q in &mut o.0 {
+            q[1] -= STANCE;
+        }
+    }
+    for h in &mut l.handles {
+        *h = restyle_side(*h, &pr);
+    }
+    l.mirror = restyle_side(l.mirror, &pr);
+    l.plate_y[0] -= STANCE;
+    d
+}
+
+pub fn sedan() -> VehicleDef {
+    let length = 4.70;
+    // A greenhouse 3 cm lower than the package the structure was drawn on
+    // (the belt unchanged), the body 1.5 cm lower on its wheels (`STANCE`),
+    // the sides 1.5 cm wider amidships, the front axle 5 cm forward, the
+    // bonnet's leading edge 3 cm lower.
+    let profile = BodyProfile {
+        length,
+        top: Curve::new(&[
+            (0.00, 0.975),
+            (0.20, 1.005),
+            (0.55, 1.03),
+            (0.78, 1.045),
+            (1.10, 1.21),
+            (1.38, 1.35),
+            (1.70, 1.39),
+            (2.20, 1.40),
+            (2.55, 1.38),
+            (2.95, 1.185),
+            (3.33, 0.985),
+            (3.80, 0.93),
+            (4.20, 0.86),
+            (4.50, 0.79),
+            (4.70, 0.72),
+        ]),
+        bottom: Curve::new(&[
+            (0.00, 0.405),
+            (0.25, 0.285),
+            (0.55, 0.205),
+            (0.90, 0.165),
+            (1.20, 0.155),
+            (3.60, 0.155),
+            (4.15, 0.175),
+            (4.45, 0.215),
+            (4.70, 0.295),
+        ]),
+        shoulder: Curve::new(&[
+            (0.00, 0.915),
+            (0.40, 0.955),
+            (0.78, 0.985),
+            (1.40, 0.985),
+            (2.30, 0.965),
+            (3.00, 0.945),
+            (3.50, 0.915),
+            (3.90, 0.865),
+            (4.30, 0.785),
+            (4.70, 0.685),
+        ]),
         half_width: Curve::new(&[
             (0.00, 0.80),
             (0.25, 0.86),
             (0.60, 0.895),
-            (1.20, 0.905),
-            (2.40, 0.91),
-            (3.60, 0.905),
+            (1.20, 0.92),
+            (2.40, 0.925),
+            (3.60, 0.92),
             (4.20, 0.88),
             (4.50, 0.84),
             (4.70, 0.78),
@@ -374,7 +522,7 @@ pub fn sedan() -> VehicleDef {
                 inner_x: 0.58,
             },
             Well {
-                z: 3.73,
+                z: FRONT_AXLE,
                 y: 0.335,
                 radius: 0.385,
                 inner_x: 0.58,
@@ -382,8 +530,8 @@ pub fn sedan() -> VehicleDef {
         ],
     };
     let side_glass = vec![
-        Outline::new(&[(3.09, 1.01), (2.65, 1.355), (2.36, 1.375), (2.36, 1.01)]),
-        Outline::new(&[(2.12, 1.01), (2.12, 1.375), (1.64, 1.345), (1.47, 1.02)]),
+        Outline::new(&[(3.09, 0.995), (2.65, 1.31), (2.36, 1.33), (2.36, 0.995)]),
+        Outline::new(&[(2.12, 0.995), (2.12, 1.33), (1.64, 1.30), (1.47, 1.005)]),
     ];
     let panels = vec![
         panel(
@@ -564,7 +712,7 @@ pub fn sedan() -> VehicleDef {
                     (0.44, 0.23, 2.24),
                     (0.44, 0.24, 2.80),
                     (0.44, 0.31, 3.36),
-                    (0.44, 0.41, 3.73),
+                    (0.44, 0.41, FRONT_AXLE),
                     (0.44, 0.42, 4.10),
                     (0.44, 0.43, 4.40),
                     (0.44, 0.43, 4.57),
@@ -584,7 +732,11 @@ pub fn sedan() -> VehicleDef {
         // tower to the radiator support.
         ladder(member(
             "apron",
-            &[(0.79, 0.92, 3.38), (0.66, 0.82, 3.73), (0.55, 0.74, 4.40)],
+            &[
+                (0.79, 0.92, 3.38),
+                (0.66, 0.82, FRONT_AXLE),
+                (0.55, 0.74, 4.40),
+            ],
             0.14,
             0.14,
             UP,
@@ -597,7 +749,7 @@ pub fn sedan() -> VehicleDef {
         // Strut towers: the rail to the apron.
         ladder(member(
             "tower_f",
-            &[(0.44, 0.41, 3.73), (0.66, 0.82, 3.73)],
+            &[(0.44, 0.41, FRONT_AXLE), (0.66, 0.82, FRONT_AXLE)],
             0.10,
             0.10,
             FWD,
@@ -800,7 +952,11 @@ pub fn sedan() -> VehicleDef {
         ))),
         catching(ladder(member(
             "subframe_f1",
-            &[(-0.44, 0.29, 3.73), (0.0, 0.27, 3.73), (0.44, 0.29, 3.73)],
+            &[
+                (-0.44, 0.29, FRONT_AXLE),
+                (0.0, 0.27, FRONT_AXLE),
+                (0.44, 0.29, FRONT_AXLE),
+            ],
             0.10,
             0.18,
             UP,
@@ -1126,7 +1282,7 @@ pub fn sedan() -> VehicleDef {
         },
     ];
     let wheel = |z: f32, driven: bool, spring: f32, damper: f32, cross: f32| Corner {
-        x: 0.78,
+        x: 0.795,
         y: 0.335,
         z,
         tyre_radius: 0.335,
@@ -1164,7 +1320,7 @@ pub fn sedan() -> VehicleDef {
         plate_y: [0.40, 0.70],
         mirror: [3.22, 1.0],
     };
-    VehicleDef {
+    restyle(VehicleDef {
         name: "Rubble Showcase Sedan".into(),
         profile,
         grades: {
@@ -1197,7 +1353,7 @@ pub fn sedan() -> VehicleDef {
         plates,
         masses,
         corners: vec![
-            wheel(3.73, true, 30_000.0, 2_200.0, 0.0),
+            wheel(FRONT_AXLE, true, 30_000.0, 2_200.0, 0.0),
             wheel(1.03, false, 26_000.0, 2_000.0, REAR_CROSS),
         ],
         kerb_mass: 1450.0,
@@ -1219,7 +1375,7 @@ pub fn sedan() -> VehicleDef {
             let (bb, bt) = ([0.79, 0.31, 2.24], [0.62, 1.39, 2.24]);
             let (rb, rt) = ([0.79, 0.31, 1.36], [0.62, 1.37, 1.50]);
             // Front end: strut-tower tops and bases, the rails at the firewall.
-            let (tf, tfb) = ([0.66, 0.82, 3.73], [0.44, 0.41, 3.73]);
+            let (tf, tfb) = ([0.66, 0.82, FRONT_AXLE], [0.44, 0.41, FRONT_AXLE]);
             let rail_fw = [0.44, 0.31, 3.36];
             // Rear end: strut-tower tops and bases, the parcel shelf, the rear
             // rails.
@@ -1303,5 +1459,5 @@ pub fn sedan() -> VehicleDef {
         tiered: true,
         body_damping_reach: 2.0,
         body_damping_strength: 5000.0,
-    }
+    })
 }
