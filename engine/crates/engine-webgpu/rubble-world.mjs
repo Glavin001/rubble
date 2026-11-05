@@ -43,6 +43,24 @@ export async function createVehicleScene(def) {
   return world;
 }
 
+/** A motion demo scene (`rubble::play::motion`); place it with `world.placeMotionScene(def)`. */
+export async function createMotionScene(def) {
+  ready ??= init();
+  await ready;
+  const world = await WebWorld.createMotionScene(def);
+  world.flags = solverFlags();
+  return world;
+}
+
+/** The terrain demo's hills (`rubble::play::hills`); place them with `world.placeHillsScene(def)`. */
+export async function createHillsScene(def) {
+  ready ??= init();
+  await ready;
+  const world = await WebWorld.createHillsScene(def);
+  world.flags = solverFlags();
+  return world;
+}
+
 /**
  * The large-maps city (`rubble::city`, as the native benchmark builds it): `opts`
  * `{ houses, map, sleep, pool }`, `page` the WorldDef fields a page may set (`gpuTiming`,

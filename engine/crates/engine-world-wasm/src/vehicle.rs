@@ -6,12 +6,12 @@ use crate::{err, res, WebWorld};
 use rubble::*;
 use wasm_bindgen::prelude::*;
 
-fn from_js<T: serde::de::DeserializeOwned>(what: &str, v: JsValue) -> Result<T, JsValue> {
+pub(crate) fn from_js<T: serde::de::DeserializeOwned>(what: &str, v: JsValue) -> Result<T, JsValue> {
     let v: serde_json::Value = serde_wasm_bindgen::from_value(v).map_err(err)?;
     serde_json::from_value(v).map_err(|e| err(format!("{what}: {e}")))
 }
 
-fn js(v: serde_json::Value) -> JsValue {
+pub(crate) fn js(v: serde_json::Value) -> JsValue {
     use serde::Serialize;
     v.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
         .unwrap_or(JsValue::NULL)

@@ -5,6 +5,9 @@
 //!
 //! - [`presets`]: the registry, every demo by name, with the page that hosts it today.
 //! - [`rigid`]: the rigid benchmark scenes (wall, ring, gables, pyramid, pile, columns).
+//! - [`hills`]: the terrain demo's heightfield and its bodies.
+//! - [`motion`]: the motion demo's scenes (the tunnelling gallery, the character
+//!   playground, bullets through walls).
 //! - [`vehicles`]: the vehicle demo's scenes (playground, traffic, the coupling labs, the
 //!   buggies, the meteor range, the gauntlet, the meteor run).
 //! - [`balls`]: the balls every scene fires (the fracture lab's stress models, the range).
@@ -17,6 +20,8 @@
 
 pub mod balls;
 pub mod broadside;
+pub mod hills;
+pub mod motion;
 pub mod presets;
 pub mod range;
 pub mod rigid;

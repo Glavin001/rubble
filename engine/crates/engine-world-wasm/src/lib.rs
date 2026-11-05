@@ -35,6 +35,7 @@ mod guidance;
 /// The fracture lab (`fracture/`): its scenes as destructibles, its shots.
 mod lab;
 mod motion;
+mod presets;
 mod read;
 mod scene;
 mod soft;
