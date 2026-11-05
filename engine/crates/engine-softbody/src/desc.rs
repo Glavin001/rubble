@@ -371,6 +371,8 @@ pub struct SoftSlideNode {
     pub strength: f32,
     #[serde(with = "inf_f32")]
     pub cap_strength: f32,
+    /// `fixToRail`: moved onto its rail at spawn (default true).
+    pub fix_to_rail: bool,
 }
 
 impl Default for SoftSlideNode {
@@ -384,6 +386,7 @@ impl Default for SoftSlideNode {
             damp: 0.0,
             strength: f32::INFINITY,
             cap_strength: f32::INFINITY,
+            fix_to_rail: true,
         }
     }
 }
