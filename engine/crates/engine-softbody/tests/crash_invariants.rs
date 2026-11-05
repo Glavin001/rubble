@@ -89,6 +89,10 @@ fn spawn_truck(truck: &str, at: Vec3, vel: Vec3) -> ExplicitBeams {
     )
     .unwrap();
     s.roll_tyres(vel);
+    // (CI_ANTI: `0` or `1` sets anti-clip, spec §36; measurements only.)
+    if let Ok(a) = std::env::var("CI_ANTI") {
+        s.anti_clip = a == "1";
+    }
     s
 }
 
@@ -1542,3 +1546,4 @@ fn sheet_beams_yield_in_tension_at_the_sheet_yield() {
     }
     assert!(ok);
 }
+

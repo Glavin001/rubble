@@ -1708,6 +1708,18 @@ small group and the owner-by-owner pass), one-step then 17-step frames: the side
 memories equal word for word after every frame, positions within 1.1 µm (the
 accumulator's rounding, §35).
 
+**Effect on the showcase car (sedan1, CPU, the profile's 2.5 cm band, anti-clip off
+and on).** T-bone at 80 km/h (`showcase_car.rs` `t_car_to_car_t_bone_at_80_kmh`,
+live-skin leak metric, limit 10 of 993), striker offset −0.03 / 0 / +0.03 / 0.40 /
+0.43 m: off 19 / 13 / 15 / 14 / 7, on 16 / 16 / 16 / 10 / 2 (means 13.6 and 12.0,
+within the run-to-run chaos; deepest leak 0.19–0.24 m either way). The leaked nodes'
+last inward crossings start at hits in front of the skin (on: 93 of 97 crossings,
+"in front & out" 69, "behind & pushed in" 0): anti-clip keeps every node's side, but
+the contact rule's push per step cannot hold a node the struck skin closes on, which
+then passes CLIP_DEPTH and is forgotten. Not anti-clip's to fix. The frontal wall
+(`crash_invariants.rs`, `CI_ANTI=0|1`): every row identical; its 3,408 self-contacts
+are band hits on the side of δ (held sides 3,394), none crossed.
+
 **Still to come in this profile:** exact `exp`/`pow` in the friction law;
 `externalCollisionBias`; plasticity without RoR's spring-back for `.truck` content;
 damping-only beams and `dampCutoffHz` for `.truck` content; flexbody 4-node binding.
