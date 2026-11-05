@@ -871,8 +871,38 @@ yields. A sheet edge's yield is its bay's ultimate stress
   effective width, σ_u = σ_y·√(σ_cr/σ_y)·(1 − 0.22√(σ_cr/σ_y)), with b the
   edge's length;
 - 0.8 mm on 0.2 m bays: 48 MPa against σ_y 210;
-- the same both ways, because JBeam has one beamDeform. Our body skin beams
-  now yield at about 7 kN; the BX's median is 8 kN.
+- in compression only. Our body skin beams now yield at about 7 kN in
+  compression; the BX's median (one beamDeform both ways) is 8 kN.
+- **In tension (2026-11-05, later)** a sheet does not buckle: it carries a
+  tension field at its own yield, (√3/4)·σ_y·t·L (about 14.5 kN on a
+  0.2 m edge of 0.8 mm). JBeam's documentation has no expansion-side deform
+  force (beamDeform is one value; deformLimitExpansion limits the plastic
+  change, anisotropic and bounded beams split stiffness and damping, not
+  yield), so this is Rubble's `.truck` extension `rubble_tension_yield`
+  (`jbeam-semantics-spec.md` §18.4: the solver's Tt, which it already kept
+  apart from Tc; no kernel change; GPU parity bit for bit in
+  `tension_yield_gpu`). A sheet edge's break force is then its tension yield
+  plus its elongation × its built k·L. `TENSION_YIELD=0` builds the old way
+  (a measurement switch).
+  - Effect, sedan1 Medium, ensembles (before → after): `g` the door's skin
+    no longer tears before its hardware (4 edges did, at 0.4–1.1 kN); the
+    latch lets go at 36.2 kN (was 46.3), the door is off at 51.9 kN (47.0);
+    `n` max crush 644 → 633 mm, peak 31.8 → 32.8 g, b1 22.83 → 22.86,
+    t_m 75.4 → 74.4 ms, e 0.175 → 0.174; MDB 177 → 186 mm (in band);
+    `p` peak 18.9 → 22.5 kN; `q` 6.99 → 8.59×; `o` 270 → 206 mm; `h` the
+    fifth second's ringing peak 11.6 J against the fourth's 10.9 J (fails;
+    it passed); `t` 14 leaked either way.
+  - **Why `o` fell: springback.** The side pole's dynamic crush (deepest
+    exterior node, `O_DYN=1`) is 332–388 mm in both builds, inside the
+    measured residual band (297–445), but about half of it springs back:
+    residual 176–310 mm (was 229–299). A beam that yields keeps an elastic
+    stretch of its yield force over its k (`explicit-beams.md` §2, plastic
+    coefficient 0), and the step's bound puts k at 0.1–4 % of real, so it
+    springs back 25–1,000× as far as steel's σ_y/E. The tension yield doubles
+    the skin's yield force in tension, so its elastic stretch and springback
+    double too (about 14 % strain on a 0.2 m body edge before it yields).
+    The plastic coefficient is not a fix: at p → 1 a yielding beam's rest
+    length follows it and it stops carrying its yield force while it flows.
 
 At z 4.0 the shell carried about 100 kN, more than the rails. It now
 carries 10–50 kN.

@@ -2923,7 +2923,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 // (A sheet edge given its real yield: the strength it had
                 // was the yield's.)
                 let kl = b.mat.k * super::material::REF_LENGTH;
-                b.mat.strength = b.mat.deform + e * kl;
+                b.mat.strength = b.mat.deform.max(b.tension_yield) + e * kl;
             }
         }
         (1.0, 1.0)
@@ -3174,6 +3174,7 @@ fn one_tier_real_stiffness(
             }
         }
         let mut sheet_yield = 0.0f32;
+        let mut tension_yield = 0.0f32;
         if on_shell.contains(&b.a)
             && on_shell.contains(&b.b)
             && sk.nodes[a].part == sk.nodes[c].part
@@ -3193,16 +3194,23 @@ fn one_tier_real_stiffness(
             let lattice = 3f32.sqrt() / 4.0;
             if !lane && lattice * e * t > real {
                 real = lattice * e * t;
-                // Its yield force: the bay's ultimate stress in compression
+                // Its yield force: in compression the bay's ultimate stress
                 // (a thin plate buckles, then carries Winter's effective
-                // width, [`sheet_ultimate_stress`]), (√3/4)·σ_u·t·L, the
-                // same both ways (JBeam's one beamDeform).
+                // width, [`sheet_ultimate_stress`]), (√3/4)·σ_u·t·L; in
+                // tension the sheet's own yield, (√3/4)·σ_y·t·L (a tension
+                // field does not buckle; `rubble_tension_yield`).
                 sheet_yield = lattice * sheet_ultimate_stress(e, sy, t, l) * t * l;
+                tension_yield = lattice * sy * t * l;
             }
         }
         if sheet_yield > 0.0 && real > 0.0 {
             b.mat.deform = sheet_yield;
             b.mat.strength = sheet_yield;
+            // (`TENSION_YIELD=0`: the buckled yield both ways, as before
+            // `rubble_tension_yield`, to measure what it changes.)
+            if std::env::var("TENSION_YIELD").map_or(true, |v| v != "0") {
+                b.tension_yield = tension_yield;
+            }
         }
         if real == 0.0 {
             continue;

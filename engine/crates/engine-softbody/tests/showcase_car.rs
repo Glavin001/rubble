@@ -3087,6 +3087,44 @@ fn o_side_pole_matches_the_nhtsa_sedans() {
 
 /// One NCAP side pole run (see [`o_side_pole_matches_the_nhtsa_sedans`]):
 /// the residual crush at the pole (m).
+/// The side pole's crush now: the deepest struck-side exterior node near the
+/// pole's line, in the far side's frame (as [`side_pole_crush_p`] measures it).
+fn pole_inward(b: &Built, s0: &ExplicitBeams, s: &ExplicitBeams, centre: Vec3) -> f32 {
+    let far = |st: &ExplicitBeams| {
+        let g = &b.groups["sill_r"];
+        let zs: Vec<f32> = g
+            .iter()
+            .map(|&i| b.skeleton.nodes[i as usize].p.z)
+            .collect();
+        let zm = zs.iter().sum::<f32>() / zs.len() as f32;
+        let half = |front: bool| {
+            let v: Vec<Vec3> = g
+                .iter()
+                .zip(&zs)
+                .filter(|(_, &z)| (z > zm) == front)
+                .map(|(&i, _)| st.nodes[i as usize].pos)
+                .collect();
+            v.iter().sum::<Vec3>() / v.len() as f32
+        };
+        let tu = group_mean(st, b, &["tunnel"]);
+        let (o, x) = (half(false), (half(true) - half(false)).normalize());
+        let up = x.cross(tu - o).normalize();
+        (o, x, up.cross(x))
+    };
+    let (o0, x0, a0) = far(s0);
+    let (o1, _, a1) = far(s);
+    let zc = (centre - o0).dot(x0);
+    let mut best = 0.0f32;
+    for &i in &b.shell.nodes {
+        let i = i as usize;
+        let p = s0.nodes[i].pos;
+        if p.x > 0.3 && ((p - o0).dot(x0) - zc).abs() < 0.15 && p.y > 0.3 && p.y < 1.2 {
+            best = best.max((p - o0).dot(a0) - (s.nodes[i].pos - o1).dot(a1));
+        }
+    }
+    best
+}
+
 fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
     let kmh = kmh * (1.0 + p.speed);
     let a = 75.0f32.to_radians() + p.yaw;
@@ -3243,6 +3281,24 @@ fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
                 .filter(|(h, _)| h.name.contains("_l."))
                 .map(|(h, p)| format!("{} {:.1}", h.name, p / 1e3))
                 .collect::<Vec<_>>()
+        );
+    } else if std::env::var("O_DYN").is_ok() {
+        // The deepest exterior node's crush every 10 ms (the dynamic crush,
+        // and what springs back of it).
+        let mut deepest = (0.0f32, 0.0f32);
+        for k in 0..150 {
+            for _ in 0..20 {
+                s.step();
+            }
+            let d = pole_inward(b, &s0, &s, centre);
+            if d > deepest.0 {
+                deepest = (d, (k + 1) as f32 * 0.01);
+            }
+        }
+        eprintln!(
+            "(o) dynamic crush at the pole {:.0} mm at {:.2} s",
+            deepest.0 * 1e3,
+            deepest.1
         );
     } else {
         run(&mut s, 1.5);
