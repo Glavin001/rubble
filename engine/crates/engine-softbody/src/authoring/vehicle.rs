@@ -2695,7 +2695,41 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     })
                     .unwrap()
             };
+            // One tier: a panel is only where both members run alongside.
+            // A bay of `a` past either end of `b` along the axis (a front
+            // rail ahead of the sill, a rear rail behind it) has no panel to
+            // `b`: its diagonals would run from that bay to `b`'s end
+            // station through whatever lies between (the wheelhouse), a load
+            // path the car does not have. (`SHEAR_OVERHANG=1` builds them,
+            // a measurement.)
+            let (b_lo, b_hi) = sb.iter().fold((f32::MAX, f32::MIN), |(lo, hi), c| {
+                (lo.min(c[sp.axis]), hi.max(c[sp.axis]))
+            });
+            let reach = 0.05;
+            let mode = std::env::var("SHEAR_OVERHANG").unwrap_or_default();
+            let trimmed = one && mode != "1" && (sp.grade == "floor" || mode == "all");
+            let overhang = |i: usize| {
+                trimmed && {
+                    let mid = 0.5 * (sa[i][sp.axis] + sa[i + 1][sp.axis]);
+                    mid < b_lo - reach || mid > b_hi + reach
+                }
+            };
+            if std::env::var("SHEAR_TRACE").is_ok() {
+                let skipped = (0..sa.len().saturating_sub(1))
+                    .filter(|&i| overhang(i))
+                    .count();
+                eprintln!(
+                    "shear {}-{}: {} bays, {skipped} past {}'s ends",
+                    truss_names[ia],
+                    truss_names[ib],
+                    sa.len().saturating_sub(1),
+                    truss_names[ib]
+                );
+            }
             for i in 0..sa.len().saturating_sub(1) {
+                if overhang(i) {
+                    continue;
+                }
                 let (j0, j1) = (near_b(sa[i]), near_b(sa[i + 1]));
                 let (a0, a1) = (trusses[ia].stations[i], trusses[ia].stations[i + 1]);
                 let (b0, b1) = (trusses[ib].stations[j0], trusses[ib].stations[j1]);

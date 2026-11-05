@@ -1596,6 +1596,57 @@ without).
   `fixed_contact`, a step's contact forces are summed apart from
   `n.force`, and every self-contact had shown up as a momentum residual.
 
+### The frontal: the floor pan only where it is (2026-11-05, built)
+
+`N_CUT=<z>` (spawn z, comma-separated) gives the push across a plane every
+10 ms by member. `N_CUT_WHO=1` lists the beams over 4 kN at 60 ms.
+
+**What it found.** At 60 ms, 160 of the 278 kN crossing the plane just
+ahead of the firewall (z 3.45) went through body beams that belong to no
+member. The largest are 0.8–1.2 m diagonals carrying 8–21 kN each. They run
+from the front rails' forward stations (z 4.1–4.5, at the crush cans) to the
+sill's front end, straight through the wheelhouse.
+- **Their origin.** They are the `rail_f`–`sill` floor-pan shear panel.
+- **The cause.** A rail station past the sill's end mapped onto the sill's
+  end station, so 4 of the panel's 6 bays bridged the crush zone to the
+  cabin. `rail_r`–`sill` did the same behind the sill, in 2 of 4 bays.
+
+**Decision (one tier).** A floor panel (grade `floor`) is built only over
+the bays where both of its members run alongside.
+- The bounds are each bay's midpoint against the other member's extent,
+  with 5 cm of reach.
+- `SHEAR_OVERHANG=1` builds the old bays again; `=all` trims every panel.
+  Both are measurement switches.
+- The wheelhouse webs (`rail_f`–`apron`, `rail_r`–`quarter_inner`) stay,
+  because the inner fender's sheet is there.
+- `SHEAR_TRACE=1` lists each panel's trimmed bays.
+
+**Effect (Medium, before the solver's JBeam plasticity):**
+
+| | Before | Trimmed (**built**) |
+|---|---|---|
+| n max crush (380–580 mm) | 640 | 751 |
+| n dynamic (620–750 mm) | 712 | 800 |
+| n t_m (63–76 ms) | 76.9 | 90.8 |
+| n peak (34–47 g) | 31.6 | 27.0 |
+| n A-pillar base L / R (−7…17 / −11…15 mm) | 20 / 23 | **−3 / −4** |
+| n firewall (1…67 mm) | 20 | 32 |
+| o | 301 | 298 |
+| q | 5.81 | 5.92 |
+| p peak | 24.3 | 24.0 |
+| g latch / door off | 40.4 / 76.4 | 44.3 / 45.1 kN |
+| Rear third, wall (plastic / broken) | 89 / 5 | 69 / 3 |
+| Lid against rear body, wall | 407 mm | 383 mm |
+
+- **The front is now honestly short of strength.** The bridge had stood in
+  for the front's real late load paths.
+- **The powertrain stack-up.** In sedan1 the powertrain block spans z
+  3.75–4.21 (0.46 m deep). Its rear face is 0.37 m ahead of the firewall
+  (z 3.38), so the engine never stacks up against the dash within the
+  crush. `~powertrain/body` carries 2–4 kN across the cut.
+- **What is needed:** a real engine and transaxle package depth and
+  dash gap, from a measured source (open).
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
