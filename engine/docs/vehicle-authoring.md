@@ -1596,6 +1596,128 @@ without).
   `fixed_contact`, a step's contact forces are summed apart from
   `n.force`, and every self-contact had shown up as a momentum residual.
 
+### The frontal: the floor pan only where it is (2026-11-05, built)
+
+`N_CUT=<z>` (spawn z, comma-separated) gives the push across a plane every
+10 ms by member. `N_CUT_WHO=1` lists the beams over 4 kN at 60 ms.
+
+**What it found.** At 60 ms, 160 of the 278 kN crossing the plane just
+ahead of the firewall (z 3.45) went through body beams that belong to no
+member. The largest are 0.8–1.2 m diagonals carrying 8–21 kN each. They run
+from the front rails' forward stations (z 4.1–4.5, at the crush cans) to the
+sill's front end, straight through the wheelhouse.
+- **Their origin.** They are the `rail_f`–`sill` floor-pan shear panel.
+- **The cause.** A rail station past the sill's end mapped onto the sill's
+  end station, so 4 of the panel's 6 bays bridged the crush zone to the
+  cabin. `rail_r`–`sill` did the same behind the sill, in 2 of 4 bays.
+
+**Decision (one tier).** A floor panel (grade `floor`) is built only over
+the bays where both of its members run alongside.
+- The bounds are each bay's midpoint against the other member's extent,
+  with 5 cm of reach.
+- `SHEAR_OVERHANG=1` builds the old bays again; `=all` trims every panel.
+  Both are measurement switches.
+- The wheelhouse webs (`rail_f`–`apron`, `rail_r`–`quarter_inner`) stay,
+  because the inner fender's sheet is there.
+- `SHEAR_TRACE=1` lists each panel's trimmed bays.
+
+**Effect (Medium, before the solver's JBeam plasticity):**
+
+| | Before | Trimmed (**built**) |
+|---|---|---|
+| n max crush (380–580 mm) | 640 | 751 |
+| n dynamic (620–750 mm) | 712 | 800 |
+| n t_m (63–76 ms) | 76.9 | 90.8 |
+| n peak (34–47 g) | 31.6 | 27.0 |
+| n A-pillar base L / R (−7…17 / −11…15 mm) | 20 / 23 | **−3 / −4** |
+| n firewall (1…67 mm) | 20 | 32 |
+| o | 301 | 298 |
+| q | 5.81 | 5.92 |
+| p peak | 24.3 | 24.0 |
+| g latch / door off | 40.4 / 76.4 | 44.3 / 45.1 kN |
+| Rear third, wall (plastic / broken) | 89 / 5 | 69 / 3 |
+| Lid against rear body, wall | 407 mm | 383 mm |
+
+- **The front is now honestly short of strength.** The bridge had stood in
+  for the front's real late load paths.
+- **The powertrain stack-up.** In sedan1 the powertrain block spans z
+  3.75–4.21 (0.46 m deep). Its rear face is 0.37 m ahead of the firewall
+  (z 3.38), so the engine never stacks up against the dash within the
+  crush. `~powertrain/body` carries 2–4 kN across the cut.
+- **What is needed:** a real engine and transaxle package depth and
+  dash gap, from a measured source (open).
+
+### Rupture at the elongation at break; air drag at the measured Cd·A (2026-11-05)
+
+**Why.** The BeamNG profile now runs JBeam's NORMAL rule (solver 9d744a44),
+so a stretched beam no longer loses strength. That strength drop had been
+the only way sedan1's steel tore. `Skeleton::rupture` writes each graded
+beam's tear into `rubble_jbeam_plastic`. It is **built, not adopted**:
+`RUPTURE=1` builds it, and `RUPTURE_REPORT=1` in `which_nodes` gives the
+counts by part.
+
+**Graded metal** (`Material::ductile`: A80 and Rm/Re at the standards'
+minima; each grade's steel is a Choice):
+
+| Grade | Steel | Re / Rm (MPa) | A80 |
+|---|---|---|---|
+| panel, floor, frame | HC220B (EN 10268) | 220 / 320 | 32 % |
+| crush | HCT600X / DP600 (EN 10338) | 330 / 600 | 20 % |
+| hsla | HC340LA (EN 10268) | 340 / 410 | 21 % |
+| uhss | HCT780X / DP780 (EN 10338) | 440 / 780 | 14 % |
+| boron | 22MnB5 press-hardened | 950 / 1,300 | 5 % |
+| alu | EN AW-6082-T6 (EN 755-2) | 250 / 290 | 8 % (A50) |
+
+- **As written:** deformLimitStress = (Rm/Re)·T and strength =
+  `RUPTURE_MARGIN` (1.05) × that cap. The plastic stretch is capped at
+  dₑ = A − S/(k·L), so the strain when the beam tears is A.
+- **Why it is not adopted: one strength for both directions.** A crushed
+  beam hardens Tc·L₀/L up to the cap, and a step's overshoot past S then
+  tears it in compression. Whole car, beams broken in the 56 km/h wall:
+
+  | Rupture | Broken |
+  |---|---|
+  | none | 4 |
+  | margin 1.05 | 136 |
+  | margin 1.5 | 86 |
+  | margin 3 | 19 |
+
+  The count follows the margin, not the strain.
+- **Asked of the solver agent:** a tear at the expansion limit (a sixth
+  `rubble_jbeam_plastic` field). With it, dₑ = A − T/(k·L) tears the beam in
+  tension only, and the strength and cap stay as built.
+- **Not graded** (hardware, mounts, bolts): capping their stretch at RoR's
+  tear stretch tore 38 rear-third beams the same way, so they keep their
+  strengths as built.
+- **The door hardware's `Rope` beams no longer separate** in `r` (and so in
+  `g` and `detached_door_takes_its_edge`) since 9d744a44. The trace shows tt
+  hardened while the strength stayed at its built value. This is with the
+  solver agent.
+
+**Air drag.** The profile's air drag is now its triangles' aerodynamics
+(solver 36a6c919), at BeamNG's default dragCoef of 100. That is 3.4 kN at
+100 km/h, 11 times a real sedan.
+- **Built:** `AERO_DRAG_COEF`, with every aero triangle at one coefficient
+  so the car coasts at the 2011 Accord sedan's Cd·A: Cd 0.31 on 2.31 m², or
+  0.716 m² (fichacompleta.com.br's 2011 Accord EX V6 sheet; Motor Matchup
+  lists Cd 0.32 for the 2.4 EX).
+- **Measured:** 337 N at 100 km/h, against ½ρ·Cd·A·v² of 338 N
+  (`crash_invariants::profile_drag_is_the_triangles`, now asserted within
+  3 %).
+- **liftCoef** equals dragCoef (BeamNG's convention; no measured lift data).
+- **Next:** the solver's `rubble_aero_tri`. The covered and inner
+  triangles get 0 and the exposed ones carry it all.
+  `Skeleton::exposed_triangles` is ready: a ray along a triangle's outward
+  normal meets no other collision triangle within 3 m. `AERO_REPORT=1` in
+  `which_nodes` lists them.
+- **The lid's motion is not the drag.** The wall's lid against the rear
+  body is 416 mm with drag and without.
+- **Open with the solver:** with the triangles' aero on, the `g` door pull
+  goes non-finite (1,690 body dashpots break before any hardware). With
+  `AERO_COEF=0` it does not.
+- **The ledger tally** now counts the aero triangles' force as its drag
+  term.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.

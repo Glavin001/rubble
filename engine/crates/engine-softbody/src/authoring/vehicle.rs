@@ -2695,7 +2695,41 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     })
                     .unwrap()
             };
+            // One tier: a panel is only where both members run alongside.
+            // A bay of `a` past either end of `b` along the axis (a front
+            // rail ahead of the sill, a rear rail behind it) has no panel to
+            // `b`: its diagonals would run from that bay to `b`'s end
+            // station through whatever lies between (the wheelhouse), a load
+            // path the car does not have. (`SHEAR_OVERHANG=1` builds them,
+            // a measurement.)
+            let (b_lo, b_hi) = sb.iter().fold((f32::MAX, f32::MIN), |(lo, hi), c| {
+                (lo.min(c[sp.axis]), hi.max(c[sp.axis]))
+            });
+            let reach = 0.05;
+            let mode = std::env::var("SHEAR_OVERHANG").unwrap_or_default();
+            let trimmed = one && mode != "1" && (sp.grade == "floor" || mode == "all");
+            let overhang = |i: usize| {
+                trimmed && {
+                    let mid = 0.5 * (sa[i][sp.axis] + sa[i + 1][sp.axis]);
+                    mid < b_lo - reach || mid > b_hi + reach
+                }
+            };
+            if std::env::var("SHEAR_TRACE").is_ok() {
+                let skipped = (0..sa.len().saturating_sub(1))
+                    .filter(|&i| overhang(i))
+                    .count();
+                eprintln!(
+                    "shear {}-{}: {} bays, {skipped} past {}'s ends",
+                    truss_names[ia],
+                    truss_names[ib],
+                    sa.len().saturating_sub(1),
+                    truss_names[ib]
+                );
+            }
             for i in 0..sa.len().saturating_sub(1) {
+                if overhang(i) {
+                    continue;
+                }
                 let (j0, j1) = (near_b(sa[i]), near_b(sa[i + 1]));
                 let (a0, a1) = (trusses[ia].stations[i], trusses[ia].stations[i + 1]);
                 let (b0, b1) = (trusses[ib].stations[j0], trusses[ib].stations[j1]);
@@ -3253,6 +3287,19 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         // The profile it ships with (spec §36). `BEAMNG_PROFILE=0` leaves the
         // line out (a measurement switch: the RoR profile's contact rule).
         sk.beamng_profile = std::env::var("BEAMNG_PROFILE").map_or(true, |v| v != "0");
+        // Steel tears at its elongation at break (`Skeleton::rupture`;
+        // `RUPTURE=1` builds it, a measurement switch until the solver can
+        // tear a beam at its expansion limit: one strength for both
+        // directions tears crushed beams in compression, `vehicle-authoring.md`).
+        sk.ductile = std::env::var("RUPTURE").is_ok_and(|v| v == "1");
+        // The car's air drag: every aero triangle at one coefficient that
+        // gives the measured Cd·A ([`AERO_DRAG_COEF`]; `AERO_COEF=<d>` sets
+        // another, a measurement switch).
+        let d = std::env::var("AERO_COEF")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(AERO_DRAG_COEF);
+        sk.drag_coef = Some((d, d));
         sk.cap_to_bound()?;
         for (b, &e) in sk.beams.iter_mut().zip(&elong) {
             if e >= 0.0 {
@@ -4378,6 +4425,8 @@ fn aperture_gauges(
                 strength: f,
                 plastic: 0.0,
                 density: 0.0,
+                elong: 0.0,
+                uts: 0.0,
             };
             if sk.beam_with(a, b, m, BeamType::Normal, group) {
                 let j = sk.beams.len() - 1;
@@ -4388,6 +4437,16 @@ fn aperture_gauges(
     }
     out
 }
+
+/// The aero triangles' dragCoef (BeamNG's units: 100 a flat plate's) for
+/// one tier: the 2011 Accord sedan's Cd 0.31 on 2.31 m² (Cd·A 0.716 m²,
+/// fichacompleta.com.br's 2011 Accord EX 3.5 V6 sheet; Motor Matchup lists
+/// Cd 0.32 for the 2.4 EX), measured on sedan1 coasting at 100 km/h
+/// (`crash_invariants::profile_drag_is_the_triangles`: dragCoef 9 gives
+/// 310 N; ½ρ·Cd·A·v² is 338 N). liftCoef the same (BeamNG's default
+/// convention; no measured lift data). A Choice until the triangles take
+/// their own coefficients (covered and inner ones 0).
+pub const AERO_DRAG_COEF: f32 = 9.0 * 338.4 / 310.0;
 
 /// Seconds the car settles on its tyres before it is written ([`rest_pose`]).
 pub const INSTALL_SETTLE: f32 = 2.0;

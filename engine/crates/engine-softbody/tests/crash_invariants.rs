@@ -110,7 +110,10 @@ fn spawn_truck(truck: &str, at: Vec3, vel: Vec3) -> ExplicitBeams {
     if std::env::var("CI_DROP").as_deref() == Ok("1") {
         s.plastic_strength_drop = true;
     }
-    if let Some(p) = std::env::var("CI_PSET").ok().and_then(|v| v.parse::<f32>().ok()) {
+    if let Some(p) = std::env::var("CI_PSET")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
         for b in &mut s.beams {
             if b.ty == engine_softbody::explicit_beams::ExplicitType::Deformable {
                 b.plastic = p;
@@ -2299,21 +2302,11 @@ fn profile_drag_is_the_triangles() {
     let p1: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
     let f = -(p1 - p0) / (steps as f32 * STEP);
     let per_node = engine_softbody::explicit_beams::DRAG * s.nodes.len() as f32 * v * v;
-    let real = 0.5 * 1.225 * 0.65 * v * v;
+    // The 2011 Accord sedan's Cd·A, 0.31 × 2.31 m² (`AERO_DRAG_COEF`).
+    let real = 0.5 * 1.225 * 0.31 * 2.31 * v * v;
     eprintln!(
         "sedan1 at 100 km/h, {m:.0} kg: triangle drag {f:.0} N ({tris} triangles); per-node rule {per_node:.0} N; a real sedan {real:.0} N"
     );
-    assert!(f > 0.0);
-    // `rubble_drag_coef 9` (Rubble's extension): the triangles at 9 % of a flat
-    // plate, about a real sedan's drag.
-    let text = b.truck.replace("rubble_beamng_profile", "rubble_beamng_profile\nrubble_drag_coef 9");
-    let mut s = spawn_truck(&text, Vec3::new(0.0, 50.0, 0.0), Vec3::Z * v);
-    let p0: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
-    for _ in 0..steps {
-        s.step();
-    }
-    let p1: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
-    let f9 = -(p1 - p0) / (steps as f32 * STEP);
-    eprintln!("with rubble_drag_coef 9: {f9:.0} N");
-    assert!((f9 / f - 0.09).abs() < 0.02, "{f9} against {f}");
+    // As built (`rubble_drag_coef`, the measured Cd·A): within 3 %.
+    assert!((f / real - 1.0).abs() < 0.03, "{f} N against {real} N");
 }

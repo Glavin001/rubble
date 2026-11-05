@@ -638,7 +638,25 @@ impl Ledger {
         // (The force the node pass will take: its beams' plus the step's
         // fixed-point contact sum and held slide forces, `force_now`.)
         let now = s.forces_now();
-        for (n, &f_now) in s.nodes.iter().zip(&now) {
+        // (The BeamNG profile's air drag is its triangles' aerodynamics,
+        // applied in the beam pass: an external force, the drag term.)
+        let mut aero = vec![Vec3::ZERO; s.nodes.len()];
+        for (j, bm) in s.beams.iter().enumerate() {
+            if bm.kind != engine_softbody::explicit_beams::ExplicitKind::JbeamAeroTri || bm.broken {
+                continue;
+            }
+            let ext = &s.beam_ext[s.ext_of[j] as usize - 1];
+            let ids = [bm.a as usize, bm.b as usize, ext.index(0) as usize];
+            let f = engine_softbody::explicit_jbeam_ext::aero_tri_force(
+                ids.map(|i| s.nodes[i].pos),
+                ids.map(|i| s.nodes[i].vel),
+                ext,
+            );
+            for i in ids {
+                aero[i] += f;
+            }
+        }
+        for ((n, &f_now), &fa) in s.nodes.iter().zip(&now).zip(&aero) {
             let mut f = f_now;
             let g = if fresh {
                 Vec3::ZERO
@@ -649,7 +667,7 @@ impl Ledger {
                 -DRAG * approx_sqrt(n.vel.dot(n.vel)) * n.vel
             } else {
                 Vec3::ZERO
-            };
+            } + fa;
             self.gravity += (g * h).as_dvec3();
             self.drag += (d * h).as_dvec3();
             self.internal += ((f - g - d) * h).as_dvec3();
@@ -2984,6 +3002,70 @@ fn reference_wall(b: &Built, kmh: f32, drag: bool, noise: f64) -> Vec<(&'static 
 
 /// [`reference_wall`] perturbed (a full-width wall: the offset changes
 /// nothing, the speed and the yaw do).
+/// The load across a cut: every live beam whose ends' spawn positions lie on
+/// either side of `side` (`side(p) > 0` on one), its force's component along
+/// `dir` (positive: compression pushing toward `side`'s negative), summed by
+/// member (the group holding both ends) or part pair. (`N_CUT`, a probe.)
+fn cut_by_member(
+    s: &ExplicitBeams,
+    b: &Built,
+    side: &dyn Fn(Vec3) -> f32,
+    dir: Vec3,
+) -> (f32, Vec<(String, f32)>) {
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let mut keys: Vec<&String> = b.groups.keys().collect();
+    keys.sort();
+    let mut by: std::collections::BTreeMap<String, f32> = Default::default();
+    let mut total = 0.0;
+    for bm in s.beams.iter().filter(|b| !b.broken) {
+        let (a, c) = (bm.a as usize, bm.b as usize);
+        if a >= n || c >= n {
+            continue;
+        }
+        let (sa, sc) = (side(sk.nodes[a].p), side(sk.nodes[c].p));
+        if sa * sc >= 0.0 {
+            continue;
+        }
+        // From the negative side's node to the positive's.
+        let (pos, neg) = if sa > 0.0 { (a, c) } else { (c, a) };
+        let d = (s.nodes[pos].pos - s.nodes[neg].pos).normalize_or_zero();
+        // Compression (force < 0) pushes the positive side on along +d.
+        let f = -bm.force * d.dot(dir);
+        if std::env::var("N_CUT_WHO").is_ok() && f.abs() > 4000.0 {
+            eprintln!(
+                "    cut: {:.1} kN, {a}-{c} spawn {:.2?} to {:.2?}, k {:.2e}, yield {:.1} kN, len {:.2}",
+                f / 1e3,
+                sk.nodes[a].p,
+                sk.nodes[c].p,
+                sk.beams[sk.beam_index(bm.a, bm.b).unwrap_or(0)].mat.k,
+                sk.beams[sk.beam_index(bm.a, bm.b).unwrap_or(0)].mat.deform / 1e3,
+                sk.nodes[a].p.distance(sk.nodes[c].p)
+            );
+        }
+        let key = keys
+            .iter()
+            .find(|k| b.groups[**k].contains(&bm.a) && b.groups[**k].contains(&bm.b))
+            .map(|k| (*k).clone())
+            .unwrap_or_else(|| {
+                let (pa, pc) = (
+                    &sk.parts[sk.nodes[a].part as usize],
+                    &sk.parts[sk.nodes[c].part as usize],
+                );
+                if pa == pc {
+                    format!("~{pa}")
+                } else {
+                    format!("~{pa}/{pc}")
+                }
+            });
+        *by.entry(key).or_default() += f;
+        total += f;
+    }
+    let mut v: Vec<(String, f32)> = by.into_iter().filter(|x| x.1.abs() > 300.0).collect();
+    v.sort_by(|x, y| y.1.abs().total_cmp(&x.1.abs()));
+    (total, v)
+}
+
 fn reference_wall_p(
     car: &Car,
     kmh: f32,
@@ -3046,6 +3128,25 @@ fn reference_wall_p(
             d_dyn = cm(&s).z - z_contact;
         }
         rebound = rebound.max(-vg);
+        // (`N_CUT=<z>`: every 10 ms to 100 ms, the push across the plane at
+        // spawn z (m) by member: what carries the wall's load rearward.)
+        if let (Ok(v), Some(b)) = (std::env::var("N_CUT"), car.built) {
+            let step = (t / dt).round() as usize;
+            if step % 20 == 0 && t <= 0.1 && (std::env::var("N_CUT_WHO").is_err() || step == 120) {
+                for zc in v.split(',').filter_map(|x| x.parse::<f32>().ok()) {
+                    let (tot, by) = cut_by_member(&s, b, &|p: Vec3| p.z - zc, -Vec3::Z);
+                    eprintln!(
+                        "(n) t {:.0} ms, across z {zc:.2}: {:.1} kN; {:?}",
+                        t * 1e3,
+                        tot / 1e3,
+                        by.iter()
+                            .take(16)
+                            .map(|(k, f)| format!("{k} {:.1}", f / 1e3))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
     }
     let _ = z0;
     // 100 Hz two-pole Butterworth, forward and backward
@@ -4184,6 +4285,25 @@ fn rig_pull(b: &Built, groups: &[usize], d: Vec3) -> (f32, bool) {
         peak = peak.max(f);
         if rig.iter().all(|&j| s.beams[j].broken) {
             break;
+        }
+    }
+    // (`RIG_TRACE=1`: the rig's beams that held, their kind, force and
+    // stretch.)
+    if std::env::var("RIG_TRACE").is_ok() {
+        for &j in rig.iter().filter(|&&j| !s.beams[j].broken) {
+            let bm = &s.beams[j];
+            let l = s.nodes[bm.a as usize]
+                .pos
+                .distance(s.nodes[bm.b as usize].pos);
+            eprintln!(
+                "  (rig) held {j}: {:?} force {:.1} kN strength {:.1} kN rest {:.3} len {:.3} tt {:.1} kN",
+                bm.kind,
+                bm.force / 1e3,
+                bm.strength / 1e3,
+                bm.rest,
+                l,
+                bm.tt / 1e3
+            );
         }
     }
     (peak, rig.iter().all(|&j| s.beams[j].broken))
@@ -5432,6 +5552,53 @@ fn member_chord_yields() {
 #[ignore]
 fn which_nodes() {
     let b = built(Resolution::Medium);
+    // (`AERO_REPORT=1`: the exposed collision triangles by part, and their
+    // area projected on the car's front.)
+    if std::env::var("AERO_REPORT").is_ok() {
+        let sk = &b.skeleton;
+        let ex = sk.exposed_triangles();
+        let mut by: std::collections::BTreeMap<String, (usize, f32)> = Default::default();
+        let mut front = 0.0;
+        for &k in &ex {
+            let t = sk.collision[k].map(|i| sk.pos(i));
+            let c = (t[1] - t[0]).cross(t[2] - t[0]) * 0.5;
+            if c.z > 0.0 {
+                front += c.z;
+            }
+            let e = by
+                .entry(sk.parts[sk.nodes[sk.collision[k][0] as usize].part as usize].clone())
+                .or_default();
+            e.0 += 1;
+            e.1 += c.length();
+        }
+        eprintln!(
+            "aero: {} of {} collision triangles exposed; frontal area {front:.2} m²; {by:?}",
+            ex.len(),
+            sk.collision.len()
+        );
+    }
+    // (`RUPTURE_REPORT=1`: the ductile beams' rupture, by part.)
+    if std::env::var("RUPTURE_REPORT").is_ok() {
+        let sk = &b.skeleton;
+        let mut by: std::collections::BTreeMap<String, (usize, usize, f32)> = Default::default();
+        for bm in &sk.beams {
+            if let Some(r) = sk.rupture(bm) {
+                let pa = sk.parts[sk.nodes[bm.a as usize].part as usize].clone();
+                let e = by.entry(pa).or_default();
+                e.0 += 1;
+                if r.expansion <= 0.0 {
+                    e.1 += 1;
+                }
+                e.2 += r.expansion;
+            }
+        }
+        for (k, (n, z, sum)) in by {
+            eprintln!(
+                "rupture {k}: {n} beams, {z} tear at S (no plastic room), mean dₑ {:.3}",
+                sum / n as f32
+            );
+        }
+    }
     for t in std::env::var("NODES").unwrap_or_default().split(',') {
         let Ok(i) = t.parse::<usize>() else { continue };
         let n = &b.skeleton.nodes[i];
@@ -5442,9 +5609,31 @@ fn which_nodes() {
             .map(|(k, _)| k)
             .collect();
         eprintln!(
-            "node {i}: part {} at {:.2?} primary {} catcher {} groups {gs:?}",
-            b.skeleton.parts[n.part as usize], n.p, n.primary, n.catcher
+            "node {i}: part {} at {:.2?} mass {:.2} kg (fixed {:.2}) primary {} catcher {} groups {gs:?}",
+            b.skeleton.parts[n.part as usize], n.p, n.mass, n.fixed, n.primary, n.catcher
         );
+        // (`NODES_BEAMS=1`: its beams, the other end's part, length, k and yield.)
+        if std::env::var("NODES_BEAMS").is_ok() {
+            for bm in b
+                .skeleton
+                .beams
+                .iter()
+                .filter(|x| x.a as usize == i || x.b as usize == i)
+            {
+                let o = if bm.a as usize == i { bm.b } else { bm.a } as usize;
+                let on = &b.skeleton.nodes[o];
+                eprintln!(
+                    "    to {o} ({}, {:.2?}, {:.2} kg) len {:.2} k {:.3e} yield {:.1} kN {:?}",
+                    b.skeleton.parts[on.part as usize],
+                    on.p,
+                    on.mass,
+                    n.p.distance(on.p),
+                    bm.mat.k,
+                    bm.mat.deform / 1e3,
+                    bm.ty
+                );
+            }
+        }
     }
 }
 
