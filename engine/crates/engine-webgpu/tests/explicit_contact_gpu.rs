@@ -371,3 +371,122 @@ fn a_running_sim_survives_leaving_its_frame_bounds() {
     assert!(g.take_contact_errors().is_empty());
     assert!(g.positions().iter().flatten().all(|p| p.is_finite()));
 }
+
+/// A procedural sedan at `speed` m/s into a standing pressure-wheel JBeam car (the
+/// fixture car, whose tyres carry LBEAMs, spec §24; every node a contacter) `gap` m
+/// ahead: [sedan, car].
+fn sedan_into_lbeam_car(speed: f32, gap: f32) -> Vec<ExplicitBeams> {
+    use engine_softbody::jbeam::load_jbeam;
+    let settings = ExplicitBeamsSettings { turbulence: false, ..Default::default() };
+    let desc = load_jbeam(&[("car.jbeam", engine_softbody::jbeam_fixture::PART2_CAR)], None).unwrap();
+    let (mut car, _) = ExplicitBeams::from_desc_jbeam_with(&desc, JbeamWheels::Pressure, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
+    assert!(car.beams.iter().any(|b| b.kind == ExplicitKind::JbeamLbeam), "the fixture's tyres have LBEAMs");
+    assert!(car.two_body_contact);
+    let text = sedan_text();
+    let v = Vec3::new(0.0, 0.0, speed);
+    let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
+    let slow = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let front = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+    let mut sedan = ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - slow, 0.0), v, settings).unwrap();
+    sedan.roll_tyres(v);
+    // The car broadside on, its nearest node `gap` ahead of the sedan's front.
+    let low = car.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let back = car.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
+    for n in &mut car.nodes {
+        n.pos += Vec3::new(0.0, 0.01 - low, front + gap - back);
+    }
+    vec![sedan, car]
+}
+
+fn com(v: &ExplicitBeams, pos: &[Vec3], vel: &[Vec3]) -> (Vec3, Vec3) {
+    let m: f32 = v.nodes.iter().map(|n| n.mass).sum();
+    let p = pos.iter().zip(&v.nodes).map(|(p, n)| *p * n.mass).sum::<Vec3>() / m;
+    let u = vel.iter().zip(&v.nodes).map(|(u, n)| *u * n.mass).sum::<Vec3>() / m;
+    (p, u)
+}
+
+/// Pressure wheels' LBEAMs do not cost vehicle contact (2026-11-05: the barrier's
+/// LBEAMs, a follower force before spec §24's gradient form, flew its face apart in
+/// free flight and it passed through the car). A sedan hits a pressure-wheel JBeam
+/// car broadside: the car is pushed and the sedan never passes its centre, on the
+/// CPU and the GPU (with two-body contact, §10.3: the JBeam car opts in).
+#[test]
+fn a_pressure_wheel_jbeam_car_is_pushed_by_the_vehicle_that_hits_it() {
+    let fleet = sedan_into_lbeam_car(10.0, 0.3);
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut w = ExplicitBeamsWorld::new(fleet.clone());
+    let mut first = None;
+    for f in 0..60 {
+        w.frame(17);
+        g.frame(17);
+        if w.first_hit_step.is_some() && first.is_none() {
+            first = Some(f);
+            g.wait();
+            let p = g.positions();
+            for k in 0..2 {
+                let d = rms(&p[k], &w.vehicles[k].positions());
+                assert!(d < 5e-4, "vehicle {k}: GPU–CPU {d} m at contact");
+            }
+        }
+    }
+    g.wait();
+    g.contact_status().unwrap();
+    assert!(first.is_some(), "they met");
+    let cpu_vel: Vec<Vec<Vec3>> = w.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.vel).collect()).collect();
+    let cpu_pos: Vec<Vec<Vec3>> = w.vehicles.iter().map(|v| v.positions()).collect();
+    for (label, pos, vel) in [("CPU", cpu_pos, cpu_vel), ("GPU", g.positions(), g.velocities())] {
+        let (ps, vs) = com(&fleet[0], &pos[0], &vel[0]);
+        let (pc, vc) = com(&fleet[1], &pos[1], &vel[1]);
+        let sedan_front = pos[0].iter().map(|p| p.z).fold(f32::MIN, f32::max);
+        eprintln!(
+            "{label} after 1 s: sedan centre z {:.2} m ({:.2} m/s), front {sedan_front:.2} m; car centre {:.2} m ({:.2} m/s); CPU hits {}",
+            ps.z, vs.z, pc.z, vc.z, w.total.hits
+        );
+        assert!(pos.iter().flatten().all(|p| p.is_finite()), "{label}: finite");
+        assert!(vc.z > 0.5, "{label}: the car is pushed ({} m/s)", vc.z);
+        assert!(sedan_front < pc.z, "{label}: the sedan passes into the car ({sedan_front} vs {})", pc.z);
+    }
+}
+
+/// Two-body contact (jbeam-semantics-spec.md §10.3) on the GPU as on the CPU: three
+/// heavy points (10 kg) falling onto one light, free triangle (0.1, 0.2, 5 kg) of
+/// another vehicle, every step, a frame of 1 and of 17 steps.
+#[test]
+fn two_body_contact_steps_like_the_cpu() {
+    let mut tri = vehicle(&[Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 2.0)]);
+    for (n, m) in tri.nodes.iter_mut().zip([0.1, 0.2, 5.0]) {
+        n.mass = m;
+    }
+    tri.triangles.push(Triangle { nodes: [0, 1, 2], wait: 0, idle: 0 });
+    tri.finish();
+    tri.two_body_contact = true;
+    let mut pts = vehicle(&[Vec3::new(0.1, 0.02, 0.0), Vec3::new(-0.3, 0.025, -0.5), Vec3::new(0.2, 0.015, 0.8)]);
+    for n in &mut pts.nodes {
+        n.mass = 10.0;
+        n.vel = Vec3::new(0.0, -1.0, 0.0);
+    }
+    pts.finish();
+    let fleet = vec![tri, pts];
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut w = ExplicitBeamsWorld::new(fleet);
+    for (frames, steps) in [(30, 1), (6, 17)] {
+        for _ in 0..frames {
+            w.frame(steps);
+            g.frame(steps);
+        }
+    }
+    g.wait();
+    g.contact_status().unwrap();
+    assert!(w.total.hits > 10, "hits {}", w.total.hits);
+    for k in 0..2 {
+        let d = rms(&g.positions()[k], &w.vehicles[k].positions());
+        eprintln!("vehicle {k}: GPU–CPU {d:.2e} m after {} steps, {} hits", w.steps, w.total.hits);
+        assert!(d < 1e-4, "vehicle {k}: GPU–CPU {d} m");
+    }
+}

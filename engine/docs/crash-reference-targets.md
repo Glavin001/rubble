@@ -489,20 +489,50 @@ collapsed to a sheet in the lab): the carriage's beams each as stiff as the 2 kH
 step allows their two nodes (k = 0.25·min(m/n)/h², n a node's carriage beams; the
 first version took one stiffness from the lightest node, 0.8 MN/m on 90 kg frame
 nodes, and the carriage was soft), its mass 45 / 10 / 45 % at the back plate, mid and
-rear frames; shear diagonals from each face node to the neighbouring back-plate
-nodes yielding at a tenth of the column's crush force (the column carries the rest,
-so a node still crushes at σ·A; without them the columns tilted and the face folded
-flat); a densification stop behind the bumper at 20 % of the full depth.
+rear frames; a densification stop behind the bumper at 20 % of the full depth.
+
+**Honeycomb shear (2026-11-05).** Without shear the columns tilted and the face
+folded flat. The first fix, diagonals from each face node to the neighbouring
+back-plate nodes yielding at a tenth of the column force, had no source, and a
+diagonal truss couples shear to crush (its axial part adds to σ·A). Now: one LBEAM
+per face node and direction (jbeam-semantics-spec.md §24; vertex the back-plate node,
+ends the face node and the neighbouring plate node), which resists the column's tilt
+and not its crush, yielding (perfectly plastic) at the honeycomb's **plate shear
+strength** × the column's area. Data: Hexcel HexWeb CR III data sheet, Table I,
+5052 alloy, the grade whose crush strength is the barrier's 45 psi (1/4-2.3, also
+3/8-2.3): L direction 140 psi typical (100 min), W direction 85 psi (57 min); shear
+moduli 32 and 16.2 ksi. **Choices:** the ribbon direction is not openly documented,
+so both directions take the weaker W value, 85 psi = 586 kPa; the shear strain at
+that strength is 10 %, as the columns' elastic strain (the measured modulus would put
+2.9 MN/m on a 0.8 kg face node beside its column, past the 2 kHz step); no damper on
+these LBEAMs (theirs would act on the column's crush rate, and honeycomb crush is
+rate-insensitive). Measured with them: the crush test's mean 97 % of σ·A (peak 110 %,
+carriage within 1.1 %); in free flight nothing breaks.
 
 Check (`engine-softbody/tests/crash_rigs.rs`): mass and centre of mass to the
 standard's; the face's crush force is bounded by σ·A = 310 kPa × 1.676 × 0.559 m =
 290 kN (+5 %); with its front skin held and the carriage at 8 m/s, the mean over the
-crush is 101 % of σ·A, the carriage's length within 1.3 % and its back plate within
-2.3 cm of flat. Into the procedural sedan (GPU): the carriage within 0.9 %, the face
-crushed at most 48 %. Into the showcase car (with and without full contact) the
-car diverges about 5 frames after the barrier meets it (its nodes reach 82 m/s, then
-921 m/s; the barrier follows through contact): **open**, reported by
-`explicit_scenes.rs`. Into the procedural sedan's left side
+crush is 97 % of σ·A (with the shear LBEAMs; 101 % with the diagonals before), the
+carriage's length within 1.1 % and its back plate within 1 cm of flat. Into the
+procedural sedan and the showcase car (GPU): the carriage within 0.5 %, the face
+crushed at most 61 %. The showcase car's divergence (82, then 921 m/s, 2026-11-05)
+was the vehicle-contact response's static-surface assumption meeting heavy barrier
+nodes on a light skin; fixed by two-body contact (jbeam-semantics-spec.md §10.3).
+`explicit_scenes.rs` asserts that the vehicles' kinetic plus gravitational energy
+never rises and that nothing is non-finite.
+
+**FMVSS 214 dynamic: measured residual side crush** (NHTSA Vehicle Crash Test
+Database API, 2026-11-05: test configuration `IMPACTOR INTO VEHICLE`, test types
+`FMVSS 214 SIDE IMPACT PROTECTION` and `RESEARCH` at 52.7–53.9 km/h, model years
+2010–2025, the struck vehicle's `maximumCrushDistance`): 42 vehicles (1,141–2,804
+kg, median 1,810 kg) median 163 mm, IQR 142–182, p10–p90 122–198, min–max 98–219;
+the 14 four-door sedans median 160 mm, p10–p90 127–199, min–max 126–206. Rubble's
+measure (`explicit_scenes.rs`, **Choice**): the largest inward displacement of the
+struck side's skin nodes (within 15 cm of the side, 279–838 mm up: the barrier
+face's band) from their pre-test line, 1.5 s after the start, the car's rigid motion
+taken out with its far half. Results: procedural sedan **126 mm** (inside, asserted);
+showcase car **364 mm**, 1.7 times the largest measured: **open** (its side structure
+is too soft; the test is `#[ignore]`d with the number). Into the procedural sedan's left side
 (`engine-world-wasm/tests/explicit_scenes.rs`, GPU): the barrier strikes at about
 0.6 s, the car leaves at 2.9 m/s, the barrier at 1.5 m/s across (rebounding), with
 0.26 m of crush and intrusion between their centres of mass; no pass-through.
