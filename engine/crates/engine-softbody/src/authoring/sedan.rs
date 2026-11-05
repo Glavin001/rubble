@@ -701,6 +701,8 @@ pub fn screen_ring(cw: [f32; 3], ft: [f32; 3]) -> (f32, f32) {
 /// teardown's material table (NHTSA DOT HS 811 666, fig. 113: DP 350/600,
 /// DP 500/800, HSLA 350/450, HF 1050/1500).
 pub const DP600: f32 = 330e6;
+/// DP600's minimum tensile strength (Pa), EN 10338 (HCT600X).
+pub const DP600_UTS: f32 = 600e6;
 pub const DP780: f32 = 440e6;
 pub const DP980: f32 = 590e6;
 pub const HSLA340: f32 = 340e6;
@@ -2029,6 +2031,7 @@ pub fn sedan() -> VehicleDef {
         biw_mass: 0.0,
         part_masses: Vec::new(),
         damping: None,
+        crush: Vec::new(),
     })
 }
 
@@ -2069,6 +2072,31 @@ pub fn sedan_one_tier() -> VehicleDef {
     d.one_tier = true;
     d.tiered = false;
     d.damping = Some(super::vehicle::DampingRatios::default());
+    // Crush members: the front rails (an 80 × 120 × 1.6 mm DP600 box, a
+    // Choice of a typical rail's section; σ_u 600 MPa, EN 10338) and the
+    // rear rails' tail behind the rear subframe ([`side_sections`]' rear
+    // rail, 100 × 130 × 1.6 mm DP600) fold at Abramowicz and Jones's mean
+    // force (61.8 and 64.7 kN); the bumper beams keep their bending
+    // yields and fold without hardening. All stroke to
+    // [`super::vehicle::CRUSH_STROKE`].
+    let pm = |b: f32, dd: f32, t: f32| {
+        super::vehicle::progressive_crush_force(b, dd, t, DP600, DP600_UTS)
+    };
+    let crush = |member: &str, mean_force: f32| super::vehicle::CrushSpec {
+        member: member.into(),
+        mean_force,
+        deform_limit: super::vehicle::CRUSH_STROKE,
+    };
+    d.crush = vec![
+        crush("rail_f", pm(0.08, 0.12, 0.0016)),
+        crush("rail_r_tail", pm(0.10, 0.13, 0.0016)),
+        crush("bumper_beam_f", 0.0),
+        crush("bumper_beam_r", 0.0),
+    ];
+    for m in d.members.iter_mut().filter(|m| m.name == "rail_f") {
+        // (The bays' cuts set the strength: no tuned grading.)
+        m.scale = [1.0, 1.0];
+    }
     d.biw_mass = ACCORD_BIW;
     d.part_masses = vec![
         ("door_f".into(), ACCORD_DOOR_F),

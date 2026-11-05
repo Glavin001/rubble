@@ -812,6 +812,22 @@ transient.
 
 Files without these lines load as before, bit for bit.
 
+### 18.3 Rubble's `.truck` extension: JBeam's plastic limits on a beam (2026-11-05)
+
+**Rubble extension, not RoR** (`truck.rs`, `ExplicitBeams::set_jbeam_plastic`). A
+section `rubble_jbeam_plastic` of lines `a, b, deformLimitStress, deformLimit,
+deformLimitExpansion` turns the file's plain deformable beam between nodes a and b
+into a JBeam NORMAL beam (`JbeamPlain`, §3) with its spring, damping, thresholds,
+strength and plastic coefficient: its hardened thresholds never pass
+`deformLimitStress` (N), and its rest length stays within (1 − d)·L and (1 + dₑ)·L
+of its rest length L at load (a negative value: no limit). It loads exactly as
+JBeam mode loads those keys; the beam keeps the file's plastic coefficient (RoR's
+`set_beam_defaults` field) and has no RoR break exception (§2). The showcase car's
+crush members use it (`vehicle-authoring.md`, "Crush members"). The force law is
+per beam on the CPU and the GPU, so such a beam in a `.truck` vehicle runs §3's
+rule in both (`showcase_car_gpu` wall and side-pole counts match). Files without
+the section load as before, bit for bit.
+
 ## 19. Deform groups [B]
 
 `deformGroup` (string or table) names the groups a beam triggers; they drive visual

@@ -113,6 +113,7 @@ enum Section {
     TyrePose,
     SpawnContacts,
     ContactBreaks,
+    JbeamPlastic,
     Skipped,
 }
 
@@ -339,6 +340,14 @@ pub struct TruckFile {
     /// jbeam-semantics-spec.md §32): break group `group` goes off when the contact
     /// force on any of the nodes exceeds `force_N` in a step.
     pub contact_breaks: Vec<(u32, f32, Vec<u32>)>,
+    /// `rubble_jbeam_plastic` lines `a, b, deformLimitStress_N, deformLimit,
+    /// deformLimitExpansion` (Rubble's extension): the beam between nodes a and
+    /// b yields by JBeam's rule (`jbeam-semantics-spec.md` §3) with those
+    /// limits: its hardened thresholds never pass the stress cap, its rest
+    /// length never shortens past (1 − deformLimit) or lengthens past
+    /// (1 + deformLimitExpansion) of its spawn rest length (a negative value:
+    /// no limit). It keeps the file's plastic coefficient.
+    pub jbeam_plastic: Vec<(u32, u32, f32, f32, f32)>,
     pub wheels: Vec<TruckWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
@@ -622,6 +631,7 @@ impl Parser {
             "rubble_tyre_pose" => Section::TyrePose,
             "rubble_spawn_contacts" => Section::SpawnContacts,
             "rubble_contact_breaks" => Section::ContactBreaks,
+            "rubble_jbeam_plastic" => Section::JbeamPlastic,
             // Known sections this importer does not simulate (phase 3 / cosmetic).
             "engoption"
             | "engturbo"
@@ -1100,6 +1110,19 @@ impl Parser {
                         "rubble_contact_breaks needs group (> 0), force_N (> 0), nodes…: ignored"
                             .into(),
                     ),
+                }
+            }
+            Section::JbeamPlastic => {
+                let n: Vec<f32> = t.iter().filter_map(|x| x.parse::<f32>().ok()).collect();
+                if n.len() >= 5 && n[0] >= 0.0 && n[1] >= 0.0 {
+                    self.out
+                        .jbeam_plastic
+                        .push((n[0] as u32, n[1] as u32, n[2], n[3], n[4]));
+                } else {
+                    self.warn(
+                        "rubble_jbeam_plastic needs a, b, deformLimitStress, deformLimit, deformLimitExpansion: ignored"
+                            .into(),
+                    );
                 }
             }
             Section::TyrePose => {

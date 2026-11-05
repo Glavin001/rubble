@@ -576,6 +576,10 @@ struct Ledger {
     gravity: DVec3,
     drag: DVec3,
     internal: DVec3,
+    /// The f32 node sums' rounding of the beams' forces (N·s): each beam's
+    /// force is added to two nodes' f32 sums, each add off by up to an ulp
+    /// of the sum (about of the term).
+    force_rounding: f64,
     /// Σ m·ε·(|v| + |Δv|) over every velocity update: the f32 rounding
     /// bound on the momentum balance (N·s).
     rounding: f64,
@@ -608,6 +612,7 @@ impl Ledger {
             gravity: DVec3::ZERO,
             drag: DVec3::ZERO,
             internal: DVec3::ZERO,
+            force_rounding: 0.0,
             rounding: 0.0,
             e0,
             e_last: e0,
@@ -687,6 +692,12 @@ impl Ledger {
         let before: Vec<(f32, bool)> = s.beams.iter().map(|b| (b.rest, b.broken)).collect();
         s.step();
         self.steps += 1;
+        self.force_rounding += s
+            .beams
+            .iter()
+            .filter(|b| !b.broken)
+            .map(|b| 2.0 * f32::EPSILON as f64 * b.force.abs() as f64 * h as f64)
+            .sum::<f64>();
         for (n, v) in s.nodes.iter().zip(&vel) {
             self.rounding += (n.mass * f32::EPSILON * (v.length() + (n.vel - *v).length())) as f64;
         }
@@ -789,9 +800,11 @@ impl Ledger {
             self.rounding
         );
         assert!(
-            self.internal.length() <= self.rounding,
-            "({what}) internal forces sum to {:?} N·s",
-            self.internal
+            self.internal.length() <= self.rounding + self.force_rounding,
+            "({what}) internal forces sum to {:?} N·s (rounding bound {:.4} + the force sums' {:.4})",
+            self.internal,
+            self.rounding,
+            self.force_rounding
         );
         assert!(
             self.rise_window <= noise,
@@ -5058,6 +5071,32 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
             }
         }
         assert!(worst <= 0.75, "a node past the damping bound: {worst}");
+    }
+    // Crush members: every bay's cut yields at the section's mean crush
+    // force, and the `.truck` gives their beams JBeam's plastic limits, which
+    // the loader applies (JBeam NORMAL beams).
+    {
+        let file = engine_softbody::truck::parse_truck(&b.truck);
+        let sim = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+        let jb = sim
+            .beams
+            .iter()
+            .filter(|bm| bm.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamPlain)
+            .count();
+        eprintln!(
+            "crush: {} rubble_jbeam_plastic lines, {jb} JBeam NORMAL beams loaded",
+            file.jbeam_plastic.len()
+        );
+        assert!(!file.jbeam_plastic.is_empty());
+        assert_eq!(jb, file.jbeam_plastic.len());
+        for c in &b.def.crush {
+            eprintln!(
+                "crush member {:>14}: mean force {:.1} kN, deformLimit {}",
+                c.member,
+                c.mean_force / 1e3,
+                c.deform_limit
+            );
+        }
     }
     // Per member: its chords' real k against the built.
     const E: f32 = 210e9;

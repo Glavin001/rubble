@@ -639,7 +639,44 @@ pub struct VehicleDef {
     /// masses ([`DampingRatios`]); `None` keeps the grades' damping.
     #[serde(default)]
     pub damping: Option<DampingRatios>,
+    /// One tier: crush members that fold progressively ([`CrushSpec`]).
+    #[serde(default)]
+    pub crush: Vec<CrushSpec>,
 }
+
+/// One tier: a crush member (a rail, a bumper beam) that folds
+/// progressively at its section's mean crush force and stays folded. Every
+/// bay's cut (the beams of the member crossing the plane between two
+/// stations) yields axially at `mean_force` (Σ yield × |cos| of each beam
+/// to the member's axis); `mean_force` 0 keeps the built yields. Its beams
+/// take JBeam's plastic limits (`rubble_jbeam_plastic`,
+/// `jbeam-semantics-spec.md` §3): deformLimitStress = their yield (a fold
+/// does not harden) and `deform_limit` (the stack of folds bottoms out).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CrushSpec {
+    pub member: String,
+    /// The section's mean progressive crush force (N).
+    pub mean_force: f32,
+    /// JBeam's deformLimit: the share of a beam's length it may crush.
+    pub deform_limit: f32,
+}
+
+/// Abramowicz and Jones's mean progressive crush force of a thin-walled
+/// rectangular steel tube (N): P_m = 13.06·σ₀·t^(5/3)·C^(1/3), C = (b + d)/2,
+/// σ₀ = (σ_y + σ_u)/2 the flow stress (W. Abramowicz, N. Jones, "Dynamic
+/// axial crushing of square tubes", Int. J. Impact Eng. 2 (1984) 179–208,
+/// static, with the effective crushing distance 0.73 of the fold length;
+/// Wierzbicki and Abramowicz's 9.56 without it, J. Appl. Mech. 50 (1983)
+/// 727–734). `b`, `d`, `t` in m, stresses in Pa.
+pub fn progressive_crush_force(b: f32, d: f32, t: f32, sigma_y: f32, sigma_u: f32) -> f32 {
+    let c = 0.5 * (b + d);
+    13.06 * 0.5 * (sigma_y + sigma_u) * t.powf(5.0 / 3.0) * c.powf(1.0 / 3.0)
+}
+
+/// Abramowicz and Jones's effective crushing distance: the share of a
+/// tube's length a progressive fold stack crushes before it bottoms out
+/// (ibid.): a crush member's beams' deformLimit.
+pub const CRUSH_STROKE: f32 = 0.73;
 
 /// One tier: each beam's damping as a ratio ζ = c / (2·√(k·m₁m₂/(m₁+m₂)))
 /// of its own two-mass mode, per kind of part, so the ratio BeamNG's content
@@ -2830,6 +2867,9 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             &grade_of,
             &grades,
         );
+        for c in &def.crush {
+            one_tier_crush(&mut sk, c, &trusses, &truss_names, &groups)?;
+        }
         if let Some(z) = &def.damping {
             one_tier_damping(&mut sk, z, &groups, &grade_of, &grades);
             // The body dashpots at the BX body's damping-only beams' rate per
@@ -3102,6 +3142,95 @@ fn one_tier_real_stiffness(
         }
         let _ = REF_LENGTH;
     }
+}
+
+/// One tier: a crush member's bays yield axially at its mean crush force
+/// and its beams take JBeam's plastic limits ([`CrushSpec`]). The bays'
+/// cuts share bend beams (over two stations), so the scaling is iterated
+/// until every cut is within 1 % of the force.
+fn one_tier_crush(
+    sk: &mut Skeleton,
+    c: &CrushSpec,
+    trusses: &[Truss],
+    names: &[String],
+    groups: &HashMap<String, Vec<u32>>,
+) -> Result<(), String> {
+    let mut found = false;
+    for (ti, name) in names.iter().enumerate() {
+        if name != &c.member && name != &format!("{}_r", c.member) {
+            continue;
+        }
+        found = true;
+        let set: std::collections::HashSet<u32> =
+            groups.get(name).into_iter().flatten().copied().collect();
+        let beams: Vec<usize> = (0..sk.beams.len())
+            .filter(|&j| {
+                let b = &sk.beams[j];
+                b.ty == BeamType::Normal
+                    && b.group == 0
+                    && !b.damper
+                    && set.contains(&b.a)
+                    && set.contains(&b.b)
+            })
+            .collect();
+        for &j in &beams {
+            sk.beams[j].plastic_limits = Some((1.0, c.deform_limit));
+        }
+        if c.mean_force <= 0.0 {
+            continue;
+        }
+        let t = &trusses[ti];
+        let centre = |st: &[u32; 4]| st.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / 4.0;
+        // Per bay: the crossing beams and their cosines to the axis.
+        let mut cuts: Vec<Vec<(usize, f32)>> = Vec::new();
+        for w in t.stations.windows(2) {
+            let (c0, c1) = (centre(&w[0]), centre(&w[1]));
+            let n = (c1 - c0).normalize_or_zero();
+            let m = 0.5 * (c0 + c1);
+            let cut: Vec<(usize, f32)> = beams
+                .iter()
+                .copied()
+                .filter_map(|j| {
+                    let (pa, pb) = (sk.pos(sk.beams[j].a), sk.pos(sk.beams[j].b));
+                    let (sa, sb) = ((pa - m).dot(n), (pb - m).dot(n));
+                    (sa * sb < 0.0).then(|| (j, (pb - pa).normalize_or_zero().dot(n).abs()))
+                })
+                .collect();
+            if !cut.is_empty() {
+                cuts.push(cut);
+            }
+        }
+        let cap = |sk: &Skeleton, cut: &[(usize, f32)]| -> f32 {
+            cut.iter().map(|&(j, cs)| sk.beams[j].mat.deform * cs).sum()
+        };
+        for _ in 0..50 {
+            let mut worst = 0.0f32;
+            for cut in &cuts {
+                let f = c.mean_force / cap(sk, cut).max(1e-3);
+                worst = worst.max((f - 1.0).abs());
+                for &(j, _) in cut {
+                    sk.beams[j].mat.deform *= f.sqrt();
+                }
+            }
+            if worst < 0.01 {
+                break;
+            }
+        }
+        let off = cuts
+            .iter()
+            .map(|cut| (cap(sk, cut) / c.mean_force - 1.0).abs())
+            .fold(0.0f32, f32::max);
+        if off > 0.05 {
+            return Err(format!(
+                "crush member {name}: a bay's cut is {:.0} % off its mean force",
+                off * 100.0
+            ));
+        }
+    }
+    if !found {
+        return Err(format!("crush member {}: no such member", c.member));
+    }
+    Ok(())
 }
 
 /// One tier: every steel, glass and fascia beam's damping set to its part's

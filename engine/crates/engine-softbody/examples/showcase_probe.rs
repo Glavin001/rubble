@@ -2068,7 +2068,16 @@ fn main() {
                 .map(|&i| p[i as usize].y - spawn_pos[i as usize].y)
                 .sum::<f32>()
                 / g.len() as f32;
-            eprintln!("  {n:>16} dy {dy:+.3}");
+            // (And along the car: the group's mean and its extremes.)
+            let dz: Vec<f32> = g
+                .iter()
+                .map(|&i| p[i as usize].z - spawn_pos[i as usize].z)
+                .collect();
+            let mz = dz.iter().sum::<f32>() / dz.len() as f32;
+            let (lo, hi) = dz
+                .iter()
+                .fold((f32::MAX, f32::MIN), |a, &x| (a.0.min(x), a.1.max(x)));
+            eprintln!("  {n:>16} dy {dy:+.3} dz {mz:+.3} ({lo:+.3}..{hi:+.3})");
         }
     }
 }
