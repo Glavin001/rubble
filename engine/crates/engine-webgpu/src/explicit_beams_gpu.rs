@@ -87,6 +87,69 @@ pub struct ExplicitBeamsGpu {
     probe: Option<wgpu::Buffer>,
     /// The `EB_DET_HITS` variants' hit lists (binding 12).
     det: Option<wgpu::Buffer>,
+    /// The rigid coupling's regions ([`Self::with_coupling`]).
+    coupling: Option<CouplingLayout>,
+    acc: wgpu::Buffer,
+    couple_rec: u32,
+}
+
+/// Room for rigid-body proxies per vehicle ([`ExplicitBeamsGpu::with_coupling`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CouplingCapacity {
+    /// Proxy bodies, shapes (at most 255) and hull planes per vehicle.
+    pub bodies: u32,
+    pub shapes: u32,
+    pub planes: u32,
+}
+
+/// Where the coupling's records live (`explicit_beams_rigid.slang`): gMisc records from
+/// `misc_base`, `recs` per vehicle (a header, then 5 per body, 7 per shape, 1 per plane);
+/// gAcc words from `acc_base`, `bodies + 6 shapes` per vehicle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CouplingLayout {
+    pub cap: CouplingCapacity,
+    pub vehicles: u32,
+    pub misc_base: u32,
+    pub acc_base: u32,
+}
+
+impl CouplingLayout {
+    pub const BODY_RECS: u32 = 5;
+    pub const SHAPE_RECS: u32 = 7;
+
+    fn new(cap: CouplingCapacity, vehicles: u32, misc_base: u32, acc_base: u32) -> Self {
+        assert!(cap.shapes <= 255 && cap.planes < 1 << 24, "explicit coupling: at most 255 shapes per vehicle");
+        Self { cap, vehicles, misc_base, acc_base }
+    }
+    /// Records per vehicle.
+    pub fn recs(&self) -> u32 {
+        1 + self.cap.bodies * Self::BODY_RECS + self.cap.shapes * Self::SHAPE_RECS + self.cap.planes
+    }
+    pub fn misc_words(&self) -> u32 {
+        self.recs() * self.vehicles
+    }
+    pub fn acc_per_vehicle(&self) -> u32 {
+        self.cap.bodies + 6 * self.cap.shapes
+    }
+    pub fn acc_words(&self) -> u32 {
+        self.acc_per_vehicle() * self.vehicles
+    }
+    /// gMisc record of vehicle v's header, body j, shape k, plane i.
+    pub fn vehicle(&self, v: u32) -> u32 {
+        self.misc_base + v * self.recs()
+    }
+    pub fn body(&self, v: u32, j: u32) -> u32 {
+        self.vehicle(v) + 1 + j * Self::BODY_RECS
+    }
+    pub fn shape(&self, v: u32, k: u32) -> u32 {
+        self.vehicle(v) + 1 + self.cap.bodies * Self::BODY_RECS + k * Self::SHAPE_RECS
+    }
+    pub fn plane(&self, v: u32, i: u32) -> u32 {
+        self.vehicle(v) + 1 + self.cap.bodies * Self::BODY_RECS + self.cap.shapes * Self::SHAPE_RECS + i
+    }
+    pub fn acc(&self, v: u32) -> u32 {
+        self.acc_base + v * self.acc_per_vehicle()
+    }
 }
 
 /// Which kernel runs the frames: the shipped one, or (tests only) the frozen
@@ -474,6 +537,18 @@ impl ExplicitBeamsGpu {
     /// Upload `vehicles` (their current state: positions, velocities, forces, beam
     /// state, throttles, origin).
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, vehicles: &[ExplicitBeams]) -> Self {
+        Self::with_coupling(device, queue, vehicles, None)
+    }
+
+    /// [`Self::new`] with room for rigid-body proxies per vehicle (the World coupling,
+    /// `slang/kernels/explicit_beams_rigid.slang`, [`CouplingLayout`]); off until the
+    /// host writes the coupling header's `on` word.
+    pub fn with_coupling(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+    ) -> Self {
         let nv = vehicles.len();
         // Beam records carry the vehicle index in 16 bits.
         assert!(nv <= 1 << 16, "explicit beams GPU: at most 65536 vehicles, got {nv}");
@@ -1007,6 +1082,10 @@ impl ExplicitBeamsGpu {
         // The node grab ([`ExplicitBeamsGpu::set_grab`]): 2 records right after them
         // (the kernel's grabRec()), off until set.
         misc.extend(std::iter::repeat_n([0u32; 4], 2));
+        // The rigid coupling's header (the kernel's coupleRec()): (on, region, B, S |
+        // planes << 8), (gAcc region, 0, 0, 0); the regions are placed below.
+        let couple_rec = misc.len();
+        misc.extend(std::iter::repeat_n([0u32; 4], 2));
         // Vehicle contact: per triangle its contact throttle; per vehicle its records;
         // per group its record.
         let vv_tri_base = misc.len() as u32;
@@ -1104,6 +1183,14 @@ impl ExplicitBeamsGpu {
         acc_init.extend(std::iter::repeat_n(0, 2 * nv));
         // Last: the loop-cap flag (the WGSL post-process's `cap_explicit_loops`
         // writes gAcc's last word).
+        let coupling = coupling.map(|cap| {
+            let layout = CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
+            misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
+            acc_init.extend(std::iter::repeat_n(0, layout.acc_words() as usize));
+            misc[couple_rec] = [0, layout.misc_base, cap.bodies, cap.shapes | cap.planes << 8];
+            misc[couple_rec + 1] = [layout.acc_base, 0, 0, 0];
+            layout
+        });
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -1391,6 +1478,9 @@ impl ExplicitBeamsGpu {
             alts: Vec::new(),
             probe: None,
             det: None,
+            coupling,
+            acc,
+            couple_rec: couple_rec as u32,
         }
     }
 
@@ -1786,6 +1876,29 @@ impl ExplicitBeamsGpu {
     }
 
     /// The first node of vehicle `v` in [`Self::nodes_buffer`] (in nodes).
+    /// The rigid coupling's layout, when built [`Self::with_coupling`].
+    pub fn coupling(&self) -> Option<CouplingLayout> {
+        self.coupling
+    }
+
+    /// The accumulators `GPUBuffer` (gAcc; the coupling's sums, [`CouplingLayout`]).
+    pub fn acc_buffer(&self) -> &wgpu::Buffer {
+        &self.acc
+    }
+
+    /// Turn the rigid coupling on or off from the next frame (its header's `on` word).
+    /// Panics without [`Self::with_coupling`]. On, the frames run on the per-vehicle
+    /// workgroups (the wide passes do not run the coupling; the same steps, as
+    /// [`Self::set_wide`] off).
+    pub fn set_coupling_on(&mut self, on: bool) {
+        assert!(self.coupling.is_some(), "explicit beams: built without coupling room");
+        if on {
+            self.set_wide(false);
+        }
+        self.queue
+            .write_buffer(&self.misc, u64::from(self.couple_rec) * 16, bytemuck::bytes_of(&(on as u32)));
+    }
+
     pub fn node_offset(&self, v: usize) -> u32 {
         self.spans[v].node_off
     }

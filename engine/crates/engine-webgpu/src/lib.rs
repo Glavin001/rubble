@@ -8,6 +8,8 @@
 #[cfg(feature = "gpu")]
 mod explicit_beams_gpu;
 #[cfg(feature = "gpu")]
+pub mod explicit_coupling;
+#[cfg(feature = "gpu")]
 mod features;
 #[cfg(feature = "gpu")]
 mod gpu;
@@ -21,7 +23,8 @@ pub mod metal_interop;
 mod soft_skin;
 #[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
-    explicit_beams_shipped_wgsl, render_scene_json, ExplicitBeamsGpu, GpuBeam, GpuSnapshot, KernelVariant,
+    explicit_beams_shipped_wgsl, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu, GpuBeam,
+    GpuSnapshot, KernelVariant,
 };
 #[cfg(feature = "gpu")]
 pub use features::{
@@ -382,7 +385,7 @@ include!("wgsl_loop_cap.rs");
 /// Chrome treats a storage/workgroup load as non-uniform, so a later barrier
 /// inside `if (lanes == 1)` is rejected. `workgroupUniformLoad` makes it uniform.
 fn uniformize_workgroup_lanes(src: &str) -> String {
-    const NAMES: [&str; 3] = ["gsUniformLanes_0", "gsUniformHits_0", "gsUniformOpen_0"];
+    const NAMES: [&str; 4] = ["gsUniformLanes_0", "gsUniformHits_0", "gsUniformOpen_0", "gsUniformCouple_0"];
     let mut out = src.to_string();
     for name in NAMES {
         if !out.contains(name) {
