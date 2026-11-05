@@ -347,12 +347,21 @@ The character lines are:
   line reads as a crisp line of light instead of a blur one row (2.2 cm) wide.
 * **Bonnet.** Two power-dome creases run from 0.22 m off the centre at the nose
   to 0.60 m at the cowl (out toward the A-pillars), the dome 1.4 cm proud
-  between them (`hood_crease`); a lid column lies on each crease. The bonnet's
-  leading edge and the boot deck roll over in 4–5 cm (`nose_ramp`,
-  `tail_ramp`), and the deck's sides in 10 cm (`deck_ramp`), instead of the
-  greenhouse's long tumblehome ramp; the deck kicks up 2.6 cm into an
-  integrated lip spoiler (`deck_lip`). These details are added after the lid
-  is relaxed, so they stay crisp.
+  between them (`hood_crease`), faded in and out over 30–35 cm C2 ramps; a
+  column of the top lies on each crease, with a fillet column 6 mm either
+  side. The bonnet's leading edge and the boot deck roll over in 4–5 cm
+  (`nose_ramp`, `tail_ramp`; the ramp's length is blurred round the corners,
+  σ 8 cm, so the corner's surface does not twist); the bonnet's edges round
+  over a third of the fender ramp (`bonnet_edge`); the deck kicks up 2.6 cm
+  into an integrated lip spoiler (`deck_lip`).
+* **Deck ledge and C-pillar.** Behind the cabin the ramp is a second family
+  (`rear_deck`): a crisp roll off the belt, its width solved so it lands on
+  the deck's level carried forward as the quarter's ledge, a 3.5 cm fillet
+  where the C-pillar's sail rises off the ledge, the rail round into the
+  backlight. The fillet's line (the sail's base) sweeps out from the
+  backlight's foot to the belt under the quarter light; as the ledge comes
+  down to the belt it tilts up to the glass's slope, so it merges into the
+  shoulder without a notch.
 * **Fascia.** Raked: the widest line low (0.56 m), the upper fascia leaning
   14 cm back into the bonnet. A low trapezoid grille (0.66 m wide at the
   top, 0.89 m at the bottom, 0.22 m tall, its top edge just under the
@@ -364,7 +373,11 @@ The character lines are:
   rising into a tall air curtain with two gloss-black fins), so the corner
   stays a sculpted surface;
   a gloss-black splitter blade standing 3 cm proud along the bumper's lower
-  edge; no front plate (`plate_front_h` NaN).
+  edge; no front plate (`plate_front_h` NaN). The bumper rises into a
+  body-colour collar round the grille (1 cm proud, its crest 2.2 cm outside
+  the opening, `collar`), and under a crisp crease at 0.405 m (a band row:
+  the lower feature row, `lip`) the chin stands 1.4 cm proud. At the tail the
+  same row carries a crease at 0.53 m with the bumper 1 cm proud under it.
 * **Arch flares.** The front arches swell 1.8 cm over a 19 cm band (blending
   into the door, not bulging past it), the rear haunches 3.6 cm over a
   tighter 15 cm (`rear_flare`: a firm shoulder over the rear wheel), giving a
@@ -383,9 +396,9 @@ The character lines are:
 * **Tumblehome.** The side glass leans in by about 22°, from the belt at a half
   width of about 0.86 m to the roof rail at about 0.66 m. The roof, bonnet and
   deck are crowned (bonnet and deck 3.4 cm).
-* **Belt kick and DLO.** The rear deck's shoulder falls to the belt along a
-  C2 curve (`body::smootherstep`, z 0.85 to 1.50 m), so its highlight runs
-  into the belt as one curve. `BodySurface::belt(z)` is that feature line:
+* **Belt kick and DLO.** The deck ledge falls to the belt along a C2 curve
+  (`body::ledge_y`, z 0.85 to 1.50 m), so its highlight runs into the belt
+  as one curve. `BodySurface::belt(z)` is that feature line:
   the quarter light sits on it and its rear edge sweeps back along the
   C-pillar to a point on the belt, so the daylight opening reads as one swept
   shape tapering rearward. The B-pillar blackout is 8 cm; the rear door's
@@ -414,7 +427,7 @@ opening's edge, the doors' belt edges included, is black rubber.
 
 | Part | Construction |
 |---|---|
-| Body surface (`parts/body.rs`) | A *band* is swept round the plan outline: a section per arc length θ, blended between side, nose and tail shapes. The crease and lower line fall on fixed rows, so their highlights run straight. A *lid* (height field over plan view) runs from the band's top edge over a ramp (tumblehome, fender tops) to the profile's top line and crown. The ramp's round into the top is a quartic with zero curvature at both ends (`body::rail`) and the crown fades as (1 − u²)³, so no line of light runs along the roof rail or the fender tops. The rear deck meets the greenhouse in a 3.5 cm smooth max (the C-pillar's fillet into the quarter). The lid is relaxed by a Laplacian. The profile's curves are blurred (σ 8 cm), and the styling's crease line (σ 12 cm), so the clearcoat shows no ripples or kinks at their control points; the ramp's round and the shoulder's roll follow the top line's rise per row and averaged over ±30 cm (not per point), so the fender tops meet the A-pillars without wavy highlights. Grid: 2.2 cm across the sections, 3.5 cm along the car (twice that at the distant LOD). |
+| Body surface (`parts/body.rs`) | Patches between explicit feature curves. **Band** (sides, bumpers, fascia, tail): a section swept round the plan outline per arc length θ, blended between side, nose and tail shapes, a cubic span between each pair of feature rows (curl, lower line, lower-door crease or lip crease, shoulder crease, belt); the crisp lines lie on rows with fillet rows a few millimetres either side. **Ramp** (fender tops, greenhouse sides and pillars, C-pillar sails, quarter tops, the bonnet's and deck's roll-overs): between the belt and the top line (the belt offset inward by the ramp's length), per column a section of slope plateaus joined by smoothstep windows (`Ramp`): it leaves the belt on the band's slope and curvature, rounds over a controlled width (the shoulder; a crisp roll onto the deck ledge), runs straight, and rounds into the top on the top's slope and curvature, so curvature is continuous across both feature curves and a crisp line is a window of known width. Its rows lie on the windows' edges, spaced by arc length and by turn (a row per 15° of slope). **Top** (bonnet, windscreen, roof, backlight, deck): an analytic crowned height field over plan view with the power domes and the boot lip; its rows are anchored on the top line's vertices (with rows between them, fanning into the next vertex, where they are far apart) and a column lies on each dome crease. Every normal is the patch function's own (central differences of it, not of the mesh); the lookups are Catmull–Rom, so no normal steps between samples. The profile's curves are blurred (σ 8 cm), and the styling's crease line (σ 12 cm). Grid: 2.2 cm across the sections (coarser over the lower body, the flat spans and the top), 3.5 cm along the car (about twice that at the distant LOD). The highlight check: `showcase-car.html?zebra=1|2|3` (reflected stripes along the car, across it, level bands) and `cargo run --release -p engine-softbody --example showcase_zebra -- DIR` (a software render of the cut pieces; `RAW=1 WIRE=1` the uncut surface tinted by patch). |
 | Panels (`parts/trim.rs`, `design.rs`) | Each panel is a region (an SDF made of smooth cut lines in side, plan or arc view), made metric on the surface and clipped by marching triangles, so edges follow the curve, not the grid. Every cut is rolled (2.8 mm radius) into a 12 mm wall and a return flange, set back 2.2 mm, giving a 4.5 mm shut line. Arch lips get an 8 mm roll. The inside of a panel renders dark. Panels: bonnet, cowl (black), lip and bumper front, fenders, doors, deck lid, valance and bumper rear, sills (black), body. |
 | Glass | The body surface over each opening, set 3 mm in (nearly flush), with a black frit band printed inside the windscreen and backlight. The side windows sit in slim (1 cm) black sash frames, with a satin-black B-pillar applique (`mat::PILLAR`, one half on each door: no mirror-bright sky once the doors move) and a chrome belt moulding. The windscreen is laminated (it cracks); the side glass is tempered (it shatters). The rear doors', quarter lights' and backlight's glass is privacy-tinted (`mat::PRIVACY`). |
 | Lamps (`fixtures::lamp`) | A lens continuing the body surface; a housing extruded along the lamp axis; a reflector back; small projector cups with lens domes; light guides that follow the outline (the DRL ring; two tail rings; the light bar; the fog lamps' LED line). |
@@ -554,7 +567,9 @@ shapes) and the profile. The tools stay the same.
   `fov=` radians); `node showcase-car-check.mjs --size 1920x1080 [--only
   rest_three,...]` takes headless screenshots (close-ups: `rest_low`,
   `rest_nose`, `rest_back`, `rest_head`, `rest_tail`, `rest_wheel`,
-  `rest_interior`, `rest_dash`, `rest_screen`, `rest_fplate`).
+  `rest_interior`, `rest_dash`, `rest_screen`, `rest_fplate`; zebra close-ups
+  `zebra_three`, `zebra_bonnet`, `zebra_apillar`, `zebra_side`,
+  `zebra_cpillar`, `zebra_deck`, `zebra_nose`, `zebra_tail`).
 * `node --experimental-websocket crash-lab-check.mjs --car showcase [--size 1920x1080]`:
   the crash lab's presets with the skinned body (`--size` sets the
   screenshots' size, 1280x720 by default).

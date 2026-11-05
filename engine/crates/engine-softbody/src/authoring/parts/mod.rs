@@ -8,10 +8,11 @@
 //! spacing: [`super::skin`] binds every piece to the solver's triangles
 //! afterwards, so the same mesh rides a coarse or a dense skeleton.
 //!
-//! * [`body`]: the body surface: a lower *band* swept round the plan outline
-//!   (bumpers, sides, the tail) and a *lid* over it (bonnet, greenhouse, deck),
-//!   one connected triangle mesh with smooth section curves, a shoulder crease,
-//!   arch flares and tumblehome;
+//! * [`body`]: the body surface as patches between explicit feature curves: a
+//!   *band* swept round the plan outline (bumpers, sides, the tail), a *ramp*
+//!   from the belt to the top line (fender tops, greenhouse sides, the deck
+//!   ledge and C-pillars) and the *top* (bonnet, roof, deck), one connected
+//!   triangle mesh meshed along those curves, with the surface's own normals;
 //! * [`trim`]: cutting that surface into panels: regions as signed distance
 //!   functions, marching triangles, rolled panel edges with a real gap and a
 //!   return flange, offset copies (glass, inner skins);
