@@ -2243,7 +2243,9 @@ impl ExplicitBeams {
                         n.friction,
                     );
                     n.force += if n.has(NODE_FRICTION_LIMIT) {
-                        crate::explicit_jbeam_ext::friction_limit(c, n.force, n.vel, n.mass, Vec3::Y, h)
+                        crate::explicit_jbeam_ext::friction_limit(
+                            c, n.force, n.vel, n.mass, Vec3::Y, h, ground - x.y,
+                        )
                     } else {
                         c
                     };

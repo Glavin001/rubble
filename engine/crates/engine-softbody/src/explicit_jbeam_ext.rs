@@ -301,10 +301,23 @@ pub fn pressure_tri_force(x0: Vec3, x1: Vec3, x2: Vec3, p: f32) -> Vec3 {
 }
 
 /// A ground contact force `c` on a node (force `f` before it, velocity `v`, mass
-/// `m`, normal `n`) with its tangential part limited so it at most stops the
-/// node's slip in one step `h` (spec §28): an explicit friction force on a light,
-/// heavily loaded node otherwise reverses the slip every step and grows.
-pub fn friction_limit(c: Vec3, f: Vec3, v: Vec3, m: f32, n: Vec3, h: f32) -> Vec3 {
+/// `m`, normal `n`, depth `p`) with its normal part limited so the node rises at
+/// most half its depth in one step `h`, and its tangential part so it at most
+/// stops the node's slip in one step (spec §28): on a light, heavily loaded node
+/// the explicit laws otherwise overshoot every step.
+pub fn friction_limit(c: Vec3, f: Vec3, v: Vec3, m: f32, n: Vec3, h: f32, p: f32) -> Vec3 {
+    // The node leaves at most half its depth `p` in one step: the solver's pop-out
+    // (0.2 of the depth per step, as a velocity the node keeps) otherwise throws a
+    // heavily loaded light node clear of the ground, and its load drives it back
+    // in at metres per second the next step. Half keeps it in contact.
+    let mut c = c;
+    let cn = c.dot(n);
+    let out = v.dot(n) + (f.dot(n) + cn) * (h / m);
+    let most = 0.5 * p / h;
+    if cn > 0.0 && out > most {
+        let capped = ((most - v.dot(n)) * (m / h) - f.dot(n)).max(0.0);
+        c += n * (capped - cn);
+    }
     let total = f + c;
     let t = total - total.dot(n) * n;
     let vt = v - v.dot(n) * n;

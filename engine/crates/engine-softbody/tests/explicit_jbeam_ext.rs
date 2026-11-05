@@ -351,7 +351,10 @@ fn pressure_wheel_car_stands_on_its_tyres() {
     s.run(4.0);
     let ke = kinetic(&s);
     println!("kinetic energy at 4 s: {ke} J");
-    assert!(ke < 1.0, "settled: {ke} J");
+    // Settled to chatter: about 1 J of the car rocking on its 12-ray tyres'
+    // flats (±3 cm at about 1 Hz, spec §28) since the ground rule's normal part;
+    // 0.25 J before, when the tread nodes' bounce on the ground damped it.
+    assert!(ke < 2.0, "settled: {ke} J");
     assert_eq!(s.damage().0, 0, "nothing broke");
     let sag = chassis_y0 - s.nodes[node(&d, "flt") as usize].pos.y;
     assert!(sag > 0.0 && sag < 0.08, "tyres carry the car: sag {sag}");
@@ -391,3 +394,107 @@ fn slide_node_hangs_on_its_rail() {
     );
     assert!(p.x > 0.2, "free along it: {p}");
 }
+
+/// Rest creep (spec §28): the horizontal centre of mass sampled every 0.1 s over
+/// `window` s after `settle` s; returns (fitted drift over the window, the sway
+/// about that fit), both the larger of x and z, in metres. Exact physics: at rest
+/// on flat ground no net horizontal force acts, so a straight-line fit of the
+/// centre of mass moves no more than the sway (the at-rest chatter) around it.
+fn creep(s: &mut ExplicitBeams, settle: f32, window: f32) -> (f32, f32) {
+    s.run(settle);
+    let mass: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let mut samples = Vec::new();
+    let n = (window / 0.1).round() as usize;
+    for k in 0..=n {
+        if k > 0 {
+            s.run(0.1);
+        }
+        let c = s.nodes.iter().map(|n| n.pos * n.mass).sum::<Vec3>() / mass;
+        samples.push((0.1 * k as f64, c));
+    }
+    let (mut drift, mut sway) = (0.0f32, 0.0f32);
+    for axis in [0usize, 2] {
+        let t: Vec<f64> = samples.iter().map(|s| s.0).collect();
+        let y: Vec<f64> = samples.iter().map(|s| s.1[axis] as f64).collect();
+        let (tm, ym) = (t.iter().sum::<f64>() / t.len() as f64, y.iter().sum::<f64>() / y.len() as f64);
+        let slope = t.iter().zip(&y).map(|(a, b)| (a - tm) * (b - ym)).sum::<f64>()
+            / t.iter().map(|a| (a - tm).powi(2)).sum::<f64>();
+        let resid = t
+            .iter()
+            .zip(&y)
+            .map(|(a, b)| (b - ym - slope * (a - tm)).abs())
+            .fold(0.0, f64::max);
+        drift = drift.max((slope * window as f64).abs() as f32);
+        sway = sway.max(resid as f32);
+    }
+    (drift, sway)
+}
+
+#[test]
+fn pressure_wheel_car_does_not_creep_at_rest() {
+    let (mut s, _, _) = spawn_text(PART2_CAR, JbeamWheels::Pressure, Vec3::ZERO);
+    let drop = lowest(&s) - 0.02;
+    for n in &mut s.nodes {
+        n.pos.y -= drop;
+    }
+    let (drift, sway) = creep(&mut s, 2.0, 4.0);
+    println!("fixture car: drift {drift} m over 4 s, sway {sway} m");
+    // Rounding: 1 mm.
+    assert!(drift <= sway + 1e-3, "creeps {drift} m (sway {sway} m)");
+}
+
+/// The normal part of the pressure-wheel ground rule (spec §28): a light node
+/// under a heavy load, 9 mm deep, rises at most half its depth in a step.
+#[test]
+fn loaded_tread_node_is_pushed_to_the_surface_not_past_it() {
+    use engine_softbody::explicit_beams::{contact_force, ContactSurface};
+    use engine_softbody::explicit_jbeam_ext::friction_limit;
+    let (m, f, p) = (0.12, Vec3::new(0.0, -5000.0, 0.0), 0.009);
+    for vy in [-0.5f32, 0.0, 3.0] {
+        let v = Vec3::new(0.0, vy, 0.0);
+        let c = contact_force(f, v, m, Vec3::Y, STEP, &ContactSurface::GROUND, p, 1.0);
+        let c = friction_limit(c, f, v, m, Vec3::Y, STEP, p);
+        let out = vy + (f.y + c.y) * STEP / m;
+        assert!(out * STEP <= 0.5 * p * (1.0 + 1e-4), "vy {vy}: rises {out} m/s");
+        assert!(c.y >= 0.0);
+    }
+}
+
+/// Community vehicles (opt-in, `RUBBLE_BEAMNG_MODS=<inspiration/beamng-mods>`):
+/// no rest creep with pressure wheels.
+#[test]
+fn community_vehicles_do_not_creep_at_rest() {
+    let Ok(mods) = std::env::var("RUBBLE_BEAMNG_MODS") else {
+        eprintln!("skip: RUBBLE_BEAMNG_MODS not set");
+        return;
+    };
+    let m = std::path::Path::new(&mods);
+    for (dir, name, pc) in [
+        ("monster_supercar/vehicles", "supercar", "config.pc"),
+        ("qlourie_astral_r/vehicles", "qlourie_astral_r", "wrc17_tarmac_balanced.pc"),
+    ] {
+        let dir = m.join(dir);
+        let Ok(files) = engine_softbody::jbeam::read_vehicle_dir(&dir, name) else {
+            continue;
+        };
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let pcs = std::fs::read_to_string(dir.join(name).join(pc)).unwrap();
+        let desc = load_jbeam(&refs, Some(&pcs)).unwrap();
+        let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(
+            &desc,
+            JbeamWheels::Pressure,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            settings(),
+        )
+        .unwrap();
+        let drop = lowest(&s) - 0.02;
+        for n in &mut s.nodes {
+            n.pos.y -= drop;
+        }
+        let (drift, sway) = creep(&mut s, 2.0, 8.0);
+        println!("{name}: drift {drift} m over 8 s, sway {sway} m");
+        assert!(drift <= sway + 1e-3, "{name} creeps {drift} m (sway {sway} m)");
+    }
+}
+

@@ -720,6 +720,28 @@ the step's limits, apply in JBeam mode only, and the spawn warns with their coun
   tangential force at most stops the node's slip in one step: the solver's friction
   law's viscous branch, on light tread nodes carrying a tyre's pressure load, would
   otherwise reverse the slip every step and grow.
+* **Tyre ground push** (2026-11-05). On a pressure-wheel node the ground's normal
+  push lets the node rise at most half its depth p in one step (velocity out of the
+  ground ≤ 0.5·p/h). The solver's contact restores 0.2 of the depth per step as a
+  velocity the node keeps; a 0.12 kg tread node under the 5 kN of its wheel's load
+  then left the ground every 8 steps, fell back 9 mm in one step at 17 m/s, and the
+  friction of those landings walked the Monster supercar sideways 0.15 m/s at rest
+  (0.5 m in 4 s, with either damping law). At most half keeps the node in contact.
+  Rest creep, `tests/explicit_jbeam_ext.rs` `creep` (exact physics: no net
+  horizontal force on a car at rest, so a straight-line fit of its centre of mass
+  over 8 s after 2 s may move no more than the sway around it, plus 1 mm):
+
+  | | drift / sway before | after |
+  |---|---|---|
+  | Monster supercar | 214 / 156 mm (**creeps**) | 1.5 / 45 mm |
+  | Astral R | — | 1.6 / 24 mm |
+  | fixture car (`PART2_CAR`, 4 s) | 1.5 / 9.5 mm | 23 / 60 mm |
+
+  Factors measured (supercar drift / fixture KE at 4 s): 1.0 (back to the surface,
+  where the node then loses its support): 53 mm / 9.9 J; 0.5: 1.5 mm / 1.0 J;
+  0.2 (the solver's own fraction): 34 mm / 11.5 J. The fixture car keeps about 1 J
+  of rocking on its 12-ray tyres' flats (±3 cm fore and aft at about 1 Hz; 0.25 J
+  before, when the bouncing tread damped it). Open.
 
 ## 29. Acceptance vehicles (CPU reference, 2026-11-05)
 
@@ -747,6 +769,22 @@ crashes (wrc17_tarmac_balanced.pc, CPU):
 
 Its JBeam has no meshes (the author's repository leaves the `.dae` files out), so it
 does not count for B3's "with flexbodies".
+
+**On the GPU** (`engine-webgpu/tests/explicit_jbeam_community_gpu.rs`, opt-in
+`RUBBLE_BEAMNG_MODS`, `RUBBLE_JBEAM_DIR`; RC damping law and §28's ground push;
+M3 Max, 2026-11-05). Rest 4 s, then a rigid wall at 56 km/h for 1.5 s; CPU / GPU:
+
+| vehicle | rest: broken, KE | rest: GPU − CPU positions | wall: broken / bent | wall: KE left (of the impact's) |
+|---|---|---|---|---|
+| Monster supercar | 0 / 0, 34.3 / 34.3 J | 0.00 mm (bit for bit) | 0 / 34, 0 / 34 | 13.8 / 13.8 kJ (237 kJ) |
+| Astral R | 0 / 0, 8.3 / 11.1 J | rms 10 mm, max 19 mm | 251 / 266, 218 / 273 | 22.8 / 19.4 kJ (245 kJ) |
+| AgentY legocar | 0 / 0, 85 / 58 J | rms 64 mm, max 153 mm | 486 / 11, 527 / 11 | 1.9 / 1.5 kJ (172 kJ) |
+
+The supercar has no self-collision nodes and matches bit for bit; the GPU's
+self-collision forces are fixed point (§14), so the other two part ways at rest
+(their parked chatter) and in the crash (chaotic: counts within 25 %, the test's
+rule). The supercar is a stiff space frame: it bends 34 beams, breaks none, and
+rebounds off the wall (its centre of mass rises 0.6 m as it pitches).
 
 ## 30. GPU layout of Part II and verification
 
