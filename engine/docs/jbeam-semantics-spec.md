@@ -548,8 +548,16 @@ the layout below, Rubble's own.
   side at the same angles). Masses `hubNodeWeight` / `nodeWeight` (`hubWeight`,
   `tireWeight` divided over their 2N nodes override them). Tyre nodes collide with the
   ground and statics with their `frictionCoef`; no self-collision; hub nodes collide.
+* **Settings across parts.** BeamNG splits a wheel over parts (a part with the
+  rows, rim and tyre parts with modifiers only). **Choice:** a row takes the
+  pressureWheels modifiers of every part of each slot subtree around its own part,
+  from the whole vehicle down to its own part (nearer subtrees override; within one,
+  assembly order, later wins), then its own part's and its own options.
 * **Beams** (each set's `Spring`, `Damp`, `Deform`, `Strength`, `DampCutoffHz`,
-  `Precompression`, missing values from the row's beam defaults):
+  `Precompression`; **Choice** for missing values: no deform, no break, and for the
+  hub sets the stiffest spring the step integrates with margin on the hub nodes,
+  k = 0.04·m/h² (ω·h = 0.2 per beam) with damping 0.2·√(k·m); other sets
+  4.3 MN/m and 580 N·s/m):
   * `hubBeam`: hub(k, i) to the other side's axle node; `hubSideBeam`: to its own
     side's axle node (radial spokes);
   * `hubTreadBeam`: hub(0, i)–hub(1, i) and hub(0, i)–hub(1, i + 1);
@@ -561,9 +569,9 @@ the layout below, Rubble's own.
   * `wheelReinfBeam` (`enableTireReinfBeams`, unless L-beams): tyre(k, i)–hub(1 − k, i);
   * L-beams (`enableTireLbeams`; `wheelLbeamSpring`… else the side beam's values):
     vertex tyre(k, i) with ends hub(k, i) and tyre(1 − k, i) (lateral), and hub(k, i)
-    and tyre(k, i + 1) (shear: torque between hub and tread);
+    with tyre(k, i ± 1) (shear: torque between hub and tread, both senses);
   * `wheelTreadBeam`: tyre(0, i)–tyre(1, i); `wheelTreadReinfBeam`
-    (`enableTreadReinfBeams`): tyre(0, i)–tyre(1, i ± 1);
+    (`enableTreadReinfBeams`): tyre(0, i)–tyre(1, i + 1);
   * `wheelPeripheryBeam`: tyre(k, i)–tyre(k, i + 1); `wheelPeripheryReinfBeam`
     (`enableTirePeripheryReinfBeams`): tyre(k, i)–tyre(k, i + 2);
   * `tireSupportBeam` (`enableTireSupportBeams`): SUPPORT from its own side's axle node
@@ -577,7 +585,9 @@ the layout below, Rubble's own.
 * **Rolling.** With `roll` the wheel's nodes spawn rolling at the vehicle's speed
   (as the soft tyres' `roll_tyres`).
 * Not simulated: brakes and drive torque (no powertrain), `conicityFactor`, hubcaps,
-  `nodeS`, tyre friction models (`noLoadCoef`… : node friction only),
+  `nodeS`, tyre friction models (**Choice:** a tyre node's friction is the model's
+  `noLoadCoef` when given, else `frictionCoef`; BeamNG's `frictionCoef` multiplies
+  its ground model's, which Rubble's contact model has not),
   `hubWeightGainRatio` (warnings).
 * Selected by `JbeamWheels::Pressure` (`ExplicitBeams::from_desc_jbeam_with`); the
   default stays the `.truck` path's soft tyres (§12), and RoR content keeps its tyres.
@@ -598,9 +608,8 @@ On a closed surface the pushes sum to zero (momentum conserved).
   step's positions; the triangles use the p of the previous step (state double
   buffered by step parity; at spawn p = p₀). One step (0.5 ms) of lag keeps the
   group's sum and its triangles in one pass on the GPU, with no new barrier.
-* The group breaks (pressure lost: p = 0 from then on, the records stay) when any of
-  its triangles' sides breaks (a beam between two of a triangle's nodes; a tyre
-  puncture). **Choice.**
+* Punctures are not simulated: the group keeps its gas when beams of its surface
+  break (a GPU beam phase cannot read this step's breaks without a race).
 
 ## 27. Rails and slidenodes [R]
 
@@ -618,3 +627,18 @@ and `capStrength` are not distinguished and an uncapped end does not let the nod
 off (warning when a rail is uncapped or sets `capStrength`). `fixToRail` is not
 simulated: the node keeps its spawn position (warning when false is asked for; the
 files place slide nodes on their rails).
+
+## 28. Two limits of the fixed explicit step
+
+Community content carries values the 0.5 ms explicit step cannot integrate as
+written; BeamNG runs them. Both rules below change nothing for a beam or node inside
+the step's limits, apply in JBeam mode only, and the spawn warns with their counts.
+
+* **Stiff dampers.** A beam whose damping gives c·h/μ > 1 (μ the reduced mass of its
+  two nodes; explicit damping diverges past 2) takes the backward-Euler damping of
+  that pair, c/(1 + c·h/μ), for its slow, fast, limit and rebound rates. (The
+  Monster supercar has two such beams: 100 kN·s/m on 7 and 10 kg nodes.)
+* **Tyre friction.** On a pressure-wheel node (`NODE_FRICTION_LIMIT`) the ground's
+  tangential force at most stops the node's slip in one step: the solver's friction
+  law's viscous branch, on light tread nodes carrying a tyre's pressure load, would
+  otherwise reverse the slip every step and grow.

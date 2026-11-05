@@ -52,6 +52,9 @@ pub const NODE_IMMOVABLE: u32 = 2;
 pub const NODE_ON_TRIANGLE: u32 = 4;
 pub const NODE_CONTACTER: u32 = 8;
 pub const NODE_TYRE: u32 = 16;
+/// JBeam pressure-wheel nodes: ground friction never reverses the slip in a step
+/// (`engine/docs/jbeam-semantics-spec.md` §28).
+pub const NODE_FRICTION_LIMIT: u32 = 32;
 
 /// Optional parts of the compatible profile. All on by default.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,6 +162,23 @@ pub enum ExplicitKind {
     /// The second record of a [`ExplicitKind::JbeamTorsion`] element (no force of
     /// its own).
     JbeamTorsionPair,
+    /// JBeam ANISOTROPIC beams (spec §20; extension record E1 = (k expansion, c
+    /// expansion, transition zone, break length m)).
+    JbeamAniso,
+    /// JBeam PRESSURED beams (spec §21; E1 = (surface, absolute spawn pressure,
+    /// volume coefficient, spawn length), E2 = (gauge limit, gauge break)).
+    JbeamPressured,
+    /// JBeam LBEAMs (spec §24) between id1 (`a`) and id2 (`b`), the vertex id3 in E1
+    /// .x (bits); `rest` holds cos θ₀.
+    JbeamLbeam,
+    /// A pressure group (spec §26): no force; E1 = (first triangle record, triangle
+    /// count (bits), V₀, absolute spawn pressure), E2 .x the gauge ceiling.
+    JbeamPressureGroup,
+    /// A pressure group's triangle, first record (nodes x₀, x₁; E1 = (x₂, group
+    /// record) as bits); the next record ([`ExplicitKind::JbeamPressureTri2`], x₂–x₂)
+    /// carries x₂'s force.
+    JbeamPressureTri,
+    JbeamPressureTri2,
 }
 
 impl ExplicitKind {
@@ -176,6 +196,12 @@ impl ExplicitKind {
             ExplicitKind::JbeamCoupler => 9,
             ExplicitKind::JbeamTorsion => 10,
             ExplicitKind::JbeamTorsionPair => 11,
+            ExplicitKind::JbeamAniso => 12,
+            ExplicitKind::JbeamPressured => 13,
+            ExplicitKind::JbeamLbeam => 14,
+            ExplicitKind::JbeamPressureGroup => 15,
+            ExplicitKind::JbeamPressureTri => 16,
+            ExplicitKind::JbeamPressureTri2 => 17,
         }
     }
 
@@ -189,6 +215,12 @@ impl ExplicitKind {
                 | ExplicitKind::JbeamCoupler
                 | ExplicitKind::JbeamTorsion
                 | ExplicitKind::JbeamTorsionPair
+                | ExplicitKind::JbeamAniso
+                | ExplicitKind::JbeamPressured
+                | ExplicitKind::JbeamLbeam
+                | ExplicitKind::JbeamPressureGroup
+                | ExplicitKind::JbeamPressureTri
+                | ExplicitKind::JbeamPressureTri2
         )
     }
 }
@@ -770,6 +802,27 @@ pub struct ExplicitBeams {
     pub groups_now: Vec<u32>,
     /// The node grab applied each step ([`Grab`]); `None` (the default) for none.
     pub grab: Option<Grab>,
+    /// JBeam Part II (`engine/docs/jbeam-semantics-spec.md` §16–§26;
+    /// [`crate::explicit_jbeam_ext`]). All empty for vehicles that use none of it.
+    /// Extension records, and per beam its record + 1 (0 none; empty: none).
+    pub beam_ext: Vec<crate::explicit_jbeam_ext::BeamExt>,
+    pub ext_of: Vec<u32>,
+    /// Per collision triangle the beams whose break kills it (u32::MAX none; §18)
+    /// and whether it is dead (from the start of this step's beam pass).
+    pub tri_breaks: Vec<[u32; 4]>,
+    pub tri_dead: Vec<bool>,
+    /// Per deform group whether it has triggered (§19), and the groups' names.
+    pub deform_state: Vec<u32>,
+    pub deform_names: Vec<String>,
+}
+
+/// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
+#[derive(Clone, Copy, Debug)]
+pub enum JbeamWheels {
+    /// The `.truck` path's soft tyres with these defaults (spec §12).
+    Soft(crate::truck_export::TyreDefaults),
+    /// JBeam pressure wheels (spec §25).
+    Pressure,
 }
 
 /// A JBeam beam's damping low-pass (`dampCutoffHz`, spec §6): the damping uses
@@ -967,6 +1020,12 @@ impl ExplicitBeams {
             groups_last: Vec::new(),
             groups_now: Vec::new(),
             grab: None,
+            beam_ext: Vec::new(),
+            ext_of: Vec::new(),
+            tri_breaks: Vec::new(),
+            tri_dead: Vec::new(),
+            deform_state: Vec::new(),
+            deform_names: Vec::new(),
         }
     }
 
@@ -1614,6 +1673,21 @@ impl ExplicitBeams {
         velocity: Vec3,
         settings: ExplicitBeamsSettings,
     ) -> Result<(Self, Vec<String>), String> {
+        Self::from_desc_jbeam_with(desc, JbeamWheels::Soft(tyres), position, velocity, settings)
+    }
+
+    /// [`Self::from_desc_jbeam`] with a choice of wheel model: the `.truck` path's
+    /// soft tyres, or JBeam pressure wheels (`engine/docs/jbeam-semantics-spec.md`
+    /// §25). Node order is the desc's, then the wheels'; beam order is the desc's
+    /// beams, torsion elements, couplers, LBEAMs, then the wheels' beams, rail
+    /// segment beams last.
+    pub fn from_desc_jbeam_with(
+        desc: &SoftVehicleDesc,
+        wheels: JbeamWheels,
+        position: Vec3,
+        velocity: Vec3,
+        settings: ExplicitBeamsSettings,
+    ) -> Result<(Self, Vec<String>), String> {
         let collision_tris = desc.triangles.iter().filter(|t| t.collision).count();
         if collision_tris > MAX_COLLISION_TRIANGLES {
             return Err(format!(
@@ -1729,7 +1803,16 @@ impl ExplicitBeams {
             };
             s.beams.push(beam);
         }
-        if !desc.wheels.is_empty() {
+        s.add_lbeams(desc);
+        let tyres = match wheels {
+            JbeamWheels::Soft(t) => Some(t),
+            JbeamWheels::Pressure => {
+                let mut w = s.add_pressure_wheels(desc, velocity);
+                warnings.append(&mut w);
+                None
+            }
+        };
+        if let (Some(tyres), false) = (tyres, desc.wheels.is_empty()) {
             // The `.truck` path's tyres, from the same text it writes.
             let (text, _) = crate::truck_export::desc_to_truck(desc, tyres);
             let file = parse_truck_config(&text, None);
@@ -1745,18 +1828,15 @@ impl ExplicitBeams {
                 tyres.damp
             ));
         }
-        for (n, what) in [
-            (
-                desc.elements
-                    .iter()
-                    .filter(|e| e.kind == crate::desc::ElementKind::Lbeam)
-                    .count(),
-                "LBEAMs",
-            ),
-            (desc.rails.len(), "rails"),
-            (desc.slidenodes.len(), "slide nodes"),
-            (desc.rigid_parts.len(), "rigid parts"),
-        ] {
+        s.add_jbeam_rails(desc, &mut warnings);
+        let stiff = s.stiff_dampers();
+        if stiff > 0 {
+            warnings.push(format!(
+                "{stiff} beams damp harder than the 0.5 ms step integrates (c·h/μ > 1): \
+                 backward-Euler damping c/(1 + c·h/μ) (jbeam-semantics-spec.md §28)"
+            ));
+        }
+        for (n, what) in [(desc.rigid_parts.len(), "rigid parts")] {
             if n > 0 {
                 warnings.push(format!(
                     "{n} {what} are not simulated by the explicit solver"
@@ -1769,6 +1849,12 @@ impl ExplicitBeams {
             DEFAULT_COLLISION_RANGE
         };
         s.add_triangles(desc);
+        s.add_triangle_breaks(desc, &mut warnings);
+        s.deform_names = desc.deform_groups.clone();
+        s.deform_state = vec![0; desc.deform_groups.len()];
+        if !s.beam_ext.is_empty() {
+            s.ext_of.resize(s.beams.len(), 0);
+        }
         s.finish();
         // Self-collision: the nodes with `selfCollision` (and collision at all).
         s.candidates = (0..desc.nodes.len() as u32)
@@ -1786,8 +1872,9 @@ impl ExplicitBeams {
         Ok((s, warnings))
     }
 
-    /// A desc beam in JBeam mode (spec §2–5).
-    fn push_jbeam_beam(&mut self, b: &crate::desc::SoftBeam) {
+    /// A desc beam in JBeam mode (spec §2–5; Part II features through
+    /// [`Self::attach_ext`]).
+    pub(crate) fn push_jbeam_beam(&mut self, b: &crate::desc::SoftBeam) {
         let jb = b.jbeam.unwrap_or(crate::desc::JbeamBeam {
             deform: b.deform,
             precompression: b.precompression,
@@ -1838,6 +1925,9 @@ impl ExplicitBeams {
             }
         }
         self.beams.push(beam);
+        if jb.needs_ext() || jb.long_extent.is_some() {
+            self.attach_ext(self.beams.len() - 1, &jb, spawn);
+        }
     }
 
     /// Spawn a desc (no tyres): its nodes at `position` moving at `velocity`, its
@@ -2130,7 +2220,7 @@ impl ExplicitBeams {
             if !n.has(NODE_NO_GROUND) {
                 let x = origin + n.pos;
                 if ground > x.y {
-                    n.force += contact_force(
+                    let c = contact_force(
                         n.force,
                         n.vel,
                         n.mass,
@@ -2140,6 +2230,11 @@ impl ExplicitBeams {
                         ground - x.y,
                         n.friction,
                     );
+                    n.force += if n.has(NODE_FRICTION_LIMIT) {
+                        crate::explicit_jbeam_ext::friction_limit(c, n.force, n.vel, n.mass, Vec3::Y, h)
+                    } else {
+                        c
+                    };
                 }
                 for bx in &self.boxes {
                     if let Some(normal) = box_face(bx, x) {
@@ -2323,8 +2418,18 @@ impl ExplicitBeams {
     fn beam_pass(&mut self) {
         std::mem::swap(&mut self.groups_last, &mut self.groups_now);
         self.groups_now.clear();
+        if !self.tri_breaks.is_empty() {
+            self.triangle_breaks();
+        }
         for j in 0..self.beams.len() {
             if self.beams[j].broken {
+                if !self.ext_of.is_empty() && self.ext_of[j] != 0 {
+                    self.ext_broken(j);
+                }
+                continue;
+            }
+            if !self.ext_of.is_empty() && self.ext_of[j] != 0 {
+                self.ext_beam(j);
                 continue;
             }
             let mut beam = self.beams[j];
@@ -2351,13 +2456,7 @@ impl ExplicitBeams {
                 if beam.broken {
                     self.beams[j + 1].broken = true;
                     if beam.group > 0 {
-                        let g = beam.group;
-                        self.groups_now.push(g as u32);
-                        for other in &mut self.beams {
-                            if other.group.abs() == g {
-                                other.broken = true;
-                            }
-                        }
+                        self.cascade(beam.group);
                     }
                 }
                 for (n, f) in [beam.a, beam.b, c, d].into_iter().zip(f) {
@@ -2369,13 +2468,7 @@ impl ExplicitBeams {
                 let push = coupler_force(&mut beam, &na, &nb);
                 self.beams[j] = beam;
                 if beam.broken && beam.group > 0 {
-                    let g = beam.group;
-                    self.groups_now.push(g as u32);
-                    for other in &mut self.beams {
-                        if other.group.abs() == g {
-                            other.broken = true;
-                        }
-                    }
+                    self.cascade(beam.group);
                 }
                 self.nodes[beam.a as usize].force += push;
                 self.nodes[beam.b as usize].force -= push;
@@ -2418,17 +2511,24 @@ impl ExplicitBeams {
             }
             self.beams[j] = beam;
             if cascade {
-                let g = beam.group;
-                self.groups_now.push(g as u32);
-                for other in &mut self.beams {
-                    if other.group.abs() == g {
-                        other.broken = true;
-                    }
-                }
+                self.cascade(beam.group);
             }
             let push = out.d * (f * out.inv);
             self.nodes[beam.a as usize].force += push;
             self.nodes[beam.b as usize].force -= push;
+        }
+    }
+
+    /// Set off break group `g` (> 0): every member is broken (spec §8, §17).
+    pub(crate) fn cascade(&mut self, g: i32) {
+        self.groups_now.push(g as u32);
+        for other in &mut self.beams {
+            if other.group.abs() == g {
+                other.broken = true;
+            }
+        }
+        if !self.ext_of.is_empty() {
+            self.cascade_ext(g);
         }
     }
 
@@ -2453,6 +2553,11 @@ impl ExplicitBeams {
                 tri.idle = 0;
             }
             let [i0, i1, i2] = tri.nodes;
+            if !self.tri_dead.is_empty() && self.tri_dead[t] {
+                // A broken triangle (spec §18): no candidates.
+                self.triangles[t].wait += 1;
+                continue;
+            }
             let tri_group = self.triangle_self_group(t);
             let world = |i: u32| self.origin + self.nodes[i as usize].pos;
             let (p0, p1, p2) = (world(i0), world(i1), world(i2));
@@ -2876,7 +2981,13 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         | ExplicitKind::JbeamBounded
         | ExplicitKind::JbeamCoupler
         | ExplicitKind::JbeamTorsion
-        | ExplicitKind::JbeamTorsionPair => {}
+        | ExplicitKind::JbeamTorsionPair
+        | ExplicitKind::JbeamAniso
+        | ExplicitKind::JbeamPressured
+        | ExplicitKind::JbeamLbeam
+        | ExplicitKind::JbeamPressureGroup
+        | ExplicitKind::JbeamPressureTri
+        | ExplicitKind::JbeamPressureTri2 => {}
     }
     let mut f = -k * e - c * u;
     beam.force = f;
