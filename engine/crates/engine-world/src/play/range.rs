@@ -6,13 +6,23 @@
 //! script (if any) sits on top: it fires through [`Range::spawn_ball`] between
 //! [`Range::begin_step`] and [`Range::end_step`].
 
-use rubble::*;
+use super::balls::{Ball, Balls};
+use crate::*;
 
 /// A cannonball: 24 lb of iron (10.9 kg, 0.074 m radius).
 pub const BALL_MASS: f32 = 10.9;
 pub const BALL_RADIUS: f32 = 0.074;
 /// Muzzle velocity: a 24-pounder's ~450 m/s, spent to this at close range.
 pub const BALL_SPEED: f32 = 300.0;
+/// The cannonball's body: iron, the default surface, continuous collision on.
+pub fn cannonball() -> Ball {
+    Ball {
+        mass: BALL_MASS,
+        radius: BALL_RADIUS,
+        material: SurfaceMaterial::default(),
+        ccd: true,
+    }
+}
 /// Balls in flight or at rest the scene keeps (the oldest is removed past this).
 pub const MAX_BALLS: usize = 256;
 /// Balls in strike prediction's shot table at once (its limit is 64).
@@ -116,10 +126,9 @@ pub struct Range {
     /// Each chunk's Shardwright fragment and its render colour (its mesh's mean).
     pub fragment: Vec<Option<u32>>,
     pub color: Vec<[f32; 3]>,
-    /// Balls in the world, oldest first, with the frame each was fired.
-    pub balls: Vec<(BodyId, u32)>,
-    /// The balls still in strike prediction's shot table, oldest first.
-    striking: Vec<(BodyId, u32)>,
+    /// Balls in the world (the shared pool, `super::balls`), oldest first, with the frame
+    /// each was fired; at most [`MAX_STRIKING`] in strike prediction's shot table.
+    pub balls: Balls,
     /// Every shot fired: (frame, from, velocity), for the camera and the report.
     pub log: Vec<(u32, [f32; 3], [f32; 3])>,
     pub total: Report,
@@ -259,8 +268,7 @@ impl Range {
             chunks,
             fragment,
             color,
-            balls: Vec::new(),
-            striking: Vec::new(),
+            balls: Balls::new(MAX_BALLS, MAX_STRIKING),
             log: Vec::new(),
             total: Report::default(),
             pending: Vec::new(),
@@ -292,61 +300,16 @@ impl Range {
     /// Balls half a second old are spent (through the structure or stopped in it): they leave
     /// strike prediction's shot table (64 at most) and roll on as plain rigid balls.
     pub fn retire_spent(&mut self) -> anyhow::Result<()> {
-        let spent = (0.5 / self.dt).round() as u32;
-        while self
-            .striking
-            .first()
-            .is_some_and(|&(_, f)| self.frame >= f + spent)
-        {
-            let (ball, _) = self.striking.remove(0);
-            if self.world.body_is_valid(ball) {
-                self.world.body_set_projectile(ball, None)?;
-            }
-        }
-        Ok(())
+        let spent = (0.5 / self.dt).round() as u64;
+        self.balls
+            .retire_spent(&mut self.world, self.frame as u64, spent)
     }
 
+    /// A cannonball from `from` at `v` (the shared ball pool: the oldest goes past
+    /// [`MAX_BALLS`], a full shot table's oldest striker leaves it).
     pub fn spawn_ball(&mut self, from: [f32; 3], v: [f32; 3]) -> anyhow::Result<()> {
-        if self.balls.len() >= MAX_BALLS {
-            let (old, _) = self.balls.remove(0);
-            self.striking.retain(|(b, _)| *b != old);
-            self.world.destroy_body(old)?;
-        }
-        // A full shot table (raze fires up to three a step): the oldest leaves it early,
-        // long through the structure by now.
-        if self.striking.len() >= MAX_STRIKING {
-            let (old, _) = self.striking.remove(0);
-            if self.world.body_is_valid(old) {
-                self.world.body_set_projectile(old, None)?;
-            }
-        }
-        let ball = self.world.create_body(&BodyDef {
-            linear_velocity: v,
-            is_bullet: true,
-            ..BodyDef::dynamic(from)
-        })?;
-        self.world.create_sphere_shape(
-            ball,
-            &ShapeDef {
-                update_body_mass: false,
-                ..ShapeDef::default()
-            },
-            [0.0; 3],
-            BALL_RADIUS,
-        )?;
-        let i = 0.4 * BALL_MASS * BALL_RADIUS * BALL_RADIUS;
-        self.world.body_set_mass_data(
-            ball,
-            MassData {
-                mass: BALL_MASS,
-                center: [0.0; 3],
-                rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]],
-            },
-        )?;
-        self.world
-            .body_set_projectile(ball, Some(Projectile::default()))?;
-        self.balls.push((ball, self.frame));
-        self.striking.push((ball, self.frame));
+        self.balls
+            .fire(&mut self.world, &cannonball(), from, v, [0.0; 3], self.frame as u64)?;
         self.log.push((self.frame, from, v));
         self.total.shots += 1;
         Ok(())
@@ -481,6 +444,7 @@ impl Range {
     /// Every ball's pose, oldest first.
     pub fn ball_poses(&self) -> Vec<Transform> {
         self.balls
+            .live()
             .iter()
             .filter_map(|(b, _)| self.world.body_transform(*b).ok().flatten())
             .collect()

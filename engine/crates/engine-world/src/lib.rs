@@ -36,6 +36,10 @@ mod joints;
 /// The fracture lab as one API (scenes, bond models, settings, actions, stats).
 #[cfg(feature = "stress")]
 pub mod lab;
+/// Every demo as a preset of the one library: the registry, the shared balls, the range
+/// scenes (Broadside, the timber yard) and what a host draws for them.
+#[cfg(feature = "stress")]
+pub mod play;
 mod math;
 mod motion;
 mod queries;

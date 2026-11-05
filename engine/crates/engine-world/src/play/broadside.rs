@@ -12,9 +12,9 @@
 //! Fracture is forward only (AGENTS.md): every ball is a threshold striker whose breaks
 //! are predicted at the end of the frame before it lands.
 
-use rubble::*;
+use crate::*;
 
-pub use crate::range::*;
+pub use super::range::*;
 
 /// The galleon stern's levels: 0 its 566 members whole (they part at their joints),
 /// 1 each member in about 0.3 m pieces, 2 (the leaf, the default) in grain-stretched
