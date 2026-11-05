@@ -428,6 +428,38 @@ Jacobi (4 passes) gives 13 / 78 / 34 but diverges at 16. Open: a converged conta
 solve (a Gauss–Seidel or accumulated-impulse iteration per turn) is what the leak
 asks for; the side test alone does not fix it.
 
+**Leak, third pass: a converged solve (2026-11-05, showcase car after the
+body-in-white merge, 1,157 striker nodes, so the limit is 11; CPU; TB_DZ 0 / 0.43 /
+0.7 m; most striker nodes inside).** Today's car: RoR's rule 11 / 129 / 60, this rule
+106 / 190 / 131. Tried, all reverted (the patch is not in the repository):
+* *Iterated mass-split Jacobi per owner's turn* (accumulated normal forces, the
+  turn's forces summed in fixed point so any order gives the same sums, each hit moved
+  by its split reduced mass times the residual of its relative normal acceleration,
+  the contact law's target as the fixed point). With §10.3's w²·k splitting it
+  diverges (16 passes: 4 / 50 / 0 with thousands of beams broken, NaN): a node with a
+  small weight in one hit and large ones in others is under-split. Splitting by the
+  summed weights S (inverse mass Σ w·S/m, which bounds every row of the hits' coupling
+  by its diagonal, Gershgorin) converges: 8 / 32 / 128 passes 7 / 99 / 43, 7 / 97 /
+  77, 16 / 64 / 64 (diverging at 128).
+* *The same over the whole contact pass* (every owner's two-body hits solved together;
+  the walks read no force, so walking every owner first changes nothing for RoR's
+  rule): 16 passes 7 / 98 / 18, 64 passes 6 / 89 / 9 (diverging at 0.7 m). Each pass's
+  largest change after 64 passes is still 0.1–0.5 % of the total.
+* *Energy (`energy_ledger.rs`, T-bone 0.7 m):* the single pass does −11 kJ normal and
+  −34 kJ friction work; converged, the contact law's own terms put energy in: the
+  depth push 0.2·p/h and the cancelled force on separating hits (the law holds a
+  separating pair's velocity) do +22 kJ normal work at 16 passes, +58 kJ normal and
+  +1.57 MJ friction at 64. Without the push: +9.5 / +15 kJ normal, and the leak 56 /
+  105 / 35 (16 passes). With an inelastic target (relative normal velocity ≥ 0, no
+  push): −13 kJ normal, −15 kJ friction at 16 passes (friction +35 kJ at 64), leak
+  35 / 106 / 73.
+* **So the leak at 0.43 m is not the solve's convergence:** every variant leaves
+  89–106 striker nodes inside, converged or not, against 129 with RoR's rule. A
+  converged two-body solve fixes the door middle (6–7, inside the limit) and
+  helps 0.7 m, but RoR's contact law iterated to convergence is not dissipative.
+  **Open:** where the 0.43 m nodes get in (they are no longer hits: about 70 hits a
+  step at the peak); two-body stays JBeam mode's default only.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,
