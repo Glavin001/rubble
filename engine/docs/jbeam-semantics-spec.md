@@ -353,38 +353,52 @@ six back-plate nodes hit one triangle in a step, each removing the approach on i
 own. The car's nodes reached 300–370 m/s at the high resolution (CPU and GPU) and
 diverged at the medium one before the barrier's shear was rebuilt (§24 below).
 
-**Rule** (exact physics of the lumped masses; `explicit_contact.rs`,
-`vvTry`): in a hit where the owner or the partner is a JBeam-mode vehicle
-(`ExplicitBeams::two_body_contact`; the `.truck` path keeps RoR's rule, bit for bit,
-also with `rubble_full_contact`):
+**Rule** (exact physics of the lumped masses; `explicit_contact.rs`, `vvTry`) in a
+hit where the owner or the partner has `ExplicitBeams::two_body_contact`: on in JBeam
+mode (so any pair with the FMVSS 214 barrier); off on both vehicles of a pair, RoR's
+rule, bit for bit. **Not yet the `.truck` default:** made the default, it raised the
+showcase car's 80 km/h T-bone at the door middle to 62 of 1,141 striker nodes inside
+the struck skin (6 with RoR's rule; the limit is 1 %), so it waits on the leak (below).
 
 * **Mass splitting** (Tonge, Benevolenski and Voroshilov, SIGGRAPH 2012, as the
   World's rigid proxies, `explicit-vehicles-in-world.md` §1): in one owner's turn
   every node counts its two-body hits (as the contacter, or as a vertex of the hit's
-  triangle) and is k sub-bodies of mass m/k, the contacter's force F/k each.
-* **Triangle point mass**: m_t = 1/Σ w_k²·k_k/m_k (w_k = 0 left out): the reaction
-  is shared out as w_k·J, so the point's velocity changes by J·Σ w_k²/m_k.
-* **Share**: the contact force cancels s·F_h/k_h, s = m_t/(m_h/k_h + m_t), the share
-  that zeroes the relative normal acceleration; F_h is the contacter's force before
-  its first hit of the turn. The approach and penetration terms use the reduced mass
-  of the split masses. Friction as before, on the same force.
-* GPU: per-vehicle flag bit 7; counts in gAcc at `vvSplit` (per node its triangle
-  count, then `VV_PART` point slots: the small groups' owners count side by side),
-  cleared after each turn. A turn whose hit list overflows applies at once with the
-  counts found so far (as before, out of the specification's order).
+  triangle) and is k sub-bodies, inverse mass k/m each; an immovable node has none.
+* **Triangle point**: inverse mass Σ w_k²·k_k/m_k (w_k = 0 left out): the reaction
+  is shared out as w_k·J, so the point's velocity changes by J·Σ w_k²·k_k/m_k. The
+  reduced mass m = 1/(k_h/m_h + Σ w_k²·k_k/m_k).
+* **Cancelled force**: (F_h/m_h − Σ w_k·F_k/m_k)·m, the pair's relative acceleration
+  from the forces at the contact pass's start (every node's accumulator before any
+  vehicle contact of the step) times the reduced mass: the force that zeroes their
+  relative acceleration, normal and tangential (friction's slip force), in place of
+  RoR's whole F_h. The approach and penetration terms use m. Friction as before.
+* GPU: per-vehicle flag bit 7; the forces at the pass's start in gBeams at `vvSnap`
+  (written at the pass's start), the counts in gAcc at `vvSplit` (per node its
+  triangle count, then `VV_PART` point slots: the small groups' owners count side by
+  side), cleared after each turn. A turn whose hit list overflows applies at once
+  with the counts found so far (as before, out of the specification's order).
 
 Effect (MDB at 53.9 km/h, 27° crab, showcase car, GPU, fastest node over 1.5 s):
 low / medium / high resolution 93 / 34 / 372 m/s before (diverging at medium the
 day before), 30–48 / 47–66 / 42–46 m/s after; nothing non-finite; the vehicles'
 kinetic plus gravitational energy never rises (`explicit_scenes.rs`).
 
-**Why not the `.truck` path too:** in the 80 km/h sedan T-bone with every node a
-contacter the rule let 12 to 15 of 463 striker nodes into the struck skin (CPU and
-GPU; 2–5 with RoR's rule; the limit is 1 %). Ablation (CPU): without the share 1,
-without splitting 4, without the point mass 20. The share lets a heavy node carry a
-light skin with it instead of bouncing it ahead, so node-only contact meets a
-deforming skin's gaps more often; that is the open leak question (task 3), not
-settled here.
+**Energy (`energy_ledger.rs`).** In the showcase T-bone at 80 km/h, 0.7 m off the
+door middle, RoR's rule does +1.18 MJ of friction and +0.18 MJ of normal work on the
+two cars (striker 379.7 kJ): the static-surface projection puts the contacter's whole
+force, normal and tangential, on light triangles, and the rattling nodes that results
+(30–66 m/s under a 15 m/s barrier) are what the air and the beams then soak up. With
+this rule every contact term is negative and the beams dissipate 115 kJ of the 338 kJ
+lost.
+
+**Leak (80 km/h sedan T-bone, every node a contacter, CPU, five offsets −0.3 to
+0.45 m, most striker nodes inside the struck skin of 463):** RoR's rule 63 in total
+(28 at −0.3 m); this rule's first form (cancel the share m_t/(m_h + m_t) of F_h
+alone) 84; this rule 64. Every leaked node is a contacter over a struck triangle that
+has crossed its whole ±3 cm band (none through gaps, none untested: the throttle off
+changes nothing); one traced node entered a triangle's prism sideways, in front of
+it, and the side vote (its neighbours behind the plane) pushed it through. Open
+(task 3): a side kept per contacter–triangle pair cut it to 57 only.
 
 ## 11. What the BX and the legocar use, and what is left
 

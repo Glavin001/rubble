@@ -18,7 +18,7 @@
 //! bit-identical to stepping each alone.
 
 use crate::explicit_beams::{
-    contact_force, ContactSurface, ExplicitBeams, ExplicitKind, ForceTrace, GRAVITY,
+    contact_force, ContactSurface, ExplicitBeams, ExplicitKind, ForceTrace, Node, GRAVITY,
     NODE_IMMOVABLE, STEP,
 };
 use glam::Vec3;
@@ -106,22 +106,22 @@ pub fn vote_behind(
     score < 0
 }
 
-/// The effective mass of a triangle's point at barycentric weights `w` (spec
-/// §10.3): the reaction J is shared out as w_k·J, so the point's velocity changes by
-/// J·Σ w_k²/m_k, and its mass is 1/Σ w_k²/m_k (terms with w_k = 0 left out). The
-/// weighted mean Σ w_k·m_k (RoR's rule) overstates it wherever a light node carries
-/// most of the weight beside a heavy one (0.07 kg at 0.77 next to 10 kg at 0.14:
-/// 1.5 kg against 0.12 kg), and the light node is then thrown off at hundreds of
-/// m/s. `m` and `w` in the order n₁, n₂, n₀ (α, β, γ), summed left to right.
-pub fn two_body_triangle_mass(m: [f32; 3], w: [f32; 3]) -> f32 {
+/// The inverse mass of a triangle's point at barycentric weights `w` (spec §10.3)
+/// from its nodes' inverse masses `im`: the reaction J is shared out as w_k·J, so
+/// the point's velocity changes by J·Σ w_k²·im_k (terms with w_k = 0 left out). The
+/// weighted mean Σ w_k·m_k (RoR's rule) overstates the mass wherever a light node
+/// carries most of the weight beside a heavy one (0.07 kg at 0.77 next to 10 kg at
+/// 0.14: 1.5 kg against 0.12 kg), and the light node is then thrown off at hundreds
+/// of m/s. In the order n₁, n₂, n₀ (α, β, γ), summed left to right.
+pub fn two_body_inverse_mass(im: [f32; 3], w: [f32; 3]) -> f32 {
     let term = |k: usize| {
         if w[k] > 0.0 {
-            (w[k] * w[k]) / m[k]
+            (w[k] * w[k]) * im[k]
         } else {
             0.0
         }
     };
-    1.0 / ((term(0) + term(1)) + term(2))
+    (term(0) + term(1)) + term(2)
 }
 
 /// Statistics of the last contact pass (not simulated state).
@@ -157,6 +157,8 @@ pub struct ExplicitBeamsWorld {
     pub first_hit_step: Option<u64>,
     /// Scratch: world positions per vehicle and padded boxes.
     world: Vec<Vec<Vec3>>,
+    /// Scratch: every node's force at the contact pass's start (two-body hits).
+    pass_force: Vec<Vec<Vec3>>,
     /// The energy ledger (None: off; [`Self::enable_ledger`]).
     pub ledger: Option<EnergyLedger>,
     boxes: Vec<(Vec3, Vec3)>,
@@ -183,6 +185,7 @@ impl ExplicitBeamsWorld {
             first_hit_step: None,
             world: Vec::new(),
             ledger: None,
+            pass_force: Vec::new(),
             boxes: Vec::new(),
         }
     }
@@ -274,6 +277,13 @@ impl ExplicitBeamsWorld {
     /// The bounding boxes (spec §4.1) and the vehicle-contact pass (§3.1 3).
     pub fn contact_pass(&mut self) {
         let nv = self.vehicles.len();
+        if self.vehicles.iter().any(|v| v.two_body_contact) {
+            self.pass_force.resize(nv, Vec::new());
+            for (pf, v) in self.pass_force.iter_mut().zip(&self.vehicles) {
+                pf.clear();
+                pf.extend(v.nodes.iter().map(|n| n.force));
+            }
+        }
         self.world.resize(nv, Vec::new());
         self.boxes.clear();
         for (v, w) in self.vehicles.iter().zip(&mut self.world) {
@@ -435,7 +445,6 @@ impl ExplicitBeamsWorld {
         let two_body = |b: usize| tb[a] || tb[b];
         let mut split_a: Vec<u32> = Vec::new();
         let mut split_b: Vec<Vec<u32>> = vec![Vec::new(); self.vehicles.len()];
-        let mut f_start: Vec<Vec<Vec3>> = vec![Vec::new(); self.vehicles.len()];
         if hits.iter().any(|x| two_body(x.b)) {
             split_a = vec![0; self.vehicles[a].nodes.len()];
             for x in hits.iter().filter(|x| two_body(x.b)) {
@@ -444,7 +453,6 @@ impl ExplicitBeamsWorld {
                 }
                 if split_b[x.b].is_empty() {
                     split_b[x.b] = vec![0; self.vehicles[x.b].nodes.len()];
-                    f_start[x.b] = self.vehicles[x.b].nodes.iter().map(|n| n.force).collect();
                 }
                 split_b[x.b][x.h as usize] += 1;
             }
@@ -462,19 +470,38 @@ impl ExplicitBeamsWorld {
             );
             let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
             let (m, fh) = if two_body(b) {
-                // Each node of the hit is one of its k sub-bodies (mass m/k, force F/k).
+                // Each node of the hit is one of its k sub-bodies (mass m/k); an
+                // immovable node is of infinite mass. The triangle point's inverse
+                // mass is Σ w²·k/m; the pair's relative normal acceleration from the
+                // forces at the pass's start (the contacter's F/m less the point's
+                // Σ w·F/m) is cancelled with their reduced mass.
+                let im = |n: &Node, k: f32| {
+                    if n.has(NODE_IMMOVABLE) {
+                        0.0
+                    } else {
+                        k / n.mass
+                    }
+                };
+                let acc = |f: Vec3, n: &Node| {
+                    if n.has(NODE_IMMOVABLE) {
+                        Vec3::ZERO
+                    } else {
+                        f / n.mass
+                    }
+                };
                 let k = |i: u32| split_a[i as usize] as f32;
-                let kh = split_b[b][h as usize] as f32;
-                let mh = node.mass / kh;
-                let mt = two_body_triangle_mass(
-                    [n1.mass / k(i1), n2.mass / k(i2), n0.mass / k(i0)],
+                let imh = im(&node, split_b[b][h as usize] as f32);
+                let imt = two_body_inverse_mass(
+                    [im(&n1, k(i1)), im(&n2, k(i2)), im(&n0, k(i0))],
                     [alpha, beta, gamma],
                 );
-                // Only the share m_t/(m_h + m_t) of the contacter's force (before
-                // its first hit of the turn, split k ways) is cancelled: the
-                // relative normal acceleration's zero.
-                let m = (mh * mt) / (mh + mt);
-                (m, (f_start[b][h as usize] / kh) * (mt / (mh + mt)))
+                let inv = imh + imt;
+                let m = if inv > 0.0 { 1.0 / inv } else { 0.0 };
+                let pf = &self.pass_force[a];
+                let at = acc(pf[i1 as usize], &n1) * alpha
+                    + acc(pf[i2 as usize], &n2) * beta
+                    + acc(pf[i0 as usize], &n0) * gamma;
+                (m, (acc(self.pass_force[b][h as usize], &node) - at) * m)
             } else {
                 let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
                 ((node.mass * mt) / (node.mass + mt), node.force)

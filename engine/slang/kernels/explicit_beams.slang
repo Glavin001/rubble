@@ -200,6 +200,7 @@ struct Params
     uint triExcl; // gStatic: per triangle (start in gLists, count) of self-collision nodes it skips (0: none)
     uint loopCapWord; // gAcc: the loop-cap flag (see EB_LOOP_CAP)
     uint vvSplit; // gAcc: two-body mass splitting counts, per node: its triangle hits, then VV_PART slots of its point hits (0: no two-body vehicle)
+    uint vvSnap; // gBeams: per node its force at the contact pass's start (two-body contact)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -5306,6 +5307,28 @@ void vvSplitCount(VvTri t, uint h, uint slot)
     gAcc[vvSplitPoint(slot, h)].add(1);
 }
 float vvSplitK(uint at) { return float(max(gAcc[at].load(), 1)); }
+bool vvImmovable(uint n) { return (gStatic[gP.nodeInfoBase + n].x & NODE_IMMOVABLE) != 0u; }
+
+// Node n's acceleration (F/m)·w, component by component (explicit_contact.rs's
+// order); 0 for an immovable node.
+float3 vvAccel(float3 f, uint n, float m, float w)
+{
+    if (vvImmovable(n)) return float3(0.0, 0.0, 0.0);
+    return sscale(float3(sdiv(f.x, m), sdiv(f.y, m), sdiv(f.z, m)), w);
+}
+
+// Every member's node force at the contact pass's start (two-body contact).
+void vvSnapshot(uint off, uint k, uint parity, uint lane)
+{
+    for (uint mi = 0u, miStop = EB_END(mi, k, 1u); mi < miStop; mi++)
+    {
+        uint v = vvMember(off, mi);
+        uint4 r0 = gStatic[v * 4u];
+        for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+            gBeams[gP.vvSnap + r0.x + i] = float4(vvPointForce(r0.x + i, v, parity), 0.0);
+    }
+}
+
 // Zeroes the two-body counts of the group's members' nodes (triangle counts and
 // point slots 0..slots − 1), after a turn's hits are applied.
 void vvSplitClear(uint off, uint k, uint slots, uint lane)
@@ -5338,7 +5361,7 @@ float3 vvPointForce(uint h, uint vh, uint parity)
     return fh;
 }
 
-bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, uint slot, bool useStart, float3 fStart)
+bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, uint slot)
 {
     float3 q = ssub3(p, t.p0);
     float alpha = 0.0;
@@ -5401,15 +5424,19 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
         // Each node one of its k sub-bodies of this turn (mass m/k, force F/k); the
         // triangle point's mass 1/Σ w²/m; only the share m_t/(m_h + m_t) of the
         // contacter's force (at its first hit of the turn) is cancelled.
-        float kh = vvSplitK(vvSplitPoint(slot, h));
-        float mh = sdiv(P.w, kh);
-        float i1 = alpha > 0.0 ? sdiv(smul(alpha, alpha), sdiv(P1.w, vvSplitK(vvSplitTri(t.tn.y)))) : 0.0;
-        float i2 = beta > 0.0 ? sdiv(smul(beta, beta), sdiv(P2.w, vvSplitK(vvSplitTri(t.tn.z)))) : 0.0;
-        float i0 = gamma > 0.0 ? sdiv(smul(gamma, gamma), sdiv(P0.w, vvSplitK(vvSplitTri(t.tn.x)))) : 0.0;
-        mt = sdiv(1.0, nf(nf(i1 + i2) + i0));
-        m = sdiv(smul(mh, mt), nf(mh + mt));
-        float3 f0 = useStart ? fStart : fh;
-        fh = sscale(float3(sdiv(f0.x, kh), sdiv(f0.y, kh), sdiv(f0.z, kh)), sdiv(mt, nf(mh + mt)));
+        // Inverse masses of the split sub-bodies (immovable: 0), the triangle
+        // point's Σ w²·k/m, and the pair's relative acceleration from the forces at
+        // the pass's start (explicit_contact.rs).
+        float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), P.w);
+        float i1 = (alpha > 0.0 && !vvImmovable(t.tn.y)) ? smul(smul(alpha, alpha), sdiv(vvSplitK(vvSplitTri(t.tn.y)), P1.w)) : 0.0;
+        float i2 = (beta > 0.0 && !vvImmovable(t.tn.z)) ? smul(smul(beta, beta), sdiv(vvSplitK(vvSplitTri(t.tn.z)), P2.w)) : 0.0;
+        float i0 = (gamma > 0.0 && !vvImmovable(t.tn.x)) ? smul(smul(gamma, gamma), sdiv(vvSplitK(vvSplitTri(t.tn.x)), P0.w)) : 0.0;
+        float inv = nf(imh + nf(nf(i1 + i2) + i0));
+        m = inv > 0.0 ? sdiv(1.0, inv) : 0.0;
+        float3 at = sadd3(sadd3(vvAccel(gBeams[gP.vvSnap + t.tn.y].xyz, t.tn.y, P1.w, alpha),
+                                vvAccel(gBeams[gP.vvSnap + t.tn.z].xyz, t.tn.z, P2.w, beta)),
+                          vvAccel(gBeams[gP.vvSnap + t.tn.x].xyz, t.tn.x, P0.w, gamma));
+        fh = sscale(ssub3(vvAccel(gBeams[gP.vvSnap + h].xyz, h, P.w, 1.0), at), m);
     }
     float3 f = contactForce(fh, v, m, nn, boxSurface(), pen, V.w);
     accAdd(h, f);
@@ -5484,7 +5511,7 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
         }
         else
         {
-            vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity, 0u, false, float3(0.0, 0.0, 0.0));
+            vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity, 0u);
         }
     }
     vvMark(gt, cand, hit);
@@ -5515,12 +5542,10 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
         }
         if (!first) continue;
         uint vh = gStatic[gP.nodeInfoBase + h].w;
-        // The point's force before its first hit of this turn (two-body hits).
-        float3 fStart = vvPointForce(h, vh, parity);
         for (uint it = 0u, itStop = EB_END(it, n, 1u); it < itStop; it++)
         {
             VvTri t = vvTriangle(gt, oa, r);
-            vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity, slot, true, fStart);
+            vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity, slot);
             // The point's next hit: the smallest later triangle.
             uint next = 0xFFFFFFFFu;
             for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++)
@@ -5590,6 +5615,11 @@ void vvClearCounters()
 void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 {
     uint parity = step & 1u;
+    if (gP.vvSplit != 0u)
+    {
+        vvSnapshot(off, k, parity, lane);
+        sync();
+    }
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     uint prevTri = 0u;
     uint prevListed = 0u;
@@ -5832,7 +5862,7 @@ void vvTriangleCandsApply(uint va, uint gt, uint sub, uint subs, uint run, uint 
         if (any(E.xyz < t.lo) || any(E.xyz > t.hi)) continue;
         uint h = asuint(E.w);
         if (!vvInBand(t, E.xyz, r)) continue;
-        vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity, slot, false, float3(0.0, 0.0, 0.0));
+        vvTry(t, gt, h, E.xyz, gStatic[gP.nodeInfoBase + h].w, r, parity, slot);
     }
 }
 
@@ -5867,6 +5897,11 @@ uint vvLevel(uint a, uint k, uint points)
 void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 {
     uint parity = step & 1u;
+    if (gP.vvSplit != 0u)
+    {
+        vvSnapshot(off, k, parity, lane);
+        sync();
+    }
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     // (S) the partner scans: lane per ordered pair (a, b).
     for (uint p = lane, pStop = EB_END(p, k * k, LANES); p < pStop; p += LANES)

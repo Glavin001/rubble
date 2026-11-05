@@ -16,8 +16,12 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
 
 /// Unit-mass nodes at `points` with ground contact on (the ground far below), no
 /// drag.
+/// A vehicle of `points` with RoR's contact rule (these tests are the RoR
+/// reference specification's; two-body contact is spec §10.3's, tested in
+/// `explicit_contact_gpu.rs` and `energy_ledger.rs`).
 fn vehicle(points: &[Vec3]) -> ExplicitBeams {
     let mut s = ExplicitBeams::empty(EXACT);
+    s.two_body_contact = false;
     s.ground = -1.0e3;
     for &p in points {
         s.nodes.push(Node {
