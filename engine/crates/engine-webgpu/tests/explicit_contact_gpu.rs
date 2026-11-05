@@ -625,3 +625,142 @@ fn self_collision_two_body_steps_like_the_cpu() {
     let close = |a: usize, b: usize| (a as f32 - b as f32).abs() <= 0.1 * a.max(b) as f32 + 2.0;
     assert!(close(cb, gb) && close(cn, gn));
 }
+
+/// Anti-clip (jbeam-semantics-spec.md §36) on the GPU against the CPU, step by step
+/// with one-step frames, then 17-step ones: points at 30–150 m/s through another
+/// vehicle's floor (the swept test catches those faster than the band per step),
+/// a self-collision node through its own vehicle's triangle, and an anti-clip-only
+/// (NONCOLLIDABLE) triangle. The side memories are equal word for word after every
+/// frame (the contact decisions), the positions to the accumulator's rounding.
+#[test]
+fn anti_clip_steps_like_the_cpu() {
+    // Three vehicles (a small contact group), then six (the owner-by-owner pass).
+    anti_clip_scene(0);
+    anti_clip_scene(3);
+}
+
+fn anti_clip_scene(extra: usize) {
+    let mut fl = floor(Vec3::new(3.0, 3.0, 3.0));
+    fl.anti_clip = true;
+    fl.two_body_contact = true;
+    fl.settings.triangle_throttle = false;
+    let mut pts = vehicle(&[
+        Vec3::new(0.1, 0.3, 0.0),
+        Vec3::new(-0.3, 0.2, -0.5),
+        Vec3::new(0.2, 0.25, 0.8),
+        Vec3::new(0.0, -0.2, 0.1),
+    ]);
+    for (n, v) in pts.nodes.iter_mut().zip([-30.0, -70.0, -150.0, 100.0]) {
+        n.vel = Vec3::new(0.0, v, 0.0);
+        n.flags |= NODE_NO_GROUND | NODE_CONTACTER;
+    }
+    pts.finish();
+    // Self-collision: a node through its own vehicle's triangle at 90 m/s, and one
+    // falling onto an anti-clip-only triangle.
+    let mut own = vehicle(&[
+        Vec3::new(10.0, 0.0, -1.0),
+        Vec3::new(12.0, 0.0, -1.0),
+        Vec3::new(11.0, 0.0, 2.0),
+        Vec3::new(11.0, 0.3, 0.0),
+        Vec3::new(10.0, 0.0, 3.0),
+        Vec3::new(12.0, 0.0, 3.0),
+        Vec3::new(11.0, 0.0, 6.0),
+        Vec3::new(11.0, 0.05, 4.0),
+    ]);
+    own.settings.triangle_throttle = false;
+    for i in [0, 1, 2, 4, 5, 6] {
+        own.nodes[i].flags |= NODE_IMMOVABLE | NODE_ON_TRIANGLE;
+    }
+    for (i, v) in [(3, -90.0), (7, -1.0)] {
+        own.nodes[i].flags |= NODE_CONTACTER | NODE_NO_GROUND;
+        own.nodes[i].vel = Vec3::new(0.0, v, 0.0);
+    }
+    own.triangles.push(Triangle {
+        nodes: [0, 1, 2],
+        wait: 0,
+        idle: 0,
+    });
+    own.triangles.push(Triangle {
+        nodes: [4, 5, 6],
+        wait: 0,
+        idle: 0,
+    });
+    own.anti_only_tris = vec![false, true];
+    own.anti_clip = true;
+    own.two_body_contact = true;
+    own.finish();
+    let mut fleet = vec![fl, pts, own];
+    for k in 0..extra {
+        let mut p = point(
+            Vec3::new(-0.5 + 0.3 * k as f32, 0.4, -0.2),
+            Vec3::new(0.0, -120.0, 0.0),
+            false,
+        );
+        p.nodes[0].flags |= NODE_NO_GROUND;
+        fleet.push(p);
+    }
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut w = ExplicitBeamsWorld::new(fleet);
+    let mut recorded = 0usize;
+    for (frames, steps) in [(60, 1), (6, 17)] {
+        for _ in 0..frames {
+            w.frame(steps);
+            g.frame(steps);
+            let gs = g.clip_sides();
+            for k in 0..w.vehicles.len() {
+                let cs = &w.vehicles[k].clip_sides;
+                for (i, c) in gs[k].iter().enumerate() {
+                    let cpu = cs
+                        .get(i)
+                        .copied()
+                        .unwrap_or([engine_softbody::explicit_contact::CLIP_EMPTY; 4]);
+                    assert_eq!(
+                        *c, cpu,
+                        "vehicle {k} node {i} side memory after {} steps",
+                        w.steps
+                    );
+                    recorded += c[2..]
+                        .iter()
+                        .filter(|&&x| x != engine_softbody::explicit_contact::CLIP_EMPTY)
+                        .count();
+                }
+            }
+        }
+    }
+    g.wait();
+    g.contact_status().unwrap();
+    assert!(recorded >= 10, "contacts recorded: {recorded}");
+    let pos = g.positions();
+    for k in 0..w.vehicles.len() {
+        let d = rms(&pos[k], &w.vehicles[k].positions());
+        eprintln!("vehicle {k}: GPU–CPU {d:.2e} m after {} steps", w.steps);
+        assert!(d < 1e-4, "vehicle {k}: GPU–CPU {d} m");
+    }
+    // Every fast point is above the floor (caught on its side), the self-collision
+    // node above its triangle, the other held at the anti-clip-only plane.
+    for (i, p) in pos[1].iter().enumerate() {
+        let above = i != 3;
+        assert!((p.y > -0.01) == above, "point {i} at y {}", p.y);
+    }
+    for k in 3..3 + extra {
+        assert!(pos[k][0].y > -0.01, "extra point {k} at y {}", pos[k][0].y);
+    }
+    eprintln!(
+        "{} vehicles: {recorded} contacts recorded, {} contact groups",
+        w.vehicles.len(),
+        g.contact_groups()
+    );
+    assert!(
+        pos[2][3].y > -0.01,
+        "self-collision node at {}",
+        pos[2][3].y
+    );
+    assert!(
+        pos[2][7].y.abs() < 0.005,
+        "anti-clip-only plane: {}",
+        pos[2][7].y
+    );
+}

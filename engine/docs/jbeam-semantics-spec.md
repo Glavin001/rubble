@@ -302,7 +302,7 @@ its first node `group` (the importer's `self_group`, the rule Rubble's BeamNG-pa
 solver already uses). Without it a panel's middle node lies in the plane of its own
 neighbouring triangles: the BX boot lid's centre node sat 3 cm from its own panel and
 was kicked by the self-collision throttle every eighth step. Collision triangles,
-range (0.03 m) and contact rules are otherwise the solver's.
+range (0.03 m; 0.025 m since §36's band) and contact rules are otherwise the solver's.
 
 ### 10.1 Self-collision pairs that start inside the contact range (2026-11-05)
 
@@ -316,7 +316,8 @@ chattered at 8 m/s, and the forklift's beacon, whose base nodes start 1 cm above
 roll hoop's triangles, broke its 3.8 kN mounts at 52 ms.
 
 **Choice:** a self-collision node that starts inside a collision triangle's contact
-range (inside it, within the 3 cm range of its plane, and not excluded by §10's
+range (inside it, within the contact range of its plane (2.5 cm since §36; 3 cm
+when measured below), and not excluded by §10's
 group rule) never collides with that triangle (`ExplicitBeams::spawn_exclusions`,
 `tri_excl`; at most `TRI_EXCL_CAP` = 16 per triangle). JBeam mode always; the
 `.truck` path only through `opt_in_full_contact` (§10.2). GPU: per triangle (start,
@@ -1615,6 +1616,9 @@ The research behind the list is `ror-vs-beamng-research.md` §5.
 | Beam lengths | fast inverse square root | exact (§33, §35) | `settings.fast_inv_sqrt` |
 | Idle-triangle throttle | skip an unhit triangle up to 12 steps | every triangle every step | `settings.triangle_throttle` |
 | Contact rule (vehicle and self) | static surface: cancel the contacter's whole force | two-body (§10.3) with mass splitting | `two_body_contact` |
+| Anti-clip (vehicle and self) | the band test only | side memory and a swept crossing test | `anti_clip` |
+| Contact band | 2 cm (`set_collision_range`) | 2.5 cm, unless the file sets one | `collision_range` |
+| `NONCOLLIDABLE` triangles (JBeam) | not collision triangles | anti-clip only | `anti_only_tris` |
 
 **No throttle.** RoR's throttle skips work whose result can differ (AGENTS.md: not
 outside the RoR profile). A contacter arriving at 10 m/s at a triangle idle for a
@@ -1648,7 +1652,74 @@ the overflow path (`selfSerial`) likewise; `explicit_contact_gpu.rs`
 mm when self-contact starts; broken 127 / 134, bent 529 / 523 after 0.6 s). JBeam
 mode's bit-for-bit runs (§35) are unchanged.
 
-**Still to come in this profile:** exact `exp`/`pow` in the friction law; anti-clip
-(side memory, NONCOLLIDABLE triangles, the 2.5 cm band, and a swept test for nodes
-faster than r/h); plasticity without RoR's spring-back for `.truck` content;
+**Anti-clip.** [BN-nodes]: anti-clip forces near the surface "decide which side of
+the triangle the node ends up on"; `NONCOLLIDABLE` triangles "still have anti-clip";
+a triangle is 2.5 cm thick ("a node starts feeling a triangle at around 2.5cm").
+RoR's band test is stateless: a node faster than r/h (40 m/s at 2 cm and 0.5 ms)
+can step over the band, and a node pushed past the plane is pushed out of the far
+side. With `anti_clip`, per (node, triangle) pair, in vehicle contact (on when the
+owner or the partner has it) and self-collision
+(`explicit_contact::clip_test`):
+* **The side.** The side the node held for the triangle last step (it was in
+  contact); else the side it came from when it crossed the plane over the step
+  inside the triangle (the swept test: the node and the triangle a step back,
+  x − v·h, the crossing linear in the step; its weights α, β interpolated, γ =
+  (1 − α) − β); else, new and over the triangle within the band, the side it is on
+  (self-collision: the sign of δ; vehicle contact: §5.3's vote).
+* **The contact.** Weights inside (the crossing's, or now) and −`CLIP_DEPTH` ≤ d ≤ r
+  with d = side·δ: a hit with normal side·n, depth r − d, so a node up to
+  `CLIP_DEPTH` behind is pushed back to its side. **Choice:** `CLIP_DEPTH` 0.1 m
+  (BeamNG documents that a triangle with no node within 10 cm goes inactive).
+* **Memory.** Each contact records owner << 21 | triangle << 1 | (side > 0) for the
+  next step; the node pass makes the recorded words the held ones. Two slots: the
+  two smallest words a step records (**Choice**: an order-free rule, so the GPU's
+  lanes, recording in any order, keep the CPU's; a node touching three triangles at
+  once keeps the two of smallest key). At most 1,022 vehicles and 2²⁰ − 1 collision
+  triangles per vehicle in one upload, checked.
+* **Reach.** The box tests reach the nodes that can cross: self-collision's
+  triangle box grows by (its fastest node's speed + the vehicle's fastest) · h +
+  `CLIP_DEPTH`; vehicle contact's candidate box per point by (the triangle's fastest
+  travel + the point's) + `CLIP_DEPTH`.
+* **`NONCOLLIDABLE`.** JBeam's NONCOLLIDABLE triangles become collision triangles
+  after the others (`anti_only_tris`), part of self-collision, vehicle contact,
+  breaking (§18) and the spawn exclusions (§10.1), only while `anti_clip` is on: no
+  force in front of the plane (d ≥ 0: the side recorded only), behind it pushed back
+  to the plane (depth −d). `.truck` content has no such type.
+* **Band.** JBeam content's range is 2.5 cm (was 3 cm, a Choice), a profile `.truck`'s
+  2.5 cm unless it has `set_collision_range`.
+* **Spawn exclusions** (§10.1) count a node on a triangle's edge to rounding as
+  inside (**Choice**: 10⁻⁴ in barycentric weight). Without it the Astral R's nodes
+  477 and 478, at T-junctions on the edges of NONCOLLIDABLE triangles 376 and 377,
+  were caught crossing them as the car settled (step 2).
+
+Measured (CPU, `explicit_contact.rs`
+`anti_clip_catches_a_point_faster_than_the_band_per_step`): a point through another
+vehicle's floor at 70 / 100 / 150 m/s ends 4.1 / 9.7 / 14.7 m below it with the band
+test and above it with anti-clip; `an_anti_clip_only_triangle_holds_a_node_at_its_plane`:
+a node falling at 1 m/s rests at 0.0200 m on a collision triangle, at 0.0000 m on an
+anti-clip-only one, and falls through it with anti-clip off. GPU (flag 2048
+`FLAG_ANTI_CLIP`; 4096 `FLAG_CLIP_MEM` on every vehicle of an upload with any: the
+node phase rolls the memory and takes the vehicle's fastest speed (gAcc at
+`clipVmax`, two parities), the shapes path; memory at `clipMem`, 4 words a node,
+recorded by atomic min; triangle bit 30 anti-clip only): `explicit_contact_gpu.rs`
+`anti_clip_steps_like_the_cpu`, points at 30–150 m/s through a floor, a
+self-collision node at 90 m/s and an anti-clip-only triangle, 3 and 6 vehicles (the
+small group and the owner-by-owner pass), one-step then 17-step frames: the side
+memories equal word for word after every frame, positions within 1.1 µm (the
+accumulator's rounding, §35).
+
+**Effect on the showcase car (sedan1, CPU, the profile's 2.5 cm band, anti-clip off
+and on).** T-bone at 80 km/h (`showcase_car.rs` `t_car_to_car_t_bone_at_80_kmh`,
+live-skin leak metric, limit 10 of 993), striker offset −0.03 / 0 / +0.03 / 0.40 /
+0.43 m: off 19 / 13 / 15 / 14 / 7, on 16 / 16 / 16 / 10 / 2 (means 13.6 and 12.0,
+within the run-to-run chaos; deepest leak 0.19–0.24 m either way). The leaked nodes'
+last inward crossings start at hits in front of the skin (on: 93 of 97 crossings,
+"in front & out" 69, "behind & pushed in" 0): anti-clip keeps every node's side, but
+the contact rule's push per step cannot hold a node the struck skin closes on, which
+then passes CLIP_DEPTH and is forgotten. Not anti-clip's to fix. The frontal wall
+(`crash_invariants.rs`, `CI_ANTI=0|1`): every row identical; its 3,408 self-contacts
+are band hits on the side of δ (held sides 3,394), none crossed.
+
+**Still to come in this profile:** exact `exp`/`pow` in the friction law;
+`externalCollisionBias`; plasticity without RoR's spring-back for `.truck` content;
 damping-only beams and `dampCutoffHz` for `.truck` content; flexbody 4-node binding.
