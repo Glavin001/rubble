@@ -2271,4 +2271,48 @@ fn energy_terms_probe() {
             car.part[i], s.nodes[i].mass, s.nodes[i].pos
         );
     }
+
+/// The BeamNG profile's air drag (jbeam-semantics-spec.md §31, §36): sedan1 takes
+/// the triangles' drag at BeamNG's default dragCoef (100) in place of the per-node
+/// drag. Coasting at 100 km/h clear of the ground (0.05 s): the drag force against
+/// the per-node rule's (DRAG·|v|² per node, independent of mass) and a real
+/// sedan's (½ρ·Cd·A, Cd·A ≈ 0.65 m²).
+#[test]
+fn profile_drag_is_the_triangles() {
+    let b = built("sedan1");
+    let v = 100.0 / 3.6;
+    let mut s = spawn_truck(&b.truck, Vec3::new(0.0, 50.0, 0.0), Vec3::Z * v);
+    assert!(!s.settings.drag && !s.settings.turbulence);
+    let tris = s
+        .beams
+        .iter()
+        .filter(|bm| bm.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamAeroTri)
+        .count();
+    assert!(tris > 0);
+    let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let p0: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
+    let steps = 100;
+    for _ in 0..steps {
+        s.step();
+    }
+    let p1: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
+    let f = -(p1 - p0) / (steps as f32 * STEP);
+    let per_node = engine_softbody::explicit_beams::DRAG * s.nodes.len() as f32 * v * v;
+    let real = 0.5 * 1.225 * 0.65 * v * v;
+    eprintln!(
+        "sedan1 at 100 km/h, {m:.0} kg: triangle drag {f:.0} N ({tris} triangles); per-node rule {per_node:.0} N; a real sedan {real:.0} N"
+    );
+    assert!(f > 0.0);
+    // `rubble_drag_coef 9` (Rubble's extension): the triangles at 9 % of a flat
+    // plate, about a real sedan's drag.
+    let text = b.truck.replace("rubble_beamng_profile", "rubble_beamng_profile\nrubble_drag_coef 9");
+    let mut s = spawn_truck(&text, Vec3::new(0.0, 50.0, 0.0), Vec3::Z * v);
+    let p0: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
+    for _ in 0..steps {
+        s.step();
+    }
+    let p1: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
+    let f9 = -(p1 - p0) / (steps as f32 * STEP);
+    eprintln!("with rubble_drag_coef 9: {f9:.0} N");
+    assert!((f9 / f - 0.09).abs() < 0.02, "{f9} against {f}");
 }

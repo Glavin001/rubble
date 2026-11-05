@@ -1631,6 +1631,7 @@ The research behind the list is `ror-vs-beamng-research.md` §5.
 | Contact force sums (CPU) | floats into the node's force | the GPU's fixed point (1/32 N, ties to even) | `fixed_contact` |
 | `.truck` deformable plain beams | RoR's rule (`Plain`) | JBeam's NORMAL rule (§3, `JbeamPlain`) | `use_jbeam_plasticity` |
 | Strength falls with plastic stretch | yes (k × the stretch) | no | `plastic_strength_drop` |
+| Air drag (`.truck`) | per node, DRAG·|v|·v (mass-independent), turbulence | the triangles' (§31), dragCoef 100 or `rubble_drag_coef` | `settings.drag` → aero triangles |
 
 **No throttle.** RoR's throttle skips work whose result can differ (AGENTS.md: not
 outside the RoR profile). A contacter arriving at 10 m/s at a triangle idle for a
@@ -1775,6 +1776,19 @@ JBeam) loses strength with stretch. GPU: vehicle flag 8192 (`FLAG_KEEP_STRENGTH`
   improve: the rear damage is not plasticity's. The ripple falls at the boot lid
   (12.9 → 8.9 mm) and the body (4.0 → 2.9), not to 1 mm. The authored `sedan` (no
   profile) is bit for bit unchanged.
+
+**Air drag.** A profile `.truck` with drag on takes §31's triangle aerodynamics on
+every cab triangle (one per node set: a cab line of both groups is one aero triangle)
+at BeamNG's defaults (dragCoef 100, liftCoef = dragCoef, stall 0.58 rad), and its
+per-node drag and turbulence go off, as JBeam mode's. `rubble_drag_coef <d> [<l>]`
+(**Rubble extension**) sets every triangle's coefficients. Measured
+(`crash_invariants.rs` `profile_drag_is_the_triangles`, sedan1 coasting at 100 km/h
+clear of the ground): 3,417 N with the default 100; the per-node rule would give
+38,310 N (0.05·|v|² on each of its nodes, whatever their mass); a real sedan's
+½ρ·Cd·A at Cd·A ≈ 0.65 m² is 307 N. BeamNG's default is 11 times a real car's here
+(every panel a flat plate, inside ones too); `rubble_drag_coef 9` gives 310 N. The
+GPU runs the same aero records (`showcase_car_gpu`, sedan1: at rest, the side pole and
+the wall equal to the CPU's).
 
 **Effect on the showcase car (sedan1, CPU, the profile's 2.5 cm band, anti-clip off
 and on).** T-bone at 80 km/h (`showcase_car.rs` `t_car_to_car_t_bone_at_80_kmh`,
