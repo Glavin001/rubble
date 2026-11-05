@@ -902,8 +902,12 @@ vehicle the same visual format as the authored car, so
     die with it while the hinged door is still pressed in, which opens a
     hole.
 
-  The sash definition is in the scratchpad history of this task. Without it,
-  the side-glass gauges have only belt corners.
+  The sashes tried were `window_frame(riding(ladder(member("door_sash_f",
+  [(0.80, 1.10, 2.98), (0.70, 1.33, 2.64), (0.69, 1.36, 2.36), (0.79, 1.10,
+  2.36)], 0.05, 0.05, OUT, "hsla", [1, 1], 0, true, 1))))`, and `door_sash_r`
+  through (0.79, 1.10, 2.12), (0.69, 1.36, 2.12), (0.69, 1.33, 1.64) and
+  (0.79, 1.10, 1.58). Without them, the side-glass gauges have only belt
+  corners.
 - **What is open:**
   - Direct impact against measured data, on the solver's contact-force
     break trigger. The solver owner is adding `rubble_contact_breaks`; it
