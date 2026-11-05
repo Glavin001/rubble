@@ -125,6 +125,15 @@ pub const ROOF_YIELD: f32 = 1.2e4;
 /// 56 km/h crash, crushed by a roll-over.
 pub const CABIN_YIELD: f32 = 6.0e4;
 
+/// The hinge pillar's lumped body-side panel (the A-pillar's shoulder at the
+/// cowl to the B-pillar's base): k·L × [`KL_PANEL`] and its yield force (N).
+/// The yield is the panel's shear capacity: a 1.5 mm body-side outer and
+/// hinge-pillar inner over about 0.6 m at about 200 MPa shear yield carry
+/// about 180–200 kN. It keeps the front door's aperture within NCAP's
+/// measured ±9 mm (`crash-reference-targets.md` §4.9) while the front crushes.
+pub const HINGE_PANEL: f32 = 1.5;
+pub const HINGE_YIELD: f32 = 2.0e5;
+
 /// The front subframe's cross members' threshold scale (a pole between the
 /// engine and a rail meets them).
 pub const SUBFRAME: f32 = 1.5;
@@ -215,7 +224,7 @@ pub const RAIL_BUMPER: f32 = 1.0;
 /// (`engine/docs/crash-reference-targets.md` §2, §8): at 56 km/h a 1,450 kg
 /// sedan crushes 0.62–0.75 m dynamically (t_m 63–76 ms) and 0.38–0.58 m
 /// residually (Campbell b1 22.9–39.2). The `n` test measures it.
-pub const CRUSH_PLATEAU: f32 = 1.3;
+pub const CRUSH_PLATEAU: f32 = 1.25;
 
 /// The main load paths' (rails, sills) section against their grade's k·L.
 pub const RAIL_STIFF: f32 = 1.4;
@@ -1206,6 +1215,10 @@ pub fn sedan() -> VehicleDef {
             let _ = (bb, bt, ft, rt, tun_r, tun_f);
             cabin_x(fb, ft, cw, bb, bt, rb, rt, k)
                 .into_iter()
+                .chain([yielding(
+                    brace("hinge_x", cw, bb, "uhss", k * HINGE_PANEL),
+                    HINGE_YIELD,
+                )])
                 .chain({
                     [
                         // Front end: the cowl and strut towers as one box (strut

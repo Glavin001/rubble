@@ -258,9 +258,13 @@ fn group_mean(s: &ExplicitBeams, b: &Built, names: &[&str]) -> Vec3 {
     v / n
 }
 
+/// The sill's length (its end nodes' distance: a car that yaws or pitches
+/// after the crash keeps its sill's length).
 fn sill_length(s: &ExplicitBeams, b: &Built) -> f32 {
     let g = &b.groups["sill"];
-    (s.nodes[g[0] as usize].pos.z - s.nodes[*g.last().unwrap() as usize].pos.z).abs()
+    s.nodes[g[0] as usize]
+        .pos
+        .distance(s.nodes[*g.last().unwrap() as usize].pos)
 }
 
 fn ke(s: &ExplicitBeams) -> f32 {
@@ -1897,7 +1901,7 @@ fn front_profile(
 /// and structure), Campbell b1, the dynamic crush and when it peaks, the
 /// springback, restitution and where the energy went. Returns (exterior
 /// average crush, failures).
-fn reference_wall(b: &Built, kmh: f32, drag: bool) -> (f32, Vec<String>) {
+fn reference_wall(b: &Built, kmh: f32, drag: bool) -> Vec<(&'static str, f32)> {
     let sk = &b.skeleton;
     let v0 = kmh / 3.6;
     let mut s = spawn(b, Vec3::new(0.0, 0.0, v0), 0.0);
@@ -2009,55 +2013,133 @@ fn reference_wall(b: &Built, kmh: f32, drag: bool) -> (f32, Vec<String>) {
         ke1 / 1e3,
         0.5 * total * rebound * rebound / 1e3
     );
-    let mut fails = Vec::new();
-    let mut check = |ok: bool, what: String| {
-        if !ok {
-            fails.push(format!("{kmh} km/h drag {drag}: {what}"));
-        }
+    // The cabin as NHTSA measures it (§1, §4.9): the door apertures (hinge
+    // pillar to latch pillar, low and at the belt, both sides, both doors),
+    // the A-pillars' bases and the firewall moving rearward.
+    let near = |p: Vec3| -> usize {
+        (0..sk.nodes.len())
+            .filter(|&i| sk.nodes[i].part == 0)
+            .min_by(|&a, &c| {
+                sk.nodes[a]
+                    .p
+                    .distance(p)
+                    .total_cmp(&sk.nodes[c].p.distance(p))
+            })
+            .unwrap()
     };
-    if (kmh - 56.0).abs() < 0.5 {
-        // §4.5: residual max 380–580 mm; §4.6: b1 22.9–39.2 1/s; §8 (seven
-        // NCAP sedan pulses): dynamic crush 0.62–0.75 m, t_m 63–76 ms, e
-        // 0.13–0.20, peak 34–47 g. (Springback of ~25 % is normal, §8.)
-        check(
-            (0.380..=0.580).contains(&max_x),
-            format!("max crush {max_x} m"),
-        );
-        check((22.9..=39.2).contains(&b1), format!("b1 {b1}"));
-        check(
-            (0.62..=0.75).contains(&d_dyn),
-            format!("dynamic crush {d_dyn} m"),
-        );
-        check((0.063..=0.076).contains(&tm), format!("t_m {tm} s"));
-        check((0.13..=0.20).contains(&e), format!("restitution {e}"));
-        check((34.0..=47.0).contains(&peak_g), format!("peak {peak_g} g"));
+    let mut aper: Vec<f32> = Vec::new();
+    for side in [1.0f32, -1.0] {
+        for (za, zb) in [(3.30, 2.30), (2.18, 1.40)] {
+            for y in [0.40, 0.95] {
+                let (a, c) = (
+                    near(Vec3::new(side * 0.85, y, za)),
+                    near(Vec3::new(side * 0.85, y, zb)),
+                );
+                aper.push(l1[a].distance(l1[c]) - l0[a].distance(l0[c]));
+            }
+        }
     }
-    (avg_x, fails)
+    let rearward = |g: &str, ymax: f32| -> f32 {
+        let v: Vec<usize> = b.groups[g]
+            .iter()
+            .map(|&i| i as usize)
+            .filter(|&i| sk.nodes[i].p.y < ymax)
+            .collect();
+        v.iter().map(|&i| l0[i].x - l1[i].x).sum::<f32>() / v.len() as f32
+    };
+    let a_base = rearward("pillar_a", 0.6).max(rearward("pillar_a_r", 0.6));
+    let fw = rearward("firewall", 2.0);
+    let mut sorted: Vec<f32> = aper.iter().map(|a| a.abs()).collect();
+    sorted.sort_by(f32::total_cmp);
+    let (aper_med, aper_p90) = (
+        sorted[sorted.len() / 2],
+        sorted[(sorted.len() * 9) / 10 - 1],
+    );
+    eprintln!(
+        "(n) wall {kmh} km/h drag {drag}: door apertures {:?} mm (|median| {:.0}, p90 {:.0}); A-pillar base rearward {:.0} mm, firewall {:.0} mm",
+        aper.iter().map(|a| (a * 1e3).round()).collect::<Vec<_>>(),
+        aper_med * 1e3,
+        aper_p90 * 1e3,
+        a_base * 1e3,
+        fw * 1e3
+    );
+    vec![
+        ("avg crush", avg_x),
+        ("max crush", max_x),
+        ("b1", b1),
+        ("dynamic crush", d_dyn),
+        ("t_m", tm),
+        ("restitution", e),
+        ("peak g", peak_g),
+        ("aperture p90", aper_p90),
+        ("aperture median", aper_med),
+        ("A-pillar base rearward", a_base),
+        ("firewall rearward", fw),
+    ]
 }
 
 /// NHTSA-referenced frontal measures (`engine/docs/crash-reference-targets.md`
-/// §4.5–4.8, 4.10): residual crush at bumper height (max and the 6-point
-/// average), Campbell b1, restitution, springback, and Campbell's speed
-/// scaling C̄(50)/C̄(56) ≈ 0.875. Medium, drag on and off. Ignored: run with
-/// `--ignored` (reports every failure).
+/// §4.5–4.10, §8): residual crush at bumper height, Campbell b1, the pulse at
+/// the rear seat's cross member (dynamic crush, t_m, peak g), restitution,
+/// the cabin (door apertures, A-pillar bases, firewall) and Campbell's speed
+/// scaling C̄(50)/C̄(56) ≈ 0.875. Medium; medians over 55–57 km/h with drag
+/// on and off, each inside the measured sedans' spread.
 #[test]
-#[ignore]
 fn n_wall_matches_the_nhtsa_sedans() {
     let b = built(Resolution::Medium);
+    // 55–57 km/h with drag on and off: the medians are judged (the solver's
+    // run-to-run spread at one speed is a few centimetres).
+    let mut runs: Vec<Vec<(&str, f32)>> = Vec::new();
+    for kmh in [55.0, 56.0, 57.0] {
+        for drag in [true, false] {
+            runs.push(reference_wall(&b, kmh, drag));
+        }
+    }
+    let med = |k: &str| {
+        let mut v: Vec<f32> = runs
+            .iter()
+            .map(|r| r.iter().find(|x| x.0 == k).unwrap().1)
+            .collect();
+        v.sort_by(f32::total_cmp);
+        0.5 * (v[(v.len() - 1) / 2] + v[v.len() / 2])
+    };
     let mut fails = Vec::new();
-    for drag in [true, false] {
-        let (c56, f) = reference_wall(&b, 56.0, drag);
-        fails.extend(f);
-        if std::env::var("N_ONLY56").is_ok() {
-            continue;
+    let mut band = |k: &str, lo: f32, hi: f32| {
+        let m = med(k);
+        eprintln!("(n) median {k} {m:.4} (reference {lo}–{hi})");
+        if !(lo..=hi).contains(&m) {
+            fails.push(format!("{k} {m} outside {lo}–{hi}"));
         }
-        let (c50, f) = reference_wall(&b, 50.0, drag);
-        fails.extend(f);
-        let ratio = c50 / c56;
-        eprintln!("(n) drag {drag}: average crush 50/56 km/h {ratio:.3} (Campbell 0.875)");
-        if (ratio - 0.875).abs() > 0.1 {
-            fails.push(format!("drag {drag}: crush ratio 50/56 {ratio}"));
-        }
+    };
+    // §4.5 residual max 380–580 mm; §4.6 b1 22.9–39.2; §8 (seven NCAP sedan
+    // pulses) dynamic crush 0.62–0.75 m, t_m 63–76 ms, e 0.13–0.20, peak
+    // 34–47 g; §4.9 apertures (individual p10–p90 ±9 mm, median 0–1, IQR
+    // −2…+3), A-pillar base ≤ 17 mm, firewall ≤ 85 mm.
+    band("max crush", 0.380, 0.580);
+    band("b1", 22.9, 39.2);
+    band("dynamic crush", 0.62, 0.75);
+    band("t_m", 0.063, 0.076);
+    band("restitution", 0.13, 0.20);
+    band("peak g", 34.0, 47.0);
+    band("aperture p90", 0.0, 0.009);
+    band("aperture median", 0.0, 0.003);
+    band("A-pillar base rearward", -0.017, 0.017);
+    band("firewall rearward", -0.085, 0.085);
+    // §4.10 Campbell's speed scaling: C̄(50)/C̄(56) ≈ 0.875 (no measured
+    // spread; the sim's own spread decides the tolerance).
+    let c56 = med("avg crush");
+    let mut r50: Vec<f32> = [true, false]
+        .iter()
+        .map(|&d| {
+            let r = reference_wall(&b, 50.0, d);
+            r.iter().find(|x| x.0 == "avg crush").unwrap().1
+        })
+        .collect();
+    r50.sort_by(f32::total_cmp);
+    let ratio = 0.5 * (r50[0] + r50[1]) / c56;
+    eprintln!("(n) average crush 50/56 km/h {ratio:.3} (Campbell 0.875)");
+    if (ratio - 0.875).abs() > 0.1 {
+        fails.push(format!("crush ratio 50/56 {ratio}"));
     }
     assert!(fails.is_empty(), "{fails:#?}");
 }
