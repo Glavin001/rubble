@@ -128,6 +128,9 @@ static const uint FLAG_ANTI_CLIP = 2048u;
 static const uint FLAG_CLIP_MEM = 4096u;
 // A collision triangle that is anti-clip only (BeamNG NONCOLLIDABLE; gMisc .z).
 static const uint TRI_ANTI_ONLY = 0x40000000u;
+// The BeamNG profile's plasticity (jbeam-semantics-spec.md §36): a beam's strength
+// does not fall with its plastic stretch (RoR's rule; `plastic_strength_drop` off).
+static const uint FLAG_KEEP_STRENGTH = 8192u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -1432,6 +1435,9 @@ void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(sscale(g4, t), 0.0);
 }
 
+// Beam bn's vehicle keeps strength under plastic stretch (FLAG_KEEP_STRENGTH).
+bool keepStrength(uint4 bn) { return (gStatic[(bn.z >> 16) * 4u + 3u].x & FLAG_KEEP_STRENGTH) != 0u; }
+
 // A JBeam-mode beam (kinds KIND_JPLAIN..KIND_JCOUPLER; the CPU reference's
 // jbeam_force_filtered, coupler_force and beam_pass; engine/docs/jbeam-semantics-spec.md).
 // Exact lengths (JBeam mode spawns without the fast inverse square root); no break
@@ -1594,7 +1600,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
                 {
                     tt = min(sdiv(smul(tt, rest), old), max(c1.z, tt));
                     gate = min(min(tc, tt), strength);
-                    strength = nf(strength - smul(nf(rest - old), k));
+                    if (!keepStrength(bn)) strength = nf(strength - smul(nf(rest - old), k));
                 }
             }
         }
@@ -1955,7 +1961,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
                 {
                     tt = min(sdiv(smul(tt, rest), old), max(c1.z, tt));
                     gate = min(min(tc, tt), strength);
-                    strength = nf(strength - smul(nf(rest - old), k));
+                    if (!keepStrength(bn)) strength = nf(strength - smul(nf(rest - old), k));
                 }
             }
         }

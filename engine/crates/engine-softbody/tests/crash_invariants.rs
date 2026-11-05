@@ -105,6 +105,18 @@ fn spawn_truck(truck: &str, at: Vec3, vel: Vec3) -> ExplicitBeams {
     if let Ok(a) = std::env::var("CI_ANTI") {
         s.anti_clip = a == "1";
     }
+    // (CI_DROP: `1` puts back RoR's strength drop with plastic stretch; CI_PSET:
+    // the plastic coefficient of every deformable beam; spec §36, measurements.)
+    if std::env::var("CI_DROP").as_deref() == Ok("1") {
+        s.plastic_strength_drop = true;
+    }
+    if let Some(p) = std::env::var("CI_PSET").ok().and_then(|v| v.parse::<f32>().ok()) {
+        for b in &mut s.beams {
+            if b.ty == engine_softbody::explicit_beams::ExplicitType::Deformable {
+                b.plastic = p;
+            }
+        }
+    }
     s
 }
 

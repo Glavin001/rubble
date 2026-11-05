@@ -71,8 +71,9 @@ fn bits(u: u32) -> f32 {
     f32::from_bits(u)
 }
 
-/// The JBeam yield rule (spec §3) shared with `jbeam_force_filtered`.
-fn jbeam_yield(beam: &mut Beam, len: f32, e: f32, k: f32, damp: f32, mut f: f32) -> (f32, f32) {
+/// The JBeam yield rule (spec §3) shared with `jbeam_force_filtered`; `keep`: no
+/// strength drop with plastic stretch (the BeamNG profile, §36).
+fn jbeam_yield(beam: &mut Beam, len: f32, e: f32, k: f32, damp: f32, mut f: f32, keep: bool) -> (f32, f32) {
     let mut tau = f.abs();
     if tau > beam.gate && beam.ty == ExplicitType::Deformable && k != 0.0 {
         if f > beam.tc && e < 0.0 {
@@ -108,7 +109,9 @@ fn jbeam_yield(beam: &mut Beam, len: f32, e: f32, k: f32, damp: f32, mut f: f32)
             if beam.rest > old {
                 beam.tt = (beam.tt * beam.rest / old).min(beam.limit_k.max(beam.tt));
                 beam.gate = beam.tc.min(beam.tt).min(beam.strength);
-                beam.strength -= (beam.rest - old) * k;
+                if !keep {
+                    beam.strength -= (beam.rest - old) * k;
+                }
             }
         }
     }
@@ -126,6 +129,18 @@ pub fn jbeam_ext_force(
     na: &Node,
     nb: &Node,
     filter: Option<&mut DampFilter>,
+) -> BeamOut {
+    jbeam_ext_force_with(beam, ext, na, nb, filter, false)
+}
+
+/// [`jbeam_ext_force`]; `keep`: no strength drop with plastic stretch (§36).
+pub fn jbeam_ext_force_with(
+    beam: &mut Beam,
+    ext: &mut BeamExt,
+    na: &Node,
+    nb: &Node,
+    filter: Option<&mut DampFilter>,
+    keep: bool,
 ) -> BeamOut {
     if ext.ramp_left > 0 {
         beam.rest += ext.ramp_delta;
@@ -234,7 +249,7 @@ pub fn jbeam_ext_force(
     }
     let f = -k * e - damp;
     beam.force = f;
-    let (f, tau) = jbeam_yield(beam, len, e, k, damp, f);
+    let (f, tau) = jbeam_yield(beam, len, e, k, damp, f, keep);
     BeamOut {
         d,
         inv,
@@ -555,7 +570,14 @@ impl ExplicitBeams {
             arms = Some((c, o.fa, o.fb));
             o.beam
         } else {
-            jbeam_ext_force(&mut beam, &mut self.beam_ext[x], &na, &nb, filter)
+            jbeam_ext_force_with(
+                &mut beam,
+                &mut self.beam_ext[x],
+                &na,
+                &nb,
+                filter,
+                !self.plastic_strength_drop,
+            )
         };
         let mut f = out.force;
         let mut broke_now = beam.broken;
