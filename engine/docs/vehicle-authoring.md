@@ -1093,6 +1093,41 @@ Other references with both (Medium ensembles): `n` max crush 651 mm, b1
 `q` 8.62×; `g` latch 46.9 kN, door off 47.4 kN (passes); `t` 12 leaked;
 `h` passes.
 
+### Topology against the bound (2026-11-05, started)
+
+`topology_census` (`--ignored`) gives, per part: nodes, beam ends per node
+by kind, the share of nodes at the bound, and how each node's Gershgorin row
+divides by kind (stiffness h²k and damping 2hc, at the saturated nodes). It
+also gives the median k·L, ε_y and springback at 20 % plastic strain.
+sedan1 Medium at 64a3072c:
+
+| Part | Nodes | Ends per node (sheet, member, sheet–member, dashpot, tie) | At the bound | Row: member k, sheet k, tie k, all damping | k·L p50 | ε_y p50 | Springback at 20 % |
+|---|---|---|---|---|---|---|---|
+| body | 549 | 1.7, 9.4, 0.1, 1.9, 2.0 (15.2) | 87 % | 54, 17, 12, 17 % | 2.75e5 N | 4.4 % | 18 % |
+| doors | 106 | 1.9, 7.2, 0, 1.0, 0.7 (10.9) | 92 % | 55, 16, 6, 22 % | 1.74e5 | 3.1 % | 13 % |
+| bonnet | 31 | 4.6, 3.7, 0, 1.7, 0.3 (12.0) | 97 % | 37, 27, 3, 32 % | 7.7e4 | 4.4 % | 18 % |
+| boot lid | 21 | 0, 6.4, 0, 1.1, 0.5 (9.4) | 95 % | 65, 0, 6, 27 % | 1.2e5 | 10.8 % | 35 % |
+| fenders | 20 | 5.8, 0, 0, 1.5, 0 (7.3) | 80 % | 0, 79, 0, 21 % | 1.4e5 | 2.1 % | 10 % |
+
+The BX: body 11.0 ends per node, k·L 9.5e5 N, ε_y 1.0 %; doors 4.1 ends,
+ε_y 1.25 %.
+
+The members' trusses take about half of every saturated row. A box
+member's corner node has about 10 beam ends: 2 longitudinals, 4 face
+diagonals, 2 bend beams over two stations, and 2–3 ring ties.
+
+**Tried, not adopted: no bend beams** (`n`, `o`, `p`, `q`, Medium). Body
+ends per node fell 15.2 → 14.3 and k·L rose only 2.75e5 → 2.81e5: the
+freed row went to the other saturated beams of each node. The car lost its
+members' buckling resistance: `n` max crush 0.84 m, b1 20.0, t_m 80.8 ms;
+`p` 17.7 kN; `o` 228 mm (dynamic 354–473). The bend beams carry the
+crush, so they stay.
+
+So beam count alone does not raise k·L. The lever is the station spacing
+(a member's axial rigidity grows with the square of its station spacing at
+a fixed mass and step, `MemberSpec::station`), which the pole lanes cap at
+0.24 m (A8). Open.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
