@@ -86,6 +86,7 @@ pub fn brace(name: &str, from: [f32; 3], to: [f32; 3], grade: &str, kl: f32) -> 
         kl,
         strength: 0.0,
         on: Default::default(),
+        tension_only: false,
     }
 }
 
@@ -450,6 +451,34 @@ fn door_ring(name: &str, c: [[f32; 3]; 4], front: &str, rear: &str) -> Vec<Brace
         yielding(brace(&format!("{name}_x"), c[0], c[3], "uhss", kl), f),
         yielding(brace(&format!("{name}_y"), c[2], c[1], "uhss", kl), f),
     ]
+}
+
+/// The door rings' X's ([`door_ring`]) as tension-only diagonals: in
+/// racking one diagonal pulls while the other would push, so each alone
+/// carries the frame's racking stiffness (k·L = k·L_i/cos²α_i) and its
+/// mechanism shear (F = V/cos α_i). A load that shortens both (the roof
+/// pushed down) finds no diagonal, as a real door opening has none.
+fn tension_only_rings(braces: &mut [BraceSpec]) {
+    let geo = |b: &BraceSpec| {
+        let d = glam::Vec3::from_array(b.to) - glam::Vec3::from_array(b.from);
+        (d.length(), d.z.abs() / d.length())
+    };
+    for ring in ["ring_f", "ring_r"] {
+        let ix: Vec<usize> = (0..braces.len())
+            .filter(|&i| braces[i].name.starts_with(&format!("{ring}_")))
+            .collect();
+        let (sk, sc): (f32, f32) = ix.iter().fold((0.0, 0.0), |(a, c), &i| {
+            let (l, cs) = geo(&braces[i]);
+            (a + cs * cs / l, c + cs)
+        });
+        for &i in &ix {
+            let (l, cs) = geo(&braces[i]);
+            let b = &mut braces[i];
+            b.kl *= sk / (cs * cs / l);
+            b.strength *= sc / cs;
+            b.tension_only = true;
+        }
+    }
 }
 
 /// The front axle (z, m): 2.75 m of wheelbase, 0.92 m of front overhang.
@@ -2141,6 +2170,22 @@ pub fn sedan_one_tier() -> VehicleDef {
     // by the build but not used: with it the 52 and 120 km/h walls' energy
     // rose 2–38 J between tenths of a second, past the ledger's bound;
     // open, `vehicle-authoring.md`.)
+    // The door openings carry nothing across them (sedan1's q load path,
+    // `vehicle-authoring.md`): the sill–roof-rail zigzag panel, which
+    // crossed both door openings with diagonals from the roof rail to the
+    // sill (12 kN each at the belt in q), is not built; the openings'
+    // racking is the door rings' (`SILL_ROOF_PANEL=1` builds the panel, a
+    // measurement switch).
+    if std::env::var("SILL_ROOF_PANEL").map_or(true, |v| v != "1") {
+        d.shear.retain(|s| !(s.a == "sill" && s.b == "roof_rail"));
+    }
+    // Each door ring's X as tension-only diagonals (`RING_ROPES=0` keeps
+    // both acting, a measurement switch): in racking one pulls and carries
+    // the whole frame shear, so each takes the frame's racking stiffness
+    // and its yield shear alone ([`door_ring`] spread them over two).
+    if std::env::var("RING_ROPES").map_or(true, |v| v != "0") {
+        tension_only_rings(&mut d.braces);
+    }
     // The front bumper beam: the 2011 Accord's is roll-formed steel of
     // 590 MPa tensile strength, its assembly with crush cans, centre plate
     // and brackets 7.96 kg (NHTSA DOT HS 811 666 §5.10.7.1). Its section: a

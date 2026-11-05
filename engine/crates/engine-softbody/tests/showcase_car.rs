@@ -635,8 +635,11 @@ impl Ledger {
         // A fresh solver's nodes carry no force yet (its node pass sets
         // gravity and drag for the next step).
         let fresh = s.steps == 0;
-        for n in &s.nodes {
-            let mut f = n.force;
+        // (The force the node pass will take: its beams' plus the step's
+        // fixed-point contact sum and held slide forces, `force_now`.)
+        let now = s.forces_now();
+        for (n, &f_now) in s.nodes.iter().zip(&now) {
+            let mut f = f_now;
             let g = if fresh {
                 Vec3::ZERO
             } else {
