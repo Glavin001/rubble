@@ -638,6 +638,11 @@ pub fn jbeam_visual(
         if mi.translucent && !matches!(c, mat::SCREEN | mat::GLASS | mat::LENS | mat::TAIL_LENS) {
             c = mat::GLASS;
         }
+        // A colour-mapped material is not the body paint (paint is a flat
+        // colour): it shades satin with its map (carbon, fabric, wood, dials).
+        if mi.textured && c == mat::PAINT {
+            c = mat::DASH;
+        }
         if mi.emissive {
             c = if c == mat::TAIL_LENS { mat::TAIL_LED } else { mat::DRL };
         }

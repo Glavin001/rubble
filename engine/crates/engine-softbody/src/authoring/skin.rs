@@ -1023,7 +1023,40 @@ fn damage_units(
             .map(|k| Vec3::from_array(out.positions[k]) - built.shift)
             .sum::<Vec3>()
             / cnt.max(1) as f32;
+        // The physics' own pane units (Built.damage_units: glass_windscreen,
+        // glass_backlight, glass_side_{f,r,q}_{l,r}, each the pane's beams
+        // and its mounts, broken when one of them breaks), mapped to the
+        // solver's beams by node pair.
+        let physics_unit = matches!(kind, unit_kind::TEMPERED | unit_kind::LAMINATED)
+            .then(|| {
+                let want = if base.starts_with("glass_") { base.to_string() } else { format!("glass_{base}") };
+                built.damage_units.iter().find(|u| u.name == want)
+            })
+            .flatten()
+            .map(|u| {
+                let mut js: Vec<u32> = u
+                    .beams
+                    .iter()
+                    .filter_map(|&j| sk.beams.get(j as usize))
+                    .filter_map(|b| by_pair.get(&(b.a.min(b.b), b.a.max(b.b))))
+                    .flatten()
+                    .copied()
+                    .collect();
+                js.sort_unstable();
+                js.dedup();
+                js
+            });
         let uid = *by_name.entry(base.to_string()).or_insert_with(|| {
+            if let Some(beams) = physics_unit.clone() {
+                out.units.push(DamageUnit {
+                    name: base.to_string(),
+                    kind,
+                    beams,
+                    strain: f32::INFINITY,
+                    shards: 0,
+                });
+                return (out.units.len() - 1) as u32;
+            }
             let glassy = matches!(kind, unit_kind::TEMPERED | unit_kind::LAMINATED);
             // A pane on its glass zone; otherwise (and every lamp and mirror)
             // its mount.
