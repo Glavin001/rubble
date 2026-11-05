@@ -233,17 +233,24 @@ pub fn jbeam_ext_force(
     }
 }
 
-/// An LBEAM's force (spec §24) between `na` (id1) and `nb` (id2) with vertex `nc`:
-/// a beam whose rest length is the law-of-cosines length of the current arms at the
-/// rest angle (`rest` holds cos θ₀); past the deform force (`tc`) the rest angle
-/// follows so the spring force stays at it.
+/// An LBEAM's force (spec §24): the beam id1–id2 whose rest length L follows the
+/// arms (a = |x₁ − x₃|, b = |x₂ − x₃|, L = √(a² + b² − 2ab·cos θ₀), θ₀ in
+/// `beam.rest` as cos θ₀). Its spring is the gradient of U = ½k·e², e = ℓ − L, on
+/// all three nodes: −k·e along id1–id2 (in `force`, as a beam) plus the arm terms
+/// k·e·(∂L/∂a)·â on id1 and k·e·(∂L/∂b)·b̂ on id2, their sum taken from id3
+/// ([`LbeamOut`]); a pure arm stretch keeps e (no force). Its damper is a beam's,
+/// −c·u along id1–id2 (u the extension rate of id1–id2). Without the arm
+/// terms the pair force is not the gradient of any energy (a follower force): it
+/// does work round a closed path, and the FMVSS 214 barrier's honeycomb-shear
+/// LBEAMs flew apart in free flight (2026-11-05). Past `beamDeform` (`tc`) the rest
+/// angle moves so the spring stays at the deform force.
 pub fn lbeam_force(
     beam: &mut Beam,
     na: &Node,
     nb: &Node,
     nc: &Node,
     filter: Option<&mut DampFilter>,
-) -> BeamOut {
+) -> LbeamOut {
     let d = na.pos - nb.pos;
     let q = d.dot(d);
     let inv = 1.0 / q.sqrt();
@@ -255,27 +262,51 @@ pub fn lbeam_force(
     let ab = (a2 * b2).sqrt();
     let rest = (a2 + b2 - 2.0 * ab * beam.rest).max(0.0).sqrt();
     let e = len - rest;
+    let mut spring = beam.k * e;
+    if spring.abs() > beam.tc && ab > 1e-12 {
+        let m = (beam.tc / beam.k).copysign(e);
+        let l = len - m;
+        beam.rest = ((a2 + b2 - l * l) / (2.0 * ab)).clamp(-1.0, 1.0);
+        spring = beam.tc.copysign(e);
+    }
+    // ∂L/∂a·â = (1 − (b/a)·cos θ₀)/L · ra, likewise for b (the moved rest angle).
+    let (la, lb) = (a2.sqrt(), b2.sqrt());
+    let l_now = (a2 + b2 - 2.0 * ab * beam.rest).max(0.0).sqrt();
+    let (ga, gb) = if l_now > 1e-9 && la > 1e-12 && lb > 1e-12 {
+        let g = 1.0 / l_now;
+        (ra * (g * (1.0 - (lb / la) * beam.rest)), rb * (g * (1.0 - (la / lb) * beam.rest)))
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    };
+    // The damper: id1–id2's extension rate, as a beam's (a pair dashpot, always
+    // dissipative).
     let u = (na.vel - nb.vel).dot(d) * inv;
     let u = match filter {
         Some(f) => f.step(u),
         None => u,
     };
-    let spring = beam.k * e;
-    let mut f = -spring - beam.c * u;
-    if spring.abs() > beam.tc && ab > 1e-12 {
-        let m = (beam.tc / beam.k).copysign(e);
-        let l = len - m;
-        beam.rest = ((a2 + b2 - l * l) / (2.0 * ab)).clamp(-1.0, 1.0);
-        f = -beam.tc.copysign(e) - beam.c * u;
-    }
+    let f = -spring - beam.c * u;
     beam.force = f;
-    BeamOut {
-        d,
-        inv,
-        e,
-        force: f,
-        check_break: f.abs() > beam.strength,
+    LbeamOut {
+        beam: BeamOut {
+            d,
+            inv,
+            e,
+            force: f,
+            check_break: f.abs() > beam.strength,
+        },
+        fa: ga * spring,
+        fb: gb * spring,
     }
+}
+
+/// [`lbeam_force`]'s result: the id1–id2 force as a beam's, and the arm terms on
+/// id1 (`fa`) and id2 (`fb`); id3 takes −(fa + fb).
+#[derive(Clone, Copy, Debug)]
+pub struct LbeamOut {
+    pub beam: BeamOut,
+    pub fa: Vec3,
+    pub fb: Vec3,
 }
 
 /// A pressure group's gauge pressure from its triangle records (spec §26): the
@@ -441,7 +472,7 @@ impl ExplicitBeams {
         let x = self.ext_index(j);
         let mut beam = self.beams[j];
         match beam.kind {
-            ExplicitKind::JbeamPressureTri2 | ExplicitKind::JbeamAeroTri2 => return,
+            ExplicitKind::JbeamPressureTri2 | ExplicitKind::JbeamAeroTri2 | ExplicitKind::JbeamLbeam2 => return,
             ExplicitKind::JbeamAeroTri => {
                 let ext = self.beam_ext[x];
                 let n2 = ext.index(0);
@@ -495,9 +526,13 @@ impl ExplicitBeams {
             0 => None,
             i => Some(&mut self.damp_filters[i as usize - 1]),
         };
+        let mut arms = None;
         let out = if beam.kind == ExplicitKind::JbeamLbeam {
-            let nc = self.nodes[self.beam_ext[x].index(0) as usize];
-            lbeam_force(&mut beam, &na, &nb, &nc, filter)
+            let c = self.beam_ext[x].index(0);
+            let nc = self.nodes[c as usize];
+            let o = lbeam_force(&mut beam, &na, &nb, &nc, filter);
+            arms = Some((c, o.fa, o.fb));
+            o.beam
         } else {
             jbeam_ext_force(&mut beam, &mut self.beam_ext[x], &na, &nb, filter)
         };
@@ -532,6 +567,15 @@ impl ExplicitBeams {
             }
         }
         let push = out.d * (f * out.inv);
+        if let Some((c, fa, fb)) = arms {
+            // As the GPU's slots: id1 push + fa, id2 −push + fb, id3 (its second
+            // record) −(fa + fb); none once broken.
+            let (fa, fb) = if broke_now { (Vec3::ZERO, Vec3::ZERO) } else { (fa, fb) };
+            self.nodes[beam.a as usize].force += push + fa;
+            self.nodes[beam.b as usize].force += -push + fb;
+            self.nodes[c as usize].force += -(fa + fb);
+            return;
+        }
         self.nodes[beam.a as usize].force += push;
         self.nodes[beam.b as usize].force -= push;
     }
@@ -677,6 +721,18 @@ impl ExplicitBeams {
             self.damp_filters.push(DampFilter::new(cutoff));
             beam.shock = self.damp_filters.len() as u32;
         }
+        let r2 = Beam::new(
+            c,
+            c,
+            ExplicitKind::JbeamLbeam2,
+            ExplicitType::Actuator,
+            0.0,
+            0.0,
+            0.0,
+            f32::INFINITY,
+            f32::INFINITY,
+            0.0,
+        );
         self.beams.push(beam);
         let j = self.beams.len() - 1;
         let ext = BeamExt {
@@ -685,6 +741,16 @@ impl ExplicitBeams {
             ..Default::default()
         };
         self.push_ext(j, ext);
+        // The vertex's force record (the GPU writes the arm terms' sum there).
+        self.beams.push(r2);
+        let j = self.beams.len() - 1;
+        self.push_ext(
+            j,
+            BeamExt {
+                beam: j as u32,
+                ..Default::default()
+            },
+        );
     }
 
     /// The desc's triangles' aerodynamics (spec §31): two records per triangle with a

@@ -655,6 +655,16 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     // as `wgsl/explicit_baseline_*.wgsl`, plus the race-probe variants (`EB_RACE_PROBE`).
     // Read from OUT_DIR at run time by the bit-identity tests only (not embedded).
     explicit_baseline(slang_root, &wgsl_dir)?;
+    // Tests only (tests/explicit_loop_cap.rs): the explicit kernels' Slang loop caps
+    // (explicit_loop_cap.slang) on a runaway, read at run time.
+    compile_with_defines(
+        &slang_root.join("kernels/explicit_loop_cap_test.slang"),
+        "explicit_loop_cap_test",
+        SlangTarget::Wgsl,
+        &wgsl_dir.join("loop_cap_test.wgsl"),
+        &[],
+        &[],
+    )?;
     // Compact snapshots' buffer extents (WgpuSim::measure_state): standalone.
     let extent = wgsl_dir.join("state_extent.wgsl");
     let status = std::process::Command::new(find_slangc()?)
@@ -767,12 +777,15 @@ fn store(dir: &Path, out_dir: &Path, compiled: &Compiled) -> Result<()> {
 
 /// An explicit-beams module as slangc wrote it, made ready to ship. Slang's storage
 /// barrier carries a texture barrier naga rejects (and an empty statement Safari's
-/// parser rejects): keep the storage and workgroup barriers. Every loop is capped
-/// (`src/wgsl_loop_cap.rs`, `cap_explicit_loops`): a runaway loop stops, flagged,
-/// instead of holding the GPU. Measurement builds only (in their own target
-/// directory): `RUBBLE_EB_REF_UNCAPPED=1` leaves the frozen reference modules
-/// (`explicit_ref_*`) uncapped, so `tests/explicit_beams_bitwise.rs` compares the
-/// capped kernel with the uncapped one bit for bit.
+/// parser rejects): keep the storage and workgroup barriers. Every loop is capped:
+/// a runaway loop stops, flagged, instead of holding the GPU. The shipped kernel
+/// (`explicit_beams.slang`) caps its loops in its source (`EB_LOOP_CAP`, every
+/// target; its modules call `ebLoopCapHit`); a module without them (the frozen
+/// baseline and reference, or a measurement build of another source) is capped
+/// here (`src/wgsl_loop_cap.rs`, `cap_explicit_loops`). Measurement builds only (in
+/// their own target directory): `RUBBLE_EB_REF_UNCAPPED=1` leaves the frozen
+/// reference modules (`explicit_ref_*`) uncapped, so `tests/explicit_beams_bitwise.rs`
+/// compares the capped kernel with the uncapped one bit for bit.
 fn explicit_post(out: &Path) -> Result<()> {
     let text = std::fs::read_to_string(out)?
         .replace(
@@ -786,7 +799,7 @@ fn explicit_post(out: &Path) -> Result<()> {
     let name = out.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let uncapped = name.starts_with("explicit_ref_")
         && std::env::var("RUBBLE_EB_REF_UNCAPPED").is_ok_and(|v| v == "1");
-    let text = if uncapped {
+    let text = if uncapped || text.contains("ebLoopCapHit") {
         text
     } else {
         cap_explicit_loops(&text).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?

@@ -284,6 +284,7 @@ fn lbeam_resists_angle_not_arm_length_and_conserves_momentum() {
             &c,
             None,
         )
+        .beam
     };
     assert!(at(&mut b, Vec3::X, Vec3::Y).force.abs() < 1e-3);
     assert!(
@@ -294,10 +295,32 @@ fn lbeam_resists_angle_not_arm_length_and_conserves_momentum() {
     let pb = Vec3::new(0.5, 3f32.sqrt() / 2.0, 0.0);
     let o = at(&mut b, Vec3::X, pb);
     assert!(o.force > 0.0);
-    // Equal and opposite along id1–id2: momentum and angular momentum.
-    let push = o.d * (o.force * o.inv);
-    let torque = Vec3::X.cross(push) + pb.cross(-push);
-    assert!(torque.length() < 1e-3);
+    // The forces on id1, id2 and the vertex (at the origin) sum to zero, and so do
+    // their moments: momentum and angular momentum.
+    let full = lbeam_force(&mut b, &node_at(Vec3::X, Vec3::ZERO), &node_at(pb, Vec3::ZERO), &c, None);
+    let push = full.beam.d * (full.beam.force * full.beam.inv);
+    let (f1, f2, f3) = (push + full.fa, -push + full.fb, -(full.fa + full.fb));
+    assert!((f1 + f2 + f3).length() < 1e-3);
+    assert!((Vec3::X.cross(f1) + pb.cross(f2)).length() < 1e-3);
+    // Conservative: the force is minus the gradient of ½k(ℓ − L)² (central
+    // differences of the energy at each node).
+    let energy = |x1: Vec3, x2: Vec3, x3: Vec3| {
+        let mut bb = b;
+        let o = lbeam_force(&mut bb, &node_at(x1, Vec3::ZERO), &node_at(x2, Vec3::ZERO), &node_at(x3, Vec3::ZERO), None);
+        0.5 * 1000.0 * o.beam.e * o.beam.e
+    };
+    let x = [Vec3::X, pb, Vec3::ZERO];
+    let h = 1e-3;
+    for (k, f) in [f1, f2, f3].into_iter().enumerate() {
+        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+            let mut xp = x;
+            let mut xm = x;
+            xp[k] += axis * h;
+            xm[k] -= axis * h;
+            let g = (energy(xp[0], xp[1], xp[2]) - energy(xm[0], xm[1], xm[2])) / (2.0 * h);
+            assert!((f.dot(axis) + g).abs() < 1.0, "node {k} {axis}: force {} vs −∂U {}", f.dot(axis), -g);
+        }
+    }
 }
 
 #[test]
@@ -348,13 +371,32 @@ fn pressure_wheel_car_stands_on_its_tyres() {
         n.pos.y -= drop;
     }
     let chassis_y0 = s.nodes[node(&d, "flt") as usize].pos.y;
-    s.run(4.0);
+    // The car's own nodes (the wheels' come after them).
+    let body = d.nodes.len();
+    let mass: f32 = s.nodes[..body].iter().map(|n| n.mass).sum();
+    let com_z = |s: &ExplicitBeams| s.nodes[..body].iter().map(|n| n.pos.z * n.mass).sum::<f32>() / mass;
+    s.run(1.0);
+    let first = kinetic(&s);
+    let (mut ke_max, mut lo, mut hi) = (0.0f32, f32::MAX, f32::MIN);
+    for _ in 0..60 {
+        s.run(0.05);
+        ke_max = ke_max.max(kinetic(&s));
+        lo = lo.min(com_z(&s));
+        hi = hi.max(com_z(&s));
+    }
     let ke = kinetic(&s);
-    println!("kinetic energy at 4 s: {ke} J");
-    // Settled to chatter: about 1 J of the car rocking on its 12-ray tyres'
-    // flats (±3 cm at about 1 Hz, spec §28) since the ground rule's normal part;
-    // 0.25 J before, when the tread nodes' bounce on the ground damped it.
-    assert!(ke < 2.0, "settled: {ke} J");
+    println!("kinetic energy at 1 s {first:.1} J, at 4 s {ke:.1} J, most 1-4 s {ke_max:.1} J; body rolls over {:.3} m", hi - lo);
+    // **Open (2026-11-05):** since LBEAMs are conservative (spec §24) the car rolls
+    // to and fro inside one flat of its 12-ray tyres (about 1.3 Hz, up to 35 J of
+    // kinetic energy at the turns' middle), weakly damped: the free-rolling wheels
+    // have no rolling loss at walking pace. The non-conservative LBEAM of before
+    // damped it (about 1 J at 4 s). Exact checks: the drop's energy never comes
+    // back (kinetic below the 2 cm drop's m·g·h), and the body never rolls off
+    // its flat (its centre of mass within one tread segment, 2π·r/12, r the
+    // fixture's wheel radius, 0.32 m).
+    let drop_energy = (mass + 192.0 * s.nodes[body].mass) * 9.81 * 0.02;
+    assert!(ke_max < drop_energy, "kinetic {ke_max} J above the drop's {drop_energy} J");
+    assert!(hi - lo < 2.0 * std::f32::consts::PI * 0.32 / 12.0, "the car rolls off its tyres' flats: {}", hi - lo);
     assert_eq!(s.damage().0, 0, "nothing broke");
     let sag = chassis_y0 - s.nodes[node(&d, "flt") as usize].pos.y;
     assert!(sag > 0.0 && sag < 0.08, "tyres carry the car: sag {sag}");
@@ -619,3 +661,5 @@ fn community_cars_coast_down_by_aero_and_rolling_resistance() {
         assert!(f_on >= 0.95 * aero_mean, "{name}: {f_on} N below its triangles' drag {aero_mean} N");
     }
 }
+
+

@@ -200,6 +200,13 @@ fn explicit_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result
     );
     for (m, (dest, r)) in MODULES.iter().zip(compiled) {
         let (msl, threads) = r?;
+        // The kernel caps its loops in its source (explicit_loop_cap.slang): every
+        // module with a loop carries them on this target too.
+        anyhow::ensure!(
+            msl.contains("ebLoopCapHit") || !(msl.contains("for(") || msl.contains("for (") || msl.contains("while")),
+            "{}: the MSL has no loop caps (explicit_loop_cap.slang)",
+            m.name
+        );
         let mut binds = String::new();
         for (global, index) in msl_buffers(&msl, m.entry, "[[kernel]]")? {
             let slot = slots
@@ -216,6 +223,25 @@ fn explicit_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result
         )?;
     }
     table.push_str("];\n");
+    // Tests only: the loop caps on a runaway (tests/explicit_loop_cap.rs).
+    let test_source = root.join("kernels/explicit_loop_cap_test.slang");
+    let test_slots = vk_binding_slots(std::slice::from_ref(&test_source))?;
+    let entry = "explicit_loop_cap_test";
+    let dest = dir.join(format!("{entry}.metal"));
+    let (msl, threads) = compile_kernel_with_defines(&slangc, root, &test_source, entry, &dest, &[])?;
+    let mut binds = String::new();
+    for (global, index) in msl_buffers(&msl, entry, "[[kernel]]")? {
+        let slot = test_slots
+            .get(&global)
+            .ok_or_else(|| anyhow::anyhow!("{entry}: global {global} has no vk::binding"))?;
+        write!(binds, "({index}, {slot}), ")?;
+    }
+    writeln!(
+        table,
+        "/// Tests only: `explicit_loop_cap_test.slang` (bindings 0 gAcc, 1 gOut).\n\
+         pub static LOOP_CAP_TEST: ExplicitKernel = ExplicitKernel {{ name: {entry:?}, entry: {entry:?}, msl: include_str!({:?}), threads: {threads:?}, binds: &[{binds}] }};",
+        dest.display().to_string()
+    )?;
     std::fs::write(out_dir.join("explicit_kernels.rs"), table)?;
     Ok(())
 }

@@ -156,6 +156,8 @@ pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
 pub const PARAM_WORDS: usize = 80;
+/// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
+pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer.
 pub const ARGS_BYTES: u64 = 32;
 /// Params word: the phases a measurement build skips (`EB_ABLATE`).
@@ -382,7 +384,7 @@ pub enum Cmd {
 
 /// The status a host reads every [`STATUS_EVERY`] frames: 4 contact counters
 /// (outside, overflow, unconverged, too big) at byte `base + 16` of gAcc, and the
-/// loop-cap flag at byte `cap` (set by the WGSL loop cap; 0 on the other targets).
+/// loop-cap flag at byte `cap` (the kernel's `EB_LOOP_CAP`, every target).
 #[derive(Clone, Copy, Debug)]
 pub struct StatusWords {
     pub base: u64,
@@ -622,7 +624,8 @@ impl ExplicitUpload {
                 | (v.fusedrag.is_some() as u32) << 3
                 | (!v.triggers.is_empty() as u32) << 4
                 | (!v.slides.is_empty() as u32) << 5
-                | (!v.shapes.is_empty() as u32) << 6;
+                | (!v.shapes.is_empty() as u32) << 6
+                | (v.two_body_contact as u32) << 7;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1194,8 +1197,9 @@ impl ExplicitUpload {
         let next_len = hit_base + nv * SELF_HIT_WORDS;
         let hit_acc = acc_init.len();
         acc_init.extend(std::iter::repeat_n(0, 2 * nv));
-        // Last: the loop-cap flag (the WGSL post-process's `cap_explicit_loops`
-        // writes gAcc's last word).
+        // Last: the loop-cap flag (the kernel's `EB_LOOP_CAP`, at the parameter
+        // `loopCapWord`; the frozen WGSL test modules' post-process writes gAcc's
+        // last word, the same word).
         let coupling = coupling.map(|cap| {
             let layout = CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
@@ -1204,6 +1208,15 @@ impl ExplicitUpload {
             misc[couple_rec + 1] = [layout.acc_base, 0, 0, 0];
             layout
         });
+        // Vehicle contact's two-body mass splitting (jbeam-semantics-spec.md §10.3):
+        // per node its triangle-hit count, then VV_SPLIT_SLOTS − 1 point-hit slots.
+        let vv_split = if vehicles.iter().any(|v| v.two_body_contact) {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, VV_SPLIT_SLOTS * total_nodes));
+            at
+        } else {
+            0
+        };
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -1347,6 +1360,8 @@ impl ExplicitUpload {
             tri_break_base,
             deform_base,
             tri_excl_base,
+            cap_at as u32,
+            vv_split,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -1895,10 +1910,52 @@ impl ExplicitLayout {
         contact_error(&acc[at + 4..at + 8])
     }
 
-    /// The loop-cap flag (from gAcc; WGSL builds only, 0 elsewhere).
+    /// The loop-cap flag (from gAcc): nonzero when a kernel loop was held to its
+    /// cap ([`explicit_loop_cap_hit`]). Every target (WGSL, MSL, CUDA) writes it.
     pub fn loop_cap_flag(&self, acc: &[i32]) -> i32 {
         acc[(self.status.cap / 4) as usize]
     }
+
+    /// The kernel status (from gAcc): the loop-cap flag, then the contact
+    /// counters ([`Self::contact_status`]).
+    pub fn kernel_status(&self, acc: &[i32]) -> Result<(), String> {
+        explicit_loop_cap_hit(self.loop_cap_flag(acc)).map_err(|e| format!("explicit beams kernel: {e}"))?;
+        self.contact_status(acc)
+    }
+}
+
+/// The explicit kernels' loop cap (`EB_LOOP_CAP` in `explicit_beams.slang`, every
+/// target): a loop whose bound is not a constant runs at most this many passes.
+/// Far above any legitimate count (a few loops run on one lane over a whole
+/// vehicle's beams: tens of thousands for a large vehicle), so a capped loop
+/// computes what an uncapped one does.
+pub const EXPLICIT_LOOP_CAP: u32 = 1 << 20;
+
+/// The kernel's tag on a loop-cap flag (`EB_LOOP_CAP_TAG`): the flag is the tag
+/// | the stopped loop's source line. Untagged, the flag is the loop's number in
+/// its WGSL module (counting from 1): the frozen test modules
+/// (`explicit_beams_baseline.slang`, `explicit_beams_ref.slang`), capped by
+/// engine-webgpu's WGSL post-process.
+pub const EXPLICIT_LOOP_CAP_TAG: i32 = 1 << 24;
+
+/// The error for a loop-cap flag read back from gAcc ([`ExplicitLayout::loop_cap_flag`];
+/// 0: none).
+pub fn explicit_loop_cap_hit(flag: i32) -> Result<(), String> {
+    if flag == 0 {
+        return Ok(());
+    }
+    let place = if flag & EXPLICIT_LOOP_CAP_TAG != 0 {
+        format!(
+            "the loop at line {} of explicit_beams.slang (or of an explicit_beams_*.slang file it includes)",
+            flag & !EXPLICIT_LOOP_CAP_TAG
+        )
+    } else {
+        format!("a kernel loop (number {flag} in its WGSL module, counting from 1)")
+    };
+    Err(format!(
+        "{place} ran {EXPLICIT_LOOP_CAP} passes, its cap, and was stopped: that frame's results \
+         are invalid (a runaway loop: a corrupt count or bound)"
+    ))
 }
 
 /// Fleets of at most this many vehicles run 512 lanes per vehicle (about one

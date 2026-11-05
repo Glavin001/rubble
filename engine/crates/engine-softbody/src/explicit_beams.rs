@@ -184,6 +184,10 @@ pub enum ExplicitKind {
     /// ([`ExplicitKind::JbeamAeroTri2`], x₂–x₂) carries x₂'s force.
     JbeamAeroTri,
     JbeamAeroTri2,
+    /// An LBEAM's second record (x₃–x₃, after its [`ExplicitKind::JbeamLbeam`]):
+    /// carries the vertex's force (the arm terms, spec §24) on the GPU; no force
+    /// of its own.
+    JbeamLbeam2,
 }
 
 impl ExplicitKind {
@@ -209,6 +213,7 @@ impl ExplicitKind {
             ExplicitKind::JbeamPressureTri2 => 17,
             ExplicitKind::JbeamAeroTri => 18,
             ExplicitKind::JbeamAeroTri2 => 19,
+            ExplicitKind::JbeamLbeam2 => 20,
         }
     }
 
@@ -230,6 +235,7 @@ impl ExplicitKind {
                 | ExplicitKind::JbeamPressureTri2
                 | ExplicitKind::JbeamAeroTri
                 | ExplicitKind::JbeamAeroTri2
+                | ExplicitKind::JbeamLbeam2
         )
     }
 }
@@ -824,6 +830,13 @@ pub struct ExplicitBeams {
     /// lowest node (a tyre's contact patch) under the ground it stands on
     /// ([`Self::spawn_clearance`]).
     pub rest_pose: Option<f32>,
+    /// Vehicle contact's two-body share (spec §10.3): a hit where this vehicle is
+    /// the owner or the partner cancels only the share m_t/(m_h + m_t) of the
+    /// contacter's force, the share that makes the relative normal acceleration
+    /// zero. Off (RoR's `.truck` content that does not opt in): the whole force,
+    /// as against a static surface (bit for bit as before). On in JBeam mode (so
+    /// any pair with a JBeam vehicle, e.g. the FMVSS 214 barrier, uses it).
+    pub two_body_contact: bool,
     /// JBeam mode's damping filters (`dampCutoffHz`), by [`Beam::shock`] − 1.
     pub damp_filters: Vec<DampFilter>,
     /// JBeam torsion elements' watched break groups (0 = none), by [`Beam::shock`]
@@ -1052,6 +1065,7 @@ impl ExplicitBeams {
             tri_excl: Vec::new(),
             contact_every_node: false,
             rest_pose: None,
+            two_body_contact: false,
             damp_filters: Vec::new(),
             torsion_watch: Vec::new(),
             groups_last: Vec::new(),
@@ -2025,6 +2039,7 @@ impl ExplicitBeams {
                 .map(|i| desc.nodes.get(i).map_or(0, |n| n.self_group))
                 .collect();
         }
+        s.two_body_contact = true;
         let pairs = s.spawn_exclusions();
         if pairs > 0 {
             warnings.push(format!(
@@ -3222,7 +3237,8 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         | ExplicitKind::JbeamPressureTri
         | ExplicitKind::JbeamPressureTri2
         | ExplicitKind::JbeamAeroTri
-        | ExplicitKind::JbeamAeroTri2 => {}
+        | ExplicitKind::JbeamAeroTri2
+        | ExplicitKind::JbeamLbeam2 => {}
     }
     let mut f = -k * e - c * u;
     beam.force = f;

@@ -152,6 +152,117 @@ fn tbone_striker_stays_outside_the_struck_skin() {
     assert!(most * 100 <= n, "{most} of {n} inside");
 }
 
+/// Kinetic plus gravitational energy of every vehicle (J), world positions.
+fn mechanical_energy(s: &ExplicitSim) -> f64 {
+    let (pos, vel) = (s.gpu_solver().positions(), s.gpu_solver().velocities());
+    let mut e = 0.0f64;
+    for (k, (p, v)) in pos.iter().zip(&vel).enumerate() {
+        for ((p, v), n) in p.iter().zip(v).zip(&s.spawned(k).nodes) {
+            e += f64::from(n.mass) * (0.5 * f64::from(v.length_squared()) + 9.81 * f64::from(p.y));
+        }
+    }
+    e
+}
+
+/// The struck side's residual maximum crush (m), as NHTSA measures it on the
+/// vehicle: the largest inward displacement of the struck-side exterior from its
+/// pre-test line. The car's rigid motion is taken out with its far half (its nodes
+/// on the side away from the barrier: their mean and their yaw, from the far
+/// half's front and rear quarters). **Choice:** the exterior is the collision
+/// skin's nodes within 15 cm of the struck side (+X) at spawn, in the barrier
+/// face's height band (279 to 838 mm above the car's lowest node).
+fn residual_side_crush(spawn: &[Vec3], now: &[Vec3], skin: &[usize]) -> f32 {
+    let mid = spawn.iter().map(|p| p.x).sum::<f32>() / spawn.len() as f32;
+    let far: Vec<usize> = (0..spawn.len()).filter(|&i| spawn[i].x < mid).collect();
+    let mean = |p: &[Vec3], ids: &[usize]| ids.iter().map(|&i| p[i]).sum::<Vec3>() / ids.len() as f32;
+    let (z0, z1) = far.iter().fold((f32::MAX, f32::MIN), |(a, b), &i| (a.min(spawn[i].z), b.max(spawn[i].z)));
+    let q = 0.25 * (z1 - z0);
+    let front: Vec<usize> = far.iter().copied().filter(|&i| spawn[i].z > z1 - q).collect();
+    let rear: Vec<usize> = far.iter().copied().filter(|&i| spawn[i].z < z0 + q).collect();
+    let axis = |p: &[Vec3]| {
+        let d = mean(p, &front) - mean(p, &rear);
+        d.x.atan2(d.z)
+    };
+    let yaw = axis(now) - axis(spawn);
+    let turn = glam::Quat::from_rotation_y(-yaw);
+    let (c0, c1) = (mean(spawn, &far), mean(now, &far));
+    skin.iter()
+        .map(|&i| {
+            let back = c0 + turn * (now[i] - c1);
+            spawn[i].x - back.x
+        })
+        .fold(0.0, f32::max)
+}
+
+/// The FMVSS 214 dynamic test (moving deformable barrier, 53.9 km/h, crabbed 27°)
+/// into `truck`: nothing diverges (the two vehicles' kinetic plus gravitational
+/// energy never rises above its start: no energy enters them), and the car's
+/// residual maximum side crush is inside the measured spread of the FMVSS 214
+/// compliance and research tests at 52.7–53.9 km/h in NHTSA's database
+/// (crash-reference-targets.md §10: 42 vehicles, 2010–2025, min–max 98–219 mm; the
+/// 14 four-door sedans 126–206 mm, p10–p90 127–199 mm).
+fn mdb_side_impact(label: &str, truck: String) {
+    let Some((_, device, queue)) = engine_webgpu::default_device().ok() else {
+        return;
+    };
+    let spec = serde_json::json!({ "vehicles": [{ "truck": truck }], "scene": "mdb214", "timing": false });
+    let mut s = ExplicitSim::new_native(&device, &queue, &spec).unwrap();
+    let spawn = s.gpu_solver().positions().remove(0);
+    let car = s.spawned(0);
+    let reach = spawn.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+    let low = spawn.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+    let mut skin: Vec<usize> = car.triangles.iter().flat_map(|t| t.nodes.map(|n| n as usize)).collect();
+    skin.sort_unstable();
+    skin.dedup();
+    skin.retain(|&i| spawn[i].x > reach - 0.15 && (0.279..=0.838).contains(&(spawn[i].y - low)));
+    assert!(!skin.is_empty());
+    let e0 = mechanical_energy(&s);
+    let mut most = e0;
+    for _ in 0..60 {
+        s.frame_native(33).unwrap();
+        s.gpu_solver().wait();
+        most = most.max(mechanical_energy(&s));
+    }
+    // Then 0.5 s more for the struck car to rebound and the barrier to leave.
+    for _ in 0..30 {
+        s.frame_native(33).unwrap();
+    }
+    s.gpu_solver().wait();
+    let now = s.gpu_solver().positions().remove(0);
+    let all = s.gpu_solver().positions();
+    assert!(all.iter().flatten().all(|p| p.is_finite()), "{label}: non-finite nodes");
+    let crush = residual_side_crush(&spawn, &now, &skin);
+    eprintln!(
+        "MDB into the {label}: energy {:.1} kJ at the start, at most {:.1} kJ; residual side crush {:.0} mm ({} skin nodes)",
+        e0 * 1e-3,
+        most * 1e-3,
+        crush * 1e3,
+        skin.len()
+    );
+    // The energy never rises (a 0.5 % allowance: the explicit step's symplectic
+    // error and the GPU's fixed-point contact sums).
+    assert!(most <= e0 * 1.005, "{label}: energy rose from {e0} J to {most} J");
+    assert!((0.098..=0.219).contains(&crush), "{label}: residual side crush {crush} m outside 98–219 mm");
+}
+
+#[test]
+fn mdb_into_the_sedan_conserves_energy_and_crushes_in_the_fmvss_214_spread() {
+    mdb_side_impact("sedan", explicit_sedan_truck(true));
+}
+
+/// **Open (2026-11-05):** the showcase car crushes 364 mm, 1.7 times the largest of
+/// the 42 measured (219 mm): its side structure is too soft for FMVSS 214 (energy
+/// and stability pass). Run with `--ignored`.
+#[test]
+#[ignore = "open: the showcase car's residual side crush is 364 mm (spread 98-219 mm)"]
+fn mdb_into_the_showcase_car_conserves_energy_and_crushes_in_the_fmvss_214_spread() {
+    use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+    let truck = build(&style("sedan").unwrap(), &BuildParams { resolution: Resolution::parse("medium").unwrap(), strength: 1.0, paint: None })
+        .unwrap()
+        .truck;
+    mdb_side_impact("showcase", truck);
+}
+
 /// The barrier's integrity in the side impact (FMVSS 214, 54 km/h, 27° crab) into
 /// the procedural sedan and the authored showcase car (with and without full
 /// contact): the carriage (the back plate to the rear frame) keeps its length within
@@ -223,13 +334,6 @@ fn mdb_keeps_its_shape_against_the_sedan_and_the_showcase_car() {
         }
         let all = s.gpu_solver().positions();
         let nan: Vec<usize> = all.iter().map(|v| v.iter().filter(|p| !p.is_finite()).count()).collect();
-        if label.starts_with("showcase") && nan.iter().any(|&n| n > 0) {
-            // Open (2026-11-05): the showcase car diverges about 5 frames after the
-            // barrier meets it (its nodes first: 82 m/s, then 921 m/s, then the
-            // barrier through contact); reported, not yet judged.
-            eprintln!("OPEN: MDB into the {label}: non-finite nodes (car, barrier) {nan:?}; contact errors {errors:?}");
-            continue;
-        }
         assert!(nan.iter().all(|&n| n == 0), "{label}: non-finite nodes per vehicle (car, barrier) {nan:?}; contact errors {errors:?}");
         eprintln!("MDB into the {label}: carriage length change at most {:.2} %, mean face crush at most {:.0} %; contact errors {errors:?}", 100.0 * worst_len, 100.0 * worst_crush);
         assert!(worst_len < 0.03, "{label}: the carriage deforms {worst_len}");

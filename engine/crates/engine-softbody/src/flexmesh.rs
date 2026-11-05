@@ -497,6 +497,8 @@ pub fn cluster(m: &DaeMesh, cell: f32) -> DaeMesh {
 /// near level is always the full mesh.
 pub const LOD_CELL: f32 = 0.03;
 pub const LOD_PIXELS: f32 = 2.6;
+/// The third (farthest) level's cluster size (m).
+pub const FAR_CELL: f32 = 0.09;
 pub fn lod_distance(cell: f32) -> f32 {
     cell / LOD_PIXELS * 1080.0 / (2.0 * 0.375f32.tan())
 }
@@ -533,13 +535,16 @@ pub fn material_class(name: &str) -> u8 {
 
 /// What Rubble's renderer uses of a BeamNG material (`*.materials.json`):
 /// its first stage's diffuse colour, and whether it is translucent, glows or
-/// is textured (textures are not read: a textured material shades flat).
-#[derive(Clone, Copy, Debug, Default)]
+/// is textured (its colour map: `color_map`).
+#[derive(Clone, Debug, Default)]
 pub struct MatInfo {
     pub color: Option<[f32; 3]>,
     pub translucent: bool,
     pub emissive: bool,
     pub textured: bool,
+    /// The colour map's file name (the path's last component: BeamNG paths
+    /// are game-absolute, the files sit in the vehicle's folder).
+    pub color_map: Option<String>,
 }
 
 /// Read a `*.materials.json` (relaxed JSON): every material by its `mapTo`
@@ -557,15 +562,19 @@ pub fn read_materials(src: &str) -> HashMap<String, MatInfo> {
             .and_then(Value::as_array)
             .filter(|a| a.len() >= 3)
             .map(|a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.5) as f32));
-        let textured = f("colorMap").or_else(|| f("baseColorMap")).is_some_and(|x| x.is_string());
+        let color_map = f("colorMap")
+            .or_else(|| f("baseColorMap"))
+            .and_then(Value::as_str)
+            .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string());
+        let textured = color_map.is_some();
         let translucent = v.get("translucent").and_then(Value::as_bool).unwrap_or(false)
             || v.get("translucentBlendOp").and_then(Value::as_str).is_some_and(|o| o != "None");
         let emissive = f("glow").and_then(Value::as_bool).unwrap_or(false)
             || f("emissive").and_then(Value::as_bool).unwrap_or(false)
             || f("emissiveFactor").is_some_and(|x| x.is_array());
-        let info = MatInfo { color, translucent, emissive, textured };
+        let info = MatInfo { color, translucent, emissive, textured, color_map };
         if let Some(t) = v.get("mapTo").and_then(Value::as_str) {
-            out.insert(t.to_string(), info);
+            out.insert(t.to_string(), info.clone());
         }
         out.insert(key, info);
     }
@@ -621,8 +630,10 @@ pub fn jbeam_visual(
     // the material is translucent and emissive when it glows; its diffuse
     // colour when it is untextured (a textured one shades a flat mid grey,
     // except paint, which takes the paint).
-    let shade = |name: &str| -> (u8, [f32; 3]) {
-        let mi = materials.get(name).or_else(|| materials.get(name.trim_end_matches("-material"))).copied().unwrap_or_default();
+    // Textures by colour map, in first use order.
+    let mut textures: Vec<String> = Vec::new();
+    let mut shade = |name: &str| -> (u8, [f32; 3], u16) {
+        let mi = materials.get(name).or_else(|| materials.get(name.trim_end_matches("-material"))).cloned().unwrap_or_default();
         let mut c = material_class(name);
         if mi.translucent && !matches!(c, mat::SCREEN | mat::GLASS | mat::LENS | mat::TAIL_LENS) {
             c = mat::GLASS;
@@ -630,12 +641,24 @@ pub fn jbeam_visual(
         if mi.emissive {
             c = if c == mat::TAIL_LENS { mat::TAIL_LED } else { mat::DRL };
         }
+        // A colour map multiplies the material's colour (white unless the
+        // material gives one); paint keeps the paint.
+        let tex = match &mi.color_map {
+            Some(f) if c != mat::PAINT => {
+                let k = textures.iter().position(|t| t == f).unwrap_or_else(|| {
+                    textures.push(f.clone());
+                    textures.len() - 1
+                });
+                k as u16
+            }
+            _ => u16::MAX,
+        };
         let col = match (mi.color, mi.textured) {
             (Some(k), false) if !matches!(c, mat::GLASS | mat::SCREEN) => k,
-            (_, true) if c != mat::PAINT => [0.3, 0.3, 0.31],
+            (k, true) if c != mat::PAINT => k.unwrap_or([1.0, 1.0, 1.0]),
             _ => crate::authoring::skin::color(c, paint),
         };
-        (c, col)
+        (c, col, tex)
     };
     let sim_nodes: Vec<Vec3> = sim.nodes.iter().map(|n| n.pos).collect();
     let sim_nodes = &sim_nodes[..];
@@ -723,16 +746,18 @@ pub fn jbeam_visual(
             out.rigid.push(u8::from(rigid.is_some()));
             out.material.push(mat::PAINT);
             out.colors.push(paint);
+            out.tex.push(u16::MAX);
         }
         for (ti, t) in m.tris.iter().enumerate() {
             let v = [vmap[t[0] as usize], vmap[t[1] as usize], vmap[t[2] as usize]];
             if v.contains(&u32::MAX) {
                 continue;
             }
-            let (mc, col) = shade(m.materials.get(m.tri_mat[ti] as usize).map_or("", String::as_str));
+            let (mc, col, tx) = shade(m.materials.get(m.tri_mat[ti] as usize).map_or("", String::as_str));
             for &x in &v {
                 out.material[x as usize] = mc;
                 out.colors[x as usize] = col;
+                out.tex[x as usize] = tx;
             }
             out.indices.extend_from_slice(&v);
         }
@@ -952,6 +977,7 @@ pub fn jbeam_visual(
         .iter()
         .map(|&t| if t { crate::authoring::skin::node_mat::RUBBER } else { crate::authoring::skin::node_mat::METAL })
         .collect();
+    out.textures = textures;
     Ok((out, rep))
 }
 

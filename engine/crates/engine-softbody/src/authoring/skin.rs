@@ -197,6 +197,12 @@ pub struct ShowcaseVisual {
     /// Per solver node its surface material ([`node_mat`]): which nodes throw
     /// sparks when they scrape (metal), chips (plastic), nothing (rubber).
     pub node_material: Vec<u8>,
+    /// Texture files (an imported vehicle's colour maps, by file name in its
+    /// folder; `flextex` decodes them) and per vertex its texture's index
+    /// (`u16::MAX` or absent: untextured). Its colour multiplies the
+    /// vertex's (sampled at its `uvs`, v up).
+    pub textures: Vec<String>,
+    pub tex: Vec<u16>,
 }
 
 /// Surface material of a solver node (`ShowcaseVisual::node_material`).
@@ -1301,6 +1307,28 @@ fn rot_to(a: Vec3, b: Vec3, v: Vec3) -> Vec3 {
     v * c + k.cross(v) + k * (k.dot(v) / (1.0 + c))
 }
 
+/// The visual's median rest triangle edge (m), over its opaque triangles:
+/// the renderer picks, per car, the finest level of detail whose edges are
+/// at least a pixel on screen (finer triangles only add overshading, the
+/// image is the same).
+pub fn median_edge(v: &ShowcaseVisual) -> f32 {
+    let mut e: Vec<f32> = Vec::with_capacity(v.indices.len());
+    for t in v.indices.chunks_exact(3) {
+        if transparent(v.material[t[0] as usize]) {
+            continue;
+        }
+        let p = |k: usize| Vec3::from_array(v.positions[t[k] as usize]);
+        e.push(p(0).distance(p(1)));
+        e.push(p(1).distance(p(2)));
+        e.push(p(2).distance(p(0)));
+    }
+    if e.is_empty() {
+        return 0.0;
+    }
+    let mid = e.len() / 2;
+    *e.select_nth_unstable_by(mid, f32::total_cmp).1
+}
+
 /// Per solver node its skin normal (zero off the skin).
 pub fn node_normals(v: &ShowcaseVisual, nodes: &[Vec3]) -> Vec<Vec3> {
     let mut out = vec![Vec3::ZERO; nodes.len()];
@@ -1391,11 +1419,7 @@ pub fn deform_with(
                 let (nh0, _, e0) = crease_envelope(rest_p, pr, w, l);
                 let last = pos.len() - 1;
                 pos[last] += (e - e0).clamp(-0.5 * l, 0.5 * l) * u;
-                let ns = rot_to(nh0, nh, Vec3::from_array(v.normals[i])).normalize_or_zero();
-                // A panel crushed past its binding (envelope and frame
-                // normals > ~45° apart) keeps the facet.
-                let k = super::parts::smoothstep(0.75, 0.55, ns.dot(nf));
-                nrm.push(ns.lerp(nf, k).normalize_or_zero());
+                nrm.push(rot_to(nh0, nh, Vec3::from_array(v.normals[i])).normalize_or_zero());
                 continue;
             }
         }

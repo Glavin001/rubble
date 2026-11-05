@@ -644,10 +644,14 @@ opening's edge, the doors' belt edges included, is black rubber.
   landings. A ring of 8,192 particles shared by every car. Only with
   `update`'s `dt` > 0 (the simulated time since the last update).
 * **Wear** (plan P11). Per node the renderer keeps its plastic strain and
-  the metres it slid in contact with the floor or a static box. The
-  clearcoat dulls with plastic strain (from 0.4 % to 6 %); scraped paint is
-  scratched to primer, then bare steel, in streaks, more with every metre
-  slid. Scrapes accumulate forward in time (a replay scrubbed back keeps
+  the metres it slid in pressed contact with the floor or a static box
+  (within 1.2 cm of it and not leaving it: a node passing near a wall in a
+  crush scratches nothing). The clearcoat dulls with plastic strain (from
+  0.4 % to 6 %); scraped paint is scratched to primer after 3 cm slid, to
+  bare steel after 15 cm, in streaks, more with every metre slid. (The grey
+  flecks near a crushed bonnet's front edge are these: its nodes slid along
+  the wall; `showcase-car.html?debugWear=1` shows the tear field, plastic
+  strain and metres slid as red, green and blue.) Scrapes accumulate forward in time (a replay scrubbed back keeps
   them).
 * **Cabin.** Seats and the steering wheel ride one triangle of their frame
   rigidly (`Bind::GroupRigid`), so a far binding triangle never swings them
@@ -703,31 +707,34 @@ opening's edge, the doors' belt edges included, is black rubber.
   triangle switches over about 1 cm) and smooth along it, wherever the
   binding triangles' edges run; a mild bend keeps barycentric (Phong-like)
   weights and stays smooth. Only the change from the rest envelope is
-  applied, so the rest pose and rigid motion are exact. Where the result
-  disagrees with the binding triangle's frame by more than about 45° (a
-  panel crushed past its binding) the faceted frame normal wins.
+  applied, so the rest pose and rigid motion are exact. There is no
+  faceted fallback (the binding triangle's frame normal drew its edges as a
+  sawtooth along crushed lips).
   `showcase-car.html?crease=0.04&splitDeg=12` tries other constants (sharper
   than 0.08 shows the visual mesh's own triangles as a sawtooth);
   `showcase-car-check.mjs wall_56_bonnet,zebra_wall_56_bonnet` is the
   close-up.
-* **Level of detail.** `showcase_visual_lod(built, 0.45)` (wasm `visualLod`) is
-  the same car with a coarser body, single-step rolls and fewer segments:
-  about 75k triangles against about 240k.
+* **Level of detail.** Three levels: the full car, `showcase_visual_lod(built,
+  0.45)` (wasm `visualLod`: a coarser body, single-step rolls, fewer
+  segments) and `showcase_visual_lod(built, 0.2)` (`visualFar`).
   * The renderer picks a level per car on the GPU from the last frame's eye
-    (indirect dispatch and draw), so only that level is skinned and drawn.
+    (indirect dispatch and draw), so only that level is skinned and drawn:
+    the finest level whose median rest edge (`skin::median_edge`, wasm
+    `edgeLength`) spans at least 3 pixels at the car's distance
+    (`LOD_PX`; `draw`'s `height` is the viewport's). Finer triangles than
+    that change nothing visible (the 10-car row at 16 m and 30 m renders
+    the same on the second level as on the full mesh) but cost quad
+    overshading: profiling (`?perfFlat=1`, a flat fragment shader; `?perfSkip=`
+    `opaque,glass,reflect,contact,fx`) showed the near level at 16 m spent
+    5.3 of its 7.0 ms (10 cars) in fragment shading of sub-pixel triangles,
+    0.7 ms in vertex and raster work, 1.1 ms in the floor reflection.
   * Measured with 10 cars on an M3 Max at 1080p with 4× MSAA
-    (`showcase-car.html?perf=1&n=10`): about 0.50 ms per car with the
-    interior, the floor reflection and the contact shadows (about 300k
-    triangles, 99k at the distant level; 0.41 ms without the reflection),
-    0.31 ms at the distant level. Another GPU user moves these by ±10 %.
-  * With the damage units, wear, debris and the inner stampings and bay
-    (348k triangles, 121k at the distant level; 2026-11-05): about 0.62 ms
-    per car (the previous renderer on the same mesh: 0.55; the stampings
-    and bay add 0.03), 0.37 ms at the distant level. The skinned vertex is
-    32 bytes (tear and damage, plastic strain and scrape packed as f16
-    pairs); worn paint and the primer band shade through the generic metal
-    and matt paths rather than code of their own, because the paint path is
-    occupancy bound (a second inlined `env()` costs it).
+    (`showcase-car.html?perf=1&n=10`, 2026-11-05): 0.39 ms per car at 16 m,
+    0.38 ms at 30 m, 0.31 ms at 80 m (was 0.70 at 16 m: the full mesh). A
+    single car filling the frame costs 3.9 ms, of which 0.6 ms is vertex and
+    raster work (the paint's shading). The fragment discards (tears,
+    shattered glass) cost 6–13 % (`?perfNoDiscard=1`). Another GPU user
+    moves these by ±10 %.
 
 To restyle, change `design::sedan_styling` (cut lines, outlines, section
 shapes) and the profile. The tools stay the same.
@@ -765,9 +772,10 @@ vehicle the same visual format as the authored car, so
   when it glows, and gives untextured materials their diffuse colour.
   Textures are not read (a textured material shades flat grey; paint takes
   the paint).
-* **Level of detail.** The distant level clusters each mesh on a 3 cm grid
-  per material and normal direction (`cluster`, `LOD_CELL`), switching where
-  a cell is 2.6 pixels at 1080p (16 m). The near level is the full mesh.
+* **Level of detail.** Three levels: the full mesh, each mesh clustered on a
+  3 cm grid per material and normal direction (`cluster`, `LOD_CELL`), and
+  on a 9 cm grid (`FAR_CELL`; wasm `visualFar`). The renderer picks them as
+  for the authored car (the finest whose median edge spans 3 pixels).
 * **Pages.** wasm `jbeamVisual(spec, meshes)`; `showcase-car.html?mod=<folder>`
   renders a mod's visual at rest (no solver; `?n=` copies); the crash lab
   loads `softbody.html?...&mod=<folder>&jbeamMode=native` (a folder served
@@ -776,9 +784,13 @@ vehicle the same visual format as the authored car, so
   `inspiration/beamng-mods` (`RUBBLE_MODS`), skipped when absent.
 * **Measured** (M3 Max, 1080p, 4× MSAA, 10 copies): the Monster supercar
   (95 flexbodies, 1.52M triangles: about 40 times a typical BeamNG car's
-  30–40k) costs 1.57 ms a car near and 0.91 ms a car at the distant level
-  (275k triangles). Both are over the 0.5 ms budget; the supercar's own mesh
-  is the outlier, and a third, coarser level is the next step.
+  30–40k; levels 268k and 84k) costs 0.95 ms a car at 16 m (was 1.57) and
+  0.61 ms at 30 m (was 0.91), still over 0.5 ms. It is fragment bound, not
+  triangle bound: a 25 cm third level (33k triangles) costs the same, and
+  a flat fragment shader brings the 10 at 30 m from 6.1 to 1.2 ms. A
+  single car costs about 1.5–2 ms in this timed pass at any distance once
+  any of it is on screen (0.24 ms off screen), for the authored car too, so
+  the per-car figures carry a share of that constant.
 
 ### Glass (A9, open)
 

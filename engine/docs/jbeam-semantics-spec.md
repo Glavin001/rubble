@@ -339,6 +339,53 @@ not opt in is unchanged (bit for bit). A `.truck` file opts in itself with the l
 writes it; RoR files without it are read as before). The vehicle-contact kernels take the contact
 point lists as data, so every backend runs it.
 
+### 10.3 Two-body vehicle contact (JBeam mode, 2026-11-05)
+
+The vehicle-contact response (`explicit-beams-vehicle-contact-spec.md` §6, RoR's)
+cancels the contacter's **whole** force, as against a static surface, uses the
+weighted mean m_t = Σ w_k·m_k as the triangle point's mass, and sizes every hit as if
+it were alone. With the FMVSS 214 barrier (0.8 kg face and 4.7 kg back-plate nodes)
+on the showcase car's skin (0.07–0.3 kg nodes) each of the three threw light nodes
+off: a 0.07 kg node at weight 0.77 beside a 10 kg node at 0.14 has m_t = 1.5 kg
+by the mean, 0.12 kg by its impulse response; the cancelled column force of a
+heavy node (8–20 kN) went whole onto that node (Δv = 150 m/s in one step); and up to
+six back-plate nodes hit one triangle in a step, each removing the approach on its
+own. The car's nodes reached 300–370 m/s at the high resolution (CPU and GPU) and
+diverged at the medium one before the barrier's shear was rebuilt (§24 below).
+
+**Rule** (exact physics of the lumped masses; `explicit_contact.rs`,
+`vvTry`): in a hit where the owner or the partner is a JBeam-mode vehicle
+(`ExplicitBeams::two_body_contact`; the `.truck` path keeps RoR's rule, bit for bit,
+also with `rubble_full_contact`):
+
+* **Mass splitting** (Tonge, Benevolenski and Voroshilov, SIGGRAPH 2012, as the
+  World's rigid proxies, `explicit-vehicles-in-world.md` §1): in one owner's turn
+  every node counts its two-body hits (as the contacter, or as a vertex of the hit's
+  triangle) and is k sub-bodies of mass m/k, the contacter's force F/k each.
+* **Triangle point mass**: m_t = 1/Σ w_k²·k_k/m_k (w_k = 0 left out): the reaction
+  is shared out as w_k·J, so the point's velocity changes by J·Σ w_k²/m_k.
+* **Share**: the contact force cancels s·F_h/k_h, s = m_t/(m_h/k_h + m_t), the share
+  that zeroes the relative normal acceleration; F_h is the contacter's force before
+  its first hit of the turn. The approach and penetration terms use the reduced mass
+  of the split masses. Friction as before, on the same force.
+* GPU: per-vehicle flag bit 7; counts in gAcc at `vvSplit` (per node its triangle
+  count, then `VV_PART` point slots: the small groups' owners count side by side),
+  cleared after each turn. A turn whose hit list overflows applies at once with the
+  counts found so far (as before, out of the specification's order).
+
+Effect (MDB at 53.9 km/h, 27° crab, showcase car, GPU, fastest node over 1.5 s):
+low / medium / high resolution 93 / 34 / 372 m/s before (diverging at medium the
+day before), 30–48 / 47–66 / 42–46 m/s after; nothing non-finite; the vehicles'
+kinetic plus gravitational energy never rises (`explicit_scenes.rs`).
+
+**Why not the `.truck` path too:** in the 80 km/h sedan T-bone with every node a
+contacter the rule let 12 to 15 of 463 striker nodes into the struck skin (CPU and
+GPU; 2–5 with RoR's rule; the limit is 1 %). Ablation (CPU): without the share 1,
+without splitting 4, without the point mass 20. The share lets a heavy node carry a
+light skin with it instead of bouncing it ahead, so node-only contact meets a
+deforming skin's gaps more often; that is the open leak question (task 3), not
+settled here.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,
@@ -657,15 +704,34 @@ id1 and id2 are the beam's ends, id3 the vertex; beams id1–id3 and id2–id3 m
 [id1,id2]", and it "applies no force when only the L-beam's own length changes" (of
 an arm).
 
-* **Choice (units N/m, as `beamSpring`):** a beam between id1 and id2 whose rest
-  length follows the arms: with a = |x₁ − x₃|, b = |x₂ − x₃| now and θ₀ the rest
-  angle at id3, L(t) = √(a² + b² − 2ab·cos θ₀); F = −k·(ℓ − L) − c·u along id1–id2.
-  A pure stretch of an arm moves L with it (no force), an angle change does not. The
-  pair force conserves momentum and angular momentum.
+* **Choice (units N/m, as `beamSpring`):** the energy U = ½k·(ℓ − L)², ℓ = |x₁ − x₂|
+  and L its rest length at the arms' current lengths, a = |x₁ − x₃|, b = |x₂ − x₃|,
+  L = √(a² + b² − 2ab·cos θ₀). The spring is −∇U on all three nodes: −k(ℓ − L) along
+  id1–id2 (the "beam from [id1,id2]") plus k(ℓ − L)·∂L/∂a along the arm x₁ − x₃ on id1,
+  k(ℓ − L)·∂L/∂b along x₂ − x₃ on id2, and their negative sum on id3
+  (∂L/∂a = (a − b·cos θ₀)/L). A pure stretch of an arm keeps ℓ − L (no force), an
+  angle change does not. Momentum, angular momentum and energy are conserved.
+* **Before (2026-11-03 to 2026-11-05)** only the id1–id2 pair force was applied. It
+  is not the gradient of any energy (a follower force: it does work round a closed
+  path). The FMVSS 214 barrier's honeycomb-shear LBEAMs flew its face apart in free
+  flight (a bumper beam stretched 1.1 m within 0.25 s) and the barrier passed through
+  the car with 8 contact hits: "LBEAMs kill vehicle contact". Contact itself was not
+  at fault. Test: `explicit_contact_gpu.rs`, a sedan into the pressure-wheel fixture
+  car (LBEAM tyres) pushes it, CPU and GPU; the unit test checks −∇U by central
+  differences.
+* The damper is a beam's: −c·u along id1–id2, u its extension rate (a pair dashpot,
+  always dissipative). `dampCutoffHz` applies ([B] lists L-beams).
 * θ₀ at spawn: the spawn angle (precompression scales L: θ₀ from p·ℓ₀).
 * **Deform. Choice:** past `beamDeform` the rest angle moves so |k·(ℓ − L)| stays at
-  the deform force (perfect plasticity); past `beamStrength` it breaks. `dampCutoffHz`
-  applies ([B] lists L-beams).
+  the deform force (perfect plasticity); past `beamStrength` it breaks.
+* **Records:** the LBEAM (kind 14; id3 in E1 .x) and a second record x₃–x₃
+  (`JbeamLbeam2`, kind 20) whose first slot carries the vertex's force on the GPU; it
+  has no force of its own (as §26's and §31's second records).
+* Effect on the pressure-wheel fixture car at rest: it now rolls to and fro inside
+  one flat of its 12-ray tyres (about 1.3 Hz, up to 44 J at the turns' middle, the
+  body over 0.13 m of a 0.17 m flat), weakly damped; the follower force had damped
+  it to about 1 J. **Open**; the test checks the exact bounds (no energy above the
+  2 cm drop's, never off its flat). Coast-down C_rr is unchanged (0.052 / 0.071).
 * The `.truck` path still drops LBEAMs (RoR has none).
 
 ## 25. Pressure wheels (JBeam mode, opt-in) [WH]
