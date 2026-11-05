@@ -2939,13 +2939,18 @@ impl<'a> Car<'a> {
         v.iter().sum::<Vec3>() / v.len() as f32
     }
 
-    /// Positions in the cabin's frame (as [`cabin_local`]).
-    fn cabin_local(&self, s: &ExplicitBeams) -> Vec<Vec3> {
-        let (o, r) = frame3(
+    /// The cabin's frame (as [`cabin_local`]): origin and axes.
+    fn frame(&self, s: &ExplicitBeams) -> (Vec3, glam::Mat3) {
+        frame3(
             self.half(s, "sill", false),
             self.half(s, "sill", true),
             self.mean(s, &["sill_r"]),
-        );
+        )
+    }
+
+    /// Positions in the cabin's frame (as [`cabin_local`]).
+    fn cabin_local(&self, s: &ExplicitBeams) -> Vec<Vec3> {
+        let (o, r) = self.frame(s);
         let inv = r.transpose();
         s.nodes.iter().map(|n| inv * (n.pos - o)).collect()
     }
@@ -3065,7 +3070,11 @@ fn reference_wall_p(
     let mut f = biquad(&f);
     f.reverse();
     let peak_g = f.iter().map(|a| -a).fold(0.0f32, f32::max);
-    ledger.check(&s, &format!("n {kmh} km/h drag {drag}"), noise);
+    // (The ledgers are the authored car's: a JBeam car's pressure tyres and
+    // bounded beams are not in their accounting.)
+    if car.built.is_some() {
+        ledger.check(&s, &format!("n {kmh} km/h drag {drag}"), noise);
+    }
     let l1 = car.cabin_local(&s);
     let attached: Vec<bool> = (0..s.nodes.len())
         .map(|i| {
@@ -3483,6 +3492,11 @@ fn side_pole_crush_p(car: &Car, kmh: f32, p: Perturb) -> f32 {
             let d = pole_inward(car, &s0, &s, centre);
             if d > deepest.0 {
                 deepest = (d, (k + 1) as f32 * 0.01);
+                // (`O_ELASTIC=1`: where the elastic energy is at the deepest
+                // frame, by member or part pair: what springs back.)
+                if let (Ok(_), Some(b)) = (std::env::var("O_ELASTIC"), car.built) {
+                    elastic_census(&s, b, "o at the deepest frame");
+                }
             }
         }
         eprintln!(
@@ -3592,6 +3606,48 @@ fn side_pole_crush_p(car: &Car, kmh: f32, p: Perturb) -> f32 {
 /// The plastic work each member took (≈ yield force × its rest's change,
 /// summed over the beams with both nodes in the member's group; the rest
 /// by part pair), the largest 14, and the broken beams per group.
+/// Each member's (or part pair's) elastic energy now (kJ), largest first.
+fn elastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let mut names: Vec<&String> = b.groups.keys().collect();
+    names.sort();
+    let sets: Vec<(&String, HashSet<u32>)> = names
+        .iter()
+        .map(|k| (*k, b.groups[*k].iter().copied().collect()))
+        .collect();
+    let mut by: std::collections::BTreeMap<String, f64> = Default::default();
+    let mut total = 0.0;
+    for bm in s.beams.iter().filter(|b| !b.broken) {
+        let (a, c) = (bm.a, bm.b);
+        if a as usize >= n || c as usize >= n {
+            continue;
+        }
+        let w = beam_energy(bm, solver_len(s, bm), bm.rest);
+        total += w;
+        let key = sets
+            .iter()
+            .find(|(_, g)| g.contains(&a) && g.contains(&c))
+            .map(|(k, _)| k.to_string())
+            .unwrap_or_else(|| {
+                let pa = &sk.parts[sk.nodes[a as usize].part as usize];
+                let pc = &sk.parts[sk.nodes[c as usize].part as usize];
+                format!("~{pa}/{pc}")
+            });
+        *by.entry(key).or_default() += w;
+    }
+    let mut v: Vec<(String, f64)> = by.into_iter().collect();
+    v.sort_by(|x, y| y.1.total_cmp(&x.1));
+    eprintln!(
+        "({tag}) elastic energy {:.2} kJ by member: {:?}",
+        total / 1e3,
+        v.iter()
+            .take(16)
+            .map(|(k, w)| format!("{k} {:.2}", w / 1e3))
+            .collect::<Vec<_>>()
+    );
+}
+
 fn plastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
     let sk = &b.skeleton;
     let n = sk.nodes.len();
@@ -6001,84 +6057,35 @@ fn energy_rise_probe() {
 /// read local, non-redistributable content and nothing in the repository
 /// depends on it.
 fn beamng_desc() -> Option<engine_softbody::desc::SoftVehicleDesc> {
+    use engine_softbody::reference_cars as rc;
     let dir = std::env::var("RUBBLE_JBEAM_BX").ok()?;
     let dir = std::path::Path::new(&dir);
     let name = std::env::var("REF_CAR").unwrap_or_else(|_| "bx".into());
-    let files = engine_softbody::jbeam::read_vehicle_dir(dir, &name).ok()?;
-    let refs: Vec<(&str, &str)> = files
-        .iter()
-        .map(|(a, b)| (a.as_str(), b.as_str()))
-        .collect();
     // (A configuration is slot choices, not content: the coupe body, every
     // other slot its default.)
-    let pcs = match std::env::var("REF_PC") {
+    let pc = match std::env::var("REF_PC") {
         Ok(pc) => std::fs::read_to_string(dir.join(&name).join(pc)).ok()?,
         Err(_) => r#"{"format":2,"model":"bx","parts":{"bx_body":"bx_body_coupe"}}"#.into(),
     };
-    let mut desc = engine_softbody::jbeam::load_jbeam(&refs, Some(&pcs)).unwrap();
-    give_tyres(&mut desc);
-    Some(desc)
-}
-
-/// The BX's tyres are in BeamNG's shared `common` content, which is not here:
-/// its `pressureWheels` are hubs only (`hasTire` false), so it would sit on
-/// 0.14 m hubs, 15 cm low. The only passenger-car pressure tyre in the local
-/// JBeam content is a community car's 205/65 R15 (`RUBBLE_BEAMNG_MODS`,
-/// `qlourie_astral_r`, its front tyre: radius 0.324 m, against the BX's
-/// design axle heights of 0.325–0.35 m). Its tyre options are put on the BX's
-/// hubs at run time (the hubs keep the BX's own values). A Choice, reported
-/// with the results; without that content the BX runs on its hubs.
-fn give_tyres(desc: &mut engine_softbody::desc::SoftVehicleDesc) {
-    if desc
-        .pressure_wheels
-        .iter()
-        .all(|w| w.flags.get("hasTire") != Some(&false))
+    let mut desc = rc::load(dir, &name, Some(&pc)).ok()?;
+    // The BX's tyres are in BeamNG's shared `common` content, which is not
+    // here: its pressure wheels are hubs only (`hasTire` false), so it would
+    // sit on 0.14 m hubs, 15 cm low. The one passenger-car pressure tyre in
+    // the local JBeam content (a community car's 205/65 R15, radius 0.325 m,
+    // against the BX's design axle heights of 0.325-0.35 m) goes on its hubs
+    // at run time. A Choice, reported with the results.
+    match std::env::var("RUBBLE_BEAMNG_MODS")
+        .ok()
+        .and_then(|m| rc::donor_tyre_car(std::path::Path::new(&m)))
     {
-        return;
-    }
-    let Ok(mods) = std::env::var("RUBBLE_BEAMNG_MODS") else {
-        eprintln!("(ref) no RUBBLE_BEAMNG_MODS: the car runs on its hubs");
-        return;
-    };
-    let dir = std::path::Path::new(&mods).join("qlourie_astral_r/vehicles");
-    let Ok(files) = engine_softbody::jbeam::read_vehicle_dir(&dir, "qlourie_astral_r") else {
-        eprintln!("(ref) no donor tyre: the car runs on its hubs");
-        return;
-    };
-    let refs: Vec<(&str, &str)> = files
-        .iter()
-        .map(|(a, b)| (a.as_str(), b.as_str()))
-        .collect();
-    let Ok(pcs) = std::fs::read_to_string(dir.join("qlourie_astral_r/wrc17_tarmac_balanced.pc"))
-    else {
-        return;
-    };
-    let donor = engine_softbody::jbeam::load_jbeam(&refs, Some(&pcs)).unwrap();
-    let Some(t) = donor
-        .pressure_wheels
-        .iter()
-        .find(|w| w.flags.get("hasTire") != Some(&false) && w.values.contains_key("radius"))
-    else {
-        return;
-    };
-    let tyre = |k: &str| {
-        !k.starts_with("hub") && !k.starts_with("brake") && k != "numRays" && k != "wheelOffset"
-    };
-    for w in &mut desc.pressure_wheels {
-        for (k, v) in t.values.iter().filter(|(k, _)| tyre(k)) {
-            w.values.insert(k.clone(), *v);
+        Some(donor) => {
+            if let Some([r, w, psi]) = rc::fit_donor_tyre(&mut desc, &donor) {
+                eprintln!("(ref) tyres: the donor's radius {r:.3} m, width {w:.3} m, {psi:.1} psi");
+            }
         }
-        for (k, v) in t.flags.iter().filter(|(k, _)| tyre(k)) {
-            w.flags.insert(k.clone(), *v);
-        }
-        w.flags.insert("hasTire".into(), true);
+        None => eprintln!("(ref) no donor tyre (RUBBLE_BEAMNG_MODS): the car runs on its hubs"),
     }
-    eprintln!(
-        "(ref) tyres: the donor's radius {:.3} m, width {:.3} m, {:.1} psi",
-        t.values.get("radius").copied().unwrap_or(f32::NAN),
-        t.values.get("tireWidth").copied().unwrap_or(f32::NAN),
-        t.values.get("pressurePSI").copied().unwrap_or(f32::NAN)
-    );
+    Some(desc)
 }
 
 /// A JBeam car in JBeam mode (pressure wheels), turned to face +z, its lowest
@@ -6312,6 +6319,15 @@ fn beamng_ref_census() {
             );
         }
     }
+    if std::env::var("CENSUS_GROUPS").is_ok() {
+        let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+        for i in 0..desc.beams.len() {
+            for g in desc.beam_group_names(i).1 {
+                *by.entry(g).or_default() += 1;
+            }
+        }
+        eprintln!("break groups (beams): {by:?}");
+    }
     let want = std::env::var("CENSUS_PARTS").unwrap_or_default();
     for p in &desc.parts {
         let m: f32 = p.nodes.iter().map(|&i| desc.nodes[i as usize].mass).sum();
@@ -6326,4 +6342,112 @@ fn beamng_ref_census() {
             }
         }
     }
+}
+
+/// A8's pole sweep (as [`pole_sweep_never_passes_through`], at `SWEEP_KMH`,
+/// default 30 km/h) on BeamNG's car: whether its node spacing (the BX's door
+/// and side nodes about 0.5-0.6 m apart) lets a 20 cm square or 25 cm round
+/// pole through, frontal and sideways, offsets every 5 cm. Reported.
+#[test]
+#[ignore]
+fn beamng_pole_sweep() {
+    let Some(desc) = beamng_desc() else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    let car = beamng_car(&desc);
+    let kmh: f32 = std::env::var("SWEEP_KMH")
+        .ok()
+        .and_then(|k| k.parse().ok())
+        .unwrap_or(30.0);
+    let mut jobs = Vec::new();
+    for square in [true, false] {
+        for i in -16..=16 {
+            jobs.push((Vec3::Z, i as f32 * 0.05, square));
+        }
+        for i in -44..=44 {
+            jobs.push((Vec3::X, i as f32 * 0.05, square));
+        }
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let fails = std::sync::Mutex::new(Vec::new());
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(6));
+    std::thread::scope(|sc| {
+        for _ in 0..threads {
+            sc.spawn(|| loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&(dir, off, square)) = jobs.get(k) else {
+                    break;
+                };
+                let v = kmh / 3.6;
+                let mut s = car.spawn(dir * v, 0.0);
+                let lateral = Vec3::Y.cross(dir);
+                let front = s.nodes[..car.n]
+                    .iter()
+                    .map(|q| q.pos.dot(dir))
+                    .fold(f32::MIN, f32::max);
+                let r = if square { 0.1 } else { 0.125 };
+                let centre = dir * (front + 0.03 + r) + lateral * offset_of(off) + Vec3::Y * 2.0;
+                if square {
+                    s.shapes.push(StaticShape::oriented_box(
+                        centre,
+                        Vec3::new(r, 2.0, r),
+                        Quat::IDENTITY,
+                    ));
+                } else {
+                    s.shapes.push(StaticShape::cylinder(centre, r, 2.0));
+                }
+                let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+                let mid = s.nodes.iter().map(|n| n.mass * n.pos.dot(dir)).sum::<f32>() / total;
+                let far: Vec<usize> = (0..car.n)
+                    .filter(|&i| car.primary[i] && s.nodes[i].pos.dot(dir) < mid)
+                    .collect();
+                let (_, r0) = car.frame(&s);
+                let (d_l, lat_l) = (r0.transpose() * dir, r0.transpose() * lateral);
+                let mut through = false;
+                for _ in 0..(0.9 * 60.0) as usize {
+                    s.frame();
+                    let (o, rot) = car.frame(&s);
+                    let inv = rot.transpose();
+                    let pole = inv * (centre - o);
+                    through = far.iter().any(|&i| {
+                        let q = inv * (s.nodes[i].pos - o) - pole;
+                        q.dot(d_l) > r
+                            && q.dot(lat_l).abs() < r
+                            && s.incidence[i]
+                                .iter()
+                                .any(|&bm| !s.beams[bm as usize].broken)
+                    });
+                    if through {
+                        break;
+                    }
+                }
+                if through {
+                    fails.lock().unwrap().push((dir, off, square));
+                }
+            });
+        }
+    });
+    let fails = fails.into_inner().unwrap();
+    for f in &fails {
+        eprintln!("  through: dir {:?} offset {:+.2} square {}", f.0, f.1, f.2);
+    }
+    for (d, name) in [(Vec3::Z, "front"), (Vec3::X, "side")] {
+        for square in [true, false] {
+            let of = jobs.iter().filter(|j| j.0 == d && j.2 == square).count();
+            let n = fails.iter().filter(|f| f.0 == d && f.2 == square).count();
+            eprintln!(
+                "(ref) pole sweep {name:>5} {:>14} {kmh} km/h: {n} of {of} passed through",
+                if square {
+                    "square 20 cm"
+                } else {
+                    "cylinder 25 cm"
+                }
+            );
+        }
+    }
+}
+
+fn offset_of(o: f32) -> f32 {
+    o
 }

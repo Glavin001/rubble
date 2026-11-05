@@ -3029,10 +3029,15 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         if let Some(z) = &def.damping {
             one_tier_damping(&mut sk, z, &groups, &grade_of, &grades);
             // The body dashpots at the BX body's damping-only beams' rate per
-            // kilogram of body ([`BX_BODY_DASHPOT_RATE`]), each on the mass
-            // of the node it is from.
-            for &(j, i) in &body_dash {
-                sk.beams[j].mat.damp = BX_BODY_DASHPOT_RATE * sk.nodes[i as usize].mass;
+            // kilogram of body ([`BX_BODY_DASHPOT_RATE`]), each on the
+            // lighter of its two nodes' masses: neither end is damped harder
+            // per kilogram than the BX's rate. (On the mass of the node it is
+            // from, a 6.9 kg node's dashpot to a 0.10 kg station damped that
+            // station at 70 times the rate, h·Σc/m 0.79, past `C_RATIO`.)
+            for &(j, _) in &body_dash {
+                let (a, b) = (sk.beams[j].a as usize, sk.beams[j].b as usize);
+                let m = sk.nodes[a].mass.min(sk.nodes[b].mass);
+                sk.beams[j].mat.damp = BX_BODY_DASHPOT_RATE * m;
             }
         }
         sk.exact_lengths = true;
@@ -3047,6 +3052,21 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 let kl = b.mat.k * super::material::REF_LENGTH;
                 b.mat.strength = b.mat.deform.max(b.tension_yield) + e * kl;
             }
+        }
+        // Each member's section once per bay, spread by axial rigidity
+        // (`SECTION_CUTS=0` leaves the cuts as built, a measurement switch;
+        // `SECTION_CUTS=report` prints them before and after).
+        let cuts = std::env::var("SECTION_CUTS").unwrap_or_default();
+        if cuts != "0" {
+            one_tier_section_cuts(
+                &mut sk,
+                def,
+                &trusses,
+                &truss_names,
+                &groups,
+                &elong,
+                cuts == "report",
+            );
         }
         // (`BX_YIELD=1`, a measurement: each part's beams yield no later
         // than the Ibishu BX's median yield strain for that part type,
@@ -3480,6 +3500,171 @@ fn one_tier_crush(
         return Err(format!("crush member {}: no such member", c.member));
     }
     Ok(())
+}
+
+/// One tier: each member's bays carry its section's axial yield once. A bay's
+/// cut (the member's beams crossing the plane between two stations) holds
+/// longitudinals, bend beams over two stations, face diagonals and, on the
+/// body, the lane's shell edges and webs, all in parallel; each built at its
+/// own yield they sum to more than the section. Here every cut's
+/// Σ yield·|cos| is the section's: its chords (4 a box, 2 a ladder) × its
+/// chord yield (the cut's largest near-axial yield). Within the cut the
+/// yield goes to each beam in proportion to its built axial rigidity
+/// k·L·|cos|, so all of them reach it at one strain, as a section's fibres
+/// do at σ_y/E: the least elastic strain at yield the topology allows.
+/// Crush members keep their cut's mean crush force ([`one_tier_crush`]) and
+/// are only redistributed. Break forces keep each beam's elongation.
+fn one_tier_section_cuts(
+    sk: &mut Skeleton,
+    def: &VehicleDef,
+    trusses: &[Truss],
+    names: &[String],
+    groups: &HashMap<String, Vec<u32>>,
+    elong: &[f32],
+    report: bool,
+) {
+    let len = |sk: &Skeleton, j: usize| sk.pos(sk.beams[j].a).distance(sk.pos(sk.beams[j].b));
+    for (ti, name) in names.iter().enumerate() {
+        let base = name.strip_suffix("_r").unwrap_or(name);
+        let Some(m) = def
+            .members
+            .iter()
+            .find(|m| m.name == base || m.name == *name)
+        else {
+            continue;
+        };
+        let crush = def.crush.iter().any(|c| c.member == m.name);
+        let chords = if m.section == 2 { 2.0 } else { 4.0 };
+        let set: std::collections::HashSet<u32> =
+            groups.get(name).into_iter().flatten().copied().collect();
+        let beams: Vec<usize> = (0..sk.beams.len())
+            .filter(|&j| {
+                let b = &sk.beams[j];
+                b.ty == BeamType::Normal
+                    && b.group == 0
+                    && !b.damper
+                    && !b.tie
+                    && b.mat.deform < 1.0e8
+                    && set.contains(&b.a)
+                    && set.contains(&b.b)
+            })
+            .collect();
+        let t = &trusses[ti];
+        let centre =
+            |sk: &Skeleton, st: &[u32; 4]| st.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / 4.0;
+        let mut cuts: Vec<(Vec<(usize, f32)>, f32)> = Vec::new();
+        for w in t.stations.windows(2) {
+            let (c0, c1) = (centre(sk, &w[0]), centre(sk, &w[1]));
+            let bay = c0.distance(c1);
+            let n = (c1 - c0).normalize_or_zero();
+            let mid = 0.5 * (c0 + c1);
+            let cut: Vec<(usize, f32)> = beams
+                .iter()
+                .copied()
+                .filter_map(|j| {
+                    let (pa, pb) = (sk.pos(sk.beams[j].a), sk.pos(sk.beams[j].b));
+                    let (sa, sb) = ((pa - mid).dot(n), (pb - mid).dot(n));
+                    (sa * sb < 0.0).then(|| (j, (pb - pa).normalize_or_zero().dot(n).abs()))
+                })
+                .collect();
+            // The chord's yield: the largest of the near-axial beams one bay long.
+            let chord = cut
+                .iter()
+                .filter(|&&(j, cs)| cs > 0.9 && len(sk, j) < 1.5 * bay)
+                .map(|&(j, _)| sk.beams[j].mat.deform)
+                .fold(0.0f32, f32::max);
+            if cut.is_empty() || chord <= 0.0 {
+                continue;
+            }
+            let cap: f32 = cut.iter().map(|&(j, cs)| sk.beams[j].mat.deform * cs).sum();
+            let f = if crush { cap } else { chords * chord };
+            cuts.push((cut, f));
+        }
+        if cuts.is_empty() {
+            continue;
+        }
+        let cap = |sk: &Skeleton, cut: &[(usize, f32)]| -> f32 {
+            cut.iter().map(|&(j, cs)| sk.beams[j].mat.deform * cs).sum()
+        };
+        let mut ratio: Vec<f32> = cuts.iter().map(|(c, f)| cap(sk, c) / f).collect();
+        ratio.sort_by(f32::total_cmp);
+        // The strain at yield now: the cut's yield over its rigidity.
+        let strain = |sk: &Skeleton, cut: &[(usize, f32)], f: f32| -> f32 {
+            f / cut
+                .iter()
+                .map(|&(j, cs)| sk.beams[j].mat.k_at(len(sk, j)) * len(sk, j) * cs * cs)
+                .sum::<f32>()
+                .max(1e-3)
+        };
+        let mut eps0: Vec<f32> = cuts.iter().map(|(c, f)| strain(sk, c, *f)).collect();
+        eps0.sort_by(f32::total_cmp);
+        {
+            let touched: std::collections::HashSet<usize> = cuts
+                .iter()
+                .flat_map(|(c, _)| c.iter().map(|x| x.0))
+                .collect();
+            for &j in &touched {
+                let l = len(sk, j);
+                sk.beams[j].mat.deform = sk.beams[j].mat.k_at(l) * l;
+                // (A section yields alike both ways: a lane's shell edge in
+                // it is the section's chord, not a sheet in tension.)
+                sk.beams[j].tension_yield = 0.0;
+            }
+            for _ in 0..60 {
+                let mut worst = 0.0f32;
+                for (cut, f) in &cuts {
+                    let r = f / cap(sk, cut).max(1e-3);
+                    worst = worst.max((r - 1.0).abs());
+                    for &(j, _) in cut {
+                        sk.beams[j].mat.deform *= r.sqrt();
+                    }
+                }
+                if worst < 0.01 {
+                    break;
+                }
+            }
+            for &j in &touched {
+                let e = elong[j];
+                if e >= 0.0 {
+                    let b = &mut sk.beams[j];
+                    let kl = b.mat.k * super::material::REF_LENGTH;
+                    b.mat.strength = b.mat.deform.max(b.tension_yield) + e * kl;
+                }
+            }
+        }
+        let mut after: Vec<f32> = cuts.iter().map(|(c, f)| cap(sk, c) / f).collect();
+        after.sort_by(f32::total_cmp);
+        let mut eps1: Vec<f32> = cuts.iter().map(|(c, f)| strain(sk, c, *f)).collect();
+        eps1.sort_by(f32::total_cmp);
+        let med = |v: &[f32]| v[v.len() / 2];
+        if !report {
+            continue;
+        }
+        // The largest yield given to one beam against its cut's section.
+        let mut big = (0.0f32, 0usize, 0.0f32, 0.0f32);
+        for (cut, f) in &cuts {
+            for &(j, cs) in cut {
+                let r = sk.beams[j].mat.deform / f;
+                if r > big.0 {
+                    big = (r, j, cs, len(sk, j));
+                }
+            }
+        }
+        eprintln!(
+            "    largest share: beam {} {:.2} of its cut's section (|cos| {:.2}, {:.2} m)",
+            big.1, big.0, big.2, big.3
+        );
+        eprintln!(
+            "  section cuts {name:>16}{}: {} bays, cut / section p50 {:.2} (max {:.2}) -> {:.2}; strain at the section's yield p50 {:.1} % -> {:.1} %",
+            if crush { " (crush)" } else { "" },
+            cuts.len(),
+            med(&ratio),
+            ratio.last().unwrap(),
+            med(&after),
+            med(&eps0) * 100.0,
+            med(&eps1) * 100.0
+        );
+    }
 }
 
 /// One tier: every steel, glass and fascia beam's damping set to its part's

@@ -483,25 +483,49 @@ pub fn build_shell(
         let ((la, ha), (lc, hc)) = (band(a), band(c));
         zipper(&a.half[la..=ha], &a.v[la..=ha], &m.half, &m.v, &mut loft);
         zipper(&m.half, &m.v, &c.half[lc..=hc], &c.v[lc..=hc], &mut loft);
+        // The floor's (the top's) strip from major to major meets the band
+        // at the minor ring's edge node, which lies on the strip's edge
+        // between the two majors' band nodes: the strip's triangle on that
+        // edge is split at it, so the node is a vertex of the floor and the
+        // skin has no T-junction (a node lying on another triangle's edge,
+        // in self-contact range of it at rest, and a sliver closing it).
+        let split = |strip: &mut Vec<[u32; 3]>, p: u32, q: u32, at: u32| {
+            let k = strip
+                .iter()
+                .position(|t| t.contains(&p) && t.contains(&q))
+                .expect("the strip's edge between the majors");
+            let t = strip[k];
+            // (u, v) the edge in the triangle's own order, w the third.
+            let (u, v, w) = (0..3)
+                .map(|r| (t[r], t[(r + 1) % 3], t[(r + 2) % 3]))
+                .find(|&(u, v, _)| (u == p && v == q) || (u == q && v == p))
+                .unwrap();
+            strip[k] = [u, at, w];
+            strip.push([at, v, w]);
+        };
         if la > 0 {
+            let mut strip = Vec::new();
             zipper(
                 &a.half[..=la],
                 &a.v[..=la],
                 &c.half[..=lc],
                 &c.v[..=lc],
-                &mut loft,
+                &mut strip,
             );
-            loft.push([a.half[la], c.half[lc], m.half[0]]);
+            split(&mut strip, a.half[la], c.half[lc], m.half[0]);
+            loft.extend(strip);
         }
         if ha + 1 < a.half.len() {
+            let mut strip = Vec::new();
             zipper(
                 &a.half[ha..],
                 &a.v[ha..],
                 &c.half[hc..],
                 &c.v[hc..],
-                &mut loft,
+                &mut strip,
             );
-            loft.push([a.half[ha], c.half[hc], *m.half.last().unwrap()]);
+            split(&mut strip, a.half[ha], c.half[hc], *m.half.last().unwrap());
+            loft.extend(strip);
         }
         k += 2;
     }

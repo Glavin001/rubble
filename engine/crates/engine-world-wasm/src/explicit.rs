@@ -175,6 +175,17 @@ fn build(
     if let Some(d) = v.get("desc") {
         let desc: SoftVehicleDesc =
             serde_json::from_value(d.clone()).map_err(|e| format!("desc: {e}"))?;
+        // `native`: a desc loaded from JBeam, run in JBeam mode (pressure wheels).
+        if v.get("native").and_then(|n| n.as_bool()).unwrap_or(false) {
+            let (sim, warnings) = ExplicitBeams::from_desc_jbeam_with(
+                &desc,
+                engine_softbody::explicit_beams::JbeamWheels::Pressure,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                settings,
+            )?;
+            return Ok((sim, desc, warnings));
+        }
         let sim = ExplicitBeams::new(&desc, Vec3::ZERO, Vec3::ZERO, settings);
         return Ok((sim, desc, Vec::new()));
     }

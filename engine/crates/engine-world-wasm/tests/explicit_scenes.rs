@@ -226,10 +226,16 @@ fn side_crush_of(spawn: &[Vec3], now: &[Vec3], skin: &[usize]) -> Vec<(usize, f3
 /// (crash-reference-targets.md §10: 42 vehicles, 2010–2025, min–max 98–219 mm; the
 /// 14 four-door sedans 126–206 mm, p10–p90 127–199 mm).
 fn mdb_side_impact(label: &str, truck: String) {
+    mdb_side_impact_of(label, serde_json::json!({ "truck": truck }), true);
+}
+
+/// [`mdb_side_impact`] on any vehicle spec; `assert_band` false only reports
+/// the crush (BeamNG's own cars: a calibration, not a target).
+fn mdb_side_impact_of(label: &str, vehicle: serde_json::Value, assert_band: bool) {
     let Some((_, device, queue)) = engine_webgpu::default_device().ok() else {
         return;
     };
-    let spec = serde_json::json!({ "vehicles": [{ "truck": truck }], "scene": "mdb214", "timing": false });
+    let spec = serde_json::json!({ "vehicles": [vehicle], "scene": "mdb214", "timing": false });
     let mut s = ExplicitSim::new_native(&device, &queue, &spec).unwrap();
     let spawn = s.gpu_solver().positions().remove(0);
     let car = s.spawned(0);
@@ -328,7 +334,33 @@ fn mdb_side_impact(label: &str, truck: String) {
     // The energy never rises (a 0.5 % allowance: the explicit step's symplectic
     // error and the GPU's fixed-point contact sums).
     assert!(most <= e0 * 1.005, "{label}: energy rose from {e0} J to {most} J");
-    assert!((0.098..=0.219).contains(&crush), "{label}: residual side crush {crush} m outside 98–219 mm");
+    if assert_band {
+        assert!((0.098..=0.219).contains(&crush), "{label}: residual side crush {crush} m outside 98–219 mm");
+    }
+}
+
+/// The MDB into BeamNG's own car (opt-in: `RUBBLE_JBEAM_BX`, the `vehicles`
+/// directory holding `bx/`; `RUBBLE_BEAMNG_MODS` for the donor tyre, as
+/// `showcase_car.rs`'s `beamng_*`): the calibration of what BeamNG's content
+/// scores here. Reported, never asserted beyond finiteness and energy; skips
+/// when the content is absent.
+#[test]
+#[ignore]
+fn mdb_into_beamng_reference_car() {
+    use engine_softbody::reference_cars as rc;
+    let Ok(dir) = std::env::var("RUBBLE_JBEAM_BX") else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    let pc = r#"{"format":2,"model":"bx","parts":{"bx_body":"bx_body_coupe"}}"#;
+    let Ok(mut desc) = rc::load(std::path::Path::new(&dir), "bx", Some(pc)) else {
+        eprintln!("skip: no bx under {dir}");
+        return;
+    };
+    if let Some(donor) = std::env::var("RUBBLE_BEAMNG_MODS").ok().and_then(|m| rc::donor_tyre_car(std::path::Path::new(&m))) {
+        eprintln!("(ref) donor tyre {:?}", rc::fit_donor_tyre(&mut desc, &donor));
+    }
+    mdb_side_impact_of("BX", serde_json::json!({ "desc": desc, "native": true }), false);
 }
 
 #[test]
