@@ -700,6 +700,9 @@ pub fn screen_ring(cw: [f32; 3], ft: [f32; 3]) -> (f32, f32) {
 /// extrusion (250). The same grades and classes as the 2011 Honda Accord
 /// teardown's material table (NHTSA DOT HS 811 666, fig. 113: DP 350/600,
 /// DP 500/800, HSLA 350/450, HF 1050/1500).
+/// Bake-hardening BH210 (EN 10268 HC220B class, minimum yield 210 MPa after
+/// paint bake): body side outers and closures' outers.
+pub const BH210: f32 = 210e6;
 pub const DP600: f32 = 330e6;
 /// DP600's minimum tensile strength (Pa), EN 10338 (HCT600X).
 pub const DP600_UTS: f32 = 600e6;
@@ -1657,12 +1660,21 @@ pub fn sedan() -> VehicleDef {
         m.skin = true;
         m
     };
-    members.extend([
-        inner("lid_inner_r", 0.14, 0.58, [1.00, 1.04]),
-        inner("lid_inner_f", 0.46, 0.57, [1.03, 1.07]),
-        inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
-        inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
-    ]);
+    // Not built (`LID_INNER=1` builds them, a measurement switch): the
+    // rigidifier stands in for the inner stamping as in BeamNG's BX, and these
+    // ladders took 37 % of the bonnet's row at the step's bound from its
+    // sheet (its first mode 13.0 Hz without them against 12.4 with, 19.3
+    // against 17.9 at the BX's rigidifier depth) and one of them pumped
+    // energy at the step's Nyquist rate in the 120 km/h wall
+    // (`vehicle-authoring.md`, "The lids").
+    if std::env::var("LID_INNER").is_ok_and(|v| v == "1") {
+        members.extend([
+            inner("lid_inner_r", 0.14, 0.58, [1.00, 1.04]),
+            inner("lid_inner_f", 0.46, 0.57, [1.03, 1.07]),
+            inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
+            inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
+        ]);
+    }
     // The transverse members a sedan has besides those above (their
     // sections in [`side_sections`]): the front subframe's rear cross
     // member and the rear seat cushion's cross member. (A boot floor cross
@@ -2061,6 +2073,43 @@ pub const ACCORD_FENDER: f32 = (147.0 - 58.99 - 47.46 - 17.90 - 12.37) / 2.0;
 
 /// A section's steel per metre (kg/m): a box's perimeter × wall, a tube's
 /// circumference × wall, × 7,850 kg/m³.
+/// One stamping of a layered section ([`layered`]).
+#[derive(Clone, Copy, Debug)]
+pub enum LayerShape {
+    /// A hat: one flange and both webs (closed by the other layers).
+    Hat,
+    /// A flat closing plate: one flange.
+    Flange,
+}
+
+/// A member made of several stampings welded at their flanges (outer,
+/// reinforcement, inner), as one box section of the same outer size whose
+/// plastic moment is the sum of the layers' and whose steel per metre is
+/// theirs: a hat's Z_p is t·(w·d/2 + d²/2), a flange's t·w·d/2; its steel
+/// t·(w + 2d) and t·w. Returns the equivalent box (its wall from the steel,
+/// its yield stress from the moment).
+pub fn layered(depth: f32, width: f32, layers: &[(f32, f32, LayerShape)]) -> Section {
+    let (d, w) = (depth, width);
+    let (mut mp, mut area) = (0.0f32, 0.0f32);
+    for &(t, sy, shape) in layers {
+        let (z, a) = match shape {
+            LayerShape::Hat => (t * (0.5 * w * d + 0.5 * d * d), t * (w + 2.0 * d)),
+            LayerShape::Flange => (t * 0.5 * w * d, t * w),
+        };
+        mp += sy * z;
+        area += a;
+    }
+    let t = area / (2.0 * (w + d));
+    let box_z = t * (w * d + 0.5 * d * d);
+    Section {
+        depth,
+        width,
+        t,
+        sigma_y: mp / box_z,
+        round: false,
+    }
+}
+
 pub fn section_kg_per_m(s: &Section) -> f32 {
     let perimeter = if s.round {
         std::f32::consts::PI * s.depth
@@ -2211,6 +2260,77 @@ pub fn sedan_one_tier() -> VehicleDef {
             }
         }
     }
+    // The side structure as its stampings (`SIDE_LAYERS=0`: the single
+    // sections of [`side_sections`], a measurement switch). Once each bay's
+    // section is counted once (`one_tier_section_cuts`), a single 1.4–1.8 mm
+    // section for the rocker and the pillars carries only one of the parts a
+    // sedan's side has there; the over-count had stood in for the rest. Each
+    // member is now the sum of its layers ([`layered`]): the body side outer
+    // (a hat over the member, BH210 0.7 mm), the reinforcement and the
+    // inner. Grades and gauges are WorldAutoSteel's FutureSteelVehicle and
+    // A2Mac1-style teardown descriptions of 2010s mid-size sedans (a Choice
+    // in each published range): B-pillar reinforcement hot-stamped 22MnB5
+    // 1.8 mm (published 1.5–2.0), its inner HSLA 1.2 mm; A-pillar and hinge
+    // pillar reinforcement hot-stamped 1.6 mm, inner DP780 1.4 mm; rocker
+    // reinforcement DP980 1.6 mm, inner DP780 1.4 mm. The 2011 Accord
+    // teardown's material classes (DOT HS 811 666 fig. 113) include each.
+    if std::env::var("SIDE_LAYERS").map_or(true, |v| v != "0") {
+        use LayerShape::{Flange, Hat};
+        let list = [
+            (
+                "sill",
+                layered(
+                    0.10,
+                    0.14,
+                    &[
+                        (0.0007, BH210, Hat),
+                        (0.0016, DP980, Hat),
+                        (0.0014, DP780, Hat),
+                    ],
+                ),
+                0.18,
+                2.0,
+            ),
+            (
+                "pillar_b",
+                layered(
+                    0.07,
+                    0.12,
+                    &[
+                        (0.0007, BH210, Hat),
+                        (0.0018, PHS, Hat),
+                        (0.0012, HSLA340, Flange),
+                    ],
+                ),
+                0.14,
+                2.0,
+            ),
+            (
+                "pillar_a",
+                layered(
+                    0.10,
+                    0.12,
+                    &[
+                        (0.0007, BH210, Hat),
+                        (0.0016, PHS, Hat),
+                        (0.0014, DP780, Flange),
+                    ],
+                ),
+                0.10,
+                2.0,
+            ),
+        ];
+        sectioned_by(&mut d.members, &Grades::default(), &list);
+        for (name, sec, _, _) in list {
+            for m in d
+                .members
+                .iter_mut()
+                .filter(|m| m.name == name || m.name == format!("{name}_r"))
+            {
+                m.kg_per_m = section_kg_per_m(&sec);
+            }
+        }
+    }
     // The floor and the roof, which no pole reaches, at the BX's interior
     // spacing (`bx_body_coupe`, measured: its floor's stations 0.38–0.75 m
     // apart along the car and 0.25–0.7 m across, its roof's 0.33–0.37 m
@@ -2221,9 +2341,11 @@ pub fn sedan_one_tier() -> VehicleDef {
     // placed over its whole section at once, so a coarser floor would move
     // the sides' nodes and the door hardware with them. The
     // roof is the top between the screens' zones (backlight to 1.35 m,
-    // windscreen from 2.59 m). Measured, not adopted (`vehicle-authoring.md`
-    // "Pole lanes only where needed"): `INTERIOR=1` builds it (a
-    // measurement switch); by default the pole lanes run everywhere.
+    // windscreen from 2.59 m). Measured, not adopted (`vehicle-authoring.md`,
+    // "INTERIOR"): its energy gain (the skin's T-junctions), damping bound and
+    // Nyquist pump are fixed, but its 0.48 m floor lets a side pole through
+    // once the sill is crushed (A8 sweep 5 of 178 sideways at 30 km/h) and the
+    // MDB's residual crush rises 208 -> 309 mm. `INTERIOR=1` builds it.
     if std::env::var("INTERIOR").is_ok_and(|v| v == "1") {
         d.interior = Some(super::body::Interior {
             ring: 2.0 * super::vehicle::POLE_LANE,

@@ -34,13 +34,23 @@ const BAND_SPEED: f32 = 40.0;
 /// motion. **Choice**: about half a pixel at 2 m on a 1080p, 60° view
 /// (2 m · tan 30° / 540 ≈ 2 mm per pixel).
 const VISIBLE: f64 = 1e-3;
-/// The boot lid relative to the rear body in a 56 km/h frontal. **Choice**
-/// ("millimetres, not centimetres"): 5 mm. Reasoning: the lid's inertia at the
-/// pulse's measured peak (34–47 g, `crash-reference-targets.md` §8) on its ~12 kg
-/// is ≤ 5.5 kN shared by two hinges and a latch; FMVSS 206 hardware carries
-/// 8.9–11 kN without separating, so it stays in its elastic range: a few mm of
-/// hinge, latch and seal compliance.
-const LID_REL: f64 = 5e-3;
+/// Measured first (out-of-plane) modes of production hoods on the car (Hz): the
+/// lowest and highest published. 17.7 Hz: a front hood's first torsion,
+/// experimental modal analysis (MDPI *Machines* 12(12) 862, 2024; its other
+/// first-torsion estimate 22.9 Hz); 41.5 Hz: the least first mode over a
+/// lightweight hood's design variants (modal analysis with stamping effects).
+/// Design targets quoted: 25–30 Hz and "above 40 Hz". A decklid is the same
+/// construction (outer, hemmed inner, hinges and a latch): the same range,
+/// a Choice.
+const LID_MODE_HZ: [f64; 2] = [17.7, 41.5];
+/// The boot lid relative to the rear body in a 56 km/h frontal: the
+/// quasi-static deflection a/ω² of a lid at the measured range's lowest mode
+/// under the measured pulse's top, a = 47 g (`crash-reference-targets.md` §8):
+/// 47 · 9.807 / (2π · 17.7)² = 37 mm. (The pulse's 63–76 ms rise is long
+/// against a mode above 15 Hz, so the lid follows it quasi-statically.)
+const LID_REL: f64 = 47.0 * 9.807
+    / ((2.0 * std::f64::consts::PI * LID_MODE_HZ[0])
+        * (2.0 * std::f64::consts::PI * LID_MODE_HZ[0]));
 /// The rear body's own deformation (RMS of its nodes about their rigid fit) in a
 /// 56 km/h frontal. **Choice**: 5 mm, the same reasoning (the rear third carries
 /// only its own inertia, ≤ 47 g).
@@ -230,6 +240,10 @@ impl SceneCar {
                 "body".into()
             } else if p.starts_with("bx_trunk") {
                 "bootlid".into()
+            } else if p.starts_with("bx_hood") {
+                "bonnet".into()
+            } else if p.starts_with("bx_fender_L") {
+                "fender_l".into()
             } else if p == "bx_door_L" || p == "bx_doorpanel_L" {
                 "door_f_l".into()
             } else if p == "bx_door_R" || p == "bx_doorpanel_R" {
@@ -1089,7 +1103,7 @@ fn drive_no_plastic_no_breaks() {
 /// FAILS (2026-11-05): wall: sedan 21 beams past 0.2 % (worst 15 %), 0 broken; sedan1
 /// 131 past (worst 23 %) and 24 broken (body skin both ways, rear bumper mounts,
 /// lid inner frame, lid seals). Head-on: sedan passes (0); sedan1 37 past (7.1 %).
-/// Mechanism: `panels_are_stiff_enough_for_millimetres_at_47_g` (rear panels' lowest
+/// Mechanism: `lids_first_mode_in_the_measured_range` (rear panels' lowest
 /// modes 2.5–7 Hz deflect 0.2–1.6 m quasi-statically at 47 g) and
 /// `sheet_beams_yield_in_tension_at_the_sheet_yield` (skin edges yield at 0.6–15 % of
 /// the sheet's tension yield). Not drag: the same with drag off (`drag_effect_report`).
@@ -1171,8 +1185,8 @@ fn frontal_boot_lid_and_rear_body_stay_put() {
 /// bonnet 14.7, bumper_f 14.7, body 7.4, fender_r 6.0, bumper_r 5.0, doors 1.5–2.7;
 /// sedan1 bumper_r 15.0, bumper_f 8.2, bonnet 7.4, bootlid 6.4, doors 1.4–4.5. Panel
 /// modes are 2.5–7 Hz (lids, bonnets) and 17–37 Hz (doors), decaying to 1 % in
-/// 0.5–7 s; the amplitude for a given struck speed is v/ω, so a panel at the 48 Hz
-/// needed for millimetres rings 7–19× smaller and decays ζω-proportionally faster.
+/// 0.5–7 s; the amplitude for a given struck speed is v/ω, so a lid at the measured 17.7–41.5 Hz
+/// rings 2–8× smaller and decays ζω-proportionally faster.
 #[test]
 #[ignore]
 fn wall_ripple_falls_below_visible_by_half_a_second() {
@@ -1491,15 +1505,20 @@ fn panel_modes() -> Vec<(&'static str, &'static str, f64, f64)> {
     use engine_softbody::authoring::vehicle::PANEL_GAUGE;
     let mut out = Vec::new();
     use engine_softbody::explicit_beams::{Node, NODE_IMMOVABLE, NODE_NO_GROUND};
-    for car in cars() {
-        let b = built(car);
-        let sk = &b.skeleton;
-        let s = spawn_truck(&b.truck, Vec3::ZERO, Vec3::ZERO);
-        let n = sk.nodes.len();
+    // (`CI_REF=1`: BeamNG's BX too, opt-in as `beamng_reference_invariants_report`.)
+    let mut list: Vec<&str> = cars();
+    if std::env::var("CI_REF").is_ok() && std::env::var("RUBBLE_JBEAM_BX").is_ok() {
+        list.push("bx");
+    }
+    for car in list {
+        let sc = scene_car(car);
+        let s = sc.spawn(Vec3::ZERO, Vec3::ZERO, false);
+        let n = sc.n;
         for part in ["bootlid", "bonnet", "door_f_l", "door_r_l", "fender_l"] {
-            let ids: Vec<usize> = (0..n)
-                .filter(|&i| sk.parts[sk.nodes[i].part as usize] == part)
-                .collect();
+            let ids: Vec<usize> = (0..n).filter(|&i| sc.part[i] == part).collect();
+            if ids.len() < 3 {
+                continue;
+            }
             let inside: std::collections::HashSet<usize> = ids.iter().copied().collect();
             let mut map: HashMap<usize, u32> = HashMap::new();
             let mut nodes: Vec<Node> = Vec::new();
@@ -1543,10 +1562,7 @@ fn panel_modes() -> Vec<(&'static str, &'static str, f64, f64)> {
                     if inside.contains(&a) != inside.contains(&c) && a < n && c < n {
                         let other = if inside.contains(&a) { c } else { a };
                         let e = by
-                            .entry(format!(
-                                "{:?}->{}",
-                                bm.kind, sk.parts[sk.nodes[other].part as usize]
-                            ))
+                            .entry(format!("{:?}->{}", bm.kind, sc.part[other]))
                             .or_default();
                         e.0 += 1;
                         e.1 += bm.k;
@@ -1642,26 +1658,22 @@ fn panel_modes_report() {
     assert!(!panel_modes().is_empty());
 }
 
-/// The lowest out-of-plane mode a panel needs so that the frontal pulse moves it by
-/// millimetres: a mode of angular frequency ω under a quasi-static deceleration a
-/// deflects by a/ω² (the pulse's 63–76 ms rise is long against a mode above 15 Hz,
-/// so it is quasi-static). With a = 47 g (the measured NHTSA peak's top,
-/// `crash-reference-targets.md` §8) and δ = [`LID_REL`] (5 mm), f ≥ √(a/δ)/2π =
-/// 48 Hz.
+/// The lids' (bonnet, boot lid) lowest out-of-plane mode on the car lies within
+/// the measured production range [`LID_MODE_HZ`]: a lid's response to the crash
+/// pulse is a/ω² (quasi-static), so its first mode sets how far it moves; a lid
+/// below the range moves further than any measured hood, one above it is stiffer
+/// than any. The doors and fenders are reported (no published modal data here).
 ///
-/// FAILS (2026-11-05): sedan bootlid 5.4 Hz, bonnet 6.7, front door 36.8, rear door
-/// 30.7, fender 30.6; sedan1 bootlid 2.5, bonnet 4.8, front door 16.8, rear door
-/// 27.4, fender 90.6 (passes). A 5.4 Hz lid deflects a/ω² = 0.40 m at 47 g (the wall
-/// test measures 0.63 m). Content: the panels are single-layer lattices (no bending
-/// stiffness out of plane) on light nodes (0.1–0.9 kg).
+/// FAILS (2026-11-05): sedan1 bootlid 6.7 Hz, bonnet 8.7 Hz (doors 23.6 and 26.3,
+/// fender 117). The lids are single sheets on a rigidifier: no inner panel.
 #[test]
 #[ignore]
-fn panels_are_stiff_enough_for_millimetres_at_47_g() {
+fn lids_first_mode_in_the_measured_range() {
     let a = 47.0 * 9.807;
-    let f_min = (a / LID_REL).sqrt() / (2.0 * std::f64::consts::PI);
     let mut ok = true;
     for (car, part, f, zeta) in panel_modes() {
-        let pass = f >= f_min;
+        let lid = part == "bonnet" || part == "bootlid";
+        let pass = !lid || (LID_MODE_HZ[0]..=LID_MODE_HZ[1]).contains(&f);
         row(
             &format!("panel lowest mode {part}"),
             car,
@@ -1669,7 +1681,11 @@ fn panels_are_stiff_enough_for_millimetres_at_47_g() {
                 "{f:.1} Hz (ζ {zeta:.3}); 47 g deflects {:.0} mm",
                 1e3 * a / (2.0 * std::f64::consts::PI * f).powi(2)
             ),
-            format!("≥ {f_min:.0} Hz"),
+            if lid {
+                format!("{:.1}–{:.1} Hz", LID_MODE_HZ[0], LID_MODE_HZ[1])
+            } else {
+                "report".into()
+            },
             pass,
         );
         ok &= pass;
