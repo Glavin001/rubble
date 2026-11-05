@@ -911,7 +911,7 @@ carries 10–50 kN.
 | o side pole residual | 245 mm (sd 15) | 270 mm (sd 26) | 297–445 |
 | p FMVSS 214 peak | 21.3 kN | 18.9 kN | ≥ 28.4 |
 | q FMVSS 216a | 5.55× | 6.99× | 4.48–5.32 |
-| g door off | 104 kN | 47 kN | 78–83 |
+| g latch lets go (door pulled at its centre of mass) | 104 kN | 46.3 kN | 25.7–55.3 (statics × the 14 latches' 13.6–29.2 kN) |
 | t T-bone leak, ensemble mean at 0 / 0.43 / 0.7 m | | 1.40 / 0.84 / 0.71 % | ≤ 1 % |
 | MDB residual | | 177 mm | 126–206 |
 | A8 sweep at 30 km/h | | 0 of 244 | 0 |
@@ -1003,8 +1003,28 @@ Parts hang on hardware, not on their seams.
 - **Tests.**
   - `r`: the FMVSS 206 rigs, static and in the solver.
   - `s`: 30 g inertial load.
-  - `g`: door pull. The door comes off at 82 kN, the sum of its parts'
-    transverse strengths (2 × 29.8 + 20.5 kN).
+  - `g`: door pull. The door is pulled outward at its centre of mass, so
+    statics shares the pull by levers, not by strength: the latch takes
+    the moment about the hinge line (53 % on sedan1's front door), then the
+    hinges take the whole pull at once (the more loaded 59 %). The door
+    therefore lets go group by group, and "off at the sum of the strengths"
+    (the old band, 78–83 kN) would need each group loaded in proportion to
+    its strength. The test asserts that the latch goes first, at a pull
+    whose latch share is inside the 14 measured latch failures (13.6–29.2
+    kN transverse), and that the door is off by the summed strengths.
+    - sedan1 (2026-11-05): the latch at 46.3 kN (24.5 kN its share), the
+      door off at 47.0 kN. Nothing on the load path broke first: only four
+      skin edges (0.4–1.1 kN strength: the buckling-based yield, which
+      JBeam's one beamDeform applies in tension too).
+    - The two-tier `sedan` now fails it: its latch holds to 81 kN (36.5 kN
+      share), past the measured maximum.
+    - In situ (`G_SPLIT=1`), against the ellipse through each unit's
+      measured loads: the latch assembly carried 1.58× its median before
+      letting go, the upper hinge let go at 0.78× its floor and the lower
+      at 2.49×, the hinges loaded dynamically by the latch's release. Rope
+      groups sized in a rigid rig share differently on the softened
+      pillars; the FMVSS 206 rigs in the solver (`r`) run 15–40 % over the
+      static solve (latch transverse 23.5 kN, hinge pair 77 kN). Open.
   - Bearing: a door end bears on the pillar beside it along the car, and
     inboard on a flange strip (one flange node behind each member end, both
     chords bearing on it). It never bears mostly outward on a node outboard
