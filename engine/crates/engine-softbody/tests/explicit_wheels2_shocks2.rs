@@ -345,8 +345,9 @@ fn shocks2_force_at_set_rates() {
                 // The solver's own e and u (from the integrated positions).
                 let d = s.nodes[0].pos - s.nodes[1].pos;
                 let q = d.dot(d);
-                let inv = 1.0 / q.sqrt();
-                let ee = q * inv - b.rest;
+                // (The exact path's length, `rubble_exact_lengths`, spec §33.)
+                let (len, inv) = engine_softbody::explicit_beams::exact_length(q);
+                let ee = len - b.rest;
                 let uu = (s.nodes[0].vel - s.nodes[1].vel).dot(d) * inv;
                 let (kk, cc) = sh.rates(ee, uu, b.rest, 0.2, 0.3);
                 assert_eq!(f, -kk * ee - cc * uu, "{opts} pre {pre} u {u} e {e}");

@@ -357,6 +357,30 @@ float sFastInvSqrt(float x)
     return smul(y, nf(1.5 - smul(smul(smul(0.5, x), y), y)));
 }
 
+// The exact path's inverse square root (rubble_exact_lengths; explicit_beams.rs
+// exact_inv_sqrt): the fast estimate and three more Newton steps, products and
+// differences in the CPU's order, so the CPU and GPU agree bit for bit.
+float sExactInvSqrt(float x)
+{
+    int i = 0x5f3759df - (asint(x) >> 1);
+    float y = asfloat(i);
+    float hx = smul(0.5, x);
+    y = smul(y, nf(1.5 - smul(smul(hx, y), y)));
+    y = smul(y, nf(1.5 - smul(smul(hx, y), y)));
+    y = smul(y, nf(1.5 - smul(smul(hx, y), y)));
+    return smul(y, nf(1.5 - smul(smul(hx, y), y)));
+}
+
+// rubble_exact_lengths' (length, inverse length) of squared length q
+// (explicit_beams.rs exact_length): the length q·y with one Newton correction
+// through its exact residual.
+float2 sExactLength(float q)
+{
+    float y = sExactInvSqrt(q);
+    float l = smul(q, y);
+    return float2(nf(fma(nf(fma(-l, l, q)), smul(0.5, y), l)), y);
+}
+
 float approxSqrt(float x)
 {
     int i = ((asint(x) - 0x3F800000) >> 1) + 0x3F800000;
@@ -1805,8 +1829,10 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     // Strict, in the CPU reference's order (yield and break decide on these).
     float3 d = ssub3(pa.xyz, pb.xyz);
     float q = sdot(d, d);
-    float inv = fast ? sFastInvSqrt(q) : sdiv(1.0, ssqrt(q));
-    float len = smul(q, inv);
+    float2 li = fast ? float2(0.0, sFastInvSqrt(q)) : sExactLength(q);
+    if (fast) li.x = smul(q, li.y);
+    float inv = li.y;
+    float len = li.x;
     float e = nf(len - rest);
     float u = smul(sdot(ssub3(va, vb), d), inv);
     float k = c1.x;
@@ -2643,8 +2669,10 @@ void shock2Update(uint gj, uint local, bool fast, uint groupOff, uint parity, ui
     float3 vb = gNodes[bn.y * 3u + 1u].xyz;
     float3 d = ssub3(pa.xyz, pb.xyz);
     float q = sdot(d, d);
-    float inv = fast ? sFastInvSqrt(q) : sdiv(1.0, ssqrt(q));
-    float len = smul(q, inv);
+    float2 li = fast ? float2(0.0, sFastInvSqrt(q)) : sExactLength(q);
+    if (fast) li.x = smul(q, li.y);
+    float inv = li.y;
+    float len = li.x;
     float e = nf(len - rest);
     float u = smul(sdot(ssub3(va, vb), d), inv);
     // §6.1: the velocity picks the side.
@@ -2752,8 +2780,10 @@ void triggerUpdate(uint gj, bool fast, uint parity, uint4 bn)
     float3 vb = gNodes[bn.y * 3u + 1u].xyz;
     float3 d = ssub3(pa.xyz, pb.xyz);
     float q = sdot(d, d);
-    float inv = fast ? sFastInvSqrt(q) : sdiv(1.0, ssqrt(q));
-    float len = smul(q, inv);
+    float2 li = fast ? float2(0.0, sFastInvSqrt(q)) : sExactLength(q);
+    if (fast) li.x = smul(q, li.y);
+    float inv = li.y;
+    float len = li.x;
     float e = nf(len - rest);
     float u = smul(sdot(ssub3(va, vb), d), inv);
     float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);

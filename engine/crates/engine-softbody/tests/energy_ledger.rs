@@ -470,3 +470,47 @@ fn rubble_exact_lengths_turns_the_fast_inverse_square_root_off() {
     );
     assert!(worst < 2.0e-3);
 }
+
+/// The exact path's inverse square root (`explicit_beams::exact_inv_sqrt`, the GPU
+/// kernel's `sExactInvSqrt`): within 2 ulp of 1/√x over the beam lengths a vehicle
+/// has (1 mm to 100 m, every 64th float of x), and finite at 0.
+#[test]
+fn exact_inverse_square_root_is_within_two_ulp() {
+    use engine_softbody::explicit_beams::exact_inv_sqrt;
+    let (lo, hi) = (1.0e-6f32.to_bits(), 1.0e4f32.to_bits());
+    let mut worst = 0.0f64;
+    let mut b = lo;
+    while b < hi {
+        let x = f32::from_bits(b);
+        let y = exact_inv_sqrt(x);
+        let exact = 1.0 / f64::from(x).sqrt();
+        let ulp = f64::from(f32::from_bits((exact as f32).to_bits() + 1)) - f64::from(exact as f32);
+        worst = worst.max((f64::from(y) - exact).abs() / ulp);
+        b += 64;
+    }
+    eprintln!("exact inverse square root: worst {worst:.2} ulp");
+    assert!(worst <= 2.0, "{worst} ulp");
+    assert!(exact_inv_sqrt(0.0).is_finite());
+}
+
+/// `explicit_beams::exact_length`: the length is √q correctly rounded (at most one
+/// in a thousand off, by 1 ulp, is allowed; none is), over every 7th float of q
+/// from 10⁻⁶ to 10⁴.
+#[test]
+fn exact_length_is_the_square_root() {
+    use engine_softbody::explicit_beams::exact_length;
+    let (lo, hi) = (1.0e-6f32.to_bits(), 1.0e4f32.to_bits());
+    let (mut n, mut off, mut worst) = (0u64, 0u64, 0i64);
+    let mut b = lo;
+    while b < hi {
+        let q = f32::from_bits(b);
+        let (l, _) = exact_length(q);
+        let d = (l.to_bits() as i64 - q.sqrt().to_bits() as i64).abs();
+        n += 1;
+        off += (d != 0) as u64;
+        worst = worst.max(d);
+        b += 7;
+    }
+    eprintln!("exact length: {off} of {n} not √q correctly rounded, worst {worst} ulp");
+    assert!(worst <= 1 && off * 1000 < n, "{off} of {n}, {worst} ulp");
+}

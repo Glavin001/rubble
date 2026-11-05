@@ -926,6 +926,35 @@ pub fn fast_inv_sqrt(x: f32) -> f32 {
     y * (1.5 - 0.5 * x * y * y)
 }
 
+/// The exact path's inverse square root (`rubble_exact_lengths`,
+/// jbeam-semantics-spec.md §33): the fast inverse square root's estimate refined by
+/// three more Newton steps, y ← y·(1.5 − (½x·y)·y), in IEEE single precision in
+/// this order (products and differences only, each rounded once). The GPU kernel
+/// runs the same sequence (`sExactInvSqrt`), so the two agree bit for bit (a
+/// correctly rounded 1/√x needs a correctly rounded square root and division,
+/// which the GPU backends do not promise). Within 2 ulp of 1/√x
+/// (tests/energy_ledger.rs).
+pub fn exact_inv_sqrt(x: f32) -> f32 {
+    let i = 0x5f37_59df_i32.wrapping_sub((x.to_bits() as i32) >> 1);
+    let mut y = f32::from_bits(i as u32);
+    let hx = 0.5 * x;
+    y = y * (1.5 - hx * y * y);
+    y = y * (1.5 - hx * y * y);
+    y = y * (1.5 - hx * y * y);
+    y * (1.5 - hx * y * y)
+}
+
+/// The exact path's length and inverse length of a beam whose squared length is
+/// `q` (`rubble_exact_lengths`, spec §33): ([`exact_inv_sqrt`]'s y, and the length
+/// q·y with one Newton correction through its exact residual,
+/// ℓ ← fma(fma(−ℓ, ℓ, q), ½y, ℓ)). The kernel runs the same sequence
+/// (`sExactLength`); the length is √q correctly rounded (tests/energy_ledger.rs).
+pub fn exact_length(q: f32) -> (f32, f32) {
+    let y = exact_inv_sqrt(q);
+    let l = q * y;
+    ((-l).mul_add(l, q).mul_add(0.5 * y, l), y)
+}
+
 /// Bit-trick square root: halves the exponent.
 pub fn approx_sqrt(x: f32) -> f32 {
     let i = ((x.to_bits() as i32).wrapping_sub(0x3F80_0000) >> 1).wrapping_add(0x3F80_0000);
@@ -3396,12 +3425,12 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
     }
     let d = na.pos - nb.pos;
     let q = d.dot(d);
-    let inv = if fast {
-        fast_inv_sqrt(q)
+    let (len, inv) = if fast {
+        let inv = fast_inv_sqrt(q);
+        (q * inv, inv)
     } else {
-        1.0 / q.sqrt()
+        exact_length(q)
     };
-    let len = q * inv;
     let e = len - beam.rest;
     let u = (na.vel - nb.vel).dot(d) * inv;
     let mut k = beam.k;
@@ -3734,12 +3763,12 @@ pub fn coupler_force(beam: &mut Beam, na: &Node, nb: &Node) -> Vec3 {
 pub fn shock2_force(beam: &mut Beam, sh: &Shock2, na: &Node, nb: &Node, fast: bool) -> BeamOut {
     let d = na.pos - nb.pos;
     let q = d.dot(d);
-    let inv = if fast {
-        fast_inv_sqrt(q)
+    let (len, inv) = if fast {
+        let inv = fast_inv_sqrt(q);
+        (q * inv, inv)
     } else {
-        1.0 / q.sqrt()
+        exact_length(q)
     };
-    let len = q * inv;
     let e = len - beam.rest;
     let u = (na.vel - nb.vel).dot(d) * inv;
     let (k, c) = sh.rates(e, u, beam.rest, beam.short_bound, beam.long_bound);

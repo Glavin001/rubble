@@ -1262,6 +1262,40 @@ length error 0.175 %, `energy_ledger.rs`). Measured on the showcase sedan:
   Campbell b1 29.4 → 29.9 s⁻¹ (120 km/h 27.0 → 28.3); FMVSS 214 peak 210 → 217 kN;
   FMVSS 216a 4.78 → 4.77 × weight; side pole intrusion 0.024 → 0.024 m; T-bone
   inside 9 → 5 of 1,141; rest energy 8.30 → 8.20 kJ.
-* **Recommendation:** adopt it for the showcase car only once the kernel's exact
-  inverse length is correctly rounded (bit parity with the CPU, as the fast path);
-  the physics gain at today's references is small.
+* **Recommendation (before 2026-11-05's fix):** adopt it for the showcase car only
+  once the kernel's exact inverse length is correctly rounded (bit parity with the
+  CPU, as the fast path); the physics gain at today's references is small.
+
+**One sequence on both sides (2026-11-05).** The exact path's length and inverse
+length are now an explicitly specified sequence the CPU
+(`explicit_beams::exact_length`) and the kernel (`sExactLength`) run identically:
+y = the fast inverse square root's magic estimate and four Newton steps
+y ← y·(1.5 − (½q·y)·y) (IEEE single products and differences in that order;
+`exact_inv_sqrt`, within 1.65 ulp of 1/√q), and the length ℓ = q·y with one Newton
+correction through its exact residual, ℓ ← fma(fma(−ℓ, ℓ, q), ½y, ℓ) (Rust's
+`mul_add`, the kernel's `fma`: fused on both). No hardware square root or division:
+the GPU backends promise neither correctly rounded. **Choice** over a correctly
+rounded 1/√q. Measured: ℓ is √q correctly rounded for every 7th float of q from
+10⁻⁶ to 10⁴ (40 million, `energy_ledger.rs`; the old ℓ = q·(1/√q) was within an
+ulp), so a beam spawned at its length has e = 0 exactly; finite at q = 0 (the old
+path gave a NaN length there). The inverse length (the damping rate and the push
+direction) is y. Checked:
+* y on wgpu (Metal backend) against the CPU, every float of q from 10⁻⁴ to 16
+  (147 million): all bit for bit;
+* the procedural sedan at rest, exact and fast, every node's position and velocity
+  bit for bit after each of 2,400 steps, wgpu (`showcase_car_gpu.rs`
+  `exact_lengths_step_bit_for_bit`) and Metal (`explicit_parity.rs`
+  `metal_exact_lengths_step_bit_for_bit`);
+* the showcase sedan at rest for 2 s: rms 1.4 → 0.25 mm (max 8.0 mm), **not yet bit
+  for bit:** one node differs by one ulp of velocity at step 5, and the rest
+  follow. Not the length (proved identical above), not self-collision (no contacts),
+  not a subnormal; the car's rest lengths are the fast path's (`authoring`
+  settles with it, §18.2), so with exact lengths its beams are strained at spawn
+  (one yields at step 2) and it moves at rest where the fast path keeps it still.
+  **Open:** which of the showcase car's paths (ropes, supports, limited springs, the
+  yield it reaches) differs. For the showcase to adopt the exact path it should also
+  author its rest lengths with it.
+* Unchanged: the fast path (RoR's), and JBeam mode's exact lengths
+  (`jbeam_force_filtered`, `jbeam_ext_force`; the kernel's `jbeamUpdate` and
+  `jbeamExtUpdate`, which keep 1/√q and `sdiv(1, ssqrt(q))`, not bit for bit:
+  a follow-up can move them to `exact_length`).
