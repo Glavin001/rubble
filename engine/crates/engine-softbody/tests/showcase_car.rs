@@ -1375,6 +1375,11 @@ fn pole_sweep_never_passes_through() {
     {
         jobs.retain(|j| j.3 == k);
     }
+    // `SWEEP_ONLY=1.95,-0.05`: those offsets only.
+    if let Ok(v) = std::env::var("SWEEP_ONLY") {
+        let only: Vec<f32> = v.split(',').filter_map(|t| t.parse().ok()).collect();
+        jobs.retain(|j| only.iter().any(|&o| (j.1 - o).abs() < 1e-3));
+    }
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(6));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let fails = std::sync::Mutex::new(Vec::new());
