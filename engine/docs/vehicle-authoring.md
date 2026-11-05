@@ -372,7 +372,10 @@ opening's edge, the doors' belt edges included, is black rubber.
   of the nearest single-part skin triangles). Where it reaches more than 8 cm
   past that part, it is cut along the smooth zero line of the distance
   difference (marching triangles), and the far side rides the other part
-  (`Bind::Part`). So it parts along a clean line instead of stretching.
+  (`Bind::Part`). So it parts along a clean line instead of stretching. A
+  vertex leaves its piece's part only beyond 9.5 cm (1.5 cm past the cut), so
+  the vertices on the cut line itself stay on their side and the line opens
+  as one clean crack, not a sawtooth of triangles riding alternate parts.
 * **Rigid pieces.** These ride one triangle's orthonormal frame
   (`ShowcaseVisual::rigid`): they move rigidly and never stretch.
   * Lamps, mirrors and handles.
@@ -388,6 +391,8 @@ opening's edge, the doors' belt edges included, is black rubber.
 * **Cabin.** Seats and the steering wheel ride one triangle of their frame
   rigidly (`Bind::GroupRigid`), so a far binding triangle never swings them
   out of the cabin; the dashboard and console ride their members' triangles.
+* **Folds.** A back face whose skinned normal still faces the eye is a
+  sliver folded over in a crush, not a panel's inside: it shades as paint.
 * **Tears.** The renderer keeps a per-node tear field: a skin triangle's
   perimeter against its rest perimeter (`node_rest`), interpolated over each
   vertex's binding nodes. Panels are cut where it crosses ½, a smooth line,
