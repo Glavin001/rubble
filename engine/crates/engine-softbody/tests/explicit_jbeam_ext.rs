@@ -534,3 +534,88 @@ fn triangle_drag_and_lift_follow_the_flat_plate_law() {
     let across = (f - (-dir) * along).length();
     assert!((across - 0.8 * q * 0.58f32.sin() * a.cos()).abs() < 1e-3 * q, "stalled lift {across}");
 }
+
+/// Coast-down (opt-in, `RUBBLE_BEAMNG_MODS`): with no powertrain a coasting car's
+/// only horizontal forces are its triangles' air drag and its tyres' rolling
+/// resistance, F = F_aero + C_rr·N. Exact checks: its horizontal momentum never
+/// grows; and the deceleration with drag on is at least the triangles' own drag
+/// (their law summed at each sampled state, averaged; the rolling resistance on top
+/// is never negative), to 5 %. The rolling resistance is reported against
+/// passenger-car tyres' documented C_rr of about 0.010–0.015 (open, spec §31).
+#[test]
+fn community_cars_coast_down_by_aero_and_rolling_resistance() {
+    use engine_softbody::explicit_beams::ExplicitKind;
+    use engine_softbody::explicit_jbeam_ext::aero_tri_force;
+    let Ok(mods) = std::env::var("RUBBLE_BEAMNG_MODS") else {
+        eprintln!("skip: RUBBLE_BEAMNG_MODS not set");
+        return;
+    };
+    let m = std::path::Path::new(&mods);
+    for (dir, name, pc) in [
+        ("monster_supercar/vehicles", "supercar", "config.pc"),
+        ("qlourie_astral_r/vehicles", "qlourie_astral_r", "wrc17_tarmac_balanced.pc"),
+    ] {
+        let dir = m.join(dir);
+        let Ok(files) = engine_softbody::jbeam::read_vehicle_dir(&dir, name) else {
+            continue;
+        };
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let pcs = std::fs::read_to_string(dir.join(name).join(pc)).unwrap();
+        let desc = load_jbeam(&refs, Some(&pcs)).unwrap();
+        let v0 = 25.0;
+        let run = |drag: bool| {
+            let settings = ExplicitBeamsSettings { drag, turbulence: false, ..Default::default() };
+            let v = Vec3::new(0.0, 0.0, v0);
+            let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(&desc, JbeamWheels::Pressure, Vec3::ZERO, v, settings).unwrap();
+            // Facing +Z (the supercar is modelled facing −X).
+            let f = engine_softbody::pack::forward_axis(&desc);
+            let turn = glam::Quat::from_rotation_y(-f.x.atan2(f.z));
+            for n in &mut s.nodes {
+                n.pos = turn * n.pos;
+            }
+            let drop = lowest(&s) - 0.02;
+            for n in &mut s.nodes {
+                n.pos.y -= drop;
+            }
+            s.roll_tyres(v);
+            let aero = |s: &ExplicitBeams| {
+                let mut a = Vec3::ZERO;
+                for (j, b) in s.beams.iter().enumerate() {
+                    if b.kind == ExplicitKind::JbeamAeroTri {
+                        let ext = s.beam_ext[s.ext_of[j] as usize - 1];
+                        let n2 = ext.index(0) as usize;
+                        let ids = [b.a as usize, b.b as usize, n2];
+                        a += 3.0 * aero_tri_force(ids.map(|i| s.nodes[i].pos), ids.map(|i| s.nodes[i].vel), &ext);
+                    }
+                }
+                -a.z
+            };
+            let mass: f32 = s.nodes.iter().map(|n| n.mass).sum();
+            let p = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>();
+            s.run(0.5);
+            let p0 = p(&s);
+            let (mut grew, mut last, mut aero_sum) = (false, p0, 0.0);
+            for _ in 0..10 {
+                for _ in 0..20 {
+                    for _ in 0..10 {
+                        s.step();
+                    }
+                    aero_sum += aero(&s);
+                }
+                let now = p(&s);
+                grew |= now > last + 1e-3 * mass;
+                last = now;
+            }
+            (mass, p0 - last, aero_sum / 200.0, grew, last / mass)
+        };
+        let (mass, f_off, _, grew_off, v_off) = run(false);
+        let (_, f_on, aero_mean, grew_on, v_on) = run(true);
+        let crr = f_off / (mass * 9.81);
+        eprintln!(
+            "{name}: coasting from {v0} m/s, 0.5–1.5 s: rolling only {f_off:.0} N (C_rr {crr:.3}, at {v_off:.1} m/s); with drag {f_on:.0} N, its triangles' drag {aero_mean:.0} N (at {v_on:.1} m/s)"
+        );
+        assert!(!grew_off && !grew_on, "{name}: momentum grew while coasting");
+        assert!(f_off > 0.0, "{name}: rolling resistance decelerates");
+        assert!(f_on >= 0.95 * aero_mean, "{name}: {f_on} N below its triangles' drag {aero_mean} N");
+    }
+}

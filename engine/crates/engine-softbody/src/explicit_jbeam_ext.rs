@@ -685,7 +685,7 @@ impl ExplicitBeams {
         let k = 0.5 * AIR_DENSITY * FLAT_PLATE_CD * 0.01;
         for t in &desc.triangles {
             let [drag, lift, stall, _skin] = t.aero;
-            if drag <= 0.0 && lift <= 0.0 {
+            if drag <= 0.0 && lift == 0.0 {
                 continue;
             }
             let [a, b, c] = t.nodes;
