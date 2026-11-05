@@ -417,6 +417,12 @@ shapes) and the profile. The tools stay the same.
 
 ## Tests and tools
 
+* The side pole's intrusion is the deepest door node near the pole across
+  the car in the far side's frame (the right sill and the tunnel): the car
+  spins 55–75° round the pole, so world x would measure the spin. The k test
+  takes `K_APER` (door-opening pairs) and `K_VEC` (group means, the worst
+  roof node and its beams); the sweep `SWEEP_LIST=1` lists the offsets that
+  passed through; the panels-stay-on test `M_KMH`.
 * `cargo test --release -p engine-softbody --test showcase_car -- --nocapture`:
   counts, closed skins, mass, symmetry, the visual binding, materials (the
   tiers' scales, the rails' and sills' k·L, ζ), stillness at rest, torsion three
@@ -440,7 +446,11 @@ shapes) and the profile. The tools stay the same.
   those frames; `RELAX=<zones>` removes a zone's stored energy at `RELAX_AT`
   (which zone drives the rebound); `BROKEN_PAIR=a~b` lists a pair's broken
   and bent beams; `FASTEST=1 CONTACTS=1` the self-contact triangles under the
-  fastest nodes).
+  fastest nodes). `PULSE=3.36` (with `PULSE_AXIS=x`, `PULSE_ALL=1`)
+  traces the wall force and the force across a plane by member every 2 ms;
+  `ESPLIT_YIELD=1` splits off the elastic energy held by yielded beams and
+  `RELAX=yielded` removes it; `SLACK=1 … info` lists node mass beyond its
+  stability floor per group.
 * `showcase-car.html?res=medium&scene=wall&speed=56`: the car on the GPU in a page
   (`freeze=0` shows the rest pose, `perf=1` times the car's render pass;
   `cam=` a named view or a direction `x,y,z`, `look=x,y,z` offsets the target,

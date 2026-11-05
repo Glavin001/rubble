@@ -676,6 +676,14 @@ fn pole_sweep_never_passes_through() {
             e.0 += 1;
         }
     }
+    if std::env::var("SWEEP_LIST").is_ok() {
+        for f in &fails {
+            eprintln!(
+                "  through: dir {:?} offset {:+.2} square {} {} km/h",
+                f.0, f.1, f.2, f.3
+            );
+        }
+    }
     for ((dir, pole, kmh), (n, of)) in &table {
         eprintln!("pole sweep {dir:>5} {pole:>14} {kmh:2} km/h: {n:2} of {of} passed through");
     }
@@ -1190,9 +1198,10 @@ fn cabin_local(s: &ExplicitBeams, b: &Built) -> Vec<Vec3> {
 /// within 6 cm of their travel) with no rear suspension or tyre beam broken.
 /// With drag on and off; `K_KMH` sets the speed (nearby speeds for medians).
 ///
-/// Ignored: fails today (medium, 55–57 km/h: rebound ~2.6 m/s, roof skin
-/// ~25 mm, B-pillars ~17 mm, rear doors ~22 mm, door openings ~35 mm; the rear
-/// hubs now stay within ~1 cm). Run with `--ignored`.
+/// Ignored: fails today on the rebound and the door openings (medium, 53–59
+/// km/h medians: rebound ~1.9 m/s, door openings ~20 mm; roof ~12 mm,
+/// B-pillars ~11, C-pillars ~9, rear doors ~8, rear hubs ~1 cm pass). Run
+/// with `--ignored`.
 #[test]
 #[ignore]
 fn k_wall_damage_stays_in_the_crumple_zone() {

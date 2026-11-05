@@ -877,7 +877,11 @@ fn main() {
         // pushes the cell and when.
         let zp: f32 = plane.parse().unwrap_or(3.36);
         // PULSE_AXIS=x: a plane across the car (a side impact).
-        let ax = if std::env::var("PULSE_AXIS").is_ok_and(|a| a == "x") { 0usize } else { 2 };
+        let ax = if std::env::var("PULSE_AXIS").is_ok_and(|a| a == "x") {
+            0usize
+        } else {
+            2
+        };
         let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
         let mom = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.mass * n.vel[ax]).sum::<f32>();
         let mut p0 = mom(&s);
@@ -968,7 +972,12 @@ fn main() {
                         continue;
                     }
                     let (za, zb) = (zone(bm.a), zone(bm.b));
-                    if zones != "all" && !(zs.contains(&za) && zs.contains(&zb)) {
+                    let yielded = (bm.rest - bm.rest0).abs() > 0.001 * bm.rest0;
+                    if zones == "yielded" {
+                        if !yielded {
+                            continue;
+                        }
+                    } else if zones != "all" && !(zs.contains(&za) && zs.contains(&zb)) {
                         continue;
                     }
                     let l = s.nodes[bm.a as usize]
@@ -1018,6 +1027,14 @@ fn main() {
                         == engine_softbody::explicit_beams::ExplicitKind::LimitedSpring
                     {
                         format!("{key} (springs)")
+                    } else {
+                        key
+                    };
+                    // ESPLIT_YIELD: beams that have yielded apart.
+                    let key = if std::env::var("ESPLIT_YIELD").is_ok()
+                        && (bm.rest - bm.rest0).abs() > 0.001 * bm.rest0
+                    {
+                        format!("{key} (yielded)")
                     } else {
                         key
                     };
