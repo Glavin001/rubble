@@ -677,7 +677,8 @@ impl ExplicitUpload {
                 | (!v.slides.is_empty() as u32) << 5
                 | (!v.shapes.is_empty() as u32) << 6
                 | (v.two_body_contact as u32) << 7
-                | (v.contact_force.is_some() as u32) << 8;
+                | (v.contact_force.is_some() as u32) << 8
+                | (!v.tread.is_empty() as u32) << 9;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1229,6 +1230,20 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // The tread contact (jbeam-semantics-spec.md §34): per node (z, the depth
+        // the step before, 0, 0) for every vehicle when any has tread nodes.
+        let tread_state = if vehicles.iter().any(|v| !v.tread.is_empty()) {
+            let at = beams.len() as u32;
+            for v in vehicles {
+                beams.extend((0..v.nodes.len()).map(|i| {
+                    let t = v.tread.get(i).copied().unwrap_or([0.0; 2]);
+                    [t[0], t[1], 0.0, 0.0]
+                }));
+            }
+            at
+        } else {
+            0
+        };
         // The contact-force log (jbeam-semantics-spec.md §32): in gLists per node
         // its contact break (break group, 0 none; force N's bits).
         let any_cf = vehicles.iter().any(|v| v.contact_force.is_some());
@@ -1495,6 +1510,7 @@ impl ExplicitUpload {
             cf_acc,
             cf_node,
             cf_pend,
+            tread_state,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
