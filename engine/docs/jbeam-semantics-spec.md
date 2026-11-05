@@ -1677,8 +1677,12 @@ owner or the partner has it) and self-collision
   (1 − α) − β); else, new and over the triangle within the band, the side it is on
   (self-collision: the sign of δ; vehicle contact: §5.3's vote).
 * **The contact.** Weights inside (the crossing's, or now) and −`CLIP_DEPTH` ≤ d ≤ r
-  with d = side·δ: a hit with normal side·n, depth r − d, so a node up to
-  `CLIP_DEPTH` behind is pushed back to its side. **Choice:** `CLIP_DEPTH` 0.1 m
+  with d = side·δ: a hit with normal side·n, depth min(r − d, r), so a node up to
+  `CLIP_DEPTH` behind is pushed back to its side as one at the plane
+  (**Choice**, `clip_depth`: the contact rule's push grows with depth, 0.2·p/h, and
+  with the whole depth a node 10 cm through was kicked out at 40 m/s; BeamNG's BX
+  coupe's side-pole ensemble went non-finite in one of 8 runs, and with the cap all
+  8 are finite, residual crush 332–365 mm, anti-clip off 357–385). **Choice:** `CLIP_DEPTH` 0.1 m
   (BeamNG documents that a triangle with no node within 10 cm goes inactive).
 * **Memory.** Each contact records owner << 21 | triangle << 1 | (side > 0) for the
   next step; the node pass makes the recorded words the held ones. Two slots: the
@@ -1694,7 +1698,7 @@ owner or the partner has it) and self-collision
   after the others (`anti_only_tris`), part of self-collision, vehicle contact,
   breaking (§18) and the spawn exclusions (§10.1), only while `anti_clip` is on: no
   force in front of the plane (d ≥ 0: the side recorded only), behind it pushed back
-  to the plane (depth −d). `.truck` content has no such type.
+  to the plane (depth min(−d, r)). `.truck` content has no such type.
 * **Band.** JBeam content's range is 2.5 cm (was 3 cm, a Choice), a profile `.truck`'s
   2.5 cm unless it has `set_collision_range`.
 * **Spawn exclusions** (§10.1) count a node on a triangle's edge to rounding as
