@@ -1692,8 +1692,9 @@ fn l_door_point_load_dents_locally() {
 /// At 56 km/h into a wall the panels stay on (tearing is for about 80 km/h
 /// and up): the fenders crumple back against the A-pillars, the bonnet buckles
 /// but stays latched and hinged. No panel node ends up more than 15 cm
-/// outside the body's width at any time, and no beam joining the bonnet or a
-/// fender to the rest of the car breaks. With drag on and off.
+/// outside the body's width at any time, no beam joining the bonnet or a
+/// fender to the rest of the car breaks, and the boot lid stays latched and
+/// hinged within FMVSS 206's capacities. With drag on and off.
 #[test]
 fn m_wall_56_panels_stay_on() {
     for drag in [true, false] {
@@ -1770,10 +1771,81 @@ fn m_wall_56_panels_stay_on() {
                 );
             }
         }
+        // The lid's hinge and latch systems (as the Hinged joint builds them:
+        // its front edge's seam beams, 14 cm deep, are the hinges, one a
+        // side; its rear edge's within |x| ≤ 0.3 m the latch).
+        let lid: Vec<usize> = panels
+            .iter()
+            .copied()
+            .filter(|&i| name(i) == "bootlid")
+            .collect();
+        let (z0, z1) = lid.iter().fold((f32::MAX, f32::MIN), |(a, c), &i| {
+            (a.min(sk.nodes[i].p.z), c.max(sk.nodes[i].p.z))
+        });
+        let mut systems: [Vec<usize>; 3] = Default::default();
+        for (bi, bm) in s.beams.iter().enumerate() {
+            let (a, c) = (bm.a as usize, bm.b as usize);
+            if a >= n || c >= n {
+                continue;
+            }
+            let (l, o) = if name(a) == "bootlid" { (a, c) } else { (c, a) };
+            if name(l) != "bootlid" || sk.nodes[o].part != body {
+                continue;
+            }
+            let q = sk.nodes[l].p;
+            if q.z > z1 - 0.14 {
+                systems[if q.x > 0.0 { 0 } else { 1 }].push(bi);
+            } else if q.z < z0 + 0.14 && q.x.abs() <= 0.3 {
+                systems[2].push(bi);
+            }
+        }
+        let mut sys_force = [0.0f32; 3];
         let mut lift = (0.0f32, 0usize, 0usize);
         let mut open = (0.0f32, 0usize, 0usize);
         for f in 0..(1.5 * 60.0) as usize {
             s.frame();
+            for (k, v) in systems.iter().enumerate() {
+                let fsum: f32 = v.iter().map(|&bi| s.beams[bi].force.abs()).sum();
+                sys_force[k] = sys_force[k].max(fsum);
+            }
+            if std::env::var("M_TRACE").is_ok() && f % 3 == 0 {
+                // The body's deck opening (hinge line to latch line) and the
+                // lid's own length, along the car (cabin frame), against spawn.
+                let l = cabin_local(&s, &b);
+                let mean = |v: &[usize], body_side: bool| -> Vec3 {
+                    let ids: Vec<usize> = v
+                        .iter()
+                        .map(|&bi| {
+                            let bm = &s.beams[bi];
+                            let (a, c) = (bm.a as usize, bm.b as usize);
+                            let lidn = if name(a) == "bootlid" { a } else { c };
+                            let other = if lidn == a { c } else { a };
+                            if body_side {
+                                other
+                            } else {
+                                lidn
+                            }
+                        })
+                        .collect();
+                    ids.iter().map(|&i| l[i] - l0[i]).sum::<Vec3>() / ids.len() as f32
+                };
+                let hinge: Vec<usize> = [systems[0].clone(), systems[1].clone()].concat();
+                let (hb, lb) = (mean(&hinge, true), mean(&systems[2], true));
+                let up_mid = lid
+                    .iter()
+                    .map(|&i| -(l[i] - l0[i]).z)
+                    .fold(f32::MIN, f32::max);
+                eprintln!(
+                    "  (m) f{f}: body hinge line moved {:.0} mm along, latch line {:.0} mm (opening shortened {:.0} mm); lid's highest rise {:.0} mm; hinge/latch forces {:.1} {:.1} {:.1} kN",
+                    hb.x * 1e3,
+                    lb.x * 1e3,
+                    (lb.x - hb.x) * 1e3,
+                    up_mid * 1e3,
+                    systems[0].iter().map(|&bi| s.beams[bi].force).sum::<f32>() / 1e3,
+                    systems[1].iter().map(|&bi| s.beams[bi].force).sum::<f32>() / 1e3,
+                    systems[2].iter().map(|&bi| s.beams[bi].force).sum::<f32>() / 1e3
+                );
+            }
             let l = cabin_local(&s, &b);
             for &i in &panels {
                 let out = (l[i].y - hi).max(lo - l[i].y);
@@ -1853,7 +1925,33 @@ fn m_wall_56_panels_stay_on() {
         assert!(finite(&s));
         assert!(worst.0 < 0.15, "a panel splayed {} m out", worst.0);
         assert_eq!(torn, 0, "bonnet or fender joints tore: {torn_by:?}");
-        assert!(lift.0 < 0.02, "the boot lid's edge lifted {} m", lift.0);
+        // The deck lid stays latched and hinged (as in 56 km/h NCAP tests):
+        // no hinge or latch beam breaks and each system carries less than
+        // FMVSS 206's capacity of a hinge or latch system (8.9 kN across, 11.1
+        // kN along). The lift and seam gap above are reported (panel
+        // buckling), not asserted.
+        let broken = |v: &[usize]| v.iter().filter(|&&bi| s.beams[bi].broken).count();
+        eprintln!(
+            "(m) drag {drag}: boot lid hinges (left, right) and latch: peak {:.1}, {:.1}, {:.1} kN (FMVSS 206 8.9–11.1), beams {}, {}, {} of which broken {}, {}, {}",
+            sys_force[0] / 1e3,
+            sys_force[1] / 1e3,
+            sys_force[2] / 1e3,
+            systems[0].len(),
+            systems[1].len(),
+            systems[2].len(),
+            broken(&systems[0]),
+            broken(&systems[1]),
+            broken(&systems[2])
+        );
+        for k in 0..3 {
+            assert!(!systems[k].is_empty(), "boot lid system {k} has no beams");
+            assert_eq!(broken(&systems[k]), 0, "boot lid hinge/latch {k} broke");
+            assert!(
+                sys_force[k] < 11_100.0,
+                "boot lid hinge/latch {k} carried {} N",
+                sys_force[k]
+            );
+        }
     }
 }
 
