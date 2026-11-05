@@ -2271,6 +2271,7 @@ fn energy_terms_probe() {
             car.part[i], s.nodes[i].mass, s.nodes[i].pos
         );
     }
+}
 
 /// The BeamNG profile's air drag (jbeam-semantics-spec.md §31, §36): sedan1 takes
 /// the triangles' drag at BeamNG's default dragCoef (100) in place of the per-node
