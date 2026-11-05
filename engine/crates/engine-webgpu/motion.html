@@ -40,7 +40,7 @@
   <div id="stats" class="panel"><div id="statsBody"></div><div id="log"></div></div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, Poses, pollFrame as poll, stepFrames, errorText } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, Poses, pollFrame as poll, stepFrames, errorText } from './rubble-world.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -75,11 +75,9 @@
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
     // The world opens the device; the page renders on it and reads the world's buffers in place.
-    const world = await createWorld({
-      gravity: [0, -10, 0],
-      contacts: 'canonical',
-      capacity: { maxBodies: 4096, maxColliders: 8192, maxContacts: 65536, maxCandidates: 131072, maxJoints: 64, maxCommands: 2048 },
-    });
+    // The scene (rubble::play::motion, engine-world): its world, solver and bodies.
+    const sceneDef = await sceneFromQuery('motion', location.search);
+    const world = await createScene(sceneDef);
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -96,32 +94,10 @@
     addEventListener('resize', configure);
 
     // ---------------------------------------------------------------- world
-    const DT = 1 / 60;
-    world.setSolver({ dt: DT, iterations: 10, flags: lookAhead ? world.flags.SPEC_VELOCITY : 0 });
-    const MAT_GROUND = { friction: 0.9 }, MAT_PROP = { friction: 0.6 };
-
-    const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
-    const boxI = (m, hx, hy, hz) => [(m * (hy * hy + hz * hz)) / 3, (m * (hx * hx + hz * hz)) / 3, (m * (hx * hx + hy * hy)) / 3];
-    // Every body this page made and how it started, for reset (R).
-    const made = [];
-    const body = (def, shape, material, mass = null) => {
-      const id = world.createBody(def);
-      world.createShape(id, { material }, shape);
-      if (mass) world.bodySetMassData(id, mass[0], [0, 0, 0], mass[1]);
-      made.push({ id, def });
-      return id;
-    };
-    const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => body({ position: p, rotation: q }, { box: { half } }, material);
-    const kinematicBox = (p, half, q = [0, 0, 0, 1]) => body({ type: 'kinematic', position: p, rotation: q }, { box: { half } }, MAT_GROUND);
-    const dynBox = (p, half, mass, q = [0, 0, 0, 1]) => body({ type: 'dynamic', position: p, rotation: q }, { box: { half } }, MAT_PROP, [mass, boxI(mass, ...half)]);
-    // Parked far below until launched: asleep dynamic bodies (CCD for `ccd`).
-    const parked = (p, shape, mass, inertia, ccd) => body({ type: 'dynamic', position: p, isAwake: false, isBullet: ccd }, shape, MAT_PROP, [mass, inertia]);
-    // Ground slab: collider 0, drawn as the grid plane.
-    staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
-
+    const DT = 1 / 60; // the scene's step (rubble::play::motion), in f64 for the page's clocks
+    const placed = world.placeScene(sceneDef);
     // Characters: handle -> { start, jumps sent }.
-    const characters = new Map();
-    const addCharacter = (desc, p) => { const h = world.createCharacter(desc, p, 0); characters.set(h, { start: p, jumps: 0 }); return h; };
+    const characters = new Map(placed.characters.map((c) => [c.h, { start: c.start, jumps: 0 }]));
     // Input with a jump counter (a new value jumps once), as the HUD keys count jumps.
     const setCharacterInput = (h, v, jumpSeq) => {
       const c = characters.get(h);
@@ -130,87 +106,12 @@
     };
 
     // Scene state the HUD and the checks read.
-    const S = { lanes: [], shower: null, player: -1, npcs: [], platform: null, lift: null, walls: [], targets: [], log: [] };
+    const S = {
+      lanes: placed.lanes.map((L) => ({ ...L, result: { control: '—', ccd: '—' }, tally: { control: 0, ccd: 0, shots: 0 } })),
+      shower: placed.shower, player: placed.player ?? -1, npcs: placed.npcs, platform: placed.platform, lift: placed.lift,
+      rockets: placed.rockets, walls: placed.walls, targets: placed.targets, log: [],
+    };
     const say = (m) => { S.log.unshift(`${world.stepCount()}: ${m}`); S.log.length = Math.min(S.log.length, 40); };
-
-    if (scene === 'ccd') {
-      // Each lane: a control ball (no CCD) and a CCD ball (BODY_CCD), 2 m apart,
-      // fired along +z at a wall whose near face is at z = 30.
-      const WALL_Z = 30;
-      var BALL_R = 0.15;
-      const laneDefs = [
-        { name: '5 cm slab', x: -16, build: (x) => staticBox([x, 1.5, WALL_Z + 0.025], [2.5, 1.5, 0.025]), depth: 0.05 },
-        { name: '20 cm slab', x: -8, build: (x) => staticBox([x, 1.5, WALL_Z + 0.1], [2.5, 1.5, 0.1]), depth: 0.2 },
-        { name: '1 m wall', x: 0, build: (x) => staticBox([x, 1.5, WALL_Z + 0.5], [2.5, 1.5, 0.5]), depth: 1.0 },
-        { name: 'brick wall (grid)', x: 8, build: (x) => {
-          for (let iy = 0; iy < 15; iy++) for (let ix = 0; ix < 25; ix++) staticBox([x - 2.4 + ix * 0.2, 0.1 + iy * 0.2, WALL_Z + 0.1], [0.1, 0.1, 0.1]);
-        }, depth: 0.2 },
-        { name: 'brick wall (dynamic)', x: 16, dynamic: true, build: (x) => {
-          const bricks = [];
-          for (let iy = 0; iy < 12; iy++) for (let ix = 0; ix < 20; ix++) {
-            const p = [x - 1.9 + ix * 0.2, 0.1 + iy * 0.2, WALL_Z + 0.1];
-            bricks.push({ body: dynBox(p, [0.1, 0.1, 0.1], 4), p });
-          }
-          return bricks;
-        }, depth: 0.2 },
-      ];
-      for (const L of laneDefs) {
-        const bricks = L.build(L.x);
-        // Dynamic wall: the bricks in each ball's path. A ball that passes the
-        // wall without moving them tunnelled; one that knocked them out smashed through.
-        if (L.dynamic) for (const [side, dx] of [['control', -1.0], ['ccd', 1.0]])
-          L[side + 'Bricks'] = bricks.filter((b) => Math.abs(b.p[0] - (L.x + dx)) < 0.25).map((b) => b.body);
-        // Parked far below until fired (static until then).
-        const ball = (dx, ccd) => {
-          return parked([L.x + dx, -500, 0], { sphere: { radius: BALL_R } }, 5, [1 / 250, 1 / 250, 1 / 250], ccd);
-        };
-        S.lanes.push({ ...L, wallZ: WALL_Z, control: ball(-1.0, false), ccd: ball(1.0, true), result: { control: '—', ccd: '—' }, tally: { control: 0, ccd: 0, shots: 0 } });
-      }
-      // Debris shower: 0.1 m chunks at 40 m/s onto a 0.2 m slab, CCD off (left) / on (right).
-      staticBox([-6, 0.1 + 6, -14], [2.5, 0.1, 2.5], [0, 0, 0, 1], MAT_GROUND);
-      staticBox([6, 0.1 + 6, -14], [2.5, 0.1, 2.5], [0, 0, 0, 1], MAT_GROUND);
-      S.shower = { control: [], ccd: [] };
-      for (const [side, x0, ccd] of [['control', -6, false], ['ccd', 6, true]]) {
-        for (let i = 0; i < 49; i++) {
-          const body = parked([x0 + (i % 7) * 0.6 - 1.8, -600, -14 + Math.floor(i / 7) * 0.6 - 1.8], { box: { half: [0.05, 0.05, 0.05] } }, 0.3, boxI(0.3, 0.05, 0.05, 0.05), ccd);
-          S.shower[side].push({ body, x: x0 + (i % 7) * 0.6 - 1.8, z: -14 + Math.floor(i / 7) * 0.6 - 1.8, y: 9 + 0.13 * (i % 5) });
-        }
-      }
-    } else if (scene === 'character') {
-      // Stairs: six 0.3 m steps (0.5 m run) from x = 4.
-      for (let k = 0; k < 6; k++) {
-        const top = 0.3 * (k + 1);
-        staticBox([4 + 0.5 * k + 3, top / 2, 6], [3, top / 2, 2]);
-      }
-      // A walkable 30° ramp and a 55° slide.
-      staticBox([-6, 1.0, 8], [3, 0.2, 2], qAxis([0, 0, 1], -Math.PI / 6));
-      staticBox([-6, 2.2, 14], [2.4, 0.2, 2], qAxis([0, 0, 1], -55 * Math.PI / 180));
-      // Moving platform (kinematic) and a lift.
-      S.platform = kinematicBox([10, 0.25, -6], [2, 0.25, 2]);
-      S.lift = kinematicBox([-10, 0.25, -4], [1.6, 0.25, 1.6]);
-      staticBox([-10, 2.5, -7], [2, 2.5, 1]);
-      // Light crates (push through) and a heavy crate (blocks).
-      for (let i = 0; i < 5; i++) dynBox([2 + i * 0.7, 0.25, -3], [0.25, 0.25, 0.25], 8);
-      dynBox([2, 0.6, -8], [0.6, 0.6, 0.6], 2500);
-      // Seesaw plank on a pivot.
-      staticBox([-2, 0.25, -14], [0.15, 0.25, 1.2]);
-      dynBox([-2, 0.6, -14], [2.5, 0.06, 0.8], 25);
-      // Brick wall for CCD rockets and a debris pile.
-      for (let iy = 0; iy < 10; iy++) for (let ix = 0; ix < 16; ix++) dynBox([14 + ix * 0.4 - 3, 0.1 + iy * 0.2, 14], [0.2, 0.1, 0.1], 6);
-      for (let i = 0; i < 120; i++) dynBox([-12 + (i % 6) * 0.3, 0.15 + Math.floor(i / 36) * 0.3, 4 + (Math.floor(i / 6) % 6) * 0.3], [0.12, 0.12, 0.12], 2);
-      // The player and three NPCs.
-      S.player = addCharacter({ radius: 0.3, half_height: 0.6 }, [0, 1.0, 0]);
-      for (let k = 0; k < 3; k++) S.npcs.push({ h: addCharacter({ radius: 0.28, half_height: 0.55 }, [-4 + 2 * k, 1.0, -2]), phase: k * 2.1 });
-      // Rockets: parked CCD balls.
-      S.rockets = [];
-      for (let i = 0; i < 8; i++) {
-        S.rockets.push(parked([-3000 - i * 5, -3000, -3000], { sphere: { radius: 0.12 } }, 4, [1 / 250, 1 / 250, 1 / 250], true));
-      }
-    } else {
-      // Five 5 cm walls, then three dynamic targets.
-      for (let k = 0; k < 5; k++) S.walls.push(staticBox([0, 1.5, 10 + 2 * k + 0.025], [2, 1.5, 0.025]));
-      for (let k = 0; k < 3; k++) S.targets.push(dynBox([(k - 1) * 1.2, 0.4, 24], [0.4, 0.4, 0.4], 3));
-    }
     statusEl.textContent = `scene ready · ${world.bodyCount()} bodies · ${world.colliderCount()} colliders`;
 
     // ---------------------------------------------------------------- body writes
@@ -482,11 +383,10 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
     }
     function resetScene() {
       // Every body and character back to its start, at rest (parked bodies asleep again).
-      for (const { id, def } of made) {
-        if (def.type !== 'dynamic' && def.type !== 'kinematic') continue;
-        world.bodySetTransform(id, def.position, def.rotation ?? [0, 0, 0, 1]);
-        world.bodySetVelocity(id, [0, 0, 0], [0, 0, 0]);
-        if (def.isAwake === false) world.bodySetAwake(id, false);
+      for (const r of placed.resets) {
+        world.bodySetTransform(r.id, r.position, r.rotation);
+        world.bodySetVelocity(r.id, [0, 0, 0], [0, 0, 0]);
+        if (r.asleep) world.bodySetAwake(r.id, false);
       }
       for (const [h, c] of characters) { world.characterTeleport(h, c.start); world.characterSetInput(h, [0, 0, 0], false); }
       lastKinFlip = -1;

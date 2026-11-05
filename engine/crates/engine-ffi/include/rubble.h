@@ -291,6 +291,9 @@ typedef enum RbCastShape {
 // An opaque lab: its world and its placed scene.
 typedef struct RbLab RbLab;
 
+// A placed preset and its world (`rbCreatePlay`).
+typedef struct RbPlay RbPlay;
+
 // An opaque world.
 typedef struct RbWorld RbWorld;
 
@@ -1258,6 +1261,16 @@ typedef struct RbLabStats {
   float physics_hz;
 } RbLabStats;
 
+// A play's counts as of its last step (`rbPlay_GetStats`).
+typedef struct RbPlayStats {
+  uint64_t steps;
+  uint32_t bodies;
+  uint32_t awake;
+  uint32_t contacts;
+  // The last step's overflow flags (0: none).
+  uint32_t overflow;
+} RbPlayStats;
+
 // Deformable-terrain settings (from [`rbDefaultTerrainDef`]).
 typedef struct RbTerrainDef {
   // Limits: exceeding one fails the step with its name.
@@ -2116,6 +2129,20 @@ enum RbResult rbLab_Step(struct RbLab *lab, uint32_t steps);
 
 // The lab's counts as of its last step.
 enum RbResult rbLab_GetStats(struct RbLab *lab, struct RbLabStats *out);
+
+// Preset `preset`'s scene (`gauntlet`, `soft-tbone`, `ring`, ...) placed in a world on
+// the default GPU; `query` (null or empty: none) is any of its page's URL switches
+// (`speed=80&overlap=0.5`) over the preset's own. A preset placed elsewhere (the lab,
+// the range, the city) fails with its reason (`rbGetLastError`).
+enum RbResult rbCreatePlay(const char *preset, const char *query, struct RbPlay **out);
+
+void rbDestroyPlay(struct RbPlay *play);
+
+// `steps` steps, waiting for each step's results.
+enum RbResult rbPlay_Step(struct RbPlay *play, uint32_t steps);
+
+// The play's counts as of its last step.
+enum RbResult rbPlay_GetStats(struct RbPlay *play, struct RbPlayStats *out);
 
 // Defaults in `coordinates`' units (lengths, speeds, densities, energies).
 struct RbTerrainDef rbDefaultTerrainDef(enum RbCoordinates coordinates);

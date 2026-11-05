@@ -21,6 +21,7 @@
 mod controls;
 mod guidance;
 pub mod lab;
+pub mod play;
 pub use controls::*;
 use controls::text;
 mod terrain;

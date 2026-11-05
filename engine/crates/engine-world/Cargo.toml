@@ -20,6 +20,7 @@ wgpu.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json = { workspace = true, optional = true }
 # The fracture lab's stress-solver modes (`StrengthModel::Threshold`): the stress
 # oracle's GPU fracture and contact ingest on the world's device, its scene import
@@ -28,9 +29,11 @@ stress-gpu = { path = "../../stress-oracle/crates/stress-gpu", optional = true }
 stress-ref = { path = "../../stress-oracle/crates/stress-ref", optional = true }
 stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-features = false, features = ["gpu"], optional = true }
 
-[dev-dependencies]
-# Scene builders for the strike gates (host only, no Metal world).
+# The rigid benchmark scenes (`play::rigid`): engine-scenes' generators, host only (no
+# Metal world).
 engine-scenes = { path = "../engine-scenes", default-features = false }
+
+[dev-dependencies]
 
 [features]
 default = ["stress"]

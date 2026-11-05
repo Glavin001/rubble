@@ -90,13 +90,20 @@ impl World {
             });
         }
         let bodies = self.create_bodies(&defs)?;
-        for (id, mass) in bodies.iter().zip(masses) {
+        // Each mass and shape is an upload: let them land in batches (`settle_uploads`).
+        for (k, (id, mass)) in bodies.iter().zip(masses).enumerate() {
+            if k > 0 && k % 4096 == 0 {
+                self.settle_uploads();
+            }
             if let Some(m) = mass {
                 self.body_set_mass_data(*id, m)?;
             }
         }
         let mut shapes = Vec::with_capacity(snap.colliders.len());
         for (i, c) in snap.colliders.iter().enumerate() {
+            if i > 0 && i % 4096 == 0 {
+                self.settle_uploads();
+            }
             let body = *bodies.get(c.body as usize).ok_or_else(|| {
                 anyhow::anyhow!("collider record {i}: body {} out of range", c.body)
             })?;
