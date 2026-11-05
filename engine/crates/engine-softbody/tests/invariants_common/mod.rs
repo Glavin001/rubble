@@ -250,7 +250,12 @@ pub fn oscillator(make: Maker, k: f32, zeta: f64, m: f32) -> Option<OscOut> {
     let mut sim = make(hanging(k, c, m, 0.01))?;
     // 0.25 s: 30 periods at 121 Hz.
     let y = record_hanging(sim.as_mut(), k, m, 500);
-    let x = crossings(&y);
+    // Crossings while the amplitude is above 1 % of its start (a decayed signal's
+    // late crossings sit near the f32 rounding of positions at y ≈ 2 m).
+    let x: Vec<f64> = crossings(&y)
+        .into_iter()
+        .filter(|&t| (-(zeta * (k as f64 / m as f64).sqrt()) * t * H).exp() > 1e-2)
+        .collect();
     let period = (x[x.len() - 1] - x[0]) / (x.len() - 1) as f64 * H;
     let pk: Vec<(f64, f64)> = peaks(&y)
         .into_iter()
