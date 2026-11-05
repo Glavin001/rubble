@@ -48,7 +48,8 @@ fn jbeam_car(v: Vec3) -> ExplicitBeams {
         ..Default::default()
     };
     let (mut s, _) =
-        ExplicitBeams::from_desc_jbeam_with(&d, JbeamWheels::Pressure, Vec3::ZERO, v, settings).unwrap();
+        ExplicitBeams::from_desc_jbeam_with(&d, JbeamWheels::Pressure, Vec3::ZERO, v, settings)
+            .unwrap();
     let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
     for n in &mut s.nodes {
         n.pos.y += 0.02 - low;
@@ -80,7 +81,11 @@ fn metal(fleet: &[ExplicitBeams]) -> Option<MetalExplicitBeams> {
 }
 
 /// Run both for `frames` 60 fps frames; returns the Metal host.
-fn run_both(cpu: &mut ExplicitBeams, frames: u32, wide: Option<bool>) -> Option<MetalExplicitBeams> {
+fn run_both(
+    cpu: &mut ExplicitBeams,
+    frames: u32,
+    wide: Option<bool>,
+) -> Option<MetalExplicitBeams> {
     let mut gpu = metal(std::slice::from_ref(cpu))?;
     if let Some(w) = wide {
         gpu.set_wide(w);
@@ -116,7 +121,10 @@ fn metal_sedan_at_rest_matches_cpu() {
         assert!(rms < 3e-3, "rms {rms} m");
         assert!(max < 1e-2, "max {max} m");
         assert_eq!(cpu.damage().0, 0);
-        let vmax = gpu.velocities()[0].iter().map(|v| v.length()).fold(0.0, f32::max);
+        let vmax = gpu.velocities()[0]
+            .iter()
+            .map(|v| v.length())
+            .fold(0.0, f32::max);
         assert!(vmax < 0.5, "GPU node speed {vmax} m/s at rest");
     }
 }
@@ -163,14 +171,22 @@ fn compare_jbeam(label: &str, cpu: &mut ExplicitBeams, frames: u32) -> Option<(f
         cpu.frame();
         gpu.frame(clock.next());
         let g = &gpu.positions()[0];
-        let d = cpu.positions().iter().zip(g).map(|(a, b)| a.distance(*b)).fold(0.0, f32::max);
+        let d = cpu
+            .positions()
+            .iter()
+            .zip(g)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0.0, f32::max);
         worst = worst.max(d);
     }
     let gb = gpu.beams()[0].iter().filter(|b| b.broken).count();
     let cb = cpu.damage().0;
     let gd = gpu.deform_triggered().remove(0);
     let cd = cpu.deform_triggered().to_vec();
-    assert!(gpu.positions()[0].iter().all(|p| p.is_finite()), "{label}: Metal NaN");
+    assert!(
+        gpu.positions()[0].iter().all(|p| p.is_finite()),
+        "{label}: Metal NaN"
+    );
     eprintln!(
         "Metal {label}: max position difference {:.4} mm; broken CPU {cb} GPU {gb}; deform CPU {cd:?} GPU {gd:?}",
         worst * 1e3
@@ -203,16 +219,21 @@ fn rear_end(speed: f32, gap: f32) -> Vec<ExplicitBeams> {
     let text = sedan_text();
     let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
     let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
-    let (zmin, zmax) = probe
-        .nodes
-        .iter()
-        .fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.z), b.max(n.pos.z)));
+    let (zmin, zmax) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| {
+        (a.min(n.pos.z), b.max(n.pos.z))
+    });
     let length = zmax - zmin;
     let v = Vec3::new(0.0, 0.0, speed);
-    let mut rear = ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - low, 0.0), v, settings()).unwrap();
+    let mut rear =
+        ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - low, 0.0), v, settings()).unwrap();
     rear.roll_tyres(v);
-    let front =
-        ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - low, length + gap), Vec3::ZERO, settings()).unwrap();
+    let front = ExplicitBeams::from_truck(
+        &text,
+        Vec3::new(0.0, 0.01 - low, length + gap),
+        Vec3::ZERO,
+        settings(),
+    )
+    .unwrap();
     vec![front, rear]
 }
 
@@ -233,7 +254,10 @@ fn metal_two_sedans_rear_end_match_cpu() {
             let p = g.positions();
             for k in 0..2 {
                 let (d, _) = rms_max(&p[k], &w.vehicles[k].positions());
-                eprintln!("Metal frame {f} (contact starts): vehicle {k} GPU–CPU {:.3} mm", d * 1e3);
+                eprintln!(
+                    "Metal frame {f} (contact starts): vehicle {k} GPU–CPU {:.3} mm",
+                    d * 1e3
+                );
                 assert!(d < 5e-4, "vehicle {k}: {d} m at contact");
             }
         }
@@ -254,9 +278,16 @@ fn metal_two_sedans_rear_end_match_cpu() {
         );
         assert!(c_bent > 20, "the crash bends vehicle {k} ({c_bent})");
         // One GPU run (the wgpu test takes the median of 5): the wider bar.
-        let close = |a: usize, b: usize| (a as f32 - b as f32).abs() <= 0.15 * a.max(b) as f32 + 3.0;
-        assert!(close(c_broken, g_broken), "vehicle {k} broken {c_broken} vs {g_broken}");
-        assert!(close(c_bent, g_bent), "vehicle {k} bent {c_bent} vs {g_bent}");
+        let close =
+            |a: usize, b: usize| (a as f32 - b as f32).abs() <= 0.15 * a.max(b) as f32 + 3.0;
+        assert!(
+            close(c_broken, g_broken),
+            "vehicle {k} broken {c_broken} vs {g_broken}"
+        );
+        assert!(
+            close(c_bent, g_bent),
+            "vehicle {k} bent {c_bent} vs {g_bent}"
+        );
     }
 }
 
@@ -268,7 +299,11 @@ fn metal_two_sedans_rear_end_match_cpu() {
 fn metal_jbeam_part2_break_and_deform_groups_match() {
     use engine_softbody::jbeam_fixture::{PART2_GROUPS, PART2_PANEL};
     use engine_softbody::truck_export::TyreDefaults;
-    for (label, text, pull) in [("groups a", PART2_GROUPS, "a1"), ("groups b", PART2_GROUPS, "b1"), ("panel", PART2_PANEL, "p1")] {
+    for (label, text, pull) in [
+        ("groups a", PART2_GROUPS, "a1"),
+        ("groups b", PART2_GROUPS, "b1"),
+        ("panel", PART2_PANEL, "p1"),
+    ] {
         let d = load_jbeam(&[("t.jbeam", text)], None).unwrap();
         let settings = ExplicitBeamsSettings {
             turbulence: false,
@@ -299,7 +334,13 @@ fn metal_jbeam_part2_break_and_deform_groups_match() {
             s.frame();
             gpu.frame(clock.next());
             let g = &gpu.positions()[0];
-            worst = worst.max(s.positions().iter().zip(g).map(|(a, b)| a.distance(*b)).fold(0.0, f32::max));
+            worst = worst.max(
+                s.positions()
+                    .iter()
+                    .zip(g)
+                    .map(|(a, b)| a.distance(*b))
+                    .fold(0.0, f32::max),
+            );
         }
         let gb = gpu.beams()[0].iter().filter(|b| b.broken).count();
         let cb = s.damage().0;
@@ -335,7 +376,11 @@ fn metal_coupled_sedan_into_a_rigid_box_matches_cpu() {
         turbulence: false,
     };
     let mut sim = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
-    let bounds = |s: &ExplicitBeams| s.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));
+    let bounds = |s: &ExplicitBeams| {
+        s.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| {
+            (a.min(n.pos), b.max(n.pos))
+        })
+    };
     let (lo, hi) = bounds(&sim);
     if hi.x - lo.x > hi.z - lo.z {
         for n in &mut sim.nodes {
@@ -350,7 +395,11 @@ fn metal_coupled_sedan_into_a_rigid_box_matches_cpu() {
     }
     sim.ground = -1.0e4;
     let hi_y = sim.nodes.iter().map(|n| n.pos.y).fold(f32::MIN, f32::max);
-    let (centre, half, mass) = (Vec3::new(0.0, 0.5 * (1.0 + hi_y), 1.3), Vec3::new(1.2, 0.7, 0.5), 1200.0f32);
+    let (centre, half, mass) = (
+        Vec3::new(0.0, 0.5 * (1.0 + hi_y), 1.3),
+        Vec3::new(1.2, 0.7, 0.5),
+        1200.0f32,
+    );
     let inertia = Vec3::new(
         mass / 3.0 * (half.y * half.y + half.z * half.z),
         mass / 3.0 * (half.x * half.x + half.z * half.z),
@@ -368,12 +417,23 @@ fn metal_coupled_sedan_into_a_rigid_box_matches_cpu() {
             share: 1.0,
             count: 0,
         }],
-        shapes: vec![ProxyShape::new(0, Vec3::ZERO, Quat::IDENTITY, ProxyGeom::Box { half }, 3, None)],
+        shapes: vec![ProxyShape::new(
+            0,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            ProxyGeom::Box { half },
+            3,
+            None,
+        )],
         frozen: false,
     };
     set.begin_window();
     let m: f32 = sim.nodes.iter().map(|n| n.mass).sum();
-    let cap = CouplingCapacity { bodies: 4, shapes: 8, planes: 64 };
+    let cap = CouplingCapacity {
+        bodies: 4,
+        shapes: 8,
+        planes: 64,
+    };
     let mut gpu = match MetalExplicitBeams::with_coupling(std::slice::from_ref(&sim), Some(cap)) {
         Ok(g) => g,
         Err(e) if e.to_string().contains("no Metal device") => return,
@@ -409,9 +469,19 @@ fn metal_coupled_sedan_into_a_rigid_box_matches_cpu() {
     let cset = cpu.rigid.take().unwrap();
     let gvel = gpu.velocities();
     let masses: Vec<f32> = sim.nodes.iter().map(|n| n.mass).collect();
-    let pg = horizontal(gvel[0].iter().zip(&masses).map(|(v, m)| *v * *m).sum::<Vec3>())
-        + horizontal(gset.bodies[0].momentum().0);
-    let vg = gvel[0].iter().zip(&masses).map(|(v, m)| v.z * m).sum::<f32>() / m;
+    let pg = horizontal(
+        gvel[0]
+            .iter()
+            .zip(&masses)
+            .map(|(v, m)| *v * *m)
+            .sum::<Vec3>(),
+    ) + horizontal(gset.bodies[0].momentum().0);
+    let vg = gvel[0]
+        .iter()
+        .zip(&masses)
+        .map(|(v, m)| v.z * m)
+        .sum::<f32>()
+        / m;
     let vc = cpu.nodes.iter().map(|n| n.vel.z * n.mass).sum::<f32>() / m;
     eprintln!(
         "Metal coupled: early worst {worst_early:.2e} m; box GPU {:.4} CPU {:.4} m/s; vehicle GPU {vg:.4} CPU {vc:.4}; |dP| {:.4} of {:.0}",
@@ -421,8 +491,51 @@ fn metal_coupled_sedan_into_a_rigid_box_matches_cpu() {
         p0.length()
     );
     assert!(worst_early < 1e-3, "early frames apart by {worst_early} m");
-    assert!((pg - p0).length() < 2e-4 * p0.length(), "Metal momentum {pg} vs {p0}");
+    assert!(
+        (pg - p0).length() < 2e-4 * p0.length(),
+        "Metal momentum {pg} vs {p0}"
+    );
     let rel = |a: f32, b: f32| (a - b).abs() / b.abs().max(1e-3);
     assert!(rel(gset.bodies[0].vel.z, cset.bodies[0].vel.z) < 0.01);
     assert!(rel(vg, vc) < 0.01);
+}
+
+/// `rubble_exact_lengths` (jbeam-semantics-spec.md §33) on Metal: the procedural
+/// sedan at rest, exact lengths and fast, every node's position and velocity the
+/// CPU's float after each of 2,400 steps (1.2 s), as on wgpu
+/// (`showcase_car_gpu.rs` `exact_lengths_step_bit_for_bit`).
+#[test]
+fn metal_exact_lengths_step_bit_for_bit() {
+    for fast in [false, true] {
+        let s = ExplicitBeamsSettings {
+            fast_inv_sqrt: fast,
+            ..settings()
+        };
+        let text = sedan_text();
+        let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, s).unwrap();
+        let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+        let mut cpu =
+            ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - low, 0.0), Vec3::ZERO, s)
+                .unwrap();
+        let Some(mut gpu) = metal(std::slice::from_ref(&cpu)) else {
+            return;
+        };
+        for step in 0..2400 {
+            cpu.step();
+            gpu.frame(1);
+            gpu.wait();
+            let (p, v) = (gpu.positions(), gpu.velocities());
+            let bits = |a: Vec3| a.to_array().map(f32::to_bits);
+            let bad = (0..cpu.nodes.len())
+                .filter(|&i| {
+                    bits(cpu.nodes[i].pos) != bits(p[0][i])
+                        || bits(cpu.nodes[i].vel) != bits(v[0][i])
+                })
+                .count();
+            assert_eq!(
+                bad, 0,
+                "fast {fast}: step {step}: {bad} nodes differ from the CPU"
+            );
+        }
+    }
 }

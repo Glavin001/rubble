@@ -10,6 +10,10 @@ use engine_webgpu::{default_device, ExplicitBeamsGpu};
 use glam::Vec3;
 
 fn sedan(velocity: Vec3) -> ExplicitBeams {
+    sedan_with(velocity, std::env::var("SC_EXACT").is_err())
+}
+
+fn sedan_with(velocity: Vec3, fast_inv_sqrt: bool) -> ExplicitBeams {
     let b = build(
         &style("sedan").unwrap(),
         &BuildParams {
@@ -21,7 +25,7 @@ fn sedan(velocity: Vec3) -> ExplicitBeams {
     let settings = ExplicitBeamsSettings {
         turbulence: false,
         // (SC_EXACT=1: exact beam lengths, as `rubble_exact_lengths`.)
-        fast_inv_sqrt: std::env::var("SC_EXACT").is_err(),
+        fast_inv_sqrt,
         ..Default::default()
     };
     let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, velocity, settings).unwrap();
@@ -89,6 +93,64 @@ fn showcase_sedan_at_rest_matches_cpu() {
     assert_eq!(cpu.damage().0, 0);
     assert_eq!(g_broken, 0);
     assert!(vmax < 2.0);
+}
+
+/// `rubble_exact_lengths` (jbeam-semantics-spec.md §33): the GPU's exact inverse
+/// square root is the CPU's sequence (`exact_inv_sqrt`). The procedural sedan at
+/// rest, exact lengths and fast, every node's position and velocity the same
+/// float as the CPU's after each of 2,400 steps (1.2 s). The showcase sedan at rest
+/// for 2 s is reported (not bit for bit: open, spec §33).
+#[test]
+fn exact_lengths_step_bit_for_bit() {
+    use engine_softbody::procedural::{car_truck_bare, CarParams};
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let text = car_truck_bare(&CarParams {
+        minimass: 10.0,
+        ..CarParams::sedan()
+    });
+    for fast in [false, true] {
+        let settings = ExplicitBeamsSettings {
+            turbulence: false,
+            fast_inv_sqrt: fast,
+            ..Default::default()
+        };
+        let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
+        let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+        let mut cpu =
+            ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - low, 0.0), Vec3::ZERO, settings)
+                .unwrap();
+        let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+        for s in 0..2400 {
+            cpu.step();
+            gpu.frame(1);
+            gpu.wait();
+            let (p, v) = (&gpu.positions()[0], &gpu.velocities()[0]);
+            let bits = |a: Vec3| a.to_array().map(f32::to_bits);
+            let bad = (0..cpu.nodes.len())
+                .filter(|&i| {
+                    bits(cpu.nodes[i].pos) != bits(p[i]) || bits(cpu.nodes[i].vel) != bits(v[i])
+                })
+                .count();
+            assert_eq!(
+                bad, 0,
+                "fast {fast}: step {s}: {bad} nodes differ from the CPU"
+            );
+        }
+    }
+    let mut cpu = sedan_with(Vec3::ZERO, false);
+    let Some(gpu) = run_both(&mut cpu, 120) else {
+        return;
+    };
+    let (rms, max) = rms_max(&cpu.positions(), &gpu.positions()[0]);
+    eprintln!(
+        "showcase sedan, exact lengths, at rest 2 s: GPU vs CPU rms {:.4} mm, max {:.4} mm",
+        rms * 1e3,
+        max * 1e3
+    );
+    assert!(rms < 1e-2 && max < 0.1);
 }
 
 #[test]
