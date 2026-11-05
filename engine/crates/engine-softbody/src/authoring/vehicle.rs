@@ -293,11 +293,9 @@ pub struct Loads {
 /// system separated in any report: every hinge value is a floor. §9.4 takes
 /// the pair at or above the latch's (median floor 28 / 21 kN); the pair is
 /// taken at the highest load any pair held without separating, 36.2 / 29.8
-/// kN (2005 Camry, report 637726), the best-supported floor, so the door
-/// opens at its latch before a hinge lets go, as every report found. (At
-/// the median floor each hinge's half, 14 / 10.5 kN, is below what the
-/// struck door's hinges carry in the NCAP side pole, 12–13 kN resultants
-/// mostly across the car, and the struck door came off its hinges.)
+/// kN (2005 Camry, report 637726), the best-supported floor, and each hinge
+/// holds it on its own (`hardware_rigs`), so the door opens at its latch
+/// before a hinge lets go, as every report found.
 pub const PRIMARY_LATCH: Loads = Loads {
     longitudinal: 28_000.0,
     transverse: 20_500.0,
@@ -1248,7 +1246,14 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     for &a in &ends {
                         for b in sk.nearest(sk.pos(a), &body, 2) {
                             let l = sk.pos(a).distance(sk.pos(b));
-                            if l <= 0.3 {
+                            // (A door end bears on the pillar beside it
+                            // along the car, the aperture closing in a
+                            // frontal; never mostly outward on what is
+                            // outboard of it: that would hold it shut.)
+                            let d = sk.pos(b) - sk.pos(a);
+                            let outboard =
+                                through.contains(&part) && d.x * sk.pos(a).x.signum() > d.z.abs();
+                            if l <= 0.3 && !outboard {
                                 let sc = l.max(super::material::REF_LENGTH)
                                     / super::skeleton::TIE_LENGTH.max(l);
                                 // The mount grade's stiffness (the door is
@@ -1506,68 +1511,73 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     .flat_map(|e| e.0.iter().copied())
                     .map(|i| abs_x(&sk, i))
                     .fold(f32::MAX, f32::min);
-                let mean = edge.iter().map(|e| e.1).sum::<Vec3>() / edge.len() as f32;
-                let pf = Vec3::new(side * (xin - FLANGE_GAP), mean.y, mean.z);
-                let flange = flange_of[&sk.nearest(pf, &flanged, 1)[0]].clone();
-                // Its root: the body's frame nodes beside it (three or more
-                // not in one plane with it, or the edge has no flange).
-                let root: Vec<u32> = sk
-                    .nearest(pf, &body, 4)
-                    .into_iter()
-                    .filter(|&r| sk.pos(r).distance(pf) <= 0.35)
-                    .collect();
-                let solid = root.len() >= 3 && {
-                    let q: Vec<Vec3> = root.iter().map(|&r| sk.pos(r) - pf).collect();
-                    (0..q.len()).any(|i| {
-                        (i + 1..q.len()).any(|j| {
-                            (j + 1..q.len()).any(|k| q[i].cross(q[j]).dot(q[k]).abs() > 1e-4)
+                // The flange is a strip down the pillar behind the door's
+                // edge: a node of it behind each member end, welded to the
+                // pillar and to its neighbours along the strip.
+                let mut strip: Vec<u32> = Vec::new();
+                for (nodes, c) in &edge {
+                    let pf = Vec3::new(side * (xin - FLANGE_GAP), c.y, c.z);
+                    let flange = flange_of[&sk.nearest(pf, &flanged, 1)[0]].clone();
+                    let root: Vec<u32> = sk
+                        .nearest(pf, &body, 4)
+                        .into_iter()
+                        .filter(|&r| sk.pos(r).distance(pf) <= 0.35)
+                        .collect();
+                    // (Three or more not in one plane with it, or this end
+                    // has no flange behind it.)
+                    let solid = root.len() >= 3 && {
+                        let q: Vec<Vec3> = root.iter().map(|&r| sk.pos(r) - pf).collect();
+                        (0..q.len()).any(|i| {
+                            (i + 1..q.len()).any(|j| {
+                                (j + 1..q.len()).any(|k| q[i].cross(q[j]).dot(q[k]).abs() > 1e-4)
+                            })
                         })
-                    })
-                };
-                if !solid {
-                    continue;
-                }
-                let grade = &def
-                    .members
-                    .iter()
-                    .find(|m| m.name == flange.member)
-                    .unwrap()
-                    .grade;
-                let base = grades.get(grade)?;
-                let cap = flange.capacity() * params.strength;
-                let f = sk.node(pf, 0);
-                sk.nodes[f as usize].primary = true;
-                // Welded to the pillar along its root (every strip's), at
-                // the bearing's stiffness (in series with it).
-                let n = edge.len() as f32;
-                let weld = Material {
-                    k: grades.mount.k,
-                    damp: grades.mount.damp,
-                    deform: n * cap,
-                    strength: n * cap + (base.strength - base.deform),
-                    ..base
-                };
-                for r in root {
-                    sk.tie(f, r, weld);
-                }
-                for (nodes, _) in &edge {
-                    let outer = *nodes
+                    };
+                    if !solid {
+                        continue;
+                    }
+                    let grade = &def
+                        .members
                         .iter()
-                        .max_by(|&&a, &&b| abs_x(&sk, a).total_cmp(&abs_x(&sk, b)))
-                        .unwrap();
-                    let l = sk.pos(outer).distance(pf);
-                    let sc =
-                        l.max(super::material::REF_LENGTH) / super::skeleton::TIE_LENGTH.max(l);
-                    let bear = Material {
+                        .find(|m| m.name == flange.member)
+                        .unwrap()
+                        .grade;
+                    let base = grades.get(grade)?;
+                    let cap = flange.capacity() * params.strength;
+                    let f = sk.node(pf, 0);
+                    sk.nodes[f as usize].primary = true;
+                    // Welded to the pillar along its root, at the bearing's
+                    // stiffness (in series with it).
+                    let weld = Material {
                         k: grades.mount.k,
                         damp: grades.mount.damp,
                         deform: cap,
                         strength: cap + (base.strength - base.deform),
                         ..base
                     };
-                    sk.beam_with(outer, f, bear.stiffer(sc), BeamType::Support(SEAL_BREAK), 0);
+                    for r in root {
+                        sk.tie(f, r, weld);
+                    }
+                    if let Some(&prev) = strip.last() {
+                        sk.tie(f, prev, weld);
+                    }
+                    strip.push(f);
+                    // The end's chords bear on it (pushed in, only).
+                    for &a in nodes.iter() {
+                        let l = sk.pos(a).distance(pf);
+                        let sc =
+                            l.max(super::material::REF_LENGTH) / super::skeleton::TIE_LENGTH.max(l);
+                        let bear = Material {
+                            k: grades.mount.k,
+                            damp: grades.mount.damp,
+                            deform: cap,
+                            strength: cap + (base.strength - base.deform),
+                            ..base
+                        };
+                        sk.beam_with(a, f, bear.stiffer(sc), BeamType::Support(SEAL_BREAK), 0);
+                    }
+                    flange_nodes.push((format!("{name}_flanges"), f));
                 }
-                flange_nodes.push((format!("{name}_flanges"), f));
             }
         }
         for (k, f) in flange_nodes {
@@ -2489,6 +2499,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             sk.nodes[i as usize].contacter = true;
         }
     }
+    shut_line_breaks(&mut sk, &shell, &hardware);
     sk.skin = shell.tris.clone();
     // Reference nodes: floor centre, a metre back, and left.
     let floor: Vec<u32> = shell
@@ -2532,6 +2543,55 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         },
         hardware,
     })
+}
+
+/// The collision skin across the shut lines (A1: no collision triangle
+/// outlives the joint it spans). The skin stays the closed lattice, so
+/// nothing passes between two parts while they are joined; each triangle
+/// with nodes in two parts breaks (spec §18) when a beam along its edges
+/// across the shut line breaks (the seam's seal, bolt or bearing beams) or
+/// when the nearest hinge
+/// or latch group of its parts lets go. Triangles inside a part stay plain:
+/// a part that comes off keeps its own skin and collides as a part. Every
+/// shell node of a part that can come off is a contacter, and the car's file
+/// asks for contact from every node (spec §10.2).
+fn shut_line_breaks(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]) {
+    let pins: Vec<(u16, Vec3, u32)> = hardware
+        .iter()
+        .map(|h| {
+            let b = &sk.beams[h.beams[0]];
+            let pin = if sk.nodes[b.a as usize].part == h.part { b.a } else { b.b };
+            (h.part, sk.pos(pin), h.group)
+        })
+        .collect();
+    let mut breaks = Vec::with_capacity(sk.collision.len());
+    for t in &sk.collision {
+        let parts: Vec<u16> = t.iter().map(|&i| sk.nodes[i as usize].part).collect();
+        if parts.iter().all(|&p| p == parts[0]) {
+            breaks.push(None);
+            continue;
+        }
+        let c = (sk.pos(t[0]) + sk.pos(t[1]) + sk.pos(t[2])) / 3.0;
+        let g = pins
+            .iter()
+            .filter(|p| parts.contains(&p.0))
+            .min_by(|a, b| a.1.distance(c).total_cmp(&b.1.distance(c)))
+            .map_or(0, |p| p.2);
+        // Its edges across the shut line (a torn skin beam inside a part
+        // leaves the part's own surface there).
+        let mask = (0..3)
+            .filter(|&k| parts[k] != parts[(k + 1) % 3])
+            .fold(0u8, |m, k| m | 1 << k);
+        breaks.push(Some((g, mask)));
+    }
+    sk.collision_breaks = breaks;
+    sk.full_contact = true;
+    let detachable: std::collections::HashSet<u16> = hardware.iter().map(|h| h.part).collect();
+    for &i in &shell.nodes {
+        if detachable.contains(&sk.nodes[i as usize].part) {
+            sk.nodes[i as usize].contacter = true;
+        }
+    }
 }
 
 /// Tempered glass's break strain: characteristic bending strength ≈ 120 MPa
@@ -2741,8 +2801,12 @@ pub fn hardware_rigs(hw: &[HardwareGroup]) -> Vec<(String, Vec<usize>, Loads)> {
                 hinges.clone(),
                 HINGE_SYSTEM,
             ));
-            // Each hinge on its own carries its share of the pair's.
-            let share = 1.0 / hinges.len() as f32;
+            // Each hinge on its own holds the pair's floor: the reports'
+            // fixtures loaded the pair, and no pair let go up to it, so
+            // neither hinge did (a door's intrusion beam pulls its own hinge
+            // alone: at half the pair's floor, the side pole tore the lower
+            // hinge off every time).
+            let share = 1.0;
             for &h in &hinges {
                 out.push((
                     hw[h].name.clone(),

@@ -13,6 +13,7 @@ pub mod buggy;
 pub mod calibrate;
 pub mod color;
 pub mod cpu;
+pub mod crash_rigs;
 pub mod damage;
 pub mod desc;
 pub mod elements;

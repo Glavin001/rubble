@@ -172,7 +172,7 @@
     const XSCENES = { idle: 'Explicit: at rest (L launches)', coast: 'Explicit: coasting', wall: 'Explicit: into a rigid wall',
       headon: 'Explicit: head-on, two cars', tbone: 'Explicit: T-bone into a car', pole: 'Explicit: into a 20 cm pole',
       sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar', drop: 'Explicit: drop test',
-      arena: 'Explicit: fleet arena (many vehicles)' };
+      arena: 'Explicit: fleet arena (many vehicles)', mdb214: 'Explicit: FMVSS 214 moving barrier', doorpull: 'Explicit: door pull' };
     // Explicit scenes' knobs (the solver's crash_scene and arena): [url key, label,
     // default, [min, max, step]]. km/h knobs go to the solver in m/s; angles in degrees.
     const KMH = [0, 200, 1], OVERLAP = [0.05, 1, 0.05], ANGLE = [-90, 90, 1], ALONG = [-2.5, 2.5, 0.05];
@@ -186,8 +186,11 @@
       limbo: [['speed', 'km/h', 60, KMH], ['bar', 'bar height m', 1, [0.3, 2, 0.05]]],
       drop: [['height', 'height m', 8, [0.5, 40, 0.5]], ['speed', 'forward km/h', 0, KMH]],
       arena: [['n', 'vehicles', 256, [1, 4096, 1]], ['headOn', 'head-on share', 0, [0, 1, 0.05]], ['speedMin', 'min km/h', 90, KMH], ['speedMax', 'max km/h', 150, KMH]],
+      // FMVSS 214 S7: 33.5 mph (53.9 km/h), the barrier crabbed 27°.
+      mdb214: [['speed', 'barrier km/h', 53.9, KMH], ['crab', 'crab °', 27, [0, 45, 1]]],
+      doorpull: [['pullSpeed', 'pull m/s', 0.5, [0.05, 3, 0.05]], ['doorNodes', 'door nodes', 6, [1, 24, 1]], ['pullStiffness', 'pull N/m', 100000, [10000, 1000000, 10000]]],
     };
-    const XCRASH = new Set(['wall', 'headon', 'tbone', 'pole', 'sidepole', 'limbo', 'drop']);
+    const XCRASH = new Set(['wall', 'headon', 'tbone', 'pole', 'sidepole', 'limbo', 'drop', 'mdb214', 'doorpull']);
     const XMAP = { yard: 'idle', crates: 'idle', traffic: 'idle', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
       wall: 'wall', pole: 'pole', sidepole: 'sidepole', tbone: 'tbone', headon: 'headon', limbo: 'limbo', sandwich: 'wall', import: 'wall', drop: 'drop' };
     const xscene = XSCENES[qs.get('xscene')] ? qs.get('xscene') : XMAP[scene];
@@ -205,7 +208,8 @@
     const XPILL = { idle: () => 'AT REST', coast: () => `COASTING · ${P('xspeed', 100)} KM/H`, wall: () => `WALL · ${P('speed', 100)} KM/H`,
       headon: () => `HEAD-ON · ${P('speed', 56)} + ${P('speed2', 56)} KM/H`, tbone: () => `T-BONE · ${P('speed', 50)} KM/H`,
       pole: () => `POLE · ${P('speed', 60)} KM/H`, sidepole: () => `SIDE POLE · ${P('speed', 32)} KM/H · ${P('angle', 90)}°`,
-      limbo: () => `LOW BAR · ${P('speed', 60)} KM/H`, drop: () => `DROPPED FROM ${P('height', 8)} M` };
+      limbo: () => `LOW BAR · ${P('speed', 60)} KM/H`, drop: () => `DROPPED FROM ${P('height', 8)} M`,
+      mdb214: () => `FMVSS 214 MDB · ${P('speed', 53.9)} KM/H · ${P('crab', 27)}° CRAB`, doorpull: () => `DOOR PULL · ${P('pullSpeed', 0.5)} M/S` };
     // The crash-test lab (crash-lab.mjs, crash-lab-render.mjs): the explicit solver's
     // view with tube beams, node spheres, a ghost body, time control, impact time and
     // node grabbing; ?lab=0 keeps the plain view (the arena always does).
@@ -1151,7 +1155,21 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (!pos) return false;
       if (bodyFor.layout !== xlayout) {
         for (const id of bodyIds) bodyR.removeCar(id);
-        bodyIds = xlayout.vehicles.map((v, i) => { const vis = bodyVisual(); return bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: vis.lod ?? null, lodDistance: vis.lodDistance ?? 18 }); });
+        // The body goes on the vehicles it was built for (vehicle 0's kind): a
+        // scene's other bodies (the FMVSS 214 barrier) are drawn solid, and
+        // beams a rig added past the body's own (the door pull's cables) as cables.
+        const vis = bodyVisual();
+        const own = (v) => v.name === xlayout.vehicles[0].name && v.nodes >= vis.nodeCount;
+        bodyIds = xlayout.vehicles.filter(own).map((v) => bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: xlayout.vehicles.indexOf(v), lod: vis.lod ?? null, lodDistance: vis.lodDistance ?? 18 }));
+        let tri = 0;
+        const solidTris = [];
+        let cables = [0, 0];
+        for (const v of xlayout.vehicles) {
+          if (!own(v)) solidTris.push([tri, v.triangles]);
+          else if (v.beams > vis.beamRest0.length && cables[1] === 0) cables = [v.beamOffset + vis.beamRest0.length, v.beamOffset + v.beams];
+          tri += v.triangles;
+        }
+        labR.set({ solidTris, cables });
         bodyFor.step = null;
         bodyFor.layout = xlayout;
       }

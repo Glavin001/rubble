@@ -179,6 +179,11 @@ pub enum ExplicitKind {
     /// carries x₂'s force.
     JbeamPressureTri,
     JbeamPressureTri2,
+    /// A triangle's aerodynamics (spec §31), first record (nodes x₀, x₁; E1 = (x₂
+    /// as bits, drag factor, lift factor, sin of the stall angle)); the next record
+    /// ([`ExplicitKind::JbeamAeroTri2`], x₂–x₂) carries x₂'s force.
+    JbeamAeroTri,
+    JbeamAeroTri2,
 }
 
 impl ExplicitKind {
@@ -202,6 +207,8 @@ impl ExplicitKind {
             ExplicitKind::JbeamPressureGroup => 15,
             ExplicitKind::JbeamPressureTri => 16,
             ExplicitKind::JbeamPressureTri2 => 17,
+            ExplicitKind::JbeamAeroTri => 18,
+            ExplicitKind::JbeamAeroTri2 => 19,
         }
     }
 
@@ -221,6 +228,8 @@ impl ExplicitKind {
                 | ExplicitKind::JbeamPressureGroup
                 | ExplicitKind::JbeamPressureTri
                 | ExplicitKind::JbeamPressureTri2
+                | ExplicitKind::JbeamAeroTri
+                | ExplicitKind::JbeamAeroTri2
         )
     }
 }
@@ -789,9 +798,12 @@ pub struct ExplicitBeams {
     /// §8): per node its group (0 = none); a node skips the collision triangles
     /// whose three nodes are all in its group. Empty: no exclusion.
     pub self_groups: Vec<u32>,
-    /// JBeam mode: per collision triangle the self-collision group a node lying on
-    /// it at spawn gave it (0 = its nodes' own, spec §10.1). Empty: none.
-    pub tri_groups: Vec<u32>,
+    /// Per collision triangle the self-collision nodes it never collides with (they
+    /// started inside its range at spawn, spec §10.1). Empty: none.
+    pub tri_excl: Vec<Vec<u32>>,
+    /// Every node (but those with no collision) is a contacter against other
+    /// vehicles' triangles (spec §10.2); off: the file's contacters only.
+    pub contact_every_node: bool,
     /// JBeam mode's damping filters (`dampCutoffHz`), by [`Beam::shock`] − 1.
     pub damp_filters: Vec<DampFilter>,
     /// JBeam torsion elements' watched break groups (0 = none), by [`Beam::shock`]
@@ -1017,7 +1029,8 @@ impl ExplicitBeams {
             neighbours: Vec::new(),
             contact_throttle: Vec::new(),
             self_groups: Vec::new(),
-            tri_groups: Vec::new(),
+            tri_excl: Vec::new(),
+            contact_every_node: false,
             damp_filters: Vec::new(),
             torsion_watch: Vec::new(),
             groups_last: Vec::new(),
@@ -1313,6 +1326,12 @@ impl ExplicitBeams {
         s.add_triangles(&desc);
         s.add_aero(&file, airfoil);
         s.finish();
+        // Rubble's extensions (none in Rigs of Rods files: unchanged): cab
+        // lines that break (spec §18) and contact from every node (§10.2).
+        s.add_truck_triangle_breaks(&desc);
+        if file.full_contact {
+            s.opt_in_full_contact();
+        }
         Ok(s)
     }
 
@@ -1854,6 +1873,12 @@ impl ExplicitBeams {
         };
         s.add_triangles(desc);
         s.add_triangle_breaks(desc, &mut warnings);
+        if s.settings.drag {
+            // JBeam mode's air drag is the triangles' (spec §31), not the nodes'.
+            s.add_triangle_aero(desc);
+            s.settings.drag = false;
+            s.settings.turbulence = false;
+        }
         s.deform_names = desc.deform_groups.clone();
         s.deform_state = vec![0; desc.deform_groups.len()];
         if !s.beam_ext.is_empty() {
@@ -1872,7 +1897,13 @@ impl ExplicitBeams {
             s.self_groups = (0..s.nodes.len())
                 .map(|i| desc.nodes.get(i).map_or(0, |n| n.self_group))
                 .collect();
-            s.surface_nodes(&mut warnings);
+        }
+        let pairs = s.spawn_exclusions();
+        if pairs > 0 {
+            warnings.push(format!(
+                "{pairs} self-collision node-triangle pairs start inside the contact range: \
+                 they never collide (spec §10.1)"
+            ));
         }
         Ok((s, warnings))
     }
@@ -2063,6 +2094,17 @@ impl ExplicitBeams {
         self.finish_contact();
     }
 
+    /// Opt in to JBeam's contact semantics (spec §10.1–10.2) for a vehicle of the
+    /// `.truck` path (JBeam mode has them): every node with collision is a contacter
+    /// against other vehicles' triangles, and self-collision pairs that start inside
+    /// the contact range never collide. Call after spawn, before the GPU upload.
+    /// Returns the excluded self-collision pairs.
+    pub fn opt_in_full_contact(&mut self) -> usize {
+        self.contact_every_node = true;
+        self.finish_contact();
+        self.spawn_exclusions()
+    }
+
     /// Vehicle contact's spawn data ([`crate::explicit_contact`], spec §2): the
     /// contact points, the neighbour lists and zeroed contact throttles.
     pub fn finish_contact(&mut self) {
@@ -2077,7 +2119,8 @@ impl ExplicitBeams {
             .filter(|&i| {
                 let n = &self.nodes[i as usize];
                 n.has(NODE_CONTACTER)
-                    || (!n.has(NODE_NO_GROUND) && (on_triangle[i as usize] || no_triangles))
+                    || (!n.has(NODE_NO_GROUND)
+                        && (self.contact_every_node || on_triangle[i as usize] || no_triangles))
             })
             .collect();
         self.neighbour_start = Vec::with_capacity(self.nodes.len() + 1);
@@ -2119,9 +2162,6 @@ impl ExplicitBeams {
     pub fn triangle_self_group(&self, t: usize) -> u32 {
         if self.self_groups.is_empty() {
             return 0;
-        }
-        if let Some(&g) = self.tri_groups.get(t).filter(|&&g| g != 0) {
-            return g;
         }
         let [a, b, c] = self.triangles[t]
             .nodes
@@ -2243,7 +2283,9 @@ impl ExplicitBeams {
                         n.friction,
                     );
                     n.force += if n.has(NODE_FRICTION_LIMIT) {
-                        crate::explicit_jbeam_ext::friction_limit(c, n.force, n.vel, n.mass, Vec3::Y, h)
+                        crate::explicit_jbeam_ext::friction_limit(
+                            c, n.force, n.vel, n.mass, Vec3::Y, h, ground - x.y,
+                        )
                     } else {
                         c
                     };
@@ -2599,6 +2641,9 @@ impl ExplicitBeams {
                     continue;
                 }
                 if tri_group != 0 && self.self_groups[hn as usize] == tri_group {
+                    continue;
+                }
+                if !self.tri_excl.is_empty() && self.tri_excl[t].contains(&hn) {
                     continue;
                 }
                 let p = self.origin + self.nodes[hn as usize].pos;
@@ -3006,7 +3051,9 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         | ExplicitKind::JbeamLbeam
         | ExplicitKind::JbeamPressureGroup
         | ExplicitKind::JbeamPressureTri
-        | ExplicitKind::JbeamPressureTri2 => {}
+        | ExplicitKind::JbeamPressureTri2
+        | ExplicitKind::JbeamAeroTri
+        | ExplicitKind::JbeamAeroTri2 => {}
     }
     let mut f = -k * e - c * u;
     beam.force = f;

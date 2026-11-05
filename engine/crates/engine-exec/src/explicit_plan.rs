@@ -59,7 +59,8 @@ pub struct Span {
 /// Room for rigid-body proxies per vehicle (`ExplicitBeamsGpu::with_coupling`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CouplingCapacity {
-    /// Proxy bodies, shapes (at most 255) and hull planes per vehicle.
+    /// Proxy bodies, shapes (at most 1024, at least the bodies) and hull planes (at most
+    /// 65535) per vehicle.
     pub bodies: u32,
     pub shapes: u32,
     pub planes: u32,
@@ -81,7 +82,10 @@ impl CouplingLayout {
     pub const SHAPE_RECS: u32 = 7;
 
     fn new(cap: CouplingCapacity, vehicles: u32, misc_base: u32, acc_base: u32) -> Self {
-        assert!(cap.shapes <= 255 && cap.planes < 1 << 24, "explicit coupling: at most 255 shapes per vehicle");
+        assert!(
+            cap.bodies <= cap.shapes && cap.shapes <= 1024 && cap.planes < 1 << 16,
+            "explicit coupling: at most 1024 shapes (and no more bodies) and 65535 planes per vehicle"
+        );
         Self { cap, vehicles, misc_base, acc_base }
     }
     /// Records per vehicle.
@@ -525,6 +529,11 @@ impl ExplicitUpload {
         // the extension states, the triangle break lists, the deform group words.
         let any_ext = vehicles.iter().any(|v| !v.beam_ext.is_empty());
         let any_tri_break = vehicles.iter().any(|v| !v.tri_breaks.is_empty());
+        // Self-collision spawn exclusions (spec §10.1): per triangle (start, count) in
+        // the lists, the excluded nodes global.
+        let any_tri_excl = vehicles.iter().any(|v| !v.tri_excl.is_empty());
+        let mut tri_excl_recs: Vec<[u32; 4]> = Vec::new();
+        let mut tri_excl_list: Vec<u32> = Vec::new();
         let mut ext_recs: Vec<[u32; 4]> = Vec::new();
         let mut ext_state: Vec<[f32; 4]> = Vec::new();
         let mut ext_index: Vec<u32> = Vec::new();
@@ -671,6 +680,7 @@ impl ExplicitUpload {
                         e1[1] += beam_off;
                     }
                     K::JbeamPressureGroup => e1[0] += beam_off,
+                    K::JbeamAeroTri => e1[0] += node_off,
                     _ => {}
                 }
                 let dg = |g: u32| if g == 0 { 0 } else { deform_first + g };
@@ -773,6 +783,13 @@ impl ExplicitUpload {
                         tri_misc[first_tri + t][2] |= 0x8000_0000;
                     }
                     tri_break_recs.push(g);
+                }
+            }
+            if any_tri_excl {
+                for t in 0..v.triangles.len() {
+                    let l = v.tri_excl.get(t).map_or(&[][..], |l| &l[..]);
+                    tri_excl_recs.push([tri_excl_list.len() as u32, l.len() as u32, 0, 0]);
+                    tri_excl_list.extend(l.iter().map(|&n| node_off + n));
                 }
             }
             for bx in &v.boxes {
@@ -1077,7 +1094,7 @@ impl ExplicitUpload {
         // (the kernel's grabRec()), off until set.
         misc.extend(std::iter::repeat_n([0u32; 4], 2));
         // The rigid coupling's header (the kernel's coupleRec()): (on, region, B, S |
-        // planes << 8), (gAcc region, 0, 0, 0); the regions are placed below.
+        // planes << 16), (gAcc region, 0, 0, 0); the regions are placed below.
         let couple_rec = misc.len();
         misc.extend(std::iter::repeat_n([0u32; 4], 2));
         // Vehicle contact: per triangle its contact throttle; per vehicle its records;
@@ -1184,7 +1201,7 @@ impl ExplicitUpload {
             let layout = CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
             acc_init.extend(std::iter::repeat_n(0, layout.acc_words() as usize));
-            misc[couple_rec] = [0, layout.misc_base, cap.bodies, cap.shapes | cap.planes << 8];
+            misc[couple_rec] = [0, layout.misc_base, cap.bodies, cap.shapes | cap.planes << 16];
             misc[couple_rec + 1] = [layout.acc_base, 0, 0, 0];
             layout
         });
@@ -1242,6 +1259,15 @@ impl ExplicitUpload {
         statics.extend(tri_break_recs);
         let ext_index_base = lists.len() as u32;
         lists.extend(ext_index);
+        let tri_excl_base = if any_tri_excl {
+            let at = lists.len() as u32;
+            lists.extend(tri_excl_list);
+            let base = statics.len() as u32;
+            statics.extend(tri_excl_recs.iter().map(|r| [r[0] + at, r[1], 0, 0]));
+            base
+        } else {
+            0
+        };
 
         let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
         let lanes = frame_lanes(vehicles);
@@ -1321,6 +1347,7 @@ impl ExplicitUpload {
             ext_state_base,
             tri_break_base,
             deform_base,
+            tri_excl_base,
             cap_at as u32,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
@@ -1508,6 +1535,11 @@ impl FramePlanner {
         assert!(metres >= 0.0 && metres.is_finite(), "contact margin {metres}");
         self.words[W_VV_MARGIN] = metres.to_bits();
         self.contact.left = 0;
+    }
+
+    /// The frame bounds margin (m).
+    pub fn contact_margin(&self) -> f32 {
+        f32::from_bits(self.words[W_VV_MARGIN])
     }
 
     /// A new contact plan is due next frame (the host wrote velocities or forces the

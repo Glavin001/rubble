@@ -4,7 +4,7 @@
 // Off (the coupling header's .x is 0, the default) nothing here runs: the frame reads
 // one record at its start and every vehicle steps as before.
 //
-// gMisc at coupleRec() (after the grab's records): (on, region base, B, S | planes << 8)
+// gMisc at coupleRec() (after the grab's records): (on, region base, B, S | planes << 16)
 // with B proxy bodies, S proxy shapes and `planes` hull planes per vehicle. Per vehicle
 // v its region at base + v * cplRecs():
 //   header      (bodies, shapes, planes used, 0)
@@ -41,8 +41,8 @@ static const uint CPL_SHAPE_RECS = 7u;
 
 uint coupleRec() { return grabRec() + 2u; }
 uint cplB() { return gMisc[coupleRec()].z; }
-uint cplS() { return gMisc[coupleRec()].w & 255u; }
-uint cplPlanes() { return gMisc[coupleRec()].w >> 8; }
+uint cplS() { return gMisc[coupleRec()].w & 0xFFFFu; }
+uint cplPlanes() { return gMisc[coupleRec()].w >> 16; }
 uint cplRecs() { return 1u + cplB() * CPL_BODY_RECS + cplS() * CPL_SHAPE_RECS + cplPlanes(); }
 uint cplBase(uint v) { return gMisc[coupleRec()].y + v * cplRecs(); }
 uint cplBody(uint v, uint j) { return cplBase(v) + 1u + j * CPL_BODY_RECS; }

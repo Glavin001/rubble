@@ -163,3 +163,27 @@ fn runs_within_webgpu_uniform_binding_limit() {
     assert!(one.positions()[0].iter().all(|p| p.is_finite()));
     assert_eq!(many.positions()[0], many.positions()[2]);
 }
+
+/// Triangle aerodynamics (spec §31) on the GPU: the panel fixture thrown through
+/// the air at 25 m/s (its triangles' drag and lift, the solver's drag setting on),
+/// bit for bit against the CPU.
+#[test]
+fn triangle_aero_matches() {
+    let d = load_jbeam(&[("t.jbeam", PART2_PANEL)], None).unwrap();
+    let settings = ExplicitBeamsSettings { turbulence: false, drag: true, ..Default::default() };
+    let v = Vec3::new(3.0, 25.0, 10.0);
+    let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(
+        &d,
+        JbeamWheels::Soft(TyreDefaults::for_vehicle(&d)),
+        Vec3::new(0.0, 5.0, 0.0),
+        v,
+        settings,
+    )
+    .unwrap();
+    assert!(s.beams.iter().any(|b| b.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamAeroTri));
+    let Some((worst, cb, gb, ..)) = compare("aero panel", &mut s, 40) else {
+        return;
+    };
+    assert_eq!(cb, gb);
+    assert!(worst < 1e-4, "aero: {worst}");
+}

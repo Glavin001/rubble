@@ -9,7 +9,7 @@
 //   cargo run -p engine-webgpu --release --no-default-features --bin wgsl_export
 //   wasm-pack build crates/engine-world-wasm --release --target web \
 //     --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
-//   node showcase-car-check.mjs [--res medium] [--out DIR] [--size 1920x1080] [--only a,b]
+//   node showcase-car-check.mjs [--res medium] [--out DIR] [--size 1920x1080] [--only a,b] [--run name=query]
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
@@ -132,6 +132,9 @@ const RUNS = [
   // inner skin through its tear, the roof's scrapes after the drop.
   ['wall_56_bay', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=0.55,0.55,1&dist=3.0&look=0,-0.1,1.3'],
   ['zebra_wall_56_bay', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=0.55,0.55,1&dist=3.0&look=0,-0.1,1.3&zebra=1'],
+  // Creases (skin.rs crease_envelope): the crushed bonnet close, shaded and zebra.
+  ['wall_56_bonnet', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=0.3,0.8,1&dist=1.8&look=0,0,1.6'],
+  ['zebra_wall_56_bonnet', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=0.3,0.8,1&dist=1.8&look=0,0,1.6&zebra=1'],
   ['wall_120_bay', 'scene=wall&speed=120&runUp=0.6&freeze=1.0&cam=0.7,0.5,0.8&dist=3.4&look=0,-0.1,1.0'],
   ['sidepole_door', 'scene=sidepole&speed=32&runUp=0.3&freeze=1.2&cam=0.25,0.3,1&dist=3.0&look=0.4,-0.1,0.6'],
   ['drop_15_roof', 'scene=drop&height=15&freeze=3.5&cam=0.6,0.25,0.5&dist=4.2&look=0,-0.3,0'],
@@ -160,9 +163,13 @@ const RUNS = [
   ['damage_sidepole_32', 'scene=sidepole&speed=32&runUp=0.3&freeze=1.2&cam=front&dist=6&check=damage'],
   ['damage_drop_15', 'scene=drop&height=15&freeze=3.5&cam=three&check=damage'],
 ];
+// Ad-hoc runs: --run name=query (repeatable), e.g. --run 'bay_c=scene=wall&speed=56&crease=0.05'.
+const adhoc = [];
+args.forEach((a, i) => { if (a === '--run') { const [n, ...q] = args[i + 1].split('='); RUNS.push([n, q.join('=')]); adhoc.push(n); } });
 let failed = 0;
 const only = opt('--only', null);
-for (const [name, q] of RUNS.filter(([n]) => !only || only.split(',').includes(n))) {
+const picked = only || adhoc.length ? [...(only ? only.split(',') : []), ...adhoc] : null;
+for (const [name, q] of RUNS.filter(([n]) => !picked || picked.includes(n))) {
   if (name.startsWith('mod_') && !existsSync(MODS)) { console.log(`${name}: ${MODS} not found, skipped`); continue; }
   await send('Page.navigate', { url: `${base}/showcase-car.html?res=${RES}&${q}` });
   let st = null;

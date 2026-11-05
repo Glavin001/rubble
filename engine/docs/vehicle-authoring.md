@@ -335,6 +335,87 @@ share of the energy: what to stiffen and what is spent for nothing; `DOOR=1`: a 
 kN push on the door instead). `MASSES=1` lists node mass by class;
 `SHOWCASE_FLOORS=1 … info` the floors by group, tier and beam kind.
 
+## Hardware, bearing and sheet masses (2026-11-05)
+
+Parts hang on hardware, not on their seams.
+
+- **Doors.** Each door has an upper hinge, a lower hinge, a latch and a
+  secondary latch. Each is one detacher group of tension-only ropes from one
+  pin node, the outer node of a member end, to the pillar.
+  - Using one pin lets the door turn about its hinge line.
+  - Each pin's ropes run toward the pillar, inboard and up, so every pull
+    meets a rope sized for it.
+- **Strengths.** They come from a static FMVSS 206 rig solve
+  (`rig_tensions`, `size_hardware`). The fixture moves the pins along the
+  pull. A rope at cosine c carries k·c/Σk·c² per newton.
+  - Each rope's strength is the largest load × share over a fan of pulls.
+    The fan runs from longitudinal (away from the pillar) to transverse
+    (outward) on the ellipse through the two measured loads, and, for doors,
+    from both of those to the door's weight (down) at the longitudinal load.
+  - Group strengths, front door, Medium:
+    - latch: 28.0 kN longitudinal, 20.5 kN transverse;
+    - secondary latch: 19.0 / 17.8 kN;
+    - hinge pair: 73.8 / 46.9 kN. Each hinge on its own holds the 36.2 /
+      29.8 kN pair floor (2005 Camry, report 637726). No report separated a
+      pair, so neither hinge failed. At half that floor, the intrusion beam's
+      pull tore the lower hinge off in every side pole run.
+  - The source is `crash-reference-targets.md` §9. The secondary engages
+    softer, so the assembly fails with its primary.
+- **Bearing.**
+  - The member ends of each door edge bear inboard on one flange node of
+    the pillar. Each end gets one 50 mm strip, with capacity σ_y·t·w: A-pillar
+    DP980 1.8 mm 53 kN, B-pillar PHS 1.8 mm 99 kN, C-pillar DP780 1.4 mm
+    31 kN.
+  - The door's inner end faces (`door_face_*`, HSLA 0.8 mm × 150 mm, 41 kN)
+    carry the members' pull to the hardware.
+  - The skin edge is compression-only. The shut faces bear through the hem;
+    the rest is seal.
+- **Lids.** The bonnet and boot lid have a hinge on each side and a latch at
+  the centre of the far edge, sized with the door values. FMVSS 206 covers
+  side doors only, so this is an assumption.
+  - Their seals are compression-only.
+  - An inner-frame ladder (`lid_inner_*`, `bonnet_inner_*`) gives them depth.
+    It is in the skin tier; each chord's strength is M_p / lever of a
+    100 × 60 × 0.75 mm hat at 210 MPa.
+- **Collision skin (A1): no triangle outlives the joint it spans.** The
+  collision skin is the closed lattice. Each triangle across a shut line
+  (Medium: 241 of 740) breaks (spec §18) when a beam of its edges across the
+  line breaks (seal, bolt or bearing) or when its parts' nearest hinge or
+  latch group lets go; triangles inside a part stay plain, so a part that
+  comes off keeps its own skin (`g` checks the door: its 23 triangles live,
+  none joining it to the car). The `.truck` carries it as Rubble's extension
+  of a `cab` line, a fifth field (the break group, 0 none) and a sixth (the
+  edges, bit k for nodes k to k+1), and asks for contact from every node
+  (spec §10.2) with `rubble_full_contact`; the shared loader
+  (`ExplicitBeams::from_truck`) applies both, so the page, the World, Metal
+  and CUDA get them by loading the file. Rigs of Rods files carry neither
+  and load as before. Every shell node of a part with hardware is a
+  contacter. The render stays per part. The 80 km/h T-bone (two vehicles)
+  holds the striker's nodes outside the struck skin to 0.5 %.
+- **Backed panels** (fenders, bumpers, bonnet, boot lid) bear on the body
+  frame through supports. Only their hardware carries tension.
+- **Sheet masses** (`SheetSpec`). A panel's mass is its skin area (a third
+  of each triangle to each node's part) × Σ gauge × share × density:
+  - bonnet 14.3 kg, boot lid 7.7 kg: 0.75 mm outer plus an inner of the same
+    gauge over half the area;
+  - fenders 2.7 kg: 0.75 mm;
+  - bumper fascias 2.5 / 1.3 kg: 3 mm at 1,000 kg/m³.
+
+  These parts take no share of the structure's mass. The kerb mass stays
+  1,450 kg.
+- **Tests.**
+  - `r`: the FMVSS 206 rigs, static and in the solver.
+  - `s`: 30 g inertial load.
+  - `g`: door pull. The door comes off at 82 kN, the sum of its parts'
+    transverse strengths (2 × 29.8 + 20.5 kN).
+  - Bearing: a door end bears on the pillar beside it along the car, and
+    inboard on a flange strip (one flange node behind each member end, both
+    chords bearing on it). It never bears mostly outward on a node outboard
+    of it, because that would hold the door shut.
+  - `o`: FMVSS 214 S9.2.3 door retention in the side pole.
+  - `t`: car-to-car T-bone, reported. `TB_KMH`, `TB_MASS`, `TB_DZ` and
+    `TB_ANG` vary it.
+
 ## Example: tweak a parameter
 
 A longer, lower roof and stronger front rails:
@@ -608,9 +689,27 @@ opening's edge, the doors' belt edges included, is black rubber.
   Ambient occlusion is baked from analytic occluders (downward faces low on
   the car, faces inside the arches); the wheels, which turn, are darkened by
   height instead. Cabin trim is lit without studio reflections.
-* **Normals.** Smooth normals follow the node normals. Where they disagree with
-  the triangle's frame by more than about 15°, the faceted frame normal wins,
-  so physics kinks read as creases.
+* **Creases** (`skin.rs` `crease_envelope`, the renderer's `envelope()`).
+  Each skin node has a tangent plane through it (its skin normal), or two
+  where a fold runs through the node (its skin triangles fall in two groups,
+  the most deviant more than 20° from the mean: `node_planes`), so a node on
+  a fold line carries both panels' planes rather than a bevel between them.
+  A body vertex's point on its binding triangle moves, along the planes'
+  barycentric mean normal, onto the plane nearest it, the planes weighted
+  wᵢ·exp(−(|t| − min|t|)/(0.08 L)) (t the distance to the plane, L the
+  binding triangle's size), and its rest normal turns with the weighted
+  planes' normal. At a fold the two sides' planes cross along a straight
+  line, so the crease is straight and sharp across (a 60° fold of a 10 cm
+  triangle switches over about 1 cm) and smooth along it, wherever the
+  binding triangles' edges run; a mild bend keeps barycentric (Phong-like)
+  weights and stays smooth. Only the change from the rest envelope is
+  applied, so the rest pose and rigid motion are exact. Where the result
+  disagrees with the binding triangle's frame by more than about 45° (a
+  panel crushed past its binding) the faceted frame normal wins.
+  `showcase-car.html?crease=0.04&splitDeg=12` tries other constants (sharper
+  than 0.08 shows the visual mesh's own triangles as a sawtooth);
+  `showcase-car-check.mjs wall_56_bonnet,zebra_wall_56_bonnet` is the
+  close-up.
 * **Level of detail.** `showcase_visual_lod(built, 0.45)` (wasm `visualLod`) is
   the same car with a coarser body, single-step rolls and fewer segments:
   about 75k triangles against about 240k.
@@ -680,6 +779,36 @@ vehicle the same visual format as the authored car, so
   30–40k) costs 1.57 ms a car near and 0.91 ms a car at the distant level
   (275k triangles). Both are over the 0.5 ms budget; the supercar's own mesh
   is the outlier, and a third, coarser level is the next step.
+
+### A6: where the hardware's loads reach its strength (2026-11-05)
+
+`u_hardware_where_loads_reach_strength` (`--ignored`; `U_ONLY=overlap,pole,open,side`,
+`U_KMH`, `U_TRACE=<group>` for a group's pull every millisecond) reports each
+hinge and latch group's peak pull against the FMVSS 206 values it is sized to
+(hinge 29.8–36.2 kN each, latch 20.5–28.0, secondary 10.3–19.0;
+transverse–longitudinal). Medium, front left door unless noted:
+
+| Scene | Peak pulls (kN) | Let go |
+|---|---|---|
+| IIHS small overlap 64 km/h (25 % left, rigid box) | latch 4.6, hinges ≤ 6.3 (rear door) | none |
+| small overlap 80 km/h | latch 12.0, rear door lower hinge 12.5 | none |
+| side pole 254 mm, 32 km/h, at the hinge line | upper hinge 52.6, lower 25.6, latch 13.5 | both hinges (0.05, 0.08 s) |
+| side pole at the hinge line, 40 / 50 / 64 km/h | upper 52.0 / 51.2 / 55.9, lower 26.8 / 23.7 / 24.7 | both hinges; latch held (20.3 at 64) |
+| side pole, 32 km/h, at the latch line | latch 20.9, secondary 18.7 | latch |
+| side pole at the latch line, 50 / 64 km/h | latch 19.1 / 21.3, secondary 27.0 / 24.0 | latch and secondary; hinges held |
+| door open 60°, reversing into a pole, 10 km/h | hinges ≤ 2.5 | none: the door swings freely (the car has no check link or opening stop) |
+| on its side from 1 m | ≤ 5.8 (secondary, right front) | none |
+| car-to-car T-bone 80 km/h, door middle (`t`) | latch 23.8, lower hinge 19.5 | none (inside the measured latch spread) |
+| T-bone, striker 0.7 m forward (`TB_DZ`) | latch 29.2, secondary 24.0 | latch, secondary |
+
+- The hinge pull rises over about 20 ms to 40–49 kN before it lets go (no
+  one-step contact spike).
+- The latch lets go at 19–21 kN, its transverse strength.
+- The lower hinge lets go at 24–27 kN, under the 29.8 kN floor. That load
+  points outside FMVSS 206's two pulls (the pole drives the door's front end
+  in and back), so one rope takes most of it.
+- No scene takes every group of a door. The hinge line takes the hinges; the
+  latch line, the latch.
 
 ## Tests and tools
 

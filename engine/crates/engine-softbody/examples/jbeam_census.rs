@@ -30,4 +30,7 @@ fn main() {
             println!("{n:6} {k}");
         }
     }
+    for (k, n, why) in engine_softbody::jbeam::out_of_scope_features(&census) {
+        println!("out of scope: {n:6} {k}: {why}");
+    }
 }
