@@ -845,6 +845,106 @@ fn momentum(s: &ExplicitBeams) -> DVec3 {
     s.nodes.iter().map(|n| (n.mass * n.vel).as_dvec3()).sum()
 }
 
+/// A node's Gershgorin row in the solver as it stands (intact beams, their
+/// current k and c), as a fraction of the step's bound (`G_LIMIT`).
+fn solver_row(s: &ExplicitBeams, i: usize) -> f32 {
+    use engine_softbody::authoring::skeleton::G_LIMIT;
+    let h = STEP;
+    let mi = s.nodes[i].mass.max(1e-6);
+    let mut r = 0.0f32;
+    for &j in &s.incidence[i] {
+        let bm = &s.beams[j as usize];
+        if bm.broken {
+            continue;
+        }
+        let o = if bm.a as usize == i { bm.b } else { bm.a } as usize;
+        let mo = s.nodes[o].mass.max(1e-6);
+        r += (h * h * bm.k + 2.0 * h * bm.c) * (1.0 / mi + 1.0 / (mi * mo).sqrt());
+    }
+    r / (G_LIMIT * h * h)
+}
+
+/// `G_NAN=1` (the door pull's non-finite run, for the solver agent): every
+/// step's newly broken beams (the first steps that break any, up to 40
+/// beams), each with its two nodes' masses, Gershgorin rows (built, and in the
+/// solver as it stands), speeds and parts; then the first non-finite node.
+/// Returns true once a node is non-finite (the pull stops there).
+fn g_nan_probe(
+    s: &ExplicitBeams,
+    b: &Built,
+    was: &[bool],
+    seen: &mut (Vec<bool>, bool),
+    step: i64,
+    pull: f32,
+) -> bool {
+    if std::env::var("G_NAN").is_err() {
+        return false;
+    }
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let rows = sk.bound_rows();
+    let part = |i: usize| {
+        if i < n {
+            sk.parts[sk.nodes[i].part as usize].as_str()
+        } else {
+            "(tyre)"
+        }
+    };
+    let row = |i: usize| if i < n { rows[i] } else { f32::NAN };
+    if seen.0.is_empty() {
+        seen.0 = vec![false; s.beams.len()];
+    }
+    for (j, bm) in s.beams.iter().enumerate() {
+        if !bm.broken || was[j] || seen.0[j] || seen.0.iter().filter(|&&x| x).count() >= 40 {
+            continue;
+        }
+        let (a, c) = (bm.a as usize, bm.b as usize);
+        let len = s.nodes[a].pos.distance(s.nodes[c].pos);
+        eprintln!(
+            "(g nan) step {step} pull {:.2} kN: beam {j} {a}-{c} {:?}/{:?} {}~{} k {:.3e} c {:.1} rest {:.4} len {:.4} strength {:.2} kN tt {:.2} kN tc {:.2} kN; m {:.3}/{:.3} kg; row built {:.3}/{:.3}, solver {:.3}/{:.3}; |v| {:.2}/{:.2} m/s",
+            pull / 1e3,
+            bm.kind,
+            bm.ty,
+            part(a),
+            part(c),
+            bm.k,
+            bm.c,
+            bm.rest,
+            len,
+            bm.strength / 1e3,
+            bm.tt / 1e3,
+            bm.tc / 1e3,
+            s.nodes[a].mass,
+            s.nodes[c].mass,
+            row(a),
+            row(c),
+            solver_row(s, a),
+            solver_row(s, c),
+            s.nodes[a].vel.length(),
+            s.nodes[c].vel.length(),
+        );
+        seen.0[j] = true;
+    }
+    if !seen.1 {
+        if let Some(i) = (0..s.nodes.len())
+            .find(|&i| !(s.nodes[i].pos.is_finite() && s.nodes[i].vel.is_finite()))
+        {
+            seen.1 = true;
+            eprintln!(
+                "(g nan) step {step} pull {:.2} kN: first non-finite node {i} ({}), m {:.3} kg, row built {:.3}, solver {:.3}; broken beams so far {}",
+                pull / 1e3,
+                part(i),
+                s.nodes[i].mass,
+                row(i),
+                solver_row(s, i),
+                s.beams.iter().zip(was).filter(|(bm, &w)| bm.broken && !w).count()
+            );
+            return true;
+        }
+    }
+    false
+}
+
 /// The largest rise of the mechanical energy between frames of the car
 /// standing still (after 1 s to settle, over 1 s): the solver's own energy
 /// noise (the tyres' ground contact chatters), the tolerance of the energy
@@ -1654,6 +1754,9 @@ fn g_pulling_a_door_tears_it_off() {
     let mut last = [(0.0f32, 0.0f32, 0.0f32); 3];
     let (mut first, mut off) = (None, None);
     let was: Vec<bool> = s.beams.iter().map(|bm| bm.broken).collect();
+    let mut nan_seen = (Vec::new(), false);
+    let g_free = std::env::var("G_FREE").is_ok();
+    let m_car: f32 = s.nodes.iter().map(|nd| nd.mass).sum();
     let mut t = 0.0f32;
     while t < 16.0 && off.is_none() {
         let f = rate * t;
@@ -1661,8 +1764,22 @@ fn g_pulling_a_door_tears_it_off() {
             let mi = s.nodes[i].mass;
             s.nodes[i].force += out * (f * mi / m);
         }
+        // In the car's frame (d'Alembert): every node takes its share of the
+        // pull's reaction, −F·mᵢ/M, so its internal loads are exactly those
+        // of the free car pulled by F, without the free car's growing
+        // sideways speed (128 m/s at 77 kN, under the triangles' aero:
+        // `G_FREE=1` pulls the free car, a measurement).
+        if !g_free {
+            for nd in s.nodes.iter_mut() {
+                let mi = nd.mass;
+                nd.force -= out * (f * mi / m_car);
+            }
+        }
         s.step();
         t += STEP;
+        if g_nan_probe(&s, &b, &was, &mut nan_seen, (t / STEP).round() as i64, f) {
+            break;
+        }
         // Each unit's load on the door against its measured strength: the
         // latch assembly (primary and secondary, fully latched) and each
         // hinge, as the ellipse through their longitudinal and transverse
