@@ -2380,10 +2380,7 @@ impl ExplicitBeams {
     /// and its rest length held within (1 − d)·L and (1 + dₑ)·L of its rest
     /// length L now (a negative limit: none), exactly as JBeam mode loads
     /// them. Errors name a pair with no plain beam.
-    pub fn set_jbeam_plastic(
-        &mut self,
-        lines: &[(u32, u32, f32, f32, f32)],
-    ) -> Result<(), String> {
+    pub fn set_jbeam_plastic(&mut self, lines: &[(u32, u32, f32, f32, f32)]) -> Result<(), String> {
         let mut at: HashMap<(u32, u32), usize> = HashMap::new();
         for (j, b) in self.beams.iter().enumerate() {
             if b.kind == ExplicitKind::Plain && b.ty == ExplicitType::Deformable {

@@ -2434,8 +2434,12 @@ fn front_profile(
         // The strip's front at spawn, and the nodes that made it (within 20
         // cm of it): the same material is followed, wherever it moves
         // across the car.
+        // (Each strip half the points' spacing either side, so the six cover
+        // the band's width whatever the node spacing: a 10 cm strip missed
+        // the one-tier car's bumper beam, whose nodes are 0.44 m apart.)
+        let half = 0.05f32.max(0.5 * (hi - lo - 0.10) / 5.0);
         let strip: Vec<usize> = (0..n)
-            .filter(|&i| pick(i) && (l0[i].y - y).abs() < 0.05)
+            .filter(|&i| pick(i) && (l0[i].y - y).abs() < half)
             .collect();
         let f0 = strip.iter().map(|&i| l0[i].x).fold(f32::MIN, f32::max);
         let f1 = strip
@@ -2443,6 +2447,29 @@ fn front_profile(
             .filter(|&&i| l0[i].x > f0 - 0.20)
             .map(|&i| l1[i].x)
             .fold(f32::MIN, f32::max);
+        if std::env::var("PROFILE_WHO").is_ok() {
+            // Which node sets the strip's front after the crash.
+            if let Some(&w) = strip
+                .iter()
+                .filter(|&&i| l0[i].x > f0 - 0.20)
+                .max_by(|&&a, &&c| l1[a].x.total_cmp(&l1[c].x))
+            {
+                let beams = sk
+                    .beams
+                    .iter()
+                    .filter(|bm| bm.a as usize == w || bm.b as usize == w)
+                    .count();
+                eprintln!(
+                    "  profile C{} (structure {structure}): front set by node {w} ({}, group {:?}, {beams} beams, mass {:.2} kg) at spawn {:?} now {:?}",
+                    k + 1,
+                    sk.parts[sk.nodes[w].part as usize],
+                    b.groups.iter().find(|g| g.1.contains(&(w as u32))).map(|g| g.0),
+                    sk.nodes[w].mass,
+                    l0[w],
+                    l1[w]
+                );
+            }
+        }
         *ck = if strip.is_empty() {
             0.0
         } else {
