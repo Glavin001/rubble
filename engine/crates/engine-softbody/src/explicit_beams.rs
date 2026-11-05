@@ -770,6 +770,9 @@ pub struct ExplicitBeams {
     pub groups_now: Vec<u32>,
     /// The node grab applied each step ([`Grab`]); `None` (the default) for none.
     pub grab: Option<Grab>,
+    /// Rigid bodies this vehicle meets ([`crate::explicit_rigid`]); `None` (the
+    /// default) for none, every step unchanged.
+    pub rigid: Option<Box<crate::explicit_rigid::ProxySet>>,
 }
 
 /// A JBeam beam's damping low-pass (`dampCutoffHz`, spec §6): the damping uses
@@ -967,6 +970,7 @@ impl ExplicitBeams {
             groups_last: Vec::new(),
             groups_now: Vec::new(),
             grab: None,
+            rigid: None,
         }
     }
 
@@ -2125,6 +2129,10 @@ impl ExplicitBeams {
         let settings = self.settings;
         // The shapes' culling boxes (none allocated without shapes).
         let shape_bounds: Vec<StaticBox> = self.shapes.iter().map(StaticShape::bounds).collect();
+        let mut rigid = self.rigid.take();
+        if let Some(r) = rigid.as_mut() {
+            r.begin_step(origin, &self.nodes);
+        }
         for i in 0..self.nodes.len() {
             let mut n = self.nodes[i];
             if !n.has(NODE_NO_GROUND) {
@@ -2169,6 +2177,9 @@ impl ExplicitBeams {
                         );
                     }
                 }
+                if let Some(r) = rigid.as_mut() {
+                    n.force += r.node_contact(x, &n);
+                }
             }
             if !n.has(NODE_IMMOVABLE) {
                 n.vel += n.force / n.mass * h;
@@ -2191,6 +2202,10 @@ impl ExplicitBeams {
                 }
             }
             self.nodes[i] = n;
+        }
+        if let Some(mut r) = rigid {
+            r.end_step();
+            self.rigid = Some(r);
         }
         if let Some(g) = self.grab {
             self.grab_pass(g);
