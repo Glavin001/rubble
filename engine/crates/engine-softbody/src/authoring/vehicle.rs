@@ -217,9 +217,11 @@ pub struct Look {
 }
 
 /// A door frame's hinge and latch beams to the pillars: yield force (N) of
-/// each (two to four a door end: FMVSS 206 asks 8.9–11.1 kN of a hinge or
-/// latch system).
-pub const DOOR_HOLD: f32 = 4.5e3;
+/// each (two to four a door end), above FMVSS 206's 11.1 kN for a hinge or
+/// latch system. With them the door ring carries a side pole into the
+/// pillars: the NCAP side pole's residual crush lands in the measured
+/// sedans' band (the `o` test). A 60 kN pull still tears the door off (`g`).
+pub const DOOR_HOLD: f32 = 1.5e4;
 
 /// A door frame's ends bearing on the pillars (compression only): thresholds
 /// × this against the door frame's own (a side load goes into the pillars

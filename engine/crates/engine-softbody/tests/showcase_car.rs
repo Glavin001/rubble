@@ -2262,15 +2262,33 @@ fn n_wall_matches_the_nhtsa_sedans() {
 /// (centre of gravity about z 2.55 m, 0.38 m off the centre line). Measured as
 /// NHTSA does: the residual crush of the struck side's exterior at the pole,
 /// against its pre-test line (in the far side's frame), once the car is at
-/// rest. Medium. Ignored: run with `--ignored`.
+/// rest. Medium; the median over 30–34 km/h lands in the measured sedans'
+/// p10–p90.
 #[test]
-#[ignore]
 fn o_side_pole_matches_the_nhtsa_sedans() {
     let b = built(Resolution::Medium);
-    let kmh: f32 = std::env::var("O_KMH")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(32.0);
+    // 30–34 km/h: the median is judged. O_KMH: one speed only.
+    let speeds: Vec<f32> = match std::env::var("O_KMH").ok().and_then(|v| v.parse().ok()) {
+        Some(k) => vec![k],
+        None => vec![30.0, 31.0, 32.0, 33.0, 34.0],
+    };
+    let mut crushes: Vec<f32> = speeds.iter().map(|&k| side_pole_crush(&b, k)).collect();
+    crushes.sort_by(f32::total_cmp);
+    let crush = crushes[crushes.len() / 2];
+    eprintln!(
+        "(o) side pole: median residual crush at the pole {:.0} mm",
+        crush * 1e3
+    );
+    // §4.11: p10–p90 297–445 mm (hard 169–537).
+    assert!(
+        (0.297..=0.445).contains(&crush),
+        "residual crush at the pole {crush} m"
+    );
+}
+
+/// One NCAP side pole run (see [`o_side_pole_matches_the_nhtsa_sedans`]):
+/// the residual crush at the pole (m).
+fn side_pole_crush(b: &Built, kmh: f32) -> f32 {
     let a = 75.0f32.to_radians();
     let dir = Vec3::new(a.sin(), 0.0, a.cos());
     let s0 = spawn(&b, Vec3::ZERO, 0.0);
@@ -2365,11 +2383,7 @@ fn o_side_pole_matches_the_nhtsa_sedans() {
         0.5 * total * (kmh / 3.6).powi(2) / 1e3
     );
     assert!(finite(&s));
-    // §4.11: p10–p90 297–445 mm (hard 169–537).
-    assert!(
-        (0.297..=0.445).contains(&crush),
-        "residual crush at the pole {crush} m"
-    );
+    crush
 }
 
 /// A quasi-static rig: `held` nodes kept where they are (the rig's
