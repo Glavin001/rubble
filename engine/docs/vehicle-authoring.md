@@ -311,7 +311,8 @@ The character lines are:
   integrated lip spoiler (`deck_lip`). These details are added after the lid
   is relaxed, so they stay crisp.
 * **Fascia.** Raked: the widest line low (0.56 m), the upper fascia leaning
-  10 cm back into the bonnet. A wide, low grille (0.94 m × 0.22 m) with a
+  14 cm back into the bonnet. A low trapezoid grille (0.66 m wide at the
+  top, 0.89 m at the bottom, 0.20 m tall: the face's dark mass sits low) with a
   1.6 cm gloss-black surround and a honeycomb; slim full-LED headlamps (3.5 cm
   at the grille, 1.5 cm at the tip) just under the bonnet's edge, wrapping the
   corners to a pointed tip, with a DRL blade along their upper edge
@@ -375,7 +376,10 @@ opening's edge, the doors' belt edges included, is black rubber.
   of the nearest single-part skin triangles). Where it reaches more than 8 cm
   past that part, it is cut along the smooth zero line of the distance
   difference (marching triangles), and the far side rides the other part
-  (`Bind::Part`). So it parts along a clean line instead of stretching.
+  (`Bind::Part`). So it parts along a clean line instead of stretching. A
+  vertex leaves its piece's part only beyond 9.5 cm (1.5 cm past the cut), so
+  the vertices on the cut line itself stay on their side and the line opens
+  as one clean crack, not a sawtooth of triangles riding alternate parts.
 * **Rigid pieces.** These ride one triangle's orthonormal frame
   (`ShowcaseVisual::rigid`): they move rigidly and never stretch.
   * Lamps, mirrors and handles.
@@ -391,6 +395,8 @@ opening's edge, the doors' belt edges included, is black rubber.
 * **Cabin.** Seats and the steering wheel ride one triangle of their frame
   rigidly (`Bind::GroupRigid`), so a far binding triangle never swings them
   out of the cabin; the dashboard and console ride their members' triangles.
+* **Folds.** A back face whose skinned normal still faces the eye is a
+  sliver folded over in a crush, not a panel's inside: it shades as paint.
 * **Tears.** The renderer keeps a per-node tear field: a skin triangle's
   perimeter against its rest perimeter (`node_rest`), interpolated over each
   vertex's binding nodes. Panels are cut where it crosses ½, a smooth line,
@@ -401,7 +407,12 @@ opening's edge, the doors' belt edges included, is black rubber.
   sun; below the horizon the floor reflected from the shaded point (short
   rays land in the car's own shadow: under the sills, in the arches; far rays
   fade into the horizon), so the flanks carry a crisp horizon line.
-  `showcase-car.html` draws the same cyclorama and floor behind the car; the
+  `showcase-car.html` draws the same cyclorama and floor behind the car,
+  and the car reflected in the floor (`drawReflection`: the opaque level
+  mirrored, a depth pass then one cheap diffuse shade of the nearest surface,
+  blended at 0.22 reflectance fading with height; `?reflect=0` turns it off,
+  `?reflect=0.3` sets it). It costs about 0.1 ms a car (10 cars: 4.97 ms
+  against 3.96 ms without); the
   crash lab's backdrop is a navy cyclorama with a lit horizon band. The paint
   deepens toward grazing (flop); tail lenses are a deep ruby; tyres satin. The clearcoat has a mirror-sharp sun glint over
   a broader sheen. Diffuse light is an analytic lobe fitted to the studio.

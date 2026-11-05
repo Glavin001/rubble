@@ -625,7 +625,11 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 match (mine, near) {
                     (Some(a), Some(z)) => {
                         let zp = sk.nodes[z.0[0] as usize].part;
-                        if a.3 > z.3 + 0.08 && zp != pt {
+                        // 1.5 cm more than the vote's cut (8 cm): a piece cut
+                        // there has vertices on the cut line itself, which
+                        // must stay on their side, or the line opens as a
+                        // sawtooth of triangles riding alternate parts.
+                        if a.3 > z.3 + 0.095 && zp != pt {
                             Some(((z.0, z.1, z.2), zp))
                         } else {
                             Some(((a.0, a.1, a.2), pt))
