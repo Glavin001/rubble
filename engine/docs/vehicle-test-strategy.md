@@ -125,9 +125,10 @@ The ledger (`ExplicitBeamsWorld::enable_ledger`) runs in every scene. The checke
 | Energy | ledger closure ≤ 10⁻³ of start; rise ≤ 0.5 % | `energy_ledger.rs` |
 | Creep | drift ≤ sway + 1 mm | `explicit_jbeam_ext.rs` |
 | Visual drift | ≤ the contact band, 2 cm | contact band |
-| Lid vs rear body; rear-body RMS | 5 mm | **Choice**: millimetres. The lid's inertia at 47 g on about 12 kg is ≤ 5.5 kN, well inside FMVSS 206's 8.9–11 kN. |
+| Lid vs rear body | 37 mm | exact from measured data: a/ω² at a = 47 g (the NHTSA peak's top) for a lid at the lowest measured production hood mode, 17.7 Hz |
+| Rear-body RMS | 5 mm | **Choice**: millimetres. The rear third carries only its own inertia, ≤ 47 g. |
 | Ripple visible | 1 mm | **Choice**: about half a pixel at 2 m |
-| Panel lowest mode | ≥ 48 Hz | exact: deflection a/ω² ≤ 5 mm at a = 47 g, the top of the NHTSA peak range. **Not met by real hoods**: measured first modes are 17.7–41.5 Hz, and design targets are 25–40 Hz (`vehicle-authoring.md`, "Lids: measured modal data"); the measured band is the lids' target |
+| Lids' (bonnet, boot lid) first mode | 17.7–41.5 Hz | measured production hoods on the car: first torsion 17.7 Hz (experimental modal analysis, MDPI *Machines* 12(12) 862, 2024) to 41.5 Hz (the least first mode of a lightweight hood's design variants); design targets quoted 25–30 Hz and "above 40 Hz". The decklid takes the same range (same construction, a Choice). Replaces the earlier ≥ 48 Hz, which no measured hood reaches. Doors and fenders are reported |
 
 ### Results
 
@@ -144,7 +145,7 @@ The ledger (`ExplicitBeamsWorld::enable_ledger`) runs in every scene. The checke
 | Head-on contacts faster than r/h | 15 of 300,040 (59.9 m/s) | 15 of 197,234 (59.6 m/s) | FAIL, ignored |
 | Visual drift from the collision skin (wall / pole) | 200 / 206 mm | 271 / 153 mm | FAIL, ignored |
 | Pole: far side elastic, far doors closed | 40 past, 22 broken; hardware holds | 89 past, 10 broken; door_f_r.latch_secondary and door_r_r.hinge_upper break | FAIL, ignored |
-| Panels' lowest mode ≥ 48 Hz | bootlid 5.4, bonnet 6.7, doors 31–37, fender 31 Hz | bootlid 2.5, bonnet 4.8, doors 17–27, fender 91 Hz | FAIL, ignored |
+| Lids' first mode 17.7–41.5 Hz (`lids_first_mode_in_the_measured_range`) | bootlid 5.4, bonnet 6.7 Hz | bootlid 6.7, bonnet 8.7 Hz (2026-11-05, later) | FAIL, ignored |
 | Body sheet edges yield in tension at ≥ (√3/4)σ_y·t·L | 1029 of 1267 below (median 0.06) | 1132 of 1651 below (median 0.155) | FAIL, ignored. Fixed upstream at 1444ea75 (`rubble_tension_yield`); un-ignore after merging. |
 
 **Community cars** on Rubble's solver (56 km/h wall, rear third), as a control (`community_wall_56_report`):
@@ -172,7 +173,7 @@ So the floppy rear panels yield where they stretch.
 
 **3. Ripple.**
 - Lid and bonnet modes are 2.5–7 Hz; doors are 17–37 Hz.
-- For a given struck speed the amplitude is v/ω. A panel at the 48 Hz needed for millimetres would ring 7–19× smaller and decay ζω-proportionally faster.
+- For a given struck speed the amplitude is v/ω. A lid in the measured 17.7–41.5 Hz would ring 2–8× smaller and decay ζω-proportionally faster.
 - Stiffness-proportional damping lowers the modal ratio below the per-beam ζ (layer 1). The measured modal ζ is 0.017–0.055.
 - A real steel panel's lowest mode cannot be lower than that of a flat plate of its gauge and spans. Curvature and an inner skin only raise it. The flat simply supported plate gives f₁₁ = (π/2)(1/a² + 1/b²)·√(D/ρt): 11–19 Hz for these lids. Ours are 2.5–5.4 Hz, so for the same struck speed their amplitude is 3.4–4.5× a real lid's, at least.
 

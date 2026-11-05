@@ -1379,7 +1379,7 @@ rigidity.**
 - **Not adopted yet** because of `f`. The fix is that ladder's mass or its
   tie, to be done with the lids' double skin.
 
-**Lids: measured modal data (for `panels_are_stiff_enough_for_millimetres_at_47_g`).**
+**Lids: measured modal data (`lids_first_mode_in_the_measured_range`, which replaced the ≥ 48 Hz invariant).**
 - **Published hoods measured on the car:**
   - first torsion 17.7 Hz and 22.9 Hz (MDPI *Machines* 12(12) 862, 2024,
     experimental modal analysis of a front hood);
