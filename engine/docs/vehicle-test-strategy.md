@@ -142,7 +142,8 @@ The ledger (`ExplicitBeamsWorld::enable_ledger`) runs in every scene. The checke
 | Lid / rear body (head-on) | 172/18 mm; 9.9/70 mm | 253/126 mm; 29.6/173 mm | FAIL, ignored |
 | Ripple from 0.5 s, worst part | bootlid 17.9 mm, bonnet 14.7, body 7.4 | bumper_r 15.0, bonnet 7.4, bootlid 6.4 | FAIL, ignored |
 | Head-on contacts faster than r/h | 15 of 300,040 (59.9 m/s) | 15 of 197,234 (59.6 m/s) | FAIL, ignored |
-| Visual drift from the collision skin (wall / pole), sampled every 0.1 s | 10.7 / 19.2 mm | 15.1 / 10.0 mm | **pass** (live) |
+| Visual drift from the collision skin (wall / pole), sampled every 0.1 s | 204.7 / 39.8 mm | 168.4 / 132.2 mm | FAIL, ignored. Panel edges past their last node row; waits on hem rows (see 5). |
+| Detached door: no drawn triangle joins it to the car (0.3 s after it comes off) | n/a | 0 (272 without the fallback) | **pass** (live) |
 | Pole: far side elastic, far doors closed | 40 past, 22 broken; hardware holds | 89 past, 10 broken; door_f_r.latch_secondary and door_r_r.hinge_upper break | FAIL, ignored |
 | Panels' lowest mode ≥ 48 Hz | bootlid 5.4, bonnet 6.7, doors 31–37, fender 31 Hz | bootlid 2.5, bonnet 4.8, doors 17–27, fender 91 Hz | FAIL, ignored |
 | Body sheet edges yield in tension at ≥ (√3/4)σ_y·t·L | 1029 of 1267 below (median 0.06) | 1132 of 1651 below (median 0.155) | FAIL, ignored. Fixed upstream at 1444ea75 (`rubble_tension_yield`); un-ignore after merging. |
@@ -181,7 +182,7 @@ So the floppy rear panels yield where they stretch.
 - In a 56 km/h head-on, 5–8 per 100,000 node samples near the other car exceed that, up to 60 m/s.
 - The lossless fix is a swept crossing test for fast nodes (solver).
 
-**5. Visual drift.** Fixed (feat/showcase-car-visual).
+**5. Visual drift.** Binding fixed (feat/showcase-car-visual). The remaining drift is content: it needs node rows at the panels' edges.
 - The worst exterior visual vertices were bound to skin triangles 0.22–0.37 m away along the normal.
 - When such a triangle rotates, the vertex swings 15–18 cm off the collision skin.
 - Root cause: each vertex could bind only to its voted part's single-part skin triangles. Every triangle across a shut line, and every one-row part (no single-part triangle), was excluded. A vertex there took the part's nearest remaining triangle, often another sheet of the same part.
@@ -190,6 +191,12 @@ So the floppy rear panels yield where they stretch.
   - Off the skin, a vertex rides a frame of three of its own part's nodes, as a BeamNG flexbody does. The frame is the part's nearest well-shaped, compact one, with at most one node across the part's border.
   - Structure-group pieces (dash, console, aprons) ride their groups' nodes.
   - The build fails if a vertex lies beyond `BIND_MAX` (0.3 m), or `GROUP_BIND_MAX` (0.45 m) on structure groups.
+- Shut-line fallback (`ShowcaseVisual::alt`): a vertex riding a frame across a part border also gets its own part's frame at build time. It switches to that frame for good once the frame dies, which happens when:
+  - a beam on its death list breaks: its collision triangle's §18 break list, else its sides' cross-part beams, else the part's hinges and latches;
+  - or the frame tears.
+- The renderer's `skin()` and `deform_beams` do the same.
+- Without the fallback, a pulled-off door drew 272 triangles of body skin joining it to the car; with the fallback it draws 0.
+- Once a lid pops or a latch breaks, its edge rides the lid's own nodes. Those nodes are up to 0.15 m inboard, so the drift grows (above).
 - Riding only the part's own nodes at shut lines was measured at 98–119 mm of drift. The panels' drawn edges lie up to 0.15 m past their last node row. About 31 % of body vertices ride a shut-line triangle. In the crashes, up to 215 of about 1700 such samples stretch past 1.5×, and the renderer tears them at 2.5×. The physics' own collision triangles stretch the same way.
 
 **6. Per-node air drag.**

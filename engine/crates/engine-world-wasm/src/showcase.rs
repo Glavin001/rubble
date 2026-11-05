@@ -145,10 +145,18 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     }
     set(&vis, "textures", &tex.into());
     if !v.tex.is_empty() {
-        let t: Vec<u16> = v.tex.iter().map(|&x| if x == u16::MAX { 0 } else { x + 1 }).collect();
+        let t: Vec<u16> = v
+            .tex
+            .iter()
+            .map(|&x| if x == u16::MAX { 0 } else { x + 1 })
+            .collect();
         set(&vis, "tex", &js_sys::Uint16Array::from(t.as_slice()).into());
     }
-    set(&vis, "edgeLength", &JsValue::from(engine_softbody::authoring::skin::median_edge(v)));
+    set(
+        &vis,
+        "edgeLength",
+        &JsValue::from(engine_softbody::authoring::skin::median_edge(v)),
+    );
     set(
         &vis,
         "positions",
@@ -200,6 +208,30 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         &Uint8Array::from(v.smooth.as_slice()).into(),
     );
     set(&vis, "rigid", &Uint8Array::from(v.rigid.as_slice()).into());
+    // Shut-line fallbacks (skin.rs `ShowcaseVisual::alt`): per vertex its
+    // own-part binding + 1 (0 none), the bindings, the frame each replaces,
+    // and per such frame the beams whose break kills it.
+    set(&vis, "alt", &Uint32Array::from(v.alt.as_slice()).into());
+    let an: Vec<u32> = v.alt_nodes.iter().flatten().copied().collect();
+    set(&vis, "altNodes", &Uint32Array::from(an.as_slice()).into());
+    set(
+        &vis,
+        "altCoords",
+        &f32s(v.alt_coords.iter().flatten().copied()),
+    );
+    set(
+        &vis,
+        "altNormal",
+        &f32s(v.alt_normal.iter().flatten().copied()),
+    );
+    set(&vis, "altRest", &f32s(v.alt_rest.iter().flatten().copied()));
+    set(
+        &vis,
+        "altTri",
+        &Uint32Array::from(v.alt_tri.as_slice()).into(),
+    );
+    let sd: Vec<u32> = v.skin_death.iter().flatten().copied().collect();
+    set(&vis, "skinDeath", &Uint32Array::from(sd.as_slice()).into());
     // Damage units (skin.rs `DamageUnit`): per unit its name, kind, beams
     // (CSR: unitStart, unitBeams, this vehicle's solver beam indices), strain
     // trigger and shard count; per vertex its unit (u32 max: none) and shard
@@ -214,13 +246,29 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         start.push(ubeams.len() as u32);
     }
     set(&vis, "unitNames", &names.into());
-    set(&vis, "unitStart", &Uint32Array::from(start.as_slice()).into());
-    set(&vis, "unitBeams", &Uint32Array::from(ubeams.as_slice()).into());
+    set(
+        &vis,
+        "unitStart",
+        &Uint32Array::from(start.as_slice()).into(),
+    );
+    set(
+        &vis,
+        "unitBeams",
+        &Uint32Array::from(ubeams.as_slice()).into(),
+    );
     let kinds: Vec<u8> = v.units.iter().map(|u| u.kind).collect();
     set(&vis, "unitKind", &Uint8Array::from(kinds.as_slice()).into());
-    set(&vis, "unitStrain", &f32s(v.units.iter().map(|u| u.strain.min(f32::MAX))));
+    set(
+        &vis,
+        "unitStrain",
+        &f32s(v.units.iter().map(|u| u.strain.min(f32::MAX))),
+    );
     let shards: Vec<u32> = v.units.iter().map(|u| u.shards).collect();
-    set(&vis, "unitShards", &Uint32Array::from(shards.as_slice()).into());
+    set(
+        &vis,
+        "unitShards",
+        &Uint32Array::from(shards.as_slice()).into(),
+    );
     set(&vis, "unit", &Uint32Array::from(v.unit.as_slice()).into());
     set(&vis, "shard", &Uint8Array::from(v.shard.as_slice()).into());
     set(&vis, "beamRest0", &f32s(v.beam_rest0.iter().copied()));
@@ -299,7 +347,10 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
             )
         })
         .collect();
-    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let pc = v.get("pc").and_then(|t| t.as_str());
     let paint = v
         .get("paint")
@@ -324,9 +375,15 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
         .map_err(err)?
         .0
     } else {
-        ExplicitBeams::from_jbeam(&refs, pc, Vec3::ZERO, Vec3::ZERO, ExplicitBeamsSettings::default())
-            .map_err(err)?
-            .0
+        ExplicitBeams::from_jbeam(
+            &refs,
+            pc,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            ExplicitBeamsSettings::default(),
+        )
+        .map_err(err)?
+        .0
     };
     let mut all = Vec::new();
     for m in meshes.iter() {
@@ -337,22 +394,43 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
         all.extend(flexmesh::read_collada(&text).map_err(|e| err(format!("{name}: {e}")))?);
     }
     let mut mats = std::collections::HashMap::new();
-    for m in v.get("materials").and_then(|m| m.as_array()).into_iter().flatten() {
-        mats.extend(flexmesh::read_materials(m.get(1).and_then(|x| x.as_str()).unwrap_or("")));
+    for m in v
+        .get("materials")
+        .and_then(|m| m.as_array())
+        .into_iter()
+        .flatten()
+    {
+        mats.extend(flexmesh::read_materials(
+            m.get(1).and_then(|x| x.as_str()).unwrap_or(""),
+        ));
     }
-    let (vis, rep) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &all, &mats, paint).map_err(err)?;
+    let (vis, rep) =
+        flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &all, &mats, paint).map_err(err)?;
     // The distant level: the meshes clustered (flexmesh::cluster).
-    let far: Vec<flexmesh::DaeMesh> = all.iter().map(|m| flexmesh::cluster(m, flexmesh::LOD_CELL)).collect();
-    let (lod, lrep) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &far, &mats, paint).map_err(err)?;
+    let far: Vec<flexmesh::DaeMesh> = all
+        .iter()
+        .map(|m| flexmesh::cluster(m, flexmesh::LOD_CELL))
+        .collect();
+    let (lod, lrep) =
+        flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &far, &mats, paint).map_err(err)?;
     // A third, coarser level: clustered on FAR_CELL.
-    let far_cell = v.get("farCell").and_then(|x| x.as_f64()).map_or(flexmesh::FAR_CELL, |x| x as f32);
-    let farther: Vec<flexmesh::DaeMesh> = all.iter().map(|m| flexmesh::cluster(m, far_cell)).collect();
-    let (far_vis, _) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &farther, &mats, paint).map_err(err)?;
+    let far_cell = v
+        .get("farCell")
+        .and_then(|x| x.as_f64())
+        .map_or(flexmesh::FAR_CELL, |x| x as f32);
+    let farther: Vec<flexmesh::DaeMesh> =
+        all.iter().map(|m| flexmesh::cluster(m, far_cell)).collect();
+    let (far_vis, _) =
+        flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &farther, &mats, paint).map_err(err)?;
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
     set(&out, "visualLod", &visual_js(&lod).into());
     set(&out, "visualFar", &visual_js(&far_vis).into());
-    set(&out, "lodDistance", &JsValue::from(flexmesh::lod_distance(flexmesh::LOD_CELL)));
+    set(
+        &out,
+        "lodDistance",
+        &JsValue::from(flexmesh::lod_distance(flexmesh::LOD_CELL)),
+    );
     set(&out, "lodTriangles", &JsValue::from(lrep.triangles as u32));
     let r = Object::new();
     set(&r, "flexbodies", &JsValue::from(rep.flexbodies as u32));
