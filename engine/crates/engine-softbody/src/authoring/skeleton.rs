@@ -180,6 +180,10 @@ pub struct Skeleton {
     pub full_contact: bool,
     /// Exact beam lengths (spec §33): `rubble_exact_lengths`.
     pub exact_lengths: bool,
+    /// The BeamNG profile (spec §36): `rubble_beamng_profile` (exact
+    /// lengths, no idle-triangle throttle, two-body vehicle and self
+    /// contact).
+    pub beamng_profile: bool,
     /// The nodes are the vehicle at rest on flat ground at this height
     /// (`rubble_rest_pose`): it spawns standing, its beams' rest lengths
     /// (`rest_scale`) the unloaded design's.
@@ -1122,6 +1126,9 @@ impl Skeleton {
         let _ = writeln!(s, "enable_advanced_deformation\n");
         if self.exact_lengths {
             let _ = writeln!(s, "rubble_exact_lengths\n");
+        }
+        if self.beamng_profile {
+            let _ = writeln!(s, "rubble_beamng_profile\n");
         }
         if self.full_contact {
             let _ = writeln!(s, "rubble_full_contact\n");

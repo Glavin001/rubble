@@ -5575,3 +5575,189 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
 /// The largest difference between a one-tier node's mass and its real local
 /// mass (kg): none is moved; this is the f32 sum's rounding.
 const MOVED_MASS_TOLERANCE: f32 = 1.0e-4;
+
+/// The topology against the step's bound, per part (`--ignored`, a
+/// measurement): nodes, beam ends per node by kind (sheet edges, member
+/// beams, sheet–member, dashpots, ties, the rest), the share of nodes whose
+/// Gershgorin row is at the bound, and the beams' median k·L, yield strain
+/// k·L / deform and springback after 20 % plastic strain. BX values for
+/// comparison: `examples/jbeam_yield_strain.rs`.
+#[test]
+#[ignore]
+fn topology_census() {
+    use engine_softbody::authoring::skeleton::BeamType;
+    let res = std::env::var("RES")
+        .ok()
+        .and_then(|r| Resolution::parse(&r))
+        .unwrap_or(Resolution::Medium);
+    let b = built(res);
+    let sk = &b.skeleton;
+    let shell: HashSet<u32> = b.shell.nodes.iter().copied().collect();
+    let member: HashSet<u32> = b
+        .groups
+        .iter()
+        .filter(|(k, _)| !k.contains("flange") && !k.contains("rigidifier"))
+        .flat_map(|(_, g)| g.iter().copied())
+        .collect();
+    let rows = sk.bound_rows();
+    let key_of = |name: &str| -> String {
+        if name.starts_with("door") {
+            "door".into()
+        } else if name.starts_with("fender") {
+            "fender".into()
+        } else {
+            name.into()
+        }
+    };
+    let mut by: std::collections::BTreeMap<String, (HashSet<u32>, [usize; 6], Vec<f32>, Vec<f32>)> =
+        Default::default();
+    // The bound's row by kind at saturated nodes: stiffness h²k and damping
+    // 2hc, as shares of the summed row.
+    let mut share: std::collections::BTreeMap<String, [f64; 12]> = Default::default();
+    for bm in &sk.beams {
+        let (pa, pb) = (sk.nodes[bm.a as usize].part, sk.nodes[bm.b as usize].part);
+        if pa != pb {
+            continue;
+        }
+        let key = key_of(&sk.parts[pa as usize]);
+        let e = by.entry(key).or_default();
+        e.0.insert(bm.a);
+        e.0.insert(bm.b);
+        let (sa, sb) = (shell.contains(&bm.a), shell.contains(&bm.b));
+        let (ma, mb) = (member.contains(&bm.a), member.contains(&bm.b));
+        let cat = if bm.damper {
+            3
+        } else if bm.tie {
+            4
+        } else if bm.ty != BeamType::Normal {
+            5
+        } else if sa && sb && !(ma && mb) {
+            0
+        } else if ma && mb {
+            1
+        } else if (sa || ma) && (sb || mb) {
+            2
+        } else {
+            5
+        };
+        e.1[cat] += 2;
+        {
+            let h = engine_softbody::authoring::skeleton::STEP;
+            let l = sk.pos(bm.a).distance(sk.pos(bm.b));
+            let (qk, qc) = (
+                (h * h * bm.mat.k_at(l)) as f64,
+                (2.0 * h * bm.mat.damp) as f64,
+            );
+            let sh = share.entry(key_of(&sk.parts[pa as usize])).or_default();
+            for i in [bm.a, bm.b] {
+                if rows[i as usize] > 0.95 {
+                    let m = sk.nodes[i as usize].mass as f64;
+                    sh[cat] += qk / m;
+                    sh[6 + cat] += qc / m;
+                }
+            }
+        }
+        if !bm.damper && bm.ty == BeamType::Normal && bm.mat.deform < 1.0e8 {
+            let l = sk.pos(bm.a).distance(sk.pos(bm.b));
+            let kl = bm.mat.k_at(l) * l;
+            e.2.push(kl);
+            e.3.push(bm.mat.deform / kl);
+        }
+    }
+    {
+        let mut in_tri: HashSet<u32> = HashSet::new();
+        for t in &b.shell.tris {
+            in_tri.extend(t.iter().copied());
+        }
+        let lone: Vec<(u32, Vec3, f32)> = b
+            .shell
+            .nodes
+            .iter()
+            .filter(|i| !in_tri.contains(i))
+            .map(|&i| (i, sk.pos(i), sk.nodes[i as usize].mass))
+            .collect();
+        eprintln!("shell nodes in no skin triangle: {lone:?}");
+    }
+    // `TOPO_NODE=x,y,z`: every beam at the node nearest that point (its
+    // other end's groups, length, k, kind), to see what fills its row.
+    if let Ok(p) = std::env::var("TOPO_NODE") {
+        let v: Vec<f32> = p.split(',').filter_map(|x| x.parse().ok()).collect();
+        let q = Vec3::new(v[0], v[1], v[2]);
+        let all: Vec<u32> = (0..sk.nodes.len() as u32).collect();
+        let n = sk.nearest(q, &all, 1)[0];
+        let gname = |i: u32| -> String {
+            let g: Vec<&str> = b
+                .groups
+                .iter()
+                .filter(|(_, g)| g.contains(&i))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            let sh = if shell.contains(&i) { "shell " } else { "" };
+            format!("{sh}{}", g.join("+"))
+        };
+        eprintln!(
+            "node {n} at {:.3?} mass {:.2} kg row {:.2}: {}",
+            sk.pos(n),
+            sk.nodes[n as usize].mass,
+            rows[n as usize],
+            gname(n)
+        );
+        for bm in sk.beams.iter().filter(|bm| bm.a == n || bm.b == n) {
+            let o = if bm.a == n { bm.b } else { bm.a };
+            let l = sk.pos(n).distance(sk.pos(o));
+            eprintln!(
+                "   to {o:>5} {:.3?} L {:.3} k {:.2e} kL {:.2e} deform {:.2e} c {:.1} {}{}{:?}: {}",
+                sk.pos(o) - sk.pos(n),
+                l,
+                bm.mat.k_at(l),
+                bm.mat.k_at(l) * l,
+                bm.mat.deform,
+                bm.mat.damp,
+                if bm.tie { "tie " } else { "" },
+                if bm.damper { "damper " } else { "" },
+                bm.ty,
+                gname(o)
+            );
+        }
+    }
+    let med = |v: &mut Vec<f32>| {
+        if v.is_empty() {
+            return f32::NAN;
+        }
+        v.sort_by(|a, b| a.total_cmp(b));
+        v[v.len() / 2]
+    };
+    eprintln!("part: nodes; ends per node (sheet, member, sheet–member, dashpot, tie, other) total; at the bound; k·L p50 (N); ε_y p50; springback at 20 %");
+    for (k, (nodes, ends, kl, eps)) in &mut by {
+        let n = nodes.len() as f32;
+        let total: usize = ends.iter().sum();
+        let sat = nodes.iter().filter(|&&i| rows[i as usize] > 0.95).count() as f32 / n;
+        let e = med(eps);
+        eprintln!(
+            "{k:>12}: {n:>4}; {:?} {:.1}; {:.0} %; {:.2e}; {:.4}; {:.2}",
+            ends.iter()
+                .map(|&x| (x as f32 / n * 10.0).round() / 10.0)
+                .collect::<Vec<_>>(),
+            total as f32 / n,
+            sat * 100.0,
+            med(kl),
+            e,
+            e / (e + 0.2)
+        );
+        if let Some(sh) = share.get(k) {
+            let t: f64 = sh.iter().sum();
+            eprintln!(
+                "{:>12}  row at the bound, stiffness {:?} damping {:?} %",
+                "",
+                sh[..6]
+                    .iter()
+                    .map(|x| (x / t * 100.0).round())
+                    .collect::<Vec<_>>(),
+                sh[6..]
+                    .iter()
+                    .map(|x| (x / t * 100.0).round())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}

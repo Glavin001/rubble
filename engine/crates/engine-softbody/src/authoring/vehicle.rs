@@ -646,6 +646,11 @@ pub struct VehicleDef {
     /// One tier: crush members that fold progressively ([`CrushSpec`]).
     #[serde(default)]
     pub crush: Vec<CrushSpec>,
+    /// One tier: the floor and the roof, which no pole reaches, at the
+    /// interior's coarser spacing ([`super::body::Interior`]); `None`: the
+    /// pole lanes everywhere.
+    #[serde(default)]
+    pub interior: Option<super::body::Interior>,
 }
 
 /// One tier: a crush member (a rail, a bumper beam) that folds
@@ -948,6 +953,25 @@ impl Grades {
     }
 }
 
+/// A point's distance to a polyline, the polyline's unit tangent there and
+/// the point's arc fraction along it.
+fn path_distance(path: &[Vec3], q: Vec3) -> (f32, Vec3, f32) {
+    let mut best = (f32::MAX, Vec3::Z, 0.0);
+    let total: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
+    let mut acc = 0.0;
+    for w in path.windows(2) {
+        let d = w[1] - w[0];
+        let l = d.length().max(1e-6);
+        let u = ((q - w[0]).dot(d) / (l * l)).clamp(0.0, 1.0);
+        let e = q.distance(w[0] + d * u);
+        if e < best.0 {
+            best = (e, d / l, (acc + u * l) / total.max(1e-6));
+        }
+        acc += l;
+    }
+    best
+}
+
 /// Build the skeleton and its `.truck`.
 pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let grades = def.grades.scaled(params.strength);
@@ -955,12 +979,22 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let len = def.profile.length;
     let mut sk = Skeleton::new(&def.name);
     let one = def.one_tier;
-    let spacing = if one {
+    let mut spacing = if one {
         res.spacing().pole_lanes()
     } else {
         res.spacing()
     };
-    let shell = build_shell(&def.profile, &spacing, &def.stations, &mut sk);
+    let interior = def.interior.filter(|_| one);
+    if let Some(it) = interior.as_ref().filter(|it| it.floor > 0.0) {
+        spacing.floor = it.floor;
+    }
+    let shell = build_shell(
+        &def.profile,
+        &spacing,
+        &def.stations,
+        interior.as_ref(),
+        &mut sk,
+    );
     check_closed(&shell.tris).map_err(|e| format!("shell skin: {e}"))?;
     // Parts: the first panel whose region holds a node owns it.
     let mut panel_of: HashMap<u32, usize> = HashMap::new();
@@ -1308,6 +1342,17 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let mut lane_beams: Vec<(usize, f32)> = Vec::new();
     let mut truss_names: Vec<String> = Vec::new();
     let mut snap_pool: Vec<u32> = shell.nodes.clone();
+    // One tier: the shell's bend beams (two bays long) in a member's lane
+    // stay the sheet's bending: the lane's edges are its chord already, and
+    // a chord twice over in parallel would carry twice its section's yield.
+    // `LANE_BENDS=1` makes them chords too (a measurement switch).
+    let shell_bends: std::collections::HashSet<(u32, u32)> = shell
+        .beams
+        .iter()
+        .filter(|b| b.2 == ShellBeam::Bend)
+        .map(|b| (b.0.min(b.1), b.0.max(b.1)))
+        .collect();
+    let lane_bends_stay = std::env::var("LANE_BENDS").map_or(true, |v| v != "1");
     for m in &def.members {
         let base = grades.get(&m.grade)?.stiffer(m.stiff);
         let sides: &[f32] = if m.mirrored { &[1.0, -1.0] } else { &[1.0] };
@@ -1351,6 +1396,26 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             };
             let spec = m.clone();
             let mat = move |t: f32| base.scaled(spec.scale_at(t));
+            // One tier: the shell nodes in the member's lane (below), known
+            // before its truss so the truss leaves out what the lane already
+            // is: its longitudinals and face diagonals between two lane
+            // nodes (the lane's shell beams are that chord and that face).
+            // `LANE_TRUSS=1` keeps them (a measurement switch).
+            let lane_pre: std::collections::HashSet<u32> =
+                if one && m.attach > 0 && std::env::var("LANE_TRUSS").map_or(true, |v| v != "1") {
+                    let r = 0.5 * m.width.max(m.height) + LANE_REACH;
+                    shell
+                        .nodes
+                        .iter()
+                        .copied()
+                        .filter(|&i| {
+                            sk.nodes[i as usize].part == part
+                                && path_distance(&path, sk.pos(i)).0 <= r
+                        })
+                        .collect()
+                } else {
+                    Default::default()
+                };
             let truss: Truss = box_truss(
                 &mut sk,
                 &path,
@@ -1373,6 +1438,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 m.section,
                 m.catch && !one,
                 &pool,
+                &lane_pre,
             );
             snap_pool.extend(truss.stations.iter().flatten().copied());
             // The frame: every member's stations (not its catchers); a door's
@@ -1533,6 +1599,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         || sk.beams[j].ty != BeamType::Normal
                         || sk.beams[j].group != 0
                         || sk.beams[j].tie
+                        || (lane_bends_stay && shell_bends.contains(&(a.min(b), a.max(b))))
                     {
                         continue;
                     }
@@ -2969,6 +3036,9 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             }
         }
         sk.exact_lengths = true;
+        // The profile it ships with (spec §36). `BEAMNG_PROFILE=0` leaves the
+        // line out (a measurement switch: the RoR profile's contact rule).
+        sk.beamng_profile = std::env::var("BEAMNG_PROFILE").map_or(true, |v| v != "0");
         sk.cap_to_bound()?;
         for (b, &e) in sk.beams.iter_mut().zip(&elong) {
             if e >= 0.0 {
@@ -4641,6 +4711,16 @@ fn preload(sk: &mut Skeleton, def: &VehicleDef) {
 /// node) until it fits the solver's 3,000 triangles; closed like the fine skin.
 pub fn coarse_skin(sk: &Skeleton, shell: &Shell) -> Result<Vec<[u32; 3]>, String> {
     use super::body::orient;
+    // Minor rings ([`super::body::Interior`]): the fine skin itself (the
+    // strides below assume full rings).
+    if shell.rings.iter().any(|r| r.minor) {
+        if shell.tris.len() > 2900 {
+            return Err("the collision skin does not fit 3,000 triangles".into());
+        }
+        let tris = orient(shell.tris.clone(), &|i| sk.pos(i));
+        check_closed(&tris).map_err(|e| format!("collision skin: {e}"))?;
+        return Ok(tris);
+    }
     for (ring_stride, node_stride) in [(1usize, 1usize), (2, 1), (1, 2), (2, 2), (3, 2), (3, 3)] {
         let tris = coarse_with(sk, shell, ring_stride, node_stride);
         if tris.len() <= 2900 {
