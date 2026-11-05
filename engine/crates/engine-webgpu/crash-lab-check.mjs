@@ -45,7 +45,7 @@ const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', hires: 'car=hires',
   mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck',
   // Imported BeamNG mods drawn with their flexbodies (?mod=: the lab reads the
   // folder's files.json, which this server lists).
-  supercar: 'mod=/__mods/monster_supercar/vehicles/supercar', tutorial: 'mod=/__mods/morzbng_tutorial/vehicles/tutorial&pc=none' }; // (its .pc is not valid JSON: the slot defaults)
+  supercar: 'mod=/__mods/monster_supercar/vehicles/supercar&jbeamMode=native', tutorial: 'mod=/__mods/morzbng_tutorial/vehicles/tutorial&pc=none' }; // (its .pc is not valid JSON: the slot defaults)
 if (!CARS[CAR]) throw new Error(`--car: one of ${Object.keys(CARS).join(', ')}`);
 const carFile = CARS[CAR].startsWith('truck=') ? join(LOCAL, CARS[CAR].split('/__local/')[1])
   : CARS[CAR].startsWith('mod=') ? join(MODS, CARS[CAR].split('/__mods/')[1].split('&')[0]) : null;

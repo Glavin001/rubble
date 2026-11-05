@@ -150,6 +150,9 @@ const RUNS = [
   // Imported BeamNG vehicles' flexbodies and props at rest (?mod=).
   ['mod_supercar_three', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=three&dist=6'],
   ['mod_supercar_front', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=0.5,0.2,1&dist=5'],
+  ['mod_supercar_lod', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=three&dist=24'],
+  ['mod_supercar_perf_n10', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=three&perf=1&n=10&dist=16'],
+  ['mod_supercar_perf_n10_far', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=three&perf=1&n=10&dist=30'],
   ['mod_tutorial_three', 'mod=/__mods/morzbng_tutorial/vehicles/tutorial&pc=none&freeze=0&cam=three&dist=6'],
   // Visual damage = physics damage, every frame.
   ['damage_rest', 'scene=idle&freeze=1.5&cam=three&check=damage'],

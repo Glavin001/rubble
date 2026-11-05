@@ -1143,7 +1143,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // Or an imported JBeam vehicle's flexbodies and props (?mod=).
     let importVis = null;
     const bodyVisual = () => carKind === 'showcase' ? showcaseBuilt().visual
-      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native', materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; return r.visual; })());
+      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native', materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = r.visualLod; r.visual.lodDistance = r.lodDistance; return r.visual; })());
     const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
     let bodyFor = { layout: null, pos: null }, bodyIds = [];
     const syncBody = () => {
@@ -1151,7 +1151,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (!pos) return false;
       if (bodyFor.layout !== xlayout) {
         for (const id of bodyIds) bodyR.removeCar(id);
-        bodyIds = xlayout.vehicles.map((v, i) => bodyR.addCar(bodyVisual(), { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i }));
+        bodyIds = xlayout.vehicles.map((v, i) => { const vis = bodyVisual(); return bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: vis.lod ?? null, lodDistance: vis.lodDistance ?? 18 }); });
         bodyFor.step = null;
         bodyFor.layout = xlayout;
       }

@@ -633,6 +633,54 @@ opening's edge, the doors' belt edges included, is black rubber.
 To restyle, change `design::sedan_styling` (cut lines, outlines, section
 shapes) and the profile. The tools stay the same.
 
+## Imported JBeam vehicles' visual layer
+
+`engine-softbody/src/flexmesh.rs` (clean room: BeamNG's public flexbody and
+prop documentation, the Collada 1.4 specification) gives an imported BeamNG
+vehicle the same visual format as the authored car, so
+`showcase-car-render.mjs` skins, shades and damages it the same way.
+
+* **Meshes.** `read_collada` reads a `.dae`: triangles, polylists and
+  polygons (fanned), scene-node transforms (matrix, translate, rotate,
+  scale), `Z_UP` or `Y_UP`. Corners equal in position, normal and texture
+  coordinates are welded into one vertex (exporters write each corner on its
+  own; the supercar's 4.6M corners are 0.67M vertices).
+* **Flexbodies.** Each `flexbodies` row (`jbeam::assembled_rows`) binds its
+  mesh (a scene node's or a geometry's name) to its node groups' nodes
+  (`desc.node_group_nodes`): every vertex on the nearest node and the most
+  perpendicular pair of others (`flexbody::bind`). Wheel meshes, whose groups
+  are the nodes a `pressureWheels` row makes, bind to those (the solver
+  appends them after the desc's nodes). A row's `pos`, `rot`, `scale` move
+  the mesh. A desc node maps to the solver node at its rest position, so the
+  binding holds on either spawn path (`.truck` or JBeam mode).
+* **Props.** Each `props` row puts its mesh rigidly on `idRef`, `idX`,
+  `idY`; a lamp's (`func` a light) lit parts are emissive.
+* **Deform groups.** A row's `deformGroup` is a damage unit: the beams of
+  that group (`desc.beam_group_names`), broken once one breaks or yields past
+  the group's `deformationTriggerRatio`, the solver's own rule. Glass then
+  shatters (a `windshield` mesh cracks), a lamp goes dark. The renderer
+  computes it from the beam buffer each update (C1's check applies).
+* **Materials.** A Collada material picks a shading class by its name
+  (glass, lamp lens, chrome, tyre, rim, trim, interior, engine, else paint);
+  the vehicle's `*.materials.json` makes it glass when translucent, emissive
+  when it glows, and gives untextured materials their diffuse colour.
+  Textures are not read (a textured material shades flat grey; paint takes
+  the paint).
+* **Level of detail.** The distant level clusters each mesh on a 3 cm grid
+  per material and normal direction (`cluster`, `LOD_CELL`), switching where
+  a cell is 2.6 pixels at 1080p (16 m). The near level is the full mesh.
+* **Pages.** wasm `jbeamVisual(spec, meshes)`; `showcase-car.html?mod=<folder>`
+  renders a mod's visual at rest (no solver; `?n=` copies); the crash lab
+  loads `softbody.html?...&mod=<folder>&jbeamMode=native` (a folder served
+  with a `files.json` listing). `showcase-car-check.mjs mod_*` and
+  `crash-lab-check.mjs --car supercar|tutorial` use the gitignored
+  `inspiration/beamng-mods` (`RUBBLE_MODS`), skipped when absent.
+* **Measured** (M3 Max, 1080p, 4× MSAA, 10 copies): the Monster supercar
+  (95 flexbodies, 1.52M triangles: about 40 times a typical BeamNG car's
+  30–40k) costs 1.57 ms a car near and 0.91 ms a car at the distant level
+  (275k triangles). Both are over the 0.5 ms budget; the supercar's own mesh
+  is the outlier, and a third, coarser level is the next step.
+
 ## Tests and tools
 
 * The side pole's intrusion is the deepest door node near the pole across

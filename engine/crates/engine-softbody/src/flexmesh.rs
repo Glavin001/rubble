@@ -421,6 +421,86 @@ pub fn read_collada(src: &str) -> Result<Vec<DaeMesh>, String> {
     Ok(out)
 }
 
+/// A coarser copy of `m` for the distant level of detail: vertices clustered
+/// on a `cell` (m) grid, per material and normal direction (so creases and
+/// material borders stay), each cluster at its vertices' mean, triangles that
+/// collapse dropped. At a distance where `cell` is about a pixel this is the
+/// same image; the near level is always the full mesh.
+pub fn cluster(m: &DaeMesh, cell: f32) -> DaeMesh {
+    // Per vertex its material (its first triangle's).
+    let mut vmat = vec![u16::MAX; m.pos.len()];
+    for (t, tri) in m.tris.iter().enumerate() {
+        for &v in tri {
+            if vmat[v as usize] == u16::MAX {
+                vmat[v as usize] = m.tri_mat[t];
+            }
+        }
+    }
+    let dir = |n: Vec3| -> u8 {
+        // One of 26 directions (each axis -, 0, +).
+        let q = |x: f32| if x > 0.38 { 2u8 } else if x < -0.38 { 0 } else { 1 };
+        q(n.x) * 9 + q(n.y) * 3 + q(n.z)
+    };
+    let mut ids: HashMap<(i32, i32, i32, u16, u8), u32> = HashMap::new();
+    let mut acc: Vec<(Vec3, Vec3, [f32; 2], u32)> = Vec::new();
+    let mut map = vec![0u32; m.pos.len()];
+    for (i, p) in m.pos.iter().enumerate() {
+        let k = (
+            (p.x / cell).floor() as i32,
+            (p.y / cell).floor() as i32,
+            (p.z / cell).floor() as i32,
+            vmat[i],
+            dir(m.nrm[i]),
+        );
+        let id = *ids.entry(k).or_insert_with(|| {
+            acc.push((Vec3::ZERO, Vec3::ZERO, [0.0; 2], 0));
+            (acc.len() - 1) as u32
+        });
+        let a = &mut acc[id as usize];
+        a.0 += *p;
+        a.1 += m.nrm[i];
+        a.2 = m.uv[i];
+        a.3 += 1;
+        map[i] = id;
+    }
+    let mut out = DaeMesh {
+        name: m.name.clone(),
+        geometry: m.geometry.clone(),
+        materials: m.materials.clone(),
+        ..Default::default()
+    };
+    for (p, n, uv, c) in acc {
+        out.pos.push(p / c as f32);
+        out.nrm.push(n.normalize_or(Vec3::Z));
+        out.uv.push(uv);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (t, tri) in m.tris.iter().enumerate() {
+        let v = tri.map(|x| map[x as usize]);
+        if v[0] == v[1] || v[1] == v[2] || v[0] == v[2] {
+            continue;
+        }
+        let mut key = v;
+        key.sort_unstable();
+        if seen.insert(key) {
+            out.tris.push(v);
+            out.tri_mat.push(m.tri_mat[t]);
+        }
+    }
+    out
+}
+
+/// The distant level's cluster size (m), and the distance (m) it switches
+/// at: where a cell is `LOD_PIXELS` pixels at 1080p with a 0.75 rad field of
+/// view (a pixel is 2·d·tan(0.375)/1080 m at d). A cluster's vertex is its
+/// vertices' mean, so on a smooth surface it moves far less than a cell. The
+/// near level is always the full mesh.
+pub const LOD_CELL: f32 = 0.03;
+pub const LOD_PIXELS: f32 = 2.6;
+pub fn lod_distance(cell: f32) -> f32 {
+    cell / LOD_PIXELS * 1080.0 / (2.0 * 0.375f32.tan())
+}
+
 /// A Collada material name's class in Rubble's renderer (BeamNG's own
 /// materials are textures; this is the shading the renderer can give them).
 pub fn material_class(name: &str) -> u8 {

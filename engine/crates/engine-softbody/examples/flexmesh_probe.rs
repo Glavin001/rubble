@@ -53,6 +53,13 @@ fn main() -> Result<(), String> {
     let (p, _) = engine_softbody::authoring::skin::deform(&v, &sim_nodes);
     let worst = p.iter().zip(&v.positions).map(|(a, b)| a.distance(Vec3::from_array(*b))).fold(0.0f32, f32::max);
     eprintln!("rest mesh reproduced to {worst:.2e} m");
+    if std::env::var("LOD").is_ok() {
+        for cell in [0.01f32, 0.015, 0.02, 0.03, 0.05] {
+            let far: Vec<DaeMesh> = meshes.iter().map(|m| engine_softbody::flexmesh::cluster(m, cell)).collect();
+            let t: usize = far.iter().map(|m| m.tris.len()).sum();
+            eprintln!("cluster {cell} m: {t} triangles (switch at {:.0} m)", engine_softbody::flexmesh::lod_distance(cell));
+        }
+    }
     for u in &v.units {
         eprintln!("unit {} kind {} beams {} trigger {} shards {}", u.name, u.kind, u.beams.len(), u.strain, u.shards);
     }
