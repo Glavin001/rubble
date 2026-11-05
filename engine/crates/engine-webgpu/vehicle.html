@@ -103,8 +103,8 @@
     // Physics: rubble's Rust World (engine-world-wasm), the host native and Unreal run.
     // This page keeps rendering, input, UI and its scene scripts; the street, meteor
     // and run builders (engine-vehicle-wasm) are Rust that only describe launches.
-    import { createWorld, pollFrame as poll, stepFrames, softCalibratedSettings, saveState, errorText } from './rubble-world.mjs';
-    import { L, WHEEL_RIM_MATERIAL, centerOfMass, Gauntlet, MeteorRange, MeteorRun } from './vehicle.mjs';
+    import { createVehicleScene, pollFrame as poll, stepFrames, saveState, errorText } from './rubble-world.mjs';
+    import { L, WHEEL_RIM_MATERIAL, Gauntlet, MeteorRange, MeteorRun } from './vehicle.mjs';
     import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
     import { duneBuggySoft } from './soft.mjs';
 
@@ -178,37 +178,40 @@
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
 
     // ---------------------------------------------------------------- world
-    const nTraffic = scene === 'traffic' ? Math.max(1, Math.min(60, Number(qs.get('vehicles')) || 48)) : 0;
-    const est = scene === 'traffic' ? 4000 + nTraffic * 40 : scene === 'gauntlet' ? 9000 : scene === 'run' ? 15000 : 6000;
-    const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
-    const maxBodies = nextPow2(Math.max(est, 4096));
-    // ?build=hybrid (buggies scene): node-beam frames with bolted parts on joints
+    // The scene (rubble::play::vehicles, engine-world): its world, solver, materials,
+    // bodies and vehicles are placed in Rust. The page keeps its input, camera and
+    // gameplay over what placement returns.
+    // ?build=hybrid (buggies scenes): node-beam frames with bolted parts on joints
     // (engine_softbody::buggy), stepped as the soft-body demo: 240 Hz, 4 steps a frame.
     const hybrid = (scene === 'buggies' || scene === 'vibeland') && qs.get('build') === 'hybrid';
-    const SOFT_HZ = 240;
-    const STEPS_PER_FRAME = hybrid ? Math.round(SOFT_HZ / 60) : 1;
-    const capacity = {
-      maxBodies,
-      maxColliders: nextPow2(Math.max(est * 2, maxBodies * 2, 8192)),
-      maxContacts: Math.min(nextPow2(Math.max(est * 16, 65536)), 1 << 21),
-      maxJoints: hybrid ? 1024 : 64,
-      maxCandidates: Math.min(nextPow2(Math.max(est * 32, 131072)), 1 << 21),
-      maxColors: 32,
-      // The JS host's 64 held its kinematic velocities only; World also carries
-      // teleports and velocity sets as commands (capacity only).
-      maxCommands: 2048,
-      maxHullVertices: 64,
-    };
+    const STEPS_PER_FRAME = hybrid ? 4 : 1;
     const guided = scene === 'gauntlet' || scene === 'meteors' || scene === 'run';
+    // ?strength=k scales every mount limit (1 = the rated joints, smaller = more fragile).
+    const strength = Math.max(0.01, Number(qs.get('strength')) || 1);
+    // Gauntlet: the street's shelling state. Meteor gauntlet: the run (engine-vehicle-wasm
+    // run.rs: the street, the meteor director, judging and score).
+    const street = scene === 'gauntlet' ? new Gauntlet() : null;
+    const range = scene === 'meteors';
+    const run = scene === 'run' ? new MeteorRun() : null;
+    if (run) document.body.classList.add('run');
+    const sceneDef = {
+      scene, preset: presetName, strength, hybrid, rigidMode: qs.get('rigid') !== '0',
+      // ?spawn=x,z,yaw places the player vehicle (yaw in radians about +Y).
+      spawn: (qs.get('spawn') || '').split(',').filter(Boolean).map(Number),
+      vehicles: Number(qs.get('vehicles')) || 48,
+      heavy: qs.get('heavy') || null,
+      tracksShells: qs.get('tracks') === 'shells',
+      sleepOff: qs.get('sleep') === 'off',
+      // ?rest=carry: the resting-pair carry instead of the sleep archive.
+      carryRest: qs.get('rest') === 'carry',
+      // Continuous collision (BODY_CCD, engine/docs/ccd.md) for the cannonballs: a 45 m/s
+      // ball gets a time-of-impact contact; ?ccd=0 turns it off.
+      cannonCcd: qs.get('ccd') !== '0',
+      street: street ? JSON.parse(street.layout()) : run ? JSON.parse(run.layout()) : null,
+      range: range ? JSON.parse(MeteorRange.range()) : null,
+    };
     // The world opens the device; the page renders on it and reads the world's buffers in place.
-    const world = await createWorld({
-      gravity: [0, hybrid ? -9.81 : -10, 0],
-      contacts: 'canonical',
-      capacity,
-      vehicles: { maxVehicles: 64, maxWheels: 1024, maxCurvePoints: 8192, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 64 },
-      ...(hybrid ? { soft: { maxBodies: 32, maxBeams: 24576, maxParticles: 4096, maxColors: 64, maxGroups: 1024, maxTriangles: 12288, maxObstacles: 64 } } : {}),
-      ...(guided ? { guidance: { maxZones: 256, planBudget: 256 } } : {}),
-    });
+    const world = await createVehicleScene(sceneDef);
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -223,391 +226,42 @@
     };
     configure();
     addEventListener('resize', configure);
-
-    // The bridge needs 20 iterations to converge its bending within a fast crossing
-    // (tests/vehicle.rs BRIDGE_ITERATIONS).
-    world.setSolver({ iterations: scene === 'bridge' ? 20 : 8 });
-    if (hybrid) {
-      world.setSolver({ dt: 1 / SOFT_HZ, iterations: 10, gravityY: -9.81, betaLin: 1e7 });
-      // Rigid mode (on unless ?rigid=0): a buggy that only drives rides its core
-      // (drives exactly as the rigid buggy); any contact turns it soft that step.
-      world.setSoftSettings({ ...softCalibratedSettings(SOFT_HZ), rigid_mode: qs.get('rigid') !== '0' });
-    }
-    const sleepQ = qs.get('sleep');
-    if (sleepQ === 'off') world.setSolver({ sleepTime: 1e6 });
-    // ?rest=carry: the resting-pair carry instead of the sleep archive (World::set_carry_rest).
-    if (qs.get('rest') === 'carry') world.setCarryRest(true);
+    const placed = world.placeVehicleScene(sceneDef);
+    const capacity = placed.capacity;
     const DT = world.solver().dt, GRAVITY_Y = world.solver().gravityY;
     // The simulation's clock: steps since the scene started or was reset.
     const steps = () => world.simSteps();
-    const MAT_GROUND = 0, MAT_PROP = 1, MAT_ICE = 2, MAT_SKID = 3;
-    // Meteor range colours (the renderer keys static bodies on these).
-    const MAT_PAD = 4, MAT_HIT = 5, MAT_MISS = 6;
-    // Meteor gauntlet: meteors, their trails (drawn along the velocity) and the finish gate.
-    const MAT_METEOR = 10, MAT_TRAIL = 11, MAT_FINISH = 12;
-    // The material table the JS host had (64 slots, friction 0.6 unless set): vehicle
-    // part colliders name slot 0, wheel rims slot 7 and soft nodes slot 9 directly, and
-    // shapes of a given friction share the first slot with it.
-    const labs = !['playground', 'destruction', 'traffic', 'buggies', 'vibeland', 'gauntlet', 'meteors', 'run'].includes(scene);
-    const FRICTION = { [MAT_GROUND]: 1.0, [MAT_PROP]: 0.6, [MAT_ICE]: 0.08, [WHEEL_RIM_MATERIAL]: 0.9 };
-    if (labs) FRICTION[MAT_SKID] = 0.0;
-    if (hybrid) FRICTION[9] = 0.8; // node spheres
-    for (let i = 0; i < 64; i++) world.setMaterialSlot(i, { friction: FRICTION[i] ?? 0.6 });
-    // Page material per collider, for colours only (the GPU slot is the friction's).
-    const kinds = new Uint32Array(capacity.maxColliders);
-
-    const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
-    const boxI = (m, hx, hy, hz) => [(m * (hy * hy + hz * hz)) / 3, (m * (hx * hx + hz * hz)) / 3, (m * (hx * hx + hy * hy)) / 3];
-    const ballI = (m, r) => { const i = 0.4 * m * r * r; return [i, i, i]; };
-    const shape = (body, geometry, kind, filter) => {
-      const s = world.createShape(body, { material: { friction: FRICTION[kind] ?? 0.6 }, ...(filter ? { filter } : {}) }, geometry);
-      const c = world.shapeCollider(s);
-      kinds[c] = kind;
-      return c;
-    };
-    const boxOf = (half, position) => ({ box: { half, ...(position ? { transform: { position, rotation: [0, 0, 0, 1] } } : {}) } });
-    const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => {
-      const body = world.createBody({ position: p, rotation: q });
-      shape(body, boxOf(half), material);
-      return body;
-    };
-    const dynBody = (p, mass, inertia, q = [0, 0, 0, 1], v = [0, 0, 0], isBullet = false) => {
-      const body = world.createBody({ type: 'dynamic', position: p, rotation: q, linearVelocity: v, isBullet });
-      return { body, mass: () => world.bodySetMassData(body, mass, [0, 0, 0], inertia) };
-    };
-    const dynBox = (p, half, mass, q = [0, 0, 0, 1]) => {
-      const { body, mass: setMass } = dynBody(p, mass, boxI(mass, ...half), q);
-      shape(body, boxOf(half), MAT_PROP);
-      setMass();
-      return body;
-    };
-    const dynBall = (p, r, mass, v = [0, 0, 0]) => {
-      const { body, mass: setMass } = dynBody(p, mass, ballI(mass, r), [0, 0, 0, 1], v);
-      shape(body, { sphere: { radius: r } }, MAT_PROP);
-      setMass();
-      return body;
-    };
-    // A body parked static until launched (bodySetType): made dynamic with its mass
-    // first, so a launch only changes its type, pose and velocity.
-    const parked = (p, geometry, kind, mass, inertia, isBullet = false) => {
-      const { body, mass: setMass } = dynBody(p, mass, inertia, [0, 0, 0, 1], [0, 0, 0], isBullet);
-      shape(body, geometry, kind);
-      setMass();
-      world.bodySetType(body, 'static', p, [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
-      return { id: body, slot: world.bodySlot(body), home: p };
-    };
-    const park = (b) => world.bodySetType(b.id, 'static', b.home, [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
-    const launch = (b, p, v, w = [0, 0, 0]) => world.bodySetType(b.id, 'dynamic', p, [0, 0, 0, 1], v, w);
-    // Ground slab (collider 0; the renderer draws it as a plane).
-    staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
-
-    // ?strength=k scales every mount limit (1 = the rated joints, smaller = more fragile).
-    const strength = Math.max(0.01, Number(qs.get('strength')) || 1);
-    const withStrength = (d) => {
-      if (strength === 1) return d;
-      d = structuredClone(d);
-      const scaleMount = (m) => { if (m) { m.break_force *= strength; m.break_torque *= strength; } };
-      d.parts.forEach((part) => scaleMount(part.mount));
-      d.wheels.forEach((w) => scaleMount(w.mount));
-      return d;
-    };
+    // The page's collider kinds (its colours; the GPU slot holds the friction).
+    const MAT_HIT = 5, MAT_MISS = 6;
+    const kinds = Uint32Array.from(placed.kinds);
     // Each vehicle's records and bodies (World's vehicleEntry), and soft bodies'.
     const entries = [];
     const softEntries = [];
     const entryOf = (h) => (entries[h] ??= world.vehicleEntry(h));
     const chassisSlot = (h) => entryOf(h).chassis;
-    const vehicles = []; // {h, name, ai, soft?}
-    const addVehicle = (name, p, yaw = 0, ai = null) => {
-      if (hybrid && name === 'dune_buggy') {
-        // The soft frame stands on its core's wheels from the ground up.
-        const desc = duneBuggySoft(strength);
-        const s = world.addSoftVehicle(desc, [p[0], 0.1, p[2]], qAxis([0, 1, 0], yaw), null);
-        softEntries[s] = world.softEntry(s);
-        const h = world.softVehicle(s);
-        entryOf(h);
-        vehicles.push({ h, name, ai, soft: s, softDesc: desc });
-        return h;
-      }
-      const q = qAxis([0, 1, 0], yaw);
-      const h = world.addVehicle(withStrength(byName[name]), p, q);
-      const v = { h, name, ai };
-      vehicles.push(v);
-      if (name === 'vibe_semi') {
-        // Its flatbed: a vehicle of its own, placed so the two hitch points meet
-        // (both design spaces share the origin), joined there by a ball joint.
-        const trailer = byName.vibe_semi_trailer;
-        const oc = entryOf(h).origin, ot = centerOfMass(trailer);
-        const d = qrotJs(q, ot.map((x, k) => x - oc[k]));
-        const t = world.addVehicle(trailer, p.map((x, k) => x + d[k]), q);
-        const hitch = [0, 1.12, -2.3]; // presets::VIBE_SEMI_HITCH
-        world.createBallJoint({ bodyA: world.bodyAt(chassisSlot(h)), bodyB: world.bodyAt(chassisSlot(t)),
-          anchorA: hitch.map((x, k) => x - oc[k]), anchorB: hitch.map((x, k) => x - ot[k]) });
-        v.trailer = t;
-      }
-      return h;
-    };
-    function qrotJs(q, v) {
-      const [x, y, z, w] = q, d = 2 * (x * v[0] + y * v[1] + z * v[2]), s = w * w - (x * x + y * y + z * z);
-      const c = [y * v[2] - z * v[1], z * v[0] - x * v[2], x * v[1] - y * v[0]];
-      return [x * d + v[0] * s + c[0] * 2 * w, y * d + v[1] * s + c[1] * 2 * w, z * d + v[2] * s + c[2] * 2 * w];
-    }
-
-    // Gauntlet: the street's shelling state and its facade blocks.
-    const street = scene === 'gauntlet' ? new Gauntlet() : null;
-    const range = scene === 'meteors';
-    // Meteor gauntlet: the run (engine-vehicle-wasm run.rs: the street, the
-    // meteor director, judging and score) and its meteors.
-    const run = scene === 'run' ? new MeteorRun() : null;
-    const rocks = { list: [], count: 0, radius: 1, mass: 1 };
-    if (run) document.body.classList.add('run');
-    const blocks = { list: [], count: 0, parked: [], launched: new Set() };
+    const softDesc = hybrid ? duneBuggySoft(strength) : null;
+    // {h, name, ai, soft?, softDesc?, trailer?}
+    const vehicles = placed.vehicles.map((v) => {
+      const out = { h: v.h, name: v.name, ai: v.ai && { forward: v.ai[0], steer: v.ai[1], handbrake: v.ai[2] } };
+      if (v.soft !== null) { out.soft = v.soft; out.softDesc = softDesc; softEntries[v.soft] = world.softEntry(v.soft); }
+      if (v.trailer !== null) out.trailer = v.trailer;
+      entryOf(v.h);
+      return out;
+    });
+    // Parked bodies: static until launched (bodySetType).
+    const park = (b) => world.bodySetType(b.id, 'static', b.home, [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
+    const launch = (b, p, v, w = [0, 0, 0]) => world.bodySetType(b.id, 'dynamic', p, [0, 0, 0, 1], v, w);
+    const rocks = { list: placed.rocks, count: placed.rocks.length, radius: sceneDef.street?.meteor?.radius ?? 1, mass: sceneDef.street?.meteor?.mass ?? 1 };
+    const blocks = { list: placed.blocks, count: placed.blocks.length, layout: sceneDef.street?.blocks, parked: placed.parked, launched: new Set() };
     // Meteor range: launched meteors and their touchdown markers.
-    const meteors = { pads: [], moving: qs.get('targets') === 'moving', routes: qs.get('routes') !== '0', list: [], count: 36, markerList: [], markers: 60, next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] };
-    let rng = 7;
-    let bridgeBolts = 0; // breakable joints in the scene (bridge)
-    // ?spawn=x,z,yaw places the player vehicle (yaw in radians about +Y).
-    const spawnAt = (qs.get('spawn') || '').split(',').filter(Boolean).map(Number);
-    const rand = () => { rng = (Math.imul(rng, 1103515245) + 12345) >>> 0; return rng / 2 ** 32; };
-    // Facade blocks, static until a blast launches them; the grid is sized for them
-    // as if they moved (the JS host counted them as moving colliders).
-    const addBlocks = (g) => {
-      let r = 0;
-      for (const b of g.blocks) {
-        blocks.list.push(parked(b.p, boxOf(b.half), MAT_PROP, b.mass, boxI(b.mass, ...b.half)));
-        const br = Math.hypot(...b.half);
-        if (br <= 2) r = Math.max(r, br);
-      }
-      world.reserveMovingRadius(r);
-      blocks.count = g.blocks.length;
-      blocks.layout = g.blocks;
+    const meteors = {
+      pads: placed.pads, moving: qs.get('targets') === 'moving', routes: qs.get('routes') !== '0',
+      list: placed.meteors, count: placed.meteors.length, markerList: placed.markers, markers: placed.markers.length,
+      radius: sceneDef.range?.radius, mass: sceneDef.range?.mass,
+      next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]],
     };
-    if (scene === 'playground' || scene === 'destruction') {
-      addVehicle(presetName, [spawnAt[0] ?? 0, 2.5, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
-      // Ramps (static, rotated about X), a long hill and a kicker.
-      staticBox([0, 0.6, 30], [4, 0.4, 6], qAxis([1, 0, 0], -0.22));
-      staticBox([0, 1.95, 41], [4, 0.4, 5.5], [0, 0, 0, 1]);
-      staticBox([0, 0.6, 52], [4, 0.4, 6], qAxis([1, 0, 0], 0.22));
-      staticBox([-22, 0.9, 10], [3, 0.3, 4], qAxis([1, 0, 0], -0.32));
-      staticBox([24, 0.0, -20], [10, 1.5, 14], qAxis([0, 0, 1], 0.18));
-      // Ice patch.
-      staticBox([-30, -0.02, -25], [12, 0.05, 12], [0, 0, 0, 1], MAT_ICE);
-      // Bollards (small statics).
-      for (let i = 0; i < 8; i++) staticBox([-12 + i * 3.4, 0.6, 18], [0.25, 0.6, 0.25]);
-      // Box stacks.
-      for (const [x, z] of [[8, 26], [-10, 32], [14, 40]]) {
-        for (let y = 0; y < 5; y++) for (let i = 0; i < 4 - (y >> 1); i++) dynBox([x + (i - 1.5) * 1.05, 0.5 + y * 1.0, z], [0.5, 0.5, 0.5], 40);
-      }
-      // Brick wall.
-      for (let c = 0; c < 8; c++) for (let i = 0; i < 14; i++) dynBox([-20 + i * 1.02 + (c & 1) * 0.5, 0.25 + c * 0.5, 60], [0.5, 0.25, 0.25], 12);
-      // Balls.
-      for (let i = 0; i < 6; i++) dynBall([20 + i * 2.2, 0.8, 6], 0.8, 60);
-      if (scene === 'destruction') {
-        addVehicle('destructible_sedan', [8, 2.5, -10], 1.2);
-        addVehicle('destructible_sedan', [-8, 2.5, -12], -0.6);
-        for (let c = 0; c < 6; c++) for (let i = 0; i < 10; i++) dynBox([12 + i * 1.02 + (c & 1) * 0.5, 0.25 + c * 0.5, -30], [0.5, 0.25, 0.25], 12);
-      } else {
-        addVehicle('monster_truck', [-14, 3.5, -12], 0.4);
-        addVehicle('kart', [6, 1.5, -6], 2.0);
-        addVehicle('six_wheel_truck', [18, 3, 22], -1.2);
-      }
-    } else if (scene === 'buggies' || scene === 'vibeland') {
-      // Arena for vibe-land's vehicles: every part breaks off when its mount is
-      // overloaded (MountDesc; engine/scenes/dune-buggy rates them from the
-      // recipe's measured joints).
-      addVehicle(presetName, [spawnAt[0] ?? 0, 1.5, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
-      // Perimeter berms.
-      for (const [x, z, hx, hz] of [[0, 95, 60, 1], [0, -45, 60, 1], [60, 25, 1, 70], [-60, 25, 1, 70]]) staticBox([x, 1, z], [hx, 1, hz]);
-      // Dunes ahead: a kicker, a tabletop with its down-ramp, then a step-down.
-      staticBox([0, 0.55, 22], [3.5, 0.3, 4], qAxis([1, 0, 0], -0.3));
-      staticBox([0, 1.6, 33], [3.5, 0.3, 5]);
-      staticBox([0, 0.55, 44], [3.5, 0.3, 4], qAxis([1, 0, 0], 0.3));
-      staticBox([-18, 0.7, 18], [3, 0.3, 5], qAxis([1, 0, 0], -0.22));
-      staticBox([-18, 1.85, 30], [3, 0.3, 7]);
-      // A concrete barrier row to crash into.
-      for (let i = 0; i < 7; i++) staticBox([16 + i * 2.2, 0.5, 8], [1, 0.5, 0.3]);
-      // Brick wall and crate stacks.
-      for (let c = 0; c < 6; c++) for (let i = 0; i < 12; i++) dynBox([-12 + i * 1.02 + (c & 1) * 0.5, 0.25 + c * 0.5, 70], [0.5, 0.25, 0.25], 12);
-      for (const [x, z] of [[20, 40], [-30, 50]]) {
-        for (let y = 0; y < 4; y++) for (let i = 0; i < 4 - (y >> 1); i++) dynBox([x + (i - 1.5) * 1.05, 0.5 + y * 1.0, z], [0.5, 0.5, 0.5], 40);
-      }
-      if (scene === 'buggies') {
-        // Parked buggies: targets for the cannon (B) and for ramming.
-        for (const [x, z, yaw] of [[12, -12, 1.57], [-12, -12, -1.57], [30, 20, 0.6], [-30, 15, -2.2]]) addVehicle('dune_buggy', [x, 1.5, z], yaw);
-        // A heavy ball dropped on the first one's engine and fuel tank as the scene
-        // starts (it faces +X: its tail is at -X).
-        dynBall([10.8, 9, -12], 0.7, 900);
-      } else {
-        // The catalog, parked in a row behind the start (Tab drives the next one).
-        const lineup = ['dune_buggy', 'vibe_trophy', 'vibe_rally', 'vibe_monster', 'vibe_derby', 'vibe_sprint', 'vibe_semi'];
-        lineup.forEach((name, i) => addVehicle(name, [-24 + i * 8, name === 'vibe_monster' ? 1.2 : 0.8, -16], 0));
-      }
-    } else if (scene === 'meteors') {
-      // engine-vehicle-wasm meteors.rs: two lanes of target pads; the left one is
-      // steered. The car only anchors the camera, between the lanes.
-      const g = JSON.parse(MeteorRange.range());
-      addVehicle(presetName, [0, 2.2, 18], 0);
-      // Pads are kinematic, so they can slide as carts (moving targets).
-      for (const p of g.pads) {
-        const body = world.createBody({ type: 'kinematic', position: [p.p[0], p.half[1], p.p[2]] });
-        shape(body, boxOf(p.half), MAT_PAD);
-        meteors.pads.push({ body, slot: world.bodySlot(body), lane: p.lane, pad: meteors.pads.filter((x) => x.lane === p.lane).length, y: p.half[1], z: p.p[2] });
-      }
-      // Parked meteors (static until launched) and touchdown markers (collide with nothing).
-      for (let i = 0; i < meteors.count; i++) meteors.list.push(parked([-3000 - i * 3, -3000, -3000], { sphere: { radius: g.radius } }, MAT_PROP, g.mass, ballI(g.mass, g.radius)));
-      for (let i = 0; i < meteors.markers; i++) {
-        const p = [-3000 - i * 3, -3000, -2000];
-        const body = world.createBody({ position: p });
-        const c = shape(body, boxOf([0.25, 0.06, 0.25]), MAT_MISS, { categories: 0x8000, mask: 0 });
-        meteors.markerList.push({ id: body, collider: c });
-      }
-      meteors.radius = g.radius; meteors.mass = g.mass;
-    } else if (scene === 'gauntlet') {
-      // engine-vehicle-wasm gauntlet.rs: masonry facades on both sides of a street,
-      // static cores behind them and parked cars at the kerbs. Facade blocks stay
-      // static (held by the frame) until a blast launches them (fireShell).
-      const g = JSON.parse(street.layout());
-      addVehicle(presetName, g.spawn, 0);
-      for (const c of g.cores) staticBox(c.p, c.half);
-      addBlocks(g);
-      for (const c of g.parked) blocks.parked.push(addVehicle('sedan', c.p, c.yaw, { forward: 0, steer: 0, handbrake: 1 }));
-    } else if (scene === 'run') {
-      // engine-vehicle-wasm run.rs: the Gauntlet's street, twice as long, its
-      // facades blasted by the meteors that hit them.
-      const g = JSON.parse(run.layout());
-      addVehicle(presetName, g.spawn, 0);
-      for (const c of g.cores) staticBox(c.p, c.half);
-      addBlocks(g);
-      for (const c of g.parked) blocks.parked.push(addVehicle('sedan', c.p, c.yaw, { forward: 0, steer: 0, handbrake: 1 }));
-      // The finish gate: posts at the kerbs and a banner across, high over the road.
-      for (const x of [-7.4, 7.4]) staticBox([x, 4, g.finish], [0.3, 4, 0.3], [0, 0, 0, 1], MAT_FINISH);
-      staticBox([0, 8.4, g.finish], [7.7, 0.5, 0.15], [0, 0, 0, 1], MAT_FINISH);
-      // Parked meteors (static until launched, continuous collision once they fly),
-      // each with its trail (collides with nothing).
-      Object.assign(rocks, { count: g.meteor.count, radius: g.meteor.radius, mass: g.meteor.mass });
-      const r = rocks.radius;
-      for (let i = 0; i < rocks.count; i++) {
-        const rock = parked([-3000 - i * 4, -3000, -1000], { sphere: { radius: r } }, MAT_METEOR, rocks.mass, ballI(rocks.mass, r), true);
-        shape(rock.id, boxOf([0.8 * r, 0.8 * r, 0.5]), MAT_TRAIL, { categories: 0x8000, mask: 0 });
-        rocks.list.push(rock);
-      }
-      if (r <= 2) world.reserveMovingRadius(r);
-    } else if (scene !== 'traffic') {
-      // Two-way coupling labs: each mirrors a test in tests/vehicle.rs.
-      const boxBody = (p, half, mass, extra = {}) => dynBody(p, mass, boxI(mass, ...half), extra.q);
-      if (scene === 'slab') {
-        // Heavy slab: grippy deck on frictionless skids. The car's tyres push it back.
-        const m = 2500, half = [6, 0.15, 30];
-        const b = boxBody([0, 0.25, 0], [6, 0.25, 30], m);
-        shape(b.body, boxOf(half, [0, 0.1, 0]), MAT_GROUND);
-        shape(b.body, boxOf(half, [0, -0.1, 0]), MAT_SKID);
-        b.mass();
-        // Cones along the world so the slab's motion reads on camera.
-        for (let z = -40; z <= 40; z += 8) staticBox([8.5, 0.5, z], [0.25, 0.5, 0.25]);
-        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? -20], spawnAt[2] ?? 0);
-      } else if (scene === 'seesaw') {
-        // Low pivot, long plank resting on its near (-Z) end; the car's weight tips it.
-        staticBox([0, 0.25, 0], [2.6, 0.25, 0.2]);
-        // Centre 1 m on the near side so the plank rests on its near end until the car's
-        // weight crosses the pivot.
-        const tilt = -Math.atan(0.5 / 8);
-        const b = boxBody([0, 0.58 - Math.tan(-tilt), -1], [2.2, 0.08, 7], 250, { q: qAxis([1, 0, 0], tilt) });
-        shape(b.body, boxOf([2.2, 0.08, 7]), MAT_GROUND);
-        b.mass();
-        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? -16], spawnAt[2] ?? 0);
-      } else if (scene === 'carry') {
-        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
-        // Parked kart (handbrake on) riding on the truck's roof.
-        addVehicle('kart', [spawnAt[0] ?? 0, 4.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0, { forward: 0, steer: 0, handbrake: 1 });
-      } else if (scene === 'bridge') {
-        // Mirrors bridge() in tests/vehicle.rs: five 2.6 m timber planks (200 kg/m)
-        // span a 12 m gap 3 m up, resting on the abutment seats. Each seam has four
-        // ball-joint bolts (top and bottom corners) rated 255 kN, so the deck carries
-        // bending as a bolt couple: ~100 kN at rest, ~205 kN under the sedan, ~320 kN
-        // under the monster truck, which snaps them. Below ~9 m/s it falls through;
-        // faster, the deck folds behind it and it makes it over.
-        const Y = 3.0, N = 5, LEN = 2.6, GAP = 0.005, HX = 2.2, HY = 0.1, HZ = LEN / 2;
-        const MASS = 200 * LEN, BOLT_K = 1e8, BOLT_BREAK = 255e3;
-        const pitch = LEN + GAP, endZ = N * pitch - GAP, seat = 0.5, roadHalf = 30, roadX = HX + 0.3;
-        const seatTop = Y - 2 * HY;
-        staticBox([0, Y / 2, -GAP - roadHalf], [roadX, Y / 2, roadHalf]);
-        staticBox([0, Y / 2, endZ + GAP + roadHalf], [roadX, Y / 2, roadHalf]);
-        staticBox([0, seatTop / 2, (seat - GAP) / 2], [roadX, seatTop / 2, (seat + GAP) / 2]);
-        staticBox([0, seatTop / 2, endZ - (seat - GAP) / 2], [roadX, seatTop / 2, (seat + GAP) / 2]);
-        const planks = [];
-        for (let i = 0; i < N; i++) {
-          const b = boxBody([0, Y - HY, i * pitch + HZ], [HX, HY, HZ], MASS);
-          shape(b.body, boxOf([HX, HY, HZ]), MAT_GROUND);
-          b.mass();
-          planks.push(b.body);
-        }
-        for (let i = 0; i + 1 < N; i++) {
-          for (const [bx, by] of [[-0.8 * HX, -0.8 * HY], [0.8 * HX, -0.8 * HY], [-0.8 * HX, 0.8 * HY], [0.8 * HX, 0.8 * HY]]) {
-            // D6 ball bolt; its rows start at BOLT_K (the default kStart lets the span sag).
-            const j = world.createBallJoint({
-              bodyA: planks[i], bodyB: planks[i + 1],
-              anchorA: [bx, by, HZ + GAP / 2], anchorB: [bx, by, -HZ - GAP / 2],
-              breakForce: BOLT_BREAK,
-            });
-            world.jointSetLinearPenalty(j, BOLT_K);
-          }
-        }
-        bridgeBolts = (N - 1) * 4;
-        // The light car first; the heavy vehicle waits behind it (Tab to drive it).
-        addVehicle(presetName, [spawnAt[0] ?? 0, Y + 1.5, spawnAt[1] ?? -2.5], spawnAt[2] ?? 0);
-        // ?heavy=none leaves the player alone (e.g. preset=monster_truck&spawn=0,-27).
-        const heavy = qs.get('heavy') || 'monster_truck';
-        if (heavy !== 'none') {
-          if (!byName[heavy]) throw new Error(`unknown heavy preset ${heavy}`);
-          addVehicle(heavy, [0, Y + 2, -11], 0, { forward: 0, steer: 0, handbrake: 1 });
-        }
-      } else if (scene === 'tanklab') {
-        // Mirrors the tank tests in tests/vehicle.rs: rubble in the track paths, logs
-        // across the lane, then a 0.6 m ledge (twice the road wheels' reach).
-        for (let row = 0; row < 7; row++) for (const x of [-1.7, 0, 1.7]) {
-          const h = row % 2 ? 0.175 : 0.12, z = 10 + row * 1.5, j = (row % 3 - 1) * 0.15;
-          const b = boxBody([x + j, h, z], [h, h, h], 1500 * 8 * h * h * h);
-          shape(b.body, boxOf([h, h, h]), MAT_PROP);
-          b.mass();
-        }
-        for (const z of [24, 28]) {
-          const half = [2.6, 0.2, 0.2];
-          const b = boxBody([0, 0.2, z], half, 250);
-          shape(b.body, boxOf(half), MAT_PROP);
-          b.mass();
-        }
-        staticBox([0, 0.3, 36 + 25], [6, 0.3, 25], [0, 0, 0, 1], MAT_GROUND);
-        for (let z = 0; z <= 80; z += 8) staticBox([7.5, 0.5, z], [0.25, 0.5, 0.25]);
-        addVehicle(presetName, [spawnAt[0] ?? 0, 2.5, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
-      } else if (scene === 'sidewall') {
-        // Light crates in two rows that only the tyre outlines reach (outside the body,
-        // off the ray lines): the wheel shells shove them.
-        for (let i = 0; i < 8; i++) for (const x of [-1.15, 1.15]) {
-          const b = boxBody([x, 0.2, 6 + i * 2.5], [0.3, 0.2, 0.3], 15);
-          shape(b.body, boxOf([0.3, 0.2, 0.3]), MAT_PROP);
-          b.mass();
-        }
-        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
-      }
-    } else {
-      addVehicle(presetName, [spawnAt[0] ?? 0, 2.5, spawnAt[1] ?? -60], spawnAt[2] ?? 0);
-      const kindsOfCar = ['sedan', 'sports', 'kart', 'jolt_default', 'destructible_sedan', 'monster_truck'];
-      const cols = Math.ceil(Math.sqrt(nTraffic));
-      for (let i = 0; i < nTraffic; i++) {
-        const x = ((i % cols) - cols / 2) * 14, z = (Math.floor(i / cols) - cols / 2) * 14;
-        const kind = kindsOfCar[i % kindsOfCar.length];
-        addVehicle(kind, [x, kind === 'monster_truck' ? 3.5 : 2.2, z], rand() * 6.28,
-          { forward: 0.2 + 0.25 * rand(), steer: (rand() < 0.5 ? -1 : 1) * (0.15 + 0.35 * rand()) });
-      }
-      for (let i = 0; i < 400; i++) dynBox([(rand() - 0.5) * 120, 0.5 + rand() * 6, (rand() - 0.5) * 120], [0.5, 0.5, 0.5], 30);
-    }
-    // Cannonballs: parked static spheres, launched by bodySetType.
-    // Continuous collision (BODY_CCD, engine/docs/ccd.md): a 45 m/s ball gets a
-    // time-of-impact contact instead of passing thin parts between steps; ?ccd=0
-    // turns it off. The flag is inert on a parked (static) ball.
-    const cannonCcd = qs.get('ccd') !== '0';
-    const cannon = [];
-    for (let i = 0; i < 12; i++) cannon.push(parked([-4000 - i * 5, -4000, -4000], { sphere: { radius: 0.6 } }, MAT_PROP, 400, ballI(400, 0.6), cannonCcd));
-    for (const v of vehicles) if (v.ai) world.setVehicleInput(v.h, v.ai);
+    const bridgeBolts = placed.bridgeBolts; // breakable joints in the scene (bridge)
+    const cannon = placed.cannon;
     const initial = await saveState(world);
     // ---------------------------------------------------------------- directed debris (gauntlet)
     const guideOn = document.getElementById('guideOn'), guideStrength = document.getElementById('guideStrength');

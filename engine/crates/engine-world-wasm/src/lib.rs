@@ -107,7 +107,7 @@ pub fn last_panic() -> String {
 
 /// A high-performance WebGPU adapter's device with its full limits: what
 /// `engine_webgpu::default_device` opens natively.
-async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), JsValue> {
+pub(crate) async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), JsValue> {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::BROWSER_WEBGPU;
     let instance = wgpu::Instance::new(desc);

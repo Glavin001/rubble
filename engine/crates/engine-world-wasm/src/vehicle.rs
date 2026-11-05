@@ -13,17 +13,56 @@ fn from_js<T: serde::de::DeserializeOwned>(what: &str, v: JsValue) -> Result<T, 
 
 fn js(v: serde_json::Value) -> JsValue {
     use serde::Serialize;
-    v.serialize(&serde_wasm_bindgen::Serializer::json_compatible()).unwrap_or(JsValue::NULL)
+    v.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .unwrap_or(JsValue::NULL)
 }
 
 #[wasm_bindgen]
 impl WebWorld {
+    /// The world a vehicle scene needs (`rubble::play::vehicles::world_def`) on its own
+    /// device: `def` is the scene and the page's switches (`VehicleSceneDef`, camelCase).
+    #[wasm_bindgen(js_name = createVehicleScene)]
+    pub async fn create_vehicle_scene(def: JsValue) -> Result<WebWorld, JsValue> {
+        let def: rubble::play::vehicles::VehicleSceneDef = from_js("VehicleSceneDef", def)?;
+        let wd = res(rubble::play::vehicles::world_def(&def))?;
+        let (info, device, queue) = crate::web_device().await?;
+        let world = res(World::new(
+            GpuContext::Shared {
+                info,
+                device,
+                queue,
+            },
+            &wd,
+        ))?;
+        crate::creation_check(&world).await?;
+        Ok(WebWorld { world })
+    }
+
+    /// Place a vehicle scene in this (empty) world (`rubble::play::vehicles::place`).
+    /// Returns `Placed` (camelCase): each collider's page kind, the vehicles, the
+    /// cannonballs, the street's blocks and parked cars, the range's pads, meteors and
+    /// markers, the run's meteors, the bridge's bolts.
+    #[wasm_bindgen(js_name = placeVehicleScene)]
+    pub fn place_vehicle_scene(&mut self, def: JsValue) -> Result<JsValue, JsValue> {
+        let def: rubble::play::vehicles::VehicleSceneDef = from_js("VehicleSceneDef", def)?;
+        let placed = res(rubble::play::vehicles::place(&mut self.world, &def))?;
+        Ok(js(serde_json::to_value(placed).map_err(err)?))
+    }
+
     /// A vehicle (`VehicleDesc`, as engine-vehicle serialises it: the presets
     /// JSON) with its chassis origin (its centre of mass) at `position`.
     #[wasm_bindgen(js_name = addVehicle)]
-    pub fn add_vehicle(&mut self, desc: JsValue, position: &[f32], rotation: &[f32]) -> Result<u32, JsValue> {
+    pub fn add_vehicle(
+        &mut self,
+        desc: JsValue,
+        position: &[f32],
+        rotation: &[f32],
+    ) -> Result<u32, JsValue> {
         let desc: VehicleDesc = from_js("VehicleDesc", desc)?;
-        Ok(res(self.world.add_vehicle(&desc, crate::vec3(position)?, crate::vec4(rotation)?))?.0)
+        Ok(res(self
+            .world
+            .add_vehicle(&desc, crate::vec3(position)?, crate::vec4(rotation)?))?
+        .0)
     }
 
     /// Driver input `{ forward, steer, brake, handbrake, gear }` (missing:
@@ -37,7 +76,9 @@ impl WebWorld {
         f.f32("brake", &mut i.brake)?;
         f.f32("handbrake", &mut i.handbrake)?;
         if let Some(g) = f.take("gear") {
-            let g = g.as_i64().ok_or_else(|| err("VehicleInput.gear: expected an integer or null"))?;
+            let g = g
+                .as_i64()
+                .ok_or_else(|| err("VehicleInput.gear: expected an integer or null"))?;
             i.gear = GearRequest::Gear(g as i32);
         }
         f.finish()?;
@@ -62,7 +103,11 @@ impl WebWorld {
     /// Functional overrides `{ wheelMask, driveMask, steerMask, brakeMask,
     /// engineConnected }` (missing: all on).
     #[wasm_bindgen(js_name = vehicleSetFunctionalState)]
-    pub fn vehicle_set_functional_state(&mut self, vehicle: u32, state: JsValue) -> Result<(), JsValue> {
+    pub fn vehicle_set_functional_state(
+        &mut self,
+        vehicle: u32,
+        state: JsValue,
+    ) -> Result<(), JsValue> {
         let mut f = Fields::of("FunctionalState", state)?;
         let mut s = FunctionalState::default();
         f.u32("wheelMask", &mut s.wheel_mask)?;
@@ -71,7 +116,9 @@ impl WebWorld {
         f.u32("brakeMask", &mut s.brake_mask)?;
         f.bool("engineConnected", &mut s.engine_connected)?;
         f.finish()?;
-        res(self.world.vehicle_set_functional_state(VehicleHandle(vehicle), s))
+        res(self
+            .world
+            .vehicle_set_functional_state(VehicleHandle(vehicle), s))
     }
 
     #[wasm_bindgen(js_name = vehicleCount)]
@@ -152,7 +199,10 @@ impl WebWorld {
         let host = self.world.sim().vehicle_host();
         let v = VehicleHandle(vehicle);
         let [(_, parts), (_, wheels)] = host.mount_load_slots(v);
-        let slots: Vec<[u32; 4]> = words.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        let slots: Vec<[u32; 4]> = words
+            .chunks_exact(4)
+            .map(|c| [c[0], c[1], c[2], c[3]])
+            .collect();
         if slots.len() != (parts + wheels) as usize {
             return Err(err("vehicleMountLoads: not this vehicle's copy"));
         }
@@ -167,14 +217,26 @@ impl WebWorld {
     /// `SpawnOptions` (serde JSON, missing fields default). With wheels its
     /// rigid core is a vehicle (`softVehicle`).
     #[wasm_bindgen(js_name = addSoftVehicle)]
-    pub fn add_soft_vehicle(&mut self, desc: JsValue, position: &[f32], rotation: &[f32], options: JsValue) -> Result<u32, JsValue> {
+    pub fn add_soft_vehicle(
+        &mut self,
+        desc: JsValue,
+        position: &[f32],
+        rotation: &[f32],
+        options: JsValue,
+    ) -> Result<u32, JsValue> {
         let desc: SoftVehicleDesc = from_js("SoftVehicleDesc", desc)?;
         let options: SpawnOptions = if options.is_undefined() || options.is_null() {
             SpawnOptions::default()
         } else {
             from_js("SpawnOptions", options)?
         };
-        Ok(res(self.world.add_soft_vehicle(&desc, crate::vec3(position)?, crate::vec4(rotation)?, &options))?.0)
+        Ok(res(self.world.add_soft_vehicle(
+            &desc,
+            crate::vec3(position)?,
+            crate::vec4(rotation)?,
+            &options,
+        ))?
+        .0)
     }
 
     /// The vehicle driving a soft body's rigid core (`undefined`: none).
@@ -189,7 +251,10 @@ impl WebWorld {
     #[wasm_bindgen(js_name = softEntry)]
     pub fn soft_entry(&self, soft: u32) -> Result<JsValue, JsValue> {
         let host = self.world.sim().soft_host();
-        let e = host.entries.get(soft as usize).ok_or_else(|| err(format!("no soft body {soft}")))?;
+        let e = host
+            .entries
+            .get(soft as usize)
+            .ok_or_else(|| err(format!("no soft body {soft}")))?;
         let d = &e.desc;
         Ok(js(serde_json::json!({
             "name": d.name,

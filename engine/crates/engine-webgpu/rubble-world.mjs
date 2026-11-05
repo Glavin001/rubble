@@ -31,6 +31,19 @@ export async function createWorld(def = {}) {
 }
 
 /**
+ * A vehicle demo scene (`rubble::play::vehicles`): `def` the scene and the page's switches
+ * (`VehicleSceneDef`, camelCase). The world is made for it; place its bodies with
+ * `world.placeVehicleScene(def)`.
+ */
+export async function createVehicleScene(def) {
+  ready ??= init();
+  await ready;
+  const world = await WebWorld.createVehicleScene(def);
+  world.flags = solverFlags();
+  return world;
+}
+
+/**
  * The large-maps city (`rubble::city`, as the native benchmark builds it): `opts`
  * `{ houses, map, sleep, pool }`, `page` the WorldDef fields a page may set (`gpuTiming`,
  * `killBelow`, `readbackFrames`, ...). Place the houses with `world.cityBegin(city)` then
