@@ -118,6 +118,11 @@ pub struct SkBeam {
     /// deformLimit (its rest length never shortens past 1 − this of its
     /// spawn rest length). None: the `.truck` yield rule.
     pub plastic_limits: Option<(f32, f32)>,
+    /// Its yield force in tension (N) when it differs from its compression
+    /// yield `mat.deform` (`rubble_tension_yield`): a sheet edge buckles in
+    /// compression but carries its material's yield in tension. 0: the same
+    /// both ways.
+    pub tension_yield: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -291,6 +296,7 @@ impl Skeleton {
             rest_scale: 1.0,
             target_k: 0.0,
             plastic_limits: None,
+            tension_yield: 0.0,
         });
         true
     }
@@ -1274,6 +1280,22 @@ impl Skeleton {
                 let (cap, d) = b.plastic_limits.unwrap();
                 let stress = round2(cap * round2(b.mat.deform));
                 let _ = writeln!(s, "{}, {}, {stress}, {d}, -1", b.a, b.b);
+            }
+        }
+        // (Rubble's extension: a tension-side yield on those beams.)
+        let tension: Vec<&SkBeam> = self
+            .beams
+            .iter()
+            .filter(|b| {
+                b.tension_yield > b.mat.deform
+                    && b.ty == BeamType::Normal
+                    && self.pos(b.a).distance(self.pos(b.b)) * b.rest_scale >= MIN_YIELD_LENGTH
+            })
+            .collect();
+        if !tension.is_empty() {
+            let _ = writeln!(s, "\nrubble_tension_yield\n; a, b, Tt (N)");
+            for b in tension {
+                let _ = writeln!(s, "{}, {}, {}", b.a, b.b, round2(b.tension_yield));
             }
         }
         if !self.shocks.is_empty() {

@@ -1538,6 +1538,10 @@ impl ExplicitBeams {
         if !file.jbeam_plastic.is_empty() {
             s.set_jbeam_plastic(&file.jbeam_plastic)?;
         }
+        // `rubble_tension_yield` (Rubble's extension, spec §18.4).
+        if !file.tension_yield.is_empty() {
+            s.set_tension_yield(&file.tension_yield)?;
+        }
         if !file.spawn_contacts.is_empty() {
             let sorted = |t: [u32; 3]| {
                 let mut t = t;
@@ -2400,6 +2404,36 @@ impl ExplicitBeams {
             } else {
                 f32::INFINITY
             };
+        }
+        Ok(())
+    }
+
+    /// A tension-side yield force on `.truck` beams (`rubble_tension_yield`,
+    /// spec §18.4): per line (a, b, Tt) the deformable plain beam a–b (`Plain`
+    /// or `JbeamPlain`) yields in tension at Tt; its compression threshold Tc
+    /// stays. The yield rule already keeps Tc and Tt apart (they start equal at
+    /// spawn), so only the thresholds and the gate (min(Tc, Tt, S)) change.
+    pub fn set_tension_yield(&mut self, lines: &[(u32, u32, f32)]) -> Result<(), String> {
+        let mut at: HashMap<(u32, u32), usize> = HashMap::new();
+        for (j, b) in self.beams.iter().enumerate() {
+            if matches!(b.kind, ExplicitKind::Plain | ExplicitKind::JbeamPlain)
+                && b.ty == ExplicitType::Deformable
+            {
+                at.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(j);
+            }
+        }
+        for &(a, b, tt) in lines {
+            let Some(&j) = at.get(&(a.min(b), a.max(b))) else {
+                return Err(format!(
+                    "rubble_tension_yield: no deformable plain beam {a}–{b}"
+                ));
+            };
+            if !(tt > 0.0) {
+                return Err(format!("rubble_tension_yield: {a}–{b}: Tt {tt} is not > 0"));
+            }
+            let beam = &mut self.beams[j];
+            beam.tt = tt;
+            beam.gate = beam.tc.min(beam.tt).min(beam.strength);
         }
         Ok(())
     }

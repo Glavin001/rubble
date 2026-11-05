@@ -114,6 +114,7 @@ enum Section {
     SpawnContacts,
     ContactBreaks,
     JbeamPlastic,
+    TensionYield,
     Skipped,
 }
 
@@ -348,6 +349,12 @@ pub struct TruckFile {
     /// (1 + deformLimitExpansion) of its spawn rest length (a negative value:
     /// no limit). It keeps the file's plastic coefficient.
     pub jbeam_plastic: Vec<(u32, u32, f32, f32, f32)>,
+    /// `rubble_tension_yield` lines `a, b, Tt_N` (Rubble's extension,
+    /// jbeam-semantics-spec.md §18.4): the deformable beam between nodes a and
+    /// b yields in tension at Tt (its compression threshold stays the file's
+    /// deform threshold): a sheet buckles in compression but carries its
+    /// material's yield in tension.
+    pub tension_yield: Vec<(u32, u32, f32)>,
     pub wheels: Vec<TruckWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
@@ -632,6 +639,7 @@ impl Parser {
             "rubble_spawn_contacts" => Section::SpawnContacts,
             "rubble_contact_breaks" => Section::ContactBreaks,
             "rubble_jbeam_plastic" => Section::JbeamPlastic,
+            "rubble_tension_yield" => Section::TensionYield,
             // Known sections this importer does not simulate (phase 3 / cosmetic).
             "engoption"
             | "engturbo"
@@ -1123,6 +1131,16 @@ impl Parser {
                         "rubble_jbeam_plastic needs a, b, deformLimitStress, deformLimit, deformLimitExpansion: ignored"
                             .into(),
                     );
+                }
+            }
+            Section::TensionYield => {
+                let n: Vec<f32> = t.iter().filter_map(|x| x.parse::<f32>().ok()).collect();
+                if n.len() >= 3 && n[0] >= 0.0 && n[1] >= 0.0 && n[2] > 0.0 {
+                    self.out
+                        .tension_yield
+                        .push((n[0] as u32, n[1] as u32, n[2]));
+                } else {
+                    self.warn("rubble_tension_yield needs a, b, Tt_N (> 0): ignored".into());
                 }
             }
             Section::TyrePose => {
