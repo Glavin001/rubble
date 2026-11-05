@@ -21,6 +21,7 @@
 //! `engine-cuda::CudaExplicitBeams`).
 
 pub mod coupling;
+pub mod drive;
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
 use glam::Vec3;
@@ -508,6 +509,8 @@ pub struct ExplicitLayout {
     /// gMisc record of the rigid coupling's header.
     pub couple_rec: u32,
     pub coupling: Option<CouplingLayout>,
+    /// The raycast wheels' records (None: no vehicle has them).
+    pub drive: Option<drive::DriveLayout>,
     /// gMisc record of the first triangle's contact throttle.
     pub vv_tri_base: u32,
     /// The fleet runs the aero modules (`EB_AERO`).
@@ -1189,6 +1192,10 @@ impl ExplicitUpload {
         // planes << 16), (gAcc region, 0, 0, 0); the regions are placed below.
         let couple_rec = misc.len();
         misc.extend(std::iter::repeat_n([0u32; 4], 2));
+        // The raycast wheels' header (the kernel's driveRec(), after the coupling's):
+        // (on, region, stride, 0); the region is placed below. Off without wheels.
+        let drive_rec = misc.len();
+        misc.push([0u32; 4]);
         // Vehicle contact: per triangle its contact throttle; per vehicle its records;
         // per group its record.
         let vv_tri_base = misc.len() as u32;
@@ -1345,6 +1352,20 @@ impl ExplicitUpload {
                 cap.shapes | cap.planes << 16,
             ];
             misc[couple_rec + 1] = [layout.acc_base, 0, 0, 0];
+            layout
+        });
+        // Raycast wheels (explicit_plan::drive): a region per vehicle when any has them.
+        let drive_wheels = vehicles.iter().filter_map(|v| v.drive.as_ref()).map(|d| d.config.wheels.len()).max();
+        let drive = drive_wheels.map(|w| {
+            let layout = drive::DriveLayout {
+                header: drive_rec as u32,
+                base: misc.len() as u32,
+                stride: drive::DriveLayout::stride_for(w),
+            };
+            for v in vehicles {
+                misc.extend(drive::records(v.drive.as_deref(), layout.stride));
+            }
+            misc[drive_rec] = layout.header_words();
             layout
         });
         // Vehicle contact's two-body mass splitting (jbeam-semantics-spec.md §10.3):
@@ -1575,7 +1596,8 @@ impl ExplicitUpload {
             group_total,
         ];
         // The wide passes do not run wings, the fuselage drag, commands or shocks2.
-        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero;
+        // Raycast wheels run in the vehicle workgroups only.
+        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none();
         // Every vehicle must have run the same steps for the wide passes (one
         // step parity for the group slots).
         let same_steps = vehicles.windows(2).all(|w| w[0].steps == w[1].steps);
@@ -1596,6 +1618,7 @@ impl ExplicitUpload {
             total,
             couple_rec: couple_rec as u32,
             coupling,
+            drive,
             vv_tri_base,
             aero,
             big,

@@ -3928,6 +3928,9 @@ void vvReportOutside(uint v)
 void contactGroup(uint g, uint lane);
 #endif
 
+// Raycast wheels (engine_softbody::explicit_drive).
+#include "explicit_beams_drive.slang"
+
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -4009,6 +4012,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         // Self-collision hits or pending beams possible (selfApply's barriers).
         gsUniformLanes = triCount > 0u ? 1u : 0u;
         coupleBegin();
+        driveBegin();
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
@@ -4026,10 +4030,12 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     sync();
     uint selfOn = gsUniformLanes;
     uint coupleOn = gsUniformCouple;
+    uint driveOn = gsUniformDrive;
 
     for (uint s = 0u, sStop = EB_END(s, gP.steps, 1u); s < sStop; s++)
     {
         coupleStep(v, lane, s, coupleOn);
+        driveStep(v, lane, s, driveOn);
         uint step = stepBase + s;
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
@@ -6840,10 +6846,12 @@ void contactGroup(uint g, uint lane)
     {
         gsUniformLanes = G.y;
         coupleBegin();
+        driveBegin();
     }
     sync();
     uint k = gsUniformLanes;
     uint coupleOn = gsUniformCouple;
+    uint driveOn = gsUniformDrive;
     sync();
     // Members in vehicle order (a rank sort), their run prefixes and member
     // indices.
@@ -6872,6 +6880,7 @@ void contactGroup(uint g, uint lane)
     for (uint s = 0u, sStop = EB_END(s, gP.steps, 1u); s < sStop; s++)
     {
         coupleStepMembers(off, k, lane, s, coupleOn);
+        driveStepMembers(off, k, lane, s, driveOn);
         if (k <= VV_PART)
         {
             contactMembersStep(off, k, lane, s);

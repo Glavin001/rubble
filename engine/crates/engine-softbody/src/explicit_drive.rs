@@ -41,9 +41,7 @@
 //! (less roll moment, as a roll influence below 1); rays meet static geometry,
 //! not the World's moving rigid bodies.
 
-use crate::explicit_beams::{
-    exact_atan2, to_fixed, ExplicitBeams, StaticShape, CONTACT_FIXED, STEP,
-};
+use crate::explicit_beams::{to_fixed, ExplicitBeams, StaticShape, CONTACT_FIXED, STEP};
 use crate::pack::{raycast_core, SpawnOptions};
 use crate::SoftVehicleDesc;
 use glam::Vec3;
@@ -198,12 +196,70 @@ fn dot(a: Vec3, b: Vec3) -> f32 {
 
 /// `v / |v|` (zero stays zero), per-component quotients (the kernel's `sdiv3`).
 fn nrm(v: Vec3) -> Vec3 {
-    let l = dot(v, v).sqrt();
+    let l = sq(dot(v, v));
     if l > 0.0 {
-        Vec3::new(v.x / l, v.y / l, v.z / l)
+        div3(v, l)
     } else {
         v
     }
+}
+
+/// a/b as the kernel's `sdiv`: the reciprocal, the quotient, one exact fma
+/// correction (bit for bit with the GPU, which computes it the same way).
+fn dv(a: f32, b: f32) -> f32 {
+    let r = 1.0 / b;
+    let q = a * r;
+    (-q).mul_add(b, a).mul_add(r, q)
+}
+
+/// √x as the kernel's `ssqrt`: the root and one exact fma correction.
+fn sq(x: f32) -> f32 {
+    if x <= 0.0 {
+        return x.sqrt();
+    }
+    let s = x.sqrt();
+    (-s).mul_add(s, x).mul_add(0.5 / s, s)
+}
+
+/// atan2(y, x) as the kernel's `sAtan2` (`explicit_beams::exact_atan2`'s sequence
+/// with the kernel's quotients, [`dv`]).
+pub fn exact_atan2(y: f32, x: f32) -> f32 {
+    const C: [u32; 12] = [
+        0x3f800000, 0xbeaaaaab, 0x3e4ccccd, 0xbe124925, 0x3de38e39, 0xbdba2e8c, 0x3d9d89d9,
+        0xbd888889, 0x3d70f0f1, 0xbd579436, 0x3d430c31, 0xbd321643,
+    ];
+    let (ax, ay) = (x.abs(), y.abs());
+    let swap = ay > ax;
+    let (lo, hi) = if swap { (ax, ay) } else { (ay, ax) };
+    if hi == 0.0 {
+        return 0.0;
+    }
+    let a = dv(lo, hi);
+    let (t, base) = if a > f32::from_bits(0x3ed4_13cd) {
+        (dv(a - 1.0, a + 1.0), f32::from_bits(0x3f490fdb))
+    } else {
+        (a, 0.0)
+    };
+    let t2 = t * t;
+    let mut p = f32::from_bits(C[11]);
+    for k in (0..11).rev() {
+        p = p * t2 + f32::from_bits(C[k]);
+    }
+    let mut r = base + t * p;
+    if swap {
+        r = f32::from_bits(0x3fc90fdb) - r;
+    }
+    if x < 0.0 {
+        r = f32::from_bits(0x40490fdb) - r;
+    }
+    if y < 0.0 {
+        r = -r;
+    }
+    r
+}
+
+fn div3(v: Vec3, k: f32) -> Vec3 {
+    Vec3::new(dv(v.x, k), dv(v.y, k), dv(v.z, k))
 }
 
 fn move_toward(cur: f32, target: f32, max_delta: f32) -> f32 {
@@ -228,7 +284,7 @@ pub fn curve_eval(p: &[[f32; 2]], x: f32) -> f32 {
     }
     for i in 1..p.len() {
         if x <= p[i][0] {
-            let t = (x - p[i - 1][0]) / (p[i][0] - p[i - 1][0]).max(1e-9);
+            let t = dv(x - p[i - 1][0], (p[i][0] - p[i - 1][0]).max(1e-9));
             return p[i - 1][1] + (p[i][1] - p[i - 1][1]) * t;
         }
     }
@@ -283,8 +339,8 @@ fn slab(pl: Vec3, dl: Vec3, lo: Vec3, hi: Vec3, ax: [Vec3; 3]) -> Option<Hit> {
             }
             continue;
         }
-        let t1 = (l - p) / d;
-        let t2 = (h - p) / d;
+        let t1 = dv(l - p, d);
+        let t2 = dv(h - p, d);
         let (near, far, s) = if t1 < t2 {
             (t1, t2, -1.0)
         } else {
@@ -317,7 +373,7 @@ fn ray_sphere(p: Vec3, d: Vec3, c: Vec3, r: f32) -> Option<Hit> {
     if disc < 0.0 {
         return None;
     }
-    let t = -b - disc.sqrt();
+    let t = -b - sq(disc);
     if t < 0.0 {
         return None;
     }
@@ -348,7 +404,7 @@ fn ray_tube(p: Vec3, d: Vec3, c: Vec3, a: Vec3, r: f32) -> Option<(f32, f32, Vec
     if disc < 0.0 {
         return None;
     }
-    let t = (-qb - disc.sqrt()) / qa;
+    let t = dv(-qb - sq(disc), qa);
     if t < 0.0 {
         return None;
     }
@@ -388,7 +444,7 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
                 } else {
                     (centre.y - half_height, -1.0)
                 };
-                let t = (y - p.y) / d.y;
+                let t = dv(y - p.y, d.y);
                 let q = p + d * t - centre;
                 if t >= 0.0 && q.x * q.x + q.z * q.z <= radius * radius {
                     best = Some(Hit {
@@ -408,9 +464,9 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
             let mut best = ray_sphere(p, d, a, radius);
             closer(&mut best, ray_sphere(p, d, b, radius));
             let ab = b - a;
-            let l = dot(ab, ab).sqrt();
+            let l = sq(dot(ab, ab));
             if l > 0.0 {
-                let ax = Vec3::new(ab.x / l, ab.y / l, ab.z / l);
+                let ax = div3(ab, l);
                 if let Some((t, y, n)) = ray_tube(p, d, a, ax, radius) {
                     if y >= 0.0 && y <= l {
                         closer(&mut best, Some(Hit { t, n }));
@@ -427,7 +483,7 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
 fn ray_cast(s: &ExplicitBeams, p: Vec3, d: Vec3, t_max: f32) -> Option<Hit> {
     let mut best: Option<Hit> = None;
     if d.y < -PARALLEL && p.y >= s.ground {
-        let t = (s.ground - p.y) / d.y;
+        let t = dv(s.ground - p.y, d.y);
         best = Some(Hit { t, n: Vec3::Y });
     }
     for b in &s.boxes {
@@ -437,7 +493,12 @@ fn ray_cast(s: &ExplicitBeams, p: Vec3, d: Vec3, t_max: f32) -> Option<Hit> {
         );
     }
     for sh in &s.shapes {
-        closer(&mut best, ray_shape(p, d, sh));
+        // An identity-rotation box is a box slot on the GPU (its world bounds).
+        let h = match sh.as_aabb() {
+            Some(b) => slab(p, d, b.lo, b.hi, [Vec3::X, Vec3::Y, Vec3::Z]),
+            None => ray_shape(p, d, sh),
+        };
+        closer(&mut best, h);
     }
     best.filter(|h| h.t <= t_max)
 }
@@ -459,22 +520,22 @@ pub fn spin_solve(
     a: f32,
     h: f32,
 ) -> (f32, f32) {
-    let stick = |w: f32| m * (w * r - u) / h - ft;
+    let stick = |w: f32| dv(m * (w * r - u), h) - ft;
     let f0 = clampf(stick(0.0), -a, a);
-    let g0 = j * (0.0 - wd) / h + r * f0;
+    let g0 = dv(j * (0.0 - wd), h) + r * f0;
     if g0 - b <= 0.0 && g0 + b >= 0.0 {
         return (0.0, f0);
     }
     let s = if g0 + b < 0.0 { 1.0 } else { -1.0 };
     let num = j * wd + r * m * u + h * r * ft - h * s * b;
     let den = j + m * r * r;
-    let wu = num / den;
+    let wu = dv(num, den);
     let fu = stick(wu);
     let (mut w, f) = if fu.abs() <= a {
         (wu, fu)
     } else {
         let f = sgn(fu) * a;
-        (wd - h * (r * f + s * b) / j, f)
+        (wd - dv(h * (r * f + s * b), j), f)
     };
     if s * w < 0.0 {
         w = 0.0;
@@ -492,11 +553,7 @@ fn hub(s: &ExplicitBeams, w: &DriveWheel) -> (f32, Vec3, Vec3) {
     let m = n1.mass + n2.mass;
     let x = (s.origin + n1.pos) * n1.mass + (s.origin + n2.pos) * n2.mass;
     let v = n1.vel * n1.mass + n2.vel * n2.mass;
-    (
-        m,
-        Vec3::new(x.x / m, x.y / m, x.z / m),
-        Vec3::new(v.x / m, v.y / m, v.z / m),
-    )
+    (m, div3(x, m), div3(v, m))
 }
 
 /// Adds wheel force `f` (newtons) to node `i` as a contact sum in the GPU's fixed
@@ -537,7 +594,7 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
         msum += hubs[k].0;
         psum += hubs[k].2 * hubs[k].0;
     }
-    let vm = Vec3::new(psum.x / msum, psum.y / msum, psum.z / msum);
+    let vm = div3(psum, msum);
     let speed = dot(vm, fw);
     let mut fin = clampf(d.input.forward, -1.0, 1.0);
     let sin = clampf(d.input.steer, -1.0, 1.0);
@@ -556,22 +613,22 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
     let sp = speed.abs();
     let mut scale = 1.0f32;
     if c.top_speed > 0.0 && forward * speed > 0.0 {
-        scale = if sp < c.top_speed / 3.0 {
+        scale = if sp < dv(c.top_speed, 3.0) {
             1.0
         } else {
-            clampf((c.top_speed - sp) / (c.top_speed * 2.0 / 3.0), 0.0, 1.0)
+            clampf(dv(c.top_speed - sp, dv(c.top_speed * 2.0, 3.0)), 0.0, 1.0)
         };
     }
     let mut cut = d.tc_cut;
     if c.traction_control {
-        let v_reg = sp / sp.max(3.0);
+        let v_reg = dv(sp, sp.max(3.0));
         let mut k_max = 0.0f32;
         for (k, w) in c.wheels.iter().enumerate() {
             if w.driven && d.wheels[k].contact {
-                k_max = k_max.max(d.wheels[k].kappa * v_reg / w.peak_kappa.max(0.03));
+                k_max = k_max.max(dv(d.wheels[k].kappa * v_reg, w.peak_kappa.max(0.03)));
             }
         }
-        let cut_target = 1.0 - clampf(1.0 - (k_max - 0.8) / 1.0, 0.2, 1.0);
+        let cut_target = 1.0 - clampf(1.0 - dv(k_max - 0.8, 1.0), 0.2, 1.0);
         cut = lerp(cut, cut_target, c.tc_alpha);
     }
     // 2. Rays and suspension.
@@ -597,7 +654,7 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
             let cos_t = dot(ht.n, up);
             if cos_t >= c.max_slope_cos {
                 let l = ht.t - w.radius;
-                let rate = dot(vh, ht.n) / cos_t;
+                let rate = dv(dot(vh, ht.n), cos_t);
                 let fs = w.k * (l - w.susp_max) + w.c * rate;
                 let mut f = if fs < 0.0 { -fs } else { 0.0 };
                 if l < w.susp_min && w.bump_k > 0.0 {
@@ -631,7 +688,7 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
             let wb = d.config.wheelbase;
             if d.config.ackermann > 0.0 && w.side != 0.0 && angle.abs() > 1e-4 && wb > 0.0 {
                 let (sa, ca) = sin_cos(angle.abs());
-                let turn_r = wb / (sa / ca);
+                let turn_r = dv(wb, dv(sa, ca));
                 let inner = (angle > 0.0) == (w.side > 0.0);
                 let off = if inner { -0.5 } else { 0.5 };
                 let ack = exact_atan2(wb, (turn_r + off * d.config.track).max(1e-3));
@@ -644,13 +701,20 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
         let fwd = f0 * ca + uw.cross(f0) * sa;
         let j = w.inertia;
         let r = w.radius;
-        let tau = if w.driven {
+        let mut tau = if w.driven {
             forward * d.config.max_torque * scale * w.drive_mult * (1.0 - cut)
         } else {
             0.0
         };
+        // The rev limit: no drive past the top speed at the wheel's rim (the
+        // drivetrain's engine-speed clamp; a wheel spinning in the air stops there).
+        if d.config.top_speed > 0.0
+            && sgn(forward) * d.wheels[k].omega * w.radius >= d.config.top_speed
+        {
+            tau = 0.0;
+        }
         let st = d.wheels[k];
-        let wd = st.omega * (1.0 - w.angular_damping * h).max(0.0) + h * tau / j;
+        let wd = st.omega * (1.0 - w.angular_damping * h).max(0.0) + dv(h * tau, j);
         let mut b = brake * w.brake_max;
         if w.handbrake {
             b += hand * w.handbrake_max;
@@ -672,54 +736,54 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
             let vs = dot(vh, sd);
             let ft = dot(fpre, t);
             let fs = dot(fpre, sd);
-            let kappa = (st.omega * r - vt).abs() / vt.abs().max(1e-3);
-            let vlen = (vt * vt + vs * vs).sqrt();
+            let kappa = dv((st.omega * r - vt).abs(), vt.abs().max(1e-3));
+            let vlen = sq(vt * vt + vs * vs);
             let alpha = if vlen < 1e-3 {
                 0.0
             } else {
                 exact_atan2(vs.abs(), vt.abs()) * f32::from_bits(DEGREES)
             };
             let mu_l = (curve_eval(&w.long_curve, kappa.max(w.peak_kappa)) * w.long_scale).max(0.0);
-            let mu_l = (mu_l * d.config.surface).sqrt();
+            let mu_l = sq(mu_l * d.config.surface);
             let mu_t = (curve_eval(&w.lat_curve, alpha.max(w.peak_alpha)) * w.lat_scale).max(0.0);
-            let mu_t = (mu_t * d.config.surface).sqrt();
+            let mu_t = sq(mu_t * d.config.surface);
             let al = mu_l * fn_;
             let at = mu_t * fn_;
-            let ft_raw = -(fs + m * vs / h);
+            let ft_raw = -(fs + dv(m * vs, h));
             let (_, fl_raw) = spin_solve(m, vt, ft, j, r, wd, b, f32::MAX, h);
             let (mut al_eff, mut f_t) = (al, ft_raw);
             if at <= 1e-9 {
                 f_t = 0.0;
             } else {
                 let e = if al > 1e-9 {
-                    (fl_raw / al) * (fl_raw / al) + (ft_raw / at) * (ft_raw / at)
+                    dv(fl_raw, al) * dv(fl_raw, al) + dv(ft_raw, at) * dv(ft_raw, at)
                 } else {
                     2.0
                 };
                 if e > 1.0 {
-                    let sc = 1.0 / e.sqrt();
+                    let sc = dv(1.0, sq(e));
                     let t_prop = ft_raw.abs() * sc;
                     let l_prop = fl_raw.abs() * sc;
-                    let nx = kappa / w.peak_kappa.max(0.03);
+                    let nx = dv(kappa, w.peak_kappa.max(0.03));
                     let tan_a = if vlen < 1e-3 {
                         0.0
                     } else if vt.abs() > 0.0 {
-                        (vs.abs() / vt.abs()).min(f32::from_bits(TAN_145))
+                        dv(vs.abs(), vt.abs()).min(f32::from_bits(TAN_145))
                     } else {
                         f32::from_bits(TAN_145)
                     };
-                    let ny = tan_a / w.tan_peak_alpha;
-                    let nn = (nx * nx + ny * ny).sqrt();
+                    let ny = dv(tan_a, w.tan_peak_alpha);
+                    let nn = sq(nx * nx + ny * ny);
                     let ws = if nn > 1e-6 {
                         clampf(nx.max(ny) - 1.0, 0.0, 1.0)
                     } else {
                         0.0
                     };
-                    let t_cap = lerp(t_prop, if nn > 1e-6 { at * ny / nn } else { t_prop }, ws);
-                    al_eff = lerp(l_prop, if nn > 1e-6 { al * nx / nn } else { l_prop }, ws);
+                    let t_cap = lerp(t_prop, if nn > 1e-6 { dv(at * ny, nn) } else { t_prop }, ws);
+                    al_eff = lerp(l_prop, if nn > 1e-6 { dv(al * nx, nn) } else { l_prop }, ws);
                     f_t = clampf(ft_raw, -t_cap, t_cap);
                 } else {
-                    al_eff = al * (1.0 - (ft_raw / at) * (ft_raw / at)).max(0.0).sqrt();
+                    al_eff = al * sq((1.0 - dv(ft_raw, at) * dv(ft_raw, at)).max(0.0));
                 }
             }
             let (w_new, f_l) = spin_solve(m, vt, ft, j, r, wd, b, al_eff, h);
@@ -754,8 +818,8 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
             if n1 == n2 {
                 apply(s, n1, force);
             } else {
-                let r1 = s.nodes[n1 as usize].mass / m;
-                let r2 = s.nodes[n2 as usize].mass / m;
+                let r1 = dv(s.nodes[n1 as usize].mass, m);
+                let r2 = dv(s.nodes[n2 as usize].mass, m);
                 apply(s, n1, force * r1);
                 apply(s, n2, force * r2);
             }

@@ -366,6 +366,24 @@ impl MetalExplicitBeams {
         coupling::decode_proxies(&layout, &misc[at..at + layout.recs() as usize * 4], set);
     }
 
+    /// Set vehicle `v`'s driver input for its raycast wheels (waits for the frames in
+    /// flight; a fleet without raycast wheels ignores it).
+    pub fn set_drive_input(&mut self, v: usize, input: engine_softbody::explicit_drive::DriveInput) {
+        let Some(d) = self.layout.drive else { return };
+        self.wait();
+        write(&self.bufs[plan::BIND_MISC as usize], d.input_offset(v), bytemuck::cast_slice(&plan::drive::input_words(input)));
+        self.planner.request_replan();
+    }
+
+    /// Read vehicle `v`'s raycast wheels' state back into `drive` (waits).
+    pub fn read_drive(&mut self, v: usize, drive: &mut engine_softbody::explicit_drive::Drive) {
+        let Some(l) = self.layout.drive else { return };
+        self.wait();
+        let misc: Vec<u32> = self.contents(plan::BIND_MISC);
+        let at = l.vehicle(v) as usize * 4;
+        plan::drive::decode(&misc[at..at + l.stride as usize * 4], drive);
+    }
+
     /// Set one node's velocity (waits for the frames in flight).
     pub fn set_velocity(&mut self, vehicle: usize, node: u32, v: Vec3) {
         self.wait();
