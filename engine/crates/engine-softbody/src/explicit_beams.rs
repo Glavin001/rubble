@@ -845,6 +845,9 @@ pub struct ExplicitBeams {
     /// Rigid bodies this vehicle meets ([`crate::explicit_rigid`]); `None` (the
     /// default) for none, every step unchanged.
     pub rigid: Option<Box<crate::explicit_rigid::ProxySet>>,
+    /// The energy ledger's per-node force split of the last step (None: not
+    /// traced; [`crate::explicit_contact::EnergyLedger`]).
+    pub trace: Option<Box<ForceTrace>>,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -1057,6 +1060,7 @@ impl ExplicitBeams {
             deform_state: Vec::new(),
             deform_names: Vec::new(),
             rigid: None,
+            trace: None,
         }
     }
 
@@ -2263,13 +2267,27 @@ impl ExplicitBeams {
         } else if !self.centering.is_empty() {
             self.command_pass();
         }
+        let mut trace = self.trace.take();
+        if let Some(t) = trace.as_mut() {
+            t.capture(&self.nodes, 0);
+        }
         self.beam_pass();
+        if let Some(t) = trace.as_mut() {
+            t.capture(&self.nodes, 1);
+        }
         if !self.triangles.is_empty() && !self.candidates.is_empty() {
             self.collision_pass();
+        }
+        if let Some(t) = trace.as_mut() {
+            t.capture(&self.nodes, 2);
         }
         if !self.slides.is_empty() {
             self.slide_pass();
         }
+        if let Some(t) = trace.as_mut() {
+            t.capture(&self.nodes, 3);
+        }
+        self.trace = trace;
         self.steps += 1;
     }
 
@@ -2981,6 +2999,31 @@ fn round_face(d: Vec3, radius: f32) -> Option<Vec3> {
         return None;
     }
     Some(if l > 0.0 { div3(d, l) } else { Vec3::Y })
+}
+
+/// One step's force accumulation split by source, per node (the energy ledger):
+/// the accumulator after the node pass and the air passes (gravity, drag, wings),
+/// then what the beam pass, self-collision and slide nodes added. The next step's
+/// node pass consumes their sum (plus vehicle contact, added by the world).
+#[derive(Clone, Debug, Default)]
+pub struct ForceTrace {
+    /// [air, beams, self-collision, slides] per node.
+    pub parts: [Vec<Vec3>; 4],
+    last: Vec<Vec3>,
+}
+
+impl ForceTrace {
+    /// Record stage `k`: the accumulator's growth since the last stage (stage 0:
+    /// the accumulator itself).
+    fn capture(&mut self, nodes: &[Node], k: usize) {
+        let n = nodes.len();
+        self.parts[k].resize(n, Vec3::ZERO);
+        self.last.resize(n, Vec3::ZERO);
+        for (i, nd) in nodes.iter().enumerate() {
+            self.parts[k][i] = if k == 0 { nd.force } else { nd.force - self.last[i] };
+            self.last[i] = nd.force;
+        }
+    }
 }
 
 /// What [`beam_force`] decided.
