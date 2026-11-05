@@ -51,8 +51,9 @@ fn mdb_has_the_standards_mass_and_centre_of_mass() {
 /// series in front of it), plus 5 % (the yield rule's half-step overshoot). It
 /// carries less while columns unload: the carriage is not rigid at the 2 kHz step
 /// (its back-plate nodes, a few kg each on stiff frame beams, ring against the frame), and
-/// the mean over the crush is 101 % of σ·A (measured 2026-11-05 with the stiffened
-/// carriage and its shear diagonals, 72 % before; the check keeps it above 85 %).
+/// the mean over the crush is 97 % of σ·A (measured 2026-11-05 with the stiffened
+/// carriage and its honeycomb-shear LBEAMs; 101 % with the shear diagonals before
+/// them, 72 % before the carriage was stiffened; the check keeps it above 85 %).
 #[test]
 fn mdb_crushes_at_the_honeycombs_stress() {
     let v = 8.0;

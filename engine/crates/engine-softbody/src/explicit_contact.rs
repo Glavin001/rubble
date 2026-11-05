@@ -103,6 +103,24 @@ pub fn vote_behind(
     score < 0
 }
 
+/// The effective mass of a triangle's point at barycentric weights `w` (spec
+/// §10.3): the reaction J is shared out as w_k·J, so the point's velocity changes by
+/// J·Σ w_k²/m_k, and its mass is 1/Σ w_k²/m_k (terms with w_k = 0 left out). The
+/// weighted mean Σ w_k·m_k (RoR's rule) overstates it wherever a light node carries
+/// most of the weight beside a heavy one (0.07 kg at 0.77 next to 10 kg at 0.14:
+/// 1.5 kg against 0.12 kg), and the light node is then thrown off at hundreds of
+/// m/s. `m` and `w` in the order n₁, n₂, n₀ (α, β, γ), summed left to right.
+pub fn two_body_triangle_mass(m: [f32; 3], w: [f32; 3]) -> f32 {
+    let term = |k: usize| {
+        if w[k] > 0.0 {
+            (w[k] * w[k]) / m[k]
+        } else {
+            0.0
+        }
+    };
+    1.0 / ((term(0) + term(1)) + term(2))
+}
+
 /// Statistics of the last contact pass (not simulated state).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ContactStats {
@@ -270,11 +288,16 @@ impl ExplicitBeamsWorld {
         self.last = stats;
     }
 
-    /// Owner `a`'s triangle loop against `partners` (§3.3, §4.2, §5, §6).
+    /// Owner `a`'s triangle loop against `partners` (§3.3, §4.2, §5, §6): the walk
+    /// (throttles, boxes, hit tests and side votes, all from positions), then the
+    /// hits' forces in the walk's order (triangles in list order, candidates in
+    /// order). The walk reads no force, so the two phases are the specification's
+    /// single loop.
     fn triangle_loop(&mut self, a: usize, partners: &[usize], stats: &mut ContactStats) {
         let r = self.vehicles[a].collision_range;
         let rr = Vec3::splat(r);
         let mut cands: Vec<(usize, u32)> = Vec::new();
+        let mut hits: Vec<Hit> = Vec::new();
         for t in 0..self.vehicles[a].triangles.len() {
             let [mut cwait, mut cidle] = self.vehicles[a].contact_throttle[t];
             if self.throttle {
@@ -337,35 +360,99 @@ impl ExplicitBeamsWorld {
                     } else {
                         (frame.n, delta)
                     };
-                    let p = r - delta;
-                    let node = vb.nodes[h as usize];
-                    let va = &self.vehicles[a];
-                    let (n0, n1, n2) = (
-                        va.nodes[i0 as usize],
-                        va.nodes[i1 as usize],
-                        va.nodes[i2 as usize],
-                    );
-                    let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
-                    let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
-                    let m = (node.mass * mt) / (node.mass + mt);
-                    let f = contact_force(
-                        node.force,
-                        v,
-                        m,
+                    hits.push(Hit {
+                        tri: [i0, i1, i2],
+                        w: [alpha, beta, gamma],
+                        b,
+                        h,
                         n,
-                        STEP,
-                        &ContactSurface::BOX,
-                        p,
-                        node.friction,
-                    );
-                    self.vehicles[b].nodes[h as usize].force += f;
-                    let va = &mut self.vehicles[a];
-                    va.nodes[i1 as usize].force -= f * alpha;
-                    va.nodes[i2 as usize].force -= f * beta;
-                    va.nodes[i0 as usize].force -= f * gamma;
+                        p: r - delta,
+                    });
                 }
             }
             self.vehicles[a].contact_throttle[t] = [cwait, cidle];
         }
+        if hits.is_empty() {
+            return;
+        }
+        // Two-body hits' mass splitting (spec §10.3): per node, the two-body hits of
+        // this turn it takes part in (as the contacter, or a vertex of the hit's
+        // triangle); and each contacter's force before its first hit of the turn.
+        let tb: Vec<bool> = self.vehicles.iter().map(|v| v.two_body_contact).collect();
+        let two_body = |b: usize| tb[a] || tb[b];
+        let mut split_a: Vec<u32> = Vec::new();
+        let mut split_b: Vec<Vec<u32>> = vec![Vec::new(); self.vehicles.len()];
+        let mut f_start: Vec<Vec<Vec3>> = vec![Vec::new(); self.vehicles.len()];
+        if hits.iter().any(|x| two_body(x.b)) {
+            split_a = vec![0; self.vehicles[a].nodes.len()];
+            for x in hits.iter().filter(|x| two_body(x.b)) {
+                for &i in &x.tri {
+                    split_a[i as usize] += 1;
+                }
+                if split_b[x.b].is_empty() {
+                    split_b[x.b] = vec![0; self.vehicles[x.b].nodes.len()];
+                    f_start[x.b] = self.vehicles[x.b].nodes.iter().map(|n| n.force).collect();
+                }
+                split_b[x.b][x.h as usize] += 1;
+            }
+        }
+        for x in &hits {
+            let (b, h) = (x.b, x.h);
+            let [i0, i1, i2] = x.tri;
+            let [alpha, beta, gamma] = x.w;
+            let node = self.vehicles[b].nodes[h as usize];
+            let va = &self.vehicles[a];
+            let (n0, n1, n2) = (
+                va.nodes[i0 as usize],
+                va.nodes[i1 as usize],
+                va.nodes[i2 as usize],
+            );
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let (m, fh) = if two_body(b) {
+                // Each node of the hit is one of its k sub-bodies (mass m/k, force F/k).
+                let k = |i: u32| split_a[i as usize] as f32;
+                let kh = split_b[b][h as usize] as f32;
+                let mh = node.mass / kh;
+                let mt = two_body_triangle_mass(
+                    [n1.mass / k(i1), n2.mass / k(i2), n0.mass / k(i0)],
+                    [alpha, beta, gamma],
+                );
+                // Only the share m_t/(m_h + m_t) of the contacter's force (before
+                // its first hit of the turn, split k ways) is cancelled: the
+                // relative normal acceleration's zero.
+                let m = (mh * mt) / (mh + mt);
+                (m, (f_start[b][h as usize] / kh) * (mt / (mh + mt)))
+            } else {
+                let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
+                ((node.mass * mt) / (node.mass + mt), node.force)
+            };
+            let f = contact_force(
+                fh,
+                v,
+                m,
+                x.n,
+                STEP,
+                &ContactSurface::BOX,
+                x.p,
+                node.friction,
+            );
+            self.vehicles[b].nodes[h as usize].force += f;
+            let va = &mut self.vehicles[a];
+            va.nodes[i1 as usize].force -= f * alpha;
+            va.nodes[i2 as usize].force -= f * beta;
+            va.nodes[i0 as usize].force -= f * gamma;
+        }
     }
+}
+
+/// One hit of an owner's walk: the triangle's nodes (n₀, n₁, n₂) and weights
+/// (α, β, γ), the partner and its contact point, the normal after the side vote and
+/// the penetration r − δ.
+struct Hit {
+    tri: [u32; 3],
+    w: [f32; 3],
+    b: usize,
+    h: u32,
+    n: Vec3,
+    p: f32,
 }
