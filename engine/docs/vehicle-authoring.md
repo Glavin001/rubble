@@ -105,8 +105,9 @@ or blocks) and over every beam.
 `MemberSpec { path, width, height, up, grade, scale: [start, end], beads, mirrored,
 attach, ride, section, station, catch, stiff }`: a box (4 nodes a station) or ladder
 (2) truss along a path; every path vertex is a station (members meet at their
-paths' vertices) and each segment is split at most 60 cm apart (crush members 45
-cm; `station` overrides). `stiff` is the section's k·L against its grade's (rails
+paths' vertices) and each segment is split at most 1 m apart (crush members 60
+cm; `station` overrides: the B-pillar 0.6 m and the doors' rails 0.42 m, so a
+pole at mid-span meets a station, the centre hinge of its 4·M_p/L collapse). `stiff` is the section's k·L against its grade's (rails
 ×1.4, rear rails ×3.5, sills ×2.3: k·L ≥ 5e5 N). Its grade's
 thresholds graded from `scale[0]` to `scale[1]` (a crush rail: weak at the bumper,
 strong at the firewall), weaker rings every `beads` stations (it folds there
@@ -167,12 +168,72 @@ from 20 to 17 kN (`ROOF_YIELD`), because the PHS B-pillar now carries more of
 the FMVSS 216a platen.
 
 With these sections, the NCAP side pole's residual crush at the pole fell from
-a median of 444 mm to 375–396 mm (two builds; single runs 362–417), against
-the measured median 356 (p10–p90 297–445). The 45 and
-60 km/h side pole sweeps did not change. There the pole's force holds about
-110–120 kN with or without the sections: a sparse body's nodes slide round
-the pole (node-only contact), so the force is not limited by the members'
-plastic collapse loads above.
+a median of 444 mm to 375–396 mm, and to 340 mm after the re-node (the
+measured median is 356, p10–p90 297–445).
+
+The pole sweep (`--ignored`, side) still finds pass-throughs: of 178 cases,
+17 at 30 km/h, 59 at 45 and 91 at 60 (front: 0 of 66 at each speed). At
+30 km/h they fall in three places. The sweep's offset is along −z from the
+car's middle; `showcase_probe … side` takes it along +z, so negate it there.
+
+* The rear overhang, z 0.35–0.80: no cross member between the rear subframe
+  (0.62) and the bumper beam (0.15–0.21), so only the rear rails and the boot
+  floor's skin bear on the pole.
+* The rear door, z 1.65.
+* Behind the front wheel, z 3.55–3.65.
+
+Neither the front and rear subframe cross members at real sections
+(90 × 60 × 2 mm, S420), nor catchers in the frame tier, nor a lower radiator
+cross member changed the 30 km/h count. Node-only contact lets the pole pass
+between stations 0.4–0.6 m apart once the catchers' ties fail.
+
+## Node counts (BeamNG's)
+
+The structure is noded as BeamNG's cars are: a frame of a few hundred heavy
+nodes with dense node lanes only on the impact faces (the catchers, the doors'
+rails). Medium (`counts_per_resolution` asserts 800–1,000 nodes, ≥ 3,000
+beams, a frame of 300–350 besides the doors' frames, median 1–4 kg):
+
+| | f447ed8f | re-noded |
+|---|---|---|
+| nodes / beams | 1,125 / 7,804 | 993 / 6,735 |
+| frame (besides the doors') | 490 (392) | 398 (324) |
+| frame node median | 1.21 kg | 1.44 kg |
+| powertrain lattice | 80 (0.17 m cube) | 40 (faces 0.17 m, two layers) |
+| catchers | 108 | 108 |
+| skin scale | ×0.43 | ×0.59 |
+| frame grades' k·L | ×1.0 | ×1.5 |
+
+Low: 915 nodes, skin ×0.64; High: 1,054, skin ×0.45 (the resolution sets the
+skin only).
+
+### The rear body
+
+`showcase_probe -- sedan medium wall 56` with `REAR=1` measures the rear frame
+(z < 1.2) in the cell's best-fit frame (sills, pillars, roof rails, tunnel,
+the B-pillar cross member) each millisecond: its RMS displacement from rest,
+and with `REAR_FIT=1` its own best fit (pitch, centre) against its own
+deformation. `… static` with `BEND=y|z` solves it under 30 g with the cell
+clamped, and `TOPBEAMS=1` lists the beams storing the most energy.
+
+Before the re-node the rear frame moved 107 mm (peak RMS; 71 mm over the
+pulse): it hinged ±4° about the kick-up at about 12 Hz (δ = a/ω²: 30 g on a
+12 Hz mode is 52 mm) and slid 85 mm forward on the floor's cross members,
+which are ladders that do not bend in plan. Now 21 mm (13 mm over the pulse),
+5× less:
+
+* the rear rails start at the sill under the B-pillar (they were held by the
+  rear seat cross member alone);
+* floor-pan shear panels from the front and rear rails to the sills;
+* the rear body's upper chord: the quarter inner and C-pillar ×6
+  (`QUARTER_STIFF`, `C_PILLAR_STIFF`), the rear quarter's web ×3
+  (`QUARTER_WEB`).
+
+Statically, 30 g vertical on the rear moves it 39 mm (73 before), so its
+pitch mode is about 14 Hz. Ten times less motion needs ω × 3.2 (about 45 Hz).
+Stiffening every rear and cell member ×2–4 runs the step budget out first
+(skin ×0.04, frame ×0.76); what is left is spread across the C-pillar, the
+roof header, the door-ring panels and the skin.
 
 ## Suspension corners
 
@@ -213,8 +274,10 @@ The body is built the BeamNG way, in two tiers:
 
 * **Frame** (primary): every member's stations: rails, aprons, towers, sills,
   pillars, roof rails and bows, cross members, tunnel, firewall, cowl, bumper
-  beams, subframes, the doors' own beams. About 350–480 nodes of 1–2 kg (the named
-  masses sit on them), its grades at RoR-level k·L on the load paths. It carries
+  beams, subframes, the doors' own beams. About 320 nodes of 1–4 kg besides the
+  doors' frames (74 more), median 1.44 kg (the named masses sit on them), its
+  grades at 1.5 × RoR-level k·L on the load paths (`sedan::FRAME_STIFF`; see
+  Node counts below). It carries
   torsion (the cabin box's lumped shear panels, the strut towers braced into it),
   crash load paths and the door rings.
 * **Skin**: the shell (panels, floor pan, roof skin; 25–40 cm, `SKIN_DENSITY`
@@ -249,12 +312,13 @@ rest of the seats is a named mass on the floor). That freed about 100 kg of
 the budget: the skin's scale went from ×0.19 to ×0.47. `showcase_probe --
 sedan medium info` with `SLACK=1` lists the mass beyond the floors per group.
 
-The crumple zone's plateau (`CRUSH_PLATEAU`, 0.65 × the crush grade) is as
-low as the crush length allows: what the front still pushes on the cell when
-the car stops comes back elastically as rebound (about F²/2k), so a lower
-plateau with a longer crush (0.75 m at 56 km/h) rebounds less (2.7 → 2.0
-m/s). The front rails are graded from 1.0 under the floor to 0.5 at the
-bumper (`RAIL_CABIN`).
+The crumple zone's plateau (`CRUSH_PLATEAU`, 0.9 × the crush grade) and the
+crush grade's rigidity (`CRUSH_RIGIDITY`, 0.15 × the frame's) are set from
+NCAP's measured pulse (`crash-reference-targets.md` §8): the front springs
+back 0.10–0.24 m from its dynamic crush to its residual, so it unloads over a
+long, soft tail. The front rails are graded from 1.0 under the floor
+(`RAIL_CABIN`) to 0.7 at the bumper (`RAIL_BUMPER`): the force rises with the
+crush, as Campbell's model has it.
 
 `VehicleDef::tiered` fits the step per tier (`Skeleton::fit_tiers`): the frame's
 beams at their grades (`Built::stiffness_scale` = 1), the skin's stiffness and
