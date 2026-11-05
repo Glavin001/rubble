@@ -283,6 +283,34 @@ fn coasting_pressure_tyres_energy_split() {
             for _ in 0..30 {
                 w.frame(33);
             }
+            {
+                // Each tyre's loaded deflection: its radius less the axle centre's
+                // height over the lowest tread node; and the tyre and car masses.
+                let v = &w.vehicles[0];
+                let mass: f32 = v.nodes.iter().map(|n| n.mass).sum();
+                let d: Vec<String> = v
+                    .tyres
+                    .iter()
+                    .map(|t| {
+                        let c = 0.5
+                            * (v.nodes[t.axle[0] as usize].pos + v.nodes[t.axle[1] as usize].pos);
+                        let n = t.count as usize / 4;
+                        let tread = (t.first as usize + 2 * n)..(t.first + t.count) as usize;
+                        let low = tread
+                            .clone()
+                            .map(|i| v.nodes[i].pos.y)
+                            .fold(f32::MAX, f32::min);
+                        let m: f32 = tread.map(|i| v.nodes[i].mass).sum();
+                        format!(
+                            "r {:.3} deflection {:.1} mm tread mass {:.2} kg",
+                            t.radius,
+                            (t.radius - (c.y - low)) * 1e3,
+                            m
+                        )
+                    })
+                    .collect();
+                eprintln!("{name} {v0} m/s: mass {mass:.0} kg; tyres {d:?}");
+            }
             w.enable_ledger();
             // Per beam its dissipation over the window, −Σ f·Δℓ − ΔU (f the force
             // over the step, compression positive, the trapezoid of its values at

@@ -524,6 +524,65 @@ live triangles around the fold of the crushed door (572, 564, 566, 568, 606) in 
 out every few steps: they sit on the plane inside the contact band, where the hit's
 side vote decides.
 
+**Leak, sixth pass: where the crossings start; the prism-gap fixes measured
+(2026-11-05, same car, CPU, corrected metric).** `showcase_car.rs` test `t` now classes
+every inward crossing of a live triangle by where the node was against that triangle at
+the contact pass before (positions after the last step, whose hits set this step's
+forces). It also classes each hit's side (by the skin's outward orientation) and the
+leaked nodes at the worst frame by their last inward crossing.
+
+| Rule, offset | Inward crossings: hit / beyond band / outside the prism | Leaked by last crossing: hit / beyond / outside / out only | Hit crossings: vote pushed in / pushed out |
+|---|---|---|---|
+| RoR's, 0 m | 121 / 4 / 11 | 9 / 2 / 2 / 0 | 14 / 107 |
+| RoR's, 0.43 m | 295 / 30 / 21 | 26 / 2 / 5 / 10 | 116 / 179 |
+| RoR's, 0.7 m | 532 / 35 / 13 | 74 / 6 / 5 / 0 | 217 / 315 |
+| Two-body, 0 m | 314 / 0 / 23 | 97 / 0 / 4 / 0 | 15 / 299 |
+| Two-body, 0.43 m | 575 / 1 / 6 | 128 / 1 / 4 / 1 | 239 / 336 |
+| Two-body, 0.7 m | 517 / 3 / 17 | 124 / 1 / 10 / 0 | 260 / 257 |
+
+**So the prism gaps are not the leak.** 2–10 leaked nodes per case last crossed from
+outside the prism; 80–95 % were hits of the triangle they crossed, and every hit
+crossing came from in front. Of those, 30–50 % at the offsets were pushed in by the side
+vote (the node in front, its neighbours behind the plane). The rest were pushed out and
+crossed anyway. In a trace (node 397 against triangle 606, 0.7 m), the hit swings by
+±1.5 cm a step for ten steps before the node goes through: a contact that rings rather
+than holds.
+
+Measured, all reverted (patches in the session scratchpad, not in the repository; most
+leaked / 1,165; "div." = the run went non-finite):
+
+| Variant | RoR's rule 0 / 0.43 / 0.7 m | Two-body 0 / 0.43 / 0.7 m |
+|---|---|---|
+| Today | 13 / 43 / 85 | 101 / 134 / 135 |
+| Side memory: last hit's push normal for 20 steps, else the vote | 30 / div. / div. | 111 / 101 / 116 |
+| Side memory, else the side of δ | 23 / div. / 48 | 114 / 120 / 108 |
+| The side of δ, no vote | 27 / 91 / div. | 154 / 171 / 176 |
+| Prisms extended across live edges to the dihedral's bisector plane (weights clamped, renormalised; 6–11 % of hits are new) | 13 / div. / div. | 82 / 118 / 161 |
+
+The vote is also what recovers a penetrated node: without it, outward crossings fall
+from 133 to 16 (RoR's rule, 0 m). Extended prisms under RoR's rule put the whole force
+of an edge hit on one or two light nodes, the closest-feature attempt's failure, and
+diverge. **Not adopted;** two-body stays JBeam mode's default only, because it leaks
+more than RoR's rule at every offset. **Open:** the ringing hit. The response
+over-corrects the light struck triangle when many striker nodes hit it at once (RoR's
+rule sizes each hit as if it were alone). Two-body's splitting under-corrects, and a
+converged solve injects energy (third pass). This is a contact-response question, not a
+candidate-generation one.
+
+**Leak, seventh pass: the one-tier car (`SHOWCASE_STYLE=sedan1`, 2026-11-05, 1,052
+striker nodes, limit 10; CPU, live-skin metric; most leaked, the winding count in
+brackets).** RoR's rule 23 (42) / 7 (38) / 4 (5) at 0 / 0.43 / 0.7 m; two-body 13 (57) /
+11 (37) / 11 (31). With 1.3 kg body nodes, the hit crossings that leak are a handful,
+not hundreds. The count is chaotic at this level. Near the door middle, RoR's rule
+gives 9 / 23 / 13 at −0.03 / 0 / +0.03 m; near 0.43 m it gives 12 / 7 / 4 at 0.40 /
+0.43 / 0.46 m. Every case is within about twice the limit, and some are inside it.
+
+*Each hit's triangle mass split among the turn's hits on that triangle* (RoR's rule:
+m_t / n_t in the reduced mass, n_t the triangle's hits in the owner's turn; measured,
+reverted). sedan1: 17 / 10 / 18 at −0.03 / 0 / +0.03 m, 4 / 19 / 5 at 0.40 / 0.43 /
+0.46 m, 7 at 0.7 m. The two-tier car: 15 / 72 / 95 (was 13 / 43 / 85). No systematic
+gain on either car, so not adopted.
+
 ## 11. What the BX and the legocar use, and what is left
 
 Feature census (`examples/jbeam_census.rs`) of the two test configurations: NORMAL,
@@ -1279,6 +1338,61 @@ start − end mechanical energy over the 1 s window, kJ/s, supercar / Astral R a
 * The fixture car's rest rocking (§24, §28) is the same mechanism with less loss:
   peak kinetic energy 1–4 s 37.3 J (was 44 J), 17.7 J at 4 s; the polygon flats'
   well and free-rolling wheels, damped only by the tyres' rolling loss.
+
+**The tread's landing, measured against geometry (2026-11-05, `energy_ledger.rs`
+coasting, which now also reports each tyre's loaded deflection and tread mass).**
+Astral R: 2,028 kg, tread 5.09 kg per tyre (32 nodes of 0.159 kg), loaded deflection
+δ = 8–11 mm at 9 m/s and 10–12 mm at 25 m/s, R = 0.325 m. A point-mass tread node
+rotating at radius R reaches the flattened patch at angle θ, cos θ = 1 − δ/R
+(13.5° at 9 m/s, 14.9° at 25 m/s), moving towards the ground at v·sin θ (2.1 and
+6.4 m/s). It lands with ½m(v·sin θ)² = 0.35 J and 3.3 J; measured 0.40 J and 5.6 J
+(1,444 landings a second at 25 m/s, 29.5 per tyre revolution: almost every tread node,
+every revolution). Per tyre that is a force of about M_tread·v²·sin²θ / (4πR): 205 N
+for the car at 25 m/s (5.1 kJ/s of the 8.1 measured; the rest is the node's radial
+ringing as it leaves the patch, at 196 g centripetal). It does not depend on the
+polygon (the rays set the node mass, not the total tread mass or θ), as `rays=2`
+showed. The landing's impulse is what the sidewall and L-beam dampers then take
+(13 and 3 kJ/s). The loss scales with the total tread mass and the deflection, and
+roughly with v² (C_rr 0.025 at 9 m/s, 0.063 at 25 m/s; a real tyre's is close to
+constant). **So the remaining sink is the lumped tread's inelastic landing at its
+patch-entry angle** (§28's node–ground rule on a belt with no bending stiffness ahead
+of the patch, unlike a real tyre's belt), not a mis-set beam. Every input is the
+file's own (node weights, deflection from its pressure and springs). **Not fixed:**
+removing it needs a modelling Choice with nothing measured behind it: a ground
+restitution, or tread bending ahead of the patch the file does not author. This is the
+user's decision (AGENTS.md: no lossy or invented model on our own initiative).
+
+**A compliant, hysteretic tread contact, measured (2026-11-05; CPU, reverted, the
+patch is in the session scratchpad).** The coordinator's decision: replace §28's
+inelastic ground rule on pressure-wheel tread nodes only with a compliant contact whose
+loss comes from measured tread-rubber hysteresis.
+* *Source of tan δ.* Mogi, Hase, Mizone and Nishitani, "Research on Optimization of
+  Viscoelastic Properties of Tire Tread Rubber to Reduce Rolling Resistance and
+  Decrease Braking Distance", Honda R&D Technical Review 19(1), April 2007: tan δ at
+  60 °C and about 10 Hz is the index of rolling resistance, and the tread is about
+  50 % of it. That paper gives no number. The value used, **tan δ = 0.12**, is a
+  representative tread compound's (0.117 for a TDAE-oil reference compound, an ACS
+  Rubber Division meeting abstract seen in a search index but not retrieved).
+  **Unverified at the source:** a cited table (Clark, *Mechanics of Pneumatic
+  Tires*; NRC Special Report 286) is still owed.
+* *Hysteretic, rate-independent* (**Choice**: k = m/h², ω·h = 1, the stiffest the step
+  integrates with margin; real tread rubber is about 15 times stiffer, about 10 MN/m
+  per node, and cannot be integrated at 2 kHz; loading k·p, unloading k·p·(1 − ψ)
+  below the episode's peak, ψ = (π/2)·tan δ, so a 0 → p₀ → 0 cycle loses a
+  sinusoidal cycle's π·tan δ·k·a²): C_rr **0.016** (supercar, was 0.024) and
+  **0.051** (Astral R, was 0.063). The landing energy now mostly comes back (ground
+  vertical work −2.2 kJ/s), but the sidewall and L-beam dampers still take 17 kJ/s
+  of the Astral R's 25. Fails the rest creep: the supercar drifts 105 mm against a
+  sway of 103 mm. Below the peak the loop is elastic, so small oscillations are not
+  damped and the tread walks.
+* *Kelvin–Voigt* (c = k·tan δ/(2π·10 Hz), implicit, c·h/m = 3.8; stateless): C_rr
+  0.035 and 0.069, worse. The viscous law over-damps the tread's fast modes,
+  which are far above 10 Hz. Fails `pressure_wheel_car_stands_on_its_tyres` (the
+  fixture car rolls 0.195 m, off its flats).
+* **Not adopted.** Neither passes the rest tests. A hysteresis that damps small
+  cycles too (reversal-point, Masing-type) needs per-node state on both solvers. The
+  one that reaches the band at all, the supercar's, leaves the Astral R at 0.051,
+  because its remaining sink is its own sidewall dampers. **Open, for the coordinator.**
 
 **Drag area check** (`jbeam_accept … aero=`: Σ 1.28·(dragCoef/100)·A·|n̂·f̂|
 over the desc's triangles, f̂ the forward axis; one-sided areas, each triangle once,

@@ -451,6 +451,9 @@ pub struct LeakTracker {
     /// The last update's crossings: (point, triangle, +1 inward / −1 outward / 0
     /// through a dead triangle).
     pub events: Vec<(u32, u32, i8)>,
+    /// Points' steps and triangles' sweeps not tracked: non-finite or wider than
+    /// [`LEAK_SPAN`] (a diverging vehicle).
+    pub skipped: u64,
     prev_pts: Vec<Vec3>,
     prev_skin: Vec<Vec3>,
     grid: std::collections::HashMap<(i32, i32, i32), Vec<u32>>,
@@ -463,6 +466,15 @@ const LEAK_CELL: f32 = 0.25;
 /// Each triangle's box is grown by this much (m) so that a point passing close by
 /// an edge sees both triangles' solid angles change (their sum is the crossing).
 const LEAK_MARGIN: f32 = 0.05;
+
+/// Whether a box is finite and spans at most [`LEAK_SPAN`] (a step of a diverging
+/// vehicle is not tracked, and is counted in `skipped`).
+fn wild(lo: Vec3, hi: Vec3) -> bool {
+    lo.is_finite() && hi.is_finite() && (hi - lo).max_element() <= LEAK_SPAN
+}
+
+/// The largest box a point's step or a triangle's sweep may span (m).
+const LEAK_SPAN: f32 = 4.0;
 
 fn leak_cell(p: Vec3) -> (i32, i32, i32) {
     let q = p / LEAK_CELL;
@@ -479,6 +491,7 @@ impl LeakTracker {
             outward: 0,
             through_dead: 0,
             events: Vec::new(),
+            skipped: 0,
             prev_pts: pts.to_vec(),
             prev_skin: skin_pos.to_vec(),
             grid: Default::default(),
@@ -513,6 +526,10 @@ impl LeakTracker {
                     hi = hi.max(p);
                 }
             }
+            if !wild(lo, hi) {
+                self.skipped += 1;
+                continue;
+            }
             let (a, b) = (
                 leak_cell(lo - Vec3::splat(LEAK_MARGIN)),
                 leak_cell(hi + Vec3::splat(LEAK_MARGIN)),
@@ -527,6 +544,10 @@ impl LeakTracker {
         }
         for (k, &p1) in pts.iter().enumerate() {
             let p0 = self.prev_pts[k];
+            if !wild(p0.min(p1), p0.max(p1)) {
+                self.skipped += 1;
+                continue;
+            }
             let (a, b) = (leak_cell(p0.min(p1)), leak_cell(p0.max(p1)));
             self.epoch = self.epoch.wrapping_add(1);
             // The change of the point's winding number over the nearby triangles,
