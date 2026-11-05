@@ -2437,10 +2437,69 @@ fn front_profile(
 /// and structure), Campbell b1, the dynamic crush and when it peaks, the
 /// springback, restitution and where the energy went. Returns (exterior
 /// average crush, failures).
+/// A tiny physical perturbation of a crash scene: the impact point moved
+/// `offset` m across the line of travel, the speed × (1 + `speed`), the
+/// line of travel turned `yaw` rad about the vertical. A single run of an
+/// explicit crash is chaotic (bifurcations in which member folds first), so
+/// a reference is judged on an ensemble's mean, as repeat tests of one
+/// model scatter.
+#[derive(Clone, Copy, Debug, Default)]
+struct Perturb {
+    offset: f32,
+    speed: f32,
+    yaw: f32,
+}
+
+/// The ensemble: the eight corners of ±1 cm, ±0.3 % and ±0.2°.
+fn ensemble() -> Vec<Perturb> {
+    let mut v = Vec::new();
+    for o in [-0.01f32, 0.01] {
+        for sp in [-0.003f32, 0.003] {
+            for y in [-0.2f32, 0.2] {
+                v.push(Perturb {
+                    offset: o,
+                    speed: sp,
+                    yaw: y.to_radians(),
+                });
+            }
+        }
+    }
+    v
+}
+
+/// Mean, standard deviation, min and max.
+fn spread(v: &[f32]) -> (f32, f32, f32, f32) {
+    let n = v.len() as f32;
+    let m = v.iter().sum::<f32>() / n;
+    let sd = (v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / (n - 1.0).max(1.0)).sqrt();
+    (
+        m,
+        sd,
+        v.iter().copied().fold(f32::MAX, f32::min),
+        v.iter().copied().fold(f32::MIN, f32::max),
+    )
+}
+
 fn reference_wall(b: &Built, kmh: f32, drag: bool, noise: f64) -> Vec<(&'static str, f32)> {
+    reference_wall_p(b, kmh, drag, noise, Perturb::default())
+}
+
+/// [`reference_wall`] perturbed (a full-width wall: the offset changes
+/// nothing, the speed and the yaw do).
+fn reference_wall_p(
+    b: &Built,
+    kmh: f32,
+    drag: bool,
+    noise: f64,
+    p: Perturb,
+) -> Vec<(&'static str, f32)> {
     let sk = &b.skeleton;
-    let v0 = kmh / 3.6;
-    let mut s = spawn(b, Vec3::new(0.0, 0.0, v0), 0.0);
+    let v0 = kmh * (1.0 + p.speed) / 3.6;
+    let mut s = spawn(
+        b,
+        Quat::from_rotation_y(p.yaw) * Vec3::new(0.0, 0.0, v0),
+        0.0,
+    );
     s.settings.drag = drag;
     let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
     s.boxes.push(StaticBox::centered(
@@ -2640,26 +2699,26 @@ fn reference_wall(b: &Built, kmh: f32, drag: bool, noise: f64) -> Vec<(&'static 
 fn n_wall_matches_the_nhtsa_sedans() {
     let b = built(Resolution::Medium);
     let noise = rest_noise(&b);
-    // 55–57 km/h with drag on and off: the medians are judged (the solver's
-    // run-to-run spread at one speed is a few centimetres).
-    let mut runs: Vec<Vec<(&str, f32)>> = Vec::new();
-    for kmh in [55.0, 56.0, 57.0] {
-        for drag in [true, false] {
-            runs.push(reference_wall(&b, kmh, drag, noise));
-        }
-    }
+    // The ensemble at 56 km/h (`ensemble`: ±1 cm, ±0.3 %, ±0.2°), drag on
+    // and off in turn: its mean is judged, its spread reported.
+    let runs: Vec<Vec<(&str, f32)>> = ensemble()
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| reference_wall_p(&b, 56.0, i % 2 == 0, noise, p))
+        .collect();
     let med = |k: &str| {
-        let mut v: Vec<f32> = runs
+        let v: Vec<f32> = runs
             .iter()
             .map(|r| r.iter().find(|x| x.0 == k).unwrap().1)
             .collect();
-        v.sort_by(f32::total_cmp);
-        0.5 * (v[(v.len() - 1) / 2] + v[v.len() / 2])
+        let (m, sd, lo, hi) = spread(&v);
+        eprintln!("(n) ensemble {k}: mean {m:.4}, sd {sd:.4}, range {lo:.4}–{hi:.4}");
+        m
     };
     let mut fails = Vec::new();
     let mut band = |k: &str, lo: f32, hi: f32| {
         let m = med(k);
-        eprintln!("(n) median {k} {m:.4} (reference {lo}–{hi})");
+        eprintln!("(n) mean {k} {m:.4} (reference {lo}–{hi})");
         if !(lo..=hi).contains(&m) {
             fails.push(format!("{k} {m} outside {lo}–{hi}"));
         }
@@ -2693,13 +2752,7 @@ fn n_wall_matches_the_nhtsa_sedans() {
         let (mut b1, mut c) = (Vec::new(), Vec::new());
         for &k in kmh {
             for drag in [true, false] {
-                let r = if k == 55.0 || k == 56.0 || k == 57.0 {
-                    let i = [55.0, 56.0, 57.0].iter().position(|&x| x == k).unwrap() * 2
-                        + if drag { 0 } else { 1 };
-                    runs[i].clone()
-                } else {
-                    reference_wall(&b, k, drag, noise)
-                };
+                let r = reference_wall(&b, k, drag, noise);
                 b1.push(r.iter().find(|x| x.0 == "b1").unwrap().1);
                 c.push(r.iter().find(|x| x.0 == "avg crush").unwrap().1);
             }
@@ -2743,17 +2796,25 @@ fn n_wall_matches_the_nhtsa_sedans() {
 #[test]
 fn o_side_pole_matches_the_nhtsa_sedans() {
     let b = built(Resolution::Medium);
-    // 30–34 km/h: the median is judged. O_KMH: one speed only.
-    let speeds: Vec<f32> = match std::env::var("O_KMH").ok().and_then(|v| v.parse().ok()) {
-        Some(k) => vec![k],
-        None => vec![30.0, 31.0, 32.0, 33.0, 34.0],
-    };
-    let mut crushes: Vec<f32> = speeds.iter().map(|&k| side_pole_crush(&b, k)).collect();
-    crushes.sort_by(f32::total_cmp);
-    let crush = crushes[crushes.len() / 2];
+    // The ensemble at 32 km/h (`ensemble`: the pole ±1 cm along the car,
+    // the speed ±0.3 %, the line of travel ±0.2°): its mean is judged, its
+    // spread reported. O_KMH: that speed.
+    let kmh = std::env::var("O_KMH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32.0);
+    let crushes: Vec<f32> = ensemble()
+        .into_iter()
+        .map(|p| side_pole_crush_p(&b, kmh, p))
+        .collect();
+    let (crush, sd, lo, hi) = spread(&crushes);
     eprintln!(
-        "(o) side pole: median residual crush at the pole {:.0} mm",
-        crush * 1e3
+        "(o) side pole: ensemble mean residual crush at the pole {:.0} mm, sd {:.0}, range {:.0}–{:.0} ({:.0?})",
+        crush * 1e3,
+        sd * 1e3,
+        lo * 1e3,
+        hi * 1e3,
+        crushes.iter().map(|c| c * 1e3).collect::<Vec<_>>()
     );
     // §4.11: p10–p90 297–445 mm (hard 169–537).
     assert!(
@@ -2764,8 +2825,9 @@ fn o_side_pole_matches_the_nhtsa_sedans() {
 
 /// One NCAP side pole run (see [`o_side_pole_matches_the_nhtsa_sedans`]):
 /// the residual crush at the pole (m).
-fn side_pole_crush(b: &Built, kmh: f32) -> f32 {
-    let a = 75.0f32.to_radians();
+fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
+    let kmh = kmh * (1.0 + p.speed);
+    let a = 75.0f32.to_radians() + p.yaw;
     let dir = Vec3::new(a.sin(), 0.0, a.cos());
     let s0 = spawn(&b, Vec3::ZERO, 0.0);
     let mut s = spawn(&b, dir * kmh / 3.6, 0.0);
@@ -2776,7 +2838,7 @@ fn side_pole_crush(b: &Built, kmh: f32) -> f32 {
     let head = Vec3::new(
         0.38,
         0.0,
-        group_mean(&s0, &b, &["pillar_b", "pillar_b_r"]).z + (2.55 - 2.24),
+        group_mean(&s0, &b, &["pillar_b", "pillar_b_r"]).z + (2.55 - 2.24) + p.offset,
     );
     let gap = |c: Vec3| {
         s.nodes
