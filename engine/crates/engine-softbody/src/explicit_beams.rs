@@ -86,6 +86,12 @@ pub struct ExplicitBeamsSettings {
     pub drag: bool,
     /// Pseudo-random turbulence on top of the drag (needs `drag`).
     pub turbulence: bool,
+    /// Rigs of Rods' idle-triangle throttle: a collision triangle with no
+    /// candidate is skipped for up to 12 steps, in self-collision and vehicle
+    /// contact (`explicit-beams.md` §3). Off in the BeamNG profile
+    /// ([`Self::beamng`], jbeam-semantics-spec.md §36): every triangle is tested
+    /// every step.
+    pub triangle_throttle: bool,
 }
 
 impl Default for ExplicitBeamsSettings {
@@ -94,6 +100,20 @@ impl Default for ExplicitBeamsSettings {
             fast_inv_sqrt: true,
             drag: true,
             turbulence: true,
+            triangle_throttle: true,
+        }
+    }
+}
+
+impl ExplicitBeamsSettings {
+    /// The BeamNG profile (jbeam-semantics-spec.md §36): JBeam content and a
+    /// `.truck` with a `rubble_beamng_profile` line. Each switch can be turned
+    /// back alone; the default (Rigs of Rods) profile is unchanged.
+    pub fn beamng(self) -> Self {
+        Self {
+            fast_inv_sqrt: false,
+            triangle_throttle: false,
+            ..self
         }
     }
 }
@@ -1599,6 +1619,12 @@ impl ExplicitBeams {
         if file.exact_lengths {
             s.settings.fast_inv_sqrt = false;
         }
+        // `rubble_beamng_profile` (Rubble's extension, spec §36): the BeamNG
+        // profile's switches and two-body vehicle contact.
+        if file.beamng_profile {
+            s.settings = s.settings.beamng();
+            s.two_body_contact = true;
+        }
         // `rubble_contact_breaks` (Rubble's extension, spec §32).
         if !file.contact_breaks.is_empty() {
             s.set_contact_breaks(&file.contact_breaks)?;
@@ -2032,10 +2058,10 @@ impl ExplicitBeams {
         let mut warnings = desc.warnings.clone();
         // Exact beam lengths: the fast inverse square root is a Rigs of Rods
         // compatibility rule (its 0.2 % error strains stiff beams at rest).
-        let settings = ExplicitBeamsSettings {
-            fast_inv_sqrt: false,
-            ..settings
-        };
+        // JBeam content runs the BeamNG profile (§36; exact beam lengths among
+        // its switches: the fast inverse square root is a Rigs of Rods rule whose
+        // 0.2 % error strains stiff beams at rest).
+        let settings = settings.beamng();
         let mut s = Self::spawn_nodes(desc, position, 0.0, velocity, settings);
         for b in &desc.beams {
             s.push_jbeam_beam(b);
@@ -3144,6 +3170,8 @@ impl ExplicitBeams {
         }
         let r = self.collision_range;
         let h = STEP;
+        // Without the throttle (§36) a triangle never waits: its count stays ≤ 0.
+        let cap = if self.settings.triangle_throttle { i32::MAX } else { 0 };
         for t in 0..self.triangles.len() {
             let tri = &mut self.triangles[t];
             if tri.wait > 0 {
@@ -3157,7 +3185,7 @@ impl ExplicitBeams {
             let [i0, i1, i2] = tri.nodes;
             if !self.tri_dead.is_empty() && self.tri_dead[t] {
                 // A broken triangle (spec §18): no candidates.
-                self.triangles[t].wait += 1;
+                self.triangles[t].wait = (self.triangles[t].wait + 1).min(cap);
                 continue;
             }
             let tri_group = self.triangle_self_group(t);
@@ -3244,7 +3272,7 @@ impl ExplicitBeams {
             if hit {
                 tri.wait = -20000;
             } else {
-                tri.wait += 1;
+                tri.wait = (tri.wait + 1).min(cap);
             }
         }
     }

@@ -117,6 +117,9 @@ static const uint FLAG_CFORCE = 256u; // the contact-force log (jbeam-semantics-
 // The vehicle has tread nodes (NODE_TREAD): its nodes take the shapes path, whose
 // ground contact runs treadGround for them (jbeam-semantics-spec.md §34).
 static const uint FLAG_TREAD = 512u;
+// The BeamNG profile without Rigs of Rods' idle-triangle throttle
+// (jbeam-semantics-spec.md §36): the vehicle's triangles never wait.
+static const uint FLAG_NO_THROTTLE = 1024u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -2076,6 +2079,14 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
 // steps up); one that was tested restarts its wait from its hit (gMisc .w, set by
 // any of its lanes) or counts it up. A triangle that comes off idle waits at most
 // 12 steps and is tested that same step (triangleTest reads it as not waiting).
+// The largest wait triangle gt's throttle may hold: 0 when its vehicle runs without
+// the throttle (FLAG_NO_THROTTLE), else unbounded.
+int throttleCap(uint gt)
+{
+    uint v = gStatic[gP.triBase + gt].w;
+    return (gStatic[v * 4u + 3u].x & FLAG_NO_THROTTLE) != 0u ? 0 : 0x7FFFFFFF;
+}
+
 int triangleFinish(uint gt)
 {
     uint mi = gP.vehicles + gt;
@@ -2094,7 +2105,7 @@ int triangleFinish(uint gt)
             wait = min(idle, 12);
             idle = 0;
         }
-        wait = th.w != 0u ? -20000 : wait + 1;
+        wait = th.w != 0u ? -20000 : min(wait + 1, throttleCap(gt));
     }
     gMisc[mi] = uint4(asuint(wait), asuint(idle), th.z, 0u);
     return wait;
@@ -5805,7 +5816,7 @@ void vvThrottleEnd(uint gt)
     gNext[mark + 1u] = 0u;
     int cwait = asint(c.x);
     if (hit) cwait = 0;
-    else if (!had) cwait = cwait + 1;
+    else if (!had) cwait = min(cwait + 1, throttleCap(gt));
     gMisc[gP.vvTri + gt] = uint4(asuint(cwait), c.y, 0u, 0u);
 }
 
@@ -5945,7 +5956,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             // no candidate: its throttle update at once, no tests.
             if (!vvNearBox(ra1.x + t, va, range, plo, phi))
             {
-                gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(cwait + 1), 0u, 0u, 0u);
+                gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(min(cwait + 1, throttleCap(ra1.x + t))), 0u, 0u, 0u);
                 continue;
             }
             gMisc[gP.vvTri + ra1.x + t] = uint4(asuint(cwait), 0u, 0u, 0u);
@@ -6208,7 +6219,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             }
             if (!vvNearBox(gt, va, range, plo, phi))
             {
-                gMisc[gP.vvTri + gt] = uint4(fix ? 0u : asuint(cwait + 1), 0u, 0u, 0u);
+                gMisc[gP.vvTri + gt] = uint4(fix ? 0u : asuint(min(cwait + 1, throttleCap(gt))), 0u, 0u, 0u);
                 continue;
             }
             gMisc[gP.vvTri + gt] = uint4(asuint(cwait), 0u, 0u, 0u);

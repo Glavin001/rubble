@@ -361,6 +361,12 @@ impl ExplicitBeamsWorld {
         let rr = Vec3::splat(r);
         let mut cands: Vec<(usize, u32)> = Vec::new();
         let mut hits: Vec<Hit> = Vec::new();
+        // The owner's profile without the throttle (§36): a triangle never waits.
+        let cap = if self.vehicles[a].settings.triangle_throttle {
+            i32::MAX
+        } else {
+            0
+        };
         for t in 0..self.vehicles[a].triangles.len() {
             let [mut cwait, mut cidle] = self.vehicles[a].contact_throttle[t];
             if self.throttle {
@@ -433,7 +439,7 @@ impl ExplicitBeamsWorld {
                     });
                 }
             }
-            self.vehicles[a].contact_throttle[t] = [cwait, cidle];
+            self.vehicles[a].contact_throttle[t] = [cwait.min(cap), cidle];
         }
         if hits.is_empty() {
             return;

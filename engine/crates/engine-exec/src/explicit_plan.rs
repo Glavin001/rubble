@@ -678,7 +678,8 @@ impl ExplicitUpload {
                 | (!v.shapes.is_empty() as u32) << 6
                 | (v.two_body_contact as u32) << 7
                 | (v.contact_force.is_some() as u32) << 8
-                | (!v.tread.is_empty() as u32) << 9;
+                | (!v.tread.is_empty() as u32) << 9
+                | (!v.settings.triangle_throttle as u32) << 10;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
