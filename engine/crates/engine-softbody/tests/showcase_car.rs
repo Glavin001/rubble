@@ -1307,6 +1307,36 @@ fn g_pulling_a_door_tears_it_off() {
         if first.is_none() && !broken.is_empty() {
             first = Some((f, broken.join(", ")));
         }
+        if first.is_none() && std::env::var("G_SPLIT").is_ok() && (f as i32) % 10_000 == 0 {
+            // Where the pull goes: every beam joining the door to the car,
+            // by kind, as force along the pull.
+            let n = sk.nodes.len();
+            let mut by: std::collections::BTreeMap<String, f32> = Default::default();
+            for bm in &s.beams {
+                let (a, c) = (bm.a as usize, bm.b as usize);
+                if bm.broken
+                    || a >= n
+                    || c >= n
+                    || (sk.nodes[a].part == part) == (sk.nodes[c].part == part)
+                {
+                    continue;
+                }
+                let (d, o) = if sk.nodes[a].part == part {
+                    (a, c)
+                } else {
+                    (c, a)
+                };
+                let u = (s.nodes[o].pos - s.nodes[d].pos).normalize();
+                *by.entry(format!("{:?}", bm.kind)).or_default() += -bm.force * u.dot(-out);
+            }
+            eprintln!(
+                "(g) at {:.0} kN: {:?}",
+                f / 1e3,
+                by.iter()
+                    .map(|(k, v)| format!("{k} {:.1} kN", v / 1e3))
+                    .collect::<Vec<_>>()
+            );
+        }
         if broken.len() == groups.len() {
             off = Some(f);
         }
@@ -3195,9 +3225,24 @@ fn t_car_to_car_t_bone_at_80_kmh() {
     let hw = sk0.nodes.iter().map(|nd| nd.p.x).fold(f32::MIN, f32::max);
     // The striker turned 90° (its front toward −x), 5 cm off the door.
     let mut sk = sk0.clone();
+    let env = |k: &str, d: f32| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let (kmh, dz, heavy) = (env("TB_KMH", 80.0), env("TB_DZ", 0.0), env("TB_MASS", 1.0));
+    // (TB_ANG: the striker's path turned rearward from square, degrees.)
+    let ang = env("TB_ANG", 0.0).to_radians();
+    let zs = zd + dz;
     sk.append(sk0, "striker_", &|p: Vec3| {
-        Vec3::new(hw + 0.05 + (len - p.z), p.y, zd + p.x)
+        Vec3::new(hw + 0.05 + (len - p.z), p.y, zs + p.x)
     });
+    if heavy != 1.0 {
+        for nd in sk.nodes[n..].iter_mut() {
+            nd.mass *= heavy;
+        }
+    }
     for nd in &mut sk.nodes {
         nd.p.z -= 0.5 * len;
     }
@@ -3215,7 +3260,7 @@ fn t_car_to_car_t_bone_at_80_kmh() {
         settings(),
     )
     .unwrap();
-    let v = Vec3::new(-80.0 / 3.6, 0.0, 0.0);
+    let v = Vec3::new(-ang.cos(), 0.0, -ang.sin()) * (kmh / 3.6);
     let plane = hw + 0.025;
     // The striker's tyres rolling at v, the struck car's still; the rest of
     // the striker at v.
@@ -3262,8 +3307,20 @@ fn t_car_to_car_t_bone_at_80_kmh() {
     let mut lowest = f32::MAX;
     let mut off_at = None;
     let mut order: Vec<(f32, &str)> = Vec::new();
+    let mut peak = vec![0.0f32; groups.len()];
     for f in 0..(2.0 * 60.0) as usize {
-        s.frame();
+        for _ in 0..s.clock.next() {
+            s.step();
+            for (k, (_, beams)) in groups.iter().enumerate() {
+                // The group's pull: its ropes' tensions summed.
+                let t: f32 = beams
+                    .iter()
+                    .filter(|&&j| !s.beams[j].broken)
+                    .map(|&j| (-s.beams[j].force).max(0.0))
+                    .sum();
+                peak[k] = peak[k].max(t);
+            }
+        }
         let t = (f + 1) as f32 / 60.0;
         for (name, beams) in &groups {
             if !order.iter().any(|o| o.1 == *name) && beams.iter().any(|&j| s.beams[j].broken) {
@@ -3279,12 +3336,20 @@ fn t_car_to_car_t_bone_at_80_kmh() {
     }
     let dv: Vec3 = door.iter().map(|&i| s.nodes[i].vel).sum::<Vec3>() / door.len() as f32;
     eprintln!(
-        "(t) car-to-car T-bone 80 km/h: the struck door's hardware let go {:?}; door off: {}; its lowest node {:.3} m above the ground; its mean speed at 2 s {:.2} m/s; broken {}",
+        "(t) car-to-car T-bone {kmh} km/h (striker ×{heavy} mass, {dz:+.2} m along): the struck door's hardware let go {:?}; door off: {}; its lowest node {:.3} m above the ground; its mean speed at 2 s {:.2} m/s; broken {}",
         order.iter().map(|o| format!("{} at {:.2} s", o.1, o.0)).collect::<Vec<_>>(),
         off_at.map_or("no".to_string(), |t| format!("yes, at {t:.2} s")),
         lowest,
         dv.length(),
         s.damage().0
+    );
+    eprintln!(
+        "(t) peak pull of each group (its ropes' tensions summed) against the most its rope set can carry (Σ strengths): {:?}",
+        groups
+            .iter()
+            .zip(&peak)
+            .map(|((n, beams), p)| format!("{n} {:.1} of {:.1} kN", p / 1e3, beams.iter().map(|&j| s.beams[j].strength.max(0.0)).sum::<f32>() / 1e3))
+            .collect::<Vec<_>>()
     );
     assert!(finite(&s));
     if off_at.is_some() {
