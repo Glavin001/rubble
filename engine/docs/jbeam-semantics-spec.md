@@ -356,3 +356,265 @@ trial 0 at 1 to 8 vehicles (GPU time per frame 1.15, 2.29, 3.00, 3.89 ms), then
 waited for a quiet GPU: macOS `mediaanalysisd` held it at 100 % and the run was
 stopped at its 15-minute limit. `mixed` was not started. Body-only means no tyres:
 the cars slide on the ground.
+
+# Part II: the remaining JBeam features (2026-11-05)
+
+Same rules as Part I: semantics from BeamNG's public documentation only, JBeam files
+read as data, choices marked **Choice**. These sections supersede the "not simulated"
+entries of §8, §11 and §12 that they cover. Further sources (retrieved 2026-11-05):
+
+* [P] Pressured beams: https://documentation.beamng.com/modding/vehicle/sections/beams/pressured/
+* [WH] Pressure wheels: https://documentation.beamng.com/modding/vehicle/sections/wheels/
+* [R] Slidenodes and rails: https://documentation.beamng.com/modding/vehicle/sections/rails/
+* and [B], [A], [BD], [S], [L], [T] of Part I, re-read for the fields below.
+
+**One rule for all of Part II: unused features cost nothing and change nothing.** A
+beam that uses none of them is spawned, stored and stepped exactly as before (the
+same kind, the same records, the same code path), so every vehicle without them runs
+bit for bit as before. A beam that uses one carries an *extension record* (§16.1) and
+takes a separate function behind an early return, on the CPU and the GPU alike.
+
+## 16. Extension records
+
+16.1. A JBeam-mode beam with any Part II field gets an extension: on the CPU
+`ExplicitBeams::beam_ext` (by `ExplicitBeams::ext_of[j] − 1`), on the GPU a block of
+four `gStatic` records (its index in `gLists` at `extIndex + j`), plus one mutable
+`gBeams` record of state. The beam's type byte carries `TYPE_EXT` (bit 2): only such
+beams read their index. Fields:
+
+* E0: feature mask, deform groups 1 and 2 (slot + 1, 0 none), `deformationTriggerRatio`;
+* E1, E2: the kind's parameters (§19–§22);
+* E3: the precompression ramp (§23) and the extra break groups 2 and 3 (§17).
+
+## 17. Several break groups per element [B], [T]
+
+"A table assigns the beam to several groups. It then breaks when any of those groups
+breaks, and it triggers breaking in all of them."
+
+* **Broken by any.** A beam in groups {g₁, g₂, g₃} is broken when any of them is set
+  off, exactly as a single-group member (it drops the force it computed in a step
+  whose group master precedes it in beam order).
+* **Sets off all.** An active member (`breakGroupType` 0) that breaks on its own
+  sets off all its groups. **Choice (deterministic order):** it does so one step
+  later, at its own place in that step's beam order, and only when none of its groups
+  had been set off before it in the step it broke (as the beam-order rule already
+  decides whether it was alive). The CPU does this with a pending flag; the GPU in the
+  next beam phase, reading the last step's group slots. Breaking groups through a
+  group (a member broken by g₁ does not set off g₂) does **not** propagate: the
+  docs give a beam's own break as the trigger.
+* A passive member (type 1) is broken by any of its groups and sets off none.
+* At most three groups per beam (the first three; a warning names more). Neither the
+  BX nor the legocar uses tables; the Astral R uses 75.
+* Triangles with several groups: §18 lists up to one group per triangle (the first;
+  warning).
+
+## 18. Triangle breaking [B], [T]
+
+"By default, a triangle breaks when any beam forming one of its sides breaks", and
+when its `breakGroup` breaks; `disableTriangleBreaking` on a beam keeps that beam's
+break from breaking triangles ("when the beam only serves as structural support").
+A broken triangle switches "to a non-collision, non-aero state".
+
+* In JBeam mode each collision triangle gets a break list: for each side, the first
+  beam (desc order) between its two nodes without `disableTriangleBreaking`, and a
+  representative of its break group: the first beam of the group that sets it off on
+  its own (an active, single-group member), when there is one (warning otherwise).
+* **Dead** from the step after any listed beam is broken: the state at the start of
+  the step's beam pass. A dead triangle takes part in neither self-collision nor
+  vehicle contact: it has no candidates (the throttles see "no candidates"). It never
+  comes back.
+* Vehicles where no triangle can break (every side beam has
+  `disableTriangleBreaking`, no group) get no break lists: nothing changes.
+* GPU: per triangle four beam indices at `triBreak + t`; the triangle's self-group
+  word (`gMisc` .z) carries bit 31 when it has a list. The triangle geometry
+  (`triangleGeo`, `vvTriangle`) reads the four beams' broken state (`gBeams` .z set,
+  .w not 1: broken before this beam phase) and gives a dead triangle an empty box.
+
+## 19. Deform groups [B]
+
+`deformGroup` (string or table) names the groups a beam triggers; they drive visual
+damage (glass, lamps; flexbody material swaps) and some powertrain damage.
+`deformationTriggerRatio` r: "a shortening or lengthening greater than that amount
+triggers it". Breaking a beam with a deform group triggers it too.
+
+* **Trigger:** |L − L₀| > r·L₀ after a yield (L the rest length, L₀ the spawn rest
+  length), or the beam breaks (on its own or by its group). **Choice:** without r only
+  breaking triggers. Up to two deform groups per beam (warning past).
+* **State:** per vehicle, per deform group, a word that is 0 until triggered, then 1
+  forever. `ExplicitBeams::deform_triggered()` and the GPU's
+  `ExplicitBeamsGpu::deform_triggered()` return it with the group names
+  (`SoftVehicleDesc::deform_groups`). It is physics state only; the visual layer reads
+  it. It has no effect on the beam.
+* GPU: `gGroups` at `deformBase` + the vehicle's offset; set with an atomic max where
+  a beam yields or breaks.
+
+## 20. ANISOTROPIC beams (kind `JbeamAniso`) [A]
+
+`beamSpring`/`beamDamp` "used only while the beam is compressed"; `springExpansion`,
+`dampExpansion` "when the beam is stretched past its spawned length"; `transitionZone`
+z "a fraction of spawned length" over which the rates move from the compression to the
+expansion values (default 0: instant); `beamLongBound` b (default FLT_MAX) breaks it at
+(1 + b)·ℓ₀, `beamLongExtent` (m) overrides b.
+
+* e = ℓ − L. e ≤ 0: (k, c). e ≥ z·L: (kₑ, cₑ). Between: σ = e/(z·L) and
+  k = k + (kₑ − k)·σ, c likewise (**Choice**: linear; the docs say "ramp"). The force
+  is continuous (it is 0 at e = 0 for every σ). Missing `springExpansion` or
+  `dampExpansion` take `beamSpring`/`beamDamp` (**Choice**).
+* The break length is in metres from the spawn length ℓ₀ (as SUPPORT's, §4).
+* Yield, deform limits and strength as NORMAL (§3), with the k of this step's side.
+
+## 21. PRESSURED beams (kind `JbeamPressured`) [P]
+
+A virtual air cylinder whose "gas volume depends only on the beam's length";
+"halving the length doubles the pressure"; `volumeCoef` c "scales the virtual
+cylinder length relative to the beam length. Larger values make pressure rise
+earlier. Values above 1 eventually reach infinite pressure. Values below 1 never
+reach infinity. 0 means pressure never changes"; force "from pressure acting on
+`surface`" A (m², default 1); "in extension, the total force combines the beamSpring
+force with the pressure force".
+
+* **Volume** V(ℓ) ∝ ℓ₀ − c·(ℓ₀ − ℓ) (the only linear law with all four documented
+  properties; ℓ₀ the spawn length). Isothermal: p_abs = p_abs,0 · ℓ₀ / (ℓ₀ − c·(ℓ₀ − ℓ)).
+* **Pressures. Choice:** `pressure` (Pa) and `pressurePSI` (× 6894.757 Pa) are gauge
+  (the docs: "ambient pressure is not included"; the PSI form "adds a fixed 101325
+  Pa", i.e. converts to absolute); p_abs,0 = 101325 Pa + gauge. The push is the gauge
+  pressure times the area: F_p = (p_abs − 101325)·A pushing the ends apart. A
+  denominator at or below 1 % of ℓ₀ is held there (the cylinder bottoms out).
+* `pressureLimit` (`pressureLimitPSI`): the gauge pressure never passes it.
+  `maxPressure` (`maxPressurePSI`): the beam breaks when the gauge pressure passes it.
+* **Spring. Choice:** the beam's spring acts only in extension (e > 0), its damping
+  always: F = F_p − k·max(e, 0) − c·u. Strength applies to |F| (no yield: a cylinder is
+  not plastic).
+
+## 22. Rebound and velocity-split damping (BOUNDED) [BD]
+
+"Compression uses the base value, and expansion uses the rebound value." Per side,
+with u the extension rate (u > 0 expanding):
+
+| | compression (u < 0) | expansion (u > 0) |
+|---|---|---|
+| slow | `beamDamp` c | `beamDampRebound` (default c) |
+| fast | `beamDampFast` (default c) | `beamDampReboundFast` (default the rebound slow value) |
+| split | `beamDampVelocitySplit` v_s (default ∞) | `beamDampVelocitySplitRebound` (default v_s) |
+| limit | `beamLimitDamp` | `beamLimitDampRebound` (default `beamLimitDamp`) |
+
+The slow/fast law per side is §5's (continuous at the split). A bounded beam that
+sets none of the rebound fields is §5's beam unchanged. NORMAL beams: the docs give
+rebound only for bounded beams; a NORMAL beam's rebound fields are ignored (warning).
+
+## 23. `beamPrecompressionTime`, `beamLongExtent`
+
+* **Precompression time** [B]: "time taken for precompressed beams to reach their
+  requested length on spawn". The rest length starts at the spawn distance ℓ₀ and
+  moves by (L_target − ℓ₀)/N each step for N = round(T / 0.5 ms) steps (**Choice**:
+  linear), then stays; a yield in the ramp moves it as usual on top. L₀ (the spawn rest
+  length the deform limits and triggers measure from) is L_target.
+* **`beamLongExtent`** [S], [A]: the support's (or anisotropic beam's) absolute break
+  length in metres; it overrides `beamLongBound`.
+
+## 24. LBEAMs (kind `JbeamLbeam`) [L]
+
+id1 and id2 are the beam's ends, id3 the vertex; beams id1–id3 and id2–id3 must exist;
+"any change in angle between [id1,id3] and [id2,id3] is resisted by the L-Beam from
+[id1,id2]", and it "applies no force when only the L-beam's own length changes" (of
+an arm).
+
+* **Choice (units N/m, as `beamSpring`):** a beam between id1 and id2 whose rest
+  length follows the arms: with a = |x₁ − x₃|, b = |x₂ − x₃| now and θ₀ the rest
+  angle at id3, L(t) = √(a² + b² − 2ab·cos θ₀); F = −k·(ℓ − L) − c·u along id1–id2.
+  A pure stretch of an arm moves L with it (no force), an angle change does not. The
+  pair force conserves momentum and angular momentum.
+* θ₀ at spawn: the spawn angle (precompression scales L: θ₀ from p·ℓ₀).
+* **Deform. Choice:** past `beamDeform` the rest angle moves so |k·(ℓ − L)| stays at
+  the deform force (perfect plasticity); past `beamStrength` it breaks. `dampCutoffHz`
+  applies ([B] lists L-beams).
+* The `.truck` path still drops LBEAMs (RoR has none).
+
+## 25. Pressure wheels (JBeam mode, opt-in) [WH]
+
+The docs give the parts, not the layout: hub nodes on the axle "through fairly rigid
+standard beams", tread nodes "on the tire's outer layer" joined to the hub "with
+several beams", "a pressure group uses both hub and tire nodes", `numRays` "spokes per
+side, must be even" (default 10), `radius` (default 0.5), `hubRadius` (default 0.65 ×
+radius), `wheelOffset`, `tireWidth`/`hubWidth` (default the axle-node distance), the
+beam sets and their flags, `pressurePSI`, `maxPressurePSI` (default 10). **Choice:**
+the layout below, Rubble's own.
+
+* **Frame.** Axle nodes n₁ → n₂, axis a = unit(n₂ − n₁), centre c = midpoint +
+  `wheelOffset`·a; reference direction r₀ = the component of the arm node's offset (or
+  of +y) normal to a; rays at angles 2πi/N (i = 0 … N − 1) about a.
+* **Nodes.** Hub rings k = 0 (toward n₁), 1 at c + (k − ½)·hubWidth·a, radius
+  hubRadius; tyre rings k = 0, 1 at ±½ tireWidth, radius `radius` (rings of one
+  side at the same angles). Masses `hubNodeWeight` / `nodeWeight` (`hubWeight`,
+  `tireWeight` divided over their 2N nodes override them). Tyre nodes collide with the
+  ground and statics with their `frictionCoef`; no self-collision; hub nodes collide.
+* **Beams** (each set's `Spring`, `Damp`, `Deform`, `Strength`, `DampCutoffHz`,
+  `Precompression`, missing values from the row's beam defaults):
+  * `hubBeam`: hub(k, i) to the other side's axle node; `hubSideBeam`: to its own
+    side's axle node (radial spokes);
+  * `hubTreadBeam`: hub(0, i)–hub(1, i) and hub(0, i)–hub(1, i + 1);
+  * `hubPeripheryBeam`: hub(k, i)–hub(k, i + 1);
+  * `wheelSideBeam` (ANISOTROPIC with `wheelSideBeamSpringExpansion`,
+    `…DampExpansion`, `wheelSideTransitionZone`): tyre(k, i)–hub(k, i);
+  * `wheelSideReinfBeam` (`enableTireSideReinfBeams`, anisotropic likewise):
+    tyre(k, i)–hub(k, i ± 1);
+  * `wheelReinfBeam` (`enableTireReinfBeams`, unless L-beams): tyre(k, i)–hub(1 − k, i);
+  * L-beams (`enableTireLbeams`; `wheelLbeamSpring`… else the side beam's values):
+    vertex tyre(k, i) with ends hub(k, i) and tyre(1 − k, i) (lateral), and hub(k, i)
+    and tyre(k, i + 1) (shear: torque between hub and tread);
+  * `wheelTreadBeam`: tyre(0, i)–tyre(1, i); `wheelTreadReinfBeam`
+    (`enableTreadReinfBeams`): tyre(0, i)–tyre(1, i ± 1);
+  * `wheelPeripheryBeam`: tyre(k, i)–tyre(k, i + 1); `wheelPeripheryReinfBeam`
+    (`enableTirePeripheryReinfBeams`): tyre(k, i)–tyre(k, i + 2);
+  * `tireSupportBeam` (`enableTireSupportBeams`): SUPPORT from its own side's axle node
+    to tyre(k, i).
+* **Pressure group (§26)** over the closed surface: both sidewalls (hub(k, ·)–tyre(k, ·)
+  bands), the tread band and the hub band, 8N triangles. Gauge `pressurePSI`; the rise
+  above it is capped at `maxPressurePSI` (**Choice**: the docs' "stop internal pressure
+  from rising too high"). Tyre triangles are not collision triangles
+  (`triangleCollision` default false; when true they are added as collision
+  triangles).
+* **Rolling.** With `roll` the wheel's nodes spawn rolling at the vehicle's speed
+  (as the soft tyres' `roll_tyres`).
+* Not simulated: brakes and drive torque (no powertrain), `conicityFactor`, hubcaps,
+  `nodeS`, tyre friction models (`noLoadCoef`… : node friction only),
+  `hubWeightGainRatio` (warnings).
+* Selected by `JbeamWheels::Pressure` (`ExplicitBeams::from_desc_jbeam_with`); the
+  default stays the `.truck` path's soft tyres (§12), and RoR content keeps its tyres.
+
+## 26. Pressure groups (kinds `JbeamPressureGroup`, `JbeamPressureTri`)
+
+A closed triangle surface with a gas inside: V = Σ (x₀ · (x₁ × x₂))/6 over its
+triangles (outward winding), isothermal p_abs = p_abs,0·V₀/V (V held at 1 % of V₀ or
+more), gauge p = p_abs − 101325 Pa capped as the owner says; each triangle pushes its
+three nodes outward with p·(x₁ − x₀) × (x₂ − x₀)/6 each (one third of p·area·n̂ each).
+On a closed surface the pushes sum to zero (momentum conserved).
+
+* **Records.** A group record (no force; its nodes a = b = its first triangle's first
+  node) then two records per triangle (nodes x₀–x₁ carrying their forces, then x₂–x₂
+  carrying x₂'s), in beam order: the node sums are the beam sums of the solver, in
+  the same order on CPU and GPU.
+* **Order. Choice:** the group record computes V and p in a step's beam pass from that
+  step's positions; the triangles use the p of the previous step (state double
+  buffered by step parity; at spawn p = p₀). One step (0.5 ms) of lag keeps the
+  group's sum and its triangles in one pass on the GPU, with no new barrier.
+* The group breaks (pressure lost: p = 0 from then on, the records stay) when any of
+  its triangles' sides breaks (a beam between two of a triangle's nodes; a tyre
+  puncture). **Choice.**
+
+## 27. Rails and slidenodes [R]
+
+The explicit solver's slide nodes (`explicit-beams.md`, the `.truck` path's
+`slidenodes`, the GPU's slide pass in the EB_AERO modules) take the JBeam rows:
+`links:` (a polyline of nodes; its segments the beams between consecutive link nodes,
+a zero-stiffness beam is added where none exists), `looped`, `capped`; per slide node
+`railName`, `attached` (default true), `tolerance` (m, default 0), `spring` (N/m,
+default 4.3 MN/m), `strength` (N, default ∞: detaches past it), `capStrength`.
+**Choice:** the solver's slide-node force law, unchanged (the node pulled toward
+its nearest point on its current segment once past the tolerance, the opposite force
+on the segment's ends by their weights, one segment hop per step, `strength` its break
+force). The rail's ends always hold the node (the solver's segment clamp): `capped`
+and `capStrength` are not distinguished and an uncapped end does not let the node run
+off (warning when a rail is uncapped or sets `capStrength`). `fixToRail` is not
+simulated: the node keeps its spawn position (warning when false is asked for; the
+files place slide nodes on their rails).

@@ -566,7 +566,13 @@ struct Placed {
 impl JbeamDb {
     /// Add the parts of one `.jbeam` file.
     pub fn add_file(&mut self, name: &str, src: &str) -> Result<(), String> {
-        let v = parse_relaxed(src).map_err(|e| format!("{name}: {e}"))?;
+        // Some community files leave out the outer braces: read them as one object.
+        let v = match parse_relaxed(src) {
+            Ok(v) => v,
+            Err(e) if !src.trim_start().starts_with('{') => parse_relaxed(&format!("{{{src}\n}}"))
+                .map_err(|_| format!("{name}: {e}"))?,
+            Err(e) => return Err(format!("{name}: {e}")),
+        };
         let Value::Object(map) = v else {
             return Err(format!("{name}: top level is not an object"));
         };
@@ -865,7 +871,7 @@ pub fn read_vehicle_dir(
             let p = e.map_err(|e| e.to_string())?.path();
             if p.is_dir() {
                 walk(&p, out)?;
-            } else if p.extension().is_some_and(|x| x == "jbeam") {
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("jbeam")) {
                 out.push(p);
             }
         }
