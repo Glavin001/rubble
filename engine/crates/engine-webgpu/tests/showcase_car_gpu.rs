@@ -20,6 +20,8 @@ fn sedan(velocity: Vec3) -> ExplicitBeams {
     .unwrap();
     let settings = ExplicitBeamsSettings {
         turbulence: false,
+        // (SC_EXACT=1: exact beam lengths, as `rubble_exact_lengths`.)
+        fast_inv_sqrt: std::env::var("SC_EXACT").is_err(),
         ..Default::default()
     };
     let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, velocity, settings).unwrap();
@@ -161,4 +163,43 @@ fn showcase_sedan_side_pole_matches_cpu_counts() {
     );
     assert!(close(c_bent, g_bent, 0.15), "bent {c_bent} vs {g_bent}");
     assert!((cm.x - gm.x).abs() < 0.05);
+}
+
+/// `rubble_exact_lengths`' cost (measurement, `--ignored`): 32 showcase sedans side
+/// by side at rest, 120 frames, wall time per frame with RoR's fast inverse square
+/// root and with exact lengths.
+#[test]
+#[ignore]
+fn exact_lengths_cost() {
+    let Ok((_, device, queue)) = default_device() else {
+        return;
+    };
+    for exact in [false, true] {
+        let fleet: Vec<ExplicitBeams> = (0..32)
+            .map(|k| {
+                let mut s = sedan(Vec3::ZERO);
+                s.settings.fast_inv_sqrt = !exact;
+                for n in &mut s.nodes {
+                    n.pos.x += 4.0 * k as f32;
+                }
+                s
+            })
+            .collect();
+        let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+        let mut clock = FrameClock::default();
+        for _ in 0..20 {
+            gpu.frame(clock.next());
+        }
+        gpu.wait();
+        let t = std::time::Instant::now();
+        for _ in 0..120 {
+            gpu.frame(clock.next());
+        }
+        gpu.wait();
+        eprintln!(
+            "exact lengths {exact}: {:.3} ms a frame (32 cars, {} nodes each)",
+            t.elapsed().as_secs_f64() * 1e3 / 120.0,
+            fleet[0].nodes.len()
+        );
+    }
 }
