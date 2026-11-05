@@ -144,6 +144,28 @@ pub struct MemberSpec {
     /// belt.
     #[serde(default = "yes")]
     pub hardware_ends: bool,
+    /// The member's steel per metre (kg/m: its section's perimeter × wall ×
+    /// 7,850 kg/m³). One tier: its real mass, spread over its stations (0:
+    /// its truss's width × height at [`DEFAULT_GAUGE`]).
+    #[serde(default)]
+    pub kg_per_m: f32,
+}
+
+/// The wall of a member without a real section (m): a Choice, typical of a
+/// body's inner panels and reinforcements.
+pub const DEFAULT_GAUGE: f32 = 0.0012;
+/// Steel's density (kg/m³).
+pub const STEEL_DENSITY: f32 = 7850.0;
+
+impl MemberSpec {
+    /// Its steel per metre (kg/m), [`MemberSpec::kg_per_m`] or the default.
+    pub fn mass_per_m(&self) -> f32 {
+        if self.kg_per_m > 0.0 {
+            self.kg_per_m
+        } else {
+            2.0 * (self.width + self.height) * DEFAULT_GAUGE * STEEL_DENSITY
+        }
+    }
 }
 
 impl MemberSpec {
@@ -389,11 +411,28 @@ pub fn attach(
     reach: f32,
     mat: Material,
 ) {
+    attach_with(sk, nodes, pool, count, reach, mat, true)
+}
+
+/// [`attach`] with ties (`tie`) or beams of their own length.
+pub fn attach_with(
+    sk: &mut Skeleton,
+    nodes: &[u32],
+    pool: &[u32],
+    count: usize,
+    reach: f32,
+    mat: Material,
+    tie: bool,
+) {
     for &a in nodes {
         let p = sk.pos(a);
         for b in sk.nearest(p, pool, count) {
             if b != a && sk.pos(b).distance(p) <= reach {
-                sk.tie(a, b, mat);
+                if tie {
+                    sk.tie(a, b, mat);
+                } else {
+                    sk.beam(a, b, mat);
+                }
             }
         }
     }

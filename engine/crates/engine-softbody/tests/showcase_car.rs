@@ -23,9 +23,15 @@ use engine_softbody::explicit_beams::{
 use glam::{DVec3, Quat, Vec3};
 use std::collections::HashSet;
 
+/// The car under test: `SHOWCASE_STYLE` (`sedan1`, the one-tier build), else
+/// the two-tier `sedan`.
+fn car_style() -> String {
+    std::env::var("SHOWCASE_STYLE").unwrap_or_else(|_| "sedan".into())
+}
+
 fn built(res: Resolution) -> Built {
     build(
-        &style("sedan").unwrap(),
+        &style(&car_style()).unwrap(),
         &BuildParams {
             resolution: res,
             ..Default::default()
@@ -4447,7 +4453,7 @@ fn which_nodes() {
 #[test]
 #[ignore]
 fn i_windscreen_share_of_torsion() {
-    let def = style("sedan").unwrap();
+    let def = style(&car_style()).unwrap();
     let params = BuildParams {
         resolution: Resolution::Medium,
         ..Default::default()
@@ -4521,7 +4527,7 @@ fn write_trucks() {
 #[test]
 #[ignore]
 fn torsion_scan() {
-    let mut def = style("sedan").unwrap();
+    let mut def = style(&car_style()).unwrap();
     let spec = std::env::var("TORSION_SCALE").unwrap_or_default();
     for br in def
         .braces
@@ -4577,3 +4583,124 @@ fn torsion_scan() {
         Err(e) => eprintln!("(i) torsion [{spec}]: {e}"),
     }
 }
+
+/// Where the one-tier car's material differs from the real one, and why
+/// (`vehicle-authoring.md`). Its node masses are their real local mass:
+/// no node's mass differs from it by more than [`MOVED_MASS_TOLERANCE`] (no
+/// mass is moved to meet the step's bound). Its beams are as stiff as they
+/// were built unless the bound requires less: every beam softer than its
+/// target has a node whose Gershgorin row is at the bound, and no row is
+/// past it. Reports, per member, its chords' real k (E·A/L of its section's
+/// share), the built k and their ratio.
+#[test]
+fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let sk = &b.skeleton;
+    for (k, kg) in &b.masses {
+        eprintln!("mass {k:>48}: {kg:7.1} kg");
+    }
+    let moved: Vec<(usize, f32)> = sk
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (i, (n.mass - n.local).abs()))
+        .filter(|x| x.1 > MOVED_MASS_TOLERANCE)
+        .collect();
+    assert!(moved.is_empty(), "mass moved off its real place: {moved:?}");
+    let total = sk.total_mass();
+    assert!(
+        (total - b.def.kerb_mass).abs() < 0.05,
+        "mass {total} kg, kerb {}",
+        b.def.kerb_mass
+    );
+    let rows = sk.bound_rows();
+    let worst = rows.iter().cloned().fold(0.0f32, f32::max);
+    assert!(worst <= 1.002, "a node past the step's bound: {worst}");
+    let mut soft_free = Vec::new();
+    let mut soft = 0;
+    for (j, bm) in sk.beams.iter().enumerate() {
+        if bm.target_k == 0.0 {
+            continue;
+        }
+        let l = sk.pos(bm.a).distance(sk.pos(bm.b));
+        let k = bm.mat.k;
+        if k < 0.99 * bm.target_k {
+            soft += 1;
+            let sat = rows[bm.a as usize].max(rows[bm.b as usize]);
+            if sat < 0.98 {
+                if soft_free.len() < 6 {
+                    eprintln!(
+                        "  soft beam {j}: {:?} {:?} parts {} {} k {k:.3e} target {:.3e} l {l:.3} rows {:.3} {:.3} masses {:.3} {:.3} fixed {} tie {} group {}",
+                        bm.ty, sk.pos(bm.a), sk.parts[sk.nodes[bm.a as usize].part as usize], sk.parts[sk.nodes[bm.b as usize].part as usize],
+                        bm.target_k, rows[bm.a as usize], rows[bm.b as usize], sk.nodes[bm.a as usize].mass, sk.nodes[bm.b as usize].mass, bm.fixed, bm.tie, bm.group
+                    );
+                }
+                soft_free.push((j, k / bm.target_k, sat));
+            }
+        }
+    }
+    eprintln!(
+        "{} beams, {soft} softer than built (all at a node at the bound); worst row {worst:.4}",
+        sk.beams.len()
+    );
+    assert!(
+        soft_free.is_empty(),
+        "beams softer than the bound requires (beam, ratio, row): {:?}",
+        &soft_free[..soft_free.len().min(20)]
+    );
+    // Per member: its chords' real k against the built.
+    const E: f32 = 210e9;
+    eprintln!(
+        "{:>16} {:>9} {:>10} {:>10} {:>10} {:>8}",
+        "member", "kg/m", "real k", "target k", "built k", "built/real"
+    );
+    for m in &b.def.members {
+        let Some(g) = b.groups.get(&m.name) else {
+            continue;
+        };
+        let set: HashSet<u32> = g.iter().copied().collect();
+        let chords = if m.section == 2 { 2.0 } else { 4.0 };
+        let area = m.mass_per_m() / 7850.0 / chords;
+        let (mut real, mut target, mut built, mut mass) = (vec![], vec![], vec![], vec![]);
+        for bm in &sk.beams {
+            if !(set.contains(&bm.a) && set.contains(&bm.b)) || bm.target_k == 0.0 {
+                continue;
+            }
+            let l = sk.pos(bm.a).distance(sk.pos(bm.b));
+            real.push(E * area / l);
+            target.push(bm.target_k * 0.1 / l.max(0.1));
+            built.push(bm.mat.k_at(l));
+            mass.push(
+                sk.nodes[bm.a as usize]
+                    .mass
+                    .min(sk.nodes[bm.b as usize].mass),
+            );
+        }
+        if real.is_empty() {
+            continue;
+        }
+        let med = |mut v: Vec<f32>| {
+            v.sort_by(f32::total_cmp);
+            v[v.len() / 2]
+        };
+        let (r, t, k) = (med(real), med(target), med(built));
+        eprintln!(
+            "{:>16} {:9.2} {r:10.2e} {t:10.2e} {k:10.2e} {:8.4}  (lighter node median {:.2} kg)",
+            m.name,
+            m.mass_per_m(),
+            k / r,
+            med(mass)
+        );
+    }
+}
+
+/// The largest difference between a one-tier node's mass and its real local
+/// mass (kg): none is moved; this is the f32 sum's rounding.
+const MOVED_MASS_TOLERANCE: f32 = 1.0e-4;

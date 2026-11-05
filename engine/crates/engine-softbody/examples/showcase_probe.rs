@@ -45,6 +45,9 @@ fn main() {
             st.primary_nodes, st.primary_node_mass, st.kl_primary, b.stiffness_scale, b.skin_scale
         );
     }
+    for (k, kg) in &b.masses {
+        eprintln!("  mass: {k:>48}: {kg:7.1} kg");
+    }
     if std::env::var("PARTS").is_ok() {
         // Each part's nodes and mass.
         for (k, name) in sk.parts.iter().enumerate() {
