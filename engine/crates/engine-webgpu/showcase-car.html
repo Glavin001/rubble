@@ -42,7 +42,9 @@ try {
   const n = Math.max(1, Number(qs.get('n')) || 1);
   const t0 = performance.now();
   const world = await createWorld({ gravity: [0, -9.81, 0], capacity: { maxBodies: 1024, maxColliders: 2048, maxContacts: 65536, maxJoints: 64, maxCandidates: 131072, maxColors: 32, maxCommands: 256, maxHullVertices: 64 } });
-  const car = showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: res, ...(paint ? { paint } : {}) });
+  const car = showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: res, ...(paint ? { paint } : {}),
+    // Measurement switches (a visual A/B on identical physics).
+    ...(qs.get('bind') ? { bind: qs.get('bind') } : {}), ...(qs.get('alt') === '0' ? { alt: false } : {}) });
   const buildMs = performance.now() - t0;
   const device = world.device();
   device.addEventListener('uncapturederror', (e) => fail('gpu: ' + (e.error?.message ?? e.error)));

@@ -435,7 +435,9 @@
     // The vehicle's source for either solver: `.truck` text, JBeam files, or (soft
     // only) a desc. The procedural sedan is the same `.truck` text on both.
     let showcaseCache = null;
-    const showcaseBuilt = () => showcaseCache ??= showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: qs.get('res') ?? 'medium' });
+    const showcaseBuilt = () => showcaseCache ??= showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: qs.get('res') ?? 'medium',
+      // Measurement switches (a visual A/B on identical physics).
+      ...(qs.get('bind') ? { bind: qs.get('bind') } : {}), ...(qs.get('alt') === '0' ? { alt: false } : {}) });
     const hiresJbeam = carKind === 'hires' ? [['hires.jbeam', hiresCarJbeam()]] : null;
     const vehicleSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
       // ?jbeamMode=native: the JBeam-mode spawn (desc order, pressure wheels).
