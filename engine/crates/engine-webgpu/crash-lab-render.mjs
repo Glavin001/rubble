@@ -39,7 +39,9 @@ struct Lab {
   colorMode: u32, skinMode: u32, flags: u32, grabNode: u32,
   tubeR: f32, nodeR: f32, beams: u32, nodes: u32,
   grabTarget: vec4f,
-  floorY: f32, focusX: f32, focusZ: f32, pad: f32,
+  // reflect > 0.5: the floor leaves no depth (a car's reflection is drawn
+  // over it, below the floor plane).
+  floorY: f32, focusX: f32, focusZ: f32, reflect: f32,
 };
 @group(0) @binding(1) var<uniform> frame: Frame;
 @group(0) @binding(2) var<uniform> lab: Lab;
@@ -341,7 +343,7 @@ struct BgFrag { @location(0) c: vec4f, @builtin(frag_depth) depth: f32 };
     let clip = frame.viewProj * vec4f(w, 1.0);
     fl = fl * (0.35 + 0.65 * shadowAt(w));
     o.c = vec4f(mix(backdrop(i.ndc), fl, fade * 0.9 + 0.1), 1.0);
-    o.depth = clamp(clip.z / clip.w, 0.0, 0.99999);
+    o.depth = select(clamp(clip.z / clip.w, 0.0, 0.99999), 0.99999, lab.reflect > 0.5);
   }
   return o;
 }
@@ -384,7 +386,7 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
   let sim = null, layout = null, mod = null, pipes = null, bufs = null, groups = null, sides = 0;
   const labBuf = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const countsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const opts = { colorMode: 'strain', skin: 'ghost', skeleton: true, nodes: true, stubs: true, tyres: true, studio: true, tubeR: 0.009, nodeR: 0.017, grab: null, floorY: 0, focus: [0, 0] };
+  const opts = { colorMode: 'strain', skin: 'ghost', skeleton: true, nodes: true, stubs: true, tyres: true, studio: true, tubeR: 0.009, nodeR: 0.017, grab: null, floorY: 0, focus: [0, 0], reflect: false };
   const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
 
   const build = (n) => {
@@ -456,7 +458,7 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
     w[3] = opts.grab ? opts.grab.node : 0xffffffff;
     f[4] = opts.tubeR; f[5] = opts.nodeR; w[6] = layout?.beams ?? 0; w[7] = layout?.nodes ?? 0;
     if (opts.grab) f.set([...opts.grab.target, 1], 8);
-    f[12] = opts.floorY; f[13] = opts.focus[0]; f[14] = opts.focus[1];
+    f[12] = opts.floorY; f[13] = opts.focus[0]; f[14] = opts.focus[1]; f[15] = opts.reflect ? 1 : 0;
     device.queue.writeBuffer(labBuf, 0, u);
   }
 

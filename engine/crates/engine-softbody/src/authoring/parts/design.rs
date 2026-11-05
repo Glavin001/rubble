@@ -131,10 +131,10 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         tail_bow: 0.09,
         nose_corner: 0.47,
         tail_corner: 0.31,
-        flare: 0.03,
+        flare: 0.018,
         flare_width: 0.19,
         rear_flare: 0.036,
-        lid_crown: 0.022,
+        lid_crown: 0.034,
         step: 0.022,
         step_along: 0.035,
         nose_ramp: 0.045,
@@ -143,7 +143,9 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         hood_crease: [0.22, 0.60, 0.014, 0.004],
         hood_z: [3.36, 4.70],
         deck_lip: [0.026, 0.24, 0.60],
-        scoop: Curve::new(&[(1.30, 0.60), (2.20, 0.53), (3.00, 0.46), (3.45, 0.43)]),
+        // Straight, rising 3.5 cm to the rear: parallel to the rocker's line
+        // in side view, not diving toward the front arch.
+        scoop: Curve::new(&[(1.30, 0.495), (3.45, 0.46)]),
         scoop_depth: 0.024,
         scoop_z: [1.42, 1.80, 3.10, 3.40],
     };
@@ -708,7 +710,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
             if b.mesh.is_empty() {
                 continue;
             }
-            let mut bm = trim::offset(&b.mesh, 0.0015, false, Some(mat::TRIM), 1.0);
+            let mut bm = trim::offset(&b.mesh, 0.0015, false, Some(mat::PILLAR), 1.0);
             let loops = trim::boundary_loops(&bm);
             for (l, closed) in &loops {
                 trim::roll_loop(&mut bm, l, *closed, EdgeStyle::TRIM);

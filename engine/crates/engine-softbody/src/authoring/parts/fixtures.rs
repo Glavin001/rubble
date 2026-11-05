@@ -814,7 +814,8 @@ pub fn handle(path: &[Vec3], nrm: &[Vec3], bar: u8) -> Mesh {
     let mut bot = Vec::new();
     for k in 0..n {
         let t = k as f32 / (n - 1) as f32;
-        let w = 0.022 * (PI * t).sin().powf(0.4);
+        // sin(π) rounds to −9e-8 in f32: clamp before the root (NaN otherwise).
+        let w = 0.022 * (PI * t).sin().max(0.0).powf(0.4);
         let p = path[k] + nrm[k] * 0.0012;
         top.push(m.vert(p + Vec3::Y * (w + 0.004), nrm[k], mat::TRIM, 0.5));
         bot.push(m.vert(p - Vec3::Y * (w + 0.006), nrm[k], mat::TRIM, 0.35));
@@ -824,7 +825,7 @@ pub fn handle(path: &[Vec3], nrm: &[Vec3], bar: u8) -> Mesh {
     let bar_path: Vec<Vec3> = (1..n - 1)
         .map(|k| {
             let t = k as f32 / (n - 1) as f32;
-            path[k] + nrm[k] * (0.006 + 0.006 * (PI * t).sin().powf(0.3))
+            path[k] + nrm[k] * (0.006 + 0.006 * (PI * t).sin().max(0.0).powf(0.3))
         })
         .collect();
     let up = Vec3::Y;

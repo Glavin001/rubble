@@ -295,8 +295,9 @@ The character lines are:
   the lower line's slope as a multiple of the mean), so the lower doors face
   the floor and read darker; above the crease the shoulder leans in hard
   (`a_above` 0.85) and catches the sky, a bright band over the handles.
-* **Lower-door sculpture.** Under a feature line rising from 0.43 m behind the
-  front arch to 0.60 m ahead of the rear one, the side steps in 2.4 cm with a
+* **Lower-door sculpture.** Under a straight feature line rising from 0.46 m
+  behind the front arch to 0.50 m ahead of the rear one (parallel to the
+  rocker in side view), the side steps in 2.4 cm with a
   crisp upper edge, easing out toward the sill (`BodyStyle::scoop`). A band row
   lies on the line, so its highlight runs straight.
 * **Fillets.** Two extra band rows a few millimetres either side of the crease
@@ -319,8 +320,10 @@ The character lines are:
   (`LampSpec::guide_above`); sharp side intakes (air curtains) in the corners;
   a gloss-black splitter blade standing 3 cm proud along the bumper's lower
   edge; no front plate (`plate_front_h` NaN).
-* **Arch flares.** The front arches swell 3 cm over a 19 cm band, the rear
-  haunches 4 cm over 24 cm (`rear_flare`), giving a plateau at the rolled lip
+* **Arch flares.** The front arches swell 1.8 cm over a 19 cm band (blending
+  into the door, not bulging past it), the rear haunches 3.6 cm over a
+  tighter 15 cm (`rear_flare`: a firm shoulder over the rear wheel), giving a
+  plateau at the rolled lip
   and a wider-track look. The arch is cut 1.8 cm outside the tyre, and the
   wheels (a 20-inch look: the rim 0.80 of the tyre's radius, a low-profile
   sidewall) sit 4.2 cm outboard of the physics tyres (`design::WHEEL_OUT`),
@@ -334,7 +337,14 @@ The character lines are:
   bumper.
 * **Tumblehome.** The side glass leans in by about 22°, from the belt at a half
   width of about 0.86 m to the roof rail at about 0.66 m. The roof, bonnet and
-  deck are crowned.
+  deck are crowned (bonnet and deck 3.4 cm).
+* **Belt kick and DLO.** The rear deck's shoulder falls to the belt along a
+  C2 curve (`body::smootherstep`, z 0.85 to 1.50 m), so its highlight runs
+  into the belt as one curve. `BodySurface::belt(z)` is that feature line:
+  the quarter light sits on it and its rear edge sweeps back along the
+  C-pillar to a point on the belt, so the daylight opening reads as one swept
+  shape tapering rearward. The B-pillar blackout is 8 cm; the rear door's
+  glass and the quarter light share one 2 cm sash.
 * **Plan view.** The nose and tail are bowed and the corners are rounded (a
   smooth intersection), so the bumpers wrap round without end caps.
 
@@ -361,7 +371,7 @@ opening's edge, the doors' belt edges included, is black rubber.
 |---|---|
 | Body surface (`parts/body.rs`) | A *band* is swept round the plan outline: a section per arc length θ, blended between side, nose and tail shapes. The crease and lower line fall on fixed rows, so their highlights run straight. A *lid* (height field over plan view) runs from the band's top edge over a ramp (tumblehome, fender tops) to the profile's top line and crown. The ramp's round into the top is a quartic with zero curvature at both ends (`body::rail`) and the crown fades as (1 − u²)³, so no line of light runs along the roof rail or the fender tops. The rear deck meets the greenhouse in a 3.5 cm smooth max (the C-pillar's fillet into the quarter). The lid is relaxed by a Laplacian. The profile's curves are blurred (σ 8 cm) so the clearcoat shows no ripples at their control points. Grid: 2.2 cm across the sections, 3.5 cm along the car (twice that at the distant LOD). |
 | Panels (`parts/trim.rs`, `design.rs`) | Each panel is a region (an SDF made of smooth cut lines in side, plan or arc view), made metric on the surface and clipped by marching triangles, so edges follow the curve, not the grid. Every cut is rolled (2.8 mm radius) into a 12 mm wall and a return flange, set back 2.2 mm, giving a 4.5 mm shut line. Arch lips get an 8 mm roll. The inside of a panel renders dark. Panels: bonnet, cowl (black), lip and bumper front, fenders, doors, deck lid, valance and bumper rear, sills (black), body. |
-| Glass | The body surface over each opening, set 6 mm in, with a black frit band printed inside the windscreen and backlight. The side windows sit in black sash frames, with a black B-pillar applique (one half on each door) and a chrome belt moulding. The windscreen is laminated (it cracks); the side glass is tempered (it shatters). The rear doors', quarter lights' and backlight's glass is privacy-tinted (`mat::PRIVACY`). |
+| Glass | The body surface over each opening, set 3 mm in (nearly flush), with a black frit band printed inside the windscreen and backlight. The side windows sit in slim (1 cm) black sash frames, with a satin-black B-pillar applique (`mat::PILLAR`, one half on each door: no mirror-bright sky once the doors move) and a chrome belt moulding. The windscreen is laminated (it cracks); the side glass is tempered (it shatters). The rear doors', quarter lights' and backlight's glass is privacy-tinted (`mat::PRIVACY`). |
 | Lamps (`fixtures::lamp`) | A lens continuing the body surface; a housing extruded along the lamp axis; a reflector back; small projector cups with lens domes; light guides that follow the outline (the DRL ring; two tail rings; the light bar; the fog lamps' LED line). |
 | Grille (`fixtures::grille`) | Gloss-black surround, a dark throat recessed 8 cm and a honeycomb back mesh (drawn by the shader). The side intakes are grilles too, their throats along the lamp axis. |
 | Wheels (`fixtures::wheel`, `caliper`) | Tyre lathe: four tread grooves, rounded shoulders, a rim protector and lettering band, proportioned to the sidewall's height. Texture coordinates on the tyre (u round it, v up the sidewall or across the tread) carry raised "RUBBLE SPORT 245/35 R20" (matching the 20-inch rim) lettering on the outer sidewall and tread blocks on the shoulders. Rim: lip and barrel, a dished face of ten split spokes (each forks toward the lip) cut on a polar grid, the faces diamond cut (`mat::MACHINED`), the 4 cm spoke walls gunmetal (`mat::RIM`); centre cap, five lug nuts. Vented disc (38 cm front, 35 cm rear) with its hat. The lettering's u seam has its own vertices (no text run backwards). The caliper is a monoblock: a flat-faced outboard piston housing, a bridge over the disc's rim and a slimmer inboard half, each a rounded section swept round the disc's edge with rounded ends; it rides the axle (it does not turn). |
@@ -400,7 +410,8 @@ opening's edge, the doors' belt edges included, is black rubber.
 * **Tears.** The renderer keeps a per-node tear field: a skin triangle's
   perimeter against its rest perimeter (`node_rest`), interpolated over each
   vertex's binding nodes. Panels are cut where it crosses ½, a smooth line,
-  with a bare-metal band at the edge.
+  with a thin bright lip of bare steel at the edge (the field's last 6 %: a
+  few millimetres, lit by the studio). A panel's inside is dark e-coat grey.
 * **Shading.** A procedural showroom: a cyclorama with a bright horizon band
   fading to a dark ceiling, three long softbox strips overhead (crisp lines
   along the roof, bonnet and deck), two low side strips, a key box and the
@@ -411,11 +422,22 @@ opening's edge, the doors' belt edges included, is black rubber.
   and the car reflected in the floor (`drawReflection`: the opaque level
   mirrored, a depth pass then one cheap diffuse shade of the nearest surface,
   blended at 0.22 reflectance fading with height; `?reflect=0` turns it off,
-  `?reflect=0.3` sets it). It costs about 0.1 ms a car (10 cars: 4.97 ms
-  against 3.96 ms without); the
-  crash lab's backdrop is a navy cyclorama with a lit horizon band. The paint
-  deepens toward grazing (flop); tail lenses are a deep ruby; tyres satin. The clearcoat has a mirror-sharp sun glint over
-  a broader sheen. Diffuse light is an analytic lobe fitted to the studio.
+  `?reflect=0.3` sets it). Only the opaque triangles under 0.95 m at rest
+  are reflected (a second index list; the reflection has faded to 3 % there).
+  Contact shadows follow it (`drawReflection`'s `contact`): the triangles
+  within 25 cm of the ground at rest (tyres, sill and bumper edges) drawn
+  flattened onto the floor, each layer darkening it by up to 0.3 by its
+  height, spread a little along its horizontal normal, so the car sits on the
+  floor wherever it is and however it has turned. The crash lab draws both
+  on its navy floor when the body is shown (`softbody.html?labReflect=0`
+  off, `=0.2` the reflectance; 0.16 by default; the floor then leaves no
+  depth). The crash lab's backdrop is a navy cyclorama with a lit horizon
+  band. The paint deepens toward grazing (flop); tail lenses are a deep
+  ruby; tyres satin. Metallic flakes are fixed in the paint's rest space (they
+  never swim as the body deforms) and glint near the sun's highlight in a
+  close view, fading out where a flake is under a pixel. The clearcoat has a
+  mirror-sharp sun glint over a broader sheen; its sky reflection is eased
+  at grazing angles so a flat bonnet does not read milky. Diffuse light is an analytic lobe fitted to the studio.
   Ambient occlusion is baked from analytic occluders (downward faces low on
   the car, faces inside the arches); the wheels, which turn, are darkened by
   height instead. Cabin trim is lit without studio reflections.
@@ -428,9 +450,10 @@ opening's edge, the doors' belt edges included, is black rubber.
   * The renderer picks a level per car on the GPU from the last frame's eye
     (indirect dispatch and draw), so only that level is skinned and drawn.
   * Measured with 10 cars on an M3 Max at 1080p with 4× MSAA
-    (`showcase-car.html?perf=1&n=10`): about 0.40–0.43 ms per car with the
-    interior (about 300k triangles, 99k at the distant level), and 0.21–0.34
-    ms at the distant level. Another GPU user moves these by ±10 %.
+    (`showcase-car.html?perf=1&n=10`): about 0.50 ms per car with the
+    interior, the floor reflection and the contact shadows (about 300k
+    triangles, 99k at the distant level; 0.41 ms without the reflection),
+    0.31 ms at the distant level. Another GPU user moves these by ±10 %.
 
 To restyle, change `design::sedan_styling` (cut lines, outlines, section
 shapes) and the profile. The tools stay the same.
@@ -487,6 +510,9 @@ shapes) and the profile. The tools stay the same.
   rest_three,...]` takes headless screenshots (close-ups: `rest_low`,
   `rest_nose`, `rest_back`, `rest_head`, `rest_tail`, `rest_wheel`,
   `rest_interior`, `rest_dash`, `rest_screen`, `rest_fplate`).
+* `node --experimental-websocket crash-lab-check.mjs --car showcase [--size 1920x1080]`:
+  the crash lab's presets with the skinned body (`--size` sets the
+  screenshots' size, 1280x720 by default).
 
 ## What the visual binds to (`Built`)
 
