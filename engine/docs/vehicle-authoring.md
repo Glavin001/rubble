@@ -355,8 +355,10 @@ Parts hang on hardware, not on their seams.
   - Group strengths, front door, Medium:
     - latch: 28.0 kN longitudinal, 20.5 kN transverse;
     - secondary latch: 19.0 / 17.8 kN;
-    - hinge pair: 36.9 / 23.4 kN, each hinge sized for half of the 36.2 /
-      29.8 kN pair floor (2005 Camry, report 637726).
+    - hinge pair: 73.8 / 46.9 kN. Each hinge on its own holds the 36.2 /
+      29.8 kN pair floor (2005 Camry, report 637726). No report separated a
+      pair, so neither hinge failed. At half that floor, the intrusion beam's
+      pull tore the lower hinge off in every side pole run.
   - The source is `crash-reference-targets.md` §9. The secondary engages
     softer, so the assembly fails with its primary.
 - **Bearing.**
@@ -389,7 +391,12 @@ Parts hang on hardware, not on their seams.
 - **Tests.**
   - `r`: the FMVSS 206 rigs, static and in the solver.
   - `s`: 30 g inertial load.
-  - `g`: door pull.
+  - `g`: door pull. The door comes off at 82 kN, the sum of its parts'
+    transverse strengths (2 × 29.8 + 20.5 kN).
+  - Bearing: a door end bears on the pillar beside it along the car, and
+    inboard on a flange strip (one flange node behind each member end, both
+    chords bearing on it). It never bears mostly outward on a node outboard
+    of it, because that would hold the door shut.
   - `o`: FMVSS 214 S9.2.3 door retention in the side pole.
   - `t`: car-to-car T-bone, reported. `TB_KMH`, `TB_MASS`, `TB_DZ` and
     `TB_ANG` vary it.

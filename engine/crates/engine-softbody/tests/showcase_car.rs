@@ -1265,10 +1265,10 @@ fn f_wall_at_120_kmh_follows_campbell_and_keeps_its_ledgers() {
 /// (each its mass's share, so the door itself is not torn) ramped at 10
 /// kN/s, the car free on its wheels. It holds FMVSS 206's transverse
 /// minima together (S4.1.1.2 latch 9,000 N and S4.1.2.1 hinge system
-/// 9,000 N: no group lets go below 18 kN) and then comes off (every hinge
-/// and latch group broken); the load it comes off at is reported against
-/// the sum of the parts' measured transverse strengths (hinge pair 29.8
-/// kN, latch 20.5 kN).
+/// 9,000 N: no group lets go below 18 kN) and comes off (every hinge and
+/// latch group broken) at the sum of its parts' transverse strengths: each
+/// hinge at the pair's floor, 29.8 kN, and the latch inside its measured
+/// interquartile range, 18.8–23.8 kN (`crash-reference-targets.md` §9).
 #[test]
 fn g_pulling_a_door_tears_it_off() {
     let b = built(Resolution::Medium);
@@ -1291,7 +1291,7 @@ fn g_pulling_a_door_tears_it_off() {
     let rate = 10_000.0f32;
     let (mut first, mut off) = (None, None);
     let mut t = 0.0f32;
-    while t < 8.0 && off.is_none() {
+    while t < 16.0 && off.is_none() {
         let f = rate * t;
         for &i in &door {
             let mi = s.nodes[i].mass;
@@ -1355,10 +1355,14 @@ fn g_pulling_a_door_tears_it_off() {
     let first = first.expect("no hardware let go").0;
     let off = off.expect("the door stayed on");
     assert!(first >= 18_000.0, "hardware let go at {first} N");
-    // (Reported against the parts' measured sum, 50.3 kN: the door turns
-    // as it is pulled, so more of each part's beams share the pull than in
-    // the fixtures.)
-    let _ = off;
+    // The parts' transverse strengths summed: each hinge at the pair's
+    // floor (29.8 kN), the latch at its measured interquartile range
+    // (18.8–23.8 kN).
+    let (lo, hi) = (2.0 * 29_813.0 + 18_800.0, 2.0 * 29_813.0 + 23_800.0);
+    assert!(
+        (lo..=hi).contains(&off),
+        "the door came off at {off} N, not {lo}–{hi}"
+    );
 }
 
 /// After a 56 km/h wall crash the body's ringing dies out (no "jelly"): its
@@ -3028,7 +3032,7 @@ fn rig_pull(b: &Built, groups: &[usize], d: Vec3) -> (f32, bool) {
     let mut peak = 0.0f32;
     let mut x = 0.0f32;
     let mut steps = 0usize;
-    while x < 0.15 {
+    while x < 0.4 {
         x += v * dt;
         for (k, &i) in pins.iter().enumerate() {
             s.nodes[i].pos = start[k] + d * x;
