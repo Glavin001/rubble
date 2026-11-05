@@ -403,7 +403,10 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   var n = normalize(i.normal);
   let v = normalize(frame.eye.xyz - i.world);
   // The inside of a body panel (seen through a window or a tear): bare, dark.
-  if (!front && i.mat == 0u) {
+  // A back face whose skinned normal still faces the eye is not an inside but
+  // a sliver folded over in a crush (a rolled edge, a crease): paint, so a
+  // buckled seam reads as a sharp fold rather than a dark sawtooth.
+  if (!front && i.mat == 0u && dot(n, v) < 0.0) {
     let d = vec3f(0.035, 0.035, 0.038) * (0.4 + 0.6 * clamp(i.ao, 0.0, 1.0));
     return vec4f(tonemap(d * (irradiance(-n) + vec3f(0.2))), 1.0);
   }
