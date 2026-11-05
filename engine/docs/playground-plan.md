@@ -18,6 +18,37 @@ Principles (unchanged from the lab):
 - Lossless: no scene loses bodies, contacts, iterations or detail in the move. Every page
   keeps its frame time (checked before and after each phase, one GPU run at a time).
 
+## Status (2026-11-05, branch `claude/amazing-euler-eefda7`)
+
+| Phase | State |
+|---|---|
+| 1 | Done: the preset registry (`play::presets`), the shared balls (`play::balls`), Broadside and the timber yard in `engine-world`. |
+| 2 | Done: `demo.html`'s built scenes are made in Rust (`engine-scenes::web`, `play::rigid`). |
+| 3 | Done for vehicles, soft bodies, motion and terrain (`play::{vehicles, softbody, motion, hills}`); the city was already Rust (`rubble::city`). The street and range layouts moved to `engine_vehicle::streets`. |
+| 3b | Done: one `SceneDef` over those families (`play::scene`): its world, its placement, a page's URL switches read in Rust (`from_query`, so a preset's query is its page's scene), and `Playground`. Bindings: wasm `createScene`/`placeScene`/`sceneFromQuery`/`presetScene`; C `rbCreatePlay`/`rbPlay_Step`/`rbPlay_GetStats`; native `tests/play_presets.rs` (all 44 placed presets). |
+| 4–6 | Not started. |
+
+Every move was checked in Chrome against the page before it: the body records before the
+first frame (and every soft body's entry, the heightfield) byte for byte. Demo 12
+configurations and the Morton slot order, vehicle 16, motion 3, terrain 3, softbody 27.
+
+How this differs from the target below, so far:
+
+- `SceneDef` is an enum of the families' own definitions, not freely composed parts
+  (rigid content + vehicles + ground + characters in one scene). Composition comes with
+  the shell (phase 4), when one page needs it.
+- No `Action` type yet: firing, ramming, shelling, meteors and crash runs are still each
+  page's script over what placement returns.
+- Not in `SceneDef` yet: the lab, the range (Broadside, the timber yard), impact and the
+  city; the explicit solver's own scene (the page builds the sim, Rust places its shapes);
+  imported vehicles (the page adds the file to the scene).
+- `World::settle_uploads` (new): bulk placement hands its uploads over in batches;
+  natively, one write per body piled up Metal staging buffers (gables506k placed in over
+  10 minutes, now 7.7 s).
+
+Known on main, not from this work: R (reset) in `motion.html`'s ccd and character scenes
+fails ("forcing a body to sleep" is unsupported).
+
 ## Today (2026-11-05, main after PR #102)
 
 The physics is already one engine. Every page creates a `World` through
