@@ -5515,6 +5515,28 @@ fn member_chord_yields() {
 #[ignore]
 fn which_nodes() {
     let b = built(Resolution::Medium);
+    // (`RUPTURE_REPORT=1`: the ductile beams' rupture, by part.)
+    if std::env::var("RUPTURE_REPORT").is_ok() {
+        let sk = &b.skeleton;
+        let mut by: std::collections::BTreeMap<String, (usize, usize, f32)> = Default::default();
+        for bm in &sk.beams {
+            if let Some(r) = sk.rupture(bm) {
+                let pa = sk.parts[sk.nodes[bm.a as usize].part as usize].clone();
+                let e = by.entry(pa).or_default();
+                e.0 += 1;
+                if r.expansion <= 0.0 {
+                    e.1 += 1;
+                }
+                e.2 += r.expansion;
+            }
+        }
+        for (k, (n, z, sum)) in by {
+            eprintln!(
+                "rupture {k}: {n} beams, {z} tear at S (no plastic room), mean dₑ {:.3}",
+                sum / n as f32
+            );
+        }
+    }
     for t in std::env::var("NODES").unwrap_or_default().split(',') {
         let Ok(i) = t.parse::<usize>() else { continue };
         let n = &b.skeleton.nodes[i];

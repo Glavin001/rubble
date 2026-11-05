@@ -3287,6 +3287,9 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         // The profile it ships with (spec §36). `BEAMNG_PROFILE=0` leaves the
         // line out (a measurement switch: the RoR profile's contact rule).
         sk.beamng_profile = std::env::var("BEAMNG_PROFILE").map_or(true, |v| v != "0");
+        // Steel tears at its elongation at break (`Skeleton::rupture`;
+        // `RUPTURE=0` leaves it out, a measurement switch).
+        sk.ductile = std::env::var("RUPTURE").map_or(true, |v| v != "0");
         sk.cap_to_bound()?;
         for (b, &e) in sk.beams.iter_mut().zip(&elong) {
             if e >= 0.0 {
@@ -4412,6 +4415,8 @@ fn aperture_gauges(
                 strength: f,
                 plastic: 0.0,
                 density: 0.0,
+                elong: 0.0,
+                uts: 0.0,
             };
             if sk.beam_with(a, b, m, BeamType::Normal, group) {
                 let j = sk.beams.len() - 1;

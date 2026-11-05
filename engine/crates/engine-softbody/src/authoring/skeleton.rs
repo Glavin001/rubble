@@ -42,6 +42,22 @@ pub const SHORT_BREAK: f32 = 2.0;
 /// beam at least this long, so a shorter one is made elastic up to its break.
 pub const MIN_YIELD_LENGTH: f32 = 0.1;
 
+/// A ductile beam tears at this many times its ultimate force
+/// ([`Skeleton::rupture`]): just past the hardening cap, so the hardened
+/// beam carries its ultimate force and the step's overshoot does not tear it.
+pub const RUPTURE_MARGIN: f32 = 1.05;
+
+/// A ductile beam's rupture ([`Skeleton::rupture`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Rupture {
+    /// deformLimitStress (N): the ultimate force.
+    pub cap: f32,
+    /// beamStrength (N).
+    pub strength: f32,
+    /// deformLimitExpansion (fraction of the rest length).
+    pub expansion: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BeamType {
     Normal,
@@ -184,6 +200,9 @@ pub struct Skeleton {
     /// lengths, no idle-triangle throttle, two-body vehicle and self
     /// contact).
     pub beamng_profile: bool,
+    /// Ductile beams tear at their elongation at break
+    /// ([`Skeleton::rupture`]): one tier.
+    pub ductile: bool,
     /// The nodes are the vehicle at rest on flat ground at this height
     /// (`rubble_rest_pose`): it spawns standing, its beams' rest lengths
     /// (`rest_scale`) the unloaded design's.
@@ -269,6 +288,40 @@ impl Skeleton {
         self.index.contains_key(&(a.min(b), a.max(b)))
     }
 
+    /// A ductile beam's rupture (one tier; `RUPTURE=0` leaves it out, a
+    /// measurement): a deformable plain beam of a grade with an elongation
+    /// at break ([`Material::ductile`]) hardens at most to its ultimate force
+    /// (Rm/Re × its yield, tension's when that is higher) and tears just past
+    /// it (×[`RUPTURE_MARGIN`]); its plastic stretch is capped
+    /// (`deformLimitExpansion`) so that its strain when it tears, plastic
+    /// plus the elastic stretch at that force, is the elongation at break:
+    /// dₑ = A − S/(k·L), at least 0 (a beam whose elastic stretch at S is
+    /// already past A, at the bound's stiffness, tears at S).
+    pub fn rupture(&self, b: &SkBeam) -> Option<Rupture> {
+        if !self.ductile
+            || b.mat.elong <= 0.0
+            || b.mat.uts <= 0.0
+            || b.ty != BeamType::Normal
+            || b.damper
+        {
+            return None;
+        }
+        let l = self.pos(b.a).distance(self.pos(b.b)) * b.rest_scale;
+        if l < MIN_YIELD_LENGTH {
+            return None;
+        }
+        let t = b.mat.deform.max(b.tension_yield);
+        let cap = b.mat.uts * t;
+        let strength = RUPTURE_MARGIN * cap;
+        let kl = b.mat.k_at(l) * l;
+        let expansion = (b.mat.elong - strength / kl).max(0.0);
+        Some(Rupture {
+            cap,
+            strength,
+            expansion,
+        })
+    }
+
     /// A beam between `a` and `b` unless they are already joined; returns whether
     /// it was added.
     pub fn beam(&mut self, a: u32, b: u32, mat: Material) -> bool {
@@ -329,6 +382,8 @@ impl Skeleton {
             strength,
             plastic: 0.0,
             density: 0.0,
+            elong: 0.0,
+            uts: 0.0,
         };
         let added = self.beam(a, b, mat);
         if added {
@@ -1175,6 +1230,8 @@ impl Skeleton {
                 let (d, st) = if l < MIN_YIELD_LENGTH {
                     let st = b.mat.strength.min(SHORT_BREAK * b.mat.deform);
                     (st, st)
+                } else if let Some(r) = self.rupture(b) {
+                    (b.mat.deform, r.strength)
                 } else {
                     (b.mat.deform, b.mat.strength)
                 };
@@ -1273,7 +1330,7 @@ impl Skeleton {
             .beams
             .iter()
             .filter(|b| {
-                b.plastic_limits.is_some()
+                (b.plastic_limits.is_some() || self.rupture(b).is_some())
                     && b.ty == BeamType::Normal
                     && self.pos(b.a).distance(self.pos(b.b)) * b.rest_scale >= MIN_YIELD_LENGTH
             })
@@ -1284,9 +1341,15 @@ impl Skeleton {
                 "\nrubble_jbeam_plastic\n; a, b, deformLimitStress (N), deformLimit, deformLimitExpansion"
             );
             for b in limited {
-                let (cap, d) = b.plastic_limits.unwrap();
-                let stress = round2(cap * round2(b.mat.deform));
-                let _ = writeln!(s, "{}, {}, {stress}, {d}, -1", b.a, b.b);
+                let r = self.rupture(b);
+                let (cap, d) = b.plastic_limits.unwrap_or((-1.0, -1.0));
+                let stress = match (b.plastic_limits, r) {
+                    (Some(_), _) => round2(cap * round2(b.mat.deform)),
+                    (None, Some(r)) => round2(r.cap),
+                    (None, None) => -1.0,
+                };
+                let de = r.map_or(-1.0, |r| r.expansion);
+                let _ = writeln!(s, "{}, {}, {stress}, {d}, {de}", b.a, b.b);
             }
         }
         // (Rubble's extension: a tension-side yield on those beams.)

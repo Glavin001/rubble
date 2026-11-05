@@ -28,6 +28,15 @@ pub struct Material {
     /// Relative mass per metre of beam (the body's mass is spread by it, then
     /// scaled to the body's target).
     pub density: f32,
+    /// Elongation at break (engineering strain, the datasheet's A80; 0: the
+    /// beam has no rupture strain and breaks at its strength only). One tier
+    /// writes it as the beam's `deformLimitExpansion` ([`Material::ductile`]).
+    #[serde(default)]
+    pub elong: f32,
+    /// Ultimate over yield strength (Rm/Re, datasheet minima): the beam's
+    /// force never hardens past it, and it tears there.
+    #[serde(default)]
+    pub uts: f32,
 }
 
 impl Material {
@@ -39,7 +48,15 @@ impl Material {
             strength,
             plastic: 0.0,
             density,
+            elong: 0.0,
+            uts: 0.0,
         }
+    }
+
+    /// A ductile metal's rupture: its elongation at break and its Rm/Re
+    /// (datasheet minima).
+    pub fn ductile(self, elong: f32, uts: f32) -> Self {
+        Self { elong, uts, ..self }
     }
 
     /// A grade from its stiffness (for a [`REF_LENGTH`] beam), damping, yield
@@ -54,6 +71,8 @@ impl Material {
             strength: deform * break_ratio,
             plastic: 0.0,
             density,
+            elong: 0.0,
+            uts: 0.0,
         }
     }
 
@@ -97,6 +116,8 @@ impl Material {
             strength: skin.strength * 3.0,
             plastic: skin.plastic,
             density: skin.density,
+            elong: 0.0,
+            uts: 0.0,
         }
     }
 
@@ -110,6 +131,8 @@ impl Material {
             strength: self.strength.min(o.strength),
             plastic: self.plastic.min(o.plastic),
             density: self.density.min(o.density),
+            elong: self.elong.min(o.elong),
+            uts: self.uts.min(o.uts),
         }
     }
 }
@@ -139,6 +162,8 @@ impl Material {
             strength: yield_force + elong * kl,
             plastic: 0.0,
             density,
+            elong: 0.0,
+            uts: 0.0,
         }
     }
 
@@ -213,14 +238,39 @@ impl Default for Grades {
     /// where the body gives in a crash.
     fn default() -> Self {
         Self {
-            panel: Material::steel(2.7e4, SKIN_ZETA, 5.0e2, 0.3, 1.0).plastic(PLASTIC),
-            floor: Material::steel(2.7e4, SKIN_ZETA, 7.0e2, 0.3, 1.5).plastic(PLASTIC),
-            frame: Material::steel(2.0e4, ZETA, 1.9e2, 0.3, 1.5).plastic(PLASTIC),
-            crush: Material::steel(3.75e5, ZETA, 1.35e4, 0.25, 2.0).plastic(PLASTIC),
-            hsla: Material::steel(1.45e5, ZETA, 2.9e3, 0.2, 2.0).plastic(PLASTIC),
-            uhss: Material::steel(2.2e5, ZETA, 3.5e3, 0.12, 3.0).plastic(PLASTIC),
-            boron: Material::steel(2.65e5, ZETA, 3.9e3, 0.08, 3.5).plastic(PLASTIC),
-            alu: Material::steel(1.45e5, ZETA, 2.9e3, 0.12, 2.0).plastic(PLASTIC),
+            // Rupture (`ductile`: A80, Rm/Re at the standards' minima; each
+            // grade's steel a Choice, `vehicle-authoring.md`): skins, floor
+            // and lid inners bake-hardening HC220B (EN 10268: Re 220, Rm
+            // 320 MPa, A80 32 %); crush members DP600 (HCT600X, EN 10338:
+            // Re 330, Rm 600, A80 20 %); HSLA HC340LA (EN 10268: Re 340,
+            // Rm 410, A80 21 %); the cell's UHSS DP780 (HCT780X: Re 440,
+            // Rm 780, A80 14 %); press-hardened 22MnB5 (Re 950, Rm 1,300,
+            // A80 5 %); aluminium EN AW-6082-T6 extrusion (EN 755-2: Rp0.2
+            // 250, Rm 290, A50 8 %).
+            panel: Material::steel(2.7e4, SKIN_ZETA, 5.0e2, 0.3, 1.0)
+                .plastic(PLASTIC)
+                .ductile(0.32, 320.0 / 220.0),
+            floor: Material::steel(2.7e4, SKIN_ZETA, 7.0e2, 0.3, 1.5)
+                .plastic(PLASTIC)
+                .ductile(0.32, 320.0 / 220.0),
+            frame: Material::steel(2.0e4, ZETA, 1.9e2, 0.3, 1.5)
+                .plastic(PLASTIC)
+                .ductile(0.32, 320.0 / 220.0),
+            crush: Material::steel(3.75e5, ZETA, 1.35e4, 0.25, 2.0)
+                .plastic(PLASTIC)
+                .ductile(0.20, 600.0 / 330.0),
+            hsla: Material::steel(1.45e5, ZETA, 2.9e3, 0.2, 2.0)
+                .plastic(PLASTIC)
+                .ductile(0.21, 410.0 / 340.0),
+            uhss: Material::steel(2.2e5, ZETA, 3.5e3, 0.12, 3.0)
+                .plastic(PLASTIC)
+                .ductile(0.14, 780.0 / 440.0),
+            boron: Material::steel(2.65e5, ZETA, 3.9e3, 0.08, 3.5)
+                .plastic(PLASTIC)
+                .ductile(0.05, 1300.0 / 950.0),
+            alu: Material::steel(1.45e5, ZETA, 2.9e3, 0.12, 2.0)
+                .plastic(PLASTIC)
+                .ductile(0.08, 290.0 / 250.0),
             plastic: Material::steel(1.2e4, SKIN_ZETA, 9.0e2, 0.25, 0.5),
             glass: Material::steel(9.0e3, SKIN_ZETA, 4.0e2, 0.04, 1.0),
             rigid: Material::steel(1.5e5, 0.03, 1.0e9, 0.0, 6.0),
