@@ -345,7 +345,7 @@ impl Contact {
                 .enumerate()
                 .map(|(i, b)| wgpu::BindGroupEntry {
                     binding: i as u32,
-                    resource: b.as_entire_binding(),
+                    resource: if i == 0 { params_window(b) } else { b.as_entire_binding() },
                 })
                 .collect();
             if args {
@@ -499,6 +499,16 @@ const WIDE_HITS: usize = 7;
 /// step word) plus the frame's end, at the uniform offset alignment.
 const PARAM_STRIDE: u64 = 512;
 const PARAM_COPIES: u32 = 129;
+/// The parameter buffer as the non-wide passes bind it: its first copy only (the
+/// whole buffer, PARAM_STRIDE × PARAM_COPIES, is past WebGPU's 64 KiB uniform
+/// binding limit; those passes read copy 0, the wide ones a dynamic offset).
+fn params_window(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
+    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+        buffer: b,
+        offset: 0,
+        size: std::num::NonZeroU64::new(PARAM_STRIDE),
+    })
+}
 /// Words of the kernel's Params.
 const PARAM_WORDS: usize = 80;
 /// Params word: the phases a measurement build skips (`EB_ABLATE`).
@@ -1489,7 +1499,7 @@ impl ExplicitBeamsGpu {
             ]
             .map(|(binding, b)| wgpu::BindGroupEntry {
                 binding,
-                resource: b.as_entire_binding(),
+                resource: if binding == 0 { params_window(b) } else { b.as_entire_binding() },
             }),
         });
         let buffers = [
@@ -2252,7 +2262,7 @@ impl ExplicitBeamsGpu {
                 .enumerate()
                 .map(|(i, b)| wgpu::BindGroupEntry {
                     binding: i as u32,
-                    resource: b.as_entire_binding(),
+                    resource: if i == 0 { params_window(b) } else { b.as_entire_binding() },
                 })
                 .collect();
             bind.extend(extra.iter().map(|(b, buf)| wgpu::BindGroupEntry {

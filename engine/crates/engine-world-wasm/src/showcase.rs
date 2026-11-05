@@ -243,3 +243,97 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     );
     vis
 }
+
+/// The visual layer of an imported BeamNG JBeam vehicle (engine_softbody
+/// `flexmesh`): its flexbodies and props, bound to the explicit solver's nodes
+/// as `explicitSim` spawns it from `jbeam` (a desc node maps to the solver node
+/// at its rest position), in `showcaseCar`'s `visual` format, so
+/// `showcase-car-render.mjs` draws it. `spec`: `{ jbeam: [[name, text]], pc,
+/// paint: [r, g, b], native (the JBeam-mode spawn: `explicitSim`'s),
+/// materials: [[name, text]] (the `*.materials.json` files) }`; `meshes`: `[[name, Uint8Array]]`, the vehicle's `.dae`
+/// files. Returns `{ visual, visualLod (the distant level: the meshes
+/// clustered on a 3 cm grid), lodDistance (m: where a cluster is about 2.6
+/// pixels), lodTriangles, report: { flexbodies, props, vertices, triangles,
+/// unbound, missing } }`.
+#[wasm_bindgen(js_name = jbeamVisual)]
+pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
+    use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
+    use engine_softbody::flexmesh;
+    use glam::Vec3;
+    let v: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
+    let files: Vec<(String, String)> = v
+        .get("jbeam")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| err("jbeamVisual: `jbeam` files"))?
+        .iter()
+        .map(|f| {
+            (
+                f.get(0).and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                f.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let pc = v.get("pc").and_then(|t| t.as_str());
+    let paint = v
+        .get("paint")
+        .and_then(|p| p.as_array())
+        .filter(|a| a.len() == 3)
+        .map(|a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.5) as f32))
+        .unwrap_or([0.45, 0.05, 0.04]);
+    let desc = engine_softbody::jbeam::load_jbeam(&refs, pc).map_err(err)?;
+    let flex = engine_softbody::jbeam::assembled_rows(&refs, pc, "flexbodies").map_err(err)?;
+    let props = engine_softbody::jbeam::assembled_rows(&refs, pc, "props").map_err(err)?;
+    // The solver path the lab spawns it on: `native` the JBeam mode (desc
+    // order, pressure wheels), else the `.truck` path. Either way the visual
+    // binds by rest position, so this only has to match the spawn's nodes.
+    let sim = if v.get("native").and_then(|x| x.as_bool()).unwrap_or(false) {
+        ExplicitBeams::from_desc_jbeam_with(
+            &desc,
+            engine_softbody::explicit_beams::JbeamWheels::Pressure,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            ExplicitBeamsSettings::default(),
+        )
+        .map_err(err)?
+        .0
+    } else {
+        ExplicitBeams::from_jbeam(&refs, pc, Vec3::ZERO, Vec3::ZERO, ExplicitBeamsSettings::default())
+            .map_err(err)?
+            .0
+    };
+    let mut all = Vec::new();
+    for m in meshes.iter() {
+        let pair = Array::from(&m);
+        let name = pair.get(0).as_string().unwrap_or_default();
+        let bytes = Uint8Array::new(&pair.get(1)).to_vec();
+        let text = String::from_utf8_lossy(&bytes);
+        all.extend(flexmesh::read_collada(&text).map_err(|e| err(format!("{name}: {e}")))?);
+    }
+    let mut mats = std::collections::HashMap::new();
+    for m in v.get("materials").and_then(|m| m.as_array()).into_iter().flatten() {
+        mats.extend(flexmesh::read_materials(m.get(1).and_then(|x| x.as_str()).unwrap_or("")));
+    }
+    let (vis, rep) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &all, &mats, paint).map_err(err)?;
+    // The distant level: the meshes clustered (flexmesh::cluster).
+    let far: Vec<flexmesh::DaeMesh> = all.iter().map(|m| flexmesh::cluster(m, flexmesh::LOD_CELL)).collect();
+    let (lod, lrep) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &far, &mats, paint).map_err(err)?;
+    let out = Object::new();
+    set(&out, "visual", &visual_js(&vis).into());
+    set(&out, "visualLod", &visual_js(&lod).into());
+    set(&out, "lodDistance", &JsValue::from(flexmesh::lod_distance(flexmesh::LOD_CELL)));
+    set(&out, "lodTriangles", &JsValue::from(lrep.triangles as u32));
+    let r = Object::new();
+    set(&r, "flexbodies", &JsValue::from(rep.flexbodies as u32));
+    set(&r, "props", &JsValue::from(rep.props as u32));
+    set(&r, "vertices", &JsValue::from(rep.vertices as u32));
+    set(&r, "triangles", &JsValue::from(rep.triangles as u32));
+    set(&r, "unbound", &JsValue::from(rep.unbound as u32));
+    let missing = Array::new();
+    for m in &rep.missing {
+        missing.push(&JsValue::from_str(m));
+    }
+    set(&r, "missing", &missing.into());
+    set(&out, "report", &r.into());
+    Ok(out.into())
+}

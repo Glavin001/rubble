@@ -71,7 +71,7 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar } from './rubble-world.mjs';
+    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
@@ -135,6 +135,19 @@
       const r = await fetch(url);
       if (!r.ok) throw new Error(`?truck=${url}: ${r.status} ${r.statusText}`);
       importSrc = { kind: 'truck', text: await r.text(), label: url.split('/').pop() };
+    } else if (qs.get('mod')) {
+      // ?mod=<folder url>: a BeamNG vehicle folder served with a files.json
+      // (its files' paths): its .jbeam parts, a .pc (?pc= its name, else the
+      // first) and its .dae meshes (the crash lab draws its flexbodies).
+      const base = qs.get('mod').replace(/\/$/, '');
+      const list = await (await fetch(`${base}/files.json`)).json();
+      const text = async (f) => [f, await (await fetch(`${base}/${f}`)).text()];
+      const files = await Promise.all(list.filter((f) => f.endsWith('.jbeam')).map(text));
+      const pcName = qs.get('pc') ?? list.find((f) => f.endsWith('.pc'));
+      const pc = pcName && list.includes(pcName) ? (await text(pcName))[1] : undefined;
+      const meshes = await Promise.all(list.filter((f) => f.endsWith('.dae')).map(async (f) => [f, new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer())]));
+      const materials = await Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text));
+      importSrc = { kind: 'jbeam', files, pc, meshes, materials, label: base.split('/').pop() };
     } else if (qs.get('car') === 'import') {
       try { importSrc = JSON.parse(sessionStorage.getItem(IMPORT_KEY) || 'null'); } catch { importSrc = null; }
     }
@@ -149,7 +162,7 @@
     for (const [id, t] of Object.entries(CARS)) carSel.add(new Option(t, id, false, id === carKind));
     carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') u.searchParams.delete('truck'); location.href = u.href; };
     // Query parameters a scene change keeps: the solver and the vehicle.
-    const keep = (u) => { for (const k of ['solver', 'car', 'truck']) if (qs.has(k)) u.searchParams.set(k, qs.get(k)); return u; };
+    const keep = (u) => { for (const k of ['solver', 'car', 'truck', 'mod', 'pc', 'jbeamMode']) if (qs.has(k)) u.searchParams.set(k, qs.get(k)); return u; };
     sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = keep(u).href; };
     const solverBtn = document.getElementById('solverBtn');
     solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz (RoR parity) ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
@@ -421,7 +434,8 @@
     const showcaseBuilt = () => showcaseCache ??= showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: qs.get('res') ?? 'medium' });
     const hiresJbeam = carKind === 'hires' ? [['hires.jbeam', hiresCarJbeam()]] : null;
     const vehicleSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
-      : carKind === 'import' ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc } : { truck: importSrc.text })
+      // ?jbeamMode=native: the JBeam-mode spawn (desc order, pressure wheels).
+      : carKind === 'import' ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native' } : { truck: importSrc.text })
       : carKind === 'showcase' ? { truck: showcaseBuilt().truck }
       // The sedan as the acceptance runs build it (?tyres=0: its bare body).
       : { truck: explicitSedanTruck(qs.get('tyres') !== '0') };
@@ -1126,14 +1140,18 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     const labR = LAB ? createCrashLabRenderer({ device, format, sampleCount: SAMPLES, frameBuf, shadowView, shadowSampler }) : null;
     labR?.setSim(xsim, xlayout);
     // The showcase sedan's body, skinned from the lab's node positions (live and replay).
-    const bodyR = LAB && carKind === 'showcase' ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
+    // Or an imported JBeam vehicle's flexbodies and props (?mod=).
+    let importVis = null;
+    const bodyVisual = () => carKind === 'showcase' ? showcaseBuilt().visual
+      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native', materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = r.visualLod; r.visual.lodDistance = r.lodDistance; return r.visual; })());
+    const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
     let bodyFor = { layout: null, pos: null }, bodyIds = [];
     const syncBody = () => {
       const pos = labR.positionsBuffer();
       if (!pos) return false;
       if (bodyFor.layout !== xlayout) {
         for (const id of bodyIds) bodyR.removeCar(id);
-        bodyIds = xlayout.vehicles.map((v, i) => bodyR.addCar(showcaseBuilt().visual, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i }));
+        bodyIds = xlayout.vehicles.map((v, i) => { const vis = bodyVisual(); return bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: vis.lod ?? null, lodDistance: vis.lodDistance ?? 18 }); });
         bodyFor.step = null;
         bodyFor.layout = xlayout;
       }

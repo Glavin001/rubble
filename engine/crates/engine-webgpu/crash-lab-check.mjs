@@ -21,13 +21,16 @@
 // (gitignored; skipped when absent). Needs Chrome (CHROME env to override).
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const LOCAL = normalize(join(ROOT, '../../local-vehicles'));
+// Community BeamNG vehicles (with their .dae flexbodies), gitignored and local
+// only: RUBBLE_MODS, else the checkout's inspiration/beamng-mods.
+const MODS = normalize(process.env.RUBBLE_MODS || join(ROOT, '../../../inspiration/beamng-mods'));
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const OUT = opt('--out', join(ROOT, 'recordings', 'crash-lab'));
@@ -39,9 +42,13 @@ const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 mkdirSync(OUT, { recursive: true });
 const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
-  mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck' };
+  mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck',
+  // Imported BeamNG mods drawn with their flexbodies (?mod=: the lab reads the
+  // folder's files.json, which this server lists).
+  supercar: 'mod=/__mods/monster_supercar/vehicles/supercar&jbeamMode=native', tutorial: 'mod=/__mods/morzbng_tutorial/vehicles/tutorial&pc=none' }; // (its .pc is not valid JSON: the slot defaults)
 if (!CARS[CAR]) throw new Error(`--car: one of ${Object.keys(CARS).join(', ')}`);
-const carFile = CARS[CAR].startsWith('truck=') ? join(LOCAL, CARS[CAR].split('/__local/')[1]) : null;
+const carFile = CARS[CAR].startsWith('truck=') ? join(LOCAL, CARS[CAR].split('/__local/')[1])
+  : CARS[CAR].startsWith('mod=') ? join(MODS, CARS[CAR].split('/__mods/')[1].split('&')[0]) : null;
 if (carFile && !existsSync(carFile)) { console.log(`- ${CAR}: ${carFile} not found, skipped`); process.exit(0); }
 
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
@@ -49,8 +56,23 @@ const serveFrom = (base, rel) => {
   const path = normalize(join(base, rel));
   return path.startsWith(base) && existsSync(path) && !statSync(path).isDirectory() ? path : null;
 };
+const listFiles = (dir, rel = '') => readdirSync(join(dir, rel), { withFileTypes: true }).flatMap((e) =>
+  e.isDirectory() ? listFiles(dir, join(rel, e.name)) : [join(rel, e.name)]);
 const server = createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  if (p.startsWith('/__mods/') && p.endsWith('/files.json')) {
+    const dir = normalize(join(MODS, p.slice(8, -'/files.json'.length)));
+    if (!dir.startsWith(MODS) || !existsSync(dir)) { res.writeHead(404).end(); return; }
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(listFiles(dir)));
+    return;
+  }
+  if (p.startsWith('/__mods/')) {
+    const path = serveFrom(MODS, p.slice(8));
+    if (!path) { res.writeHead(404).end(); return; }
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'no-store' });
+    res.end(readFileSync(path));
+    return;
+  }
   const path = p.startsWith('/__local/') ? serveFrom(LOCAL, p.slice(9)) : serveFrom(ROOT, p);
   if (!path) { res.writeHead(404).end(); return; }
   res.writeHead(200, { 'content-type': TYPES[extname(path)] || 'application/octet-stream', 'cache-control': 'no-store' });

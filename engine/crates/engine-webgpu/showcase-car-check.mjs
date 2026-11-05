@@ -12,7 +12,7 @@
 //   node showcase-car-check.mjs [--res medium] [--out DIR] [--size 1920x1080] [--only a,b]
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,8 +28,21 @@ const CHROME = process.env.CHROME || (process.platform === 'darwin'
 mkdirSync(OUT, { recursive: true });
 
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
+// Community BeamNG vehicles (the mod_* runs; local only, skipped when absent):
+// RUBBLE_MODS, else the checkout's inspiration/beamng-mods.
+const MODS = normalize(process.env.RUBBLE_MODS || join(ROOT, '../../../inspiration/beamng-mods'));
+const listFiles = (dir, rel = '') => readdirSync(join(dir, rel), { withFileTypes: true }).flatMap((e) =>
+  e.isDirectory() ? listFiles(dir, join(rel, e.name)) : [join(rel, e.name)]);
 const server = createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  if (p.startsWith('/__mods/')) {
+    const list = p.endsWith('/files.json');
+    const path = normalize(join(MODS, list ? p.slice(8, -'/files.json'.length) : p.slice(8)));
+    if (!path.startsWith(MODS) || !existsSync(path)) { res.writeHead(404).end(); return; }
+    if (list) { res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(listFiles(path))); return; }
+    res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(readFileSync(path));
+    return;
+  }
   const path = normalize(join(ROOT, p));
   if (!path.startsWith(ROOT) || !existsSync(path) || statSync(path).isDirectory()) { res.writeHead(404).end(); return; }
   res.writeHead(200, { 'content-type': TYPES[extname(path)] || 'application/octet-stream', 'cache-control': 'no-store' });
@@ -118,6 +131,7 @@ const RUNS = [
   // Damage close-ups: the bay behind a crushed bonnet, the struck door's
   // inner skin through its tear, the roof's scrapes after the drop.
   ['wall_56_bay', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=0.55,0.55,1&dist=3.0&look=0,-0.1,1.3'],
+  ['zebra_wall_56_bay', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=0.55,0.55,1&dist=3.0&look=0,-0.1,1.3&zebra=1'],
   ['wall_120_bay', 'scene=wall&speed=120&runUp=0.6&freeze=1.0&cam=0.7,0.5,0.8&dist=3.4&look=0,-0.1,1.0'],
   ['sidepole_door', 'scene=sidepole&speed=32&runUp=0.3&freeze=1.2&cam=0.25,0.3,1&dist=3.0&look=0.4,-0.1,0.6'],
   ['drop_15_roof', 'scene=drop&height=15&freeze=3.5&cam=0.6,0.25,0.5&dist=4.2&look=0,-0.3,0'],
@@ -133,6 +147,13 @@ const RUNS = [
   ['perf_n10_far', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=80'],
   ['perf_n10_lod0', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=16&lod=0'],
   ['perf_pass', 'scene=idle&freeze=0&cam=three&perf=pass'],
+  // Imported BeamNG vehicles' flexbodies and props at rest (?mod=).
+  ['mod_supercar_three', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=three&dist=6'],
+  ['mod_supercar_front', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=0.5,0.2,1&dist=5'],
+  ['mod_supercar_lod', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=three&dist=24'],
+  ['mod_supercar_perf_n10', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=three&perf=1&n=10&dist=16'],
+  ['mod_supercar_perf_n10_far', 'mod=/__mods/monster_supercar/vehicles/supercar&freeze=0&cam=three&perf=1&n=10&dist=30'],
+  ['mod_tutorial_three', 'mod=/__mods/morzbng_tutorial/vehicles/tutorial&pc=none&freeze=0&cam=three&dist=6'],
   // Visual damage = physics damage, every frame.
   ['damage_rest', 'scene=idle&freeze=1.5&cam=three&check=damage'],
   ['damage_wall_56', 'scene=wall&speed=56&runUp=0.4&freeze=1.2&cam=three&check=damage'],
@@ -142,6 +163,7 @@ const RUNS = [
 let failed = 0;
 const only = opt('--only', null);
 for (const [name, q] of RUNS.filter(([n]) => !only || only.split(',').includes(n))) {
+  if (name.startsWith('mod_') && !existsSync(MODS)) { console.log(`${name}: ${MODS} not found, skipped`); continue; }
   await send('Page.navigate', { url: `${base}/showcase-car.html?res=${RES}&${q}` });
   let st = null;
   for (let i = 0; i < 600; i++) {

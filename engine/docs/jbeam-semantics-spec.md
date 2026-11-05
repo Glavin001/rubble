@@ -692,3 +692,9 @@ there, and is still unstable at 100 ms).
   (`slangc -target cuda|metal`, with and without `EB_AERO`), and the Metal output
   compiles to AIR with `xcrun metal`; no CUDA toolchain or NVIDIA GPU here, so the
   CUDA build is a Slang type-check only.
+* Cost (`explicit_beams_scaling jbeam=…:bx:rubble_body_only.pc`, 120 fps, 240 frames,
+  3 trials, a busy machine: load 12–22 from other sessions). The BX body now runs
+  Part II itself (704 beams with deform groups, breakable triangles), so this is the
+  cost with the features in use. GPU ms per frame, before → after: idle 1.06 → 1.02
+  (1 car), 0.94 → 1.11 (16), 2.26 → 2.45 (64); impact at 56 km/h 1.39 → 1.59,
+  2.22 → 2.34, 5.23 → 5.61 (+7 % at 64 cars).
