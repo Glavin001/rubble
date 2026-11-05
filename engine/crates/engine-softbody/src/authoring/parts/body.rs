@@ -236,6 +236,8 @@ pub struct BodySurface {
 pub struct Band {
     pub prof: Pkg,
     pub style: BodyStyle,
+    /// The style's crease line, blurred like the package curves.
+    crease: Lut,
     /// Plan outline (x ≥ 0 half), uniformly by arc length: (point (x, z), outward normal).
     outline: Vec<(Vec2, Vec2)>,
     /// Half outline length (rear centre to front centre).
@@ -338,6 +340,7 @@ impl Band {
         Self {
             prof: prof.clone(),
             style: style.clone(),
+            crease: blur_curve(&style.crease, l, 0.12),
             outline,
             half,
             v_lower: 0.0,
@@ -364,11 +367,22 @@ impl Band {
         let wf = smoothstep(0.25, 0.97, n.y);
         let wr = smoothstep(0.25, 0.97, -n.y);
         let mut side = st.side;
-        side.crease = st.crease.eval(p.y);
+        side.crease = self.crease.eval(p.y);
         // Fenders and deck sides roll toward the flat lid; the cabin's doors
         // lean in less (the glass continues them).
-        let rise = (self.prof.top.eval(p.y) - self.prof.shoulder.eval(p.y)).max(0.0);
-        let roll = 1.0 - smoothstep(0.08, 0.30, rise);
+        // The rise averaged over ±30 cm along the car: at the cowl the top
+        // line climbs the windscreen within 20 cm, and a roll that followed
+        // it point by point would twist the shoulder there (wavy highlights
+        // where the fender meets the A-pillar).
+        let rise = [-0.3f32, -0.15, 0.0, 0.15, 0.3]
+            .iter()
+            .map(|dz| {
+                let z = (p.y + dz).clamp(0.0, self.prof.length);
+                (self.prof.top.eval(z) - self.prof.shoulder.eval(z)).max(0.0)
+            })
+            .sum::<f32>()
+            / 5.0;
+        let roll = 1.0 - smootherstep(0.08, 0.30, rise);
         // Not behind the cabin when the rear deck is its own surface: there
         // the quarter stays upright into the deck's tight roll (a hard
         // shoulder).
@@ -530,42 +544,47 @@ pub struct Pkg {
 /// package curves are monotone cubics through a handful of points, smooth in
 /// value and slope but with curvature jumps at the points, which a clearcoat's
 /// reflections show as ripples.
-pub fn smooth_profile(p: &BodyProfile, sigma: f32) -> Pkg {
-    let l = p.length;
+/// A curve over z ∈ [0, l] blurred along the car (Gaussian, σ m) and
+/// tabulated every 1 cm: a monotone cubic's curvature jumps at its control
+/// points, which a clearcoat's reflections show as ripples or kinks.
+pub fn blur_curve(c: &Curve, l: f32, sigma: f32) -> Lut {
     let dz = 0.01f32;
     let n = (l / dz).ceil() as usize;
-    let blur = |c: &Curve| -> Lut {
-        let raw: Vec<f32> = (0..=n).map(|i| c.eval(l * i as f32 / n as f32)).collect();
-        let r = (3.0 * sigma / dz).ceil() as i32;
-        let g: Vec<f32> = (-r..=r)
-            .map(|k| (-(k as f32 * dz).powi(2) / (2.0 * sigma * sigma)).exp())
-            .collect();
-        let v = (0..=n as i32)
-            .map(|i| {
-                let (mut s, mut w) = (0.0f32, 0.0f32);
-                for k in -r..=r {
-                    // Odd reflection at the ends (keeps the end values and slopes).
-                    let j = i + k;
-                    let v = if j < 0 {
-                        2.0 * raw[0] - raw[(-j).min(n as i32) as usize]
-                    } else if j > n as i32 {
-                        2.0 * raw[n] - raw[(2 * n as i32 - j).max(0) as usize]
-                    } else {
-                        raw[j as usize]
-                    };
-                    let gk = g[(k + r) as usize];
-                    s += gk * v;
-                    w += gk;
-                }
-                s / w
-            })
-            .collect();
-        Lut {
-            z0: 0.0,
-            dz: l / n as f32,
-            v,
-        }
-    };
+    let raw: Vec<f32> = (0..=n).map(|i| c.eval(l * i as f32 / n as f32)).collect();
+    let r = (3.0 * sigma / dz).ceil() as i32;
+    let g: Vec<f32> = (-r..=r)
+        .map(|k| (-(k as f32 * dz).powi(2) / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let v = (0..=n as i32)
+        .map(|i| {
+            let (mut s, mut w) = (0.0f32, 0.0f32);
+            for k in -r..=r {
+                // Odd reflection at the ends (keeps the end values and slopes).
+                let j = i + k;
+                let v = if j < 0 {
+                    2.0 * raw[0] - raw[(-j).min(n as i32) as usize]
+                } else if j > n as i32 {
+                    2.0 * raw[n] - raw[(2 * n as i32 - j).max(0) as usize]
+                } else {
+                    raw[j as usize]
+                };
+                let gk = g[(k + r) as usize];
+                s += gk * v;
+                w += gk;
+            }
+            s / w
+        })
+        .collect();
+    Lut {
+        z0: 0.0,
+        dz: l / n as f32,
+        v,
+    }
+}
+
+pub fn smooth_profile(p: &BodyProfile, sigma: f32) -> Pkg {
+    let l = p.length;
+    let blur = |c: &Curve| -> Lut { blur_curve(c, l, sigma) };
     Pkg {
         length: l,
         top: blur(&p.top),
@@ -741,7 +760,12 @@ impl BodySurface {
             let t = (d / ramp).clamp(0.0, 1.0);
             // A straight-ish ramp (the glass) into a rounded rail; a long gentle
             // one when the rise is small (fender tops into the bonnet).
-            let tau = (0.7 - (rise - 0.05) * 1.6).clamp(0.22, 0.7);
+            // The round's share from the top line's rise without the crown:
+            // the crown varies across a row, and a per-point tau would bend
+            // each row's profile differently (lumpy reflections where the
+            // fender tops meet the A-pillars).
+            let rise_row = (prof.top.eval(z) - yb).max(0.004);
+            let tau = (0.7 - (rise_row - 0.05) * 1.6).clamp(0.22, 0.7);
             let hh = rail(t, tau);
             let mut y = yb + rise * hh;
             // The rear deck (a crisp lid and the quarters' shoulder), merged
