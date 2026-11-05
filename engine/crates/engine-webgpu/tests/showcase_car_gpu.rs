@@ -15,7 +15,7 @@ fn sedan(velocity: Vec3) -> ExplicitBeams {
 
 fn sedan_with(velocity: Vec3, fast_inv_sqrt: bool) -> ExplicitBeams {
     let b = build(
-        &style("sedan").unwrap(),
+        &style(&std::env::var("SHOWCASE_STYLE").unwrap_or_else(|_| "sedan".into())).unwrap(),
         &BuildParams {
             resolution: Resolution::Low,
             ..Default::default()
@@ -264,4 +264,70 @@ fn exact_lengths_cost() {
             fleet[0].nodes.len()
         );
     }
+}
+
+/// The one-tier showcase car (`sedan1`, written with `rubble_exact_lengths`)
+/// at rest, Low: the GPU's every node's position and velocity against the
+/// CPU's after each step for 1.2 s, the first step that differs and how many
+/// nodes do (reported; asserted within the at-rest tolerances).
+#[test]
+fn one_tier_at_rest_step_parity() {
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(b.truck.contains("rubble_exact_lengths"));
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        ..Default::default()
+    };
+    let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
+    let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let mut cpu = ExplicitBeams::from_truck(
+        &b.truck,
+        Vec3::new(0.0, probe.spawn_clearance() - low, 0.0),
+        Vec3::ZERO,
+        settings,
+    )
+    .unwrap();
+    assert!(!cpu.settings.fast_inv_sqrt);
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    let bits = |a: Vec3| a.to_array().map(f32::to_bits);
+    let mut first: Option<(usize, usize)> = None;
+    for s in 0..2400 {
+        cpu.step();
+        gpu.frame(1);
+        gpu.wait();
+        let (p, v) = (&gpu.positions()[0], &gpu.velocities()[0]);
+        let bad = (0..cpu.nodes.len())
+            .filter(|&i| {
+                bits(cpu.nodes[i].pos) != bits(p[i]) || bits(cpu.nodes[i].vel) != bits(v[i])
+            })
+            .count();
+        if bad > 0 && first.is_none() {
+            first = Some((s, bad));
+            let i = (0..cpu.nodes.len())
+                .find(|&i| bits(cpu.nodes[i].pos) != bits(p[i]) || bits(cpu.nodes[i].vel) != bits(v[i]))
+                .unwrap();
+            eprintln!(
+                "one tier at rest: step {s} first differs, {bad} nodes; node {i} cpu {:?} {:?} gpu {:?} {:?}",
+                cpu.nodes[i].pos, cpu.nodes[i].vel, p[i], v[i]
+            );
+        }
+    }
+    let (rms, max) = rms_max(&cpu.positions(), &gpu.positions()[0]);
+    eprintln!(
+        "one tier at rest 1.2 s, exact lengths: first difference {first:?}; GPU vs CPU rms {:.4} mm, max {:.4} mm",
+        rms * 1e3,
+        max * 1e3
+    );
+    assert!(rms < 1e-2 && max < 0.1);
 }

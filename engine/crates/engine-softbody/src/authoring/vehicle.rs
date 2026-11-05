@@ -440,6 +440,12 @@ pub const SHOCK_TOP: f32 = 4.0;
 /// other member's station).
 pub const GUSSET: f32 = 1.0;
 
+/// One tier: a member's lane on the shell reaches this far past its
+/// section's half depth (m), and takes the shell's beams within 37° of its
+/// path (cos ≥ [`LANE_COS`]): Choices.
+pub const LANE_REACH: f32 = 0.08;
+pub const LANE_COS: f32 = 0.8;
+
 /// A side pole's width (m): the NCAP and FMVSS 214 pole is 254 mm. One
 /// tier: the shell's spacing and the outer members' stations are at most
 /// this (static contact is per node).
@@ -1168,6 +1174,9 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let mut trusses: Vec<Truss> = Vec::new();
     // Each truss's steel per metre and part (one tier's masses).
     let mut truss_kgm: Vec<(f32, u16)> = Vec::new();
+    // One tier: shell beams that are members' outer chords, and their webs
+    // (beam, the chord's steel area m²).
+    let mut lane_beams: Vec<(usize, f32)> = Vec::new();
     let mut truss_names: Vec<String> = Vec::new();
     let mut snap_pool: Vec<u32> = shell.nodes.clone();
     for m in &def.members {
@@ -1222,13 +1231,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     } else {
                         res.truss()
                     };
-                    // One tier: a member on the body or an impact member
-                    // has a station within every pole lane (no catchers).
-                    if one && (m.attach > 0 || m.catch || m.ride) && m.beads == 0 {
-                        s.min(POLE_LANE)
-                    } else {
-                        s
-                    }
+                    s
                 },
                 part,
                 &mat,
@@ -1353,6 +1356,81 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         }
                     }
                 }
+            }
+            // One tier: a member drawn on the body has the shell along its
+            // path as its outer chord (the sill's outer panel, a pillar's
+            // outer): the shell's beams in its lane, along its path, take
+            // its chords' material, and each lane node is joined to its
+            // nearest stations' nodes (the section's webs). The shell is at
+            // most `POLE_LANE` apart, so a pole meets the member's chord in
+            // every lane.
+            let mut nodes = nodes;
+            if one && m.attach > 0 {
+                let r = 0.5 * m.width.max(m.height) + LANE_REACH;
+                let dist = |q: Vec3| -> (f32, Vec3, f32) {
+                    // (Distance to the path, its tangent there, its arc fraction.)
+                    let mut best = (f32::MAX, Vec3::Z, 0.0);
+                    let total: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
+                    let mut acc = 0.0;
+                    for w in path.windows(2) {
+                        let d = w[1] - w[0];
+                        let l = d.length().max(1e-6);
+                        let u = ((q - w[0]).dot(d) / (l * l)).clamp(0.0, 1.0);
+                        let e = q.distance(w[0] + d * u);
+                        if e < best.0 {
+                            best = (e, d / l, (acc + u * l) / total.max(1e-6));
+                        }
+                        acc += l;
+                    }
+                    best
+                };
+                let lane: Vec<u32> = shell
+                    .nodes
+                    .iter()
+                    .copied()
+                    .filter(|&i| sk.nodes[i as usize].part == part && dist(sk.pos(i)).0 <= r)
+                    .collect();
+                let lane_set: std::collections::HashSet<u32> = lane.iter().copied().collect();
+                let chords = if m.section == 2 { 2.0 } else { 4.0 };
+                let area = m.mass_per_m() / super::members::STEEL_DENSITY / chords;
+                for j in 0..sk.beams.len() {
+                    let (a, b) = (sk.beams[j].a, sk.beams[j].b);
+                    if !(lane_set.contains(&a) && lane_set.contains(&b))
+                        || sk.beams[j].ty != BeamType::Normal
+                        || sk.beams[j].group != 0
+                        || sk.beams[j].tie
+                    {
+                        continue;
+                    }
+                    let mid = 0.5 * (sk.pos(a) + sk.pos(b));
+                    let (_, tan, t) = dist(mid);
+                    let d = (sk.pos(b) - sk.pos(a)).normalize_or_zero();
+                    if d.dot(tan).abs() >= LANE_COS {
+                        sk.beams[j].mat = mat(t);
+                        lane_beams.push((j, area));
+                    }
+                }
+                let stations: Vec<u32> = truss
+                    .stations
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|i| !lane_set.contains(i))
+                    .collect();
+                for &a in &lane {
+                    let (_, _, t) = dist(sk.pos(a));
+                    let web = mat(t)
+                        .stiffer(super::members::DIAG)
+                        .scaled(super::members::DIAG);
+                    for b in sk.nearest(sk.pos(a), &stations, 2) {
+                        if sk.pos(b).distance(sk.pos(a)) <= 0.6 && sk.beam(a, b, web) {
+                            lane_beams.push((sk.beams.len() - 1, area));
+                        }
+                    }
+                }
+                nodes.extend(lane);
+                nodes.sort();
+                nodes.dedup();
             }
             let key = if side > 0.0 || !m.mirrored {
                 m.name.clone()
@@ -2644,7 +2722,15 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 }
             })
             .collect();
-        one_tier_real_stiffness(&mut sk, &shell, &trusses, &truss_kgm, &grade_of, &grades);
+        one_tier_real_stiffness(
+            &mut sk,
+            &shell,
+            &trusses,
+            &truss_kgm,
+            &lane_beams,
+            &grade_of,
+            &grades,
+        );
         sk.exact_lengths = true;
         sk.cap_to_bound()?;
         for (b, &e) in sk.beams.iter_mut().zip(&elong) {
@@ -2819,9 +2905,11 @@ fn one_tier_real_stiffness(
     shell: &Shell,
     trusses: &[Truss],
     kgm: &[(f32, u16)],
+    lanes: &[(usize, f32)],
     grade_of: &HashMap<u32, Material>,
     grades: &Grades,
 ) {
+    let lane_of: HashMap<usize, f32> = lanes.iter().copied().collect();
     use super::material::REF_LENGTH;
     use super::members::STEEL_DENSITY;
     let n = sk.nodes.len();
@@ -2844,13 +2932,14 @@ fn one_tier_real_stiffness(
         }
     }
     let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
-    for b in sk.beams.iter_mut() {
+    for (j, b) in sk.beams.iter_mut().enumerate() {
         if b.damper || b.fixed || b.ty != BeamType::Normal || b.group != 0 {
             continue;
         }
         let (a, c) = (b.a as usize, b.b as usize);
         let l = sk.nodes[a].p.distance(sk.nodes[c].p).max(1e-3);
-        let mut real = 0.0f32;
+        let mut real = lane_of.get(&j).map_or(0.0, |&area| E_STEEL * area / l);
+        let lane = real > 0.0;
         for &(ti, area) in &of[a] {
             if of[c].iter().any(|x| x.0 == ti) {
                 real = real.max(E_STEEL * area / l);
@@ -2874,7 +2963,7 @@ fn one_tier_real_stiffness(
                 (E_STEEL, PANEL_GAUGE, SHEET_YIELD)
             };
             let lattice = 3f32.sqrt() / 4.0;
-            if lattice * e * t > real {
+            if !lane && lattice * e * t > real {
                 real = lattice * e * t;
                 // Its yield force at the sheet's yield strain: (√3/4)·σ_y·t·L.
                 sheet_yield = lattice * sy * t * l;
