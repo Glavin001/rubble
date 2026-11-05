@@ -1215,6 +1215,45 @@ void triggerUpdate(uint gj, bool fast, uint parity, uint4 bn);
 // the rest slot, the deform torque in Tc. Static: (k, c, -, -), the watched break
 // groups (c2.xyz): it breaks the step after one of them breaks (the last step's
 // group slots, parity ^ 1).
+// atan2 by the CPU's explicit sequence (explicit_beams.rs exact_atan2,
+// jbeam-semantics-spec.md §35): no hardware atan2, bit for bit.
+float sAtan2(float y, float x)
+{
+    float ax = abs(x);
+    float ay = abs(y);
+    bool swap = ay > ax;
+    float lo = swap ? ax : ay;
+    float hi = swap ? ay : ax;
+    if (hi == 0.0) return 0.0;
+    float a = sdiv(lo, hi);
+    float t = a;
+    float base = 0.0;
+    if (a > asfloat(0x3ed413cdu))
+    {
+        t = sdiv(nf(a - 1.0), nf(a + 1.0));
+        base = asfloat(0x3f490fdbu);
+    }
+    float t2 = smul(t, t);
+    // The series coefficients (-1)^k / (2k + 1), k = 11 down to 0 (the CPU's ATAN_C).
+    float p = asfloat(0xbd321643u);
+    p = nf(smul(p, t2) + asfloat(0x3d430c31u));
+    p = nf(smul(p, t2) + asfloat(0xbd579436u));
+    p = nf(smul(p, t2) + asfloat(0x3d70f0f1u));
+    p = nf(smul(p, t2) + asfloat(0xbd888889u));
+    p = nf(smul(p, t2) + asfloat(0x3d9d89d9u));
+    p = nf(smul(p, t2) + asfloat(0xbdba2e8cu));
+    p = nf(smul(p, t2) + asfloat(0x3de38e39u));
+    p = nf(smul(p, t2) + asfloat(0xbe124925u));
+    p = nf(smul(p, t2) + asfloat(0x3e4ccccdu));
+    p = nf(smul(p, t2) + asfloat(0xbeaaaaabu));
+    p = nf(smul(p, t2) + asfloat(0x3f800000u));
+    float r = nf(base + smul(t, p));
+    if (swap) r = nf(asfloat(0x3fc90fdbu) - r);
+    if (x < 0.0) r = nf(asfloat(0x40490fdbu) - r);
+    if (y < 0.0) r = -r;
+    return r;
+}
+
 float wrapAngle(float a)
 {
     if (a > 3.14159274) return nf(a - 6.28318548);
@@ -1253,7 +1292,7 @@ void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         float l2 = sdot(n2, n2);
         float ll = sdot(b2, b2);
         float lb = ssqrt(ll);
-        float phi = atan2(smul(lb, sdot(b1, n2)), sdot(n1, n2));
+        float phi = sAtan2(smul(lb, sdot(b1, n2)), sdot(n1, n2));
         if (!(l1 < 1e-12 || l2 < 1e-12 || ll < 1e-12))
         {
             g1 = sscale(n1, sdiv(-lb, l1));
@@ -1350,8 +1389,11 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     float gate = s0.w;
     float3 d = ssub3(pa.xyz, pb.xyz);
     float q = sdot(d, d);
-    float inv = sdiv(1.0, ssqrt(q));
-    float len = smul(q, inv);
+    // The exact length and inverse length (jbeam-semantics-spec.md §35; the CPU's
+    // exact_length), bit for bit.
+    float2 li = sExactLength(q);
+    float inv = li.y;
+    float len = li.x;
     float e = nf(len - rest);
     float u = smul(sdot(ssub3(va, vb), d), inv);
     if (r2.w != 0u)
@@ -1633,8 +1675,9 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     }
     float3 d = ssub3(pa.xyz, pb.xyz);
     float q = sdot(d, d);
-    float inv = sdiv(1.0, ssqrt(q));
-    float len = smul(q, inv);
+    float2 li = sExactLength(q); // spec §35, the CPU's exact_length
+    float inv = li.y;
+    float len = li.x;
     float u = smul(sdot(ssub3(va, vb), d), inv);
     if (r2.w != 0u)
     {

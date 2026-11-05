@@ -2989,8 +2989,16 @@ impl ExplicitBeams {
         }
     }
 
-    /// Slide nodes in spawn order (spec §3.4), after self-collision.
+    /// Slide nodes in spawn order (spec §3.4), after self-collision. Each node's
+    /// slide forces are summed (from zero, in slide order: node, rail end a, rail
+    /// end b) and that sum is added to its force, as the kernel's slide slots do
+    /// (jbeam-semantics-spec.md §35: bit for bit when a rail end takes several).
     fn slide_pass(&mut self) {
+        let mut sums: Vec<(u32, Vec3)> = Vec::new();
+        let mut add = |n: u32, f: Vec3| match sums.iter_mut().find(|s| s.0 == n) {
+            Some(s) => s.1 += f,
+            None => sums.push((n, Vec3::ZERO + f)),
+        };
         for i in 0..self.slides.len() {
             let Some(cur) = self.slides[i].segment else {
                 continue;
@@ -3024,9 +3032,12 @@ impl ExplicitBeams {
             let f = slide.force(q, x, ratio);
             let node = slide.node;
             let b = self.beams[self.segments[seg as usize].beam as usize];
-            self.nodes[node as usize].force += f.node;
-            self.nodes[b.a as usize].force += f.a;
-            self.nodes[b.b as usize].force += f.b;
+            add(node, f.node);
+            add(b.a, f.a);
+            add(b.b, f.b);
+        }
+        for (n, f) in sums {
+            self.nodes[n as usize].force += f;
         }
     }
 
@@ -3731,12 +3742,14 @@ pub fn jbeam_force_filtered(
 ) -> BeamOut {
     let d = na.pos - nb.pos;
     let q = d.dot(d);
-    let inv = if fast {
-        fast_inv_sqrt(q)
+    // JBeam mode's exact path: the length and inverse length of `exact_length`
+    // (spec §35), the kernel's `sExactLength`, bit for bit.
+    let (len, inv) = if fast {
+        let inv = fast_inv_sqrt(q);
+        (q * inv, inv)
     } else {
-        1.0 / q.sqrt()
+        exact_length(q)
     };
-    let len = q * inv;
     let e = len - beam.rest;
     let u = (na.vel - nb.vel).dot(d) * inv;
     let u = match filter {
@@ -3842,11 +3855,57 @@ pub fn jbeam_force_filtered(
     }
 }
 
-/// Dihedral angle φ ∈ (−π, π] of nodes 1–2–3–4 about the 2→3 axis.
+/// [`exact_atan2`]'s series coefficients (−1)ᵏ/(2k + 1), k = 0..11, as bits (the
+/// kernel's `ATAN_C`).
+#[rustfmt::skip]
+const ATAN_C: [u32; 12] = [
+    0x3f80_0000, 0xbeaa_aaab, 0x3e4c_cccd, 0xbe12_4925, 0x3de3_8e39, 0xbdba_2e8c,
+    0x3d9d_89d9, 0xbd88_8889, 0x3d70_f0f1, 0xbd57_9436, 0x3d43_0c31, 0xbd32_1643,
+];
+
+/// atan2(y, x) by one explicitly specified sequence the CPU and the kernel
+/// (`sAtan2`) run identically (spec §35): a = min(|x|, |y|)/max(|x|, |y|); past
+/// tan(π/8), atan a = π/4 + atan((a − 1)/(a + 1)); atan t by its series to t²³
+/// (|t| ≤ tan(π/8), truncation below 4·10⁻⁹), Horner in t²; then the octant.
+/// IEEE single products, sums and quotients in this order; no library atan2 (the
+/// backends' are not the same function). 0 when x = y = 0.
+pub fn exact_atan2(y: f32, x: f32) -> f32 {
+    let (ax, ay) = (x.abs(), y.abs());
+    let swap = ay > ax;
+    let (lo, hi) = if swap { (ax, ay) } else { (ay, ax) };
+    if hi == 0.0 {
+        return 0.0;
+    }
+    let a = lo / hi;
+    let (t, base) = if a > f32::from_bits(0x3ed4_13cd) {
+        ((a - 1.0) / (a + 1.0), std::f32::consts::FRAC_PI_4)
+    } else {
+        (a, 0.0)
+    };
+    let t2 = t * t;
+    let mut p = f32::from_bits(ATAN_C[11]);
+    for k in (0..11).rev() {
+        p = p * t2 + f32::from_bits(ATAN_C[k]);
+    }
+    let mut r = base + t * p;
+    if swap {
+        r = std::f32::consts::FRAC_PI_2 - r;
+    }
+    if x < 0.0 {
+        r = std::f32::consts::PI - r;
+    }
+    if y < 0.0 {
+        r = -r;
+    }
+    r
+}
+
+/// Dihedral angle φ ∈ (−π, π] of nodes 1–2–3–4 about the 2→3 axis
+/// ([`exact_atan2`], bit for bit with the kernel).
 pub fn dihedral(x: [Vec3; 4]) -> f32 {
     let (b1, b2, b3) = (x[1] - x[0], x[2] - x[1], x[3] - x[2]);
     let (n1, n2) = (b1.cross(b2), b2.cross(b3));
-    (b2.length() * b1.dot(n2)).atan2(n1.dot(n2))
+    exact_atan2(b2.length() * b1.dot(n2), n1.dot(n2))
 }
 
 /// An angle difference of two angles in (−π, π] wrapped into (−π, π].
