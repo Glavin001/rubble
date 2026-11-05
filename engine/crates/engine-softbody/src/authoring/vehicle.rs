@@ -2499,6 +2499,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             sk.nodes[i as usize].contacter = true;
         }
     }
+    per_part_collision(&mut sk, &shell, &hardware);
     sk.skin = shell.tris.clone();
     // Reference nodes: floor centre, a metre back, and left.
     let floor: Vec<u32> = shell
@@ -2542,6 +2543,37 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         },
         hardware,
     })
+}
+
+/// Each part its own collision skin: no collision triangle spans a shut
+/// line (a part that comes off would drag it along as a ghost sheet), and
+/// every shell node of a part that can come off is a contacter (it meets
+/// the car it left and the other car wherever it lands).
+fn per_part_collision(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]) {
+    let before = sk.collision.len();
+    let nodes = &sk.nodes;
+    let dropped: Vec<[u32; 3]> = sk
+        .collision
+        .iter()
+        .copied()
+        .filter(|t| t.iter().any(|&i| nodes[i as usize].part != nodes[t[0] as usize].part))
+        .collect();
+    sk.collision.retain(|t| t.iter().all(|&i| nodes[i as usize].part == nodes[t[0] as usize].part));
+    if std::env::var("COLL_DEBUG").is_ok() {
+        let mut longest = 0.0f32;
+        for t in &dropped {
+            for k in 0..3 {
+                longest = longest.max(sk.pos(t[k]).distance(sk.pos(t[(k + 1) % 3])));
+            }
+        }
+        eprintln!("collision: {before} -> {} triangles ({} span a shut line, longest edge {longest:.3} m)", sk.collision.len(), dropped.len());
+    }
+    let detachable: std::collections::HashSet<u16> = hardware.iter().map(|h| h.part).collect();
+    for &i in &shell.nodes {
+        if detachable.contains(&sk.nodes[i as usize].part) {
+            sk.nodes[i as usize].contacter = true;
+        }
+    }
 }
 
 /// Tempered glass's break strain: characteristic bending strength ≈ 120 MPa

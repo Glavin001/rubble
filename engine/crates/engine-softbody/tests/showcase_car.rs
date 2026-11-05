@@ -13,6 +13,7 @@
 
 use engine_softbody::authoring::body::check_closed;
 use engine_softbody::authoring::skin::{deform, showcase_visual};
+use engine_softbody::authoring::vehicle::coarse_skin;
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use engine_softbody::explicit_beams::{
     approx_sqrt, box_face, contact_force, fast_inv_sqrt, shape_face, Beam, ContactSurface,
@@ -89,7 +90,33 @@ fn skins_are_closed_and_the_truck_loads() {
     for res in RESOLUTIONS {
         let b = built(res);
         check_closed(&b.skeleton.skin).unwrap();
-        check_closed(&b.skeleton.collision).unwrap();
+        // Each part its own collision skin (A1): the lattice's closed skin
+        // less exactly the triangles that span a shut line.
+        let sk = &b.skeleton;
+        let part = |i: u32| sk.nodes[i as usize].part;
+        let key = |t: &[u32; 3]| {
+            let mut k = *t;
+            k.sort();
+            k
+        };
+        let lattice = coarse_skin(sk, &b.shell).unwrap();
+        check_closed(&lattice).unwrap();
+        let kept: HashSet<[u32; 3]> = sk.collision.iter().map(key).collect();
+        assert_eq!(kept.len(), sk.collision.len());
+        for t in &lattice {
+            let pure = t.iter().all(|&i| part(i) == part(t[0]));
+            assert_eq!(kept.contains(&key(t)), pure, "{res:?}: triangle {t:?}");
+        }
+        assert!(sk.collision.iter().all(|t| lattice.iter().any(|u| key(u) == key(t))));
+        // Each part's patch is a manifold: no edge on more than two.
+        let mut edges: std::collections::HashMap<(u32, u32), u32> = Default::default();
+        for t in &sk.collision {
+            for k in 0..3 {
+                let (a, c) = (t[k], t[(k + 1) % 3]);
+                *edges.entry((a.min(c), a.max(c))).or_default() += 1;
+            }
+        }
+        assert!(edges.values().all(|&n| n <= 2));
         let sim = ExplicitBeams::from_truck(
             &b.truck,
             Vec3::ZERO,
@@ -99,10 +126,26 @@ fn skins_are_closed_and_the_truck_loads() {
         .unwrap();
         assert_eq!(sim.triangles.len(), b.skeleton.collision.len());
         assert_eq!(sim.tyres.len(), 4);
-        // Contacters: the collision skin's nodes.
-        let on_skin: HashSet<u32> = b.skeleton.collision.iter().flatten().copied().collect();
-        let contacters = b.skeleton.nodes.iter().filter(|n| n.contacter).count();
-        assert_eq!(contacters, on_skin.len());
+        // Contacters: the collision lattice's nodes, and every shell node of a
+        // part that can come off (it meets the car it left and the ground).
+        let detachable: HashSet<u16> = b.hardware.iter().map(|h| h.part).collect();
+        // (The lattice's nodes stay contacters on the triangles they lost.)
+        let mut expect: HashSet<u32> = lattice.iter().flatten().copied().collect();
+        expect.extend(b.shell.nodes.iter().copied().filter(|&i| detachable.contains(&part(i))));
+        let contacters: HashSet<u32> = (0..sk.nodes.len() as u32)
+            .filter(|&i| sk.nodes[i as usize].contacter)
+            .collect();
+        assert_eq!(contacters, expect);
+        for &p in &detachable {
+            let on: Vec<u32> = b.shell.nodes.iter().copied().filter(|&i| part(i) == p).collect();
+            assert!(!on.is_empty() && on.iter().all(|i| contacters.contains(i)), "{}", sk.parts[p as usize]);
+        }
+        eprintln!(
+            "{res:?}: collision {} of the lattice's {} triangles (the rest span a shut line), {} contacters",
+            sk.collision.len(),
+            lattice.len(),
+            contacters.len()
+        );
     }
 }
 

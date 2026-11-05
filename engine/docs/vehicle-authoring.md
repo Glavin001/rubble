@@ -377,6 +377,13 @@ Parts hang on hardware, not on their seams.
   - An inner-frame ladder (`lid_inner_*`, `bonnet_inner_*`) gives them depth.
     It is in the skin tier; each chord's strength is M_p / lever of a
     100 × 60 × 0.75 mm hat at 210 MPa.
+- **Collision skin per part (A1).** The coarse lattice skin loses every
+  triangle that spans a shut line (Medium: 499 of 740 kept), so a part that
+  comes off drags no ghost sheet. Every shell node of a part with hardware
+  is a contacter. The lattice's nodes stay contacters too. Static contact
+  (ground, wall, pole) is per node, so the gaps along the shut lines (edges
+  up to 0.52 m) matter only for car-to-car contact (`COLL_DEBUG=1` prints
+  the split).
 - **Backed panels** (fenders, bumpers, bonnet, boot lid) bear on the body
   frame through supports. Only their hardware carries tension.
 - **Sheet masses** (`SheetSpec`). A panel's mass is its skin area (a third
