@@ -1638,10 +1638,13 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     else if (!done && kind == KIND_JANISO)
     {
         if (len > e1.w) lengthBreak = true;
-        if (e > 0.0)
+        // Past the spawned length (§20): rest + (E2 .y + ramp step · steps left).
+        float sw = nf(rest + nf(e2.y + smul(asfloat(e3.x), st.x)));
+        float past = nf(len - sw);
+        if (past > 0.0)
         {
-            float zone = smul(e1.z, rest);
-            float sz = zone > 0.0 ? min(sdiv(e, zone), 1.0) : 1.0;
+            float zone = smul(e1.z, sw);
+            float sz = zone > 0.0 ? min(sdiv(past, zone), 1.0) : 1.0;
             k = nf(k + smul(nf(e1.x - k), sz));
             damp = smul(nf(c + smul(nf(e1.y - c), sz)), u);
         }

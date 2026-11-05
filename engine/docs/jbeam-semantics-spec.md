@@ -683,10 +683,18 @@ z "a fraction of spawned length" over which the rates move from the compression 
 expansion values (default 0: instant); `beamLongBound` b (default FLT_MAX) breaks it at
 (1 + b)·ℓ₀, `beamLongExtent` (m) overrides b.
 
-* e = ℓ − L. e ≤ 0: (k, c). e ≥ z·L: (kₑ, cₑ). Between: σ = e/(z·L) and
-  k = k + (kₑ − k)·σ, c likewise (**Choice**: linear; the docs say "ramp"). The force
-  is continuous (it is 0 at e = 0 for every σ). Missing `springExpansion` or
-  `dampExpansion` take `beamSpring`/`beamDamp` (**Choice**).
+* The switch is at the spawned length S (2026-11-05; before, at the rest length L,
+  so a precompressed beam rested on its expansion branch). s = ℓ − S. s ≤ 0: (k, c).
+  s ≥ z·S: (kₑ, cₑ). Between: σ = s/(z·S) and k = k + (kₑ − k)·σ, c likewise
+  (**Choice**: linear; the docs say "ramp"). The force stays −k·(ℓ − L): it is
+  continuous for z > 0 (σ = 0 at S); with z = 0 and precompression it steps at S,
+  as the docs' "instant" switch says. **Choice:** S = L + (ℓ₀ − L_target), so it
+  moves with yield as the rest length does, and during the precompression ramp
+  (§23) the ramp still to come is added back (S = ℓ₀ throughout). Without
+  precompression S is L, bit for bit (E2 .y = ℓ₀ − L_target = 0). Missing
+  `springExpansion` or `dampExpansion` take `beamSpring`/`beamDamp` (**Choice**).
+* Effect: coast-down C_rr 0.053 → 0.050 (supercar), 0.079 → 0.074 (Astral R):
+  not the rolling loss (§31).
 * The break length is in metres from the spawn length ℓ₀ (as SUPPORT's, §4).
 * Yield, deform limits and strength as NORMAL (§3), with the k of this step's side.
 
@@ -770,7 +778,8 @@ an arm).
   (`JbeamLbeam2`, kind 20) whose first slot carries the vertex's force on the GPU; it
   has no force of its own (as §26's and §31's second records).
 * Effect on the pressure-wheel fixture car at rest: it now rolls to and fro inside
-  one flat of its 12-ray tyres (about 1.3 Hz, up to 44 J at the turns' middle, the
+  one flat of its 12-ray tyres (about 1.3 Hz, up to 44 J at the turns' middle (37 J
+  since the L-beam layout of §25, 2026-11-05), the
   body over 0.13 m of a 0.17 m flat), weakly damped; the follower force had damped
   it to about 1 J. **Open**; the test checks the exact bounds (no energy above the
   2 cm drop's, never off its flat). Coast-down C_rr is unchanged (0.052 / 0.071).
@@ -818,12 +827,16 @@ the layout below, Rubble's own.
     tyre(k, i)–hub(k, i ± 1);
   * `wheelReinfBeam` (`enableTireReinfBeams`, unless L-beams): tyre(k, i)–hub(1 − k, i);
   * L-beams (`enableTireLbeams`; `wheelLbeamSpring`… else `wheelReinfBeam`'s values,
-    [WH]: "the wheelReinfBeam setting covers these diagonal beams or L-beams", else the
-    side beam's; its `DampCutoffHz` too) (2026-11-05: before, the side beam's: on the
-    forklift's tyres, three L-beams per tread node with the side beam's 1,150 N·s/m
-    gave c·h/m = 2.6 on 1.1 kg tread nodes and the tyres diverged at the Nyquist rate):
-    vertex tyre(k, i) with ends hub(k, i) and tyre(1 − k, i) (lateral), and hub(k, i)
-    with tyre(k, i ± 1) (shear: torque between hub and tread, both senses);
+    [WH]: `wheelReinfBeam*` are the "Spring, Damp, Deform, Strength, DampCutoffHz,
+    Precompression of diagonal tire reinforcement beams, or L-beams (diagonal)"; L-beams
+    are "similar to TireReinfBeams" and "If enabled, TireReinfBeams will be disabled";
+    else the side beam's; its `DampCutoffHz` and `Precompression` too) (2026-11-05:
+    before, the side beam's: on the forklift's tyres, three L-beams per tread node with
+    the side beam's 1,150 N·s/m gave c·h/m = 2.6 on 1.1 kg tread nodes and the tyres
+    diverged at the Nyquist rate): one per tread node on the reinforcement diagonal,
+    vertex tyre(k, i) with ends hub(k, i) and tyre(1 − k, i) (2026-11-05: before, two
+    more per tread node, hub(k, i) with tyre(k, i ± 1), a Rubble Choice the docs do not
+    have, and precompression 1; they carried half the supercar's rolling loss, §31);
   * `wheelTreadBeam`: tyre(0, i)–tyre(1, i); `wheelTreadReinfBeam`
     (`enableTreadReinfBeams`): tyre(0, i)–tyre(1, i + 1);
   * `wheelPeripheryBeam`: tyre(k, i)–tyre(k, i + 1); `wheelPeripheryReinfBeam`
@@ -1119,7 +1132,43 @@ landing through the §28 ground rule (it removes 80 % of a landing node's normal
 speed, an inelastic impact whose energy the sidewalls' rebound then carries), and
 §20's switch point (the docs switch to the expansion rates "when the beam is
 stretched past its spawned length", ℓ₀; Rubble switches at its precompressed rest
-length L = p·ℓ₀, so a precompressed sidewall rests on its expansion branch). **Drag area check** (`jbeam_accept … aero=`: Σ 1.28·(dragCoef/100)·A·|n̂·f̂|
+length L = p·ℓ₀, so a precompressed sidewall rests on its expansion branch).
+
+**The two suspects tested, and the sink found (2026-11-05, same harness; loss =
+start − end mechanical energy over the 1 s window, kJ/s, supercar / Astral R at 25 m/s).**
+* *The conclusion above was wrong.* `nodamp=wheelSideBeam` zeroes the sidewall
+  beams' dampers only; the "sidewall" part (tread to hub) also holds the L-beams
+  (`enableTireLbeams`, both cars), which take `wheelReinfBeamDamp`, 135–227 N·s/m
+  against the sidewalls' 65–120. Zeroing each damper set in turn: L-beams 25.1 →
+  11.3 / 36.4 → 19.4, sidewall beams → 22.4 / 30.9, periphery → 24.1 / 35.0, tread →
+  25.1 / 36.4. All the sidewall-part dampers off: the Astral R loses 9.5 kJ/s (the
+  supercar's tyres go unstable without them). The springs are not the sink: the
+  dampers are, the L-beams' first.
+* *§20's switch point* (fixed to the docs' spawned length): C_rr 0.053 → 0.050 /
+  0.079 → 0.074.
+* *The L-beam layout* (fixed to the docs, §25): Rubble had three L-beams per tread
+  node, two of them on hub(k, i)–tyre(k, i ± 1) chords that the docs do not have
+  ([WH]: L-beams are "(diagonal)", in place of the diagonal reinforcement beams), and
+  no precompression. With one diagonal L-beam per tread node and
+  `wheelReinfBeamPrecompression`: loss 13.5 / 30.9 kJ/s; **C_rr 0.024 (supercar,
+  was 0.050) and 0.063 (Astral R, was 0.074)**.
+* *Touchdowns through the ground rule* (a node below the ground that was above it
+  the step before; its normal kinetic energy ½m·v_y², all of which the 80 %-per-step
+  rule removes): supercar 470 a second (12.8 per tyre revolution), 3.3 kJ/s, 7 J
+  each; Astral R 1,444 (29.5), 8.1 kJ/s, 5.6 J each: a quarter of the loss at 25 m/s,
+  3–6 % at 9 m/s (0.17 / 0.33 kJ/s). Not the sink. It does not shrink with the
+  polygon (`rays=2`: unchanged; half the mass lands as often again): the tread lands
+  at about v·sin θ of its patch-entry angle. BeamNG documents no node–ground normal
+  response ([GM], [N]), so the rule stays; a restitution would be a modelling Choice
+  with nothing measured behind it.
+* What is left of the Astral R's: its sidewall beams' dampers carry 13 kJ/s of
+  30.9 (`nodamp=wheelSideBeam` 17.9), the L-beams' 3 (27.9), the touchdowns 8.
+  **Open:** 4–6 times the documented C_rr for the Astral R, 2 times for the supercar.
+* The fixture car's rest rocking (§24, §28) is the same mechanism with less loss:
+  peak kinetic energy 1–4 s 37.3 J (was 44 J), 17.7 J at 4 s; the polygon flats'
+  well and free-rolling wheels, damped only by the tyres' rolling loss.
+
+**Drag area check** (`jbeam_accept … aero=`: Σ 1.28·(dragCoef/100)·A·|n̂·f̂|
 over the desc's triangles, f̂ the forward axis; one-sided areas, each triangle once,
 SI units, the default 100 only where a row sets none). The reading is the docs':
 the values are the files'. The supercar's 61.6 m² is 96 % two groups whose

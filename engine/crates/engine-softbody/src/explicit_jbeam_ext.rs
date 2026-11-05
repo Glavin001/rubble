@@ -197,9 +197,19 @@ pub fn jbeam_ext_force(
             if len > ext.e1[3] {
                 return broke(beam);
             }
-            if e > 0.0 {
-                let zone = ext.e1[2] * beam.rest;
-                let s = if zone > 0.0 { (e / zone).min(1.0) } else { 1.0 };
+            // The expansion rates past the spawned length (§20): the rest length
+            // plus the precompression's offset (E2 .y, ℓ₀ − L; less the ramp still
+            // to come), which moves with yield as the rest length does. Without
+            // precompression it is the rest length, bit for bit.
+            let switch = beam.rest + (ext.e2[1] + ext.ramp_delta * ext.ramp_left as f32);
+            let past = len - switch;
+            if past > 0.0 {
+                let zone = ext.e1[2] * switch;
+                let s = if zone > 0.0 {
+                    (past / zone).min(1.0)
+                } else {
+                    1.0
+                };
                 k += (ext.e1[0] - k) * s;
                 damp = (c + (ext.e1[1] - c) * s) * u;
             }
@@ -274,7 +284,10 @@ pub fn lbeam_force(
     let l_now = (a2 + b2 - 2.0 * ab * beam.rest).max(0.0).sqrt();
     let (ga, gb) = if l_now > 1e-9 && la > 1e-12 && lb > 1e-12 {
         let g = 1.0 / l_now;
-        (ra * (g * (1.0 - (lb / la) * beam.rest)), rb * (g * (1.0 - (la / lb) * beam.rest)))
+        (
+            ra * (g * (1.0 - (lb / la) * beam.rest)),
+            rb * (g * (1.0 - (la / lb) * beam.rest)),
+        )
     } else {
         (Vec3::ZERO, Vec3::ZERO)
     };
@@ -472,7 +485,9 @@ impl ExplicitBeams {
         let x = self.ext_index(j);
         let mut beam = self.beams[j];
         match beam.kind {
-            ExplicitKind::JbeamPressureTri2 | ExplicitKind::JbeamAeroTri2 | ExplicitKind::JbeamLbeam2 => return,
+            ExplicitKind::JbeamPressureTri2
+            | ExplicitKind::JbeamAeroTri2
+            | ExplicitKind::JbeamLbeam2 => return,
             ExplicitKind::JbeamAeroTri => {
                 let ext = self.beam_ext[x];
                 let n2 = ext.index(0);
@@ -570,7 +585,11 @@ impl ExplicitBeams {
         if let Some((c, fa, fb)) = arms {
             // As the GPU's slots: id1 push + fa, id2 −push + fb, id3 (its second
             // record) −(fa + fb); none once broken.
-            let (fa, fb) = if broke_now { (Vec3::ZERO, Vec3::ZERO) } else { (fa, fb) };
+            let (fa, fb) = if broke_now {
+                (Vec3::ZERO, Vec3::ZERO)
+            } else {
+                (fa, fb)
+            };
             self.nodes[beam.a as usize].force += push + fa;
             self.nodes[beam.b as usize].force += -push + fb;
             self.nodes[c as usize].force += -(fa + fb);
@@ -618,6 +637,9 @@ impl ExplicitBeams {
                 jb.transition_zone,
                 length,
             ];
+            // The spawned length's offset from the rest length (§20, 0 without
+            // precompression).
+            ext.e2[1] = spawn - beam.rest;
         }
         if jb.pressured {
             beam.kind = ExplicitKind::JbeamPressured;
@@ -1308,8 +1330,13 @@ impl ExplicitBeams {
             }
         }
         if lbeams {
-            // [WH]: "the wheelReinfBeam setting covers these diagonal beams or
-            // L-beams"; a file without it falls back to its side beams' values.
+            // [WH]: wheelReinfBeam* are the "Spring, Damp, Deform, Strength,
+            // DampCutoffHz, Precompression of diagonal tire reinforcement beams, or
+            // L-beams (diagonal)"; L-beams are "similar to TireReinfBeams" and
+            // replace them. So one L-beam per tread node, on the reinforcement
+            // diagonal: tyre(s, i) the vertex, ends hub(s, i) and tyre(1 − s, i)
+            // (chord hub(s, i)–tyre(1 − s, i), the diagonal). A file without
+            // wheelReinfBeam values falls back to its side beams' (**Choice**).
             let g = |k: &str, d: f32| {
                 v(
                     &format!("wheelLbeam{k}"),
@@ -1322,41 +1349,19 @@ impl ExplicitBeams {
             let (k, c) = (g("Spring", 4_300_000.0), g("Damp", 580.0));
             let (deform, strength) = (g("Deform", f32::INFINITY), g("Strength", f32::INFINITY));
             let cutoff = g("DampCutoffHz", 0.0).max(0.0);
+            let pre = g("Precompression", 1.0).max(0.01);
             for s in 0..2 {
                 for i in 0..n {
-                    let t = tire[s][i];
                     self.push_lbeam(
                         hub[s][i],
                         tire[1 - s][i],
-                        t,
+                        tire[s][i],
                         k,
                         c,
                         deform,
                         strength,
                         cutoff,
-                        1.0,
-                    );
-                    self.push_lbeam(
-                        hub[s][i],
-                        tire[s][(i + 1) % n],
-                        t,
-                        k,
-                        c,
-                        deform,
-                        strength,
-                        cutoff,
-                        1.0,
-                    );
-                    self.push_lbeam(
-                        hub[s][i],
-                        tire[s][(i + n - 1) % n],
-                        t,
-                        k,
-                        c,
-                        deform,
-                        strength,
-                        cutoff,
-                        1.0,
+                        pre,
                     );
                 }
             }
