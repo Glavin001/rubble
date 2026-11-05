@@ -70,10 +70,12 @@ fn counts_per_resolution() {
                 st.primary_node_mass
             );
             // (Plus the door flanges' bearing nodes and the lids' inner
-            // frames' lower chords: 26 nodes, 2026-11-05.)
+            // frames' lower chords: 26 nodes, 2026-11-05; and the front
+            // subframe's rear and the rear seat's cross members, 16 frame
+            // nodes, 2026-11-05.)
             assert!((800..=1050).contains(&sk.nodes.len()));
             assert!(sk.beams.len() >= 3000);
-            assert!((300..=350).contains(&frame.len()));
+            assert!((300..=360).contains(&frame.len()));
             assert!((1.0..=4.0).contains(&st.primary_node_mass));
         }
         assert_eq!(sk.wheels.len(), 4);
@@ -2921,6 +2923,9 @@ fn side_pole_crush(b: &Built, kmh: f32) -> f32 {
     } else {
         run(&mut s, 1.5);
     }
+    if std::env::var("O_WHO").is_ok() {
+        plastic_census(&s, b, "o");
+    }
     // The far side's frame (as the c test).
     let far = |st: &ExplicitBeams| {
         let g = &b.groups["sill_r"];
@@ -3022,6 +3027,52 @@ fn side_pole_crush(b: &Built, kmh: f32) -> f32 {
     );
     assert!(finite(&s));
     crush
+}
+
+/// The plastic work each member took (≈ yield force × its rest's change,
+/// summed over the beams with both nodes in the member's group; the rest
+/// by part pair), the largest 14, and the broken beams per group.
+fn plastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let mut names: Vec<&String> = b.groups.keys().collect();
+    names.sort();
+    let sets: Vec<(&String, HashSet<u32>)> = names
+        .iter()
+        .map(|k| (*k, b.groups[*k].iter().copied().collect()))
+        .collect();
+    let mut work: std::collections::BTreeMap<String, (f64, usize)> = Default::default();
+    for bm in &s.beams {
+        let (a, c) = (bm.a, bm.b);
+        if a as usize >= n || c as usize >= n {
+            continue;
+        }
+        let w = 0.5 * (bm.tc.abs() + bm.tt.abs()) as f64 * (bm.rest - bm.rest0).abs() as f64;
+        if w == 0.0 && !bm.broken {
+            continue;
+        }
+        let key = sets
+            .iter()
+            .find(|(_, g)| g.contains(&a) && g.contains(&c))
+            .map(|(k, _)| k.to_string())
+            .unwrap_or_else(|| {
+                let pa = &sk.parts[sk.nodes[a as usize].part as usize];
+                let pc = &sk.parts[sk.nodes[c as usize].part as usize];
+                format!("~{pa}/{pc}")
+            });
+        let e = work.entry(key).or_default();
+        e.0 += w;
+        e.1 += bm.broken as usize;
+    }
+    let mut v: Vec<(String, (f64, usize))> = work.into_iter().collect();
+    v.sort_by(|x, y| y.1 .0.total_cmp(&x.1 .0));
+    eprintln!(
+        "({tag}) plastic work by member (kJ, broken): {:?}",
+        v.iter()
+            .take(14)
+            .map(|(k, (w, br))| format!("{k} {:.2} {br}", w / 1e3))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// A quasi-static rig: `held` nodes kept where they are (the rig's
@@ -4396,5 +4447,68 @@ fn write_trucks() {
     for res in RESOLUTIONS {
         let b = built(res);
         std::fs::write(format!("{dir}/showcase_{res:?}.truck"), &b.truck).unwrap();
+    }
+}
+
+/// The body-in-white torsion (Medium) with the lumped panels' rigidities
+/// scaled: `TORSION_SCALE=windscreen_x:0.5,parcel-header_r:0,...` (a brace
+/// by name, a shear panel by `a-b`). `--ignored` (a measurement).
+#[test]
+#[ignore]
+fn torsion_scan() {
+    let mut def = style("sedan").unwrap();
+    let spec = std::env::var("TORSION_SCALE").unwrap_or_default();
+    for br in def
+        .braces
+        .iter()
+        .filter(|b| b.name == "screen_ring" || b.name.starts_with("ring_"))
+    {
+        eprintln!(
+            "(i) {}: k·L {:.3e} N, yield {:.1} kN",
+            br.name,
+            br.kl,
+            br.strength / 1e3
+        );
+    }
+    for kv in spec.split(',').filter(|s| !s.is_empty()) {
+        let (k, v) = kv.split_once(':').unwrap();
+        let f: f32 = v.parse().unwrap();
+        let mut hit = false;
+        for br in def
+            .braces
+            .iter_mut()
+            .filter(|b| b.name == k || k == "braces")
+        {
+            br.kl *= f;
+            hit = true;
+        }
+        for sh in def
+            .shear
+            .iter_mut()
+            .filter(|s| format!("{}-{}", s.a, s.b) == k || k == "shear")
+        {
+            sh.kl *= f;
+            hit = true;
+        }
+        for m in def
+            .members
+            .iter_mut()
+            .filter(|m| m.name == k || k == "members")
+        {
+            m.stiff *= f;
+            hit = true;
+        }
+        assert!(hit, "nothing named {k}");
+    }
+    let params = BuildParams {
+        resolution: Resolution::Medium,
+        ..Default::default()
+    };
+    match build(&def, &params) {
+        Ok(b) => eprintln!(
+            "(i) torsion [{spec}]: body-in-white {:.2} kN·m/deg",
+            torsion_biw(&b, 2000.0)
+        ),
+        Err(e) => eprintln!("(i) torsion [{spec}]: {e}"),
     }
 }

@@ -114,6 +114,11 @@ pub fn cell(mut m: MemberSpec) -> MemberSpec {
     m
 }
 
+/// The lumped windscreen panel's (`windscreen_x`) rigidity against
+/// [`KL_PANEL`]: the glazing's measured share of the body's torsion (a
+/// Choice of target within the published spread, `vehicle-authoring.md`).
+pub const GLAZING: f32 = 2.0;
+
 /// A lumped screen's (glass shear panel's) yield force (N): it cracks.
 pub const GLASS_YIELD: f32 = 8.0e3;
 
@@ -358,12 +363,91 @@ fn cabin_x(
         yielding(brace("roof_f", ft, m(bt), "panel", k), ROOF_YIELD),
         yielding(brace("roof_r", bt, m(rt), "panel", k), ROOF_YIELD),
         brace("firewall_x", fb, m(cw), "hsla", k),
-        yielding(brace("windscreen_x", cw, m(ft), "glass", k), GLASS_YIELD),
+        // The screen's frame (on the A-pillars' own stations), then its
+        // glass (on the apron's and roof rail's).
+        {
+            let (kl, f) = screen_ring(cw, ft);
+            on(
+                yielding(brace("screen_ring", cw, m(ft), "uhss", kl), f),
+                "pillar_a",
+                "pillar_a",
+            )
+        },
+        yielding(
+            brace("windscreen_x", cw, m(ft), "glass", k * GLAZING),
+            GLASS_YIELD,
+        ),
         brace("bulkhead_x", rb, m(rt), "hsla", k),
-        yielding(brace("ring_f_x", fb, bt, "uhss", k), CABIN_YIELD),
-        yielding(brace("ring_f_y", bb, ft, "uhss", k), CABIN_YIELD),
-        yielding(brace("ring_r_x", bb, rt, "uhss", k), CABIN_YIELD),
-        yielding(brace("ring_r_y", rb, bt, "uhss", k), CABIN_YIELD),
+    ]
+    .into_iter()
+    .chain(door_ring(
+        "ring_f",
+        [fb, ft, bb, bt],
+        "pillar_a",
+        "pillar_b",
+    ))
+    .chain(door_ring(
+        "ring_r",
+        [bb, bt, rb, rt],
+        "pillar_b",
+        "pillar_c",
+    ))
+    .collect()
+}
+
+/// A section from [`side_sections`] by its member's name.
+fn section_of(name: &str) -> Section {
+    side_sections()
+        .into_iter()
+        .find(|x| x.0 == name)
+        .map(|x| x.1)
+        .unwrap()
+}
+
+/// The same section bent in the other plane (depth and width swapped).
+fn turned(s: Section) -> Section {
+    Section {
+        depth: s.width,
+        width: s.depth,
+        ..s
+    }
+}
+
+/// A door ring (sill, front and rear pillars, roof rail) as the lumped X
+/// of its frame in racking ([`aperture_racking`]) in the body side's
+/// plane: the corners `[bottom front, top front, bottom rear, top rear]`,
+/// the pillars `front` and `rear` bent fore and aft, the sill and roof
+/// rail up and down ([`side_sections`]; the C-pillar's and A-pillar's
+/// 100–120 mm fore-aft faces, the B-pillar's 120). Its two diagonals take
+/// one k·L each, so their fore-aft stiffnesses sum to the frame's
+/// (Σ k·L·cos²α/L), and yield together at the frame's yield shear
+/// (Σ F·cos α). The columns sway in parallel (h/I over their mean I).
+fn door_ring(name: &str, c: [[f32; 3]; 4], front: &str, rear: &str) -> Vec<BraceSpec> {
+    let v = |p: [f32; 3]| glam::Vec3::from_array(p);
+    let (bf, tf, br, tr) = (v(c[0]), v(c[1]), v(c[2]), v(c[3]));
+    let (pf, pr) = (turned(section_of(front)), turned(section_of(rear)));
+    // Columns in parallel: h/I with I the mean of the two.
+    let i_col = 0.5 * (pf.i() + pr.i());
+    let h = 0.5 * ((tf.y - bf.y) + (tr.y - br.y));
+    let b = 0.5 * ((bf.z - br.z).abs() + (tf.z - tr.z).abs());
+    let (top, bottom) = (section_of("roof_rail"), section_of("sill"));
+    let flex =
+        h * h / (24.0 * E_STEEL) * (h / i_col + 0.5 * b * (1.0 / top.i() + 1.0 / bottom.i()));
+    let m_p = pf.m_p().min(pr.m_p()).min(top.m_p()).min(bottom.m_p());
+    let (k, shear) = (1.0 / flex, 4.0 * m_p / h);
+    let diags = [(c[0], c[3]), (c[2], c[1])];
+    let geo: Vec<(f32, f32)> = diags
+        .iter()
+        .map(|&(a, b)| {
+            let d = v(b) - v(a);
+            (d.length(), d.z.abs() / d.length())
+        })
+        .collect();
+    let kl = k / geo.iter().map(|&(l, cs)| cs * cs / l).sum::<f32>();
+    let f = shear / geo.iter().map(|&(_, cs)| cs).sum::<f32>();
+    vec![
+        yielding(brace(&format!("{name}_x"), c[0], c[3], "uhss", kl), f),
+        yielding(brace(&format!("{name}_y"), c[2], c[1], "uhss", kl), f),
     ]
 }
 
@@ -513,70 +597,206 @@ fn restyle(mut d: VehicleDef) -> VehicleDef {
 /// A thin-walled closed section (a box, or a hat closed by its panel) of a
 /// member, for its lateral plastic collapse: `depth` along the load (the
 /// lever), `width` across it, wall `t` (m), the steel's yield stress
-/// `sigma_y` (Pa).
+/// `sigma_y` (Pa). A round tube (`round`) has diameter `depth`.
 #[derive(Clone, Copy, Debug)]
 pub struct Section {
     pub depth: f32,
     pub width: f32,
     pub t: f32,
     pub sigma_y: f32,
+    pub round: bool,
 }
 
 impl Section {
-    /// Plastic section modulus (m³): the two flanges (t·width at ±depth/2)
-    /// and the two webs (t·depth²/4 each).
+    /// Plastic section modulus (m³): a box's two flanges (t·width at
+    /// ±depth/2) and two webs (t·depth²/4 each); a tube's
+    /// (D³ − (D − 2t)³)/6.
     pub fn z_p(&self) -> f32 {
-        self.t * (self.width * self.depth + 0.5 * self.depth * self.depth)
+        if self.round {
+            let (d, i) = (self.depth, self.depth - 2.0 * self.t);
+            (d * d * d - i * i * i) / 6.0
+        } else {
+            self.t * (self.width * self.depth + 0.5 * self.depth * self.depth)
+        }
     }
 
     /// Plastic moment M_p = σ_y·Z_p (N·m).
     pub fn m_p(&self) -> f32 {
         self.sigma_y * self.z_p()
     }
+
+    /// Second moment of area about the axis across `depth` (m⁴): a thin
+    /// box's t·d²(3w + d)/6, a thin tube's π·r³·t.
+    pub fn i(&self) -> f32 {
+        if self.round {
+            let r = 0.5 * (self.depth - self.t);
+            std::f32::consts::PI * r * r * r * self.t
+        } else {
+            self.t * self.depth * self.depth * (3.0 * self.width + self.depth) / 6.0
+        }
+    }
 }
 
-/// The members that carry a side impact in bending (or end-on), their real
-/// sections and the truss's lever for that bending: `(name, section, lever
-/// (m), chords a side)`. A box truss carries M = 2·T·lever, a ladder
-/// M = T·lever, so each member's chords yield at T = M_p / (chords · lever)
-/// and the truss's plastic moment is the section's. (End-on, a floor cross
-/// member's two chords then carry 2·M_p/depth, within a third of its
-/// section's squash load A·σ_y.) `vehicle-authoring.md` (Lateral strength)
-/// tabulates them.
-pub fn side_sections() -> Vec<(&'static str, Section, f32, f32)> {
-    // Grades' minimum yield stresses (Pa).
-    let (dp980, phs, dp780, dp600, hsla340) = (590e6, 1100e6, 440e6, 330e6, 340e6);
+/// Steel's Young's modulus (Pa).
+pub const E_STEEL: f32 = 210e9;
+
+/// A window aperture's frame in racking (exact for a closed rectangular
+/// frame with rigid corners, each member in double curvature, its
+/// inflection at mid-span): pillars of length `h` and second moment
+/// `pillar.i()`, the top and bottom members `b` long. The racking
+/// displacement under a shear V is V·h²/(24E)·[h/I_p + b/2·(1/I_t + 1/I_b)],
+/// and the frame yields when its weakest corner member reaches M_p: the
+/// corner moment is V·h/4. Returns (stiffness N/m, yield shear N).
+pub fn aperture_racking(
+    pillar: Section,
+    top: Section,
+    bottom: Section,
+    h: f32,
+    b: f32,
+) -> (f32, f32) {
+    let flex =
+        h * h / (24.0 * E_STEEL) * (h / pillar.i() + 0.5 * b * (1.0 / top.i() + 1.0 / bottom.i()));
+    let m_p = pillar.m_p().min(top.m_p()).min(bottom.m_p());
+    (1.0 / flex, 4.0 * m_p / h)
+}
+
+/// The windscreen aperture's frame (A-pillars, front header, cowl) as a
+/// lumped X from the cowl's corner to the header's opposite corner (and its
+/// mirror), of the frame's racking stiffness and yield
+/// ([`aperture_racking`]); the sections in the screen's plane: the
+/// A-pillar's ([`side_sections`]) bent across its 100 mm, the header's
+/// across its 100 mm fore-aft, the cowl's plenum a 150 × 100 × 1.0 mm DP600
+/// box. Rigid corners are a Choice (a real joint is softer). Returns
+/// (k·L of each diagonal, its yield force).
+pub fn screen_ring(cw: [f32; 3], ft: [f32; 3]) -> (f32, f32) {
     let sec = |depth: f32, width: f32, t: f32, sigma_y: f32| Section {
         depth,
         width,
         t,
         sigma_y,
+        round: false,
+    };
+    let pillar = sec(0.10, 0.12, 0.0014, DP780);
+    let header = sec(0.10, 0.06, 0.0012, HSLA340);
+    let cowl = sec(0.15, 0.10, 0.0010, DP600);
+    let (a, c) = (glam::Vec3::from_array(cw), glam::Vec3::from_array(ft));
+    // A pillar from the cowl's corner to the header's; the frame's width
+    // the mean of its top and bottom.
+    let h = a.distance(c);
+    let b = a.x + c.x;
+    let (k, v) = aperture_racking(pillar, header, cowl, h, b);
+    // Each diagonal (cowl corner to the opposite header corner) carries
+    // half the shear along x: k = 2·(kL/L)·cos²α, V = 2·F·cos α.
+    let d = glam::Vec3::new(a.x + c.x, a.y - c.y, a.z - c.z);
+    let (l, cos) = (d.length(), (a.x + c.x) / d.length());
+    (k * l / (2.0 * cos * cos), v / (2.0 * cos))
+}
+
+/// Grades' minimum yield stresses (Pa): EN 10338 for the dual-phase steels
+/// (DP600 330, DP780 440, DP980 590), EN 10268 for HSLA CR340LA,
+/// EN 10149-2 for S420MC, about 1,100 for hot-stamped 22MnB5 and 1,200
+/// for an ultra-high-strength door-beam tube, EN 755-2 for an AW-6082-T6
+/// extrusion (250). The same grades and classes as the 2011 Honda Accord
+/// teardown's material table (NHTSA DOT HS 811 666, fig. 113: DP 350/600,
+/// DP 500/800, HSLA 350/450, HF 1050/1500).
+pub const DP600: f32 = 330e6;
+pub const DP780: f32 = 440e6;
+pub const DP980: f32 = 590e6;
+pub const HSLA340: f32 = 340e6;
+pub const S420: f32 = 420e6;
+pub const PHS: f32 = 1100e6;
+pub const TUBE1200: f32 = 1200e6;
+pub const AL6082: f32 = 250e6;
+
+/// The members' real sections and the truss's lever for their bending:
+/// `(name, section, lever (m), chords a side)`. A box truss carries
+/// M = 2·T·lever, a ladder M = T·lever, so each member's chords yield at
+/// T = M_p / (chords · lever) and the truss's plastic moment is the
+/// section's. (End-on, a cross member's two chords then carry 2·M_p/depth,
+/// within a third of its section's squash load A·σ_y.) Sections are typical
+/// of compact and mid-size sedan bodies (a Choice: not one car's drawings);
+/// `vehicle-authoring.md` (Lateral strength) tabulates them.
+pub fn side_sections() -> Vec<(&'static str, Section, f32, f32)> {
+    let sec = |depth: f32, width: f32, t: f32, sigma_y: f32| Section {
+        depth,
+        width,
+        t,
+        sigma_y,
+        round: false,
+    };
+    let tube = |d: f32, t: f32, sigma_y: f32| Section {
+        depth: d,
+        width: d,
+        t,
+        sigma_y,
+        round: true,
     };
     vec![
         // Rocker: inner, outer and reinforcement, 100 wide × 140 tall, 1.8 mm.
-        ("sill", sec(0.10, 0.14, 0.0018, dp980), 0.18, 2.0),
+        ("sill", sec(0.10, 0.14, 0.0018, DP980), 0.18, 2.0),
         // B-pillar: hot-stamped hat closed by its outer, 70 deep × 120 wide.
-        ("pillar_b", sec(0.07, 0.12, 0.0018, phs), 0.14, 2.0),
+        ("pillar_b", sec(0.07, 0.12, 0.0018, PHS), 0.14, 2.0),
         // Tunnel: hat 200 wide × 150 tall closed by the floor, 1.2 mm.
-        ("tunnel", sec(0.20, 0.15, 0.0012, dp600), 0.16, 2.0),
+        ("tunnel", sec(0.20, 0.15, 0.0012, DP600), 0.16, 2.0),
         // Front seat cross members: hats 80 × 60 closed by the floor.
-        ("floor_x1", sec(0.08, 0.06, 0.0014, dp780), 0.08, 1.0),
-        ("floor_x2", sec(0.08, 0.06, 0.0016, dp780), 0.08, 1.0),
+        ("floor_x1", sec(0.08, 0.06, 0.0014, DP780), 0.08, 1.0),
+        ("floor_x2", sec(0.08, 0.06, 0.0016, DP780), 0.08, 1.0),
         // Rear seat and kick-up cross members: hats 100 × 60, 1.2 mm.
-        ("floor_x3", sec(0.10, 0.06, 0.0012, hsla340), 0.10, 1.0),
-        ("kickup", sec(0.10, 0.06, 0.0012, hsla340), 0.10, 1.0),
+        ("floor_x3", sec(0.10, 0.06, 0.0012, HSLA340), 0.10, 1.0),
+        ("kickup", sec(0.10, 0.06, 0.0012, HSLA340), 0.10, 1.0),
+        // Roof side rails: inner, outer and reinforcement, 70 along the
+        // load × 90, 1.4 mm.
+        ("roof_rail", sec(0.07, 0.09, 0.0014, DP780), 0.10, 1.0),
+        // Front and rear headers and the B-pillar's roof bow: hats 60 × 100
+        // closed by the roof, 1.2 mm.
+        ("header_f", sec(0.06, 0.10, 0.0012, HSLA340), 0.18, 1.0),
+        ("header_r", sec(0.06, 0.10, 0.0012, HSLA340), 0.18, 1.0),
+        ("bow_b", sec(0.06, 0.10, 0.0012, HSLA340), 0.18, 1.0),
+        // The rear roof bow: a 40 × 80 hat, 0.8 mm.
+        ("bow_r", sec(0.04, 0.08, 0.0008, HSLA340), 0.18, 1.0),
+        // A-pillar (hinge pillar into the screen pillar): inner, outer and
+        // reinforcement, 100 across the car × 120, 1.4 mm.
+        ("pillar_a", sec(0.10, 0.12, 0.0014, DP780), 0.10, 2.0),
+        // C-pillar: 70 across the car × 100, 1.4 mm.
+        ("pillar_c", sec(0.07, 0.10, 0.0014, DP780), 0.12, 1.0),
+        // Rear rails: 100 across × 130 tall, 1.6 mm.
+        ("rail_r", sec(0.10, 0.13, 0.0016, DP600), 0.10, 2.0),
+        // Front and rear subframe cross members (and the front subframe's
+        // rear one): 90 × 60 boxes, 2.0 mm.
+        ("subframe_f0", sec(0.09, 0.06, 0.0020, S420), 0.18, 1.0),
+        ("subframe_f1", sec(0.09, 0.06, 0.0020, S420), 0.18, 1.0),
+        ("subframe_f2", sec(0.09, 0.06, 0.0020, S420), 0.18, 1.0),
+        ("subframe_r1", sec(0.09, 0.06, 0.0020, S420), 0.18, 1.0),
+        ("subframe_r2", sec(0.09, 0.06, 0.0020, S420), 0.18, 1.0),
+        // Rear seat cushion cross member: an 80 × 60 hat, 1.2 mm.
+        ("seat_x", sec(0.08, 0.06, 0.0012, DP600), 0.08, 1.0),
+        // Rear bumper beam: an AW-6082-T6 extrusion 50 deep × 100, 2.5 mm.
+        ("bumper_beam_r", sec(0.05, 0.10, 0.0025, AL6082), 0.12, 1.0),
+        // Instrument panel cross-car beam: a steel tube Ø 60 × 1.6 mm.
+        ("dash", tube(0.060, 0.0016, S420), 0.18, 1.0),
+        // Door intrusion beams: tubes Ø 31.8 × 1.9 mm, 1,200 MPa.
+        ("door_beam_f", tube(0.0318, 0.0019, TUBE1200), 0.14, 1.0),
+        ("door_beam_r", tube(0.0318, 0.0019, TUBE1200), 0.14, 1.0),
     ]
 }
 
 /// Sets each [`side_sections`] member's thresholds from its section's
-/// plastic moment.
+/// plastic moment (a member with a knee keeps its gradient's shape, its
+/// strongest point at the section's).
 fn sectioned(members: &mut [MemberSpec], grades: &Grades) {
     for (name, sec, lever, sides) in side_sections() {
         for m in members.iter_mut().filter(|m| m.name == name) {
             let chord = sec.m_p() / (sides * lever);
             let s = chord / grades.get(&m.grade).unwrap().deform;
-            m.scale = [s, s];
-            m.knee = None;
+            match m.knee {
+                Some([t, k]) => {
+                    let top = m.scale[0].max(m.scale[1]).max(k);
+                    let f = s / top;
+                    m.scale = [m.scale[0] * f, m.scale[1] * f];
+                    m.knee = Some([t, k * f]);
+                }
+                None => m.scale = [s, s],
+            }
         }
     }
 }
@@ -1379,6 +1599,7 @@ pub fn sedan() -> VehicleDef {
         width: 0.10,
         t: 0.00075,
         sigma_y: 210e6,
+        round: false,
     };
     let lid_chord = lid_sec.m_p() / 0.06 / Grades::default().panel.deform;
     let inner = |name: &str, z: f32, x: f32, y: [f32; 2]| {
@@ -1417,6 +1638,27 @@ pub fn sedan() -> VehicleDef {
         let k = p.iter().position(|q| (q.z - 0.62).abs() < 1e-3).unwrap();
         m.knee = Some([len(0, k) / len(0, p.len() - 1), REAR_RAIL]);
     }
+    // The transverse members a sedan has besides those above (their
+    // sections in [`side_sections`]): the front subframe's rear cross
+    // member and the rear seat cushion's cross member. (A boot floor cross
+    // member rail to rail at z 0.40 was tried: it moved the frontal's
+    // restitution to 0.202 and did not stop the rear overhang's
+    // pass-through; `vehicle-authoring.md`.)
+    members.extend([
+        ladder(member(
+            "subframe_f0",
+            &[(-0.44, 0.29, 3.55), (0.0, 0.27, 3.55), (0.44, 0.29, 3.55)],
+            0.10,
+            0.18,
+            UP,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            false,
+            2,
+        )),
+        cell(floor_cross("seat_x", 1.58, "uhss")),
+    ]);
     // The side's load path at its sections' strength.
     sectioned(&mut members, &Grades::default());
     let blocks = vec![
@@ -1694,6 +1936,9 @@ pub fn sedan() -> VehicleDef {
                             .map(|x| x.1)
                             .expect("a brace corner on a member")
                     };
+                    if !b.on[0].is_empty() {
+                        return b;
+                    }
                     let (a, c) = (host(b.from), host(b.to));
                     on(b, a, c)
                 })
