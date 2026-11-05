@@ -462,10 +462,27 @@ fn fsMirror(i: VOut) -> @location(0) vec4f {
   return vec4f(tonemap(c), a);
 }
 
+// Zebra (highlight-quality check, \`?zebra=1|2|3\`): paint shows the reflection
+// of evenly spaced light stripes (1 parallel to the car's length, 2 across
+// it, 3 level bands), so a smooth surface shows smooth, continuous lines and
+// a wobble or kink in the surface shows as one in the lines.
+const ZEBRA: f32 = 0.0;
+fn zebraCoord(n: vec3f, w: vec3f) -> f32 {
+  let r = reflect(normalize(w - frame.eye.xyz), n);
+  if (ZEBRA < 1.5) { return atan2(r.y, r.x) * 9.0 / 3.14159265; }
+  if (ZEBRA < 2.5) { return atan2(r.y, r.z) * 9.0 / 3.14159265; }
+  return asin(clamp(r.y, -1.0, 1.0)) * 18.0 / 3.14159265;
+}
 fn shade(i: VOut, front: bool) -> vec4f {
   // Texture-coordinate footprint (taken in uniform control flow): printed
   // text fades to its average ink when too small to read.
   let uvw = fwidth(i.uv);
+  var zc = 0.0;
+  var zw = 1.0;
+  if (ZEBRA > 0.0) {
+    zc = zebraCoord(normalize(i.normal), i.world);
+    zw = fwidth(zc);
+  }
   // Tears: the far half of a torn triangle is cut away (through the triangle,
   // not along the grid); a band at the cut shows the bare metal edge.
   if (i.torn > 0.5) { discard; }
@@ -590,6 +607,12 @@ fn shade(i: VOut, front: bool) -> vec4f {
     let cab = albedo * (irradiance(n) * 0.55 * ao + sun * ndl / 3.14159 * 0.35 * ao) + vec3f(sheen) * ao;
     return vec4f(tonemap(cab), 1.0);
   }
+  if (ZEBRA > 0.0 && m == 0u) {
+    let q = abs(fract(zc) - 0.5) * 2.0;
+    let e = clamp(zw, 1e-4, 0.5);
+    let band = smoothstep(0.5 - e, 0.5 + e, q);
+    return vec4f(vec3f(mix(0.04, 0.92, band) * mix(0.6, 1.0, ao)), 1.0);
+  }
   var pr = props(m);
   var albedo2 = albedo;
   var ao2 = ao;
@@ -694,12 +717,14 @@ fn shade(i: VOut, front: bool) -> vec4f {
 
 /**
  * A renderer for showcase cars on `device`. See the file header for the interface.
- * `opts`: `{ format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none' }`.
+ * `opts`: `{ format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none', zebra = 0 }`
+ * (`zebra` 1–3 draws the paint as reflected stripes: the highlight check).
  */
 export function createShowcaseCarRenderer(device, opts = {}) {
-  const { format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none' } = opts;
+  const { format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none', zebra = 0 } = opts;
   const skinModule = device.createShaderModule({ label: 'showcase-skin', code: SKIN_WGSL });
-  const drawModule = device.createShaderModule({ label: 'showcase-draw', code: DRAW_WGSL });
+  const drawCode = zebra ? DRAW_WGSL.replace('const ZEBRA: f32 = 0.0;', `const ZEBRA: f32 = ${Number(zebra).toFixed(1)};`) : DRAW_WGSL;
+  const drawModule = device.createShaderModule({ label: 'showcase-draw', code: drawCode });
   const skinLayout = device.createBindGroupLayout({
     entries: [0, 1, 2, 3, 4, 5, 6, 7].map((binding) => ({
       binding,
