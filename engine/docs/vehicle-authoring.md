@@ -780,6 +780,36 @@ vehicle the same visual format as the authored car, so
   (275k triangles). Both are over the 0.5 ms budget; the supercar's own mesh
   is the outlier, and a third, coarser level is the next step.
 
+### A6: where the hardware's loads reach its strength (2026-11-05)
+
+`u_hardware_where_loads_reach_strength` (`--ignored`; `U_ONLY=overlap,pole,open,side`,
+`U_KMH`, `U_TRACE=<group>` for a group's pull every millisecond) reports each
+hinge and latch group's peak pull against the FMVSS 206 values it is sized to
+(hinge 29.8–36.2 kN each, latch 20.5–28.0, secondary 10.3–19.0;
+transverse–longitudinal). Medium, front left door unless noted:
+
+| Scene | Peak pulls (kN) | Let go |
+|---|---|---|
+| IIHS small overlap 64 km/h (25 % left, rigid box) | latch 4.6, hinges ≤ 6.3 (rear door) | none |
+| small overlap 80 km/h | latch 12.0, rear door lower hinge 12.5 | none |
+| side pole 254 mm, 32 km/h, at the hinge line | upper hinge 52.6, lower 25.6, latch 13.5 | both hinges (0.05, 0.08 s) |
+| side pole at the hinge line, 40 / 50 / 64 km/h | upper 52.0 / 51.2 / 55.9, lower 26.8 / 23.7 / 24.7 | both hinges; latch held (20.3 at 64) |
+| side pole, 32 km/h, at the latch line | latch 20.9, secondary 18.7 | latch |
+| side pole at the latch line, 50 / 64 km/h | latch 19.1 / 21.3, secondary 27.0 / 24.0 | latch and secondary; hinges held |
+| door open 60°, reversing into a pole, 10 km/h | hinges ≤ 2.5 | none: the door swings freely (the car has no check link or opening stop) |
+| on its side from 1 m | ≤ 5.8 (secondary, right front) | none |
+| car-to-car T-bone 80 km/h, door middle (`t`) | latch 23.8, lower hinge 19.5 | none (inside the measured latch spread) |
+| T-bone, striker 0.7 m forward (`TB_DZ`) | latch 29.2, secondary 24.0 | latch, secondary |
+
+- The hinge pull rises over about 20 ms to 40–49 kN before it lets go (no
+  one-step contact spike).
+- The latch lets go at 19–21 kN, its transverse strength.
+- The lower hinge lets go at 24–27 kN, under the 29.8 kN floor. That load
+  points outside FMVSS 206's two pulls (the pole drives the door's front end
+  in and back), so one rope takes most of it.
+- No scene takes every group of a door. The hinge line takes the hinges; the
+  latch line, the latch.
+
 ## Tests and tools
 
 * The side pole's intrusion is the deepest door node near the pole across
