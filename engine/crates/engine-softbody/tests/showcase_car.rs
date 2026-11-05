@@ -1852,10 +1852,14 @@ fn front_profile(
     l1: &[Vec3],
     y0: &[f32],
     structure: bool,
+    attached: &[bool],
 ) -> ([f32; 6], f32, f32) {
     let sk = &b.skeleton;
     let n = sk.nodes.len();
-    let pick = |i: usize| (!structure || sk.nodes[i].primary) && y0[i] > 0.30 && y0[i] < 0.65;
+    // Nodes torn off (every beam broken) are debris, not the profile.
+    let pick = |i: usize| {
+        (!structure || sk.nodes[i].primary) && y0[i] > 0.30 && y0[i] < 0.65 && attached[i]
+    };
     // Width: the band's extent across the car at spawn.
     let (lo, hi) = (0..n)
         .filter(|&i| pick(i))
@@ -1865,13 +1869,23 @@ fn front_profile(
     let mut c = [0.0f32; 6];
     for (k, ck) in c.iter_mut().enumerate() {
         let y = lo + 0.05 + (hi - lo - 0.10) * k as f32 / 5.0;
-        let front = |l: &[Vec3]| {
-            (0..n)
-                .filter(|&i| pick(i) && (l[i].y - y).abs() < 0.05)
-                .map(|i| l[i].x)
-                .fold(f32::MIN, f32::max)
+        // The strip's front at spawn, and the nodes that made it (within 20
+        // cm of it): the same material is followed, wherever it moves
+        // across the car.
+        let strip: Vec<usize> = (0..n)
+            .filter(|&i| pick(i) && (l0[i].y - y).abs() < 0.05)
+            .collect();
+        let f0 = strip.iter().map(|&i| l0[i].x).fold(f32::MIN, f32::max);
+        let f1 = strip
+            .iter()
+            .filter(|&&i| l0[i].x > f0 - 0.20)
+            .map(|&i| l1[i].x)
+            .fold(f32::MIN, f32::max);
+        *ck = if strip.is_empty() {
+            0.0
+        } else {
+            (f0 - f1).max(0.0)
         };
-        *ck = (front(l0) - front(l1)).max(0.0);
     }
     let max = c.iter().copied().fold(0.0f32, f32::max);
     let avg = (0.5 * c[0] + c[1] + c[2] + c[3] + c[4] + 0.5 * c[5]) / 5.0;
@@ -1903,32 +1917,79 @@ fn reference_wall(b: &Built, kmh: f32, drag: bool) -> (f32, Vec<String>) {
     let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
     let ke0 = 0.5 * total * v0 * v0;
     let vcg = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>() / total;
-    // Fixed steps (0.5 ms) for the pulse: the cabin's travel past contact.
-    let sill0 = group_mean(&s, b, &["sill", "sill_r"]).z;
+    // Fixed steps (0.5 ms) for the pulse, read at the rear seat's cross
+    // member (floor_x3, where NCAP's 093/094 accelerometers sit): its travel
+    // past contact until it stops (dynamic crush, t_m) and its acceleration.
+    let cm = |s: &ExplicitBeams| group_mean(s, b, &["floor_x3"]);
+    let vcm = |s: &ExplicitBeams| {
+        let g = &b.groups["floor_x3"];
+        g.iter().map(|&i| s.nodes[i as usize].vel.z).sum::<f32>() / g.len() as f32
+    };
+    let z0 = cm(&s).z;
     let (mut t, mut t_contact, mut t_m, mut d_dyn) = (0.0f32, None, None, 0.0f32);
-    let mut rebound = 0.0f32;
+    let (mut z_contact, mut rebound) = (z0, 0.0f32);
     let dt = engine_softbody::authoring::skeleton::STEP;
+    let mut acc: Vec<f32> = Vec::new();
+    let mut vprev = vcm(&s);
     for _ in 0..(2.0 / dt) as usize {
         s.step();
         t += dt;
-        let v = vcg(&s);
-        if t_contact.is_none() && v < v0 - 0.05 {
+        let v = vcm(&s);
+        acc.push((v - vprev) / dt / 9.81);
+        vprev = v;
+        let vg = vcg(&s);
+        if t_contact.is_none() && vg < v0 - 0.05 {
             t_contact = Some(t);
+            z_contact = cm(&s).z;
         }
-        if t_m.is_none() && v <= 0.0 {
+        if t_contact.is_some() && t_m.is_none() && v <= 0.0 {
             t_m = Some(t);
-            d_dyn = group_mean(&s, b, &["sill", "sill_r"]).z - sill0 - 0.05;
+            d_dyn = cm(&s).z - z_contact;
         }
-        rebound = rebound.max(-v);
+        rebound = rebound.max(-vg);
     }
+    let _ = z0;
+    // 100 Hz two-pole Butterworth, forward and backward
+    // (engine/scripts/nhtsa_pulse.py; close to CFC 60).
+    let biquad = |x: &[f32]| -> Vec<f32> {
+        let w = (std::f32::consts::PI * 100.0 * dt).tan();
+        let n = 1.0 / (1.0 + 2f32.sqrt() * w + w * w);
+        let (b0, a1, a2) = (
+            w * w * n,
+            2.0 * (w * w - 1.0) * n,
+            (1.0 - 2f32.sqrt() * w + w * w) * n,
+        );
+        let (b1, b2) = (2.0 * b0, b0);
+        let (mut x1, mut x2, mut y1, mut y2) = (x[0], x[0], x[0], x[0]);
+        x.iter()
+            .map(|&v| {
+                let o = b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+                (x2, x1, y2, y1) = (x1, v, y1, o);
+                o
+            })
+            .collect()
+    };
+    let mut f = biquad(&acc);
+    f.reverse();
+    let mut f = biquad(&f);
+    f.reverse();
+    let peak_g = f.iter().map(|a| -a).fold(0.0f32, f32::max);
     let l1 = cabin_local(&s, b);
-    let (cx, max_x, avg_x) = front_profile(b, &l0, &l1, &y0, false);
-    let (cs, max_s, avg_s) = front_profile(b, &l0, &l1, &y0, true);
+    let attached: Vec<bool> = (0..s.nodes.len())
+        .map(|i| {
+            s.incidence[i]
+                .iter()
+                .any(|&bm| !s.beams[bm as usize].broken)
+        })
+        .collect();
+    let (cx, max_x, avg_x) = front_profile(b, &l0, &l1, &y0, false, &attached);
+    let (cs, max_s, avg_s) = front_profile(b, &l0, &l1, &y0, true, &attached);
     let ke1 = ke(&s);
     let tm = t_m.unwrap_or(f32::NAN) - t_contact.unwrap_or(0.0);
     let b1 = (v0 - 8.0 / 3.6) / avg_x;
     let e = rebound / v0;
     let springback = d_dyn - max_s;
+    let mean_g = v0 / tm / 9.81;
     eprintln!(
         "(n) wall {kmh} km/h drag {drag}: residual crush at bumper height exterior C1..C6 {:?} mm, max {:.0} avg {:.0} mm; structure {:?} mm, max {:.0} avg {:.0} mm",
         cx.map(|c| (c * 1e3).round()),
@@ -1939,7 +2000,7 @@ fn reference_wall(b: &Built, kmh: f32, drag: bool) -> (f32, Vec<String>) {
         avg_s * 1e3
     );
     eprintln!(
-        "(n) wall {kmh} km/h drag {drag}: Campbell b1 {b1:.1} 1/s; dynamic crush (cabin travel) {:.0} mm at t_m {:.0} ms (v0·t_m/2 {:.0} mm), springback {:.0} mm (dynamic - structure max), rebound {rebound:.2} m/s (e {e:.3}); KE {:.1} kJ -> {:.2} kJ, rebound KE {:.2} kJ",
+        "(n) wall {kmh} km/h drag {drag}: Campbell b1 {b1:.1} 1/s; dynamic crush (rear seat cross member's travel) {:.0} mm at t_m {:.0} ms (v0·t_m/2 {:.0} mm), peak {peak_g:.1} g (100 Hz), mean to t_m {mean_g:.1} g; springback {:.0} mm (dynamic - structure max), rebound {rebound:.2} m/s (e {e:.3}); KE {:.1} kJ -> {:.2} kJ, rebound KE {:.2} kJ",
         d_dyn * 1e3,
         tm * 1e3,
         0.5 * v0 * tm * 1e3,
@@ -1955,18 +2016,21 @@ fn reference_wall(b: &Built, kmh: f32, drag: bool) -> (f32, Vec<String>) {
         }
     };
     if (kmh - 56.0).abs() < 0.5 {
-        // §4.5: p10–p90 380–580 mm (hard 217–738); §4.6: b1 22.9–39.2 1/s;
-        // §4.7: e 0.03–0.20; §4.8: springback ≤ 0.1 × the residual crush.
+        // §4.5: residual max 380–580 mm; §4.6: b1 22.9–39.2 1/s; §8 (seven
+        // NCAP sedan pulses): dynamic crush 0.62–0.75 m, t_m 63–76 ms, e
+        // 0.13–0.20, peak 34–47 g. (Springback of ~25 % is normal, §8.)
         check(
             (0.380..=0.580).contains(&max_x),
             format!("max crush {max_x} m"),
         );
         check((22.9..=39.2).contains(&b1), format!("b1 {b1}"));
-        check((0.03..=0.20).contains(&e), format!("restitution {e}"));
         check(
-            springback <= 0.1 * max_s,
-            format!("springback {springback} m of {max_s} m"),
+            (0.62..=0.75).contains(&d_dyn),
+            format!("dynamic crush {d_dyn} m"),
         );
+        check((0.063..=0.076).contains(&tm), format!("t_m {tm} s"));
+        check((0.13..=0.20).contains(&e), format!("restitution {e}"));
+        check((34.0..=47.0).contains(&peak_g), format!("peak {peak_g} g"));
     }
     (avg_x, fails)
 }
@@ -1984,6 +2048,9 @@ fn n_wall_matches_the_nhtsa_sedans() {
     for drag in [true, false] {
         let (c56, f) = reference_wall(&b, 56.0, drag);
         fails.extend(f);
+        if std::env::var("N_ONLY56").is_ok() {
+            continue;
+        }
         let (c50, f) = reference_wall(&b, 50.0, drag);
         fails.extend(f);
         let ratio = c50 / c56;

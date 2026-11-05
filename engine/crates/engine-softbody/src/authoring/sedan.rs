@@ -205,14 +205,17 @@ pub fn door_joint() -> Joint {
 pub const END_YIELD: f32 = 2.0e4;
 
 /// The front rails' threshold scale at their cabin end (under the floor at
-/// the B-pillar), graded to 0.5 at the bumper.
+/// the B-pillar) and at the bumper: the same along the rail (the plateau
+/// starts at the bumper, so the pulse rises early, as measured).
 pub const RAIL_CABIN: f32 = 1.0;
+pub const RAIL_BUMPER: f32 = 1.0;
 
 /// The crush grade's thresholds against `Grades::default`'s: the rails' and
-/// aprons' plateau. What the front still carries when the car stops is what
-/// the cell holds elastically and gives back as rebound (≈ F²/2k), so the
-/// plateau is as low as the crush length allows (0.75 m at 56 km/h).
-pub const CRUSH_PLATEAU: f32 = 0.65;
+/// aprons' plateau, set from NCAP measurements
+/// (`engine/docs/crash-reference-targets.md` §2, §8): at 56 km/h a 1,450 kg
+/// sedan crushes 0.62–0.75 m dynamically (t_m 63–76 ms) and 0.38–0.58 m
+/// residually (Campbell b1 22.9–39.2). The `n` test measures it.
+pub const CRUSH_PLATEAU: f32 = 1.3;
 
 /// The main load paths' (rails, sills) section against their grade's k·L.
 pub const RAIL_STIFF: f32 = 1.4;
@@ -548,7 +551,7 @@ pub fn sedan() -> VehicleDef {
                 0.24,
                 UP,
                 "crush",
-                [RAIL_CABIN, 0.5],
+                [RAIL_CABIN, RAIL_BUMPER],
                 3,
                 true,
                 1,
