@@ -2140,6 +2140,76 @@ pub fn sedan_one_tier() -> VehicleDef {
         // (The bays' cuts set the strength: no tuned grading.)
         m.scale = [1.0, 1.0];
     }
+    // The deck lid opening's frame (A7): a real sedan's opening is ringed by
+    // closed sections, the rear package tray's upper reinforcement across
+    // its front edge, the quarters' gutters (drip channel and quarter inner
+    // upper) down both sides, and the rear end panel's upper reinforcement
+    // across its back. Without them the opening's edges were skin only, and
+    // in the 56 km/h wall the opening shortened 721 → 446 mm under the rear
+    // body's own inertia (`m`, `M_TRACE=1`), lifting the lid. Sections are
+    // typical stampings, not one car's (a Choice): HSLA (CR340LA) hats
+    // closed by their panels, 0.8 mm.
+    if std::env::var("DECK_FRAME").map_or(true, |v| v != "0") {
+        let hat = |depth: f32, width: f32| Section {
+            depth,
+            width,
+            t: 0.0008,
+            sigma_y: HSLA340,
+            round: false,
+        };
+        d.members.push(ladder(member(
+            "deck_x",
+            &[(-0.80, 1.03, 0.78), (0.0, 1.05, 0.79), (0.80, 1.03, 0.78)],
+            0.10,
+            0.08,
+            UP,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            false,
+            1,
+        )));
+        d.members.push(ladder(member(
+            "deck_gutter",
+            &[
+                (0.80, 0.98, 1.36),
+                (0.82, 0.96, 0.78),
+                (0.82, 0.94, 0.35),
+                (0.78, 0.72, 0.02),
+            ],
+            0.06,
+            0.06,
+            OUT,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            true,
+            1,
+        )));
+        d.members.push(ladder(member(
+            "rear_panel",
+            &[(-0.78, 0.72, 0.02), (0.0, 0.70, -0.01), (0.78, 0.72, 0.02)],
+            0.10,
+            0.10,
+            FWD,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            false,
+            1,
+        )));
+        let list = [
+            ("deck_x", hat(0.06, 0.08), 0.08, 1.0),
+            ("deck_gutter", hat(0.05, 0.06), 0.06, 1.0),
+            ("rear_panel", hat(0.06, 0.10), 0.10, 1.0),
+        ];
+        sectioned_by(&mut d.members, &Grades::default(), &list);
+        for (name, sec, _, _) in list {
+            for m in d.members.iter_mut().filter(|m| m.name == name) {
+                m.kg_per_m = section_kg_per_m(&sec);
+            }
+        }
+    }
     d.biw_mass = ACCORD_BIW;
     d.part_masses = vec![
         ("door_f".into(), ACCORD_DOOR_F),

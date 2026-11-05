@@ -2492,6 +2492,52 @@ fn m_wall_56_boot_lid_stays_latched_and_hinged() {
                 };
                 let hinge: Vec<usize> = [systems[0].clone(), systems[1].clone()].concat();
                 let (hb, lb) = (mean(&hinge, true), mean(&systems[2], true));
+                {
+                    // (The same in the world: the deck opening's length.)
+                    let ends = |v: &[usize], p: &dyn Fn(usize) -> Vec3| -> Vec3 {
+                        let ids: Vec<usize> = v
+                            .iter()
+                            .map(|&bi| {
+                                let bm = &s.beams[bi];
+                                if name(bm.a as usize) == "bootlid" {
+                                    bm.b as usize
+                                } else {
+                                    bm.a as usize
+                                }
+                            })
+                            .collect();
+                        ids.iter().map(|&i| p(i)).sum::<Vec3>() / ids.len() as f32
+                    };
+                    let now = |i: usize| s.nodes[i].pos;
+                    let then = |i: usize| sk.nodes[i].p;
+                    let d1 = ends(&hinge, &now).distance(ends(&systems[2], &now));
+                    let d0 = ends(&hinge, &then).distance(ends(&systems[2], &then));
+                    eprintln!(
+                        "  (m) f{f}: deck opening (world) {:.0} mm, design {:.0} mm",
+                        d1 * 1e3,
+                        d0 * 1e3
+                    );
+                    if f == 6 {
+                        for (k, v) in systems.iter().enumerate() {
+                            for &bi in v {
+                                let bm = &s.beams[bi];
+                                let o = if name(bm.a as usize) == "bootlid" {
+                                    bm.b
+                                } else {
+                                    bm.a
+                                };
+                                let mut gs: Vec<&str> = b
+                                    .groups
+                                    .iter()
+                                    .filter(|(_, g)| g.contains(&o))
+                                    .map(|(k, _)| k.as_str())
+                                    .collect();
+                                gs.sort();
+                                eprintln!("    system {k} body node {o} at {:.2?} {gs:?} moved {:.0?} mm (cabin frame)", sk.nodes[o as usize].p, (l[o as usize] - l0[o as usize]) * 1e3);
+                            }
+                        }
+                    }
+                }
                 let up_mid = lid
                     .iter()
                     .map(|&i| -(l[i] - l0[i]).z)
@@ -2541,6 +2587,31 @@ fn m_wall_56_boot_lid_stays_latched_and_hinged() {
                     open = (gap, *i, f);
                 }
             }
+        }
+        if std::env::var("M_WHO").is_ok() {
+            plastic_census(&s, &b, "m");
+            // Plastic work by station along the car (design z, 0.25 m bins;
+            // z 0 the rear).
+            let mut bins = [0.0f64; 24];
+            for bm in &s.beams {
+                let (a, c) = (bm.a as usize, bm.b as usize);
+                if a >= n || c >= n {
+                    continue;
+                }
+                let w =
+                    0.5 * (bm.tc.abs() + bm.tt.abs()) as f64 * (bm.rest - bm.rest0).abs() as f64;
+                let z = 0.5 * (sk.nodes[a].p.z + sk.nodes[c].p.z);
+                let k = ((z / 0.25).floor().max(0.0) as usize).min(23);
+                if w.is_finite() {
+                    bins[k] += w;
+                }
+            }
+            eprintln!(
+                "(m) plastic work by z (0.25 m bins from the rear, kJ): {:?}",
+                bins.iter()
+                    .map(|w| (w / 1e2).round() / 10.0)
+                    .collect::<Vec<_>>()
+            );
         }
         eprintln!(
             "(m) drag {drag}: boot lid edge lifts {:.0} mm off the body (node {} at {:?}, frame {})",
@@ -2763,6 +2834,12 @@ fn reference_wall_p(
         0.0,
     );
     s.settings.drag = drag;
+    // (`NO_SELF=1`, a measurement: no self-collision, to tell an energy
+    // rise of the contact from one of the beams.)
+    if std::env::var("NO_SELF").is_ok() {
+        s.triangles.clear();
+        s.finish();
+    }
     let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
     s.boxes.push(StaticBox::centered(
         Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
@@ -3449,7 +3526,7 @@ fn plastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
     eprintln!(
         "({tag}) plastic work by member (kJ, broken): {:?}",
         v.iter()
-            .take(14)
+            .take(30)
             .map(|(k, (w, br))| format!("{k} {:.2} {br}", w / 1e3))
             .collect::<Vec<_>>()
     );
