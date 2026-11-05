@@ -139,7 +139,7 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         step_along: 0.035,
         nose_ramp: 0.045,
         tail_ramp: 0.04,
-        rear_deck: [0.85, 1.25, 0.045, 0.035],
+        rear_deck: [0.85, 1.50, 0.045, 0.035],
         hood_crease: [0.22, 0.60, 0.014, 0.004],
         hood_z: [3.36, 4.70],
         deck_lip: [0.026, 0.24, 0.60],
@@ -161,10 +161,12 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         deck: [0.79, 0.62, 0.47, 0.71],
         windscreen: [2.59, 3.32],
         backlight: [0.84, 1.36],
-        side_windows: [[2.31, 3.25], [1.64, 2.17], [1.30, 1.58]],
+        // The B-pillar blackout 8 cm (2.20..2.28); the rear door's glass and
+        // the quarter light split by one slim sash (2 cm).
+        side_windows: [[2.28, 3.25], [1.62, 2.20], [1.12, 1.60]],
         pillar: 0.035,
         rail: 0.045,
-        frame: 0.022,
+        frame: 0.010,
         // Slim, sharp full-LED blades just under the bonnet's leading edge,
         // rising outward and wrapping round the corner to a pointed tip.
         headlight: vec![
@@ -200,18 +202,22 @@ pub fn sedan_styling(def: &VehicleDef) -> Styling {
         ],
         // Side intakes in the bumper's corners (air curtains): sharp
         // trapezoids, the inner edge raked.
+        // A blade in the bumper's corner: a slim slot along the lower edge
+        // rising into a tall air curtain at the outer end (an L in arc view),
+        // so the bumper's corner stays a sculpted surface, not a hole.
         intake: vec![
-            (0.585, -0.30),
-            (0.60, -0.185),
-            (0.62, -0.165),
-            (0.75, -0.135),
-            (0.85, -0.14),
-            (0.868, -0.158),
-            (0.90, -0.24),
-            (0.885, -0.325),
-            (0.865, -0.342),
-            (0.68, -0.345),
-            (0.605, -0.33),
+            (0.60, -0.318),
+            (0.63, -0.300),
+            (0.80, -0.286),
+            (0.835, -0.270),
+            (0.85, -0.18),
+            (0.862, -0.160),
+            (0.882, -0.168),
+            (0.900, -0.250),
+            (0.892, -0.322),
+            (0.872, -0.340),
+            (0.66, -0.342),
+            (0.612, -0.334),
         ],
         // Wrapped LED tail lamps: deep at the outer end, a sharp tip round
         // the corner, joined by the light bar across the boot lid.
@@ -355,11 +361,15 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         }
         let r = lidrow(p.z);
         let [z0, z1] = st.side_windows[k];
-        let fy = smax(r.y_t + 0.018 - p.y, p.y - (r.y_e - st.rail), 0.05);
+        // The quarter light sits on the belt's kick up the deck shoulder.
+        let yb = if k == 2 { surf.belt(p.z) } else { r.y_t };
+        let fy = smax(yb + 0.018 - p.y, p.y - (r.y_e - st.rail), 0.05);
         let fz = if k == 2 {
-            // Quarter glass: its rear edge follows the C-pillar's slope.
-            let zc = z0 + 0.55 * (p.y - r.y_t);
-            smax(zc - p.z, p.z - z1, 0.04)
+            // Quarter glass: its rear edge sweeps back along the C-pillar's
+            // slope to a point on the belt (the DLO's tail), its top edge
+            // under the falling roof.
+            let zc = z0 + 1.42 * (p.y - yb - 0.012);
+            smax(zc - p.z, p.z - z1, 0.03)
         } else {
             smax(z0 - p.z, p.z - z1, 0.04)
         };
@@ -618,7 +628,8 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
                 "backlight" => mat::PRIVACY,
                 _ => mat::GLASS,
             };
-            let mut g = trim::offset(&c.mesh, -0.006, false, Some(gm), 1.0);
+            // Nearly flush (3 mm in): the frame and seal hide the step.
+            let mut g = trim::offset(&c.mesh, -0.003, false, Some(gm), 1.0);
             if name == "glass_side" {
                 // Rear doors' and quarter lights' glass: privacy tint.
                 for k in 0..g.len() {
@@ -678,7 +689,7 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         let mut mesh = Mesh::default();
         for (l, closed) in &c.loops {
             let mut s =
-                trim::loop_strip(&c.mesh, l, *closed, 0.004, st.frame, 0.0015, mat::TRIM, 1.0);
+                trim::loop_strip(&c.mesh, l, *closed, 0.003, st.frame, 0.001, mat::TRIM, 1.0);
             let loops = trim::boundary_loops(&s);
             for (l2, c2) in &loops {
                 trim::roll_loop(&mut s, l2, *c2, EdgeStyle::TRIM);
@@ -1023,10 +1034,11 @@ pub fn assemble(def: &VehicleDef, st: &Styling) -> Vec<Piece> {
         let spec = fixtures::GrilleSpec {
             axis: (avg_in(&f) * 0.5 - Vec3::Z * 0.5).normalize(),
             depth: 0.07,
-            surround: 0.01,
+            surround: 0.008,
             surround_mat: mat::TRIM,
-            slats: Vec::new(),
-            slat_half: 0.006,
+            // Two gloss-black fins across the air curtain.
+            slats: vec![(-0.212, mat::TRIM), (-0.252, mat::TRIM)],
+            slat_half: 0.005,
             slat_back: 0.02,
             back_mat: mat::GRILLE,
         };

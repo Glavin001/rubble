@@ -143,6 +143,12 @@ pub fn rail(t: f32, tau: f32) -> f32 {
     m * t0 + m * s - m / (tau * tau) * s * s * s + m / (2.0 * tau * tau * tau) * s * s * s * s
 }
 
+/// Quintic smoothstep: value, slope and curvature continuous at both ends.
+pub fn smootherstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
 /// Smooth max(s, 0) with a rounding of w (m).
 fn soft_pos(s: f32, w: f32) -> f32 {
     0.5 * (s + (s * s + w * w).sqrt())
@@ -367,7 +373,7 @@ impl Band {
         // the quarter stays upright into the deck's tight roll (a hard
         // shoulder).
         let front = if st.rear_deck[2] > 0.0 {
-            smoothstep(st.rear_deck[1], st.rear_deck[1] + 0.6, p.y)
+            smoothstep(st.rear_deck[1] - 0.25, st.rear_deck[1] + 0.35, p.y)
         } else {
             1.0
         };
@@ -740,7 +746,10 @@ impl BodySurface {
             // with the greenhouse by a smooth max: the C-pillar's crease.
             let [zd0, zd1, dr, k] = style.rear_deck;
             if dr > 0.0 && z < zd1 + 0.05 {
-                let s = smoothstep(zd0, zd1, z);
+                // C2 (smootherstep): the shoulder line's curvature is
+                // continuous where it leaves the deck and meets the belt, so
+                // its highlight runs as one curve, no jog.
+                let s = smootherstep(zd0, zd1, z);
                 let deck0 = prof.top.eval(z.min(zd0));
                 let deck = deck0 + style.lid_crown * (1.0 - s) * (1.0 - u * u) * (1.0 - u * u);
                 let yd = deck + (yb - 0.01 - deck) * s;
@@ -937,6 +946,21 @@ impl BodySurface {
             x_r: l(a.x_r, b.x_r),
             y_e: l(a.y_e, b.y_e),
         }
+    }
+
+    /// The belt line at z (side view): the band's top edge, kicked up behind
+    /// the cabin along the rear deck's shoulder as it falls from the deck to
+    /// the belt (the feature line the quarter light sits on).
+    pub fn belt(&self, z: f32) -> f32 {
+        let r = self.lid_row(z);
+        let [zd0, zd1, dr, _] = self.band.style.rear_deck;
+        if dr <= 0.0 || z >= zd1 {
+            return r.y_t;
+        }
+        let s = smootherstep(zd0, zd1, z);
+        let deck0 = self.band.prof.top.eval(z.min(zd0));
+        let yd = deck0 + (r.y_t - 0.01 - deck0) * s;
+        r.y_t.max(yd)
     }
 
     /// The band's top-edge height at arc `a` from the front centre.
