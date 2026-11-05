@@ -2693,19 +2693,17 @@ fn m_wall_56_boot_lid_stays_latched_and_hinged() {
 /// cover or skin). Returns (C1..C6, max, NHTSA average (C1/2 + C2..C5 +
 /// C6/2)/5).
 fn front_profile(
-    b: &Built,
+    car: &Car,
     l0: &[Vec3],
     l1: &[Vec3],
     y0: &[f32],
     structure: bool,
     attached: &[bool],
 ) -> ([f32; 6], f32, f32) {
-    let sk = &b.skeleton;
-    let n = sk.nodes.len();
+    let n = car.n;
     // Nodes torn off (every beam broken) are debris, not the profile.
-    let pick = |i: usize| {
-        (!structure || sk.nodes[i].primary) && y0[i] > 0.30 && y0[i] < 0.65 && attached[i]
-    };
+    let pick =
+        |i: usize| (!structure || car.primary[i]) && y0[i] > 0.30 && y0[i] < 0.65 && attached[i];
     // Width: the band's extent across the car at spawn.
     let (lo, hi) = (0..n)
         .filter(|&i| pick(i))
@@ -2731,7 +2729,8 @@ fn front_profile(
             .filter(|&&i| l0[i].x > f0 - 0.20)
             .map(|&i| l1[i].x)
             .fold(f32::MIN, f32::max);
-        if std::env::var("PROFILE_WHO").is_ok() {
+        if let (Ok(_), Some(b)) = (std::env::var("PROFILE_WHO"), car.built) {
+            let sk = &b.skeleton;
             // Which node sets the strip's front after the crash.
             if let Some(&w) = strip
                 .iter()
@@ -2813,26 +2812,179 @@ fn spread(v: &[f32]) -> (f32, f32, f32, f32) {
     )
 }
 
+/// A car under the reference scenes (n, o, p, q): an authored build, or a
+/// BeamNG car's JBeam (`beamng_car`), with the node sets those scenes
+/// measure. The scenes' measurement code is the same for both.
+struct Car<'a> {
+    built: Option<&'a Built>,
+    /// The JBeam car settled at rest, turned to face +z (its spawns are
+    /// copies of it).
+    settled: Option<ExplicitBeams>,
+    /// The structure's nodes are the solver's first `n` (wheels after).
+    n: usize,
+    /// Each node's place along the car at rest (to split a member into its
+    /// front and rear halves).
+    along: Vec<f32>,
+    /// Structure (frame tier; the BX's body shell and bumper bar).
+    primary: Vec<bool>,
+    /// The exterior skin's nodes.
+    shell: Vec<u32>,
+    /// `accel` (rear seat cross member: NCAP's 093/094 accelerometers),
+    /// `sill`, `sill_r`, `tunnel`, `pillar_b` (both), `header_f`, `roof_rail`
+    /// (left), `a_base_l`/`_r` (A-pillar bases), `firewall_l`/`_r`,
+    /// `door_f_l` (the struck front door).
+    g: std::collections::HashMap<&'static str, Vec<u32>>,
+    /// Door apertures: (hinge pillar, latch pillar) node pairs, low and at the
+    /// belt, each door, both sides.
+    apertures: Vec<(usize, usize)>,
+}
+
+impl<'a> Car<'a> {
+    fn of(b: &'a Built) -> Self {
+        let sk = &b.skeleton;
+        let n = sk.nodes.len();
+        let near = |p: Vec3| -> usize {
+            (0..n)
+                .filter(|&i| sk.nodes[i].part == 0)
+                .min_by(|&a, &c| {
+                    sk.nodes[a]
+                        .p
+                        .distance(p)
+                        .total_cmp(&sk.nodes[c].p.distance(p))
+                })
+                .unwrap()
+        };
+        let mut apertures = Vec::new();
+        for side in [1.0f32, -1.0] {
+            for (za, zb) in [(3.30, 2.30), (2.18, 1.40)] {
+                for y in [0.40, 0.95] {
+                    apertures.push((
+                        near(Vec3::new(side * 0.85, y, za)),
+                        near(Vec3::new(side * 0.85, y, zb)),
+                    ));
+                }
+            }
+        }
+        // `side`: +1 the left (driver's) half, −1 the right.
+        let part_of = |gname: &str, ymax: f32, side: f32| -> Vec<u32> {
+            b.groups[gname]
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    sk.nodes[i as usize].p.y < ymax && sk.nodes[i as usize].p.x * side > 0.0
+                })
+                .collect()
+        };
+        let mut g = std::collections::HashMap::new();
+        g.insert("accel", b.groups["floor_x3"].clone());
+        for k in ["sill", "sill_r", "tunnel", "header_f", "roof_rail"] {
+            g.insert(k, b.groups[k].clone());
+        }
+        g.insert(
+            "pillar_b",
+            [b.groups["pillar_b"].clone(), b.groups["pillar_b_r"].clone()].concat(),
+        );
+        g.insert("a_base_l", part_of("pillar_a", 0.6, 1.0));
+        g.insert("a_base_r", part_of("pillar_a_r", 0.6, -1.0));
+        g.insert("firewall_l", part_of("firewall", 2.0, 1.0));
+        g.insert("firewall_r", part_of("firewall", 2.0, -1.0));
+        g.insert(
+            "door_f_l",
+            (0..n as u32)
+                .filter(|&i| sk.parts[sk.nodes[i as usize].part as usize] == "door_f_l")
+                .collect(),
+        );
+        Car {
+            built: Some(b),
+            settled: None,
+            n,
+            along: sk.nodes.iter().map(|q| q.p.z).collect(),
+            primary: sk.nodes.iter().map(|q| q.primary).collect(),
+            shell: b.shell.nodes.clone(),
+            g,
+            apertures,
+        }
+    }
+
+    fn spawn(&self, vel: Vec3, lift: f32) -> ExplicitBeams {
+        if let Some(b) = self.built {
+            return spawn(b, vel, lift);
+        }
+        let mut s = self.settled.clone().unwrap();
+        for nd in &mut s.nodes {
+            nd.pos.y += lift;
+            nd.vel = vel;
+        }
+        s.roll_tyres(vel);
+        s
+    }
+
+    fn mean(&self, s: &ExplicitBeams, names: &[&str]) -> Vec3 {
+        let ids: Vec<u32> = names
+            .iter()
+            .flat_map(|k| self.g[*k].iter().copied())
+            .collect();
+        ids.iter().map(|&i| s.nodes[i as usize].pos).sum::<Vec3>() / ids.len() as f32
+    }
+
+    /// A group's front (`true`) or rear half's mean position.
+    fn half(&self, s: &ExplicitBeams, name: &str, front: bool) -> Vec3 {
+        let g = &self.g[name];
+        let zm = g.iter().map(|&i| self.along[i as usize]).sum::<f32>() / g.len() as f32;
+        let v: Vec<Vec3> = g
+            .iter()
+            .filter(|&&i| (self.along[i as usize] > zm) == front)
+            .map(|&i| s.nodes[i as usize].pos)
+            .collect();
+        v.iter().sum::<Vec3>() / v.len() as f32
+    }
+
+    /// Positions in the cabin's frame (as [`cabin_local`]).
+    fn cabin_local(&self, s: &ExplicitBeams) -> Vec<Vec3> {
+        let (o, r) = frame3(
+            self.half(s, "sill", false),
+            self.half(s, "sill", true),
+            self.mean(s, &["sill_r"]),
+        );
+        let inv = r.transpose();
+        s.nodes.iter().map(|n| inv * (n.pos - o)).collect()
+    }
+
+    /// The far side's frame (origin, along the car, inward across it).
+    fn far(&self, s: &ExplicitBeams) -> (Vec3, Vec3, Vec3) {
+        let tu = self.mean(s, &["tunnel"]);
+        let (o, x) = (
+            self.half(s, "sill_r", false),
+            (self.half(s, "sill_r", true) - self.half(s, "sill_r", false)).normalize(),
+        );
+        let up = x.cross(tu - o).normalize();
+        (o, x, up.cross(x))
+    }
+
+    fn noise(&self) -> f64 {
+        let mut s = self.spawn(Vec3::ZERO, 0.0);
+        run(&mut s, 1.0);
+        let mut l = Ledger::new(&s, Vec3::Z);
+        l.run(&mut s, 1.0);
+        l.rise.max(energy_rounding(&s))
+    }
+}
+
 fn reference_wall(b: &Built, kmh: f32, drag: bool, noise: f64) -> Vec<(&'static str, f32)> {
-    reference_wall_p(b, kmh, drag, noise, Perturb::default())
+    reference_wall_p(&Car::of(b), kmh, drag, noise, Perturb::default())
 }
 
 /// [`reference_wall`] perturbed (a full-width wall: the offset changes
 /// nothing, the speed and the yaw do).
 fn reference_wall_p(
-    b: &Built,
+    car: &Car,
     kmh: f32,
     drag: bool,
     noise: f64,
     p: Perturb,
 ) -> Vec<(&'static str, f32)> {
-    let sk = &b.skeleton;
     let v0 = kmh * (1.0 + p.speed) / 3.6;
-    let mut s = spawn(
-        b,
-        Quat::from_rotation_y(p.yaw) * Vec3::new(0.0, 0.0, v0),
-        0.0,
-    );
+    let mut s = car.spawn(Quat::from_rotation_y(p.yaw) * Vec3::new(0.0, 0.0, v0), 0.0);
     s.settings.drag = drag;
     // (`NO_SELF=1`, a measurement: no self-collision, to tell an energy
     // rise of the contact from one of the beams.)
@@ -2845,8 +2997,8 @@ fn reference_wall_p(
         Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
         Vec3::new(3.0, 2.0, 1.0),
     ));
-    let l0 = cabin_local(&s, b);
-    let ground = s.nodes[..sk.nodes.len()]
+    let l0 = car.cabin_local(&s);
+    let ground = s.nodes[..car.n]
         .iter()
         .map(|n| n.pos.y)
         .fold(f32::MAX, f32::min)
@@ -2858,9 +3010,9 @@ fn reference_wall_p(
     // Fixed steps (0.5 ms) for the pulse, read at the rear seat's cross
     // member (floor_x3, where NCAP's 093/094 accelerometers sit): its travel
     // past contact until it stops (dynamic crush, t_m) and its acceleration.
-    let cm = |s: &ExplicitBeams| group_mean(s, b, &["floor_x3"]);
+    let cm = |s: &ExplicitBeams| car.mean(s, &["accel"]);
     let vcm = |s: &ExplicitBeams| {
-        let g = &b.groups["floor_x3"];
+        let g = &car.g["accel"];
         g.iter().map(|&i| s.nodes[i as usize].vel.z).sum::<f32>() / g.len() as f32
     };
     let z0 = cm(&s).z;
@@ -2914,7 +3066,7 @@ fn reference_wall_p(
     f.reverse();
     let peak_g = f.iter().map(|a| -a).fold(0.0f32, f32::max);
     ledger.check(&s, &format!("n {kmh} km/h drag {drag}"), noise);
-    let l1 = cabin_local(&s, b);
+    let l1 = car.cabin_local(&s);
     let attached: Vec<bool> = (0..s.nodes.len())
         .map(|i| {
             s.incidence[i]
@@ -2922,15 +3074,17 @@ fn reference_wall_p(
                 .any(|&bm| !s.beams[bm as usize].broken)
         })
         .collect();
-    let (cx, max_x, avg_x) = front_profile(b, &l0, &l1, &y0, false, &attached);
-    let (cs, max_s, avg_s) = front_profile(b, &l0, &l1, &y0, true, &attached);
+    let (cx, max_x, avg_x) = front_profile(car, &l0, &l1, &y0, false, &attached);
+    let (cs, max_s, avg_s) = front_profile(car, &l0, &l1, &y0, true, &attached);
     let ke1 = ke(&s);
     let tm = t_m.unwrap_or(f32::NAN) - t_contact.unwrap_or(0.0);
     let b1 = (v0 - 8.0 / 3.6) / avg_x;
     let e = rebound / v0;
     let springback = d_dyn - max_s;
     let mean_g = v0 / tm / 9.81;
-    glass_report(&s, &b, &format!("wall {kmh} km/h drag {drag}"));
+    if let Some(b) = car.built {
+        glass_report(&s, b, &format!("wall {kmh} km/h drag {drag}"));
+    }
     eprintln!(
         "(n) wall {kmh} km/h drag {drag}: residual crush at bumper height exterior C1..C6 {:?} mm, max {:.0} avg {:.0} mm; structure {:?} mm, max {:.0} avg {:.0} mm",
         cx.map(|c| (c * 1e3).round()),
@@ -2953,46 +3107,20 @@ fn reference_wall_p(
     // The cabin as NHTSA measures it (§1, §4.9): the door apertures (hinge
     // pillar to latch pillar, low and at the belt, both sides, both doors),
     // the A-pillars' bases and the firewall moving rearward.
-    let near = |p: Vec3| -> usize {
-        (0..sk.nodes.len())
-            .filter(|&i| sk.nodes[i].part == 0)
-            .min_by(|&a, &c| {
-                sk.nodes[a]
-                    .p
-                    .distance(p)
-                    .total_cmp(&sk.nodes[c].p.distance(p))
-            })
-            .unwrap()
+    let aper: Vec<f32> = car
+        .apertures
+        .iter()
+        .map(|&(a, c)| l1[a].distance(l1[c]) - l0[a].distance(l0[c]))
+        .collect();
+    let rearward = |g: &str| -> f32 {
+        let v = &car.g[g];
+        v.iter()
+            .map(|&i| l0[i as usize].x - l1[i as usize].x)
+            .sum::<f32>()
+            / v.len() as f32
     };
-    let mut aper: Vec<f32> = Vec::new();
-    for side in [1.0f32, -1.0] {
-        for (za, zb) in [(3.30, 2.30), (2.18, 1.40)] {
-            for y in [0.40, 0.95] {
-                let (a, c) = (
-                    near(Vec3::new(side * 0.85, y, za)),
-                    near(Vec3::new(side * 0.85, y, zb)),
-                );
-                aper.push(l1[a].distance(l1[c]) - l0[a].distance(l0[c]));
-            }
-        }
-    }
-    // `side`: +1 the left (driver's) half, −1 the right.
-    let rearward = |g: &str, ymax: f32, side: f32| -> f32 {
-        let v: Vec<usize> = b.groups[g]
-            .iter()
-            .map(|&i| i as usize)
-            .filter(|&i| sk.nodes[i].p.y < ymax && sk.nodes[i].p.x * side > 0.0)
-            .collect();
-        v.iter().map(|&i| l0[i].x - l1[i].x).sum::<f32>() / v.len() as f32
-    };
-    let (a_left, a_right) = (
-        rearward("pillar_a", 0.6, 1.0),
-        rearward("pillar_a_r", 0.6, -1.0),
-    );
-    let (fw_left, fw_right) = (
-        rearward("firewall", 2.0, 1.0),
-        rearward("firewall", 2.0, -1.0),
-    );
+    let (a_left, a_right) = (rearward("a_base_l"), rearward("a_base_r"));
+    let (fw_left, fw_right) = (rearward("firewall_l"), rearward("firewall_r"));
     // The signed median (NHTSA's population: median 0–1 mm, IQR −2…+3) and
     // the largest |change| but one (p90 of eight; population p10–p90 ±9).
     let mut sorted: Vec<f32> = aper.iter().map(|a| a.abs()).collect();
@@ -3037,13 +3165,19 @@ fn reference_wall_p(
 #[test]
 fn n_wall_matches_the_nhtsa_sedans() {
     let b = built(Resolution::Medium);
-    let noise = rest_noise(&b);
+    let fails = n_wall(&Car::of(&b));
+    assert!(fails.is_empty(), "{fails:#?}");
+}
+
+/// The n test's runs and bands on `car`: the failures.
+fn n_wall(car: &Car) -> Vec<String> {
+    let noise = car.noise();
     // The ensemble at 56 km/h (`ensemble`: ±1 cm, ±0.3 %, ±0.2°), drag on
     // and off in turn: its mean is judged, its spread reported.
     let runs: Vec<Vec<(&str, f32)>> = ensemble()
         .into_iter()
         .enumerate()
-        .map(|(i, p)| reference_wall_p(&b, 56.0, i % 2 == 0, noise, p))
+        .map(|(i, p)| reference_wall_p(car, 56.0, i % 2 == 0, noise, p))
         .collect();
     let med = |k: &str| {
         let v: Vec<f32> = runs
@@ -3091,7 +3225,7 @@ fn n_wall_matches_the_nhtsa_sedans() {
         let (mut b1, mut c) = (Vec::new(), Vec::new());
         for &k in kmh {
             for drag in [true, false] {
-                let r = reference_wall(&b, k, drag, noise);
+                let r = reference_wall_p(car, k, drag, noise, Perturb::default());
                 b1.push(r.iter().find(|x| x.0 == "b1").unwrap().1);
                 c.push(r.iter().find(|x| x.0 == "avg crush").unwrap().1);
             }
@@ -3121,7 +3255,7 @@ fn n_wall_matches_the_nhtsa_sedans() {
             "b1 {m_lo} at 50 km/h against {m_hi} at 56 (scatter {scatter})"
         ));
     }
-    assert!(fails.is_empty(), "{fails:#?}");
+    fails
 }
 
 /// The FMVSS 214 / NCAP side pole (`crash-reference-targets.md` §1, §4.11): a
@@ -3144,7 +3278,7 @@ fn o_side_pole_matches_the_nhtsa_sedans() {
         .unwrap_or(32.0);
     let crushes: Vec<f32> = ensemble()
         .into_iter()
-        .map(|p| side_pole_crush_p(&b, kmh, p))
+        .map(|p| side_pole_crush_p(&Car::of(&b), kmh, p))
         .collect();
     let (crush, sd, lo, hi) = spread(&crushes);
     eprintln!(
@@ -3166,33 +3300,12 @@ fn o_side_pole_matches_the_nhtsa_sedans() {
 /// the residual crush at the pole (m).
 /// The side pole's crush now: the deepest struck-side exterior node near the
 /// pole's line, in the far side's frame (as [`side_pole_crush_p`] measures it).
-fn pole_inward(b: &Built, s0: &ExplicitBeams, s: &ExplicitBeams, centre: Vec3) -> f32 {
-    let far = |st: &ExplicitBeams| {
-        let g = &b.groups["sill_r"];
-        let zs: Vec<f32> = g
-            .iter()
-            .map(|&i| b.skeleton.nodes[i as usize].p.z)
-            .collect();
-        let zm = zs.iter().sum::<f32>() / zs.len() as f32;
-        let half = |front: bool| {
-            let v: Vec<Vec3> = g
-                .iter()
-                .zip(&zs)
-                .filter(|(_, &z)| (z > zm) == front)
-                .map(|(&i, _)| st.nodes[i as usize].pos)
-                .collect();
-            v.iter().sum::<Vec3>() / v.len() as f32
-        };
-        let tu = group_mean(st, b, &["tunnel"]);
-        let (o, x) = (half(false), (half(true) - half(false)).normalize());
-        let up = x.cross(tu - o).normalize();
-        (o, x, up.cross(x))
-    };
-    let (o0, x0, a0) = far(s0);
-    let (o1, _, a1) = far(s);
+fn pole_inward(car: &Car, s0: &ExplicitBeams, s: &ExplicitBeams, centre: Vec3) -> f32 {
+    let (o0, x0, a0) = car.far(s0);
+    let (o1, _, a1) = car.far(s);
     let zc = (centre - o0).dot(x0);
     let mut best = 0.0f32;
-    for &i in &b.shell.nodes {
+    for &i in &car.shell {
         let i = i as usize;
         let p = s0.nodes[i].pos;
         if p.x > 0.3 && ((p - o0).dot(x0) - zc).abs() < 0.15 && p.y > 0.3 && p.y < 1.2 {
@@ -3202,12 +3315,12 @@ fn pole_inward(b: &Built, s0: &ExplicitBeams, s: &ExplicitBeams, centre: Vec3) -
     best
 }
 
-fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
+fn side_pole_crush_p(car: &Car, kmh: f32, p: Perturb) -> f32 {
     let kmh = kmh * (1.0 + p.speed);
     let a = 75.0f32.to_radians() + p.yaw;
     let dir = Vec3::new(a.sin(), 0.0, a.cos());
-    let s0 = spawn(&b, Vec3::ZERO, 0.0);
-    let mut s = spawn(&b, dir * kmh / 3.6, 0.0);
+    let s0 = car.spawn(Vec3::ZERO, 0.0);
+    let mut s = car.spawn(dir * kmh / 3.6, 0.0);
     let r = 0.127;
     // The head's point in plan view, then along the line of travel until the
     // pole stands 3 cm off the nearest node.
@@ -3215,7 +3328,7 @@ fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
     let head = Vec3::new(
         0.38,
         0.0,
-        group_mean(&s0, &b, &["pillar_b", "pillar_b_r"]).z + (2.55 - 2.24) + p.offset,
+        car.mean(&s0, &["pillar_b"]).z + (2.55 - 2.24) + p.offset,
     );
     let gap = |c: Vec3| {
         s.nodes
@@ -3229,7 +3342,7 @@ fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
     }
     let centre = head + dir * t + Vec3::Y * 2.0;
     s.shapes.push(StaticShape::cylinder(centre, r, 2.0));
-    if std::env::var("O_DIAG").is_ok() {
+    if let (Ok(_), Some(b)) = (std::env::var("O_DIAG"), car.built) {
         // Each tenth: the struck doors' hardware groups broken, and the
         // door-to-body beams by kind (live, broken, yielded).
         let sk = &b.skeleton;
@@ -3367,7 +3480,7 @@ fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
             for _ in 0..20 {
                 s.step();
             }
-            let d = pole_inward(b, &s0, &s, centre);
+            let d = pole_inward(car, &s0, &s, centre);
             if d > deepest.0 {
                 deepest = (d, (k + 1) as f32 * 0.01);
             }
@@ -3380,39 +3493,18 @@ fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
     } else {
         run(&mut s, 1.5);
     }
-    if std::env::var("O_WHO").is_ok() {
+    if let (Ok(_), Some(b)) = (std::env::var("O_WHO"), car.built) {
         plastic_census(&s, b, "o");
     }
     // The far side's frame (as the c test).
-    let far = |st: &ExplicitBeams| {
-        let g = &b.groups["sill_r"];
-        let zs: Vec<f32> = g
-            .iter()
-            .map(|&i| b.skeleton.nodes[i as usize].p.z)
-            .collect();
-        let zm = zs.iter().sum::<f32>() / zs.len() as f32;
-        let half = |front: bool| {
-            let v: Vec<Vec3> = g
-                .iter()
-                .zip(&zs)
-                .filter(|(_, &z)| (z > zm) == front)
-                .map(|(&i, _)| st.nodes[i as usize].pos)
-                .collect();
-            v.iter().sum::<Vec3>() / v.len() as f32
-        };
-        let tu = group_mean(st, &b, &["tunnel"]);
-        let (o, x) = (half(false), (half(true) - half(false)).normalize());
-        let up = x.cross(tu - o).normalize();
-        (o, x, up.cross(x))
-    };
-    let (o0, x0, a0) = far(&s0);
-    let (o1, x1, a1) = far(&s);
+    let (o0, x0, a0) = car.far(&s0);
+    let (o1, x1, a1) = car.far(&s);
     // Struck-side exterior (shell nodes on the left half) near the pole's
     // line along the car (±0.15 m at spawn), between sill and belt.
     let zc = (centre - o0).dot(x0);
     let inward = |i: usize| (s0.nodes[i].pos - o0).dot(a0) - (s.nodes[i].pos - o1).dot(a1);
     let mut best = (0.0f32, 0usize);
-    for &i in &b.shell.nodes {
+    for &i in &car.shell {
         let i = i as usize;
         let p = s0.nodes[i].pos;
         let along = (p - o0).dot(x0);
@@ -3426,10 +3518,10 @@ fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
     let _ = x1;
     let (crush, at) = best;
     // The structure there too (door beams, sill, B-pillar: frame nodes).
-    let frame = (0..b.skeleton.nodes.len())
+    let frame = (0..car.n)
         .filter(|&i| {
             let p = s0.nodes[i].pos;
-            b.skeleton.nodes[i].primary
+            car.primary[i]
                 && p.x > 0.3
                 && ((p - o0).dot(x0) - zc).abs() < 0.15
                 && p.y > 0.25
@@ -3441,6 +3533,18 @@ fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
         "(o) side pole: the structure at the pole moved in {:.0} mm",
         frame * 1e3
     );
+    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let Some(b) = car.built else {
+        eprintln!(
+            "(o) side pole {kmh} km/h at 75°: residual crush at the pole {:.0} mm (node {at} at y {:.2}); KE left {:.2} kJ of {:.1}",
+            crush * 1e3,
+            s0.nodes[at].pos.y,
+            ke(&s) / 1e3,
+            0.5 * total * (kmh / 3.6).powi(2) / 1e3
+        );
+        assert!(finite(&s));
+        return crush;
+    };
     // FMVSS 214 S9.2.3 (door opening): the struck door does not separate
     // totally (some hinge or latch group holds); every door the pole does
     // not strike stays latched and hinged (no group of it breaks).
@@ -3472,7 +3576,6 @@ fn side_pole_crush_p(b: &Built, kmh: f32, p: Perturb) -> f32 {
         others.is_empty(),
         "a door the pole did not strike opened: {others:?}"
     );
-    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
     glass_report(&s, &b, &format!("side pole {kmh} km/h at 75°"));
     eprintln!(
         "(o) side pole {kmh} km/h at 75°: residual crush at the pole {:.0} mm (node {at} {} at y {:.2}); KE left {:.2} kJ of {:.1}",
@@ -3590,16 +3693,19 @@ fn ram_rig(
     inside: &dyn Fn(Vec3, f32) -> Option<f32>,
 ) -> Vec<(f32, f32)> {
     let dt = engine_softbody::authoring::skeleton::STEP;
-    let fixed: Vec<Vec3> = held.iter().map(|&i| s.nodes[i].pos).collect();
+    // The held nodes are immovable (the solver's own pin: they take no step).
+    // (Resetting their positions after each step instead is not a constraint:
+    // the node moves a step under its load and is yanked back, which drives
+    // its neighbours unstable on the BX's stiffer beams.)
+    for &i in held {
+        s.nodes[i].flags |= engine_softbody::explicit_beams::NODE_IMMOVABLE;
+        s.nodes[i].vel = Vec3::ZERO;
+    }
     let mut out = Vec::new();
     let (mut d, mut acc, mut n, mut next) = (0.0f32, 0.0f32, 0usize, 0.005f32);
     while d < travel {
         d += speed * dt;
         s.step();
-        for (k, &i) in held.iter().enumerate() {
-            s.nodes[i].pos = fixed[k];
-            s.nodes[i].vel = Vec3::ZERO;
-        }
         let mut f = 0.0f32;
         for nd in s.nodes.iter_mut() {
             if let Some(depth) = inside(nd.pos, d) {
@@ -3635,12 +3741,15 @@ fn ram_rig(
 #[test]
 fn p_fmvss_214_static_door_crush() {
     let b = built(Resolution::Medium);
-    let sk = &b.skeleton;
-    let mut s = spawn(&b, Vec3::ZERO, 0.0);
+    let fails = p_door_crush(&Car::of(&b)).1;
+    assert!(fails.is_empty(), "{fails:?}");
+}
+
+/// The p rig on `car`: (peak force, failures).
+fn p_door_crush(car: &Car) -> (f32, Vec<String>) {
+    let mut s = car.spawn(Vec3::ZERO, 0.0);
     run(&mut s, 1.0);
-    let door: Vec<usize> = (0..sk.nodes.len())
-        .filter(|&i| sk.parts[sk.nodes[i].part as usize] == "door_f_l")
-        .collect();
+    let door: Vec<usize> = car.g["door_f_l"].iter().map(|&i| i as usize).collect();
     let lo = door
         .iter()
         .map(|&i| s.nodes[i].pos.y)
@@ -3656,8 +3765,8 @@ fn p_fmvss_214_static_door_crush() {
     let r = 0.1525;
     let (y0, y1) = (lo + 0.127, lo + 0.80);
     // The far half of the car held (the rig's restraint).
-    let held: Vec<usize> = (0..sk.nodes.len())
-        .filter(|&i| sk.nodes[i].primary && s.nodes[i].pos.x < -0.2)
+    let held: Vec<usize> = (0..car.n)
+        .filter(|&i| car.primary[i] && s.nodes[i].pos.x < -0.2)
         .collect();
     let cx0 = outer + r + 0.01;
     let inside = move |p: Vec3, d: f32| -> Option<f32> {
@@ -3678,9 +3787,9 @@ fn p_fmvss_214_static_door_crush() {
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(0.457 + 0.05);
     let curve = ram_rig(&mut s, &held, -Vec3::X, travel, 0.1, &inside);
-    if std::env::var("P_SPLIT").is_ok() {
-        force_census(&s, &b, "p", None);
-        plastic_census(&s, &b, "p");
+    if let (Ok(_), Some(b)) = (std::env::var("P_SPLIT"), car.built) {
+        force_census(&s, b, "p", None);
+        plastic_census(&s, b, "p");
     }
     // Crush is counted from the ram's first contact with the door (the
     // first 5 mm step carrying more than 200 N).
@@ -3728,7 +3837,7 @@ fn p_fmvss_214_static_door_crush() {
     if peak < need {
         fails.push(format!("peak {peak} N < {need}"));
     }
-    assert!(fails.is_empty(), "{fails:?}");
+    (peak, fails)
 }
 
 /// FMVSS 216a roof crush (`crash-reference-targets.md` §1, §4.13): a rigid
@@ -3741,10 +3850,18 @@ fn p_fmvss_214_static_door_crush() {
 #[test]
 fn q_fmvss_216a_roof_crush() {
     let b = built(Resolution::Medium);
-    let sk = &b.skeleton;
-    let mut s = spawn(&b, Vec3::ZERO, 0.0);
+    let r = q_roof_crush(&Car::of(&b));
+    // FMVSS 216a needs 3.0 ×; the compact sedans measured (§1) are 4.48
+    // (2006–11 Civic), 5.1 (2010 Corolla) and 5.32 (2011 Mazda3): the roof
+    // lands inside that spread.
+    assert!((4.48..=5.32).contains(&r), "roof {r} × weight");
+}
+
+/// The q rig on `car`: the peak over the unloaded weight.
+fn q_roof_crush(car: &Car) -> f32 {
+    let mut s = car.spawn(Vec3::ZERO, 0.0);
     run(&mut s, 1.0);
-    let g = |n: &str| group_mean(&s, &b, &[n]);
+    let g = |n: &str| car.mean(&s, &[n]);
     // The roof's front: the windscreen header; its side: the left roof rail.
     let header = g("header_f");
     let rail = g("roof_rail");
@@ -3775,9 +3892,8 @@ fn q_fmvss_216a_roof_crush() {
     // its floor: the sills' nodes held.
     let held: Vec<usize> = ["sill", "sill_r"]
         .iter()
-        .flat_map(|g| b.groups[*g].iter().map(|&i| i as usize))
+        .flat_map(|g| car.g[*g].iter().map(|&i| i as usize))
         .collect();
-    let _ = sk;
     let inside = move |p: Vec3, d: f32| -> Option<f32> {
         if !under(p) {
             return None;
@@ -3788,11 +3904,11 @@ fn q_fmvss_216a_roof_crush() {
     let before = s.positions();
     let f0: Vec<f32> = s.beams.iter().map(|bm| bm.force).collect();
     let curve = ram_rig(&mut s, &held, push, 0.127, 0.1, &inside);
-    if std::env::var("Q_SPLIT").is_ok() {
-        force_census(&s, &b, "q", Some(&f0));
+    if let (Ok(_), Some(b)) = (std::env::var("Q_SPLIT"), car.built) {
+        force_census(&s, b, "q", Some(&f0));
     }
     let peak = curve.iter().map(|c| c.1).fold(0.0f32, f32::max);
-    if std::env::var("Q_DIAG").is_ok() {
+    if let (Ok(_), Some(b)) = (std::env::var("Q_DIAG"), car.built) {
         let mut v: Vec<(String, f32)> = b
             .groups
             .iter()
@@ -3814,7 +3930,9 @@ fn q_fmvss_216a_roof_crush() {
         );
     }
     let uvw: f32 = s.nodes.iter().map(|n| n.mass).sum::<f32>() * 9.81;
-    glass_report(&s, &b, "FMVSS 216a roof");
+    if let Some(b) = car.built {
+        glass_report(&s, b, "FMVSS 216a roof");
+    }
     eprintln!(
         "(q) FMVSS 216a roof: peak {:.1} kN within 127 mm = {:.2} × unloaded weight (≥ 3.0; IIHS good ≥ 4.0); curve every 25 mm: {:?} kN",
         peak / 1e3,
@@ -3826,14 +3944,7 @@ fn q_fmvss_216a_roof_crush() {
             .collect::<Vec<_>>()
     );
     assert!(finite(&s));
-    // FMVSS 216a needs 3.0 ×; the compact sedans measured (§1) are 4.48
-    // (2006–11 Civic), 5.1 (2010 Corolla) and 5.32 (2011 Mazda3): the roof
-    // lands inside that spread.
-    assert!(
-        (4.48..=5.32).contains(&(peak / uvw)),
-        "roof {} × weight",
-        peak / uvw
-    );
+    peak / uvw
 }
 
 /// One FMVSS 206 rig in the solver (TP-206's fixture): the body held, every
@@ -5758,6 +5869,461 @@ fn topology_census() {
                     .map(|x| (x / t * 100.0).round())
                     .collect::<Vec<_>>()
             );
+        }
+    }
+}
+
+/// Where a wall crash's mechanical energy rises: each node's share (its
+/// kinetic and height energy and half of each live beam's elastic energy)
+/// every 33 steps, tenth-of-a-second means, and the nodes whose share rose
+/// most over the tenth in which the total rose most. `PROBE_RES=low|medium`,
+/// `PROBE_KMH` (56), `PROBE_DRAG=0`. `--ignored` (a measurement).
+#[test]
+#[ignore]
+fn energy_rise_probe() {
+    let res = std::env::var("PROBE_RES")
+        .ok()
+        .and_then(|r| Resolution::parse(&r))
+        .unwrap_or(Resolution::Low);
+    let kmh: f32 = std::env::var("PROBE_KMH")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(56.0);
+    let b = built(res);
+    let sk = &b.skeleton;
+    let rows = sk.bound_rows();
+    let v = kmh / 3.6;
+    let mut s = spawn(&b, Vec3::new(0.0, 0.0, v), 0.0);
+    s.settings.drag = std::env::var("PROBE_DRAG").map_or(true, |x| x != "0");
+    let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+    s.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+        Vec3::new(3.0, 2.0, 1.0),
+    ));
+    assert_eq!(s.nodes.len(), sk.nodes.len());
+    let share = |s: &ExplicitBeams| -> (Vec<f64>, [f64; 3]) {
+        let mut e: Vec<f64> = s
+            .nodes
+            .iter()
+            .map(|n| {
+                0.5 * n.mass as f64 * n.vel.length_squared() as f64
+                    - (n.mass * GRAVITY) as f64 * (s.origin.y + n.pos.y) as f64
+            })
+            .collect();
+        let ke: f64 = s
+            .nodes
+            .iter()
+            .map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64)
+            .sum();
+        let mut el = 0.0;
+        for bm in s.beams.iter().filter(|b| !b.broken) {
+            let w = beam_energy(bm, solver_len(s, bm), bm.rest);
+            el += w;
+            e[bm.a as usize] += 0.5 * w;
+            e[bm.b as usize] += 0.5 * w;
+        }
+        let tot: f64 = e.iter().sum();
+        (e, [tot, ke, el])
+    };
+    let mut frames: Vec<(Vec<f64>, [f64; 3])> = Vec::new();
+    let steps = (2.0 / STEP).round() as usize;
+    for k in 0..steps {
+        s.step();
+        if k % 33 == 0 {
+            frames.push(share(&s));
+        }
+    }
+    let tenth = |w: usize| -> (Vec<f64>, [f64; 3]) {
+        let fr = &frames[w * 6..w * 6 + 6];
+        let n = fr[0].0.len();
+        let mut e = vec![0.0; n];
+        let mut t = [0.0; 3];
+        for f in fr {
+            for i in 0..n {
+                e[i] += f.0[i] / 6.0;
+            }
+            for j in 0..3 {
+                t[j] += f.1[j] / 6.0;
+            }
+        }
+        (e, t)
+    };
+    let nw = frames.len() / 6;
+    let tens: Vec<(Vec<f64>, [f64; 3])> = (0..nw).map(tenth).collect();
+    let mut worst = (f64::MIN, 0);
+    for w in 1..nw {
+        let d = tens[w].1[0] - tens[w - 1].1[0];
+        eprintln!(
+            "tenth {w}: total {:+.2} J (kinetic {:+.2}, elastic {:+.2})",
+            d,
+            tens[w].1[1] - tens[w - 1].1[1],
+            tens[w].1[2] - tens[w - 1].1[2]
+        );
+        if d > worst.0 {
+            worst = (d, w);
+        }
+    }
+    let w = worst.1;
+    let mut d: Vec<(f64, usize)> = (0..sk.nodes.len())
+        .map(|i| (tens[w].0[i] - tens[w - 1].0[i], i))
+        .collect();
+    d.sort_by(|a, b| b.0.total_cmp(&a.0));
+    eprintln!(
+        "the largest rise {:.2} J in tenth {w}; nodes that gained most:",
+        worst.0
+    );
+    for &(de, i) in d.iter().take(15) {
+        let gs: Vec<&str> = b
+            .groups
+            .iter()
+            .filter(|(_, g)| g.contains(&(i as u32)))
+            .map(|(k, _)| k.as_str())
+            .collect();
+        let n = &sk.nodes[i];
+        eprintln!(
+            "  {de:+8.2} J node {i} {} {:.3} kg row {:.2} at {:.2?} speed {:.2} m/s {:?}",
+            sk.parts[n.part as usize],
+            n.mass,
+            rows[i],
+            n.p,
+            s.nodes[i].vel.length(),
+            gs
+        );
+    }
+}
+
+// --- BeamNG's own cars on the same scenes (opt-in: RUBBLE_JBEAM_BX) -----------
+
+/// A BeamNG car's assembled configuration (`RUBBLE_JBEAM_BX`, the `vehicles`
+/// directory holding `bx/`; `REF_CAR` the vehicle, default `bx`; `REF_PC` its
+/// `.pc`, a path under the vehicle's directory or absolute; default the BX
+/// coupe on its slot defaults). None when the content is absent: these runs
+/// read local, non-redistributable content and nothing in the repository
+/// depends on it.
+fn beamng_desc() -> Option<engine_softbody::desc::SoftVehicleDesc> {
+    let dir = std::env::var("RUBBLE_JBEAM_BX").ok()?;
+    let dir = std::path::Path::new(&dir);
+    let name = std::env::var("REF_CAR").unwrap_or_else(|_| "bx".into());
+    let files = engine_softbody::jbeam::read_vehicle_dir(dir, &name).ok()?;
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    // (A configuration is slot choices, not content: the coupe body, every
+    // other slot its default.)
+    let pcs = match std::env::var("REF_PC") {
+        Ok(pc) => std::fs::read_to_string(dir.join(&name).join(pc)).ok()?,
+        Err(_) => r#"{"format":2,"model":"bx","parts":{"bx_body":"bx_body_coupe"}}"#.into(),
+    };
+    let mut desc = engine_softbody::jbeam::load_jbeam(&refs, Some(&pcs)).unwrap();
+    give_tyres(&mut desc);
+    Some(desc)
+}
+
+/// The BX's tyres are in BeamNG's shared `common` content, which is not here:
+/// its `pressureWheels` are hubs only (`hasTire` false), so it would sit on
+/// 0.14 m hubs, 15 cm low. The only passenger-car pressure tyre in the local
+/// JBeam content is a community car's 205/65 R15 (`RUBBLE_BEAMNG_MODS`,
+/// `qlourie_astral_r`, its front tyre: radius 0.324 m, against the BX's
+/// design axle heights of 0.325–0.35 m). Its tyre options are put on the BX's
+/// hubs at run time (the hubs keep the BX's own values). A Choice, reported
+/// with the results; without that content the BX runs on its hubs.
+fn give_tyres(desc: &mut engine_softbody::desc::SoftVehicleDesc) {
+    if desc
+        .pressure_wheels
+        .iter()
+        .all(|w| w.flags.get("hasTire") != Some(&false))
+    {
+        return;
+    }
+    let Ok(mods) = std::env::var("RUBBLE_BEAMNG_MODS") else {
+        eprintln!("(ref) no RUBBLE_BEAMNG_MODS: the car runs on its hubs");
+        return;
+    };
+    let dir = std::path::Path::new(&mods).join("qlourie_astral_r/vehicles");
+    let Ok(files) = engine_softbody::jbeam::read_vehicle_dir(&dir, "qlourie_astral_r") else {
+        eprintln!("(ref) no donor tyre: the car runs on its hubs");
+        return;
+    };
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let Ok(pcs) = std::fs::read_to_string(dir.join("qlourie_astral_r/wrc17_tarmac_balanced.pc"))
+    else {
+        return;
+    };
+    let donor = engine_softbody::jbeam::load_jbeam(&refs, Some(&pcs)).unwrap();
+    let Some(t) = donor
+        .pressure_wheels
+        .iter()
+        .find(|w| w.flags.get("hasTire") != Some(&false) && w.values.contains_key("radius"))
+    else {
+        return;
+    };
+    let tyre = |k: &str| {
+        !k.starts_with("hub") && !k.starts_with("brake") && k != "numRays" && k != "wheelOffset"
+    };
+    for w in &mut desc.pressure_wheels {
+        for (k, v) in t.values.iter().filter(|(k, _)| tyre(k)) {
+            w.values.insert(k.clone(), *v);
+        }
+        for (k, v) in t.flags.iter().filter(|(k, _)| tyre(k)) {
+            w.flags.insert(k.clone(), *v);
+        }
+        w.flags.insert("hasTire".into(), true);
+    }
+    eprintln!(
+        "(ref) tyres: the donor's radius {:.3} m, width {:.3} m, {:.1} psi",
+        t.values.get("radius").copied().unwrap_or(f32::NAN),
+        t.values.get("tireWidth").copied().unwrap_or(f32::NAN),
+        t.values.get("pressurePSI").copied().unwrap_or(f32::NAN)
+    );
+}
+
+/// A JBeam car in JBeam mode (pressure wheels), turned to face +z, its lowest
+/// node 2 cm above the ground, settled `settle` s at rest, then given `vel`
+/// (its tyres rolling).
+fn beamng_spawn(
+    desc: &engine_softbody::desc::SoftVehicleDesc,
+    vel: Vec3,
+    settle: f32,
+) -> ExplicitBeams {
+    use engine_softbody::explicit_beams::JbeamWheels;
+    let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(
+        desc,
+        JbeamWheels::Pressure,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        settings(),
+    )
+    .unwrap();
+    let f = engine_softbody::pack::forward_axis(desc);
+    let turn = Quat::from_rotation_y(-f.x.atan2(f.z));
+    for nd in &mut s.nodes {
+        nd.pos = turn * nd.pos;
+    }
+    let low = s.nodes.iter().map(|q| q.pos.y).fold(f32::MAX, f32::min);
+    let mid = s.nodes.iter().map(|q| q.pos).sum::<Vec3>() / s.nodes.len() as f32;
+    for nd in &mut s.nodes {
+        nd.pos.y -= low - 0.02;
+        nd.pos.x -= mid.x;
+        nd.pos.z -= mid.z;
+    }
+    run(&mut s, settle);
+    for nd in &mut s.nodes {
+        nd.vel += vel;
+    }
+    s.roll_tyres(vel);
+    s
+}
+
+/// A BeamNG car as a [`Car`]: its node sets picked by its JBeam node names
+/// (the BX's: `f*` floor and firewall, `fi*` floor inners, `p*` pillars,
+/// `q*` quarters, `rf*` roof; `l`/`ll` the left, `r`/`rr` the right), each a
+/// Choice made from the node positions (`beamng_ref_census`,
+/// `CENSUS_PARTS=bx_body_coupe`).
+fn beamng_car(desc: &engine_softbody::desc::SoftVehicleDesc) -> Car<'static> {
+    let settled = beamng_spawn(desc, Vec3::ZERO, 2.0);
+    let n = desc.nodes.len();
+    let id = |name: &str| -> u32 {
+        desc.nodes
+            .iter()
+            .position(|q| q.name == name)
+            .unwrap_or_else(|| panic!("no node {name}")) as u32
+    };
+    let ids = |names: &[&str]| -> Vec<u32> { names.iter().map(|k| id(k)).collect() };
+    let mut g = std::collections::HashMap::new();
+    // The rockers: the floor's outer row and its inner flange nodes.
+    g.insert(
+        "sill",
+        ids(&[
+            "f1ll", "fi1ll", "f2ll", "fi2ll", "f7ll", "f3ll", "fi3ll", "f4ll",
+        ]),
+    );
+    g.insert(
+        "sill_r",
+        ids(&[
+            "f1rr", "fi1rr", "f2rr", "fi2rr", "f7rr", "f3rr", "fi3rr", "f4rr",
+        ]),
+    );
+    // The floor's middle (only its direction from the far sill is used).
+    g.insert(
+        "tunnel",
+        ids(&["f2l", "f2r", "f3l", "f3r", "f7l", "f7r", "f8l", "f8r"]),
+    );
+    // The floor's rearmost cross row, under the rear seat (z −0.92).
+    g.insert("accel", ids(&["f4l", "f4r", "f4ll", "f4rr"]));
+    // B-pillar: roof joint, belt and its foot on the quarter.
+    g.insert(
+        "pillar_b",
+        ids(&["p3l", "p4l", "q1l", "q7l", "p3r", "p4r", "q1r", "q7r"]),
+    );
+    g.insert("header_f", ids(&["rf1", "rf1l", "rf1r"]));
+    g.insert("roof_rail", ids(&["rf1l", "rf2l", "rf3l", "rf4l"]));
+    // The hinge pillar's nodes below the belt, and the firewall's (inner
+    // rows: floor, mid, cowl).
+    g.insert("a_base_l", ids(&["f5ll", "f6ll"]));
+    g.insert("a_base_r", ids(&["f5rr", "f6rr"]));
+    g.insert("firewall_l", ids(&["f1l", "f5l", "f6l"]));
+    g.insert("firewall_r", ids(&["f1r", "f5r", "f6r"]));
+    let door = desc
+        .parts
+        .iter()
+        .find(|p| p.name.ends_with("door_L"))
+        .map(|p| p.nodes.clone())
+        .unwrap_or_default();
+    g.insert("door_f_l", door);
+    // The door opening: hinge pillar to latch pillar, at the hinge's lower
+    // node and at the belt.
+    let apertures = vec![
+        (id("f5ll") as usize, id("q7l") as usize),
+        (id("f6ll") as usize, id("q1l") as usize),
+        (id("f5rr") as usize, id("q7r") as usize),
+        (id("f6rr") as usize, id("q1r") as usize),
+    ];
+    let mut primary = vec![false; n];
+    for p in desc.parts.iter().filter(|p| {
+        p.name.contains("_body")
+            || p.name.contains("bumperbar")
+            || p.name.contains("radsupport")
+            || p.name.ends_with("_floor")
+    }) {
+        for &i in &p.nodes {
+            primary[i as usize] = true;
+        }
+    }
+    let mut shell: Vec<u32> = desc.triangles.iter().flat_map(|t| t.nodes).collect();
+    shell.sort_unstable();
+    shell.dedup();
+    shell.retain(|&i| (i as usize) < n);
+    Car {
+        built: None,
+        along: settled.nodes[..n].iter().map(|q| q.pos.z).collect(),
+        settled: Some(settled),
+        n,
+        primary,
+        shell,
+        g,
+        apertures,
+    }
+}
+
+/// n on BeamNG's car (`RUBBLE_JBEAM_BX`; reported, never asserted: the
+/// calibration of what BeamNG's own content scores on the references).
+#[test]
+#[ignore]
+fn beamng_n() {
+    let Some(desc) = beamng_desc() else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    let fails = n_wall(&beamng_car(&desc));
+    eprintln!("(ref n) {fails:#?}");
+}
+
+#[test]
+#[ignore]
+fn beamng_o() {
+    let Some(desc) = beamng_desc() else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    let car = beamng_car(&desc);
+    let crushes: Vec<f32> = ensemble()
+        .into_iter()
+        .map(|p| side_pole_crush_p(&car, 32.0, p))
+        .collect();
+    let (m, sd, lo, hi) = spread(&crushes);
+    eprintln!(
+        "(ref o) side pole residual crush: mean {:.0} mm, sd {:.0}, range {:.0}–{:.0} ({:.0?}) (297–445)",
+        m * 1e3,
+        sd * 1e3,
+        lo * 1e3,
+        hi * 1e3,
+        crushes.iter().map(|c| c * 1e3).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+#[ignore]
+fn beamng_p() {
+    let Some(desc) = beamng_desc() else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    let (peak, fails) = p_door_crush(&beamng_car(&desc));
+    eprintln!("(ref p) peak {:.1} kN; {fails:?}", peak / 1e3);
+}
+
+#[test]
+#[ignore]
+fn beamng_q() {
+    let Some(desc) = beamng_desc() else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    let r = q_roof_crush(&beamng_car(&desc));
+    eprintln!("(ref q) roof {r:.2} × weight (4.48–5.32)");
+}
+
+#[test]
+#[ignore]
+fn beamng_ref_census() {
+    let Some(desc) = beamng_desc() else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    eprintln!(
+        "{}: {} nodes, {:.1} kg, {} beams, {} tris, {} wheels, parts {}",
+        desc.name,
+        desc.nodes.len(),
+        desc.total_mass(),
+        desc.beams.len(),
+        desc.triangles.len(),
+        desc.wheels.len(),
+        desc.parts.len()
+    );
+    let s = beamng_spawn(&desc, Vec3::ZERO, 1.0);
+    eprintln!(
+        "solver nodes {}, mass {:.1} kg, tyres {}, KE after 1 s {:.2} J",
+        s.nodes.len(),
+        s.nodes.iter().map(|n| n.mass).sum::<f32>(),
+        s.tyres.len(),
+        ke(&s)
+    );
+    if let Ok(v) = std::env::var("CENSUS_NODES") {
+        for i in v.split(',').filter_map(|x| x.parse::<usize>().ok()) {
+            let parts: Vec<&str> = desc
+                .parts
+                .iter()
+                .filter(|p| p.nodes.contains(&(i as u32)))
+                .map(|p| p.name.as_str())
+                .collect();
+            let bs: Vec<String> = desc
+                .beams
+                .iter()
+                .filter(|b| b.a as usize == i || b.b as usize == i)
+                .map(|b| format!("{}", desc.nodes[(b.a + b.b) as usize - i].name))
+                .collect();
+            eprintln!(
+                "node {i} {} m {:.2} parts {parts:?} beams to {bs:?}",
+                desc.nodes[i].name, desc.nodes[i].mass
+            );
+        }
+    }
+    let want = std::env::var("CENSUS_PARTS").unwrap_or_default();
+    for p in &desc.parts {
+        let m: f32 = p.nodes.iter().map(|&i| desc.nodes[i as usize].mass).sum();
+        eprintln!("part {} ({} nodes, {m:.1} kg)", p.name, p.nodes.len());
+        if want.split(',').any(|w| !w.is_empty() && p.name.contains(w)) {
+            for &i in &p.nodes {
+                let q = s.nodes[i as usize].pos;
+                eprintln!(
+                    "   {:<10} x {:+.3} y {:.3} z {:+.3} m {:.2}",
+                    desc.nodes[i as usize].name, q.x, q.y, q.z, desc.nodes[i as usize].mass
+                );
+            }
         }
     }
 }
