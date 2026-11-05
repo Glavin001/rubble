@@ -34,7 +34,13 @@ fn main() -> Result<(), String> {
             meshes.extend(m);
         }
     }
-    let (v, rep) = jbeam_visual(&flex, &props, &desc, &sim, &meshes, [0.5, 0.05, 0.04])?;
+    let mut mats = std::collections::HashMap::new();
+    for e in walk(&dir.join(name)) {
+        if e.to_string_lossy().ends_with(".materials.json") {
+            mats.extend(engine_softbody::flexmesh::read_materials(&std::fs::read_to_string(&e).unwrap_or_default()));
+        }
+    }
+    let (v, rep) = jbeam_visual(&flex, &props, &desc, &sim, &meshes, &mats, [0.5, 0.05, 0.04])?;
     eprintln!(
         "{name}: {} nodes ({} in the solver); {} flexbodies, {} props, {} vertices, {} triangles, {} unbound vertices, {:.1} s",
         desc.nodes.len(), sim_nodes.len(), rep.flexbodies, rep.props, rep.vertices, rep.triangles, rep.unbound, t.elapsed().as_secs_f32()

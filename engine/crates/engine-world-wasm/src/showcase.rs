@@ -249,7 +249,8 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
 /// as `explicitSim` spawns it from `jbeam` (a desc node maps to the solver node
 /// at its rest position), in `showcaseCar`'s `visual` format, so
 /// `showcase-car-render.mjs` draws it. `spec`: `{ jbeam: [[name, text]], pc,
-/// paint: [r, g, b], native (the JBeam-mode spawn: `explicitSim`'s) }`; `meshes`: `[[name, Uint8Array]]`, the vehicle's `.dae`
+/// paint: [r, g, b], native (the JBeam-mode spawn: `explicitSim`'s),
+/// materials: [[name, text]] (the `*.materials.json` files) }`; `meshes`: `[[name, Uint8Array]]`, the vehicle's `.dae`
 /// files. Returns `{ visual, report: { flexbodies, props, vertices,
 /// triangles, unbound, missing } }`.
 #[wasm_bindgen(js_name = jbeamVisual)]
@@ -307,7 +308,11 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
         let text = String::from_utf8_lossy(&bytes);
         all.extend(flexmesh::read_collada(&text).map_err(|e| err(format!("{name}: {e}")))?);
     }
-    let (vis, rep) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &all, paint).map_err(err)?;
+    let mut mats = std::collections::HashMap::new();
+    for m in v.get("materials").and_then(|m| m.as_array()).into_iter().flatten() {
+        mats.extend(flexmesh::read_materials(m.get(1).and_then(|x| x.as_str()).unwrap_or("")));
+    }
+    let (vis, rep) = flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &all, &mats, paint).map_err(err)?;
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
     let r = Object::new();

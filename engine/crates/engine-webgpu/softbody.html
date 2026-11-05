@@ -146,7 +146,8 @@
       const pcName = qs.get('pc') ?? list.find((f) => f.endsWith('.pc'));
       const pc = pcName && list.includes(pcName) ? (await text(pcName))[1] : undefined;
       const meshes = await Promise.all(list.filter((f) => f.endsWith('.dae')).map(async (f) => [f, new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer())]));
-      importSrc = { kind: 'jbeam', files, pc, meshes, label: base.split('/').pop() };
+      const materials = await Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text));
+      importSrc = { kind: 'jbeam', files, pc, meshes, materials, label: base.split('/').pop() };
     } else if (qs.get('car') === 'import') {
       try { importSrc = JSON.parse(sessionStorage.getItem(IMPORT_KEY) || 'null'); } catch { importSrc = null; }
     }
@@ -1142,7 +1143,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // Or an imported JBeam vehicle's flexbodies and props (?mod=).
     let importVis = null;
     const bodyVisual = () => carKind === 'showcase' ? showcaseBuilt().visual
-      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native' }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; return r.visual; })());
+      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native', materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; return r.visual; })());
     const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
     let bodyFor = { layout: null, pos: null }, bodyIds = [];
     const syncBody = () => {

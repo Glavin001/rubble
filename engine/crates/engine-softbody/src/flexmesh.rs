@@ -451,6 +451,47 @@ pub fn material_class(name: &str) -> u8 {
     }
 }
 
+/// What Rubble's renderer uses of a BeamNG material (`*.materials.json`):
+/// its first stage's diffuse colour, and whether it is translucent, glows or
+/// is textured (textures are not read: a textured material shades flat).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MatInfo {
+    pub color: Option<[f32; 3]>,
+    pub translucent: bool,
+    pub emissive: bool,
+    pub textured: bool,
+}
+
+/// Read a `*.materials.json` (relaxed JSON): every material by its `mapTo`
+/// (the name meshes use) and its own name.
+pub fn read_materials(src: &str) -> HashMap<String, MatInfo> {
+    let mut out = HashMap::new();
+    let Ok(Value::Object(m)) = crate::jbeam::parse_relaxed(src) else {
+        return out;
+    };
+    for (key, v) in m {
+        let st0 = v.get("Stages").and_then(|s| s.get(0));
+        let f = |k: &str| st0.and_then(|s| s.get(k));
+        let color = f("diffuseColor")
+            .or_else(|| f("baseColorFactor"))
+            .and_then(Value::as_array)
+            .filter(|a| a.len() >= 3)
+            .map(|a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.5) as f32));
+        let textured = f("colorMap").or_else(|| f("baseColorMap")).is_some_and(|x| x.is_string());
+        let translucent = v.get("translucent").and_then(Value::as_bool).unwrap_or(false)
+            || v.get("translucentBlendOp").and_then(Value::as_str).is_some_and(|o| o != "None");
+        let emissive = f("glow").and_then(Value::as_bool).unwrap_or(false)
+            || f("emissive").and_then(Value::as_bool).unwrap_or(false)
+            || f("emissiveFactor").is_some_and(|x| x.is_array());
+        let info = MatInfo { color, translucent, emissive, textured };
+        if let Some(t) = v.get("mapTo").and_then(Value::as_str) {
+            out.insert(t.to_string(), info);
+        }
+        out.insert(key, info);
+    }
+    out
+}
+
 fn vec3_of(v: Option<&Value>, d: Vec3) -> Vec3 {
     let f = |k: &str| v.and_then(|o| o.get(k)).and_then(Value::as_f64).map(|x| x as f32);
     match v {
@@ -493,8 +534,29 @@ pub fn jbeam_visual(
     desc: &SoftVehicleDesc,
     sim: &crate::explicit_beams::ExplicitBeams,
     meshes: &[DaeMesh],
+    materials: &HashMap<String, MatInfo>,
     paint: [f32; 3],
 ) -> Result<(ShowcaseVisual, FlexReport), String> {
+    // A mesh material's class and colour: its name's class, made glass when
+    // the material is translucent and emissive when it glows; its diffuse
+    // colour when it is untextured (a textured one shades a flat mid grey,
+    // except paint, which takes the paint).
+    let shade = |name: &str| -> (u8, [f32; 3]) {
+        let mi = materials.get(name).or_else(|| materials.get(name.trim_end_matches("-material"))).copied().unwrap_or_default();
+        let mut c = material_class(name);
+        if mi.translucent && !matches!(c, mat::SCREEN | mat::GLASS | mat::LENS | mat::TAIL_LENS) {
+            c = mat::GLASS;
+        }
+        if mi.emissive {
+            c = if c == mat::TAIL_LENS { mat::TAIL_LED } else { mat::DRL };
+        }
+        let col = match (mi.color, mi.textured) {
+            (Some(k), false) if !matches!(c, mat::GLASS | mat::SCREEN) => k,
+            (_, true) if c != mat::PAINT => [0.3, 0.3, 0.31],
+            _ => crate::authoring::skin::color(c, paint),
+        };
+        (c, col)
+    };
     let sim_nodes: Vec<Vec3> = sim.nodes.iter().map(|n| n.pos).collect();
     let sim_nodes = &sim_nodes[..];
     let to_r = |p: Vec3| Vec3::from_array(crate::jbeam::to_rubble(p.to_array()));
@@ -587,10 +649,10 @@ pub fn jbeam_visual(
             if v.contains(&u32::MAX) {
                 continue;
             }
-            let mc = material_class(m.materials.get(m.tri_mat[ti] as usize).map_or("", String::as_str));
+            let (mc, col) = shade(m.materials.get(m.tri_mat[ti] as usize).map_or("", String::as_str));
             for &x in &v {
                 out.material[x as usize] = mc;
-                out.colors[x as usize] = crate::authoring::skin::color(mc, paint);
+                out.colors[x as usize] = col;
             }
             out.indices.extend_from_slice(&v);
         }
@@ -848,7 +910,7 @@ mod tests {
         let desc = crate::jbeam::load_jbeam(&files, None).unwrap();
         let flex = crate::jbeam::assembled_rows(&files, None, "flexbodies").unwrap();
         let sim = crate::explicit_beams::ExplicitBeams::new(&desc, Vec3::ZERO, Vec3::ZERO, Default::default());
-        let (v, rep) = jbeam_visual(&flex, &[], &desc, &sim, &meshes, [0.5; 3]).unwrap();
+        let (v, rep) = jbeam_visual(&flex, &[], &desc, &sim, &meshes, &HashMap::new(), [0.5; 3]).unwrap();
         assert_eq!((rep.flexbodies, rep.unbound, rep.triangles), (1, 0, 2), "{rep:?}");
         let nodes: Vec<Vec3> = sim.nodes.iter().map(|n| n.pos).collect();
         let (p, _) = crate::authoring::skin::deform(&v, &nodes);
