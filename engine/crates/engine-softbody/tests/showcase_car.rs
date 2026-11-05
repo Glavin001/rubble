@@ -2268,21 +2268,53 @@ fn n_wall_matches_the_nhtsa_sedans() {
     band("A-pillar base rearward right", -0.011, 0.015);
     band("firewall rearward left", 0.001, 0.067);
     band("firewall rearward right", -0.015, 0.085);
-    // §4.10 Campbell's speed scaling: C̄(50)/C̄(56) ≈ 0.875 (no measured
-    // spread; the sim's own spread decides the tolerance).
-    let c56 = med("avg crush");
-    let mut r50: Vec<f32> = [true, false]
-        .iter()
-        .map(|&d| {
-            let r = reference_wall(&b, 50.0, d, noise);
-            r.iter().find(|x| x.0 == "avg crush").unwrap().1
-        })
-        .collect();
-    r50.sort_by(f32::total_cmp);
-    let ratio = 0.5 * (r50[0] + r50[1]) / c56;
-    eprintln!("(n) average crush 50/56 km/h {ratio:.3} (Campbell 0.875)");
-    if (ratio - 0.875).abs() > 0.1 {
-        fails.push(format!("crush ratio 50/56 {ratio}"));
+    // §2.2, §4.10 Campbell's speed scaling: the residual crush is linear in
+    // the impact speed above b0 (8 km/h), v = b0 + b1·C̄, with one b1 at
+    // every speed, so C̄(50)/C̄(56) = (50 − 8)/(56 − 8) = 0.875. No measured
+    // spread exists for one car's b1 across speeds, so the sim's own decides:
+    // the median b1 over 47–52 km/h and over 54–59 km/h (drag on and off, 12
+    // runs each) differ by no more than the half range of the runs within
+    // either group. The ratio Campbell then implies, 0.875·b1(56)/b1(50), is
+    // reported beside the medians' crush ratio.
+    let b1_at = |kmh: &[f32]| -> (Vec<f32>, Vec<f32>) {
+        let (mut b1, mut c) = (Vec::new(), Vec::new());
+        for &k in kmh {
+            for drag in [true, false] {
+                let r = if k == 55.0 || k == 56.0 || k == 57.0 {
+                    let i = [55.0, 56.0, 57.0].iter().position(|&x| x == k).unwrap() * 2
+                        + if drag { 0 } else { 1 };
+                    runs[i].clone()
+                } else {
+                    reference_wall(&b, k, drag, noise)
+                };
+                b1.push(r.iter().find(|x| x.0 == "b1").unwrap().1);
+                c.push(r.iter().find(|x| x.0 == "avg crush").unwrap().1);
+            }
+        }
+        (b1, c)
+    };
+    let median = |mut v: Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        0.5 * (v[(v.len() - 1) / 2] + v[v.len() / 2])
+    };
+    let half_range = |v: &[f32]| {
+        0.5 * (v.iter().copied().fold(f32::MIN, f32::max)
+            - v.iter().copied().fold(f32::MAX, f32::min))
+    };
+    let (b1_lo, c_lo) = b1_at(&[47.0, 48.0, 49.0, 50.0, 51.0, 52.0]);
+    let (b1_hi, c_hi) = b1_at(&[54.0, 55.0, 56.0, 57.0, 58.0, 59.0]);
+    let scatter = half_range(&b1_lo).max(half_range(&b1_hi));
+    let (m_lo, m_hi) = (median(b1_lo.clone()), median(b1_hi.clone()));
+    let ratio = median(c_lo) / median(c_hi);
+    eprintln!(
+        "(n) Campbell b1 at 47–52 km/h {m_lo:.1} {b1_lo:.1?}, at 54–59 km/h {m_hi:.1} {b1_hi:.1?}: differ by {:.1} (runs' half range {scatter:.1}); C̄(50)/C̄(56) from the b1 medians {:.3}, from the crush medians {ratio:.3} (Campbell 0.875)",
+        (m_lo - m_hi).abs(),
+        0.875 * m_hi / m_lo
+    );
+    if (m_lo - m_hi).abs() > scatter {
+        fails.push(format!(
+            "b1 {m_lo} at 50 km/h against {m_hi} at 56 (scatter {scatter})"
+        ));
     }
     assert!(fails.is_empty(), "{fails:#?}");
 }

@@ -235,10 +235,15 @@ pub fn door_joint() -> Joint {
 pub const END_YIELD: f32 = 2.0e4;
 
 /// The front rails' threshold scale at their cabin end (under the floor at
-/// the B-pillar) and at the bumper: the same along the rail (the plateau
-/// starts at the bumper, so the pulse rises early, as measured).
+/// the B-pillar) and at the bumper. Nearly the same along the rail (the
+/// plateau starts at the bumper, so the pulse rises early, as measured); 5 %
+/// weaker at the bumper so the force rises with the crush as Campbell's
+/// model has it (`crash-reference-targets.md` §2.2): b1 is then one value at
+/// 47–52 and 54–59 km/h (30.5 and 30.6 over 13 runs each; C̄(50)/C̄(56)
+/// 0.877 against Campbell's 0.875). Uniform, b1 fell with speed (31.5 to
+/// 31.0: 0.861); at 0.9 it rose (0.882), at 0.8 more (0.896).
 pub const RAIL_CABIN: f32 = 1.0;
-pub const RAIL_BUMPER: f32 = 1.0;
+pub const RAIL_BUMPER: f32 = 0.95;
 
 /// The crush grade's thresholds against `Grades::default`'s: the rails' and
 /// aprons' plateau, set from NCAP measurements
