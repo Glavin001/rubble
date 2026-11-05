@@ -1204,6 +1204,196 @@ reverted. Open.
 - **f.** The profile's two-body self-contact fixes the 120 km/h energy rise
   in every build here.
 
+### BeamNG's own car on the same scenes (2026-11-05, later)
+
+The Ibishu BX coupe (BeamNG-authored, `bx_body_coupe`, every other slot its
+default) runs sedan1's scenes on Rubble's solver in JBeam mode (pressure
+wheels). It is opt-in and skips cleanly without the content:
+- `RUBBLE_JBEAM_BX`: the `vehicles` directory holding `bx/`;
+- `RUBBLE_BEAMNG_MODS`: the community content holding the donor tyre.
+
+Nothing of BeamNG's is committed. `reference_cars.rs` only loads from the
+paths a test passes it. The tests are:
+- `showcase_car`: `beamng_n`, `beamng_o`, `beamng_p`, `beamng_q`,
+  `beamng_pole_sweep`, `beamng_ref_census`;
+- `crash_invariants`: `beamng_reference_invariants_report`;
+- `explicit_scenes`: `mdb_into_beamng_reference_car` (GPU).
+
+The BX's node sets for the scenes (sills, B-pillars, header, door apertures)
+are picked by its JBeam node names. Each pick is a Choice.
+
+**Choices for the BX runs.**
+- **Tyres.** BeamNG's shared `common` content is not local, so the BX's
+  pressure wheels are hubs only. They take a community car's 205/65 R15
+  tyre (radius 0.325 m, against the BX's axle heights of 0.325–0.35 m).
+- **Ledgers.** Its ledgers are not judged. Their accounting does not cover
+  pressure tyres or bounded beams.
+- **The rigs pin with the solver's `NODE_IMMOVABLE`.** Before, they reset the
+  held nodes' positions after every step. That is not a constraint: the node
+  moves a step under its load and is yanked back. On the BX's stiffer beams it
+  drove the neighbours unstable within 10 steps. sedan1 under the true pin:
+  `p` 19.8 → 23.8 kN, `q` 8.49 → 9.01×.
+
+The other local stock car, `template_car_sedan`, is BeamNG's modelling
+template, not a crash model: 59 body nodes carrying 1,090 kg, no closures,
+and no tyres (`common`). It is not used.
+
+| Reference (band) | BX coupe | sedan1 (lanes, before the cuts) |
+|---|---|---|
+| n max crush (380–580 mm) | 279 | 592 |
+| n dynamic crush (620–750 mm) | 461 | 691 |
+| n t_m (63–76 ms) | 48.5 | 74.1 |
+| n peak (34–47 g) | 49.8 | 33.2 |
+| n b1 (22.9–39.2) | 86 | 25.1 |
+| n restitution (0.13–0.20) | 0.228 | 0.192 |
+| n apertures, A-pillar, firewall | all in (6–9 mm) | all in |
+| o residual (297–445 mm) | 351, sd 4 | 307, sd 121 (bimodal) |
+| o dynamic → springback | 367 → 4 % | 332–388 → about 45 % |
+| p initial / intermediate / peak (≥ 10 / 15.6 / its 2 × curb) | 9.0 / 14.0 / 28.7 kN (≥ 23.7) | 11.6 / 13.9 / 23.8 kN (≥ 28.4) |
+| q (4.48–5.32×) | 5.59 | 9.01 |
+| MDB residual (126–206 mm) | 202 | 137 |
+| Rear third, wall / head-on (past 0.2 %, broken) | 0, 0 / 0, 0 | 82, 7 / 18, 0 |
+| Lid against rear body, wall / head-on peak (≤ 5 mm) | 13.9 / 11.3 mm | 422 / 217 mm |
+| Rear body RMS, wall (≤ 5 mm) | 2.6 mm | 42 mm |
+| Wall ripple from 0.5 s (≤ 1 mm) | panels < 1; fascia 6.6, fuel tank 3.4, sideskirt 2.1 | body 4.2, bonnet 7.0, lid 10.6, doors 1.9–4.5, fascia 13.2 |
+| Pole far side (past 0.2 %, broken; far doors' hardware) | 20, 0; holds | 99, 6; holds |
+| A8 sweep at 30 km/h (passed through) | **21 of 244** | 0 of 244 |
+
+**What BeamNG's content shows on this solver.**
+- **Side, roof and MDB.** BeamNG's own yields (about 1 % strain, 8 kN a
+  body beam, at k·L about 1e6 N) land `o`, `p`, `q` and the MDB in or near
+  the measured bands. They also give 4 % springback in the pole, and its
+  rear body stays elastic.
+- **Frontal.** The BX is over-stiff (a 1990 small coupe with a short crush
+  zone) and rebounds more than sedan1 (e 0.23).
+- **Topology.** Its quality comes from fewer, heavier nodes and long beams
+  (145 body nodes, 0.56 m median beam).
+- **A8.** That spacing fails A8 on node-only static contact: a 25 cm pole
+  passes between its side nodes in 12 of 89 offsets. sedan1 keeps the
+  0.24 m pole lanes, so the BX's k·L is out of reach by topology.
+
+**Decision: real forces, each section counted once, spread by axial
+rigidity.**
+- **Ruled out:** BeamNG's strains at sedan1's k·L. Measured above, they make
+  the car too weak everywhere: n 964 mm, p 8.9 kN, q 3.93×.
+- **Why:** BeamNG's low strain is its yield over its k·L, not an independent
+  choice. The forces are what the scenes measure.
+- **Measured instead:** what a member's cut carries. Every non-crush
+  member's bay cut (the beams crossing the plane between two stations) held
+  1.4–6× its section's axial yield, typically 2–3×:
+  - the longitudinals at the full chord yield;
+  - two bend beams at half each;
+  - the face diagonals;
+  - on the body, the lane's shell edges and webs.
+
+  For example: sill 3.1×, B-pillar 2.8×, roof rail 2.5×, header 3.7×,
+  firewall 6×. This is the same double count as the lanes' (fixed above), in
+  the trusses themselves.
+- **Built now** (`one_tier_section_cuts`; `SECTION_CUTS=0` measures the old
+  build):
+  - Every cut's Σ yield·|cos| is its section's: its chords (4 a box, 2 a
+    ladder) × its chord yield.
+  - Within the cut, each beam's yield is proportional to its built
+    k·L·|cos|. So the cut's beams yield together, as a section's fibres do,
+    which gives the least elastic strain at yield the topology allows:
+    1–9 % at the cut, against 20–28 % on a lane chord before.
+  - Crush members keep their mean crush force and are only redistributed.
+  - A member's beams yield alike both ways (no sheet tension yield on a
+    lane edge that is a chord).
+- **Option not taken:** "a section's strength split across parallel
+  beams". Splitting does not lower ε_y unless the beams are longer: the bound
+  caps Σk at a node, not Σk·L. Spreading by k·L is that idea done exactly.
+
+**Effect (Medium, ensembles, everything else as built):**
+
+| Reference (band) | Before the cuts | Cuts | Cuts + `INTERIOR=1` |
+|---|---|---|---|
+| n max crush (380–580 mm) | 592 | 644 | 604 |
+| n dynamic (620–750 mm) | 691 | 730 | 677 |
+| n t_m (63–76 ms) | 74.1 | 80.3 | **75.1** |
+| n peak (34–47 g) | 33.2 | 30.0 | 33.9 |
+| n b1 (22.9–39.2) | 25.1 | **22.9** | **23.6** |
+| n restitution (0.13–0.20) | 0.192 | **0.170** | **0.143** |
+| n A-pillar base rearward (−7…17 mm) | in | 24, 25 | 22, 32 |
+| n ledger | passes | rises 3.8 J between tenths | passes |
+| o residual (297–445 mm) | 307 (bimodal) | 221, sd 10 | 258, sd 35 |
+| o dynamic | 332–388 | 406–415 | 426–467 |
+| p initial / intermediate / peak | 11.6 / 13.9 / 23.8 kN | 11.7 / 12.6 / 19.7 | 11.7 / 13.1 / 21.3 |
+| q (4.48–5.32×) | 9.01 | 7.63 | 7.26 |
+| g latch / door off (52.2–83.4 kN off) | 46.0 / 46.5 | 52.2 / 98.9 | 47.3 / 102.6 |
+| h | fails narrowly | fails narrowly (0.287 J against 0.277) | passes |
+| f 120 km/h | passes | passes | fails (below) |
+| t leaked | 19 | 19 | |
+| MDB (126–206 mm) | 137 | 180 | |
+| A8 sweep at 30 km/h | 0 of 244 | 0 of 244 | |
+| crash invariants | 8 of 17 | 9 of 18 | |
+| invariants_small | 19 of 19 | 19 of 19 | |
+
+- **Gained.** The cuts take the roof from 9.0× to 7.6× and the frontal's
+  rebound into its band. The pole's front latch now holds every run, so `o`
+  is no longer bimodal.
+- **Lost.** The members are a third to half as strong axially as before, so
+  the cell lets the A-pillar base back 24 mm and the door crush falls.
+- **What this says about the sections.** With each counted once, the real
+  sections in `side_sections` do not carry the side and frontal loads alone.
+  The over-count had been standing in for structure the car does not have
+  yet: door inner panels, the B-pillar's reinforcement, the roof bows'
+  joints. That is the next authoring work.
+- **Springback is not fixed by the cuts.** At the pole's deepest frame the
+  car holds 15.9 kJ elastically (`O_ELASTIC=1`), in this order:
+  - body skin 4.2 kJ;
+  - sill 3.4 kJ;
+  - suspension 1.6 kJ;
+  - floor_x1 1.0 kJ.
+
+  The skin's tension yield (σ_y·t, Rubble's extension) at the bound's k is
+  the largest store. That is the next lever.
+
+**`INTERIOR=1`: its two blockers fixed, a third found.**
+- **The energy gain was content.** The interior's minor ring left its band's
+  edge node lying on the edge of the floor's (and the top's) strip from major
+  to major: a T-junction closed by a sliver triangle.
+  - `crash_invariants::energy_terms_probe` (the world's ledger per term per
+    0.1 s) shows self-contact doing +1.0–1.6 kJ of positive work every tenth
+    while the car stands, balanced by the beams' dissipation. Two right-sill
+    nodes went on vibrating at 7–10 m/s.
+  - The strip's triangle is now split at that node, so the skin is
+    conforming. Self-contact's work fell to the baseline's 0–16 J a tenth,
+    and the wall's mechanical energy only falls.
+  - The solver's anti-clip spawn exclusions now also treat a node on a
+    triangle's edge as inside.
+- **The damping bound.** Body dashpots are rated at the BX's 18.2 /s on the
+  lighter of their two nodes' masses, not on the node each is from. Neither
+  end is damped harder per kilogram than the BX. Worst h·Σc/m 0.787 → 0.602
+  (`C_RATIO` 0.75). `a` at rest is clean (0.00 J between tenths).
+- **Still open: `f` at 120 km/h with drag off.**
+  - Two `bonnet_inner_3` ladder nodes (0.40 kg, row at the bound, one 25 mm
+    tie to the skin) oscillate at the step's Nyquist rate. Their beams yield
+    every step in alternating directions and harden, and 22 steps each add
+    0.5–2.1 kJ.
+  - It appears only with the cuts and the interior together.
+  - The solver agent's reading: content at the stability edge, since
+    `G_LIMIT` is 1.2 × 4/h² by design and the yield rule pumps the period-2
+    mode there. A node whose beams yield wants its row well under the edge.
+    The solver will add a load-time per-node stability check.
+- **Not adopted yet** because of `f`. The fix is that ladder's mass or its
+  tie, to be done with the lids' double skin.
+
+**Lids: measured modal data (for `panels_are_stiff_enough_for_millimetres_at_47_g`).**
+- **Published hoods measured on the car:**
+  - first torsion 17.7 Hz and 22.9 Hz (MDPI *Machines* 12(12) 862, 2024,
+    experimental modal analysis of a front hood);
+  - 12.3 Hz raised to 31.0 Hz by moving the lock (an NVH DOE study);
+  - lightweight hood designs' first mode 41.5 Hz at the least (stamping-aware
+    modal study).
+- **Design targets quoted:** 25–30 Hz and "above 40 Hz".
+- **No production hood reaches 48 Hz.** So the invariant's ≥ 48 Hz
+  ("millimetres at 47 g") is not physically achievable as written: a real
+  hood at 25 Hz deflects about 19 mm quasi-statically at 47 g.
+- **The measured target for the lids is their first mode at 18–41 Hz.**
+  sedan1's are 8.7 Hz (bonnet) and 6.7 Hz (boot lid). The doors (23.6 and
+  26.3 Hz) are in that range.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.

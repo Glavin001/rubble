@@ -127,7 +127,7 @@ The ledger (`ExplicitBeamsWorld::enable_ledger`) runs in every scene. The checke
 | Visual drift | ≤ the contact band, 2 cm | contact band |
 | Lid vs rear body; rear-body RMS | 5 mm | **Choice**: millimetres. The lid's inertia at 47 g on about 12 kg is ≤ 5.5 kN, well inside FMVSS 206's 8.9–11 kN. |
 | Ripple visible | 1 mm | **Choice**: about half a pixel at 2 m |
-| Panel lowest mode | ≥ 48 Hz | exact: deflection a/ω² ≤ 5 mm at a = 47 g, the top of the NHTSA peak range |
+| Panel lowest mode | ≥ 48 Hz | exact: deflection a/ω² ≤ 5 mm at a = 47 g, the top of the NHTSA peak range. **Not met by real hoods**: measured first modes are 17.7–41.5 Hz, and design targets are 25–40 Hz (`vehicle-authoring.md`, "Lids: measured modal data"); the measured band is the lids' target |
 
 ### Results
 

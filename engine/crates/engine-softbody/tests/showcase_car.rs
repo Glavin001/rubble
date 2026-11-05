@@ -3072,8 +3072,20 @@ fn reference_wall_p(
     let peak_g = f.iter().map(|a| -a).fold(0.0f32, f32::max);
     // (The ledgers are the authored car's: a JBeam car's pressure tyres and
     // bounded beams are not in their accounting.)
+    // (`LEDGER_WARN=1`, a measurement: report a ledger failure and go on, to
+    // read the crash's numbers.)
     if car.built.is_some() {
-        ledger.check(&s, &format!("n {kmh} km/h drag {drag}"), noise);
+        let what = format!("n {kmh} km/h drag {drag}");
+        if std::env::var("LEDGER_WARN").is_ok() {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ledger.check(&s, &what, noise)
+            }));
+            if r.is_err() {
+                eprintln!("({what}) LEDGER FAILED (see above)");
+            }
+        } else {
+            ledger.check(&s, &what, noise);
+        }
     }
     let l1 = car.cabin_local(&s);
     let attached: Vec<bool> = (0..s.nodes.len())
@@ -5849,9 +5861,10 @@ fn topology_census() {
     // other end's groups, length, k, kind), to see what fills its row.
     if let Ok(p) = std::env::var("TOPO_NODE") {
         let v: Vec<f32> = p.split(',').filter_map(|x| x.parse().ok()).collect();
-        let q = Vec3::new(v[0], v[1], v[2]);
+        let q = if v.len() == 3 { Vec3::new(v[0], v[1], v[2]) } else { Vec3::ZERO };
         let all: Vec<u32> = (0..sk.nodes.len() as u32).collect();
-        let n = sk.nearest(q, &all, 1)[0];
+        // (A single number: that node.)
+        let n = if v.len() == 1 { v[0] as u32 } else { sk.nearest(q, &all, 1)[0] };
         let gname = |i: u32| -> String {
             let g: Vec<&str> = b
                 .groups
