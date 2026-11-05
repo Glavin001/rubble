@@ -3,6 +3,9 @@
 //! pages (engine-world-wasm), the C ABI and the native viewer play the same presets; none of
 //! them decides physics.
 //!
+//! - [`scene`]: one [`SceneDef`] over the families placed here (rigid, vehicles, soft
+//!   bodies, motion, terrain): its world, its placement, a preset's query, and
+//!   [`Playground`], a placed scene stepped.
 //! - [`presets`]: the registry, every demo by name, with the page that hosts it today.
 //! - [`rigid`]: the rigid benchmark scenes (wall, ring, gables, pyramid, pile, columns).
 //! - [`hills`]: the terrain demo's heightfield and its bodies.
@@ -26,10 +29,12 @@ pub mod hills;
 pub mod motion;
 pub mod presets;
 pub mod range;
-pub mod softbody;
 pub mod rigid;
+pub mod scene;
+pub mod softbody;
 pub mod stage;
 pub mod timber_yard;
 pub mod vehicles;
 
 pub use presets::{preset, presets, Family, Preset};
+pub use scene::{Placed, PlayStats, Playground, RigidSceneDef, SceneDef};

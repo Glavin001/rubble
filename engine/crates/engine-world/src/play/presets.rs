@@ -296,7 +296,13 @@ const PRESETS: &[Preset] = &[
     ),
     // softbody.html
     p("soft", "Soft-body vehicles", Soft, "softbody.html", ""),
-    p("soft-arena", "Arena", Soft, "softbody.html", "scene=arena"),
+    p(
+        "soft-arena",
+        "Explicit fleet arena",
+        Soft,
+        "softbody.html",
+        "solver=explicit&xscene=arena",
+    ),
     p(
         "soft-crates",
         "Crates",

@@ -15,113 +15,16 @@
 //! both sides with static building cores behind them; the ground is y = 0.
 
 use engine_schema::guidance::{GuidanceSettings, ZoneDesc, ZoneShape};
-use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-/// Half the street's width to the facades' street faces (m).
-pub const STREET_HALF: f32 = 8.0;
-/// Facade block half extents (x thickness, y height, z length) and mass (kg).
-pub const BLOCK_HALF: [f32; 3] = [0.25, 0.25, 0.4];
-pub const BLOCK_MASS: f32 = 150.0;
-/// Rows of blocks per facade (12 m).
-pub const ROWS: u32 = 24;
-/// Building spans along the street (z from, z to), the same on both sides.
-pub const SPANS: [(f32, f32); 4] = [(0.0, 30.0), (40.0, 70.0), (80.0, 110.0), (120.0, 150.0)];
-/// Where the player starts (and heads +Z).
-pub const SPAWN: [f32; 3] = [-2.5, 3.5, -25.0];
+pub use engine_vehicle::streets::gauntlet::*;
+
 /// Blast radius on the facade (m) and the fastest block it throws (m/s).
 const BLAST_RADIUS: f32 = 1.6;
 const BLAST_SPEED: f32 = 7.5;
 
 /// A blasted block's launch: block index, velocity and spin.
 pub type BlockLaunch = (u32, [f32; 3], [f32; 3]);
-
-#[derive(Clone, Copy, Debug, Serialize)]
-pub struct Block {
-    pub p: [f32; 3],
-    pub half: [f32; 3],
-    pub mass: f32,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-pub struct Parked {
-    pub p: [f32; 3],
-    pub yaw: f32,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct Layout {
-    pub spawn: [f32; 3],
-    pub blocks: Vec<Block>,
-    /// Static building cores behind the facades.
-    pub cores: Vec<Block>,
-    pub parked: Vec<Parked>,
-}
-
-/// Parked cars at the kerbs (x, z, yaw).
-pub const PARKED: [(f32, f32, f32); 6] = [
-    (-5.6, 22.0, 0.0),
-    (5.6, 48.0, std::f32::consts::PI),
-    (-5.6, 75.0, 0.0),
-    (5.6, 96.0, std::f32::consts::PI),
-    (-5.6, 128.0, 0.0),
-    (5.6, 140.0, std::f32::consts::PI),
-];
-
-/// The street: facade blocks in running bond, cores and parked cars.
-pub fn layout() -> Layout {
-    layout_of(&SPANS, &PARKED)
-}
-
-/// A street of buildings over `spans` with cars parked at `parked`.
-pub fn layout_of(spans: &[(f32, f32)], parked: &[(f32, f32, f32)]) -> Layout {
-    let [hx, hy, hz] = BLOCK_HALF;
-    let mut blocks = Vec::new();
-    let mut cores = Vec::new();
-    for side in [-1.0f32, 1.0] {
-        let x = side * (STREET_HALF + hx);
-        for &(z0, z1) in spans {
-            for row in 0..ROWS {
-                // Odd rows shift half a block and hold one fewer.
-                let shift = if row % 2 == 1 { hz } else { 0.0 };
-                let n = ((z1 - z0) / (2.0 * hz)).floor() as u32 - (row % 2);
-                for k in 0..n {
-                    let z = z0 + shift + hz + 2.0 * hz * k as f32;
-                    // 1 mm gaps so the stack starts without overlap.
-                    let y = hy + row as f32 * (2.0 * hy + 0.001);
-                    blocks.push(Block {
-                        p: [x, y, z],
-                        half: BLOCK_HALF,
-                        mass: BLOCK_MASS,
-                    });
-                }
-            }
-            let height = ROWS as f32 * 2.0 * hy;
-            let depth = 8.0;
-            cores.push(Block {
-                p: [
-                    side * (STREET_HALF + 2.0 * hx + 0.01 + depth),
-                    height / 2.0,
-                    (z0 + z1) / 2.0,
-                ],
-                half: [depth, height / 2.0, (z1 - z0) / 2.0],
-                mass: 0.0,
-            });
-        }
-    }
-    Layout {
-        spawn: SPAWN,
-        blocks,
-        cores,
-        parked: parked
-            .iter()
-            .map(|&(x, z, yaw)| Parked {
-                p: [x, 2.2, z],
-                yaw,
-            })
-            .collect(),
-    }
-}
 
 /// The zones: a ring around the player car (led ahead of it), each parked
 /// car's roof and an arc behind the player. Bodies are world body indices;

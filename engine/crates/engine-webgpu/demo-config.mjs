@@ -10,7 +10,7 @@
 
 // The scene table (engine-scenes `web::scenes`, written by scene_export): titles,
 // cameras, solver constants and capacities, in menu order. The built scenes are made
-// in Rust when placed (`WebWorld.createDemoScene`); the rest are snapshots.
+// in Rust when placed (`rubble::play::SceneDef`, `WebWorld.placeScene`); the rest are snapshots.
 import table from './generated/scenes/demo.json' with { type: 'json' };
 
 export function demoScenes(qs = new URLSearchParams()) {

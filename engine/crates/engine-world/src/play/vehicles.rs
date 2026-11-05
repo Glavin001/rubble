@@ -117,6 +117,73 @@ pub struct RangeLayout {
     pub mass: f64,
 }
 
+impl StreetLayout {
+    fn of(l: &engine_vehicle::streets::gauntlet::Layout, num: fn(f32) -> f64) -> Self {
+        let block = |b: &engine_vehicle::streets::gauntlet::Block| LayoutBlock {
+            p: b.p.map(num),
+            half: b.half.map(num),
+            mass: num(b.mass),
+        };
+        StreetLayout {
+            spawn: l.spawn.map(num),
+            blocks: l.blocks.iter().map(block).collect(),
+            cores: l.cores.iter().map(block).collect(),
+            parked: l
+                .parked
+                .iter()
+                .map(|c| LayoutParked {
+                    p: c.p.map(num),
+                    yaw: num(c.yaw),
+                })
+                .collect(),
+            finish: None,
+            meteor: None,
+        }
+    }
+
+    /// The Gauntlet's street, as the page holds it from `Gauntlet.layout()` (its JSON's
+    /// shortest decimals).
+    pub fn gauntlet() -> Self {
+        Self::of(&engine_vehicle::streets::gauntlet::layout(), dec)
+    }
+
+    /// The meteor run's street with its finish line and meteors, as the page holds it from
+    /// `MeteorRun.layout()` (its JSON carries each f32 widened).
+    pub fn run() -> Self {
+        use engine_vehicle::streets::run;
+        let w = |x: f32| x as f64;
+        StreetLayout {
+            finish: Some(w(run::FINISH)),
+            meteor: Some(LayoutMeteor {
+                count: run::METEORS,
+                radius: w(run::METEOR_RADIUS),
+                mass: w(run::METEOR_MASS),
+            }),
+            ..Self::of(&run::layout(), w)
+        }
+    }
+}
+
+impl RangeLayout {
+    /// The meteor range, as the page holds it from `MeteorRange.range()` (widened f32s).
+    pub fn meteors() -> Self {
+        use engine_vehicle::streets::meteors;
+        let w = |x: f32| x as f64;
+        RangeLayout {
+            pads: meteors::pads()
+                .iter()
+                .map(|p| RangePad {
+                    p: p.p.map(w),
+                    half: p.half.map(w),
+                    lane: p.lane,
+                })
+                .collect(),
+            radius: w(meteors::RADIUS),
+            mass: w(meteors::MASS),
+        }
+    }
+}
+
 /// A vehicle scene: the scene and the page's switches.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -971,9 +1038,7 @@ pub fn place(world: &mut World, def: &VehicleSceneDef) -> anyhow::Result<Placed>
         "meteors" => {
             // Two lanes of target pads; the left one is steered. The car only anchors the
             // camera, between the lanes.
-            let g = def.range.clone().ok_or_else(|| {
-                anyhow::anyhow!("the meteor range needs its layout (MeteorRange.range)")
-            })?;
+            let g = def.range.clone().unwrap_or_else(RangeLayout::meteors);
             b.add_vehicle(&player, [0.0, 2.2, 18.0], 0.0, None)?;
             // Pads are kinematic, so they can slide as carts (moving targets).
             for p in &g.pads {
@@ -1037,10 +1102,13 @@ pub fn place(world: &mut World, def: &VehicleSceneDef) -> anyhow::Result<Placed>
             // Masonry facades on both sides of a street, static cores behind them and
             // parked cars at the kerbs. Facade blocks stay static until a blast launches
             // them.
-            let g = def
-                .street
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("the {scene} needs its street layout"))?;
+            let g = def.street.clone().unwrap_or_else(|| {
+                if scene == "run" {
+                    StreetLayout::run()
+                } else {
+                    StreetLayout::gauntlet()
+                }
+            });
             let sp = g.spawn;
             b.add_vehicle(&player, sp, 0.0, None)?;
             for c in &g.cores {

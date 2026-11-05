@@ -71,7 +71,7 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createSoftScene, pollFrame as poll, drain, macrotask, saveState, errorText, hiresCarJbeam, explicitSedanTruck } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, pollFrame as poll, drain, macrotask, saveState, errorText, hiresCarJbeam, explicitSedanTruck } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCarVisual, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
@@ -270,16 +270,11 @@
     // and the traffic count), solver, material slots, soft settings and bodies. ?threshold=
     // scales the deform/break thresholds (1: the file's raw values), ?sweeps= particle
     // sweeps per iteration, ?rigid=0 turns off rigid mode (quiet cars riding their cores).
-    const sceneDef = {
-      scene, car: carKind, explicit: EXPLICIT,
-      import: importSrc ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc ?? null } : { truck: importSrc.text }) : null,
-      strength: Number(qs.get('strength')) || 0, deform: Number(qs.get('deform')) || 0,
-      hz: HZ, iters: ITERS, threshold: Number(qs.get('threshold')) || 0, sweeps: Number(qs.get('sweeps')) || 0, rigid: qs.get('rigid') !== '0',
-      params: Object.fromEntries([...qs].filter(([, v]) => v !== '' && Number.isFinite(Number(v))).map(([k, v]) => [k, Number(v)])),
-      runup, cars: Number(qs.get('cars')) || 0, target: qs.get('target') === 'car' ? 'car' : 'wall',
-    };
+    const sceneDef = await sceneFromQuery('soft', location.search);
+    // A loaded vehicle (?truck=, or a file kept for this tab) is the scene's car.
+    if (importSrc) Object.assign(sceneDef, { car: 'import', import: importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc ?? null } : { truck: importSrc.text } });
     // The world opens the device; the page renders on it and reads the world's buffers in place.
-    const world = await createSoftScene(sceneDef);
+    const world = await createScene(sceneDef);
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -355,7 +350,7 @@
     }
     // The explicit solver collides with its own copies of its static shapes; the world
     // holds them only to render (not soft obstacles: the arena has hundreds).
-    const placed = world.placeSoftScene({ ...sceneDef, explicitBoxes: EXPLICIT ? xlayout.boxes : [] });
+    const placed = world.placeScene({ ...sceneDef, explicitBoxes: EXPLICIT ? xlayout.boxes : [] });
     for (const x of placed.softs) track(x.h, x.car, x.buggy);
     // The scene's vehicle where the page still needs it (the buggy's renderer, the
     // import scene's crash).

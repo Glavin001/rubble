@@ -6,7 +6,10 @@ use crate::{err, res, WebWorld};
 use rubble::*;
 use wasm_bindgen::prelude::*;
 
-pub(crate) fn from_js<T: serde::de::DeserializeOwned>(what: &str, v: JsValue) -> Result<T, JsValue> {
+pub(crate) fn from_js<T: serde::de::DeserializeOwned>(
+    what: &str,
+    v: JsValue,
+) -> Result<T, JsValue> {
     let v: serde_json::Value = serde_wasm_bindgen::from_value(v).map_err(err)?;
     serde_json::from_value(v).map_err(|e| err(format!("{what}: {e}")))
 }
@@ -19,36 +22,6 @@ pub(crate) fn js(v: serde_json::Value) -> JsValue {
 
 #[wasm_bindgen]
 impl WebWorld {
-    /// The world a vehicle scene needs (`rubble::play::vehicles::world_def`) on its own
-    /// device: `def` is the scene and the page's switches (`VehicleSceneDef`, camelCase).
-    #[wasm_bindgen(js_name = createVehicleScene)]
-    pub async fn create_vehicle_scene(def: JsValue) -> Result<WebWorld, JsValue> {
-        let def: rubble::play::vehicles::VehicleSceneDef = from_js("VehicleSceneDef", def)?;
-        let wd = res(rubble::play::vehicles::world_def(&def))?;
-        let (info, device, queue) = crate::web_device().await?;
-        let world = res(World::new(
-            GpuContext::Shared {
-                info,
-                device,
-                queue,
-            },
-            &wd,
-        ))?;
-        crate::creation_check(&world).await?;
-        Ok(WebWorld { world })
-    }
-
-    /// Place a vehicle scene in this (empty) world (`rubble::play::vehicles::place`).
-    /// Returns `Placed` (camelCase): each collider's page kind, the vehicles, the
-    /// cannonballs, the street's blocks and parked cars, the range's pads, meteors and
-    /// markers, the run's meteors, the bridge's bolts.
-    #[wasm_bindgen(js_name = placeVehicleScene)]
-    pub fn place_vehicle_scene(&mut self, def: JsValue) -> Result<JsValue, JsValue> {
-        let def: rubble::play::vehicles::VehicleSceneDef = from_js("VehicleSceneDef", def)?;
-        let placed = res(rubble::play::vehicles::place(&mut self.world, &def))?;
-        Ok(js(serde_json::to_value(placed).map_err(err)?))
-    }
-
     /// A vehicle (`VehicleDesc`, as engine-vehicle serialises it: the presets
     /// JSON) with its chassis origin (its centre of mass) at `position`.
     #[wasm_bindgen(js_name = addVehicle)]

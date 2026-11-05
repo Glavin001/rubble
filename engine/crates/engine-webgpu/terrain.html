@@ -37,7 +37,7 @@
   </div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createHillsScene, Poses, pollFrame, stepFrames, errorText } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, Poses, pollFrame, stepFrames, errorText } from './rubble-world.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -55,7 +55,8 @@
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
     // The world opens the device; the page renders on it and reads the world's buffers in place.
     // The scene (rubble::play::hills, engine-world): its world, solver, heightfield and bodies.
-    const world = await createHillsScene({ n: N });
+    const sceneDef = await sceneFromQuery('terrain', location.search);
+    const world = await createScene(sceneDef);
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -72,7 +73,7 @@
     addEventListener('resize', configure);
 
     // ---------------------------------------------------------------- world
-    const placed = world.placeHillsScene({ n: N });
+    const placed = world.placeScene(sceneDef);
     // The terrain: a static heightfield (collider 0), 161 × 161 samples, 0.25 m cells: 40 m
     // square of rolling hills and a ridge.
     const terrain = placed.terrain;

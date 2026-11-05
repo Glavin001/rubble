@@ -45,43 +45,12 @@ impl WebWorld {
     #[wasm_bindgen(js_name = createBodies)]
     pub fn create_bodies(&mut self, records: &[f32], shape: JsValue) -> Result<Vec<f64>, JsValue> {
         let shape = defs::shape_def(shape)?;
-        let ids = res(rubble::play::rigid::create_bodies(&mut self.world, records, &shape))?;
-        Ok(ids.iter().map(|b| handle(b.to_bits())).collect())
-    }
-
-    /// Place built scene `name` (engine-scenes `web`: wall, ring, gables, pyramid, pile,
-    /// columns, ring110k, gables506k; `rubble::play::rigid::place`). `options`: `{ levels,
-    /// ccd, spatialOrder, shape }` (`shape`: every shape's `ShapeDef`). Returns `{ bodies,
-    /// gpuToScene, initial }`: the body handles in slot order, the scene body at each slot,
-    /// and each scene body's starting position (x, y, z, scene order).
-    #[wasm_bindgen(js_name = createDemoScene)]
-    pub fn create_demo_scene(&mut self, name: &str, options: JsValue) -> Result<JsValue, JsValue> {
-        let get = |k: &str| js_sys::Reflect::get(&options, &k.into()).unwrap_or(JsValue::UNDEFINED);
-        let levels = get("levels").as_f64().unwrap_or(0.0) as u32;
-        let ccd = get("ccd").as_bool().unwrap_or(false);
-        let spatial = get("spatialOrder").as_bool().unwrap_or(false);
-        let shape = defs::shape_def(get("shape"))?;
-        let placed = res(rubble::play::rigid::place(
+        let ids = res(rubble::play::rigid::create_bodies(
             &mut self.world,
-            name,
-            levels,
-            ccd,
-            spatial,
+            records,
             &shape,
         ))?;
-        let o = js_sys::Object::new();
-        let bodies: Vec<f64> = placed.bodies.iter().map(|b| handle(b.to_bits())).collect();
-        let initial: Vec<f32> = placed.initial.iter().flatten().copied().collect();
-        let set = |k: &str, v: &JsValue| {
-            let _ = js_sys::Reflect::set(&o, &k.into(), v);
-        };
-        set("bodies", &js_sys::Float64Array::from(bodies.as_slice()).into());
-        set(
-            "gpuToScene",
-            &js_sys::Uint32Array::from(placed.gpu_to_scene.as_slice()).into(),
-        );
-        set("initial", &js_sys::Float32Array::from(initial.as_slice()).into());
-        Ok(o.into())
+        Ok(ids.iter().map(|b| handle(b.to_bits())).collect())
     }
 
     /// Continuous collision for a static or kinematic body when it is made

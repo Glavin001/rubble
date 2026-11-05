@@ -50,7 +50,11 @@ pub fn create_bodies(
         update_body_mass: false,
         ..shape.clone()
     };
-    for (b, r) in ids.iter().zip(&rows) {
+    for (k, (b, r)) in ids.iter().zip(&rows).enumerate() {
+        // Each body's shape and mass are uploads: let them land in batches.
+        if k > 0 && k % 4096 == 0 {
+            world.settle_uploads();
+        }
         let geometry = match r[19] as u32 {
             0 => Geometry::Sphere {
                 center: [0.0; 3],

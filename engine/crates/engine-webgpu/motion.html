@@ -40,7 +40,7 @@
   <div id="stats" class="panel"><div id="statsBody"></div><div id="log"></div></div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createMotionScene, Poses, pollFrame as poll, stepFrames, errorText } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, Poses, pollFrame as poll, stepFrames, errorText } from './rubble-world.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -76,8 +76,8 @@
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
     // The world opens the device; the page renders on it and reads the world's buffers in place.
     // The scene (rubble::play::motion, engine-world): its world, solver and bodies.
-    const sceneDef = { scene, lookAhead };
-    const world = await createMotionScene(sceneDef);
+    const sceneDef = await sceneFromQuery('motion', location.search);
+    const world = await createScene(sceneDef);
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -95,7 +95,7 @@
 
     // ---------------------------------------------------------------- world
     const DT = 1 / 60; // the scene's step (rubble::play::motion), in f64 for the page's clocks
-    const placed = world.placeMotionScene(sceneDef);
+    const placed = world.placeScene(sceneDef);
     // Characters: handle -> { start, jumps sent }.
     const characters = new Map(placed.characters.map((c) => [c.h, { start: c.start, jumps: 0 }]));
     // Input with a jump counter (a new value jumps once), as the HUD keys count jumps.

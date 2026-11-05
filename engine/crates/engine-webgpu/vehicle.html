@@ -103,7 +103,7 @@
     // Physics: rubble's Rust World (engine-world-wasm), the host native and Unreal run.
     // This page keeps rendering, input, UI and its scene scripts; the street, meteor
     // and run builders (engine-vehicle-wasm) are Rust that only describe launches.
-    import { createVehicleScene, pollFrame as poll, stepFrames, saveState, errorText } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, pollFrame as poll, stepFrames, saveState, errorText } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL, Gauntlet, MeteorRange, MeteorRun } from './vehicle.mjs';
     import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
     import { duneBuggySoft } from './soft.mjs';
@@ -194,24 +194,14 @@
     const range = scene === 'meteors';
     const run = scene === 'run' ? new MeteorRun() : null;
     if (run) document.body.classList.add('run');
-    const sceneDef = {
-      scene, preset: presetName, strength, hybrid, rigidMode: qs.get('rigid') !== '0',
-      // ?spawn=x,z,yaw places the player vehicle (yaw in radians about +Y).
-      spawn: (qs.get('spawn') || '').split(',').filter(Boolean).map(Number),
-      vehicles: Number(qs.get('vehicles')) || 48,
-      heavy: qs.get('heavy') || null,
-      tracksShells: qs.get('tracks') === 'shells',
-      sleepOff: qs.get('sleep') === 'off',
-      // ?rest=carry: the resting-pair carry instead of the sleep archive.
-      carryRest: qs.get('rest') === 'carry',
-      // Continuous collision (BODY_CCD, engine/docs/ccd.md) for the cannonballs: a 45 m/s
-      // ball gets a time-of-impact contact; ?ccd=0 turns it off.
-      cannonCcd: qs.get('ccd') !== '0',
-      street: street ? JSON.parse(street.layout()) : run ? JSON.parse(run.layout()) : null,
-      range: range ? JSON.parse(MeteorRange.range()) : null,
-    };
+    // The scene as Rust reads the URL (rubble::play::SceneDef::from_query); Rust builds the
+    // street, run and range layouts too (engine_vehicle::streets). The page keeps its own
+    // copies for its scripts (blasts, meteors, scoring).
+    const sceneDef = await sceneFromQuery('vehicle', location.search);
+    const layout = street ? JSON.parse(street.layout()) : run ? JSON.parse(run.layout()) : null;
+    const rangeLayout = range ? JSON.parse(MeteorRange.range()) : null;
     // The world opens the device; the page renders on it and reads the world's buffers in place.
-    const world = await createVehicleScene(sceneDef);
+    const world = await createScene(sceneDef);
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -226,7 +216,7 @@
     };
     configure();
     addEventListener('resize', configure);
-    const placed = world.placeVehicleScene(sceneDef);
+    const placed = world.placeScene(sceneDef);
     const capacity = placed.capacity;
     const DT = world.solver().dt, GRAVITY_Y = world.solver().gravityY;
     // The simulation's clock: steps since the scene started or was reset.
@@ -251,13 +241,13 @@
     // Parked bodies: static until launched (bodySetType).
     const park = (b) => world.bodySetType(b.id, 'static', b.home, [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
     const launch = (b, p, v, w = [0, 0, 0]) => world.bodySetType(b.id, 'dynamic', p, [0, 0, 0, 1], v, w);
-    const rocks = { list: placed.rocks, count: placed.rocks.length, radius: sceneDef.street?.meteor?.radius ?? 1, mass: sceneDef.street?.meteor?.mass ?? 1 };
-    const blocks = { list: placed.blocks, count: placed.blocks.length, layout: sceneDef.street?.blocks, parked: placed.parked, launched: new Set() };
+    const rocks = { list: placed.rocks, count: placed.rocks.length, radius: layout?.meteor?.radius ?? 1, mass: layout?.meteor?.mass ?? 1 };
+    const blocks = { list: placed.blocks, count: placed.blocks.length, layout: layout?.blocks, parked: placed.parked, launched: new Set() };
     // Meteor range: launched meteors and their touchdown markers.
     const meteors = {
       pads: placed.pads, moving: qs.get('targets') === 'moving', routes: qs.get('routes') !== '0',
       list: placed.meteors, count: placed.meteors.length, markerList: placed.markers, markers: placed.markers.length,
-      radius: sceneDef.range?.radius, mass: sceneDef.range?.mass,
+      radius: rangeLayout?.radius, mass: rangeLayout?.mass,
       next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]],
     };
     const bridgeBolts = placed.bridgeBolts; // breakable joints in the scene (bridge)

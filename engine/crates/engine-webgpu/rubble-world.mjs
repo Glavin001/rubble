@@ -6,7 +6,7 @@
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
-  hiresCarJbeam, explicitSedanTruck,
+  hiresCarJbeam, explicitSedanTruck, sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -31,43 +31,31 @@ export async function createWorld(def = {}) {
 }
 
 /**
- * A vehicle demo scene (`rubble::play::vehicles`): `def` the scene and the page's switches
- * (`VehicleSceneDef`, camelCase). The world is made for it; place its bodies with
- * `world.placeVehicleScene(def)`.
+ * A demo scene placed in Rust (`rubble::play::SceneDef`: `{ family, ... }` from
+ * `sceneFromQuery(family, location.search)` or `presetScene(name)`), its world on its own
+ * device with `settings` (`WorldDef` fields, as `createWorld` takes them) over the scene's
+ * own; place it with `world.placeScene(def)`.
  */
-export async function createVehicleScene(def) {
+export async function createScene(def, settings = undefined) {
   ready ??= init();
   await ready;
-  const world = await WebWorld.createVehicleScene(def);
+  const world = await WebWorld.createScene(def, settings);
   world.flags = solverFlags();
   return world;
 }
 
-/** A motion demo scene (`rubble::play::motion`); place it with `world.placeMotionScene(def)`. */
-export async function createMotionScene(def) {
+/** The scene a family's page builds from its URL query (`rubble::play::SceneDef::from_query`). */
+export async function sceneFromQuery(family, query) {
   ready ??= init();
   await ready;
-  const world = await WebWorld.createMotionScene(def);
-  world.flags = solverFlags();
-  return world;
+  return wasmSceneFromQuery(family, query);
 }
 
-/** The terrain demo's hills (`rubble::play::hills`); place them with `world.placeHillsScene(def)`. */
-export async function createHillsScene(def) {
+/** Preset `name`'s scene (`rubble::play::Preset::scene_def`). */
+export async function presetScene(name) {
   ready ??= init();
   await ready;
-  const world = await WebWorld.createHillsScene(def);
-  world.flags = solverFlags();
-  return world;
-}
-
-/** A soft-body demo scene (`rubble::play::softbody`); place it with `world.placeSoftScene(def)`. */
-export async function createSoftScene(def) {
-  ready ??= init();
-  await ready;
-  const world = await WebWorld.createSoftScene(def);
-  world.flags = solverFlags();
-  return world;
+  return wasmPresetScene(name);
 }
 
 /**
