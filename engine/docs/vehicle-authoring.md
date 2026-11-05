@@ -812,6 +812,126 @@ elastic energy, about 50 ms):
 The crush zone is not where the spring is. The passenger cell and the door
 ring hold up to 52 kJ elastically and give it back.
 
+### Real crush, damping and heavier nodes (2026-11-05, later)
+
+The user's decision on the rebound above: real crush mechanics, BeamNG's
+damping, and fewer, heavier nodes, with strengths kept real. All Medium,
+8-run ensembles where a reference has one.
+
+**Damping (measured, not tuned).** `examples/jbeam_damping.rs` measures each
+beam's damping ratio on its own two-mass mode,
+ζ = beamDamp / (2√(beamSpring·m₁m₂/(m₁+m₂))), on the BX's default
+configuration:
+
+| Part (BX) | ζ median (p10–p90) | sedan1 before |
+|---|---|---|
+| body (`bx_body`) | 0.0275 (0.018–0.052) | 0.069 |
+| front rails (body, `f*` frame nodes) | 0.0177 (0.015–0.018) | |
+| bumper bar | 0.0158 | |
+| doors | 0.0334 (0.025–0.040) | 0.081–0.091 |
+| bonnet | 0.0593 (0.045–0.080) | 0.112 |
+| boot lid (tailgate) | 0.0567 (0.038–0.065) | 0.125 |
+| fenders | 0.0422 (0.039–0.053) | 0.084 |
+| bumpers (fascias) | 0.089 | 0.125–0.138 |
+| windscreen | 0.0200 (0.017–0.026) | |
+| door glass | 0.0545 (0.046–0.057) | |
+
+- `DampingRatios` sets every part beam (not the fixed mounts or the
+  suspension) to its part's median, c = 2ζ√(k·μ) at its target k, before
+  `cap_to_bound` (which keeps ζ).
+- The body's dashpots take the BX's damping-only beams' rate: 12 beams of
+  500 N·s/m over 328.9 kg, 18.2 /s per kilogram of the node each is from.
+- **The damping bound.** sedan1's worst h·Σc/m was 1.29, past `C_RATIO`'s
+  0.75, at a light node that 16 nodes' dashpots chose as their partner. With
+  a fan-in of 2 and the BX ratios it is 0.65. The one-tier test asserts it.
+
+**Crush members.**
+- A Rubble `.truck` extension, `rubble_jbeam_plastic`
+  (`jbeam-semantics-spec.md` §18.3), gives beams JBeam's deformLimitStress
+  and deformLimit. The loader makes them JBeam NORMAL beams, which the CPU
+  and GPU dispatch per beam.
+- `CrushSpec` (`one_tier_crush`): every bay's cut (the member's beams
+  crossing the plane between two stations, Σ yield × |cos|) yields at
+  Abramowicz and Jones's mean progressive crush force,
+  P_m = 13.06·σ₀·t^(5/3)·C^(1/3).
+  - `rail_f`: 80 × 120 × 1.6 mm DP600, 61.7 kN (the section is a Choice).
+  - `rail_r_tail`: 100 × 130 × 1.6 mm, 64.6 kN.
+  - No hardening: deformLimitStress = the yield. Stroke: deformLimit 0.73
+    (the effective crushing distance).
+  - The bumper beams keep their bending yields and fold without hardening.
+- The front bumper beam is the Accord's: roll-formed steel, 590 MPa tensile,
+  assembly 7.96 kg (NHTSA DOT HS 811 666 §5.10.7.1), as a 60 × 100 × 1.6 mm
+  box (a Choice). Its yields come from its M_p. It shares `rail_f`'s
+  end-station nodes.
+
+**Sheet buckling.** A thin bay in compression buckles long before it
+yields. A sheet edge's yield is its bay's ultimate stress
+(`sheet_ultimate_stress`):
+- σ_cr = 4π²E/(12(1 − ν²))·(t/b)² (k = 4, a Choice), then Winter's
+  effective width, σ_u = σ_y·√(σ_cr/σ_y)·(1 − 0.22√(σ_cr/σ_y)), with b the
+  edge's length;
+- 0.8 mm on 0.2 m bays: 48 MPa against σ_y 210;
+- the same both ways, because JBeam has one beamDeform. Our body skin beams
+  now yield at about 7 kN; the BX's median is 8 kN.
+
+At z 4.0 the shell carried about 100 kN, more than the rails. It now
+carries 10–50 kN.
+
+**Heavier, fewer nodes.**
+- `Spacing::pole_lanes` keeps every spacing a pole can meet (along the car,
+  the sides, the ends) at most 0.24 m. The roof and floor take the
+  resolution's 0.30 and 0.35 m.
+- `pillar_c` has pole-width stations (A8), so the rear doors' latches meet
+  the pillar's own nodes.
+- Door hardware picks its pillar nodes from members' nodes only.
+- Counts: 940 to 872 nodes. Body skin 350 to 282 nodes, median 1.31 to
+  1.53 kg (BX 145 at 1.7 kg). Bonnet 25 skin nodes (BX 26). Front door 19
+  skin nodes, median 0.88 kg (BX 11 at 1.0). Rear door 16.
+- Skin beam k: body 8.7e5 N/m, doors 4.8–5.4e5 N/m (BX door skin
+  1.1 MN/m on 1 kg nodes).
+- **Side glass as its own part** (`GLASS_PART`) is built and gives 15-node
+  doors at 1.3 kg. sedan1 does not use it (open): with it, the 52 and
+  120 km/h walls' energy rose 2–38 J between tenths of a second. That held
+  with the pane welded in instead of bolted, so the cause is the extra shut
+  line, not the break group.
+
+**Results (sedan1, Medium):**
+
+| Reference | Before (71fb8075) | Now | Band |
+|---|---|---|---|
+| n max residual crush | 356 mm | 643 mm | 380–580 |
+| n dynamic crush | 0.51 m | 0.698 m | 0.62–0.75 |
+| n t_m | 57 ms | 75.4 ms | 63–76 |
+| n restitution | 0.27 | 0.175 | 0.13–0.20 |
+| n peak g | 60 | 31.8 | 34–47 |
+| n b1 | 67 | 22.8 | 22.9–39.2 |
+| n apertures, A-pillar, firewall | p90 18 mm out | all in | |
+| f 120 km/h (b1, ledgers) | fails | passes | |
+| h settle | fails | passes | |
+| o side pole residual | 245 mm (sd 15) | 270 mm (sd 26) | 297–445 |
+| p FMVSS 214 peak | 21.3 kN | 18.9 kN | ≥ 28.4 |
+| q FMVSS 216a | 5.55× | 6.99× | 4.48–5.32 |
+| g door off | 104 kN | 47 kN | 78–83 |
+| t T-bone leak, ensemble mean at 0 / 0.43 / 0.7 m | | 1.40 / 0.84 / 0.71 % | ≤ 1 % |
+| MDB residual | | 177 mm | 126–206 |
+| A8 sweep at 30 km/h | | 0 of 244 | 0 |
+| torsion (BIW) | 7.4 kN·m/deg | 10.3, glazing 2.4 % | 12.3, about 12 % |
+
+Notes on the table:
+- **n crush profile.** NHTSA measures C1–C6 against each point's own
+  position. The swept bumper centre starts 14 cm ahead of its ends and ends
+  on the same flat front, so its extra 14 cm is real crush. That makes the
+  maximum.
+- **n before.** Test `n`'s strips were ±5 cm, and the one-tier bumper
+  beam's nodes are 0.44 m apart, so C3/C4 measured the engine block or the
+  rear bumper. Each strip is now half the points' spacing either side. The
+  "before" column was measured with the old strips.
+- **o scatter.** The side pole's ensemble sd is 26 mm. NHTSA's repeat tests
+  scatter 24 mm (pole) and 14 mm (MDB).
+- **u (A6).** The side pole at the latch line lets the front door's primary
+  latch go at 27.2 kN; the secondary holds.
+- `sedan` stays the default: sedan1 does not pass o, p, q, g or t yet.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
