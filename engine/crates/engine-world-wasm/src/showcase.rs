@@ -94,10 +94,107 @@ pub fn decode_texture(bytes: &[u8], size: u32) -> Result<Vec<u8>, JsValue> {
 /// The showcase car's third level of detail (`showcase_visual_lod`'s detail).
 const FAR_DETAIL: f32 = 0.2;
 
+/// The visual for a spawn on raycast wheels (`engine_softbody::explicit_drive`):
+/// without the tyre nodes and beams the `.truck` spawn builds, so every binding,
+/// beam index and per-node array matches that solver's vehicle. The tyres' own
+/// skin goes (the page draws the raycast wheels); beams after the tyres' move down.
+struct TyreCut {
+    /// The spawn's nodes without tyres, its first tyre beam and the tyre beams.
+    nodes: u32,
+    first: u32,
+    count: u32,
+}
+
+impl TyreCut {
+    fn of(truck: &str) -> Result<Self, JsValue> {
+        use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
+        let z = glam::Vec3::ZERO;
+        let with = ExplicitBeams::from_truck(truck, z, z, ExplicitBeamsSettings::default()).map_err(err)?;
+        let (without, _) =
+            ExplicitBeams::from_truck_raycast(truck, None, z, 0.0, z, ExplicitBeamsSettings::default()).map_err(err)?;
+        // Beam order: cinecam beams, tyre beams, then the file's.
+        let first = engine_softbody::truck::parse_truck(truck).cinecams.len() as u32 * 8;
+        Ok(Self {
+            nodes: without.nodes.len() as u32,
+            first,
+            count: (with.beams.len() - without.beams.len()) as u32,
+        })
+    }
+
+    fn beam(&self, b: u32) -> Option<u32> {
+        if b < self.first {
+            Some(b)
+        } else if b < self.first + self.count {
+            None
+        } else {
+            Some(b - self.count)
+        }
+    }
+
+    fn apply(&self, v: &mut ShowcaseVisual) {
+        let n = self.nodes;
+        let live = |t: &[u32; 3]| t.iter().all(|&i| i < n);
+        let ok_vertex: Vec<bool> = v.bind_nodes.iter().map(live).collect();
+        let idx: Vec<u32> = v
+            .indices
+            .chunks(3)
+            .filter(|t| t.iter().all(|&i| ok_vertex[i as usize]))
+            .flatten()
+            .copied()
+            .collect();
+        v.indices = idx;
+        for (b, ok) in v.bind_nodes.iter_mut().zip(&ok_vertex) {
+            if !ok {
+                *b = [0; 3];
+            }
+        }
+        v.normal_tris.retain(|t| live(t));
+        let mut lists = vec![Vec::new(); n as usize];
+        for (k, t) in v.normal_tris.iter().enumerate() {
+            for &i in t {
+                lists[i as usize].push(k as u32);
+            }
+        }
+        v.node_tri_start = std::iter::once(0)
+            .chain(lists.iter().scan(0u32, |a, l| {
+                *a += l.len() as u32;
+                Some(*a)
+            }))
+            .collect();
+        v.node_tri_list = lists.concat();
+        v.node_rest_normal.truncate(n as usize);
+        v.node_rest.truncate(n as usize);
+        v.node_material.truncate(n as usize);
+        v.node_beam_start.truncate(n as usize + 1);
+        let end = v.node_beam_start.last().copied().unwrap_or(0) as usize;
+        v.node_beam_list.truncate(end);
+        v.node_beam_list = v.node_beam_list.iter().filter_map(|&b| self.beam(b)).collect();
+        let (a, c) = (self.first as usize, (self.first + self.count) as usize);
+        if c <= v.beam_rest0.len() {
+            v.beam_rest0.drain(a..c);
+        }
+        for u in &mut v.units {
+            u.beams = u.beams.iter().filter_map(|&b| self.beam(b)).collect();
+        }
+        v.node_count = n;
+    }
+}
+
 #[wasm_bindgen(js_name = showcaseCar)]
 pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     let b = built(&params)?;
-    let v = showcase_visual(&b).map_err(err)?;
+    // `wheels: 'raycast'`: the visual for a spawn on raycast wheels (no tyres).
+    let raycast = !params.is_undefined()
+        && !params.is_null()
+        && Reflect::get(&params, &JsValue::from_str("wheels")).ok().and_then(|w| w.as_string()).as_deref() == Some("raycast");
+    let cut = if raycast { Some(TyreCut::of(&b.truck)?) } else { None };
+    let fix = |mut v: ShowcaseVisual| {
+        if let Some(c) = &cut {
+            c.apply(&mut v);
+        }
+        v
+    };
+    let v = fix(showcase_visual(&b).map_err(err)?);
     let out = Object::new();
     set(&out, "truck", &JsValue::from_str(&b.truck));
     let counts = Object::new();
@@ -120,10 +217,10 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     set(&out, "counts", &counts);
     set(&out, "visual", &visual_js(&v).into());
     // The distant level of detail (the renderer picks it by distance).
-    let lod = showcase_visual_lod(&b, 0.45).map_err(err)?;
+    let lod = fix(showcase_visual_lod(&b, 0.45).map_err(err)?);
     set(&out, "visualLod", &visual_js(&lod).into());
     // A third, coarser level (a car a few hundred pixels long and less).
-    let far = showcase_visual_lod(&b, FAR_DETAIL).map_err(err)?;
+    let far = fix(showcase_visual_lod(&b, FAR_DETAIL).map_err(err)?);
     set(&out, "visualFar", &visual_js(&far).into());
     Ok(out.into())
 }
