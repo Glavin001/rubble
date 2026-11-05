@@ -409,7 +409,15 @@ fn max_ab(a: f32, b: f32) -> f32 {
 impl Shock2 {
     /// Rates with progression: `k0 + (p_k·k0)·λ`, `c0 + (p_c·c0)·λ`, with
     /// λ = 1 for a zero bound, else min((e / (bound·L))², 1).
-    fn progressive(k0: f32, c0: f32, pk: f32, pc: f32, e: f32, bound: f32, rest: f32) -> (f32, f32) {
+    fn progressive(
+        k0: f32,
+        c0: f32,
+        pk: f32,
+        pc: f32,
+        e: f32,
+        bound: f32,
+        rest: f32,
+    ) -> (f32, f32) {
         let lambda = if bound == 0.0 {
             1.0
         } else {
@@ -420,7 +428,15 @@ impl Shock2 {
     }
 
     fn out_rates(&self, e: f32, lb: f32, rest: f32) -> (f32, f32) {
-        Self::progressive(self.k_out, self.c_out, self.pk_out, self.pc_out, e, lb, rest)
+        Self::progressive(
+            self.k_out,
+            self.c_out,
+            self.pk_out,
+            self.pc_out,
+            e,
+            lb,
+            rest,
+        )
     }
 
     fn in_rates(&self, e: f32, sb: f32, rest: f32) -> (f32, f32) {
@@ -804,6 +820,10 @@ pub struct ExplicitBeams {
     /// Every node (but those with no collision) is a contacter against other
     /// vehicles' triangles (spec §10.2); off: the file's contacters only.
     pub contact_every_node: bool,
+    /// The file is its vehicle at rest (`rubble_rest_pose`): the depth of its
+    /// lowest node (a tyre's contact patch) under the ground it stands on
+    /// ([`Self::spawn_clearance`]).
+    pub rest_pose: Option<f32>,
     /// JBeam mode's damping filters (`dampCutoffHz`), by [`Beam::shock`] − 1.
     pub damp_filters: Vec<DampFilter>,
     /// JBeam torsion elements' watched break groups (0 = none), by [`Beam::shock`]
@@ -1031,6 +1051,7 @@ impl ExplicitBeams {
             self_groups: Vec::new(),
             tri_excl: Vec::new(),
             contact_every_node: false,
+            rest_pose: None,
             damp_filters: Vec::new(),
             torsion_watch: Vec::new(),
             groups_last: Vec::new(),
@@ -1143,7 +1164,11 @@ impl ExplicitBeams {
         }
         // Collision triangles take the concrete surface; a named one is not
         // supported yet (refused rather than run on concrete).
-        if let Some(g) = file.submesh_groundmodel.as_deref().filter(|g| *g != "concrete") {
+        if let Some(g) = file
+            .submesh_groundmodel
+            .as_deref()
+            .filter(|g| *g != "concrete")
+        {
             return Err(format!(
                 "`submesh_groundmodel {g}`: collision triangles on a surface other than \
                  concrete are not supported"
@@ -1185,7 +1210,12 @@ impl ExplicitBeams {
         let mut tyre_of = vec![0u32; file.wheels.len()];
         let mut spawn_order = Vec::with_capacity(file.wheels.len());
         for kind in ["wheels", "meshwheels", "meshwheels2"] {
-            for (i, w) in file.wheels.iter().enumerate().filter(|(_, w)| w.kind == kind) {
+            for (i, w) in file
+                .wheels
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| w.kind == kind)
+            {
                 tyre_of[i] = spawn_order.len() as u32;
                 spawn_order.push(w);
             }
@@ -1193,13 +1223,42 @@ impl ExplicitBeams {
         // A turned spawn builds its tyres in the file's axes, then turns them like
         // every other node.
         let yawed = yaw_degrees != 0.0;
-        let local: Vec<Vec3> = if yawed {
-            desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect()
+        let mut local: Vec<Vec3> = if yawed {
+            desc.nodes
+                .iter()
+                .map(|n| Vec3::from_array(n.position))
+                .collect()
         } else {
             Vec::new()
         };
-        for w in spawn_order {
-            s.add_tyre(w, position, yaw_degrees, velocity, &local);
+        for (t, w) in spawn_order.into_iter().enumerate() {
+            let file_wheel = tyre_of.iter().position(|&x| x as usize == t).unwrap_or(t) as u32;
+            let posed = file.tyre_pose.iter().any(|p| p.0 == file_wheel);
+            // (Rubble's `rubble_tyre_pose`: a tyre's rest lengths are built
+            // round its axle's rest positions.)
+            let rest = file.tyre_rest_axle.iter().find(|r| r.0 == file_wheel);
+            let saved = [s.nodes[w.node1 as usize].pos, s.nodes[w.node2 as usize].pos];
+            if let Some(&(_, r1, r2)) = rest {
+                for (node, r) in [(w.node1, r1), (w.node2, r2)] {
+                    let r = Vec3::from_array(r);
+                    s.nodes[node as usize].pos =
+                        position + if yawed { yaw_offset(r, yaw_degrees) } else { r };
+                    if yawed {
+                        local[node as usize] = r;
+                    }
+                }
+            }
+            s.add_tyre(w, position, yaw_degrees, velocity, &local, posed);
+            if rest.is_some() {
+                s.nodes[w.node1 as usize].pos = saved[0];
+                s.nodes[w.node2 as usize].pos = saved[1];
+                if yawed {
+                    local[w.node1 as usize] =
+                        Vec3::from_array(desc.nodes[w.node1 as usize].position);
+                    local[w.node2 as usize] =
+                        Vec3::from_array(desc.nodes[w.node2 as usize].position);
+                }
+            }
         }
         // Then the file's beams, shocks, shocks2, shocks3, commands and hydros, each
         // section in file order. Commands and hydros gate their break test on the
@@ -1255,7 +1314,9 @@ impl ExplicitBeams {
         // `beams` lines on generated tyre nodes, at their place among the file's.
         let tyre_node = |s: &Self, r: crate::truck::TruckNodeRef| match r {
             crate::truck::TruckNodeRef::File(n) => n,
-            crate::truck::TruckNodeRef::Tyre(w, k) => s.tyres[tyre_of[w as usize] as usize].first + k,
+            crate::truck::TruckNodeRef::Tyre(w, k) => {
+                s.tyres[tyre_of[w as usize] as usize].first + k
+            }
         };
         let mut tyre_beams = file.tyre_beams.iter().peekable();
         for class in 0..8 {
@@ -1263,7 +1324,11 @@ impl ExplicitBeams {
                 while class == 0 && tyre_beams.peek().is_some_and(|t| t.position <= i) {
                     let t = tyre_beams.next().unwrap();
                     let (a, b) = (tyre_node(&s, t.a), tyre_node(&s, t.b));
-                    s.push_desc_beam(&crate::desc::SoftBeam { a, b, ..t.beam.clone() });
+                    s.push_desc_beam(&crate::desc::SoftBeam {
+                        a,
+                        b,
+                        ..t.beam.clone()
+                    });
                 }
                 let at = s.beams.len() as u32;
                 s.push_desc_beam(b);
@@ -1318,8 +1383,33 @@ impl ExplicitBeams {
             while class == 0 && tyre_beams.peek().is_some() {
                 let t = tyre_beams.next().unwrap();
                 let (a, b) = (tyre_node(&s, t.a), tyre_node(&s, t.b));
-                s.push_desc_beam(&crate::desc::SoftBeam { a, b, ..t.beam.clone() });
+                s.push_desc_beam(&crate::desc::SoftBeam {
+                    a,
+                    b,
+                    ..t.beam.clone()
+                });
             }
+        }
+        // Rubble's `rubble_tyre_pose`: tyre nodes spawn where the file puts
+        // them (the tyre at rest, deflected), their beams keeping the
+        // undeflected tyre's rest lengths; `rubble_rest_pose <y>`: the file is
+        // the vehicle at rest on ground at `y`.
+        for &(w, k, p) in &file.tyre_pose {
+            let Some(t) = tyre_of
+                .get(w as usize)
+                .and_then(|&t| s.tyres.get(t as usize))
+            else {
+                continue;
+            };
+            if k < t.count {
+                let p = Vec3::from_array(p);
+                let i = (t.first + k) as usize;
+                s.nodes[i].pos = position + if yawed { yaw_offset(p, yaw_degrees) } else { p };
+            }
+        }
+        if let Some(g) = file.rest_ground {
+            let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+            s.rest_pose = Some((position.y + g - low).max(0.0));
         }
         s.add_slidenodes(&file);
         s.collision_range = desc.collision_range;
@@ -1331,6 +1421,26 @@ impl ExplicitBeams {
         s.add_truck_triangle_breaks(&desc);
         if file.full_contact {
             s.opt_in_full_contact();
+        }
+        if !file.spawn_contacts.is_empty() {
+            let sorted = |t: [u32; 3]| {
+                let mut t = t;
+                t.sort_unstable();
+                t
+            };
+            let at: HashMap<[u32; 3], u32> = s
+                .triangles
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (sorted(t.nodes), i as u32))
+                .collect();
+            let keep: std::collections::HashSet<(u32, u32)> = file
+                .spawn_contacts
+                .iter()
+                .filter_map(|&(t, c)| at.get(&sorted(t)).map(|&i| (i, c)))
+                .collect();
+            s.tri_excl.clear();
+            s.spawn_exclusions_except(&keep);
         }
         Ok(s)
     }
@@ -1345,6 +1455,7 @@ impl ExplicitBeams {
         yaw_degrees: f32,
         velocity: Vec3,
         local: &[Vec3],
+        posed: bool,
     ) {
         let yawed = yaw_degrees != 0.0;
         let at = |s: &Self, i: u32| {
@@ -1369,8 +1480,10 @@ impl ExplicitBeams {
             0.0
         };
         // The axle runs toward +z: the node of lower z is A1, whichever the
-        // file names first (equal z keeps the file's order).
-        let (a1, a2) = if at(self, w.node1).z > at(self, w.node2).z {
+        // file names first (equal z keeps the file's order). A tyre the file
+        // poses (Rubble's `rubble_tyre_pose`) keeps the file's order: its pose
+        // names its nodes as built from its first axle node.
+        let (a1, a2) = if !posed && at(self, w.node1).z > at(self, w.node2).z {
             (w.node2, w.node1)
         } else {
             (w.node1, w.node2)
@@ -1600,7 +1713,11 @@ impl ExplicitBeams {
 
     /// Wings (break references, chains) and the fuselage drag from spawn
     /// positions, with their airfoil tables.
-    fn add_aero(&mut self, file: &crate::truck::TruckFile, airfoil: &dyn Fn(&str) -> Option<String>) {
+    fn add_aero(
+        &mut self,
+        file: &crate::truck::TruckFile,
+        airfoil: &dyn Fn(&str) -> Option<String>,
+    ) {
         let table = |s: &mut Self, name: &str| -> u32 {
             if let Some(i) = s.airfoils.iter().position(|a| a.name == name) {
                 return i as u32;
@@ -1608,7 +1725,8 @@ impl ExplicitBeams {
             let a = match airfoil(name) {
                 Some(text) => Airfoil::parse(name, &text),
                 None => {
-                    s.warnings.push(format!("airfoil `{name}` not found: its tables are zero"));
+                    s.warnings
+                        .push(format!("airfoil `{name}` not found: its tables are zero"));
                     Airfoil::zero(name)
                 }
             };
@@ -1618,7 +1736,14 @@ impl ExplicitBeams {
         let x: Vec<Vec3> = self.nodes.iter().map(|n| self.origin + n.pos).collect();
         for w in &file.wings {
             let t = table(self, &w.airfoil);
-            self.wings.push(Wing::new(w.nodes, w.efficacy, w.chord_point, w.control, t, &x));
+            self.wings.push(Wing::new(
+                w.nodes,
+                w.efficacy,
+                w.chord_point,
+                w.control,
+                t,
+                &x,
+            ));
         }
         chain_wings(&mut self.wings, &x);
         if let Some(fd) = &file.fusedrag {
@@ -1656,8 +1781,10 @@ impl ExplicitBeams {
         settings: ExplicitBeamsSettings,
     ) -> Result<(Self, String, Vec<String>), String> {
         let desc = crate::jbeam::load_jbeam(files, config)?;
-        let (text, warnings) =
-            crate::truck_export::desc_to_truck(&desc, crate::truck_export::TyreDefaults::for_vehicle(&desc));
+        let (text, warnings) = crate::truck_export::desc_to_truck(
+            &desc,
+            crate::truck_export::TyreDefaults::for_vehicle(&desc),
+        );
         let sim = Self::from_truck(&text, position, velocity, settings)?;
         Ok((sim, text, warnings))
     }
@@ -1840,7 +1967,7 @@ impl ExplicitBeams {
             let (text, _) = crate::truck_export::desc_to_truck(desc, tyres);
             let file = parse_truck_config(&text, None);
             for w in &file.wheels {
-                s.add_tyre(w, position, 0.0, velocity, &[]);
+                s.add_tyre(w, position, 0.0, velocity, &[], false);
             }
             warnings.push(format!(
                 "{} pressure wheels simulated as {}-ray soft tyres ({} kg, {} N/m, {} N·s/m)",
@@ -2096,6 +2223,17 @@ impl ExplicitBeams {
         self.finish_contact();
     }
 
+    /// How far above the ground to spawn the vehicle's lowest node: 2 cm (the
+    /// usual drop onto its tyres), or, for a file that is its vehicle at rest
+    /// (`rubble_rest_pose`), its lowest node's depth under it (its tyres
+    /// already stand on the ground, in contact).
+    pub fn spawn_clearance(&self) -> f32 {
+        match self.rest_pose {
+            Some(depth) => -depth,
+            None => 0.02,
+        }
+    }
+
     /// Opt in to JBeam's contact semantics (spec §10.1–10.2) for a vehicle of the
     /// `.truck` path (JBeam mode has them): every node with collision is a contacter
     /// against other vehicles' triangles, and self-collision pairs that start inside
@@ -2131,7 +2269,8 @@ impl ExplicitBeams {
         for (i, inc) in self.incidence.iter().enumerate() {
             for &j in inc {
                 let b = &self.beams[j as usize];
-                self.neighbours.push(if b.a == i as u32 { b.b } else { b.a });
+                self.neighbours
+                    .push(if b.a == i as u32 { b.b } else { b.a });
             }
             self.neighbour_start.push(self.neighbours.len() as u32);
         }
@@ -2286,7 +2425,13 @@ impl ExplicitBeams {
                     );
                     n.force += if n.has(NODE_FRICTION_LIMIT) {
                         crate::explicit_jbeam_ext::friction_limit(
-                            c, n.force, n.vel, n.mass, Vec3::Y, h, ground - x.y,
+                            c,
+                            n.force,
+                            n.vel,
+                            n.mass,
+                            Vec3::Y,
+                            h,
+                            ground - x.y,
                         )
                     } else {
                         c
@@ -2408,7 +2553,12 @@ impl ExplicitBeams {
         };
         let p = &self.nodes[fd.front as usize];
         let y = self.origin.y + p.pos.y;
-        if let Some(d) = fd.force(p.vel, y, self.nodes.len(), &self.airfoils[fd.airfoil as usize]) {
+        if let Some(d) = fd.force(
+            p.vel,
+            y,
+            self.nodes.len(),
+            &self.airfoils[fd.airfoil as usize],
+        ) {
             self.fuse_force = d;
         }
     }
@@ -2633,11 +2783,24 @@ impl ExplicitBeams {
             let mut list = std::mem::take(&mut self.grid.list);
             list.clear();
             if self.grid_cell > 0.0 {
-                self.grid.gather(lo - self.origin, hi - self.origin, self.grid_cell, &mut list);
+                self.grid.gather(
+                    lo - self.origin,
+                    hi - self.origin,
+                    self.grid_cell,
+                    &mut list,
+                );
             }
-            let count = if self.grid_cell > 0.0 { list.len() } else { self.candidates.len() };
+            let count = if self.grid_cell > 0.0 {
+                list.len()
+            } else {
+                self.candidates.len()
+            };
             for idx in 0..count {
-                let k = if self.grid_cell > 0.0 { list[idx] as usize } else { idx };
+                let k = if self.grid_cell > 0.0 {
+                    list[idx] as usize
+                } else {
+                    idx
+                };
                 let hn = self.candidates[k];
                 if hn == i0 || hn == i1 || hn == i2 {
                     continue;
