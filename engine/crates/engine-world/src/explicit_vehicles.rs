@@ -133,7 +133,11 @@ fn storage(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
 impl ExplicitVehicles {
     pub fn new(world: &World, vehicles: &[ExplicitBeams], def: &ExplicitVehiclesDef) -> anyhow::Result<Self> {
         anyhow::ensure!(!vehicles.is_empty(), "explicit vehicles: none given");
-        anyhow::ensure!(def.capacity.shapes <= 255, "explicit vehicles: at most 255 shapes per vehicle");
+        let c = def.capacity;
+        anyhow::ensure!(
+            c.bodies <= c.shapes && c.shapes <= 1024 && c.planes < 1 << 16,
+            "explicit vehicles: at most 1024 shapes (and no more bodies) and 65535 hull planes per vehicle, not {c:?}"
+        );
         let device = world.sim.device();
         let queue = world.sim.queue();
         let mut gpu = ExplicitBeamsGpu::with_coupling(device, queue, vehicles, Some(def.capacity));
