@@ -3526,7 +3526,7 @@ impl ExplicitBeams {
         if only && c.d >= 0.0 {
             return None;
         }
-        let pen = if only { -c.d } else { r - c.d };
+        let pen = crate::explicit_contact::clip_depth(only, c.d, r);
         Some((c.w[0], c.w[1], c.w[2], pen, frame.n * c.side))
     }
 

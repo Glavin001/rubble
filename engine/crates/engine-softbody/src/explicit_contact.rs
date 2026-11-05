@@ -168,6 +168,17 @@ pub struct ClipTest {
     pub d: f32,
 }
 
+/// The depth an anti-clip contact pushes with (§36): r − d in the band (an
+/// anti-clip-only triangle: −d behind its plane), at most r. **Choice:** a node held
+/// behind the plane is pushed as one at the plane, not by its whole depth: the
+/// contact rule's push grows with depth (0.2·p/h, 10 m/s of separation at 2.5 cm),
+/// so a node 10 cm through was kicked out at 40 m/s and the BX coupe's side-pole
+/// run went non-finite.
+pub fn clip_depth(only: bool, d: f32, r: f32) -> f32 {
+    let p = if only { -d } else { r - d };
+    p.min(r)
+}
+
 /// [`ClipTest`]: `held` the remembered side, `crossing` the swept crossing (only
 /// asked for when nothing is held); `None` when the point is not in contact.
 pub fn clip_test(
@@ -621,7 +632,7 @@ impl ExplicitBeamsWorld {
                         );
                         // An anti-clip-only triangle (BeamNG NONCOLLIDABLE): no force
                         // in front of its plane; behind it, pushed back to the plane.
-                        let p = if only { -c.d } else { r - c.d };
+                        let p = clip_depth(only, c.d, r);
                         if only && c.d >= 0.0 {
                             continue;
                         }
