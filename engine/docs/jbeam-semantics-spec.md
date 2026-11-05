@@ -27,6 +27,8 @@ Sources (all retrieved 2026-11-03):
 * [TH] Torsion hydros: https://documentation.beamng.com/modding/vehicle/sections/torsionhydros/
 * [I] Introduction to JBeam: https://documentation.beamng.com/modding/vehicle/intro_jbeam/
 * [CI] Common JBeam issues: https://documentation.beamng.com/modding/vehicle/intro_jbeam/common_issues/
+* [GM] Ground models: https://documentation.beamng.com/modding/levels/level_formats/groundmodels/
+  (retrieved 2026-11-05).
 * [PN] BeamNG.drive alpha 0.11 patch notes ("The coast is clear"):
   https://beamng.com/game/news/patch/the-coast-is-clear/ (retrieved 2026-11-05).
 * [W] the former wiki page "Beams" (https://wiki.beamng.com/Beams, now a redirect to
@@ -720,7 +722,10 @@ the step's limits, apply in JBeam mode only, and the spawn warns with their coun
   tangential force at most stops the node's slip in one step: the solver's friction
   law's viscous branch, on light tread nodes carrying a tyre's pressure load, would
   otherwise reverse the slip every step and grow.
-* **Tyre ground push** (2026-11-05). On a pressure-wheel node the ground's normal
+* **Tyre ground push** (2026-11-05). **Choice** (BeamNG documents no node–ground
+  collision response: its ground models [GM] give friction, roughness, depth and
+  fluid parameters, nothing on how a node is pushed out; [N] gives only the
+  self-collision distance). On a pressure-wheel node the ground's normal
   push lets the node rise at most half its depth p in one step (velocity out of the
   ground ≤ 0.5·p/h). The solver's contact restores 0.2 of the depth per step as a
   velocity the node keeps; a 0.12 kg tread node under the 5 kN of its wheel's load
@@ -737,11 +742,20 @@ the step's limits, apply in JBeam mode only, and the spawn warns with their coun
   | Astral R | — | 1.6 / 24 mm |
   | fixture car (`PART2_CAR`, 4 s) | 1.5 / 9.5 mm | 23 / 60 mm |
 
-  Factors measured (supercar drift / fixture KE at 4 s): 1.0 (back to the surface,
-  where the node then loses its support): 53 mm / 9.9 J; 0.5: 1.5 mm / 1.0 J;
-  0.2 (the solver's own fraction): 34 mm / 11.5 J. The fixture car keeps about 1 J
-  of rocking on its 12-ray tyres' flats (±3 cm fore and aft at about 1 Hz; 0.25 J
-  before, when the bouncing tread damped it). Open.
+  Factors measured (supercar drift over 8 s, Astral R drift, fixture-car KE at
+  4 s): none (before) 214 mm (creeps), —, 0.25 J; 0.2 (the solver's own
+  fraction) 34 mm, 0.7 mm, 11.5 J; 0.3: 7.7, 2.2 mm, 16.9 J; 0.4: 1.4, 15 mm,
+  0.92 J; **0.5: 1.5, 1.6 mm, 1.0 J**; 0.6: 14, 8.3 mm, 2.0 J; 0.7: 1.1, 6.7 mm,
+  5.7 J; 0.8: 68, 15 mm, 10.8 J; 0.9: 13, 1.0 mm, 4.3 J; 1.0 (back to the
+  surface, where the node then loses its support) 53, 12 mm, 9.9 J. Every factor
+  stops the creep test failing on the supercar except 0.8 (marginal); none keeps
+  the fixture car's 0.25 J. The fixture car's residual is rocking on its 12-ray
+  tyres' flats, ±3 cm fore and aft at about 1 Hz on free-rolling wheels (no brakes
+  are simulated); before, the bouncing tread nodes damped it (and walked the
+  supercar). Its KE at 4 s swings between 0.9 and 17 J with the factor (the
+  rocking's phase), its sway is 4–7 cm for every factor. **Open** (a regression
+  from 0.25 J): a rolling-resistance or brake model would damp it; neither is in
+  scope (no powertrain).
 
 ## 29. Acceptance vehicles (CPU reference, 2026-11-05)
 
@@ -785,6 +799,21 @@ self-collision forces are fixed point (§14), so the other two part ways at rest
 (their parked chatter) and in the crash (chaotic: counts within 25 %, the test's
 rule). The supercar is a stiff space frame: it bends 34 beams, breaks none, and
 rebounds off the wall (its centre of mass rises 0.6 m as it pitches).
+
+**TPU Medium Forklift** (RLS Career Overhaul, AGPL-3.0; self-contained, own
+pressure wheels and `.dae` flexbodies; `FL45D Triplex.pc`, 693 nodes, 7.9 t; CPU,
+2026-11-05). Not passing:
+
+* With pressure wheels its highest spring mode is ω·h = 2.12, past the explicit
+  step's limit of 2: the drive hubs have 30 rays at a 0.19 m radius (4 cm periphery
+  beams) of 4.25 MN/m on 2 kg hub nodes, and §25's layout puts periphery, two tread
+  and a side beam on each hub node. It diverges. Whether BeamNG's own layout puts
+  fewer beams on a hub node is not documented; §25 is our choice.
+* With the `.truck` path's soft tyres (ω·h = 1.78) it rests (KE 10.6 J at 4 s), but
+  its beacon light's break group (12 beams, strengths about 3.3 kN) breaks in the
+  spawn drop, and into the wall at 56 km/h its forks and mast, the first and stiffest
+  parts to touch, throw it up and back: its centre of mass rises 1.8 m and it leaves
+  the wall with 277 kJ of its 965 kJ. Not plausible; open.
 
 ## 30. GPU layout of Part II and verification
 
