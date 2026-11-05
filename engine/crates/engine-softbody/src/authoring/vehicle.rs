@@ -652,6 +652,9 @@ pub struct Built {
     pub truck: String,
     /// Shift from definition coordinates to the `.truck`'s: (0, 0, −length / 2).
     pub shift: Vec3,
+    /// Each skeleton node's design position (definition coordinates), before
+    /// the car settled into its rest pose (the skeleton's).
+    pub design: Vec<Vec3>,
     /// Node indices per named member, block and corner.
     pub groups: HashMap<String, Vec<u32>>,
     /// Binding triangles over each group's nodes (for visual parts riding the
@@ -2520,17 +2523,48 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     for n in &mut out.nodes {
         n.p += shift;
     }
-    if BRITTLE_GLASS {
-        let glass: Vec<usize> = panes
-            .iter()
-            .flat_map(|u| u.beams.iter().map(|&j| j as usize))
-            .collect();
-        let scale = installation_pose(&out, &glass)?;
-        for (&j, &f) in glass.iter().zip(&scale) {
-            sk.beams[j].rest_scale = f;
-            out.beams[j].rest_scale = f;
+    let design: Vec<Vec3> = sk.nodes.iter().map(|n| n.p).collect();
+    // The car spawns at rest (its glass's installation pose too).
+    let glass: Vec<usize> = panes
+        .iter()
+        .flat_map(|u| u.beams.iter().map(|&j| j as usize))
+        .collect();
+    // (`REST_POSE=0`: the design pose instead, to measure what the rest
+    // pose changes.)
+    if std::env::var("REST_POSE").map_or(true, |v| v != "0") {
+        rest_pose(&mut out, &glass)?;
+        // The hardware's ropes are sized on the car as it stands (their
+        // shares follow their angles, which the car's weight moves).
+        size_hardware_once(&mut out, &hardware, params.strength)?;
+        for (b, o) in sk.beams.iter_mut().zip(&out.beams) {
+            b.mat = o.mat;
         }
     }
+    for (n, o) in sk.nodes.iter_mut().zip(&out.nodes) {
+        n.p = o.p - shift;
+    }
+    for (b, o) in sk.beams.iter_mut().zip(&out.beams) {
+        b.rest_scale = o.rest_scale;
+    }
+    for (b, o) in sk.shocks.iter_mut().zip(&out.shocks) {
+        b.precomp = o.precomp;
+    }
+    for (b, o) in sk.straps.iter_mut().zip(&out.straps) {
+        b.precomp = o.precomp;
+    }
+    sk.rest_ground = out.rest_ground;
+    sk.wheels = out.wheels.clone();
+    sk.spawn_contacts = out.spawn_contacts.clone();
+    sk.tyre_rest_axle = out
+        .tyre_rest_axle
+        .iter()
+        .map(|[a, b]| [*a - shift, *b - shift])
+        .collect();
+    sk.tyre_pose = out
+        .tyre_pose
+        .iter()
+        .map(|t| t.iter().map(|&p| p - shift).collect())
+        .collect();
     let truck = out.to_truck();
     let bind_tris: HashMap<String, Vec<[u32; 3]>> = groups
         .iter()
@@ -2543,6 +2577,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         shell,
         truck,
         shift,
+        design,
         bind_tris,
         groups,
         stiffness_scale,
@@ -2571,7 +2606,11 @@ fn shut_line_breaks(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]
         .iter()
         .map(|h| {
             let b = &sk.beams[h.beams[0]];
-            let pin = if sk.nodes[b.a as usize].part == h.part { b.a } else { b.b };
+            let pin = if sk.nodes[b.a as usize].part == h.part {
+                b.a
+            } else {
+                b.b
+            };
             (h.part, sk.pos(pin), h.group)
         })
         .collect();
@@ -2613,20 +2652,32 @@ fn shut_line_breaks(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]
 /// (Compression shortens one diagonal as it stretches the other.)
 pub const GAUGE_K: f32 = 1.0e4;
 
-fn aperture_gauges(sk: &mut Skeleton, pane: &[u32], mounts: &[usize], strain: f32, group: u32) -> Vec<usize> {
+fn aperture_gauges(
+    sk: &mut Skeleton,
+    pane: &[u32],
+    mounts: &[usize],
+    strain: f32,
+    group: u32,
+) -> Vec<usize> {
     let set: std::collections::HashSet<u32> = pane.iter().copied().collect();
     let rim: Vec<u32> = mounts
         .iter()
         .map(|&j| {
             let b = &sk.beams[j];
-            if set.contains(&b.a) { b.b } else { b.a }
+            if set.contains(&b.a) {
+                b.b
+            } else {
+                b.a
+            }
         })
         .collect();
     if rim.is_empty() {
         return Vec::new();
     }
     let c = rim.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / rim.len() as f32;
-    let (lo, hi) = rim.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), &i| (a.min(sk.pos(i)), b.max(sk.pos(i))));
+    let (lo, hi) = rim.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), &i| {
+        (a.min(sk.pos(i)), b.max(sk.pos(i)))
+    });
     let ext = hi - lo;
     let mut axes = [(ext.x, Vec3::X), (ext.y, Vec3::Y), (ext.z, Vec3::Z)];
     axes.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -2659,7 +2710,8 @@ fn aperture_gauges(sk: &mut Skeleton, pane: &[u32], mounts: &[usize], strain: f3
             // pull, elastic all the way; k a thousandth of a frame span's.)
             let l = sk.pos(a).distance(sk.pos(b));
             let k = GAUGE_K;
-            let f = k * super::material::REF_LENGTH / l.max(super::material::REF_LENGTH) * strain * l;
+            let f =
+                k * super::material::REF_LENGTH / l.max(super::material::REF_LENGTH) * strain * l;
             let m = Material {
                 k,
                 damp: 0.0,
@@ -2678,67 +2730,209 @@ fn aperture_gauges(sk: &mut Skeleton, pane: &[u32], mounts: &[usize], strain: f3
     out
 }
 
-/// Seconds the car settles before its glass is installed.
+/// Seconds the car settles on its tyres before it is written ([`rest_pose`]).
 pub const INSTALL_SETTLE: f32 = 2.0;
 
-/// The glass's installation pose (a Choice, `vehicle-authoring.md`): a pane
-/// is bonded into a body already standing under its own weight, so it
-/// carries no stress there. The car spawns on the ground at rest on the
-/// CPU reference, settles [`INSTALL_SETTLE`] s, and each of `beams` (the
-/// panes' and their mounts') takes its settled length over its spawn length
-/// as its rest scale. Deterministic: the same skeleton gives the same pose,
-/// and the `.truck` carries the scales, so every consumer loads the same
-/// panes.
-fn installation_pose(sk: &Skeleton, beams: &[usize]) -> Result<Vec<f32>, String> {
-    use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
-    // (The panes are not in yet: nothing of theirs yields or breaks.)
-    let mut sk = sk.clone();
-    for &j in beams {
-        sk.beams[j].mat.deform = 1.0e9;
-        sk.beams[j].mat.strength = 1.0e9;
-        sk.beams[j].group = 0;
+/// The car's rest pose (a Choice, `vehicle-authoring.md`): the car spawns
+/// standing on its tyres, so nothing in it moves at spawn and its glass's
+/// installation pose (a pane is bonded into a body already standing under
+/// its own weight) is its spawn pose. The car stands on flat ground on the
+/// CPU reference (its tyres touching, no drop), with nothing of its glass
+/// breakable, and settles [`INSTALL_SETTLE`] s ([`settle`]). Its nodes then
+/// take their settled positions, its tyres theirs (`rubble_tyre_pose`, built
+/// round their axles' design positions); every beam and shock keeps the
+/// solver's rest length (its `rest_scale` / precompression over the settled
+/// length), so the body carries the same loads as when it settled and stands
+/// in equilibrium; `gauges` (beams that only measure, of negligible
+/// stiffness) take the settled lengths as their rest. Deterministic: the
+/// same skeleton gives the same pose, and the `.truck` carries it
+/// (`rubble_rest_pose`, `rubble_tyre_pose`, `rubble_spawn_contacts` and the
+/// beams' fifth field), so every consumer loads the same car.
+fn rest_pose(sk: &mut Skeleton, glass: &[usize]) -> Result<(), String> {
+    let n = sk.nodes.len();
+    let design = sk.clone();
+    // The design pose as the solver reads it (the file's rounding), and the
+    // node–triangle pairs it never collides (in range at spawn, spec §10.1).
+    let pairs =
+        |s: &crate::explicit_beams::ExplicitBeams| -> std::collections::HashSet<([u32; 3], u32)> {
+            s.tri_excl
+                .iter()
+                .enumerate()
+                .flat_map(|(t, l)| l.iter().map(move |&c| (t, c)))
+                .map(|(t, c)| (s.triangles[t].nodes, c))
+                .collect()
+        };
+    let (p0, excluded) = {
+        let t = design.to_truck();
+        let probe = crate::explicit_beams::ExplicitBeams::from_truck(
+            &t,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Default::default(),
+        )?;
+        (probe.positions()[..n].to_vec(), pairs(&probe))
+    };
+    let gauges: std::collections::HashSet<usize> = glass
+        .iter()
+        .copied()
+        .filter(|&j| sk.beams[j].fixed && sk.beams[j].mat.density == 0.0)
+        .collect();
+    let settled = settle(sk, glass)?;
+    let p1 = &settled.nodes;
+    // Each beam's and shock's rest length is the solver's after the settle
+    // (the design's, or where it yielded settling).
+    let rest = |a: u32, c: u32| settled.rests[&(a.min(c), a.max(c))];
+    for (j, b) in sk.beams.iter_mut().enumerate() {
+        let (a, c) = (b.a as usize, b.b as usize);
+        b.rest_scale = if gauges.contains(&j) {
+            1.0
+        } else {
+            rest(b.a, b.b) / p1[a].distance(p1[c])
+        };
     }
-    let sk = &sk;
-    let truck = sk.to_truck();
+    for x in sk.shocks.iter_mut().chain(sk.straps.iter_mut()) {
+        let (a, c) = (x.a as usize, x.b as usize);
+        x.precomp = rest(x.a, x.b) / p1[a].distance(p1[c]);
+    }
+    for (node, &p) in sk.nodes.iter_mut().zip(p1) {
+        node.p = p;
+    }
+    // (A posed tyre is built from its line's first axle node: the one its
+    // settle built it from.)
+    for (w, a) in sk.wheels.iter_mut().zip(&settled.axles) {
+        [w.a1, w.a2] = *a;
+    }
+    sk.tyre_rest_axle = sk
+        .wheels
+        .iter()
+        .map(|w| [p0[w.a1 as usize], p0[w.a2 as usize]])
+        .collect();
+    sk.tyre_pose = settled.tyres;
+    sk.rest_ground = Some(settled.ground);
+    // The pairs that came into range settling rest in contact: they keep
+    // colliding.
+    let rest = crate::explicit_beams::ExplicitBeams::from_truck(
+        &sk.to_truck(),
+        Vec3::ZERO,
+        Vec3::ZERO,
+        Default::default(),
+    )?;
+    let mut contacts: Vec<([u32; 3], u32)> = pairs(&rest).difference(&excluded).copied().collect();
+    contacts.sort_unstable();
+    sk.spawn_contacts = contacts;
+    if std::env::var("GLASS_STRAIN").is_ok() {
+        let moved = p0
+            .iter()
+            .zip(p1)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0.0f32, f32::max);
+        eprintln!(
+            "rest pose: nodes moved up to {:.1} mm from the design; ground at y {:.4}; {} pairs rest in contact",
+            moved * 1e3,
+            settled.ground,
+            sk.spawn_contacts.len()
+        );
+    }
+    Ok(())
+}
+
+struct Settled {
+    /// The skeleton's nodes, in the file's frame.
+    nodes: Vec<Vec3>,
+    /// Each tyre's nodes.
+    tyres: Vec<Vec<Vec3>>,
+    /// Each tyre's axle nodes, the one it was built from first.
+    axles: Vec<[u32; 2]>,
+    /// The ground's height.
+    ground: f32,
+    /// Each beam's rest length at the end, by its sorted node pair (the
+    /// first beam on the pair): the design's, or where it yielded settling.
+    rests: std::collections::HashMap<(u32, u32), f32>,
+}
+
+/// The car standing on flat ground on the CPU reference (its design pose,
+/// its tyres touching), with nothing of its glass breakable, after
+/// [`INSTALL_SETTLE`] s: in the file's frame, to the µm the file writes.
+fn settle(sk: &Skeleton, glass: &[usize]) -> Result<Settled, String> {
+    use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
+    let n = sk.nodes.len();
+    let mut probe_sk = sk.clone();
+    probe_sk.rest_ground = None;
+    probe_sk.tyre_pose.clear();
+    probe_sk.tyre_rest_axle.clear();
+    probe_sk.spawn_contacts.clear();
+    for &j in glass {
+        probe_sk.beams[j].mat.deform = 1.0e9;
+        probe_sk.beams[j].mat.strength = 1.0e9;
+        probe_sk.beams[j].group = 0;
+    }
+    let truck = probe_sk.to_truck();
     let settings = ExplicitBeamsSettings {
         turbulence: false,
         ..Default::default()
     };
     let probe = ExplicitBeams::from_truck(&truck, Vec3::ZERO, Vec3::ZERO, settings.clone())?;
     let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
-    let mut s = ExplicitBeams::from_truck(&truck, Vec3::new(0.0, 0.02 - low, 0.0), Vec3::ZERO, settings)?;
-    let p0 = s.positions();
-    for _ in 0..(INSTALL_SETTLE * 60.0) as usize {
-        s.frame();
-    }
-    let p1 = s.positions();
-    if std::env::var("GLASS_STRAIN").is_ok() {
-        // How much the settled panes still move at rest (strain against the
-        // settled lengths), over another two seconds, and during the settle.
-        let len = |p: &[Vec3], j: usize| p[sk.beams[j].a as usize].distance(p[sk.beams[j].b as usize]);
-        let mut worst = 0.0f32;
-        for _ in 0..120 {
-            s.frame();
-            let p = s.positions();
-            for &j in beams {
-                worst = worst.max((len(&p, j) / len(&p1, j) - 1.0).abs());
-            }
+    // Its tyres touching the ground (no drop: a landing would yield its
+    // weakest panels), it settles [`INSTALL_SETTLE`] s.
+    let lift = Vec3::new(0.0, -low, 0.0);
+    let mut s = ExplicitBeams::from_truck(&truck, lift, Vec3::ZERO, settings)?;
+    let h = crate::explicit_beams::STEP;
+    for k in 0..(INSTALL_SETTLE / h) as usize {
+        s.step();
+        if std::env::var("GLASS_STRAIN").is_ok() && k % 1000 == 999 {
+            let (iv, vm) = (0..n)
+                .map(|i| (i, s.nodes[i].vel.length()))
+                .fold((0, 0.0f32), |a, x| if x.1 > a.1 { x } else { a });
+            let ke: f32 = s
+                .nodes
+                .iter()
+                .map(|q| 0.5 * q.mass * q.vel.length_squared())
+                .sum();
+            let yielded = s
+                .beams
+                .iter()
+                .filter(|b| {
+                    b.rest != b.rest0
+                        && b.kind != crate::explicit_beams::ExplicitKind::LimitedSpring
+                })
+                .count();
+            eprintln!(
+                "settle {:.1} s: KE {ke:.3} J, fastest {vm:.4} m/s (node {iv} {}), {yielded} beams yielded",
+                (k + 1) as f32 * h,
+                sk.parts[sk.nodes[iv].part as usize]
+            );
         }
-        let settle = beams.iter().map(|&j| (len(&p1, j) / len(&p0, j) - 1.0).abs()).fold(0.0f32, f32::max);
-        for &j in beams.iter().filter(|&&j| sk.beams[j].fixed && sk.beams[j].mat.density == 0.0) {
-            let b = &sk.beams[j];
-            eprintln!("  gauge {}-{} ({} {:?} / {} {:?}): settle {:.4} %", b.a, b.b, sk.parts[sk.nodes[b.a as usize].part as usize], sk.nodes[b.a as usize].p, sk.parts[sk.nodes[b.b as usize].part as usize], sk.nodes[b.b as usize].p, (len(&p1, j) / len(&p0, j) - 1.0) * 100.0);
-        }
-        eprintln!("glass: settle strain up to {:.4} %, then at rest up to {:.4} % (tempered breaks at {:.3} %)", settle * 100.0, worst * 100.0, TEMPERED_STRAIN * 100.0);
     }
-    Ok(beams
-        .iter()
-        .map(|&j| {
-            let b = &sk.beams[j];
-            let (a, c) = (b.a as usize, b.b as usize);
-            p1[a].distance(p1[c]) / p0[a].distance(p0[c])
-        })
-        .collect())
+    if s.beams.iter().any(|b| b.broken) {
+        return Err("the car broke a beam settling on its tyres".into());
+    }
+    let um = |x: f32| ((x as f64 * 1.0e6).round() / 1.0e6) as f32;
+    let file = |p: Vec3| {
+        let q = p - lift;
+        Vec3::new(um(q.x), um(q.y), um(q.z))
+    };
+    let p = s.positions();
+    Ok(Settled {
+        nodes: p[..n].iter().map(|&q| file(q)).collect(),
+        tyres: s
+            .tyres
+            .iter()
+            .map(|t| {
+                (t.first..t.first + t.count)
+                    .map(|i| file(p[i as usize]))
+                    .collect()
+            })
+            .collect(),
+        axles: s.tyres.iter().map(|t| t.axle).collect(),
+        rests: s
+            .beams
+            .iter()
+            .rev()
+            .map(|b| ((b.a.min(b.b), b.a.max(b.b)), b.rest))
+            .collect(),
+        ground: um(-lift.y),
+    })
 }
 
 /// Tempered glass's break strain: characteristic bending strength ≈ 120 MPa
@@ -2877,7 +3071,10 @@ fn brittle_glass(
                 // Side glass sits in its door's run channel: it bears there
                 // (compression only), held by its regulator along the bottom
                 // (those beams keep their tension), and breaks with the pane.
-                let low = nodes.iter().map(|&i| sk.nodes[i as usize].p.y).fold(f32::MAX, f32::min);
+                let low = nodes
+                    .iter()
+                    .map(|&i| sk.nodes[i as usize].p.y)
+                    .fold(f32::MAX, f32::min);
                 let inner = if set.contains(&b.a) { b.a } else { b.b };
                 if sk.nodes[inner as usize].p.y > low + 0.05 {
                     b.ty = BeamType::Support(SEAL_BREAK);
@@ -2893,9 +3090,24 @@ fn brittle_glass(
         // extension against the installed pose: the strain the frame
         // imposes on the glass reaching its strength (tempered 120 MPa,
         // laminated 45 MPa: it cracks, in no group, and holds).
-        let gauges = aperture_gauges(sk, &nodes, &mounts, if laminated { ANNEALED_STRAIN } else { TEMPERED_STRAIN }, if laminated { 0 } else { g });
+        let gauges = aperture_gauges(
+            sk,
+            &nodes,
+            &mounts,
+            if laminated {
+                ANNEALED_STRAIN
+            } else {
+                TEMPERED_STRAIN
+            },
+            if laminated { 0 } else { g },
+        );
         let part = sk.nodes[nodes[0] as usize].part;
-        let beams: Vec<u32> = pane.iter().chain(&mounts).chain(&gauges).map(|&j| j as u32).collect();
+        let beams: Vec<u32> = pane
+            .iter()
+            .chain(&mounts)
+            .chain(&gauges)
+            .map(|&j| j as u32)
+            .collect();
         out.push(DamageUnit {
             name,
             kind: DamageKind::Glass,

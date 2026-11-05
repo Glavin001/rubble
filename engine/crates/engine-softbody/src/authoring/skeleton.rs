@@ -158,6 +158,20 @@ pub struct Skeleton {
     pub collision_breaks: Vec<Option<(u32, u8)>>,
     /// Contact from every node (spec §10.2): `rubble_full_contact`.
     pub full_contact: bool,
+    /// The nodes are the vehicle at rest on flat ground at this height
+    /// (`rubble_rest_pose`): it spawns standing, its beams' rest lengths
+    /// (`rest_scale`) the unloaded design's.
+    pub rest_ground: Option<f32>,
+    /// Its tyres at rest (`rubble_tyre_pose`): per wheel, its generated
+    /// nodes' positions (empty: built undeflected round the axles).
+    pub tyre_pose: Vec<Vec<Vec3>>,
+    /// With a tyre pose, each wheel's axle nodes' rest (design) positions,
+    /// [`SkWheel::a1`]'s first.
+    pub tyre_rest_axle: Vec<[Vec3; 2]>,
+    /// In a rest pose, the (collision triangle, node) pairs that rest in
+    /// contact: they collide though they start in range
+    /// (`rubble_spawn_contacts`).
+    pub spawn_contacts: Vec<([u32; 3], u32)>,
     pub parts: Vec<String>,
     /// Reference nodes: centre, back, left (`cameras`).
     pub cameras: [u32; 3],
@@ -169,6 +183,24 @@ impl Skeleton {
             name: name.into(),
             parts: vec!["body".into()],
             ..Default::default()
+        }
+    }
+
+    /// Moves the whole car by `f` (a rigid motion): its nodes and its tyres'
+    /// rest pose. A motion that does not keep the ground under its tyres (a
+    /// turn off the vertical) must also clear `rest_ground`.
+    pub fn map_positions(&mut self, f: impl Fn(Vec3) -> Vec3) {
+        for n in &mut self.nodes {
+            n.p = f(n.p);
+        }
+        for t in &mut self.tyre_pose {
+            for p in t {
+                *p = f(*p);
+            }
+        }
+        for [a, b] in &mut self.tyre_rest_axle {
+            *a = f(*a);
+            *b = f(*b);
         }
     }
 
@@ -774,12 +806,15 @@ impl Skeleton {
         if self.full_contact {
             let _ = writeln!(s, "rubble_full_contact\n");
         }
+        if let Some(g) = self.rest_ground {
+            let _ = writeln!(s, "rubble_rest_pose {g:.6}\n");
+        }
         let _ = writeln!(s, "nodes");
         for (i, n) in self.nodes.iter().enumerate() {
             let opt = if n.ground { "l" } else { "lc" };
             let _ = writeln!(
                 s,
-                "{i}, {:.4}, {:.4}, {:.4}, {opt}, {:.3}",
+                "{i}, {:.6}, {:.6}, {:.6}, {opt}, {:.3}",
                 n.p.x, n.p.y, n.p.z, n.mass
             );
         }
@@ -802,7 +837,9 @@ impl Skeleton {
             .beams
             .iter()
             .map(|b| {
-                let l = self.pos(b.a).distance(self.pos(b.b));
+                // (Its rest length: the spawn length unless the pose is not
+                // its rest, `rest_scale`.)
+                let l = self.pos(b.a).distance(self.pos(b.b)) * b.rest_scale;
                 let k = round2(b.mat.k_at(l));
                 // Too short to yield safely: elastic up to its break, which is
                 // then near the yield force (a ductile grade's break is far past
@@ -874,10 +911,30 @@ impl Skeleton {
                     let _ = writeln!(s, "{}, {}, is, {f}{pre}", l.a, l.b);
                 }
                 None if l.rope => {
-                    let _ = writeln!(s, "{}, {}, ir{}", l.a, l.b, if pre.is_empty() { String::new() } else { format!(", 0{pre}") });
+                    let _ = writeln!(
+                        s,
+                        "{}, {}, ir{}",
+                        l.a,
+                        l.b,
+                        if pre.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", 0{pre}")
+                        }
+                    );
                 }
                 None => {
-                    let _ = writeln!(s, "{}, {}, i{}", l.a, l.b, if pre.is_empty() { String::new() } else { format!(", 0{pre}") });
+                    let _ = writeln!(
+                        s,
+                        "{}, {}, i{}",
+                        l.a,
+                        l.b,
+                        if pre.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", 0{pre}")
+                        }
+                    );
                 }
             }
         }
@@ -944,6 +1001,27 @@ impl Skeleton {
                     w.spring,
                     w.damp
                 );
+            }
+        }
+        if !self.tyre_pose.is_empty() {
+            let _ = writeln!(s, "\nrubble_tyre_pose");
+            for (w, [a, b]) in self.tyre_rest_axle.iter().enumerate() {
+                let _ = writeln!(
+                    s,
+                    "{w}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}",
+                    a.x, a.y, a.z, b.x, b.y, b.z
+                );
+            }
+            for (w, ps) in self.tyre_pose.iter().enumerate() {
+                for (k, p) in ps.iter().enumerate() {
+                    let _ = writeln!(s, "{w}, {k}, {:.6}, {:.6}, {:.6}", p.x, p.y, p.z);
+                }
+            }
+        }
+        if !self.spawn_contacts.is_empty() {
+            let _ = writeln!(s, "\nrubble_spawn_contacts");
+            for ([a, b, c], n) in &self.spawn_contacts {
+                let _ = writeln!(s, "{a}, {b}, {c}, {n}");
             }
         }
         let _ = writeln!(s, "\nend");

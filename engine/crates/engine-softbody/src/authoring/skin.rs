@@ -1485,7 +1485,7 @@ mod tests {
         let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, st.clone()).unwrap();
         let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
         let mut s =
-            ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, 0.02 - low, 0.0), vel, st).unwrap();
+            ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, probe.spawn_clearance() - low, 0.0), vel, st).unwrap();
         s.roll_tyres(vel);
         s
     }

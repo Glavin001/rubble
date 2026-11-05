@@ -21,7 +21,7 @@ fn main() {
     let settings = ExplicitBeamsSettings { turbulence: false, ..Default::default() };
     let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
     let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
-    let mut s = ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, 0.02 - low, 0.0), Vec3::ZERO, settings).unwrap();
+    let mut s = ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, probe.spawn_clearance() - low, 0.0), Vec3::ZERO, settings).unwrap();
     let rest = s.positions();
     let frames: u32 = std::env::args().nth(1).map(|a| a.parse().unwrap()).unwrap_or(90);
     for _ in 0..frames { s.frame(); }

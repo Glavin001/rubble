@@ -716,7 +716,7 @@ impl ExplicitSim {
             let along = at3.dot(forward) - if front { f1 } else { 0.5 * (f0 + f1) };
             let across = at3.dot(lateral) - 0.5 * (l0 + l1);
             let lift = spots.get(vi).map_or(0.0, |s| s.lift);
-            let shift = forward * along + lateral * across + Vec3::Y * (0.02 - lowest + lift);
+            let shift = forward * along + lateral * across + Vec3::Y * (sim.spawn_clearance() - lowest + lift);
             for n in &mut sim.nodes {
                 n.pos += shift;
             }

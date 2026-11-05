@@ -828,16 +828,36 @@ vehicle the same visual format as the authored car, so
     10 mm bead with L its share of the edge;
   - side glass bears in its run channel (compression only) and is held by
     its regulator along the bottom.
-- **Installation pose (a Choice).** A pane is bonded into a body already
-  standing under its own weight, so it carries no stress there.
-  `installation_pose` settles the car at rest on the CPU reference for
-  `INSTALL_SETTLE` = 2 s, with the panes unbreakable. Each pane and mount
-  beam then takes its settled length over its spawn length as its rest
-  scale. The `.truck` carries the scale as Rubble's fifth `beams` field, and
-  the shared loader applies it to any beam. `skins_are_closed` checks that
-  the solver's rest lengths match it.
-  - Medium: 335 beams. Settle strain is up to 0.54 %; at rest afterwards,
-    up to 0.05 %.
+- **Rest pose = installation pose (a Choice, 2026-11-05).** A pane is
+  bonded into a body already standing under its own weight. The car is
+  therefore written standing at rest, and it spawns that way: nothing moves
+  at spawn, so the installation pose is the spawn pose. There is no "skip the
+  first N ms" rule.
+  - `rest_pose` stands the car on flat ground on the CPU reference (tyres
+    touching, no drop), with its glass unbreakable, for `INSTALL_SETTLE` =
+    2 s.
+  - The nodes then take their settled positions. Every beam and shock keeps
+    the solver's rest length through `rest_scale` (beams' fifth field) and
+    precompression.
+  - The tyres keep their deflected shape (`rubble_tyre_pose`, built round
+    their axles' design positions).
+  - Pairs that came into contact while settling keep colliding
+    (`rubble_spawn_contacts`).
+  - The hardware ropes are sized again on the standing car.
+  - The spec is `jbeam-semantics-spec.md` §18.2. Consumers spawn with
+    `ExplicitBeams::spawn_clearance()`: the patch depth for a rest pose, 2 cm
+    otherwise.
+  - `Built.design` keeps the design positions, which are mirror-symmetric;
+    the rest pose leans 1–2 mm toward the driver.
+  - Medium: nodes sit up to 45 mm from the design (mostly the suspension's
+    sag); no beam yields while settling.
+  - In `a` the car stands with 0.3 mm wobble, body nodes under 0.01 m/s, and
+    energy rises between frames of at most 0.04 J. That rise is the energy
+    sum's f32 rounding (`energy_rounding`).
+  - Every reference test stays in band (n, o, p, q, g, t).
+  - The settle used to start with a 2 cm drop. That landing yielded the
+    roof's lumped panel beams by up to 0.9 mm, which the rest pose would
+    have carried.
 - **Brittle glass is still off.** With the installation pose, every pane
   still breaks at rest. A pane beam's break force is its strain times the
   model's k·L: 0.17 % of about 180 N, roughly 0.3 N. The pane nodes' own

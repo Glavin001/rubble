@@ -277,7 +277,7 @@ fn main() {
     let lift = if scene == "drop" { 15.0 } else { 0.0 };
     let mut s = ExplicitBeams::from_truck(
         &b.truck,
-        Vec3::new(0.0, 0.02 - low + lift, 0.0),
+        Vec3::new(0.0, probe.spawn_clearance() - low + lift, 0.0),
         vel,
         settings,
     )
@@ -303,6 +303,75 @@ fn main() {
             2.0,
         )),
         _ => {}
+    }
+    if scene == "spawn" {
+        // The spawn transient: per 50 ms over 2 s, the body's largest move from
+        // its spawn pose and fastest node (tyres apart), and where.
+        let p0 = s.positions();
+        let n = b.skeleton.nodes.len();
+        println!(
+            "spawn: lowest tread {:.2} mm, lowest body {:.2} mm, rest pose {:?}",
+            p0[n..].iter().map(|q| q.y).fold(f32::MAX, f32::min) * 1e3,
+            p0[..n].iter().map(|q| q.y).fold(f32::MAX, f32::min) * 1e3,
+            s.rest_pose
+        );
+        if std::env::var("IMBALANCE").is_ok() {
+            // One step from rest: each node's acceleration is its net force
+            // over its mass (gravity included): where the pose is not at rest.
+            let mut t = s.clone();
+            t.step();
+            t.step();
+            let h = engine_softbody::explicit_beams::STEP;
+            let mut a: Vec<(usize, f32)> = (0..t.nodes.len())
+                .map(|i| (i, t.nodes[i].vel.length() / h))
+                .collect();
+            a.sort_by(|x, y| y.1.total_cmp(&x.1));
+            for &(i, acc) in a.iter().take(12) {
+                let part = if i < n {
+                    b.skeleton.parts[b.skeleton.nodes[i].part as usize].as_str()
+                } else {
+                    "tyre"
+                };
+                println!(
+                    "  node {i} {part}: {acc:.1} m/s² ({:.1} N) at {:?}",
+                    acc * t.nodes[i].mass,
+                    t.nodes[i].pos
+                );
+            }
+        }
+        let secs: usize = std::env::var("SPAWN_S")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(2);
+        let every: usize = std::env::var("SPAWN_EVERY")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(3);
+        for f in 0..secs * 60 {
+            s.frame();
+            if f % every != every - 1 {
+                continue;
+            }
+            let p = s.positions();
+            let (im, dm) = (0..n)
+                .map(|i| (i, p[i].distance(p0[i])))
+                .fold((0, 0.0f32), |a, x| if x.1 > a.1 { x } else { a });
+            let (iv, vm) = (0..n)
+                .map(|i| (i, s.nodes[i].vel.length()))
+                .fold((0, 0.0f32), |a, x| if x.1 > a.1 { x } else { a });
+            let low = p[n..].iter().map(|q| q.y).fold(f32::MAX, f32::min);
+            let part = |i: usize| &b.skeleton.parts[b.skeleton.nodes[i].part as usize];
+            println!(
+                "{:4} ms: moved {:.2} mm (node {im} {}), fastest {:.3} m/s (node {iv} {}), lowest tread {:.2} mm",
+                (f + 1) * 1000 / 60,
+                dm * 1e3,
+                part(im),
+                vm,
+                part(iv),
+                low * 1e3
+            );
+        }
+        return;
     }
     if scene == "wobble" {
         // 3 s to settle, then 1 s of samples: the nodes that move most about

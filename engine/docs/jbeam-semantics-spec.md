@@ -584,6 +584,37 @@ node k to node k + 1; default 7, all three). A triangle with a break group is de
 its sides' beams count. RoR's own `cab` lines have four fields: RoR files are read as
 before, bit for bit.
 
+### 18.2 Rubble's `.truck` extension: a file that is its vehicle at rest (2026-11-05)
+
+**Rubble extension, not RoR** (the showcase car's authoring, `truck.rs`,
+`ExplicitBeams::from_truck`). A file may be its vehicle standing at rest on flat
+ground, so it spawns with nothing moving: no drop onto its tyres, no settling
+transient.
+
+* `rubble_rest_pose <y>`: the node positions are the vehicle at rest on ground at
+  height `y`. The beams keep their own rest lengths through the beams' fifth field
+  (the rest length over the spawn length). Shocks keep theirs through their
+  precompression.
+* `rubble_tyre_pose`, a section of two kinds of lines:
+  * `wheel, x1, y1, z1, x2, y2, z2`: the rest positions of the wheel's axle nodes.
+    The tyre's beams' rest lengths are built round these positions (the
+    undeflected tyre).
+  * `wheel, node, x, y, z`: where the tyre's generated node `node` spawns (the
+    deflected tyre at rest). `wheel` is the file's wheel index; `node` runs from 0
+    to 2 × rays − 1, in build order.
+
+  A posed tyre is built from its line's first axle node. The lower-z rule does not
+  apply to it, so its nodes are named as they were built.
+* `rubble_spawn_contacts`, lines `a, b, c, node`: a collision triangle (by its
+  nodes) and a node that collide although the node starts in the triangle's range.
+  §10.1's spawn exclusions are the design pose's; these pairs rest in contact.
+* `ExplicitBeams::spawn_clearance()` gives the height to spawn the lowest node above
+  the ground. It is 2 cm for any other file. For a rest pose it is minus the
+  lowest node's depth under its ground, because the tyres' contact patches stand in
+  contact. Consumers spawn with it in place of a fixed 2 cm.
+
+Files without these lines load as before, bit for bit.
+
 ## 19. Deform groups [B]
 
 `deformGroup` (string or table) names the groups a beam triggers; they drive visual

@@ -478,8 +478,16 @@ impl ExplicitBeams {
                 let n2 = ext.index(0);
                 let [a, b] = [beam.a as usize, beam.b as usize];
                 let f = aero_tri_force(
-                    [self.nodes[a].pos, self.nodes[b].pos, self.nodes[n2 as usize].pos],
-                    [self.nodes[a].vel, self.nodes[b].vel, self.nodes[n2 as usize].vel],
+                    [
+                        self.nodes[a].pos,
+                        self.nodes[b].pos,
+                        self.nodes[n2 as usize].pos,
+                    ],
+                    [
+                        self.nodes[a].vel,
+                        self.nodes[b].vel,
+                        self.nodes[n2 as usize].vel,
+                    ],
                     &ext,
                 );
                 self.nodes[a].force += f;
@@ -938,7 +946,11 @@ impl ExplicitBeams {
     /// they name (by node pair, in this solver's beam order) and their
     /// group's first beam. None when no triangle breaks.
     pub(crate) fn add_truck_triangle_breaks(&mut self, desc: &SoftVehicleDesc) {
-        if !desc.triangles.iter().any(|t| t.collision && (t.break_sides != 0 || t.break_group != 0)) {
+        if !desc
+            .triangles
+            .iter()
+            .any(|t| t.collision && (t.break_sides != 0 || t.break_group != 0))
+        {
             return;
         }
         let mut side: HashMap<(u32, u32), u32> = HashMap::new();
@@ -978,6 +990,16 @@ impl ExplicitBeams {
     /// starts inside a collision triangle's contact range (inside it, within the
     /// range of its plane) never collides with that triangle. Returns how many pairs.
     pub fn spawn_exclusions(&mut self) -> usize {
+        self.spawn_exclusions_except(&std::collections::HashSet::new())
+    }
+
+    /// [`Self::spawn_exclusions`] but for the (triangle, node) pairs in `keep`:
+    /// they collide although they start in range (Rubble's `rubble_rest_pose`
+    /// files list the pairs that rest in contact, `rubble_spawn_contacts`).
+    pub fn spawn_exclusions_except(
+        &mut self,
+        keep: &std::collections::HashSet<(u32, u32)>,
+    ) -> usize {
         let r = self.collision_range;
         let mut excl: Vec<Vec<u32>> = vec![Vec::new(); self.triangles.len()];
         let mut pairs = 0;
@@ -1011,6 +1033,9 @@ impl ExplicitBeams {
                 let a = (d22 * q1 - d12 * q2) / det;
                 let b = (d11 * q2 - d12 * q1) / det;
                 if a < 0.0 || b < 0.0 || a + b > 1.0 {
+                    continue;
+                }
+                if keep.contains(&(t as u32, c)) {
                     continue;
                 }
                 excl[t].push(c);
