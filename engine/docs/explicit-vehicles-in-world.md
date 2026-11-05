@@ -298,9 +298,13 @@ per World step from the step's own timestamps (median / p95):
 
 | Vehicles | Houses | With vehicles | Houses alone | Explicit frame alone |
 |---|---|---|---|---|
-| 1 | 1 | 3.08 / 4.71 | 1.75 / 1.92 | 0.47 |
-| 16 | 4 | 6.35 / 15.2 | 2.06 / 5.5 | 0.53 |
-| 64 | 16 | 11.75 / 20.0 | 2.55 / 5.8 | 1.14 |
+| 1 | 1 | 4.20 / 5.30 | 4.31 / 5.20 | 0.46 |
+| 16 | 4 | 7.61 / 15.5 | 2.61 / 3.07 | 0.53 |
+| 64 | 16 | 13.44 / 18.0 | 2.53 / 4.25 | 1.14 |
+
+(After the emit rule, the 1024-shape room and the per-window contact replan; measured with
+the load average back up to 20 from other agents, so the 1-vehicle pair is noise-limited.
+An earlier run on a quieter machine, before those changes: 3.08, 6.35 and 11.75 ms.)
 
 At 64 with the coupling filtered out (vehicles meet only each other, four at each house's centre)
 the step is 7.6 ms: the fleet with its vehicle–vehicle contact groups is about 4.8 ms, and the
