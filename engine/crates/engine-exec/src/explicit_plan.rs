@@ -59,7 +59,8 @@ pub struct Span {
 /// Room for rigid-body proxies per vehicle (`ExplicitBeamsGpu::with_coupling`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CouplingCapacity {
-    /// Proxy bodies, shapes (at most 255) and hull planes per vehicle.
+    /// Proxy bodies, shapes (at most 1024, at least the bodies) and hull planes (at most
+    /// 65535) per vehicle.
     pub bodies: u32,
     pub shapes: u32,
     pub planes: u32,
@@ -81,7 +82,10 @@ impl CouplingLayout {
     pub const SHAPE_RECS: u32 = 7;
 
     fn new(cap: CouplingCapacity, vehicles: u32, misc_base: u32, acc_base: u32) -> Self {
-        assert!(cap.shapes <= 255 && cap.planes < 1 << 24, "explicit coupling: at most 255 shapes per vehicle");
+        assert!(
+            cap.bodies <= cap.shapes && cap.shapes <= 1024 && cap.planes < 1 << 16,
+            "explicit coupling: at most 1024 shapes (and no more bodies) and 65535 planes per vehicle"
+        );
         Self { cap, vehicles, misc_base, acc_base }
     }
     /// Records per vehicle.
@@ -1077,7 +1081,7 @@ impl ExplicitUpload {
         // (the kernel's grabRec()), off until set.
         misc.extend(std::iter::repeat_n([0u32; 4], 2));
         // The rigid coupling's header (the kernel's coupleRec()): (on, region, B, S |
-        // planes << 8), (gAcc region, 0, 0, 0); the regions are placed below.
+        // planes << 16), (gAcc region, 0, 0, 0); the regions are placed below.
         let couple_rec = misc.len();
         misc.extend(std::iter::repeat_n([0u32; 4], 2));
         // Vehicle contact: per triangle its contact throttle; per vehicle its records;
@@ -1183,7 +1187,7 @@ impl ExplicitUpload {
             let layout = CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
             acc_init.extend(std::iter::repeat_n(0, layout.acc_words() as usize));
-            misc[couple_rec] = [0, layout.misc_base, cap.bodies, cap.shapes | cap.planes << 8];
+            misc[couple_rec] = [0, layout.misc_base, cap.bodies, cap.shapes | cap.planes << 16];
             misc[couple_rec + 1] = [layout.acc_base, 0, 0, 0];
             layout
         });

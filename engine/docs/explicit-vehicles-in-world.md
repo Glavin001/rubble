@@ -261,6 +261,51 @@ Measured numbers (1, 16, 64 vehicles) are in §8 when the implementation lands.
   (momentum through the World's impulse path); a vehicle into a prefractured threshold
   wall breaks bonds, forward-only, and the freed pieces carry the vehicle's impulse.
 
-## 8. Results
+## 8. Results (2026-11-05, M3 Max, other agents on the GPU)
 
-(filled in as the work lands)
+Code: `engine_softbody::explicit_rigid` (CPU reference), `slang/kernels/explicit_beams_rigid.slang`
+(included by the explicit kernel), `slang/kernels/vehicle_coupling.slang` and
+`engine-world/src/explicit_vehicles.rs` (World), `engine-world/src/explicit_scene.rs` (the crash
+town), `engine-webgpu/explicit-world.html` (the page). The coupling's records also run on Metal
+and CUDA through `engine_exec::explicit_plan` (`engine-metal/tests/explicit_parity.rs`).
+
+Tests:
+
+| Test | Result |
+|---|---|
+| CPU: a static proxy is the static shape (`engine-softbody/tests/explicit_rigid.rs`) | bit for bit through a 15 m/s crash |
+| CPU: momentum across the coupling (free flight into a free box) | horizontal ΔP 1e-6 of P |
+| CPU: energy | rises no more than the vehicle's own free-flight oscillation |
+| CPU: box of known mass (300, 1200, 4000 kg) | between the plastic and elastic speeds, exact momentum balance, restitution 0.07 |
+| GPU vs CPU (`engine-webgpu/tests/explicit_rigid_gpu.rs`) | first contact frames 2.5e-7 m, outcome 1e-5, momentum 7e-8; coupling built but off: bit for bit |
+| World: vehicle into a free 1200 kg box (`engine-world/tests/explicit_vehicles.rs`) | ΔP 1.4e-6 of P through the World's impulse path; box 13.1 m/s in [11.37, 22.75]; kinetic energy lost |
+| World: vehicle at 20 m/s into the prefractured cuboid house (826 chunks, threshold) | bonds break in the step of first contact, the house splits, freed pieces move |
+
+Frame times (`engine-world/examples/explicit_vehicles_bench.rs`): the crash town, repo sedans at
+15–18 m/s, one house per four vehicles, World steps of 1/60 s (33–34 explicit steps each), GPU ms
+per World step from the step's own timestamps (median / p95):
+
+| Vehicles | Houses | With vehicles | Houses alone | Explicit frame alone |
+|---|---|---|---|---|
+| 1 | 1 | 3.08 / 4.71 | 1.75 / 1.92 | 0.47 |
+| 16 | 4 | 6.35 / 15.2 | 2.06 / 5.5 | 0.53 |
+| 64 | 16 | 11.75 / 20.0 | 2.55 / 5.8 | 1.14 |
+
+At 64 with the coupling filtered out (vehicles meet only each other, four at each house's centre)
+the step is 7.6 ms: the fleet with its vehicle–vehicle contact groups is about 4.8 ms, and the
+strikes (proxies, and the fracture's breaks and splits of 1700 bonds in 2 s) about 4 ms. The
+coupling's own barriers cost 3–5 % of the explicit frame. The wide passes are not used with the
+coupling on; for the repo sedan the per-vehicle frame is faster anyway (0.44 against 0.63 ms
+alone), and with vehicle contact on (any fleet) the wide passes are off already.
+
+## 9. Remaining
+
+- In-frame release: a chunk proxy freed the substep its load passes its capacity (today the
+  vehicle meets the unbroken structure for one window, §4).
+- The proxy plan is brute force (vehicles × colliders); a collider grid when collider counts grow.
+- Per node, every proxy shape is tested (bounding-sphere culled); a vehicle inside a broken house
+  meets hundreds of pieces: a per-vehicle shape grid would cut that.
+- Threshold destructibles with their own fracture (crushing, blast loading) are refused
+  loudly; the shared fracture's are supported.
+- Wide passes with the coupling (single very large vehicles without vehicle contact).
+- Rigid bodies resting *on* vehicles are held by staggered impulses (§2), a few mm of sink.

@@ -6,7 +6,7 @@
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
-  hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual,
+  hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, vehicleTownLayout,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -45,6 +45,20 @@ export async function createCity(opts, page = {}) {
   const world = await WebWorld.createCity(city, page);
   world.flags = solverFlags();
   return { city, world };
+}
+
+/**
+ * The explicit vehicles' crash town (`rubble::explicit_scene::crash_town`, as the native
+ * benchmark builds it): `spec` `{ truck, count, houses, speed, runUp, drag }` (`truck`
+ * .truck text; absent, the procedural sedan with tyres). Returns the world and
+ * `{ houses, ground, centres }`.
+ */
+export async function createVehicleTown(spec) {
+  ready ??= init();
+  await ready;
+  const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) });
+  world.flags = solverFlags();
+  return { world, layout: vehicleTownLayout(spec.houses ?? 0, spec.count ?? 4) };
 }
 
 /**

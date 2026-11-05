@@ -31,6 +31,7 @@ mod city;
 mod defs;
 mod demo;
 mod explicit;
+mod explicit_world;
 mod frame;
 mod guidance;
 /// The fracture lab (`fracture/`): its scenes as destructibles, its shots.

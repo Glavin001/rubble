@@ -14,7 +14,7 @@ use glam::Vec3;
 /// The vehicle `template` turned so its long axis runs along `heading` (a whole number of
 /// quarter turns: `turns` about +Y from +Z), its front face's middle at `front` (its lowest
 /// node 2 cm above `front.y`), every node at `speed` along the heading, its own flat ground
-/// at `ground`. A template whose node box is longer in x than in z is first turned so its
+/// at `ground`, its tyres (if any) rolling. A template whose node box is longer in x than in z is first turned so its
 /// long axis is z (its forward is taken along +z).
 pub fn place_vehicle(template: &ExplicitBeams, front: Vec3, turns: u32, speed: f32, ground: f32) -> ExplicitBeams {
     let mut sim = template.clone();
@@ -48,7 +48,41 @@ pub fn place_vehicle(template: &ExplicitBeams, front: Vec3, turns: u32, speed: f
     }
     sim.origin = Vec3::ZERO;
     sim.ground = ground;
+    // Soft tyres rolling with the vehicle, not skidding.
+    if !sim.tyres.is_empty() && speed != 0.0 {
+        sim.roll_tyres(dir * speed);
+    }
     sim
+}
+
+/// Lot `k` of `houses` (x, z): a ceil(sqrt) grid at [`PITCH`].
+fn lot(k: usize, houses: usize) -> [f32; 2] {
+    let cols = (houses as f64).sqrt().ceil() as usize;
+    [(k % cols) as f32 * PITCH, (k / cols) as f32 * PITCH]
+}
+
+/// The town's lot pitch (m).
+pub const PITCH: f32 = 32.0;
+
+fn house_centre(lab: &engine_fracture::Scene, offset: [f32; 3], k: usize, houses: usize) -> [f32; 3] {
+    let at = lot(k, houses);
+    [
+        lab.center[0] as f32 + offset[0] + at[0],
+        lab.center[1] as f32 + offset[1],
+        lab.center[2] as f32 + offset[2] + at[1],
+    ]
+}
+
+/// The houses (at least one per four vehicles), their centres and the ground height of a
+/// [`crash_town`] of `count` vehicles: for a page's camera.
+pub fn town_layout(houses: usize, count: usize) -> anyhow::Result<(Vec<[f32; 3]>, f32)> {
+    let asset = DestructibleAssetDesc::cuboid_house(&Default::default())?;
+    let (lab, _) = engine_fracture::samples::cuboid_stress_scene(None)?;
+    let stress = asset.stress.as_ref().ok_or_else(|| anyhow::anyhow!("crash town: no stress source"))?;
+    let offset = stress.placement().map(|x| -x as f32);
+    let houses = houses.max(count.div_ceil(4)).max(1);
+    let centres = (0..houses).map(|k| house_centre(&lab, offset, k, houses)).collect();
+    Ok((centres, stress.ground_height().unwrap_or(0.0) + offset[1]))
 }
 
 /// The crash town ([`crash_town`]).
@@ -119,28 +153,17 @@ pub fn crash_town(
         },
     )?;
     let a = world.create_destructible_asset(&asset)?;
-    let cols = (houses as f64).sqrt().ceil() as usize;
-    let pitch = 32.0f32;
     let half = [0.5 * lab.extent_x as f32, 0.5 * lab.extent_z as f32];
     let mut ids = Vec::new();
-    let mut centres = Vec::new();
+    let centres: Vec<[f32; 3]> = (0..houses).map(|k| house_centre(&lab, offset, k, houses)).collect();
     for k in 0..houses {
-        let at = [
-            (k % cols) as f32 * pitch,
-            0.0,
-            (k / cols) as f32 * pitch,
-        ];
+        let at = lot(k, houses);
         ids.push(world.create_destructible(&DestructibleDef {
             model: StrengthModel::Threshold,
-            transform: Transform::new([offset[0] + at[0], offset[1], offset[2] + at[2]], [0.0, 0.0, 0.0, 1.0]),
+            transform: Transform::new([offset[0] + at[0], offset[1], offset[2] + at[1]], [0.0, 0.0, 0.0, 1.0]),
             asleep: false,
             ..DestructibleDef::new(a)
         })?);
-        centres.push([
-            lab.center[0] as f32 + offset[0] + at[0],
-            lab.center[1] as f32 + offset[1],
-            lab.center[2] as f32 + offset[2] + at[2],
-        ]);
     }
     for _ in 0..settle {
         world.step()?;
@@ -191,9 +214,9 @@ pub fn crash_town(
 pub fn town_coupling() -> ExplicitVehiclesDef {
     ExplicitVehiclesDef {
         capacity: engine_webgpu::CouplingCapacity {
-            bodies: 64,
-            shapes: 255,
-            planes: 4096,
+            bodies: 512,
+            shapes: 512,
+            planes: 8192,
         },
         ..ExplicitVehiclesDef::default()
     }
