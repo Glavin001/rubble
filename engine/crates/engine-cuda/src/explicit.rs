@@ -16,9 +16,10 @@
 use crate::backend;
 use cudarc::driver::{result, sys};
 use engine_exec::explicit_plan::{
-    self as plan, Cmd, ExplicitLayout, ExplicitUpload, FramePlanner, GpuBeam, Kernel, BIND_ARGS, BIND_COUNT,
-    BIND_PARAMS, PARAM_STRIDE,
+    self as plan, coupling, Cmd, CouplingCapacity, CouplingLayout, ExplicitLayout, ExplicitUpload, FramePlanner,
+    GpuBeam, Kernel, BIND_ARGS, BIND_COUNT, BIND_PARAMS, PARAM_STRIDE,
 };
+use engine_softbody::explicit_rigid::ProxySet;
 use engine_exec::ExecError;
 use engine_softbody::explicit_beams::ExplicitBeams;
 use glam::Vec3;
@@ -86,6 +87,12 @@ impl CudaExplicitBeams {
 
     /// Upload `vehicles` (their current state) on device 0.
     pub fn new(vehicles: &[ExplicitBeams]) -> anyhow::Result<Self> {
+        Self::with_coupling(vehicles, None)
+    }
+
+    /// [`Self::new`] with room for rigid-body proxies per vehicle (the coupling,
+    /// `explicit_beams_rigid.slang`); off until [`Self::set_coupling_on`].
+    pub fn with_coupling(vehicles: &[ExplicitBeams], cap: Option<CouplingCapacity>) -> anyhow::Result<Self> {
         anyhow::ensure!(
             Self::has_ptx(),
             "engine-cuda was built without nvcc: no explicit-beams PTX embedded (see engine/TOOLCHAIN.md)"
@@ -100,7 +107,7 @@ impl CudaExplicitBeams {
         unsafe { result::ctx::set_current(ctx) }.map_err(map)?;
         let stream = result::stream::create(result::stream::StreamKind::NonBlocking).map_err(map)?;
 
-        let upload = ExplicitUpload::new(vehicles, None);
+        let upload = ExplicitUpload::new(vehicles, cap);
         let layout = upload.layout.clone();
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         let mut sizes = Vec::with_capacity(BIND_COUNT);
@@ -315,6 +322,45 @@ impl CudaExplicitBeams {
         }
         unsafe { result::launch_kernel(k.function, grid, (k.threads, 1, 1), 0, stream, &mut []) }
             .map_err(|e| ExecError::Backend(format!("CUDA: launch {kernel:?}: {e:?}")))
+    }
+
+    fn upload(&self, b: u32, offset: u64, bytes: &[u8]) -> Result<(), ExecError> {
+        assert!(offset + bytes.len() as u64 <= self.sizes[b as usize], "upload past binding {b}");
+        self.bind_ctx()?;
+        unsafe { result::memcpy_htod_async(self.bufs[b as usize] + offset, bytes, self.stream) }.map_err(backend)
+    }
+
+    pub fn coupling(&self) -> Option<CouplingLayout> {
+        self.layout.coupling
+    }
+
+    /// Turn the rigid coupling on or off from the next frame (frames then run per
+    /// vehicle: the wide passes do not run it).
+    pub fn set_coupling_on(&mut self, on: bool) -> Result<(), ExecError> {
+        assert!(self.layout.coupling.is_some(), "explicit beams: built without coupling room");
+        if on {
+            self.set_wide(false);
+        }
+        self.upload(plan::BIND_MISC, self.layout.coupling_on_offset(), bytemuck::bytes_of(&(on as u32)))
+    }
+
+    /// Write vehicle `v`'s proxies (its accumulators cleared) for the next frames.
+    pub fn write_proxies(&mut self, v: usize, set: &ProxySet) -> Result<(), ExecError> {
+        let layout = self.layout.coupling.ok_or_else(|| ExecError::Backend("explicit coupling: no room".into()))?;
+        let recs = coupling::proxy_records(&layout, set).map_err(ExecError::Backend)?;
+        self.upload(plan::BIND_MISC, u64::from(layout.vehicle(v as u32)) * 16, bytemuck::cast_slice(&recs))?;
+        let zeros = vec![0i32; layout.acc_per_vehicle() as usize];
+        self.upload(plan::BIND_ACC, u64::from(layout.acc(v as u32)) * 4, bytemuck::cast_slice(&zeros))
+    }
+
+    /// Read vehicle `v`'s proxies back into `set` (waits).
+    pub fn read_proxies(&mut self, v: usize, set: &mut ProxySet) -> Result<(), ExecError> {
+        let layout = self.layout.coupling.expect("coupling room");
+        self.wait()?;
+        let misc: Vec<u32> = self.download(plan::BIND_MISC)?;
+        let at = layout.vehicle(v as u32) as usize * 4;
+        coupling::decode_proxies(&layout, &misc[at..at + layout.recs() as usize * 4], set);
+        Ok(())
     }
 
     /// Block until queued frames have run; `Err` on a contact error a frame reported.

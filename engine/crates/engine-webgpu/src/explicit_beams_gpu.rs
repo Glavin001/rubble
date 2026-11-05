@@ -856,11 +856,8 @@ impl ExplicitBeamsGpu {
         if on {
             self.set_wide(false);
         }
-        self.queue.write_buffer(
-            &self.misc,
-            u64::from(self.layout.couple_rec) * 16,
-            bytemuck::bytes_of(&(on as u32)),
-        );
+        self.queue
+            .write_buffer(&self.misc, self.layout.coupling_on_offset(), bytemuck::bytes_of(&(on as u32)));
     }
 
     /// The first node of vehicle `v` in [`Self::nodes_buffer`] (in nodes).

@@ -20,6 +20,8 @@
 //! (`engine-webgpu::ExplicitBeamsGpu`, `engine-metal::MetalExplicitBeams`,
 //! `engine-cuda::CudaExplicitBeams`).
 
+pub mod coupling;
+
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
 use glam::Vec3;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1675,6 +1677,11 @@ impl ExplicitLayout {
     /// Byte offset in [`BIND_NODES`] of a node's velocity (3 f32).
     pub fn velocity_offset(&self, vehicle: usize, node: u32) -> u64 {
         ((self.spans[vehicle].node_off + node) as u64 * 3 + 1) * 16
+    }
+
+    /// Byte offset in [`BIND_MISC`] of the rigid coupling's `on` word (its header).
+    pub fn coupling_on_offset(&self) -> u64 {
+        u64::from(self.couple_rec) * 16
     }
 
     /// gMisc record of the grab (the kernel's grabRec()).

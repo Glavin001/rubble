@@ -14,9 +14,10 @@
 
 use crate::sim::{gpu_ms, shared, write};
 use engine_exec::explicit_plan::{
-    self as plan, Cmd, ExplicitLayout, ExplicitUpload, FramePlanner, GpuBeam, Kernel, BIND_ARGS, BIND_COUNT,
-    BIND_PARAMS, PARAM_STRIDE,
+    self as plan, coupling, Cmd, CouplingCapacity, CouplingLayout, ExplicitLayout, ExplicitUpload, FramePlanner,
+    GpuBeam, Kernel, BIND_ARGS, BIND_COUNT, BIND_PARAMS, PARAM_STRIDE,
 };
+use engine_softbody::explicit_rigid::ProxySet;
 use engine_softbody::explicit_beams::ExplicitBeams;
 use glam::Vec3;
 use metal::*;
@@ -72,9 +73,15 @@ pub struct MetalExplicitBeams {
 impl MetalExplicitBeams {
     /// Upload `vehicles` (their current state) on the system default Metal device.
     pub fn new(vehicles: &[ExplicitBeams]) -> anyhow::Result<Self> {
+        Self::with_coupling(vehicles, None)
+    }
+
+    /// [`Self::new`] with room for rigid-body proxies per vehicle (the coupling,
+    /// `explicit_beams_rigid.slang`); off until [`Self::set_coupling_on`].
+    pub fn with_coupling(vehicles: &[ExplicitBeams], cap: Option<CouplingCapacity>) -> anyhow::Result<Self> {
         let device = Device::system_default().ok_or_else(|| anyhow::anyhow!("no Metal device"))?;
         let queue = device.new_command_queue();
-        let upload = ExplicitUpload::new(vehicles, None);
+        let upload = ExplicitUpload::new(vehicles, cap);
         let layout = upload.layout.clone();
         let bufs: Vec<Buffer> = (0..BIND_COUNT as u32)
             .map(|b| {
@@ -307,6 +314,42 @@ impl MetalExplicitBeams {
     pub fn contact_status(&mut self) -> Result<(), String> {
         self.wait();
         self.layout.contact_status(&self.acc())
+    }
+
+    /// The rigid coupling's layout, when built [`Self::with_coupling`].
+    pub fn coupling(&self) -> Option<CouplingLayout> {
+        self.layout.coupling
+    }
+
+    /// Turn the rigid coupling on or off from the next frame (frames then run per
+    /// vehicle: the wide passes do not run it). Waits for the frames in flight.
+    pub fn set_coupling_on(&mut self, on: bool) {
+        assert!(self.layout.coupling.is_some(), "explicit beams: built without coupling room");
+        if on {
+            self.set_wide(false);
+        }
+        self.wait();
+        write(&self.bufs[plan::BIND_MISC as usize], self.layout.coupling_on_offset(), bytemuck::bytes_of(&(on as u32)));
+    }
+
+    /// Write vehicle `v`'s proxies (its accumulators cleared) for the next frames.
+    pub fn write_proxies(&mut self, v: usize, set: &ProxySet) -> Result<(), String> {
+        let layout = self.layout.coupling.ok_or("explicit coupling: built without coupling room")?;
+        let recs = coupling::proxy_records(&layout, set)?;
+        self.wait();
+        write(&self.bufs[plan::BIND_MISC as usize], u64::from(layout.vehicle(v as u32)) * 16, bytemuck::cast_slice(&recs));
+        let zeros = vec![0i32; layout.acc_per_vehicle() as usize];
+        write(&self.bufs[plan::BIND_ACC as usize], u64::from(layout.acc(v as u32)) * 4, bytemuck::cast_slice(&zeros));
+        Ok(())
+    }
+
+    /// Read vehicle `v`'s proxies back into `set` (waits).
+    pub fn read_proxies(&mut self, v: usize, set: &mut ProxySet) {
+        let layout = self.layout.coupling.expect("coupling room");
+        self.wait();
+        let misc: Vec<u32> = self.contents(plan::BIND_MISC);
+        let at = layout.vehicle(v as u32) as usize * 4;
+        coupling::decode_proxies(&layout, &misc[at..at + layout.recs() as usize * 4], set);
     }
 
     /// Set one node's velocity (waits for the frames in flight).
