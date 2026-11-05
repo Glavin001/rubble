@@ -3044,6 +3044,35 @@ pub const FASCIA_WALL: f32 = 0.003;
 pub const SHEET_YIELD: f32 = 210e6;
 pub const FASCIA_YIELD: f32 = 25e6;
 
+/// Poisson's ratio of steel and of the fascia's compound in
+/// [`sheet_ultimate_stress`] (0.3, a Choice for the compound).
+pub const SHEET_POISSON: f32 = 0.3;
+/// The plate buckling coefficient of a bay in [`sheet_ultimate_stress`]: 4,
+/// a long plate simply supported on both unloaded edges (its neighbouring
+/// bays and members hold them in line), a Choice between the clamped 6.97
+/// and the free edge's 0.425.
+pub const SHEET_BUCKLING_K: f32 = 4.0;
+
+/// A thin sheet bay's ultimate stress in compression (Pa): it buckles
+/// elastically at σ_cr = k·π²·E/(12(1 − ν²))·(t/b)² (Bryan 1891; Timoshenko
+/// and Gere, Theory of Elastic Stability, 1961, §9.2), then carries load on
+/// Winter's effective width b_e/b = √(σ_cr/σ_y)·(1 − 0.22·√(σ_cr/σ_y))
+/// (G. Winter, "Strength of thin steel compression flanges", Trans. ASCE 112
+/// (1947) 527–554; AISI S100 §B2.1) at its yield, so σ_u = σ_y·b_e/b,
+/// never above σ_y. `b` is the bay's width: the lattice edge's length.
+/// 0.8 mm steel on 0.2 m bays: σ_cr 12 MPa, σ_u 48 MPa (σ_y 210).
+pub fn sheet_ultimate_stress(e: f32, sigma_y: f32, t: f32, b: f32) -> f32 {
+    if sigma_y <= 0.0 {
+        return 0.0;
+    }
+    let pi2 = std::f32::consts::PI * std::f32::consts::PI;
+    let cr = SHEET_BUCKLING_K * pi2 * e / (12.0 * (1.0 - SHEET_POISSON * SHEET_POISSON))
+        * (t / b.max(1e-3)).powi(2);
+    let lam = (cr / sigma_y).sqrt();
+    let width = (lam * (1.0 - 0.22 * lam)).min(1.0);
+    sigma_y * width
+}
+
 /// One tier: each steel, glass and fascia beam's target stiffness is its real
 /// one before the step's bound is applied ([`Skeleton::cap_to_bound`]):
 /// - a member's beams (chords, rings, diagonals, bends): E·A/L with A its
@@ -3123,8 +3152,11 @@ fn one_tier_real_stiffness(
             let lattice = 3f32.sqrt() / 4.0;
             if !lane && lattice * e * t > real {
                 real = lattice * e * t;
-                // Its yield force at the sheet's yield strain: (√3/4)·σ_y·t·L.
-                sheet_yield = lattice * sy * t * l;
+                // Its yield force: the bay's ultimate stress in compression
+                // (a thin plate buckles, then carries Winter's effective
+                // width, [`sheet_ultimate_stress`]), (√3/4)·σ_u·t·L, the
+                // same both ways (JBeam's one beamDeform).
+                sheet_yield = lattice * sheet_ultimate_stress(e, sy, t, l) * t * l;
             }
         }
         if sheet_yield > 0.0 && real > 0.0 {
