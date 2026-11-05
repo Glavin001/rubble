@@ -61,6 +61,15 @@ export async function createHillsScene(def) {
   return world;
 }
 
+/** A soft-body demo scene (`rubble::play::softbody`); place it with `world.placeSoftScene(def)`. */
+export async function createSoftScene(def) {
+  ready ??= init();
+  await ready;
+  const world = await WebWorld.createSoftScene(def);
+  world.flags = solverFlags();
+  return world;
+}
+
 /**
  * The large-maps city (`rubble::city`, as the native benchmark builds it): `opts`
  * `{ houses, map, sleep, pool }`, `page` the WorldDef fields a page may set (`gpuTiming`,

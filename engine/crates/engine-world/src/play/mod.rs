@@ -8,6 +8,8 @@
 //! - [`hills`]: the terrain demo's heightfield and its bodies.
 //! - [`motion`]: the motion demo's scenes (the tunnelling gallery, the character
 //!   playground, bullets through walls).
+//! - [`softbody`]: the soft-body demo's scenes (the crash yard, crash tests, traffic
+//!   derby and the rest, with the sedan, buggy, hi-res car or an import).
 //! - [`vehicles`]: the vehicle demo's scenes (playground, traffic, the coupling labs, the
 //!   buggies, the meteor range, the gauntlet, the meteor run).
 //! - [`balls`]: the balls every scene fires (the fracture lab's stress models, the range).
@@ -24,6 +26,7 @@ pub mod hills;
 pub mod motion;
 pub mod presets;
 pub mod range;
+pub mod softbody;
 pub mod rigid;
 pub mod stage;
 pub mod timber_yard;

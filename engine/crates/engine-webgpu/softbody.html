@@ -71,9 +71,9 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck } from './rubble-world.mjs';
+    import { createSoftScene, pollFrame as poll, drain, macrotask, saveState, errorText, hiresCarJbeam, explicitSedanTruck } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
-    import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
+    import { loadTruck, loadJbeam, proceduralCarVisual, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
     import { createCarRenderer, LIGHTING_WGSL } from './car-render.mjs';
     const statusEl = document.getElementById('status');
@@ -260,49 +260,26 @@
     // nodes need the smaller step (engine_softbody::soft_scene_params).
     const HZ = Number(qs.get('hz')) || 240;
     const STEPS_PER_FRAME = Math.max(1, Math.round(HZ / 60));
-    // Traffic scales the arenas with its car count (161 particles, 923 beams each).
-    const NCARS = scene === 'traffic' ? Math.max(1, Math.min(128, Number(qs.get('cars')) || 20)) : 0;
-    const big = Math.max(NCARS, 24);
-    // Per-car soft capacity from the car actually loaded (an imported or hi-res car can
-    // have several times the procedural sedan's beams), at least the sedan's.
-    const carSize = (() => {
-      if (EXPLICIT || (carKind !== 'import' && carKind !== 'hires')) return null;
-      const d = carKind === 'hires' ? loadJbeam([['hires.jbeam', hiresCarJbeam()]])
-        : importSrc.kind === 'jbeam' ? loadJbeam(importSrc.files, importSrc.pc) : loadTruck(importSrc.text);
-      const groups = new Set(d.beams.map((b) => b.break_group ?? b.breakGroup ?? 0).filter((g) => g)).size;
-      return { particles: d.nodes.length, beams: d.beams.length, triangles: (d.triangles ?? []).length, groups };
-    })();
-    const perCar = { beams: Math.max(1000, (carSize?.beams ?? 0) + 64), particles: Math.max(170, (carSize?.particles ?? 0) + 16), triangles: Math.max(400, (carSize?.triangles ?? 0) + 16), groups: carSize?.groups ?? 0 };
-    const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
-    // Sized as the JS host's sceneCapacity(200·big + 2000 bodies, 220·big + 4000 colliders).
-    // Bodies per car: a soft car's node spheres and core (the procedural sedan's ~200, an
-    // imported car's its node count), plus the scene's own.
-    const estBodies = Math.max(200, (carSize?.particles ?? 0) + 32) * big + 2000, maxBodies = nextPow2(Math.max(estBodies, 4096));
-    const capacity = {
-      maxBodies,
-      maxColliders: nextPow2(Math.max(Math.max(220, (carSize?.particles ?? 0) + 48) * big + 4000, maxBodies * 2, 8192)),
-      maxContacts: Math.min(nextPow2(Math.max(estBodies * 16, 65536)), 1 << 21),
-      // The buggy holds 8 core joints and 30 bolted-part joints.
-      maxJoints: 512 + (buggy ? 48 : 16) * big,
-      maxCandidates: Math.min(nextPow2(Math.max(estBodies * 32, 131072)), 1 << 21),
-      maxColors: 32,
-      // The JS host's 64 held its kinematic velocities only; World also carries
-      // teleports and velocity sets as commands (capacity only).
-      maxCommands: 2048,
-      maxHullVertices: 64,
+    const ITERS = Number(qs.get('iters')) || 10;
+    // Crash parameters (?speed= km/h, ?overlap=, ?angle=, ?offset=, ?at=, ?mass=,
+    // ?carSpeed=, ?height=, ?pitch=); defaults are each scene's standard test.
+    const P = (k, d) => (qs.has(k) && qs.get(k) !== '' && Number.isFinite(Number(qs.get(k))) ? Number(qs.get(k)) : d);
+    // ?runup=metres: extra approach distance before a crash test (videos).
+    const runup = Number(qs.get('runup')) || 0;
+    // The scene (rubble::play::softbody, engine-world): its world (sized for the car loaded
+    // and the traffic count), solver, material slots, soft settings and bodies. ?threshold=
+    // scales the deform/break thresholds (1: the file's raw values), ?sweeps= particle
+    // sweeps per iteration, ?rigid=0 turns off rigid mode (quiet cars riding their cores).
+    const sceneDef = {
+      scene, car: carKind, explicit: EXPLICIT,
+      import: importSrc ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc ?? null } : { truck: importSrc.text }) : null,
+      strength: Number(qs.get('strength')) || 0, deform: Number(qs.get('deform')) || 0,
+      hz: HZ, iters: ITERS, threshold: Number(qs.get('threshold')) || 0, sweeps: Number(qs.get('sweeps')) || 0, rigid: qs.get('rigid') !== '0',
+      params: Object.fromEntries([...qs].filter(([, v]) => v !== '' && Number.isFinite(Number(v))).map(([k, v]) => [k, Number(v)])),
+      runup, cars: Number(qs.get('cars')) || 0, target: qs.get('target') === 'car' ? 'car' : 'wall',
     };
     // The world opens the device; the page renders on it and reads the world's buffers in place.
-    const world = await createWorld({
-      gravity: [0, -9.81, 0],
-      contacts: 'canonical',
-      capacity,
-      // A frame takes up to 2 × STEPS_PER_FRAME steps, each holding a readback
-      // slot until it is polled: enough slots that real time never waits on one
-      // (World's default 3 would cap 240 Hz at 3 steps a frame, 75 % real time).
-      readbackFrames: 2 * STEPS_PER_FRAME + 2,
-      vehicles: { maxVehicles: big + 8, maxWheels: 4 * big + 32, maxCurvePoints: 4096, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 16 },
-      soft: { maxBodies: big + 16, maxBeams: perCar.beams * big + 8192, maxParticles: perCar.particles * big + 2048, maxColors: 64, maxGroups: Math.max(1024, perCar.groups * big + 64), maxTriangles: perCar.triangles * big + 4096, maxObstacles: 64 },
-    });
+    const world = await createSoftScene(sceneDef);
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -318,122 +295,34 @@
     configure();
     addEventListener('resize', configure);
 
-    const ITERS = Number(qs.get('iters')) || 10;
-    world.setSolver({ dt: 1 / HZ, iterations: ITERS, gravityY: -9.81, betaLin: 1e7 });
     // The simulation's clock: steps since the scene started or was reset.
     // (Explicit mode: the explicit solver's steps in this rate's units, so reads and
     // the camera's lead keep their cadence.)
     const simSteps = () => EXPLICIT ? Math.floor((xsim?.steps() ?? 0) * HZ / 2000) : world.simSteps();
-    const MAT_GROUND = 0, MAT_PROP = 1, MAT_NODE = 9;
-    // The JS host's material table (64 slots, friction 0.6 unless set): soft nodes
-    // name slot 9 and wheel rims slot 7 directly, and shapes of a given friction
-    // share the first slot with it (ground slot 0, props slot 1).
-    const FRICTION = { [MAT_GROUND]: 1.0, [MAT_PROP]: 0.6, [MAT_NODE]: 0.8, [WHEEL_RIM_MATERIAL]: 0.9 };
-    for (let i = 0; i < 64; i++) world.setMaterialSlot(i, { friction: FRICTION[i] ?? 0.6 });
-    // Deform/break thresholds scaled for the step rate (engine_softbody
-    // SoftSettings::calibrated_for, fitted by soft_calibrate); ?threshold=1 keeps
-    // the file's raw values. ?sweeps=N runs N particle sweeps per iteration.
-    const calibrated = softCalibratedSettings(HZ);
-    const threshold = Number(qs.get('threshold')) || calibrated.threshold_scale;
-    const sweeps = Number(qs.get('sweeps')) || calibrated.sweeps;
-    // Rigid mode (on unless ?rigid=0): quiet cars ride their cores rigidly and
-    // skip the particle solve; any contact or nearby body turns them soft.
-    world.setSoftSettings({ ...calibrated, threshold_scale: threshold, sweeps, rigid_mode: qs.get('rigid') !== '0' });
-
     const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
-    const boxI = (m, hx, hy, hz) => [(m * (hy * hy + hz * hz)) / 3, (m * (hx * hx + hz * hz)) / 3, (m * (hx * hx + hy * hy)) / 3];
-    const ballI = (m, r) => { const i = 0.4 * m * r * r; return [i, i, i]; };
-    const shapeOn = (body, geometry, material) => world.createShape(body, { material: { friction: FRICTION[material] ?? 0.6 } }, geometry);
-    // Every static box but the ground is a soft obstacle: soft skin triangles
-    // collide with it too, so a wall's edge cannot slip between a panel's nodes.
-    const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => {
-      const body = world.createBody({ position: p, rotation: q });
-      const s = shapeOn(body, { box: { half } }, material);
-      if (material !== MAT_GROUND) world.softAddObstacle(s);
-      return body;
-    };
-    // A dynamic box (the JS host's inertia, set exactly): its handle, shape and slot.
-    const dynBox = (p, half, mass, v = [0, 0, 0]) => {
-      const body = world.createBody({ type: 'dynamic', position: p, linearVelocity: v });
-      const shape = shapeOn(body, { box: { half } }, MAT_PROP);
-      world.bodySetMassData(body, mass, [0, 0, 0], boxI(mass, ...half));
-      return { body, shape, slot: world.bodySlot(body) };
-    };
-    // A static pole (capsule along Y) that soft triangles also collide with.
-    const pole = (p, r, half) => {
-      const body = world.createBody({ position: p });
-      const s = shapeOn(body, { capsule: { radius: r, halfLen: half } }, MAT_PROP);
-      world.softAddObstacle(s);
-      return s;
-    };
-    staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
 
-    // The procedural car with named parts (bonnet, doors, bumpers, engine…);
-    // ?deform= rebuilds it from .truck text with another threshold (no parts).
-    // The vehicle's source for either solver: `.truck` text, JBeam files, or (soft
-    // only) a desc. The procedural sedan is the same `.truck` text on both.
+    // The vehicle's source for the explicit solver: `.truck` text or JBeam files. The
+    // procedural sedan is the same `.truck` text as on the soft solver.
     const hiresJbeam = carKind === 'hires' ? [['hires.jbeam', hiresCarJbeam()]] : null;
     const vehicleSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
       : carKind === 'import' ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc } : { truck: importSrc.text })
       // The sedan as the acceptance runs build it (?tyres=0: its bare body).
       : { truck: explicitSedanTruck(qs.get('tyres') !== '0') };
-    const carDesc = EXPLICIT ? null : buggy ? duneBuggySoft(Math.max(0.01, Number(qs.get('strength')) || 1))
-      : carKind === 'hires' ? loadJbeam(hiresJbeam)
-      : carKind === 'import' ? (importSrc.kind === 'jbeam' ? loadJbeam(importSrc.files, importSrc.pc) : loadTruck(importSrc.text))
-      : qs.get('deform') ? loadTruck(proceduralCar(Number(qs.get('deform')), 0)) : proceduralCarDesc();
-    // A non-procedural vehicle (hi-res car, imports) is turned so its forward axis
-    // is the scene's +Z, its front face centred where the sedan's would be (CAR_FRONT
-    // ahead of the spawn point), its lowest node 10 cm up.
-    const placed = carKind === 'hires' || carKind === 'import';
     const softs = []; // {h, name, core, car, buggy}
     const entries = []; // World's softEntry of each soft body
-    const addSoftAt = (desc, p, q, opts = {}) => {
-      if (placed && desc === carDesc) {
-        const f = forwardOf(desc), fix = qAxis([0, 1, 0], -Math.atan2(f[0], f[2]));
-        const turn = (a, b) => [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-          a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
-        q = turn(q, fix);
-        const rot = (v) => { const c = [q[1] * v[2] - q[2] * v[1], q[2] * v[0] - q[0] * v[2], q[0] * v[1] - q[1] * v[0]];
-          const d = 2 * (q[0] * v[0] + q[1] * v[1] + q[2] * v[2]), w2 = q[3] * q[3] - (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
-          return [0, 1, 2].map((i) => q[i] * d + v[i] * w2 + c[i] * 2 * q[3]); };
-        const ps = desc.nodes.map((n) => rot(n.position));
-        // Its forward and left in the world (the scene's yaw).
-        const fw = rot(f), l = [fw[2], 0, -fw[0]];
-        const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-        const along = Math.max(...ps.map((r) => dot(r, fw))), lats = ps.map((r) => dot(r, l));
-        const mid = (Math.min(...lats) + Math.max(...lats)) / 2, low = Math.min(...ps.map((r) => r[1]));
-        p = [0, 1, 2].map((i) => i === 1 ? p[1] + 0.05 - low : p[i] + fw[i] * (CAR_FRONT - along) - l[i] * mid);
-      }
-      const h = world.addSoftVehicle(desc, p, q, opts);
+    const track = (h, car = false, buggy = false) => {
       const e = entries[h] = world.softEntry(h);
       // `car`: drawn by the procedural car's mesh; `buggy`: by the buggy's.
-      softs.push({ h, name: e.name, core: e.core, car: desc === carDesc && carKind === 'sedan', buggy: desc === carDesc && buggy });
+      softs.push({ h, name: e.name, core: e.core, car, buggy });
       return h;
     };
-    const addSoft = (desc, p, yaw = 0, opts = {}) => addSoftAt(desc, p, qAxis([0, 1, 0], yaw), opts);
+    // A vehicle spawned at run time (imports).
+    const addSoft = (desc, p, yaw = 0, opts = {}) => track(world.addSoftVehicle(desc, p, qAxis([0, 1, 0], yaw), opts));
 
     let player = 0;
     let camMode = 'chase';
     let crusher = null; // scripted lift (crusher scene)
     let orbit = { yaw: 0.9, pitch: 0.3, dist: 12, target: null };
-    let ram = null; // parked side ram (T key / tbone scene)
-    let pendingRam = -1;
-    // ?runup=metres: extra approach distance before a crash test (videos).
-    const runup = Number(qs.get('runup')) || 0;
-    // Camera subjects: every soft car (its core) plus named rigid bodies of the
-    // scene, by body slot. `mount` = where a camera rides on it, in its own frame.
-    const subjects = []; // {name, body, mount: [x, y, z]}
-    const subject = (name, slot, mount = [0, 1.6, 2.6]) => { subjects.push({ name, body: slot, mount }); return slot; };
-    let ramSpeed = 11.1, ramAt = 0;
-    const parkRam = (mass) => {
-      ram = dynBox([-4000, -4000, -4000], [0.6, 0.6, 0.9], mass);
-      subject('side ram', ram.slot, [0, 1.0, 0]);
-      // Its edges would slip between the nodes: the skin collides with it too.
-      world.softAddObstacle(ram.shape);
-    };
-    // Crash parameters (?speed= km/h, ?overlap=, ?angle=, ?offset=, ?at=, ?mass=,
-    // ?carSpeed=, ?height=, ?pitch=); defaults are each scene's standard test.
-    const P = (k, d) => (qs.has(k) && qs.get(k) !== '' && Number.isFinite(Number(qs.get(k))) ? Number(qs.get(k)) : d);
     const CAR_HW = 0.85, CAR_FRONT = 2.2; // half width, bumper face ahead of the centre
     // ---------------------------------------------------------------- explicit solver
     // The vehicle on the explicit solver (engine-world-wasm ExplicitSim on this
@@ -462,150 +351,37 @@
     };
     if (EXPLICIT) {
       buildExplicit();
-      // The explicit solver collides with its own copies; these only render (not soft
-      // obstacles: the arena has hundreds).
-      // Rows [centre, half, rotation, kind]: 0/1 box, 2 vertical cylinder (a 16-sided
-      // hull: radius hx, half height hy), 3 capsule along its y, 4 sphere.
-      const xGeom = (k, hx, hy, hz) => k === 2 ? { hull: { points: Array.from({ length: 32 }, (_, i) => { const a = (i >> 1) * Math.PI / 8; return [hx * Math.cos(a), i & 1 ? hy : -hy, hx * Math.sin(a)]; }).flat() } }
-        : k === 3 ? { capsule: { radius: hx, halfLen: hy } } : k === 4 ? { sphere: { radius: hx } } : { box: { half: [hx, hy, hz] } };
-      for (const [cx, cy, cz, hx, hy, hz, qx = 0, qy = 0, qz = 0, qw = 1, k = 0] of xlayout.boxes) shapeOn(world.createBody({ position: [cx, cy, cz], rotation: [qx, qy, qz, qw] }), xGeom(k, hx, hy, hz), MAT_PROP);
       camMode = 'orbit'; orbit = ARENA ? { yaw: 0.7, pitch: 0.55, dist: 650, target: [0, 1, xlayout.boxes.length ? xlayout.boxes.reduce((a, b) => a + b[2], 0) / xlayout.boxes.length : 0] } : { yaw: 2.2, pitch: 0.3, dist: 11, target: null };
-    } else if (scene === 'yard') {
-      addSoft(carDesc, [0, 0.05, 0]);
-      // A wall, a row of poles, parked soft cars, crates, a ramp.
-      staticBox([0, 1.5, 60], [8, 1.5, 0.3]);
-      for (let i = 0; i < 5; i++) pole([-14 + i * 3.5, 1.5, 34], 0.1, 1.5);
-      addSoft(carDesc, [14, 0.05, 20], Math.PI / 2);
-      addSoft(carDesc, [14, 0.05, 30], -Math.PI / 2);
-      staticBox([-18, 0.5, 10], [3, 0.3, 4], qAxis([1, 0, 0], -0.25));
-      for (let i = 0; i < 3; i++) {
-        const crate = loadTruck(latticeCrate(3, 0.45, 120, 1.5e6, 6e3, 1e5));
-        addSoft(crate, [-9 + i * 1.6, 0.1, 22], 0, { rigid_core: false });
-      }
-      parkRam(1500);
-    } else if (scene === 'wall') {
-      // Rigid wall 0.8 m ahead of the bumper. overlap: share of the car's width it
-      // covers, from the left (+X) side (1 = full width, 0.25 = small overlap);
-      // angle: wall yaw in degrees (oblique impact).
-      const overlap = P('overlap', 1), angle = P('angle', 0) * Math.PI / 180;
-      const edge = CAR_HW - overlap * 2 * CAR_HW;
-      staticBox([edge + 3, 1.5, 3.0], [3, 1.5, 0.2], qAxis([0, 1, 0], angle));
-      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, P('speed', 54) / 3.6] });
-      camMode = 'orbit'; orbit = { yaw: 2.2, pitch: 0.25, dist: 9, target: [0, 0.8, 0.5] };
-    } else if (scene === 'pole') {
-      // 20 cm pole; offset: lateral offset from the centre line (m, + = left).
-      pole([P('offset', 0), 1.5, 2.8], 0.1, 1.5);
-      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, P('speed', 40) / 3.6] });
-      camMode = 'orbit'; orbit = { yaw: 2.3, pitch: 0.35, dist: 9, target: [0, 0.8, 1.5] };
-    } else if (scene === 'sidepole') {
-      // The car slides sideways (right side first) into a pole at the driver's
-      // door; at = the pole's position along the car (m forward of the centre).
-      pole([-(CAR_HW + 0.5 + runup), 1.5, P('at', 0.3)], 0.125, 1.5);
-      addSoft(carDesc, [0, 0.05, 0], 0, { velocity: [-P('speed', 32) / 3.6, 0, 0] });
-      camMode = 'orbit'; orbit = { yaw: 0.4, pitch: 0.4, dist: 9, target: [-1, 0.8, 0] };
-    } else if (scene === 'tbone') {
-      // A block of `mass` kg at `speed` into the left side, `at` m forward of the
-      // car's centre (+1.6 = the front wheel, −1.6 = the rear); carSpeed: the
-      // struck car's own speed (km/h).
-      addSoft(carDesc, [0, 0.05, -P('carSpeed', 0) / 3.6 * 0.25], 0, { velocity: [0, 0, P('carSpeed', 0) / 3.6] });
-      parkRam(P('mass', 1500));
-      ramSpeed = P('speed', 40) / 3.6; ramAt = P('at', 0);
-      pendingRam = 60; // launch after the car has settled
-      camMode = 'orbit'; orbit = { yaw: 0.6, pitch: 0.45, dist: 10, target: [0, 0.8, 0] };
-    } else if (scene === 'headon') {
-      // speed: each car's speed; overlap: share of the width that meets.
-      const v = P('speed', 29) / 3.6, dx = 2 * CAR_HW * (1 - P('overlap', 1)) + 0.3 * P('overlap', 1);
-      addSoft(carDesc, [0, 0.05, -3 - runup / 2], 0, { velocity: [0, 0, v] });
-      addSoft(carDesc, [dx, 0.05, 3 + runup / 2], Math.PI, { velocity: [0, 0, -v] });
-      camMode = 'orbit'; orbit = { yaw: 1.4, pitch: 0.35, dist: 12, target: [0, 0.8, 0] };
-    } else if (scene === 'rollover') {
-      // Sliding sideways (right side first) into a 25 cm curb: the tyres and the
-      // curb trip it.
-      staticBox([-(CAR_HW + 1.2 + runup) - 0.3, 0.125, 0], [0.3, 0.125, 4]);
-      addSoft(carDesc, [0, 0.05, 0], 0, { velocity: [-P('speed', 50) / 3.6, 0, 0] });
-      camMode = 'orbit'; orbit = { yaw: 0.2, pitch: 0.3, dist: 12, target: [-3, 0.8, 0] };
-    } else if (scene === 'ramp') {
-      // A ramp under the left wheels only: one side launches, the car corkscrews.
-      const ang = Math.atan(1.1 / 4);
-      staticBox([0.55, 2 * Math.sin(ang) - 0.2 * Math.cos(ang) + 0.02, CAR_FRONT + 5 + 2 + runup], [0.45, 0.2, 2], qAxis([1, 0, 0], -ang));
-      addSoft(carDesc, [0, 0.05, 0], 0, { velocity: [0, 0, P('speed', 70) / 3.6] });
-      camMode = 'orbit'; orbit = { yaw: 2.0, pitch: 0.3, dist: 14, target: [0, 1, 10] };
-    } else if (scene === 'drop') {
-      // Dropped from `height` m, nose down by `pitch` degrees.
-      addSoftAt(carDesc, [0, P('height', 8), 0], qAxis([1, 0, 0], P('pitch', 35) * Math.PI / 180));
-      camMode = 'orbit'; orbit = { yaw: 1.6, pitch: 0.2, dist: 11, target: [0, 1.5, 1] };
-    } else if (scene === 'limbo') {
-      // A fixed bar across the road (underside at `bar` m): the bonnet passes
-      // under, the pillars catch it, and past their strength the roof shears off.
-      const y = P('bar', 1.2) + 0.1;
-      staticBox([0, y, 6], [3.2, 0.1, 0.1]);
-      for (const x of [-3.3, 3.3]) staticBox([x, y / 2, 6], [0.12, y / 2, 0.12]);
-      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, P('speed', 80) / 3.6] });
-      // Third person: track the car from its left side to watch the roof go.
-      camMode = 'left';
-    } else if (scene === 'sandwich') {
-      // The car waits behind a parked 15 t truck; an 18 t truck at `speed` hits
-      // it from behind and shunts it into the parked one.
-      const half = [1.25, 1.6, 6.0];
-      const parked = dynBox([0, 1.75, CAR_FRONT + 0.4 + half[2]], half, P('parked', 15000));
-      subject('parked truck', parked.slot, [0, 1.2, -6.3]);
-      world.softAddObstacle(parked.shape);
-      addSoft(carDesc, [0, 0.05, 0]);
-      const truck = dynBox([0, 1.75, -CAR_FRONT - 3 - half[2] - runup], half, P('mass', 18000), [0, 0, P('speed', 60) / 3.6]);
-      subject('18 t truck', truck.slot, [0, 1.3, 6.4]);
-      world.softAddObstacle(truck.shape);
-      camMode = 'orbit'; orbit = { yaw: 1.3, pitch: 0.3, dist: 16, target: [0, 1, 0] };
-    } else if (scene === 'crusher') {
-      // A `mass` kg block dropped from `height` m onto the roof.
-      const block = dynBox([0, P('height', 4) + 1.5, 0], [1.2, 0.5, 1.5], P('mass', 10000));
-      subject('crusher block', block.slot, [0, -1.2, 2.5]);
-      crusher = { body: block.body, slot: block.slot, liftAt: P('liftAt', 2.5), liftTo: P('liftTo', 4.5), speed: 1.2, start: null, reading: false, heavy: false };
-      world.softAddObstacle(block.shape);
-      addSoft(carDesc, [0, 0.05, 0]);
-      camMode = 'orbit'; orbit = { yaw: 1.0, pitch: 0.35, dist: 10, target: [0, 1, 0] };
-    } else if (scene === 'traffic') {
-      // A walled 140 m arena with concrete blocks and poles; the cars drive
-      // themselves (wander, or chase the nearest car: a demolition derby).
-      const A = 70;
-      for (const [x, z, hx, hz] of [[0, A, A, 0.5], [0, -A, A, 0.5], [A, 0, 0.5, A], [-A, 0, 0.5, A]]) staticBox([x, 1, z], [hx, 1, hz]);
-      for (let i = 0; i < 10; i++) {
-        const a = i * 2.39996, r = 18 + (i % 4) * 11;
-        staticBox([Math.cos(a) * r, 0.5, Math.sin(a) * r], [1.5, 0.5, 0.5], qAxis([0, 1, 0], a));
-      }
-      for (let i = 0; i < 8; i++) { const a = i * 0.785 + 0.4; pole([Math.cos(a) * 32, 1.5, Math.sin(a) * 32], 0.15, 1.5); }
-      const cols = Math.ceil(Math.sqrt(NCARS));
-      for (let i = 0; i < NCARS; i++) {
-        const x = ((i % cols) - (cols - 1) / 2) * 9, z = (Math.floor(i / cols) - (cols - 1) / 2) * 11;
-        addSoft(carDesc, [x, 0.05, z], ((i * 1.7) % 6.283));
-      }
-      camMode = 'orbit'; orbit = { yaw: 0.6, pitch: 0.6, dist: Math.min(140, 40 + NCARS * 0.9), target: [0, 0, 0] };
-    } else if (scene === 'import') {
-      // Crash target for an imported vehicle (window.__crashImported): ?target=wall
-      // (rigid wall across z = 12) or car (a procedural car parked side-on there).
-      if (qs.get('target') === 'car') addSoft(carDesc, [0, 0.05, 13], Math.PI / 2);
-      else staticBox([0, 2.5, 12.3], [6, 2.5, 0.3]);
-      camMode = 'orbit'; orbit = { yaw: 2.2, pitch: 0.3, dist: 16, target: [0, 1.2, 10] };
-    } else if (scene === 'crates') {
-      for (let i = 0; i < 9; i++) {
-        const crate = loadTruck(latticeCrate(3, 0.45, 120, 1.5e6, 6e3, 1e5));
-        addSoft(crate, [(i % 3) * 1.4 - 1.4, 1 + Math.floor(i / 3) * 1.5, (i % 2) * 0.3], 0, { rigid_core: false });
-      }
-      camMode = 'orbit'; orbit = { yaw: 0.7, pitch: 0.4, dist: 9, target: [0, 1, 0] };
     }
-    // Cannonballs: parked static spheres (their 300 kg mass set first), launched by
-    // bodySetType. The JS host counted them as moving colliders while parked: the
-    // grid is sized for them the same way.
-    const cannon = [];
-    for (let i = 0; i < 6; i++) {
-      const p = [-3000 - i * 5, -3000, -3000];
-      const body = world.createBody({ type: 'dynamic', position: p });
-      const s = shapeOn(body, { sphere: { radius: 0.5 } }, MAT_PROP);
-      world.bodySetMassData(body, 300, [0, 0, 0], ballI(300, 0.5));
-      world.bodySetType(body, 'static', p, [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
-      world.softAddObstacle(s);
-      cannon.push(body);
-    }
-    world.reserveMovingRadius(0.5);
+    // The explicit solver collides with its own copies of its static shapes; the world
+    // holds them only to render (not soft obstacles: the arena has hundreds).
+    const placed = world.placeSoftScene({ ...sceneDef, explicitBoxes: EXPLICIT ? xlayout.boxes : [] });
+    for (const x of placed.softs) track(x.h, x.car, x.buggy);
+    // The scene's vehicle where the page still needs it (the buggy's renderer, the
+    // import scene's crash).
+    const carDesc = placed.carDesc;
+    // Camera subjects: every soft car (its core) plus named rigid bodies of the scene,
+    // by body slot. `mount` = where a camera rides on it, in its own frame.
+    const subjects = placed.subjects;
+    // The parked side ram (T key / tbone scene) and the scripted crusher's lift.
+    let ram = placed.ram;
+    let pendingRam = placed.pendingRam;
+    const ramSpeed = placed.ramSpeed, ramAt = placed.ramAt;
+    if (placed.crusher) crusher = { ...placed.crusher, start: null, reading: false, heavy: false };
+    // Cannonballs: parked static spheres, launched by bodySetType.
+    const cannon = placed.cannon;
+    // Each scene's camera.
+    const CAMS = {
+      wall: { yaw: 2.2, pitch: 0.25, dist: 9, target: [0, 0.8, 0.5] }, pole: { yaw: 2.3, pitch: 0.35, dist: 9, target: [0, 0.8, 1.5] },
+      sidepole: { yaw: 0.4, pitch: 0.4, dist: 9, target: [-1, 0.8, 0] }, tbone: { yaw: 0.6, pitch: 0.45, dist: 10, target: [0, 0.8, 0] },
+      headon: { yaw: 1.4, pitch: 0.35, dist: 12, target: [0, 0.8, 0] }, rollover: { yaw: 0.2, pitch: 0.3, dist: 12, target: [-3, 0.8, 0] },
+      ramp: { yaw: 2.0, pitch: 0.3, dist: 14, target: [0, 1, 10] }, drop: { yaw: 1.6, pitch: 0.2, dist: 11, target: [0, 1.5, 1] },
+      sandwich: { yaw: 1.3, pitch: 0.3, dist: 16, target: [0, 1, 0] }, crusher: { yaw: 1.0, pitch: 0.35, dist: 10, target: [0, 1, 0] },
+      traffic: { yaw: 0.6, pitch: 0.6, dist: Math.min(140, 40 + placed.softs.length * 0.9), target: [0, 0, 0] },
+      import: { yaw: 2.2, pitch: 0.3, dist: 16, target: [0, 1.2, 10] }, crates: { yaw: 0.7, pitch: 0.4, dist: 9, target: [0, 1, 0] },
+    };
+    if (!EXPLICIT && scene === 'limbo') camMode = 'left'; // third person from the left, to watch the roof go
+    else if (!EXPLICIT && CAMS[scene]) { camMode = 'orbit'; orbit = CAMS[scene]; }
     const truckInfo = document.getElementById('truckInfo');
     const initial = await saveState(world);
 
