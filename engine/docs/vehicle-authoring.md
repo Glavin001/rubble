@@ -1026,6 +1026,73 @@ Notes on the table:
   latch go at 27.2 kN; the secondary holds.
 - `sedan` stays the default: sedan1 does not pass o, p, q, g or t yet.
 
+### The deck lid opening and the lids (2026-11-05, later)
+
+**Measured first** (`m`, `M_TRACE=1`, Medium, 56 km/h wall). The boot lid
+did not lift because its latch let go: its hinges and latch peaked at
+2–4 kN and nothing broke. The deck opening itself collapsed. Its length
+(the body's hinge-line nodes to its latch-line nodes, in the world) went
+721 → 446 mm at 100 ms and stayed about 480 mm. Its edges were shell nodes
+in no member: the rear panel's top moved 350–500 mm forward against the
+cabin, under the rear body's own inertia, at low plastic work (the skin's
+buckled yield).
+
+**The opening's frame.** A real sedan's deck opening is ringed by closed
+sections. sedan1 now has them (`sedan_one_tier`, `DECK_FRAME=0` leaves them
+out to measure):
+- `deck_x`, the rear package tray's upper reinforcement, across the
+  opening's front edge (the lid's hinge line);
+- `deck_gutter`, the quarters' gutters (drip channel and quarter inner
+  upper), from the C-pillar's base to the rear panel, both sides;
+- `rear_panel`, the rear end panel's upper reinforcement, across its back.
+
+Sections are typical HSLA (CR340LA) hats closed by their panels, 0.8 mm
+(a Choice): 60 × 80, 50 × 60 and 60 × 100 mm. Their yields come from M_p.
+The opening now shortens at most 132 mm while the car stops and about
+20–30 mm after it (747 mm long).
+
+**A rigidifier under each lid** (BeamNG's documented practice for flat
+panels: "add a rigidifier node offset from the surface and connected to
+every panel node"). A real lid is a bonded double shell whose depth gives it
+bending stiffness. The lattice's single sheet has only its curvature's, so
+with the opening fixed the boot lid's free rear corners flapped up 280 mm
+at about 80 ms, while the latch at the centre held. The node sits
+`RIGIDIFIER_DEPTH` (0.10 m, the inner frame's hat, a Choice) under each lid's
+centroid, joined to every skin node by the lid's own sheet beam
+(`RIGIDIFIER=0`: none). Damping-only beams across the panels' spans (the
+other documented practice) were already there: the body dashpots at the
+BX's rate.
+
+| Boot lid, 56 km/h wall (drag on / off) | Before | Deck frame | Deck frame and rigidifiers |
+|---|---|---|---|
+| Edge lifts off the body | 136 / 140 mm | 284 / 293 mm | 174 / 171 mm |
+| Seam opens | 371 / 396 mm | 330 / 340 mm | 238 / 247 mm |
+| Deck opening, shortest | 446 mm of 721 | 615 mm of 747 | |
+| Hinges and latch, peak | 2.2–4.3 kN | 2.4–5.6 kN | 1.5–2.9 kN |
+
+The remaining lift is the lid's bending under the step's bound (k at
+0.1–4 % of real, the same root as the side pole's springback). The
+topology work (fewer beam ends per node, longer beams) is the fix.
+
+**The BX's latches, for the latch itself.** The BX holds its closures with
+couplers (`advancedCouplerControl`, `autoCoupling`): trunk 40 kN, bonnet
+latch and catch 30 kN each, doors 35 kN, each in its own breakGroup. sedan1's
+lid latches are still tension ropes sized at the door's FMVSS 206 values.
+They did not let go in any wall, so the coupler would not change the lift
+measured here. A `.truck` coupler needs a Rubble extension and a striker
+node on the body at the latch pin; not done yet.
+
+**Energy (open, solver).** With either addition the 120 km/h wall's energy
+rises between tenths of a second (`f`): 113.6 J with both, 9.8 J with the
+rigidifiers only, 1.9 J with the deck frame only, none without. With
+self-collision off (`NO_SELF=1`, a measurement) it rises by 0.00 J with
+both, so the contact injects it. Sent to the solver agent as a repro.
+
+Other references with both (Medium ensembles): `n` max crush 651 mm, b1
+22.2, e 0.181, peak 32.1 g, t_m 75.0 ms; `o` 225 mm (sd 91); `p` 20.4 kN;
+`q` 8.62×; `g` latch 46.9 kN, door off 47.4 kN (passes); `t` 12 leaked;
+`h` passes.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.

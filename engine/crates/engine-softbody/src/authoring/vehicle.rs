@@ -303,6 +303,10 @@ pub struct Loads {
 /// kN (2005 Camry, report 637726), the best-supported floor, and each hinge
 /// holds it on its own (`hardware_rigs`), so the door opens at its latch
 /// before a hinge lets go, as every report found.
+/// The depth of a lid's rigidifier node under its centroid (m): the inner
+/// frame's 100 mm hat (a Choice).
+pub const RIGIDIFIER_DEPTH: f32 = 0.10;
+
 pub const PRIMARY_LATCH: Loads = Loads {
     longitudinal: 28_000.0,
     transverse: 20_500.0,
@@ -2047,6 +2051,54 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     weight: false,
                 });
             }
+        }
+    }
+    // One tier: a rigidifier node under each lid (BeamNG's documented
+    // practice for flat panels, "a rigidifier node offset from the surface
+    // and connected to every panel node"). A real lid is a bonded double
+    // shell, outer and inner frame, whose depth gives it bending stiffness;
+    // the lattice's single sheet has none but its curvature's, so in the
+    // 56 km/h wall the boot lid's free corners flapped up 160–280 mm. The
+    // node sits `RIGIDIFIER_DEPTH` under the lid's centroid (a Choice: the
+    // inner frame's 100 mm hat), joined to every skin node of the lid by
+    // beams of the lid's own sheet material. `RIGIDIFIER=0`: none.
+    if one && std::env::var("RIGIDIFIER").map_or(true, |v| v != "0") {
+        let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
+        for name in ["bonnet", "bootlid"] {
+            let Some(pt) = sk.parts.iter().position(|p| p == name) else {
+                continue;
+            };
+            let pt = pt as u16;
+            let skin: Vec<u32> = (0..sk.nodes.len() as u32)
+                .filter(|&i| sk.nodes[i as usize].part == pt && on_shell.contains(&i))
+                .collect();
+            if skin.len() < 4 {
+                continue;
+            }
+            // The lid's own sheet beam (its median stiffness) as the material.
+            let mut mats: Vec<Material> = sk
+                .beams
+                .iter()
+                .filter(|b| {
+                    b.ty == BeamType::Normal
+                        && b.group == 0
+                        && !b.damper
+                        && skin.contains(&b.a)
+                        && skin.contains(&b.b)
+                })
+                .map(|b| b.mat)
+                .collect();
+            if mats.is_empty() {
+                continue;
+            }
+            mats.sort_by(|a, b| a.k.total_cmp(&b.k));
+            let mat = mats[mats.len() / 2];
+            let c = skin.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / skin.len() as f32;
+            let r = sk.node(c - Vec3::Y * RIGIDIFIER_DEPTH, pt);
+            for &i in &skin {
+                sk.beam(r, i, mat);
+            }
+            groups.insert(format!("{name}_rigidifier"), vec![r]);
         }
     }
     // Backed panels: each skin node tied to the part's frame behind it.
