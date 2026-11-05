@@ -112,6 +112,7 @@ enum Section {
     SlideNodes,
     TyrePose,
     SpawnContacts,
+    ContactBreaks,
     Skipped,
 }
 
@@ -334,6 +335,10 @@ pub struct TruckFile {
     /// node starts in its range: in a file that is its vehicle at rest, they
     /// rest in contact (spec §10.1's spawn exclusions are the design's).
     pub spawn_contacts: Vec<([u32; 3], u32)>,
+    /// `rubble_contact_breaks` lines `group, force_N, nodes…` (Rubble's extension,
+    /// jbeam-semantics-spec.md §32): break group `group` goes off when the contact
+    /// force on any of the nodes exceeds `force_N` in a step.
+    pub contact_breaks: Vec<(u32, f32, Vec<u32>)>,
     pub wheels: Vec<TruckWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
@@ -616,6 +621,7 @@ impl Parser {
             "slidenodes" => Section::SlideNodes,
             "rubble_tyre_pose" => Section::TyrePose,
             "rubble_spawn_contacts" => Section::SpawnContacts,
+            "rubble_contact_breaks" => Section::ContactBreaks,
             // Known sections this importer does not simulate (phase 3 / cosmetic).
             "engoption"
             | "engturbo"
@@ -1075,6 +1081,25 @@ impl Parser {
                     self.out.spawn_contacts.push(([n[0], n[1], n[2]], n[3]));
                 } else {
                     self.warn("rubble_spawn_contacts needs a, b, c, node: ignored".into());
+                }
+            }
+            Section::ContactBreaks => {
+                let g = t.first().and_then(|x| x.parse::<u32>().ok());
+                let force = t.get(1).and_then(|x| x.parse::<f32>().ok());
+                let nodes: Option<Vec<u32>> = t[2.min(t.len())..]
+                    .iter()
+                    .map(|x| x.parse::<u32>().ok())
+                    .collect();
+                match (g, force, nodes) {
+                    (Some(g), Some(force), Some(nodes))
+                        if g > 0 && force > 0.0 && !nodes.is_empty() =>
+                    {
+                        self.out.contact_breaks.push((g, force, nodes))
+                    }
+                    _ => self.warn(
+                        "rubble_contact_breaks needs group (> 0), force_N (> 0), nodes…: ignored"
+                            .into(),
+                    ),
                 }
             }
             Section::TyrePose => {

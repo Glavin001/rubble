@@ -310,6 +310,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     if (solo && any(abs(P.xyz - gsVvBounds[0]) > gsVvBounds[1])) vvReportOutside(vehicle);
 #endif
     float4 V = gNodes[gi * 3u + 1u];
+    cfRoll(gi, groupOff, flagsV);
     float selfGroup = gNodes[gi * 3u + 2u].w;
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -330,7 +331,11 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     {
         float3 x = origin + pos;
         if (ground > x.y)
-            f += contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+        {
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            cfAdd(gi, c);
+            f += c;
+        }
         for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
         {
             uint4 lo4 = gStatic[gP.boxBase + (boxOff + b) * 2u];
@@ -351,10 +356,17 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
                 }
                 else
                     n = shapeNormal(lo4.w, gP.boxBase + hi4.w, x);
-                if (n.w != 0.0) f += contactForce(f, vel, mass, n.xyz, boxSurface(), 0.0, V.w);
+                if (n.w != 0.0)
+                {
+                    float3 c = contactForce(f, vel, mass, n.xyz, boxSurface(), 0.0, V.w);
+                    cfAdd(gi, c);
+                    f += c;
+                }
             }
         }
-        f = cplContacts(vehicle, x, f, vel, mass, V.w);
+        float3 fr = cplContacts(vehicle, x, f, vel, mass, V.w);
+        cfAdd(gi, fr - f);
+        f = fr;
     }
     if ((flags & NODE_IMMOVABLE) == 0u)
     {

@@ -469,6 +469,9 @@ fn two_body_contact_steps_like_the_cpu() {
         n.vel = Vec3::new(0.0, -1.0, 0.0);
     }
     pts.finish();
+    // (The contact-force log on, spec §32: vehicle contact's forces logged alike.)
+    tri.enable_contact_force();
+    pts.enable_contact_force();
     let fleet = vec![tri, pts];
     let Some(mut g) = gpu(&fleet) else {
         eprintln!("no GPU: skipped");
@@ -489,4 +492,72 @@ fn two_body_contact_steps_like_the_cpu() {
         eprintln!("vehicle {k}: GPU–CPU {d:.2e} m after {} steps, {} hits", w.steps, w.total.hits);
         assert!(d < 1e-4, "vehicle {k}: GPU–CPU {d} m");
     }
+    let logs = g.contact_forces();
+    for k in 0..2 {
+        let (_, peak, _) = logs[k].clone().unwrap();
+        let cpu = w.vehicles[k].take_contact_force_peak().unwrap();
+        eprintln!("vehicle {k}: contact-force peaks CPU {cpu:?} GPU {peak:?} N");
+        assert!(cpu.iter().any(|&f| f > 1.0));
+        for (a, b) in cpu.iter().zip(&peak) {
+            assert!((a - b).abs() <= 0.1 + 1e-3 * a, "CPU {a} GPU {b}");
+        }
+    }
+}
+
+/// The contact-force log and a contact break (jbeam-semantics-spec.md §32) on the
+/// GPU as on the CPU: a two-node pane (break group 1, 50 N on node 0) dropped
+/// 0.5 m onto the ground breaks in the same step, and a second pane resting on
+/// the ground logs the same contact forces; one-step frames, then 17-step ones.
+#[test]
+fn contact_breaks_step_like_the_cpu() {
+    let pane = |x0: f32, y: f32| {
+        let mut s = vehicle(&[Vec3::new(x0, y, 0.0), Vec3::new(x0 + 1.0, y, 0.0)]);
+        s.ground = 0.0;
+        let mut b = Beam::new(0, 1, ExplicitKind::Plain, ExplicitType::Deformable, 1.0e5, 100.0, 1.0, 1.0e9, 1.0e9, 0.0);
+        b.group = 1;
+        s.beams.push(b);
+        s.finish();
+        s
+    };
+    let mut drop = pane(0.0, 0.5);
+    drop.set_contact_breaks(&[(1, 50.0, vec![0])]).unwrap();
+    let mut rest = pane(5.0, 0.005);
+    rest.enable_contact_force();
+    let fleet = vec![drop, rest];
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut w = ExplicitBeamsWorld::new(fleet);
+    let (mut cpu_at, mut gpu_at) = (None, None);
+    for k in 0..1000u32 {
+        w.frame(1);
+        g.frame(1);
+        g.wait();
+        if cpu_at.is_none() && w.vehicles[0].beams[0].broken {
+            cpu_at = Some(k);
+        }
+        if gpu_at.is_none() && g.beams()[0][0].broken {
+            gpu_at = Some(k);
+        }
+    }
+    for _ in 0..20 {
+        w.frame(17);
+        g.frame(17);
+    }
+    g.wait();
+    eprintln!("broke: CPU step {cpu_at:?}, GPU step {gpu_at:?}");
+    assert!(cpu_at.is_some());
+    assert_eq!(cpu_at, gpu_at);
+    let logs = g.contact_forces();
+    let (last, peak, states) = logs[0].clone().unwrap();
+    assert_eq!(states[1], 2);
+    let cpu = w.vehicles[1].contact_forces().unwrap();
+    let (gl, _, _) = logs[1].clone().unwrap();
+    eprintln!("resting pane: CPU {cpu:?} N, GPU {gl:?} N; dropped pane peak {peak:?} last {last:?}");
+    for (a, b) in cpu.iter().zip(&gl) {
+        assert!((a - b).abs() <= 0.05 + 1e-3 * a.abs(), "CPU {a} GPU {b}");
+    }
+    let cpu_peak = w.vehicles[0].take_contact_force_peak().unwrap();
+    assert!((cpu_peak[0] - peak[0]).abs() <= 0.05 + 1e-3 * cpu_peak[0], "peak CPU {} GPU {}", cpu_peak[0], peak[0]);
 }

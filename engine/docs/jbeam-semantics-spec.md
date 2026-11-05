@@ -1108,3 +1108,34 @@ wings and aero devices (`dragCoef` 100–160), 0.5 m² its body panels (6–12):
 car with its aero kit at C_d·A ≈ 1.0–1.2 m², so ours is about 1.5× (both faces of
 each triangle drag, as [T] says, "Triangles are not affected by other triangles").
 No triangle takes the default 100 in either car except where the author left it.
+## 32. The contact-force log and `rubble_contact_breaks` (2026-11-05)
+
+**Contact force (Rubble, both solvers).** A node's contact force in a step is the
+sum of the magnitudes of every contact force on it that step: the node pass's
+(ground, boxes, static shapes, rigid bodies: the latter's sum per node),
+self-collision's and vehicle contact's, as the contacter and as a struck
+triangle's node (its share w·|F|). **Choice:** magnitudes summed (a pinched node
+counts both pushes); fixed point at 1/32 N, as the kernel's accumulators. Off by
+default (`ExplicitBeams::contact_force`, `enable_contact_force`): nothing changes for
+a vehicle without it. A step's sum is complete after the vehicle-contact pass; the
+next node pass moves it to `last` (and a running peak) and restarts it.
+Readback: CPU `contact_forces()` (last step, N) and `take_contact_force_peak()`;
+GPU `ExplicitBeamsGpu::contact_forces()` (per vehicle: last, peak, contact-break
+states) and `clear_contact_force_peaks()`. GPU: per-vehicle flag bit 8
+(`FLAG_CFORCE`, its nodes take the shapes path of the node phase); params words
+`cfAcc` (gAcc, per node sum/last/peak), `cfNode` (gLists, per node break group and
+force), `cfPend` (gAcc, per group slot its state).
+
+**`rubble_contact_breaks`** (a `.truck` section, **Rubble extension, not RoR**): lines
+`group, force_N, nodes…`. Break group `group` goes off when the contact force on any
+listed node exceeds `force_N` in a step. Forward only: the step's force is tested at
+the next node pass and the group breaks in that step's beam pass, as if set off by
+its first beam (beam 0 keeps that step's force; its other beams do not), once. A
+group must be some beam's own break group and a node may be in one line only; the
+loader fails with a clear error otherwise. Use: windscreen and glass direct-impact
+breaking (a pane's nodes and its break group), and the visual layer's paint-wear
+pressure (the log alone). Tests: `contact_breaks.rs` (CPU: a resting node's mean
+contact force is its weight to 0.05 N; a 0.5 m drop breaks the group the step after
+its force passes 50 N, never at 10 MN; the lines are read and checked),
+`explicit_contact_gpu.rs` `contact_breaks_step_like_the_cpu` (the same step on the
+GPU, logs within 0.05 N + 0.1 %).

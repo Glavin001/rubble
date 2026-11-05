@@ -534,6 +534,14 @@ impl ExplicitBeamsWorld {
             va.nodes[i1 as usize].force -= f * alpha;
             va.nodes[i2 as usize].force -= f * beta;
             va.nodes[i0 as usize].force -= f * gamma;
+            if let Some(l) = self.vehicles[a].contact_force.as_mut() {
+                l.add(i1 as usize, f * alpha);
+                l.add(i2 as usize, f * beta);
+                l.add(i0 as usize, f * gamma);
+            }
+            if let Some(l) = self.vehicles[b].contact_force.as_mut() {
+                l.add(h as usize, f);
+            }
         }
     }
 }
