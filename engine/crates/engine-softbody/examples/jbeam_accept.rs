@@ -22,9 +22,11 @@ fn report(tag: &str, s: &ExplicitBeams, ke0: f32) {
     let (broken, bent) = s.damage();
     let deform = s.deform_triggered().iter().filter(|&&d| d != 0).count();
     let dead = s.tri_dead.iter().filter(|&&d| d).count();
+    let mass: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let com = s.nodes.iter().map(|n| n.pos * n.mass).sum::<Vec3>() / mass;
     println!(
         "{tag}: broken {broken} bent {bent} KE {ke:.1} J (spawn {ke0:.1}) max node speed {vmax:.2} m/s \
-         NaN {nan} deform groups {deform}/{} dead triangles {dead}/{}",
+         NaN {nan} deform groups {deform}/{} dead triangles {dead}/{} centre of mass {com:.4}",
         s.deform_state.len(),
         s.tri_dead.len()
     );
@@ -81,6 +83,12 @@ fn main() {
             }
         }
     }
+    if let Some(list) = opt("nocand=") {
+        for w in list.split(',') {
+            let i = desc.nodes.iter().position(|n| n.name == w).unwrap() as u32;
+            s.candidates.retain(|&c| c != i);
+        }
+    }
     if opt("noself=").is_some() {
         s.candidates.clear();
     }
@@ -98,6 +106,53 @@ fn main() {
         mass,
         desc.pressure_wheels.len()
     );
+    if opt("spawnpairs=").is_some() {
+        // Self-collision node-triangle pairs inside the contact range at spawn.
+        let name = |i: u32| desc.nodes.get(i as usize).map_or("wheel".to_string(), |n| n.name.clone());
+        for (t, tri) in s.triangles.iter().enumerate() {
+            let g = s.triangle_self_group(t);
+            let [i0, i1, i2] = tri.nodes;
+            let (p0, p1, p2) = (s.nodes[i0 as usize].pos, s.nodes[i1 as usize].pos, s.nodes[i2 as usize].pos);
+            let (e1, e2) = (p1 - p0, p2 - p0);
+            let n = e1.cross(e2).normalize_or_zero();
+            for &c in &s.candidates {
+                if c == i0 || c == i1 || c == i2 || (g != 0 && s.self_groups[c as usize] == g) {
+                    continue;
+                }
+                let q = s.nodes[c as usize].pos - p0;
+                let delta = n.dot(q);
+                if delta.abs() > s.collision_range {
+                    continue;
+                }
+                // Barycentric coordinates of the projection.
+                let qp = q - n * delta;
+                let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+                let (q1, q2) = (qp.dot(e1), qp.dot(e2));
+                let det = d11 * d22 - d12 * d12;
+                let a = (d22 * q1 - d12 * q2) / det;
+                let b = (d11 * q2 - d12 * q1) / det;
+                if a >= 0.0 && b >= 0.0 && a + b <= 1.0 {
+                    println!(
+                        "pair: node {} triangle {} {} {} delta {:.4} m",
+                        name(c), name(i0), name(i1), name(i2), delta
+                    );
+                }
+            }
+        }
+        return;
+    }
+    if let Some(w) = opt("watch=") {
+        // Follow one node: position and velocity every 5 steps for 0.4 s.
+        let i = desc.nodes.iter().position(|n| n.name == w).unwrap();
+        for step in 0..800 {
+            s.step();
+            if step % 5 == 0 {
+                let n = s.nodes[i];
+                println!("step {step}: {w} pos {:.4?} vel {:.3?} contacts {}", n.pos, n.vel, s.last_contacts);
+            }
+        }
+        return;
+    }
     if opt("modes=").is_some() {
         // The highest beam-spring mode ω_max·h (power iteration on M⁻¹K, springs only):
         // explicit integration diverges past 2.
@@ -210,6 +265,22 @@ fn main() {
     let steps = (crash / 0.1).ceil() as usize;
     for k in 1..=steps {
         s.run(0.1);
+        if opt("crashwatch=").is_some() {
+            let (i, n) = s
+                .nodes
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.vel.length().total_cmp(&b.1.vel.length()))
+                .unwrap();
+            println!(
+                "  {:.1} s fastest node {} {} m {} v {:.2} m/s",
+                0.1 * k as f32,
+                i,
+                desc.nodes.get(i).map_or("wheel", |n| n.name.as_str()),
+                n.mass,
+                n.vel.length()
+            );
+        }
         if k % 5 == 0 || k == steps {
             report(&format!("crash {:.1} s", 0.1 * k as f32), &s, ke0);
         }

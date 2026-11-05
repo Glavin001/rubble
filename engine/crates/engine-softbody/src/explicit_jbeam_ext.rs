@@ -17,6 +17,9 @@ use crate::explicit_beams::{
 use glam::Vec3;
 use std::collections::HashMap;
 
+/// How near a collision triangle's plane a self-collision node lies "on" it at
+/// spawn (spec §10.1): 1 mm, the precision JBeam positions are written to.
+pub const SURFACE_TOLERANCE: f32 = 0.001;
 /// Ambient pressure (Pa): PRESSURED beams and pressure groups take gauge pressures
 /// over it (spec §21, §26).
 pub const ATMOSPHERE: f32 = 101_325.0;
@@ -737,6 +740,68 @@ impl ExplicitBeams {
         if any {
             self.tri_dead = vec![false; lists.len()];
             self.tri_breaks = lists;
+        }
+    }
+
+    /// Self-collision nodes lying on a collision triangle at spawn (spec §10.1):
+    /// inside it and within [`SURFACE_TOLERANCE`] of its plane. Such a node has
+    /// no side to be pushed out to; the triangle takes the node's self-collision
+    /// group (when the triangle has none), so the node skips it.
+    pub(crate) fn surface_nodes(&mut self, warnings: &mut Vec<String>) {
+        let mut groups = vec![0u32; self.triangles.len()];
+        let (mut taken, mut left) = (0, 0);
+        for t in 0..self.triangles.len() {
+            if self.triangle_self_group(t) != 0 {
+                continue;
+            }
+            let [i0, i1, i2] = self.triangles[t].nodes;
+            let p0 = self.nodes[i0 as usize].pos;
+            let (e1, e2) = (
+                self.nodes[i1 as usize].pos - p0,
+                self.nodes[i2 as usize].pos - p0,
+            );
+            let n = e1.cross(e2).normalize_or_zero();
+            let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+            let det = d11 * d22 - d12 * d12;
+            if n == Vec3::ZERO || det <= 0.0 {
+                continue;
+            }
+            for &c in &self.candidates {
+                if c == i0 || c == i1 || c == i2 {
+                    continue;
+                }
+                let q = self.nodes[c as usize].pos - p0;
+                let delta = n.dot(q);
+                if delta.abs() > SURFACE_TOLERANCE {
+                    continue;
+                }
+                let (q1, q2) = (q.dot(e1), q.dot(e2));
+                let a = (d22 * q1 - d12 * q2) / det;
+                let b = (d11 * q2 - d12 * q1) / det;
+                if a < 0.0 || b < 0.0 || a + b > 1.0 {
+                    continue;
+                }
+                let g = self.self_groups[c as usize];
+                if g != 0 && (groups[t] == 0 || groups[t] == g) {
+                    groups[t] = g;
+                    taken += 1;
+                } else {
+                    left += 1;
+                }
+            }
+        }
+        if taken > 0 {
+            self.tri_groups = groups;
+            warnings.push(format!(
+                "{taken} self-collision nodes lie on a collision triangle at spawn: \
+                 those triangles take the node's group (spec §10.1)"
+            ));
+        }
+        if left > 0 {
+            warnings.push(format!(
+                "{left} self-collision nodes lie on a collision triangle at spawn \
+                 with no group to give it: they still collide with it"
+            ));
         }
     }
 

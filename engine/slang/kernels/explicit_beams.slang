@@ -1166,10 +1166,10 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     float u = smul(sdot(ssub3(va, vb), d), inv);
     if (r2.w != 0u)
     {
-        // dampCutoffHz: the bilinear low-pass of the rate.
+        // dampCutoffHz: the RC low-pass of the rate (spec §6).
         uint fi = r2.w - 1u;
         float4 flt = gBeams[fi];
-        float y = nf(smul(flt.z, nf(u + flt.x)) - smul(flt.w, flt.y));
+        float y = nf(smul(flt.z, u) - smul(flt.w, flt.y));
         gBeams[fi] = float4(u, y, flt.z, flt.w);
         u = y;
     }
@@ -1408,7 +1408,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     {
         uint fi = r2.w - 1u;
         float4 flt = gBeams[fi];
-        float y = nf(smul(flt.z, nf(u + flt.x)) - smul(flt.w, flt.y));
+        float y = nf(smul(flt.z, u) - smul(flt.w, flt.y));
         gBeams[fi] = float4(u, y, flt.z, flt.w);
         u = y;
     }
