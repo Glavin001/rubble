@@ -65,6 +65,10 @@ pub struct ExplicitBeamsGpu {
     spans: Vec<Span>,
     rest0: Vec<f32>,
     words: [u32; PARAM_WORDS],
+    /// JBeam deform group words (spec §19): gGroups word of the first, and per
+    /// vehicle (first, count).
+    deform_base: u32,
+    deform_spans: Vec<(u32, u32)>,
     /// gBeams record of the aero state and per vehicle its first wing and count.
     aero_state: u32,
     /// gBeams record of the slide node states; gNext word of the trigger inputs.
@@ -430,10 +434,10 @@ const WIDE_HITS: usize = 7;
 
 /// Parameter copies for the wide passes: one per step of a frame (its index in the
 /// step word) plus the frame's end, at the uniform offset alignment.
-const PARAM_STRIDE: u64 = 256;
+const PARAM_STRIDE: u64 = 512;
 const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-const PARAM_WORDS: usize = 64;
+const PARAM_WORDS: usize = 80;
 /// Params word: the phases a measurement build skips (`EB_ABLATE`).
 const W_ABLATE: usize = 63;
 /// Params word: the steps the contact plan's frame bounds cover.
@@ -520,6 +524,16 @@ impl ExplicitBeamsGpu {
         // Per lists position (incidence entries) the entry's far end.
         let mut nbr: Vec<u32> = Vec::new();
         let mut vv_tri: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
+        // JBeam Part II (spec §16-§19): extension records, per beam its record + 1,
+        // the extension states, the triangle break lists, the deform group words.
+        let any_ext = vehicles.iter().any(|v| !v.beam_ext.is_empty());
+        let any_tri_break = vehicles.iter().any(|v| !v.tri_breaks.is_empty());
+        let mut ext_recs: Vec<[u32; 4]> = Vec::new();
+        let mut ext_state: Vec<[f32; 4]> = Vec::new();
+        let mut ext_index: Vec<u32> = Vec::new();
+        let mut tri_break_recs: Vec<[u32; 4]> = Vec::new();
+        let mut deform_spans: Vec<(u32, u32)> = Vec::with_capacity(nv);
+        let mut deform_total = 0u32;
         // Per vehicle its slide slots (node → 1-based global slot) and slot range.
         let mut slot_maps: Vec<Vec<u32>> = Vec::with_capacity(nv);
         let mut slot_ranges: Vec<(u32, u32)> = Vec::with_capacity(nv);
@@ -533,6 +547,12 @@ impl ExplicitBeamsGpu {
                 .beams
                 .iter()
                 .map(|b| b.group.unsigned_abs() + 1)
+                .chain(
+                    v.beam_ext
+                        .iter()
+                        .flat_map(|x| x.extra_groups)
+                        .map(|g| g.unsigned_abs() + 1),
+                )
                 .max()
                 .filter(|&g| g > 1)
                 .unwrap_or(0);
@@ -638,11 +658,52 @@ impl ExplicitBeamsGpu {
                     0,
                 ]);
             }
-            for b in &v.beams {
+            // Extension records, globalised (spec §16).
+            let ext_first = (ext_recs.len() / 4) as u32;
+            let deform_first = deform_total;
+            deform_spans.push((deform_first, v.deform_state.len() as u32));
+            deform_total += v.deform_state.len() as u32;
+            for x in &v.beam_ext {
+                use engine_softbody::explicit_beams::ExplicitKind as K;
+                let kind = v.beams[x.beam as usize].kind;
+                let mut e1 = x.e1.map(f32::to_bits);
+                match kind {
+                    K::JbeamLbeam => e1[0] += node_off,
+                    K::JbeamPressureTri => {
+                        e1[0] += node_off;
+                        e1[1] += beam_off;
+                    }
+                    K::JbeamPressureGroup => e1[0] += beam_off,
+                    _ => {}
+                }
+                let dg = |g: u32| if g == 0 { 0 } else { deform_first + g };
+                ext_recs.push([x.mask, dg(x.deform[0]), dg(x.deform[1]), x.trigger.to_bits()]);
+                ext_recs.push(e1);
+                ext_recs.push(x.e2.map(f32::to_bits));
+                ext_recs.push([
+                    x.ramp_delta.to_bits(),
+                    x.ramp_steps,
+                    x.extra_groups[0] as u32,
+                    x.extra_groups[1] as u32,
+                ]);
+                ext_state.push([x.ramp_left as f32, x.pressure[0], x.pressure[1], 0.0]);
+            }
+            if any_ext {
+                ext_index.extend((0..v.beams.len()).map(|j| match v.ext_of.get(j) {
+                    Some(&x) if x != 0 => ext_first + x,
+                    _ => 0,
+                }));
+            }
+            for (j, b) in v.beams.iter().enumerate() {
+                let ext = if v.ext_of.get(j).is_some_and(|&x| x != 0) {
+                    engine_softbody::explicit_jbeam_ext::TYPE_EXT
+                } else {
+                    0
+                };
                 beam_recs.push([
                     node_off + b.a,
                     node_off + b.b,
-                    b.kind.code() | b.ty.code() << 8 | (vi as u32) << 16,
+                    b.kind.code() | (b.ty.code() | ext) << 8 | (vi as u32) << 16,
                     b.group as u32,
                 ]);
                 beam_recs.push([
@@ -705,6 +766,17 @@ impl ExplicitBeamsGpu {
             let first_tri = tri_misc.len() - v.triangles.len();
             for t in 0..v.triangles.len() {
                 tri_misc[first_tri + t][2] = v.triangle_self_group(t);
+            }
+            // Breakable triangles (spec §18): their four beams, bit 31 of the word.
+            if any_tri_break {
+                for t in 0..v.triangles.len() {
+                    let l = v.tri_breaks.get(t).copied().unwrap_or([u32::MAX; 4]);
+                    let g = l.map(|j| if j == u32::MAX { j } else { beam_off + j });
+                    if g.iter().any(|&j| j != u32::MAX) {
+                        tri_misc[first_tri + t][2] |= 0x8000_0000;
+                    }
+                    tri_break_recs.push(g);
+                }
             }
             for bx in &v.boxes {
                 box_recs.push(bits(bx.lo));
@@ -1068,6 +1140,8 @@ impl ExplicitBeamsGpu {
         for &(rec, i) in &filter_patches {
             beam_recs[rec][3] = (filter_base + i + 1) as u32;
         }
+        let ext_state_base = beams.len() as u32;
+        beams.extend(ext_state);
         // gNext: per list position the grid rank, then the wide passes' grid
         // offsets and tested lists (plain words: only the counters are atomic).
         let grid_off_base = lists.len() as u32;
@@ -1152,6 +1226,12 @@ impl ExplicitBeamsGpu {
             statics.push([*node, lists.len() as u32, entries.len() as u32, 0]);
             lists.extend(entries);
         }
+        let ext_base = statics.len() as u32;
+        statics.extend(ext_recs);
+        let tri_break_base = statics.len() as u32;
+        statics.extend(tri_break_recs);
+        let ext_index_base = lists.len() as u32;
+        lists.extend(ext_index);
 
         let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
         let lanes = frame_lanes(vehicles);
@@ -1186,7 +1266,9 @@ impl ExplicitBeamsGpu {
         };
         // Two parities of group slots.
         let group_total = groups.len() as u32;
-        let groups: Vec<u32> = groups.iter().chain(groups.iter()).copied().collect();
+        let mut groups: Vec<u32> = groups.iter().chain(groups.iter()).copied().collect();
+        let deform_base = groups.len() as u32;
+        groups.extend(std::iter::repeat_n(0u32, deform_total as usize));
         let init = |label: &str, contents: &[u8], usage| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
@@ -1262,7 +1344,13 @@ impl ExplicitBeamsGpu {
             vv_nbr,
             vv_hits,
             0,
+            ext_index_base,
+            ext_base,
+            ext_state_base,
+            tri_break_base,
+            deform_base,
         ];
+        let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),
             size: PARAM_STRIDE * u64::from(PARAM_COPIES),
@@ -1376,6 +1464,8 @@ impl ExplicitBeamsGpu {
             spans,
             rest0,
             words,
+            deform_base,
+            deform_spans,
             aero_state,
             slide_state: slide_state_base,
             key_base,
@@ -2509,6 +2599,19 @@ impl ExplicitBeamsGpu {
     }
 
     /// Per vehicle, every beam's broken flag and rest length.
+    /// Per vehicle its triggered JBeam deform groups (0 or 1, in
+    /// `ExplicitBeams::deform_names` order; jbeam-semantics-spec.md §19).
+    pub fn deform_triggered(&self) -> Vec<Vec<u32>> {
+        let words: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[6])).to_vec();
+        self.deform_spans
+            .iter()
+            .map(|&(first, n)| {
+                let at = (self.deform_base + first) as usize;
+                words.get(at..at + n as usize).map_or_else(|| vec![0; n as usize], <[u32]>::to_vec)
+            })
+            .collect()
+    }
+
     pub fn beams(&self) -> Vec<Vec<GpuBeam>> {
         let raw = self.read(&self.beams);
         let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);

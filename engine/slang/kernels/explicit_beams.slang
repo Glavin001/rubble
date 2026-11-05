@@ -82,6 +82,22 @@ static const uint KIND_JBOUNDED = 8u;
 static const uint KIND_JCOUPLER = 9u;
 static const uint KIND_JTORSION = 10u; // nodes 1-2; the next record carries nodes 3-4
 static const uint KIND_JTORSION2 = 11u;
+// JBeam Part II (engine/docs/jbeam-semantics-spec.md §16-§28): kinds and the type
+// byte's extension flag; such beams take jbeamExtUpdate (explicit_jbeam_ext.rs).
+static const uint KIND_JANISO = 12u;
+static const uint KIND_JPRESSURED = 13u;
+static const uint KIND_JLBEAM = 14u;
+static const uint KIND_JPGROUP = 15u;
+static const uint KIND_JPTRI = 16u;
+static const uint KIND_JPTRI2 = 17u;
+static const uint TYPE_EXT = 4u;
+static const uint EXT_GROUPS = 1u;
+static const uint EXT_DEFORM = 2u;
+static const uint EXT_REBOUND = 4u;
+static const uint EXT_RAMP = 8u;
+static const uint NODE_FRICTION_LIMIT = 32u;
+static const uint TRI_BREAKABLE = 0x80000000u;
+static const float ATMOSPHERE = 101325.0;
 static const uint TYPE_DEFORMABLE = 0u;
 
 static const uint FLAG_FAST_INV_SQRT = 1u;
@@ -166,6 +182,14 @@ struct Params
     uint vvNbr; // gLists: per incidence entry (same position + vvNbr) its far end
     uint vvHits; // gNext: per group 2 × its points hits (triangle, node) of one owner
     uint ablate; // measurement builds only (EB_ABLATE): phases to skip
+    // JBeam Part II (jbeamExtUpdate): gLists per beam its extension + 1 (0 none);
+    // gStatic per extension 4 records; gBeams per extension 1 state record;
+    // gStatic per triangle its 4 break beams; gGroups the deform group words.
+    uint extIndex;
+    uint extBase;
+    uint extState;
+    uint triBreak;
+    uint deformBase;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -367,6 +391,19 @@ float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, f
     return ssub3(sscale(n, r), sscale(sl, smul(nf(g + min(smul(s.t2, sigma), 5.0)), gr)));
 }
 
+// A pressure-wheel node's ground contact (NODE_FRICTION_LIMIT, spec §28): the
+// tangential part at most stops the slip in one step (explicit_jbeam_ext.rs
+// friction_limit).
+float3 frictionLimit(float3 c, float3 f, float3 v, float m, float3 n)
+{
+    float3 total = sadd3(f, c);
+    float3 t = ssub3(total, sscale(n, sdot(total, n)));
+    float3 vt = ssub3(v, sscale(n, sdot(v, n)));
+    float3 dv = sscale(t, sdiv(STEP, m));
+    if (sdot(dv, vt) < 0.0 && sdot(dv, dv) > sdot(vt, vt)) return sadd3(c, ssub3(sscale(-vt, sdiv(m, STEP)), t));
+    return c;
+}
+
 float3 accForce(uint node)
 {
     return float3(float(gAcc[node * 3u].load()), float(gAcc[node * 3u + 1u].load()),
@@ -393,11 +430,15 @@ uint groupSlot(uint parity, uint groupOff, uint g)
 // Beam j's group break as a node phase sees it: true for a beam after the first
 // master that broke its group (step parity `parity`), which then drops the force it
 // computed; when `mark`, any beam of such a group is marked broken.
+bool groupDropsExt(uint j, uint beamOff, uint groupOff, uint parity, bool mark, uint master);
+
 bool groupDrops(uint j, uint beamOff, uint groupOff, uint parity, bool mark)
 {
-    int g = asint(gStatic[gP.beamBase + j * 3u].w);
+    uint4 b0 = gStatic[gP.beamBase + j * 3u];
+    int g = asint(b0.w);
     if (g == 0) return false;
     uint master = gGroups[groupSlot(parity, groupOff, uint(abs(g)))].load();
+    if ((b0.z & (TYPE_EXT << 8)) != 0u) return groupDropsExt(j, beamOff, groupOff, parity, mark, master);
     if (master == NO_GROUP) return false;
     if (mark)
     {
@@ -407,6 +448,40 @@ bool groupDrops(uint j, uint beamOff, uint groupOff, uint parity, bool mark)
             s1.z = 1.0;
             gBeams[j * 2u + 1u] = s1;
         }
+    }
+    return j - beamOff > master;
+}
+
+// The deform groups of extension x triggered (spec §19).
+void extDeform(uint x, uint vehicle)
+{
+    uint4 e0 = gStatic[gP.extBase + x * 4u];
+    if (e0.y != 0u) gGroups[gP.deformBase + e0.y - 1u].max(1u);
+    if (e0.z != 0u) gGroups[gP.deformBase + e0.z - 1u].max(1u);
+}
+
+// groupDrops for a beam with an extension record: its extra break groups too
+// (spec §17), and its deform groups when a group breaks it.
+bool groupDropsExt(uint j, uint beamOff, uint groupOff, uint parity, bool mark, uint master)
+{
+    uint x = gLists[gP.extIndex + j] - 1u;
+    uint4 e0 = gStatic[gP.extBase + x * 4u];
+    uint4 e3 = gStatic[gP.extBase + x * 4u + 3u];
+    if ((e0.x & EXT_GROUPS) != 0u)
+    {
+        if (asint(e3.z) != 0) master = min(master, gGroups[groupSlot(parity, groupOff, uint(abs(asint(e3.z))))].load());
+        if (asint(e3.w) != 0) master = min(master, gGroups[groupSlot(parity, groupOff, uint(abs(asint(e3.w))))].load());
+    }
+    if (master == NO_GROUP) return false;
+    if (mark)
+    {
+        float4 s1 = gBeams[j * 2u + 1u];
+        if (s1.z == 0.0)
+        {
+            s1.z = 1.0;
+            gBeams[j * 2u + 1u] = s1;
+        }
+        if ((e0.x & EXT_DEFORM) != 0u) extDeform(x, 0u);
     }
     return j - beamOff > master;
 }
@@ -511,7 +586,11 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
     {
         float3 x = origin + pos;
         if (ground > x.y)
-            f += contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+        {
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            f += c;
+        }
         for (uint b = 0u; b < boxCount; b++)
         {
             float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u].xyz);
@@ -597,7 +676,11 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
     {
         float3 x = origin + pos;
         if (ground > x.y)
-            f += contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+        {
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            f += c;
+        }
         for (uint b = 0u; b < boxCount; b++)
         {
             float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u].xyz);
@@ -773,7 +856,11 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     {
         float3 x = origin + pos;
         if (ground > x.y)
-            f += contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+        {
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            f += c;
+        }
         for (uint b = 0u; b < boxCount; b++)
         {
             uint4 lo4 = gStatic[gP.boxBase + (boxOff + b) * 2u];
@@ -1185,13 +1272,319 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
 }
 
+// Set off group g (> 0) as master `local` in this beam phase.
+void extSetOff(int g, uint local, uint groupOff, uint parity)
+{
+    if (g <= 0) return;
+    gGroups[groupSlot(parity, groupOff, uint(g))].min(local);
+    gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+}
+
+// A beam with several break groups that broke on its own in the last beam phase
+// (spec §17): sets off all its groups now, unless one of them had broken it first
+// (a master before it in the last step's slots).
+void extPending(uint gj, uint local, uint groupOff, uint parity)
+{
+    uint4 bn = gStatic[gP.beamBase + gj * 3u];
+    if ((bn.z & (TYPE_EXT << 8)) == 0u) return;
+    uint x = gLists[gP.extIndex + gj] - 1u;
+    uint4 e0 = gStatic[gP.extBase + x * 4u];
+    if ((e0.x & EXT_GROUPS) == 0u) return;
+    uint4 e3 = gStatic[gP.extBase + x * 4u + 3u];
+    int g0 = asint(bn.w);
+    int g1 = asint(e3.z);
+    int g2 = asint(e3.w);
+    uint last = parity ^ 1u;
+    uint m = NO_GROUP;
+    if (g0 != 0) m = min(m, gGroups[groupSlot(last, groupOff, uint(abs(g0)))].load());
+    if (g1 != 0) m = min(m, gGroups[groupSlot(last, groupOff, uint(abs(g1)))].load());
+    if (g2 != 0) m = min(m, gGroups[groupSlot(last, groupOff, uint(abs(g2)))].load());
+    if (m != NO_GROUP && m < local) return;
+    extSetOff(g0, local, groupOff, parity);
+    extSetOff(g1, local, groupOff, parity);
+    extSetOff(g2, local, groupOff, parity);
+}
+
+// A JBeam beam with an extension record (the CPU reference's ext_beam,
+// jbeam_ext_force, lbeam_force and the pressure group; spec §16-§26).
+void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, float4 s1)
+{
+    uint kind = bn.z & 0xFFu;
+    uint x = gLists[gP.extIndex + gj] - 1u;
+    uint4 e0 = gStatic[gP.extBase + x * 4u];
+    float4 e1 = asfloat(gStatic[gP.extBase + x * 4u + 1u]);
+    float4 e2 = asfloat(gStatic[gP.extBase + x * 4u + 2u]);
+    uint4 e3 = gStatic[gP.extBase + x * 4u + 3u];
+    if (kind == KIND_JPTRI2) return; // its triangle's first record writes its forces
+    if (kind == KIND_JPGROUP)
+    {
+        // The enclosed volume about node a, isothermal gauge pressure, capped.
+        float3 c = gNodes[bn.x * 3u].xyz;
+        uint first = asuint(e1.x);
+        uint count = asuint(e1.y);
+        float v = 0.0;
+        for (uint t = 0u; t < count; t++)
+        {
+            uint r = first + 2u * t;
+            uint4 ra = gStatic[gP.beamBase + r * 3u];
+            uint4 rb = gStatic[gP.beamBase + (r + 1u) * 3u];
+            float3 x0 = ssub3(gNodes[ra.x * 3u].xyz, c);
+            float3 x1 = ssub3(gNodes[ra.y * 3u].xyz, c);
+            float3 x2 = ssub3(gNodes[rb.x * 3u].xyz, c);
+            v = nf(v + sdot(x0, scross(x1, x2)));
+        }
+        v = max(sdiv(v, 6.0), smul(0.01, e1.z));
+        float p = min(nf(smul(e1.w, sdiv(e1.z, v)) - ATMOSPHERE), e2.x);
+        float4 st = gBeams[gP.extState + x];
+        if (parity == 0u) st.y = p;
+        else st.z = p;
+        gBeams[gP.extState + x] = st;
+        return;
+    }
+    if (kind == KIND_JPTRI)
+    {
+        uint g = asuint(e1.y);
+        uint gx = gLists[gP.extIndex + g] - 1u;
+        float4 gs = gBeams[gP.extState + gx];
+        float p = parity == 0u ? gs.z : gs.y; // the last step's
+        uint n2 = asuint(e1.x);
+        float3 x0 = gNodes[bn.x * 3u].xyz;
+        float3 x1 = gNodes[bn.y * 3u].xyz;
+        float3 x2 = gNodes[n2 * 3u].xyz;
+        float3 f = sscale(scross(ssub3(x1, x0), ssub3(x2, x0)), sdiv(p, 6.0));
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(f, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(f, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(f, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
+    uint4 r2 = gStatic[gP.beamBase + gj * 3u + 2u];
+    float4 c2 = asfloat(r2);
+    float4 s0 = gBeams[gj * 2u];
+    uint type = (bn.z >> 8) & 3u;
+    int group = asint(bn.w);
+    float4 pa = gNodes[bn.x * 3u];
+    float4 pb = gNodes[bn.y * 3u];
+    float3 va = gNodes[bn.x * 3u + 1u].xyz;
+    float3 vb = gNodes[bn.y * 3u + 1u].xyz;
+    float rest = s0.x;
+    float tc = s0.y;
+    float tt = s0.z;
+    float gate = s0.w;
+    float strength = s1.x;
+    float4 st = gBeams[gP.extState + x];
+    bool rampOn = st.x > 0.0;
+    if (rampOn)
+    {
+        rest = nf(rest + asfloat(e3.x));
+        st.x = st.x - 1.0;
+        gBeams[gP.extState + x] = st;
+    }
+    float3 d = ssub3(pa.xyz, pb.xyz);
+    float q = sdot(d, d);
+    float inv = sdiv(1.0, ssqrt(q));
+    float len = smul(q, inv);
+    float u = smul(sdot(ssub3(va, vb), d), inv);
+    if (r2.w != 0u)
+    {
+        uint fi = r2.w - 1u;
+        float4 flt = gBeams[fi];
+        float y = nf(smul(flt.z, nf(u + flt.x)) - smul(flt.w, flt.y));
+        gBeams[fi] = float4(u, y, flt.z, flt.w);
+        u = y;
+    }
+    float k = c1.x;
+    float c = c1.y;
+    float e = 0.0;
+    float f = 0.0;
+    float last = 0.0;
+    bool broken = false;
+    bool lengthBreak = false;
+    bool done = false;
+    if (kind == KIND_JLBEAM)
+    {
+        // The arms' law-of-cosines length at the rest angle (rest holds cos θ0).
+        float3 xc = gNodes[asuint(e1.x) * 3u].xyz;
+        float3 ra = ssub3(pa.xyz, xc);
+        float3 rb = ssub3(pb.xyz, xc);
+        float a2 = sdot(ra, ra);
+        float b2 = sdot(rb, rb);
+        float ab = ssqrt(smul(a2, b2));
+        float lr = ssqrt(max(nf(nf(a2 + b2) - smul(smul(2.0, ab), rest)), 0.0));
+        e = nf(len - lr);
+        float spring = smul(k, e);
+        f = nf(-spring - smul(c, u));
+        if (abs(spring) > tc && ab > 1e-12)
+        {
+            float m = sdiv(tc, k);
+            m = e < 0.0 ? -m : m;
+            float l = nf(len - m);
+            rest = clamp(sdiv(nf(nf(a2 + b2) - smul(l, l)), smul(2.0, ab)), -1.0, 1.0);
+            f = nf((e < 0.0 ? tc : -tc) - smul(c, u));
+        }
+        last = f;
+        if (abs(f) > strength) broken = true;
+        done = true;
+    }
+    else
+    {
+        e = nf(len - rest);
+    }
+    float damp = smul(c, u);
+    if (!done && kind == KIND_JPRESSURED)
+    {
+        float l0 = e1.w;
+        float den = max(nf(l0 - smul(e1.z, nf(l0 - len))), smul(0.01, l0));
+        float gauge = min(nf(smul(e1.y, sdiv(l0, den)) - ATMOSPHERE), e2.x);
+        f = nf(nf(smul(gauge, e1.x) - smul(k, max(e, 0.0))) - damp);
+        last = f;
+        if (gauge > e2.y || abs(f) > strength) broken = true;
+        done = true;
+    }
+    if (!done && kind == KIND_JBOUNDED)
+    {
+        float cs = c;
+        float cf = tt;
+        float split = tc;
+        float lc = c1.w;
+        if ((e0.x & EXT_REBOUND) != 0u && u > 0.0)
+        {
+            cs = e2.x;
+            cf = e2.y;
+            split = e2.z;
+            lc = e2.w;
+        }
+        damp = smul(cs, u);
+        float au = abs(u);
+        if (au > split)
+        {
+            float m = nf(smul(cs, split) + smul(cf, nf(au - split)));
+            damp = u < 0.0 ? -m : m;
+        }
+        float lb = smul(c2.y, rest);
+        float sb = smul(c2.x, rest);
+        float o = 0.0;
+        if (e > lb) o = nf(e - lb);
+        else if (e < -sb) o = nf(-e - sb);
+        if (o > 0.0)
+        {
+            float sz = c2.z > 0.0 ? min(sdiv(o, c2.z), 1.0) : 1.0;
+            k = nf(k + smul(nf(c1.z - k), sz));
+            damp = nf(damp + smul(nf(smul(lc, u) - damp), sz));
+        }
+    }
+    else if (!done && kind == KIND_JSUPPORT && e > 0.0)
+    {
+        if (len > c2.y) lengthBreak = true;
+        k = 0.0;
+        damp = 0.0;
+    }
+    else if (!done && kind == KIND_JANISO)
+    {
+        if (len > e1.w) lengthBreak = true;
+        if (e > 0.0)
+        {
+            float zone = smul(e1.z, rest);
+            float sz = zone > 0.0 ? min(sdiv(e, zone), 1.0) : 1.0;
+            k = nf(k + smul(nf(e1.x - k), sz));
+            damp = smul(nf(c + smul(nf(e1.y - c), sz)), u);
+        }
+    }
+    if (lengthBreak)
+    {
+        broken = true;
+        f = 0.0;
+        last = 0.0;
+    }
+    else if (!done)
+    {
+        f = nf(smul(-k, e) - damp);
+        last = f;
+        float tau = abs(f);
+        if (tau > gate && type == TYPE_DEFORMABLE && k != 0.0)
+        {
+            if (f > tc && e < 0.0)
+            {
+                float delta = nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z)));
+                float old = rest;
+                float floorLen = max(c2.x, MIN_REST);
+                float free = nf(rest + delta);
+                if (free < floorLen)
+                {
+                    rest = min(floorLen, old);
+                    f = nf(smul(-k, nf(len - rest)) - damp);
+                }
+                else
+                {
+                    rest = free;
+                    f = nf(f - sdiv(nf(f - tc), 2.0));
+                }
+                tau = abs(f);
+                if (rest < old)
+                {
+                    tc = min(sdiv(smul(tc, old), rest), max(c1.z, tc));
+                    gate = min(min(tc, tt), strength);
+                }
+            }
+            else if (f < -tt && e > 0.0)
+            {
+                float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
+                float old = rest;
+                float free = nf(rest + delta);
+                if (free > c2.y)
+                {
+                    rest = max(c2.y, old);
+                    f = nf(smul(-k, nf(len - rest)) - damp);
+                }
+                else
+                {
+                    rest = free;
+                    f = nf(f - sdiv(nf(f + tt), 2.0));
+                }
+                tau = abs(f);
+                if (rest > old)
+                {
+                    tt = min(sdiv(smul(tt, rest), old), max(c1.z, tt));
+                    gate = min(min(tc, tt), strength);
+                    strength = nf(strength - smul(nf(rest - old), k));
+                }
+            }
+        }
+        if (tau > strength) broken = true;
+    }
+    if (broken)
+    {
+        f = 0.0;
+        if ((e0.x & EXT_GROUPS) == 0u) extSetOff(group, local, groupOff, parity);
+    }
+    if ((e0.x & EXT_DEFORM) != 0u)
+    {
+        bool yields = kind == KIND_JPLAIN || kind == KIND_JSUPPORT || kind == KIND_JANISO;
+        if (broken || (yields && !(st.x > 0.0) && abs(nf(rest - e2.x)) > smul(asfloat(e0.w), e2.x))) extDeform(x, 0u);
+    }
+    float4 n0 = float4(rest, tc, tt, gate);
+    if (any(n0 != s0)) gBeams[gj * 2u] = n0;
+    if (strength != s1.x || broken)
+        gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, broken ? 1.0 : 0.0);
+    else if (s1.w != 0.0)
+        gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
+    float3 push = sscale(d, smul(f, inv));
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
+}
+
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
 {
     float4 s1 = gBeams[gj * 2u + 1u];
     if (s1.z != 0.0)
     {
         // Broken in the last beam phase: no longer this step's break.
-        if (s1.w != 0.0) gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
+        if (s1.w != 0.0)
+        {
+            gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
+            if (s1.w == 1.0) extPending(gj, local, groupOff, parity);
+        }
         gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(0.0, 0.0, 0.0, 0.0);
         gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
         return;
@@ -1199,6 +1592,11 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
     if ((bn.z & 0xFFu) >= KIND_JPLAIN)
     {
+        if ((bn.z & (TYPE_EXT << 8)) != 0u)
+        {
+            jbeamExtUpdate(gj, local, groupOff, parity, bn, s1);
+            return;
+        }
         jbeamUpdate(gj, local, groupOff, parity, bn, s1);
         return;
     }
@@ -1417,7 +1815,7 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
     uint4 tn = t.tn;
     if (h == tn.x || h == tn.y || h == tn.z) return;
     // JBeam mode: a node skips the triangles of its own self-collision group.
-    uint tg = gMisc[t.mi].z;
+    uint tg = gMisc[t.mi].z & ~TRI_BREAKABLE;
     if (tg != 0u && uint(gNodes[h * 3u + 2u].w) == tg) return;
     float4 P = gNodes[h * 3u];
     float3 p = nf3(origin + P.xyz);
@@ -1506,6 +1904,21 @@ float3 hitShare(float3 f, uint role, float alpha, float beta, float gamma)
 int3 toFixed3(float3 f) { return int3(toFixed(f.x), toFixed(f.y), toFixed(f.z)); }
 
 // Triangle gt's geometry; mi < vehicles (none) when it waits this step.
+// A breakable triangle (spec §18) is dead once any of its four listed beams was
+// broken before this beam phase (.z set, .w not this phase's own break).
+bool triangleDead(uint gt)
+{
+    uint4 l = gStatic[gP.triBreak + gt];
+    for (uint k = 0u; k < 4u; k++)
+    {
+        uint j = l[k];
+        if (j == 0xFFFFFFFFu) continue;
+        float4 s1 = gBeams[j * 2u + 1u];
+        if (s1.z != 0.0 && s1.w != 1.0) return true;
+    }
+    return false;
+}
+
 TriGeo triangleGeo(uint gt, float3 origin, float r)
 {
     TriGeo t;
@@ -1527,6 +1940,11 @@ TriGeo triangleGeo(uint gt, float3 origin, float r)
     t.rn = sscale(scross(u, w), rd);
     t.lo = min(min(t.p0, p1), p2) - float3(r, r, r);
     t.hi = max(max(t.p0, p1), p2) + float3(r, r, r);
+    if ((gMisc[t.mi].z & TRI_BREAKABLE) != 0u && triangleDead(gt))
+    {
+        t.lo = float3(3.0e38, 3.0e38, 3.0e38);
+        t.hi = -t.lo;
+    }
     return t;
 }
 
@@ -2441,7 +2859,11 @@ void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float grou
     {
         float3 x = origin + pos;
         if (ground > x.y)
-            f += contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+        {
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            f += c;
+        }
         for (uint b = 0u; b < boxCount; b++)
         {
             float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u].xyz);
@@ -2496,7 +2918,11 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
     {
         float3 x = origin + pos;
         if (ground > x.y)
-            f += contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+        {
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0));
+            f += c;
+        }
         for (uint b = 0u; b < boxCount; b++)
         {
             float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u].xyz);
@@ -4693,6 +5119,11 @@ VvTri vvTriangle(uint gt, float3 origin, float r)
     float3 r3 = float3(r, r, r);
     t.lo = ssub3(min(min(t.p0, p1), p2), r3);
     t.hi = sadd3(max(max(t.p0, p1), p2), r3);
+    if ((gMisc[gP.vehicles + gt].z & TRI_BREAKABLE) != 0u && triangleDead(gt))
+    {
+        t.lo = float3(3.0e38, 3.0e38, 3.0e38);
+        t.hi = -t.lo;
+    }
     return t;
 }
 

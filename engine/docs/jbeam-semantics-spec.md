@@ -666,3 +666,29 @@ documents only "vibration frequencies above this value are not damped, which hel
 higher damping before instability occurs", which a phase-lagging filter does not do at
 these stiffnesses. Open: a cut-off law without that lag (a single-pole filter has 11°
 there, and is still unstable at 100 ms).
+
+## 30. GPU layout of Part II and verification
+
+* Params words 64–68: `extIndex` (gLists, per beam its extension + 1), `extBase`
+  (gStatic, 4 records per extension, index fields globalised by the host),
+  `extState` (gBeams, per extension (ramp steps left, pressure even, pressure odd,
+  0)), `triBreak` (gStatic, per triangle its 4 beams), `deformBase` (gGroups after
+  the two parities of group slots: the deform group words). The parameter stride is
+  512 bytes (80 words).
+* A beam with an extension has `TYPE_EXT` in its type byte; `beamUpdate` sends it
+  to `jbeamExtUpdate` before `jbeamUpdate` (whose code is unchanged), `groupDrops` to
+  `groupDropsExt` (only when a master broke this step), and its first beam phase
+  after an own break calls `extPending` (several groups, §17). Breakable triangles
+  carry bit 31 of their self-group word; `triangleGeo` and `vvTriangle` give a dead
+  one an empty box; `tryContact` masks the bit. Pressure-wheel nodes carry
+  `NODE_FRICTION_LIMIT` (32) for the ground contact (§28).
+* Verification (2026-11-05, M3 Max): `explicit_beams_bitwise` (11 tests) bit for
+  bit against the frozen reference after the change; `tests/explicit_jbeam_ext_gpu.rs`:
+  the break-group ladders, the breaking panel (triangles and deform groups), the
+  precompression ramp and the rail bit for bit against the CPU (0.0000 mm, equal
+  broken counts and deform states); the pressure-wheel car within 2.2 mm over 2 s
+  at rest (ground friction's float-level differences) and identical into a wall at
+  56 km/h over 1 s. The same Slang compiles for the CUDA and Metal targets
+  (`slangc -target cuda|metal`, with and without `EB_AERO`), and the Metal output
+  compiles to AIR with `xcrun metal`; no CUDA toolchain or NVIDIA GPU here, so the
+  CUDA build is a Slang type-check only.
