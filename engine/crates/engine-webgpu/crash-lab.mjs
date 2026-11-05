@@ -107,6 +107,7 @@ body.lab-on:not(.lab-clean) #labCounts { left: auto; right: 22px; bottom: 146px;
  * @param {(m: Float32Array) => Float32Array} ctx.inverse 4×4 inverse
  * @param {() => void} ctx.restart rebuild the scene
  * @param {(e: any) => void} ctx.fail
+ * @param {boolean} [ctx.drive] the scene is driven (WASD, Space handbrake, chase camera)
  */
 export function createCrashLab(ctx) {
   const { qs, canvas, renderer } = ctx;
@@ -142,7 +143,8 @@ export function createCrashLab(ctx) {
     grab: null,
     grabK: Number(P('grabK', 5e4)),
     spin: qs.get('spin') === '1',
-    cam: P('cam3', preset?.cam ?? 'three'),
+    // Driving (ctx.drive): the chase camera.
+    cam: P('cam3', preset?.cam ?? (ctx.drive ? 'follow' : 'three')),
     clean: qs.get('clean') === '1',
     focus: null,
     size: 5,
@@ -471,7 +473,8 @@ export function createCrashLab(ctx) {
   addEventListener('keydown', (e) => {
     if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' || e.repeat) return;
     const k = e.code;
-    if (k === 'Space') { playPause(); e.preventDefault(); e.stopImmediatePropagation(); }
+    // Driving: Space is the handbrake (the page's), not pause.
+    if (k === 'Space' && !ctx.drive) { playPause(); e.preventDefault(); e.stopImmediatePropagation(); }
     else if (k === 'Period') frameStep();
     else if (k === 'Comma') physicsStep();
     else if (k === 'KeyH' || (k === 'Escape' && st.clean)) setClean(!st.clean);

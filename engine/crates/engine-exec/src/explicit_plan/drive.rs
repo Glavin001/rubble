@@ -11,12 +11,12 @@
 //! 2  (wheels, ref centre, ref back, ref left) u32         (0 wheels: no drive)
 //! 3  (max torque, top speed, steer rate, Ackermann)
 //! 4  (wheelbase, track, throttle rate, brake rate)
-//! 5  (handbrake rate, flags u32: 1 reverse brake, 2 traction control, max slope cos, surface)
+//! 5  (handbrake rate, flags u32: 1 reverse brake, 2 traction control, 4 hub axles, max slope cos, surface)
 //! 6  (traction-control α, cut, speed, anti-roll bars u32)  cut, speed: state
 //! 7  (speed-curve points u32, 0, 0, 0)
 //! 8..11   speed curve, two points per record
 //! 12..19  anti-roll bars (left u32, right u32, N/m, 0)
-//! 20 + 20·w  wheel w:
+//! 20 + 21·w  wheel w:
 //!    0  (node1, node2, flags u32: 1 driven 2 handbrake, long points | lat points << 16)
 //!    1  (radius, width, inertia, angular damping)
 //!    2  (bump length, natural length, hardpoint height, spring)
@@ -28,6 +28,7 @@
 //!    15 state (spin, spin angle, steer angle, length)
 //!    16 state (load, slip ratio, slip angle °, contact 0/1)
 //!    17..19 outputs: centre, axle, up (xyz, 0)
+//!    20 the axle's spawn direction in the vehicle frame (forward, up, left, 0)
 //! ```
 //! Node indices are vehicle-local.
 
@@ -36,7 +37,7 @@ use glam::Vec3;
 
 /// Records per vehicle before its wheels, and per wheel.
 pub const VEHICLE_RECS: u32 = 20;
-pub const WHEEL_RECS: u32 = 20;
+pub const WHEEL_RECS: u32 = 21;
 
 /// Where the drive records live in gMisc.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -101,7 +102,8 @@ pub fn records(d: Option<&Drive>, stride: u32) -> Vec<[u32; 4]> {
     r[2] = [c.wheels.len() as u32, c.refs[0], c.refs[1], c.refs[2]];
     r[3] = f4(c.max_torque, c.top_speed, c.steer_rate, c.ackermann);
     r[4] = f4(c.wheelbase, c.track, c.throttle_rate, c.brake_rate);
-    let flags = c.reverse_brake as u32 | (c.traction_control as u32) << 1;
+    let flags =
+        c.reverse_brake as u32 | (c.traction_control as u32) << 1 | (c.hub_axles as u32) << 2;
     r[5] = [
         c.handbrake_rate.to_bits(),
         flags,
@@ -132,6 +134,7 @@ pub fn records(d: Option<&Drive>, stride: u32) -> Vec<[u32; 4]> {
         r[at + 4] = f4(w.drive_mult, w.brake_max, w.handbrake_max, w.rolling);
         r[at + 5] = f4(w.long_scale, w.lat_scale, w.peak_kappa, w.peak_alpha);
         r[at + 6] = f4(w.tan_peak_alpha, w.side, 0.0, 0.0);
+        r[at + 20] = f4(w.axle_rest[0], w.axle_rest[1], w.axle_rest[2], 0.0);
         curve(&mut r, at + 7, &w.long_curve);
         curve(&mut r, at + 11, &w.lat_curve);
         r[at + 15] = f4(s.omega, s.spin, s.steer, s.length);

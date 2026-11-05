@@ -320,55 +320,82 @@ fn steady_cornering_turns_with_the_steer() {
     assert!(lat < 1.2f32.sqrt() * 9.807 * 1.1, "beyond the grip: {lat}");
 }
 
-#[test]
-#[ignore]
-fn debug_corner() {
-    let mut s = spawn(Vec3::ZERO);
+/// Settle 2 s, then 2 s of full throttle: every wheel down at rest, and moving.
+fn drives(label: &str, mut s: ExplicitBeams) {
+    s.finish();
     settle(&mut s, 2.0);
-    let fw0 = forward(&s);
-    println!(
-        "fw0 {fw0:?} refs {:?}",
-        s.drive.as_ref().unwrap().config.refs
+    let d = s.drive.as_ref().unwrap();
+    let down = d.wheels.iter().filter(|w| w.contact).count();
+    let n = d.wheels.len();
+    s.set_drive_input(DriveInput {
+        forward: 1.0,
+        ..Default::default()
+    });
+    s.run(2.0);
+    let speed = s.drive.as_ref().unwrap().speed;
+    let (broken, _) = s.damage();
+    println!("{label}: {down}/{n} wheels down at rest, {speed:.2} m/s after 2 s of throttle, {broken} beams broken");
+    assert_eq!(down, n, "{label}: wheels down");
+    assert!(speed > 2.0, "{label}: speed {speed}");
+}
+
+#[test]
+fn showcase_cars_drive_on_raycast_wheels() {
+    use engine_softbody::authoring::{build, style, BuildParams};
+    for name in ["sedan", "sedan1"] {
+        let b = build(&style(name).unwrap(), &BuildParams::default()).unwrap();
+        let (s, notes) = ExplicitBeams::from_truck_raycast(
+            &b.truck,
+            None,
+            Vec3::new(0.0, 0.8, 0.0),
+            0.0,
+            Vec3::ZERO,
+            settings(),
+        )
+        .unwrap();
+        println!("{name}: {notes:?}");
+        drives(name, s);
+    }
+}
+
+#[test]
+fn jbeam_cars_drive_on_raycast_wheels() {
+    // The JBeam pressure-wheel fixture car, through the `.truck` export (the explicit
+    // page's default JBeam path) and in JBeam mode (BeamNG's rules), on raycast
+    // wheels. (The hi-res JBeam test car breaks apart in its first half second on
+    // beam tyres too with these settings, a pre-existing state: not used here.)
+    let d = engine_softbody::jbeam::load_jbeam(
+        &[("t.jbeam", engine_softbody::jbeam_fixture::PART2_CAR)],
+        None,
+    )
+    .unwrap();
+    let (truck, _) = engine_softbody::truck_export::desc_to_truck(
+        &d,
+        engine_softbody::truck_export::TyreDefaults::for_vehicle(&d),
     );
-    for w in &s.drive.as_ref().unwrap().config.wheels {
-        println!(
-            "wheel n{} n{} steer {} driven {} side {} hb {}",
-            w.node1, w.node2, w.max_steer, w.driven, w.side, w.handbrake
-        );
-    }
-    s.set_drive_input(DriveInput {
-        forward: 0.5,
-        ..Default::default()
-    });
-    for _ in 0..(3 * 60) {
-        s.frame();
-    }
-    s.set_drive_input(DriveInput {
-        forward: 0.25,
-        steer: -0.6,
-        ..Default::default()
-    });
-    for i in 0..(2 * 60) {
-        s.frame();
-        if i % 6 == 0 {
-            let f = forward(&s);
-            let d = s.drive.as_ref().unwrap();
-            let v = com(&s).1;
-            println!(
-                "t {:.2} yaw {:.3} v {:.2} vlat {:.2} | {}",
-                i as f32 / 60.0,
-                f32::atan2(fw0.cross(f).y, fw0.dot(f)),
-                v.dot(f),
-                v.dot(Vec3::Y.cross(f)),
-                d.wheels
-                    .iter()
-                    .map(|w| format!(
-                        "[st {:.2} Fn {:.0} k {:.2} a {:.1} om {:.1}]",
-                        w.steer, w.load, w.kappa, w.alpha, w.omega
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-        }
-    }
+    let (s, notes) = ExplicitBeams::from_truck_raycast(
+        &truck,
+        None,
+        Vec3::new(0.0, 0.8, 0.0),
+        0.0,
+        Vec3::ZERO,
+        settings(),
+    )
+    .unwrap();
+    println!("JBeam fixture through .truck: {notes:?}");
+    drives("JBeam fixture (.truck)", s);
+    let (s, w) = ExplicitBeams::from_desc_jbeam_raycast(
+        &d,
+        Vec3::new(0.0, 0.8, 0.0),
+        Vec3::ZERO,
+        settings(),
+    )
+    .unwrap();
+    println!(
+        "JBeam mode fixture: {:?}",
+        w.iter()
+            .filter(|x| x.contains("raycast"))
+            .collect::<Vec<_>>()
+    );
+    drives("JBeam-mode fixture", s);
 }

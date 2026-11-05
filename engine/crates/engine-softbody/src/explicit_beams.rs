@@ -1527,6 +1527,7 @@ impl ExplicitBeams {
             } else {
                 s.nodes[w.node1 as usize].mass += 0.5 * w.mass;
                 s.nodes[w.node2 as usize].mass += 0.5 * w.mass;
+                s.add_hub_rigidity(w.node1, w.node2, w.rigidity, w.spring, w.damp);
             }
             if rest.is_some() {
                 s.nodes[w.node1 as usize].pos = saved[0];
@@ -1927,6 +1928,36 @@ impl ExplicitBeams {
         }
     }
 
+    /// A wheel without its tyre (raycast wheels): the tyre's rigidity beams tied its
+    /// rigidity (arm) node to the tyre, which holds the axle; without the tyre the
+    /// arm is tied to the two axle nodes directly (tyre-rigidity beams, the tyre's
+    /// spring and damping, never yielding), so the wheel keeps its toe and camber
+    /// as the tyre kept them. No arm: nothing.
+    fn add_hub_rigidity(&mut self, a1: u32, a2: u32, arm: Option<u32>, k: f32, c: f32) {
+        let Some(p) = arm else {
+            return;
+        };
+        for a in [a1, a2] {
+            if a == p {
+                continue;
+            }
+            let rest = self.nodes[a as usize].pos.distance(self.nodes[p as usize].pos);
+            let beam = Beam::new(
+                p,
+                a,
+                ExplicitKind::Plain,
+                ExplicitType::Virtual,
+                k,
+                c,
+                rest,
+                f32::INFINITY,
+                f32::INFINITY,
+                0.0,
+            );
+            self.beams.push(beam);
+        }
+    }
+
     /// Slide nodes and their rails, after every beam (spec §3.2): each rail pair is
     /// the lowest-index beam on those two nodes, in that beam's direction; a rail
     /// with a missing beam leaves its slide node inert. The current segment starts
@@ -2319,10 +2350,12 @@ impl ExplicitBeams {
             }
             JbeamWheels::Raycast => {
                 // Raycast wheels (crate::explicit_drive): no wheel nodes; each
-                // wheel's mass goes to its axle nodes.
+                // wheel's mass goes to its axle nodes, its arm held as the tyre held it.
+                let t = crate::truck_export::TyreDefaults::for_vehicle(desc);
                 for w in &desc.wheels {
                     s.nodes[w.node1 as usize].mass += 0.5 * w.mass;
                     s.nodes[w.node2 as usize].mass += 0.5 * w.mass;
+                    s.add_hub_rigidity(w.node1, w.node2, w.arm, t.spring, t.damp);
                 }
                 None
             }
