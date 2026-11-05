@@ -1394,6 +1394,120 @@ rigidity.**
   sedan1's are 8.7 Hz (bonnet) and 6.7 Hz (boot lid). The doors (23.6 and
   26.3 Hz) are in that range.
 
+### Section cuts fixed, side stampings, lids, INTERIOR (2026-11-05, later still)
+
+**The section cuts' allocation (fixed).**
+- **The bug.** The first build rescaled every cut's beams iteratively. A
+  beam two cuts share (a bend over two bays) was driven toward zero where one
+  cut was 6× over. Firewall beams ended with yields and break forces of
+  0–0.2 kN, and they tore in `g`'s door pull. That is what held the door to
+  98.9 kN.
+- **Now:**
+  - Only a cut's axial carriers share its section's yield: beams within 60°
+    of the axis (`SECTION_AXIAL_COS`). The rings and webs across it keep
+    their own yields, and those yields' small axial part counts against the
+    section.
+  - Each beam takes the least of its cuts' λ = F / Σ k·L·cos², then rises
+    while all its cuts are under their section.
+  - Every member's cut is now at 1.00 of its section.
+
+**The side structure as its stampings** (`layered`, `SIDE_LAYERS=0`
+measures without).
+- **Members.** The rocker, the B-pillar and the A/hinge pillar are each the
+  sum of their layers:
+  - body side outer: a BH210 0.7 mm hat;
+  - reinforcement: hot-stamped 22MnB5 1.8 mm (B-pillar), 1.6 mm (A-pillar);
+    DP980 1.6 mm (rocker);
+  - inner: HSLA 1.2 mm (B-pillar), DP780 1.4 mm (A-pillar, rocker).
+- **Sources.** These are Choices in WorldAutoSteel FSV's and A2Mac1-style
+  teardowns' published ranges. The Accord teardown's material classes (DOT HS
+  811 666 fig. 113) include each.
+- **How a layered section is computed.** Its plastic moment is the layers'
+  sum: a hat's Z_p is t·(w·d/2 + d²/2), a flange's t·w·d/2. Its steel per
+  metre is theirs, which spreads the measured BIW mass. No mass is moved.
+- **Not built:**
+  - **The roof bows and gussets.** q is already 1.5× over its band, and the
+    over-strength is the skin's tension field.
+  - **The door inner panels.** They are built as `DOOR_INNER=1` and
+    measured: at the bound their beams take their rows' share from the
+    door's members, and p fell 24.5 → 17.9 kN.
+
+**The lids** (`lids_first_mode_in_the_measured_range`, measured hood range
+17.7–41.5 Hz).
+
+| Lid construction | Bonnet first mode | Boot lid first mode |
+|---|---|---|
+| Before: rigidifier 0.10 m, lid ladders, the lid's built sheet on the spokes | 8.7 Hz | 6.7 Hz |
+| Double skin, 60 mm inner hemmed at the perimeter (`DOUBLE_SKIN=1`, `LID_HEM=1`) | 7.1 Hz | 3.8 Hz |
+| Double skin, inner under every node | 8.2 Hz | 6.0 Hz |
+| Rigidifier spokes at the inner stamping's real stiffness and yield | 12.4 Hz | 11.2 Hz |
+| The same, at the BX's rigidifier depths, without the lid ladders (**built**) | **19.2 Hz** | **12.6–14.6 Hz** |
+| BX (`CI_REF=1`, same measurement) | 33.7 Hz | 3.1 Hz (67 extension beams left out of its cut-out) |
+
+- **Why the double skin fails.** At real masses under the 2 kHz bound, a
+  sandwich's faces carry about 1/1500 of steel's axial rigidity, so a 60 mm
+  depth cannot lift the mode.
+- **What lands the bonnet is BeamNG's practice**, a deep rigidifier node:
+  - the BX's are measured at 0.228 m under the hood (`h6`) and 0.160 m under
+    the trunk (`t5`);
+  - its spokes are now the inner stamping's sheet, (√3/4)·E·t/2 and half a
+    sheet edge's yields;
+  - before, the spokes yielded at 0.3 kN and sat far under the bound.
+- **The lid ladders are gone** (`LID_INNER=1` builds them). They took 37 % of
+  the bonnet's row from its sheet, and one of them pumped energy at the
+  step's Nyquist rate (below).
+- **Still open:** the boot lid is below the range.
+
+**INTERIOR: fixed, measured, not adopted.**
+- **Fixed:**
+  - the T-junctions, which made the energy gain;
+  - the dashpots' rating, which broke the damping bound;
+  - the 120 km/h Nyquist pump on `bonnet_inner_3`, gone with the lid
+    ladders.
+- **Measured with it:** n max crush 564 mm, o 336 mm, A-pillar 15/21 mm,
+  h passes.
+- **Why it is not adopted:** its 0.48 m floor lets a side pole through once
+  the sill is crushed (A8 at 30 km/h: 5 of 178 sideways passed through), and
+  the MDB's residual crush rose 208 → 309 mm. A8 is a requirement.
+  `INTERIOR=1` builds it.
+
+**Now (Medium; BX on the same scenes since the anti-clip merge):**
+
+| Reference (band) | sedan1 now | BX |
+|---|---|---|
+| n max crush (380–580 mm) | 640 | 287–322 (structure) |
+| n dynamic (620–750 mm) | 711 | 462 |
+| n t_m (63–76 ms) | 76.6 | 48.5 |
+| n peak (34–47 g) | 31.0 | 49.3 |
+| n b1 (22.9–39.2) | 22.4 | (exterior profile unreliable) |
+| n restitution (0.13–0.20) | 0.145 | 0.228 |
+| n A-pillar base (−7…17 mm) | 19, 22 | 6, 7 |
+| o residual (297–445 mm) | 293, sd 7 | 350–354; one run of 8 non-finite since the anti-clip merge (sent to the solver agent) |
+| p initial / intermediate / peak | 9.9 / 14.6 / 23.0 kN (≥ 28.4) | 9.0 / 13.9 / 32.3 kN (≥ 23.7) |
+| q (4.48–5.32×) | 8.37 | 5.59 |
+| g latch / door off (25.7–55.3 / 52.2–83.4 kN) | 41.3 / 102.3 | |
+| MDB (126–206 mm) | 208 | 201 |
+| t leaked | 5 | |
+| A8 at 30 km/h | 0 of 244 | 21 of 244 |
+| f, h, a, b | pass | |
+| Rear third, wall / head-on (past 0.2 %, broken) | 88, 6 / 19, 0 | 0, 0 / 0, 0 |
+| Lid against rear body, wall / head-on (≤ 37 mm) | 399 / 124 mm | 12 / 7 mm |
+| Pole far side | 90 past, 8 broken; `door_r_r.latch_secondary` | 22 past, 0 broken; holds |
+| Bonnet / boot lid first mode (17.7–41.5 Hz) | 19.2 / 14.6 Hz | 33.7 / 3.1 Hz |
+| crash invariants | 9 of 18 | |
+| invariants_small | 19 of 19 | |
+
+- **g.** All of the pull is in the hardware's ropes. After the latch lets go
+  (41 kN), the lower hinge takes 67 of its ropes' 87 kN when the door comes
+  off at 102 kN, past the statics band. This is hinge sizing against the
+  stiffer door ring, not a path round the hardware.
+- **Next:**
+  - the hem rows (requested by the visual agent);
+  - the frontal's crush (640 mm, peak 31 g) and A-pillar;
+  - p's door;
+  - the boot lid's mode;
+  - the skin's tension field (q).
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.

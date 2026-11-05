@@ -2341,12 +2341,12 @@ pub fn sedan_one_tier() -> VehicleDef {
     // placed over its whole section at once, so a coarser floor would move
     // the sides' nodes and the door hardware with them. The
     // roof is the top between the screens' zones (backlight to 1.35 m,
-    // windscreen from 2.59 m). Adopted (`vehicle-authoring.md`, "INTERIOR"):
-    // its energy gain was the skin's T-junctions (fixed), its damping bound a
-    // dashpot rated on the wrong node (fixed), and the 120 km/h wall's
-    // Nyquist pump the lid ladders (gone). `INTERIOR=0` runs the pole lanes
-    // everywhere (a measurement switch).
-    if std::env::var("INTERIOR").map_or(true, |v| v != "0") {
+    // windscreen from 2.59 m). Measured, not adopted (`vehicle-authoring.md`,
+    // "INTERIOR"): its energy gain (the skin's T-junctions), damping bound and
+    // Nyquist pump are fixed, but its 0.48 m floor lets a side pole through
+    // once the sill is crushed (A8 sweep 5 of 178 sideways at 30 km/h) and the
+    // MDB's residual crush rises 208 -> 309 mm. `INTERIOR=1` builds it.
+    if std::env::var("INTERIOR").is_ok_and(|v| v == "1") {
         d.interior = Some(super::body::Interior {
             ring: 2.0 * super::vehicle::POLE_LANE,
             floor: 0.0,
