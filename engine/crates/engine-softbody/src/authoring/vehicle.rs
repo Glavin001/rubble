@@ -163,6 +163,13 @@ pub struct BraceSpec {
     /// station (the first member's through it).
     #[serde(default)]
     pub on: [String; 2],
+    /// Tension only (each beam a rope): an X standing in for a frame's
+    /// racking ([`super::sedan`]'s door rings), whose diagonals in a real
+    /// opening do not exist. In racking one diagonal pulls and carries the
+    /// frame's shear; under a load that shortens both (a roof pushed down)
+    /// neither carries anything, as the opening carries nothing.
+    #[serde(default)]
+    pub tension_only: bool,
 }
 
 /// A shear panel between two members (a face of the body's box: roof between
@@ -2620,7 +2627,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         m.deform = share * br.strength * grades_strength;
                         m.strength = 4.0 * m.deform;
                     }
-                    sk.beam(p, q, m);
+                    if br.tension_only {
+                        sk.beam_with(p, q, m, BeamType::Rope, 0);
+                    } else {
+                        sk.beam(p, q, m);
+                    }
                 }
             }
         }

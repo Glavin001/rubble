@@ -1542,6 +1542,60 @@ by member, with the body's own beams binned by side and position
   section-cut treatment: their yield as the aperture's racking mechanism
   load, not a strut's. A real roof's strength is the pillars' bending.
 
+### q: the openings carry nothing (2026-11-05, built)
+
+**Traced: the 536 → sill beams are a builder artefact.** They are the
+`sill`–`roof_rail` zigzag shear panel (`ShearSpec`, `KL_SHEAR`, from the
+two-tier cabin box). Each roof-rail bay was crossed by diagonals to the
+nearest sill stations, through both door openings. In q they carried
+11–12 kN each at the belt. `BRACES=0` left them because they are `shear`,
+not `braces`.
+- **Decision:** sedan1 does not build that panel. A door opening has no web,
+  and the door rings' racking X already stands in for the aperture's shear
+  (`SILL_ROOF_PANEL=1` builds it again, as a measurement).
+
+**The door rings' X as tension-only diagonals** (`RING_ROPES=0` measures
+without).
+- **Why.** An X of two acting diagonals couples a racking frame's shear with
+  vertical load. Under a roof load both diagonals shorten, and the opening
+  carries 2·F·sin α that a real opening does not have.
+- **Built.** Each diagonal is now a rope (`BraceSpec::tension_only`). In
+  racking, one diagonal pulls and alone carries the frame's racking stiffness
+  (k·L_i / cos²α_i) and its mechanism shear, F = V / cos α_i with
+  V = 4·M_p/h (`door_ring`, `aperture_racking`). A load that shortens both
+  diagonals finds neither.
+- **This is the racking-mechanism yield the plan asked for.** The rings
+  already had it; the spurious vertical path was the second diagonal.
+- The remaining lumped panels across the belt are real panels: the
+  screen's frame, and the rear bulkhead behind the seat.
+
+**Effect (Medium):**
+
+| | Before | No panel | No panel + ring ropes (**built**) |
+|---|---|---|---|
+| q (4.48–5.32×; BX 5.59) | 8.37 | 7.39 | **5.81** |
+| q at the belt: pillars A / B / no member | 19 / 38 / 50 kN | 27 / 45 / ~25 | 39 / 45 / ~10 kN |
+| BIW torsion (measured 12.3 kN·m/deg) | 10.5 | 10.4 | 9.8 |
+| p peak (≥ 28.4 kN) | 23.0 | 23.9 | 24.3 |
+| o residual (297–445 mm) | 293, sd 7 | | **301, sd 9** |
+| g: latch / door off (52.2–83.4 kN) | 41.3 / 101.5 | | 40.4 / **76.4** |
+| n max crush, peak, A-pillar | 686–639 mm, 31 g, 17–24 mm | | 632–644 mm, 31–33 g, 17–25 mm |
+| t leaked (≤ 9 of 983) | 7 | | 10 |
+| crash invariants | 9 of 18 | | 10 of 18 |
+
+- **Where the roof's load goes now.** The platen's load goes down the
+  pillars: 84 of 78 kN at the belt is the A- and B-pillars, with the
+  far-side ring rope in tension against them. The roof's strength is the
+  pillars' bending, as in a real car.
+- **Torsion** loses 7 % (10.5 → 9.8). That is the second diagonal's
+  coupling, which a real ring does not have.
+- **t's leak** (10 against 9) is contact noise. The solver agent measured
+  sedan1's T-bone at a mean of 12 over five offsets, with anti-clip on or
+  off, so it is not structure.
+- **The ledger tally** in `showcase_car` now reads `forces_now()`. Since
+  `fixed_contact`, a step's contact forces are summed apart from
+  `n.force`, and every self-contact had shown up as a momentum residual.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
