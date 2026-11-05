@@ -2520,6 +2520,17 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     for n in &mut out.nodes {
         n.p += shift;
     }
+    if BRITTLE_GLASS {
+        let glass: Vec<usize> = panes
+            .iter()
+            .flat_map(|u| u.beams.iter().map(|&j| j as usize))
+            .collect();
+        let scale = installation_pose(&out, &glass)?;
+        for (&j, &f) in glass.iter().zip(&scale) {
+            sk.beams[j].rest_scale = f;
+            out.beams[j].rest_scale = f;
+        }
+    }
     let truck = out.to_truck();
     let bind_tris: HashMap<String, Vec<[u32; 3]>> = groups
         .iter()
@@ -2592,6 +2603,65 @@ fn shut_line_breaks(sk: &mut Skeleton, shell: &Shell, hardware: &[HardwareGroup]
             sk.nodes[i as usize].contacter = true;
         }
     }
+}
+
+/// Seconds the car settles before its glass is installed.
+pub const INSTALL_SETTLE: f32 = 2.0;
+
+/// The glass's installation pose (a Choice, `vehicle-authoring.md`): a pane
+/// is bonded into a body already standing under its own weight, so it
+/// carries no stress there. The car spawns on the ground at rest on the
+/// CPU reference, settles [`INSTALL_SETTLE`] s, and each of `beams` (the
+/// panes' and their mounts') takes its settled length over its spawn length
+/// as its rest scale. Deterministic: the same skeleton gives the same pose,
+/// and the `.truck` carries the scales, so every consumer loads the same
+/// panes.
+fn installation_pose(sk: &Skeleton, beams: &[usize]) -> Result<Vec<f32>, String> {
+    use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
+    // (The panes are not in yet: nothing of theirs yields or breaks.)
+    let mut sk = sk.clone();
+    for &j in beams {
+        sk.beams[j].mat.deform = 1.0e9;
+        sk.beams[j].mat.strength = 1.0e9;
+        sk.beams[j].group = 0;
+    }
+    let sk = &sk;
+    let truck = sk.to_truck();
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        ..Default::default()
+    };
+    let probe = ExplicitBeams::from_truck(&truck, Vec3::ZERO, Vec3::ZERO, settings.clone())?;
+    let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let mut s = ExplicitBeams::from_truck(&truck, Vec3::new(0.0, 0.02 - low, 0.0), Vec3::ZERO, settings)?;
+    let p0 = s.positions();
+    for _ in 0..(INSTALL_SETTLE * 60.0) as usize {
+        s.frame();
+    }
+    let p1 = s.positions();
+    if std::env::var("GLASS_STRAIN").is_ok() {
+        // How much the settled panes still move at rest (strain against the
+        // settled lengths), over another two seconds, and during the settle.
+        let len = |p: &[Vec3], j: usize| p[sk.beams[j].a as usize].distance(p[sk.beams[j].b as usize]);
+        let mut worst = 0.0f32;
+        for _ in 0..120 {
+            s.frame();
+            let p = s.positions();
+            for &j in beams {
+                worst = worst.max((len(&p, j) / len(&p1, j) - 1.0).abs());
+            }
+        }
+        let settle = beams.iter().map(|&j| (len(&p1, j) / len(&p0, j) - 1.0).abs()).fold(0.0f32, f32::max);
+        eprintln!("glass: settle strain up to {:.4} %, then at rest up to {:.4} % (tempered breaks at {:.3} %)", settle * 100.0, worst * 100.0, TEMPERED_STRAIN * 100.0);
+    }
+    Ok(beams
+        .iter()
+        .map(|&j| {
+            let b = &sk.beams[j];
+            let (a, c) = (b.a as usize, b.b as usize);
+            p1[a].distance(p1[c]) / p0[a].distance(p0[c])
+        })
+        .collect())
 }
 
 /// Tempered glass's break strain: characteristic bending strength ≈ 120 MPa

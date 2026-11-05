@@ -2030,7 +2030,9 @@ impl ExplicitBeams {
         let mut rest = self.nodes[b.a as usize]
             .pos
             .distance(self.nodes[b.b as usize].pos);
-        if b.kind == BeamKind::Bounded {
+        // (Bounded: RoR shock precompression; any other beam only with
+        // Rubble's `.truck` extension, 1 otherwise.)
+        if b.kind == BeamKind::Bounded || b.precompression != 1.0 {
             rest *= b.precompression;
         }
         let mut beam = Beam::new(

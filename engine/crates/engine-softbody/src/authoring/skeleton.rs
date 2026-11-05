@@ -98,6 +98,11 @@ pub struct SkBeam {
     /// members' spans (not glass, panels, ties, mounts or the rigid blocks). Set
     /// by the build.
     pub structure: bool,
+    /// Rest length over its spawn length (1: the spawn pose). Glass panes
+    /// and their beads take their installation pose: unstressed in the car
+    /// settled under its own weight (`.truck` beams' fifth field, Rubble's
+    /// extension).
+    pub rest_scale: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -233,6 +238,7 @@ impl Skeleton {
             tie: false,
             damper: false,
             structure: false,
+            rest_scale: 1.0,
         });
         true
     }
@@ -788,6 +794,7 @@ impl Skeleton {
             group: u32,
             support: Option<f32>,
             rope: bool,
+            pre: f32,
             a: u32,
             b: u32,
         }
@@ -819,6 +826,7 @@ impl Skeleton {
                         _ => None,
                     },
                     rope: b.ty == BeamType::Rope,
+                    pre: b.rest_scale,
                     a: b.a,
                     b: b.b,
                 }
@@ -855,15 +863,21 @@ impl Skeleton {
                 );
                 cur = Some(props);
             }
+            // (A rest length off the spawn pose: Rubble's fifth field.)
+            let pre = if l.pre != 1.0 {
+                format!(", {:.7}", l.pre)
+            } else {
+                String::new()
+            };
             match l.support {
                 Some(f) => {
-                    let _ = writeln!(s, "{}, {}, is, {f}", l.a, l.b);
+                    let _ = writeln!(s, "{}, {}, is, {f}{pre}", l.a, l.b);
                 }
                 None if l.rope => {
-                    let _ = writeln!(s, "{}, {}, ir", l.a, l.b);
+                    let _ = writeln!(s, "{}, {}, ir{}", l.a, l.b, if pre.is_empty() { String::new() } else { format!(", 0{pre}") });
                 }
                 None => {
-                    let _ = writeln!(s, "{}, {}, i", l.a, l.b);
+                    let _ = writeln!(s, "{}, {}, i{}", l.a, l.b, if pre.is_empty() { String::new() } else { format!(", 0{pre}") });
                 }
             }
         }

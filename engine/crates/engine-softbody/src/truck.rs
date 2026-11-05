@@ -848,6 +848,11 @@ impl Parser {
                 };
                 let mut beam = self.beam(a, b);
                 Self::beam_options(&mut beam, t);
+                // (Rubble's extension: a fifth field, its rest length over
+                // its spawn length.)
+                if let Some(p) = t.get(4).and_then(|p| p.parse::<f32>().ok()).filter(|&p| p > 0.0) {
+                    beam.precompression = p;
+                }
                 self.out.beams.push(beam);
             }
             Section::Shocks | Section::Shocks2 | Section::Shocks3 => self.parse_shock(t),

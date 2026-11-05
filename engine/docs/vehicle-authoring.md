@@ -797,14 +797,27 @@ vehicle the same visual format as the authored car, so
     10 mm bead with L its share of the edge;
   - side glass bears in its run channel (compression only) and is held by
     its regulator along the bottom.
-- With it on, 158 beams break at rest in `a`. The panes are skin-tier beams,
-  about 10⁵ × softer than glass, and they rack with the settling body. The
-  real bead's stiffness (G·w·L/t) is far above what the step allows the
-  pane's nodes, so the model cannot put the body's racking into the bead
-  the way a car does.
-- What is open: a pane model whose strain is the glass's own (for example
-  rest lengths taken at the settled pose, or the pane as a heavier
-  frame-tier plate). This needs a decision.
+- **Installation pose (a Choice).** A pane is bonded into a body already
+  standing under its own weight, so it carries no stress there.
+  `installation_pose` settles the car at rest on the CPU reference for
+  `INSTALL_SETTLE` = 2 s, with the panes unbreakable. Each pane and mount
+  beam then takes its settled length over its spawn length as its rest
+  scale. The `.truck` carries the scale as Rubble's fifth `beams` field, and
+  the shared loader applies it to any beam. `skins_are_closed` checks that
+  the solver's rest lengths match it.
+  - Medium: 335 beams. Settle strain is up to 0.54 %; at rest afterwards,
+    up to 0.05 %.
+- **Brittle glass is still off.** With the installation pose, every pane
+  still breaks at rest. A pane beam's break force is its strain times the
+  model's k·L: 0.17 % of about 180 N, roughly 0.3 N. The pane nodes' own
+  weight, about 0.7 N each, exceeds it. The step-softened beams are about
+  10⁵ × softer than glass, so a strain criterion becomes a force too small
+  to carry the pane. A real pane's strip would hold σ·t·L, about 144 kN at
+  4 mm × 0.3 m, which these beams never reach.
+- **What is open:** a fracture criterion that matches how real panes
+  break: from bending under contact, against measured impact data (for
+  example UN R43's 227 g ball and headform tests), not from membrane
+  strain. This needs a decision.
 
 ### A6: where the hardware's loads reach its strength (2026-11-05)
 

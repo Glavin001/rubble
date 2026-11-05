@@ -124,6 +124,18 @@ fn skins_are_closed_and_the_truck_loads() {
         .unwrap();
         assert_eq!(sim.triangles.len(), b.skeleton.collision.len());
         assert_eq!(sim.tyres.len(), 4);
+        // The glass's installation pose reaches the solver's rest lengths.
+        let map = solver_beams(&sim, &b);
+        let mut installed = 0;
+        for (j, bm) in sk.beams.iter().enumerate() {
+            if bm.rest_scale != 1.0 {
+                installed += 1;
+                let x = &sim.beams[map[j]];
+                let l = sim.nodes[x.a as usize].pos.distance(sim.nodes[x.b as usize].pos);
+                assert!((x.rest / l - bm.rest_scale).abs() < 1e-4, "{res:?}: beam {j} rest {} of {l}, scale {}", x.rest, bm.rest_scale);
+            }
+        }
+        eprintln!("{res:?}: {installed} glass beams at their installation pose");
         // The loader takes the breaks and the contact from every node.
         assert!(sim.contact_every_node);
         assert_eq!(sim.tri_breaks.len(), sim.triangles.len());
@@ -788,8 +800,15 @@ fn a_stands_at_rest_for_ten_seconds() {
             wobble * 1e3
         );
         assert!(finite(&s));
-        assert_eq!(broken, 0);
-        assert_eq!(bent, 0);
+        let map = solver_beams(&s, &b);
+        let units: Vec<String> = b
+            .damage_units
+            .iter()
+            .filter(|u| u.beams.iter().any(|&j| s.beams[map[j as usize]].broken || s.beams[map[j as usize]].bent()))
+            .map(|u| u.name.clone())
+            .collect();
+        assert_eq!(broken, 0, "{res:?}: broken or bent units {units:?}");
+        assert_eq!(bent, 0, "{res:?}: broken or bent units {units:?}");
         assert!(low > s.ground, "a body node is on the ground");
         assert!(e10 <= e2, "the car gained {} J at rest", e10 - e2);
         // (The rises between frames are the noise itself here.)
