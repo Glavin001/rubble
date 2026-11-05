@@ -404,7 +404,12 @@ opening's edge, the doors' belt edges included, is black rubber.
   sun; below the horizon the floor reflected from the shaded point (short
   rays land in the car's own shadow: under the sills, in the arches; far rays
   fade into the horizon), so the flanks carry a crisp horizon line.
-  `showcase-car.html` draws the same cyclorama and floor behind the car; the
+  `showcase-car.html` draws the same cyclorama and floor behind the car,
+  and the car reflected in the floor (`drawReflection`: the opaque level
+  mirrored, a depth pass then one cheap diffuse shade of the nearest surface,
+  blended at 0.22 reflectance fading with height; `?reflect=0` turns it off,
+  `?reflect=0.3` sets it). It costs about 0.1 ms a car (10 cars: 4.97 ms
+  against 3.96 ms without); the
   crash lab's backdrop is a navy cyclorama with a lit horizon band. The paint
   deepens toward grazing (flop); tail lenses are a deep ruby; tyres satin. The clearcoat has a mirror-sharp sun glint over
   a broader sheen. Diffuse light is an analytic lobe fitted to the studio.

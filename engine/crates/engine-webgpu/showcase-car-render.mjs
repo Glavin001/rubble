@@ -14,6 +14,7 @@
 //   const id = r.addCar(car.visual, { nodeOffset: layout.vehicles[i].nodeOffset, vehicle: i });
 //   // each frame, after sim.frame(steps):
 //   r.update(encoder);                                       // compute: deform every car
+//   r.drawReflection(pass, { viewProj, eye, light });        // optional: after a floor at y 0
 //   r.draw(pass, { viewProj, eye, light });                  // in a render pass with depth
 //   r.removeCar(id); r.destroy();
 //
@@ -206,7 +207,7 @@ struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
 @group(0) @binding(0) var<uniform> frame: Frame;
 
 struct VOut {
-  @builtin(position) clip: vec4f,
+  @builtin(position) @invariant clip: vec4f,
   @location(0) world: vec3f,
   @location(1) normal: vec3f,
   @location(2) color: vec3f,
@@ -385,6 +386,33 @@ fn cracks(q: vec2f) -> f32 {
 
 @fragment
 fn fs(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
+  return shade(i, front);
+}
+
+// The car mirrored in the studio floor (drawn with viewProj · diag(1, −1, 1)),
+// blended over the floor, fading with height above it (a polished floor's
+// reflection, not a mirror's). frame.light.w is the floor's reflectance at the
+// contact.
+@fragment
+fn fsDepth() -> @location(0) vec4f { return vec4f(0.0); }
+
+@fragment
+fn fsMirror(i: VOut) -> @location(0) vec4f {
+  // Cheap: where the reflection has faded, nothing; elsewhere the base colour
+  // under the studio's diffuse light, the paint with a hint of its sheen (a
+  // blurred floor reflection shows no more), tears and shattered glass cut.
+  let a = frame.light.w * exp(-max(i.world.y, 0.0) * 2.2);
+  if (a < 0.015 || i.torn > 0.5) { discard; }
+  if ((i.mat == 1u || i.mat == 27u) && i.strain > 0.12) { discard; }
+  gP = i.world;
+  let n = normalize(i.normal);
+  var c = i.color * irradiance(n) * (0.35 + 0.65 * clamp(i.ao, 0.0, 1.0));
+  if (i.mat == 18u || i.mat == 21u) { c = i.color * 3.0; }
+  if (i.mat == 0u) { c += vec3f(0.06) * smoothstep(-0.2, 0.6, n.y); }
+  return vec4f(tonemap(c), a);
+}
+
+fn shade(i: VOut, front: bool) -> vec4f {
   // Texture-coordinate footprint (taken in uniform control flow): printed
   // text fades to its average ink when too small to read.
   let uvw = fwidth(i.uv);
@@ -658,6 +686,44 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'less' },
     multisample: { count: sampleCount },
   });
+  // The floor reflection: the opaque level again, mirrored, blended by height.
+  const mirrorPipe = device.createRenderPipeline({
+    label: 'showcase-mirror',
+    layout: 'auto',
+    vertex: {
+      module: drawModule,
+      entryPoint: 'vs',
+      buffers: [
+        { arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x4' }] },
+        { arrayStride: 40, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }, { shaderLocation: 5, offset: 20, format: 'float32x3' }, { shaderLocation: 6, offset: 32, format: 'float32x2' }] },
+      ],
+    },
+    fragment: { module: drawModule, entryPoint: 'fsMirror', targets: [{ format, blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'zero', dstFactor: 'one' } } }] },
+    primitive: { topology: 'triangle-list', cullMode },
+    // Only the nearest surface (laid down by the depth pass): blended layers
+    // drawn in any order would show the cabin through the body.
+    depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'equal' },
+    multisample: { count: sampleCount },
+  });
+  const mirrorDepthPipe = device.createRenderPipeline({
+    label: 'showcase-mirror-depth',
+    layout: 'auto',
+    vertex: {
+      module: drawModule,
+      entryPoint: 'vs',
+      buffers: [
+        { arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x4' }] },
+        { arrayStride: 40, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 4, offset: 12, format: 'float32' }, { shaderLocation: 3, offset: 16, format: 'uint32' }, { shaderLocation: 5, offset: 20, format: 'float32x3' }, { shaderLocation: 6, offset: 32, format: 'float32x2' }] },
+      ],
+    },
+    fragment: { module: drawModule, entryPoint: 'fsDepth', targets: [{ format, writeMask: 0 }] },
+    primitive: { topology: 'triangle-list', cullMode },
+    depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: sampleCount },
+  });
+  const mirrorBuf = device.createBuffer({ label: 'showcase-mirror-frame', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const mirrorBind = device.createBindGroup({ layout: mirrorPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: mirrorBuf } }] });
+  const mirrorDepthBind = device.createBindGroup({ layout: mirrorDepthPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: mirrorBuf } }] });
   const frameBuf = device.createBuffer({ label: 'showcase-frame', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const drawBind = device.createBindGroup({ layout: drawPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
   const glassBind = device.createBindGroup({ layout: glassPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
@@ -873,6 +939,33 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       }
       pass.end();
     },
+    /**
+     * The cars' reflection in a floor at y = 0 (reflectance `strength` at the
+     * contact, fading with height): draw it after the floor (which must not
+     * write depth) and before the cars. Uses its own uniforms, so it can share
+     * a command encoder with `draw`.
+     */
+    drawReflection(pass, { viewProj, eye, light = [0.4, 0.8, 0.35], strength = 0.22 }) {
+      const vp = Float32Array.from(viewProj);
+      for (let k = 4; k < 8; k++) vp[k] = -vp[k];   // viewProj · diag(1, −1, 1, 1)
+      const fr = new Float32Array(24);
+      fr.set(vp, 0);
+      fr.set([eye[0], -eye[1], eye[2], 1], 16);
+      fr.set([light[0], light[1], light[2], strength], 20);
+      device.queue.writeBuffer(mirrorBuf, 0, fr);
+      for (const [pipe, bind] of [[mirrorDepthPipe, mirrorDepthBind], [mirrorPipe, mirrorBind]]) {
+        pass.setPipeline(pipe);
+        pass.setBindGroup(0, bind);
+        for (const car of cars.values()) {
+          car.levels.forEach((lv, k) => {
+            pass.setVertexBuffer(0, lv.out);
+            pass.setVertexBuffer(1, lv.attrs);
+            pass.setIndexBuffer(lv.index, 'uint32');
+            pass.drawIndexedIndirect(car.args, k * 52 + 12);
+          });
+        }
+      }
+    },
     /** Draw every car into `pass` (a render pass with a colour target of `format` and depth). */
     draw(pass, { viewProj, eye, light = [0.4, 0.8, 0.35] }) {
       const fr = new Float32Array(24);
@@ -897,6 +990,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     destroy() {
       for (const id of [...cars.keys()]) this.removeCar(id);
       frameBuf.destroy();
+      mirrorBuf.destroy();
       viewBuf.destroy();
     },
   };

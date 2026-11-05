@@ -107,6 +107,8 @@ const RUNS = [
   ['perf_draw', 'scene=idle&freeze=0&cam=three&perf=draw'],
   ['perf_noskin', 'scene=idle&freeze=0&cam=three&perf=1&noskin=1'],
   ['perf_n10', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=16'],
+  ['perf_n10_noreflect', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=16&reflect=0'],
+  ['perf_noreflect', 'scene=idle&freeze=0&cam=three&perf=1&reflect=0'],
   ['perf_n10_far', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=80'],
   ['perf_n10_lod0', 'scene=idle&freeze=0&cam=three&perf=1&n=10&dist=16&lod=0'],
   ['perf_pass', 'scene=idle&freeze=0&cam=three&perf=pass'],

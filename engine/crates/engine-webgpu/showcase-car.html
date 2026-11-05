@@ -148,6 +148,15 @@ try {
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
     multisample: { count: SAMPLES },
   });
+  // The floor alone, without depth: the cars' reflection is drawn over it.
+  const floorPipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: sm, entryPoint: 'vs', buffers: [{ arrayStride: 36, attributes: [0, 1, 2].map((l) => ({ shaderLocation: l, offset: 12 * l, format: 'float32x3' })) }] },
+    fragment: { module: sm, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: SAMPLES },
+  });
   const bgPipe = device.createRenderPipeline({
     layout: 'auto',
     vertex: { module: sm, entryPoint: 'vsBg' },
@@ -185,10 +194,23 @@ try {
   const frameBuf = device.createBuffer({ size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const sceneBind = device.createBindGroup({ layout: scenePipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
   const bgBind = device.createBindGroup({ layout: bgPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
-  const drawScene = (p) => {
+  const floorBind = device.createBindGroup({ layout: floorPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
+  // ?reflect=0: no floor reflection (on by default; ?reflect=0.3 sets the
+  // floor's reflectance at the contact).
+  const reflect = qs.get('reflect') === '0' ? 0 : Number(qs.get('reflect')) || 0.22;
+  // The backdrop, the floor (no depth: the reflection goes over it) and the
+  // scene's shapes. The reflection, when on, is drawn by the caller between
+  // drawFloor and drawShapes, or after drawScene in another pass (the floor
+  // leaves no depth behind).
+  const drawFloor = (p) => {
     p.setPipeline(bgPipe); p.setBindGroup(0, bgBind); p.draw(3);
-    p.setPipeline(scenePipe); p.setBindGroup(0, sceneBind); p.setVertexBuffer(0, sceneBuf); p.draw(verts.length / 9);
+    p.setPipeline(floorPipe); p.setBindGroup(0, floorBind); p.setVertexBuffer(0, sceneBuf); p.draw(6);
   };
+  const drawShapes = (p) => {
+    if (verts.length / 9 <= 6) return;
+    p.setPipeline(scenePipe); p.setBindGroup(0, sceneBind); p.setVertexBuffer(0, sceneBuf); p.draw(verts.length / 9 - 6, 1, 6);
+  };
+  const drawScene = (p) => { drawFloor(p); drawShapes(p); };
 
   // Camera: orbits the first car's reference node.
   const mat = {
@@ -260,7 +282,10 @@ try {
         depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
         timestampWrites: { querySet: tq.set, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 },
       });
-      if (qs.get('perf') !== 'pass') r.draw(p1, { viewProj: vp, eye, light });
+      if (qs.get('perf') !== 'pass') {
+        if (reflect > 0) r.drawReflection(p1, { viewProj: vp, eye, light, strength: reflect });
+        r.draw(p1, { viewProj: vp, eye, light });
+      }
       p1.end();
       enc.resolveQuerySet(tq.set, 0, 2, tq.resolve, 0);
       if (!tq.pending) enc.copyBufferToBuffer(tq.resolve, 0, tq.read, 0, 16);
@@ -269,7 +294,9 @@ try {
         colorAttachments: [{ view: msaa.createView(), resolveTarget: outView, loadOp: 'clear', storeOp: 'discard', clearValue: { r: 0.40, g: 0.415, b: 0.44, a: 1 } }],
         depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'clear', depthClearValue: 1, depthStoreOp: 'store' },
       });
-      drawScene(pass);
+      drawFloor(pass);
+      if (reflect > 0) r.drawReflection(pass, { viewProj: vp, eye, light, strength: reflect });
+      drawShapes(pass);
       r.draw(pass, { viewProj: vp, eye, light });
       pass.end();
     }
@@ -291,7 +318,10 @@ try {
             colorAttachments: [{ view: msaa.createView(), loadOp: 'load', storeOp: 'store' }],
             depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
           });
-          if (mode !== 'pass') r.draw(p, { viewProj: vp, eye, light });
+          if (mode !== 'pass') {
+            if (reflect > 0) r.drawReflection(p, { viewProj: vp, eye, light, strength: reflect });
+            r.draw(p, { viewProj: vp, eye, light });
+          }
           p.end();
         }
         device.queue.submit([e2.finish()]);
