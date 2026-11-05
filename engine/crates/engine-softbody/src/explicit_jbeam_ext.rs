@@ -400,6 +400,12 @@ pub fn friction_limit(c: Vec3, f: Vec3, v: Vec3, m: f32, n: Vec3, h: f32, p: f32
         let capped = ((most - v.dot(n)) * (m / h) - f.dot(n)).max(0.0);
         c += n * (capped - cn);
     }
+    slip_limit(c, f, v, m, n, h)
+}
+
+/// The tangential part of ground force `c` on a node of force `f`, velocity `v`,
+/// mass `m` (normal `n`, step `h`) at most stops its slip in one step (spec §28).
+pub fn slip_limit(c: Vec3, f: Vec3, v: Vec3, m: f32, n: Vec3, h: f32) -> Vec3 {
     let total = f + c;
     let t = total - total.dot(n) * n;
     let vt = v - v.dot(n) * n;
@@ -1148,38 +1154,44 @@ impl ExplicitBeams {
         // model's, which Rubble's contact model does not have).
         let friction = v("noLoadCoef", v("frictionCoef", 1.0));
         let first = self.nodes.len() as u32;
-        let mut ring = |s: &mut Self, r: f32, half: f32, k: usize, mass: f32| -> Vec<u32> {
-            (0..n)
-                .map(|i| {
-                    let a = std::f32::consts::TAU * i as f32 / n as f32;
-                    let dir = r0 * a.cos() + r1 * a.sin();
-                    let pos = centre + (k as f32 - 0.5) * 2.0 * half * axis + r * dir;
-                    s.nodes.push(Node {
-                        pos,
-                        vel: velocity,
-                        force: Vec3::ZERO,
-                        mass,
-                        friction,
-                        flags: NODE_CONTACTER
-                            | NODE_TYRE
-                            | crate::explicit_beams::NODE_FRICTION_LIMIT,
-                    });
-                    s.nodes.len() as u32 - 1
-                })
-                .collect()
-        };
+        let tread = crate::explicit_beams::NODE_TREAD;
+        let mut ring =
+            |s: &mut Self, r: f32, half: f32, k: usize, mass: f32, extra: u32| -> Vec<u32> {
+                (0..n)
+                    .map(|i| {
+                        let a = std::f32::consts::TAU * i as f32 / n as f32;
+                        let dir = r0 * a.cos() + r1 * a.sin();
+                        let pos = centre + (k as f32 - 0.5) * 2.0 * half * axis + r * dir;
+                        s.nodes.push(Node {
+                            pos,
+                            vel: velocity,
+                            force: Vec3::ZERO,
+                            mass,
+                            friction,
+                            flags: NODE_CONTACTER
+                                | NODE_TYRE
+                                | crate::explicit_beams::NODE_FRICTION_LIMIT
+                                | extra,
+                        });
+                        s.nodes.len() as u32 - 1
+                    })
+                    .collect()
+            };
         let hub = [
-            ring(self, hub_radius, 0.5 * hub_width, 0, hub_mass),
-            ring(self, hub_radius, 0.5 * hub_width, 1, hub_mass),
+            ring(self, hub_radius, 0.5 * hub_width, 0, hub_mass, 0),
+            ring(self, hub_radius, 0.5 * hub_width, 1, hub_mass, 0),
         ];
         let tire = if has_tire {
             Some([
-                ring(self, radius, 0.5 * tire_width, 0, tire_mass),
-                ring(self, radius, 0.5 * tire_width, 1, tire_mass),
+                ring(self, radius, 0.5 * tire_width, 0, tire_mass, tread),
+                ring(self, radius, 0.5 * tire_width, 1, tire_mass, tread),
             ])
         } else {
             None
         };
+        if has_tire {
+            self.tread.resize(self.nodes.len(), [0.0; 2]);
+        }
         self.tyres.push(Tyre {
             axle: [n1, n2],
             first,

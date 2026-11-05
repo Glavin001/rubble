@@ -100,6 +100,7 @@ static const uint EXT_DEFORM = 2u;
 static const uint EXT_REBOUND = 4u;
 static const uint EXT_RAMP = 8u;
 static const uint NODE_FRICTION_LIMIT = 32u;
+static const uint NODE_TREAD = 64u; // a pressure wheel's tread node (spec §34, treadGround)
 static const uint TRI_BREAKABLE = 0x80000000u;
 static const float ATMOSPHERE = 101325.0;
 static const uint TYPE_DEFORMABLE = 0u;
@@ -113,6 +114,9 @@ static const uint FLAG_SHAPES = 64u;
 // vehicle is the owner or the partner splits masses and cancels a share.
 static const uint FLAG_TWO_BODY = 128u;
 static const uint FLAG_CFORCE = 256u; // the contact-force log (jbeam-semantics-spec.md §32)
+// The vehicle has tread nodes (NODE_TREAD): its nodes take the shapes path, whose
+// ground contact runs treadGround for them (jbeam-semantics-spec.md §34).
+static const uint FLAG_TREAD = 512u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -205,6 +209,7 @@ struct Params
     uint cfAcc; // gAcc: the contact-force log, per node (this step's sum, last step's, peak), fixed point (0: off)
     uint cfNode; // gLists: per node its contact break (break group, 0 none; force N's bits)
     uint cfPend; // gAcc: per group slot its contact-break state (0 idle, 1 set off, 2 done)
+    uint treadState; // gBeams: per node its tread contact's (z, depth the step before, 0, 0) (0: no tread nodes)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -457,6 +462,77 @@ float3 frictionLimit(float3 c, float3 f, float3 v, float m, float3 n, float p)
     return c;
 }
 
+// The tread contact (NODE_TREAD, jbeam-semantics-spec.md §34; CPU
+// explicit_beams::tread_hysteresis and the node pass's tread branch): a compliant,
+// rate-independent hysteretic normal force k·(p + z) at depth p, z the node's
+// hysteretic deflection (slope μ while |z| grows, λ after a reversal until it passes
+// zero), the solver's friction law on that normal force, and the slip limit. State
+// in gBeams at treadState per node: (z, the depth the step before), both 0 off the
+// ground. Strict arithmetic in the CPU's order. Off the ground (`on` false) it only
+// clears the state and returns 0.
+static const uint TREAD_GROW_BITS = 0x3e3c7bbfu; // TREAD_GROW, μ
+static const uint TREAD_REVERSE_BITS = 0x3f2c73d7u; // TREAD_REVERSE, λ
+static const uint TREAD_INV_REVERSE_BITS = 0x3fbe0301u; // 1/λ
+static const uint TREAD_K_BITS = 0x4a11dfb2u; // TREAD_K, 1/(h²(1 + λ))
+
+// contactForce's friction law on a given normal force r > 0 (CPU contact_friction).
+float3 contactFriction(float r, float3 f, float3 v, float3 n, Surface s, float friction)
+{
+    float vn = sdot(v, n);
+    float fn = sdot(f, n);
+    float3 sf = ssub3(f, sscale(n, fn));
+    float3 sl = ssub3(v, sscale(n, vn));
+    float sigma = ssqrt(sdot(sl, sl));
+    if (sigma > 0.0) sl = sdiv3(sl, sigma);
+    float gr = smul(smul(r, s.strength), friction);
+    float ms = smul(s.ms, gr);
+    if (sigma < s.va && gr > 0.0 && sdot(sf, sf) <= smul(ms, ms))
+        return ssub3(ssub3(sscale(n, r), sscale(sl, smul(ms, nf(1.0 - approxExp(-sdiv(sigma, s.va)))))), sf);
+    float g = nf(s.mc + smul(nf(s.ms - s.mc), approxExp(-approxPow(sdiv(sigma, s.vs), s.alpha))));
+    return ssub3(sscale(n, r), sscale(sl, smul(nf(g + min(smul(s.t2, sigma), 5.0)), gr)));
+}
+
+// frictionLimit's tangential part alone (CPU explicit_jbeam_ext::slip_limit).
+float3 slipLimit(float3 c, float3 f, float3 v, float m, float3 n)
+{
+    float3 total = sadd3(f, c);
+    float3 t = ssub3(total, sscale(n, sdot(total, n)));
+    float3 vt = ssub3(v, sscale(n, sdot(v, n)));
+    float3 dv = sscale(t, sdiv(STEP, m));
+    if (sdot(dv, vt) < 0.0 && sdot(dv, dv) > sdot(vt, vt)) return sadd3(c, ssub3(sscale(-vt, sdiv(m, STEP)), t));
+    return c;
+}
+
+float3 treadGround(uint gi, float3 f, float3 v, float m, float friction, float p, bool on)
+{
+    uint at = gP.treadState + gi;
+    float4 st = gBeams[at];
+    if (!on)
+    {
+        if (st.x != 0.0 || st.y != 0.0) gBeams[at] = float4(0.0, 0.0, 0.0, 0.0);
+        return float3(0.0, 0.0, 0.0);
+    }
+    float z = st.x;
+    float dp = nf(p - st.y);
+    float z1;
+    if (smul(z, dp) >= 0.0)
+        z1 = nf(z + smul(asfloat(TREAD_GROW_BITS), dp));
+    else
+    {
+        float t = nf(z + smul(asfloat(TREAD_REVERSE_BITS), dp));
+        if ((t > 0.0) != (z > 0.0))
+            z1 = smul(asfloat(TREAD_GROW_BITS), nf(dp + smul(z, asfloat(TREAD_INV_REVERSE_BITS))));
+        else
+            z1 = t;
+    }
+    if (z1 < -p) z1 = -p;
+    gBeams[at] = float4(z1, p, 0.0, 0.0);
+    float r = smul(smul(m, asfloat(TREAD_K_BITS)), nf(p + z1));
+    if (!(r > 0.0)) return float3(0.0, 0.0, 0.0);
+    float3 n = float3(0.0, 1.0, 0.0);
+    return slipLimit(contactFriction(r, f, v, n, groundSurface(), friction), f, v, m, n);
+}
+
 float3 accForce(uint node)
 {
     return float3(float(gAcc[node * 3u].load()), float(gAcc[node * 3u + 1u].load()),
@@ -658,7 +734,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
                           groupCount, hits, false);
         return;
     }
-    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE)) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD)) != 0u)
     {
         nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                          groupCount, hits, false);
@@ -752,7 +828,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
         return nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                  groupOff, groupCount, hits, true);
     }
-    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE)) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD)) != 0u)
     {
         return nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                 groupOff, groupCount, hits, true);
@@ -970,7 +1046,16 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     if ((flags & NODE_NO_GROUND) == 0u)
     {
         float3 x = origin + pos;
-        if (ground > x.y)
+        if ((flags & NODE_TREAD) != 0u)
+        {
+            float3 c = treadGround(gi, f, vel, mass, V.w, ground - x.y, ground > x.y);
+            if (ground > x.y && any(c != float3(0.0, 0.0, 0.0)))
+            {
+                cfAdd(gi, c);
+                f += c;
+            }
+        }
+        else if (ground > x.y)
         {
             float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
