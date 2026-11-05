@@ -29,12 +29,17 @@ pub use curve::{Curve, Outline};
 pub use material::{Grades, Material};
 pub use members::{Corner, MemberSpec};
 pub use skeleton::Skeleton;
-pub use vehicle::{build, BraceSpec, BuildParams, Built, DamageKind, DamageUnit, Resolution, ShearSpec, Stats, VehicleDef};
+pub use vehicle::{
+    build, BraceSpec, BuildParams, Built, DamageKind, DamageUnit, Resolution, ShearSpec, Stats,
+    VehicleDef,
+};
 
 /// A definition by body style name (`sedan`, `hatchback`).
 pub fn style(name: &str) -> Option<VehicleDef> {
     match name {
         "sedan" => Some(sedan::sedan()),
+        // One tier (BeamNG's construction): `sedan::sedan_one_tier`.
+        "sedan1" | "showcase1" => Some(sedan::sedan_one_tier()),
         "hatchback" | "hatch" => Some(hatchback::hatchback()),
         _ => None,
     }

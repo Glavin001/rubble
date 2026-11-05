@@ -665,6 +665,153 @@ k ≤ 4.8·m / (2·n·h²) ≈ 1.6 MN/m per kg at 6 neighbours):
 - `sedan.rs`: member paths redrawn on ring stations.
 - All tests re-baselined.
 
+## The one-tier build (`sedan1`, 2026-11-05, in progress)
+
+`style("sedan1")` (`sedan::sedan_one_tier`, `VehicleDef::one_tier`) builds the
+same shape, members, parts and hardware as `sedan` in one tier, as BeamNG's
+cars are built: the body shell's nodes are the frame's. `sedan` (two tiers)
+stays the default; its `.truck` is byte-identical to before at every
+resolution.
+
+- **Shell.** Every spacing is at most `POLE_LANE` (0.24 m, under the
+  254 mm pole), so a pole always meets a shell node.
+- **Members on the body** (`attach > 0`) snap their stations onto shell nodes
+  within 15 cm (`SNAP_FRAME`). The shell in their lane, within
+  `LANE_REACH` (8 cm) past half their section and within 37° of their
+  path (`LANE_COS`), becomes their outer chord: those shell beams take the
+  member's chord material. Each lane node is joined to the member's two
+  nearest station nodes as its webs. Both reaches are Choices.
+- **No catchers, no skin-to-frame ties, no backing ties.** A station with no
+  node on the shell is joined to it by beams of their own length.
+- **Exact lengths.** `rubble_exact_lengths` is written; the rest pose is
+  settled and its rest lengths taken on the exact path.
+- **GPU.** `showcase_car_gpu::one_tier_at_rest_step_parity` (Low): every
+  node's position and velocity matches the CPU's, bit for bit, after each of
+  2,400 steps.
+
+### Where we differ from real material, and why
+
+**Masses are the real local mass. No mass is moved to meet the step's
+bound.** `one_tier_masses` gives every node what is physically there.
+
+| Item | kg | Source |
+|---|---|---|
+| Body-in-white, painted, with sound deadening | 339.0 | 2011 Accord, NHTSA DOT HS 811 666 §5.9 (328 + 12) |
+| Front door, each | 29.5 | ibid. fig. 161 (58.99 the pair, with glass, regulator, trim, mirror) |
+| Rear door, each | 23.7 | ibid. fig. 171 (47.46 the pair) |
+| Hood | 17.9 | ibid. §5.10.4 |
+| Decklid | 12.4 | ibid. |
+| Fender, each | 5.1 | the closures' 147 kg less the rest, a pair |
+| Bumper fascias | 2.4 / 1.7 | 3 mm at 1,000 kg/m³ over their area (`panel_sheets`) |
+| Body glass (windscreen 4.2 mm laminated, backlight 3.5 mm tempered) | 22.8 | area × thickness × 2,500 kg/m³ |
+| Named masses, blocks, hubs, arms | 609.0 | as in `sedan` (driver, seats, fuel, powertrain …) |
+| Tyres and rims | 88.0 | as in `sedan` |
+| Equipment spread over the body's shell by area | 240.1 | what the 1,450 kg kerb mass leaves: wiring, HVAC, carpet, sealer, lamps |
+
+- Inside a part, the measured total is spread by the part's own steel:
+  - its sheet's area × gauge × 7,850 kg/m³: the body at `SHELL_GAUGE`
+    0.8 mm, the panels at 0.75 mm, the panes at their glass;
+  - its members' length × their section's steel per metre
+    (`MemberSpec::kg_per_m`, from `side_sections`, else `DEFAULT_GAUGE`
+    1.2 mm round the truss);
+  - a node on neither (a flange strip, a bracket): its beams' half-lengths
+    of a 50 × 1.2 mm strip (`STRIP_KG_PER_M`).
+- The factor from the sections and sheet to the measured total is printed
+  per part (Medium):
+  - body ×0.87;
+  - doors ×1.5–1.7: the trim, glass and regulator ride the door's steel;
+  - fenders ×1.9;
+  - fascias ×0.48.
+  These are Choices of how the measured mass is spread within the part.
+- Named masses sit evenly on the members' nodes in their box (where they
+  bolt), not on the nodes whose bound wants them.
+- `one_tier_masses_are_real_and_beams_soft_only_at_the_bound` fails if any
+  node's mass differs from its local mass by more than 0.1 g
+  (`MOVED_MASS_TOLERANCE`, the f32 sum's rounding). **Mass moved: none.**
+
+**Stiffness is real unless the step's bound requires less.** The bound is the
+explicit step's Gershgorin row (h²ω² + 2hγ within `G_LIMIT` at 0.5 ms). It is
+numerics, and BeamNG's content obeys it too (its BX door skin is about
+1.1 MN/m on 1 kg nodes, against roughly 4e7 N/m of real sheet).
+`one_tier_real_stiffness` first sets each beam's target to its real stiffness:
+- a member's beams (and its lane on the shell): E·A/L, with A its
+  section's steel shared by its chords (4 a box, 2 a ladder). Its webs are
+  taken as the same sheet, a Choice;
+- a sheet's edges: (√3/4)·E·t, an isotropic membrane as an equilateral
+  triangular lattice (Poisson's ratio 1/3). The fascia's E of 1.5 GPa is a
+  Choice in polypropylene compound's 1–2 GPa.
+
+Everything else keeps the stiffness it was built with: seals, ropes,
+bearings, mounts, gauges, and the lumped shear panels (whose racking comes
+from exact frame physics).
+
+`Skeleton::cap_to_bound` then lowers stiffness only where a node would
+exceed the bound. The cut is max-min fair: at a saturated node its stiffest
+beams come down to a common level, beams under that level keep theirs, and a
+final pass raises any beam that still has room at both ends. The tyres' spoke
+springs are capped the same way (the spoke rate is the tyre model's, not a
+measured rate). Damping keeps its ratio. The test fails if a beam is softer
+than its target without one of its nodes within 5 % of the bound (the rest
+pose's few-centimetre settle changes lengths), or if any node is past it.
+
+Medium, 6,928 beams: 5,055 are at the bound. Built/real k per member, median
+over its beams, from the test:
+
+| Member | real k (N/m) | built k (N/m) | built/real | lighter node (kg) |
+|---|---|---|---|---|
+| `rail_f` | 1.44e8 | 2.99e5 | 0.0021 | 0.98 |
+| `sill` | 1.37e8 | 4.57e5 | 0.0033 | 1.00 |
+| `pillar_a` | 8.13e7 | 2.16e5 | 0.0027 | 1.01 |
+| `pillar_b` | 1.07e8 | 2.21e5 | 0.0021 | 0.64 |
+| `roof_rail` | 1.51e8 | 2.06e5 | 0.0014 | 0.87 |
+| `tunnel` | 1.40e8 | 5.54e5 | 0.0040 | 1.24 |
+| `floor_x1` | 1.29e8 | 1.00e6 | 0.0078 | 1.88 |
+| `dash` | 7.01e7 | 1.92e6 | 0.0273 | 2.54 |
+| `door_beam_f` | 4.95e7 | 4.38e5 | 0.0088 | 0.79 |
+| `bumper_beam_f` | 1.45e8 | 2.82e5 | 0.0019 | 0.28 |
+
+Every member is at 0.001–0.04 of its real k, because of the bound at its
+nodes' real masses. Skins (median beam k, against the BX's door skin of
+1.1 MN/m on 1 kg nodes):
+- body: 6.6e5 N/m on 1.31 kg nodes;
+- doors: 2.7–3.0e5 N/m on 0.55–0.62 kg nodes, so per kilogram of node about
+  2× under the BX's;
+- fenders: 3.8e5 N/m;
+- bonnet: 9.2e4 N/m;
+- boot lid: 1.6e5 N/m.
+
+**Strengths stay real forces.**
+- Members keep their sections' chord yields (`side_sections`).
+- A sheet edge yields at its sheet's yield strain, (√3/4)·σ_y·t·L, with
+  σ_y = 210 MPa (`SHEET_YIELD`: BH210 and DC04-class outers and inners, a
+  Choice); a fascia at 25 MPa.
+- After the cut, each beam's break force is its yield + elong × its built
+  k·L, so it tears at the same elongation as before.
+
+**What this costs (measured, open).** A beam's elastic energy at a force F
+is F²/2k. With k at 0.1–4 % of real and F real, a member stores 25–1,000×
+the elastic energy a real one does before it yields.
+
+The NCAP 56 km/h frontal (`n`, Medium, after the lanes):
+- in band: none of max crush, t_m, peak or restitution;
+- max crush 356 mm, against 380–580 mm;
+- t_m 57 ms, against 63–76 ms;
+- peak 60 g, against 34–47 g;
+- restitution 0.27, against 0.13–0.20.
+
+Before the lanes, max crush was in band (394–456 mm).
+
+`ESPLIT` shows where the rebound is stored (in kJ, at the frame of most
+elastic energy, about 50 ms):
+- cabin members to doors (the doors' bearing on the pillars): 11–20;
+- the cabin's own members: 7–11 (the cell yields at `CELL` × its grade, so
+  it stays elastic);
+- cabin to front structure: 8;
+- the front structure: 5, about half of it in yielded beams.
+
+The crush zone is not where the spring is. The passenger cell and the door
+ring hold up to 52 kJ elastically and give it back.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.

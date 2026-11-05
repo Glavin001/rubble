@@ -198,6 +198,20 @@ pub struct Spacing {
 }
 
 impl Spacing {
+    /// The one-tier shell (BeamNG's density, the BX's 0.19–0.25 m): every
+    /// spacing at most [`super::vehicle::POLE_LANE`], so a 254 mm pole
+    /// always meets a node of the shell.
+    pub fn pole_lanes(self) -> Self {
+        let p = super::vehicle::POLE_LANE;
+        Self {
+            ring: self.ring.min(p),
+            side: self.side.min(p),
+            top: self.top.min(p),
+            floor: self.floor.min(p),
+            cap: self.cap.min(p),
+        }
+    }
+
     pub fn of(&self, seg: Seg) -> f32 {
         match seg {
             Seg::Floor | Seg::Well => self.floor,

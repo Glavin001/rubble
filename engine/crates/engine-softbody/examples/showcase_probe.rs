@@ -45,6 +45,17 @@ fn main() {
             st.primary_nodes, st.primary_node_mass, st.kl_primary, b.stiffness_scale, b.skin_scale
         );
     }
+    if std::env::var("MEMBERS").is_ok() {
+        for m in &def.members {
+            eprintln!(
+                "  member {:>16}: section {} attach {} catch {} ride {} beads {} station {:.2} mirrored {} w {:.2} h {:.2} up {:?}",
+                m.name, m.section, m.attach, m.catch, m.ride, m.beads, m.station, m.mirrored, m.width, m.height, m.up
+            );
+        }
+    }
+    for (k, kg) in &b.masses {
+        eprintln!("  mass: {k:>48}: {kg:7.1} kg");
+    }
     if std::env::var("PARTS").is_ok() {
         // Each part's nodes and mass.
         for (k, name) in sk.parts.iter().enumerate() {

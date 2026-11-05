@@ -44,6 +44,7 @@ pub fn member(
         stiff: 1.0,
         skin: false,
         hardware_ends: true,
+        kg_per_m: 0.0,
     }
 }
 
@@ -2024,7 +2025,64 @@ pub fn sedan() -> VehicleDef {
         body_damping_strength: 5000.0,
         flanges: door_flanges(),
         sheets: panel_sheets(),
+        one_tier: false,
+        biw_mass: 0.0,
+        part_masses: Vec::new(),
+        damping: None,
     })
+}
+
+/// The 2011 Honda Accord's painted body-in-white with its sprayed-on sound
+/// deadening (kg): NHTSA DOT HS 811 666 §5.9 (328 kg structure + 12 kg).
+pub const ACCORD_BIW: f32 = 339.0;
+/// The Accord's closures and fenders as assemblies (kg each: structure,
+/// glass, regulators, seals, wiring, speakers, hinges and latch, mirrors,
+/// trim and fasteners), DOT HS 811 666 §5.10: front doors 58.99 the pair
+/// (fig. 161), rear doors 47.46 the pair (fig. 171), hood 17.90, decklid
+/// 12.37; the fenders the rest of the closures' 147 kg, a pair.
+pub const ACCORD_DOOR_F: f32 = 58.99 / 2.0;
+pub const ACCORD_DOOR_R: f32 = 47.46 / 2.0;
+pub const ACCORD_HOOD: f32 = 17.90;
+pub const ACCORD_DECKLID: f32 = 12.37;
+pub const ACCORD_FENDER: f32 = (147.0 - 58.99 - 47.46 - 17.90 - 12.37) / 2.0;
+
+/// A section's steel per metre (kg/m): a box's perimeter × wall, a tube's
+/// circumference × wall, × 7,850 kg/m³.
+pub fn section_kg_per_m(s: &Section) -> f32 {
+    let perimeter = if s.round {
+        std::f32::consts::PI * s.depth
+    } else {
+        2.0 * (s.depth + s.width)
+    };
+    perimeter * s.t * super::members::STEEL_DENSITY
+}
+
+/// The showcase sedan built in one tier, as BeamNG's cars are
+/// ([`VehicleDef::one_tier`]): the body's shell is its frame, every node
+/// weighs its real local mass, and the beams are as stiff as their materials
+/// unless the step's bound requires less. The same shape, members, parts and
+/// hardware as [`sedan`]; the body-in-white's and the closures' masses are
+/// the 2011 Accord teardown's (NHTSA DOT HS 811 666).
+pub fn sedan_one_tier() -> VehicleDef {
+    let mut d = sedan();
+    d.name = "sedan1".into();
+    d.one_tier = true;
+    d.tiered = false;
+    d.damping = Some(super::vehicle::DampingRatios::default());
+    d.biw_mass = ACCORD_BIW;
+    d.part_masses = vec![
+        ("door_f".into(), ACCORD_DOOR_F),
+        ("door_r".into(), ACCORD_DOOR_R),
+        ("bonnet".into(), ACCORD_HOOD),
+        ("bootlid".into(), ACCORD_DECKLID),
+        ("fender".into(), ACCORD_FENDER),
+    ];
+    for (name, sec, _, _) in side_sections() {
+        for m in d.members.iter_mut().filter(|m| m.name == name) {
+            m.kg_per_m = section_kg_per_m(&sec);
+        }
+    }
+    d
 }
 
 /// The bolted and hinged panels' sheets: steel outers 0.75 mm (outer panel

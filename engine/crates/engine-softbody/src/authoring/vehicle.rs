@@ -440,6 +440,17 @@ pub const SHOCK_TOP: f32 = 4.0;
 /// other member's station).
 pub const GUSSET: f32 = 1.0;
 
+/// One tier: a member's lane on the shell reaches this far past its
+/// section's half depth (m), and takes the shell's beams within 37° of its
+/// path (cos ≥ [`LANE_COS`]): Choices.
+pub const LANE_REACH: f32 = 0.08;
+pub const LANE_COS: f32 = 0.8;
+
+/// A side pole's width (m): the NCAP and FMVSS 214 pole is 254 mm. One
+/// tier: the shell's spacing and the outer members' stations are at most
+/// this (static contact is per node).
+pub const POLE_LANE: f32 = 0.24;
+
 /// The skin's spacing against the frame's era (25–40 cm): the light skin
 /// tier is denser than the frame, so dents and creases are local.
 pub const SKIN_DENSITY: f32 = 1.0;
@@ -607,6 +618,111 @@ pub struct VehicleDef {
     /// triangle's third to each node's part) × Σ gauge × share × density.
     #[serde(default)]
     pub sheets: Vec<SheetSpec>,
+    /// One tier (BeamNG's construction): the body shell's nodes are the
+    /// frame's. Members drawn on the body share the shell's nodes (their
+    /// stations snap onto it), there are no catchers or skin-to-frame ties,
+    /// every node weighs its real local mass ([`SkNode::local`]) and every
+    /// beam keeps its stiffness unless the step's bound requires less
+    /// ([`Skeleton::cap_to_bound`]). Off: the two-tier build.
+    #[serde(default)]
+    pub one_tier: bool,
+    /// One tier: the painted body-in-white's measured mass (kg), spread
+    /// over the body's shell and members by their sheet and sections.
+    #[serde(default)]
+    pub biw_mass: f32,
+    /// One tier: parts' measured assembly masses (part name prefix, kg each:
+    /// structure, glass, trim, hardware), spread over each part's nodes by
+    /// its sheet and members.
+    #[serde(default)]
+    pub part_masses: Vec<(String, f32)>,
+    /// One tier: beam damping as a damping ratio on the beam's own node
+    /// masses ([`DampingRatios`]); `None` keeps the grades' damping.
+    #[serde(default)]
+    pub damping: Option<DampingRatios>,
+}
+
+/// One tier: each beam's damping as a ratio ζ = c / (2·√(k·m₁m₂/(m₁+m₂)))
+/// of its own two-mass mode, per kind of part, so the ratio BeamNG's content
+/// uses carries over to this car's real masses. Defaults: the medians
+/// measured on the BX's default configuration (`examples/jbeam_damping.rs`,
+/// `vehicle-authoring.md` "Where we differ"): never tuned to a reference.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DampingRatios {
+    /// The body's shell and members (`bx_body`: median 0.0275, p10–p90
+    /// 0.018–0.052).
+    pub body: f32,
+    /// Crush members ([`Self::crush_members`]): the BX's front frame rails
+    /// (0.0177, 0.015–0.018) and its bumper bar (0.0158).
+    pub crush: f32,
+    /// Members whose beams count as crush structure.
+    pub crush_members: Vec<String>,
+    /// Doors (`bx_door`: 0.0334, 0.025–0.040).
+    pub door: f32,
+    /// Bonnet (`bx_hood`: 0.0593, 0.045–0.080).
+    pub bonnet: f32,
+    /// Boot lid (`bx_tailgate`: 0.0567, 0.038–0.065).
+    pub bootlid: f32,
+    /// Fenders (`bx_fender`: 0.0422, 0.039–0.053).
+    pub fender: f32,
+    /// Bumper fascias (`bx_bumper_F`/`_R`: 0.089–0.091).
+    pub bumper: f32,
+    /// The body's glass (`bx_windshield`: 0.0200, 0.017–0.026).
+    pub glass_body: f32,
+    /// A door's glass (`bx_doorglass`: 0.0545, 0.046–0.057).
+    pub glass_side: f32,
+}
+
+impl Default for DampingRatios {
+    fn default() -> Self {
+        Self {
+            body: 0.0275,
+            crush: 0.0177,
+            crush_members: [
+                "rail_f",
+                "rail_r",
+                "rail_r_tail",
+                "bumper_beam_f",
+                "bumper_beam_r",
+            ]
+            .map(String::from)
+            .to_vec(),
+            door: 0.0334,
+            bonnet: 0.0593,
+            bootlid: 0.0567,
+            fender: 0.0422,
+            bumper: 0.0893,
+            glass_body: 0.0200,
+            glass_side: 0.0545,
+        }
+    }
+}
+
+impl DampingRatios {
+    /// The ratio for a beam in part `part` (its name), glass or not, crush
+    /// structure or not.
+    pub fn of(&self, part: &str, glass: bool, crush: bool) -> f32 {
+        let body = part == "body" || part.is_empty();
+        if glass {
+            return if body {
+                self.glass_body
+            } else {
+                self.glass_side
+            };
+        }
+        if crush {
+            return self.crush;
+        }
+        let pick = [
+            ("door", self.door),
+            ("bonnet", self.bonnet),
+            ("bootlid", self.bootlid),
+            ("fender", self.fender),
+            ("bumper", self.bumper),
+        ];
+        pick.iter()
+            .find(|(n, _)| part.starts_with(n))
+            .map_or(self.body, |x| x.1)
+    }
 }
 
 fn one() -> f32 {
@@ -676,6 +792,10 @@ pub struct Built {
     pub hardware: Vec<HardwareGroup>,
     /// Hardware, glass panes, lamps and mirrors as damage units.
     pub damage_units: Vec<DamageUnit>,
+    /// One tier: where the kerb mass is (kg by item: the body-in-white, its
+    /// glass, each part, the equipment spread over the body, and the
+    /// scales that took the sections and sheet to the measured masses).
+    pub masses: Vec<(String, f32)>,
 }
 
 /// Medians of the built skeleton's materials (the measures real node–beam cars
@@ -793,7 +913,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     let res = params.resolution;
     let len = def.profile.length;
     let mut sk = Skeleton::new(&def.name);
-    let shell = build_shell(&def.profile, &res.spacing(), &def.stations, &mut sk);
+    let one = def.one_tier;
+    let spacing = if one {
+        res.spacing().pole_lanes()
+    } else {
+        res.spacing()
+    };
+    let shell = build_shell(&def.profile, &spacing, &def.stations, &mut sk);
     check_closed(&shell.tris).map_err(|e| format!("shell skin: {e}"))?;
     // Parts: the first panel whose region holds a node owns it.
     let mut panel_of: HashMap<u32, usize> = HashMap::new();
@@ -830,6 +956,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             shell_grade
         };
         grade_of.insert(i, m);
+    }
+    // One tier: the shell's nodes are the frame's (members snap onto them,
+    // `members::SNAP_FRAME`).
+    if one {
+        for &i in &shell.nodes {
+            sk.nodes[i as usize].primary = true;
+        }
     }
     // Panel extents along z (hinge and latch edges).
     let mut extent: HashMap<u16, (f32, f32)> = HashMap::new();
@@ -1127,6 +1260,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     // Door members' end stations (part, nodes).
     let mut door_ends: Vec<(u16, Vec<u32>)> = Vec::new();
     let mut trusses: Vec<Truss> = Vec::new();
+    // Each truss's steel per metre and part (one tier's masses).
+    let mut truss_kgm: Vec<(f32, u16)> = Vec::new();
+    // One tier: shell beams that are members' outer chords, and their webs
+    // (beam, the chord's steel area m²).
+    let mut lane_beams: Vec<(usize, f32)> = Vec::new();
     let mut truss_names: Vec<String> = Vec::new();
     let mut snap_pool: Vec<u32> = shell.nodes.clone();
     for m in &def.members {
@@ -1173,18 +1311,21 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 m.width,
                 m.height,
                 up,
-                if m.station > 0.0 {
-                    m.station
-                } else if m.beads > 0 {
-                    res.crush()
-                } else {
-                    res.truss()
+                {
+                    let s = if m.station > 0.0 {
+                        m.station
+                    } else if m.beads > 0 {
+                        res.crush()
+                    } else {
+                        res.truss()
+                    };
+                    s
                 },
                 part,
                 &mat,
                 m.beads,
                 m.section,
-                m.catch,
+                m.catch && !one,
                 &pool,
             );
             snap_pool.extend(truss.stations.iter().flatten().copied());
@@ -1200,6 +1341,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             }
             let nodes = truss.nodes();
             trusses.push(truss.clone());
+            truss_kgm.push((m.mass_per_m(), part));
             truss_names.push(if side > 0.0 || !m.mirrored {
                 m.name.clone()
             } else {
@@ -1210,9 +1352,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 // the shell (already part of it).
                 let on_shell: std::collections::HashSet<u32> =
                     shell.nodes.iter().copied().collect();
+                // (One tier: only a station with no node on the shell, by
+                // beams of their own length: what is on the shell is
+                // welded to it already.)
                 let nodes: Vec<u32> = truss
                     .stations
                     .iter()
+                    .filter(|st| !one || !st.iter().any(|i| on_shell.contains(i)))
                     .flatten()
                     .copied()
                     .filter(|i| !on_shell.contains(i))
@@ -1223,7 +1369,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     .copied()
                     .filter(|&i| sk.nodes[i as usize].part == part)
                     .collect();
-                attach(
+                super::members::attach_with(
                     &mut sk,
                     &nodes,
                     &pool,
@@ -1239,6 +1385,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         // A panel's own frame (doors) backs its skin.
                         ..if m.ride { backing } else { grades.panel }
                     },
+                    !one,
                 );
             }
             if m.ride {
@@ -1297,6 +1444,81 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         }
                     }
                 }
+            }
+            // One tier: a member drawn on the body has the shell along its
+            // path as its outer chord (the sill's outer panel, a pillar's
+            // outer): the shell's beams in its lane, along its path, take
+            // its chords' material, and each lane node is joined to its
+            // nearest stations' nodes (the section's webs). The shell is at
+            // most `POLE_LANE` apart, so a pole meets the member's chord in
+            // every lane.
+            let mut nodes = nodes;
+            if one && m.attach > 0 {
+                let r = 0.5 * m.width.max(m.height) + LANE_REACH;
+                let dist = |q: Vec3| -> (f32, Vec3, f32) {
+                    // (Distance to the path, its tangent there, its arc fraction.)
+                    let mut best = (f32::MAX, Vec3::Z, 0.0);
+                    let total: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
+                    let mut acc = 0.0;
+                    for w in path.windows(2) {
+                        let d = w[1] - w[0];
+                        let l = d.length().max(1e-6);
+                        let u = ((q - w[0]).dot(d) / (l * l)).clamp(0.0, 1.0);
+                        let e = q.distance(w[0] + d * u);
+                        if e < best.0 {
+                            best = (e, d / l, (acc + u * l) / total.max(1e-6));
+                        }
+                        acc += l;
+                    }
+                    best
+                };
+                let lane: Vec<u32> = shell
+                    .nodes
+                    .iter()
+                    .copied()
+                    .filter(|&i| sk.nodes[i as usize].part == part && dist(sk.pos(i)).0 <= r)
+                    .collect();
+                let lane_set: std::collections::HashSet<u32> = lane.iter().copied().collect();
+                let chords = if m.section == 2 { 2.0 } else { 4.0 };
+                let area = m.mass_per_m() / super::members::STEEL_DENSITY / chords;
+                for j in 0..sk.beams.len() {
+                    let (a, b) = (sk.beams[j].a, sk.beams[j].b);
+                    if !(lane_set.contains(&a) && lane_set.contains(&b))
+                        || sk.beams[j].ty != BeamType::Normal
+                        || sk.beams[j].group != 0
+                        || sk.beams[j].tie
+                    {
+                        continue;
+                    }
+                    let mid = 0.5 * (sk.pos(a) + sk.pos(b));
+                    let (_, tan, t) = dist(mid);
+                    let d = (sk.pos(b) - sk.pos(a)).normalize_or_zero();
+                    if d.dot(tan).abs() >= LANE_COS {
+                        sk.beams[j].mat = mat(t);
+                        lane_beams.push((j, area));
+                    }
+                }
+                let stations: Vec<u32> = truss
+                    .stations
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|i| !lane_set.contains(i))
+                    .collect();
+                for &a in &lane {
+                    let (_, _, t) = dist(sk.pos(a));
+                    let web = mat(t)
+                        .stiffer(super::members::DIAG)
+                        .scaled(super::members::DIAG);
+                    for b in sk.nearest(sk.pos(a), &stations, 2) {
+                        if sk.pos(b).distance(sk.pos(a)) <= 0.6 && sk.beam(a, b, web) {
+                            lane_beams.push((sk.beams.len() - 1, area));
+                        }
+                    }
+                }
+                nodes.extend(lane);
+                nodes.sort();
+                nodes.dedup();
             }
             let key = if side > 0.0 || !m.mirrored {
                 m.name.clone()
@@ -1763,11 +1985,14 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .map(|(i, _)| i as u16)
             .collect();
         let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
+        // (One tier: the members behind the panel, not the shell beside it.)
+        let member_set: std::collections::HashSet<u32> = structure_nodes.iter().copied().collect();
         let body_frame: Vec<u32> = (0..sk.nodes.len() as u32)
             .filter(|&i| {
                 sk.nodes[i as usize].part == 0
                     && sk.nodes[i as usize].primary
                     && !sk.nodes[i as usize].catcher
+                    && (!one || (member_set.contains(&i) && !on_shell.contains(&i)))
             })
             .collect();
         for &pt in &parts {
@@ -1780,9 +2005,12 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 .nodes
                 .iter()
                 .copied()
-                .filter(|&i| sk.nodes[i as usize].part == pt && !sk.nodes[i as usize].primary)
+                .filter(|&i| {
+                    sk.nodes[i as usize].part == pt && (one || !sk.nodes[i as usize].primary)
+                })
                 .collect();
-            if !own.is_empty() {
+            // (One tier: the panel's members are drawn on its skin; no ties.)
+            if !own.is_empty() && !one {
                 attach(&mut sk, &skin, &own, 2, 0.3, backing);
             }
             // The body's structure behind it (apron, tower, radiator support,
@@ -2311,13 +2539,25 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         }
         // On the frame where it has nodes in the box (seats, fuel and trim bolt
         // to the structure, which carries and steadies them).
+        // (One tier: on the members in the box, evenly: where it bolts, not
+        // where the step's bound would want it.)
         let frame: Vec<u32> = nodes
             .iter()
             .copied()
-            .filter(|&i| sk.nodes[i as usize].primary)
+            .filter(|&i| {
+                if one {
+                    structure_nodes.contains(&i)
+                } else {
+                    sk.nodes[i as usize].primary
+                }
+            })
             .collect();
         let nodes = if frame.is_empty() { nodes } else { frame };
-        sk.add_mass_by_need(&nodes, m.kg, &need);
+        if one {
+            sk.add_mass(&nodes, m.kg);
+        } else {
+            sk.add_mass_by_need(&nodes, m.kg, &need);
+        }
         named += m.kg;
     }
     let blocks: f32 =
@@ -2331,6 +2571,9 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     // first), no share of the structure's.
     let mut sheets = 0.0;
     for part in 1..sk.parts.len() as u16 {
+        if one {
+            break;
+        }
         let Some(kg) = sheet_mass(def, &sk, &shell.tris, part) else {
             continue;
         };
@@ -2356,6 +2599,8 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     // a crash; real bodies' joints, sealer and trim damp those. Each node gets
     // one, to the node of its part nearest `reach` m away along an axis (x, y,
     // z in turn).
+    // (Each body dashpot and the node it is from.)
+    let mut body_dash: Vec<(usize, u32)> = Vec::new();
     if def.body_damping > 0.0 {
         let n = sk.nodes.len() as u32;
         let susp_part = sk
@@ -2364,6 +2609,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .position(|p| p == "suspension")
             .map(|x| x as u16);
         let reach = def.body_damping_reach;
+        // One tier: a node takes at most `BODY_DAMPING_FAN_IN` dashpots from
+        // others (otherwise a light node that is many nodes' best partner
+        // carried 16 of them, h·Σc/m 1.29 past `C_RATIO`'s 0.75).
+        let mut fan_in = vec![0usize; n as usize];
+        body_dash.clear();
         for i in 0..n {
             let ni = &sk.nodes[i as usize];
             if Some(ni.part) == susp_part {
@@ -2373,6 +2623,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             let pi = ni.p;
             let best = (0..n)
                 .filter(|&j| j != i && sk.nodes[j as usize].part == ni.part)
+                .filter(|&j| !one || fan_in[j as usize] < BODY_DAMPING_FAN_IN)
                 .filter_map(|j| {
                     let d = sk.pos(j) - pi;
                     let l = d.length();
@@ -2392,7 +2643,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 } else {
                     def.body_damping
                 };
-                sk.dashpot(i, j, c, def.body_damping_strength);
+                fan_in[j as usize] += 1;
+                if sk.dashpot(i, j, c, def.body_damping_strength) {
+                    body_dash.push((sk.beams.len() - 1, i));
+                }
             }
         }
     }
@@ -2548,13 +2802,63 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             );
         }
     }
-    let (stiffness_scale, skin_scale) = if def.tiered {
+    let mut masses: Vec<(String, f32)> = Vec::new();
+    let (stiffness_scale, skin_scale) = if one {
+        // Real local masses, then the step's bound on the stiffness.
+        masses = one_tier_masses(def, &mut sk, &shell, &trusses, &truss_kgm)?;
+        // Each beam's elongation at break (its break force is its yield +
+        // elong × k·L: it tears after stretching that share of its length),
+        // kept through the bound's cut so it tears at the same strain.
+        let elong: Vec<f32> = sk
+            .beams
+            .iter()
+            .map(|b| {
+                let kl = b.mat.k * super::material::REF_LENGTH;
+                if b.mat.deform >= 1.0e8 || kl <= 0.0 {
+                    -1.0
+                } else {
+                    ((b.mat.strength - b.mat.deform) / kl).max(0.0)
+                }
+            })
+            .collect();
+        one_tier_real_stiffness(
+            &mut sk,
+            &shell,
+            &trusses,
+            &truss_kgm,
+            &lane_beams,
+            &grade_of,
+            &grades,
+        );
+        if let Some(z) = &def.damping {
+            one_tier_damping(&mut sk, z, &groups, &grade_of, &grades);
+            // The body dashpots at the BX body's damping-only beams' rate per
+            // kilogram of body ([`BX_BODY_DASHPOT_RATE`]), each on the mass
+            // of the node it is from.
+            for &(j, i) in &body_dash {
+                sk.beams[j].mat.damp = BX_BODY_DASHPOT_RATE * sk.nodes[i as usize].mass;
+            }
+        }
+        sk.exact_lengths = true;
+        sk.cap_to_bound()?;
+        for (b, &e) in sk.beams.iter_mut().zip(&elong) {
+            if e >= 0.0 {
+                // (A sheet edge given its real yield: the strength it had
+                // was the yield's.)
+                let kl = b.mat.k * super::material::REF_LENGTH;
+                b.mat.strength = b.mat.deform + e * kl;
+            }
+        }
+        (1.0, 1.0)
+    } else if def.tiered {
         sk.fit_tiers(structure, 0.95)
     } else {
         let s = sk.fit_stiffness(structure, 0.95);
         (s, s)
     };
-    sk.solve_masses(structure)?;
+    if !one {
+        sk.solve_masses(structure)?;
+    }
     size_hardware(&mut sk, &hardware, params.strength)?;
     let panes = brittle_glass(
         def,
@@ -2564,6 +2868,10 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         &mut groups_made,
         params.strength,
     );
+    if one {
+        // (What the glass added.)
+        sk.cap_to_bound()?;
+    }
     preload(&mut sk, def);
     // Collision skin: the shell's skin on a coarser lattice, its nodes contacters.
     sk.collision = coarse_skin(&sk, &shell)?;
@@ -2658,7 +2966,359 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             u
         },
         hardware,
+        masses,
     })
+}
+
+/// One tier: the body dashpots' damping per kilogram of the node each is
+/// from (1/s): the BX body's damping-only beams (`bx_body_hatch`, "main
+/// frame damping": 12 beams of 500 N·s/m, k 0) over its 328.9 kg, Σc/Σm
+/// = 6,000 / 328.9 = 18.2 /s. Measured, not tuned.
+pub const BX_BODY_DASHPOT_RATE: f32 = 6000.0 / 328.9;
+
+/// One tier: the most body dashpots a node takes from other nodes (a Choice
+/// that keeps every node within `C_RATIO`).
+pub const BODY_DAMPING_FAN_IN: usize = 2;
+
+/// One tier: the body shell's sheet (m), a Choice typical of a body side
+/// and floor (the body's sum is set by its measured mass, so only the shell's
+/// share against the members' rests on it).
+pub const SHELL_GAUGE: f32 = 0.0008;
+/// Glass's density (kg/m³).
+pub const GLASS_DENSITY: f32 = 2500.0;
+/// One tier: a node on no sheet or member (a flange strip, a bracket) weighs
+/// its beams' half-lengths of a 50 × 1.2 mm steel strip (kg/m), a Choice.
+pub const STRIP_KG_PER_M: f32 = 0.05 * 0.0012 * 7850.0;
+
+/// Steel's, glass's and a bumper fascia's (talc-filled polypropylene, a
+/// Choice in its 1–2 GPa range) Young's moduli (Pa).
+pub const E_STEEL: f32 = 210e9;
+pub const E_FASCIA: f32 = 1.5e9;
+/// A panel's (door, lid, fender skin) sheet (m): the 0.7–0.9 mm outer.
+pub const PANEL_GAUGE: f32 = 0.00075;
+/// A bumper fascia's wall (m).
+pub const FASCIA_WALL: f32 = 0.003;
+/// A sheet's yield stress (Pa): the outer and inner panels' bake-hardening
+/// and drawing grades (BH210, DC04 class), a Choice; a fascia's polypropylene
+/// compound about 25 MPa.
+pub const SHEET_YIELD: f32 = 210e6;
+pub const FASCIA_YIELD: f32 = 25e6;
+
+/// One tier: each steel, glass and fascia beam's target stiffness is its real
+/// one before the step's bound is applied ([`Skeleton::cap_to_bound`]):
+/// - a member's beams (chords, rings, diagonals, bends): E·A/L with A its
+///   section's steel ([`MemberSpec::mass_per_m`] / 7,850) shared by its
+///   chords (4 a box, 2 a ladder; its webs are the same sheet, a Choice);
+/// - a sheet's edges (the shell's beams within a part): an isotropic
+///   membrane as a triangular lattice, (√3/4)·E·t per edge (exact for an
+///   equilateral lattice, Poisson's ratio 1/3), its t the body's
+///   [`SHELL_GAUGE`], a panel's [`PANEL_GAUGE`], a pane's glass or a
+///   fascia's wall.
+///
+/// Every other beam (seals, ropes, bearing, mounts, the lumped shear panels'
+/// racking from exact frame physics, gauges) keeps its built stiffness.
+/// Damping keeps its ratio. A beam is never made softer here.
+fn one_tier_real_stiffness(
+    sk: &mut Skeleton,
+    shell: &Shell,
+    trusses: &[Truss],
+    kgm: &[(f32, u16)],
+    lanes: &[(usize, f32)],
+    grade_of: &HashMap<u32, Material>,
+    grades: &Grades,
+) {
+    let lane_of: HashMap<usize, f32> = lanes.iter().copied().collect();
+    use super::material::REF_LENGTH;
+    use super::members::STEEL_DENSITY;
+    let n = sk.nodes.len();
+    // Per node: the trusses it is in, with each one's chord area (m²).
+    let mut of: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
+    for (ti, (t, &(kg_m, _))) in trusses.iter().zip(kgm).enumerate() {
+        let chords = {
+            let st = t.stations[0];
+            if st[0] == st[2] && st[1] == st[3] {
+                2.0
+            } else {
+                4.0
+            }
+        };
+        let area = kg_m / STEEL_DENSITY / chords;
+        for &i in t.stations.iter().flatten() {
+            if !of[i as usize].iter().any(|x| x.0 == ti) {
+                of[i as usize].push((ti, area));
+            }
+        }
+    }
+    let on_shell: std::collections::HashSet<u32> = shell.nodes.iter().copied().collect();
+    for (j, b) in sk.beams.iter_mut().enumerate() {
+        if b.damper || b.fixed || b.ty != BeamType::Normal || b.group != 0 {
+            continue;
+        }
+        let (a, c) = (b.a as usize, b.b as usize);
+        let l = sk.nodes[a].p.distance(sk.nodes[c].p).max(1e-3);
+        let mut real = lane_of.get(&j).map_or(0.0, |&area| E_STEEL * area / l);
+        let lane = real > 0.0;
+        for &(ti, area) in &of[a] {
+            if of[c].iter().any(|x| x.0 == ti) {
+                real = real.max(E_STEEL * area / l);
+            }
+        }
+        let mut sheet_yield = 0.0f32;
+        if on_shell.contains(&b.a)
+            && on_shell.contains(&b.b)
+            && sk.nodes[a].part == sk.nodes[c].part
+        {
+            let ga = grade_of[&b.a];
+            let gb = grade_of[&b.b];
+            let glass = ga == grades.glass || gb == grades.glass;
+            let (e, t, sy) = if glass {
+                (GLASS_E, TEMPERED_THICKNESS, 0.0)
+            } else if ga == grades.plastic || gb == grades.plastic {
+                (E_FASCIA, FASCIA_WALL, FASCIA_YIELD)
+            } else if sk.nodes[a].part == 0 {
+                (E_STEEL, SHELL_GAUGE, SHEET_YIELD)
+            } else {
+                (E_STEEL, PANEL_GAUGE, SHEET_YIELD)
+            };
+            let lattice = 3f32.sqrt() / 4.0;
+            if !lane && lattice * e * t > real {
+                real = lattice * e * t;
+                // Its yield force at the sheet's yield strain: (√3/4)·σ_y·t·L.
+                sheet_yield = lattice * sy * t * l;
+            }
+        }
+        if sheet_yield > 0.0 && real > 0.0 {
+            b.mat.deform = sheet_yield;
+            b.mat.strength = sheet_yield;
+        }
+        if real == 0.0 {
+            continue;
+        }
+        let now = b.mat.k_at(l);
+        if real > now {
+            let f = real / now;
+            b.mat.k *= f;
+            b.mat.damp *= f.sqrt();
+        }
+        let _ = REF_LENGTH;
+    }
+}
+
+/// One tier: every steel, glass and fascia beam's damping set to its part's
+/// ratio ([`DampingRatios`]) on its own two-mass mode at its target
+/// stiffness: c = 2ζ·√(k·μ), μ = m₁m₂/(m₁+m₂) of its nodes' real masses.
+/// [`Skeleton::cap_to_bound`] then keeps the ratio (c ∝ √k). Every beam of
+/// a part but the fixed ones (blocks' and plates' mounts, the suspension)
+/// and the dashpots: the part's seals, supports and hardware ropes too (the
+/// BX's door file's supports and latch beams sit in its door ratio's range).
+/// A beam across two parts takes the non-body part's.
+fn one_tier_damping(
+    sk: &mut Skeleton,
+    z: &DampingRatios,
+    groups: &HashMap<String, Vec<u32>>,
+    grade_of: &HashMap<u32, Material>,
+    grades: &Grades,
+) {
+    let mut crush: std::collections::HashSet<(u32, u32)> = Default::default();
+    {
+        let mut of: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut k = 0usize;
+        for m in &z.crush_members {
+            for key in [m.clone(), format!("{m}_r")] {
+                if let Some(g) = groups.get(&key) {
+                    for &i in g {
+                        of.entry(i).or_default().push(k);
+                    }
+                    k += 1;
+                }
+            }
+        }
+        for b in &sk.beams {
+            if let (Some(x), Some(y)) = (of.get(&b.a), of.get(&b.b)) {
+                if x.iter().any(|t| y.contains(t)) {
+                    crush.insert((b.a, b.b));
+                }
+            }
+        }
+    }
+    let names = sk.parts.clone();
+    for i in 0..sk.beams.len() {
+        let b = &sk.beams[i];
+        if b.damper || b.fixed || b.mat.k <= 0.0 {
+            continue;
+        }
+        let (a, c) = (b.a as usize, b.b as usize);
+        let l = sk.nodes[a].p.distance(sk.nodes[c].p).max(1e-3);
+        let (ma, mc) = (sk.nodes[a].mass, sk.nodes[c].mass);
+        if !(ma > 0.0 && mc > 0.0) {
+            continue;
+        }
+        let glass =
+            grade_of.get(&b.a) == Some(&grades.glass) || grade_of.get(&b.b) == Some(&grades.glass);
+        let part = &names[sk.nodes[a].part.max(sk.nodes[c].part) as usize];
+        let zeta = z.of(part, glass, crush.contains(&(b.a, b.b)));
+        let mu = ma * mc / (ma + mc);
+        let k = b.mat.k_at(l);
+        sk.beams[i].mat.damp = 2.0 * zeta * (k * mu).sqrt();
+    }
+}
+
+/// One tier: every node's real local mass. The named masses, blocks, plates
+/// and the suspension's hubs and arms are where they were put (`fixed`). The
+/// body-in-white's measured mass ([`VehicleDef::biw_mass`]) is spread over
+/// the body's shell (its area × [`SHELL_GAUGE`]) and members (their length
+/// × [`MemberSpec::mass_per_m`]); each part's measured mass
+/// ([`VehicleDef::part_masses`], else its [`SheetSpec`]) over its own sheet
+/// (its glass at its thickness) and members; the body's glass is its pane's
+/// area × thickness × [`GLASS_DENSITY`]. What the kerb mass leaves (wiring,
+/// HVAC, carpet, sealer, lamps, the rest of the equipment) is spread over the
+/// body's shell by area. Sets each node's mass and [`SkNode::local`] to it:
+/// nothing is moved to meet the step's bound. Returns the ledger.
+fn one_tier_masses(
+    def: &VehicleDef,
+    sk: &mut Skeleton,
+    shell: &Shell,
+    trusses: &[Truss],
+    kgm: &[(f32, u16)],
+) -> Result<Vec<(String, f32)>, String> {
+    use super::members::STEEL_DENSITY;
+    let n = sk.nodes.len();
+    let len = def.profile.length;
+    let mut area = vec![0.0f32; n];
+    for t in &shell.tris {
+        let (a, b, c) = (sk.pos(t[0]), sk.pos(t[1]), sk.pos(t[2]));
+        let ar = 0.5 * (b - a).cross(c - a).length();
+        for &i in t {
+            area[i as usize] += ar / 3.0;
+        }
+    }
+    // A glass zone's pane thickness: the windscreen (the top zone ahead of
+    // the middle) laminated, the rest tempered.
+    let glass_t = |sk: &Skeleton, i: u32| -> Option<f32> {
+        let p = sk.pos(i);
+        let seg = shell.seg[&i];
+        def.zones
+            .iter()
+            .find(|z| z.grade == "glass" && z.region.contains(p, seg, len))
+            .map(|z| match z.region {
+                Region::Top { z0, .. } if z0 > 0.5 * len => LAMINATED_GLASS,
+                _ => TEMPERED_THICKNESS,
+            })
+    };
+    let mut w = vec![0.0f32; n];
+    let mut glass = vec![0.0f32; n];
+    for &i in &shell.nodes {
+        let iu = i as usize;
+        match glass_t(sk, i) {
+            Some(t) if sk.nodes[iu].part == 0 => glass[iu] = area[iu] * t * GLASS_DENSITY,
+            Some(t) => w[iu] += area[iu] * t * GLASS_DENSITY,
+            None => w[iu] += area[iu] * SHELL_GAUGE * STEEL_DENSITY,
+        }
+    }
+    for (t, &(kg_m, _)) in trusses.iter().zip(kgm) {
+        let sets: Vec<Vec<u32>> = t
+            .stations
+            .iter()
+            .map(|st| {
+                let mut v = st.to_vec();
+                v.sort();
+                v.dedup();
+                v
+            })
+            .collect();
+        let c = |v: &[u32]| v.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / v.len() as f32;
+        for k in 0..sets.len().saturating_sub(1) {
+            let kg = c(&sets[k]).distance(c(&sets[k + 1])) * kg_m;
+            for v in [&sets[k], &sets[k + 1]] {
+                for &i in v.iter() {
+                    w[i as usize] += 0.5 * kg / v.len() as f32;
+                }
+            }
+        }
+    }
+    let mut strip = vec![0.0f32; n];
+    for b in &sk.beams {
+        let l = sk.pos(b.a).distance(sk.pos(b.b));
+        for i in [b.a, b.b] {
+            strip[i as usize] += 0.5 * l * STRIP_KG_PER_M;
+        }
+    }
+    for i in 0..n {
+        if w[i] == 0.0 && glass[i] == 0.0 && sk.nodes[i].fixed == 0.0 {
+            w[i] = strip[i];
+        }
+    }
+    let mut ledger: Vec<(String, f32)> = Vec::new();
+    let mut parts_kg = 0.0f32;
+    for part in 0..sk.parts.len() as u16 {
+        let name = sk.parts[part as usize].clone();
+        let nodes: Vec<usize> = (0..n).filter(|&i| sk.nodes[i].part == part).collect();
+        let sum: f32 = nodes.iter().map(|&i| w[i]).sum();
+        if sum == 0.0 {
+            continue;
+        }
+        let target = if part == 0 {
+            Some(def.biw_mass)
+        } else if let Some((_, kg)) = def
+            .part_masses
+            .iter()
+            .find(|(p, _)| name.starts_with(p.as_str()))
+        {
+            Some(*kg)
+        } else {
+            sheet_mass(def, sk, &shell.tris, part)
+        };
+        let Some(target) = target.filter(|&t| t > 0.0) else {
+            // (Blocks' and the suspension's own brackets: as computed.)
+            parts_kg += sum;
+            continue;
+        };
+        let f = target / sum;
+        for &i in &nodes {
+            w[i] *= f;
+        }
+        parts_kg += target;
+        ledger.push((format!("{name} (sections and sheet ×{f:.2})"), target));
+    }
+    let glass_kg: f32 = glass.iter().sum();
+    ledger.push(("body glass".into(), glass_kg));
+    let fixed: f32 = sk.nodes.iter().map(|x| x.fixed).sum();
+    let wheels: f32 = sk.wheels.iter().map(|x| x.mass).sum();
+    ledger.push(("named masses, blocks, hubs, arms".into(), fixed));
+    ledger.push(("tyres and rims".into(), wheels));
+    let rest = def.kerb_mass - fixed - wheels - parts_kg - glass_kg;
+    if rest < 0.0 {
+        return Err(format!(
+            "one tier: the kerb mass {} kg is {:.1} kg under its parts ({ledger:?})",
+            def.kerb_mass, -rest
+        ));
+    }
+    let body_area: f32 = shell
+        .nodes
+        .iter()
+        .filter(|&&i| sk.nodes[i as usize].part == 0 && glass[i as usize] == 0.0)
+        .map(|&i| area[i as usize])
+        .sum();
+    let mut equip = vec![0.0f32; n];
+    for &i in &shell.nodes {
+        let iu = i as usize;
+        if sk.nodes[iu].part == 0 && glass[iu] == 0.0 {
+            equip[iu] = rest * area[iu] / body_area;
+        }
+    }
+    ledger.push(("equipment spread over the body's shell".into(), rest));
+    for i in 0..n {
+        let m = sk.nodes[i].fixed + w[i] + glass[i] + equip[i];
+        if !(m > 0.0) {
+            return Err(format!(
+                "one tier: node {i} at {:?} has no mass",
+                sk.nodes[i].p
+            ));
+        }
+        sk.nodes[i].mass = m;
+        sk.nodes[i].local = m;
+    }
+    Ok(ledger)
 }
 
 /// The collision skin across the shut lines (A1: no collision triangle
@@ -2905,6 +3565,7 @@ fn rest_pose(sk: &mut Skeleton, glass: &[usize]) -> Result<(), String> {
         .filter(|&j| sk.beams[j].fixed && sk.beams[j].mat.density == 0.0)
         .collect();
     let settled = settle(sk, glass)?;
+    let exact = sk.exact_lengths;
     let p1 = &settled.nodes;
     // Each beam's and shock's rest length is the solver's after the settle
     // (the design's, or where it yielded settling).
@@ -2916,8 +3577,13 @@ fn rest_pose(sk: &mut Skeleton, glass: &[usize]) -> Result<(), String> {
             // the default (RoR-compatible) profile's fast inverse square
             // root is off by up to 0.18 % from the exact length the loader
             // gives a rest, more than the glass's break strain.
+            // (On the exact path, `rubble_exact_lengths`, it is exact.)
             let q = p1[a].distance_squared(p1[c]);
-            q * crate::explicit_beams::fast_inv_sqrt(q) / q.sqrt()
+            if exact {
+                1.0
+            } else {
+                q * crate::explicit_beams::fast_inv_sqrt(q) / q.sqrt()
+            }
         } else {
             rest(b.a, b.b) / p1[a].distance(p1[c])
         };
