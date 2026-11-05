@@ -72,10 +72,11 @@ fn counts_per_resolution() {
             // (Plus the door flanges' bearing nodes and the lids' inner
             // frames' lower chords: 26 nodes, 2026-11-05; and the front
             // subframe's rear and the rear seat's cross members, 16 frame
-            // nodes, 2026-11-05.)
-            assert!((800..=1050).contains(&sk.nodes.len()));
+            // nodes, 2026-11-05; and the rear rails' tail stations at a
+            // pole's width, 8 frame nodes, 2026-11-05.)
+            assert!((800..=1060).contains(&sk.nodes.len()));
             assert!(sk.beams.len() >= 3000);
-            assert!((300..=360).contains(&frame.len()));
+            assert!((300..=370).contains(&frame.len()));
             assert!((1.0..=4.0).contains(&st.primary_node_mass));
         }
         assert_eq!(sk.wheels.len(), 4);

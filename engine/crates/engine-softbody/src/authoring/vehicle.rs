@@ -3047,7 +3047,15 @@ fn settle(sk: &Skeleton, glass: &[usize]) -> Result<Settled, String> {
                     Some(nd) => format!("{i} {} {:.2?}", sk.parts[nd.part as usize], nd.p),
                     None => format!("{i} wheel"),
                 };
-                format!("{}-{}", name(b.a), name(b.b))
+                format!(
+                    "{}-{} (rest {:.2} m, k {:.0}, strength {:.0} N, {:?})",
+                    name(b.a),
+                    name(b.b),
+                    b.rest0,
+                    b.k,
+                    b.strength,
+                    b.kind
+                )
             })
             .collect();
         return Err(format!(

@@ -253,6 +253,87 @@ fn main() {
             );
         }
     }
+    if let Ok(g) = std::env::var("GROUP_NEAR") {
+        // A group's frame nodes: position, mass, floor, and the nearest
+        // frame node outside the group (a station it could share).
+        let fl = sk.floors(1.0);
+        let own: std::collections::HashSet<u32> = b
+            .groups
+            .get(&g)
+            .map(|v| v.iter().copied().collect())
+            .unwrap_or_default();
+        for &i in &own {
+            let nd = &sk.nodes[i as usize];
+            if !nd.primary {
+                continue;
+            }
+            let near = (0..sk.nodes.len() as u32)
+                .filter(|j| !own.contains(j) && sk.nodes[*j as usize].primary)
+                .min_by(|&a, &c| {
+                    sk.pos(a)
+                        .distance(nd.p)
+                        .total_cmp(&sk.pos(c).distance(nd.p))
+                });
+            let (who, d) = near.map_or(("-".to_string(), 0.0), |j| {
+                let name = b
+                    .groups
+                    .iter()
+                    .filter(|(k, v)| k.as_str() != g && v.contains(&j))
+                    .map(|(k, _)| k.clone())
+                    .min()
+                    .unwrap_or_default();
+                (format!("{j} {name}"), sk.pos(j).distance(nd.p))
+            });
+            eprintln!(
+                "  {i} at ({:+.2}, {:.2}, {:.2}) mass {:.2} floor {:.2}; nearest frame {who} {d:.3} m",
+                nd.p.x, nd.p.y, nd.p.z, nd.mass, fl[i as usize]
+            );
+        }
+    }
+    if std::env::var("NN").is_ok() {
+        // Shell (skin) nodes per part: count, mass, median node mass and the
+        // median nearest-neighbour spacing along the skin's triangle edges
+        // (p10–p90), as `beamng-realism-plan.md` §1.3 measures the BX.
+        let mut nb: std::collections::HashMap<u32, f32> = Default::default();
+        for t in &b.shell.tris {
+            for k in 0..3 {
+                let (i, j) = (t[k], t[(k + 1) % 3]);
+                let d = sk.nodes[i as usize].p.distance(sk.nodes[j as usize].p);
+                for x in [i, j] {
+                    let e = nb.entry(x).or_insert(f32::MAX);
+                    *e = e.min(d);
+                }
+            }
+        }
+        let pct = |v: &mut Vec<f32>, q: f32| -> f32 {
+            v.sort_by(f32::total_cmp);
+            if v.is_empty() {
+                0.0
+            } else {
+                v[((v.len() - 1) as f32 * q).round() as usize]
+            }
+        };
+        let mut by: std::collections::BTreeMap<String, (Vec<f32>, Vec<f32>)> = Default::default();
+        for &i in &b.shell.nodes {
+            let nd = &sk.nodes[i as usize];
+            let e = by.entry(sk.parts[nd.part as usize].clone()).or_default();
+            e.0.push(nd.mass);
+            if let Some(&d) = nb.get(&i) {
+                e.1.push(d);
+            }
+        }
+        for (part, (mut m, mut d)) in by {
+            let kg: f32 = m.iter().sum();
+            let n = m.len();
+            eprintln!(
+                "  skin {part:>10}: {n:4} nodes {kg:6.1} kg, median node {:.2} kg; nn spacing median {:.2} m ({:.2}–{:.2})",
+                pct(&mut m, 0.5),
+                pct(&mut d, 0.5),
+                pct(&mut d, 0.1),
+                pct(&mut d, 0.9)
+            );
+        }
+    }
     if let Ok(p) = std::env::var("TRUCK_OUT") {
         std::fs::write(&p, &b.truck).unwrap();
     }
