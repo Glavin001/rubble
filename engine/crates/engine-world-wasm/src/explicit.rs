@@ -883,6 +883,12 @@ impl ExplicitSim {
             self.gpu.frame(steps);
             self.steps += u64::from(steps);
         }
+        // A contact error (a vehicle past its frame bounds: the margin widens by
+        // itself) never stops the sim: the page gets it and keeps stepping.
+        let errors = self.gpu.take_contact_errors();
+        if !errors.is_empty() {
+            return Err(err(format!("vehicle contact (the sim continues): {}", errors.join("; "))));
+        }
         Ok(())
     }
 

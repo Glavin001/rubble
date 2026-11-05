@@ -339,3 +339,35 @@ fn a_group_over_the_limit_runs_alone_and_is_reported() {
     g.frame(17);
     g.contact_status().unwrap();
 }
+
+/// A node leaving its frame bounds never stops a running sim: the error is handed
+/// to the host once ([`ExplicitBeamsGpu::take_contact_errors`]), the margin widens
+/// so later frames cover the fall, and frames go on. (The CPU reference has no
+/// frame bounds: it tests every pair every step.)
+#[test]
+fn a_running_sim_survives_leaving_its_frame_bounds() {
+    let mut a = floor(Vec3::new(3.0, 3.0, 3.0));
+    for n in &mut a.nodes {
+        n.flags &= !NODE_IMMOVABLE;
+    }
+    let b = point(Vec3::new(50.0, 0.0, 0.0), Vec3::ZERO, true);
+    let Some(mut g) = gpu(&[a, b]) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    g.set_contact_margin(0.0);
+    let mut errors = Vec::new();
+    for _ in 0..20 {
+        g.frame(17);
+        g.wait();
+        errors.extend(g.take_contact_errors());
+    }
+    assert!(!errors.is_empty() && errors[0].contains("left its frame bounds"), "{errors:?}");
+    // The margin widened: the last frames report nothing more.
+    for _ in 0..5 {
+        g.frame(17);
+        g.wait();
+    }
+    assert!(g.take_contact_errors().is_empty());
+    assert!(g.positions().iter().flatten().all(|p| p.is_finite()));
+}
