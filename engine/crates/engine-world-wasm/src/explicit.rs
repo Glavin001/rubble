@@ -867,10 +867,18 @@ impl ExplicitSim {
 
     /// Submit one frame of `steps` fixed steps for every vehicle (never waits).
     pub fn frame(&mut self, steps: u32) -> Result<(), JsValue> {
+        self.frame_native(steps).map_err(err)
+    }
+}
+
+impl ExplicitSim {
+    /// [`Self::frame`] for native hosts and tests (errors as text).
+    #[doc(hidden)]
+    pub fn frame_native(&mut self, steps: u32) -> Result<(), String> {
         if steps > MAX_FRAME_STEPS {
-            return Err(err(format!(
+            return Err(format!(
                 "at most {MAX_FRAME_STEPS} steps per frame, got {steps}"
-            )));
+            ));
         }
         if let Some(p) = self.pull {
             // The rig's target where it is at this frame's end (vehicle frame: the
@@ -887,10 +895,14 @@ impl ExplicitSim {
         // itself) never stops the sim: the page gets it and keeps stepping.
         let errors = self.gpu.take_contact_errors();
         if !errors.is_empty() {
-            return Err(err(format!("vehicle contact (the sim continues): {}", errors.join("; "))));
+            return Err(format!("vehicle contact (the sim continues): {}", errors.join("; ")));
         }
         Ok(())
     }
+}
+
+#[wasm_bindgen]
+impl ExplicitSim {
 
     /// Steps run since spawn.
     pub fn steps(&self) -> f64 {

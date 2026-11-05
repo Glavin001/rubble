@@ -2750,12 +2750,16 @@ impl CollisionGrid {
     /// bucket once), in candidate order; every candidate when the box covers too
     /// many cells.
     fn gather(&mut self, lo: Vec3, hi: Vec3, cell: f32, out: &mut Vec<u32>) {
-        let (c0, c1) = (grid_cell_of(lo, cell), grid_cell_of(hi, cell));
-        let cells: i64 = (0..3).map(|i| i64::from(c1[i] - c0[i] + 1)).product();
-        if cells > 64 {
+        // The box's cells counted in float (as the kernel does): a stretched or
+        // non-finite triangle (a flung node) takes every candidate instead of
+        // overflowing an integer cell count into an unbounded loop.
+        let (f0, f1) = ((lo / cell).floor(), (hi / cell).floor());
+        let span = f1 - f0 + Vec3::ONE;
+        if !(span.cmple(Vec3::splat(64.0)).all() && span.x * span.y * span.z <= 64.0) {
             out.extend(0..self.bucket_of.len() as u32);
             return;
         }
+        let (c0, c1) = (grid_cell_of(lo, cell), grid_cell_of(hi, cell));
         self.buckets.clear();
         self.bits.clear();
         self.bits.resize(self.bucket_of.len().div_ceil(64), 0);

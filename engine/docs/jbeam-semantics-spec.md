@@ -334,7 +334,9 @@ triangle): a car's frame nodes are not, so once its skin crumples they pass into
 other car. `ExplicitBeams::opt_in_full_contact` (JSON `fullContact: true` on a
 vehicle of `explicitSim`) makes every node without `collision: false`
 (`NODE_NO_GROUND`) a contacter, and computes §10.1's exclusions; RoR content that does
-not opt in is unchanged (bit for bit). The vehicle-contact kernels take the contact
+not opt in is unchanged (bit for bit). A `.truck` file opts in itself with the line
+`rubble_full_contact` (**Rubble extension, not RoR**; the showcase car's authoring
+writes it; RoR files without it are read as before). The vehicle-contact kernels take the contact
 point lists as data, so every backend runs it.
 
 ## 11. What the BX and the legocar use, and what is left
@@ -524,6 +526,16 @@ A broken triangle switches "to a non-collision, non-aero state".
   word (`gMisc` .z) carries bit 31 when it has a list. The triangle geometry
   (`triangleGeo`, `vvTriangle`) reads the four beams' broken state (`gBeams` .z set,
   .w not 1: broken before this beam phase) and gives a dead triangle an empty box.
+
+### 18.1 Rubble's `.truck` extension: breakable cab triangles
+
+**Rubble extension, not RoR** (the showcase car's authoring, `truck.rs`): a `cab` line
+may carry a fifth field, a break group (a number: the beams' group of the same
+number), and a sixth, the edges that break it, a bit mask (bit k: the edge from its
+node k to node k + 1; default 7, all three). A triangle with a break group is dead
+(§18: no collision, no aero) once that group is set off; its edge mask says which of
+its sides' beams count. RoR's own `cab` lines have four fields: RoR files are read as
+before, bit for bit.
 
 ## 19. Deform groups [B]
 

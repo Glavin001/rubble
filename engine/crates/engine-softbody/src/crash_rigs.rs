@@ -72,8 +72,9 @@ pub fn mdb214_jbeam() -> String {
     let face_mass = face_count as f32 * FACE_NODE_MASS;
     let carriage = MDB_MASS - face_mass;
     // Equal masses at the back plate and the rear frame put the centre of mass at the
-    // mid frame (y = cg_y); 30 % / 40 % / 30 %. The frames' top share sets its height.
-    let (m_back, m_mid, m_rear) = (0.3 * carriage, 0.4 * carriage, 0.3 * carriage);
+    // mid frame (y = cg_y); 45 % / 10 % / 45 % (the ends heavy: the back plate is the
+    // face's rigid support). The frames' top share sets its height.
+    let (m_back, m_mid, m_rear) = (0.45 * carriage, 0.1 * carriage, 0.45 * carriage);
     let back_z = zs.iter().sum::<f32>() / ROWS as f32;
     let frame_x = [-0.5 * 1.880, 0.0, 0.5 * 1.880];
     let (z_lo, z_hi) = (0.02f32, clear + h);
@@ -110,33 +111,27 @@ pub fn mdb214_jbeam() -> String {
     frame("r", y_rear, m_rear, &mut nodes);
 
     let mut beams = vec![json!(["id1:", "id2:"])];
-    // Carriage: stiff plain beams, below the 2 kHz step's limit on its lightest
-    // (back plate) nodes (ω·h about 1 with eight neighbours).
-    let mb_node = m_back / (COLS * ROWS) as f32;
-    let k_frame = 0.06 * mb_node / (crate::explicit_beams::STEP * crate::explicit_beams::STEP);
-    beams.push(json!({"beamType": "|NORMAL", "beamSpring": k_frame, "beamDamp": 0.5 * (k_frame * mb_node).sqrt(),
-        "beamDeform": "FLT_MAX", "beamStrength": "FLT_MAX", "beamPrecompression": 1}));
+    // Carriage: a stiff steel frame. Its beams: the back plate's grid, every plate
+    // node to the two mid-frame nodes of its third of the width, and every pair of
+    // frame nodes. Each beam as stiff as the 2 kHz step allows its two nodes, with
+    // margin: k = 0.25·min(m/n)/h² over its ends (m a node's mass, n its carriage
+    // beams), so no node's carriage beams pass ω·h ≈ 0.7 together.
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for i in 0..COLS {
         for j in 0..ROWS {
             if i + 1 < COLS {
-                beams.push(json!([name("p", i, j), name("p", i + 1, j)]));
+                pairs.push((name("p", i, j), name("p", i + 1, j)));
             }
             if j + 1 < ROWS {
-                beams.push(json!([name("p", i, j), name("p", i, j + 1)]));
+                pairs.push((name("p", i, j), name("p", i, j + 1)));
             }
             if i + 1 < COLS && j + 1 < ROWS {
-                beams.push(json!([name("p", i, j), name("p", i + 1, j + 1)]));
-                beams.push(json!([name("p", i + 1, j), name("p", i, j + 1)]));
+                pairs.push((name("p", i, j), name("p", i + 1, j + 1)));
+                pairs.push((name("p", i + 1, j), name("p", i, j + 1)));
             }
-        }
-    }
-    // Back plate to the mid frame, mid to rear, and each frame braced.
-    for i in 0..COLS {
-        for j in [0, ROWS - 1] {
-            let k = if j == 0 { 0 } else { 1 };
             let fi = if i < COLS / 3 { 0 } else if i < 2 * COLS / 3 { 1 } else { 2 };
-            beams.push(json!([name("p", i, j), format!("m{fi}_{k}")]));
-            beams.push(json!([name("p", i, j), format!("m{fi}_{}", 1 - k)]));
+            pairs.push((name("p", i, j), format!("m{fi}_0")));
+            pairs.push((name("p", i, j), format!("m{fi}_1")));
         }
     }
     let frame_ids: Vec<String> = ["m", "r"]
@@ -145,8 +140,31 @@ pub fn mdb214_jbeam() -> String {
         .collect();
     for a in 0..frame_ids.len() {
         for b in a + 1..frame_ids.len() {
-            beams.push(json!([frame_ids[a], frame_ids[b]]));
+            pairs.push((frame_ids[a].clone(), frame_ids[b].clone()));
         }
+    }
+    let mass_of = |id: &str| -> f32 {
+        let k = id[1..].split('_').nth(1).and_then(|k| k.parse::<usize>().ok()).unwrap_or(0);
+        let share = if k == 0 { 1.0 - f } else { f };
+        match &id[..1] {
+            "p" => m_back / (COLS * ROWS) as f32,
+            "m" => m_mid * share / 3.0,
+            _ => m_rear * share / 3.0,
+        }
+    };
+    let mut degree: std::collections::HashMap<&str, f32> = Default::default();
+    for (a, b) in &pairs {
+        *degree.entry(a.as_str()).or_default() += 1.0;
+        *degree.entry(b.as_str()).or_default() += 1.0;
+    }
+    let h2 = crate::explicit_beams::STEP * crate::explicit_beams::STEP;
+    beams.push(json!({"beamType": "|NORMAL", "beamDeform": "FLT_MAX", "beamStrength": "FLT_MAX", "beamPrecompression": 1}));
+    for (a, b) in &pairs {
+        let (ma, mb) = (mass_of(a), mass_of(b));
+        let k = 0.25 * (ma / degree[a.as_str()]).min(mb / degree[b.as_str()]) / h2;
+        let mu = ma * mb / (ma + mb);
+        beams.push(json!({"beamSpring": k, "beamDamp": 0.1 * (k * mu).sqrt()}));
+        beams.push(json!([a, b]));
     }
     // Cladding: the main face's sheet ties neighbouring face nodes, softly
     // (**Choice**: 0.8 mm aluminium carries little across a crushing block).
@@ -169,11 +187,31 @@ pub fn mdb214_jbeam() -> String {
     }
     // Honeycomb columns: SUPPORT beams yielding at the crush force (no hardening),
     // densified at 80 %; a tension past 10 × their length (never) would break them.
+    // Shear (**Choice**): honeycomb resists its cells tilting. Diagonals from each
+    // face node to the neighbouring back-plate nodes (NORMAL beams yielding at a
+    // tenth of the column's crush force, no hardening) hold the face square; the
+    // column carries the rest, so a node's crush force is still σ·A (all yielding:
+    // the column's plus the diagonals' along the barrier's axis).
+    let diag_share = 0.1f32;
     for i in 0..COLS {
         for j in 0..ROWS {
             let a = trib(i, COLS, dx) * trib(j, ROWS, dz);
-            let fm = MDB_CRUSH[0] * a;
+            let total = MDB_CRUSH[0] * a;
+            let mut nb: Vec<(usize, usize, f32)> = Vec::new();
+            for (di, dj, d) in [(1i32, 0i32, dx), (-1, 0, dx), (0, 1, dz), (0, -1, dz)] {
+                let (ni, nj) = (i as i32 + di, j as i32 + dj);
+                if ni >= 0 && nj >= 0 && (ni as usize) < COLS && (nj as usize) < ROWS {
+                    nb.push((ni as usize, nj as usize, depth / (depth * depth + d * d).sqrt()));
+                }
+            }
+            let fd = diag_share * total;
+            let fm = total - nb.iter().map(|&(_, _, cos)| fd * cos).sum::<f32>();
             let km = fm / (ELASTIC_STRAIN[1] * depth);
+            beams.push(json!({"beamType": "|NORMAL", "beamSpring": km, "beamDamp": 0.05 * (km * FACE_NODE_MASS).sqrt(),
+                "beamDeform": fd, "deformLimitStress": fd, "deformLimit": DENSIFY, "beamStrength": "FLT_MAX", "beamLongBound": 10}));
+            for &(ni, nj, _) in &nb {
+                beams.push(json!([name("f", i, j), name("p", ni, nj)]));
+            }
             beams.push(json!({"beamType": "|SUPPORT", "beamSpring": km, "beamDamp": 0.05 * (km * FACE_NODE_MASS).sqrt(),
                 "beamDeform": fm, "deformLimitStress": fm, "deformLimit": DENSIFY, "beamStrength": "FLT_MAX", "beamLongBound": 10}));
             beams.push(json!([name("f", i, j), name("p", i, j)]));
@@ -187,6 +225,20 @@ pub fn mdb214_jbeam() -> String {
             }
         }
     }
+    // The densified block (**Choice**): past 80 % crush the honeycomb is solid
+    // aluminium; a SUPPORT beam from each bumper node to its back-plate node, its
+    // rest 20 % of the full depth, pushes from there as stiff as the step allows on
+    // the face nodes. (The main block's own columns stop at their deform limit.)
+    let k_dense = 0.25 * FACE_NODE_MASS / (crate::explicit_beams::STEP * crate::explicit_beams::STEP);
+    beams.push(json!({"beamType": "|SUPPORT", "beamSpring": k_dense, "beamDamp": 0.1 * (k_dense * 0.5 * FACE_NODE_MASS).sqrt(),
+        "beamDeform": "FLT_MAX", "deformLimitStress": "", "deformLimit": "", "beamStrength": "FLT_MAX", "beamLongBound": 10,
+        "beamPrecompression": 1.0 - DENSIFY}));
+    for i in 0..COLS {
+        for j in 0..BUMPER_ROWS {
+            beams.push(json!([name("b", i, j), name("p", i, j)]));
+        }
+    }
+    beams.push(json!({"beamType": "|NORMAL"}));
     // Collision skin: the bumper's front and the main face above it.
     let mut tris = vec![json!(["id1:", "id2:", "id3:"])];
     let quad = |tris: &mut Vec<Value>, a: String, b: String, c: String, d: String| {
