@@ -78,13 +78,20 @@ const FX_BOXES = 16;
 // Annealed glass's strain at which the windscreen cracks (skin.rs
 // LAMINATED_CRACK_STRAIN: 45 MPa over 70 GPa).
 const LAMINATED_CRACK_STRAIN = 45e6 / 70e9;
+// Crease sharpness (skin.rs CREASE_SHARP): the envelope's temperature over
+// the binding triangle's size. A fold whose planes differ by θ switches
+// planes over about CREASE_SHARP · L / sin θ.
+const CREASE_SHARP = 0.08;
+// A node's skin splits into two planes (a fold through it) where its most
+// deviant triangle is more than 20° from its mean normal (skin.rs SPLIT_COS).
+const SPLIT_COS = Math.cos(20 * Math.PI / 180);
 
 const SKIN_WGSL = /* wgsl */ `
 struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r1: f32, nt: f32, nb: f32, nn: f32, r2: f32, rx: f32, ry: f32, rz: f32, flags: u32 };
 // topo (u32 words) holds the car's tables at these offsets: per node its
 // triangle range (nodeCount + 1 starts), the triangle list (listAt), the
-// triangles' nodes and rest perimeter (4 words each, trisAt), rest normals (4
-// words a node, restNAt), per node its beams (nodeCount + 1 starts then the
+// triangles' nodes and rest perimeter (4 words each, trisAt), rest normals and
+// positions (8 words a node, restNAt), per node its beams (nodeCount + 1 starts then the
 // list, nodeBeamAt), every beam's spawn rest length (rest0At), the damage
 // units (4 words each: beam list start and end in topo, kind, strain trigger;
 // then the lists, unitAt) and per node its surface material (nodeMatAt).
@@ -103,7 +110,7 @@ struct Fx { dt: f32, seed: u32, floorY: f32, boxes: u32, box: array<vec4f, ${2 *
 @group(0) @binding(4) var<uniform> params: Params;
 @group(0) @binding(5) var<storage, read> topo: array<u32>;
 @group(0) @binding(6) var<storage, read> beams: array<vec4f>;
-// Per node 3 vec4: (normal, tear), (last world position, valid), (plastic
+// Per node NS (6) vec4: (plane a, tear), (last world position, valid), (plastic
 // strain, broken beams, scrape (m slid in contact), 0); then per damage unit
 // (broken, strain, shards due, broken as of the last moving update) at
 // stateAt; then the level of detail state (picked, picked last update) at
@@ -124,6 +131,12 @@ struct Lod { n0: u32, n1: u32, opq0: u32, gl0: u32, opq1: u32, gl1: u32, levels:
 @group(1) @binding(2) var<uniform> view: vec4f;
 
 const LAMINATED = 1u;
+const CREASE_SHARP = ${CREASE_SHARP};
+const SPLIT_COS = ${SPLIT_COS};
+// Per node: (plane a now, tear), (last world position, valid), (plastic
+// strain, broken beams, scrape, 0), (plane b now, two planes), plane a at
+// rest (and two), plane b at rest.
+const NS = 6u;
 const ANNEALED_CRACK = ${LAMINATED_CRACK_STRAIN};
 // A node within this of a surface (its collision range) is in contact.
 const CONTACT = 0.03;
@@ -136,8 +149,113 @@ fn nodePos(i: u32) -> vec3f { return nodes[(params.nodeOffset + i) * 3u].xyz; }
 fn beamBroken(j: u32) -> bool { return beams[(params.beamOffset + j) * 2u + 1u].z != 0.0; }
 fn beamRest(j: u32) -> f32 { return beams[(params.beamOffset + j) * 2u].x; }
 fn restN(i: u32) -> vec3f {
-  let k = params.restNAt + 4u * i;
+  let k = params.restNAt + 8u * i;
   return vec3f(bitcast<f32>(topo[k]), bitcast<f32>(topo[k + 1u]), bitcast<f32>(topo[k + 2u]));
+}
+fn restP(i: u32) -> vec3f {
+  let k = params.restNAt + 8u * i + 4u;
+  return vec3f(bitcast<f32>(topo[k]), bitcast<f32>(topo[k + 1u]), bitcast<f32>(topo[k + 2u]));
+}
+
+// Creases (skin.rs crease_envelope; the CPU mirror). Each binding node has
+// a tangent plane through it (its skin normal), or two where a fold runs
+// through the node (its skin triangles fall in two groups more than
+// SPLIT_COS apart: one plane per side, so a node on the fold line carries
+// both panels' planes, not a bevel between them). The vertex's point on the
+// binding triangle (barycentric w) sits at height d over each plane, and the
+// surface follows the plane nearest it: at a fold the two sides' planes
+// cross along a straight line, so the fold is straight and sharp across
+// while smooth along it, whatever the binding triangles' grid; where the
+// planes barely differ (a mild bend) the weights are the barycentric ones
+// (Phong-like, smooth). Weights, per node i and plane c:
+//   s = w_i exp(−(|t| − min|t|) / (CREASE_SHARP · L)), t the distance to the plane along u
+// The point moves along u (the planes' barycentric mean normal) to the
+// plane it follows (e). Returns the weighted normal n, u and e.
+struct Env { n: vec3f, u: vec3f, e: f32 };
+fn envelope(p: array<vec3f, 3>, na: array<vec3f, 3>, nb: array<vec4f, 3>, w: vec3f, l: f32) -> Env {
+  let pl = w.x * p[0] + w.y * p[1] + w.z * p[2];
+  let k = 1.0 / (CREASE_SHARP * max(l, 1e-4));
+  // The direction the point moves in: the planes' barycentric mean normal
+  // (continuous across the binding triangles).
+  let ww = max(w, vec3f(0.0));
+  let u = normalize(ww.x * (na[0] + nb[0].xyz) + ww.y * (na[1] + nb[1].xyz) + ww.z * (na[2] + nb[2].xyz) + vec3f(1e-9));
+  var score: array<f32, 6>;
+  var t: array<f32, 6>;
+  var best = 1e30;
+  for (var i = 0u; i < 3u; i++) {
+    let lw = log(max(w[i], 1e-6));
+    // The distance along u from the point to each plane.
+    t[2u * i] = -dot(pl - p[i], na[i]) / max(dot(na[i], u), 0.2);
+    t[2u * i + 1u] = -dot(pl - p[i], nb[i].xyz) / max(dot(nb[i].xyz, u), 0.2);
+    score[2u * i] = abs(t[2u * i]) * k - lw;
+    score[2u * i + 1u] = select(1e30, abs(t[2u * i + 1u]) * k - lw, nb[i].w > 0.5);
+    best = min(best, min(score[2u * i], score[2u * i + 1u]));
+  }
+  var acc = vec3f(0.0);
+  var off = 0.0;
+  var sum = 0.0;
+  for (var i = 0u; i < 3u; i++) {
+    let sa = exp(best - score[2u * i]);
+    let sb = exp(best - score[2u * i + 1u]);
+    acc += sa * na[i] + sb * nb[i].xyz;
+    off += sa * t[2u * i] + sb * t[2u * i + 1u];
+    sum += sa + sb;
+  }
+  return Env(normalize(acc + vec3f(1e-9)), u, off / sum);
+}
+// A node's planes from its skin triangles (rest: their rest positions):
+// (normal, 1 when there are two) and the second's normal. Two when its most
+// deviant triangle is more than SPLIT_COS from the mean: then the triangles
+// nearer that one than the one most opposite it form the second.
+fn nodePlanes(i: u32, rest: bool) -> array<vec4f, 2> {
+  var acc = vec3f(0.0);
+  for (var k = topo[i]; k < topo[i + 1u]; k++) {
+    let t = params.trisAt + 4u * topo[params.listAt + k];
+    acc += triCross(t, rest);
+  }
+  let m = normalize(acc + vec3f(1e-12));
+  if (dot(acc, acc) < 1e-24) { return array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); }
+  var lo = 2.0;
+  var sb = m;
+  for (var k = topo[i]; k < topo[i + 1u]; k++) {
+    let c = triCross(params.trisAt + 4u * topo[params.listAt + k], rest);
+    let cl = length(c);
+    if (cl < 1e-12) { continue; }
+    let q = dot(c / cl, m);
+    if (q < lo) { lo = q; sb = c / cl; }
+  }
+  if (lo > SPLIT_COS) { return array<vec4f, 2>(vec4f(m, 0.0), vec4f(m, 0.0)); }
+  var hi = 2.0;
+  var sa = m;
+  for (var k = topo[i]; k < topo[i + 1u]; k++) {
+    let c = triCross(params.trisAt + 4u * topo[params.listAt + k], rest);
+    let cl = length(c);
+    if (cl < 1e-12) { continue; }
+    let q = dot(c / cl, sb);
+    if (q < hi) { hi = q; sa = c / cl; }
+  }
+  var aa = vec3f(0.0);
+  var ab = vec3f(0.0);
+  for (var k = topo[i]; k < topo[i + 1u]; k++) {
+    let c = triCross(params.trisAt + 4u * topo[params.listAt + k], rest);
+    if (dot(c, sa) >= dot(c, sb)) { aa += c; } else { ab += c; }
+  }
+  return array<vec4f, 2>(vec4f(normalize(aa + vec3f(1e-12)), 1.0), vec4f(normalize(ab + vec3f(1e-12)), 1.0));
+}
+fn triCross(t: u32, rest: bool) -> vec3f {
+  if (rest) {
+    let a = restP(topo[t]);
+    return cross(restP(topo[t + 1u]) - a, restP(topo[t + 2u]) - a);
+  }
+  let a = nodePos(topo[t]);
+  return cross(nodePos(topo[t + 1u]) - a, nodePos(topo[t + 2u]) - a);
+}
+// v rotated by the shortest rotation taking unit a to unit b.
+fn rotTo(a: vec3f, b: vec3f, v: vec3f) -> vec3f {
+  let k = cross(a, b);
+  let c = dot(a, b);
+  if (c < -0.999) { return reflect(v, normalize(a + b + vec3f(1e-6, 2e-6, 3e-6))); }
+  return v * c + cross(k, v) + k * (dot(k, v) / (1.0 + c));
 }
 
 // Distance from p to the static surfaces (the floor, boxes, cylinders) and
@@ -192,22 +310,26 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
     nodeN[params.stateAt + u] = st;
     return;
   }
-  var acc = vec3f(0.0);
   var stretch = 0.0;
   for (var k = topo[i]; k < topo[i + 1u]; k++) {
     let t = params.trisAt + 4u * topo[params.listAt + k];
     let a = nodePos(topo[t]);
     let b = nodePos(topo[t + 1u]);
     let c = nodePos(topo[t + 2u]);
-    acc += cross(b - a, c - a);
     // Tear: the triangle's perimeter against its rest perimeter (word 3).
     let rest = bitcast<f32>(topo[t + 3u]);
     if (rest > 0.0) { stretch = max(stretch, (length(b - a) + length(c - b) + length(a - c)) / rest); }
   }
-  let l = length(acc);
   // w: how torn the node's skin is (0 whole, 1 torn), smooth across nodes so a
   // tear cuts the panel along a smooth line rather than the mesh's grid.
-  nodeN[3u * i] = vec4f(select(vec3f(0.0), acc / l, l > 1e-12), smoothstep(1.35, 1.8, stretch));
+  // The node's planes now and at rest (nodePlanes: one, or two either side
+  // of a fold through it).
+  let pn = nodePlanes(i, false);
+  let pr = nodePlanes(i, true);
+  nodeN[NS * i] = vec4f(pn[0].xyz, smoothstep(1.35, 1.8, stretch));
+  nodeN[NS * i + 3u] = pn[1];
+  nodeN[NS * i + 4u] = pr[0];
+  nodeN[NS * i + 5u] = pr[1];
   // Plastic strain: the node's beams' largest permanent length change, and
   // its broken beams.
   var plastic = 0.0;
@@ -219,10 +341,10 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
     let r0 = bitcast<f32>(topo[params.rest0At + j]);
     plastic = max(plastic, abs(beamRest(j) - r0) / max(abs(r0), 1e-6));
   }
-  let was = nodeN[3u * i + 2u];
+  let was = nodeN[NS * i + 2u];
   var scrape = was.z;
   let p = nodePos(i) + origin();
-  let prev = nodeN[3u * i + 1u];
+  let prev = nodeN[NS * i + 1u];
   if (fxu.dt > 0.0) {
     let mat = topo[params.nodeMatAt + i];
     if (prev.w > 0.5 && distance(p, prev.xyz) < 1.0) {
@@ -251,9 +373,9 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
         fxSpawn(p, v * 0.7 + fxRndDir(seed, 10u) * 1.6 + vec3f(0.0, 0.8, 0.0), 4.0, 5u | (col << 8u));
       }
     }
-    nodeN[3u * i + 1u] = vec4f(p, 1.0);
+    nodeN[NS * i + 1u] = vec4f(p, 1.0);
   }
-  nodeN[3u * i + 2u] = vec4f(plastic, nb, scrape, 0.0);
+  nodeN[NS * i + 2u] = vec4f(plastic, nb, scrape, 0.0);
 }
 
 
@@ -303,7 +425,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let torn = s1 > 2.5 || s2 > 2.5 || cl <= 1e-12;
   let rigid = (bd.flags & 2u) != 0u;
   var pos: vec3f;
-  let t0 = nodeN[3u * bd.n0].w; let t1 = nodeN[3u * bd.n1].w; let t2 = nodeN[3u * bd.n2].w;
+  let t0 = nodeN[NS * bd.n0].w; let t1 = nodeN[NS * bd.n1].w; let t2 = nodeN[NS * bd.n2].w;
   var w = vec3f(1.0 - bd.a - bd.b, bd.a, bd.b);
   var tear: f32;
   if (rigid) {
@@ -323,19 +445,34 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let nf = normalize(bd.nt * t + bd.nb * b + bd.nn * n + vec3f(1e-9));
   var nrm = nf;
   if ((bd.flags & 1u) != 0u && !rigid) {
-    // Smooth: the rest normal moved by the binding nodes' normal changes
-    // (continuous across binding triangles). Only where it disagrees with the
-    // triangle frame's by more than ~45° (a real fold, a panel bent double)
-    // does the faceted normal take over: at milder creases the frame's
-    // facets would show the binding triangles' edges as a sawtooth.
-    let ns = normalize(vec3f(bd.rx, bd.ry, bd.rz)
-      + w.x * (nodeN[3u * bd.n0].xyz - restN(bd.n0))
-      + w.y * (nodeN[3u * bd.n1].xyz - restN(bd.n1))
-      + w.z * (nodeN[3u * bd.n2].xyz - restN(bd.n2)) + vec3f(1e-9));
-    nrm = normalize(mix(ns, nf, 1.0 - smoothstep(0.55, 0.75, dot(ns, nf))));
+    // The body's skin: the crease envelope (envelope()) now and at rest. The
+    // vertex moves by the change of its offset (the rest pose and any rigid
+    // motion are exact), and its rest normal turns with its planes' normals,
+    // weighted as they are: smooth over a mild bend, switching sharply along
+    // a fold's straight line. Only where that disagrees with the triangle
+    // frame's by more than ~45° (a panel crushed past its binding) does the
+    // faceted normal take over.
+    let ids = array<u32, 3>(bd.n0, bd.n1, bd.n2);
+    var pn: array<vec3f, 3>; var an: array<vec3f, 3>; var bn: array<vec4f, 3>;
+    var pr: array<vec3f, 3>; var ar: array<vec3f, 3>; var br: array<vec4f, 3>;
+    var ok = !torn;
+    for (var c = 0u; c < 3u; c++) {
+      let q = NS * ids[c];
+      pn[c] = nodePos(ids[c]) + org; an[c] = nodeN[q].xyz; bn[c] = nodeN[q + 3u];
+      pr[c] = restP(ids[c]); let r = nodeN[q + 4u]; ar[c] = r.xyz; br[c] = vec4f(nodeN[q + 5u].xyz, r.w);
+      ok = ok && dot(an[c], an[c]) > 0.5 && dot(ar[c], ar[c]) > 0.5;
+    }
+    if (ok) {
+      let l = 0.5 * (bd.r1 + bd.r2);
+      let now = envelope(pn, an, bn, w, l);
+      let rest = envelope(pr, ar, br, w, l);
+      pos += clamp(now.e - rest.e, -0.5 * l, 0.5 * l) * now.u;
+      let ns = rotTo(rest.n, now.n, vec3f(bd.rx, bd.ry, bd.rz));
+      nrm = normalize(mix(ns, nf, 1.0 - smoothstep(0.55, 0.75, dot(ns, nf))));
+    }
   }
   // The binding nodes' plastic strain, broken beams and scrape.
-  let q0 = nodeN[3u * bd.n0 + 2u]; let q1 = nodeN[3u * bd.n1 + 2u]; let q2 = nodeN[3u * bd.n2 + 2u];
+  let q0 = nodeN[NS * bd.n0 + 2u]; let q1 = nodeN[NS * bd.n1 + 2u]; let q2 = nodeN[NS * bd.n2 + 2u];
   let plastic = w.x * q0.x + w.y * q1.x + w.z * q2.x;
   let scrape = w.x * q0.z + w.y * q1.z + w.z * q2.z;
   // Damage: −1 on a broken unit (its glass, lenses and mirror glass are
@@ -997,8 +1134,15 @@ fn shade(i: VOut, front: bool) -> vec4f {
  */
 export function createShowcaseCarRenderer(device, opts = {}) {
   const { format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none', zebra = 0 } = opts;
-  const skinModule = device.createShaderModule({ label: 'showcase-skin', code: SKIN_WGSL });
-  const drawCode = zebra ? DRAW_WGSL.replace('const ZEBRA: f32 = 0.0;', `const ZEBRA: f32 = ${Number(zebra).toFixed(1)};`) : DRAW_WGSL;
+  // ?crease= / ?splitDeg= (showcase-car.html): other crease constants, for comparison.
+  const crease = (code) => code.replace(`const CREASE_SHARP = ${CREASE_SHARP};`, `const CREASE_SHARP = ${opts.creaseSharp || CREASE_SHARP};`)
+    .replace(`const SPLIT_COS = ${SPLIT_COS};`, `const SPLIT_COS = ${opts.splitDeg ? Math.cos(opts.splitDeg * Math.PI / 180) : SPLIT_COS};`);
+  const skinModule = device.createShaderModule({ label: 'showcase-skin', code: crease(SKIN_WGSL) });
+  let drawCode = zebra ? DRAW_WGSL.replace('const ZEBRA: f32 = 0.0;', `const ZEBRA: f32 = ${Number(zebra).toFixed(1)};`) : DRAW_WGSL;
+  // Profiling (showcase-car.html ?perfFlat=1, ?perfSkip=opaque,glass,reflect,contact):
+  // a flat fragment shader (vertex and raster cost alone), or parts left out.
+  if (opts.perfFlat) drawCode = drawCode.replace('  return shade(i, front);\n}', '  return vec4f(i.color, 1.0);\n}');
+  const skip = new Set(opts.perfSkip ?? []);
   const drawModule = device.createShaderModule({ label: 'showcase-draw', code: drawCode });
   // 0 nodes, 1 misc, 2 binds, 3 out (rw), 4 params, 5 topo, 6 beams, 7 node
   // state (rw), 8 effects, 9 particles (rw): 8 storage buffers, the default limit.
@@ -1164,7 +1308,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       posBuf = buf;
       restBuf = rest ?? null;
       if (buf && !posPipes) {
-        const m = device.createShaderModule({ label: 'showcase-skin-pos', code: SKIN_POS_WGSL });
+        const m = device.createShaderModule({ label: 'showcase-skin-pos', code: crease(SKIN_POS_WGSL) });
         posPipes = {
           pick: device.createComputePipeline({ label: 'showcase-lod-pick-pos', layout: pickPipeLayout, compute: { module: m, entryPoint: 'pick' } }),
           skin: device.createComputePipeline({ label: 'showcase-skin-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'skin' } }),
@@ -1195,7 +1339,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       // topo's tables (SKIN_WGSL's Params documents the layout).
       const listAt = start.length, trisAt = listAt + list.length;
       const restNAt = trisAt + (nt.length / 3) * 4;
-      const nodeBeamAt = restNAt + nodeCount * 4;
+      const nodeBeamAt = restNAt + nodeCount * 8;
       const rest0At = nodeBeamAt + nbs.length + nbl.length;
       const unitAt = rest0At + r0.length;
       const unitListAt = unitAt + units * 4;
@@ -1215,7 +1359,10 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           tf[trisAt + 4 * t + 3] = d(a, b) + d(b, c) + d(c, a);
         }
       }
-      for (let i = 0; i < nodeCount; i++) tf.set(visual.nodeRestNormal.subarray(3 * i, 3 * i + 3), restNAt + 4 * i);
+      for (let i = 0; i < nodeCount; i++) {
+        tf.set(visual.nodeRestNormal.subarray(3 * i, 3 * i + 3), restNAt + 8 * i);
+        if (nr) tf.set(nr.subarray(3 * i, 3 * i + 3), restNAt + 8 * i + 4);
+      }
       topo.set(nbs, nodeBeamAt);
       topo.set(nbl, nodeBeamAt + nbs.length);
       tf.set(r0, rest0At);
@@ -1236,7 +1383,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           break;
         }
       }
-      const stateAt = nodeCount * 3;
+      const stateAt = nodeCount * 6;
       const level = (v, lvIndex) => {
         const n = v.vertexCount;
         const bindData = new ArrayBuffer(n * 64);
@@ -1352,7 +1499,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       Object.assign(car, {
         nodeCount, vehicle, levels, units, stateAt, unitNames: visual.unitNames ?? [], skinBind: null, posBind: null,
         topo: upload('showcase-topology', topo),
-        // Per node 3 vec4, per unit 1, the level state 1 (zeros: nothing yet).
+        // Per node 6 vec4, per unit 1, the level state 1 (zeros: nothing yet).
         nodeN: device.createBuffer({ label: 'showcase-node-state', size: (stateAt + units + 1) * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
         lod: upload('showcase-lod', lodData, GPUBufferUsage.UNIFORM),
         // Indirect args (2 levels × 23 words); level 0 drawn until the first pick.
@@ -1476,7 +1623,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       fr.set([eye[0], 2 * floorY - eye[1], eye[2], floorY], 16);
       fr.set([light[0], light[1], light[2], strength], 20);
       device.queue.writeBuffer(mirrorBuf, 0, fr);
-      for (const [pipe, bind] of [[mirrorDepthPipe, mirrorDepthBind], [mirrorPipe, mirrorBind]]) {
+      for (const [pipe, bind] of skip.has('reflect') ? [] : [[mirrorDepthPipe, mirrorDepthBind], [mirrorPipe, mirrorBind]]) {
         pass.setPipeline(pipe);
         pass.setBindGroup(0, bind);
         for (const car of cars.values()) {
@@ -1488,7 +1635,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           });
         }
       }
-      if (contact > 0) {
+      if (contact > 0 && !skip.has('contact')) {
         const cf = new Float32Array(24);
         cf.set(viewProj, 0);
         cf.set([eye[0], eye[1], eye[2], floorY], 16);
@@ -1514,7 +1661,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       fr.set([light[0], light[1], light[2], 0], 20);
       device.queue.writeBuffer(frameBuf, 0, fr);
       device.queue.writeBuffer(viewBuf, 0, new Float32Array([eye[0], eye[1], eye[2], 1]));
-      for (const [pipe, bind, at] of [[drawPipe, drawBind, 12], [glassPipe, glassBind, 32]]) {
+      for (const [pipe, bind, at] of [[drawPipe, drawBind, 12, 'opaque'], [glassPipe, glassBind, 32, 'glass']].filter((d) => !skip.has(d[3]))) {
         pass.setPipeline(pipe);
         pass.setBindGroup(0, bind);
         for (const car of cars.values()) {

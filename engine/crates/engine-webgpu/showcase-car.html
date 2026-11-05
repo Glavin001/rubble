@@ -82,7 +82,7 @@ try {
   let batchPending = false;
   const adapterInfo = await navigator.gpu.requestAdapter().then((a) => a?.info ? `${a.info.vendor} ${a.info.architecture} ${a.info.description}` : '?');
   const batchMs = [];
-  const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES, zebra: Number(qs.get('zebra')) || 0 });
+  const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES, zebra: Number(qs.get('zebra')) || 0, creaseSharp: Number(qs.get('crease')) || 0, splitDeg: Number(qs.get('splitDeg')) || 0, perfFlat: qs.has('perfFlat'), perfSkip: qs.get('perfSkip')?.split(',') });
   if (!qs.has('mod')) r.setSolver(sim.nodesBuffer(), sim.miscBuffer(), sim.beamsBuffer());
   // ?mod=<folder>: an imported BeamNG vehicle's flexbodies and props at rest
   // (its files.json lists the folder: .jbeam, .pc (?pc=), .dae,

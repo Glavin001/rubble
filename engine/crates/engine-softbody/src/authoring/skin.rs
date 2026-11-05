@@ -1173,6 +1173,134 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// Crease sharpness: the envelope's temperature over the binding triangle's
+/// size L. A fold whose two sides' planes differ by θ switches from one to the
+/// other over about `CREASE_SHARP · L / sin θ` (a 60° fold of a 10 cm
+/// triangle: 1 cm); a bend of a few degrees stays smooth.
+pub const CREASE_SHARP: f32 = 0.08;
+/// A node's skin splits into two planes (a fold runs through the node) where
+/// its most deviant triangle is more than 20° from its mean normal.
+pub const SPLIT_COS: f32 = 0.939_692_6;
+
+/// A node's tangent planes ([`node_planes`]): the first normal, and the
+/// second where its skin triangles fall either side of a fold.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NodePlanes {
+    pub a: Vec3,
+    pub b: Option<Vec3>,
+}
+
+/// Every solver node's tangent planes from the skin triangles at `nodes`
+/// (the renderer's `nodePlanes()`): its mean skin normal, or, where its most
+/// deviant triangle is more than [`SPLIT_COS`] from that mean, two: the
+/// triangles nearer that one, and those nearer the one most opposite it. A
+/// node on a fold line so carries both panels' planes, not a bevel between
+/// them. Zero off the skin.
+pub fn node_planes(v: &ShowcaseVisual, nodes: &[Vec3]) -> Vec<NodePlanes> {
+    let n = nodes.len().min(v.node_tri_start.len().saturating_sub(1));
+    let mut out = vec![NodePlanes::default(); nodes.len()];
+    for (i, o) in out.iter_mut().enumerate().take(n) {
+        let tris = &v.node_tri_list[v.node_tri_start[i] as usize..v.node_tri_start[i + 1] as usize];
+        let cr: Vec<Vec3> = tris
+            .iter()
+            .map(|&ti| {
+                let t = v.normal_tris[ti as usize];
+                let a = nodes[t[0] as usize];
+                (nodes[t[1] as usize] - a).cross(nodes[t[2] as usize] - a)
+            })
+            .collect();
+        let acc: Vec3 = cr.iter().copied().sum();
+        if acc.length_squared() < 1e-24 {
+            continue;
+        }
+        let m = (acc + Vec3::splat(1e-12)).normalize();
+        let unit = |c: &Vec3| (c.length() >= 1e-12).then(|| *c / c.length());
+        let mut lo = 2.0;
+        let mut sb = m;
+        for u in cr.iter().filter_map(unit) {
+            if u.dot(m) < lo {
+                lo = u.dot(m);
+                sb = u;
+            }
+        }
+        if lo > SPLIT_COS {
+            *o = NodePlanes { a: m, b: None };
+            continue;
+        }
+        let mut hi = 2.0;
+        let mut sa = m;
+        for u in cr.iter().filter_map(unit) {
+            if u.dot(sb) < hi {
+                hi = u.dot(sb);
+                sa = u;
+            }
+        }
+        let (mut aa, mut ab) = (Vec3::ZERO, Vec3::ZERO);
+        for c in &cr {
+            if c.dot(sa) >= c.dot(sb) {
+                aa += *c;
+            } else {
+                ab += *c;
+            }
+        }
+        *o = NodePlanes {
+            a: (aa + Vec3::splat(1e-12)).normalize(),
+            b: Some((ab + Vec3::splat(1e-12)).normalize()),
+        };
+    }
+    out
+}
+
+/// The crease envelope of a body vertex (the renderer's `envelope()`). The
+/// vertex's point on its binding triangle (nodes at `p`, barycentric `w`)
+/// moves along u, the planes' barycentric mean normal, to the node tangent
+/// plane nearest it: per node i and plane, t is the distance along u to the
+/// plane and its weight s = wᵢ exp(−(|t| − min|t|) / (CREASE_SHARP · L)). At
+/// a fold the two sides' planes cross along a straight line, so the fold is
+/// straight and sharp across while smooth along it, wherever the binding
+/// triangles' edges run; where the planes barely differ the weights are the
+/// barycentric ones (Phong-like). Every term is invariant under rigid motion
+/// and continuous across a shared edge (the opposite node's weight is zero
+/// there). Returns the weighted normal, u and the offset along u.
+pub fn crease_envelope(p: [Vec3; 3], planes: [NodePlanes; 3], w: Vec3, l: f32) -> (Vec3, Vec3, f32) {
+    let pl = w.x * p[0] + w.y * p[1] + w.z * p[2];
+    let k = 1.0 / (CREASE_SHARP * l.max(1e-4));
+    let ww = w.max(Vec3::ZERO);
+    let mut u = Vec3::splat(1e-9);
+    for i in 0..3 {
+        u += ww[i] * (planes[i].a + planes[i].b.unwrap_or(planes[i].a));
+    }
+    let u = u.normalize();
+    let mut cand: Vec<(Vec3, f32, f32)> = Vec::with_capacity(6);
+    for i in 0..3 {
+        let lw = w[i].max(1e-6).ln();
+        for nrm in [Some(planes[i].a), planes[i].b].into_iter().flatten() {
+            let t = -(pl - p[i]).dot(nrm) / nrm.dot(u).max(0.2);
+            cand.push((nrm, t, t.abs() * k - lw));
+        }
+    }
+    let best = cand.iter().map(|c| c.2).fold(f32::INFINITY, f32::min);
+    let (mut acc, mut off, mut sum) = (Vec3::ZERO, 0.0, 0.0);
+    for (nrm, t, sc) in cand {
+        let s = (best - sc).exp();
+        acc += s * nrm;
+        off += s * t;
+        sum += s;
+    }
+    ((acc + Vec3::splat(1e-9)).normalize(), u, off / sum)
+}
+
+/// `v` turned by the shortest rotation taking unit `a` to unit `b`.
+fn rot_to(a: Vec3, b: Vec3, v: Vec3) -> Vec3 {
+    let k = a.cross(b);
+    let c = a.dot(b);
+    if c < -0.999 {
+        let m = (a + b + Vec3::new(1e-6, 2e-6, 3e-6)).normalize();
+        return v - 2.0 * v.dot(m) * m;
+    }
+    v * c + k.cross(v) + k * (k.dot(v) / (1.0 + c))
+}
+
 /// Per solver node its skin normal (zero off the skin).
 pub fn node_normals(v: &ShowcaseVisual, nodes: &[Vec3]) -> Vec<Vec3> {
     let mut out = vec![Vec3::ZERO; nodes.len()];
@@ -1216,7 +1344,9 @@ pub fn deform_with(
     nodes: &[Vec3],
     units: Option<&[UnitState]>,
 ) -> (Vec<Vec3>, Vec<Vec3>) {
-    let nn = node_normals(v, nodes);
+    let now_pl = node_planes(v, nodes);
+    let rest: Vec<Vec3> = v.node_rest.iter().map(|q| Vec3::from_array(*q)).collect();
+    let rest_pl = node_planes(v, &rest);
     let mut pos = Vec::with_capacity(v.positions.len());
     let mut nrm = Vec::with_capacity(v.positions.len());
     for i in 0..v.positions.len() {
@@ -1249,18 +1379,25 @@ pub fn deform_with(
         }
         let [x, y, z] = v.bind_normal[i];
         let nf = (t * x + bb * y + n * z).normalize_or_zero();
+        let ids = [a as usize, b as usize, c as usize];
         if v.smooth[i] == 1 && !rigid {
-            let w = [1.0 - al - be, al, be];
-            let mut d = Vec3::from_array(v.normals[i]);
-            for (k, &node) in [a, b, c].iter().enumerate() {
-                d += w[k]
-                    * (nn[node as usize] - Vec3::from_array(v.node_rest_normal[node as usize]));
+            let (pn, pr) = (ids.map(|k| now_pl[k]), ids.map(|k| rest_pl[k]));
+            if pn.iter().chain(pr.iter()).all(|q| q.a.length_squared() > 0.5) {
+                // The crease envelope now and at rest (see [`crease_envelope`]).
+                let w = Vec3::new(1.0 - al - be, al, be);
+                let l = 0.5 * (r1 + r2);
+                let rest_p = ids.map(|k| Vec3::from_array(v.node_rest[k]));
+                let (nh, u, e) = crease_envelope([p0, p1, p2], pn, w, l);
+                let (nh0, _, e0) = crease_envelope(rest_p, pr, w, l);
+                let last = pos.len() - 1;
+                pos[last] += (e - e0).clamp(-0.5 * l, 0.5 * l) * u;
+                let ns = rot_to(nh0, nh, Vec3::from_array(v.normals[i])).normalize_or_zero();
+                // A panel crushed past its binding (envelope and frame
+                // normals > ~45° apart) keeps the facet.
+                let k = super::parts::smoothstep(0.75, 0.55, ns.dot(nf));
+                nrm.push(ns.lerp(nf, k).normalize_or_zero());
+                continue;
             }
-            let ns = d.normalize_or_zero();
-            // A fold (smooth and frame normals > ~45° apart) keeps the facet.
-            let k = super::parts::smoothstep(0.75, 0.55, ns.dot(nf));
-            nrm.push(ns.lerp(nf, k).normalize_or_zero());
-            continue;
         }
         nrm.push(nf);
     }
@@ -1294,6 +1431,47 @@ mod tests {
             ExplicitBeams::from_truck(&b.truck, Vec3::new(0.0, 0.02 - low, 0.0), vel, st).unwrap();
         s.roll_tyres(vel);
         s
+    }
+
+    /// The crease envelope follows the plane of the side a point is on, so a
+    /// fold through the binding triangle is the planes' straight crossing
+    /// line: a tent (ridge along z at x = 0, y = 1) bound by a triangle with
+    /// a ridge node (both planes) and one node on each slope.
+    #[test]
+    fn crease_envelope_is_the_planes_crossing() {
+        let na = Vec3::new(1.0, 1.0, 0.0).normalize();
+        let nb = Vec3::new(-1.0, 1.0, 0.0).normalize();
+        let p = [Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 1.0)];
+        let pl = [
+            NodePlanes { a: na, b: Some(nb) },
+            NodePlanes { a: na, b: None },
+            NodePlanes { a: nb, b: None },
+        ];
+        let surface = |w: Vec3| {
+            let (n, u, e) = crease_envelope(p, pl, w, 1.4);
+            (w.x * p[0] + w.y * p[1] + w.z * p[2] + e * u, n)
+        };
+        let tent = |q: Vec3| 1.0 - q.x.abs();
+        for &w in &[
+            Vec3::new(0.2, 0.6, 0.2),
+            Vec3::new(0.2, 0.2, 0.6),
+            Vec3::new(0.5, 0.4, 0.1),
+            Vec3::new(0.1, 0.3, 0.6),
+        ] {
+            let (q, n) = surface(w);
+            // Off the ridge (the planes' |t| differ by much more than the
+            // temperature) the point lies on its side's plane, with its normal.
+            assert!((q.y - tent(q)).abs() < 2e-3, "{w:?}: {q:?}");
+            let side = if q.x > 0.0 { na } else { nb };
+            assert!(n.dot(side) > 0.999, "{w:?}: {n:?}");
+        }
+        // On the ridge line itself the point reaches the ridge, not a chamfer.
+        let (q, _) = surface(Vec3::new(0.2, 0.4, 0.4));
+        assert!(q.x.abs() < 1e-4 && (q.y - 1.0).abs() < 1e-3, "{q:?}");
+        // On a flat triangle nothing moves.
+        let up = NodePlanes { a: Vec3::Y, b: None };
+        let (_, _, e) = crease_envelope(p.map(|q| q * Vec3::new(1.0, 0.0, 1.0)), [up; 3], Vec3::splat(1.0 / 3.0), 1.4);
+        assert!(e.abs() < 1e-6);
     }
 
     /// Every pane, lamp and mirror is a unit with beams; none breaks at rest
