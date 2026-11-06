@@ -473,6 +473,11 @@ fn rule_switches(s: &mut ExplicitBeams) {
     if std::env::var("DISSIPATIVE_CONTACT").is_ok_and(|v| v == "0") {
         s.dissipative_contact = false;
     }
+    // SURFACE_CONTACT=1: surface contact (jbeam-semantics-spec.md §38) on, for
+    // its calibration check.
+    if std::env::var("SURFACE_CONTACT").is_ok_and(|v| v == "1") {
+        s.surface_contact = true;
+    }
 }
 
 /// The solver's beam for each skeleton beam (the `.truck` sorts them), by
@@ -826,6 +831,11 @@ impl Ledger {
             .map(|i| s.contact_quantisation(i))
             .collect();
         s.step();
+        // Surface contact's force on the nodes this step (§38; zero when off): an
+        // obstacle's impulse. (The next tally's node forces hold it, in the contact
+        // sums: not internal.)
+        self.obstacle += s.surface_force * f64::from(h);
+        self.internal -= s.surface_force * f64::from(h);
         self.steps += 1;
         let mut wq = 0.0;
         for ((n, v), &(q, k)) in s.nodes.iter().zip(&vel).zip(&quant) {
