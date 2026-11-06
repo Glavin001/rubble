@@ -30,8 +30,9 @@
 //! fusing): the GPU kernel (`explicit_beams.slang`, `surfaceContact`) does the same.
 
 use crate::explicit_beams::{
-    contact_response, no_positive_work_body, shift_depth, to_fixed, ContactSurface, ExplicitBeams,
-    ExplicitKind, Node, StaticShape, CONTACT_FIXED, NODE_IMMOVABLE, NODE_NO_GROUND, STEP,
+    contact_response, no_positive_work_body, shift_depth, surface_response, to_fixed,
+    ContactSurface, ExplicitBeams, ExplicitKind, Node, StaticShape, CONTACT_FIXED, NODE_IMMOVABLE,
+    NODE_NO_GROUND, STEP,
 };
 // The geometry is the shared strict closest-feature module (its Slang twin is
 // `slang/physics/feature_query.slang`).
@@ -85,6 +86,14 @@ pub fn segment_kind(k: ExplicitKind) -> bool {
             | ExplicitKind::JbeamPressured
             | ExplicitKind::JbeamRope
     )
+}
+
+/// Measurement only (CPU reference): `RUBBLE_SURFACE_FRICTION=ror` takes RoR's contact
+/// law ([`contact_response`]) for the surface pass's friction instead of
+/// [`surface_response`]'s Coulomb stick (§38.8), to measure what it changed.
+pub fn ror_friction() -> bool {
+    static ROR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ROR.get_or_init(|| std::env::var("RUBBLE_SURFACE_FRICTION").as_deref() == Ok("ror"))
 }
 
 /// Measurement only: `RUBBLE_SURFACE_CAST=0` turns the fast shapes' casts off (the
@@ -471,7 +480,11 @@ impl ExplicitBeams {
             let fh = (Vec3::ZERO - at) * m;
             let friction = (nd[0].friction * w[0] + nd[1].friction * w[1]) + nd[2].friction * w[2];
             let p = (r - f.hit.gap).min(r);
-            let (fc, budget) = contact_response(fh, vs - vt, m, nn, STEP, &surface, p, friction);
+            let (fc, budget) = if ror_friction() {
+                contact_response(fh, vs - vt, m, nn, STEP, &surface, p, friction)
+            } else {
+                surface_response(fh, vs - vt, m, nn, STEP, &surface, p, friction)
+            };
             if fc == Vec3::ZERO {
                 continue;
             }

@@ -225,6 +225,28 @@ fn main() {
     let mut sim = ExplicitSim::new_native(&device, &queue, &spec).expect("spawn");
     let mut cpu = sim.spawned(0).clone();
     let bx = *cpu.boxes.last().expect("the pole box");
+    // --cyl (CPU only): the pole a 254 mm vertical cylinder at the box's place (FMVSS 214's,
+    // as vehicle_compare's pole scene).
+    let pole_c = 0.5 * (bx.lo + bx.hi);
+    // POLE_FRICTION=k (diagnostic): every node's friction coefficient times k.
+    if let Some(k) = std::env::var("POLE_FRICTION")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        for n in &mut cpu.nodes {
+            n.friction *= k;
+        }
+    }
+    if flag("--cyl") {
+        assert!(!gpu, "--cyl is the CPU reference's");
+        cpu.boxes.pop();
+        cpu.shapes
+            .push(engine_softbody::explicit_beams::StaticShape::cylinder(
+                pole_c,
+                0.127,
+                0.5 * (bx.hi.y - bx.lo.y),
+            ));
+    }
     let p0 = cpu.positions();
     let mass: Vec<f32> = cpu.nodes.iter().map(|n| n.mass).collect();
     let v0 = cpu.nodes[0].vel;
@@ -313,8 +335,33 @@ fn main() {
         .copied()
         .unwrap_or(0.0);
     let ke_end: f32 = 0.5 * total_mass * (p_prev / total_mass).powi(2);
+    // Slide: the centre of mass's move across the approach (along the pole's face), m.
+    let com = |p: &[Vec3]| p.iter().zip(&mass).map(|(x, m)| *x * *m).sum::<Vec3>() / total_mass;
+    let slide = (com(&last_p) - com(&p0)).dot(lateral);
+    // The pole's shift along the car (vehicle_compare's pole_slide): its place along the
+    // car's long axis (the nodes' horizontal principal direction) from the car's centre,
+    // at the end against the start.
+    let axis = |p: &[Vec3]| {
+        let c = com(p);
+        let (mut xx, mut xz, mut zz) = (0.0f32, 0.0f32, 0.0f32);
+        for (x, m) in p.iter().zip(&mass) {
+            let d = *x - c;
+            xx += m * d.x * d.x;
+            xz += m * d.x * d.z;
+            zz += m * d.z * d.z;
+        }
+        let ang = 0.5 * (2.0 * xz).atan2(xx - zz);
+        Vec3::new(ang.cos(), 0.0, ang.sin())
+    };
+    let a0 = axis(&p0);
+    let mut a1 = axis(&last_p);
+    if a1.dot(a0) < 0.0 {
+        a1 = -a1;
+    }
+    let along = |p: &[Vec3], a: Vec3| (pole_c - com(p)).dot(a);
+    let pole_slide = along(&last_p, a1) - along(&p0, a0);
     println!(
-        "{car_name} {scene} {kmh} km/h at {at} surface {} {}: depth max node {:.1} beam {:.1} tri {:.1} mm, p99 {:.1} mm ({} samples); peak {:.0} kN; crush max {:.0} end {:.0} mm; {:.1} µs/step ({} steps, {} surface hits); approach KE left {:.1} kJ",
+        "{car_name} {scene} {kmh} km/h at {at} surface {} {}: depth max node {:.1} beam {:.1} tri {:.1} mm, p99 {:.1} mm ({} samples); peak {:.0} kN; crush max {:.0} end {:.0} mm; {:.1} µs/step ({} steps, {} surface hits); approach KE left {:.1} kJ; slide {:.0} mm; pole slide along the car {:.0} mm",
         surface as u8,
         if gpu { "gpu" } else { "cpu" },
         dn * 1e3,
@@ -329,6 +376,8 @@ fn main() {
         steps,
         surf_hits,
         ke_end / 1e3,
+        slide * 1e3,
+        pole_slide * 1e3,
     );
     let _ = STEP;
 }

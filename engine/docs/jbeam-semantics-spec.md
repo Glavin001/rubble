@@ -2743,6 +2743,51 @@ step against 1.24; flat in the map's bodies), but:
 Next: the static slots and fast proxies on the pair path too, a group's members side by
 side in the pass, and the Metal turned-proxy run on a quiet machine.
 
+### 38.8 Friction: a true stick (2026-11-06)
+
+**Problem** (reported from `feat/vehicle-gen3-r4`'s `pole_slide_mm`): in the 75° oblique pole
+the car slid along the pole with surface contact on (gen3 0.7–1.3 m, the ETK 1.7 m; node
+contact 0.13 m) and the pole crush collapsed. Checked against the list:
+* coefficient: `ContactSurface::BOX` (μs 1.2, kinetic curve from 1.2 to 0.75 plus 0.01·σ)
+  times the nodes' friction, weighted over the element, as node contact's;
+* the cap (§37 `no_positive_work`, and §38.6's for dynamic bodies): clipped 3–8 % of the
+  friction in the ETK's oblique pole, not more;
+* the tangent: per hit, from that hit's normal; no state, so nothing is lost when a
+  contact moves to an edge or the deepest point (a round shape's crossing normal from
+  radial axes was tried as well and changed nothing measured: not taken);
+* **the static/kinetic split: the defect.** The surface pass took RoR's law
+  (`contact_response`), whose static branch cancels the tangential *force* but meets an
+  existing *slip* with only 1 − e^(−σ/3 m/s) of the limit. A node inside a shape hides
+  it (the shape holds the node by its depth); a skin held at the band does not: a panel
+  on two bars between its node lines crept down a 25° slope (9 cm in 1 s, 0.7 m at 40°)
+  where node contact holds to 48°.
+
+**Rule** (`surface_response`, GPU `surfResponse`; surface contact only, node contact
+unchanged): the tangential force that stops the slip within the step, −(f_t + v_t·m/h),
+is taken whole while within μs·r; past it the pair slides on RoR's kinetic curve against
+its slip. Then §37's cap. Measurement switch (CPU): `RUBBLE_SURFACE_FRICTION=ror`.
+
+Checked: `engine-softbody/tests/explicit_surface_friction.rs`: on two capsules and on two
+bars (no node touching), a panel pushed along them holds under 1.1 × its weight and slides
+at 1.5 (node contact the same, to the millimetre); set sliding it stops within the
+law's distance (1 m/s: 4.3 cm; node contact on RoR's law 23.6 cm); on an incline it holds
+to 48° and slides at 55° (as node contact). `surface_contact_gpu` (static slots, GPU
+against the CPU) and `explicit_surface_proxy_gpu` pass; flag off bit for bit.
+
+Measured (`surface_pole --scene oblique --cyl`: the crash lab's oblique pole as a 254 mm
+cylinder, 32 km/h, 1 s, CPU; pole slide = the pole's shift along the car's long axis):
+
+| car | node contact | surface, RoR friction | surface, stick |
+|---|---|---|---|
+| ETK slide / residual crush | 51 / 468 mm | 624 / 205 mm | 324 / 307 mm |
+| sedan1 slide / residual crush | −124 / 569 mm | 2,637 / 1,515 mm | 2,726 / 1,613 mm |
+
+The ETK's slide halves and its residual crush rises toward node contact's. sedan1's does
+not move, and it is not friction: with every node's friction ×3 it slides the same
+2.7 m, frictionless 3.4 m the other way; its side gives 1.3–1.6 m to the pole with
+surface contact on (0.6 m node only), so the pole runs along the collapsed door. Open:
+sedan1's side structure under surface contact (with §38.2's calibration).
+
 ## 39. Centred damping (2026-11-06)
 
 `ExplicitBeamsSettings::centred_damping`: **on in the BeamNG profile** (`beamng()`,

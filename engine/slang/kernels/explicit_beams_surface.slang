@@ -284,6 +284,39 @@ float3 surfAcc(uint x)
 
 float surfTerm(float w, float im) { return w > 0.0 ? smul(smul(w, w), im) : 0.0; }
 
+// Surface contact's response (explicit_beams.rs surface_response, spec §38.8): §37's
+// dissipative normal force r and friction with a true stick: the tangential force that
+// stops the slip this step while within μs·r, else RoR's kinetic curve against the slip.
+// Then noPositiveWork. Strict, in the CPU's order.
+float3 surfResponse(float3 f, float3 v, float m, float3 n, Surface s, float p, float friction, out float budget)
+{
+    budget = 0.0;
+    if (p < 0.0) return float3(0.0, 0.0, 0.0);
+    float vn = sdot(v, n);
+    float fn = sdot(f, n);
+    float r = nf(-fn - sdiv(smul(nf(vn + max(vn, 0.0)), m), STEP));
+    float bud = 0.0;
+    if (vn < 0.0) bud = max(nf(smul(smul(0.5, m), smul(vn, vn)) + smul(smul(0.5, STEP), smul(fn, vn))), 0.0);
+    if (r <= 0.0) return float3(0.0, 0.0, 0.0);
+    float3 ft = ssub3(f, sscale(n, fn));
+    float3 vt = ssub3(v, sscale(n, vn));
+    float3 stick = -sadd3(ft, sscale(vt, sdiv(m, STEP)));
+    float gr = smul(smul(r, s.strength), friction);
+    float ms = smul(s.ms, gr);
+    float3 c;
+    if (sdot(stick, stick) <= smul(ms, ms)) c = sadd3(sscale(n, r), stick);
+    else
+    {
+        float sl = ssqrt(sdot(vt, vt));
+        float3 dir = sl > 0.0 ? -sdiv3(vt, sl) : sdiv3(stick, ssqrt(sdot(stick, stick)));
+        // Sliding: RoR's kinetic curve (contactResponse's sliding branch).
+        float g = nf(s.mc + smul(nf(s.ms - s.mc), frictionExp(s, -frictionPow(s, sdiv(sl, s.vs), s.alpha))));
+        c = sadd3(sscale(n, r), sscale(dir, smul(nf(g + min(smul(s.t2, sl), 5.0)), gr)));
+    }
+    budget = bud;
+    return noPositiveWork(c, r, n, f, v, m);
+}
+
 // A dynamic proxy body's response to impulse x at the contact (CPU
 // explicit_surface apply_surface_hits' k): the element's imt plus the body's split share
 // of 1/M and (I⁻¹(arm × x)) × arm.
@@ -370,7 +403,7 @@ void surfApplyTo(uint v, uint4 tn, float3 w, float3 nn, float gap, float r, uint
     Surface surf = surfaceV(boxSurface(), v);
     surf.dissipative = 1u;
     float budget;
-    float3 fc = contactResponse(fh, ssub3(vs, vt), m, nn, surf, p, fr, budget);
+    float3 fc = surfResponse(fh, ssub3(vs, vt), m, nn, surf, p, fr, budget);
     if (all(fc == float3(0.0, 0.0, 0.0))) return;
     // A dynamic body turns: the friction capped with its full response (§38.4).
     if (split != 0.0) fc = surfBodyCap(fc, fh, ssub3(vs, vt), m, nn, imt, split, bim, arm, bq, ii);

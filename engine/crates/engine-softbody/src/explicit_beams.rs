@@ -1334,6 +1334,70 @@ pub fn contact_response(
     }
 }
 
+/// Surface contact's response (jbeam-semantics-spec.md §38.8): §37's dissipative normal
+/// force r (the approach stopped, no separation made) and friction with a true stick. The
+/// tangential force that stops the pair's slip within the step, −(f_t + v_t·m/h), is taken
+/// whole while it is within the static limit μs·r (μs = `surface.ms`·friction·strength);
+/// past it the pair slides on RoR's kinetic curve ([`contact_friction`]'s sliding branch:
+/// from μs at no slip toward `surface.mc`, plus `t2`·σ) against its slip (against the
+/// tangential force when it has none). Then [`no_positive_work`]. RoR's law
+/// ([`contact_response`]: the stick cancels the force only, and a slip under `va` = 3 m/s
+/// meets a fraction 1 − e^(−σ/va) of the limit) let a panel held on a bar by its skin creep
+/// down a 25° slope and a car slide along an oblique pole; node contact's interlock (a
+/// node inside the shape) hid it. Returns the force and the normal force's budget.
+#[allow(clippy::too_many_arguments)]
+pub fn surface_response(
+    f: Vec3,
+    v: Vec3,
+    m: f32,
+    n: Vec3,
+    h: f32,
+    surface: &ContactSurface,
+    p: f32,
+    friction: f32,
+) -> (Vec3, f32) {
+    if p < 0.0 {
+        return (Vec3::ZERO, 0.0);
+    }
+    let vn = v.dot(n);
+    let fn_ = f.dot(n);
+    let r = -fn_ - (vn + vn.max(0.0)) * m / h;
+    let budget = if vn < 0.0 {
+        (0.5 * m * (vn * vn) + 0.5 * h * (fn_ * vn)).max(0.0)
+    } else {
+        0.0
+    };
+    if r <= 0.0 {
+        return (Vec3::ZERO, 0.0);
+    }
+    let ft = f - n * fn_;
+    let vt = v - n * vn;
+    let stick = -(ft + vt * (m / h));
+    let gr = r * surface.strength * friction;
+    let ms = surface.ms * gr;
+    let c = if stick.dot(stick) <= ms * ms {
+        n * r + stick
+    } else {
+        // Sliding: RoR's kinetic curve (contact_friction's), against the slip (against
+        // the tangential force when there is none).
+        let sl = vt.length();
+        let dir = if sl > 0.0 {
+            -(vt / sl)
+        } else {
+            stick / stick.length()
+        };
+        let e = if surface.exact {
+            exact_exp(-exact_pow(sl / surface.vs, surface.alpha))
+        } else {
+            approx_exp(-approx_pow(sl / surface.vs, surface.alpha))
+        };
+        let g = surface.mc + (surface.ms - surface.mc) * e;
+        n * r + dir * ((g + (surface.t2 * sl).min(5.0)) * gr)
+    };
+    let capped = no_positive_work(c, r, n, f, v, m, h);
+    (capped, budget)
+}
+
 /// §37: the penetration's position step, the pair's separation δ along the
 /// normal this step (m), from the depth `p` in the band, the `budget` the step's
 /// normal force took out of the pair ([`contact_response`]) and the pair's normal
