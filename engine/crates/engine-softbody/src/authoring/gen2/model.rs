@@ -427,13 +427,6 @@ pub fn grid(st: &Strip, h: f32) -> Grid {
     let l_en = polylen(&line(&|x| (1.0, x)));
     let ns = ((l_lo.max(l_hi) / h).round() as usize).max(1);
     let nb = ((l_st.max(l_en) / h).round() as usize).max(1);
-    if std::env::var("GEN2_DEBUG_STRIP").is_ok() {
-        let p = |s: f32, t: f32| {
-            let q = st.point(s, t);
-            format!("({:.3},{:.3},{:.3})", q.x, q.y, q.z)
-        };
-        eprintln!("strip {ns}x{nb} lo {l_lo:.3} hi {l_hi:.3} st {l_st:.3} en {l_en:.3}: a0 {:.3}..{:.3} a1 {:.3}..{:.3}; corners {} {} {} {}", (st.a0)(0.0), (st.a0)(1.0), (st.a1)(0.0), (st.a1)(1.0), p(0.0, 0.0), p(1.0, 0.0), p(0.0, 1.0), p(1.0, 1.0));
-    }
     // Crease rows: each pinned to its crease; the columns even out between
     // them.
     let nc = st.creases.len();
@@ -444,13 +437,6 @@ pub fn grid(st: &Strip, h: f32) -> Grid {
         let lo = jcs.last().map_or(1, |&j| j + 1);
         let j = ((mean * nb as f32).round() as usize).clamp(lo, nb - (nc - c));
         jcs.push(j);
-        if std::env::var("GEN2_DEBUG").is_ok() {
-            eprintln!(
-                "crease {c}: mean t {mean:.3} row {j} of {nb}; t at s=0 {:.3}, s=1 {:.3}",
-                st.crease_t(c, 0.0),
-                st.crease_t(c, 1.0)
-            );
-        }
     }
     // Pins (row, t at s): the borders and the crease rows.
     let pins = |s: f32| -> Vec<(usize, f32)> {
@@ -793,6 +779,15 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
                 if side(q(c), q(d), q(a)) * side(q(c), q(d), q(b)) >= 0.0 {
                     ok = false;
                 }
+                // Nor may the UVs fold (both new triangles wound as the old).
+                let uv_area = |t: [u32; 3]| {
+                    let [a, b, c] = t.map(|x| part.uv[x as usize]);
+                    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+                };
+                let s0 = uv_area(tr);
+                if out.iter().any(|&nt| uv_area(nt) * s0 <= 0.0) {
+                    ok = false;
+                }
                 if !ok || after >= before * 0.95 {
                     continue;
                 }
@@ -910,29 +905,31 @@ pub fn emit(part: &mut Part, g: &Grid, m: Mat, col: [f32; 3]) -> Vec<u32> {
             i == 0 || j == 0 || i == g.ns || j == g.nb
         })
         .collect();
-    clean_slivers(part, tri0, first as usize, &border, &mut ids);
-    if std::env::var("GEN2_DEBUG").is_ok() {
-        let mut worst = (0.0f32, Vec3::ZERO, 0usize);
-        let mut over = 0;
-        for t in &part.tris[tri0..] {
-            let [a, b, c] = t.map(|i| part.pos[i as usize]);
-            let area = 0.5 * (b - a).cross(c - a).length();
-            let l = (b - a).length().max((c - b).length()).max((a - c).length());
-            let asp = l * l / (2.0 * area.max(1e-12));
-            if asp > 6.0 {
-                over += 1;
-            }
-            if asp > worst.0 {
-                worst = (asp, a, 0);
+    // Merged points can fold a triangle over its neighbours in UV (it then
+    // spans no surface of its own either): drop those against the chart's
+    // winding.
+    {
+        let uv_area = |t: &[u32; 3]| {
+            let [a, b, c] = t.map(|x| part.uv[x as usize]);
+            (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        };
+        let sum: f32 = part.tris[tri0..].iter().map(|t| uv_area(t).signum()).sum();
+        let keep: Vec<bool> = part.tris[tri0..]
+            .iter()
+            .map(|t| uv_area(t) * sum > 0.0)
+            .collect();
+        let mut w = tri0;
+        for (q, &k) in keep.iter().enumerate() {
+            if k {
+                part.tris[w] = part.tris[tri0 + q];
+                part.tmat[w] = part.tmat[tri0 + q];
+                w += 1;
             }
         }
-        if over > 0 {
-            eprintln!(
-                "emit {} {}x{}: {over} over 6, worst {:.0} at ({:.3}, {:.3}, {:.3})",
-                part.name, g.ns, g.nb, worst.0, worst.1.x, worst.1.y, worst.1.z
-            );
-        }
+        part.tris.truncate(w);
+        part.tmat.truncate(w);
     }
+    clean_slivers(part, tri0, first as usize, &border, &mut ids);
     let size =
         g.uv.iter()
             .fold([0.0f32; 2], |s, u| [s[0].max(u[0]), s[1].max(u[1])]);
@@ -1364,7 +1361,16 @@ pub fn build() -> Model {
     // The greenhouse's corner and the lines either side of it: the glass's
     // edge on the top (windshield, backlight, roof edge) and the door frame's
     // top on the side.
-    let th_corner = Table::new(sf::theta_corner, -2.05, 0.85);
+    // (Kept above the belt: at the A-pillar's foot the greenhouse fades into
+    // the cowl and the 50° lean would land on the body side, below it.)
+    let th_corner = {
+        let b = th_belt.clone();
+        Table::new(
+            move |u| sf::theta_corner(u).min(b.at(u) - 0.07),
+            -2.05,
+            0.85,
+        )
+    };
     let th_top_edge = {
         let c = th_corner.clone();
         Table::new(move |u| theta_walk(u, c.at(u), -0.05), -2.05, 0.85)
@@ -1735,7 +1741,7 @@ pub fn build() -> Model {
         &th_frame_top,
         &th_belt,
         Mat::TrimBlack,
-        [g1, g2, z0, g2],
+        [g1, g2, z0, g1],
         0.0,
     );
     upper(
@@ -1885,8 +1891,8 @@ pub fn build() -> Model {
             Some("body_shell"),
             &st,
             Mat::Paint,
-            [g1, z0, z0, z0],
-            [true, false, false, false],
+            [g1, z0, g1, z0],
+            [true, false, true, false],
         );
         // The deck's sides, beside the trunk lid, to the tail.
         let (a, b) = (c_top.clone(), th_belt.clone());
