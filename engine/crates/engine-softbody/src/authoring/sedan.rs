@@ -2596,6 +2596,16 @@ pub fn sedan_one_tier() -> VehicleDef {
         side.kg_per_m = section_kg_per_m(&sec);
         d.members.push(side);
     }
+    // (`DOOR_BELT_REAL=1`, a measurement: the doors' belt reinforcements as
+    // a DP980 hat 40 × 60 × 1.4 mm instead of the two-tier boron × 5.)
+    if std::env::var("DOOR_BELT_REAL").is_ok_and(|v| v == "1") {
+        let belt = layered(0.04, 0.06, &[(0.0014, DP980, LayerShape::Hat)]);
+        let list = [
+            ("door_belt_f", belt, 0.14, 1.0),
+            ("door_belt_r", belt, 0.14, 1.0),
+        ];
+        sectioned_by(&mut d.members, &Grades::default(), &list);
+    }
     // The rear end's panels (`REAR_END=0` leaves them out, a measurement
     // switch): the package tray and the back panel, [`rear_end`].
     if std::env::var("REAR_END").map_or(true, |v| v != "0")

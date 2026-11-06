@@ -1829,6 +1829,98 @@ boot lid and bumper seams) and every panel's ripple stays at 2–6 mm after
 rear-end round (back panel, rear floor, rear rails to the bumper beam,
 parcel shelf).
 
+### The rear end (2026-11-05, latest)
+
+**Why the far sheet yielded** (`CI_PLASTIC_LIST=1` in `crash_invariants`
+lists each rear-third beam past 0.2 % with its rest position). In the 56 km/h
+wall the 89 plastic beams were mostly not buckled sheet:
+- **the deck frame had no depth.** `deck_x` was drawn 2–4 cm off the shell's
+  crown with stations 0.8 m apart. Its lower chord snapped up onto the shell at
+  the centre, so at mid-span both chords were one node 1 cm apart. Its centre
+  bowed 218 mm forward under its own and the lid's inertia. `rear_panel` had 3
+  stations over 1.5 m, and its centre bowed 100–187 mm.
+- **the backlight carried the deck.** Nothing joined `deck_x` to the parcel
+  shelf but the rear glass. The glass's beams kept the skin grade's 0.4 kN
+  yield (about 1 MPa over a 3.5 mm strip), so they set plastically, 6–12 %.
+- **the rest:** lid seals (`bootlid~body` supports) crushed by the lid's own
+  motion, fascia-to-body ties, the gutters in compression.
+
+So the answer is missing structure and a mis-drawn frame. Neither the
+buckling yield's value nor where it is applied was the cause.
+
+**Built** (`rear_end`, `sedan_one_tier`):
+- **Deck frame on the shell.** `deck_x` and `rear_panel` now have their outer
+  chord on the shell's line and their inner chord one lever inside (0.08 and
+  0.10 m). Each has a station at every lane node (`DECK_STATION` 0.30 m, its
+  path's points). The gutter's stations are at `POLE_LANE`.
+  `DECK_FRAME_V1=1` builds the old frame.
+- **Package tray** (`tray`, `tray_m`, `tray_o`) from `deck_x`'s inner chord
+  to the parcel shelf's upper chord.
+- **Back panel** (`back_panel`, `back_panel_s`) from the rear floor's edge,
+  through the rear rails' tips, to `rear_panel`'s inner chord.
+- **Source and construction.** Both are sub-assemblies in the Accord
+  teardown (DOT HS 811 666 §10.5, fig. 502–503). Both are built as the dash
+  panel's strips: 0.8 mm sheet (a Choice in 0.7–0.9 mm), each chord at σ_y·A
+  of its half strip (210 MPa, membrane: the panels' beads, a Choice). Their
+  steel spreads the measured body mass. No mass is moved.
+- **The rear bumper beam is steel.** The teardown's options replace "the
+  baseline steel stampings" of both bumpers, and the assemblies weigh 7.84 and
+  7.96 kg. It takes the front's section, `ACCORD_BUMPER_BEAM` (a Choice);
+  before, it was a 6082 extrusion. `REAR_BEAM_ALU=1` keeps the old beam.
+- **Glass is elastic to its fracture while brittle glass is off.** Pane beams
+  hold the strip of real pane, σ·t·L (tempered 120 MPa; the laminated screen
+  cracks at its plies' 45 MPa and holds). A bonded pane's mounts are its bead:
+  G·w·L/t where that is under the built stiffness, and they hold τ·w·L, then
+  let go. `GLASS_SKIN=1` keeps the skin grade's yield. One tier only.
+- `REAR_END=0` leaves the tray and back panel out.
+
+**Effect (Medium, single runs; n, o, p, q, g as their tests):**
+
+| | Before | Built | Bound |
+|---|---|---|---|
+| Rear third plastic, wall / head-on | 89 (worst 28 %) / 21 | 53 (worst 10 %) / 19 | 0 / 0 (BX 0/0) |
+| Lid against rear body, wall peak/end | 374 / 198 mm | 99 / 37 mm | ≤ 37 mm |
+| Lid against rear body, head-on peak | 179 mm | 48 mm | ≤ 37 mm |
+| Rear body RMS, wall | 40 mm | 18 mm | ≤ 5 mm |
+| Wall ripple after 0.5 s | 1.1–3.5 mm | 1.1–4.5 mm | ≤ 1 mm |
+| n max crush / b1 / dynamic / t_m / e / peak | 688 / 20.6 / 748 / 77.9 / 0.125 / 40.0 | 700 / 20.3 / 753 / 79.6 / 0.130 / 40.1 | |
+| o residual | 300 mm | 291 mm | 297–445 |
+| p initial / intermediate / peak | – / – / 23.9 kN | 9.95 / 14.3 / 27.7 kN | ≥ 10.0 / 15.6 / 28.4 |
+| q | 5.58 × | 5.69 × | 4.48–5.32 |
+| g latch / door off | 43.1 / 84.0 kN | 40.2 / 64.2 kN | passes |
+
+All 32 of `n`'s ledgers close. The non-ignored `crash_invariants` tests pass,
+9 of 9, and `invariants_small` passes 19 of 19.
+
+**What is left in the rear:**
+- the lid seals: an EPDM seal does not set; they are crushed by the lid's
+  12.6–14.6 Hz bending, below the measured 17.7–41.5 Hz;
+- the fascia ties;
+- `deck_gutter` in compression, 1–3 %;
+- the rear body's RMS. The Accord's BIW modal test (DOT HS 811 666, Defiance
+  report 106072) puts "trunk rear fore-aft" first at 56.6 Hz, about 3 mm at
+  40 g. At the step's bound the frame's k is 0.1–4 % of real, so its modes
+  are about a tenth of real.
+
+**Task-2 findings.**
+- `profile_drag_is_the_triangles` passes (338 N against 338 N). It now also
+  asserts that no `rubble_aero_tri` triangle lies on a block's faces: 0 of 868.
+- `detached_door_takes_its_edge` passes on this build, but by chance.
+  - On the build before this round it gave 212 / 59.
+  - The joining triangles are body pieces (`frame_l`, `windscreen`) whose
+    vertices are bound with a `door_f_l` node in their frame and no own-part
+    fallback (`CI_DEBUG=1` lists them at rest and when the door is off).
+  - Whether they count depends on how far the door flies: when their frame
+    degenerates the vertex goes non-finite and the test filters it out.
+  - This is a visual binding issue, passed to the visual side.
+
+**p's door (measured, not built).** `door_belt_*` is still the two-tier
+"boron × 5" (cut maximum 71.5 kN). As a real belt reinforcement
+(`DOOR_BELT_REAL=1`: a DP980 hat 40 × 60 × 1.4 mm, a Choice), p falls to
+8.6 / 13.1 / 22.2 kN. The peak of 27.7 kN leans on that over-strength. The
+real door's inner panel, the beam's end brackets and the belt have to carry
+it: the next round.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
