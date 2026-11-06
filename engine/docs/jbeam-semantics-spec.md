@@ -1379,6 +1379,34 @@ the SUV and trailer miss are brake pads and bulbs only (no nodes). Measured
   unchanged); the options are the user's: a smaller step for such vehicles, or an
   implicit treatment of their stiffest elements.
 
+### 29.2 Parts a configuration names that are not local (2026-11-06)
+
+A community mod's configurations name parts from BeamNG's stock content (tyres,
+wheels, brake pads, bulbs, occupants) and from other mods (a "godmode" suspension),
+none of them local. **Choice** (BeamNG documents none; the data's own slots give the
+fallback):
+* **A missing part takes its slot's default** when that is local (the slot row's
+  `default`), with a warning (`the local … stands in`).
+* **A wheel slot** (`wheel_*`) whose part and default are both missing takes the
+  first local part by name of its slot type, else of its family (`wheel_F_6` →
+  `wheel_F_5`): the wheel part carries the hub nodes (`fw1rr`, `fw1r`, …) the
+  suspension's beams and the `pressureWheels` rows use, so without it a car has no
+  hubs and no wheels. Its rim and hub geometry is the stand-in's; its tyre (BeamNG's
+  shared tyres) stays missing, so a raycast wheel's radius is the row's own or its
+  hub's.
+* Else the slot stays empty (warning), as before.
+* **No wheels at all** (a boat; a bare body with its suspension slots empty, CCF
+  `skull`): raycast spawns give no drive and a warning, never an error
+  (`from_desc_jbeam_raycast`); the page shows a notice and the picker sends the
+  vehicle to the 15 m drop.
+* Beams the file gives `beamStrength` 0 (e.g. the Vertex's hood-open switch beams
+  in `beater`, `vanilla`) break at once by design; the sweep lists them apart.
+
+Sweep of every configuration (`community_sweep`, CPU, JBeam mode on raycast wheels,
+1 s at rest): see the report of 2026-11-06 (scratchpad); the classes left are content
+at the explicit step's edge (§29.1: the SUV, the trailer, the CCF's `country` and
+`f6_offroadster` subframes, its `f4_cup` window nets).
+
 ## 30. GPU layout of Part II and verification
 
 * Params words 64–68: `extIndex` (gLists, per beam its extension + 1), `extBase`

@@ -593,6 +593,27 @@ impl JbeamDb {
     /// Resolve the part tree from the main part through each slot's configured
     /// (or default) part, depth first. Returns the parts in assembly order with
     /// their accumulated slot node offsets.
+    /// A local part for wheel slot `slot` whose chosen part is missing: the slot's
+    /// `default` when local, else the first by name of slot type `slot`, else of
+    /// its family (the type without its trailing `_<lug count>`).
+    fn wheel_substitute(&self, slot: &str, default: &str) -> Option<String> {
+        if !default.is_empty() && self.parts.contains_key(default) {
+            return Some(default.to_string());
+        }
+        let mut of = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+            let mut v: Vec<&String> = self
+                .parts
+                .iter()
+                .filter(|(_, p)| p.get("slotType").and_then(Value::as_str).is_some_and(|t| pred(t)))
+                .map(|(k, _)| k)
+                .collect();
+            v.sort();
+            v.first().map(|s| s.to_string())
+        };
+        let family = slot.trim_end_matches(|c: char| c.is_ascii_digit());
+        of(&|t| t == slot).or_else(|| of(&|t| t.starts_with(family) && family.ends_with('_')))
+    }
+
     fn assemble(&mut self, config: &PcConfig) -> Result<Vec<Placed>, String> {
         let main = match &config.main_part {
             Some(m) => m.clone(),
@@ -654,17 +675,43 @@ impl JbeamDb {
                         .and_then(Value::as_object)
                         .cloned()
                         .unwrap_or_default();
-                    let chosen = config.parts.get(&slot_name).cloned().unwrap_or(default);
+                    let mut chosen = config.parts.get(&slot_name).cloned().unwrap_or(default.clone());
                     if chosen.is_empty() {
                         continue;
                     }
+                    let mut substitute = false;
                     if !self.parts.contains_key(&chosen) {
-                        self.warnings
-                            .push(format!("slot `{slot_name}`: part `{chosen}` not found"));
-                        continue;
+                        // A wheel slot whose part is BeamNG's stock content (not
+                        // local): the wheel part carries the hub nodes the suspension
+                        // and the wheel rows use, so a local wheel part stands in
+                        // (spec §29.2): the slot's default, else the first by name of
+                        // its slot type, else of its family (`wheel_F_6` → `wheel_F_*`).
+                        // Any other slot whose part is missing (another mod's, or
+                        // stock content) takes its own default when that is local.
+                        let local = if slot_name.starts_with("wheel_") {
+                            self.wheel_substitute(&slot_name, &default)
+                        } else if !default.is_empty() && default != chosen && self.parts.contains_key(&default) {
+                            Some(default.clone())
+                        } else {
+                            None
+                        };
+                        match local {
+                            Some(l) => {
+                                self.warnings.push(format!(
+                                    "slot `{slot_name}`: part `{chosen}` not found: the local `{l}` stands in"
+                                ));
+                                chosen = l;
+                                substitute = true;
+                            }
+                            None => {
+                                self.warnings
+                                    .push(format!("slot `{slot_name}`: part `{chosen}` not found"));
+                                continue;
+                            }
+                        }
                     }
                     let ty = self.slot_type(&chosen).unwrap_or("");
-                    let allowed = if v2 {
+                    let allowed = substitute || if v2 {
                         field("allowTypes")
                             .and_then(Value::as_array)
                             .is_none_or(|a| a.iter().any(|t| t.as_str() == Some(ty)))
@@ -1317,6 +1364,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     let mut skipped: BTreeMap<String, u32> = BTreeMap::new();
     let mut jbeam_unsupported: BTreeMap<&str, u32> = BTreeMap::new();
     let mut missing = 0u32;
+    let mut missing_names: Vec<String> = Vec::new();
     // The `hydros` section's rows are beams of type HYDRO (after the `beams` rows).
     let hydro_rows = expand(&db, &parts, "hydros", &vars)
         .into_iter()
@@ -1331,6 +1379,13 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         let (Some(a), Some(b)) = (node(&f, "id1"), node(&f, "id2")) else {
             if !f.get("optional").and_then(Value::as_bool).unwrap_or(false) {
                 missing += 1;
+                for k in ["id1", "id2"] {
+                    if let Some(n) = f.get(k).and_then(Value::as_str) {
+                        if !ids.contains_key(n) && missing_names.len() < 8 && !missing_names.iter().any(|m: &String| m == n) {
+                            missing_names.push(n.to_string());
+                        }
+                    }
+                }
             }
             continue;
         };
@@ -1615,7 +1670,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     }
     if missing > 0 {
         desc.warnings.push(format!(
-            "{missing} beams reference nodes not in this configuration"
+            "{missing} beams reference nodes not in this configuration (such as {})",
+            missing_names.join(", ")
         ));
     }
     // Couplers (door, bonnet and boot latches): each `couplerNodes` table of an

@@ -618,7 +618,8 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
     }
     // On raycast wheels the wheels' pieces ride the drive wheels.
     let mut vis = vis;
-    if raycast {
+    // (A vehicle without wheels has none to bind: the spawn has no drive either.)
+    if raycast && !desc.wheels.is_empty() {
         let (config, _) = engine_softbody::explicit_drive::DriveConfig::from_desc(&desc).map_err(err)?;
         for l in [&mut vis, &mut lod, &mut far_vis] {
             engine_softbody::authoring::skin::bind_raycast_wheels(l, &config).map_err(err)?;

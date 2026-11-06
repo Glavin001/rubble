@@ -22,8 +22,12 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const ALL = args.includes('--all');
+// --pc a.pc,b.pc: only these configurations; --rest-scene: the rest run's scene
+// (default idle; yard: the drive page).
+const PCS = opt('--pc', '').split(',').filter(Boolean);
+const REST_SCENE = opt('--rest-scene', 'idle');
 const OUT = opt('--out', join(ROOT, 'recordings', 'community'));
-const only = args.filter((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWith('--out'));
+const only = args.filter((a, i) => !a.startsWith('--') && !['--out', '--pc', '--rest-scene'].includes(args[i - 1]));
 const INDEX = join(ROOT, '__mods', 'index.json');
 if (!existsSync(INDEX)) { console.log('- no __mods/index.json (community_cache): skipped'); process.exit(0); }
 mkdirSync(OUT, { recursive: true });
@@ -86,11 +90,11 @@ for (const c of cars) {
   // Each vehicle's representative configuration (else its first).
   const PREFER = ['etkk/kr6.pc', 'ccf/f4_sport_M.pc', 'gavril_vertex/gavril_vertex.pc', 'fullsuv/mid-sport.pc', 'boathauler/gooseneck.pc', 'bh_yacht48/yacht48.pc'];
   const first = c.configs.find((k) => PREFER.includes(k.pc)) ?? c.configs[0];
-  for (const k of ALL ? c.configs : [first]) {
+  for (const k of PCS.length ? c.configs.filter((x) => PCS.includes(x.pc.split('/').pop())) : ALL ? c.configs : [first]) {
     const q = `solver=explicit&mod=/__mods/${c.folder}&pc=${encodeURIComponent(k.pc)}${(k.wheels ?? 1) > 0 ? '&wheels=raycast' : ''}`;
     const row = { car: c.label, pc: k.pc, mb: c.megabytes, nodes: k.nodes, beams: k.beams, rest: '', wall: '', url: `/softbody.html?${q}&preset=${(k.wheels ?? 1) > 0 ? 'wall56' : 'drop15'}` };
     try {
-      await open(`${q}&xscene=idle&cam=left`);
+      await open(`${q}&xscene=${REST_SCENE}&cam=left`);
       const d = await step(4000);
       row.rest = `${d.broken} broken, ${d.yielded} bent`;
       const still = await send('Page.captureScreenshot', { format: 'jpeg', quality: 80 });

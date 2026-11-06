@@ -193,7 +193,7 @@
         g.label = `${c.label} (${c.megabytes} MB)${c.note ? ` · ${c.note}` : ''}`;
         for (const k of c.configs) {
           const mod = `/__mods/${c.folder}`;
-          g.appendChild(new Option(`${c.label} · ${k.pc.split('/').pop().replace(/\.pc$/, '')} (${k.nodes} nodes)${c.note ? ` · ${c.note}` : ''}`, `${mod}|${k.pc}|${k.wheels ?? 1}`, false, qs.get('mod') === mod && qs.get('pc') === k.pc));
+          g.appendChild(new Option(`${c.label} · ${k.pc.split('/').pop().replace(/\.pc$/, '')} (${k.nodes} nodes)${c.note || (k.rest && (k.rest.broken > 0 || k.rest.fastest > 1 || !k.rest.finite)) ? ' · marginal at rest' : ''}`, `${mod}|${k.pc}|${k.wheels ?? 1}`, false, qs.get('mod') === mod && qs.get('pc') === k.pc));
         }
         modSel.appendChild(g);
       }
@@ -220,7 +220,8 @@
     const keep = (u) => { keepVehicle(u.searchParams); return u; };
     sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = keep(u).href; };
     const solverBtn = document.getElementById('solverBtn');
-    solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz (RoR parity) ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
+    // (The explicit label names its profile once the vehicles spawn: labelProfile.)
+    solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
     solverBtn.onclick = () => { const u = new URL(location.href); if (EXPLICIT) u.searchParams.delete('solver'); else u.searchParams.set('solver', 'explicit'); location.href = u.href; };
     // The explicit solver's scenes; each soft scene maps to the nearest.
     // Speeds, angles and the rest are each scene's knobs (XPARAMS), not part of its name.
@@ -261,6 +262,16 @@
     // Raycast wheels: the drive scenes', or any explicit scene with ?wheels=raycast
     // (a crash on the solver's own wheels, the body's rims riding them).
     const RAYCAST = DRIVE || (EXPLICIT && qs.get('wheels') === 'raycast');
+    // Whether any vehicle of the explicit sim drives on raycast wheels.
+    const anyDrivable = () => !!xsim && !!xlayout && xlayout.vehicles.some((_, i) => xsim.drivable(i));
+    // A notice on the page (not an error).
+    const showNotice = (text) => {
+      const d = document.createElement('div');
+      d.textContent = text;
+      d.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:50;padding:8px 14px;border-radius:8px;background:rgba(20,28,48,.92);color:#fff;font:13px system-ui;';
+      document.body.appendChild(d);
+      console.warn(text);
+    };
     // The page for an explicit scene with its default knobs: keeps the solver and the
     // vehicle (and the lab's view options), drops any preset and the old scene's knobs.
     const xsceneUrl = (id) => {
@@ -617,6 +628,9 @@
       xsim = world.explicitSim(explicitSpec(x, z));
       xlayout = xsim.layout();
       labelProfile();
+      // Raycast wheels asked for but the vehicle has none (a boat, a bare body):
+      // it spawned without them; say so (not an error).
+      if (RAYCAST && !anyDrivable()) showNotice('This vehicle has no wheels: it is not drivable here (try the 15 m drop).');
       return xsim;
     };
     // The profile each vehicle actually runs (layout.vehicles[].profile), on the
@@ -1697,7 +1711,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     }
     function readPoses() {
       if (poseRead) return poseRead;
-      if (RAYCAST) {
+      if (RAYCAST && anyDrivable()) {
         const sim = xsim, step = simSteps();
         poseRead = sim.readDrive().then((d) => {
           poseRead = null;
@@ -2249,7 +2263,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       // Driving automation: hold an input ({ forward, steer, brake, handbrake }; null: the keys
       // again) and read the vehicles' drive state.
       drive: (i) => { driveOverride = i; if (i && xsim.drivable(player)) xsim.setDriveInput(player, i.forward ?? 0, i.steer ?? 0, i.brake ?? 0, i.handbrake ?? 0); },
-      readDrive: () => xsim.readDrive(), wheelBodies: () => wheelsDrawn } : null;
+      readDrive: () => (anyDrivable() ? xsim.readDrive() : Promise.resolve({ vehicles: [] })), wheelBodies: () => wheelsDrawn } : null;
     window.__ready = true;
     statusEl.textContent = `scene ready · ${world.bodyCount()} bodies · ${softs.length} soft bodies`;
     // The first frame on screen ends the loading card (its stages: window.__loadTimes).
