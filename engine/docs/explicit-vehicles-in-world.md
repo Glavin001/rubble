@@ -800,6 +800,45 @@ median of the two runs' p50 (ms per 120 Hz World step, submit to completion). Lo
   (§10.2) and the awake cars' frames remain. Loosening `reach` would let them sleep; it is
   a lossy trade and left for a decision.
 
+### 10.4 Creep and sleep against distance from the origin
+
+`engine-softbody/examples/sleep_distance.rs`: on the CPU reference with the World's
+clock (120 Hz frames), each frame re-bases as the GPU does. A vehicle spawns at rest at
+(d, 0, d/2) the way `place_vehicle` places it (world positions, origin 0). The table gives
+when it falls asleep under the default rule, and its creep over the last 2 s of a run
+with sleep off, measured in vehicle-local coordinates.
+
+| d (m) | Repo sedan: asleep at (s); CoM / largest node travel (mm) | Fixture car (pressure wheels, 90 s): asleep at (s); CoM / node (mm) |
+|---|---|---|
+| 0 | 2.39; 0.003 / 0.023 | 49.6; 0.002 / 0.005 |
+| 30 | 2.42; 0.013 / 0.043 | 43.0; 0.007 / 0.024 |
+| 60 | 2.27; 0.000 / 0.036 | 54.8; 0.029 / 0.054 |
+| 100 | 2.61; 0.001 / 0.024 | 54.8; 0.039 / 0.085 |
+| 500 | 2.65; 0.044 / 0.176 | 58.7; 0.006 / 0.013 |
+| 1000 | 2.61; 0.001 / 0.044 | 47.6; 0.001 / 0.005 |
+| 2000 | 2.35; 0.002 / 0.039 | 44.9; 0.002 / 0.005 |
+| 4000 | 2.79; 0.004 / 0.045 | 53.2; 0.014 / 0.028 |
+
+**Creep does not grow with distance.** The solver already keeps node positions in
+vehicle-local coordinates: each frame moves a vehicle's origin to node 0 when node 0 is
+farther than `REBASE_RADIUS` (100 m) from it, so past 100 m every node sits within a car's
+size of its origin. Only the World-space boundaries add the origin back: proxies, the
+coupling plan and vehicle contact. The rule's `reach` test runs in local coordinates.
+
+The largest local coordinates come just inside the radius (up to 100 m, a float spacing
+of 7.6 µm). The fixture car's slightly larger creep at 60–100 m is from that band, and it
+still sleeps. The 1 mm/s creep measured earlier at x = −30 came from a run that never
+re-based. So no fix is built.
+
+A smaller radius would re-base at different frames from today, so it would not be bit
+for bit near the origin. It has no measured benefit for sleep.
+
+Open, and separate from sleep: at km scale the World-space boundaries run in f32 world
+coordinates. At 4 km the spacing is 0.24 mm for contact points against rigid proxies and
+between vehicles. The lossless direction would be to shift each vehicle's proxies into its
+local frame in `cpl_plan`, and its contact partners into the owner's frame. That is a
+contact-precision change, not a sleep one, so it is proposed here, not built.
+
 ### 10.2 The coupling plan's O(vehicles × colliders): waiting on the World broadphase
 
 Not changed here. The surface-contact work (`feat/softrigid-surface-contact-r2`, spec
