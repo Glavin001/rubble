@@ -189,6 +189,32 @@ fn main() {
         _ => panic!("--scene side|oblique|front"),
     }
     let (_, device, queue) = engine_webgpu::default_device().expect("a GPU device");
+    // --arena N: N copies into walls and poles (the arena scene), GPU wall clock per
+    // frame only (the cost at scale).
+    if let Some(n) = arg("--arena") {
+        spec["scene"] = "arena".into();
+        spec["count"] = n.parse::<f64>().unwrap().into();
+        let mut sim = ExplicitSim::new_native(&device, &queue, &spec).expect("spawn");
+        let mut clock = FrameClock::default();
+        let (mut cost, mut steps) = (0.0f64, 0u64);
+        for f in 0..(secs * 60.0) as usize {
+            let k = clock.next();
+            let t = Instant::now();
+            sim.frame_native(k).unwrap();
+            sim.gpu_solver().wait();
+            if f >= 10 {
+                cost += t.elapsed().as_secs_f64();
+                steps += u64::from(k);
+            }
+        }
+        println!(
+            "{car_name} arena x{n} surface {}: {:.3} ms per 60 fps frame, {:.1} µs/step for the fleet",
+            surface as u8,
+            cost / steps as f64 * 1e3 * 100.0 / 3.0,
+            cost / steps as f64 * 1e6
+        );
+        return;
+    }
     let mut sim = ExplicitSim::new_native(&device, &queue, &spec).expect("spawn");
     let mut cpu = sim.spawned(0).clone();
     let bx = *cpu.boxes.last().expect("the pole box");

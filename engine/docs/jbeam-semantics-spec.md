@@ -2064,6 +2064,18 @@ frame; crush: the struck side's skin in the pole's lane against the far side.
 * Cost (CPU reference: every triangle against every slot whose box is near; no
   broad-phase beyond the per-vehicle slot list): the ETK side pole 2.8× per step,
   sedan1 1.0–1.3×.
+* GPU (`--gpu`, wgpu on Metal, M3 Max, wall clock per step with the frame's wait):
+  sedan1 alone at the side pole 195 → 616 µs/step (3.2×: the triangles at the pole
+  each run their whole narrow phase in one lane, twice: find, then apply); the
+  `arena` of 64 sedan1 into walls and poles 8.23 → 9.76 ms per fleet step (+19 %:
+  most triangles cull out; the three barriers and the snapshot per step remain). The
+  ETK (RoR profile: float contact sums, not bit for bit, so its GPU run is its own
+  chaotic path): side pole, triangle depth 98.9 → 25.9 mm, inside samples 2,101 → 281,
+  crush max 456 → 339 mm, end 302 → 61 mm, peak 153 → 398 kN, 121 → 188 µs/step.
+* Lossless speed-ups not yet taken: keep each triangle's find result for its apply
+  (most hit one slot), spread a triangle's candidates over lanes, and a per-vehicle
+  slot grid for large static sets.
 
-**Open:** beam-edge contact; GPU proxies (the World's coupling); GPU cost at scale; the
-NCAP pole calibration with it on. The default stays node only until those hold.
+**Open:** beam-edge contact; GPU proxies (the World's coupling); the single-vehicle GPU
+cost; the NCAP pole calibration with it on. The default stays node only until those
+hold.
