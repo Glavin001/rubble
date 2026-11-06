@@ -76,29 +76,33 @@ pub(crate) fn read_ranges_with(
 }
 
 /// [`read_ranges_with`] on any device and queue (the explicit solver's buffers).
+///
+/// The copy is submitted before this returns, so the read holds the state after
+/// exactly the work submitted so far (a frame submitted next, in the same task,
+/// is not in it); only the mapping is awaited.
 pub(crate) fn read_ranges_on(
     device: wgpu::Device,
     queue: wgpu::Queue,
     ranges: Vec<(wgpu::Buffer, u64, u64)>,
     decode: impl FnOnce(Vec<u32>) -> Result<JsValue, JsValue> + 'static,
 ) -> js_sys::Promise {
-    wasm_bindgen_futures::future_to_promise(async move {
-        let total: u64 = ranges.iter().map(|r| r.2).sum();
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readRanges"),
-            size: total.max(4),
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut enc = device.create_command_encoder(&Default::default());
-        let mut at = 0;
-        for (b, offset, size) in &ranges {
-            if *size > 0 {
-                enc.copy_buffer_to_buffer(b, *offset, &staging, at, *size);
-            }
-            at += size;
+    let total: u64 = ranges.iter().map(|r| r.2).sum();
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readRanges"),
+        size: total.max(4),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&Default::default());
+    let mut at = 0;
+    for (b, offset, size) in &ranges {
+        if *size > 0 {
+            enc.copy_buffer_to_buffer(b, *offset, &staging, at, *size);
         }
-        queue.submit([enc.finish()]);
+        at += size;
+    }
+    queue.submit([enc.finish()]);
+    wasm_bindgen_futures::future_to_promise(async move {
         let (tx, rx) = futures_channel::oneshot::channel();
         staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
