@@ -192,7 +192,8 @@ fn the_broadphase_plan_is_the_scan_on_the_uniform_grid() {
 fn a_vehicle_out_of_the_broadphase_has_no_proxies_and_its_proxy_is_frozen() {
     let mut w = scene(true, 40, 0);
     let car = sedan(0.0, Vec3::new(0.0, 0.0, -2.0));
-    w.add_explicit_vehicles(std::slice::from_ref(&car), &def()).unwrap();
+    w.add_explicit_vehicles(std::slice::from_ref(&car), &def())
+        .unwrap();
     for _ in 0..10 {
         w.step().unwrap();
         w.poll_blocking().unwrap();
@@ -200,7 +201,10 @@ fn a_vehicle_out_of_the_broadphase_has_no_proxies_and_its_proxy_is_frozen() {
     let p0 = w.explicit_vehicle_proxy(0).unwrap();
     assert!(p0.refattens >= 1 && p0.in_broadphase, "{p0:?}");
     assert!(p0.lo.cmplt(p0.hi).all(), "fat box {p0:?}");
-    assert!(!w.explicit_window_impulses()[0].is_empty(), "the posts are proxies");
+    assert!(
+        !w.explicit_window_impulses()[0].is_empty(),
+        "the posts are proxies"
+    );
     w.set_explicit_vehicle_in_broadphase(0, false).unwrap();
     for _ in 0..5 {
         w.step().unwrap();
@@ -208,12 +212,22 @@ fn a_vehicle_out_of_the_broadphase_has_no_proxies_and_its_proxy_is_frozen() {
     }
     let p1 = w.explicit_vehicle_proxy(0).unwrap();
     assert!(!p1.in_broadphase, "{p1:?}");
-    assert_eq!((p1.lo, p1.hi, p1.refattens), (p0.lo, p0.hi, p0.refattens), "frozen out of the broadphase");
-    assert!(w.explicit_window_impulses()[0].is_empty(), "no proxies out of the broadphase");
+    assert_eq!(
+        (p1.lo, p1.hi, p1.refattens),
+        (p0.lo, p0.hi, p0.refattens),
+        "frozen out of the broadphase"
+    );
+    assert!(
+        w.explicit_window_impulses()[0].is_empty(),
+        "no proxies out of the broadphase"
+    );
     w.set_explicit_vehicle_in_broadphase(0, true).unwrap();
     w.step().unwrap();
     w.poll_blocking().unwrap();
     let p2 = w.explicit_vehicle_proxy(0).unwrap();
-    assert!(p2.in_broadphase && p2.refattens == 1, "refattened on return: {p2:?}");
+    assert!(
+        p2.in_broadphase && p2.refattens == 1,
+        "refattened on return: {p2:?}"
+    );
     assert!(!w.explicit_window_impulses()[0].is_empty(), "proxies again");
 }

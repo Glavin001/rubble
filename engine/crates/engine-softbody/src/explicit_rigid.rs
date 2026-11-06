@@ -109,6 +109,8 @@ pub struct ProxyShape {
     hull_local: Option<(Vec<Vec3>, Vec<[u32; 2]>)>,
     /// This step's world geometry and cull box.
     world: Option<(WorldGeom, Vec3, Vec3)>,
+    /// This step's body velocity when the body is fast ([`ProxySet::cast_velocities`]).
+    fast: Option<Vec3>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -220,6 +222,7 @@ impl ProxyShape {
             sum: [0; 6],
             hull_local: None,
             world: None,
+            fast: None,
         }
     }
 
@@ -343,6 +346,10 @@ impl ProxySet {
     /// count (nodes inside its shapes, on the positions the node pass tests).
     pub fn begin_step(&mut self, origin: Vec3, nodes: &[Node]) {
         self.place_shapes();
+        let fast = self.cast_velocities_now();
+        for (s, f) in self.shapes.iter_mut().zip(fast) {
+            s.fast = f;
+        }
         for b in &mut self.bodies {
             b.count = 0;
         }
@@ -366,12 +373,29 @@ impl ProxySet {
     /// shape it is strictly inside, in shape order; each one's reaction is summed into its
     /// shape.
     pub fn node_contact(&mut self, x: Vec3, n: &Node) -> Vec3 {
+        self.node_contact_with(x, n, false)
+    }
+
+    /// [`Self::node_contact`]; with `fast_side` (the surface contact's casts, §38.4) a
+    /// node inside a fast body's shape is pushed out along the body's motion relative to
+    /// it, the side it entered by, instead of through the nearest face (a node a fast ball
+    /// carried past its centre would otherwise leave by the far side and push the ball
+    /// on). Slow bodies are unchanged.
+    pub fn node_contact_with(&mut self, x: Vec3, n: &Node, fast_side: bool) -> Vec3 {
         let mut total = Vec3::ZERO;
         let h = STEP;
         for k in 0..self.shapes.len() {
-            let Some(normal) = Self::face(&self.shapes[k], x) else {
+            let Some(mut normal) = Self::face(&self.shapes[k], x) else {
                 continue;
             };
+            if let Some(vb) = self.shapes[k].fast.filter(|_| fast_side) {
+                // Only while the body overtakes the node (their relative motion along
+                // the body's own): a node outrunning the body leaves by its nearest face.
+                let d = vb - n.vel;
+                if d.length_squared() > 0.0 && d.dot(vb) > 0.0 {
+                    normal = d.normalize();
+                }
+            }
             let s = &self.shapes[k];
             let b = &self.bodies[s.body as usize];
             let f = n.force + total;
@@ -473,6 +497,10 @@ impl ProxySet {
     /// e a box's least half extent, a sphere's or capsule's radius, a hull's least
     /// plane offset (its inscribed radius about its origin; at least 1 cm). Else none.
     pub fn cast_velocities(&self) -> Vec<Option<Vec3>> {
+        self.cast_velocities_now()
+    }
+
+    fn cast_velocities_now(&self) -> Vec<Option<Vec3>> {
         self.shapes
             .iter()
             .map(|s| {

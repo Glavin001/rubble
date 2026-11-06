@@ -3371,6 +3371,9 @@ impl ExplicitBeams {
         if let Some(r) = rigid.as_mut() {
             r.begin_step(origin, &self.nodes);
         }
+        // §38.4: with surface contact, a fast proxy pushes the nodes inside it out the side
+        // they came from.
+        let fast_side = self.surface_contact && !crate::explicit_surface::casts_off();
         let mut cf = self.contact_force.take();
         // (Sized by the pressure wheels' builder: every tread node has a slot.)
         let mut tread = std::mem::take(&mut self.tread);
@@ -3478,7 +3481,7 @@ impl ExplicitBeams {
                     }
                 }
                 if let Some(r) = rigid.as_mut() {
-                    let c = r.node_contact(x, &n);
+                    let c = r.node_contact_with(x, &n, fast_side);
                     if let Some(l) = cf.as_mut() {
                         l.add(i, c);
                     }

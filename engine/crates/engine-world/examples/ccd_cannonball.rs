@@ -27,7 +27,9 @@ const STEPS: u32 = 17;
 
 fn arg(k: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
-    a.iter().position(|x| x == k).and_then(|i| a.get(i + 1).cloned())
+    a.iter()
+        .position(|x| x == k)
+        .and_then(|i| a.get(i + 1).cloned())
 }
 
 fn car(name: &str) -> ExplicitBeams {
@@ -59,7 +61,11 @@ fn car(name: &str) -> ExplicitBeams {
     };
     let mut sim = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
     // Long axis along z, lowest node 2 cm above the ground at y = 0, centred on x = 0.
-    let b = |s: &ExplicitBeams| s.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));
+    let b = |s: &ExplicitBeams| {
+        s.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| {
+            (a.min(n.pos), b.max(n.pos))
+        })
+    };
     let (lo, hi) = b(&sim);
     if hi.x - lo.x > hi.z - lo.z {
         for n in &mut sim.nodes {
@@ -100,7 +106,9 @@ impl Shot {
     fn geom(self) -> ProxyGeom {
         match self {
             Shot::Sphere(r) => ProxyGeom::Sphere { radius: r },
-            Shot::Box(h) => ProxyGeom::Box { half: Vec3::splat(h) },
+            Shot::Box(h) => ProxyGeom::Box {
+                half: Vec3::splat(h),
+            },
         }
     }
     fn label(self) -> String {
@@ -123,8 +131,14 @@ impl Shot {
 
 /// The aim: door height (the car's mid height), its middle along z, 1 m off its +x side.
 fn aim(sim: &ExplicitBeams) -> (Vec3, f32, f32) {
-    let (lo, hi) = sim.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));
-    (Vec3::new(hi.x + 1.0, 0.5 * (lo.y + hi.y), 0.5 * (lo.z + hi.z)), lo.x, hi.x)
+    let (lo, hi) = sim.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| {
+        (a.min(n.pos), b.max(n.pos))
+    });
+    (
+        Vec3::new(hi.x + 1.0, 0.5 * (lo.y + hi.y), 0.5 * (lo.z + hi.z)),
+        lo.x,
+        hi.x,
+    )
 }
 
 /// The deepest any collision triangle gets inside the projectile at c (sampled: the
@@ -160,7 +174,14 @@ fn proxy(shot: Shot, at: Vec3, speed: f32) -> ProxySet {
             share: 1.0,
             count: 0,
         }],
-        shapes: vec![ProxyShape::new(0, Vec3::ZERO, Quat::IDENTITY, shot.geom(), 1, None)],
+        shapes: vec![ProxyShape::new(
+            0,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            shot.geom(),
+            1,
+            None,
+        )],
         frozen: false,
     };
     set.begin_window();
@@ -184,6 +205,16 @@ fn run_cpu(sim: &ExplicitBeams, shot: Shot, speed: f32) -> Out {
             let c = cpu.rigid.as_ref().unwrap().bodies[0].pos;
             let pos: Vec<Vec3> = cpu.nodes.iter().map(|n| cpu.origin + n.pos).collect();
             depth = depth.max(deepest(&cpu, &pos, shot, c));
+            if std::env::var("CCD_TRACE").is_ok() {
+                let b = &cpu.rigid.as_ref().unwrap().bodies[0];
+                println!(
+                    "x {:.3} v {:?} w {:.1} hits {}",
+                    b.pos.x,
+                    b.vel,
+                    b.ang_vel.length(),
+                    cpu.surface_last
+                );
+            }
         }
     }
     let b = &cpu.rigid.as_ref().unwrap().bodies[0];
@@ -197,8 +228,13 @@ fn run_cpu(sim: &ExplicitBeams, shot: Shot, speed: f32) -> Out {
 fn run_gpu(sim: &ExplicitBeams, shot: Shot, speed: f32) -> Out {
     let (_, device, queue) = engine_webgpu::default_device().unwrap();
     let (at, _, _) = aim(sim);
-    let cap = CouplingCapacity { bodies: 2, shapes: 2, planes: 8 };
-    let mut gpu = ExplicitBeamsGpu::with_coupling(&device, &queue, std::slice::from_ref(sim), Some(cap));
+    let cap = CouplingCapacity {
+        bodies: 2,
+        shapes: 2,
+        planes: 8,
+    };
+    let mut gpu =
+        ExplicitBeamsGpu::with_coupling(&device, &queue, std::slice::from_ref(sim), Some(cap));
     let mut set = proxy(shot, at, speed);
     gpu.set_coupling_on(true);
     let mut depth = 0.0f32;
@@ -228,6 +264,9 @@ fn run_world(sim: &ExplicitBeams, shot: Shot, speed: f32) -> Out {
         },
     )
     .unwrap();
+    // The vehicles' clock starts a World step after they are added: the shot starts two
+    // steps' travel farther out, so it meets the car inside the vehicles' windows.
+    let at = at + Vec3::X * (2.0 * speed * w.solver().dt);
     let b = w
         .create_body(&BodyDef {
             linear_velocity: [-speed, 0.0, 0.0],
@@ -242,10 +281,11 @@ fn run_world(sim: &ExplicitBeams, shot: Shot, speed: f32) -> Out {
         Shot::Sphere(r) => w.create_sphere_shape(b, &def, [0.0; 3], r).unwrap(),
         Shot::Box(h) => w.create_box_shape(b, &def, [h; 3]).unwrap(),
     };
-    w.add_explicit_vehicles(std::slice::from_ref(sim), &ExplicitVehiclesDef::default()).unwrap();
+    w.add_explicit_vehicles(std::slice::from_ref(sim), &ExplicitVehiclesDef::default())
+        .unwrap();
     let mut depth = 0.0f32;
     let mut last = Vec3::from(at);
-    let frames = ((6.0 / speed / w.solver().dt).ceil() as u32).clamp(4, 12);
+    let frames = ((6.0 / speed / w.solver().dt).ceil() as u32 + 2).clamp(4, 14);
     for _ in 0..frames {
         w.step().unwrap();
         w.poll_blocking().unwrap();
@@ -272,8 +312,14 @@ fn main() {
         .collect();
     let sim = car(&name);
     let (_, far, _) = aim(&sim);
-    println!("{name}: {} nodes, {} triangles; far side x = {far:.2}", sim.nodes.len(), sim.triangles.len());
-    println!("| car | mode | projectile | m/s | outcome | momentum given | deepest (mm) | end x (m) |");
+    println!(
+        "{name}: {} nodes, {} triangles; far side x = {far:.2}",
+        sim.nodes.len(),
+        sim.triangles.len()
+    );
+    println!(
+        "| car | mode | projectile | m/s | outcome | momentum given | deepest (mm) | end x (m) |"
+    );
     println!("|---|---|---|---|---|---|---|---|");
     for shot in [Shot::Sphere(0.06), Shot::Sphere(0.15), Shot::Box(0.1)] {
         for &v in &speeds {
@@ -284,7 +330,11 @@ fn main() {
                     "world" => run_world(&sim, shot, v),
                     _ => panic!("--modes cpu,gpu,world"),
                 };
-                let outcome = if o.end_x < far && o.transfer < 0.02 { "tunnel" } else { "hit" };
+                let outcome = if o.end_x < far && o.transfer < 0.02 {
+                    "tunnel"
+                } else {
+                    "hit"
+                };
                 println!(
                     "| {name} | {mode} | {} | {v:.0} | {outcome} | {:.1} % | {:.1} | {:.2} |",
                     shot.label(),

@@ -1347,7 +1347,10 @@ pub fn translated(s: &SurfaceShape, d: Vec3) -> SurfaceShape {
             b: *b + d,
             radius: *radius,
         },
-        SurfaceShape::Sphere { c, radius } => SurfaceShape::Sphere { c: *c + d, radius: *radius },
+        SurfaceShape::Sphere { c, radius } => SurfaceShape::Sphere {
+            c: *c + d,
+            radius: *radius,
+        },
         SurfaceShape::Hull {
             verts,
             edges,
@@ -1357,7 +1360,9 @@ pub fn translated(s: &SurfaceShape, d: Vec3) -> SurfaceShape {
             edges: edges.clone(),
             planes: planes.iter().map(|&(n, o)| (n, o + dot3(n, d))).collect(),
         },
-        SurfaceShape::Triangle { t } => SurfaceShape::Triangle { t: [t[0] + d, t[1] + d, t[2] + d] },
+        SurfaceShape::Triangle { t } => SurfaceShape::Triangle {
+            t: [t[0] + d, t[1] + d, t[2] + d],
+        },
     }
 }
 

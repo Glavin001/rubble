@@ -22,7 +22,9 @@ use rubble::*;
 
 fn arg(k: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
-    a.iter().position(|x| x == k).and_then(|i| a.get(i + 1).cloned())
+    a.iter()
+        .position(|x| x == k)
+        .and_then(|i| a.get(i + 1).cloned())
 }
 
 fn sedan(at: Vec3, speed: f32) -> ExplicitBeams {
@@ -38,7 +40,11 @@ fn sedan(at: Vec3, speed: f32) -> ExplicitBeams {
         triangle_throttle: true,
     };
     let mut sim = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
-    let b = |s: &ExplicitBeams| s.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));
+    let b = |s: &ExplicitBeams| {
+        s.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| {
+            (a.min(n.pos), b.max(n.pos))
+        })
+    };
     let (lo, hi) = b(&sim);
     if hi.x - lo.x > hi.z - lo.z {
         for n in &mut sim.nodes {
@@ -75,16 +81,43 @@ fn median(mut v: Vec<f64>) -> f64 {
 
 fn world(n: usize, cars: usize, side: f32) -> (World, Vec<ExplicitBeams>) {
     let cap = WorldCapacity {
-        max_bodies: (n as u32 + 64 * cars as u32 + 64).next_power_of_two().max(4096),
-        max_colliders: (n as u32 + 64 * cars as u32 + 64).next_power_of_two().max(8192),
+        max_bodies: (n as u32 + 64 * cars as u32 + 64)
+            .next_power_of_two()
+            .max(4096),
+        max_colliders: (n as u32 + 64 * cars as u32 + 64)
+            .next_power_of_two()
+            .max(8192),
         ..WorldCapacity::default()
     };
-    let mut w = World::new(GpuContext::Default, &WorldDef { capacity: cap, ..WorldDef::default() }).unwrap();
+    let mut w = World::new(
+        GpuContext::Default,
+        &WorldDef {
+            capacity: cap,
+            ..WorldDef::default()
+        },
+    )
+    .unwrap();
     // The ground slab 30 cm under the cars' own ground.
-    let g = w.create_body(&BodyDef { position: [0.0, -0.8, 0.0], ..BodyDef::default() }).unwrap();
-    w.create_box_shape(g, &ShapeDef::default(), [0.5 * side + 10.0, 0.5, 0.5 * side + 10.0]).unwrap();
+    let g = w
+        .create_body(&BodyDef {
+            position: [0.0, -0.8, 0.0],
+            ..BodyDef::default()
+        })
+        .unwrap();
+    w.create_box_shape(
+        g,
+        &ShapeDef::default(),
+        [0.5 * side + 10.0, 0.5, 0.5 * side + 10.0],
+    )
+    .unwrap();
     let pts: Vec<Vec3> = (0..8)
-        .map(|i| Vec3::new(if i & 1 != 0 { 0.15 } else { -0.15 }, if i & 2 != 0 { 0.45 } else { -0.45 }, if i & 4 != 0 { 0.15 } else { -0.15 }))
+        .map(|i| {
+            Vec3::new(
+                if i & 1 != 0 { 0.15 } else { -0.15 },
+                if i & 2 != 0 { 0.45 } else { -0.45 },
+                if i & 4 != 0 { 0.15 } else { -0.15 },
+            )
+        })
         .collect();
     let hull = engine_schema::convex::ConvexHull::from_points(&pts).unwrap();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
@@ -93,16 +126,34 @@ fn world(n: usize, cars: usize, side: f32) -> (World, Vec<ExplicitBeams>) {
     // Cars on a grid of lanes 12 m apart about the origin.
     let per_row = (cars as f32).sqrt().ceil() as usize;
     let car_at: Vec<Vec3> = (0..cars)
-        .map(|i| Vec3::new(12.0 * (i % per_row) as f32 - 6.0 * per_row as f32, 0.0, 12.0 * (i / per_row) as f32 - 6.0 * per_row as f32))
+        .map(|i| {
+            Vec3::new(
+                12.0 * (i % per_row) as f32 - 6.0 * per_row as f32,
+                0.0,
+                12.0 * (i / per_row) as f32 - 6.0 * per_row as f32,
+            )
+        })
         .collect();
-    let near_car = |p: Vec3| car_at.iter().any(|c| (p.x - c.x).abs() < 4.0 && (p.z - (c.z - 2.4)).abs() < 6.0);
+    let near_car = |p: Vec3| {
+        car_at
+            .iter()
+            .any(|c| (p.x - c.x).abs() < 4.0 && (p.z - (c.z - 2.4)).abs() < 6.0)
+    };
     for c in &car_at {
         for k in 0..40 {
             let side = if k % 2 == 0 { -1.0 } else { 1.0 };
-            statics.push(Vec3::new(c.x + side * (1.05 + 0.5 * ((k / 2) % 3) as f32), 0.45, c.z - 6.0 + 0.6 * (k / 6) as f32));
+            statics.push(Vec3::new(
+                c.x + side * (1.05 + 0.5 * ((k / 2) % 3) as f32),
+                0.45,
+                c.z - 6.0 + 0.6 * (k / 6) as f32,
+            ));
         }
         for k in 0..20 {
-            dynamics.push(Vec3::new(c.x + if k % 2 == 0 { -1.7 } else { 1.7 }, -0.1, c.z - 6.0 + 0.6 * (k / 2) as f32));
+            dynamics.push(Vec3::new(
+                c.x + if k % 2 == 0 { -1.7 } else { 1.7 },
+                -0.1,
+                c.z - 6.0 + 0.6 * (k / 2) as f32,
+            ));
         }
     }
     while statics.len() + dynamics.len() < n + 60 * cars {
@@ -116,19 +167,30 @@ fn world(n: usize, cars: usize, side: f32) -> (World, Vec<ExplicitBeams>) {
             dynamics.push(Vec3::new(p.x, -0.1, p.z));
         }
     }
-    let defs: Vec<BodyDef> = statics.iter().map(|p| BodyDef { position: p.to_array(), ..BodyDef::default() }).collect();
+    let defs: Vec<BodyDef> = statics
+        .iter()
+        .map(|p| BodyDef {
+            position: p.to_array(),
+            ..BodyDef::default()
+        })
+        .collect();
     let ids = w.create_bodies(&defs).unwrap();
     for (k, b) in ids.into_iter().enumerate() {
         if k % 3 == 0 {
             w.create_hull_shape(b, &ShapeDef::default(), &hull).unwrap();
         } else {
-            w.create_box_shape(b, &ShapeDef::default(), [0.15, 0.45, 0.15]).unwrap();
+            w.create_box_shape(b, &ShapeDef::default(), [0.15, 0.45, 0.15])
+                .unwrap();
         }
     }
-    let defs: Vec<BodyDef> = dynamics.iter().map(|p| BodyDef::dynamic(p.to_array())).collect();
+    let defs: Vec<BodyDef> = dynamics
+        .iter()
+        .map(|p| BodyDef::dynamic(p.to_array()))
+        .collect();
     let ids = w.create_bodies(&defs).unwrap();
     for b in ids {
-        w.create_box_shape(b, &ShapeDef::default(), [0.2, 0.2, 0.2]).unwrap();
+        w.create_box_shape(b, &ShapeDef::default(), [0.2, 0.2, 0.2])
+            .unwrap();
     }
     let fleet: Vec<ExplicitBeams> = car_at.iter().map(|&c| sedan(c, 0.5)).collect();
     (w, fleet)
@@ -148,7 +210,11 @@ fn main() {
     for &n in &ns {
         let (mut w, fleet) = world(n, cars, side);
         let def = ExplicitVehiclesDef {
-            capacity: engine_webgpu::CouplingCapacity { bodies: 96, shapes: 128, planes: 4096 },
+            capacity: engine_webgpu::CouplingCapacity {
+                bodies: 96,
+                shapes: 128,
+                planes: 4096,
+            },
             ..ExplicitVehiclesDef::default()
         };
         w.add_explicit_vehicles(&fleet, &def).unwrap();
@@ -162,7 +228,11 @@ fn main() {
         let mut plan = [Vec::new(), Vec::new()];
         for round in 0..8 {
             for (m, scan) in [(0usize, false), (1, true)] {
-                let (m, scan) = if round % 2 == 0 { (m, scan) } else { (1 - m, !scan) };
+                let (m, scan) = if round % 2 == 0 {
+                    (m, scan)
+                } else {
+                    (1 - m, !scan)
+                };
                 w.set_explicit_plan_scan(scan);
                 for _ in 0..6 {
                     let t = std::time::Instant::now();
@@ -180,7 +250,13 @@ fn main() {
         }
         let shapes = w.explicit_window_impulses().first().map_or(0, |v| v.len());
         let used = w.explicit_plan_used_broadphase();
-        let med = |v: &Vec<f64>| if v.is_empty() { f64::NAN } else { median(v.clone()) };
+        let med = |v: &Vec<f64>| {
+            if v.is_empty() {
+                f64::NAN
+            } else {
+                median(v.clone())
+            }
+        };
         println!(
             "| {n} | {cars} | {:.3} | {:.3} | {:.2} | {:.2} | {shapes} | {awake} (broadphase kept: {used:?}) |",
             med(&plan[0]),

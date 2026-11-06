@@ -1428,7 +1428,8 @@ impl ExplicitUpload {
             // its surface hits this step (gAcc), at the header's .z (0: none).
             let surf_body = if any_surface {
                 let at = acc_init.len() as u32;
-                acc_init.extend(std::iter::repeat_n(0, (cap.bodies * nv as u32) as usize));
+                // Then by step parity each fast body's earliest time of impact (§38.4).
+                acc_init.extend(std::iter::repeat_n(0, (3 * cap.bodies * nv as u32) as usize));
                 at
             } else {
                 0

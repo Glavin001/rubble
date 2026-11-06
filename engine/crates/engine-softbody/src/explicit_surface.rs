@@ -96,30 +96,65 @@ pub fn casts_off() -> bool {
 
 /// A fast shape's cast (§38.4) against element `x` (a triangle, a segment or a point)
 /// over its relative motion `d` this step: within the swept cull box, the earliest
-/// fraction of the motion at which the element comes within the band `r`
-/// ([`fq::toi`]), and the contact there (`contact` against the shape moved that far),
-/// on the side the shape came from. None when the element is not met (or is met at
-/// the start: the discrete contact's).
-pub fn cast_hit<T>(
-    x: &[Vec3],
-    s: &SurfaceShape,
-    lo: Vec3,
-    hi: Vec3,
-    d: Vec3,
-    r: f32,
-    contact: impl Fn(&SurfaceShape) -> Option<T>,
-) -> Option<T> {
-    let (elo, ehi) = x.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(a, b), &v| (a.min(v), b.max(v)));
+/// fraction t > 0 of the motion at which the element comes within the band `r`
+/// ([`fq::toi`]). None when the element is not met (or is met at the start: the
+/// discrete contact's).
+pub fn cast_toi(x: &[Vec3], s: &SurfaceShape, lo: Vec3, hi: Vec3, d: Vec3, r: f32) -> Option<f32> {
+    let (elo, ehi) = x.iter().fold(
+        (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+        |(a, b), &v| (a.min(v), b.max(v)),
+    );
     let (slo, shi) = (lo + d.min(Vec3::ZERO), hi + d.max(Vec3::ZERO));
     let (elo, ehi) = (elo - Vec3::splat(r), ehi + Vec3::splat(r));
     if !(elo.cmple(shi).all() && ehi.cmpge(slo).all()) {
         return None;
     }
     let t = fq::toi(x, s, d, r)?;
-    if !(t > 0.0) {
-        return None;
+    (t > 0.0).then_some(t)
+}
+
+/// The casts of a step (§38.4): the first pass gathers each fast body's earliest time of
+/// impact over every element (`tmin`); the second places a contact only for the
+/// elements met then (within [`TIE`] of it along their motion), each at its own time of
+/// impact against the shape moved that far, on the side it came from: an element the
+/// body would reach only after passing through another is not met this step.
+struct Casts {
+    /// Per slot its body's velocity (fast) and body index.
+    fast: Vec<Option<(Vec3, usize)>>,
+    tmin: Vec<f32>,
+    gather: bool,
+    /// The last placed cast's shape motion ([`Found::shift`]).
+    shift: Vec3,
+}
+
+impl Casts {
+    fn hit<T>(
+        &mut self,
+        slot: usize,
+        x: &[Vec3],
+        ve: Vec3,
+        s: &SurfaceShape,
+        lo: Vec3,
+        hi: Vec3,
+        r: f32,
+        contact: impl Fn(&SurfaceShape) -> Option<T>,
+    ) -> Option<T> {
+        let (vb, body) = self.fast[slot]?;
+        let d = (vb - ve) * STEP;
+        let t = cast_toi(x, s, lo, hi, d, r)?;
+        if self.gather {
+            self.tmin[body] = self.tmin[body].min(t);
+            return None;
+        }
+        let len = fq::dot3(d, d).sqrt();
+        if !(t <= self.tmin[body] + TIE / len) {
+            return None;
+        }
+        let shift = d * t;
+        let c = contact(&fq::translated(s, shift))?;
+        self.shift = shift;
+        Some(c)
     }
-    contact(&fq::translated(s, d * t))
 }
 
 /// One surface hit found by the pass: its element (a triangle, or past the
@@ -132,6 +167,9 @@ pub struct Found {
     /// Static slot (boxes, then shapes) or, at or past `static_slots`, proxy shape.
     pub slot: u32,
     pub hit: SurfaceHit,
+    /// A cast's (§38.4) shape motion to its time of impact: the body takes the contact at
+    /// `hit.q − shift`, its own point at its pose now (zero for a discrete contact).
+    pub shift: Vec3,
 }
 
 /// The beams surface contact tests as segments (beam-edge contact): every beam of a
@@ -214,98 +252,134 @@ impl ExplicitBeams {
         let r = self.collision_range;
         // Fast proxy bodies (§38.4): per slot its body's velocity when it moves more than
         // half its least extent in a step (cast along its motion), else none.
-        let mut cast: Vec<Option<Vec3>> = vec![None; statics as usize];
+        let mut casts = Casts {
+            fast: vec![None; statics as usize],
+            tmin: Vec::new(),
+            gather: false,
+            shift: Vec3::ZERO,
+        };
         if let Some(rs) = self.rigid.as_ref() {
-            cast.extend(rs.cast_velocities());
+            casts.fast.extend(
+                rs.cast_velocities()
+                    .into_iter()
+                    .zip(&rs.shapes)
+                    .map(|(v, sh)| v.map(|v| (v, sh.body as usize))),
+            );
+            casts.tmin = vec![f32::INFINITY; rs.bodies.len()];
         }
         if casts_off() {
-            cast.iter_mut().for_each(|c| *c = None);
+            casts.fast.iter_mut().for_each(|c| *c = None);
         }
-        let nodes = &self.nodes;
-        let vel = |i: u32| nodes[i as usize].vel;
-        let mut found: Vec<Found> = Vec::new();
-        for t in 0..self.triangles.len() {
-            if (!self.tri_dead.is_empty() && self.tri_dead[t]) || self.tri_anti_only(t) {
-                continue;
-            }
-            let [i0, i1, i2] = self.triangles[t].nodes;
-            let x = [i0, i1, i2].map(|i| self.origin + self.nodes[i as usize].pos);
-            for (k, (s, lo, hi)) in shapes.iter().enumerate() {
-                let hit = if near(&x, r, *lo, *hi) { triangle_contact(&x, s, r) } else { None };
-                let hit = hit.or_else(|| {
-                    let vb = cast[k]?;
-                    let ve = ((vel(i0) + vel(i1)) + vel(i2)) / 3.0;
-                    cast_hit(&x, s, *lo, *hi, (vb - ve) * STEP, r, |s| triangle_contact(&x, s, r))
-                });
-                if let Some(hit) = hit {
-                    found.push(Found {
-                        tri: t as u32,
-                        nodes: [i0, i1, i2],
-                        slot: k as u32,
-                        hit,
-                    });
-                }
-            }
-        }
-        // Beam-edge contact: the segments, after the triangles.
+        let any_fast = casts.fast.iter().any(Option::is_some);
         if self.surface_segs.is_none() {
             self.surface_segs = Some(surface_segments(self));
         }
         let segs = self.surface_segs.take().unwrap_or_default();
-        let nt = self.triangles.len() as u32;
-        for (k, &j) in segs.iter().enumerate() {
-            let b = &self.beams[j as usize];
-            if b.broken {
+        let mut found: Vec<Found> = Vec::new();
+        // With a fast body: a gathering pass first (its hits dropped), then the pass.
+        for gather in [true, false] {
+            if gather && !any_fast {
                 continue;
             }
-            let (a, bb) = (b.a, b.b);
-            let x = [a, bb].map(|i| self.origin + self.nodes[i as usize].pos);
-            for (slot, (s, lo, hi)) in shapes.iter().enumerate() {
-                let pair = if seg_near(&x, r, *lo, *hi) { segment_contact(&x, s, r) } else { None };
-                let pair = pair.or_else(|| {
-                    let vb = cast[slot]?;
-                    let ve = (vel(a) + vel(bb)) * 0.5;
-                    cast_hit(&x, s, *lo, *hi, (vb - ve) * STEP, r, |s| segment_contact(&x, s, r))
-                });
-                if let Some((hit, second)) = pair {
-                    for hit in std::iter::once(hit).chain(second) {
+            casts.gather = gather;
+            found.clear();
+            let nodes = &self.nodes;
+            let vel = |i: u32| nodes[i as usize].vel;
+            for t in 0..self.triangles.len() {
+                if (!self.tri_dead.is_empty() && self.tri_dead[t]) || self.tri_anti_only(t) {
+                    continue;
+                }
+                let [i0, i1, i2] = self.triangles[t].nodes;
+                let x = [i0, i1, i2].map(|i| self.origin + self.nodes[i as usize].pos);
+                for (k, (s, lo, hi)) in shapes.iter().enumerate() {
+                    let hit = if near(&x, r, *lo, *hi) {
+                        triangle_contact(&x, s, r)
+                    } else {
+                        None
+                    };
+                    casts.shift = Vec3::ZERO;
+                    let hit = hit.or_else(|| {
+                        let ve = ((vel(i0) + vel(i1)) + vel(i2)) / 3.0;
+                        casts.hit(k, &x, ve, s, *lo, *hi, r, |s| triangle_contact(&x, s, r))
+                    });
+                    if let Some(hit) = hit {
                         found.push(Found {
-                            tri: nt + k as u32,
-                            nodes: [a, bb, a],
+                            tri: t as u32,
+                            nodes: [i0, i1, i2],
+                            slot: k as u32,
+                            hit,
+                            shift: casts.shift,
+                        });
+                    }
+                }
+            }
+            // Beam-edge contact: the segments, after the triangles.
+            let nt = self.triangles.len() as u32;
+            for (k, &j) in segs.iter().enumerate() {
+                let b = &self.beams[j as usize];
+                if b.broken {
+                    continue;
+                }
+                let (a, bb) = (b.a, b.b);
+                let x = [a, bb].map(|i| self.origin + self.nodes[i as usize].pos);
+                for (slot, (s, lo, hi)) in shapes.iter().enumerate() {
+                    let pair = if seg_near(&x, r, *lo, *hi) {
+                        segment_contact(&x, s, r)
+                    } else {
+                        None
+                    };
+                    casts.shift = Vec3::ZERO;
+                    let pair = pair.or_else(|| {
+                        let ve = (vel(a) + vel(bb)) * 0.5;
+                        casts.hit(slot, &x, ve, s, *lo, *hi, r, |s| segment_contact(&x, s, r))
+                    });
+                    if let Some((hit, second)) = pair {
+                        for hit in std::iter::once(hit).chain(second) {
+                            found.push(Found {
+                                tri: nt + k as u32,
+                                nodes: [a, bb, a],
+                                slot: slot as u32,
+                                hit,
+                                shift: casts.shift,
+                            });
+                        }
+                    }
+                }
+            }
+            // Point contact in the band: every collidable node outside a shape and within
+            // the band of it (a node strictly inside is node contact's), after the segments.
+            let ns = nt + segs.len() as u32;
+            for i in 0..self.nodes.len() {
+                if self.nodes[i].has(NODE_NO_GROUND) {
+                    continue;
+                }
+                let x = self.origin + self.nodes[i].pos;
+                for (slot, (s, lo, hi)) in shapes.iter().enumerate() {
+                    let hit = if seg_near(&[x, x], r, *lo, *hi) {
+                        point_contact(x, s, r)
+                    } else {
+                        None
+                    };
+                    casts.shift = Vec3::ZERO;
+                    let hit = hit.or_else(|| {
+                        casts.hit(slot, &[x], vel(i as u32), s, *lo, *hi, r, |s| {
+                            point_contact(x, s, r)
+                        })
+                    });
+                    if let Some(hit) = hit {
+                        let n = i as u32;
+                        found.push(Found {
+                            tri: ns + n,
+                            nodes: [n, n, n],
                             slot: slot as u32,
                             hit,
+                            shift: casts.shift,
                         });
                     }
                 }
             }
         }
-        // Point contact in the band: every collidable node outside a shape and within
-        // the band of it (a node strictly inside is node contact's), after the segments.
-        let ns = nt + segs.len() as u32;
         self.surface_segs = Some(segs);
-        for i in 0..self.nodes.len() {
-            if self.nodes[i].has(NODE_NO_GROUND) {
-                continue;
-            }
-            let x = self.origin + self.nodes[i].pos;
-            for (slot, (s, lo, hi)) in shapes.iter().enumerate() {
-                let hit = if seg_near(&[x, x], r, *lo, *hi) { point_contact(x, s, r) } else { None };
-                let hit = hit.or_else(|| {
-                    let vb = cast[slot]?;
-                    let d = (vb - vel(i as u32)) * STEP;
-                    cast_hit(&[x], s, *lo, *hi, d, r, |s| point_contact(x, s, r))
-                });
-                if let Some(hit) = hit {
-                    let n = i as u32;
-                    found.push(Found {
-                        tri: ns + n,
-                        nodes: [n, n, n],
-                        slot: slot as u32,
-                        hit,
-                    });
-                }
-            }
-        }
         self.surface_last = found.len() as u32;
         self.surface_force = glam::DVec3::ZERO;
         if found.is_empty() {
@@ -373,7 +447,7 @@ impl ExplicitBeams {
                 Some(rs) => {
                     let sh = &rs.shapes[(f.slot - statics) as usize];
                     let b = &rs.bodies[sh.body as usize];
-                    let arm = f.hit.q - b.pos;
+                    let arm = (f.hit.q - f.shift) - b.pos;
                     let vb = b.vel + cross3(b.ang_vel, arm);
                     if b.is_static() {
                         (0.0, vb)
@@ -427,7 +501,7 @@ impl ExplicitBeams {
             }
             if f.slot >= statics {
                 if let Some(rs) = self.rigid.as_mut() {
-                    rs.add_surface_reaction((f.slot - statics) as usize, fc, f.hit.q);
+                    rs.add_surface_reaction((f.slot - statics) as usize, fc, f.hit.q - f.shift);
                 }
             }
         }

@@ -291,12 +291,29 @@ bool cplMay(uint v, uint k, float3 x, bool cull, uint2 gr)
     return dot(d, d) < asfloat(w.w);
 }
 
+// A fast proxy's push direction for a node inside it (its own function: the shipped
+// path keeps its code).
+float4 cplFastSide(uint v, uint k, float3 vel, float4 n4)
+{
+    float3 vb;
+    if (!surfProxyFast(v, k, vb)) return n4;
+    float3 d = vb - vel;
+    // Only while the body overtakes the node (CPU node_contact_with).
+    if (!(dot(d, d) > 0.0) || !(dot(d, vb) > 0.0)) return n4;
+    return float4(normalize(d), 1.0);
+}
+
 // The two-body contact on a node of vehicle v at world x (force f so far, velocity vel,
 // mass, friction) from every proxy shape it is inside, in shape order; the reactions are
 // summed into the shapes' accumulators. Returns the node's force with them added.
 // `local`: the node's index in its vehicle (its count pass range, cplGsNodes).
+bool surfProxyFast(uint v, uint k, out float3 vb);
+
 float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction)
 {
+    // §38.4 (explicit_beams_surface.slang FLAG_SURFACE): a fast proxy pushes the nodes
+    // inside it out along its motion relative to them (CPU ProxySet::node_contact_with).
+    bool fastSide = (gStatic[v * 4u + 3u].x & 131072u) != 0u && gP.surfSplit != 0u;
     uint4 hdr = gMisc[cplBase(v)];
     uint acc = cplAcc(v);
     uint nb = cplB();
@@ -317,6 +334,7 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
         if (!cplMay(v, k, x, cull, gr)) continue;
         float4 n4 = cplFace(v, k, x);
         if (n4.w == 0.0) continue;
+        if (fastSide) n4 = cplFastSide(v, k, vel, n4);
         uint at = cplShape(v, k);
         uint j = gMisc[at].y;
         uint b = cplBody(v, j);
