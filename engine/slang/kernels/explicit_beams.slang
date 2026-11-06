@@ -1620,6 +1620,34 @@ void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
 // Beam bn's vehicle keeps strength under plastic stretch (FLAG_KEEP_STRENGTH).
 bool keepStrength(uint4 bn) { return (gStatic[(bn.z >> 16) * 4u + 3u].x & FLAG_KEEP_STRENGTH) != 0u; }
 
+// A coupler (the CPU reference's coupler_force; spec §7): a zero-length
+// spring-damper (c1 = k, c) that breaks past its strength. `setOff`: a broken active
+// coupler sets off its group now; a coupler in several break groups (an extension
+// record, spec §7.1) leaves it to extPending (s1.w = 1), as other EXT_GROUPS beams.
+void jcouplerUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, float4 s1, float4 c1,
+                    float3 pa, float3 pb, float3 va, float3 vb, bool setOff)
+{
+    int group = asint(bn.w);
+    float strength = s1.x;
+    bool broken = false;
+    float3 fc = ssub3(sscale(ssub3(pa, pb), -c1.x), sscale(ssub3(va, vb), c1.y));
+    float m = ssqrt(sdot(fc, fc));
+    if (m > strength)
+    {
+        broken = true;
+        fc = float3(0.0, 0.0, 0.0);
+        if (setOff && group > 0)
+        {
+            gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+            gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+        }
+    }
+    if (broken) gBeams[gj * 2u + 1u] = float4(strength, m, 1.0, 1.0);
+    else if (s1.w != 0.0) gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(fc, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-fc, 0.0);
+}
+
 // A JBeam-mode beam (kinds KIND_JPLAIN..KIND_JCOUPLER; the CPU reference's
 // jbeam_force_filtered, coupler_force and beam_pass; engine/docs/jbeam-semantics-spec.md).
 // Exact lengths (JBeam mode spawns without the fast inverse square root); no break
@@ -1651,22 +1679,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     }
     if (kind == KIND_JCOUPLER)
     {
-        float3 fc = ssub3(sscale(ssub3(pa.xyz, pb.xyz), -c1.x), sscale(ssub3(va, vb), c1.y));
-        float m = ssqrt(sdot(fc, fc));
-        if (m > strength)
-        {
-            broken = true;
-            fc = float3(0.0, 0.0, 0.0);
-            if (group > 0)
-            {
-                gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
-                gGroups[groupSlot(parity, groupOff, 0u)].min(local);
-            }
-        }
-        if (broken) gBeams[gj * 2u + 1u] = float4(strength, m, 1.0, 1.0);
-        else if (s1.w != 0.0) gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
-        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(fc, 0.0);
-        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-fc, 0.0);
+        jcouplerUpdate(gj, local, groupOff, parity, bn, s1, c1, pa.xyz, pb.xyz, va, vb, true);
         return;
     }
     float rest = s0.x;
@@ -1861,6 +1874,13 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     float4 e2 = asfloat(gStatic[gP.extBase + x * 4u + 2u]);
     uint4 e3 = gStatic[gP.extBase + x * 4u + 3u];
     if (kind == KIND_JPTRI2 || kind == KIND_JATRI2 || kind == KIND_JLBEAM2) return; // the first record writes the forces
+    if (kind == KIND_JCOUPLER)
+    {
+        float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
+        jcouplerUpdate(gj, local, groupOff, parity, bn, s1, c1, gNodes[bn.x * 3u].xyz, gNodes[bn.y * 3u].xyz,
+                       gNodes[bn.x * 3u + 1u].xyz, gNodes[bn.y * 3u + 1u].xyz, false);
+        return;
+    }
     if (kind == KIND_JATRI)
     {
         // A triangle's drag and lift in still air (explicit_jbeam_ext.rs
