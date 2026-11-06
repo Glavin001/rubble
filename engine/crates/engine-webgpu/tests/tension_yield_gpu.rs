@@ -53,7 +53,7 @@ fn pairs() -> ExplicitBeams {
         ));
     }
     s.finish();
-    s.set_jbeam_plastic(&[(4, 5, 4_000.0, 0.5, 0.5), (6, 7, 4_000.0, 0.5, 0.5)])
+    s.set_jbeam_plastic(&[(4, 5, 4_000.0, 0.5, 0.5, false), (6, 7, 4_000.0, 0.5, 0.5, false)])
         .unwrap();
     s.set_tension_yield(&[
         (0, 1, 3_000.0),
@@ -117,4 +117,68 @@ fn tension_yield_steps_like_the_cpu() {
     }
     // The tension side yields less with Tt 3 kN than at Tc = Tt = 500 N.
     assert!(strain[0] < strain[4]);
+}
+
+/// The BeamNG profile's ropes and tearing (jbeam-semantics-spec.md §36) on the GPU,
+/// bit for bit: rope pairs (tension-only JBeam beams, `JbeamRope`) and plain pairs,
+/// flung apart (even) or together (odd), half of them tearing at dₑ 0.2
+/// (`breakAtExpansion`), none losing strength as they stretch.
+#[test]
+fn ropes_and_tearing_step_like_the_cpu() {
+    let mut s = ExplicitBeams::empty(EXACT);
+    s.ground = -100.0;
+    for p in 0..8u32 {
+        let sign = if p % 2 == 0 { 15.0 } else { -2.0 };
+        for x in [0.0f32, 0.5] {
+            s.nodes.push(Node {
+                pos: Vec3::new(x, 10.0, p as f32),
+                vel: Vec3::new(sign * if x == 0.0 { -1.0 } else { 1.0 }, 0.0, 0.0),
+                force: Vec3::ZERO,
+                mass: 1.0,
+                friction: 1.0,
+                flags: 0,
+            });
+        }
+        let kind = if p < 4 { ExplicitKind::Rope } else { ExplicitKind::Plain };
+        s.beams.push(Beam::new(2 * p, 2 * p + 1, kind, ExplicitType::Deformable, 1.0e5, 50.0, 0.5, 500.0, 50_000.0, 0.0));
+    }
+    s.finish();
+    let lines: Vec<(u32, u32, f32, f32, f32, bool)> =
+        (0..8u32).map(|p| (2 * p, 2 * p + 1, -1.0, -1.0, 0.2, p % 4 < 2)).collect();
+    s.set_jbeam_plastic(&lines).unwrap();
+    s.plastic_strength_drop = false;
+    assert_eq!(s.beams[0].kind, ExplicitKind::JbeamRope);
+    let mut cpu = s;
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    let bits = |a: Vec3| a.to_array().map(f32::to_bits);
+    for step in 0..400 {
+        cpu.step();
+        gpu.frame(1);
+        gpu.wait();
+        let (p, v) = (&gpu.positions()[0], &gpu.velocities()[0]);
+        for i in 0..cpu.nodes.len() {
+            assert!(
+                bits(cpu.nodes[i].pos) == bits(p[i]) && bits(cpu.nodes[i].vel) == bits(v[i]),
+                "step {step}: node {i}"
+            );
+        }
+        let gb = &gpu.beams()[0];
+        for (j, b) in cpu.beams.iter().enumerate() {
+            assert!(
+                b.rest.to_bits() == gb[j].rest.to_bits() && b.broken == gb[j].broken,
+                "step {step}: beam {j} cpu rest {} broken {} gpu rest {} broken {}",
+                b.rest, b.broken, gb[j].rest, gb[j].broken
+            );
+        }
+    }
+    let broken: Vec<bool> = cpu.beams.iter().map(|b| b.broken).collect();
+    eprintln!("broken: {broken:?}; strengths {:?}", cpu.beams.iter().map(|b| b.strength).collect::<Vec<_>>());
+    // Flung apart with the tear flag: torn; without it: held at 1.2·L; squeezed: held.
+    assert_eq!(broken, [true, false, false, false, true, false, false, false]);
+    assert!(cpu.beams.iter().all(|b| b.strength == 50_000.0));
+    assert!((cpu.beams[2].rest - 0.6).abs() < 1e-6);
 }

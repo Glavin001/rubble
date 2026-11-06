@@ -75,6 +75,7 @@ fn bits(u: u32) -> f32 {
 /// strength drop with plastic stretch (the BeamNG profile, §36).
 fn jbeam_yield(beam: &mut Beam, len: f32, e: f32, k: f32, damp: f32, mut f: f32, keep: bool) -> (f32, f32) {
     let mut tau = f.abs();
+    let mut tear = false;
     if tau > beam.gate && beam.ty == ExplicitType::Deformable && k != 0.0 {
         if f > beam.tc && e < 0.0 {
             let delta = e + (beam.tc / k) * (1.0 - beam.plastic);
@@ -96,16 +97,18 @@ fn jbeam_yield(beam: &mut Beam, len: f32, e: f32, k: f32, damp: f32, mut f: f32,
         } else if f < -beam.tt && e > 0.0 {
             let delta = e - (beam.tt / k) * (1.0 - beam.plastic);
             let old = beam.rest;
-            let ceiling = beam.long_bound;
+            // A negative bound tears there (breakAtExpansion, §36).
+            let ceiling = beam.long_bound.abs();
             let free = beam.rest + delta;
             if free > ceiling {
                 beam.rest = ceiling.max(old);
                 f = -k * (len - beam.rest) - damp;
+                tear = beam.long_bound < 0.0;
             } else {
                 beam.rest = free;
                 f -= (f + beam.tt) / 2.0;
             }
-            tau = f.abs();
+            tau = if tear { f32::INFINITY } else { f.abs() };
             if beam.rest > old {
                 beam.tt = (beam.tt * beam.rest / old).min(beam.limit_k.max(beam.tt));
                 beam.gate = beam.tc.min(beam.tt).min(beam.strength);
@@ -199,6 +202,10 @@ pub fn jbeam_ext_force_with(
                 k += (beam.limit_k - k) * s;
                 damp += (lc * u - damp) * s;
             }
+        }
+        ExplicitKind::JbeamRope if e < 0.0 => {
+            k = 0.0;
+            damp = (c * 0.1) * u;
         }
         ExplicitKind::JbeamSupport => {
             if e > 0.0 {
@@ -592,7 +599,7 @@ impl ExplicitBeams {
         // the spawn rest length of those); not while the precompression ramps in.
         let yields = matches!(
             beam.kind,
-            ExplicitKind::JbeamPlain | ExplicitKind::JbeamSupport | ExplicitKind::JbeamAniso
+            ExplicitKind::JbeamPlain | ExplicitKind::JbeamRope | ExplicitKind::JbeamSupport | ExplicitKind::JbeamAniso
         );
         if ext.mask & EXT_DEFORM != 0
             && (broke_now
@@ -700,7 +707,7 @@ impl ExplicitBeams {
         }
         if matches!(
             beam.kind,
-            ExplicitKind::JbeamPlain | ExplicitKind::JbeamSupport | ExplicitKind::JbeamAniso
+            ExplicitKind::JbeamPlain | ExplicitKind::JbeamRope | ExplicitKind::JbeamSupport | ExplicitKind::JbeamAniso
         ) {
             ext.e2[0] = beam.rest0;
         }

@@ -343,7 +343,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
         }
         else if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
             cfAdd(gi, c);
             f += c;
         }
@@ -369,7 +369,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
                     n = shapeNormal(lo4.w, gP.boxBase + hi4.w, x);
                 if (n.w != 0.0)
                 {
-                    float3 c = contactForce(f, vel, mass, n.xyz, boxSurface(), 0.0, V.w);
+                    float3 c = contactForce(f, vel, mass, n.xyz, surfaceV(boxSurface(), vehicle), 0.0, V.w);
                     cfAdd(gi, c);
                     f += c;
                 }

@@ -94,6 +94,9 @@ static const uint TRI_EXCL_CAP = 16u; // explicit_jbeam_ext.rs TRI_EXCL_CAP
 static const uint KIND_JATRI = 18u; // a triangle's aerodynamics (spec §31), nodes x0-x1
 static const uint KIND_JATRI2 = 19u; // its x2-x2 record
 static const uint KIND_JLBEAM2 = 20u; // an LBEAM's x3-x3 record (the vertex's force)
+// A rope by JBeam's NORMAL rule (the BeamNG profile's .truck ropes, §36): in
+// compression no spring and a tenth of its damping, in tension a KIND_JPLAIN beam.
+static const uint KIND_JROPE = 21u;
 static const uint TYPE_EXT = 4u;
 static const uint EXT_GROUPS = 1u;
 static const uint EXT_DEFORM = 2u;
@@ -131,6 +134,8 @@ static const uint TRI_ANTI_ONLY = 0x40000000u;
 // The BeamNG profile's plasticity (jbeam-semantics-spec.md §36): a beam's strength
 // does not fall with its plastic stretch (RoR's rule; `plastic_strength_drop` off).
 static const uint FLAG_KEEP_STRENGTH = 8192u;
+// The BeamNG profile's friction law with exact exponentials (§36, exact_exp/pow).
+static const uint FLAG_EXACT_FRICTION = 16384u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -249,6 +254,7 @@ struct Surface
     float vs;
     float alpha;
     float strength;
+    uint exact; // the friction law's exponentials exact (sExactExp, sExactPow; §36)
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<Params> gP;
@@ -323,6 +329,7 @@ Surface groundSurface()
 {
     Surface s;
     s.va = 3.0; s.ms = 0.85; s.mc = 0.6; s.t2 = 0.006; s.vs = 3.0; s.alpha = 2.0; s.strength = 1.0;
+    s.exact = 0u;
     return s;
 }
 
@@ -330,6 +337,14 @@ Surface boxSurface()
 {
     Surface s;
     s.va = 3.0; s.ms = 1.2; s.mc = 0.75; s.t2 = 0.01; s.vs = 6.0; s.alpha = 2.0; s.strength = 1.0;
+    s.exact = 0u;
+    return s;
+}
+
+// Surface s as vehicle v's friction law takes it: exact with FLAG_EXACT_FRICTION.
+Surface surfaceV(Surface s, uint v)
+{
+    s.exact = (gStatic[v * 4u + 3u].x & FLAG_EXACT_FRICTION) != 0u ? 1u : 0u;
     return s;
 }
 
@@ -422,6 +437,57 @@ float approxPow(float x, float y)
     return asfloat(int(nf(smul(y, e) + 1065353216.0)));
 }
 
+// explicit_beams.rs exact_exp / exact_ln / exact_pow: one specified sequence, strict,
+// in the CPU's order (jbeam-semantics-spec.md §36).
+static const float LN2_HI = 0.693359375;
+static const float LN2_LO = -2.12194440e-4;
+float sExactExp(float x)
+{
+    if (x < -87.0) return 0.0;
+    if (x > 88.0) return 3.4e38;
+    float k = floor(nf(smul(x, 1.44269502) + 0.5));
+    float r = nf(nf(x - smul(k, LN2_HI)) - smul(k, LN2_LO));
+    float p = 0.000198412701;
+    p = nf(smul(p, r) + 0.00138888892);
+    p = nf(smul(p, r) + 0.00833333377);
+    p = nf(smul(p, r) + 0.0416666679);
+    p = nf(smul(p, r) + 0.166666672);
+    p = nf(smul(p, r) + 0.5);
+    p = nf(smul(p, r) + 1.0);
+    p = nf(smul(p, r) + 1.0);
+    return smul(p, asfloat(uint(int(k) + 127) << 23));
+}
+float sExactLn(float x)
+{
+    if (!(x >= 1.17549435e-38)) return -1000.0;
+    uint b = asuint(x);
+    float e = float(int(b >> 23) - 127);
+    float m = asfloat((b & 0x007FFFFFu) | 0x3F800000u);
+    if (m > 1.41421354)
+    {
+        m = smul(m, 0.5);
+        e = nf(e + 1.0);
+    }
+    float sv = sdiv(nf(m - 1.0), nf(m + 1.0));
+    float s2 = smul(sv, sv);
+    float q = sdiv(1.0, 11.0);
+    q = nf(smul(q, s2) + sdiv(1.0, 9.0));
+    q = nf(smul(q, s2) + sdiv(1.0, 7.0));
+    q = nf(smul(q, s2) + sdiv(1.0, 5.0));
+    q = nf(smul(q, s2) + sdiv(1.0, 3.0));
+    q = nf(smul(q, s2) + 1.0);
+    float lnm = smul(nf(sv + sv), q);
+    return nf(smul(e, LN2_HI) + nf(lnm + smul(e, LN2_LO)));
+}
+float sExactPow(float x, float y)
+{
+    if (y == 0.0) return 1.0;
+    if (x == 0.0 && y > 0.0) return 0.0;
+    return sExactExp(smul(y, sExactLn(x)));
+}
+float frictionExp(Surface s, float x) { return s.exact != 0u ? sExactExp(x) : approxExp(x); }
+float frictionPow(Surface s, float x, float y) { return s.exact != 0u ? sExactPow(x, y) : approxPow(x, y); }
+
 // Turbulence: a well-mixed hash per vehicle, step, node and axis, as a value in
 // [−1, 1) built like the CPU sequence's (a float in [2, 4) minus 3).
 float noise(uint vehicle, uint step, uint node, uint axis)
@@ -452,8 +518,8 @@ float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, f
     float gr = smul(smul(r, s.strength), friction);
     float ms = smul(s.ms, gr);
     if (sigma < s.va && gr > 0.0 && sdot(sf, sf) <= smul(ms, ms))
-        return ssub3(ssub3(sscale(n, r), sscale(sl, smul(ms, nf(1.0 - approxExp(-sdiv(sigma, s.va)))))), sf);
-    float g = nf(s.mc + smul(nf(s.ms - s.mc), approxExp(-approxPow(sdiv(sigma, s.vs), s.alpha))));
+        return ssub3(ssub3(sscale(n, r), sscale(sl, smul(ms, nf(1.0 - frictionExp(s, -sdiv(sigma, s.va)))))), sf);
+    float g = nf(s.mc + smul(nf(s.ms - s.mc), frictionExp(s, -frictionPow(s, sdiv(sigma, s.vs), s.alpha))));
     return ssub3(sscale(n, r), sscale(sl, smul(nf(g + min(smul(s.t2, sigma), 5.0)), gr)));
 }
 
@@ -504,8 +570,8 @@ float3 contactFriction(float r, float3 f, float3 v, float3 n, Surface s, float f
     float gr = smul(smul(r, s.strength), friction);
     float ms = smul(s.ms, gr);
     if (sigma < s.va && gr > 0.0 && sdot(sf, sf) <= smul(ms, ms))
-        return ssub3(ssub3(sscale(n, r), sscale(sl, smul(ms, nf(1.0 - approxExp(-sdiv(sigma, s.va)))))), sf);
-    float g = nf(s.mc + smul(nf(s.ms - s.mc), approxExp(-approxPow(sdiv(sigma, s.vs), s.alpha))));
+        return ssub3(ssub3(sscale(n, r), sscale(sl, smul(ms, nf(1.0 - frictionExp(s, -sdiv(sigma, s.va)))))), sf);
+    float g = nf(s.mc + smul(nf(s.ms - s.mc), frictionExp(s, -frictionPow(s, sdiv(sigma, s.vs), s.alpha))));
     return ssub3(sscale(n, r), sscale(sl, smul(nf(g + min(smul(s.t2, sigma), 5.0)), gr)));
 }
 
@@ -547,7 +613,7 @@ float3 treadGround(uint gi, float3 f, float3 v, float m, float friction, float p
     float r = smul(smul(m, asfloat(TREAD_K_BITS)), nf(p + z1));
     if (!(r > 0.0)) return float3(0.0, 0.0, 0.0);
     float3 n = float3(0.0, 1.0, 0.0);
-    return slipLimit(contactFriction(r, f, v, n, groundSurface(), friction), f, v, m, n);
+    return slipLimit(contactFriction(r, f, v, n, surfaceV(groundSurface(), gStatic[gP.nodeInfoBase + gi].w), friction), f, v, m, n);
 }
 
 float3 accForce(uint node)
@@ -870,7 +936,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
         float3 x = origin + pos;
         if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             f += c;
         }
@@ -887,7 +953,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
                 if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
                 if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
                 if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
-                f += contactForce(f, vel, mass, n, boxSurface(), 0.0, V.w);
+                f += contactForce(f, vel, mass, n, surfaceV(boxSurface(), vehicle), 0.0, V.w);
             }
         }
     }
@@ -965,7 +1031,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
         float3 x = origin + pos;
         if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             f += c;
         }
@@ -982,7 +1048,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
                 if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
                 if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
                 if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
-                f += contactForce(f, vel, mass, n, boxSurface(), 0.0, V.w);
+                f += contactForce(f, vel, mass, n, surfaceV(boxSurface(), vehicle), 0.0, V.w);
             }
         }
     }
@@ -1157,7 +1223,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
         }
         else if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             cfAdd(gi, c);
             f += c;
@@ -1184,7 +1250,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
                     n = shapeNormal(lo4.w, gP.boxBase + hi4.w, x);
                 if (n.w != 0.0)
                 {
-                    float3 c = contactForce(f, vel, mass, n.xyz, boxSurface(), 0.0, V.w);
+                    float3 c = contactForce(f, vel, mass, n.xyz, surfaceV(boxSurface(), vehicle), 0.0, V.w);
                     cfAdd(gi, c);
                     f += c;
                 }
@@ -1541,6 +1607,12 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         k = 0.0;
         damp = 0.0;
     }
+    else if (kind == KIND_JROPE && e < 0.0)
+    {
+        k = 0.0;
+        damp = smul(smul(c, 0.1), u);
+    }
+    bool tear = false;
     if (lengthBreak)
     {
         broken = true;
@@ -1585,10 +1657,13 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
                 float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
                 float old = rest;
                 float free = nf(rest + delta);
-                if (free > c2.y)
+                // A negative bound tears there (breakAtExpansion, §36).
+                float ceilLen = abs(c2.y);
+                if (free > ceilLen)
                 {
-                    rest = max(c2.y, old);
+                    rest = max(ceilLen, old);
                     f = nf(smul(-k, nf(len - rest)) - damp);
+                    tear = c2.y < 0.0;
                 }
                 else
                 {
@@ -1604,7 +1679,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
                 }
             }
         }
-        if (tau > strength)
+        if (tau > strength || tear)
         {
             broken = true;
             f = 0.0;
@@ -1797,6 +1872,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     float f = 0.0;
     float last = 0.0;
     bool broken = false;
+    bool tear = false;
     bool lengthBreak = false;
     bool done = false;
     float3 armA = float3(0.0, 0.0, 0.0);
@@ -1891,6 +1967,11 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         k = 0.0;
         damp = 0.0;
     }
+    else if (!done && kind == KIND_JROPE && e < 0.0)
+    {
+        k = 0.0;
+        damp = smul(smul(c, 0.1), u);
+    }
     else if (!done && kind == KIND_JANISO)
     {
         if (len > e1.w) lengthBreak = true;
@@ -1946,10 +2027,13 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
                 float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
                 float old = rest;
                 float free = nf(rest + delta);
-                if (free > c2.y)
+                // A negative bound tears there (breakAtExpansion, §36).
+                float ceilLen = abs(c2.y);
+                if (free > ceilLen)
                 {
-                    rest = max(c2.y, old);
+                    rest = max(ceilLen, old);
                     f = nf(smul(-k, nf(len - rest)) - damp);
+                    tear = c2.y < 0.0;
                 }
                 else
                 {
@@ -1965,7 +2049,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
                 }
             }
         }
-        if (tau > strength) broken = true;
+        if (tau > strength || tear) broken = true;
     }
     if (broken)
     {
@@ -1974,7 +2058,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     }
     if ((e0.x & EXT_DEFORM) != 0u)
     {
-        bool yields = kind == KIND_JPLAIN || kind == KIND_JSUPPORT || kind == KIND_JANISO;
+        bool yields = kind == KIND_JPLAIN || kind == KIND_JROPE || kind == KIND_JSUPPORT || kind == KIND_JANISO;
         if (broken || (yields && !(st.x > 0.0) && abs(nf(rest - e2.x)) > smul(asfloat(e0.w), e2.x))) extDeform(x, 0u);
     }
     float4 n0 = float4(rest, tc, tt, gate);
@@ -2290,7 +2374,7 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
                             sscale(selfAcc(t2, beamOff, groupOff, groupCount, parity), beta)),
                       sscale(selfAcc(t0, beamOff, groupOff, groupCount, parity), gamma));
     float3 fh = sscale(ssub3(selfAcc(h, beamOff, groupOff, groupCount, parity), a3), m);
-    return contactForce(fh, vv, m, nn, boxSurface(), pen, friction);
+    return contactForce(fh, vv, m, nn, surfaceV(boxSurface(), gStatic[gP.nodeInfoBase + h].w), pen, friction);
 }
 
 float3 selfTwoBodyForce(uint at, uint h, uint beamOff, uint groupOff, uint groupCount, uint parity)
@@ -3474,7 +3558,7 @@ void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float grou
         float3 x = origin + pos;
         if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             f += c;
         }
@@ -3491,7 +3575,7 @@ void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float grou
                 if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
                 if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
                 if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
-                f += contactForce(f, vel, mass, n, boxSurface(), 0.0, V.w);
+                f += contactForce(f, vel, mass, n, surfaceV(boxSurface(), vehicle), 0.0, V.w);
             }
         }
     }
@@ -3533,7 +3617,7 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
         float3 x = origin + pos;
         if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), groundSurface(), ground - x.y, V.w);
+            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             f += c;
         }
@@ -3550,7 +3634,7 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
                 if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
                 if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
                 if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
-                f += contactForce(f, vel, mass, n, boxSurface(), 0.0, V.w);
+                f += contactForce(f, vel, mass, n, surfaceV(boxSurface(), vehicle), 0.0, V.w);
             }
         }
     }
@@ -3638,12 +3722,12 @@ int3 hitShareFixed(uint at, uint roles)
 // Strict, in the CPU reference's order (the test-only EB_DET_HITS build of hitForce
 // keeps the frozen baseline's expressions instead).
 float3 hitContact(float4 V, float4 P, float4 P0, float4 P1, float4 P2, float3 v0, float3 v1, float3 v2, float alpha,
-                  float beta, float gamma, float pen, float3 nn, float3 fb, float3 a3)
+                  float beta, float gamma, float pen, float3 nn, float3 fb, float3 a3, uint v)
 {
     float3 vv = ssub3(V.xyz, sadd3(sadd3(sscale(v1, alpha), sscale(v2, beta)), sscale(v0, gamma)));
     float mt = nf(nf(smul(alpha, P1.w) + smul(beta, P2.w)) + smul(gamma, P0.w));
     float m = sdiv(smul(P.w, mt), nf(P.w + mt));
-    return contactForce(sadd3(fb, a3), vv, m, nn, boxSurface(), pen, V.w);
+    return contactForce(sadd3(fb, a3), vv, m, nn, surfaceV(boxSurface(), v), pen, V.w);
 }
 
 // The force of the hit at record `at` (key `key`) of vehicle v: its node's force,
@@ -3667,9 +3751,9 @@ void hitForce(uint v, uint at, uint key, int3 sum, uint round, float3 origin, fl
                         false);
     float3 a3 = float3(float(acc.x), float(acc.y), float(acc.z)) * (1.0 / FIXED);
 #ifdef EB_DET_HITS
-    float3 f = contactForce(fb + a3, vv, m, nn, boxSurface(), pen, friction);
+    float3 f = contactForce(fb + a3, vv, m, nn, surfaceV(boxSurface(), v), pen, friction);
 #else
-    float3 f = contactForce(sadd3(fb, a3), vv, m, nn, boxSurface(), pen, friction);
+    float3 f = contactForce(sadd3(fb, a3), vv, m, nn, surfaceV(boxSurface(), v), pen, friction);
 #endif
     gNext[at + 3u] = asuint(f.x);
     gNext[at + 4u] = asuint(f.y);
@@ -3867,7 +3951,7 @@ void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uin
                 float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff,
                                     groupCount, parity, false);
                 f = hitContact(V, P, P0, P1, P2, gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz,
-                               gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, pen, nn, fb, accForce(h));
+                               gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, pen, nn, fb, accForce(h), v);
             }
             accAdd(h, f);
             accAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
@@ -6108,7 +6192,7 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
                           vvAccel(gBeams[gP.vvSnap + t.tn.x].xyz, t.tn.x, P0.w, gamma));
         fh = sscale(ssub3(vvAccel(gBeams[gP.vvSnap + h].xyz, h, P.w, 1.0), at), m);
     }
-    float3 f = contactForce(fh, v, m, nn, boxSurface(), pen, V.w);
+    float3 f = contactForce(fh, v, m, nn, surfaceV(boxSurface(), vh), pen, V.w);
     accAdd(h, f);
     accAdd(t.tn.y, -sscale(f, alpha));
     accAdd(t.tn.z, -sscale(f, beta));
