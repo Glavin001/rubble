@@ -1737,6 +1737,22 @@ pub struct PlannerState {
     replan: bool,
 }
 
+impl PlannerState {
+    /// As words (tests: a snapshot saved to a file).
+    pub fn to_words(self) -> [u32; 5] {
+        [self.left, u32::from(self.fresh), self.frames as u32, (self.frames >> 32) as u32, u32::from(self.replan)]
+    }
+    /// From [`Self::to_words`].
+    pub fn from_words(w: [u32; 5]) -> Self {
+        Self {
+            left: w[0],
+            fresh: w[1] != 0,
+            frames: u64::from(w[2]) | (u64::from(w[3]) << 32),
+            replan: w[4] != 0,
+        }
+    }
+}
+
 /// Plans each frame of one uploaded fleet: parameters and commands. Hosts call
 /// [`Self::write_params`], then [`Self::commands`], then [`Self::status_due`].
 #[derive(Debug)]
