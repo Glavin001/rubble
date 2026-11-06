@@ -140,6 +140,12 @@ static const uint FLAG_EXACT_FRICTION = 16384u;
 // (jbeam-semantics-spec.md §37, `dissipative_contact`; vehicle contact: the owner's
 // or the partner's flag).
 static const uint FLAG_DISSIPATIVE = 32768u;
+// Some vehicle of the upload has FLAG_DISSIPATIVE: every vehicle's node phase takes
+// its nodes' contact position steps (gAcc at shiftAt, §37; the shapes path).
+static const uint FLAG_SHIFT_MEM = 65536u;
+// The contact position steps' fixed point, units per metre (explicit_beams.rs
+// SHIFT_FIXED, 2^24).
+static const float SHIFT_FIXED = 16777216.0;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -517,35 +523,58 @@ float noise(uint vehicle, uint step, uint node, uint axis)
     return asfloat(0x40000000u | (h & 0x7FFFFFu)) - 3.0;
 }
 
-// §37 (explicit_beams.rs no_positive_work): contact force c on a pair of relative
-// velocity v, reduced mass m, under force f, scaled by s = min(1, −a/b) (none when
-// a ≥ 0) so its work over the step at the pair's mean velocity is ≤ 0:
-// a = c·(2v + h·f/m), b = h·|c|²/m. Strict, in the CPU's order.
-float3 noPositiveWork(float3 c, float3 f, float3 v, float m)
+// §37 (explicit_beams.rs no_positive_work): contact force c (normal part r·n) on a
+// pair of relative velocity v, reduced mass m, under force f, its tangential part
+// t = c − r·n scaled by the largest s in [0, 1] keeping the force's work over the
+// step at the pair's mean velocity ≤ 0 (the positive root of a0 + a1·s + b·s²).
+// Strict, in the CPU's order.
+float3 noPositiveWork(float3 c, float r, float3 n, float3 f, float3 v, float m)
 {
     if (m <= 0.0) return c;
     float hm = sdiv(STEP, m);
+    float3 rn = sscale(n, r);
+    float3 t = ssub3(c, rn);
     float3 u = sadd3(sadd3(v, v), sscale(f, hm));
-    float a = sdot(c, u);
-    float b = smul(sdot(c, c), hm);
-    if (nf(a + b) <= 0.0) return c;
-    if (a >= 0.0) return float3(0.0, 0.0, 0.0);
-    return sscale(c, sdiv(-a, b));
+    float a0 = nf(sdot(rn, u) + smul(sdot(rn, rn), hm));
+    float a1 = nf(sdot(t, u) + smul(smul(2.0, hm), sdot(rn, t)));
+    float b = smul(sdot(t, t), hm);
+    if (nf(nf(a0 + a1) + b) <= 0.0 || b <= 0.0) return c;
+    float disc = nf(smul(a1, a1) - smul(smul(4.0, b), a0));
+    float k = 0.0;
+    if (!(disc < 0.0)) k = clamp(sdiv(nf(ssqrt(disc) - a1), smul(2.0, b)), 0.0, 1.0);
+    return sadd3(rn, sscale(t, k));
 }
 
-float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, float friction)
+// §37 (explicit_beams.rs shift_depth): the penetration's position step δ (m) from
+// the depth p, the normal force's budget (J) and the pair's normal force fn.
+float shiftDepth(float p, float budget, float fn)
 {
+    float full = smul(0.2, p);
+    if (fn >= 0.0 || smul(-fn, full) <= budget) return full;
+    return sdiv(budget, -fn);
+}
+
+// contactForce, and on a dissipative surface (§37) the energy its normal force
+// takes out of the pair this step (`budget`, J; 0 otherwise): explicit_beams.rs
+// contact_response.
+float3 contactResponse(float3 f, float3 v, float m, float3 n, Surface s, float p, float friction, out float budget)
+{
+    budget = 0.0;
     if (p < 0.0) return float3(0.0, 0.0, 0.0);
     // Strict, in the CPU reference's order (its branches decide on these values).
     float vn = sdot(v, n);
     float fn = sdot(f, n);
     float r = -fn;
-    if (vn < 0.0)
-        r = nf(r - sdiv(smul(nf(smul(0.8, vn) - sdiv(smul(0.2, p), STEP)), m), STEP));
-    // §37: never a separation made, so no positive work (explicit_beams.rs
-    // contact_force): r ≤ −fn − (vn + max(vn, 0))·m/h.
+    float bud = 0.0;
     if (s.dissipative != 0u)
-        r = min(r, nf(-fn - sdiv(smul(nf(vn + max(vn, 0.0)), m), STEP)));
+    {
+        // §37: the approach stopped, a separation never made:
+        // r = −fn − (vn + max(vn, 0))·m/h.
+        r = nf(-fn - sdiv(smul(nf(vn + max(vn, 0.0)), m), STEP));
+        if (vn < 0.0) bud = max(nf(smul(smul(0.5, m), smul(vn, vn)) + smul(smul(0.5, STEP), smul(fn, vn))), 0.0);
+    }
+    else if (vn < 0.0)
+        r = nf(r - sdiv(smul(nf(smul(0.8, vn) - sdiv(smul(0.2, p), STEP)), m), STEP));
     if (r <= 0.0) return float3(0.0, 0.0, 0.0);
     float3 sf = ssub3(f, sscale(n, fn));
     float3 sl = ssub3(v, sscale(n, vn));
@@ -561,7 +590,15 @@ float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, f
         float g = nf(s.mc + smul(nf(s.ms - s.mc), frictionExp(s, -frictionPow(s, sdiv(sigma, s.vs), s.alpha))));
         c = ssub3(sscale(n, r), sscale(sl, smul(nf(g + min(smul(s.t2, sigma), 5.0)), gr)));
     }
-    return s.dissipative != 0u ? noPositiveWork(c, f, v, m) : c;
+    if (s.dissipative == 0u) return c;
+    budget = bud;
+    return noPositiveWork(c, r, n, f, v, m);
+}
+
+float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, float friction)
+{
+    float budget;
+    return contactResponse(f, v, m, n, s, p, friction, budget);
 }
 
 // A pressure-wheel node's ground contact (NODE_FRICTION_LIMIT, spec §28): the
@@ -674,6 +711,42 @@ int toFixed(float x)
     float d = nf(y - f);
     if (d > 0.5 || (d == 0.5 && floor(f * 0.5) * 2.0 != f)) f = f + 1.0;
     return int(f);
+}
+
+// §37's position steps: node x's 3 words in gAcc (after the two-body counts).
+uint shiftAt(uint x) { return gP.selfSplit + gP.totalNodes + x * 3u; }
+
+// x in 1/SHIFT_FIXED m units, as toFixed (explicit_beams.rs to_fixed_shift).
+int toFixedShift(float x)
+{
+    float y = clamp(nf(x * SHIFT_FIXED), -2.0e9, 2.0e9);
+    float f = floor(y);
+    float d = nf(y - f);
+    if (d > 0.5 || (d == 0.5 && floor(f * 0.5) * 2.0 != f)) f = f + 1.0;
+    return int(f);
+}
+
+// Adds position step d (m) to node x's (ExplicitBeams::add_shift).
+void shiftAdd(uint x, float3 d)
+{
+    uint at = shiftAt(x);
+    gAcc[at].add(toFixedShift(d.x));
+    gAcc[at + 1u].add(toFixedShift(d.y));
+    gAcc[at + 2u].add(toFixedShift(d.z));
+}
+
+// The node phase: node gi's position step from the last contact pass (m), cleared
+// (zero without FLAG_SHIFT_MEM).
+float3 shiftTake(uint gi, uint flagsV)
+{
+    if (gP.selfSplit == 0u || (flagsV & FLAG_SHIFT_MEM) == 0u) return float3(0.0, 0.0, 0.0);
+    uint at = shiftAt(gi);
+    float3 d = float3(float(gAcc[at].load()), float(gAcc[at + 1u].load()), float(gAcc[at + 2u].load()))
+               * (1.0 / SHIFT_FIXED);
+    gAcc[at].store(0);
+    gAcc[at + 1u].store(0);
+    gAcc[at + 2u].store(0);
+    return d;
 }
 
 void accAdd(uint node, float3 f)
@@ -939,7 +1012,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
                           groupCount, hits, false);
         return;
     }
-    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY | FLAG_CLIP_MEM)) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY | FLAG_CLIP_MEM | FLAG_SHIFT_MEM)) != 0u)
     {
         nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                          groupCount, hits, false);
@@ -1033,7 +1106,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
         return nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                  groupOff, groupCount, hits, true);
     }
-    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY | FLAG_CLIP_MEM)) != 0u)
+    if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY | FLAG_CLIP_MEM | FLAG_SHIFT_MEM)) != 0u)
     {
         return nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                 groupOff, groupCount, hits, true);
@@ -1234,6 +1307,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     cfRoll(gi, groupOff, flagsV);
     clipRoll(gi, flagsV);
     if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
+    float3 shift = shiftTake(gi, flagsV);
     float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -1302,6 +1376,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     {
         vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
         pos = sadd3(pos, sscale(vel, STEP));
+        pos = sadd3(pos, shift);
     }
     clipSpeed(vehicle, step, flagsV, vel);
 #ifdef EB_AERO
@@ -2416,7 +2491,25 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
                       sscale(selfAcc(t0, beamOff, groupOff, groupCount, parity), gamma));
     float3 fh = sscale(ssub3(selfAcc(h, beamOff, groupOff, groupCount, parity), a3), m);
     uint hv = gStatic[gP.nodeInfoBase + h].w;
-    return contactForce(fh, vv, m, nn, contactSurfaceV(hv, hv), pen, friction);
+    Surface surf = contactSurfaceV(hv, hv);
+    float budget;
+    float3 f = contactResponse(fh, vv, m, nn, surf, pen, friction, budget);
+    if (surf.dissipative != 0u && any(f != float3(0.0, 0.0, 0.0)))
+    {
+        // §37: the position step, a position impulse δ·m shared by the sub-bodies'
+        // inverse masses (explicit_beams.rs apply_two_body_self_hits). Called once
+        // per hit (selfRound marks it computed; selfSerial applies in order).
+        float delta = shiftDepth(pen, budget, sdot(fh, nn));
+        if (delta > 0.0)
+        {
+            float q = smul(delta, m);
+            shiftAdd(h, sscale(nn, smul(q, selfInvMass(h))));
+            if (alpha > 0.0) shiftAdd(t1, sscale(nn, -smul(alpha, smul(q, selfInvMass(t1)))));
+            if (beta > 0.0) shiftAdd(t2, sscale(nn, -smul(beta, smul(q, selfInvMass(t2)))));
+            if (gamma > 0.0) shiftAdd(t0, sscale(nn, -smul(gamma, smul(q, selfInvMass(t0)))));
+        }
+    }
+    return f;
 }
 
 float3 selfTwoBodyForce(uint at, uint h, uint beamOff, uint groupOff, uint groupCount, uint parity)
@@ -6234,7 +6327,28 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
                           vvAccel(gBeams[gP.vvSnap + t.tn.x].xyz, t.tn.x, P0.w, gamma));
         fh = sscale(ssub3(vvAccel(gBeams[gP.vvSnap + h].xyz, h, P.w, 1.0), at), m);
     }
-    float3 f = contactForce(fh, v, m, nn, contactSurfaceV(vh, gStatic[gP.nodeInfoBase + t.tn.x].w), pen, V.w);
+    Surface surf = contactSurfaceV(vh, gStatic[gP.nodeInfoBase + t.tn.x].w);
+    float budget;
+    float3 f = contactResponse(fh, v, m, nn, surf, pen, V.w, budget);
+    if (surf.dissipative != 0u && vvTwoBody(gStatic[gP.nodeInfoBase + t.tn.x].w, vh)
+        && any(f != float3(0.0, 0.0, 0.0)))
+    {
+        // §37: the position step, a position impulse δ·m shared by the sub-bodies'
+        // inverse masses (explicit_contact.rs).
+        float delta = shiftDepth(pen, budget, sdot(fh, nn));
+        if (delta > 0.0)
+        {
+            float q = smul(delta, m);
+            float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), P.w);
+            float im1 = vvImmovable(t.tn.y) ? 0.0 : sdiv(vvSplitK(vvSplitTri(t.tn.y)), P1.w);
+            float im2 = vvImmovable(t.tn.z) ? 0.0 : sdiv(vvSplitK(vvSplitTri(t.tn.z)), P2.w);
+            float im0 = vvImmovable(t.tn.x) ? 0.0 : sdiv(vvSplitK(vvSplitTri(t.tn.x)), P0.w);
+            shiftAdd(h, sscale(nn, smul(q, imh)));
+            if (alpha > 0.0) shiftAdd(t.tn.y, sscale(nn, -smul(alpha, smul(q, im1))));
+            if (beta > 0.0) shiftAdd(t.tn.z, sscale(nn, -smul(beta, smul(q, im2))));
+            if (gamma > 0.0) shiftAdd(t.tn.x, sscale(nn, -smul(gamma, smul(q, im0))));
+        }
+    }
     accAdd(h, f);
     accAdd(t.tn.y, -sscale(f, alpha));
     accAdd(t.tn.z, -sscale(f, beta));
