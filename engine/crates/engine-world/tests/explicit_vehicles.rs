@@ -407,3 +407,46 @@ fn the_coupling_workgroup_copies_are_bit_exact() {
     }
     assert!(checked >= 2, "the comparison ran with the cars among the house's chunks");
 }
+
+/// The coupling plan's lane-parallel records (`vehicle_coupling.slang` `cplPlanShapes`)
+/// are its serial walk's: from one World state, the plan alone both ways gives the same
+/// proxy records (bodies, shapes, hull planes, each body's shape range) and share
+/// counts, word for word. Four cars into one house at 120 Hz, compared once they meet
+/// its chunks.
+#[test]
+fn the_coupling_plan_in_parallel_is_the_serial_walk() {
+    let template = sedan(0.0, 0.0, Vec3::ZERO, 0);
+    let mut town = rubble::explicit_scene::crash_town_at(
+        GpuContext::Default,
+        &template,
+        1,
+        4,
+        15.0,
+        8.0,
+        30,
+        &rubble::explicit_scene::town_coupling(),
+        Some(1.0 / 120.0),
+        None,
+    )
+    .unwrap();
+    let w = &mut town.world;
+    let mut checked = 0;
+    for step in 0..150 {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        if step < 60 || step % 15 != 0 {
+            continue;
+        }
+        let shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
+        let parallel = w.explicit_replan_words(false);
+        let serial = w.explicit_replan_words(true);
+        assert_eq!(parallel.len(), serial.len());
+        let diff = parallel.iter().zip(&serial).filter(|(a, b)| a != b).count();
+        println!("step {step}: proxy shapes per vehicle {shapes:?}, {diff} words differ");
+        assert_eq!(diff, 0, "step {step}: the parallel plan differs from the serial walk");
+        if shapes.iter().any(|&n| n >= 10) {
+            checked += 1;
+        }
+    }
+    assert!(checked >= 2, "the comparison ran with the cars among the house's chunks");
+}

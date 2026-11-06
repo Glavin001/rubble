@@ -88,7 +88,9 @@ struct Params {
     step: u32,
     filter: u32,
     row_cap: u32,
-    pad: [u32; 3],
+    /// Tests: cpl_plan's serial walk (1) instead of its lane-parallel records.
+    serial_plan: u32,
+    pad: [u32; 2],
 }
 
 pub(crate) struct ExplicitVehicles {
@@ -104,6 +106,8 @@ pub(crate) struct ExplicitVehicles {
     work: wgpu::Buffer,
     /// Bytes of `work` cleared each window (the vehicle table follows).
     cleared: u64,
+    /// Tests ([`Self::replan_words`]): cpl_plan's serial walk.
+    serial_plan: bool,
     /// Stand-ins for the threshold ingest's records, row counts and collider table.
     dummy: [wgpu::Buffer; 3],
     /// For renderers: per collision triangle (global nodes a, b, c, vehicle).
@@ -244,6 +248,7 @@ impl ExplicitVehicles {
             params,
             work,
             cleared,
+            serial_plan: false,
             dummy: [0, 1, 2].map(|_| storage(device, "vehicle-coupling-dummy", 160)),
             tris,
             tri_count,
@@ -318,9 +323,48 @@ impl ExplicitVehicles {
             step: self.windows as u32,
             filter: u32::from(self.def.categories) | u32::from(self.def.mask) << 16,
             row_cap: self.ingest_rows().min(ingest_rows),
-            pad: [0; 3],
+            serial_plan: u32::from(self.serial_plan),
+            pad: [0; 2],
         };
         sim.queue().write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
+    }
+
+    /// Tests: the plan alone (bounds, plan, share) for a window of `steps` from the
+    /// current state, `serial` its lane-0 walk; returns the coupling's records and the
+    /// share counts as words. Blocking.
+    pub fn replan_words(
+        &mut self,
+        sim: &engine_webgpu::WgpuSim,
+        steps: u32,
+        ingest: Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u32)>,
+        serial: bool,
+    ) -> Vec<u32> {
+        self.serial_plan = serial;
+        self.write_params(sim, steps, ingest.map_or(0, |i| i.3));
+        self.serial_plan = false;
+        let mut enc = sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        enc.clear_buffer(&self.work, 0, Some(self.cleared));
+        let group = self.bind(sim, ingest);
+        let nv = self.sims.len() as u32;
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_bind_group(0, &group, &[]);
+            for p in 0..3 {
+                pass.set_pipeline(&self.pipes[p]);
+                pass.dispatch_workgroups(nv, 1, 1);
+            }
+        }
+        sim.queue().submit([enc.finish()]);
+        let l = self.layout;
+        let mut out = engine_webgpu::explicit_coupling::read_words(
+            sim.device(),
+            sim.queue(),
+            self.gpu.misc_buffer(),
+            u64::from(l.misc_base) * 16,
+            u64::from(l.misc_words()) * 16,
+        );
+        out.extend(engine_webgpu::explicit_coupling::read_words(sim.device(), sim.queue(), &self.work, 0, self.cleared));
+        out
     }
 
     /// Chunk records a window can make at most: a record per proxy shape.
@@ -521,6 +565,20 @@ impl World {
                     .collect()
             })
             .collect()
+    }
+
+    /// Tests only (blocking): the coupling plan alone from the current state, its
+    /// lane-parallel records or (`serial`) its lane-0 walk, as words: the records and
+    /// the share counts. Two calls from one state compare the two.
+    #[doc(hidden)]
+    pub fn explicit_replan_words(&mut self, serial: bool) -> Vec<u32> {
+        let Some(mut x) = self.explicit.take() else {
+            return Vec::new();
+        };
+        let steps = (f64::from(self.sim.params().dt) / f64::from(engine_softbody::explicit_beams::STEP)).round() as u32;
+        let out = x.replan_words(&self.sim, steps, self.fracture.vehicle_ingest().ok().flatten(), serial);
+        self.explicit = Some(x);
+        out
     }
 
     /// The coupling's record layout in the explicit buffers (for reads of the proxies).

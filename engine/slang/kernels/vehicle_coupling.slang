@@ -47,7 +47,8 @@ struct Params
     uint step;
     uint filter;         // the vehicles' collision filter: categories | mask << 16
     uint rowCap;         // chunk records at most (the ingest merges this many of slot 1)
-    uint pad0, pad1, pad2;
+    uint serialPlan;     // tests: cpl_plan's lane-0 walk even within every room
+    uint pad1, pad2;
 };
 
 static const uint BODY_RECS = 5u;
@@ -109,6 +110,11 @@ groupshared Atomic<uint> gsBox[7];
 groupshared Atomic<uint> gsCount;
 static const uint LIST_CAP = 1024u;
 groupshared uint gsList[LIST_CAP];
+groupshared uint gsSorted[LIST_CAP];
+groupshared uint gsBody[LIST_CAP];
+groupshared uint gsFaces[LIST_CAP];
+groupshared Atomic<uint> gsBodies;
+groupshared Atomic<uint> gsPlanes;
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -157,6 +163,92 @@ float4 colliderSphere(uint c, out uint body, out uint kind)
     return float4(p, r);
 }
 
+// cpl_plan's records a lane a shape (the n shapes in gsSorted, their bodies and faces
+// in gsBody and gsFaces, every body and plane within its room): the same records the
+// serial walk writes. Shape k's body slot is its body's number in order of first
+// appearance, its planes follow the earlier shapes' faces, its body's range is the
+// body's first and last shape.
+void cplPlanShapes(uint v, uint lane, uint n)
+{
+    uint nb = 0u;
+    uint planes = 0u;
+    for (uint k = lane; k < n; k += 256u)
+    {
+        uint body = gsBody[k];
+        // Its body's first shape, the bodies first seen before it, the planes before it.
+        uint f = k;
+        uint slot = 0u;
+        uint po = 0u;
+        uint last = k;
+        for (uint j = 0u; j < n; j++)
+        {
+            uint bj = gsBody[j];
+            if (j < k) po += gsFaces[j] & 0xFFFFu;
+            if (bj == body)
+            {
+                f = min(f, j);
+                last = j;
+            }
+        }
+        for (uint j = 0u; j < f; j++) slot += gsFaces[j] >> 31;
+        uint c = gsSorted[k];
+        uint b2, kind;
+        float4 sph = colliderSphere(c, b2, kind);
+        uint j = slot;
+        if (f == k)
+        {
+            uint b = brec(v, j);
+            float4 p0 = gBodies[7u * body];
+            float4 p2 = gBodies[7u * body + 2u];
+            float4 p3 = gBodies[7u * body + 3u];
+            float4 p4 = gBodies[7u * body + 4u];
+            gMisc[b] = asuint(p0);
+            gMisc[b + 1u] = asuint(gBodies[7u * body + 1u]);
+            gMisc[b + 2u] = asuint(float4(p3.xyz, 1.0));
+            gMisc[b + 3u] = uint4(asuint(p4.xyz), body);
+            // (1/I, w): w the body's shape range, first + 1 | (last + 1) << 16.
+            uint4 r4 = asuint(float4(p0.w > 0.0 ? p2.xyz : float3(0.0), 0.0));
+            gMisc[b + 4u] = uint4(r4.xyz, (f + 1u) | ((last + 1u) << 16));
+            gWork[wShare() + body].add(1u);
+        }
+        float4 lp = asfloat(gColliders[4u * c + 1u]);
+        uint4 lq = gColliders[4u * c + 2u];
+        float4 pr = asfloat(gColliders[4u * c + 3u]);
+        uint at = srec(v, k);
+        uint span = 0u;
+        uint code = 0u;
+        float3 prm = float3(0.0);
+        if (kind == 2u) { code = 0u; prm = pr.xyz; }
+        else if (kind == 0u) { code = 1u; prm = float3(pr.x, 0.0, 0.0); }
+        else if (kind == 1u) { code = 2u; prm = float3(pr.x, pr.y, 0.0); }
+        else
+        {
+            code = 3u;
+            uint base = asuint(pr.x) & HULL_MAX_BASE;
+            float scale = pr.y;
+            uint head = gHulls[4u * base];
+            uint nvh = head & 255u;
+            uint nf = (head >> 8) & 255u;
+            for (uint fi = 0u; fi < nf; fi++)
+            {
+                uint w = 4u * (base + 4u + nvh + fi);
+                float3 nn = asfloat(uint3(gHulls[w], gHulls[w + 1u], gHulls[w + 2u]));
+                float d = asfloat(gHulls[w + 3u]) * scale;
+                gMisc[prec(v, po + fi)] = asuint(float4(nn, d));
+            }
+            span = po | (nf << 16);
+        }
+        gMisc[at] = uint4(code, j, c, span);
+        gMisc[at + 1u] = asuint(float4(lp.xyz, prm.x));
+        gMisc[at + 2u] = lq;
+        gMisc[at + 3u] = asuint(float4(prm.y, prm.z, sph.w + 0.01, 0.0));
+        gMisc[at + 4u] = uint4(0u);
+        gMisc[at + 5u] = uint4(0u);
+        gMisc[at + 6u] = asuint(float4(sph.xyz, 0.0));
+    }
+    if (lane == 0u) gMisc[vrec(v)] = uint4(gsBodies.load(), n, gsPlanes.load(), 0u);
+}
+
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -191,31 +283,85 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         if (at < LIST_CAP) gsList[at] = c;
     }
     GroupMemoryBarrierWithGroupSync();
-    if (lane != 0u) return;
-    uint n = gsCount.load();
-    if (n > gP.S || n > LIST_CAP)
+    // The listed colliders in collider order: each one's rank among them (the indices
+    // are distinct), the list's first n (all of it within its room; a list past it is
+    // an error the status reports, as before).
+    uint total = gsCount.load();
+    uint n = min(total, min(gP.S, LIST_CAP));
+    if (lane == 0u && (total > gP.S || total > LIST_CAP)) gWork[1].or(ST_SHAPES);
+    for (uint i = lane; i < n; i += 256u)
     {
-        gWork[1].or(ST_SHAPES);
-        n = min(n, min(gP.S, LIST_CAP));
+        uint x = gsList[i];
+        uint rank = 0u;
+        for (uint j = 0u; j < n; j++) rank += gsList[j] < x ? 1u : 0u;
+        gsSorted[rank] = x;
     }
+    if (lane == 0u)
+    {
+        gsBodies.store(0u);
+        gsPlanes.store(0u);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // Each shape's engine body and hull faces; its body's first appearance counted.
+    for (uint k = lane; k < n; k += 256u)
+    {
+        uint body, kind;
+        colliderSphere(gsSorted[k], body, kind);
+        uint nf = 0u;
+        if (kind != 0u && kind != 1u && kind != 2u)
+        {
+            uint4 pr = gColliders[4u * gsSorted[k] + 3u];
+            uint base = pr.x & HULL_MAX_BASE;
+            nf = (gHulls[4u * base] >> 8) & 255u;
+        }
+        gsBody[k] = body;
+        gsFaces[k] = nf;
+        gsPlanes.add(nf);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // (gsFaces bit 31: the shape is its body's first.)
+    for (uint k = lane; k < n; k += 256u)
+    {
+        bool first = true;
+        for (uint j = 0u; j < k; j++)
+        {
+            if (gsBody[j] == gsBody[k]) { first = false; break; }
+        }
+        if (first)
+        {
+            gsBodies.add(1u);
+            gsFaces[k] = gsFaces[k] | 0x80000000u;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // Within every room (no shape skipped, as in the serial walk when nothing
+    // overflows): every record written a lane a shape, as that walk writes it.
+    // Otherwise lane 0 walks the shapes one by one as before (the status then fails
+    // the step).
+    if (gsBodies.load() <= gP.B && gsPlanes.load() <= gP.planes && gP.serialPlan == 0u)
+    {
+        cplPlanShapes(v, lane, n);
+        return;
+    }
+    if (lane != 0u) return;
     // Collider order: an insertion sort (the lists are short).
     for (uint a = 1u; a < n; a++)
     {
-        uint x = gsList[a];
+        uint x = gsSorted[a];
         uint b = a;
-        while (b > 0u && gsList[b - 1u] > x)
+        while (b > 0u && gsSorted[b - 1u] > x)
         {
-            gsList[b] = gsList[b - 1u];
+            gsSorted[b] = gsSorted[b - 1u];
             b--;
         }
-        gsList[b] = x;
+        gsSorted[b] = x;
     }
     uint nb = 0u;
     uint planes = 0u;
     uint ns = 0u;
     for (uint k = 0u; k < n; k++)
     {
-        uint c = gsList[k];
+        uint c = gsSorted[k];
         uint body, kind;
         float4 sph = colliderSphere(c, body, kind);
         // Its body's slot (first appearance).
