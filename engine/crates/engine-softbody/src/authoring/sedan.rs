@@ -45,6 +45,7 @@ pub fn member(
         skin: false,
         hardware_ends: true,
         kg_per_m: 0.0,
+        bolted: None,
     }
 }
 
@@ -246,6 +247,7 @@ pub fn seat_frame(name: &str, centre: [f32; 3], half: [f32; 3], kg: f32) -> Bloc
         bear: 0.0,
         bear_clear: 0.0,
         mount_to: Vec::new(),
+        collide: false,
     }
 }
 
@@ -1764,6 +1766,7 @@ pub fn sedan() -> VehicleDef {
             bear: 0.5,
             bear_clear: 0.0,
             mount_to: Vec::new(),
+            collide: false,
         },
         // Seat frames (the seats ride them): as heavy as their own lattice
         // needs; the rest of the seats' mass is a named mass on the floor
@@ -1787,6 +1790,7 @@ pub fn sedan() -> VehicleDef {
             bear: 0.0,
             bear_clear: 0.0,
             mount_to: Vec::new(),
+            collide: false,
         },
     ];
     let plates = vec![PlateSpec {
@@ -2277,6 +2281,16 @@ pub fn sedan_one_tier() -> VehicleDef {
             bl.half[2] = 0.5 * (front - rear);
             bl.depth = front - rear;
             bl.bear_clear = POWERTRAIN_CLEARANCE;
+            // It meets the dash, tunnel, rails and towers behind and beside
+            // it as contact: its faces are collision triangles and the
+            // body's nodes there contacters ([`BlockSpec::collide`]); its
+            // front face keeps its bearing beams to the radiator support.
+            // A bearing beam joins one pair of nodes, so a dash node that
+            // passed its engine node at an offset slid by: in the 56 km/h
+            // wall the dash's nodes went 7 cm into the engine while their
+            // beams lengthened. (`PT_COLLIDE=0`: bearing beams on every
+            // face, as before, a measurement switch.)
+            bl.collide = std::env::var("PT_COLLIDE").map_or(true, |v| v != "0");
             // Mounted where the 2008–12 Accord's are (Honda's parts
             // catalogue: the engine side mount on the right frame, the
             // transmission mount on the left frame, the front and rear roll
@@ -2457,6 +2471,71 @@ pub fn sedan_one_tier() -> VehicleDef {
             roof: [1.36, 2.58],
         });
     }
+    // The front subframe's rear mounts let go by design (DOT HS 811 666
+    // §3, fig. 55 and §8: the 2011 Accord's engine cradle rear mount drops
+    // from the body at a predetermined load between 40 and 50 ms of the
+    // NCAP frontal, to limit the foot well's intrusion). The report gives
+    // no strength: [`CRADLE_REAR_MOUNT`] is a Choice from that timing.
+    // (`CRADLE_BOLT=0` welds it as before, a measurement switch.)
+    if std::env::var("CRADLE_BOLT").map_or(true, |v| v != "0") {
+        let strength = std::env::var("CRADLE_REAR_MOUNT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(CRADLE_REAR_MOUNT);
+        // The cradle as the frame it is: its rear cross member (bolted to
+        // the rails at its ends, the rear mounts), its cross member on the
+        // axle line and side members joining both to the front cross
+        // member, which stays welded to the rails (the front mounts, which
+        // hold). Before, each cross member was welded to the rails on its
+        // own, so the rear one carried 2–4 kN at 40–50 ms: the cradle's
+        // load went through the rails at the axle.
+        use super::members::Bolt;
+        let bolt = |to: &[&str], weld: &[&str]| Bolt {
+            to: to.iter().map(|s| s.to_string()).collect(),
+            weld: weld.iter().map(|s| s.to_string()).collect(),
+            strength,
+        };
+        for m in d.members.iter_mut() {
+            match m.name.as_str() {
+                "subframe_f0" => m.bolted = Some(bolt(&["rail_f", "rail_f_r"], &[])),
+                "subframe_f1" => m.bolted = Some(bolt(&[], &[])),
+                _ => {}
+            }
+        }
+        let pr = d.profile.clone();
+        let mut side = ladder(member(
+            "subframe_side",
+            &[
+                (0.44, 0.29, 3.55),
+                (0.44, 0.29, FRONT_AXLE),
+                (0.44, 0.30, 4.10),
+            ],
+            0.10,
+            0.18,
+            UP,
+            "hsla",
+            [1.0, 1.0],
+            0,
+            true,
+            0,
+        ));
+        side.path = side.path.iter().map(|&p| restyle_point(p, &pr)).collect();
+        side.bolted = Some(bolt(&[], &["subframe_f0", "subframe_f1", "subframe_f2"]));
+        // Its section as the cross members' (`side_sections`).
+        let sec = section_of("subframe_f1");
+        sectioned_by(
+            std::slice::from_mut(&mut side),
+            &d.grades.clone(),
+            &[("subframe_side", sec, 0.18, 1.0)],
+        );
+        side.kg_per_m = section_kg_per_m(&sec);
+        d.members.push(side);
+    }
+    // The cowl and the dash panel where the 2011 Accord's are
+    // (`COWL=0` keeps the two-tier package's, a measurement switch).
+    if std::env::var("COWL").map_or(true, |v| v != "0") {
+        accord_dash(&mut d);
+    }
     d.biw_mass = ACCORD_BIW;
     d.part_masses = vec![
         ("door_f".into(), ACCORD_DOOR_F),
@@ -2471,6 +2550,182 @@ pub fn sedan_one_tier() -> VehicleDef {
         }
     }
     d
+}
+
+/// Each of the front subframe's rear body mounts lets go at this (N): a
+/// Choice set from the 2011 Accord's crash pulse (the drop at 40–50 ms of
+/// its NCAP frontal, DOT HS 811 666 fig. 55), not a measured strength.
+pub const CRADLE_REAR_MOUNT: f32 = 24.0e3;
+
+/// The dash panel's line on the 2011 Accord: 0.27–0.30 m behind the front
+/// axle (DOT HS 811 666 fig. 87, read at about 7 mm a pixel as the
+/// powertrain's place was), against the two-tier package's 0.40–0.49 m.
+pub const ACCORD_DASH_BEHIND: [f32; 2] = [0.27, 0.30];
+/// The 2011 Accord's master cylinder (3.16 kg, DOT HS 811 666 fig. 209) and
+/// its accelerator and brake pedals with their linkages (6.43 kg, §5.13.7):
+/// both bolt to the dash panel on the driver's side.
+pub const ACCORD_DASH_EQUIPMENT: f32 = 3.16 + 6.43;
+
+/// sedan1's cowl and dash panel at the 2011 Accord's place
+/// ([`ACCORD_DASH_BEHIND`]), sections and local masses.
+///
+/// - **The cowl** (the screen's base) runs from 0.30 m behind the axle at
+///   the A-pillars to 0.27 m at the centre: a windscreen's base is furthest
+///   forward at the centre (it was 9 cm behind its ends). The A-pillars'
+///   cowl corners, the aprons' rear ends and every brace on them move with
+///   it; the hinge pillars' bases stay where the door's front edge needs
+///   them (z 3.36, 0.42 m behind the axle), so the hinge pillar leans
+///   forward to the cowl as a real A-pillar's lower half widens to its
+///   foot. The screen's base, its glass and the top line's knee move with
+///   the cowl (the screen stays one straight rake from the header).
+/// - **The dash lower cross member** (`firewall`) runs at the dash panel's
+///   line between the front rails, its ends swept back round the
+///   wheelhouses to the hinge pillars' bases (it ties the sills there as
+///   before), and the tunnel runs forward to it.
+/// - **The dash panel** (`dash_panel`): three vertical strips from the
+///   lower cross member to the cowl, 0.39 m wide each, their chords 0.195 m
+///   apart across the car (the powertrain's rear face meets one wherever it
+///   bears). Each strip is its share of the 0.8 mm panel ([`SHELL_GAUGE`],
+///   a Choice: dash panels are 0.7–0.9 mm), carrying the engine's push as
+///   a membrane: each chord yields at σ_y·A of its half strip, 210 MPa
+///   ([`super::vehicle::SHEET_YIELD`]'s grade). A flat sheet's bending is
+///   negligible (0.8 mm, M_p about 13 N·m over a strip), so a strip has no
+///   web across its depth.
+/// - **Sections** (Choices, typical stampings): the cowl's plenum a
+///   150 × 100 × 1.0 mm DP600 box (as [`screen_ring`] takes it); the dash
+///   lower cross member a 60 × 100 × 1.4 mm HSLA hat closed by the panel.
+/// - **Local masses:** the master cylinder and pedal box
+///   ([`ACCORD_DASH_EQUIPMENT`]) as a named mass on the driver's half of the
+///   dash panel, taken from the equipment the kerb mass leaves (none
+///   moved).
+fn accord_dash(d: &mut VehicleDef) {
+    use super::vehicle::{SHEET_YIELD, SHELL_GAUGE};
+    let pr = d.profile.clone();
+    let rp = |p: (f32, f32, f32)| restyle_point([p.0, p.1, p.2], &pr);
+    let (back_side, back_centre) = (ACCORD_DASH_BEHIND[1], ACCORD_DASH_BEHIND[0]);
+    let (z_side, z_centre) = (FRONT_AXLE - back_side, FRONT_AXLE - back_centre);
+    // The cowl's line in plan: a parabola, furthest forward at the centre.
+    let cowl_z = |x: f32| z_centre - (z_centre - z_side) * (x / 0.79).powi(2);
+    // The strips' chords across the car.
+    let chords = [-0.4875f32, -0.2925, -0.0975, 0.0975, 0.2925, 0.4875];
+    let (old_cw, new_cw) = (3.38f32, z_side);
+    for m in d.members.iter_mut() {
+        match m.name.as_str() {
+            "cowl" => {
+                let mut pts = vec![(-0.79, 0.92, cowl_z(0.79))];
+                pts.extend(chords.iter().map(|&x| (x, 0.92, cowl_z(x))));
+                pts.push((0.79, 0.92, cowl_z(0.79)));
+                m.path = pts.into_iter().map(rp).collect();
+            }
+            "pillar_a" | "apron" => {
+                for p in m.path.iter_mut().filter(|p| p[2] == old_cw) {
+                    p[2] = new_cw;
+                }
+            }
+            "firewall" => {
+                let mut pts = vec![(-0.79, 0.27, 3.36), (-0.58, 0.27, 3.38)];
+                pts.extend(chords.iter().map(|&x| (x, 0.30, z_centre - 0.01)));
+                pts.extend([(0.58, 0.27, 3.38), (0.79, 0.27, 3.36)]);
+                m.path = pts.into_iter().map(rp).collect();
+            }
+            "tunnel" => m.path.push(rp((0.0, 0.33, z_centre - 0.01))),
+            _ => {}
+        }
+    }
+    for b in d.braces.iter_mut() {
+        for p in [&mut b.from, &mut b.to] {
+            if p[2] == old_cw && p[0].abs() == 0.79 {
+                p[2] = new_cw;
+            }
+        }
+    }
+    // The dash panel's strips: from the lower cross member's top chord
+    // (y 0.30 + 0.08) to the cowl's bottom one (0.92 − 0.09).
+    let strip = |name: &str, x: f32, mirrored: bool| {
+        ladder(member(
+            name,
+            &[(x, 0.38, z_centre - 0.01), (x, 0.83, cowl_z(x))],
+            0.10,
+            0.195,
+            [1.0, 0.0, 0.0],
+            "panel",
+            [1.0, 1.0],
+            0,
+            mirrored,
+            0,
+        ))
+    };
+    let mut strips = vec![
+        strip("dash_panel", 0.0, false),
+        strip("dash_panel_s", 0.39, true),
+    ];
+    for m in &mut strips {
+        m.path = m.path.iter().map(|p| rp((p[0], p[1], p[2]))).collect();
+        let half_strip = 0.5 * 0.39 * SHELL_GAUGE;
+        m.kg_per_m = 0.39 * SHELL_GAUGE * super::members::STEEL_DENSITY;
+        let s = SHEET_YIELD * half_strip / d.grades.panel.deform;
+        m.scale = [s, s];
+    }
+    d.members.extend(strips);
+    let plenum = Section {
+        depth: 0.15,
+        width: 0.10,
+        t: 0.0010,
+        sigma_y: DP600,
+        round: false,
+    };
+    let lower = Section {
+        depth: 0.06,
+        width: 0.10,
+        t: 0.0014,
+        sigma_y: HSLA340,
+        round: false,
+    };
+    let list = [("cowl", plenum, 0.18, 1.0), ("firewall", lower, 0.16, 1.0)];
+    sectioned_by(&mut d.members, &d.grades.clone(), &list);
+    for (name, sec, _, _) in list {
+        for m in d.members.iter_mut().filter(|m| m.name == name) {
+            m.kg_per_m = section_kg_per_m(&sec);
+        }
+    }
+    // The screen's base, its glass and the top line's knee.
+    let knee = 3.33;
+    let base = z_side + 0.01;
+    let header = (2.55, d.profile.top.eval(2.55));
+    let foot = (base, d.profile.top.eval(knee));
+    d.profile.top = Curve::new(
+        &d.profile
+            .top
+            .0
+            .iter()
+            .filter(|p| !(p[0] > header.0 && p[0] <= knee))
+            .map(|p| (p[0], p[1]))
+            .chain([(0.5 * (header.0 + foot.0), 0.5 * (header.1 + foot.1)), foot])
+            .fold(Vec::<(f32, f32)>::new(), |mut v, p| {
+                v.push(p);
+                v.sort_by(|a, b| a.0.total_cmp(&b.0));
+                v
+            }),
+    );
+    for z in d.zones.iter_mut() {
+        if let Region::Top { z1, .. } = &mut z.region {
+            if *z1 == 3.32 {
+                *z1 = z_side;
+            }
+        }
+    }
+    d.look.windscreen[1] = base;
+    // Named masses: the dash equipment on the driver's (left, +x) half; the
+    // instrument panel's box follows the cowl it hangs from.
+    d.masses.push(NamedMass {
+        name: "dash_equipment".into(),
+        kg: ACCORD_DASH_EQUIPMENT,
+        lo: [0.05, 0.25, z_centre - 0.06],
+        hi: [0.60, 0.95, z_centre + 0.04],
+    });
+    for m in d.masses.iter_mut().filter(|m| m.name == "dashboard") {
+        m.hi[2] = z_centre + 0.02;
+    }
 }
 
 /// The bolted and hinged panels' sheets: steel outers 0.75 mm (outer panel
