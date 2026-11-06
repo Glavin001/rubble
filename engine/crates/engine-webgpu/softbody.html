@@ -174,7 +174,7 @@
     for (const [id, t] of Object.entries(CARS)) carSel.add(new Option(t, id, false, id === carKind));
     carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') u.searchParams.delete('truck'); location.href = u.href; };
     // Query parameters a scene change keeps: the solver and the vehicle.
-    const keep = (u) => { for (const k of ['solver', 'car', 'truck', 'mod', 'pc', 'jbeamMode']) if (qs.has(k)) u.searchParams.set(k, qs.get(k)); return u; };
+    const keep = (u) => { for (const k of ['solver', 'car', 'truck', 'mod', 'pc', 'jbeamMode', 'wheels']) if (qs.has(k)) u.searchParams.set(k, qs.get(k)); return u; };
     sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = keep(u).href; };
     const solverBtn = document.getElementById('solverBtn');
     solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz (RoR parity) ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
@@ -215,6 +215,9 @@
     // scenes' default).
     const XDRIVE = new Set(['yard', 'traffic']);
     const DRIVE = EXPLICIT && (qs.has('drive') ? qs.get('drive') === '1' : XDRIVE.has(xscene));
+    // Raycast wheels: the drive scenes', or any explicit scene with ?wheels=raycast
+    // (a crash on the solver's own wheels, the body's rims riding them).
+    const RAYCAST = DRIVE || (EXPLICIT && qs.get('wheels') === 'raycast');
     // The page for an explicit scene with its default knobs: keeps the solver and the
     // vehicle (and the lab's view options), drops any preset and the old scene's knobs.
     const xsceneUrl = (id) => {
@@ -473,11 +476,11 @@
     // only) a desc. The procedural sedan is the same `.truck` text on both.
     let showcaseCache = null;
     const showcaseBuilt = () => showcaseCache ??= showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: qs.get('res') ?? 'medium',
-      ...(DRIVE ? { wheels: 'raycast' } : {}),
+      ...(RAYCAST ? { wheels: 'raycast' } : {}),
       // Measurement switches (a visual A/B on identical physics).
       ...(qs.get('bind') ? { bind: qs.get('bind') } : {}), ...(qs.get('alt') === '0' ? { alt: false } : {}) });
     const hiresJbeam = carKind === 'hires' ? [['hires.jbeam', hiresCarJbeam()]] : null;
-    const vehicleSource = () => DRIVE ? { ...baseSource(), wheels: 'raycast' } : baseSource();
+    const vehicleSource = () => RAYCAST ? { ...baseSource(), wheels: 'raycast' } : baseSource();
     const baseSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
       // JBeam content runs in JBeam mode (BeamNG's rules: desc order, pressure wheels
       // or raycast wheels); ?jbeamMode=truck: through the .truck export (RoR's rules).
@@ -1212,7 +1215,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // Or an imported JBeam vehicle's flexbodies and props (?mod=).
     let importVis = null;
     const bodyVisual = () => carKind === 'showcase' ? (() => { const b = showcaseBuilt(); b.visual.lod ??= [b.visualLod, b.visualFar]; return b.visual; })()
-      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: JBEAM_NATIVE, ...(DRIVE ? { wheels: 'raycast' } : {}), materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = [r.visualLod, r.visualFar]; loadBodyTextures(r.visual); return r.visual; })());
+      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: JBEAM_NATIVE, ...(RAYCAST ? { wheels: 'raycast' } : {}), materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = [r.visualLod, r.visualFar]; loadBodyTextures(r.visual); return r.visual; })());
     // An imported body's colour and data maps (normal, roughness, AO; decoded
     // in the wasm), uploaded once they arrive; until then it shades untextured.
     const loadBodyTextures = (vis) => {
@@ -1239,7 +1242,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         const own = (v) => v.name === xlayout.vehicles[0].name && v.nodes >= vis.nodeCount;
         bodyIds = xlayout.vehicles.filter(own).map((v) => bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: xlayout.vehicles.indexOf(v), lod: vis.lod ?? null,
           // Drive mode: the wheels' pieces ride the raycast wheels' records.
-          wheelRecords: DRIVE ? xsim.wheelRecords(xlayout.vehicles.indexOf(v)) : null }));
+          wheelRecords: RAYCAST ? xsim.wheelRecords(xlayout.vehicles.indexOf(v)) : null }));
         let tri = 0;
         const solidTris = [];
         let cables = [0, 0];
@@ -1252,7 +1255,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         bodyFor.step = null;
         bodyFor.layout = xlayout;
       }
-      if (bodyFor.pos !== pos || bodyFor.sim !== xsim) { bodyR.setPositions(pos, labR.restBuffer(), DRIVE ? xsim.miscBuffer() : null); bodyFor.pos = pos; bodyFor.sim = xsim; }
+      if (bodyFor.pos !== pos || bodyFor.sim !== xsim) { bodyR.setPositions(pos, labR.restBuffer(), RAYCAST ? xsim.miscBuffer() : null); bodyFor.pos = pos; bodyFor.sim = xsim; }
       return true;
     };
     const bodyOn = () => bodyR && labR.opts.skin === 'body';
@@ -1650,7 +1653,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     }
     function readPoses() {
       if (poseRead) return poseRead;
-      if (DRIVE) {
+      if (RAYCAST) {
         const sim = xsim, step = simSteps();
         poseRead = sim.readDrive().then((d) => {
           poseRead = null;
@@ -2177,7 +2180,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       };
       const drawNow = async () => {
         // Driving: the wheels' poses and the chase camera's subject first.
-        if (DRIVE) await readPoses();
+        if (RAYCAST) await readPoses();
         updateCamera(0.1, false);
         const enc = device.createCommandEncoder();
         drawScene(enc);

@@ -551,6 +551,9 @@ pub struct MatInfo {
     pub normal_map: Option<String>,
     pub roughness_map: Option<String>,
     pub ao_map: Option<String>,
+    /// A stage takes the vehicle's paint (BeamNG's `instanceDiffuse`): the body
+    /// paint, whatever its colour map holds under it.
+    pub paint: bool,
 }
 
 /// Read a `*.materials.json` (relaxed JSON): every material by its `mapTo`
@@ -582,7 +585,11 @@ pub fn read_materials(src: &str) -> HashMap<String, MatInfo> {
         let emissive = f("glow").and_then(Value::as_bool).unwrap_or(false)
             || f("emissive").and_then(Value::as_bool).unwrap_or(false)
             || f("emissiveFactor").is_some_and(|x| x.is_array());
-        let info = MatInfo { color, translucent, emissive, textured, color_map, normal_map, roughness_map, ao_map };
+        let paint = v
+            .get("Stages")
+            .and_then(Value::as_array)
+            .is_some_and(|st| st.iter().any(|s| s.get("instanceDiffuse").and_then(Value::as_bool) == Some(true)));
+        let info = MatInfo { color, translucent, emissive, textured, color_map, normal_map, roughness_map, ao_map, paint };
         if let Some(t) = v.get("mapTo").and_then(Value::as_str) {
             out.insert(t.to_string(), info.clone());
         }
@@ -677,7 +684,10 @@ pub fn jbeam_visual(
         }
         // A colour-mapped material is not the body paint (paint is a flat
         // colour): it shades satin with its map (carbon, fabric, wood, dials).
-        if mi.textured && c == mat::PAINT {
+        if mi.paint && !mi.translucent && !mi.emissive {
+            // BeamNG's paint flag (`instanceDiffuse`): the vehicle's paint.
+            c = mat::PAINT;
+        } else if mi.textured && c == mat::PAINT {
             c = mat::DASH;
         }
         if mi.emissive {

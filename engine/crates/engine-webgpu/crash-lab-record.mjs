@@ -33,9 +33,9 @@ const CHROME = process.env.CHROME || (process.platform === 'darwin'
 mkdirSync(OUT, { recursive: true });
 const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', showcase1: 'car=showcase&style=sedan1',
   // Community BeamNG cars from a local conversion cache (community_cache: one LOD,
-  // textures at 1K; engine-webgpu/__mods, never committed), on hub-only wheels.
-  etkk: 'mod=/__mods/etkk_tex&pc=etkk/kr6.pc', ccf: 'mod=/__mods/ccf_tex&pc=ccf/f4_sport_M.pc',
-  vertex: 'mod=/__mods/vertex_tex&pc=gavril_vertex/gavril_vertex.pc', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
+  // textures at 1K; engine-webgpu/__mods, never committed), on raycast wheels.
+  etkk: 'mod=/__mods/etkk_tex&pc=etkk/kr6.pc&wheels=raycast', ccf: 'mod=/__mods/ccf_tex&pc=ccf/f4_sport_M.pc&wheels=raycast',
+  vertex: 'mod=/__mods/vertex_tex&pc=gavril_vertex/gavril_vertex.pc&wheels=raycast', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
   mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck' };
 if (!CARS[CAR]) throw new Error(`--car: one of ${Object.keys(CARS).join(', ')}`);
 const carFile = CARS[CAR].startsWith('truck=') ? join(LOCAL, CARS[CAR].split('/__local/')[1])
