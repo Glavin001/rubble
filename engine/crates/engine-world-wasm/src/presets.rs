@@ -25,6 +25,24 @@ pub fn scene_from_query(family_name: &str, query: &str) -> Result<JsValue, JsVal
 }
 
 /// Preset `name`'s scene (`Preset::scene_def`), as `sceneFromQuery` gives it.
+/// Every preset (`rubble::play::presets`): `[{ name, title, family, page, query, placed }]`,
+/// `placed`: its scene is placed through `SceneDef` (the playground shell can run it).
+#[wasm_bindgen(js_name = presetList)]
+pub fn preset_list() -> JsValue {
+    js(serde_json::Value::Array(
+        rubble::play::presets()
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "name": p.name, "title": p.title, "family": p.family.name(),
+                    "page": p.page, "query": p.query,
+                    "placed": rubble::play::scene::placed_here(p.family),
+                })
+            })
+            .collect(),
+    ))
+}
+
 #[wasm_bindgen(js_name = presetScene)]
 pub fn preset_scene(name: &str) -> Result<JsValue, JsValue> {
     let p = rubble::play::preset(name).ok_or_else(|| err(format!("unknown preset {name}")))?;

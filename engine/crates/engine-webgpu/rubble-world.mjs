@@ -6,7 +6,7 @@
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
-  hiresCarJbeam, explicitSedanTruck, sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
+  hiresCarJbeam, explicitSedanTruck, sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene, presetList as wasmPresetList,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -49,6 +49,13 @@ export async function sceneFromQuery(family, query) {
   ready ??= init();
   await ready;
   return wasmSceneFromQuery(family, query);
+}
+
+/** Every preset (`rubble::play::presets`): `[{ name, title, family, page, query, placed }]`. */
+export async function presetList() {
+  ready ??= init();
+  await ready;
+  return wasmPresetList();
 }
 
 /** Preset `name`'s scene (`rubble::play::Preset::scene_def`). */

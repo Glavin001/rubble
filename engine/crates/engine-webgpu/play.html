@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rubble playground</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0d1117; color: #e6edf3; font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+    .panel { position: fixed; left: 12px; top: 12px; max-width: 420px; padding: 10px 12px; background: rgba(13, 17, 23, 0.82); border: 1px solid #30363d; border-radius: 8px; }
+    .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+    .muted { color: #8b949e; }
+    .bad { color: #f85149; }
+    button, select { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 3px 8px; font: inherit; }
+    kbd { font-size: 11px; padding: 0 4px; border: 1px solid #30363d; border-radius: 4px; }
+    #err { color: #f85149; white-space: pre-wrap; }
+    h1 { font-size: 14px; margin: 0 0 4px; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
+  <div id="hud" class="panel">
+    <h1 id="title">Rubble playground</h1>
+    <div class="row"><label class="muted" for="presetSel">Preset</label><select id="presetSel"></select></div>
+    <div id="controls" class="row"></div>
+    <div id="help" class="row muted"></div>
+    <div id="stats" class="muted"></div>
+    <div id="status" class="muted">starting…</div>
+    <div id="err"></div>
+  </div>
+  <script type="module">
+    // The playground shell (engine/docs/playground-plan.md phase 4): every preset of the
+    // rubble::play registry on one page. The shell owns the device and canvas, the frame
+    // loop, the camera, the HUD and the preset menu; a preset's family module
+    // (play-<family>.mjs) adds its controls, its HUD fields and its draw (the render layers
+    // in layers.mjs). Physics, scenes and scripts are Rust (rubble::play).
+    import { createScene, sceneFromQuery, presetList, pollFrame, stepFrames, errorText } from './rubble-world.mjs';
+    const $ = (id) => document.getElementById(id);
+    const statusEl = $('status');
+    const fail = (e) => { $('err').textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String(e?.message ?? e); };
+    addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
+    addEventListener('error', (e) => fail(e.error || e.message));
+
+    // ---------------------------------------------------------------- the preset
+    const presets = (await presetList()).filter((p) => p.placed);
+    const qs = new URLSearchParams(location.search);
+    const preset = presets.find((p) => p.name === qs.get('preset')) ?? presets[0];
+    qs.delete('preset');
+    // The page's switches first (a page reads a switch's first value), then the preset's.
+    const query = [qs.toString(), preset.query].filter(Boolean).join('&');
+    document.title = `Rubble · ${preset.title}`;
+    $('title').textContent = preset.title;
+    const sel = $('presetSel');
+    for (const p of presets) sel.add(new Option(`${p.title} (${p.family})`, p.name, false, p === preset));
+    sel.onchange = () => { location.href = `play.html?preset=${sel.value}`; };
+
+    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
+    const sceneDef = await sceneFromQuery(preset.family, query);
+    const family = await import(`./play-${preset.family}.mjs`);
+    const world = await createScene(sceneDef);
+    const device = world.device();
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+    const canvas = $('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    const configure = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      context.configure({ device, format, alphaMode: 'opaque' });
+    };
+    configure();
+    addEventListener('resize', configure);
+    const placed = world.placeScene(sceneDef);
+
+    // ---------------------------------------------------------------- the camera (orbit)
+    const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+    const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const cam = { yaw: 0.7, pitch: 0.45, dist: 42, target: [0, 0, 0], fov: Math.PI / 3, near: 0.05, far: 600, minDist: 4, maxDist: 120 };
+    let drag = null;
+    canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; });
+    addEventListener('pointerup', () => { drag = null; });
+    addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      cam.yaw -= (e.clientX - drag.x) * 0.005;
+      cam.pitch = Math.max(0.05, Math.min(1.4, cam.pitch + (e.clientY - drag.y) * 0.005));
+      drag = { x: e.clientX, y: e.clientY };
+    });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); cam.dist = Math.max(cam.minDist, Math.min(cam.maxDist, cam.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    const eyeOf = () => {
+      const cp = Math.cos(cam.pitch);
+      return [cam.target[0] + cam.dist * cp * Math.sin(cam.yaw), cam.target[1] + cam.dist * Math.sin(cam.pitch), cam.target[2] + cam.dist * cp * Math.cos(cam.yaw)];
+    };
+    function viewProj(eye, at, aspect) {
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const view = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+        -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
+      const f = 1 / Math.tan(cam.fov / 2), near = cam.near, far = cam.far;
+      const proj = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far / (near - far), -1, 0, 0, (near * far) / (near - far), 0];
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = proj[r] * view[c * 4] + proj[4 + r] * view[c * 4 + 1] + proj[8 + r] * view[c * 4 + 2] + proj[12 + r] * view[c * 4 + 3];
+      return o;
+    }
+
+    // ---------------------------------------------------------------- the family
+    const ui = {
+      button(label, key, fn) {
+        const b = document.createElement('button');
+        b.innerHTML = key ? `${label} <kbd>${key.replace(/^Key/, '')}</kbd>` : label;
+        b.onclick = () => { fn(); b.blur(); };
+        $('controls').append(b);
+        if (key) keys[key] = fn;
+      },
+      help(html) { $('help').innerHTML = html; },
+    };
+    const keys = {};
+    addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'SELECT' || e.repeat) return;
+      keys[e.code]?.();
+    });
+    const scene = await family.setup({ world, placed, sceneDef, device, format, cam, ui, preset });
+    let lastCounters = null;
+    const onFrame = (f) => {
+      scene.onFrame?.(f);
+      const c = f.counters();
+      if (c) lastCounters = { contact: c.contacts, awake: c.awake, overflow: c.overflow };
+    };
+
+    // ---------------------------------------------------------------- draw and loop
+    let depth = null;
+    function draw() {
+      if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
+        depth?.destroy();
+        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      }
+      const eye = eyeOf();
+      const view = { viewProj: viewProj(eye, cam.target, canvas.width / canvas.height), eye };
+      const enc = device.createCommandEncoder();
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: scene.clearColor ?? [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
+        depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      scene.draw(rp, view);
+      rp.end();
+      device.queue.submit([enc.finish()]);
+    }
+    let manual = false;
+    let lastT = performance.now(), fpsAcc = 0, fpsN = 0, fpsShow = 0, physMs = 0;
+    function frame(now) {
+      const dt = Math.min(0.05, (now - lastT) / 1000);
+      lastT = now;
+      fpsAcc += dt; fpsN++;
+      if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
+      if (manual) { requestAnimationFrame(frame); return; }
+      const t0 = performance.now();
+      for (let k = 0; k < (scene.stepsPerFrame ?? 1); k++) world.step();
+      pollFrame(world, onFrame);
+      physMs = performance.now() - t0;
+      draw();
+      const c = lastCounters;
+      $('stats').innerHTML = (scene.hud?.() ?? '') + (c ? ` · contacts ${c.contact} · awake ${c.awake}${c.overflow ? ` · <span class="bad">overflow 0x${c.overflow.toString(16)}</span>` : ''}` : '');
+      statusEl.textContent = `step ${world.stepCount()} · ${fpsShow.toFixed(0)} fps · host ${physMs.toFixed(1)} ms`;
+      requestAnimationFrame(frame);
+    }
+
+    // ---------------------------------------------------------------- automation
+    // __step(n): n physics steps, frame-locked, then a draw; the family's hooks besides.
+    window.__step = async (n = 1) => {
+      manual = true;
+      await stepFrames(world, n, onFrame);
+      draw();
+      return { steps: world.stepCount(), counters: lastCounters };
+    };
+    Object.assign(window, scene.hooks ?? {});
+    window.__world = world;
+    window.__preset = preset;
+    window.__ready = true;
+    statusEl.textContent = 'ready';
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
