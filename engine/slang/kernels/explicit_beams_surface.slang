@@ -431,13 +431,16 @@ uint surfTriangleProxies(uint v, uint4 tn, float3 x0, float3 x1, float3 x2, floa
 {
     float3 tlo = ssub3(min(min(x0, x1), x2), float3(r, r, r));
     float3 thi = sadd3(max(max(x0, x1), x2), float3(r, r, r));
-    for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
+    // The top bit of `proxies`: the fast proxies only (the pair path meets the rest).
+    bool fastOnly = (proxies >> 31) != 0u;
+    uint count = proxies & 0x7FFFFFFFu;
+    for (uint k = 0u, kStop = EB_END(k, count, 1u); k < kStop; k++)
     {
         uint b = boxCount + k;
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
         float3 vb;
         bool fast = surfProxyFast(v, k, vb);
-        if (!fast && !surfProxyMay(v, k, tlo, thi)) continue;
+        if (!fast && (fastOnly || !surfProxyMay(v, k, tlo, thi))) continue;
 #ifdef EB_ABLATE
         if ((gP.ablate & 536870912u) != 0u) continue;
 #endif
@@ -541,13 +544,16 @@ uint surfSegmentProxies(uint v, uint4 bn, float3 x0, float3 x1, float r, uint bo
 {
     float3 tlo = ssub3(min(x0, x1), float3(r, r, r));
     float3 thi = sadd3(max(x0, x1), float3(r, r, r));
-    for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
+    // The top bit of `proxies`: the fast proxies only (the pair path meets the rest).
+    bool fastOnly = (proxies >> 31) != 0u;
+    uint count = proxies & 0x7FFFFFFFu;
+    for (uint k = 0u, kStop = EB_END(k, count, 1u); k < kStop; k++)
     {
         uint b = boxCount + k;
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
         float3 vb;
         bool fast = surfProxyFast(v, k, vb);
-        if (!fast && !surfProxyMay(v, k, tlo, thi)) continue;
+        if (!fast && (fastOnly || !surfProxyMay(v, k, tlo, thi))) continue;
 #ifdef EB_ABLATE
         if ((gP.ablate & 536870912u) != 0u) continue;
 #endif
@@ -653,13 +659,16 @@ uint surfPointProxies(uint v, uint gi, float3 x, float r, uint boxCount, uint pr
 {
     float3 tlo = ssub3(x, float3(r, r, r));
     float3 thi = sadd3(x, float3(r, r, r));
-    for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
+    // The top bit of `proxies`: the fast proxies only (the pair path meets the rest).
+    bool fastOnly = (proxies >> 31) != 0u;
+    uint count = proxies & 0x7FFFFFFFu;
+    for (uint k = 0u, kStop = EB_END(k, count, 1u); k < kStop; k++)
     {
         uint b = boxCount + k;
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
         float3 vb;
         bool fast = surfProxyFast(v, k, vb);
-        if (!fast && !surfProxyMay(v, k, tlo, thi)) continue;
+        if (!fast && (fastOnly || !surfProxyMay(v, k, tlo, thi))) continue;
 #ifdef EB_ABLATE
         if ((gP.ablate & 536870912u) != 0u) continue;
 #endif
@@ -826,8 +835,9 @@ bool surfAnyFast(uint v, uint proxies)
 // for the apply. The same hits as the per-element loops (a pair is listed exactly when
 // the loops' fqNear holds; their sphere cull only skips pairs fqNear rejects); every sum
 // it feeds is fixed point or an integer count, so their order is free. Used when the
-// vehicle has proxies, none of them fast this step (the casts keep the per-element
-// loops), and its list holds every pair (else the per-element loops, that step).
+// vehicle has proxies, for those not fast this step (a fast proxy's casts keep the
+// per-element loops), when its list holds every pair (else the per-element loops meet
+// every proxy, that step).
 //   gNext at gMisc[coupleRec() + 1].w (0: no pair path): per vehicle SURF_PAIR_CAP
 //   pair words (kind << 30 | shape k << 20 | the element's index in the vehicle), then
 //   per vehicle SURF_HIT_CAP hits of SURF_HIT_WORDS words (the pair word; two; the body
@@ -877,6 +887,13 @@ void surfPairBounds(uint v, uint lane, uint proxies)
         float3 lo;
         float3 hi;
         fqBounds(s, lo, hi);
+        // A fast shape (its casts) stays with the per-element loops: bounds no box meets.
+        float3 vb;
+        if (surfProxyFast(v, k, vb))
+        {
+            lo = float3(3.0e38, 3.0e38, 3.0e38);
+            hi = -lo;
+        }
         uint at = surfBoundsAt(v, k);
         surfStore3(at, lo);
         surfStore3(at + 3u, hi);
@@ -1061,15 +1078,16 @@ void surfPairApply(uint v, uint p, float3 origin, float r, uint4 r0, uint4 r1, u
 // Whether any vehicle of the upload has surface contact (uniform: a parameter).
 uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 
-// The pair path's step of vehicle v (surfaceStep's, every lane; no proxy fast this
-// step, so no casts): the snapshot, the shapes' bounds, the listing, the find (the
-// static slots by the per-element loops, the proxies by pair), the apply. More pairs
-// than the list holds: the per-element loops meet the proxies too, that step. Its own
+// The pair path's step of vehicle v (surfaceStep's, every lane): the snapshot (with
+// the casts' gathering when a proxy is fast), the shapes' bounds, the listing, the find
+// (the static slots and the fast proxies by the per-element loops, the other proxies by
+// pair), the apply. More pairs than the list holds: the per-element loops meet every
+// proxy, that step. Its own
 // function behind surfaceStep's uniform early return (explicit-vehicles-in-world.md
 // §8.3: the per-element path's code stays as it was).
 void surfaceStepPairs(uint v, uint lane, uint parity, bool mine, uint4 r0, uint4 r1, uint4 r2, uint4 sr,
                       float3 origin, float r, uint nodeCount, uint triCount, uint segCount, uint proxies,
-                      uint bodies)
+                      uint bodies, bool anyFast)
 {
     sync();
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
@@ -1084,6 +1102,15 @@ void surfaceStepPairs(uint v, uint lane, uint parity, bool mine, uint4 r0, uint4
         gAcc[surfBodyBase() + v * cplB() + j].store(0);
         gAcc[surfTminAt(v, j, parity + 1u)].store(0);
     }
+    if (anyFast)
+    {
+        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+            surfGatherTriangle(v, r1.x + t, origin, r, proxies, parity);
+        for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+            surfGatherSegment(v, gLists[sr.x + j], origin, r, proxies, r2.z, parity);
+        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+            surfGatherPoint(v, r0.x + i, origin, r, proxies, parity);
+    }
     surfPairBounds(v, lane, proxies);
     sync();
     surfPairCull(v, lane, origin, r, r0, r1, sr, r2.z, parity, triCount, segCount, nodeCount, proxies);
@@ -1091,7 +1118,8 @@ void surfaceStepPairs(uint v, uint lane, uint parity, bool mine, uint4 r0, uint4
     uint listed = uint(gAcc[surfPairCount(v)].load());
     // A list too long for the region: the per-element loops meet the proxies this step.
     bool pairs = listed <= SURF_PAIR_CAP;
-    uint px = pairs ? 0u : proxies;
+    // The per-element loops: the fast proxies (casts) beside the pairs, or every proxy.
+    uint px = pairs ? (anyFast ? (proxies | 0x80000000u) : 0u) : proxies;
     // Without static slots nor proxies for them the per-element loops find nothing.
     bool loops = r1.w != 0u || px != 0u;
     if (loops)
@@ -1159,16 +1187,16 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
     uint segCount = mine ? sr.y : 0u;
     uint proxies = mine ? surfProxies(v) : 0u;
     uint bodies = proxies != 0u ? gMisc[cplBase(v)].x : 0u;
-    // Uniform: the vehicle meets proxies, none fast this step, and has the pair region
-    // (measurement: EB_ABLATE's 2^30 turns the pair path off).
+    // Uniform: the vehicle meets proxies and has the pair region (measurement:
+    // EB_ABLATE's 2^30 turns the pair path off).
     bool pairs = proxies != 0u && surfPairsOn();
 #ifdef EB_ABLATE
     if ((gP.ablate & 1073741824u) != 0u) pairs = false;
 #endif
-    if (pairs && !surfAnyFast(v, proxies))
+    if (pairs)
     {
         surfaceStepPairs(v, lane, parity, mine, r0, r1, r2, sr, origin, r, nodeCount, triCount, segCount, proxies,
-                         bodies);
+                         bodies, surfAnyFast(v, proxies));
         return;
     }
     sync();

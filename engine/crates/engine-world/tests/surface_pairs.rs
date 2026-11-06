@@ -4,7 +4,8 @@
 //! word, every proxy record and every coupling sum the same.
 //! The scene: a repo sedan with surface contact driving at 4 m/s between rows of posts
 //! 3 cm from its sides, just past its contact band (boxes, turned boxes, hulls, turned hulls),
-//! a capsule, a sphere and a resting box ahead, and a free box thrown at its front.
+//! a capsule, a sphere and a resting box ahead, a free box thrown at its front and a fast
+//! steel ball fired onto its roof (a fast proxy: its casts beside the pairs).
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use glam::{Quat, Vec3};
@@ -126,6 +127,19 @@ fn scene() -> World {
         .unwrap();
     w.create_box_shape(b, &ShapeDef::default(), [0.2, 0.2, 0.2])
         .unwrap();
+    // A fast steel ball (3 cm at 60 m/s: 3 cm a step, past half its radius) fired down
+    // onto the roof: a fast proxy (its casts) beside the pair path's slow ones.
+    let b = w
+        .create_body(&BodyDef {
+            linear_velocity: [0.0, -60.0, 0.0],
+            ..BodyDef::dynamic([0.0, 3.0, -2.0])
+        })
+        .unwrap();
+    let steel = ShapeDef {
+        density: 7850.0,
+        ..ShapeDef::default()
+    };
+    w.create_sphere_shape(b, &steel, [0.0; 3], 0.03).unwrap();
     let def = ExplicitVehiclesDef {
         capacity: engine_webgpu::CouplingCapacity {
             bodies: 64,
@@ -169,7 +183,7 @@ fn surface_pairs_are_the_per_element_loops_bit_for_bit() {
         w.step().unwrap();
         w.poll_blocking().unwrap();
         // Through the strike (the car meets the posts ahead within 20 steps), then resting.
-        if !(step % 3 == 1 && step < 40 || step % 40 == 39) {
+        if !(step < 8 || step % 3 == 1 && step < 40 || step % 40 == 39) {
             continue;
         }
         let shapes: Vec<usize> = w
