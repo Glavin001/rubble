@@ -933,6 +933,23 @@ pub fn jbeam_visual(
                 );
                 let first = out.positions.len();
                 add(&format!("{pname}:{mesh}"), m, xf, &pool, Some([a, b, c]), None, &mut out, &mut rep);
+                // BeamNG places a wheel's meshes on its wheel (they are modelled
+                // about their own origin, not where the car's wheel is): a piece
+                // whose bounding box's centre is off its wheel's centre by more than
+                // 0.15 m is moved there (each piece by its own box: a caliper
+                // modelled off the axle stays put).
+                let centre = 0.5 * (sim_nodes[a as usize] + sim_nodes[b as usize]);
+                let (lo, hi) = out.positions[first..].iter().fold(
+                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                    |(lo, hi), q| (lo.min(Vec3::from_array(*q)), hi.max(Vec3::from_array(*q))),
+                );
+                if first < out.positions.len() {
+                    let off = centre - 0.5 * (lo + hi);
+                    let shift = if off.length() > 0.15 { off } else { Vec3::ZERO };
+                    for q in &mut out.positions[first..] {
+                        *q = (Vec3::from_array(*q) + shift).to_array();
+                    }
+                }
                 let lower = mesh.to_ascii_lowercase();
                 let hub = u32::from(lower.contains("caliper") || lower.contains("brake"));
                 out.wheel.resize(first, u32::MAX);

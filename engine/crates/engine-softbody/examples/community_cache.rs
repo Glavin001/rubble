@@ -301,6 +301,7 @@ fn main() {
                     "nodes": sim.nodes.len(),
                     "beams": sim.beams.len(),
                     "triangles": rep.triangles,
+                    "wheels": desc.wheels.len(),
                 }));
             }
             Err(e) => println!("{path}: {e} (left out of the index)"),

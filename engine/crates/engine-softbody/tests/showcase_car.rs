@@ -8563,6 +8563,18 @@ fn community_car(desc: &engine_softbody::desc::SoftVehicleDesc) -> Car<'static> 
     let nearest = |t: Vec3| -> usize {
         body.iter().copied().min_by(|&a, &b| p(a).distance(t).total_cmp(&p(b).distance(t))).unwrap() as usize
     };
+    // A pick the bands leave empty takes the body nodes nearest its target (each
+    // side): the B-pillar at 0.6 H on the door's rear edge, the A-pillar bases at
+    // 0.25 H on its front edge.
+    let fill = |g: &mut std::collections::HashMap<&str, Vec<u32>>, key: &'static str, targets: &[Vec3]| {
+        if g.get(key).is_none_or(|v| v.is_empty()) {
+            g.insert(key, targets.iter().map(|&t| nearest(t) as u32).collect());
+        }
+    };
+    let (yb, ya) = (floor + 0.6 * h, floor + 0.25 * h);
+    fill(&mut g, "pillar_b", &[Vec3::new(w, yb, dz0), Vec3::new(-w, yb, dz0)]);
+    fill(&mut g, "a_base_l", &[Vec3::new(w, ya, dz1)]);
+    fill(&mut g, "a_base_r", &[Vec3::new(-w, ya, dz1)]);
     let mut apertures = Vec::new();
     for side in [1.0f32, -1.0] {
         for fy in [0.2f32, 0.5] {

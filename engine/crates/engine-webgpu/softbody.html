@@ -97,6 +97,12 @@
     addEventListener('error', (e) => fail(e.error || e.message));
 
     const qs = new URLSearchParams(location.search);
+    // What a scene or preset change keeps: the solver, the vehicle (built-in car,
+    // .truck, imported mod and configuration, wheels, JBeam mode) and the view and
+    // contact options.
+    const KEEP_KEYS = ['solver', 'car', 'style', 'res', 'truck', 'mod', 'pc', 'wheels', 'jbeamMode', 'tyres', 'drag', 'lab', 'drive', 'tex', 'skin', 'surfaceContact', 'fullContact'];
+    const keepVehicle = (s) => { for (const k of KEEP_KEYS) if (qs.has(k)) s.set(k, qs.get(k)); return s; };
+    window.__keepVehicle = keepVehicle;
     // JBeam imports run in JBeam mode (BeamNG's rules) unless ?jbeamMode=truck.
     const JBEAM_NATIVE = qs.get('jbeamMode') !== 'truck';
     // Crash-lab presets (?preset=, crash-lab.mjs): the explicit solver's scene and
@@ -187,24 +193,25 @@
         g.label = `${c.label} (${c.megabytes} MB)`;
         for (const k of c.configs) {
           const mod = `/__mods/${c.folder}`;
-          g.appendChild(new Option(`${c.label} · ${k.pc.split('/').pop().replace(/\.pc$/, '')} (${k.nodes} nodes)`, `${mod}|${k.pc}`, false, qs.get('mod') === mod && qs.get('pc') === k.pc));
+          g.appendChild(new Option(`${c.label} · ${k.pc.split('/').pop().replace(/\.pc$/, '')} (${k.nodes} nodes)`, `${mod}|${k.pc}|${k.wheels ?? 1}`, false, qs.get('mod') === mod && qs.get('pc') === k.pc));
         }
         modSel.appendChild(g);
       }
     }).catch(() => {});
     modSel.onchange = () => {
       if (!modSel.value) return;
-      const [mod, pc] = modSel.value.split('|');
+      const [mod, pc, wheels] = modSel.value.split('|');
       const u = new URL(location.href);
       for (const k of ['car', 'truck', 'jbeamMode']) u.searchParams.delete(k);
       u.searchParams.set('solver', 'explicit');
       u.searchParams.set('mod', mod);
       u.searchParams.set('pc', pc);
-      u.searchParams.set('wheels', 'raycast');
+      // Raycast wheels when it has wheels (a boat has none).
+      if (Number(wheels) > 0) u.searchParams.set('wheels', 'raycast'); else u.searchParams.delete('wheels');
       location.href = u.href;
     };
     // Query parameters a scene change keeps: the solver and the vehicle.
-    const keep = (u) => { for (const k of ['solver', 'car', 'truck', 'mod', 'pc', 'jbeamMode', 'wheels']) if (qs.has(k)) u.searchParams.set(k, qs.get(k)); return u; };
+    const keep = (u) => { keepVehicle(u.searchParams); return u; };
     sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = keep(u).href; };
     const solverBtn = document.getElementById('solverBtn');
     solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz (RoR parity) ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
@@ -252,8 +259,8 @@
     // vehicle (and the lab's view options), drops any preset and the old scene's knobs.
     const xsceneUrl = (id) => {
       const u = new URL(location.href), s = new URLSearchParams();
+      keepVehicle(s);
       s.set('solver', 'explicit'); s.set('xscene', id);
-      for (const k of ['car', 'truck', 'tyres', 'drag', 'res', 'style', 'lab', 'drive']) if (qs.has(k)) s.set(k, qs.get(k));
       u.search = s.toString();
       return u.href;
     };
@@ -1662,7 +1669,8 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       wheelsDrawn = d.vehicles.reduce((n, v) => n + (v?.wheels.length ?? 0), 0);
       // The showcase body draws its own wheels from the drive state (skin.rs
       // bind_raycast_wheels): no stand-in boxes.
-      if (bodyR && carKind === 'showcase') return;
+      // An imported body with wheel pieces on the raycast wheels (flexmesh) too.
+      if (bodyR && (carKind === 'showcase' || (importSrc && bodyVisual().rigid?.some((r) => r >= 2)))) return;
       d.vehicles.forEach((v, i) => {
         if (!v) return;
         wheelBodies[i] ??= [];
