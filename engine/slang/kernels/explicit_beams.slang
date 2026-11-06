@@ -3016,6 +3016,17 @@ groupshared Atomic<uint> gsTestedCount[2];
 void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
                   uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
+    triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, false, 0u);
+}
+
+// triangleGrid's walk, the bucket offsets in workgroup memory (gsOff) or, `at`, in
+// gNext at offBase (a contact group member's grid, triangleGridAt). One call site of
+// tryContact for both paths (the compilers inline every call): too many cells, the
+// outer loop walks the candidates (one each); else the covered cells, each bucket's
+// run once. The same tests in the same order as two separate loops.
+void triangleGridWalk(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
+                      uint beamOff, uint groupOff, uint groupCount, uint parity, bool at, uint offBase)
+{
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
     TriGeo t = triangleGeo(gt, origin, r, parity);
     // The box's cells, counted in float: a stretched or non-finite triangle (a
@@ -3023,31 +3034,48 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
     // product into an unbounded cell loop (a GPU hang).
     float3 f0 = floor((t.lo - origin) / cell);
     float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
-    if (!(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS)))
+    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
+    int3 c0 = int3(0, 0, 0);
+    int3 span = int3(1, 1, 1);
+    uint yz = 1u;
+    uint cells = 0u;
+    if (!every)
     {
-        for (uint k = sub, kStop = EB_END(k, candCount, GRID_SUBS); k < kStop; k += GRID_SUBS)
-            tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
-        return;
+        c0 = int3(f0);
+        span = int3(fs);
+        yz = uint(span.y * span.z);
+        cells = uint(span.x) * yz;
     }
-    int3 c0 = int3(f0);
-    int3 span = int3(fs);
-    uint yz = uint(span.y * span.z);
-    uint cells = uint(span.x) * yz;
-    for (uint i = sub, iStop = EB_END(i, cells, GRID_SUBS); i < iStop; i += GRID_SUBS)
+    uint outer = every ? candCount : cells;
+    for (uint i = sub, iStop = EB_END(i, outer, GRID_SUBS); i < iStop; i += GRID_SUBS)
     {
-        uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
-        // Skip a bucket an earlier cell of this triangle already covers.
-        bool dup = false;
-        for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
-            dup = dup || gridBucket(c0 + int3(int(j / yz), int((j / uint(span.z)) % uint(span.y)), int(j % uint(span.z)))) == b;
-        if (dup) continue;
-        for (uint e = gsOff[b], eGuard = 0u; e < gsOff[b + 1u]; e++)
+        uint e0 = 0u;
+        uint e1 = 1u;
+        if (!every)
+        {
+            uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
+            // Skip a bucket an earlier cell of this triangle already covers.
+            bool dup = false;
+            for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+                dup = dup || gridBucket(c0 + int3(int(j / yz), int((j / uint(span.z)) % uint(span.y)), int(j % uint(span.z)))) == b;
+            if (dup) continue;
+            e0 = at ? gNext[offBase + b] : gsOff[b];
+            e1 = at ? gNext[offBase + b + 1u] : gsOff[b + 1u];
+        }
+        for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
             EB_PASS(eGuard);
-            float4 E = gBeams[gP.gridBase + candOff + e];
-            float3 p = origin + E.xyz;
-            if (any(p < t.lo) || any(p > t.hi)) continue;
-            tryContact(t, asuint(E.w), origin, r, beamOff, groupOff, groupCount, parity);
+            uint h;
+            if (every)
+                h = gLists[candOff + i];
+            else
+            {
+                float4 E = gBeams[gP.gridBase + candOff + e];
+                float3 p = origin + E.xyz;
+                if (any(p < t.lo) || any(p > t.hi)) continue;
+                h = asuint(E.w);
+            }
+            tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
         }
     }
 }
@@ -3069,33 +3097,40 @@ void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, flo
     TriGeo t = triangleGeo(gt, origin, r, parity);
     float3 f0 = floor((t.lo - origin) / cell);
     float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
-    if (!(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS)))
+    // Too many cells: every candidate (no filter), else those the grid walk visits;
+    // one call site of tryContact for both (the compilers inline every call).
+    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
+    int3 c0 = int3(0, 0, 0);
+    int3 span = int3(1, 1, 1);
+    uint yz = 1u;
+    uint cells = 0u;
+    if (!every)
     {
-        for (uint k = sub, kStop = EB_END(k, candCount, subs); k < kStop; k += subs)
-            tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
-        return;
+        c0 = int3(f0);
+        span = int3(fs);
+        yz = uint(span.y * span.z);
+        cells = uint(span.x) * yz;
     }
-    int3 c0 = int3(f0);
-    int3 span = int3(fs);
-    uint yz = uint(span.y * span.z);
-    uint cells = uint(span.x) * yz;
     for (uint k = sub, kStop = EB_END(k, candCount, subs); k < kStop; k += subs)
     {
         uint h = gLists[candOff + k];
-        float3 e = gNodes[h * 3u].xyz;
-        float3 p = origin + e;
-        if (any(p < t.lo) || any(p > t.hi)) continue;
-        int3 c = int3(floor(e / cell));
-        if (!(all(c >= c0) && all(c < c0 + span)))
+        if (!every)
         {
-            // Outside the covered cells: tested only when its bucket is a covered
-            // cell's (a hash collision the grid walk would visit).
-            uint b = gridBucket(c);
-            bool covered = false;
-            for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
-                covered = covered
-                    || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
-            if (!covered) continue;
+            float3 e = gNodes[h * 3u].xyz;
+            float3 p = origin + e;
+            if (any(p < t.lo) || any(p > t.hi)) continue;
+            int3 c = int3(floor(e / cell));
+            if (!(all(c >= c0) && all(c < c0 + span)))
+            {
+                // Outside the covered cells: tested only when its bucket is a covered
+                // cell's (a hash collision the grid walk would visit).
+                uint b = gridBucket(c);
+                bool covered = false;
+                for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
+                    covered = covered
+                        || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
+                if (!covered) continue;
+            }
         }
         tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
     }
@@ -4482,29 +4517,32 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
     // A lane with hits still open after round k sets gsUniformOpen to k: the round
     // numbers only grow within a step, so reading "at least k" after the barrier
     // is the same for every lane even if a fast lane has moved on to round k + 1.
+    // Iterations 1..SELF_ROUNDS are the rounds (every lane, a barrier each); past them
+    // (a dependency chain longer than the rounds) one lane per vehicle finishes the
+    // open hits in key order, round 0 until none is open (at most HIT_CAP + 1 calls).
+    // One call site of selfRound for both (the compilers inline every call): the same
+    // calls in the same order as a loop each.
     uint go = 0u;
-    for (uint round = 1u; round <= SELF_ROUNDS; round++)
+    bool done = false;
+    for (uint it = 1u; it <= SELF_ROUNDS + HIT_CAP + 1u; it++)
     {
-        uint open = on ? selfRound(v, sub, lanes, round, origin, r, beamOff, groupOff, groupCount, parity) : 0u;
-        if (open != 0u) gsUniformOpen = round;
+        bool last = it > SELF_ROUNDS;
+        bool act = last ? (on && sub == 0u && !done) : on;
+        uint open = act ? selfRound(v, last ? 0u : sub, last ? 1u : lanes, last ? 0u : it, origin, r, beamOff,
+                                    groupOff, groupCount, parity)
+                        : 0u;
+        if (last)
+        {
+            if (act && open == 0u) done = true;
+            continue;
+        }
+        if (open != 0u) gsUniformOpen = it;
         sync();
-        uint last = gsUniformOpen;
-        go = last >= round ? 1u : 0u;
+        uint seen = gsUniformOpen;
+        go = seen >= it ? 1u : 0u;
         if (go == 0u) break;
     }
-    if (go != 0u)
-    {
-        // A dependency chain longer than the rounds: one lane per vehicle finishes
-        // the open hits in key order.
-        if (on && sub == 0u)
-        {
-            for (uint it = 0u; it <= HIT_CAP; it++)
-            {
-                if (selfRound(v, 0u, 1u, 0u, origin, r, beamOff, groupOff, groupCount, parity) == 0u) break;
-            }
-        }
-        sync();
-    }
+    if (go != 0u) sync();
     if (on && sub == 0u && uint(gAcc[hitAcc(v)].load()) > HIT_CAP)
         selfSerial(v, origin, r, beamOff, groupOff, groupCount, parity);
     // §37's residual pass (a listed vehicle's; selfSerial ran its own): the forces,
@@ -6273,36 +6311,7 @@ uint vvPartLanes(uint k)
 void triangleGridAt(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
                     uint beamOff, uint groupOff, uint groupCount, uint parity, uint offBase)
 {
-    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
-    TriGeo t = triangleGeo(gt, origin, r, parity);
-    float3 f0 = floor((t.lo - origin) / cell);
-    float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
-    if (!(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS)))
-    {
-        for (uint k = sub, kStop = EB_END(k, candCount, GRID_SUBS); k < kStop; k += GRID_SUBS)
-            tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
-        return;
-    }
-    int3 c0 = int3(f0);
-    int3 span = int3(fs);
-    uint yz = uint(span.y * span.z);
-    uint cells = uint(span.x) * yz;
-    for (uint i = sub, iStop = EB_END(i, cells, GRID_SUBS); i < iStop; i += GRID_SUBS)
-    {
-        uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
-        bool dup = false;
-        for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
-            dup = dup || gridBucket(c0 + int3(int(j / yz), int((j / uint(span.z)) % uint(span.y)), int(j % uint(span.z)))) == b;
-        if (dup) continue;
-        for (uint e = gNext[offBase + b], eGuard = 0u; e < gNext[offBase + b + 1u]; e++)
-        {
-            EB_PASS(eGuard);
-            float4 E = gBeams[gP.gridBase + candOff + e];
-            float3 p = origin + E.xyz;
-            if (any(p < t.lo) || any(p > t.hi)) continue;
-            tryContact(t, asuint(E.w), origin, r, beamOff, groupOff, groupCount, parity);
-        }
-    }
+    triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, true, offBase);
 }
 
 // trianglePairs into member m's slice of the pair list.
