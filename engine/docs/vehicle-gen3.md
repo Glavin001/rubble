@@ -25,7 +25,9 @@ SURFACE_CONTACT=1 cargo run --release -p engine-softbody --example vehicle_compa
 | `flexmesh::jbeam_visual_skinned` | The loader: `.glb` meshes and their `.rskin` skins, applied verbatim. |
 | `showcase-car-render.mjs` `weightedVertex()` | The GPU twin of `flexskin::eval`. |
 | `tests/gen3_rig.rs` | The required checks. |
-| `examples/gen3_rest.rs` | Rest drift and warp per part, with `GEN3_MODES` (each closure's lowest free modes), `GEN3_SOFT` (beams the stability bound softened), `GEN3_DUMP`, `GEN3_NODE` and `GEN3_STRAIN`. |
+| `examples/gen3_rest.rs` | Rest drift and warp per part, with `GEN3_MODES` (each closure's lowest free modes), `GEN3_SOFT` (beams the stability bound softened), `GEN3_DUMP`, `GEN3_NODE`, `GEN3_STRAIN` and `GEN3_KE` (where the kinetic energy is, and how much of it is the car's mean motion). |
+| `examples/gen3_side.rs` | The oblique pole at five offsets along the car (−10 to +10 cm) and the MDB, on threads: the pole residual's spread with the pole's place against the lattice. |
+| `examples/gen3_probe.rs` | The wall, named nodes every 10 ms; `PROBE_BENT=a,b` lists those nodes' most yielded beams at the end. |
 
 ## Decisions
 
@@ -424,3 +426,270 @@ The marker is 3 cm in from the rear door's shut line at 0.70 m, as the front doo
 
 Stills (GPU page, gen3 beside the ETK, same preset, camera and time):
 `media/gen3-r3/`.
+
+## Round 4 (2026-11-06)
+
+Branch `feat/vehicle-gen3-r4`. Surface contact is on unless marked. Full tables:
+`measurements/vehicle-compare-gen3-surface-on.md` and `-off.md`. Stills:
+`media/gen3-r4/`.
+
+### Decisions
+
+- **Bumper covers ride clips, not through-bolts** (`Role::Clip`, exported as
+  ANISOTROPIC, spec §20).
+  - A clip has 5 % of its spring in compression and the bolt's spring and strength
+    in tension. A cover pushed onto its beam slides back on it; pulled off, it
+    holds.
+  - Round 3's centre bolts broke in compression at 3 ms.
+  - Round 3's side mounts had taken the hubs and wheel proxies, which are body
+    nodes, so the wheels tore the covers' corners off at 11 ms.
+  - Mounts now go to structural nodes only. The cover's top edge is clipped to the
+    radiator support's upper tie bar (front) or the tail panel (rear). The front
+    cover's side ends are clipped to the fender's front edge.
+- **Fender bolt rows.**
+  - Each fender node on the hood's shut line is bolted to the nearest apron or
+    cowl node. Each rear-edge node is bolted to the nearest hinge-pillar node.
+  - That is 11 bolts a side. Each is one M6 8.8 bolt at its ultimate tensile load:
+    20.1 mm² × 800 MPa = 16 kN (ISO 898-1).
+- **The hood's hardware was already complete.**
+  - The hinges (cowl and apron) and the two latch couplers were in place.
+  - The strikers already sit on the upper and lower tie bars, the rail tips and the
+    apron ends. That is the latch support bracket.
+  - No hood hardware breaks at 56 km/h. The peak hinge load is 34.5 kN of 160 kN.
+- **The hood's seams open because it tents.**
+  - Its middle rows rise 25–40 cm against the dropping body. The 1.35 m panel,
+    shortened about 24 cm, folds once.
+  - Six rows instead of four (`GEN3_HOOD_ROWS`) did not change this (983 against
+    971 seams), so it stays at four.
+- **The A-pillar's chords are hot-stamped:** 3 × the greenhouse's yield. Boron
+  steel is 1,000–1,200 MPa; the greenhouse's yield stands for 300–400 MPa.
+  - In the wall, the chords had shortened 6–9 cm at 4.4–6.7 kN.
+  - The pillar's middle had bowed 19 cm off its chord.
+  - The front door's widest gap to the A-pillar is now 131 mm (was 223).
+- **The side structure** (step 2):
+  - **Sill stations sit at the floor's cross members:**
+    - the toe board;
+    - the footwell's rear (the front seat's front mounts, 0.53 m ahead of the
+      B-pillar);
+    - the B-pillar;
+    - the seat's rear mounts (0.35 m behind it);
+    - the kick-up.
+  - **Cross members and floor pan.** The cross members run sill to floor rail to
+    tunnel at every station but the B-pillar's, at 3 × the census yield
+    (`CROSS_MEMBER_YIELD`). The floor pan between them and its diagonals are at
+    0.3 × (`FLOOR_PAN_YIELD`): 0.7 mm sheet, which buckles in plane. The footwell's
+    floor keeps its own yield.
+  - **The B-pillar is tailored.** Above 0.6 m it is 3 × the greenhouse's yield
+    (hot-stamped). Below 0.6 m it is 0.5 × the side's (the soft zone).
+  - **The door intrusion beam is a two-chord truss.**
+    - Its inner chord is the middle row, 8 cm in. Its outer chord is 2 cm under the
+      skin. Each has five stations: the three columns and the midpoints between
+      them.
+    - Round 3's beam was a straight chain of nodes. Such a chain carries no load
+      across the door until it has sagged into a catenary, so its yield never
+      mattered: × 0.5 to × 4 changed nothing.
+    - As a 6 cm truss, its bending capacity is chord yield × depth: 0.029 ×
+      0.9 MN × 0.06 m = 1.6 kN·m. A 32 × 2 mm UHSS tube's is 2.2 kN·m.
+    - **The FMVSS 214 door's initial resistance rose from 9.1 to 10.8 kN.**
+- **The powertrain sits where the 2011 Accord's does.**
+  - Its front face is 0.39 m ahead of the front axle and its rear face 0.12 m
+    behind it (DOT HS 811 666 fig. 87). Round 3 had the rear face at the axle.
+  - The block's stops on the dash panel engage after the measured gap: the dash
+    line is 0.27–0.30 m behind the axle, less the rear face, less 3 cm of manifold
+    shield.
+  - The mounts are four break groups, one per block corner, at 60 kN a beam. They
+    hold. Making them tear at 20–30 kN raised restitution to 0.22 and added no
+    crush.
+  - Mass is 1,450 kg. The CG is 1,216 mm behind the front axle (band 1,001–1,248)
+    and 595 mm up. The front axle carries 57.1 % (was 57.3 %).
+- **Zone yields**, calibrated on the bands, each within the census body band:
+  - **Crush zone: 0.28** (was 0.4).
+  - **Greenhouse: 0.38** (was 0.45).
+  - **The suspension towers' beams stay at 0.4.** At 0.28, two of them (rail to
+    strut tower) yielded 1 mm under the parked car.
+- **Lane-node ties.** A lane node whose ties lie in one plane now gets a backing tie
+  across it. In the 0.65 m sill bay, one lane had its chain, its opposite corner and
+  its one backing node in a plane, and it sagged 29 mm in 10 s.
+
+### Required numbers (surface contact on)
+
+| Measure | Round 3 | Round 4 | Band |
+|---|---|---|---|
+| Frontal dynamic crush (mm) | 602 | **626** | 620–750 ✓ |
+| t_m (ms) | 70 | 71 | 63–76 ✓ |
+| Peak, rear cabin (g) | 31.1 | 29.3 | 34–47 ✗ |
+| Residual max / avg (mm) | 583 / 375 | **543** / 334 | 380–580 ✓ |
+| Campbell b1 (1/s) | 35.5 | 39.9 | ≤ 39.2 ✗ (by 0.7) |
+| Restitution | 0.206 | 0.212 | ≤ 0.20 ✗ |
+| Feet intrusion (mm) | 53 | 60 | ≤ 67 ✓ |
+| Roof / weight | 5.06 | 5.32 | 4.48–5.32 ✓ (at the edge) |
+| Side pole residual (mm) | 188 | 153 (mean of 5 offsets: 173) | 297–445 ✗ |
+| MDB residual (mm) | 209 | **191** | 126–206 ✓ |
+| FMVSS 214 door: initial / intermediate / peak (kN) | 9.1 / 32.3 / 113 | **10.8** / 28.5 / 97 | ≥ 10.0 / 15.6 / 28.5 ✓ |
+| Seams > 5 cm: wall / pole / MDB | 1,138 / 237 / 385 | 934 / 316 / 227 | ETK 0 / 0 / 0 ✗ |
+
+**Surface contact off:**
+- wall: dynamic crush 653 mm, t_m 73 ms, peak 29.5 g, residual 538 / 334 mm,
+  b1 39.9, restitution 0.212, feet 61 mm, 1,150 seams;
+- **pole: residual 255 mm, dynamic 353 mm;**
+- MDB 191 mm, roof 5.32, door 10.8 kN.
+
+**The ETK at the same settings (on):** dynamic crush 504 mm, peak 68 g, residual
+234 mm, b1 67, restitution 0.36, pole 117 mm, MDB 244 mm, door 6.5 kN, roof 6.02.
+
+### Seams at equal crush
+
+`gen3_seams`, the wall at five speeds:
+
+| km/h | gen3 dynamic / residual (mm) | gen3 seams > 5 cm (of 3,760) | ETK dynamic / residual (mm) | ETK seams > 5 cm (of 785) |
+|---|---|---|---|---|
+| 32 | 334 / 270 | 591 | 347 / 111 | 0 |
+| 40 | 440 / 406 | 706 | 400 / 151 | 0 |
+| 48 | 526 / 446 | 998 | 456 / 197 | 0 |
+| 56 | 626 / 543 | 934 | 504 / 234 | 0 |
+| 64 | 717 / 552 | 1,020 | 553 / 269 | 0 |
+
+**Not met.**
+- At equal dynamic crush, gen3 at 48 km/h opens 998 pairs and the ETK at 64 km/h
+  opens none (both 526–553 mm).
+- Normalised, gen3 opens 1.5–1.8 pairs per mm of dynamic crush; the ETK opens 0.
+
+What still opens at 56 km/h (`SEAM_DEBUG`, the widest node pairs):
+
+| Pair | Pairs > 5 cm | Widest node gap | Cause |
+|---|---|---|---|
+| hood / fenders | 163 | hd_o24–feL_23, 310 mm | The hood's middle rows tent up 25–40 cm while the fender stays bolted to the apron. All 22 row bolts hold (≤ 11 kN): the hardware holds and the panel folds. |
+| bumper cover / headlamps | 145 | 341–354 mm | The cover goes back with the bumper beam and cans; the lamps ride the apron tips. |
+| grille / hood | 113 | 286 mm | The hood's front corners lift (the latch is at the middle); the grille rides the cover. |
+| fenders / headlamps | 124 | 333 mm | |
+| front doors / body | 120 | ap1–door, 131 mm (was 223) | The hinge pillar's top is pushed 8 cm back against the A-pillar's top, and the door goes with its hinges. |
+| hood / body | 95 | 38 mm (was 104) | Skin only: node gaps ≤ 4 cm. |
+
+**Hardware peak loads in the wall** (`HW_DEBUG`):
+
+| Hardware | Peak load | Strength |
+|---|---|---|
+| Hood hinges | 30–35 kN | 160 kN |
+| Fender marker bolts | ≤ 30 kN | |
+| Fender row bolts | ≤ 11 kN | 16 kN |
+| Front door hinges | ≤ 27 kN | 160 kN |
+| Engine mounts | 48–80 kN a group | |
+
+Only the front cover's clips break, as the cover is crushed onto the wall:
+- the side clips: 67 kN over 8 beams at 22 ms;
+- one top-corner clip: 11 kN at 36 ms.
+
+### Side: what limits the pole
+
+- **The pole's energy goes into the floor, and the car slides along the pole.**
+  - At 32 km/h the floor pan and its sill joints take 8.6 kJ of the 20.8 kJ of
+    plastic work. The B-pillar takes 0.3 kJ.
+  - With surface contact the car slides 0.7–1.3 m along the 75° pole. With node
+    contact it slides 0.13 m and the residual is 255 mm.
+  - **The ETK shows the same.** Its residual runs 22–423 mm across ±10 cm of pole
+    offset: 423 mm where it does not slide (58 mm), 117 mm where it slides 1.7 m.
+- **Every yield that let the pole crush deeper also let the MDB crush deeper.**
+  These are the levers tried, each as a `GEN3_*` variable on `gen3_side` (five pole
+  offsets):
+
+  | Lever | Pole mean (mm) | MDB (mm) |
+  |---|---|---|
+  | Baseline (old intrusion beam) | 136 | 203 |
+  | Floor longitudinals × 0.5 (`GEN3_LONG_Y`) | 175 | 206 |
+  | Floor longitudinals × 0.3 | 180 | 222 |
+  | Side zone × 0.5 | 220 | 255 |
+  | Sill section × 0.3 | 151 | 199 |
+  | B-pillar lower × 0.25 | 138 | 192 |
+  | Door above the crease × 0.3 | 149 | 300 |
+  | Cross members × 6 | 166–172 | 210–254 |
+
+  - With the truss door beam, floor longitudinals × 0.5 moved the MDB more than the
+    pole (177 / 254 mm), so it is not adopted.
+  - The single pole number swings ±40 mm with the pole's place against the lattice.
+    Read `gen3_side`'s mean.
+- **The harness reports two new measures:**
+  - `pole_slide_mm`: the pole's final shift along the car, in the far side's frame.
+  - `residual_crush_imprint_mm`: the deepest residual within 0.15 m of the pole's
+    path, from first contact to rest.
+
+  For gen3 the imprint equals the line measure, because the deepest crush is at
+  first contact. The band reading is unchanged.
+
+### Rest kinetic energy
+
+Round 3 reported 0.13–0.17 J and suspected the new edge ties or stops. Measured with
+`GEN3_KE=1 gen3_rest`, it is not beams ringing:
+
+- **88 % of it is the whole car's mean motion.** The car rolls fore and aft on its
+  wheels: about a 3.3 s period on raycast wheels, about 1 s on pressure wheels,
+  where the wheels' rotation adds to it.
+- **The structure's own kinetic energy is unchanged by the edge nodes:** 0.019 J
+  with them against 0.021 J without (raycast, 10 s).
+
+**Round 4 on raycast wheels: 0.064 J at 10 s**, 0 broken, 0 bent. The lane fix
+above removed one sagging lane's motion.
+
+On pressure wheels it is 1.10 J at 10 s, decaying from 5.6 J at 7 s.
+- 0.54 J of it is the car's mean motion.
+- Most of the rest is the hubs and rims turning with it.
+- The structure carries under 0.15 J.
+
+This is a parked car on free wheels, with no parking brake in the scene. It is not
+fixed here.
+
+### Checks (`gen3_rig`)
+
+| Check | Round 4 | Required |
+|---|---|---|
+| Rest fidelity at spawn | 0.16 mm / 0.07° | ≤ 1 mm / 1° |
+| Parked 10 s, beyond the nodes' own motion | 0.52 mm / **0.96°** | ≤ 1 mm / 1° (close) |
+| Drift, every part | ≤ 2.1 mm | ≤ 5 mm |
+| Broken / bent at rest | 0 / 0 | 0 / 0 |
+| wall56 stretch / fold p99 | 1.22 / 5.2° | ≤ 1.6 / ≤ 31° |
+| pole32 stretch / fold p99 | 1.11 / 1.0° | ≤ 1.6 / ≤ 31° |
+| Seams > 5 cm, wall / pole | 1,040 / 309 (test ignored) | 0 |
+
+ω·h is 1.917 (bound 1.92).
+
+### On the GPU page
+
+`media/gen3-r4/` shows gen3 beside the ETK: same preset, camera and step, surface
+contact on, raycast wheels.
+- **wall56, side view:** at impact, +60 ms and settled (+1.5 s).
+- **pole29, threeFront view:** +60 ms and settled.
+- **mdb214:** +60 ms and settled.
+
+At rest the page shows 0 broken and 0 bent.
+
+**wall56:**
+- The hood folds up at its middle and the fender front tears at the arch.
+- The bumper cover hangs from its last clips.
+- The doors stay on their hinges; the front door shows a gap at the A-pillar's
+  middle.
+- The page breaks 9 beams, the bumper cover's clips. The CPU harness breaks 8–9.
+
+**pole29:** The pole stands at the B-pillar between the doors, and neither door
+leaves its hinges.
+
+**mdb214:**
+- The page counts 221 broken beams by +1.5 s, 0 at +60 ms.
+- The count covers both vehicles. The ETK's is 111 by the same time.
+- The CPU MDB, whose barrier is `crash_rigs::mdb214_jbeam`, breaks no gen3 beam.
+
+### Open
+
+- **The pulse's peak (29 g against 34–47) and restitution (0.21 against ≤ 0.20).**
+  - The force rises to about 430 kN within 10 ms and stays flat.
+  - A late peak needs the block to stack on the dash. At the Accord's measured gap,
+    the block moves only 5 cm toward the firewall before the wall stops it, so the
+    stop never engages.
+- **The pole residual.** See above: the car slides along the pole under surface
+  contact. The contact's friction against a cylinder is a question for the solver,
+  not the rig.
+- **Seams.**
+  - In the crush zone they come from the hood tenting and the cover and lamps
+    parting.
+  - At the doors they come from the hinge pillar moving back.
+- **Frontal chest intrusion.** The truss door beam raised it in some configurations:
+  60–194 mm across the sweep, 61 mm in the final build. The measure is noisy and has
+  no band.
