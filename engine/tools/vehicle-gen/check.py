@@ -17,6 +17,7 @@ argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
 path = argv[0]
 doors = (argv[argv.index('--doors') + 1] if '--doors' in argv else 'FL,FR,RL,RR').split(',')
 json_out = argv[argv.index('--json') + 1] if '--json' in argv else None
+md_out = argv[argv.index('--md') + 1] if '--md' in argv else None
 spec_dims = '--sedan' in argv
 
 MATERIALS = ['paint', 'chrome', 'trim_black', 'rubber', 'glass', 'lamp_lens',
@@ -467,6 +468,11 @@ print('|---|---|---|')
 for n_, ok, d in rows:
     print(f'| {n_} | {"pass" if ok else "FAIL"} | {d} |')
 print(f'\n{fails} failing')
+if md_out:
+    with open(md_out, 'w') as f:
+        f.write('| check | result | detail |\n|---|---|---|\n')
+        for n_, ok, d in rows:
+            f.write(f'| {n_} | {"pass" if ok else "FAIL"} | {d} |\n')
 if json_out:
     json.dump(dict(file=path, dims={k: float(v) for k, v in dims.items()},
                    groups=dict(body=groups['body'], wheel=groups['wheel'], interior=groups['interior'],

@@ -1,0 +1,22 @@
+| check | result | detail |
+|---|---|---|
+| one root named `vehicle` | pass | roots ['vehicle'] |
+| flat hierarchy | pass | 111 children of `vehicle` |
+| every part present | pass | 69 parts; missing [] |
+| every marker present | pass | 42 markers; missing []; fender bolts 4, bumper bolts 4 |
+| materials use only the spec names | pass | 10 materials; others [] |
+| glass transparent, roughness <= 0.05 | pass | [('BLEND', 0.019999999552965164)] |
+| dimensions (measured) | pass | length 4877 mm, width 2002 mm, height 1907 mm, wheelbase 2700 mm, track_f 1560 mm, track_r 1560 mm, front_overhang 921 mm, ground_clearance 247 mm, tyre_d 802 mm, origin_mid_axles 0 mm, origin_centre_x 0 mm |
+| origin on the ground, centred, midway between axles | pass | axle midpoint z 0.0 mm, centre x 0.0 mm, min y 0.0 mm |
+| tyres touch y = 0; wheel centres within 5 mm of markers | pass | tyre min y [0.0, 0.0, 0.0, 0.0] mm; centre error [0.0, 0.0, 0.0, 0.0] mm |
+| no non-manifold edges | pass | {} |
+| no zero-area triangles | pass | {} |
+| no inverted normals | FAIL | {'body_shell': (2, [0.733, 1.177, 0.728]), 'bumper_front': (2, [0.761, 0.538, 1.798]), 'door_FL': (1, [0.753, 1.158, 0.775]), 'door_FR': (2, [-0.738, 1.156, 0.79]), 'hood': (1, [-0.81, 1.145, 0.806])} |
+| panel edge p95 <= 30 mm | pass | p5 4.7, p50 19.7, p95 28.1 mm |
+| panel triangle aspect <= 6:1 | FAIL | p99 6.93, max 380.85; over 6: {'body_shell': 515, 'bumper_front': 21, 'bumper_rear': 9, 'door_FL': 539, 'door_FR': 528, 'door_RL': 35, 'door_RR': 30, 'fender_FL': 76, 'fender_FR': 79, 'hood': 1983, 'tailgate': 6}; worst {'body_shell': (50.3, [-0.617, 0.424, -0.873], [((0.6, 0.4, -0.9), 30), ((0.8, 0.5, -1.8), 26), ((-0.8, 0.5, -1.8), 26)]), 'bumper_front': (56.7, [0.761, 0.538, 1.798], [((0.8, 0.5, 1.8), 5), ((-0.8, 0.5, 1.8), 5), ((-0.9, 0.6, 1.8), 4)]), 'bumper_rear': (37.9, [0.54, 0.474, -1.807], [((-0.5, 0.5, -1.8), 4), ((0.5, 0.5, -1.8), 2), ((0.8, 0.5, -2.0), 1)]), 'door_FL': (380.9, [0.739, 1.156, 0.791], [((0.8, 1.2, 0.7), 179), ((0.8, 1.2, 0.8), 175), ((0.8, 1.3, 0.6), 58)]), 'door_FR': (122.9, [-0.804, 1.331, 0.582], [((-0.8, 1.2, 0.7), 176), ((-0.8, 1.2, 0.8), 172), ((-0.8, 1.3, 0.6), 58)]), 'door_RL': (58.6, [0.801, 1.705, -0.807], [((0.9, 1.1, -0.9), 14), ((0.9, 1.0, -1.0), 9), ((0.9, 0.9, -1.1), 5)]), 'door_RR': (58.6, [-0.801, 1.705, -0.807], [((-0.9, 1.1, -0.9), 11), ((-0.9, 1.0, -1.0), 7), ((-0.9, 0.9, -1.1), 5)]), 'fender_FL': (23.2, [0.663, 0.428, 0.864], [((0.7, 0.4, 0.9), 20), ((0.8, 0.4, 0.9), 20), ((0.6, 0.4, 0.9), 11)]), 'fender_FR': (54.7, [-0.663, 0.427, 0.864], [((-0.8, 0.4, 0.9), 20), ((-0.7, 0.4, 0.9), 18), ((-0.6, 0.4, 0.9), 13)]), 'hood': (59.3, [0.804, 1.15, 0.808], [((0.8, 1.1, 1.0), 152), ((-0.8, 1.1, 1.0), 152), ((0.7, 1.1, 1.0), 122)]), 'tailgate': (10.2, [0.689, 1.164, -2.281], [((0.7, 1.2, -2.3), 2), ((-0.7, 1.2, -2.3), 2), ((-0.7, 0.7, -2.3), 1)])} |
+| triangle budget | pass | body 195712 (150k-300k), wheel max 11152 (<= 15k), interior 32396 (<= 80k), lamps/glass/trim/bay 52658 (<= 60k), total 325374 (<= 500k) |
+| shut-line gaps 3-6 mm | FAIL | 2378 border cells: min 0.0, p5 0.5, p50 4.6, p95 5.0 mm; under 3 mm: {'body_shell/tailgate': 140, 'body_shell/door_FR': 52, 'body_shell/door_FL': 37, 'body_shell/bumper_rear': 5, 'fender_FR/hood': 3}; over 6 mm: {'body_shell/tailgate': 2}; e.g. {'<3 body_shell/door_FR': [-0.8, 1.16, 0.7], '<3 body_shell/bumper_rear': [0.86, 0.56, -1.86], '<3 body_shell/tailgate': [-0.74, 1.82, -2.26], '>6 body_shell/tailgate': [-0.72, 1.68, -2.28], '<3 body_shell/door_FL': [0.72, 1.14, 0.78], '<3 fender_FR/hood': [-0.82, 1.14, 0.8]} |
+| no panel interpenetration over 1 mm | FAIL | deepest 4.3 mm body_shell into door_FL at [0.789, 1.165, 0.736] |
+| no part pairs cross (any depth) | FAIL | 10 pairs: {'body_shell/tailgate': 239, 'exhaust/underbody': 58, 'body_shell/door_FL': 35, 'body_shell/door_FR': 20, 'fender_FL/headlight_L_lens': 11, 'fender_FR/headlight_R_lens': 11, 'headlight_L_lens/hood': 5, 'headlight_R_lens/hood': 5, 'body_shell/taillight_L_lens': 4, 'body_shell/taillight_R_lens': 3} |
+| UV0 non-overlapping on painted panels | FAIL | 657344 texels at 2048^2, 33 covered twice {'body_shell/body_shell': 16, 'fender_FR/fender_FR': 7, 'fender_FL/fender_FL': 4} at uv {'body_shell/body_shell': [0.1163, 0.9503], 'fender_FL/fender_FL': [0.3173, 0.1793], 'fender_FR/fender_FR': [0.1751, 0.1916]}; all in [0,1]: True |
+| texture memory within 64 MB | pass | 0 images (materials are flat PBR factors) |

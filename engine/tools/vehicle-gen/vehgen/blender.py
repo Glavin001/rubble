@@ -132,6 +132,7 @@ def triangulate_beauty():
 
 def export(path_glb, path_blend=None):
     if path_blend:
+        bpy.context.preferences.filepaths.save_version = 0   # no .blend1 backups
         bpy.ops.wm.save_as_mainfile(filepath=path_blend, compress=True)
     triangulate_beauty()
     bpy.ops.export_scene.gltf(

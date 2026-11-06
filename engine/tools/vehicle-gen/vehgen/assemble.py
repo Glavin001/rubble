@@ -67,7 +67,7 @@ def body_parts(D, h=0.02, log=print):
             parts[name] = glass_from(bm, shared=shared_glass)
             continue
         if name.endswith('_lens'):
-            lens = glass_from(bm, depth=0.006, grow=0.004)
+            lens = glass_from(bm, depth=0.013, grow=0.003)
             lens.set_mat('lamp_lens')
             tint = getattr(D, 'LENS_TINT', {}).get(name, (1, 1, 1, 1))
             parts[name] = lens.tint(tint)

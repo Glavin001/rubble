@@ -91,6 +91,62 @@ def rim_magnum(rim_d, rim_w, segs=72, spokes=5):
     return m
 
 
+def rim_alloy(rim_d, rim_w, segs=72, pairs=5):
+    """Modern cast wheel: five split spokes in a concave face, polished lip."""
+    r = rim_d / 2
+    hw = rim_w / 2
+    m = Mesh()
+    barrel = [(r + 0.012, -hw - 0.006), (r + 0.012, -hw + 0.004), (r - 0.004, -hw + 0.008),
+              (r - 0.012, -hw + 0.040), (r - 0.012, hw - 0.020), (r - 0.004, hw - 0.006),
+              (r - 0.009, hw - 0.006), (r - 0.017, hw - 0.020), (r - 0.017, -hw + 0.040),
+              (r - 0.009, -hw + 0.006)]
+    m.add(closed_lathe(barrel, segs, 'metal_bare'))
+    lip = [(r + 0.013, hw - 0.010), (r + 0.015, hw + 0.002), (r + 0.004, hw + 0.008),
+           (r - 0.018, hw + 0.004), (r - 0.020, hw - 0.004), (r - 0.008, hw - 0.012)]
+    m.add(closed_lathe(lip, segs, 'chrome'))
+    hub = [(0.0, hw - 0.020), (0.030, hw - 0.021), (0.065, hw - 0.028), (0.075, hw - 0.040),
+           (0.075, hw - 0.052), (0.0, hw - 0.052)]
+    m.add(closed_lathe(hub, 40, 'chrome'))
+    m.add(closed_lathe([(0.0, hw - 0.018), (0.026, hw - 0.018), (0.028, hw - 0.022), (0.0, hw - 0.022)],
+                       24, 'trim_black'))
+    for k in range(pairs):
+        for d in (-1, 1):
+            a = 2 * np.pi * k / pairs + d * 0.11
+            path = []
+            for t in np.linspace(0, 1, 8):
+                rr = 0.060 + (r - 0.020 - 0.060) * t
+                aa = a - d * 0.07 * t
+                ax = hw - 0.040 + 0.034 * t ** 0.7
+                path.append([ax, rr * np.cos(aa), rr * np.sin(aa)])
+            path = np.array(path)
+            sc = np.stack([np.linspace(0.026, 0.020, len(path)), np.full(len(path), 1.0)], 1)
+            sp = sweep(path, rrect(1.0, 0.016, 0.005, 2), mat='chrome', up=(1, 0, 0), scale=sc,
+                       twist_up=np.tile([1.0, 0, 0], (len(path), 1)))
+            m.add(orient_outward(sp))
+    for k in range(5):
+        a = 2 * np.pi * (k + 0.5) / 5
+        nut = closed_lathe([(0.0, 0.006), (0.008, 0.005), (0.009, -0.006), (0.0, -0.006)], 12, 'chrome')
+        nut.transform(None, (hw - 0.026, 0.045 * np.cos(a), 0.045 * np.sin(a)))
+        m.add(nut)
+    return m
+
+
+def rim_steel(rim_d, rim_w, segs=64):
+    """Painted steel wheel with a small hub cap (work trucks)."""
+    r = rim_d / 2
+    hw = rim_w / 2
+    m = Mesh()
+    prof = [(r + 0.012, -hw - 0.006), (r + 0.012, -hw + 0.004), (r - 0.006, -hw + 0.008),
+            (r - 0.010, hw - 0.030), (r - 0.002, hw - 0.012), (r + 0.012, hw - 0.006),
+            (r + 0.012, hw + 0.004), (r - 0.012, hw - 0.002), (r - 0.016, hw - 0.030),
+            (r - 0.040, hw - 0.034), (0.11, hw - 0.010), (0.10, hw - 0.020), (r - 0.044, hw - 0.046),
+            (r - 0.020, hw - 0.044), (r - 0.014, -hw + 0.010), (r - 0.010, -hw + 0.006)]
+    m.add(closed_lathe(prof, segs, 'metal_bare'))
+    m.add(closed_lathe([(0.0, hw + 0.006), (0.060, hw + 0.002), (0.085, hw - 0.012), (0.0, hw - 0.012)],
+                       40, 'chrome'))
+    return m
+
+
 def brake_disc(d=0.28, segs=48):
     r = d / 2
     m = closed_lathe([(0.075, -0.052), (r, -0.052), (r, -0.028), (0.075, -0.028)], segs, 'metal_bare')
@@ -111,7 +167,10 @@ def wheel(D, side, z_axle):
     x = side * D.TRACK / 2
     c = np.array([x, D.WHEEL_Y, z_axle])
     ty = tyre(D.TYRE_D, D.TYRE_W, D.RIM_D, D.RIM_W)
-    ri = rim_magnum(D.RIM_D, D.RIM_W) if getattr(D, 'RIM_STYLE', 'magnum') == 'magnum' else D.rim()
+    style = getattr(D, 'RIM_STYLE', 'magnum')
+    ri = (rim_magnum(D.RIM_D, D.RIM_W) if style == 'magnum' else
+          rim_alloy(D.RIM_D, D.RIM_W) if style == 'alloy' else
+          rim_steel(D.RIM_D, D.RIM_W))
     di = brake_disc(getattr(D, 'DISC_D', 0.28))
     out = []
     for mm in (ri, ty, di):
@@ -192,8 +251,8 @@ def door_handle(tube, z, y, side=1, length=0.13):
     Ry = rot_y(np.arctan2(-N[2], N[0]))
     m = rbox((0, 0, 0), (0.009, 0.013, length / 2), 0.006, 2, 'chrome')
     plate = rbox((0, 0, 0), (0.0015, 0.020, length / 2 + 0.012), 0.0014, 1, 'trim_black')
-    m.transform(Ry, P + N * 0.016)
-    plate.transform(Ry, P + N * 0.0030)
+    m.transform(Ry, P + N * 0.019)
+    plate.transform(Ry, P + N * 0.0060)
     return m.add(plate)
 
 
