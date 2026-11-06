@@ -30,8 +30,8 @@
 //! fusing): the GPU kernel (`explicit_beams.slang`, `surfaceContact`) does the same.
 
 use crate::explicit_beams::{
-    contact_response, shift_depth, ContactSurface, ExplicitBeams, ExplicitKind, Node, StaticShape,
-    NODE_IMMOVABLE, NODE_NO_GROUND, STEP,
+    contact_response, shift_depth, to_fixed, ContactSurface, ExplicitBeams, ExplicitKind, Node,
+    StaticShape, CONTACT_FIXED, NODE_IMMOVABLE, NODE_NO_GROUND, STEP,
 };
 use glam::Vec3;
 
@@ -1333,6 +1333,7 @@ impl ExplicitBeams {
             }
         }
         self.surface_last = found.len() as u32;
+        self.surface_force = glam::DVec3::ZERO;
         if found.is_empty() {
             return;
         }
@@ -1430,7 +1431,17 @@ impl ExplicitBeams {
                 }
             }
             for j in 0..3 {
-                self.add_contact(tri[j] as usize, -(fc * w[j]));
+                let f = -(fc * w[j]);
+                self.add_contact(tri[j] as usize, f);
+                // (The statistic: as the node takes it, its fixed-point sum's.)
+                self.surface_force += if self.fixed_contact {
+                    glam::DVec3::from(
+                        f.to_array()
+                            .map(|x| f64::from(to_fixed(x)) / f64::from(CONTACT_FIXED)),
+                    )
+                } else {
+                    f.as_dvec3()
+                };
             }
             if let Some(l) = self.contact_force.as_mut() {
                 for j in 0..3 {

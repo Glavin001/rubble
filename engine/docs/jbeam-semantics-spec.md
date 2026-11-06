@@ -2141,3 +2141,77 @@ Cost (GPU, wgpu on Metal, M3 Max, shared with other work): sedan1 at the side po
 1 s, 118 → 644 µs/step (round 1 measured 195 → 616 on a quieter GPU); the 64-car
 `arena` 7.41 → 8.30 ms per fleet step (+12 %). CPU reference: sedan1 425 → 490
 µs/step, the ETK 85 → 105.
+
+GPU, lossless: the find stores per triangle, segment and node the mask of the slots
+it hit (gAcc at `surfMark`; bit b slot b, bit 31 any slot from 31 on) and the apply
+recomputes only those: sedan1 at the side pole 107.9 → 608.3 µs/step (118.2 → 643.8
+without the masks in the same session); the 64-car arena 6.90 → 7.52 ms per fleet step
+(+9 %, was +12 %). Bit for bit as before.
+
+### 38.2 Calibration with surface contact on (sedan1, CPU, 2026-11-06)
+
+`showcase_car.rs` with `SURFACE_CONTACT=1` (a measurement switch). The momentum
+ledger now counts the surface pass's force on the nodes (`ExplicitBeams::surface_force`,
+as the fixed-point sums take it) as the obstacle's impulse; before, it showed as
+"internal" (c, d, n failed their ledgers on that alone).
+
+| Test | off | on | band |
+|---|---|---|---|
+| o, NCAP side pole 32 km/h 75°, ensemble mean residual crush | 299 mm (145–424), pass | **68 mm (42–115), fails** | 297–445 mm |
+| c, side pole at the B-pillar 32 km/h | door intrusion 11 mm, B-pillar 14, passes | 93 mm, 9, passes; ledgers close | not through |
+| d, centre pole 50 km/h | CoM 1.66 m behind, passes | 3.52 m behind, passes; ledgers close | not through |
+| n, wall 56 km/h ensemble | max crush 474, b1 31.1, dynamic 668, restitution **0.2018 fails** (pre-existing) | 520, 28.0, 657, 0.1994: **every band passes** | 380–580, 22.9–39.2, 620–750, 0.13–0.20 |
+| q, FMVSS 216a roof | 69.9 kN = 4.91 × weight | the same (the platen is not a static shape) | ≥ 3.0 |
+| MDB (`explicit_scenes.rs`) | not run: vehicle against vehicle, no static shape meets the surface pass | | |
+
+The side pole moves: the pole used to slip between the door's nodes and the measured
+crush (the struck skin's nodes against the far side) included that pass-through; met by
+the skin and the beams, the door holds and the residual crush falls to a quarter. That
+is sedan1's side structure calibrated with node-only contact, not a contact error: with
+surface contact on, its door and sill strengths need re-tuning against §4.11 before the
+flag can be the default. The ETK has no band tests in this branch (its harness,
+`vehicle_compare`, is on `feat/vehicle-compare`, which does not carry surface contact).
+
+**Recommendation: not the default yet.** It removes pass-through (p99 penetration
+91–98 → ≤ 25 mm on every pole case) and brings the wall back inside every band, but it
+takes sedan1's NCAP side pole from inside its band (299 mm) to far below it (68 mm), and
+costs 5.6× per step for one car at a pole on the GPU (+9 % for the 64-car arena).
+Default it once sedan1's side is re-tuned with it on and the World-broadphase work below
+lands.
+
+### 38.3 Next: one collision system with the World (design, not built)
+
+Decision (user, 2026-11-06): surface contact reuses the rigid engine's collision
+machinery. Broad phase: vehicles enter the World broadphase as proxies (per part or
+chunk; fat AABBs padded by the band plus the fastest node's travel over a rigid step),
+updated incrementally at the rigid rate, skipped for sleeping vehicles, the query writing
+each vehicle's candidate colliders (static and dynamic, every shape kind) into its slot
+list on the GPU; the per-vehicle copied slots remain only as the standalone
+`ExplicitSim` fallback. Narrow phase: triangle, segment and point against a shape in
+shared `slang/physics` modules with one Rust twin; the response (§37 law, mass split,
+ownership, fixed-point sums) stays in the explicit kernel. Cost must follow awake
+vehicles and nearby colliders only (one car among 10k–100k static and sleeping bodies:
+flat).
+
+Findings that shape it:
+* `slang/physics` (`convex.slang`, `box_collide.slang`, `shapes.slang`) builds SAT
+  manifolds (reference face clipping, up to four points) from the World's hull
+  records; it has no closest-feature query with barycentric weights on a triangle or
+  segment, which ownership and the weighted response need. So the queries move into a
+  new shared module (`slang/physics/feature_query.slang`, the closest-point pairs,
+  separating axis and deepest-point selection above) reading shapes in the World's
+  formats (`Collider`, `HullRef` vertices and edges), not a copy of the manifold code.
+* Those modules use the GPU's native `dot`, `cross`, `normalize` (contraction allowed);
+  the explicit kernel's surface code is strict single precision so the CPU reference
+  matches it bit for bit. Sharing keeps parity only if the shared queries are written
+  strictly (the explicit kernel's `sdot`/`nf` helpers moved into `slang/physics`) and
+  the rigid engine's callers adopt them where they want them; changing the rigid
+  engine's own manifold paths would change rigid results (not done, not required).
+* The World's broadphase tables are built and queried per rigid step by
+  `world_step.slang` in `rigid_plan`; the explicit vehicles step in their own frame
+  plan. The proxy API the vehicle-sleep work needs (insert, update, remove, a candidate
+  list per vehicle, no update while asleep) lives on the World side
+  (`engine-world/src/explicit_vehicles.rs`, `cpl_plan`), with the candidate list
+  replacing the per-vehicle box slots as the surface pass's slot list. The
+  `large-maps.md` persistent broadphase (statics and sleepers not re-inserted) is a
+  prerequisite for the flat-cost benchmark and is not on this branch.
