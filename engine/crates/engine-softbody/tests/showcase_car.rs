@@ -8155,6 +8155,12 @@ fn sedan1_kinds(b: &Built) -> Vec<String> {
         }
         v
     };
+    let mut edge: HashSet<(u32, u32)> = HashSet::new();
+    for t in &b.shell.tris {
+        for (x, y) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            edge.insert((x.min(y), x.max(y)));
+        }
+    }
     let mut raw: Vec<(String, Option<(usize, f32)>)> = Vec::with_capacity(sk.beams.len());
     for bm in &sk.beams {
         let (a, c) = (bm.a, bm.b);
@@ -8170,6 +8176,14 @@ fn sedan1_kinds(b: &Built) -> Vec<String> {
             "flange".into()
         } else if bm.tie {
             "tie".into()
+        } else if shell.contains(&a)
+            && shell.contains(&c)
+            && sk.nodes[a as usize].part == sk.nodes[c as usize].part
+            && !edge.contains(&(a.min(c), a.max(c)))
+        {
+            // A shell beam that is no skin triangle's edge: the sheet's
+            // bending (over two bays) or a lane's extra.
+            "shell bend".into()
         } else if let Some(&gi) = of[a as usize].iter().find(|g| of[c as usize].contains(g)) {
             let ax = axis(gi, 0.5 * (pa + pc));
             let cs = ((pc - pa) / l.max(1e-4)).dot(ax).abs();

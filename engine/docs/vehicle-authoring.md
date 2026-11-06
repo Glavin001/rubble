@@ -2139,6 +2139,148 @@ yields (an experiment, not kept) gives 18.9 kN.
    latch lets go inside its statics.
 3. p's first two phases: the BX's topology, with forces kept real.
 
+### BX-like topology: the census at the solver (2026-11-06, measured)
+
+**Decision: the census is built and measured; no part is redesigned yet.** The
+census shows that beam ends per node can buy at most 9 % on the body and 43 %
+on the doors. The rest of the BX's k·L comes from node mass and beam length,
+which the real masses and the A8 lanes fix. One switch was measured and not
+adopted.
+
+**The census.** `topology_census_solver` (sedan1) and `beamng_topology_census`
+(the BX, `RUBBLE_JBEAM_BX`) run the same arithmetic on the solver's own
+beams and masses. For each part they give:
+- nodes and the median node mass;
+- spring beam ends per node by kind;
+- the share of nodes whose Gershgorin row is at the bound (> 0.95);
+- each kind's share of the saturated rows;
+- the median L, k·L, ε_y = deform / (k·L), and the springback after 20 %
+  plastic strain.
+
+For sedan1, the kinds come from geometry. Within one member's group, a beam is
+classed by its angle to the member's local axis (the principal axis of its
+nodes within 0.35 m):
+- chord: within 32°. A chord longer than 1.5 × the member's median chord is a
+  `bend`. A chord whose ends are both shell nodes is a `lane chord`.
+- diagonal: 32–73°.
+- ring/web: past 73°.
+
+The other kinds:
+- `joint`: between two members;
+- `sheet`: skin-triangle edges;
+- `shell bend`: shell beams that are no triangle's edge, that is the two-bay
+  bends and the panels' braces;
+- `tie`, `bearing`, `flange`, `dashpot`: by their flags and groups.
+
+Medium, at 811c5ed3:
+
+| Part | sedan1: nodes, node mass p50, spring ends per node, at the bound | BX: nodes, node mass, spring ends, at the bound |
+|---|---|---|
+| body | 592, 1.01 kg, 13.1, 87 % | 145, 2.50 kg, 12.0, 74 % |
+| doors (each) | 26, 0.96 kg, 9.9, 92 % | 11, 1.50 kg, 6.9, 73 % |
+| bonnet | 26, 0.53 kg, 10.7, 96 % | 24, 0.55 kg, 8.4, 92 % |
+| boot lid | 16, 0.64 kg, 8.4, 94 % | 18, 0.60 kg, 9.0, 44 % |
+| fenders | 20, 0.53 kg, 5.8, 80 % | 13, 0.40 kg, 7.1, 100 % |
+
+| Part | sedan1: L p50, k·L p50, ε_y p50, springback at 20 % | BX: L, k·L, ε_y, springback |
+|---|---|---|
+| body | 0.36 m, 2.14e5 N, 2.96 %, 13 % | 0.55 m, 7.92e5 N, 0.85 %, 4 % |
+| doors | 0.30 m, 1.74e5 N, 2.11 %, 10 % | 0.59 m, 6.50e5 N, 0.92 %, 4 % |
+| bonnet | 0.37 m, 1.07e5 N, 2.80 %, 12 % | 0.45 m, 2.24e5 N, 5.51 %, 22 % |
+| boot lid | 0.36 m, 1.65e5 N, 1.75 %, 8 % | 0.40 m, 1.59e5 N, 3.76 %, 16 % |
+| fenders | 0.26 m, 1.43e5 N, 2.15 %, 10 % | 0.39 m, 1.57e5 N, 3.82 %, 16 % |
+
+**The BX's nodes are at the bound too.** Its body has 74 % of its nodes at the
+bound and its doors 73 %. Its stiffness is not chosen freely below the bound.
+At a saturated node every beam comes down to about k = G·m/(h²·n·w), so k·L
+scales with m·L/n. That ratio predicts the measured BX-to-sedan1 k·L within
+15 % on every part:
+
+| Part | m ratio | L ratio | 1/n ratio | m·L/n ratio | measured k·L ratio |
+|---|---|---|---|---|---|
+| body | 2.48 | 1.53 | 1.09 | 4.15 | 3.70 |
+| doors | 1.56 | 1.94 | 1.43 | 4.36 | 3.74 |
+| bonnet | 1.04 | 1.21 | 1.27 | 1.60 | 2.09 |
+| boot lid | 0.94 | 1.11 | 0.93 | 0.97 | 0.96 |
+| fenders | 0.75 | 1.52 | 0.82 | 0.94 | 1.10 |
+
+So:
+- **The boot lid and the fenders are already at the BX's k·L.** They have
+  lower ε_y than the BX's because their yields are real.
+- **The bonnet** is 2 × short, about evenly from length and beam ends.
+- **The body and the doors** are about 4 × short:
+  - Body: beam ends give only 1.09 ×; node mass gives 2.5 × and length 1.5 ×.
+  - Doors: beam ends give 1.43 ×; mass and length give 3 ×.
+
+  At a fixed areal mass a node's mass scales with s² and its beams' length
+  with s, so k·L scales with s³/n. The A8 lanes cap the outward faces' s at
+  0.24 m, against the BX's 0.55 m, which fails A8 (21 of 244).
+
+**What spends the saturated rows** (sedan1, share of the rows at the bound):
+
+| Kind | body | doors | bonnet | boot lid |
+|---|---|---|---|---|
+| member chords (with lane chords) | 29 % | 30 % | | |
+| shell bends (two-bay bends, panel braces) | 16 % | 32 % | 44 % | 36 % |
+| sheet edges | 11 % | 10 % | 46 % | 52 % |
+| ties | 14 % | 7 % | | |
+| diagonals | 9 % | 8 % | | |
+| joints between members | 9 % | 7 % | | |
+| member bends, rings/webs | 8 % | 5 % | | |
+| rigidifier (the lids' `other`) | | | 9 % | 12 % |
+| dashpots | 1 % | 1 % | 2 % | 1 % |
+
+- On the doors, the largest kind that does not carry the governing load is
+  the shell bends. A panel has its braces (the hinge beam across each shared
+  edge) and also its two-bay bends, and both give the sheet's out-of-plane
+  stiffness.
+- On the body, it is the ties (14 %): station nodes that have no shell node
+  are joined to the shell.
+
+**Measured, not adopted: `LEAN_BENDS=door`** (a measurement switch, one tier
+only). It leaves out the doors' two-bay shell bends and keeps their braces.
+
+| | Built | `LEAN_BENDS=door` | Band |
+|---|---|---|---|
+| door spring ends per node / at the bound | 9.9 / 92 % | 9.0 / 83 % | |
+| door k·L p50 | 1.74e5 N | 1.96e5 N (+13 %) | |
+| p initial / intermediate / peak | 9.9 / 12.7 / 22.4 kN | 9.9 / 11.6 / 25.8 kN | ≥ 10.0 / 15.6 / 28.4 |
+| o residual (8 runs) | 288 mm (sd 14) | 287 mm (sd 11) | 297–445 |
+| g first hardware / door off | 43.9 / 54.7 kN | 41.6 / 52.0 kN | statics 25.7–55.3 |
+
+The +13 % in k·L gives no gain in p's first two phases, and o's springback
+is unchanged. It is the 9–43 % that topology alone can give.
+
+**What would close the gap.** The structure would need heavier nodes and
+longer beams on the faces a pole meets, with the lanes kept. BeamNG's own
+pattern is light contact-only nodes in the lanes, on short ties, between
+structural nodes 0.48 m apart:
+- At the same areal mass, the structural nodes carry the lane's sheet
+  (m × 4) on beams twice as long. That gives k·L up to about 8 × at the same
+  ends per node, less what the contact nodes' ties cost.
+- Each tie to a contact node of mass m_c takes about sqrt(m_c/m)/n_c of the
+  structural node's row.
+- A contact node must stop a pole without passing it inboard. At 0.1 kg with
+  two ties, the bound gives its ties about 5e5 N/m, so it would move about
+  0.1 m under 50 kN.
+
+This concentrates the sheet's mass on the structural nodes. That is moving
+mass, which this round's rule ("zero mass moved") forbids. **It is the user's
+decision.** Until then, the misses that the bound limits stay: p's first two
+phases, o's springback, the panels' ripple and the frontal's maximum crush.
+
+**The two-tier `sedan` at Low (lib tests).** 61391574 gated the lids' inner
+ladders inside `sedan()`, which both styles share, so the two-tier car lost
+them too. Its Low deck top then had no frame within `BIND_MAX`
+(`damage_units_follow_the_beams`, `inner_panels_sit_at_their_section`). The
+ladders are back in `sedan()`, and only `sedan_one_tier` leaves them out
+(`LID_INNER=1` keeps them). The two-tier car's Low `.truck` is now
+byte-identical to 6d5c50ab's. sedan1's `.truck` is unchanged at Low, Medium
+and High. Both tests still fail, now on the newer visual binding's
+`ALT_BIND_MAX` check: 23 rear side-glass vertices, such as `glass_side_r_r`
+at (−0.32, 1.41, 2.29). That check is the visual agent's, and they have the
+report.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.

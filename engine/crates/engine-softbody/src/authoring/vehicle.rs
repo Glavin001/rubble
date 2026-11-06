@@ -1099,6 +1099,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         if kind == ShellBeam::Brace && !def.shell_braces && !panel_brace {
             continue;
         }
+        // One tier, `LEAN_BENDS=<part prefixes>` (a measurement switch): a
+        // panel's two-bay bend beams left out where its braces already give
+        // the sheet its out-of-plane stiffness, so the step's bound leaves
+        // the panel's other beams stiffer.
+        if kind == ShellBeam::Bend && def.one_tier && lean_bends(&sk.parts, &sk.nodes, a, b) {
+            continue;
+        }
         let (pa, pb) = (sk.pos(a), sk.pos(b));
         let zmid = 0.5 * (pa.z + pb.z);
         let crumple = def.crumple.eval(zmid);
@@ -3859,6 +3866,18 @@ pub const SHEET_BUCKLING_K: f32 = 4.0;
 /// tension; [`sheet_ultimate_stress`]). The step's bound then cuts the
 /// stiffness where it must ([`Skeleton::cap_to_bound`]). Damping keeps the
 /// lid material's ratio. Returns the material and the tension yield.
+/// `LEAN_BENDS`: whether a panel bend between `a` and `b` is left out.
+fn lean_bends(parts: &[String], nodes: &[super::skeleton::SkNode], a: u32, b: u32) -> bool {
+    let Ok(v) = std::env::var("LEAN_BENDS") else {
+        return false;
+    };
+    let (pa, pb) = (nodes[a as usize].part, nodes[b as usize].part);
+    pa == pb
+        && pa != 0
+        && v.split(',')
+            .any(|w| !w.is_empty() && parts[pa as usize].starts_with(w))
+}
+
 pub fn lid_inner_material(lid: Material, l: f32) -> (Material, f32) {
     inner_sheet_material(lid, l, 0.5)
 }
