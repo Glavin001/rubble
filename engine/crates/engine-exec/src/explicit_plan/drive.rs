@@ -37,7 +37,7 @@ use glam::Vec3;
 
 /// Records per vehicle before its wheels, and per wheel.
 pub const VEHICLE_RECS: u32 = 20;
-pub const WHEEL_RECS: u32 = 21;
+pub const WHEEL_RECS: u32 = 23;
 
 /// Where the drive records live in gMisc.
 #[derive(Clone, Copy, Debug, PartialEq)]
