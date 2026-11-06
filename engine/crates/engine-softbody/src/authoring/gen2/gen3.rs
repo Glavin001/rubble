@@ -204,5 +204,6 @@ pub fn build() -> Gen3 {
     let glb = super::model::to_glb(&model);
     let rig = rig::rig(&model);
     let skin = skins(&glb, &rig.car).expect("gen3 skins");
+    skin.packable().expect("gen3 skins fit the sidecar");
     Gen3 { rig, glb, skin }
 }

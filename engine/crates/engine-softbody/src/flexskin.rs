@@ -85,7 +85,7 @@ impl Skin {
     pub fn encode(&self) -> Vec<u8> {
         let mut o = Vec::new();
         o.extend_from_slice(MAGIC);
-        o.extend_from_slice(&1u32.to_le_bytes());
+        o.extend_from_slice(&2u32.to_le_bytes());
         let s = |o: &mut Vec<u8>, t: &str| {
             o.extend_from_slice(&(t.len() as u16).to_le_bytes());
             o.extend_from_slice(t.as_bytes());
@@ -100,25 +100,58 @@ impl Skin {
             let ne: usize = m.verts.iter().map(|v| v.w.len()).sum();
             o.extend_from_slice(&(m.verts.len() as u32).to_le_bytes());
             o.extend_from_slice(&(ne as u32).to_le_bytes());
-            let mut at = 0u32;
+            // Per vertex: its entry count (u8), offset and normal (f32).
             for v in &m.verts {
-                o.extend_from_slice(&at.to_le_bytes());
+                o.push(v.w.len() as u8);
                 for f in v.off.iter().chain(&v.nrm) {
                     o.extend_from_slice(&f.to_le_bytes());
                 }
-                at += v.w.len() as u32;
             }
-            o.extend_from_slice(&at.to_le_bytes());
+            // Entries: node (u16), A, ∂A/∂T, ∂A/∂B (i16 steps of Q_A, Q_D).
             for v in &m.verts {
                 for &(n, a, b, c) in &v.w {
-                    o.extend_from_slice(&n.to_le_bytes());
-                    for f in [a, b, c] {
-                        o.extend_from_slice(&f.to_le_bytes());
+                    o.extend_from_slice(&(n as u16).to_le_bytes());
+                    for (f, q) in [(a, Q_A), (b, Q_D), (c, Q_D)] {
+                        o.extend_from_slice(&(((f as f64) / q).round() as i16).to_le_bytes());
                     }
                 }
             }
         }
         o
+    }
+
+    /// Whether every weight is on the sidecar's grids (what `encode` stores
+    /// exactly) and every vertex fits its limits (< 256 entries, nodes < 2¹⁶).
+    pub fn packable(&self) -> Result<(), String> {
+        if self.nodes.len() > u16::MAX as usize + 1 {
+            return Err(format!(
+                "rskin: {} nodes (at most 65,536)",
+                self.nodes.len()
+            ));
+        }
+        for m in &self.meshes {
+            for (i, v) in m.verts.iter().enumerate() {
+                if v.w.len() > 255 {
+                    return Err(format!(
+                        "rskin: {} vertex {i}: {} entries (at most 255)",
+                        m.name,
+                        v.w.len()
+                    ));
+                }
+                for &(_, a, b, c) in &v.w {
+                    for (f, q) in [(a, Q_A), (b, Q_D), (c, Q_D)] {
+                        let k = f as f64 / q;
+                        if k.round() != k || k.abs() > i16::MAX as f64 {
+                            return Err(format!(
+                                "rskin: {} vertex {i}: weight {f} off its grid",
+                                m.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn decode(b: &[u8]) -> Result<Skin, String> {
@@ -142,7 +175,7 @@ impl Skin {
             return Err("rskin: not a Rubble skin".into());
         }
         let ver = u32_(&mut at)?;
-        if ver != 1 {
+        if ver != 1 && ver != 2 {
             return Err(format!("rskin: version {ver}"));
         }
         let nn = u32_(&mut at)? as usize;
@@ -156,6 +189,42 @@ impl Skin {
             let name = str_(&mut at)?;
             let nv = u32_(&mut at)? as usize;
             let ne = u32_(&mut at)? as usize;
+            if ver == 2 {
+                let mut verts = Vec::with_capacity(nv);
+                let mut counts = Vec::with_capacity(nv);
+                for _ in 0..nv {
+                    counts.push(take(&mut at, 1)?[0] as usize);
+                    let mut f = [0.0f32; 6];
+                    for x in &mut f {
+                        *x = f32_(&mut at)?;
+                    }
+                    verts.push(Vert {
+                        w: Vec::new(),
+                        off: [f[0], f[1], f[2]],
+                        nrm: [f[3], f[4], f[5]],
+                    });
+                }
+                if counts.iter().sum::<usize>() != ne {
+                    return Err(format!("rskin: {name}: entry counts do not sum to {ne}"));
+                }
+                let i16_ = |at: &mut usize| -> Result<i16, String> {
+                    Ok(i16::from_le_bytes(take(at, 2)?.try_into().unwrap()))
+                };
+                for (v, &c) in verts.iter_mut().zip(&counts) {
+                    for _ in 0..c {
+                        let n = u16::from_le_bytes(take(&mut at, 2)?.try_into().unwrap()) as u32;
+                        if n as usize >= nn {
+                            return Err(format!("rskin: {name}: node {n} of {nn}"));
+                        }
+                        let a = (i16_(&mut at)? as f64 * Q_A) as f32;
+                        let b = (i16_(&mut at)? as f64 * Q_D) as f32;
+                        let c2 = (i16_(&mut at)? as f64 * Q_D) as f32;
+                        v.w.push((n, a, b, c2));
+                    }
+                }
+                meshes.push(MeshSkin { name, verts });
+                continue;
+            }
             let mut starts = Vec::with_capacity(nv + 1);
             let mut verts = Vec::with_capacity(nv);
             for _ in 0..nv {
@@ -295,6 +364,43 @@ fn min_eig(a: DMat3) -> f64 {
     q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos()
 }
 
+/// The weight grid (A: 2⁻¹³, range ±4) and the gradient grid (∂A: 2⁻⁹ per
+/// metre, range ±64 /m): the sidecar stores each as an i16 count of steps.
+pub const Q_A: f64 = 1.0 / 8192.0;
+pub const Q_D: f64 = 1.0 / 512.0;
+
+/// `x` rounded to multiples of `q` summing exactly to `total` (largest
+/// remainder), as f32 (exact: a step count below 2¹⁵ times a power of two);
+/// None if a count leaves the i16 range.
+pub fn quantise(x: &[f64], q: f64, total: f64) -> Option<Vec<f32>> {
+    let t = (total / q).round() as i64;
+    let mut n: Vec<i64> = x.iter().map(|&v| (v / q).floor() as i64).collect();
+    let mut deficit = t - n.iter().sum::<i64>();
+    let mut order: Vec<usize> = (0..x.len()).collect();
+    order.sort_by(|&a, &b| {
+        let fa = x[a] / q - n[a] as f64;
+        let fb = x[b] / q - n[b] as f64;
+        fb.total_cmp(&fa)
+    });
+    let mut k = 0;
+    while deficit > 0 && !order.is_empty() {
+        n[order[k % order.len()]] += 1;
+        deficit -= 1;
+        k += 1;
+    }
+    while deficit < 0 && !order.is_empty() {
+        n[order[order.len() - 1 - (k % order.len())]] -= 1;
+        deficit += 1;
+        k += 1;
+    }
+    if n.iter()
+        .any(|&c| c < i16::MIN as i64 || c > i16::MAX as i64)
+    {
+        return None;
+    }
+    Some(n.iter().map(|&c| (c as f64 * q) as f32).collect())
+}
+
 /// A vertex's skin over `pool` (entries index the pool's `ids`), or None
 /// where the fit is not well posed.
 pub fn bind_vertex(pool: &Pool, frame: &Pool, x: DVec3, n0: DVec3) -> Option<Vert> {
@@ -319,15 +425,28 @@ pub fn bind_vertex(pool: &Pool, frame: &Pool, x: DVec3, n0: DVec3) -> Option<Ver
             .collect()
     };
     let (gt, gb) = (grad(t), grad(b));
-    let mut w = Vec::new();
-    let (mut p, mut u, mut v) = (DVec3::ZERO, DVec3::ZERO, DVec3::ZERO);
+    let mut keep: Vec<(usize, f64, f64, f64)> = Vec::new();
     for (k, &j) in near.iter().enumerate() {
         let a = w0.iter().find(|q| q.0 == j).map_or(0.0, |q| q.1);
         if a == 0.0 && gt[k] == 0.0 && gb[k] == 0.0 {
             continue;
         }
-        let (af, tf, bf) = (a as f32, gt[k] as f32, gb[k] as f32);
-        // The stored (f32) weights are the ones the frame is measured with.
+        keep.push((j, a, gt[k], gb[k]));
+    }
+    // Quantised (the sidecar's i16 grids) with exact sums: Σ A = 1 and
+    // Σ ∂A = 0, so a translation, and with the frame any rigid motion, stays
+    // exact; the offset and normal below are measured with these values, so
+    // the rest pose stays exact too.
+    let qa = quantise(&keep.iter().map(|e| e.1).collect::<Vec<_>>(), Q_A, 1.0)?;
+    let qt = quantise(&keep.iter().map(|e| e.2).collect::<Vec<_>>(), Q_D, 0.0)?;
+    let qb = quantise(&keep.iter().map(|e| e.3).collect::<Vec<_>>(), Q_D, 0.0)?;
+    let mut w = Vec::new();
+    let (mut p, mut u, mut v) = (DVec3::ZERO, DVec3::ZERO, DVec3::ZERO);
+    for (k, &(j, _, _, _)) in keep.iter().enumerate() {
+        let (af, tf, bf) = (qa[k], qt[k], qb[k]);
+        if af == 0.0 && tf == 0.0 && bf == 0.0 {
+            continue;
+        }
         let pj = pool.pos[j];
         p += pj * af as f64;
         u += pj * tf as f64;
