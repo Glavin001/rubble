@@ -114,16 +114,40 @@ pub fn crash_town(
     settle: u32,
     def: &ExplicitVehiclesDef,
 ) -> anyhow::Result<CrashTown> {
+    crash_town_at(gpu, template, houses, count, speed, run_up, settle, def, None, None)
+}
+
+/// [`crash_town`] with the World's step `dt` (s; `None`: the houses' solver's).
+#[allow(clippy::too_many_arguments)]
+pub fn crash_town_at(
+    gpu: GpuContext,
+    template: &ExplicitBeams,
+    houses: usize,
+    count: usize,
+    speed: f32,
+    run_up: f32,
+    settle: u32,
+    def: &ExplicitVehiclesDef,
+    dt: Option<f32>,
+    max_houses: Option<usize>,
+) -> anyhow::Result<CrashTown> {
     let asset = DestructibleAssetDesc::cuboid_house(&Default::default())?;
     let (lab, _) = engine_fracture::samples::cuboid_stress_scene(None)?;
     let stress = asset.stress.as_ref().ok_or_else(|| anyhow::anyhow!("crash town: no stress source"))?;
     let offset = stress.placement().map(|x| -x as f32);
-    let solver = asset
+    let mut solver = asset
         .solver_for(StrengthModel::Threshold)
         .ok_or_else(|| anyhow::anyhow!("crash town: no threshold solver"))?;
+    if let Some(dt) = dt {
+        solver.dt = dt;
+    }
     let scene = stress.threshold_scene(1.0, solver.dt)?;
     let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
+    // `max_houses`: past four vehicles a house, the rest meet head on in pairs in
+    // open lanes south of the town (a fleet larger than the fracture's capacity
+    // of houses).
     let houses = houses.max(count.div_ceil(4)).max(1);
+    let houses = max_houses.map_or(houses, |m| houses.min(m.max(1)));
     let mut cap = stress_rubble::capacity_for(&scene);
     let h = houses as u32;
     cap.max_bodies = (cap.max_bodies.max((chunks + 20) as u32) * h + 4 * h + 64).next_power_of_two();
@@ -171,7 +195,21 @@ pub fn crash_town(
     }
     let mut vehicles = Vec::new();
     let mut crates = Vec::new();
+    let south = centres.iter().map(|c| c[2]).fold(f32::INFINITY, f32::min) - 60.0;
     for i in 0..count {
+        if i >= 4 * houses {
+            let e = i - 4 * houses;
+            let pair = e / 2;
+            let at = Vec3::new(
+                centres[0][0] + (pair % 16) as f32 * 6.0,
+                ground,
+                south - (pair / 16) as f32 * (4.0 * run_up + 20.0),
+            );
+            let v = speed * (1.0 + 0.2 * ((i as f32 * 0.618_034).fract()));
+            let (dz, turns) = if e % 2 == 0 { (-1.0, 0) } else { (1.0, 2) };
+            vehicles.push(place_vehicle(template, at + Vec3::Z * (dz * (run_up + 3.0)), turns, v, ground));
+            continue;
+        }
         let c = Vec3::from(centres[i / 4]);
         // From +Z heading −Z, then from +X heading −X, −Z heading +Z, −X heading +X.
         let (out, turns, reach) = match i % 4 {

@@ -313,6 +313,31 @@ coupling's own barriers cost 3–5 % of the explicit frame. The wide passes are 
 coupling on; for the repo sedan the per-vehicle frame is faster anyway (0.44 against 0.63 ms
 alone), and with vehicle contact on (any fleet) the wide passes are off already.
 
+### 8.1 Scale baseline (E1), 2026-11-05
+
+`explicit_vehicles_bench` (now: `EV_HZ` the World step rate, `EV_RAYCAST=1` the
+procedural sedan on raycast wheels, `EV_ALONE=0` skips the frame-alone runs, wall
+time per step beside the GPU time; at most 32 houses, the fracture's chunk capacity,
+the rest of a fleet meeting head on in open lanes, `crash_town_at`). M3 Max, load 5–8
+from other agents, one run at a time. GPU ms per World step, median / p95 / p99:
+
+| Cars | Beam tyres, 60 Hz | Beam tyres, 120 Hz | Raycast, 60 Hz | Raycast, 120 Hz |
+|---|---|---|---|---|
+| 16 | 7.37 / 15.71 / 15.86 | 6.98 / 8.11 / 8.31 | 18.74 / 20.48 / 20.94 | 11.33 / 14.76 / 16.95 |
+| 64 | 13.84 / 18.75 / 19.31 | 8.51 / 12.70 / 13.67 | 25.15 / 40.44 / 44.93 | 14.46 / 23.70 / 25.69 |
+| 128 | 21.18 / 28.13 / 30.01 | 12.52 / 17.53 / 18.43 | 33.12 / 47.07 / 48.43 | 18.66 / 27.57 / 31.67 |
+| 256 | 28.26 / 39.90 / 46.29 | 16.20 / 22.97 / 26.15 | 44.54 / 64.64 / 72.81 | 25.21 / 38.53 / 40.50 |
+
+Wall time (step + the bench's blocking poll) adds 2–5 ms at the median. Where the
+GPU time goes (`RUBBLE_GPU_TIMING_PRINT=1`, mean per step over 240 steps at 120 Hz):
+the fracture phase (the houses' threshold loads, breaks and splits) 4.5 ms of 7.0 at
+64 beam-tyre cars and 7.4 of 10.3 at 128 (raycast: 4.9 of 7.3, 8.5 of 11.4); the rigid
+solve about 1.5 ms; the explicit vehicles' marked span 0.14–0.27 ms. The fracture's
+cost follows the bonds broken (1,776 at 64 cars and 120 Hz, 2,806 at 128; raycast
+3,265 and 4,761). Against E1 (≥ 100 cars at p99 ≤ 8.33 ms per 120 Hz step; ≥ 256 at
+60 Hz): not met; the destruction pipeline, not the explicit solver, is the first
+target.
+
 ## 9. Remaining
 
 - In-frame release: a chunk proxy freed the substep its load passes its capacity (today the

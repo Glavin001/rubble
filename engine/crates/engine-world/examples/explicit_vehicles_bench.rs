@@ -14,12 +14,31 @@ use engine_webgpu::{CouplingCapacity, ExplicitBeamsGpu};
 use rubble::explicit_scene::{crash_town, place_vehicle, town_coupling};
 use rubble::*;
 
+/// The repo sedan on its beam tyres, or (EV_RAYCAST=1) on raycast wheels (the drive).
 fn sedan() -> ExplicitBeams {
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck"
     ))
     .expect("sedan");
+    if std::env::var("EV_RAYCAST").as_deref() == Ok("1") {
+        // (The repo sedan has no wheels section: the procedural sedan, as the drive's
+        // tests.)
+        let text = engine_softbody::procedural::car_truck(&engine_softbody::procedural::CarParams {
+            minimass: 10.0,
+            ..engine_softbody::procedural::CarParams::sedan()
+        });
+        return ExplicitBeams::from_truck_raycast(
+            &text,
+            None,
+            glam::Vec3::ZERO,
+            0.0,
+            glam::Vec3::ZERO,
+            ExplicitBeamsSettings::default(),
+        )
+        .unwrap()
+        .0;
+    }
     ExplicitBeams::from_truck(&text, glam::Vec3::ZERO, glam::Vec3::ZERO, ExplicitBeamsSettings::default()).unwrap()
 }
 
@@ -69,20 +88,37 @@ fn main() -> anyhow::Result<()> {
     unsafe { std::env::set_var("RUBBLE_GPU_TIMING", "1") };
     for &n in &counts {
       for vehicles in [n, 0] {
-        let houses = n.div_ceil(4);
+        let houses = n.div_ceil(4).min(32);
         // EV_NO_CONTACT=1: the vehicles couple with nothing (filter mask 0): the plan and
         // frame without the strikes' destruction.
         let mut def = town_coupling();
         if std::env::var("EV_NO_CONTACT").is_ok() {
             def.mask = 0;
         }
-        let mut town = crash_town(GpuContext::Default, &sedan(), houses, vehicles, 15.0, 8.0, 30, &def)?;
+        // EV_HZ: World steps per second (default the houses' solver's, 60).
+        let hz: Option<f32> = std::env::var("EV_HZ").ok().and_then(|v| v.parse().ok());
+        let mut town = rubble::explicit_scene::crash_town_at(
+            GpuContext::Default,
+            &sedan(),
+            houses,
+            vehicles,
+            15.0,
+            8.0,
+            30,
+            &def,
+            hz.map(|h| 1.0 / h),
+            // At most 32 houses (the fracture's chunk capacity); the rest of the
+            // fleet meets head on in open lanes.
+            Some(32),
+        )?;
         let w = &mut town.world;
         let dt = w.solver().dt;
         let mut ms = Vec::new();
+        let mut wall = Vec::new();
         let steps = (2.0 / dt).round() as u32;
         let mut broken = 0usize;
         for _ in 0..steps {
+            let t0 = std::time::Instant::now();
             w.step()?;
             for f in w.poll_blocking()? {
                 for e in &f.destruction_events {
@@ -91,19 +127,24 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            wall.push(t0.elapsed().as_secs_f64() * 1e3);
             if let Some(t) = w.last_step_gpu_ms() {
                 ms.push(t);
             }
         }
         println!(
-            "{vehicles} vehicles, {} houses, World step {:.2} ms: {}; {broken} bonds broken; explicit steps {:?}",
+            "{vehicles} vehicles, {} houses, World step {:.2} ms: GPU {}; wall (step + poll) {}; {broken} bonds broken; explicit steps {:?}",
             town.houses.len(),
             dt * 1e3,
             stats(ms),
+            stats(wall),
             w.explicit_vehicle_steps()
         );
         drop(town);
       }
+        if std::env::var("EV_ALONE").as_deref() == Ok("0") {
+            continue;
+        }
         println!("  explicit frame alone, wide passes on:  {}", alone(n, true, false));
         println!("  explicit frame alone, wide passes off: {}", alone(n, false, false));
         println!("  explicit frame alone, coupling on:     {}", alone(n, false, true));
