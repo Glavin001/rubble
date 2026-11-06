@@ -4655,6 +4655,14 @@ fn door_path_probe(s: &ExplicitBeams, b: &Built, door: &str, d: f32, zc: f32) {
                 .iter()
                 .find(|(_, g)| g.contains(&(a as u32)) && g.contains(&(c as u32)))
                 .map_or("skin".to_string(), |(k, _)| k.to_string());
+            // (`P_WEB=1`: a member's chords, along the car at rest, apart
+            // from its webs.)
+            let key = if std::env::var("P_WEB").is_ok_and(|v| v == "1") {
+                let r = (sk.nodes[a].p - sk.nodes[c].p).normalize_or_zero();
+                format!("{key}{}", if r.z.abs() > 0.9 { ".chord" } else { ".web" })
+            } else {
+                key
+            };
             let e = own.entry(key).or_default();
             e.0 += 1;
             let r = if bm.force > 0.0 {
@@ -4683,10 +4691,28 @@ fn door_path_probe(s: &ExplicitBeams, b: &Built, door: &str, d: f32, zc: f32) {
             } else {
                 continue;
             };
-            if sk.nodes[a as usize].part as usize != pt || bm.broken {
+            if sk.nodes[a as usize].part as usize != pt {
                 continue;
             }
             let past = s.nodes[f as usize].pos.x.abs() - s.nodes[a as usize].pos.x.abs();
+            // (`P_BEAR=1`: each bearing beam's rest and present length,
+            // force and state.)
+            if std::env::var("P_BEAR").is_ok_and(|v| v == "1") {
+                let l = s.nodes[a as usize].pos.distance(s.nodes[f as usize].pos);
+                eprintln!(
+                    "(p bear {:.0} mm) door {a} on flange {f}: rest {:.3} len {l:.3} m, {:.1} kN, tc {:.1} kN, k {:.0} kN/m, past {:.0} mm{}",
+                    d * 1e3,
+                    bm.rest,
+                    bm.force / 1e3,
+                    bm.tc / 1e3,
+                    bm.k / 1e3,
+                    past * 1e3,
+                    if bm.broken { " BROKEN" } else { "" }
+                );
+            }
+            if bm.broken {
+                continue;
+            }
             if past > 0.0 {
                 c += 1;
                 worst = worst.max(past * 1e3);
