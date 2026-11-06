@@ -73,7 +73,7 @@ impl Mat {
     pub fn pbr(self) -> ([f32; 4], f32, f32) {
         match self {
             // A deep metallic blue (the base coat; the clearcoat is an extension).
-            Mat::Paint => ([0.030, 0.062, 0.165, 1.0], 0.55, 0.38),
+            Mat::Paint => ([0.016, 0.040, 0.120, 1.0], 0.6, 0.35),
             Mat::Chrome => ([0.92, 0.92, 0.93, 1.0], 1.0, 0.08),
             Mat::TrimBlack => ([0.022, 0.022, 0.025, 1.0], 0.0, 0.55),
             Mat::Rubber => ([0.025, 0.025, 0.025, 1.0], 0.0, 0.85),
@@ -576,13 +576,13 @@ fn aspect(a: Vec3, b: Vec3, c: Vec3) -> f32 {
 /// the surface. `ids` (grid point → vertex) follows the merges.
 fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], ids: &mut [u32]) {
     use std::collections::HashMap;
-    const LIMIT: f32 = 5.0;
+    const LIMIT: f32 = 4.5;
     let on_border = |v: u32| -> bool {
         let k = (v as usize).wrapping_sub(first);
         k < border.len() && border[k]
     };
     let mut merged: HashMap<u32, u32> = HashMap::new();
-    for _pass in 0..10 {
+    for _pass in 0..30 {
         let mut changed = false;
         // Edge → the triangles on it.
         let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
@@ -607,24 +607,77 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
             let len = |e: usize| p[e].distance(p[(e + 1) % 3]);
             let es = (0..3).min_by(|&x, &y| len(x).total_cmp(&len(y))).unwrap();
             let el = (0..3).max_by(|&x, &y| len(x).total_cmp(&len(y))).unwrap();
-            if len(es) < 0.5 * len(el) {
-                // Collapse the short edge: drop `v` into `k`.
-                let (a, b) = (tr[es], tr[(es + 1) % 3]);
-                let (ba, bb) = (on_border(a), on_border(b));
+            // A sliver of three points along the strip's outline (a kinked
+            // border) spans no visible surface: drop it.
+            let height = (p[1] - p[0]).cross(p[2] - p[0]).length() / len(el);
+            if tr.iter().all(|&v| on_border(v)) && height < 0.0025 {
+                dead[t] = true;
+                changed = true;
+                continue;
+            }
+            // Candidate collapses (drop `v` into `k`): a needle's short edge
+            // either way; a thin cap's apex onto either end of its longest
+            // edge. A border point only moves along the border, a short step
+            // (the hem's spacing stays under 22 mm).
+            let mut cands: Vec<(u32, u32)> = Vec::new();
+            let border_ok = |a: u32, b: u32, l: f32| {
                 let key = (a.min(b), a.max(b));
                 let boundary_edge = edges.get(&key).map_or(0, |v| v.len()) == 1;
-                let (v, k) = match (ba, bb) {
-                    (false, _) => (a, b),
-                    (true, false) => (b, a),
-                    // Both on the border: only along it, and only a short
-                    // step (the hem's spacing stays under 22 mm).
-                    (true, true) if boundary_edge && len(es) < 0.3 * H => (b, a),
-                    _ => continue,
-                };
+                !on_border(a) || (on_border(b) && boundary_edge && l < 0.45 * H)
+            };
+            if len(es) < 0.5 * len(el) {
+                let (a, b) = (tr[es], tr[(es + 1) % 3]);
+                for (v, k) in [(a, b), (b, a)] {
+                    if border_ok(v, k, len(es)) {
+                        cands.push((v, k));
+                    }
+                }
+            } else if height < 0.0025 {
+                let (a, b, c) = (tr[el], tr[(el + 1) % 3], tr[(el + 2) % 3]);
+                let (pa, pb, pc) = (
+                    part.pos[a as usize],
+                    part.pos[b as usize],
+                    part.pos[c as usize],
+                );
+                let mut ends = [(a, pc.distance(pa)), (b, pc.distance(pb))];
+                ends.sort_by(|x, y| x.1.total_cmp(&y.1));
+                for (k, l) in ends {
+                    if border_ok(c, k, l) {
+                        cands.push((c, k));
+                    }
+                }
+            }
+            let mut done = false;
+            for (v, k) in cands {
                 // The triangles round `v` must keep their facing.
                 let around: Vec<usize> = (tri0..part.tris.len())
                     .filter(|&q| !dead[q] && part.tris[q].contains(&v))
                     .collect();
+                // The link condition: the vertices next to both `v` and `k`
+                // are just the apexes of the triangles on edge v–k (else the
+                // collapse pinches the surface into a non-manifold edge).
+                let ring = |w: u32| -> Vec<u32> {
+                    let mut r: Vec<u32> = (tri0..part.tris.len())
+                        .filter(|&q| !dead[q] && part.tris[q].contains(&w))
+                        .flat_map(|q| part.tris[q])
+                        .filter(|&x| x != w)
+                        .collect();
+                    r.sort_unstable();
+                    r.dedup();
+                    r
+                };
+                let (rv, rk) = (ring(v), ring(k));
+                let shared = rv
+                    .iter()
+                    .filter(|x| rk.contains(x) && **x != k && **x != v)
+                    .count();
+                let apexes = around
+                    .iter()
+                    .filter(|&&q| part.tris[q].contains(&k))
+                    .count();
+                if shared != apexes {
+                    continue;
+                }
                 let mut ok = true;
                 for &q in &around {
                     let tq = part.tris[q];
@@ -636,6 +689,28 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
                     let n0 = (old[1] - old[0]).cross(old[2] - old[0]);
                     let n1 = (new[1] - new[0]).cross(new[2] - new[0]);
                     if n0.dot(n1) <= 0.0 || aspect(new[0], new[1], new[2]) > 12.0 {
+                        ok = false;
+                        break;
+                    }
+                    // Nor may its UVs fold (the chart stays one-to-one).
+                    let uv_area = |t: [u32; 3]| {
+                        let [a, b, c] = t.map(|x| part.uv[x as usize]);
+                        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+                    };
+                    let (u0, u1) = (uv_area(tq), uv_area(tq.map(|x| if x == v { k } else { x })));
+                    if u0 * u1 <= 0.0 {
+                        ok = false;
+                        break;
+                    }
+                    // No duplicate of a triangle already on `k`.
+                    let mut s = tq.map(|x| if x == v { k } else { x });
+                    s.sort_unstable();
+                    let dup = (tri0..part.tris.len()).any(|r| {
+                        let mut o = part.tris[r];
+                        o.sort_unstable();
+                        !dead[r] && r != q && o == s
+                    });
+                    if dup {
                         ok = false;
                         break;
                     }
@@ -654,7 +729,21 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
                 }
                 merged.insert(v, k);
                 changed = true;
-            } else {
+                done = true;
+                break;
+            }
+            if done {
+                continue;
+            }
+            {
+                // A cap thinner than half a millimetre across its longest
+                // edge covers nothing visible: drop it.
+                let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
+                if 2.0 * area / len(el) < 0.0005 {
+                    dead[t] = true;
+                    changed = true;
+                    continue;
+                }
                 // Flip the longest edge.
                 let (a, b) = (tr[el], tr[(el + 1) % 3]);
                 let c = tr[(el + 2) % 3];
@@ -671,6 +760,10 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
                 let Some(&d) = o.iter().find(|&&x| x != a && x != b) else {
                     continue;
                 };
+                // The new edge must not already exist (a third triangle on it).
+                if edges.contains_key(&(c.min(d), c.max(d))) {
+                    continue;
+                }
                 let q = |x: u32| part.pos[x as usize];
                 let before = aspect(q(a), q(b), q(c)).max(aspect(q(o[0]), q(o[1]), q(o[2])));
                 // The new pair (c, a, d) and (c, d, b), wound like the old.
@@ -856,8 +949,8 @@ pub fn emit(part: &mut Part, g: &Grid, m: Mat, col: [f32; 3]) -> Vec<u32> {
 /// normals lean out 45°, so the edge shades round), a wall [`HEM_R`] × 2
 /// deep, its foot tucked [`HEM_FLANGE`] in under the skin.
 pub fn hem(part: &mut Part, g: &Grid, ids: &[u32], e: usize, m: Mat) {
-    let idx = g.edge(e);
-    let inner: Vec<usize> = match e {
+    let all = g.edge(e);
+    let inner_all: Vec<usize> = match e {
         0 => (0..=g.ns).map(|i| g.at(i, 1.min(g.nb))).collect(),
         1 => (0..=g.ns)
             .map(|i| g.at(i, g.nb.saturating_sub(1)))
@@ -867,11 +960,28 @@ pub fn hem(part: &mut Part, g: &Grid, ids: &[u32], e: usize, m: Mat) {
             .map(|j| g.at(g.ns.saturating_sub(1), j))
             .collect(),
     };
+    // The edge's distinct vertices (merged points once), at least 5 mm
+    // apart (a crowded end would make the return wall's quads slivers).
+    let (mut idx, mut inner) = (Vec::new(), Vec::new());
+    for (q, &k) in all.iter().enumerate() {
+        let last = q + 1 == all.len();
+        if let Some(&pk) = idx.last() {
+            let (a, b) = (ids[pk] as usize, ids[k] as usize);
+            if a == b || (!last && part.pos[a].distance(part.pos[b]) < 0.005) {
+                continue;
+            }
+        }
+        idx.push(k);
+        inner.push(inner_all[q]);
+    }
+    if idx.len() < 2 {
+        return;
+    }
     let mut prev: Vec<u32> = idx.iter().map(|&k| ids[k]).collect();
     let rows: Vec<Vec<(Vec3, Vec3)>> = {
         let mut rows = vec![Vec::new(); 1];
         for (q, &k) in idx.iter().enumerate() {
-            let p = g.p[k];
+            let p = part.pos[ids[k] as usize];
             let n = g.n[k];
             let o = {
                 // Across the edge in the surface: tangent × normal, away
@@ -1225,7 +1335,7 @@ const HOOD_REAR: f32 = 0.86;
 const BUMPER_TOP_F: f32 = 0.60;
 const BUMPER_TOP_R: f32 = 0.78;
 /// The lamps' depth below their top edge (slim LED units), in height.
-const HEADLAMP_H: f32 = 0.072;
+const HEADLAMP_H: f32 = 0.085;
 const TAILLAMP_H: f32 = 0.075;
 
 pub fn build() -> Model {
@@ -1713,8 +1823,8 @@ pub fn build() -> Model {
             Some("body_shell"),
             &st,
             Mat::Paint,
-            [false, true, false, false],
-            [false, true, false, false],
+            [false, true, true, false],
+            [false, true, true, false],
         );
     }
     // Roof: windshield top to backlight top, frame top to frame top.
@@ -1970,7 +2080,7 @@ pub fn build() -> Model {
             FRAC_PI_2,
         )
     };
-    let phi_end_r = FRAC_PI_2 - 0.01;
+    let phi_end_r = FRAC_PI_2 - 1e-3;
     {
         let (a, b) = (tl_lo.clone(), tl_top.clone());
         let st = Strip::new(
@@ -2049,7 +2159,7 @@ pub fn build() -> Model {
         let st = Strip::new(
             Param::Nose,
             k(phi_g),
-            k(FRAC_PI_2 - 0.01),
+            k(FRAC_PI_2 - 1e-3),
             Box::new(move |p| a.at(p)),
             Box::new(move |p| b.at(p)),
         );
@@ -2072,12 +2182,42 @@ pub fn build() -> Model {
             LampKind::Head,
         );
     }
-    // Grille: one broad opening from the bonnet's edge down to the lower
-    // bumper, a slim dark-chrome frame round a recessed honeycomb.
-    let y_gb = 0.40;
+    // Between the lamps: a painted nose bar carrying a slim LED light bar
+    // under the bonnet's edge (the lamps' running lights joined across the
+    // car); the grille below it, from 6 cm under the lamps' feet down to the
+    // lower bumper: a slim dark-chrome frame round a recessed honeycomb.
+    let y_gb = 0.38;
+    let y_gt = 0.60;
     {
-        let fy = phi_y(Param::Nose, &hood_edge);
-        let st = Strip::new(Param::Nose, k(-phi_g), k(phi_g), k(y_gb), fy);
+        let edge = Table::new(phi_y(Param::Nose, &hood_edge), -phi_g, phi_g);
+        let (e0, e1, e2) = (edge.clone(), edge.clone(), edge.clone());
+        let st = Strip::new(
+            Param::Nose,
+            k(-phi_g),
+            k(phi_g),
+            k(y_gt),
+            Box::new(move |p| e0.at(p) - 0.026),
+        );
+        panel(
+            &mut m,
+            "bumper_front",
+            None,
+            &st,
+            Mat::Paint,
+            [true, true, false, false],
+            [true, true, false, false],
+        );
+        let st = Strip::new(
+            Param::Nose,
+            k(-phi_g),
+            k(phi_g),
+            Box::new(move |p| e1.at(p) - 0.026),
+            Box::new(move |p| e2.at(p)),
+        );
+        let mut g = grid(&st, 0.012);
+        g.shrink([true; 4], GAP);
+        lamp(&mut m, "grille", "grille", &g, [1.0; 3], LampKind::Bar);
+        let st = Strip::new(Param::Nose, k(-phi_g), k(phi_g), k(y_gb), k(y_gt));
         let mut g = grid(&st, 0.016);
         g.shrink([true, true, true, true], GAP);
         grille(&mut m, &g);
@@ -2145,7 +2285,7 @@ pub fn build() -> Model {
     // Rear bumper: the painted cover with the licence plate's recess, over a
     // textured black diffuser with strakes and the exhaust's tips.
     {
-        let yd = |phi: f32| 0.43 - 0.07 * sf::smoothstep(0.75, 1.15, phi.abs());
+        let yd = |phi: f32| 0.47 - 0.09 * sf::smoothstep(0.75, 1.15, phi.abs());
         let blo = Table::new(
             move |phi| {
                 let z = sf::hit(Param::Tail, phi, 0.45).z;
@@ -2206,7 +2346,7 @@ pub fn build() -> Model {
             Param::Tail,
             k(-1.15),
             k(1.15),
-            k(0.255),
+            k(0.29),
             Box::new(move |phi| yd(phi) - 0.004),
         );
         let g = grid(&st, H).offset(0.002);
@@ -2227,8 +2367,8 @@ pub fn build() -> Model {
                 a + na * 0.012,
                 b + nb * 0.012,
                 (na + nb).normalize(),
-                0.003,
-                0.003,
+                0.0045,
+                0.0045,
                 0.012,
                 Mat::TrimBlack,
             );
@@ -2319,7 +2459,13 @@ fn lamp(
     let depth = 0.04;
     let back = g.offset(-depth).flipped();
     let part = m.part(housing_part);
-    emit(part, &back, Mat::TrimBlack, [1.0; 3]);
+    // (In the grille, black trim is its honeycomb: the bar's back is the
+    // frame's dark chrome.)
+    if housing_part.starts_with("grille") {
+        emit(part, &back, Mat::Chrome, [0.10, 0.10, 0.11]);
+    } else {
+        emit(part, &back, Mat::TrimBlack, [1.0; 3]);
+    }
     throat(part, g, depth, Mat::TrimBlack);
     let glow = if kind == LampKind::Head {
         [1.0, 0.98, 0.95]
@@ -2332,7 +2478,7 @@ fn lamp(
         let mut prev: Option<(u32, u32)> = None;
         for &(k, toward) in pts {
             let n = g.n[k];
-            let w = (g.p[toward] - g.p[k]).normalize_or_zero() * 0.005;
+            let w = (g.p[toward] - g.p[k]).normalize_or_zero() * 0.007;
             let p = g.p[k] - n * 0.008;
             let a = part.vert(p, n, [0.0; 2], glow);
             let b = part.vert(p + w, n, [0.0; 2], glow);

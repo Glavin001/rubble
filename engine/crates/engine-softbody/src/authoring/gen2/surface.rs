@@ -195,9 +195,9 @@ impl Profiles {
             ]),
             belt,
             bottom: Spline::new(&[
-                (Z_REAR - 0.05, 0.40),
-                (-2.35, 0.30),
-                (-2.10, 0.22),
+                (Z_REAR - 0.05, 0.44),
+                (-2.35, 0.335),
+                (-2.10, 0.235),
                 (-1.85, 0.170),
                 (-1.40, 0.150),
                 (1.40, 0.150),
@@ -209,9 +209,9 @@ impl Profiles {
             // The nose: foremost at the grille's middle, leaning back above
             // it to the bonnet's edge.
             nose: Spline::new(&[
-                (0.10, Z_FRONT - 0.16),
-                (0.22, Z_FRONT - 0.075),
-                (0.34, Z_FRONT - 0.018),
+                (0.10, Z_FRONT - 0.19),
+                (0.22, Z_FRONT - 0.100),
+                (0.34, Z_FRONT - 0.032),
                 (0.46, Z_FRONT - 0.002),
                 (0.54, Z_FRONT),
                 (0.62, Z_FRONT - 0.010),

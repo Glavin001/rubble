@@ -440,6 +440,18 @@ fn main() {
         // Parts may hold several pieces that share positions (an inner panel
         // and the skin's hem flange do not): count edges on > 2 triangles.
         nonmanifold += ec.values().filter(|&&c| c > 2).count();
+        if std::env::var("GLB_DEBUG").is_ok() {
+            for (&(a, b), &c) in &ec {
+                if c > 2 {
+                    let at = |w: usize| p[id.iter().position(|&k| k == w).unwrap()];
+                    let (pa, pb) = (at(a), at(b));
+                    println!(
+                        "  non-manifold {} ({:.3}, {:.3}, {:.3})-({:.3}, {:.3}, {:.3})",
+                        m.name, pa.x, pa.y, pa.z, pb.x, pb.y, pb.z
+                    );
+                }
+            }
+        }
     }
     row(
         "no non-manifold edges",
