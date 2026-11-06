@@ -460,9 +460,9 @@ impl Car {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
         {
-            if k == 4 {
-                template.settings.centred_damping = true;
-            } else {
+            // (0: centred damping off; the BeamNG profile's default is on.)
+            template.settings.centred_damping = k == 4;
+            if k != 4 {
                 template.damp_scheme = k;
             }
         }
@@ -1528,8 +1528,11 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
         Ok(s) => s,
         Err(e) => return json!({"error": e}),
     };
-    s.damp_scheme = car.template.damp_scheme;
-    s.settings.centred_damping = car.template.settings.centred_damping;
+    // `RUBBLE_DAMP_SCHEME` (a measurement) on a BeamNG profile spawn as on the template.
+    if std::env::var("RUBBLE_DAMP_SCHEME").is_ok() && s.beamng_profile {
+        s.damp_scheme = car.template.damp_scheme;
+        s.settings.centred_damping = car.template.settings.centred_damping;
+    }
     let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
     let com = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.pos * n.mass).sum::<Vec3>() / total;
     let mut first_break = None;

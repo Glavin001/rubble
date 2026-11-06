@@ -112,11 +112,11 @@ pub struct ExplicitBeamsSettings {
     /// ([`Self::beamng`], jbeam-semantics-spec.md §36): every triangle is tested
     /// every step.
     pub triangle_throttle: bool,
-    /// Centred damping (jbeam-semantics-spec.md §39; opt-in, off in every
-    /// profile): each JBeam element's damping reads the mean of the step's start
-    /// and end velocities instead of the start's, by a correction after the node
-    /// update. Lifts the damped explicit step's limit from ω·h ≤ 2(√(1+ζ²) − ζ)
-    /// to 2 and past it; JBeam elements only.
+    /// Centred damping (jbeam-semantics-spec.md §39; on in the BeamNG profile,
+    /// off in the Rigs of Rods one): each JBeam element's damping reads the mean
+    /// of the step's start and end velocities instead of the start's, by a
+    /// correction after the node update. Lifts the damped explicit step's limit
+    /// from ω·h ≤ 2(√(1+ζ²) − ζ) to 2 and past it; JBeam elements only.
     pub centred_damping: bool,
 }
 
@@ -140,6 +140,7 @@ impl ExplicitBeamsSettings {
         Self {
             fast_inv_sqrt: false,
             triangle_throttle: false,
+            centred_damping: true,
             ..self
         }
     }

@@ -1378,7 +1378,7 @@ the SUV and trailer miss are brake pads and bulbs only (no nodes). Measured
   stabilisation it does not document) is not public. Left as is (content physics
   unchanged); the options are the user's: a smaller step for such vehicles, or an
   implicit treatment of their stiffest elements.
-* **Resolved opt-in (2026-11-06, §39):** the explicit damping's half-step lag
+* **Resolved (2026-11-06, §39, the BeamNG profile's default):** the explicit damping's half-step lag
   lowers the limit below 2 (to 1.87–1.98 at their ζ); centred damping
   (`centred_damping`) rests every SUV configuration, the trailer's axles and the
   CCF's broken ones at the same 2 kHz step, content physics unchanged.
@@ -2250,9 +2250,11 @@ T-bone. Tried without a fix:
 
 (§38 is the surface contact of `feat/softrigid-surface-contact`.)
 
-`ExplicitBeamsSettings::centred_damping`, off in every profile (the RoR and BeamNG
-profiles are bit for bit as before; a caller turns it on per vehicle). Research
-branch `research/explicit-stability`.
+`ExplicitBeamsSettings::centred_damping`: **on in the BeamNG profile** (`beamng()`,
+since 2026-11-06), off in the Rigs of Rods profile, which stays bit for bit. A
+vehicle turns it back alone (`s.settings.centred_damping = false`); the crash lab
+and the showcase page take `?centredDamping=0/1` (ExplicitSim's `centredDamping`,
+BeamNG profile vehicles only). Research branch `research/explicit-stability`.
 
 **Why.** §29.1 left the full-size SUV, the boathauler trailer and the CCF's
 `country`, `f4_cup` and `f6_offroadster` configurations vibrating or breaking at
@@ -2413,6 +2415,73 @@ Sources:
   the modified velocity Verlet with the dissipative force at a predicted velocity
   (λ = ½).
 * [CI], [I], [N], [PN] as in the header.
+
+### 39.1 The BeamNG profile's default (2026-11-06)
+
+`beamng()` turns centred damping on; the Rigs of Rods profile is unchanged, bit for
+bit. Re-run with the fuel-tank mass of §40 in both columns (it moves the community
+cars' masses, so "off" here is not §39's "current"):
+
+* **Community sweep** (198 configurations, 1 s at rest): off 141 / 49 / 8 clean /
+  marginal / broken, **on 176 / 22 / 0** (the same classes as §39's centred column;
+  the Vertex's `powerdemonrwd` 1.01 → 0.79 m/s, `taxi_taxi_carrier` 0.96 → 1.00).
+* **`vehicle_compare`** (sedan1, ETK kr6 and kc6, CCF, Vertex;
+  `engine/docs/measurements/vehicle-compare.{md,json}` is the new baseline, the old
+  one had sedan1 and the ETKs only). Every reference that moved, off → on:
+
+| car | measure | off | on |
+|---|---|---|---|
+| sedan1 | wall56 bent beams | 974 | 980 |
+| sedan1 | wall56 crush dynamic / residual | 808.5 / 614.5 mm | 809.6 / 630.6 mm |
+| sedan1 | wall56 peak force, restitution, Campbell b1 | 935.7 kN, 0.189, 21.7 | 929.1 kN, 0.188, 21.1 |
+| sedan1 | pole32 crush dynamic / residual | 398.9 / 318.4 mm | 396.2 / 298.5 mm |
+| sedan1 | MDB crush dynamic / residual | 665.1 / 552.3 mm | 656.5 / 562.9 mm |
+| sedan1 | roof peak, door peak | 68.5, 24.1 kN | 67.5, 24.7 kN |
+| ETK kr6 | rest KE, fastest node | 0.5 J, 0.148 m/s | 0.0 J, 0.001 m/s |
+| ETK kr6 | wall56 bent; crush dynamic / residual | 335; 501.0 / 197.5 mm | 337; 497.0 / 193.6 mm |
+| ETK kr6 | wall56 peak, restitution, b1 | 714.5 kN, 0.352, 67.5 | 765.5 kN, 0.362, 68.9 |
+| ETK kr6 | pole32 dynamic / residual | 166.4 / 62.2 mm | 162.9 / 53.9 mm |
+| ETK kr6 | MDB dynamic / residual | 471.0 / 293.5 mm | 467.3 / 228.2 mm |
+| ETK kr6 | roof, door peak | 84.3, 38.5 kN | 84.7, 38.3 kN |
+| ETK kc6 | rest KE, fastest node | 0.5 J, 0.148 m/s | 0.0 J, 0.001 m/s |
+| ETK kc6 | wall56 bent; dynamic / residual | 331; 497.1 / 196.1 mm | 338; 495.4 / 194.5 mm |
+| ETK kc6 | wall56 peak, restitution, b1 | 698.5 kN, 0.338, 68.0 | 760.2 kN, 0.360, 68.5 |
+| ETK kc6 | pole32 dynamic / residual | 103.5 / 57.3 mm | 98.8 / 55.0 mm |
+| ETK kc6 | MDB dynamic / residual | 474.6 / 300.3 mm | 466.6 / 230.8 mm |
+| ETK kc6 | roof, door peak | 133.9, 38.2 kN | 133.4, 86.5 kN |
+| CCF | rest fastest node | 0.062 m/s | 0.001 m/s |
+| CCF | wall56 broken / bent | 140 / 474 | 142 / 476 |
+| CCF | wall56 dynamic / residual | 481.4 / 240.7 mm | 479.5 / 19.9 mm |
+| CCF | wall56 peak, restitution, b1 | 604.0 kN, 0.264, 55.4 | 585.2 kN, 0.276, 669.9 |
+| CCF | pole32 dynamic / residual | 364.0 / 284.7 mm | 364.6 / 286.0 mm |
+| CCF | MDB dynamic / residual | 306.2 / 127.3 mm | 300.6 / 127.2 mm |
+| CCF | roof, door peak | 103.1, 189.1 kN | 109.2, 375.0 kN |
+| Vertex | wall56 broken / bent | 33 / 453 | 45 / 444 |
+| Vertex | wall56 dynamic / residual | 488.9 / 121.7 mm | 488.4 / 124.9 mm |
+| Vertex | wall56 peak, restitution, b1 | 558.0 kN, 0.214, 109.5 | 576.8 kN, 0.201, 106.7 |
+| Vertex | pole32 dynamic / residual | 266.8 / 198.6 mm | 301.1 / 238.7 mm |
+| Vertex | MDB dynamic / residual | 331.5 / 241.5 mm | 323.8 / 234.7 mm |
+| Vertex | roof, door peak | 17.1, 54.6 kN | 16.8, 60.7 kN |
+
+  Readings: the parked cars stop ringing (0.15 → 0.001 m/s); dynamic crush moves
+  by 0–2 % (the Vertex pole 13 %); the residual crushes and the door pulls move
+  where a path branches. The ETK kc6's and the CCF's door pulls follow the off
+  curves to the hinges (the same forces to the 10 mm sample) and then take
+  another break order (the kc6 loses its soft top's front mount too), so their
+  peaks are a different event, not a stiffer door. The CCF's wall residual (241 →
+  20 mm, so b1 670) is the front springing back to its shape: §39's single run
+  read 6 → 75 mm for the same car without the fuel mass. Crush residuals at this
+  car's springback are not a stable reference.
+* **sedan1's profile suites** (`showcase_car`) and `crash_invariants`: off and on
+  run the same 30 and 9 tests. `crash_invariants` passes both ways. `showcase_car`
+  fails 6 tests off and 5 on, all of them on the base branch too (after its
+  compile fix): `f_wall_at_120_kmh…` (energy rose 13.0 J between tenths, both),
+  `g_pulling_a_door_tears_it_off` (the latch at 78.1 kN, not 30.0–64.3, both),
+  `t_car_to_car_t_bone_at_80_kmh` (13 of 1,165 striker nodes in the skin, both),
+  `n_wall_matches_the_nhtsa_sedans` (restitution 0.2018, not 0.13–0.20, both),
+  `contacts_do_no_positive_work` (0.38 J off, 0.23 J on, over a tenth); and
+  off only `fixed_contact_quantisation_does_no_work` (0.0102 J), which passes on.
+  None is caused by this change; they are follow-ups.
 
 ## 40. Fuel-tank mass (2026-11-06)
 

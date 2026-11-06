@@ -31,10 +31,10 @@ fn main() {
     // `scheme=N`: the damping velocity (4: `ExplicitBeamsSettings::centred_damping`;
     // 1, 2: `ExplicitBeams::damp_scheme`, measurements).
     // `brief`: rows of broken, bent, fastest node, KE and the CPU time per step.
-    let scheme: u32 = a
+    let scheme: Option<u32> = a
         .iter()
         .find_map(|x| x.strip_prefix("scheme="))
-        .map_or(0, |s| s.parse().unwrap());
+        .map(|s| s.parse().unwrap());
     let brief = a.iter().any(|x| x == "brief");
     let mut index: Vec<serde_json::Value> =
         serde_json::from_str(&std::fs::read_to_string(mods.join("index.json")).unwrap()).unwrap();
@@ -102,11 +102,15 @@ fn main() {
             for n in &mut s.nodes {
                 n.pos.y -= low - 0.02;
             }
-            // 4: the centred damping (`centred_damping`); 1, 2: the measurements.
-            if scheme == 4 {
-                s.settings.centred_damping = true;
-            } else {
-                s.damp_scheme = scheme;
+            // 4: centred damping on, 0: off (the BeamNG profile's default is on;
+            // `scheme` absent keeps it); 1, 2: the dry-pass measurements (centred off).
+            match scheme {
+                Some(4) => s.settings.centred_damping = true,
+                Some(k) => {
+                    s.settings.centred_damping = false;
+                    s.damp_scheme = k;
+                }
+                None => {}
             }
             let t0 = std::time::Instant::now();
             let steps0 = s.steps;
