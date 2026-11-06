@@ -7076,8 +7076,34 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
         inertia[4],
         inertia[5],
     );
-    // (Across the car it is reported only: the driver's named mass sits on
-    // the left, +x, so the car is not mirror-symmetric in mass.)
+    // Across the car: the structure, its sheet and its equipment are
+    // mirror-symmetric (exact); what is placed on one side is the named
+    // masses, blocks and hubs (`fixed`): the driver (75 kg, the kerb mass is
+    // "1,450 kg with its driver"), the dash equipment on the driver's half,
+    // the battery. So the centre of mass is off the centre line by the fixed
+    // masses' first moment alone.
+    let total = sk.total_mass();
+    let sym: f32 = sk
+        .nodes
+        .iter()
+        .map(|n| (n.mass - n.fixed) * n.p.x)
+        .sum::<f32>()
+        / total;
+    let fixed: f32 = sk.nodes.iter().map(|n| n.fixed * n.p.x).sum::<f32>() / total;
+    eprintln!(
+        "centre of mass across: {:+.1} mm from the structure, sheet and equipment, {:+.1} mm from the named masses, blocks and hubs",
+        sym * 1e3,
+        fixed * 1e3
+    );
+    assert!(
+        sym.abs() < 0.002,
+        "the symmetric mass is off the centre line by {sym} m"
+    );
+    assert!(
+        (com.x - fixed).abs() < 0.002,
+        "centre of mass {} m across, the placed masses' {fixed} m",
+        com.x
+    );
     // Along the car: NHTSA measured the 2011 Accord LX sedan's centre of
     // gravity 1,147 mm behind its front axle at a 1,578 kg test weight
     // (NCAP side pole, test 7077, the NHTSA Vehicle Crash Test Database).
@@ -7094,7 +7120,7 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
     // 2021-01-0970, list vehicles by name behind a paywall). What is
     // asserted is that BeamNG's node pattern (`BEAMNG_NODES`) lumps the
     // same masses: its principal moments within 1 % (a Choice) of the
-    // 0.24 m lattice's (measured at c6032885 without the pattern).
+    // 0.24 m lattice's (measured without the pattern, the battery at 12.4 kg).
     for (k, &want) in SEDAN1_PRINCIPAL_MOMENTS.iter().enumerate() {
         let got = inertia[k];
         assert!(
@@ -7326,7 +7352,7 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
 /// sedan1's principal moments of inertia about its centre of mass (kg·m²,
 /// ascending), Medium, on the 0.24 m lattice (no `BEAMNG_NODES`): the
 /// reference the node pattern's lumping is held to.
-const SEDAN1_PRINCIPAL_MOMENTS: [f32; 3] = [607.0, 2298.0, 2597.0];
+const SEDAN1_PRINCIPAL_MOMENTS: [f32; 3] = [608.0, 2296.0, 2594.0];
 
 /// A built car's centre of mass (definition coordinates) and inertia: the
 /// three principal moments ascending, then the moments about x, y and z
