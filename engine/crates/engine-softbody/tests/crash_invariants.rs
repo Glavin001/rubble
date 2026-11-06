@@ -1403,6 +1403,38 @@ fn detached_door_takes_its_edge() {
         }
         eprintln!("  bound across the door's shut line at rest: {by:?}");
     }
+    // At rest, no vertex rides a frame across a detachable part's border
+    // without its own part's fallback (deterministic: the binding, not the
+    // pull's dynamics). A body vertex never rides a detachable part's node.
+    let detachable: Vec<u16> = b.hardware.iter().map(|h| h.part).collect();
+    let mut bare_cross: BTreeMap<String, usize> = BTreeMap::new();
+    for (pc, first, count) in &v.pieces {
+        for i in *first..first + count {
+            let parts = v.bind_nodes[i as usize].map(pof);
+            let mixed = parts.iter().any(|&q| q != parts[0]);
+            let det = parts
+                .iter()
+                .any(|q| q.is_some_and(|q| detachable.contains(&q)));
+            if mixed && det && v.alt.get(i as usize).copied().unwrap_or(0) == 0 {
+                let own = v.part[i as usize];
+                let pn = |q: Option<u16>| {
+                    q.and_then(|q| sk.parts.get(q as usize))
+                        .map_or("-", |s| s.as_str())
+                };
+                let foreign: Vec<&str> = parts
+                    .iter()
+                    .filter(|&&q| q != Some(own))
+                    .map(|&q| pn(q))
+                    .collect();
+                *bare_cross
+                    .entry(format!("{pc} on {} via {foreign:?}", pn(Some(own))))
+                    .or_default() += 1;
+            }
+        }
+    }
+    if std::env::var("CI_DEBUG").is_ok() {
+        eprintln!("  across a detachable part's border with no fallback: {bare_cross:?}");
+    }
     // Pulled until it comes off, then let go; sampled every 10 steps for
     // 0.3 s (the shut line's triangles stretch before they tear).
     let (mut t, mut off) = (0.0f32, None);
@@ -1508,6 +1540,10 @@ fn detached_door_takes_its_edge() {
         r1 == 0,
     );
     assert_eq!(r1, 0);
+    assert!(
+        bare_cross.is_empty(),
+        "vertices across a detachable part's border with no fallback: {bare_cross:?}"
+    );
 }
 
 // --- Side ------------------------------------------------------------------------------
