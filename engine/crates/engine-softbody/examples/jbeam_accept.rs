@@ -4,7 +4,7 @@
 //! at `kmh=` (default 56) for `crash=` s.
 //!
 //! ```bash
-//! cargo run --release -p engine-softbody --example jbeam_accept -- <vehicles-dir> <name> <config.pc> [rest=3] [kmh=56] [crash=1.5] [wheels=pressure|soft]
+//! cargo run --release -p engine-softbody --example jbeam_accept -- <vehicles-dir> <name> <config.pc> [rest=3] [kmh=56] [crash=1.5] [wheels=pressure|soft|raycast|hub]
 //! ```
 use engine_softbody::explicit_beams::{
     ExplicitBeams, ExplicitBeamsSettings, JbeamWheels, StaticBox,
@@ -53,22 +53,43 @@ fn main() {
         "out of scope: {:?}",
         engine_softbody::jbeam::out_of_scope_features(&census)
     );
-    let desc = engine_softbody::jbeam::load_jbeam(&files, Some(&pcs)).unwrap();
-    let wheels = if opt("wheels=").as_deref() == Some("soft") {
-        JbeamWheels::Soft(engine_softbody::truck_export::TyreDefaults::for_vehicle(
-            &desc,
-        ))
-    } else {
-        JbeamWheels::Pressure
+    let mut desc = engine_softbody::jbeam::load_jbeam(&files, Some(&pcs)).unwrap();
+    let wheels = match opt("wheels=").as_deref() {
+        Some("soft") => JbeamWheels::Soft(
+            engine_softbody::truck_export::TyreDefaults::for_vehicle(&desc),
+        ),
+        Some("raycast") => JbeamWheels::Raycast,
+        Some("hub") => {
+            // Hubs only: the pressure wheels without their tyres (`hasTire` false).
+            for w in &mut desc.pressure_wheels {
+                w.flags.insert("hasTire".into(), false);
+            }
+            JbeamWheels::Pressure
+        }
+        _ => JbeamWheels::Pressure,
     };
+    let raycast = matches!(wheels, JbeamWheels::Raycast);
     let settings = ExplicitBeamsSettings {
         drag: opt("drag=").is_some(),
         turbulence: false,
         ..Default::default()
     };
     let spawn = |v: Vec3| {
-        let (mut s, w) =
-            ExplicitBeams::from_desc_jbeam_with(&desc, wheels, Vec3::ZERO, v, settings).unwrap();
+        let (mut s, w) = if opt("path=").as_deref() == Some("truck") {
+            // Through the `.truck` export (RoR's rules), on raycast wheels as the
+            // page's drive scenes spawn it without JBeam mode.
+            let (text, w) = engine_softbody::truck_export::desc_to_truck(
+                &desc,
+                engine_softbody::truck_export::TyreDefaults::for_vehicle(&desc),
+            );
+            let (s, _) =
+                ExplicitBeams::from_truck_raycast(&text, None, Vec3::ZERO, 0.0, v, settings).unwrap();
+            (s, w)
+        } else if raycast {
+            ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, v, settings).unwrap()
+        } else {
+            ExplicitBeams::from_desc_jbeam_with(&desc, wheels, Vec3::ZERO, v, settings).unwrap()
+        };
         // Facing +Z (a file can model its car along another axis: the Monster
         // supercar faces −X), so `v` and the wall are along its forward axis.
         let f = engine_softbody::pack::forward_axis(&desc);
@@ -118,6 +139,24 @@ fn main() {
     }
     for w in &warnings {
         println!("warning: {w}");
+    }
+    if opt("couplers=").is_some() {
+        let nm = |i: u32| desc.nodes[i as usize].name.clone();
+        let gn = |g: u32| desc.break_groups.get(g as usize - 1).cloned().unwrap_or_default();
+        for c in &desc.couplers {
+            let d = glam::Vec3::from_array(desc.nodes[c.a as usize].position)
+                .distance(glam::Vec3::from_array(desc.nodes[c.b as usize].position));
+            let gs: Vec<String> = std::iter::once(c.break_group)
+                .chain(c.extra_break_groups)
+                .filter(|&g| g != 0)
+                .map(gn)
+                .collect();
+            println!(
+                "coupler {}-{} d {d:.4} m strength {} groups {gs:?} passive {} masses {} {}",
+                nm(c.a), nm(c.b), c.strength, c.break_group_passive,
+                desc.nodes[c.a as usize].mass, desc.nodes[c.b as usize].mass
+            );
+        }
     }
     let mass: f32 = s.nodes.iter().map(|n| n.mass).sum();
     println!("forward axis {:?}; first axle {:?}", engine_softbody::pack::forward_axis(&desc), s.tyres.first().map(|t| (s.nodes[t.axle[1] as usize].pos - s.nodes[t.axle[0] as usize].pos).normalize()));

@@ -329,3 +329,77 @@ fn torsion_bar_holds_its_angle_and_breaks_with_its_hinge() {
     s.step();
     assert!(s.beams[t].broken && s.beams[t + 1].broken);
 }
+
+/// BeamNG node couplers (spec §7.1) on `jbeam_fixture::NODE_COUPLERS`: which pairs
+/// couple at spawn, their strength and groups; then the lid thrown off the body: the
+/// active latch breaks past its strength and sets off its group, the passive coupler
+/// (unbreakable alone) is broken by its second group's hinge beam.
+#[test]
+fn node_couplers_couple_at_spawn_and_break_by_strength_and_group() {
+    use engine_softbody::jbeam_fixture::NODE_COUPLERS;
+    let d = load_jbeam(&[("nc.jbeam", NODE_COUPLERS)], None).unwrap();
+    let id = |n: &str| node(&d, n);
+    let group = |g: u32| d.break_groups[g as usize - 1].as_str();
+    assert_eq!(d.couplers.len(), 2, "{:?}", d.couplers);
+    let latch = d.couplers.iter().find(|c| c.a == id("lc1")).unwrap();
+    assert_eq!(latch.b, id("bc1"));
+    assert_eq!(latch.strength, 2500.0);
+    assert_eq!(group(latch.break_group), "latch_a");
+    assert!(!latch.break_group_passive);
+    let hinge = d.couplers.iter().find(|c| c.a == id("lc2")).unwrap();
+    assert_eq!(hinge.b, id("bc2"));
+    assert!(hinge.strength.is_infinite());
+    assert!(hinge.break_group_passive);
+    assert_eq!(
+        [group(hinge.break_group), group(hinge.extra_break_groups[0])],
+        ["hinge_l", "hinge_r"]
+    );
+    let warn = d.warnings.join("\n");
+    assert!(
+        warn.contains("1 node couplers have no couplerStartRadius"),
+        "{warn}"
+    );
+    assert!(
+        warn.contains("1 node couplers have no free tag node"),
+        "{warn}"
+    );
+
+    let (mut s, _) = ExplicitBeams::from_desc_jbeam(
+        &d,
+        TyreDefaults::default(),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::ZERO,
+        settings(),
+    )
+    .unwrap();
+    let coupler = |s: &ExplicitBeams, a: &str| {
+        s.beams
+            .iter()
+            .position(|b| b.kind == ExplicitKind::JbeamCoupler && b.a == id(a))
+            .unwrap()
+    };
+    let (jl, jh) = (coupler(&s, "lc1"), coupler(&s, "lc2"));
+    // At rest in free fall nothing breaks.
+    s.run(0.1);
+    assert!(s.beams.iter().all(|b| !b.broken));
+    // Throw the lid up at 3 m/s.
+    let lid = ["l1", "l2", "l3", "l4", "lc1", "lc2", "lc3", "lc4"].map(|n| id(n) as usize);
+    for &i in &lid {
+        s.nodes[i].vel.y += 3.0;
+    }
+    s.run(0.3);
+    let latch_beam = beam(&s, &d, "l2", "b4");
+    let hinge_beam = beam(&s, &d, "l1", "b4");
+    assert!(s.beams[jl].broken, "the latch holds");
+    assert!(
+        s.beams[latch_beam].broken,
+        "the latch's group was not set off"
+    );
+    assert!(s.beams[hinge_beam].broken, "the hinge beam holds");
+    assert!(s.beams[jh].broken, "the passive coupler survived its group");
+    let gap = s.nodes[id("lc2") as usize]
+        .pos
+        .distance(s.nodes[id("bc2") as usize].pos);
+    assert!(gap > 0.2, "the lid did not part: {gap}");
+    assert!(s.nodes.iter().all(|n| n.pos.is_finite()));
+}

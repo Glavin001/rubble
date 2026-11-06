@@ -15,3 +15,6 @@ serde_json.workspace = true
 quick-xml = "0.41"
 # Imported vehicles' textures (flextex.rs: materials.json colour maps).
 png = "0.18"
+
+[dev-dependencies]
+bcdec_rs = "0.2.1"

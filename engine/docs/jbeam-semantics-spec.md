@@ -251,6 +251,45 @@ reduced mass): ω·h = 0.4 and a damping ratio of 0.5, as stiff as the fixed ste
 with margin. It breaks when |F| > strength. The BX's doors, bonnet and boot are held
 by five such latches; without them the boot lid rattled on its supports.
 
+### 7.1 Node couplers (`couplerTag` → `tag`, 2026-11-06) [C]
+
+BeamNG's documented coupler system: a *coupler node* (`couplerTag` t) couples to a
+*tag node* (`tag` t). "Active" nodes move toward each other and merge; a coupler node
+"connects to one tag node at a time", and a tag node to one coupler node.
+`couplerStartRadius` "also sets the coupler to Active after spawn, so nodes in range
+connect immediately"; `couplerRadius` alone needs the coupler toggle (a driver
+input). `couplerStrength` (N, default FLT_MAX): "if the two nodes have different
+values, the lower one applies". `breakGroup` / `breakGroupType` are common node
+arguments: the connection breaks when the group breaks, and a type-0 coupler breaking
+breaks the group. `couplerLock` and `couplerWeld` only protect a coupler from the
+toggle (no physics). `couplerLockRadius` (default 0.025 m) is where connected nodes
+"are treated as one and snap together"; `couplerLatchSpeed` (default 0.3 m/s) the
+approach speed while Active. This is how BeamNG content latches doors, bonnets, boot
+lids, soft tops (the CCF, the Gavril Vertex and the ETK K-series use it; their
+`couplerNodes` controller tables carry no `couplingStartRadius`).
+
+* **Pairing (Choice for order):** coupler nodes with `couplerStartRadius` > 0 in node
+  order, each to the nearest free tag node of its tag within that radius (lowest
+  index on a tie). Others: none coupled (warnings count them: no start radius, no
+  free tag node).
+* **The coupling:** §7's zero-length spring–damper (the nodes "considered one"),
+  the same `JbeamCoupler` record, strength the lower of the two nodes'. A pair an
+  advanced controller already coupled stays one coupling (the lower strength).
+* **Break groups:** the coupler node's `breakGroup` (a name or a table) then the tag
+  node's, at most three (§17), of the coupler node's `breakGroupType` (the tag
+  node's when the coupler node names none). A coupler in more than one group gets an
+  extension record (`EXT_GROUPS`, §17) and its own breaks set its groups off by §17's
+  pending rule; with one group, as §7.
+* **Latching approach not simulated:** every pair in the three cars spawns at 0 m
+  (within `couplerLockRadius`); a pair farther apart is coupled at spawn with a
+  warning naming the largest gap.
+* **Effect:** CCF `f4_sport_M` 4 node couplers (+2 advanced), Vertex 7, ETK `kr6` 7,
+  the hood latches passive in both hinge groups.
+* Tests: `explicit_jbeam.rs` `node_couplers_couple_at_spawn_and_break_by_strength_and_group`
+  (`jbeam_fixture::NODE_COUPLERS`); GPU `explicit_jbeam_ext_gpu.rs`
+  `node_couplers_step_bit_for_bit` (800 steps bit for bit through both kinds of
+  break). Kernel: `jcouplerUpdate`, and a `KIND_JCOUPLER` arm in `jbeamExtUpdate`.
+
 ## 8. Break groups [B], [T], [C], [TB]
 
 * A beam (or coupler, torsion bar) in group g with `breakGroupType` 0 breaks every
@@ -989,6 +1028,10 @@ an arm).
   it to about 1 J. **Open**; the test checks the exact bounds (no energy above the
   2 cm drop's, never off its flat). Coast-down C_rr is unchanged (0.052 / 0.071).
 * The `.truck` path still drops LBEAMs (RoR has none).
+* **The third node in the row's options** (2026-11-06): [L]'s examples write it
+  `["a", "b", {"id3:": "c"}]`, with the header's node-column colon. Inline option
+  keys now drop a trailing `:` (the same field as the header's). Before, the
+  boathauler trailer's 20 suspension LBEAMs were skipped as "LBEAM without id3".
 
 ## 25. Pressure wheels (JBeam mode, opt-in) [WH]
 

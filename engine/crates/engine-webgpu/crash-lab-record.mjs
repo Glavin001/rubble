@@ -31,10 +31,15 @@ const only = args.filter((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWi
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 mkdirSync(OUT, { recursive: true });
-const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', showcase1: 'car=showcase&style=sedan1', etkk: 'mod=/__mods/etkk&pc=etkk/kr6.pc', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
+const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', showcase1: 'car=showcase&style=sedan1',
+  // Community BeamNG cars from a local conversion cache (community_cache: one LOD,
+  // textures at 1K; engine-webgpu/__mods, never committed), on raycast wheels.
+  etkk: 'mod=/__mods/etkk_tex&pc=etkk/kr6.pc&wheels=raycast', ccf: 'mod=/__mods/ccf_tex&pc=ccf/f4_sport_M.pc&wheels=raycast',
+  vertex: 'mod=/__mods/vertex_tex&pc=gavril_vertex/gavril_vertex.pc&wheels=raycast', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
   mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck' };
 if (!CARS[CAR]) throw new Error(`--car: one of ${Object.keys(CARS).join(', ')}`);
-const carFile = CARS[CAR].startsWith('truck=') ? join(LOCAL, CARS[CAR].split('/__local/')[1]) : null;
+const carFile = CARS[CAR].startsWith('truck=') ? join(LOCAL, CARS[CAR].split('/__local/')[1])
+  : CARS[CAR].startsWith('mod=/__mods/') ? join(ROOT, '__mods', CARS[CAR].slice('mod=/__mods/'.length).split('&')[0]) : null;
 if (carFile && !existsSync(carFile)) { console.log(`- ${CAR}: ${carFile} not found, skipped`); process.exit(0); }
 
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };

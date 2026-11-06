@@ -538,6 +538,19 @@ impl ExplicitBeams {
                 self.nodes[n2 as usize].force += f;
                 return;
             }
+            ExplicitKind::JbeamCoupler => {
+                // A coupler in several break groups (spec §7.1): its own breaks set
+                // them off by the pending rule (§17).
+                let (na, nb) = (self.nodes[beam.a as usize], self.nodes[beam.b as usize]);
+                let push = crate::explicit_beams::coupler_force(&mut beam, &na, &nb);
+                self.beams[j] = beam;
+                if beam.broken && beam.group > 0 {
+                    self.beam_ext[x].pending = true;
+                }
+                self.nodes[beam.a as usize].force += push;
+                self.nodes[beam.b as usize].force -= push;
+                return;
+            }
             ExplicitKind::JbeamPressureGroup => {
                 let c = self.nodes[beam.a as usize].pos;
                 let p = pressure_group_gauge(&self.beams, &self.nodes, &self.beam_ext[x], c);
@@ -711,6 +724,19 @@ impl ExplicitBeams {
         ) {
             ext.e2[0] = beam.rest0;
         }
+        self.push_ext(j, ext);
+    }
+
+    /// Coupler `j`'s further break groups (spec §7.1): an extension record with
+    /// only `EXT_GROUPS`, of the coupler's group sign.
+    pub(crate) fn attach_coupler_groups(&mut self, j: usize, extra: [u32; 2]) {
+        let sign = self.beams[j].group.signum();
+        let ext = BeamExt {
+            beam: j as u32,
+            mask: EXT_GROUPS,
+            extra_groups: extra.map(|g| sign * g as i32),
+            ..Default::default()
+        };
         self.push_ext(j, ext);
     }
 

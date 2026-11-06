@@ -2643,6 +2643,10 @@ impl ExplicitBeams {
                 cp.break_group as i32
             };
             s.beams.push(beam);
+            if cp.extra_break_groups != [0, 0] && beam.group != 0 {
+                // Several break groups (spec §7.1, §17): an extension record.
+                s.attach_coupler_groups(s.beams.len() - 1, cp.extra_break_groups);
+            }
         }
         s.add_lbeams(desc);
         let tyres = match wheels {

@@ -193,3 +193,52 @@ pub const PART2_RAIL: &str = r#"
   "slidenodes": [["id:", "railName", "attached", "fixToRail", "tolerance", "spring", "strength", "capStrength"],
                  ["s", "guide", true, true, 0, 100000, "FLT_MAX", "FLT_MAX"]]
 }}"#;
+
+/// Node couplers (`jbeam-semantics-spec.md` §7.1): a lid held on a body by BeamNG
+/// node couplers (a node's `couplerTag` coupling to a node with that `tag`), written
+/// for Rubble. `lc1`: an active latch (strength the lower of the two nodes', 2,500 N)
+/// in group `latch_a`, which also holds the beam l2–b4; `lc2`: a passive coupler
+/// (type 1) with no strength of its own, in the two hinge groups, one held by the
+/// hinge beam l1–b4 (strength 100 N); `lc3`: no `couplerStartRadius` (not Active
+/// at spawn: left uncoupled); `lc4`: no tag node. Both parts are tetrahedra.
+pub const NODE_COUPLERS: &str = r#"{
+"nc_box": {
+    "information": {"name": "Node-coupler box", "authors": "Rubble"},
+    "slotType": "main",
+    "nodes": [
+        ["id", "posX", "posY", "posZ"],
+        {"nodeWeight": 5, "collision": false, "selfCollision": false},
+        ["b1", 0.0, 0.0, 1.0], ["b2", 0.5, 0.0, 1.0], ["b3", 0.0, 0.5, 1.0], ["b4", 0.25, 0.25, 1.4],
+        {"nodeWeight": 2},
+        ["bc1", 0.4, 0.0, 1.3, {"tag": "latch", "couplerStrength": 2500}],
+        ["bc2", 0.0, 0.4, 1.3, {"tag": "hinge"}],
+        ["bc3", 0.2, 0.2, 1.3, {"tag": "toggle"}],
+        {"nodeWeight": 3},
+        ["l1", 0.0, 0.0, 1.6], ["l2", 0.5, 0.0, 1.6], ["l3", 0.0, 0.5, 1.6], ["l4", 0.25, 0.25, 2.0],
+        {"nodeWeight": 2},
+        ["lc1", 0.4, 0.0, 1.3, {"couplerTag": "latch", "couplerStrength": 3000, "couplerStartRadius": 0.01, "couplerLock": true, "breakGroup": "latch_a"}],
+        ["lc2", 0.0, 0.4, 1.3, {"couplerTag": "hinge", "couplerStartRadius": 0.01, "couplerWeld": true, "breakGroupType": 1, "breakGroup": ["hinge_l", "hinge_r"]}],
+        ["lc3", 0.2, 0.2, 1.3, {"couplerTag": "toggle", "couplerRadius": 0.5, "couplerStrength": 1000}],
+        ["lc4", 0.1, 0.1, 1.3, {"couplerTag": "absent", "couplerStartRadius": 0.1}]
+    ],
+    "beams": [
+        ["id1:", "id2:"],
+        {"beamSpring": 1001000, "beamDamp": 100, "beamDeform": "FLT_MAX", "beamStrength": "FLT_MAX"},
+        ["b1", "b2"], ["b1", "b3"], ["b1", "b4"], ["b2", "b3"], ["b2", "b4"], ["b3", "b4"],
+        ["bc1", "b1"], ["bc1", "b2"], ["bc1", "b3"], ["bc1", "b4"],
+        ["bc2", "b1"], ["bc2", "b2"], ["bc2", "b3"], ["bc2", "b4"],
+        ["bc3", "b1"], ["bc3", "b2"], ["bc3", "b3"], ["bc3", "b4"],
+        ["l1", "l2"], ["l1", "l3"], ["l1", "l4"], ["l2", "l3"], ["l2", "l4"], ["l3", "l4"],
+        ["lc1", "l1"], ["lc1", "l2"], ["lc1", "l3"], ["lc1", "l4"],
+        ["lc2", "l1"], ["lc2", "l2"], ["lc2", "l3"], ["lc2", "l4"],
+        ["lc3", "l1"], ["lc3", "l2"], ["lc3", "l3"], ["lc3", "l4"],
+        ["lc4", "l1"], ["lc4", "l2"], ["lc4", "l3"], ["lc4", "l4"],
+        {"beamSpring": 101000, "beamDamp": 20},
+        {"breakGroup": "latch_a"},
+        ["l2", "b4"],
+        {"breakGroup": "hinge_l", "beamStrength": 100},
+        ["l1", "b4"],
+        {"breakGroup": "", "beamStrength": "FLT_MAX"}
+    ]
+}
+}"#;
