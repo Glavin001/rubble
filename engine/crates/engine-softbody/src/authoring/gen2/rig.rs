@@ -69,6 +69,25 @@ pub const ENGINE_MOUNT: f32 = 60e3;
 /// flattened sheet and hub. An estimate from those parts' depths, not a
 /// measured Accord value; `GEN3_COOLING_STACK` sweeps it.
 pub const COOLING_STACK: f32 = 0.08;
+/// How far a block-to-structure stack's stop reaches across the car (m):
+/// a target node more than this off the block's line of travel is not ahead
+/// of it. A stop to a node well to the side engages along a diagonal, pushes
+/// mostly sideways and lets the block slip past it once level (round 6:
+/// the block passed the beam's 0.40 m station, 0.14 m to its side).
+pub const STACK_REACH: f32 = 0.12;
+/// The block's half width (m): its corner nodes' x, and the front bumper
+/// beam's stations on the block's face lines.
+pub const STACK_X: f32 = 0.26;
+
+/// A stop's closure (m) that engages it once the two nodes' separation
+/// along the car (glTF z) is `left`: `d` is their rest offset. The stop's
+/// own length closes from |d| to the hypotenuse of `left` and the offset
+/// across the car.
+pub fn stack_close(d: Vec3, left: f32) -> f32 {
+    let across = Vec3::new(d.x, d.y, 0.0).length();
+    d.length() - (across * across + left * left).sqrt()
+}
+
 /// A front wheel's hub centre to the hinge pillar once its tyre is crushed
 /// onto the rim (m): the 16-inch rim's 0.20 m radius plus 3 cm of flattened
 /// tyre and brake hardware.
@@ -1039,7 +1058,7 @@ pub fn rig(model: &Model) -> Rig {
         let mut ids = Vec::new();
         for (kz, &z) in pt_z.iter().enumerate() {
             for (ky, &y) in [0.38f32, 0.78].iter().enumerate() {
-                for (kx, &xx) in [0.26f32, -0.26].iter().enumerate() {
+                for (kx, &xx) in [STACK_X, -STACK_X].iter().enumerate() {
                     ids.push(r.node(
                         &format!("e{kz}{ky}{kx}"),
                         Vec3::new(xx, y, z),
@@ -1100,7 +1119,11 @@ pub fn rig(model: &Model) -> Rig {
             let j = r.car.beam(e, t, Role::Stop, body);
             r.car.beams[j].role = Role::Stop;
             if !old_pt {
-                r.car.stop_close.insert(j, dash_gap);
+                // Round 6: the gap closes along the car (see the front stack).
+                let d = g - r.g(t);
+                r.car
+                    .stop_close
+                    .insert(j, stack_close(d, (d.z - dash_gap).max(0.01)));
             }
         }
     }
@@ -1529,7 +1552,15 @@ pub fn rig(model: &Model) -> Rig {
         let bz =
             |x: f32| face - (0.13 + 0.10 * (x / 0.75).powi(2)) * if front { 1.0 } else { -1.0 };
         let mut beam = Vec::new();
-        for (k, &xx) in [-0.72f32, -0.40, 0.0, 0.40, 0.72].iter().enumerate() {
+        // Round 6: the front beam has a station on each of the block's
+        // face lines (x = ±STACK_X), so the cooling stack's stops push
+        // straight along the car (see the front stack).
+        let stations: &[f32] = if front && std::env::var("GEN3_OLD_BEAM").is_err() {
+            &[-0.72, -0.40, -STACK_X, 0.0, STACK_X, 0.40, 0.72]
+        } else {
+            &[-0.72, -0.40, 0.0, 0.40, 0.72]
+        };
+        for (k, &xx) in stations.iter().enumerate() {
             for (kh, &y) in [0.40f32, 0.56].iter().enumerate() {
                 beam.push(r.node(
                     &format!("{tag}_b{kh}{k}"),
@@ -1613,18 +1644,38 @@ pub fn rig(model: &Model) -> Rig {
             .copied()
             .filter(|&e| r.g(e).z > pt_z[2] - 0.05)
             .collect();
+        // Round 6: the stack closes along the car. The stop engages when the
+        // block's face is `stack` behind the beam node, whatever the node's
+        // offset across the car (round 5 closed the stop's own length to
+        // `stack`, which a node 0.14-0.29 m to the side never reaches: the
+        // block passed the beam and the stop never engaged). Targets are the
+        // beam nodes most nearly ahead (least offset across the car), within
+        // the beam's own depth of the block's line ([`STACK_REACH`]): the
+        // block's lower front meets the beam; its top, above the beam, meets
+        // only the radiator's top and the tie bar's sheet.
+        let beam_nodes: Vec<usize> = (0..r.car.nodes.len())
+            .filter(|&i| {
+                r.car.nodes[i].part == Part::BumperF && r.member[i] == Some(Role::BumperBeam)
+            })
+            .collect();
         for &e in &front_eng {
             let g = r.g(e);
-            for t in r.nearest(Part::BumperF, g, 2, |i| {
-                r.member[i] == Some(Role::BumperBeam)
-            }) {
-                let l = r.g(t).distance(g);
-                if l <= stack + 0.02 {
-                    continue;
-                }
+            let mut ahead: Vec<(f32, usize)> = beam_nodes
+                .iter()
+                .map(|&t| {
+                    let d = r.g(t) - g;
+                    (Vec3::new(d.x, d.y, 0.0).length(), t)
+                })
+                .filter(|&(p, t)| {
+                    p <= env_f("GEN3_STACK_REACH", STACK_REACH) && r.g(t).z - g.z > stack + 0.02
+                })
+                .collect();
+            ahead.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for &(_, t) in ahead.iter().take(2) {
+                let d = r.g(t) - g;
                 let j = r.car.beam(e, t, Role::Stop, body);
                 r.car.beams[j].role = Role::Stop;
-                r.car.stop_close.insert(j, l - stack);
+                r.car.stop_close.insert(j, stack_close(d, stack));
             }
         }
     }
@@ -2242,6 +2293,36 @@ pub fn rig(model: &Model) -> Rig {
         }
     }
 
+    // Round 6: the block's front face as collision triangles, and the front
+    // bumper beam's nodes as self-collision contacters against them. The
+    // cooling stack's stops are point to point: once the block pitches down
+    // under its mounts and the beam rides up on the wall (6 and 5 cm by
+    // 50 ms), the block's lower corner passes under the beam node it was
+    // aimed at and the stop never engages. A face meets the beam wherever
+    // the two are across the car and up the block (0.52 m by 0.40 m).
+    let engine_face = std::env::var("GEN3_NO_ENGINE_FACE").is_err();
+    if engine_face && !old_pt {
+        let id = |r: &Rig, n: &str| r.car.id(n);
+        let (a, b, c, d) = (
+            id(&r, "e200"),
+            id(&r, "e201"),
+            id(&r, "e211"),
+            id(&r, "e210"),
+        );
+        for t in [[a, b, c], [a, c, d]] {
+            let (pa, pb, pc) = (r.car.p(t[0]), r.car.p(t[1]), r.car.p(t[2]));
+            // Facing forward (JBeam −y), toward the beam.
+            let n = if (pb - pa).cross(pc - pa).y < 0.0 {
+                t
+            } else {
+                [t[0], t[2], t[1]]
+            };
+            r.car.tris.push(Tri {
+                n,
+                part: Part::Engine,
+            });
+        }
+    }
     // Self-collision: skin nodes, engine, rims.
     let mut on_tri = vec![false; r.car.nodes.len()];
     for t in &r.car.tris {
@@ -2257,6 +2338,13 @@ pub fn rig(model: &Model) -> Rig {
             && !nd.contact
             && std::env::var("GEN3_NOSELF").is_err()
             && std::env::var("GEN3_NOSELF_PART").map_or(true, |p| !nd.name.contains(&p));
+    }
+    if engine_face && !old_pt {
+        for i in 0..r.car.nodes.len() {
+            if r.car.nodes[i].part == Part::BumperF && r.member[i] == Some(Role::BumperBeam) {
+                r.car.nodes[i].self_collision = true;
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -2430,6 +2518,13 @@ pub fn rig(model: &Model) -> Rig {
         r.car.id("slt1L"),
         r.car.id("rc1"),
     ];
+    // Round 6: the front rails' graded sections (their gauge, [`RAIL_ZONES`])
+    // before the springs; their yields follow in the zone pass.
+    for j in 0..r.car.beams.len() {
+        if let Some(z) = rail_zone(&r.car, &r.car.beams[j]) {
+            r.car.beams[j].section = zone_section(z);
+        }
+    }
     let hub = hub_extra(&r.car);
     r.car.assign_springs(&hub);
     // Zones: the crush zones' members stack (deformLimit) and carry the crush
@@ -2513,7 +2608,42 @@ pub fn rig(model: &Model) -> Rig {
         let t = ((fw_y - y) / (fw_y - nose_y).max(1e-3)).clamp(0.0, 1.0);
         gr + (gf - gr) * t
     };
-    for b in &mut r.car.beams {
+    let zones: Vec<Option<usize>> = r.car.beams.iter().map(|b| rail_zone(&r.car, b)).collect();
+    let zone_at = |z: f32| -> usize {
+        if z > 1.69 {
+            1
+        } else if z > 1.31 {
+            2
+        } else {
+            3
+        }
+    };
+    // Round 6: the whole front grades by station, not only the rails.
+    // - The body's shut-line edge ties ahead of the dash (the radiator
+    //   support's, the aprons' and the lamp surrounds' flanges) kept the
+    //   census sheet yield, 4.3 times the rails': in the wall they took
+    //   21 kJ (ebody-rh, ar-ebody) of 114 kJ plastic work, half of it by
+    //   20 ms, a stiff front along its whole length. They take their
+    //   station's rail yield (`GEN3_NO_EDGE_ZONE` keeps the census's).
+    // - The towers' yield floor ([`TOWER_YIELD`]) holds only at the tower:
+    //   a member from the radiator support or the apron's tip back to the
+    //   tower (rsu-tw, ar3-tw, mid more than 0.235 m ahead of the axle) is
+    //   the upper load path's front, and takes its station's yield
+    //   (`GEN3_TOWER_ALL` keeps the floor on every tower member).
+    let edge_zone = std::env::var("GEN3_NO_EDGE_ZONE").is_err();
+    let tower_near = std::env::var("GEN3_TOWER_ALL").is_err();
+    if edge_zone {
+        for b in r.car.beams.iter_mut() {
+            if b.part != body || b.role != Role::EdgeTie || !b.deform.is_finite() {
+                continue;
+            }
+            let g = to_gltf(0.5 * (r.car.nodes[b.a].p + r.car.nodes[b.b].p));
+            if g.z > 0.88 - 0.05 {
+                b.deform *= cy * zone_yield(zone_at(g.z));
+            }
+        }
+    }
+    for (j, b) in r.car.beams.iter_mut().enumerate() {
         if !b.deform.is_finite()
             || b.break_group.is_some()
             || matches!(
@@ -2550,8 +2680,15 @@ pub fn rig(model: &Model) -> Rig {
                 let n = &r.car.nodes[i].name;
                 n.starts_with("tw") || n.starts_with("wh") || n.starts_with("hpf")
             };
-            b.deform *= if tower(b.a) || tower(b.b) {
+            let gz = to_gltf(mid).z;
+            b.deform *= if (tower(b.a) || tower(b.b)) && tower_near && gz > 1.65 && mid.y < fw_y {
+                cy * zone_yield(zone_at(gz))
+            } else if tower(b.a) || tower(b.b) {
                 cy.max(env("GEN3_TOWER_Y", TOWER_YIELD))
+            } else if let Some(z) = zones[j] {
+                // Round 6: the rail's graded gauge and grade by station
+                // (its spring already carries the gauge, [`RAIL_ZONES`]).
+                cy * zone_yield(z)
             } else if mid.y < fw_y - 0.05 {
                 cy * front_grade(mid.y)
             } else {
@@ -2686,7 +2823,13 @@ pub fn rig(model: &Model) -> Rig {
 /// Round 5 (push links, stacks, the hinge pillar's joints at the towers'
 /// yield): 620 mm at 0.25, 625 at 0.24, 629 at 0.23; b1 39.4 / 38.6 / 38.6;
 /// restitution 0.201 / 0.207 / 0.202 (each ±0.005 run to run of the yield).
-pub const CRUSH_YIELD: f32 = 0.23;
+/// Round 6 (the front graded by station, [`RAIL_ZONES`]; this is the tip's):
+/// at 0.25 / 0.26 / 0.27 / 0.28: peak 35.7 / 34.4 / 32.3 / 30.2 g (34-47),
+/// crush 657 / 651 / 645 / 637 mm, b1 36.9 / 37.5 / 41.4 / 41.5 (<= 39.2),
+/// restitution 0.193 / 0.193 / 0.191 / 0.218, residual max 581 / 577 /
+/// 425 / 418 mm (380-580: it falls either near 430 or near 580, one zone
+/// folding or not, ±0.01 of the yield).
+pub const CRUSH_YIELD: f32 = 0.26;
 /// The suspension towers' beams in the crush zone (see the zone pass).
 pub const TOWER_YIELD: f32 = 0.4;
 /// The footwell's (floor, sills, hinge pillars and firewall ahead of the
@@ -2715,6 +2858,86 @@ pub const CROSS_MEMBER_YIELD: f32 = 3.0;
 /// The front crush zone's yield grade, nose and firewall, on its yield
 /// (1, 1: ungraded; calibrated in round 5 on the pulse's bands).
 pub const CRUSH_GRADE: [f32; 2] = [1.0, 1.0];
+
+/// Round 6: the front rails' gauge (mm) and yield grade (MPa) from the nose
+/// back, the same for the lower rails, the upper rails (aprons) and their
+/// webs: the crush cans (triggered, the softest), the tip (bumper to the
+/// block's front), the section to the strut tower (a tailor-welded gauge
+/// step) and the kick-down behind the tower under the dash (reinforced).
+/// The grades are the Accord body's (270/340/440/980 MPa, DOT HS 811 666
+/// fig. 140); the gauges are the usual mid-size sedan rail's (1.4-2.0 mm),
+/// not measured on an Accord. A thin-walled section folding progressively
+/// carries a mean force ∝ σ_y·t^(5/3) (Wierzbicki and Abramowicz), and its
+/// spring ∝ t: the section scales the spring by t/1.6 and the yield strain
+/// by (σ/440)·(t/1.6)^(2/3), so the yield force goes as σ·t^(5/3). The tip
+/// is the reference: [`CRUSH_YIELD`] is its yield. Force over the tip's:
+/// cans 0.62, tip 1, tower 1.45, kick-down 1.95.
+pub const RAIL_ZONES: [(f32, f32); 4] = [(1.4, 340.0), (1.6, 440.0), (2.0, 440.0), (2.0, 590.0)];
+
+/// A rail station's name (`rl2L`, `rh0R`, `ar3L`).
+fn rail_node(n: &str) -> bool {
+    let t = n.trim_end_matches(['L', 'R']);
+    ["rl", "rh", "ar"].iter().any(|p| {
+        t.strip_prefix(p)
+            .is_some_and(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
+/// The [`RAIL_ZONES`] zone of a front rail member (0 cans, 1 tip, 2 to the
+/// tower, 3 the kick-down), or none: a body member with a rail station at
+/// one end (or a front crush can), ahead of the dash, not a suspension tower's.
+pub fn rail_zone(car: &Car, b: &Beam) -> Option<usize> {
+    if b.part != Part::Body || b.break_group.is_some() {
+        return None;
+    }
+    let mid = to_gltf(0.5 * (car.nodes[b.a].p + car.nodes[b.b].p));
+    if mid.z < 0.88 - 0.05 {
+        return None;
+    }
+    if b.role == Role::CrushCan {
+        return Some(0);
+    }
+    if !matches!(b.role, Role::Rail | Role::Apron | Role::Web | Role::Cross) {
+        return None;
+    }
+    let (na, nb) = (&car.nodes[b.a].name, &car.nodes[b.b].name);
+    let tower = |n: &str| n.starts_with("tw") || n.starts_with("wh") || n.starts_with("hpf");
+    if tower(na) || tower(nb) || !(rail_node(na) || rail_node(nb)) {
+        return None;
+    }
+    Some(if mid.z > 1.69 {
+        1
+    } else if mid.z > 1.31 {
+        2
+    } else {
+        3
+    })
+}
+
+fn zone_env(z: usize) -> f32 {
+    std::env::var(format!("GEN3_ZONE{z}_Y"))
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(1.0)
+}
+
+/// A zone's spring over the tip's (its gauge over 1.6 mm).
+pub fn zone_section(z: usize) -> f32 {
+    if std::env::var("GEN3_NO_ZONES").is_ok() {
+        return 1.0;
+    }
+    RAIL_ZONES[z].0 / RAIL_ZONES[1].0
+}
+
+/// A zone's yield strain over the tip's (`GEN3_ZONE<z>_Y` multiplies it).
+pub fn zone_yield(z: usize) -> f32 {
+    if std::env::var("GEN3_NO_ZONES").is_ok() {
+        return 1.0;
+    }
+    let (t, s) = RAIL_ZONES[z];
+    let (t0, s0) = RAIL_ZONES[1];
+    zone_env(z) * (s / s0) * (t / t0).powf(2.0 / 3.0)
+}
 /// The floor pan's (the floor between the cross members and its diagonals):
 /// 0.7 mm sheet, which buckles in plane (`GEN3_PAN_Y`).
 pub const FLOOR_PAN_YIELD: f32 = 0.3;

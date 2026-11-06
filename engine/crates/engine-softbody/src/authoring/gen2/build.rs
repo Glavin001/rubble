@@ -392,6 +392,9 @@ pub struct Beam {
     pub break_group: Option<String>,
     /// JBeam deformLimit (compression: L ≥ (1 − d)·L₀), 0 for none.
     pub deform_limit: f32,
+    /// The member's section as a multiple of its role's (its spring: a
+    /// thicker gauge, round 6's graded rails), set before the springs.
+    pub section: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -511,6 +514,7 @@ impl Car {
             strength: sp.strength,
             break_group: None,
             deform_limit: 0.0,
+            section: 1.0,
         });
         let j = self.beams.len() - 1;
         self.pair.insert(key, j);
@@ -1008,11 +1012,12 @@ impl Car {
             .zip(&len)
             .map(|(b, &l)| {
                 let sp = b.role.spec(b.part);
-                mult * if sp.k_fixed > 0.0 {
-                    sp.k_fixed
-                } else {
-                    sp.kl / l.max(SPRING_LENGTH)
-                }
+                mult * b.section
+                    * if sp.k_fixed > 0.0 {
+                        sp.k_fixed
+                    } else {
+                        sp.kl / l.max(SPRING_LENGTH)
+                    }
             })
             .collect();
         let damp = |k: f32, b: &Beam| 2.0 * ZETA * (k * mu(b)).sqrt();
@@ -1200,6 +1205,41 @@ impl Car {
                 let edge = matches!(self.beams[j].role, Role::EdgeTie | Role::EdgeStop);
                 if e[j] >= 0.25 * emax && (edge || !edge_first) {
                     ks[j] *= 0.97;
+                }
+            }
+        }
+        // Round 6: a contact-only (lane) node's own bound in any geometry.
+        // Its ties spread in 3-D at rest, but a platen or pole pressing it
+        // into its backing lines them up, and then its stiffness along that
+        // line is up to the sum of its ties' (Gershgorin, each tie's far node
+        // free). The roof's platen drove xbody47 (0.15 kg, ties summing
+        // 3.9e6 N/m: ω·h 2.6 aligned) unstable; the power iteration above
+        // sees only the rest geometry's modes. Its ties are scaled so the
+        // aligned bound holds too (`GEN3_NO_LANE_BOUND` skips it).
+        if std::env::var("GEN3_NO_LANE_BOUND").is_err() {
+            let limit = if centred { OMEGA_H_CENTRED } else { OMEGA_H };
+            for i in 0..n {
+                if !self.nodes[i].contact {
+                    continue;
+                }
+                let w2: f32 = adj[i]
+                    .iter()
+                    .map(|&j| {
+                        let b = &self.beams[j];
+                        let o = if b.a == i { b.b } else { b.a };
+                        let c = if centred {
+                            0.0
+                        } else {
+                            2.0 * damp(ks[j], b) / H
+                        };
+                        (ks[j] + c) * (1.0 / m[i] + 1.0 / m[o]) * H * H
+                    })
+                    .sum();
+                if w2 > limit * limit {
+                    let f = limit * limit / w2;
+                    for &j in &adj[i] {
+                        ks[j] *= f;
+                    }
                 }
             }
         }

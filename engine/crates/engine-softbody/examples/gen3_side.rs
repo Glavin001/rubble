@@ -5,6 +5,8 @@
 //! ```bash
 //! SURFACE_CONTACT=1 cargo run --release -p engine-softbody --example gen3_side -- [car] [offset_m ...]
 //! ```
+//! `SIDE_S` sets the run length (s, default 1.5, the harness's). The pole's
+//! line (the driver's head) is printed against the car's centre of mass.
 use engine_softbody::vehicle_compare::{default_manifest, scene_mdb, scene_pole_at, Car, Manifest};
 
 fn main() -> Result<(), String> {
@@ -14,6 +16,10 @@ fn main() -> Result<(), String> {
     if dz.is_empty() {
         dz = vec![-0.10, -0.05, 0.0, 0.05, 0.10];
     }
+    let secs: f32 = std::env::var("SIDE_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.5);
     let m: Manifest = serde_json::from_str(
         &std::fs::read_to_string(default_manifest()).map_err(|e| e.to_string())?,
     )
@@ -24,12 +30,23 @@ fn main() -> Result<(), String> {
         .find(|c| c.name == name)
         .ok_or("no such car")?;
     let car = Car::load(spec)?;
+    let s = &car.template;
+    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let cg = s.nodes.iter().map(|n| n.pos * n.mass).sum::<glam::Vec3>() / total;
+    let f = car.frame;
+    let head = f.front_axle - 0.64 * (f.front_axle - f.rear_axle);
+    println!(
+        "{name}: head line {:.3} m, centre of mass {:.3} m along the car (the line {:+.3} m ahead of it); {secs} s",
+        head,
+        cg.z,
+        head - cg.z
+    );
     let (poles, mdb) = std::thread::scope(|sc| {
         let hs: Vec<_> = dz
             .iter()
             .map(|&d| {
                 let car = &car;
-                sc.spawn(move || scene_pole_at(car, 32.0, 1.5, d))
+                sc.spawn(move || scene_pole_at(car, 32.0, secs, d))
             })
             .collect();
         let mdb = sc.spawn(|| scene_mdb(&car, 1.5));
@@ -45,8 +62,8 @@ fn main() -> Result<(), String> {
         let r = p["residual_crush_mm"].as_f64().unwrap_or(f64::NAN);
         sum += r;
         println!(
-            "pole {d:+.2} m: residual {r} mm, dynamic {} mm, slide {} mm",
-            p["dynamic_crush_mm"], p["pole_slide_mm"]
+            "pole {d:+.2} m: residual {r} mm, dynamic {} mm, slide {} mm, imprint {} mm",
+            p["dynamic_crush_mm"], p["pole_slide_mm"], p["residual_crush_imprint_mm"]
         );
     }
     println!(

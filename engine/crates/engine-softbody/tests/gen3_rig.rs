@@ -195,7 +195,13 @@ fn rest_fidelity_at_spawn_and_parked() {
     println!("spawn: vertex {e0:.4} mm, normal {a0:.4}°");
     assert!(e0 <= 1.0 && a0 <= 1.0, "spawn: {e0} mm, {a0}°");
     lift(&mut l.sim);
-    park(&mut l.sim, 10.0);
+    park(
+        &mut l.sim,
+        std::env::var("GEN3_PARK_S")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10.0),
+    );
     let (e1, a1, e1a, a1a) = fidelity(&l.vis, &positions(&l.sim));
     println!("parked 10 s: vertex {e1:.3} mm, normal {a1:.3}° about its nodes' motion ({e1a:.1} mm, {a1a:.2}° absolute)");
     assert!(e1 <= 1.0 && a1 <= 1.0, "parked: {e1} mm, {a1}°");

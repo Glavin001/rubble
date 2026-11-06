@@ -1987,6 +1987,15 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
             rebound = rebound.max(-v);
         }
         let ts = steps_after as f32 * STEP;
+        // `WALL_DEBUG`: the plastic work by member every 10 ms, and the force.
+        if steps_after % 20 == 0 && steps_after <= 160 && std::env::var("WALL_DEBUG").is_ok() {
+            eprintln!(
+                "  wall {:.0} ms: force {:.0} kN; plastic {}",
+                ts * 1e3,
+                force.iter().rev().take(20).sum::<f32>() / 20e3,
+                plastic_by_member(car, s, 14)
+            );
+        }
         if steps_after % 10 == 0 {
             intr.sample(s);
             if let Some(l) = &w.ledger {
@@ -2129,6 +2138,56 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     })
 }
 
+/// The plastic work so far by member (node-name stems without side or
+/// station, an upper estimate: yield force times the rest length's change),
+/// its total and the `top` largest (`SIDE_DEBUG`, `WALL_DEBUG`).
+pub fn plastic_by_member(car: &Car, s: &ExplicitBeams, top: usize) -> String {
+    let stem = |i: u32| -> String {
+        let n = car.node_name(i as usize);
+        let n = n.trim_end_matches(['L', 'R']);
+        let n: String = n.chars().filter(|c| !c.is_ascii_digit()).collect();
+        n.trim_end_matches(['L', 'R']).to_string()
+    };
+    let mut by: std::collections::BTreeMap<String, f64> = Default::default();
+    for b in s.beams.iter().filter(|b| b.a != b.b && !b.broken) {
+        let dr = (b.rest - b.rest0) as f64;
+        let fy = if dr < 0.0 { b.tc } else { b.tt } as f64;
+        if !fy.is_finite() || dr == 0.0 {
+            continue;
+        }
+        let (mut a, mut c) = (stem(b.a), stem(b.b));
+        if a > c {
+            std::mem::swap(&mut a, &mut c);
+        }
+        *by.entry(format!("{a}-{c}")).or_default() += fy * dr.abs();
+    }
+    let mut v: Vec<(String, f64)> = by.into_iter().collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let tot: f64 = v.iter().map(|x| x.1).sum();
+    format!(
+        "{:.1} kJ: {}",
+        tot / 1e3,
+        v.iter()
+            .take(top)
+            .map(|(k, e)| format!("{k} {:.2}", e / 1e3))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The oblique pole's impact reference line aft of the front axle, as a
+/// share of the wheelbase. NHTSA's 2018 Honda Accord pole tests (TP-214P,
+/// reports v10841 and v10842): 1,303 and 1,313 mm of a 2,819-2,820 mm
+/// wheelbase, 0.10 m behind the test weight's centre of mass. (A 2020
+/// Veloster: 0.50; a 2024 Nautilus: 0.45.) Round 5's harness used the
+/// generic head point, 0.64 of the wheelbase: 0.5 m behind gen3's centre of
+/// mass, so the 75° impulse spun the car about the pole.
+pub const POLE_LINE: f32 = 0.464;
+/// The carriage's friction under the tyres: the car rides the test's
+/// platform on low-friction pads (PTFE on steel, μ 0.04-0.10), towed into
+/// the pole with its wheels not turning.
+pub const CARRIAGE_MU: f32 = 0.1;
+
 /// FMVSS 214's oblique pole (32 km/h, 75°, 254 mm) at the driver's head:
 /// residual and dynamic crush at the pole, intrusion, damage, visual.
 pub fn scene_pole(car: &Car, kmh: f32, seconds: f32) -> Value {
@@ -2145,14 +2204,38 @@ pub fn scene_pole_at(car: &Car, kmh: f32, seconds: f32, dz: f32) -> Value {
     let dir = Vec3::new(a.sin(), 0.0, a.cos());
     let mut s = car.template.clone();
     let rest = positions(&s);
-    set_moving(&mut s, dir * kmh / 3.6);
+    let old = std::env::var("POLE_OLD").is_ok();
     let r = 0.127;
-    let head = occupant_points(&f)
-        .iter()
-        .find(|p| p.0 == "head")
-        .unwrap()
-        .1;
+    let head = if old {
+        occupant_points(&f)
+            .iter()
+            .find(|p| p.0 == "head")
+            .unwrap()
+            .1
+    } else {
+        // The impact reference line (the driver dummy's head CG), as the
+        // NHTSA tests measured it on a 2018 Accord: [`POLE_LINE`] of the
+        // wheelbase aft of the front axle.
+        Vec3::new(0.37, 0.0, f.front_axle - POLE_LINE * f.wheelbase())
+    };
     let head = Vec3::new(head.x, 0.0, head.z + dz);
+    if old {
+        set_moving(&mut s, dir * kmh / 3.6);
+    } else {
+        // On the carriage: every node at the test velocity, the wheels not
+        // turning, the tyres on the carriage's low-friction pads
+        // ([`CARRIAGE_MU`]).
+        for n in &mut s.nodes {
+            n.vel = if n.flags & NODE_IMMOVABLE != 0 {
+                Vec3::ZERO
+            } else {
+                dir * kmh / 3.6
+            };
+            if n.flags & NODE_TYRE != 0 {
+                n.friction = n.friction.min(CARRIAGE_MU);
+            }
+        }
+    }
     let gap = |c: Vec3| {
         s.nodes
             .iter()
@@ -2333,6 +2416,25 @@ fn side_run(
                 let now = positions(car_s);
                 let fit = rigid_fit(&rest, &now, &far);
                 pole_reach = pole_reach.max(reach - (fit.to_rest(c).x - 0.127));
+                // `POLE_TRACE`: every 50 ms the pole in the far side's frame,
+                // the car's yaw and its centre of mass's velocity.
+                if k % 100 == 99 && std::env::var("POLE_TRACE").is_ok() {
+                    let q = fit.to_rest(c);
+                    let fwd = fit.r.transpose() * glam::DVec3::Z;
+                    let m: f32 = car_s.nodes.iter().map(|n| n.mass).sum();
+                    let v = car_s.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m;
+                    eprintln!(
+                        "  pole {:.0} ms: pole at x {:.3} z {:.3} (car frame), yaw {:.1}°, v ({:.2}, {:.2}, {:.2}) m/s, crush {:.0} mm",
+                        (k + 1) as f32 * STEP * 1e3,
+                        q.x,
+                        q.z,
+                        fwd.x.atan2(fwd.z).to_degrees(),
+                        v.x,
+                        v.y,
+                        v.z,
+                        c_now * 1e3
+                    );
+                }
             }
             intr.sample(car_s);
         }
@@ -2372,37 +2474,7 @@ fn side_run(
     // `SIDE_DEBUG`: the struck nodes with the most residual crush, and the
     // plastic work by member (node-name stems, an upper estimate).
     if std::env::var("SIDE_DEBUG").is_ok() {
-        let stem = |i: u32| -> String {
-            let n = car.node_name(i as usize);
-            let n = n.trim_end_matches(['L', 'R']);
-            let n: String = n.chars().filter(|c| !c.is_ascii_digit()).collect();
-            n.trim_end_matches(['L', 'R']).to_string()
-        };
-        let mut by: std::collections::BTreeMap<String, f64> = Default::default();
-        for b in s.beams.iter().filter(|b| b.a != b.b && !b.broken) {
-            let dr = (b.rest - b.rest0) as f64;
-            let fy = if dr < 0.0 { b.tc } else { b.tt } as f64;
-            if !fy.is_finite() || dr == 0.0 {
-                continue;
-            }
-            let (mut a, mut c) = (stem(b.a), stem(b.b));
-            if a > c {
-                std::mem::swap(&mut a, &mut c);
-            }
-            *by.entry(format!("{a}-{c}")).or_default() += fy * dr.abs();
-        }
-        let mut v: Vec<(String, f64)> = by.into_iter().collect();
-        v.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let tot: f64 = v.iter().map(|x| x.1).sum();
-        eprintln!(
-            "  side plastic {:.1} kJ: {}",
-            tot / 1e3,
-            v.iter()
-                .take(16)
-                .map(|(k, e)| format!("{k} {:.2}", e / 1e3))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        eprintln!("  side plastic {}", plastic_by_member(car, s, 16));
         let now = positions(s);
         let fit = rigid_fit(&rest, &now, &far);
         let mut v: Vec<(f32, u32)> = struck
