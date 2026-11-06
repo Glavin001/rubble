@@ -1319,9 +1319,8 @@ hinge groups by name (`crash_invariants.rs` `community_part`). Tests:
 | Whole car broken in the wall / head-on / pole | 2 / 1 / 17 | 143 / 124 / 4 | 26 / 4 / 8 | |
 
 ¹ The side-pole measure found no struck node near the pole on the CCF and the
-Vertex (a residual of 0 mm at node 0): their B-pillar pick (`pillar_b`, by the
-left front door's rear edge) puts the pole's aim off the car. To be fixed
-before these numbers are read. ² The ETK is a soft-top roadster: the roof crush
+Vertex (a residual of 0 mm at node 0), also with B-pillar picks of 6 and 10
+nodes: the measure's own node search fails on these cars (open). Not read. ² The ETK is a soft-top roadster: the roof crush
 loads its windscreen frame and roll hoops.
 
 What they show: like the BX, BeamNG's community content is stiff in the frontal
