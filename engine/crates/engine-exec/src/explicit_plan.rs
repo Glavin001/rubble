@@ -165,7 +165,7 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-pub const PARAM_WORDS: usize = 80;
+pub const PARAM_WORDS: usize = 84;
 /// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
 pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer.
@@ -534,7 +534,15 @@ impl ExplicitUpload {
         // triangle by owner vehicle (10 bits) and index (20 bits).
         let any_anti = vehicles.iter().any(|v| v.anti_clip);
         // Dissipative contact's position steps (§37) on every vehicle of the upload.
-        let any_shift = vehicles.iter().any(|v| v.dissipative_contact);
+        // (Surface contact's position steps too, §38.)
+        let any_shift = vehicles.iter().any(|v| v.dissipative_contact || v.surface_contact);
+        let any_surface = vehicles.iter().any(|v| v.surface_contact);
+        if any_surface {
+            assert!(
+                coupling.is_none(),
+                "explicit vehicles: surface contact (jbeam-semantics-spec.md §38) runs against static boxes and shapes on the GPU; with rigid proxies it is the CPU reference's only (ExplicitBeams::rigid)"
+            );
+        }
         if any_anti {
             assert!(
                 nv < engine_softbody::explicit_contact::CLIP_SELF as usize,
@@ -708,7 +716,8 @@ impl ExplicitUpload {
                 | (!v.plastic_strength_drop as u32) << 13
                 | (v.exact_friction as u32) << 14
                 | (v.dissipative_contact as u32) << 15
-                | (any_shift as u32) << 16;
+                | (any_shift as u32) << 16
+                | (v.surface_contact as u32) << 17;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1268,6 +1277,14 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // Surface contact (§38): per node its force at the surface pass's start.
+        let surf_snap = if any_surface {
+            let at = beams.len() as u32;
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
+            at
+        } else {
+            0
+        };
         // The tread contact (jbeam-semantics-spec.md §34): per node (z, the depth
         // the step before, 0, 0) for every vehicle when any has tread nodes.
         let tread_state = if vehicles.iter().any(|v| !v.tread.is_empty()) {
@@ -1455,6 +1472,14 @@ impl ExplicitUpload {
         } else {
             (0, 0)
         };
+        // Surface contact (§38): per node its hit count this step.
+        let surf_split = if any_surface {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, total_nodes));
+            at
+        } else {
+            0
+        };
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -1608,6 +1633,8 @@ impl ExplicitUpload {
             self_split,
             clip_mem,
             clip_vmax,
+            surf_snap,
+            surf_split,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -1619,7 +1646,8 @@ impl ExplicitUpload {
         ];
         // The wide passes do not run wings, the fuselage drag, commands or shocks2.
         // Raycast wheels run in the vehicle workgroups only.
-        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none();
+        // (Surface contact runs in the frame modules: not in the wide passes.)
+        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none() && !any_surface;
         // Every vehicle must have run the same steps for the wide passes (one
         // step parity for the group slots).
         let same_steps = vehicles.windows(2).all(|w| w[0].steps == w[1].steps);

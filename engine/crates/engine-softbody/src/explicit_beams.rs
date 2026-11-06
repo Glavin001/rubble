@@ -953,6 +953,14 @@ pub struct ExplicitBeams {
     /// Vehicle contact takes it when the owner or the partner has it. Off: RoR's
     /// rule.
     pub dissipative_contact: bool,
+    /// Surface contact (opt-in, jbeam-semantics-spec.md §38;
+    /// [`crate::explicit_surface`]): the collision triangles meet the static boxes and
+    /// shapes and the rigid proxies by their surface (edges and faces), beside node
+    /// contact, with the two-body dissipative rule in the vehicle's band. Off (the
+    /// default): node contact only, every step bit for bit as before.
+    pub surface_contact: bool,
+    /// The surface pass's hits in the last step (a statistic; not simulated state).
+    pub surface_last: u32,
     /// [`Self::dissipative_contact`]'s position steps this step, per node in
     /// [`SHIFT_FIXED`] units (summed as integers, order free); the next node pass
     /// adds them to the positions after x + h·v (empty until used).
@@ -1546,6 +1554,8 @@ impl ExplicitBeams {
             anti_only_tris: Vec::new(),
             fixed_contact: false,
             dissipative_contact: false,
+            surface_contact: false,
+            surface_last: 0,
             contact_shift: Vec::new(),
             shift_applied: Vec::new(),
             ground_lift: Vec::new(),
@@ -3308,6 +3318,9 @@ impl ExplicitBeams {
         }
         if !self.triangles.is_empty() && !self.candidates.is_empty() {
             self.collision_pass();
+        }
+        if self.surface_contact && !self.triangles.is_empty() {
+            self.surface_pass();
         }
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 2);
