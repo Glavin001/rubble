@@ -704,7 +704,8 @@ impl ExplicitUpload {
                 | (v.anti_clip as u32) << 11
                 | (any_anti as u32) << 12
                 | (!v.plastic_strength_drop as u32) << 13
-                | (v.exact_friction as u32) << 14;
+                | (v.exact_friction as u32) << 14
+                | (v.dissipative_contact as u32) << 15;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,

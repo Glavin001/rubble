@@ -144,12 +144,24 @@ pub struct ContactSurface {
     /// The friction law's exponentials by [`exact_exp`] / [`exact_pow`] (the BeamNG
     /// profile, jbeam-semantics-spec.md §36); false: RoR's bit tricks.
     pub exact: bool,
+    /// The normal force does no positive work (the BeamNG profile's self- and
+    /// vehicle contact, jbeam-semantics-spec.md §37): RoR's penetration push is
+    /// capped so it never makes the pair separate ([`contact_force`]). False:
+    /// RoR's rule.
+    pub dissipative: bool,
 }
 
 impl ContactSurface {
     /// This surface with the exact exponentials when `on`.
     pub const fn exact_if(self, on: bool) -> Self {
         Self { exact: on, ..self }
+    }
+    /// This surface with [`Self::dissipative`] when `on`.
+    pub const fn dissipative_if(self, on: bool) -> Self {
+        Self {
+            dissipative: on,
+            ..self
+        }
     }
     /// The ground ("gravel").
     pub const GROUND: Self = Self {
@@ -161,6 +173,7 @@ impl ContactSurface {
         alpha: 2.0,
         strength: 1.0,
         exact: false,
+        dissipative: false,
     };
     /// Static boxes and self-collision ("concrete").
     pub const BOX: Self = Self {
@@ -172,6 +185,7 @@ impl ContactSurface {
         alpha: 2.0,
         strength: 1.0,
         exact: false,
+        dissipative: false,
     };
 }
 
@@ -924,6 +938,12 @@ pub struct ExplicitBeams {
     /// order). The CPU then computes the same values as the GPU. Off: added to the
     /// node's force as floats (the RoR profile).
     pub fixed_contact: bool,
+    /// Self- and vehicle contact never do positive work (the BeamNG profile,
+    /// jbeam-semantics-spec.md §37; [`ContactSurface::dissipative`]): RoR's
+    /// penetration push may stop an approach but not make the pair separate.
+    /// Vehicle contact takes it when the owner or the partner has it. Off: RoR's
+    /// rule.
+    pub dissipative_contact: bool,
     /// RoR's rule that a beam's strength falls by k × its plastic stretch (true,
     /// the RoR profile and the solver's JBeam rule until §36). The BeamNG profile:
     /// false (BeamNG documents no such rule; its `deformLimitStress` and deform
@@ -1211,10 +1231,46 @@ pub fn contact_force(
     if vn < 0.0 {
         r -= (0.8 * vn - 0.2 * p / h) * m / h;
     }
+    if surface.dissipative {
+        // (§37) Over the step the normal force does work r·(vn + vn′)/2·h, with
+        // vn′ = vn + h·(fn + r)/m the pair's normal speed after it. Capped so that
+        // vn′ ≤ 0 when approaching (the push stops the approach, never reverses
+        // it) and vn′ ≤ −vn when separating (work ≤ 0):
+        // r ≤ −fn − (vn + max(vn, 0))·m/h.
+        r = r.min(-fn_ - (vn + vn.max(0.0)) * m / h);
+    }
     if r <= 0.0 {
         return Vec3::ZERO;
     }
-    contact_friction(r, f, v, n, surface, friction)
+    let c = contact_friction(r, f, v, n, surface, friction);
+    if surface.dissipative {
+        no_positive_work(c, f, v, m, h)
+    } else {
+        c
+    }
+}
+
+/// §37: contact force `c` on a pair of relative velocity `v`, reduced mass `m`,
+/// under force `f`, scaled down (s ∈ [0, 1]) until its work over the step at the
+/// pair's mean velocity, c·(v + v′)/2·h with v′ = v + h·(f + c)/m, is ≤ 0: the
+/// work is ∝ s·a + s²·b, a = c·(2v + h·f/m), b = h·|c|²/m, so s = min(1, −a/b),
+/// none when a ≥ 0. (Friction's stick term cancels the tangential force like the
+/// normal term cancels the normal one, and both do positive work while the beams
+/// decelerate the pair.)
+pub fn no_positive_work(c: Vec3, f: Vec3, v: Vec3, m: f32, h: f32) -> Vec3 {
+    if m <= 0.0 {
+        return c;
+    }
+    let u = v + v + f * (h / m);
+    let a = c.dot(u);
+    let b = c.dot(c) * (h / m);
+    if a + b <= 0.0 {
+        c
+    } else if a >= 0.0 {
+        Vec3::ZERO
+    } else {
+        c * (-a / b)
+    }
 }
 
 /// The contact force of normal force `r` > 0 along `n` with its friction
@@ -1403,6 +1459,7 @@ impl ExplicitBeams {
             clip_sides: Vec::new(),
             anti_only_tris: Vec::new(),
             fixed_contact: false,
+            dissipative_contact: false,
             plastic_strength_drop: true,
             exact_friction: false,
             contact_acc: Vec::new(),
@@ -1880,6 +1937,7 @@ impl ExplicitBeams {
             s.two_body_contact = true;
             s.anti_clip = true;
             s.fixed_contact = true;
+            s.dissipative_contact = true;
             s.exact_friction = true;
         }
         // `rubble_contact_breaks` (Rubble's extension, spec §32).
@@ -2601,6 +2659,7 @@ impl ExplicitBeams {
         s.two_body_contact = true;
         s.anti_clip = true;
         s.fixed_contact = true;
+        s.dissipative_contact = true;
         s.plastic_strength_drop = false;
         s.exact_friction = true;
         let pairs = s.spawn_exclusions();
@@ -3744,7 +3803,9 @@ impl ExplicitBeams {
                     m,
                     n,
                     h,
-                    &ContactSurface::BOX.exact_if(exact),
+                    &ContactSurface::BOX
+                        .exact_if(exact)
+                        .dissipative_if(self.dissipative_contact),
                     pen,
                     node.friction,
                 );
@@ -3948,7 +4009,9 @@ impl ExplicitBeams {
                 m,
                 n,
                 STEP,
-                &ContactSurface::BOX.exact_if(exact),
+                &ContactSurface::BOX
+                    .exact_if(exact)
+                    .dissipative_if(self.dissipative_contact),
                 depth,
                 node.friction,
             );

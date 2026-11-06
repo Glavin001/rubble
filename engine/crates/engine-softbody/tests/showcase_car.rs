@@ -447,7 +447,16 @@ fn spawn(b: &Built, vel: Vec3, lift: f32) -> ExplicitBeams {
     // (The car's file asks for contact from every node, spec §10.2.)
     assert!(s.contact_every_node);
     s.roll_tyres(vel);
+    rule_switches(&mut s);
     s
+}
+
+/// Measurement switches on a spawned car: `DISSIPATIVE_CONTACT=0`, RoR's
+/// penetration push in self- and vehicle contact (jbeam-semantics-spec.md §37).
+fn rule_switches(s: &mut ExplicitBeams) {
+    if std::env::var("DISSIPATIVE_CONTACT").is_ok_and(|v| v == "0") {
+        s.dissipative_contact = false;
+    }
 }
 
 /// The solver's beam for each skeleton beam (the `.truck` sorts them), by
@@ -3196,6 +3205,7 @@ impl<'a> Car<'a> {
             nd.vel = vel;
         }
         s.roll_tyres(vel);
+        rule_switches(&mut s);
         s
     }
 
@@ -3749,6 +3759,127 @@ fn fixed_contact_quantisation_does_no_work() {
     // crushed car's, where contacts persist.)
     let mut s = wall_spawn(&car, 51.0, true, Perturb::default());
     check("51 km/h drag true, then at rest to 12 s", &mut s, 12.0);
+}
+
+/// The most self-contact work and the most vehicle-contact work (normal and
+/// friction) over any tenth of a second of `seconds` of `w`'s steps (the world's
+/// energy ledger, J).
+fn contact_work_tenths(
+    w: &mut engine_softbody::explicit_contact::ExplicitBeamsWorld,
+    seconds: f32,
+) -> (f64, f64) {
+    w.enable_ledger();
+    let terms = |w: &engine_softbody::explicit_contact::ExplicitBeamsWorld| {
+        let l = w.ledger.as_ref().unwrap();
+        (l.w_self_contact, l.w_contact_normal + l.w_contact_friction)
+    };
+    let tenth = (0.1 / STEP).round() as usize;
+    let (mut most_self, mut most_vc) = (f64::MIN, f64::MIN);
+    let mut last = terms(w);
+    for k in 1..=(seconds / STEP).round() as usize {
+        w.step();
+        if k % tenth == 0 {
+            let now = terms(w);
+            most_self = most_self.max(now.0 - last.0);
+            most_vc = most_vc.max(now.1 - last.1);
+            last = now;
+        }
+    }
+    (most_self, most_vc)
+}
+
+/// The BeamNG profile's self- and vehicle contact never do positive work
+/// (jbeam-semantics-spec.md §37): sedan1 into the wall over the n test's speed
+/// sweep (47–52 and 54–59 km/h, drag on and off, 2 s), the 51 km/h car crushed
+/// and at rest to 12 s, and the 80 km/h T-bone (two sedan1s, the striker's
+/// middle at the door's, 1.5 s). Bound (stated): the world ledger's
+/// self-contact work and vehicle-contact work over any tenth of a second at most
+/// +0.01 J (the ledger's rounding; RoR's push did up to +216 J in a tenth of the
+/// sweep and +5 J per tenth at rest for good, §36's note).
+#[test]
+fn contacts_do_no_positive_work() {
+    use engine_softbody::explicit_contact::ExplicitBeamsWorld;
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let car = Car::of(&b);
+    let check = |what: &str, mut w: ExplicitBeamsWorld, seconds: f32| {
+        assert!(
+            w.vehicles.iter().all(|v| v.dissipative_contact),
+            "the BeamNG profile"
+        );
+        let (sc, vc) = contact_work_tenths(&mut w, seconds);
+        eprintln!(
+            "({what}) most work over a tenth: self-contact {sc:+.4} J, vehicle contact {vc:+.4} J"
+        );
+        assert!(sc <= 0.01, "({what}) self-contact did {sc} J over a tenth");
+        assert!(
+            vc <= 0.01,
+            "({what}) vehicle contact did {vc} J over a tenth"
+        );
+    };
+    for kmh in [
+        47.0, 48.0, 49.0, 50.0, 51.0, 52.0, 54.0, 55.0, 56.0, 57.0, 58.0, 59.0,
+    ] {
+        for drag in [true, false] {
+            let s = wall_spawn(&car, kmh, drag, Perturb::default());
+            check(
+                &format!("wall {kmh} km/h drag {drag}"),
+                ExplicitBeamsWorld::new(vec![s]),
+                2.0,
+            );
+        }
+    }
+    let s = wall_spawn(&car, 51.0, true, Perturb::default());
+    check(
+        "wall 51 km/h drag true, then at rest to 12 s",
+        ExplicitBeamsWorld::new(vec![s]),
+        12.0,
+    );
+    // The T-bone (as `t_car_to_car_t_bone_at_80_kmh` sets it up): the striker the
+    // same car turned 90°, 5 cm off the struck car's side, its middle at the door's.
+    let sk0 = &b.skeleton;
+    let len = b.def.profile.length;
+    let door_part = sk0.parts.iter().position(|p| p == "door_f_l").unwrap() as u16;
+    let struck = spawn(&b, Vec3::ZERO, 0.0);
+    let p0 = struck.positions();
+    let door: Vec<usize> = (0..sk0.nodes.len())
+        .filter(|&i| sk0.nodes[i].part == door_part)
+        .collect();
+    let zd = door.iter().map(|&i| p0[i].z).sum::<f32>() / door.len() as f32;
+    let hw = p0.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+    let mut sk = sk0.clone();
+    sk.map_positions(|p| {
+        let q = p - Vec3::new(0.0, 0.0, 0.5 * len);
+        Vec3::new(-q.z, q.y, q.x)
+    });
+    let truck = sk.to_truck();
+    let pp = ExplicitBeams::from_truck(&truck, Vec3::ZERO, Vec3::ZERO, settings())
+        .unwrap()
+        .positions();
+    let (low, near) = pp
+        .iter()
+        .fold((f32::MAX, f32::MAX), |(l, x), p| (l.min(p.y), x.min(p.x)));
+    let low0 = p0.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+    let v = Vec3::new(-80.0 / 3.6, 0.0, 0.0);
+    let mut striker = ExplicitBeams::from_truck(
+        &truck,
+        Vec3::new(hw + 0.05 - near, low0 - low, zd),
+        v,
+        settings(),
+    )
+    .unwrap();
+    striker.roll_tyres(v);
+    check(
+        "T-bone 80 km/h",
+        ExplicitBeamsWorld::new(vec![struck, striker]),
+        1.5,
+    );
 }
 
 /// Some of the n test's speed-sweep runs (a measurement, `--ignored`):
