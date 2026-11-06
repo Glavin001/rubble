@@ -1078,17 +1078,40 @@ void surfPairApply(uint v, uint p, float3 origin, float r, uint4 r0, uint4 r1, u
 // Whether any vehicle of the upload has surface contact (uniform: a parameter).
 uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 
-// The pair path's step of vehicle v (surfaceStep's, every lane): the snapshot (with
-// the casts' gathering when a proxy is fast), the shapes' bounds, the listing, the find
-// (the static slots and the fast proxies by the per-element loops, the other proxies by
-// pair), the apply. More pairs than the list holds: the per-element loops meet every
-// proxy, that step. Its own
-// function behind surfaceStep's uniform early return (explicit-vehicles-in-world.md
-// §8.3: the per-element path's code stays as it was).
-void surfaceStepPairs(uint v, uint lane, uint parity, bool mine, uint4 r0, uint4 r1, uint4 r2, uint4 sr,
-                      float3 origin, float r, uint nodeCount, uint triCount, uint segCount, uint proxies,
-                      uint bodies, bool anyFast)
+// Step's surface pass of vehicle v (uniform `on`), after its self-collision and
+// before its slide nodes (parity: the step's): the barrier, the snapshot (and the casts'
+// gathering when a proxy is fast, and the proxies' bounds on the pair path), the listing
+// of the pair path (its own barrier), the find, the apply. A vehicle without the flag
+// reaches the barriers only (all decisions below are uniform). The caller's barrier
+// follows. Each heavy function has one call site per phase: the Metal and Chrome
+// compilers inline every call.
+void surfaceStep(uint v, uint lane, uint on, uint parity)
 {
+#ifdef EB_ABLATE
+    // Measurement only (time): 2^27 the whole pass and its barriers.
+    if ((gP.ablate & 134217728u) != 0u) return;
+#endif
+    if (on == 0u) return;
+    uint4 r0 = gStatic[v * 4u];
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    uint4 r3 = gStatic[v * 4u + 3u];
+    bool mine = (r3.x & FLAG_SURFACE) != 0u;
+    uint nodeCount = mine ? r0.y : 0u;
+    uint triCount = mine ? r1.y : 0u;
+    float3 origin = asfloat(gMisc[v].xyz);
+    float r = asfloat(r3.z);
+    uint4 sr = gStatic[gP.surfSeg + v];
+    uint segCount = mine ? sr.y : 0u;
+    uint proxies = mine ? surfProxies(v) : 0u;
+    uint bodies = proxies != 0u ? gMisc[cplBase(v)].x : 0u;
+    bool anyFast = proxies != 0u && surfAnyFast(v, proxies);
+    // The pair path when the vehicle meets proxies and has its region (measurement:
+    // EB_ABLATE's 2^30 turns it off).
+    bool pairs = proxies != 0u && surfPairsOn();
+#ifdef EB_ABLATE
+    if ((gP.ablate & 1073741824u) != 0u) pairs = false;
+#endif
     sync();
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
     {
@@ -1111,15 +1134,21 @@ void surfaceStepPairs(uint v, uint lane, uint parity, bool mine, uint4 r0, uint4
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
             surfGatherPoint(v, r0.x + i, origin, r, proxies, parity);
     }
-    surfPairBounds(v, lane, proxies);
+    if (pairs) surfPairBounds(v, lane, proxies);
     sync();
-    surfPairCull(v, lane, origin, r, r0, r1, sr, r2.z, parity, triCount, segCount, nodeCount, proxies);
-    sync();
-    uint listed = uint(gAcc[surfPairCount(v)].load());
-    // A list too long for the region: the per-element loops meet the proxies this step.
-    bool pairs = listed <= SURF_PAIR_CAP;
-    // The per-element loops: the fast proxies (casts) beside the pairs, or every proxy.
-    uint px = pairs ? (anyFast ? (proxies | 0x80000000u) : 0u) : proxies;
+    // The proxies the per-element loops meet: every one, the fast ones only (the top
+    // bit) beside the pairs, or none.
+    uint px = proxies;
+    uint listed = 0u;
+    if (pairs)
+    {
+        surfPairCull(v, lane, origin, r, r0, r1, sr, r2.z, parity, triCount, segCount, nodeCount, proxies);
+        sync();
+        listed = uint(gAcc[surfPairCount(v)].load());
+        // A list longer than the region: the per-element loops meet every proxy this step.
+        if (listed <= SURF_PAIR_CAP) px = anyFast ? (proxies | 0x80000000u) : 0u;
+        else pairs = false;
+    }
     // Without static slots nor proxies for them the per-element loops find nothing.
     bool loops = r1.w != 0u || px != 0u;
     if (loops)
@@ -1160,80 +1189,5 @@ void surfaceStepPairs(uint v, uint lane, uint parity, bool mine, uint4 r0, uint4
                 surfPairApply(v, p, origin, r, r0, r1, sr);
         }
     }
-    if (lane == 0u && mine) gsHit = 1u;
-}
-
-// Step's surface pass of vehicle v (uniform `on`), after its self-collision and
-// before its slide nodes (parity: the step's): the barrier, the snapshot, the find,
-// the apply. A vehicle without the flag reaches the barriers only. The caller's
-// barrier follows.
-void surfaceStep(uint v, uint lane, uint on, uint parity)
-{
-#ifdef EB_ABLATE
-    // Measurement only (time): 2^27 the whole pass and its barriers.
-    if ((gP.ablate & 134217728u) != 0u) return;
-#endif
-    if (on == 0u) return;
-    uint4 r0 = gStatic[v * 4u];
-    uint4 r1 = gStatic[v * 4u + 1u];
-    uint4 r2 = gStatic[v * 4u + 2u];
-    uint4 r3 = gStatic[v * 4u + 3u];
-    bool mine = (r3.x & FLAG_SURFACE) != 0u;
-    uint nodeCount = mine ? r0.y : 0u;
-    uint triCount = mine ? r1.y : 0u;
-    float3 origin = asfloat(gMisc[v].xyz);
-    float r = asfloat(r3.z);
-    uint4 sr = gStatic[gP.surfSeg + v];
-    uint segCount = mine ? sr.y : 0u;
-    uint proxies = mine ? surfProxies(v) : 0u;
-    uint bodies = proxies != 0u ? gMisc[cplBase(v)].x : 0u;
-    // Uniform: the vehicle meets proxies and has the pair region (measurement:
-    // EB_ABLATE's 2^30 turns the pair path off).
-    bool pairs = proxies != 0u && surfPairsOn();
-#ifdef EB_ABLATE
-    if ((gP.ablate & 1073741824u) != 0u) pairs = false;
-#endif
-    if (pairs)
-    {
-        surfaceStepPairs(v, lane, parity, mine, r0, r1, r2, sr, origin, r, nodeCount, triCount, segCount, proxies,
-                         bodies, surfAnyFast(v, proxies));
-        return;
-    }
-    sync();
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
-    {
-        uint gi = r0.x + i;
-        float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + gi], r0.z, r2.z, r2.w, parity, false);
-        gBeams[gP.surfSnap + gi] = float4(sadd3(f, accForce(gi)), 0.0);
-        gAcc[gP.surfSplit + gi].store(0);
-    }
-    for (uint j = lane, jStop = EB_END(j, bodies, LANES); j < jStop; j += LANES)
-    {
-        gAcc[surfBodyBase() + v * cplB() + j].store(0);
-        gAcc[surfTminAt(v, j, parity + 1u)].store(0);
-    }
-    if (proxies != 0u && surfAnyFast(v, proxies))
-    {
-        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
-            surfGatherTriangle(v, r1.x + t, origin, r, proxies, parity);
-        for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
-            surfGatherSegment(v, gLists[sr.x + j], origin, r, proxies, r2.z, parity);
-        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
-            surfGatherPoint(v, r0.x + i, origin, r, proxies, parity);
-    }
-    sync();
-    for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
-        surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, proxies, parity, false);
-    for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
-        surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, proxies, r2.z, parity, false);
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
-        surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, proxies, parity, false);
-    sync();
-    for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
-        surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, proxies, parity, true);
-    for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
-        surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, proxies, r2.z, parity, true);
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
-        surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, proxies, parity, true);
     if (lane == 0u && mine) gsHit = 1u;
 }

@@ -2643,6 +2643,106 @@ the ball up: the body's lever arm is its point now. CPU and GPU agree on the mom
 given to within 2 points; the World's run differs as its time coupling does (the ball
 integrates in the rigid step between windows).
 
+### 38.5 Cost: lossless speed-ups against the proxies (2026-11-06)
+
+Branch `feat/surface-contact-perf`; measurements in
+`engine/docs/measurements/softbody-world-broadphase.md` §3.
+
+**Where the time went** (`vehicle_broadphase_bench --probe`, EB_ABLATE bits 2^20–2^30 in
+`explicit_beams_surface.slang`, time only; one repo sedan among 11 proxy shapes, frame of
+17 steps, GPU timestamps): the frame 16.7 ms, of which the surface pass 15.9 ms (its three
+barriers 0.13 ms). The static slots and the snapshot were 0.5 ms; the proxies 15.4 ms: the
+per-element cull (each element read every shape's fast test and grown sphere) 1.8 ms, the
+shapes' strict poses and bounds rebuilt per element 0.8 ms, the narrow phase 12.9 ms
+(triangles 11.0, segments 3.1, points 0.9 ms; the apply recomputing the find's hits 6 ms).
+Of 134 pairs whose boxes met, 9 hit: the narrow phase ran mostly to reject, a box's twelve
+edges or a hull's eighteen against each triangle, four candidate passes per contact, on
+the few lanes whose elements sit by a shape while the rest of the workgroup waited.
+
+**The pair path** (`surfaceStep`; every decision uniform, each heavy function called once
+per phase, as the Metal and Chrome compilers inline every call): per step each proxy's
+bounds once
+(`surfPairBounds`); every live element against them, each meeting pair listed
+(`surfPairCull`: exactly fqNear's test, so the same pairs the per-element loops reach; their
+grown-sphere cull only ever skips pairs fqNear rejects); a barrier; the pairs spread over
+the lanes for the narrow phase (`surfPairFind`), each hit counted as the loops count it and
+kept (`SURF_HIT_CAP` 256 records of 19 words per vehicle); the apply from the kept hits.
+Every sum it feeds is fixed point or an integer count, so order is free. Fallbacks, both
+exact: more pairs than `SURF_PAIR_CAP` (2048) and the step takes the per-element loops;
+more hits than the records hold and the apply recomputes every pair's. A fast proxy
+(casts, §38.4) stays with the per-element loops (its bounds in the listing empty, the
+loops told to meet the fast proxies only), beside the pairs for the rest. Memory per vehicle with surface contact
+and the coupling: 2048 + 256·19 + 6·S words of gNext (≈ 30 KB with S = 128), two gAcc
+words. Switch (tests, measurement): coupling header bit 16, `RUBBLE_SURFACE_PAIRS=0`.
+
+**Edge culls in the shared queries** (`feature_query.slang` `fqFar`, `fqPrune`): a pass keeps
+candidates of gap at most its threshold (pass 0 the least so far, capped at the contact's
+band: a least gap past it is no contact either way; later passes gx + TIE). Every candidate
+of a shape edge pairs a point of the edge with a point of the element, so its gap is at
+least their boxes' gap, less the rounding of the computed points; an edge farther than
+the threshold by 1e-4 m + 1e-5 of the largest coordinate is skipped. The Rust twin keeps
+the full walk (the same candidates count). Switch: coupling header bit 32,
+`RUBBLE_SURFACE_CULLS=0`.
+
+Result (frame GPU time, the switches timed from one saved state; measurements file §3):
+one sedan among 11 proxies 21.9 → 4.2 ms per 17 steps (the pass 1.24 → 0.20 ms a step);
+the crash town, 4 cars among 29–77 house chunks each, 55.7 → 17.1 ms; 32 cars 213 → 37 ms
+(minima on a shared GPU; 16.7 ms with the pass off).
+
+Checked bit for bit: `engine-world/tests/surface_pairs.rs` (a sedan between rows of boxes,
+turned boxes, hulls, turned hulls, into a capsule, a sphere, a free box thrown at it and a
+fast steel ball (casts beside the pairs):
+pairs, culls and both against neither, every vehicle state word, proxy record and coupling
+sum, through the strike and at rest); `surface_contact_gpu.rs` (static slots, against the
+CPU twin, with the culls on) and `explicit_surface_proxy_gpu.rs` unchanged; the World
+coupling tests (`explicit_vehicles.rs`, including the workgroup-copy and cull bit-exact
+checks) pass.
+
+### 38.6 Friction against a turning body (cast regression, 2026-11-06)
+
+**Problem.** After the casts, a 6 cm steel ball at 100 m/s into the repo sedan gave 76 %
+of its momentum and went into the car (before: it bounced). Traced on the CPU: its first
+hit (a cast contact) left it at 3,545 rad/s, more kinetic energy than it had. The surface
+contact's friction against a dynamic proxy was capped (§37's no positive work) with the
+pair's reduced mass along the normal; a turning body answers a tangential impulse through
+its inertia as well (a sphere 3.5 times as much), so the cap let the friction drive the
+contact point's slip far past zero and spin the body up. Without friction the ball bounced
+(105 %).
+
+**Rule** (`no_positive_work_body`, GPU `surfBodyCap`; dynamic proxies only, after
+contact_response's own cap, so the friction is the lesser of both): the pair's velocity
+change per unit impulse x is k(x) = imt·x + split·(x/M + (I⁻¹(a × x)) × a) (a the arm from
+the body's centre, I⁻¹ in world, split its mass splitting); n·k(n) = 1/m keeps the normal
+rule; the friction t is scaled by the largest s ∈ [0, 1] for which
+(r·n + s·t)·(u + h·k(r·n + s·t)) ≤ 0, u = 2v + h·f/m. Static bodies and static slots take
+the old path bit for bit.
+
+Checked: `explicit_surface_cast.rs` `a_glancing_ball_is_not_spun_up_by_friction` (100 m/s
+at 60° and 45°, 30 m/s at 70°: energy, rotation and the plate's height under gravity
+included, does not rise; without the cap it rose 6.5-fold); the cannonball table (the
+measurements file §2.1): the repo sedan's 6 cm ball at 100 m/s 75.9 → 103.0 % (bounces),
+its 300 m/s 122.4 → 101.5 %, the spins that exceeded the projectile's speed gone
+(12,682 → 596 rad/s at 600 m/s); no projectile tunnels and none gains energy.
+
+### 38.7 Default or not (2026-11-06)
+
+**Not yet.** The cost is now small and flat where it was the blocker (one car: 0.20 ms a
+step against 1.24; flat in the map's bodies), but:
+* the crash town still pays for it: 32 cars among house chunks 37 ms a frame against 17
+  with it off (the per-element static-slot and fast-proxy loops, a contact group's
+  members stepping the pass one after another, and the hits' narrow phase remain); 64
+  and 256 cars were not measured (§3 of the measurements file: the merged branch's
+  64-car town stalls with the pass off too);
+* sedan1's NCAP side pole falls out of its band with it on (§38.2), a calibration the
+  default must wait for;
+* native Metal (Slang to MSL): the turned-proxy check
+  (`metal_surface_contact_meets_a_turned_box_proxy_like_the_cpu`) was not re-run: the
+  four parity tests' kernel compile ran past the 20-minute bound on a shared machine and
+  was stopped. wgpu on Metal matches the CPU for turned proxies (2.4e-7 m).
+
+Next: the static slots and fast proxies on the pair path too, a group's members side by
+side in the pass, and the Metal turned-proxy run on a quiet machine.
+
 ## 39. Centred damping (2026-11-06)
 
 `ExplicitBeamsSettings::centred_damping`: **on in the BeamNG profile** (`beamng()`,
