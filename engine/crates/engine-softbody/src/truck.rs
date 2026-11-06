@@ -363,7 +363,10 @@ pub struct TruckFile {
     /// length never shortens past (1 − deformLimit) or lengthens past
     /// (1 + deformLimitExpansion) of its spawn rest length (a negative value:
     /// no limit). It keeps the file's plastic coefficient.
-    pub jbeam_plastic: Vec<(u32, u32, f32, f32, f32)>,
+    /// An optional sixth field `breakAtExpansion` (nonzero; Rubble's, §36): the beam
+    /// tears the step its rest length reaches (1 + deformLimitExpansion)·L. A rope
+    /// (`r`) line is a tension-only JBeam beam (`JbeamRope`).
+    pub jbeam_plastic: Vec<(u32, u32, f32, f32, f32, bool)>,
     /// `rubble_tension_yield` lines `a, b, Tt_N` (Rubble's extension,
     /// jbeam-semantics-spec.md §18.4): the deformable beam between nodes a and
     /// b yields in tension at Tt (its compression threshold stays the file's
@@ -1156,9 +1159,10 @@ impl Parser {
             Section::JbeamPlastic => {
                 let n: Vec<f32> = t.iter().filter_map(|x| x.parse::<f32>().ok()).collect();
                 if n.len() >= 5 && n[0] >= 0.0 && n[1] >= 0.0 {
+                    let tear = n.get(5).is_some_and(|&x| x != 0.0);
                     self.out
                         .jbeam_plastic
-                        .push((n[0] as u32, n[1] as u32, n[2], n[3], n[4]));
+                        .push((n[0] as u32, n[1] as u32, n[2], n[3], n[4], tear));
                 } else {
                     self.warn(
                         "rubble_jbeam_plastic needs a, b, deformLimitStress, deformLimit, deformLimitExpansion: ignored"
