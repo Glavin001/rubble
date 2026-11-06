@@ -29,8 +29,8 @@ use crate::authoring::skin::{deform_beams, unit_states, BeamState, ShowcaseVisua
 use crate::authoring::{build, style, BuildParams, Built, Resolution};
 use crate::desc::SoftVehicleDesc;
 use crate::explicit_beams::{
-    ExplicitBeams, ExplicitBeamsSettings, JbeamWheels, StaticBox, StaticShape, NODE_IMMOVABLE,
-    NODE_NO_GROUND, NODE_TYRE, STEP,
+    ExplicitBeams, ExplicitBeamsSettings, ExplicitKind, JbeamWheels, StaticBox, StaticShape,
+    NODE_IMMOVABLE, NODE_NO_GROUND, NODE_TYRE, STEP,
 };
 use crate::explicit_contact::ExplicitBeamsWorld;
 use glam::{DMat3, DQuat, DVec3, Quat, Vec3};
@@ -1047,7 +1047,13 @@ thread_local! {
 /// `SEAM_DEBUG`: per piece pair, whether the opened seams are the parts'
 /// nodes separating (the gap between each vertex's heaviest node pair) or the
 /// skin reaching past its nodes.
-fn seam_diagnosis(v: &ShowcaseVisual, rest: &[Vec3], now: &[Vec3], pairs: &[(usize, usize, f32)]) {
+fn seam_diagnosis(
+    car: &Car,
+    v: &ShowcaseVisual,
+    rest: &[Vec3],
+    now: &[Vec3],
+    pairs: &[(usize, usize, f32)],
+) {
     let top = |i: usize| -> Option<u32> {
         if v.wt_start.len() != v.positions.len() + 1 {
             return Some(v.bind_nodes[i][0]);
@@ -1064,6 +1070,8 @@ fn seam_diagnosis(v: &ShowcaseVisual, rest: &[Vec3], now: &[Vec3], pairs: &[(usi
         }
     }
     let mut by: std::collections::BTreeMap<String, (usize, f32, f32, usize)> = Default::default();
+    // The widest-opened node pairs per piece pair (names, node gap in mm).
+    let mut worst: std::collections::BTreeMap<String, Vec<(f32, u32, u32)>> = Default::default();
     for &(i, j, g) in pairs {
         let (Some(a), Some(b)) = (top(i), top(j)) else {
             continue;
@@ -1071,12 +1079,16 @@ fn seam_diagnosis(v: &ShowcaseVisual, rest: &[Vec3], now: &[Vec3], pairs: &[(usi
         let ng =
             now[a as usize].distance(now[b as usize]) - rest[a as usize].distance(rest[b as usize]);
         let key = format!("{} / {}", v.pieces[piece[i]].0, v.pieces[piece[j]].0);
-        let e = by.entry(key).or_insert((0, 0.0, 0.0, 0));
+        let e = by.entry(key.clone()).or_insert((0, 0.0, 0.0, 0));
         e.0 += 1;
         e.1 += g;
         e.2 += ng;
         if ng > 0.05 {
             e.3 += 1;
+        }
+        let w = worst.entry(key).or_default();
+        if !w.iter().any(|x| x.1 == a && x.2 == b) {
+            w.push((ng, a, b));
         }
     }
     let mut v2: Vec<_> = by.into_iter().collect();
@@ -1087,6 +1099,111 @@ fn seam_diagnosis(v: &ShowcaseVisual, rest: &[Vec3], now: &[Vec3], pairs: &[(usi
             g / *n as f32 * 1e3,
             ng / *n as f32 * 1e3
         );
+        if let Some(w) = worst.get_mut(k) {
+            w.sort_by(|x, y| y.0.total_cmp(&x.0));
+            let top: Vec<String> = w
+                .iter()
+                .take(3)
+                .map(|&(g, a, b)| {
+                    format!(
+                        "{}-{} {:.0}",
+                        car.node_name(a as usize),
+                        car.node_name(b as usize),
+                        g * 1e3
+                    )
+                })
+                .collect();
+            eprintln!("    widest node pairs (mm): {}", top.join(", "));
+        }
+    }
+}
+
+/// `HW_DEBUG`: per hardware group (hinges, latches, bolts) the largest
+/// tension any of its beams carried and when, and whether it broke.
+pub struct HwTrack {
+    on: bool,
+    groups: Vec<(String, Vec<usize>, f32, f32)>,
+}
+
+impl HwTrack {
+    pub fn new(car: &Car, s: &ExplicitBeams) -> HwTrack {
+        let on = std::env::var("HW_DEBUG").is_ok();
+        let mut at: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        if on {
+            for (j, b) in s.beams.iter().enumerate() {
+                at.entry((b.a.min(b.b), b.a.max(b.b))).or_default().push(j);
+            }
+        }
+        let groups = if on {
+            let mut g: Vec<(String, Vec<usize>, f32, f32)> = car
+                .hardware
+                .iter()
+                .map(|(n, pairs)| {
+                    let js: Vec<usize> = pairs
+                        .iter()
+                        .flat_map(|&(a, b)| {
+                            at.get(&(a.min(b), a.max(b))).cloned().unwrap_or_default()
+                        })
+                        .collect();
+                    (n.clone(), js, 0.0f32, 0.0f32)
+                })
+                .collect();
+            // Couplers (latches) by their nodes' names.
+            for (j, b) in s.beams.iter().enumerate() {
+                if b.kind == ExplicitKind::JbeamCoupler {
+                    g.push((
+                        format!(
+                            "coupler {}-{}",
+                            car.node_name(b.a as usize),
+                            car.node_name(b.b as usize)
+                        ),
+                        vec![j],
+                        0.0,
+                        0.0,
+                    ));
+                }
+            }
+            g
+        } else {
+            Vec::new()
+        };
+        HwTrack { on, groups }
+    }
+    pub fn sample(&mut self, s: &ExplicitBeams, t: f32) {
+        if !self.on {
+            return;
+        }
+        for g in &mut self.groups {
+            // The group's load: its beams' tensions summed (a bolt's or hinge's
+            // beams share it).
+            let f: f32 =
+                g.1.iter()
+                    .filter(|&&j| !s.beams[j].broken)
+                    .map(|&j| (-s.beams[j].force).max(0.0))
+                    .sum();
+            if f > g.2 {
+                g.2 = f;
+                g.3 = t;
+            }
+        }
+    }
+    pub fn report(&self, scene: &str, s: &ExplicitBeams) {
+        if !self.on {
+            return;
+        }
+        let mut v: Vec<&(String, Vec<usize>, f32, f32)> = self.groups.iter().collect();
+        v.sort_by(|a, b| b.2.total_cmp(&a.2));
+        for g in v {
+            let broken = g.1.iter().any(|&j| s.beams[j].broken);
+            eprintln!(
+                "  hw {scene} {}: {} beams, peak tension {:.1} kN at {:.0} ms{}",
+                g.0,
+                g.1.len(),
+                g.2 / 1e3,
+                g.3 * 1e3,
+                if broken { ", BROKE" } else { "" }
+            );
+        }
     }
 }
 
@@ -1124,7 +1241,7 @@ fn visual_now(car: &Car, s: &ExplicitBeams) -> Value {
     let out = visual_metrics(v, &p0, &n0, &p1, &n1);
     if std::env::var("SEAM_DEBUG").is_ok() {
         let pairs = SEAM_PAIRS.with(|c| c.borrow().clone());
-        seam_diagnosis(v, &positions(&car.template), &positions(s), &pairs);
+        seam_diagnosis(car, v, &positions(&car.template), &positions(s), &pairs);
     }
     out
 }
@@ -1811,10 +1928,12 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     let mut k = 0usize;
     let after = (seconds_after / STEP).round() as usize;
     let limit = (1.5 / STEP) as usize + after;
+    let mut hw = HwTrack::new(car, &w.vehicles[0]);
     while k < limit {
         w.step();
         k += 1;
         let s = &w.vehicles[0];
+        hw.sample(s, steps_after as f32 * STEP);
         if k % 2 == 0 {
             pen.sample(s);
         }
@@ -1869,6 +1988,7 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
         }
     }
     let s = &w.vehicles[0];
+    hw.report("wall", s);
     let now = positions(s);
     let l = w.ledger.as_ref().unwrap();
     // The pulse (100 Hz) and force (100 Hz), 1 ms samples to 150 ms.
@@ -1994,6 +2114,13 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
 /// FMVSS 214's oblique pole (32 km/h, 75°, 254 mm) at the driver's head:
 /// residual and dynamic crush at the pole, intrusion, damage, visual.
 pub fn scene_pole(car: &Car, kmh: f32, seconds: f32) -> Value {
+    scene_pole_at(car, kmh, seconds, 0.0)
+}
+
+/// [`scene_pole`] with the pole moved `dz` m along the car (+ forward): a
+/// pole a few centimetres either way meets other nodes, which shows how much
+/// of a residual is the lattice's place against the pole.
+pub fn scene_pole_at(car: &Car, kmh: f32, seconds: f32, dz: f32) -> Value {
     let t0 = Instant::now();
     let f = car.frame;
     let a = 75.0f32.to_radians();
@@ -2007,7 +2134,7 @@ pub fn scene_pole(car: &Car, kmh: f32, seconds: f32) -> Value {
         .find(|p| p.0 == "head")
         .unwrap()
         .1;
-    let head = Vec3::new(head.x, 0.0, head.z);
+    let head = Vec3::new(head.x, 0.0, head.z + dz);
     let gap = |c: Vec3| {
         s.nodes
             .iter()
@@ -2072,6 +2199,8 @@ fn side_run(
             .fold(0.0, f32::max)
     };
     let mut dyn_max = 0.0f32;
+    let side_debug = std::env::var("SIDE_DEBUG").is_ok();
+    let mut elastic_at_max = String::new();
     // The pole's deepest reach into the car: its axis in the far side's frame from the struck side's skin.
     let mut pole_reach = 0.0f32;
     let n = (seconds / STEP).round() as usize;
@@ -2096,12 +2225,28 @@ fn side_run(
         (_, Some(s)) => mech(s),
         _ => 0.0,
     };
+    let mut hw = HwTrack::new(
+        car,
+        match (&world, &solo) {
+            (Some(w), _) => &w.vehicles[0],
+            (_, Some(s)) => s,
+            _ => unreachable!(),
+        },
+    );
     for k in 0..n {
         match (&mut world, &mut solo) {
             (Some(w), _) => w.step(),
             (_, Some(s)) => s.step(),
             _ => {}
         }
+        hw.sample(
+            match (&world, &solo) {
+                (Some(w), _) => &w.vehicles[0],
+                (_, Some(s)) => s,
+                _ => unreachable!(),
+            },
+            k as f32 * STEP,
+        );
         if k % 2 == 1 {
             let car_s = match (&world, &solo) {
                 (Some(w), _) => &w.vehicles[0],
@@ -2117,7 +2262,55 @@ fn side_run(
                 _ => unreachable!(),
             };
             e_max = e_max.max(e - e0);
-            dyn_max = dyn_max.max(crush(car_s));
+            let c_now = crush(car_s);
+            if side_debug && c_now > dyn_max {
+                // The elastic energy at the deepest crush: what springs back.
+                let mut v: Vec<(f32, usize)> = car_s
+                    .beams
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| {
+                        !b.broken
+                            && b.a != b.b
+                            && b.k > 0.0
+                            && !is_tyre(car_s, b.a as usize)
+                            && !is_tyre(car_s, b.b as usize)
+                    })
+                    .map(|(j, b)| {
+                        let l = (car_s.nodes[b.a as usize].pos - car_s.nodes[b.b as usize].pos)
+                            .length();
+                        let e = l - b.rest;
+                        // Supports carry no tension.
+                        let e = if b.kind == ExplicitKind::JbeamSupport {
+                            e.min(0.0)
+                        } else {
+                            e
+                        };
+                        (0.5 * b.k * e * e, j)
+                    })
+                    .collect();
+                v.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let total: f32 = v.iter().map(|x| x.0).sum();
+                elastic_at_max = format!(
+                    "elastic {:.0} J at {:.0} mm; top: {}",
+                    total,
+                    c_now * 1e3,
+                    v.iter()
+                        .take(14)
+                        .map(|&(e, j)| {
+                            let b = &car_s.beams[j];
+                            format!(
+                                "{}-{} {:.0} J",
+                                car.node_name(b.a as usize),
+                                car.node_name(b.b as usize),
+                                e
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            dyn_max = dyn_max.max(c_now);
             if let Some(c) = pole {
                 let now = positions(car_s);
                 let fit = rigid_fit(&rest, &now, &far);
@@ -2131,6 +2324,96 @@ fn side_run(
         (_, Some(s)) => s,
         _ => unreachable!(),
     };
+    hw.report(if pole.is_some() { "pole" } else { "side" }, s);
+    // The pole's imprint: the car slides along an oblique pole as it crushes
+    // (75°: a quarter of the speed is along the car), so the crush is spread
+    // along the pole's path, not only on its line at first contact. The
+    // pole's final place in the far side's frame (its shift along the car)
+    // and the deepest residual crush within 0.15 m of its path, first
+    // contact to rest (NHTSA's crush profile takes the damage where it is).
+    let imprint = pole.map(|c| {
+        let now = positions(s);
+        let fit = rigid_fit(&rest, &now, &far);
+        let cz = fit.to_rest(c).z;
+        let r = car
+            .skin
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let p = rest[i as usize];
+                p.x > 0.3 * 0.5 * f.width()
+                    && p.z > cz.min(c.z) - 0.15
+                    && p.z < cz.max(c.z) + 0.15
+                    && (0.3..1.2).contains(&p.y)
+            })
+            .filter(|&i| now[i as usize].is_finite())
+            .map(|i| rest[i as usize].x - fit.to_rest(now[i as usize]).x)
+            .fold(0.0, f32::max);
+        (cz - c.z, r)
+    });
+    // `SIDE_DEBUG`: the struck nodes with the most residual crush, and the
+    // plastic work by member (node-name stems, an upper estimate).
+    if std::env::var("SIDE_DEBUG").is_ok() {
+        let stem = |i: u32| -> String {
+            let n = car.node_name(i as usize);
+            let n = n.trim_end_matches(['L', 'R']);
+            let n: String = n.chars().filter(|c| !c.is_ascii_digit()).collect();
+            n.trim_end_matches(['L', 'R']).to_string()
+        };
+        let mut by: std::collections::BTreeMap<String, f64> = Default::default();
+        for b in s.beams.iter().filter(|b| b.a != b.b && !b.broken) {
+            let dr = (b.rest - b.rest0) as f64;
+            let fy = if dr < 0.0 { b.tc } else { b.tt } as f64;
+            if !fy.is_finite() || dr == 0.0 {
+                continue;
+            }
+            let (mut a, mut c) = (stem(b.a), stem(b.b));
+            if a > c {
+                std::mem::swap(&mut a, &mut c);
+            }
+            *by.entry(format!("{a}-{c}")).or_default() += fy * dr.abs();
+        }
+        let mut v: Vec<(String, f64)> = by.into_iter().collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let tot: f64 = v.iter().map(|x| x.1).sum();
+        eprintln!(
+            "  side plastic {:.1} kJ: {}",
+            tot / 1e3,
+            v.iter()
+                .take(16)
+                .map(|(k, e)| format!("{k} {:.2}", e / 1e3))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let now = positions(s);
+        let fit = rigid_fit(&rest, &now, &far);
+        let mut v: Vec<(f32, u32)> = struck
+            .iter()
+            .filter(|&&i| now[i as usize].is_finite())
+            .map(|&i| (rest[i as usize].x - fit.to_rest(now[i as usize]).x, i))
+            .collect();
+        v.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let top: Vec<String> = v
+            .iter()
+            .take(8)
+            .map(|&(d, i)| {
+                format!(
+                    "{} {:.0} (y {:.2})",
+                    car.node_name(i as usize),
+                    d * 1e3,
+                    rest[i as usize].y
+                )
+            })
+            .collect();
+        eprintln!(
+            "  side {}: struck {} nodes; residual (mm) {}\n  side {} {}",
+            if pole.is_some() { "pole" } else { "mdb" },
+            struck.len(),
+            top.join(", "),
+            if pole.is_some() { "pole" } else { "mdb" },
+            elastic_at_max
+        );
+    }
     let wall_s = t0.elapsed().as_secs_f32();
     let ke: f32 = s
         .nodes
@@ -2138,7 +2421,7 @@ fn side_run(
         .map(|n| 0.5 * n.mass * n.vel.length_squared())
         .sum();
     json!({
-        "barrier_min_x": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.pos.x).fold(f32::MAX, f32::min))), "barrier_vx": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / w.vehicles[1].nodes.iter().map(|n| n.mass).sum::<f32>())), "car_vx": r3(s.nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / s.nodes.iter().map(|n| n.mass).sum::<f32>()), "pole_reach_mm": pole.map(|_| mm(pole_reach)), "residual_crush_mm": mm(crush(s)), "dynamic_crush_mm": mm(dyn_max), "struck_nodes": struck.len(),
+        "barrier_min_x": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.pos.x).fold(f32::MAX, f32::min))), "barrier_vx": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / w.vehicles[1].nodes.iter().map(|n| n.mass).sum::<f32>())), "car_vx": r3(s.nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / s.nodes.iter().map(|n| n.mass).sum::<f32>()), "pole_reach_mm": pole.map(|_| mm(pole_reach)), "residual_crush_mm": mm(crush(s)), "pole_slide_mm": imprint.map(|x| mm(x.0)), "residual_crush_imprint_mm": imprint.map(|x| mm(x.1)), "dynamic_crush_mm": mm(dyn_max), "struck_nodes": struck.len(),
         "energy_rise_j": r1(e_max as f32), "ke_end_kj": r3(ke / 1e3),
         "penetration": pen.result(), "intrusion": intr.result(), "damage": damage_report(car, s), "visual": visual_now(car, s),
         "sim_s": seconds, "wall_s_per_sim_s": r3(wall_s / seconds),

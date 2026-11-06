@@ -28,8 +28,9 @@ use super::build::*;
 use super::model::Model;
 use super::surface::{self as sf, Param, ARCH_R, AXLE_F, AXLE_R, TRACK_HALF, TYRE_R};
 use crate::authoring::sedan::{
-    ACCORD_BIW, ACCORD_DECKLID, ACCORD_DOOR_F, ACCORD_DOOR_R, ACCORD_ENGINE_KG, ACCORD_FENDER,
-    ACCORD_HOOD, ACCORD_TRANSAXLE_KG,
+    ACCORD_BIW, ACCORD_DASH_BEHIND, ACCORD_DECKLID, ACCORD_DOOR_F, ACCORD_DOOR_R, ACCORD_ENGINE_KG,
+    ACCORD_FENDER, ACCORD_HOOD, ACCORD_PT_AHEAD, ACCORD_PT_BEHIND, ACCORD_TRANSAXLE_KG,
+    POWERTRAIN_CLEARANCE,
 };
 use glam::Vec3;
 use std::collections::HashMap;
@@ -55,6 +56,13 @@ pub const STACK_LIMIT: f32 = 0.7;
 pub const FENDER_BOLT: f32 = 25e3;
 pub const BUMPER_BOLT: f32 = 20e3;
 pub const BUMPER_SIDE_BOLT: f32 = 15e3;
+/// A fender's flange bolts down the apron rail and onto the hinge pillar: an
+/// M6 property class 8.8 bolt's ultimate tensile load (20.1 mm² stress area
+/// × 800 MPa = 16 kN; ISO 898-1).
+pub const FENDER_ROW_BOLT: f32 = 16e3;
+/// An engine mount beam's strength (N): the round-3 value per beam, now in
+/// four break groups (one per block corner).
+pub const ENGINE_MOUNT: f32 = 60e3;
 /// Neighbourhood reach of the beam graph (m): the body's members and each
 /// closure's frame.
 pub const REACH_BODY: f32 = 0.90;
@@ -387,7 +395,20 @@ pub fn rig(model: &Model) -> Rig {
     // ------------------------------------------------------------------
     // Body: members per side.
     // ------------------------------------------------------------------
-    let sill_z = span(z_a - 0.05, z_c + 0.10, 5);
+    // Sill stations: the toe board, the front seat's front cross member,
+    // the B-pillar, the seat's rear cross member and the rear seat's kick-up
+    // ([`SEAT_CM_F`] ahead of and [`SEAT_CM_R`] behind the B-pillar).
+    let sill_z = if std::env::var("GEN3_OLD_SILL").is_ok() {
+        span(z_a - 0.05, z_c + 0.10, 5)
+    } else {
+        vec![
+            z_a - 0.05,
+            z_b + SEAT_CM_F,
+            z_b,
+            z_b - SEAT_CM_R,
+            z_c + 0.10,
+        ]
+    };
     let roof_z = [-0.08f32, z_b, 0.5 * (z_b + -1.05), -1.05];
     let mut sill_o = [Vec::new(), Vec::new()];
     let mut sill_t = [Vec::new(), Vec::new()];
@@ -994,9 +1015,19 @@ pub fn rig(model: &Model) -> Rig {
     // ------------------------------------------------------------------
     // Engine: a 12-node block on mounts.
     // ------------------------------------------------------------------
+    // The powertrain's faces where the 2011 Accord's are: 0.39 m ahead of
+    // and 0.12 m behind the front axle (DOT HS 811 666 fig. 87). Round 3
+    // had its rear face at the axle.
+    let old_pt = std::env::var("GEN3_OLD_POWERTRAIN").is_ok();
+    let pt_z: [f32; 3] = if old_pt {
+        [1.40, 1.61, 1.82]
+    } else {
+        let (r0, f0) = (AXLE_F - ACCORD_PT_BEHIND, AXLE_F + ACCORD_PT_AHEAD);
+        [r0, 0.5 * (r0 + f0), f0]
+    };
     let eng = {
         let mut ids = Vec::new();
-        for (kz, &z) in [1.40f32, 1.61, 1.82].iter().enumerate() {
+        for (kz, &z) in pt_z.iter().enumerate() {
             for (ky, &y) in [0.38f32, 0.78].iter().enumerate() {
                 for (kx, &xx) in [0.26f32, -0.26].iter().enumerate() {
                     ids.push(r.node(
@@ -1012,22 +1043,55 @@ pub fn rig(model: &Model) -> Rig {
         graph(&mut r, &ids, 0.9, Part::Engine, Role::Engine, &|_| false);
         ids
     };
+    // Mounts: each block node to its two nearest rail or apron nodes. They
+    // are four break groups (the block's corners: left and right, front and
+    // rear, as a transverse engine's side mounts and torque rods), so once
+    // the block is stopped against the barrier and the cabin drives on, the
+    // mounts tear and the block stacks back onto the dash panel instead of
+    // dragging the rails beside it.
     for &e in &eng {
         let g = r.g(e);
         let mounts = r.nearest(body, g, 2, |i| {
             matches!(r.member[i], Some(Role::Rail) | Some(Role::Apron))
         });
+        let group = format!(
+            "engine_mount_{}{}",
+            if g.x > 0.0 { "L" } else { "R" },
+            if g.z > pt_z[1] { "F" } else { "R" }
+        );
         for b in mounts {
-            r.car.beam(e, b, Role::Mount, body);
+            if old_pt {
+                r.car.beam(e, b, Role::Mount, body);
+            } else {
+                let st = std::env::var("GEN3_MOUNT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(ENGINE_MOUNT);
+                r.car.hardware(e, b, Role::Mount, body, &group, st);
+            }
         }
     }
-    // Engine-to-dash stops (BOUNDED: engage with 8 cm left).
-    let front_eng: Vec<usize> = eng.iter().copied().filter(|&e| r.g(e).z < 1.45).collect();
-    for &e in &front_eng {
+    // The dash panel behind the block (BOUNDED stops from its rear face to
+    // the firewall's nodes): the Accord's dash line is 0.27-0.30 m behind
+    // the front axle, so the block's rear face meets it after closing
+    // 0.15-0.18 m, less what stays crushed between them (manifold shield
+    // and hoses, POWERTRAIN_CLEARANCE).
+    let dash_gap = 0.5 * (ACCORD_DASH_BEHIND[0] + ACCORD_DASH_BEHIND[1])
+        - ACCORD_PT_BEHIND
+        - POWERTRAIN_CLEARANCE;
+    let rear_eng: Vec<usize> = eng
+        .iter()
+        .copied()
+        .filter(|&e| r.g(e).z < pt_z[0] + 0.05)
+        .collect();
+    for &e in &rear_eng {
         let g = r.g(e);
         for t in r.nearest(body, g, 2, |i| r.member[i] == Some(Role::Firewall)) {
             let j = r.car.beam(e, t, Role::Stop, body);
             r.car.beams[j].role = Role::Stop;
+            if !old_pt {
+                r.car.stop_close.insert(j, dash_gap);
+            }
         }
     }
 
@@ -1077,6 +1141,56 @@ pub fn rig(model: &Model) -> Rig {
                     Some(Role::DoorFrame),
                     false,
                 ));
+            }
+            // The side intrusion beam's stations between the columns, so the
+            // tube can form a plastic hinge where a narrow object strikes it
+            // (a pole between two columns otherwise met a 0.5 m straight
+            // span). On the inner panel's middle row, between its columns.
+            let split_beam = std::env::var("GEN3_OLD_INTRUSION").is_err();
+            // The tube's outer chord, 2 cm under the skin at every station
+            // (the inner chord is the middle row, 8 cm in): a 6 cm deep
+            // truss, so the beam resists a load across the door by bending.
+            // A straight chain of nodes carries none until it has sagged
+            // into a catenary.
+            let mut outer_chord: Vec<usize> = Vec::new();
+            if split_beam {
+                let mut zs: Vec<f32> = cols.to_vec();
+                for k in 0..cols.len() - 1 {
+                    zs.push(0.5 * (cols[k] + cols[k + 1]));
+                }
+                for (k, &z) in zs.iter().enumerate() {
+                    let bottom = low_at(pts, z, 0.04).unwrap_or(lo.y) + 0.03;
+                    let ym = 0.5 * (bottom + belt(z) - 0.02);
+                    let out = std::env::var("GEN3_INTRUSION_OUT")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(INTRUSION_OUT);
+                    let p = mirror(inward(side(z, ym), out), s);
+                    let i = r.node(
+                        &format!("{dn}_io{k}"),
+                        p,
+                        part,
+                        Some(Role::DoorFrame),
+                        false,
+                    );
+                    inner.push(i);
+                    outer_chord.push(i);
+                }
+            }
+            if split_beam {
+                for k in 0..cols.len() - 1 {
+                    let z = 0.5 * (cols[k] + cols[k + 1]);
+                    let bottom = low_at(pts, z, 0.04).unwrap_or(lo.y) + 0.03;
+                    let ym = 0.5 * (bottom + belt(z) - 0.02);
+                    let p = mirror(inward(side(z, ym), 0.08), s);
+                    inner.push(r.node(
+                        &format!("{dn}_imh{k}"),
+                        p,
+                        part,
+                        Some(Role::DoorFrame),
+                        false,
+                    ));
+                }
             }
             // The window frame: its top at the front and rear.
             let (fz0, fz1) = if front {
@@ -1148,16 +1262,36 @@ pub fn rig(model: &Model) -> Rig {
             // The side intrusion beam: a tube along the door at its middle,
             // hinge pillar to latch (the inner middle row), tied to the skin's
             // crease row it backs.
-            let mids: Vec<usize> = inner
+            let mut mids: Vec<usize> = inner
                 .iter()
                 .copied()
                 .filter(|&i| r.car.nodes[i].name.contains("_im"))
                 .collect();
+            // (The outer chord's nodes are `_io`: not in the inner chord.)
+            // Hinge side to latch side (along the door).
+            mids.sort_by(|&a, &b| r.g(b).z.total_cmp(&r.g(a).z));
             for w in mids.windows(2) {
                 let j = r.car.beam(w[0], w[1], Role::Intrusion, part);
                 r.car.beams[j].role = Role::Intrusion;
             }
-            if let (Some(&a), Some(&b)) = (mids.first(), mids.last()) {
+            if split_beam {
+                outer_chord.sort_by(|&a, &b| r.g(b).z.total_cmp(&r.g(a).z));
+                let mut pairs: Vec<(usize, usize)> = Vec::new();
+                for w in outer_chord.windows(2) {
+                    pairs.push((w[0], w[1]));
+                }
+                for k in 0..mids.len().min(outer_chord.len()) {
+                    pairs.push((mids[k], outer_chord[k]));
+                    if k + 1 < mids.len() {
+                        pairs.push((mids[k], outer_chord[k + 1]));
+                        pairs.push((outer_chord[k], mids[k + 1]));
+                    }
+                }
+                for (a, b) in pairs {
+                    let j = r.car.beam(a, b, Role::Intrusion, part);
+                    r.car.beams[j].role = Role::Intrusion;
+                }
+            } else if let (Some(&a), Some(&b)) = (mids.first(), mids.last()) {
                 let j = r.car.beam(a, b, Role::Intrusion, part);
                 r.car.beams[j].role = Role::Intrusion;
             }
@@ -1197,7 +1331,14 @@ pub fn rig(model: &Model) -> Rig {
     // Hood: a 5 × 4 skin grid and an inner frame 5 cm under it.
     let hood_ids = {
         let part = Part::Hood;
-        let rows_z = span(hd_lo.z + 0.03, hd_hi.z - 0.04, 4);
+        let rows_z = span(
+            hd_lo.z + 0.03,
+            hd_hi.z - 0.04,
+            std::env::var("GEN3_HOOD_ROWS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4),
+        );
         let mut grid = Vec::new();
         let mut inner = Vec::new();
         for (kr, &z) in rows_z.iter().enumerate() {
@@ -1220,8 +1361,13 @@ pub fn rig(model: &Model) -> Rig {
             }
             grid.push(row);
         }
-        r.car
-            .panel(&grid, part, &[Role::Sheet; 4], Role::Sheet, true);
+        r.car.panel(
+            &grid,
+            part,
+            &vec![Role::Sheet; grid.len()],
+            Role::Sheet,
+            true,
+        );
         let mut all: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
         all.extend(&inner);
         graph(&mut r, &all, 0.85, part, Role::Sheet, &|_| false);
@@ -1824,25 +1970,41 @@ pub fn rig(model: &Model) -> Rig {
             }
         }
     }
-    // Bumper bolts: the beam to the rail ends (already the cans) and the
-    // cover's ends to the body (fender and quarter edges).
+    // Bumper covers: clipped, not bolted through (a cover pushed onto its
+    // beam slides on its clips; pulled off them, they hold to their
+    // strength). Every mount is a [`Role::Clip`]: soft in compression, the
+    // bolt's spring in tension. Mounts go to the body's structure only (the
+    // hubs and wheel proxies are body nodes too: the side mounts had taken
+    // them, so the wheels tore the covers' corners off at 11 ms in the wall).
+    let structural = |i: usize, r: &Rig| {
+        r.member[i].is_some()
+            && !r.car.nodes[i].no_group
+            && !r.car.nodes[i].name.starts_with("hub")
+            && !r.car.nodes[i].name.starts_with("rim")
+    };
+    let old_mounts = std::env::var("GEN3_OLD_BUMPER").is_ok();
     for (front, part, nm) in [
         (true, Part::BumperF, "front"),
         (false, Part::BumperR, "rear"),
     ] {
         let (cover, _) = bumper_ids[&part].clone();
+        let mount = if old_mounts { Role::Bolt } else { Role::Clip };
         for q in 1..=4 {
             let mk = marker(model, &format!("bolt_bumper_{nm}_{q}"));
             let mut dv: Vec<(f32, usize)> =
                 cover.iter().map(|&i| (r.g(i).distance(mk), i)).collect();
             dv.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let bv = r.nearest(body, mk, 2, |_| true);
+            let bv = if old_mounts {
+                r.nearest(body, mk, 2, |_| true)
+            } else {
+                r.nearest(body, mk, 2, |i| structural(i, &r))
+            };
             for &(_, d) in dv.iter().take(1) {
                 for &b in &bv {
                     r.car.hardware(
                         d,
                         b,
-                        Role::Bolt,
+                        mount,
                         part,
                         &format!("bumper_{nm}_bolt{q}"),
                         BUMPER_BOLT,
@@ -1850,19 +2012,80 @@ pub fn rig(model: &Model) -> Rig {
                 }
             }
         }
-        // The cover's side ends on the body.
+        // The cover's side ends: to the body's arch front (rear: the
+        // quarter's) and, at the front, to the fender's front edge (a real
+        // cover's side bracket is screwed to the fender).
+        let end_z = if front { bf_lo.z } else { br_hi.z };
         for &c in cover.iter() {
             let g = r.g(c);
-            if (g.z - if front { bf_lo.z } else { br_hi.z }).abs() < 0.10 {
-                for b in r.nearest(body, g, 3, |_| true) {
-                    r.car.hardware(
-                        c,
-                        b,
-                        Role::Bolt,
-                        part,
-                        &format!("bumper_{nm}_side"),
-                        BUMPER_SIDE_BOLT,
-                    );
+            if (g.z - end_z).abs() >= 0.10 {
+                continue;
+            }
+            let mut to = if old_mounts {
+                r.nearest(body, g, 3, |_| true)
+            } else {
+                r.nearest(body, g, 2, |i| structural(i, &r))
+            };
+            if front && !old_mounts {
+                let fp = if g.x > 0.0 {
+                    Part::FenderL
+                } else {
+                    Part::FenderR
+                };
+                to.extend(r.nearest(fp, g, 2, |_| true));
+            }
+            for b in to {
+                if r.g(b).distance(g) > 0.35 && !old_mounts {
+                    continue;
+                }
+                r.car.hardware(
+                    c,
+                    b,
+                    mount,
+                    part,
+                    &format!("bumper_{nm}_side"),
+                    BUMPER_SIDE_BOLT,
+                );
+            }
+        }
+        // The cover's top edge: screwed to the radiator support's upper tie
+        // bar (front) or the tail panel (rear) every column across the face.
+        if !old_mounts {
+            let top_y = cover.iter().map(|&i| r.g(i).y).fold(f32::MIN, f32::max);
+            let tie: Vec<usize> = (0..r.car.nodes.len())
+                .filter(|&i| {
+                    r.car.nodes[i].part == body
+                        && r.member[i] == Some(Role::Cross)
+                        && (r.g(i).z - end_z).abs() < 0.5
+                        && r.g(i).y > 0.6
+                        && if front {
+                            r.g(i).z > 1.9
+                        } else {
+                            r.g(i).z < -2.0
+                        }
+                })
+                .collect();
+            let tops: Vec<usize> = cover
+                .iter()
+                .copied()
+                .filter(|&i| r.g(i).y > top_y - 0.02 && (r.g(i).z - end_z).abs() > 0.10)
+                .collect();
+            for (k, c) in tops.into_iter().enumerate() {
+                let g = r.g(c);
+                let mut v: Vec<(f32, usize)> =
+                    tie.iter().map(|&i| (r.g(i).distance(g), i)).collect();
+                v.sort_by(|a, b| a.0.total_cmp(&b.0));
+                for &(d, b) in v.iter().take(1) {
+                    if d < 0.45 {
+                        r.car.hardware(
+                            c,
+                            b,
+                            Role::Clip,
+                            part,
+                            &format!("bumper_{nm}_top{k}"),
+                            BUMPER_SIDE_BOLT,
+                        );
+                    }
                 }
             }
         }
@@ -1873,6 +2096,57 @@ pub fn rig(model: &Model) -> Rig {
     // ------------------------------------------------------------------
     if std::env::var("GEN3_NO_EDGES").is_err() {
         edge_nodes(&mut r, model, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06));
+    }
+
+    // ------------------------------------------------------------------
+    // Fender bolt rows: a real fender's top flange is bolted down the apron
+    // rail every 15-25 cm and its rear edge to the hinge pillar (two or
+    // three bolts), so it moves with the apron and the pillar rather than
+    // with its own skin. Each top-flange node (the fender's nodes on the
+    // hood's shut line) is bolted to the nearest apron or cowl node; each
+    // rear-edge node to the nearest hinge-pillar node. One M6 8.8 bolt each
+    // ([`FENDER_ROW_BOLT`]).
+    // ------------------------------------------------------------------
+    if std::env::var("GEN3_NO_FENDER_ROWS").is_err() {
+        for (s, part) in [(1.0f32, Part::FenderL), (-1.0, Part::FenderR)] {
+            let x = lr(s);
+            let own: Vec<usize> = (0..r.car.nodes.len())
+                .filter(|&i| r.car.nodes[i].part == part && !r.car.nodes[i].contact)
+                .collect();
+            let hood_n: Vec<usize> = (0..r.car.nodes.len())
+                .filter(|&i| r.car.nodes[i].part == Part::Hood && !r.car.nodes[i].no_group)
+                .collect();
+            let z_rear = own.iter().map(|&i| r.g(i).z).fold(f32::MAX, f32::min);
+            let mut k = 0;
+            for &f in &own {
+                let g = r.g(f);
+                let on_hood_line = hood_n.iter().any(|&h| r.g(h).distance(g) < 0.12);
+                let rear_edge = g.z < z_rear + 0.06;
+                let to: Vec<usize> = if on_hood_line {
+                    r.nearest(body, g, 1, |i| {
+                        matches!(r.member[i], Some(Role::Apron) | Some(Role::Firewall))
+                    })
+                } else if rear_edge {
+                    r.nearest(body, g, 1, |i| r.member[i] == Some(Role::PillarA))
+                } else {
+                    continue;
+                };
+                for b in to {
+                    if r.g(b).distance(g) > 0.30 || r.car.has_beam(f, b) {
+                        continue;
+                    }
+                    k += 1;
+                    r.car.hardware(
+                        f,
+                        b,
+                        Role::Bolt,
+                        part,
+                        &format!("fender_{x}_row{k}"),
+                        FENDER_ROW_BOLT,
+                    );
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -2143,6 +2417,10 @@ pub fn rig(model: &Model) -> Rig {
     );
     let (sy, cy) = (env("GEN3_SIDE_Y", 1.0), env("GEN3_CRUSH_Y", CRUSH_YIELD));
     let belt_h = to_jbeam(Vec3::new(0.0, 0.95, 0.0)).z;
+    // The door above its crease (the upper inner panel and the belt
+    // reinforcement): `GEN3_DOOR_UP_Y` times the door's yield.
+    let door_up_h = to_jbeam(Vec3::new(0.0, 0.75, 0.0)).z;
+    let duy = env("GEN3_DOOR_UP_Y", 1.0);
     // The footwell: the floor, sills and hinge pillars ahead of the front
     // seats (the side tests strike behind it).
     let foot_y = to_jbeam(Vec3::new(0.0, 0.0, 0.40)).y;
@@ -2168,8 +2446,23 @@ pub fn rig(model: &Model) -> Rig {
         let crush_zone = mid.y < fw_y - 0.05 || mid.y > rear_y;
         if b.part.is_door() {
             b.deform *= dy;
+            if mid.z > door_up_h {
+                b.deform *= duy;
+            }
         } else if b.part == body && crush_zone && b.role != Role::Sheet {
-            b.deform *= cy;
+            // The suspension towers (front strut, rear wheelhouse) carry the
+            // car's weight into the rails: at the crush zone's 0.28 two of
+            // their beams yielded under the parked car; they keep round 3's
+            // 0.4, which none did ([`TOWER_YIELD`]).
+            let tower = |i: usize| {
+                let n = &r.car.nodes[i].name;
+                n.starts_with("tw") || n.starts_with("wh")
+            };
+            b.deform *= if tower(b.a) || tower(b.b) {
+                cy.max(env("GEN3_TOWER_Y", TOWER_YIELD))
+            } else {
+                cy
+            };
         } else if b.part == body && mid.y >= fw_y - 0.05 && mid.y <= rear_y {
             b.deform *= if mid.z > belt_h {
                 ry
@@ -2180,24 +2473,160 @@ pub fn rig(model: &Model) -> Rig {
             };
         }
     }
+    // The doors' side intrusion beams: `GEN3_INTRUSION_Y` times their yield.
+    let iy = env("GEN3_INTRUSION_Y", INTRUSION_YIELD);
+    for b in &mut r.car.beams {
+        if b.role == Role::Intrusion && b.deform.is_finite() {
+            b.deform *= iy;
+        }
+    }
+    // The A-pillar's chords (hinge pillar top to the header, outer and inner
+    // walls): a hot-stamped section, its yield `GEN3_APILLAR_Y` times the
+    // greenhouse's.
+    let ay = env("GEN3_APILLAR_Y", APILLAR_YIELD);
+    let chord_ends = ["hp2", "hpi1", "rr0", "rri0"];
+    for b in &mut r.car.beams {
+        let na = &r.car.nodes[b.a].name;
+        let nb = &r.car.nodes[b.b].name;
+        let is = |n: &str| {
+            chord_ends
+                .iter()
+                .any(|c| n.len() == c.len() + 1 && n.starts_with(c))
+        };
+        let low = |n: &str| n.starts_with("hp");
+        if b.role == Role::PillarA && is(na) && is(nb) && low(na) != low(nb) && b.deform.is_finite()
+        {
+            b.deform *= ay;
+        }
+    }
+    // The floor: cross members at the stations that carry one (sill to the
+    // floor rail and the tunnel), the floor pan elsewhere. A pole at the
+    // B-pillar's station meets the sill between two cross members and bends
+    // it; a wide barrier pushes the sill at every station and loads them
+    // end on.
+    if std::env::var("GEN3_OLD_SILL").is_err() {
+        let (cmy, pany) = (
+            env("GEN3_CM_Y", CROSS_MEMBER_YIELD),
+            env("GEN3_PAN_Y", FLOOR_PAN_YIELD),
+        );
+        // (station, kind): kind 0 sill, 1 floor rail or tunnel.
+        let station = |n: &str| -> Option<(usize, u8)> {
+            let t = n.trim_end_matches(['L', 'R']);
+            for (pfx, kind) in [("slo", 0u8), ("slt", 0), ("slb", 0), ("flr", 1), ("tn", 1)] {
+                if let Some(k) = t.strip_prefix(pfx) {
+                    if let Ok(k) = k.parse::<usize>() {
+                        return Some((k, kind));
+                    }
+                }
+            }
+            None
+        };
+        let cm = |k: usize| k != 2;
+        for b in &mut r.car.beams {
+            if b.part != body || !b.deform.is_finite() || b.break_group.is_some() {
+                continue;
+            }
+            let (Some((ka, ta)), Some((kb, tb))) = (
+                station(&r.car.nodes[b.a].name),
+                station(&r.car.nodes[b.b].name),
+            ) else {
+                continue;
+            };
+            // The sill's own section at a station (its outer wall onto its
+            // top and bottom): `GEN3_SILL_SEC_Y`.
+            if ta == 0 && tb == 0 {
+                if ka == kb {
+                    b.deform *= env("GEN3_SILL_SEC_Y", 1.0);
+                } else {
+                    b.deform *= env("GEN3_LONG_Y", 1.0);
+                }
+                continue;
+            }
+            if ta == 1 && tb == 1 && ka != kb {
+                b.deform *= env("GEN3_LONG_Y", 1.0);
+                continue;
+            }
+            // Across the floor: sill to floor, or floor rail to tunnel.
+            let across = ta != tb
+                || (ta == 1
+                    && (r.car.nodes[b.a].name.starts_with("tn")
+                        != r.car.nodes[b.b].name.starts_with("tn")));
+            if !across {
+                continue;
+            }
+            // The footwell's floor (toe board to the seat's front cross
+            // member) keeps its own yield: the frontal's feet intrusion.
+            b.deform *= if ka == kb && cm(ka) {
+                cmy
+            } else if ka.max(kb) <= 1 {
+                1.0
+            } else {
+                pany
+            };
+        }
+        // The B-pillar: hot-stamped above the door's crease, the tailored
+        // blank's soft zone below it.
+        let (bu, bl) = (
+            env("GEN3_BP_UP", BPILLAR_UPPER_YIELD),
+            env("GEN3_BP_LO", BPILLAR_LOWER_YIELD),
+        );
+        let split = to_jbeam(Vec3::new(0.0, 0.60, 0.0)).z;
+        for b in &mut r.car.beams {
+            if b.role != Role::PillarB || !b.deform.is_finite() || b.break_group.is_some() {
+                continue;
+            }
+            let mid = 0.5 * (r.car.nodes[b.a].p + r.car.nodes[b.b].p);
+            b.deform *= if mid.z > split { bu } else { bl };
+        }
+    }
     let _ = (ARCH_R, &eng);
     r
 }
 
 /// The yield of the crush zones' body members (rails, cans, aprons, rear
-/// rails and their webs) as a multiple of the census's 1.15 %: 0.46 %, in
+/// rails and their webs) as a multiple of the census's 1.15 %: 0.32 %, in
 /// the census's body band (p10 0.2-0.3 %, p50 1.0-1.3 %). Measured on the
-/// wall (surface contact on): dynamic crush 583 to 602 mm (620-750), t_m 60
-/// to 70 ms (63-76), b1 41 to 35.5 /s (<= 39.2).
-pub const CRUSH_YIELD: f32 = 0.4;
+/// wall (surface contact on), round 4's structure: dynamic crush 581 mm at
+/// 0.4, 619 at 0.3, 631 at 0.28 (620-750); t_m 66 / 71 / 72 ms (63-76);
+/// b1 42.1 / 39.8 / 39.2 (<= 39.2).
+pub const CRUSH_YIELD: f32 = 0.28;
+/// The suspension towers' beams in the crush zone (see the zone pass).
+pub const TOWER_YIELD: f32 = 0.4;
 /// The footwell's (floor, sills, hinge pillars and firewall ahead of the
 /// front seats, below the belt): 4.1 %, under the census's body p90
 /// (4.9-9.3 %): high-strength steel there. Feet intrusion 94 to 53 mm (<= 67).
 pub const FOOTWELL_YIELD: f32 = 3.0;
-/// The greenhouse's (above the belt, firewall to the rear shelf): 0.62 %.
-/// FMVSS 216a 5.94 to 5.02 x weight (4.48-5.32); its frontal racking stays
-/// within the cabin (the A-pillar's chords carry the header).
-pub const GREENHOUSE_YIELD: f32 = 0.45;
+/// The greenhouse's (above the belt, firewall to the rear shelf): 0.52 %.
+/// FMVSS 216a 5.94 to 5.02 x weight at 0.45 in round 3 (4.48-5.32); with
+/// round 4's hot-stamped A-pillar and B-pillar upper, 5.57 at 0.45, 5.32 at
+/// 0.38.
+pub const GREENHOUSE_YIELD: f32 = 0.38;
+/// The A-pillar chords' yield over the greenhouse's: a hot-stamped section
+/// (boron steel, about 1,000-1,200 MPa against 300-400 MPa for the HSLA the
+/// greenhouse's yield stands for).
+pub const APILLAR_YIELD: f32 = 3.0;
+/// The floor's cross members ahead of and behind the B-pillar (m): the
+/// footwell's rear (the front seat's front mounts; the old evenly spaced
+/// station, which the frontal's feet intrusion needs) and the front seat's
+/// rear mounts.
+pub const SEAT_CM_F: f32 = 0.53;
+pub const SEAT_CM_R: f32 = 0.35;
+/// The floor cross members' yield over the census's (dash, seat front, seat
+/// rear, kick-up): high-strength sections a wide side load reaches through
+/// the sill (`GEN3_CM_Y`).
+pub const CROSS_MEMBER_YIELD: f32 = 3.0;
+/// The floor pan's (the floor between the cross members and its diagonals):
+/// 0.7 mm sheet, which buckles in plane (`GEN3_PAN_Y`).
+pub const FLOOR_PAN_YIELD: f32 = 0.3;
+/// The B-pillar's upper section over the greenhouse's yield (hot-stamped)
+/// and its lower section over the side's (the tailored blank's soft zone):
+/// `GEN3_BP_UP`, `GEN3_BP_LO`.
+pub const BPILLAR_UPPER_YIELD: f32 = 3.0;
+pub const BPILLAR_LOWER_YIELD: f32 = 0.5;
+/// How far the intrusion beam's outer chord sits under the door skin (m).
+pub const INTRUSION_OUT: f32 = 0.02;
+/// The door intrusion beams' yield over their role's.
+pub const INTRUSION_YIELD: f32 = 1.0;
 
 /// Spacing of the shut lines' edge nodes (m): a real closure's flange is
 /// bolted, hinged or stopped every 15-25 cm along it.
@@ -2511,19 +2940,6 @@ fn edge_nodes(
         }
     }
     edge
-}
-
-/// The smallest eigenvalue of a symmetric 3 × 3 and its axis (inverse
-/// iteration on the shifted matrix).
-fn weakest_axis(m: glam::Mat3) -> (f32, Vec3) {
-    let tr = m.x_axis.x + m.y_axis.y + m.z_axis.z;
-    let shifted = glam::Mat3::from_diagonal(Vec3::splat(tr + 1e-3)) - m;
-    // The largest eigenvector of (tr·I − M) is M's smallest.
-    let mut v = Vec3::new(0.577, 0.577, 0.577);
-    for _ in 0..60 {
-        v = (shifted * v).normalize_or(Vec3::X);
-    }
-    (v.dot(m * v), v)
 }
 
 /// The raycast wheels' mass on their hub nodes (half a wheel each).

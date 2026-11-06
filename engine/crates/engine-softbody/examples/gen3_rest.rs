@@ -249,6 +249,22 @@ fn main() -> Result<(), String> {
             s.step();
             t += 0.0005;
             k += 1;
+            if k % 1000 == 0 && std::env::var("GEN3_KE").is_ok() {
+                let (mut ke, mut m, mut p) = (0.0f32, 0.0f32, Vec3::ZERO);
+                for n in &s.nodes {
+                    ke += 0.5 * n.mass * n.vel.length_squared();
+                    m += n.mass;
+                    p += n.mass * n.vel;
+                }
+                let v = p / m;
+                println!(
+                    "  t {t:.1} s: KE {ke:.4} J, of it the mean motion {:.4} J (v {:.4} {:.4} {:.4})",
+                    0.5 * m * v.length_squared(),
+                    v.x,
+                    v.y,
+                    v.z
+                );
+            }
             if trace && (k <= 60 || k % 2000 == 0) {
                 let (i, v) = s
                     .nodes
@@ -274,6 +290,42 @@ fn main() -> Result<(), String> {
             .map(|n| 0.5 * n.mass * n.vel.length_squared())
             .sum();
         println!("[{label}] parked {secs} s: broken {broken}, bent {bent}, KE {ke:.3} J");
+        // `GEN3_KE`: where the kinetic energy is (the fastest nodes, the parts).
+        if std::env::var("GEN3_KE").is_ok() {
+            let nm = |i: usize| {
+                desc.nodes
+                    .get(i)
+                    .map_or(format!("#{i}"), |n| n.name.clone())
+            };
+            let mut v: Vec<(f32, usize)> = s
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (0.5 * n.mass * n.vel.length_squared(), i))
+                .collect();
+            v.sort_by(|a, b| b.0.total_cmp(&a.0));
+            for &(e, i) in v.iter().take(12) {
+                println!(
+                    "    ke {} {:.4} J ({:.3} m/s, {:.2} kg)",
+                    nm(i),
+                    e,
+                    s.nodes[i].vel.length(),
+                    s.nodes[i].mass
+                );
+            }
+            for p in desc.parts.iter().filter(|p| !p.nodes.is_empty()) {
+                let e: f32 = p
+                    .nodes
+                    .iter()
+                    .filter(|&&i| (i as usize) < s.nodes.len())
+                    .map(|&i| {
+                        let n = &s.nodes[i as usize];
+                        0.5 * n.mass * n.vel.length_squared()
+                    })
+                    .sum();
+                println!("    ke part {} {:.4} J", p.name, e);
+            }
+        }
         if std::env::var("GEN3_DUMP").is_ok() {
             for b in s.beams.iter().filter(|b| b.broken || b.bent()).take(30) {
                 let nm = |i: u32| {

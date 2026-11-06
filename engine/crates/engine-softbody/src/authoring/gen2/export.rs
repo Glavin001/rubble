@@ -157,10 +157,13 @@ pub fn jbeam_files(
                 s.insert("beamDamp".into(), json!(0));
                 s.insert("beamLimitSpring".into(), json!(STOP_SPRING));
                 s.insert("beamLimitDamp".into(), json!(STOP_DAMP));
-                s.insert(
-                    "beamShortBound".into(),
-                    num(((l - STOP_LEFT) / l).max(0.05)),
-                );
+                // `GEN3_STOP_CLOSE`: engage after this much closure instead.
+                let close = std::env::var("GEN3_STOP_CLOSE")
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .or_else(|| car.stop_close.get(&j).copied())
+                    .unwrap_or(l - STOP_LEFT);
+                s.insert("beamShortBound".into(), num((close / l).max(0.05)));
                 s.insert("beamLongBound".into(), json!(100.0));
                 s.insert("boundZone".into(), json!(0.02));
                 s.insert("beamStrength".into(), json!("FLT_MAX"));
@@ -168,8 +171,18 @@ pub fn jbeam_files(
                 brows.push(json!([n(b.a), n(b.b), Value::Object(s)]));
                 continue;
             }
-            o.insert("beamSpring".into(), num(b.k));
-            o.insert("beamDamp".into(), num(b.c));
+            if b.role == Role::Clip {
+                // ANISOTROPIC (spec §20): soft while compressed, the bolt in
+                // tension.
+                o.insert("beamType".into(), json!("|ANISOTROPIC"));
+                o.insert("beamSpring".into(), num(b.k * CLIP_COMPRESSION));
+                o.insert("beamDamp".into(), num(b.c * CLIP_COMPRESSION.sqrt()));
+                o.insert("springExpansion".into(), num(b.k));
+                o.insert("dampExpansion".into(), num(b.c));
+            } else {
+                o.insert("beamSpring".into(), num(b.k));
+                o.insert("beamDamp".into(), num(b.c));
+            }
             o.insert("beamDeform".into(), num(b.deform));
             o.insert("beamStrength".into(), num(b.strength));
             if b.deform_limit > 0.0 {

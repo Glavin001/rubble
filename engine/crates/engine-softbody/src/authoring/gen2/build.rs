@@ -140,6 +140,10 @@ pub enum Role {
     Hinge,
     /// Bolts: fenders, bumper fascias.
     Bolt,
+    /// A clip or slotted mount (bumper covers): ANISOTROPIC, [`CLIP_COMPRESSION`]
+    /// of its spring in compression (the cover slides back on it), the bolt's
+    /// spring and strength in tension.
+    Clip,
     /// Compression-only seals and stops (door edges on pillars, lids on seats).
     Bearing,
     /// A shut line's edge node tied into its own panel's frame (the panel's
@@ -254,6 +258,22 @@ pub fn stiff_mult() -> f32 {
     env_f("GEN2_STIFF", 1.0)
 }
 
+/// The smallest eigenvalue of a symmetric 3 × 3 and its axis (power
+/// iteration on the shifted matrix).
+pub fn weakest_axis(m: glam::Mat3) -> (f32, Vec3) {
+    let tr = m.x_axis.x + m.y_axis.y + m.z_axis.z;
+    let shifted = glam::Mat3::from_diagonal(Vec3::splat(tr + 1e-3)) - m;
+    // The largest eigenvector of (tr·I − M) is M's smallest.
+    let mut v = Vec3::new(0.577, 0.577, 0.577);
+    for _ in 0..60 {
+        v = (shifted * v).normalize_or(Vec3::X);
+    }
+    (v.dot(m * v), v)
+}
+
+/// A [`Role::Clip`]'s spring in compression as a share of its tension spring.
+pub const CLIP_COMPRESSION: f32 = 0.05;
+
 /// Damping ratio of every spring beam (census ζ 0.03–0.05).
 pub const ZETA: f32 = 0.04;
 
@@ -316,6 +336,7 @@ impl Role {
             // Hardware (census: hinges 30–98 kN a beam, k 0.5–3e6).
             Role::Hinge => fixed(1.5e6, inf, 40e3),
             Role::Bolt => fixed(0.8e6, inf, 9e3),
+            Role::Clip => fixed(0.8e6, inf, 9e3),
             Role::EdgeTie => s(sheet_kl(part), e, 0.0, false),
             Role::EdgeStop => RoleSpec {
                 support: true,
@@ -324,7 +345,7 @@ impl Role {
             // Seals and stops: SUPPORT, 100–280 kN.
             Role::Bearing => RoleSpec {
                 support: true,
-                ..fixed(0.6e6, inf, 150e3)
+                ..fixed(0.6e6, env_f("GEN3_BEARING_EPS", inf), 150e3)
             },
             Role::Engine => fixed(6e6, inf, inf),
             Role::Mount => fixed(2.0e6, inf, 60e3),
@@ -426,6 +447,9 @@ pub struct Car {
     /// the damping, so the bound is the springs' highest mode at
     /// [`OMEGA_H_CENTRED`], damping not counted.
     pub centred_damping: bool,
+    /// Per [`Role::Stop`] beam: the closure (m) after which it engages
+    /// (absent: [`super::export::STOP_LEFT`] of its length left).
+    pub stop_close: HashMap<usize, f32>,
     by_name: HashMap<String, usize>,
     pair: HashMap<(usize, usize), usize>,
 }
@@ -770,6 +794,45 @@ impl Car {
                 if picked == 0 {
                     if let Some(&(_, b)) = best.first() {
                         self.beam(i, b, Role::Backing, part);
+                    }
+                }
+                // Ties that span all three directions: a lane node whose ties
+                // lie in one plane (its edge, the opposite corner and a
+                // backing node in line with it) has a free mode across that
+                // plane and sags under gravity (a 0.65 m sill bay: 29 mm in
+                // 10 s). While their directions' second moment has a weak
+                // axis, the backing node most along it (within 1.5× the
+                // nearest's distance, then within 0.5 m) is tied too.
+                for _ in 0..2 {
+                    let ties: Vec<Vec3> = self
+                        .beams
+                        .iter()
+                        .filter(|b| b.a == i || b.b == i)
+                        .map(|b| {
+                            let o = if b.a == i { b.b } else { b.a };
+                            (self.p(o) - p).normalize_or_zero()
+                        })
+                        .collect();
+                    let m = ties.iter().fold(glam::Mat3::ZERO, |m, d| {
+                        m + glam::Mat3::from_cols(*d * d.x, *d * d.y, *d * d.z)
+                    });
+                    let (lam, axis) = weakest_axis(m);
+                    if lam > 0.08 * ties.len() as f32 {
+                        break;
+                    }
+                    let pick = best
+                        .iter()
+                        .filter(|&&(d, b)| d <= 0.5 && !self.has_beam(i, b))
+                        .max_by(|x, y| {
+                            let f = |b: usize| (self.p(b) - p).normalize_or_zero().dot(axis).abs();
+                            f(x.1).total_cmp(&f(y.1))
+                        })
+                        .map(|x| x.1);
+                    match pick {
+                        Some(b) => {
+                            self.beam(i, b, Role::Backing, part);
+                        }
+                        None => break,
                     }
                 }
             }

@@ -174,6 +174,38 @@ fn main() -> Result<(), String> {
             next += 0.01;
         }
     }
+    // `PROBE_BENT=a,b`: the named nodes' beams at the end, the most yielded
+    // first (rest length change, force, yield force).
+    if let Ok(list) = std::env::var("PROBE_BENT") {
+        let want: Vec<&str> = list.split(',').collect();
+        let mut v: Vec<(f32, String)> = s
+            .beams
+            .iter()
+            .filter(|b| b.a != b.b)
+            .filter_map(|b| {
+                let (na, nb) = (car.node_name(b.a as usize), car.node_name(b.b as usize));
+                if !want.iter().any(|w| na == *w || nb == *w) {
+                    return None;
+                }
+                let dr = b.rest - b.rest0;
+                Some((
+                    dr.abs(),
+                    format!(
+                        "{na}-{nb}: rest {:+.1} mm of {:.0} mm, yield {:.1} kN, k {:.2e}{}",
+                        dr * 1e3,
+                        b.rest0 * 1e3,
+                        b.tc / 1e3,
+                        b.k,
+                        if b.broken { " BROKEN" } else { "" }
+                    ),
+                ))
+            })
+            .collect();
+        v.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for x in v.iter().take(24) {
+            println!("  bent {}", x.1);
+        }
+    }
     if std::env::var("PROBE_ENERGY").is_ok() {
         // Plastic work by zone (yield force now × the rest length's change:
         // an upper estimate under hardening): ahead of the firewall (the
