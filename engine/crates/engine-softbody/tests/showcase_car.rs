@@ -1951,7 +1951,7 @@ fn g_pulling_a_door_tears_it_off() {
                         r += u * -bm.force;
                     }
                     format!(
-                        "{} {:.1} [along {:.1} out {:.1} up {:.1}] (ropes at {:?} of strength)",
+                        "{} {:.1} [along {:.1} out {:.1} up {:.1}] (ropes at {:?} of strength; group, kind, broken {:?})",
                         g.0,
                         g.1.iter().map(|&j| -s.beams[j].force).sum::<f32>() / 1e3,
                         -r.dot(h.along) / 1e3,
@@ -1959,6 +1959,9 @@ fn g_pulling_a_door_tears_it_off() {
                         -r.y / 1e3,
                         g.1.iter()
                             .map(|&j| (-s.beams[j].force / s.beams[j].strength * 100.0).round())
+                            .collect::<Vec<_>>(),
+                        g.1.iter()
+                            .map(|&j| (s.beams[j].group, s.beams[j].kind, s.beams[j].broken))
                             .collect::<Vec<_>>()
                     )
                 })
