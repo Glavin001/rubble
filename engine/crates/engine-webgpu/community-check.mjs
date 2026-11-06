@@ -88,27 +88,31 @@ for (const c of cars) {
   const first = c.configs.find((k) => PREFER.includes(k.pc)) ?? c.configs[0];
   for (const k of ALL ? c.configs : [first]) {
     const q = `solver=explicit&mod=/__mods/${c.folder}&pc=${encodeURIComponent(k.pc)}${(k.wheels ?? 1) > 0 ? '&wheels=raycast' : ''}`;
-    const row = { car: c.label, pc: k.pc, mb: c.megabytes, nodes: k.nodes, beams: k.beams, rest: '', wall: '', url: `/softbody.html?${q}&preset=wall56` };
+    const row = { car: c.label, pc: k.pc, mb: c.megabytes, nodes: k.nodes, beams: k.beams, rest: '', wall: '', url: `/softbody.html?${q}&preset=${(k.wheels ?? 1) > 0 ? 'wall56' : 'drop15'}` };
     try {
       await open(`${q}&xscene=idle&cam=left`);
       const d = await step(4000);
       row.rest = `${d.broken} broken, ${d.yielded} bent`;
       const still = await send('Page.captureScreenshot', { format: 'jpeg', quality: 80 });
       writeFileSync(join(OUT, `${c.folder}-${k.pc.split('/').pop().replace(/\.pc$/, '')}-rest.jpg`), Buffer.from(still.result.data, 'base64'));
-      await open(`${q}&preset=wall56`);
-      const w = await step(3000);
+      // A vehicle without wheels (the yacht) takes the 15 m drop.
+      const crash = (k.wheels ?? 1) > 0 ? 'wall56' : 'drop15';
+      await open(`${q}&preset=${crash}`);
+      // (The drop: 15 m takes 1.75 s to fall.)
+      const w = await step(crash === 'drop15' ? 6000 : 3000);
       row.wall = `${w.broken} broken, ${w.yielded} bent`;
       const shot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 80 });
-      writeFileSync(join(OUT, `${c.folder}-${k.pc.split('/').pop().replace(/\.pc$/, '')}-wall56.jpg`), Buffer.from(shot.result.data, 'base64'));
+      writeFileSync(join(OUT, `${c.folder}-${k.pc.split('/').pop().replace(/\.pc$/, '')}-${crash}.jpg`), Buffer.from(shot.result.data, 'base64'));
+      row.wall = `${crash}: ${row.wall}`;
       // The vehicle stays across scene and preset changes (the lab's menu).
-      for (const v of ['s:sidepole', 's:yard', 'p:pole29']) {
+      for (const v of (k.wheels ?? 1) > 0 ? ['s:sidepole', 's:yard', 'p:pole29'] : ['s:sidepole', 'p:pole29']) {
         await evaluate(`(() => { const s = document.getElementById('labPreset'); s.value = '${v}'; s.dispatchEvent(new Event('change')); })()`);
         await new Promise((r) => setTimeout(r, 1500));
         for (let i = 0; i < 1800 && !(await evaluate('window.__ready === true').catch(() => false)); i++) await new Promise((r) => setTimeout(r, 100));
         const href = await evaluate('location.search');
         if (!href.includes(encodeURIComponent(`/__mods/${c.folder}`)) && !href.includes(`/__mods/${c.folder}`)) throw new Error(`${v} lost the vehicle: ${href}`);
       }
-      row.wall += '; kept across sidepole, yard, pole29';
+      row.wall += (k.wheels ?? 1) > 0 ? '; kept across sidepole, yard, pole29' : '; kept across sidepole, pole29';
     } catch (e) {
       row.rest ||= `error: ${String(e.message ?? e).slice(0, 160)}`;
       row.wall ||= 'not run';

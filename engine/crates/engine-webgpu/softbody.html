@@ -207,7 +207,13 @@
       u.searchParams.set('mod', mod);
       u.searchParams.set('pc', pc);
       // Raycast wheels when it has wheels (a boat has none).
-      if (Number(wheels) > 0) u.searchParams.set('wheels', 'raycast'); else u.searchParams.delete('wheels');
+      if (Number(wheels) > 0) u.searchParams.set('wheels', 'raycast');
+      else {
+        // No wheels (the yacht): its scene is the 15 m drop.
+        u.searchParams.delete('wheels');
+        u.searchParams.delete('xscene');
+        u.searchParams.set('preset', 'drop15');
+      }
       location.href = u.href;
     };
     // Query parameters a scene change keeps: the solver and the vehicle.

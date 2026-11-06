@@ -1287,6 +1287,21 @@ The CCF tears its front fascia off (its bumper break groups), and a piece lands 
 to the side in the browser crash lab: **open** whether that is the content's light
 fascia or too much energy in the tear.
 
+**Browser (GPU) against the CPU reference** (2026-11-06, JBeam mode on raycast wheels
+both; `community-check.mjs` against `jbeam_accept wheels=raycast`), the wall at
+56 km/h after 1.5 s, broken / bent: ETK 2 / 369 against 2 / 359, CCF 142 / 494
+against 144 / 493, Vertex 26 / 466 against 26 / 472. The lab's impact detection fires
+at 570 ms (the run-up), not before. A GPU ETK that sheds fragments and ends as a heap
+was the `.truck` path's (before the JBeam-mode default).
+
+**Wheels coming off after the wall (2026-11-06): the visual, not the physics.** The
+ETK breaks two beams at 56 km/h (a bounded transmission-to-differential beam and the
+bonnet latch), the SUV 44 (headlights, its turbo intake); no hub, suspension or
+break-group beam. Its hub nodes stay within 3 cm of their place against the centre
+of mass. The wheels drawn away from the car were the wheel meshes placed at their
+`.dae` model origin, fixed by moving each wheel piece onto its wheel
+(`flexmesh`, fd87ec32 on).
+
 **Through the `.truck` export the same content does not rest.** The ETK on raycast
 wheels through `desc_to_truck` (RoR's rules): 11 broken, 99 bent and a node at
 9.8 m/s within 1 s (JBeam mode: 0, 0, 0.15 m/s). That is what tore the browser drive

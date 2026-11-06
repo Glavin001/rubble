@@ -620,4 +620,23 @@ fn main() {
             report(&format!("crash {:.1} s", 0.1 * k as f32), &s, ke0);
         }
     }
+    if opt("crashbroken=").is_some() {
+        // The broken beams after the crash by the parts of their ends.
+        let name = |i: u32| desc.nodes.get(i as usize).map_or("wheel".to_string(), |n| n.name.clone());
+        let mut by: std::collections::BTreeMap<String, usize> = Default::default();
+        for b in s.beams.iter().filter(|b| b.broken) {
+            let part = |i: u32| desc.parts.iter().find(|p| p.nodes.contains(&i)).map_or("?".to_string(), |p| p.name.clone());
+            *by.entry(format!("{:?} {}~{}", b.kind, part(b.a), part(b.b))).or_default() += 1;
+            let _ = name;
+        }
+        for (k, n) in by {
+            println!("  broken {n}: {k}");
+        }
+        // The hubs' travel against the body's centre of mass.
+        let n0 = desc.nodes.len();
+        let com: Vec3 = s.nodes[..n0].iter().map(|q| q.pos * q.mass).sum::<Vec3>() / s.nodes[..n0].iter().map(|q| q.mass).sum::<f32>();
+        for w in &desc.wheels {
+            println!("  hub {} at {:.2?} from the centre of mass", name(w.node1), s.nodes[w.node1 as usize].pos - com);
+        }
+    }
 }
