@@ -26,6 +26,8 @@ pub const H: f32 = 0.0005;
 pub const ROW_BOUND: f32 = 4.8;
 /// Mass of a contact-only node (kg): the agreed pattern's light lane nodes.
 pub const CONTACT_MASS: f32 = 0.15;
+/// Mass of a shut line's edge node (kg), from its part's budget.
+pub const EDGE_MASS: f32 = 0.15;
 /// Largest spacing of contact points along a pole lane (m).
 pub const LANE: f32 = 0.20;
 /// Beams shorter than this take the spring of one this long (BeamNG springs
@@ -140,6 +142,12 @@ pub enum Role {
     Bolt,
     /// Compression-only seals and stops (door edges on pillars, lids on seats).
     Bearing,
+    /// A shut line's edge node tied into its own panel's frame (the panel's
+    /// sheet; the step's bound softens these before the panel's own beams).
+    EdgeTie,
+    /// A SUPPORT stop across a shut line between two edge nodes (the
+    /// bound softens it before the panels' own beams).
+    EdgeStop,
     /// The powertrain block (rigid).
     Engine,
     /// Engine mounts.
@@ -154,7 +162,7 @@ pub enum Role {
 fn role_rank(r: Role) -> u8 {
     match r {
         Role::Tie | Role::Backing | Role::Bend => 0,
-        Role::Sheet | Role::Bearing => 1,
+        Role::Sheet | Role::Bearing | Role::EdgeTie | Role::EdgeStop => 1,
         Role::Web
         | Role::Cross
         | Role::Floor
@@ -256,6 +264,14 @@ pub const OMEGA_H: f32 = 1.85;
 pub const OMEGA_H_CENTRED: f32 = 1.92;
 
 impl Role {
+    /// Lane ties and shut-line edge ties: the springs the stability bound
+    /// and the row cap soften first.
+    pub fn yields_first(self) -> bool {
+        matches!(
+            self,
+            Role::Tie | Role::Backing | Role::EdgeTie | Role::EdgeStop
+        )
+    }
     pub fn spec(self, part: Part) -> RoleSpec {
         let inf = f32::INFINITY;
         let s = |kl: f32, eps: f32, kg_per_m: f32, lim: bool| RoleSpec {
@@ -300,6 +316,11 @@ impl Role {
             // Hardware (census: hinges 30–98 kN a beam, k 0.5–3e6).
             Role::Hinge => fixed(1.5e6, inf, 40e3),
             Role::Bolt => fixed(0.8e6, inf, 9e3),
+            Role::EdgeTie => s(sheet_kl(part), e, 0.0, false),
+            Role::EdgeStop => RoleSpec {
+                support: true,
+                ..fixed(0.6e6, inf, 150e3)
+            },
             // Seals and stops: SUPPORT, 100–280 kN.
             Role::Bearing => RoleSpec {
                 support: true,
@@ -330,6 +351,11 @@ pub struct Node {
     pub no_group: bool,
     /// A mass of its own (kg), outside its part's budget (0: none).
     pub fixed_mass: f32,
+    /// A shut line's edge node: [`EDGE_MASS`] taken from its part's budget
+    /// (the panel's sheet stays with the nodes that carried it, so adding
+    /// edge nodes does not lighten them; the edge ties give way to the
+    /// step's bound instead).
+    pub edge: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -418,6 +444,7 @@ impl Car {
             self_collision: false,
             no_group: false,
             fixed_mass: 0.0,
+            edge: false,
         });
         let i = self.nodes.len() - 1;
         self.by_name.insert(name.to_string(), i);
@@ -764,7 +791,7 @@ impl Car {
             }
             let l = self.p(b.a).distance(self.p(b.b));
             for e in [b.a, b.b] {
-                if self.nodes[e].part == b.part && !self.nodes[e].contact {
+                if self.nodes[e].part == b.part && !self.nodes[e].contact && !self.nodes[e].edge {
                     w[e] += 0.5 * kgm * l;
                 }
             }
@@ -820,11 +847,23 @@ impl Car {
             }
         }
         for (&part, &kg) in &self.part_mass.clone() {
+            let edges = (0..n)
+                .filter(|&i| self.nodes[i].part == part && self.nodes[i].edge)
+                .count();
+            for i in 0..n {
+                if self.nodes[i].part == part && self.nodes[i].edge {
+                    self.nodes[i].mass = EDGE_MASS;
+                }
+            }
             let ids: Vec<usize> = (0..n)
-                .filter(|&i| self.nodes[i].part == part && self.nodes[i].fixed_mass == 0.0)
+                .filter(|&i| {
+                    self.nodes[i].part == part
+                        && self.nodes[i].fixed_mass == 0.0
+                        && !self.nodes[i].edge
+                })
                 .collect();
             let contact = ids.iter().filter(|&&i| self.nodes[i].contact).count();
-            let budget = kg - contact as f32 * CONTACT_MASS;
+            let budget = kg - contact as f32 * CONTACT_MASS - edges as f32 * EDGE_MASS;
             assert!(
                 budget > 0.0,
                 "{part:?}: {kg} kg for {contact} contact nodes"
@@ -936,12 +975,12 @@ impl Car {
                     .sum();
                 let contact_only = self.row_cap_contact_only
                     && !self.nodes[i].contact
-                    && adj[i].iter().all(|&j| !matches!(self.beams[j].role, Role::Tie | Role::Backing));
+                    && adj[i].iter().all(|&j| !self.beams[j].role.yields_first());
                 if row > cap * 1.0001 && !contact_only {
                     over = true;
                     // The lane ties give way first: a structural node keeps its
                     // members' census stiffness while its ties can absorb the excess.
-                    let tie = |j: usize| matches!(self.beams[j].role, Role::Tie | Role::Backing);
+                    let tie = |j: usize| self.beams[j].role.yields_first();
                     let part_row = |want_tie: bool| -> f32 {
                         adj[i]
                             .iter()
@@ -1027,7 +1066,12 @@ impl Car {
                 let mut y = vec![Vec3::ZERO; n];
                 for (j, b) in self.beams.iter().enumerate() {
                     let d = dirs[j];
-                    let keff = ks[j] + if centred { 0.0 } else { 2.0 * damp(ks[j], b) / H };
+                    let keff = ks[j]
+                        + if centred {
+                            0.0
+                        } else {
+                            2.0 * damp(ks[j], b) / H
+                        };
                     let f = d * (keff * d.dot(x[b.a] - x[b.b]));
                     y[b.a] += f;
                     y[b.b] -= f;
@@ -1047,11 +1091,20 @@ impl Car {
             }
             omega_h = lam.sqrt() * H;
             let limit = if centred { OMEGA_H_CENTRED } else { OMEGA_H };
-            if std::env::var("GEN3_MODE").is_ok() && (round < 3 || round % 50 == 0 || omega_h <= OMEGA_H) {
+            if std::env::var("GEN3_MODE").is_ok()
+                && (round < 3 || round % 50 == 0 || omega_h <= OMEGA_H)
+            {
                 let mut v: Vec<(f32, usize)> = (0..n).map(|i| (x[i].length(), i)).collect();
                 v.sort_by(|a, b| b.0.total_cmp(&a.0));
-                let top: Vec<String> = v.iter().take(6).map(|&(a, i)| format!("{} {:.2} ({:.2} kg)", self.nodes[i].name, a, m[i])).collect();
-                eprintln!("mode round {round}: omega_h {omega_h:.3}: {}", top.join(", "));
+                let top: Vec<String> = v
+                    .iter()
+                    .take(6)
+                    .map(|&(a, i)| format!("{} {:.2} ({:.2} kg)", self.nodes[i].name, a, m[i]))
+                    .collect();
+                eprintln!(
+                    "mode round {round}: omega_h {omega_h:.3}: {}",
+                    top.join(", ")
+                );
             }
             if omega_h <= limit {
                 break;
@@ -1065,13 +1118,24 @@ impl Car {
                 .iter()
                 .enumerate()
                 .map(|(j, b)| {
-                    let keff = ks[j] + if centred { 0.0 } else { 2.0 * damp(ks[j], b) / H };
+                    let keff = ks[j]
+                        + if centred {
+                            0.0
+                        } else {
+                            2.0 * damp(ks[j], b) / H
+                        };
                     keff * dirs[j].dot(x[b.a] - x[b.b]).powi(2)
                 })
                 .collect();
             let emax = e.iter().copied().fold(0.0, f32::max);
+            // Where the mode's carriers include a shut line's edge ties or
+            // stops, only those give (the panel keeps its census springs).
+            let edge_first = (0..e.len()).any(|j| {
+                e[j] >= 0.25 * emax && matches!(self.beams[j].role, Role::EdgeTie | Role::EdgeStop)
+            });
             for j in 0..e.len() {
-                if e[j] >= 0.25 * emax {
+                let edge = matches!(self.beams[j].role, Role::EdgeTie | Role::EdgeStop);
+                if e[j] >= 0.25 * emax && (edge || !edge_first) {
                     ks[j] *= 0.97;
                 }
             }

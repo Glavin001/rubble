@@ -3556,9 +3556,13 @@ fn markers(m: &mut Model) {
                 &format!("hinge_door_{name}_lower"),
                 sx(side_pt(zf - 0.03, 0.45)) - Vec3::new(s * 0.02, 0.0, 0.0),
             );
+            // The latch on the door's rear shut line at mid height (both
+            // doors' rear edges are straight sections below the belt: the
+            // rear door's frame runs back to the quarter light only above
+            // it), 3 cm in from the edge and 3 cm under the skin.
             m.marker(
                 &format!("latch_door_{name}"),
-                sx(side_pt(zr, 0.70)) - Vec3::new(s * 0.03, 0.0, 0.0),
+                sx(side_pt(zr + 0.03, 0.70)) - Vec3::new(s * 0.03, 0.0, 0.0),
             );
         }
         m.marker(

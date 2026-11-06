@@ -313,11 +313,24 @@ fn graph(
     web: Role,
     blocked: &dyn Fn(Vec3) -> bool,
 ) {
+    graph_pairs(r, ids, reach, part, web, blocked, &|_, _, _| true);
+}
+
+/// [`graph`] with a rule on the pair (`pair_ok(rig, a, b)`).
+fn graph_pairs(
+    r: &mut Rig,
+    ids: &[usize],
+    reach: f32,
+    part: Part,
+    web: Role,
+    blocked: &dyn Fn(Vec3) -> bool,
+    pair_ok: &dyn Fn(&Rig, usize, usize) -> bool,
+) {
     for (ka, &a) in ids.iter().enumerate() {
         for &b in &ids[ka + 1..] {
             let (pa, pb) = (r.g(a), r.g(b));
             let d = pa.distance(pb);
-            if d > reach || d < 0.03 {
+            if d > reach || d < 0.03 || !pair_ok(r, a, b) {
                 continue;
             }
             if segment_blocked(pa, pb, blocked) {
@@ -467,8 +480,27 @@ pub fn rig(model: &Model) -> Rig {
             Some(Role::PillarA),
             false,
         );
+        // The hinge pillar's front wall (the A-pillar lower's depth): behind
+        // the front wheel arch, under the fender, so the pillar is a box
+        // about 20 cm deep fore and aft, not a line of nodes at one station
+        // (it rotated back about the sill under the upper load path).
+        if std::env::var("GEN3_NO_HPF").is_err() {
+            let zf = (AXLE_F - ARCH_R - 0.08).max(hp_z + 0.12);
+            for (k, &y) in [0.45f32, 0.80].iter().enumerate() {
+                put(
+                    &mut r,
+                    format!("hpf{k}{x}"),
+                    inward(side(zf, y), 0.08),
+                    Some(Role::PillarA),
+                    false,
+                );
+            }
+        }
         let _ = (hp0, hp1, hp2, hpi0, hpi1);
-        for (k, &z) in [0.33f32, -0.08].iter().enumerate() {
+        // The A-pillar's middle (its top is the roof rail's front station,
+        // `rr0`/`rri0`, at the windshield header: one node, not two
+        // coincident ones the graph would leave unjoined).
+        for (k, &z) in [0.33f32].iter().enumerate() {
             let c = corner(z);
             put(
                 &mut r,
@@ -909,9 +941,55 @@ pub fn rig(model: &Model) -> Rig {
     // The body's member graph.
     let body_ids: Vec<usize> = (0..r.car.nodes.len()).collect();
     let apertures = [Aperture::of(&door_f.pos), Aperture::of(&door_r.pos)];
-    graph(&mut r, &body_ids, REACH_BODY, body, Role::Web, &|p| {
-        body_blocked(p, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06))
-    });
+    // The front structure's upper rails and towers meet the cabin at the
+    // A-pillar's base (the hinge pillar and cowl), not the greenhouse: no
+    // beam from them to a node above the belt (they were struts from the
+    // aprons up to the A-pillar's middle and the windshield, under the cowl,
+    // and pushed the greenhouse up and back in the wall).
+    let split = std::env::var("GEN3_APRON_TO_GREENHOUSE").is_err();
+    let front_member = |r: &Rig, i: usize| {
+        matches!(
+            r.member[i],
+            Some(Role::Apron) | Some(Role::Rail) | Some(Role::Cross)
+        ) && r.g(i).z > z_a + 0.08
+    };
+    let greenhouse = |r: &Rig, i: usize| {
+        let g = r.g(i);
+        g.y > belt(g.z.min(z_a)) + 0.05
+    };
+    graph_pairs(
+        &mut r,
+        &body_ids,
+        REACH_BODY,
+        body,
+        Role::Web,
+        &|p| body_blocked(p, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06)),
+        &|r, a, b| {
+            !split
+                || !((front_member(r, a) && greenhouse(r, b))
+                    || (front_member(r, b) && greenhouse(r, a)))
+        },
+    );
+    // The A-pillars' chords: the hinge pillar's top straight to the header
+    // (the roof rail's front station), outer and inner walls. The pillar is
+    // a closed section about 8 cm deep; as a chain of two bays through its
+    // middle node it had no depth against the cabin's inertia pushing the
+    // header forward and buckled out (the greenhouse racked 28 cm in the
+    // 56 km/h wall, the ETK's 7 cm). The chords run inside the section (the
+    // pillar's curve leaves its straight line by about 4 cm).
+    if std::env::var("GEN3_NO_APILLAR_CHORD").is_err() {
+        for x in ["L", "R"] {
+            let id = |n: &str| named_ids[&format!("{n}{x}")];
+            for (a, b) in [
+                ("hp2", "rr0"),
+                ("hpi1", "rri0"),
+                ("hp2", "rri0"),
+                ("hpi1", "rr0"),
+            ] {
+                r.car.beam(id(a), id(b), Role::PillarA, body);
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Engine: a 12-node block on mounts.
@@ -1482,29 +1560,9 @@ pub fn rig(model: &Model) -> Rig {
                     }
                 }
             }
-            // Latch: a coupler at the marker (door node to a tag node on the body).
-            // The latch on the door's rear shut line at the marker's height
-            // (the rearmost skin point there, 3 cm in).
-            let mut mk = marker(model, &format!("latch_door_{tagf}{x}"));
-            let skin_pts = if front { &df } else { &dr };
-            // On the vertical shut line: where the marker's height is forward
-            // of the door's rear edge (over an arch), the latch goes up to it.
-            let zmin = skin_pts.iter().map(|p| p.z).fold(f32::MAX, f32::min);
-            let rear_at = |y: f32| {
-                skin_pts
-                    .iter()
-                    .filter(|p| (p.y - y).abs() < 0.03)
-                    .map(|p| p.z)
-                    .reduce(f32::min)
-            };
-            let mut y = mk.y;
-            while rear_at(y).is_some_and(|z| z > zmin + 0.03) && y < mk.y + 0.30 {
-                y += 0.02;
-            }
-            if let Some(zr) = rear_at(y) {
-                mk.y = y;
-                mk.z = zr + 0.03;
-            }
+            // Latch: a coupler at the marker (door node to a tag node on the
+            // body), on the door's rear shut line.
+            let mk = marker(model, &format!("latch_door_{tagf}{x}"));
             let latch = r.node(&format!("{dn}_latch"), mk, part, None, false);
             let strike = r.node(&format!("{dn}_strike"), mk, body, None, false);
             r.car.nodes[latch].no_group = true;
@@ -1811,6 +1869,13 @@ pub fn rig(model: &Model) -> Rig {
     }
 
     // ------------------------------------------------------------------
+    // Shut lines: structural edge nodes along both sides of every shut line.
+    // ------------------------------------------------------------------
+    if std::env::var("GEN3_NO_EDGES").is_err() {
+        edge_nodes(&mut r, model, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06));
+    }
+
+    // ------------------------------------------------------------------
     // Pole lanes: light contact-only nodes on the side-facing skin edges.
     // ------------------------------------------------------------------
     let surf = |p: Vec3| -> Vec3 { to_jbeam(sf::project(to_gltf(p))) };
@@ -1841,6 +1906,7 @@ pub fn rig(model: &Model) -> Rig {
                     && !r.skin[i]
                     && !r.car.nodes[i].no_group
                     && !r.car.nodes[i].contact
+                    && !r.car.nodes[i].edge
             })
             .collect();
         let before = r.car.nodes.len();
@@ -2027,7 +2093,15 @@ pub fn rig(model: &Model) -> Rig {
         }
         let mid = 0.5 * (r.car.nodes[b.a].p + r.car.nodes[b.b].p);
         if (mid.y < fw_y - 0.05 || mid.y > rear_y)
-            && !matches!(b.role, Role::Sheet | Role::Bend | Role::Tie | Role::Backing)
+            && !matches!(
+                b.role,
+                Role::Sheet
+                    | Role::Bend
+                    | Role::Tie
+                    | Role::Backing
+                    | Role::EdgeTie
+                    | Role::EdgeStop
+            )
         {
             b.deform_limit = STACK_LIMIT;
         }
@@ -2053,8 +2127,371 @@ pub fn rig(model: &Model) -> Rig {
             b.deform *= cabin_mult();
         }
     }
+    // The cabin's yield by height (the floor, sills and lower pillars, and
+    // the greenhouse above the belt) and the doors': `GEN3_FLOOR_Y`,
+    // `GEN3_ROOF_Y`, `GEN3_DOOR_Y` (multiples on the census yield).
+    let env = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(1.0)
+    };
+    let (fy, ry, dy) = (env("GEN3_FLOOR_Y"), env("GEN3_ROOF_Y"), env("GEN3_DOOR_Y"));
+    let belt_h = to_jbeam(Vec3::new(0.0, 0.95, 0.0)).z;
+    for b in &mut r.car.beams {
+        if !b.deform.is_finite()
+            || b.break_group.is_some()
+            || matches!(
+                b.role,
+                Role::EdgeTie
+                    | Role::EdgeStop
+                    | Role::Bearing
+                    | Role::Susp
+                    | Role::Mount
+                    | Role::Stop
+                    | Role::Engine
+                    | Role::Tie
+                    | Role::Backing
+            )
+        {
+            continue;
+        }
+        let mid = 0.5 * (r.car.nodes[b.a].p + r.car.nodes[b.b].p);
+        if b.part.is_door() {
+            b.deform *= dy;
+        } else if b.part == body && mid.y >= fw_y - 0.05 && mid.y <= rear_y {
+            b.deform *= if mid.z > belt_h { ry } else { fy };
+        }
+    }
     let _ = (ARCH_R, &eng);
     r
+}
+
+/// Spacing of the shut lines' edge nodes (m): a real closure's flange is
+/// bolted, hinged or stopped every 15-25 cm along it.
+pub const EDGE_SPACING: f32 = 0.22;
+/// How far an edge node sits in from its panel's edge, and under its skin (m).
+pub const EDGE_IN: f32 = 0.025;
+pub const EDGE_UNDER: f32 = 0.01;
+
+/// A mesh's boundary vertices (positions welded, so a split vertex counts
+/// once): one vertex index per welded boundary point.
+fn boundary_points(p: &super::model::Part) -> Vec<usize> {
+    let key = |q: Vec3| {
+        (
+            (q.x * 2e4).round() as i64,
+            (q.y * 2e4).round() as i64,
+            (q.z * 2e4).round() as i64,
+        )
+    };
+    let mut weld: HashMap<(i64, i64, i64), usize> = HashMap::new();
+    let wid: Vec<usize> = p
+        .pos
+        .iter()
+        .map(|&q| {
+            let l = weld.len();
+            *weld.entry(key(q)).or_insert(l)
+        })
+        .collect();
+    let mut edges: HashMap<(usize, usize), u32> = HashMap::new();
+    for t in &p.tris {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            let (wa, wb) = (wid[a as usize], wid[b as usize]);
+            if wa != wb {
+                *edges.entry((wa.min(wb), wa.max(wb))).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut on = vec![false; weld.len()];
+    for (&(a, b), &n) in &edges {
+        if n == 1 {
+            on[a] = true;
+            on[b] = true;
+        }
+    }
+    let mut seen = vec![false; weld.len()];
+    (0..p.pos.len())
+        .filter(|&i| {
+            let w = wid[i];
+            let keep = on[w] && !seen[w];
+            seen[w] = true;
+            keep
+        })
+        .collect()
+}
+
+/// Shut-line edge nodes: where two parts' render meshes meet (boundary
+/// vertices of different parts within 1 cm, as the harness finds seams), a
+/// structural node on each side every [`EDGE_SPACING`], [`EDGE_IN`] in from
+/// its panel's edge and [`EDGE_UNDER`] under its skin, each tied into its
+/// own part's frame (its nearest structural nodes, an inner one among them)
+/// and to its neighbours along the edge, and a SUPPORT stop to the node
+/// across the line. They are in their part's binding pool, so a border
+/// vertex rides nodes within about 10 cm instead of extrapolating past the
+/// part's lattice; the stops carry a closure's edge onto its neighbour as a
+/// flange does. Returns the edge nodes.
+fn edge_nodes(
+    r: &mut Rig,
+    model: &Model,
+    apertures: &[Aperture],
+    trunk_z: (f32, f32),
+) -> Vec<usize> {
+    // Skinned and rigid pieces of the parts (glass excluded: it sits in its
+    // own part's frame), their boundary vertices.
+    let meshes: Vec<(usize, Part, bool)> = model
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.name.starts_with("glass_"))
+        .filter_map(|(k, p)| {
+            super::gen3::part_of(&p.name).map(|part| (k, part, super::gen3::rigid(&p.name)))
+        })
+        .collect();
+    let cell = 0.01f32;
+    let ck = |q: Vec3| {
+        (
+            (q.x / cell).floor() as i32,
+            (q.y / cell).floor() as i32,
+            (q.z / cell).floor() as i32,
+        )
+    };
+    let mut grid: HashMap<(i32, i32, i32), Vec<(usize, usize)>> = HashMap::new();
+    let mut bnd: Vec<Vec<usize>> = vec![Vec::new(); model.parts.len()];
+    for &(k, _, _) in &meshes {
+        bnd[k] = boundary_points(&model.parts[k]);
+        for &v in &bnd[k] {
+            grid.entry(ck(model.parts[k].pos[v]))
+                .or_default()
+                .push((k, v));
+        }
+    }
+    let info = |k: usize| meshes.iter().find(|m| m.0 == k).map(|m| (m.1, m.2));
+    // Seam points per part pair (lower part first): each side's point and mesh.
+    type Pts = Vec<(Vec3, Vec3, usize, usize)>;
+    let mut seams: std::collections::BTreeMap<(Part, Part), Pts> = Default::default();
+    for &(k, pa, _) in &meshes {
+        for &v in &bnd[k] {
+            let q = model.parts[k].pos[v];
+            let (x, y, z) = ck(q);
+            let mut best: Option<(f32, usize, usize)> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let Some(cands) = grid.get(&(x + dx, y + dy, z + dz)) else {
+                            continue;
+                        };
+                        for &(k2, v2) in cands {
+                            let Some((pb, _)) = info(k2) else { continue };
+                            if pb == pa {
+                                continue;
+                            }
+                            let d = q.distance(model.parts[k2].pos[v2]);
+                            if d < cell && best.is_none_or(|b| d < b.0) {
+                                best = Some((d, k2, v2));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((_, k2, v2)) = best {
+                let pb = info(k2).unwrap().0;
+                if pa < pb {
+                    seams
+                        .entry((pa, pb))
+                        .or_default()
+                        .push((q, model.parts[k2].pos[v2], k, k2));
+                }
+            }
+        }
+    }
+    // A side's node: in from the edge (toward the panel's vertices within
+    // 8 cm, in its tangent plane) and under the skin.
+    let place = |k: usize, q: Vec3| -> Option<Vec3> {
+        let m = &model.parts[k];
+        let (mut c, mut n, mut w) = (Vec3::ZERO, Vec3::ZERO, 0.0f32);
+        for (p, nn) in m.pos.iter().zip(&m.nrm) {
+            if p.distance(q) < 0.08 {
+                c += *p;
+                n += *nn;
+                w += 1.0;
+            }
+        }
+        let n = n.normalize_or_zero();
+        if w < 3.0 || n == Vec3::ZERO {
+            return None;
+        }
+        let d = c / w - q;
+        let t = d - n * n.dot(d);
+        if t.length() < 1e-4 {
+            return None;
+        }
+        Some(q + t.normalize() * EDGE_IN - n * EDGE_UNDER)
+    };
+    let mut serial = 0usize;
+    let mut made: Vec<(usize, Part)> = Vec::new();
+    for (&(pa, pb), pts) in &seams {
+        // Greedy samples along the line, in a fixed order.
+        let mut pts = pts.clone();
+        pts.sort_by(|a, b| {
+            (a.0.z, a.0.y, a.0.x)
+                .partial_cmp(&(b.0.z, b.0.y, b.0.x))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut picked: Pts = Vec::new();
+        for s in &pts {
+            if picked.iter().all(|p| p.0.distance(s.0) >= EDGE_SPACING) {
+                picked.push(*s);
+            }
+        }
+        for (a, b, ka, kb) in picked {
+            let mut pair = [None, None];
+            for (side, (part, k, q)) in [(pa, ka, a), (pb, kb, b)].into_iter().enumerate() {
+                // A rigid piece (a lamp) rides one frame: no edge node for it.
+                if info(k).is_some_and(|m| m.1) {
+                    continue;
+                }
+                let Some(g) = place(k, q) else { continue };
+                // An edge node of the part already within half a spacing serves.
+                if let Some(&(near, _)) = made
+                    .iter()
+                    .filter(|m| m.1 == part)
+                    .min_by(|x, y| r.g(x.0).distance(g).total_cmp(&r.g(y.0).distance(g)))
+                {
+                    if r.g(near).distance(g) < 0.5 * EDGE_SPACING {
+                        pair[side] = Some(near);
+                        continue;
+                    }
+                }
+                if r.nearest(part, g, 1, |_| true)
+                    .first()
+                    .is_some_and(|&j| r.g(j).distance(g) < 0.03)
+                {
+                    continue;
+                }
+                serial += 1;
+                let nm = format!("e{}{serial}", part.name().trim_start_matches("gen2_"));
+                let i = r.node(&nm, g, part, Some(Role::Sheet), false);
+                r.car.nodes[i].edge = true;
+                made.push((i, part));
+                pair[side] = Some(i);
+            }
+            if let [Some(x), Some(y)] = pair {
+                let part = if pa == Part::Body { pb } else { pa };
+                if x != y
+                    && !r.car.has_beam(x, y)
+                    && r.g(x).distance(r.g(y)) > 0.03
+                    && std::env::var("GEN3_NO_EDGESTOP").is_err()
+                {
+                    let j = r.car.beam(x, y, Role::EdgeStop, part);
+                    r.car.beams[j].role = Role::EdgeStop;
+                }
+            }
+        }
+    }
+    // Ties: each edge node to its part's nearest structural nodes (none
+    // across an opening), an inner one among them, and its neighbours along
+    // the edge.
+    let edge: Vec<usize> = made.iter().map(|m| m.0).collect();
+    for &(i, part) in &made {
+        let g = r.g(i);
+        let ok = |j: usize, r: &Rig| {
+            j != i
+                && !r.car.nodes[j].no_group
+                && !r.car.nodes[j].name.starts_with("hub")
+                && !r.car.nodes[j].name.starts_with("rim")
+                && (part != Part::Body
+                    || !segment_blocked(g, r.g(j), &|p| body_blocked(p, apertures, trunk_z)))
+        };
+        let mut frame: Vec<usize> = r
+            .nearest(part, g, 12, |j| !edge.contains(&j) && ok(j, r))
+            .into_iter()
+            .filter(|&j| r.g(j).distance(g) < 0.65)
+            .collect();
+        // At an opening's very edge (the trunk's, a door's) every segment
+        // may graze the opening: the nearest frame nodes then, at most 0.4 m.
+        if frame.len() < 4 {
+            let more: Vec<usize> = r
+                .nearest(part, g, 6, |j| {
+                    !edge.contains(&j)
+                        && j != i
+                        && !r.car.nodes[j].no_group
+                        && !r.car.nodes[j].name.starts_with("hub")
+                        && !r.car.nodes[j].name.starts_with("rim")
+                })
+                .into_iter()
+                .filter(|&j| r.g(j).distance(g) < 0.4 && !frame.contains(&j))
+                .collect();
+            frame.extend(more);
+        }
+        let mut tie = |r: &mut Rig, j: usize| {
+            if !r.car.has_beam(i, j) && r.g(i).distance(r.g(j)) > 0.03 {
+                r.car.beam(i, j, Role::EdgeTie, part);
+            }
+        };
+        let mut tied: Vec<usize> = Vec::new();
+        for &j in frame.iter().take(4) {
+            tie(r, j);
+            tied.push(j);
+        }
+        if let Some(&j) = frame.iter().find(|&&j| !r.skin[j] && !tied.contains(&j)) {
+            tie(r, j);
+            tied.push(j);
+        }
+        // Ties that span all three directions (no free mode out of their
+        // plane): while their directions' second moment has a weak axis, the
+        // frame node most along it joins them.
+        for _ in 0..3 {
+            let m = tied.iter().fold(glam::Mat3::ZERO, |m, &j| {
+                let d = (r.g(j) - g).normalize_or_zero();
+                m + glam::Mat3::from_cols(d * d.x, d * d.y, d * d.z)
+            });
+            let (lam, axis) = weakest_axis(m);
+            if lam > 0.12 * tied.len() as f32 {
+                break;
+            }
+            let best = frame
+                .iter()
+                .copied()
+                .chain(r.nearest(part, g, 20, |j| {
+                    !edge.contains(&j)
+                        && j != i
+                        && !r.car.nodes[j].no_group
+                        && !r.car.nodes[j].name.starts_with("hub")
+                        && !r.car.nodes[j].name.starts_with("rim")
+                }))
+                .filter(|j| !tied.contains(j) && r.g(*j).distance(g) < 0.65)
+                .max_by(|&a, &b| {
+                    let f = |j: usize| (r.g(j) - g).normalize_or_zero().dot(axis).abs();
+                    f(a).total_cmp(&f(b))
+                });
+            match best {
+                Some(j) => {
+                    tie(r, j);
+                    tied.push(j);
+                }
+                None => break,
+            }
+        }
+        for j in r.nearest(part, g, 2, |j| edge.contains(&j) && ok(j, r)) {
+            if r.g(j).distance(g) < 1.6 * EDGE_SPACING {
+                tie(r, j);
+            }
+        }
+    }
+    edge
+}
+
+/// The smallest eigenvalue of a symmetric 3 × 3 and its axis (inverse
+/// iteration on the shifted matrix).
+fn weakest_axis(m: glam::Mat3) -> (f32, Vec3) {
+    let tr = m.x_axis.x + m.y_axis.y + m.z_axis.z;
+    let shifted = glam::Mat3::from_diagonal(Vec3::splat(tr + 1e-3)) - m;
+    // The largest eigenvector of (tr·I − M) is M's smallest.
+    let mut v = Vec3::new(0.577, 0.577, 0.577);
+    for _ in 0..60 {
+        v = (shifted * v).normalize_or(Vec3::X);
+    }
+    (v.dot(m * v), v)
 }
 
 /// The raycast wheels' mass on their hub nodes (half a wheel each).
@@ -2074,7 +2511,7 @@ pub fn voronoi_area(model: &Model, car: &Car) -> Vec<f32> {
     let mut area = vec![0.0f32; car.nodes.len()];
     let mut pools: HashMap<Part, Vec<usize>> = HashMap::new();
     for (i, n) in car.nodes.iter().enumerate() {
-        if !n.contact && !n.no_group && !n.name.starts_with("hub") {
+        if !n.contact && !n.no_group && !n.edge && !n.name.starts_with("hub") {
             pools.entry(n.part).or_default().push(i);
         }
     }

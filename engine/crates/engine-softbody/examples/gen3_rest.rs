@@ -249,7 +249,7 @@ fn main() -> Result<(), String> {
             s.step();
             t += 0.0005;
             k += 1;
-            if trace && k <= 60 {
+            if trace && (k <= 60 || k % 2000 == 0) {
                 let (i, v) = s
                     .nodes
                     .iter()
