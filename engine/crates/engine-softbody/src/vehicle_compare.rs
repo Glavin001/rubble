@@ -1486,7 +1486,25 @@ pub fn visual_metrics(
             &v[..v.len().min(12)]
         );
     }
+    // Shut lines: every vertex (not only open mesh edges) paired with the
+    // nearest vertex of another piece within SHUT_LINE at rest. A BeamNG
+    // panel's edges are hemmed (closed meshes), so the boundary pairs above
+    // never see its hood, door or lamp lines (vehicle-gen3.md round 5).
+    let (shut, _) = rest_seam_pairs(v, p0, SHUT_LINE, false);
+    let (mut s5, mut sgaps) = (0usize, Vec::new());
+    for &(i, j) in &shut {
+        if !ok(p1, i) || !ok(p1, j) {
+            continue;
+        }
+        let g = p1[i].distance(p1[j]) - p0[i].distance(p0[j]);
+        if g > 0.05 {
+            s5 += 1;
+        }
+        sgaps.push(g);
+    }
     json!({
+        "shutline_pairs": shut.len(), "shutline_open_5cm": s5,
+        "shutline_gap_p99_mm": mm(pct(&mut sgaps, 0.99)),
         "available": true, "vertices": verts.len(), "triangles": tris.len(),
         "torn_vertices": torn, "torn_fraction": r3(torn as f32 / verts.len().max(1) as f32),
         "stretch_max": r3(smax.iter().copied().fold(0.0, f32::max)), "stretch_p99": r3(pct(&mut smax, 0.99)),
@@ -2772,5 +2790,377 @@ pub fn run_car(car: &Car, quick: bool) -> Value {
             "pole_sweep32": sweep.join().unwrap(),
             "warnings": car.warnings.len(),
         })
+    })
+}
+
+// --- Seam evidence (round 5) -------------------------------------------------------
+
+/// The shut-line pairing distance: two pieces' vertices within 1.5 cm at rest
+/// (a production panel gap is 3–6 mm; the ETK's hood-to-fender vertices sit
+/// 5–15 mm apart).
+pub const SHUT_LINE: f32 = 0.015;
+
+/// Boundary vertices of two different pieces and the nearest such vertex of
+/// another piece within `cell` at rest (`visual_metrics`' seam pairs when
+/// `cell` is 1 cm; every vertex instead of the boundary ones when not
+/// `boundary_only`), and per vertex its piece. Wheels excluded.
+pub fn rest_seam_pairs(
+    v: &ShowcaseVisual,
+    p0: &[Vec3],
+    cell: f32,
+    boundary_only: bool,
+) -> (Vec<(usize, usize)>, Vec<u32>) {
+    let nv = v.positions.len();
+    let mut piece = vec![u32::MAX; nv];
+    for (k, (_, first, count)) in v.pieces.iter().enumerate() {
+        for i in *first..first + count {
+            if (i as usize) < nv {
+                piece[i as usize] = k as u32;
+            }
+        }
+    }
+    let wheel = |i: usize| v.wheel.get(i).is_some_and(|&w| w != u32::MAX);
+    let tris: Vec<[usize; 3]> = v
+        .indices
+        .chunks_exact(3)
+        .map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
+        .filter(|t| t.iter().all(|&i| !wheel(i) && p0[i].is_finite()))
+        .collect();
+    let key = |p: Vec3| {
+        (
+            (p.x * 2e4).round() as i64,
+            (p.y * 2e4).round() as i64,
+            (p.z * 2e4).round() as i64,
+        )
+    };
+    let mut weld: HashMap<(i64, i64, i64, u32), usize> = HashMap::new();
+    let wid: Vec<usize> = (0..nv)
+        .map(|i| {
+            let (x, y, z) = key(p0[i]);
+            let l = weld.len();
+            *weld.entry((x, y, z, piece[i])).or_insert(l)
+        })
+        .collect();
+    let mut wedges: HashMap<(usize, usize), usize> = HashMap::new();
+    for t in &tris {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            let (wa, wb) = (wid[a], wid[b]);
+            if wa != wb {
+                *wedges.entry((wa.min(wb), wa.max(wb))).or_default() += 1;
+            }
+        }
+    }
+    let mut wb = std::collections::HashSet::new();
+    for (&(a, b), &n) in &wedges {
+        if n == 1 {
+            wb.insert(a);
+            wb.insert(b);
+        }
+    }
+    let bverts: Vec<usize> = (0..nv)
+        .filter(|&i| !wheel(i) && p0[i].is_finite() && (!boundary_only || wb.contains(&wid[i])))
+        .collect();
+    let ck = |p: Vec3| {
+        (
+            (p.x / cell).floor() as i32,
+            (p.y / cell).floor() as i32,
+            (p.z / cell).floor() as i32,
+        )
+    };
+    let mut grid: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
+    for &i in &bverts {
+        grid.entry(ck(p0[i])).or_default().push(i);
+    }
+    let mut pairs = Vec::new();
+    for &i in &bverts {
+        let (x, y, z) = ck(p0[i]);
+        let mut best: Option<(f32, usize)> = None;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    for &j in grid
+                        .get(&(x + dx, y + dy, z + dz))
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[])
+                    {
+                        if piece[j] == piece[i] {
+                            continue;
+                        }
+                        let d = p0[i].distance(p0[j]);
+                        if d < cell && best.is_none_or(|b| d < b.0) {
+                            best = Some((d, j));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, j)) = best {
+            pairs.push((i.min(j), i.max(j)));
+        }
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    (pairs, piece)
+}
+
+/// A render vertex's skinning nodes: its weighted nodes (a flexskin) or its
+/// binding triangle (a flexbody).
+fn vertex_nodes(v: &ShowcaseVisual, i: usize) -> Vec<u32> {
+    if v.wt_start.len() == v.positions.len() + 1 {
+        (v.wt_start[i] as usize..v.wt_start[i + 1] as usize)
+            .map(|k| v.wt_node[k])
+            .collect()
+    } else {
+        v.bind_nodes[i].to_vec()
+    }
+}
+
+/// The node a vertex follows most (its heaviest weight, or its binding
+/// triangle's first node).
+fn vertex_top(v: &ShowcaseVisual, i: usize) -> u32 {
+    if v.wt_start.len() == v.positions.len() + 1 {
+        let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
+        (a..b)
+            .max_by(|&x, &y| v.wt_w[x][0].total_cmp(&v.wt_w[y][0]))
+            .map_or(v.bind_nodes[i][0], |k| v.wt_node[k])
+    } else {
+        v.bind_nodes[i][0]
+    }
+}
+
+/// Seam evidence for one car in the wall at `kmh` (`gen3_seam_evidence`):
+/// per piece pair that shares a seam at rest (boundary vertices within
+/// `cell`), the flexbody groups each piece binds to, whether the two sides'
+/// vertices share skinning nodes, and over the crash the widest skin gap and
+/// the widest separation of the two sides' nodes; per hood piece its largest
+/// rise in the cabin's frame (the tent).
+pub fn seam_evidence(car: &Car, kmh: f32, seconds: f32, cell: f32) -> Value {
+    use std::collections::{BTreeMap, BTreeSet};
+    let Some(v) = &car.visual else {
+        return json!({"available": false});
+    };
+    let rest_nodes = positions(&car.template);
+    let rest_beams: Vec<BeamState> = car
+        .template
+        .beams
+        .iter()
+        .map(|b| BeamState {
+            broken: b.broken,
+            rest: b.rest,
+        })
+        .collect();
+    let rest_units = unit_states(v, &rest_beams);
+    let (p0, _) = deform_beams(v, &rest_nodes, Some(&rest_units), Some(&rest_beams));
+    let (pairs, piece) = rest_seam_pairs(v, &p0, cell, std::env::var("SEAM_ALL_VERTS").is_err());
+    // Flexbody groups per mesh, and each group's nodes by name.
+    let mut groups_of: HashMap<String, Vec<String>> = HashMap::new();
+    let mut group_nodes: HashMap<String, Vec<String>> = HashMap::new();
+    if let Source::Jbeam {
+        files, pc, desc, ..
+    } = &car.source
+    {
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        if let Ok(rows) = crate::jbeam::assembled_rows(&refs, pc.as_deref(), "flexbodies") {
+            for (_, row) in rows {
+                let Some(mesh) = row.get("mesh").and_then(Value::as_str) else {
+                    continue;
+                };
+                let g: Vec<String> = match row.get("[group]").or_else(|| row.get("group")) {
+                    Some(Value::Array(a)) => a
+                        .iter()
+                        .filter_map(|g| g.as_str().map(str::to_string))
+                        .collect(),
+                    Some(Value::String(s)) => vec![s.clone()],
+                    _ => Vec::new(),
+                };
+                groups_of.insert(mesh.to_string(), g);
+            }
+        }
+        for (g, ns) in &desc.node_group_nodes {
+            group_nodes.insert(
+                g.clone(),
+                ns.iter()
+                    .map(|&i| desc.nodes[i as usize].name.clone())
+                    .collect(),
+            );
+        }
+    }
+    let pname = |k: u32| {
+        v.pieces
+            .get(k as usize)
+            .map_or("?".to_string(), |q| q.0.clone())
+    };
+    let mut by: BTreeMap<(u32, u32), Vec<(usize, usize)>> = Default::default();
+    for &(i, j) in &pairs {
+        let (a, b) = (piece[i], piece[j]);
+        if a <= b {
+            by.entry((a, b)).or_default().push((i, j));
+        } else {
+            by.entry((b, a)).or_default().push((j, i));
+        }
+    }
+    let piece_nodes = |k: u32| -> BTreeSet<u32> {
+        let (_, first, count) = &v.pieces[k as usize];
+        (*first as usize..(*first + *count) as usize)
+            .flat_map(|i| vertex_nodes(v, i))
+            .collect()
+    };
+    #[derive(Default)]
+    struct Acc {
+        gap: f32,
+        node_gap: f32,
+        widest: (f32, u32, u32),
+        gap_end: f32,
+        node_gap_end: f32,
+        open5_end: usize,
+    }
+    let mut acc: Vec<Acc> = by.keys().map(|_| Acc::default()).collect();
+    let hoods: Vec<u32> = (0..v.pieces.len() as u32)
+        .filter(|&k| pname(k).to_ascii_lowercase().contains("hood"))
+        .collect();
+    let mut rise = vec![0.0f32; hoods.len()];
+    let f = car.frame;
+    let mut s = car.template.clone();
+    set_moving(&mut s, Vec3::Z * kmh / 3.6);
+    let front = car
+        .skin
+        .iter()
+        .map(|&i| s.nodes[i as usize].pos.z)
+        .fold(f32::MIN, f32::max);
+    s.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 2.0, front + 0.05 + 0.5),
+        Vec3::new(0.5 * f.width() + 1.0, 2.0, 0.5),
+    ));
+    let cabin: Vec<u32> = (0..s.nodes.len() as u32)
+        .filter(|&i| {
+            !is_tyre(&s, i as usize)
+                && (f.rear_axle - 0.1..f.rear_axle + 0.5 * f.wheelbase())
+                    .contains(&rest_nodes[i as usize].z)
+        })
+        .collect();
+    let mut w = ExplicitBeamsWorld::new(vec![s]);
+    w.contact = false;
+    let n_steps = (seconds / STEP).round() as usize;
+    let every = (0.005 / STEP).round() as usize;
+    let mut broken_hw: Vec<String> = Vec::new();
+    for k in 1..=n_steps {
+        w.step();
+        if k % every != 0 && k != n_steps {
+            continue;
+        }
+        let s = &w.vehicles[0];
+        let now = positions(s);
+        let beams: Vec<BeamState> = s
+            .beams
+            .iter()
+            .map(|b| BeamState {
+                broken: b.broken,
+                rest: b.rest,
+            })
+            .collect();
+        let units = unit_states(v, &beams);
+        let (p1, _) = deform_beams(v, &now, Some(&units), Some(&beams));
+        let fit = rigid_fit(&rest_nodes, &now, &cabin);
+        let end = k == n_steps;
+        for (q, ps) in by.values().enumerate() {
+            let a = &mut acc[q];
+            let (mut g_now, mut ng_now, mut o5) = (0.0f32, 0.0f32, 0usize);
+            for &(i, j) in ps {
+                if !p1[i].is_finite() || !p1[j].is_finite() {
+                    continue;
+                }
+                let g = p1[i].distance(p1[j]) - p0[i].distance(p0[j]);
+                let (na, nb) = (vertex_top(v, i), vertex_top(v, j));
+                let ng = now[na as usize].distance(now[nb as usize])
+                    - rest_nodes[na as usize].distance(rest_nodes[nb as usize]);
+                g_now = g_now.max(g);
+                ng_now = ng_now.max(ng);
+                if g > 0.05 {
+                    o5 += 1;
+                }
+                if ng > a.widest.0 {
+                    a.widest = (ng, na, nb);
+                }
+            }
+            a.gap = a.gap.max(g_now);
+            a.node_gap = a.node_gap.max(ng_now);
+            if end {
+                a.gap_end = g_now;
+                a.node_gap_end = ng_now;
+                a.open5_end = o5;
+            }
+        }
+        for (h, &k) in hoods.iter().enumerate() {
+            let (_, first, count) = &v.pieces[k as usize];
+            for i in *first as usize..(*first + *count) as usize {
+                if p1[i].is_finite() {
+                    rise[h] = rise[h].max(fit.to_rest(p1[i]).y - p0[i].y);
+                }
+            }
+        }
+        if end {
+            broken_hw = car
+                .hardware
+                .iter()
+                .filter(|(_, ps)| {
+                    ps.iter().any(|&(a, b)| {
+                        s.incidence[a as usize].iter().any(|&j| {
+                            let bm = &s.beams[j as usize];
+                            bm.broken && (bm.a.min(bm.b), bm.a.max(bm.b)) == (a.min(b), a.max(b))
+                        })
+                    })
+                })
+                .map(|(n, _)| n.clone())
+                .collect();
+        }
+    }
+    let gset = |g: &[String]| -> BTreeSet<String> {
+        g.iter()
+            .flat_map(|x| group_nodes.get(x).cloned().unwrap_or_default())
+            .collect()
+    };
+    let rows: Vec<Value> = by
+        .iter()
+        .zip(&acc)
+        .map(|(((a, b), ps), r)| {
+            let (na, nb) = (piece_nodes(*a), piece_nodes(*b));
+            let shared_seam = ps
+                .iter()
+                .filter(|&&(i, j)| {
+                    let x = vertex_nodes(v, i);
+                    vertex_nodes(v, j).iter().any(|n| x.contains(n))
+                })
+                .count();
+            let same_top = ps
+                .iter()
+                .filter(|&&(i, j)| vertex_top(v, i) == vertex_top(v, j))
+                .count();
+            let mesh = |k: u32| {
+                let n = pname(k);
+                n.split_once(':').map_or(n.clone(), |x| x.1.to_string())
+            };
+            let ga = groups_of.get(&mesh(*a)).cloned().unwrap_or_default();
+            let gb = groups_of.get(&mesh(*b)).cloned().unwrap_or_default();
+            json!({
+                "a": pname(*a), "b": pname(*b), "pairs": ps.len(),
+                "groups_a": ga, "groups_b": gb,
+                "shared_group_nodes": gset(&ga).intersection(&gset(&gb)).count(),
+                "nodes_a": na.len(), "nodes_b": nb.len(), "shared_nodes": na.intersection(&nb).count(),
+                "seam_pairs_sharing_a_node": shared_seam, "seam_pairs_same_top_node": same_top,
+                "skin_gap_max_mm": mm(r.gap), "node_gap_max_mm": mm(r.node_gap),
+                "widest_node_pair": format!("{}-{}", car.node_name(r.widest.1 as usize), car.node_name(r.widest.2 as usize)),
+                "skin_gap_end_mm": mm(r.gap_end), "node_gap_end_mm": mm(r.node_gap_end), "open_5cm_end": r.open5_end,
+            })
+        })
+        .collect();
+    json!({
+        "car": car.spec.name, "kmh": kmh, "cell_mm": mm(cell), "seam_pairs": pairs.len(),
+        "pieces": v.pieces.len(),
+        "hood_rise_mm": hoods.iter().zip(&rise).map(|(&k, &r)| json!({"piece": pname(k), "rise_mm": mm(r)})).collect::<Vec<_>>(),
+        "hardware_broken": broken_hw,
+        "pairs": rows,
     })
 }

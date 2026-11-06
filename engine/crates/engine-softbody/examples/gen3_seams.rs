@@ -25,13 +25,15 @@ fn main() -> Result<(), String> {
             let w = scene_wall(&car, k, 1.0);
             let v = &w["visual"];
             println!(
-                "{} {k} km/h: residual max {} mm, dynamic {} mm; seams > 1 cm {}, > 5 cm {} of {}; stretch p99 {}, fold p99 {}",
+                "{} {k} km/h: residual max {} mm, dynamic {} mm; seams > 1 cm {}, > 5 cm {} of {}; shut lines > 5 cm {} of {}; stretch p99 {}, fold p99 {}",
                 spec.name,
                 w["residual_crush_max_mm"],
                 w["dynamic_crush_mm"],
                 v["seam_open_1cm"],
                 v["seam_open_5cm"],
                 v["seam_pairs"],
+                v["shutline_open_5cm"],
+                v["shutline_pairs"],
                 v["stretch_p99"],
                 v["dihedral_p99_deg"]
             );

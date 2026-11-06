@@ -159,6 +159,7 @@ const ROWS: &[(&str, &str, &str, &str)] = &[
     ("Wall 56 km/h", "mesh: triangles > 1.5× / < 0.5×", "wall56.visual.tris_over_1_5|wall56.visual.tris_under_0_5", ""),
     ("Wall 56 km/h", "mesh: torn vertices (share); new flipped triangles", "wall56.visual.torn_fraction|wall56.visual.flipped_new", ""),
     ("Wall 56 km/h", "mesh: seams opened > 1 cm / > 5 cm (of pairs)", "wall56.visual.seam_open_1cm|wall56.visual.seam_open_5cm|wall56.visual.seam_pairs", ""),
+    ("Wall 56 km/h", "mesh: shut lines opened > 5 cm (of pairs, every vertex within 1.5 cm)", "wall56.visual.shutline_open_5cm|wall56.visual.shutline_pairs", ""),
     ("Wall 56 km/h", "mesh: seam gap p99 / max (mm)", "wall56.visual.seam_gap_p99_mm|wall56.visual.seam_gap_max_mm", ""),
     ("Wall 56 km/h", "mesh: dihedral change p99 / max (°); edges > 30° / > 60°", "wall56.visual.dihedral_p99_deg|wall56.visual.dihedral_max_deg|wall56.visual.dihedral_over_30|wall56.visual.dihedral_over_60", ""),
     ("Side pole 32 km/h, 75°", "residual / dynamic crush at the pole (mm)", "pole32.residual_crush_mm|pole32.dynamic_crush_mm", "297–445 residual"),
