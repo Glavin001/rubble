@@ -15,6 +15,11 @@ pub const NAME: &str = "gen2";
 pub const STOP_LEFT: f32 = 0.08;
 pub const STOP_SPRING: f32 = 2.0e6;
 pub const STOP_DAMP: f32 = 4000.0;
+/// Each rear wheel's parking brake torque (N·m): FMVSS 135 S7.12 asks the
+/// parking brake to hold the car on a 20 % grade. At the Accord's 1,950 kg
+/// GVWR on a 0.33 m tyre that is 1,950 × 9.81 × sin(atan 0.2) × 0.33 / 2 =
+/// 619 N·m a wheel; twice that for margin (a cable brake's design factor).
+pub const PARKING_TORQUE: f32 = 1240.0;
 
 fn num(x: f32) -> Value {
     if !x.is_finite() {
@@ -244,6 +249,9 @@ pub fn jbeam_files(
                 "enableTreadReinfBeams": true, "wheelTreadReinfBeamSpring": 120000, "wheelTreadReinfBeamDamp": 20
             })];
             for wh in &car.wheels {
+                // The parking brake acts on the rear wheels (spec §25.1).
+                let rear = wh.name.starts_with('R');
+                w.push(json!({"parkingTorque": if rear { PARKING_TORQUE } else { 0.0 }}));
                 w.push(json!([
                     wh.name,
                     format!("wheel_{}", wh.name),

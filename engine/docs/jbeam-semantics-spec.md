@@ -1116,13 +1116,41 @@ the layout below, Rubble's own.
   triangles).
 * **Rolling.** With `roll` the wheel's nodes spawn rolling at the vehicle's speed
   (as the soft tyres' `roll_tyres`).
-* Not simulated: brakes and drive torque (no powertrain), `conicityFactor`, hubcaps,
+* **Parking brake (§25.1).** Not simulated otherwise: the service brake
+  (`brakeTorque`) and drive torque (no powertrain), `conicityFactor`, hubcaps,
   `nodeS`, tyre friction models (**Choice:** a tyre node's friction is the model's
   `noLoadCoef` when given, else `frictionCoef`; BeamNG's `frictionCoef` multiplies
   its ground model's, which Rubble's contact model has not),
   `hubWeightGainRatio` (warnings).
 * Selected by `JbeamWheels::Pressure` (`ExplicitBeams::from_desc_jbeam_with`); the
   default stays the `.truck` path's soft tyres (§12), and RoR content keeps its tyres.
+
+### 25.1 Parking brake (`parkingTorque`; Rubble's own model)
+
+A pressure wheel row whose `parkingTorque` T is positive and which names a
+`nodeArm:` gets a brake (`WheelBrake`): a Coulomb torque between the hub's ring
+nodes (the disc) and the arm node (the caliper's mount) about the axle. The
+input `ExplicitBeams::parking_brake` u ∈ [0, 1] (0, released, by default) scales
+T; with u = 0 or no brakes no pass runs, so content without them is unchanged
+bit for bit.
+
+Each step, after the node pass and the aero and command passes (forces from this
+step's integrated state), per brake in file order (`brake_apply`):
+
+* axis a = (node2 − node1)/|node2 − node1|, point c and velocity v_c the axle nodes'
+  means; r⊥(p) = (p − c) − a((p − c)·a);
+* the disc: I_w = Σ m |r⊥|², ω_w = Σ m a·(r⊥ × (v − v_c)) / I_w over the hub rings'
+  2N nodes; the caliper: I_a = m_a |r⊥a|², ω_a = a·(r⊥a × (v_a − v_c)) / |r⊥a|²;
+* τ = −sgn(ω_w − ω_a) min(uT, |ω_w − ω_a| I_eff / h), I_eff = I_w I_a / (I_w + I_a):
+  stick removes at most the two bodies' relative spin in one step (a damper at
+  c·h/I_eff = 1, inside the explicit bound of 2), slip is the torque T;
+* forces: each disc node m (a × r⊥) τ/I_w, the arm (a × r⊥a)(−τ/|r⊥a|²), each axle
+  node half the negative of their sum. The net force is zero, the torques about
+  the axle are τ and −τ.
+
+The tyre turns with the disc through its side beams. The service brake
+(`brakeTorque`) has no input in Rubble and stays unsimulated. On raycast wheels
+the drive's handbrake is the parking brake (`explicit_drive`).
 
 ## 26. Pressure groups (kinds `JbeamPressureGroup`, `JbeamPressureTri`)
 

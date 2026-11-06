@@ -234,6 +234,17 @@ fn main() -> Result<(), String> {
         let (mut s, _) =
             ExplicitBeams::from_desc_jbeam_with(&desc, wheels, Vec3::ZERO, Vec3::ZERO, settings())?;
         s.surface_contact = std::env::var("SURFACE_CONTACT").map_or(true, |v| v != "0");
+        // Parked: the parking brake applied (`GEN3_PARK=0` releases it).
+        s.parking_brake = if std::env::var("GEN3_PARK").is_ok_and(|v| v == "0") {
+            0.0
+        } else {
+            1.0
+        };
+        eprintln!(
+            "[{label}] parking brakes: {} (input {})",
+            s.brakes.len(),
+            s.parking_brake
+        );
         let low = s
             .nodes
             .iter()

@@ -1283,6 +1283,18 @@ impl ExplicitBeams {
             radius,
         });
         let axle = [n1, n2];
+        // The parking brake (spec §25.1): between the hub rings (the disc) and
+        // the wheel's arm node (the caliper's mount).
+        let parking = v("parkingTorque", 0.0);
+        if let (Some(arm), true) = (pw.arm, parking > 0.0) {
+            self.brakes.push(crate::explicit_beams::WheelBrake {
+                axle,
+                arm,
+                first,
+                count: 2 * n as u32,
+                torque: parking,
+            });
+        }
         // A beam of set `name` (its Spring, Damp, Deform, Strength, DampCutoffHz,
         // Precompression; anisotropic sets their expansion values).
         // Hub sets the file leaves unset: stiff as the fixed step allows on the hub

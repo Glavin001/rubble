@@ -863,6 +863,11 @@ pub struct ExplicitBeams {
     pub collision_range: f32,
     /// Soft tyres built from a `.truck` file's `wheels` (for [`Self::roll_tyres`]).
     pub tyres: Vec<Tyre>,
+    /// Pressure wheels' parking brakes (JBeam `parkingTorque`, spec §25.1), in
+    /// file order; empty for content without them (no pass runs).
+    pub brakes: Vec<WheelBrake>,
+    /// The parking brake input, 0 (released, the default) to 1 (applied).
+    pub parking_brake: f32,
     /// Self-collision contacts in the last step (a statistic; not simulated state).
     pub last_contacts: u32,
     pub settings: ExplicitBeamsSettings,
@@ -1550,6 +1555,8 @@ impl ExplicitBeams {
             collision_range: DEFAULT_COLLISION_RANGE,
             last_contacts: 0,
             tyres: Vec::new(),
+            brakes: Vec::new(),
+            parking_brake: 0.0,
             settings,
             noise: 1,
             incidence: Vec::new(),
@@ -3349,6 +3356,9 @@ impl ExplicitBeams {
         } else if !self.centering.is_empty() {
             self.command_pass();
         }
+        if !self.brakes.is_empty() && self.parking_brake > 0.0 {
+            self.brake_pass();
+        }
         let mut trace = self.trace.take();
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 0);
@@ -4736,6 +4746,95 @@ impl CollisionGrid {
             }
         }
     }
+}
+
+/// A pressure wheel's parking brake (jbeam-semantics-spec.md §25.1): a Coulomb
+/// torque between the hub's ring nodes (the disc) and the wheel's `nodeArm:`
+/// (the caliper's mount) about the axle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WheelBrake {
+    pub axle: [u32; 2],
+    /// The torque reaction node (`nodeArm:`).
+    pub arm: u32,
+    /// The hub ring nodes `first..first + count`.
+    pub first: u32,
+    pub count: u32,
+    /// Holding torque at full input (N·m, `parkingTorque`).
+    pub torque: f32,
+}
+
+impl ExplicitBeams {
+    /// The parking brakes' forces from this step's integrated state (spec §25.1).
+    fn brake_pass(&mut self) {
+        let u = self.parking_brake.min(1.0);
+        for k in 0..self.brakes.len() {
+            let b = self.brakes[k];
+            brake_apply(&mut self.nodes, &b, b.torque * u, STEP);
+        }
+    }
+}
+
+/// One brake's forces (spec §25.1), added to the nodes' forces:
+///
+/// * the axis a is the axle (node1 → node2), its point c and velocity v_c the
+///   axle nodes' mean; r⊥ a node's offset from the axis line;
+/// * the disc's spin ω_w = Σ m (r⊥ × (v − v_c))·a / I_w, I_w = Σ m |r⊥|² over the
+///   hub ring; the caliper's ω_a = (r⊥a × (v_a − v_c))·a / |r⊥a|²;
+/// * the torque on the disc τ = −sgn(ω_w − ω_a) · min(T, |ω_w − ω_a| · I_eff / h),
+///   I_eff = I_w I_a / (I_w + I_a), I_a = m_a |r⊥a|²: at most the impulse that
+///   stops the two bodies' relative spin in one step (stick), else T (slip);
+/// * the disc's nodes take m (a × r⊥) τ / I_w (torque τ about a), the arm
+///   (a × r⊥a)(−τ / |r⊥a|²) (torque −τ), the two axle nodes half the negative
+///   of their sum each: no net force, no net torque about the axle.
+pub fn brake_apply(nodes: &mut [Node], b: &WheelBrake, t_max: f32, h: f32) {
+    if !(t_max > 0.0) {
+        return;
+    }
+    let (p1, p2) = (nodes[b.axle[0] as usize].pos, nodes[b.axle[1] as usize].pos);
+    let (v1, v2) = (nodes[b.axle[0] as usize].vel, nodes[b.axle[1] as usize].vel);
+    let span = p2 - p1;
+    let ls = span.dot(span);
+    if !(ls > 1e-12) {
+        return;
+    }
+    let a = span * (1.0 / ls.sqrt());
+    let c = (p1 + p2) * 0.5;
+    let vc = (v1 + v2) * 0.5;
+    let perp = |p: Vec3| {
+        let r = p - c;
+        r - a * a.dot(r)
+    };
+    let (mut l, mut iw) = (0.0f32, 0.0f32);
+    for i in b.first..b.first + b.count {
+        let n = &nodes[i as usize];
+        let r = perp(n.pos);
+        l += n.mass * a.dot(r.cross(n.vel - vc));
+        iw += n.mass * r.dot(r);
+    }
+    let arm = nodes[b.arm as usize];
+    let ra = perp(arm.pos);
+    let da = ra.dot(ra);
+    if !(iw > 0.0) || !(da > 1e-8) {
+        return;
+    }
+    let ia = arm.mass * da;
+    let wr = l / iw - a.dot(ra.cross(arm.vel - vc)) / da;
+    let ieff = iw * ia / (iw + ia);
+    let mag = (wr.abs() * ieff / h).min(t_max);
+    let tau = if wr > 0.0 { -mag } else { mag };
+    let g = tau / iw;
+    let mut s = Vec3::ZERO;
+    for i in b.first..b.first + b.count {
+        let n = &mut nodes[i as usize];
+        let f = a.cross(perp(n.pos)) * (g * n.mass);
+        n.force += f;
+        s += f;
+    }
+    let fa = a.cross(ra) * (-tau / da);
+    nodes[b.arm as usize].force += fa;
+    let half = (s + fa) * -0.5;
+    nodes[b.axle[0] as usize].force += half;
+    nodes[b.axle[1] as usize].force += half;
 }
 
 /// A soft tyre: its axle nodes and its ring nodes `first..first + count`.

@@ -2734,6 +2734,32 @@ pub fn scene_roof(car: &Car) -> Value {
 }
 
 /// Every scene for one car (each scene on its own thread).
+/// Parked on its pressure wheels (the crash template, settled 1 s) for
+/// `seconds` more with the parking brake input `parking` (spec §25.1): the
+/// kinetic energy at the end, the share in the car's mean motion, the centre
+/// of mass's travel and broken and bent beams.
+pub fn scene_rest_pressure(car: &Car, seconds: f32, parking: f32) -> Value {
+    let mut s = car.template.clone();
+    s.parking_brake = parking;
+    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let com = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.pos * n.mass).sum::<Vec3>() / total;
+    let c0 = com(&s);
+    steps(&mut s, seconds);
+    let (mut ke, mut p) = (0.0f32, Vec3::ZERO);
+    for n in &s.nodes {
+        ke += 0.5 * n.mass * n.vel.length_squared();
+        p += n.mass * n.vel;
+    }
+    let v = p / total;
+    json!({
+        "brakes": s.brakes.len(),
+        "ke_j": r3(ke), "ke_mean_motion_j": r3(0.5 * total * v.length_squared()),
+        "com_travel_mm": mm((com(&s) - c0).length()),
+        "broken": s.beams.iter().filter(|b| b.broken).count(),
+        "bent": s.beams.iter().filter(|b| b.bent()).count(),
+    })
+}
+
 pub fn run_car(car: &Car, quick: bool) -> Value {
     let rest_s = if quick { 2.0 } else { 10.0 };
     let jbeam = matches!(car.source, Source::Jbeam { .. });
@@ -2764,6 +2790,16 @@ pub fn run_car(car: &Car, quick: bool) -> Value {
                 scene_pole(car, 32.0, if quick { 0.4 } else { 1.5 })
             })
         });
+        let parked = jbeam.then(|| {
+            sc.spawn(|| {
+                timed("rest_pressure", &|| {
+                    json!({
+                        "applied": scene_rest_pressure(car, rest_s, 1.0),
+                        "released": scene_rest_pressure(car, rest_s, 0.0),
+                    })
+                })
+            })
+        });
         let mdb = sc.spawn(|| timed("mdb214", &|| scene_mdb(car, if quick { 0.4 } else { 1.5 })));
         let roof = sc.spawn(|| timed("roof", &|| scene_roof(car)));
         let door = sc.spawn(|| timed("door", &|| scene_door(car)));
@@ -2782,6 +2818,7 @@ pub fn run_car(car: &Car, quick: bool) -> Value {
             "census": census(car),
             "rest": rest.join().unwrap(),
             "rest_truck_export": rest_tx.map(|h| h.join().unwrap()),
+            "rest_pressure": parked.map(|h| h.join().unwrap()),
             "wall56": wall.join().unwrap(),
             "pole32": pole.join().unwrap(),
             "mdb214": mdb.join().unwrap(),
@@ -3016,6 +3053,8 @@ pub fn seam_evidence(car: &Car, kmh: f32, seconds: f32, cell: f32) -> Value {
         gap_end: f32,
         node_gap_end: f32,
         open5_end: usize,
+        /// The widest pair's two nodes' moves in the cabin's frame at the end (m).
+        moves: (Vec3, Vec3),
     }
     let mut acc: Vec<Acc> = by.keys().map(|_| Acc::default()).collect();
     let hoods: Vec<u32> = (0..v.pieces.len() as u32)
@@ -3088,6 +3127,8 @@ pub fn seam_evidence(car: &Car, kmh: f32, seconds: f32, cell: f32) -> Value {
             a.gap = a.gap.max(g_now);
             a.node_gap = a.node_gap.max(ng_now);
             if end {
+                let mv = |n: u32| fit.to_rest(now[n as usize]) - rest_nodes[n as usize];
+                a.moves = (mv(a.widest.1), mv(a.widest.2));
                 a.gap_end = g_now;
                 a.node_gap_end = ng_now;
                 a.open5_end = o5;
@@ -3152,6 +3193,8 @@ pub fn seam_evidence(car: &Car, kmh: f32, seconds: f32, cell: f32) -> Value {
                 "seam_pairs_sharing_a_node": shared_seam, "seam_pairs_same_top_node": same_top,
                 "skin_gap_max_mm": mm(r.gap), "node_gap_max_mm": mm(r.node_gap),
                 "widest_node_pair": format!("{}-{}", car.node_name(r.widest.1 as usize), car.node_name(r.widest.2 as usize)),
+                "widest_rest": [rest_nodes[r.widest.1 as usize].to_array().map(r3), rest_nodes[r.widest.2 as usize].to_array().map(r3)],
+                "widest_moves_end_mm": [r.moves.0.to_array().map(mm), r.moves.1.to_array().map(mm)],
                 "skin_gap_end_mm": mm(r.gap_end), "node_gap_end_mm": mm(r.node_gap_end), "open_5cm_end": r.open5_end,
             })
         })
