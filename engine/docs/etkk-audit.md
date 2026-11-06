@@ -255,3 +255,25 @@ Bands are from `crash-reference-targets.md` and `vehicle-test-strategy.md`.
 - The ETK's ledger rises 14–16 J in the wall; sedan1's rises 0. The ledger
   does not cover pressure tyres or bounded beams (`vehicle-test-strategy.md`).
 - Raycast wheels are used only at rest.
+
+## Re-run with couplers and the contact fix (2026-11-06, `feat/jbeam-community`)
+
+The harness again (`vehicle_compare --cars sedan1,etkk,etkk_kc6,ccf,vertex`) after
+BeamNG's node couplers (spec §7.1), JBeam mode as the page's default for JBeam
+content, and `feat/jbeam-features`' contact rest fix. What changed for the ETK:
+
+| Finding | Before | Now |
+|---|---|---|
+| 1. Lids held | hood 945 mm, trunk 574 mm adrift over the settle | **resolved**: latched by their couplers; the largest settle drifts are the soft top 32.8 mm (kr6) and the front suspension 5 mm; the lids are not among them |
+| 2. Parked | JBeam mode 0 / 0; `.truck` export 10 broken | JBeam mode 0 / 0 (0.5 J, 0.15 m/s); the `.truck` path is no longer the page's default |
+| 3. Frontal (kr6) | dynamic 511 mm, t_m 50 ms, 56 g, residual 281 mm, e 0.26 | dynamic 489 mm, t_m 46 ms, 66 g, residual 228 mm, e 0.35 (stiffer with the lids latched) |
+| 4. Side pole (kr6) | residual 512 mm, reach 969 mm | residual 57 mm, reach 1,045 mm (the pole still slips between the skin's nodes) |
+| 4. MDB (kr6 / kc6) | 210 / 392 mm | 364 / 265 mm |
+| 4. Door crush | 5.4 / 10.1 / 19.5 kN | 5.7 / 10.7 / 38.5 kN (initial and intermediate still under 10.0 / 15.6) |
+| 5. Roof (kr6 / kc6) | 1.61 / 9.62 × | 6.14 / 9.79 × |
+
+The CCF and the Vertex are in the table too (`vehicle-compare.md`). Two open points
+from them: the Vertex's wall ledger shows a 27 kJ rise (the energy check fails; its
+front suspension rings at 16–20 mm), and the CCF's wall residual crush reads 29 mm
+with b1 2,335 /s, with both headlights detached (the cabin fit or the crush frame
+is suspect, not yet read).
