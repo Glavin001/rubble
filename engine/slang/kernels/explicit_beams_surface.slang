@@ -111,7 +111,7 @@ uint surfBodyBase() { return gMisc[coupleRec() + 1u].z; }
 uint surfProxies(uint v)
 {
     if (surfBodyBase() == 0u || !cplHas(v)) return 0u;
-    return gMisc[cplBase(v)].y;
+    return cplVeh(v).y;
 }
 
 // Proxy shape k of vehicle v at its body's pose now, its body slot j: the strict pose
@@ -606,7 +606,7 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
     uint4 sr = gStatic[gP.surfSeg + v];
     uint segCount = mine ? sr.y : 0u;
     uint proxies = mine ? surfProxies(v) : 0u;
-    uint bodies = proxies != 0u ? gMisc[cplBase(v)].x : 0u;
+    uint bodies = proxies != 0u ? cplVeh(v).x : 0u;
     sync();
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
     {

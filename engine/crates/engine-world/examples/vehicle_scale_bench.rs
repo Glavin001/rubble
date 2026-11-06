@@ -379,12 +379,16 @@ fn main() -> anyhow::Result<()> {
                 let cp = l / cc as f32;
                 let cars: Vec<ExplicitBeams> = (0..nc)
                     .map(|i| {
-                        // Between the buildings.
-                        let at = Vec3::new(
-                            (i % cc) as f32 * cp - 0.5 * l + 0.5 * pitch,
-                            0.0,
-                            (i / cc) as f32 * cp - 0.5 * l + 0.5 * pitch,
-                        );
+                        // Between the buildings: the car's middle at the middle of a
+                        // building cell (its lattice point snapped to the cell it falls
+                        // in). Before 2026-11-06 the cars sat at multiples of the car
+                        // pitch plus half a building pitch, which put one car in four on a
+                        // building (the car pitch is 2.5 building pitches): those cars
+                        // never slept.
+                        let cell = |k: usize| {
+                            ((k as f32 * cp / pitch).floor() + 0.5) * pitch - 0.5 * l
+                        };
+                        let at = Vec3::new(cell(i % cc), 0.0, cell(i / cc) + 0.5 * len);
                         place_vehicle(&t, at, 0, 0.0, 0.0)
                     })
                     .collect();

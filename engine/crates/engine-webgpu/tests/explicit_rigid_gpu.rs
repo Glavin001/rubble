@@ -320,3 +320,28 @@ fn coupling_off_is_bit_for_bit() {
     assert_eq!(a.positions(), b.positions());
     assert_eq!(a.velocities(), b.velocities());
 }
+
+/// A corrupt proxy record header (body and shape counts past the region's B and S, as
+/// an unset or overwritten record would hold) fails loudly and fast: the coupling's
+/// loops stay within the vehicle's records (`explicit_beams_rigid.slang` `cplVeh`) and
+/// the frame reports the loop cap, instead of looping over millions of garbage records
+/// in one GPU submission.
+#[test]
+fn a_corrupt_proxy_header_fails_loudly_not_slowly() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let (sim, set, _) = setup(1200.0);
+    let mut gpu = ExplicitBeamsGpu::with_coupling(&device, &queue, std::slice::from_ref(&sim), Some(CAP));
+    write_proxies(&gpu, &queue, 0, &set).unwrap();
+    let at = u64::from(gpu.coupling().unwrap().vehicle(0)) * 16;
+    queue.write_buffer(gpu.misc_buffer(), at, bytemuck::cast_slice(&[u32::MAX, u32::MAX]));
+    gpu.set_coupling_on(true);
+    let t = std::time::Instant::now();
+    gpu.frame(STEPS);
+    let status = gpu.kernel_status();
+    let secs = t.elapsed().as_secs_f64();
+    println!("corrupt header: {status:?} in {secs:.2} s");
+    assert!(status.is_err(), "the loop cap is raised");
+    assert!(secs < 10.0, "bounded: {secs:.1} s");
+}
