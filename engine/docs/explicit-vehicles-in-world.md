@@ -640,6 +640,28 @@ should follow awake bodies and active destruction only):
   fracture's loads, breaks and readbacks run over all bodies, colliders, chunks and
   bonds.
 
+### 8.5 Scaling to large maps: the baseline (2026-11-06)
+
+`vehicle_scale_bench` (engine-world example; CSV and plots in
+`engine/docs/measurements/vehicle-scale/`): repo sedans on beam tyres, World steps of
+1/120 s, each step's span from submit to completion (median, p95, p99 ms). M3 Max with
+other agents on the GPU (load 40 to 90), so single points are noisy; the shapes are
+what matter. Baseline (3cf34d27 with the bench added):
+
+| Scenario | Points (p50 ms) |
+|---|---|
+| Cars driving at fixed density (6 m lanes, 15 m apart) | 64: 2.14, 128: 3.47, 256: 4.91, 512: 8.20, 1024: 13.86 |
+| 128 cars: spread, traffic (1 m nose to tail), pile-up (pairs head on) | 3.46, 3.58, 5.90 |
+| 1,000 parked (settled 4 s) + 10 driving | 15.93 |
+| Rigid bodies at 1 % awake + 10 driving cars: 10k, 30k, 100k | 2.41, 2.39, 3.32 |
+| Nothing active: map side 500, 1000, 2000, 4000 m (400 sleeping buildings and 64 parked cars per km²) | 1.74, 2.81, 5.49, 15.64 |
+
+The parked lot costs as much as 1,000 driving cars, and an idle map grows with its area
+(its parked cars): the explicit frame steps every vehicle every substep, and the
+coupling's passes run a workgroup per vehicle. The rigid bodies' own idle cost is
+`large-maps.md`'s (their row is flat here because 99 % are asleep and the World skips
+nothing while the vehicles request every step).
+
 ## 9. Remaining
 
 - In-frame release: a chunk proxy freed the substep its load passes its capacity (today the
