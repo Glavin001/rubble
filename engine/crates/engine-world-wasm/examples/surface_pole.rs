@@ -16,7 +16,8 @@
 //! `RUBBLE_ETK` (the `vehicles` directory holding `etkk/`), as the page's
 //! `mod=/__mods/etkk&pc=etkk/kr6.pc` loads it.
 
-use engine_softbody::explicit_beams::{ExplicitBeams, FrameClock, StaticBox, STEP};
+use engine_softbody::explicit_beams::{ExplicitBeams, FrameClock, StaticBox, NODE_NO_GROUND, STEP};
+use engine_softbody::explicit_surface::segment_kind;
 use engine_world_wasm::ExplicitSim;
 use glam::Vec3;
 use std::time::Instant;
@@ -126,8 +127,14 @@ fn depths(
         tri: 0.0,
         samples: Vec::new(),
     };
+    // Matter that collides: nodes not `NODE_NO_GROUND` (JBeam collision false), beams
+    // of a physical kind between two of them (`segment_kind`: no trigger, coupler,
+    // torsion, LBEAM, pressure or aero records).
+    let collides = |i: u32| !s.nodes[i as usize].has(NODE_NO_GROUND);
     for (i, &x) in p.iter().enumerate() {
-        let _ = i;
+        if !collides(i as u32) {
+            continue;
+        }
         let d = depth(bx, x);
         if d > 0.0 {
             out.node = out.node.max(d);
@@ -135,7 +142,7 @@ fn depths(
         }
     }
     for (j, b) in s.beams.iter().enumerate() {
-        if !live_beam(j) {
+        if !live_beam(j) || !segment_kind(b.kind) || !collides(b.a) || !collides(b.b) {
             continue;
         }
         let d = seg_depth(bx, p[b.a as usize], p[b.b as usize]);

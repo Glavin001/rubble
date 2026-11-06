@@ -30,8 +30,8 @@
 //! fusing): the GPU kernel (`explicit_beams.slang`, `surfaceContact`) does the same.
 
 use crate::explicit_beams::{
-    contact_response, shift_depth, ContactSurface, ExplicitBeams, Node, StaticShape,
-    NODE_IMMOVABLE, STEP,
+    contact_response, shift_depth, to_fixed, ContactSurface, ExplicitBeams, ExplicitKind, Node,
+    StaticShape, CONTACT_FIXED, NODE_IMMOVABLE, NODE_NO_GROUND, STEP,
 };
 use glam::Vec3;
 
@@ -406,6 +406,89 @@ fn point_distance(s: &SurfaceShape, x: Vec3) -> Option<f32> {
     }
 }
 
+/// The shape's point nearest x when x is outside it (a hull's: x moved back along its
+/// farthest plane, the lower bound's point), `None` inside.
+fn point_nearest(s: &SurfaceShape, x: Vec3) -> Option<Vec3> {
+    match s {
+        SurfaceShape::Box { c, axes, half } => {
+            let d = x - *c;
+            let l = Vec3::new(dot3(axes[0], d), dot3(axes[1], d), dot3(axes[2], d));
+            let inside = l.x > -half.x
+                && l.x < half.x
+                && l.y > -half.y
+                && l.y < half.y
+                && l.z > -half.z
+                && l.z < half.z;
+            if inside {
+                return None;
+            }
+            let k = Vec3::new(
+                l.x.max(-half.x).min(half.x),
+                l.y.max(-half.y).min(half.y),
+                l.z.max(-half.z).min(half.z),
+            );
+            Some(((*c + axes[0] * k.x) + axes[1] * k.y) + axes[2] * k.z)
+        }
+        SurfaceShape::Sphere { c, radius } => {
+            let d = x - *c;
+            let l = len3(d);
+            (l > *radius).then(|| *c + d * (*radius / l))
+        }
+        SurfaceShape::Capsule { a, b, radius } => {
+            let ab = *b - *a;
+            let l2 = dot3(ab, ab);
+            let t = if l2 > 0.0 {
+                clamp01(dot3(x - *a, ab) / l2)
+            } else {
+                0.0
+            };
+            let m = *a + ab * t;
+            let d = x - m;
+            let l = len3(d);
+            (l > *radius).then(|| m + d * (*radius / l))
+        }
+        SurfaceShape::Cylinder {
+            c,
+            radius,
+            half_height,
+        } => {
+            point_distance(s, x)?;
+            Some(cylinder_point(*c, *radius, *half_height, x))
+        }
+        SurfaceShape::Hull { planes, .. } => {
+            let mut m = f32::NEG_INFINITY;
+            let mut n = Vec3::ZERO;
+            for &(pn, d) in planes {
+                let e = dot3(pn, x) - d;
+                if e > m {
+                    m = e;
+                    n = pn;
+                }
+            }
+            (m >= 0.0).then(|| x - n * m)
+        }
+    }
+}
+
+/// The band contact of a node at x (point-vs-shape): outside the shape and within
+/// `r` of it, the normal toward its nearest point; `None` inside (node contact's),
+/// past the band, or touching (gap ≤ [`PIERCE`]: no direction; node contact takes it
+/// once inside). Weights (1, 0, 0).
+pub fn point_contact(x: Vec3, s: &SurfaceShape, r: f32) -> Option<SurfaceHit> {
+    let p = point_nearest(s, x)?;
+    let dv = p - x;
+    let g = len3(dv);
+    if !(g <= r) || !(g > PIERCE) {
+        return None;
+    }
+    Some(SurfaceHit {
+        w: [1.0, 0.0, 0.0],
+        n: dv / g,
+        gap: g,
+        q: x,
+    })
+}
+
 /// The point of the solid vertical cylinder (centre c, radius r, half height hh)
 /// nearest x (x itself inside).
 fn cylinder_point(c: Vec3, r: f32, hh: f32, x: Vec3) -> Vec3 {
@@ -601,19 +684,58 @@ fn tri_edges_inside(x: &[Vec3; 3], planes: &[(Vec3, f32)], visit: &mut impl FnMu
     for k in 0..3 {
         let (p0, p1) = (x[k], x[(k + 1) % 3]);
         if let Some((t0, t1)) = clip_planes(p0, p1, planes.iter().copied()) {
-            let t = (t0 + t1) * 0.5;
-            let q = p0 + (p1 - p0) * t;
-            visit(
-                Pair {
-                    w: edge_weights(k, t),
-                    q,
-                    cs: q,
-                    d: 0.0,
-                },
-                0.0,
-            );
+            for t in [t0, t1] {
+                let q = p0 + (p1 - p0) * t;
+                visit(
+                    Pair {
+                        w: edge_weights(k, t),
+                        q,
+                        cs: q,
+                        d: 0.0,
+                    },
+                    0.0,
+                );
+            }
         }
     }
+}
+
+/// Weights on two or more nodes (not a node's own point).
+fn shared(w: &[f32; 3]) -> bool {
+    (w[0] > 0.0) as u32 + (w[1] > 0.0) as u32 + (w[2] > 0.0) as u32 >= 2
+}
+
+/// Touching or crossing (the normal n from the separating axis): the contact at the
+/// element's deepest point along n among the candidates within [`TIE`] of the nearest
+/// gap `gx` whose weights are shared (a node's own point is its contact), the mean
+/// of those within [`TIE`] of the deepest; `None` when there is none. A crossing's
+/// candidates are the ends of its runs inside the shape (each the element's deepest
+/// on its run), so the contact holds the point that went deepest, not a run's middle
+/// the element turns about. Two more passes over the candidates.
+fn deepest(
+    n: Vec3,
+    gx: f32,
+    cands: &dyn Fn(&mut dyn FnMut(Pair, f32)),
+) -> Option<([f32; 3], Vec3)> {
+    let mut top = f32::NEG_INFINITY;
+    cands(&mut |p, g| {
+        if g <= gx + TIE && shared(&p.w) {
+            top = top.max(dot3(n, p.q));
+        }
+    });
+    if top == f32::NEG_INFINITY {
+        return None;
+    }
+    let (mut w, mut q, mut k) = ([0.0f32; 3], Vec3::ZERO, 0u32);
+    cands(&mut |p, g| {
+        if g <= gx + TIE && shared(&p.w) && dot3(n, p.q) >= top - TIE {
+            w = [w[0] + p.w[0], w[1] + p.w[1], w[2] + p.w[2]];
+            q += p.q;
+            k += 1;
+        }
+    });
+    let kf = k as f32;
+    Some(([w[0] / kf, w[1] / kf, w[2] / kf], q / kf))
 }
 
 /// The surface contact of triangle x (world positions, node order) with shape s in a
@@ -662,17 +784,381 @@ pub fn triangle_contact(x: &[Vec3; 3], s: &SurfaceShape, r: f32) -> Option<Surfa
     }
     let dv = cs - q;
     let dl = len3(dv);
-    let normal = if gx > PIERCE && dl > PIERCE {
-        dv / dl
-    } else {
-        overlap_axis(x, n, s)
-    };
+    if gx > PIERCE && dl > PIERCE {
+        return Some(SurfaceHit {
+            w,
+            n: dv / dl,
+            gap: gx,
+            q,
+        });
+    }
+    let normal = overlap_axis(x, n, s);
+    let (w, q) = deepest(normal, gx, &|mut v| x_candidates(s, x, &mut v)).unwrap_or((w, q));
     Some(SurfaceHit {
         w,
         n: normal,
         gap: gx,
         q,
     })
+}
+
+/// A beam the surface pass meets shapes with ([`ExplicitBeams::surface_segments`]):
+/// the kinds that are a physical member between their two nodes (not triggers,
+/// couplers, torsion, LBEAM, pressure or aero records).
+pub fn segment_kind(k: ExplicitKind) -> bool {
+    matches!(
+        k,
+        ExplicitKind::Plain
+            | ExplicitKind::LimitedSpring
+            | ExplicitKind::Support
+            | ExplicitKind::Rope
+            | ExplicitKind::Shock2
+            | ExplicitKind::JbeamPlain
+            | ExplicitKind::JbeamSupport
+            | ExplicitKind::JbeamBounded
+            | ExplicitKind::JbeamAniso
+            | ExplicitKind::JbeamPressured
+            | ExplicitKind::JbeamRope
+    )
+}
+
+/// The parameter on segment p0 + d·t (d·d = dd > 0) nearest x.
+fn seg_param(p0: Vec3, d: Vec3, dd: f32, x: Vec3) -> f32 {
+    clamp01(dot3(x - p0, d) / dd)
+}
+
+/// The candidate pairs of shape edge e0–e1 against beam p0–p1 (direction d, d·d =
+/// dd): the two segments' closest points unless they are parallel, then each edge end
+/// against the beam (a run's ends when they are parallel), each through `map`.
+#[allow(clippy::too_many_arguments)]
+fn edge_beam(
+    e0: Vec3,
+    e1: Vec3,
+    p0: Vec3,
+    p1: Vec3,
+    d: Vec3,
+    dd: f32,
+    map: &impl Fn(Pair) -> (Pair, f32),
+    visit: &mut impl FnMut(Pair, f32),
+) {
+    let mut emit = |p: Pair| {
+        let (p, g) = map(p);
+        visit(p, g);
+    };
+    let de = e1 - e0;
+    let c = cross3(d, de);
+    if dot3(c, c) > 1e-12 * (dd * dot3(de, de)) {
+        let (s, t) = closest_seg_seg(p0, p1, e0, e1);
+        let a = p0 + d * s;
+        let y = e0 + de * t;
+        emit(Pair {
+            w: [1.0 - s, s, 0.0],
+            q: a,
+            cs: y,
+            d: len3(a - y),
+        });
+    }
+    for e in [e0, e1] {
+        let t = seg_param(p0, d, dd, e);
+        let a = p0 + d * t;
+        emit(Pair {
+            w: [1.0 - t, t, 0.0],
+            q: a,
+            cs: e,
+            d: len3(a - e),
+        });
+    }
+}
+
+/// The beam's run inside the planes (it crosses the shape): a pair of distance 0 at
+/// each of the run's ends.
+fn beam_inside(p0: Vec3, p1: Vec3, planes: &[(Vec3, f32)], visit: &mut impl FnMut(Pair, f32)) {
+    if let Some((t0, t1)) = clip_planes(p0, p1, planes.iter().copied()) {
+        for t in [t0, t1] {
+            let q = p0 + (p1 - p0) * t;
+            visit(
+                Pair {
+                    w: [1.0 - t, t, 0.0],
+                    q,
+                    cs: q,
+                    d: 0.0,
+                },
+                0.0,
+            );
+        }
+    }
+}
+
+/// The X candidates of the shape against beam x₀–x₁, in a fixed order (the beam's
+/// end points are its nodes': V, not here).
+fn seg_candidates(s: &SurfaceShape, x: &[Vec3; 2], visit: &mut impl FnMut(Pair, f32)) {
+    let (p0, p1) = (x[0], x[1]);
+    let d = p1 - p0;
+    let dd = dot3(d, d);
+    let id = |p: Pair| (p, p.d);
+    match s {
+        SurfaceShape::Sphere { c, radius } => {
+            let t = seg_param(p0, d, dd, *c);
+            let q = p0 + d * t;
+            let dist = len3(*c - q);
+            visit(
+                Pair {
+                    w: [1.0 - t, t, 0.0],
+                    q,
+                    cs: *c,
+                    d: dist,
+                },
+                dist - *radius,
+            );
+        }
+        SurfaceShape::Capsule { a, b, radius } => {
+            let r = *radius;
+            edge_beam(*a, *b, p0, p1, d, dd, &|p: Pair| (p, p.d - r), visit);
+        }
+        SurfaceShape::Cylinder {
+            c,
+            radius,
+            half_height,
+        } => {
+            // The axis's pairs, each beam point taken to the solid cylinder.
+            let h = Vec3::new(0.0, *half_height, 0.0);
+            let (cc, hh, rr) = (*c, *half_height, *radius);
+            edge_beam(
+                cc - h,
+                cc + h,
+                p0,
+                p1,
+                d,
+                dd,
+                &|p: Pair| {
+                    let cs = cylinder_point(cc, rr, hh, p.q);
+                    let dist = len3(p.q - cs);
+                    (Pair { cs, d: dist, ..p }, dist)
+                },
+                visit,
+            );
+        }
+        SurfaceShape::Box { c, axes, half } => {
+            // The twelve edges in x_candidates' order, then the beam's run inside.
+            let h = [half.x, half.y, half.z];
+            for i in 0..3 {
+                let (u, v) = ((i + 1) % 3, (i + 2) % 3);
+                for k in 0..4 {
+                    let su = if k & 1 != 0 { h[u] } else { -h[u] };
+                    let sv = if k & 2 != 0 { h[v] } else { -h[v] };
+                    let m = *c + axes[u] * su + axes[v] * sv;
+                    let e = axes[i] * h[i];
+                    edge_beam(m - e, m + e, p0, p1, d, dd, &id, visit);
+                }
+            }
+            beam_inside(p0, p1, &box_planes(*c, axes, *half), visit);
+        }
+        SurfaceShape::Hull {
+            verts,
+            edges,
+            planes,
+        } => {
+            for e in edges {
+                edge_beam(
+                    verts[e[0] as usize],
+                    verts[e[1] as usize],
+                    p0,
+                    p1,
+                    d,
+                    dd,
+                    &id,
+                    visit,
+                );
+            }
+            beam_inside(p0, p1, planes, visit);
+        }
+    }
+}
+
+/// [`overlap_axis`] for beam x₀–x₁: the shape's face axes, then the beam's direction
+/// crossed with the shape's edge directions; with none (a sphere), a fixed
+/// perpendicular of the beam.
+pub fn seg_overlap_axis(x: &[Vec3; 2], s: &SurfaceShape) -> Vec3 {
+    let d = x[1] - x[0];
+    // (least overlap, its axis, none yet)
+    let mut st = (f32::INFINITY, Vec3::ZERO, true);
+    let test = |st: &mut (f32, Vec3, bool), u: Vec3| {
+        let t0 = dot3(u, x[0]);
+        let t1 = dot3(u, x[1]);
+        let (tlo, thi) = (t0.min(t1), t0.max(t1));
+        let (slo, shi) = project(s, u);
+        let plus = thi - slo;
+        let minus = shi - tlo;
+        let (ov, axis) = if plus <= minus {
+            (plus, u)
+        } else {
+            (minus, -u)
+        };
+        if st.2 || ov < st.0 - 1e-5 {
+            *st = (ov, axis, false);
+        }
+    };
+    let mut dirs: Vec<Vec3> = Vec::new();
+    match s {
+        SurfaceShape::Box { axes, .. } => {
+            for &a in axes {
+                test(&mut st, a);
+            }
+            dirs.extend_from_slice(axes);
+        }
+        SurfaceShape::Cylinder { .. } => {
+            test(&mut st, Vec3::Y);
+            dirs.push(Vec3::Y);
+        }
+        SurfaceShape::Capsule { a, b, .. } => dirs.push(*b - *a),
+        SurfaceShape::Sphere { .. } => {}
+        SurfaceShape::Hull {
+            verts,
+            edges,
+            planes,
+        } => {
+            for &(p, _) in planes {
+                test(&mut st, p);
+            }
+            for e in edges {
+                dirs.push(verts[e[1] as usize] - verts[e[0] as usize]);
+            }
+        }
+    }
+    for &e in &dirs {
+        let a = cross3(d, e);
+        let l2 = dot3(a, a);
+        if !(l2 > 1e-12 * (dot3(d, d) * dot3(e, e))) {
+            continue;
+        }
+        test(&mut st, a / l2.sqrt());
+    }
+    if st.2 {
+        // The beam crossed with x, or with y when it is nearest along x.
+        let ax = if d.x.abs() <= d.y.abs().max(d.z.abs()) {
+            Vec3::X
+        } else {
+            Vec3::Y
+        };
+        let a = cross3(d, ax);
+        test(&mut st, a / len3(a));
+    }
+    st.1
+}
+
+/// The surface contact of beam x₀–x₁ (world positions of its nodes a, b) with shape
+/// s in a band of `r` (m), as [`triangle_contact`]: `None` when apart by more than r
+/// or when the nearest feature is an end (its node's contact). Weights (w₀, w₁, 0).
+/// A beam through a shape may have a second contact ([`deepest_ends`]).
+pub fn segment_contact(
+    x: &[Vec3; 2],
+    s: &SurfaceShape,
+    r: f32,
+) -> Option<(SurfaceHit, Option<SurfaceHit>)> {
+    let d = x[1] - x[0];
+    if !(dot3(d, d) > 1e-12) {
+        return None;
+    }
+    let mut gx = f32::INFINITY;
+    seg_candidates(s, x, &mut |_, g| gx = gx.min(g));
+    if !(gx <= r) {
+        return None;
+    }
+    for &v in x {
+        if let Some(dv) = point_distance(s, v) {
+            if dv <= gx + TIE {
+                return None;
+            }
+        }
+    }
+    let mut w = [0.0f32; 2];
+    let mut q = Vec3::ZERO;
+    let mut cs = Vec3::ZERO;
+    let mut k = 0u32;
+    seg_candidates(s, x, &mut |p, g| {
+        if g <= gx + TIE {
+            w = [w[0] + p.w[0], w[1] + p.w[1]];
+            q += p.q;
+            cs += p.cs;
+            k += 1;
+        }
+    });
+    let kf = k as f32;
+    let w = [w[0] / kf, w[1] / kf];
+    let (q, cs) = (q / kf, cs / kf);
+    if !(w[0] > 0.0 && w[1] > 0.0) {
+        return None;
+    }
+    let dv = cs - q;
+    let dl = len3(dv);
+    let w = [w[0], w[1], 0.0];
+    if gx > PIERCE && dl > PIERCE {
+        return Some((
+            SurfaceHit {
+                w,
+                n: dv / dl,
+                gap: gx,
+                q,
+            },
+            None,
+        ));
+    }
+    let normal = seg_overlap_axis(x, s);
+    let hit = |w: [f32; 3], q: Vec3| SurfaceHit {
+        w,
+        n: normal,
+        gap: gx,
+        q,
+    };
+    // Touching or crossing: the deepest candidates along n; when they spread along
+    // the beam (a run through the shape, its ends equally deep along an axis across
+    // the beam) one contact at each extreme, so the beam is held at both and cannot
+    // turn deeper about one.
+    let cands = |mut v: &mut dyn FnMut(Pair, f32)| seg_candidates(s, x, &mut v);
+    match deepest_ends(normal, gx, &cands) {
+        Some((lo, hi)) if hi.0[1] > lo.0[1] => Some((hit(lo.0, lo.1), Some(hit(hi.0, hi.1)))),
+        Some((lo, _)) => Some((hit(lo.0, lo.1), None)),
+        None => Some((hit(w, q), None)),
+    }
+}
+
+/// [`deepest`] for a beam: of the deepest candidates along n (within [`TIE`]), those
+/// at the least and the most parameter along the beam (the first of equals).
+#[allow(clippy::type_complexity)]
+fn deepest_ends(
+    n: Vec3,
+    gx: f32,
+    cands: &dyn Fn(&mut dyn FnMut(Pair, f32)),
+) -> Option<(([f32; 3], Vec3), ([f32; 3], Vec3))> {
+    let mut top = f32::NEG_INFINITY;
+    cands(&mut |p, g| {
+        if g <= gx + TIE && shared(&p.w) {
+            top = top.max(dot3(n, p.q));
+        }
+    });
+    if top == f32::NEG_INFINITY {
+        return None;
+    }
+    let mut lo: Option<([f32; 3], Vec3)> = None;
+    let mut hi: Option<([f32; 3], Vec3)> = None;
+    cands(&mut |p, g| {
+        if g <= gx + TIE && shared(&p.w) && dot3(n, p.q) >= top - TIE {
+            if lo.is_none_or(|l| p.w[1] < l.0[1]) {
+                lo = Some((p.w, p.q));
+            }
+            if hi.is_none_or(|h| p.w[1] > h.0[1]) {
+                hi = Some((p.w, p.q));
+            }
+        }
+    });
+    Some((lo?, hi?))
+}
+
+/// A beam's box padded by `r` overlapping `lo..hi`.
+pub fn seg_near(x: &[Vec3; 2], r: f32, lo: Vec3, hi: Vec3) -> bool {
+    let tlo = x[0].min(x[1]) - Vec3::splat(r);
+    let thi = x[0].max(x[1]) + Vec3::splat(r);
+    tlo.cmple(hi).all() && thi.cmpge(lo).all()
 }
 
 /// A triangle's box padded by `r` overlapping `lo..hi`.
@@ -682,13 +1168,49 @@ pub fn near(x: &[Vec3; 3], r: f32, lo: Vec3, hi: Vec3) -> bool {
     tlo.cmple(hi).all() && thi.cmpge(lo).all()
 }
 
-/// One surface hit found by the pass: triangle, shape slot, the contact.
+/// One surface hit found by the pass: its element (a triangle, or past the
+/// triangles a segment of [`surface_segments`]), its nodes (a segment's third is its
+/// first, weight 0), shape slot, the contact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Found {
     pub tri: u32,
+    pub nodes: [u32; 3],
     /// Static slot (boxes, then shapes) or, at or past `static_slots`, proxy shape.
     pub slot: u32,
     pub hit: SurfaceHit,
+}
+
+/// The beams surface contact tests as segments (beam-edge contact): every beam of a
+/// physical kind ([`segment_kind`]) between two distinct collidable nodes (not
+/// `NODE_NO_GROUND`) that is no edge of a collision triangle the surface pass meets
+/// (not anti-clip only): a triangle owns its edges, a node its ends. In beam order;
+/// fixed at spawn (a triangle's break does not hand its edges to the beams).
+pub fn surface_segments(s: &ExplicitBeams) -> Vec<u32> {
+    let mut edges = std::collections::HashSet::new();
+    for (t, tri) in s.triangles.iter().enumerate() {
+        if s.tri_anti_only(t) {
+            continue;
+        }
+        let n = tri.nodes;
+        for k in 0..3 {
+            let (a, b) = (n[k], n[(k + 1) % 3]);
+            edges.insert((a.min(b), a.max(b)));
+        }
+    }
+    let mut out = Vec::new();
+    for (j, b) in s.beams.iter().enumerate() {
+        if !segment_kind(b.kind) || b.a == b.b {
+            continue;
+        }
+        if s.nodes[b.a as usize].has(NODE_NO_GROUND) || s.nodes[b.b as usize].has(NODE_NO_GROUND) {
+            continue;
+        }
+        if edges.contains(&(b.a.min(b.b), b.a.max(b.b))) {
+            continue;
+        }
+        out.push(j as u32);
+    }
+    out
 }
 
 impl ExplicitBeams {
@@ -750,13 +1272,68 @@ impl ExplicitBeams {
                 if let Some(hit) = triangle_contact(&x, s, r) {
                     found.push(Found {
                         tri: t as u32,
+                        nodes: [i0, i1, i2],
                         slot: k as u32,
                         hit,
                     });
                 }
             }
         }
+        // Beam-edge contact: the segments, after the triangles.
+        if self.surface_segs.is_none() {
+            self.surface_segs = Some(surface_segments(self));
+        }
+        let segs = self.surface_segs.take().unwrap_or_default();
+        let nt = self.triangles.len() as u32;
+        for (k, &j) in segs.iter().enumerate() {
+            let b = &self.beams[j as usize];
+            if b.broken {
+                continue;
+            }
+            let (a, bb) = (b.a, b.b);
+            let x = [a, bb].map(|i| self.origin + self.nodes[i as usize].pos);
+            for (slot, (s, lo, hi)) in shapes.iter().enumerate() {
+                if !seg_near(&x, r, *lo, *hi) {
+                    continue;
+                }
+                if let Some((hit, second)) = segment_contact(&x, s, r) {
+                    for hit in std::iter::once(hit).chain(second) {
+                        found.push(Found {
+                            tri: nt + k as u32,
+                            nodes: [a, bb, a],
+                            slot: slot as u32,
+                            hit,
+                        });
+                    }
+                }
+            }
+        }
+        // Point contact in the band: every collidable node outside a shape and within
+        // the band of it (a node strictly inside is node contact's), after the segments.
+        let ns = nt + segs.len() as u32;
+        self.surface_segs = Some(segs);
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].has(NODE_NO_GROUND) {
+                continue;
+            }
+            let x = self.origin + self.nodes[i].pos;
+            for (slot, (s, lo, hi)) in shapes.iter().enumerate() {
+                if !seg_near(&[x, x], r, *lo, *hi) {
+                    continue;
+                }
+                if let Some(hit) = point_contact(x, s, r) {
+                    let n = i as u32;
+                    found.push(Found {
+                        tri: ns + n,
+                        nodes: [n, n, n],
+                        slot: slot as u32,
+                        hit,
+                    });
+                }
+            }
+        }
         self.surface_last = found.len() as u32;
+        self.surface_force = glam::DVec3::ZERO;
         if found.is_empty() {
             return;
         }
@@ -767,7 +1344,7 @@ impl ExplicitBeams {
         let exact = self.exact_friction;
         let mut split = vec![0u32; self.nodes.len()];
         for f in found {
-            let tri = self.triangles[f.tri as usize].nodes;
+            let tri = f.nodes;
             for (j, &i) in tri.iter().enumerate() {
                 if f.hit.w[j] > 0.0 {
                     split[i as usize] += 1;
@@ -800,7 +1377,7 @@ impl ExplicitBeams {
         let surface = ContactSurface::BOX.exact_if(exact).dissipative_if(true);
         let r = self.collision_range;
         for f in found {
-            let tri = self.triangles[f.tri as usize].nodes;
+            let tri = f.nodes;
             let nd = tri.map(|i| self.nodes[i as usize]);
             let w = f.hit.w;
             let nn = f.hit.n;
@@ -854,7 +1431,17 @@ impl ExplicitBeams {
                 }
             }
             for j in 0..3 {
-                self.add_contact(tri[j] as usize, -(fc * w[j]));
+                let f = -(fc * w[j]);
+                self.add_contact(tri[j] as usize, f);
+                // (The statistic: as the node takes it, its fixed-point sum's.)
+                self.surface_force += if self.fixed_contact {
+                    glam::DVec3::from(
+                        f.to_array()
+                            .map(|x| f64::from(to_fixed(x)) / f64::from(CONTACT_FIXED)),
+                    )
+                } else {
+                    f.as_dvec3()
+                };
             }
             if let Some(l) = self.contact_force.as_mut() {
                 for j in 0..3 {

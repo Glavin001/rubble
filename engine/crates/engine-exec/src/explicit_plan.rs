@@ -936,7 +936,8 @@ impl ExplicitUpload {
             node_off += v.nodes.len() as u32;
             beam_off += v.beams.len() as u32;
             tri_off += v.triangles.len() as u32;
-            box_off += v.boxes.len() as u32;
+            // Its slots: its boxes, then its static shapes (each a slot).
+            box_off += (v.boxes.len() + v.shapes.len()) as u32;
         }
         // Shape parameter records after every box slot (offsets from the box base).
         let shape_at = box_recs.len() as u32;
@@ -1481,6 +1482,28 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // Surface contact's segments per vehicle (beam-edge contact; none without
+        // the flag), and the find's slot masks (gAcc): per triangle, then per
+        // segment, then per node, each the slots it hit (bit b slot b, bit 31 any
+        // slot from 31 on), so the apply recomputes only those.
+        let surf_segs: Vec<Vec<u32>> = vehicles
+            .iter()
+            .map(|v| {
+                if any_surface && v.surface_contact {
+                    engine_softbody::explicit_surface::surface_segments(v)
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        let surf_seg_total: usize = surf_segs.iter().map(Vec::len).sum();
+        let surf_mark = if any_surface {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, total_tris + surf_seg_total + total_nodes));
+            at
+        } else {
+            0
+        };
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -1540,6 +1563,25 @@ impl ExplicitUpload {
             lists.extend(tri_excl_list);
             let base = statics.len() as u32;
             statics.extend(tri_excl_recs.iter().map(|r| [r[0] + at, r[1], 0, 0]));
+            base
+        } else {
+            0
+        };
+        // Surface contact's segments (§38, beam-edge contact): per vehicle (start in
+        // gLists, count, its first segment's mask in gAcc, its first node's mask in
+        // gAcc), the global beam indices in gLists.
+        let surf_seg = if any_surface {
+            let base = statics.len() as u32;
+            let mut beam_at = 0u32;
+            let mut seg_mark = surf_mark + total_tris as u32;
+            let mut node_mark = seg_mark + surf_seg_total as u32;
+            for (v, segs) in vehicles.iter().zip(&surf_segs) {
+                statics.push([lists.len() as u32, segs.len() as u32, seg_mark, node_mark]);
+                lists.extend(segs.iter().map(|&j| beam_at + j));
+                beam_at += v.beams.len() as u32;
+                seg_mark += segs.len() as u32;
+                node_mark += v.nodes.len() as u32;
+            }
             base
         } else {
             0
@@ -1636,6 +1678,8 @@ impl ExplicitUpload {
             clip_vmax,
             surf_snap,
             surf_split,
+            surf_seg,
+            surf_mark,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -2403,6 +2447,43 @@ fn vv_cell(vehicles: &[ExplicitBeams]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each vehicle's box slots (its boxes, then its static shapes) start after every
+    /// earlier vehicle's: two vehicles with a box and a cylinder each, the second's
+    /// first slot is its own box.
+    #[test]
+    fn box_slots_of_later_vehicles_skip_earlier_shapes() {
+        use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape};
+        let text = "slots\nglobals\n40, 0, tracks/semi\nnodes\n0, 0.0, 0.0, 0.0\n1, 0.3, 0.0, 0.0\nbeams\n0, 1\nend\n";
+        let settings = ExplicitBeamsSettings {
+            drag: false,
+            turbulence: false,
+            fast_inv_sqrt: true,
+            triangle_throttle: true,
+        };
+        let mut vs = Vec::new();
+        for k in 0..2 {
+            let mut v = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
+            let c = Vec3::new(10.0 * k as f32 + 1.0, 0.5, 0.0);
+            v.boxes.push(StaticBox::centered(c, Vec3::splat(0.5)));
+            v.shapes.push(StaticShape::cylinder(c + Vec3::X * 3.0, 0.2, 1.0));
+            vs.push(v);
+        }
+        let up = ExplicitUpload::new(&vs, None);
+        let box_base = up.layout.words[5] as usize;
+        for (k, v) in vs.iter().enumerate() {
+            let r1 = up.statics[k * 4 + 1];
+            assert_eq!(r1[3], 2, "vehicle {k}: its box and its cylinder");
+            let lo = up.statics[box_base + r1[2] as usize * 2];
+            let want = v.boxes[0].lo;
+            assert_eq!(
+                [f32::from_bits(lo[0]), f32::from_bits(lo[1]), f32::from_bits(lo[2])],
+                [want.x, want.y, want.z],
+                "vehicle {k}: its first slot (offset {}) is its own box",
+                r1[2]
+            );
+        }
+    }
 
     /// Every kernel a plan can name has a module, with its entry.
     #[test]

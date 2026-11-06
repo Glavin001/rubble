@@ -245,8 +245,8 @@ struct Params
     // Surface contact (§38, explicit_beams_surface.slang; 0: no vehicle has it).
     uint surfSnap; // gBeams: per node its force at the surface pass's start
     uint surfSplit; // gAcc: per node its surface hit count this step
-    uint surfPad0;
-    uint surfPad1;
+    uint surfSeg; // gStatic: per vehicle (segment start in gLists, segments); gLists the global beam indices
+    uint surfMark; // gAcc: the find's slot masks: per triangle (global), then segments, nodes (their records' .z, .w)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
