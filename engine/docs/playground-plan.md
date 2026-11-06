@@ -27,6 +27,7 @@ Principles (unchanged from the lab):
 | 3 | Done for vehicles, soft bodies, motion and terrain (`play::{vehicles, softbody, motion, hills}`); the city was already Rust (`rubble::city`). The street and range layouts moved to `engine_vehicle::streets`. |
 | 3b | Done: one `SceneDef` over those families (`play::scene`): its world, its placement, a page's URL switches read in Rust (`from_query`, so a preset's query is its page's scene), and `Playground`. Bindings: wasm `createScene`/`placeScene`/`sceneFromQuery`/`presetScene`; C `rbCreatePlay`/`rbPlay_Step`/`rbPlay_GetStats`; native `tests/play_presets.rs` (all 44 placed presets). |
 | 3c | Done for vehicles, soft bodies, motion and terrain: `play::Action` and `play::Director` (`play::director`, `play::vehicle_director`). Each scene's script (the gallery's volleys, the playground's NPCs and platform, the T-bone ram, the crusher's winch, the traffic drivers, the gauntlet's shelling, the range's volleys and scoring, the meteor run's director and judge, directed debris) runs in Rust before each step or frame, and the player's actions (fire, cannon, ram, crater, rain, guide, targets, reset) are `act` calls. Pages call `world.act()` and follow `takeEvents()`; natively `Playground::act`/`frame`. `World::begin_body_read` reads body records without waiting, as the pages' `readBodies`. The gauntlet, range and run scripts moved to `engine_vehicle::scripts`. |
+| 3d | The city (`play::city_scene`: `city.html`'s switches, every house placed, shell and scenario actions) and the range scenes (Broadside, the timber yard: `stage::RangeSceneDef`) run through `Playground` (`Playground::with_assets` for the GLB; native hosts read the repository's). Not yet: the lab (its own Rust API, `rubble::lab`, with a JSON definition the fracture app builds; folded in with its page in phase 4), and impact and showcase, whose scenes are still placed by page JavaScript. |
 | 4–6 | Not started. |
 
 Every move was checked in Chrome against the page before it: the body records before the
@@ -40,8 +41,8 @@ How this differs from the target below, so far:
   the shell (phase 4), when one page needs it.
 - No `Action` type yet: firing, ramming, shelling, meteors and crash runs are still each
   page's script over what placement returns.
-- Not in `SceneDef` yet: the lab, the range (Broadside, the timber yard), impact and the
-  city; the explicit solver's own scene (the page builds the sim, Rust places its shapes);
+- Not in `SceneDef` yet: the lab, impact and showcase (the range and the city run
+  through `Playground`, each on its own placement, not composed parts); the explicit solver's own scene (the page builds the sim, Rust places its shapes);
   imported vehicles (the page adds the file to the scene).
 - `World::settle_uploads` (new): bulk placement hands its uploads over in batches;
   natively, one write per body piled up Metal staging buffers (gables506k placed in over

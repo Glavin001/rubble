@@ -108,6 +108,9 @@ pub enum SceneDef {
     Soft(softbody::SoftSceneDef),
     Motion(motion::MotionSceneDef),
     Terrain(hills::HillsDef),
+    City(super::city_scene::CitySceneDef),
+    /// Broadside or the timber yard: built by [`super::stage::Play`] from its GLB.
+    Range(super::stage::RangeSceneDef),
 }
 
 /// What a placed scene hands its host: each family's handles and layout.
@@ -118,6 +121,7 @@ pub enum Placed {
     Soft(softbody::Placed),
     Motion(motion::Placed),
     Terrain(hills::Placed),
+    City(crate::city::City),
 }
 
 impl Placed {
@@ -134,6 +138,12 @@ impl Placed {
             Placed::Soft(p) => serde_json::to_value(p)?,
             Placed::Motion(p) => serde_json::to_value(p)?,
             Placed::Terrain(p) => serde_json::to_value(p)?,
+            Placed::City(c) => serde_json::json!({
+                "houses": c.houses.iter().map(|h| h.to_bits()).collect::<Vec<_>>(),
+                "lots": c.lots,
+                "pitch": c.pitch,
+                "ground": c.ground,
+            }),
         })
     }
 }
@@ -146,6 +156,8 @@ impl SceneDef {
             SceneDef::Soft(_) => Family::Soft,
             SceneDef::Motion(_) => Family::Motion,
             SceneDef::Terrain(_) => Family::Terrain,
+            SceneDef::City(_) => Family::City,
+            SceneDef::Range(_) => Family::Range,
         }
     }
 
@@ -157,6 +169,10 @@ impl SceneDef {
             SceneDef::Soft(d) => softbody::world_def(d),
             SceneDef::Motion(d) => motion::world_def(d),
             SceneDef::Terrain(d) => hills::world_def(d),
+            SceneDef::City(d) => super::city_scene::world_def(d),
+            SceneDef::Range(_) => {
+                anyhow::bail!("a range scene builds its own world (Playground::new)")
+            }
         }
     }
 
@@ -168,6 +184,10 @@ impl SceneDef {
             SceneDef::Soft(d) => Placed::Soft(softbody::place(world, d)?),
             SceneDef::Motion(d) => Placed::Motion(motion::place(world, d)?),
             SceneDef::Terrain(d) => Placed::Terrain(hills::place(world, d)?),
+            SceneDef::City(d) => Placed::City(super::city_scene::place(world, d)?),
+            SceneDef::Range(_) => {
+                anyhow::bail!("a range scene places itself (Playground::new)")
+            }
         })
     }
 
@@ -312,6 +332,8 @@ impl SceneDef {
                     .unwrap_or(2000);
                 SceneDef::Terrain(hills::HillsDef { n })
             }
+            Family::Range => SceneDef::Range(super::stage::RangeSceneDef::from_query(&q)?),
+            Family::City => SceneDef::City(super::city_scene::CitySceneDef::from_query(&q)?),
             f => anyhow::bail!("the {} family is not placed through SceneDef yet", f.name()),
         })
     }
@@ -321,7 +343,13 @@ impl SceneDef {
 pub fn placed_here(family: Family) -> bool {
     matches!(
         family,
-        Family::Rigid | Family::Vehicle | Family::Soft | Family::Motion | Family::Terrain
+        Family::Rigid
+            | Family::Vehicle
+            | Family::Soft
+            | Family::Motion
+            | Family::Terrain
+            | Family::City
+            | Family::Range
     )
 }
 
@@ -343,7 +371,7 @@ impl Preset {
 }
 
 /// `Number(s)` as a page reads a query value: blank is 0, anything not a number NaN.
-fn js_number(s: &str) -> f64 {
+pub(crate) fn js_number(s: &str) -> f64 {
     let t = s.trim();
     if t.is_empty() {
         return 0.0;
@@ -362,7 +390,7 @@ fn js_number(s: &str) -> f64 {
 }
 
 /// A URL query's pairs, decoded as `URLSearchParams` does (`+` is a space, `%XX` a byte).
-struct Query {
+pub(crate) struct Query {
     pairs: Vec<(String, String)>,
 }
 
@@ -399,7 +427,7 @@ impl Query {
     }
 
     /// The first value of `k` (`URLSearchParams.get`).
-    fn get(&self, k: &str) -> Option<&str> {
+    pub(crate) fn get(&self, k: &str) -> Option<&str> {
         self.pairs
             .iter()
             .find(|(a, _)| a == k)
@@ -417,12 +445,18 @@ impl Query {
     }
 }
 
+/// What a playground runs: a scene placed in its world, or a range scene (Broadside, the
+/// timber yard), which builds its own world from its baked GLB ([`super::stage::Play`]).
+pub enum Stage {
+    Placed { world: World, placed: Placed },
+    Range(Box<super::stage::Play>),
+}
+
 /// A placed scene with its world, stepped: the one way any host runs a preset.
 pub struct Playground {
-    pub world: World,
     pub scene: SceneDef,
-    pub placed: Placed,
     pub director: super::Director,
+    pub stage: Stage,
 }
 
 /// A playground's counts as of its last step.
@@ -436,17 +470,53 @@ pub struct PlayStats {
     pub overflow: u32,
 }
 
+/// The repository's baked range assets (`engine-webgpu/fracture/assets`), for native hosts.
+pub fn repo_asset(name: &str) -> anyhow::Result<Vec<u8>> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../engine-webgpu/fracture/assets")
+        .join(name);
+    std::fs::read(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+}
+
 impl Playground {
-    /// Make `scene`'s world on `gpu` and place the scene.
+    /// Make `scene`'s world on `gpu` and place the scene (a range scene's GLB from the
+    /// repository's assets).
     pub fn new(gpu: GpuContext, scene: SceneDef) -> anyhow::Result<Self> {
+        Self::with_assets(gpu, scene, &repo_asset)
+    }
+
+    /// [`Self::new`] with the host's assets (`asset(name)`: the file's bytes).
+    pub fn with_assets(
+        gpu: GpuContext,
+        scene: SceneDef,
+        asset: &dyn Fn(&str) -> anyhow::Result<Vec<u8>>,
+    ) -> anyhow::Result<Self> {
+        if let SceneDef::Range(r) = &scene {
+            let glb = asset(r.asset())?;
+            let play = super::stage::Play::load(gpu, &glb, r.kind(), r.level, r.raze)?;
+            return Ok(Playground {
+                scene,
+                director: super::Director::none(),
+                stage: Stage::Range(Box::new(play)),
+            });
+        }
         let mut world = World::new(gpu, &scene.world_def()?)?;
         let placed = scene.place(&mut world)?;
         let director = super::Director::new(&scene, &placed, &mut world)?;
         Ok(Playground {
-            world,
             scene,
-            placed,
             director,
+            stage: Stage::Placed { world, placed },
+        })
+    }
+
+    /// A scene already placed in `world` ([`SceneDef::place`]).
+    pub fn of_placed(scene: SceneDef, mut world: World, placed: Placed) -> anyhow::Result<Self> {
+        let director = super::Director::new(&scene, &placed, &mut world)?;
+        Ok(Playground {
+            scene,
+            director,
+            stage: Stage::Placed { world, placed },
         })
     }
 
@@ -469,40 +539,84 @@ impl Playground {
         Self::new(gpu, SceneDef::from_query(p.family, &merged)?)
     }
 
-    /// Do `action` before the next step.
+    pub fn world(&self) -> &World {
+        match &self.stage {
+            Stage::Placed { world, .. } => world,
+            Stage::Range(p) => &p.scene.range().world,
+        }
+    }
+
+    pub fn world_mut(&mut self) -> &mut World {
+        match &mut self.stage {
+            Stage::Placed { world, .. } => world,
+            Stage::Range(p) => &mut p.scene.range_mut().world,
+        }
+    }
+
+    /// The placement (none for a range scene, which places itself).
+    pub fn placed(&self) -> Option<&Placed> {
+        match &self.stage {
+            Stage::Placed { placed, .. } => Some(placed),
+            Stage::Range(_) => None,
+        }
+    }
+
+    /// Do `action` before the next step. A range scene fires its 24-pounder along the
+    /// aim (fire or cannon).
     pub fn act(&mut self, action: &super::Action) -> anyhow::Result<()> {
-        self.director.act(&mut self.world, action)
+        match &mut self.stage {
+            Stage::Placed { world, .. } => self.director.act(world, action),
+            Stage::Range(p) => match action {
+                super::Action::Cannon { aim } | super::Action::Fire { aim: Some(aim) } => {
+                    let f = |v: [f64; 3]| v.map(|x| x as f32);
+                    p.shoot_ray(f(aim.eye), f(aim.dir));
+                    Ok(())
+                }
+                a => anyhow::bail!("range scenes have no {} action", a.name()),
+            },
+        }
     }
 
     /// One frame of `steps` steps, frame-locked: the scene's frame scripts on fresh reads,
     /// each step after its own script, every result waited on. `dt`: the frame's time (s).
     pub fn frame(&mut self, steps: u32, dt: f64) -> anyhow::Result<()> {
-        self.director.prepare(&self.world)?;
-        while self.director.pending(&self.world) {
-            std::thread::yield_now();
+        if let Stage::Placed { world, .. } = &mut self.stage {
+            self.director.prepare(world)?;
+            while self.director.pending(world) {
+                std::thread::yield_now();
+            }
+            self.director.before_frame(world, dt, None)?;
         }
-        self.director.before_frame(&mut self.world, dt, None)?;
         self.step(steps)?;
-        self.director.after_frame(&self.world)
-    }
-
-    /// `steps` steps (each after the scene's script), waiting for each one's results.
-    pub fn step(&mut self, steps: u32) -> anyhow::Result<()> {
-        for _ in 0..steps {
-            self.director.before_step(&mut self.world)?;
-            self.world.step()?;
-            self.world.poll_blocking()?;
+        if let Stage::Placed { world, .. } = &mut self.stage {
+            self.director.after_frame(world)?;
         }
         Ok(())
     }
 
+    /// `steps` steps (each after the scene's script), waiting for each one's results.
+    pub fn step(&mut self, steps: u32) -> anyhow::Result<()> {
+        match &mut self.stage {
+            Stage::Placed { world, .. } => {
+                for _ in 0..steps {
+                    self.director.before_step(world)?;
+                    world.step()?;
+                    world.poll_blocking()?;
+                }
+                Ok(())
+            }
+            Stage::Range(p) => p.frame(steps),
+        }
+    }
+
     pub fn stats(&self) -> PlayStats {
+        let world = self.world();
         let mut s = PlayStats {
-            steps: self.world.step_count(),
-            bodies: self.world.body_count() as u32,
+            steps: world.step_count(),
+            bodies: world.body_count() as u32,
             ..PlayStats::default()
         };
-        if let Some(c) = self.world.counters() {
+        if let Some(c) = world.counters() {
             s.awake = c.awake_count;
             s.contacts = c.contact_count;
             s.overflow = c.overflow_flags;
@@ -534,7 +648,9 @@ mod tests {
                 Some(d) => {
                     let d = d.unwrap_or_else(|e| panic!("{}: {e}", p.name));
                     assert_eq!(d.family(), p.family, "{}", p.name);
-                    d.world_def().unwrap_or_else(|e| panic!("{}: {e}", p.name));
+                    if !matches!(d, SceneDef::Range(_)) {
+                        d.world_def().unwrap_or_else(|e| panic!("{}: {e}", p.name));
+                    }
                     n += 1;
                 }
                 None => assert!(

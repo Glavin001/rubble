@@ -24,6 +24,20 @@ fn every_placed_preset_builds_and_steps() {
         }
         let Some(def) = p.scene_def() else { continue };
         let def = def.unwrap_or_else(|e| panic!("{}: {e}", p.name));
+        if matches!(def, rubble::play::SceneDef::Range(_)) {
+            // A range scene builds its own world from its GLB.
+            let mut play = Playground::new(GpuContext::Default, def)
+                .unwrap_or_else(|e| panic!("{}: {e:#}", p.name));
+            play.step(3).unwrap_or_else(|e| panic!("{}: {e:#}", p.name));
+            assert_eq!(play.stats().overflow, 0, "{}", p.name);
+            eprintln!(
+                "{:16} {:7} bodies (range scene)",
+                p.name,
+                play.stats().bodies
+            );
+            ran.push(p.name);
+            continue;
+        }
         // Each phase's time: making the world, placing the scene, its first steps.
         let t = std::time::Instant::now();
         let wd = def
@@ -47,13 +61,8 @@ fn every_placed_preset_builds_and_steps() {
                 placing.as_secs_f64() * 1e3
             );
         }
-        let director = rubble::play::Director::new(&def, &placed, &mut world).unwrap();
-        let mut play = Playground {
-            world,
-            scene: def,
-            placed,
-            director,
-        };
+        let mut play = Playground::of_placed(def, world, placed)
+            .unwrap_or_else(|e| panic!("{}: {e:#}", p.name));
         let bodies = play.stats().bodies;
         assert!(bodies > 1, "{}: {bodies} bodies", p.name);
         play.step(3).unwrap_or_else(|e| panic!("{}: {e:#}", p.name));
@@ -159,6 +168,23 @@ fn directors_act_and_script() {
     assert!(volleys >= 2, "{volleys} volleys in 5 s");
     assert!(downs > 0, "no touchdowns");
     assert!(p.director.state()["zones"].as_u64().unwrap() > 0);
+    // The city: every house placed, its scenario started, a shell fired.
+    let mut p = Playground::preset(GpuContext::Default, "city", "k=16&scenario=war").unwrap();
+    p.step(30).unwrap();
+    p.act(&Action::Start).unwrap();
+    p.act(&Action::Shell {
+        origin: [0.0, 40.0, 0.0],
+        velocity: [0.0, -60.0, 0.0],
+        radius: 0.5,
+    })
+    .unwrap();
+    p.step(30).unwrap();
+    assert_eq!(events(&mut p), ["start", "shell"]);
+    // A range scene: its 24-pounder along the aim.
+    let mut p = Playground::preset(GpuContext::Default, "timber-yard", "level=1").unwrap();
+    p.act(&Action::Cannon { aim }).unwrap();
+    p.step(10).unwrap();
+    assert!(p.act(&Action::Rain).is_err());
     let mut p = Playground::preset(GpuContext::Default, "playground", "").unwrap();
     p.act(&Action::Cannon { aim }).unwrap();
     assert_eq!(events(&mut p), ["cannon"]);

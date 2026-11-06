@@ -52,6 +52,14 @@ pub enum Action {
         #[serde(default)]
         strength: Option<u32>,
     },
+    /// The city's scenario (`?scenario=`), started once its houses have settled.
+    Start,
+    /// A steel ball of `radius` m from `origin` at `velocity` (the city's shells).
+    Shell {
+        origin: [f32; 3],
+        velocity: [f32; 3],
+        radius: f32,
+    },
     /// The meteor range's carts moving, and steering that knows their routes (the host
     /// resets the scene after).
     Targets {
@@ -73,6 +81,8 @@ impl Action {
             Action::Rain => "rain",
             Action::Guide { .. } => "guide",
             Action::Targets { .. } => "targets",
+            Action::Start => "start",
+            Action::Shell { .. } => "shell",
         }
     }
 }
@@ -95,6 +105,7 @@ enum Kind {
     Soft(SoftDirector),
     Terrain(TerrainDirector),
     Vehicle(VehicleDirector),
+    City(super::city_scene::CityDirector),
 }
 
 /// A placed scene's script and the player's actions on it.
@@ -104,6 +115,14 @@ pub struct Director {
 }
 
 impl Director {
+    /// A director with no script and no actions.
+    pub fn none() -> Director {
+        Director {
+            kind: Kind::None,
+            events: Vec::new(),
+        }
+    }
+
     /// The director of `scene`, just placed (`placed`) in `world`.
     pub fn new(scene: &SceneDef, placed: &Placed, world: &mut World) -> anyhow::Result<Director> {
         let kind = match (scene, placed) {
@@ -115,6 +134,9 @@ impl Director {
             }
             (SceneDef::Terrain(_), Placed::Terrain(p)) => {
                 Kind::Terrain(TerrainDirector::new(p.clone(), world))
+            }
+            (SceneDef::City(d), Placed::City(c)) => {
+                Kind::City(super::city_scene::CityDirector::new(d, c.clone())?)
             }
             (SceneDef::Vehicle(d), Placed::Vehicle(p)) => {
                 Kind::Vehicle(VehicleDirector::new(d, p.clone(), world)?)
@@ -134,7 +156,7 @@ impl Director {
             Kind::None => Ok(()),
             Kind::Motion(d) => d.before_step(world, ev),
             Kind::Soft(d) => d.before_step(world, ev),
-            Kind::Terrain(_) => Ok(()),
+            Kind::Terrain(_) | Kind::City(_) => Ok(()),
             Kind::Vehicle(d) => d.before_step(world, ev),
         }
     }
@@ -205,6 +227,7 @@ impl Director {
             Kind::Soft(d) => d.act(world, action, ev),
             Kind::Terrain(d) => d.act(world, action, ev),
             Kind::Vehicle(d) => d.act(world, action, ev),
+            Kind::City(d) => d.act(world, action, ev),
         }
     }
 
@@ -224,6 +247,7 @@ impl Director {
         match &self.kind {
             Kind::Vehicle(d) => serde_json::json!({ "zones": d.zone_count }),
             Kind::Terrain(d) => serde_json::json!({ "craters": d.craters }),
+            Kind::City(d) => serde_json::json!({ "shells": d.shells }),
             _ => serde_json::Value::Null,
         }
     }

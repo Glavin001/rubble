@@ -27,6 +27,7 @@
 
 pub mod balls;
 pub mod broadside;
+pub mod city_scene;
 pub mod director;
 pub mod hills;
 pub mod motion;
@@ -42,4 +43,4 @@ pub mod vehicles;
 
 pub use director::{Action, Aim, Director, Event};
 pub use presets::{preset, presets, Family, Preset};
-pub use scene::{Placed, PlayStats, Playground, RigidSceneDef, SceneDef};
+pub use scene::{repo_asset, Placed, PlayStats, Playground, RigidSceneDef, SceneDef, Stage};

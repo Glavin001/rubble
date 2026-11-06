@@ -460,3 +460,62 @@ fn vertex(p: [f32; 3], n: [f32; 3], color: [f32; 3], id: f32, out: &mut Vec<f32>
     out.extend_from_slice(&color);
     out.push(id);
 }
+
+/// A range scene as a [`super::SceneDef`]: Broadside or the timber yard, its fracture
+/// level and its take, as the range page reads them (`?scene=`, `?level=`, `?take=raze`).
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RangeSceneDef {
+    /// `broadside` or `timber`.
+    pub scene: String,
+    pub level: u8,
+    pub raze: bool,
+}
+
+impl Default for RangeSceneDef {
+    fn default() -> Self {
+        RangeSceneDef {
+            scene: "broadside".into(),
+            level: 2,
+            raze: false,
+        }
+    }
+}
+
+impl RangeSceneDef {
+    pub(crate) fn from_query(q: &super::scene::Query) -> anyhow::Result<Self> {
+        let scene = q.get("scene").unwrap_or("broadside");
+        anyhow::ensure!(
+            scene == "broadside" || scene == "timber",
+            "range scene {scene}: broadside or timber"
+        );
+        // The page's default on a desktop (fine pointer): level 2.
+        let level = match q.get("level") {
+            Some(l) => super::scene::js_number(l) as u8,
+            None => 2,
+        };
+        Ok(RangeSceneDef {
+            scene: scene.into(),
+            level,
+            raze: q.get("take") == Some("raze"),
+        })
+    }
+
+    /// 0 Broadside, 1 the timber yard ([`Play::load`]).
+    pub fn kind(&self) -> u8 {
+        if self.scene == "timber" {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Its baked GLB (`engine-webgpu/fracture/assets`).
+    pub fn asset(&self) -> &'static str {
+        if self.scene == "timber" {
+            "timber-yard.glb"
+        } else {
+            "galleon-stern.glb"
+        }
+    }
+}

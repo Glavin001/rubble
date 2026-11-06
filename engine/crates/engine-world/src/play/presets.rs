@@ -222,8 +222,8 @@ const PRESETS: &[Preset] = &[
     // fracture/
     p("lab", "Fracture lab", Lab, "fracture/", ""),
     // broadside.html, timber.html
-    p("broadside", "Broadside", Range, "broadside.html", ""),
-    p("timber-yard", "Timber yard", Range, "timber.html", ""),
+    p("broadside", "Broadside", Range, "broadside.html", "scene=broadside"),
+    p("timber-yard", "Timber yard", Range, "timber.html", "scene=timber"),
     // vehicle.html
     p("vehicles", "Vehicles", Vehicle, "vehicle.html", ""),
     p("bridge", "Bridge", Vehicle, "vehicle.html", "scene=bridge"),

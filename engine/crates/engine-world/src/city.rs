@@ -175,6 +175,7 @@ impl CityDef {
 
 /// A city being built in a world, then run: its ground, the house asset and the houses
 /// placed so far.
+#[derive(Clone, Debug)]
 pub struct City {
     pub def: CityDef,
     pub lots: Vec<[f32; 2]>,
