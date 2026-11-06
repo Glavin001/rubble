@@ -273,6 +273,7 @@ impl SceneDef {
                         "wall"
                     }
                     .into(),
+                    ai: q.get("ai").unwrap_or("").into(),
                 })
             }
             Family::Motion => {
@@ -283,6 +284,12 @@ impl SceneDef {
                 SceneDef::Motion(motion::MotionSceneDef {
                     scene: scene.into(),
                     look_ahead: q.get("lookahead") != Some("0"),
+                    // `Number(x) || 250`: blank, 0 and NaN fall back.
+                    speed: match q.get("speed").map(js_number) {
+                        Some(v) if v != 0.0 && !v.is_nan() => v,
+                        _ => 250.0,
+                    },
+                    autofire: q.get("autofire") != Some("0"),
                 })
             }
             Family::Terrain => {
@@ -404,6 +411,7 @@ pub struct Playground {
     pub world: World,
     pub scene: SceneDef,
     pub placed: Placed,
+    pub director: super::Director,
 }
 
 /// A playground's counts as of its last step.
@@ -422,10 +430,12 @@ impl Playground {
     pub fn new(gpu: GpuContext, scene: SceneDef) -> anyhow::Result<Self> {
         let mut world = World::new(gpu, &scene.world_def()?)?;
         let placed = scene.place(&mut world)?;
+        let director = super::Director::new(&scene, &placed, &world);
         Ok(Playground {
             world,
             scene,
             placed,
+            director,
         })
     }
 
@@ -448,9 +458,27 @@ impl Playground {
         Self::new(gpu, SceneDef::from_query(p.family, &merged)?)
     }
 
-    /// `steps` steps, waiting for each one's results.
+    /// Do `action` before the next step.
+    pub fn act(&mut self, action: &super::Action) -> anyhow::Result<()> {
+        self.director.act(&mut self.world, action)
+    }
+
+    /// One frame of `steps` steps, frame-locked: the scene's frame scripts on fresh reads,
+    /// each step after its own script, every result waited on. `dt`: the frame's time (s).
+    pub fn frame(&mut self, steps: u32, dt: f64) -> anyhow::Result<()> {
+        self.director.prepare(&self.world)?;
+        while self.director.pending(&self.world) {
+            std::thread::yield_now();
+        }
+        self.director.before_frame(&mut self.world, dt, None)?;
+        self.step(steps)?;
+        self.director.after_frame(&self.world)
+    }
+
+    /// `steps` steps (each after the scene's script), waiting for each one's results.
     pub fn step(&mut self, steps: u32) -> anyhow::Result<()> {
         for _ in 0..steps {
+            self.director.before_step(&mut self.world)?;
             self.world.step()?;
             self.world.poll_blocking()?;
         }

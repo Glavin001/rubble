@@ -106,6 +106,9 @@ pub struct SoftSceneDef {
     pub cars: f64,
     /// The import scene's target: `wall` or `car`.
     pub target: String,
+    /// Traffic drivers (`?ai=`): empty, the derby (two in three wander, one chases);
+    /// `cruise`, everyone wanders and brakes for cars ahead; `0`, none.
+    pub ai: String,
 }
 
 impl Default for SoftSceneDef {
@@ -127,6 +130,7 @@ impl Default for SoftSceneDef {
             runup: 0.0,
             cars: 0.0,
             target: "wall".into(),
+            ai: String::new(),
         }
     }
 }

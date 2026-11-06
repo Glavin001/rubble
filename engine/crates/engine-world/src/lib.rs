@@ -20,6 +20,7 @@
 
 mod assembly;
 mod blast;
+mod body_read;
 /// The large-maps benchmark city: one builder for the native benchmark and `city.html`.
 #[cfg(feature = "stress")]
 pub mod city;
@@ -54,6 +55,7 @@ pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
     PartRef, VehicleBuild, VehicleDef, VehicleModel,
 };
+pub use body_read::{BodyRead, BodyRecordRead};
 pub use blast::{
     BlastDef, ChunkBlastLoad, LoadCause, RadialImpulse, BLAST_CAP, MIN_SCALED_DISTANCE,
 };

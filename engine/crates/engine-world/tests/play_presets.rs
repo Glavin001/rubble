@@ -47,10 +47,12 @@ fn every_placed_preset_builds_and_steps() {
                 placing.as_secs_f64() * 1e3
             );
         }
+        let director = rubble::play::Director::new(&def, &placed, &world);
         let mut play = Playground {
             world,
             scene: def,
             placed,
+            director,
         };
         let bodies = play.stats().bodies;
         assert!(bodies > 1, "{}: {bodies} bodies", p.name);

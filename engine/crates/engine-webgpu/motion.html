@@ -54,10 +54,12 @@
       character: 'Character playground',
       bullets: 'Bullets through walls',
     };
-    const scene = SCENES[qs.get('scene')] ? qs.get('scene') : 'ccd';
+    // The scene (rubble::play::motion, engine-world): its world, solver, bodies and script.
+    const sceneDef = await sceneFromQuery('motion', location.search);
+    const scene = sceneDef.scene;
     const SPEEDS = [60, 140, 250];
-    const shotSpeed = Number(qs.get('speed')) || 250;
-    const lookAhead = qs.get('lookahead') !== '0';
+    const shotSpeed = sceneDef.speed;
+    const lookAhead = sceneDef.lookAhead;
     const sceneSel = document.getElementById('sceneSel');
     for (const [id, t] of Object.entries(SCENES)) sceneSel.add(new Option(t, id, false, id === scene));
     const speedSel = document.getElementById('speedSel');
@@ -75,8 +77,6 @@
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
     // The world opens the device; the page renders on it and reads the world's buffers in place.
-    // The scene (rubble::play::motion, engine-world): its world, solver and bodies.
-    const sceneDef = await sceneFromQuery('motion', location.search);
     const world = await createScene(sceneDef);
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
@@ -115,25 +115,22 @@
     statusEl.textContent = `scene ready · ${world.bodyCount()} bodies · ${world.colliderCount()} colliders`;
 
     // ---------------------------------------------------------------- body writes
-    function launch(body, p, v) {
-      world.bodySetTransform(body, p, [0, 0, 0, 1]);
-      world.bodySetVelocity(body, v, [0, 0, 0]);
-      world.bodySetAwake(body, true);
+    // The script (rubble::play::director) fires volleys and bursts on its cadence and the
+    // player's actions; the HUD follows what it reports.
+    function onEvent(e) {
+      if (e.what === 'volley') {
+        for (const L of S.lanes) {
+          L.fired = e.step;
+          L.result = { control: 'flying', ccd: 'flying' };
+          L.tally.shots++;
+        }
+        if (S.shower) S.shower.fired = e.step;
+        say(`volley at ${shotSpeed} m/s`);
+      } else if (e.what === 'burst') say('3 bullets at 900 m/s (5,000 J/m to cross a wall)');
+      else if (e.what === 'bullet') say('bullet at 600 m/s');
+      else if (e.what === 'rocket') say('CCD rocket at 150 m/s');
     }
-    function fireVolley() {
-      for (const L of S.lanes) {
-        L.fired = world.stepCount();
-        L.result = { control: 'flying', ccd: 'flying' };
-        L.tally.shots++;
-        launch(L.control, [L.x - 1.0, 1.4, 4], [0, 0, shotSpeed]);
-        launch(L.ccd, [L.x + 1.0, 1.4, 4], [0, 0, shotSpeed]);
-      }
-      if (S.shower) {
-        for (const side of ['control', 'ccd']) for (const c of S.shower[side]) launch(c.body, [c.x, c.y, c.z], [0, -40, 0]);
-        S.shower.fired = world.stepCount();
-      }
-      say(`volley at ${shotSpeed} m/s`);
-    }
+    const takeEvents = () => { for (const e of world.takeEvents()) onEvent(e); };
 
     // ---------------------------------------------------------------- renderer
     const SHADER = /* wgsl */`
@@ -356,47 +353,27 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
     addEventListener('blur', () => keys.clear());
     const key = (...c) => c.some((k) => keys.has(k));
 
-    let rocketNext = 0;
+    const aim = () => { const eye = eyeOf(); return { eye, dir: norm3(sub3(cam.target, eye)) }; };
     function fire() {
-      if (scene === 'ccd') return fireVolley();
-      if (scene === 'bullets') {
-        for (let k = 0; k < 3; k++) world.spawnProjectile({ position: [(k - 1) * 1.2, 0.5, 0], velocity: [0, 0.6, 900], mass: 0.01, penetrationCost: 5000, maxHitsPerStep: 8 });
-        say('3 bullets at 900 m/s (5,000 J/m to cross a wall)');
-        return;
-      }
-      const c = S.motion?.characters[S.player];
-      if (!c) return;
-      const eye = eyeOf();
-      const dir = norm3(sub3(cam.target, eye));
-      const from = [c.position[0], c.position[1] + 0.6, c.position[2]];
-      world.spawnProjectile({ position: from, velocity: dir.map((d) => d * 600), mass: 0.012, penetrationCost: 20000, maxHitsPerStep: 8, ignoreBody: world.characterBody(S.player) });
-      say('bullet at 600 m/s');
+      world.act({ action: 'fire', aim: scene === 'character' ? aim() : undefined });
+      takeEvents();
     }
     function rocket() {
-      if (scene !== 'character' || !S.motion) return;
-      const c = S.motion.characters[S.player];
-      const eye = eyeOf();
-      const dir = norm3(sub3(cam.target, eye));
-      const body = S.rockets[rocketNext++ % S.rockets.length];
-      launch(body, [c.position[0] + dir[0] * 1.2, c.position[1] + 0.8 + dir[1] * 1.2, c.position[2] + dir[2] * 1.2], dir.map((d) => d * 150));
-      say('CCD rocket at 150 m/s');
+      if (scene !== 'character') return;
+      world.act({ action: 'cannon', aim: aim() });
+      takeEvents();
     }
     function resetScene() {
       // Every body and character back to its start, at rest (parked bodies asleep again).
-      for (const r of placed.resets) {
-        world.bodySetTransform(r.id, r.position, r.rotation);
-        world.bodySetVelocity(r.id, [0, 0, 0], [0, 0, 0]);
-        if (r.asleep) world.bodySetAwake(r.id, false);
-      }
-      for (const [h, c] of characters) { world.characterTeleport(h, c.start); world.characterSetInput(h, [0, 0, 0], false); }
-      lastKinFlip = -1;
+      world.act({ action: 'reset' });
+      takeEvents();
       for (const L of S.lanes) { L.result = { control: '—', ccd: '—' }; L.tally = { control: 0, ccd: 0, shots: 0 }; }
       S.log.length = 0;
       jumpSeq = 0;
     }
 
     // ---------------------------------------------------------------- per-step logic
-    let lastKinFlip = 0;
+    // The player's input; the NPCs, platform and lift are the scene's script.
     function driveScene() {
       if (scene !== 'character') return;
       // Player: WASD relative to the camera.
@@ -408,17 +385,6 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
       const l = Math.hypot(vx, vz) || 1;
       if (fwd || side) { vx = (vx / l) * speed; vz = (vz / l) * speed; } else { vx = 0; vz = 0; }
       if (!S.scripted) setCharacterInput(S.player, [vx, 0, vz], jumpSeq);
-      // NPCs walk circles.
-      const steps = world.stepCount();
-      const t = steps * DT;
-      for (const n of S.npcs) setCharacterInput(n.h, [2 * Math.cos(t * 0.6 + n.phase), 0, 2 * Math.sin(t * 0.6 + n.phase)], 0);
-      // Platform back and forth (3 s each way); the lift up and down.
-      if (steps - lastKinFlip >= 180 || steps === 0 || lastKinFlip < 0) {
-        const dir = Math.floor(steps / 180) % 2 ? -1 : 1;
-        world.bodySetVelocity(S.platform, [1.5 * dir, 0, 0], [0, 0, 0]);
-        world.bodySetVelocity(S.lift, [0, 1.0 * dir, 0], [0, 0, 0]);
-        lastKinFlip = steps;
-      }
     }
     // One step if it can be taken without waiting on a readback (its inputs first).
     function tryStep() {
@@ -432,6 +398,7 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
     let lastCounters = null;
     const bodyState = { get: (id) => ({ p: poses.position(world.bodySlot(id)) }) };
     function onFrame(f) {
+      takeEvents();
       if (f.empty) return;
       poses.apply(f);
       const c = f.counters();
@@ -532,17 +499,12 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
     let fpsAcc = 0, fpsN = 0, fpsShow = 0;
     const frameF = new Float32Array(24);
     let manual = false;
-    let autoFire = qs.get('autofire') !== '0';
     function frame(now) {
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
       fpsAcc += dt; fpsN++;
       if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
       if (manual) { updateCamera(dt); const e = device.createCommandEncoder(); drawScene(e); device.queue.submit([e.finish()]); requestAnimationFrame(frame); return; }
-      // Demo cadence: a volley every 3 s in the gallery, a burst every 2 s on the range.
-      const steps = world.stepCount();
-      if (world.canStep() && autoFire && scene === 'ccd' && steps % 180 === 20) fireVolley();
-      if (world.canStep() && autoFire && scene === 'bullets' && steps % 120 === 20) fire();
       tryStep();
       pollFrame();
       updateHud();
@@ -569,10 +531,10 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
     // __check(): the scene's end-to-end script, run frame-locked; returns metrics.
     window.__check = async () => {
       manual = true;
-      autoFire = false;
+      world.setAutofire(false);
       if (scene === 'ccd') {
         await window.__step(5);
-        fireVolley();
+        fire();
         await window.__step(90);
         const lanes = S.lanes.map((L) => {
           const st = (side) => bodyState.get(L[side]);
