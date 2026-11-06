@@ -91,7 +91,10 @@ pub mod mat {
     /// The engine and its bay's hardware (block, cam cover, radiator, strut
     /// towers): cast and painted metal.
     pub const ENGINE: u8 = 31;
-    pub const COUNT: usize = 32;
+    /// Grained black plastic, moulded in colour (bumper splitters, vents,
+    /// diffusers): satin, a fine stipple texture.
+    pub const GRAINED: u8 = 32;
+    pub const COUNT: usize = 33;
 }
 
 /// Material names, by id.
@@ -128,6 +131,7 @@ pub const MATERIAL_NAMES: [&str; mat::COUNT] = [
     "pillar",
     "inner",
     "engine",
+    "grained",
 ];
 
 /// Whether a material is drawn blended (after the opaque ones).

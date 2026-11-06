@@ -854,6 +854,7 @@ fn props(m: u32) -> vec3f {
     case 24u: { return vec3f(0.2, 0.0, 0.5); }   // tail lamp back
     case 30u: { return vec3f(0.55, 0.0, 0.25); } // inner stamping: e-coat, a little sheen
     case 31u: { return vec3f(0.5, 1.0, 0.0); }   // engine: cast alloy
+    case 32u: { return vec3f(0.62, 0.0, 0.0); }  // grained black plastic (satin)
     default: { return vec3f(0.8, 0.0, 0.0); }
   }
 }
@@ -1026,6 +1027,14 @@ fn shade(i: VOut, front: bool) -> vec4f {
   // the car's body their inner faces.
   if (i.mat == 6u || i.mat == 7u || i.mat == 22u || i.mat == 23u || i.mat == 28u) {
     ao *= mix(1.0, 0.42, smoothstep(0.30, 0.66, i.world.y));
+  }
+  // Grained plastic: a fine stipple (about 1 mm, in rest space) tilting the
+  // normal, faded to the satin average where a grain is under a pixel.
+  if (i.mat == 32u) {
+    let q = i.rest * 1100.0;
+    let gr = vec3f(noise3(q), noise3(q + vec3f(17.3)), noise3(q + vec3f(41.7))) - vec3f(0.5);
+    let px = distance(frame.eye.xyz, i.world) * 1.2;
+    n = normalize(n + gr * 0.5 * (1.0 - smoothstep(0.4, 1.6, px)));
   }
   let ndl = max(dot(n, l), 0.0);
   let ndv = max(dot(n, v), 1e-3);

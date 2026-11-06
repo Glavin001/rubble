@@ -37,6 +37,10 @@ pub struct Material {
     pub roughness: f32,
     pub blend: bool,
     pub emissive: [f32; 3],
+    /// `KHR_materials_clearcoat`: the coat's factor and roughness (a factor
+    /// of 0: no coat).
+    pub clearcoat: f32,
+    pub clearcoat_roughness: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -153,13 +157,20 @@ pub fn write(g: &Glb) -> Vec<u8> {
             if m.emissive != [0.0; 3] {
                 v["emissiveFactor"] = json!(m.emissive);
             }
+            if m.clearcoat > 0.0 {
+                v["extensions"] = json!({"KHR_materials_clearcoat": {
+                    "clearcoatFactor": m.clearcoat,
+                    "clearcoatRoughnessFactor": m.clearcoat_roughness,
+                }});
+            }
             v
         })
         .collect();
+    let coat = g.materials.iter().any(|m| m.clearcoat > 0.0);
     while bin.data.len() % 4 != 0 {
         bin.data.push(0);
     }
-    let doc = json!({
+    let mut doc = json!({
         "asset": {"version": "2.0", "generator": "Rubble gen2 (engine_softbody::authoring::gen2::model)"},
         "scene": 0,
         "scenes": [{"name": "Scene", "nodes": [0]}],
@@ -170,6 +181,9 @@ pub fn write(g: &Glb) -> Vec<u8> {
         "bufferViews": bin.views,
         "buffers": [{"byteLength": bin.data.len()}],
     });
+    if coat {
+        doc["extensionsUsed"] = json!(["KHR_materials_clearcoat"]);
+    }
     let mut js = serde_json::to_vec(&doc).unwrap();
     while js.len() % 4 != 0 {
         js.push(b' ');
@@ -316,6 +330,13 @@ pub fn read(bytes: &[u8]) -> Result<Glb, String> {
                     .map_or([0.0; 3], |a| {
                         [0, 1, 2].map(|k| a[k].as_f64().unwrap_or(0.0) as f32)
                     }),
+                clearcoat: m["extensions"]["KHR_materials_clearcoat"]["clearcoatFactor"]
+                    .as_f64()
+                    .unwrap_or(0.0) as f32,
+                clearcoat_roughness: m["extensions"]["KHR_materials_clearcoat"]
+                    ["clearcoatRoughnessFactor"]
+                    .as_f64()
+                    .unwrap_or(0.0) as f32,
             }
         })
         .collect();
@@ -445,24 +466,34 @@ pub fn read(bytes: &[u8]) -> Result<Glb, String> {
 /// The renderer's material class for a spec material on a part.
 pub fn class_of(material: &str, part: &str) -> u8 {
     let p = part.to_ascii_lowercase();
-    let tail = p.starts_with("taillight");
+    // Rear lamps: the tail lamps, and a light bar on the boot lid.
+    let tail = p.starts_with("taillight") || p.starts_with("trunk_lid");
     match material {
         "paint" => mat::PAINT,
+        // On a rim, bright metal is a diamond-cut spoke face.
+        "chrome" if p.starts_with("rim") => mat::MACHINED,
         "chrome" => mat::CHROME,
         "trim_black" => {
             if p.starts_with("underbody") || p.starts_with("wheel_well") {
                 mat::UNDERBODY
             } else if p.starts_with("grille") {
                 mat::GRILLE
-            } else if tail && p.ends_with("housing") {
+            } else if tail {
                 mat::TAIL_BACK
+            } else if p.starts_with("bumper") {
+                // Bumper splitters, vents and diffusers: unpainted
+                // moulded-in-colour plastic, grained.
+                mat::GRAINED
             } else {
                 mat::TRIM
             }
         }
         "rubber" => mat::TYRE,
         "glass" => {
-            if p.contains("windshield") {
+            if p.starts_with("headlight") {
+                // A projector module's lens inside a headlamp.
+                mat::HEADLIGHT
+            } else if p.contains("windshield") {
                 mat::SCREEN
             } else if p.contains("rear")
                 || p.contains("quarter")
@@ -520,6 +551,15 @@ pub fn class_of(material: &str, part: &str) -> u8 {
         }
         other => crate::flexmesh::material_class(other),
     }
+}
+
+/// The model's own paint colour (its `paint` material's base colour), if it
+/// has one.
+pub fn paint_of(g: &Glb) -> Option<[f32; 3]> {
+    g.materials
+        .iter()
+        .find(|m| m.name == "paint")
+        .map(|m| [m.base[0], m.base[1], m.base[2]])
 }
 
 /// A visual of the model at rest: every vertex rigid on one fixed frame of

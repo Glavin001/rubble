@@ -139,29 +139,35 @@ pub struct Profiles {
 
 impl Profiles {
     pub fn new() -> Self {
+        // The side glass's base: a gentle wedge, rising toward the tail.
         let belt = Spline::new(&[
-            (Z_REAR, 1.035),
-            (-1.80, 1.040),
-            (-1.20, 1.030),
-            (-0.30, 1.005),
-            (0.40, 0.975),
-            (0.80, 0.950),
-            (Z_FRONT, 0.90),
+            (Z_REAR, 0.985),
+            (-1.80, 0.998),
+            (-1.20, 0.995),
+            (-0.30, 0.978),
+            (0.40, 0.955),
+            (0.80, 0.938),
+            (Z_FRONT, 0.890),
         ]);
         Profiles {
+            // A low bonnet falling to a slim nose; a short, near-level deck
+            // ending in a crisp ducktail lip that overhangs the tail.
             top: Spline::new(&[
-                (Z_REAR - 0.05, 1.035),
-                (-2.30, 1.065),
-                (-2.00, 1.068),
-                (-1.80, 1.065),
-                (-1.20, 1.055),
-                (0.40, 1.000),
-                (0.80, 0.972),
-                (1.10, 0.945),
-                (1.50, 0.900),
-                (1.90, 0.845),
-                (2.15, 0.800),
-                (Z_FRONT + 0.05, 0.735),
+                (Z_REAR - 0.05, 0.996),
+                (-2.445, 1.010),
+                (-2.36, 1.016),
+                (-2.20, 1.020),
+                (-2.00, 1.022),
+                (-1.80, 1.024),
+                (-1.20, 1.026),
+                (0.40, 0.975),
+                (0.80, 0.952),
+                (1.10, 0.928),
+                (1.50, 0.885),
+                (1.90, 0.830),
+                (2.15, 0.786),
+                (2.30, 0.752),
+                (Z_FRONT + 0.05, 0.715),
             ]),
             crown: Spline::new(&[
                 (Z_REAR, 0.025),
@@ -171,23 +177,25 @@ impl Profiles {
                 (1.6, 0.045),
                 (Z_FRONT, 0.040),
             ]),
+            // A fastback roof: the crown just behind the B-pillar, a long,
+            // shallow backlight down to a short deck.
             roof: Spline::new(&[
-                (-2.10, 0.80),
-                (-1.82, 1.040),
-                (-1.55, 1.180),
-                (-1.30, 1.320),
-                (-1.05, 1.405),
-                (-0.75, 1.442),
+                (-2.25, 0.80),
+                (-1.95, 1.030),
+                (-1.62, 1.200),
+                (-1.30, 1.335),
+                (-1.00, 1.414),
+                (-0.70, 1.446),
                 (-0.40, 1.450),
-                (-0.10, 1.425),
-                (0.15, 1.345),
-                (0.45, 1.180),
-                (0.80, 0.985),
-                (1.05, 0.80),
+                (-0.12, 1.428),
+                (0.15, 1.350),
+                (0.45, 1.185),
+                (0.80, 0.975),
+                (1.05, 0.78),
             ]),
             belt,
             bottom: Spline::new(&[
-                (Z_REAR - 0.05, 0.42),
+                (Z_REAR - 0.05, 0.40),
                 (-2.35, 0.30),
                 (-2.10, 0.22),
                 (-1.85, 0.170),
@@ -198,23 +206,30 @@ impl Profiles {
                 (2.30, 0.285),
                 (Z_FRONT + 0.05, 0.36),
             ]),
+            // The nose: foremost at the grille's middle, leaning back above
+            // it to the bonnet's edge.
             nose: Spline::new(&[
-                (0.10, Z_FRONT - 0.13),
-                (0.25, Z_FRONT - 0.04),
-                (0.42, Z_FRONT),
-                (0.55, Z_FRONT - 0.005),
-                (0.68, Z_FRONT - 0.04),
-                (0.78, Z_FRONT - 0.11),
-                (0.90, Z_FRONT - 0.30),
+                (0.10, Z_FRONT - 0.16),
+                (0.22, Z_FRONT - 0.075),
+                (0.34, Z_FRONT - 0.018),
+                (0.46, Z_FRONT - 0.002),
+                (0.54, Z_FRONT),
+                (0.62, Z_FRONT - 0.010),
+                (0.68, Z_FRONT - 0.032),
+                (0.74, Z_FRONT - 0.080),
+                (0.85, Z_FRONT - 0.260),
             ]),
+            // The tail: rearmost at the ducktail lip, the face nearly upright
+            // under it, the bumper's lower half tucking under (the diffuser).
             tail: Spline::new(&[
-                (0.15, Z_REAR + 0.14),
-                (0.32, Z_REAR + 0.04),
-                (0.50, Z_REAR),
-                (0.70, Z_REAR + 0.005),
-                (0.90, Z_REAR + 0.03),
-                (1.02, Z_REAR + 0.07),
-                (1.10, Z_REAR + 0.16),
+                (0.15, Z_REAR + 0.21),
+                (0.28, Z_REAR + 0.105),
+                (0.42, Z_REAR + 0.035),
+                (0.60, Z_REAR + 0.010),
+                (0.80, Z_REAR + 0.016),
+                (0.93, Z_REAR + 0.016),
+                (1.00, Z_REAR),
+                (1.06, Z_REAR + 0.06),
             ]),
         }
     }
@@ -243,9 +258,9 @@ pub fn with_profiles<R>(f: impl FnOnce(&Profiles) -> R) -> R {
 fn plan_d(p: &Profiles, x: f32, z: f32, y: f32) -> f32 {
     let w0 = 0.99;
     let (z0, tip, e) = if z > 0.0 {
-        (1.80, p.nose.at(y), 2.6f32)
+        (1.78, p.nose.at(y), 2.5f32)
     } else {
-        (-1.85, p.tail.at(y), 3.2f32)
+        (-1.80, p.tail.at(y), 2.8f32)
     };
     let l = (tip - z0).abs().max(0.05);
     let zz = ((z - z0) * (tip - z0).signum()).max(0.0);
@@ -257,36 +272,65 @@ fn plan_d(p: &Profiles, x: f32, z: f32, y: f32) -> f32 {
     (r - 1.0) / g.max(1e-3)
 }
 
-/// Section half width at height y (the body side's curvature, the shoulder
-/// character line at 0.86 m and the tuck under to the rocker), at z (the
-/// wheel-arch flares).
-/// Height of the shoulder character line (the side's crease) at z.
+/// Height of the shoulder character line (the side's crease) at z: rising
+/// gently toward the tail (a wedge).
 pub fn shoulder_y(z: f32) -> f32 {
-    0.865 + 0.012 * (z / 2.4)
+    0.868 - 0.016 * (z / 2.4)
 }
 
+/// Height of the lower character line at z: the top edge of the doors'
+/// scallop, sweeping up from the front door toward the rear wheel.
+pub fn scallop_y(z: f32) -> f32 {
+    0.50 + 0.095 * smoothstep(0.9, -1.25, z)
+}
+
+/// Section half width at height y (the body side's curvature, the shoulder
+/// character line, the lower scallop and the tuck under to the rocker), at z
+/// (the haunch over the rear wheel, the wheel-arch flares).
 fn section_w(z: f32, y: f32) -> f32 {
-    // Bodyside: fullest at 0.66 m.
-    let t = (y - 0.66) / 0.48;
-    let base = 0.914 - 0.040 * t * t;
+    // Bodyside: fullest at 0.68 m, tucking under to the sill.
+    let w0 = 0.902;
+    let prof = |y: f32| {
+        let t = (y - 0.68) / 0.48;
+        w0 - if t < 0.0 { 0.062 } else { 0.045 } * t * t
+    };
+    let base = prof(y);
     // Above the shoulder line the side leans in (a crisp crease, 6 mm blend).
     let ys = shoulder_y(z);
-    let above = 0.914 - 0.040 * ((ys - 0.66) / 0.48).powi(2) - 0.30 * (y - ys);
+    let above = prof(ys) - 0.30 * (y - ys);
     let mut w = smin(base, above, 0.012);
+    // The haunch: the shoulder swells out over the rear wheel (and a little
+    // over the front), under the crease.
+    let band = smoothstep(0.42, 0.66, y) * smoothstep(ys + 0.03, ys - 0.06, y);
+    let haunch = 0.017 * (-((z - (AXLE_R + 0.12)) / 0.62).powi(2)).exp()
+        + 0.006 * (-((z - (AXLE_F - 0.05)) / 0.45).powi(2)).exp();
+    w += haunch * band;
+    // The lower scallop: below a crisp line the doors step in, deepest ahead
+    // of the rear wheel, returning to the sill at the bottom; it fades out at
+    // the arches.
+    let yl = scallop_y(z);
+    let depth = 0.006 + 0.012 * smoothstep(0.6, -0.9, z);
+    // It rises out of the front door's leading edge and dies into the rear
+    // door's trailing edge (under the haunch).
+    let fade = smoothstep(0.76, 0.40, z) * smoothstep(-0.97, -0.62, z);
+    // Crisp at the line (2 cm), a long concave return to the sill.
+    let cut = smoothstep(yl + 0.006, yl - 0.02, y).powf(0.7) * smoothstep(0.34, 0.50, y);
+    w -= depth * fade * cut;
     // Arch flares: a soft swell round each opening.
     for za in [AXLE_F, AXLE_R] {
         let r = ((z - za).powi(2) + (y - TYRE_R).powi(2)).sqrt();
-        w += 0.016 * (-((r - 0.45) / 0.09).powi(2)).exp() * smoothstep(0.98, 0.70, y);
+        w += 0.018 * (-((r - 0.44) / 0.075).powi(2)).exp() * smoothstep(0.98, 0.70, y);
     }
     w
 }
 
-/// The greenhouse's half width at (z, y).
+/// The greenhouse's half width at (z, y): the glass leans in (tumblehome) and
+/// narrows toward the fastback's tail.
 fn glass_w(p: &Profiles, z: f32, y: f32) -> f32 {
     let b = p.belt.at(z);
     let g = ((y - b) / (1.44 - b)).clamp(-0.5, 1.3);
-    let w = 0.872 - 0.215 * g.max(0.0).powf(1.12) + 0.02 * (-g).max(0.0);
-    let taper = 1.0 - 0.055 * smoothstep(-0.8, -1.9, z) - 0.02 * smoothstep(0.1, 0.8, z);
+    let w = 0.878 - 0.250 * g.max(0.0).powf(1.08) + 0.02 * (-g).max(0.0);
+    let taper = 1.0 - 0.04 * smoothstep(-0.7, -1.95, z) - 0.02 * smoothstep(0.1, 0.8, z);
     w * taper
 }
 
@@ -307,7 +351,10 @@ pub fn sdf_with(p: &Profiles, q: Vec3) -> f32 {
     let d_top = (y - top) / (1.0 + ts * ts).sqrt();
     let bs = p.bottom.slope(z);
     let d_bot = (p.bottom.at(z) - y) / (1.0 + bs * bs).sqrt();
-    let lower = smax(smax(d_lat, d_top, 0.045), d_bot, 0.06);
+    // The top's edge rounds over 45 mm, tightening to 20 mm at the tail (a
+    // crisp lip).
+    let k_top = 0.045 - 0.025 * smoothstep(-2.05, -2.40, z);
+    let lower = smax(smax(d_lat, d_top, k_top), d_bot, 0.06);
     // Greenhouse.
     let rc = 0.05;
     let roof = p.roof.at(z) - rc * (x / 0.75).powi(2);

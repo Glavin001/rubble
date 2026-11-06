@@ -643,18 +643,20 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
 
 /// A vehicle model in the vehicle art spec's glTF binary (`.glb`: an
 /// artist's delivery or `gen2`'s `sedan.glb`) as the showcase renderer's visual
-/// at rest (`engine_softbody::glb::visual`). `spec`: `{ paint?: [r, g, b] }`.
+/// at rest (`engine_softbody::glb::visual`). `spec`: `{ paint?: [r, g, b] }`
+/// (default: the model's own `paint` colour).
 /// Returns `{ visual, parts, markers, triangles }`.
 #[wasm_bindgen(js_name = glbVisual)]
 pub fn glb_visual(bytes: &[u8], spec: JsValue) -> Result<JsValue, JsValue> {
     let v: serde_json::Value = serde_wasm_bindgen::from_value(spec).unwrap_or(serde_json::Value::Null);
+    let g = engine_softbody::glb::read(bytes).map_err(err)?;
     let paint = v
         .get("paint")
         .and_then(|p| p.as_array())
         .filter(|a| a.len() == 3)
         .map(|a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.5) as f32))
+        .or_else(|| engine_softbody::glb::paint_of(&g))
         .unwrap_or([0.42, 0.035, 0.03]);
-    let g = engine_softbody::glb::read(bytes).map_err(err)?;
     let vis = engine_softbody::glb::visual(&g, paint);
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
