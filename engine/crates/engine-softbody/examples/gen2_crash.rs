@@ -59,12 +59,25 @@ fn main() {
 
     if has("rest") {
         let mut s = spawn(Vec3::ZERO);
-        let ke = |s: &ExplicitBeams| s.nodes.iter().map(|n| 0.5 * n.mass * n.vel.length_squared()).sum::<f32>();
+        if has("noself") {
+            s.candidates.clear();
+        }
+        if has("park") {
+            // Parked: the brakes on, as a parked car's handbrake.
+            s.set_drive_input(engine_softbody::explicit_drive::DriveInput { forward: 0.0, steer: 0.0, brake: 1.0, handbrake: 1.0 });
+        }
+        let ke =|s: &ExplicitBeams| s.nodes.iter().map(|n| 0.5 * n.mass * n.vel.length_squared()).sum::<f32>();
         let mut peak_v = 0.0f32;
         for k in 1..=100 {
             s.run(0.1);
             peak_v = peak_v.max(s.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max));
             if k % 20 == 0 {
+                if has("fast") {
+                    let mut v: Vec<(f32, usize)> = s.nodes.iter().enumerate().map(|(i, n)| (n.vel.length(), i)).collect();
+                    v.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    let names: Vec<String> = v.iter().take(6).map(|&(sp, i)| format!("{} {sp:.3}", desc.nodes.get(i).map_or("?", |n| n.name.as_str()))).collect();
+                    println!("    fastest {names:?} contacts {}", s.last_contacts);
+                }
                 let (b, bent) = s.damage();
                 println!("rest {:.0} s: broken {b} bent {bent} KE {:.2} J, peak node speed so far {peak_v:.2} m/s", k as f32 / 10.0, ke(&s));
             }

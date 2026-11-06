@@ -683,7 +683,7 @@ pub fn sedan() -> Car {
                 } else {
                     Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z)
                 }
-            });
+            }, &|_, _| true);
         }
     }
 
@@ -737,7 +737,7 @@ pub fn sedan() -> Car {
             c.beam(t, best[0].1, Role::Bearing, part);
         }
         let back = [gs(&c, "apr0"), gs(&c, "apr1"), gs(&c, "apr2"), gs(&c, "twr"), gs(&c, "rlHi0"), gs(&c, "rlHi1"), gs(&c, "rlHi3"), gs(&c, "hp"), gs(&c, "bbHi0")];
-        c.lanes(part, &back, &|q: Vec3| Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z));
+        c.lanes(part, &back, &|q: Vec3| Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z), &|_, _| true);
     }
 
     // ------------------------------------------------------------------
@@ -789,6 +789,10 @@ pub fn sedan() -> Car {
                 c.beam(h, best[0].1, Role::Bearing, part);
             }
         }
+        // Pole lanes along the hood's outer edges (a pole at the front
+        // corner meets them), backed by the aprons.
+        let back: Vec<usize> = ["apr0l", "apr1l", "twrl", "apr2l", "apr0r", "apr1r", "twrr", "apr2r"].iter().map(|b| c.id(b)).collect();
+        c.lanes(part, &back, &|q: Vec3| q, &|a: Vec3, b: Vec3| a.x.abs() > 0.5 && b.x.abs() > 0.5);
     }
 
     // ------------------------------------------------------------------
@@ -906,7 +910,7 @@ pub fn sedan() -> Car {
         // Split under the Engine tag, then return them (and their lane nodes)
         // to the body.
         let first_node = c.nodes.len();
-        c.lanes(Part::Engine, &back, &|q: Vec3| Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z));
+        c.lanes(Part::Engine, &back, &|q: Vec3| Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z), &|_, _| true);
         for i in first_node..c.nodes.len() {
             c.nodes[i].part = body;
             let nm = c.nodes[i].name.replace("xengine", "xbody");
@@ -945,7 +949,9 @@ pub fn sedan() -> Car {
             for (k, &r) in ring.iter().enumerate() {
                 c.nodes[r].no_group = true;
                 c.nodes[r].fixed_mass = RIM_NODE_KG;
-                c.fan(r, &[hi, ho], Role::Susp, body);
+                // Off the axle line too, or the ring spins freely about it.
+                let arm = if w == "F" { c.id(&format!("twr{x}")) } else { c.id(&format!("wh{x}")) };
+                c.fan(r, &[hi, ho, arm], Role::Susp, body);
                 c.beam(r, ring[(k + 1) % ring.len()], Role::Susp, body);
                 c.beam(r, ring[(k + 2) % ring.len()], Role::Susp, body);
                 rims.push(r);

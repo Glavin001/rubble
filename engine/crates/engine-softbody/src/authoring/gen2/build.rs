@@ -525,7 +525,7 @@ impl Car {
     /// a fan, and every lane node is tied to its neighbours along the edge, to
     /// the triangle corners, to the centre nodes, and to the nearest `backing`
     /// node (its support across the panel).
-    pub fn lanes(&mut self, part: Part, backing: &[usize], surf: &dyn Fn(Vec3) -> Vec3) {
+    pub fn lanes(&mut self, part: Part, backing: &[usize], surf: &dyn Fn(Vec3) -> Vec3, edge_ok: &dyn Fn(Vec3, Vec3) -> bool) {
         let tris: Vec<usize> = (0..self.tris.len()).filter(|&t| self.tris[t].part == part).collect();
         let mut edge_pts: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
         let mut serial = 0usize;
@@ -546,7 +546,7 @@ impl Car {
                 let d = pv - pu;
                 let run = d.y.abs();
                 let n = ((run / LANE).ceil() as usize).max(1);
-                if n <= 1 || d.z.abs() > 0.35 * run {
+                if n <= 1 || d.z.abs() > 0.35 * run || !edge_ok(pu, pv) {
                     continue;
                 }
                 split += 1;
