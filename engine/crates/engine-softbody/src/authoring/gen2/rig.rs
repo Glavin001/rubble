@@ -276,7 +276,7 @@ impl Aperture {
 
 /// Regions a body beam may not cross (glTF): the door apertures, the cabin,
 /// the engine bay's top and the trunk opening.
-fn body_blocked(p: Vec3, doors: &[Aperture]) -> bool {
+fn body_blocked(p: Vec3, doors: &[Aperture], trunk_z: (f32, f32)) -> bool {
     let x = p.x.abs();
     if doors.iter().any(|d| d.inside(p, 0.055)) {
         return true;
@@ -286,7 +286,9 @@ fn body_blocked(p: Vec3, doors: &[Aperture]) -> bool {
     let cabin =
         x < 0.62 && p.y > 0.46 && p.y < 1.28 && p.z > -1.72 && p.z < 0.78 && sf::sdf(p) < -0.08;
     let bay = x < 0.48 && p.y > 0.72 && p.z > 0.98 && p.z < 1.98;
-    let trunk = x < 0.58 && p.y > 0.86 && p.y < 1.06 && p.z > -2.38 && p.z < -1.86;
+    // The trunk opening (under the lid, from its mesh), clear of the shelf
+    // and tail panel at its ends.
+    let trunk = x < 0.58 && p.y > 0.86 && p.y < 1.06 && p.z > trunk_z.0 && p.z < trunk_z.1;
     cabin || bay || trunk
 }
 
@@ -902,7 +904,7 @@ pub fn rig(model: &Model) -> Rig {
     let body_ids: Vec<usize> = (0..r.car.nodes.len()).collect();
     let apertures = [Aperture::of(&door_f.pos), Aperture::of(&door_r.pos)];
     graph(&mut r, &body_ids, REACH_BODY, body, Role::Web, &|p| {
-        body_blocked(p, &apertures)
+        body_blocked(p, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06))
     });
 
     // ------------------------------------------------------------------
@@ -1772,7 +1774,10 @@ pub fn rig(model: &Model) -> Rig {
     let surf = |p: Vec3| -> Vec3 { to_jbeam(sf::project(to_gltf(p))) };
     let side_edge = |a: Vec3, b: Vec3| {
         let m = to_gltf(0.5 * (a + b));
-        sf::normal(sf::project(m)).x.abs() > 0.55
+        // On the outer skin only (an edge behind another part's skin, such
+        // as the sill's top under a door, would put lane nodes in that
+        // part's contact band).
+        sf::normal(sf::project(m)).x.abs() > 0.55 && sf::sdf(m) > -0.02
     };
     let lane_parts: Vec<Part> = if std::env::var("GEN3_NOLANES").is_ok() {
         vec![]
@@ -1812,8 +1817,13 @@ pub fn rig(model: &Model) -> Rig {
         }
     }
     for (i, nd) in r.car.nodes.iter_mut().enumerate() {
+        // Lane nodes meet the world (poles, walls, other cars) but not the
+        // car's own skin: on light ties beside a shut line they would ride
+        // the neighbouring part's contact band at rest.
         nd.self_collision = (on_tri[i] || nd.part == Part::Engine || nd.name.starts_with("rim"))
-            && std::env::var("GEN3_NOSELF").is_err();
+            && !nd.contact
+            && std::env::var("GEN3_NOSELF").is_err()
+            && std::env::var("GEN3_NOSELF_PART").map_or(true, |p| !nd.name.contains(&p));
     }
 
     // ------------------------------------------------------------------

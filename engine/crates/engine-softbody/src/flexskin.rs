@@ -43,6 +43,8 @@ pub const R_MIN: f64 = 0.42;
 /// eigenvalue (without λ) above (`EIG_MIN` m)²·W; a pool that fails grows
 /// every radius by 12 % (one field per pool: still smooth).
 pub const MIN_NODES: usize = 5;
+/// The frame's kernels: this multiple of the position's radii.
+pub const FRAME_SCALE: f64 = 1.6;
 pub const EIG_MIN: f64 = 0.012;
 
 /// One vertex's skin.
@@ -295,19 +297,22 @@ fn min_eig(a: DMat3) -> f64 {
 
 /// A vertex's skin over `pool` (entries index the pool's `ids`), or None
 /// where the fit is not well posed.
-pub fn bind_vertex(pool: &Pool, x: DVec3, n0: DVec3) -> Option<Vert> {
+pub fn bind_vertex(pool: &Pool, frame: &Pool, x: DVec3, n0: DVec3) -> Option<Vert> {
     let n0 = n0.normalize_or(DVec3::Y);
     let t = n0.any_orthonormal_vector();
     let b = n0.cross(t);
     let eps = 2e-3;
-    let near = pool.near(x, eps);
+    let near = frame.near(x, eps);
     let (w0, ok) = pool.weights(x, &near);
     if !ok {
         return None;
     }
+    // The frame's gradients from the wider kernels (the position's own would
+    // turn the frame with every few-millimetre difference between close
+    // nodes; any affine-reproducing weights give an exact rigid motion).
     let grad = |d: DVec3| -> Vec<f64> {
-        let (wp, _) = pool.weights(x + d * eps, &near);
-        let (wm, _) = pool.weights(x - d * eps, &near);
+        let (wp, _) = frame.weights(x + d * eps, &near);
+        let (wm, _) = frame.weights(x - d * eps, &near);
         let get = |v: &[(usize, f64)], j: usize| v.iter().find(|q| q.0 == j).map_or(0.0, |q| q.1);
         near.iter()
             .map(|&j| (get(&wp, j) - get(&wm, j)) / (2.0 * eps))
@@ -356,10 +361,11 @@ pub fn bind(
     let mut scale = 1.0;
     for _ in 0..12 {
         let pool = Pool::new(ids.to_vec(), dpos.clone(), scale);
+        let frame = Pool::new(ids.to_vec(), dpos.clone(), scale * FRAME_SCALE);
         let mut out = Vec::with_capacity(verts.len());
         let mut failed = false;
         for (x, n) in verts.iter().zip(nrms) {
-            match bind_vertex(&pool, x.as_dvec3(), n.as_dvec3()) {
+            match bind_vertex(&pool, &frame, x.as_dvec3(), n.as_dvec3()) {
                 Some(v) => out.push(v),
                 None => {
                     failed = true;
@@ -393,7 +399,10 @@ pub fn bind_rigid(
     let mut scale = 1.0;
     for _ in 0..12 {
         let pool = Pool::new(ids.to_vec(), dpos.clone(), scale);
-        if let Some(cv) = bind_vertex(&pool, c, DVec3::Y) {
+        // A rigid piece's frame is its centroid's nodes' own (its offsets
+        // reach across the piece: a wider frame would turn it with the
+        // structure around rather than the nodes that carry it).
+        if let Some(cv) = bind_vertex(&pool, &pool, c, DVec3::Y) {
             let (mut p, mut u, mut v) = (DVec3::ZERO, DVec3::ZERO, DVec3::ZERO);
             let at = |id: u32| pool.pos[pool.ids.iter().position(|&x| x == id).unwrap()];
             for &(n, a, da, db) in &cv.w {

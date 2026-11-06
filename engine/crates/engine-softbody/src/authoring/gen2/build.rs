@@ -717,15 +717,24 @@ impl Car {
                 // The nearest backing node with room (at most `BACKING_LOAD`
                 // lane nodes each, so no one node's row carries a whole lane;
                 // within 1.5× the nearest's distance), else the nearest.
+                // Two backing ties (a lane node on a strip's edge has only
+                // its edge and one corner otherwise: soft across the panel).
                 let d0 = best.first().map_or(0.0, |b| b.0);
-                let pick = best
-                    .iter()
-                    .find(|&&(d, b)| d <= 1.5 * d0 + 1e-6 && load.get(&b).copied().unwrap_or(0) < BACKING_LOAD)
-                    .or(best.first())
-                    .map(|q| q.1);
-                if let Some(b) = pick {
-                    *load.entry(b).or_insert(0) += 1;
-                    self.beam(i, b, Role::Backing, part);
+                let mut picked = 0;
+                for &(d, b) in &best {
+                    if picked == 2 {
+                        break;
+                    }
+                    if d <= 1.5 * d0 + 1e-6 && load.get(&b).copied().unwrap_or(0) < BACKING_LOAD {
+                        *load.entry(b).or_insert(0) += 1;
+                        self.beam(i, b, Role::Backing, part);
+                        picked += 1;
+                    }
+                }
+                if picked == 0 {
+                    if let Some(&(_, b)) = best.first() {
+                        self.beam(i, b, Role::Backing, part);
+                    }
                 }
             }
         }

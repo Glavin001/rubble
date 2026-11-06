@@ -177,8 +177,10 @@ fn fidelity(
                 .find(|q| (q.1..q.1 + q.2).contains(&(i as u32)))
                 .map_or("?", |q| q.0.as_str());
             println!(
-                "  worse normal: {piece} vertex {i} {an:.2}°, {} entries",
-                b - a
+                "  worse normal: {piece} vertex {i} {an:.2}°, {} entries at {:?} n {:?}",
+                b - a,
+                v.positions[i],
+                v.normals[i]
             );
         }
         a_local = a_local.max(an);
