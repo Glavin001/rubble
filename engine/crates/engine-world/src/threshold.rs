@@ -1839,6 +1839,15 @@ mod imp {
                 65_535 * 32,
                 capacity.max_contacts
             );
+            // The fracture's split ranks chunks and body slots with a two-level scan (one
+            // group of 1024 blocks of 1024): at most 2^20 body slots, an engine-wide bound
+            // checked here by its WorldCapacity name (a chunk room past it is clamped:
+            // chunks beyond 2^20 fail when placed).
+            anyhow::ensure!(
+                capacity.max_bodies <= 1 << 20,
+                "threshold destructibles: WorldCapacity::max_bodies {} is past the fracture's 2^20 body slots (its split's two-level scans); size the world's capacity to the destructibles it holds",
+                capacity.max_bodies
+            );
             // A chunk per collider at most, bonds at four per chunk (a brick's six faces,
             // shared), a part per collider.
             let room = fracture::Capacity {
