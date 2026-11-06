@@ -1288,6 +1288,49 @@ and no tyres (`common`). It is not used.
 | Pole far side (past 0.2 %, broken; far doors' hardware) | 20, 0; holds | 99, 6; holds |
 | A8 sweep at 30 km/h (passed through) | **21 of 244** | 0 of 244 |
 
+**Community cars on the same scenes (2026-11-06).** Three community BeamNG
+cars, local only (`RUBBLE_JBEAM_COMMUNITY`, never committed): the ETK
+K-series (`kr6`), the Hirochi CCF (`f4_sport_M`) and the Gavril Vertex
+(default). They run in JBeam mode on their hubs (their tyres are BeamNG's
+shared `common` parts, not local). Their node sets are picked by position from
+the body shell (`showcase_car.rs` `community_car`; Choices), their parts and
+hinge groups by name (`crash_invariants.rs` `community_part`). Tests:
+`showcase_car` `community_scenes`, `crash_invariants`
+`community_invariants_report` (both `CI_CARS`). Reported, never asserted.
+
+| Reference (band) | ETK (roadster) | CCF | Vertex (sedan) | BX coupe |
+|---|---|---|---|---|
+| n max crush (380–580 mm) | 230 | 206 | 125 | 279 |
+| n dynamic crush (620–750 mm) | 471 | 462 | 470 | 461 |
+| n t_m (63–76 ms) | 48 | 49 | 51 | 48.5 |
+| n peak (34–47 g) | 60.3 | 49.6 | 45.1 | 49.8 |
+| n b1 (22.9–39.2) | 68.6 | — (no fit) | 142 | 86 |
+| n restitution (0.13–0.20) | 0.255 | 0.207 | 0.224 | 0.228 |
+| n apertures p90 (≤ 9 mm) | 18 | 2.2 | 27 | in |
+| o residual (297–445 mm) | 76, sd 40 | not measured ¹ | not measured ¹ | 351 |
+| p initial / intermediate / peak (kN) | 6.3 / 12.5 / 98 | 13.6 / 21.9 / 198 | 6.6 / 14.5 / 58 | 9.0 / 14.0 / 28.7 |
+| q (4.48–5.32×) | 6.20 ² | 7.21 | 7.80 | 5.59 |
+| MDB residual (126–206 mm) | not run | not run | not run | 202 |
+| Rear third, wall / head-on (past 0.2 %, broken) | 22, 0 / 0, 0 | 21, 0 / 2, 0 | 3, 0 / 0, 0 | 0, 0 / 0, 0 |
+| Lid against rear body, wall / head-on peak | 26.2 / 10.5 mm | 15.2 / 5.4 mm | 11.3 / 3.8 mm | 13.9 / 11.3 mm |
+| Rear body RMS, wall (≤ 5 mm) | 8.1 mm | 5.0 mm | 10.6 mm | 2.6 mm |
+| Wall ripple from 0.5 s (≤ 1 mm) | bumpers 3.3–3.8, exhaust 3.9, soft top 2.8, sideskirts 1.2–1.6 | fascia 8.0, antenna 7.4, exhaust 3.4, body and bonnet 1.6 | aerial 13.2, airdam 9.5, bonnet 5.5, body 3.1 | panels < 1; fascia 6.6 |
+| Pole far side (past 0.2 %, broken; far doors' hardware) | 11, 0; holds | 13, 2; holds | 25, 0; holds | 20, 0; holds |
+| Whole car broken in the wall / head-on / pole | 2 / 1 / 17 | 143 / 124 / 4 | 26 / 4 / 8 | |
+
+¹ The side-pole measure found no struck node near the pole on the CCF and the
+Vertex (a residual of 0 mm at node 0): their B-pillar pick (`pillar_b`, by the
+left front door's rear edge) puts the pole's aim off the car. To be fixed
+before these numbers are read. ² The ETK is a soft-top roadster: the roof crush
+loads its windscreen frame and roll hoops.
+
+What they show: like the BX, BeamNG's community content is stiff in the frontal
+(short crush, peak g at or above the band, t_m 48–51 ms against 63–76) and
+rebounds a little more than the band (e 0.21–0.26). Their side and roof
+structure is stronger than the references (p's peak 58–198 kN, q 6.2–7.8×).
+Their rear bodies flex more than the BX's (RMS 5–11 mm), and their light
+hardware (antennas, air dams, fascias) rings after the wall.
+
 **What BeamNG's content shows on this solver.**
 - **Side, roof and MDB.** BeamNG's own yields (about 1 % strain, 8 kN a
   body beam, at k·L about 1e6 N) land `o`, `p`, `q` and the MDB in or near

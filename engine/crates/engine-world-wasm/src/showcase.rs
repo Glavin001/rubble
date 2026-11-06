@@ -616,6 +616,14 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
     for l in [&mut lod, &mut far_vis] {
         flexmesh::rebase_textures(l, &vis.textures, &vis.data_textures).map_err(err)?;
     }
+    // On raycast wheels the wheels' pieces ride the drive wheels.
+    let mut vis = vis;
+    if raycast {
+        let (config, _) = engine_softbody::explicit_drive::DriveConfig::from_desc(&desc).map_err(err)?;
+        for l in [&mut vis, &mut lod, &mut far_vis] {
+            engine_softbody::authoring::skin::bind_raycast_wheels(l, &config).map_err(err)?;
+        }
+    }
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
     set(&out, "visualLod", &visual_js(&lod).into());

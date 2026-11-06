@@ -35,6 +35,7 @@
     <div class="row">
       <select id="sceneSel"></select>
       <select id="carSel" title="The vehicle every scene crashes"></select>
+      <select id="modSel" title="Converted BeamNG vehicles (community_cache: engine-webgpu/__mods)" hidden></select>
       <select id="xsceneSel" title="The explicit solver's scene" style="display:none"></select>
       <label class="file">Load .truck <input id="truckFile" type="file" accept=".truck,.load,.car,.trailer,.boat,.airplane,.fixed,.train" hidden /></label>
       <label class="file" title="A BeamNG vehicle folder (.jbeam parts, optional .pc config)">Load JBeam folder <input id="jbeamDir" type="file" webkitdirectory multiple hidden /></label>
@@ -172,7 +173,36 @@
     const buggy = carKind === 'buggy' && !EXPLICIT;
     const carSel = document.getElementById('carSel');
     for (const [id, t] of Object.entries(CARS)) carSel.add(new Option(t, id, false, id === carKind));
-    carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') u.searchParams.delete('truck'); location.href = u.href; };
+    carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') for (const k of ['truck', 'mod', 'pc', 'wheels']) u.searchParams.delete(k); location.href = u.href; };
+    // Converted community vehicles (community_cache writes __mods/index.json): every
+    // car and configuration; picking one loads it in JBeam mode on raycast wheels in
+    // this scene (explicit solver).
+    const modSel = document.getElementById('modSel');
+    fetch('/__mods/index.json').then((r) => (r.ok ? r.json() : [])).then((cars) => {
+      if (!cars.length) return;
+      modSel.hidden = false;
+      modSel.add(new Option('Converted BeamNG vehicles…', ''));
+      for (const c of cars) {
+        const g = document.createElement('optgroup');
+        g.label = `${c.label} (${c.megabytes} MB)`;
+        for (const k of c.configs) {
+          const mod = `/__mods/${c.folder}`;
+          g.appendChild(new Option(`${c.label} · ${k.pc.split('/').pop().replace(/\.pc$/, '')} (${k.nodes} nodes)`, `${mod}|${k.pc}`, false, qs.get('mod') === mod && qs.get('pc') === k.pc));
+        }
+        modSel.appendChild(g);
+      }
+    }).catch(() => {});
+    modSel.onchange = () => {
+      if (!modSel.value) return;
+      const [mod, pc] = modSel.value.split('|');
+      const u = new URL(location.href);
+      for (const k of ['car', 'truck', 'jbeamMode']) u.searchParams.delete(k);
+      u.searchParams.set('solver', 'explicit');
+      u.searchParams.set('mod', mod);
+      u.searchParams.set('pc', pc);
+      u.searchParams.set('wheels', 'raycast');
+      location.href = u.href;
+    };
     // Query parameters a scene change keeps: the solver and the vehicle.
     const keep = (u) => { for (const k of ['solver', 'car', 'truck', 'mod', 'pc', 'jbeamMode', 'wheels']) if (qs.has(k)) u.searchParams.set(k, qs.get(k)); return u; };
     sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = keep(u).href; };
