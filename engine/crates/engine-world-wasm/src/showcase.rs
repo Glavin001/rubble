@@ -497,7 +497,8 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
 /// as `explicitSim` spawns it from `jbeam` (a desc node maps to the solver node
 /// at its rest position), in `showcaseCar`'s `visual` format, so
 /// `showcase-car-render.mjs` draws it. `spec`: `{ jbeam: [[name, text]], pc,
-/// paint: [r, g, b], native (the JBeam-mode spawn: `explicitSim`'s),
+/// paint: [r, g, b], native (the JBeam-mode spawn: `explicitSim`'s), wheels
+/// ('raycast': the drive scenes' spawn, no wheel nodes),
 /// materials: [[name, text]] (the `*.materials.json` files) }`; `meshes`: `[[name, Uint8Array]]`, the vehicle's `.dae`
 /// files. Returns `{ visual, visualLod (the distant level: the meshes
 /// clustered on a 3 cm grid), lodDistance (m: where a cluster is about 2.6
@@ -538,10 +539,24 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
     // The solver path the lab spawns it on: `native` the JBeam mode (desc
     // order, pressure wheels), else the `.truck` path. Either way the visual
     // binds by rest position, so this only has to match the spawn's nodes.
-    let sim = if v.get("native").and_then(|x| x.as_bool()).unwrap_or(false) {
+    // `wheels: 'raycast'` (the drive scenes' spawn): no wheel nodes.
+    let raycast = v.get("wheels").and_then(|w| w.as_str()) == Some("raycast");
+    let sim = if raycast && !v.get("native").and_then(|x| x.as_bool()).unwrap_or(false) {
+        let (text, _) = engine_softbody::truck_export::desc_to_truck(
+            &desc,
+            engine_softbody::truck_export::TyreDefaults::for_vehicle(&desc),
+        );
+        ExplicitBeams::from_truck_raycast(&text, None, Vec3::ZERO, 0.0, Vec3::ZERO, ExplicitBeamsSettings::default())
+            .map_err(err)?
+            .0
+    } else if v.get("native").and_then(|x| x.as_bool()).unwrap_or(false) {
         ExplicitBeams::from_desc_jbeam_with(
             &desc,
-            engine_softbody::explicit_beams::JbeamWheels::Pressure,
+            if raycast {
+                engine_softbody::explicit_beams::JbeamWheels::Raycast
+            } else {
+                engine_softbody::explicit_beams::JbeamWheels::Pressure
+            },
             Vec3::ZERO,
             Vec3::ZERO,
             ExplicitBeamsSettings::default(),

@@ -1124,16 +1124,39 @@ impl ExplicitSim {
         MAX_FRAME_STEPS
     }
 
-    /// Submit one frame of `steps` fixed steps for every vehicle (never waits).
+    /// Submit one frame of `steps` fixed steps for every vehicle (never waits). A
+    /// contact error (a vehicle past its frame bounds: the margin widens by itself)
+    /// is a console warning and the sim keeps stepping; other errors are returned.
     pub fn frame(&mut self, steps: u32) -> Result<(), JsValue> {
-        self.frame_native(steps).map_err(err)
+        self.frame_steps(steps).map_err(err)?;
+        for e in self.gpu.take_contact_errors() {
+            let note = format!("explicit beams vehicle contact (the sim continues): {e}");
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::warn_1(&note.into());
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("{note}");
+        }
+        Ok(())
     }
 }
 
 impl ExplicitSim {
-    /// [`Self::frame`] for native hosts and tests (errors as text).
+    /// [`Self::frame`] for native hosts and tests (errors as text, a contact
+    /// error too: the sim keeps stepping).
     #[doc(hidden)]
     pub fn frame_native(&mut self, steps: u32) -> Result<(), String> {
+        self.frame_steps(steps)?;
+        // A contact error (a vehicle past its frame bounds: the margin widens by
+        // itself) never stops the sim: the caller gets it and keeps stepping.
+        let errors = self.gpu.take_contact_errors();
+        if !errors.is_empty() {
+            return Err(format!("vehicle contact (the sim continues): {}", errors.join("; ")));
+        }
+        Ok(())
+    }
+
+    /// One frame's steps; contact errors are left for the caller.
+    fn frame_steps(&mut self, steps: u32) -> Result<(), String> {
         if steps > MAX_FRAME_STEPS {
             return Err(format!(
                 "at most {MAX_FRAME_STEPS} steps per frame, got {steps}"
@@ -1149,12 +1172,6 @@ impl ExplicitSim {
         if steps > 0 {
             self.gpu.frame(steps);
             self.steps += u64::from(steps);
-        }
-        // A contact error (a vehicle past its frame bounds: the margin widens by
-        // itself) never stops the sim: the page gets it and keeps stepping.
-        let errors = self.gpu.take_contact_errors();
-        if !errors.is_empty() {
-            return Err(format!("vehicle contact (the sim continues): {}", errors.join("; ")));
         }
         Ok(())
     }

@@ -75,7 +75,17 @@ fn main() {
         ..Default::default()
     };
     let spawn = |v: Vec3| {
-        let (mut s, w) = if raycast {
+        let (mut s, w) = if opt("path=").as_deref() == Some("truck") {
+            // Through the `.truck` export (RoR's rules), on raycast wheels as the
+            // page's drive scenes spawn it without JBeam mode.
+            let (text, w) = engine_softbody::truck_export::desc_to_truck(
+                &desc,
+                engine_softbody::truck_export::TyreDefaults::for_vehicle(&desc),
+            );
+            let (s, _) =
+                ExplicitBeams::from_truck_raycast(&text, None, Vec3::ZERO, 0.0, v, settings).unwrap();
+            (s, w)
+        } else if raycast {
             ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, v, settings).unwrap()
         } else {
             ExplicitBeams::from_desc_jbeam_with(&desc, wheels, Vec3::ZERO, v, settings).unwrap()

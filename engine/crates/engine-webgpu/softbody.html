@@ -96,6 +96,8 @@
     addEventListener('error', (e) => fail(e.error || e.message));
 
     const qs = new URLSearchParams(location.search);
+    // JBeam imports run in JBeam mode (BeamNG's rules) unless ?jbeamMode=truck.
+    const JBEAM_NATIVE = qs.get('jbeamMode') !== 'truck';
     // Crash-lab presets (?preset=, crash-lab.mjs): the explicit solver's scene and
     // its fields (the query's own values win), labels and camera.
     // A ?xscene= other than the preset's own wins: the preset is dropped (it would
@@ -477,8 +479,9 @@
     const hiresJbeam = carKind === 'hires' ? [['hires.jbeam', hiresCarJbeam()]] : null;
     const vehicleSource = () => DRIVE ? { ...baseSource(), wheels: 'raycast' } : baseSource();
     const baseSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
-      // ?jbeamMode=native: the JBeam-mode spawn (desc order, pressure wheels).
-      : carKind === 'import' ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native' } : { truck: importSrc.text })
+      // JBeam content runs in JBeam mode (BeamNG's rules: desc order, pressure wheels
+      // or raycast wheels); ?jbeamMode=truck: through the .truck export (RoR's rules).
+      : carKind === 'import' ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc, native: JBEAM_NATIVE } : { truck: importSrc.text })
       : carKind === 'showcase' ? { truck: showcaseBuilt().truck }
       // The sedan as the acceptance runs build it (?tyres=0: its bare body).
       : { truck: explicitSedanTruck(qs.get('tyres') !== '0') };
@@ -1209,7 +1212,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // Or an imported JBeam vehicle's flexbodies and props (?mod=).
     let importVis = null;
     const bodyVisual = () => carKind === 'showcase' ? (() => { const b = showcaseBuilt(); b.visual.lod ??= [b.visualLod, b.visualFar]; return b.visual; })()
-      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native', materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = [r.visualLod, r.visualFar]; loadBodyTextures(r.visual); return r.visual; })());
+      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: JBEAM_NATIVE, ...(DRIVE ? { wheels: 'raycast' } : {}), materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = [r.visualLod, r.visualFar]; loadBodyTextures(r.visual); return r.visual; })());
     // An imported body's colour and data maps (normal, roughness, AO; decoded
     // in the wasm), uploaded once they arrive; until then it shades untextured.
     const loadBodyTextures = (vis) => {
