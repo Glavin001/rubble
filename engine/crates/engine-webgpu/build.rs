@@ -522,7 +522,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     let coupling = wgsl_dir.join("vehicle_coupling.wgsl");
     let mut cmd = std::process::Command::new(find_slangc()?);
     cmd.args(["-target", "wgsl"]);
-    for e in ["cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end", "cpl_query"] {
+    for e in ["cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end", "cpl_query", "cpl_sleep_mask"] {
         cmd.args(["-entry", e, "-stage", "compute"]);
     }
     let status = cmd
@@ -612,6 +612,12 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             )
         })
         .collect();
+    // Vehicle sleep's awake list (engine_exec::explicit_plan::SLEEP_LIST).
+    vv.push((
+        "explicit_beams_sleep_list".to_string(),
+        "",
+        vec![("ENGINE_WGSL", "1"), ("EB_SLEEP_LIST", "1")],
+    ));
     for (name, lanes, aero) in [
         ("explicit_beams_contact", "256", false),
         ("explicit_beams_contact_wide", "512", false),

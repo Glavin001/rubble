@@ -346,3 +346,107 @@ fn the_coupling_shape_cull_is_bit_exact() {
     }
     assert!(checked >= 2, "the comparison ran with the cars among the house's chunks");
 }
+
+/// The coupling's workgroup copies (`explicit_beams_rigid.slang` `cplGsAdd`: the proxy
+/// spheres and each node's shape range from the count pass in workgroup memory, a small
+/// contact group's members' coupling side by side) change no result: the same frames
+/// with them on and off are equal bit for bit (every word of the vehicles' state, the
+/// proxies' integrated bodies and the window impulses included). Four cars into one
+/// house at 120 Hz; the frames compared run once the cars are inside it (tens of chunk
+/// shapes each, contact groups of two).
+#[test]
+fn the_coupling_workgroup_copies_are_bit_exact() {
+    let template = sedan(0.0, 0.0, Vec3::ZERO, 0);
+    let mut town = rubble::explicit_scene::crash_town_at(
+        GpuContext::Default,
+        &template,
+        1,
+        4,
+        15.0,
+        8.0,
+        30,
+        &rubble::explicit_scene::town_coupling(),
+        Some(1.0 / 120.0),
+        None,
+    )
+    .unwrap();
+    let w = &mut town.world;
+    let mut checked = 0;
+    for step in 0..150 {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        if step < 60 || step % 30 != 0 {
+            continue;
+        }
+        let shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
+        let x = w.explicit_vehicles_mut().unwrap();
+        let snap = x.snapshot();
+        let mut run = |cache: bool| {
+            x.restore(&snap);
+            x.set_coupling_workgroup_cache(cache);
+            for _ in 0..3 {
+                x.frame(17);
+            }
+            x.wait();
+            // (The header's cache bit itself is the one word the runs set apart.)
+            x.set_coupling_workgroup_cache(true);
+            x.state_words()
+        };
+        let off = run(false);
+        let on = run(true);
+        x.restore(&snap);
+        x.set_coupling_workgroup_cache(true);
+        println!("step {step}: proxy shapes per vehicle {shapes:?}");
+        for ((name, a), (_, b)) in off.iter().zip(&on) {
+            let diff = a.iter().zip(b).filter(|(p, q)| p != q).count();
+            assert_eq!(diff, 0, "step {step}: {name}: {diff} words differ with the workgroup copies on");
+        }
+        if shapes.iter().any(|&n| n >= 10) {
+            checked += 1;
+        }
+    }
+    assert!(checked >= 2, "the comparison ran with the cars among the house's chunks");
+}
+
+/// The coupling plan's lane-parallel records (`vehicle_coupling.slang` `cplPlanShapes`)
+/// are its serial walk's: from one World state, the plan alone both ways gives the same
+/// proxy records (bodies, shapes, hull planes, each body's shape range) and share
+/// counts, word for word. Four cars into one house at 120 Hz, compared once they meet
+/// its chunks.
+#[test]
+fn the_coupling_plan_in_parallel_is_the_serial_walk() {
+    let template = sedan(0.0, 0.0, Vec3::ZERO, 0);
+    let mut town = rubble::explicit_scene::crash_town_at(
+        GpuContext::Default,
+        &template,
+        1,
+        4,
+        15.0,
+        8.0,
+        30,
+        &rubble::explicit_scene::town_coupling(),
+        Some(1.0 / 120.0),
+        None,
+    )
+    .unwrap();
+    let w = &mut town.world;
+    let mut checked = 0;
+    for step in 0..150 {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        if step < 60 || step % 15 != 0 {
+            continue;
+        }
+        let shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
+        let parallel = w.explicit_replan_words(false);
+        let serial = w.explicit_replan_words(true);
+        assert_eq!(parallel.len(), serial.len());
+        let diff = parallel.iter().zip(&serial).filter(|(a, b)| a != b).count();
+        println!("step {step}: proxy shapes per vehicle {shapes:?}, {diff} words differ");
+        assert_eq!(diff, 0, "step {step}: the parallel plan differs from the serial walk");
+        if shapes.iter().any(|&n| n >= 10) {
+            checked += 1;
+        }
+    }
+    assert!(checked >= 2, "the comparison ran with the cars among the house's chunks");
+}

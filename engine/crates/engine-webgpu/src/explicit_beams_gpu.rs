@@ -56,6 +56,7 @@ pub struct ExplicitBeamsGpu {
     /// The coupling header's state ([`Self::set_coupling_on`], [`Self::set_coupling_cull`]).
     coupling_on: bool,
     coupling_cull_off: bool,
+    coupling_cache_off: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
@@ -73,6 +74,11 @@ pub struct ExplicitBeamsGpu {
     /// The `EB_DET_HITS` variants' hit lists (binding 12).
     det: Option<wgpu::Buffer>,
     acc: wgpu::Buffer,
+    /// Vehicle sleep's host side: the last drive input per vehicle (a change wakes it),
+    /// the grabbed vehicle (kept awake), the vehicles to wake before the next frame.
+    sleep_inputs: Vec<Option<engine_softbody::explicit_drive::DriveInput>>,
+    sleep_grab: Option<usize>,
+    sleep_wake: std::sync::Mutex<Vec<usize>>,
 }
 
 /// Which kernel runs the frames: the shipped one, or (tests only) the frozen
@@ -139,6 +145,8 @@ struct Contact {
 struct ContactPipes {
     /// The plan passes (bounds, pairs, group) and the contact groups' entry.
     plan: [wgpu::ComputePipeline; 3],
+    /// Vehicle sleep's awake list ([`plan::SLEEP_LIST`]).
+    sleep: wgpu::ComputePipeline,
     groups: wgpu::ComputePipeline,
     /// The solo vehicles' frame (`EB_VV_SOLO`).
     solo: wgpu::ComputePipeline,
@@ -251,6 +259,7 @@ fn module_wgsl(name: &str) -> &'static str {
         "explicit_beams_contact_wide" => EXPLICIT_BEAMS_CONTACT_WIDE_WGSL,
         "explicit_beams_contact_aero" => EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
         "explicit_beams_contact_aero_wide" => EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
+        "explicit_beams_sleep_list" => crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL,
         _ => EXPLICIT_BEAMS_VV_PASSES
             .iter()
             .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
@@ -334,6 +343,7 @@ impl Contact {
         let (contact_layout, contact_group) = layout_with(false);
         let pipes = build_pipes.then(|| ContactPipes {
             plan: plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), &plan_layout)),
+            sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), &plan_layout),
             groups: make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout),
             solo: make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout),
         });
@@ -444,6 +454,7 @@ fn kernel_name(cmd: &Cmd) -> &'static str {
         Kernel::Vv(1) => "explicit vv pairs",
         Kernel::Vv(_) => "explicit vv group plan",
         Kernel::Wide(_) => "explicit wide",
+        Kernel::Sleep => "explicit sleep list",
     }
 }
 
@@ -488,7 +499,7 @@ impl ExplicitBeamsGpu {
             }));
         }
         if vehicles.len() > 1 {
-            specs.extend(plan::VV_PASSES.iter().map(|&entry| crate::ComputeSpec {
+            specs.extend(plan::VV_PASSES.iter().chain([&plan::SLEEP_LIST]).map(|&entry| crate::ComputeSpec {
                 label: entry,
                 wgsl: u(module_wgsl(entry)),
                 entry,
@@ -516,7 +527,20 @@ impl ExplicitBeamsGpu {
         vehicles: &[ExplicitBeams],
         coupling: Option<CouplingCapacity>,
     ) -> Self {
-        let upload = ExplicitUpload::new(vehicles, coupling);
+        Self::with_sleep(device, queue, vehicles, coupling, None)
+    }
+
+    /// [`Self::with_coupling`] with vehicle sleep (`engine_softbody::explicit_sleep`, on
+    /// from the first frame) when `sleep` is set. `None`: no room; frames as without it,
+    /// bit for bit.
+    pub fn with_sleep(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+        sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
+    ) -> Self {
+        let upload = ExplicitUpload::with_sleep(vehicles, coupling, sleep);
         let layout = upload.layout.clone();
         let (aero, big, lanes) = (layout.aero, layout.big, layout.lanes);
         // Large vehicles get twice the lanes (more loads in flight per step), a
@@ -606,7 +630,10 @@ impl ExplicitBeamsGpu {
             misc.clone(),
             next.clone(),
         ];
-        let planner = FramePlanner::new(&layout);
+        let mut planner = FramePlanner::new(&layout);
+        if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
+            planner.set_sleep_listing(false);
+        }
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -623,6 +650,7 @@ impl ExplicitBeamsGpu {
             marks: None,
             coupling_on: false,
             coupling_cull_off: false,
+            coupling_cache_off: false,
             wide,
             contact,
             contact_errors: Default::default(),
@@ -634,7 +662,99 @@ impl ExplicitBeamsGpu {
             probe: None,
             det: None,
             acc,
+            sleep_inputs: vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect(),
+            sleep_grab: None,
+            sleep_wake: Default::default(),
         }
+    }
+
+    /// Vehicle sleep's layout (`None`: built without room, [`Self::with_sleep`]).
+    pub fn sleep_layout(&self) -> Option<plan::SleepLayout> {
+        self.layout.sleep
+    }
+
+    /// Vehicle sleep on or off (only with room; on from the start). Turning it on wakes
+    /// every vehicle (still counts from 0). Returns whether it is on.
+    pub fn set_sleep(&mut self, on: bool) -> bool {
+        let Some(s) = self.layout.sleep else {
+            return false;
+        };
+        if on && !self.planner.sleep_on() {
+            let zeros = vec![[0u32; 4]; self.layout.vehicles()];
+            self.queue
+                .write_buffer(&self.misc, s.record_offset(0), bytemuck::cast_slice(&zeros));
+        }
+        self.planner.set_sleep(on)
+    }
+
+    /// Whether vehicle sleep runs.
+    pub fn sleep_on(&self) -> bool {
+        self.planner.sleep_on()
+    }
+
+    /// Measurement only: dispatch through the awake list (the default) or every vehicle
+    /// with a sleeping one's workgroup returning at once (`RUBBLE_SLEEP_LIST=0` at
+    /// creation). The same results.
+    pub fn set_sleep_listing(&mut self, on: bool) {
+        self.planner.set_sleep_listing(on);
+    }
+
+    /// Wake vehicle `v` before the next frame (a scripted force or any host write the
+    /// GPU does not see as motion). Without sleep, nothing.
+    pub fn wake(&self, v: usize) {
+        if self.layout.sleep.is_some() && v < self.layout.vehicles() {
+            self.sleep_wake.lock().unwrap().push(v);
+        }
+    }
+
+    /// The host's wakes, written before a frame: those queued, the grabbed vehicle and
+    /// every vehicle with throttle (an engine driving wheels is not still).
+    fn write_wakes(&self) {
+        let Some(s) = self.layout.sleep else {
+            return;
+        };
+        if !self.planner.sleep_on() {
+            return;
+        }
+        let mut list = std::mem::take(&mut *self.sleep_wake.lock().unwrap());
+        list.extend(self.sleep_grab);
+        list.extend(
+            self.sleep_inputs
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| i.is_some_and(|i| i.forward != 0.0))
+                .map(|(v, _)| v),
+        );
+        list.sort_unstable();
+        list.dedup();
+        for v in list {
+            self.queue
+                .write_buffer(&self.misc, s.record_offset(v), bytemuck::cast_slice(&[0u32; 4]));
+        }
+    }
+
+    /// Host writes that will wake a vehicle before the next frame (queued wakes, a grab,
+    /// throttle held).
+    pub fn wakes_pending(&self) -> bool {
+        self.planner.sleep_on()
+            && (!self.sleep_wake.lock().unwrap().is_empty()
+                || self.sleep_grab.is_some()
+                || self.sleep_inputs.iter().any(|i| i.is_some_and(|i| i.forward != 0.0)))
+    }
+
+    /// Blocking read: per vehicle its sleep record (still steps, asleep); empty without
+    /// room.
+    pub fn sleep_states(&self) -> Vec<(u32, bool)> {
+        let Some(s) = self.layout.sleep else {
+            return Vec::new();
+        };
+        let misc = self.read_u4(&self.misc);
+        (0..self.layout.vehicles())
+            .map(|v| {
+                let r = misc[s.base as usize + v];
+                (r[0], r[1] & engine_softbody::explicit_sleep::SLEEP_ASLEEP != 0)
+            })
+            .collect()
     }
 
     /// The shared plan's layout of this fleet (where every record lives).
@@ -1030,6 +1150,19 @@ impl ExplicitBeamsGpu {
         self.write_coupling_header();
     }
 
+    /// Tests and measurement: the coupling's workgroup copies and ranges (on by default;
+    /// lossless, `explicit_beams_rigid.slang`: the header words, the proxy spheres and
+    /// each node's shape range from the count pass in workgroup memory, the shapes'
+    /// step reactions a lane a shape before each body sums them in shape order, a body's
+    /// shapes scanned over the range the plan wrote, a small contact group's members'
+    /// coupling side by side) off: every read from the buffers, every scan over every
+    /// shape, as before them.
+    #[doc(hidden)]
+    pub fn set_coupling_workgroup_cache(&mut self, on: bool) {
+        self.coupling_cache_off = !on;
+        self.write_coupling_header();
+    }
+
     /// Measurement only: the raycast wheels' pass on or off (off, the frames skip it and
     /// results are meaningless: time only). No-op without wheels.
     #[doc(hidden)]
@@ -1045,6 +1178,7 @@ impl ExplicitBeamsGpu {
         let casts_off = engine_softbody::explicit_surface::casts_off();
         let word = u32::from(self.coupling_on)
             | if self.coupling_on && self.coupling_cull_off { 2 } else { 0 }
+            | if self.coupling_on && self.coupling_cache_off { 4 } else { 0 }
             | if self.coupling_on && casts_off { 8 } else { 0 };
         self.queue
             .write_buffer(&self.misc, self.layout.coupling_on_offset(), bytemuck::bytes_of(&word));
@@ -1116,6 +1250,7 @@ impl ExplicitBeamsGpu {
     /// dispatches, a copy between them; whether they copy the status for a read.
     fn encode(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32) -> bool {
         self.check_contact_status();
+        self.write_wakes();
         self.write_params(steps);
         // Timestamps at the start of the frame's first pass and the end of its last.
         let slot = self.timing.as_mut().and_then(|t| {
@@ -1207,6 +1342,11 @@ impl ExplicitBeamsGpu {
                 );
                 pass.set_bind_group(0, g, &[]);
                 pass.set_pipeline(p);
+            }
+            Kernel::Sleep => {
+                let p = c.pipes.as_ref().expect("explicit beams: the sleep list for one vehicle");
+                pass.set_bind_group(0, &c.plan_group, &[]);
+                pass.set_pipeline(&p.sleep);
             }
             Kernel::Wide(i) => {
                 let w = self.wide.as_ref().expect("explicit beams: wide passes not built");
@@ -1453,6 +1593,47 @@ impl ExplicitBeamsGpu {
         }
     }
 
+    /// Tests only: a [`Self::snapshot`] as bytes (blocking), for [`Self::snapshot_from_bytes`]
+    /// in another process: a kernel's frames compared with another build's from one state.
+    #[doc(hidden)]
+    pub fn snapshot_to_bytes(&self, snap: &GpuSnapshot) -> Vec<u8> {
+        let mut out: Vec<u32> = snap.state.to_words().to_vec();
+        out.push(snap.copies.len() as u32);
+        for c in &snap.copies {
+            let words: Vec<u32> = bytemuck::pod_collect_to_vec(&self.read(c));
+            out.push(words.len() as u32);
+            out.extend(words);
+        }
+        bytemuck::cast_slice(&out).to_vec()
+    }
+
+    /// Tests only: a snapshot from [`Self::snapshot_to_bytes`] (the same fleet and layout).
+    #[doc(hidden)]
+    pub fn snapshot_from_bytes(&self, bytes: &[u8]) -> GpuSnapshot {
+        let w: Vec<u32> = bytemuck::pod_collect_to_vec(bytes);
+        let state = plan::PlannerState::from_words([w[0], w[1], w[2], w[3], w[4]]);
+        let n = w[5] as usize;
+        let mut at = 6;
+        let mut copies = Vec::new();
+        for b in self.snapshot_sources().iter().take(n) {
+            let len = w[at] as usize;
+            at += 1;
+            // (A shorter buffer: the indirect arguments of a build with fewer dispatches,
+            // the rest zero.)
+            assert!(len as u64 * 4 <= b.size(), "explicit beams: a snapshot of another layout");
+            let c = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("explicit-beams-snapshot"),
+                size: b.size(),
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue.write_buffer(&c, 0, bytemuck::cast_slice(&w[at..at + len]));
+            at += len;
+            copies.push(c);
+        }
+        GpuSnapshot { copies, state }
+    }
+
     /// Tests only: put back a [`Self::snapshot`].
     #[doc(hidden)]
     pub fn restore(&mut self, snap: &GpuSnapshot) {
@@ -1617,6 +1798,11 @@ impl ExplicitBeamsGpu {
         let rec = self.layout.grab_records(grab);
         self.queue
             .write_buffer(&self.misc, self.layout.grab_rec() * 16, bytemuck::cast_slice(&rec));
+        // Vehicle sleep: a grabbed vehicle is kept awake (and one let go wakes).
+        if let Some(v) = self.sleep_grab.take() {
+            self.wake(v);
+        }
+        self.sleep_grab = grab.map(|(v, _)| v);
         // The contact plan's frame bounds assumed the forces without it.
         self.planner.request_replan();
     }
@@ -1634,6 +1820,13 @@ impl ExplicitBeamsGpu {
         let words = plan::drive::input_words(input);
         self.queue
             .write_buffer(&self.misc, d.input_offset(vehicle), bytemuck::cast_slice(&words));
+        // Vehicle sleep: a changed input (brake released, steering, throttle) wakes it.
+        if self.sleep_inputs.get(vehicle).copied().flatten() != Some(input) {
+            self.wake(vehicle);
+        }
+        if let Some(i) = self.sleep_inputs.get_mut(vehicle) {
+            *i = Some(input);
+        }
         // Drive forces change the speeds the contact plan's frame bounds assumed.
         self.planner.request_replan();
     }
@@ -1672,6 +1865,7 @@ impl ExplicitBeamsGpu {
         let offset = self.layout.velocity_offset(vehicle, node);
         self.queue
             .write_buffer(&self.nodes, offset, bytemuck::cast_slice(&v.to_array()));
+        self.wake(vehicle);
         // The contact plan's frame bounds assumed the old speeds.
         self.planner.request_replan();
     }
@@ -1877,6 +2071,7 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));
     }
+    out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
     out
 }
 

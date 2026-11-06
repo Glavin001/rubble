@@ -233,6 +233,14 @@ pub struct SkinOutput {
     pub face_strain: Vec<f32>,
 }
 
+/// An explicit vehicle fell asleep or woke (vehicle sleep,
+/// `engine_softbody::explicit_sleep`): `vehicle` in the order the vehicles were added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExplicitSleepEvent {
+    pub vehicle: u32,
+    pub asleep: bool,
+}
+
 /// The results of one step, delivered by `World::poll` in step order. Valid
 /// until dropped; nothing in it refers back into the world.
 #[derive(Clone, Debug, Default)]
@@ -296,6 +304,9 @@ pub struct Frame {
     pub terrain_bakes: Vec<crate::TerrainBake>,
     /// With `WorldDef::gpu_timing` on: the rigid step's GPU time.
     pub gpu_time: Option<StepGpuTime>,
+    /// Explicit vehicles that fell asleep or woke since the last delivered frame (vehicle
+    /// sleep on; read back as a bit per vehicle).
+    pub explicit_sleep: Vec<ExplicitSleepEvent>,
 }
 
 /// One rigid step's GPU time from timestamp queries (`WorldDef::gpu_timing`).
@@ -395,6 +406,8 @@ pub struct CoalescedFrame {
     pub terrain_bakes: Vec<crate::TerrainBake>,
     /// Every folded step's GPU time (`WorldDef::gpu_timing`), with its step.
     pub gpu_times: Vec<(u64, StepGpuTime)>,
+    /// Every folded step's explicit vehicle sleep changes, in step order.
+    pub explicit_sleep: Vec<ExplicitSleepEvent>,
 }
 
 /// Fold frames (in step order) into one.
@@ -440,6 +453,7 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
                 .or_insert(m);
         }
         out.left_world.extend(f.body_events.left_world);
+        out.explicit_sleep.extend(f.explicit_sleep);
         out.destruction_events
             .extend(f.destruction_events.into_iter().map(|e| (f.step, e)));
         for v in f.vehicles {

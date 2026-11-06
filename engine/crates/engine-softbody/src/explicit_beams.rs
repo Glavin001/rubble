@@ -1041,6 +1041,9 @@ pub struct ExplicitBeams {
     /// content, or a `.truck` with `rubble_beamng_profile`; else Rigs of
     /// Rods'. What hosts report as the vehicle's profile.
     pub beamng_profile: bool,
+    /// Vehicle sleep's state ([`crate::explicit_sleep`]; used only by a fleet with the
+    /// setting on): still count, asleep, anchor.
+    pub sleep: crate::explicit_sleep::SleepState,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -1571,6 +1574,7 @@ impl ExplicitBeams {
             trace: None,
             drive: None,
             beamng_profile: false,
+            sleep: Default::default(),
         }
     }
 
@@ -3282,6 +3286,12 @@ impl ExplicitBeams {
             crate::explicit_drive::drive_pass(self);
         }
         self.node_pass();
+        if let Some(speed) = self.sleep.track {
+            // Vehicle sleep: the velocities this node pass left (the GPU's point).
+            if !self.sleep.moving {
+                self.sleep.moving = self.nodes.iter().any(|n| crate::explicit_sleep::moving(n.vel, speed));
+            }
+        }
         if !self.wings.is_empty() {
             self.wing_pass();
         }

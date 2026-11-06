@@ -5,8 +5,9 @@
 //! * lossless: from one World state the plan from the broadphase writes every proxy record
 //!   word for word as the scan does, on the hierarchical grid (hulls) and the uniform grid
 //!   (boxes), with statics, sleepers, falling and resting bodies near a moving vehicle;
-//! * the proxy API: a sleeping vehicle's proxy is frozen, has no proxies, and is marked
-//!   touched when a moving body enters its fat box; out of the broadphase it has none.
+//! * the proxy API: out of the broadphase a vehicle has no proxies and its fat box is
+//!   frozen; back in, it is rebuilt. (Vehicle sleep, `explicit_sleep`, keeps a sleeping
+//!   vehicle's bounds and its plan wakes it beside a moving body: the same plan.)
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use glam::Vec3;
@@ -188,65 +189,31 @@ fn the_broadphase_plan_is_the_scan_on_the_uniform_grid() {
 }
 
 #[test]
-fn a_sleeping_vehicle_proxy_is_frozen_and_woken_by_a_mover() {
+fn a_vehicle_out_of_the_broadphase_has_no_proxies_and_its_proxy_is_frozen() {
     let mut w = scene(true, 40, 0);
     let car = sedan(0.0, Vec3::new(0.0, 0.0, -2.0));
-    w.add_explicit_vehicles(std::slice::from_ref(&car), &def())
-        .unwrap();
+    w.add_explicit_vehicles(std::slice::from_ref(&car), &def()).unwrap();
     for _ in 0..10 {
         w.step().unwrap();
         w.poll_blocking().unwrap();
     }
     let p0 = w.explicit_vehicle_proxy(0).unwrap();
-    assert!(p0.refattens >= 1 && !p0.asleep && p0.in_broadphase);
+    assert!(p0.refattens >= 1 && p0.in_broadphase, "{p0:?}");
     assert!(p0.lo.cmplt(p0.hi).all(), "fat box {p0:?}");
-    w.set_explicit_vehicle_asleep(0, true).unwrap();
-    for _ in 0..10 {
+    assert!(!w.explicit_window_impulses()[0].is_empty(), "the posts are proxies");
+    w.set_explicit_vehicle_in_broadphase(0, false).unwrap();
+    for _ in 0..5 {
         w.step().unwrap();
         w.poll_blocking().unwrap();
     }
     let p1 = w.explicit_vehicle_proxy(0).unwrap();
-    assert!(p1.asleep && !p1.touched, "{p1:?}");
-    assert_eq!(
-        (p1.lo, p1.hi, p1.refattens),
-        (p0.lo, p0.hi, p0.refattens),
-        "frozen while asleep"
-    );
-    assert!(
-        w.explicit_window_impulses()[0].is_empty(),
-        "no proxies while asleep"
-    );
-    // A ball dropped onto the sleeping car: it enters the fat box and marks it.
-    let ball = w.create_body(&BodyDef::dynamic([0.0, 3.5, -4.0])).unwrap();
-    w.create_sphere_shape(ball, &ShapeDef::default(), [0.0; 3], 0.2)
-        .unwrap();
-    let mut touched = false;
-    for _ in 0..60 {
-        w.step().unwrap();
-        w.poll_blocking().unwrap();
-        if w.explicit_vehicle_proxy(0).unwrap().touched {
-            touched = true;
-            break;
-        }
-    }
-    assert!(
-        touched,
-        "the falling ball marked the sleeping vehicle's proxy"
-    );
-    w.set_explicit_vehicle_asleep(0, false).unwrap();
-    w.set_explicit_vehicle_in_broadphase(0, false).unwrap();
-    w.step().unwrap();
-    w.poll_blocking().unwrap();
-    assert!(
-        w.explicit_window_impulses()[0].is_empty(),
-        "no proxies out of the broadphase"
-    );
+    assert!(!p1.in_broadphase, "{p1:?}");
+    assert_eq!((p1.lo, p1.hi, p1.refattens), (p0.lo, p0.hi, p0.refattens), "frozen out of the broadphase");
+    assert!(w.explicit_window_impulses()[0].is_empty(), "no proxies out of the broadphase");
     w.set_explicit_vehicle_in_broadphase(0, true).unwrap();
     w.step().unwrap();
     w.poll_blocking().unwrap();
     let p2 = w.explicit_vehicle_proxy(0).unwrap();
-    assert!(
-        p2.in_broadphase && p2.refattens == 1,
-        "refattened on return: {p2:?}"
-    );
+    assert!(p2.in_broadphase && p2.refattens == 1, "refattened on return: {p2:?}");
+    assert!(!w.explicit_window_impulses()[0].is_empty(), "proxies again");
 }

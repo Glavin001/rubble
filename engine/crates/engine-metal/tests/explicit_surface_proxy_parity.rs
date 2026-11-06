@@ -155,7 +155,7 @@ fn pole_set(pole: Pole, at: Vec3) -> ProxySet {
         bodies: vec![RigidProxy {
             body: 7,
             pos: at,
-            rot: Quat::from_rotation_y(0.3),
+            rot: Quat::from_rotation_y(std::env::var("POLE_ROT").ok().and_then(|s| s.parse().ok()).unwrap_or(0.3)),
             vel: Vec3::ZERO,
             ang_vel: Vec3::ZERO,
             inv_mass,
